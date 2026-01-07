@@ -133,7 +133,10 @@ func (w *Walker) visitFile(path string, info os.FileInfo, err error) error {
 	}
 
 	// Check exclusion patterns
-	relPath, _ := filepath.Rel(w.projectRoot, path)
+	relPath, err := filepath.Rel(w.projectRoot, path)
+	if err != nil {
+		relPath = path // Fall back to absolute path
+	}
 	if w.config.ShouldExclude(relPath) {
 		w.mu.Lock()
 		w.stats.SkippedFiles++

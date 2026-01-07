@@ -35,12 +35,38 @@ func (r *DeprecatedIoutilRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	}
 
 	var violations []*core.Violation
+	inMultiLineBacktick := false
 
 	for lineNum, line := range ctx.Lines {
+		wasInBacktick := inMultiLineBacktick
+
+		// Track multi-line backtick strings
+		backtickCount := strings.Count(line, "`")
+		if backtickCount > 0 && backtickCount%2 == 1 {
+			inMultiLineBacktick = !inMultiLineBacktick
+		}
+
+		// Skip lines completely inside multi-line backtick strings
+		if wasInBacktick && backtickCount == 0 {
+			continue
+		}
+
+		// Skip if ioutil. appears in the backtick portion of this line
+		if r.isIoutilInBacktickPortion(line, wasInBacktick, backtickCount) {
+			continue
+		}
+
+		trimmed := strings.TrimSpace(line)
+
+		// Skip comments
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+
 		// Check for import of io/ioutil
-		if strings.Contains(line, `"io/ioutil"`) {
+		if r.isIoutilImport(line) {
 			v := r.CreateViolation(ctx.RelPath, lineNum+1, "io/ioutil is deprecated since Go 1.16")
-			v.WithCode(strings.TrimSpace(line))
+			v.WithCode(trimmed)
 			v.WithSuggestion("Use io.ReadAll, os.ReadFile, os.WriteFile instead")
 			violations = append(violations, v)
 			continue
@@ -48,15 +74,19 @@ func (r *DeprecatedIoutilRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 
 		// Check for ioutil.* function calls
 		if strings.Contains(line, "ioutil.") {
-			// Skip if inside string literal
-			if isInsideString(line, "ioutil.") {
+			// Skip if inside any string literal
+			if isInsideLiteral(line, "ioutil.") {
 				continue
 			}
 
-			// Determine specific replacement
+			// Skip if ioutil. is only in inline comment
+			if isInInlineComment(line, "ioutil.") {
+				continue
+			}
+
 			suggestion := r.getSuggestion(line)
 			v := r.CreateViolation(ctx.RelPath, lineNum+1, "ioutil functions are deprecated")
-			v.WithCode(strings.TrimSpace(line))
+			v.WithCode(trimmed)
 			v.WithSuggestion(suggestion)
 			violations = append(violations, v)
 		}
@@ -65,19 +95,84 @@ func (r *DeprecatedIoutilRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	return violations
 }
 
-// isInsideString checks if a substring appears inside a string literal
+// isIoutilInBacktickPortion checks if ioutil. is in the backtick-enclosed portion of a line
+func (r *DeprecatedIoutilRule) isIoutilInBacktickPortion(line string, wasInBacktick bool, backtickCount int) bool {
+	if !strings.Contains(line, "ioutil.") {
+		return false
+	}
+
+	ioutilIdx := strings.Index(line, "ioutil.")
+	backtickIdx := strings.Index(line, "`")
+
+	// If we were inside a backtick and this line closes it,
+	// check if ioutil. is before the closing backtick
+	if wasInBacktick && backtickCount > 0 && backtickIdx >= 0 {
+		if ioutilIdx < backtickIdx {
+			return true // ioutil. is inside the backtick string
+		}
+	}
+
+	return false
+}
+
+// isIoutilImport checks if this line imports io/ioutil
+func (r *DeprecatedIoutilRule) isIoutilImport(line string) bool {
+	// Must have the import path in double quotes, not inside backticks
+	if !strings.Contains(line, `"io/ioutil"`) {
+		return false
+	}
+
+	// Skip if inside backtick string (test data, etc.)
+	if isInsideBackticks(line, `"io/ioutil"`) {
+		return false
+	}
+
+	return true
+}
+
+// isInsideLiteral checks if substr is inside any string literal
+func isInsideLiteral(line, substr string) bool {
+	return isInsideString(line, substr) || isInsideBackticks(line, substr)
+}
+
+// isInInlineComment checks if substr appears only after // in the line
+func isInInlineComment(line, substr string) bool {
+	commentIdx := strings.Index(line, "//")
+	if commentIdx < 0 {
+		return false
+	}
+
+	substrIdx := strings.Index(line, substr)
+	if substrIdx < 0 {
+		return false
+	}
+
+	// substr is in comment if it appears after //
+	return substrIdx > commentIdx
+}
+
+// isInsideString checks if a substring appears inside a double-quoted string
 func isInsideString(line, substr string) bool {
 	idx := strings.Index(line, substr)
 	if idx < 0 {
 		return false
 	}
 
-	// Count quotes before the substring
 	beforeSubstr := line[:idx]
 	quoteCount := strings.Count(beforeSubstr, `"`)
-
-	// If odd number of quotes, we're inside a string
 	return quoteCount%2 == 1
+}
+
+// isInsideBackticks checks if a substring appears inside a backtick string
+func isInsideBackticks(line, substr string) bool {
+	idx := strings.Index(line, substr)
+	if idx < 0 {
+		return false
+	}
+
+	beforeSubstr := line[:idx]
+	backtickCount := strings.Count(beforeSubstr, "`")
+	return backtickCount%2 == 1
 }
 
 func (r *DeprecatedIoutilRule) getSuggestion(line string) string {

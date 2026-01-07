@@ -7,6 +7,10 @@ import (
 	"github.com/aiseeq/glint/pkg/rules"
 )
 
+const (
+	defaultMaxFunctionLines = 50
+)
+
 func init() {
 	rules.Register(NewLongFunctionRule())
 }
@@ -26,7 +30,7 @@ func NewLongFunctionRule() *LongFunctionRule {
 			"Detects functions that exceed the maximum line count",
 			core.SeverityMedium,
 		),
-		maxLines: 50, // Default max lines
+		maxLines: defaultMaxFunctionLines,
 	}
 }
 
@@ -35,7 +39,7 @@ func (r *LongFunctionRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
-	r.maxLines = r.GetIntSetting("max_lines", 50)
+	r.maxLines = r.GetIntSetting("max_lines", defaultMaxFunctionLines)
 	return nil
 }
 

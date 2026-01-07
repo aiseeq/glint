@@ -44,44 +44,56 @@ func (r *InterfaceAnyRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 	var violations []*core.Violation
 
 	for lineNum, line := range ctx.Lines {
-		trimmed := strings.TrimSpace(line)
-
-		// Skip comments
-		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
-			continue
-		}
-
-		// Skip regex patterns
-		if strings.Contains(line, "regexp.") && strings.Contains(line, `interface\{\}`) {
-			continue
-		}
-
-		// Check each pattern
-		for patternName, pattern := range r.patterns {
-			if pattern.MatchString(line) {
-				// Skip if inside string literal
-				if strings.Contains(line, `"`) {
-					matchStr := getMatchString(patternName)
-					if isInsideString(line, matchStr) {
-						continue
-					}
-				}
-
-				// Check for allowed exceptions
-				if r.isAllowedException(line, ctx) {
-					continue
-				}
-
-				v := r.CreateViolation(ctx.RelPath, lineNum+1, r.getMessage(patternName))
-				v.WithCode(trimmed)
-				v.WithSuggestion(r.getSuggestion(patternName))
-				violations = append(violations, v)
-				break // One violation per line
-			}
+		if v := r.checkLine(ctx, lineNum, line); v != nil {
+			violations = append(violations, v)
 		}
 	}
 
 	return violations
+}
+
+func (r *InterfaceAnyRule) checkLine(ctx *core.FileContext, lineNum int, line string) *core.Violation {
+	trimmed := strings.TrimSpace(line)
+
+	// Skip comments
+	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
+		return nil
+	}
+
+	// Skip regex patterns
+	if strings.Contains(line, "regexp.") && strings.Contains(line, `interface\{\}`) {
+		return nil
+	}
+
+	// Check each pattern
+	for patternName, pattern := range r.patterns {
+		if !pattern.MatchString(line) {
+			continue
+		}
+
+		if r.shouldSkipMatch(line, patternName, ctx) {
+			continue
+		}
+
+		v := r.CreateViolation(ctx.RelPath, lineNum+1, r.getMessage(patternName))
+		v.WithCode(trimmed)
+		v.WithSuggestion(r.getSuggestion(patternName))
+		return v // One violation per line
+	}
+
+	return nil
+}
+
+func (r *InterfaceAnyRule) shouldSkipMatch(line, patternName string, ctx *core.FileContext) bool {
+	// Skip if inside string literal
+	if strings.Contains(line, `"`) {
+		matchStr := getMatchString(patternName)
+		if isInsideString(line, matchStr) {
+			return true
+		}
+	}
+
+	return r.isAllowedException(line, ctx)
 }
 
 func (r *InterfaceAnyRule) isAllowedException(line string, ctx *core.FileContext) bool {
@@ -101,16 +113,10 @@ func (r *InterfaceAnyRule) isAllowedException(line string, ctx *core.FileContext
 	}
 
 	// Check if 'any' is already used (Go 1.18+ replacement)
-	// This catches cases like: var x any = interface{}(val)
-	if isUsingAny(line) {
-		return true
-	}
-
-	return false
+	return isUsingAny(line)
 }
 
 func isUsingAny(line string) bool {
-	// Check for 'any' keyword usage patterns
 	anyPatterns := []string{
 		" any ", " any,", " any)", " any}",
 		"]any ", "]any,", "]any)", "]any}",
@@ -143,12 +149,8 @@ func isInsideString(line, substr string) bool {
 		return false
 	}
 
-	// Count quotes before the substring
 	beforeSubstr := line[:idx]
 	quoteCount := strings.Count(beforeSubstr, `"`)
-
-	// If odd number of quotes, we're inside a string
-	// (Simplified check - doesn't handle escaped quotes perfectly)
 	return quoteCount%2 == 1
 }
 
