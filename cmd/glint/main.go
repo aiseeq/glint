@@ -10,6 +10,9 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/output"
 	"github.com/aiseeq/glint/pkg/rules"
+
+	// Rule packages - imported for init() registration
+	_ "github.com/aiseeq/glint/pkg/rules/patterns"
 )
 
 var version = "dev"
