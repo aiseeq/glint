@@ -19,6 +19,10 @@ import (
 
 var version = "dev"
 
+const (
+	defaultFilePermissions = 0644
+)
+
 // CLI flags
 var (
 	flagCategory    string
@@ -116,52 +120,14 @@ func init() {
 func runCheck(cmd *cobra.Command, args []string) error {
 	startTime := time.Now()
 
-	// Determine paths to analyze
-	paths := args
-	if len(paths) == 0 {
-		paths = []string{"."}
-	}
-
-	// Get project root
-	projectRoot := paths[0]
-	if projectRoot == "." {
-		var err error
-		projectRoot, err = os.Getwd()
-		if err != nil {
-			return fmt.Errorf("failed to get working directory: %w", err)
-		}
-	}
-
-	// Load configuration
-	cfg, err := core.LoadConfigWithDefaults(projectRoot)
+	projectRoot, err := getProjectRoot(args)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return err
 	}
 
-	// Apply CLI overrides
-	if flagMinSeverity != "" {
-		cfg.Settings.MinSeverity = flagMinSeverity
-	}
-	if flagOutput != "" {
-		cfg.Settings.Output = flagOutput
-	}
-
-	// Configure rules
-	if err := rules.ConfigureAll(cfg); err != nil {
-		return fmt.Errorf("failed to configure rules: %w", err)
-	}
-
-	// Get enabled rules
-	enabledRules := rules.GetEnabled(cfg)
-	if flagCategory != "" {
-		enabledRules = rules.GetByCategory(flagCategory)
-	}
-	if flagRule != "" {
-		if r, ok := rules.Get(flagRule); ok {
-			enabledRules = []rules.Rule{r}
-		} else {
-			return fmt.Errorf("unknown rule: %s", flagRule)
-		}
+	cfg, enabledRules, err := loadConfig(projectRoot)
+	if err != nil {
+		return err
 	}
 
 	if len(enabledRules) == 0 {
@@ -169,11 +135,84 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	contexts, walker := walkFiles(projectRoot, cfg)
+
+	allViolations := analyzeFiles(contexts, enabledRules)
+	allViolations = allViolations.BySeverity(cfg.GetMinSeverity())
+
+	stats := output.Stats{
+		FilesAnalyzed: len(contexts),
+		FilesSkipped:  walker.Stats().SkippedFiles,
+		RulesRun:      len(enabledRules),
+		Duration:      time.Since(startTime).Seconds(),
+	}
+
+	outputResults(cfg.Settings.Output, allViolations, stats)
+
+	if allViolations.HasCritical() {
+		os.Exit(1)
+	}
+
+	return nil
+}
+
+func getProjectRoot(args []string) (string, error) {
+	paths := args
+	if len(paths) == 0 {
+		paths = []string{"."}
+	}
+
+	projectRoot := paths[0]
+	if projectRoot == "." {
+		var err error
+		projectRoot, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("failed to get working directory: %w", err)
+		}
+	}
+	return projectRoot, nil
+}
+
+func loadConfig(projectRoot string) (*core.Config, []rules.Rule, error) {
+	cfg, err := core.LoadConfigWithDefaults(projectRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if flagMinSeverity != "" {
+		cfg.Settings.MinSeverity = flagMinSeverity
+	}
+	if flagOutput != "" {
+		cfg.Settings.Output = flagOutput
+	}
+
+	if err := rules.ConfigureAll(cfg); err != nil {
+		return nil, nil, fmt.Errorf("failed to configure rules: %w", err)
+	}
+
+	enabledRules := getEnabledRules(cfg)
+	return cfg, enabledRules, nil
+}
+
+func getEnabledRules(cfg *core.Config) []rules.Rule {
+	enabledRules := rules.GetEnabled(cfg)
+	if flagCategory != "" {
+		enabledRules = rules.GetByCategory(flagCategory)
+	}
+	if flagRule != "" {
+		if r, ok := rules.Get(flagRule); ok {
+			enabledRules = []rules.Rule{r}
+		}
+	}
+
 	if flagVerbose {
 		fmt.Printf("Running %d rules...\n", len(enabledRules))
 	}
 
-	// Walk files
+	return enabledRules
+}
+
+func walkFiles(projectRoot string, cfg *core.Config) ([]*core.FileContext, *core.Walker) {
 	walker := core.NewWalker(projectRoot, cfg)
 	contexts, errors := walker.WalkSync()
 
@@ -182,12 +221,14 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Found %d files to analyze\n", stats.TotalFiles)
 	}
 
-	// Report walk errors
 	for _, err := range errors {
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
 	}
 
-	// Run analysis
+	return contexts, walker
+}
+
+func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule) core.ViolationList {
 	var allViolations core.ViolationList
 	for _, ctx := range contexts {
 		for _, rule := range enabledRules {
@@ -195,40 +236,23 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			allViolations = append(allViolations, violations...)
 		}
 	}
+	return allViolations
+}
 
-	// Filter by severity
-	minSev := cfg.GetMinSeverity()
-	allViolations = allViolations.BySeverity(minSev)
-
-	// Output results
-	stats := output.Stats{
-		FilesAnalyzed: len(contexts),
-		FilesSkipped:  walker.Stats().SkippedFiles,
-		RulesRun:      len(enabledRules),
-		Duration:      time.Since(startTime).Seconds(),
-	}
-
-	switch cfg.Settings.Output {
+func outputResults(format string, violations core.ViolationList, stats output.Stats) {
+	switch format {
 	case "json":
-		// TODO: Implement JSON output
 		fmt.Println("JSON output not yet implemented")
 	case "summary":
 		out := output.NewSummaryOutput().WithWriter(os.Stdout)
-		out.Write(allViolations, stats)
+		_ = out.Write(violations, stats)
 	default:
 		out := output.NewConsoleOutput().
 			WithWriter(os.Stdout).
 			WithVerbose(flagVerbose).
 			WithNoColor(flagNoColor)
-		out.Write(allViolations, stats)
+		_ = out.Write(violations, stats)
 	}
-
-	// Exit with error code if critical issues found
-	if allViolations.HasCritical() {
-		os.Exit(1)
-	}
-
-	return nil
 }
 
 func runRules(cmd *cobra.Command, args []string) error {
@@ -331,7 +355,7 @@ categories:
 		return fmt.Errorf("%s already exists", filename)
 	}
 
-	if err := os.WriteFile(filename, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(filename, []byte(configContent), defaultFilePermissions); err != nil {
 		return fmt.Errorf("failed to create config: %w", err)
 	}
 

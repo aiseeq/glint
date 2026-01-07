@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -39,59 +40,15 @@ func (r *EmptyBlockRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		switch stmt := n.(type) {
 		case *ast.IfStmt:
-			if isEmptyBlock(stmt.Body) {
-				pos := ctx.PositionFor(stmt)
-				v := r.CreateViolation(ctx.RelPath, pos.Line, "Empty if block")
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Add code or remove empty block")
-				violations = append(violations, v)
-			}
-			// Check else block
-			if stmt.Else != nil {
-				if block, ok := stmt.Else.(*ast.BlockStmt); ok && isEmptyBlock(block) {
-					pos := ctx.GoFileSet.Position(block.Pos())
-					v := r.CreateViolation(ctx.RelPath, pos.Line, "Empty else block")
-					v.WithCode(ctx.GetLine(pos.Line))
-					v.WithSuggestion("Add code or remove empty else block")
-					violations = append(violations, v)
-				}
-			}
-
+			violations = r.checkIfStmt(ctx, stmt, violations)
 		case *ast.ForStmt:
-			if isEmptyBlock(stmt.Body) {
-				pos := ctx.PositionFor(stmt)
-				v := r.CreateViolation(ctx.RelPath, pos.Line, "Empty for block")
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Add code or remove empty loop")
-				violations = append(violations, v)
-			}
-
+			violations = r.checkBlock(ctx, stmt.Body, stmt.Pos(), "for", violations)
 		case *ast.RangeStmt:
-			if isEmptyBlock(stmt.Body) {
-				pos := ctx.PositionFor(stmt)
-				v := r.CreateViolation(ctx.RelPath, pos.Line, "Empty range block")
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Add code or remove empty loop")
-				violations = append(violations, v)
-			}
-
+			violations = r.checkBlock(ctx, stmt.Body, stmt.Pos(), "range", violations)
 		case *ast.SwitchStmt:
-			if stmt.Body != nil && len(stmt.Body.List) == 0 {
-				pos := ctx.PositionFor(stmt)
-				v := r.CreateViolation(ctx.RelPath, pos.Line, "Empty switch block")
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Add cases or remove empty switch")
-				violations = append(violations, v)
-			}
-
+			violations = r.checkSwitchStmt(ctx, stmt, violations)
 		case *ast.SelectStmt:
-			if stmt.Body != nil && len(stmt.Body.List) == 0 {
-				pos := ctx.PositionFor(stmt)
-				v := r.CreateViolation(ctx.RelPath, pos.Line, "Empty select block")
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Add cases or remove empty select")
-				violations = append(violations, v)
-			}
+			violations = r.checkSelectStmt(ctx, stmt, violations)
 		}
 		return true
 	})
@@ -99,9 +56,43 @@ func (r *EmptyBlockRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	return violations
 }
 
-func isEmptyBlock(block *ast.BlockStmt) bool {
-	if block == nil {
-		return false
+func (r *EmptyBlockRule) checkIfStmt(ctx *core.FileContext, stmt *ast.IfStmt, violations []*core.Violation) []*core.Violation {
+	if isEmptyBlock(stmt.Body) {
+		violations = r.checkBlock(ctx, stmt.Body, stmt.Pos(), "if", violations)
 	}
-	return len(block.List) == 0
+	if stmt.Else != nil {
+		if block, ok := stmt.Else.(*ast.BlockStmt); ok && isEmptyBlock(block) {
+			violations = r.checkBlock(ctx, block, block.Pos(), "else", violations)
+		}
+	}
+	return violations
+}
+
+func (r *EmptyBlockRule) checkSwitchStmt(ctx *core.FileContext, stmt *ast.SwitchStmt, violations []*core.Violation) []*core.Violation {
+	if stmt.Body != nil && len(stmt.Body.List) == 0 {
+		return r.checkBlock(ctx, stmt.Body, stmt.Pos(), "switch", violations)
+	}
+	return violations
+}
+
+func (r *EmptyBlockRule) checkSelectStmt(ctx *core.FileContext, stmt *ast.SelectStmt, violations []*core.Violation) []*core.Violation {
+	if stmt.Body != nil && len(stmt.Body.List) == 0 {
+		return r.checkBlock(ctx, stmt.Body, stmt.Pos(), "select", violations)
+	}
+	return violations
+}
+
+func (r *EmptyBlockRule) checkBlock(ctx *core.FileContext, block *ast.BlockStmt, nodePos token.Pos, blockType string, violations []*core.Violation) []*core.Violation {
+	if !isEmptyBlock(block) {
+		return violations
+	}
+	pos := ctx.GoFileSet.Position(nodePos)
+	v := r.CreateViolation(ctx.RelPath, pos.Line, "Empty "+blockType+" block")
+	v.WithCode(ctx.GetLine(pos.Line))
+	v.WithSuggestion("Add code or remove empty block")
+	return append(violations, v)
+}
+
+func isEmptyBlock(block *ast.BlockStmt) bool {
+	return block != nil && len(block.List) == 0
 }

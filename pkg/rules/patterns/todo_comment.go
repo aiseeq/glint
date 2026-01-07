@@ -8,6 +8,11 @@ import (
 	"github.com/aiseeq/glint/pkg/rules"
 )
 
+const (
+	matchesWithKeyword = 2 // Regex match with keyword
+	matchesWithMessage = 3 // Regex match with keyword and message
+)
+
 func init() {
 	rules.Register(NewTodoCommentRule())
 }
@@ -58,10 +63,10 @@ func (r *TodoCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		commentText = strings.TrimSpace(commentText)
 
 		matches := r.pattern.FindStringSubmatch(commentText)
-		if len(matches) >= 2 {
+		if len(matches) >= matchesWithKeyword {
 			keyword := strings.ToUpper(matches[1])
 			message := ""
-			if len(matches) >= 3 {
+			if len(matches) >= matchesWithMessage {
 				message = strings.TrimSpace(matches[2])
 			}
 

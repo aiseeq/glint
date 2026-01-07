@@ -12,6 +12,11 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 )
 
+const (
+	outputLineWidth = 60
+	topIssuesLimit  = 5
+)
+
 // ConsoleOutput writes violations to console with colors
 type ConsoleOutput struct {
 	writer  io.Writer
@@ -64,7 +69,7 @@ func (c *ConsoleOutput) Write(violations core.ViolationList, stats Stats) error 
 func (c *ConsoleOutput) printHeader(stats Stats) {
 	fmt.Fprintln(c.writer)
 	fmt.Fprintln(c.writer, "GLINT ANALYSIS RESULTS")
-	fmt.Fprintln(c.writer, strings.Repeat("=", 60))
+	fmt.Fprintln(c.writer, strings.Repeat("=", outputLineWidth))
 	fmt.Fprintf(c.writer, "Files analyzed: %d\n", stats.FilesAnalyzed)
 	if stats.FilesSkipped > 0 {
 		fmt.Fprintf(c.writer, "Files skipped: %d\n", stats.FilesSkipped)
@@ -159,7 +164,7 @@ func (c *ConsoleOutput) printViolation(v *core.Violation) {
 func (c *ConsoleOutput) printSummary(violations core.ViolationList) {
 	counts := violations.CountBySeverity()
 
-	fmt.Fprintln(c.writer, strings.Repeat("-", 60))
+	fmt.Fprintln(c.writer, strings.Repeat("-", outputLineWidth))
 	fmt.Fprintf(c.writer, "SUMMARY: %d issues found\n", len(violations))
 
 	// Print counts by severity
@@ -211,6 +216,17 @@ func (s *SummaryOutput) WithWriter(w io.Writer) *SummaryOutput {
 
 // Write outputs a compact summary
 func (s *SummaryOutput) Write(violations core.ViolationList, stats Stats) error {
+	s.printHeader(violations)
+
+	if len(violations) > 0 {
+		s.printTopIssues(violations)
+	}
+
+	fmt.Fprintf(s.writer, "Files analyzed: %d | Duration: %.2fs\n", stats.FilesAnalyzed, stats.Duration)
+	return nil
+}
+
+func (s *SummaryOutput) printHeader(violations core.ViolationList) {
 	counts := violations.CountBySeverity()
 
 	fmt.Fprintln(s.writer, "GLINT ANALYSIS SUMMARY")
@@ -222,50 +238,51 @@ func (s *SummaryOutput) Write(violations core.ViolationList, stats Stats) error 
 		counts[core.SeverityLow],
 	)
 	fmt.Fprintln(s.writer)
+}
 
-	if len(violations) > 0 {
-		// Group by rule and count
-		byRule := violations.CountByRule()
+type ruleCount struct {
+	rule  string
+	count int
+	sev   core.Severity
+}
 
-		// Sort by count descending
-		type ruleCount struct {
-			rule  string
-			count int
-			sev   core.Severity
-		}
-		var ruleCounts []ruleCount
-		for rule, count := range byRule {
-			// Find severity for this rule
-			var sev core.Severity
-			for _, v := range violations {
-				if v.Rule == rule {
-					sev = v.Severity
-					break
-				}
+func (s *SummaryOutput) printTopIssues(violations core.ViolationList) {
+	ruleCounts := s.buildRuleCounts(violations)
+
+	fmt.Fprintln(s.writer, "TOP ISSUES:")
+	limit := topIssuesLimit
+	if len(ruleCounts) < limit {
+		limit = len(ruleCounts)
+	}
+	for i := 0; i < limit; i++ {
+		rc := ruleCounts[i]
+		fmt.Fprintf(s.writer, "%d. [%s] %s: %d violations\n",
+			i+1, rc.sev.Label(), rc.rule, rc.count)
+	}
+	fmt.Fprintln(s.writer)
+}
+
+func (s *SummaryOutput) buildRuleCounts(violations core.ViolationList) []ruleCount {
+	byRule := violations.CountByRule()
+	var ruleCounts []ruleCount
+
+	for rule, count := range byRule {
+		var sev core.Severity
+		for _, v := range violations {
+			if v.Rule == rule {
+				sev = v.Severity
+				break
 			}
-			ruleCounts = append(ruleCounts, ruleCount{rule, count, sev})
 		}
-		sort.Slice(ruleCounts, func(i, j int) bool {
-			if ruleCounts[i].sev != ruleCounts[j].sev {
-				return ruleCounts[i].sev > ruleCounts[j].sev
-			}
-			return ruleCounts[i].count > ruleCounts[j].count
-		})
-
-		fmt.Fprintln(s.writer, "TOP ISSUES:")
-		limit := 5
-		if len(ruleCounts) < limit {
-			limit = len(ruleCounts)
-		}
-		for i := 0; i < limit; i++ {
-			rc := ruleCounts[i]
-			fmt.Fprintf(s.writer, "%d. [%s] %s: %d violations\n",
-				i+1, rc.sev.Label(), rc.rule, rc.count)
-		}
-		fmt.Fprintln(s.writer)
+		ruleCounts = append(ruleCounts, ruleCount{rule, count, sev})
 	}
 
-	fmt.Fprintf(s.writer, "Files analyzed: %d | Duration: %.2fs\n", stats.FilesAnalyzed, stats.Duration)
+	sort.Slice(ruleCounts, func(i, j int) bool {
+		if ruleCounts[i].sev != ruleCounts[j].sev {
+			return ruleCounts[i].sev > ruleCounts[j].sev
+		}
+		return ruleCounts[i].count > ruleCounts[j].count
+	})
 
-	return nil
+	return ruleCounts
 }

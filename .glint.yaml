@@ -1,0 +1,18 @@
+# Glint configuration
+version: 1
+
+settings:
+  exclude:
+    - "vendor/*"
+    - "node_modules/*"
+    - "*_test.go"
+  min_severity: medium
+  output: console
+
+categories:
+  architecture:
+    enabled: true
+  patterns:
+    enabled: true
+  typesafety:
+    enabled: true

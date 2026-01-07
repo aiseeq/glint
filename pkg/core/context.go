@@ -30,7 +30,10 @@ type FileContext struct {
 
 // NewFileContext creates a new file context
 func NewFileContext(path, projectRoot string, content []byte, cfg *Config) *FileContext {
-	relPath, _ := filepath.Rel(projectRoot, path)
+	relPath, err := filepath.Rel(projectRoot, path)
+	if err != nil {
+		relPath = path // Fall back to absolute path if relative fails
+	}
 
 	ctx := &FileContext{
 		Path:        path,
