@@ -12,7 +12,9 @@ import (
 	"github.com/aiseeq/glint/pkg/rules"
 
 	// Rule packages - imported for init() registration
+	_ "github.com/aiseeq/glint/pkg/rules/architecture"
 	_ "github.com/aiseeq/glint/pkg/rules/patterns"
+	_ "github.com/aiseeq/glint/pkg/rules/typesafety"
 )
 
 var version = "dev"
