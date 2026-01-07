@@ -26,7 +26,7 @@ type Violation struct {
 
 	// Context
 	Code    string                 // The offending code snippet
-	Context map[string]interface{} // Additional metadata
+	Context map[string]any // Additional metadata
 }
 
 // NewViolation creates a new violation with required fields
@@ -38,7 +38,7 @@ func NewViolation(rule, category, file string, line int, severity Severity, mess
 		Line:     line,
 		Severity: severity,
 		Message:  message,
-		Context:  make(map[string]interface{}),
+		Context:  make(map[string]any),
 	}
 }
 
@@ -67,9 +67,9 @@ func (v *Violation) WithEndLine(endLine int) *Violation {
 }
 
 // WithContext adds context metadata
-func (v *Violation) WithContext(key string, value interface{}) *Violation {
+func (v *Violation) WithContext(key string, value any) *Violation {
 	if v.Context == nil {
-		v.Context = make(map[string]interface{})
+		v.Context = make(map[string]any)
 	}
 	v.Context[key] = value
 	return v

@@ -27,7 +27,7 @@ type SettingsConfig struct {
 type CategoryConfig struct {
 	Enabled          bool                    `yaml:"enabled"`
 	SeverityOverride string                  `yaml:"severity_override,omitempty"`
-	Settings         map[string]interface{}  `yaml:"settings,omitempty"`
+	Settings         map[string]any  `yaml:"settings,omitempty"`
 	Rules            map[string]RuleConfig   `yaml:"rules,omitempty"`
 }
 
@@ -35,7 +35,7 @@ type CategoryConfig struct {
 type RuleConfig struct {
 	Enabled    bool          `yaml:"enabled"`
 	Severity   string        `yaml:"severity,omitempty"`
-	Settings   map[string]interface{} `yaml:"settings,omitempty"`
+	Settings   map[string]any `yaml:"settings,omitempty"`
 	Exceptions []Exception   `yaml:"exceptions,omitempty"`
 }
 
