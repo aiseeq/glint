@@ -13,7 +13,7 @@ type Rule interface {
 	DefaultSeverity() core.Severity
 
 	// Configuration
-	Configure(settings map[string]interface{}) error
+	Configure(settings map[string]any) error
 
 	// Analysis - rules implement the ones they need
 	AnalyzeFile(ctx *core.FileContext) []*core.Violation
@@ -25,7 +25,7 @@ type BaseRule struct {
 	category        string
 	description     string
 	defaultSeverity core.Severity
-	settings        map[string]interface{}
+	settings        map[string]any
 }
 
 // NewBaseRule creates a new base rule
@@ -35,7 +35,7 @@ func NewBaseRule(name, category, description string, severity core.Severity) *Ba
 		category:        category,
 		description:     description,
 		defaultSeverity: severity,
-		settings:        make(map[string]interface{}),
+		settings:        make(map[string]any),
 	}
 }
 
@@ -60,13 +60,13 @@ func (r *BaseRule) DefaultSeverity() core.Severity {
 }
 
 // Configure sets rule settings
-func (r *BaseRule) Configure(settings map[string]interface{}) error {
+func (r *BaseRule) Configure(settings map[string]any) error {
 	r.settings = settings
 	return nil
 }
 
 // GetSetting retrieves a setting value
-func (r *BaseRule) GetSetting(key string) (interface{}, bool) {
+func (r *BaseRule) GetSetting(key string) (any, bool) {
 	val, ok := r.settings[key]
 	return val, ok
 }

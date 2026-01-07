@@ -31,7 +31,7 @@ func NewLongFunctionRule() *LongFunctionRule {
 }
 
 // Configure sets rule settings
-func (r *LongFunctionRule) Configure(settings map[string]interface{}) error {
+func (r *LongFunctionRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
