@@ -9,7 +9,7 @@ Originally built to help AI agents understand codebases, but useful for any proj
 
 ## Features
 
-- **37 rules in 8 categories** — architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation
+- **40 rules in 8 categories** — architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation
 - **Auto-fix support** — automatic fixes for common issues (v1.1+)
 - **Single-pass analysis** — files are read and parsed once, AST is cached
 - **Parallel execution** — utilizes all CPU cores
@@ -90,11 +90,11 @@ See [docs/configuration.md](docs/configuration.md) for full reference.
 | Category | Rules | Description |
 |----------|-------|-------------|
 | architecture | 5 | layer-violation, import-direction, long-function, deep-nesting, cyclomatic-complexity |
-| deadcode | 1 | unused-param |
-| documentation | 1 | doc-missing |
+| deadcode | 2 | unused-param, unused-symbol |
+| documentation | 2 | doc-missing, doc-links |
 | duplication | 2 | duplicate-block, cross-file-duplicate |
 | naming | 1 | naming-convention |
-| patterns | 23 | error-masking, ignored-error, deprecated-ioutil, todo-comment, empty-block, error-string, error-string-compare, error-wrap, magic-number, context-background, tech-debt, defer-in-loop, return-nil-error, shadow-variable, append-assign, range-val-pointer, mutex-lock, http-body-close, sql-rows-close, string-concat, bool-compare, nil-slice, time-equal |
+| patterns | 24 | error-masking, ignored-error, deprecated-ioutil, todo-comment, empty-block, error-string, error-string-compare, error-wrap, go-modern, magic-number, context-background, tech-debt, defer-in-loop, return-nil-error, shadow-variable, append-assign, range-val-pointer, mutex-lock, http-body-close, sql-rows-close, string-concat, bool-compare, nil-slice, time-equal |
 | security | 2 | hardcoded-secret, sql-injection |
 | typesafety | 2 | interface-any, type-assertion |
 
@@ -112,6 +112,9 @@ See [docs/configuration.md](docs/configuration.md) for full reference.
 - **doc-missing** — Detects exported types/functions without documentation
 - **error-string-compare** — Detects error comparisons via strings instead of errors.Is/errors.As
 - **error-wrap** — Detects errors returned without context (should use %w)
+- **go-modern** — Suggests modern Go 1.21+ alternatives (slices.Sort, built-in min/max)
+- **unused-symbol** — Detects unused private functions, types, constants
+- **doc-links** — Detects broken/placeholder URLs in documentation
 
 ### Rule Details
 
