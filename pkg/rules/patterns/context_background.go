@@ -122,7 +122,10 @@ func (r *ContextBackgroundRule) isContextBackgroundOrTodo(call *ast.CallExpr) bo
 }
 
 func (r *ContextBackgroundRule) getMessage(call *ast.CallExpr) string {
-	sel := call.Fun.(*ast.SelectorExpr)
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "Using context.Background()/TODO() in a function that receives context parameter"
+	}
 	name := sel.Sel.Name
 
 	if strings.ToLower(name) == "todo" {
