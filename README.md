@@ -10,6 +10,7 @@ Originally built to help AI agents understand codebases, but useful for any proj
 ## Features
 
 - **28 rules in 4 categories** — architecture, duplication, patterns, typesafety
+- **Auto-fix support** — automatic fixes for common issues (v1.1+)
 - **Single-pass analysis** — files are read and parsed once, AST is cached
 - **Parallel execution** — utilizes all CPU cores
 - **YAML configuration** — with inheritance and per-rule exceptions
@@ -148,6 +149,38 @@ TOP ISSUES:
 Files analyzed: 666 | Duration: 1.26s
 ```
 
+## Auto-Fix (v1.1+)
+
+Glint can automatically fix certain issues:
+
+```bash
+# Preview fixes (dry-run by default)
+glint fix
+
+# Fix specific rule
+glint fix --rule=interface-any
+
+# Actually apply fixes
+glint fix --dry-run=false
+
+# Apply fixes even with uncommitted changes
+glint fix --dry-run=false --force
+```
+
+### Available Fixers
+
+| Rule | Fix | Description |
+|------|-----|-------------|
+| interface-any | `interface{}` → `any` | Go 1.18+ type alias |
+| deprecated-ioutil | `ioutil.*` → `io/os.*` | Go 1.16+ deprecation |
+| bool-compare | `x == true` → `x` | Simplify boolean comparisons |
+
+### Safety
+
+- **Dry-run by default** — always preview changes first
+- **Git warning** — warns if you have uncommitted changes
+- **Atomic** — all fixes in a file are applied together
+
 ## Verbose/Debug
 
 ```bash
@@ -165,6 +198,7 @@ glint/
 ├── cmd/glint/          # CLI entry point
 ├── pkg/
 │   ├── core/           # Walker, parser, config, cache
+│   ├── fix/            # Auto-fix implementations
 │   ├── rules/          # Rule implementations by category
 │   └── output/         # Output formatters
 ├── configs/            # Built-in presets
