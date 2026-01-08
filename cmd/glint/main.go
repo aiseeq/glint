@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/fix"
 	"github.com/aiseeq/glint/pkg/output"
 	"github.com/aiseeq/glint/pkg/rules"
 
@@ -33,6 +34,10 @@ var (
 	flagVerbose     bool
 	flagDebug       bool
 	flagNoColor     bool
+	// Fix command flags
+	flagDryRun    bool
+	flagForce     bool
+	flagFixRule   string
 )
 
 func main() {
@@ -93,6 +98,20 @@ var configValidateCmd = &cobra.Command{
 	RunE:  runConfigValidate,
 }
 
+var fixCmd = &cobra.Command{
+	Use:   "fix [paths...]",
+	Short: "Auto-fix issues that have fixers available",
+	Long: `Auto-fix issues that have fixers available.
+By default runs in dry-run mode to show what would be fixed.
+Use --no-dry-run to actually apply fixes.
+
+Available fixers:
+  - interface-any: Replace interface{} with any (Go 1.18+)
+  - deprecated-ioutil: Replace io/ioutil with io/os
+  - bool-compare: Simplify boolean comparisons (x == true -> x)`,
+	RunE: runFix,
+}
+
 func init() {
 	// Check command flags
 	checkCmd.Flags().StringVarP(&flagCategory, "category", "c", "", "Run only specified category")
@@ -110,12 +129,19 @@ func init() {
 	configCmd.AddCommand(configShowCmd)
 	configCmd.AddCommand(configValidateCmd)
 
+	// Fix command flags
+	fixCmd.Flags().BoolVar(&flagDryRun, "dry-run", true, "Show what would be fixed without applying (default: true)")
+	fixCmd.Flags().BoolVar(&flagForce, "force", false, "Apply fixes even with uncommitted changes")
+	fixCmd.Flags().StringVarP(&flagFixRule, "rule", "r", "", "Fix only specified rule")
+	fixCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed output")
+
 	// Root commands
 	rootCmd.AddCommand(checkCmd)
 	rootCmd.AddCommand(rulesCmd)
 	rootCmd.AddCommand(explainCmd)
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(fixCmd)
 }
 
 func runCheck(cmd *cobra.Command, args []string) error {
@@ -422,5 +448,114 @@ func runConfigValidate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Configuration valid: %s\n", configPath)
+	return nil
+}
+
+func runFix(cmd *cobra.Command, args []string) error {
+	projectRoot, err := getProjectRoot(args)
+	if err != nil {
+		return err
+	}
+
+	// Check for uncommitted changes
+	engine := fix.NewEngine(fix.DefaultRegistry, flagDryRun, flagVerbose)
+	hasChanges, err := engine.CheckGitStatus(projectRoot)
+	if err != nil && flagVerbose {
+		fmt.Fprintf(os.Stderr, "Warning: could not check git status: %v\n", err)
+	}
+
+	if hasChanges && !flagForce && !flagDryRun {
+		fmt.Println("WARNING: You have uncommitted changes.")
+		fmt.Println("Use --force to apply fixes anyway, or commit your changes first.")
+		fmt.Println("Running in dry-run mode instead.")
+		flagDryRun = true
+	}
+
+	// Load config and get enabled rules
+	cfg, enabledRules, err := loadConfig(projectRoot)
+	if err != nil {
+		return err
+	}
+
+	// Filter to only rules that have fixers
+	var fixableRules []rules.Rule
+	for _, r := range enabledRules {
+		if flagFixRule != "" && r.Name() != flagFixRule {
+			continue
+		}
+		if _, ok := fix.DefaultRegistry.Get(r.Name()); ok {
+			fixableRules = append(fixableRules, r)
+		}
+	}
+
+	if len(fixableRules) == 0 {
+		if flagFixRule != "" {
+			fmt.Printf("No fixer available for rule: %s\n", flagFixRule)
+		} else {
+			fmt.Println("No fixable rules enabled.")
+		}
+		return nil
+	}
+
+	if flagVerbose {
+		fmt.Printf("Running %d fixable rules...\n", len(fixableRules))
+	}
+
+	// Walk files and analyze
+	contexts, _ := walkFiles(projectRoot, cfg)
+
+	// Build context map for fixers (by both absolute and relative paths)
+	contextMap := make(map[string]*core.FileContext)
+	for _, ctx := range contexts {
+		contextMap[ctx.Path] = ctx
+		contextMap[ctx.RelPath] = ctx
+	}
+
+	// Collect violations from fixable rules
+	var violations []*core.Violation
+	for _, ctx := range contexts {
+		for _, rule := range fixableRules {
+			vs := rule.AnalyzeFile(ctx)
+			violations = append(violations, vs...)
+		}
+	}
+
+	if len(violations) == 0 {
+		fmt.Println("No issues found that can be fixed.")
+		return nil
+	}
+
+	// Generate fixes
+	fixes := engine.GenerateFixes(violations, contextMap)
+
+	if len(fixes) == 0 {
+		fmt.Println("No automatic fixes available for the found issues.")
+		return nil
+	}
+
+	// Show preview
+	fmt.Print(engine.Preview(fixes))
+
+	if flagDryRun {
+		return nil
+	}
+
+	// Apply fixes
+	results := engine.ApplyFixes(fixes)
+
+	// Report results
+	totalFixed := 0
+	for _, result := range results {
+		if result.Error != nil {
+			fmt.Fprintf(os.Stderr, "Error fixing %s: %v\n", result.File, result.Error)
+		} else {
+			totalFixed += result.FixesApplied
+			if flagVerbose {
+				fmt.Printf("Fixed %d issues in %s\n", result.FixesApplied, result.File)
+			}
+		}
+	}
+
+	fmt.Printf("\nApplied %d fixes in %d files.\n", totalFixed, len(results))
 	return nil
 }
