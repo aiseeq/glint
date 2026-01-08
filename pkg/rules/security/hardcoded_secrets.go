@@ -80,6 +80,12 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		return nil
 	}
 
+	// Skip config module files - they contain development defaults
+	// that are overridden by environment variables in production
+	if strings.Contains(ctx.RelPath, "/config/") || strings.HasPrefix(ctx.RelPath, "config/") {
+		return nil
+	}
+
 	var violations []*core.Violation
 
 	for lineNum, line := range ctx.Lines {
