@@ -214,3 +214,65 @@ func TestErrorMaskingRule_CommentSkip(t *testing.T) {
 	violations := rule.AnalyzeFile(ctx)
 	assert.Empty(t, violations, "Comments should be skipped")
 }
+
+func TestErrorMaskingRule_ErrEqualNil(t *testing.T) {
+	rule := NewErrorMaskingRule()
+	parser := core.NewParser()
+
+	tests := []struct {
+		name           string
+		code           string
+		wantViolations int
+	}{
+		{
+			name: "err == nil return false - valid pattern",
+			code: `package main
+
+func IsNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return true
+}`,
+			wantViolations: 0, // This is valid pattern for error type checking
+		},
+		{
+			name: "err != nil return true - masking",
+			code: `package main
+
+func GetUser() bool {
+	err := doSomething()
+	if err != nil { return true }
+	return false
+}`,
+			wantViolations: 1, // This masks the error (detected by regex)
+		},
+		{
+			name: "err != nil return error - proper handling",
+			code: `package main
+
+import "fmt"
+
+func GetUser() error {
+	err := doSomething()
+	if err != nil {
+		return fmt.Errorf("failed: %w", err)
+	}
+	return nil
+}`,
+			wantViolations: 0, // Proper error handling
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := core.NewFileContext("/src/service.go", "/src", []byte(tt.code), core.DefaultConfig())
+			fset, astFile, err := parser.ParseGoFile("/src/service.go", []byte(tt.code))
+			require.NoError(t, err)
+			ctx.SetGoAST(fset, astFile)
+
+			violations := rule.AnalyzeFile(ctx)
+			assert.Len(t, violations, tt.wantViolations, "Code:\n%s", tt.code)
+		})
+	}
+}
