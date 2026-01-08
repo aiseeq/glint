@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 	"regexp"
 	"strings"
 
@@ -121,8 +122,9 @@ func (r *ErrorMaskingRule) shouldSkipFile(ctx *core.FileContext) bool {
 		return true
 	}
 
-	// Skip CLI tools and analyzers
-	if strings.Contains(path, "/cmd/") || strings.Contains(path, "/tools/analyzers/") {
+	// Skip CLI tools and analyzers (handle both /cmd/ and cmd/ paths)
+	if strings.Contains(path, "/cmd/") || strings.HasPrefix(path, "cmd/") ||
+		strings.Contains(path, "/tools/analyzers/") || strings.HasPrefix(path, "tools/analyzers/") {
 		return true
 	}
 
@@ -316,10 +318,16 @@ func (r *ErrorMaskingRule) returnIncludesError(stmt *ast.ReturnStmt) bool {
 	return false
 }
 
-// isErrNilCheck checks if condition is "err != nil"
+// isErrNilCheck checks if condition is "err != nil" (not "err == nil")
 func (r *ErrorMaskingRule) isErrNilCheck(expr ast.Expr) bool {
 	binExpr, ok := expr.(*ast.BinaryExpr)
 	if !ok {
+		return false
+	}
+
+	// Must be "err != nil", not "err == nil"
+	// "err == nil" with return false is valid pattern for error type checking (IsNotFound, etc.)
+	if binExpr.Op != token.NEQ {
 		return false
 	}
 
@@ -332,8 +340,8 @@ func (r *ErrorMaskingRule) isErrNilCheck(expr ast.Expr) bool {
 		return false
 	}
 
-	_, isNil := binExpr.Y.(*ast.Ident)
-	return isNil
+	nilIdent, isNil := binExpr.Y.(*ast.Ident)
+	return isNil && nilIdent.Name == "nil"
 }
 
 // isProblematicReturn checks if return value masks the error
@@ -448,9 +456,15 @@ func (r *ErrorMaskingRule) isRegexPatternDefinition(line string) bool {
 
 // isGoException checks if pattern match is a valid exception
 func (r *ErrorMaskingRule) isGoException(path, line string) bool {
-	// Config files with documented defaults
-	if strings.Contains(path, "config") && strings.Contains(line, "// default") {
-		return true
+	// Config files with documented defaults (case-insensitive)
+	if strings.Contains(path, "config") {
+		lineLower := strings.ToLower(line)
+		if strings.Contains(lineLower, "// default") ||
+			strings.Contains(lineLower, "//default") ||
+			strings.Contains(lineLower, "default value") ||
+			strings.Contains(lineLower, "default if") {
+			return true
+		}
 	}
 
 	// Validation returning false for invalid input
@@ -461,6 +475,17 @@ func (r *ErrorMaskingRule) isGoException(path, line string) bool {
 	// Pagination defaults
 	if strings.Contains(line, "defaultLimit") || strings.Contains(line, "defaultPage") {
 		return true
+	}
+
+	// Config getter functions returning documented defaults
+	if strings.Contains(path, "config") && strings.Contains(line, "return") {
+		// Allow returns with documented fallback comments
+		if strings.Contains(line, "// ") && (strings.Contains(strings.ToLower(line), "limit") ||
+			strings.Contains(strings.ToLower(line), "gas") ||
+			strings.Contains(strings.ToLower(line), "rate") ||
+			strings.Contains(strings.ToLower(line), "timeout")) {
+			return true
+		}
 	}
 
 	return false
