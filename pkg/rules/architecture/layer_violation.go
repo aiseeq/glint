@@ -47,6 +47,11 @@ func (r *LayerViolationRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 		return nil
 	}
 
+	// Skip test infrastructure files (test_router, test_helper, etc.)
+	if strings.Contains(ctx.RelPath, "test_") || strings.HasPrefix(ctx.RelPath, "test") {
+		return nil
+	}
+
 	layer := r.determineLayer(ctx.RelPath)
 	if layer == UnknownLayer {
 		return nil
