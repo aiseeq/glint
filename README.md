@@ -116,6 +116,12 @@ See [docs/configuration.md](docs/configuration.md) for full reference.
 - **unused-symbol** — Detects unused private functions, types, constants
 - **doc-links** — Detects broken/placeholder URLs in documentation
 
+### Known Limitations
+
+- **unused-symbol**: Analyzes single files only, not entire packages. May report false positives for symbols used in other files of the same package. Best for main packages or single-file packages.
+- **go-modern**: May suggest iterator patterns for external library methods (e.g., `router.Walk`) that cannot be changed.
+- **doc-links**: May flag `localhost` or `example.com` in code comments used as format examples.
+
 ### Rule Details
 
 ```bash
