@@ -1,17 +1,20 @@
 # Glint
 
-Fast, configurable static analyzer for Go and TypeScript projects.
+[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+Fast, configurable static analyzer for Go projects.
 
 Originally built to help AI agents understand codebases, but useful for any project.
 
 ## Features
 
-- **28 rules in 8 categories** — architecture, patterns, typesafety, duplication, deadcode, config, naming, documentation
+- **28 rules in 4 categories** — architecture, duplication, patterns, typesafety
 - **Single-pass analysis** — files are read and parsed once, AST is cached
 - **Parallel execution** — utilizes all CPU cores
 - **YAML configuration** — with inheritance and per-rule exceptions
 - **Multiple output formats** — console, JSON, summary (optimized for AI agents)
-- **Auto-fix support** (v1.1+) — safe automatic fixes with dry-run preview
+- **Go and TypeScript support** — regex and AST-based analysis
 
 ## Installation
 
@@ -43,7 +46,7 @@ glint check --min-severity=high
 glint check --category=architecture
 
 # Run specific rule
-glint check --rule=fallback
+glint check --rule=error-masking
 
 # Get summary for AI agents
 glint check --output=summary
@@ -69,30 +72,36 @@ categories:
   patterns:
     enabled: true
     rules:
-      fallback:
+      error-masking:
         exceptions:
           - files: "**/config/**"
             reason: "Config defaults are acceptable"
-  naming:
-    enabled: false
+  typesafety:
+    enabled: true
 ```
 
 See [docs/configuration.md](docs/configuration.md) for full reference.
 
 ## Rules
 
-### Categories
+### Current Categories
 
 | Category | Rules | Description |
 |----------|-------|-------------|
-| architecture | 5 | Layer violations, call graph, SOLID |
-| patterns | 7 | Fallback masking, error handling, tech debt |
-| typesafety | 4 | interface{}/any, API compatibility |
-| duplication | 4 | Code clones, semantic duplicates |
-| deadcode | 3 | Unused symbols, endpoint coverage |
-| config | 3 | Hardcoded values, config usage |
-| naming | 2 | Go conventions, JSON/DB tags |
-| documentation | 3 | Doc completeness, broken links |
+| architecture | 4 | layer-violation, import-direction, long-function, deep-nesting |
+| duplication | 1 | duplicate-block |
+| patterns | 21 | error-masking, ignored-error, deprecated-ioutil, todo-comment, empty-block, error-string, magic-number, context-background, tech-debt, defer-in-loop, return-nil-error, shadow-variable, append-assign, range-val-pointer, mutex-lock, http-body-close, sql-rows-close, string-concat, bool-compare, nil-slice, time-equal |
+| typesafety | 2 | interface-any, type-assertion |
+
+### Key Rules
+
+- **layer-violation** (CRITICAL) — Detects violations of Handler→Service→Repository architecture
+- **import-direction** (HIGH) — Detects imports that violate layered architecture direction
+- **duplicate-block** (MEDIUM) — Detects copy-pasted code blocks (8+ lines)
+- **error-masking** (CRITICAL) — Detects patterns that mask errors instead of handling them properly
+- **long-function** — Functions exceeding 50 lines
+- **ignored-error** — Error values ignored with blank identifier
+- **interface-any** — interface{} that should be replaced with 'any'
 
 ### Rule Details
 
@@ -101,7 +110,7 @@ See [docs/configuration.md](docs/configuration.md) for full reference.
 glint rules
 
 # Explain specific rule
-glint explain fallback
+glint explain error-masking
 ```
 
 ## Output Formats
@@ -129,32 +138,15 @@ Compact output optimized for AI agents:
 ```
 GLINT ANALYSIS SUMMARY
 ======================
-Critical: 3 | High: 12 | Medium: 28 | Low: 5
+Critical: 37 | High: 176 | Medium: 1324 | Low: 1141
 
 TOP ISSUES:
-1. [CRITICAL] fallback: 3 violations in backend/shared/services/
-2. [HIGH] layer_violation: 5 violations in backend/handlers/
+1. [HIGH] error-masking: 62 violations
+2. [MEDIUM] ignored-error: 791 violations
+3. [MEDIUM] long-function: 587 violations
 
-Full report: /tmp/glint-report-20250107-120000.json
+Files analyzed: 666 | Duration: 1.26s
 ```
-
-## Auto-fix (v1.1+)
-
-```bash
-# Preview changes
-glint fix --dry-run
-
-# Apply fixes
-glint fix
-
-# Fix specific rule only
-glint fix --rule=interface_any
-```
-
-Supported auto-fixes:
-- `interface_any`: `interface{}` → `any` (Go 1.18+)
-- `json_db_tags`: Format JSON tags to camelCase
-- `go_naming`: Fix exported symbol casing
 
 ## Verbose/Debug
 
@@ -178,6 +170,18 @@ glint/
 ├── configs/            # Built-in presets
 └── testdata/           # Test fixtures and golden files
 ```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-rule`)
+3. Add tests for your changes
+4. Run tests (`go test ./...`)
+5. Commit your changes (`git commit -m 'Add amazing-rule'`)
+6. Push to the branch (`git push origin feature/amazing-rule`)
+7. Open a Pull Request
 
 ## License
 
