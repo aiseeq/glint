@@ -41,7 +41,7 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 			},
 			{
 				name:    "api_key",
-				regex:   regexp.MustCompile(`(?i)(api[_-]?key|apikey)\s*[:=]\s*["'\x60][A-Za-z0-9_\-]{16,}["'\x60]`),
+				regex:   regexp.MustCompile(`(?i)\b(api[_-]?key|apikey)\s*[:=]\s*["'\x60][A-Za-z0-9_\-]{16,}["'\x60]`),
 				message: "Hardcoded API key detected",
 			},
 			{
@@ -121,6 +121,13 @@ func (r *HardcodedSecretsRule) isPlaceholder(line string) bool {
 		if strings.Contains(lower, p) {
 			return true
 		}
+	}
+
+	// Skip explicit testing configuration (Testing.Security.*, etc.)
+	if strings.Contains(lower, "testing.security") ||
+		strings.Contains(lower, "testsecurity") ||
+		strings.Contains(lower, "testconfig") {
+		return true
 	}
 
 	return false
