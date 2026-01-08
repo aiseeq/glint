@@ -9,7 +9,7 @@ Originally built to help AI agents understand codebases, but useful for any proj
 
 ## Features
 
-- **33 rules in 6 categories** — architecture, duplication, patterns, typesafety, security, deadcode
+- **37 rules in 8 categories** — architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation
 - **Auto-fix support** — automatic fixes for common issues (v1.1+)
 - **Single-pass analysis** — files are read and parsed once, AST is cached
 - **Parallel execution** — utilizes all CPU cores
@@ -90,10 +90,12 @@ See [docs/configuration.md](docs/configuration.md) for full reference.
 | Category | Rules | Description |
 |----------|-------|-------------|
 | architecture | 5 | layer-violation, import-direction, long-function, deep-nesting, cyclomatic-complexity |
-| duplication | 2 | duplicate-block, cross-file-duplicate |
-| patterns | 21 | error-masking, ignored-error, deprecated-ioutil, todo-comment, empty-block, error-string, magic-number, context-background, tech-debt, defer-in-loop, return-nil-error, shadow-variable, append-assign, range-val-pointer, mutex-lock, http-body-close, sql-rows-close, string-concat, bool-compare, nil-slice, time-equal |
-| security | 2 | hardcoded-secret, sql-injection |
 | deadcode | 1 | unused-param |
+| documentation | 1 | doc-missing |
+| duplication | 2 | duplicate-block, cross-file-duplicate |
+| naming | 1 | naming-convention |
+| patterns | 23 | error-masking, ignored-error, deprecated-ioutil, todo-comment, empty-block, error-string, error-string-compare, error-wrap, magic-number, context-background, tech-debt, defer-in-loop, return-nil-error, shadow-variable, append-assign, range-val-pointer, mutex-lock, http-body-close, sql-rows-close, string-concat, bool-compare, nil-slice, time-equal |
+| security | 2 | hardcoded-secret, sql-injection |
 | typesafety | 2 | interface-any, type-assertion |
 
 ### Key Rules
@@ -106,6 +108,10 @@ See [docs/configuration.md](docs/configuration.md) for full reference.
 - **cyclomatic-complexity** — Functions with too many decision paths (default: >10)
 - **cross-file-duplicate** — Detects duplicate code blocks across different files
 - **unused-param** — Function parameters that are never used
+- **naming-convention** — Detects stuttering, ALL_CAPS, underscores in exported names
+- **doc-missing** — Detects exported types/functions without documentation
+- **error-string-compare** — Detects error comparisons via strings instead of errors.Is/errors.As
+- **error-wrap** — Detects errors returned without context (should use %w)
 
 ### Rule Details
 

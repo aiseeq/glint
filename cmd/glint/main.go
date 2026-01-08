@@ -15,7 +15,9 @@ import (
 	// Rule packages - imported for init() registration
 	_ "github.com/aiseeq/glint/pkg/rules/architecture"
 	_ "github.com/aiseeq/glint/pkg/rules/deadcode"
+	_ "github.com/aiseeq/glint/pkg/rules/doccheck"
 	_ "github.com/aiseeq/glint/pkg/rules/duplication"
+	_ "github.com/aiseeq/glint/pkg/rules/naming"
 	_ "github.com/aiseeq/glint/pkg/rules/patterns"
 	_ "github.com/aiseeq/glint/pkg/rules/security"
 	_ "github.com/aiseeq/glint/pkg/rules/typesafety"
