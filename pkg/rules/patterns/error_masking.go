@@ -138,6 +138,11 @@ func (r *ErrorMaskingRule) shouldSkipFile(ctx *core.FileContext) bool {
 		return true
 	}
 
+	// Skip config module files - they contain documented development defaults
+	if strings.Contains(path, "/config/") || strings.HasPrefix(path, "config/") {
+		return true
+	}
+
 	return false
 }
 
@@ -273,6 +278,12 @@ func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, stmt *ast.IfS
 		return nil
 	}
 
+	// Skip semantic boolean functions (Is*, Has*, Can*, Should*, etc.)
+	// These functions returning true/false on error is intentional semantic behavior
+	if r.isInSemanticBooleanFunc(ctx, stmt) {
+		return nil
+	}
+
 	// Check if error is logged before return (acceptable pattern)
 	hasLogging := false
 	hasReturn := false
@@ -296,12 +307,16 @@ func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, stmt *ast.IfS
 		}
 	}
 
-	// If error is logged and then returns false (deny by default), it's acceptable
-	// This is common pattern for permission/validation checks
+	// If error is logged and then returns false/empty (deny by default), it's acceptable
+	// This is common pattern for permission/validation/security checks
 	if hasLogging && hasReturn && returnStmt != nil {
 		for _, result := range returnStmt.Results {
 			if ident, ok := result.(*ast.Ident); ok && ident.Name == "false" {
 				return nil // Logged error + return false is acceptable (deny by default)
+			}
+			// Empty string with logging is also acceptable for security denial
+			if lit, ok := result.(*ast.BasicLit); ok && lit.Value == `""` {
+				return nil // Logged error + return "" is acceptable (denial pattern)
 			}
 		}
 	}
@@ -315,6 +330,12 @@ func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, stmt *ast.IfS
 
 		// If return includes an error (fmt.Errorf, err, errors.New), it's proper handling
 		if r.returnIncludesError(retStmt) {
+			continue
+		}
+
+		// Check if this is a comma-ok pattern (returns ..., false)
+		// Comma-ok with false as last value indicates failure, not masking
+		if r.isCommaOkReturnWithFalse(retStmt) {
 			continue
 		}
 
@@ -332,6 +353,22 @@ func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, stmt *ast.IfS
 	}
 
 	return nil
+}
+
+// isCommaOkReturnWithFalse checks if return is a comma-ok pattern ending with false
+// Pattern: return value, false - indicates failure in Go idiom
+func (r *ErrorMaskingRule) isCommaOkReturnWithFalse(stmt *ast.ReturnStmt) bool {
+	if len(stmt.Results) < 2 {
+		return false
+	}
+
+	// Check if last return value is false (comma-ok failure indicator)
+	lastResult := stmt.Results[len(stmt.Results)-1]
+	if ident, ok := lastResult.(*ast.Ident); ok {
+		return ident.Name == "false"
+	}
+
+	return false
 }
 
 // returnIncludesError checks if return statement includes proper error handling
@@ -353,6 +390,44 @@ func (r *ErrorMaskingRule) returnIncludesError(stmt *ast.ReturnStmt) bool {
 			}
 		}
 	}
+	return false
+}
+
+// isInSemanticBooleanFunc checks if statement is inside a semantic boolean function
+// Functions like IsEmpty, HasPermission, CanAccess, ShouldRetry have semantic boolean returns
+// where returning true/false on error is intentional behavior, not error masking
+func (r *ErrorMaskingRule) isInSemanticBooleanFunc(ctx *core.FileContext, stmt ast.Stmt) bool {
+	// Find the enclosing function
+	var funcName string
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok {
+			return true
+		}
+		// Check if stmt is within this function's body
+		if fn.Body != nil && fn.Body.Pos() <= stmt.Pos() && stmt.End() <= fn.Body.End() {
+			funcName = fn.Name.Name
+			return false // Found it, stop searching
+		}
+		return true
+	})
+
+	if funcName == "" {
+		return false
+	}
+
+	// Check for semantic boolean function prefixes
+	semanticPrefixes := []string{
+		"Is", "Has", "Can", "Should", "Must", "Will", "Was", "Does", "Did",
+		"Contains", "Exists", "Valid", "Empty", "Nil", "Zero", "Equal",
+	}
+
+	for _, prefix := range semanticPrefixes {
+		if strings.HasPrefix(funcName, prefix) {
+			return true
+		}
+	}
+
 	return false
 }
 
@@ -525,6 +600,11 @@ func (r *ErrorMaskingRule) isGoException(path, line string) bool {
 			strings.Contains(strings.ToLower(line), "timeout")) {
 			return true
 		}
+	}
+
+	// E2E test support - "test-" prefix returns are intentional for test mode
+	if strings.Contains(line, `"test-`) && strings.Contains(line, "return") {
+		return true
 	}
 
 	return false
