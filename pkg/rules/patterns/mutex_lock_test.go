@@ -25,7 +25,7 @@ func TestMutexLockRule_Detection(t *testing.T) {
 		expectMatch bool
 	}{
 		{
-			name: "lock without defer unlock",
+			name: "lock with regular unlock - acceptable",
 			code: `package main
 
 import "sync"
@@ -37,7 +37,7 @@ func example() {
 	mu.Unlock()
 }
 `,
-			expectMatch: true, // No defer!
+			expectMatch: false, // Regular unlock is acceptable (early-unlock pattern)
 		},
 		{
 			name: "lock with defer unlock",
@@ -55,7 +55,21 @@ func example() {
 			expectMatch: false,
 		},
 		{
-			name: "rlock without defer runlock",
+			name: "lock without any unlock - violation",
+			code: `package main
+
+import "sync"
+
+func example() {
+	var mu sync.Mutex
+	mu.Lock()
+	// do something but no unlock!
+}
+`,
+			expectMatch: true, // No unlock at all - real problem
+		},
+		{
+			name: "rlock with regular runlock - acceptable",
 			code: `package main
 
 import "sync"
@@ -67,7 +81,7 @@ func example() {
 	mu.RUnlock()
 }
 `,
-			expectMatch: true, // No defer!
+			expectMatch: false, // Regular unlock is acceptable
 		},
 		{
 			name: "rlock with defer runlock",
@@ -83,6 +97,20 @@ func example() {
 }
 `,
 			expectMatch: false,
+		},
+		{
+			name: "rlock without any runlock - violation",
+			code: `package main
+
+import "sync"
+
+func example() {
+	var mu sync.RWMutex
+	mu.RLock()
+	// do something but no unlock!
+}
+`,
+			expectMatch: true, // No unlock at all - real problem
 		},
 		{
 			name: "struct field mutex with defer",
@@ -110,7 +138,7 @@ func (s *Service) Method() {
 
 			if tt.expectMatch {
 				require.NotEmpty(t, violations, "Expected violation for: %s", tt.name)
-				assert.Equal(t, "mutex_no_defer", violations[0].Context["pattern"])
+				assert.Equal(t, "mutex_no_unlock", violations[0].Context["pattern"])
 			} else {
 				assert.Empty(t, violations, "Expected no violations for: %s", tt.name)
 			}
