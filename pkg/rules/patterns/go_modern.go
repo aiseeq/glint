@@ -16,6 +16,7 @@ func init() {
 // GoModernRule detects patterns that could use modern Go features
 type GoModernRule struct {
 	*rules.BaseRule
+	iteratorCallbacks []string // Function names that suggest callback-based iteration
 }
 
 // NewGoModernRule creates the rule
@@ -24,9 +25,15 @@ func NewGoModernRule() *GoModernRule {
 		BaseRule: rules.NewBaseRule(
 			"go-modern",
 			"patterns",
-			"Detects patterns that could use modern Go features (1.21+)",
+			"Detects patterns that could use modern Go features (1.21+, 1.23+ iterators)",
 			core.SeverityLow,
 		),
+		// Common callback-based iteration patterns that could use Go 1.23 iterators
+		iteratorCallbacks: []string{
+			"Walk", "WalkFunc", "WalkDir",
+			"Each", "ForEach", "Iterate",
+			"Range", "Visit", "Traverse",
+		},
 	}
 }
 
@@ -95,6 +102,26 @@ func (r *GoModernRule) checkCallExpr(ctx *core.FileContext, call *ast.CallExpr) 
 				v.WithSuggestion("Use unsafe.Slice and unsafe.String (Go 1.20+)")
 				v.WithContext("pattern", "deprecated-reflect")
 				violations = append(violations, v)
+			}
+
+			// Check for callback-based iteration that could use Go 1.23 iterators
+			for _, iterName := range r.iteratorCallbacks {
+				if sel.Sel.Name == iterName {
+					// Check if any argument is a function literal (callback)
+					for _, arg := range call.Args {
+						if _, ok := arg.(*ast.FuncLit); ok {
+							pos := ctx.PositionFor(call)
+							v := r.CreateViolation(ctx.RelPath, pos.Line,
+								"Callback-based iteration could use Go 1.23+ range-over-func iterator")
+							v.WithCode(ctx.GetLine(pos.Line))
+							v.WithSuggestion("Consider using iter.Seq or iter.Seq2 for Go 1.23+ iterator pattern")
+							v.WithContext("pattern", "iterator-candidate")
+							v.WithContext("function", sel.Sel.Name)
+							violations = append(violations, v)
+							break
+						}
+					}
+				}
 			}
 		}
 	}

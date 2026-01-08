@@ -127,6 +127,67 @@ func main() {
 }`,
 			wantViolations: 2,
 		},
+		{
+			name: "callback iteration - Walk with func literal",
+			code: `package main
+
+type Tree struct{}
+
+func (t *Tree) Walk(fn func(int) bool) {}
+
+func main() {
+	t := &Tree{}
+	t.Walk(func(v int) bool {
+		return true
+	})
+}`,
+			wantViolations: 1,
+		},
+		{
+			name: "callback iteration - ForEach with func literal",
+			code: `package main
+
+type List struct{}
+
+func (l *List) ForEach(fn func(string)) {}
+
+func main() {
+	l := &List{}
+	l.ForEach(func(s string) {
+		println(s)
+	})
+}`,
+			wantViolations: 1,
+		},
+		{
+			name: "callback iteration - no func literal",
+			code: `package main
+
+type Tree struct{}
+
+func (t *Tree) Walk(fn func(int) bool) {}
+func myCallback(v int) bool { return true }
+
+func main() {
+	t := &Tree{}
+	t.Walk(myCallback)
+}`,
+			wantViolations: 0, // Not using func literal, might be intentional
+		},
+		{
+			name: "regular method call - not iteration",
+			code: `package main
+
+type Service struct{}
+
+func (s *Service) Process(data string) {}
+
+func main() {
+	s := &Service{}
+	s.Process("data")
+}`,
+			wantViolations: 0,
+		},
 	}
 
 	for _, tt := range tests {
