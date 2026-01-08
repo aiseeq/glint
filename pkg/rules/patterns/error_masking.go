@@ -133,6 +133,11 @@ func (r *ErrorMaskingRule) shouldSkipFile(ctx *core.FileContext) bool {
 		return true
 	}
 
+	// Skip test helper files (not _test.go but testing utilities)
+	if strings.Contains(path, "/testing/") || strings.Contains(path, "test_helper") {
+		return true
+	}
+
 	return false
 }
 
@@ -268,6 +273,39 @@ func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, stmt *ast.IfS
 		return nil
 	}
 
+	// Check if error is logged before return (acceptable pattern)
+	hasLogging := false
+	hasReturn := false
+	var returnStmt *ast.ReturnStmt
+
+	for _, bodyStmt := range stmt.Body.List {
+		// Check for logging calls
+		if exprStmt, ok := bodyStmt.(*ast.ExprStmt); ok {
+			if call, ok := exprStmt.X.(*ast.CallExpr); ok {
+				funcName := core.ExtractFullFunctionName(call)
+				if strings.Contains(funcName, "log") || strings.Contains(funcName, "Log") ||
+					strings.Contains(funcName, "Error") || strings.Contains(funcName, "Warn") {
+					hasLogging = true
+				}
+			}
+		}
+
+		if ret, ok := bodyStmt.(*ast.ReturnStmt); ok {
+			hasReturn = true
+			returnStmt = ret
+		}
+	}
+
+	// If error is logged and then returns false (deny by default), it's acceptable
+	// This is common pattern for permission/validation checks
+	if hasLogging && hasReturn && returnStmt != nil {
+		for _, result := range returnStmt.Results {
+			if ident, ok := result.(*ast.Ident); ok && ident.Name == "false" {
+				return nil // Logged error + return false is acceptable (deny by default)
+			}
+		}
+	}
+
 	// Check body for problematic returns
 	for _, bodyStmt := range stmt.Body.List {
 		retStmt, ok := bodyStmt.(*ast.ReturnStmt)
@@ -348,8 +386,9 @@ func (r *ErrorMaskingRule) isErrNilCheck(expr ast.Expr) bool {
 func (r *ErrorMaskingRule) isProblematicReturn(expr ast.Expr) bool {
 	switch v := expr.(type) {
 	case *ast.Ident:
-		// "true", "false", "nil" without accompanying error
-		return v.Name == "true" || v.Name == "false"
+		// Only "true" is problematic - it masks error as success
+		// "false" is acceptable as it indicates failure (comma-ok pattern, deny-by-default)
+		return v.Name == "true"
 	case *ast.BasicLit:
 		// Empty string, zero values
 		return v.Value == `""` || v.Value == "0"
