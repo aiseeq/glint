@@ -39,60 +39,67 @@ func (r *DeprecatedIoutilRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 
 	for lineNum, line := range ctx.Lines {
 		wasInBacktick := inMultiLineBacktick
+		inMultiLineBacktick = r.updateBacktickState(line, inMultiLineBacktick)
 
-		// Track multi-line backtick strings
-		backtickCount := strings.Count(line, "`")
-		if backtickCount > 0 && backtickCount%2 == 1 {
-			inMultiLineBacktick = !inMultiLineBacktick
-		}
-
-		// Skip lines completely inside multi-line backtick strings
-		if wasInBacktick && backtickCount == 0 {
+		if r.shouldSkipLine(line, wasInBacktick) {
 			continue
 		}
 
-		// Skip if ioutil. appears in the backtick portion of this line
-		if r.isIoutilInBacktickPortion(line, wasInBacktick, backtickCount) {
-			continue
-		}
-
-		trimmed := strings.TrimSpace(line)
-
-		// Skip comments
-		if strings.HasPrefix(trimmed, "//") {
-			continue
-		}
-
-		// Check for import of io/ioutil
-		if r.isIoutilImport(line) {
-			v := r.CreateViolation(ctx.RelPath, lineNum+1, "io/ioutil is deprecated since Go 1.16")
-			v.WithCode(trimmed)
-			v.WithSuggestion("Use io.ReadAll, os.ReadFile, os.WriteFile instead")
-			violations = append(violations, v)
-			continue
-		}
-
-		// Check for ioutil.* function calls
-		if strings.Contains(line, "ioutil.") {
-			// Skip if inside any string literal
-			if isInsideLiteral(line, "ioutil.") {
-				continue
-			}
-
-			// Skip if ioutil. is only in inline comment
-			if isInInlineComment(line, "ioutil.") {
-				continue
-			}
-
-			suggestion := r.getSuggestion(line)
-			v := r.CreateViolation(ctx.RelPath, lineNum+1, "ioutil functions are deprecated")
-			v.WithCode(trimmed)
-			v.WithSuggestion(suggestion)
+		if v := r.checkLine(ctx, lineNum, line); v != nil {
 			violations = append(violations, v)
 		}
 	}
 
 	return violations
+}
+
+func (r *DeprecatedIoutilRule) updateBacktickState(line string, current bool) bool {
+	backtickCount := strings.Count(line, "`")
+	if backtickCount > 0 && backtickCount%2 == 1 {
+		return !current
+	}
+	return current
+}
+
+func (r *DeprecatedIoutilRule) shouldSkipLine(line string, wasInBacktick bool) bool {
+	backtickCount := strings.Count(line, "`")
+
+	// Skip lines completely inside multi-line backtick strings
+	if wasInBacktick && backtickCount == 0 {
+		return true
+	}
+
+	// Skip if ioutil. appears in the backtick portion of this line
+	if r.isIoutilInBacktickPortion(line, wasInBacktick, backtickCount) {
+		return true
+	}
+
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "//")
+}
+
+func (r *DeprecatedIoutilRule) checkLine(ctx *core.FileContext, lineNum int, line string) *core.Violation {
+	trimmed := strings.TrimSpace(line)
+
+	if r.isIoutilImport(line) {
+		v := r.CreateViolation(ctx.RelPath, lineNum+1, "io/ioutil is deprecated since Go 1.16")
+		v.WithCode(trimmed)
+		v.WithSuggestion("Use io.ReadAll, os.ReadFile, os.WriteFile instead")
+		return v
+	}
+
+	if strings.Contains(line, "ioutil.") {
+		if isInsideLiteral(line, "ioutil.") || isInInlineComment(line, "ioutil.") {
+			return nil
+		}
+
+		v := r.CreateViolation(ctx.RelPath, lineNum+1, "ioutil functions are deprecated")
+		v.WithCode(trimmed)
+		v.WithSuggestion(r.getSuggestion(line))
+		return v
+	}
+
+	return nil
 }
 
 // isIoutilInBacktickPortion checks if ioutil. is in the backtick-enclosed portion of a line

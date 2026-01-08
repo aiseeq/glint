@@ -44,64 +44,55 @@ func (r *MagicNumberRule) Configure(settings map[string]any) error {
 
 // AnalyzeFile checks for magic numbers
 func (r *MagicNumberRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || !ctx.HasGoAST() {
-		return nil
-	}
-
-	// Skip test files - magic numbers in tests are often acceptable
-	if ctx.IsTestFile() {
+	if !ctx.IsGoFile() || !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
 
 	var violations []*core.Violation
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		lit, ok := n.(*ast.BasicLit)
-		if !ok {
-			return true
+		if v := r.checkLiteral(ctx, n); v != nil {
+			violations = append(violations, v)
 		}
-
-		// Only check integer literals
-		if lit.Kind != token.INT {
-			return true
-		}
-
-		// Parse the value
-		value, err := strconv.ParseInt(lit.Value, 0, 64)
-		if err != nil {
-			return true
-		}
-
-		// Skip small values (0, 1, -1 are usually OK)
-		if value >= 0 && value < int64(r.minValue) {
-			return true
-		}
-
-		// Skip if this is part of a const declaration
-		if r.isInConstDecl(ctx.GoAST, lit) {
-			return true
-		}
-
-		// Skip common acceptable values
-		if r.isAcceptableValue(value) {
-			return true
-		}
-
-		// Skip if in array/slice index or capacity
-		if r.isArrayContext(ctx.GoAST, lit) {
-			return true
-		}
-
-		pos := ctx.PositionFor(lit)
-		v := r.CreateViolation(ctx.RelPath, pos.Line, "Consider using a named constant instead of magic number")
-		v.WithCode(lit.Value)
-		v.WithSuggestion("Define a const with a descriptive name")
-		violations = append(violations, v)
-
 		return true
 	})
 
 	return violations
+}
+
+func (r *MagicNumberRule) checkLiteral(ctx *core.FileContext, n ast.Node) *core.Violation {
+	lit, ok := n.(*ast.BasicLit)
+	if !ok || lit.Kind != token.INT {
+		return nil
+	}
+
+	value, err := strconv.ParseInt(lit.Value, 0, 64)
+	if err != nil {
+		return nil
+	}
+
+	if r.shouldSkipValue(ctx, lit, value) {
+		return nil
+	}
+
+	pos := ctx.PositionFor(lit)
+	v := r.CreateViolation(ctx.RelPath, pos.Line, "Consider using a named constant instead of magic number")
+	v.WithCode(lit.Value)
+	v.WithSuggestion("Define a const with a descriptive name")
+	return v
+}
+
+func (r *MagicNumberRule) shouldSkipValue(ctx *core.FileContext, lit *ast.BasicLit, value int64) bool {
+	if value >= 0 && value < int64(r.minValue) {
+		return true
+	}
+	if r.isInConstDecl(ctx.GoAST, lit) {
+		return true
+	}
+	if r.isAcceptableValue(value) {
+		return true
+	}
+	return r.isArrayContext(ctx.GoAST, lit)
 }
 
 func (r *MagicNumberRule) isInConstDecl(file *ast.File, lit *ast.BasicLit) bool {

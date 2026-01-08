@@ -70,52 +70,51 @@ func (r *ErrorStringRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+		if vs := r.checkCall(ctx, n); len(vs) > 0 {
+			violations = append(violations, vs...)
 		}
-
-		if !r.isErrorCreation(call) {
-			return true
-		}
-
-		// Check the first string argument
-		if len(call.Args) == 0 {
-			return true
-		}
-
-		lit, ok := call.Args[0].(*ast.BasicLit)
-		if !ok {
-			return true
-		}
-
-		// Extract string value
-		val := strings.Trim(lit.Value, "`\"")
-		if val == "" {
-			return true
-		}
-
-		// Check for capital letter at start
-		if r.startsWithCapital(val) {
-			pos := ctx.PositionFor(lit)
-			v := r.CreateViolation(ctx.RelPath, pos.Line, "Error strings should not be capitalized")
-			v.WithCode(ctx.GetLine(pos.Line))
-			v.WithSuggestion("Use lowercase for error strings (Go convention)")
-			violations = append(violations, v)
-			return true
-		}
-
-		// Check for punctuation at end
-		if r.endsWithPunctuation(val) {
-			pos := ctx.PositionFor(lit)
-			v := r.CreateViolation(ctx.RelPath, pos.Line, "Error strings should not end with punctuation")
-			v.WithCode(ctx.GetLine(pos.Line))
-			v.WithSuggestion("Remove trailing punctuation from error string")
-			violations = append(violations, v)
-		}
-
 		return true
 	})
+
+	return violations
+}
+
+func (r *ErrorStringRule) checkCall(ctx *core.FileContext, n ast.Node) []*core.Violation {
+	call, ok := n.(*ast.CallExpr)
+	if !ok || !r.isErrorCreation(call) || len(call.Args) == 0 {
+		return nil
+	}
+
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	if !ok {
+		return nil
+	}
+
+	val := strings.Trim(lit.Value, "`\"")
+	if val == "" {
+		return nil
+	}
+
+	return r.checkErrorString(ctx, lit, val)
+}
+
+func (r *ErrorStringRule) checkErrorString(ctx *core.FileContext, lit *ast.BasicLit, val string) []*core.Violation {
+	var violations []*core.Violation
+	pos := ctx.PositionFor(lit)
+
+	if r.startsWithCapital(val) {
+		v := r.CreateViolation(ctx.RelPath, pos.Line, "Error strings should not be capitalized")
+		v.WithCode(ctx.GetLine(pos.Line))
+		v.WithSuggestion("Use lowercase for error strings (Go convention)")
+		violations = append(violations, v)
+	}
+
+	if r.endsWithPunctuation(val) {
+		v := r.CreateViolation(ctx.RelPath, pos.Line, "Error strings should not end with punctuation")
+		v.WithCode(ctx.GetLine(pos.Line))
+		v.WithSuggestion("Remove trailing punctuation from error string")
+		violations = append(violations, v)
+	}
 
 	return violations
 }
