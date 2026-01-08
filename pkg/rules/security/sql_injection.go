@@ -35,6 +35,11 @@ func (r *SQLInjectionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 		return nil
 	}
 
+	// Skip test files and test infrastructure (DDL commands don't support parameters)
+	if ctx.IsTestFile() || strings.Contains(ctx.RelPath, "/testing/") {
+		return nil
+	}
+
 	var violations []*core.Violation
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
