@@ -86,14 +86,10 @@ func (r *SQLRowsCloseRule) checkFunction(ctx *core.FileContext, body *ast.BlockS
 	}
 
 	// Check for defer rows.Close() or rows.Close()
+	// Also check inside function literals like: defer func() { _ = rows.Close() }()
 	closedVars := make(map[string]bool)
 
 	ast.Inspect(body, func(n ast.Node) bool {
-		// Skip nested function literals
-		if _, ok := n.(*ast.FuncLit); ok {
-			return false
-		}
-
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -133,9 +129,35 @@ func (r *SQLRowsCloseRule) isQueryCall(expr ast.Expr) bool {
 	method := sel.Sel.Name
 
 	// Check for db.Query, db.QueryContext, db.QueryRow is NOT included (returns *Row, not *Rows)
-	return method == "Query" || method == "QueryContext" ||
-		method == "QueryxContext" || method == "Queryx" ||
-		method == "NamedQuery" || method == "NamedQueryContext"
+	sqlMethods := map[string]bool{
+		"Query": true, "QueryContext": true,
+		"QueryxContext": true, "Queryx": true,
+		"NamedQuery": true, "NamedQueryContext": true,
+	}
+
+	if !sqlMethods[method] {
+		return false
+	}
+
+	// Check that receiver looks like a database connection
+	// Exclude URL.Query() and similar non-database Query methods
+	receiverName := r.getReceiverName(sel.X)
+	if receiverName == "URL" || receiverName == "url" {
+		return false // URL.Query() returns url.Values, not *sql.Rows
+	}
+
+	return true
+}
+
+func (r *SQLRowsCloseRule) getReceiverName(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.SelectorExpr:
+		// For chains like r.URL.Query(), get the last selector
+		return e.Sel.Name
+	}
+	return ""
 }
 
 func (r *SQLRowsCloseRule) getCloseVar(call *ast.CallExpr) string {
