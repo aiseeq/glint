@@ -204,6 +204,11 @@ func (r *CrossFileDuplicateRule) isTrivialLine(line string) bool {
 		return true
 	}
 
+	// Skip import statements - imports are expected to be similar across files
+	if strings.HasPrefix(line, `"`) || strings.HasPrefix(line, "import") {
+		return true
+	}
+
 	trivial := []string{
 		"{", "}", "(", ")", "[", "]",
 		"else {", "} else {", "} else if",
@@ -233,6 +238,19 @@ func (r *CrossFileDuplicateRule) isTrivialLine(line string) bool {
 	}
 
 	if strings.HasPrefix(line, "//") || strings.HasPrefix(line, "/*") {
+		return true
+	}
+
+	// Common HTTP patterns - expected to repeat across handlers
+	if strings.Contains(line, `Header().Set("Content-Type"`) ||
+		strings.Contains(line, "json.NewEncoder") ||
+		strings.Contains(line, "json.Unmarshal") ||
+		strings.Contains(line, "WriteHeader") {
+		return true
+	}
+
+	// Common interface/type declarations
+	if strings.HasPrefix(line, "type ") && strings.HasSuffix(line, " interface {") {
 		return true
 	}
 
