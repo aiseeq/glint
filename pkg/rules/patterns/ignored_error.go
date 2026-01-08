@@ -39,52 +39,67 @@ func (r *IgnoredErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 
 	visitor := core.NewGoASTVisitor(ctx)
 	visitor.OnAssignStmt(func(stmt *ast.AssignStmt) {
-		// Check for blank identifier assignments
-		for i, lhs := range stmt.Lhs {
-			ident, ok := lhs.(*ast.Ident)
-			if !ok || ident.Name != "_" {
-				continue
-			}
-
-			// Check if the corresponding RHS might return an error
-			if i < len(stmt.Rhs) {
-				if call, ok := stmt.Rhs[i].(*ast.CallExpr); ok {
-					funcName := core.ExtractFullFunctionName(call)
-					// Common error-returning patterns
-					if looksLikeErrorReturn(funcName) {
-						pos := ctx.PositionFor(stmt)
-						v := r.CreateViolation(ctx.RelPath, pos.Line,
-							"Error from "+funcName+" is ignored")
-						v.WithCode(ctx.GetLine(pos.Line))
-						v.WithSuggestion("Handle the error or use a named blank identifier with comment")
-						violations = append(violations, v)
-					}
-				}
-			}
-		}
-
-		// Check for assignments like: result, _ := SomeFunc()
-		// where _ is in the error position (typically last)
-		if len(stmt.Lhs) >= 2 && len(stmt.Rhs) >= 1 {
-			lastLhs := stmt.Lhs[len(stmt.Lhs)-1]
-			if ident, ok := lastLhs.(*ast.Ident); ok && ident.Name == "_" {
-				if call, ok := stmt.Rhs[0].(*ast.CallExpr); ok {
-					funcName := core.ExtractFullFunctionName(call)
-					if !isKnownSafeToIgnore(funcName) {
-						pos := ctx.PositionFor(stmt)
-						v := r.CreateViolation(ctx.RelPath, pos.Line,
-							"Potential error ignored in multi-value assignment from "+funcName)
-						v.WithCode(ctx.GetLine(pos.Line))
-						v.WithSuggestion("Consider handling the error")
-						violations = append(violations, v)
-					}
-				}
-			}
-		}
+		violations = append(violations, r.checkBlankIdentifiers(ctx, stmt)...)
+		violations = append(violations, r.checkMultiValueAssignment(ctx, stmt)...)
 	})
 	visitor.Visit()
 
 	return violations
+}
+
+func (r *IgnoredErrorRule) checkBlankIdentifiers(ctx *core.FileContext, stmt *ast.AssignStmt) []*core.Violation {
+	var violations []*core.Violation
+
+	for i, lhs := range stmt.Lhs {
+		ident, ok := lhs.(*ast.Ident)
+		if !ok || ident.Name != "_" || i >= len(stmt.Rhs) {
+			continue
+		}
+
+		call, ok := stmt.Rhs[i].(*ast.CallExpr)
+		if !ok {
+			continue
+		}
+
+		funcName := core.ExtractFullFunctionName(call)
+		if looksLikeErrorReturn(funcName) {
+			pos := ctx.PositionFor(stmt)
+			v := r.CreateViolation(ctx.RelPath, pos.Line, "Error from "+funcName+" is ignored")
+			v.WithCode(ctx.GetLine(pos.Line))
+			v.WithSuggestion("Handle the error or use a named blank identifier with comment")
+			violations = append(violations, v)
+		}
+	}
+
+	return violations
+}
+
+func (r *IgnoredErrorRule) checkMultiValueAssignment(ctx *core.FileContext, stmt *ast.AssignStmt) []*core.Violation {
+	if len(stmt.Lhs) < 2 || len(stmt.Rhs) < 1 {
+		return nil
+	}
+
+	lastLhs := stmt.Lhs[len(stmt.Lhs)-1]
+	ident, ok := lastLhs.(*ast.Ident)
+	if !ok || ident.Name != "_" {
+		return nil
+	}
+
+	call, ok := stmt.Rhs[0].(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+
+	funcName := core.ExtractFullFunctionName(call)
+	if isKnownSafeToIgnore(funcName) {
+		return nil
+	}
+
+	pos := ctx.PositionFor(stmt)
+	v := r.CreateViolation(ctx.RelPath, pos.Line, "Potential error ignored in multi-value assignment from "+funcName)
+	v.WithCode(ctx.GetLine(pos.Line))
+	v.WithSuggestion("Consider handling the error")
+	return []*core.Violation{v}
 }
 
 func looksLikeErrorReturn(funcName string) bool {

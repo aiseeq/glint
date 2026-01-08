@@ -147,7 +147,9 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		Duration:      time.Since(startTime).Seconds(),
 	}
 
-	outputResults(cfg.Settings.Output, allViolations, stats)
+	if err := outputResults(cfg.Settings.Output, allViolations, stats); err != nil {
+		return fmt.Errorf("output error: %w", err)
+	}
 
 	if allViolations.HasCritical() {
 		os.Exit(1)
@@ -239,19 +241,20 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule) core.
 	return allViolations
 }
 
-func outputResults(format string, violations core.ViolationList, stats output.Stats) {
+func outputResults(format string, violations core.ViolationList, stats output.Stats) error {
 	switch format {
 	case "json":
 		fmt.Println("JSON output not yet implemented")
+		return nil
 	case "summary":
 		out := output.NewSummaryOutput().WithWriter(os.Stdout)
-		_ = out.Write(violations, stats)
+		return out.Write(violations, stats)
 	default:
 		out := output.NewConsoleOutput().
 			WithWriter(os.Stdout).
 			WithVerbose(flagVerbose).
 			WithNoColor(flagNoColor)
-		_ = out.Write(violations, stats)
+		return out.Write(violations, stats)
 	}
 }
 
