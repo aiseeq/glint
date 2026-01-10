@@ -88,14 +88,10 @@ func (r *HTTPBodyCloseRule) checkFunction(ctx *core.FileContext, body *ast.Block
 	}
 
 	// Check for defer resp.Body.Close() or resp.Body.Close()
+	// Note: we DO need to check inside FuncLit because defer func() { resp.Body.Close() }() is common
 	closedVars := make(map[string]bool)
 
 	ast.Inspect(body, func(n ast.Node) bool {
-		// Skip nested function literals
-		if _, ok := n.(*ast.FuncLit); ok {
-			return false
-		}
-
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
