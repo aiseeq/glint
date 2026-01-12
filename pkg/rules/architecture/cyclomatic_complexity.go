@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 const (
@@ -51,33 +52,25 @@ func (r *CyclomaticComplexityRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 	if !ctx.IsGoFile() || !ctx.HasGoAST() {
 		return nil
 	}
+	return helpers.AnalyzeFuncDecls(ctx, r.checkFunction)
+}
 
-	var violations []*core.Violation
+func (r *CyclomaticComplexityRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+	complexity := r.calculateComplexity(fn)
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			return true
-		}
+	if complexity > r.maxComplexity {
+		pos := ctx.PositionFor(fn.Name)
+		v := r.CreateViolation(ctx.RelPath, pos.Line,
+			fmt.Sprintf("Function '%s' has cyclomatic complexity %d (max: %d)",
+				fn.Name.Name, complexity, r.maxComplexity))
+		v.WithCode(ctx.GetLine(pos.Line))
+		v.WithSuggestion("Consider breaking this function into smaller, more focused functions")
+		v.WithContext("complexity", fmt.Sprintf("%d", complexity))
+		v.WithContext("function", fn.Name.Name)
+		return []*core.Violation{v}
+	}
 
-		complexity := r.calculateComplexity(fn)
-
-		if complexity > r.maxComplexity {
-			pos := ctx.PositionFor(fn.Name)
-			v := r.CreateViolation(ctx.RelPath, pos.Line,
-				fmt.Sprintf("Function '%s' has cyclomatic complexity %d (max: %d)",
-					fn.Name.Name, complexity, r.maxComplexity))
-			v.WithCode(ctx.GetLine(pos.Line))
-			v.WithSuggestion("Consider breaking this function into smaller, more focused functions")
-			v.WithContext("complexity", fmt.Sprintf("%d", complexity))
-			v.WithContext("function", fn.Name.Name)
-			violations = append(violations, v)
-		}
-
-		return true
-	})
-
-	return violations
+	return nil
 }
 
 // calculateComplexity computes the cyclomatic complexity of a function

@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -88,7 +89,7 @@ func (r *InterfaceAnyRule) shouldSkipMatch(line, patternName string, ctx *core.F
 	// Skip if inside string literal
 	if strings.Contains(line, `"`) {
 		matchStr := getMatchString(patternName)
-		if isInsideString(line, matchStr) {
+		if helpers.IsInsideString(line, matchStr) {
 			return true
 		}
 	}
@@ -140,18 +141,6 @@ func getMatchString(patternName string) string {
 	default:
 		return "interface{}"
 	}
-}
-
-// isInsideString checks if a substring appears inside a string literal
-func isInsideString(line, substr string) bool {
-	idx := strings.Index(line, substr)
-	if idx < 0 {
-		return false
-	}
-
-	beforeSubstr := line[:idx]
-	quoteCount := strings.Count(beforeSubstr, `"`)
-	return quoteCount%2 == 1
 }
 
 func (r *InterfaceAnyRule) getMessage(patternName string) string {
