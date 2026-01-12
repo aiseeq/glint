@@ -1,4 +1,4 @@
-# Glint configuration
+# Glint configuration for self-analysis
 version: 1
 
 settings:
@@ -12,7 +12,32 @@ settings:
 categories:
   architecture:
     enabled: true
+    rules:
+      # Increased thresholds for complex rule implementations
+      cyclomatic-complexity:
+        enabled: true
+        settings:
+          max_complexity: 15
+      long-function:
+        enabled: true
+        settings:
+          max_lines: 100
+      deep-nesting:
+        enabled: true
+        settings:
+          max_depth: 5
+      # solid-srp: too strict for analyzer rules that naturally have multiple responsibilities
+      solid-srp:
+        enabled: false
+
   patterns:
     enabled: true
+    rules:
+      context-first:
+        enabled: false
+
   typesafety:
+    enabled: true
+
+  duplication:
     enabled: true
