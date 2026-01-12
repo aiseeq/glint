@@ -121,6 +121,11 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 		"MarshalText", "UnmarshalText", "MarshalBinary", "UnmarshalBinary",
 		"Scan", "Value", // sql.Scanner, driver.Valuer
 		"ServeHTTP",     // http.Handler (context is in request)
+		"Unwrap",        // error interface method for unwrapping errors
+		"Commit",        // database transaction (context often stored in struct)
+		"Rollback",      // database transaction
+		"Ping",          // simple healthcheck operations
+		"Stats",         // statistics retrieval (no side effects)
 	}
 
 	for _, special := range specialNames {
@@ -128,6 +133,40 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 			return true
 		}
 	}
+
+	// Is* predicates - pure functions checking error/state types (no context needed)
+	if strings.HasPrefix(name, "Is") && len(name) > 2 && unicode.IsUpper(rune(name[2])) {
+		return true
+	}
+
+	// Set* setters for dependency injection (no context needed, just struct assignment)
+	if strings.HasPrefix(name, "Set") && len(name) > 3 && unicode.IsUpper(rune(name[3])) {
+		return true
+	}
+
+	// Get* simple getters that just return struct fields (no context needed)
+	// Only if they have no parameters (pure accessors)
+	if strings.HasPrefix(name, "Get") && len(name) > 3 && unicode.IsUpper(rune(name[3])) {
+		if fn.Type.Params == nil || len(fn.Type.Params.List) == 0 {
+			return true
+		}
+	}
+
+	// *Operations methods - delegation pattern returning interfaces
+	if strings.HasSuffix(name, "Operations") {
+		return true
+	}
+
+	// Valid* functions - return validation constants/lists
+	if strings.HasPrefix(name, "Valid") {
+		return true
+	}
+
+	// Wrap* error wrapping functions - add context to errors
+	if strings.HasPrefix(name, "Wrap") {
+		return true
+	}
+
 	return false
 }
 

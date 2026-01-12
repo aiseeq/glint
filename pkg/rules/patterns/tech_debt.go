@@ -66,7 +66,8 @@ func (r *TechDebtRule) initPatterns() {
 			suggestion:  "Refactor the code or create a task",
 		},
 		"dead_code_marker": {
-			regex:       regexp.MustCompile(`(?i)//\s*(dead\s+code|unused|not\s+used|никогда\s+не\s+использ)`),
+			// NOTE: "unused" must be followed by non-letter to avoid matching "UnusedParamRule"
+			regex:       regexp.MustCompile(`(?i)//\s*(dead\s+code|unused(?:[^a-zA-Z]|$)|not\s+used|никогда\s+не\s+использ)`),
 			severity:    core.SeverityMedium,
 			description: "Dead code marker",
 			suggestion:  "Remove dead code - git remembers history",
@@ -78,10 +79,13 @@ func (r *TechDebtRule) initPatterns() {
 			suggestion:  "Fix the broken feature or remove it",
 		},
 		"ignore_errors": {
-			regex:       regexp.MustCompile(`(?i)//.*\b(ignore\s+errors?|игнорир\w*\s+ошибк|non.?critical|not\s+critical|can\s+ignore|safe\s+to\s+ignore)`),
+			// NOTE: Removed "non.?critical", "not critical", "safe to ignore" from pattern
+			// These phrases are often used to EXPLAIN why ignoring is safe, not as lazy markers
+			// Only flag explicit "ignore error" without explanation
+			regex:       regexp.MustCompile(`(?i)//.*\b(ignore\s+errors?\s*$|игнорир\w*\s+ошибк\w*\s*$)`),
 			severity:    core.SeverityCritical,
-			description: "Ignoring errors is dangerous - errors should be handled or logged",
-			suggestion:  "Handle the error properly: log it, return it, or document why it's safe to ignore",
+			description: "Ignoring errors without explanation - document why it's safe",
+			suggestion:  "Add explanation why ignoring is safe (e.g. 'Non-critical: uses defaults if fails')",
 		},
 		"unfinished_work": {
 			regex:       regexp.MustCompile(`(?i)//\s*(WIP|work\s+in\s+progress|not\s+finished|incomplete|незаверш|в\s+работе)`),

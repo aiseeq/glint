@@ -135,7 +135,7 @@ func (r *GoModernRule) checkCallExpr(ctx *core.FileContext, call *ast.CallExpr) 
 
 	// Check for math.Max/math.Min
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-		if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "math" {
+		if pkgIdent, ok := sel.X.(*ast.Ident); ok && pkgIdent.Name == "math" {
 			if sel.Sel.Name == "Max" || sel.Sel.Name == "Min" {
 				pos := ctx.PositionFor(call)
 				v := r.CreateViolation(ctx.RelPath, pos.Line,
