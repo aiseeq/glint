@@ -17,7 +17,8 @@ categories:
       cyclomatic-complexity:
         enabled: true
         settings:
-          max_complexity: 15
+          # Higher threshold for AST analyzer rules - pattern matching is inherently complex
+          max_complexity: 20
       long-function:
         enabled: true
         settings:

@@ -105,23 +105,8 @@ func (r *GoModernRule) checkCallExpr(ctx *core.FileContext, call *ast.CallExpr) 
 			}
 
 			// Check for callback-based iteration that could use Go 1.23 iterators
-			for _, iterName := range r.iteratorCallbacks {
-				if sel.Sel.Name == iterName {
-					// Check if any argument is a function literal (callback)
-					for _, arg := range call.Args {
-						if _, ok := arg.(*ast.FuncLit); ok {
-							pos := ctx.PositionFor(call)
-							v := r.CreateViolation(ctx.RelPath, pos.Line,
-								"Callback-based iteration could use Go 1.23+ range-over-func iterator")
-							v.WithCode(ctx.GetLine(pos.Line))
-							v.WithSuggestion("Consider using iter.Seq or iter.Seq2 for Go 1.23+ iterator pattern")
-							v.WithContext("pattern", "iterator-candidate")
-							v.WithContext("function", sel.Sel.Name)
-							violations = append(violations, v)
-							break
-						}
-					}
-				}
+			if v := r.checkIteratorCallback(ctx, call, sel); v != nil {
+				violations = append(violations, v)
 			}
 		}
 	}
@@ -149,6 +134,37 @@ func (r *GoModernRule) checkCallExpr(ctx *core.FileContext, call *ast.CallExpr) 
 	}
 
 	return violations
+}
+
+// checkIteratorCallback checks if a call matches an iterator callback pattern
+func (r *GoModernRule) checkIteratorCallback(ctx *core.FileContext, call *ast.CallExpr, sel *ast.SelectorExpr) *core.Violation {
+	for _, iterName := range r.iteratorCallbacks {
+		if sel.Sel.Name != iterName {
+			continue
+		}
+		if !r.hasCallbackArg(call) {
+			continue
+		}
+		pos := ctx.PositionFor(call)
+		v := r.CreateViolation(ctx.RelPath, pos.Line,
+			"Callback-based iteration could use Go 1.23+ range-over-func iterator")
+		v.WithCode(ctx.GetLine(pos.Line))
+		v.WithSuggestion("Consider using iter.Seq or iter.Seq2 for Go 1.23+ iterator pattern")
+		v.WithContext("pattern", "iterator-candidate")
+		v.WithContext("function", sel.Sel.Name)
+		return v
+	}
+	return nil
+}
+
+// hasCallbackArg checks if any argument to a call is a function literal
+func (r *GoModernRule) hasCallbackArg(call *ast.CallExpr) bool {
+	for _, arg := range call.Args {
+		if _, ok := arg.(*ast.FuncLit); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // checkForStmt checks for loop patterns that could be modernized

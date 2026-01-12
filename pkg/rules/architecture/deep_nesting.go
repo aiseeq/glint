@@ -5,6 +5,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 const (
@@ -49,21 +50,11 @@ func (r *DeepNestingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() || !ctx.HasGoAST() {
 		return nil
 	}
+	return helpers.AnalyzeFuncDecls(ctx, r.checkFuncDecl)
+}
 
-	var violations []*core.Violation
-
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			return true
-		}
-
-		fnViolations := r.checkNesting(ctx, fn.Body, 0, fn.Name.Name)
-		violations = append(violations, fnViolations...)
-		return true
-	})
-
-	return violations
+func (r *DeepNestingRule) checkFuncDecl(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+	return r.checkNesting(ctx, fn.Body, 0, fn.Name.Name)
 }
 
 func (r *DeepNestingRule) checkNesting(ctx *core.FileContext, node ast.Node, depth int, funcName string) []*core.Violation {

@@ -5,6 +5,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -33,26 +34,7 @@ func (r *HTTPBodyCloseRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	if !ctx.IsGoFile() || ctx.IsTestFile() {
 		return nil
 	}
-
-	if ctx.GoAST == nil {
-		return nil
-	}
-
-	var violations []*core.Violation
-
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			return true
-		}
-
-		// Find http.Get, http.Post, client.Do, etc. calls
-		r.checkFunction(ctx, fn.Body, &violations)
-
-		return true
-	})
-
-	return violations
+	return helpers.AnalyzeFuncBodies(ctx, r.checkFunction)
 }
 
 func (r *HTTPBodyCloseRule) checkFunction(ctx *core.FileContext, body *ast.BlockStmt, violations *[]*core.Violation) {

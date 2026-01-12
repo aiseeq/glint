@@ -75,49 +75,49 @@ func (r *StringConcatRule) checkLoop(ctx *core.FileContext, body *ast.BlockStmt,
 
 		// Check for += with string
 		if assign.Tok == token.ADD_ASSIGN {
-			if len(assign.Lhs) == 1 && len(assign.Rhs) == 1 {
-				if r.isStringConcat(assign.Rhs[0]) {
-					line := r.getLineFromNode(ctx, assign)
-					v := r.CreateViolation(ctx.RelPath, line, "String concatenation in loop - use strings.Builder")
-					v.WithCode(ctx.GetLine(line))
-					v.WithSuggestion("Use var sb strings.Builder; sb.WriteString(...)")
-					v.WithContext("pattern", "string_concat_loop")
-					*violations = append(*violations, v)
-				}
+			if len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && r.isStringConcat(assign.Rhs[0]) {
+				r.reportConcatViolation(ctx, assign, violations)
 			}
 			return true
 		}
 
 		// Check for s = s + "..."
 		if assign.Tok == token.ASSIGN && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 {
-			binary, ok := assign.Rhs[0].(*ast.BinaryExpr)
-			if !ok || binary.Op != token.ADD {
-				return true
-			}
-
-			// Check if left side of + is same as assigned variable
-			lhsIdent, ok := assign.Lhs[0].(*ast.Ident)
-			if !ok {
-				return true
-			}
-
-			rhsIdent, ok := binary.X.(*ast.Ident)
-			if !ok {
-				return true
-			}
-
-			if lhsIdent.Name == rhsIdent.Name && r.isStringExpr(binary.Y) {
-				line := r.getLineFromNode(ctx, assign)
-				v := r.CreateViolation(ctx.RelPath, line, "String concatenation in loop - use strings.Builder")
-				v.WithCode(ctx.GetLine(line))
-				v.WithSuggestion("Use var sb strings.Builder; sb.WriteString(...)")
-				v.WithContext("pattern", "string_concat_loop")
-				*violations = append(*violations, v)
+			if r.isAssignPlusPattern(assign) {
+				r.reportConcatViolation(ctx, assign, violations)
 			}
 		}
 
 		return true
 	})
+}
+
+func (r *StringConcatRule) isAssignPlusPattern(assign *ast.AssignStmt) bool {
+	binary, ok := assign.Rhs[0].(*ast.BinaryExpr)
+	if !ok || binary.Op != token.ADD {
+		return false
+	}
+
+	lhsIdent, ok := assign.Lhs[0].(*ast.Ident)
+	if !ok {
+		return false
+	}
+
+	rhsIdent, ok := binary.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+
+	return lhsIdent.Name == rhsIdent.Name && r.isStringExpr(binary.Y)
+}
+
+func (r *StringConcatRule) reportConcatViolation(ctx *core.FileContext, assign *ast.AssignStmt, violations *[]*core.Violation) {
+	line := r.getLineFromNode(ctx, assign)
+	v := r.CreateViolation(ctx.RelPath, line, "String concatenation in loop - use strings.Builder")
+	v.WithCode(ctx.GetLine(line))
+	v.WithSuggestion("Use var sb strings.Builder; sb.WriteString(...)")
+	v.WithContext("pattern", "string_concat_loop")
+	*violations = append(*violations, v)
 }
 
 func (r *StringConcatRule) isStringConcat(expr ast.Expr) bool {

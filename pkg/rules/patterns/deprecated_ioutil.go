@@ -5,6 +5,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -130,7 +131,7 @@ func (r *DeprecatedIoutilRule) isIoutilImport(line string) bool {
 	}
 
 	// Skip if inside backtick string (test data, etc.)
-	if isInsideBackticks(line, `"io/ioutil"`) {
+	if helpers.IsInsideBackticks(line, `"io/ioutil"`) {
 		return false
 	}
 
@@ -139,47 +140,12 @@ func (r *DeprecatedIoutilRule) isIoutilImport(line string) bool {
 
 // isInsideLiteral checks if substr is inside any string literal
 func isInsideLiteral(line, substr string) bool {
-	return isInsideString(line, substr) || isInsideBackticks(line, substr)
+	return helpers.IsInsideString(line, substr) || helpers.IsInsideBackticks(line, substr)
 }
 
 // isInInlineComment checks if substr appears only after // in the line
 func isInInlineComment(line, substr string) bool {
-	commentIdx := strings.Index(line, "//")
-	if commentIdx < 0 {
-		return false
-	}
-
-	substrIdx := strings.Index(line, substr)
-	if substrIdx < 0 {
-		return false
-	}
-
-	// substr is in comment if it appears after //
-	return substrIdx > commentIdx
-}
-
-// isInsideString checks if a substring appears inside a double-quoted string
-func isInsideString(line, substr string) bool {
-	idx := strings.Index(line, substr)
-	if idx < 0 {
-		return false
-	}
-
-	beforeSubstr := line[:idx]
-	quoteCount := strings.Count(beforeSubstr, `"`)
-	return quoteCount%2 == 1
-}
-
-// isInsideBackticks checks if a substring appears inside a backtick string
-func isInsideBackticks(line, substr string) bool {
-	idx := strings.Index(line, substr)
-	if idx < 0 {
-		return false
-	}
-
-	beforeSubstr := line[:idx]
-	backtickCount := strings.Count(beforeSubstr, "`")
-	return backtickCount%2 == 1
+	return helpers.IsInComment(line, substr)
 }
 
 func (r *DeprecatedIoutilRule) getSuggestion(line string) string {

@@ -279,67 +279,77 @@ func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, stmt *ast.IfS
 	}
 
 	// Skip semantic boolean functions (Is*, Has*, Can*, Should*, etc.)
-	// These functions returning true/false on error is intentional semantic behavior
 	if r.isInSemanticBooleanFunc(ctx, stmt) {
 		return nil
 	}
 
 	// Check if error is logged before return (acceptable pattern)
-	hasLogging := false
-	hasReturn := false
-	var returnStmt *ast.ReturnStmt
+	info := r.analyzeErrorBlock(stmt.Body.List)
+	if r.isAcceptableDenialPattern(info) {
+		return nil
+	}
 
-	for _, bodyStmt := range stmt.Body.List {
-		// Check for logging calls
+	// Find first problematic return
+	return r.findProblematicReturn(ctx, stmt, info)
+}
+
+// blockAnalysis holds analysis results of an error handling block
+type blockAnalysis struct {
+	hasLogging bool
+	returnStmt *ast.ReturnStmt
+}
+
+// analyzeErrorBlock analyzes statements in error handling block for logging and return
+func (r *ErrorMaskingRule) analyzeErrorBlock(stmts []ast.Stmt) blockAnalysis {
+	var info blockAnalysis
+	for _, bodyStmt := range stmts {
 		if exprStmt, ok := bodyStmt.(*ast.ExprStmt); ok {
 			if call, ok := exprStmt.X.(*ast.CallExpr); ok {
 				funcName := core.ExtractFullFunctionName(call)
-				if strings.Contains(funcName, "log") || strings.Contains(funcName, "Log") ||
-					strings.Contains(funcName, "Error") || strings.Contains(funcName, "Warn") {
-					hasLogging = true
+				if r.isLoggingCall(funcName) {
+					info.hasLogging = true
 				}
 			}
 		}
-
 		if ret, ok := bodyStmt.(*ast.ReturnStmt); ok {
-			hasReturn = true
-			returnStmt = ret
+			info.returnStmt = ret
 		}
 	}
+	return info
+}
 
-	// If error is logged and then returns false/empty (deny by default), it's acceptable
-	// This is common pattern for permission/validation/security checks
-	if hasLogging && hasReturn && returnStmt != nil {
-		for _, result := range returnStmt.Results {
-			if ident, ok := result.(*ast.Ident); ok && ident.Name == "false" {
-				return nil // Logged error + return false is acceptable (deny by default)
-			}
-			// Empty string with logging is also acceptable for security denial
-			if lit, ok := result.(*ast.BasicLit); ok && lit.Value == `""` {
-				return nil // Logged error + return "" is acceptable (denial pattern)
-			}
+// isLoggingCall checks if function name indicates a logging call
+func (r *ErrorMaskingRule) isLoggingCall(funcName string) bool {
+	return strings.Contains(funcName, "log") || strings.Contains(funcName, "Log") ||
+		strings.Contains(funcName, "Error") || strings.Contains(funcName, "Warn")
+}
+
+// isAcceptableDenialPattern checks if block is an acceptable logged denial pattern
+func (r *ErrorMaskingRule) isAcceptableDenialPattern(info blockAnalysis) bool {
+	if !info.hasLogging || info.returnStmt == nil {
+		return false
+	}
+	for _, result := range info.returnStmt.Results {
+		if ident, ok := result.(*ast.Ident); ok && ident.Name == "false" {
+			return true // Logged error + return false is acceptable
+		}
+		if lit, ok := result.(*ast.BasicLit); ok && lit.Value == `""` {
+			return true // Logged error + return "" is acceptable
 		}
 	}
+	return false
+}
 
-	// Check body for problematic returns
+// findProblematicReturn finds problematic returns in error handling block
+func (r *ErrorMaskingRule) findProblematicReturn(ctx *core.FileContext, stmt *ast.IfStmt, _ blockAnalysis) *core.Violation {
 	for _, bodyStmt := range stmt.Body.List {
 		retStmt, ok := bodyStmt.(*ast.ReturnStmt)
 		if !ok {
 			continue
 		}
-
-		// If return includes an error (fmt.Errorf, err, errors.New), it's proper handling
-		if r.returnIncludesError(retStmt) {
+		if r.returnIncludesError(retStmt) || r.isCommaOkReturnWithFalse(retStmt) {
 			continue
 		}
-
-		// Check if this is a comma-ok pattern (returns ..., false)
-		// Comma-ok with false as last value indicates failure, not masking
-		if r.isCommaOkReturnWithFalse(retStmt) {
-			continue
-		}
-
-		// Check for problematic returns without error
 		for _, result := range retStmt.Results {
 			if r.isProblematicReturn(result) {
 				pos := ctx.PositionFor(stmt)
@@ -351,7 +361,6 @@ func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, stmt *ast.IfS
 			}
 		}
 	}
-
 	return nil
 }
 
