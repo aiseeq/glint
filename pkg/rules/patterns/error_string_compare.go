@@ -42,12 +42,24 @@ func (r *ErrorStringCompareRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 		switch node := n.(type) {
 		case *ast.BinaryExpr:
 			if node.Op == token.EQL || node.Op == token.NEQ {
+				// Check for err.Error() == "string"
 				if r.isErrorStringCall(node.X) || r.isErrorStringCall(node.Y) {
 					pos := ctx.PositionFor(node)
 					v := r.CreateViolation(ctx.RelPath, pos.Line,
 						"Comparing error using .Error() string; use errors.Is or errors.As instead")
 					v.WithCode(ctx.GetLine(pos.Line))
 					v.WithSuggestion("Use errors.Is(err, targetErr) or errors.As(err, &target) for error comparison")
+					violations = append(violations, v)
+				}
+
+				// Check for errorMsg == "" or errMsg == "something"
+				if r.isErrorMessageVarComparison(node.X, node.Y) || r.isErrorMessageVarComparison(node.Y, node.X) {
+					pos := ctx.PositionFor(node)
+					v := r.CreateViolation(ctx.RelPath, pos.Line,
+						"Comparing error message variable with string; antipattern")
+					v.Severity = core.SeverityHigh
+					v.WithCode(ctx.GetLine(pos.Line))
+					v.WithSuggestion("Use typed errors and errors.Is() instead of comparing error message strings")
 					violations = append(violations, v)
 				}
 			}
@@ -97,6 +109,29 @@ func (r *ErrorStringCompareRule) isErrorStringCall(expr ast.Expr) bool {
 	name := ident.Name
 	return name == "err" || name == "error" || name == "e" ||
 		len(name) > 3 && name[len(name)-3:] == "Err"
+}
+
+// isErrorMessageVarComparison checks if identifier is errorMsg/errMsg compared with string
+func (r *ErrorStringCompareRule) isErrorMessageVarComparison(varExpr, strExpr ast.Expr) bool {
+	// Check if varExpr is an identifier that looks like error message variable
+	ident, ok := varExpr.(*ast.Ident)
+	if !ok {
+		return false
+	}
+
+	// Common error message variable names
+	name := ident.Name
+	isErrorMsgVar := name == "errorMsg" || name == "errMsg" || name == "errorMessage" ||
+		name == "errMessage" || name == "errorStr" || name == "errStr" ||
+		name == "errText" || name == "errorText"
+
+	if !isErrorMsgVar {
+		return false
+	}
+
+	// Check if strExpr is a string literal
+	_, isString := strExpr.(*ast.BasicLit)
+	return isString
 }
 
 // isStringsContainsErrorCall checks for strings.Contains(err.Error(), "...")

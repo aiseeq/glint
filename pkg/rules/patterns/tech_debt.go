@@ -77,6 +77,18 @@ func (r *TechDebtRule) initPatterns() {
 			description: "Broken feature marker",
 			suggestion:  "Fix the broken feature or remove it",
 		},
+		"ignore_errors": {
+			regex:       regexp.MustCompile(`(?i)//.*\b(ignore\s+errors?|игнорир\w*\s+ошибк|non.?critical|not\s+critical|can\s+ignore|safe\s+to\s+ignore)`),
+			severity:    core.SeverityCritical,
+			description: "Ignoring errors is dangerous - errors should be handled or logged",
+			suggestion:  "Handle the error properly: log it, return it, or document why it's safe to ignore",
+		},
+		"unfinished_work": {
+			regex:       regexp.MustCompile(`(?i)//\s*(WIP|work\s+in\s+progress|not\s+finished|incomplete|незаверш|в\s+работе)`),
+			severity:    core.SeverityMedium,
+			description: "Unfinished work marker",
+			suggestion:  "Complete the implementation or create a task",
+		},
 	}
 }
 
