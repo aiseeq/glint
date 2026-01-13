@@ -138,6 +138,12 @@ func (r *GoModernRule) checkCallExpr(ctx *core.FileContext, call *ast.CallExpr) 
 
 // checkIteratorCallback checks if a call matches an iterator callback pattern
 func (r *GoModernRule) checkIteratorCallback(ctx *core.FileContext, call *ast.CallExpr, sel *ast.SelectorExpr) *core.Violation {
+	// Only flag package-level function calls (e.g., filepath.Walk)
+	// Skip method calls on variables (e.g., router.Walk) - we can't change library APIs
+	if !r.isPackageLevelCall(sel) {
+		return nil
+	}
+
 	for _, iterName := range r.iteratorCallbacks {
 		if sel.Sel.Name != iterName {
 			continue
@@ -155,6 +161,28 @@ func (r *GoModernRule) checkIteratorCallback(ctx *core.FileContext, call *ast.Ca
 		return v
 	}
 	return nil
+}
+
+// isPackageLevelCall checks if selector is a package-level call (e.g., filepath.Walk)
+// vs a method call on a variable (e.g., router.Walk)
+func (r *GoModernRule) isPackageLevelCall(sel *ast.SelectorExpr) bool {
+	ident, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	// Package names are typically lowercase and short
+	// Variable names can be anything, but common patterns are:
+	// - router, db, client, handler, etc.
+	// Package names that have Walk-like functions:
+	// - filepath, path, ast, html, etc.
+	knownPackages := map[string]bool{
+		"filepath": true,
+		"path":     true,
+		"ast":      true,
+		"html":     true,
+		"template": true,
+	}
+	return knownPackages[ident.Name]
 }
 
 // hasCallbackArg checks if any argument to a call is a function literal

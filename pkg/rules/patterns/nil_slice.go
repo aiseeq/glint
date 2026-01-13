@@ -77,6 +77,12 @@ func (r *NilSliceRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			return true
 		}
 
+		// Skip any/interface{} types - nil check is correct for them
+		// Check both type inference and common naming patterns
+		if typeInferrer.IsAny(varName) || r.looksLikeAnyByName(varName) {
+			return true
+		}
+
 		// Use type inference to check if it's a slice
 		if !r.isSliceVar(varName, typeInferrer) {
 			return true
@@ -116,14 +122,41 @@ func (r *NilSliceRule) getVarName(expr ast.Expr) string {
 }
 
 func (r *NilSliceRule) isSliceVar(name string, inferrer *TypeInferrer) bool {
-	// First, check type inference
+	// First, check type inference for slices
+	// Note: type inferrer is file-level, not scope-aware
+	// So we rely primarily on heuristics for accuracy
 	if inferrer.IsSlice(name) {
+		// Double-check: if also marked as any, it's not a slice
+		if inferrer.IsAny(name) {
+			return false
+		}
 		return true
 	}
 
 	// Fallback to heuristic for cases type inference can't catch
 	// (e.g., struct fields from other packages)
 	return r.looksLikeSliceByName(name)
+}
+
+// looksLikeAnyByName checks if variable name suggests it's an any/interface{} type
+func (r *NilSliceRule) looksLikeAnyByName(name string) bool {
+	// Common parameter names for any/interface{} types
+	anyPatterns := map[string]bool{
+		"data":   true, // func Process(data any)
+		"v":      true, // func Marshal(v any)
+		"value":  true, // func Set(value any)
+		"val":    true, // func Store(val any)
+		"obj":    true, // func Clone(obj any)
+		"input":  true, // func Handle(input any)
+		"arg":    true, // func Call(arg any)
+		"param":  true, // func Invoke(param any)
+		"target": true, // func Copy(target any)
+		"src":    true, // func Convert(src any)
+		"dst":    true, // func Convert(dst any)
+		"x":      true, // func Dump(x any)
+		"i":      true, // interface{} receivers
+	}
+	return anyPatterns[name]
 }
 
 func (r *NilSliceRule) looksLikeSliceByName(name string) bool {

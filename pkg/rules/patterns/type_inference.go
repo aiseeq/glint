@@ -49,6 +49,15 @@ func (ti *TypeInferrer) IsTime(name string) bool {
 	return ok && info.IsTime
 }
 
+// IsAny checks if a variable is any/interface{}
+func (ti *TypeInferrer) IsAny(name string) bool {
+	info, ok := ti.varTypes[name]
+	if !ok {
+		return false
+	}
+	return info.TypeName == "any" || info.TypeName == "interface{}"
+}
+
 func (ti *TypeInferrer) collectTypes(file *ast.File) {
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -166,7 +175,7 @@ func (ti *TypeInferrer) analyzeTypeExpr(expr ast.Expr) TypeInfo {
 		name := t.Name
 		return TypeInfo{
 			IsError:  name == "error",
-			TypeName: name,
+			TypeName: name, // includes "any" which is alias for interface{}
 		}
 
 	case *ast.StarExpr:
