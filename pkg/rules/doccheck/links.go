@@ -18,10 +18,10 @@ func init() {
 // DocLinksRule detects broken or suspicious links in documentation
 type DocLinksRule struct {
 	*rules.BaseRule
-	urlPattern      *regexp.Regexp
-	fileRefPattern  *regexp.Regexp
-	pkgRefPattern   *regexp.Regexp
-	brokenURLHints  []string
+	urlPattern     *regexp.Regexp
+	fileRefPattern *regexp.Regexp
+	pkgRefPattern  *regexp.Regexp
+	brokenURLHints []string
 }
 
 // NewDocLinksRule creates the rule
@@ -40,10 +40,9 @@ func NewDocLinksRule() *DocLinksRule {
 		// Match package/function references like "see Package.Function"
 		pkgRefPattern: regexp.MustCompile(`(?:see|use|call)\s+([A-Z][a-zA-Z0-9]*(?:\.[A-Z][a-zA-Z0-9]*)?)`),
 		// URL patterns that often indicate broken links
+		// Note: localhost/127.0.0.1 are valid for local development documentation
 		brokenURLHints: []string{
 			"example.com",
-			"localhost",
-			"127.0.0.1",
 			"TODO",
 			"FIXME",
 			"XXX",
@@ -148,6 +147,22 @@ func (r *DocLinksRule) checkURL(ctx *core.FileContext, line int, url string) *co
 
 // checkFileRef checks if a file reference exists
 func (r *DocLinksRule) checkFileRef(ctx *core.FileContext, line int, fileRef string) *core.Violation {
+	// Common config file names that exist in standard locations
+	// These are often referenced without full path in documentation
+	wellKnownConfigs := map[string]bool{
+		"config.yaml":         true,
+		"config.yml":          true,
+		"config.json":         true,
+		".env":                true,
+		"Makefile":            true,
+		"Dockerfile":          true,
+		"docker-compose.yaml": true,
+		"docker-compose.yml":  true,
+	}
+	if wellKnownConfigs[fileRef] {
+		return nil // Skip well-known config files
+	}
+
 	// Try to resolve the file path relative to the current file
 	dir := filepath.Dir(ctx.Path)
 	fullPath := filepath.Join(dir, fileRef)

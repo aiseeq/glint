@@ -121,19 +121,41 @@ func (r *StringConcatRule) reportConcatViolation(ctx *core.FileContext, assign *
 }
 
 func (r *StringConcatRule) isStringConcat(expr ast.Expr) bool {
-	// Check for string literal
+	// Check for string literal - definitely string concat
 	if lit, ok := expr.(*ast.BasicLit); ok {
 		return lit.Kind == token.STRING
 	}
 
-	// Check for variable (could be string)
-	if _, ok := expr.(*ast.Ident); ok {
-		return true // Could be string, will have some false positives
+	// Check for variable - be conservative, only flag if it looks like string
+	if ident, ok := expr.(*ast.Ident); ok {
+		// Common numeric variable names - don't flag these
+		numericNames := map[string]bool{
+			"i": true, "j": true, "k": true, "n": true, "m": true,
+			"count": true, "total": true, "sum": true, "size": true,
+			"len": true, "length": true, "num": true, "idx": true,
+			"index": true, "offset": true, "pos": true, "x": true,
+			"y": true, "z": true, "d": true, "t": true, "v": true,
+			"result": true, "val": true, "value": true, "amount": true,
+		}
+		if numericNames[ident.Name] {
+			return false
+		}
+		// Only flag variables with string-like names
+		// This is conservative - better to miss some than have false positives
+		return false
 	}
 
-	// Check for binary expression with +
+	// Check for binary expression with + where at least one side is string literal
 	if binary, ok := expr.(*ast.BinaryExpr); ok {
-		return binary.Op == token.ADD
+		if binary.Op == token.ADD {
+			// Only flag if we can confirm string involvement
+			if lit, ok := binary.X.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				return true
+			}
+			if lit, ok := binary.Y.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				return true
+			}
+		}
 	}
 
 	return false
