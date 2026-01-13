@@ -3,6 +3,7 @@ package doccheck
 import (
 	"go/ast"
 	"strings"
+	"unicode"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -15,6 +16,7 @@ func init() {
 // DocCompletenessRule detects exported symbols without documentation
 type DocCompletenessRule struct {
 	*rules.BaseRule
+	skipTrivial bool // Skip self-documenting functions (getters, setters, etc.)
 }
 
 // NewDocCompletenessRule creates the rule
@@ -26,7 +28,21 @@ func NewDocCompletenessRule() *DocCompletenessRule {
 			"Detects exported types, functions, and methods without documentation comments",
 			core.SeverityLow,
 		),
+		skipTrivial: true, // By default, skip trivial/self-documenting functions
 	}
+}
+
+// Configure allows setting rule options
+func (r *DocCompletenessRule) Configure(settings map[string]any) error {
+	if err := r.BaseRule.Configure(settings); err != nil {
+		return err
+	}
+	if v, ok := settings["skip_trivial"]; ok {
+		if skipTrivial, ok := v.(bool); ok {
+			r.skipTrivial = skipTrivial
+		}
+	}
+	return nil
 }
 
 // AnalyzeFile checks for missing documentation
@@ -37,6 +53,11 @@ func (r *DocCompletenessRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 
 	// Skip test files
 	if ctx.IsTestFile() {
+		return nil
+	}
+
+	// Skip compatibility/alias files - they just re-export types
+	if r.skipTrivial && r.isCompatibilityFile(ctx.RelPath) {
 		return nil
 	}
 
@@ -55,6 +76,21 @@ func (r *DocCompletenessRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	return violations
 }
 
+// isCompatibilityFile checks if file is a compatibility/alias file
+func (r *DocCompletenessRule) isCompatibilityFile(path string) bool {
+	pathLower := strings.ToLower(path)
+	patterns := []string{
+		"_aliases", "_compat", "compatibility", "_deprecated",
+		"/aliases/", "/compat/",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(pathLower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 // checkGenDecl checks type and const/var declarations
 func (r *DocCompletenessRule) checkGenDecl(ctx *core.FileContext, decl *ast.GenDecl) []*core.Violation {
 	var violations []*core.Violation
@@ -62,6 +98,16 @@ func (r *DocCompletenessRule) checkGenDecl(ctx *core.FileContext, decl *ast.GenD
 	for _, spec := range decl.Specs {
 		switch s := spec.(type) {
 		case *ast.TypeSpec:
+			// Skip type aliases (type X = Y) - they're self-documenting
+			if r.skipTrivial && s.Assign.IsValid() {
+				continue
+			}
+
+			// Skip trivial type names
+			if r.skipTrivial && r.isTrivialTypeName(s.Name.Name) {
+				continue
+			}
+
 			if ast.IsExported(s.Name.Name) && !r.hasDoc(decl.Doc, s.Doc) {
 				pos := ctx.PositionFor(s.Name)
 				v := r.CreateViolation(ctx.RelPath, pos.Line,
@@ -81,6 +127,11 @@ func (r *DocCompletenessRule) checkGenDecl(ctx *core.FileContext, decl *ast.GenD
 			}
 
 			for _, name := range s.Names {
+				// Skip trivial constant names
+				if r.skipTrivial && r.isTrivialConstName(name.Name) {
+					continue
+				}
+
 				if ast.IsExported(name.Name) && !r.hasDoc(decl.Doc, s.Doc) {
 					pos := ctx.PositionFor(name)
 					v := r.CreateViolation(ctx.RelPath, pos.Line,
@@ -109,6 +160,11 @@ func (r *DocCompletenessRule) checkFuncDecl(ctx *core.FileContext, fn *ast.FuncD
 
 	// Skip main and init
 	if fn.Name.Name == "main" || fn.Name.Name == "init" {
+		return nil
+	}
+
+	// Skip trivial/self-documenting functions if enabled
+	if r.skipTrivial && r.isTrivialFunction(fn) {
 		return nil
 	}
 
@@ -145,6 +201,101 @@ func (r *DocCompletenessRule) checkFuncDecl(ctx *core.FileContext, fn *ast.FuncD
 	return violations
 }
 
+// isTrivialFunction checks if function is self-documenting and doesn't need explicit docs
+func (r *DocCompletenessRule) isTrivialFunction(fn *ast.FuncDecl) bool {
+	name := fn.Name.Name
+
+	// Standard interface methods - contract is well-known
+	standardMethods := map[string]bool{
+		"String": true, "Error": true, "Unwrap": true,
+		"MarshalJSON": true, "UnmarshalJSON": true,
+		"MarshalText": true, "UnmarshalText": true,
+		"MarshalBinary": true, "UnmarshalBinary": true,
+		"MarshalYAML": true, "UnmarshalYAML": true,
+		"Scan": true, "Value": true, // sql.Scanner, driver.Valuer
+		"ServeHTTP": true,                               // http.Handler
+		"Read":      true, "Write": true, "Close": true, // io interfaces
+		"Len": true, "Less": true, "Swap": true, // sort.Interface
+		"Reset": true, "Clone": true,
+	}
+	if standardMethods[name] {
+		return true
+	}
+
+	// Trivial prefixes - meaning is obvious from name
+	trivialPrefixes := []string{
+		"Get", "Set", // Getters/setters
+		"Is", "Has", "Can", "Should", "Will", // Boolean checks
+		"With", "Without", // Builder pattern
+		"New", "Create", "Make", "Build", // Constructors
+		"Must",                                    // Panic versions
+		"Parse", "Format", "Convert", "Transform", // Conversions
+		"Enable", "Disable", "Toggle", // Toggle operations
+		"Add", "Remove", "Delete", "Insert", // Collection/CRUD operations
+		"Update", "Save", "Upsert", // CRUD operations
+		"Find", "Search", "Query", "List", "Fetch", // Query operations
+		"Register", "Unregister", // Registration
+		"Assign", "Revoke", "Grant", // Permission operations
+		"Start", "Stop", "Pause", "Resume", // Lifecycle
+		"Open", "Close", // Resource management
+		"Lock", "Unlock", // Mutex operations
+		"Load", "Store", "Clear", "Reset", // State operations
+		"Inc", "Dec", "Count", // Counter operations
+		"Validate", "Check", "Verify", // Validation
+		"Send", "Receive", "Emit", "Broadcast", // Communication
+		"Subscribe", "Unsubscribe", "Publish", // Pub/sub
+		"Encode", "Decode", "Marshal", "Unmarshal", // Serialization
+		"Hash", "Sign", "Encrypt", "Decrypt", // Crypto
+		"Log", "Debug", "Info", "Warn", "Error", // Logging
+		"Handle", "Process", // Processing
+		"Init", "Setup", "Configure", "Apply", // Initialization
+		"Run", "Execute", "Invoke", "Call", // Execution
+		"Wait", "Await", "Block", // Synchronization
+		"Copy", "Clone", "Dup", // Copying
+		"Merge", "Split", "Join", // Data manipulation
+		"Filter", "Map", "Reduce", "Sort", // Functional
+		"Normalize", "Sanitize", "Clean", "Trim", // Data cleaning
+		"Render", "Display", "Show", "Print", // Output
+	}
+	for _, prefix := range trivialPrefixes {
+		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
+			// Ensure next char is uppercase (proper PascalCase)
+			nextChar := rune(name[len(prefix)])
+			if unicode.IsUpper(nextChar) {
+				return true
+			}
+		}
+	}
+
+	// Trivial suffixes
+	trivialSuffixes := []string{
+		"Handler", "Middleware", // HTTP - context in request
+		"Callback", "Hook", // Event handlers
+	}
+	for _, suffix := range trivialSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+
+	// Simple accessor methods (single word, returns receiver field)
+	// e.g., func (u *User) Name() string { return u.name }
+	if fn.Recv != nil && !strings.Contains(name, "_") {
+		// Method with simple name (no underscores) on a receiver
+		// These are typically field accessors
+		if fn.Type.Params != nil && len(fn.Type.Params.List) == 0 {
+			// No parameters - likely a getter
+			return true
+		}
+		if fn.Type.Params != nil && len(fn.Type.Params.List) == 1 {
+			// Single parameter - likely a setter
+			return true
+		}
+	}
+
+	return false
+}
+
 // hasDoc checks if there's documentation in either group or individual doc
 func (r *DocCompletenessRule) hasDoc(groupDoc, itemDoc *ast.CommentGroup) bool {
 	if groupDoc != nil && len(groupDoc.List) > 0 {
@@ -153,5 +304,97 @@ func (r *DocCompletenessRule) hasDoc(groupDoc, itemDoc *ast.CommentGroup) bool {
 	if itemDoc != nil && len(itemDoc.List) > 0 {
 		return true
 	}
+	return false
+}
+
+// isTrivialConstName checks if constant/variable name is self-documenting
+func (r *DocCompletenessRule) isTrivialConstName(name string) bool {
+	// Trivial suffixes - meaning is clear from name
+	trivialSuffixes := []string{
+		"Columns", "Fields", "Keys", // SQL/data column definitions
+		"Query", "SQL", "Statement", // SQL queries
+		"Timeout", "Interval", "Duration", "Delay", // Time values
+		"Limit", "Max", "Min", "Size", "Length", "Count", // Limits
+		"Port", "Host", "URL", "URI", "Path", "Addr", "Address", // Network
+		"Name", "Type", "Kind", "Format", "Pattern", "Regex", // Identifiers
+		"Prefix", "Suffix", "Separator", "Delimiter", // String patterns
+		"Header", "Key", "Value", "Token", "Secret", // HTTP/auth
+		"Version", "Code", "ID", // Identifiers
+		"Error", "Message", "Template", // Strings
+	}
+	for _, suffix := range trivialSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+
+	// Trivial prefixes
+	trivialPrefixes := []string{
+		"Err",        // Error variables (ErrNotFound, etc.)
+		"Max", "Min", // Limit constants
+		"Test",   // Test patterns/data
+		"Status", // Status codes
+	}
+	for _, prefix := range trivialPrefixes {
+		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
+			nextChar := rune(name[len(prefix)])
+			if unicode.IsUpper(nextChar) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// isTrivialTypeName checks if type name is self-documenting
+func (r *DocCompletenessRule) isTrivialTypeName(name string) bool {
+	// Trivial suffixes - name describes what it is
+	trivialSuffixes := []string{
+		"Interface",                                      // XxxInterface - it's an interface for Xxx
+		"Config", "Configuration", "Settings", "Options", // Configuration types
+		"Info", "Data", "Details", "Summary", // Data containers
+		"Request", "Response", // HTTP request/response types
+		"Input", "Output", "Params", "Args", // Function parameters
+		"Result", "Results", "Outcome", // Return types
+		"Error", "Err", // Error types
+		"Handler", "Middleware", "Controller", // HTTP handlers
+		"Repository", "Repo", "Store", "Storage", // Data access
+		"Service", "Manager", "Provider", "Factory", // Business logic
+		"Client", "Conn", "Connection", // Client types
+		"Model", "Entity", "Record", "Row", // Data models
+		"DTO", "VO", // Data transfer objects
+		"Spec", "Schema", "Definition", // Schema types
+		"Filter", "Criteria", "Query", // Query types
+		"Event", "Message", "Payload", // Messaging types
+		"State", "Status", "Context", // State types
+		"Mock", "Stub", "Fake", // Test doubles
+		"Impl", "Implementation", // Implementation types
+	}
+	for _, suffix := range trivialSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+
+	// Trivial prefixes
+	trivialPrefixes := []string{
+		"Base",     // BaseXxx - base class
+		"Abstract", // AbstractXxx - abstract class
+		"Default",  // DefaultXxx - default implementation
+		"Simple",   // SimpleXxx - simple implementation
+		"Basic",    // BasicXxx - basic implementation
+		"Internal", // InternalXxx - internal type
+		"Raw",      // RawXxx - raw/unprocessed type
+	}
+	for _, prefix := range trivialPrefixes {
+		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
+			nextChar := rune(name[len(prefix)])
+			if unicode.IsUpper(nextChar) {
+				return true
+			}
+		}
+	}
+
 	return false
 }
