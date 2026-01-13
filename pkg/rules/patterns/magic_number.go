@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"strconv"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -42,9 +43,41 @@ func (r *MagicNumberRule) Configure(settings map[string]any) error {
 	return nil
 }
 
+// shouldSkipFile checks if file should be skipped (config files have many legitimate constants)
+func (r *MagicNumberRule) shouldSkipFile(path string) bool {
+	pathLower := strings.ToLower(path)
+	skipPatterns := []string{
+		"config/",    // config directory
+		"/config/",   // config in subpath
+		"_config.go", // config files
+		"config.go",
+		"constants/",    // constants directory
+		"/constants/",   // constants in subpath
+		"_constants.go", // constants files
+		"constants.go",
+		"blockchain/",  // blockchain code often has chain IDs
+		"/blockchain/", // blockchain in subpath
+		"crypto2b/",    // crypto provider - chain IDs
+		"/crypto2b/",   // crypto in subpath
+		"chain/",       // chain-related code
+		"/chain/",      // chain in subpath
+	}
+	for _, pattern := range skipPatterns {
+		if strings.Contains(pathLower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 // AnalyzeFile checks for magic numbers
 func (r *MagicNumberRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() || !ctx.HasGoAST() || ctx.IsTestFile() {
+		return nil
+	}
+
+	// Skip config files - they legitimately contain many business constants
+	if r.shouldSkipFile(ctx.RelPath) {
 		return nil
 	}
 
@@ -63,6 +96,13 @@ func (r *MagicNumberRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 func (r *MagicNumberRule) checkLiteral(ctx *core.FileContext, n ast.Node) *core.Violation {
 	lit, ok := n.(*ast.BasicLit)
 	if !ok || lit.Kind != token.INT {
+		return nil
+	}
+
+	// Skip hex, octal, binary literals (they already have semantic context)
+	if strings.HasPrefix(lit.Value, "0x") || strings.HasPrefix(lit.Value, "0X") ||
+		strings.HasPrefix(lit.Value, "0o") || strings.HasPrefix(lit.Value, "0O") ||
+		strings.HasPrefix(lit.Value, "0b") || strings.HasPrefix(lit.Value, "0B") {
 		return nil
 	}
 
@@ -92,7 +132,16 @@ func (r *MagicNumberRule) shouldSkipValue(ctx *core.FileContext, lit *ast.BasicL
 	if r.isAcceptableValue(value) {
 		return true
 	}
-	return r.isArrayContext(ctx.GoAST, lit)
+	if r.isArrayContext(ctx.GoAST, lit) {
+		return true
+	}
+	if r.isTimeDurationContext(ctx.GoAST, lit) {
+		return true
+	}
+	if r.isComparisonContext(ctx.GoAST, lit) {
+		return true
+	}
+	return r.isVarDeclContext(ctx.GoAST, lit)
 }
 
 func (r *MagicNumberRule) isInConstDecl(file *ast.File, lit *ast.BasicLit) bool {
@@ -116,15 +165,28 @@ func (r *MagicNumberRule) isInConstDecl(file *ast.File, lit *ast.BasicLit) bool 
 func (r *MagicNumberRule) isAcceptableValue(value int64) bool {
 	// Common acceptable magic numbers
 	acceptable := map[int64]bool{
-		2:    true, // Common for doubling
-		10:   true, // Decimal base
-		16:   true, // Hex base
-		32:   true, // Common size
-		64:   true, // Common size
-		100:  true, // Percentage
-		1000: true, // Common multiplier
-		1024: true, // KB/KiB
-		8:    true, // Bits in byte
+		// Small numbers (often used for counts, retries, limits)
+		2: true, 3: true, 4: true, 5: true, 6: true, 7: true,
+		// Numeric bases and bit operations
+		8: true, 10: true, 16: true, 32: true, 64: true, 128: true, 256: true, 512: true,
+		// Time-related (hours, minutes, seconds)
+		12: true, 15: true, 18: true, 20: true, 24: true, 30: true, 42: true, 45: true,
+		50: true, 60: true, 90: true, 120: true, 180: true, 300: true, 360: true,
+		// Seconds in hour/day
+		3600: true, 86400: true,
+		// Common limits and sizes
+		100: true, 200: true, 250: true, 500: true, 1000: true, 1024: true,
+		2000: true, 2048: true, 4096: true, 5000: true, 8192: true, 10000: true,
+		// HTTP status codes
+		201: true, 204: true, 301: true, 302: true, 304: true,
+		400: true, 401: true, 403: true, 404: true, 405: true, 409: true, 422: true, 429: true,
+		501: true, 502: true, 503: true, 504: true,
+		// Year/date related
+		365: true, 366: true,
+		// Large limits (microseconds, nanoseconds, large buffers)
+		1000000: true, 1048576: true,
+		// Port and network related
+		1025: true, 65535: true,
 	}
 	return acceptable[value]
 }
@@ -145,6 +207,88 @@ func (r *MagicNumberRule) isArrayContext(file *ast.File, lit *ast.BasicLit) bool
 			}
 		case *ast.SliceExpr:
 			if node.Low == lit || node.High == lit || node.Max == lit {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// isTimeDurationContext checks if number is used with time.Duration (e.g., 24 * time.Hour)
+func (r *MagicNumberRule) isTimeDurationContext(file *ast.File, lit *ast.BasicLit) bool {
+	found := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		binExpr, ok := n.(*ast.BinaryExpr)
+		if !ok || binExpr.Op != token.MUL {
+			return true
+		}
+
+		// Check if lit is part of this multiplication
+		if binExpr.X != lit && binExpr.Y != lit {
+			return true
+		}
+
+		// Check if the other operand is time.Something
+		var other ast.Expr
+		if binExpr.X == lit {
+			other = binExpr.Y
+		} else {
+			other = binExpr.X
+		}
+
+		if sel, ok := other.(*ast.SelectorExpr); ok {
+			if ident, ok := sel.X.(*ast.Ident); ok {
+				if ident.Name == "time" {
+					// time.Hour, time.Minute, time.Second, etc.
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// isComparisonContext checks if number is used in comparison (len(x) > N, value < N, etc.)
+func (r *MagicNumberRule) isComparisonContext(file *ast.File, lit *ast.BasicLit) bool {
+	found := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		binExpr, ok := n.(*ast.BinaryExpr)
+		if !ok {
+			return true
+		}
+
+		// Check comparison operators
+		switch binExpr.Op {
+		case token.LSS, token.GTR, token.LEQ, token.GEQ, token.EQL, token.NEQ:
+			// Check if lit is part of this comparison
+			if binExpr.X == lit || binExpr.Y == lit {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// isVarDeclContext checks if number is in variable declaration with descriptive name
+func (r *MagicNumberRule) isVarDeclContext(file *ast.File, lit *ast.BasicLit) bool {
+	found := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		// Check var declarations
+		valueSpec, ok := n.(*ast.ValueSpec)
+		if !ok {
+			return true
+		}
+
+		// Check if lit is in this value spec
+		for _, val := range valueSpec.Values {
+			if val == lit {
+				// Variable has a name, so the number has context
 				found = true
 				return false
 			}
