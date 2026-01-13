@@ -2,6 +2,11 @@ package deadcode
 
 import (
 	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -30,11 +35,11 @@ func NewUnusedSymbolsRule() *UnusedSymbolsRule {
 
 // symbolInfo tracks a declared symbol
 type symbolInfo struct {
-	name    string
-	kind    string // "func", "type", "const", "var"
-	line    int
-	node    ast.Node
-	usages  int
+	name   string
+	kind   string // "func", "type", "const", "var"
+	line   int
+	node   ast.Node
+	usages int
 }
 
 // AnalyzeFile checks for unused symbols
@@ -62,7 +67,12 @@ func (r *UnusedSymbolsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 		}
 	}
 
-	// Second pass: count usages
+	// If no symbols to check, return early
+	if len(symbols) == 0 {
+		return nil
+	}
+
+	// Second pass: count usages in current file
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		if ident, ok := n.(*ast.Ident); ok {
 			if sym, exists := symbols[ident.Name]; exists {
@@ -74,6 +84,10 @@ func (r *UnusedSymbolsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 		}
 		return true
 	})
+
+	// Third pass: check usages in sibling files (same package)
+	// This catches cross-file usage within the same Go package
+	r.checkSiblingFileUsages(ctx, symbols)
 
 	// Generate violations for unused symbols
 	var violations []*core.Violation
@@ -90,6 +104,50 @@ func (r *UnusedSymbolsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	}
 
 	return violations
+}
+
+// checkSiblingFileUsages checks for symbol usages in other files of the same package
+func (r *UnusedSymbolsRule) checkSiblingFileUsages(ctx *core.FileContext, symbols map[string]*symbolInfo) {
+	// Get the directory containing this file
+	dir := filepath.Dir(ctx.Path)
+
+	// List all .go files in the directory
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	currentFile := filepath.Base(ctx.Path)
+	fset := token.NewFileSet()
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		// Skip current file, test files, and non-Go files
+		if name == currentFile || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+
+		// Parse sibling file
+		siblingPath := filepath.Join(dir, name)
+		siblingAST, err := parser.ParseFile(fset, siblingPath, nil, 0)
+		if err != nil {
+			continue
+		}
+
+		// Check for usages of our symbols in this sibling file
+		ast.Inspect(siblingAST, func(n ast.Node) bool {
+			if ident, ok := n.(*ast.Ident); ok {
+				if sym, exists := symbols[ident.Name]; exists {
+					sym.usages++
+				}
+			}
+			return true
+		})
+	}
 }
 
 // collectFunc collects function declarations
