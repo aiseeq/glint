@@ -28,10 +28,10 @@ type CrossFileDuplicateRule struct {
 	minBlockSize int
 
 	// Shared state for cross-file detection
-	mu           sync.Mutex
-	blockHashes  map[string][]BlockLocation // hash -> locations
-	reported     map[string]bool            // hash -> already reported
-	initialized  bool
+	mu          sync.Mutex
+	blockHashes map[string][]BlockLocation // hash -> locations
+	reported    map[string]bool            // hash -> already reported
+	initialized bool
 }
 
 // NewCrossFileDuplicateRule creates the rule
@@ -209,6 +209,21 @@ func (r *CrossFileDuplicateRule) isTrivialLine(line string) bool {
 		return true
 	}
 
+	// Skip type switch patterns - commonly duplicated for import cycle prevention
+	// These are often intentionally duplicated when extracting would cause import cycles
+	if strings.HasPrefix(line, "switch ") && strings.Contains(line, ".(type)") {
+		return true
+	}
+	if strings.HasPrefix(line, "case ") && strings.Contains(line, ":") {
+		return true
+	}
+	if strings.HasPrefix(line, "return ") && strings.Contains(line, ", true") {
+		return true
+	}
+	if strings.HasPrefix(line, "return ") && strings.Contains(line, ", false") {
+		return true
+	}
+
 	trivial := []string{
 		"{", "}", "(", ")", "[", "]",
 		"else {", "} else {", "} else if",
@@ -217,6 +232,7 @@ func (r *CrossFileDuplicateRule) isTrivialLine(line string) bool {
 		"return err", "return result", "return v",
 		"if err != nil {", "if !ok {", "if ok {",
 		"defer func() {", "}()",
+		`return "", false`, `return "", true`,
 	}
 
 	for _, t := range trivial {
