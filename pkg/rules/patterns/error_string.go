@@ -31,25 +31,34 @@ func NewErrorStringRule() *ErrorStringRule {
 			core.SeverityLow,
 		),
 		acronyms: map[string]bool{
-			"API":   true,
-			"URL":   true,
-			"HTTP":  true,
-			"HTTPS": true,
-			"JSON":  true,
-			"XML":   true,
-			"SQL":   true,
-			"EOF":   true,
-			"ID":    true,
-			"UUID":  true,
-			"JWT":   true,
-			"TLS":   true,
-			"SSL":   true,
-			"DNS":   true,
-			"TCP":   true,
-			"UDP":   true,
-			"IP":    true,
-			"OS":    true,
-			"IO":    true,
+			// Standard tech acronyms
+			"API": true, "URL": true, "HTTP": true, "HTTPS": true,
+			"JSON": true, "XML": true, "SQL": true, "EOF": true,
+			"ID": true, "UUID": true, "JWT": true, "JWKS": true,
+			"TLS": true, "SSL": true, "DNS": true, "TCP": true,
+			"UDP": true, "IP": true, "OS": true, "IO": true,
+			"DI": true, "CSRF": true, "SSE": true, "MFA": true,
+			"RPC": true, "gRPC": true, "REST": true, "SOAP": true,
+			// Email/SMTP protocol
+			"SMTP": true, "MAIL": true, "RCPT": true, "DATA": true,
+			"POP3": true, "IMAP": true,
+			// SQL keywords (often appear in database error messages)
+			"SELECT": true, "INSERT": true, "UPDATE": true, "DELETE": true,
+			"WHERE": true, "FROM": true, "JOIN": true, "CREATE": true,
+			"DROP": true, "ALTER": true, "INDEX": true, "TABLE": true,
+			// Crypto/blockchain
+			"ETH": true, "BTC": true, "USDC": true, "USDT": true,
+			"ERC": true, "NFT": true, "HD": true, "BIP": true,
+			// Severity markers (intentionally capitalized)
+			"CRITICAL": true, "SECURITY": true, "WARNING": true,
+			"ERROR": true, "FATAL": true, "IMPORTANT": true,
+			// Common English words that start errors (acceptable)
+			"User": true, "No": true, "Not": true, "The": true,
+			"This": true, "An": true, "A": true, "Invalid": true,
+			"Missing": true, "Unknown": true, "Failed": true,
+			"Cannot": true, "Could": true, "Unable": true,
+			"List": true, "Search": true, "Get": true, "Set": true,
+			"INTERFACE": true, "WRAPPER": true, "INTERNAL": true,
 		},
 	}
 }
@@ -145,19 +154,117 @@ func (r *ErrorStringRule) startsWithCapital(s string) bool {
 		return false
 	}
 
-	firstRune := rune(s[0])
+	// Get first rune properly (handles UTF-8 including Cyrillic)
+	runes := []rune(s)
+	firstRune := runes[0]
+
+	// Only check Latin letters for capitalization
+	// Non-Latin scripts (Cyrillic, etc.) have different conventions
+	// and error messages in these languages are valid
+	if !unicode.Is(unicode.Latin, firstRune) {
+		return false
+	}
+
 	if !unicode.IsUpper(firstRune) {
 		return false
 	}
 
-	// Check if it's a known acronym
+	// Check if it's a known acronym or allowed starter word
 	firstWord := strings.Split(s, " ")[0]
 	firstWord = strings.TrimRight(firstWord, ":")
-	if r.acronyms[strings.ToUpper(firstWord)] {
+	// Check both as-is (for common words like "User") and uppercase (for acronyms)
+	if r.acronyms[firstWord] || r.acronyms[strings.ToUpper(firstWord)] {
+		return false
+	}
+
+	// Check if it looks like a Go identifier (PascalCase function/type name)
+	// e.g., "ValidationService", "GetAdminByEmail", "UnifiedConfig"
+	if r.isPascalCaseIdentifier(firstWord) {
+		return false
+	}
+
+	// Check if it looks like an error code (UPPER_SNAKE_CASE)
+	// e.g., "CRYPTO2B_CONFIG_LOAD_FAILED:", "SECURITY_ERROR:"
+	if r.isErrorCode(firstWord) {
 		return false
 	}
 
 	return true
+}
+
+// isErrorCode checks if word looks like an error code (UPPER_SNAKE_CASE or UPPER-KEBAB-CASE)
+func (r *ErrorStringRule) isErrorCode(word string) bool {
+	if len(word) < 3 {
+		return false
+	}
+
+	// Remove trailing colon if present
+	word = strings.TrimSuffix(word, ":")
+
+	// Must contain underscore or hyphen for error code patterns
+	// Supports: SNAKE_CASE, KEBAB-CASE (like APPEND-ONLY)
+	if !strings.Contains(word, "_") && !strings.Contains(word, "-") {
+		return false
+	}
+
+	// All letters must be uppercase
+	for _, ch := range word {
+		if unicode.IsLetter(ch) && !unicode.IsUpper(ch) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isPascalCaseIdentifier checks if word looks like a Go identifier (PascalCase)
+func (r *ErrorStringRule) isPascalCaseIdentifier(word string) bool {
+	if len(word) < 2 {
+		return false
+	}
+
+	runes := []rune(word)
+
+	// Must start with uppercase
+	if !unicode.IsUpper(runes[0]) {
+		return false
+	}
+
+	// Check for PascalCase pattern: has lowercase after uppercase, or another uppercase
+	hasLower := false
+	hasMultipleCaps := false
+	for i := 1; i < len(runes); i++ {
+		if unicode.IsLower(runes[i]) {
+			hasLower = true
+		}
+		if unicode.IsUpper(runes[i]) {
+			hasMultipleCaps = true
+		}
+	}
+
+	// PascalCase: either "ValidationService" (has both upper and lower)
+	// or has multiple capitals like "GetURL" or ends with known suffix
+	if hasLower && hasMultipleCaps {
+		return true
+	}
+
+	// Check for common Go type/function suffixes
+	suffixes := []string{"Service", "Config", "Manager", "Handler", "Repository", "Interface", "Error", "Exception", "Client", "Server", "Factory", "Builder", "Provider", "Validator", "Controller", "Module", "Dependencies"}
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(word, suffix) {
+			return true
+		}
+	}
+
+	// Check for common Go function prefixes
+	prefixes := []string{"Get", "Set", "New", "Create", "Delete", "Update", "Find", "Is", "Has", "Can", "Must", "Should", "Validate", "Parse", "Format", "Convert", "Build", "Make", "Init", "Load", "Save", "Read", "Write", "Open", "Close", "Start", "Stop", "Run", "Execute", "Process", "Handle", "Register", "Unregister", "Add", "Remove", "Assign"}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(word, prefix) && len(word) > len(prefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (r *ErrorStringRule) endsWithPunctuation(s string) bool {
