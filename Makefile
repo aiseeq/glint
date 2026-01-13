@@ -16,7 +16,12 @@ build: ## Build the binary
 	@mkdir -p $(BUILD_DIR)
 	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/glint
 
-install: ## Install to GOPATH/bin
+install: build ## Install to ~/bin (recommended)
+	@mkdir -p $(HOME)/bin
+	@cp $(BUILD_DIR)/$(BINARY_NAME) $(HOME)/bin/$(BINARY_NAME)
+	@echo "Installed to $(HOME)/bin/$(BINARY_NAME)"
+
+install-gopath: ## Install to GOPATH/bin
 	go install $(LDFLAGS) ./cmd/glint
 
 clean: ## Remove build artifacts
