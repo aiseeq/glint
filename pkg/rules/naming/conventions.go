@@ -16,6 +16,8 @@ func init() {
 // NamingConventionsRule detects Go naming convention violations
 type NamingConventionsRule struct {
 	*rules.BaseRule
+	// Known acronyms that are correctly written in ALL_CAPS
+	knownAcronyms map[string]bool
 }
 
 // NewNamingConventionsRule creates the rule
@@ -27,6 +29,42 @@ func NewNamingConventionsRule() *NamingConventionsRule {
 			"Detects Go naming convention violations (stuttering, underscore, ALL_CAPS)",
 			core.SeverityLow,
 		),
+		knownAcronyms: map[string]bool{
+			// Standard Go acronyms (per Effective Go)
+			"ID": true, "URL": true, "URI": true, "HTTP": true, "HTTPS": true,
+			"API": true, "JSON": true, "XML": true, "HTML": true, "CSS": true,
+			"SQL": true, "RPC": true, "TCP": true, "UDP": true, "IP": true,
+			"TLS": true, "SSL": true, "SSH": true, "DNS": true,
+			"EOF": true, "UUID": true, "UID": true, "GID": true,
+			"CPU": true, "GPU": true, "RAM": true, "ROM": true,
+			"OS": true, "IO": true, "UI": true, "CLI": true, "GUI": true,
+			"OK": true, "ACL": true, "ASCII": true, "UTF8": true,
+			// Auth/crypto
+			"JWT": true, "JWK": true, "JWKS": true, "JWE": true,
+			"RSA": true, "AES": true, "SHA": true, "MD5": true,
+			"HMAC": true, "ECDSA": true, "PKCS": true,
+			"MFA": true, "OTP": true, "TOTP": true, "HOTP": true,
+			"CSRF": true, "XSS": true, "CORS": true,
+			// Database
+			"JSONB": true, "BSON": true, "BLOB": true, "CLOB": true,
+			"DDL": true, "DML": true, "CRUD": true,
+			// Blockchain
+			"ETH": true, "BTC": true, "NFT": true, "ERC": true,
+			"USDC": true, "USDT": true, "DAI": true,
+			// Protocols
+			"SMTP": true, "IMAP": true, "POP3": true,
+			"FTP": true, "SFTP": true, "SCP": true,
+			"GRPC": true, "REST": true, "SOAP": true,
+			"SSE": true, "WS": true, "WSS": true,
+			// Other common
+			"YAML": true, "TOML": true, "CSV": true, "TSV": true,
+			"PDF": true, "PNG": true, "JPG": true, "JPEG": true, "GIF": true,
+			"SVG": true, "MP3": true, "MP4": true,
+			"AWS": true, "GCP": true, "CDN": true,
+			"SLA": true, "KPI": true, "ROI": true,
+			"DI": true, "IOC": true, "ORM": true, "DTO": true, "DAO": true,
+			"FIFO": true, "LIFO": true, "LRU": true,
+		},
 	}
 }
 
@@ -63,7 +101,8 @@ func (r *NamingConventionsRule) checkTypeName(ctx *core.FileContext, spec *ast.T
 	name := spec.Name.Name
 
 	// Check for stuttering (package name repeated in type name)
-	if r.stutters(name, pkgName) {
+	// Only check exported types - unexported are internal and stuttering is acceptable
+	if ast.IsExported(name) && r.stutters(name, pkgName) {
 		pos := ctx.PositionFor(spec.Name)
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
 			"Type name stutters with package name: "+pkgName+"."+name)
@@ -74,7 +113,8 @@ func (r *NamingConventionsRule) checkTypeName(ctx *core.FileContext, spec *ast.T
 	}
 
 	// Check for ALL_CAPS (should be PascalCase)
-	if r.isAllCaps(name) && len(name) > 2 {
+	// Skip known acronyms which are correctly ALL_CAPS
+	if r.isAllCaps(name) && len(name) > 2 && !r.knownAcronyms[name] {
 		pos := ctx.PositionFor(spec.Name)
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
 			"Type name uses ALL_CAPS instead of PascalCase: "+name)
