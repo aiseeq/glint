@@ -2,6 +2,7 @@ package architecture
 
 import (
 	"go/ast"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -62,6 +63,13 @@ func (r *SolidISPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			return true
 		}
 
+		// Skip config-related interfaces - they are legitimately large
+		// as they provide typed access to all configuration values
+		interfaceName := typeSpec.Name.Name
+		if r.isConfigInterface(ctx.RelPath, interfaceName) {
+			return true
+		}
+
 		methodCount := 0
 		if interfaceType.Methods != nil {
 			for _, method := range interfaceType.Methods.List {
@@ -90,4 +98,25 @@ func (r *SolidISPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	})
 
 	return violations
+}
+
+// isConfigInterface checks if an interface is a configuration interface
+// Config interfaces are legitimately large - they provide typed getters for all config values
+func (r *SolidISPRule) isConfigInterface(filePath, interfaceName string) bool {
+	// Check file path for config-related patterns
+	pathLower := strings.ToLower(filePath)
+	if strings.Contains(pathLower, "config") {
+		return true
+	}
+
+	// Check interface name patterns
+	nameLower := strings.ToLower(interfaceName)
+	configPatterns := []string{"config", "configuration", "settings", "options"}
+	for _, pattern := range configPatterns {
+		if strings.Contains(nameLower, pattern) {
+			return true
+		}
+	}
+
+	return false
 }
