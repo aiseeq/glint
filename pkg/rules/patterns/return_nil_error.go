@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -51,6 +52,11 @@ func (r *ReturnNilErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 			return true
 		}
 
+		// Skip valid (nil, nil) patterns
+		if r.isValidNilNilPattern(fn) {
+			return true
+		}
+
 		// Find return statements with (nil, nil)
 		ast.Inspect(fn.Body, func(inner ast.Node) bool {
 			ret, ok := inner.(*ast.ReturnStmt)
@@ -74,6 +80,66 @@ func (r *ReturnNilErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 	})
 
 	return violations
+}
+
+// isValidNilNilPattern checks if (nil, nil) return is a valid Go pattern
+func (r *ReturnNilErrorRule) isValidNilNilPattern(fn *ast.FuncDecl) bool {
+	funcName := fn.Name.Name
+	funcNameLower := strings.ToLower(funcName)
+
+	// 1. driver.Valuer interface: Value() returns (nil, nil) for SQL NULL
+	// This is the standard Go database pattern
+	if funcName == "Value" && r.hasDriverValueReturn(fn) {
+		return true
+	}
+
+	// 2. "not found" semantics: Get*, Find*, Lookup*, Search*, Existing*
+	// Return (nil, nil) when item doesn't exist (vs error for actual failures)
+	notFoundPrefixes := []string{"get", "find", "lookup", "search", "fetch", "load", "existing"}
+	for _, prefix := range notFoundPrefixes {
+		if strings.HasPrefix(funcNameLower, prefix) {
+			return true
+		}
+	}
+
+	// 3. "no data, no error" semantics for processing functions
+	// Return (nil, nil) when input is nil/empty (no data to process, not an error)
+	noDataPrefixes := []string{"parse", "convert", "transform", "serialize", "deserialize", "decode", "encode", "marshal", "unmarshal"}
+	for _, prefix := range noDataPrefixes {
+		if strings.HasPrefix(funcNameLower, prefix) {
+			return true
+		}
+	}
+
+	// 4. Functions ending with "FromString", "FromBytes", etc.
+	// These commonly return (nil, nil) for empty input
+	fromSuffixes := []string{"fromstring", "frombytes", "fromjson", "fromxml"}
+	for _, suffix := range fromSuffixes {
+		if strings.HasSuffix(funcNameLower, suffix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasDriverValueReturn checks if function returns (driver.Value, error)
+func (r *ReturnNilErrorRule) hasDriverValueReturn(fn *ast.FuncDecl) bool {
+	if fn.Type.Results == nil || len(fn.Type.Results.List) != 2 {
+		return false
+	}
+
+	// Check first return type is driver.Value
+	firstResult := fn.Type.Results.List[0]
+	sel, ok := firstResult.Type.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	ident, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return ident.Name == "driver" && sel.Sel.Name == "Value"
 }
 
 // hasErrorReturn checks if function has error as last return type
