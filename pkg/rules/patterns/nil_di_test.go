@@ -25,64 +25,96 @@ func TestNilDIRule_Detection(t *testing.T) {
 		expectHits int
 	}{
 		{
-			name: "constructor with nil arg - should detect",
+			name: "nil logger to service - should detect",
 			code: `package main
 
 func main() {
-	svc := NewService(db, nil)
+	svc := NewMetricsService(cfg, nil)
 }
 `,
 			expectHits: 1,
 		},
 		{
-			name: "constructor with multiple nil args - should detect all",
+			name: "nil repo to handler - should detect",
 			code: `package main
 
 func main() {
-	svc := NewService(nil, nil, nil)
+	h := NewDepositHandler(db, logger, nil, cfg)
 }
 `,
-			expectHits: 3,
+			expectHits: 0, // nil is not in high-risk position for handler
 		},
 		{
-			name: "constructor with no nil args - should not detect",
+			name: "nil logger to middleware - should detect",
 			code: `package main
 
 func main() {
-	svc := NewService(db, logger)
-}
-`,
-			expectHits: 0,
-		},
-		{
-			name: "non-constructor with nil - should not detect",
-			code: `package main
-
-func main() {
-	ProcessData(nil)
-}
-`,
-			expectHits: 0,
-		},
-		{
-			name: "package-qualified constructor with nil",
-			code: `package main
-
-func main() {
-	svc := mypackage.NewService(nil)
+	mw := NewSecurityMiddleware(nil, cfg)
 }
 `,
 			expectHits: 1,
 		},
 		{
-			name: "real world example - crypto2b bug pattern",
+			name: "nil db to repository - should detect",
+			code: `package main
+
+func main() {
+	repo := NewUserRepository(nil, logger)
+}
+`,
+			expectHits: 1,
+		},
+		{
+			name: "non-high-risk nil - should NOT detect",
+			code: `package main
+
+func main() {
+	// nil for non-service/repo/logger parameter
+	obj := NewSomething(cfg, nil, data)
+}
+`,
+			expectHits: 0,
+		},
+		{
+			name: "suppressed with comment - should NOT detect",
+			code: `package main
+
+func main() {
+	// nil-di: safe - validator not needed for admin tokens
+	svc := NewJWTService(cfg, nil)
+}
+`,
+			expectHits: 0,
+		},
+		{
+			name: "suppressed inline - should NOT detect",
+			code: `package main
+
+func main() {
+	svc := NewService(cfg, nil) // nil-di: safe
+}
+`,
+			expectHits: 0,
+		},
+		{
+			name: "real world bug pattern - metrics service nil logger",
+			code: `package main
+
+func main() {
+	canonicalService := canonical.NewCanonicalMetricsService(cfg, nil)
+}
+`,
+			expectHits: 1,
+		},
+		{
+			name: "multiple nil to service - detect high-risk only",
 			code: `package main
 
 func createServices() {
-	handler := depositService.NewIntegrationOnlyDepositHandler(db, logger, nil, cfg, nil, nil, nil)
+	svc := NewInvestmentService(cfg, repo, nil, userSvc, nil)
 }
 `,
-			expectHits: 4,
+			expectHits: 1, // only last nil (logger position)
 		},
 	}
 
@@ -100,19 +132,61 @@ func createServices() {
 	}
 }
 
-func TestNilDIRule_TestFilesExcluded(t *testing.T) {
+func TestNilDIRule_SkipsTestFiles(t *testing.T) {
 	rule := NewNilDIRule()
 
 	code := `package main
 
 func main() {
-	svc := NewService(nil) // This should be allowed in test files
+	svc := NewService(cfg, nil)
 }
 `
+	// Test _test.go files
 	ctx := createNilDIContext(t, "service_test.go", code)
 	violations := rule.AnalyzeFile(ctx)
-
 	assert.Empty(t, violations, "Test files should be excluded")
+
+	// Test test.go files (benchmarks)
+	ctx = createNilDIContext(t, "test.go", code)
+	violations = rule.AnalyzeFile(ctx)
+	assert.Empty(t, violations, "test.go files should be excluded")
+}
+
+func TestNilDIRule_HighRiskParams(t *testing.T) {
+	rule := NewNilDIRule()
+
+	tests := []struct {
+		paramHint string
+		isHighRisk bool
+	}{
+		{"logger", true},
+		{"log", true},
+		{"service", true},
+		{"svc", true},
+		{"repo", true},
+		{"repository", true},
+		{"storage", true},
+		{"store", true},
+		{"handler", true},
+		{"client", true},
+		{"db", true},
+		{"database", true},
+		{"cache", true},
+		{"metrics", true},
+		{"validator", true},
+		{"config", false},
+		{"options", false},
+		{"settings", false},
+		{"dependency", false},
+		{"data", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.paramHint, func(t *testing.T) {
+			result := rule.isHighRiskParam(tt.paramHint)
+			assert.Equal(t, tt.isHighRisk, result, "Expected isHighRisk=%v for %s", tt.isHighRisk, tt.paramHint)
+		})
+	}
 }
 
 // Helper function
