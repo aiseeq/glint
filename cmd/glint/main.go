@@ -39,9 +39,9 @@ var (
 	flagDebug       bool
 	flagNoColor     bool
 	// Fix command flags
-	flagDryRun    bool
-	flagForce     bool
-	flagFixRule   string
+	flagDryRun  bool
+	flagForce   bool
+	flagFixRule string
 )
 
 func main() {

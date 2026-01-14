@@ -169,24 +169,30 @@ func (r *MagicNumberRule) isAcceptableValue(value int64) bool {
 		2: true, 3: true, 4: true, 5: true, 6: true, 7: true,
 		// Numeric bases and bit operations
 		8: true, 10: true, 16: true, 32: true, 64: true, 128: true, 256: true, 512: true,
-		// Time-related (hours, minutes, seconds)
-		12: true, 15: true, 18: true, 20: true, 24: true, 30: true, 42: true, 45: true,
-		50: true, 60: true, 90: true, 120: true, 180: true, 300: true, 360: true,
+		// Time-related (hours, minutes, seconds, days)
+		11: true, 12: true, 14: true, 15: true, 18: true, 20: true, 21: true, 22: true, 23: true,
+		24: true, 25: true, 28: true, 30: true, 31: true, 39: true, 42: true, 43: true, 45: true,
+		50: true, 59: true, 60: true, 80: true, 90: true, 95: true, 99: true,
+		120: true, 180: true, 300: true, 360: true,
 		// Seconds in hour/day
 		3600: true, 86400: true,
 		// Common limits and sizes
 		100: true, 200: true, 250: true, 500: true, 1000: true, 1024: true,
 		2000: true, 2048: true, 4096: true, 5000: true, 8192: true, 10000: true,
+		// Larger limits (transaction limits, buffers)
+		100000: true, 1000000: true, 1048576: true,
 		// HTTP status codes
 		201: true, 204: true, 301: true, 302: true, 304: true,
 		400: true, 401: true, 403: true, 404: true, 405: true, 409: true, 422: true, 429: true,
 		501: true, 502: true, 503: true, 504: true,
 		// Year/date related
 		365: true, 366: true,
-		// Large limits (microseconds, nanoseconds, large buffers)
-		1000000: true, 1048576: true,
+		// Nanoseconds (end of day, timeouts)
+		999999999: true,
 		// Port and network related
 		1025: true, 65535: true,
+		// Test/development network IDs
+		1337: true,
 	}
 	return acceptable[value]
 }

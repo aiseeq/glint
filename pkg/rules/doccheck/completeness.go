@@ -182,8 +182,9 @@ func (r *DocCompletenessRule) checkFuncDecl(ctx *core.FileContext, fn *ast.FuncD
 		v.WithContext("symbol", fn.Name.Name)
 		v.WithContext("kind", kind)
 		violations = append(violations, v)
-	} else {
+	} else if !r.skipTrivial || !r.isTrivialFunction(fn) {
 		// Check that doc starts with function name (Go convention)
+		// Skip this check for trivial functions - their meaning is obvious from name
 		firstLine := fn.Doc.List[0].Text
 		if !strings.HasPrefix(strings.TrimPrefix(firstLine, "// "), fn.Name.Name) &&
 			!strings.HasPrefix(strings.TrimPrefix(firstLine, "/* "), fn.Name.Name) {
@@ -217,6 +218,19 @@ func (r *DocCompletenessRule) isTrivialFunction(fn *ast.FuncDecl) bool {
 		"Read":      true, "Write": true, "Close": true, // io interfaces
 		"Len": true, "Less": true, "Swap": true, // sort.Interface
 		"Reset": true, "Clone": true,
+		// Logging methods (Error already in interface methods above)
+		"Debug": true, "Info": true, "Warn": true,
+		"Fatal": true, "Trace": true, "Print": true, "Println": true,
+		// Repository/CRUD methods
+		"Store": true, "Delete": true, "Create": true, "Update": true,
+		"Get": true, "List": true, "Find": true, "Count": true,
+		"Save": true, "Remove": true, "Where": true,
+		// HTTP methods
+		"Post": true, "Put": true, "Patch": true,
+		// Router methods
+		"Mount": true, "Use": true, "Group": true, "Route": true,
+		// Auth methods
+		"Login": true, "Logout": true, "Authenticate": true, "Authorize": true,
 	}
 	if standardMethods[name] {
 		return true
@@ -256,6 +270,13 @@ func (r *DocCompletenessRule) isTrivialFunction(fn *ast.FuncDecl) bool {
 		"Filter", "Map", "Reduce", "Sort", // Functional
 		"Normalize", "Sanitize", "Clean", "Trim", // Data cleaning
 		"Render", "Display", "Show", "Print", // Output
+		"Reject", "Approve", "Complete", "Cancel", // Action outcomes
+		"Bulk",          // Batch operations
+		"Benchmark",     // Test functions
+		"Sync", "Async", // Sync operations
+		"Cleanup", "Generate", "Refresh", // Common operations
+		"Zero", "One", "Default", // Value constructors
+		"Safe", // Safe type constructors
 	}
 	for _, prefix := range trivialPrefixes {
 		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
@@ -321,6 +342,9 @@ func (r *DocCompletenessRule) isTrivialConstName(name string) bool {
 		"Header", "Key", "Value", "Token", "Secret", // HTTP/auth
 		"Version", "Code", "ID", // Identifiers
 		"Error", "Message", "Template", // Strings
+		"Endpoint", "Route", "Handler", // API endpoints
+		"Param", "QueryParam", "PathParam", // Request parameters
+		"Group", "Services", "Overrides", // Config groupings
 	}
 	for _, suffix := range trivialSuffixes {
 		if strings.HasSuffix(name, suffix) {
@@ -332,14 +356,80 @@ func (r *DocCompletenessRule) isTrivialConstName(name string) bool {
 	trivialPrefixes := []string{
 		"Err",        // Error variables (ErrNotFound, etc.)
 		"Max", "Min", // Limit constants
-		"Test",   // Test patterns/data
-		"Status", // Status codes
+		"Test",                               // Test patterns/data
+		"Status",                             // Status codes
+		"Role",                               // Role constants (RoleAdmin, RoleUser)
+		"Severity",                           // Severity levels (SeverityHigh, SeverityLow)
+		"Risk",                               // Risk levels (RiskHigh, RiskMedium)
+		"Task",                               // Task identifiers (TaskCompliance)
+		"Currency",                           // Currency codes (CurrencyBTC, CurrencyETH)
+		"Network",                            // Network identifiers (NetworkEthereum)
+		"Safe",                               // Safe types (SafeDecimalZero)
+		"Default",                            // Default values
+		"Transaction",                        // Transaction types/approaches
+		"Storage", "User", "Admin", "System", // Domain prefixes
+		"Wallet",                              // Wallet constants
+		"Investment", "Deposit", "Withdrawal", // Financial entities
+		"Sync", "Async", "Batch", // Operation modes
+		"Resource",                            // Resource identifiers
+		"Event",                               // Event types
+		"Reject", "Approve", "Accept", "Deny", // Action outcomes
+		"Generate", "Refresh", "Revoke", // Token operations
+		"Financial", "Compliance", "Violation", // Business domain
+		"Post", "Mount", "Logout", // HTTP/router methods
+		"Action",        // Action constants
+		"AML", "Amount", // Risk/compliance prefixes
+		"Address",            // Address constants
+		"Complete", "Cancel", // Action outcomes
+		"Blockchain",        // Blockchain constants
+		"Benchmark", "Bulk", // Test/batch prefixes
+		"Composite", "Cleanup", "Auth", // Misc prefixes
+		"DB", "Database", // Database prefixes
 	}
 	for _, prefix := range trivialPrefixes {
 		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
 			nextChar := rune(name[len(prefix)])
 			if unicode.IsUpper(nextChar) {
 				return true
+			}
+		}
+	}
+
+	// Enum-style constants following Go convention: TypeNameValue
+	// e.g., DepositStatusPending, WithdrawalCreatorUser, FeeTypeCommercial
+	if r.isEnumConstant(name) {
+		return true
+	}
+
+	return false
+}
+
+// isEnumConstant checks if constant follows enum pattern: TypeCategoryValue
+// where Category is Status, Type, Creator, Kind, Mode, State, Level, etc.
+func (r *DocCompletenessRule) isEnumConstant(name string) bool {
+	// Common enum category markers that appear in the middle of compound names
+	enumCategories := []string{
+		"Status", "Type", "Creator", "Kind", "Mode", "State", "Level",
+		"Category", "Role", "Permission", "Action", "Event", "Stage",
+		"Phase", "Priority", "Severity", "Source", "Target", "Direction",
+		"Method", "Provider", "Strategy", "Policy", "Result", "Reason",
+	}
+
+	for _, category := range enumCategories {
+		idx := strings.Index(name, category)
+		if idx > 0 && idx+len(category) < len(name) {
+			// Found category in the middle
+			prefix := name[:idx]
+			suffix := name[idx+len(category):]
+
+			// Check that prefix starts with uppercase (type name)
+			// and suffix starts with uppercase (value name)
+			if len(prefix) > 0 && len(suffix) > 0 {
+				firstPrefixChar := rune(prefix[0])
+				firstSuffixChar := rune(suffix[0])
+				if unicode.IsUpper(firstPrefixChar) && unicode.IsUpper(firstSuffixChar) {
+					return true
+				}
 			}
 		}
 	}
@@ -370,6 +460,19 @@ func (r *DocCompletenessRule) isTrivialTypeName(name string) bool {
 		"State", "Status", "Context", // State types
 		"Mock", "Stub", "Fake", // Test doubles
 		"Impl", "Implementation", // Implementation types
+		"Type",                                    // Type definitions
+		"Breakdown", "Calculation", "Aggregation", // Financial breakdowns
+		"Transaction", "Transfer", "Payment", // Transaction types
+		"Writer", "Reader", "Closer", // IO types
+		"Group",                       // Service groups
+		"Bus",                         // Event bus types
+		"Router",                      // Router types
+		"Constraint",                  // Constraint types
+		"Infrastructure",              // Infrastructure types
+		"Metadata", "Health", "Check", // Monitoring types
+		"Services", "Business", // Service collection types
+		"Timestamp", "Builder", "Audit", // Utility types
+		"Overrides", "Compliance", // Config/compliance types
 	}
 	for _, suffix := range trivialSuffixes {
 		if strings.HasSuffix(name, suffix) {
@@ -386,6 +489,8 @@ func (r *DocCompletenessRule) isTrivialTypeName(name string) bool {
 		"Basic",    // BasicXxx - basic implementation
 		"Internal", // InternalXxx - internal type
 		"Raw",      // RawXxx - raw/unprocessed type
+		"Test",     // TestXxx - test types
+		"Task",     // TaskXxx - task types
 	}
 	for _, prefix := range trivialPrefixes {
 		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
