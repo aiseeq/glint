@@ -130,7 +130,7 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 		"Info", "Warn", "Debug", "Fatal", "Trace", // logging methods
 		"Cleanup", "Shutdown", "Dispose", // lifecycle
 		"HealthCheck", "ReadyCheck", "LiveCheck", // health checks
-		"Middleware", "Handler", // HTTP middleware (context in request)
+		"Middleware", "Handler", "HandlerFunc", // HTTP middleware (context in request)
 		"Do", "Get", "Post", "Put", "Patch", "Delete", "Head", "Options", // HTTP methods
 		"Validate", "Validates", // validation (no I/O)
 		"Where", "Select", "OrderBy", "GroupBy", "Limit", "Offset", "Set", // SQL builder
@@ -139,8 +139,29 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 		"And", "Or", "Not", // SQL conditions
 		"Register", "Unregister", "Subscribe", "Unsubscribe", // event patterns
 		"Use", "With", "Version", // utility methods
-		"Has", "Float", "Sub", // utility methods
+		"Has", "Float", "Sub", "Mul", "Div", "Add", "Neg", "Abs", // math/value type methods
+		"LessThan", "GreaterThan", "Equal", "Cmp", "Compare", // comparison methods
 		"Revoke", "Retrieve", "Resolve", "Rollback", // operations
+		"Keys", "Values", "Entries", "Items", // collection accessors
+		"Authenticate", "Authorize", // auth methods (context often in struct)
+		"HTTPStatusCode", "StatusCode", // status helpers
+		"Coalesce", "Min", "Max", // utility functions
+		"Ptr", "Ref", // pointer helpers
+		"Contains", "Float64", "Float32", "Int64", "Int32", // exact type helpers
+		"Deactivate", "Increment", "Decrement", // state operations
+		"Logout", "Login", // auth operations (context often in struct)
+		"Group", "Mount", "NotFound", "MethodNotAllowed", // router methods
+		"Select", "Handle", // handler methods
+		"Connect", "Disconnect", "Reconnect", // connection methods
+		"DSN", "URL", "URI", // config getters
+		"Count", "Length", "Size", "Len", // size methods
+		"Health", "Liveness", "Readiness", // health check handlers (context in request)
+		"Initialize", "InitializeDefaultContainer", "InitializeEnterpriseErrorSystem", // initialization functions
+		"ConfigurationNotLoaded", "QueryExecutionFailed", "HTTPRequestFailed", // error message methods
+		"RevokeAllSessions",         // session management
+		"Enable", "Disable", "Name", // middleware control methods
+		"CommitTransaction", "RollbackTransaction", // transaction methods
+		"Calculate", // calculation methods
 	}
 
 	for _, special := range specialNames {
@@ -191,12 +212,33 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 		"SLA", "Monitoring", "Logging", "Log", // observability
 		"Status", "Resource", "Start", "Stop", "Span", // lifecycle/tracing
 		"Required", "Optional", "Default", // field helpers
+		"List", "Enumerate", "Iterate", // listing operations
+		"Broadcast", "Emit", "Notify", "Dispatch", "Publish", // event operations
+		"Determine", "Resolve", "Decide", // decision helpers
+		"Clear", "Wipe", "Purge", // cleanup operations
+		"First", "Last", "Min", "Max", // accessor helpers
+		"Record", "Track", "Measure", // metrics (often context in struct)
+		"Finish", "Complete", "Finalize", // completion operations
+		"Name", "Type", "Kind", // metadata accessors
+		"Enforce",                // permission/security enforcement
+		"Increment", "Decrement", // counter operations
+		"Logout", "Login", // auth operations
+		"Select", "Choose", "Pick", // selection operations
+		"Error",                           // error helpers
+		"Health", "Liveness", "Readiness", // health checks (context in request)
+		"Cleanup", "Teardown", // cleanup operations
+		"Common", "Shared", "Global", // utility accessors
+		"Business", "Domain", // domain logic (often pure)
+		"Blockchain", "Detailed", // specific handlers
+		"LessThan", "GreaterThan", "EqualTo", // comparison methods
+		"Compound", // calculation prefixes
 	}
 
 	for _, prefix := range purePrefixes {
 		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
 			nextChar := rune(name[len(prefix)])
-			if unicode.IsUpper(nextChar) || prefix == name {
+			// Allow uppercase letter or digit after prefix (e.g., Float64, Int32)
+			if unicode.IsUpper(nextChar) || unicode.IsDigit(nextChar) || prefix == name {
 				return true
 			}
 		}
@@ -226,6 +268,9 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 		"Strict",                                     // validation variants
 		"WithTrace", "Structured", "WithCorrelation", // logging variants
 		"Success", "Error", "Access", // response/status suffixes
+		"Exists", "Value", "Path", // JSONB/JSON query helpers
+		"Time", "Duration", "Retry", // timing helpers
+		"Event", "Session", "Token", // domain objects
 	}
 
 	for _, suffix := range pureSuffixes {

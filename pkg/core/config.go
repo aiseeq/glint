@@ -10,9 +10,9 @@ import (
 
 // Config represents the glint configuration
 type Config struct {
-	Version  int             `yaml:"version"`
-	Extends  string          `yaml:"extends,omitempty"`
-	Settings SettingsConfig  `yaml:"settings"`
+	Version    int                       `yaml:"version"`
+	Extends    string                    `yaml:"extends,omitempty"`
+	Settings   SettingsConfig            `yaml:"settings"`
 	Categories map[string]CategoryConfig `yaml:"categories"`
 }
 
@@ -25,18 +25,18 @@ type SettingsConfig struct {
 
 // CategoryConfig contains category-specific settings
 type CategoryConfig struct {
-	Enabled          bool                    `yaml:"enabled"`
-	SeverityOverride string                  `yaml:"severity_override,omitempty"`
-	Settings         map[string]any  `yaml:"settings,omitempty"`
-	Rules            map[string]RuleConfig   `yaml:"rules,omitempty"`
+	Enabled          bool                  `yaml:"enabled"`
+	SeverityOverride string                `yaml:"severity_override,omitempty"`
+	Settings         map[string]any        `yaml:"settings,omitempty"`
+	Rules            map[string]RuleConfig `yaml:"rules,omitempty"`
 }
 
 // RuleConfig contains rule-specific settings
 type RuleConfig struct {
-	Enabled    bool          `yaml:"enabled"`
-	Severity   string        `yaml:"severity,omitempty"`
+	Enabled    bool           `yaml:"enabled"`
+	Severity   string         `yaml:"severity,omitempty"`
 	Settings   map[string]any `yaml:"settings,omitempty"`
-	Exceptions []Exception   `yaml:"exceptions,omitempty"`
+	Exceptions []Exception    `yaml:"exceptions,omitempty"`
 }
 
 // Exception defines when a rule should be skipped
