@@ -33,12 +33,12 @@ func GetUser() {}`,
 			wantViolations: 1,
 		},
 		{
-			name: "localhost URL",
+			name: "localhost URL - ok for local dev docs",
 			code: `package main
 
 // Server runs on http://localhost:8080
 func Server() {}`,
-			wantViolations: 1,
+			wantViolations: 0, // localhost valid for local development docs
 		},
 		{
 			name: "placeholder with TODO",
@@ -73,13 +73,13 @@ func Parse() {}`,
 			wantViolations: 0,
 		},
 		{
-			name: "multiple issues",
+			name: "one issue - example.com only",
 			code: `package main
 
 // Connect to http://localhost:3000
 // See https://example.com/docs for more.
 func Connect() {}`,
-			wantViolations: 2,
+			wantViolations: 1, // localhost ok, example.com flagged
 		},
 		{
 			name: "no URLs - ok",
@@ -91,12 +91,12 @@ func GetUser(id string) {}`,
 			wantViolations: 0,
 		},
 		{
-			name: "IP address URL",
+			name: "IP address URL - ok for local dev docs",
 			code: `package main
 
 // Access at http://127.0.0.1:8080/api
 func Access() {}`,
-			wantViolations: 1,
+			wantViolations: 0, // 127.0.0.1 valid for local development docs
 		},
 	}
 

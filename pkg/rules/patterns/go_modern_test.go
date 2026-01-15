@@ -128,7 +128,7 @@ func main() {
 			wantViolations: 2,
 		},
 		{
-			name: "callback iteration - Walk with func literal",
+			name: "method call Walk - not flagged (can't change library APIs)",
 			code: `package main
 
 type Tree struct{}
@@ -141,10 +141,10 @@ func main() {
 		return true
 	})
 }`,
-			wantViolations: 1,
+			wantViolations: 0, // Method calls skipped - can't change library APIs
 		},
 		{
-			name: "callback iteration - ForEach with func literal",
+			name: "method call ForEach - not flagged (can't change library APIs)",
 			code: `package main
 
 type List struct{}
@@ -157,7 +157,20 @@ func main() {
 		println(s)
 	})
 }`,
-			wantViolations: 1,
+			wantViolations: 0, // Method calls skipped - can't change library APIs
+		},
+		{
+			name: "filepath.Walk - package level call should be flagged",
+			code: `package main
+
+import "path/filepath"
+
+func main() {
+	filepath.Walk("/tmp", func(path string, info any, err error) error {
+		return nil
+	})
+}`,
+			wantViolations: 1, // Package-level call - suggest Go 1.23 iterator
 		},
 		{
 			name: "callback iteration - no func literal",
