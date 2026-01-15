@@ -11,11 +11,11 @@ func TestFallbackReturnRule(t *testing.T) {
 	rule := NewFallbackReturnRule()
 
 	tests := []struct {
-		name       string
-		code       string
-		filename   string
-		wantCount  int
-		wantMsg    string
+		name      string
+		code      string
+		filename  string
+		wantCount int
+		wantMsg   string
 	}{
 		{
 			name: "return testProvider on error",
@@ -48,13 +48,13 @@ func GetService() Service {
 			wantMsg:   "Fallback return",
 		},
 		{
-			name: "return defaultConfig on error",
+			name: "return fallbackConfig on error",
 			code: `package main
 
 func LoadConfig() *Config {
 	cfg, err := readConfig()
 	if err != nil {
-		return defaultConfig
+		return fallbackConfig
 	}
 	return cfg
 }`,
@@ -223,7 +223,7 @@ function getService(): Service {
 function getConfig() {
   const cfg = loadConfig();
   if (!cfg) {
-    return cfg ?? defaultConfig;
+    return cfg ?? fallbackConfig;
   }
   return cfg;
 }`,
