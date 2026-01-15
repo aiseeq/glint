@@ -196,8 +196,39 @@ func (r *AnonInterfaceDegradationRule) isDegradationReturn(ret *ast.ReturnStmt) 
 		return false
 	}
 
+	// Check if any result is an explicit error (fmt.Errorf, errors.New)
+	// This is NOT a degradation - it's proper error handling
+	for _, result := range ret.Results {
+		if r.isExplicitError(result) {
+			return false
+		}
+	}
+
 	for _, result := range ret.Results {
 		if r.isMagicValue(result) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isExplicitError checks if expression is an explicit error (fmt.Errorf, errors.New, etc.)
+func (r *AnonInterfaceDegradationRule) isExplicitError(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+
+	funcName := core.ExtractFullFunctionName(call)
+	// Check for common error constructors
+	errorFuncs := []string{
+		"fmt.Errorf", "errors.New", "errors.Wrap", "errors.Wrapf",
+		"Errorf", "New", "Wrap", "Wrapf",
+	}
+
+	for _, fn := range errorFuncs {
+		if strings.HasSuffix(funcName, fn) || funcName == fn {
 			return true
 		}
 	}
