@@ -386,3 +386,80 @@ func getValue() (int, error) {
 		})
 	}
 }
+
+func TestFallbackReturnRule_LoggingException(t *testing.T) {
+	rule := NewFallbackReturnRule()
+
+	tests := []struct {
+		name      string
+		code      string
+		filename  string
+		wantCount int
+	}{
+		{
+			name: "fallback with logger.Warn - should not flag",
+			code: `package main
+
+func getValue() int {
+	val, err := parseValue()
+	if err != nil {
+		logger.Warn("failed to parse, using zero: %v", err)
+		val = 0
+	}
+	return val
+}`,
+			filename:  "parser.go",
+			wantCount: 0,
+		},
+		{
+			name: "fallback with s.logger.Error - should not flag",
+			code: `package main
+
+func (s *Service) getValue() int {
+	val, err := s.parseValue()
+	if err != nil {
+		s.logger.Error("parse failed: %v", err)
+		val = 0
+	}
+	return val
+}`,
+			filename:  "service.go",
+			wantCount: 0,
+		},
+		{
+			name: "fallback without logging - should flag",
+			code: `package main
+
+func getValue() int {
+	val, err := parseValue()
+	if err != nil {
+		val = 0
+	}
+	return val
+}`,
+			filename:  "parser.go",
+			wantCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := core.NewParser()
+			ctx := core.NewFileContext(tt.filename, ".", []byte(tt.code), nil)
+			
+			fset, astFile, err := parser.ParseGoFile(tt.filename, []byte(tt.code))
+			if err == nil {
+				ctx.SetGoAST(fset, astFile)
+			}
+
+			violations := rule.AnalyzeFile(ctx)
+
+			if len(violations) != tt.wantCount {
+				t.Errorf("got %d violations, want %d", len(violations), tt.wantCount)
+				for _, v := range violations {
+					t.Logf("  violation: %s at line %d", v.Message, v.Line)
+				}
+			}
+		})
+	}
+}
