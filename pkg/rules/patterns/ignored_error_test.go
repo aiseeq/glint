@@ -60,11 +60,12 @@ func foo() {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := core.NewFileContext("/test/file.go", "/test", []byte(tt.code), core.DefaultConfig())
+			// Use path without "/test" to avoid being skipped
+			ctx := core.NewFileContext("/src/file.go", "/src", []byte(tt.code), core.DefaultConfig())
 
 			// Parse Go AST
 			parser := core.NewParser()
-			fset, astFile, err := parser.ParseGoFile("/test/file.go", []byte(tt.code))
+			fset, astFile, err := parser.ParseGoFile("/src/file.go", []byte(tt.code))
 			if err == nil {
 				ctx.SetGoAST(fset, astFile)
 			}
