@@ -712,34 +712,46 @@ func (r *FallbackReturnRule) looksLikeFallbackAssignment(expr ast.Expr, ctx *cor
 	return false
 }
 
-// hasLegitimateComment checks if previous lines have comments explaining legitimate use
+// hasLegitimateComment checks if lines have comments explaining legitimate use
+// Checks inline comments on current line and standalone comments on previous lines
 func (r *FallbackReturnRule) hasLegitimateComment(lines []string, lineIdx int) bool {
 	if lineIdx < 0 || lineIdx >= len(lines) {
 		return false
 	}
 
-	// Check up to 3 lines before for comments
-	for i := lineIdx; i >= 0 && i > lineIdx-3; i-- {
+	legitimatePatterns := []string{
+		"optional", "non-critical", "best effort", "graceful",
+		"using 0", "using zero", "baseline", "explicit",
+		"intentional", "acceptable", "allow", "permit",
+		"разрешаем", "устанавливаем", "базовые",
+	}
+
+	// Check current line for inline comment
+	currentLine := lines[lineIdx]
+	if commentIdx := strings.Index(currentLine, "//"); commentIdx >= 0 {
+		commentLower := strings.ToLower(currentLine[commentIdx:])
+		for _, pattern := range legitimatePatterns {
+			if strings.Contains(commentLower, pattern) {
+				return true
+			}
+		}
+	}
+
+	// Check up to 3 lines before for standalone comments
+	for i := lineIdx - 1; i >= 0 && i > lineIdx-4; i-- {
 		line := strings.TrimSpace(lines[i])
 		if strings.HasPrefix(line, "//") {
 			lineLower := strings.ToLower(line)
-			// Legitimate patterns: optional, non-critical, best effort, graceful
-			if strings.Contains(lineLower, "optional") ||
-				strings.Contains(lineLower, "non-critical") ||
-				strings.Contains(lineLower, "best effort") ||
-				strings.Contains(lineLower, "graceful") ||
-				strings.Contains(lineLower, "using 0") ||
-				strings.Contains(lineLower, "using zero") ||
-				strings.Contains(lineLower, "baseline") ||
-				strings.Contains(lineLower, "explicit") ||
-				strings.Contains(lineLower, "intentional") ||
-				strings.Contains(lineLower, "acceptable") {
-				return true
+			for _, pattern := range legitimatePatterns {
+				if strings.Contains(lineLower, pattern) {
+					return true
+				}
 			}
 		}
 	}
 	return false
 }
+
 
 // hasLoggingStatement checks if there's a logging statement in the if block before the assignment
 func (r *FallbackReturnRule) hasLoggingStatement(ifStmt *ast.IfStmt, ctx *core.FileContext) bool {
