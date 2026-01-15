@@ -51,19 +51,26 @@ func GetUser(id string) {}`,
 			wantViolations: 0,
 		},
 		{
-			name: "undocumented exported function",
+			name: "trivial function GetUser - ok without doc",
 			code: `package main
 
 func GetUser(id string) {}`,
-			wantViolations: 1,
+			wantViolations: 0, // Get* prefix is trivial/self-documenting
 		},
 		{
-			name: "documented function wrong format",
+			name: "trivial function with doc - format not checked",
 			code: `package main
 
 // Returns a user by ID.
 func GetUser(id string) {}`,
-			wantViolations: 1, // Doc doesn't start with function name
+			wantViolations: 0, // Trivial functions skip doc format check
+		},
+		{
+			name: "non-trivial function without doc",
+			code: `package main
+
+func TransmogrifyCacheEntries(id string) {}`,
+			wantViolations: 1, // Non-trivial name requires doc
 		},
 		{
 			name: "main and init - ok without doc",
@@ -74,21 +81,28 @@ func init() {}`,
 			wantViolations: 0,
 		},
 		{
-			name: "documented method - ok",
+			name: "trivial type and method - ok without doc",
 			code: `package main
 
 type Service struct{}
 
 // Start starts the service.
 func (s *Service) Start() {}`,
-			wantViolations: 1, // Type is undocumented
+			wantViolations: 0, // Service suffix and Start prefix are trivial
 		},
 		{
-			name: "undocumented exported const",
+			name: "trivial const MaxSize - ok without doc",
 			code: `package main
 
 const MaxSize = 100`,
-			wantViolations: 1,
+			wantViolations: 0, // Max* prefix is trivial/self-documenting
+		},
+		{
+			name: "non-trivial const without doc",
+			code: `package main
+
+const MagicThreshold = 42`,
+			wantViolations: 1, // Non-trivial name requires doc
 		},
 		{
 			name: "documented const - ok",
@@ -124,13 +138,22 @@ func getUser(id string) {}`,
 			wantViolations: 0,
 		},
 		{
-			name: "interface without doc",
+			name: "trivial interface Reader - ok without doc",
 			code: `package main
 
 type Reader interface {
 	Read() error
 }`,
-			wantViolations: 1,
+			wantViolations: 0, // Reader suffix is trivial/self-documenting
+		},
+		{
+			name: "non-trivial interface without doc",
+			code: `package main
+
+type Orchestrator interface {
+	Coordinate() error
+}`,
+			wantViolations: 1, // Non-trivial name requires doc
 		},
 		{
 			name: "documented interface - ok",

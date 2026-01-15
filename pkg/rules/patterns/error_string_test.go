@@ -59,11 +59,18 @@ var err = errors.New("API not available")`,
 			expectedCount: 0,
 		},
 		{
-			name: "fmt.Errorf capitalized - should flag",
+			name: "fmt.Errorf with Failed - OK (allowed starter)",
 			code: `package main
 import "fmt"
 var err = fmt.Errorf("Failed to connect: %w", err)`,
-			expectedCount: 1,
+			expectedCount: 0, // "Failed" is now an allowed starter word
+		},
+		{
+			name: "fmt.Errorf truly capitalized - should flag",
+			code: `package main
+import "fmt"
+var err = fmt.Errorf("Badly configured: %w", err)`,
+			expectedCount: 1, // "Badly" is not an allowed starter
 		},
 		{
 			name: "fmt.Errorf lowercase - OK",
