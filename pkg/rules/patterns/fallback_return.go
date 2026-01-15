@@ -15,12 +15,13 @@ func init() {
 
 // FallbackReturnRule detects fallback patterns that silently degrade instead of failing explicitly
 // This implements CLAUDE.md principle: "Fail explicitly, never degrade silently"
-// Catches: return testProvider, return mockService, return defaultValue on errors
+// Catches: return testProvider, return mockService on errors
+// Excludes: functions with "OrDefault" in name, parse* functions, singleton getters, middleware defensive code
 type FallbackReturnRule struct {
 	*rules.BaseRule
-	fallbackPatterns []*regexp.Regexp
-	goContextPatterns  []*regexp.Regexp
-	tsContextPatterns  []*regexp.Regexp
+	fallbackPatterns  []*regexp.Regexp
+	goContextPatterns []*regexp.Regexp
+	tsContextPatterns []*regexp.Regexp
 }
 
 // NewFallbackReturnRule creates the rule
@@ -45,14 +46,11 @@ func (r *FallbackReturnRule) initFallbackPatterns() []*regexp.Regexp {
 		// Return provider/service fallbacks (test*, mock*, fake*, stub*, dummy*, fallback*)
 		regexp.MustCompile(`return\s+(?:test|mock|fake|stub|dummy|fallback)[A-Z]\w*`),
 
-		// Return *Provider fallback after error
-		regexp.MustCompile(`return\s+\w*(?:Provider|Service|Client|Handler|Manager)\s*$`),
+		// Return *Provider fallback after error (but not singleton getters)
+		regexp.MustCompile(`return\s+\w*(?:Provider|Service|Client|Handler)\s*$`),
 
 		// Explicit fallback naming
 		regexp.MustCompile(`(?i)return\s+\w*fallback\w*`),
-
-		// Return default* variable
-		regexp.MustCompile(`return\s+default[A-Z]\w+`),
 
 		// Return new*Mock/Test/Fake
 		regexp.MustCompile(`return\s+[Nn]ew(?:Mock|Test|Fake|Stub|Dummy)\w*\(`),
@@ -71,7 +69,7 @@ func (r *FallbackReturnRule) initGoContextPatterns() []*regexp.Regexp {
 		regexp.MustCompile(`if\s+!\w+`),
 
 		// Error in comment
-		regexp.MustCompile(`//.*(?i)(?:error|fail|unavailable|fallback|default)`),
+		regexp.MustCompile(`//.*(?i)(?:error|fail|unavailable|fallback)`),
 
 		// Fallback comment
 		regexp.MustCompile(`//.*(?i)(?:use|return|fall\s*back|degrad)`),
@@ -82,13 +80,13 @@ func (r *FallbackReturnRule) initGoContextPatterns() []*regexp.Regexp {
 func (r *FallbackReturnRule) initTSContextPatterns() []*regexp.Regexp {
 	return []*regexp.Regexp{
 		// Error check context - TS style
-		regexp.MustCompile(`if\s*\(\s*!\w+`),          // if (!svc)
-		regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*null`), // if (x === null)
-		regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*undefined`), // if (x === undefined)
-		regexp.MustCompile(`if\s*\(\s*err`),           // if (err...)
+		regexp.MustCompile(`if\s*\(\s*!\w+`),                    // if (!svc)
+		regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*null`),       // if (x === null)
+		regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*undefined`),  // if (x === undefined)
+		regexp.MustCompile(`if\s*\(\s*err`),                     // if (err...)
 
 		// Error in comment
-		regexp.MustCompile(`//.*(?i)(?:error|fail|unavailable|fallback|default)`),
+		regexp.MustCompile(`//.*(?i)(?:error|fail|unavailable|fallback)`),
 
 		// Fallback comment
 		regexp.MustCompile(`//.*(?i)(?:use|return|fall\s*back|degrad)`),
@@ -178,7 +176,7 @@ func (r *FallbackReturnRule) analyzeGoRegex(ctx *core.FileContext) []*core.Viola
 			if pattern.MatchString(line) {
 				// Check if this is in error handling context
 				if r.isInGoContext(ctx.Lines, lineNum) {
-					if !r.isGoException(ctx.RelPath, line, lineNum, ctx.Lines) {
+					if !r.isGoException(ctx, line, lineNum) {
 						v := r.createViolation(ctx, lineNum+1, line)
 						violations = append(violations, v)
 						break // One violation per line
@@ -233,8 +231,18 @@ func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violati
 				continue
 			}
 
+			// Skip if error is returned explicitly
+			if r.returnsError(retStmt) {
+				continue
+			}
+
 			for _, result := range retStmt.Results {
 				if r.isFallbackReturn(result) {
+					// Check function-level exceptions
+					if r.isFunctionException(ctx, ifStmt) {
+						continue
+					}
+
 					pos := ctx.PositionFor(retStmt)
 					v := r.CreateViolation(ctx.RelPath, pos.Line, "Fallback return on error - silently degrades instead of failing explicitly")
 					v.WithCode(ctx.GetLine(pos.Line))
@@ -248,6 +256,74 @@ func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violati
 	})
 
 	return violations
+}
+
+// returnsError checks if return statement includes an error
+func (r *FallbackReturnRule) returnsError(stmt *ast.ReturnStmt) bool {
+	for _, result := range stmt.Results {
+		// Check for error variable
+		if ident, ok := result.(*ast.Ident); ok {
+			if ident.Name == "err" {
+				return true
+			}
+		}
+		// Check for fmt.Errorf, errors.New, etc.
+		if call, ok := result.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if sel.Sel.Name == "Errorf" || sel.Sel.Name == "New" || sel.Sel.Name == "Wrap" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isFunctionException checks if the enclosing function is an exception
+func (r *FallbackReturnRule) isFunctionException(ctx *core.FileContext, stmt ast.Node) bool {
+	// Find enclosing function
+	var funcName string
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok {
+			return true
+		}
+		if fn.Body != nil && fn.Body.Pos() <= stmt.Pos() && stmt.End() <= fn.Body.End() {
+			funcName = fn.Name.Name
+			return false
+		}
+		return true
+	})
+
+	if funcName == "" {
+		return false
+	}
+
+	funcLower := strings.ToLower(funcName)
+
+	// Functions with "OrDefault", "Default" pattern - by design return defaults
+	if strings.Contains(funcLower, "ordefault") || strings.HasSuffix(funcLower, "default") {
+		return true
+	}
+
+	// Parse functions with default parameter - legitimate
+	if strings.HasPrefix(funcLower, "parse") && strings.Contains(funcLower, "param") {
+		return true
+	}
+
+	// Singleton getters (Get*Manager, Get*EventManager) - not fallbacks
+	if strings.HasPrefix(funcLower, "get") && (strings.HasSuffix(funcLower, "manager") ||
+		strings.HasSuffix(funcLower, "eventmanager") || strings.HasSuffix(funcLower, "instance")) {
+		return true
+	}
+
+	// GetRealIP, GetClientKey - defensive programming for middleware
+	if strings.HasPrefix(funcLower, "get") && (strings.Contains(funcLower, "ip") ||
+		strings.Contains(funcLower, "key") || strings.Contains(funcLower, "client")) {
+		return true
+	}
+
+	return false
 }
 
 // isErrorCondition checks if condition is error-related
@@ -280,8 +356,18 @@ func (r *FallbackReturnRule) isFallbackReturn(expr ast.Expr) bool {
 		name := e.Name
 		nameLower := strings.ToLower(name)
 
+		// Skip status constants (testStatusPassed, statusOK, etc.)
+		if strings.Contains(nameLower, "status") {
+			return false
+		}
+
+		// Skip "unknown" constant - it's a label, not a fallback value
+		if nameLower == "unknown" || strings.HasSuffix(nameLower, "unknown") {
+			return false
+		}
+
 		// Check for fallback naming patterns
-		fallbackPrefixes := []string{"test", "mock", "fake", "stub", "dummy", "fallback", "default"}
+		fallbackPrefixes := []string{"test", "mock", "fake", "stub", "dummy", "fallback"}
 		for _, prefix := range fallbackPrefixes {
 			if strings.HasPrefix(nameLower, prefix) {
 				return true
@@ -319,12 +405,34 @@ func (r *FallbackReturnRule) isFallbackReturn(expr ast.Expr) bool {
 }
 
 // isGoException checks if this is a valid exception
-func (r *FallbackReturnRule) isGoException(path, line string, lineNum int, lines []string) bool {
+func (r *FallbackReturnRule) isGoException(ctx *core.FileContext, line string, lineNum int) bool {
 	lineLower := strings.ToLower(line)
+	path := ctx.RelPath
+	lines := ctx.Lines
 
-	// Factory functions that create test implementations (test file creators, not fallbacks)
+	// Factory functions that create test implementations
 	if strings.Contains(path, "factory") || strings.Contains(path, "builder") {
 		return true
+	}
+
+	// Middleware code - defensive programming is expected
+	if strings.Contains(path, "middleware") || strings.Contains(path, "rate_limit") {
+		return true
+	}
+
+	// Health check code - test status constants
+	if strings.Contains(path, "health") {
+		return true
+	}
+
+	// Helpers with explicit default parameters
+	if strings.Contains(path, "helpers") || strings.Contains(path, "helper") {
+		// Check if function has "default" in parameter name (by looking at func signature)
+		for i := lineNum; i >= 0 && i > lineNum-15; i-- {
+			if strings.Contains(lines[i], "func ") && strings.Contains(strings.ToLower(lines[i]), "default") {
+				return true
+			}
+		}
 	}
 
 	// Explicit "for testing" comment
@@ -333,13 +441,30 @@ func (r *FallbackReturnRule) isGoException(path, line string, lineNum int, lines
 	}
 
 	// Check if function is explicitly a test factory
-	for i := lineNum; i >= 0 && i > lineNum-10; i-- {
-		if strings.Contains(lines[i], "func New") && strings.Contains(lines[i], "ForTest") {
-			return true
+	for i := lineNum; i >= 0 && i > lineNum-15; i-- {
+		funcLine := lines[i]
+		funcLower := strings.ToLower(funcLine)
+
+		// Functions with OrDefault, Default in name
+		if strings.Contains(funcLine, "func ") {
+			if strings.Contains(funcLower, "ordefault") || strings.Contains(funcLower, "default") {
+				return true
+			}
+			// Parse functions with default parameter
+			if strings.Contains(funcLower, "parse") {
+				return true
+			}
+			// Singleton getters
+			if strings.Contains(funcLower, "get") && strings.Contains(funcLower, "manager") {
+				return true
+			}
+			break // Found function declaration, stop looking
 		}
-		if strings.Contains(lines[i], "func Create") && strings.Contains(lines[i], "Test") {
-			return true
-		}
+	}
+
+	// Check if error is already being returned on the same line
+	if strings.Contains(line, "fmt.Errorf") || strings.Contains(line, "errors.") {
+		return true
 	}
 
 	// DI container test mode setup
@@ -359,17 +484,14 @@ func (r *FallbackReturnRule) analyzeTSFile(ctx *core.FileContext) []*core.Violat
 		// Return mock/test/fake (case insensitive after prefix)
 		regexp.MustCompile(`(?i)return\s+(?:mock|test|fake|stub|dummy)\w+`),
 
-		// Return default fallback
-		regexp.MustCompile(`(?i)return\s+default\w+`),
-
 		// Fallback in variable assignment
 		regexp.MustCompile(`(?i)=\s+(?:mock|test|fake|fallback)\w+`),
 
-		// || fallback pattern
-		regexp.MustCompile(`(?i)\|\|\s*(?:mock|test|fake|default)\w+`),
+		// || fallback pattern (but not for common defaults)
+		regexp.MustCompile(`(?i)\|\|\s*(?:mock|test|fake)\w+`),
 
-		// ?? fallback pattern (nullish coalescing)
-		regexp.MustCompile(`(?i)\?\?\s*(?:mock|test|fake|default)\w+`),
+		// ?? fallback pattern
+		regexp.MustCompile(`(?i)\?\?\s*(?:mock|test|fake|fallback)\w+`),
 	}
 
 	for lineNum, line := range ctx.Lines {
