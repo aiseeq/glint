@@ -224,12 +224,19 @@ func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violati
 			return true
 		}
 
+		// Check function-level exceptions first
+		if r.isFunctionException(ctx, ifStmt) {
+			return true
+		}
+
 		// Check body for fallback returns
+		hasReturn := false
 		for _, stmt := range ifStmt.Body.List {
 			retStmt, ok := stmt.(*ast.ReturnStmt)
 			if !ok {
 				continue
 			}
+			hasReturn = true
 
 			// Skip if error is returned explicitly
 			if r.returnsError(retStmt) {
@@ -238,11 +245,6 @@ func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violati
 
 			for _, result := range retStmt.Results {
 				if r.isFallbackReturn(result) {
-					// Check function-level exceptions
-					if r.isFunctionException(ctx, ifStmt) {
-						continue
-					}
-
 					pos := ctx.PositionFor(retStmt)
 					v := r.CreateViolation(ctx.RelPath, pos.Line, "Fallback return on error - silently degrades instead of failing explicitly")
 					v.WithCode(ctx.GetLine(pos.Line))
@@ -250,6 +252,12 @@ func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violati
 					violations = append(violations, v)
 				}
 			}
+		}
+
+		// NEW: Detect error-ignoring assignment pattern (CLAUDE.md violation)
+		// Pattern: if err != nil { variable = fallbackValue } without return
+		if !hasReturn && r.isErrNotNilCondition(ifStmt.Cond) {
+			violations = append(violations, r.detectErrorIgnoringAssignment(ctx, ifStmt)...)
 		}
 
 		return true
@@ -572,4 +580,157 @@ func (r *FallbackReturnRule) createTSViolation(ctx *core.FileContext, lineNum in
 	v.WithContext("pattern", "fallback-return")
 	v.WithContext("language", "typescript")
 	return v
+}
+
+// isErrNotNilCondition checks specifically for "err != nil" condition
+func (r *FallbackReturnRule) isErrNotNilCondition(expr ast.Expr) bool {
+	binExpr, ok := expr.(*ast.BinaryExpr)
+	if !ok {
+		return false
+	}
+
+	// Check for err != nil
+	if binExpr.Op.String() != "!=" {
+		return false
+	}
+
+	xIdent, xOk := binExpr.X.(*ast.Ident)
+	yIdent, yOk := binExpr.Y.(*ast.Ident)
+
+	if xOk && xIdent.Name == "err" && yOk && yIdent.Name == "nil" {
+		return true
+	}
+
+	return false
+}
+
+// detectErrorIgnoringAssignment detects pattern where error is caught but ignored with assignment
+// Example violation: if err != nil { secretKeyBytes = []byte(h.secretKey) }
+func (r *FallbackReturnRule) detectErrorIgnoringAssignment(ctx *core.FileContext, ifStmt *ast.IfStmt) []*core.Violation {
+	var violations []*core.Violation
+
+	// Skip if body is empty
+	if len(ifStmt.Body.List) == 0 {
+		return nil
+	}
+
+	// Check each statement in body
+	for _, stmt := range ifStmt.Body.List {
+		assignStmt, ok := stmt.(*ast.AssignStmt)
+		if !ok {
+			continue
+		}
+
+		// Skip if this is err = ... (error reassignment)
+		if r.isErrReassignment(assignStmt) {
+			continue
+		}
+
+		// Check if RHS looks like a fallback value
+		for _, rhs := range assignStmt.Rhs {
+			if r.looksLikeFallbackAssignment(rhs, ctx) {
+				pos := ctx.PositionFor(assignStmt)
+				lineContent := ctx.GetLine(pos.Line)
+
+				// Skip if there's a comment explaining legitimate reason
+				if r.hasLegitimateComment(ctx.Lines, pos.Line-1) {
+					continue
+				}
+
+				v := r.CreateViolation(ctx.RelPath, pos.Line, "Error caught but ignored with fallback assignment - CLAUDE.md violation")
+				v.WithCode(lineContent)
+				v.WithSuggestion("Return the error instead of assigning fallback. Function should fail explicitly on error.")
+				v.WithContext("pattern", "error-ignoring-assignment")
+				violations = append(violations, v)
+			}
+		}
+	}
+
+	return violations
+}
+
+// isErrReassignment checks if assignment is to err variable
+func (r *FallbackReturnRule) isErrReassignment(stmt *ast.AssignStmt) bool {
+	for _, lhs := range stmt.Lhs {
+		if ident, ok := lhs.(*ast.Ident); ok {
+			if ident.Name == "err" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// looksLikeFallbackAssignment checks if RHS is a fallback pattern
+func (r *FallbackReturnRule) looksLikeFallbackAssignment(expr ast.Expr, ctx *core.FileContext) bool {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		name := strings.ToLower(e.Name)
+		// Variables with fallback-indicating names
+		if strings.Contains(name, "test") || strings.Contains(name, "mock") ||
+			strings.Contains(name, "fake") || strings.Contains(name, "fallback") {
+			return true
+		}
+
+	case *ast.CallExpr:
+		// Type conversions like []byte(h.secretKey) - converting original value
+		if len(e.Args) > 0 {
+			// Check if it's a type conversion (function is a type)
+			if _, ok := e.Fun.(*ast.ArrayType); ok {
+				return true // []byte(...) conversion as fallback
+			}
+			if ident, ok := e.Fun.(*ast.Ident); ok {
+				// string(...), []byte(...), int(...) etc - type casts as fallbacks
+				typeCasts := []string{"string", "int", "int32", "int64", "float32", "float64", "bool"}
+				for _, cast := range typeCasts {
+					if ident.Name == cast {
+						return true
+					}
+				}
+			}
+		}
+
+		// Function calls with fallback patterns
+		if fun, ok := e.Fun.(*ast.Ident); ok {
+			nameLower := strings.ToLower(fun.Name)
+			if strings.HasPrefix(nameLower, "newmock") ||
+				strings.HasPrefix(nameLower, "newtest") ||
+				strings.HasPrefix(nameLower, "newfake") {
+				return true
+			}
+		}
+
+	case *ast.BasicLit:
+		// Literal values like "", 0, nil as fallback
+		return true
+
+	case *ast.CompositeLit:
+		// Empty struct/slice/map as fallback: Foo{}, []string{}, etc.
+		return true
+	}
+
+	return false
+}
+
+// hasLegitimateComment checks if previous lines have comments explaining legitimate use
+func (r *FallbackReturnRule) hasLegitimateComment(lines []string, lineIdx int) bool {
+	if lineIdx < 0 || lineIdx >= len(lines) {
+		return false
+	}
+
+	// Check up to 3 lines before for comments
+	for i := lineIdx; i >= 0 && i > lineIdx-3; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "//") {
+			lineLower := strings.ToLower(line)
+			// Legitimate patterns: optional, non-critical, best effort, graceful
+			if strings.Contains(lineLower, "optional") ||
+				strings.Contains(lineLower, "non-critical") ||
+				strings.Contains(lineLower, "best effort") ||
+				strings.Contains(lineLower, "graceful") {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -247,3 +247,142 @@ function getConfig() {
 		})
 	}
 }
+
+func TestFallbackReturnRule_ErrorIgnoringAssignment(t *testing.T) {
+	rule := NewFallbackReturnRule()
+
+	tests := []struct {
+		name      string
+		code      string
+		filename  string
+		wantCount int
+		wantMsg   string
+	}{
+		{
+			name: "type conversion on error - should flag",
+			code: `package main
+
+func decodeKey(encoded string) []byte {
+	decoded, err := base64.DecodeString(encoded)
+	if err != nil {
+		decoded = []byte(encoded)
+	}
+	return decoded
+}`,
+			filename:  "crypto.go",
+			wantCount: 1,
+			wantMsg:   "Error caught but ignored",
+		},
+		{
+			name: "literal fallback on error - should flag",
+			code: `package main
+
+func getValue() int {
+	val, err := parseValue()
+	if err != nil {
+		val = 0
+	}
+	return val
+}`,
+			filename:  "parser.go",
+			wantCount: 1,
+			wantMsg:   "Error caught but ignored",
+		},
+		{
+			name: "empty struct fallback on error - should flag",
+			code: `package main
+
+func getConfig() Config {
+	cfg, err := loadConfig()
+	if err != nil {
+		cfg = Config{}
+	}
+	return cfg
+}`,
+			filename:  "config.go",
+			wantCount: 1,
+			wantMsg:   "Error caught but ignored",
+		},
+		{
+			name: "error reassignment - should not flag",
+			code: `package main
+
+func process() error {
+	_, err := doSomething()
+	if err != nil {
+		err = fmt.Errorf("wrapped: %w", err)
+	}
+	return err
+}`,
+			filename:  "handler.go",
+			wantCount: 0,
+		},
+		{
+			name: "legitimate comment - should not flag",
+			code: `package main
+
+func getTimeout() int {
+	timeout, err := parseTimeout()
+	// optional - use best effort value
+	if err != nil {
+		timeout = 30
+	}
+	return timeout
+}`,
+			filename:  "config.go",
+			wantCount: 0,
+		},
+		{
+			name: "proper error return - should not flag",
+			code: `package main
+
+func getValue() (int, error) {
+	val, err := parseValue()
+	if err != nil {
+		return 0, err
+	}
+	return val, nil
+}`,
+			filename:  "parser.go",
+			wantCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := core.NewParser()
+			ctx := core.NewFileContext(tt.filename, ".", []byte(tt.code), nil)
+			
+			// Parse Go AST for precise detection
+			fset, astFile, err := parser.ParseGoFile(tt.filename, []byte(tt.code))
+			if err == nil {
+				ctx.SetGoAST(fset, astFile)
+			}
+
+			violations := rule.AnalyzeFile(ctx)
+
+			if len(violations) != tt.wantCount {
+				t.Errorf("got %d violations, want %d", len(violations), tt.wantCount)
+				for _, v := range violations {
+					t.Logf("  violation: %s at line %d", v.Message, v.Line)
+				}
+			}
+
+			if tt.wantMsg != "" && len(violations) > 0 {
+				found := false
+				for _, v := range violations {
+					if strings.Contains(v.Message, tt.wantMsg) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected message containing %q", tt.wantMsg)
+					for _, v := range violations {
+						t.Logf("  got message: %s", v.Message)
+					}
+				}
+			}
+		})
+	}
+}
