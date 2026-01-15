@@ -20,7 +20,7 @@ func TestMagicNumberRule(t *testing.T) {
 			name: "Magic number in function - should flag",
 			code: `package main
 func foo() {
-	timeout := 3600
+	timeout := 4321
 	_ = timeout
 }`,
 			expectedCount: 1,
