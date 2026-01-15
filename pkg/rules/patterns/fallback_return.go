@@ -633,7 +633,7 @@ func (r *FallbackReturnRule) detectErrorIgnoringAssignment(ctx *core.FileContext
 				lineContent := ctx.GetLine(pos.Line)
 
 				// Skip if there's a comment explaining legitimate reason
-				if r.hasLegitimateComment(ctx.Lines, pos.Line-1) {
+				if r.hasLegitimateComment(ctx.Lines, pos.Line-1) || r.hasLoggingStatement(ifStmt, ctx) {
 					continue
 				}
 
@@ -727,8 +727,36 @@ func (r *FallbackReturnRule) hasLegitimateComment(lines []string, lineIdx int) b
 			if strings.Contains(lineLower, "optional") ||
 				strings.Contains(lineLower, "non-critical") ||
 				strings.Contains(lineLower, "best effort") ||
-				strings.Contains(lineLower, "graceful") {
+				strings.Contains(lineLower, "graceful") ||
+				strings.Contains(lineLower, "using 0") ||
+				strings.Contains(lineLower, "using zero") ||
+				strings.Contains(lineLower, "baseline") ||
+				strings.Contains(lineLower, "explicit") ||
+				strings.Contains(lineLower, "intentional") ||
+				strings.Contains(lineLower, "acceptable") {
 				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasLoggingStatement checks if there's a logging statement in the if block before the assignment
+func (r *FallbackReturnRule) hasLoggingStatement(ifStmt *ast.IfStmt, ctx *core.FileContext) bool {
+	for _, stmt := range ifStmt.Body.List {
+		// Check for logging calls like logger.Warn, log.Printf, s.logger.Error, etc.
+		if exprStmt, ok := stmt.(*ast.ExprStmt); ok {
+			if call, ok := exprStmt.X.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					methodName := strings.ToLower(sel.Sel.Name)
+					// Common logging methods
+					if methodName == "warn" || methodName == "error" || methodName == "info" ||
+						methodName == "debug" || methodName == "printf" || methodName == "println" ||
+						methodName == "warnstructured" || methodName == "errorstructured" ||
+						methodName == "infostructured" {
+						return true
+					}
+				}
 			}
 		}
 	}
