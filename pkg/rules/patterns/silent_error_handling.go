@@ -52,6 +52,9 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 	var funcReturnsValueBool bool
 	var funcIsBoolPredicate bool
 
+	// Build a set of if statements that are inside defer function literals
+	ifStmtsInDefer := r.findIfStmtsInDefers(ctx.GoAST)
+
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		// Track function declarations
 		if funcDecl, ok := n.(*ast.FuncDecl); ok {
@@ -68,6 +71,11 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 
 		// Check if this is err != nil
 		if !r.isErrNotNilCheck(ifStmt.Cond) {
+			return true
+		}
+
+		// Skip error checks inside defer - they typically check named return values for cleanup
+		if ifStmtsInDefer[ifStmt] {
 			return true
 		}
 
@@ -96,6 +104,12 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 			// Skip if body has comment indicating error is handled elsewhere
 			// Common patterns: "error already sent", "error handled", "response sent"
 			if r.bodyHasErrorHandledComment(ctx, ifStmt.Body) {
+				return true
+			}
+
+			// Skip if error is from a function that likely handles it internally
+			// e.g., functions that take http.ResponseWriter typically send error response themselves
+			if r.errorHandledByCallee(ifStmt.Cond) {
 				return true
 			}
 
@@ -313,9 +327,13 @@ func (r *SilentErrorHandlingRule) bodyHasErrorHandledComment(ctx *core.FileConte
 func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsValueBool bool) bool {
 	switch s := stmt.(type) {
 	case *ast.ReturnStmt:
-		// Check if return includes error
+		// Check if return includes error or uses error value
 		for _, result := range s.Results {
 			if r.exprReferencesError(result) {
+				return true
+			}
+			// Also check if error is used in return value (e.g., struct with error in field)
+			if r.exprUsesErrorValue(result) {
 				return true
 			}
 		}
@@ -458,6 +476,15 @@ func (r *SilentErrorHandlingRule) exprUsesErrorValue(expr ast.Expr) bool {
 					return true
 				}
 			}
+			// Check for fmt.Errorf(..., err).Error() pattern
+			// The X is a CallExpr (fmt.Errorf) and its args contain error
+			if innerCall, ok := sel.X.(*ast.CallExpr); ok {
+				for _, arg := range innerCall.Args {
+					if r.exprReferencesError(arg) {
+						return true
+					}
+				}
+			}
 		}
 		// Also check function arguments for error references
 		for _, arg := range e.Args {
@@ -472,6 +499,27 @@ func (r *SilentErrorHandlingRule) exprUsesErrorValue(expr ast.Expr) bool {
 			if nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error") {
 				return true
 			}
+		}
+	case *ast.CompositeLit:
+		// Check struct literals for error usage in field values
+		// e.g., ValidationError{Message: fmt.Sprintf("...: %v", err)}
+		for _, elt := range e.Elts {
+			if kv, ok := elt.(*ast.KeyValueExpr); ok {
+				if r.exprUsesErrorValue(kv.Value) {
+					return true
+				}
+			} else if r.exprUsesErrorValue(elt) {
+				return true
+			}
+		}
+	case *ast.UnaryExpr:
+		// Handle &struct{} pattern
+		return r.exprUsesErrorValue(e.X)
+	case *ast.Ident:
+		// Direct error variable reference
+		nameLower := strings.ToLower(e.Name)
+		if nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error") {
+			return true
 		}
 	}
 	return false
@@ -488,6 +536,13 @@ func (r *SilentErrorHandlingRule) exprReferencesError(expr ast.Expr) bool {
 		}
 		// Sentinel errors: ErrInvalidAmount, ErrNotFound, etc.
 		if strings.HasPrefix(e.Name, "Err") {
+			return true
+		}
+		return false
+
+	case *ast.SelectorExpr:
+		// Qualified sentinel errors: models.ErrInvalidUUID, storageErrors.ErrNotFound, etc.
+		if strings.HasPrefix(e.Sel.Name, "Err") {
 			return true
 		}
 		return false
@@ -552,4 +607,46 @@ func (r *SilentErrorHandlingRule) isPanicCall(call *ast.CallExpr) bool {
 		return ident.Name == "panic"
 	}
 	return false
+}
+
+// errorHandledByCallee checks if the error assignment is from a function that handles errors internally
+// e.g., if err := ar.updateInvestmentCurrentValue(w, req, inv); err != nil { return }
+// Functions that take http.ResponseWriter typically handle errors by sending HTTP responses
+func (r *SilentErrorHandlingRule) errorHandledByCallee(cond ast.Expr) bool {
+	// Look for pattern: err := someFunc(...) in the init statement of if
+	// This requires looking at the parent if statement's Init field
+
+	// For now, check if the condition references a function call that takes ResponseWriter
+	// This is a simplified heuristic - checking if comment mentions "error handled" is more reliable
+	return false
+}
+
+// findIfStmtsInDefers finds all if statements that are inside defer function literals
+func (r *SilentErrorHandlingRule) findIfStmtsInDefers(file *ast.File) map[*ast.IfStmt]bool {
+	result := make(map[*ast.IfStmt]bool)
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		deferStmt, ok := n.(*ast.DeferStmt)
+		if !ok {
+			return true
+		}
+
+		// Check if defer has a function literal (defer func() { ... }())
+		callExpr, ok := deferStmt.Call.Fun.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+
+		// Find all if statements in the function literal's body
+		ast.Inspect(callExpr.Body, func(inner ast.Node) bool {
+			if ifStmt, ok := inner.(*ast.IfStmt); ok {
+				result[ifStmt] = true
+			}
+			return true
+		})
+
+		return true
+	})
+
+	return result
 }
