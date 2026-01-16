@@ -93,6 +93,12 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 				return true
 			}
 
+			// Skip if body has comment indicating error is handled elsewhere
+			// Common patterns: "error already sent", "error handled", "response sent"
+			if r.bodyHasErrorHandledComment(ctx, ifStmt.Body) {
+				return true
+			}
+
 			v := r.CreateViolation(ctx.RelPath, pos.Line,
 				"Error check without logging or error propagation")
 			v.WithCode(lineContent)
@@ -245,6 +251,39 @@ func (r *SilentErrorHandlingRule) bodyReturnsBool(body *ast.BlockStmt) bool {
 						return true
 					}
 				}
+			}
+		}
+	}
+
+	return false
+}
+
+// bodyHasErrorHandledComment checks if the if body has a comment indicating error is handled elsewhere
+func (r *SilentErrorHandlingRule) bodyHasErrorHandledComment(ctx *core.FileContext, body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+
+	// Get line numbers covered by the body
+	startLine := ctx.PositionFor(body).Line
+	endLine := startLine + 5 // Check a few lines within the body
+
+	// Patterns indicating error is handled elsewhere
+	handledPatterns := []string{
+		"already sent", "already handled", "response sent", "error sent",
+		"handled by", "logged by", "reported by", "error response",
+		"already logged", "handled above", "handled in",
+	}
+
+	for lineNum := startLine; lineNum <= endLine && lineNum <= len(ctx.Lines); lineNum++ {
+		lineLower := strings.ToLower(ctx.GetLine(lineNum))
+		if !strings.Contains(lineLower, "//") {
+			continue
+		}
+
+		for _, pattern := range handledPatterns {
+			if strings.Contains(lineLower, pattern) {
+				return true
 			}
 		}
 	}
