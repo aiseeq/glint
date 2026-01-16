@@ -220,7 +220,7 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsVal
 	return false
 }
 
-// exprReferencesError checks if expression references err variable
+// exprReferencesError checks if expression references err variable or creates an error
 func (r *SilentErrorHandlingRule) exprReferencesError(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.Ident:
@@ -228,15 +228,25 @@ func (r *SilentErrorHandlingRule) exprReferencesError(expr ast.Expr) bool {
 		return nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error")
 
 	case *ast.CallExpr:
-		// fmt.Errorf("...: %w", err) or errors.Wrap(err, ...)
 		funcName := core.ExtractFullFunctionName(e)
-		if strings.Contains(funcName, "Errorf") || strings.Contains(funcName, "Wrap") ||
-			strings.Contains(funcName, "Error") || strings.Contains(funcName, "New") {
-			// Check if err is in arguments
-			for _, arg := range e.Args {
-				if r.exprReferencesError(arg) {
-					return true
-				}
+		funcNameLower := strings.ToLower(funcName)
+
+		// Any error-creating function is error propagation
+		// errors.New(), fmt.Errorf(), errors.Wrap(), custom.NewError(), etc.
+		errorCreatingPatterns := []string{
+			"errorf", "wrap", "wrapf", "new", "newerror",
+			"error", "fail", "makeerror", "createerror",
+		}
+		for _, pattern := range errorCreatingPatterns {
+			if strings.Contains(funcNameLower, pattern) {
+				return true
+			}
+		}
+
+		// Also check if err is passed as argument (for Wrap patterns)
+		for _, arg := range e.Args {
+			if r.exprReferencesError(arg) {
+				return true
 			}
 		}
 	}
@@ -257,6 +267,9 @@ func (r *SilentErrorHandlingRule) isLoggingCall(call *ast.CallExpr) bool {
 		"errorstructured", "warnstructured", "infostructured",
 		"printf", "println",
 		"slog.",
+		"record", // recordFailure, recordError, etc.
+		"report", // reportError, etc.
+		"notify", // notifyError, etc.
 	}
 
 	for _, pattern := range loggingPatterns {
