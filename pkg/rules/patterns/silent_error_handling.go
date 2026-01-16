@@ -47,15 +47,17 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 
 	var violations []*core.Violation
 
-	// Track current function context for (T, bool) pattern detection
+	// Track current function context for (T, bool) and predicate pattern detection
 	var currentFunc *ast.FuncDecl
 	var funcReturnsValueBool bool
+	var funcIsBoolPredicate bool
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		// Track function declarations
 		if funcDecl, ok := n.(*ast.FuncDecl); ok {
 			currentFunc = funcDecl
 			funcReturnsValueBool = r.functionReturnsValueBool(funcDecl)
+			funcIsBoolPredicate = r.functionIsBoolPredicate(funcDecl)
 			return true
 		}
 
@@ -82,6 +84,12 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 
 			// Skip if we're in a function returning (T, bool) and return includes false
 			if funcReturnsValueBool && r.bodyReturnsFalse(ifStmt.Body) {
+				return true
+			}
+
+			// Skip if we're in a predicate function (IsEmpty, IsValid, etc.)
+			// Converting error to true/false is acceptable for predicates
+			if funcIsBoolPredicate && r.bodyReturnsBool(ifStmt.Body) {
 				return true
 			}
 
@@ -159,6 +167,49 @@ func (r *SilentErrorHandlingRule) functionReturnsValueBool(fn *ast.FuncDecl) boo
 	return false
 }
 
+// functionIsBoolPredicate checks if function is a predicate returning only bool
+// For predicates (IsEmpty, IsValid, HasX, CanX, etc.), converting error to bool is acceptable
+func (r *SilentErrorHandlingRule) functionIsBoolPredicate(fn *ast.FuncDecl) bool {
+	if fn == nil || fn.Type == nil || fn.Type.Results == nil {
+		return false
+	}
+
+	results := fn.Type.Results.List
+
+	// Must return exactly one value
+	if len(results) != 1 {
+		return false
+	}
+
+	// Must be bool
+	if ident, ok := results[0].Type.(*ast.Ident); ok {
+		if ident.Name != "bool" {
+			return false
+		}
+	} else {
+		return false
+	}
+
+	// Function name must be a predicate pattern
+	if fn.Name == nil {
+		return false
+	}
+	nameLower := strings.ToLower(fn.Name.Name)
+
+	predicatePatterns := []string{
+		"is", "has", "can", "should", "must", "check", "verify", "validate",
+		"contains", "exists", "empty", "valid", "equal", "match",
+	}
+
+	for _, pattern := range predicatePatterns {
+		if strings.HasPrefix(nameLower, pattern) || strings.Contains(nameLower, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // bodyReturnsFalse checks if the body contains return with false
 func (r *SilentErrorHandlingRule) bodyReturnsFalse(body *ast.BlockStmt) bool {
 	if body == nil {
@@ -170,6 +221,27 @@ func (r *SilentErrorHandlingRule) bodyReturnsFalse(body *ast.BlockStmt) bool {
 			for _, result := range retStmt.Results {
 				if ident, ok := result.(*ast.Ident); ok {
 					if ident.Name == "false" {
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// bodyReturnsBool checks if the body contains return with true or false
+func (r *SilentErrorHandlingRule) bodyReturnsBool(body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+
+	for _, stmt := range body.List {
+		if retStmt, ok := stmt.(*ast.ReturnStmt); ok {
+			for _, result := range retStmt.Results {
+				if ident, ok := result.(*ast.Ident); ok {
+					if ident.Name == "true" || ident.Name == "false" {
 						return true
 					}
 				}
