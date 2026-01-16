@@ -80,10 +80,10 @@ func (r *FallbackReturnRule) initGoContextPatterns() []*regexp.Regexp {
 func (r *FallbackReturnRule) initTSContextPatterns() []*regexp.Regexp {
 	return []*regexp.Regexp{
 		// Error check context - TS style
-		regexp.MustCompile(`if\s*\(\s*!\w+`),                    // if (!svc)
-		regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*null`),       // if (x === null)
-		regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*undefined`),  // if (x === undefined)
-		regexp.MustCompile(`if\s*\(\s*err`),                     // if (err...)
+		regexp.MustCompile(`if\s*\(\s*!\w+`),                   // if (!svc)
+		regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*null`),      // if (x === null)
+		regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*undefined`), // if (x === undefined)
+		regexp.MustCompile(`if\s*\(\s*err`),                    // if (err...)
 
 		// Error in comment
 		regexp.MustCompile(`//.*(?i)(?:error|fail|unavailable|fallback)`),
@@ -211,6 +211,9 @@ func (r *FallbackReturnRule) isInGoContext(lines []string, lineNum int) bool {
 // analyzeGoAST uses Go AST for precise detection
 func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
+
+	// First pass: detect implicit else fallback patterns at function level
+	violations = append(violations, r.detectImplicitElseFallback(ctx)...)
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		// Check if statements with error handling
@@ -707,6 +710,14 @@ func (r *FallbackReturnRule) looksLikeFallbackAssignment(expr ast.Expr, ctx *cor
 	case *ast.CompositeLit:
 		// Empty struct/slice/map as fallback: Foo{}, []string{}, etc.
 		return true
+
+	case *ast.UnaryExpr:
+		// Pointer to empty struct as fallback: &Foo{}, &Config{}
+		if e.Op.String() == "&" {
+			if _, ok := e.X.(*ast.CompositeLit); ok {
+				return true
+			}
+		}
 	}
 
 	return false
@@ -752,7 +763,6 @@ func (r *FallbackReturnRule) hasLegitimateComment(lines []string, lineIdx int) b
 	return false
 }
 
-
 // hasLoggingStatement checks if there's a logging statement in the if block before the assignment
 func (r *FallbackReturnRule) hasLoggingStatement(ifStmt *ast.IfStmt, ctx *core.FileContext) bool {
 	for _, stmt := range ifStmt.Body.List {
@@ -770,6 +780,139 @@ func (r *FallbackReturnRule) hasLoggingStatement(ifStmt *ast.IfStmt, ctx *core.F
 					}
 				}
 			}
+		}
+	}
+	return false
+}
+
+// detectImplicitElseFallback detects pattern: if good { return good } return fallback
+// This catches CreateValidationService-like patterns where fallback is returned after positive check
+func (r *FallbackReturnRule) detectImplicitElseFallback(ctx *core.FileContext) []*core.Violation {
+	var violations []*core.Violation
+
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		funcDecl, ok := n.(*ast.FuncDecl)
+		if !ok || funcDecl.Body == nil {
+			return true
+		}
+
+		// Skip exception functions
+		if r.isFunctionNameException(funcDecl.Name.Name) {
+			return true
+		}
+
+		// Check if function returns (T, error) pattern
+		if !r.returnsValueAndError(funcDecl) {
+			return true
+		}
+
+		// Look for pattern: if x != nil { return x, nil } return fallback, nil
+		violations = append(violations, r.checkForImplicitFallback(ctx, funcDecl)...)
+
+		return true
+	})
+
+	return violations
+}
+
+// isFunctionNameException checks if function name indicates its OK to have fallbacks
+func (r *FallbackReturnRule) isFunctionNameException(name string) bool {
+	nameLower := strings.ToLower(name)
+	
+	// OrX patterns are by design
+	if strings.Contains(nameLower, "ordefault") || strings.Contains(nameLower, "orempty") ||
+		strings.Contains(nameLower, "ornew") || strings.Contains(nameLower, "ornull") {
+		return true
+	}
+	
+	// Get*Manager, Get*Instance - singleton patterns
+	if strings.HasPrefix(nameLower, "get") && (strings.HasSuffix(nameLower, "manager") ||
+		strings.HasSuffix(nameLower, "instance") || strings.HasSuffix(nameLower, "singleton")) {
+		return true
+	}
+	
+	// Parse* functions often have legitimate fallbacks
+	if strings.HasPrefix(nameLower, "parse") {
+		return true
+	}
+	
+	return false
+}
+
+// returnsValueAndError checks if function signature is (T, error)
+func (r *FallbackReturnRule) returnsValueAndError(funcDecl *ast.FuncDecl) bool {
+	if funcDecl.Type.Results == nil || len(funcDecl.Type.Results.List) < 2 {
+		return false
+	}
+	
+	// Check last return type is error
+	lastResult := funcDecl.Type.Results.List[len(funcDecl.Type.Results.List)-1]
+	if ident, ok := lastResult.Type.(*ast.Ident); ok {
+		return ident.Name == "error"
+	}
+	return false
+}
+
+// checkForImplicitFallback looks for if-return-good then return-fallback patterns
+func (r *FallbackReturnRule) checkForImplicitFallback(ctx *core.FileContext, funcDecl *ast.FuncDecl) []*core.Violation {
+	var violations []*core.Violation
+	stmts := funcDecl.Body.List
+	
+	for i := 0; i < len(stmts)-1; i++ {
+		ifStmt, ok := stmts[i].(*ast.IfStmt)
+		if !ok {
+			continue
+		}
+		
+		// Check if the if body returns (positive path)
+		if !r.bodyReturnsWithoutError(ifStmt.Body) {
+			continue
+		}
+		
+		// Check next statement is a return (the fallback)
+		nextReturn, ok := stmts[i+1].(*ast.ReturnStmt)
+		if !ok {
+			continue
+		}
+		
+		// Skip if the return includes an error
+		if r.returnsError(nextReturn) {
+			continue
+		}
+		
+		// Check if theres a fallback comment nearby
+		pos := ctx.PositionFor(nextReturn)
+		if r.hasFallbackCommentNearby(ctx.Lines, pos.Line-1) {
+			v := r.CreateViolation(ctx.RelPath, pos.Line, 
+				"Implicit else fallback - returns non-error value when precondition fails")
+			v.WithCode(ctx.GetLine(pos.Line))
+			v.WithSuggestion("Return an error instead of fallback. Caller should handle missing precondition.")
+			v.WithContext("pattern", "implicit-else-fallback")
+			violations = append(violations, v)
+		}
+	}
+	
+	return violations
+}
+
+// bodyReturnsWithoutError checks if block has a return without error
+func (r *FallbackReturnRule) bodyReturnsWithoutError(body *ast.BlockStmt) bool {
+	for _, stmt := range body.List {
+		if retStmt, ok := stmt.(*ast.ReturnStmt); ok {
+			return !r.returnsError(retStmt)
+		}
+	}
+	return false
+}
+
+// hasFallbackCommentNearby checks if theres a comment with fallback nearby
+func (r *FallbackReturnRule) hasFallbackCommentNearby(lines []string, lineIdx int) bool {
+	// Check 3 lines before
+	for i := lineIdx; i >= 0 && i > lineIdx-4; i-- {
+		lineLower := strings.ToLower(lines[i])
+		if strings.Contains(lineLower, "fallback") || strings.Contains(lineLower, "fall back") ||
+			strings.Contains(lineLower, "fall-back") {
+			return true
 		}
 	}
 	return false
