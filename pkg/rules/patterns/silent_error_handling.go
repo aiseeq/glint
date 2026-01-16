@@ -280,11 +280,17 @@ func (r *SilentErrorHandlingRule) bodyHasErrorHandledComment(ctx *core.FileConte
 	startLine := ctx.PositionFor(body).Line
 	endLine := startLine + 5 // Check a few lines within the body
 
-	// Patterns indicating error is handled elsewhere
+	// Patterns indicating error is handled elsewhere or intentionally acceptable
 	handledPatterns := []string{
+		// Error handled elsewhere
 		"already sent", "already handled", "response sent", "error sent",
 		"handled by", "logged by", "reported by", "error response",
 		"already logged", "handled above", "handled in",
+		// Intentionally acceptable error (optional operations)
+		"allow empty", "optional", "permitted", "expected", "ok to fail",
+		"non-critical", "best effort", "acceptable", "can fail",
+		// Russian equivalents (Cyrillic)
+		"разрешаем", "опционально", "допускается", "ожидаемо",
 	}
 
 	for lineNum := startLine; lineNum <= endLine && lineNum <= len(ctx.Lines); lineNum++ {
