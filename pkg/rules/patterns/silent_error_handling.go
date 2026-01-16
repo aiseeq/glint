@@ -154,13 +154,25 @@ func (r *SilentErrorHandlingRule) bodyHandlesError(body *ast.BlockStmt, funcRetu
 }
 
 // functionReturnsValueBool checks if function returns (T, bool) pattern
+// Handles both (string, bool) and (value, exists bool) syntaxes
 func (r *SilentErrorHandlingRule) functionReturnsValueBool(fn *ast.FuncDecl) bool {
 	if fn == nil || fn.Type == nil || fn.Type.Results == nil {
 		return false
 	}
 
 	results := fn.Type.Results.List
-	if len(results) < 2 {
+
+	// Count total return values (a field can have multiple names)
+	totalReturns := 0
+	for _, field := range results {
+		if len(field.Names) == 0 {
+			totalReturns++ // unnamed return value
+		} else {
+			totalReturns += len(field.Names) // named return values
+		}
+	}
+
+	if totalReturns < 2 {
 		return false
 	}
 
