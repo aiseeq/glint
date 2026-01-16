@@ -429,7 +429,15 @@ func (r *SilentErrorHandlingRule) exprReferencesError(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.Ident:
 		nameLower := strings.ToLower(e.Name)
-		return nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error")
+		// Standard error variable names
+		if nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error") {
+			return true
+		}
+		// Sentinel errors: ErrInvalidAmount, ErrNotFound, etc.
+		if strings.HasPrefix(e.Name, "Err") {
+			return true
+		}
+		return false
 
 	case *ast.CallExpr:
 		funcName := core.ExtractFullFunctionName(e)
