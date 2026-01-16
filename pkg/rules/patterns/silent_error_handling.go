@@ -354,6 +354,10 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsVal
 		if r.isExplicitErrorAcknowledge(s) {
 			return true
 		}
+		// Check for error usage in RHS (e.g., response["details"] = err.Error())
+		if r.rhsUsesError(s) {
+			return true
+		}
 	}
 
 	return false
@@ -428,6 +432,49 @@ func (r *SilentErrorHandlingRule) isExplicitErrorAcknowledge(stmt *ast.AssignStm
 
 	// RHS must reference error variable
 	return r.exprReferencesError(stmt.Rhs[0])
+}
+
+// rhsUsesError checks if any RHS expression uses an error (e.g., err.Error())
+// Pattern: response["details"] = err.Error() or similar
+func (r *SilentErrorHandlingRule) rhsUsesError(stmt *ast.AssignStmt) bool {
+	for _, rhs := range stmt.Rhs {
+		if r.exprUsesErrorValue(rhs) {
+			return true
+		}
+	}
+	return false
+}
+
+// exprUsesErrorValue checks if expression uses an error value (e.g., err.Error(), err.String())
+func (r *SilentErrorHandlingRule) exprUsesErrorValue(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		// Check for err.Error() pattern
+		if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
+			// Check if X is an error variable
+			if ident, ok := sel.X.(*ast.Ident); ok {
+				nameLower := strings.ToLower(ident.Name)
+				if nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error") {
+					return true
+				}
+			}
+		}
+		// Also check function arguments for error references
+		for _, arg := range e.Args {
+			if r.exprUsesErrorValue(arg) {
+				return true
+			}
+		}
+	case *ast.SelectorExpr:
+		// err.someField
+		if ident, ok := e.X.(*ast.Ident); ok {
+			nameLower := strings.ToLower(ident.Name)
+			if nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // exprReferencesError checks if expression references err variable or creates an error
