@@ -47,7 +47,18 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 
 	var violations []*core.Violation
 
+	// Track current function context for (T, bool) pattern detection
+	var currentFunc *ast.FuncDecl
+	var funcReturnsValueBool bool
+
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		// Track function declarations
+		if funcDecl, ok := n.(*ast.FuncDecl); ok {
+			currentFunc = funcDecl
+			funcReturnsValueBool = r.functionReturnsValueBool(funcDecl)
+			return true
+		}
+
 		ifStmt, ok := n.(*ast.IfStmt)
 		if !ok {
 			return true
@@ -59,12 +70,18 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 		}
 
 		// Check if the if body handles the error properly
-		if !r.bodyHandlesError(ifStmt.Body) {
+		// For (T, bool) functions, returning false is acceptable error handling
+		if !r.bodyHandlesError(ifStmt.Body, funcReturnsValueBool) {
 			pos := ctx.PositionFor(ifStmt)
 			lineContent := ctx.GetLine(pos.Line)
 
 			// Skip if has nolint
 			if strings.Contains(lineContent, "nolint") {
+				return true
+			}
+
+			// Skip if we're in a function returning (T, bool) and return includes false
+			if funcReturnsValueBool && r.bodyReturnsFalse(ifStmt.Body) {
 				return true
 			}
 
@@ -77,6 +94,9 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 
 		return true
 	})
+
+	// Clear function context to avoid leaking between files
+	_ = currentFunc // silence unused warning
 
 	return violations
 }
@@ -105,13 +125,13 @@ func (r *SilentErrorHandlingRule) isErrNotNilCheck(cond ast.Expr) bool {
 }
 
 // bodyHandlesError checks if the if body logs or propagates error
-func (r *SilentErrorHandlingRule) bodyHandlesError(body *ast.BlockStmt) bool {
+func (r *SilentErrorHandlingRule) bodyHandlesError(body *ast.BlockStmt, funcReturnsValueBool bool) bool {
 	if body == nil {
 		return false
 	}
 
 	for _, stmt := range body.List {
-		if r.stmtHandlesError(stmt) {
+		if r.stmtHandlesError(stmt, funcReturnsValueBool) {
 			return true
 		}
 	}
@@ -119,8 +139,49 @@ func (r *SilentErrorHandlingRule) bodyHandlesError(body *ast.BlockStmt) bool {
 	return false
 }
 
+// functionReturnsValueBool checks if function returns (T, bool) pattern
+func (r *SilentErrorHandlingRule) functionReturnsValueBool(fn *ast.FuncDecl) bool {
+	if fn == nil || fn.Type == nil || fn.Type.Results == nil {
+		return false
+	}
+
+	results := fn.Type.Results.List
+	if len(results) < 2 {
+		return false
+	}
+
+	// Check if last return type is bool
+	lastResult := results[len(results)-1]
+	if ident, ok := lastResult.Type.(*ast.Ident); ok {
+		return ident.Name == "bool"
+	}
+
+	return false
+}
+
+// bodyReturnsFalse checks if the body contains return with false
+func (r *SilentErrorHandlingRule) bodyReturnsFalse(body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+
+	for _, stmt := range body.List {
+		if retStmt, ok := stmt.(*ast.ReturnStmt); ok {
+			for _, result := range retStmt.Results {
+				if ident, ok := result.(*ast.Ident); ok {
+					if ident.Name == "false" {
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 // stmtHandlesError checks if a statement handles error
-func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt) bool {
+func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsValueBool bool) bool {
 	switch s := stmt.(type) {
 	case *ast.ReturnStmt:
 		// Check if return includes error
@@ -144,13 +205,13 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt) bool {
 
 	case *ast.IfStmt:
 		// Nested if might handle error
-		if r.bodyHandlesError(s.Body) {
+		if r.bodyHandlesError(s.Body, funcReturnsValueBool) {
 			return true
 		}
 
 	case *ast.BlockStmt:
 		for _, inner := range s.List {
-			if r.stmtHandlesError(inner) {
+			if r.stmtHandlesError(inner, funcReturnsValueBool) {
 				return true
 			}
 		}
