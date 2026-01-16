@@ -332,6 +332,10 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsVal
 		if r.isErrorCollectionAppend(s) {
 			return true
 		}
+		// Check for explicit error acknowledgment: _ = err
+		if r.isExplicitErrorAcknowledge(s) {
+			return true
+		}
 	}
 
 	return false
@@ -383,6 +387,29 @@ func (r *SilentErrorHandlingRule) isErrorCollectionAppend(stmt *ast.AssignStmt) 
 	}
 
 	return false
+}
+
+// isExplicitErrorAcknowledge checks if statement is an explicit error acknowledgment
+// Pattern: _ = err (explicitly assigns error to blank identifier to silence linter)
+func (r *SilentErrorHandlingRule) isExplicitErrorAcknowledge(stmt *ast.AssignStmt) bool {
+	// Must be simple assignment (=)
+	if stmt.Tok != token.ASSIGN {
+		return false
+	}
+
+	// Must have exactly one LHS and one RHS
+	if len(stmt.Lhs) != 1 || len(stmt.Rhs) != 1 {
+		return false
+	}
+
+	// LHS must be blank identifier (_)
+	lhsIdent, ok := stmt.Lhs[0].(*ast.Ident)
+	if !ok || lhsIdent.Name != "_" {
+		return false
+	}
+
+	// RHS must reference error variable
+	return r.exprReferencesError(stmt.Rhs[0])
 }
 
 // exprReferencesError checks if expression references err variable or creates an error
