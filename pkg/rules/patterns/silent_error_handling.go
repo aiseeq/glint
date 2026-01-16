@@ -326,6 +326,60 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsVal
 				return true
 			}
 		}
+
+	case *ast.AssignStmt:
+		// Check for error collection pattern: errors = append(errors, err)
+		if r.isErrorCollectionAppend(s) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isErrorCollectionAppend checks if statement is appending error to a collection
+// Pattern: errors = append(errors, err) or errs = append(errs, err)
+func (r *SilentErrorHandlingRule) isErrorCollectionAppend(stmt *ast.AssignStmt) bool {
+	// Must have RHS
+	if len(stmt.Rhs) != 1 {
+		return false
+	}
+
+	// Check RHS is append call
+	call, ok := stmt.Rhs[0].(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+
+	// Check it's append function
+	fnIdent, ok := call.Fun.(*ast.Ident)
+	if !ok || fnIdent.Name != "append" {
+		return false
+	}
+
+	// Need at least 2 args: slice and element(s)
+	if len(call.Args) < 2 {
+		return false
+	}
+
+	// Check if first arg (slice) is named like an error collection
+	sliceIdent, ok := call.Args[0].(*ast.Ident)
+	if !ok {
+		return false
+	}
+	sliceNameLower := strings.ToLower(sliceIdent.Name)
+	isErrorSlice := sliceNameLower == "errors" || sliceNameLower == "errs" ||
+		strings.HasSuffix(sliceNameLower, "errors") || strings.HasSuffix(sliceNameLower, "errs")
+
+	if !isErrorSlice {
+		return false
+	}
+
+	// Check if any appended element references error
+	for i := 1; i < len(call.Args); i++ {
+		if r.exprReferencesError(call.Args[i]) {
+			return true
+		}
 	}
 
 	return false
