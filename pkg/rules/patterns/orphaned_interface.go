@@ -68,6 +68,11 @@ func (r *OrphanedInterfaceRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 		hasUsage := usedIn[iface.name]
 
 		if !hasImpl && !hasUsage {
+			// Check for nolint or "Used by:" comment
+			if r.hasExemptComment(ctx, iface.pos.Line) {
+				continue
+			}
+
 			v := r.CreateViolation(ctx.RelPath, iface.pos.Line,
 				"Interface '"+iface.name+"' has no implementations or usages in this file - potentially orphaned")
 			v.Suggestion = "Remove unused interface or add implementations/usages. " +
@@ -116,6 +121,23 @@ func (r *OrphanedInterfaceRule) shouldSkipFile(ctx *core.FileContext) bool {
 		return true
 	}
 
+	return false
+}
+
+// hasExemptComment checks if interface has nolint or "Used by:" documentation
+func (r *OrphanedInterfaceRule) hasExemptComment(ctx *core.FileContext, line int) bool {
+	// Check 5 lines above interface declaration for comments
+	for i := max(1, line-5); i <= line; i++ {
+		lineContent := ctx.GetLine(i)
+		// Check for nolint comment
+		if strings.Contains(lineContent, "nolint") {
+			return true
+		}
+		// Check for "Used by:" documentation pattern
+		if strings.Contains(lineContent, "Used by:") || strings.Contains(lineContent, "USED BY:") {
+			return true
+		}
+	}
 	return false
 }
 
