@@ -105,6 +105,18 @@ func (r *StubMethodRule) checkForStubMethod(ctx *core.FileContext, fn *ast.FuncD
 		return nil
 	}
 
+	// Check for nolint comment in function doc or preceding comment
+	fnPos := ctx.PositionFor(fn.Name)
+	if fnPos.Line > 0 {
+		// Check 3 lines above for nolint comment (doc + blank line)
+		for i := max(1, fnPos.Line-3); i <= fnPos.Line; i++ {
+			lineContent := ctx.GetLine(i)
+			if strings.Contains(lineContent, "nolint") {
+				return nil
+			}
+		}
+	}
+
 	// For short functions (1-3 statements), check if they only return stub errors
 	if len(fn.Body.List) > 5 {
 		return nil // Too complex to be a simple stub
