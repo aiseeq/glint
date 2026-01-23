@@ -24,16 +24,16 @@ type Fixer interface {
 
 // Fix represents a single code fix
 type Fix struct {
-	File       string // File path
-	StartLine  int    // Start line (1-based)
-	EndLine    int    // End line (1-based, same as StartLine for single-line)
-	StartCol   int    // Start column (1-based, 0 = entire line)
-	EndCol     int    // End column (1-based, 0 = entire line)
-	OldText    string // Text to replace
-	NewText    string // Replacement text
-	Message    string // Description of the fix
-	RuleName   string // Rule that triggered this fix
-	Violation  *core.Violation
+	File      string // File path
+	StartLine int    // Start line (1-based)
+	EndLine   int    // End line (1-based, same as StartLine for single-line)
+	StartCol  int    // Start column (1-based, 0 = entire line)
+	EndCol    int    // End column (1-based, 0 = entire line)
+	OldText   string // Text to replace
+	NewText   string // Replacement text
+	Message   string // Description of the fix
+	RuleName  string // Rule that triggered this fix
+	Violation *core.Violation
 }
 
 // FixResult represents the result of applying fixes
@@ -176,6 +176,29 @@ func (e *Engine) applyToFile(file string, fixes []*Fix) FixResult {
 	// Apply each fix
 	for _, fix := range sortedFixes {
 		if fix.StartLine < 1 || fix.StartLine > len(lines) {
+			continue
+		}
+
+		// Handle multi-line fixes
+		if fix.EndLine > fix.StartLine && fix.EndLine <= len(lines) {
+			startIdx := fix.StartLine - 1
+			endIdx := fix.EndLine - 1
+
+			// Get the old text from file
+			oldLines := lines[startIdx : endIdx+1]
+			oldText := strings.Join(oldLines, "\n")
+
+			// Verify it matches (or at least starts the same)
+			if oldText == fix.OldText || strings.HasPrefix(oldText, strings.Split(fix.OldText, "\n")[0]) {
+				// Replace the lines
+				newLines := strings.Split(fix.NewText, "\n")
+				// Build new lines slice: before + new + after
+				newSlice := append([]string{}, lines[:startIdx]...)
+				newSlice = append(newSlice, newLines...)
+				newSlice = append(newSlice, lines[endIdx+1:]...)
+				lines = newSlice
+				result.FixesApplied++
+			}
 			continue
 		}
 
