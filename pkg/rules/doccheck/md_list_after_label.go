@@ -33,8 +33,9 @@ func NewMdListAfterLabelRule() *MdListAfterLabelRule {
 		// Match label patterns on their own line:
 		// 1. **Label:** - colon inside bold
 		// 2. **Label**: - colon after bold
-		// 3. **Bold text** extra content: - bold at start, ends with colon (allows colons in middle like times)
-		labelPattern: regexp.MustCompile(`^\*\*[^*]+:\*\*\s*$|^\*\*[^*]+\*\*\s*:\s*$|^\*\*[^*]+\*\*.*:\s*$`),
+		// 3. **Bold text** extra content: - bold at start, ends with colon (allows colons in middle)
+		// 4. **Bold text** - just bold text on its own line (no colon)
+		labelPattern: regexp.MustCompile(`^\*\*[^*]+:\*\*\s*$|^\*\*[^*]+\*\*\s*:\s*$|^\*\*[^*]+\*\*.*:\s*$|^\*\*[^*]+\*\*\s*$`),
 		// Match list items (- or * or numbered)
 		listPattern: regexp.MustCompile(`^\s*[-*]\s+|^\s*\d+\.\s+`),
 	}
