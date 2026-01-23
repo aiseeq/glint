@@ -28,9 +28,9 @@ func NewMdLineBreakRule() *MdLineBreakRule {
 			"Detects consecutive bold-label lines in Markdown that will render as single line",
 			core.SeverityLow,
 		),
-		// Match lines starting with **Label:** (colon inside bold, with optional leading whitespace)
-		// Example: **Версия:** 1.0.0 where "Версия:" is bold
-		boldLabelPattern: regexp.MustCompile(`^\s*\*\*[^*]+:\*\*`),
+		// Match lines starting with **Label:** or **Label**: (colon inside or after bold)
+		// Example: **Версия:** 1.0.0 or **ID**: VUL-002
+		boldLabelPattern: regexp.MustCompile(`^\s*\*\*[^*]+:\*\*|^\s*\*\*[^*]+\*\*\s*:`),
 	}
 }
 
