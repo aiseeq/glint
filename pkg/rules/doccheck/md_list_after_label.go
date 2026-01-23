@@ -30,8 +30,11 @@ func NewMdListAfterLabelRule() *MdListAfterLabelRule {
 			"Detects bold labels followed by lists without blank line (causes rendering issues)",
 			core.SeverityLow,
 		),
-		// Match **Label:** on its own line (no content after)
-		labelPattern: regexp.MustCompile(`^\*\*[^*]+:\*\*\s*$`),
+		// Match label patterns on their own line:
+		// 1. **Label:** - colon inside bold
+		// 2. **Label**: - colon after bold
+		// 3. **Bold text** extra content: - bold at start, ends with colon (allows colons in middle like times)
+		labelPattern: regexp.MustCompile(`^\*\*[^*]+:\*\*\s*$|^\*\*[^*]+\*\*\s*:\s*$|^\*\*[^*]+\*\*.*:\s*$`),
 		// Match list items (- or * or numbered)
 		listPattern: regexp.MustCompile(`^\s*[-*]\s+|^\s*\d+\.\s+`),
 	}
