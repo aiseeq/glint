@@ -234,10 +234,13 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 		".go",
 		".ts", ".tsx",
 		".js", ".jsx",
+		".md",
 	}
 
 	for _, e := range analyzableExtensions {
 		if ext == e {
+			// Debug: uncomment to see which files are considered
+			// fmt.Printf("DEBUG isAnalyzable: %s -> true (ext=%s)\n", path, ext)
 			return true
 		}
 	}

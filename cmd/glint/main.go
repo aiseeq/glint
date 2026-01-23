@@ -233,8 +233,18 @@ func getEnabledRules(cfg *core.Config) []rules.Rule {
 		enabledRules = rules.GetByCategory(flagCategory)
 	}
 	if flagRule != "" {
+		if flagDebug {
+			fmt.Printf("DEBUG: Filtering by rule: %q\n", flagRule)
+		}
 		if r, ok := rules.Get(flagRule); ok {
+			if flagDebug {
+				fmt.Printf("DEBUG: Found rule %s in category %s\n", r.Name(), r.Category())
+			}
 			enabledRules = []rules.Rule{r}
+		} else {
+			if flagDebug {
+				fmt.Printf("DEBUG: Rule %q NOT FOUND in registry\n", flagRule)
+			}
 		}
 	}
 
