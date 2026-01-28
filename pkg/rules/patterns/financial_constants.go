@@ -44,7 +44,11 @@ func (r *FinancialConstantsRule) shouldSkipFile(path string) bool {
 		"/constants/",
 		"_constants.go",
 		"constants.go",
-		"_test.go", // Skip test files - they may have test constants
+		"_test.go",     // Skip test files - they may have test constants
+		"/math.go",     // Skip math utility files (percentage, days calculations)
+		"math/",        // Skip math directories
+		"/monitoring/", // Skip monitoring files (thresholds are not financial)
+		"monitoring/",  // Skip monitoring directories
 	}
 	for _, pattern := range skipPatterns {
 		if strings.Contains(pathLower, pattern) {
@@ -88,12 +92,41 @@ func (r *FinancialConstantsRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	return violations
 }
 
+// isExplicitlyNonFinancial checks if function name clearly indicates non-financial context
+func (r *FinancialConstantsRule) isExplicitlyNonFinancial(funcName string) bool {
+	nonFinancialKeywords := []string{
+		"test",      // Test functions
+		"analytics", // Analytics/dashboard
+		"dashboard", // Dashboard
+		"metrics",   // Metrics/monitoring
+		"exchange",  // Exchange rate placeholders
+		"balance",   // Balance utilities (not fees)
+		"limits",    // Validation limits
+		"validate",  // Validation functions
+		"build",     // Builder functions (usually not fees)
+		"create",    // Factory functions
+		"result",    // Result builders
+	}
+
+	for _, keyword := range nonFinancialKeywords {
+		if strings.Contains(funcName, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
 // isFinancialContext checks if function name suggests financial context
 func (r *FinancialConstantsRule) isFinancialContext(funcName string) bool {
+	// First check if explicitly non-financial
+	if r.isExplicitlyNonFinancial(funcName) {
+		return false
+	}
+
 	financialKeywords := []string{
-		"fee", "commission", "rate", "price", "cost",
+		"fee", "commission", "price", "cost",
 		"charge", "premium", "margin", "spread",
-		"withdrawal", "deposit", "transfer",
+		"withdrawal", "transfer",
 	}
 
 	for _, keyword := range financialKeywords {
@@ -157,6 +190,11 @@ func (r *FinancialConstantsRule) checkDecimalCall(ctx *core.FileContext, call *a
 	// Skip only 0 - often used for initialization
 	// Note: 1 is NOT skipped in financial context as it could be a $1 fee
 	if value == 0 {
+		return nil
+	}
+
+	// Skip explicitly non-financial contexts entirely
+	if r.isExplicitlyNonFinancial(funcName) {
 		return nil
 	}
 
