@@ -168,7 +168,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 
 	contexts, walker := walkFiles(projectRoot, cfg)
 
-	allViolations := analyzeFiles(contexts, enabledRules)
+	allViolations := analyzeFiles(contexts, enabledRules, cfg)
 	allViolations = allViolations.BySeverity(cfg.GetMinSeverity())
 
 	stats := output.Stats{
@@ -271,10 +271,14 @@ func walkFiles(projectRoot string, cfg *core.Config) ([]*core.FileContext, *core
 	return contexts, walker
 }
 
-func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule) core.ViolationList {
+func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config) core.ViolationList {
 	var allViolations core.ViolationList
 	for _, ctx := range contexts {
 		for _, rule := range enabledRules {
+			// Skip file entirely if it matches a rule-level exception
+			if cfg.IsFileExcepted(rule.Category(), rule.Name(), ctx.RelPath) {
+				continue
+			}
 			violations := rule.AnalyzeFile(ctx)
 			allViolations = append(allViolations, violations...)
 		}

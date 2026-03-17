@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -244,6 +245,51 @@ func (c *Config) GetMinSeverity() Severity {
 		return SeverityLow
 	}
 	return sev
+}
+
+// IsFileExcepted checks if a file should be excepted from a specific rule based on YAML exceptions.
+// Supports ** glob patterns by converting to substring match on path segments.
+func (c *Config) IsFileExcepted(category, rule, filePath string) bool {
+	exceptions := c.GetRuleExceptions(category, rule)
+	for _, exc := range exceptions {
+		if exc.Files != "" && matchGlobPattern(exc.Files, filePath) {
+			return true
+		}
+		if exc.File != "" && (exc.File == filePath || exc.File == filepath.Base(filePath)) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchGlobPattern matches a path against a glob pattern, supporting ** for recursive match.
+// filepath.Match doesn't support ** so we handle it: **/foo/bar matches any path ending with /foo/bar.
+func matchGlobPattern(pattern, path string) bool {
+	if strings.Contains(pattern, "**") {
+		// Convert **/rest to suffix match: path must end with /rest (or match rest if ** is prefix)
+		suffix := strings.TrimPrefix(pattern, "**/")
+		if suffix != pattern {
+			// Pattern was **/something — check if path ends with /something or equals something
+			return strings.HasSuffix(path, "/"+suffix) || path == suffix ||
+				strings.Contains(path, "/"+suffix+"/")
+		}
+		// ** in the middle: split and check segments
+		parts := strings.SplitN(pattern, "**", 2)
+		prefix := strings.TrimSuffix(parts[0], "/")
+		suffix = strings.TrimPrefix(parts[1], "/")
+		prefixOK := prefix == "" || strings.HasPrefix(path, prefix+"/") || strings.HasPrefix(path, prefix)
+		suffixOK := suffix == "" || strings.HasSuffix(path, "/"+suffix) || strings.HasSuffix(path, suffix)
+		return prefixOK && suffixOK
+	}
+
+	// No **, use standard filepath.Match
+	matched, err := filepath.Match(pattern, path)
+	if err == nil && matched {
+		return true
+	}
+	// Also try basename
+	matched, err = filepath.Match(pattern, filepath.Base(path))
+	return err == nil && matched
 }
 
 // ShouldExclude checks if a path should be excluded based on glob patterns
