@@ -95,7 +95,8 @@ func (r *ReturnNilErrorRule) isValidNilNilPattern(fn *ast.FuncDecl) bool {
 
 	// 2. "not found" semantics: Get*, Find*, Lookup*, Search*, Existing*
 	// Return (nil, nil) when item doesn't exist (vs error for actual failures)
-	notFoundPrefixes := []string{"get", "find", "lookup", "search", "fetch", "load", "existing"}
+	// Also includes Check*, Validate* - return (nil, nil) for "no issue found"
+	notFoundPrefixes := []string{"get", "find", "lookup", "search", "fetch", "load", "existing", "check", "validate"}
 	for _, prefix := range notFoundPrefixes {
 		if strings.HasPrefix(funcNameLower, prefix) {
 			return true
