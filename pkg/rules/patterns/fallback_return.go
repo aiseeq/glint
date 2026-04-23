@@ -503,6 +503,11 @@ func (r *FallbackReturnRule) analyzeTSFile(ctx *core.FileContext) []*core.Violat
 
 		// ?? fallback pattern
 		regexp.MustCompile(`(?i)\?\?\s*(?:mock|test|fake|fallback)\w+`),
+
+		// Method/function calls named *Fallback*(...) invoked inside an
+		// error-handling branch. Picks up the "primary check failed → call
+		// fallback detector" pattern (TestDataValidator.ts:118).
+		regexp.MustCompile(`\.[A-Za-z_]\w*[Ff]allback\w*\s*\(`),
 	}
 
 	for lineNum, line := range ctx.Lines {
@@ -818,24 +823,24 @@ func (r *FallbackReturnRule) detectImplicitElseFallback(ctx *core.FileContext) [
 // isFunctionNameException checks if function name indicates its OK to have fallbacks
 func (r *FallbackReturnRule) isFunctionNameException(name string) bool {
 	nameLower := strings.ToLower(name)
-	
+
 	// OrX patterns are by design
 	if strings.Contains(nameLower, "ordefault") || strings.Contains(nameLower, "orempty") ||
 		strings.Contains(nameLower, "ornew") || strings.Contains(nameLower, "ornull") {
 		return true
 	}
-	
+
 	// Get*Manager, Get*Instance - singleton patterns
 	if strings.HasPrefix(nameLower, "get") && (strings.HasSuffix(nameLower, "manager") ||
 		strings.HasSuffix(nameLower, "instance") || strings.HasSuffix(nameLower, "singleton")) {
 		return true
 	}
-	
+
 	// Parse* functions often have legitimate fallbacks
 	if strings.HasPrefix(nameLower, "parse") {
 		return true
 	}
-	
+
 	return false
 }
 
@@ -844,7 +849,7 @@ func (r *FallbackReturnRule) returnsValueAndError(funcDecl *ast.FuncDecl) bool {
 	if funcDecl.Type.Results == nil || len(funcDecl.Type.Results.List) < 2 {
 		return false
 	}
-	
+
 	// Check last return type is error
 	lastResult := funcDecl.Type.Results.List[len(funcDecl.Type.Results.List)-1]
 	if ident, ok := lastResult.Type.(*ast.Ident); ok {
@@ -857,33 +862,33 @@ func (r *FallbackReturnRule) returnsValueAndError(funcDecl *ast.FuncDecl) bool {
 func (r *FallbackReturnRule) checkForImplicitFallback(ctx *core.FileContext, funcDecl *ast.FuncDecl) []*core.Violation {
 	var violations []*core.Violation
 	stmts := funcDecl.Body.List
-	
+
 	for i := 0; i < len(stmts)-1; i++ {
 		ifStmt, ok := stmts[i].(*ast.IfStmt)
 		if !ok {
 			continue
 		}
-		
+
 		// Check if the if body returns (positive path)
 		if !r.bodyReturnsWithoutError(ifStmt.Body) {
 			continue
 		}
-		
+
 		// Check next statement is a return (the fallback)
 		nextReturn, ok := stmts[i+1].(*ast.ReturnStmt)
 		if !ok {
 			continue
 		}
-		
+
 		// Skip if the return includes an error
 		if r.returnsError(nextReturn) {
 			continue
 		}
-		
+
 		// Check if theres a fallback comment nearby
 		pos := ctx.PositionFor(nextReturn)
 		if r.hasFallbackCommentNearby(ctx.Lines, pos.Line-1) {
-			v := r.CreateViolation(ctx.RelPath, pos.Line, 
+			v := r.CreateViolation(ctx.RelPath, pos.Line,
 				"Implicit else fallback - returns non-error value when precondition fails")
 			v.WithCode(ctx.GetLine(pos.Line))
 			v.WithSuggestion("Return an error instead of fallback. Caller should handle missing precondition.")
@@ -891,7 +896,7 @@ func (r *FallbackReturnRule) checkForImplicitFallback(ctx *core.FileContext, fun
 			violations = append(violations, v)
 		}
 	}
-	
+
 	return violations
 }
 

@@ -34,15 +34,27 @@ func NewSilentErrorHandlingRule() *SilentErrorHandlingRule {
 
 // AnalyzeFile checks for silent error handling
 func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.HasGoAST() || ctx.IsTestFile() {
+	if !ctx.HasGoAST() {
 		return nil
 	}
 
-	// Skip test utility files
 	pathLower := strings.ToLower(ctx.RelPath)
-	if strings.Contains(pathLower, "/test") || strings.Contains(pathLower, "test_") ||
-		strings.HasSuffix(pathLower, "/test.go") || strings.HasSuffix(pathLower, "/testing.go") {
+
+	// Strict _test.go files: unit tests legitimately assert with `t.Error` etc.
+	// Skip them entirely.
+	if strings.HasSuffix(pathLower, "_test.go") {
 		return nil
+	}
+
+	// Test helpers under /tests/ are in-scope per CLAUDE.md "Log all errors,
+	// never ignore silently" — a helper that silently returns `nil` masks
+	// genuine API failures as missing data and hides infrastructure bugs.
+	// Generic /test-prefixed utility files unrelated to /tests/ are skipped.
+	if !strings.Contains(pathLower, "/tests/") {
+		if strings.Contains(pathLower, "test_") ||
+			strings.HasSuffix(pathLower, "/test.go") || strings.HasSuffix(pathLower, "/testing.go") {
+			return nil
+		}
 	}
 
 	var violations []*core.Violation
