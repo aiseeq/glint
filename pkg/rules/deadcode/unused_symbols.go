@@ -126,8 +126,10 @@ func (r *UnusedSymbolsRule) checkSiblingFileUsages(ctx *core.FileContext, symbol
 		}
 
 		name := entry.Name()
-		// Skip current file, test files, and non-Go files
-		if name == currentFile || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+		// Skip current file and non-Go files. Test files ARE scanned: an unexported
+		// symbol used only by tests (e.g. test-only reset helpers, alert formatters
+		// exercised by unit tests) is not dead code.
+		if name == currentFile || !strings.HasSuffix(name, ".go") {
 			continue
 		}
 

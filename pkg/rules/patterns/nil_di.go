@@ -65,6 +65,12 @@ func (r *NilDIRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			return true
 		}
 
+		// Skip known stdlib constructors where the nil-able parameter is not a DI dependency
+		// (e.g. http.NewRequest body is io.Reader, bytes.NewReader takes []byte).
+		if r.isStdlibNonDI(call) {
+			return true
+		}
+
 		// Check each argument for nil
 		for i, arg := range call.Args {
 			if !r.isNilIdent(arg) {
@@ -200,6 +206,29 @@ func (r *NilDIRule) getFuncName(call *ast.CallExpr) string {
 		return fn.Sel.Name
 	}
 	return ""
+}
+
+// isStdlibNonDI reports whether the call is a known stdlib constructor where a nil argument
+// is a canonical use (not a missing dependency). Example: http.NewRequest(..., nil) is a
+// bodiless GET; bytes.NewReader(nil) returns an empty reader.
+func (r *NilDIRule) isStdlibNonDI(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	switch pkg.Name + "." + sel.Sel.Name {
+	case "http.NewRequest",
+		"http.NewRequestWithContext",
+		"bytes.NewReader",
+		"bytes.NewBuffer",
+		"strings.NewReader":
+		return true
+	}
+	return false
 }
 
 // isNilIdent checks if expression is the nil identifier

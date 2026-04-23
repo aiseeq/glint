@@ -1,4 +1,4 @@
-.PHONY: build install clean test test-coverage lint fmt check help
+.PHONY: build install clean test test-coverage lint fmt check help commit
 
 # Build variables
 BINARY_NAME=glint
@@ -84,6 +84,17 @@ deps-update: ## Update dependencies
 
 self-check: build ## Run glint on itself
 	./$(BUILD_DIR)/$(BINARY_NAME) check ./...
+
+## Commit
+
+commit: ## Stage all and commit with MESSAGE (usage: make commit MESSAGE="...")
+	@if [ -z "$(MESSAGE)" ]; then \
+		echo "Usage: make commit MESSAGE=\"commit message\""; \
+		exit 1; \
+	fi
+	@git add -A
+	@git commit -m "$(MESSAGE)" -m "" -m "🤖 Generated with Claude Code" -m "" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
+	@echo "Committed: $(MESSAGE)"
 
 ## Help
 

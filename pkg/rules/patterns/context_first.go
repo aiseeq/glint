@@ -161,7 +161,8 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 		"RevokeAllSessions",         // session management
 		"Enable", "Disable", "Name", // middleware control methods
 		"CommitTransaction", "RollbackTransaction", // transaction methods
-		"Calculate", // calculation methods
+		"Calculate",                    // calculation methods
+		"Now", "UTC", "Since", "Until", // time helpers (pure, no I/O)
 	}
 
 	for _, special := range specialNames {
@@ -231,7 +232,8 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 		"Business", "Domain", // domain logic (often pure)
 		"Blockchain", "Detailed", // specific handlers
 		"LessThan", "GreaterThan", "EqualTo", // comparison methods
-		"Compound", // calculation prefixes
+		"Compound",             // calculation prefixes
+		"Next", "Prev", "Peek", // pure iterators/lookups
 	}
 
 	for _, prefix := range purePrefixes {

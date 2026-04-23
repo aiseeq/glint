@@ -81,12 +81,27 @@ func (r *ContextBackgroundRule) hasContextParam(fn *ast.FuncDecl) bool {
 	}
 
 	for _, param := range fn.Type.Params.List {
-		if r.isContextType(param.Type) {
-			return true
+		if !r.isContextType(param.Type) {
+			continue
 		}
+		// Skip params explicitly marked as unused (`_ context.Context`). The caller ctx is
+		// intentionally ignored — context.Background()/TODO() is the correct choice then.
+		if len(param.Names) > 0 && allUnderscore(param.Names) {
+			continue
+		}
+		return true
 	}
 
 	return false
+}
+
+func allUnderscore(names []*ast.Ident) bool {
+	for _, n := range names {
+		if n.Name != "_" {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *ContextBackgroundRule) isContextType(expr ast.Expr) bool {

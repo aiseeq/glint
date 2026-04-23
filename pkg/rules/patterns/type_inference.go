@@ -59,6 +59,21 @@ func (ti *TypeInferrer) IsAny(name string) bool {
 }
 
 func (ti *TypeInferrer) collectTypes(file *ast.File) {
+	// Pass 1: collect struct fields. These are the most authoritative type declarations
+	// for a given name and must not be overwritten by later-seen function params
+	// (e.g. a variadic `foo ...T` param in a constructor must not make the struct field
+	// `foo *T` appear as a slice).
+	ast.Inspect(file, func(n ast.Node) bool {
+		if st, ok := n.(*ast.StructType); ok && st.Fields != nil {
+			for _, f := range st.Fields.List {
+				ti.processField(f)
+			}
+		}
+		return true
+	})
+
+	// Pass 2: everything else. processField and processValueSpec now skip names already
+	// registered from struct fields.
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.ValueSpec:
@@ -66,8 +81,12 @@ func (ti *TypeInferrer) collectTypes(file *ast.File) {
 			// var t time.Time
 			ti.processValueSpec(node)
 
+		case *ast.StructType:
+			// Already handled in pass 1; prevent double-visit of nested fields.
+			return false
+
 		case *ast.Field:
-			// Function parameters and struct fields
+			// Function parameters and other field nodes (interface methods, etc.)
 			ti.processField(node)
 
 		case *ast.AssignStmt:
@@ -93,18 +112,32 @@ func (ti *TypeInferrer) processValueSpec(spec *ast.ValueSpec) {
 	}
 
 	for _, name := range spec.Names {
-		if name.Name != "_" {
-			ti.varTypes[name.Name] = typeInfo
+		if name.Name == "_" {
+			continue
 		}
+		if _, ok := ti.varTypes[name.Name]; ok {
+			// Earlier declaration (e.g. struct field) wins over later shadowing.
+			continue
+		}
+		ti.varTypes[name.Name] = typeInfo
 	}
 }
 
 func (ti *TypeInferrer) processField(field *ast.Field) {
+	// Variadic params (`x ...T`) are strictly function-local and would otherwise shadow
+	// struct fields / pointer params with the same name in this file-level map.
+	if _, isVariadic := field.Type.(*ast.Ellipsis); isVariadic {
+		return
+	}
 	typeInfo := ti.analyzeTypeExpr(field.Type)
 	for _, name := range field.Names {
-		if name.Name != "_" {
-			ti.varTypes[name.Name] = typeInfo
+		if name.Name == "_" {
+			continue
 		}
+		if _, ok := ti.varTypes[name.Name]; ok {
+			continue
+		}
+		ti.varTypes[name.Name] = typeInfo
 	}
 }
 
@@ -112,6 +145,10 @@ func (ti *TypeInferrer) processAssignment(assign *ast.AssignStmt) {
 	for i, lhs := range assign.Lhs {
 		ident, ok := lhs.(*ast.Ident)
 		if !ok || ident.Name == "_" {
+			continue
+		}
+
+		if _, ok := ti.varTypes[ident.Name]; ok {
 			continue
 		}
 
