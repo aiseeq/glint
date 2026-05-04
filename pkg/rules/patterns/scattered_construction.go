@@ -55,6 +55,9 @@ func (r *ScatteredConstructionRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 	if !ctx.IsGoFile() || ctx.GoAST == nil {
 		return nil
 	}
+	if ctx.IsTestFile() {
+		return nil
+	}
 
 	r.collectConstructions(ctx)
 	return r.reportViolations(ctx)

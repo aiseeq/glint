@@ -44,13 +44,31 @@ func (r *TimeEqualRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		return nil
 	}
 
-	// Build type information from declarations
-	typeInferrer := NewTypeInferrer(ctx.GoAST)
+	// Build file-level type information for globals and struct fields. Function-local
+	// inference below takes precedence to avoid same-name variables leaking across
+	// functions in this file-level AST pass.
+	fileInferrer := NewTypeInferrer(ctx.GoAST)
 
 	var violations []*core.Violation
 
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+
+		localInferrer := NewTypeInferrerFromNode(fn)
+		violations = append(violations, r.analyzeComparisons(ctx, fn.Body, localInferrer, fileInferrer)...)
+	}
+
+	return violations
+}
+
+func (r *TimeEqualRule) analyzeComparisons(ctx *core.FileContext, node ast.Node, localInferrer, fileInferrer *TypeInferrer) []*core.Violation {
+	var violations []*core.Violation
+
 	// Find == and != comparisons involving time variables
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+	ast.Inspect(node, func(n ast.Node) bool {
 		binary, ok := n.(*ast.BinaryExpr)
 		if !ok {
 			return true
@@ -66,8 +84,8 @@ func (r *TimeEqualRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		}
 
 		// Check if either side is a time expression
-		leftIsTime := r.isTimeExpr(binary.X, typeInferrer)
-		rightIsTime := r.isTimeExpr(binary.Y, typeInferrer)
+		leftIsTime := r.isTimeExpr(binary.X, localInferrer, fileInferrer)
+		rightIsTime := r.isTimeExpr(binary.Y, localInferrer, fileInferrer)
 
 		if !leftIsTime && !rightIsTime {
 			return true
@@ -110,12 +128,12 @@ func (r *TimeEqualRule) isNilExpr(expr ast.Expr) bool {
 	return false
 }
 
-func (r *TimeEqualRule) isTimeExpr(expr ast.Expr, inferrer *TypeInferrer) bool {
+func (r *TimeEqualRule) isTimeExpr(expr ast.Expr, localInferrer, fileInferrer *TypeInferrer) bool {
 	switch e := expr.(type) {
 	case *ast.Ident:
 		// Check type inference first
-		if inferrer.IsTime(e.Name) {
-			return true
+		if info, ok := getScopedType(e.Name, localInferrer, fileInferrer); ok {
+			return info.IsTime
 		}
 		// Fallback to common time variable names
 		return r.looksLikeTimeVar(e.Name)
@@ -127,7 +145,7 @@ func (r *TimeEqualRule) isTimeExpr(expr ast.Expr, inferrer *TypeInferrer) bool {
 		// Check if the base object has a known time field
 		if ident, ok := e.X.(*ast.Ident); ok {
 			// Check if we know the type of the base object
-			if info, ok := inferrer.GetType(ident.Name); ok && info.TypeName != "" {
+			if info, ok := getScopedType(ident.Name, localInferrer, fileInferrer); ok && info.TypeName != "" {
 				// If we have type info, trust the field name heuristic
 				return r.looksLikeTimeField(fieldName)
 			}
@@ -140,6 +158,18 @@ func (r *TimeEqualRule) isTimeExpr(expr ast.Expr, inferrer *TypeInferrer) bool {
 		return r.isTimeCall(e)
 	}
 	return false
+}
+
+func getScopedType(name string, localInferrer, fileInferrer *TypeInferrer) (TypeInfo, bool) {
+	if localInferrer != nil {
+		if info, ok := localInferrer.GetType(name); ok {
+			return info, true
+		}
+	}
+	if fileInferrer != nil {
+		return fileInferrer.GetType(name)
+	}
+	return TypeInfo{}, false
 }
 
 func (r *TimeEqualRule) looksLikeTimeVar(name string) bool {
@@ -168,7 +198,6 @@ func (r *TimeEqualRule) looksLikeTimeField(name string) bool {
 		"StartTime": true,
 		"EndTime":   true,
 		"Timestamp": true,
-		"Date":      true,
 		"Birthday":  true,
 	}
 	return timeFieldNames[name]
