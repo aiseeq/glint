@@ -39,11 +39,11 @@ func short() {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := core.NewFileContext("/test/file.go", "/test", []byte(tt.code), core.DefaultConfig())
+			ctx := core.NewFileContext("/app/file.go", "/app", []byte(tt.code), core.DefaultConfig())
 
 			// Parse Go AST
 			parser := core.NewParser()
-			fset, astFile, err := parser.ParseGoFile("/test/file.go", []byte(tt.code))
+			fset, astFile, err := parser.ParseGoFile("/app/file.go", []byte(tt.code))
 			if err == nil {
 				ctx.SetGoAST(fset, astFile)
 			}

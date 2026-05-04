@@ -31,6 +31,17 @@ func NewTypeInferrer(file *ast.File) *TypeInferrer {
 	return ti
 }
 
+// NewTypeInferrerFromNode creates a type inferrer for a specific AST scope.
+func NewTypeInferrerFromNode(node ast.Node) *TypeInferrer {
+	ti := &TypeInferrer{
+		varTypes: make(map[string]TypeInfo),
+	}
+	if node != nil {
+		ti.collectTypes(node)
+	}
+	return ti
+}
+
 // GetType returns type info for a variable name
 func (ti *TypeInferrer) GetType(name string) (TypeInfo, bool) {
 	info, ok := ti.varTypes[name]
@@ -58,12 +69,12 @@ func (ti *TypeInferrer) IsAny(name string) bool {
 	return info.TypeName == "any" || info.TypeName == "interface{}"
 }
 
-func (ti *TypeInferrer) collectTypes(file *ast.File) {
+func (ti *TypeInferrer) collectTypes(node ast.Node) {
 	// Pass 1: collect struct fields. These are the most authoritative type declarations
 	// for a given name and must not be overwritten by later-seen function params
 	// (e.g. a variadic `foo ...T` param in a constructor must not make the struct field
 	// `foo *T` appear as a slice).
-	ast.Inspect(file, func(n ast.Node) bool {
+	ast.Inspect(node, func(n ast.Node) bool {
 		if st, ok := n.(*ast.StructType); ok && st.Fields != nil {
 			for _, f := range st.Fields.List {
 				ti.processField(f)
@@ -74,7 +85,7 @@ func (ti *TypeInferrer) collectTypes(file *ast.File) {
 
 	// Pass 2: everything else. processField and processValueSpec now skip names already
 	// registered from struct fields.
-	ast.Inspect(file, func(n ast.Node) bool {
+	ast.Inspect(node, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.ValueSpec:
 			// var items []string

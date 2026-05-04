@@ -195,6 +195,7 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 		"Write", "Read", "Close", "Open", // I/O (often interface methods)
 		"Multi", "Safe", "Try", // wrapper patterns
 		"Generate", "Render", "Print", // output generation
+		"Detect",                         // pure classification/detection helpers
 		"Allowed", "Denied", "Permitted", // authorization checks
 		"Reset", "Update", "Refresh", // state operations
 		"Serve", "Benchmark", "Test", "Example", // special function types
@@ -270,7 +271,7 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 		"Strict",                                     // validation variants
 		"WithTrace", "Structured", "WithCorrelation", // logging variants
 		"Success", "Error", "Access", // response/status suffixes
-		"Exists", "Value", "Path", // JSONB/JSON query helpers
+		"Exists", "Value", "Path", "Count", // JSONB/JSON query/accessor helpers
 		"Time", "Duration", "Retry", // timing helpers
 		"Event", "Session", "Token", // domain objects
 	}

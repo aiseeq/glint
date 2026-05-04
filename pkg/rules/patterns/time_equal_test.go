@@ -90,6 +90,58 @@ func example(e1, e2 Event) bool {
 			expectMatch: true,
 		},
 		{
+			name: "string Date field comparison",
+			code: `package main
+
+import "time"
+
+type FinancialTransaction struct {
+	Date string
+}
+
+func example(tx FinancialTransaction) bool {
+	_ = time.Now()
+	return tx.Date == ""
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "string date parameter shadows date time in another function",
+			code: `package main
+
+import "time"
+
+func record(txDate string) bool {
+	date, _ := time.Parse("2006-01-02", txDate)
+	return date == time.Now()
+}
+
+func lookup(date string) bool {
+	return date == ""
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "string date parameter is not time comparison",
+			code: `package main
+
+import "time"
+
+func record(txDate string) bool {
+	date, _ := time.Parse("2006-01-02", txDate)
+	_ = date
+	return txDate == ""
+}
+
+func lookup(date string) bool {
+	return date == ""
+}
+`,
+			expectMatch: false,
+		},
+		{
 			name: "no time import",
 			code: `package main
 

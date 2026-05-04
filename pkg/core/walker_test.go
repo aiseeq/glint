@@ -179,8 +179,8 @@ func TestWalkerOnlyAnalyzesCodeFiles(t *testing.T) {
 
 	contexts, _ := walker.WalkSync()
 
-	// Should only include Go, TypeScript, and JavaScript files
-	assert.Len(t, contexts, 3)
+	// Should only include Go, TypeScript, JavaScript, and Markdown files
+	assert.Len(t, contexts, 4)
 
 	var extensions []string
 	for _, ctx := range contexts {
@@ -190,6 +190,7 @@ func TestWalkerOnlyAnalyzesCodeFiles(t *testing.T) {
 	assert.Contains(t, extensions, ".go")
 	assert.Contains(t, extensions, ".ts")
 	assert.Contains(t, extensions, ".js")
+	assert.Contains(t, extensions, ".md")
 }
 
 func TestWalkerParsesGoFiles(t *testing.T) {

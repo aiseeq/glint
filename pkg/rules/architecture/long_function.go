@@ -48,6 +48,9 @@ func (r *LongFunctionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 	if !ctx.HasGoAST() {
 		return nil
 	}
+	if ctx.IsTestFile() {
+		return nil
+	}
 
 	var violations []*core.Violation
 
