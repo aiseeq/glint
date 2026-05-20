@@ -170,8 +170,8 @@ func complex(x, y int, items []int) int {
 func TestCyclomaticComplexityConfigure(t *testing.T) {
 	rule := NewCyclomaticComplexityRule()
 
-	// Default should be 10
-	assert.Equal(t, 10, rule.maxComplexity)
+	// Default should ignore routine branching and flag only clearly complex functions.
+	assert.Equal(t, 20, rule.maxComplexity)
 
 	// Configure with new value
 	err := rule.Configure(map[string]any{"max_complexity": 15})

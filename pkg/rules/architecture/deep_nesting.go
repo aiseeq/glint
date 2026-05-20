@@ -47,7 +47,7 @@ func (r *DeepNestingRule) Configure(settings map[string]any) error {
 
 // AnalyzeFile checks for deeply nested code
 func (r *DeepNestingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || !ctx.HasGoAST() {
+	if !ctx.IsGoFile() || !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
 	return helpers.AnalyzeFuncDecls(ctx, r.checkFuncDecl)

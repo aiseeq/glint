@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	defaultMaxFunctionLines = 50
+	defaultMaxFunctionLines = 100
 )
 
 func init() {

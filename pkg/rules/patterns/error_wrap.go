@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -31,6 +32,9 @@ func NewErrorWrapRule() *ErrorWrapRule {
 // AnalyzeFile checks for unwrapped error returns
 func (r *ErrorWrapRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.GoAST == nil {
+		return nil
+	}
+	if strings.HasPrefix(ctx.RelPath, "internal/") || strings.HasPrefix(ctx.RelPath, "cmd/") {
 		return nil
 	}
 

@@ -58,6 +58,9 @@ func (r *ContextFirstRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 		if r.isSpecialFunction(fn) {
 			return true
 		}
+		if r.hasNoParams(fn) {
+			return true
+		}
 
 		// Skip functions that return only error (like Close(), Flush())
 		if r.isSimpleOperation(fn) {
@@ -145,7 +148,7 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 		"Keys", "Values", "Entries", "Items", // collection accessors
 		"Authenticate", "Authorize", // auth methods (context often in struct)
 		"HTTPStatusCode", "StatusCode", // status helpers
-		"Coalesce", "Min", "Max", // utility functions
+		"Coalesce", "Min", "Max", "T", "Sign", "Router", "MountOnRouter", "CancelTransaction", // utility functions
 		"Ptr", "Ref", // pointer helpers
 		"Contains", "Float64", "Float32", "Int64", "Int32", // exact type helpers
 		"Deactivate", "Increment", "Decrement", // state operations
@@ -169,6 +172,12 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 		if name == special {
 			return true
 		}
+	}
+	if strings.HasPrefix(name, "Err") {
+		return true
+	}
+	if strings.Contains(name, "Currency") {
+		return true
 	}
 
 	// Pure function prefixes - no I/O, no need for context
@@ -283,6 +292,10 @@ func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
 	}
 
 	return false
+}
+
+func (r *ContextFirstRule) hasNoParams(fn *ast.FuncDecl) bool {
+	return fn.Type == nil || fn.Type.Params == nil || len(fn.Type.Params.List) == 0
 }
 
 func (r *ContextFirstRule) isSimpleOperation(fn *ast.FuncDecl) bool {

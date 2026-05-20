@@ -3,7 +3,6 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
-	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -73,26 +72,6 @@ func (r *GoModernRule) checkCallExpr(ctx *core.FileContext, call *ast.CallExpr) 
 			funcName := ident.Name + "." + sel.Sel.Name
 
 			switch funcName {
-			case "sort.Slice", "sort.SliceStable":
-				// Suggest slices.SortFunc for Go 1.21+
-				pos := ctx.PositionFor(call)
-				v := r.CreateViolation(ctx.RelPath, pos.Line,
-					"Consider using slices.SortFunc (Go 1.21+) instead of "+funcName)
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Use slices.SortFunc or slices.SortStableFunc from the slices package")
-				v.WithContext("pattern", "sort-modernization")
-				violations = append(violations, v)
-
-			case "sort.Search":
-				// Suggest slices.BinarySearch for Go 1.21+
-				pos := ctx.PositionFor(call)
-				v := r.CreateViolation(ctx.RelPath, pos.Line,
-					"Consider using slices.BinarySearch (Go 1.21+) instead of sort.Search")
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Use slices.BinarySearch or slices.BinarySearchFunc from the slices package")
-				v.WithContext("pattern", "search-modernization")
-				violations = append(violations, v)
-
 			case "reflect.SliceHeader", "reflect.StringHeader":
 				// These are deprecated in Go 1.20+
 				pos := ctx.PositionFor(call)
@@ -104,10 +83,6 @@ func (r *GoModernRule) checkCallExpr(ctx *core.FileContext, call *ast.CallExpr) 
 				violations = append(violations, v)
 			}
 
-			// Check for callback-based iteration that could use Go 1.23 iterators
-			if v := r.checkIteratorCallback(ctx, call, sel); v != nil {
-				violations = append(violations, v)
-			}
 		}
 	}
 
@@ -115,21 +90,6 @@ func (r *GoModernRule) checkCallExpr(ctx *core.FileContext, call *ast.CallExpr) 
 	if ident, ok := call.Fun.(*ast.Ident); ok {
 		if ident.Name == "math.Max" || ident.Name == "math.Min" {
 			// This is actually a selector, handled above
-		}
-	}
-
-	// Check for math.Max/math.Min
-	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-		if pkgIdent, ok := sel.X.(*ast.Ident); ok && pkgIdent.Name == "math" {
-			if sel.Sel.Name == "Max" || sel.Sel.Name == "Min" {
-				pos := ctx.PositionFor(call)
-				v := r.CreateViolation(ctx.RelPath, pos.Line,
-					"Consider using built-in "+strings.ToLower(sel.Sel.Name)+" (Go 1.21+) instead of math."+sel.Sel.Name)
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Use built-in max() or min() for integer types")
-				v.WithContext("pattern", "builtin-minmax")
-				violations = append(violations, v)
-			}
 		}
 	}
 

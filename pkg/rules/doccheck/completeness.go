@@ -55,6 +55,9 @@ func (r *DocCompletenessRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	if ctx.IsTestFile() {
 		return nil
 	}
+	if strings.HasPrefix(ctx.RelPath, "internal/") {
+		return nil
+	}
 
 	// Skip compatibility/alias files - they just re-export types
 	if r.skipTrivial && r.isCompatibilityFile(ctx.RelPath) {

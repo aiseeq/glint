@@ -83,11 +83,12 @@ func (r *TimeEqualRule) analyzeComparisons(ctx *core.FileContext, node ast.Node,
 			return true
 		}
 
-		// Check if either side is a time expression
+		// Compare only confirmed time expressions on both sides. A single heuristic
+		// match creates false positives for sentinel comparisons such as err == io.EOF.
 		leftIsTime := r.isTimeExpr(binary.X, localInferrer, fileInferrer)
 		rightIsTime := r.isTimeExpr(binary.Y, localInferrer, fileInferrer)
 
-		if !leftIsTime && !rightIsTime {
+		if !leftIsTime || !rightIsTime {
 			return true
 		}
 

@@ -348,12 +348,18 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsVal
 			if r.exprUsesErrorValue(result) {
 				return true
 			}
+			if r.exprReturnsUserVisibleError(result) {
+				return true
+			}
 		}
 
 	case *ast.ExprStmt:
 		// Check for logging calls
 		if call, ok := s.X.(*ast.CallExpr); ok {
 			if r.isLoggingCall(call) {
+				return true
+			}
+			if r.isResponseCall(call) {
 				return true
 			}
 			// Check for panic
@@ -390,6 +396,38 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsVal
 		}
 	}
 
+	return false
+}
+
+func (r *SilentErrorHandlingRule) exprReturnsUserVisibleError(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.UnaryExpr:
+		return r.exprReturnsUserVisibleError(e.X)
+	case *ast.CompositeLit:
+		for _, elt := range e.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := kv.Key.(*ast.Ident)
+			if ok && strings.EqualFold(key.Name, "error") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *SilentErrorHandlingRule) isResponseCall(call *ast.CallExpr) bool {
+	funcName := strings.ToLower(core.ExtractFullFunctionName(call))
+	patterns := []string{
+		"http.error", "writejson", "render", "redirect", "respond", "response", "senderror", "errorjson",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(funcName, pattern) {
+			return true
+		}
+	}
 	return false
 }
 

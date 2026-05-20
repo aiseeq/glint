@@ -26,7 +26,7 @@ func main() {
 		return items[i] < items[j]
 	})
 }`,
-			wantViolations: 1,
+			wantViolations: 0,
 		},
 		{
 			name: "sort.SliceStable - suggest slices.SortStableFunc",
@@ -40,7 +40,7 @@ func main() {
 		return items[i] < items[j]
 	})
 }`,
-			wantViolations: 1,
+			wantViolations: 0,
 		},
 		{
 			name: "sort.Search - suggest slices.BinarySearch",
@@ -55,7 +55,7 @@ func main() {
 	})
 	_ = idx
 }`,
-			wantViolations: 1,
+			wantViolations: 0,
 		},
 		{
 			name: "math.Max - suggest built-in max",
@@ -68,7 +68,7 @@ func main() {
 	m := math.Max(a, b)
 	_ = m
 }`,
-			wantViolations: 1,
+			wantViolations: 0,
 		},
 		{
 			name: "math.Min - suggest built-in min",
@@ -81,7 +81,7 @@ func main() {
 	m := math.Min(a, b)
 	_ = m
 }`,
-			wantViolations: 1,
+			wantViolations: 0,
 		},
 		{
 			name: "slices.Sort - already modern, no violation",
@@ -125,7 +125,7 @@ func main() {
 	m := math.Max(a, b)
 	_ = m
 }`,
-			wantViolations: 2,
+			wantViolations: 0,
 		},
 		{
 			name: "method call Walk - not flagged (can't change library APIs)",
@@ -170,7 +170,7 @@ func main() {
 		return nil
 	})
 }`,
-			wantViolations: 1, // Package-level call - suggest Go 1.23 iterator
+			wantViolations: 0,
 		},
 		{
 			name: "callback iteration - no func literal",

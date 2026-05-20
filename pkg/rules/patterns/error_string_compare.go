@@ -31,7 +31,7 @@ func NewErrorStringCompareRule() *ErrorStringCompareRule {
 
 // AnalyzeFile checks for error string comparisons
 func (r *ErrorStringCompareRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.GoAST == nil {
+	if !ctx.IsGoFile() || ctx.GoAST == nil || ctx.IsTestFile() {
 		return nil
 	}
 

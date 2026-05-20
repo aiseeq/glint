@@ -169,6 +169,22 @@ func example() bool {
 			expectMatch: false,
 		},
 		{
+			name: "io EOF sentinel comparison with time import",
+			code: `package main
+
+import (
+	"io"
+	"time"
+)
+
+func example(err error) bool {
+	_ = time.Now()
+	return err == io.EOF
+}
+`,
+			expectMatch: false,
+		},
+		{
 			name: "type inference from var declaration",
 			code: `package main
 
