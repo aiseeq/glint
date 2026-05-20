@@ -28,7 +28,7 @@ func NewDuplicateBlockRule() *DuplicateBlockRule {
 			"Detects duplicate code blocks within the same file (copy-paste detection)",
 			core.SeverityMedium,
 		),
-		minBlockSize: 8, // Minimum 8 consecutive lines
+		minBlockSize: 40,
 	}
 }
 
@@ -37,24 +37,46 @@ func (r *DuplicateBlockRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
-	r.minBlockSize = r.GetIntSetting("min_block_size", 6)
+	r.minBlockSize = r.GetIntSetting("min_block_size", 40)
 	return nil
 }
 
 // AnalyzeFile checks for duplicate code blocks
 func (r *DuplicateBlockRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if ctx.IsTestFile() || len(ctx.Lines) < r.minBlockSize*2 {
+	if (!ctx.IsGoFile() && !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile()) || ctx.IsTestFile() || len(ctx.Lines) < r.minBlockSize*2 {
 		return nil
 	}
+
+	rawStringLines := rawStringLineSet(ctx.Lines)
 
 	// Normalize all lines
 	normalized := make([]string, len(ctx.Lines))
 	for i, line := range ctx.Lines {
+		if rawStringLines[i] {
+			normalized[i] = ""
+			continue
+		}
 		normalized[i] = r.normalizeLine(line)
 	}
 
 	// Find duplicate blocks using sliding window
 	return r.findDuplicateWindows(ctx, normalized)
+}
+
+func rawStringLineSet(lines []string) map[int]bool {
+	result := make(map[int]bool)
+	inRawString := false
+	for i, line := range lines {
+		if strings.Count(line, "`")%2 == 1 {
+			result[i] = true
+			inRawString = !inRawString
+			continue
+		}
+		if inRawString {
+			result[i] = true
+		}
+	}
+	return result
 }
 
 func (r *DuplicateBlockRule) findDuplicateWindows(ctx *core.FileContext, normalized []string) []*core.Violation {

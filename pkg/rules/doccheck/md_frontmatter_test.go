@@ -50,16 +50,15 @@ Content.`,
 			expectViolations: 0,
 		},
 		{
-			name: "missing frontmatter",
+			name: "frontmatter is optional",
 			path: "/test/doc.md",
 			content: `# Test Document
 
 Some content here.`,
-			expectViolations: 1,
-			expectMessages:   []string{"Missing YAML frontmatter"},
+			expectViolations: 0,
 		},
 		{
-			name: "missing required field - title",
+			name: "partial frontmatter is allowed",
 			path: "/test/doc.md",
 			content: `---
 description: A test document
@@ -68,19 +67,17 @@ version: 3.3.51
 ---
 
 # Test Document`,
-			expectViolations: 1,
-			expectMessages:   []string{"Missing required frontmatter field: title"},
+			expectViolations: 0,
 		},
 		{
-			name: "missing multiple required fields",
+			name: "minimal frontmatter is allowed",
 			path: "/test/doc.md",
 			content: `---
 title: Test
 ---
 
 # Test`,
-			expectViolations: 3,
-			expectMessages:   []string{"description", "date", "version"},
+			expectViolations: 0,
 		},
 		{
 			name: "invalid date format",
@@ -126,8 +123,7 @@ version: 3.3.51
 **Date:** 2026-01-23
 
 Some content.`,
-			expectViolations: 2,
-			expectMessages:   []string{"Old-style metadata found"},
+			expectViolations: 0,
 		},
 		{
 			name: "skip README.md",

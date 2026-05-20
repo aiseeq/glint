@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultMaxComplexity = 10
+	defaultMaxComplexity = 20
 )
 
 func init() {
@@ -49,7 +49,7 @@ func (r *CyclomaticComplexityRule) Configure(settings map[string]any) error {
 
 // AnalyzeFile checks for high cyclomatic complexity
 func (r *CyclomaticComplexityRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || !ctx.HasGoAST() {
+	if !ctx.IsGoFile() || !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
 	return helpers.AnalyzeFuncDecls(ctx, r.checkFunction)

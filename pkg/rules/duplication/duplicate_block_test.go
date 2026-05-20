@@ -18,8 +18,9 @@ func TestDuplicateBlockRule_Metadata(t *testing.T) {
 
 func TestDuplicateBlockRule_DetectsDuplicate(t *testing.T) {
 	rule := NewDuplicateBlockRule()
+	rule.minBlockSize = 8
 
-	// Large duplicate block with 8+ substantial lines
+	// Duplicate block with 8+ substantial lines.
 	code := `package main
 
 func processUserData(id int) error {

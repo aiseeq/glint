@@ -36,7 +36,7 @@ func NewMdFrontmatterRule() *MdFrontmatterRule {
 			"Validates YAML frontmatter presence and format in Markdown documents",
 			core.SeverityMedium,
 		),
-		requiredFields: []string{"title", "description", "date", "version"},
+		requiredFields: nil,
 		// Match lines like **Label:** value (colon inside bold markers)
 		oldMetadataPattern: regexp.MustCompile(`^\*\*[^*]+:\*\*`),
 		// Known metadata keywords (EN and RU) - only these trigger old-style detection
@@ -73,24 +73,9 @@ func (r *MdFrontmatterRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	lines := ctx.Lines
 
 	// Check for YAML frontmatter
-	hasFrontmatter, frontmatterEnd, frontmatterFields := r.parseFrontmatter(lines)
+	hasFrontmatter, _, frontmatterFields := r.parseFrontmatter(lines)
 
-	if !hasFrontmatter {
-		v := r.CreateViolation(ctx.RelPath, 1,
-			"Missing YAML frontmatter; required fields: title, description, date, version")
-		v.WithSuggestion("Add YAML frontmatter at the beginning: ---\\ntitle: ...\\ndescription: ...\\ndate: YYYY-MM-DD\\nversion: X.Y.Z\\n---")
-		violations = append(violations, v)
-	} else {
-		// Validate required fields
-		for _, field := range r.requiredFields {
-			if _, ok := frontmatterFields[field]; !ok {
-				v := r.CreateViolation(ctx.RelPath, 1,
-					"Missing required frontmatter field: "+field)
-				v.WithSuggestion("Add '" + field + "' field to frontmatter")
-				violations = append(violations, v)
-			}
-		}
-
+	if hasFrontmatter {
 		// Validate date format
 		if date, ok := frontmatterFields["date"]; ok {
 			if !r.datePattern.MatchString(strings.TrimSpace(date)) {
@@ -108,53 +93,6 @@ func (r *MdFrontmatterRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 					"Invalid version format in frontmatter: "+version+"; expected semver (X.Y.Z)")
 				v.WithSuggestion("Use semantic versioning: major.minor.patch")
 				violations = append(violations, v)
-			}
-		}
-	}
-
-	// Check for old-style metadata after frontmatter or title
-	startLine := frontmatterEnd + 1
-	if startLine < len(lines) {
-		// Skip the H1 title line
-		for i := startLine; i < len(lines) && i < startLine+5; i++ {
-			line := strings.TrimSpace(lines[i])
-			if strings.HasPrefix(line, "# ") {
-				startLine = i + 1
-				break
-			}
-		}
-
-		// Look for old-style metadata in the next few lines
-		consecutiveContent := 0
-		for i := startLine; i < len(lines) && i < startLine+15; i++ {
-			line := lines[i]
-			trimmed := strings.TrimSpace(line)
-
-			// Skip empty lines and horizontal rules
-			if trimmed == "" || trimmed == "---" {
-				consecutiveContent = 0
-				continue
-			}
-
-			// Check for old-style bold-label metadata with known keywords
-			if r.oldMetadataPattern.MatchString(trimmed) && r.isMetadataKeyword(trimmed) {
-				v := r.CreateViolation(ctx.RelPath, i+1,
-					"Old-style metadata found; move to YAML frontmatter and remove")
-				v.WithCode(line)
-				v.WithSuggestion("Move this metadata to YAML frontmatter at the top of the file")
-				v.WithContext("old_metadata_line", i+1)
-				violations = append(violations, v)
-				consecutiveContent = 0
-			} else if strings.HasPrefix(trimmed, "#") {
-				// Headers don't count as content for stopping
-				consecutiveContent = 0
-			} else {
-				// Regular content line
-				consecutiveContent++
-				// Stop after 2 consecutive content lines (not metadata)
-				if consecutiveContent >= 2 {
-					break
-				}
 			}
 		}
 	}

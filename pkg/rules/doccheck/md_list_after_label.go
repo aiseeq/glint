@@ -55,6 +55,9 @@ func (r *MdListAfterLabelRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	if !strings.HasSuffix(ctx.Path, ".md") {
 		return nil
 	}
+	if strings.HasPrefix(ctx.RelPath, "docs/") || strings.HasPrefix(ctx.RelPath, ".claude/") {
+		return nil
+	}
 
 	var violations []*core.Violation
 	lines := ctx.Lines

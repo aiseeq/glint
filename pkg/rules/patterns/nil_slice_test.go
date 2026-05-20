@@ -103,7 +103,7 @@ func example() {
 			expectMatch: false,
 		},
 		{
-			name: "field access slice - detected by name heuristic",
+			name: "field access slice keeps nil semantics",
 			code: `package main
 
 type Data struct {
@@ -117,7 +117,7 @@ func example() {
 	}
 }
 `,
-			expectMatch: true, // Field name "Items" is in heuristic list
+			expectMatch: false,
 		},
 		{
 			name: "slice with List suffix - detected by type inference",

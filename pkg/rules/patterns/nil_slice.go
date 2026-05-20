@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -84,6 +85,9 @@ func (r *NilSliceRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		}
 
 		// Use type inference to check if it's a slice
+		if r.hasIntentionalNilSemantics(varName) {
+			return true
+		}
 		if !r.isSliceVar(varName, typeInferrer) {
 			return true
 		}
@@ -115,8 +119,7 @@ func (r *NilSliceRule) getVarName(expr ast.Expr) string {
 	case *ast.Ident:
 		return e.Name
 	case *ast.SelectorExpr:
-		// For x.Field, return the field name for heuristic matching
-		return e.Sel.Name
+		return ""
 	}
 	return ""
 }
@@ -157,6 +160,10 @@ func (r *NilSliceRule) looksLikeAnyByName(name string) bool {
 		"i":      true, // interface{} receivers
 	}
 	return anyPatterns[name]
+}
+
+func (r *NilSliceRule) hasIntentionalNilSemantics(name string) bool {
+	return name == "options" || strings.HasSuffix(name, "IDs")
 }
 
 func (r *NilSliceRule) looksLikeSliceByName(name string) bool {

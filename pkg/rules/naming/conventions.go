@@ -40,7 +40,7 @@ func NewNamingConventionsRule() *NamingConventionsRule {
 			"OS": true, "IO": true, "UI": true, "CLI": true, "GUI": true,
 			"OK": true, "ACL": true, "ASCII": true, "UTF8": true,
 			// Auth/crypto
-			"JWT": true, "JWK": true, "JWKS": true, "JWE": true,
+			"JWT": true, "JWK": true, "JWKS": true, "JWE": true, "RFI": true, "RFIURL": true,
 			"RSA": true, "AES": true, "SHA": true, "MD5": true,
 			"HMAC": true, "ECDSA": true, "PKCS": true,
 			"MFA": true, "OTP": true, "TOTP": true, "HOTP": true,
@@ -70,7 +70,7 @@ func NewNamingConventionsRule() *NamingConventionsRule {
 
 // AnalyzeFile checks for naming convention violations
 func (r *NamingConventionsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.GoAST == nil {
+	if !ctx.IsGoFile() || ctx.GoAST == nil || ctx.IsTestFile() {
 		return nil
 	}
 
@@ -102,7 +102,7 @@ func (r *NamingConventionsRule) checkTypeName(ctx *core.FileContext, spec *ast.T
 
 	// Check for stuttering (package name repeated in type name)
 	// Only check exported types - unexported are internal and stuttering is acceptable
-	if ast.IsExported(name) && r.stutters(name, pkgName) {
+	if ast.IsExported(name) && r.stutters(name, pkgName) && !r.isSemanticSuffix(name) {
 		pos := ctx.PositionFor(spec.Name)
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
 			"Type name stutters with package name: "+pkgName+"."+name)
@@ -136,6 +136,10 @@ func (r *NamingConventionsRule) checkTypeName(ctx *core.FileContext, spec *ast.T
 	}
 
 	return violations
+}
+
+func (r *NamingConventionsRule) isSemanticSuffix(name string) bool {
+	return strings.HasSuffix(name, "Error") || strings.HasSuffix(name, "Context")
 }
 
 // checkFuncName checks function naming conventions
