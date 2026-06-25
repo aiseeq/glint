@@ -199,3 +199,49 @@ func TestGetRuleExceptions(t *testing.T) {
 	assert.Len(t, exceptions, 1)
 	assert.Equal(t, "legacy.go", exceptions[0].File)
 }
+
+func TestIsFileExceptedOnlyUsesFileOnlyExceptions(t *testing.T) {
+	cfg := DefaultConfig()
+	patternsCat := cfg.Categories["patterns"]
+	patternsCat.Rules = map[string]RuleConfig{
+		"query-in-loop": {
+			Enabled: true,
+			Exceptions: []Exception{
+				{File: "repo.go", Line: 42, Reason: "line-specific exception"},
+				{File: "generated.go", Reason: "whole-file exception"},
+			},
+		},
+	}
+	cfg.Categories["patterns"] = patternsCat
+
+	assert.False(t, cfg.IsFileExcepted("patterns", "query-in-loop", "repo.go"))
+	assert.True(t, cfg.IsFileExcepted("patterns", "query-in-loop", "generated.go"))
+}
+
+func TestIsViolationExceptedMatchesSpecificFields(t *testing.T) {
+	cfg := DefaultConfig()
+	patternsCat := cfg.Categories["patterns"]
+	patternsCat.Rules = map[string]RuleConfig{
+		"query-in-loop": {
+			Enabled: true,
+			Exceptions: []Exception{
+				{File: "repo.go", Line: 42, Pattern: "Update", Function: "SyncWallet", Reason: "intentional per-wallet write"},
+			},
+		},
+	}
+	cfg.Categories["patterns"] = patternsCat
+
+	matched := NewViolation("query-in-loop", "patterns", "repo.go", 42, SeverityMedium, "query in loop").
+		WithCode("repo.Update(ctx, item)").
+		WithContext("function", "SyncWallet")
+	wrongLine := NewViolation("query-in-loop", "patterns", "repo.go", 41, SeverityMedium, "query in loop").
+		WithCode("repo.Update(ctx, item)").
+		WithContext("function", "SyncWallet")
+	wrongPattern := NewViolation("query-in-loop", "patterns", "repo.go", 42, SeverityMedium, "query in loop").
+		WithCode("repo.Create(ctx, item)").
+		WithContext("function", "SyncWallet")
+
+	assert.True(t, cfg.IsViolationExcepted("patterns", "query-in-loop", "repo.go", matched))
+	assert.False(t, cfg.IsViolationExcepted("patterns", "query-in-loop", "repo.go", wrongLine))
+	assert.False(t, cfg.IsViolationExcepted("patterns", "query-in-loop", "repo.go", wrongPattern))
+}

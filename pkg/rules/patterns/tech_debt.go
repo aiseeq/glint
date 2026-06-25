@@ -88,7 +88,7 @@ func (r *TechDebtRule) initPatterns() {
 			suggestion:  "Add explanation why ignoring is safe (e.g. 'Non-critical: uses defaults if fails')",
 		},
 		"unfinished_work": {
-			regex:       regexp.MustCompile(`(?i)//\s*(WIP|work\s+in\s+progress|not\s+finished|incomplete|незаверш|в\s+работе)`),
+			regex:       regexp.MustCompile(`(?i)//\s*(\bWIP\b|work\s+in\s+progress|not\s+finished|incomplete|незаверш|в\s+работе)`),
 			severity:    core.SeverityMedium,
 			description: "Unfinished work marker",
 			suggestion:  "Complete the implementation or create a task",

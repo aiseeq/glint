@@ -280,7 +280,12 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 				continue
 			}
 			violations := rule.AnalyzeFile(ctx)
-			allViolations = append(allViolations, violations...)
+			for _, violation := range violations {
+				if cfg.IsViolationExcepted(rule.Category(), rule.Name(), ctx.RelPath, violation) {
+					continue
+				}
+				allViolations = append(allViolations, violation)
+			}
 		}
 	}
 	return allViolations
@@ -289,8 +294,8 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 func outputResults(format string, violations core.ViolationList, stats output.Stats) error {
 	switch format {
 	case "json":
-		fmt.Println("JSON output not yet implemented")
-		return nil
+		out := output.NewJSONOutput().WithWriter(os.Stdout)
+		return out.Write(violations, stats)
 	case "summary":
 		out := output.NewSummaryOutput().WithWriter(os.Stdout)
 		return out.Write(violations, stats)

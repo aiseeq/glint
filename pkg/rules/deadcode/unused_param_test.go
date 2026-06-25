@@ -1,6 +1,7 @@
 package deadcode
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -144,11 +145,15 @@ func maker(x int) func() int {
 			assert.Len(t, violations, tt.wantViolations, "Code:\n%s", tt.code)
 
 			if tt.wantParams != nil {
-				for i, v := range violations {
-					if i < len(tt.wantParams) {
-						assert.Contains(t, v.Message, tt.wantParams[i],
-							"Expected param '%s' in message '%s'", tt.wantParams[i], v.Message)
+				for _, param := range tt.wantParams {
+					found := false
+					for _, v := range violations {
+						if strings.Contains(v.Message, param) {
+							found = true
+							break
+						}
 					}
+					assert.True(t, found, "Expected param '%s' in one of %d violation messages", param, len(violations))
 				}
 			}
 		})

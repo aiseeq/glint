@@ -76,8 +76,11 @@ func (r *LongFunctionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 
 				v := r.CreateViolation(ctx.RelPath, startPos.Line, "")
 				v.Message = formatLongFuncMessage(funcName, lineCount, r.maxLines)
-				v.WithCode(ctx.GetLine(startPos.Line - 1)) // Function signature line
+				v.WithCode(ctx.GetLine(ctx.GoFileSet.Position(fn.Pos()).Line))
 				v.WithSuggestion("Consider breaking this function into smaller functions")
+				v.WithContext("function", fn.Name.Name)
+				v.WithContext("lines", lineCount)
+				v.WithContext("max_lines", r.maxLines)
 
 				if lineCount > r.maxLines*2 {
 					v.Severity = core.SeverityHigh

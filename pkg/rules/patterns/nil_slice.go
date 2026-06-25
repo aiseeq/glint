@@ -128,12 +128,12 @@ func (r *NilSliceRule) isSliceVar(name string, inferrer *TypeInferrer) bool {
 	// First, check type inference for slices
 	// Note: type inferrer is file-level, not scope-aware
 	// So we rely primarily on heuristics for accuracy
-	if inferrer.IsSlice(name) {
+	if info, ok := inferrer.GetType(name); ok {
 		// Double-check: if also marked as any, it's not a slice
-		if inferrer.IsAny(name) {
+		if info.TypeName == "any" || info.TypeName == "interface{}" {
 			return false
 		}
-		return true
+		return info.IsSlice
 	}
 
 	// Fallback to heuristic for cases type inference can't catch
