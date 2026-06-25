@@ -93,6 +93,7 @@ func ex(s *S, ids []string) {
 			if tt.expectMatch {
 				require.NotEmpty(t, violations, "expected violation: %s", tt.name)
 				assert.Equal(t, "query_in_loop", violations[0].Context["pattern"])
+				assert.Equal(t, "ex", violations[0].Context["function"])
 			} else {
 				assert.Empty(t, violations, "expected no violations: %s", tt.name)
 			}

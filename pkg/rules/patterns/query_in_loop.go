@@ -66,10 +66,22 @@ func (r *QueryInLoopRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 	var violations []*core.Violation
 	loopDepth := 0
+	currentFunc := ""
 
 	var inspect func(n ast.Node) bool
 	inspect = func(n ast.Node) bool {
 		switch node := n.(type) {
+		case *ast.FuncDecl:
+			prevFunc := currentFunc
+			currentFunc = node.Name.Name
+			if node.Body != nil {
+				ast.Inspect(node.Body, func(child ast.Node) bool {
+					return inspect(child)
+				})
+			}
+			currentFunc = prevFunc
+			return false
+
 		case *ast.ForStmt, *ast.RangeStmt:
 			loopDepth++
 			ast.Inspect(n, func(child ast.Node) bool {
@@ -93,6 +105,9 @@ func (r *QueryInLoopRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 					v.WithCode(ctx.GetLine(line))
 					v.WithSuggestion("Load data in a single batch query before the loop (e.g. WHERE id IN (...) / one query + in-memory join), or cache per-request")
 					v.WithContext("pattern", "query_in_loop")
+					if currentFunc != "" {
+						v.WithContext("function", currentFunc)
+					}
 					violations = append(violations, v)
 				}
 			}

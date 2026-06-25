@@ -50,6 +50,10 @@ func short() {
 
 			violations := rule.AnalyzeFile(ctx)
 			assert.Len(t, violations, tt.expectedCount)
+			if tt.expectedCount > 0 {
+				assert.Equal(t, "longFunc", violations[0].Context["function"])
+				assert.Contains(t, violations[0].Code, "func longFunc()")
+			}
 		})
 	}
 }

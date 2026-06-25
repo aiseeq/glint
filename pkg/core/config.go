@@ -252,10 +252,69 @@ func (c *Config) GetMinSeverity() Severity {
 func (c *Config) IsFileExcepted(category, rule, filePath string) bool {
 	exceptions := c.GetRuleExceptions(category, rule)
 	for _, exc := range exceptions {
+		if !exc.isFileOnly() {
+			continue
+		}
 		if exc.Files != "" && matchGlobPattern(exc.Files, filePath) {
 			return true
 		}
 		if exc.File != "" && (exc.File == filePath || exc.File == filepath.Base(filePath)) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsViolationExcepted checks whether a specific violation matches a rule exception.
+func (c *Config) IsViolationExcepted(category, rule, filePath string, violation *Violation) bool {
+	exceptions := c.GetRuleExceptions(category, rule)
+	for _, exc := range exceptions {
+		if exc.matchesViolation(filePath, violation) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e Exception) isFileOnly() bool {
+	return (e.File != "" || e.Files != "") && e.Line == 0 && e.Pattern == "" && e.Function == ""
+}
+
+func (e Exception) matchesViolation(filePath string, violation *Violation) bool {
+	if violation == nil {
+		return false
+	}
+	if e.File == "" && e.Files == "" && e.Line == 0 && e.Pattern == "" && e.Function == "" {
+		return false
+	}
+	if e.File != "" && e.File != filePath && e.File != filepath.Base(filePath) {
+		return false
+	}
+	if e.Files != "" && !matchGlobPattern(e.Files, filePath) {
+		return false
+	}
+	if e.Line > 0 && e.Line != violation.Line {
+		return false
+	}
+	if e.Pattern != "" && !strings.Contains(violation.Code, e.Pattern) && !strings.Contains(violation.Message, e.Pattern) {
+		return false
+	}
+	if e.Function != "" && !exceptionFunctionMatches(e.Function, violation) {
+		return false
+	}
+	return true
+}
+
+func exceptionFunctionMatches(name string, violation *Violation) bool {
+	if violation.Context == nil {
+		return false
+	}
+	for _, key := range []string{"function", "func", "method"} {
+		value, ok := violation.Context[key]
+		if !ok {
+			continue
+		}
+		if text, ok := value.(string); ok && text == name {
 			return true
 		}
 	}

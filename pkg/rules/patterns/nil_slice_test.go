@@ -90,6 +90,20 @@ func example() {
 			expectMatch: false,
 		},
 		{
+			name: "plural pointer parameter is not a slice",
+			code: `package main
+
+import "math/big"
+
+func amount(tokens *big.Int) {
+	if tokens == nil {
+		return
+	}
+}
+`,
+			expectMatch: false,
+		},
+		{
 			name: "err nil check",
 			code: `package main
 

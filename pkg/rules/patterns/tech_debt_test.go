@@ -199,6 +199,29 @@ func TestTechDebtRule_NeedsRefactoring(t *testing.T) {
 	}
 }
 
+func TestTechDebtRule_WIPRequiresWordBoundary(t *testing.T) {
+	rule := NewTechDebtRule()
+
+	tests := []struct {
+		code        string
+		expectMatch bool
+	}{
+		{"// WIP: implementation is not finished", true},
+		{"// wiping live position rows is prevented", false},
+	}
+
+	for _, tt := range tests {
+		ctx := createTechDebtContext(t, "backend/service.go", tt.code)
+		violations := rule.AnalyzeFile(ctx)
+
+		if tt.expectMatch {
+			require.NotEmpty(t, violations, "Expected violation for: %s", tt.code)
+		} else {
+			assert.Empty(t, violations)
+		}
+	}
+}
+
 func TestTechDebtRule_DeadCode(t *testing.T) {
 	rule := NewTechDebtRule()
 
