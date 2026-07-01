@@ -273,8 +273,8 @@ func wire() {
 	if len(violations2) != 1 {
 		t.Fatalf("want 1 violation, got %d: %+v", len(violations2), violations2)
 	}
-	if !strings.Contains(violations2[0].Message, "argument #2") ||
-		!strings.Contains(violations2[0].Message, "possibly") {
-		t.Errorf("cross-file message should be honest about the heuristic, got: %s", violations2[0].Message)
+	if !strings.Contains(violations2[0].Message, "dependency argument #2") ||
+		strings.Contains(violations2[0].Message, "logger") {
+		t.Errorf("cross-file message must be neutral (no heuristic guess), got: %s", violations2[0].Message)
 	}
 }

@@ -177,8 +177,8 @@ func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext) []*core.Viola
 		pos := ctx.PositionFor(call)
 		lineContent := ctx.GetLine(pos.Line)
 
-		// Respect //nolint:non-canonical-logger opt-outs on the same line.
-		if strings.Contains(lineContent, "nolint:non-canonical-logger") {
+		// Respect suppression opt-outs on the same line (canonical core check).
+		if core.LineSuppresses(lineContent, "non-canonical-logger") {
 			return true
 		}
 

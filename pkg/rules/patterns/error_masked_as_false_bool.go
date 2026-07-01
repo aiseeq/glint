@@ -141,7 +141,7 @@ func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *a
 
 		pos := ctx.PositionFor(ret)
 		lineContent := ctx.GetLine(pos.Line)
-		if strings.Contains(lineContent, "nolint:error-masked-as-false-bool") {
+		if core.LineSuppresses(lineContent, "error-masked-as-false-bool") {
 			return true
 		}
 

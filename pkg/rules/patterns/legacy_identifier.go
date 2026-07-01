@@ -114,7 +114,7 @@ func (r *LegacyIdentifierRule) violation(ctx *core.FileContext, pos token.Pos, n
 	line := ctx.GoFileSet.Position(pos).Line
 	lineContent := ctx.GetLine(line)
 
-	if strings.Contains(lineContent, "nolint:legacy-identifier") {
+	if core.LineSuppresses(lineContent, "legacy-identifier") {
 		return nil
 	}
 

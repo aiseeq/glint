@@ -109,6 +109,14 @@ func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
 	return false
 }
 
+// LineSuppresses reports whether the line's comment part carries a
+// suppression marker for the given rule (nolint:<rule> / <rule>: safe).
+// Single canonical implementation — rules must delegate here instead of
+// matching suppression strings themselves.
+func LineSuppresses(line, ruleName string) bool {
+	return commentHasSuppressionMarker(line, ruleName)
+}
+
 // commentHasSuppressionMarker checks the comment part of a line for
 // suppression markers of the given rule.
 func commentHasSuppressionMarker(line, ruleName string) bool {
