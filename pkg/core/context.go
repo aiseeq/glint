@@ -87,6 +87,90 @@ func (ctx *FileContext) IsTestFile() bool {
 	return false
 }
 
+// IsSuppressed reports whether a violation of the given rule at the given
+// line is suppressed by an inline comment. Two forms are recognized, on the
+// violation line itself or on the line directly above it:
+//
+//	//nolint:<rule-name>
+//	// <rule-name>: safe — <reason>
+//
+// The marker must appear inside a comment ("//" or "/*"); string literals
+// containing the same text do not suppress. Rule names match exactly:
+// "nolint:my-rule" does not suppress rule "my-rule-extended" and vice versa.
+func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
+	for checkLine := line - 1; checkLine <= line; checkLine++ {
+		if checkLine < 1 || checkLine > len(ctx.Lines) {
+			continue
+		}
+		if commentHasSuppressionMarker(ctx.Lines[checkLine-1], ruleName) {
+			return true
+		}
+	}
+	return false
+}
+
+// commentHasSuppressionMarker checks the comment part of a line for
+// suppression markers of the given rule.
+func commentHasSuppressionMarker(line, ruleName string) bool {
+	comment := commentPart(line)
+	if comment == "" {
+		return false
+	}
+	markers := []string{"nolint:" + ruleName, ruleName + ": safe", ruleName + ":safe"}
+	for _, marker := range markers {
+		idx := strings.Index(comment, marker)
+		if idx < 0 {
+			continue
+		}
+		// The character right after the rule name must not extend the name,
+		// so "nolint:my-rule" never suppresses "my-rule-extended".
+		end := idx + len(marker)
+		if strings.HasSuffix(marker, ruleName) && end < len(comment) && isRuleNameChar(comment[end]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// commentPart returns the substring of the line starting at its comment
+// marker ("//" or "/*"), or "" when the line has no comment. A marker inside
+// a string literal is not treated as a comment start.
+func commentPart(line string) string {
+	inString := byte(0)
+	for i := 0; i < len(line)-1; i++ {
+		c := line[i]
+		if inString != 0 {
+			if c == '\\' {
+				i++
+			} else if c == inString {
+				inString = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'', '`':
+			inString = c
+		case '/':
+			if line[i+1] == '/' || line[i+1] == '*' {
+				return line[i:]
+			}
+		case '*':
+			// Continuation line of a block comment ("  * text").
+			if strings.TrimSpace(line[:i]) == "" {
+				return line[i:]
+			}
+		}
+	}
+	return ""
+}
+
+// isRuleNameChar reports whether c can be part of a rule name.
+func isRuleNameChar(c byte) bool {
+	return c == '-' || c == '_' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
 // GetLine returns a specific line (1-based index)
 func (ctx *FileContext) GetLine(lineNum int) string {
 	if lineNum < 1 || lineNum > len(ctx.Lines) {

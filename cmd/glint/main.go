@@ -280,8 +280,12 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 				continue
 			}
 			violations := rule.AnalyzeFile(ctx)
+			honorsSuppression := rules.HonorsSuppression(rule)
 			for _, violation := range violations {
 				if cfg.IsViolationExcepted(rule.Category(), rule.Name(), ctx.RelPath, violation) {
+					continue
+				}
+				if honorsSuppression && ctx.IsSuppressed(violation.Line, rule.Name()) {
 					continue
 				}
 				allViolations = append(allViolations, violation)

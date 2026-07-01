@@ -179,3 +179,91 @@ func TestFileContextDir(t *testing.T) {
 	ctx := &FileContext{Path: "/project/pkg/main.go"}
 	assert.Equal(t, "/project/pkg", ctx.Dir())
 }
+
+func TestFileContextIsSuppressed(t *testing.T) {
+	tests := []struct {
+		name     string
+		lines    []string
+		line     int
+		rule     string
+		expected bool
+	}{
+		{
+			name:     "nolint on violation line",
+			lines:    []string{`x := foo() //nolint:my-rule`},
+			line:     1,
+			rule:     "my-rule",
+			expected: true,
+		},
+		{
+			name:     "nolint with space",
+			lines:    []string{`x := foo() // nolint:my-rule`},
+			line:     1,
+			rule:     "my-rule",
+			expected: true,
+		},
+		{
+			name:     "rule-colon-safe on violation line",
+			lines:    []string{`x := foo() // my-rule: safe — reason here`},
+			line:     1,
+			rule:     "my-rule",
+			expected: true,
+		},
+		{
+			name:     "rule-colon-safe without space",
+			lines:    []string{`x := foo() // my-rule:safe`},
+			line:     1,
+			rule:     "my-rule",
+			expected: true,
+		},
+		{
+			name:     "suppression on line above",
+			lines:    []string{`// nolint:my-rule — justified`, `x := foo()`},
+			line:     2,
+			rule:     "my-rule",
+			expected: true,
+		},
+		{
+			name:     "different rule not suppressed",
+			lines:    []string{`x := foo() //nolint:other-rule`},
+			line:     1,
+			rule:     "my-rule",
+			expected: false,
+		},
+		{
+			name:     "rule name prefix must not match longer rule",
+			lines:    []string{`x := foo() //nolint:my-rule-extended`},
+			line:     1,
+			rule:     "my-rule",
+			expected: false,
+		},
+		{
+			name:     "no comment no suppression",
+			lines:    []string{`x := foo()`},
+			line:     1,
+			rule:     "my-rule",
+			expected: false,
+		},
+		{
+			name:     "marker outside comment is ignored",
+			lines:    []string{`msg := "nolint:my-rule"`},
+			line:     1,
+			rule:     "my-rule",
+			expected: false,
+		},
+		{
+			name:     "line out of range",
+			lines:    []string{`x := foo()`},
+			line:     99,
+			rule:     "my-rule",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := &FileContext{Lines: tt.lines}
+			assert.Equal(t, tt.expected, ctx.IsSuppressed(tt.line, tt.rule))
+		})
+	}
+}

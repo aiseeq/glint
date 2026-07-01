@@ -154,6 +154,23 @@ type Fixer interface {
 	Fix(ctx *core.FileContext, violation *core.Violation) (*Fix, error)
 }
 
+// SuppressionExempt is an optional interface for rules whose findings must
+// not be silenced by inline comments (nolint:<rule> / <rule>: safe). Policy
+// rules that forbid a pattern unconditionally implement it and return true.
+type SuppressionExempt interface {
+	SuppressionExempt() bool
+}
+
+// HonorsSuppression reports whether inline suppression comments apply to the
+// given rule. All rules honor suppression unless they opt out explicitly via
+// the SuppressionExempt interface.
+func HonorsSuppression(r Rule) bool {
+	if se, ok := r.(SuppressionExempt); ok && se.SuppressionExempt() {
+		return false
+	}
+	return true
+}
+
 // Fix represents an auto-fix for a violation
 type Fix struct {
 	File        string
