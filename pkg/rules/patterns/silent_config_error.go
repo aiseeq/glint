@@ -65,6 +65,12 @@ var configLoadFuncNames = []string{
 }
 
 // AnalyzeFile checks for silent config errors
+// SuppressionExempt: policy forbids silent config errors unconditionally,
+// so inline nolint/safe comments do not silence this rule.
+func (r *SilentConfigErrorRule) SuppressionExempt() bool {
+	return true
+}
+
 func (r *SilentConfigErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.HasGoAST() {
 		return nil
