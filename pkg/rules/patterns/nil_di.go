@@ -85,14 +85,16 @@ func (r *NilDIRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			}
 
 			// Prefer the real parameter name when the constructor is
-			// declared in this file; fall back to position heuristics.
+			// declared in this file. For cross-file constructors the
+			// position heuristic only decides whether the arg is high-risk;
+			// the message stays neutral (a guess printed as fact misled the
+			// 2026-07-01 audit: "Nil logger" for a nil balanceService).
 			paramName := resolveParamName(ctx.GoAST, funcName, i)
 			paramHint := paramName
 			message := "Nil " + paramName + " argument to constructor " + funcName
 			if paramName == "" {
 				paramHint = r.guessParamType(funcName, i, len(call.Args))
-				message = "Nil argument #" + strconv.Itoa(i+1) + " to constructor " + funcName +
-					" (possibly " + paramHint + ")"
+				message = "Nil dependency argument #" + strconv.Itoa(i+1) + " to constructor " + funcName
 			}
 
 			// Only flag high-risk nil parameters
@@ -187,24 +189,9 @@ func (r *NilDIRule) guessParamType(funcName string, argIndex, totalArgs int) str
 	return "dependency"
 }
 
-// hasSuppression checks if the line or previous line has a suppression comment
+// hasSuppression delegates to the canonical core suppression check.
 func (r *NilDIRule) hasSuppression(ctx *core.FileContext, line int) bool {
-	// Check current line and previous line for suppression
-	for checkLine := line - 1; checkLine <= line; checkLine++ {
-		if checkLine < 1 || checkLine > len(ctx.Lines) {
-			continue
-		}
-		lineContent := ctx.Lines[checkLine-1]
-		// Check for suppression patterns
-		if strings.Contains(lineContent, "nil-di: safe") ||
-			strings.Contains(lineContent, "nil-di:safe") ||
-			strings.Contains(lineContent, "nolint:nil-di") ||
-			strings.Contains(lineContent, "// nil is intentional") ||
-			strings.Contains(lineContent, "// nil ok") {
-			return true
-		}
-	}
-	return false
+	return ctx.IsSuppressed(line, r.Name())
 }
 
 // getFuncName extracts the function name from a call expression

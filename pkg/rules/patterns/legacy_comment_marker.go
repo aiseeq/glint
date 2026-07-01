@@ -120,7 +120,7 @@ func (r *LegacyCommentMarkerRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 
 // tryMatch decides whether a comment-bearing line is a runtime legacy marker.
 func (r *LegacyCommentMarkerRule) tryMatch(ctx *core.FileContext, lineNum int, line string, isBlock bool) *core.Violation {
-	if strings.Contains(line, "nolint:legacy-comment-marker") {
+	if core.LineSuppresses(line, "legacy-comment-marker") {
 		return nil
 	}
 
