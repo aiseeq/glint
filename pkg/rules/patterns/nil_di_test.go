@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -156,7 +157,7 @@ func TestNilDIRule_HighRiskParams(t *testing.T) {
 	rule := NewNilDIRule()
 
 	tests := []struct {
-		paramHint string
+		paramHint  string
 		isHighRisk bool
 	}{
 		{"logger", true},
@@ -224,4 +225,56 @@ func splitNilDILines(s string) []string {
 		lines = append(lines, s[start:])
 	}
 	return lines
+}
+
+func TestNilDIResolvedParamName(t *testing.T) {
+	rule := NewNilDIRule()
+
+	code := `package svc
+
+func NewDashboardService(adminRepo Repo, db DB, balanceService BalanceService) *Service {
+	return &Service{}
+}
+
+func wire() {
+	_ = NewDashboardService(repo, db, nil)
+}
+`
+	ctx := core.NewFileContext("service.go", ".", []byte(code), nil)
+	parser := core.NewParser()
+	fset, astFile, err := parser.ParseGoFile("service.go", []byte(code))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ctx.SetGoAST(fset, astFile)
+
+	violations := rule.AnalyzeFile(ctx)
+	if len(violations) != 1 {
+		t.Fatalf("want 1 violation, got %d: %+v", len(violations), violations)
+	}
+	if !strings.Contains(violations[0].Message, "balanceService") {
+		t.Errorf("message should name the real parameter, got: %s", violations[0].Message)
+	}
+
+	crossFile := `package svc
+
+func wire() {
+	_ = NewRemoteService(cfg, nil)
+}
+`
+	ctx2 := core.NewFileContext("wire.go", ".", []byte(crossFile), nil)
+	fset2, astFile2, err := parser.ParseGoFile("wire.go", []byte(crossFile))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ctx2.SetGoAST(fset2, astFile2)
+
+	violations2 := rule.AnalyzeFile(ctx2)
+	if len(violations2) != 1 {
+		t.Fatalf("want 1 violation, got %d: %+v", len(violations2), violations2)
+	}
+	if !strings.Contains(violations2[0].Message, "argument #2") ||
+		!strings.Contains(violations2[0].Message, "possibly") {
+		t.Errorf("cross-file message should be honest about the heuristic, got: %s", violations2[0].Message)
+	}
 }

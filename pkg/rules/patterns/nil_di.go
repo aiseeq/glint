@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -83,14 +84,23 @@ func (r *NilDIRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 				continue
 			}
 
+			// Prefer the real parameter name when the constructor is
+			// declared in this file; fall back to position heuristics.
+			paramName := resolveParamName(ctx.GoAST, funcName, i)
+			paramHint := paramName
+			message := "Nil " + paramName + " argument to constructor " + funcName
+			if paramName == "" {
+				paramHint = r.guessParamType(funcName, i, len(call.Args))
+				message = "Nil argument #" + strconv.Itoa(i+1) + " to constructor " + funcName +
+					" (possibly " + paramHint + ")"
+			}
+
 			// Only flag high-risk nil parameters
-			paramHint := r.guessParamType(funcName, i, len(call.Args))
 			if !r.isHighRiskParam(paramHint) {
 				continue
 			}
 
-			v := r.CreateViolation(ctx.RelPath, line,
-				"Nil "+paramHint+" argument to constructor "+funcName)
+			v := r.CreateViolation(ctx.RelPath, line, message)
 			v.WithCode(ctx.GetLine(line))
 			v.WithSuggestion("Verify this nil is intentional. Add '// nil-di: safe' comment to suppress if safe.")
 			v.WithContext("constructor", funcName)
@@ -262,4 +272,33 @@ func (r *NilDIRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
 		}
 	}
 	return line
+}
+
+// resolveParamName returns the name of the constructor's parameter at
+// argIndex when the constructor is declared in the same file, or "" when it
+// is declared elsewhere (per-file AST has no cross-file resolution).
+func resolveParamName(file *ast.File, funcName string, argIndex int) string {
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || fn.Name.Name != funcName || fn.Type.Params == nil {
+			continue
+		}
+		idx := 0
+		for _, field := range fn.Type.Params.List {
+			count := len(field.Names)
+			if count == 0 {
+				count = 1 // unnamed parameter still occupies a position
+			}
+			for j := 0; j < count; j++ {
+				if idx == argIndex {
+					if j < len(field.Names) {
+						return field.Names[j].Name
+					}
+					return ""
+				}
+				idx++
+			}
+		}
+	}
+	return ""
 }
