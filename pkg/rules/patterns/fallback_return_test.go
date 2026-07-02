@@ -463,3 +463,65 @@ func getValue() int {
 		})
 	}
 }
+
+// Репро аудита 2026-07-02 (saga frontend): классический TS-синглтон
+// `return X.instance` внутри getInstance() флаговался как fallback.
+func TestFallbackReturnRule_TSSingletonGetter(t *testing.T) {
+	rule := NewFallbackReturnRule()
+	code := `export class TestEnvironmentManager {
+  private static instance: TestEnvironmentManager
+  static getInstance(): TestEnvironmentManager {
+    if (!TestEnvironmentManager.instance) {
+      TestEnvironmentManager.instance = new TestEnvironmentManager();
+    }
+    return TestEnvironmentManager.instance;
+  }
+}
+`
+	ctx := core.NewFileContext("shared/config/test-environment.ts", ".", []byte(code), nil)
+	violations := rule.AnalyzeFile(ctx)
+	if len(violations) != 0 {
+		t.Fatalf("singleton getter must not be flagged, got: %+v", violations)
+	}
+}
+
+// Репро аудита 2026-07-02: PascalCase-классы тестовой инфраструктуры
+// (TestEnvironmentSchemas — Zod-схемы) — не fallback-значения; fallback-значения
+// именуются lowerCamel (testProvider) или UPPER_SNAKE (TEST_DEFAULT).
+func TestFallbackReturnRule_TSPascalCaseClassIsNotFallback(t *testing.T) {
+	rule := NewFallbackReturnRule()
+	code := `function validate(data: Config) {
+  const errors: string[] = [];
+  if (errors.length > 0) {
+    log.warn('validation issues');
+  }
+  const apiPortValidation = TestEnvironmentSchemas.port.safeParse(data.testingPorts.api);
+  return apiPortValidation;
+}
+`
+	ctx := core.NewFileContext("shared/config/test-environment.ts", ".", []byte(code), nil)
+	violations := rule.AnalyzeFile(ctx)
+	if len(violations) != 0 {
+		t.Fatalf("PascalCase class access must not be flagged, got: %+v", violations)
+	}
+}
+
+// /e2e/ — каталог тестовой инфраструктуры Playwright (как __tests__):
+// осознанные тестовые константы не являются fallback-деградацией.
+func TestFallbackReturnRule_E2EDirIsException(t *testing.T) {
+	rule := NewFallbackReturnRule()
+	code := `async function createUser() {
+  const userData = await createTestUserWithBalanceAndToken(100, 'a@b.c');
+  if (!userData) {
+    throw new Error('no user');
+  }
+  const walletAddress = TEST_ACCOUNTS.USER1.address;
+  return walletAddress;
+}
+`
+	ctx := core.NewFileContext("e2e/utils/test-user-with-balance-helper.ts", ".", []byte(code), nil)
+	violations := rule.AnalyzeFile(ctx)
+	if len(violations) != 0 {
+		t.Fatalf("/e2e/ dir must be exempt, got: %+v", violations)
+	}
+}

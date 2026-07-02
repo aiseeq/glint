@@ -177,3 +177,34 @@ func TestX(t *testing.T) {}
 		})
 	}
 }
+
+// Репро аудита 2026-07-02: реальные frontend-надгробия, пропущенные правилом
+// (вычищены вручную в saga@8f7c1a6bd).
+func TestTombstoneComment_RussianColonAndDashForms(t *testing.T) {
+	rule := NewTombstoneCommentRule()
+	code := `const LABEL_MAPPINGS = {
+  // УДАЛЕНО: investmentStatuses теперь используется из централизованного модуля investment-status-validation.ts
+  transactionStatuses: {},
+  // networks: УДАЛЕНО - используйте getNetworkName из @shared/config/networks
+  currencies: {},
+}
+`
+	ctx := core.NewFileContext("frontend/shared/lib/label-utils.ts", ".", []byte(code), nil)
+	violations := rule.AnalyzeFile(ctx)
+	if len(violations) != 2 {
+		t.Fatalf("want 2 violations (оба «УДАЛЕНО»-надгробия), got %d: %+v", len(violations), violations)
+	}
+}
+
+// «если он был удалён cleanup-системой» — описание условия/поведения, не надгробие.
+func TestTombstoneComment_PastConditionIsBehavior(t *testing.T) {
+	rule := NewTombstoneCommentRule()
+	code := `// Создаём пользователя заново если он был удалён cleanup системой
+export const ensureUser = 1
+`
+	ctx := core.NewFileContext("e2e/utils/real-auth-helpers.ts", ".", []byte(code), nil)
+	violations := rule.AnalyzeFile(ctx)
+	if len(violations) != 0 {
+		t.Fatalf("past-condition behavior must not be flagged, got: %+v", violations)
+	}
+}
