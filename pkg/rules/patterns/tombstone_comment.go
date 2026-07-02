@@ -46,7 +46,7 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 		tombstone: regexp.MustCompile(
 			`(?i)\b(?:removed|deleted)\b|удал[её]н[оаы]?(?:[^а-яё]|$)|больше не использ|no longer (?:used|needed|exists|supported)`),
 		behaviorAux: regexp.MustCompile(
-			`(?i)(?:\b(?:is|are|be|being|been|get|gets|got|to|soft)\s+|будут\s+|будет\s+|должн\w*\s+быть\s+|могут\s+быть\s+|не\s+|что\s+|сколько\s+)$`),
+			`(?i)(?:\b(?:is|are|be|being|been|get|gets|got|to|soft)\s+|будут\s+|будет\s+|был[аио]?\s+|должн\w*\s+быть\s+|могут\s+быть\s+|не\s+|что\s+|сколько\s+)$`),
 		behaviorTail: regexp.MustCompile(
 			`(?i)^(?:\s+from\b|\s*(?:->|→))`),
 		policyLine: regexp.MustCompile(

@@ -490,19 +490,21 @@ func (r *FallbackReturnRule) isGoException(ctx *core.FileContext, line string, l
 func (r *FallbackReturnRule) analyzeTSFile(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 
-	// Patterns for TS - case insensitive for variable names
+	// Patterns for TS. Fallback values are lowerCamel (testProvider) or
+	// UPPER_SNAKE (TEST_DEFAULT); PascalCase (TestEnvironmentSchemas) is a
+	// class/namespace of test infrastructure, not a fallback value.
 	tsPatterns := []*regexp.Regexp{
-		// Return mock/test/fake (case insensitive after prefix)
-		regexp.MustCompile(`(?i)return\s+(?:mock|test|fake|stub|dummy)\w+`),
+		// Return mock/test/fake value
+		regexp.MustCompile(`return\s+(?:mock|test|fake|stub|dummy|MOCK_|TEST_|FAKE_|STUB_|DUMMY_)\w+`),
 
 		// Fallback in variable assignment
-		regexp.MustCompile(`(?i)=\s+(?:mock|test|fake|fallback)\w+`),
+		regexp.MustCompile(`=\s+(?:mock|test|fake|fallback|MOCK_|TEST_|FAKE_|FALLBACK_)\w+`),
 
 		// || fallback pattern (but not for common defaults)
-		regexp.MustCompile(`(?i)\|\|\s*(?:mock|test|fake)\w+`),
+		regexp.MustCompile(`\|\|\s*(?:mock|test|fake|MOCK_|TEST_|FAKE_)\w+`),
 
 		// ?? fallback pattern
-		regexp.MustCompile(`(?i)\?\?\s*(?:mock|test|fake|fallback)\w+`),
+		regexp.MustCompile(`\?\?\s*(?:mock|test|fake|fallback|MOCK_|TEST_|FAKE_|FALLBACK_)\w+`),
 
 		// Method/function calls named *Fallback*(...) invoked inside an
 		// error-handling branch. Picks up the "primary check failed → call
@@ -510,9 +512,15 @@ func (r *FallbackReturnRule) analyzeTSFile(ctx *core.FileContext) []*core.Violat
 		regexp.MustCompile(`\.[A-Za-z_]\w*[Ff]allback\w*\s*\(`),
 	}
 
+	// `return X.instance` — классический синглтон-геттер, не fallback
+	singletonReturn := regexp.MustCompile(`return\s+\w+\.instance\b`)
+
 	for lineNum, line := range ctx.Lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
+			continue
+		}
+		if singletonReturn.MatchString(line) {
 			continue
 		}
 
@@ -551,9 +559,10 @@ func (r *FallbackReturnRule) isInTSContext(lines []string, lineNum int) bool {
 
 // isTSException checks if this is a valid exception for TS
 func (r *FallbackReturnRule) isTSException(path, line string) bool {
-	// Test files
+	// Test files and test infrastructure (Playwright e2e dir)
 	if strings.Contains(path, ".test.") || strings.Contains(path, ".spec.") ||
-		strings.Contains(path, "__tests__") || strings.Contains(path, "__mocks__") {
+		strings.Contains(path, "__tests__") || strings.Contains(path, "__mocks__") ||
+		strings.Contains(path, "/e2e/") || strings.HasPrefix(path, "e2e/") {
 		return true
 	}
 
