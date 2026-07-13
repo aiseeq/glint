@@ -56,6 +56,7 @@ func TestConfigIsCategoryEnabled(t *testing.T) {
 
 func TestConfigIsRuleEnabled(t *testing.T) {
 	cfg := DefaultConfig()
+	assert.False(t, cfg.IsRuleEnabled("patterns", "deprecated-nginx-http2-listen"))
 
 	// Default categories should have all rules enabled
 	assert.True(t, cfg.IsRuleEnabled("architecture", "any-rule"))

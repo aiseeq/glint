@@ -18,7 +18,10 @@ build: ## Build the binary
 
 install: build ## Install to ~/bin (recommended)
 	@mkdir -p $(HOME)/bin
-	@cp $(BUILD_DIR)/$(BINARY_NAME) $(HOME)/bin/$(BINARY_NAME)
+	@tmp=$$(mktemp $(HOME)/bin/.$(BINARY_NAME).XXXXXX); \
+	trap 'rm -f "$$tmp"' EXIT; \
+	install -m 0755 $(BUILD_DIR)/$(BINARY_NAME) "$$tmp"; \
+	mv -f "$$tmp" $(HOME)/bin/$(BINARY_NAME)
 	@echo "Installed to $(HOME)/bin/$(BINARY_NAME)"
 
 install-gopath: ## Install to GOPATH/bin

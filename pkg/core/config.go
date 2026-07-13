@@ -67,12 +67,14 @@ func DefaultConfig() *Config {
 		},
 		Categories: map[string]CategoryConfig{
 			"architecture": {Enabled: true},
-			"patterns":     {Enabled: true},
-			"typesafety":   {Enabled: true},
-			"duplication":  {Enabled: true},
-			"deadcode":     {Enabled: true},
-			"config":       {Enabled: true},
-			"naming":       {Enabled: true},
+			"patterns": {Enabled: true, Rules: map[string]RuleConfig{
+				"deprecated-nginx-http2-listen": {Enabled: false},
+			}},
+			"typesafety":  {Enabled: true},
+			"duplication": {Enabled: true},
+			"deadcode":    {Enabled: true},
+			"config":      {Enabled: true},
+			"naming":      {Enabled: true},
 		},
 	}
 }

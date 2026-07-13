@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -40,6 +41,7 @@ func (r *HTTPBodyCloseRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 func (r *HTTPBodyCloseRule) checkFunction(ctx *core.FileContext, body *ast.BlockStmt, violations *[]*core.Violation) {
 	// Track response variable names
 	responseVars := make(map[string]int) // varName -> line
+	httpAliases := httpImportAliases(ctx)
 
 	ast.Inspect(body, func(n ast.Node) bool {
 		// Skip nested function literals
@@ -55,7 +57,7 @@ func (r *HTTPBodyCloseRule) checkFunction(ctx *core.FileContext, body *ast.Block
 		// Check for http response assignments
 		// resp, err := http.Get(...) or resp, err := client.Do(...)
 		if len(assign.Lhs) >= 1 && len(assign.Rhs) == 1 {
-			if r.isHTTPCall(assign.Rhs[0]) {
+			if isHTTPResponseCall(assign.Rhs[0], httpAliases) {
 				if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
 					responseVars[ident.Name] = r.getLineFromNode(ctx, assign)
 				}
@@ -99,7 +101,35 @@ func (r *HTTPBodyCloseRule) checkFunction(ctx *core.FileContext, body *ast.Block
 	}
 }
 
-func (r *HTTPBodyCloseRule) isHTTPCall(expr ast.Expr) bool {
+func httpImportAliases(ctx *core.FileContext) map[string]struct{} {
+	aliases := make(map[string]struct{})
+	hasNetHTTP := false
+	for _, path := range ctx.GoImports {
+		if path == "net/http" {
+			hasNetHTTP = true
+			break
+		}
+	}
+	if !hasNetHTTP || ctx.GoAST == nil {
+		return aliases
+	}
+
+	for _, spec := range ctx.GoAST.Imports {
+		if spec.Path.Value != `"net/http"` {
+			continue
+		}
+		name := "http"
+		if spec.Name != nil {
+			name = spec.Name.Name
+		}
+		if name != "." && name != "_" {
+			aliases[name] = struct{}{}
+		}
+	}
+	return aliases
+}
+
+func isHTTPResponseCall(expr ast.Expr, httpAliases map[string]struct{}) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return false
@@ -111,27 +141,147 @@ func (r *HTTPBodyCloseRule) isHTTPCall(expr ast.Expr) bool {
 	}
 
 	method := sel.Sel.Name
-
-	// Check for http.Get, http.Post, http.Head, http.PostForm
 	if ident, ok := sel.X.(*ast.Ident); ok {
-		if ident.Name == "http" {
-			return method == "Get" || method == "Post" || method == "Head" ||
-				method == "PostForm" || method == "Do"
-		}
-		// Common HTTP client variable names
-		clientNames := map[string]bool{
-			"client":     true,
-			"httpClient": true,
-			"c":          true,
-		}
-		if clientNames[ident.Name] {
-			return method == "Do" || method == "Get" || method == "Post" ||
-				method == "Head" || method == "PostForm"
+		if _, isPackage := httpAliases[ident.Name]; isPackage {
+			return isHTTPPackageResponseMethod(method)
 		}
 	}
+	if !isHTTPClientResponseMethod(method) {
+		return false
+	}
+	if isHTTPClientExpr(sel.X, httpAliases) {
+		return true
+	}
+	return method == "Do" && len(call.Args) > 0 && isHTTPTypedExpr(call.Args[0], "Request", httpAliases)
+}
 
-	// Only match Do method for client calls (most reliable indicator)
-	return method == "Do"
+func isHTTPPackageResponseMethod(method string) bool {
+	return method == "Get" || method == "Post" || method == "Head" || method == "PostForm"
+}
+
+func isHTTPClientResponseMethod(method string) bool {
+	return method == "Do" || isHTTPPackageResponseMethod(method)
+}
+
+func isHTTPClientExpr(expr ast.Expr, httpAliases map[string]struct{}) bool {
+	if isHTTPTypedExpr(expr, "Client", httpAliases) {
+		return true
+	}
+	return isHTTPDefaultClientExpr(expr, httpAliases)
+}
+
+func isHTTPDefaultClientExpr(expr ast.Expr, httpAliases map[string]struct{}) bool {
+	sel, ok := ast.Unparen(expr).(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "DefaultClient" {
+		return false
+	}
+	packageName, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	_, ok = httpAliases[packageName.Name]
+	return ok
+}
+
+func isHTTPTypedExpr(expr ast.Expr, typeName string, httpAliases map[string]struct{}) bool {
+	switch expr := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		return expr.Obj != nil && declarationHasHTTPType(expr.Obj.Decl, expr.Name, typeName, httpAliases)
+	case *ast.StarExpr:
+		return isHTTPTypeSyntax(expr.X, typeName, httpAliases)
+	case *ast.SelectorExpr:
+		return isHTTPTypeSyntax(expr, typeName, httpAliases)
+	case *ast.CompositeLit:
+		return isHTTPTypeSyntax(expr.Type, typeName, httpAliases)
+	case *ast.UnaryExpr:
+		return expr.Op == token.AND && isHTTPTypedExpr(expr.X, typeName, httpAliases)
+	default:
+		return false
+	}
+}
+
+func declarationHasHTTPType(decl any, name, typeName string, httpAliases map[string]struct{}) bool {
+	switch decl := decl.(type) {
+	case *ast.Field:
+		return isHTTPTypeSyntax(decl.Type, typeName, httpAliases)
+	case *ast.ValueSpec:
+		if decl.Type != nil {
+			return isHTTPTypeSyntax(decl.Type, typeName, httpAliases)
+		}
+		return valueSpecHasHTTPType(decl, name, typeName, httpAliases)
+	case *ast.AssignStmt:
+		return assignmentHasHTTPType(decl, name, typeName, httpAliases)
+	default:
+		return false
+	}
+}
+
+func valueSpecHasHTTPType(spec *ast.ValueSpec, name, typeName string, httpAliases map[string]struct{}) bool {
+	for i, declaredName := range spec.Names {
+		if declaredName.Name != name || i >= len(spec.Values) {
+			continue
+		}
+		return httpValueHasType(spec.Values[i], typeName, httpAliases)
+	}
+	return false
+}
+
+func assignmentHasHTTPType(assign *ast.AssignStmt, name, typeName string, httpAliases map[string]struct{}) bool {
+	for i, lhs := range assign.Lhs {
+		ident, ok := lhs.(*ast.Ident)
+		if !ok || ident.Name != name {
+			continue
+		}
+		if len(assign.Rhs) == len(assign.Lhs) {
+			return httpValueHasType(assign.Rhs[i], typeName, httpAliases)
+		}
+		return i == 0 && len(assign.Rhs) == 1 && httpValueHasType(assign.Rhs[0], typeName, httpAliases)
+	}
+	return false
+}
+
+func httpValueHasType(expr ast.Expr, typeName string, httpAliases map[string]struct{}) bool {
+	switch expr := ast.Unparen(expr).(type) {
+	case *ast.CompositeLit:
+		return isHTTPTypeSyntax(expr.Type, typeName, httpAliases)
+	case *ast.UnaryExpr:
+		return expr.Op == token.AND && httpValueHasType(expr.X, typeName, httpAliases)
+	case *ast.SelectorExpr:
+		return typeName == "Client" && isHTTPDefaultClientExpr(expr, httpAliases)
+	case *ast.CallExpr:
+		return typeName == "Request" && isHTTPRequestConstructor(expr, httpAliases)
+	default:
+		return false
+	}
+}
+
+func isHTTPRequestConstructor(call *ast.CallExpr, httpAliases map[string]struct{}) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || (sel.Sel.Name != "NewRequest" && sel.Sel.Name != "NewRequestWithContext") {
+		return false
+	}
+	packageName, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	_, ok = httpAliases[packageName.Name]
+	return ok
+}
+
+func isHTTPTypeSyntax(expr ast.Expr, typeName string, httpAliases map[string]struct{}) bool {
+	switch expr := ast.Unparen(expr).(type) {
+	case *ast.StarExpr:
+		return isHTTPTypeSyntax(expr.X, typeName, httpAliases)
+	case *ast.SelectorExpr:
+		packageName, ok := expr.X.(*ast.Ident)
+		if !ok || expr.Sel.Name != typeName {
+			return false
+		}
+		_, ok = httpAliases[packageName.Name]
+		return ok
+	default:
+		return false
+	}
 }
 
 func (r *HTTPBodyCloseRule) getBodyCloseVar(call *ast.CallExpr) string {
