@@ -73,7 +73,7 @@ func NewLegacyCommentMarkerRule() *LegacyCommentMarkerRule {
 
 // AnalyzeFile scans line-by-line for legacy comments in Go and TS files.
 func (r *LegacyCommentMarkerRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !(ctx.IsGoFile() || ctx.IsTypeScriptFile()) {
+	if !ctx.IsGoFile() && !ctx.IsTypeScriptFile() {
 		return nil
 	}
 	if ctx.IsTestFile() {

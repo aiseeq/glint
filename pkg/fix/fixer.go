@@ -251,7 +251,7 @@ func (e *Engine) Preview(fixes []*Fix) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("PROPOSED FIXES (%d changes in %d files):\n\n", len(fixes), len(byFile)))
+	fmt.Fprintf(&sb, "PROPOSED FIXES (%d changes in %d files):\n\n", len(fixes), len(byFile))
 
 	for file, fileFixes := range byFile {
 		relPath := file
@@ -262,9 +262,9 @@ func (e *Engine) Preview(fixes []*Fix) string {
 		}
 
 		for _, fix := range fileFixes {
-			sb.WriteString(fmt.Sprintf("  %s:%d [%s]\n", relPath, fix.StartLine, fix.RuleName))
-			sb.WriteString(fmt.Sprintf("    - %s\n", fix.OldText))
-			sb.WriteString(fmt.Sprintf("    + %s\n", fix.NewText))
+			fmt.Fprintf(&sb, "  %s:%d [%s]\n", relPath, fix.StartLine, fix.RuleName)
+			fmt.Fprintf(&sb, "    - %s\n", fix.OldText)
+			fmt.Fprintf(&sb, "    + %s\n", fix.NewText)
 			sb.WriteString("\n")
 		}
 	}

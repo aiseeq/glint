@@ -124,7 +124,10 @@ func commentHasSuppressionMarker(line, ruleName string) bool {
 	if comment == "" {
 		return false
 	}
-	markers := []string{"nolint:" + ruleName, ruleName + ": safe", ruleName + ":safe"}
+	if nolintListContains(comment, ruleName) {
+		return true
+	}
+	markers := []string{ruleName + ": safe", ruleName + ":safe"}
 	for _, marker := range markers {
 		idx := strings.Index(comment, marker)
 		if idx < 0 {
@@ -141,6 +144,24 @@ func commentHasSuppressionMarker(line, ruleName string) bool {
 	return false
 }
 
+func nolintListContains(comment, ruleName string) bool {
+	const prefix = "nolint:"
+	idx := strings.Index(comment, prefix)
+	if idx < 0 {
+		return false
+	}
+	list := comment[idx+len(prefix):]
+	if fields := strings.Fields(list); len(fields) > 0 {
+		list = fields[0]
+	}
+	for _, name := range strings.Split(list, ",") {
+		if strings.TrimSpace(name) == ruleName {
+			return true
+		}
+	}
+	return false
+}
+
 // commentPart returns the substring of the line starting at its comment
 // marker ("//" or "/*"), or "" when the line has no comment. A marker inside
 // a string literal is not treated as a comment start.
@@ -149,9 +170,10 @@ func commentPart(line string) string {
 	for i := 0; i < len(line)-1; i++ {
 		c := line[i]
 		if inString != 0 {
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == inString {
+			case inString:
 				inString = 0
 			}
 			continue

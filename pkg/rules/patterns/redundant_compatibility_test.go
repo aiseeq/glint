@@ -59,17 +59,17 @@ func GetValue() {}
 		t.Run(tt.name, func(t *testing.T) {
 			// Create fresh rule for each test
 			rule := NewRedundantCompatibilityRule()
-			
+
 			ctx := core.NewFileContext("test.go", ".", []byte(tt.code), nil)
 			violations := rule.AnalyzeFile(ctx)
-			
+
 			if len(violations) != tt.wantCount {
 				t.Errorf("got %d violations, want %d", len(violations), tt.wantCount)
 				for _, v := range violations {
 					t.Logf("  violation: %s", v.Message)
 				}
 			}
-			
+
 			if tt.wantCount > 0 && len(violations) > 0 {
 				if violations[0].Message == "" {
 					t.Error("violation message should not be empty")
@@ -145,16 +145,16 @@ func GetID(ctx context.Context) string {
 		t.Run(tt.name, func(t *testing.T) {
 			rule := NewRedundantCompatibilityRule()
 			parser := core.NewParser()
-			
+
 			ctx := core.NewFileContext("test.go", ".", []byte(tt.code), nil)
 			// Parse Go AST for AST-based checks
 			fset, astFile, err := parser.ParseGoFile("test.go", []byte(tt.code))
 			if err == nil {
 				ctx.SetGoAST(fset, astFile)
 			}
-			
+
 			violations := rule.AnalyzeFile(ctx)
-			
+
 			// Filter for multiple-context-keys pattern
 			contextKeyViolations := 0
 			for _, v := range violations {
@@ -164,7 +164,7 @@ func GetID(ctx context.Context) string {
 					}
 				}
 			}
-			
+
 			if contextKeyViolations != tt.wantCount {
 				t.Errorf("got %d context-key violations, want %d", contextKeyViolations, tt.wantCount)
 				for _, v := range violations {
@@ -220,16 +220,16 @@ var (
 		t.Run(tt.name, func(t *testing.T) {
 			rule := NewRedundantCompatibilityRule()
 			parser := core.NewParser()
-			
+
 			ctx := core.NewFileContext("test.go", ".", []byte(tt.code), nil)
 			// Parse Go AST for AST-based checks
 			fset, astFile, err := parser.ParseGoFile("test.go", []byte(tt.code))
 			if err == nil {
 				ctx.SetGoAST(fset, astFile)
 			}
-			
+
 			violations := rule.AnalyzeFile(ctx)
-			
+
 			// Filter for duplicate-key-definitions pattern
 			dupKeyViolations := 0
 			for _, v := range violations {
@@ -239,7 +239,7 @@ var (
 					}
 				}
 			}
-			
+
 			if dupKeyViolations != tt.wantCount {
 				t.Errorf("got %d duplicate-key violations, want %d", dupKeyViolations, tt.wantCount)
 				for _, v := range violations {
@@ -257,11 +257,11 @@ func TestRedundantCompatibilityRule_SkipTestFiles(t *testing.T) {
 func GetOldValue() {}
 `
 	rule := NewRedundantCompatibilityRule()
-	
+
 	// Test file should be skipped
 	ctx := core.NewFileContext("test_file_test.go", ".", []byte(code), nil)
 	violations := rule.AnalyzeFile(ctx)
-	
+
 	if len(violations) != 0 {
 		t.Errorf("test files should be skipped, got %d violations", len(violations))
 	}
@@ -274,11 +274,11 @@ func TestRedundantCompatibilityRule_LegitimateCompatibility(t *testing.T) {
 func HandleExternalAPI() {}
 `
 	rule := NewRedundantCompatibilityRule()
-	
+
 	// Should skip because it mentions "external API"
 	ctx := core.NewFileContext("api_handler.go", ".", []byte(code), nil)
 	violations := rule.AnalyzeFile(ctx)
-	
+
 	if len(violations) != 0 {
 		t.Errorf("legitimate external API compatibility should be skipped, got %d violations", len(violations))
 	}

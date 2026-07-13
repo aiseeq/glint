@@ -12,60 +12,60 @@ func TestTodoCommentRule(t *testing.T) {
 	rule := NewTodoCommentRule()
 
 	tests := []struct {
-		name           string
-		code           string
-		expectedCount  int
+		name            string
+		code            string
+		expectedCount   int
 		expectedKeyword string
 	}{
 		{
-			name:           "TODO with colon",
-			code:           "// TODO: implement this feature",
-			expectedCount:  1,
+			name:            "TODO with colon",
+			code:            "// TODO: implement this feature",
+			expectedCount:   1,
 			expectedKeyword: "TODO",
 		},
 		{
-			name:           "FIXME with colon",
-			code:           "// FIXME: broken logic here",
-			expectedCount:  1,
+			name:            "FIXME with colon",
+			code:            "// FIXME: broken logic here",
+			expectedCount:   1,
 			expectedKeyword: "FIXME",
 		},
 		{
-			name:           "HACK comment",
-			code:           "// HACK: workaround for bug",
-			expectedCount:  1,
+			name:            "HACK comment",
+			code:            "// HACK: workaround for bug",
+			expectedCount:   1,
 			expectedKeyword: "HACK",
 		},
 		{
-			name:           "TODO with author",
-			code:           "// TODO(john): review this",
-			expectedCount:  1,
+			name:            "TODO with author",
+			code:            "// TODO(john): review this",
+			expectedCount:   1,
 			expectedKeyword: "TODO",
 		},
 		{
-			name:           "TODO with dash",
-			code:           "// TODO - fix later",
-			expectedCount:  1,
+			name:            "TODO with dash",
+			code:            "// TODO - fix later",
+			expectedCount:   1,
 			expectedKeyword: "TODO",
 		},
 		{
-			name:           "Not actionable - description",
-			code:           "// This function detects TODO comments",
-			expectedCount:  0,
+			name:          "Not actionable - description",
+			code:          "// This function detects TODO comments",
+			expectedCount: 0,
 		},
 		{
-			name:           "Not actionable - in middle",
-			code:           "// The TODO pattern is matched here",
-			expectedCount:  0,
+			name:          "Not actionable - in middle",
+			code:          "// The TODO pattern is matched here",
+			expectedCount: 0,
 		},
 		{
-			name:           "Not a comment",
-			code:           "var TODO = \"something\"",
-			expectedCount:  0,
+			name:          "Not a comment",
+			code:          "var TODO = \"something\"",
+			expectedCount: 0,
 		},
 		{
-			name:           "Block comment TODO",
-			code:           "/* TODO: implement */",
-			expectedCount:  1,
+			name:            "Block comment TODO",
+			code:            "/* TODO: implement */",
+			expectedCount:   1,
 			expectedKeyword: "TODO",
 		},
 	}

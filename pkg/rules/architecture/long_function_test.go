@@ -5,15 +5,16 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
 
 func TestLongFunctionRule(t *testing.T) {
 	rule := NewLongFunctionRule()
-	rule.Configure(map[string]any{
+	require.NoError(t, rule.Configure(map[string]any{
 		"max_lines": 10, // Low threshold for testing
-	})
+	}))
 
 	tests := []struct {
 		name          string

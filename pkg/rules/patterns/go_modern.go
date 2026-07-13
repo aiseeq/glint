@@ -2,7 +2,6 @@ package patterns
 
 import (
 	"go/ast"
-	"go/token"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -15,7 +14,6 @@ func init() {
 // GoModernRule detects patterns that could use modern Go features
 type GoModernRule struct {
 	*rules.BaseRule
-	iteratorCallbacks []string // Function names that suggest callback-based iteration
 }
 
 // NewGoModernRule creates the rule
@@ -27,12 +25,6 @@ func NewGoModernRule() *GoModernRule {
 			"Detects patterns that could use modern Go features (1.21+, 1.23+ iterators)",
 			core.SeverityLow,
 		),
-		// Common callback-based iteration patterns that could use Go 1.23 iterators
-		iteratorCallbacks: []string{
-			"Walk", "WalkFunc", "WalkDir",
-			"Each", "ForEach", "Iterate",
-			"Range", "Visit", "Traverse",
-		},
 	}
 }
 
@@ -52,8 +44,6 @@ func (r *GoModernRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		case *ast.ForStmt:
 			violations = append(violations, r.checkForStmt(ctx, node)...)
 
-		case *ast.IfStmt:
-			violations = append(violations, r.checkIfStmt(ctx, node)...)
 		}
 
 		return true
@@ -86,73 +76,7 @@ func (r *GoModernRule) checkCallExpr(ctx *core.FileContext, call *ast.CallExpr) 
 		}
 	}
 
-	// Check for max/min patterns that could use built-in max/min (Go 1.21+)
-	if ident, ok := call.Fun.(*ast.Ident); ok {
-		if ident.Name == "math.Max" || ident.Name == "math.Min" {
-			// This is actually a selector, handled above
-		}
-	}
-
 	return violations
-}
-
-// checkIteratorCallback checks if a call matches an iterator callback pattern
-func (r *GoModernRule) checkIteratorCallback(ctx *core.FileContext, call *ast.CallExpr, sel *ast.SelectorExpr) *core.Violation {
-	// Only flag package-level function calls (e.g., filepath.Walk)
-	// Skip method calls on variables (e.g., router.Walk) - we can't change library APIs
-	if !r.isPackageLevelCall(sel) {
-		return nil
-	}
-
-	for _, iterName := range r.iteratorCallbacks {
-		if sel.Sel.Name != iterName {
-			continue
-		}
-		if !r.hasCallbackArg(call) {
-			continue
-		}
-		pos := ctx.PositionFor(call)
-		v := r.CreateViolation(ctx.RelPath, pos.Line,
-			"Callback-based iteration could use Go 1.23+ range-over-func iterator")
-		v.WithCode(ctx.GetLine(pos.Line))
-		v.WithSuggestion("Consider using iter.Seq or iter.Seq2 for Go 1.23+ iterator pattern")
-		v.WithContext("pattern", "iterator-candidate")
-		v.WithContext("function", sel.Sel.Name)
-		return v
-	}
-	return nil
-}
-
-// isPackageLevelCall checks if selector is a package-level call (e.g., filepath.Walk)
-// vs a method call on a variable (e.g., router.Walk)
-func (r *GoModernRule) isPackageLevelCall(sel *ast.SelectorExpr) bool {
-	ident, ok := sel.X.(*ast.Ident)
-	if !ok {
-		return false
-	}
-	// Package names are typically lowercase and short
-	// Variable names can be anything, but common patterns are:
-	// - router, db, client, handler, etc.
-	// Package names that have Walk-like functions:
-	// - filepath, path, ast, html, etc.
-	knownPackages := map[string]bool{
-		"filepath": true,
-		"path":     true,
-		"ast":      true,
-		"html":     true,
-		"template": true,
-	}
-	return knownPackages[ident.Name]
-}
-
-// hasCallbackArg checks if any argument to a call is a function literal
-func (r *GoModernRule) hasCallbackArg(call *ast.CallExpr) bool {
-	for _, arg := range call.Args {
-		if _, ok := arg.(*ast.FuncLit); ok {
-			return true
-		}
-	}
-	return false
 }
 
 // checkForStmt checks for loop patterns that could be modernized
@@ -161,25 +85,4 @@ func (r *GoModernRule) checkForStmt(ctx *core.FileContext, stmt *ast.ForStmt) []
 	// Range loops are handled separately as ast.RangeStmt
 	// For now, we don't have specific patterns to check in regular for loops
 	return nil
-}
-
-// checkIfStmt checks for if patterns that could be simplified
-func (r *GoModernRule) checkIfStmt(ctx *core.FileContext, stmt *ast.IfStmt) []*core.Violation {
-	var violations []*core.Violation
-
-	// Check for "if err != nil { return ..., err }" without wrapping
-	// This is handled by error-wrap rule, skip here
-
-	// Check for manual nil checks that could use cmp.Or (Go 1.22+)
-	// Pattern: if x == nil { x = defaultValue }
-	if stmt.Else == nil && stmt.Init == nil {
-		if bin, ok := stmt.Cond.(*ast.BinaryExpr); ok && bin.Op == token.EQL {
-			if _, ok := bin.Y.(*ast.Ident); ok {
-				// Could be a nil check, but need more context
-				// Skip for now - too many false positives
-			}
-		}
-	}
-
-	return violations
 }

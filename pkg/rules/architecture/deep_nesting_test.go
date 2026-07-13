@@ -4,15 +4,16 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
 
 func TestDeepNestingRule(t *testing.T) {
 	rule := NewDeepNestingRule()
-	rule.Configure(map[string]any{
+	require.NoError(t, rule.Configure(map[string]any{
 		"max_depth": 3, // Low threshold for testing
-	})
+	}))
 
 	tests := []struct {
 		name          string

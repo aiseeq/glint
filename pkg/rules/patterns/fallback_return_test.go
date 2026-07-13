@@ -352,7 +352,7 @@ func getValue() (int, error) {
 		t.Run(tt.name, func(t *testing.T) {
 			parser := core.NewParser()
 			ctx := core.NewFileContext(tt.filename, ".", []byte(tt.code), nil)
-			
+
 			// Parse Go AST for precise detection
 			fset, astFile, err := parser.ParseGoFile(tt.filename, []byte(tt.code))
 			if err == nil {
@@ -446,7 +446,7 @@ func getValue() int {
 		t.Run(tt.name, func(t *testing.T) {
 			parser := core.NewParser()
 			ctx := core.NewFileContext(tt.filename, ".", []byte(tt.code), nil)
-			
+
 			fset, astFile, err := parser.ParseGoFile(tt.filename, []byte(tt.code))
 			if err == nil {
 				ctx.SetGoAST(fset, astFile)

@@ -2,7 +2,7 @@
 - Проект: /home/aisee/work/glint (github.com/aiseeq/glint) — универсальный статический анализатор Go/TypeScript; ответы — на русском.
 - Задачи: docs/tasks; имена docs/tasks/YYYYMMDD-HHMM-LEVEL-title.md.
 - Редактирование CLAUDE.md: максимальная краткость = экономия токенов при чтении.
-- 79 правил в 8 категориях (architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation); авторитетный список — `glint rules`, README вторичен.
+- 80 правил в 8 категориях (architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation); авторитетный список — `glint rules`, README вторичен.
 - Single-pass: файлы читаются/парсятся один раз, AST-кэш; параллельное выполнение; YAML-конфиг с наследованием и per-rule exceptions; autofix для части правил; вывод console/JSON/summary.
 - РАЗРАБОТКА НА ПРИМЕРАХ PROJECTA: главный потребитель — /home/aisee/work/projectA (`make analyze`); новые правила и фиксы — TDD-репро с реальных находок. Универсальные правила живут здесь; ProjectA-специфичные — в projectA tools/projectA-lint, сюда их не добавлять.
 

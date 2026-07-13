@@ -10,9 +10,9 @@ import (
 
 // Registry holds all registered rules
 type Registry struct {
-	rules    map[string]Rule
+	rules      map[string]Rule
 	byCategory map[string][]Rule
-	mu       sync.RWMutex
+	mu         sync.RWMutex
 }
 
 // Global registry instance
@@ -164,9 +164,13 @@ func (r *Registry) ConfigureAll(cfg *core.Config) error {
 
 // Global registry functions
 
-// Register adds a rule to the global registry
-func Register(rule Rule) error {
-	return globalRegistry.Register(rule)
+// Register adds a rule to the global registry and fails fast on duplicate
+// registration. Package init functions cannot recover from an invalid rule
+// registry, while Registry.Register remains available for dynamic callers.
+func Register(rule Rule) {
+	if err := globalRegistry.Register(rule); err != nil {
+		panic(err)
+	}
 }
 
 // Get returns a rule from the global registry

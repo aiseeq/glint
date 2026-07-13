@@ -196,12 +196,19 @@ func getProjectRoot(args []string) (string, error) {
 	}
 
 	projectRoot := paths[0]
-	if projectRoot == "." {
+	if projectRoot == "." || projectRoot == "./..." {
 		var err error
 		projectRoot, err = os.Getwd()
 		if err != nil {
 			return "", fmt.Errorf("failed to get working directory: %w", err)
 		}
+	}
+	info, err := os.Stat(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("invalid project root %q: %w", projectRoot, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("invalid project root %q: not a directory", projectRoot)
 	}
 	return projectRoot, nil
 }
