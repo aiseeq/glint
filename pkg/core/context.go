@@ -70,6 +70,9 @@ func (ctx *FileContext) IsTestFile() bool {
 	if strings.HasSuffix(name, "_test.go") {
 		return true
 	}
+	if strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".go") {
+		return true
+	}
 
 	// JS/TS test files
 	if strings.Contains(name, ".test.") || strings.Contains(name, ".spec.") {

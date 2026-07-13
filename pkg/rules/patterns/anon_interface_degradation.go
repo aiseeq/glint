@@ -46,12 +46,6 @@ func (r *AnonInterfaceDegradationRule) AnalyzeFile(ctx *core.FileContext) []*cor
 		return nil
 	}
 
-	// Skip test utility files
-	pathLower := strings.ToLower(ctx.RelPath)
-	if strings.Contains(pathLower, "/test") || strings.Contains(pathLower, "test_") {
-		return nil
-	}
-
 	var violations []*core.Violation
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {

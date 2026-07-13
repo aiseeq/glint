@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,23 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestWalkerVisitFilePropagatesFilesystemError(t *testing.T) {
+	walker := NewWalker(t.TempDir(), DefaultConfig())
+	walkErr := errors.New("permission denied")
+
+	err := walker.visitFile("blocked", nil, walkErr)
+	require.ErrorIs(t, err, walkErr)
+}
+
+func TestWalkerReportsGoParseError(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "invalid.go"), []byte("package"), 0644))
+
+	contexts, errs := NewWalker(tmpDir, DefaultConfig()).WalkSync()
+	require.Len(t, contexts, 1, "regex rules should still analyze the invalid file")
+	require.Len(t, errs, 1)
+}
 
 func TestNewWalker(t *testing.T) {
 	tmpDir := t.TempDir()

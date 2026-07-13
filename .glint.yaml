@@ -42,3 +42,9 @@ categories:
 
   duplication:
     enabled: true
+    rules:
+      # Rule implementations share short traversal/guard scaffolding.
+      cross-file-duplicate:
+        enabled: true
+        settings:
+          min_block_size: 15

@@ -97,8 +97,7 @@ func (e *Engine) CheckGitStatus(projectRoot string) (bool, error) {
 	cmd.Dir = projectRoot
 	output, err := cmd.Output()
 	if err != nil {
-		// Not a git repo or git not available - skip check
-		return false, nil
+		return false, fmt.Errorf("git status in %q: %w", projectRoot, err)
 	}
 	return len(strings.TrimSpace(string(output))) > 0, nil
 }

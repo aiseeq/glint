@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -115,7 +116,7 @@ func (w *Walker) WalkSync() ([]*FileContext, []error) {
 // visitFile is called for each file during walk
 func (w *Walker) visitFile(path string, info os.FileInfo, err error) error {
 	if err != nil {
-		return nil // Skip files with errors
+		return fmt.Errorf("visit %q: %w", path, err)
 	}
 
 	// Skip directories we don't need to traverse
@@ -135,7 +136,7 @@ func (w *Walker) visitFile(path string, info os.FileInfo, err error) error {
 	// Check exclusion patterns
 	relPath, err := filepath.Rel(w.projectRoot, path)
 	if err != nil {
-		relPath = path // Fall back to absolute path
+		return fmt.Errorf("make %q relative to project root: %w", path, err)
 	}
 	if w.config.ShouldExclude(relPath) {
 		w.mu.Lock()
@@ -165,7 +166,6 @@ func (w *Walker) worker() {
 			w.stats.ErrorFiles++
 			w.mu.Unlock()
 			w.errorChan <- err
-			continue
 		}
 
 		if ctx != nil {
@@ -190,8 +190,8 @@ func (w *Walker) processFile(path string) (*FileContext, error) {
 	if ctx.IsGoFile() {
 		fset, astFile, err := w.parser.ParseGoFile(path, content)
 		if err != nil {
-			// Log error but continue with regex-based analysis
 			ctx.SetGoAST(nil, nil)
+			return ctx, fmt.Errorf("parse Go file %q: %w", path, err)
 		} else {
 			ctx.SetGoAST(fset, astFile)
 		}

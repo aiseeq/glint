@@ -86,6 +86,7 @@ func TestFileContextIsTestFile(t *testing.T) {
 		{"/project/app.test.ts", true},
 		{"/project/app.spec.js", true},
 		{"/project/test/helper.go", true},
+		{"/project/test_helper.go", true},
 		{"/project/__tests__/app.ts", true},
 		{"/project/main.go", false},
 		{"/project/app.ts", false},
