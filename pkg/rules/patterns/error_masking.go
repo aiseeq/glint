@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -92,15 +93,7 @@ func (r *ErrorMaskingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 		return nil
 	}
 
-	var violations []*core.Violation
-
-	if ctx.IsGoFile() {
-		violations = append(violations, r.analyzeGoFile(ctx)...)
-	} else if ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile() {
-		violations = append(violations, r.analyzeTSFile(ctx)...)
-	}
-
-	return violations
+	return helpers.AnalyzeGoAndFrontend(ctx, r.analyzeGoFile, r.analyzeTSFile)
 }
 
 // shouldSkipFile checks if file should be excluded

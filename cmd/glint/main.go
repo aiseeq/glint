@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -166,7 +167,10 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	contexts, walker := walkFiles(projectRoot, cfg)
+	contexts, walker, err := walkFiles(projectRoot, cfg)
+	if err != nil {
+		return err
+	}
 
 	allViolations := analyzeFiles(contexts, enabledRules, cfg)
 	allViolations = allViolations.BySeverity(cfg.GetMinSeverity())
@@ -182,7 +186,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("output error: %w", err)
 	}
 
-	if allViolations.HasCritical() {
+	if shouldFailAnalysis(allViolations) {
 		os.Exit(1)
 	}
 
@@ -262,20 +266,29 @@ func getEnabledRules(cfg *core.Config) []rules.Rule {
 	return enabledRules
 }
 
-func walkFiles(projectRoot string, cfg *core.Config) ([]*core.FileContext, *core.Walker) {
+func walkFiles(projectRoot string, cfg *core.Config) ([]*core.FileContext, *core.Walker, error) {
 	walker := core.NewWalker(projectRoot, cfg)
-	contexts, errors := walker.WalkSync()
+	contexts, walkErrors := walker.WalkSync()
 
 	if flagVerbose {
 		stats := walker.Stats()
 		fmt.Printf("Found %d files to analyze\n", stats.TotalFiles)
 	}
 
-	for _, err := range errors {
-		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+	if len(walkErrors) > 0 {
+		return nil, walker, fmt.Errorf("walk project files: %w", errors.Join(walkErrors...))
 	}
 
-	return contexts, walker
+	return contexts, walker, nil
+}
+
+func shouldFailAnalysis(violations core.ViolationList) bool {
+	for _, violation := range violations {
+		if violation.Severity >= core.SeverityHigh {
+			return true
+		}
+	}
+	return false
 }
 
 func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config) core.ViolationList {
@@ -494,8 +507,8 @@ func runFix(cmd *cobra.Command, args []string) error {
 	// Check for uncommitted changes
 	engine := fix.NewEngine(fix.DefaultRegistry, flagDryRun, flagVerbose)
 	hasChanges, err := engine.CheckGitStatus(projectRoot)
-	if err != nil && flagVerbose {
-		fmt.Fprintf(os.Stderr, "Warning: could not check git status: %v\n", err)
+	if err != nil {
+		return fmt.Errorf("check git status: %w", err)
 	}
 
 	if hasChanges && !flagForce && !flagDryRun {
@@ -536,7 +549,10 @@ func runFix(cmd *cobra.Command, args []string) error {
 	}
 
 	// Walk files and analyze
-	contexts, _ := walkFiles(projectRoot, cfg)
+	contexts, _, err := walkFiles(projectRoot, cfg)
+	if err != nil {
+		return err
+	}
 
 	// Build context map for fixers (by both absolute and relative paths)
 	contextMap := make(map[string]*core.FileContext)

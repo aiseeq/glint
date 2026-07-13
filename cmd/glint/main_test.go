@@ -35,6 +35,22 @@ func TestGetProjectRootRejectsMissingPath(t *testing.T) {
 	}
 }
 
+func TestShouldFailAnalysisAtHighSeverity(t *testing.T) {
+	medium := core.ViolationList{core.NewViolation("medium", "test", "test.go", 1, core.SeverityMedium, "medium")}
+	high := core.ViolationList{core.NewViolation("high", "test", "test.go", 1, core.SeverityHigh, "high")}
+	critical := core.ViolationList{core.NewViolation("critical", "test", "test.go", 1, core.SeverityCritical, "critical")}
+
+	if shouldFailAnalysis(medium) {
+		t.Fatal("medium findings must not fail analysis")
+	}
+	if !shouldFailAnalysis(high) {
+		t.Fatal("high findings must fail analysis")
+	}
+	if !shouldFailAnalysis(critical) {
+		t.Fatal("critical findings must fail analysis")
+	}
+}
+
 func goContext(t *testing.T, name, code string) *core.FileContext {
 	t.Helper()
 	ctx := core.NewFileContext(name, ".", []byte(code), nil)

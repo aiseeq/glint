@@ -3,8 +3,17 @@ package fix
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/aiseeq/glint/pkg/core"
 )
+
+func TestCheckGitStatusReturnsGitError(t *testing.T) {
+	engine := NewEngine(NewRegistry(), true, false)
+
+	_, err := engine.CheckGitStatus(t.TempDir())
+	require.Error(t, err)
+}
 
 func TestInterfaceAnyFixer(t *testing.T) {
 	tests := []struct {

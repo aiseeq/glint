@@ -150,6 +150,8 @@ Always add the reason after the marker. Policy rules may opt out of suppression 
 # List all rules
 glint rules
 
+# Exit status is non-zero when HIGH or CRITICAL findings are present.
+
 # Explain specific rule
 glint explain error-masking
 ```
