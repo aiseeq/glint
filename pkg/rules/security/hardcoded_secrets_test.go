@@ -1,6 +1,7 @@
 package security
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -176,19 +177,59 @@ var password = os.Getenv("PASSWORD")`,
 	}
 }
 
-func TestHardcodedSecretsSkipsTestFiles(t *testing.T) {
+func TestHardcodedSecretsScansSecuritySensitiveLocations(t *testing.T) {
+	tests := []struct {
+		name        string
+		path        string
+		code        string
+		wantPattern string
+	}{
+		{
+			name:        "provider credential in test helper",
+			path:        "/src/e2e/credential_helper_test.go",
+			code:        `package e2e; const key = "` + strings.Join([]string{"re", "_1234567890abcdefghijklmnop"}, "") + `"`,
+			wantPattern: "resend_key",
+		},
+		{
+			name:        "password in config package",
+			path:        "/src/config/loader.go",
+			code:        `package config; const password = "real-password-value"`,
+			wantPattern: "password",
+		},
+		{
+			name:        "password embedded in shell command",
+			path:        "/src/tools/database.go",
+			code:        `package tools; const command = "` + strings.Join([]string{"PGPASSWORD", "=1234567890abcdefghijkl psql"}, "") + `"`,
+			wantPattern: "pgpassword",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rule := NewHardcodedSecretsRule()
+			ctx := core.NewFileContext(tt.path, "/src", []byte(tt.code), core.DefaultConfig())
+			violations := rule.AnalyzeFile(ctx)
+			if assert.Len(t, violations, 1) {
+				assert.Equal(t, tt.wantPattern, violations[0].Context["pattern"])
+			}
+		})
+	}
+}
+
+func TestHardcodedSecretsAllowsExplicitPlaceholders(t *testing.T) {
 	rule := NewHardcodedSecretsRule()
+	code := `package config
+var password = "${DB_PASSWORD}"
+var key = process.env.RESEND_API_KEY`
+	ctx := core.NewFileContext("/src/config/loader.go", "/src", []byte(code), core.DefaultConfig())
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+}
 
-	code := `package main
-
-var password = "test_password_123456"`
-
-	// Path is a test file - should be skipped
-	ctx := core.NewFileContext("/src/config_test.go", "/src", []byte(code), core.DefaultConfig())
-
-	violations := rule.AnalyzeFile(ctx)
-
-	assert.Empty(t, violations, "Should skip test files")
+func TestHardcodedSecretsAllowsGenericCredentialsInTestConfig(t *testing.T) {
+	rule := NewHardcodedSecretsRule()
+	code := `const config = { jwtSecret: "test-jwt-secret-32-characters-minimum" }`
+	ctx := core.NewFileContext("/src/shared/config/test-config.ts", "/src", []byte(code), core.DefaultConfig())
+	assert.Empty(t, rule.AnalyzeFile(ctx))
 }
 
 func TestHardcodedSecretsMasksOutput(t *testing.T) {

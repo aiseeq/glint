@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -8,6 +10,30 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/patterns"
 	"github.com/aiseeq/glint/pkg/rules/typesafety"
 )
+
+func TestGetProjectRootExpandsRecursiveCurrentDirectory(t *testing.T) {
+	want, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+
+	got, err := getProjectRoot([]string{"./..."})
+	if err != nil {
+		t.Fatalf("get project root: %v", err)
+	}
+	if got != want {
+		t.Fatalf("got project root %q, want %q", got, want)
+	}
+}
+
+func TestGetProjectRootRejectsMissingPath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	_, err := getProjectRoot([]string{missing})
+	if err == nil {
+		t.Fatal("expected missing project root to return an error")
+	}
+}
 
 func goContext(t *testing.T, name, code string) *core.FileContext {
 	t.Helper()

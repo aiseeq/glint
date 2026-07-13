@@ -25,7 +25,7 @@ type Violation struct {
 	Suggestion string // How to fix it
 
 	// Context
-	Code    string                 // The offending code snippet
+	Code    string         // The offending code snippet
 	Context map[string]any // Additional metadata
 }
 

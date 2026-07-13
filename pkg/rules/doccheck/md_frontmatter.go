@@ -17,10 +17,6 @@ type MdFrontmatterRule struct {
 	*rules.BaseRule
 	// Required fields
 	requiredFields []string
-	// Pattern for old-style metadata (bold labels at start)
-	oldMetadataPattern *regexp.Regexp
-	// Known metadata keywords (case-insensitive)
-	metadataKeywords []string
 	// Pattern for valid date format YYYY-MM-DD
 	datePattern *regexp.Regexp
 	// Pattern for semver version
@@ -37,17 +33,6 @@ func NewMdFrontmatterRule() *MdFrontmatterRule {
 			core.SeverityMedium,
 		),
 		requiredFields: nil,
-		// Match lines like **Label:** value (colon inside bold markers)
-		oldMetadataPattern: regexp.MustCompile(`^\*\*[^*]+:\*\*`),
-		// Known metadata keywords (EN and RU) - only these trigger old-style detection
-		metadataKeywords: []string{
-			// English
-			"version", "date", "updated", "audience", "status", "author",
-			"architecture", "priority", "document", "last update",
-			// Russian
-			"версия", "дата", "обновлено", "обновление", "аудитория", "статус",
-			"автор", "архитектура", "приоритет", "документ", "последнее обновление",
-		},
 		// YYYY-MM-DD format
 		datePattern: regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`),
 		// Semver: major.minor.patch with optional pre-release
@@ -145,17 +130,4 @@ func (r *MdFrontmatterRule) parseFrontmatter(lines []string) (bool, int, map[str
 	}
 
 	return true, endLine, fields
-}
-
-// isMetadataKeyword checks if the line contains a known metadata keyword
-func (r *MdFrontmatterRule) isMetadataKeyword(line string) bool {
-	lower := strings.ToLower(line)
-	for _, keyword := range r.metadataKeywords {
-		// Check if keyword appears after ** and before :
-		if strings.Contains(lower, "**"+keyword+":") ||
-			strings.Contains(lower, "**"+keyword+" ") && strings.Contains(lower, ":") {
-			return true
-		}
-	}
-	return false
 }

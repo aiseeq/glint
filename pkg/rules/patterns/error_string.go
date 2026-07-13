@@ -2,7 +2,6 @@ package patterns
 
 import (
 	"go/ast"
-	"regexp"
 	"strings"
 	"unicode"
 
@@ -67,8 +66,6 @@ var errorFuncs = map[string]bool{
 	"errors.New": true,
 	"fmt.Errorf": true,
 }
-
-var errorStringPattern = regexp.MustCompile(`^["` + "`" + `]([^"` + "`" + `]+)["` + "`" + `]`)
 
 // AnalyzeFile checks error string formatting
 func (r *ErrorStringRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {

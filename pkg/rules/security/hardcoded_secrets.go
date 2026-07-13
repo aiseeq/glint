@@ -1,6 +1,7 @@
 package security
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -19,9 +20,10 @@ type HardcodedSecretsRule struct {
 }
 
 type secretPattern struct {
-	name    string
-	regex   *regexp.Regexp
-	message string
+	name           string
+	regex          *regexp.Regexp
+	message        string
+	highConfidence bool
 }
 
 // NewHardcodedSecretsRule creates the rule
@@ -34,6 +36,30 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 			core.SeverityCritical,
 		),
 		patterns: []*secretPattern{
+			{
+				name:           "resend_key",
+				regex:          regexp.MustCompile(`\bre_[A-Za-z0-9_-]{20,}\b`),
+				message:        "Resend API key detected",
+				highConfidence: true,
+			},
+			{
+				name:           "google_oauth_secret",
+				regex:          regexp.MustCompile(`\bGOCSPX-[A-Za-z0-9_-]{20,}\b`),
+				message:        "Google OAuth client secret detected",
+				highConfidence: true,
+			},
+			{
+				name:           "stripe_key",
+				regex:          regexp.MustCompile(`\bsk_live_[A-Za-z0-9]{20,}\b`),
+				message:        "Stripe live secret key detected",
+				highConfidence: true,
+			},
+			{
+				name:           "pgpassword",
+				regex:          regexp.MustCompile(`\bPGPASSWORD=[A-Za-z0-9_./+=-]{20,}`),
+				message:        "Hardcoded PostgreSQL password detected",
+				highConfidence: true,
+			},
 			{
 				name:    "password",
 				regex:   regexp.MustCompile(`(?i)(password|passwd|pwd)\s*[:=]\s*["'\x60][^"'\x60]{4,}["'\x60]`),
@@ -55,14 +81,16 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 				message: "Hardcoded token detected",
 			},
 			{
-				name:    "aws_key",
-				regex:   regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
-				message: "AWS access key detected",
+				name:           "aws_key",
+				regex:          regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
+				message:        "AWS access key detected",
+				highConfidence: true,
 			},
 			{
-				name:    "private_key",
-				regex:   regexp.MustCompile(`-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`),
-				message: "Private key detected in source code",
+				name:           "private_key",
+				regex:          regexp.MustCompile(`-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`),
+				message:        "Private key detected in source code",
+				highConfidence: true,
 			},
 			{
 				name:    "jwt",
@@ -75,17 +103,6 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 
 // AnalyzeFile checks for hardcoded secrets
 func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	// Skip test files - they may contain test credentials
-	if ctx.IsTestFile() {
-		return nil
-	}
-
-	// Skip config module files - they contain development defaults
-	// that are overridden by environment variables in production
-	if strings.Contains(ctx.RelPath, "/config/") || strings.HasPrefix(ctx.RelPath, "config/") {
-		return nil
-	}
-
 	var violations []*core.Violation
 
 	for lineNum, line := range ctx.Lines {
@@ -95,13 +112,17 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			continue
 		}
 
-		// Skip lines that are clearly example/placeholder values
-		if r.isPlaceholder(line) {
-			continue
-		}
-
 		for _, pattern := range r.patterns {
+			if (ctx.IsTestFile() || isTestConfigPath(ctx.RelPath)) && !pattern.highConfidence {
+				continue
+			}
+			if !pattern.highConfidence && r.isPlaceholder(line) {
+				continue
+			}
 			if pattern.regex.MatchString(line) {
+				if ctx.IsSuppressed(lineNum+1, r.Name()) {
+					break
+				}
 				v := r.CreateViolation(ctx.RelPath, lineNum+1, pattern.message)
 				v.WithCode(r.maskSecret(line))
 				v.WithSuggestion("Use environment variables or a secrets manager")
@@ -115,12 +136,20 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	return violations
 }
 
+func isTestConfigPath(path string) bool {
+	lower := strings.ToLower(filepath.ToSlash(path))
+	return strings.Contains(lower, "test-config") ||
+		strings.Contains(lower, "test_config") ||
+		strings.Contains(lower, "/testing/")
+}
+
 func (r *HardcodedSecretsRule) isPlaceholder(line string) bool {
 	lower := strings.ToLower(line)
 	placeholders := []string{
 		"xxx", "your_", "example", "placeholder", "<your",
 		"todo", "fixme", "change_me", "replace_with",
-		"test_", "dummy", "sample", "demo",
+		"test_", "dummy", "sample", "demo", "${",
+		"process.env", "os.getenv", "os.lookupenv",
 	}
 
 	for _, p := range placeholders {

@@ -9,7 +9,7 @@ Originally built to help AI agents understand codebases, but useful for any proj
 
 ## Features
 
-- **79 rules in 8 categories** — architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation (`glint rules` is always the authoritative list)
+- **80 rules in 8 categories** — architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation (`glint rules` is always the authoritative list)
 - **Auto-fix support** — automatic fixes for common issues (v1.1+)
 - **Single-pass analysis** — files are read and parsed once, AST is cached
 - **Parallel execution** — utilizes all CPU cores
@@ -95,7 +95,7 @@ See [docs/configuration.md](docs/configuration.md) for full reference.
 | duplication | 2 | cross-file-duplicate, duplicate-block |
 | naming | 1 | naming-convention |
 | patterns | 54 | anon-interface-degradation, append-assign, bool-compare, constructor-nil-return, constructor-swallows-nil-dep, context-background, context-first, defer-in-loop, deprecated-ioutil, deterministic-uuid, empty-block, empty-struct-return, error-length-check, error-masked-as-false-bool, error-masking, error-string, error-string-compare, error-wrap, fallback-return, financial-constants, financial-fp-rounding, financial-rounded-delta, frontend-env-fallback, frontend-money-arithmetic, frontend-silent-catch, go-modern, http-body-close, ignored-error, legacy-comment-marker, legacy-identifier, log-and-return-zero, magic-number, masked-error-in-or-condition, migration-duplicate-version, mutex-lock, nil-di, nil-slice, non-canonical-logger, nullable-object-call, orphaned-interface, query-in-loop, range-val-pointer, redundant-compatibility, return-nil-error, scattered-construction, shadow-variable, silent-config-error, silent-error-handling, sql-rows-close, string-concat, tech-debt, time-equal, todo-comment, tombstone-comment |
-| security | 2 | hardcoded-secret, sql-injection |
+| security | 3 | hardcoded-secret, sensitive-query-param, sql-injection |
 | typesafety | 3 | any-in-public-contract, interface-any, type-assertion |
 
 ### Key Rules
@@ -111,6 +111,7 @@ See [docs/configuration.md](docs/configuration.md) for full reference.
 - **layer-violation** (CRITICAL) — Detects violations of Handler→Service→Repository architecture
 - **import-direction** (HIGH) — Detects imports that violate layered architecture direction
 - **hardcoded-secret** (CRITICAL) — Detects passwords, API keys, tokens in code
+- **sensitive-query-param** (HIGH) — Detects credentials and action tokens exposed in URLs (CWE-598)
 - **sql-injection** (CRITICAL) — Detects SQL injection via string concatenation
 - **error-masking** (CRITICAL) — Detects patterns that mask errors instead of handling them properly
 - **cyclomatic-complexity** — Functions with too many decision paths (default: >10)
@@ -126,10 +127,11 @@ See [docs/configuration.md](docs/configuration.md) for full reference.
 
 ### Suppressing a finding
 
-Two equivalent inline forms, placed on the violation line or the line directly above; markers work only inside comments and match the rule name exactly:
+Two equivalent inline forms, placed on the violation line or the line directly above; markers work only inside comments and match the rule name exactly. Comma-separated `nolint` lists are supported:
 
 ```go
 db := NewRepo(nil) //nolint:nil-di
+db := NewRepo(nil) //nolint:gosec,nil-di
 // nil-di: safe — repo is wired later by the DI container
 db := NewRepo(nil)
 ```

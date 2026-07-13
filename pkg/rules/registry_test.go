@@ -43,7 +43,7 @@ func TestRegistryGet(t *testing.T) {
 	r := NewRegistry()
 
 	rule := NewMockRule("my-rule")
-	r.Register(rule)
+	require.NoError(t, r.Register(rule))
 
 	found, ok := r.Get("my-rule")
 	assert.True(t, ok)
@@ -61,9 +61,9 @@ func TestRegistryGetByCategory(t *testing.T) {
 	rule2 := &MockRule{BaseRule: NewBaseRule("rule2", "category-a", "desc", core.SeverityLow)}
 	rule3 := &MockRule{BaseRule: NewBaseRule("rule3", "category-b", "desc", core.SeverityLow)}
 
-	r.Register(rule1)
-	r.Register(rule2)
-	r.Register(rule3)
+	require.NoError(t, r.Register(rule1))
+	require.NoError(t, r.Register(rule2))
+	require.NoError(t, r.Register(rule3))
 
 	catA := r.GetByCategory("category-a")
 	assert.Len(t, catA, 2)
@@ -78,9 +78,9 @@ func TestRegistryGetByCategory(t *testing.T) {
 func TestRegistryAll(t *testing.T) {
 	r := NewRegistry()
 
-	r.Register(&MockRule{BaseRule: NewBaseRule("rule-b", "cat-b", "desc", core.SeverityLow)})
-	r.Register(&MockRule{BaseRule: NewBaseRule("rule-a", "cat-a", "desc", core.SeverityLow)})
-	r.Register(&MockRule{BaseRule: NewBaseRule("rule-c", "cat-a", "desc", core.SeverityLow)})
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("rule-b", "cat-b", "desc", core.SeverityLow)}))
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("rule-a", "cat-a", "desc", core.SeverityLow)}))
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("rule-c", "cat-a", "desc", core.SeverityLow)}))
 
 	all := r.All()
 	assert.Len(t, all, 3)
@@ -94,9 +94,9 @@ func TestRegistryAll(t *testing.T) {
 func TestRegistryCategories(t *testing.T) {
 	r := NewRegistry()
 
-	r.Register(&MockRule{BaseRule: NewBaseRule("r1", "zebra", "desc", core.SeverityLow)})
-	r.Register(&MockRule{BaseRule: NewBaseRule("r2", "alpha", "desc", core.SeverityLow)})
-	r.Register(&MockRule{BaseRule: NewBaseRule("r3", "beta", "desc", core.SeverityLow)})
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("r1", "zebra", "desc", core.SeverityLow)}))
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("r2", "alpha", "desc", core.SeverityLow)}))
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("r3", "beta", "desc", core.SeverityLow)}))
 
 	cats := r.Categories()
 	assert.Equal(t, []string{"alpha", "beta", "zebra"}, cats)
@@ -105,9 +105,9 @@ func TestRegistryCategories(t *testing.T) {
 func TestRegistryCountByCategory(t *testing.T) {
 	r := NewRegistry()
 
-	r.Register(&MockRule{BaseRule: NewBaseRule("r1", "cat-a", "desc", core.SeverityLow)})
-	r.Register(&MockRule{BaseRule: NewBaseRule("r2", "cat-a", "desc", core.SeverityLow)})
-	r.Register(&MockRule{BaseRule: NewBaseRule("r3", "cat-b", "desc", core.SeverityLow)})
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("r1", "cat-a", "desc", core.SeverityLow)}))
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("r2", "cat-a", "desc", core.SeverityLow)}))
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("r3", "cat-b", "desc", core.SeverityLow)}))
 
 	counts := r.CountByCategory()
 	assert.Equal(t, 2, counts["cat-a"])
@@ -117,9 +117,9 @@ func TestRegistryCountByCategory(t *testing.T) {
 func TestRegistryGetEnabled(t *testing.T) {
 	r := NewRegistry()
 
-	r.Register(&MockRule{BaseRule: NewBaseRule("r1", "enabled-cat", "desc", core.SeverityLow)})
-	r.Register(&MockRule{BaseRule: NewBaseRule("r2", "disabled-cat", "desc", core.SeverityLow)})
-	r.Register(&MockRule{BaseRule: NewBaseRule("r3", "enabled-cat", "desc", core.SeverityLow)})
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("r1", "enabled-cat", "desc", core.SeverityLow)}))
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("r2", "disabled-cat", "desc", core.SeverityLow)}))
+	require.NoError(t, r.Register(&MockRule{BaseRule: NewBaseRule("r3", "enabled-cat", "desc", core.SeverityLow)}))
 
 	cfg := core.DefaultConfig()
 	cfg.Categories["enabled-cat"] = core.CategoryConfig{Enabled: true}
@@ -137,7 +137,7 @@ func TestRegistryConfigureAll(t *testing.T) {
 	r := NewRegistry()
 
 	rule := NewMockRule("configurable-rule")
-	r.Register(rule)
+	require.NoError(t, r.Register(rule))
 
 	cfg := core.DefaultConfig()
 	cfg.Categories["mock"] = core.CategoryConfig{

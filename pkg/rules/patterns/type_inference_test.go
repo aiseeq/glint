@@ -11,10 +11,10 @@ import (
 
 func TestTypeInferrer_SliceDetection(t *testing.T) {
 	tests := []struct {
-		name     string
-		code     string
-		varName  string
-		isSlice  bool
+		name    string
+		code    string
+		varName string
+		isSlice bool
 	}{
 		{
 			name: "var declaration with slice type",

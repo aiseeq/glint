@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -35,9 +36,9 @@ func TestBaseRuleConfigure(t *testing.T) {
 
 func TestBaseRuleGetStringSetting(t *testing.T) {
 	rule := NewBaseRule("test", "cat", "desc", core.SeverityMedium)
-	rule.Configure(map[string]interface{}{
+	require.NoError(t, rule.Configure(map[string]interface{}{
 		"name": "value",
-	})
+	}))
 
 	assert.Equal(t, "value", rule.GetStringSetting("name", "default"))
 	assert.Equal(t, "default", rule.GetStringSetting("missing", "default"))
@@ -45,11 +46,11 @@ func TestBaseRuleGetStringSetting(t *testing.T) {
 
 func TestBaseRuleGetIntSetting(t *testing.T) {
 	rule := NewBaseRule("test", "cat", "desc", core.SeverityMedium)
-	rule.Configure(map[string]interface{}{
+	require.NoError(t, rule.Configure(map[string]interface{}{
 		"count":   42,
 		"float":   3.14,
 		"invalid": "not a number",
-	})
+	}))
 
 	assert.Equal(t, 42, rule.GetIntSetting("count", 0))
 	assert.Equal(t, 3, rule.GetIntSetting("float", 0)) // float64 converted to int
@@ -59,11 +60,11 @@ func TestBaseRuleGetIntSetting(t *testing.T) {
 
 func TestBaseRuleGetBoolSetting(t *testing.T) {
 	rule := NewBaseRule("test", "cat", "desc", core.SeverityMedium)
-	rule.Configure(map[string]interface{}{
+	require.NoError(t, rule.Configure(map[string]interface{}{
 		"enabled":  true,
 		"disabled": false,
 		"invalid":  "yes",
-	})
+	}))
 
 	assert.True(t, rule.GetBoolSetting("enabled", false))
 	assert.False(t, rule.GetBoolSetting("disabled", true))
@@ -73,10 +74,10 @@ func TestBaseRuleGetBoolSetting(t *testing.T) {
 
 func TestBaseRuleGetFloat64Setting(t *testing.T) {
 	rule := NewBaseRule("test", "cat", "desc", core.SeverityMedium)
-	rule.Configure(map[string]interface{}{
+	require.NoError(t, rule.Configure(map[string]interface{}{
 		"ratio":   0.75,
 		"integer": 10,
-	})
+	}))
 
 	assert.Equal(t, 0.75, rule.GetFloat64Setting("ratio", 0.0))
 	assert.Equal(t, 10.0, rule.GetFloat64Setting("integer", 0.0))

@@ -105,9 +105,10 @@ func commentTextOfLine(line string) string {
 	for i := 0; i < len(line)-1; i++ {
 		c := line[i]
 		if quote != 0 {
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 			continue

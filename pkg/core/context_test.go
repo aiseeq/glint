@@ -203,6 +203,13 @@ func TestFileContextIsSuppressed(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "nolint comma separated list",
+			lines:    []string{`x := foo() //nolint:first-rule,my-rule,third-rule`},
+			line:     1,
+			rule:     "my-rule",
+			expected: true,
+		},
+		{
 			name:     "rule-colon-safe on violation line",
 			lines:    []string{`x := foo() // my-rule: safe — reason here`},
 			line:     1,

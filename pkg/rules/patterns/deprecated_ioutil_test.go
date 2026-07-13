@@ -38,8 +38,8 @@ data, _ := ioutil.ReadAll(resp.Body)`,
 			expectedCount: 1,
 		},
 		{
-			name: "ioutil.WriteFile usage",
-			code: `ioutil.WriteFile("test.txt", data, 0644)`,
+			name:          "ioutil.WriteFile usage",
+			code:          `ioutil.WriteFile("test.txt", data, 0644)`,
 			expectedCount: 1,
 		},
 		{
