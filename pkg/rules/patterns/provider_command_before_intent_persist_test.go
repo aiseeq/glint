@@ -139,6 +139,20 @@ func send(s *Service, req Request, enabled bool) error {
 	}
 }
 
+func TestProviderCommandBeforeIntentPersistRule_ShortCircuitPersistenceGuardsCommand(t *testing.T) {
+	code := `package service
+func send(s *Service, req Request, enabled bool) error {
+	if enabled && s.repo.SavePaymentIntent(req) == nil {
+		_, err := s.provider.SendTransaction(req)
+		return err
+	}
+	return nil
+}`
+	ctx := createQueryContext(t, "service.go", code)
+
+	assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
+}
+
 func TestProviderCommandBeforeIntentPersistRule_DurableIntentMustMatchCommandEntity(t *testing.T) {
 	code := `package service
 func send(s *Service, reqA, reqB Request) error {
@@ -173,6 +187,73 @@ func send(s *Service, ctx Context, req Request) error {
 	ctx := createQueryContext(t, "service.go", code)
 
 	assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
+}
+
+func TestProviderCommandBeforeIntentPersistRule_MatchesAddressedAndDereferencedEntity(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		persistArg string
+		commandArg string
+	}{
+		{name: "persist address", persistArg: "&req", commandArg: "req"},
+		{name: "command address", persistArg: "req", commandArg: "&req"},
+		{name: "persist dereference", persistArg: "*req", commandArg: "req"},
+		{name: "command dereference", persistArg: "req", commandArg: "*req"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			code := fmt.Sprintf(`package service
+func send(s *Service, ctx Context, req Request) error {
+	if err := s.repo.SavePaymentIntent(ctx, %s); err != nil { return err }
+	_, err := s.provider.SendTransaction(ctx, %s)
+	return err
+}`, tt.persistArg, tt.commandArg)
+			ctx := createQueryContext(t, "service.go", code)
+
+			assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
+		})
+	}
+}
+
+func TestProviderCommandBeforeIntentPersistRule_RealProPaySerializedRequestPersistence(t *testing.T) {
+	code := `package orchestrator
+func (s *confirmationService) sendPaywhoTransaction(ctx context.Context, tx *domain.Transaction) (*domain.Transaction, error) {
+	paywhoReq, err := buildPaywhoRequest(tx)
+	if err != nil {
+		s.errors.record(ctx, tx, "build Paywho request", err)
+		return tx, fmt.Errorf("build paywho request: %w", err)
+	}
+	reqJSON, err := paywho.MarshalPOSTBody(paywhoReq)
+	if err != nil {
+		s.errors.record(ctx, tx, "marshal Paywho request", err)
+		return tx, fmt.Errorf("marshal paywho request: %w", err)
+	}
+	if err := paywhorequest.ValidateSendTransactionRequestAgainstPaywhoContract(paywhoReq, s.paywho); err != nil {
+		s.errors.record(ctx, tx, "validate Paywho request contract", err, reqJSON)
+		return tx, fmt.Errorf("validate paywho request contract: %w", err)
+	}
+	if err := s.txnRepo.PersistPaywhoRequest(ctx, tx.ID, tx.Version, reqJSON); err != nil {
+		return tx, fmt.Errorf("persist Paywho request before send: %w", err)
+	}
+	tx.Version++
+
+	resp, err := s.paywho.SendTransaction(paywhoReq)
+	return tx, err
+}`
+	ctx := createQueryContext(t, "internal/orchestrator/orchestrator.go", code)
+
+	assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
+}
+
+func TestProviderCommandBeforeIntentPersistRule_ProviderSpecificPersistenceMustMatchReceiver(t *testing.T) {
+	code := `package service
+func send(s *Service, ctx Context, tx Transaction, req Request) error {
+	if err := s.repo.PersistPaywhoRequest(ctx, tx.ID, tx.Version, req.JSON); err != nil { return err }
+	_, err := s.bank.SendTransaction(req)
+	return err
+}`
+	ctx := createQueryContext(t, "service.go", code)
+
+	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
 
 func TestProviderCommandBeforeIntentPersistRule_DoesNotLinkMutuallyExclusiveBranches(t *testing.T) {

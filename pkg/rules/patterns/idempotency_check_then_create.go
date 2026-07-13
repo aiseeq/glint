@@ -77,16 +77,23 @@ func (s *idempotencyScope) declare(ident *ast.Ident) {
 
 type idempotencyPath struct {
 	lookups map[idempotencyReceiverKey][]idempotencyRepositoryCall
+	truths  map[idempotencyBinding]bool
 }
 
 func newIdempotencyPath() idempotencyPath {
-	return idempotencyPath{lookups: make(map[idempotencyReceiverKey][]idempotencyRepositoryCall)}
+	return idempotencyPath{
+		lookups: make(map[idempotencyReceiverKey][]idempotencyRepositoryCall),
+		truths:  make(map[idempotencyBinding]bool),
+	}
 }
 
 func (p idempotencyPath) clone() idempotencyPath {
 	clone := newIdempotencyPath()
 	for receiver, calls := range p.lookups {
 		clone.lookups[receiver] = append([]idempotencyRepositoryCall(nil), calls...)
+	}
+	for binding, truth := range p.truths {
+		clone.truths[binding] = truth
 	}
 	return clone
 }
@@ -218,17 +225,44 @@ func (a *idempotencyFunctionAnalyzer) analyzeIf(paths []idempotencyPath, parent 
 	if statement.Init != nil {
 		paths = a.analyzeStatement(paths, scope, statement.Init).next
 	}
-	paths = a.applyCalls(paths, scope, statement.Cond)
-	body := a.analyzeBlock(cloneIdempotencyPaths(paths), newIdempotencyScope(scope), statement.Body.List)
-	otherwise := idempotencyFlow{next: cloneIdempotencyPaths(paths)}
+	truePaths, falsePaths := a.analyzeCondition(paths, scope, statement.Cond)
+	body := a.analyzeBlock(truePaths, newIdempotencyScope(scope), statement.Body.List)
+	otherwise := idempotencyFlow{next: falsePaths}
 	if statement.Else != nil {
-		otherwise = a.analyzeStatement(cloneIdempotencyPaths(paths), scope, statement.Else)
+		otherwise = a.analyzeStatement(falsePaths, scope, statement.Else)
 	}
 	return idempotencyFlow{
 		next:      mergeIdempotencyPaths(append(body.next, otherwise.next...)),
 		breaks:    append(body.breaks, otherwise.breaks...),
 		continues: append(body.continues, otherwise.continues...),
 	}
+}
+
+func (a *idempotencyFunctionAnalyzer) analyzeCondition(paths []idempotencyPath, scope *idempotencyScope, expression ast.Expr) ([]idempotencyPath, []idempotencyPath) {
+	switch node := unparenIdempotencyExpr(expression).(type) {
+	case *ast.Ident:
+		binding := idempotencyBindingFor(node, scope)
+		return constrainIdempotencyPaths(paths, binding, true), constrainIdempotencyPaths(paths, binding, false)
+	case *ast.UnaryExpr:
+		if node.Op == token.NOT {
+			whenTrue, whenFalse := a.analyzeCondition(paths, scope, node.X)
+			return whenFalse, whenTrue
+		}
+	case *ast.BinaryExpr:
+		switch node.Op {
+		case token.LAND:
+			leftTrue, leftFalse := a.analyzeCondition(paths, scope, node.X)
+			rightTrue, rightFalse := a.analyzeCondition(leftTrue, scope, node.Y)
+			return rightTrue, mergeIdempotencyPaths(append(leftFalse, rightFalse...))
+		case token.LOR:
+			leftTrue, leftFalse := a.analyzeCondition(paths, scope, node.X)
+			rightTrue, rightFalse := a.analyzeCondition(leftFalse, scope, node.Y)
+			return mergeIdempotencyPaths(append(leftTrue, rightTrue...)), rightFalse
+		}
+	}
+
+	paths = a.applyCalls(paths, scope, expression)
+	return cloneIdempotencyPaths(paths), cloneIdempotencyPaths(paths)
 }
 
 func (a *idempotencyFunctionAnalyzer) analyzeFor(paths []idempotencyPath, parent *idempotencyScope, statement *ast.ForStmt) idempotencyFlow {
@@ -367,6 +401,9 @@ func (a *idempotencyFunctionAnalyzer) analyzeDeclaration(paths []idempotencyPath
 		}
 		for _, name := range spec.Names {
 			scope.declare(name)
+			if isDataAccessReceiver(idempotencyReceiverTypeName(spec.Type)) {
+				a.dataAccessBindings[name] = struct{}{}
+			}
 		}
 	}
 	return paths
@@ -604,6 +641,9 @@ func invalidateIdempotencyAssignments(paths []idempotencyPath, scope *idempotenc
 
 	for index := range paths {
 		paths[index] = paths[index].clone()
+		for binding := range reassigned {
+			delete(paths[index].truths, binding)
+		}
 		for receiver, calls := range paths[index].lookups {
 			if _, changed := reassigned[receiver.binding]; changed {
 				delete(paths[index].lookups, receiver)
@@ -650,6 +690,19 @@ func cloneIdempotencyPaths(paths []idempotencyPath) []idempotencyPath {
 	return clones
 }
 
+func constrainIdempotencyPaths(paths []idempotencyPath, binding idempotencyBinding, truth bool) []idempotencyPath {
+	constrained := make([]idempotencyPath, 0, len(paths))
+	for _, path := range paths {
+		if known, ok := path.truths[binding]; ok && known != truth {
+			continue
+		}
+		path = path.clone()
+		path.truths[binding] = truth
+		constrained = append(constrained, path)
+	}
+	return constrained
+}
+
 func mergeIdempotencyPaths(paths []idempotencyPath) []idempotencyPath {
 	merged := make([]idempotencyPath, 0, len(paths))
 	for _, candidate := range paths {
@@ -668,7 +721,7 @@ func mergeIdempotencyPaths(paths []idempotencyPath) []idempotencyPath {
 }
 
 func equalIdempotencyPaths(left, right idempotencyPath) bool {
-	if len(left.lookups) != len(right.lookups) {
+	if len(left.lookups) != len(right.lookups) || len(left.truths) != len(right.truths) {
 		return false
 	}
 	for receiver, leftCalls := range left.lookups {
@@ -680,6 +733,11 @@ func equalIdempotencyPaths(left, right idempotencyPath) bool {
 			if leftCalls[index].call != rightCalls[index].call {
 				return false
 			}
+		}
+	}
+	for binding, leftTruth := range left.truths {
+		if rightTruth, ok := right.truths[binding]; !ok || leftTruth != rightTruth {
+			return false
 		}
 	}
 	return true
