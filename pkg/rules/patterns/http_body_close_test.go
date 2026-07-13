@@ -57,6 +57,22 @@ func example() {
 			expectMatch: false,
 		},
 		{
+			name: "aliased http.Get without close",
+			code: `package main
+
+import nethttp "net/http"
+
+func example() {
+	resp, err := nethttp.Get("http://example.com")
+	if err != nil {
+		return
+	}
+	_ = resp
+}
+`,
+			expectMatch: true,
+		},
+		{
 			name: "http.Get with close",
 			code: `package main
 
@@ -87,6 +103,44 @@ func example(client *http.Client, req *http.Request) {
 }
 `,
 			expectMatch: true,
+		},
+		{
+			name: "aliased http client Do without close",
+			code: `package main
+
+import nethttp "net/http"
+
+func example(client *nethttp.Client, req *nethttp.Request) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	_ = resp
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "arbitrary Do without close is not HTTP",
+			code: `package main
+
+import "net/http"
+
+type executor struct{}
+type result struct{}
+
+func (executor) Do() (*result, error) { return nil, nil }
+
+func example(worker executor) {
+	_ = http.MethodGet
+	resp, err := worker.Do()
+	if err != nil {
+		return
+	}
+	_ = resp
+}
+`,
+			expectMatch: false,
 		},
 		{
 			name: "response ignored",

@@ -35,6 +35,16 @@ func TestNewWalker(t *testing.T) {
 	assert.NotNil(t, walker)
 }
 
+func TestWalkerAnalyzesNginxConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "nginx.conf"), []byte("server {}"), 0644))
+
+	contexts, errs := NewWalker(tmpDir, DefaultConfig()).WalkSync()
+	require.Empty(t, errs)
+	require.Len(t, contexts, 1)
+	assert.Equal(t, "nginx.conf", contexts[0].RelPath)
+}
+
 func TestWalkerWalkSync(t *testing.T) {
 	// Create temp directory structure
 	tmpDir := t.TempDir()
