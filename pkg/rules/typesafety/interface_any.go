@@ -86,12 +86,9 @@ func (r *InterfaceAnyRule) checkLine(ctx *core.FileContext, lineNum int, line st
 }
 
 func (r *InterfaceAnyRule) shouldSkipMatch(line, patternName string, ctx *core.FileContext) bool {
-	// Skip if inside string literal
-	if strings.Contains(line, `"`) {
-		matchStr := getMatchString(patternName)
-		if helpers.IsInsideString(line, matchStr) {
-			return true
-		}
+	matchStr := getMatchString(patternName)
+	if helpers.IsInStringOrComment(line, matchStr) {
+		return true
 	}
 
 	return r.isAllowedException(line, ctx)

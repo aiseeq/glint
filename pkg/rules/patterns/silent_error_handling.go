@@ -394,6 +394,9 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsVal
 		if r.rhsUsesError(s) {
 			return true
 		}
+
+	case *ast.SendStmt:
+		return r.exprReferencesError(s.Value) || r.exprUsesErrorValue(s.Value)
 	}
 
 	return false
@@ -565,6 +568,8 @@ func (r *SilentErrorHandlingRule) exprUsesErrorValue(expr ast.Expr) bool {
 	case *ast.UnaryExpr:
 		// Handle &struct{} pattern
 		return r.exprUsesErrorValue(e.X)
+	case *ast.BinaryExpr:
+		return r.exprUsesErrorValue(e.X) || r.exprUsesErrorValue(e.Y)
 	case *ast.Ident:
 		// Direct error variable reference
 		nameLower := strings.ToLower(e.Name)

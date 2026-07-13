@@ -1,6 +1,7 @@
 package deadcode
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -87,7 +88,13 @@ func (r *UnusedSymbolsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 
 	// Third pass: check usages in sibling files (same package)
 	// This catches cross-file usage within the same Go package
-	r.checkSiblingFileUsages(ctx, symbols)
+	if err := r.checkSiblingFileUsages(ctx, symbols); err != nil {
+		v := r.CreateViolation(ctx.RelPath, 1, "Unused-symbol analysis failed: "+err.Error())
+		v.Severity = core.SeverityCritical
+		v.WithCode(ctx.RelPath)
+		v.WithSuggestion("Fix filesystem access or invalid sibling Go source, then rerun analysis")
+		return []*core.Violation{v}
+	}
 
 	// Generate violations for unused symbols
 	var violations []*core.Violation
@@ -107,14 +114,14 @@ func (r *UnusedSymbolsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 }
 
 // checkSiblingFileUsages checks for symbol usages in other files of the same package
-func (r *UnusedSymbolsRule) checkSiblingFileUsages(ctx *core.FileContext, symbols map[string]*symbolInfo) {
+func (r *UnusedSymbolsRule) checkSiblingFileUsages(ctx *core.FileContext, symbols map[string]*symbolInfo) error {
 	// Get the directory containing this file
 	dir := filepath.Dir(ctx.Path)
 
 	// List all .go files in the directory
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return
+		return fmt.Errorf("read package directory %q: %w", dir, err)
 	}
 
 	currentFile := filepath.Base(ctx.Path)
@@ -137,7 +144,7 @@ func (r *UnusedSymbolsRule) checkSiblingFileUsages(ctx *core.FileContext, symbol
 		siblingPath := filepath.Join(dir, name)
 		siblingAST, err := parser.ParseFile(fset, siblingPath, nil, 0)
 		if err != nil {
-			continue
+			return fmt.Errorf("parse sibling file %q: %w", siblingPath, err)
 		}
 
 		// Check for usages of our symbols in this sibling file
@@ -150,6 +157,8 @@ func (r *UnusedSymbolsRule) checkSiblingFileUsages(ctx *core.FileContext, symbol
 			return true
 		})
 	}
+
+	return nil
 }
 
 // collectFunc collects function declarations

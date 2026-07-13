@@ -1,9 +1,6 @@
 package core
 
-import (
-	"fmt"
-	"path/filepath"
-)
+import "fmt"
 
 // Violation represents a single issue found by a rule
 type Violation struct {
@@ -81,15 +78,6 @@ func (v *Violation) Location() string {
 		return fmt.Sprintf("%s:%d:%d", v.File, v.Line, v.Column)
 	}
 	return fmt.Sprintf("%s:%d", v.File, v.Line)
-}
-
-// RelativeFile returns the file path relative to the given root
-func (v *Violation) RelativeFile(root string) string {
-	rel, err := filepath.Rel(root, v.File)
-	if err != nil {
-		return v.File
-	}
-	return rel
 }
 
 // String returns a human-readable representation

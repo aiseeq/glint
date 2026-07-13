@@ -76,7 +76,9 @@ func (r *StringConcatRule) checkLoop(ctx *core.FileContext, body *ast.BlockStmt,
 		// Check for += with string
 		if assign.Tok == token.ADD_ASSIGN {
 			if len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && r.isStringConcat(assign.Rhs[0]) {
-				r.reportConcatViolation(ctx, assign, violations)
+				if !r.variableResetBefore(body, assign) {
+					r.reportConcatViolation(ctx, assign, violations)
+				}
 			}
 			return true
 		}
@@ -84,12 +86,49 @@ func (r *StringConcatRule) checkLoop(ctx *core.FileContext, body *ast.BlockStmt,
 		// Check for s = s + "..."
 		if assign.Tok == token.ASSIGN && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 {
 			if r.isAssignPlusPattern(assign) {
-				r.reportConcatViolation(ctx, assign, violations)
+				if !r.variableResetBefore(body, assign) {
+					r.reportConcatViolation(ctx, assign, violations)
+				}
 			}
 		}
 
 		return true
 	})
+}
+
+func (r *StringConcatRule) variableResetBefore(body *ast.BlockStmt, target *ast.AssignStmt) bool {
+	targetIdent, ok := target.Lhs[0].(*ast.Ident)
+	if !ok {
+		return false
+	}
+
+	reset := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			return false
+		}
+		block, ok := n.(*ast.BlockStmt)
+		if !ok || block.Pos() > target.Pos() || block.End() < target.End() {
+			return true
+		}
+		for _, stmt := range block.List {
+			if stmt.End() >= target.Pos() {
+				break
+			}
+			assign, ok := stmt.(*ast.AssignStmt)
+			if !ok || (assign.Tok != token.DEFINE && assign.Tok != token.ASSIGN) {
+				continue
+			}
+			for _, lhs := range assign.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok && ident.Name == targetIdent.Name {
+					reset = true
+					return false
+				}
+			}
+		}
+		return !reset
+	})
+	return reset
 }
 
 func (r *StringConcatRule) isAssignPlusPattern(assign *ast.AssignStmt) bool {
@@ -149,10 +188,10 @@ func (r *StringConcatRule) isStringConcat(expr ast.Expr) bool {
 	if binary, ok := expr.(*ast.BinaryExpr); ok {
 		if binary.Op == token.ADD {
 			// Only flag if we can confirm string involvement
-			if lit, ok := binary.X.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if xLiteral, ok := binary.X.(*ast.BasicLit); ok && xLiteral.Kind == token.STRING {
 				return true
 			}
-			if lit, ok := binary.Y.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if yLiteral, ok := binary.Y.(*ast.BasicLit); ok && yLiteral.Kind == token.STRING {
 				return true
 			}
 		}

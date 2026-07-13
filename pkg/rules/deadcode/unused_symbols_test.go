@@ -1,9 +1,12 @@
 package deadcode
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -175,10 +178,13 @@ func main() {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rule := NewUnusedSymbolsRule()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "main.go")
+			require.NoError(t, os.WriteFile(path, []byte(tt.code), 0644))
 
 			parser := core.NewParser()
-			ctx := core.NewFileContext("/src/main.go", "/src", []byte(tt.code), core.DefaultConfig())
-			fset, astFile, err := parser.ParseGoFile("/src/main.go", []byte(tt.code))
+			ctx := core.NewFileContext(path, dir, []byte(tt.code), core.DefaultConfig())
+			fset, astFile, err := parser.ParseGoFile(path, []byte(tt.code))
 			if err != nil {
 				t.Fatalf("Parse error: %v", err)
 			}
@@ -189,6 +195,20 @@ func main() {
 			assert.Len(t, violations, tt.wantViolations, "Code:\n%s", tt.code)
 		})
 	}
+}
+
+func TestUnusedSymbolsReportsSiblingReadError(t *testing.T) {
+	code := "package main\nfunc unused() {}"
+	path := filepath.Join(t.TempDir(), "missing", "main.go")
+	ctx := core.NewFileContext(path, filepath.Dir(path), []byte(code), core.DefaultConfig())
+	parser := core.NewParser()
+	fset, astFile, err := parser.ParseGoFile(path, []byte(code))
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, astFile)
+
+	violations := NewUnusedSymbolsRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+	require.Equal(t, core.SeverityCritical, violations[0].Severity)
 }
 
 func TestUnusedSymbolsRuleMetadata(t *testing.T) {

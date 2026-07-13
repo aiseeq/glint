@@ -173,7 +173,11 @@ func runCheck(cmd *cobra.Command, args []string) error {
 	}
 
 	allViolations := analyzeFiles(contexts, enabledRules, cfg)
-	allViolations = allViolations.BySeverity(cfg.GetMinSeverity())
+	minSeverity, err := cfg.GetMinSeverity()
+	if err != nil {
+		return err
+	}
+	allViolations = allViolations.BySeverity(minSeverity)
 
 	stats := output.Stats{
 		FilesAnalyzed: len(contexts),

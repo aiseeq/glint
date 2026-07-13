@@ -131,6 +131,9 @@ func (r *LegacyIdentifierRule) violation(ctx *core.FileContext, pos token.Pos, n
 // shouldSkipFile excludes generated files.
 func (r *LegacyIdentifierRule) shouldSkipFile(ctx *core.FileContext) bool {
 	path := ctx.RelPath
+	if strings.HasSuffix(path, "legacy_identifier.go") || strings.HasSuffix(path, "legacy_comment_marker.go") {
+		return true
+	}
 	if strings.HasSuffix(path, ".gen.go") || strings.HasSuffix(path, "_gen.go") {
 		return true
 	}

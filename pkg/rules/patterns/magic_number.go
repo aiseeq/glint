@@ -108,7 +108,7 @@ func (r *MagicNumberRule) checkLiteral(ctx *core.FileContext, n ast.Node) *core.
 
 	value, err := strconv.ParseInt(lit.Value, 0, 64)
 	if err != nil {
-		return nil
+		return r.invalidMagicNumberLiteral(ctx, lit, err)
 	}
 
 	if r.shouldSkipValue(ctx, lit, value) {
@@ -119,6 +119,14 @@ func (r *MagicNumberRule) checkLiteral(ctx *core.FileContext, n ast.Node) *core.
 	v := r.CreateViolation(ctx.RelPath, pos.Line, "Consider using a named constant instead of magic number")
 	v.WithCode(lit.Value)
 	v.WithSuggestion("Define a const with a descriptive name")
+	return v
+}
+
+func (r *MagicNumberRule) invalidMagicNumberLiteral(ctx *core.FileContext, lit *ast.BasicLit, err error) *core.Violation {
+	line := ctx.PositionFor(lit).Line
+	v := r.CreateViolation(ctx.RelPath, line, "Invalid integer literal: "+err.Error())
+	v.WithCode(ctx.GetLine(line))
+	v.WithSuggestion("Fix the integer literal before magic-number analysis")
 	return v
 }
 

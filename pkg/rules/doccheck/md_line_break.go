@@ -1,6 +1,7 @@
 package doccheck
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -118,11 +119,11 @@ func (r *MdLineBreakRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 func (r *MdLineBreakRule) Fix(ctx *core.FileContext, violation *core.Violation) (*rules.Fix, error) {
 	groupStart, ok := violation.Context["group_start"].(int)
 	if !ok {
-		return nil, nil
+		return nil, fmt.Errorf("md-line-break fix requires integer group_start")
 	}
 	groupEnd, ok := violation.Context["group_end"].(int)
 	if !ok {
-		return nil, nil
+		return nil, fmt.Errorf("md-line-break fix requires integer group_end")
 	}
 
 	// Convert to 0-based index

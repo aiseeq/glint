@@ -23,19 +23,22 @@ func TestConfigGetMinSeverity(t *testing.T) {
 	tests := []struct {
 		input    string
 		expected Severity
+		wantErr  bool
 	}{
-		{"low", SeverityLow},
-		{"medium", SeverityMedium},
-		{"high", SeverityHigh},
-		{"critical", SeverityCritical},
-		{"invalid", SeverityLow}, // defaults to low on error
+		{"low", SeverityLow, false},
+		{"medium", SeverityMedium, false},
+		{"high", SeverityHigh, false},
+		{"critical", SeverityCritical, false},
+		{"invalid", SeverityLow, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.Settings.MinSeverity = tt.input
-			assert.Equal(t, tt.expected, cfg.GetMinSeverity())
+			severity, err := cfg.GetMinSeverity()
+			assert.Equal(t, tt.expected, severity)
+			assert.Equal(t, tt.wantErr, err != nil)
 		})
 	}
 }

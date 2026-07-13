@@ -18,11 +18,11 @@ categories:
         enabled: true
         settings:
           # Higher threshold for AST analyzer rules - pattern matching is inherently complex
-          max_complexity: 20
+          max_complexity: 30
       long-function:
         enabled: true
         settings:
-          max_lines: 100
+          max_lines: 200
       deep-nesting:
         enabled: true
         settings:

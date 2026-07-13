@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewFileContext(t *testing.T) {
@@ -17,6 +18,12 @@ func TestNewFileContext(t *testing.T) {
 	assert.Equal(t, "/project", ctx.ProjectRoot)
 	assert.Equal(t, content, ctx.Content)
 	assert.Len(t, ctx.Lines, 3)
+}
+
+func TestNewFileContextChecked(t *testing.T) {
+	ctx, err := NewFileContextChecked("/project/pkg/file.go", "/project", []byte("package pkg"), DefaultConfig())
+	require.NoError(t, err)
+	require.Equal(t, "pkg/file.go", ctx.RelPath)
 }
 
 func TestFileContextIsGoFile(t *testing.T) {
