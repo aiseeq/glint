@@ -1,12 +1,25 @@
 package patterns
 
 import (
+	"go/ast"
+	"go/token"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
+
+func TestFinancialConstantsReportsInvalidNumericLiteral(t *testing.T) {
+	rule := NewFinancialConstantsRule()
+	ctx := core.NewFileContext("/src/fees.go", "/src", nil, core.DefaultConfig())
+	call := &ast.CallExpr{
+		Fun:  &ast.SelectorExpr{X: ast.NewIdent("decimal"), Sel: ast.NewIdent("NewFromInt")},
+		Args: []ast.Expr{&ast.BasicLit{Kind: token.INT, Value: "invalid"}},
+	}
+
+	assert.NotNil(t, rule.checkDecimalCall(ctx, call, "NewFromInt"))
+}
 
 func TestFinancialConstantsRule(t *testing.T) {
 	rule := NewFinancialConstantsRule()

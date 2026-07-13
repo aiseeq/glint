@@ -30,6 +30,41 @@ func example() (*Result, *Result) {
 	require.Empty(t, violations)
 }
 
+func TestSilentErrorHandlingRule_ErrorSentToChannel(t *testing.T) {
+	code := `package main
+
+func walk(errorChan chan error) {
+	err := visit()
+	if err != nil {
+		errorChan <- err
+	}
+}
+
+`
+
+	ctx := createSilentErrorContext(t, "walker.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Empty(t, violations)
+}
+
+func TestSilentErrorHandlingRule_ErrorIncludedInDiagnostic(t *testing.T) {
+	code := `package main
+
+func analyze() []*Violation {
+	err := inspect()
+	if err != nil {
+		violation := NewViolation("analysis failed: " + err.Error())
+		return []*Violation{violation}
+	}
+	return nil
+}
+`
+
+	ctx := createSilentErrorContext(t, "analyzer.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Empty(t, violations)
+}
+
 func createSilentErrorContext(t *testing.T, path, code string) *core.FileContext {
 	t.Helper()
 	ctx := &core.FileContext{

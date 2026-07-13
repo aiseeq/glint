@@ -3,6 +3,8 @@ package doccheck
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/aiseeq/glint/pkg/core"
 )
 
@@ -153,4 +155,13 @@ Some text`
 	if fix.NewText != expected {
 		t.Errorf("unexpected fix:\ngot:      %q\nexpected: %q", fix.NewText, expected)
 	}
+}
+
+func TestMdLineBreakRuleFixRejectsMissingContext(t *testing.T) {
+	rule := NewMdLineBreakRule()
+	ctx := core.NewFileContext("/test/doc.md", "/test", []byte("**Label:** value"), nil)
+
+	fix, err := rule.Fix(ctx, core.NewViolation(rule.Name(), rule.Category(), ctx.RelPath, 1, core.SeverityLow, "test"))
+	require.Error(t, err)
+	require.Nil(t, fix)
 }

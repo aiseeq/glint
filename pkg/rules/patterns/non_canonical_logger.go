@@ -111,6 +111,13 @@ func (r *NonCanonicalLoggerRule) shouldSkipFile(ctx *core.FileContext) bool {
 		return true
 	}
 
+	// tools/** package main files are command-line programs. Their fmt output is
+	// the user-facing command result, not application logging.
+	if ctx.GoPackage == "main" &&
+		(strings.HasPrefix(path, "tools/") || strings.Contains(path, "/tools/")) {
+		return true
+	}
+
 	return false
 }
 

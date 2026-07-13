@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -127,4 +128,17 @@ func (r *Router) RegisterAdminRoutes() {}`,
 			assert.Len(t, violations, tt.expectedCount, "Code: %s", tt.code)
 		})
 	}
+}
+
+func TestLegacyIdentifierRuleSkipsDiagnosticImplementation(t *testing.T) {
+	code := `package patterns
+type LegacyCommentMarkerRule struct{}
+func NewLegacyIdentifierRule() *LegacyCommentMarkerRule { return nil }`
+	ctx := core.NewFileContext("/src/pkg/rules/patterns/legacy_identifier.go", "/src", []byte(code), core.DefaultConfig())
+	parser := core.NewParser()
+	fset, file, err := parser.ParseGoFile(ctx.Path, ctx.Content)
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, file)
+
+	require.Empty(t, NewLegacyIdentifierRule().AnalyzeFile(ctx))
 }

@@ -129,6 +129,9 @@ func (r *TechDebtRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 }
 
 func (r *TechDebtRule) shouldSkipFile(path string) bool {
+	if strings.HasSuffix(path, "legacy_comment_marker.go") || strings.HasSuffix(path, "legacy_identifier.go") {
+		return true
+	}
 	skipPatterns := []string{
 		"vendor/",
 		"node_modules/",

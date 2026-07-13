@@ -176,13 +176,13 @@ func (r *FinancialConstantsRule) checkDecimalCall(ctx *core.FileContext, call *a
 	if lit.Kind == token.INT {
 		v, err := strconv.ParseInt(lit.Value, 0, 64)
 		if err != nil {
-			return nil
+			return r.invalidNumericLiteral(ctx, lit, err)
 		}
 		value = float64(v)
 	} else {
 		v, err := strconv.ParseFloat(lit.Value, 64)
 		if err != nil {
-			return nil
+			return r.invalidNumericLiteral(ctx, lit, err)
 		}
 		value = v
 	}
@@ -234,6 +234,14 @@ func (r *FinancialConstantsRule) checkDecimalCall(ctx *core.FileContext, call *a
 	}
 
 	return nil
+}
+
+func (r *FinancialConstantsRule) invalidNumericLiteral(ctx *core.FileContext, lit *ast.BasicLit, err error) *core.Violation {
+	line := ctx.PositionFor(lit).Line
+	v := r.CreateViolation(ctx.RelPath, line, "Invalid financial numeric literal: "+err.Error())
+	v.WithCode(ctx.GetLine(line))
+	v.WithSuggestion("Fix the numeric literal before financial constant analysis")
+	return v
 }
 
 // isLikelyScalingFactor checks if value is likely used for scaling/conversion, not as a fee

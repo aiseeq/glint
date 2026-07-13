@@ -1,12 +1,21 @@
 package patterns
 
 import (
+	"go/ast"
+	"go/token"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
+
+func TestMagicNumberReportsInvalidIntegerLiteral(t *testing.T) {
+	rule := NewMagicNumberRule()
+	ctx := core.NewFileContext("/src/service.go", "/src", nil, core.DefaultConfig())
+
+	assert.NotNil(t, rule.checkLiteral(ctx, &ast.BasicLit{Kind: token.INT, Value: "invalid"}))
+}
 
 func TestMagicNumberRule(t *testing.T) {
 	rule := NewMagicNumberRule()

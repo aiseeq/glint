@@ -117,10 +117,18 @@ func main() { fmt.Println("ok") }`,
 		},
 		{
 			name: "root main.go is skipped",
-			path: "main.go",
+			path: "/src/main.go",
 			code: `package main
 import "fmt"
 func main() { fmt.Println("ok") }`,
+			expectedCount: 0,
+		},
+		{
+			name: "tools package main stdout is skipped",
+			path: "/src/tools/report/output.go",
+			code: `package main
+import "fmt"
+func report() { fmt.Println("complete") }`,
 			expectedCount: 0,
 		},
 		{
@@ -158,9 +166,6 @@ func H() { slog.Info("ok") }`,
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			projectRoot := "/src"
-			if tt.path == "main.go" {
-				projectRoot = "/src"
-			}
 			ctx := core.NewFileContext(tt.path, projectRoot, []byte(tt.code), core.DefaultConfig())
 
 			parser := core.NewParser()

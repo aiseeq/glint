@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"path/filepath"
@@ -30,9 +31,18 @@ type FileContext struct {
 
 // NewFileContext creates a new file context
 func NewFileContext(path, projectRoot string, content []byte, cfg *Config) *FileContext {
+	ctx, err := NewFileContextChecked(path, projectRoot, content, cfg)
+	if err != nil {
+		panic(err)
+	}
+	return ctx
+}
+
+// NewFileContextChecked creates a file context and reports invalid path relationships.
+func NewFileContextChecked(path, projectRoot string, content []byte, cfg *Config) (*FileContext, error) {
 	relPath, err := filepath.Rel(projectRoot, path)
 	if err != nil {
-		relPath = path // Fall back to absolute path if relative fails
+		return nil, fmt.Errorf("make %q relative to project root %q: %w", path, projectRoot, err)
 	}
 
 	ctx := &FileContext{
@@ -44,7 +54,7 @@ func NewFileContext(path, projectRoot string, content []byte, cfg *Config) *File
 		Config:      cfg,
 	}
 
-	return ctx
+	return ctx, nil
 }
 
 // IsGoFile returns true if this is a Go file

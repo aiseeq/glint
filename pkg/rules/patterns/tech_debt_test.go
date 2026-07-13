@@ -262,6 +262,7 @@ func legacy() {
 	// This is fine
 	x := "legacy code"
 }
+
 `
 	ctx := &core.FileContext{
 		Path:    "/backend/service.go",
@@ -272,6 +273,17 @@ func legacy() {
 	violations := rule.AnalyzeFile(ctx)
 
 	assert.Empty(t, violations, "Non-comment lines should not trigger violations")
+}
+
+func TestTechDebtRuleSkipsDiagnosticImplementation(t *testing.T) {
+	ctx := core.NewFileContext(
+		"/src/pkg/rules/patterns/legacy_comment_marker.go",
+		"/src",
+		[]byte("// legacy code path marker detected by this rule"),
+		core.DefaultConfig(),
+	)
+
+	assert.Empty(t, NewTechDebtRule().AnalyzeFile(ctx))
 }
 
 // Helper functions

@@ -238,13 +238,13 @@ func (c *Config) GetRuleExceptions(category, rule string) []Exception {
 	return nil
 }
 
-// GetMinSeverity returns the minimum severity level
-func (c *Config) GetMinSeverity() Severity {
+// GetMinSeverity returns the configured minimum severity level.
+func (c *Config) GetMinSeverity() (Severity, error) {
 	sev, err := ParseSeverity(c.Settings.MinSeverity)
 	if err != nil {
-		return SeverityLow
+		return SeverityLow, fmt.Errorf("parse minimum severity %q: %w", c.Settings.MinSeverity, err)
 	}
-	return sev
+	return sev, nil
 }
 
 // IsFileExcepted checks if a file should be excepted from a specific rule based on YAML exceptions.

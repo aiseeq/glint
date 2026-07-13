@@ -184,7 +184,10 @@ func (w *Walker) processFile(path string) (*FileContext, error) {
 		return nil, err
 	}
 
-	ctx := NewFileContext(path, w.projectRoot, content, w.config)
+	ctx, err := NewFileContextChecked(path, w.projectRoot, content, w.config)
+	if err != nil {
+		return nil, err
+	}
 
 	// Parse Go files
 	if ctx.IsGoFile() {

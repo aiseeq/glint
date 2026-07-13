@@ -66,6 +66,36 @@ func example() {
 			expectMatch: false,
 		},
 		{
+			name: "per-iteration value reset before suffix",
+			code: `package main
+
+func example(lines []string) {
+	for i := range lines {
+		line := lines[i]
+		line = line + "  "
+		lines[i] = line
+	}
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "conditional reset does not dominate accumulator",
+			code: `package main
+
+func example(reset bool) {
+	result := ""
+	for i := 0; i < 10; i++ {
+		if reset {
+			result = ""
+		}
+		result += "item"
+	}
+}
+`,
+			expectMatch: true,
+		},
+		{
 			name: "concat outside loop",
 			code: `package main
 

@@ -71,3 +71,13 @@ func TestInterfaceAnyNonGoFile(t *testing.T) {
 
 	assert.Empty(t, violations)
 }
+
+func TestInterfaceAnyIgnoresInlineComment(t *testing.T) {
+	code := `package sample
+var names = map[string]bool{
+	"i": true, // interface{} receivers
+}`
+	ctx := core.NewFileContext("/src/sample.go", "/src", []byte(code), core.DefaultConfig())
+
+	assert.Empty(t, NewInterfaceAnyRule().AnalyzeFile(ctx))
+}
