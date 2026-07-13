@@ -99,9 +99,10 @@ type providerCommandCall struct {
 }
 
 type providerFlowState struct {
-	durableObserved bool
-	durableEntities []string
-	pending         []providerCommandCall
+	durableObserved      bool
+	durableEntities      []string
+	durableProviderCalls []string
+	pending              []providerCommandCall
 }
 
 type providerFlowAnalyzer struct {
@@ -195,14 +196,43 @@ func (a *providerFlowAnalyzer) ifStatement(stmt *ast.IfStmt, states []providerFl
 	if stmt.Init != nil {
 		states = a.statement(stmt.Init, states)
 	}
-	states = a.expression(stmt.Cond, states)
-	branches := a.block(stmt.Body, cloneProviderFlowStates(states))
+	trueStates, falseStates := a.condition(stmt.Cond, states)
+	branches := a.block(stmt.Body, trueStates)
 	if stmt.Else == nil {
-		branches = append(branches, cloneProviderFlowStates(states)...)
+		branches = append(branches, falseStates...)
 	} else {
-		branches = append(branches, a.statement(stmt.Else, cloneProviderFlowStates(states))...)
+		branches = append(branches, a.statement(stmt.Else, falseStates)...)
 	}
 	return compactProviderFlowStates(branches)
+}
+
+func (a *providerFlowAnalyzer) condition(
+	expr ast.Expr,
+	states []providerFlowState,
+) (trueStates, falseStates []providerFlowState) {
+	switch node := expr.(type) {
+	case *ast.ParenExpr:
+		return a.condition(node.X, states)
+	case *ast.UnaryExpr:
+		if node.Op == token.NOT {
+			falseStates, trueStates = a.condition(node.X, states)
+			return trueStates, falseStates
+		}
+	case *ast.BinaryExpr:
+		switch node.Op {
+		case token.LAND:
+			leftTrue, leftFalse := a.condition(node.X, states)
+			rightTrue, rightFalse := a.condition(node.Y, leftTrue)
+			return rightTrue, compactProviderFlowStates(append(leftFalse, rightFalse...))
+		case token.LOR:
+			leftTrue, leftFalse := a.condition(node.X, states)
+			rightTrue, rightFalse := a.condition(node.Y, leftFalse)
+			return compactProviderFlowStates(append(leftTrue, rightTrue...)), rightFalse
+		}
+	}
+
+	evaluated := a.expression(expr, states)
+	return cloneProviderFlowStates(evaluated), cloneProviderFlowStates(evaluated)
 }
 
 func (a *providerFlowAnalyzer) forStatement(stmt *ast.ForStmt, states []providerFlowState) []providerFlowState {
@@ -361,6 +391,10 @@ func (a *providerFlowAnalyzer) call(call *ast.CallExpr, states []providerFlowSta
 			if entity != "" && !containsProviderEntity(states[i].durableEntities, entity) {
 				states[i].durableEntities = append(append([]string(nil), states[i].durableEntities...), entity)
 			}
+			durableMethod := selectorCallMethod(call)
+			if durableMethod != "" && !containsProviderEntity(states[i].durableProviderCalls, durableMethod) {
+				states[i].durableProviderCalls = append(append([]string(nil), states[i].durableProviderCalls...), durableMethod)
+			}
 		}
 	}
 	return compactProviderFlowStates(states)
@@ -378,7 +412,9 @@ func (a *providerFlowAnalyzer) recordProviderCommand(
 	}
 
 	for i := range states {
-		if !containsProviderEntity(states[i].durableEntities, entity) {
+		entityPersisted := containsProviderEntity(states[i].durableEntities, entity)
+		providerPersisted := durableCallMatchesProvider(states[i].durableProviderCalls, call)
+		if !entityPersisted && !providerPersisted {
 			pending := providerCommandCall{
 				call: call, method: method,
 			}
@@ -413,6 +449,7 @@ func cloneProviderFlowStates(states []providerFlowState) []providerFlowState {
 	for i, state := range states {
 		cloned[i] = state
 		cloned[i].durableEntities = append([]string(nil), state.durableEntities...)
+		cloned[i].durableProviderCalls = append([]string(nil), state.durableProviderCalls...)
 		cloned[i].pending = append([]providerCommandCall(nil), state.pending...)
 	}
 	return cloned
@@ -437,11 +474,17 @@ func compactProviderFlowStates(states []providerFlowState) []providerFlowState {
 
 func sameProviderFlowState(left, right providerFlowState) bool {
 	if left.durableObserved != right.durableObserved ||
-		len(left.durableEntities) != len(right.durableEntities) || len(left.pending) != len(right.pending) {
+		len(left.durableEntities) != len(right.durableEntities) ||
+		len(left.durableProviderCalls) != len(right.durableProviderCalls) || len(left.pending) != len(right.pending) {
 		return false
 	}
 	for i := range left.durableEntities {
 		if left.durableEntities[i] != right.durableEntities[i] {
+			return false
+		}
+	}
+	for i := range left.durableProviderCalls {
+		if left.durableProviderCalls[i] != right.durableProviderCalls[i] {
 			return false
 		}
 	}
@@ -467,6 +510,10 @@ func isProviderContextArgument(expr ast.Expr) bool {
 	switch node := expr.(type) {
 	case *ast.ParenExpr:
 		return isProviderContextArgument(node.X)
+	case *ast.StarExpr:
+		return isProviderContextArgument(node.X)
+	case *ast.UnaryExpr:
+		return node.Op == token.AND && isProviderContextArgument(node.X)
 	case *ast.Ident:
 		return isProviderContextName(node.Name)
 	case *ast.SelectorExpr:
@@ -491,6 +538,13 @@ func normalizedProviderEntity(expr ast.Expr) string {
 	switch node := expr.(type) {
 	case *ast.ParenExpr:
 		return normalizedProviderEntity(node.X)
+	case *ast.StarExpr:
+		return normalizedProviderEntity(node.X)
+	case *ast.UnaryExpr:
+		if node.Op == token.AND {
+			return normalizedProviderEntity(node.X)
+		}
+		return ""
 	case *ast.Ident:
 		return "ident(" + node.Name + ")"
 	case *ast.SelectorExpr:
@@ -511,6 +565,59 @@ func normalizedProviderEntity(expr ast.Expr) string {
 	default:
 		return ""
 	}
+}
+
+func selectorCallMethod(call *ast.CallExpr) string {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	return sel.Sel.Name
+}
+
+func durableCallMatchesProvider(methods []string, call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	receiver := providerReceiverName(sel.X)
+	if receiver == "" || isGenericProviderReceiver(receiver) {
+		return false
+	}
+	for _, method := range methods {
+		if strings.Contains(strings.ToLower(method), receiver) {
+			return true
+		}
+	}
+	return false
+}
+
+func providerReceiverName(expr ast.Expr) string {
+	switch node := expr.(type) {
+	case *ast.Ident:
+		return strings.ToLower(node.Name)
+	case *ast.SelectorExpr:
+		return strings.ToLower(node.Sel.Name)
+	case *ast.IndexExpr:
+		return providerReceiverName(node.X)
+	case *ast.IndexListExpr:
+		return providerReceiverName(node.X)
+	case *ast.ParenExpr:
+		return providerReceiverName(node.X)
+	case *ast.StarExpr:
+		return providerReceiverName(node.X)
+	default:
+		return ""
+	}
+}
+
+func isGenericProviderReceiver(receiver string) bool {
+	for _, generic := range []string{"provider", "payment", "payout", "bank", "remit"} {
+		if receiver == generic {
+			return true
+		}
+	}
+	return false
 }
 
 func containsProviderEntity(entities []string, entity string) bool {

@@ -167,6 +167,40 @@ func update(repo Repository, id string) {
 	}
 }
 
+func TestNonAtomicStatusHistoryRule_DoesNotLinkReassignedIdentifiers(t *testing.T) {
+	rule := NewNonAtomicStatusHistoryRule()
+	tests := []struct {
+		name string
+		code string
+	}{
+		{
+			name: "reassigned receiver",
+			code: `package service
+func update(repo Repository, id string) {
+	repo.UpdateStatus(ctx, id)
+	repo = auditRepo
+	repo.RecordStatusHistory(ctx, id)
+}`,
+		},
+		{
+			name: "reassigned entity",
+			code: `package service
+func update(repo Repository, id string) {
+	repo.UpdateStatus(ctx, id)
+	id = auditID
+	repo.RecordStatusHistory(ctx, id)
+}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := createNonAtomicStatusHistoryContext(t, "service.go", tt.code)
+			assert.Empty(t, rule.AnalyzeFile(ctx))
+		})
+	}
+}
+
 func TestNonAtomicStatusHistoryRule_DoesNotLinkDifferentEntities(t *testing.T) {
 	rule := NewNonAtomicStatusHistoryRule()
 	ctx := createNonAtomicStatusHistoryContext(t, "service.go", `package service

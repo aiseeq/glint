@@ -137,6 +137,43 @@ func run(worker executor) {
 			wantCount: 0,
 		},
 		{
+			name: "custom Do with HTTP request is not HTTP client",
+			path: "custom_worker.go",
+			code: `package execute
+
+import (
+	"io"
+	"net/http"
+)
+
+type customResult struct { Body io.Reader }
+type worker struct{}
+
+func (worker) Do(req *http.Request) (*customResult, error) { return nil, nil }
+
+func run(w worker, req *http.Request) {
+	resp, _ := w.Do(req)
+	_, _ = io.ReadAll(resp.Body)
+}`,
+			wantCount: 0,
+		},
+		{
+			name: "aliased typed HTTP client Do response body",
+			path: "aliased_client.go",
+			code: `package fetch
+
+import (
+	"io"
+	nethttp "net/http"
+)
+
+func fetch(customClient *nethttp.Client, req *nethttp.Request) {
+	resp, _ := customClient.Do(req)
+	_, _ = io.ReadAll(resp.Body)
+}`,
+			wantCount: 1,
+		},
+		{
 			name: "file read",
 			path: "file.go",
 			code: `package files
@@ -325,6 +362,103 @@ import (
 func fetch() {
 	resp, _ := http.Get("https://example.com")
 	return
+	_, _ = io.ReadAll(resp.Body)
+}`,
+			wantCount: 0,
+		},
+		{
+			name: "break skips response assignment",
+			path: "break_assignment.go",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+func fetch(resp *http.Response) {
+	for {
+		break
+		resp, _ = http.Get("https://example.com")
+	}
+	_, _ = io.ReadAll(resp.Body)
+}`,
+			wantCount: 0,
+		},
+		{
+			name: "break preserves response and skips unreachable read",
+			path: "break_read.go",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+func fetch() {
+	var resp *http.Response
+	for {
+		resp, _ = http.Get("https://example.com")
+		break
+		_, _ = io.ReadAll(resp.Body)
+	}
+	_, _ = io.ReadAll(resp.Body)
+}`,
+			wantCount: 1,
+		},
+		{
+			name: "continue skips response assignment",
+			path: "continue_assignment.go",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+func fetch(resp *http.Response) {
+	for i := 0; i < 1; i++ {
+		continue
+		resp, _ = http.Get("https://example.com")
+	}
+	_, _ = io.ReadAll(resp.Body)
+}`,
+			wantCount: 0,
+		},
+		{
+			name: "continue preserves response and skips unreachable read",
+			path: "continue_read.go",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+func fetch() {
+	var resp *http.Response
+	for i := 0; i < 1; i++ {
+		resp, _ = http.Get("https://example.com")
+		continue
+		_, _ = io.ReadAll(resp.Body)
+	}
+	_, _ = io.ReadAll(resp.Body)
+}`,
+			wantCount: 1,
+		},
+		{
+			name: "panic skips unreachable assignment and read",
+			path: "panic.go",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+func fetch(resp *http.Response) {
+	panic("stop")
+	resp, _ = http.Get("https://example.com")
 	_, _ = io.ReadAll(resp.Body)
 }`,
 			wantCount: 0,

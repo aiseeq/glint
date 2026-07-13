@@ -143,6 +143,122 @@ func example(worker executor) {
 			expectMatch: false,
 		},
 		{
+			name: "custom Do with HTTP request is not HTTP client",
+			code: `package main
+
+import (
+	"io"
+	"net/http"
+)
+
+type customResult struct { Body io.Reader }
+type worker struct{}
+
+func (worker) Do(req *http.Request) (*customResult, error) { return nil, nil }
+
+func example(w worker, req *http.Request) {
+	resp, err := w.Do(req)
+	if err != nil {
+		return
+	}
+	_ = resp
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "break skips unreachable response assignment",
+			code: `package main
+
+import "net/http"
+
+func example() {
+	for {
+		break
+		resp, _ := http.Get("http://example.com")
+		_ = resp
+	}
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "break skips unreachable close",
+			code: `package main
+
+import "net/http"
+
+func example() {
+	for {
+		resp, _ := http.Get("http://example.com")
+		break
+		resp.Body.Close()
+	}
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "continue skips unreachable response assignment",
+			code: `package main
+
+import "net/http"
+
+func example() {
+	for i := 0; i < 1; i++ {
+		continue
+		resp, _ := http.Get("http://example.com")
+		_ = resp
+	}
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "continue skips unreachable close",
+			code: `package main
+
+import "net/http"
+
+func example() {
+	for i := 0; i < 1; i++ {
+		resp, _ := http.Get("http://example.com")
+		continue
+		resp.Body.Close()
+	}
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "panic skips unreachable response assignment",
+			code: `package main
+
+import "net/http"
+
+func example() {
+	panic("stop")
+	resp, _ := http.Get("http://example.com")
+	_ = resp
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "panic skips unreachable close",
+			code: `package main
+
+import "net/http"
+
+func example() {
+	resp, _ := http.Get("http://example.com")
+	panic("stop")
+	resp.Body.Close()
+}
+`,
+			expectMatch: true,
+		},
+		{
 			name: "response ignored",
 			code: `package main
 

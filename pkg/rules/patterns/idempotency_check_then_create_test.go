@@ -82,6 +82,19 @@ func save(r PaymentRepository, key string, payment *Payment) error {
 	assert.Len(t, rule.AnalyzeFile(ctx), 1)
 }
 
+func TestIdempotencyCheckThenCreateRule_DetectsTypedLocalReceiver(t *testing.T) {
+	rule := NewIdempotencyCheckThenCreateRule()
+	code := `package payments
+func save(repo PaymentRepository, key string, payment *Payment) error {
+	var r PaymentRepository = repo
+	_, _ = r.GetByIdempotencyKey(key)
+	return r.Create(payment)
+}`
+
+	ctx := createIdempotencyCheckThenCreateContext(t, "service.go", code)
+	assert.Len(t, rule.AnalyzeFile(ctx), 1)
+}
+
 func TestIdempotencyCheckThenCreateRule_DoesNotLinkMutuallyExclusiveBranches(t *testing.T) {
 	rule := NewIdempotencyCheckThenCreateRule()
 	code := `package payments
@@ -92,6 +105,40 @@ func save(repo PaymentRepository, checkOnly bool, key string, payment *Payment) 
 		return repo.Create(payment)
 	}
 	return nil
+}`
+
+	ctx := createIdempotencyCheckThenCreateContext(t, "service.go", code)
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+}
+
+func TestIdempotencyCheckThenCreateRule_DoesNotLinkNegatedShortCircuitPath(t *testing.T) {
+	rule := NewIdempotencyCheckThenCreateRule()
+	code := `package payments
+func save(repo PaymentRepository, enabled bool, key string, payment *Payment) error {
+	if enabled && repo.ExistsByIdempotencyKey(key) {
+		return nil
+	}
+	if !enabled && repo.Create(payment) == nil {
+		return nil
+	}
+	return nil
+}`
+
+	ctx := createIdempotencyCheckThenCreateContext(t, "service.go", code)
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+}
+
+func TestIdempotencyCheckThenCreateRule_DoesNotLinkNegatedGuardPath(t *testing.T) {
+	rule := NewIdempotencyCheckThenCreateRule()
+	code := `package payments
+func save(repo PaymentRepository, enabled bool, key string, payment *Payment) error {
+	if enabled {
+		_, _ = repo.GetByIdempotencyKey(key)
+	}
+	if enabled {
+		return nil
+	}
+	return repo.Create(payment)
 }`
 
 	ctx := createIdempotencyCheckThenCreateContext(t, "service.go", code)

@@ -82,6 +82,19 @@ func run() {
 			want: 1,
 		},
 		{
+			name: "success branch with logged failure else continues",
+			code: `package jobs
+func run() {
+	if err := repo.SaveCheckpoint(); err == nil {
+		logger.Info("checkpoint saved")
+	} else {
+		logger.Error(err)
+	}
+	repo.Complete()
+}`,
+			want: 1,
+		},
+		{
 			name: "conditional return leaves a failure path",
 			code: `package jobs
 func run(strict bool) error {
@@ -444,6 +457,74 @@ func run() {
 	other.Complete()
 }`,
 			want: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := terminalAfterFailedCheckpointContext(t, "job.go", tt.code)
+			assert.Len(t, NewTerminalAfterFailedCheckpointRule().AnalyzeFile(ctx), tt.want)
+		})
+	}
+}
+
+func TestTerminalAfterFailedCheckpointRule_LexicalShadowing(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		want int
+	}{
+		{
+			name: "ordinary block restores outer checkpoint error",
+			code: `package jobs
+func run() {
+	err := outer.SaveCheckpoint()
+	{
+		err := inner.SaveCheckpoint()
+		if err != nil { return }
+	}
+	if err != nil { logger.Error(err) }
+	outer.Complete()
+}`,
+			want: 1,
+		},
+		{
+			name: "for init restores outer checkpoint error",
+			code: `package jobs
+func run() {
+	err := outer.SaveCheckpoint()
+	for err := inner.SaveCheckpoint(); err == nil; {
+		break
+	}
+	if err != nil { logger.Error(err) }
+	outer.Complete()
+}`,
+			want: 1,
+		},
+		{
+			name: "switch init restores outer checkpoint error",
+			code: `package jobs
+func run() {
+	err := outer.SaveCheckpoint()
+	switch err := inner.SaveCheckpoint(); {
+	default:
+		_ = err
+	}
+	if err != nil { logger.Error(err) }
+	outer.Complete()
+}`,
+			want: 1,
+		},
+		{
+			name: "assignment in same scope replaces checkpoint error",
+			code: `package jobs
+func run() {
+	err := outer.SaveCheckpoint()
+	err = inner.SaveCheckpoint()
+	if err != nil { return }
+	outer.Complete()
+}`,
+			want: 0,
 		},
 	}
 

@@ -43,28 +43,30 @@ func (r *HTTPBodyCloseRule) checkFunction(ctx *core.FileContext, body *ast.Block
 	responseVars := make(map[string]int) // varName -> line
 	httpAliases := httpImportAliases(ctx)
 
-	ast.Inspect(body, func(n ast.Node) bool {
-		// Skip nested function literals
-		if _, ok := n.(*ast.FuncLit); ok {
-			return false
-		}
+	walkReachableHTTPBodyStatements(body.List, func(n ast.Node) {
+		ast.Inspect(n, func(n ast.Node) bool {
+			// Skip nested function literals
+			if _, ok := n.(*ast.FuncLit); ok {
+				return false
+			}
 
-		assign, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
 
-		// Check for http response assignments
-		// resp, err := http.Get(...) or resp, err := client.Do(...)
-		if len(assign.Lhs) >= 1 && len(assign.Rhs) == 1 {
-			if isHTTPResponseCall(assign.Rhs[0], httpAliases) {
-				if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
-					responseVars[ident.Name] = r.getLineFromNode(ctx, assign)
+			// Check for http response assignments
+			// resp, err := http.Get(...) or resp, err := client.Do(...)
+			if len(assign.Lhs) >= 1 && len(assign.Rhs) == 1 {
+				if isHTTPResponseCall(assign.Rhs[0], httpAliases) {
+					if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
+						responseVars[ident.Name] = r.getLineFromNode(ctx, assign)
+					}
 				}
 			}
-		}
 
-		return true
+			return true
+		})
 	})
 
 	if len(responseVars) == 0 {
@@ -75,17 +77,19 @@ func (r *HTTPBodyCloseRule) checkFunction(ctx *core.FileContext, body *ast.Block
 	// Note: we DO need to check inside FuncLit because defer func() { resp.Body.Close() }() is common
 	closedVars := make(map[string]bool)
 
-	ast.Inspect(body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
+	walkReachableHTTPBodyStatements(body.List, func(n ast.Node) {
+		ast.Inspect(n, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+
+			if varName := r.getBodyCloseVar(call); varName != "" {
+				closedVars[varName] = true
+			}
+
 			return true
-		}
-
-		if varName := r.getBodyCloseVar(call); varName != "" {
-			closedVars[varName] = true
-		}
-
-		return true
+		})
 	})
 
 	// Report unclosed responses
@@ -98,6 +102,144 @@ func (r *HTTPBodyCloseRule) checkFunction(ctx *core.FileContext, body *ast.Block
 			v.WithContext("variable", varName)
 			*violations = append(*violations, v)
 		}
+	}
+}
+
+type httpBodyReachability struct {
+	next      bool
+	breaks    bool
+	continues bool
+}
+
+func walkReachableHTTPBodyStatements(statements []ast.Stmt, visit func(ast.Node)) httpBodyReachability {
+	flow := httpBodyReachability{next: true}
+	for _, statement := range statements {
+		if !flow.next {
+			break
+		}
+		statementFlow := walkReachableHTTPBodyStatement(statement, visit)
+		flow.breaks = flow.breaks || statementFlow.breaks
+		flow.continues = flow.continues || statementFlow.continues
+		flow.next = statementFlow.next
+	}
+	return flow
+}
+
+func walkReachableHTTPBodyStatement(statement ast.Stmt, visit func(ast.Node)) httpBodyReachability {
+	switch node := statement.(type) {
+	case *ast.BlockStmt:
+		return walkReachableHTTPBodyStatements(node.List, visit)
+	case *ast.IfStmt:
+		if node.Init != nil {
+			walkReachableHTTPBodyStatement(node.Init, visit)
+		}
+		visit(node.Cond)
+		body := walkReachableHTTPBodyStatements(node.Body.List, visit)
+		otherwise := httpBodyReachability{next: true}
+		if node.Else != nil {
+			otherwise = walkReachableHTTPBodyStatement(node.Else, visit)
+		}
+		return mergeHTTPBodyReachability(body, otherwise)
+	case *ast.ForStmt:
+		if node.Init != nil {
+			walkReachableHTTPBodyStatement(node.Init, visit)
+		}
+		if node.Cond != nil {
+			visit(node.Cond)
+		}
+		body := walkReachableHTTPBodyStatements(node.Body.List, visit)
+		if node.Post != nil && (body.next || body.continues) {
+			walkReachableHTTPBodyStatement(node.Post, visit)
+		}
+		return httpBodyReachability{next: node.Cond != nil || body.breaks}
+	case *ast.RangeStmt:
+		visit(node.X)
+		walkReachableHTTPBodyStatements(node.Body.List, visit)
+		return httpBodyReachability{next: true}
+	case *ast.SwitchStmt:
+		if node.Init != nil {
+			walkReachableHTTPBodyStatement(node.Init, visit)
+		}
+		if node.Tag != nil {
+			visit(node.Tag)
+		}
+		return walkReachableHTTPBodyClauses(node.Body.List, visit)
+	case *ast.TypeSwitchStmt:
+		if node.Init != nil {
+			walkReachableHTTPBodyStatement(node.Init, visit)
+		}
+		walkReachableHTTPBodyStatement(node.Assign, visit)
+		return walkReachableHTTPBodyClauses(node.Body.List, visit)
+	case *ast.SelectStmt:
+		return walkReachableHTTPBodyComms(node.Body.List, visit)
+	case *ast.LabeledStmt:
+		return walkReachableHTTPBodyStatement(node.Stmt, visit)
+	case *ast.ReturnStmt:
+		visit(node)
+		return httpBodyReachability{}
+	case *ast.BranchStmt:
+		if node.Label != nil {
+			return httpBodyReachability{}
+		}
+		switch node.Tok {
+		case token.BREAK:
+			return httpBodyReachability{breaks: true}
+		case token.CONTINUE:
+			return httpBodyReachability{continues: true}
+		default:
+			return httpBodyReachability{}
+		}
+	default:
+		visit(node)
+		if isPanicStatement(node) {
+			return httpBodyReachability{}
+		}
+		return httpBodyReachability{next: true}
+	}
+}
+
+func walkReachableHTTPBodyClauses(statements []ast.Stmt, visit func(ast.Node)) httpBodyReachability {
+	result := httpBodyReachability{}
+	hasDefault := false
+	for _, statement := range statements {
+		clause, ok := statement.(*ast.CaseClause)
+		if !ok {
+			continue
+		}
+		for _, expression := range clause.List {
+			visit(expression)
+		}
+		flow := walkReachableHTTPBodyStatements(clause.Body, visit)
+		result.next = result.next || flow.next || flow.breaks
+		result.continues = result.continues || flow.continues
+		hasDefault = hasDefault || len(clause.List) == 0
+	}
+	result.next = result.next || !hasDefault
+	return result
+}
+
+func walkReachableHTTPBodyComms(statements []ast.Stmt, visit func(ast.Node)) httpBodyReachability {
+	result := httpBodyReachability{}
+	for _, statement := range statements {
+		clause, ok := statement.(*ast.CommClause)
+		if !ok {
+			continue
+		}
+		if clause.Comm != nil {
+			walkReachableHTTPBodyStatement(clause.Comm, visit)
+		}
+		flow := walkReachableHTTPBodyStatements(clause.Body, visit)
+		result.next = result.next || flow.next || flow.breaks
+		result.continues = result.continues || flow.continues
+	}
+	return result
+}
+
+func mergeHTTPBodyReachability(left, right httpBodyReachability) httpBodyReachability {
+	return httpBodyReachability{
+		next:      left.next || right.next,
+		breaks:    left.breaks || right.breaks,
+		continues: left.continues || right.continues,
 	}
 }
 
@@ -152,7 +294,7 @@ func isHTTPResponseCall(expr ast.Expr, httpAliases map[string]struct{}) bool {
 	if isHTTPClientExpr(sel.X, httpAliases) {
 		return true
 	}
-	return method == "Do" && len(call.Args) > 0 && isHTTPTypedExpr(call.Args[0], "Request", httpAliases)
+	return false
 }
 
 func isHTTPPackageResponseMethod(method string) bool {
@@ -248,24 +390,9 @@ func httpValueHasType(expr ast.Expr, typeName string, httpAliases map[string]str
 		return expr.Op == token.AND && httpValueHasType(expr.X, typeName, httpAliases)
 	case *ast.SelectorExpr:
 		return typeName == "Client" && isHTTPDefaultClientExpr(expr, httpAliases)
-	case *ast.CallExpr:
-		return typeName == "Request" && isHTTPRequestConstructor(expr, httpAliases)
 	default:
 		return false
 	}
-}
-
-func isHTTPRequestConstructor(call *ast.CallExpr, httpAliases map[string]struct{}) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || (sel.Sel.Name != "NewRequest" && sel.Sel.Name != "NewRequestWithContext") {
-		return false
-	}
-	packageName, ok := sel.X.(*ast.Ident)
-	if !ok {
-		return false
-	}
-	_, ok = httpAliases[packageName.Name]
-	return ok
 }
 
 func isHTTPTypeSyntax(expr ast.Expr, typeName string, httpAliases map[string]struct{}) bool {

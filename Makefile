@@ -18,7 +18,8 @@ build: ## Build the binary
 
 install: build ## Install to ~/bin (recommended)
 	@mkdir -p $(HOME)/bin
-	@tmp=$$(mktemp $(HOME)/bin/.$(BINARY_NAME).XXXXXX); \
+	@set -eu; \
+	tmp=$$(mktemp $(HOME)/bin/.$(BINARY_NAME).XXXXXX); \
 	trap 'rm -f "$$tmp"' EXIT; \
 	install -m 0755 $(BUILD_DIR)/$(BINARY_NAME) "$$tmp"; \
 	mv -f "$$tmp" $(HOME)/bin/$(BINARY_NAME)

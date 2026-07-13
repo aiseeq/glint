@@ -60,7 +60,7 @@ type checkpointAssignment struct {
 }
 
 type checkpointFlow struct {
-	assignments map[string]checkpointAssignment
+	assignments map[token.Pos]checkpointAssignment
 	failures    []failedCheckpoint
 }
 
@@ -126,7 +126,7 @@ func checkpointFindings(body *ast.BlockStmt) []checkpointFinding {
 }
 
 func (a *checkpointFlowAnalyzer) analyzeCallable(body *ast.BlockStmt) {
-	initial := checkpointFlow{assignments: make(map[string]checkpointAssignment)}
+	initial := checkpointFlow{assignments: make(map[token.Pos]checkpointAssignment)}
 	a.analyzeBlock(body, []checkpointFlow{initial})
 
 	var closures []*ast.FuncLit
@@ -157,6 +157,7 @@ func (a *checkpointFlowAnalyzer) analyzeBlock(block *ast.BlockStmt, paths []chec
 		flow.continues = append(flow.continues, statementFlow.continues...)
 		flow.next = statementFlow.next
 	}
+	removeCheckpointAssignments(&flow, checkpointBlockDeclaredObjects(block))
 	flow.next = compactCheckpointFlows(flow.next)
 	flow.breaks = compactCheckpointFlows(flow.breaks)
 	flow.continues = compactCheckpointFlows(flow.continues)
@@ -222,9 +223,8 @@ func (a *checkpointFlowAnalyzer) analyzeIf(ifStmt *ast.IfStmt, paths []checkpoin
 		if ifStmt.Else != nil {
 			otherwise = a.analyzeStatement(ifStmt.Else, falsePaths)
 		}
-		scopedNames := checkpointScopedNames(ifStmt.Init)
-		restoreCheckpointAssignments(&body, path.assignments, scopedNames)
-		restoreCheckpointAssignments(&otherwise, path.assignments, scopedNames)
+		removeCheckpointAssignments(&body, checkpointDeclaredObjects(ifStmt.Init))
+		removeCheckpointAssignments(&otherwise, checkpointDeclaredObjects(ifStmt.Init))
 
 		result.next = append(result.next, body.next...)
 		result.next = append(result.next, otherwise.next...)
@@ -240,6 +240,7 @@ func (a *checkpointFlowAnalyzer) analyzeIf(ifStmt *ast.IfStmt, paths []checkpoin
 }
 
 func (a *checkpointFlowAnalyzer) analyzeFor(stmt *ast.ForStmt, paths []checkpointFlow) checkpointStatementFlow {
+	scopedObjects := checkpointDeclaredObjects(stmt.Init)
 	if stmt.Init != nil {
 		paths = a.analyzeStatement(stmt.Init, paths).next
 	}
@@ -259,7 +260,9 @@ func (a *checkpointFlowAnalyzer) analyzeFor(stmt *ast.ForStmt, paths []checkpoin
 	if stmt.Cond != nil {
 		exits = append(exits, iterationEnds...)
 	}
-	return checkpointStatementFlow{next: compactCheckpointFlows(exits)}
+	result := checkpointStatementFlow{next: compactCheckpointFlows(exits)}
+	removeCheckpointAssignments(&result, scopedObjects)
+	return result
 }
 
 func (a *checkpointFlowAnalyzer) analyzeRange(stmt *ast.RangeStmt, paths []checkpointFlow) checkpointStatementFlow {
@@ -273,21 +276,27 @@ func (a *checkpointFlowAnalyzer) analyzeRange(stmt *ast.RangeStmt, paths []check
 }
 
 func (a *checkpointFlowAnalyzer) analyzeSwitch(stmt *ast.SwitchStmt, paths []checkpointFlow) checkpointStatementFlow {
+	scopedObjects := checkpointDeclaredObjects(stmt.Init)
 	if stmt.Init != nil {
 		paths = a.analyzeStatement(stmt.Init, paths).next
 	}
 	if stmt.Tag != nil {
 		a.findTerminalsOnPaths(stmt.Tag, paths)
 	}
-	return a.analyzeCaseClauses(stmt.Body, paths)
+	result := a.analyzeCaseClauses(stmt.Body, paths)
+	removeCheckpointAssignments(&result, scopedObjects)
+	return result
 }
 
 func (a *checkpointFlowAnalyzer) analyzeTypeSwitch(stmt *ast.TypeSwitchStmt, paths []checkpointFlow) checkpointStatementFlow {
+	scopedObjects := append(checkpointDeclaredObjects(stmt.Init), checkpointDeclaredObjects(stmt.Assign)...)
 	if stmt.Init != nil {
 		paths = a.analyzeStatement(stmt.Init, paths).next
 	}
 	paths = a.analyzeStatement(stmt.Assign, paths).next
-	return a.analyzeCaseClauses(stmt.Body, paths)
+	result := a.analyzeCaseClauses(stmt.Body, paths)
+	removeCheckpointAssignments(&result, scopedObjects)
+	return result
 }
 
 func (a *checkpointFlowAnalyzer) analyzeCaseClauses(body *ast.BlockStmt, paths []checkpointFlow) checkpointStatementFlow {
@@ -382,8 +391,8 @@ func flowWithAssignment(flow checkpointFlow, assign *ast.AssignStmt) checkpointF
 		return flow
 	}
 	for _, lhs := range assign.Lhs {
-		if ident, ok := lhs.(*ast.Ident); ok {
-			delete(flow.assignments, ident.Name)
+		if ident, ok := lhs.(*ast.Ident); ok && ident.Obj != nil {
+			delete(flow.assignments, ident.Obj.Pos())
 		}
 	}
 	if len(assign.Rhs) != 1 {
@@ -399,8 +408,8 @@ func flowWithAssignment(flow checkpointFlow, assign *ast.AssignStmt) checkpointF
 	}
 	checkpoint := checkpointAssignment{receiver: receiver, method: method}
 	for _, lhs := range assign.Lhs {
-		if ident, ok := lhs.(*ast.Ident); ok && ident.Name != "_" {
-			flow.assignments[ident.Name] = checkpoint
+		if ident, ok := lhs.(*ast.Ident); ok && ident.Name != "_" && ident.Obj != nil {
+			flow.assignments[ident.Obj.Pos()] = checkpoint
 		}
 	}
 	return flow
@@ -410,24 +419,24 @@ func conditionCheckpointPaths(ifStmt *ast.IfStmt, paths []checkpointFlow) ([]che
 	var truePaths []checkpointFlow
 	var falsePaths []checkpointFlow
 	for _, path := range paths {
-		var errName string
+		var errObject token.Pos
 		var checkpoint checkpointAssignment
-		for _, name := range notNilComparedNames(ifStmt.Cond) {
-			if assignment, ok := path.assignments[name]; ok {
-				errName = name
+		for _, object := range nilComparedObjects(ifStmt.Cond) {
+			if assignment, ok := path.assignments[object]; ok {
+				errObject = object
 				checkpoint = assignment
 				break
 			}
 		}
-		if errName == "" {
+		if errObject == token.NoPos {
 			truePaths = append(truePaths, copyCheckpointFlow(path))
 			falsePaths = append(falsePaths, copyCheckpointFlow(path))
 			continue
 		}
 
 		resolvedPath := copyCheckpointFlow(path)
-		delete(resolvedPath.assignments, errName)
-		successTruth := conditionTruthForCheckpoint(ifStmt.Cond, errName, false)
+		delete(resolvedPath.assignments, errObject)
+		successTruth := conditionTruthForCheckpoint(ifStmt.Cond, errObject, false)
 		if successTruth&conditionTrue != 0 {
 			truePaths = append(truePaths, copyCheckpointFlow(resolvedPath))
 		}
@@ -441,7 +450,7 @@ func conditionCheckpointPaths(ifStmt *ast.IfStmt, paths []checkpointFlow) ([]che
 			method:   checkpoint.method,
 		}
 		resolvedPath.failures = appendCheckpointFailure(resolvedPath.failures, failure)
-		failureTruth := conditionTruthForCheckpoint(ifStmt.Cond, errName, true)
+		failureTruth := conditionTruthForCheckpoint(ifStmt.Cond, errObject, true)
 		if failureTruth&conditionTrue != 0 {
 			truePaths = append(truePaths, copyCheckpointFlow(resolvedPath))
 		}
@@ -457,24 +466,24 @@ const (
 	conditionTrue
 )
 
-func conditionTruthForCheckpoint(expr ast.Expr, errName string, failed bool) uint8 {
+func conditionTruthForCheckpoint(expr ast.Expr, errObject token.Pos, failed bool) uint8 {
 	switch node := expr.(type) {
 	case *ast.ParenExpr:
-		return conditionTruthForCheckpoint(node.X, errName, failed)
+		return conditionTruthForCheckpoint(node.X, errObject, failed)
 	case *ast.UnaryExpr:
 		if node.Op != token.NOT {
 			return conditionFalse | conditionTrue
 		}
-		truth := conditionTruthForCheckpoint(node.X, errName, failed)
+		truth := conditionTruthForCheckpoint(node.X, errObject, failed)
 		return ((truth & conditionFalse) << 1) | ((truth & conditionTrue) >> 1)
 	case *ast.BinaryExpr:
-		if truth, ok := nilComparisonTruthForCheckpoint(node, errName, failed); ok {
+		if truth, ok := nilComparisonTruthForCheckpoint(node, errObject, failed); ok {
 			return truth
 		}
 		if node.Op == token.LAND || node.Op == token.LOR {
 			return combineConditionTruth(
-				conditionTruthForCheckpoint(node.X, errName, failed),
-				conditionTruthForCheckpoint(node.Y, errName, failed),
+				conditionTruthForCheckpoint(node.X, errObject, failed),
+				conditionTruthForCheckpoint(node.Y, errObject, failed),
 				node.Op,
 			)
 		}
@@ -482,13 +491,13 @@ func conditionTruthForCheckpoint(expr ast.Expr, errName string, failed bool) uin
 	return conditionFalse | conditionTrue
 }
 
-func nilComparisonTruthForCheckpoint(expr *ast.BinaryExpr, errName string, failed bool) (uint8, bool) {
+func nilComparisonTruthForCheckpoint(expr *ast.BinaryExpr, errObject token.Pos, failed bool) (uint8, bool) {
 	if expr.Op != token.EQL && expr.Op != token.NEQ {
 		return 0, false
 	}
 	for _, pair := range [][2]ast.Expr{{expr.X, expr.Y}, {expr.Y, expr.X}} {
 		ident, ok := pair[0].(*ast.Ident)
-		if !ok || ident.Name != errName || !isNilIdent(pair[1]) {
+		if !ok || ident.Obj == nil || ident.Obj.Pos() != errObject || !isNilIdent(pair[1]) {
 			continue
 		}
 		if expr.Op == token.NEQ && failed || expr.Op == token.EQL && !failed {
@@ -554,24 +563,24 @@ func checkpointReceiver(expr ast.Expr) (string, bool) {
 	}
 }
 
-func notNilComparedNames(expr ast.Expr) []string {
+func nilComparedObjects(expr ast.Expr) []token.Pos {
 	if paren, ok := expr.(*ast.ParenExpr); ok {
-		return notNilComparedNames(paren.X)
+		return nilComparedObjects(paren.X)
 	}
 	binary, ok := expr.(*ast.BinaryExpr)
 	if !ok {
 		return nil
 	}
 	if binary.Op == token.LAND || binary.Op == token.LOR {
-		return append(notNilComparedNames(binary.X), notNilComparedNames(binary.Y)...)
+		return append(nilComparedObjects(binary.X), nilComparedObjects(binary.Y)...)
 	}
-	if binary.Op != token.NEQ {
+	if binary.Op != token.EQL && binary.Op != token.NEQ {
 		return nil
 	}
 	for _, pair := range [][2]ast.Expr{{binary.X, binary.Y}, {binary.Y, binary.X}} {
 		ident, ok := pair[0].(*ast.Ident)
-		if ok && isNilIdent(pair[1]) {
-			return []string{ident.Name}
+		if ok && ident.Obj != nil && isNilIdent(pair[1]) {
+			return []token.Pos{ident.Obj.Pos()}
 		}
 	}
 	return nil
@@ -579,11 +588,11 @@ func notNilComparedNames(expr ast.Expr) []string {
 
 func copyCheckpointFlow(flow checkpointFlow) checkpointFlow {
 	copyFlow := checkpointFlow{
-		assignments: make(map[string]checkpointAssignment, len(flow.assignments)),
+		assignments: make(map[token.Pos]checkpointAssignment, len(flow.assignments)),
 		failures:    append([]failedCheckpoint(nil), flow.failures...),
 	}
-	for name, assignment := range flow.assignments {
-		copyFlow.assignments[name] = assignment
+	for object, assignment := range flow.assignments {
+		copyFlow.assignments[object] = assignment
 	}
 	return copyFlow
 }
@@ -596,28 +605,33 @@ func cloneCheckpointFlows(flows []checkpointFlow) []checkpointFlow {
 	return clones
 }
 
-func checkpointScopedNames(stmt ast.Stmt) []string {
+func checkpointDeclaredObjects(stmt ast.Stmt) []token.Pos {
 	assign, ok := stmt.(*ast.AssignStmt)
 	if !ok || assign.Tok != token.DEFINE {
 		return nil
 	}
-	var names []string
+	var objects []token.Pos
 	for _, lhs := range assign.Lhs {
-		if ident, ok := lhs.(*ast.Ident); ok && ident.Name != "_" {
-			names = append(names, ident.Name)
+		if ident, ok := lhs.(*ast.Ident); ok && ident.Obj != nil && ident.Obj.Decl == assign {
+			objects = append(objects, ident.Obj.Pos())
 		}
 	}
-	return names
+	return objects
 }
 
-func restoreCheckpointAssignments(flow *checkpointStatementFlow, original map[string]checkpointAssignment, names []string) {
+func checkpointBlockDeclaredObjects(block *ast.BlockStmt) []token.Pos {
+	var objects []token.Pos
+	for _, stmt := range block.List {
+		objects = append(objects, checkpointDeclaredObjects(stmt)...)
+	}
+	return objects
+}
+
+func removeCheckpointAssignments(flow *checkpointStatementFlow, objects []token.Pos) {
 	for _, paths := range [][]checkpointFlow{flow.next, flow.breaks, flow.continues} {
 		for i := range paths {
-			for _, name := range names {
-				delete(paths[i].assignments, name)
-				if assignment, ok := original[name]; ok {
-					paths[i].assignments[name] = assignment
-				}
+			for _, object := range objects {
+				delete(paths[i].assignments, object)
 			}
 		}
 	}
@@ -653,8 +667,8 @@ func equalCheckpointFlow(left, right checkpointFlow) bool {
 	if len(left.assignments) != len(right.assignments) || len(left.failures) != len(right.failures) {
 		return false
 	}
-	for name, assignment := range left.assignments {
-		if right.assignments[name] != assignment {
+	for object, assignment := range left.assignments {
+		if right.assignments[object] != assignment {
 			return false
 		}
 	}

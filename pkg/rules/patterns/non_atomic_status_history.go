@@ -210,6 +210,7 @@ func (a *statusHistoryFlowAnalyzer) statement(statement ast.Stmt, paths []status
 	switch node := statement.(type) {
 	case *ast.AssignStmt:
 		paths = a.applyCalls(paths, scope, node)
+		paths = invalidateStatusHistoryAssignments(paths, scope, node)
 		if node.Tok == token.DEFINE {
 			declareStatusHistoryExpressions(scope, node.Lhs)
 		}
@@ -413,6 +414,42 @@ func (a *statusHistoryFlowAnalyzer) declaration(declaration ast.Decl, paths []st
 		for _, name := range value.Names {
 			scope.declare(name)
 		}
+	}
+	return paths
+}
+
+func invalidateStatusHistoryAssignments(paths []statusHistoryPath, scope *statusHistoryLexicalScope, assignment *ast.AssignStmt) []statusHistoryPath {
+	reassigned := make(map[statusHistoryIdentity]struct{})
+	for _, expression := range assignment.Lhs {
+		identifier, ok := expression.(*ast.Ident)
+		if !ok || identifier.Name == "_" {
+			continue
+		}
+		if assignment.Tok == token.DEFINE {
+			declaration, alreadyDeclared := scope.symbols[identifier.Name]
+			if !alreadyDeclared {
+				continue
+			}
+			reassigned[statusHistoryIdentity{name: identifier.Name, declaration: declaration}] = struct{}{}
+			continue
+		}
+		reassigned[scope.resolve(identifier)] = struct{}{}
+	}
+	if len(reassigned) == 0 {
+		return paths
+	}
+
+	for index := range paths {
+		kept := make([]statusHistoryCall, 0, len(paths[index].mutations))
+		for _, mutation := range paths[index].mutations {
+			_, receiverChanged := reassigned[mutation.receiver.root]
+			_, entityChanged := reassigned[mutation.entity.root]
+			if receiverChanged || mutation.hasEntity && entityChanged {
+				continue
+			}
+			kept = append(kept, mutation)
+		}
+		paths[index].mutations = kept
 	}
 	return paths
 }
