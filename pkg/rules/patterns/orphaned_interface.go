@@ -209,6 +209,7 @@ func (r *OrphanedInterfaceRule) isDIInterface(name string) bool {
 		"Registry",
 		"Checker",
 		"Constraint",
+		"Rule",
 	}
 
 	for _, suffix := range diSuffixes {

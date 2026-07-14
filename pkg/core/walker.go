@@ -14,6 +14,7 @@ type Walker struct {
 	projectRoot string
 	config      *Config
 	parser      *Parser
+	parseGo     bool
 
 	// Worker pool
 	workers    int
@@ -46,11 +47,18 @@ func NewWalker(projectRoot string, config *Config) *Walker {
 		projectRoot: projectRoot,
 		config:      config,
 		parser:      NewParser(),
+		parseGo:     true,
 		workers:     workers,
 		fileQueue:   make(chan string, 100),
 		resultChan:  make(chan *FileContext, 100),
 		errorChan:   make(chan error, 100),
 	}
+}
+
+// WithGoParsing controls whether the walker parses Go files into ASTs.
+func (w *Walker) WithGoParsing(enabled bool) *Walker {
+	w.parseGo = enabled
+	return w
 }
 
 // WithWorkers sets the number of worker goroutines
@@ -190,7 +198,7 @@ func (w *Walker) processFile(path string) (*FileContext, error) {
 	}
 
 	// Parse Go files
-	if ctx.IsGoFile() {
+	if ctx.IsGoFile() && w.parseGo {
 		fset, astFile, err := w.parser.ParseGoFile(path, content)
 		if err != nil {
 			ctx.SetGoAST(nil, nil)

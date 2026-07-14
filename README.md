@@ -9,7 +9,7 @@ Originally built to help AI agents understand codebases, but useful for any proj
 
 ## Features
 
-- **90 rules in 8 categories** — architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation (`glint rules` is always the authoritative list)
+- **91 rules in 8 categories** — architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation (`glint rules` is always the authoritative list)
 - **Auto-fix support** — automatic fixes for common issues (v1.1+)
 - **Single-pass analysis** — files are read and parsed once, AST is cached
 - **Parallel execution** — utilizes all CPU cores
