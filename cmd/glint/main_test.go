@@ -279,6 +279,32 @@ func TestPrepareAnalysisWithoutProjectRuleUsesWalkerParser(t *testing.T) {
 	}
 }
 
+func TestPrepareAnalysisSkipsGoProjectForTreeWithoutGoFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "app.ts"), []byte("export const x = 1\n"), 0644); err != nil {
+		t.Fatalf("write app.ts: %v", err)
+	}
+	projectRule := newProjectStubRule()
+
+	contexts, _, project, err := prepareAnalysis(root, core.DefaultConfig(), []rules.Rule{projectRule})
+	if err != nil {
+		t.Fatalf("prepare analysis on TS-only tree must not fail: %v", err)
+	}
+	if project != nil {
+		t.Fatal("Go project context must not be loaded for a tree without Go files")
+	}
+	if len(contexts) != 1 {
+		t.Fatalf("contexts=%d, want 1 (app.ts)", len(contexts))
+	}
+
+	if _, err := analyzeProject(contexts, []rules.Rule{projectRule}, core.DefaultConfig(), project); err != nil {
+		t.Fatalf("analyze TS-only tree with project rule must not fail: %v", err)
+	}
+	if projectRule.projectCalls != 0 {
+		t.Fatalf("project rule calls=%d, want 0 on a tree without Go files", projectRule.projectCalls)
+	}
+}
+
 func TestAnalyzeProjectFiltersPackageFindings(t *testing.T) {
 	tests := []struct {
 		name   string

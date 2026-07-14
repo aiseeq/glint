@@ -318,7 +318,9 @@ func prepareAnalysis(projectRoot string, cfg *core.Config, enabledRules []rules.
 	if err != nil {
 		return nil, walker, nil, err
 	}
-	if projectRuleCount == 0 {
+	// Дерево без Go-файлов (например, frontend): Go-project правилам нечего
+	// анализировать, а загрузка Go-контекста упала бы с "no packages found".
+	if projectRuleCount == 0 || !hasGoFiles(contexts) {
 		return contexts, walker, nil, nil
 	}
 	project, err := core.LoadGoProject(projectRoot, contexts, requireSSA)
@@ -361,6 +363,15 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 	return allViolations
 }
 
+func hasGoFiles(contexts []*core.FileContext) bool {
+	for _, ctx := range contexts {
+		if ctx != nil && ctx.IsGoFile() {
+			return true
+		}
+	}
+	return false
+}
+
 func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext) (core.ViolationList, error) {
 	var allViolations core.ViolationList
 	fileRules := make([]rules.Rule, 0, len(enabledRules))
@@ -371,6 +382,10 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 			continue
 		}
 		if project == nil {
+			if !hasGoFiles(contexts) {
+				// Дерево без Go-файлов: Go-project правилам нечего анализировать.
+				continue
+			}
 			return nil, fmt.Errorf("analyze Go project with rule %q: project context is nil", rule.Name())
 		}
 		violations, err := projectRule.AnalyzeGoProject(project)
