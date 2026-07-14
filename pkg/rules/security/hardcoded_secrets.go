@@ -119,7 +119,8 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			if !pattern.highConfidence && r.isPlaceholder(line) {
 				continue
 			}
-			if pattern.regex.MatchString(line) {
+			match := pattern.regex.FindString(line)
+			if match != "" && !isDynamicSecretMatch(match) {
 				if ctx.IsSuppressed(lineNum+1, r.Name()) {
 					break
 				}
@@ -134,6 +135,15 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	}
 
 	return violations
+}
+
+func isDynamicSecretMatch(match string) bool {
+	separator := strings.IndexByte(match, '=')
+	if separator < 0 {
+		return false
+	}
+	value := strings.TrimSpace(match[separator+1:])
+	return strings.HasPrefix(value, "$")
 }
 
 func isTestConfigPath(path string) bool {

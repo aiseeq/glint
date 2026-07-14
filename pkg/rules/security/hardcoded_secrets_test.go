@@ -225,6 +225,13 @@ var key = process.env.RESEND_API_KEY`
 	assert.Empty(t, rule.AnalyzeFile(ctx))
 }
 
+func TestHardcodedSecretsAllowsDynamicPGPassword(t *testing.T) {
+	rule := NewHardcodedSecretsRule()
+	code := "const remote = `PGPASSWORD=${shellQuote(dbPassword)} psql -h 127.0.0.1`"
+	ctx := core.NewFileContext("/src/e2e/deploy.ts", "/src", []byte(code), core.DefaultConfig())
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+}
+
 func TestHardcodedSecretsAllowsGenericCredentialsInTestConfig(t *testing.T) {
 	rule := NewHardcodedSecretsRule()
 	code := `const config = { jwtSecret: "test-jwt-secret-32-characters-minimum" }`
