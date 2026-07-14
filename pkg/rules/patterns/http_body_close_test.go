@@ -1,6 +1,9 @@
 package patterns
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -288,6 +291,73 @@ func example() {
 			}
 		})
 	}
+}
+
+func TestHTTPBodyCloseRule_DetectsTypedClientWithoutIdentifierObjects(t *testing.T) {
+	code := `package main
+
+import nethttp "net/http"
+
+type worker struct{}
+type result struct{}
+
+func (worker) Do() (*result, error) { return nil, nil }
+
+func (worker worker) example(client *nethttp.Client, req *nethttp.Request) {
+	httpResp, httpErr := client.Do(req)
+	if httpErr != nil {
+		return
+	}
+	_ = httpResp
+
+	var declaredClient *nethttp.Client = nethttp.DefaultClient
+	declaredResp, declaredErr := declaredClient.Get("http://example.com")
+	if declaredErr != nil {
+		return
+	}
+	_ = declaredResp
+
+	assignedClient := &nethttp.Client{}
+	assignedResp, assignedErr := assignedClient.Do(req)
+	if assignedErr != nil {
+		return
+	}
+	_ = assignedResp
+
+	workerResp, workerErr := worker.Do()
+	if workerErr != nil {
+		return
+	}
+	_ = workerResp
+}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "service.go", code, parser.ParseComments|parser.SkipObjectResolution)
+	require.NoError(t, err)
+	ast.Inspect(file, func(node ast.Node) bool {
+		if ident, ok := node.(*ast.Ident); ok {
+			assert.Nil(t, ident.Obj)
+		}
+		return true
+	})
+
+	ctx := &core.FileContext{
+		Path:    "/service.go",
+		RelPath: "service.go",
+		Lines:   splitHTTPLines(code),
+		Content: []byte(code),
+	}
+	ctx.SetGoAST(fset, file)
+
+	violations := NewHTTPBodyCloseRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 3)
+	variables := make([]string, 0, len(violations))
+	for _, violation := range violations {
+		variable, ok := violation.Context["variable"].(string)
+		require.True(t, ok)
+		variables = append(variables, variable)
+	}
+	assert.ElementsMatch(t, []string{"httpResp", "declaredResp", "assignedResp"}, variables)
 }
 
 // Helper function
