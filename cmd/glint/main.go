@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -167,12 +169,15 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	contexts, walker, err := walkFiles(projectRoot, cfg)
+	contexts, walker, project, err := prepareAnalysis(projectRoot, cfg, enabledRules)
 	if err != nil {
 		return err
 	}
 
-	allViolations := analyzeFiles(contexts, enabledRules, cfg)
+	allViolations, err := analyzeProject(contexts, enabledRules, cfg, project)
+	if err != nil {
+		return err
+	}
 	minSeverity, err := cfg.GetMinSeverity()
 	if err != nil {
 		return err
@@ -211,6 +216,11 @@ func getProjectRoot(args []string) (string, error) {
 			return "", fmt.Errorf("failed to get working directory: %w", err)
 		}
 	}
+	absRoot, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("make project root %q absolute: %w", projectRoot, err)
+	}
+	projectRoot = filepath.Clean(absRoot)
 	info, err := os.Stat(projectRoot)
 	if err != nil {
 		return "", fmt.Errorf("invalid project root %q: %w", projectRoot, err)
@@ -272,7 +282,12 @@ func getEnabledRules(cfg *core.Config) []rules.Rule {
 
 func walkFiles(projectRoot string, cfg *core.Config) ([]*core.FileContext, *core.Walker, error) {
 	walker := core.NewWalker(projectRoot, cfg)
+	return walkWithWalker(walker)
+}
+
+func walkWithWalker(walker *core.Walker) ([]*core.FileContext, *core.Walker, error) {
 	contexts, walkErrors := walker.WalkSync()
+	sort.Slice(contexts, func(i, j int) bool { return contexts[i].Path < contexts[j].Path })
 
 	if flagVerbose {
 		stats := walker.Stats()
@@ -284,6 +299,33 @@ func walkFiles(projectRoot string, cfg *core.Config) ([]*core.FileContext, *core
 	}
 
 	return contexts, walker, nil
+}
+
+func prepareAnalysis(projectRoot string, cfg *core.Config, enabledRules []rules.Rule) ([]*core.FileContext, *core.Walker, *core.GoProjectContext, error) {
+	projectRuleCount := 0
+	requireSSA := false
+	for _, rule := range enabledRules {
+		projectRule, ok := rule.(rules.GoProjectRule)
+		if !ok {
+			continue
+		}
+		projectRuleCount++
+		requireSSA = requireSSA || projectRule.RequiresSSA()
+	}
+
+	walker := core.NewWalker(projectRoot, cfg).WithGoParsing(projectRuleCount == 0)
+	contexts, walker, err := walkWithWalker(walker)
+	if err != nil {
+		return nil, walker, nil, err
+	}
+	if projectRuleCount == 0 {
+		return contexts, walker, nil, nil
+	}
+	project, err := core.LoadGoProject(projectRoot, contexts, requireSSA)
+	if err != nil {
+		return nil, walker, nil, fmt.Errorf("load Go project context: %w", err)
+	}
+	return contexts, walker, project, nil
 }
 
 func shouldFailAnalysis(violations core.ViolationList) bool {
@@ -317,6 +359,43 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 		}
 	}
 	return allViolations
+}
+
+func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext) (core.ViolationList, error) {
+	var allViolations core.ViolationList
+	fileRules := make([]rules.Rule, 0, len(enabledRules))
+	for _, rule := range enabledRules {
+		projectRule, ok := rule.(rules.GoProjectRule)
+		if !ok {
+			fileRules = append(fileRules, rule)
+			continue
+		}
+		if project == nil {
+			return nil, fmt.Errorf("analyze Go project with rule %q: project context is nil", rule.Name())
+		}
+		violations, err := projectRule.AnalyzeGoProject(project)
+		if err != nil {
+			return nil, fmt.Errorf("analyze Go project with rule %q: %w", rule.Name(), err)
+		}
+		for _, violation := range violations {
+			if violation == nil {
+				return nil, fmt.Errorf("analyze Go project with rule %q: nil violation", rule.Name())
+			}
+			fileCtx, err := project.File(violation.File)
+			if err != nil {
+				return nil, fmt.Errorf("map finding from Go project rule %q: %w", rule.Name(), err)
+			}
+			if cfg.IsFileExcepted(rule.Category(), rule.Name(), fileCtx.RelPath) ||
+				cfg.IsViolationExcepted(rule.Category(), rule.Name(), fileCtx.RelPath, violation) ||
+				(rules.HonorsSuppression(rule) && fileCtx.IsSuppressed(violation.Line, rule.Name())) {
+				continue
+			}
+			violation.File = fileCtx.RelPath
+			allViolations = append(allViolations, violation)
+		}
+	}
+	allViolations = append(allViolations, analyzeFiles(contexts, fileRules, cfg)...)
+	return allViolations, nil
 }
 
 func outputResults(format string, violations core.ViolationList, stats output.Stats) error {

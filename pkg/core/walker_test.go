@@ -250,3 +250,15 @@ func main() {
 	assert.Equal(t, "main", ctx.GoPackage)
 	assert.Contains(t, ctx.GoImports, "fmt")
 }
+
+func TestWalkerWithGoParsingDisabledLeavesGoASTForProjectLoader(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n"), 0644))
+
+	contexts, errs := NewWalker(tmpDir, DefaultConfig()).WithGoParsing(false).WalkSync()
+
+	require.Empty(t, errs)
+	require.Len(t, contexts, 1)
+	assert.Nil(t, contexts[0].GoAST)
+	assert.Nil(t, contexts[0].GoFileSet)
+}

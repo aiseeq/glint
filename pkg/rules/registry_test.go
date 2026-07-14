@@ -127,6 +127,7 @@ func TestRegistryGetEnabled(t *testing.T) {
 
 	enabled := r.GetEnabled(cfg)
 	assert.Len(t, enabled, 2)
+	assert.Equal(t, []string{"r1", "r3"}, []string{enabled[0].Name(), enabled[1].Name()})
 
 	for _, rule := range enabled {
 		assert.Equal(t, "enabled-cat", rule.Category())

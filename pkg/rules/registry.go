@@ -127,6 +127,12 @@ func (r *Registry) GetEnabled(cfg *core.Config) []Rule {
 			enabled = append(enabled, rule)
 		}
 	}
+	sort.Slice(enabled, func(i, j int) bool {
+		if enabled[i].Category() != enabled[j].Category() {
+			return enabled[i].Category() < enabled[j].Category()
+		}
+		return enabled[i].Name() < enabled[j].Name()
+	})
 
 	return enabled
 }

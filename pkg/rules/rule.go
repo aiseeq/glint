@@ -19,6 +19,15 @@ type Rule interface {
 	AnalyzeFile(ctx *core.FileContext) []*core.Violation
 }
 
+// GoProjectRule is an optional package-level analysis interface for rules that
+// need shared typed syntax or SSA. Implementations still satisfy Rule for API
+// compatibility, but their AnalyzeFile method is not called by the check flow.
+type GoProjectRule interface {
+	Rule
+	AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error)
+	RequiresSSA() bool
+}
+
 // BaseRule provides common functionality for rules
 type BaseRule struct {
 	name            string
