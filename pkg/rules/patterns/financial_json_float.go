@@ -67,6 +67,9 @@ func (r *FinancialJSONFloatRule) inspectJSONStruct(ctx *core.FileContext, struct
 			fieldName += " " + field.Names[0].Name
 		}
 		financial := inheritedFinancial || strongFinancialName(fieldName)
+		if !financial && contextualMarketFinancialName(fieldName) {
+			financial = typeFinancial
+		}
 		if !financial && weakFinancialName(fieldName) {
 			financial = typeFinancial || financialContextName(exprTypeName(field.Type))
 		}
@@ -88,7 +91,7 @@ func (r *FinancialJSONFloatRule) inspectJSONStruct(ctx *core.FileContext, struct
 			if typeName != "" {
 				nextSeen[typeName] = true
 			}
-			violations = append(violations, r.inspectJSONStruct(ctx, nested, inheritedFinancial || financialContainerName(fieldName), financialContextName(typeName), true, types, nextSeen, reported)...)
+			violations = append(violations, r.inspectJSONStruct(ctx, nested, inheritedFinancial || financialContainerName(fieldName), typeFinancial || financialContextName(typeName), true, types, nextSeen, reported)...)
 		}
 	}
 	return violations
@@ -149,27 +152,49 @@ func containsFloatType(expr ast.Expr, types map[string]ast.Expr, seen map[string
 }
 
 func resolveStructType(expr ast.Expr, types map[string]ast.Expr) *ast.StructType {
-	if pointer, ok := expr.(*ast.StarExpr); ok {
-		expr = pointer.X
+	return resolveStructTypeSeen(expr, types, make(map[string]bool))
+}
+
+func resolveStructTypeSeen(expr ast.Expr, types map[string]ast.Expr, seen map[string]bool) *ast.StructType {
+	switch node := expr.(type) {
+	case *ast.StarExpr:
+		return resolveStructTypeSeen(node.X, types, seen)
+	case *ast.ArrayType:
+		return resolveStructTypeSeen(node.Elt, types, seen)
+	case *ast.MapType:
+		return resolveStructTypeSeen(node.Value, types, seen)
+	case *ast.Ident:
+		if seen[node.Name] {
+			return nil
+		}
+		seen[node.Name] = true
+		return resolveStructTypeSeen(types[node.Name], types, seen)
+	case *ast.StructType:
+		return node
+	default:
+		return nil
 	}
-	if ident, ok := expr.(*ast.Ident); ok {
-		expr = types[ident.Name]
-	}
-	structType, _ := expr.(*ast.StructType)
-	return structType
 }
 
 func exprTypeName(expr ast.Expr) string {
-	if pointer, ok := expr.(*ast.StarExpr); ok {
-		expr = pointer.X
+	switch node := expr.(type) {
+	case *ast.StarExpr:
+		return exprTypeName(node.X)
+	case *ast.ArrayType:
+		return exprTypeName(node.Elt)
+	case *ast.MapType:
+		return exprTypeName(node.Value)
+	case *ast.Ident:
+		return node.Name
+	default:
+		return ""
 	}
-	if ident, ok := expr.(*ast.Ident); ok {
-		return ident.Name
-	}
-	return ""
 }
 
 func strongFinancialName(name string) bool {
+	if compoundMarketFinancialName(name) {
+		return true
+	}
 	financialTokens := map[string]bool{
 		"amount": true, "amounts": true, "balance": true, "balances": true,
 		"cost": true, "costs": true, "fee": true, "fees": true,
@@ -185,6 +210,37 @@ func strongFinancialName(name string) bool {
 		}
 	}
 	return false
+}
+
+func compoundMarketFinancialName(name string) bool {
+	for _, identifier := range strings.Fields(name) {
+		tokens := identifierTokens(identifier)
+		if len(tokens) == 2 && tokens[0] == "exchange" && (tokens[1] == "rate" || tokens[1] == "rates") {
+			return true
+		}
+		if len(tokens) == 2 && tokens[0] == "fx" && (tokens[1] == "rate" || tokens[1] == "rates") {
+			return true
+		}
+	}
+	return false
+}
+
+func contextualMarketFinancialName(name string) bool {
+	for _, identifier := range strings.Fields(name) {
+		tokens := identifierTokens(identifier)
+		if len(tokens) != 1 {
+			continue
+		}
+		switch tokens[0] {
+		case "mid", "rate", "rates", "fx":
+			return true
+		}
+	}
+	return false
+}
+
+func financialValueName(name string) bool {
+	return strongFinancialName(name) || contextualMarketFinancialName(name)
 }
 
 func weakFinancialName(name string) bool {
@@ -203,7 +259,7 @@ func financialContainerName(name string) bool {
 func financialContextName(name string) bool {
 	for _, token := range identifierTokens(name) {
 		switch token {
-		case "asset", "assets", "fee", "fees", "market", "money", "payment", "payments", "portfolio", "token", "tokens", "transaction", "transactions", "transfer", "transfers", "wallet":
+		case "asset", "assets", "fee", "fees", "fx", "market", "mid", "money", "payment", "payments", "portfolio", "quote", "rate", "rates", "token", "tokens", "transaction", "transactions", "transfer", "transfers", "wallet":
 			return true
 		}
 	}
@@ -211,6 +267,7 @@ func financialContextName(name string) bool {
 }
 
 func identifierTokens(name string) []string {
+	runes := []rune(name)
 	var tokens []string
 	var current []rune
 	flush := func() {
@@ -219,18 +276,19 @@ func identifierTokens(name string) []string {
 			current = nil
 		}
 	}
-	var previous rune
-	for _, char := range name {
+	for index, char := range runes {
 		if !unicode.IsLetter(char) && !unicode.IsDigit(char) {
 			flush()
-			previous = 0
 			continue
 		}
-		if len(current) > 0 && unicode.IsUpper(char) && unicode.IsLower(previous) {
-			flush()
+		if len(current) > 0 && unicode.IsUpper(char) {
+			previous := runes[index-1]
+			nextIsLower := index+1 < len(runes) && unicode.IsLower(runes[index+1])
+			if unicode.IsLower(previous) || unicode.IsDigit(previous) || unicode.IsUpper(previous) && nextIsLower {
+				flush()
+			}
 		}
 		current = append(current, char)
-		previous = char
 	}
 	flush()
 	return tokens

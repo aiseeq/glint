@@ -9,7 +9,7 @@ Originally built to help AI agents understand codebases, but useful for any proj
 
 ## Features
 
-- **80 rules in 8 categories** — architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation (`glint rules` is always the authoritative list)
+- **90 rules in 8 categories** — architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation (`glint rules` is always the authoritative list)
 - **Auto-fix support** — automatic fixes for common issues (v1.1+)
 - **Single-pass analysis** — files are read and parsed once, AST is cached
 - **Parallel execution** — utilizes all CPU cores
@@ -94,7 +94,7 @@ See [docs/configuration.md](docs/configuration.md) for full reference.
 | documentation | 5 | doc-links, doc-missing, md-frontmatter, md-line-break, md-list-after-label |
 | duplication | 2 | cross-file-duplicate, duplicate-block |
 | naming | 1 | naming-convention |
-| patterns | 54 | anon-interface-degradation, append-assign, bool-compare, constructor-nil-return, constructor-swallows-nil-dep, context-background, context-first, defer-in-loop, deprecated-ioutil, deterministic-uuid, empty-block, empty-struct-return, error-length-check, error-masked-as-false-bool, error-masking, error-string, error-string-compare, error-wrap, fallback-return, financial-constants, financial-fp-rounding, financial-rounded-delta, frontend-env-fallback, frontend-money-arithmetic, frontend-silent-catch, go-modern, http-body-close, ignored-error, legacy-comment-marker, legacy-identifier, log-and-return-zero, magic-number, masked-error-in-or-condition, migration-duplicate-version, mutex-lock, nil-di, nil-slice, non-canonical-logger, nullable-object-call, orphaned-interface, query-in-loop, range-val-pointer, redundant-compatibility, return-nil-error, scattered-construction, shadow-variable, silent-config-error, silent-error-handling, sql-rows-close, string-concat, tech-debt, time-equal, todo-comment, tombstone-comment |
+| patterns | 64 | anon-interface-degradation, append-assign, bool-compare, constructor-nil-return, constructor-swallows-nil-dep, context-background, context-first, defer-in-loop, deprecated-ioutil, deprecated-nginx-http2-listen, deterministic-uuid, empty-block, empty-struct-return, error-length-check, error-masked-as-false-bool, error-masking, error-string, error-string-compare, error-wrap, fallback-return, financial-constants, financial-decimal-float, financial-fp-rounding, financial-json-float, financial-rounded-delta, frontend-env-fallback, frontend-money-arithmetic, frontend-silent-catch, go-modern, http-body-close, idempotency-check-then-create, ignored-error, legacy-comment-marker, legacy-identifier, log-and-return-zero, magic-number, masked-error-in-or-condition, migration-duplicate-version, mutex-lock, nil-di, nil-slice, non-atomic-status-history, non-canonical-logger, nullable-object-call, orphaned-interface, pagination-boundary-truncation, provider-command-before-intent-persist, provider-command-retry, query-in-loop, range-val-pointer, redundant-compatibility, return-nil-error, scattered-construction, shadow-variable, silent-config-error, silent-error-handling, sql-rows-close, string-concat, tech-debt, terminal-after-failed-checkpoint, time-equal, todo-comment, tombstone-comment, unbounded-response-read |
 | security | 3 | hardcoded-secret, sensitive-query-param, sql-injection |
 | typesafety | 3 | any-in-public-contract, interface-any, type-assertion |
 

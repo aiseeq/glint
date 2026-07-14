@@ -7,12 +7,13 @@ import (
 
 // TypeInfo holds inferred type information for a variable
 type TypeInfo struct {
-	IsSlice  bool
-	IsMap    bool
-	IsTime   bool
-	IsError  bool
-	IsChan   bool
-	TypeName string // e.g., "[]string", "time.Time", "error"
+	IsSlice         bool
+	IsMap           bool
+	IsTime          bool
+	IsError         bool
+	IsChan          bool
+	TypeName        string // e.g., "[]string", "time.Time", "error"
+	ElementTypeName string
 }
 
 // TypeInferrer infers types from AST declarations within a file
@@ -106,9 +107,6 @@ func (ti *TypeInferrer) collectTypes(node ast.Node) {
 				ti.processAssignment(node)
 			}
 
-		case *ast.RangeStmt:
-			// for _, item := range items
-			ti.processRangeStmt(node)
 		}
 		return true
 	})
@@ -177,12 +175,6 @@ func (ti *TypeInferrer) processAssignment(assign *ast.AssignStmt) {
 	}
 }
 
-func (ti *TypeInferrer) processRangeStmt(rangeStmt *ast.RangeStmt) {
-	// The range expression type tells us about the collection
-	// but we mainly care about marking the key/value variables
-	// For now, skip - could be enhanced later
-}
-
 func (ti *TypeInferrer) analyzeTypeExpr(expr ast.Expr) TypeInfo {
 	if expr == nil {
 		return TypeInfo{}
@@ -192,14 +184,16 @@ func (ti *TypeInferrer) analyzeTypeExpr(expr ast.Expr) TypeInfo {
 	case *ast.ArrayType:
 		// []T or [N]T
 		return TypeInfo{
-			IsSlice:  t.Len == nil, // nil Len means slice, not array
-			TypeName: "[]" + ti.typeExprToString(t.Elt),
+			IsSlice:         t.Len == nil, // nil Len means slice, not array
+			TypeName:        "[]" + ti.typeExprToString(t.Elt),
+			ElementTypeName: ti.typeExprToString(t.Elt),
 		}
 
 	case *ast.MapType:
 		return TypeInfo{
-			IsMap:    true,
-			TypeName: "map[" + ti.typeExprToString(t.Key) + "]" + ti.typeExprToString(t.Value),
+			IsMap:           true,
+			TypeName:        "map[" + ti.typeExprToString(t.Key) + "]" + ti.typeExprToString(t.Value),
+			ElementTypeName: ti.typeExprToString(t.Value),
 		}
 
 	case *ast.ChanType:
@@ -277,6 +271,12 @@ func (ti *TypeInferrer) analyzeExpr(expr ast.Expr) TypeInfo {
 	case *ast.SliceExpr:
 		// x[1:2] - result is same type as x
 		return ti.analyzeExpr(e.X)
+
+	case *ast.IndexExpr:
+		collection := ti.analyzeExpr(e.X)
+		if collection.ElementTypeName != "" {
+			return TypeInfo{TypeName: collection.ElementTypeName}
+		}
 	}
 
 	return TypeInfo{}

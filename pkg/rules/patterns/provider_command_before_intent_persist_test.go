@@ -32,6 +32,11 @@ func TestProviderCommandBeforeIntentPersistRule_CommandAndPersistenceVocabulary(
 		{"payout", "CreatePayout", "repo", "RecordState"},
 		{"bank", "SendPayout", "stateStore", "CreateState"},
 		{"remit", "TransferFunds", "ledgerDB", "UpdateState"},
+		{"provider", "CancelTransaction", "repo", "UpdateState"},
+		{"payment", "CancelPayment", "store", "SaveState"},
+		{"provider", "RefundPayment", "db", "PersistState"},
+		{"payment", "CreateRefund", "repo", "RecordState"},
+		{"bank", "SendRefund", "ledgerDB", "UpdateState"},
 	}
 
 	for _, tt := range tests {
@@ -56,6 +61,7 @@ func TestProviderCommandBeforeIntentPersistRule_DurableEvidenceVocabulary(t *tes
 		"RecordPayoutAttempt",
 		"CreateTransferOutbox",
 		"EnqueueProviderCommand",
+		"ClaimPaymentIntent",
 	} {
 		t.Run(method, func(t *testing.T) {
 			code := fmt.Sprintf(`package service
@@ -67,6 +73,89 @@ func send(s *Service, req Request) error {
 }`, method)
 			ctx := createQueryContext(t, "service.go", code)
 			assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
+		})
+	}
+}
+
+func TestProviderCommandBeforeIntentPersistRule_AcquireIsNotDurableEvidence(t *testing.T) {
+	code := `package service
+func send(s *Service, req Request) error {
+	if err := s.repo.AcquirePaymentIntent(req); err != nil { return err }
+	resp, err := s.provider.SendTransaction(req)
+	if err != nil { return err }
+	return s.repo.UpdateState(resp.ID)
+}`
+	ctx := createQueryContext(t, "service.go", code)
+
+	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
+}
+
+func TestProviderCommandBeforeIntentPersistRule_MatchesCancellationIntentSemantics(t *testing.T) {
+	code := `package service
+func cancel(s *Service, tx Transaction) error {
+	if err := s.repo.ClaimCancellationIntent(tx.ID); err != nil { return err }
+	return s.provider.CancelTransaction(tx.Reference)
+}`
+	ctx := createQueryContext(t, "service.go", code)
+
+	assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
+}
+
+func TestProviderCommandBeforeIntentPersistRule_OperationSemanticsRequireSameEntityRoot(t *testing.T) {
+	code := `package service
+func cancel(s *Service, txA, txB Transaction) error {
+	if err := s.repo.ClaimCancellationIntent(txA.ID); err != nil { return err }
+	return s.provider.CancelTransaction(txB.Reference)
+}`
+	ctx := createQueryContext(t, "service.go", code)
+
+	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
+}
+
+func TestProviderCommandBeforeIntentPersistRule_DoesNotMatchDifferentIntentOperation(t *testing.T) {
+	code := `package service
+func refund(s *Service, tx Transaction) error {
+	if err := s.repo.ClaimCancellationIntent(tx.ID); err != nil { return err }
+	return s.provider.RefundPayment(tx.Reference)
+}`
+	ctx := createQueryContext(t, "service.go", code)
+
+	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
+}
+
+func TestProviderCommandBeforeIntentPersistRule_DoesNotCombineOperationAndEntityAcrossIntents(t *testing.T) {
+	code := `package service
+func cancel(s *Service, txA, txB Transaction) error {
+	if err := s.repo.ClaimCancellationIntent(txA.ID); err != nil { return err }
+	if err := s.repo.ClaimRefundIntent(txB.ID); err != nil { return err }
+	return s.provider.CancelTransaction(txB.Reference)
+}`
+	ctx := createQueryContext(t, "service.go", code)
+
+	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
+}
+
+func TestProviderCommandBeforeIntentPersistRule_EntityOwnerPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		persistArg string
+		commandArg string
+		want       int
+	}{
+		{name: "same owner", persistArg: "tx.ID", commandArg: "tx.Reference", want: 0},
+		{name: "different nested owner", persistArg: "req.A.ID", commandArg: "req.B.Reference", want: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code := fmt.Sprintf(`package service
+func cancel(s *Service, tx Transaction, req Request) error {
+	if err := s.repo.ClaimCancellationIntent(%s); err != nil { return err }
+	return s.provider.CancelTransaction(%s)
+}`, tt.persistArg, tt.commandArg)
+			ctx := createQueryContext(t, "service.go", code)
+
+			assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), tt.want)
 		})
 	}
 }

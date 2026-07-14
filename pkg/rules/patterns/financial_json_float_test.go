@@ -31,6 +31,55 @@ type Response struct {
 			want: 3,
 		},
 		{
+			name: "market fields in financial type contexts",
+			code: `package api
+type QuoteResponse struct {
+	Mid float64 ` + "`json:\"mid\"`" + `
+	Rate float64 ` + "`json:\"rate\"`" + `
+	Rates map[string]float64 ` + "`json:\"rates\"`" + `
+	FX float64 ` + "`json:\"fx\"`" + `
+	ExchangeRate float64 ` + "`json:\"exchange_rate\"`" + `
+	FXRate float64 ` + "`json:\"fx_rate\"`" + `
+}
+type ExchangeRateResponse struct {
+	Rate float64 ` + "`json:\"rate\"`" + `
+}
+type websiteManifestRates struct {
+	Mid float64 ` + "`json:\"mid\"`" + `
+}`,
+			want: 8,
+		},
+		{
+			name: "standalone market fields are not financial in metrics context",
+			code: `package api
+type MetricsResponse struct {
+	Rate float64 ` + "`json:\"rate\"`" + `
+	Mid float64 ` + "`json:\"mid\"`" + `
+	FX float64 ` + "`json:\"fx\"`" + `
+	SuccessRate float64 ` + "`json:\"successRate\"`" + `
+	BitRate float64 ` + "`json:\"bitRate\"`" + `
+	RefreshRate float64 ` + "`json:\"refreshRate\"`" + `
+}`,
+			want: 0,
+		},
+		{
+			name: "nested structs and float aliases in containers",
+			code: `package api
+type Scalar float64
+type SliceLevel struct {
+	Rate Scalar ` + "`json:\"rate\"`" + `
+}
+type MapLevel struct {
+	Mid Scalar ` + "`json:\"mid\"`" + `
+}
+type QuoteResponse struct {
+	Levels []SliceLevel ` + "`json:\"levels\"`" + `
+	Points map[string]MapLevel ` + "`json:\"points\"`" + `
+	Rates []Scalar ` + "`json:\"rates\"`" + `
+}`,
+			want: 3,
+		},
+		{
 			name: "financial parent catches approximate float",
 			code: `package api
 type Quantity struct {
