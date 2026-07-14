@@ -2,6 +2,8 @@ package patterns
 
 import (
 	"fmt"
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -526,6 +528,45 @@ func run() {
 }`,
 			want: 0,
 		},
+		{
+			name: "assignment resolves a declared variable",
+			code: `package jobs
+func run() {
+	var err error
+	err = outer.SaveCheckpoint()
+	if err != nil { logger.Error(err) }
+	outer.Complete()
+}`,
+			want: 1,
+		},
+		{
+			name: "range declaration restores outer checkpoint error",
+			code: `package jobs
+func run(errors []error) {
+	err := outer.SaveCheckpoint()
+	for _, err := range errors {
+		if err != nil { return }
+	}
+	if err != nil { logger.Error(err) }
+	outer.Complete()
+}`,
+			want: 1,
+		},
+		{
+			name: "select declaration restores outer checkpoint error",
+			code: `package jobs
+func run(errors <-chan error) {
+	err := outer.SaveCheckpoint()
+	select {
+	case err := <-errors:
+		if err != nil { return }
+	default:
+	}
+	if err != nil { logger.Error(err) }
+	outer.Complete()
+}`,
+			want: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -534,6 +575,27 @@ func run() {
 			assert.Len(t, NewTerminalAfterFailedCheckpointRule().AnalyzeFile(ctx), tt.want)
 		})
 	}
+}
+
+func TestTerminalAfterFailedCheckpointRule_WithoutObjectResolution(t *testing.T) {
+	code := `package jobs
+func run(err error) {
+	err = outer.SaveCheckpoint()
+	{
+		err := inner.SaveCheckpoint()
+		if err != nil { return }
+	}
+	if err != nil { logger.Error(err) }
+	outer.Complete()
+}`
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "job.go", code, parser.ParseComments|parser.SkipObjectResolution)
+	require.NoError(t, err)
+	ctx := core.NewFileContext("job.go", ".", []byte(code), nil)
+	ctx.SetGoAST(fset, file)
+
+	require.Len(t, NewTerminalAfterFailedCheckpointRule().AnalyzeFile(ctx), 1)
 }
 
 func TestTerminalAfterFailedCheckpointRule_StandardSuppression(t *testing.T) {
@@ -551,8 +613,8 @@ func run() {
 func terminalAfterFailedCheckpointContext(t *testing.T, path, code string) *core.FileContext {
 	t.Helper()
 	ctx := core.NewFileContext(path, ".", []byte(code), nil)
-	parser := core.NewParser()
-	fset, file, err := parser.ParseGoFile(path, []byte(code))
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, code, parser.ParseComments|parser.SkipObjectResolution)
 	require.NoError(t, err)
 	ctx.SetGoAST(fset, file)
 	return ctx
