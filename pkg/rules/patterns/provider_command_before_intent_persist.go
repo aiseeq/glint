@@ -10,15 +10,20 @@ import (
 )
 
 var providerCommandMethods = map[string]bool{
-	"SendTransaction": true,
-	"ExecutePayment":  true,
-	"SubmitPayment":   true,
-	"CreatePayout":    true,
-	"SendPayout":      true,
-	"TransferFunds":   true,
+	"SendTransaction":   true,
+	"ExecutePayment":    true,
+	"SubmitPayment":     true,
+	"CreatePayout":      true,
+	"SendPayout":        true,
+	"TransferFunds":     true,
+	"CancelTransaction": true,
+	"CancelPayment":     true,
+	"RefundPayment":     true,
+	"CreateRefund":      true,
+	"SendRefund":        true,
 }
 
-var durableIntentActions = []string{"persist", "save", "record", "create", "enqueue"}
+var durableIntentActions = []string{"persist", "save", "record", "create", "enqueue", "claim"}
 var durableIntentSubjects = []string{"request", "intent", "attempt", "outbox", "command"}
 var providerReceiverMarkers = []string{"paywho", "provider", "payment", "payout", "bank", "remit"}
 var stateReceiverMarkers = []string{"repo", "store", "db", "outbox", "ledger"}
@@ -98,11 +103,16 @@ type providerCommandCall struct {
 	method string
 }
 
+type durableIntentEvidence struct {
+	method string
+	entity string
+	owner  string
+}
+
 type providerFlowState struct {
-	durableObserved      bool
-	durableEntities      []string
-	durableProviderCalls []string
-	pending              []providerCommandCall
+	durableObserved bool
+	durableEvidence []durableIntentEvidence
+	pending         []providerCommandCall
 }
 
 type providerFlowAnalyzer struct {
@@ -168,7 +178,7 @@ func (a *providerFlowAnalyzer) statement(stmt ast.Stmt, states []providerFlowSta
 		if !command {
 			return states
 		}
-		return compactProviderFlowStates(a.recordProviderCommand(node.Call, method, providerCallEntity(node.Call), states))
+		return compactProviderFlowStates(a.recordProviderCommand(node.Call, method, providerCallEntity(node.Call), providerCallEntityOwner(node.Call), states))
 	case *ast.DeferStmt:
 		return a.callOperands(node.Call, states)
 	case *ast.LabeledStmt:
@@ -375,8 +385,9 @@ func (a *providerFlowAnalyzer) call(call *ast.CallExpr, states []providerFlowSta
 	persistsState := matchesSelectorCallPrefix(call, statePersistencePrefixes, stateReceiverMarkers)
 	durable := isDurableIntentCall(call)
 	entity := providerCallEntity(call)
+	entityOwner := providerCallEntityOwner(call)
 	if command {
-		states = a.recordProviderCommand(call, method, entity, states)
+		states = a.recordProviderCommand(call, method, entity, entityOwner, states)
 	}
 
 	for i := range states {
@@ -388,12 +399,9 @@ func (a *providerFlowAnalyzer) call(call *ast.CallExpr, states []providerFlowSta
 		}
 		if durable {
 			states[i].durableObserved = true
-			if entity != "" && !containsProviderEntity(states[i].durableEntities, entity) {
-				states[i].durableEntities = append(append([]string(nil), states[i].durableEntities...), entity)
-			}
-			durableMethod := selectorCallMethod(call)
-			if durableMethod != "" && !containsProviderEntity(states[i].durableProviderCalls, durableMethod) {
-				states[i].durableProviderCalls = append(append([]string(nil), states[i].durableProviderCalls...), durableMethod)
+			evidence := durableIntentEvidence{method: selectorCallMethod(call), entity: entity, owner: entityOwner}
+			if !containsDurableIntentEvidence(states[i].durableEvidence, evidence) {
+				states[i].durableEvidence = append(append([]durableIntentEvidence(nil), states[i].durableEvidence...), evidence)
 			}
 		}
 	}
@@ -404,6 +412,7 @@ func (a *providerFlowAnalyzer) recordProviderCommand(
 	call *ast.CallExpr,
 	method string,
 	entity string,
+	entityOwner string,
 	states []providerFlowState,
 ) []providerFlowState {
 	anyDurableObserved := false
@@ -412,9 +421,7 @@ func (a *providerFlowAnalyzer) recordProviderCommand(
 	}
 
 	for i := range states {
-		entityPersisted := containsProviderEntity(states[i].durableEntities, entity)
-		providerPersisted := durableCallMatchesProvider(states[i].durableProviderCalls, call)
-		if !entityPersisted && !providerPersisted {
+		if !durableEvidenceMatchesProvider(states[i].durableEvidence, call, entity, entityOwner) {
 			pending := providerCommandCall{
 				call: call, method: method,
 			}
@@ -448,8 +455,7 @@ func cloneProviderFlowStates(states []providerFlowState) []providerFlowState {
 	cloned := make([]providerFlowState, len(states))
 	for i, state := range states {
 		cloned[i] = state
-		cloned[i].durableEntities = append([]string(nil), state.durableEntities...)
-		cloned[i].durableProviderCalls = append([]string(nil), state.durableProviderCalls...)
+		cloned[i].durableEvidence = append([]durableIntentEvidence(nil), state.durableEvidence...)
 		cloned[i].pending = append([]providerCommandCall(nil), state.pending...)
 	}
 	return cloned
@@ -474,17 +480,11 @@ func compactProviderFlowStates(states []providerFlowState) []providerFlowState {
 
 func sameProviderFlowState(left, right providerFlowState) bool {
 	if left.durableObserved != right.durableObserved ||
-		len(left.durableEntities) != len(right.durableEntities) ||
-		len(left.durableProviderCalls) != len(right.durableProviderCalls) || len(left.pending) != len(right.pending) {
+		len(left.durableEvidence) != len(right.durableEvidence) || len(left.pending) != len(right.pending) {
 		return false
 	}
-	for i := range left.durableEntities {
-		if left.durableEntities[i] != right.durableEntities[i] {
-			return false
-		}
-	}
-	for i := range left.durableProviderCalls {
-		if left.durableProviderCalls[i] != right.durableProviderCalls[i] {
+	for i := range left.durableEvidence {
+		if left.durableEvidence[i] != right.durableEvidence[i] {
 			return false
 		}
 	}
@@ -502,6 +502,36 @@ func providerCallEntity(call *ast.CallExpr) string {
 			continue
 		}
 		return normalizedProviderEntity(arg)
+	}
+	return ""
+}
+
+func providerCallEntityOwner(call *ast.CallExpr) string {
+	for _, arg := range call.Args {
+		if isProviderContextArgument(arg) {
+			continue
+		}
+		return providerEntityOwner(arg)
+	}
+	return ""
+}
+
+func providerEntityOwner(expr ast.Expr) string {
+	switch node := expr.(type) {
+	case *ast.ParenExpr:
+		return providerEntityOwner(node.X)
+	case *ast.StarExpr:
+		return providerEntityOwner(node.X)
+	case *ast.UnaryExpr:
+		if node.Op == token.AND {
+			return providerEntityOwner(node.X)
+		}
+	case *ast.Ident:
+		return normalizedProviderEntity(node)
+	case *ast.SelectorExpr:
+		return normalizedProviderEntity(node.X)
+	case *ast.IndexExpr:
+		return normalizedProviderEntity(node)
 	}
 	return ""
 }
@@ -575,21 +605,49 @@ func selectorCallMethod(call *ast.CallExpr) string {
 	return sel.Sel.Name
 }
 
-func durableCallMatchesProvider(methods []string, call *ast.CallExpr) bool {
+func durableEvidenceMatchesProvider(evidence []durableIntentEvidence, call *ast.CallExpr, entity, owner string) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return false
 	}
 	receiver := providerReceiverName(sel.X)
-	if receiver == "" || isGenericProviderReceiver(receiver) {
-		return false
-	}
-	for _, method := range methods {
-		if strings.Contains(strings.ToLower(method), receiver) {
+	providerOperation := canonicalProviderOperation(sel.Sel.Name)
+	for _, durable := range evidence {
+		durableOperation := canonicalProviderOperation(durable.method)
+		if durable.entity == entity && entity != "" &&
+			(providerOperation == "" || durableOperation == "" || durableOperation == providerOperation) {
+			return true
+		}
+		if owner != "" && durable.owner == owner && providerOperation != "" && durableOperation == providerOperation {
+			return true
+		}
+		if receiver != "" && !isGenericProviderReceiver(receiver) &&
+			strings.Contains(strings.ToLower(durable.method), receiver) {
 			return true
 		}
 	}
 	return false
+}
+
+func containsDurableIntentEvidence(items []durableIntentEvidence, evidence durableIntentEvidence) bool {
+	for _, item := range items {
+		if item == evidence {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalProviderOperation(method string) string {
+	lower := strings.ToLower(method)
+	switch {
+	case strings.Contains(lower, "cancel"):
+		return "cancel"
+	case strings.Contains(lower, "refund"):
+		return "refund"
+	default:
+		return ""
+	}
 }
 
 func providerReceiverName(expr ast.Expr) string {
@@ -614,18 +672,6 @@ func providerReceiverName(expr ast.Expr) string {
 func isGenericProviderReceiver(receiver string) bool {
 	for _, generic := range []string{"provider", "payment", "payout", "bank", "remit"} {
 		if receiver == generic {
-			return true
-		}
-	}
-	return false
-}
-
-func containsProviderEntity(entities []string, entity string) bool {
-	if entity == "" {
-		return false
-	}
-	for _, durable := range entities {
-		if durable == entity {
 			return true
 		}
 	}

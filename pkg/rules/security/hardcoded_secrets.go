@@ -56,7 +56,7 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 			},
 			{
 				name:           "pgpassword",
-				regex:          regexp.MustCompile(`\bPGPASSWORD=[A-Za-z0-9_./+=-]{20,}`),
+				regex:          regexp.MustCompile(`\bPGPASSWORD=\S{20,}`),
 				message:        "Hardcoded PostgreSQL password detected",
 				highConfidence: true,
 			},
@@ -124,7 +124,7 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 					break
 				}
 				v := r.CreateViolation(ctx.RelPath, lineNum+1, pattern.message)
-				v.WithCode(r.maskSecret(line))
+				v.WithCode(r.maskSecretMatches(line))
 				v.WithSuggestion("Use environment variables or a secrets manager")
 				v.WithContext("pattern", pattern.name)
 				violations = append(violations, v)
@@ -168,22 +168,9 @@ func (r *HardcodedSecretsRule) isPlaceholder(line string) bool {
 	return false
 }
 
-func (r *HardcodedSecretsRule) maskSecret(line string) string {
-	// Mask the actual secret value in the output
-	// Find quoted strings and mask their middle part
-	masked := line
-	for _, quote := range []string{`"`, `'`, "`"} {
-		parts := strings.Split(masked, quote)
-		for i := 1; i < len(parts); i += 2 {
-			if len(parts[i]) > 4 {
-				visible := 2
-				if len(parts[i]) > 8 {
-					visible = 3
-				}
-				parts[i] = parts[i][:visible] + "***" + parts[i][len(parts[i])-visible:]
-			}
-		}
-		masked = strings.Join(parts, quote)
+func (r *HardcodedSecretsRule) maskSecretMatches(line string) string {
+	for _, pattern := range r.patterns {
+		line = pattern.regex.ReplaceAllString(line, "[REDACTED]")
 	}
-	return masked
+	return line
 }

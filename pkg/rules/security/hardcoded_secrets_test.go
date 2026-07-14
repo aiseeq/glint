@@ -233,18 +233,71 @@ func TestHardcodedSecretsAllowsGenericCredentialsInTestConfig(t *testing.T) {
 }
 
 func TestHardcodedSecretsMasksOutput(t *testing.T) {
-	rule := NewHardcodedSecretsRule()
+	tests := []struct {
+		name      string
+		code      string
+		fullMatch string
+		forbidden string
+	}{
+		{
+			name:      "unquoted PGPASSWORD",
+			code:      `PGPASSWORD=1234567890abcdefghijkl psql`,
+			fullMatch: "PGPASSWORD=1234567890abcdefghijkl",
+		},
+		{
+			name:      "unquoted PGPASSWORD with punctuation suffix",
+			code:      `PGPASSWORD=1234567890abcdefghijkl@prod-secret:%more psql`,
+			fullMatch: "PGPASSWORD=1234567890abcdefghijkl@prod-secret:%more",
+			forbidden: "prod-secret",
+		},
+		{
+			name:      "AWS access key",
+			code:      `AWS_ACCESS_KEY_ID=AKIAIOSFODNN7REALKEY`,
+			fullMatch: "AKIAIOSFODNN7REALKEY",
+		},
+		{
+			name:      "JWT",
+			code:      `token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`,
+			fullMatch: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+		},
+		{
+			name:      "PEM private key header",
+			code:      `-----BEGIN RSA PRIVATE KEY-----`,
+			fullMatch: "-----BEGIN RSA PRIVATE KEY-----",
+		},
+	}
 
-	code := `package main
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rule := NewHardcodedSecretsRule()
+			ctx := core.NewFileContext("/src/config.go", "/src", []byte(tt.code), core.DefaultConfig())
 
-var password = "verylongsecretpassword"`
+			violations := rule.AnalyzeFile(ctx)
 
+			if assert.Len(t, violations, 1) {
+				assert.Contains(t, violations[0].Code, "[REDACTED]")
+				assert.NotContains(t, violations[0].Code, tt.fullMatch, "full regexp match must not appear")
+				if tt.forbidden != "" && strings.Contains(violations[0].Code, tt.forbidden) {
+					t.Fatal("secret suffix must not appear in violation code")
+				}
+			}
+		})
+	}
+}
+
+func TestHardcodedSecretsMasksEveryMatchOnReportedLine(t *testing.T) {
+	const password = `password = "very-secret-password"`
+	const awsKey = `AKIAIOSFODNN7REALKEY`
+	const jwt = `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`
+	code := `package config; var credentials = map[string]string{"db": "` + password + `", "aws": "` + awsKey + `", "jwt": "` + jwt + `"}`
 	ctx := core.NewFileContext("/src/config.go", "/src", []byte(code), core.DefaultConfig())
 
-	violations := rule.AnalyzeFile(ctx)
+	violations := NewHardcodedSecretsRule().AnalyzeFile(ctx)
 
-	assert.Len(t, violations, 1)
-	// The code should be masked - not contain the full secret
-	assert.Contains(t, violations[0].Code, "***", "Secret should be masked in output")
-	assert.NotContains(t, violations[0].Code, "verylongsecretpassword", "Full secret should not appear")
+	if assert.Len(t, violations, 1) {
+		assert.NotContains(t, violations[0].Code, password)
+		assert.NotContains(t, violations[0].Code, awsKey)
+		assert.NotContains(t, violations[0].Code, jwt)
+		assert.Equal(t, 3, strings.Count(violations[0].Code, "[REDACTED]"))
+	}
 }
