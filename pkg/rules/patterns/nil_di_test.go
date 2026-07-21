@@ -1,6 +1,8 @@
 package patterns
 
 import (
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 
@@ -15,6 +17,26 @@ func TestNilDIRule_Metadata(t *testing.T) {
 	assert.Equal(t, "nil-di", rule.Name())
 	assert.Equal(t, "patterns", rule.Category())
 	assert.Equal(t, core.SeverityMedium, rule.DefaultSeverity())
+}
+
+func TestNilDIRule_SuppressionWithSharedFileSet(t *testing.T) {
+	rule := NewNilDIRule()
+	fset := token.NewFileSet()
+	_, err := parser.ParseFile(fset, "first.go", "package svc\n\nvar padding = 1\n", parser.ParseComments)
+	require.NoError(t, err)
+
+	code := `package svc
+
+func wire() {
+	_ = NewRemoteService(cfg, nil) // nil-di: safe
+}
+`
+	file, err := parser.ParseFile(fset, "wire.go", code, parser.ParseComments)
+	require.NoError(t, err)
+	ctx := core.NewFileContext("wire.go", ".", []byte(code), nil)
+	ctx.SetGoAST(fset, file)
+
+	assert.Empty(t, rule.AnalyzeFile(ctx))
 }
 
 func TestNilDIRule_Detection(t *testing.T) {

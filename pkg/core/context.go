@@ -267,10 +267,19 @@ func (ctx *FileContext) SetGoAST(fset *token.FileSet, file *ast.File) {
 
 // PositionFor returns the position for a given ast.Node
 func (ctx *FileContext) PositionFor(node ast.Node) token.Position {
-	if ctx.GoFileSet == nil {
+	if node == nil || ctx.GoFileSet == nil {
 		return token.Position{}
 	}
 	return ctx.GoFileSet.Position(node.Pos())
+}
+
+// LineFor returns the one-based source line for an AST node.
+func (ctx *FileContext) LineFor(node ast.Node) int {
+	line := ctx.PositionFor(node).Line
+	if line < 1 {
+		return 1
+	}
+	return line
 }
 
 // Extension returns the file extension
