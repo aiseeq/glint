@@ -66,6 +66,9 @@ func (r *ReturnNilErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 
 			if r.isNilNilReturn(ret) {
 				line := r.getLineFromNode(ctx, ret)
+				if ctx.IsSuppressed(line, r.Name()) {
+					return true
+				}
 				v := r.CreateViolation(ctx.RelPath, line, "Returning (nil, nil) - possible missing error")
 				v.WithCode(ctx.GetLine(line))
 				v.WithSuggestion("Return an error or a valid value, not both nil")
@@ -184,25 +187,5 @@ func (r *ReturnNilErrorRule) isNil(expr ast.Expr) bool {
 }
 
 func (r *ReturnNilErrorRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	if node == nil {
-		return 1
-	}
-
-	pos := node.Pos()
-	if pos == 0 {
-		return 1
-	}
-
-	offset := int(pos) - 1
-	if offset < 0 || offset >= len(ctx.Content) {
-		return 1
-	}
-
-	line := 1
-	for i := 0; i < offset && i < len(ctx.Content); i++ {
-		if ctx.Content[i] == '\n' {
-			line++
-		}
-	}
-	return line
+	return ctx.LineFor(node)
 }

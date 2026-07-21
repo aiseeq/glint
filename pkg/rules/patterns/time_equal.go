@@ -222,25 +222,5 @@ func (r *TimeEqualRule) isTimeCall(call *ast.CallExpr) bool {
 }
 
 func (r *TimeEqualRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	if node == nil {
-		return 1
-	}
-
-	pos := node.Pos()
-	if pos == 0 {
-		return 1
-	}
-
-	offset := int(pos) - 1
-	if offset < 0 || offset >= len(ctx.Content) {
-		return 1
-	}
-
-	line := 1
-	for i := 0; i < offset && i < len(ctx.Content); i++ {
-		if ctx.Content[i] == '\n' {
-			line++
-		}
-	}
-	return line
+	return ctx.LineFor(node)
 }

@@ -1,6 +1,8 @@
 package patterns
 
 import (
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -14,6 +16,26 @@ func TestReturnNilErrorRule_Metadata(t *testing.T) {
 	assert.Equal(t, "return-nil-error", rule.Name())
 	assert.Equal(t, "patterns", rule.Category())
 	assert.Equal(t, core.SeverityMedium, rule.DefaultSeverity())
+}
+
+func TestReturnNilErrorRule_SuppressionWithSharedFileSet(t *testing.T) {
+	rule := NewReturnNilErrorRule()
+	fset := token.NewFileSet()
+	_, err := parser.ParseFile(fset, "first.go", "package svc\n\nvar padding = 1\n", parser.ParseComments)
+	require.NoError(t, err)
+
+	code := `package svc
+
+func Evaluate() (*Report, error) {
+	return nil, nil // return-nil-error: safe - no report is a valid result
+}
+`
+	file, err := parser.ParseFile(fset, "evaluate.go", code, parser.ParseComments)
+	require.NoError(t, err)
+	ctx := core.NewFileContext("evaluate.go", ".", []byte(code), nil)
+	ctx.SetGoAST(fset, file)
+
+	assert.Empty(t, rule.AnalyzeFile(ctx))
 }
 
 func TestReturnNilErrorRule_Detection(t *testing.T) {
