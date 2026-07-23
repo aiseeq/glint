@@ -1,4 +1,4 @@
-.PHONY: build install clean test test-coverage lint fmt check help commit
+.PHONY: build install clean smoke test test-short test-coverage lint fmt check help commit
 
 # Build variables
 BINARY_NAME=glint
@@ -39,6 +39,8 @@ test: ## Run all tests
 
 test-short: ## Run tests without long-running ones
 	go test -short -v ./...
+
+smoke: fmt-check vet test-short ## Fast checks before commit
 
 test-coverage: ## Run tests with coverage report
 	go test -coverprofile=coverage.out ./...
@@ -91,7 +93,7 @@ self-check: build ## Run glint on itself
 
 ## Commit
 
-commit: ## Stage all and commit with MESSAGE (usage: make commit MESSAGE="...")
+commit: smoke ## Stage all and commit with MESSAGE (usage: make commit MESSAGE="...")
 	@if [ -z "$(MESSAGE)" ]; then \
 		echo "Usage: make commit MESSAGE=\"commit message\""; \
 		exit 1; \
