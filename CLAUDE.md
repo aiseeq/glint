@@ -16,7 +16,7 @@
 - Принцип: требовательная терминология без избыточного усиления.
 
 Ключевые запреты и принципы
-- GIT ТОЛЬКО ЧЕРЕЗ make commit: меняющие состояние git-команды — только с явного разрешения; read-only (`git status/diff/log`) — без ограничений. Принцип: "make commit by default, raw git only with permission".
+- GIT: commit только через `make commit`; безопасные branch-команды разрешены по правилам раздела «Версионирование и коммиты», остальные меняющие состояние команды требуют разрешения.
 - ЛОЖНЫЕ СРАБАТЫВАНИЯ ЧИНИТЬ В ПРАВИЛЕ: false positive → TDD-репро (красный тест с реальным кодом) → фикс правила; suppress в целевом проекте — только для документированных легитимных случаев, не вместо фикса правила. Принцип: "Fix the rule, don't silence the finding".
 - Доверие пользователю: сообщил о проблеме — ищем, пока не найдена; не обесцениваем репорты.
 - In-place правки: без «-backup/-v2/-old»; один источник истины; ненужное — удаляем, история в git.
@@ -44,7 +44,8 @@
 
 Версионирование и коммиты
 - `make commit MESSAGE="..."` — stage all + commit; затем `git push`. Разрешён без запроса, так часто, как нужно; после задачи — коммит и push; при массовых правках — промежуточные коммиты.
-- Raw git, меняющий состояние (`add/commit/reset/checkout/restore/stash/rebase/merge/cherry-pick`), — только с явного разрешения; read-only — без ограничений.
+- Без запроса разрешены read-only команды, `git fetch`, `git switch <existing-branch>`, `git switch -c <branch> origin/main`, `git branch --set-upstream-to=...`, `git merge --ff-only`, `git pull --ff-only`.
+- Требуют разрешения: `add`, raw `commit`, `reset`, `restore`, `checkout --`, `clean`, `stash`, `rebase`, `cherry-pick`, обычный merge, удаление веток, force-push, теги и переписывание истории.
 - Перед коммитом смотреть только на секреты и большие бинарники. Осмысленные MESSAGE с Conventional Commits.
 
 Workflow агента
