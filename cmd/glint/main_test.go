@@ -13,31 +13,31 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/typesafety"
 )
 
-func TestGetProjectRootExpandsRecursiveCurrentDirectory(t *testing.T) {
+func TestGetProjectRootsExpandsRecursiveCurrentDirectory(t *testing.T) {
 	want, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("get working directory: %v", err)
 	}
 
-	got, err := getProjectRoot([]string{"./..."})
+	got, err := getProjectRoots([]string{"./..."})
 	if err != nil {
-		t.Fatalf("get project root: %v", err)
+		t.Fatalf("get project roots: %v", err)
 	}
-	if got != want {
-		t.Fatalf("got project root %q, want %q", got, want)
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("got project roots %v, want [%s]", got, want)
 	}
 }
 
-func TestGetProjectRootRejectsMissingPath(t *testing.T) {
+func TestGetProjectRootsRejectsMissingPath(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 
-	_, err := getProjectRoot([]string{missing})
+	_, err := getProjectRoots([]string{missing})
 	if err == nil {
 		t.Fatal("expected missing project root to return an error")
 	}
 }
 
-func TestGetProjectRootReturnsAbsoluteCleanPath(t *testing.T) {
+func TestGetProjectRootsReturnsAbsoluteCleanPath(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "project")
 	if err := os.Mkdir(root, 0755); err != nil {
@@ -45,12 +45,12 @@ func TestGetProjectRootReturnsAbsoluteCleanPath(t *testing.T) {
 	}
 	t.Chdir(parent)
 
-	got, err := getProjectRoot([]string{"project/./"})
+	got, err := getProjectRoots([]string{"project/./"})
 	if err != nil {
-		t.Fatalf("get project root: %v", err)
+		t.Fatalf("get project roots: %v", err)
 	}
-	if got != root {
-		t.Fatalf("got project root %q, want %q", got, root)
+	if len(got) != 1 || got[0] != root {
+		t.Fatalf("got project roots %v, want [%s]", got, root)
 	}
 }
 
@@ -374,5 +374,50 @@ func TestAnalyzeProjectReturnsRuleError(t *testing.T) {
 	_, err = analyzeProject(contexts, []rules.Rule{rule}, core.DefaultConfig(), project)
 	if !errors.Is(err, rule.err) {
 		t.Fatalf("got error %v, want %v", err, rule.err)
+	}
+}
+
+func TestGetProjectRootsKeepsEveryPath(t *testing.T) {
+	parent := t.TempDir()
+	first := filepath.Join(parent, "backend")
+	second := filepath.Join(parent, "tools")
+	for _, dir := range []string{first, second} {
+		if err := os.Mkdir(dir, 0755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+
+	got, err := getProjectRoots([]string{first, second})
+	if err != nil {
+		t.Fatalf("get project roots: %v", err)
+	}
+	if len(got) != 2 || got[0] != first || got[1] != second {
+		t.Fatalf("got project roots %v, want [%s %s]", got, first, second)
+	}
+}
+
+func TestGetProjectRootsDeduplicatesRepeatedPath(t *testing.T) {
+	root := t.TempDir()
+
+	got, err := getProjectRoots([]string{root, root + "/."})
+	if err != nil {
+		t.Fatalf("get project roots: %v", err)
+	}
+	if len(got) != 1 || got[0] != root {
+		t.Fatalf("got project roots %v, want [%s]", got, root)
+	}
+}
+
+func TestDedupeViolationsDropsRepeatedFinding(t *testing.T) {
+	violations := core.ViolationList{
+		{Rule: "error-wrap", File: "a.go", Line: 10},
+		{Rule: "error-wrap", File: "a.go", Line: 10},
+		{Rule: "error-wrap", File: "a.go", Line: 20},
+		{Rule: "magic-number", File: "a.go", Line: 10},
+	}
+
+	got := dedupeViolations(violations)
+	if len(got) != 3 {
+		t.Fatalf("got %d violations, want 3", len(got))
 	}
 }
