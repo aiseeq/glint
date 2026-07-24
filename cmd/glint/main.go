@@ -154,44 +154,56 @@ func init() {
 func runCheck(cmd *cobra.Command, args []string) error {
 	startTime := time.Now()
 
-	projectRoot, err := getProjectRoot(args)
+	projectRoots, err := getProjectRoots(args)
 	if err != nil {
 		return err
 	}
 
-	cfg, enabledRules, err := loadConfig(projectRoot)
-	if err != nil {
-		return err
+	var allViolations core.ViolationList
+	var stats output.Stats
+	outputFormat := ""
+
+	for _, projectRoot := range projectRoots {
+		cfg, enabledRules, err := loadConfig(projectRoot)
+		if err != nil {
+			return err
+		}
+
+		if len(enabledRules) == 0 {
+			fmt.Println("No rules enabled. Check your configuration.")
+			return nil
+		}
+		if outputFormat == "" {
+			outputFormat = cfg.Settings.Output
+		}
+
+		contexts, walker, project, err := prepareAnalysis(projectRoot, cfg, enabledRules)
+		if err != nil {
+			return err
+		}
+
+		violations, err := analyzeProject(contexts, enabledRules, cfg, project)
+		if err != nil {
+			return err
+		}
+		minSeverity, err := cfg.GetMinSeverity()
+		if err != nil {
+			return err
+		}
+		allViolations = append(allViolations, violations.BySeverity(minSeverity)...)
+
+		stats.FilesAnalyzed += len(contexts)
+		stats.FilesSkipped += walker.Stats().SkippedFiles
+		if len(enabledRules) > stats.RulesRun {
+			stats.RulesRun = len(enabledRules)
+		}
 	}
 
-	if len(enabledRules) == 0 {
-		fmt.Println("No rules enabled. Check your configuration.")
-		return nil
-	}
+	// Пересекающиеся пути (./backend и ./backend/auth) дают одну и ту же находку дважды.
+	allViolations = dedupeViolations(allViolations)
+	stats.Duration = time.Since(startTime).Seconds()
 
-	contexts, walker, project, err := prepareAnalysis(projectRoot, cfg, enabledRules)
-	if err != nil {
-		return err
-	}
-
-	allViolations, err := analyzeProject(contexts, enabledRules, cfg, project)
-	if err != nil {
-		return err
-	}
-	minSeverity, err := cfg.GetMinSeverity()
-	if err != nil {
-		return err
-	}
-	allViolations = allViolations.BySeverity(minSeverity)
-
-	stats := output.Stats{
-		FilesAnalyzed: len(contexts),
-		FilesSkipped:  walker.Stats().SkippedFiles,
-		RulesRun:      len(enabledRules),
-		Duration:      time.Since(startTime).Seconds(),
-	}
-
-	if err := outputResults(cfg.Settings.Output, allViolations, stats); err != nil {
+	if err := outputResults(outputFormat, allViolations, stats); err != nil {
 		return fmt.Errorf("output error: %w", err)
 	}
 
@@ -202,13 +214,49 @@ func runCheck(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func getProjectRoot(args []string) (string, error) {
+func dedupeViolations(violations core.ViolationList) core.ViolationList {
+	type key struct {
+		file string
+		line int
+		rule string
+	}
+	seen := make(map[key]struct{}, len(violations))
+	unique := make(core.ViolationList, 0, len(violations))
+	for _, violation := range violations {
+		k := key{file: violation.File, line: violation.Line, rule: violation.Rule}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		unique = append(unique, violation)
+	}
+	return unique
+}
+
+func getProjectRoots(args []string) ([]string, error) {
 	paths := args
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
 
-	projectRoot := paths[0]
+	roots := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		root, err := resolveProjectRoot(path)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[root]; ok {
+			continue
+		}
+		seen[root] = struct{}{}
+		roots = append(roots, root)
+	}
+	return roots, nil
+}
+
+func resolveProjectRoot(path string) (string, error) {
+	projectRoot := path
 	if projectRoot == "." || projectRoot == "./..." {
 		var err error
 		projectRoot, err = os.Getwd()
@@ -597,11 +645,20 @@ func runConfigValidate(cmd *cobra.Command, args []string) error {
 }
 
 func runFix(cmd *cobra.Command, args []string) error {
-	projectRoot, err := getProjectRoot(args)
+	projectRoots, err := getProjectRoots(args)
 	if err != nil {
 		return err
 	}
 
+	for _, projectRoot := range projectRoots {
+		if err := fixProjectRoot(projectRoot); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func fixProjectRoot(projectRoot string) error {
 	// Check for uncommitted changes
 	engine := fix.NewEngine(fix.DefaultRegistry, flagDryRun, flagVerbose)
 	hasChanges, err := engine.CheckGitStatus(projectRoot)
