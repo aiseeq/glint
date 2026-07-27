@@ -1,6 +1,8 @@
 package typesafety
 
 import (
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -167,4 +169,39 @@ func splitLines(s string) []string {
 		lines = append(lines, s[start:])
 	}
 	return lines
+}
+
+// token.Pos is an offset into the shared file set; counting newlines in the
+// file's own content reported the wrong line as soon as a set held more than
+// one file.
+func TestTypeAssertionReportsRealLineWithSharedFileSet(t *testing.T) {
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "filler.go", "package filler\n\n// padding\n", parser.ParseComments); err != nil {
+		t.Fatalf("parse filler: %v", err)
+	}
+
+	code := `package svc
+
+import "fmt"
+
+func Describe(v any) string {
+	fmt.Println("before")
+	name := v.(string)
+	return name
+}
+`
+	astFile, err := parser.ParseFile(fset, "svc.go", code, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ctx := core.NewFileContext("svc.go", ".", []byte(code), nil)
+	ctx.SetGoAST(fset, astFile)
+
+	violations := NewTypeAssertionRule().AnalyzeFile(ctx)
+	if len(violations) != 1 {
+		t.Fatalf("got %d violations, want 1", len(violations))
+	}
+	if violations[0].Line != 7 {
+		t.Fatalf("got line %d, want 7 — the position was resolved against the wrong file", violations[0].Line)
+	}
 }

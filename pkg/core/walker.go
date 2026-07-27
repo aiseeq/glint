@@ -16,14 +16,15 @@ type Walker struct {
 	parser      *Parser
 	parseGo     bool
 
-	// Worker pool
+	// Worker pool. The channels belong to one walk: Walk creates them, so the
+	// same walker can be reused.
 	workers    int
 	fileQueue  chan string
 	resultChan chan *FileContext
 	errorChan  chan error
 	wg         sync.WaitGroup
 
-	// Statistics
+	// Statistics of the most recent walk
 	stats WalkerStats
 	mu    sync.Mutex
 }
@@ -49,9 +50,6 @@ func NewWalker(projectRoot string, config *Config) *Walker {
 		parser:      NewParser(),
 		parseGo:     true,
 		workers:     workers,
-		fileQueue:   make(chan string, 100),
-		resultChan:  make(chan *FileContext, 100),
-		errorChan:   make(chan error, 100),
 	}
 }
 
@@ -69,31 +67,45 @@ func (w *Walker) WithWorkers(n int) *Walker {
 	return w
 }
 
-// Walk traverses all files and returns FileContexts through a channel
+// Walk traverses all files and returns FileContexts through a channel. Each
+// call owns its channels and resets the statistics, so a walker can be reused.
 func (w *Walker) Walk() (<-chan *FileContext, <-chan error) {
-	// Start workers
+	const channelBuffer = 100
+	fileQueue := make(chan string, channelBuffer)
+	results := make(chan *FileContext, channelBuffer)
+	walkErrors := make(chan error, channelBuffer)
+
+	w.mu.Lock()
+	w.stats = WalkerStats{}
+	w.mu.Unlock()
+
+	var wg sync.WaitGroup
 	for i := 0; i < w.workers; i++ {
-		w.wg.Add(1)
-		go w.worker()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w.work(fileQueue, results, walkErrors)
+		}()
 	}
 
 	// Start file discovery
 	go func() {
-		err := filepath.Walk(w.projectRoot, w.visitFile)
-		if err != nil {
-			w.errorChan <- err
+		if err := filepath.Walk(w.projectRoot, func(path string, info os.FileInfo, err error) error {
+			return w.visitPath(fileQueue, path, info, err)
+		}); err != nil {
+			walkErrors <- err
 		}
-		close(w.fileQueue)
+		close(fileQueue)
 	}()
 
 	// Wait for workers to finish and close channels
 	go func() {
-		w.wg.Wait()
-		close(w.resultChan)
-		close(w.errorChan)
+		wg.Wait()
+		close(results)
+		close(walkErrors)
 	}()
 
-	return w.resultChan, w.errorChan
+	return results, walkErrors
 }
 
 // WalkSync walks files synchronously and returns all contexts
@@ -121,16 +133,16 @@ func (w *Walker) WalkSync() ([]*FileContext, []error) {
 	return contexts, errors
 }
 
-// visitFile is called for each file during walk
-func (w *Walker) visitFile(path string, info os.FileInfo, err error) error {
+// visitPath is called for each entry during walk and queues the analyzable
+// files onto this walk's channel.
+func (w *Walker) visitPath(fileQueue chan<- string, path string, info os.FileInfo, err error) error {
 	if err != nil {
 		return fmt.Errorf("visit %q: %w", path, err)
 	}
 
 	// Skip directories we don't need to traverse
 	if info.IsDir() {
-		name := info.Name()
-		if w.shouldSkipDir(name) {
+		if w.shouldSkipDir(info.Name()) {
 			return filepath.SkipDir
 		}
 		return nil
@@ -158,29 +170,27 @@ func (w *Walker) visitFile(path string, info os.FileInfo, err error) error {
 	w.stats.TotalFiles++
 	w.mu.Unlock()
 
-	w.fileQueue <- path
+	fileQueue <- path
 
 	return nil
 }
 
-// worker processes files from the queue
-func (w *Walker) worker() {
-	defer w.wg.Done()
-
-	for path := range w.fileQueue {
+// work processes files from this walk's queue.
+func (w *Walker) work(fileQueue <-chan string, results chan<- *FileContext, walkErrors chan<- error) {
+	for path := range fileQueue {
 		ctx, err := w.processFile(path)
 		if err != nil {
 			w.mu.Lock()
 			w.stats.ErrorFiles++
 			w.mu.Unlock()
-			w.errorChan <- err
+			walkErrors <- err
 		}
 
 		if ctx != nil {
 			w.mu.Lock()
 			w.stats.ParsedFiles++
 			w.mu.Unlock()
-			w.resultChan <- ctx
+			results <- ctx
 		}
 	}
 }
@@ -211,24 +221,11 @@ func (w *Walker) processFile(path string) (*FileContext, error) {
 	return ctx, nil
 }
 
-// shouldSkipDir returns true if directory should be skipped entirely
+// shouldSkipDir reports whether a directory is not descended into at all. The
+// list comes from settings.skip_dirs, which defaults to DefaultSkipDirs — a
+// project whose own package is called build/ or out/ can override it.
 func (w *Walker) shouldSkipDir(name string) bool {
-	skipDirs := []string{
-		".git",
-		".svn",
-		".hg",
-		"node_modules",
-		"vendor",
-		".next",
-		"out",
-		"dist",
-		"build",
-		"bin",
-		".idea",
-		".vscode",
-	}
-
-	for _, skip := range skipDirs {
+	for _, skip := range w.config.SkipDirs() {
 		if name == skip {
 			return true
 		}

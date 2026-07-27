@@ -146,19 +146,9 @@ func dataAccessCall(call *ast.CallExpr) (string, string, bool) {
 	return recvName, method, true
 }
 
+// lineFromNode resolves a node's source line through the file set. Counting
+// newlines in ctx.Content instead was wrong as soon as several files shared a
+// file set: positions are offsets into the set, not into one file.
 func lineFromNode(ctx *core.FileContext, node ast.Node) int {
-	if node == nil {
-		return 1
-	}
-	offset := int(node.Pos()) - 1
-	if offset < 0 || offset >= len(ctx.Content) {
-		return 1
-	}
-	line := 1
-	for i := 0; i < offset; i++ {
-		if ctx.Content[i] == '\n' {
-			line++
-		}
-	}
-	return line
+	return ctx.LineFor(node)
 }

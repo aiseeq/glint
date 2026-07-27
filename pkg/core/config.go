@@ -21,8 +21,26 @@ type Config struct {
 // SettingsConfig contains global settings
 type SettingsConfig struct {
 	Exclude     []string `yaml:"exclude"`
+	SkipDirs    []string `yaml:"skip_dirs,omitempty"`
 	MinSeverity string   `yaml:"min_severity"`
 	Output      string   `yaml:"output"`
+}
+
+// DefaultSkipDirs are the directory names the walker never descends into
+// unless settings.skip_dirs says otherwise.
+var DefaultSkipDirs = []string{
+	".git", ".svn", ".hg",
+	".idea", ".vscode",
+	"node_modules", "vendor",
+	".next", "out", "dist", "build", "bin",
+}
+
+// SkipDirs returns the configured directory names to skip, or the defaults.
+func (c *Config) SkipDirs() []string {
+	if len(c.Settings.SkipDirs) > 0 {
+		return c.Settings.SkipDirs
+	}
+	return DefaultSkipDirs
 }
 
 // CategoryConfig contains category-specific settings
@@ -290,6 +308,9 @@ func MergeConfigs(base, override *Config) *Config {
 	// Merge settings
 	if len(override.Settings.Exclude) > 0 {
 		result.Settings.Exclude = override.Settings.Exclude
+	}
+	if len(override.Settings.SkipDirs) > 0 {
+		result.Settings.SkipDirs = override.Settings.SkipDirs
 	}
 	if override.Settings.MinSeverity != "" {
 		result.Settings.MinSeverity = override.Settings.MinSeverity

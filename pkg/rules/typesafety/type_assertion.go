@@ -102,25 +102,11 @@ func (r *TypeAssertionRule) createViolation(ctx *core.FileContext, fset *token.F
 	return v
 }
 
+// getLineFromPos resolves a position through the file set. Counting newlines
+// in ctx.Content instead was wrong as soon as several files shared a file set:
+// token.Pos is an offset into the set, not into one file.
 func (r *TypeAssertionRule) getLineFromPos(ctx *core.FileContext, pos token.Pos) int {
-	// token.Pos is 1-based offset within file
-	// We need to find the line number by counting newlines
-	if pos == token.NoPos {
-		return 1
-	}
-
-	offset := int(pos) - 1
-	if offset < 0 || offset >= len(ctx.Content) {
-		return 1
-	}
-
-	line := 1
-	for i := 0; i < offset && i < len(ctx.Content); i++ {
-		if ctx.Content[i] == '\n' {
-			line++
-		}
-	}
-	return line
+	return ctx.LineForPos(pos)
 }
 
 func formatType(expr ast.Expr) string {

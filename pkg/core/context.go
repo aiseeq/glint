@@ -277,7 +277,21 @@ func (ctx *FileContext) PositionFor(node ast.Node) token.Position {
 
 // LineFor returns the one-based source line for an AST node.
 func (ctx *FileContext) LineFor(node ast.Node) int {
-	line := ctx.PositionFor(node).Line
+	if node == nil {
+		return 1
+	}
+	return ctx.LineForPos(node.Pos())
+}
+
+// LineForPos returns the one-based source line for a position. Rules must use
+// it rather than counting newlines in Content: token.Pos is an offset into the
+// shared file set, not into a single file, so hand-rolled arithmetic silently
+// reports the wrong line once several files share a set.
+func (ctx *FileContext) LineForPos(pos token.Pos) int {
+	if ctx.GoFileSet == nil || pos == token.NoPos {
+		return 1
+	}
+	line := ctx.GoFileSet.Position(pos).Line
 	if line < 1 {
 		return 1
 	}

@@ -94,6 +94,7 @@ Reference:
 |-----|---------|
 | `extends` | Path to a base config merged under this one (relative to this file). |
 | `settings.exclude` | Glob patterns; `*` stays inside one path segment, `**` spans segments. A pattern without a separator also matches the base name. |
+| `settings.skip_dirs` | Directory names never descended into. Defaults to `.git .svn .hg .idea .vscode node_modules vendor .next out dist build bin` — set it if one of those is a real package of yours. |
 | `settings.min_severity` | `low` / `medium` / `high` / `critical`. |
 | `settings.output` | `console` / `json` / `summary`. |
 | `categories.<name>.enabled` | Defaults to `true` — naming a category to configure its rules does not switch it off. |

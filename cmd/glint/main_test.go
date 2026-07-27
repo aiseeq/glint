@@ -410,14 +410,27 @@ func TestGetProjectRootsDeduplicatesRepeatedPath(t *testing.T) {
 
 func TestDedupeViolationsDropsRepeatedFinding(t *testing.T) {
 	violations := core.ViolationList{
-		{Rule: "error-wrap", File: "a.go", Line: 10},
-		{Rule: "error-wrap", File: "a.go", Line: 10},
-		{Rule: "error-wrap", File: "a.go", Line: 20},
-		{Rule: "magic-number", File: "a.go", Line: 10},
+		{Rule: "error-wrap", File: "a.go", Line: 10, Message: "wrap it"},
+		{Rule: "error-wrap", File: "a.go", Line: 10, Message: "wrap it"},
+		{Rule: "error-wrap", File: "a.go", Line: 20, Message: "wrap it"},
+		{Rule: "magic-number", File: "a.go", Line: 10, Message: "42"},
 	}
 
 	got := dedupeViolations(violations)
 	if len(got) != 3 {
 		t.Fatalf("got %d violations, want 3", len(got))
+	}
+}
+
+// One rule can report several distinct problems on the same line — for
+// example two magic numbers in one expression. Those are not duplicates.
+func TestDedupeViolationsKeepsDistinctFindingsOnOneLine(t *testing.T) {
+	violations := core.ViolationList{
+		{Rule: "magic-number", File: "a.go", Line: 10, Column: 12, Message: "Magic number 86400"},
+		{Rule: "magic-number", File: "a.go", Line: 10, Column: 30, Message: "Magic number 3600"},
+	}
+
+	if got := dedupeViolations(violations); len(got) != 2 {
+		t.Fatalf("got %d violations, want both distinct findings kept", len(got))
 	}
 }

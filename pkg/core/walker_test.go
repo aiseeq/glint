@@ -14,7 +14,7 @@ func TestWalkerVisitFilePropagatesFilesystemError(t *testing.T) {
 	walker := NewWalker(t.TempDir(), DefaultConfig())
 	walkErr := errors.New("permission denied")
 
-	err := walker.visitFile("blocked", nil, walkErr)
+	err := walker.visitPath(make(chan string, 1), "blocked", nil, walkErr)
 	require.ErrorIs(t, err, walkErr)
 }
 
