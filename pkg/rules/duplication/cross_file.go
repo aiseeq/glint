@@ -1,8 +1,7 @@
 package duplication
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -27,11 +26,12 @@ type CrossFileDuplicateRule struct {
 	*rules.BaseRule
 	minBlockSize int
 
-	// Shared state for cross-file detection
-	mu          sync.Mutex
-	blockHashes map[string][]BlockLocation // hash -> locations
-	reported    map[string]bool            // hash -> already reported
-	initialized bool
+	// Shared state for cross-file detection. Only the first location of each
+	// block is kept: it is the one every later file is reported against, and
+	// keeping every occurrence made memory grow with the whole project.
+	mu        sync.Mutex
+	firstSeen map[windowHash]BlockLocation
+	reported  map[windowHash]bool
 }
 
 // NewCrossFileDuplicateRule creates the rule
@@ -44,8 +44,8 @@ func NewCrossFileDuplicateRule() *CrossFileDuplicateRule {
 			core.SeverityHigh,
 		),
 		minBlockSize: 10, // Higher threshold for cross-file (more significant)
-		blockHashes:  make(map[string][]BlockLocation),
-		reported:     make(map[string]bool),
+		firstSeen:    make(map[windowHash]BlockLocation),
+		reported:     make(map[windowHash]bool),
 	}
 }
 
@@ -58,13 +58,13 @@ func (r *CrossFileDuplicateRule) Configure(settings map[string]any) error {
 	return nil
 }
 
-// Reset clears the shared state (call before new analysis run)
-func (r *CrossFileDuplicateRule) Reset() {
+// ResetState clears the blocks collected so far. The check flow calls it before
+// each project root so that findings never depend on a previous run.
+func (r *CrossFileDuplicateRule) ResetState() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.blockHashes = make(map[string][]BlockLocation)
-	r.reported = make(map[string]bool)
-	r.initialized = false
+	r.firstSeen = make(map[windowHash]BlockLocation)
+	r.reported = make(map[windowHash]bool)
 }
 
 // AnalyzeFile collects blocks and detects cross-file duplicates
@@ -80,7 +80,7 @@ func (r *CrossFileDuplicateRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	// Normalize lines
 	normalized := make([]string, len(ctx.Lines))
 	for i, line := range ctx.Lines {
-		normalized[i] = r.normalizeLine(line)
+		normalized[i] = normalizeLine(line)
 	}
 
 	// Collect blocks from this file and check for duplicates
@@ -88,176 +88,116 @@ func (r *CrossFileDuplicateRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 }
 
 func (r *CrossFileDuplicateRule) processFile(ctx *core.FileContext, normalized []string) []*core.Violation {
-	var violations []*core.Violation
-	localBlocks := make(map[string]BlockLocation)
+	blocks := r.collectBlocks(ctx, normalized)
 
-	// Collect all blocks from this file
-	for i := 0; i <= len(normalized)-r.minBlockSize; i++ {
-		if r.isTrivialLine(normalized[i]) {
-			continue
-		}
-
-		window := normalized[i : i+r.minBlockSize]
-		if r.isWindowTrivial(window) {
-			continue
-		}
-
-		hash := r.hashWindow(window)
-
-		// Store block location for this file
-		if _, exists := localBlocks[hash]; !exists {
-			localBlocks[hash] = BlockLocation{
-				File:      ctx.RelPath,
-				StartLine: i + 1,
-				EndLine:   i + r.minBlockSize,
-				Content:   window,
-			}
-		}
-	}
-
-	// Now check against global registry and update it
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for hash, block := range localBlocks {
-		existingLocs := r.blockHashes[hash]
-
-		// Check if this block exists in OTHER files
-		for _, existing := range existingLocs {
-			if existing.File != ctx.RelPath && !r.reported[hash] {
-				// Found duplicate in different file!
-				// Verify content matches (hash collision protection)
-				if r.windowsMatch(block.Content, existing.Content) {
-					r.reported[hash] = true
-
-					v := r.CreateViolation(ctx.RelPath, block.StartLine,
-						"Cross-file duplicate: same as "+existing.File+":"+r.itoa(existing.StartLine)+"-"+r.itoa(existing.EndLine))
-					v.WithCode(ctx.GetLine(block.StartLine))
-					v.WithSuggestion("Extract to shared package or utility function")
-					v.WithContext("original_file", existing.File)
-					v.WithContext("original_start", existing.StartLine)
-					v.WithContext("original_end", existing.EndLine)
-					v.WithContext("block_size", r.minBlockSize)
-
-					violations = append(violations, v)
-				}
-			}
+	var violations []*core.Violation
+	for _, block := range blocks {
+		existing, seen := r.firstSeen[block.hash]
+		if !seen {
+			r.firstSeen[block.hash] = block.location
+			continue
 		}
+		// A file is analyzed once, so a previously stored block of the same
+		// hash always comes from another file.
+		if r.reported[block.hash] || !windowsMatch(block.location.Content, existing.Content) {
+			continue
+		}
+		r.reported[block.hash] = true
 
-		// Add this block to global registry
-		r.blockHashes[hash] = append(existingLocs, block)
+		v := r.CreateViolation(ctx.RelPath, block.location.StartLine,
+			"Cross-file duplicate: same as "+existing.File+":"+
+				strconv.Itoa(existing.StartLine)+"-"+strconv.Itoa(existing.EndLine))
+		v.WithCode(ctx.GetLine(block.location.StartLine))
+		v.WithSuggestion("Extract to shared package or utility function")
+		v.WithContext("original_file", existing.File)
+		v.WithContext("original_start", existing.StartLine)
+		v.WithContext("original_end", existing.EndLine)
+		v.WithContext("block_size", r.minBlockSize)
+
+		violations = append(violations, v)
 	}
 
 	return violations
 }
 
-func (r *CrossFileDuplicateRule) windowsMatch(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+// hashedBlock is one candidate window of the file being analyzed.
+type hashedBlock struct {
+	hash     windowHash
+	location BlockLocation
+}
+
+// collectBlocks returns the file's candidate windows in ascending line order,
+// keeping the first occurrence of each distinct window. Ordering by line — not
+// by map iteration — is what makes the reported findings reproducible.
+func (r *CrossFileDuplicateRule) collectBlocks(ctx *core.FileContext, normalized []string) []hashedBlock {
+	lineHashes := hashLines(normalized)
+	seen := make(map[windowHash]bool)
+	var blocks []hashedBlock
+
+	for i := 0; i <= len(normalized)-r.minBlockSize; i++ {
+		if isCrossFileTrivialLine(normalized[i]) {
+			continue
 		}
-	}
-	return true
-}
 
-func (r *CrossFileDuplicateRule) hashWindow(window []string) string {
-	h := sha256.New()
-	for _, line := range window {
-		h.Write([]byte(line))
-		h.Write([]byte{'\n'})
-	}
-	return hex.EncodeToString(h.Sum(nil))[:16]
-}
-
-func (r *CrossFileDuplicateRule) isWindowTrivial(window []string) bool {
-	nonTrivialCount := 0
-	totalLength := 0
-
-	for _, line := range window {
-		totalLength += len(line)
-		if !r.isTrivialLine(line) {
-			nonTrivialCount++
+		window := normalized[i : i+r.minBlockSize]
+		minNonTrivial := max(len(window)/2, 4)
+		if isWindowTrivial(window, minNonTrivial, isCrossFileTrivialLine) {
+			continue
 		}
+
+		hash := hashWindow(lineHashes, i, r.minBlockSize)
+		if seen[hash] {
+			continue
+		}
+		seen[hash] = true
+		blocks = append(blocks, hashedBlock{
+			hash: hash,
+			location: BlockLocation{
+				File:      ctx.RelPath,
+				StartLine: i + 1,
+				EndLine:   i + r.minBlockSize,
+				Content:   window,
+			},
+		})
 	}
 
-	// Need at least half of lines to be non-trivial and decent total length
-	minNonTrivial := len(window) / 2
-	if minNonTrivial < 4 {
-		minNonTrivial = 4
-	}
-	return nonTrivialCount < minNonTrivial || totalLength < 150
+	return blocks
 }
 
-func (r *CrossFileDuplicateRule) normalizeLine(line string) string {
-	normalized := strings.TrimSpace(line)
-	for strings.Contains(normalized, "  ") {
-		normalized = strings.ReplaceAll(normalized, "  ", " ")
-	}
-	return normalized
-}
-
-func (r *CrossFileDuplicateRule) isTrivialLine(line string) bool {
-	if line == "" {
+// isCrossFileTrivialLine extends the shared triviality check with lines that
+// legitimately repeat across files: imports, type switches, and the standard
+// HTTP handler boilerplate.
+func isCrossFileTrivialLine(line string) bool {
+	if isTrivialLine(line) {
 		return true
 	}
 
-	// Skip import statements - imports are expected to be similar across files
+	// Imports are expected to be similar across files.
 	if strings.HasPrefix(line, `"`) || strings.HasPrefix(line, "import") {
 		return true
 	}
 
-	// Skip type switch patterns - commonly duplicated for import cycle prevention
-	// These are often intentionally duplicated when extracting would cause import cycles
+	// Type switches are often duplicated on purpose to avoid import cycles.
 	if strings.HasPrefix(line, "switch ") && strings.Contains(line, ".(type)") {
 		return true
 	}
 	if strings.HasPrefix(line, "case ") && strings.Contains(line, ":") {
 		return true
 	}
-	if strings.HasPrefix(line, "return ") && strings.Contains(line, ", true") {
-		return true
-	}
-	if strings.HasPrefix(line, "return ") && strings.Contains(line, ", false") {
-		return true
-	}
-
-	trivial := []string{
-		"{", "}", "(", ")", "[", "]",
-		"else {", "} else {", "} else if",
-		"default:", "break", "continue",
-		"return", "return nil", "return false", "return true",
-		"return err", "return result", "return v",
-		"if err != nil {", "if !ok {", "if ok {",
-		"defer func() {", "}()",
-		`return "", false`, `return "", true`,
-	}
-
-	for _, t := range trivial {
-		if line == t {
-			return true
-		}
-	}
-
-	if strings.HasSuffix(line, ",") && len(line) < 50 {
+	if strings.HasPrefix(line, "return ") &&
+		(strings.Contains(line, ", true") || strings.Contains(line, ", false")) {
 		return true
 	}
 
-	if strings.Contains(line, "`json:") || strings.Contains(line, "`xml:") {
+	switch line {
+	case `return "", false`, `return "", true`:
 		return true
 	}
 
-	if len(line) < 15 {
-		return true
-	}
-
-	if strings.HasPrefix(line, "//") || strings.HasPrefix(line, "/*") {
-		return true
-	}
-
-	// Common HTTP patterns - expected to repeat across handlers
+	// Common HTTP patterns - expected to repeat across handlers.
 	if strings.Contains(line, `Header().Set("Content-Type"`) ||
 		strings.Contains(line, "json.NewEncoder") ||
 		strings.Contains(line, "json.Unmarshal") ||
@@ -265,22 +205,6 @@ func (r *CrossFileDuplicateRule) isTrivialLine(line string) bool {
 		return true
 	}
 
-	// Common interface/type declarations
-	if strings.HasPrefix(line, "type ") && strings.HasSuffix(line, " interface {") {
-		return true
-	}
-
-	return false
-}
-
-func (r *CrossFileDuplicateRule) itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var digits []byte
-	for n > 0 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-		n /= 10
-	}
-	return string(digits)
+	// Common interface/type declarations.
+	return strings.HasPrefix(line, "type ") && strings.HasSuffix(line, " interface {")
 }

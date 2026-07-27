@@ -39,7 +39,7 @@ func TestCrossFileDuplicateRule(t *testing.T) {
 	}
 
 	// Reset rule state
-	rule.Reset()
+	rule.ResetState()
 
 	// Process file 1 - should find no violations yet
 	violations1 := rule.AnalyzeFile(ctx1)
@@ -97,7 +97,7 @@ func TestCrossFileDuplicateRule_NoDuplicate(t *testing.T) {
 		},
 	}
 
-	rule.Reset()
+	rule.ResetState()
 
 	violations1 := rule.AnalyzeFile(ctx1)
 	violations2 := rule.AnalyzeFile(ctx2)
@@ -109,7 +109,7 @@ func TestCrossFileDuplicateRule_NoDuplicate(t *testing.T) {
 
 func TestCrossFileDuplicateRule_SkipsTests(t *testing.T) {
 	rule := NewCrossFileDuplicateRule()
-	rule.Reset()
+	rule.ResetState()
 
 	ctx := &core.FileContext{
 		Path:    "/test/file_test.go",
@@ -128,20 +128,19 @@ func TestCrossFileDuplicateRule_SkipsTests(t *testing.T) {
 	}
 }
 
-func TestCrossFileDuplicateRule_Reset(t *testing.T) {
+func TestCrossFileDuplicateRule_ResetState(t *testing.T) {
 	rule := NewCrossFileDuplicateRule()
 
 	// Add some state
-	rule.blockHashes["test"] = []BlockLocation{{File: "test.go"}}
-	rule.reported["test"] = true
+	rule.firstSeen[1] = BlockLocation{File: "test.go"}
+	rule.reported[1] = true
 
-	// Reset should clear
-	rule.Reset()
+	rule.ResetState()
 
-	if len(rule.blockHashes) != 0 {
-		t.Error("Expected blockHashes to be empty after Reset")
+	if len(rule.firstSeen) != 0 {
+		t.Error("Expected firstSeen to be empty after ResetState")
 	}
 	if len(rule.reported) != 0 {
-		t.Error("Expected reported to be empty after Reset")
+		t.Error("Expected reported to be empty after ResetState")
 	}
 }

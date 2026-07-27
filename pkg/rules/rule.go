@@ -163,6 +163,23 @@ type Fixer interface {
 	Fix(ctx *core.FileContext, violation *core.Violation) (*Fix, error)
 }
 
+// StatefulRule is an optional interface for rules that accumulate state across
+// files (cross-file analysis). The check flow resets them before analyzing a
+// project root, so that findings never depend on a previously analyzed root.
+type StatefulRule interface {
+	Rule
+	ResetState()
+}
+
+// ResetState clears the accumulated state of every stateful rule in the list.
+func ResetState(list []Rule) {
+	for _, rule := range list {
+		if stateful, ok := rule.(StatefulRule); ok {
+			stateful.ResetState()
+		}
+	}
+}
+
 // SuppressionExempt is an optional interface for rules whose findings must
 // not be silenced by inline comments (nolint:<rule> / <rule>: safe). Policy
 // rules that forbid a pattern unconditionally implement it and return true.

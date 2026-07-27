@@ -50,6 +50,14 @@ func NewMigrationDuplicateVersionRule() *MigrationDuplicateVersionRule {
 	}
 }
 
+// ResetState clears the migrations seen so far, so that a project root never
+// inherits versions registered while analyzing a previous root.
+func (r *MigrationDuplicateVersionRule) ResetState() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = make(map[string]map[string]string)
+}
+
 // AnalyzeFile registers migration files and reports duplicate versions
 func (r *MigrationDuplicateVersionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !strings.HasSuffix(ctx.Path, ".sql") {
