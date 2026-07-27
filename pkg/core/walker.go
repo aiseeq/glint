@@ -16,13 +16,9 @@ type Walker struct {
 	parser      *Parser
 	parseGo     bool
 
-	// Worker pool. The channels belong to one walk: Walk creates them, so the
-	// same walker can be reused.
-	workers    int
-	fileQueue  chan string
-	resultChan chan *FileContext
-	errorChan  chan error
-	wg         sync.WaitGroup
+	// Worker pool size. The channels belong to one walk: Walk creates them,
+	// so the same walker can be reused.
+	workers int
 
 	// Statistics of the most recent walk
 	stats WalkerStats

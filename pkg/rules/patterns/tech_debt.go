@@ -1,7 +1,9 @@
 package patterns
 
 import (
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -111,7 +113,8 @@ func (r *TechDebtRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			continue
 		}
 
-		for patternName, pattern := range r.patterns {
+		for _, patternName := range slices.Sorted(maps.Keys(r.patterns)) {
+			pattern := r.patterns[patternName]
 			if pattern.regex.MatchString(line) {
 				v := r.CreateViolation(ctx.RelPath, lineNum+1, pattern.description)
 				v.Severity = pattern.severity

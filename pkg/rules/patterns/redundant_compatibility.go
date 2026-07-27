@@ -3,7 +3,9 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -263,7 +265,8 @@ func (r *RedundantCompatibilityRule) detectDuplicateKeyDefinitions(ctx *core.Fil
 	})
 
 	// Report duplicates
-	for baseName, defs := range keyDefs {
+	for _, baseName := range slices.Sorted(maps.Keys(keyDefs)) {
+		defs := keyDefs[baseName]
 		if len(defs) >= 2 {
 			names := make([]string, len(defs))
 			for i, d := range defs {

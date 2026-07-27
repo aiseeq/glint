@@ -5,8 +5,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -98,7 +100,8 @@ func (r *UnusedSymbolsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 
 	// Generate violations for unused symbols
 	var violations []*core.Violation
-	for name, sym := range symbols {
+	for _, name := range slices.Sorted(maps.Keys(symbols)) {
+		sym := symbols[name]
 		if sym.usages == 0 {
 			v := r.CreateViolation(ctx.RelPath, sym.line,
 				"Unexported "+sym.kind+" '"+name+"' appears to be unused")

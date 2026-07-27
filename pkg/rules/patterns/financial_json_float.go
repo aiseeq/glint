@@ -2,7 +2,9 @@ package patterns
 
 import (
 	"go/ast"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -44,7 +46,8 @@ func (r *FinancialJSONFloatRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 		return true
 	})
 	reported := make(map[tokenPos]bool)
-	for typeName, expr := range types {
+	for _, typeName := range slices.Sorted(maps.Keys(types)) {
+		expr := types[typeName]
 		if structType := resolveStructType(expr, types); structType != nil {
 			allowDefaultJSON := explicitJSONContractName(typeName) || structHasJSONTag(structType)
 			violations = append(violations, r.inspectJSONStruct(ctx, structType, false, financialContextName(typeName), allowDefaultJSON, types, map[string]bool{typeName: true}, reported)...)
