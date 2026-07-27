@@ -3,6 +3,7 @@ package architecture
 import (
 	"go/ast"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -247,7 +248,7 @@ func (r *SolidSRPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		}
 
 		if len(businessAreas) > r.maxResponsibilities {
-			msg := structName + " has " + itoa(len(businessAreas)) + " business responsibility areas (max " + itoa(r.maxResponsibilities) + ")"
+			msg := structName + " has " + strconv.Itoa(len(businessAreas)) + " business responsibility areas (max " + strconv.Itoa(r.maxResponsibilities) + ")"
 			if len(infraAreas) > 0 || len(typeAreas) > 0 {
 				var excluded []string
 				if len(infraAreas) > 0 {

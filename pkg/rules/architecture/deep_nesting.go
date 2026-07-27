@@ -2,6 +2,7 @@ package architecture
 
 import (
 	"go/ast"
+	"strconv"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -120,5 +121,5 @@ func (r *DeepNestingRule) checkBlockStatements(ctx *core.FileContext, stmts []as
 }
 
 func (r *DeepNestingRule) getMessage(depth int, funcName string) string {
-	return "Nesting depth " + itoa(depth) + " exceeds maximum of " + itoa(r.maxDepth) + " in function " + funcName
+	return "Nesting depth " + strconv.Itoa(depth) + " exceeds maximum of " + strconv.Itoa(r.maxDepth) + " in function " + funcName
 }

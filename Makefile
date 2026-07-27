@@ -40,6 +40,9 @@ test: ## Run all tests
 test-short: ## Run tests without long-running ones
 	go test -short -v ./...
 
+test-race: ## Run tests with the race detector (analysis runs rules in parallel)
+	go test -race ./...
+
 smoke: fmt-check vet test-short ## Fast checks before commit
 
 test-coverage: ## Run tests with coverage report
@@ -69,7 +72,7 @@ fmt-check: ## Check if code is formatted
 vet: ## Run go vet
 	go vet ./...
 
-check: fmt-check vet lint test ## Run all checks
+check: fmt-check vet lint test test-race ## Run all checks
 
 ## Development
 
@@ -93,14 +96,23 @@ self-check: build ## Run glint on itself
 
 ## Commit
 
+# MESSAGE reaches the recipe through the environment, so multi-line commit
+# bodies survive: expanding $(MESSAGE) into the shell command line would split
+# the recipe at the first newline.
+export MESSAGE
+
 commit: smoke ## Stage all and commit with MESSAGE (usage: make commit MESSAGE="...")
-	@if [ -z "$(MESSAGE)" ]; then \
+	@if [ -z "$$MESSAGE" ]; then \
 		echo "Usage: make commit MESSAGE=\"commit message\""; \
 		exit 1; \
 	fi
 	@git add -A
-	@git commit -m "$(MESSAGE)" -m "" -m "🤖 Generated with Claude Code" -m "" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
-	@echo "Committed: $(MESSAGE)"
+	@printf '%s\n\n%s\n\n%s\n' \
+		"$$MESSAGE" \
+		"🤖 Generated with Claude Code" \
+		"Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>" \
+		| git commit -F -
+	@echo "Committed: $$(printf '%s' "$$MESSAGE" | head -1)"
 
 ## Help
 

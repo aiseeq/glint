@@ -29,7 +29,9 @@ type FileContext struct {
 	Config *Config
 }
 
-// NewFileContext creates a new file context
+// NewFileContext creates a file context and panics on an invalid path pair.
+// It exists for tests, which build contexts from literal paths; the analysis
+// pipeline uses NewFileContextChecked and reports the error instead.
 func NewFileContext(path, projectRoot string, content []byte, cfg *Config) *FileContext {
 	ctx, err := NewFileContextChecked(path, projectRoot, content, cfg)
 	if err != nil {

@@ -109,6 +109,10 @@ func DefaultConfig() *Config {
 // maxConfigChain bounds how many `extends` hops a configuration may use.
 const maxConfigChain = 16
 
+// SupportedConfigVersion is the schema version this glint understands. A
+// config written for a different one is rejected rather than half-applied.
+const SupportedConfigVersion = 1
+
 // LoadConfig loads a configuration file, resolving its `extends` chain.
 func LoadConfig(path string) (*Config, error) {
 	cfg, err := loadConfigChain(path, make(map[string]bool))
@@ -166,6 +170,11 @@ func loadConfigChain(path string, visiting map[string]bool) (*Config, error) {
 // Validate reports configuration values that glint would otherwise have to
 // guess about: unparseable severities anywhere in the file.
 func (c *Config) Validate() error {
+	// Version 0 means the key is absent, which older configs rely on.
+	if c.Version != 0 && c.Version != SupportedConfigVersion {
+		return fmt.Errorf("version: unsupported config version %d (this glint understands version %d)",
+			c.Version, SupportedConfigVersion)
+	}
 	if c.Settings.MinSeverity != "" {
 		if _, err := ParseSeverity(c.Settings.MinSeverity); err != nil {
 			return fmt.Errorf("settings.min_severity: %w", err)
