@@ -1,6 +1,9 @@
 package fix
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -8,11 +11,37 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 )
 
-func TestCheckGitStatusReturnsGitError(t *testing.T) {
+// A path outside a repository is a state the caller has to react to, not a
+// failure: reporting it as an error made `glint fix` unusable there.
+func TestCheckWorkingTreeReportsPathOutsideRepository(t *testing.T) {
 	engine := NewEngine(NewRegistry(), true, false)
 
-	_, err := engine.CheckGitStatus(t.TempDir())
-	require.Error(t, err)
+	state, err := engine.CheckWorkingTree(t.TempDir())
+	require.NoError(t, err)
+	require.Equal(t, WorkingTreeUntracked, state)
+}
+
+func TestCheckWorkingTreeDetectsDirtyTree(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "glint@example.com"},
+		{"config", "user.name", "glint"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+
+	engine := NewEngine(NewRegistry(), true, false)
+	state, err := engine.CheckWorkingTree(root)
+	require.NoError(t, err)
+	require.Equal(t, WorkingTreeClean, state)
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644))
+	state, err = engine.CheckWorkingTree(root)
+	require.NoError(t, err)
+	require.Equal(t, WorkingTreeDirty, state)
 }
 
 func TestInterfaceAnyFixer(t *testing.T) {

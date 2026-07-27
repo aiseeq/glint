@@ -1,6 +1,7 @@
 package fix
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -91,15 +92,43 @@ func NewEngine(registry *Registry, dryRun, verbose bool) *Engine {
 	}
 }
 
-// CheckGitStatus checks for uncommitted changes
-func (e *Engine) CheckGitStatus(projectRoot string) (bool, error) {
-	cmd := exec.Command("git", "status", "--porcelain")
-	cmd.Dir = projectRoot
-	output, err := cmd.Output()
-	if err != nil {
-		return false, fmt.Errorf("git status in %q: %w", projectRoot, err)
+// WorkingTreeState describes what can be recovered if a fix goes wrong.
+type WorkingTreeState int
+
+const (
+	// WorkingTreeClean means every fix can be reverted with git.
+	WorkingTreeClean WorkingTreeState = iota
+	// WorkingTreeDirty means fixes would mix into uncommitted work.
+	WorkingTreeDirty
+	// WorkingTreeUntracked means the path is not inside a git repository, so
+	// nothing can be reverted.
+	WorkingTreeUntracked
+)
+
+// CheckWorkingTree reports whether fixes applied under projectRoot could be
+// reverted. Being outside a repository is a distinct answer, not an error:
+// the caller decides whether to require --force for it.
+func (e *Engine) CheckWorkingTree(projectRoot string) (WorkingTreeState, error) {
+	inside := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	inside.Dir = projectRoot
+	if err := inside.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return WorkingTreeUntracked, nil
+		}
+		return WorkingTreeUntracked, fmt.Errorf("run git in %q: %w", projectRoot, err)
 	}
-	return len(strings.TrimSpace(string(output))) > 0, nil
+
+	status := exec.Command("git", "status", "--porcelain")
+	status.Dir = projectRoot
+	output, err := status.Output()
+	if err != nil {
+		return WorkingTreeUntracked, fmt.Errorf("git status in %q: %w", projectRoot, err)
+	}
+	if len(strings.TrimSpace(string(output))) > 0 {
+		return WorkingTreeDirty, nil
+	}
+	return WorkingTreeClean, nil
 }
 
 // GenerateFixes generates fixes for violations without applying them
@@ -269,7 +298,7 @@ func (e *Engine) Preview(fixes []*Fix) string {
 	}
 
 	if e.dryRun {
-		sb.WriteString("Run without --dry-run to apply changes.\n")
+		sb.WriteString("Run with --dry-run=false to apply changes.\n")
 	}
 
 	return sb.String()
