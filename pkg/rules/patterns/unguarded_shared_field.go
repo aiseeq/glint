@@ -158,12 +158,25 @@ func (r *UnguardedSharedFieldRule) report(field *types.Var, access fieldAccess, 
 // accident.
 func guardedByMutex(field *types.Var, list []fieldAccess) bool {
 	contents := hasSharedContents(field.Type())
+	reads, guardedReads := 0, 0
+
 	for _, access := range list {
 		if access.guarded && (access.mutating || contents) {
 			return true
 		}
+		if access.mutating {
+			continue
+		}
+		reads++
+		if access.guarded {
+			guardedReads++
+		}
 	}
-	return false
+
+	// Every read takes the lock, so the value is shared state even though the
+	// mutations happen to skip it — that is the race. A setting read outside the
+	// lock somewhere else fails this test, which is what keeps it out.
+	return guardedReads > 0 && guardedReads == reads
 }
 
 // guardingMutex returns the lock that covers the field, for the message.
