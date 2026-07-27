@@ -53,7 +53,11 @@ var (
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
+		// Findings were already printed by the reporter; only real failures
+		// need an error line.
+		if !errors.Is(err, errFindingsReported) {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+		}
 		os.Exit(1)
 	}
 }
@@ -175,6 +179,9 @@ func runCheck(cmd *cobra.Command, args []string) error {
 	var allViolations core.ViolationList
 	var stats output.Stats
 	outputFormat := ""
+	// Different roots can enable different rule sets; the reported count is
+	// how many distinct rules ran overall.
+	rulesRun := make(map[string]struct{})
 
 	for _, projectRoot := range projectRoots {
 		cfg, enabledRules, err := loadConfig(projectRoot)
@@ -210,10 +217,11 @@ func runCheck(cmd *cobra.Command, args []string) error {
 
 		stats.FilesAnalyzed += len(contexts)
 		stats.FilesSkipped += walker.Stats().SkippedFiles
-		if len(enabledRules) > stats.RulesRun {
-			stats.RulesRun = len(enabledRules)
+		for _, rule := range enabledRules {
+			rulesRun[rule.Name()] = struct{}{}
 		}
 	}
+	stats.RulesRun = len(rulesRun)
 
 	// Пересекающиеся пути (./backend и ./backend/auth) дают одну и ту же находку дважды.
 	allViolations = dedupeViolations(allViolations)
@@ -224,22 +232,38 @@ func runCheck(cmd *cobra.Command, args []string) error {
 	}
 
 	if shouldFailAnalysis(allViolations) {
-		os.Exit(1)
+		return errFindingsReported
 	}
 
 	return nil
 }
 
+// errFindingsReported signals that the analysis itself succeeded but reported
+// findings severe enough to fail the run. Returning it instead of calling
+// os.Exit keeps the exit path in one place and lets cobra unwind normally.
+var errFindingsReported = errors.New("findings at or above high severity")
+
+// dedupeViolations drops findings that overlapping paths reported twice. The
+// message is part of the identity: one rule can legitimately report several
+// distinct problems on the same line.
 func dedupeViolations(violations core.ViolationList) core.ViolationList {
 	type key struct {
-		file string
-		line int
-		rule string
+		file    string
+		line    int
+		column  int
+		rule    string
+		message string
 	}
 	seen := make(map[key]struct{}, len(violations))
 	unique := make(core.ViolationList, 0, len(violations))
 	for _, violation := range violations {
-		k := key{file: violation.File, line: violation.Line, rule: violation.Rule}
+		k := key{
+			file:    violation.File,
+			line:    violation.Line,
+			column:  violation.Column,
+			rule:    violation.Rule,
+			message: violation.Message,
+		}
 		if _, ok := seen[k]; ok {
 			continue
 		}
