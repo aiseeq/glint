@@ -22,6 +22,7 @@ type FrontendSilentCatchRule struct {
 	userFeedbackCall *regexp.Regexp
 }
 
+// NewFrontendSilentCatchRule creates the rule
 func NewFrontendSilentCatchRule() *FrontendSilentCatchRule {
 	return &FrontendSilentCatchRule{
 		BaseRule: rules.NewBaseRule(
@@ -36,6 +37,7 @@ func NewFrontendSilentCatchRule() *FrontendSilentCatchRule {
 	}
 }
 
+// AnalyzeFile checks for catch blocks that log without user-visible handling
 func (r *FrontendSilentCatchRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
 		return nil

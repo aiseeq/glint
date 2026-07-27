@@ -32,6 +32,7 @@ type constructionSite struct {
 	funcN string
 }
 
+// NewScatteredConstructionRule creates the rule
 func NewScatteredConstructionRule() *ScatteredConstructionRule {
 	return &ScatteredConstructionRule{
 		BaseRule: rules.NewBaseRule(
@@ -45,6 +46,7 @@ func NewScatteredConstructionRule() *ScatteredConstructionRule {
 	}
 }
 
+// Configure allows setting rule options
 func (r *ScatteredConstructionRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
@@ -60,6 +62,7 @@ func (r *ScatteredConstructionRule) ResetState() {
 	r.constructions = make(map[string][]constructionSite)
 }
 
+// AnalyzeFile checks for struct types constructed in too many places
 func (r *ScatteredConstructionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.GoAST == nil {
 		return nil

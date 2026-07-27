@@ -64,13 +64,13 @@ var configLoadFuncNames = []string{
 	"viper.mergeconfig",
 }
 
-// AnalyzeFile checks for silent config errors
-// SuppressionExempt: policy forbids silent config errors unconditionally,
-// so inline nolint/safe comments do not silence this rule.
+// SuppressionExempt reports that policy forbids silent config errors
+// unconditionally, so inline nolint/safe comments do not silence this rule.
 func (r *SilentConfigErrorRule) SuppressionExempt() bool {
 	return true
 }
 
+// AnalyzeFile checks for silent config errors
 func (r *SilentConfigErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.HasGoAST() {
 		return nil

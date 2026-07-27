@@ -24,6 +24,7 @@ type FinancialRoundedDeltaRule struct {
 	deltaContext      *regexp.Regexp
 }
 
+// NewFinancialRoundedDeltaRule creates the rule
 func NewFinancialRoundedDeltaRule() *FinancialRoundedDeltaRule {
 	return &FinancialRoundedDeltaRule{
 		BaseRule: rules.NewBaseRule(
@@ -39,6 +40,7 @@ func NewFinancialRoundedDeltaRule() *FinancialRoundedDeltaRule {
 	}
 }
 
+// AnalyzeFile checks for deltas computed from parsed cumulative money fields
 func (r *FinancialRoundedDeltaRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
 		return nil

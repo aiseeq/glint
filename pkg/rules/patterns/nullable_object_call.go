@@ -22,6 +22,7 @@ type NullableObjectCallRule struct {
 	objectHasOwnCall     *regexp.Regexp
 }
 
+// NewNullableObjectCallRule creates the rule
 func NewNullableObjectCallRule() *NullableObjectCallRule {
 	return &NullableObjectCallRule{
 		BaseRule: rules.NewBaseRule(
@@ -36,6 +37,7 @@ func NewNullableObjectCallRule() *NullableObjectCallRule {
 	}
 }
 
+// AnalyzeFile checks for Object.* calls on possibly nullable values
 func (r *NullableObjectCallRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
 		return nil
