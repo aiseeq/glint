@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"regexp"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -52,7 +53,13 @@ func NewQuadraticLoopRule() *QuadraticLoopRule {
 
 // AnalyzeFile looks for the two quadratic shapes in one file.
 func (r *QuadraticLoopRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.IsTestFile() || ctx.GoAST == nil {
+	if ctx.IsTestFile() {
+		return nil
+	}
+	if ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile() {
+		return r.analyzeFrontend(ctx)
+	}
+	if !ctx.IsGoFile() || ctx.GoAST == nil {
 		return nil
 	}
 
@@ -239,4 +246,106 @@ func replacesInLoop(body *ast.BlockStmt, subject string) bool {
 	})
 
 	return replaces
+}
+
+// frontendScanStart matches the ways JavaScript walks a collection: a for…of
+// loop and the array methods that visit every element.
+var frontendScanStart = regexp.MustCompile(`for\s*\(\s*(?:const|let|var)\s+\w+\s+of\s+([\w.]+)\s*\)|\b([\w.]+)\.(?:forEach|map|filter|some|every|find|findIndex|reduce)\s*\(`)
+
+// frontendRescan matches a loop condition that searches the whole string again
+// after each replacement.
+var frontendRescan = regexp.MustCompile(`while\s*\(\s*([\w.]+)\.(?:includes|indexOf|search|match)\s*\(`)
+
+// analyzeFrontend applies the same two shapes to TypeScript and JavaScript,
+// where a collection is scanned by method calls rather than by range.
+func (r *QuadraticLoopRule) analyzeFrontend(ctx *core.FileContext) []*core.Violation {
+	var violations []*core.Violation
+
+	for i := 0; i < len(ctx.Lines); i++ {
+		line := ctx.Lines[i]
+		// Only a scan that opens a block can contain another one. A chain —
+		// items.map(...).filter(...) — walks the result of the previous step,
+		// and a second statement further down is a separate pass, not a nested
+		// one.
+		if collection, ok := frontendScanned(line); ok && strings.HasSuffix(strings.TrimSpace(line), "{") {
+			block, end := collectBraceBlock(ctx.Lines, i)
+			if inner, ok := frontendNestedScan(block, collection); ok {
+				violations = append(violations, r.frontendNested(ctx, i+1, collection, inner))
+			}
+			if end > i {
+				i = end
+			}
+			continue
+		}
+		if match := frontendRescan.FindStringSubmatch(line); match != nil {
+			block, _ := collectBraceBlock(ctx.Lines, i)
+			if frontendReplacesInBlock(block, match[1]) {
+				violations = append(violations, r.frontendRescan(ctx, i+1, match[1]))
+			}
+		}
+	}
+
+	return violations
+}
+
+func (r *QuadraticLoopRule) frontendNested(ctx *core.FileContext, line int, collection string, innerLine int) *core.Violation {
+	v := r.CreateViolation(ctx.RelPath, line,
+		fmt.Sprintf("Nested scan over %q: every element is compared with every other one, so the work grows with the square of the input", collection))
+	v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+	v.WithSuggestion(fmt.Sprintf("Index %s by the key being matched (a Map or a lookup object) and read the partner from it, instead of scanning again", collection))
+	v.WithContext("pattern", "quadratic_nested_scan")
+	v.WithContext("collection", collection)
+	v.WithContext("inner_line", innerLine)
+	return v
+}
+
+func (r *QuadraticLoopRule) frontendRescan(ctx *core.FileContext, line int, subject string) *core.Violation {
+	v := r.CreateViolation(ctx.RelPath, line,
+		fmt.Sprintf("Each pass rescans the whole of %q after replacing inside it, so the cost grows with the square of its length", subject))
+	v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+	v.WithSuggestion(fmt.Sprintf("Use a single replaceAll with a global regular expression over %s instead of searching again after each pass", subject))
+	v.WithContext("pattern", "quadratic_rescan")
+	v.WithContext("variable", subject)
+	return v
+}
+
+// frontendScanned returns the collection a line starts walking over.
+func frontendScanned(line string) (string, bool) {
+	match := frontendScanStart.FindStringSubmatch(line)
+	if match == nil {
+		return "", false
+	}
+	collection := match[1]
+	if collection == "" {
+		collection = match[2]
+	}
+	return collection, collection != ""
+}
+
+// frontendNestedScan reports whether the block walks the same collection again,
+// on a line other than the one that opened the outer scan.
+func frontendNestedScan(block string, collection string) (int, bool) {
+	lines := strings.Split(block, "\n")
+	for i, line := range lines[1:] {
+		inner, ok := frontendScanned(line)
+		if ok && inner == collection {
+			return i + 2, true
+		}
+	}
+	return 0, false
+}
+
+// frontendReplacesInBlock reports whether the block assigns a replacement of the
+// subject back to it.
+func frontendReplacesInBlock(block string, subject string) bool {
+	for _, line := range strings.Split(block, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, subject+" =") && !strings.Contains(trimmed, subject+" = ") {
+			continue
+		}
+		if strings.Contains(trimmed, subject+".replace") {
+			return true
+		}
+	}
+	return false
 }

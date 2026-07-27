@@ -178,6 +178,104 @@ func check(items []string) {
 	assert.Empty(t, NewQuadraticLoopRule().AnalyzeFile(ctx))
 }
 
+// The same shape in TypeScript: for…of over the same array inside itself.
+func TestQuadraticLoopReportsNestedFrontendLoop(t *testing.T) {
+	ctx := rulestest.TextFile(t, "scan.ts", `export function pairs(items: Item[]) {
+  const found: string[] = []
+  for (const a of items) {
+    for (const b of items) {
+      if (a.id !== b.id && a.name === b.name) {
+        found.push(a.id)
+      }
+    }
+  }
+  return found
+}
+`)
+
+	violations := NewQuadraticLoopRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+	assert.Equal(t, 3, violations[0].Line)
+	assert.Contains(t, violations[0].Message, "items")
+}
+
+// Array methods walk the collection just as a loop does.
+func TestQuadraticLoopReportsNestedArrayMethods(t *testing.T) {
+	ctx := rulestest.TextFile(t, "scan.ts", `export function duplicates(items: Item[]) {
+  return items.filter((a) => {
+    return items.some((b) => b.id !== a.id && b.name === a.name)
+  })
+}
+`)
+
+	violations := NewQuadraticLoopRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "items")
+}
+
+// Two different collections give O(n*m), which is what the code asks for.
+func TestQuadraticLoopIgnoresFrontendCrossJoin(t *testing.T) {
+	ctx := rulestest.TextFile(t, "scan.ts", `export function crossJoin(users: string[], roles: string[]) {
+  return users.map((user) => roles.filter((role) => role === user))
+}
+`)
+
+	assert.Empty(t, NewQuadraticLoopRule().AnalyzeFile(ctx))
+}
+
+// Rescanning a string after each replacement is quadratic in JavaScript too.
+func TestQuadraticLoopReportsFrontendRescan(t *testing.T) {
+	ctx := rulestest.TextFile(t, "scan.ts", `export function collapse(text: string) {
+  let value = text
+  while (value.includes("  ")) {
+    value = value.replace("  ", " ")
+  }
+  return value
+}
+`)
+
+	violations := NewQuadraticLoopRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+	assert.Equal(t, 3, violations[0].Line)
+	assert.Contains(t, violations[0].Message, "value")
+}
+
+// A single replaceAll is the fixed form and must stay silent.
+func TestQuadraticLoopIgnoresSingleFrontendReplace(t *testing.T) {
+	ctx := rulestest.TextFile(t, "scan.ts", `export function collapse(text: string) {
+  return text.replace(/\s+/g, " ")
+}
+`)
+
+	assert.Empty(t, NewQuadraticLoopRule().AnalyzeFile(ctx))
+}
+
+// Repro from saga: a chain of array methods walks the result of the previous
+// step, so each pass is linear and the whole chain is not quadratic.
+func TestQuadraticLoopIgnoresMethodChain(t *testing.T) {
+	ctx := rulestest.TextFile(t, "chart.tsx", `export function series(chartData: Point[]) {
+  const values = chartData.map((d) => d.apy).filter((v) => v > 0)
+  return values
+}
+`)
+
+	assert.Empty(t, NewQuadraticLoopRule().AnalyzeFile(ctx))
+}
+
+// Repro from saga: narrowing a list step by step is a sequence of passes, not a
+// scan inside a scan.
+func TestQuadraticLoopIgnoresSequentialFilters(t *testing.T) {
+	ctx := rulestest.TextFile(t, "registry.tsx", `export function narrow(operations: Op[], kind: string) {
+  let filtered = operations
+  filtered = filtered.filter((op) => op.type === 'yield')
+  filtered = filtered.filter((op) => op.kind === kind)
+  return filtered
+}
+`)
+
+	assert.Empty(t, NewQuadraticLoopRule().AnalyzeFile(ctx))
+}
+
 func TestQuadraticLoopMetadata(t *testing.T) {
 	rule := NewQuadraticLoopRule()
 	assert.Equal(t, "quadratic-loop", rule.Name())
