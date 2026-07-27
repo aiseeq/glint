@@ -171,6 +171,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("settings.min_severity: %w", err)
 		}
 	}
+	for i, pattern := range c.Settings.Exclude {
+		if !doublestar.ValidatePattern(pattern) {
+			return fmt.Errorf("settings.exclude[%d]: malformed glob pattern %q", i, pattern)
+		}
+	}
 	for name, cat := range c.Categories {
 		if cat.SeverityOverride != "" {
 			if _, err := ParseSeverity(cat.SeverityOverride); err != nil {
@@ -178,11 +183,16 @@ func (c *Config) Validate() error {
 			}
 		}
 		for ruleName, ruleCfg := range cat.Rules {
-			if ruleCfg.Severity == "" {
-				continue
+			if ruleCfg.Severity != "" {
+				if _, err := ParseSeverity(ruleCfg.Severity); err != nil {
+					return fmt.Errorf("categories.%s.rules.%s.severity: %w", name, ruleName, err)
+				}
 			}
-			if _, err := ParseSeverity(ruleCfg.Severity); err != nil {
-				return fmt.Errorf("categories.%s.rules.%s.severity: %w", name, ruleName, err)
+			for i, exc := range ruleCfg.Exceptions {
+				if exc.Files != "" && !doublestar.ValidatePattern(exc.Files) {
+					return fmt.Errorf("categories.%s.rules.%s.exceptions[%d].files: malformed glob pattern %q",
+						name, ruleName, i, exc.Files)
+				}
 			}
 		}
 	}
@@ -450,17 +460,22 @@ func exceptionFunctionMatches(name string, violation *Violation) bool {
 // exclusion and rule exceptions must both go through it.
 func matchGlobPattern(pattern, path string) bool {
 	path = filepath.ToSlash(path)
-	if matched, err := doublestar.Match(pattern, path); err == nil && matched {
+	if globMatches(pattern, path) {
 		return true
 	}
-	// A directory pattern also covers everything below it: "vendor/**" is what
+	// A directory pattern also covers the directory itself: "vendor/**" is what
 	// users write, but "vendor" alone reads as the whole tree too.
-	if strings.HasSuffix(pattern, "/**") {
-		if matched, err := doublestar.Match(strings.TrimSuffix(pattern, "/**"), path); err == nil && matched {
-			return true
-		}
+	if strings.HasSuffix(pattern, "/**") && globMatches(strings.TrimSuffix(pattern, "/**"), path) {
+		return true
 	}
-	matched, err := doublestar.Match(pattern, filepath.Base(path))
+	return globMatches(pattern, filepath.Base(path))
+}
+
+// globMatches reports whether a well-formed pattern matches. Malformed
+// patterns never reach here: Config.Validate rejects the configuration that
+// declares them.
+func globMatches(pattern, path string) bool {
+	matched, err := doublestar.Match(pattern, path)
 	return err == nil && matched
 }
 

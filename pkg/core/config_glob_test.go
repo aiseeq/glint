@@ -207,3 +207,17 @@ func TestExtendsReportsMissingBase(t *testing.T) {
 	_, err := LoadConfig(child)
 	require.Error(t, err, "a missing base config must fail loudly, not fall back to defaults")
 }
+
+func TestValidateRejectsMalformedGlob(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".glint.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`version: 1
+settings:
+  exclude:
+    - "vendor/[unclosed"
+`), 0o644))
+
+	_, err := LoadConfig(path)
+	require.Error(t, err, "a malformed exclude pattern must not silently match nothing")
+	assert.Contains(t, err.Error(), "vendor/[unclosed")
+}

@@ -4,6 +4,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -22,12 +23,19 @@ func writeGoModule(t *testing.T, files map[string]string) (string, []*FileContex
 		require.NoError(t, os.WriteFile(path, []byte(content), 0644))
 	}
 
-	var contexts []*FileContext
-	for name, content := range files {
-		if !strings.HasSuffix(name, ".go") {
-			continue
+	names := make([]string, 0, len(files))
+	for name := range files {
+		if strings.HasSuffix(name, ".go") {
+			names = append(names, name)
 		}
-		ctx, err := NewFileContextChecked(filepath.Join(root, name), root, []byte(content), DefaultConfig())
+	}
+	// Map iteration order is random; tests that pick contexts by index need a
+	// stable one.
+	sort.Strings(names)
+
+	contexts := make([]*FileContext, 0, len(names))
+	for _, name := range names {
+		ctx, err := NewFileContextChecked(filepath.Join(root, name), root, []byte(files[name]), DefaultConfig())
 		require.NoError(t, err)
 		contexts = append(contexts, ctx)
 	}
