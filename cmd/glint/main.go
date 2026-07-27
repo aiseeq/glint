@@ -375,11 +375,6 @@ func getEnabledRules(cfg *core.Config) ([]rules.Rule, error) {
 	return enabledRules, nil
 }
 
-func walkFiles(projectRoot string, cfg *core.Config) ([]*core.FileContext, *core.Walker, error) {
-	walker := core.NewWalker(projectRoot, cfg)
-	return walkWithWalker(walker)
-}
-
 func walkWithWalker(walker *core.Walker) ([]*core.FileContext, *core.Walker, error) {
 	contexts, walkErrors := walker.WalkSync()
 	sort.Slice(contexts, func(i, j int) bool { return contexts[i].Path < contexts[j].Path })
@@ -882,8 +877,10 @@ func fixProjectRoot(projectRoot string) error {
 		fmt.Printf("Running %d fixable rules...\n", len(fixableRules))
 	}
 
-	// Walk files and analyze
-	contexts, _, err := walkFiles(projectRoot, cfg)
+	// Collect findings through the same pipeline as `check`, so that project
+	// rules run, and configuration exceptions and inline suppression comments
+	// are honored.
+	contexts, _, project, err := prepareAnalysis(projectRoot, cfg, fixableRules)
 	if err != nil {
 		return err
 	}
@@ -895,14 +892,11 @@ func fixProjectRoot(projectRoot string) error {
 		contextMap[ctx.RelPath] = ctx
 	}
 
-	// Collect findings through the same pipeline as `check`, so that
-	// configuration exceptions and inline suppression comments are honored.
-	overrides, err := buildSeverityOverrides(cfg, fixableRules)
+	rules.ResetState(fixableRules)
+	violations, err := analyzeProject(contexts, fixableRules, cfg, project)
 	if err != nil {
 		return err
 	}
-	rules.ResetState(fixableRules)
-	violations := analyzeFiles(contexts, fixableRules, cfg, overrides)
 
 	if len(violations) == 0 {
 		fmt.Println("No issues found that can be fixed.")

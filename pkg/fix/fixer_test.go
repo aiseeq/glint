@@ -87,10 +87,11 @@ func TestInterfaceAnyFixer(t *testing.T) {
 				Line: 1,
 			}
 
-			fix := fixer.GenerateFix(ctx, v)
-			if fix == nil {
-				t.Fatal("Expected fix, got nil")
+			fixes := fixer.GenerateFix(ctx, v)
+			if len(fixes) != 1 {
+				t.Fatalf("Expected one fix, got %d", len(fixes))
 			}
+			fix := fixes[0]
 
 			if fix.OldText != "interface{}" {
 				t.Errorf("Expected OldText 'interface{}', got '%s'", fix.OldText)
@@ -180,10 +181,11 @@ func TestDeprecatedIoutilFixer(t *testing.T) {
 				Line: 1,
 			}
 
-			fix := fixer.GenerateFix(ctx, v)
-			if fix == nil {
-				t.Fatal("Expected fix, got nil")
+			fixes := fixer.GenerateFix(ctx, v)
+			if len(fixes) != 1 {
+				t.Fatalf("Expected one fix, got %d", len(fixes))
 			}
+			fix := fixes[0]
 
 			if fix.OldText != tt.expectedOld {
 				t.Errorf("Expected OldText '%s', got '%s'", tt.expectedOld, fix.OldText)
@@ -268,10 +270,11 @@ func TestBoolCompareFixer(t *testing.T) {
 				Line: 1,
 			}
 
-			fix := fixer.GenerateFix(ctx, v)
-			if fix == nil {
-				t.Fatalf("Expected fix for line '%s', got nil", tt.line)
+			fixes := fixer.GenerateFix(ctx, v)
+			if len(fixes) != 1 {
+				t.Fatalf("Expected one fix for line '%s', got %d", tt.line, len(fixes))
 			}
+			fix := fixes[0]
 
 			if fix.OldText != tt.expectedOld {
 				t.Errorf("Expected OldText '%s', got '%s'", tt.expectedOld, fix.OldText)

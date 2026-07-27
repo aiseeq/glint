@@ -27,7 +27,7 @@ func (f *MdListAfterLabelFixer) CanFix(v *core.Violation) bool {
 }
 
 // GenerateFix generates the fix for a violation
-func (f *MdListAfterLabelFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) *Fix {
+func (f *MdListAfterLabelFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) []*Fix {
 	if ctx == nil || v == nil {
 		return nil
 	}
@@ -55,7 +55,7 @@ func (f *MdListAfterLabelFixer) GenerateFix(ctx *core.FileContext, v *core.Viola
 	oldLine := ctx.Lines[idx]
 	newText := oldLine + "\n"
 
-	return &Fix{
+	return []*Fix{&Fix{
 		File:      ctx.Path,
 		StartLine: labelLine,
 		EndLine:   labelLine,
@@ -63,7 +63,7 @@ func (f *MdListAfterLabelFixer) GenerateFix(ctx *core.FileContext, v *core.Viola
 		NewText:   newText,
 		Message:   "Add blank line between label and list",
 		RuleName:  "md-list-after-label",
-	}
+	}}
 }
 
 func init() {

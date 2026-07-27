@@ -34,7 +34,7 @@ func (f *InterfaceAnyFixer) CanFix(v *core.Violation) bool {
 }
 
 // GenerateFix generates the fix for a violation
-func (f *InterfaceAnyFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) *Fix {
+func (f *InterfaceAnyFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) []*Fix {
 	if ctx == nil || v == nil {
 		return nil
 	}
@@ -50,7 +50,7 @@ func (f *InterfaceAnyFixer) GenerateFix(ctx *core.FileContext, v *core.Violation
 		return nil
 	}
 
-	return &Fix{
+	return []*Fix{&Fix{
 		File:      ctx.Path,
 		StartLine: v.Line,
 		EndLine:   v.Line,
@@ -59,7 +59,7 @@ func (f *InterfaceAnyFixer) GenerateFix(ctx *core.FileContext, v *core.Violation
 		Message:   "Replace interface{} with any (Go 1.18+)",
 		RuleName:  "interface-any",
 		Violation: v,
-	}
+	}}
 }
 
 func init() {

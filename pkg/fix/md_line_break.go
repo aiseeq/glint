@@ -31,7 +31,7 @@ func (f *MdLineBreakFixer) CanFix(v *core.Violation) bool {
 }
 
 // GenerateFix generates the fix for a violation
-func (f *MdLineBreakFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) *Fix {
+func (f *MdLineBreakFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) []*Fix {
 	if ctx == nil || v == nil {
 		return nil
 	}
@@ -94,7 +94,7 @@ func (f *MdLineBreakFixer) GenerateFix(ctx *core.FileContext, v *core.Violation)
 		return nil
 	}
 
-	return &Fix{
+	return []*Fix{&Fix{
 		File:      ctx.Path,
 		StartLine: groupStart + 1,
 		EndLine:   groupEnd + 1,
@@ -102,7 +102,7 @@ func (f *MdLineBreakFixer) GenerateFix(ctx *core.FileContext, v *core.Violation)
 		NewText:   newText,
 		Message:   "Add hard line breaks to consecutive bold-label lines",
 		RuleName:  "md-line-break",
-	}
+	}}
 }
 
 func init() {
