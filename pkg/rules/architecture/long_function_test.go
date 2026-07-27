@@ -1,6 +1,7 @@
 package architecture
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -65,7 +66,7 @@ func generateLongFunction(lines int) string {
 	sb.WriteString("func longFunc() {\n")
 	for i := 0; i < lines; i++ {
 		sb.WriteString("\t_ = ")
-		sb.WriteString(itoa(i))
+		sb.WriteString(strconv.Itoa(i))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("}\n")

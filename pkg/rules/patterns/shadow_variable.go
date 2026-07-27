@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"strconv"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -124,7 +125,7 @@ func (r *ShadowVariableRule) reportShadow(ctx *core.FileContext, name *ast.Ident
 		return
 	}
 	line := r.getLineFromNode(ctx, name)
-	v := r.CreateViolation(ctx.RelPath, line, "Variable '"+name.Name+"' shadows declaration from line "+r.itoa(origLine))
+	v := r.CreateViolation(ctx.RelPath, line, "Variable '"+name.Name+"' shadows declaration from line "+strconv.Itoa(origLine))
 	v.WithCode(ctx.GetLine(line))
 	v.WithSuggestion("Use a different variable name to avoid confusion")
 	v.WithContext("pattern", "shadow_variable")
@@ -223,16 +224,4 @@ func (r *ShadowVariableRule) checkRange(ctx *core.FileContext, s *ast.RangeStmt,
 
 func (r *ShadowVariableRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
 	return ctx.LineFor(node)
-}
-
-func (r *ShadowVariableRule) itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var digits []byte
-	for n > 0 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-		n /= 10
-	}
-	return string(digits)
 }

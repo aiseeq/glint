@@ -2,6 +2,7 @@ package architecture
 
 import (
 	"go/ast"
+	"strconv"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -108,17 +109,5 @@ func getReceiverType(expr ast.Expr) (string, bool) {
 }
 
 func formatLongFuncMessage(name string, lines, max int) string {
-	return name + " is " + itoa(lines) + " lines long (max " + itoa(max) + ")"
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	s := ""
-	for i > 0 {
-		s = string(rune('0'+i%10)) + s
-		i /= 10
-	}
-	return s
+	return name + " is " + strconv.Itoa(lines) + " lines long (max " + strconv.Itoa(max) + ")"
 }

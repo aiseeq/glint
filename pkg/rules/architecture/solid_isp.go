@@ -2,6 +2,7 @@ package architecture
 
 import (
 	"go/ast"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -86,7 +87,7 @@ func (r *SolidISPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		if methodCount > r.maxMethods {
 			pos := ctx.PositionFor(typeSpec)
 			v := r.CreateViolation(ctx.RelPath, pos.Line,
-				typeSpec.Name.Name+" interface has "+itoa(methodCount)+" methods (max "+itoa(r.maxMethods)+")")
+				typeSpec.Name.Name+" interface has "+strconv.Itoa(methodCount)+" methods (max "+strconv.Itoa(r.maxMethods)+")")
 			v.WithCode(ctx.GetLine(pos.Line))
 			v.WithSuggestion("Split into smaller, focused interfaces following Interface Segregation Principle")
 			v.WithContext("method_count", methodCount)

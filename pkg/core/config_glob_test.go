@@ -221,3 +221,13 @@ settings:
 	require.Error(t, err, "a malformed exclude pattern must not silently match nothing")
 	assert.Contains(t, err.Error(), "vendor/[unclosed")
 }
+
+func TestValidateRejectsUnsupportedVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".glint.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("version: 2\n"), 0o644))
+
+	_, err := LoadConfig(path)
+	require.Error(t, err, "a config written for another schema version must not be applied silently")
+	assert.Contains(t, err.Error(), "unsupported config version")
+}
