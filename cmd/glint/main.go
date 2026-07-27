@@ -391,7 +391,33 @@ func shouldFailAnalysis(violations core.ViolationList) bool {
 	return false
 }
 
-func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config) core.ViolationList {
+// severityOverrides maps a rule name to the severity configured for it. It is
+// resolved once per project root so that analysis never has to parse — and
+// never has to silently ignore — a severity string.
+type severityOverrides map[string]core.Severity
+
+func buildSeverityOverrides(cfg *core.Config, enabledRules []rules.Rule) (severityOverrides, error) {
+	overrides := make(severityOverrides)
+	for _, rule := range enabledRules {
+		severity, ok, err := cfg.SeverityOverrideFor(rule.Category(), rule.Name())
+		if err != nil {
+			return nil, fmt.Errorf("severity for rule %q: %w", rule.Name(), err)
+		}
+		if ok {
+			overrides[rule.Name()] = severity
+		}
+	}
+	return overrides, nil
+}
+
+// apply overrides the violation's severity when the configuration asks for it.
+func (o severityOverrides) apply(violation *core.Violation) {
+	if severity, ok := o[violation.Rule]; ok {
+		violation.Severity = severity
+	}
+}
+
+func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides) core.ViolationList {
 	var allViolations core.ViolationList
 	for _, ctx := range contexts {
 		for _, rule := range enabledRules {
@@ -408,6 +434,7 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 				if honorsSuppression && ctx.IsSuppressed(violation.Line, rule.Name()) {
 					continue
 				}
+				overrides.apply(violation)
 				allViolations = append(allViolations, violation)
 			}
 		}
@@ -425,6 +452,11 @@ func hasGoFiles(contexts []*core.FileContext) bool {
 }
 
 func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext) (core.ViolationList, error) {
+	overrides, err := buildSeverityOverrides(cfg, enabledRules)
+	if err != nil {
+		return nil, err
+	}
+
 	var allViolations core.ViolationList
 	fileRules := make([]rules.Rule, 0, len(enabledRules))
 	for _, rule := range enabledRules {
@@ -458,10 +490,11 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 				continue
 			}
 			violation.File = fileCtx.RelPath
+			overrides.apply(violation)
 			allViolations = append(allViolations, violation)
 		}
 	}
-	allViolations = append(allViolations, analyzeFiles(contexts, fileRules, cfg)...)
+	allViolations = append(allViolations, analyzeFiles(contexts, fileRules, cfg, overrides)...)
 	return allViolations, nil
 }
 

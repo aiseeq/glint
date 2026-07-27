@@ -3,6 +3,7 @@ module github.com/aiseeq/glint
 go 1.24.11
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/fatih/color v1.18.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1

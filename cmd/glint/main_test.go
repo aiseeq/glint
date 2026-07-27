@@ -142,7 +142,7 @@ func Export() (any, error) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := goContext(t, "service.go", tt.code)
-			violations := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{tt.rule}, cfg)
+			violations := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{tt.rule}, cfg, nil)
 			if len(violations) != tt.wantCount {
 				t.Errorf("got %d violations, want %d: %+v", len(violations), tt.wantCount, violations)
 			}
@@ -171,7 +171,7 @@ func TestAnalyzeFilesRespectsSuppressionExempt(t *testing.T) {
 	cfg := core.DefaultConfig()
 	ctx := core.NewFileContext("service.go", ".", []byte("x //nolint:exempt-stub\n"), nil)
 
-	violations := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{newExemptStubRule()}, cfg)
+	violations := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{newExemptStubRule()}, cfg, nil)
 	if len(violations) != 1 {
 		t.Fatalf("exempt rule must not be suppressed, got %d violations", len(violations))
 	}
