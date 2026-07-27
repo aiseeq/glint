@@ -40,6 +40,7 @@ type FinancialFPRoundingRule struct {
 	hasEpsilon *regexp.Regexp
 }
 
+// NewFinancialFPRoundingRule creates the rule
 func NewFinancialFPRoundingRule() *FinancialFPRoundingRule {
 	return &FinancialFPRoundingRule{
 		BaseRule: rules.NewBaseRule(
@@ -56,6 +57,7 @@ func NewFinancialFPRoundingRule() *FinancialFPRoundingRule {
 	}
 }
 
+// AnalyzeFile checks for floating-point rounding of money
 func (r *FinancialFPRoundingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if r.shouldSkip(ctx) {
 		return nil

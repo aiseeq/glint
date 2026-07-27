@@ -20,6 +20,7 @@ type FrontendEnvFallbackRule struct {
 	requiredSupabaseEnv  *regexp.Regexp
 }
 
+// NewFrontendEnvFallbackRule creates the rule
 func NewFrontendEnvFallbackRule() *FrontendEnvFallbackRule {
 	return &FrontendEnvFallbackRule{
 		BaseRule: rules.NewBaseRule(
@@ -33,6 +34,7 @@ func NewFrontendEnvFallbackRule() *FrontendEnvFallbackRule {
 	}
 }
 
+// AnalyzeFile checks for placeholder and fallback public environment configuration
 func (r *FrontendEnvFallbackRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
 		return nil

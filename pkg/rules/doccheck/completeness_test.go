@@ -8,6 +8,18 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 )
 
+func docContext(t *testing.T, path, code string) *core.FileContext {
+	t.Helper()
+	parser := core.NewParser()
+	ctx := core.NewFileContext(path, "/src", []byte(code), core.DefaultConfig())
+	fset, astFile, err := parser.ParseGoFile(path, []byte(code))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	ctx.SetGoAST(fset, astFile)
+	return ctx
+}
+
 func TestDocCompletenessRule(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -43,6 +55,13 @@ type user struct {
 			wantViolations: 0,
 		},
 		{
+			name: "type alias - ok without doc",
+			code: `package main
+
+type Violation = core.Violation`,
+			wantViolations: 0,
+		},
+		{
 			name: "documented function - ok",
 			code: `package main
 
@@ -51,26 +70,19 @@ func GetUser(id string) {}`,
 			wantViolations: 0,
 		},
 		{
-			name: "trivial function GetUser - ok without doc",
+			name: "undocumented function with a common verb name",
 			code: `package main
 
 func GetUser(id string) {}`,
-			wantViolations: 0, // Get* prefix is trivial/self-documenting
+			wantViolations: 1, // a familiar verb says nothing about what the function does
 		},
 		{
-			name: "trivial function with doc - format not checked",
+			name: "doc not starting with the name",
 			code: `package main
 
 // Returns a user by ID.
 func GetUser(id string) {}`,
-			wantViolations: 0, // Trivial functions skip doc format check
-		},
-		{
-			name: "non-trivial function without doc",
-			code: `package main
-
-func TransmogrifyCacheEntries(id string) {}`,
-			wantViolations: 1, // Non-trivial name requires doc
+			wantViolations: 1,
 		},
 		{
 			name: "main and init - ok without doc",
@@ -81,28 +93,11 @@ func init() {}`,
 			wantViolations: 0,
 		},
 		{
-			name: "trivial type and method - ok without doc",
-			code: `package main
-
-type Service struct{}
-
-// Start starts the service.
-func (s *Service) Start() {}`,
-			wantViolations: 0, // Service suffix and Start prefix are trivial
-		},
-		{
-			name: "trivial const MaxSize - ok without doc",
+			name: "undocumented const without a type",
 			code: `package main
 
 const MaxSize = 100`,
-			wantViolations: 0, // Max* prefix is trivial/self-documenting
-		},
-		{
-			name: "non-trivial const without doc",
-			code: `package main
-
-const MagicThreshold = 42`,
-			wantViolations: 1, // Non-trivial name requires doc
+			wantViolations: 1,
 		},
 		{
 			name: "documented const - ok",
@@ -138,22 +133,13 @@ func getUser(id string) {}`,
 			wantViolations: 0,
 		},
 		{
-			name: "trivial interface Reader - ok without doc",
+			name: "undocumented interface",
 			code: `package main
 
 type Reader interface {
 	Read() error
 }`,
-			wantViolations: 0, // Reader suffix is trivial/self-documenting
-		},
-		{
-			name: "non-trivial interface without doc",
-			code: `package main
-
-type Orchestrator interface {
-	Coordinate() error
-}`,
-			wantViolations: 1, // Non-trivial name requires doc
+			wantViolations: 1,
 		},
 		{
 			name: "documented interface - ok",
@@ -170,39 +156,178 @@ type Reader interface {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rule := NewDocCompletenessRule()
-
-			parser := core.NewParser()
-			ctx := core.NewFileContext("/src/main.go", "/src", []byte(tt.code), core.DefaultConfig())
-			fset, astFile, err := parser.ParseGoFile("/src/main.go", []byte(tt.code))
-			if err != nil {
-				t.Fatalf("Parse error: %v", err)
-			}
-			ctx.SetGoAST(fset, astFile)
-
-			violations := rule.AnalyzeFile(ctx)
-
+			violations := rule.AnalyzeFile(docContext(t, "/src/main.go", tt.code))
 			assert.Len(t, violations, tt.wantViolations, "Code:\n%s", tt.code)
 		})
 	}
 }
 
+// Repro from glint itself: every rule file declares a constructor and the
+// interface methods, and the name heuristics hid the ones missing a comment.
+func TestDocCompletenessReportsUndocumentedRuleAPI(t *testing.T) {
+	rule := NewDocCompletenessRule()
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/rule.go", `package patterns
+
+// FinancialFPRoundingRule detects float rounding of money.
+type FinancialFPRoundingRule struct {
+	threshold int
+}
+
+func NewFinancialFPRoundingRule() *FinancialFPRoundingRule {
+	return &FinancialFPRoundingRule{}
+}
+
+func (r *FinancialFPRoundingRule) Configure(settings map[string]any) error {
+	return nil
+}
+
+func (r *FinancialFPRoundingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return nil
+}
+`))
+
+	assert.Len(t, violations, 3)
+}
+
+// Methods whose contract is written in the standard library need no repeat.
+func TestDocCompletenessSkipsStandardInterfaceMethods(t *testing.T) {
+	rule := NewDocCompletenessRule()
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/severity.go", `package core
+
+// Severity represents the severity level of a violation.
+type Severity int
+
+func (s Severity) String() string {
+	switch s {
+	case SeverityLow:
+		return "low"
+	}
+	return ""
+}
+
+func (s Severity) MarshalJSON() ([]byte, error) {
+	return nil, nil
+}
+`))
+
+	assert.Empty(t, violations)
+}
+
+// A method that only hands a field over says everything in its signature.
+func TestDocCompletenessSkipsFieldAccessors(t *testing.T) {
+	rule := NewDocCompletenessRule()
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/user.go", `package main
+
+// User is a system user.
+type User struct {
+	name string
+}
+
+func (u *User) Name() string {
+	return u.name
+}
+
+func (u *User) SetName(name string) {
+	u.name = name
+}
+`))
+
+	assert.Empty(t, violations)
+}
+
+// A method that does work is not an accessor, however short its parameter list.
+func TestDocCompletenessReportsShortMethodThatDoesWork(t *testing.T) {
+	rule := NewDocCompletenessRule()
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/user.go", `package main
+
+// User is a system user.
+type User struct {
+	name string
+}
+
+func (u *User) Rename(name string) error {
+	if name == "" {
+		return errors.New("empty name")
+	}
+	u.name = strings.TrimSpace(name)
+	return nil
+}
+`))
+
+	assert.Len(t, violations, 1)
+}
+
+// Repro from glint itself: a typed const group names its own meaning, so the
+// members repeat the type rather than document anything.
+func TestDocCompletenessSkipsTypedEnumMembers(t *testing.T) {
+	rule := NewDocCompletenessRule()
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/severity.go", `package core
+
+// Severity represents the severity level of a violation.
+type Severity int
+
+const (
+	SeverityLow Severity = iota
+	SeverityMedium
+	SeverityHigh
+	SeverityCritical
+)
+`))
+
+	assert.Empty(t, violations)
+}
+
+// A typed group whose members do not carry the type name is not an enum.
+func TestDocCompletenessReportsTypedConstsUnrelatedToTheType(t *testing.T) {
+	rule := NewDocCompletenessRule()
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/limits.go", `package core
+
+// Threshold bounds an analysis.
+type Threshold int
+
+const (
+	Magic Threshold = 42
+	Other Threshold = 7
+)
+`))
+
+	assert.Len(t, violations, 2)
+}
+
+func TestDocCompletenessSkipTrivialDisabled(t *testing.T) {
+	rule := NewDocCompletenessRule()
+	if err := rule.Configure(map[string]any{"skip_trivial": false}); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/user.go", `package main
+
+// User is a system user.
+type User struct {
+	name string
+}
+
+func (u *User) Name() string {
+	return u.name
+}
+`))
+
+	assert.Len(t, violations, 1, "accessors are reported once the skip is off")
+}
+
 func TestDocCompletenessSkipsTestFiles(t *testing.T) {
 	rule := NewDocCompletenessRule()
 
-	code := `package main
+	violations := rule.AnalyzeFile(docContext(t, "/src/main_test.go", `package main
 
 type User struct {}
-func GetUser() {}`
-
-	parser := core.NewParser()
-	ctx := core.NewFileContext("/src/main_test.go", "/src", []byte(code), core.DefaultConfig())
-	fset, astFile, err := parser.ParseGoFile("/src/main_test.go", []byte(code))
-	if err != nil {
-		t.Fatalf("Parse error: %v", err)
-	}
-	ctx.SetGoAST(fset, astFile)
-
-	violations := rule.AnalyzeFile(ctx)
+func GetUser() {}`))
 
 	assert.Empty(t, violations, "Should skip test files")
 }
