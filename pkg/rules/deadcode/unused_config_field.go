@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/types"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -157,9 +158,9 @@ func collectSerializedTypes(file *ast.File, info *types.Info, decoded, encoded m
 
 		var target map[*types.Named]bool
 		switch {
-		case contains(decodeFuncs, name):
+		case slices.Contains(decodeFuncs, name):
 			target = decoded
-		case contains(encodeFuncs, name):
+		case slices.Contains(encodeFuncs, name):
 			target = encoded
 		default:
 			return true
@@ -179,15 +180,6 @@ func calleeName(fun ast.Expr) string {
 		return f.Name
 	}
 	return ""
-}
-
-func contains(names []string, name string) bool {
-	for _, candidate := range names {
-		if candidate == name {
-			return true
-		}
-	}
-	return false
 }
 
 // addReachableStructs walks a type and records every named struct it can reach

@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -630,12 +631,7 @@ func durableEvidenceMatchesProvider(evidence []durableIntentEvidence, call *ast.
 }
 
 func containsDurableIntentEvidence(items []durableIntentEvidence, evidence durableIntentEvidence) bool {
-	for _, item := range items {
-		if item == evidence {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(items, evidence)
 }
 
 func canonicalProviderOperation(method string) string {
@@ -670,12 +666,7 @@ func providerReceiverName(expr ast.Expr) string {
 }
 
 func isGenericProviderReceiver(receiver string) bool {
-	for _, generic := range []string{"provider", "payment", "payout", "bank", "remit"} {
-		if receiver == generic {
-			return true
-		}
-	}
-	return false
+	return slices.Contains([]string{"provider", "payment", "payout", "bank", "remit"}, receiver)
 }
 
 func matchingSelectorCall(call *ast.CallExpr, methods map[string]bool, receiverMarkers []string) (string, bool) {
