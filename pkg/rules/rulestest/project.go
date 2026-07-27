@@ -3,6 +3,8 @@
 package rulestest
 
 import (
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"sort"
@@ -71,4 +73,25 @@ func load(t *testing.T, files map[string]string, withSSA bool) *core.GoProjectCo
 	project, err := core.LoadGoProject(root, contexts, withSSA)
 	require.NoError(t, err)
 	return project
+}
+
+// GoFile builds a file context with its Go syntax tree parsed, for rules that
+// analyze one file at a time.
+func GoFile(t *testing.T, path, source string) *core.FileContext {
+	t.Helper()
+
+	root := t.TempDir()
+	full := filepath.Join(root, path)
+	require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+	require.NoError(t, os.WriteFile(full, []byte(source), 0o644))
+
+	ctx, err := core.NewFileContextChecked(full, root, []byte(source), core.DefaultConfig())
+	require.NoError(t, err)
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, full, source, parser.ParseComments)
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, file)
+
+	return ctx
 }
