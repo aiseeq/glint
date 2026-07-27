@@ -2,6 +2,7 @@ package architecture
 
 import (
 	"go/ast"
+	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -198,8 +199,16 @@ func (r *SolidSRPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		return true
 	})
 
-	// Analyze each struct's methods for responsibility areas
-	for structName, methods := range structMethods {
+	// Analyze each struct's methods for responsibility areas, in a stable
+	// order: map iteration would shuffle the findings of one file between runs.
+	structNames := make([]string, 0, len(structMethods))
+	for structName := range structMethods {
+		structNames = append(structNames, structName)
+	}
+	sort.Strings(structNames)
+
+	for _, structName := range structNames {
+		methods := structMethods[structName]
 		line, exists := structPositions[structName]
 		if !exists {
 			continue
@@ -309,10 +318,13 @@ func detectResponsibilityAreas(methods []string) []string {
 		}
 	}
 
-	var areas []string
+	areas := make([]string, 0, len(detectedAreas))
 	for area := range detectedAreas {
 		areas = append(areas, area)
 	}
+	// The areas end up in the finding's message; map order would make the
+	// same code produce different text on every run.
+	sort.Strings(areas)
 
 	return areas
 }

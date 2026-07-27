@@ -12,8 +12,8 @@ Originally built to help AI agents understand codebases, but useful for any proj
 - **91 rules in 8 categories** — architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation (`glint rules` is always the authoritative list)
 - **Auto-fix support** — automatic fixes for common issues (v1.1+)
 - **Single-pass analysis** — files are read and parsed once, AST is cached
-- **Parallel execution** — utilizes all CPU cores
-- **YAML configuration** — with inheritance and per-rule exceptions
+- **Parallel execution** — reading, parsing and rule evaluation use all CPU cores; findings stay byte-for-byte reproducible
+- **YAML configuration** — with `extends` inheritance, severity overrides and per-rule exceptions
 - **Multiple output formats** — console, JSON, summary (optimized for AI agents)
 - **Go and TypeScript support** — regex and AST-based analysis
 

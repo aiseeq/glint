@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -433,29 +436,112 @@ func (o severityOverrides) apply(violation *core.Violation) {
 	}
 }
 
+// analyzeFiles runs every rule over every file. Stateless rules run in
+// parallel across files; rules that accumulate cross-file state run in a fixed
+// file order afterwards. Findings are collected per (file, rule) and only then
+// flattened, so the output does not depend on scheduling.
 func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides) core.ViolationList {
-	var allViolations core.ViolationList
-	for _, ctx := range contexts {
-		for _, rule := range enabledRules {
-			// Skip file entirely if it matches a rule-level exception
-			if cfg.IsFileExcepted(rule.Category(), rule.Name(), ctx.RelPath) {
-				continue
-			}
-			violations := rule.AnalyzeFile(ctx)
-			honorsSuppression := rules.HonorsSuppression(rule)
-			for _, violation := range violations {
-				if cfg.IsViolationExcepted(rule.Category(), rule.Name(), ctx.RelPath, violation) {
-					continue
+	if len(contexts) == 0 || len(enabledRules) == 0 {
+		return nil
+	}
+
+	stateful := make([]bool, len(enabledRules))
+	statefulCount := 0
+	for i, rule := range enabledRules {
+		if _, ok := rule.(rules.StatefulRule); ok {
+			stateful[i] = true
+			statefulCount++
+		}
+	}
+
+	found := make([][]core.ViolationList, len(contexts))
+	for i := range found {
+		found[i] = make([]core.ViolationList, len(enabledRules))
+	}
+
+	if statefulCount < len(enabledRules) {
+		runStatelessRules(contexts, enabledRules, stateful, cfg, overrides, found)
+	}
+	if statefulCount > 0 {
+		for fileIndex, ctx := range contexts {
+			for ruleIndex, rule := range enabledRules {
+				if stateful[ruleIndex] {
+					found[fileIndex][ruleIndex] = runRule(ctx, rule, cfg, overrides)
 				}
-				if honorsSuppression && ctx.IsSuppressed(violation.Line, rule.Name()) {
-					continue
-				}
-				overrides.apply(violation)
-				allViolations = append(allViolations, violation)
 			}
 		}
 	}
+
+	var allViolations core.ViolationList
+	for _, perRule := range found {
+		for _, violations := range perRule {
+			allViolations = append(allViolations, violations...)
+		}
+	}
 	return allViolations
+}
+
+// runStatelessRules spreads the files over a worker per CPU. Each worker owns
+// its own row of the result matrix, so no synchronization is needed beyond the
+// wait group.
+func runStatelessRules(contexts []*core.FileContext, enabledRules []rules.Rule, stateful []bool,
+	cfg *core.Config, overrides severityOverrides, found [][]core.ViolationList) {
+	workers := runtime.NumCPU()
+	if workers > len(contexts) {
+		workers = len(contexts)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				fileIndex := int(next.Add(1)) - 1
+				if fileIndex >= len(contexts) {
+					return
+				}
+				for ruleIndex, rule := range enabledRules {
+					if stateful[ruleIndex] {
+						continue
+					}
+					found[fileIndex][ruleIndex] = runRule(contexts[fileIndex], rule, cfg, overrides)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// runRule applies one rule to one file and filters the findings the same way
+// for every caller: rule exceptions, inline suppression, severity overrides.
+func runRule(ctx *core.FileContext, rule rules.Rule, cfg *core.Config, overrides severityOverrides) core.ViolationList {
+	if cfg.IsFileExcepted(rule.Category(), rule.Name(), ctx.RelPath) {
+		return nil
+	}
+
+	violations := rule.AnalyzeFile(ctx)
+	if len(violations) == 0 {
+		return nil
+	}
+
+	honorsSuppression := rules.HonorsSuppression(rule)
+	kept := make(core.ViolationList, 0, len(violations))
+	for _, violation := range violations {
+		if cfg.IsViolationExcepted(rule.Category(), rule.Name(), ctx.RelPath, violation) {
+			continue
+		}
+		if honorsSuppression && ctx.IsSuppressed(violation.Line, rule.Name()) {
+			continue
+		}
+		overrides.apply(violation)
+		kept = append(kept, violation)
+	}
+	return kept
 }
 
 func hasGoFiles(contexts []*core.FileContext) bool {
