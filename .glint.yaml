@@ -48,6 +48,17 @@ categories:
               initialize/run/auditRoles already return errors naming the SSA
               function and the malformed sink.
 
+  deadcode:
+    enabled: true
+    rules:
+      unused-config-field:
+        exceptions:
+          - file: "pkg/core/config.go"
+            line: 100
+            reason: >-
+              Exception.Reason documents why a suppression exists for whoever
+              reads .glint.yaml; the loader deliberately does not act on it.
+
   typesafety:
     enabled: true
 
