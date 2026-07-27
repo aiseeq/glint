@@ -21,8 +21,8 @@ func init() {
 // the lock", so touching the field without taking it again is deliberate.
 var lockedNameSuffixes = []string{"locked", "nolock", "unsafe", "unlocked"}
 
-// UnguardedSharedFieldRule detects a field that some methods protect with the
-// struct's mutex and others touch without it:
+// UnguardedSharedFieldRule detects a field that some methods protect with a
+// mutex and others touch without it:
 //
 //	func (c *Counter) Add(n int) { c.mu.Lock(); defer c.mu.Unlock(); c.value += n }
 //	func (c *Counter) Reset()    { c.value = 0 }   // same field, no lock
@@ -32,10 +32,13 @@ var lockedNameSuffixes = []string{"locked", "nolock", "unsafe", "unlocked"}
 // race detector only reports it when two goroutines happen to collide during a
 // test — so it survives review and CI and fails in production.
 //
-// Not flagged: fields no method ever guards (they may be immutable after
-// construction), helpers called from inside a critical section, methods whose
-// name promises the caller holds the lock (…Locked, …NoLock, …Unsafe), and
-// plain functions such as constructors, where the value is not shared yet.
+// A lock covers the object that owns it, at any depth: s.metrics.mu.Lock()
+// guards s.metrics.total, not s.other.
+//
+// Not flagged: fields no lock ever covers (they may be set once and only read
+// afterwards), helpers called from inside a critical section, methods whose name
+// promises the caller holds the lock (…Locked, …NoLock, …Unsafe), and plain
+// functions such as constructors, where the value is not shared yet.
 type UnguardedSharedFieldRule struct {
 	*rules.BaseRule
 }
@@ -60,25 +63,18 @@ func (r *UnguardedSharedFieldRule) AnalyzeFile(_ *core.FileContext) []*core.Viol
 // RequiresSSA reports that typed syntax is enough for this rule.
 func (r *UnguardedSharedFieldRule) RequiresSSA() bool { return false }
 
-// guardedType is a struct that owns at least one mutex.
-type guardedType struct {
-	named *types.Named
-	// mutexFields holds the field names of the mutexes; an embedded mutex is
-	// stored as "" because it is locked on the receiver itself.
-	mutexFields map[string]bool
-}
-
 // fieldAccess is one mention of a field inside a method of its own type.
 type fieldAccess struct {
 	fileCtx  *core.FileContext
 	pos      token.Pos
 	method   string
+	mutex    string
 	guarded  bool
 	mutating bool
 }
 
-// AnalyzeGoProject compares, for every mutex-owning type, where its fields are
-// touched under the lock and where they are not.
+// AnalyzeGoProject compares, for every field a lock covers somewhere, the places
+// that take the lock with the places that do not.
 func (r *UnguardedSharedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	if ctx == nil {
 		return nil, errors.New("unguarded shared field: nil Go project context")
@@ -89,11 +85,7 @@ func (r *UnguardedSharedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
 			return nil, errors.New("unguarded shared field: package has no typed syntax")
 		}
-		pkgViolations, err := r.analyzePackage(pkg)
-		if err != nil {
-			return nil, err
-		}
-		violations = append(violations, pkgViolations...)
+		violations = append(violations, r.analyzePackage(pkg)...)
 	}
 
 	sort.SliceStable(violations, func(i, j int) bool {
@@ -105,14 +97,10 @@ func (r *UnguardedSharedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	return violations, nil
 }
 
-func (r *UnguardedSharedFieldRule) analyzePackage(pkg *core.GoPackageContext) ([]*core.Violation, error) {
+func (r *UnguardedSharedFieldRule) analyzePackage(pkg *core.GoPackageContext) []*core.Violation {
 	info := pkg.Package.TypesInfo
-	guarded := collectGuardedTypes(pkg)
-	if len(guarded) == 0 {
-		return nil, nil
-	}
-
 	accesses := make(map[*types.Var][]fieldAccess)
+	fieldOrder := make([]*types.Var, 0)
 	calledUnderLock := make(map[string]bool)
 
 	for _, fileCtx := range pkg.Files {
@@ -124,164 +112,113 @@ func (r *UnguardedSharedFieldRule) analyzePackage(pkg *core.GoPackageContext) ([
 			if !ok || fn.Body == nil || fn.Recv == nil {
 				continue
 			}
-			owner, receiver, ok := methodOwner(fn, info, guarded)
+			receiver, ok := receiverName(fn)
 			if !ok {
 				continue
 			}
-			collectFieldAccesses(fileCtx, fn, receiver, owner, info, accesses, calledUnderLock)
+			collectFieldAccesses(fileCtx, fn, receiver, info, accesses, &fieldOrder, calledUnderLock)
 		}
 	}
 
 	var violations []*core.Violation
-	for field, list := range accesses {
+	for _, field := range fieldOrder {
+		list := accesses[field]
 		if !guardedByMutex(field, list) {
 			continue
 		}
+		mutex := guardingMutex(list)
 		for _, access := range list {
 			if access.guarded || calledUnderLock[access.method] || hasLockedName(access.method) {
 				continue
 			}
-			violations = append(violations, r.report(field, access, guarded))
+			violations = append(violations, r.report(field, access, mutex))
 		}
 	}
-	return violations, nil
+	return violations
 }
 
-func (r *UnguardedSharedFieldRule) report(field *types.Var, access fieldAccess, guarded map[*types.Named]guardedType) *core.Violation {
+func (r *UnguardedSharedFieldRule) report(field *types.Var, access fieldAccess, mutex string) *core.Violation {
 	line := access.fileCtx.LineForPos(access.pos)
 	v := r.CreateViolation(access.fileCtx.RelPath, line,
 		fmt.Sprintf("Field %q is guarded by %s in other methods but %s touches it without the lock — concurrent access is a data race",
-			field.Name(), mutexNames(guarded), access.method))
+			field.Name(), mutex, access.method))
 	v.WithCode(strings.TrimSpace(access.fileCtx.GetLine(line)))
-	v.WithSuggestion(fmt.Sprintf("Take the same lock in %s, or move the access into a helper the locked methods call",
-		access.method))
+	v.WithSuggestion(fmt.Sprintf("Take %s in %s too, or move the access into a helper the locked methods call",
+		mutex, access.method))
 	v.WithContext("pattern", "unguarded_shared_field")
 	v.WithContext("field", field.Name())
 	return v
 }
 
-// mutexNames renders the mutex field names of the analyzed types for the message.
-func mutexNames(guarded map[*types.Named]guardedType) string {
-	names := make([]string, 0, len(guarded))
-	seen := make(map[string]bool)
-	for _, entry := range guarded {
-		for name := range entry.mutexFields {
-			if name == "" {
-				name = "the embedded mutex"
-			}
-			if seen[name] {
-				continue
-			}
-			seen[name] = true
-			names = append(names, name)
+// guardedByMutex reports whether a lock is meant to protect this field.
+// A mutation under the lock says so outright. For a map, a slice or a channel,
+// reading it under the lock says so too, because the contents are what the lock
+// protects. A plain value merely read inside a critical section proves nothing:
+// a setting configured once before any goroutine starts is often read there by
+// accident.
+func guardedByMutex(field *types.Var, list []fieldAccess) bool {
+	contents := hasSharedContents(field.Type())
+	for _, access := range list {
+		if access.guarded && (access.mutating || contents) {
+			return true
 		}
 	}
-	sort.Strings(names)
-	return strings.Join(names, "/")
+	return false
 }
 
-// collectGuardedTypes returns the package's struct types that own a mutex.
-func collectGuardedTypes(pkg *core.GoPackageContext) map[*types.Named]guardedType {
-	guarded := make(map[*types.Named]guardedType)
-
-	for _, name := range pkg.Package.Types.Scope().Names() {
-		obj, ok := pkg.Package.Types.Scope().Lookup(name).(*types.TypeName)
-		if !ok {
-			continue
-		}
-		named, ok := obj.Type().(*types.Named)
-		if !ok {
-			continue
-		}
-		structType, ok := named.Underlying().(*types.Struct)
-		if !ok {
-			continue
-		}
-
-		mutexFields := make(map[string]bool)
-		for i := range structType.NumFields() {
-			field := structType.Field(i)
-			if !isMutexType(field.Type()) {
-				continue
-			}
-			if field.Embedded() {
-				mutexFields[""] = true
-				continue
-			}
-			mutexFields[field.Name()] = true
-		}
-		if len(mutexFields) > 0 {
-			guarded[named] = guardedType{named: named, mutexFields: mutexFields}
+// guardingMutex returns the lock that covers the field, for the message.
+func guardingMutex(list []fieldAccess) string {
+	for _, access := range list {
+		if access.guarded && access.mutex != "" {
+			return access.mutex
 		}
 	}
-
-	return guarded
+	return "a mutex"
 }
 
-// isMutexType reports whether the type is a sync mutex, by value or by pointer.
-func isMutexType(t types.Type) bool {
-	if ptr, ok := t.(*types.Pointer); ok {
-		t = ptr.Elem()
+// hasSharedContents reports whether the value behind the field is mutated
+// through the field rather than by replacing it.
+func hasSharedContents(t types.Type) bool {
+	switch t.Underlying().(type) {
+	case *types.Map, *types.Slice, *types.Chan:
+		return true
 	}
-	named, ok := t.(*types.Named)
-	if !ok || named.Obj().Pkg() == nil {
-		return false
-	}
-	if named.Obj().Pkg().Path() != "sync" {
-		return false
-	}
-	return named.Obj().Name() == "Mutex" || named.Obj().Name() == "RWMutex"
+	return false
 }
 
-// methodOwner returns the mutex-owning type the method belongs to, together
-// with the receiver name it is reached through.
-func methodOwner(fn *ast.FuncDecl, info *types.Info, guarded map[*types.Named]guardedType) (guardedType, string, bool) {
+func receiverName(fn *ast.FuncDecl) (string, bool) {
 	if len(fn.Recv.List) != 1 || len(fn.Recv.List[0].Names) != 1 {
-		return guardedType{}, "", false
+		return "", false
 	}
-	receiver := fn.Recv.List[0].Names[0].Name
-	if receiver == "" || receiver == "_" {
-		return guardedType{}, "", false
+	name := fn.Recv.List[0].Names[0].Name
+	if name == "" || name == "_" {
+		return "", false
 	}
-
-	obj, ok := info.Defs[fn.Recv.List[0].Names[0]].(*types.Var)
-	if !ok {
-		return guardedType{}, "", false
-	}
-	t := obj.Type()
-	if ptr, ok := t.(*types.Pointer); ok {
-		t = ptr.Elem()
-	}
-	named, ok := t.(*types.Named)
-	if !ok {
-		return guardedType{}, "", false
-	}
-	owner, ok := guarded[named]
-	return owner, receiver, ok
+	return name, true
 }
 
-// collectFieldAccesses records every `receiver.field` mention of the method and
-// whether it happens inside a critical section, plus the sibling methods the
-// critical sections call.
+// collectFieldAccesses records every `receiver.…` field mention of the method
+// and whether a lock covering it is held, plus the sibling methods the critical
+// sections call.
 func collectFieldAccesses(
 	fileCtx *core.FileContext,
 	fn *ast.FuncDecl,
 	receiver string,
-	owner guardedType,
 	info *types.Info,
 	accesses map[*types.Var][]fieldAccess,
+	fieldOrder *[]*types.Var,
 	calledUnderLock map[string]bool,
 ) {
-	sections := criticalSections(fn, receiver, owner.mutexFields)
-	mutations := mutatedSelectors(fn)
+	sections := criticalSections(fn, info)
+	mutations, atomicAccesses := mutatedSelectors(fn)
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
 		if !ok {
 			return true
 		}
-		base, ok := sel.X.(*ast.Ident)
-		if !ok || base.Name != receiver {
+		path := receiverChain(sel)
+		if path == "" || !strings.HasPrefix(path, receiver+".") {
 			return true
 		}
 
@@ -289,7 +226,7 @@ func collectFieldAccesses(
 		if !ok {
 			return true
 		}
-		inSection := within(sections, sel.Pos())
+		mutex, inSection := coveringSection(sections, path, sel.Pos())
 
 		switch selection.Kind() {
 		case types.FieldVal:
@@ -297,15 +234,29 @@ func collectFieldAccesses(
 			if !ok || isMutexType(field.Type()) {
 				return true
 			}
+			if atomicAccesses[sel.Pos()] {
+				return false
+			}
+			// Доступ через sync/atomic синхронизирован сам по себе — мьютекс ему не нужен.
+			if atomicAccesses[sel.Pos()] {
+				return false
+			}
+			if _, seen := accesses[field]; !seen {
+				*fieldOrder = append(*fieldOrder, field)
+			}
 			accesses[field] = append(accesses[field], fieldAccess{
 				fileCtx:  fileCtx,
 				pos:      sel.Pos(),
 				method:   fn.Name.Name,
+				mutex:    mutex,
 				guarded:  inSection,
 				mutating: mutations[sel.Pos()],
 			})
+			// The path stops here: `s.metrics.total` is an access to total, not
+			// to metrics.
+			return false
 		case types.MethodVal:
-			if inSection {
+			if inSection && !isMutexMethod(selection) {
 				calledUnderLock[sel.Sel.Name] = true
 			}
 		}
@@ -313,11 +264,12 @@ func collectFieldAccesses(
 	})
 }
 
-// mutatedSelectors returns the positions of the selectors the method writes to:
-// assignment targets, ++/--, map and slice element writes, delete arguments and
-// taken addresses.
-func mutatedSelectors(fn *ast.FuncDecl) map[token.Pos]bool {
-	mutated := make(map[token.Pos]bool)
+// mutatedSelectors returns the positions of the selectors the method writes to
+// — assignment targets, ++/--, map and slice element writes, delete arguments
+// and taken addresses — and, separately, those handed to sync/atomic.
+func mutatedSelectors(fn *ast.FuncDecl) (mutated, atomicAccess map[token.Pos]bool) {
+	mutated = make(map[token.Pos]bool)
+	atomicAccess = make(map[token.Pos]bool)
 
 	mark := func(expr ast.Expr) {
 		for {
@@ -330,6 +282,24 @@ func mutatedSelectors(fn *ast.FuncDecl) map[token.Pos]bool {
 				expr = e.X
 			case *ast.SelectorExpr:
 				mutated[e.Pos()] = true
+				return
+			default:
+				return
+			}
+		}
+	}
+
+	markAtomic := func(expr ast.Expr) {
+		for {
+			switch e := expr.(type) {
+			case *ast.IndexExpr:
+				expr = e.X
+			case *ast.StarExpr:
+				expr = e.X
+			case *ast.ParenExpr:
+				expr = e.X
+			case *ast.SelectorExpr:
+				atomicAccess[e.Pos()] = true
 				return
 			default:
 				return
@@ -353,127 +323,186 @@ func mutatedSelectors(fn *ast.FuncDecl) map[token.Pos]bool {
 			if ident, ok := node.Fun.(*ast.Ident); ok && ident.Name == "delete" && len(node.Args) > 0 {
 				mark(node.Args[0])
 			}
+			// atomic.AddInt64(&s.counter) synchronizes on its own: counting such
+			// an access as unguarded would demand a lock where none is needed.
+			if sel, ok := node.Fun.(*ast.SelectorExpr); ok {
+				if pkgIdent, ok := sel.X.(*ast.Ident); ok && pkgIdent.Name == "atomic" {
+					for _, arg := range node.Args {
+						if unary, ok := arg.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+							markAtomic(unary.X)
+						}
+					}
+				}
+			}
 		}
 		return true
 	})
 
-	return mutated
+	return mutated, atomicAccess
 }
 
-// criticalSection is the source range in which a lock is held.
+// criticalSection is the source range in which a lock is held, together with
+// the path of the object it covers: "s" for s.mu.Lock(), "s.metrics" for
+// s.metrics.mu.Lock().
 type criticalSection struct {
+	owner string
+	mutex string
 	start token.Pos
 	end   token.Pos
 }
 
-// criticalSections returns the ranges of the method body where one of the
-// receiver's mutexes is held. A deferred Unlock holds the lock until the end of
-// the body; an explicit Unlock ends the section where it is called.
-func criticalSections(fn *ast.FuncDecl, receiver string, mutexFields map[string]bool) []criticalSection {
-	type lockEvent struct {
-		pos      token.Pos
-		mutex    string
-		locking  bool
-		deferred bool
-	}
+// criticalSections returns the ranges of the method body where a lock is held.
+//
+// The Unlock that ends a section is the one standing beside the Lock in the same
+// statement list. An Unlock nested deeper — the classic `if closed { mu.Unlock();
+// return }` — releases the lock on its own path only, and the statements after
+// the if are still protected.
+func criticalSections(fn *ast.FuncDecl, info *types.Info) []criticalSection {
+	var sections []criticalSection
 
-	var events []lockEvent
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.DeferStmt:
-			if call, ok := unlockCall(node.Call); ok && ownedMutex(call.receiver, receiver, mutexFields) {
-				events = append(events, lockEvent{pos: node.Pos(), mutex: call.receiver, deferred: true})
-			}
-		case *ast.CallExpr:
-			if call, ok := lockCall(node); ok && ownedMutex(call.receiver, receiver, mutexFields) {
-				events = append(events, lockEvent{pos: node.Pos(), mutex: call.receiver, locking: true})
-				return true
-			}
-			if call, ok := unlockCall(node); ok && ownedMutex(call.receiver, receiver, mutexFields) {
-				events = append(events, lockEvent{pos: node.Pos(), mutex: call.receiver})
-			}
+		for _, list := range statementLists(n) {
+			sections = append(sections, sectionsInList(list, fn, info)...)
 		}
 		return true
 	})
 
-	sort.SliceStable(events, func(i, j int) bool { return events[i].pos < events[j].pos })
-
-	var sections []criticalSection
-	for i, event := range events {
-		if !event.locking {
-			continue
-		}
-		end := fn.Body.End()
-		for _, later := range events[i+1:] {
-			if later.locking || later.mutex != event.mutex {
-				continue
-			}
-			if later.deferred {
-				break // the lock is held until the body ends
-			}
-			end = later.pos
-			break
-		}
-		sections = append(sections, criticalSection{start: event.pos, end: end})
-	}
 	return sections
 }
 
-// ownedMutex reports whether the locked expression is one of the receiver's
-// mutex fields: "c.mu" for a named field, "c" for an embedded one.
-func ownedMutex(locked, receiver string, mutexFields map[string]bool) bool {
-	if locked == receiver {
-		return mutexFields[""]
+// statementLists returns the statement sequences a node holds directly.
+func statementLists(n ast.Node) [][]ast.Stmt {
+	switch node := n.(type) {
+	case *ast.BlockStmt:
+		return [][]ast.Stmt{node.List}
+	case *ast.CaseClause:
+		return [][]ast.Stmt{node.Body}
+	case *ast.CommClause:
+		return [][]ast.Stmt{node.Body}
 	}
-	name, ok := strings.CutPrefix(locked, receiver+".")
-	return ok && mutexFields[name]
+	return nil
 }
 
-func within(sections []criticalSection, pos token.Pos) bool {
-	for _, section := range sections {
-		if pos >= section.start && pos <= section.end {
-			return true
+// sectionsInList pairs each Lock in the list with the Unlock that follows it at
+// the same level, or with the end of the enclosing scope when there is none.
+func sectionsInList(list []ast.Stmt, fn *ast.FuncDecl, info *types.Info) []criticalSection {
+	var sections []criticalSection
+
+	for i, stmt := range list {
+		call, ok := callOf(stmt)
+		if !ok {
+			continue
 		}
+		owner, mutex, ok := mutexTarget(call, info, lockMethodNames)
+		if !ok {
+			continue
+		}
+
+		end := fn.Body.End()
+		for _, later := range list[i+1:] {
+			if deferred, ok := later.(*ast.DeferStmt); ok {
+				if _, deferredMutex, ok := mutexTarget(deferred.Call, info, unlockMethods); ok && deferredMutex == mutex {
+					break // the lock is held until the body ends
+				}
+				continue
+			}
+			laterCall, ok := callOf(later)
+			if !ok {
+				continue
+			}
+			if _, laterMutex, ok := mutexTarget(laterCall, info, unlockMethods); ok && laterMutex == mutex {
+				end = later.Pos()
+				break
+			}
+		}
+		sections = append(sections, criticalSection{owner: owner, mutex: mutex, start: stmt.Pos(), end: end})
 	}
-	return false
+
+	return sections
 }
 
-// guardedByMutex reports whether the mutex is meant to protect this field.
-// A mutation under the lock says so outright. For a reference type — a map, a
-// slice, a channel, a pointer — reading it under the lock says so too, because
-// the contents are what the lock protects. A plain value merely read inside a
-// critical section proves nothing: a setting configured once before any
-// goroutine starts is often read there by accident.
-func guardedByMutex(field *types.Var, list []fieldAccess) bool {
-	// Поле, которое ни один метод не меняет, — это зависимость, выставленная
-	// конструктором (logger, config, репозиторий). Гонки на нём нет, и мьютекс
-	// защищает не его, даже если оно читается внутри критической секции.
-	mutatedSomewhere := false
-	for _, access := range list {
-		if access.mutating {
-			mutatedSomewhere = true
-			break
-		}
+// callOf returns the call of a bare call statement.
+func callOf(stmt ast.Stmt) (*ast.CallExpr, bool) {
+	exprStmt, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return nil, false
 	}
-	if !mutatedSomewhere {
+	call, ok := exprStmt.X.(*ast.CallExpr)
+	return call, ok
+}
+
+// mutexTarget reports the object a Lock/Unlock call covers and the mutex path
+// used, for calls whose method really belongs to a sync mutex.
+func mutexTarget(call *ast.CallExpr, info *types.Info, methods map[string]bool) (owner, mutex string, ok bool) {
+	sel, isSelector := call.Fun.(*ast.SelectorExpr)
+	if !isSelector || !methods[sel.Sel.Name] {
+		return "", "", false
+	}
+	selection, found := info.Selections[sel]
+	if !found || !isMutexMethod(selection) {
+		return "", "", false
+	}
+
+	path := receiverChain(sel.X)
+	if path == "" {
+		return "", "", false
+	}
+	// c.mu.Lock() locks the field itself, so the object it covers is c;
+	// c.Lock() on an embedded mutex is already called on that object.
+	if isMutexType(info.TypeOf(sel.X)) {
+		return trimLastSegment(path), path, true
+	}
+	return path, path + ".(embedded)", true
+}
+
+func trimLastSegment(path string) string {
+	idx := strings.LastIndex(path, ".")
+	if idx < 0 {
+		return path
+	}
+	return path[:idx]
+}
+
+// isMutexMethod reports whether the selected method is declared on a sync mutex.
+func isMutexMethod(selection *types.Selection) bool {
+	fn, ok := selection.Obj().(*types.Func)
+	if !ok {
 		return false
 	}
-
-	reference := isReferenceType(field.Type())
-	for _, access := range list {
-		if access.guarded && (access.mutating || reference) {
-			return true
-		}
+	signature, ok := fn.Type().(*types.Signature)
+	if !ok || signature.Recv() == nil {
+		return false
 	}
-	return false
+	return isMutexType(signature.Recv().Type())
 }
 
-func isReferenceType(t types.Type) bool {
-	switch t.Underlying().(type) {
-	case *types.Map, *types.Slice, *types.Chan, *types.Pointer, *types.Interface:
-		return true
+// isMutexType reports whether the type is a sync mutex, by value or by pointer.
+func isMutexType(t types.Type) bool {
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
 	}
-	return false
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	if named.Obj().Pkg().Path() != "sync" {
+		return false
+	}
+	return named.Obj().Name() == "Mutex" || named.Obj().Name() == "RWMutex"
+}
+
+// coveringSection reports whether a lock covering the accessed path is held at
+// the position, and which mutex it is.
+func coveringSection(sections []criticalSection, path string, pos token.Pos) (string, bool) {
+	for _, section := range sections {
+		if pos < section.start || pos > section.end {
+			continue
+		}
+		if path == section.owner || strings.HasPrefix(path, section.owner+".") {
+			return section.mutex, true
+		}
+	}
+	return "", false
 }
 
 func hasLockedName(method string) bool {

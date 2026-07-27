@@ -270,6 +270,105 @@ func (r *Rule) Threshold() int {
 	assert.Empty(t, violations)
 }
 
+// Repro from projectA: the early-exit branch releases the lock and returns, so the
+// statements after the branch are still inside the critical section.
+func TestUnguardedSharedFieldRespectsEarlyUnlockInBranch(t *testing.T) {
+	violations := analyzeGuardedFields(t, `package cache
+
+import "sync"
+
+type Service struct {
+	mu     sync.Mutex
+	closed bool
+	queue  []int
+}
+
+func (s *Service) Enqueue(event int) bool {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false
+	}
+	s.queue = append(s.queue, event)
+	full := len(s.queue) >= 10
+	s.mu.Unlock()
+	return full
+}
+
+func (s *Service) Flush() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	batch := s.queue
+	s.queue = nil
+	return batch
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// A mutex of a nested object covers that object's fields.
+func TestUnguardedSharedFieldFollowsNestedMutex(t *testing.T) {
+	violations := analyzeGuardedFields(t, `package cache
+
+import "sync"
+
+type metrics struct {
+	mu    sync.Mutex
+	times []int
+}
+
+type Service struct {
+	metrics *metrics
+}
+
+func (s *Service) Record(d int) {
+	s.metrics.mu.Lock()
+	defer s.metrics.mu.Unlock()
+	s.metrics.times = append(s.metrics.times, d)
+}
+
+func (s *Service) Reset() {
+	s.metrics.times = nil
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "times")
+	assert.Contains(t, violations[0].Message, "s.metrics.mu")
+}
+
+// Repro from projectA: sync/atomic carries its own synchronization, so a counter
+// read with atomic.LoadInt64 needs no lock.
+func TestUnguardedSharedFieldIgnoresAtomicAccess(t *testing.T) {
+	violations := analyzeGuardedFields(t, `package cache
+
+import (
+	"sync"
+	"sync/atomic"
+)
+
+type Service struct {
+	mu    sync.Mutex
+	total int64
+	times []int
+}
+
+func (s *Service) Record(d int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.times = append(s.times, d)
+	atomic.AddInt64(&s.total, 1)
+}
+
+func (s *Service) Total() int64 {
+	return atomic.LoadInt64(&s.total)
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
 // A constructor holds the only reference to the value, so nothing can race yet.
 func TestUnguardedSharedFieldIgnoresConstructor(t *testing.T) {
 	violations := analyzeGuardedFields(t, `package cache

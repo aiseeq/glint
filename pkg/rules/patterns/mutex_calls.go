@@ -5,8 +5,9 @@ import "go/ast"
 // lockMethods and unlockMethods are the calls that open and close a critical
 // section on sync.Mutex and sync.RWMutex.
 var (
-	lockMethods   = map[string]string{"Lock": "Unlock", "RLock": "RUnlock"}
-	unlockMethods = map[string]bool{"Unlock": true, "RUnlock": true}
+	lockMethods     = map[string]string{"Lock": "Unlock", "RLock": "RUnlock"}
+	lockMethodNames = map[string]bool{"Lock": true, "RLock": true}
+	unlockMethods   = map[string]bool{"Unlock": true, "RUnlock": true}
 )
 
 // mutexCall describes a Lock/Unlock call: which mutex expression it acts on
