@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
 )
 
@@ -32,12 +33,38 @@ type CategoryConfig struct {
 	Rules            map[string]RuleConfig `yaml:"rules,omitempty"`
 }
 
+// UnmarshalYAML defaults Enabled to true. Without it, naming a category in
+// order to configure its rules would switch the whole category off, because
+// the zero value of a bool is false.
+func (c *CategoryConfig) UnmarshalYAML(value *yaml.Node) error {
+	type plainCategory CategoryConfig
+	decoded := plainCategory{Enabled: true}
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*c = CategoryConfig(decoded)
+	return nil
+}
+
 // RuleConfig contains rule-specific settings
 type RuleConfig struct {
 	Enabled    bool           `yaml:"enabled"`
 	Severity   string         `yaml:"severity,omitempty"`
 	Settings   map[string]any `yaml:"settings,omitempty"`
 	Exceptions []Exception    `yaml:"exceptions,omitempty"`
+}
+
+// UnmarshalYAML defaults Enabled to true, for the same reason as
+// CategoryConfig.UnmarshalYAML: setting a rule's severity, settings or
+// exceptions must not disable it as a side effect.
+func (r *RuleConfig) UnmarshalYAML(value *yaml.Node) error {
+	type plainRule RuleConfig
+	decoded := plainRule{Enabled: true}
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*r = RuleConfig(decoded)
+	return nil
 }
 
 // Exception defines when a rule should be skipped
@@ -79,9 +106,39 @@ func DefaultConfig() *Config {
 	}
 }
 
-// LoadConfig loads configuration from a file
+// maxConfigChain bounds how many `extends` hops a configuration may use.
+const maxConfigChain = 16
+
+// LoadConfig loads a configuration file, resolving its `extends` chain.
 func LoadConfig(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	cfg, err := loadConfigChain(path, make(map[string]bool))
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config %q: %w", path, err)
+	}
+	return cfg, nil
+}
+
+// loadConfigChain reads one config file and merges it on top of the config it
+// extends. `extends` is resolved relative to the directory of the file that
+// declares it.
+func loadConfigChain(path string, visiting map[string]bool) (*Config, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve config path %q: %w", path, err)
+	}
+	if visiting[absPath] {
+		return nil, fmt.Errorf("config extends cycle at %q", absPath)
+	}
+	if len(visiting) >= maxConfigChain {
+		return nil, fmt.Errorf("config extends chain longer than %d files at %q", maxConfigChain, absPath)
+	}
+	visiting[absPath] = true
+	defer delete(visiting, absPath)
+
+	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -91,7 +148,70 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	return &cfg, nil
+	if cfg.Extends == "" {
+		return &cfg, nil
+	}
+
+	basePath := cfg.Extends
+	if !filepath.IsAbs(basePath) {
+		basePath = filepath.Join(filepath.Dir(absPath), basePath)
+	}
+	base, err := loadConfigChain(basePath, visiting)
+	if err != nil {
+		return nil, fmt.Errorf("config %q extends %q: %w", absPath, cfg.Extends, err)
+	}
+	return MergeConfigs(base, &cfg), nil
+}
+
+// Validate reports configuration values that glint would otherwise have to
+// guess about: unparseable severities anywhere in the file.
+func (c *Config) Validate() error {
+	if c.Settings.MinSeverity != "" {
+		if _, err := ParseSeverity(c.Settings.MinSeverity); err != nil {
+			return fmt.Errorf("settings.min_severity: %w", err)
+		}
+	}
+	for name, cat := range c.Categories {
+		if cat.SeverityOverride != "" {
+			if _, err := ParseSeverity(cat.SeverityOverride); err != nil {
+				return fmt.Errorf("categories.%s.severity_override: %w", name, err)
+			}
+		}
+		for ruleName, ruleCfg := range cat.Rules {
+			if ruleCfg.Severity == "" {
+				continue
+			}
+			if _, err := ParseSeverity(ruleCfg.Severity); err != nil {
+				return fmt.Errorf("categories.%s.rules.%s.severity: %w", name, ruleName, err)
+			}
+		}
+	}
+	return nil
+}
+
+// SeverityOverrideFor returns the severity configured for a rule, if any. A
+// rule-level `severity` wins over its category's `severity_override`; when
+// neither is set the rule keeps the severity it reports itself.
+func (c *Config) SeverityOverrideFor(category, rule string) (Severity, bool, error) {
+	cat, ok := c.Categories[category]
+	if !ok {
+		return SeverityLow, false, nil
+	}
+	if ruleCfg, ok := cat.Rules[rule]; ok && ruleCfg.Severity != "" {
+		severity, err := ParseSeverity(ruleCfg.Severity)
+		if err != nil {
+			return SeverityLow, false, fmt.Errorf("categories.%s.rules.%s.severity: %w", category, rule, err)
+		}
+		return severity, true, nil
+	}
+	if cat.SeverityOverride != "" {
+		severity, err := ParseSeverity(cat.SeverityOverride)
+		if err != nil {
+			return SeverityLow, false, fmt.Errorf("categories.%s.severity_override: %w", category, err)
+		}
+		return severity, true, nil
+	}
+	return SeverityLow, false, nil
 }
 
 // FindConfig searches for .glint.yaml in the directory and its parents
@@ -323,46 +443,31 @@ func exceptionFunctionMatches(name string, violation *Violation) bool {
 	return false
 }
 
-// matchGlobPattern matches a path against a glob pattern, supporting ** for recursive match.
-// filepath.Match doesn't support ** so we handle it: **/foo/bar matches any path ending with /foo/bar.
+// matchGlobPattern matches a project-relative path against a glob pattern.
+// `*` matches within one path segment, `**` spans segments; a pattern without
+// a separator also matches the file's base name, so that "*_test.go" keeps
+// covering nested test files. This is the single glob implementation — path
+// exclusion and rule exceptions must both go through it.
 func matchGlobPattern(pattern, path string) bool {
-	if strings.Contains(pattern, "**") {
-		// Convert **/rest to suffix match: path must end with /rest (or match rest if ** is prefix)
-		suffix := strings.TrimPrefix(pattern, "**/")
-		if suffix != pattern {
-			// Pattern was **/something — check if path ends with /something or equals something
-			return strings.HasSuffix(path, "/"+suffix) || path == suffix ||
-				strings.Contains(path, "/"+suffix+"/")
-		}
-		// ** in the middle: split and check segments
-		parts := strings.SplitN(pattern, "**", 2)
-		prefix := strings.TrimSuffix(parts[0], "/")
-		suffix = strings.TrimPrefix(parts[1], "/")
-		prefixOK := prefix == "" || strings.HasPrefix(path, prefix+"/") || strings.HasPrefix(path, prefix)
-		suffixOK := suffix == "" || strings.HasSuffix(path, "/"+suffix) || strings.HasSuffix(path, suffix)
-		return prefixOK && suffixOK
-	}
-
-	// No **, use standard filepath.Match
-	matched, err := filepath.Match(pattern, path)
-	if err == nil && matched {
+	path = filepath.ToSlash(path)
+	if matched, err := doublestar.Match(pattern, path); err == nil && matched {
 		return true
 	}
-	// Also try basename
-	matched, err = filepath.Match(pattern, filepath.Base(path))
+	// A directory pattern also covers everything below it: "vendor/**" is what
+	// users write, but "vendor" alone reads as the whole tree too.
+	if strings.HasSuffix(pattern, "/**") {
+		if matched, err := doublestar.Match(strings.TrimSuffix(pattern, "/**"), path); err == nil && matched {
+			return true
+		}
+	}
+	matched, err := doublestar.Match(pattern, filepath.Base(path))
 	return err == nil && matched
 }
 
 // ShouldExclude checks if a path should be excluded based on glob patterns
 func (c *Config) ShouldExclude(path string) bool {
 	for _, pattern := range c.Settings.Exclude {
-		matched, err := filepath.Match(pattern, path)
-		if err == nil && matched {
-			return true
-		}
-		// Also try matching against the base name
-		matched, err = filepath.Match(pattern, filepath.Base(path))
-		if err == nil && matched {
+		if matchGlobPattern(pattern, path) {
 			return true
 		}
 	}

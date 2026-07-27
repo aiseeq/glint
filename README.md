@@ -60,28 +60,49 @@ Create `.glint.yaml` in your project root:
 ```yaml
 version: 1
 
+# Optional: start from another config file, resolved relative to this one.
+extends: ../shared/glint-base.yaml
+
 settings:
   exclude:
     - vendor/**
     - node_modules/**
     - "**/*_test.go"
   min_severity: medium
+  output: console
 
 categories:
   architecture:
     enabled: true
   patterns:
-    enabled: true
+    severity_override: high      # severity for every rule in this category
     rules:
       error-masking:
+        severity: critical       # wins over the category override
         exceptions:
           - files: "**/config/**"
             reason: "Config defaults are acceptable"
+      todo-comment:
+        enabled: false
   typesafety:
     enabled: true
 ```
 
-See [docs/configuration.md](docs/configuration.md) for full reference.
+Reference:
+
+| Key | Meaning |
+|-----|---------|
+| `extends` | Path to a base config merged under this one (relative to this file). |
+| `settings.exclude` | Glob patterns; `*` stays inside one path segment, `**` spans segments. A pattern without a separator also matches the base name. |
+| `settings.min_severity` | `low` / `medium` / `high` / `critical`. |
+| `settings.output` | `console` / `json` / `summary`. |
+| `categories.<name>.enabled` | Defaults to `true` — naming a category to configure its rules does not switch it off. |
+| `categories.<name>.severity_override` | Reported severity for every rule of the category. |
+| `categories.<name>.rules.<rule>.severity` | Reported severity for one rule; wins over the category override. |
+| `categories.<name>.rules.<rule>.exceptions` | `file` / `files` / `line` / `pattern` / `function` + `reason`. |
+
+Individual findings can also be silenced at the source with `//nolint:<rule>` or
+`// <rule>: safe — reason`, on the offending line or the line above it.
 
 ## Rules
 

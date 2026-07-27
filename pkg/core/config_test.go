@@ -81,9 +81,8 @@ func TestConfigIsRuleEnabled(t *testing.T) {
 func TestConfigShouldExclude(t *testing.T) {
 	cfg := DefaultConfig()
 
-	// Default exclusions use glob patterns
-	// Note: filepath.Match doesn't support ** like doublestar
-	// So we test with simple patterns
+	// Single-star patterns match within one path segment; ** is covered by
+	// TestShouldExcludeSupportsDoubleStar.
 	cfg.Settings.Exclude = []string{
 		"vendor/*",
 		"node_modules/*",
