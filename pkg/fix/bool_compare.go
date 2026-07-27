@@ -38,7 +38,7 @@ func (f *BoolCompareFixer) CanFix(v *core.Violation) bool {
 }
 
 // GenerateFix generates the fix for a violation
-func (f *BoolCompareFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) *Fix {
+func (f *BoolCompareFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) []*Fix {
 	if ctx == nil || v == nil {
 		return nil
 	}
@@ -51,16 +51,16 @@ func (f *BoolCompareFixer) GenerateFix(ctx *core.FileContext, v *core.Violation)
 
 	// Try each pattern
 	if fix := f.tryFixPattern(ctx.Path, v.Line, line, boolCompareRight, true, false); fix != nil {
-		return fix
+		return []*Fix{fix}
 	}
 	if fix := f.tryFixPattern(ctx.Path, v.Line, line, boolCompareLeft, true, true); fix != nil {
-		return fix
+		return []*Fix{fix}
 	}
 	if fix := f.tryFixPattern(ctx.Path, v.Line, line, boolNotCompareRight, false, false); fix != nil {
-		return fix
+		return []*Fix{fix}
 	}
 	if fix := f.tryFixPattern(ctx.Path, v.Line, line, boolNotCompareLeft, false, true); fix != nil {
-		return fix
+		return []*Fix{fix}
 	}
 
 	return nil

@@ -20,8 +20,10 @@ type Fixer interface {
 	// CanFix returns true if this fixer can fix the given violation
 	CanFix(v *core.Violation) bool
 
-	// GenerateFix returns the fix for a violation (nil if can't fix)
-	GenerateFix(ctx *core.FileContext, v *core.Violation) *Fix
+	// GenerateFix returns the edits that fix a violation, empty if it cannot.
+	// A fix often needs more than one edit: rewriting a call also means adding
+	// the import it now needs.
+	GenerateFix(ctx *core.FileContext, v *core.Violation) []*Fix
 }
 
 // Fix represents a single code fix
@@ -152,8 +154,10 @@ func (e *Engine) GenerateFixes(violations []*core.Violation, contexts map[string
 			continue
 		}
 
-		if fix := fixer.GenerateFix(ctx, v); fix != nil {
-			fixes = append(fixes, fix)
+		for _, fix := range fixer.GenerateFix(ctx, v) {
+			if fix != nil {
+				fixes = append(fixes, fix)
+			}
 		}
 	}
 

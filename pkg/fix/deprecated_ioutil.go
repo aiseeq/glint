@@ -37,7 +37,7 @@ func (f *DeprecatedIoutilFixer) CanFix(v *core.Violation) bool {
 }
 
 // GenerateFix generates the fix for a violation
-func (f *DeprecatedIoutilFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) *Fix {
+func (f *DeprecatedIoutilFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) []*Fix {
 	if ctx == nil || v == nil {
 		return nil
 	}
@@ -51,7 +51,7 @@ func (f *DeprecatedIoutilFixer) GenerateFix(ctx *core.FileContext, v *core.Viola
 	// Find which ioutil function is used
 	for old, replacement := range ioutilReplacements {
 		if strings.Contains(line, old) {
-			return &Fix{
+			return []*Fix{&Fix{
 				File:      ctx.Path,
 				StartLine: v.Line,
 				EndLine:   v.Line,
@@ -60,7 +60,7 @@ func (f *DeprecatedIoutilFixer) GenerateFix(ctx *core.FileContext, v *core.Viola
 				Message:   "Replace deprecated " + old + " with " + replacement,
 				RuleName:  "deprecated-ioutil",
 				Violation: v,
-			}
+			}}
 		}
 	}
 
