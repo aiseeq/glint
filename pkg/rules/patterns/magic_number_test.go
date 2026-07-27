@@ -17,6 +17,17 @@ func TestMagicNumberReportsInvalidIntegerLiteral(t *testing.T) {
 	assert.NotNil(t, rule.checkLiteral(ctx, &ast.BasicLit{Kind: token.INT, Value: "invalid"}))
 }
 
+// A uint64 constant is a perfectly valid Go literal that does not fit int64.
+// Reporting it as "Invalid integer literal: value out of range" was a false
+// positive on glint's own FNV offset basis.
+func TestMagicNumberAcceptsUint64Literal(t *testing.T) {
+	rule := NewMagicNumberRule()
+	ctx := core.NewFileContext("/src/service.go", "/src", nil, core.DefaultConfig())
+
+	assert.Nil(t, rule.checkLiteral(ctx, &ast.BasicLit{Kind: token.INT, Value: "14695981039346656037"}),
+		"a uint64 algorithm constant is not a magic number and not an invalid literal")
+}
+
 func TestMagicNumberRule(t *testing.T) {
 	rule := NewMagicNumberRule()
 

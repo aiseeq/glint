@@ -19,12 +19,24 @@ type TypeInfo struct {
 // TypeInferrer infers types from AST declarations within a file
 type TypeInferrer struct {
 	varTypes map[string]TypeInfo
+	// declared holds every name the file introduces, including the ones whose
+	// type could not be inferred. Rules use it to tell "this file says nothing
+	// about the name" apart from "the file declares it, but from an expression
+	// we cannot resolve" — only the former justifies guessing by name.
+	declared map[string]bool
+	// ambiguous marks names this file binds to more than one type. Inference
+	// is file-level, not scope-aware, so a struct field `fields []*ast.FieldList`
+	// and a parameter `fields *ast.FieldList` share one entry; treating either
+	// type as authoritative produces wrong answers.
+	ambiguous map[string]bool
 }
 
 // NewTypeInferrer creates a type inferrer and collects type info from the AST
 func NewTypeInferrer(file *ast.File) *TypeInferrer {
 	ti := &TypeInferrer{
-		varTypes: make(map[string]TypeInfo),
+		varTypes:  make(map[string]TypeInfo),
+		declared:  make(map[string]bool),
+		ambiguous: make(map[string]bool),
 	}
 	if file != nil {
 		ti.collectTypes(file)
@@ -35,7 +47,9 @@ func NewTypeInferrer(file *ast.File) *TypeInferrer {
 // NewTypeInferrerFromNode creates a type inferrer for a specific AST scope.
 func NewTypeInferrerFromNode(node ast.Node) *TypeInferrer {
 	ti := &TypeInferrer{
-		varTypes: make(map[string]TypeInfo),
+		varTypes:  make(map[string]TypeInfo),
+		declared:  make(map[string]bool),
+		ambiguous: make(map[string]bool),
 	}
 	if node != nil {
 		ti.collectTypes(node)
@@ -43,10 +57,39 @@ func NewTypeInferrerFromNode(node ast.Node) *TypeInferrer {
 	return ti
 }
 
-// GetType returns type info for a variable name
+// IsDeclared reports whether the analyzed scope introduces this name at all,
+// regardless of whether its type could be inferred.
+func (ti *TypeInferrer) IsDeclared(name string) bool {
+	return ti.declared[name]
+}
+
+// IsAmbiguous reports whether the file binds this name to more than one type.
+func (ti *TypeInferrer) IsAmbiguous(name string) bool {
+	return ti.ambiguous[name]
+}
+
+// GetType returns type info for a variable name. Names bound to several types
+// in the same file report no type at all rather than the first one seen.
 func (ti *TypeInferrer) GetType(name string) (TypeInfo, bool) {
+	if ti.ambiguous[name] {
+		return TypeInfo{}, false
+	}
 	info, ok := ti.varTypes[name]
 	return info, ok
+}
+
+// remember records a name's type, marking it ambiguous when the file already
+// bound the same name to a different one.
+func (ti *TypeInferrer) remember(name string, info TypeInfo) {
+	ti.declared[name] = true
+	existing, seen := ti.varTypes[name]
+	if !seen {
+		ti.varTypes[name] = info
+		return
+	}
+	if existing.TypeName != info.TypeName && info.TypeName != "" && existing.TypeName != "" {
+		ti.ambiguous[name] = true
+	}
 }
 
 // IsSlice checks if a variable is a slice
@@ -124,11 +167,7 @@ func (ti *TypeInferrer) processValueSpec(spec *ast.ValueSpec) {
 		if name.Name == "_" {
 			continue
 		}
-		if _, ok := ti.varTypes[name.Name]; ok {
-			// Earlier declaration (e.g. struct field) wins over later shadowing.
-			continue
-		}
-		ti.varTypes[name.Name] = typeInfo
+		ti.remember(name.Name, typeInfo)
 	}
 }
 
@@ -143,10 +182,7 @@ func (ti *TypeInferrer) processField(field *ast.Field) {
 		if name.Name == "_" {
 			continue
 		}
-		if _, ok := ti.varTypes[name.Name]; ok {
-			continue
-		}
-		ti.varTypes[name.Name] = typeInfo
+		ti.remember(name.Name, typeInfo)
 	}
 }
 
@@ -154,10 +190,6 @@ func (ti *TypeInferrer) processAssignment(assign *ast.AssignStmt) {
 	for i, lhs := range assign.Lhs {
 		ident, ok := lhs.(*ast.Ident)
 		if !ok || ident.Name == "_" {
-			continue
-		}
-
-		if _, ok := ti.varTypes[ident.Name]; ok {
 			continue
 		}
 
@@ -169,9 +201,7 @@ func (ti *TypeInferrer) processAssignment(assign *ast.AssignStmt) {
 			typeInfo = ti.analyzeExpr(assign.Rhs[0])
 		}
 
-		if typeInfo.TypeName != "" {
-			ti.varTypes[ident.Name] = typeInfo
-		}
+		ti.remember(ident.Name, typeInfo)
 	}
 }
 

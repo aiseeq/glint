@@ -12,9 +12,14 @@ func init() {
 	rules.Register(NewDuplicateBlockRule())
 }
 
-// minNonTrivialInBlock is how many meaningful lines a window must carry before
-// a repeat of it is worth reporting inside a single file.
-const minNonTrivialInBlock = 6
+const (
+	// minNonTrivialInBlock is how many meaningful lines a window must carry
+	// before a repeat of it is worth reporting inside a single file.
+	minNonTrivialInBlock = 6
+	// defaultBlockSize is how many consecutive lines have to repeat before a
+	// copy-paste inside one file is reported.
+	defaultBlockSize = 40
+)
 
 // DuplicateBlockRule detects duplicate code blocks within the same file
 type DuplicateBlockRule struct {
@@ -31,7 +36,7 @@ func NewDuplicateBlockRule() *DuplicateBlockRule {
 			"Detects duplicate code blocks within the same file (copy-paste detection)",
 			core.SeverityMedium,
 		),
-		minBlockSize: 40,
+		minBlockSize: defaultBlockSize,
 	}
 }
 
@@ -40,7 +45,7 @@ func (r *DuplicateBlockRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
-	r.minBlockSize = r.GetIntSetting("min_block_size", 40)
+	r.minBlockSize = r.GetIntSetting("min_block_size", defaultBlockSize)
 	return nil
 }
 

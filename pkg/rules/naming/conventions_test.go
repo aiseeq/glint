@@ -8,7 +8,7 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 )
 
-func TestNamingConventionsRule(t *testing.T) {
+func TestConventionsRule(t *testing.T) {
 	tests := []struct {
 		name           string
 		code           string
@@ -121,7 +121,7 @@ type ID int`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rule := NewNamingConventionsRule()
+			rule := NewConventionsRule()
 
 			parser := core.NewParser()
 			ctx := core.NewFileContext("/src/test.go", "/src", []byte(tt.code), core.DefaultConfig())

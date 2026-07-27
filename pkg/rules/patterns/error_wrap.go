@@ -52,7 +52,7 @@ func (r *ErrorWrapRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		}
 
 		// Find if-err-return patterns
-		for _, stmt := range fn.Body.List {
+		for i, stmt := range fn.Body.List {
 			ifStmt, ok := stmt.(*ast.IfStmt)
 			if !ok {
 				continue
@@ -60,6 +60,13 @@ func (r *ErrorWrapRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 			// Check for if err != nil pattern
 			if !r.isErrCheck(ifStmt.Cond) {
+				continue
+			}
+
+			// Delegating to the same method on an embedded type is a pass
+			// through, not a lost context: the caller of this method adds the
+			// context, and wrapping here would duplicate it.
+			if callee := errorSourceCallee(ifStmt, fn.Body.List[:i]); callee == fn.Name.Name {
 				continue
 			}
 
@@ -145,4 +152,53 @@ func (r *ErrorWrapRule) isBareErrorReturn(ret *ast.ReturnStmt) bool {
 	}
 
 	return ident.Name == "err"
+}
+
+// errorSourceCallee returns the name of the call that produced the error the
+// if-statement checks, looking at the statement's own initializer first and
+// then at the preceding statements. It returns "" when the source cannot be
+// identified.
+func errorSourceCallee(ifStmt *ast.IfStmt, before []ast.Stmt) string {
+	if init, ok := ifStmt.Init.(*ast.AssignStmt); ok {
+		if name := assignedCallName(init); name != "" {
+			return name
+		}
+	}
+	for i := len(before) - 1; i >= 0; i-- {
+		previous, ok := before[i].(*ast.AssignStmt)
+		if !ok || !assignsError(previous) {
+			continue
+		}
+		return assignedCallName(previous)
+	}
+	return ""
+}
+
+// assignsError reports whether the assignment binds a variable named "err".
+func assignsError(assign *ast.AssignStmt) bool {
+	for _, lhs := range assign.Lhs {
+		if ident, ok := lhs.(*ast.Ident); ok && ident.Name == "err" {
+			return true
+		}
+	}
+	return false
+}
+
+// assignedCallName returns the name of the function called on the right-hand
+// side of an assignment.
+func assignedCallName(assign *ast.AssignStmt) string {
+	if len(assign.Rhs) != 1 {
+		return ""
+	}
+	call, ok := assign.Rhs[0].(*ast.CallExpr)
+	if !ok {
+		return ""
+	}
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name
+	case *ast.SelectorExpr:
+		return fun.Sel.Name
+	}
+	return ""
 }

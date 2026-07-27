@@ -79,9 +79,9 @@ func (r *TechDebtRule) initPatterns() {
 			suggestion:  "Fix the broken feature or remove it",
 		},
 		"ignore_errors": {
-			// NOTE: Removed "non.?critical", "not critical", "safe to ignore" from pattern
-			// These phrases are often used to EXPLAIN why ignoring is safe, not as lazy markers
-			// Only flag explicit "ignore error" without explanation
+			// Only an explicit "ignore error" with no explanation counts.
+			// Phrases like "non-critical" or "safe to ignore" usually justify
+			// why ignoring is fine, so they are not lazy markers.
 			regex:       regexp.MustCompile(`(?i)//.*\b(ignore\s+errors?\s*$|игнорир\w*\s+ошибк\w*\s*$)`),
 			severity:    core.SeverityCritical,
 			description: "Ignoring errors without explanation - document why it's safe",

@@ -98,12 +98,15 @@ func (r *DocLinksRule) checkComment(ctx *core.FileContext, comment *ast.Comment)
 	}
 
 	// Check file references
-	fileRefs := r.fileRefPattern.FindAllStringSubmatch(text, -1)
-	for _, match := range fileRefs {
-		if len(match) > 1 {
-			if v := r.checkFileRef(ctx, pos.Line, match[1]); v != nil {
-				violations = append(violations, v)
-			}
+	for _, match := range r.fileRefPattern.FindAllStringSubmatchIndex(text, -1) {
+		if len(match) < 4 || match[2] < 0 {
+			continue
+		}
+		if isIllustration(text[:match[0]]) {
+			continue // "like \"file.go\"" names a shape, not a real file
+		}
+		if v := r.checkFileRef(ctx, pos.Line, text[match[2]:match[3]]); v != nil {
+			violations = append(violations, v)
 		}
 	}
 
@@ -146,7 +149,20 @@ func (r *DocLinksRule) checkURL(ctx *core.FileContext, line int, url string) *co
 }
 
 // checkFileRef checks if a file reference exists
+// illustrationLead marks a file reference that introduces an example rather
+// than pointing at a real file.
+var illustrationLead = regexp.MustCompile(`(?i)(?:\blike\b|\be\.g\.|\bsuch as\b|\bfor example\b|\bexample\b|\bformat\b)[^.]*$`)
+
+func isIllustration(before string) bool {
+	return illustrationLead.MatchString(before)
+}
+
 func (r *DocLinksRule) checkFileRef(ctx *core.FileContext, line int, fileRef string) *core.Violation {
+	// "path/to/..." is the conventional placeholder for "any path".
+	if strings.HasPrefix(fileRef, "path/to/") || strings.Contains(fileRef, "/path/to/") {
+		return nil
+	}
+
 	// Common config file names that exist in standard locations
 	// These are often referenced without full path in documentation
 	wellKnownConfigs := map[string]bool{

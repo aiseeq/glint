@@ -23,7 +23,8 @@ func init() {
 // comments. A tombstone is noise the moment the commit lands.
 //
 // Not flagged: behavior descriptions ("entries are removed after TTL"),
-// Deprecated: markers (deprecated-comment rule), policy quotes.
+// godoc deprecation markers (owned by the deprecated-comment rule), policy
+// quotes.
 type TombstoneCommentRule struct {
 	*rules.BaseRule
 	tombstone    *regexp.Regexp
@@ -46,7 +47,7 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 		tombstone: regexp.MustCompile(
 			`(?i)\b(?:removed|deleted)\b|удал[её]н[оаы]?(?:[^а-яё]|$)|больше не использ|no longer (?:used|needed|exists|supported)`),
 		behaviorAux: regexp.MustCompile(
-			`(?i)(?:\b(?:is|are|be|being|been|get|gets|got|to|soft)\s+|будут\s+|будет\s+|был[аио]?\s+|должн\w*\s+быть\s+|могут\s+быть\s+|не\s+|что\s+|сколько\s+)$`),
+			`(?i)(?:\b(?:is|are|be|being|been|get|gets|got|to|soft)\s+(?:\w+ly\s+)?|будут\s+|будет\s+|был[аио]?\s+|должн\w*\s+быть\s+|могут\s+быть\s+|не\s+|что\s+|сколько\s+)$`),
 		behaviorTail: regexp.MustCompile(
 			`(?i)^(?:\s+from\b|\s*(?:->|→))`),
 		policyLine: regexp.MustCompile(
@@ -96,31 +97,16 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 // commentTextOfLine returns the comment text of the line (without the //
 // marker), or "" when the line has no comment. Comment markers inside string
 // literals are ignored; block-comment continuation lines ("* text") count.
+// commentTextOfLine returns the text of a line's comment without its marker.
+// The marker itself is located by the canonical core.CommentPart, so that a
+// "//" inside a string literal never starts a comment.
 func commentTextOfLine(line string) string {
-	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(trimmed, "*") {
-		return strings.TrimPrefix(trimmed, "*")
-	}
-	quote := byte(0)
-	for i := 0; i < len(line)-1; i++ {
-		c := line[i]
-		if quote != 0 {
-			switch c {
-			case '\\':
-				i++
-			case quote:
-				quote = 0
-			}
-			continue
-		}
-		switch c {
-		case '\'', '"', '`':
-			quote = c
-		case '/':
-			if line[i+1] == '/' || line[i+1] == '*' {
-				return line[i+2:]
-			}
-		}
+	comment := core.CommentPart(line)
+	switch {
+	case strings.HasPrefix(comment, "//"), strings.HasPrefix(comment, "/*"):
+		return comment[2:]
+	case strings.HasPrefix(comment, "*"):
+		return comment[1:]
 	}
 	return ""
 }

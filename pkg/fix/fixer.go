@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -37,8 +38,11 @@ type Fix struct {
 	Violation *core.Violation
 }
 
-// FixResult represents the result of applying fixes
-type FixResult struct {
+// fixedFilePermissions is the mode used when a fixed file has to be created.
+const fixedFilePermissions = 0o644
+
+// Result represents the outcome of applying fixes to one file.
+type Result struct {
 	File         string
 	FixesApplied int
 	Fixes        []*Fix
@@ -159,25 +163,34 @@ func (e *Engine) GenerateFixes(violations []*core.Violation, contexts map[string
 }
 
 // ApplyFixes applies fixes to files
-func (e *Engine) ApplyFixes(fixes []*Fix) []FixResult {
+func (e *Engine) ApplyFixes(fixes []*Fix) []Result {
 	// Group fixes by file
 	byFile := make(map[string][]*Fix)
 	for _, fix := range fixes {
 		byFile[fix.File] = append(byFile[fix.File], fix)
 	}
 
-	var results []FixResult
-
-	for file, fileFixes := range byFile {
-		result := e.applyToFile(file, fileFixes)
-		results = append(results, result)
+	results := make([]Result, 0, len(byFile))
+	for _, file := range sortedFileNames(byFile) {
+		results = append(results, e.applyToFile(file, byFile[file]))
 	}
 
 	return results
 }
 
-func (e *Engine) applyToFile(file string, fixes []*Fix) FixResult {
-	result := FixResult{
+// sortedFileNames keeps the order of reported files stable: map iteration
+// would shuffle both the applied results and the preview between runs.
+func sortedFileNames(byFile map[string][]*Fix) []string {
+	files := make([]string, 0, len(byFile))
+	for file := range byFile {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+	return files
+}
+
+func (e *Engine) applyToFile(file string, fixes []*Fix) Result {
+	result := Result{
 		File:  file,
 		Fixes: fixes,
 	}
@@ -190,16 +203,12 @@ func (e *Engine) applyToFile(file string, fixes []*Fix) FixResult {
 
 	lines := strings.Split(string(content), "\n")
 
-	// Sort fixes by line in reverse order (apply from bottom to top)
+	// Apply from the bottom up, so that earlier fixes keep their line numbers.
 	sortedFixes := make([]*Fix, len(fixes))
 	copy(sortedFixes, fixes)
-	for i := 0; i < len(sortedFixes)-1; i++ {
-		for j := i + 1; j < len(sortedFixes); j++ {
-			if sortedFixes[i].StartLine < sortedFixes[j].StartLine {
-				sortedFixes[i], sortedFixes[j] = sortedFixes[j], sortedFixes[i]
-			}
-		}
-	}
+	sort.SliceStable(sortedFixes, func(i, j int) bool {
+		return sortedFixes[i].StartLine > sortedFixes[j].StartLine
+	})
 
 	// Apply each fix
 	for _, fix := range sortedFixes {
@@ -258,7 +267,7 @@ func (e *Engine) applyToFile(file string, fixes []*Fix) FixResult {
 
 	// Write back to file
 	newContent := strings.Join(lines, "\n")
-	if err := os.WriteFile(file, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(file, []byte(newContent), fixedFilePermissions); err != nil {
 		result.Error = fmt.Errorf("write file: %w", err)
 		return result
 	}
@@ -281,7 +290,8 @@ func (e *Engine) Preview(fixes []*Fix) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "PROPOSED FIXES (%d changes in %d files):\n\n", len(fixes), len(byFile))
 
-	for file, fileFixes := range byFile {
+	for _, file := range sortedFileNames(byFile) {
+		fileFixes := byFile[file]
 		relPath := file
 		if cwd, err := os.Getwd(); err == nil {
 			if rel, err := filepath.Rel(cwd, file); err == nil {

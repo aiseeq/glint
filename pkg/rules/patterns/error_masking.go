@@ -542,7 +542,7 @@ func (r *ErrorMaskingRule) analyzeTSFile(ctx *core.FileContext) []*core.Violatio
 
 		for patternName, pattern := range r.tsPatterns {
 			if pattern.MatchString(line) {
-				if r.isTSException(ctx.RelPath, line) {
+				if r.isTSException(ctx.RelPath) {
 					continue
 				}
 
@@ -613,7 +613,7 @@ func (r *ErrorMaskingRule) isGoException(path, line string) bool {
 }
 
 // isTSException checks if pattern match is a valid exception for TS
-func (r *ErrorMaskingRule) isTSException(path, line string) bool {
+func (r *ErrorMaskingRule) isTSException(path string) bool {
 	// next.config.js defaults
 	if strings.Contains(path, "next.config") {
 		return true

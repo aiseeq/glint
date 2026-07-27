@@ -42,7 +42,7 @@ func (r *GoModernRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			violations = append(violations, r.checkCallExpr(ctx, node)...)
 
 		case *ast.ForStmt:
-			violations = append(violations, r.checkForStmt(ctx, node)...)
+			violations = append(violations, r.checkForStmt()...)
 
 		}
 
@@ -80,7 +80,7 @@ func (r *GoModernRule) checkCallExpr(ctx *core.FileContext, call *ast.CallExpr) 
 }
 
 // checkForStmt checks for loop patterns that could be modernized
-func (r *GoModernRule) checkForStmt(ctx *core.FileContext, stmt *ast.ForStmt) []*core.Violation {
+func (r *GoModernRule) checkForStmt() []*core.Violation {
 	// ForStmt is a regular for loop, not a range loop
 	// Range loops are handled separately as ast.RangeStmt
 	// For now, we don't have specific patterns to check in regular for loops

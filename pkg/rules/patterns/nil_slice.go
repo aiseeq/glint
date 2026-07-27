@@ -136,6 +136,14 @@ func (r *NilSliceRule) isSliceVar(name string, inferrer *TypeInferrer) bool {
 		return info.IsSlice
 	}
 
+	// The file declares this name but its type could not be resolved (an
+	// assignment from a selector or an unknown call): guessing by name here
+	// flagged pointers such as `results := fn.Type.Results` and values with a
+	// documented nil contract such as regexp submatches.
+	if inferrer.IsDeclared(name) {
+		return false
+	}
+
 	// Fallback to heuristic for cases type inference can't catch
 	// (e.g., struct fields from other packages)
 	return r.looksLikeSliceByName(name)

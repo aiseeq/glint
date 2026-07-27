@@ -22,8 +22,12 @@ type Violation struct {
 	Suggestion string // How to fix it
 
 	// Context
-	Code    string         // The offending code snippet
-	Context map[string]any // Additional metadata
+	Code string // The offending code snippet
+	// Context carries rule-specific metadata consumed by config exceptions and
+	// by the JSON output. Every rule attaches its own keys, so the payload has
+	// no single schema to declare.
+	// any-in-public-contract: safe
+	Context map[string]any
 }
 
 // NewViolation creates a new violation with required fields

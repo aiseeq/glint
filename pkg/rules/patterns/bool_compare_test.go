@@ -204,3 +204,42 @@ func splitBoolCompareLines(s string) []string {
 	}
 	return lines
 }
+
+// Repro from glint's own fixer: a value read out of a map[string]any has to be
+// compared against true — it cannot be used as a condition on its own.
+func TestBoolCompareIgnoresNonBoolOperand(t *testing.T) {
+	code := `package svc
+
+type Violation struct {
+	Context map[string]any
+}
+
+func skip(v *Violation) bool {
+	if exception, ok := v.Context["exception"]; ok && exception == true {
+		return true
+	}
+	return false
+}
+`
+	ctx := createBoolCompareContext(t, "svc.go", code)
+	violations := NewBoolCompareRule().AnalyzeFile(ctx)
+	if len(violations) != 0 {
+		t.Fatalf("expected no findings, got %d: %s", len(violations), violations[0].Suggestion)
+	}
+}
+
+func TestBoolCompareStillReportsBoolVariable(t *testing.T) {
+	code := `package svc
+
+func check(enabled bool) bool {
+	if enabled == true {
+		return true
+	}
+	return false
+}
+`
+	ctx := createBoolCompareContext(t, "svc.go", code)
+	if violations := NewBoolCompareRule().AnalyzeFile(ctx); len(violations) != 1 {
+		t.Fatalf("got %d findings, want 1", len(violations))
+	}
+}

@@ -106,23 +106,22 @@ func (r *DeprecatedCommentRule) checkFuncDecl(ctx *core.FileContext, fn *ast.Fun
 		return nil
 	}
 
-	for _, comment := range fn.Doc.List {
-		if r.isDeprecatedComment(comment.Text) {
-			pos := ctx.PositionFor(fn.Name)
-			funcName := fn.Name.Name
-			if fn.Recv != nil && len(fn.Recv.List) > 0 {
-				funcName = r.getReceiverType(fn.Recv.List[0]) + "." + funcName
-			}
-
-			v := r.CreateViolation(ctx.RelPath, pos.Line,
-				"Function '"+funcName+"' is marked as deprecated - consider removal")
-			v.WithCode(strings.TrimSpace(comment.Text))
-			v.WithSuggestion("Remove deprecated function and update all callers")
-			return v
-		}
+	comment := r.deprecationMarker(fn.Doc)
+	if comment == nil {
+		return nil
 	}
 
-	return nil
+	pos := ctx.PositionFor(fn.Name)
+	funcName := fn.Name.Name
+	if fn.Recv != nil && len(fn.Recv.List) > 0 {
+		funcName = r.getReceiverType(fn.Recv.List[0]) + "." + funcName
+	}
+
+	v := r.CreateViolation(ctx.RelPath, pos.Line,
+		"Function '"+funcName+"' is marked as deprecated - consider removal")
+	v.WithCode(strings.TrimSpace(comment.Text))
+	v.WithSuggestion("Remove deprecated function and update all callers")
+	return v
 }
 
 // checkGenDecl checks if a type/const/var declaration has deprecated comments
@@ -131,40 +130,88 @@ func (r *DeprecatedCommentRule) checkGenDecl(ctx *core.FileContext, decl *ast.Ge
 		return nil
 	}
 
-	for _, comment := range decl.Doc.List {
-		if r.isDeprecatedComment(comment.Text) {
-			// Get the name of the first spec
-			if len(decl.Specs) == 0 {
-				continue
-			}
+	comment := r.deprecationMarker(decl.Doc)
+	if comment == nil || len(decl.Specs) == 0 {
+		return nil
+	}
 
-			var name string
-			var pos token.Pos
-			switch spec := decl.Specs[0].(type) {
-			case *ast.TypeSpec:
-				name = spec.Name.Name
-				pos = spec.Name.Pos()
-			case *ast.ValueSpec:
-				if len(spec.Names) > 0 {
-					name = spec.Names[0].Name
-					pos = spec.Names[0].Pos()
-				}
-			}
-
-			if name == "" {
-				continue
-			}
-
-			position := ctx.GoFileSet.Position(pos)
-			v := r.CreateViolation(ctx.RelPath, position.Line,
-				"Type/const '"+name+"' is marked as deprecated - consider removal")
-			v.WithCode(strings.TrimSpace(comment.Text))
-			v.WithSuggestion("Remove deprecated declaration and update all usages")
-			return v
+	var name string
+	var pos token.Pos
+	switch spec := decl.Specs[0].(type) {
+	case *ast.TypeSpec:
+		name = spec.Name.Name
+		pos = spec.Name.Pos()
+	case *ast.ValueSpec:
+		if len(spec.Names) > 0 {
+			name = spec.Names[0].Name
+			pos = spec.Names[0].Pos()
 		}
 	}
 
+	if name == "" {
+		return nil
+	}
+
+	v := r.CreateViolation(ctx.RelPath, ctx.LineForPos(pos),
+		"Type/const '"+name+"' is marked as deprecated - consider removal")
+	v.WithCode(strings.TrimSpace(comment.Text))
+	v.WithSuggestion("Remove deprecated declaration and update all usages")
+	return v
+}
+
+// deprecationMarker returns the doc line that marks this declaration as
+// deprecated, or nil. Two godoc conventions separate a marker from a mere
+// mention:
+//
+//   - an indented line is example code, not a statement about this
+//     declaration (a rule documenting the pattern it detects showed up as
+//     deprecated itself);
+//   - a loose phrase such as "legacy X" or "will be removed" only counts when
+//     it opens its own paragraph; continuing a sentence from the line above
+//     makes it prose. The canonical "Deprecated:" marker counts anywhere,
+//     since it is routinely written right after the summary line.
+func (r *DeprecatedCommentRule) deprecationMarker(doc *ast.CommentGroup) *ast.Comment {
+	if doc == nil {
+		return nil
+	}
+	for i, comment := range doc.List {
+		if isGodocExample(comment.Text) {
+			continue
+		}
+		if !r.isDeprecatedComment(comment.Text) {
+			continue
+		}
+		if isCanonicalDeprecationMarker(comment.Text) {
+			return comment
+		}
+		if i > 0 && !isBlankDocLine(doc.List[i-1].Text) {
+			continue
+		}
+		return comment
+	}
 	return nil
+}
+
+// canonicalDeprecation matches the godoc "Deprecated:" marker.
+var canonicalDeprecation = regexp.MustCompile(`(?i)^\s*//\s*deprecated\s*:`)
+
+func isCanonicalDeprecationMarker(text string) bool {
+	return canonicalDeprecation.MatchString(text)
+}
+
+// isGodocExample reports whether a doc line belongs to an indented code block.
+func isGodocExample(text string) bool {
+	body := strings.TrimPrefix(text, "//")
+	if body == text {
+		return false
+	}
+	return strings.HasPrefix(body, "\t") || strings.HasPrefix(body, "    ")
+}
+
+// isBlankDocLine reports whether a doc line is the empty "//" that separates
+// godoc paragraphs.
+func isBlankDocLine(text string) bool {
+	return strings.TrimSpace(strings.TrimPrefix(text, "//")) == ""
 }
 
 // isDeprecatedComment checks if comment matches deprecated patterns

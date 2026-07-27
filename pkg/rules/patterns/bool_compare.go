@@ -39,6 +39,8 @@ func (r *BoolCompareRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		return nil
 	}
 
+	typeInferrer := NewTypeInferrer(ctx.GoAST)
+
 	var violations []*core.Violation
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
@@ -77,6 +79,13 @@ func (r *BoolCompareRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			return true
 		}
 
+		// Comparing a non-bool operand against true/false is not redundant:
+		// a value read out of a map[string]any cannot be used as a condition
+		// on its own.
+		if !r.isKnownBool(other, typeInferrer) {
+			return true
+		}
+
 		line := r.getLineFromNode(ctx, binary)
 		var suggestion string
 
@@ -99,7 +108,6 @@ func (r *BoolCompareRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		v.WithSuggestion(suggestion)
 		v.WithContext("pattern", "bool_compare")
 		v.WithContext("compared_to", boolLit.Name)
-		_ = other // Could be used for more specific messages
 
 		violations = append(violations, v)
 
@@ -111,4 +119,27 @@ func (r *BoolCompareRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 func (r *BoolCompareRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
 	return ctx.LineFor(node)
+}
+
+// isKnownBool reports whether the operand compared against true/false is
+// itself a boolean. Names the file declares but whose type cannot be resolved
+// (a map[string]any lookup, an unknown call) are left alone: rewriting those
+// comparisons would not compile.
+func (r *BoolCompareRule) isKnownBool(expr ast.Expr, inferrer *TypeInferrer) bool {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		if info, ok := inferrer.GetType(e.Name); ok {
+			return info.TypeName == "bool"
+		}
+		return !inferrer.IsDeclared(e.Name)
+	case *ast.BinaryExpr:
+		// Comparisons and logical operators always produce a bool.
+		return true
+	case *ast.UnaryExpr:
+		return e.Op == token.NOT
+	case *ast.ParenExpr:
+		return r.isKnownBool(e.X, inferrer)
+	}
+	// Selectors and calls: no type information here, keep the finding.
+	return true
 }

@@ -169,10 +169,13 @@ func (r *AuditActorPropagationRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	return analyzer.violations, nil
 }
 
+// bitsPerTaintWord is how many values one word of the taint bitset holds.
+const bitsPerTaintWord = 64
+
 type auditTaintBits []uint64
 
 func newAuditTaintBits(size int) auditTaintBits {
-	return make(auditTaintBits, (size+63)/64)
+	return make(auditTaintBits, (size+bitsPerTaintWord-1)/bitsPerTaintWord)
 }
 
 func (bits auditTaintBits) clone() auditTaintBits {

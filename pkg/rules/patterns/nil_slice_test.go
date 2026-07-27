@@ -237,3 +237,87 @@ func splitNilSliceLines(s string) []string {
 	}
 	return lines
 }
+
+// Real repros from glint's own sources: a name from the "looks like a slice"
+// list can just as well be a pointer or an unknown type. Guessing by name when
+// the file actually declares the variable produced false positives.
+func TestNilSliceIgnoresDeclaredVariablesOfUnknownType(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+	}{
+		{
+			name: "pointer field named results",
+			code: `package svc
+
+import "go/ast"
+
+func hasSingleResult(fn *ast.FuncDecl) bool {
+	results := fn.Type.Results
+	if results == nil {
+		return false
+	}
+	return len(results.List) == 1
+}
+`,
+		},
+		{
+			name: "pointer parameter named fields",
+			code: `package svc
+
+import "go/ast"
+
+func declare(fields *ast.FieldList) {
+	if fields == nil {
+		return
+	}
+	_ = fields.List
+}
+`,
+		},
+		{
+			name: "regexp submatch keeps its documented nil contract",
+			code: `package svc
+
+import "regexp"
+
+func find(pattern *regexp.Regexp, content string) string {
+	matches := pattern.FindStringSubmatch(content)
+	if matches == nil {
+		return ""
+	}
+	return matches[0]
+}
+`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := createNilSliceContext(t, "svc.go", tc.code)
+			violations := NewNilSliceRule().AnalyzeFile(ctx)
+			if len(violations) != 0 {
+				t.Fatalf("expected no findings, got %d: %s", len(violations), violations[0].Suggestion)
+			}
+		})
+	}
+}
+
+// A genuine nil-slice comparison must still be reported.
+func TestNilSliceStillReportsDeclaredSlice(t *testing.T) {
+	ctx := createNilSliceContext(t, "svc.go", `package svc
+
+func process() int {
+	items := []string{}
+	if items == nil {
+		return 0
+	}
+	return len(items)
+}
+`)
+
+	violations := NewNilSliceRule().AnalyzeFile(ctx)
+	if len(violations) != 1 {
+		t.Fatalf("got %d findings, want 1", len(violations))
+	}
+}

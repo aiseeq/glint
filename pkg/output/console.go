@@ -17,6 +17,52 @@ const (
 	topIssuesLimit  = 5
 )
 
+// reportWriter accumulates the first write error so that report code reads as
+// a sequence of writes rather than a chain of identical error checks. Once a
+// write fails every later one is a no-op, and Err returns the failure.
+// ("Errors are values" — https://go.dev/blog/errors-are-values)
+type reportWriter struct {
+	w   io.Writer
+	err error
+}
+
+func newReportWriter(w io.Writer) *reportWriter {
+	return &reportWriter{w: w}
+}
+
+// line writes its arguments followed by a newline.
+func (rw *reportWriter) line(args ...any) {
+	if rw.err != nil {
+		return
+	}
+	_, rw.err = fmt.Fprintln(rw.w, args...)
+}
+
+// printf writes formatted text.
+func (rw *reportWriter) printf(format string, args ...any) {
+	if rw.err != nil {
+		return
+	}
+	_, rw.err = fmt.Fprintf(rw.w, format, args...)
+}
+
+// colored writes formatted text in the given color.
+func (rw *reportWriter) colored(c *color.Color, format string, args ...any) {
+	if rw.err != nil {
+		return
+	}
+	if c == nil {
+		rw.printf(format, args...)
+		return
+	}
+	_, rw.err = c.Fprintf(rw.w, format, args...)
+}
+
+// Err returns the first write error, if any.
+func (rw *reportWriter) Err() error {
+	return rw.err
+}
+
 // ConsoleOutput writes violations to console with colors
 type ConsoleOutput struct {
 	writer  io.Writer
@@ -54,57 +100,39 @@ func (c *ConsoleOutput) WithNoColor(v bool) *ConsoleOutput {
 
 // Write outputs violations to console
 func (c *ConsoleOutput) Write(violations core.ViolationList, stats Stats) error {
+	out := newReportWriter(c.writer)
+
 	if len(violations) == 0 {
-		return c.printSuccess(stats)
+		c.printSuccess(out, stats)
+		return out.Err()
 	}
 
-	if err := c.printHeader(stats); err != nil {
-		return err
-	}
-	if err := c.printViolations(violations); err != nil {
-		return err
-	}
+	c.printHeader(out, stats)
+	c.printViolations(out, violations)
+	c.printSummary(out, violations)
 
-	return c.printSummary(violations)
+	return out.Err()
 }
 
-func (c *ConsoleOutput) printHeader(stats Stats) error {
-	if err := writeLine(c.writer); err != nil {
-		return err
-	}
-	if err := writeLine(c.writer, "GLINT ANALYSIS RESULTS"); err != nil {
-		return err
-	}
-	if err := writeLine(c.writer, strings.Repeat("=", outputLineWidth)); err != nil {
-		return err
-	}
-	if err := writeFormatted(c.writer, "Files analyzed: %d\n", stats.FilesAnalyzed); err != nil {
-		return err
-	}
+func (c *ConsoleOutput) printHeader(out *reportWriter, stats Stats) {
+	out.line()
+	out.line("GLINT ANALYSIS RESULTS")
+	out.line(strings.Repeat("=", outputLineWidth))
+	out.printf("Files analyzed: %d\n", stats.FilesAnalyzed)
 	if stats.FilesSkipped > 0 {
-		if err := writeFormatted(c.writer, "Files skipped: %d\n", stats.FilesSkipped); err != nil {
-			return err
-		}
+		out.printf("Files skipped: %d\n", stats.FilesSkipped)
 	}
-	return writeLine(c.writer)
+	out.line()
 }
 
-func (c *ConsoleOutput) printSuccess(stats Stats) error {
-	green := color.New(color.FgGreen, color.Bold)
-
-	if err := writeLine(c.writer); err != nil {
-		return err
-	}
-	if _, err := green.Fprintln(c.writer, "No issues found!"); err != nil {
-		return err
-	}
-	if err := writeFormatted(c.writer, "Files analyzed: %d\n", stats.FilesAnalyzed); err != nil {
-		return err
-	}
-	return writeLine(c.writer)
+func (c *ConsoleOutput) printSuccess(out *reportWriter, stats Stats) {
+	out.line()
+	out.colored(color.New(color.FgGreen, color.Bold), "No issues found!\n")
+	out.printf("Files analyzed: %d\n", stats.FilesAnalyzed)
+	out.line()
 }
 
-func (c *ConsoleOutput) printViolations(violations core.ViolationList) error {
+func (c *ConsoleOutput) printViolations(out *reportWriter, violations core.ViolationList) {
 	// Group by file
 	byFile := make(map[string]core.ViolationList)
 	for _, v := range violations {
@@ -118,38 +146,28 @@ func (c *ConsoleOutput) printViolations(violations core.ViolationList) error {
 	}
 	sort.Strings(files)
 
-	// Print each file
+	cyan := color.New(color.FgCyan, color.Bold)
 	for _, file := range files {
 		fileViolations := byFile[file]
 
-		// Sort violations by line
-		sort.Slice(fileViolations, func(i, j int) bool {
-			return fileViolations[i].Line < fileViolations[j].Line
+		// Sort violations by line, then by rule so that equal lines keep a
+		// stable order.
+		sort.SliceStable(fileViolations, func(i, j int) bool {
+			if fileViolations[i].Line != fileViolations[j].Line {
+				return fileViolations[i].Line < fileViolations[j].Line
+			}
+			return fileViolations[i].Rule < fileViolations[j].Rule
 		})
 
-		// Print file header
-		cyan := color.New(color.FgCyan, color.Bold)
-		if _, err := cyan.Fprintf(c.writer, "%s\n", file); err != nil {
-			return err
-		}
-
-		// Print violations
+		out.colored(cyan, "%s\n", file)
 		for _, v := range fileViolations {
-			if err := c.printViolation(v); err != nil {
-				return err
-			}
+			c.printViolation(out, v)
 		}
-
-		if err := writeLine(c.writer); err != nil {
-			return err
-		}
+		out.line()
 	}
-
-	return nil
 }
 
-func (c *ConsoleOutput) printViolation(v *core.Violation) error {
-	// Severity color
+func (c *ConsoleOutput) printViolation(out *reportWriter, v *core.Violation) {
 	var sevColor *color.Color
 	switch v.Severity {
 	case core.SeverityCritical:
@@ -162,82 +180,42 @@ func (c *ConsoleOutput) printViolation(v *core.Violation) error {
 		sevColor = color.New(color.FgBlue)
 	}
 
-	// Line number
 	gray := color.New(color.FgHiBlack)
-	if _, err := gray.Fprintf(c.writer, "  %d: ", v.Line); err != nil {
-		return err
-	}
+	out.colored(gray, "  %d: ", v.Line)
+	out.colored(sevColor, "[%s] ", v.Severity.Label())
+	out.printf("%s ", v.Message)
+	out.colored(gray, "(%s)\n", v.Rule)
 
-	// Severity
-	if _, err := sevColor.Fprintf(c.writer, "[%s] ", v.Severity.Label()); err != nil {
-		return err
-	}
-
-	// Message
-	if err := writeFormatted(c.writer, "%s ", v.Message); err != nil {
-		return err
-	}
-
-	// Rule name
-	if _, err := gray.Fprintf(c.writer, "(%s)\n", v.Rule); err != nil {
-		return err
-	}
-
-	// Code snippet if available
 	if v.Code != "" {
-		if _, err := gray.Fprintf(c.writer, "     > %s\n", strings.TrimSpace(v.Code)); err != nil {
-			return err
-		}
+		out.colored(gray, "     > %s\n", strings.TrimSpace(v.Code))
 	}
-
-	// Suggestion if available
 	if v.Suggestion != "" {
-		green := color.New(color.FgGreen)
-		if _, err := green.Fprintf(c.writer, "     Suggestion: %s\n", v.Suggestion); err != nil {
-			return err
-		}
+		out.colored(color.New(color.FgGreen), "     Suggestion: %s\n", v.Suggestion)
 	}
-
-	return nil
 }
 
-func (c *ConsoleOutput) printSummary(violations core.ViolationList) error {
+func (c *ConsoleOutput) printSummary(out *reportWriter, violations core.ViolationList) {
 	counts := violations.CountBySeverity()
 
-	if err := writeLine(c.writer, strings.Repeat("-", outputLineWidth)); err != nil {
-		return err
-	}
-	if err := writeFormatted(c.writer, "SUMMARY: %d issues found\n", len(violations)); err != nil {
-		return err
-	}
+	out.line(strings.Repeat("-", outputLineWidth))
+	out.printf("SUMMARY: %d issues found\n", len(violations))
 
-	// Print counts by severity
-	if count, ok := counts[core.SeverityCritical]; ok && count > 0 {
-		red := color.New(color.FgRed, color.Bold)
-		if _, err := red.Fprintf(c.writer, "  Critical: %d\n", count); err != nil {
-			return err
-		}
-	}
-	if count, ok := counts[core.SeverityHigh]; ok && count > 0 {
-		red := color.New(color.FgRed)
-		if _, err := red.Fprintf(c.writer, "  High: %d\n", count); err != nil {
-			return err
-		}
-	}
-	if count, ok := counts[core.SeverityMedium]; ok && count > 0 {
-		yellow := color.New(color.FgYellow)
-		if _, err := yellow.Fprintf(c.writer, "  Medium: %d\n", count); err != nil {
-			return err
-		}
-	}
-	if count, ok := counts[core.SeverityLow]; ok && count > 0 {
-		blue := color.New(color.FgBlue)
-		if _, err := blue.Fprintf(c.writer, "  Low: %d\n", count); err != nil {
-			return err
+	for _, level := range []struct {
+		severity core.Severity
+		label    string
+		color    *color.Color
+	}{
+		{core.SeverityCritical, "Critical", color.New(color.FgRed, color.Bold)},
+		{core.SeverityHigh, "High", color.New(color.FgRed)},
+		{core.SeverityMedium, "Medium", color.New(color.FgYellow)},
+		{core.SeverityLow, "Low", color.New(color.FgBlue)},
+	} {
+		if count := counts[level.severity]; count > 0 {
+			out.colored(level.color, "  %s: %d\n", level.label, count)
 		}
 	}
 
-	return writeLine(c.writer)
+	out.line()
 }
 
 // Stats contains analysis statistics
@@ -268,37 +246,29 @@ func (s *SummaryOutput) WithWriter(w io.Writer) *SummaryOutput {
 
 // Write outputs a compact summary
 func (s *SummaryOutput) Write(violations core.ViolationList, stats Stats) error {
-	if err := s.printHeader(violations); err != nil {
-		return err
-	}
+	out := newReportWriter(s.writer)
 
+	s.printHeader(out, violations)
 	if len(violations) > 0 {
-		if err := s.printTopIssues(violations); err != nil {
-			return err
-		}
+		s.printTopIssues(out, violations)
 	}
+	out.printf("Files analyzed: %d | Duration: %.2fs\n", stats.FilesAnalyzed, stats.Duration)
 
-	return writeFormatted(s.writer, "Files analyzed: %d | Duration: %.2fs\n", stats.FilesAnalyzed, stats.Duration)
+	return out.Err()
 }
 
-func (s *SummaryOutput) printHeader(violations core.ViolationList) error {
+func (s *SummaryOutput) printHeader(out *reportWriter, violations core.ViolationList) {
 	counts := violations.CountBySeverity()
 
-	if err := writeLine(s.writer, "GLINT ANALYSIS SUMMARY"); err != nil {
-		return err
-	}
-	if err := writeLine(s.writer, "======================"); err != nil {
-		return err
-	}
-	if err := writeFormatted(s.writer, "Critical: %d | High: %d | Medium: %d | Low: %d\n",
+	out.line("GLINT ANALYSIS SUMMARY")
+	out.line("======================")
+	out.printf("Critical: %d | High: %d | Medium: %d | Low: %d\n",
 		counts[core.SeverityCritical],
 		counts[core.SeverityHigh],
 		counts[core.SeverityMedium],
 		counts[core.SeverityLow],
-	); err != nil {
-		return err
-	}
-	return writeLine(s.writer)
+	)
+	out.line()
 }
 
 type ruleCount struct {
@@ -307,39 +277,24 @@ type ruleCount struct {
 	sev   core.Severity
 }
 
-func (s *SummaryOutput) printTopIssues(violations core.ViolationList) error {
+func (s *SummaryOutput) printTopIssues(out *reportWriter, violations core.ViolationList) {
 	ruleCounts := s.buildRuleCounts(violations)
 
-	if err := writeLine(s.writer, "TOP ISSUES:"); err != nil {
-		return err
-	}
+	out.line("TOP ISSUES:")
 	limit := topIssuesLimit
 	if len(ruleCounts) < limit {
 		limit = len(ruleCounts)
 	}
 	for i := 0; i < limit; i++ {
 		rc := ruleCounts[i]
-		if err := writeFormatted(s.writer, "%d. [%s] %s: %d violations\n",
-			i+1, rc.sev.Label(), rc.rule, rc.count); err != nil {
-			return err
-		}
+		out.printf("%d. [%s] %s: %d violations\n", i+1, rc.sev.Label(), rc.rule, rc.count)
 	}
-	return writeLine(s.writer)
-}
-
-func writeLine(w io.Writer, args ...any) error {
-	_, err := fmt.Fprintln(w, args...)
-	return err
-}
-
-func writeFormatted(w io.Writer, format string, args ...any) error {
-	_, err := fmt.Fprintf(w, format, args...)
-	return err
+	out.line()
 }
 
 func (s *SummaryOutput) buildRuleCounts(violations core.ViolationList) []ruleCount {
 	byRule := violations.CountByRule()
-	var ruleCounts []ruleCount
+	ruleCounts := make([]ruleCount, 0, len(byRule))
 
 	for rule, count := range byRule {
 		var sev core.Severity
@@ -352,11 +307,16 @@ func (s *SummaryOutput) buildRuleCounts(violations core.ViolationList) []ruleCou
 		ruleCounts = append(ruleCounts, ruleCount{rule, count, sev})
 	}
 
+	// The rule name breaks ties: without it, equally severe and equally
+	// frequent rules would swap places between runs (map iteration order).
 	sort.Slice(ruleCounts, func(i, j int) bool {
 		if ruleCounts[i].sev != ruleCounts[j].sev {
 			return ruleCounts[i].sev > ruleCounts[j].sev
 		}
-		return ruleCounts[i].count > ruleCounts[j].count
+		if ruleCounts[i].count != ruleCounts[j].count {
+			return ruleCounts[i].count > ruleCounts[j].count
+		}
+		return ruleCounts[i].rule < ruleCounts[j].rule
 	})
 
 	return ruleCounts

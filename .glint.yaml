@@ -36,6 +36,17 @@ categories:
     rules:
       context-first:
         enabled: false
+      error-wrap:
+        exceptions:
+          - files: "pkg/core/**"
+            reason: >-
+              The loader, walker and config helpers each build their error with
+              fmt.Errorf naming the operation and the path; wrapping again at
+              the call site would only repeat that text.
+          - file: "audit_actor_propagation.go"
+            reason: >-
+              initialize/run/auditRoles already return errors naming the SSA
+              function and the malformed sink.
 
   typesafety:
     enabled: true
