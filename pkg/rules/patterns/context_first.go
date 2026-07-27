@@ -1,9 +1,9 @@
 package patterns
 
 import (
+	"fmt"
 	"go/ast"
 	"strings"
-	"unicode"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -13,7 +13,31 @@ func init() {
 	rules.Register(NewContextFirstRule())
 }
 
-// ContextFirstRule detects public functions without context.Context as first parameter
+// entryPointFuncs legitimately create the root context of the program.
+var entryPointFuncs = map[string]bool{"main": true, "init": true, "TestMain": true}
+
+// ContextFirstRule detects a function that needs a context, does not accept one,
+// and therefore invents its own:
+//
+//	func (s *Service) SyncWallet(address string) error {
+//	    ctx := context.Background()          // the caller's deadline is gone
+//	    return s.repo.Save(ctx, address)
+//	}
+//
+// The call chain silently stops being cancellable at this function: a request
+// the user aborted keeps running, a shutdown waits for work nobody needs, and a
+// deadline set three frames up applies to nothing below.
+//
+// The rule looks at what the function does, not at what it is called: a function
+// that hands no context to anything needs none, whatever its name. Functions
+// that already accept a context are the business of context-background, which
+// reports the same misuse from the other side.
+//
+// Not flagged: package main and the entry points init/TestMain, where the root
+// context of the program has to come from somewhere; contexts created for a
+// goroutine that outlives the call; and contexts whose cancel function is stored
+// rather than deferred, which belong to something started here and stopped
+// elsewhere.
 type ContextFirstRule struct {
 	*rules.BaseRule
 }
@@ -24,309 +48,189 @@ func NewContextFirstRule() *ContextFirstRule {
 		BaseRule: rules.NewBaseRule(
 			"context-first",
 			"patterns",
-			"Detects public functions without context.Context as first parameter",
+			"Detects functions that create their own context.Background instead of accepting one, breaking the caller's cancellation",
 			core.SeverityMedium,
 		),
 	}
 }
 
-// AnalyzeFile checks for context.Context as first parameter in public functions
+// AnalyzeFile reports every function that manufactures the context it should
+// have been given.
 func (r *ContextFirstRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.HasGoAST() || ctx.IsTestFile() {
+	if !ctx.IsGoFile() || !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
-
-	// Skip main package and test helpers
-	if r.shouldSkipFile(ctx.RelPath) {
+	// Package main is where the root context of the program is born; there is no
+	// caller above it to inherit one from.
+	if ctx.GoAST.Name != nil && ctx.GoAST.Name.Name == "main" {
 		return nil
 	}
 
 	var violations []*core.Violation
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Name == nil {
-			return true
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || fn.Name == nil {
+			continue
 		}
-
-		// Only check public functions (capitalized)
-		if !isPublic(fn.Name.Name) {
-			return true
+		if entryPointFuncs[fn.Name.Name] || hasContextParam(fn.Type) {
+			continue
 		}
-
-		// Skip special functions
-		if r.isSpecialFunction(fn) {
-			return true
+		for _, call := range manufacturedContexts(fn.Body) {
+			violations = append(violations, r.report(ctx, fn, call))
 		}
-		if r.hasNoParams(fn) {
-			return true
-		}
-
-		// Skip functions that return only error (like Close(), Flush())
-		if r.isSimpleOperation(fn) {
-			return true
-		}
-
-		// Skip constructors and factory functions
-		if r.isConstructor(fn.Name.Name) {
-			return true
-		}
-
-		// Check if first parameter is context.Context
-		if !r.hasContextFirstParam(fn) {
-			pos := ctx.PositionFor(fn)
-			funcName := fn.Name.Name
-			if fn.Recv != nil && len(fn.Recv.List) > 0 {
-				if typeName := getReceiverTypeName(fn.Recv.List[0].Type); typeName != "" {
-					funcName = typeName + "." + funcName
-				}
-			}
-
-			v := r.CreateViolation(ctx.RelPath, pos.Line,
-				funcName+" should have context.Context as first parameter")
-			v.WithCode(ctx.GetLine(pos.Line))
-			v.WithSuggestion("Add ctx context.Context as the first parameter for proper cancellation and deadline propagation")
-			violations = append(violations, v)
-		}
-
-		return true
-	})
+	}
 
 	return violations
 }
 
-func (r *ContextFirstRule) shouldSkipFile(path string) bool {
-	skipPatterns := []string{
-		"_test.go",
-		"/testdata/",
-		"/testing/",
-		"/test_",
-		"_mock",
-		"/mocks/",
-		"/generated/",
-		"main.go",
-	}
-
-	lowerPath := strings.ToLower(path)
-	for _, pattern := range skipPatterns {
-		if strings.Contains(lowerPath, pattern) {
-			return true
-		}
-	}
-	return false
+func (r *ContextFirstRule) report(ctx *core.FileContext, fn *ast.FuncDecl, call *ast.CallExpr) *core.Violation {
+	line := ctx.LineFor(call)
+	v := r.CreateViolation(ctx.RelPath, line,
+		fmt.Sprintf("%s takes no context but creates its own here — the caller's cancellation and deadline stop at this call",
+			qualifiedFuncName(fn)))
+	v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+	v.WithSuggestion(fmt.Sprintf("Accept ctx context.Context as the first parameter of %s and pass it down instead of creating a new one",
+		fn.Name.Name))
+	v.WithContext("pattern", "context_not_accepted")
+	v.WithContext("function", fn.Name.Name)
+	return v
 }
 
-func (r *ContextFirstRule) isSpecialFunction(fn *ast.FuncDecl) bool {
-	name := fn.Name.Name
-	specialNames := []string{
-		"init", "main",
-		"String", "Error", "MarshalJSON", "UnmarshalJSON",
-		"MarshalText", "UnmarshalText", "MarshalBinary", "UnmarshalBinary",
-		"Scan", "Value", // sql.Scanner, driver.Valuer
-		"ServeHTTP",     // http.Handler (context is in request)
-		"Unwrap",        // error interface method for unwrapping errors
-		"Commit",        // database transaction (context often stored in struct)
-		"Rollback",      // database transaction
-		"Ping",          // simple healthcheck operations
-		"Stats",         // statistics retrieval (no side effects)
-		"Write", "Read", // io.Writer/Reader interfaces
-		"Info", "Warn", "Debug", "Fatal", "Trace", // logging methods
-		"Cleanup", "Shutdown", "Dispose", // lifecycle
-		"HealthCheck", "ReadyCheck", "LiveCheck", // health checks
-		"Middleware", "Handler", "HandlerFunc", // HTTP middleware (context in request)
-		"Do", "Get", "Post", "Put", "Patch", "Delete", "Head", "Options", // HTTP methods
-		"Validate", "Validates", // validation (no I/O)
-		"Where", "Select", "OrderBy", "GroupBy", "Limit", "Offset", "Set", // SQL builder
-		"LeftJoin", "InnerJoin", "RightJoin", "OuterJoin", "Join", "From", // SQL joins
-		"WhereIf", "Having", "Union", "Distinct", // SQL clauses
-		"And", "Or", "Not", // SQL conditions
-		"Register", "Unregister", "Subscribe", "Unsubscribe", // event patterns
-		"Use", "With", "Version", // utility methods
-		"Has", "Float", "Sub", "Mul", "Div", "Add", "Neg", "Abs", // math/value type methods
-		"LessThan", "GreaterThan", "Equal", "Cmp", "Compare", // comparison methods
-		"Revoke", "Retrieve", "Resolve", "Rollback", // operations
-		"Keys", "Values", "Entries", "Items", // collection accessors
-		"Authenticate", "Authorize", // auth methods (context often in struct)
-		"HTTPStatusCode", "StatusCode", // status helpers
-		"Coalesce", "Min", "Max", "T", "Sign", "Router", "MountOnRouter", "CancelTransaction", // utility functions
-		"Ptr", "Ref", // pointer helpers
-		"Contains", "Float64", "Float32", "Int64", "Int32", // exact type helpers
-		"Deactivate", "Increment", "Decrement", // state operations
-		"Logout", "Login", // auth operations (context often in struct)
-		"Group", "Mount", "NotFound", "MethodNotAllowed", // router methods
-		"Select", "Handle", // handler methods
-		"Connect", "Disconnect", "Reconnect", // connection methods
-		"DSN", "URL", "URI", // config getters
-		"Count", "Length", "Size", "Len", // size methods
-		"Health", "Liveness", "Readiness", // health check handlers (context in request)
-		"Initialize", "InitializeDefaultContainer", "InitializeEnterpriseErrorSystem", // initialization functions
-		"ConfigurationNotLoaded", "QueryExecutionFailed", "HTTPRequestFailed", // error message methods
-		"RevokeAllSessions",         // session management
-		"Enable", "Disable", "Name", // middleware control methods
-		"CommitTransaction", "RollbackTransaction", // transaction methods
-		"Calculate",                    // calculation methods
-		"Now", "UTC", "Since", "Until", // time helpers (pure, no I/O)
-	}
+// manufacturedContexts returns the context.Background/TODO calls of the body
+// whose result is handed to another call — that is what makes the function the
+// place where cancellation ends, rather than a place that merely mentions a
+// context.
+func manufacturedContexts(body *ast.BlockStmt) []*ast.CallExpr {
+	var created []*ast.CallExpr
+	names := make(map[string]*ast.CallExpr)
+	deferredCancels := deferredCalls(body)
 
-	for _, special := range specialNames {
-		if name == special {
-			return true
-		}
-	}
-	if strings.HasPrefix(name, "Err") {
-		return true
-	}
-	if strings.Contains(name, "Currency") {
-		return true
-	}
-
-	// Pure function prefixes - no I/O, no need for context
-	purePrefixes := []string{
-		"Is", "Has", "Can", "Should", "Must", "Will", "Requires", // predicates
-		"Get", "Set", // accessors
-		"Valid", "Validate", "Check", "Verify", // validation
-		"Wrap", "Unwrap", "Handle", // error handling
-		"Marshal", "Unmarshal", "Encode", "Decode", "Serialize", "Deserialize", // serialization
-		"Sign", "Encrypt", "Decrypt", "Hash", // crypto (pure operations)
-		"Calculate", "Compute", "Convert", "Transform", "Format", "Normalize", // transformations
-		"Extract", "Split", "Join", "Trim", "Replace", // string/data manipulation
-		"Register", "Unregister", // registration (often init-time)
-		"Add", "Remove", "Append", "Prepend", "Insert", "Delete", // collection operations
-		"With", "Without", // builder pattern
-		"To", "From", "As", // conversion
-		"Apply", "Filter", "Map", "Reduce", "Sort", "Merge", // functional operations
-		"Contains", "ContainsKey", "ContainsValue", "Exists", "Lookup", "Find", // lookups (in-memory)
-		"Compare", "Equal", "Match", "Matches", // comparison
-		"Clone", "Copy", "Dup", // copying
-		"Or",                                    // alternative values
-		"Prepare", "Setup", "Configure", "Init", // initialization
-		"Enable", "Disable", "Activate", "Deactivate", // toggle operations
-		"Write", "Read", "Close", "Open", // I/O (often interface methods)
-		"Multi", "Safe", "Try", // wrapper patterns
-		"Generate", "Render", "Print", // output generation
-		"Detect",                         // pure classification/detection helpers
-		"Allowed", "Denied", "Permitted", // authorization checks
-		"Reset", "Update", "Refresh", // state operations
-		"Serve", "Benchmark", "Test", "Example", // special function types
-		"Array", "Slice", "Map", "Struct", // type conversion helpers
-		"Bool", "Int", "String", "Float", "Byte", // type helpers
-		"Canonical", "Standard", "Combine", // utility patterns
-		"Cannot", "Invalid", "Missing", "Unknown", // error message helpers
-		"Failed", "Unable", "Database", "Transaction", "Connection", // error patterns
-		"Require", "Assert", "Ensure", // assertion helpers
-		"Analyze", "Inspect", "Examine", // analysis helpers
-		"Authentication", "Authorization", // auth helpers (return strings/errors)
-		"Send", "Respond", "Reply", // HTTP response helpers
-		"Decimal", "Time", "UUID", "Null", "Nullable", "Jsonb", "Json", // type conversion
-		"Truncate", "Pad", "Smart", // string/data utilities
-		"Success", "Failure", "Result", // result helpers
-		"SLA", "Monitoring", "Logging", "Log", // observability
-		"Status", "Resource", "Start", "Stop", "Span", // lifecycle/tracing
-		"Required", "Optional", "Default", // field helpers
-		"List", "Enumerate", "Iterate", // listing operations
-		"Broadcast", "Emit", "Notify", "Dispatch", "Publish", // event operations
-		"Determine", "Resolve", "Decide", // decision helpers
-		"Clear", "Wipe", "Purge", // cleanup operations
-		"First", "Last", "Min", "Max", // accessor helpers
-		"Record", "Track", "Measure", // metrics (often context in struct)
-		"Finish", "Complete", "Finalize", // completion operations
-		"Name", "Type", "Kind", // metadata accessors
-		"Enforce",                // permission/security enforcement
-		"Increment", "Decrement", // counter operations
-		"Logout", "Login", // auth operations
-		"Select", "Choose", "Pick", // selection operations
-		"Error",                           // error helpers
-		"Health", "Liveness", "Readiness", // health checks (context in request)
-		"Cleanup", "Teardown", // cleanup operations
-		"Common", "Shared", "Global", // utility accessors
-		"Business", "Domain", // domain logic (often pure)
-		"Blockchain", "Detailed", // specific handlers
-		"LessThan", "GreaterThan", "EqualTo", // comparison methods
-		"Compound",             // calculation prefixes
-		"Next", "Prev", "Peek", // pure iterators/lookups
-	}
-
-	for _, prefix := range purePrefixes {
-		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
-			nextChar := rune(name[len(prefix)])
-			// Allow uppercase letter or digit after prefix (e.g., Float64, Int32)
-			if unicode.IsUpper(nextChar) || unicode.IsDigit(nextChar) || prefix == name {
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.GoStmt:
+			// A goroutine outliving the call has no caller context to inherit.
+			return false
+		case *ast.AssignStmt:
+			for i, rhs := range node.Rhs {
+				call, ok := rootContextCall(rhs)
+				if !ok || i >= len(node.Lhs) {
+					continue
+				}
+				if outlivesCall(node.Lhs, deferredCancels) {
+					continue
+				}
+				if ident, ok := node.Lhs[i].(*ast.Ident); ok {
+					names[ident.Name] = call
+				}
+			}
+		case *ast.CallExpr:
+			if _, building := rootContextCall(node); building {
+				// context.WithTimeout(context.Background(), d) still builds the
+				// context; what counts is where the result is handed over.
 				return true
 			}
+			for _, arg := range node.Args {
+				if call, ok := rootContextCall(arg); ok {
+					created = append(created, call)
+					continue
+				}
+				ident, ok := arg.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				if call, known := names[ident.Name]; known {
+					created = append(created, call)
+					delete(names, ident.Name)
+				}
+			}
 		}
-	}
+		return true
+	})
 
-	// Pure function suffixes
-	pureSuffixes := []string{
-		"Operations", "Interface", "Impl", // delegation/interface patterns
-		"Helper", "Helpers", "Utils", "Util", // utility functions
-		"Builder", "Factory", // builder pattern
-		"Handler", "Processor", // often have context in struct
-		"Validator", "Checker", // validation
-		"Formatter", "Converter", "Transformer", "Mapper", "Serializer", // transformations
-		"JSONB", "JSON", "XML", "YAML", // serialization helpers
-		"ByID", "ByName", "ByEmail", "ByKey", "ByValue", // lookup helpers
-		"Repo", "Repository", "Service", "Client", // dependency accessors
-		"Provider", "Manager", "Store", "Cache", // infrastructure accessors
-		"Config", "Logger", "Metrics", // infrastructure getters
-		"Columns", "Table", "Schema", "Query", // database metadata
-		"Command", "Action", "Task", // CLI/commands
-		"Response", "Request", // HTTP helpers
-		"ForTesting", "ForTests", "ForTest", // test helpers
-		"Quietly", "WithTimeout", // utility wrappers
-		"Address", "Network", "Path", "URL", // resource identifiers
-		"Middleware", "Interceptor", // HTTP middleware
-		"FromString", "FromNull", "FromNullable", "ToNullable", // conversions
-		"Strict",                                     // validation variants
-		"WithTrace", "Structured", "WithCorrelation", // logging variants
-		"Success", "Error", "Access", // response/status suffixes
-		"Exists", "Value", "Path", "Count", // JSONB/JSON query/accessor helpers
-		"Time", "Duration", "Retry", // timing helpers
-		"Event", "Session", "Token", // domain objects
-	}
-
-	for _, suffix := range pureSuffixes {
-		if strings.HasSuffix(name, suffix) {
-			return true
-		}
-	}
-
-	return false
+	return created
 }
 
-func (r *ContextFirstRule) hasNoParams(fn *ast.FuncDecl) bool {
-	return fn.Type == nil || fn.Type.Params == nil || len(fn.Type.Params.List) == 0
-}
-
-func (r *ContextFirstRule) isSimpleOperation(fn *ast.FuncDecl) bool {
-	// Skip simple operations like Close(), Flush(), Reset()
-	simpleOps := []string{"Close", "Flush", "Reset", "Clear", "Stop", "Start"}
-	for _, op := range simpleOps {
-		if fn.Name.Name == op {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *ContextFirstRule) isConstructor(name string) bool {
-	// New*, Make*, Create* without further params context expectation
-	return strings.HasPrefix(name, "New") ||
-		strings.HasPrefix(name, "Make") ||
-		strings.HasPrefix(name, "Create") ||
-		strings.HasPrefix(name, "Build") ||
-		strings.HasPrefix(name, "Parse") ||
-		strings.HasPrefix(name, "Load") ||
-		strings.HasPrefix(name, "Must")
-}
-
-func (r *ContextFirstRule) hasContextFirstParam(fn *ast.FuncDecl) bool {
-	if fn.Type.Params == nil || len(fn.Type.Params.List) == 0 {
+// outlivesCall reports whether the context being assigned belongs to something
+// that keeps running after the call returns: its cancel function is stored, or
+// handed on, instead of being deferred here. A scheduler started in one method
+// and stopped in another has no caller context to inherit.
+func outlivesCall(targets []ast.Expr, deferredCancels map[string]bool) bool {
+	if len(targets) < 2 {
 		return false
 	}
+	switch cancel := targets[1].(type) {
+	case *ast.Ident:
+		return cancel.Name != "_" && !deferredCancels[cancel.Name]
+	default:
+		// Assigned to a field or an index: the owner cancels it later.
+		return true
+	}
+}
 
-	firstParam := fn.Type.Params.List[0]
-	return isContextType(firstParam.Type)
+// deferredCalls returns the names of the functions the body defers.
+func deferredCalls(body *ast.BlockStmt) map[string]bool {
+	deferred := make(map[string]bool)
+	ast.Inspect(body, func(n ast.Node) bool {
+		stmt, ok := n.(*ast.DeferStmt)
+		if !ok {
+			return true
+		}
+		if ident, ok := stmt.Call.Fun.(*ast.Ident); ok {
+			deferred[ident.Name] = true
+		}
+		return true
+	})
+	return deferred
+}
+
+// rootContextCall reports whether the expression starts a fresh context chain,
+// seeing through the wrappers that derive from one: context.WithTimeout(context.
+// Background(), d) is still a root.
+func rootContextCall(expr ast.Expr) (*ast.CallExpr, bool) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil, false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return nil, false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok || pkg.Name != "context" {
+		return nil, false
+	}
+
+	if sel.Sel.Name == "Background" || sel.Sel.Name == "TODO" {
+		return call, true
+	}
+	if !strings.HasPrefix(sel.Sel.Name, "With") || len(call.Args) == 0 {
+		return nil, false
+	}
+	return rootContextCall(call.Args[0])
+}
+
+// hasContextParam reports whether the signature accepts a context.
+func hasContextParam(funcType *ast.FuncType) bool {
+	if funcType == nil || funcType.Params == nil {
+		return false
+	}
+	for _, param := range funcType.Params.List {
+		if isContextType(param.Type) {
+			return true
+		}
+	}
+	return false
+}
+
+func qualifiedFuncName(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return fn.Name.Name
+	}
+	if typeName := getReceiverTypeName(fn.Recv.List[0].Type); typeName != "" {
+		return typeName + "." + fn.Name.Name
+	}
+	return fn.Name.Name
 }
 
 func isContextType(expr ast.Expr) bool {
@@ -336,17 +240,10 @@ func isContextType(expr ast.Expr) bool {
 			return ident.Name == "context" && t.Sel.Name == "Context"
 		}
 	case *ast.Ident:
-		// Handle aliased imports like `ctx context.Context`
+		// An aliased import still names the type Context.
 		return t.Name == "Context"
 	}
 	return false
-}
-
-func isPublic(name string) bool {
-	if len(name) == 0 {
-		return false
-	}
-	return unicode.IsUpper(rune(name[0]))
 }
 
 func getReceiverTypeName(expr ast.Expr) string {
