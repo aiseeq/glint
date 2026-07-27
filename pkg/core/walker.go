@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -221,13 +222,7 @@ func (w *Walker) processFile(path string) (*FileContext, error) {
 // list comes from settings.skip_dirs, which defaults to DefaultSkipDirs — a
 // project whose own package is called build/ or out/ can override it.
 func (w *Walker) shouldSkipDir(name string) bool {
-	for _, skip := range w.config.SkipDirs() {
-		if name == skip {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(w.config.SkipDirs(), name)
 }
 
 // isAnalyzableFile returns true if file should be analyzed
