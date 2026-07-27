@@ -252,3 +252,48 @@ func TestUnusedFieldRejectsNilProject(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nil Go project context")
 }
+
+// Внутри метода generic-типа обращение c.field даёт поле инстанцированной структуры —
+// это другой *types.Var, чем объявление. Пока ключом был указатель, каждое такое чтение
+// терялось и любое generic-поле объявлялось мёртвым.
+func TestUnusedFieldSeesReadsInsideGenericType(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"cache.go": `package cache
+
+type box[T any] struct {
+	fetch func() T
+	val   T
+	dead  int
+}
+
+func (b *box[T]) get() T {
+	b.val = b.fetch()
+	return b.val
+}
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "dead")
+}
+
+// Generic-тип, инстанцированный извне: чтение через конкретный аргумент типа тоже
+// должно засчитываться объявленному полю.
+func TestUnusedFieldSeesReadsThroughInstantiatedGeneric(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"cache.go": `package cache
+
+type pair[T any] struct {
+	first  T
+	second T
+}
+
+func firstOf(p *pair[string]) string {
+	return p.first
+}
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "second")
+}

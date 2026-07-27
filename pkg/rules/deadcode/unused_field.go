@@ -73,8 +73,11 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 	}
 
 	var declared []declaredField
-	read := make(map[*types.Var]bool)
-	written := make(map[*types.Var]bool)
+	// Ключ — позиция объявления поля, а не *types.Var: у generic-типа обращение внутри
+	// метода даёт поле инстанцированной структуры (другой *types.Var), и сравнение по
+	// указателю теряло все чтения generic-полей.
+	read := make(map[token.Pos]bool)
+	written := make(map[token.Pos]bool)
 	compared := make(map[*types.Struct]bool)
 
 	for _, pkg := range ctx.Packages {
@@ -97,10 +100,10 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 
 	var violations []*core.Violation
 	for _, field := range declared {
-		if read[field.obj] || compared[field.owner] {
+		if read[field.obj.Pos()] || compared[field.owner] {
 			continue
 		}
-		violations = append(violations, r.report(field, written[field.obj]))
+		violations = append(violations, r.report(field, written[field.obj.Pos()]))
 	}
 
 	sort.SliceStable(violations, func(i, j int) bool {
@@ -228,7 +231,7 @@ func underlyingMap(t types.Type) (*types.Map, bool) {
 
 // collectFieldReads separates the mentions that consume a field's value from the
 // ones that only set it.
-func collectFieldReads(file *ast.File, info *types.Info, read, written map[*types.Var]bool) {
+func collectFieldReads(file *ast.File, info *types.Info, read, written map[token.Pos]bool) {
 	writeOnly := writtenSelectors(file)
 
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -243,10 +246,10 @@ func collectFieldReads(file *ast.File, info *types.Info, read, written map[*type
 				return true
 			}
 			if writeOnly[node] {
-				written[field] = true
+				written[field.Pos()] = true
 				return true
 			}
-			read[field] = true
+			read[field.Pos()] = true
 		case *ast.CompositeLit:
 			for _, elt := range node.Elts {
 				kv, ok := elt.(*ast.KeyValueExpr)
@@ -258,7 +261,7 @@ func collectFieldReads(file *ast.File, info *types.Info, read, written map[*type
 					continue
 				}
 				if field, ok := info.Uses[ident].(*types.Var); ok {
-					written[field] = true
+					written[field.Pos()] = true
 				}
 			}
 		}
