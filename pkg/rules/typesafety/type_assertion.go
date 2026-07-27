@@ -40,10 +40,6 @@ func (r *TypeAssertionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	}
 
 	var violations []*core.Violation
-	fset := ctx.GoFileSet
-	if fset == nil {
-		fset = token.NewFileSet()
-	}
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		switch stmt := n.(type) {

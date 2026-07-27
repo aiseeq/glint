@@ -3,7 +3,9 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -165,7 +167,8 @@ func (r *ErrorMaskingRule) analyzeGoRegex(ctx *core.FileContext) []*core.Violati
 			continue
 		}
 
-		for patternName, pattern := range r.goPatterns {
+		for _, patternName := range slices.Sorted(maps.Keys(r.goPatterns)) {
+			pattern := r.goPatterns[patternName]
 			if pattern.MatchString(line) {
 				if r.isGoException(ctx.RelPath, line) {
 					continue
@@ -540,7 +543,8 @@ func (r *ErrorMaskingRule) analyzeTSFile(ctx *core.FileContext) []*core.Violatio
 			continue
 		}
 
-		for patternName, pattern := range r.tsPatterns {
+		for _, patternName := range slices.Sorted(maps.Keys(r.tsPatterns)) {
+			pattern := r.tsPatterns[patternName]
 			if pattern.MatchString(line) {
 				if r.isTSException(ctx.RelPath) {
 					continue

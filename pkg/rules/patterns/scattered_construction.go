@@ -3,6 +3,8 @@ package patterns
 import (
 	"fmt"
 	"go/ast"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -113,7 +115,8 @@ func (r *ScatteredConstructionRule) collectConstructions(ctx *core.FileContext) 
 func (r *ScatteredConstructionRule) reportViolations(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 
-	for typeName, sites := range r.constructions {
+	for _, typeName := range slices.Sorted(maps.Keys(r.constructions)) {
+		sites := r.constructions[typeName]
 		uniqueFuncs := make(map[string]bool)
 		for _, s := range sites {
 			uniqueFuncs[s.file+":"+s.funcN] = true

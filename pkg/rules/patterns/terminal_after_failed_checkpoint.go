@@ -3,6 +3,8 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -93,8 +95,8 @@ func (s *checkpointLexicalScope) lookup(name string) (checkpointBindingID, bool)
 
 func (s *checkpointLexicalScope) declaredBindings() []checkpointBindingID {
 	bindings := make([]checkpointBindingID, 0, len(s.bindings))
-	for _, binding := range s.bindings {
-		bindings = append(bindings, binding)
+	for _, name := range slices.Sorted(maps.Keys(s.bindings)) {
+		bindings = append(bindings, s.bindings[name])
 	}
 	return bindings
 }
