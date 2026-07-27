@@ -45,10 +45,13 @@ func (c *Config) SkipDirs() []string {
 
 // CategoryConfig contains category-specific settings
 type CategoryConfig struct {
-	Enabled          bool                  `yaml:"enabled"`
-	SeverityOverride string                `yaml:"severity_override,omitempty"`
-	Settings         map[string]any        `yaml:"settings,omitempty"`
-	Rules            map[string]RuleConfig `yaml:"rules,omitempty"`
+	Enabled          bool   `yaml:"enabled"`
+	SeverityOverride string `yaml:"severity_override,omitempty"`
+	// Rule settings are user-authored YAML whose shape each rule defines; a
+	// typed struct here would have to know all of them.
+	// any-in-public-contract: safe
+	Settings map[string]any        `yaml:"settings,omitempty"`
+	Rules    map[string]RuleConfig `yaml:"rules,omitempty"`
 }
 
 // UnmarshalYAML defaults Enabled to true. Without it, naming a category in
@@ -66,8 +69,10 @@ func (c *CategoryConfig) UnmarshalYAML(value *yaml.Node) error {
 
 // RuleConfig contains rule-specific settings
 type RuleConfig struct {
-	Enabled    bool           `yaml:"enabled"`
-	Severity   string         `yaml:"severity,omitempty"`
+	Enabled  bool   `yaml:"enabled"`
+	Severity string `yaml:"severity,omitempty"`
+	// See CategoryConfig.Settings.
+	// any-in-public-contract: safe
 	Settings   map[string]any `yaml:"settings,omitempty"`
 	Exceptions []Exception    `yaml:"exceptions,omitempty"`
 }

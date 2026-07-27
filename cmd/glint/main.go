@@ -168,7 +168,7 @@ func init() {
 	rootCmd.AddCommand(fixCmd)
 }
 
-func runCheck(cmd *cobra.Command, args []string) error {
+func runCheck(_ *cobra.Command, args []string) error {
 	startTime := time.Now()
 
 	projectRoots, err := getProjectRoots(args)
@@ -641,7 +641,7 @@ func outputResults(format string, violations core.ViolationList, stats output.St
 	}
 }
 
-func runRules(cmd *cobra.Command, args []string) error {
+func runRules(_ *cobra.Command, _ []string) error {
 	allRules := rules.All()
 
 	if flagCategory != "" {
@@ -682,7 +682,7 @@ func runRules(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runExplain(cmd *cobra.Command, args []string) error {
+func runExplain(_ *cobra.Command, args []string) error {
 	ruleName := args[0]
 
 	rule, ok := rules.Get(ruleName)
@@ -705,7 +705,7 @@ func runExplain(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runInit(cmd *cobra.Command, args []string) error {
+func runInit(_ *cobra.Command, _ []string) error {
 	configContent := `# Glint configuration
 # See: https://github.com/aiseeq/glint
 
@@ -749,7 +749,7 @@ categories:
 	return nil
 }
 
-func runConfigShow(cmd *cobra.Command, args []string) error {
+func runConfigShow(_ *cobra.Command, _ []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -782,7 +782,7 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runConfigValidate(cmd *cobra.Command, args []string) error {
+func runConfigValidate(_ *cobra.Command, _ []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -807,7 +807,7 @@ func runConfigValidate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runFix(cmd *cobra.Command, args []string) error {
+func runFix(_ *cobra.Command, args []string) error {
 	projectRoots, err := getProjectRoots(args)
 	if err != nil {
 		return err

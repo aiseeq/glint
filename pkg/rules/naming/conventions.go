@@ -10,19 +10,19 @@ import (
 )
 
 func init() {
-	rules.Register(NewNamingConventionsRule())
+	rules.Register(NewConventionsRule())
 }
 
-// NamingConventionsRule detects Go naming convention violations
-type NamingConventionsRule struct {
+// ConventionsRule detects Go naming convention violations
+type ConventionsRule struct {
 	*rules.BaseRule
 	// Known acronyms that are correctly written in ALL_CAPS
 	knownAcronyms map[string]bool
 }
 
-// NewNamingConventionsRule creates the rule
-func NewNamingConventionsRule() *NamingConventionsRule {
-	return &NamingConventionsRule{
+// NewConventionsRule creates the rule
+func NewConventionsRule() *ConventionsRule {
+	return &ConventionsRule{
 		BaseRule: rules.NewBaseRule(
 			"naming-convention",
 			"naming",
@@ -69,7 +69,7 @@ func NewNamingConventionsRule() *NamingConventionsRule {
 }
 
 // AnalyzeFile checks for naming convention violations
-func (r *NamingConventionsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+func (r *ConventionsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.GoAST == nil || ctx.IsTestFile() {
 		return nil
 	}
@@ -96,7 +96,7 @@ func (r *NamingConventionsRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 }
 
 // checkTypeName checks type naming conventions
-func (r *NamingConventionsRule) checkTypeName(ctx *core.FileContext, spec *ast.TypeSpec, pkgName string) []*core.Violation {
+func (r *ConventionsRule) checkTypeName(ctx *core.FileContext, spec *ast.TypeSpec, pkgName string) []*core.Violation {
 	var violations []*core.Violation
 	name := spec.Name.Name
 
@@ -138,12 +138,12 @@ func (r *NamingConventionsRule) checkTypeName(ctx *core.FileContext, spec *ast.T
 	return violations
 }
 
-func (r *NamingConventionsRule) isSemanticSuffix(name string) bool {
+func (r *ConventionsRule) isSemanticSuffix(name string) bool {
 	return strings.HasSuffix(name, "Error") || strings.HasSuffix(name, "Context")
 }
 
 // checkFuncName checks function naming conventions
-func (r *NamingConventionsRule) checkFuncName(ctx *core.FileContext, fn *ast.FuncDecl, pkgName string) []*core.Violation {
+func (r *ConventionsRule) checkFuncName(ctx *core.FileContext, fn *ast.FuncDecl, pkgName string) []*core.Violation {
 	var violations []*core.Violation
 	name := fn.Name.Name
 
@@ -178,7 +178,7 @@ func (r *NamingConventionsRule) checkFuncName(ctx *core.FileContext, fn *ast.Fun
 }
 
 // checkValueNames checks const/var naming conventions
-func (r *NamingConventionsRule) checkValueNames(ctx *core.FileContext, spec *ast.ValueSpec) []*core.Violation {
+func (r *ConventionsRule) checkValueNames(ctx *core.FileContext, spec *ast.ValueSpec) []*core.Violation {
 	var violations []*core.Violation
 
 	for _, ident := range spec.Names {
@@ -206,7 +206,7 @@ func (r *NamingConventionsRule) checkValueNames(ctx *core.FileContext, spec *ast
 }
 
 // stutters checks if name starts with package name (stuttering)
-func (r *NamingConventionsRule) stutters(name, pkgName string) bool {
+func (r *ConventionsRule) stutters(name, pkgName string) bool {
 	// Convert to lowercase for comparison
 	nameLower := strings.ToLower(name)
 	pkgLower := strings.ToLower(pkgName)
@@ -227,7 +227,7 @@ func (r *NamingConventionsRule) stutters(name, pkgName string) bool {
 }
 
 // isAllCaps checks if name is ALL_CAPS
-func (r *NamingConventionsRule) isAllCaps(name string) bool {
+func (r *ConventionsRule) isAllCaps(name string) bool {
 	hasLetter := false
 	for _, c := range name {
 		if unicode.IsLetter(c) {

@@ -177,6 +177,15 @@ func nolintListContains(comment, ruleName string) bool {
 	return false
 }
 
+// CommentPart returns the substring of a line starting at its comment marker
+// ("//" or "/*"), or "" when the line has no comment. A marker inside a string
+// literal is not a comment start — this is the single implementation rules
+// must use when they match comment text, so that a regexp source containing
+// "//" is not mistaken for a comment.
+func CommentPart(line string) string {
+	return commentPart(line)
+}
+
 // commentPart returns the substring of the line starting at its comment
 // marker ("//" or "/*"), or "" when the line has no comment. A marker inside
 // a string literal is not treated as a comment start.

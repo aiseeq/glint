@@ -174,8 +174,8 @@ func getScopedType(name string, localInferrer, fileInferrer *TypeInferrer) (Type
 }
 
 func (r *TimeEqualRule) looksLikeTimeVar(name string) bool {
-	// Only use specific time variable names to avoid false positives
-	// Removed generic names like "t", "start", "end" which are commonly used for other types
+	// Only specific time variable names, to avoid false positives: generic
+	// names such as "t", "start" and "end" commonly hold other types.
 	timeVarNames := map[string]bool{
 		"timestamp":  true,
 		"createdAt":  true,

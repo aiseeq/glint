@@ -519,7 +519,7 @@ func (r *FallbackReturnRule) analyzeTSFile(ctx *core.FileContext) []*core.Violat
 
 		for _, pattern := range tsPatterns {
 			if pattern.MatchString(line) {
-				if r.isInTSContext(ctx.Lines, lineNum) && !r.isTSException(ctx.RelPath, line) {
+				if r.isInTSContext(ctx.Lines, lineNum) && !r.isTSException(ctx.RelPath) {
 					v := r.createTSViolation(ctx, lineNum+1, line)
 					violations = append(violations, v)
 					break
@@ -551,7 +551,7 @@ func (r *FallbackReturnRule) isInTSContext(lines []string, lineNum int) bool {
 }
 
 // isTSException checks if this is a valid exception for TS
-func (r *FallbackReturnRule) isTSException(path, line string) bool {
+func (r *FallbackReturnRule) isTSException(path string) bool {
 	// Test files and test infrastructure (Playwright e2e dir)
 	if strings.Contains(path, ".test.") || strings.Contains(path, ".spec.") ||
 		strings.Contains(path, "__tests__") || strings.Contains(path, "__mocks__") ||
@@ -638,12 +638,12 @@ func (r *FallbackReturnRule) detectErrorIgnoringAssignment(ctx *core.FileContext
 
 		// Check if RHS looks like a fallback value
 		for _, rhs := range assignStmt.Rhs {
-			if r.looksLikeFallbackAssignment(rhs, ctx) {
+			if r.looksLikeFallbackAssignment(rhs) {
 				pos := ctx.PositionFor(assignStmt)
 				lineContent := ctx.GetLine(pos.Line)
 
 				// Skip if there's a comment explaining legitimate reason
-				if r.hasLegitimateComment(ctx.Lines, pos.Line-1) || r.hasLoggingStatement(ifStmt, ctx) {
+				if r.hasLegitimateComment(ctx.Lines, pos.Line-1) || r.hasLoggingStatement(ifStmt) {
 					continue
 				}
 
@@ -672,7 +672,7 @@ func (r *FallbackReturnRule) isErrReassignment(stmt *ast.AssignStmt) bool {
 }
 
 // looksLikeFallbackAssignment checks if RHS is a fallback pattern
-func (r *FallbackReturnRule) looksLikeFallbackAssignment(expr ast.Expr, ctx *core.FileContext) bool {
+func (r *FallbackReturnRule) looksLikeFallbackAssignment(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.Ident:
 		name := strings.ToLower(e.Name)
@@ -771,7 +771,7 @@ func (r *FallbackReturnRule) hasLegitimateComment(lines []string, lineIdx int) b
 }
 
 // hasLoggingStatement checks if there's a logging statement in the if block before the assignment
-func (r *FallbackReturnRule) hasLoggingStatement(ifStmt *ast.IfStmt, ctx *core.FileContext) bool {
+func (r *FallbackReturnRule) hasLoggingStatement(ifStmt *ast.IfStmt) bool {
 	for _, stmt := range ifStmt.Body.List {
 		// Check for logging calls like logger.Warn, log.Printf, s.logger.Error, etc.
 		if exprStmt, ok := stmt.(*ast.ExprStmt); ok {

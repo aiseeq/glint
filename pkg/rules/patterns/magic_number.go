@@ -108,6 +108,12 @@ func (r *MagicNumberRule) checkLiteral(ctx *core.FileContext, n ast.Node) *core.
 
 	value, err := strconv.ParseInt(lit.Value, 0, 64)
 	if err != nil {
+		// Literals above math.MaxInt64 are valid Go (uint64 constants such as
+		// hash bases and bit masks). They carry their own meaning and are not
+		// what this rule is about, so they are skipped rather than reported.
+		if _, uintErr := strconv.ParseUint(lit.Value, 0, 64); uintErr == nil {
+			return nil
+		}
 		return r.invalidMagicNumberLiteral(ctx, lit, err)
 	}
 

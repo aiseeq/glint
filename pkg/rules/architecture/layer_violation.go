@@ -18,9 +18,13 @@ func init() {
 type LayerType int
 
 const (
+	// UnknownLayer is the layer of a file that matches no known convention.
 	UnknownLayer LayerType = iota
+	// HandlerLayer is the transport layer: HTTP handlers, routers, controllers.
 	HandlerLayer
+	// ServiceLayer is the business logic layer.
 	ServiceLayer
+	// RepositoryLayer is the data access layer that owns SQL and storage calls.
 	RepositoryLayer
 )
 

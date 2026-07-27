@@ -121,7 +121,7 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 
 			// Skip if error is from a function that likely handles it internally
 			// e.g., functions that take http.ResponseWriter typically send error response themselves
-			if r.errorHandledByCallee(ifStmt.Cond) {
+			if r.errorHandledByCallee() {
 				return true
 			}
 
@@ -667,7 +667,7 @@ func (r *SilentErrorHandlingRule) isPanicCall(call *ast.CallExpr) bool {
 // errorHandledByCallee checks if the error assignment is from a function that handles errors internally
 // e.g., if err := ar.updateInvestmentCurrentValue(w, req, inv); err != nil { return }
 // Functions that take http.ResponseWriter typically handle errors by sending HTTP responses
-func (r *SilentErrorHandlingRule) errorHandledByCallee(cond ast.Expr) bool {
+func (r *SilentErrorHandlingRule) errorHandledByCallee() bool {
 	// Look for pattern: err := someFunc(...) in the init statement of if
 	// This requires looking at the parent if statement's Init field
 

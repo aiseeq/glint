@@ -53,7 +53,7 @@ func (r *TypeAssertionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 				if typeAssert, ok := stmt.Rhs[0].(*ast.TypeAssertExpr); ok {
 					// This is v := x.(T) - unsafe single-value assertion
 					if typeAssert.Type != nil { // Exclude type switch x.(type)
-						v := r.createViolation(ctx, fset, stmt.Pos(), typeAssert)
+						v := r.createViolation(ctx, stmt.Pos(), typeAssert)
 						violations = append(violations, v)
 					}
 				}
@@ -64,7 +64,7 @@ func (r *TypeAssertionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 			// Check for standalone type assertions like _ = x.(T)
 			if typeAssert, ok := stmt.X.(*ast.TypeAssertExpr); ok {
 				if typeAssert.Type != nil {
-					v := r.createViolation(ctx, fset, stmt.Pos(), typeAssert)
+					v := r.createViolation(ctx, stmt.Pos(), typeAssert)
 					violations = append(violations, v)
 				}
 			}
@@ -74,7 +74,7 @@ func (r *TypeAssertionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 			if len(stmt.Names) == 1 && len(stmt.Values) == 1 {
 				if typeAssert, ok := stmt.Values[0].(*ast.TypeAssertExpr); ok {
 					if typeAssert.Type != nil {
-						v := r.createViolation(ctx, fset, stmt.Pos(), typeAssert)
+						v := r.createViolation(ctx, stmt.Pos(), typeAssert)
 						violations = append(violations, v)
 					}
 				}
@@ -86,7 +86,7 @@ func (r *TypeAssertionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	return violations
 }
 
-func (r *TypeAssertionRule) createViolation(ctx *core.FileContext, fset *token.FileSet, pos token.Pos, typeAssert *ast.TypeAssertExpr) *core.Violation {
+func (r *TypeAssertionRule) createViolation(ctx *core.FileContext, pos token.Pos, typeAssert *ast.TypeAssertExpr) *core.Violation {
 	line := r.getLineFromPos(ctx, pos)
 
 	v := r.CreateViolation(ctx.RelPath, line, "Unsafe type assertion without comma-ok check")

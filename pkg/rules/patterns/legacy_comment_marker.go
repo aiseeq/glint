@@ -157,21 +157,15 @@ func (r *LegacyCommentMarkerRule) tryMatch(ctx *core.FileContext, lineNum int, l
 
 // extractComment returns the comment text on the line (or entire line content
 // for block comments).
+// extractComment returns the comment part of a line. Inside a block comment
+// the whole line is comment text; otherwise the canonical core.CommentPart
+// decides, so that a "//" inside a string literal — a regexp source, for
+// instance — is not treated as a comment.
 func (r *LegacyCommentMarkerRule) extractComment(line string, isBlock bool) string {
 	if isBlock {
 		return line
 	}
-	if idx := strings.Index(line, "//"); idx >= 0 {
-		return line[idx:]
-	}
-	if idx := strings.Index(line, "/*"); idx >= 0 {
-		end := strings.Index(line[idx:], "*/")
-		if end >= 0 {
-			return line[idx : idx+end+2]
-		}
-		return line[idx:]
-	}
-	return ""
+	return core.CommentPart(line)
 }
 
 // containsLegacyWord checks that "legacy" appears as a standalone word, not
