@@ -69,7 +69,7 @@ func (r *CrossFileDuplicateRule) ResetState() {
 
 // AnalyzeFile collects blocks and detects cross-file duplicates
 func (r *CrossFileDuplicateRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.IsTestFile() {
+	if !isDuplicationCandidate(ctx) || ctx.IsTestFile() {
 		return nil
 	}
 
@@ -94,10 +94,19 @@ func (r *CrossFileDuplicateRule) processFile(ctx *core.FileContext, normalized [
 	defer r.mu.Unlock()
 
 	var violations []*core.Violation
+	// -1 rather than 0: a duplicate may legitimately start on the first line.
+	reportedThrough := -1
 	for _, block := range blocks {
 		existing, seen := r.firstSeen[block.hash]
 		if !seen {
 			r.firstSeen[block.hash] = block.location
+			continue
+		}
+		// Windows slide one line at a time, so a long copied region matches at
+		// every offset inside it, and a region longer than the window matches in
+		// consecutive pieces. Report the region once, not once per window.
+		if block.location.StartLine <= reportedThrough+1 {
+			reportedThrough = max(reportedThrough, block.location.EndLine)
 			continue
 		}
 		// A file is analyzed once, so a previously stored block of the same
@@ -106,6 +115,7 @@ func (r *CrossFileDuplicateRule) processFile(ctx *core.FileContext, normalized [
 			continue
 		}
 		r.reported[block.hash] = true
+		reportedThrough = block.location.EndLine
 
 		v := r.CreateViolation(ctx.RelPath, block.location.StartLine,
 			"Cross-file duplicate: same as "+existing.File+":"+
@@ -170,8 +180,15 @@ func (r *CrossFileDuplicateRule) collectBlocks(ctx *core.FileContext, normalized
 // isCrossFileTrivialLine extends the shared triviality check with lines that
 // legitimately repeat across files: imports, type switches, and the standard
 // HTTP handler boilerplate.
+// isDuplicationCandidate reports whether the file is in a language whose blocks
+// this rule compares. TypeScript and JavaScript duplicate as readily as Go, and
+// a frontend is where copied components accumulate.
+func isDuplicationCandidate(ctx *core.FileContext) bool {
+	return ctx.IsGoFile() || ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile()
+}
+
 func isCrossFileTrivialLine(line string) bool {
-	if isTrivialLine(line) {
+	if isTrivialLine(line) || isFrontendBoilerplate(line) {
 		return true
 	}
 
@@ -207,4 +224,22 @@ func isCrossFileTrivialLine(line string) bool {
 
 	// Common interface/type declarations.
 	return strings.HasPrefix(line, "type ") && strings.HasSuffix(line, " interface {")
+}
+
+// isFrontendBoilerplate covers the lines a TypeScript or JSX file repeats by
+// construction: closing a callback, exporting, opening a component.
+func isFrontendBoilerplate(line string) bool {
+	switch line {
+	case "});", "})", "};", "});)", "return (", ");", "export {", "export default {",
+		"} catch (error) {", "} catch (err) {", "} finally {", "'use client';", `"use client";`:
+		return true
+	}
+	if strings.HasPrefix(line, "export ") && strings.HasSuffix(line, "from") {
+		return true
+	}
+	// JSX opening or closing a wrapper element carries no logic of its own.
+	if strings.HasPrefix(line, "<") && strings.HasSuffix(line, ">") && !strings.Contains(line, "=") {
+		return true
+	}
+	return false
 }
