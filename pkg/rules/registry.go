@@ -137,35 +137,39 @@ func (r *Registry) GetEnabled(cfg *core.Config) []Rule {
 	return enabled
 }
 
-// ConfigureAll configures all rules from config
+// ConfigureAll configures all rules from config. Every rule is configured
+// exactly once with the category settings overlaid by its own settings, so
+// that rule settings extend the category ones instead of replacing them, and
+// so that a rule never keeps settings from a previously analyzed config.
 func (r *Registry) ConfigureAll(cfg *core.Config) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	for _, rule := range r.rules {
-		cat, ok := cfg.Categories[rule.Category()]
-		if !ok {
-			continue
-		}
-
-		// Apply category-level settings
-		if cat.Settings != nil {
-			if err := rule.Configure(cat.Settings); err != nil {
-				return fmt.Errorf("failed to configure rule %s: %w", rule.Name(), err)
-			}
-		}
-
-		// Apply rule-level settings
-		if cat.Rules != nil {
-			if ruleCfg, ok := cat.Rules[rule.Name()]; ok && ruleCfg.Settings != nil {
-				if err := rule.Configure(ruleCfg.Settings); err != nil {
-					return fmt.Errorf("failed to configure rule %s: %w", rule.Name(), err)
-				}
-			}
+		if err := rule.Configure(effectiveSettings(cfg, rule)); err != nil {
+			return fmt.Errorf("failed to configure rule %s: %w", rule.Name(), err)
 		}
 	}
 
 	return nil
+}
+
+// effectiveSettings merges the category settings of a rule with its own.
+func effectiveSettings(cfg *core.Config, rule Rule) map[string]any {
+	settings := make(map[string]any)
+	cat, ok := cfg.Categories[rule.Category()]
+	if !ok {
+		return settings
+	}
+	for key, value := range cat.Settings {
+		settings[key] = value
+	}
+	if ruleCfg, ok := cat.Rules[rule.Name()]; ok {
+		for key, value := range ruleCfg.Settings {
+			settings[key] = value
+		}
+	}
+	return settings
 }
 
 // Global registry functions

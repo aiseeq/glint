@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -49,7 +50,7 @@ var (
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 }
@@ -60,6 +61,11 @@ var rootCmd = &cobra.Command{
 	Long: `Glint is a fast, configurable static analyzer for Go and TypeScript projects.
 Originally built to help AI agents understand codebases.`,
 	Version: version,
+	// A failed analysis is not a usage mistake: printing the full help text
+	// after every error buries the message that explains what went wrong.
+	// main reports the error itself, so cobra must not print it a second time.
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 var checkCmd = &cobra.Command{
@@ -110,12 +116,16 @@ var fixCmd = &cobra.Command{
 	Short: "Auto-fix issues that have fixers available",
 	Long: `Auto-fix issues that have fixers available.
 By default runs in dry-run mode to show what would be fixed.
-Use --no-dry-run to actually apply fixes.
+Use --dry-run=false to actually apply fixes.
+
+Findings silenced by configuration exceptions or by inline suppression
+comments are left alone, exactly as 'glint check' reports them.
 
 Available fixers:
   - interface-any: Replace interface{} with any (Go 1.18+)
   - deprecated-ioutil: Replace io/ioutil with io/os
-  - bool-compare: Simplify boolean comparisons (x == true -> x)`,
+  - bool-compare: Simplify boolean comparisons (x == true -> x)
+  - md-line-break, md-list-after-label: Markdown formatting`,
 	RunE: runFix,
 }
 
@@ -170,8 +180,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		}
 
 		if len(enabledRules) == 0 {
-			fmt.Println("No rules enabled. Check your configuration.")
-			return nil
+			return fmt.Errorf("no rules enabled for %s — every category is disabled in the configuration", projectRoot)
 		}
 		if outputFormat == "" {
 			outputFormat = cfg.Settings.Output
@@ -300,36 +309,43 @@ func loadConfig(projectRoot string) (*core.Config, []rules.Rule, error) {
 		return nil, nil, fmt.Errorf("failed to configure rules: %w", err)
 	}
 
-	enabledRules := getEnabledRules(cfg)
+	enabledRules, err := getEnabledRules(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
 	return cfg, enabledRules, nil
 }
 
-func getEnabledRules(cfg *core.Config) []rules.Rule {
+// getEnabledRules resolves the rule set for this run. An unknown --rule or
+// --category is an error: silently falling back to "all rules" made glint
+// report findings the caller never asked for.
+func getEnabledRules(cfg *core.Config) ([]rules.Rule, error) {
 	enabledRules := rules.GetEnabled(cfg)
+
 	if flagCategory != "" {
 		enabledRules = rules.GetByCategory(flagCategory)
+		if len(enabledRules) == 0 {
+			return nil, fmt.Errorf("unknown category %q; known categories: %s",
+				flagCategory, strings.Join(rules.Categories(), ", "))
+		}
 	}
+
 	if flagRule != "" {
+		rule, ok := rules.Get(flagRule)
+		if !ok {
+			return nil, fmt.Errorf("unknown rule %q; run 'glint rules' to list them", flagRule)
+		}
 		if flagDebug {
-			fmt.Printf("DEBUG: Filtering by rule: %q\n", flagRule)
+			fmt.Printf("DEBUG: Found rule %s in category %s\n", rule.Name(), rule.Category())
 		}
-		if r, ok := rules.Get(flagRule); ok {
-			if flagDebug {
-				fmt.Printf("DEBUG: Found rule %s in category %s\n", r.Name(), r.Category())
-			}
-			enabledRules = []rules.Rule{r}
-		} else {
-			if flagDebug {
-				fmt.Printf("DEBUG: Rule %q NOT FOUND in registry\n", flagRule)
-			}
-		}
+		enabledRules = []rules.Rule{rule}
 	}
 
 	if flagVerbose {
 		fmt.Printf("Running %d rules...\n", len(enabledRules))
 	}
 
-	return enabledRules
+	return enabledRules, nil
 }
 
 func walkFiles(projectRoot string, cfg *core.Config) ([]*core.FileContext, *core.Walker, error) {
@@ -687,6 +703,12 @@ func runFix(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if flagFixRule != "" {
+		if _, ok := rules.Get(flagFixRule); !ok {
+			return fmt.Errorf("unknown rule %q; run 'glint rules' to list them", flagFixRule)
+		}
+	}
+
 	for _, projectRoot := range projectRoots {
 		if err := fixProjectRoot(projectRoot); err != nil {
 			return err
@@ -696,19 +718,30 @@ func runFix(cmd *cobra.Command, args []string) error {
 }
 
 func fixProjectRoot(projectRoot string) error {
-	// Check for uncommitted changes
-	engine := fix.NewEngine(fix.DefaultRegistry, flagDryRun, flagVerbose)
-	hasChanges, err := engine.CheckGitStatus(projectRoot)
+	// Whether this root is fixed in place is decided per root: a dirty working
+	// tree here must not silence the fixes for the roots that follow.
+	dryRun := flagDryRun
+	state, err := fix.NewEngine(fix.DefaultRegistry, dryRun, flagVerbose).CheckWorkingTree(projectRoot)
 	if err != nil {
-		return fmt.Errorf("check git status: %w", err)
+		return fmt.Errorf("check working tree: %w", err)
 	}
 
-	if hasChanges && !flagForce && !flagDryRun {
-		fmt.Println("WARNING: You have uncommitted changes.")
-		fmt.Println("Use --force to apply fixes anyway, or commit your changes first.")
-		fmt.Println("Running in dry-run mode instead.")
-		flagDryRun = true
+	if !dryRun && !flagForce {
+		switch state {
+		case fix.WorkingTreeDirty:
+			fmt.Printf("WARNING: %s has uncommitted changes.\n", projectRoot)
+			fmt.Println("Use --force to apply fixes anyway, or commit your changes first.")
+			fmt.Println("Running in dry-run mode instead.")
+			dryRun = true
+		case fix.WorkingTreeUntracked:
+			fmt.Printf("WARNING: %s is not inside a git repository — fixes could not be reverted.\n", projectRoot)
+			fmt.Println("Use --force to apply fixes anyway.")
+			fmt.Println("Running in dry-run mode instead.")
+			dryRun = true
+		case fix.WorkingTreeClean:
+		}
 	}
+	engine := fix.NewEngine(fix.DefaultRegistry, dryRun, flagVerbose)
 
 	// Load config and get enabled rules
 	cfg, enabledRules, err := loadConfig(projectRoot)
@@ -753,14 +786,14 @@ func fixProjectRoot(projectRoot string) error {
 		contextMap[ctx.RelPath] = ctx
 	}
 
-	// Collect violations from fixable rules
-	var violations []*core.Violation
-	for _, ctx := range contexts {
-		for _, rule := range fixableRules {
-			vs := rule.AnalyzeFile(ctx)
-			violations = append(violations, vs...)
-		}
+	// Collect findings through the same pipeline as `check`, so that
+	// configuration exceptions and inline suppression comments are honored.
+	overrides, err := buildSeverityOverrides(cfg, fixableRules)
+	if err != nil {
+		return err
 	}
+	rules.ResetState(fixableRules)
+	violations := analyzeFiles(contexts, fixableRules, cfg, overrides)
 
 	if len(violations) == 0 {
 		fmt.Println("No issues found that can be fixed.")
@@ -778,7 +811,7 @@ func fixProjectRoot(projectRoot string) error {
 	// Show preview
 	fmt.Print(engine.Preview(fixes))
 
-	if flagDryRun {
+	if dryRun {
 		return nil
 	}
 
