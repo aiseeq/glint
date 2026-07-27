@@ -1,7 +1,12 @@
 package duplication
 
 import (
+	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -126,6 +131,49 @@ func TestCrossFileDuplicateRule_SkipsTests(t *testing.T) {
 	if violations != nil {
 		t.Error("Expected nil for test files")
 	}
+}
+
+// Repro from saga: 611 TypeScript files were never compared, because the rule
+// only looked at Go. A type declared twice is the same duplication problem.
+func TestCrossFileDuplicateComparesTypeScript(t *testing.T) {
+	rule := NewCrossFileDuplicateRule()
+	body := `interface PlatformProfit {
+  periodStart: string
+  periodEnd: string
+  strategy: string
+  vaultValueStart: string
+  vaultValueEnd: string
+  netDeposits: string
+  systemProfit: string
+  platformProfit: string
+  userProfit: string
+  effectiveAPY: string
+}
+`
+	first := createTestContext(t, "frontend/card.tsx", "export const Card = () => null\n"+body)
+	second := createTestContext(t, "frontend/page.tsx", "export const Page = () => null\n"+body)
+
+	assert.Empty(t, rule.AnalyzeFile(first))
+	violations := rule.AnalyzeFile(second)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "card.tsx")
+}
+
+// A copied region matches at every window offset inside it; the reader needs the
+// region once, not one finding per line.
+func TestCrossFileDuplicateReportsRegionOnce(t *testing.T) {
+	rule := NewCrossFileDuplicateRule()
+	var block strings.Builder
+	for i := range 30 {
+		fmt.Fprintf(&block, "  const value%d = computeSomething(input, %d, options)\n", i, i)
+	}
+
+	first := createTestContext(t, "frontend/a.ts", "export function a() {\n"+block.String()+"}\n")
+	second := createTestContext(t, "frontend/b.ts", "export function b() {\n"+block.String()+"}\n")
+
+	assert.Empty(t, rule.AnalyzeFile(first))
+	violations := rule.AnalyzeFile(second)
+	assert.Len(t, violations, 1, "one finding for the whole copied region")
 }
 
 func TestCrossFileDuplicateRule_ResetState(t *testing.T) {
