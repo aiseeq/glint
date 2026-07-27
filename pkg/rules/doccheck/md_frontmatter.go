@@ -15,8 +15,6 @@ func init() {
 // MdFrontmatterRule validates YAML frontmatter in Markdown documents
 type MdFrontmatterRule struct {
 	*rules.BaseRule
-	// Required fields
-	requiredFields []string
 	// Pattern for valid date format YYYY-MM-DD
 	datePattern *regexp.Regexp
 	// Pattern for semver version
@@ -32,7 +30,6 @@ func NewMdFrontmatterRule() *MdFrontmatterRule {
 			"Validates YAML frontmatter presence and format in Markdown documents",
 			core.SeverityMedium,
 		),
-		requiredFields: nil,
 		// YYYY-MM-DD format
 		datePattern: regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`),
 		// Semver: major.minor.patch with optional pre-release

@@ -635,7 +635,6 @@ func outputResults(format string, violations core.ViolationList, stats output.St
 	default:
 		out := output.NewConsoleOutput().
 			WithWriter(os.Stdout).
-			WithVerbose(flagVerbose).
 			WithNoColor(flagNoColor)
 		return out.Write(violations, stats)
 	}
@@ -831,7 +830,7 @@ func fixProjectRoot(projectRoot string) error {
 	// Whether this root is fixed in place is decided per root: a dirty working
 	// tree here must not silence the fixes for the roots that follow.
 	dryRun := flagDryRun
-	state, err := fix.NewEngine(fix.DefaultRegistry, dryRun, flagVerbose).CheckWorkingTree(projectRoot)
+	state, err := fix.NewEngine(fix.DefaultRegistry, dryRun).CheckWorkingTree(projectRoot)
 	if err != nil {
 		return fmt.Errorf("check working tree: %w", err)
 	}
@@ -851,7 +850,7 @@ func fixProjectRoot(projectRoot string) error {
 		case fix.WorkingTreeClean:
 		}
 	}
-	engine := fix.NewEngine(fix.DefaultRegistry, dryRun, flagVerbose)
+	engine := fix.NewEngine(fix.DefaultRegistry, dryRun)
 
 	// Load config and get enabled rules
 	cfg, enabledRules, err := loadConfig(projectRoot)

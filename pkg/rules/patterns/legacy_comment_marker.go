@@ -38,8 +38,7 @@ func init() {
 //     not a legacy code path)
 type LegacyCommentMarkerRule struct {
 	*rules.BaseRule
-	legacyCommentPatterns []*regexp.Regexp
-	policyQuoteMarkers    []string
+	policyQuoteMarkers []string
 }
 
 // NewLegacyCommentMarkerRule creates the rule
@@ -51,13 +50,6 @@ func NewLegacyCommentMarkerRule() *LegacyCommentMarkerRule {
 			"Detects inline comments admitting a runtime legacy code path (CLAUDE.md: No legacy, only current code)",
 			core.SeverityLow,
 		),
-	}
-	r.legacyCommentPatterns = []*regexp.Regexp{
-		// Line comment (//) containing "Legacy" / "legacy" as a whole word.
-		// Requires the comment marker, optional spaces, then the word.
-		regexp.MustCompile(`(?i)//\s*[^\n]*\blegacy\b`),
-		// Block-comment line content (inside /* ... */ expanded per-line).
-		regexp.MustCompile(`(?i)^\s*\*?\s*[^*]*\blegacy\b`),
 	}
 	r.policyQuoteMarkers = []string{
 		"claude.md",

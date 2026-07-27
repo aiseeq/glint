@@ -84,15 +84,13 @@ func (r *Registry) All() map[string]Fixer {
 type Engine struct {
 	registry *Registry
 	dryRun   bool
-	verbose  bool
 }
 
 // NewEngine creates a new fix engine
-func NewEngine(registry *Registry, dryRun, verbose bool) *Engine {
+func NewEngine(registry *Registry, dryRun bool) *Engine {
 	return &Engine{
 		registry: registry,
 		dryRun:   dryRun,
-		verbose:  verbose,
 	}
 }
 

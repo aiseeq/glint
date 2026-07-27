@@ -36,7 +36,6 @@ type interfaceInfo struct {
 	name    string
 	pos     token.Position
 	methods []string // method names for implementation matching
-	node    *ast.TypeSpec
 }
 
 // AnalyzeFile checks for orphaned interfaces
@@ -173,7 +172,6 @@ func (r *OrphanedInterfaceRule) collectInterfaces(ctx *core.FileContext) []*inte
 				name:    name,
 				pos:     ctx.PositionFor(typeSpec),
 				methods: r.extractMethodNames(ifaceType),
-				node:    typeSpec,
 			}
 			interfaces = append(interfaces, iface)
 		}

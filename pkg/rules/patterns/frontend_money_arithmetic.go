@@ -29,12 +29,11 @@ const defaultMoneyFields = "amount|balance|fee|fees|price|profit|yield|deposit|w
 // non-money numerics, tests.
 type FrontendMoneyArithmeticRule struct {
 	*rules.BaseRule
-	parseCall     *regexp.Regexp
-	moneyField    *regexp.Regexp
-	reduceRawSum  *regexp.Regexp
-	accumulate    *regexp.Regexp
-	reduceMarker  string
-	arithmeticOps string
+	parseCall    *regexp.Regexp
+	moneyField   *regexp.Regexp
+	reduceRawSum *regexp.Regexp
+	accumulate   *regexp.Regexp
+	reduceMarker string
 }
 
 // NewFrontendMoneyArithmeticRule creates the rule
@@ -46,10 +45,9 @@ func NewFrontendMoneyArithmeticRule() *FrontendMoneyArithmeticRule {
 			"Detects client-side arithmetic over money values (must come from backend)",
 			core.SeverityHigh,
 		),
-		parseCall:     regexp.MustCompile(`\b(?:parseFloat|Number)\s*\(`),
-		accumulate:    regexp.MustCompile(`\b([\w$]+)\s*[+\-]=\s*(.+)$`),
-		reduceMarker:  ".reduce(",
-		arithmeticOps: "+-*/",
+		parseCall:    regexp.MustCompile(`\b(?:parseFloat|Number)\s*\(`),
+		accumulate:   regexp.MustCompile(`\b([\w$]+)\s*[+\-]=\s*(.+)$`),
+		reduceMarker: ".reduce(",
 	}
 	r.setMoneyFields(defaultMoneyFields)
 	return r

@@ -65,9 +65,7 @@ func (rw *reportWriter) Err() error {
 
 // ConsoleOutput writes violations to console with colors
 type ConsoleOutput struct {
-	writer  io.Writer
-	verbose bool
-	noColor bool
+	writer io.Writer
 }
 
 // NewConsoleOutput creates a new console output
@@ -83,15 +81,8 @@ func (c *ConsoleOutput) WithWriter(w io.Writer) *ConsoleOutput {
 	return c
 }
 
-// WithVerbose enables verbose output
-func (c *ConsoleOutput) WithVerbose(v bool) *ConsoleOutput {
-	c.verbose = v
-	return c
-}
-
 // WithNoColor disables colors
 func (c *ConsoleOutput) WithNoColor(v bool) *ConsoleOutput {
-	c.noColor = v
 	if v {
 		color.NoColor = true
 	}

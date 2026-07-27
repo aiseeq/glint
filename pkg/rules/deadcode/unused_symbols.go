@@ -38,7 +38,6 @@ func NewUnusedSymbolsRule() *UnusedSymbolsRule {
 
 // symbolInfo tracks a declared symbol
 type symbolInfo struct {
-	name   string
 	kind   string // "func", "type", "const", "var"
 	line   int
 	node   ast.Node
@@ -185,7 +184,6 @@ func (r *UnusedSymbolsRule) collectFunc(ctx *core.FileContext, fn *ast.FuncDecl,
 
 	pos := ctx.PositionFor(fn.Name)
 	symbols[name] = &symbolInfo{
-		name: name,
 		kind: "function",
 		line: pos.Line,
 		node: fn,
@@ -201,7 +199,6 @@ func (r *UnusedSymbolsRule) collectGenDecl(ctx *core.FileContext, decl *ast.GenD
 			if !ast.IsExported(name) {
 				pos := ctx.PositionFor(s.Name)
 				symbols[name] = &symbolInfo{
-					name: name,
 					kind: "type",
 					line: pos.Line,
 					node: s,
@@ -223,7 +220,6 @@ func (r *UnusedSymbolsRule) collectGenDecl(ctx *core.FileContext, decl *ast.GenD
 				}
 
 				symbols[name] = &symbolInfo{
-					name: name,
 					kind: kind,
 					line: pos.Line,
 					node: s,
