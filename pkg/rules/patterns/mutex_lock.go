@@ -57,9 +57,13 @@ func (r *MutexLockRule) checkFunction(ctx *core.FileContext, body *ast.BlockStmt
 			return true
 		}
 
-		if info := r.getLockInfo(call); info != nil {
-			info.line = r.getLineFromNode(ctx, exprStmt)
-			lockCalls = append(lockCalls, info)
+		if info, ok := lockCall(call); ok {
+			lockCalls = append(lockCalls, &lockInfo{
+				receiver:     info.receiver,
+				method:       info.method,
+				unlockMethod: lockMethods[info.method],
+				line:         ctx.LineFor(exprStmt),
+			})
 		}
 
 		return true
@@ -79,7 +83,7 @@ func (r *MutexLockRule) checkFunction(ctx *core.FileContext, body *ast.BlockStmt
 			return true
 		}
 
-		if info := r.getUnlockInfo(deferStmt.Call); info != nil {
+		if info, ok := unlockCall(deferStmt.Call); ok {
 			deferUnlocks[info.receiver+info.method] = true
 		}
 
@@ -106,7 +110,7 @@ func (r *MutexLockRule) checkFunction(ctx *core.FileContext, body *ast.BlockStmt
 			return true
 		}
 
-		if info := r.getUnlockInfo(call); info != nil {
+		if info, ok := unlockCall(call); ok {
 			regularUnlocks[info.receiver+info.method] = true
 		}
 
@@ -133,76 +137,4 @@ type lockInfo struct {
 	method       string
 	unlockMethod string
 	line         int
-}
-
-func (r *MutexLockRule) getLockInfo(call *ast.CallExpr) *lockInfo {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return nil
-	}
-
-	method := sel.Sel.Name
-	if method != "Lock" && method != "RLock" {
-		return nil
-	}
-
-	receiver := r.getReceiverName(sel.X)
-	if receiver == "" {
-		return nil
-	}
-
-	unlockMethod := "Unlock"
-	if method == "RLock" {
-		unlockMethod = "RUnlock"
-	}
-
-	return &lockInfo{
-		receiver:     receiver,
-		method:       method,
-		unlockMethod: unlockMethod,
-	}
-}
-
-func (r *MutexLockRule) getUnlockInfo(call *ast.CallExpr) *lockInfo {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return nil
-	}
-
-	method := sel.Sel.Name
-	if method != "Unlock" && method != "RUnlock" {
-		return nil
-	}
-
-	receiver := r.getReceiverName(sel.X)
-	if receiver == "" {
-		return nil
-	}
-
-	return &lockInfo{
-		receiver: receiver,
-		method:   method,
-	}
-}
-
-func (r *MutexLockRule) getReceiverName(expr ast.Expr) string {
-	switch e := expr.(type) {
-	case *ast.Ident:
-		return e.Name
-	case *ast.SelectorExpr:
-		// Handle cases like s.mu.Lock()
-		base := r.getReceiverName(e.X)
-		if base != "" {
-			return base + "." + e.Sel.Name
-		}
-		return e.Sel.Name
-	case *ast.UnaryExpr:
-		// Handle &mu case
-		return r.getReceiverName(e.X)
-	}
-	return ""
-}
-
-func (r *MutexLockRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }
