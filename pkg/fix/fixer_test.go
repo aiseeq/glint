@@ -14,7 +14,7 @@ import (
 // A path outside a repository is a state the caller has to react to, not a
 // failure: reporting it as an error made `glint fix` unusable there.
 func TestCheckWorkingTreeReportsPathOutsideRepository(t *testing.T) {
-	engine := NewEngine(NewRegistry(), true, false)
+	engine := NewEngine(NewRegistry(), true)
 
 	state, err := engine.CheckWorkingTree(t.TempDir())
 	require.NoError(t, err)
@@ -33,7 +33,7 @@ func TestCheckWorkingTreeDetectsDirtyTree(t *testing.T) {
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
-	engine := NewEngine(NewRegistry(), true, false)
+	engine := NewEngine(NewRegistry(), true)
 	state, err := engine.CheckWorkingTree(root)
 	require.NoError(t, err)
 	require.Equal(t, WorkingTreeClean, state)
@@ -322,7 +322,7 @@ func TestDefaultRegistry(t *testing.T) {
 }
 
 func TestEnginePreview(t *testing.T) {
-	engine := NewEngine(DefaultRegistry, true, false)
+	engine := NewEngine(DefaultRegistry, true)
 
 	fixes := []*Fix{
 		{
@@ -360,7 +360,7 @@ func TestEnginePreview(t *testing.T) {
 }
 
 func TestEnginePreviewEmpty(t *testing.T) {
-	engine := NewEngine(DefaultRegistry, true, false)
+	engine := NewEngine(DefaultRegistry, true)
 
 	preview := engine.Preview(nil)
 

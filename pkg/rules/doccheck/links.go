@@ -20,7 +20,6 @@ type DocLinksRule struct {
 	*rules.BaseRule
 	urlPattern     *regexp.Regexp
 	fileRefPattern *regexp.Regexp
-	pkgRefPattern  *regexp.Regexp
 	brokenURLHints []string
 }
 
@@ -38,7 +37,6 @@ func NewDocLinksRule() *DocLinksRule {
 		// Match file references like "see file.go" or "in path/to/file.go"
 		fileRefPattern: regexp.MustCompile(`(?:see|in|from|file)\s+["']?([a-zA-Z0-9_\-./]+\.(?:go|md|yaml|json|txt))["']?`),
 		// Match package/function references like "see Package.Function"
-		pkgRefPattern: regexp.MustCompile(`(?:see|use|call)\s+([A-Z][a-zA-Z0-9]*(?:\.[A-Z][a-zA-Z0-9]*)?)`),
 		// URL patterns that often indicate broken links
 		// Note: localhost/127.0.0.1 are valid for local development documentation
 		brokenURLHints: []string{
