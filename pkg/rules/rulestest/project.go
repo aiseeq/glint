@@ -95,3 +95,18 @@ func GoFile(t *testing.T, path, source string) *core.FileContext {
 
 	return ctx
 }
+
+// TextFile builds a file context without parsing, for rules that work on lines
+// — TypeScript, Markdown, SQL.
+func TextFile(t *testing.T, path, source string) *core.FileContext {
+	t.Helper()
+
+	root := t.TempDir()
+	full := filepath.Join(root, path)
+	require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+	require.NoError(t, os.WriteFile(full, []byte(source), 0o644))
+
+	ctx, err := core.NewFileContextChecked(full, root, []byte(source), core.DefaultConfig())
+	require.NoError(t, err)
+	return ctx
+}
