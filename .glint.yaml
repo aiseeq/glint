@@ -34,8 +34,6 @@ categories:
   patterns:
     enabled: true
     rules:
-      context-first:
-        enabled: false
       error-wrap:
         exceptions:
           - files: "pkg/core/**"
