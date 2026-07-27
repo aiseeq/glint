@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -22,6 +23,13 @@ func init() {
 // UnusedSymbolsRule detects unexported symbols that appear unused within their file
 type UnusedSymbolsRule struct {
 	*rules.BaseRule
+
+	// identCounts caches, per package directory, how often each identifier
+	// appears in it. Without the cache every file reparsed all of its siblings,
+	// which made the work quadratic in the size of a package — on projectA this rule
+	// alone took 7.7s of the 17s all file rules needed together.
+	mu          sync.Mutex
+	identCounts map[string]map[string]int
 }
 
 // NewUnusedSymbolsRule creates the rule
@@ -33,7 +41,16 @@ func NewUnusedSymbolsRule() *UnusedSymbolsRule {
 			"Detects unexported functions, types, and variables that appear unused within their file",
 			core.SeverityLow,
 		),
+		identCounts: make(map[string]map[string]int),
 	}
+}
+
+// ResetState drops the per-directory cache, so a second project root never
+// inherits the counts of the first.
+func (r *UnusedSymbolsRule) ResetState() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.identCounts = make(map[string]map[string]int)
 }
 
 // symbolInfo tracks a declared symbol
@@ -115,52 +132,71 @@ func (r *UnusedSymbolsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	return violations
 }
 
-// checkSiblingFileUsages checks for symbol usages in other files of the same package
+// checkSiblingFileUsages adds the usages a symbol has in the other files of its
+// package. The counts come from a per-directory cache built once, rather than by
+// reparsing every sibling for every file.
 func (r *UnusedSymbolsRule) checkSiblingFileUsages(ctx *core.FileContext, symbols map[string]*symbolInfo) error {
-	// Get the directory containing this file
 	dir := filepath.Dir(ctx.Path)
+	counts, err := r.directoryIdentCounts(dir)
+	if err != nil {
+		return fmt.Errorf("count identifiers of package %q: %w", dir, err)
+	}
 
-	// List all .go files in the directory
+	own := identCountsOf(ctx.GoAST)
+	for name, sym := range symbols {
+		if siblings := counts[name] - own[name]; siblings > 0 {
+			sym.usages += siblings
+		}
+	}
+	return nil
+}
+
+// directoryIdentCounts returns how often each identifier appears across the Go
+// files of a directory, parsing them once. Test files are counted too: an
+// unexported symbol used only by tests is not dead code.
+func (r *UnusedSymbolsRule) directoryIdentCounts(dir string) (map[string]int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if counts, ok := r.identCounts[dir]; ok {
+		return counts, nil
+	}
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("read package directory %q: %w", dir, err)
+		return nil, fmt.Errorf("read package directory %q: %w", dir, err)
 	}
 
-	currentFile := filepath.Base(ctx.Path)
+	counts := make(map[string]int)
 	fset := token.NewFileSet()
-
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
 			continue
 		}
-
-		name := entry.Name()
-		// Skip current file and non-Go files. Test files ARE scanned: an unexported
-		// symbol used only by tests (e.g. test-only reset helpers, alert formatters
-		// exercised by unit tests) is not dead code.
-		if name == currentFile || !strings.HasSuffix(name, ".go") {
-			continue
-		}
-
-		// Parse sibling file
-		siblingPath := filepath.Join(dir, name)
-		siblingAST, err := parser.ParseFile(fset, siblingPath, nil, 0)
+		path := filepath.Join(dir, entry.Name())
+		file, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
-			return fmt.Errorf("parse sibling file %q: %w", siblingPath, err)
+			return nil, fmt.Errorf("parse sibling file %q: %w", path, err)
 		}
-
-		// Check for usages of our symbols in this sibling file
-		ast.Inspect(siblingAST, func(n ast.Node) bool {
-			if ident, ok := n.(*ast.Ident); ok {
-				if sym, exists := symbols[ident.Name]; exists {
-					sym.usages++
-				}
-			}
-			return true
-		})
+		for name, count := range identCountsOf(file) {
+			counts[name] += count
+		}
 	}
 
-	return nil
+	r.identCounts[dir] = counts
+	return counts, nil
+}
+
+// identCountsOf counts every identifier occurrence in a syntax tree.
+func identCountsOf(file *ast.File) map[string]int {
+	counts := make(map[string]int)
+	ast.Inspect(file, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok {
+			counts[ident.Name]++
+		}
+		return true
+	})
+	return counts
 }
 
 // collectFunc collects function declarations
