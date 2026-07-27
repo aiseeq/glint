@@ -1,8 +1,7 @@
 package duplication
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -12,6 +11,10 @@ import (
 func init() {
 	rules.Register(NewDuplicateBlockRule())
 }
+
+// minNonTrivialInBlock is how many meaningful lines a window must carry before
+// a repeat of it is worth reporting inside a single file.
+const minNonTrivialInBlock = 6
 
 // DuplicateBlockRule detects duplicate code blocks within the same file
 type DuplicateBlockRule struct {
@@ -56,7 +59,7 @@ func (r *DuplicateBlockRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 			normalized[i] = ""
 			continue
 		}
-		normalized[i] = r.normalizeLine(line)
+		normalized[i] = normalizeLine(line)
 	}
 
 	// Find duplicate blocks using sliding window
@@ -79,152 +82,63 @@ func rawStringLineSet(lines []string) map[int]bool {
 	return result
 }
 
+// findDuplicateWindows hashes every candidate window once and groups equal
+// windows by hash, so the cost is linear in the number of windows. Comparing
+// each window against every later one instead made large files quadratic.
 func (r *DuplicateBlockRule) findDuplicateWindows(ctx *core.FileContext, normalized []string) []*core.Violation {
-	var violations []*core.Violation
-	reported := make(map[string]bool) // hash -> reported
+	lineHashes := hashLines(normalized)
 
-	// Use sliding window of minBlockSize lines
+	// Starts of equal windows, in ascending order; hashOrder keeps the
+	// first-seen order so that findings do not depend on map iteration.
+	starts := make(map[windowHash][]int)
+	var hashOrder []windowHash
+
 	for i := 0; i <= len(normalized)-r.minBlockSize; i++ {
-		// Skip if starting on trivial line
-		if r.isTrivialLine(normalized[i]) {
+		if isTrivialLine(normalized[i]) {
 			continue
 		}
-
-		// Get window hash
 		window := normalized[i : i+r.minBlockSize]
-		if r.isWindowTrivial(window) {
+		if isWindowTrivial(window, minNonTrivialInBlock, isTrivialLine) {
 			continue
 		}
 
-		hash := r.hashWindow(window)
+		hash := hashWindow(lineHashes, i, r.minBlockSize)
+		if _, seen := starts[hash]; !seen {
+			hashOrder = append(hashOrder, hash)
+		}
+		starts[hash] = append(starts[hash], i)
+	}
 
-		// Look for duplicate windows after this one
-		for j := i + r.minBlockSize; j <= len(normalized)-r.minBlockSize; j++ {
-			otherWindow := normalized[j : j+r.minBlockSize]
-			otherHash := r.hashWindow(otherWindow)
-
-			if hash == otherHash && !reported[hash] {
-				// Verify exact match (hash collision protection)
-				if r.windowsMatch(window, otherWindow) {
-					reported[hash] = true
-
-					v := r.CreateViolation(ctx.RelPath, j+1,
-						"Duplicate block ("+r.itoa(r.minBlockSize)+" lines) - same as lines "+
-							r.itoa(i+1)+"-"+r.itoa(i+r.minBlockSize))
-					v.WithCode(ctx.GetLine(j + 1))
-					v.WithSuggestion("Extract duplicate code into a shared function")
-					v.WithContext("first_start", i+1)
-					v.WithContext("first_end", i+r.minBlockSize)
-					v.WithContext("block_size", r.minBlockSize)
-
-					violations = append(violations, v)
-				}
+	var violations []*core.Violation
+	for _, hash := range hashOrder {
+		group := starts[hash]
+		if len(group) < 2 {
+			continue
+		}
+		first := group[0]
+		window := normalized[first : first+r.minBlockSize]
+		for _, repeat := range group[1:] {
+			// Only report non-overlapping repetitions.
+			if repeat < first+r.minBlockSize {
+				continue
 			}
+			if !windowsMatch(window, normalized[repeat:repeat+r.minBlockSize]) {
+				continue
+			}
+
+			v := r.CreateViolation(ctx.RelPath, repeat+1,
+				"Duplicate block ("+strconv.Itoa(r.minBlockSize)+" lines) - same as lines "+
+					strconv.Itoa(first+1)+"-"+strconv.Itoa(first+r.minBlockSize))
+			v.WithCode(ctx.GetLine(repeat + 1))
+			v.WithSuggestion("Extract duplicate code into a shared function")
+			v.WithContext("first_start", first+1)
+			v.WithContext("first_end", first+r.minBlockSize)
+			v.WithContext("block_size", r.minBlockSize)
+
+			violations = append(violations, v)
+			break
 		}
 	}
 
 	return violations
-}
-
-func (r *DuplicateBlockRule) windowsMatch(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (r *DuplicateBlockRule) hashWindow(window []string) string {
-	h := sha256.New()
-	for _, line := range window {
-		h.Write([]byte(line))
-		h.Write([]byte{'\n'})
-	}
-	return hex.EncodeToString(h.Sum(nil))[:16]
-}
-
-func (r *DuplicateBlockRule) isWindowTrivial(window []string) bool {
-	nonTrivialCount := 0
-	totalLength := 0
-
-	for _, line := range window {
-		totalLength += len(line)
-		if !r.isTrivialLine(line) {
-			nonTrivialCount++
-		}
-	}
-
-	// Window is trivial if:
-	// - Less than 6 non-trivial lines
-	// - Total content less than 150 characters
-	return nonTrivialCount < 6 || totalLength < 150
-}
-
-func (r *DuplicateBlockRule) normalizeLine(line string) string {
-	normalized := strings.TrimSpace(line)
-	for strings.Contains(normalized, "  ") {
-		normalized = strings.ReplaceAll(normalized, "  ", " ")
-	}
-	return normalized
-}
-
-func (r *DuplicateBlockRule) isTrivialLine(line string) bool {
-	if line == "" {
-		return true
-	}
-
-	// Common trivial patterns
-	trivial := []string{
-		"{", "}", "(", ")", "[", "]",
-		"else {", "} else {", "} else if",
-		"default:", "break", "continue",
-		"return", "return nil", "return false", "return true",
-		"return err", "return result", "return v",
-		"if err != nil {", "if !ok {", "if ok {",
-		"defer func() {", "}()",
-	}
-
-	for _, t := range trivial {
-		if line == t {
-			return true
-		}
-	}
-
-	// Skip lines ending with comma (likely struct fields)
-	if strings.HasSuffix(line, ",") && len(line) < 50 {
-		return true
-	}
-
-	// Skip struct field definitions (have JSON/XML tags)
-	if strings.Contains(line, "`json:") || strings.Contains(line, "`xml:") {
-		return true
-	}
-
-	// Skip short lines
-	if len(line) < 15 {
-		return true
-	}
-
-	// Skip comment lines
-	if strings.HasPrefix(line, "//") || strings.HasPrefix(line, "/*") {
-		return true
-	}
-
-	return false
-}
-
-func (r *DuplicateBlockRule) itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var digits []byte
-	for n > 0 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-		n /= 10
-	}
-	return string(digits)
 }

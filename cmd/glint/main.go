@@ -182,6 +182,10 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
+		// Rules are process-wide singletons: cross-file state from a previous
+		// root must not influence this one.
+		rules.ResetState(enabledRules)
+
 		violations, err := analyzeProject(contexts, enabledRules, cfg, project)
 		if err != nil {
 			return err
