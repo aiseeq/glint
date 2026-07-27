@@ -58,15 +58,12 @@ func (r *UnusedParamRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		used := r.collectUsedIdents(fn.Body)
 
 		// Find unused parameters
-		for name, line := range params {
-			if name == "_" || name == "" {
-				continue
-			}
-			if !used[name] {
-				v := r.CreateViolation(ctx.RelPath, line,
-					"Parameter '"+name+"' is never used")
+		for _, param := range params {
+			if !used[param.name] {
+				v := r.CreateViolation(ctx.RelPath, param.line,
+					"Parameter '"+param.name+"' is never used")
 				v.WithSuggestion("Remove parameter or use _ if required by interface")
-				v.WithContext("param", name)
+				v.WithContext("param", param.name)
 				violations = append(violations, v)
 			}
 		}
@@ -77,18 +74,24 @@ func (r *UnusedParamRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	return violations
 }
 
-func (r *UnusedParamRule) collectParams(ctx *core.FileContext, fn *ast.FuncDecl) map[string]int {
-	params := make(map[string]int)
+// declaredParam is one named parameter of a signature. Parameters are kept in
+// declaration order: reporting them in map order made the findings of a
+// function vary from run to run.
+type declaredParam struct {
+	name string
+	line int
+}
 
+func (r *UnusedParamRule) collectParams(ctx *core.FileContext, fn *ast.FuncDecl) []declaredParam {
 	if fn.Type.Params == nil {
-		return params
+		return nil
 	}
 
+	var params []declaredParam
 	for _, field := range fn.Type.Params.List {
 		for _, name := range field.Names {
 			if name.Name != "" && name.Name != "_" {
-				pos := ctx.PositionFor(name)
-				params[name.Name] = pos.Line
+				params = append(params, declaredParam{name: name.Name, line: ctx.PositionFor(name).Line})
 			}
 		}
 	}

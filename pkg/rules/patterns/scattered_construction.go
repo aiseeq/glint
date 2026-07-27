@@ -51,6 +51,13 @@ func (r *ScatteredConstructionRule) Configure(settings map[string]any) error {
 	return nil
 }
 
+// ResetState clears the construction sites collected so far. The rule
+// accumulates them across files, so without a reset a second project root
+// would inherit the sites of the first one.
+func (r *ScatteredConstructionRule) ResetState() {
+	r.constructions = make(map[string][]constructionSite)
+}
+
 func (r *ScatteredConstructionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.GoAST == nil {
 		return nil
