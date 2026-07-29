@@ -153,6 +153,52 @@ func (c *C) ValidateFoo() bool {
 }`,
 			expectedCount: 0,
 		},
+		{
+			name: "returning the error alongside false is propagation, not masking",
+			path: "/src/backend/store.go",
+			code: `package store
+type C struct{}
+func (c *C) lookup(k string) (bool, error) { return false, nil }
+func (c *C) Record(k string) (bool, error) {
+	ok, err := c.lookup(k)
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "returning a wrapped error alongside false is propagation",
+			path: "/src/backend/store.go",
+			code: `package store
+import "fmt"
+type C struct{}
+func (c *C) lookup(k string) (bool, error) { return false, nil }
+func (c *C) Record(k string) (bool, error) {
+	ok, err := c.lookup(k)
+	if err != nil {
+		return false, fmt.Errorf("record %s: %w", k, err)
+	}
+	return ok, nil
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "returning false with an explicit nil error is still masking",
+			path: "/src/backend/store.go",
+			code: `package store
+type C struct{}
+func (c *C) lookup(k string) (bool, error) { return false, nil }
+func (c *C) Record(k string) (bool, error) {
+	ok, err := c.lookup(k)
+	if err != nil {
+		return false, nil
+	}
+	return ok, nil
+}`,
+			expectedCount: 1,
+		},
 	}
 
 	for _, tt := range tests {

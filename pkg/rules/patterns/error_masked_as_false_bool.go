@@ -189,6 +189,12 @@ func (r *ErrorMaskedAsFalseBoolRule) findReturnFalse(body *ast.BlockStmt) *ast.R
 		if !ok || len(ret.Results) == 0 {
 			return true
 		}
+		// `return false, err` hands the error to the caller alongside the
+		// bool — that is propagation, which is what this rule asks for, not
+		// the masking it looks for.
+		if returnsError(ret) {
+			return true
+		}
 		for _, res := range ret.Results {
 			if ident, ok := res.(*ast.Ident); ok && ident.Name == "false" {
 				found = ret
@@ -198,6 +204,42 @@ func (r *ErrorMaskedAsFalseBoolRule) findReturnFalse(body *ast.BlockStmt) *ast.R
 		return true
 	})
 	return found
+}
+
+// returnsError reports whether a return statement passes an error along. It
+// matches the error by name, the same way isErrNilCheck matches the check that
+// guards it, and treats an explicit nil as no error.
+func returnsError(ret *ast.ReturnStmt) bool {
+	for _, res := range ret.Results {
+		switch expr := res.(type) {
+		case *ast.Ident:
+			if isErrorName(expr.Name) {
+				return true
+			}
+		case *ast.CallExpr:
+			// fmt.Errorf(...), errors.New(...), a wrap helper — anything
+			// constructing the error being returned.
+			if selector, ok := expr.Fun.(*ast.SelectorExpr); ok && isErrorName(selector.Sel.Name) {
+				return true
+			}
+			if ident, ok := expr.Fun.(*ast.Ident); ok && isErrorName(ident.Name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isErrorName recognises the conventional spellings of an error value or of a
+// call that builds one.
+func isErrorName(name string) bool {
+	lower := strings.ToLower(name)
+	if lower == "nil" {
+		return false
+	}
+	return strings.HasPrefix(lower, "err") ||
+		strings.HasSuffix(lower, "err") ||
+		strings.HasSuffix(lower, "error")
 }
 
 // hasLoggingCall returns true if any statement in the block calls something
