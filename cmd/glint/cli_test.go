@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -87,5 +89,34 @@ func TestBuildSeverityOverridesReportsInvalidSeverity(t *testing.T) {
 
 	if _, err := buildSeverityOverrides(cfg, []rules.Rule{newExemptStubRule()}); err == nil {
 		t.Fatal("an unparseable severity must be reported, not ignored")
+	}
+}
+
+// A dangling symlink in the tree (common in historical checkouts) used to abort
+// the whole run; under --tolerate-broken-packages it must only be skipped.
+func TestWalkWithWalkerSkipsUnreadableFilesWhenTolerant(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package project\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "gone.md"), filepath.Join(root, "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := flagTolerant
+	t.Cleanup(func() { flagTolerant = prev })
+
+	flagTolerant = false
+	if _, _, err := walkWithWalker(core.NewWalker(root, core.DefaultConfig())); err == nil {
+		t.Fatal("strict mode must report an unreadable file")
+	}
+
+	flagTolerant = true
+	contexts, _, err := walkWithWalker(core.NewWalker(root, core.DefaultConfig()))
+	if err != nil {
+		t.Fatalf("tolerant mode must skip the unreadable file, got: %v", err)
+	}
+	if len(contexts) == 0 {
+		t.Fatal("readable files must still be analyzed")
 	}
 }
