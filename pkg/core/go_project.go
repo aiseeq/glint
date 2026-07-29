@@ -17,6 +17,25 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
+// GoProjectOptions controls how the typed project is loaded.
+type GoProjectOptions struct {
+	// RequireSSA builds the SSA program for rules that need it.
+	RequireSSA bool
+	// TolerateBrokenPackages keeps analysis running when some packages fail to
+	// type-check: they are excluded from typed analysis and reported in
+	// SkippedPackages instead of aborting the whole load. Needed to analyze a
+	// tree that does not compile as a whole - historical commits, generated or
+	// git-ignored sources, work in progress.
+	TolerateBrokenPackages bool
+}
+
+// SkippedPackage describes a package excluded from typed analysis.
+type SkippedPackage struct {
+	ID      string
+	PkgPath string
+	Reason  string
+}
+
 // GoProjectContext contains the shared typed representation of the initial Go packages.
 type GoProjectContext struct {
 	ProjectRoot string
@@ -24,6 +43,9 @@ type GoProjectContext struct {
 	Program     *ssa.Program
 	Packages    []*GoPackageContext
 	Files       []*FileContext
+	// SkippedPackages lists packages excluded from typed analysis; always empty
+	// unless GoProjectOptions.TolerateBrokenPackages is set.
+	SkippedPackages []SkippedPackage
 
 	filesByPath map[string]*FileContext
 }
@@ -85,11 +107,15 @@ type goProjectLoader struct {
 }
 
 // LoadGoProject loads all initial packages below root from the already-read file contents.
-func LoadGoProject(root string, contexts []*FileContext, requireSSA bool) (*GoProjectContext, error) {
-	return loadGoProject(root, contexts, requireSSA, nil)
+func LoadGoProject(root string, contexts []*FileContext, opts GoProjectOptions) (*GoProjectContext, error) {
+	return loadGoProjectWithOptions(root, contexts, opts, nil)
 }
 
 func loadGoProject(root string, contexts []*FileContext, requireSSA bool, onParse func(string)) (*GoProjectContext, error) {
+	return loadGoProjectWithOptions(root, contexts, GoProjectOptions{RequireSSA: requireSSA}, onParse)
+}
+
+func loadGoProjectWithOptions(root string, contexts []*FileContext, opts GoProjectOptions, onParse func(string)) (*GoProjectContext, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("make Go project root absolute: %w", err)
@@ -127,15 +153,18 @@ func loadGoProject(root string, contexts []*FileContext, requireSSA bool, onPars
 		}
 		return loaded[i].ID < loaded[j].ID
 	})
-	if err := validateLoadedPackages(loaded, fset); err != nil {
-		return nil, err
+	healthy, skipped := partitionLoadedPackages(loaded, fset)
+	if len(skipped) > 0 && !opts.TolerateBrokenPackages {
+		return nil, brokenPackagesError(skipped)
 	}
+	loaded = healthy
 
 	project := &GoProjectContext{
-		ProjectRoot: absRoot,
-		FileSet:     fset,
-		Files:       append([]*FileContext(nil), goFiles...),
-		filesByPath: filesByPath,
+		ProjectRoot:     absRoot,
+		FileSet:         fset,
+		Files:           append([]*FileContext(nil), goFiles...),
+		SkippedPackages: skipped,
+		filesByPath:     filesByPath,
 	}
 	compiled, err := attachLoadedGoPackages(project, loaded, loader.parsed)
 	if err != nil {
@@ -145,7 +174,7 @@ func loadGoProject(root string, contexts []*FileContext, requireSSA bool, onPars
 		return nil, err
 	}
 
-	if requireSSA {
+	if opts.RequireSSA && len(loaded) > 0 {
 		if err := attachGoSSA(project, loaded); err != nil {
 			return nil, err
 		}
@@ -363,30 +392,52 @@ func absolutePath(root, path string) (string, error) {
 	return filepath.Clean(absPath), nil
 }
 
-func validateLoadedPackages(loaded []*packages.Package, fset *token.FileSet) error {
-	var packageErrors []error
+// partitionLoadedPackages splits loaded packages into those usable for typed
+// analysis and those that are not, with the reason each one was rejected.
+func partitionLoadedPackages(loaded []*packages.Package, fset *token.FileSet) ([]*packages.Package, []SkippedPackage) {
+	healthy := make([]*packages.Package, 0, len(loaded))
+	var skipped []SkippedPackage
 	for _, pkg := range loaded {
 		if pkg == nil {
-			packageErrors = append(packageErrors, errors.New("load Go packages: nil package"))
+			skipped = append(skipped, SkippedPackage{Reason: "load Go packages: nil package"})
 			continue
 		}
+		var reasons []string
 		for _, pkgErr := range pkg.Errors {
-			packageErrors = append(packageErrors, fmt.Errorf("package %q: %s", pkg.ID, pkgErr.Error()))
+			reasons = append(reasons, pkgErr.Error())
 		}
 		if pkg.Module != nil && pkg.Module.Error != nil {
-			packageErrors = append(packageErrors, fmt.Errorf("package %q module: %s", pkg.ID, pkg.Module.Error.Err))
+			reasons = append(reasons, "module: "+pkg.Module.Error.Err)
 		}
 		if pkg.IllTyped {
-			packageErrors = append(packageErrors, fmt.Errorf("package %q is ill-typed", pkg.ID))
+			reasons = append(reasons, "package is ill-typed")
 		}
 		if pkg.Types == nil || pkg.TypesInfo == nil || pkg.Fset == nil {
-			packageErrors = append(packageErrors, fmt.Errorf("package %q has incomplete typed syntax", pkg.ID))
+			reasons = append(reasons, "package has incomplete typed syntax")
 		} else if pkg.Fset != fset {
-			packageErrors = append(packageErrors, fmt.Errorf("package %q does not use the shared file set", pkg.ID))
+			reasons = append(reasons, "package does not use the shared file set")
 		}
+		if len(reasons) > 0 {
+			skipped = append(skipped, SkippedPackage{
+				ID:      pkg.ID,
+				PkgPath: pkg.PkgPath,
+				Reason:  strings.Join(reasons, "; "),
+			})
+			continue
+		}
+		healthy = append(healthy, pkg)
 	}
-	if len(packageErrors) > 0 {
-		return fmt.Errorf("load Go project: %w", errors.Join(packageErrors...))
+	return healthy, skipped
+}
+
+func brokenPackagesError(skipped []SkippedPackage) error {
+	packageErrors := make([]error, 0, len(skipped))
+	for _, pkg := range skipped {
+		if pkg.ID == "" {
+			packageErrors = append(packageErrors, errors.New(pkg.Reason))
+			continue
+		}
+		packageErrors = append(packageErrors, fmt.Errorf("package %q: %s", pkg.ID, pkg.Reason))
 	}
-	return nil
+	return fmt.Errorf("load Go project: %w", errors.Join(packageErrors...))
 }
