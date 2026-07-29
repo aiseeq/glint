@@ -51,6 +51,11 @@ glint check --rule=error-masking
 
 # Get summary for AI agents
 glint check --output=summary
+
+# Analyze a tree that does not compile as a whole (historical commits,
+# git-ignored or generated sources, work in progress): packages that fail to
+# type-check are reported and their files are analyzed without type information
+glint check --tolerate-broken-packages
 ```
 
 ## Configuration
