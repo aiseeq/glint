@@ -120,6 +120,55 @@ func TestLoadGoProjectTolerateBrokenPackagesStillParsesTheirFiles(t *testing.T) 
 	require.NotNil(t, fileCtx.GoAST, "file rules must still see the syntax tree")
 }
 
+func TestLoadGoProjectTolerateBrokenPackagesKeepsFilesOutsideAnyModule(t *testing.T) {
+	root := t.TempDir()
+	moduleRoot := filepath.Join(root, "app")
+	require.NoError(t, os.MkdirAll(moduleRoot, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(moduleRoot, "go.mod"), []byte("module example.com/app\n\ngo 1.24\n"), 0644))
+
+	var contexts []*FileContext
+	for path, source := range map[string]string{
+		filepath.Join(moduleRoot, "value.go"):     "package app\n\nfunc Value() string { return \"ok\" }\n",
+		filepath.Join(root, "tools", "helper.go"): "package main\n\nfunc main() {}\n",
+	} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, os.WriteFile(path, []byte(source), 0644))
+		ctx, err := NewFileContextChecked(path, root, []byte(source), DefaultConfig())
+		require.NoError(t, err)
+		contexts = append(contexts, ctx)
+	}
+
+	project, err := LoadGoProject(root, contexts, GoProjectOptions{TolerateBrokenPackages: true})
+	require.NoError(t, err)
+	require.Len(t, project.Packages, 1)
+	require.Len(t, project.SkippedPackages, 1)
+	assert.Contains(t, project.SkippedPackages[0].Reason, "outside a Go module")
+
+	fileCtx, err := project.File(filepath.Join(root, "tools", "helper.go"))
+	require.NoError(t, err)
+	require.NotNil(t, fileCtx.GoAST, "a file outside any module still gets parsed")
+}
+
+func TestLoadGoProjectTolerateBrokenPackagesReportsUnparsableFiles(t *testing.T) {
+	root, contexts := writeGoModule(t, map[string]string{
+		"value.go":   "package project\n\nfunc Value() string { return \"ok\" }\n",
+		"scratch.go": "func main() {}\n",
+	})
+
+	project, err := LoadGoProject(root, contexts, GoProjectOptions{TolerateBrokenPackages: true})
+	require.NoError(t, err)
+	require.NotEmpty(t, project.SkippedPackages)
+	joined := ""
+	for _, pkg := range project.SkippedPackages {
+		joined += pkg.Reason
+	}
+	assert.Contains(t, joined, "scratch.go")
+
+	fileCtx, err := project.File(filepath.Join(root, "scratch.go"))
+	require.NoError(t, err)
+	assert.Nil(t, fileCtx.GoAST, "an unparsable file carries no syntax tree")
+}
+
 func TestLoadGoProjectUsesExcludedCompiledFileForTypesWithoutAnalyzingIt(t *testing.T) {
 	root, contexts := writeGoModule(t, map[string]string{
 		"first.go":  "package project\n\nfunc First() Second { return Second{} }\n",
