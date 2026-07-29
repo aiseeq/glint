@@ -233,6 +233,36 @@ func TestTechDebtRule_DeadCode(t *testing.T) {
 	assert.Equal(t, "dead_code_marker", violations[0].Context["pattern"])
 }
 
+// Репро из self-check самого glint: комментарий ссылается на имя правила unused-field,
+// а не признаётся в мёртвом коде. Kebab-case идентификатор — не проза.
+func TestTechDebtRule_RuleNameIsNotDeadCodeMarker(t *testing.T) {
+	rule := NewTechDebtRule()
+
+	for _, code := range []string{
+		"// the shape of an optional filter belongs to unused-field's territory rather than here",
+		"// see unused-param for the parameter case",
+		"// unused-symbol reports this instead",
+	} {
+		ctx := createTechDebtContext(t, "backend/service.go", code)
+		assert.Empty(t, rule.AnalyzeFile(ctx), "ссылка на имя правила не является меткой мёртвого кода: %s", code)
+	}
+}
+
+// Прозаическое упоминание неиспользуемого кода метка по-прежнему ловится.
+func TestTechDebtRule_UnusedProseStillFlagged(t *testing.T) {
+	rule := NewTechDebtRule()
+
+	// Матчер привязан к началу комментария — так правило устроено и до этой правки.
+	for _, code := range []string{
+		"// unused variable kept for compatibility",
+		"// unused: remove after migration",
+		"// unused, see task SI-123",
+	} {
+		ctx := createTechDebtContext(t, "backend/service.go", code)
+		require.NotEmpty(t, rule.AnalyzeFile(ctx), "метка мёртвого кода должна ловиться: %s", code)
+	}
+}
+
 func TestTechDebtRule_TestFilesExcluded(t *testing.T) {
 	rule := NewTechDebtRule()
 

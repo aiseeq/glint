@@ -68,8 +68,10 @@ func (r *TechDebtRule) initPatterns() {
 			suggestion:  "Refactor the code or create a task",
 		},
 		"dead_code_marker": {
-			// NOTE: "unused" must be followed by non-letter to avoid matching "UnusedParamRule"
-			regex:       regexp.MustCompile(`(?i)//\s*(dead\s+code|unused(?:[^a-zA-Z]|$)|not\s+used|никогда\s+не\s+использ)`),
+			// "unused" must be followed by a non-letter to avoid matching "UnusedParamRule",
+			// and not by a hyphen: "unused-field" is a rule name being referenced, not an
+			// admission of dead code (repro: glint self-check on never_assigned_field.go).
+			regex:       regexp.MustCompile(`(?i)//\s*(dead\s+code|unused(?:[^a-zA-Z-]|$)|not\s+used|никогда\s+не\s+использ)`),
 			severity:    core.SeverityMedium,
 			description: "Dead code marker",
 			suggestion:  "Remove dead code - git remembers history",
