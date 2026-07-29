@@ -390,7 +390,18 @@ func walkWithWalker(walker *core.Walker) ([]*core.FileContext, *core.Walker, err
 	}
 
 	if len(walkErrors) > 0 {
-		return nil, walker, fmt.Errorf("walk project files: %w", errors.Join(walkErrors...))
+		// Несогласованное дерево (исторический срез, битый симлинк, файл без
+		// прав) не должно останавливать анализ целиком: под флагом файлы,
+		// которые не читаются, называются и пропускаются.
+		if !flagTolerant {
+			return nil, walker, fmt.Errorf("walk project files: %w", errors.Join(walkErrors...))
+		}
+		fmt.Fprintf(os.Stderr, "Skipped %d unreadable file(s)\n", len(walkErrors))
+		if flagVerbose {
+			for _, walkErr := range walkErrors {
+				fmt.Fprintf(os.Stderr, "  %v\n", walkErr)
+			}
+		}
 	}
 
 	return contexts, walker, nil
