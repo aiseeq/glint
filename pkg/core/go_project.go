@@ -133,7 +133,7 @@ func loadGoProjectWithOptions(root string, contexts []*FileContext, opts GoProje
 		onParse: onParse,
 	}
 
-	moduleDirs, err := goModuleDirs(absRoot, goFiles)
+	moduleDirs, outsideModule, err := goModuleDirs(absRoot, goFiles, opts.TolerateBrokenPackages)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func loadGoProjectWithOptions(root string, contexts []*FileContext, opts GoProje
 	if err != nil {
 		return nil, err
 	}
-	if len(loaded) == 0 {
+	if len(loaded) == 0 && !opts.TolerateBrokenPackages {
 		return nil, fmt.Errorf("load Go packages below %q: no packages found", absRoot)
 	}
 	sort.Slice(loaded, func(i, j int) bool {
@@ -158,6 +158,7 @@ func loadGoProjectWithOptions(root string, contexts []*FileContext, opts GoProje
 		return nil, brokenPackagesError(skipped)
 	}
 	loaded = healthy
+	skipped = append(skipped, outsideModule...)
 
 	project := &GoProjectContext{
 		ProjectRoot:     absRoot,
@@ -170,9 +171,11 @@ func loadGoProjectWithOptions(root string, contexts []*FileContext, opts GoProje
 	if err != nil {
 		return nil, err
 	}
-	if err := attachUncompiledGoFiles(project, loader, goFiles, compiled); err != nil {
+	unparsed, err := attachUncompiledGoFiles(project, loader, goFiles, compiled, opts.TolerateBrokenPackages)
+	if err != nil {
 		return nil, err
 	}
+	project.SkippedPackages = append(project.SkippedPackages, unparsed...)
 
 	if opts.RequireSSA && len(loaded) > 0 {
 		if err := attachGoSSA(project, loaded); err != nil {
@@ -183,19 +186,27 @@ func loadGoProjectWithOptions(root string, contexts []*FileContext, opts GoProje
 	return project, nil
 }
 
-func goModuleDirs(root string, goFiles []*FileContext) ([]string, error) {
+// goModuleDirs resolves the modules that own the analyzed files. With tolerate
+// set, a file outside any module is reported instead of aborting the load: it
+// still gets a syntax tree, only type information is unavailable for it.
+func goModuleDirs(root string, goFiles []*FileContext, tolerate bool) ([]string, []SkippedPackage, error) {
 	modules := make(map[string]bool)
+	var outside []SkippedPackage
 	for _, fileCtx := range goFiles {
 		path, err := absoluteContextPath(root, fileCtx)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		moduleDir, found, err := nearestGoModule(root, filepath.Dir(path))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if !found {
-			return nil, fmt.Errorf("load Go project: analyzed file %q is outside a Go module", path)
+			if !tolerate {
+				return nil, nil, fmt.Errorf("load Go project: analyzed file %q is outside a Go module", path)
+			}
+			outside = append(outside, SkippedPackage{Reason: fmt.Sprintf("file %q is outside a Go module", path)})
+			continue
 		}
 		modules[moduleDir] = true
 	}
@@ -204,7 +215,7 @@ func goModuleDirs(root string, goFiles []*FileContext) ([]string, error) {
 		moduleDirs = append(moduleDirs, moduleDir)
 	}
 	sort.Strings(moduleDirs)
-	return moduleDirs, nil
+	return moduleDirs, outside, nil
 }
 
 func nearestGoModule(root, start string) (string, bool, error) {
@@ -333,22 +344,30 @@ func attachLoadedGoPackages(project *GoProjectContext, loaded []*packages.Packag
 	return compiled, nil
 }
 
-func attachUncompiledGoFiles(project *GoProjectContext, loader *goProjectLoader, goFiles []*FileContext, compiled map[string]bool) error {
+// attachUncompiledGoFiles parses the analyzed files that no typed package
+// claimed. With tolerate set, a file that does not parse at all is reported and
+// left without a syntax tree instead of failing the whole load.
+func attachUncompiledGoFiles(project *GoProjectContext, loader *goProjectLoader, goFiles []*FileContext, compiled map[string]bool, tolerate bool) ([]SkippedPackage, error) {
+	var unparsed []SkippedPackage
 	for _, fileCtx := range goFiles {
 		path, err := absoluteContextPath(project.ProjectRoot, fileCtx)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if compiled[path] {
 			continue
 		}
 		file, err := loader.parseFile(project.FileSet, path, fileCtx.Content)
 		if err != nil {
-			return err
+			if !tolerate {
+				return nil, err
+			}
+			unparsed = append(unparsed, SkippedPackage{Reason: err.Error()})
+			continue
 		}
 		fileCtx.SetGoAST(project.FileSet, file)
 	}
-	return nil
+	return unparsed, nil
 }
 
 func attachGoSSA(project *GoProjectContext, loaded []*packages.Package) error {
