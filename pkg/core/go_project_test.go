@@ -84,9 +84,40 @@ func TestLoadGoProjectReturnsTypeErrors(t *testing.T) {
 		"broken.go": "package project\n\nvar Number int = \"not an int\"\n",
 	})
 
-	_, err := LoadGoProject(root, contexts, false)
+	_, err := LoadGoProject(root, contexts, GoProjectOptions{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not an int")
+}
+
+func TestLoadGoProjectTolerateBrokenPackagesKeepsHealthyOnes(t *testing.T) {
+	root, contexts := writeGoModule(t, map[string]string{
+		"healthy/value.go": "package healthy\n\nfunc Value() string { return \"ok\" }\n",
+		"broken/broken.go": "package broken\n\nvar Number int = missingSymbol()\n",
+	})
+
+	project, err := LoadGoProject(root, contexts, GoProjectOptions{TolerateBrokenPackages: true})
+	require.NoError(t, err)
+	require.Len(t, project.Packages, 1, "only the healthy package stays typed")
+	assert.Equal(t, "example.com/project/healthy", project.Packages[0].Package.PkgPath)
+
+	require.Len(t, project.SkippedPackages, 1)
+	assert.Equal(t, "example.com/project/broken", project.SkippedPackages[0].PkgPath)
+	assert.Contains(t, project.SkippedPackages[0].Reason, "missingSymbol")
+}
+
+func TestLoadGoProjectTolerateBrokenPackagesStillParsesTheirFiles(t *testing.T) {
+	root, contexts := writeGoModule(t, map[string]string{
+		"broken/broken.go": "package broken\n\nvar Number int = missingSymbol()\n",
+	})
+
+	project, err := LoadGoProject(root, contexts, GoProjectOptions{TolerateBrokenPackages: true})
+	require.NoError(t, err)
+	assert.Empty(t, project.Packages, "a broken package carries no usable type information")
+	require.Len(t, project.SkippedPackages, 1)
+
+	fileCtx, err := project.File(filepath.Join(root, "broken", "broken.go"))
+	require.NoError(t, err)
+	require.NotNil(t, fileCtx.GoAST, "file rules must still see the syntax tree")
 }
 
 func TestLoadGoProjectUsesExcludedCompiledFileForTypesWithoutAnalyzingIt(t *testing.T) {
@@ -96,7 +127,7 @@ func TestLoadGoProjectUsesExcludedCompiledFileForTypesWithoutAnalyzingIt(t *test
 	})
 	contexts = contexts[:1]
 
-	project, err := LoadGoProject(root, contexts, true)
+	project, err := LoadGoProject(root, contexts, GoProjectOptions{RequireSSA: true})
 	require.NoError(t, err)
 	require.Len(t, project.Packages, 1)
 	require.Len(t, project.Packages[0].Files, 1)
@@ -123,7 +154,7 @@ func TestLoadGoProjectLoadsModulesBelowProjectRoot(t *testing.T) {
 		contexts = append(contexts, ctx)
 	}
 
-	project, err := LoadGoProject(root, contexts, true)
+	project, err := LoadGoProject(root, contexts, GoProjectOptions{RequireSSA: true})
 	require.NoError(t, err)
 	require.Len(t, project.Packages, 2)
 	for _, pkg := range project.Packages {
@@ -139,7 +170,7 @@ func TestLoadGoProjectRejectsAnalyzedFileOutsideGoModule(t *testing.T) {
 	ctx, err := NewFileContextChecked(path, root, source, DefaultConfig())
 	require.NoError(t, err)
 
-	_, err = LoadGoProject(root, []*FileContext{ctx}, false)
+	_, err = LoadGoProject(root, []*FileContext{ctx}, GoProjectOptions{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "outside a Go module")
 }

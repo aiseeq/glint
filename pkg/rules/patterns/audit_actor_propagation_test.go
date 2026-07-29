@@ -400,7 +400,7 @@ func TestAuditActorPropagationRule_RejectsUnmappableSourceSinkPosition(t *testin
 func update(repo *Repo) { repo.RecordStatusHistory("txn", "admin:update", 0) }
 `,
 	})
-	project, err := core.LoadGoProject(root, contexts, true)
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{RequireSSA: true})
 	require.NoError(t, err)
 	project.FileSet = nil
 
@@ -419,7 +419,7 @@ func update(repo *Repo) {
 }
 `,
 	})
-	project, err := core.LoadGoProject(root, contexts, true)
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{RequireSSA: true})
 	require.NoError(t, err)
 	violations, err := NewAuditActorPropagationRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
@@ -444,7 +444,7 @@ func analyzeAuditModuleWithRule(t *testing.T, rule *AuditActorPropagationRule, f
 func analyzeAuditModuleError(t *testing.T, rule *AuditActorPropagationRule, files map[string]string) ([]*core.Violation, error) {
 	t.Helper()
 	root, contexts := writeAuditModule(t, files)
-	project, err := core.LoadGoProject(root, contexts, true)
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{RequireSSA: true})
 	if err != nil {
 		return nil, err
 	}

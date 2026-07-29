@@ -45,6 +45,7 @@ var (
 	flagVerbose     bool
 	flagDebug       bool
 	flagNoColor     bool
+	flagTolerant    bool
 	// Fix command flags
 	flagDryRun  bool
 	flagForce   bool
@@ -145,6 +146,7 @@ func init() {
 	checkCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show analyzed files")
 	checkCmd.Flags().BoolVar(&flagDebug, "debug", false, "Enable debug output")
 	checkCmd.Flags().BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
+	checkCmd.Flags().BoolVar(&flagTolerant, "tolerate-broken-packages", false, "Analyze packages that type-check and report the ones that do not, instead of failing (for trees that do not compile as a whole)")
 
 	// Rules command flags
 	rulesCmd.Flags().StringVarP(&flagCategory, "category", "c", "", "Filter by category")
@@ -217,6 +219,9 @@ func runCheck(_ *cobra.Command, args []string) error {
 
 		stats.FilesAnalyzed += len(contexts)
 		stats.FilesSkipped += walker.Stats().SkippedFiles
+		if project != nil {
+			stats.PackagesSkipped += len(project.SkippedPackages)
+		}
 		for _, rule := range enabledRules {
 			rulesRun[rule.Name()] = struct{}{}
 		}
@@ -413,11 +418,33 @@ func prepareAnalysis(projectRoot string, cfg *core.Config, enabledRules []rules.
 	if projectRuleCount == 0 || !hasGoFiles(contexts) {
 		return contexts, walker, nil, nil
 	}
-	project, err := core.LoadGoProject(projectRoot, contexts, requireSSA)
+	project, err := core.LoadGoProject(projectRoot, contexts, core.GoProjectOptions{
+		RequireSSA:             requireSSA,
+		TolerateBrokenPackages: flagTolerant,
+	})
 	if err != nil {
 		return nil, walker, nil, fmt.Errorf("load Go project context: %w", err)
 	}
+	reportSkippedPackages(project)
 	return contexts, walker, project, nil
+}
+
+// reportSkippedPackages keeps a tolerated load honest: whatever was left out of
+// typed analysis is named, so findings are never read as full coverage.
+func reportSkippedPackages(project *core.GoProjectContext) {
+	if project == nil || len(project.SkippedPackages) == 0 {
+		return
+	}
+	if flagOutput == "json" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Skipped %d package(s) that do not type-check; their files are analyzed without type information\n", len(project.SkippedPackages))
+	if !flagVerbose {
+		return
+	}
+	for _, pkg := range project.SkippedPackages {
+		fmt.Fprintf(os.Stderr, "  %s: %s\n", pkg.PkgPath, pkg.Reason)
+	}
 }
 
 func shouldFailAnalysis(violations core.ViolationList) bool {

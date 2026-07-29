@@ -70,7 +70,7 @@ func ProjectWithSSA(t *testing.T, files map[string]string) *core.GoProjectContex
 func load(t *testing.T, files map[string]string, withSSA bool) *core.GoProjectContext {
 	t.Helper()
 	root, contexts := Module(t, files)
-	project, err := core.LoadGoProject(root, contexts, withSSA)
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{RequireSSA: withSSA})
 	require.NoError(t, err)
 	return project
 }

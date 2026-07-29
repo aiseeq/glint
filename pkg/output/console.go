@@ -213,8 +213,11 @@ func (c *ConsoleOutput) printSummary(out *reportWriter, violations core.Violatio
 type Stats struct {
 	FilesAnalyzed int
 	FilesSkipped  int
-	RulesRun      int
-	Duration      float64
+	// PackagesSkipped counts packages left out of typed analysis because they
+	// do not type-check; non-zero only under --tolerate-broken-packages.
+	PackagesSkipped int
+	RulesRun        int
+	Duration        float64
 }
 
 // SummaryOutput writes a compact summary for AI agents

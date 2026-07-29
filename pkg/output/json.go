@@ -59,10 +59,11 @@ type jsonSummary struct {
 }
 
 type jsonStats struct {
-	FilesAnalyzed int     `json:"filesAnalyzed"`
-	FilesSkipped  int     `json:"filesSkipped"`
-	RulesRun      int     `json:"rulesRun"`
-	Duration      float64 `json:"duration"`
+	FilesAnalyzed   int     `json:"filesAnalyzed"`
+	FilesSkipped    int     `json:"filesSkipped"`
+	PackagesSkipped int     `json:"packagesSkipped,omitempty"`
+	RulesRun        int     `json:"rulesRun"`
+	Duration        float64 `json:"duration"`
 }
 
 type jsonIssue struct {

@@ -21,7 +21,7 @@ func mapOrderProject(t *testing.T, source string) *core.GoProjectContext {
 	ctx, err := core.NewFileContextChecked(path, root, []byte(source), core.DefaultConfig())
 	require.NoError(t, err)
 
-	project, err := core.LoadGoProject(root, []*core.FileContext{ctx}, false)
+	project, err := core.LoadGoProject(root, []*core.FileContext{ctx}, core.GoProjectOptions{})
 	require.NoError(t, err)
 	return project
 }
