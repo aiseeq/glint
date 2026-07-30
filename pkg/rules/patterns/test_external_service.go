@@ -438,6 +438,11 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 		}
 	}
 
+	// Файл, называющий локальный адрес, гоняет наш собственный сервер, и «секрет» в нём —
+	// наш же JWT. В backoffice на этом ловился reference-тест, который гейтится
+	// BO_ADMIN_TOKEN и ходит в http://localhost:8090.
+	drivesOwnServer := r.hasLocalURLLiteral(file.GoAST)
+
 	var violations []*core.Violation
 	for _, decl := range file.GoAST.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -447,7 +452,9 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 		if r.hasGuard(fn) {
 			continue
 		}
-		violations = append(violations, r.credentialGates(file, fn)...)
+		if !drivesOwnServer {
+			violations = append(violations, r.credentialGates(file, fn)...)
+		}
 		if usesHTTPTest {
 			continue
 		}
