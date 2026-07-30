@@ -198,6 +198,8 @@ func (r *ErrorMaskingRule) analyzeGoAST(ctx *core.FileContext) []*core.Violation
 
 	visitor.Visit()
 
+	violations = append(violations, r.checkSuccessOnlyGuards(ctx)...)
+
 	// Check switch statements in functions that return error
 	// This is more conservative to avoid false positives on display/label functions
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
@@ -225,6 +227,314 @@ func (r *ErrorMaskingRule) analyzeGoAST(ctx *core.FileContext) []*core.Violation
 	})
 
 	return violations
+}
+
+// checkSuccessOnlyGuards finds the "assign on success, say nothing on failure" shape:
+//
+//	if items, err := repo.List(ctx); err == nil {
+//	    out = build(items)
+//	}
+//
+// The guard has no else and err is never looked at again — not returned, not logged —
+// so a failed call is indistinguishable from an empty result. That
+// is how a broken repository query surfaced as "no operations today" in the balance
+// card while the headline kept showing yesterday's snapshot.
+func (r *ErrorMaskingRule) checkSuccessOnlyGuards(ctx *core.FileContext) []*core.Violation {
+	var violations []*core.Violation
+
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			return true
+		}
+		ast.Inspect(fn.Body, func(inner ast.Node) bool {
+			ifStmt, ok := inner.(*ast.IfStmt)
+			if !ok {
+				return true
+			}
+			if v := r.checkSuccessOnlyGuard(ctx, fn, ifStmt); v != nil {
+				violations = append(violations, v)
+			}
+			return true
+		})
+
+		return false
+	})
+
+	return violations
+}
+
+func (r *ErrorMaskingRule) checkSuccessOnlyGuard(ctx *core.FileContext, fn *ast.FuncDecl, stmt *ast.IfStmt) *core.Violation {
+	if stmt.Else != nil {
+		return nil
+	}
+	errName, ok := successGuardErrName(stmt.Cond)
+	if !ok {
+		return nil
+	}
+	source, sourceOK := errSourceCall(fn, stmt, errName)
+	if !sourceOK {
+		return nil
+	}
+	if !guardBodyOnlyAssigns(stmt.Body) {
+		return nil
+	}
+	if guardOnlyRefinesReadyValues(fn, stmt) {
+		return nil
+	}
+	if errUsedElsewhere(fn, stmt, errName) {
+		return nil
+	}
+
+	pos := ctx.PositionFor(stmt)
+	v := r.CreateViolation(ctx.RelPath, pos.Line,
+		"Result of "+source+" is used only on success: the error is dropped and the caller cannot tell failure from empty data")
+	v.WithCode(ctx.GetLine(pos.Line))
+	v.WithSuggestion("Return the error from this function, or handle the failure branch explicitly")
+	v.WithContext("pattern", "success_only_guard")
+	return v
+}
+
+// guardOnlyRefinesReadyValues отличает уточнение от потери. Если переменная уже
+// получила осмысленное значение выше по функции, провал под guard'ом означает
+// «оставить как было» — значение по умолчанию видно в коде рядом. Потеря данных
+// начинается там, где цель пуста (var x T) или накапливается через append: тогда
+// сбой неотличим от «данных не было».
+func guardOnlyRefinesReadyValues(fn *ast.FuncDecl, stmt *ast.IfStmt) bool {
+	targets := guardAssignTargets(stmt.Body)
+	if len(targets) == 0 {
+		return false
+	}
+	for name, accumulates := range targets {
+		if accumulates || !hasValueBefore(fn, stmt, name) {
+			return false
+		}
+	}
+	return true
+}
+
+// guardAssignTargets собирает имена, в которые пишет блок успеха. Значение флага —
+// накопление (append к самому себе), при нём прежнее содержимое цель не спасает.
+func guardAssignTargets(body *ast.BlockStmt) map[string]bool {
+	targets := make(map[string]bool)
+	ast.Inspect(body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.Tok != token.ASSIGN {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			name := rootIdentName(lhs)
+			if name == "" {
+				continue
+			}
+			targets[name] = targets[name] || i < len(assign.Rhs) && isAppendExprTo(assign.Rhs[i], name)
+		}
+		return true
+	})
+	return targets
+}
+
+// rootIdentName возвращает имя переменной, в которую в итоге идёт запись:
+// x, x.field, x[i] — всё это запись в x.
+func rootIdentName(expr ast.Expr) string {
+	switch node := expr.(type) {
+	case *ast.Ident:
+		if node.Name == "_" {
+			return ""
+		}
+		return node.Name
+	case *ast.SelectorExpr:
+		return rootIdentName(node.X)
+	case *ast.IndexExpr:
+		return rootIdentName(node.X)
+	case *ast.StarExpr:
+		return rootIdentName(node.X)
+	}
+	return ""
+}
+
+func isAppendExprTo(expr ast.Expr, name string) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok || ident.Name != "append" || len(call.Args) == 0 {
+		return false
+	}
+	return rootIdentName(call.Args[0]) == name
+}
+
+// hasValueBefore проверяет, получила ли переменная значение до guard'а: присваивание
+// или var с инициализатором. Голое `var x T` значением не считается.
+func hasValueBefore(fn *ast.FuncDecl, stmt *ast.IfStmt, name string) bool {
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if n == nil || n.Pos() >= stmt.Pos() {
+			return true
+		}
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range node.Lhs {
+				if rootIdentName(lhs) == name {
+					found = true
+				}
+			}
+		case *ast.ValueSpec:
+			if len(node.Values) == 0 {
+				return true
+			}
+			for _, ident := range node.Names {
+				if ident.Name == name {
+					found = true
+				}
+			}
+		case *ast.Field: // параметр функции приходит со значением от вызывающего
+			for _, ident := range node.Names {
+				if ident.Name == name {
+					found = true
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// successGuardErrName распознаёт условие «ошибки нет» и возвращает имя переменной.
+func successGuardErrName(cond ast.Expr) (string, bool) {
+	bin, ok := cond.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.EQL {
+		return "", false
+	}
+	ident, ok := bin.X.(*ast.Ident)
+	if !ok || !isErrorVarName(ident.Name) {
+		return "", false
+	}
+	nilIdent, isNil := bin.Y.(*ast.Ident)
+	if !isNil || nilIdent.Name != "nil" {
+		return "", false
+	}
+	return ident.Name, true
+}
+
+func isErrorVarName(name string) bool {
+	lower := strings.ToLower(name)
+	return lower == "err" || strings.HasSuffix(lower, "err") || strings.HasSuffix(lower, "error")
+}
+
+// errSourceCall находит вызов, из которого пришла ошибка: либо в Init самого if,
+// либо в присваивании выше по тому же телу функции. Без вызова это не наш случай:
+// переменная могла прийти аргументом и проверяться осмысленно.
+func errSourceCall(fn *ast.FuncDecl, stmt *ast.IfStmt, errName string) (string, bool) {
+	if assign, ok := stmt.Init.(*ast.AssignStmt); ok {
+		if name, found := callAssignedToErr(assign, errName); found {
+			return name, true
+		}
+		return "", false
+	}
+	if stmt.Init != nil {
+		return "", false
+	}
+
+	var source string
+	var found bool
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.Pos() >= stmt.Pos() {
+			return true
+		}
+		if name, ok := callAssignedToErr(assign, errName); ok {
+			source = name // берём ближайшее присваивание перед проверкой
+			found = true
+		}
+		return true
+	})
+	return source, found
+}
+
+func callAssignedToErr(assign *ast.AssignStmt, errName string) (string, bool) {
+	if len(assign.Rhs) != 1 {
+		return "", false
+	}
+	call, ok := assign.Rhs[0].(*ast.CallExpr)
+	if !ok {
+		return "", false
+	}
+	for _, lhs := range assign.Lhs {
+		if ident, ok := lhs.(*ast.Ident); ok && ident.Name == errName {
+			return core.ExtractFullFunctionName(call), true
+		}
+	}
+	return "", false
+}
+
+// guardBodyOnlyAssigns требует, чтобы тело успеха писало наружу и не выходило из
+// функции: return, panic, continue и break — это уже явная развилка, а не тишина.
+func guardBodyOnlyAssigns(body *ast.BlockStmt) bool {
+	if body == nil || len(body.List) == 0 {
+		return false
+	}
+
+	hasOuterAssign := false
+	terminates := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.ReturnStmt:
+			terminates = true
+		case *ast.BranchStmt:
+			terminates = true
+		case *ast.AssignStmt:
+			if node.Tok == token.ASSIGN {
+				hasOuterAssign = true
+			}
+		case *ast.FuncLit:
+			return false // тело замыкания живёт своей жизнью
+		}
+		return true
+	})
+
+	return hasOuterAssign && !terminates
+}
+
+// errUsedElsewhere проверяет, смотрит ли на ошибку кто-то ещё в этой функции:
+// лог, второй if, возврат. Собственное присваивание и условие не считаются.
+func errUsedElsewhere(fn *ast.FuncDecl, stmt *ast.IfStmt, errName string) bool {
+	used := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		ident, ok := n.(*ast.Ident)
+		if !ok || ident.Name != errName {
+			return true
+		}
+		if ident.Pos() >= stmt.Pos() && ident.End() <= stmt.End() {
+			return true // внутри самого if: Init и условие
+		}
+		if assign, ok := enclosingAssign(fn.Body, ident); ok && identInLhs(assign, ident) {
+			return true // строка, где ошибка получена
+		}
+		used = true
+		return false
+	})
+	return used
+}
+
+func enclosingAssign(body *ast.BlockStmt, target *ast.Ident) (*ast.AssignStmt, bool) {
+	var found *ast.AssignStmt
+	ast.Inspect(body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		if assign.Pos() <= target.Pos() && target.End() <= assign.End() {
+			found = assign
+		}
+		return true
+	})
+	return found, found != nil
+}
+
+func identInLhs(assign *ast.AssignStmt, target *ast.Ident) bool {
+	return slices.Contains(assign.Lhs, ast.Expr(target))
 }
 
 // functionShouldReturnError checks if function signature suggests it should return error
