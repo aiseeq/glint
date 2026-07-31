@@ -125,7 +125,7 @@ func (r *IgnoredErrorRule) checkAssign(fileCtx *core.FileContext, assign *ast.As
 			continue
 		}
 		funcName := core.ExtractFullFunctionName(call)
-		if isKnownSafeToIgnore(funcName) {
+		if isKnownSafeToIgnore(funcName) || writeCannotFail(call, info) {
 			continue
 		}
 
@@ -196,4 +196,62 @@ func isKnownSafeToIgnore(funcName string) bool {
 	}
 
 	return false
+}
+
+// writeCannotFail reports a Write on a destination whose documentation promises
+// the error is always nil: hash.Hash ("it never returns an error"), and the
+// in-memory writers strings.Builder and bytes.Buffer. Demanding a check there
+// buys a branch that can never run, so the blank is the honest spelling.
+func writeCannotFail(call *ast.CallExpr, info *types.Info) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !strings.HasPrefix(selector.Sel.Name, "Write") {
+		return false
+	}
+	recv := info.TypeOf(selector.X)
+	if recv == nil {
+		return false
+	}
+	if pointer, ok := recv.Underlying().(*types.Pointer); ok {
+		recv = pointer.Elem()
+	}
+	if named, ok := recv.(*types.Named); ok {
+		pkg := named.Obj().Pkg()
+		if pkg != nil {
+			switch pkg.Path() + "." + named.Obj().Name() {
+			case "strings.Builder", "bytes.Buffer":
+				return true
+			}
+		}
+	}
+	return implementsHash(recv)
+}
+
+// implementsHash reports whether the type carries the hash.Hash method set. The
+// interface is matched by shape rather than by import so that both hash.Hash
+// itself and the concrete hashes returned by fnv, sha256 and friends qualify.
+func implementsHash(t types.Type) bool {
+	required := map[string]bool{"Write": false, "Sum": false, "Reset": false, "Size": false, "BlockSize": false}
+	mark := func(name string) {
+		if _, wanted := required[name]; wanted {
+			required[name] = true
+		}
+	}
+	if iface, ok := t.Underlying().(*types.Interface); ok {
+		// fnv.New64a and friends hand back hash.Hash64, so the value's static
+		// type is the interface itself; a pointer to it has no method set.
+		for i := 0; i < iface.NumMethods(); i++ {
+			mark(iface.Method(i).Name())
+		}
+	} else {
+		methods := types.NewMethodSet(types.NewPointer(t))
+		for i := 0; i < methods.Len(); i++ {
+			mark(methods.At(i).Obj().Name())
+		}
+	}
+	for _, found := range required {
+		if !found {
+			return false
+		}
+	}
+	return true
 }

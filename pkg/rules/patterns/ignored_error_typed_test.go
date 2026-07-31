@@ -191,3 +191,35 @@ func abort(t *tx) {
 `})
 	assert.Empty(t, found, "Rollback — признанное исключение: %v", found)
 }
+
+// hash.Hash, strings.Builder и bytes.Buffer документируют, что их Write никогда
+// не возвращает ошибку. Требовать её проверки — просить писать мёртвую ветку:
+// в projectC из-за этого флагилось построение fnv-хеша (seedHash).
+func TestIgnoredError_WritesThatCannotFail(t *testing.T) {
+	found := ignoredErrorMessages(t, map[string]string{"mutator/mutator.go": `package mutator
+
+import (
+	"bytes"
+	"hash/fnv"
+	"strings"
+)
+
+func SeedHash(seed, salt string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(salt))
+	_, _ = h.Write([]byte(seed))
+	return h.Sum64()
+}
+
+func Join(parts []string) string {
+	var b strings.Builder
+	var buf bytes.Buffer
+	for _, part := range parts {
+		_, _ = b.WriteString(part)
+		_, _ = buf.Write([]byte(part))
+	}
+	return b.String() + buf.String()
+}
+`})
+	assert.Empty(t, found, "запись в хеш и в буфер не может провалиться: %v", found)
+}
