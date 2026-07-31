@@ -329,6 +329,9 @@ func (r *MultiWriteNoTransactionRule) violation(ctx *core.GoProjectContext, node
 		Severity:   r.DefaultSeverity(),
 		Category:   r.Category(),
 		Suggestion: "Wrap the writes in one transaction so the operation either applies fully or leaves no trace",
+		// Имя функции в контексте — то, по чему `function:` в конфиге исключает
+		// одну осознанно разделённую пару, не глуша правило на весь файл.
+		Context: map[string]any{"function": node.display},
 	}
 }
 
