@@ -58,6 +58,23 @@ func (s *Service) Complete(ctx context.Context) error {
 	assert.Equal(t, core.SeverityHigh, violations[0].Severity)
 }
 
+// Конфиг умеет исключать находку по имени функции, но только если правило кладёт
+// это имя в контекст. Без него `function:` в .glint.yaml молча не срабатывает, и
+// осознанно разделённую пару записей приходится глушить по всему файлу.
+func TestMultiWriteNoTransactionRule_ReportsFunctionInContext(t *testing.T) {
+	violations := analyzeStoreModule(t, `
+func (s *Service) Complete(ctx context.Context) error {
+	if err := s.repo.UpdateThing(ctx); err != nil {
+		return err
+	}
+	return s.repo.CreateThing(ctx)
+}
+`)
+	require.Len(t, violations, 1)
+	require.NotNil(t, violations[0].Context)
+	assert.Equal(t, "Complete", violations[0].Context["function"])
+}
+
 // Транзакция вокруг записей снимает вопрос.
 func TestMultiWriteNoTransactionRule_SilentUnderTransaction(t *testing.T) {
 	violations := analyzeStoreModule(t, `
