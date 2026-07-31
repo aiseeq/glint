@@ -234,3 +234,42 @@ func TestReimplementedStdlibMetadata(t *testing.T) {
 	assert.Equal(t, "patterns", rule.Category())
 	assert.Equal(t, core.SeverityMedium, rule.DefaultSeverity())
 }
+
+// Числа словами делят на 10 и 100 ровно как ручной Itoa, но цифра идёт индексом
+// в таблицу слов, а не превращается в символ. Репро из propay (mutator/numwords.go).
+func TestReimplementedStdlibKeepsQuietOnNumberToWords(t *testing.T) {
+	violations := analyzeStdlibCopies(t, `package helpers
+
+var smallNumbers = []string{"Zero", "One", "Two"}
+var tensNames = []string{"", "Ten", "Twenty"}
+
+func threeDigitWords(n uint64) string {
+	var parts []string
+	if n >= 100 {
+		parts = append(parts, smallNumbers[n/100], "Hundred")
+		n %= 100
+	}
+	switch {
+	case n >= 20:
+		t := tensNames[n/10]
+		if n%10 != 0 {
+			t += " " + smallNumbers[n%10]
+		}
+		parts = append(parts, t)
+	case n > 0:
+		parts = append(parts, smallNumbers[n])
+	}
+	return join(parts)
+}
+
+func join(parts []string) string {
+	out := ""
+	for _, p := range parts {
+		out += p
+	}
+	return out
+}
+`)
+
+	assert.Empty(t, violations, "цифра здесь индекс в таблицу слов, а не символ: %v", violations)
+}

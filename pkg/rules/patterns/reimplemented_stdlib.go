@@ -128,9 +128,45 @@ func stdlibEquivalent(fn *ast.FuncDecl) (string, bool) {
 }
 
 // formatsDigitByDigit recognizes building a decimal string from the last digit
-// up: the body divides by ten and takes the remainder of ten.
+// up: the body divides by ten, takes the remainder of ten, and turns the digit
+// into a character. The last part is what separates printing a number from
+// merely reading it digit by digit — spelling a number in words divides the same
+// way but uses each digit as an index into a table of words, and replacing that
+// with strconv.Itoa would be nonsense.
 func formatsDigitByDigit(fn *ast.FuncDecl) bool {
-	return returnsBasicType(fn, "string") && hasDecimalDigitLoop(fn.Body) && !mentionsPackage(fn.Body, "strconv")
+	return returnsBasicType(fn, "string") && hasDecimalDigitLoop(fn.Body) &&
+		rendersDigitAsCharacter(fn.Body) && !mentionsPackage(fn.Body, "strconv")
+}
+
+// rendersDigitAsCharacter reports whether the body turns a digit into its ASCII
+// character, written either as `'0' + d` or as an index into a literal "0123…".
+func rendersDigitAsCharacter(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.BinaryExpr:
+			if node.Op != token.ADD {
+				return true
+			}
+			for _, operand := range []ast.Expr{node.X, node.Y} {
+				if lit, ok := operand.(*ast.BasicLit); ok && lit.Kind == token.CHAR && lit.Value == `'0'` {
+					found = true
+					return false
+				}
+			}
+		case *ast.IndexExpr:
+			lit, ok := node.X.(*ast.BasicLit)
+			if ok && lit.Kind == token.STRING && strings.Contains(lit.Value, "0123456789") {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // parsesDigitByDigit recognizes accumulating a number as `n = n*10 + digit`.

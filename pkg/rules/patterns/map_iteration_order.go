@@ -306,12 +306,7 @@ func isSortedBefore(fn *ast.FuncDecl, name string, loopEnd token.Pos) bool {
 		if !ok || call.Pos() < loopEnd {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		pkg, ok := sel.X.(*ast.Ident)
-		if !ok || (pkg.Name != "sort" && pkg.Name != "slices") {
+		if !isSortingCall(call.Fun) {
 			return true
 		}
 		for _, arg := range call.Args {
@@ -324,4 +319,21 @@ func isSortedBefore(fn *ast.FuncDecl, name string, loopEnd token.Pos) bool {
 	})
 
 	return sorted
+}
+
+// isSortingCall recognizes both the standard sorters and a project's own helper
+// around them. A wrapper named sortXEPairs orders the slice exactly as
+// sort.Slice does, and refusing to see it would push callers into inlining the
+// sort just to satisfy the rule.
+func isSortingCall(fun ast.Expr) bool {
+	switch callee := fun.(type) {
+	case *ast.SelectorExpr:
+		if pkg, ok := callee.X.(*ast.Ident); ok && (pkg.Name == "sort" || pkg.Name == "slices") {
+			return true
+		}
+		return strings.HasPrefix(strings.ToLower(callee.Sel.Name), "sort")
+	case *ast.Ident:
+		return strings.HasPrefix(strings.ToLower(callee.Name), "sort")
+	}
+	return false
 }

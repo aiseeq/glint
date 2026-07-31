@@ -177,3 +177,26 @@ func TestMapIterationOrderMetadata(t *testing.T) {
 	assert.Equal(t, "patterns", rule.Category())
 	assert.False(t, rule.RequiresSSA())
 }
+
+// Сортировка через собственный хелпер — та же гарантия порядка, что и sort.Strings.
+// Репро из propay: scheduler/xe_refresher.go собирает пары и зовёт sortXEPairs.
+func TestMapIterationOrderAcceptsSortHelper(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func sortPairs(pairs [][2]string) {
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i][0] < pairs[j][0] })
+}
+
+func Pairs(unique map[[2]string]bool) [][2]string {
+	pairs := make([][2]string, 0, len(unique))
+	for pair := range unique {
+		pairs = append(pairs, pair)
+	}
+	sortPairs(pairs)
+	return pairs
+}
+`)
+	assert.Empty(t, violations, "срез отсортирован перед возвратом: %v", violations)
+}

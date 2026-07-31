@@ -79,3 +79,30 @@ func createSilentErrorContext(t *testing.T, path, code string) *core.FileContext
 	ctx.SetGoAST(fset, file)
 	return ctx
 }
+
+// Ошибка, отданная в хелпер, не проглочена: хелпер её и логирует, и печатает.
+// Репро из propay — writePreflightFailure(msg, report, err) и
+// handleReconcileFailure(ctx, tx, err).
+func TestSilentErrorHandlingRule_ErrorPassedToHelper(t *testing.T) {
+	code := `package main
+
+type Report struct{}
+
+func writePreflightFailure(msg string, report Report, err error) {}
+
+func backfill() (Report, error) { return Report{}, nil }
+
+func run() int {
+	report, err := backfill()
+	if err != nil {
+		writePreflightFailure("historical preflight failed", report, err)
+		return 7
+	}
+	return 0
+}
+`
+
+	ctx := createSilentErrorContext(t, "main.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Empty(t, violations, "ошибка передана обработчику: %v", violations)
+}

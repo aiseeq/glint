@@ -366,6 +366,13 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsVal
 			if r.isPanicCall(call) {
 				return true
 			}
+			// Handing the error to another function is not swallowing it: the
+			// callee is what reports it. Project code routinely funnels a branch
+			// into writePreflightFailure(msg, report, err) or
+			// handleReconcileFailure(ctx, item, err) instead of logging inline.
+			if callTakesErrorArgument(call) {
+				return true
+			}
 		}
 
 	case *ast.IfStmt:
@@ -704,4 +711,25 @@ func (r *SilentErrorHandlingRule) findIfStmtsInDefers(file *ast.File) map[*ast.I
 	})
 
 	return result
+}
+
+// callTakesErrorArgument reports whether the error value itself is one of the
+// call's arguments. Only a plain identifier or a qualified sentinel counts, so a
+// call that merely mentions "error" in its name does not silence the rule.
+func callTakesErrorArgument(call *ast.CallExpr) bool {
+	for _, arg := range call.Args {
+		switch a := arg.(type) {
+		case *ast.Ident:
+			name := strings.ToLower(a.Name)
+			if name == "err" || strings.HasSuffix(name, "err") || strings.HasSuffix(name, "error") {
+				return true
+			}
+		case *ast.SelectorExpr:
+			name := strings.ToLower(a.Sel.Name)
+			if name == "err" || strings.HasSuffix(name, "err") || strings.HasSuffix(name, "error") {
+				return true
+			}
+		}
+	}
+	return false
 }
