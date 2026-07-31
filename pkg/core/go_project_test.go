@@ -224,6 +224,30 @@ func TestLoadGoProjectRejectsAnalyzedFileOutsideGoModule(t *testing.T) {
 	assert.Contains(t, err.Error(), "outside a Go module")
 }
 
+// Analyzing a subdirectory is the normal way to scope a run — `glint check
+// ./internal ./cmd` in a Makefile. The module owning those packages lives above
+// the analyzed directory, so the search for go.mod must not stop at the root of
+// the run.
+func TestLoadGoProjectFindsModuleAboveAnalyzedDirectory(t *testing.T) {
+	moduleRoot := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(moduleRoot, "go.mod"), []byte("module example.com/app\n\ngo 1.24\n"), 0644))
+
+	packageDir := filepath.Join(moduleRoot, "internal", "admin")
+	require.NoError(t, os.MkdirAll(packageDir, 0755))
+	source := []byte("package admin\n\nfunc Value() string { return \"ok\" }\n")
+	path := filepath.Join(packageDir, "admin.go")
+	require.NoError(t, os.WriteFile(path, source, 0644))
+
+	analyzedRoot := filepath.Join(moduleRoot, "internal")
+	ctx, err := NewFileContextChecked(path, analyzedRoot, source, DefaultConfig())
+	require.NoError(t, err)
+
+	project, err := LoadGoProject(analyzedRoot, []*FileContext{ctx}, GoProjectOptions{})
+	require.NoError(t, err)
+	require.Len(t, project.Packages, 1)
+	assert.Equal(t, "example.com/app/internal/admin", project.Packages[0].Package.PkgPath)
+}
+
 func TestGoProjectFileForPositionRejectsUnknownPosition(t *testing.T) {
 	project := &GoProjectContext{
 		FileSet:     token.NewFileSet(),
