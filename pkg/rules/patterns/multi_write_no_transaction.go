@@ -40,6 +40,10 @@ func init() {
 //
 //   - Calls in mutually exclusive arms of the same if or switch — only one of them runs.
 //   - A retry of the same call: the same method name twice is one write attempted twice.
+//   - Writes inside a goroutine body: that work outlives the function and cannot share its
+//     transaction. Project spawners that hide the `go` inside a helper, and telemetry that
+//     must survive precisely when the business operation fails, are listed in
+//     independent_calls.
 //   - Writes already inside a transaction runner's callback, and functions that are only
 //     ever reached from inside one — the wrapper does not have to sit in the same function
 //     as the writes, and requiring that would push every helper back into one long method.
@@ -56,6 +60,10 @@ type MultiWriteNoTransactionRule struct {
 	storeType *regexp.Regexp
 	txRunners map[string]bool
 	txOpeners map[string]bool
+	// independent — вызовы, чьи записи принадлежат другой единице работы: запускалки
+	// фоновых задач (аргумент выполняется в чужой горутине) и телеметрия, которая обязана
+	// сохраниться именно тогда, когда бизнес-операция провалилась.
+	independent map[string]bool
 }
 
 // NewMultiWriteNoTransactionRule creates the rule.
@@ -80,6 +88,9 @@ func NewMultiWriteNoTransactionRule() *MultiWriteNoTransactionRule {
 		},
 		// Функция, сама открывающая транзакцию и пишущая через её объект, а не через колбэк.
 		txOpeners: map[string]bool{"BeginTx": true, "BeginTxx": true, "Begin": true},
+		// Проектные запускалки горутин и телеметрия задаются в конфиге: в языке ни те, ни
+		// другие ничем не выделены. Голый `go` разбирается без настройки.
+		independent: map[string]bool{},
 	}
 }
 
@@ -116,6 +127,24 @@ func (r *MultiWriteNoTransactionRule) Configure(settings map[string]any) error {
 			runners[name] = true
 		}
 		r.txRunners = runners
+	}
+	if raw, ok := settings["independent_calls"]; ok {
+		list, ok := raw.([]any)
+		if !ok {
+			return fmt.Errorf("configure multi-write-no-transaction: independent_calls must be a list, got %T", raw)
+		}
+		independent := make(map[string]bool, len(list))
+		for i, item := range list {
+			name, ok := item.(string)
+			if !ok {
+				return fmt.Errorf("configure multi-write-no-transaction: independent_calls item %d must be a string, got %T", i, item)
+			}
+			if strings.TrimSpace(name) == "" {
+				return fmt.Errorf("configure multi-write-no-transaction: independent_calls item %d is empty", i)
+			}
+			independent[name] = true
+		}
+		r.independent = independent
 	}
 	return nil
 }
@@ -177,6 +206,17 @@ type branchArm struct {
 type writeCall struct {
 	method string
 	arms   []branchArm
+	// via — цепочка хелперов от разбираемой функции до самой записи. Без неё находку
+	// через два уровня вызовов невозможно проверить: в теле функции записи не видно.
+	via []string
+}
+
+// where describes the write for the report: имя метода и путь до него.
+func (w writeCall) where() string {
+	if len(w.via) == 0 {
+		return w.method
+	}
+	return w.method + " (через " + strings.Join(w.via, " → ") + ")"
 }
 
 // funcNode is one analysed function: its own writes and the functions it calls outside a
@@ -216,6 +256,7 @@ func (g callGraph) writesOf(name string, node *funcNode, visiting map[string]boo
 		}
 		for _, w := range g.writesOf(call.name, callee, visiting) {
 			w.arms = append(append([]branchArm(nil), call.arms...), w.arms...)
+			w.via = append([]string{callee.display}, w.via...)
 			writes = append(writes, w)
 		}
 	}
@@ -283,7 +324,7 @@ func (r *MultiWriteNoTransactionRule) violation(ctx *core.GoProjectContext, node
 		Column: pos.Column,
 		Message: fmt.Sprintf(
 			"%s changes stored state more than once without a transaction: %s and %s — a failure between them leaves the record half-applied",
-			node.display, pair[0].method, pair[1].method,
+			node.display, pair[0].where(), pair[1].where(),
 		),
 		Severity:   r.DefaultSeverity(),
 		Category:   r.Category(),
@@ -339,9 +380,22 @@ func (r *MultiWriteNoTransactionRule) scanBody(body *ast.BlockStmt, info *types.
 			walk(node.Assign)
 			walkCases(node.Body, id, visitWithArm, walk)
 			return
+		case *ast.GoStmt:
+			// Тело горутины — отдельная единица работы: она переживает возврат из
+			// функции и физически не может делить с ней транзакцию. Аргументы вызова
+			// вычисляются в текущей горутине (spec: Go statements), их смотрим.
+			for _, arg := range node.Call.Args {
+				walk(arg)
+			}
+			return
 		case *ast.CallExpr:
 			if r.isTransactionRunner(node) {
 				// Записи внутри колбэка транзакции уже защищены — вглубь не идём.
+				return
+			}
+			if r.isIndependent(node) {
+				// Запуск фоновой задачи или телеметрия: эти записи принадлежат другой
+				// единице работы и в транзакцию вызывающего попасть не должны.
 				return
 			}
 			// Вызов, сам являющийся записью, дальше не разворачиваем: делегирующая
@@ -417,6 +471,12 @@ func (r *MultiWriteNoTransactionRule) isTransactionRunner(call *ast.CallExpr) bo
 	return name != "" && r.txRunners[name]
 }
 
+// isIndependent reports whether the call's writes belong to another unit of work.
+func (r *MultiWriteNoTransactionRule) isIndependent(call *ast.CallExpr) bool {
+	name := mutationCalleeName(call.Fun)
+	return name != "" && r.independent[name]
+}
+
 // storeMutation reports the method name when the call mutates a store.
 func (r *MultiWriteNoTransactionRule) storeMutation(call *ast.CallExpr, info *types.Info) (string, bool) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -437,7 +497,26 @@ func (r *MultiWriteNoTransactionRule) storeMutation(call *ast.CallExpr, info *ty
 	if !r.storeType.MatchString(typeBaseName(recv)) {
 		return "", false
 	}
+	// Обращение к хранилищу идёт с контекстом. Без него это настройка самого объекта
+	// (repo.SetEnvironment(env), repo.SetLogger(l)) — она ничего не сохраняет и в
+	// транзакции не нуждается.
+	if len(call.Args) == 0 || !isContextArg(info.TypeOf(call.Args[0])) {
+		return "", false
+	}
 	return method, true
+}
+
+// isContextArg reports whether the argument is a context.Context.
+func isContextArg(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj != nil && obj.Name() == "Context" && obj.Pkg() != nil && obj.Pkg().Path() == "context"
 }
 
 // functionsUnderTransaction lists functions reachable from inside a transaction callback.

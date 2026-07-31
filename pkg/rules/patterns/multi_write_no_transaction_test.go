@@ -23,6 +23,7 @@ func (r *Repo) UpdateThing(ctx context.Context) error { return nil }
 func (r *Repo) DeleteThing(ctx context.Context) error { return nil }
 func (r *Repo) GetThing(ctx context.Context) error    { return nil }
 
+func (r *Repo) SetEnvironment(env string)                                        {}
 func (r *Repo) RunInTx(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }
 
 type Service struct{ repo *Repo }
@@ -149,6 +150,27 @@ func (s *Service) Load(ctx context.Context) error {
 	assert.Empty(t, violations)
 }
 
+// Запись в фоновой горутине — отдельная единица работы: она переживает возврат из
+// функции и в её транзакцию попасть не может даже теоретически.
+func TestMultiWriteNoTransactionRule_GoroutineWriteIsSeparateUnit(t *testing.T) {
+	violations := analyzeStoreModule(t, `
+func (s *Service) refreshAsync(ctx context.Context) {
+	go func() {
+		_ = s.repo.UpdateThing(ctx)
+	}()
+}
+
+func (s *Service) Save(ctx context.Context) error {
+	if err := s.repo.CreateThing(ctx); err != nil {
+		return err
+	}
+	s.refreshAsync(ctx)
+	return nil
+}
+`)
+	assert.Empty(t, violations)
+}
+
 // Повтор той же записи — ретрай, а не две операции.
 func TestMultiWriteNoTransactionRule_RetryIsOneWrite(t *testing.T) {
 	violations := analyzeStoreModule(t, `
@@ -182,6 +204,35 @@ func TestMultiWriteNoTransactionRule_ConfigureRejectsBadSettings(t *testing.T) {
 	require.Error(t, rule.Configure(map[string]any{"transaction_functions": "RunInTx"}))
 	require.Error(t, rule.Configure(map[string]any{"transaction_functions": []any{" "}}))
 	require.NoError(t, rule.Configure(map[string]any{"transaction_functions": []any{"Atomically"}}))
+
+	require.Error(t, rule.Configure(map[string]any{"independent_calls": "Go"}))
+	require.Error(t, rule.Configure(map[string]any{"independent_calls": []any{7}}))
+	require.Error(t, rule.Configure(map[string]any{"independent_calls": []any{" "}}))
+	require.NoError(t, rule.Configure(map[string]any{"independent_calls": []any{"Go"}}))
+}
+
+// Запускалка фоновой задачи и телеметрия объявляются в конфиге: их записи принадлежат
+// другой единице работы и в транзакцию вызывающего попасть не могут.
+func TestMultiWriteNoTransactionRule_IndependentCallsAreNotCounted(t *testing.T) {
+	rule := NewMultiWriteNoTransactionRule()
+	require.NoError(t, rule.Configure(map[string]any{"independent_calls": []any{"Spawn"}}))
+
+	source := `
+func Spawn(fn func()) { go fn() }
+
+func (s *Service) refresh(ctx context.Context) { _ = s.repo.UpdateThing(ctx) }
+
+func (s *Service) Save(ctx context.Context) error {
+	if err := s.repo.CreateThing(ctx); err != nil {
+		return err
+	}
+	Spawn(func() { s.refresh(ctx) })
+	return nil
+}
+`
+	assert.Empty(t, analyzeStoreModuleWithRule(t, rule, source))
+	// Без настройки та же запускалка неотличима от обычного вызова.
+	assert.Len(t, analyzeStoreModule(t, source), 1)
 }
 
 // Переопределённое имя раннера транзакций признаётся вместо встроенного списка.
@@ -244,4 +295,16 @@ func writeStoreModule(t *testing.T, files map[string]string) (string, []*core.Fi
 		contexts = append(contexts, ctx)
 	}
 	return root, contexts
+}
+
+// Настройка самого репозитория не является записью: она идёт без контекста и ничего
+// не сохраняет.
+func TestMultiWriteNoTransactionRule_SetterWithoutContextIsNotWrite(t *testing.T) {
+	violations := analyzeStoreModule(t, `
+func (s *Service) Boot(ctx context.Context) error {
+	s.repo.SetEnvironment("production")
+	return s.repo.CreateThing(ctx)
+}
+`)
+	assert.Empty(t, violations)
 }
