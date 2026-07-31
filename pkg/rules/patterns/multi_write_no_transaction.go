@@ -176,7 +176,6 @@ type branchArm struct {
 // writeCall is one mutating call together with the branch arms enclosing it.
 type writeCall struct {
 	method string
-	pos    token.Pos
 	arms   []branchArm
 }
 
@@ -348,7 +347,7 @@ func (r *MultiWriteNoTransactionRule) scanBody(body *ast.BlockStmt, info *types.
 			// Вызов, сам являющийся записью, дальше не разворачиваем: делегирующая
 			// обёртка иначе считалась бы второй записью поверх той же самой.
 			if method, ok := r.storeMutation(node, info); ok {
-				writes = append(writes, writeCall{method: method, pos: node.Pos(), arms: append([]branchArm(nil), arms...)})
+				writes = append(writes, writeCall{method: method, arms: append([]branchArm(nil), arms...)})
 			} else if callee := resolvedCalleeName(node, info); callee != "" {
 				calls = append(calls, callSite{name: callee, arms: append([]branchArm(nil), arms...)})
 			}
