@@ -45,6 +45,14 @@ categories:
             reason: >-
               initialize/run/auditRoles already return errors naming the SSA
               function and the malformed sink.
+      quadratic-loop:
+        exceptions:
+          - file: "multi_write_no_transaction.go"
+            reason: >-
+              The pairwise scan looks for two writes that are not in mutually
+              exclusive branches — a property of the pair, not of either write
+              alone. The collection is one function's writes, single digits in
+              practice, so the shape cannot grow into a cost.
 
   deadcode:
     enabled: true
