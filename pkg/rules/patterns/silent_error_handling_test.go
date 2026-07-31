@@ -106,3 +106,29 @@ func run() int {
 	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
 	require.Empty(t, violations, "ошибка передана обработчику: %v", violations)
 }
+
+// Причина, положенная в отчёт как err.Error(), тоже не молчание: текст ошибки
+// доезжает до читателя отчёта. Репро из projectC — бэкфилл отпечатков bulk.
+func TestSilentErrorHandlingRule_ErrorTextPassedToReport(t *testing.T) {
+	code := `package main
+
+type Report struct{ Issues []string }
+
+func appendIssue(report *Report, reason string) { report.Issues = append(report.Issues, reason) }
+
+func parseKey(key string) (string, error) { return "", nil }
+
+func classify(report *Report, keys []string) {
+	for _, key := range keys {
+		if _, err := parseKey(key); err != nil {
+			appendIssue(report, err.Error())
+			continue
+		}
+	}
+}
+`
+
+	ctx := createSilentErrorContext(t, "backfill.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Empty(t, violations, "текст ошибки попал в отчёт: %v", violations)
+}

@@ -714,22 +714,36 @@ func (r *SilentErrorHandlingRule) findIfStmtsInDefers(file *ast.File) map[*ast.I
 }
 
 // callTakesErrorArgument reports whether the error value itself is one of the
-// call's arguments. Only a plain identifier or a qualified sentinel counts, so a
-// call that merely mentions "error" in its name does not silence the rule.
+// call's arguments — either the value, or its text via err.Error(). Only those
+// shapes count, so a call that merely mentions "error" in its name does not
+// silence the rule.
 func callTakesErrorArgument(call *ast.CallExpr) bool {
 	for _, arg := range call.Args {
-		switch a := arg.(type) {
-		case *ast.Ident:
-			name := strings.ToLower(a.Name)
-			if name == "err" || strings.HasSuffix(name, "err") || strings.HasSuffix(name, "error") {
-				return true
-			}
-		case *ast.SelectorExpr:
-			name := strings.ToLower(a.Sel.Name)
-			if name == "err" || strings.HasSuffix(name, "err") || strings.HasSuffix(name, "error") {
-				return true
-			}
+		if argumentIsError(arg) {
+			return true
 		}
 	}
 	return false
+}
+
+func argumentIsError(arg ast.Expr) bool {
+	switch a := arg.(type) {
+	case *ast.Ident:
+		return looksLikeErrorName(a.Name)
+	case *ast.SelectorExpr:
+		return looksLikeErrorName(a.Sel.Name)
+	case *ast.CallExpr:
+		// err.Error() — the message travels even though the value does not.
+		sel, ok := a.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Error" {
+			return false
+		}
+		return argumentIsError(sel.X)
+	}
+	return false
+}
+
+func looksLikeErrorName(name string) bool {
+	lower := strings.ToLower(name)
+	return lower == "err" || strings.HasSuffix(lower, "err") || strings.HasSuffix(lower, "error")
 }
