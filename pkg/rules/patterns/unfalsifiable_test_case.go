@@ -114,7 +114,7 @@ func (r *UnfalsifiableTestCaseRule) unfalsifiable(subject, matcher, arg string, 
 
 // AnalyzeFile walks each test body and reports the ones with no falsifiable assertion.
 func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsTestFile() || !(ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile()) {
+	if !ctx.IsTestFile() || (!ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile()) {
 		return nil
 	}
 
