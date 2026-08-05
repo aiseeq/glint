@@ -142,3 +142,32 @@ func createUnfalsifiableContext(path, code string) *core.FileContext {
 		Content: []byte(code),
 	}
 }
+
+// Спек без единого expect: HTTP-запрос сам по себе не падает на 4xx, поэтому такой
+// тест сообщает только о том, что код не бросил исключение.
+func TestUnfalsifiableTestCase_NoAssertionsAtAll(t *testing.T) {
+	violations := NewUnfalsifiableTestCaseRule().AnalyzeFile(createUnfalsifiableContext("api.spec.ts", `import { test } from '@playwright/test'
+
+test('reads health', async ({ request }) => {
+  const response = await request.get('/api/health')
+  console.log(response.status())
+})
+`))
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "no assertions at all")
+	assert.Equal(t, "0", violations[0].Context["assertions"])
+}
+
+// Клик по несуществующему элементу роняет тест сам — такой спек находкой быть не должен.
+func TestUnfalsifiableTestCase_InteractionCanFail(t *testing.T) {
+	violations := NewUnfalsifiableTestCaseRule().AnalyzeFile(createUnfalsifiableContext("menu.spec.ts", `import { test } from '@playwright/test'
+
+test('opens menu', async ({ page }) => {
+  await page.goto('/dashboard')
+  await page.locator('[data-testid="menu"]').click()
+})
+`))
+
+	assert.Empty(t, violations)
+}

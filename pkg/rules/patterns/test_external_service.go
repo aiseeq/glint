@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -121,6 +122,10 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 	}
 
 	outbound := r.outboundPackages(ctx)
+	// Тест может лежать в самом вендорском пакете (package cryptoprov) и звать клиента
+	// без квалификатора. Такой вызов по секции import не находится, поэтому запоминаем,
+	// какому каталогу принадлежит внешний пакет.
+	outboundDirs := outboundDirectories(ctx, outbound)
 	// Тест-файлы разбираются по AST, а не по типам: пакеты грузятся без Tests:true,
 	// поэтому у *_test.go типовой информации нет, и они висят только в ctx.Files.
 	// Имя пакета в вызове разрешается по секции import самого файла — этого хватает
@@ -130,7 +135,7 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 		if file == nil || !file.IsTestFile() || file.GoAST == nil {
 			continue
 		}
-		violations = append(violations, r.analyzeTestFile(file, outbound)...)
+		violations = append(violations, r.analyzeTestFile(file, outbound, outboundDirs)...)
 	}
 
 	sort.Slice(violations, func(i, j int) bool {
@@ -140,6 +145,28 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 		return violations[i].Line < violations[j].Line
 	})
 	return violations, nil
+}
+
+// outboundDirectories maps a package directory to its outbound description, so an in-package
+// test (same directory, unqualified calls) is checked as well.
+func outboundDirectories(ctx *core.GoProjectContext, outbound map[string]outboundPackage) map[string]outboundPackage {
+	dirs := make(map[string]outboundPackage, len(outbound))
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil {
+			continue
+		}
+		entry, ok := outbound[pkg.Package.PkgPath]
+		if !ok {
+			continue
+		}
+		for _, file := range pkg.Files {
+			if file == nil {
+				continue
+			}
+			dirs[filepath.Dir(file.Path)] = entry
+		}
+	}
+	return dirs
 }
 
 // outboundPackage records why a package counts as talking to a third party.
@@ -426,7 +453,7 @@ func (r *TestExternalServiceRule) externalHost(lit *ast.BasicLit) string {
 
 // analyzeTestFile reports live calls and credential gates inside one test file.
 func (r *TestExternalServiceRule) analyzeTestFile(
-	file *core.FileContext, outbound map[string]outboundPackage,
+	file *core.FileContext, outbound map[string]outboundPackage, outboundDirs map[string]outboundPackage,
 ) []*core.Violation {
 	imports := importAliases(file.GoAST)
 	// Тест, поднявший свой httptest-сервер, никуда наружу не идёт.
@@ -459,6 +486,9 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 			continue
 		}
 		violations = append(violations, r.outboundCalls(file, imports, fn, outbound)...)
+		if own, ok := outboundDirs[filepath.Dir(file.Path)]; ok {
+			violations = append(violations, r.inPackageCalls(file, fn, own)...)
+		}
 	}
 	return violations
 }
@@ -555,6 +585,45 @@ func (r *TestExternalServiceRule) outboundCalls(
 	return violations
 }
 
+// inPackageCalls reports unqualified calls to the vendor package's own entry points.
+//
+// A test living inside the vendor client's package writes `NewClient(cfg)`, not
+// `cryptoprov.NewClient(cfg)`, so the import-based lookup above never sees it. That is exactly
+// how ProjectA's cryptoprov integration test stayed invisible to the rule.
+func (r *TestExternalServiceRule) inPackageCalls(
+	file *core.FileContext, fn *ast.FuncDecl, own outboundPackage,
+) []*core.Violation {
+	var violations []*core.Violation
+	reported := map[string]bool{}
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok || !own.entries[ident.Name] || hasNilArgument(call) {
+			return true
+		}
+		if reported[ident.Name] {
+			return true
+		}
+		reported[ident.Name] = true
+
+		pos := file.PositionFor(call)
+		v := r.CreateViolation(file.RelPath, pos.Line, fmt.Sprintf(
+			"Тест %s вызывает %s из своего же пакета — пакет %s. Тест не проверяет чужой код и не должен менять внешний мир",
+			fn.Name.Name, ident.Name, own.evidence))
+		v.WithCode(file.GetLine(pos.Line))
+		v.WithSuggestion("Подставьте провайдера на HTTP-границе (httptest) или засейте данные напрямую; живой вызов оставьте за явным опт-ином из guard_functions")
+		v.WithContext("pattern", "test_external_service")
+		v.WithContext("kind", "outbound_client")
+		violations = append(violations, v)
+		return true
+	})
+	return violations
+}
+
 // hasNilArgument reports whether the call passes an explicit nil.
 func hasNilArgument(call *ast.CallExpr) bool {
 	for _, arg := range call.Args {
@@ -635,18 +704,28 @@ func (r *TestExternalServiceRule) credentialEnvName(expr ast.Expr) string {
 
 // emptyCredentialCheck returns the env name compared against "" in the condition.
 func (r *TestExternalServiceRule) emptyCredentialCheck(cond ast.Expr, fromCredential map[string]string) string {
-	binary, ok := cond.(*ast.BinaryExpr)
-	if !ok || binary.Op.String() != "==" {
-		return ""
-	}
-	if !isEmptyStringLiteral(binary.Y) {
-		return ""
-	}
-	switch left := binary.X.(type) {
-	case *ast.Ident:
-		return fromCredential[left.Name]
-	case *ast.CallExpr:
-		return r.credentialEnvName(left)
+	switch expr := cond.(type) {
+	case *ast.ParenExpr:
+		return r.emptyCredentialCheck(expr.X, fromCredential)
+	case *ast.BinaryExpr:
+		// Гейт часто перечисляет несколько секретов: `PUB == "" || PRIV == ""`.
+		// Раньше разбирался только одиночный `==`, и составное условие проходило мимо
+		// правила — так в ProjectA остался незамеченным живой тест cryptoprov.
+		if expr.Op.String() == "||" || expr.Op.String() == "&&" {
+			if name := r.emptyCredentialCheck(expr.X, fromCredential); name != "" {
+				return name
+			}
+			return r.emptyCredentialCheck(expr.Y, fromCredential)
+		}
+		if expr.Op.String() != "==" || !isEmptyStringLiteral(expr.Y) {
+			return ""
+		}
+		switch left := expr.X.(type) {
+		case *ast.Ident:
+			return fromCredential[left.Name]
+		case *ast.CallExpr:
+			return r.credentialEnvName(left)
+		}
 	}
 	return ""
 }

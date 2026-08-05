@@ -38,6 +38,7 @@ type UnfalsifiableTestCaseRule struct {
 	genericScope   *regexp.Regexp
 	countFrom      *regexp.Regexp
 	optionalGuard  *regexp.Regexp
+	mayFail        *regexp.Regexp
 }
 
 // NewUnfalsifiableTestCaseRule creates the rule.
@@ -61,6 +62,10 @@ func NewUnfalsifiableTestCaseRule() *UnfalsifiableTestCaseRule {
 		// `if (resp.ok())`, `if (items.length > 0)` — условие ложно ровно тогда, когда
 		// проверяемое поведение сломано, поэтому проверки внутри до дела не доходят.
 		optionalGuard: regexp.MustCompile(`^\s*\}?\s*if\s*\(\s*[^)]*(?:\.ok\s*\(\s*\)|\.length\s*>\s*0|\.length\s*!==?\s*0|!==?\s*(?:null|undefined)|^\s*[A-Za-z_$][\w$.]*\s*)\)\s*\{`),
+		// Действия, которые сами роняют тест при поломке: клик по несуществующему элементу
+		// бросает исключение, ожидание состояния — тоже, а вызванный хелпер может
+		// проверять внутри. HTTP-запрос сюда не входит: request.get не падает на 4xx.
+		mayFail: regexp.MustCompile(`\.(?:click|dblclick|fill|press|check|uncheck|selectOption|setInputFiles|dragTo|hover|focus|waitFor|waitForSelector|waitForURL|waitForResponse|waitForRequest|waitForFunction|innerText|textContent|inputValue)\s*\(|\b(?:expect|assert|should|verify|ensure|check)[A-Z]\w*\s*\(|\bassert(?:\.\w+)?\s*\(`),
 	}
 }
 
@@ -129,12 +134,13 @@ func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 	}
 
 	type openTest struct {
-		name   string
-		line   int
-		depth  int
-		total  int
-		unfals int // не могут упасть сами по себе
-		hidden int // спрятаны за условием, ложным ровно при поломке
+		name    string
+		line    int
+		depth   int
+		total   int
+		unfals  int  // не могут упасть сами по себе
+		hidden  int  // спрятаны за условием, ложным ровно при поломке
+		mayFail bool // в теле есть действие или хелпер, способные уронить тест
 	}
 	var current *openTest
 	depth := 0
@@ -142,6 +148,19 @@ func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 
 	flush := func() {
 		if current == nil {
+			return
+		}
+		// Тест без единой проверки, в котором ничто не может упасть: он сообщает только
+		// о том, что код не бросил исключение, и годами числится покрытием.
+		if current.total == 0 && !current.mayFail {
+			v := r.CreateViolation(ctx.RelPath, current.line,
+				"Test '"+current.name+"' has no assertions at all — nothing in its body can fail")
+			v.WithCode(strings.TrimSpace(ctx.GetLine(current.line)))
+			v.WithSuggestion("Assert what the feature actually produces (a value, a specific element, a concrete status), or delete the test instead of claiming coverage")
+			v.WithContext("pattern", "unfalsifiable_test_case")
+			v.WithContext("assertions", "0")
+			violations = append(violations, v)
+			current = nil
 			return
 		}
 		if current.total > 0 && current.total == current.unfals+current.hidden {
@@ -171,6 +190,9 @@ func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 				}
 			}
 			if current != nil {
+				if r.mayFail.MatchString(trimmed) {
+					current.mayFail = true
+				}
 				if r.optionalGuard.MatchString(line) {
 					guardDepth = depth + 1
 				}
