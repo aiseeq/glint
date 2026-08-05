@@ -290,6 +290,24 @@ func (s *S) value() Decimal {
 			wantCount: 0,
 		},
 		{
+			// Голый return из void-функции — ранний выход после обработки
+			// (401 отправлен, запрос отклонён и залогирован), а не подмена
+			// значения. Репро: middleware projectA (auth, loopback, analytics).
+			name: "bare return from a void function is an early exit, not masking",
+			code: `package svc
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	token, err := extract(r)
+	if err != nil || token == "" {
+		sendUnauthorized(w, err)
+		return
+	}
+	serve(w, token)
+}
+`,
+			wantCount: 0,
+		},
+		{
 			name: "no error result and no return in branch: nothing masked",
 			code: `package svc
 
