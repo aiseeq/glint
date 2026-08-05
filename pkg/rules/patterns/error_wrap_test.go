@@ -165,6 +165,52 @@ func (r *Rule) Configure(settings map[string]any) error {
 	}
 }
 
+// A closure-runner call (RunInTx-style: the error comes from a call taking a
+// func literal) is a transparent pass-through: context is added inside the
+// closure, and wrapping outside would also break sentinel-error comparison for
+// callers that unwrap with errors.Is.
+func TestErrorWrapIgnoresClosureRunner(t *testing.T) {
+	code := `package svc
+
+import "fmt"
+
+func (s *Service) Apply(ctx Context, userID string) error {
+	if err := s.repo.RunInTx(ctx, func(ctx Context) error {
+		if err := s.repo.Save(ctx, userID); err != nil {
+			return fmt.Errorf("save: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+`
+	ctx := errorWrapContext(t, code)
+	if violations := NewErrorWrapRule().AnalyzeFile(ctx); len(violations) != 0 {
+		t.Fatalf("expected no findings, got %d", len(violations))
+	}
+}
+
+// Invoking a caller-supplied callback parameter is the same pass-through: the
+// callback owns its context (RunInTx itself returns fn's error verbatim so
+// domain sentinels survive).
+func TestErrorWrapIgnoresCallbackParameter(t *testing.T) {
+	code := `package svc
+
+func RunInTx(ctx Context, fn func(ctx Context) error) error {
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+`
+	ctx := errorWrapContext(t, code)
+	if violations := NewErrorWrapRule().AnalyzeFile(ctx); len(violations) != 0 {
+		t.Fatalf("expected no findings, got %d", len(violations))
+	}
+}
+
 // A different callee still loses its context and must be reported.
 func TestErrorWrapStillReportsForeignCall(t *testing.T) {
 	code := `package svc

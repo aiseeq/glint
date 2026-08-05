@@ -66,7 +66,15 @@ func (r *ErrorWrapRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			// Delegating to the same method on an embedded type is a pass
 			// through, not a lost context: the caller of this method adds the
 			// context, and wrapping here would duplicate it.
-			if callee := errorSourceCallee(ifStmt, fn.Body.List[:i]); callee == fn.Name.Name {
+			call := errorSourceCall(ifStmt, fn.Body.List[:i])
+			if callee := callName(call); callee != "" && callee == fn.Name.Name {
+				continue
+			}
+			// Closure-runners (RunInTx-style calls taking a func literal) and
+			// caller-supplied callback parameters are transparent pass-throughs:
+			// context is added inside the closure/callback, and wrapping outside
+			// would prefix every propagated error and obscure sentinel errors.
+			if isClosureRunnerCall(call) || isCallbackParamCall(call, fn) {
 				continue
 			}
 
@@ -154,14 +162,13 @@ func (r *ErrorWrapRule) isBareErrorReturn(ret *ast.ReturnStmt) bool {
 	return ident.Name == "err"
 }
 
-// errorSourceCallee returns the name of the call that produced the error the
-// if-statement checks, looking at the statement's own initializer first and
-// then at the preceding statements. It returns "" when the source cannot be
-// identified.
-func errorSourceCallee(ifStmt *ast.IfStmt, before []ast.Stmt) string {
+// errorSourceCall returns the call that produced the error the if-statement
+// checks, looking at the statement's own initializer first and then at the
+// preceding statements. It returns nil when the source cannot be identified.
+func errorSourceCall(ifStmt *ast.IfStmt, before []ast.Stmt) *ast.CallExpr {
 	if init, ok := ifStmt.Init.(*ast.AssignStmt); ok {
-		if name := assignedCallName(init); name != "" {
-			return name
+		if call := assignedCall(init); call != nil {
+			return call
 		}
 	}
 	for i := len(before) - 1; i >= 0; i-- {
@@ -169,9 +176,60 @@ func errorSourceCallee(ifStmt *ast.IfStmt, before []ast.Stmt) string {
 		if !ok || !assignsError(previous) {
 			continue
 		}
-		return assignedCallName(previous)
+		return assignedCall(previous)
+	}
+	return nil
+}
+
+// callName returns the (selector) name of the called function, "" if unknown.
+func callName(call *ast.CallExpr) string {
+	if call == nil {
+		return ""
+	}
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name
+	case *ast.SelectorExpr:
+		return fun.Sel.Name
 	}
 	return ""
+}
+
+// isClosureRunnerCall reports whether the call takes a func literal argument
+// (RunInTx-style runner executing caller-provided code).
+func isClosureRunnerCall(call *ast.CallExpr) bool {
+	if call == nil {
+		return false
+	}
+	for _, arg := range call.Args {
+		if _, ok := arg.(*ast.FuncLit); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// isCallbackParamCall reports whether the call invokes a func-typed parameter
+// of the enclosing function (the callback owns its error context).
+func isCallbackParamCall(call *ast.CallExpr, fn *ast.FuncDecl) bool {
+	if call == nil || fn.Type.Params == nil {
+		return false
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	for _, param := range fn.Type.Params.List {
+		if _, isFunc := param.Type.(*ast.FuncType); !isFunc {
+			continue
+		}
+		for _, name := range param.Names {
+			if name.Name == ident.Name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // assignsError reports whether the assignment binds a variable named "err".
@@ -184,21 +242,14 @@ func assignsError(assign *ast.AssignStmt) bool {
 	return false
 }
 
-// assignedCallName returns the name of the function called on the right-hand
-// side of an assignment.
-func assignedCallName(assign *ast.AssignStmt) string {
+// assignedCall returns the call on the right-hand side of an assignment.
+func assignedCall(assign *ast.AssignStmt) *ast.CallExpr {
 	if len(assign.Rhs) != 1 {
-		return ""
+		return nil
 	}
 	call, ok := assign.Rhs[0].(*ast.CallExpr)
 	if !ok {
-		return ""
+		return nil
 	}
-	switch fun := call.Fun.(type) {
-	case *ast.Ident:
-		return fun.Name
-	case *ast.SelectorExpr:
-		return fun.Sel.Name
-	}
-	return ""
+	return call
 }
