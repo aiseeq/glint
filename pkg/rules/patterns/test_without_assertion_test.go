@@ -103,6 +103,41 @@ func TestGroups(t *testing.T) {
 			wantCount: 1,
 		},
 		{
+			// Тест падает, если код паникует, — он фальсифицируем, просто без
+			// явного ассерта. Репро: safego_test.go в projectA ловит панику в
+			// горутине, где require.NotPanics неприменим.
+			name: "smoke call without logs is a panic check, not a stub",
+			code: `package models
+
+import "testing"
+
+func TestGo_PanicDoesNotEscapeGoroutine(t *testing.T) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		Run("escaping-task", nil, func() { panic("must not crash") })
+	}()
+	wg.Wait()
+}
+`,
+			wantCount: 0,
+		},
+		{
+			// Проверка соответствия интерфейсу выполняется компилятором: тест
+			// «падает» несобираемостью пакета. Репро: adapter_batch_check_test.go.
+			name: "compile-time interface assertion is enforced by the compiler",
+			code: `package models
+
+import "testing"
+
+func TestAdapter_HasGetUsersByIDs(t *testing.T) {
+	var _ batchUsersByIDsCheck = (*repository.UserDomainRepositoryAdapter)(nil)
+}
+`,
+			wantCount: 0,
+		},
+		{
 			name: "skipped test is out of scope",
 			code: `package models
 
