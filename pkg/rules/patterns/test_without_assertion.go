@@ -24,9 +24,16 @@ func init() {
 // Such a test claims coverage of behaviour nobody verifies. Either assert what
 // the code must do, or delete the test.
 //
+// The give-away is t.Log/t.Logf standing where an assertion belongs: the test
+// states a finding instead of checking it. A test that merely exercises code
+// without logging is a different, legitimate thing — it fails if that code
+// panics — and is not reported.
+//
 // Not flagged: tests that assert via testify/t.Error/t.Fatal, tests that hand
-// *testing.T to a helper (the helper asserts), skipped tests (see
-// skipped-tests), TestMain, benchmarks and fuzz targets.
+// *testing.T to a helper (the helper asserts), tests whose only statement is a
+// compile-time assertion (`var _ Iface = (*Impl)(nil)` — the compiler enforces
+// it), smoke calls without logging, skipped tests (see skipped-tests),
+// TestMain, benchmarks and fuzz targets.
 //
 // Companion rules: unfalsifiable-test-case covers TS/JS tests whose assertions
 // hold regardless of behaviour; tautological-assertion covers `require.True(t,
@@ -63,7 +70,9 @@ func (r *TestWithoutAssertionRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 		if bodyAsserts(fn.Body) || bodySkips(fn.Body) {
 			continue
 		}
-		if !bodyHasStatements(fn.Body) {
+		// Признак «документирующего» теста — печать вместо проверки. Без неё
+		// тело теста просто исполняет код и падает на панике: это smoke-проверка.
+		if !bodyLogsToTestingT(fn.Body) {
 			continue
 		}
 		pos := ctx.PositionFor(fn)
@@ -174,8 +183,32 @@ func isTestingIdentName(name string) bool {
 // Пропуск теста (t.Skip) — предмет отдельного правила: bodySkips живёт в
 // test_external_service.go, второй копии здесь не нужно.
 
-// bodyHasStatements reports whether the body does anything at all — an empty
-// stub is a different problem (empty-block).
-func bodyHasStatements(body *ast.BlockStmt) bool {
-	return len(body.List) > 0
+// bodyLogsToTestingT reports whether the body prints through the test handle
+// (t.Log/t.Logf and their subtest equivalents) — the marker of a test that
+// states a finding instead of asserting it.
+func bodyLogsToTestingT(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		receiver, ok := sel.X.(*ast.Ident)
+		if !ok || !isTestingIdentName(receiver.Name) {
+			return true
+		}
+		if sel.Sel.Name == "Log" || sel.Sel.Name == "Logf" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
