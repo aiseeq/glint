@@ -22,7 +22,7 @@ func TestDeprecatedCommentIgnoresGodocExamples(t *testing.T) {
 //	func LegacyMethod() {}
 type Finder struct{}
 `
-	ctx := deprecatedCommentContext(t, "svc.go", code)
+	ctx := parseGoContext(t, "svc.go", code)
 	if violations := NewDeprecatedCommentRule().AnalyzeFile(ctx); len(violations) != 0 {
 		t.Fatalf("expected no findings, got %d: %s", len(violations), violations[0].Code)
 	}
@@ -36,7 +36,7 @@ func TestDeprecatedCommentIgnoresMidParagraphMention(t *testing.T) {
 // legacy code path — "Legacy mode", "Legacy compatibility".
 type Finder struct{}
 `
-	ctx := deprecatedCommentContext(t, "svc.go", code)
+	ctx := parseGoContext(t, "svc.go", code)
 	if violations := NewDeprecatedCommentRule().AnalyzeFile(ctx); len(violations) != 0 {
 		t.Fatalf("expected no findings, got %d: %s", len(violations), violations[0].Code)
 	}
@@ -50,13 +50,13 @@ func TestDeprecatedCommentStillReportsCanonicalMarker(t *testing.T) {
 // Deprecated: use Finder instead.
 type OldFinder struct{}
 `
-	ctx := deprecatedCommentContext(t, "svc.go", code)
+	ctx := parseGoContext(t, "svc.go", code)
 	if violations := NewDeprecatedCommentRule().AnalyzeFile(ctx); len(violations) != 1 {
 		t.Fatalf("got %d findings, want 1", len(violations))
 	}
 }
 
-func deprecatedCommentContext(t *testing.T, path, code string) *core.FileContext {
+func parseGoContext(t *testing.T, path, code string) *core.FileContext {
 	t.Helper()
 	ctx := core.NewFileContext("/"+path, "/", []byte(code), core.DefaultConfig())
 	parser := core.NewParser()

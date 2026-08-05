@@ -169,6 +169,35 @@ func TestMergeConfigs(t *testing.T) {
 	assert.True(t, result.Categories["custom"].Enabled)
 }
 
+// A child config that sets only one field of a rule must not wipe the rest:
+// severity-only override used to erase the base's settings and exceptions.
+func TestMergeConfigsMergesRuleConfigFields(t *testing.T) {
+	base := &Config{Categories: map[string]CategoryConfig{
+		"patterns": {Enabled: true, Rules: map[string]RuleConfig{
+			"magic-number": {
+				Enabled:    true,
+				Settings:   map[string]any{"min_value": 100},
+				Exceptions: []Exception{{Files: "gen/**", Reason: "generated"}},
+			},
+		}},
+	}}
+	override := &Config{Categories: map[string]CategoryConfig{
+		"patterns": {Enabled: true, Rules: map[string]RuleConfig{
+			"magic-number": {Enabled: true, Severity: "low"},
+		}},
+	}}
+
+	merged := MergeConfigs(base, override)
+
+	rule := merged.Categories["patterns"].Rules["magic-number"]
+	assert.Equal(t, "low", rule.Severity)
+	assert.Equal(t, map[string]any{"min_value": 100}, rule.Settings, "base settings must survive a severity-only override")
+	require.Len(t, rule.Exceptions, 1, "base exceptions must survive a severity-only override")
+
+	baseRule := base.Categories["patterns"].Rules["magic-number"]
+	assert.Empty(t, baseRule.Severity, "MergeConfigs must not mutate the base config")
+}
+
 func TestLoadConfigWithDefaults(t *testing.T) {
 	tmpDir := t.TempDir()
 

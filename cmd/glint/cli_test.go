@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/fix"
 	"github.com/aiseeq/glint/pkg/rules"
 )
 
@@ -43,6 +44,42 @@ func TestGetEnabledRulesRejectsUnknownCategory(t *testing.T) {
 	}
 }
 
+// settings.output from the YAML config must win unless -o is passed explicitly;
+// a non-empty flag default used to override the config on every run.
+func TestLoadConfigHonorsOutputFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".glint.yaml"), []byte("settings:\n  output: json\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The -o default must stay empty: a non-empty default is indistinguishable
+	// from an explicit -o and silently overrides the config on every run.
+	if def := checkCmd.Flags().Lookup("output").DefValue; def != "" {
+		t.Fatalf("-o default must be empty so the config can win, got %q", def)
+	}
+
+	prev := flagOutput
+	t.Cleanup(func() { flagOutput = prev })
+
+	flagOutput = "" // -o not passed
+	cfg, _, err := loadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Settings.Output != "json" {
+		t.Fatalf("config output must survive when -o is not passed, got %q", cfg.Settings.Output)
+	}
+
+	flagOutput = "summary" // -o passed explicitly
+	cfg, _, err = loadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Settings.Output != "summary" {
+		t.Fatalf("explicit -o must override config, got %q", cfg.Settings.Output)
+	}
+}
+
 func TestGetEnabledRulesAcceptsKnownRule(t *testing.T) {
 	withFlags(t, "", "interface-any")
 
@@ -52,6 +89,19 @@ func TestGetEnabledRulesAcceptsKnownRule(t *testing.T) {
 	}
 	if len(enabled) != 1 || enabled[0].Name() != "interface-any" {
 		t.Fatalf("got %d rules, want only interface-any", len(enabled))
+	}
+}
+
+// Every registered fixer must belong to a registered rule, otherwise the
+// "(auto-fix)" label in `glint rules` and `glint fix` itself point nowhere.
+func TestFixersCoverRegisteredRules(t *testing.T) {
+	for name := range fix.DefaultRegistry.All() {
+		if _, ok := rules.Get(name); !ok {
+			t.Errorf("fixer %q has no registered rule", name)
+		}
+	}
+	if len(fix.DefaultRegistry.All()) == 0 {
+		t.Fatal("no fixers registered")
 	}
 }
 

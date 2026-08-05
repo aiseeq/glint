@@ -42,7 +42,6 @@ func (r *UnusedParamRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			return true
 		}
 
-		// Skip interface method implementations (may have unused params for signature matching)
 		// Skip main/init functions
 		if fn.Name.Name == "main" || fn.Name.Name == "init" {
 			return true
@@ -62,6 +61,7 @@ func (r *UnusedParamRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			if !used[param.name] {
 				v := r.CreateViolation(ctx.RelPath, param.line,
 					"Parameter '"+param.name+"' is never used")
+				v.WithCode(ctx.GetLine(param.line))
 				v.WithSuggestion("Remove parameter or use _ if required by interface")
 				v.WithContext("param", param.name)
 				violations = append(violations, v)

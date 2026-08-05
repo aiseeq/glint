@@ -145,7 +145,10 @@ func (r *RedundantCompatibilityRule) detectFalseCompatibilityComments(ctx *core.
 	return violations
 }
 
-// detectMultipleContextKeyFallbacks finds functions that check ctx.Value with multiple keys
+// detectMultipleContextKeyFallbacks finds functions where the results of
+// ctx.Value calls with different keys merge into a single destination — the
+// evidence of a fallback chain. A function that reads userID and requestID
+// into separate variables reads two different values and is left alone.
 func (r *RedundantCompatibilityRule) detectMultipleContextKeyFallbacks(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 
@@ -155,16 +158,15 @@ func (r *RedundantCompatibilityRule) detectMultipleContextKeyFallbacks(ctx *core
 			return true
 		}
 
-		// Count ctx.Value calls with unique keys
-		ctxValueCalls := r.countCtxValueCalls(fn.Body)
-		if len(ctxValueCalls) >= 2 {
-			// Multiple ctx.Value calls with distinct keys in same function
+		fallbackKeys := r.fallbackKeys(fn.Body)
+		if len(fallbackKeys) >= 2 {
+			// Results of ctx.Value with distinct keys merge into one destination
 			v := r.CreateViolation(ctx.RelPath, ctx.PositionFor(fn).Line,
 				"Multiple context key fallbacks detected - SRP violation")
-			v.WithCode("func " + fn.Name.Name + " checks " + strings.Join(ctxValueCalls, ", "))
+			v.WithCode("func " + fn.Name.Name + " checks " + strings.Join(fallbackKeys, ", "))
 			v.WithSuggestion("Unify context keys. One value should be set/retrieved with one key only.")
 			v.WithContext("pattern", "multiple-context-keys")
-			v.WithContext("keys_count", len(ctxValueCalls))
+			v.WithContext("keys_count", len(fallbackKeys))
 			violations = append(violations, v)
 		}
 
@@ -174,45 +176,97 @@ func (r *RedundantCompatibilityRule) detectMultipleContextKeyFallbacks(ctx *core
 	return violations
 }
 
-// countCtxValueCalls counts unique ctx.Value key arguments in a function body
-func (r *RedundantCompatibilityRule) countCtxValueCalls(body *ast.BlockStmt) []string {
-	var keys []string
-	seenKeys := make(map[string]bool)
+// fallbackKeys returns the distinct ctx.Value keys whose results flow into the
+// same destination: assignments to one variable name or the function's return
+// path. Only such merging proves a fallback chain.
+func (r *RedundantCompatibilityRule) fallbackKeys(body *ast.BlockStmt) []string {
+	sinkKeys := make(map[string][]string)
+	seen := make(map[string]map[string]bool)
+	var sinkOrder []string
+
+	record := func(sink, key string) {
+		if seen[sink] == nil {
+			seen[sink] = make(map[string]bool)
+			sinkOrder = append(sinkOrder, sink)
+		}
+		if !seen[sink][key] {
+			seen[sink][key] = true
+			sinkKeys[sink] = append(sinkKeys[sink], key)
+		}
+	}
 
 	ast.Inspect(body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-
-		// Check for ctx.Value(key) or context.Value(key) pattern
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "Value" {
-			return true
-		}
-
-		// Check if receiver looks like context (ctx, c, context, etc.)
-		receiverName := ""
-		if ident, ok := sel.X.(*ast.Ident); ok {
-			receiverName = strings.ToLower(ident.Name)
-		}
-		if !strings.Contains(receiverName, "ctx") && receiverName != "c" && receiverName != "context" {
-			return true
-		}
-
-		// Get the key argument
-		if len(call.Args) == 1 {
-			keyName := r.extractKeyName(call.Args[0])
-			if keyName != "" && !seenKeys[keyName] {
-				seenKeys[keyName] = true
-				keys = append(keys, keyName)
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			if len(node.Lhs) != len(node.Rhs) {
+				return true
+			}
+			for i, rhs := range node.Rhs {
+				key := r.ctxValueKey(rhs)
+				if key == "" {
+					continue
+				}
+				if ident, ok := node.Lhs[i].(*ast.Ident); ok {
+					record("var "+ident.Name, key)
+				}
+			}
+		case *ast.ReturnStmt:
+			for _, result := range node.Results {
+				if key := r.ctxValueKey(result); key != "" {
+					record("return", key)
+				}
 			}
 		}
-
 		return true
 	})
 
+	var keys []string
+	added := make(map[string]bool)
+	for _, sink := range sinkOrder {
+		if len(sinkKeys[sink]) < 2 {
+			continue
+		}
+		for _, key := range sinkKeys[sink] {
+			if !added[key] {
+				added[key] = true
+				keys = append(keys, key)
+			}
+		}
+	}
 	return keys
+}
+
+// ctxValueKey extracts the key name from a ctx.Value(key) call (possibly
+// wrapped in a type assertion), or "" when expr is not such a call.
+func (r *RedundantCompatibilityRule) ctxValueKey(expr ast.Expr) string {
+	if assertion, ok := expr.(*ast.TypeAssertExpr); ok {
+		expr = assertion.X
+	}
+
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return ""
+	}
+
+	// Check for ctx.Value(key) or context.Value(key) pattern
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Value" {
+		return ""
+	}
+
+	// Check if receiver looks like context (ctx, c, context, etc.)
+	receiverName := ""
+	if ident, ok := sel.X.(*ast.Ident); ok {
+		receiverName = strings.ToLower(ident.Name)
+	}
+	if !strings.Contains(receiverName, "ctx") && receiverName != "c" && receiverName != "context" {
+		return ""
+	}
+
+	if len(call.Args) != 1 {
+		return ""
+	}
+	return r.extractKeyName(call.Args[0])
 }
 
 // extractKeyName extracts the key name from ctx.Value argument

@@ -522,16 +522,23 @@ func isContextArg(t types.Type) bool {
 	return obj != nil && obj.Name() == "Context" && obj.Pkg() != nil && obj.Pkg().Path() == "context"
 }
 
-// functionsUnderTransaction lists functions reachable from inside a transaction callback.
+// txCallSite is one place a function is called from: either directly inside a transaction
+// callback, or from the body of a named caller whose own coverage decides the site's fate.
+type txCallSite struct {
+	underTx bool
+	caller  string
+}
+
+// functionsUnderTransaction lists functions reachable ONLY from inside a transaction callback.
 //
 // The wrapper rarely sits in the same function as the writes: a service opens the transaction
 // and calls a helper that performs them. Without this pass every such helper would be reported
-// even though its writes are atomic.
+// even though its writes are atomic. A helper with even one bare call site is not covered:
+// that call executes the writes without a transaction.
 func (r *MultiWriteNoTransactionRule) functionsUnderTransaction(ctx *core.GoProjectContext) map[string]bool {
 	covered := make(map[string]bool)
-	callees := make(map[string][]string)
+	callers := make(map[string][]txCallSite)
 
-	var queue []string
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil {
 			continue
@@ -563,32 +570,58 @@ func (r *MultiWriteNoTransactionRule) functionsUnderTransaction(ctx *core.GoProj
 						return true
 					}
 					if r.isTransactionRunner(call) {
-						queue = append(queue, calledFunctions(call, info)...)
-						return true
+						for _, name := range calledFunctions(call, info) {
+							callers[name] = append(callers[name], txCallSite{underTx: true})
+						}
+						// Внутрь не спускаемся: те же вызовы иначе запишутся второй раз
+						// как голые call sites владельца.
+						return false
 					}
-					if owner != "" {
-						callees[owner] = append(callees[owner], calledFunctions(call, info)...)
+					// Каждый вызов классифицируется в своём собственном визите —
+					// берём только непосредственного callee, вложенные вызовы
+					// аргументов обойдёт сам Inspect.
+					if name := resolvedCalleeName(call, info); name != "" {
+						callers[name] = append(callers[name], txCallSite{caller: owner})
 					}
 					return true
 				})
 				if opensTx && owner != "" {
-					queue = append(queue, owner)
+					covered[owner] = true
 				}
 				return true
 			})
 		}
 	}
 
-	for len(queue) > 0 {
-		name := queue[len(queue)-1]
-		queue = queue[:len(queue)-1]
-		if name == "" || covered[name] {
-			continue
+	// Неподвижная точка: функция покрыта, когда каждый её call site либо лежит в
+	// колбэке транзакции, либо принадлежит уже покрытой функции.
+	for changed := true; changed; {
+		changed = false
+		for name, sites := range callers {
+			if covered[name] {
+				continue
+			}
+			if !allSitesUnderTransaction(sites, covered) {
+				continue
+			}
+			covered[name] = true
+			changed = true
 		}
-		covered[name] = true
-		queue = append(queue, callees[name]...)
 	}
 	return covered
+}
+
+// allSitesUnderTransaction reports whether every call site is transaction-covered.
+func allSitesUnderTransaction(sites []txCallSite, covered map[string]bool) bool {
+	for _, site := range sites {
+		if site.underTx {
+			continue
+		}
+		if site.caller == "" || !covered[site.caller] {
+			return false
+		}
+	}
+	return true
 }
 
 // calledFunctions lists the functions named anywhere inside the expression.

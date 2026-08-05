@@ -14,20 +14,6 @@ func init() {
 	rules.Register(NewLayerViolationRule())
 }
 
-// LayerType represents an architectural layer
-type LayerType int
-
-const (
-	// UnknownLayer is the layer of a file that matches no known convention.
-	UnknownLayer LayerType = iota
-	// HandlerLayer is the transport layer: HTTP handlers, routers, controllers.
-	HandlerLayer
-	// ServiceLayer is the business logic layer.
-	ServiceLayer
-	// RepositoryLayer is the data access layer that owns SQL and storage calls.
-	RepositoryLayer
-)
-
 // LayerViolationRule detects architecture violations (Handler→Service→Repository)
 type LayerViolationRule struct {
 	*rules.BaseRule
@@ -56,7 +42,7 @@ func (r *LayerViolationRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 		return nil
 	}
 
-	layer := r.determineLayer(ctx.RelPath)
+	layer := determineLayerFromPath(ctx.RelPath)
 	if layer == UnknownLayer {
 		return nil
 	}
@@ -74,23 +60,6 @@ func (r *LayerViolationRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 	}
 
 	return violations
-}
-
-// determineLayer determines the architectural layer based on file path
-func (r *LayerViolationRule) determineLayer(path string) LayerType {
-	lowerPath := strings.ToLower(path)
-
-	if strings.Contains(lowerPath, "handler") || strings.Contains(lowerPath, "/routing/") {
-		return HandlerLayer
-	}
-	if strings.Contains(lowerPath, "service") {
-		return ServiceLayer
-	}
-	if strings.Contains(lowerPath, "repository") || strings.Contains(lowerPath, "repo") {
-		return RepositoryLayer
-	}
-
-	return UnknownLayer
 }
 
 // checkHandlerViolations checks for violations in handler layer

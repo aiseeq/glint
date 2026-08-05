@@ -340,6 +340,8 @@ func (w *typedNilWalker) walkLeaf(node ast.Node) {
 			w.checkCall(inner)
 		case *ast.AssignStmt:
 			w.checkAssign(inner)
+		case *ast.ValueSpec:
+			w.checkValueSpec(inner)
 		}
 		return true
 	})
@@ -447,6 +449,17 @@ func (w *typedNilWalker) checkAssign(assign *ast.AssignStmt) {
 	}
 	for i, lhs := range assign.Lhs {
 		w.report(assign.Rhs[i], w.pkg.TypesInfo.TypeOf(lhs), exprText(lhs))
+	}
+}
+
+// checkValueSpec reports pointers used as initializers of interface-typed declarations:
+// `var a Iface = p` кладёт указатель в интерфейс точно так же, как присваивание.
+func (w *typedNilWalker) checkValueSpec(spec *ast.ValueSpec) {
+	for i, name := range spec.Names {
+		if i >= len(spec.Values) {
+			return
+		}
+		w.report(spec.Values[i], w.pkg.TypesInfo.TypeOf(name), name.Name)
 	}
 }
 

@@ -8,17 +8,19 @@ import (
 )
 
 // ensureImports returns the edit that adds the missing standard-library imports
-// to a Go file, or nil when they are all present. A fix that rewrites code into
-// a library call is only a fix if the file can still compile.
-func ensureImports(ctx *core.FileContext, packages ...string) *Fix {
+// to a Go file. ok=false means imports are missing but there is nowhere to
+// insert them — the caller must then drop its body rewrite too, because a fix
+// that rewrites code into a library call is only a fix if the file still
+// compiles. (nil, true) means everything is already imported.
+func ensureImports(ctx *core.FileContext, packages ...string) (fix *Fix, ok bool) {
 	missing := missingImports(ctx, packages)
 	if len(missing) == 0 {
-		return nil
+		return nil, true
 	}
 
 	line, ok := importInsertionLine(ctx, missing[0])
 	if !ok {
-		return nil
+		return nil, false
 	}
 
 	var added strings.Builder
@@ -34,7 +36,7 @@ func ensureImports(ctx *core.FileContext, packages ...string) *Fix {
 		OldText:   ctx.Lines[line-1],
 		NewText:   added.String(),
 		Message:   "Add " + strings.Join(missing, ", ") + " to the imports",
-	}
+	}, true
 }
 
 // missingImports returns the requested packages the file does not import yet,
@@ -48,9 +50,6 @@ func missingImports(ctx *core.FileContext, packages []string) []string {
 			trimmed := strings.TrimSpace(line)
 			if trimmed == quoted || strings.HasPrefix(trimmed, quoted+" ") || trimmed == "import "+quoted {
 				imported = true
-				break
-			}
-			if trimmed == ")" && imported {
 				break
 			}
 		}

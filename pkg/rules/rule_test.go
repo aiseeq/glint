@@ -128,35 +128,4 @@ func TestGetRuleInfo(t *testing.T) {
 	assert.Equal(t, "info-category", info.Category)
 	assert.Equal(t, "Info description", info.Description)
 	assert.Equal(t, core.SeverityCritical, info.Severity)
-	assert.False(t, info.HasAutoFix)
-}
-
-// MockFixerRule implements both Rule and Fixer
-type MockFixerRule struct {
-	*BaseRule
-}
-
-func NewMockFixerRule(name string) *MockFixerRule {
-	return &MockFixerRule{
-		BaseRule: NewBaseRule(name, "mock", "Mock fixer rule", core.SeverityMedium),
-	}
-}
-
-func (r *MockFixerRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	return nil
-}
-
-func (r *MockFixerRule) Fix(ctx *core.FileContext, violation *core.Violation) (*Fix, error) {
-	return &Fix{
-		File:    violation.File,
-		OldText: "old",
-		NewText: "new",
-	}, nil
-}
-
-func TestGetRuleInfoWithFixer(t *testing.T) {
-	rule := NewMockFixerRule("fixer-rule")
-	info := GetRuleInfo(rule)
-
-	assert.True(t, info.HasAutoFix)
 }

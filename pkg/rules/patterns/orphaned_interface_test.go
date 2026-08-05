@@ -21,3 +21,48 @@ func TestOrphanedInterfaceSkipsRuleCapabilityInterface(t *testing.T) {
 
 	require.Empty(t, NewOrphanedInterfaceRule().AnalyzeFile(ctx))
 }
+
+// Интерфейс, используемый только как generic-констрейнт, — не сирота.
+func TestOrphanedInterfaceGenericConstraintIsUsage(t *testing.T) {
+	src := `package sample
+
+type Number interface{ Value() int }
+
+func Sum[T Number](items []T) int {
+	total := 0
+	for _, item := range items {
+		total += item.Value()
+	}
+	return total
+}
+`
+	ctx, err := core.NewFileContextChecked("sum.go", ".", []byte(src), core.DefaultConfig())
+	require.NoError(t, err)
+	fset, file, err := core.NewParser().ParseGoFile(ctx.Path, ctx.Content)
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, file)
+
+	require.Empty(t, NewOrphanedInterfaceRule().AnalyzeFile(ctx))
+}
+
+// Интерфейс, встроенный в другой интерфейс (type B interface { A }), используется.
+func TestOrphanedInterfaceEmbeddingIsUsage(t *testing.T) {
+	src := `package sample
+
+type Closable interface{ CloseIt() error }
+
+type Resource interface {
+	Closable
+	Open() error
+}
+
+func handle(res Resource) { _ = res }
+`
+	ctx, err := core.NewFileContextChecked("resource.go", ".", []byte(src), core.DefaultConfig())
+	require.NoError(t, err)
+	fset, file, err := core.NewParser().ParseGoFile(ctx.Path, ctx.Content)
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, file)
+
+	require.Empty(t, NewOrphanedInterfaceRule().AnalyzeFile(ctx))
+}

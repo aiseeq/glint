@@ -36,13 +36,12 @@ func NewDeepNestingRule() *DeepNestingRule {
 	}
 }
 
-// Configure allows setting rule options
+// Configure sets rule settings
 func (r *DeepNestingRule) Configure(settings map[string]any) error {
-	if v, ok := settings["max_depth"]; ok {
-		if maxDepth, ok := v.(int); ok {
-			r.maxDepth = maxDepth
-		}
+	if err := r.BaseRule.Configure(settings); err != nil {
+		return err
 	}
+	r.maxDepth = r.GetIntSetting("max_depth", defaultMaxNestingDepth)
 	return nil
 }
 
@@ -91,8 +90,28 @@ func (r *DeepNestingRule) checkNesting(ctx *core.FileContext, node ast.Node, dep
 
 	case *ast.CommClause:
 		violations = r.checkBlockStatements(ctx, n.Body, depth, funcName)
+
+	default:
+		// Statements without their own blocks (assignments, declarations,
+		// expression/go/defer statements) may still carry function literals
+		// whose bodies must be checked
+		violations = r.checkFuncLits(ctx, node, funcName)
 	}
 
+	return violations
+}
+
+// checkFuncLits finds function literals inside a node and checks their bodies.
+// A closure body is a new function, so its nesting depth starts from zero.
+func (r *DeepNestingRule) checkFuncLits(ctx *core.FileContext, node ast.Node, funcName string) []*core.Violation {
+	var violations []*core.Violation
+	ast.Inspect(node, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.FuncLit); ok {
+			violations = append(violations, r.checkNesting(ctx, lit.Body, 0, funcName)...)
+			return false // nested literals are reached via checkNesting
+		}
+		return true
+	})
 	return violations
 }
 

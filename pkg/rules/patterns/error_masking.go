@@ -47,19 +47,15 @@ func (r *ErrorMaskingRule) initGoPatterns() map[string]*regexp.Regexp {
 		"hardcoded_return": regexp.MustCompile(`return\s+(\d+|"[^"]*"|0x[0-9a-fA-F]+)\s*//.*(?i)(default|backup)`),
 		"success_masked":   regexp.MustCompile(`return\s+true\s*//.*(?i)(assume)`),
 
-		// Error handling returning success/zero
-		"error_return_true":    regexp.MustCompile(`if\s+err\s*!=\s*nil\s*\{[^}]*return\s+true`),
-		"error_return_success": regexp.MustCompile(`if\s+err\s*!=\s*nil\s*\{[^}]*return\s+"(?:success|ok|done)"`),
-		"error_return_zero":    regexp.MustCompile(`if\s+err\s*!=\s*nil\s*\{[^}]*return\s+(?:0|""|\[\]|\{\})[,\s}]`),
+		// NOTE: `if err != nil { ... return ... }` and recover-to-return are
+		// handled by AST analysis only: matching per line, such regex would
+		// require the whole statement on one line and is dead on gofmt code.
 
 		// NOTE: Switch default is handled by AST analysis only (more precise)
 		// Regex would cause false positives on display/suggestion functions
 
 		// Fake/mock data in production
 		"fake_data_return": regexp.MustCompile(`return\s+"(?:fake|mock|dummy|stub|test)[^"]*"`),
-
-		// Panic recovery returning value
-		"panic_to_return": regexp.MustCompile(`recover\(\)[^;]*;[^}]*return\s+(?:true|nil|""|0)`),
 
 		// Zero balance on error
 		"zero_on_error": regexp.MustCompile(`(?:buildZero|returnZero|getZero).*(?:error|fail|unavailable)`),
@@ -187,16 +183,15 @@ func (r *ErrorMaskingRule) analyzeGoRegex(ctx *core.FileContext) []*core.Violati
 func (r *ErrorMaskingRule) analyzeGoAST(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 
-	visitor := core.NewGoASTVisitor(ctx)
-
 	// Check if statements for error masking
-	visitor.OnIfStmt(func(stmt *ast.IfStmt) {
-		if v := r.checkErrorIfStmt(ctx, stmt); v != nil {
-			violations = append(violations, v)
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		if stmt, ok := n.(*ast.IfStmt); ok {
+			if v := r.checkErrorIfStmt(ctx, stmt); v != nil {
+				violations = append(violations, v)
+			}
 		}
+		return true
 	})
-
-	visitor.Visit()
 
 	violations = append(violations, r.checkSuccessOnlyGuards(ctx)...)
 
@@ -365,9 +360,16 @@ func isAppendExprTo(expr ast.Expr, name string) bool {
 	return rootIdentName(call.Args[0]) == name
 }
 
-// hasValueBefore проверяет, получила ли переменная значение до guard'а: присваивание
-// или var с инициализатором. Голое `var x T` значением не считается.
+// hasValueBefore проверяет, получила ли переменная значение до guard'а: параметр
+// или receiver (значение приходит от вызывающего), присваивание или var с
+// инициализатором. Голое `var x T` значением не считается.
 func hasValueBefore(fn *ast.FuncDecl, stmt *ast.IfStmt, name string) bool {
+	// Параметры и receiver лежат в fn.Type.Params и fn.Recv — ast.Inspect по
+	// телу функции их не видит, проверяем явно.
+	if fieldListsContainName(name, fn.Recv, fn.Type.Params) {
+		return true
+	}
+
 	found := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		if n == nil || n.Pos() >= stmt.Pos() {
@@ -389,16 +391,27 @@ func hasValueBefore(fn *ast.FuncDecl, stmt *ast.IfStmt, name string) bool {
 					found = true
 				}
 			}
-		case *ast.Field: // параметр функции приходит со значением от вызывающего
-			for _, ident := range node.Names {
-				if ident.Name == name {
-					found = true
-				}
-			}
 		}
 		return true
 	})
 	return found
+}
+
+// fieldListsContainName ищет имя среди объявлений полей (параметры, receiver).
+func fieldListsContainName(name string, lists ...*ast.FieldList) bool {
+	for _, list := range lists {
+		if list == nil {
+			continue
+		}
+		for _, field := range list.List {
+			for _, ident := range field.Names {
+				if ident.Name == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // successGuardErrName распознаёт условие «ошибки нет» и возвращает имя переменной.
@@ -596,7 +609,7 @@ func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, stmt *ast.IfS
 	}
 
 	// Find first problematic return
-	return r.findProblematicReturn(ctx, stmt, info)
+	return r.findProblematicReturn(ctx, stmt)
 }
 
 // blockAnalysis holds analysis results of an error handling block
@@ -647,7 +660,7 @@ func (r *ErrorMaskingRule) isAcceptableDenialPattern(info blockAnalysis) bool {
 }
 
 // findProblematicReturn finds problematic returns in error handling block
-func (r *ErrorMaskingRule) findProblematicReturn(ctx *core.FileContext, stmt *ast.IfStmt, _ blockAnalysis) *core.Violation {
+func (r *ErrorMaskingRule) findProblematicReturn(ctx *core.FileContext, stmt *ast.IfStmt) *core.Violation {
 	for _, bodyStmt := range stmt.Body.List {
 		retStmt, ok := bodyStmt.(*ast.ReturnStmt)
 		if !ok {
@@ -973,15 +986,10 @@ type violationInfo struct {
 
 // goViolationDetails maps pattern names to violation details
 var goViolationDetails = map[string]violationInfo{
-	"hardcoded_return":     {"Function returns hardcoded value instead of handling error", "Move value to configuration or return error", core.SeverityHigh},
-	"success_masked":       {"Function returns success, masking real problems", "Return error or add proper error handling", core.SeverityCritical},
-	"error_return_true":    {"Returns true after error - masks the problem", "Return error or add retry mechanism", core.SeverityCritical},
-	"error_return_success": {"Returns success string after error", "Return error or add proper error handling", core.SeverityCritical},
-	"error_return_zero":    {"Returns zero value after error", "Return error or add explicit handling", core.SeverityHigh},
-	"switch_default_value": {"Switch default returns value instead of error", "Return error for unknown cases: default: return fmt.Errorf(\"unknown case\")", core.SeverityCritical},
-	"fake_data_return":     {"Returns fake/mock data in production code", "Remove fake data or move to test configuration", core.SeverityHigh},
-	"panic_to_return":      {"Panic masked by returning value instead of error", "Return error from recover block", core.SeverityCritical},
-	"zero_on_error":        {"Zero value returned on system error - critical UX problem", "Show user the real error instead of fake zero", core.SeverityCritical},
+	"hardcoded_return": {"Function returns hardcoded value instead of handling error", "Move value to configuration or return error", core.SeverityHigh},
+	"success_masked":   {"Function returns success, masking real problems", "Return error or add proper error handling", core.SeverityCritical},
+	"fake_data_return": {"Returns fake/mock data in production code", "Remove fake data or move to test configuration", core.SeverityHigh},
+	"zero_on_error":    {"Zero value returned on system error - critical UX problem", "Show user the real error instead of fake zero", core.SeverityCritical},
 }
 
 // getGoViolationDetails returns message, suggestion, and severity for Go pattern

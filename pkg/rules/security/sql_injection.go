@@ -2,6 +2,7 @@ package security
 
 import (
 	"go/ast"
+	"go/token"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -127,6 +128,13 @@ func (r *SQLInjectionRule) isSQLConcatenation(binary *ast.BinaryExpr) bool {
 }
 
 func (r *SQLInjectionRule) looksLikeSQL(expr ast.Expr) bool {
+	// Descend into chained concatenation: "SELECT ..." + id + " LIMIT 1"
+	// parses as (("SELECT ..." + id) + " LIMIT 1"), so the SQL literal may be
+	// nested arbitrarily deep on either side.
+	if binary, ok := expr.(*ast.BinaryExpr); ok {
+		return binary.Op == token.ADD && (r.looksLikeSQL(binary.X) || r.looksLikeSQL(binary.Y))
+	}
+
 	lit, ok := expr.(*ast.BasicLit)
 	if !ok {
 		return false

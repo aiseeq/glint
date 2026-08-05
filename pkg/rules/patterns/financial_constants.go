@@ -70,24 +70,22 @@ func (r *FinancialConstantsRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 
 	var violations []*core.Violation
 
-	// Track current function name for context
-	var currentFuncName string
-
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.FuncDecl:
-			if node.Name != nil {
-				currentFuncName = strings.ToLower(node.Name.Name)
+	// Function context is scoped to the declaration: calls in package-level var
+	// initializers must not inherit the name of a previously visited function.
+	for _, decl := range ctx.GoAST.Decls {
+		funcName := ""
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name != nil {
+			funcName = strings.ToLower(fn.Name.Name)
+		}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if v := r.checkDecimalCall(ctx, call, funcName); v != nil {
+					violations = append(violations, v)
+				}
 			}
 			return true
-
-		case *ast.CallExpr:
-			if v := r.checkDecimalCall(ctx, node, currentFuncName); v != nil {
-				violations = append(violations, v)
-			}
-		}
-		return true
-	})
+		})
+	}
 
 	return violations
 }

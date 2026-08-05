@@ -37,13 +37,12 @@ func NewCyclomaticComplexityRule() *CyclomaticComplexityRule {
 	}
 }
 
-// Configure allows setting rule options
+// Configure sets rule settings
 func (r *CyclomaticComplexityRule) Configure(settings map[string]any) error {
-	if v, ok := settings["max_complexity"]; ok {
-		if maxComplexity, ok := v.(int); ok {
-			r.maxComplexity = maxComplexity
-		}
+	if err := r.BaseRule.Configure(settings); err != nil {
+		return err
 	}
+	r.maxComplexity = r.GetIntSetting("max_complexity", defaultMaxComplexity)
 	return nil
 }
 

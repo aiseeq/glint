@@ -98,9 +98,16 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 		}
 	}
 
+	// Test files are outside the typed load; a field read only by its
+	// white-box test must still count as read.
+	mentions := newTestMentions(ctx.Files)
+
 	var violations []*core.Violation
 	for _, field := range declared {
 		if read[field.obj.Pos()] || compared[field.owner] {
+			continue
+		}
+		if mentions.mentioned(field.fileCtx, field.fieldName) {
 			continue
 		}
 		violations = append(violations, r.report(field, written[field.obj.Pos()]))

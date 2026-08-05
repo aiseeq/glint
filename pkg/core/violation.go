@@ -103,28 +103,6 @@ func (vl ViolationList) BySeverity(minSeverity Severity) ViolationList {
 	return result
 }
 
-// ByCategory returns violations filtered by category
-func (vl ViolationList) ByCategory(category string) ViolationList {
-	result := make(ViolationList, 0)
-	for _, v := range vl {
-		if v.Category == category {
-			result = append(result, v)
-		}
-	}
-	return result
-}
-
-// ByRule returns violations filtered by rule name
-func (vl ViolationList) ByRule(rule string) ViolationList {
-	result := make(ViolationList, 0)
-	for _, v := range vl {
-		if v.Rule == rule {
-			result = append(result, v)
-		}
-	}
-	return result
-}
-
 // CountBySeverity returns a map of severity to count
 func (vl ViolationList) CountBySeverity() map[Severity]int {
 	counts := make(map[Severity]int)
@@ -150,14 +128,4 @@ func (vl ViolationList) CountByRule() map[string]int {
 		counts[v.Rule]++
 	}
 	return counts
-}
-
-// HasCritical returns true if there's at least one critical violation
-func (vl ViolationList) HasCritical() bool {
-	for _, v := range vl {
-		if v.Severity == SeverityCritical {
-			return true
-		}
-	}
-	return false
 }

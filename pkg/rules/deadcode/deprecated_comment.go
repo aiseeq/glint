@@ -114,7 +114,7 @@ func (r *DeprecatedCommentRule) checkFuncDecl(ctx *core.FileContext, fn *ast.Fun
 	pos := ctx.PositionFor(fn.Name)
 	funcName := fn.Name.Name
 	if fn.Recv != nil && len(fn.Recv.List) > 0 {
-		funcName = r.getReceiverType(fn.Recv.List[0]) + "." + funcName
+		funcName = receiverTypeName(fn.Recv.List[0]) + "." + funcName
 	}
 
 	v := r.CreateViolation(ctx.RelPath, pos.Line,
@@ -222,17 +222,4 @@ func (r *DeprecatedCommentRule) isDeprecatedComment(text string) bool {
 		}
 	}
 	return false
-}
-
-// getReceiverType extracts the receiver type name
-func (r *DeprecatedCommentRule) getReceiverType(field *ast.Field) string {
-	switch t := field.Type.(type) {
-	case *ast.StarExpr:
-		if ident, ok := t.X.(*ast.Ident); ok {
-			return ident.Name
-		}
-	case *ast.Ident:
-		return t.Name
-	}
-	return ""
 }

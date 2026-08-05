@@ -33,6 +33,28 @@ var password = "supersecret123"`,
 			wantPattern:    "password",
 		},
 		{
+			name: "hardcoded password via short variable declaration",
+			code: `package main
+
+func f() string {
+	password := "hunter2secret"
+	return password
+}`,
+			wantViolations: 1,
+			wantPattern:    "password",
+		},
+		{
+			name: "hardcoded api key via short variable declaration",
+			code: `package main
+
+func f() string {
+	apiKey := "AbCdEfGhIjKlMnOpQrStUvWx"
+	return apiKey
+}`,
+			wantViolations: 1,
+			wantPattern:    "api_key",
+		},
+		{
 			name: "hardcoded passwd",
 			code: `package main
 

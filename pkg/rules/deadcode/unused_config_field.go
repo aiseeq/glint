@@ -105,6 +105,10 @@ func (r *UnusedConfigFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 		}
 	}
 
+	// Test files are outside the typed load; a field used only by its
+	// white-box test must still count as used.
+	mentions := newTestMentions(ctx.Files)
+
 	var violations []*core.Violation
 	for _, pkg := range ctx.Packages {
 		info := pkg.Package.TypesInfo
@@ -114,6 +118,9 @@ func (r *UnusedConfigFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 			}
 			for _, field := range collectTaggedFields(fileCtx, info, decoded, encoded) {
 				if used[field.obj] {
+					continue
+				}
+				if mentions.mentioned(field.fileCtx, field.fieldName) {
 					continue
 				}
 				violations = append(violations, r.report(field))

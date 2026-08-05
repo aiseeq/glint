@@ -74,6 +74,28 @@ Some text.`,
 2. Second step`,
 			expectViolations: 1,
 		},
+		{
+			name: "list item ending with colon followed by nested list",
+			path: "/test/doc.md",
+			content: `# Test
+
+- Configure the following settings:
+  - set timeout to 30s
+  - set retries to 3
+
+Some text.`,
+			expectViolations: 0, // nested list under a list item is valid Markdown
+		},
+		{
+			name: "numbered list item label followed by nested list",
+			path: "/test/doc.md",
+			content: `# Test
+
+1. Prepare the environment variables:
+   - DATABASE_URL
+   - REDIS_URL`,
+			expectViolations: 0,
+		},
 	}
 
 	for _, tt := range tests {

@@ -164,7 +164,9 @@ func (r *AuditActorPropagationRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 		if left.Line != right.Line {
 			return left.Line < right.Line
 		}
-		return left.Context["pattern"].(string) < right.Context["pattern"].(string)
+		leftPattern, _ := left.Context["pattern"].(string)
+		rightPattern, _ := right.Context["pattern"].(string)
+		return leftPattern < rightPattern
 	})
 	return analyzer.violations, nil
 }

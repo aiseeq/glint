@@ -107,6 +107,127 @@ func run() int {
 	require.Empty(t, violations, "ошибка передана обработчику: %v", violations)
 }
 
+// NewClient() в ветке err != nil — ровно тот silent fallback, который правило
+// должно ловить: «new» в имени вызова не означает создание ошибки.
+func TestSilentErrorHandlingRule_NewCallFallbackIsFlagged(t *testing.T) {
+	code := `package main
+
+type Client struct{}
+
+func connect() (*Client, error) { return nil, nil }
+
+func getClient() *Client {
+	c, err := connect()
+	if err != nil {
+		return NewClient()
+	}
+	return c
+}
+
+func NewClient() *Client { return &Client{} }
+`
+
+	ctx := createSilentErrorContext(t, "client.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 1, "NewClient() — fallback, а не создание ошибки: %v", violations)
+}
+
+// Настоящее создание ошибки по-прежнему считается обработкой: errors.New,
+// fmt.Errorf и функции с суффиксом Error/Errorf.
+func TestSilentErrorHandlingRule_ErrorCreatingCallsStillHandle(t *testing.T) {
+	code := `package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+func load() (int, error) { return 0, nil }
+
+func NewValidationError(msg string) error { return errors.New(msg) }
+
+func a() error {
+	_, err := load()
+	if err != nil {
+		return errors.New("load failed")
+	}
+	return nil
+}
+
+func b() error {
+	_, err := load()
+	if err != nil {
+		return fmt.Errorf("load failed")
+	}
+	return nil
+}
+
+func c() error {
+	_, err := load()
+	if err != nil {
+		return NewValidationError("load failed")
+	}
+	return nil
+}
+`
+
+	ctx := createSilentErrorContext(t, "loader.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Empty(t, violations, "создание ошибки — обработка: %v", violations)
+}
+
+// Замыкание внутри (T, bool)-функции не наследует её исключение: return false
+// из closure с собственной сигнатурой func() bool молча глотает ошибку.
+func TestSilentErrorHandlingRule_ClosureDoesNotInheritValueBoolException(t *testing.T) {
+	code := `package main
+
+func ping() error { return nil }
+
+func lookup() (string, bool) {
+	check := func() bool {
+		err := ping()
+		if err != nil {
+			return false
+		}
+		return true
+	}
+	if !check() {
+		return "", false
+	}
+	return "x", true
+}
+`
+
+	ctx := createSilentErrorContext(t, "lookup.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 1, "closure не наследует (T, bool)-исключение: %v", violations)
+}
+
+// Обратная сторона: замыкание с собственной сигнатурой (T, bool) получает
+// исключение по своей сигнатуре, а не по сигнатуре объемлющей функции.
+func TestSilentErrorHandlingRule_ClosureWithOwnValueBoolSignature(t *testing.T) {
+	code := `package main
+
+func load(key string) (string, error) { return "", nil }
+
+func process() error {
+	get := func(key string) (string, bool) {
+		v, err := load(key)
+		if err != nil {
+			return "", false
+		}
+		return v, true
+	}
+	_, _ = get("a")
+	return nil
+}
+`
+
+	ctx := createSilentErrorContext(t, "process.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Empty(t, violations, "у closure своя (T, bool)-сигнатура: %v", violations)
+}
+
 // Причина, положенная в отчёт как err.Error(), тоже не молчание: текст ошибки
 // доезжает до читателя отчёта. Репро из projectC — бэкфилл отпечатков bulk.
 func TestSilentErrorHandlingRule_ErrorTextPassedToReport(t *testing.T) {

@@ -130,7 +130,7 @@ Findings silenced by configuration exceptions or by inline suppression
 comments are left alone, exactly as 'glint check' reports them.
 
 Available fixers:
-  - interface-any: Replace interface{} with any (Go 1.18+)
+  - interface-any: Replace the empty interface type with any (Go 1.18+)
   - deprecated-ioutil: Replace io/ioutil with io/os
   - bool-compare: Simplify boolean comparisons (x == true -> x)
   - md-line-break, md-list-after-label: Markdown formatting`,
@@ -142,7 +142,9 @@ func init() {
 	checkCmd.Flags().StringVarP(&flagCategory, "category", "c", "", "Run only specified category")
 	checkCmd.Flags().StringVarP(&flagRule, "rule", "r", "", "Run only specified rule")
 	checkCmd.Flags().StringVarP(&flagMinSeverity, "min-severity", "s", "", "Minimum severity (low, medium, high, critical)")
-	checkCmd.Flags().StringVarP(&flagOutput, "output", "o", "console", "Output format (console, json, summary)")
+	// Empty default: a non-empty one would be indistinguishable from an
+	// explicit -o and would override settings.output from the config.
+	checkCmd.Flags().StringVarP(&flagOutput, "output", "o", "", "Output format: console, json, summary (default from config, else console)")
 	checkCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show analyzed files")
 	checkCmd.Flags().BoolVar(&flagDebug, "debug", false, "Enable debug output")
 	checkCmd.Flags().BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
@@ -436,17 +438,17 @@ func prepareAnalysis(projectRoot string, cfg *core.Config, enabledRules []rules.
 	if err != nil {
 		return nil, walker, nil, fmt.Errorf("load Go project context: %w", err)
 	}
-	reportSkippedPackages(project)
+	reportSkippedPackages(project, cfg.Settings.Output)
 	return contexts, walker, project, nil
 }
 
 // reportSkippedPackages keeps a tolerated load honest: whatever was left out of
 // typed analysis is named, so findings are never read as full coverage.
-func reportSkippedPackages(project *core.GoProjectContext) {
+func reportSkippedPackages(project *core.GoProjectContext, outputFormat string) {
 	if project == nil || len(project.SkippedPackages) == 0 {
 		return
 	}
-	if flagOutput == "json" {
+	if outputFormat == "json" {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "Skipped %d package(s) that do not type-check; their files are analyzed without type information\n", len(project.SkippedPackages))
@@ -698,7 +700,9 @@ func runRules(_ *cobra.Command, _ []string) error {
 
 		info := rules.GetRuleInfo(r)
 		autofix := ""
-		if info.HasAutoFix {
+		// fix.DefaultRegistry is the authority on auto-fix: a rule-side
+		// interface check used to mark 1 of the 7 fixable rules.
+		if _, ok := fix.DefaultRegistry.Get(info.Name); ok {
 			autofix = " (auto-fix)"
 		}
 
@@ -727,7 +731,7 @@ func runExplain(_ *cobra.Command, args []string) error {
 	fmt.Printf("RULE: %s\n", info.Name)
 	fmt.Printf("CATEGORY: %s\n", info.Category)
 	fmt.Printf("SEVERITY: %s\n", info.Severity.Label())
-	if info.HasAutoFix {
+	if _, ok := fix.DefaultRegistry.Get(info.Name); ok {
 		fmt.Println("AUTO-FIX: Available")
 	}
 	fmt.Println()
@@ -738,7 +742,8 @@ func runExplain(_ *cobra.Command, args []string) error {
 }
 
 func runInit(_ *cobra.Command, _ []string) error {
-	configContent := `# Glint configuration
+	var b strings.Builder
+	b.WriteString(`# Glint configuration
 # See: https://github.com/aiseeq/glint
 
 version: 1
@@ -752,21 +757,13 @@ settings:
   output: console
 
 categories:
-  architecture:
-    enabled: true
-  patterns:
-    enabled: true
-  typesafety:
-    enabled: true
-  duplication:
-    enabled: true
-  deadcode:
-    enabled: true
-  config:
-    enabled: true
-  naming:
-    enabled: true
-`
+`)
+	// The registry is the authority on categories; a hardcoded list here went
+	// stale (it named a nonexistent "config" and knew nothing of security).
+	for _, category := range rules.Categories() {
+		fmt.Fprintf(&b, "  %s:\n    enabled: true\n", category)
+	}
+	configContent := b.String()
 
 	filename := ".glint.yaml"
 	if _, err := os.Stat(filename); err == nil {

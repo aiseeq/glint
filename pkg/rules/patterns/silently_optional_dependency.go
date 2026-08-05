@@ -62,11 +62,9 @@ func (r *SilentlyOptionalDependencyRule) AnalyzeFile(_ *core.FileContext) []*cor
 
 // setterInfo describes one `func (t *T) SetX(v V) { t.f = v }`.
 type setterInfo struct {
-	owner  *types.Named
 	field  string
 	method string
 	decl   *ast.FuncDecl
-	pkg    *packages.Package
 }
 
 // depKey identifies a dependency: the type that holds it plus the field name.
@@ -227,7 +225,7 @@ func (r *SilentlyOptionalDependencyRule) collectDeclarations(
 		if _, field, ok := setterDecl(fn); ok {
 			if owner := r.receiverNamed(pkg, fn); owner != nil {
 				setters[depKey{namedKey(owner), field}] = setterInfo{
-					owner: owner, field: field, method: fn.Name.Name, decl: fn, pkg: pkg,
+					field: field, method: fn.Name.Name, decl: fn,
 				}
 			}
 		}
@@ -368,8 +366,8 @@ func (r *SilentlyOptionalDependencyRule) violationFor(
 	pos := ctx.FileSet.Position(setter.decl.Pos())
 	rel := pos.Filename
 	if ctx.ProjectRoot != "" {
-		if r, err := filepath.Rel(ctx.ProjectRoot, pos.Filename); err == nil {
-			rel = r
+		if relPath, err := filepath.Rel(ctx.ProjectRoot, pos.Filename); err == nil {
+			rel = relPath
 		}
 	}
 	v := r.CreateViolation(rel, pos.Line,

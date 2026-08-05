@@ -86,6 +86,62 @@ func example(x interface{}) {
 `,
 			expectMatch: true, // Will find at least one
 		},
+		{
+			name: "unsafe assertion in return",
+			code: `package main
+
+func example(x interface{}) string {
+	return x.(string)
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "unsafe assertion as call argument",
+			code: `package main
+
+func sink(s string) {}
+
+func example(x interface{}) {
+	sink(x.(string))
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "unsafe assertions in multi-value assignment",
+			code: `package main
+
+func example(x, y interface{}) {
+	a, b := x.(string), y.(int)
+	_, _ = a, b
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "safe comma-ok in if statement",
+			code: `package main
+
+func example(x interface{}) {
+	if v, ok := x.(string); ok {
+		_ = v
+	}
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "safe comma-ok var declaration",
+			code: `package main
+
+func example(x interface{}) {
+	var v, ok = x.(string)
+	_, _ = v, ok
+}
+`,
+			expectMatch: false,
+		},
 	}
 
 	for _, tt := range tests {

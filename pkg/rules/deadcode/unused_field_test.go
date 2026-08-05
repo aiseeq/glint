@@ -43,6 +43,84 @@ func (c *Cache) Get(key string) string {
 	assert.Contains(t, violations[0].Message, "hits")
 }
 
+// White-box tests assert on internal counters all the time. Test packages are
+// not loaded (packages.Load runs with Tests:false), so without a fallback scan
+// a field read only by its test was reported as dead.
+func TestUnusedFieldAcceptsFieldReadOnlyByTest(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"cache.go": `package cache
+
+type Cache struct {
+	entries map[string]string
+	hits    int
+}
+
+func New() *Cache {
+	return &Cache{entries: make(map[string]string)}
+}
+
+func (c *Cache) Get(key string) string {
+	c.hits++
+	return c.entries[key]
+}
+`,
+		"cache_test.go": `package cache
+
+import "testing"
+
+func TestGetCountsHits(t *testing.T) {
+	c := New()
+	c.Get("a")
+	if c.hits != 1 {
+		t.Fatalf("hits = %d", c.hits)
+	}
+}
+`,
+	})
+
+	assert.Empty(t, violations, "a field read by its white-box test is not dead")
+}
+
+// A similarly named but different identifier in the test must not save the field.
+func TestUnusedFieldTestMentionMustMatchWholeName(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"cache.go": `package cache
+
+type Cache struct {
+	entries map[string]string
+	hits    int
+}
+
+func New() *Cache {
+	return &Cache{entries: make(map[string]string)}
+}
+
+func (c *Cache) Get(key string) string {
+	c.hits++
+	return c.entries[key]
+}
+`,
+		"cache_test.go": `package cache
+
+import "testing"
+
+func TestGet(t *testing.T) {
+	hitsTotal := 0
+	c := New()
+	c.Get("a")
+	_ = hitsTotal
+	_ = c
+	if testing.Short() {
+		t.Skip()
+	}
+}
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "hits")
+}
+
 // A field written but never read is a computation nobody consumes.
 func TestUnusedFieldReportsWriteOnlyField(t *testing.T) {
 	violations := analyzeFields(t, map[string]string{

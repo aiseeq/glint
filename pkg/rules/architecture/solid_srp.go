@@ -39,14 +39,17 @@ type SolidSRPRule struct {
 	excludeInfrastructure bool
 }
 
-// NewSolidSRPRule creates the rule
-func NewSolidSRPRule() *SolidSRPRule {
-	// Build default infrastructure areas map
-	infraAreas := make(map[string]bool)
+// defaultInfrastructureAreasMap builds the default infrastructure areas map
+func defaultInfrastructureAreasMap() map[string]bool {
+	infraAreas := make(map[string]bool, len(defaultInfrastructureAreas))
 	for _, area := range defaultInfrastructureAreas {
 		infraAreas[area] = true
 	}
+	return infraAreas
+}
 
+// NewSolidSRPRule creates the rule
+func NewSolidSRPRule() *SolidSRPRule {
 	return &SolidSRPRule{
 		BaseRule: rules.NewBaseRule(
 			"solid-srp",
@@ -55,7 +58,7 @@ func NewSolidSRPRule() *SolidSRPRule {
 			core.SeverityHigh,
 		),
 		maxResponsibilities:   defaultMaxResponsibilities,
-		infrastructureAreas:   infraAreas,
+		infrastructureAreas:   defaultInfrastructureAreasMap(),
 		excludeInfrastructure: true, // By default, exclude infrastructure areas from counting
 	}
 }
@@ -68,7 +71,8 @@ func (r *SolidSRPRule) Configure(settings map[string]any) error {
 	r.maxResponsibilities = r.GetIntSetting("max_responsibilities", defaultMaxResponsibilities)
 	r.excludeInfrastructure = r.GetBoolSetting("exclude_infrastructure", true)
 
-	// Allow custom infrastructure areas via settings
+	// Allow custom infrastructure areas via settings; without the key the
+	// defaults are restored so that settings from a previous config never leak
 	if customAreas, ok := settings["infrastructure_areas"].([]any); ok {
 		r.infrastructureAreas = make(map[string]bool)
 		for _, area := range customAreas {
@@ -76,6 +80,8 @@ func (r *SolidSRPRule) Configure(settings map[string]any) error {
 				r.infrastructureAreas[areaStr] = true
 			}
 		}
+	} else {
+		r.infrastructureAreas = defaultInfrastructureAreasMap()
 	}
 
 	return nil
@@ -285,26 +291,27 @@ func getStructName(expr ast.Expr) string {
 	return ""
 }
 
+// areaPatterns maps responsibility areas to method-name patterns that signal them
+var areaPatterns = map[string][]string{
+	"database":     {"Get", "Find", "Create", "Update", "Delete", "Save", "Load", "Query", "Insert", "Select"},
+	"http":         {"Handle", "Serve", "Route", "Request", "Response", "HTTP", "API", "Endpoint"},
+	"validation":   {"Validate", "Check", "Verify", "Assert", "Ensure"},
+	"logging":      {"Log", "Debug", "Info", "Warn", "Error", "Trace"},
+	"cache":        {"Cache", "Invalidate", "Refresh", "TTL", "Expire"},
+	"auth":         {"Auth", "Login", "Logout", "Permission", "Role", "Token", "Session"},
+	"crypto":       {"Encrypt", "Decrypt", "Hash", "Sign", "Verify"},
+	"file":         {"Read", "Write", "File", "Open", "Close", "Path"},
+	"network":      {"Connect", "Disconnect", "Send", "Receive", "Listen"},
+	"config":       {"Config", "Setting", "Option", "Preference"},
+	"metrics":      {"Metric", "Counter", "Gauge", "Histogram", "Timer"},
+	"scheduling":   {"Schedule", "Cron", "Timer", "Interval", "Periodic"},
+	"transaction":  {"Transaction", "Commit", "Rollback", "Begin"},
+	"export":       {"Export", "Import", "Marshal", "Unmarshal", "Encode", "Decode"},
+	"notification": {"Notify", "Alert", "Email", "SMS", "Push"},
+}
+
 // detectResponsibilityAreas analyzes method names to detect different responsibility areas
 func detectResponsibilityAreas(methods []string) []string {
-	areaPatterns := map[string][]string{
-		"database":     {"Get", "Find", "Create", "Update", "Delete", "Save", "Load", "Query", "Insert", "Select"},
-		"http":         {"Handle", "Serve", "Route", "Request", "Response", "HTTP", "API", "Endpoint"},
-		"validation":   {"Validate", "Check", "Verify", "Assert", "Ensure"},
-		"logging":      {"Log", "Debug", "Info", "Warn", "Error", "Trace"},
-		"cache":        {"Cache", "Invalidate", "Refresh", "TTL", "Expire"},
-		"auth":         {"Auth", "Login", "Logout", "Permission", "Role", "Token", "Session"},
-		"crypto":       {"Encrypt", "Decrypt", "Hash", "Sign", "Verify"},
-		"file":         {"Read", "Write", "File", "Open", "Close", "Path"},
-		"network":      {"Connect", "Disconnect", "Send", "Receive", "Listen"},
-		"config":       {"Config", "Setting", "Option", "Preference"},
-		"metrics":      {"Metric", "Counter", "Gauge", "Histogram", "Timer"},
-		"scheduling":   {"Schedule", "Cron", "Timer", "Interval", "Periodic"},
-		"transaction":  {"Transaction", "Commit", "Rollback", "Begin"},
-		"export":       {"Export", "Import", "Marshal", "Unmarshal", "Encode", "Decode"},
-		"notification": {"Notify", "Alert", "Email", "SMS", "Push"},
-	}
-
 	detectedAreas := make(map[string]bool)
 
 	for _, method := range methods {

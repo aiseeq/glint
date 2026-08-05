@@ -190,6 +190,49 @@ func (r *FinancialFPRoundingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 	assert.Len(t, violations, 3)
 }
 
+// A directive is an instruction to a tool, not documentation: a function whose
+// only "doc" is //go:generate is undocumented, and the message must say so
+// rather than complain about the comment's first word.
+func TestDocCompletenessTreatsDirectiveOnlyDocAsMissing(t *testing.T) {
+	rule := NewDocCompletenessRule()
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/gen.go", `package main
+
+//go:generate mockgen -source=gen.go
+func GetUser(id string) {}
+`))
+
+	assert.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "missing documentation")
+}
+
+func TestDocCompletenessTreatsNolintOnlyDocAsMissing(t *testing.T) {
+	rule := NewDocCompletenessRule()
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/gen.go", `package main
+
+//nolint:gocritic
+func GetUser(id string) {}
+`))
+
+	assert.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "missing documentation")
+}
+
+// A directive above the real doc comment does not hide it.
+func TestDocCompletenessIgnoresDirectiveBeforeDoc(t *testing.T) {
+	rule := NewDocCompletenessRule()
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/gen.go", `package main
+
+//go:generate mockgen -source=gen.go
+// GetUser returns a user by ID.
+func GetUser(id string) {}
+`))
+
+	assert.Empty(t, violations)
+}
+
 // Methods whose contract is written in the standard library need no repeat.
 func TestDocCompletenessSkipsStandardInterfaceMethods(t *testing.T) {
 	rule := NewDocCompletenessRule()

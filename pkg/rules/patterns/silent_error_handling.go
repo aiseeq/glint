@@ -57,23 +57,47 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 		}
 	}
 
-	var violations []*core.Violation
-
-	// Track current function context for (T, bool) and predicate pattern detection
-	var currentFunc *ast.FuncDecl
-	var funcReturnsValueBool bool
-	var funcIsBoolPredicate bool
-
 	// Build a set of if statements that are inside defer function literals
 	ifStmtsInDefer := r.findIfStmtsInDefers(ctx.GoAST)
 
+	var violations []*core.Violation
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		// Track function declarations
-		if funcDecl, ok := n.(*ast.FuncDecl); ok {
-			currentFunc = funcDecl
-			funcReturnsValueBool = r.functionReturnsValueBool(funcDecl)
-			funcIsBoolPredicate = r.functionIsBoolPredicate(funcDecl)
-			return true
+		switch fn := n.(type) {
+		case *ast.FuncDecl:
+			name := ""
+			if fn.Name != nil {
+				name = fn.Name.Name
+			}
+			violations = append(violations, r.analyzeFuncBody(ctx, fn.Type, name, fn.Body, ifStmtsInDefer)...)
+			return false
+		case *ast.FuncLit:
+			// Функциональный литерал вне FuncDecl (var handler = func() {...}).
+			violations = append(violations, r.analyzeFuncBody(ctx, fn.Type, "", fn.Body, ifStmtsInDefer)...)
+			return false
+		}
+		return true
+	})
+
+	return violations
+}
+
+// analyzeFuncBody проверяет `if err != nil` внутри тела одной функции. Вложенные
+// замыкания разбираются рекурсивно со своей сигнатурой: исключения для
+// (T, bool)-функций и bool-предикатов не наследуются от объемлющей функции.
+func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *ast.FuncType, name string, body *ast.BlockStmt, ifStmtsInDefer map[*ast.IfStmt]bool) []*core.Violation {
+	if body == nil {
+		return nil
+	}
+
+	funcReturnsValueBool := r.funcTypeReturnsValueBool(ftype)
+	funcIsBoolPredicate := r.funcIsBoolPredicate(ftype, name)
+
+	var violations []*core.Violation
+	ast.Inspect(body, func(n ast.Node) bool {
+		// Тело замыкания живёт со своей сигнатурой — рекурсия вместо спуска.
+		if lit, ok := n.(*ast.FuncLit); ok {
+			violations = append(violations, r.analyzeFuncBody(ctx, lit.Type, "", lit.Body, ifStmtsInDefer)...)
+			return false
 		}
 
 		ifStmt, ok := n.(*ast.IfStmt)
@@ -93,50 +117,43 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 
 		// Check if the if body handles the error properly
 		// For (T, bool) functions, returning false is acceptable error handling
-		if !r.bodyHandlesError(ifStmt.Body, funcReturnsValueBool) {
-			pos := ctx.PositionFor(ifStmt)
-			lineContent := ctx.GetLine(pos.Line)
-
-			// Skip if has nolint
-			if strings.Contains(lineContent, "nolint") {
-				return true
-			}
-
-			// Skip if we're in a function returning (T, bool) and return includes false
-			if funcReturnsValueBool && r.bodyReturnsFalse(ifStmt.Body) {
-				return true
-			}
-
-			// Skip if we're in a predicate function (IsEmpty, IsValid, etc.)
-			// Converting error to true/false is acceptable for predicates
-			if funcIsBoolPredicate && r.bodyReturnsBool(ifStmt.Body) {
-				return true
-			}
-
-			// Skip if body has comment indicating error is handled elsewhere
-			// Common patterns: "error already sent", "error handled", "response sent"
-			if r.bodyHasErrorHandledComment(ctx, ifStmt.Body) {
-				return true
-			}
-
-			// Skip if error is from a function that likely handles it internally
-			// e.g., functions that take http.ResponseWriter typically send error response themselves
-			if r.errorHandledByCallee() {
-				return true
-			}
-
-			v := r.CreateViolation(ctx.RelPath, pos.Line,
-				"Error check without logging or error propagation")
-			v.WithCode(lineContent)
-			v.WithSuggestion("Add logging or return the error to make failure visible")
-			violations = append(violations, v)
+		if r.bodyHandlesError(ifStmt.Body, funcReturnsValueBool) {
+			return true
 		}
+
+		pos := ctx.PositionFor(ifStmt)
+		lineContent := ctx.GetLine(pos.Line)
+
+		// Skip if has nolint
+		if strings.Contains(lineContent, "nolint") {
+			return true
+		}
+
+		// Skip if we're in a function returning (T, bool) and return includes false
+		if funcReturnsValueBool && r.bodyReturnsFalse(ifStmt.Body) {
+			return true
+		}
+
+		// Skip if we're in a predicate function (IsEmpty, IsValid, etc.)
+		// Converting error to true/false is acceptable for predicates
+		if funcIsBoolPredicate && r.bodyReturnsBool(ifStmt.Body) {
+			return true
+		}
+
+		// Skip if body has comment indicating error is handled elsewhere
+		// Common patterns: "error already sent", "error handled", "response sent"
+		if r.bodyHasErrorHandledComment(ctx, ifStmt.Body) {
+			return true
+		}
+
+		v := r.CreateViolation(ctx.RelPath, pos.Line,
+			"Error check without logging or error propagation")
+		v.WithCode(lineContent)
+		v.WithSuggestion("Add logging or return the error to make failure visible")
+		violations = append(violations, v)
 
 		return true
 	})
-
-	// Clear function context to avoid leaking between files
-	_ = currentFunc // silence unused warning
 
 	return violations
 }
@@ -179,14 +196,14 @@ func (r *SilentErrorHandlingRule) bodyHandlesError(body *ast.BlockStmt, funcRetu
 	return false
 }
 
-// functionReturnsValueBool checks if function returns (T, bool) pattern
+// funcTypeReturnsValueBool checks if function returns (T, bool) pattern
 // Handles both (string, bool) and (value, exists bool) syntaxes
-func (r *SilentErrorHandlingRule) functionReturnsValueBool(fn *ast.FuncDecl) bool {
-	if fn == nil || fn.Type == nil || fn.Type.Results == nil {
+func (r *SilentErrorHandlingRule) funcTypeReturnsValueBool(ftype *ast.FuncType) bool {
+	if ftype == nil || ftype.Results == nil {
 		return false
 	}
 
-	results := fn.Type.Results.List
+	results := ftype.Results.List
 
 	// Count total return values (a field can have multiple names)
 	totalReturns := 0
@@ -211,14 +228,14 @@ func (r *SilentErrorHandlingRule) functionReturnsValueBool(fn *ast.FuncDecl) boo
 	return false
 }
 
-// functionIsBoolPredicate checks if function is a predicate returning only bool
+// funcIsBoolPredicate checks if function is a predicate returning only bool
 // For predicates (IsEmpty, IsValid, HasX, CanX, etc.), converting error to bool is acceptable
-func (r *SilentErrorHandlingRule) functionIsBoolPredicate(fn *ast.FuncDecl) bool {
-	if fn == nil || fn.Type == nil || fn.Type.Results == nil {
+func (r *SilentErrorHandlingRule) funcIsBoolPredicate(ftype *ast.FuncType, name string) bool {
+	if ftype == nil || ftype.Results == nil {
 		return false
 	}
 
-	results := fn.Type.Results.List
+	results := ftype.Results.List
 
 	// Must return exactly one value
 	if len(results) != 1 {
@@ -234,11 +251,11 @@ func (r *SilentErrorHandlingRule) functionIsBoolPredicate(fn *ast.FuncDecl) bool
 		return false
 	}
 
-	// Function name must be a predicate pattern
-	if fn.Name == nil {
+	// Function name must be a predicate pattern (closures have no name)
+	if name == "" {
 		return false
 	}
-	nameLower := strings.ToLower(fn.Name.Name)
+	nameLower := strings.ToLower(name)
 
 	predicatePatterns := []string{
 		"is", "has", "can", "should", "must", "check", "verify", "validate",
@@ -610,22 +627,12 @@ func (r *SilentErrorHandlingRule) exprReferencesError(expr ast.Expr) bool {
 		return false
 
 	case *ast.CallExpr:
-		funcName := core.ExtractFullFunctionName(e)
-		funcNameLower := strings.ToLower(funcName)
-
-		// Any error-creating function is error propagation
-		// errors.New(), fmt.Errorf(), errors.Wrap(), custom.NewError(), etc.
-		errorCreatingPatterns := []string{
-			"errorf", "wrap", "wrapf", "new", "newerror",
-			"error", "fail", "makeerror", "createerror",
-		}
-		for _, pattern := range errorCreatingPatterns {
-			if strings.Contains(funcNameLower, pattern) {
-				return true
-			}
+		if callCreatesError(e) {
+			return true
 		}
 
-		// Also check if err is passed as argument (for Wrap patterns)
+		// Also check if err is passed as argument (for Wrap patterns:
+		// errors.Wrap(err, ...), errors.Join(err, ...), custom wrappers)
 		for _, arg := range e.Args {
 			if r.exprReferencesError(arg) {
 				return true
@@ -634,6 +641,24 @@ func (r *SilentErrorHandlingRule) exprReferencesError(expr ast.Expr) bool {
 	}
 
 	return false
+}
+
+// callCreatesError распознаёт вызовы, создающие ошибку: errors.New, fmt.Errorf
+// и функции с суффиксом Error/Errorf (NewError, newValidationError, x.Errorf).
+// Произвольные подстроки ("new", "fail") не считаются: NewClient() в ветке
+// err != nil — это fallback-значение, а не создание ошибки.
+func callCreatesError(call *ast.CallExpr) bool {
+	funcName := core.ExtractFullFunctionName(call)
+	if funcName == "errors.New" || funcName == "fmt.Errorf" {
+		return true
+	}
+
+	base := funcName
+	if idx := strings.LastIndex(base, "."); idx >= 0 {
+		base = base[idx+1:]
+	}
+	baseLower := strings.ToLower(base)
+	return strings.HasSuffix(baseLower, "error") || strings.HasSuffix(baseLower, "errorf")
 }
 
 // isLoggingCall checks if call is a logging function
@@ -668,18 +693,6 @@ func (r *SilentErrorHandlingRule) isPanicCall(call *ast.CallExpr) bool {
 	if ident, ok := call.Fun.(*ast.Ident); ok {
 		return ident.Name == "panic"
 	}
-	return false
-}
-
-// errorHandledByCallee checks if the error assignment is from a function that handles errors internally
-// e.g., if err := ar.updateInvestmentCurrentValue(w, req, inv); err != nil { return }
-// Functions that take http.ResponseWriter typically handle errors by sending HTTP responses
-func (r *SilentErrorHandlingRule) errorHandledByCallee() bool {
-	// Look for pattern: err := someFunc(...) in the init statement of if
-	// This requires looking at the parent if statement's Init field
-
-	// For now, check if the condition references a function call that takes ResponseWriter
-	// This is a simplified heuristic - checking if comment mentions "error handled" is more reliable
 	return false
 }
 

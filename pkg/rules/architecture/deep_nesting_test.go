@@ -102,6 +102,112 @@ func foo() {
 	}
 }
 
+func TestDeepNestingRule_FuncLit(t *testing.T) {
+	rule := NewDeepNestingRule()
+	require.NoError(t, rule.Configure(map[string]any{
+		"max_depth": 3,
+	}))
+
+	tests := []struct {
+		name          string
+		code          string
+		expectedCount int
+	}{
+		{
+			name: "Deep nesting inside assigned closure - should flag",
+			code: `package main
+func foo() {
+	g := func() {
+		if true {
+			if true {
+				if true {
+					if true {
+						x := 1
+						_ = x
+					}
+				}
+			}
+		}
+	}
+	g()
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "Deep nesting inside go closure - should flag",
+			code: `package main
+func foo() {
+	go func() {
+		for {
+			if true {
+				if true {
+					if true {
+						x := 1
+						_ = x
+					}
+				}
+			}
+		}
+	}()
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "Deep nesting inside deferred closure - should flag",
+			code: `package main
+func foo() {
+	defer func() {
+		if true {
+			if true {
+				if true {
+					if true {
+						x := 1
+						_ = x
+					}
+				}
+			}
+		}
+	}()
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "Shallow closure in deep context - depth resets at closure body, OK",
+			code: `package main
+func foo() {
+	if true {
+		if true {
+			if true {
+				g := func() {
+					if true {
+						x := 1
+						_ = x
+					}
+				}
+				g()
+			}
+		}
+	}
+}`,
+			expectedCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := core.NewFileContext("/src/file.go", "/src", []byte(tt.code), core.DefaultConfig())
+
+			parser := core.NewParser()
+			fset, astFile, err := parser.ParseGoFile("/src/file.go", []byte(tt.code))
+			require.NoError(t, err)
+			ctx.SetGoAST(fset, astFile)
+
+			violations := rule.AnalyzeFile(ctx)
+			assert.Len(t, violations, tt.expectedCount, "Code: %s", tt.code)
+		})
+	}
+}
+
 func TestDeepNestingRuleNoAST(t *testing.T) {
 	rule := NewDeepNestingRule()
 
@@ -119,4 +225,29 @@ func TestDeepNestingConfigure(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, 5, rule.maxDepth)
+}
+
+func TestDeepNestingConfigureFloat64(t *testing.T) {
+	rule := NewDeepNestingRule()
+
+	// YAML parsers may deliver numbers as float64
+	err := rule.Configure(map[string]any{
+		"max_depth": float64(2),
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, 2, rule.maxDepth)
+}
+
+func TestDeepNestingConfigureReset(t *testing.T) {
+	rule := NewDeepNestingRule()
+
+	require.NoError(t, rule.Configure(map[string]any{
+		"max_depth": 2,
+	}))
+	assert.Equal(t, 2, rule.maxDepth)
+
+	// Re-configuring without the key must reset to the default,
+	// not keep the value from a previously analyzed config
+	require.NoError(t, rule.Configure(map[string]any{}))
+	assert.Equal(t, defaultMaxNestingDepth, rule.maxDepth)
 }

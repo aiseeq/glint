@@ -118,7 +118,12 @@ func stdlibEquivalent(fn *ast.FuncDecl) (string, bool) {
 	case searchesLinearly(fn):
 		return "slices.Contains", true
 	case negatesWhenNegative(fn):
-		return "the built-in abs (or math.Abs for floats)", true
+		// Go has no built-in abs: math.Abs covers floats, integer copies
+		// should collapse into one shared helper.
+		if returnsBasicType(fn, "float64") || returnsBasicType(fn, "float32") {
+			return "math.Abs", true
+		}
+		return "a single shared abs helper (Go has no integer abs)", true
 	case returnsSmallerOrLarger(fn):
 		return "the built-in min/max", true
 	case reversesInPlace(fn):
@@ -210,24 +215,10 @@ func hasDecimalDigitLoop(body *ast.BlockStmt) bool {
 				remainders = remainders || node.Op == token.REM
 			}
 		case *ast.AssignStmt:
-			if len(node.Rhs) == 1 && isIntLiteral(node.Rhs[0], 10) {
-				return true
-			}
+			// `i /= 10` is an assignment, not a binary expression.
 			if node.Tok == token.QUO_ASSIGN && len(node.Rhs) == 1 && isIntLiteral(node.Rhs[0], 10) {
 				divides = true
 			}
-		}
-		return true
-	})
-
-	// `i /= 10` is an assignment, not a binary expression.
-	ast.Inspect(body, func(n ast.Node) bool {
-		assign, ok := n.(*ast.AssignStmt)
-		if !ok || assign.Tok != token.QUO_ASSIGN || len(assign.Rhs) != 1 {
-			return true
-		}
-		if isIntLiteral(assign.Rhs[0], 10) {
-			divides = true
 		}
 		return true
 	})
@@ -243,6 +234,11 @@ func searchesLinearly(fn *ast.FuncDecl) bool {
 
 	rangeStmt, ok := fn.Body.List[0].(*ast.RangeStmt)
 	if !ok || rangeStmt.Value == nil {
+		return false
+	}
+	// Ranging over a map looks identical to ranging over a slice, but
+	// slices.Contains cannot search a map — the advice would be unactionable.
+	if rangesOverMapParam(fn, rangeStmt) {
 		return false
 	}
 	element, ok := rangeStmt.Value.(*ast.Ident)
@@ -267,6 +263,24 @@ func searchesLinearly(fn *ast.FuncDecl) bool {
 		return false
 	}
 	return returnsLiteral(ifStmt.Body.List[0], "true")
+}
+
+// rangesOverMapParam reports whether the range target is a function parameter
+// declared with an explicit map type in the signature.
+func rangesOverMapParam(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt) bool {
+	ident, ok := rangeStmt.X.(*ast.Ident)
+	if !ok || fn.Type.Params == nil {
+		return false
+	}
+	for _, param := range fn.Type.Params.List {
+		for _, name := range param.Names {
+			if name.Name == ident.Name {
+				_, isMap := param.Type.(*ast.MapType)
+				return isMap
+			}
+		}
+	}
+	return false
 }
 
 // negatesWhenNegative recognizes `if x < 0 { return -x }; return x`.

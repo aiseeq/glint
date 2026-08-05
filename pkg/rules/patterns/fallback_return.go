@@ -149,7 +149,23 @@ func (r *FallbackReturnRule) analyzeGoFile(ctx *core.FileContext) []*core.Violat
 		violations = append(violations, r.analyzeGoAST(ctx)...)
 	}
 
-	return violations
+	// Regex- и AST-пути находят один и тот же fallback независимо —
+	// оставляем одну находку на строку.
+	return dedupeViolationsByLine(violations)
+}
+
+// dedupeViolationsByLine оставляет первую находку для каждой строки.
+func dedupeViolationsByLine(violations []*core.Violation) []*core.Violation {
+	seen := make(map[int]bool, len(violations))
+	deduped := violations[:0]
+	for _, v := range violations {
+		if seen[v.Line] {
+			continue
+		}
+		seen[v.Line] = true
+		deduped = append(deduped, v)
+	}
+	return deduped
 }
 
 // analyzeGoRegex uses regex patterns for Go files
@@ -340,8 +356,12 @@ func (r *FallbackReturnRule) isErrorCondition(expr ast.Expr) bool {
 				return true
 			}
 		}
-		// something == nil (nil check)
-		if _, ok := e.Y.(*ast.Ident); ok {
+		// something == nil / nil == something (nil check). Сравнение с любым
+		// другим идентификатором (mode == modeFake) — выбор режима, не ошибка.
+		if ident, ok := e.Y.(*ast.Ident); ok && ident.Name == "nil" {
+			return true
+		}
+		if ident, ok := e.X.(*ast.Ident); ok && ident.Name == "nil" {
 			return true
 		}
 	case *ast.UnaryExpr:

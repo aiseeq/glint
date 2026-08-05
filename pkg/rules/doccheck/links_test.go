@@ -82,6 +82,38 @@ func Connect() {}`,
 			wantViolations: 1, // localhost ok, example.com flagged
 		},
 		{
+			name: "malformed URL with dot-dot and trailing slash",
+			code: `package main
+
+// See http://docs..example.org/ for docs.
+func GetUser() {}`,
+			wantViolations: 1,
+		},
+		{
+			name: "double slash in path",
+			code: `package main
+
+// See https://example.org/api//users for docs.
+func GetUser() {}`,
+			wantViolations: 1,
+		},
+		{
+			name: "dot-dot in path",
+			code: `package main
+
+// See https://example.org/v1/../v2/users for docs.
+func GetUser() {}`,
+			wantViolations: 1,
+		},
+		{
+			name: "bare domain with trailing slash - ok",
+			code: `package main
+
+// See https://example.org/ for the project site.
+func GetUser() {}`,
+			wantViolations: 0,
+		},
+		{
 			name: "no URLs - ok",
 			code: `package main
 

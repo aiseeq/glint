@@ -115,16 +115,19 @@ func DefaultConfig() *Config {
 			MinSeverity: "low",
 			Output:      "console",
 		},
+		// Must stay in sync with the registered rule categories; a test in
+		// pkg/rules asserts the two sets match (core cannot import rules).
 		Categories: map[string]CategoryConfig{
 			"architecture": {Enabled: true},
 			"patterns": {Enabled: true, Rules: map[string]RuleConfig{
 				"deprecated-nginx-http2-listen": {Enabled: false},
 			}},
-			"typesafety":  {Enabled: true},
-			"duplication": {Enabled: true},
-			"deadcode":    {Enabled: true},
-			"config":      {Enabled: true},
-			"naming":      {Enabled: true},
+			"typesafety":    {Enabled: true},
+			"duplication":   {Enabled: true},
+			"deadcode":      {Enabled: true},
+			"security":      {Enabled: true},
+			"documentation": {Enabled: true},
+			"naming":        {Enabled: true},
 		},
 	}
 }
@@ -341,12 +344,16 @@ func MergeConfigs(base, override *Config) *Config {
 				existing.Settings = cat.Settings
 			}
 			if cat.Rules != nil {
-				if existing.Rules == nil {
-					existing.Rules = make(map[string]RuleConfig)
+				// Clone before writing: the map header was copied from base,
+				// so writing through it would mutate the base config.
+				merged := make(map[string]RuleConfig, len(existing.Rules)+len(cat.Rules))
+				for ruleName, ruleCfg := range existing.Rules {
+					merged[ruleName] = ruleCfg
 				}
 				for ruleName, ruleCfg := range cat.Rules {
-					existing.Rules[ruleName] = ruleCfg
+					merged[ruleName] = mergeRuleConfig(merged[ruleName], ruleCfg)
 				}
+				existing.Rules = merged
 			}
 			result.Categories[name] = existing
 		} else {
@@ -355,6 +362,26 @@ func MergeConfigs(base, override *Config) *Config {
 	}
 
 	return result
+}
+
+// mergeRuleConfig overlays an override rule config onto the base one field by
+// field. Replacing the whole struct made a severity-only override erase the
+// base's settings and exceptions.
+func mergeRuleConfig(base, override RuleConfig) RuleConfig {
+	merged := base
+	// Enabled has no "unset" state: UnmarshalYAML defaults it to true, so the
+	// override's value is always explicit.
+	merged.Enabled = override.Enabled
+	if override.Severity != "" {
+		merged.Severity = override.Severity
+	}
+	if override.Settings != nil {
+		merged.Settings = override.Settings
+	}
+	if override.Exceptions != nil {
+		merged.Exceptions = override.Exceptions
+	}
+	return merged
 }
 
 // IsCategoryEnabled checks if a category is enabled

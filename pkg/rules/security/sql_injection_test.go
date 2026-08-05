@@ -50,6 +50,18 @@ func getUser(db *sql.DB, id string) {
 			wantPattern:    "concatenation",
 		},
 		{
+			name: "chained concatenation with trailing literal",
+			code: `package main
+
+import "database/sql"
+
+func getUser(db *sql.DB, id string) {
+	db.Query("SELECT * FROM users WHERE id = " + id + " LIMIT 1")
+}`,
+			wantViolations: 1,
+			wantPattern:    "concatenation",
+		},
+		{
 			name: "string concatenation in Exec",
 			code: `package main
 

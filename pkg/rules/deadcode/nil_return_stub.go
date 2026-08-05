@@ -105,7 +105,7 @@ func (r *NilReturnStubRule) checkForNilStub(ctx *core.FileContext, fn *ast.FuncD
 	}
 
 	pos := ctx.PositionFor(fn.Name)
-	funcName := r.getReceiverType(fn.Recv.List[0]) + "." + fn.Name.Name
+	funcName := receiverTypeName(fn.Recv.List[0]) + "." + fn.Name.Name
 
 	v := r.CreateViolation(ctx.RelPath, pos.Line,
 		"Method '"+funcName+"' only returns nil - likely an interface compliance stub")
@@ -149,17 +149,4 @@ func (r *NilReturnStubRule) hasComplianceComment(fn *ast.FuncDecl) bool {
 		}
 	}
 	return false
-}
-
-// getReceiverType extracts the receiver type name
-func (r *NilReturnStubRule) getReceiverType(field *ast.Field) string {
-	switch t := field.Type.(type) {
-	case *ast.StarExpr:
-		if ident, ok := t.X.(*ast.Ident); ok {
-			return ident.Name
-		}
-	case *ast.Ident:
-		return t.Name
-	}
-	return ""
 }

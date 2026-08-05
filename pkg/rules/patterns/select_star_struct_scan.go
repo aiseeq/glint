@@ -95,6 +95,7 @@ func (r *SelectStarStructScanRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 		}
 		line := lineFromNode(ctx, lit)
 		v := r.CreateViolation(ctx.RelPath, line,
+			// select-star-struct-scan: safe — the rule's own message text, not a query
 			"`SELECT *` from table '"+table+"' — a column added by a migration breaks the scan at runtime")
 		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
 		v.WithSuggestion("List the columns the destination struct actually has, so the query no longer depends on the table's column set")

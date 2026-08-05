@@ -108,11 +108,42 @@ func (r *FinancialRoundedDeltaRule) subtractsParsedFinancialVars(line string, va
 
 func containsParsedFinancialVar(text string, vars map[string]bool) bool {
 	for name := range vars {
-		if regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`).MatchString(text) {
+		if containsWord(text, name) {
 			return true
 		}
 	}
 	return false
+}
+
+// containsWord reports whether name occurs in text delimited by word boundaries,
+// matching the semantics of regexp `\b<name>\b` without compiling a regexp per
+// variable on every line.
+func containsWord(text, name string) bool {
+	if name == "" {
+		return false
+	}
+	for start := 0; ; start++ {
+		idx := strings.Index(text[start:], name)
+		if idx < 0 {
+			return false
+		}
+		start += idx
+		end := start + len(name)
+		// \b: word-char-ness differs across the position (string edge counts as non-word).
+		beforeOK := isWordChar(name[0]) != (start > 0 && isWordChar(text[start-1]))
+		afterOK := isWordChar(name[len(name)-1]) != (end < len(text) && isWordChar(text[end]))
+		if beforeOK && afterOK {
+			return true
+		}
+	}
+}
+
+// isWordChar mirrors regexp's \w class: [0-9A-Za-z_].
+func isWordChar(b byte) bool {
+	return b == '_' ||
+		(b >= '0' && b <= '9') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= 'a' && b <= 'z')
 }
 
 func (r *FinancialRoundedDeltaRule) shouldSkip(ctx *core.FileContext) bool {

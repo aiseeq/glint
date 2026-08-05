@@ -153,7 +153,9 @@ func (r *ConventionsRule) checkFuncName(ctx *core.FileContext, fn *ast.FuncDecl,
 	}
 
 	// Check for stuttering
-	if r.stutters(name, pkgName) && fn.Recv == nil {
+	// Only check exported functions - unexported names are never qualified
+	// as pkg.name by callers, so they cannot stutter
+	if ast.IsExported(name) && r.stutters(name, pkgName) && fn.Recv == nil {
 		pos := ctx.PositionFor(fn.Name)
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
 			"Function name stutters with package name: "+pkgName+"."+name)

@@ -63,7 +63,11 @@ func (f *MapIterationOrderFixer) GenerateFix(ctx *core.FileContext, v *core.Viol
 		RuleName:  "map-iteration-order",
 		Violation: v,
 	}}
-	if importFix := ensureImports(ctx, "maps", "slices"); importFix != nil {
+	importFix, ok := ensureImports(ctx, "maps", "slices")
+	if !ok {
+		return nil // rewriting the body without its imports breaks the build
+	}
+	if importFix != nil {
 		importFix.RuleName = "map-iteration-order"
 		importFix.Violation = v
 		fixes = append(fixes, importFix)

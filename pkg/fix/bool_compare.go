@@ -2,7 +2,6 @@ package fix
 
 import (
 	"regexp"
-	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -99,11 +98,6 @@ func (f *BoolCompareFixer) tryFixPattern(file string, line int, content string, 
 		} else {
 			newText = varName // x != false -> x
 		}
-	}
-
-	// Handle already negated variables (!x == false -> x, not !!x)
-	if strings.HasPrefix(varName, "!") && strings.HasPrefix(newText, "!") {
-		newText = varName[1:] // Remove double negation
 	}
 
 	return &Fix{

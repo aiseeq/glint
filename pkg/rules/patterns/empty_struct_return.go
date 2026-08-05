@@ -62,7 +62,7 @@ func (r *EmptyStructReturnRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 
 		// Find return statements inside if blocks that check errors/nil
 		for _, stmt := range funcDecl.Body.List {
-			v := r.checkStatement(ctx, stmt, funcDecl)
+			v := r.checkStatement(ctx, stmt)
 			violations = append(violations, v...)
 		}
 
@@ -86,7 +86,7 @@ func (r *EmptyStructReturnRule) hasErrorReturn(fn *ast.FuncDecl) bool {
 }
 
 // checkStatement recursively checks statements for problematic patterns
-func (r *EmptyStructReturnRule) checkStatement(ctx *core.FileContext, stmt ast.Stmt, fn *ast.FuncDecl) []*core.Violation {
+func (r *EmptyStructReturnRule) checkStatement(ctx *core.FileContext, stmt ast.Stmt) []*core.Violation {
 	var violations []*core.Violation
 
 	switch s := stmt.(type) {
@@ -103,17 +103,17 @@ func (r *EmptyStructReturnRule) checkStatement(ctx *core.FileContext, stmt ast.S
 			}
 			// Also check else branch
 			if s.Else != nil {
-				violations = append(violations, r.checkStatement(ctx, s.Else, fn)...)
+				violations = append(violations, r.checkStatement(ctx, s.Else)...)
 			}
 		}
 		// Recurse into body
 		for _, bodyStmt := range s.Body.List {
-			violations = append(violations, r.checkStatement(ctx, bodyStmt, fn)...)
+			violations = append(violations, r.checkStatement(ctx, bodyStmt)...)
 		}
 
 	case *ast.BlockStmt:
 		for _, blockStmt := range s.List {
-			violations = append(violations, r.checkStatement(ctx, blockStmt, fn)...)
+			violations = append(violations, r.checkStatement(ctx, blockStmt)...)
 		}
 	}
 

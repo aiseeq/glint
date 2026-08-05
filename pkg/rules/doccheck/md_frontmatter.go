@@ -27,7 +27,7 @@ func NewMdFrontmatterRule() *MdFrontmatterRule {
 		BaseRule: rules.NewBaseRule(
 			"md-frontmatter",
 			"documentation",
-			"Validates YAML frontmatter presence and format in Markdown documents",
+			"Validates YAML frontmatter format in Markdown documents",
 			core.SeverityMedium,
 		),
 		// YYYY-MM-DD format
@@ -55,7 +55,7 @@ func (r *MdFrontmatterRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	lines := ctx.Lines
 
 	// Check for YAML frontmatter
-	hasFrontmatter, _, frontmatterFields := r.parseFrontmatter(lines)
+	hasFrontmatter, frontmatterFields := r.parseFrontmatter(lines)
 
 	if hasFrontmatter {
 		// Validate date format
@@ -83,16 +83,16 @@ func (r *MdFrontmatterRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 }
 
 // parseFrontmatter extracts YAML frontmatter from lines
-func (r *MdFrontmatterRule) parseFrontmatter(lines []string) (bool, int, map[string]string) {
+func (r *MdFrontmatterRule) parseFrontmatter(lines []string) (bool, map[string]string) {
 	fields := make(map[string]string)
 
 	if len(lines) == 0 {
-		return false, 0, fields
+		return false, fields
 	}
 
 	// First line must be ---
 	if strings.TrimSpace(lines[0]) != "---" {
-		return false, 0, fields
+		return false, fields
 	}
 
 	// Find closing ---
@@ -105,7 +105,7 @@ func (r *MdFrontmatterRule) parseFrontmatter(lines []string) (bool, int, map[str
 	}
 
 	if endLine == -1 {
-		return false, 0, fields
+		return false, fields
 	}
 
 	// Parse YAML fields (simple key: value parsing)
@@ -126,5 +126,5 @@ func (r *MdFrontmatterRule) parseFrontmatter(lines []string) (bool, int, map[str
 		}
 	}
 
-	return true, endLine, fields
+	return true, fields
 }

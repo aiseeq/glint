@@ -188,6 +188,24 @@ func TestGetUser() {
 	assert.Empty(t, violations, "Test files should be excluded")
 }
 
+func TestImportDirectionRule_ReportsPackageNotRepository(t *testing.T) {
+	rule := NewImportDirectionRule()
+
+	// "reports" contains "repo" as a substring but is not a repository package
+	goCode := `package reports
+
+import "myapp/services"
+
+func Build() {
+	services.GetUser()
+}
+`
+	ctx := createTestContext(t, "internal/reports/report.go", goCode)
+	violations := rule.AnalyzeFile(ctx)
+
+	assert.Empty(t, violations, "reports package must not be classified as repository layer")
+}
+
 func TestImportDirectionRule_RoutingImportsHandler(t *testing.T) {
 	rule := NewImportDirectionRule()
 

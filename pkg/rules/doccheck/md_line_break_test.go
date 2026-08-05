@@ -3,8 +3,6 @@ package doccheck
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/aiseeq/glint/pkg/core"
 )
 
@@ -100,6 +98,37 @@ Some text
 **Another:** text`,
 			expectViolations: 0, // Will be filtered because not .md file
 		},
+		{
+			name: "bold-labels inside fenced code block",
+			content: "# Document\n\n" +
+				"```markdown\n" +
+				"**Key1:** Value1\n" +
+				"**Key2:** Value2\n" +
+				"```\n\n" +
+				"Some text",
+			expectViolations: 0, // code block content is a literal example
+		},
+		{
+			name: "bold-labels inside tilde fenced code block",
+			content: "# Document\n\n" +
+				"~~~\n" +
+				"**Key1:** Value1\n" +
+				"**Key2:** Value2\n" +
+				"~~~\n\n" +
+				"Some text",
+			expectViolations: 0,
+		},
+		{
+			name: "bold-labels after a closed fence are still checked",
+			content: "# Document\n\n" +
+				"```\n" +
+				"code\n" +
+				"```\n\n" +
+				"**Key1:** Value1\n" +
+				"**Key2:** Value2\n\n" +
+				"Some text",
+			expectViolations: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -121,47 +150,4 @@ Some text
 			}
 		})
 	}
-}
-
-func TestMdLineBreakRule_Fix(t *testing.T) {
-	rule := NewMdLineBreakRule()
-
-	content := `# Document
-
-**Версия:** 1.0.0
-**Дата:** Январь 2026
-**Автор:** Team
-
-Some text`
-
-	ctx := core.NewFileContext("/test/doc.md", "/test", []byte(content), nil)
-	violations := rule.AnalyzeFile(ctx)
-
-	if len(violations) != 1 {
-		t.Fatalf("expected 1 violation, got %d", len(violations))
-	}
-
-	fix, err := rule.Fix(ctx, violations[0])
-	if err != nil {
-		t.Fatalf("fix error: %v", err)
-	}
-
-	if fix == nil {
-		t.Fatal("expected fix, got nil")
-	}
-
-	// Check that fix adds trailing spaces to lines except last
-	expected := "**Версия:** 1.0.0  \n**Дата:** Январь 2026  \n**Автор:** Team"
-	if fix.NewText != expected {
-		t.Errorf("unexpected fix:\ngot:      %q\nexpected: %q", fix.NewText, expected)
-	}
-}
-
-func TestMdLineBreakRuleFixRejectsMissingContext(t *testing.T) {
-	rule := NewMdLineBreakRule()
-	ctx := core.NewFileContext("/test/doc.md", "/test", []byte("**Label:** value"), nil)
-
-	fix, err := rule.Fix(ctx, core.NewViolation(rule.Name(), rule.Category(), ctx.RelPath, 1, core.SeverityLow, "test"))
-	require.Error(t, err)
-	require.Nil(t, fix)
 }

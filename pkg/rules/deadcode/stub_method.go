@@ -28,8 +28,7 @@ func init() {
 //	}
 type StubMethodRule struct {
 	*rules.BaseRule
-	stubPatterns     []*regexp.Regexp
-	criticalExitFunc string // "panic" - stored to avoid hook detection
+	stubPatterns []*regexp.Regexp
 }
 
 // NewStubMethodRule creates the rule
@@ -41,7 +40,6 @@ func NewStubMethodRule() *StubMethodRule {
 			"Detects methods that only return 'not implemented' or 'deprecated' errors",
 			core.SeverityMedium,
 		),
-		criticalExitFunc: "pan" + "ic", // Avoid hook detection
 	}
 	r.stubPatterns = r.initStubPatterns()
 	return r
@@ -105,22 +103,15 @@ func (r *StubMethodRule) checkForStubMethod(ctx *core.FileContext, fn *ast.FuncD
 		return nil
 	}
 
-	// Check for nolint comment in function doc or preceding comment
-	fnPos := ctx.PositionFor(fn.Name)
-	if fnPos.Line > 0 {
-		// Check 3 lines above for nolint comment (doc + blank line)
-		for i := max(1, fnPos.Line-3); i <= fnPos.Line; i++ {
-			lineContent := ctx.GetLine(i)
-			if strings.Contains(lineContent, "nolint") {
-				return nil
-			}
-		}
-	}
-
 	// For short functions (1-3 statements), check if they only return stub errors
 	if len(fn.Body.List) > 5 {
 		return nil // Too complex to be a simple stub
 	}
+
+	// A stub returns a fixed error. A function whose parameters feed the
+	// error message is a domain error constructor, not a stub, even when the
+	// message contains a trigger word ("user %s was removed").
+	params := funcParamNames(fn)
 
 	// Look for return statements with stub patterns
 	for _, stmt := range fn.Body.List {
@@ -131,12 +122,12 @@ func (r *StubMethodRule) checkForStubMethod(ctx *core.FileContext, fn *ast.FuncD
 
 		for _, result := range ret.Results {
 			if stubMsg := r.extractStubMessage(result); stubMsg != "" {
-				if r.isStubPattern(stubMsg) {
+				if r.isStubPattern(stubMsg) && !usesAnyIdent(result, params) {
 					pos := ctx.PositionFor(fn.Name)
 					funcName := fn.Name.Name
 					if fn.Recv != nil && len(fn.Recv.List) > 0 {
 						// It's a method
-						funcName = r.getReceiverType(fn.Recv.List[0]) + "." + funcName
+						funcName = receiverTypeName(fn.Recv.List[0]) + "." + funcName
 					}
 
 					v := r.CreateViolation(ctx.RelPath, pos.Line,
@@ -149,7 +140,7 @@ func (r *StubMethodRule) checkForStubMethod(ctx *core.FileContext, fn *ast.FuncD
 		}
 	}
 
-	// Also check for critical exit with deprecated message patterns
+	// Also check for panic calls with deprecated message patterns
 	for _, stmt := range fn.Body.List {
 		expr, ok := stmt.(*ast.ExprStmt)
 		if !ok {
@@ -159,7 +150,7 @@ func (r *StubMethodRule) checkForStubMethod(ctx *core.FileContext, fn *ast.FuncD
 		if !ok {
 			continue
 		}
-		if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == r.criticalExitFunc {
+		if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "panic" {
 			if len(call.Args) > 0 {
 				if msg := r.extractStringLiteral(call.Args[0]); msg != "" {
 					if r.isStubPattern(msg) {
@@ -271,15 +262,35 @@ func (r *StubMethodRule) isStubPattern(msg string) bool {
 	return false
 }
 
-// getReceiverType extracts the receiver type name
-func (r *StubMethodRule) getReceiverType(field *ast.Field) string {
-	switch t := field.Type.(type) {
-	case *ast.StarExpr:
-		if ident, ok := t.X.(*ast.Ident); ok {
-			return ident.Name
-		}
-	case *ast.Ident:
-		return t.Name
+// funcParamNames collects the named, non-blank parameters of a function.
+func funcParamNames(fn *ast.FuncDecl) map[string]bool {
+	if fn.Type.Params == nil {
+		return nil
 	}
-	return ""
+	names := make(map[string]bool)
+	for _, field := range fn.Type.Params.List {
+		for _, name := range field.Names {
+			if name.Name != "" && name.Name != "_" {
+				names[name.Name] = true
+			}
+		}
+	}
+	return names
+}
+
+// usesAnyIdent reports whether the expression references any of the given
+// identifiers.
+func usesAnyIdent(expr ast.Expr, names map[string]bool) bool {
+	if len(names) == 0 {
+		return false
+	}
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok && names[ident.Name] {
+			found = true
+			return false
+		}
+		return !found
+	})
+	return found
 }
