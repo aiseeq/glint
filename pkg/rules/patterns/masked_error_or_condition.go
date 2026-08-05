@@ -35,6 +35,14 @@ func init() {
 // Not flagged: branches that propagate/wrap the error, branches that handle
 // the error in a nested if, branches that panic, &&-narrowing (errors.Is
 // style), and branches without a return.
+//
+// For functions WITHOUT an error result the log IS the only error channel, so
+// a branch that mentions the error variable anywhere (logs it, hands it to a
+// collector) or calls an Error/Warn/Fatal-level logger is treated as handled.
+// Functions taking http.ResponseWriter are skipped entirely: an HTTP handler
+// reports failures through the response, not through return values. Functions
+// WITH an error result get no such exemption — logging and then returning nil
+// error still hides the failure from the caller.
 type MaskedErrorOrConditionRule struct {
 	*rules.BaseRule
 }
@@ -60,7 +68,7 @@ func (r *MaskedErrorOrConditionRule) AnalyzeFile(ctx *core.FileContext) []*core.
 	var violations []*core.Violation
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		body, results := functionParts(n)
+		body, params, results := functionParts(n)
 		if body == nil {
 			return true
 		}
@@ -70,6 +78,10 @@ func (r *MaskedErrorOrConditionRule) AnalyzeFile(ctx *core.FileContext) []*core.
 		// Единственный bool-результат — зона error-masked-as-false-bool: там
 		// false может честно означать «не подходит», и предикаты уже разобраны.
 		if !returnsError && isSingleBoolResult(results) {
+			return true
+		}
+		// HTTP-хендлер отчитывается об ошибке ответом клиенту, не возвратом.
+		if !returnsError && hasResponseWriterParam(params) {
 			return true
 		}
 
@@ -122,8 +134,14 @@ func (r *MaskedErrorOrConditionRule) checkBranch(
 				return
 			}
 			// С error в сигнатуре маскировка — только явный nil в error-слоте.
-			// Без error в сигнатуре деть ошибку некуда: маскирует любой возврат.
-			if !returnsError || returnsNilError(s) {
+			// Без error в сигнатуре деть ошибку некуда: маскирует любой возврат
+			// ЗНАЧЕНИЯ. Голый `return` (void-функция, обработчик) — ранний выход
+			// после обработки, а не подмена результата.
+			if returnsError {
+				if returnsNilError(s) {
+					maskingReturns = append(maskingReturns, s)
+				}
+			} else if len(s.Results) > 0 {
 				maskingReturns = append(maskingReturns, s)
 			}
 		}
@@ -151,22 +169,25 @@ func (r *MaskedErrorOrConditionRule) checkBranch(
 	return violations
 }
 
-// functionParts extracts body and results from FuncDecl/FuncLit nodes.
-func functionParts(n ast.Node) (*ast.BlockStmt, *ast.FieldList) {
+// functionParts extracts body, params and results from FuncDecl/FuncLit nodes.
+func functionParts(n ast.Node) (body *ast.BlockStmt, params, results *ast.FieldList) {
 	switch fn := n.(type) {
 	case *ast.FuncDecl:
 		if fn.Type == nil {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return fn.Body, fn.Type.Results
+		return fn.Body, fn.Type.Params, fn.Type.Results
 	case *ast.FuncLit:
 		if fn.Type == nil {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return fn.Body, fn.Type.Results
+		return fn.Body, fn.Type.Params, fn.Type.Results
 	}
-	return nil, nil
+	return nil, nil, nil
 }
+
+// hasResponseWriterParam (HTTP-хендлер отчитывается ответом, а не возвратом)
+// объявлена в log_and_return_zero.go — второй копии здесь не нужно.
 
 // lastResultIsErrorType reports whether the last result in the field list is
 // the builtin error type.
