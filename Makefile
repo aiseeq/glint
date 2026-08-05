@@ -110,7 +110,7 @@ commit: smoke ## Stage all and commit with MESSAGE (usage: make commit MESSAGE="
 	@printf '%s\n\n%s\n\n%s\n' \
 		"$$MESSAGE" \
 		"🤖 Generated with Claude Code" \
-		"Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>" \
+		"Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>" \
 		| git commit -F -
 	@echo "Committed: $$(printf '%s' "$$MESSAGE" | head -1)"
 
