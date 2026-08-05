@@ -170,7 +170,10 @@ func (r *DocCompletenessRule) checkFuncDecl(ctx *core.FileContext, fn *ast.FuncD
 		return nil
 	}
 
-	if fn.Doc == nil || len(fn.Doc.List) == 0 {
+	// Text strips comment markers and drops directives (//go:generate,
+	// //nolint), which instruct tools rather than document the function.
+	docText := fn.Doc.Text()
+	if docText == "" {
 		pos := ctx.PositionFor(fn.Name)
 		kind := "function"
 		if fn.Recv != nil {
@@ -187,9 +190,7 @@ func (r *DocCompletenessRule) checkFuncDecl(ctx *core.FileContext, fn *ast.FuncD
 	}
 
 	// Check that doc starts with function name (Go convention)
-	firstLine := fn.Doc.List[0].Text
-	if !strings.HasPrefix(strings.TrimPrefix(firstLine, "// "), fn.Name.Name) &&
-		!strings.HasPrefix(strings.TrimPrefix(firstLine, "/* "), fn.Name.Name) {
+	if !strings.HasPrefix(docText, fn.Name.Name) {
 		pos := ctx.PositionFor(fn.Name)
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
 			"Documentation for '"+fn.Name.Name+"' should start with the function name")

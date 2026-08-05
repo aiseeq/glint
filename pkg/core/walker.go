@@ -88,7 +88,7 @@ func (w *Walker) Walk() (<-chan *FileContext, <-chan error) {
 	// Start file discovery
 	go func() {
 		if err := filepath.Walk(w.projectRoot, func(path string, info os.FileInfo, err error) error {
-			return w.visitPath(fileQueue, path, info, err)
+			return w.visitPath(fileQueue, walkErrors, path, info, err)
 		}); err != nil {
 			walkErrors <- err
 		}
@@ -132,9 +132,13 @@ func (w *Walker) WalkSync() ([]*FileContext, []error) {
 
 // visitPath is called for each entry during walk and queues the analyzable
 // files onto this walk's channel.
-func (w *Walker) visitPath(fileQueue chan<- string, path string, info os.FileInfo, err error) error {
+func (w *Walker) visitPath(fileQueue chan<- string, walkErrors chan<- error, path string, info os.FileInfo, err error) error {
 	if err != nil {
-		return fmt.Errorf("visit %q: %w", path, err)
+		// Returning the error would abort the entire filepath.Walk (its
+		// documented contract), silently losing every file after this point.
+		// Report it and keep walking; the caller decides whether to fail.
+		walkErrors <- fmt.Errorf("visit %q: %w", path, err)
+		return nil
 	}
 
 	// Skip directories we don't need to traverse

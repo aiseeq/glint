@@ -26,18 +26,8 @@ func TestErrorMaskingRule_GoPatterns(t *testing.T) {
 		expectMatch bool
 		pattern     string
 	}{
-		{
-			name:        "error return true",
-			code:        `if err != nil { log.Error(err); return true }`,
-			expectMatch: true,
-			pattern:     "error_return_true",
-		},
-		{
-			name:        "error return success string",
-			code:        `if err != nil { return "success" }`,
-			expectMatch: true,
-			pattern:     "error_return_success",
-		},
+		// NOTE: `if err != nil { ... return ... }` детектится только через AST:
+		// однострочные regex были мертвы на gofmt-коде (см. TestErrorMaskingRule_ASTErrorReturn).
 		// NOTE: switch default is now only detected via AST in specific function contexts
 		// to avoid false positives on display/label functions
 		{
@@ -149,7 +139,7 @@ func TestErrorMaskingRule_Exceptions(t *testing.T) {
 		{
 			name:        "vendor excluded",
 			path:        "vendor/lib/file.go",
-			code:        `if err != nil { return true }`,
+			code:        `return "fake-user-id"`,
 			expectMatch: false,
 		},
 		{
@@ -173,7 +163,7 @@ func TestErrorMaskingRule_Exceptions(t *testing.T) {
 		{
 			name:        "production code detected",
 			path:        "backend/services/user_service.go",
-			code:        `if err != nil { log.Error(err); return true }`,
+			code:        `return "fake-user-id"`,
 			expectMatch: true,
 		},
 	}
@@ -215,9 +205,64 @@ func TestErrorMaskingRule_CommentSkip(t *testing.T) {
 	assert.Empty(t, violations, "Comments should be skipped")
 }
 
+// Однострочные regex для `if err != nil { ... return ... }` удалены: на
+// gofmt-коде условие и return всегда на разных строках, эти случаи покрывает
+// AST-путь. Тест фиксирует, что AST ловит gofmt-форму.
+func TestErrorMaskingRule_ASTErrorReturn(t *testing.T) {
+	rule := NewErrorMaskingRule()
+
+	tests := []struct {
+		name           string
+		code           string
+		wantViolations int
+	}{
+		{
+			name: "gofmt: err != nil returns true",
+			code: `package main
+
+func GetUser() bool {
+	err := doSomething()
+	if err != nil {
+		return true
+	}
+	return false
+}`,
+			wantViolations: 1,
+		},
+		{
+			name: "gofmt: err != nil returns zero",
+			code: `package main
+
+func GetCount() int {
+	count, err := load()
+	if err != nil {
+		return 0
+	}
+	return count
+}`,
+			wantViolations: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Свежий парсер на подтест: кэш парсера ключуется по пути, общий
+			// парсер отдал бы AST первого подтеста всем остальным.
+			parser := core.NewParser()
+			ctx := core.NewFileContext("/src/service.go", "/src", []byte(tt.code), core.DefaultConfig())
+			fset, astFile, err := parser.ParseGoFile("/src/service.go", []byte(tt.code))
+			require.NoError(t, err)
+			ctx.SetGoAST(fset, astFile)
+
+			violations := rule.AnalyzeFile(ctx)
+			require.Len(t, violations, tt.wantViolations, "Code:\n%s", tt.code)
+			assert.Equal(t, "error_return_value", violations[0].Context["pattern"])
+		})
+	}
+}
+
 func TestErrorMaskingRule_ErrEqualNil(t *testing.T) {
 	rule := NewErrorMaskingRule()
-	parser := core.NewParser()
 
 	tests := []struct {
 		name           string
@@ -245,7 +290,7 @@ func GetUser() bool {
 	if err != nil { return true }
 	return false
 }`,
-			wantViolations: 1, // This masks the error (detected by regex)
+			wantViolations: 1, // This masks the error (detected by AST, error_return_value)
 		},
 		{
 			name: "err != nil return error - proper handling",
@@ -266,6 +311,9 @@ func GetUser() error {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Свежий парсер на подтест: кэш парсера ключуется по пути, общий
+			// парсер отдал бы AST первого подтеста всем остальным.
+			parser := core.NewParser()
 			ctx := core.NewFileContext("/src/service.go", "/src", []byte(tt.code), core.DefaultConfig())
 			fset, astFile, err := parser.ParseGoFile("/src/service.go", []byte(tt.code))
 			require.NoError(t, err)

@@ -17,8 +17,6 @@ func TestLayerViolationRule_Metadata(t *testing.T) {
 }
 
 func TestLayerViolationRule_DetermineLayer(t *testing.T) {
-	rule := NewLayerViolationRule()
-
 	tests := []struct {
 		path     string
 		expected LayerType
@@ -27,13 +25,18 @@ func TestLayerViolationRule_DetermineLayer(t *testing.T) {
 		{"backend/shared/routing/admin_router.go", HandlerLayer},
 		{"backend/shared/services/user_service.go", ServiceLayer},
 		{"backend/auth/repository/auth_repository.go", RepositoryLayer},
+		{"backend/repo/user.go", RepositoryLayer},
+		{"backend/repositories/user.go", RepositoryLayer},
+		{"backend/storage/user_repo.go", RepositoryLayer},
 		{"backend/models/user.go", UnknownLayer},
 		{"backend/utils/helper.go", UnknownLayer},
+		{"internal/reports/monthly.go", UnknownLayer},
+		{"internal/reporting/export.go", UnknownLayer},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			result := rule.determineLayer(tt.path)
+			result := determineLayerFromPath(tt.path)
 			assert.Equal(t, tt.expected, result, "Path: %s", tt.path)
 		})
 	}
@@ -144,6 +147,24 @@ func TestGetUser(db *sql.DB) {
 	violations := rule.AnalyzeFile(ctx)
 
 	assert.Empty(t, violations, "Test files should be excluded")
+}
+
+func TestLayerViolationRule_ReportsPackageNotRepository(t *testing.T) {
+	rule := NewLayerViolationRule()
+
+	// "reports" contains "repo" as a substring but is not a repository package
+	goCode := `package reports
+
+import "net/http"
+
+func Render(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusOK)
+}
+`
+	ctx := createTestContext(t, "internal/reports/render.go", goCode)
+	violations := rule.AnalyzeFile(ctx)
+
+	assert.Empty(t, violations, "reports package must not be classified as repository layer")
 }
 
 // Helper function to create test context with parsed Go AST

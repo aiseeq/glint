@@ -192,6 +192,20 @@ func containsSubstring(s, substr string) bool {
 	return false
 }
 
+// The rule only validates fields of frontmatter that is present; the
+// description must not promise a presence check it does not perform.
+func TestMdFrontmatterMetadata(t *testing.T) {
+	rule := NewMdFrontmatterRule()
+
+	if rule.Name() != "md-frontmatter" {
+		t.Errorf("unexpected name: %s", rule.Name())
+	}
+	expected := "Validates YAML frontmatter format in Markdown documents"
+	if rule.Description() != expected {
+		t.Errorf("unexpected description:\ngot:      %q\nexpected: %q", rule.Description(), expected)
+	}
+}
+
 func TestParseFrontmatter(t *testing.T) {
 	rule := NewMdFrontmatterRule()
 
@@ -199,7 +213,6 @@ func TestParseFrontmatter(t *testing.T) {
 		name       string
 		lines      []string
 		expectHas  bool
-		expectEnd  int
 		expectKeys []string
 	}{
 		{
@@ -214,7 +227,6 @@ func TestParseFrontmatter(t *testing.T) {
 				"# Content",
 			},
 			expectHas:  true,
-			expectEnd:  5,
 			expectKeys: []string{"title", "description", "date", "version"},
 		},
 		{
@@ -224,7 +236,6 @@ func TestParseFrontmatter(t *testing.T) {
 				"Content",
 			},
 			expectHas: false,
-			expectEnd: 0,
 		},
 		{
 			name: "unclosed frontmatter",
@@ -234,7 +245,6 @@ func TestParseFrontmatter(t *testing.T) {
 				"# Content",
 			},
 			expectHas: false,
-			expectEnd: 0,
 		},
 		{
 			name: "frontmatter with quotes",
@@ -247,20 +257,16 @@ func TestParseFrontmatter(t *testing.T) {
 				"---",
 			},
 			expectHas:  true,
-			expectEnd:  5,
 			expectKeys: []string{"title", "description"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			has, end, fields := rule.parseFrontmatter(tt.lines)
+			has, fields := rule.parseFrontmatter(tt.lines)
 
 			if has != tt.expectHas {
 				t.Errorf("expected has=%v, got %v", tt.expectHas, has)
-			}
-			if end != tt.expectEnd {
-				t.Errorf("expected end=%d, got %d", tt.expectEnd, end)
 			}
 			for _, key := range tt.expectKeys {
 				if _, ok := fields[key]; !ok {

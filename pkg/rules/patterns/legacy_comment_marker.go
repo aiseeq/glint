@@ -160,11 +160,13 @@ func (r *LegacyCommentMarkerRule) extractComment(line string, isBlock bool) stri
 	return core.CommentPart(line)
 }
 
-// containsLegacyWord checks that "legacy" appears as a standalone word, not
-// as a substring (e.g., "legally", "legacies").
+// legacyWordRE matches "legacy" as a standalone word, not as a substring
+// (e.g., "legally", "legacies").
+var legacyWordRE = regexp.MustCompile(`\blegacy\b`)
+
+// containsLegacyWord checks that "legacy" appears as a standalone word.
 func containsLegacyWord(lowerText string) bool {
-	re := regexp.MustCompile(`\blegacy\b`)
-	return re.MatchString(lowerText)
+	return legacyWordRE.MatchString(lowerText)
 }
 
 // urlAdjacentLegacyParenRE matches "legacy" appearing inside parentheses on a

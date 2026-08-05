@@ -83,6 +83,20 @@ func (f *Factory) alerter() Alerter {
 			expectPtr: "f.mailer",
 		},
 		{
+			// Та же ошибка объявлением с инициализатором: var a Alerter = f.mailer.
+			name: "nil-able pointer in var declaration with interface type",
+			wiring: `package app
+
+func (f *Factory) enabled() bool { return f.mailer != nil }
+
+func (f *Factory) alerter() Alerter {
+	var a Alerter = f.mailer
+	return a
+}
+`,
+			expectPtr: "f.mailer",
+		},
+		{
 			// Правильная нормализация: присваивание под проверкой указателя.
 			name: "assignment guarded by a nil check",
 			wiring: `package app

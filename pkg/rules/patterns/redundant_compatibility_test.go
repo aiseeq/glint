@@ -139,6 +139,54 @@ func GetID(ctx context.Context) string {
 `,
 			wantCount: 1,
 		},
+		{
+			// Reading two DIFFERENT context values into two different variables
+			// is not a fallback chain: nothing merges into one destination.
+			name: "Independent keys read into separate variables - no violation",
+			code: `package main
+
+import "context"
+
+func LogRequest(ctx context.Context) {
+	userID := ctx.Value(UserIDKey)
+	requestID := ctx.Value(RequestIDKey)
+	_ = userID
+	_ = requestID
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "Fallback merged into one variable - violation",
+			code: `package main
+
+import "context"
+
+func GetActorID(ctx context.Context) any {
+	v := ctx.Value(ActorIDKey)
+	if v == nil {
+		v = ctx.Value(LegacyActorIDKey)
+	}
+	return v
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "Fallback merged into one return path - violation",
+			code: `package main
+
+import "context"
+
+func GetTraceID(ctx context.Context, useNew bool) any {
+	if useNew {
+		return ctx.Value(TraceIDKey)
+	}
+	return ctx.Value(LegacyTraceIDKey)
+}
+`,
+			wantCount: 1,
+		},
 	}
 
 	for _, tt := range tests {

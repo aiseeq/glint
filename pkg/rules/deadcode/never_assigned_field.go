@@ -116,6 +116,10 @@ func (r *NeverAssignedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 		}
 	}
 
+	// Test files are outside the typed load; a test assigning the field
+	// (fixture wiring) means it is not "never assigned".
+	mentions := newTestMentions(ctx.Files)
+
 	var violations []*core.Violation
 	for _, field := range declared {
 		if written[field.pos] {
@@ -125,6 +129,9 @@ func (r *NeverAssignedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 			continue // nil-checked optional, not a crash
 		}
 		if !read[field.pos] {
+			continue
+		}
+		if mentions.mentioned(field.fileCtx, field.fieldName) {
 			continue
 		}
 		if field.fileCtx.IsSuppressed(field.line, r.Name()) {

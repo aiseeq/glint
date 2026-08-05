@@ -160,6 +160,23 @@ func maker(x int) func() int {
 	}
 }
 
+// Findings carry the source line of the parameter, like the other rules of
+// the package.
+func TestUnusedParamIncludesCodeLine(t *testing.T) {
+	code := `package main
+
+func greet(name string, unused int) string {
+	return "Hello, " + name
+}`
+	violations := NewUnusedParamRule().AnalyzeFile(parseGoContext(t, "svc.go", code))
+	if len(violations) != 1 {
+		t.Fatalf("got %d findings, want 1", len(violations))
+	}
+	if !strings.Contains(violations[0].Code, "func greet(name string, unused int) string {") {
+		t.Fatalf("violation code %q does not carry the source line", violations[0].Code)
+	}
+}
+
 func TestUnusedParamSkipsTestFiles(t *testing.T) {
 	rule := NewUnusedParamRule()
 

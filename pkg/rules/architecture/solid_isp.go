@@ -47,7 +47,7 @@ func (r *SolidISPRule) Configure(settings map[string]any) error {
 
 // AnalyzeFile checks for ISP violations
 func (r *SolidISPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.HasGoAST() {
+	if !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
 

@@ -131,36 +131,24 @@ func (r *BaseRule) CreateViolation(file string, line int, message string) *core.
 	return core.NewViolation(r.name, r.category, file, line, r.defaultSeverity, message)
 }
 
-// RuleInfo contains metadata about a rule for display purposes
+// RuleInfo contains metadata about a rule for display purposes. Auto-fix
+// availability is not part of it: fixers live in pkg/fix (fix.DefaultRegistry),
+// which the display layer consults directly.
 type RuleInfo struct {
 	Name        string
 	Category    string
 	Description string
 	Severity    core.Severity
-	HasAutoFix  bool
 }
 
 // GetRuleInfo extracts info from a rule
 func GetRuleInfo(r Rule) RuleInfo {
-	info := RuleInfo{
+	return RuleInfo{
 		Name:        r.Name(),
 		Category:    r.Category(),
 		Description: r.Description(),
 		Severity:    r.DefaultSeverity(),
 	}
-
-	// Check if rule supports auto-fix
-	if _, ok := r.(Fixer); ok {
-		info.HasAutoFix = true
-	}
-
-	return info
-}
-
-// Fixer is an optional interface for rules that can auto-fix issues
-type Fixer interface {
-	Rule
-	Fix(ctx *core.FileContext, violation *core.Violation) (*Fix, error)
 }
 
 // StatefulRule is an optional interface for rules that accumulate state across
@@ -195,15 +183,4 @@ func HonorsSuppression(r Rule) bool {
 		return false
 	}
 	return true
-}
-
-// Fix represents an auto-fix for a violation
-type Fix struct {
-	File        string
-	StartLine   int
-	EndLine     int
-	StartColumn int
-	EndColumn   int
-	OldText     string
-	NewText     string
 }

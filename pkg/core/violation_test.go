@@ -62,20 +62,6 @@ func TestViolationListBySeverity(t *testing.T) {
 	assert.Len(t, filtered, 1)
 }
 
-func TestViolationListHasCritical(t *testing.T) {
-	listWithCritical := ViolationList{
-		NewViolation("r1", "c1", "f1.go", 1, SeverityLow, "low"),
-		NewViolation("r2", "c1", "f2.go", 2, SeverityCritical, "critical"),
-	}
-	assert.True(t, listWithCritical.HasCritical())
-
-	listWithoutCritical := ViolationList{
-		NewViolation("r1", "c1", "f1.go", 1, SeverityLow, "low"),
-		NewViolation("r2", "c1", "f2.go", 2, SeverityHigh, "high"),
-	}
-	assert.False(t, listWithoutCritical.HasCritical())
-}
-
 func TestViolationListCountBySeverity(t *testing.T) {
 	list := ViolationList{
 		NewViolation("r1", "c1", "f1.go", 1, SeverityLow, "low"),

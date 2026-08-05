@@ -1,4 +1,4 @@
-.PHONY: build install clean smoke test test-short test-coverage lint fmt check help commit
+.PHONY: build install clean smoke test test-short test-race test-coverage lint fmt fmt-check vet check self-check help commit
 
 # Build variables
 BINARY_NAME=glint
@@ -49,12 +49,6 @@ test-coverage: ## Run tests with coverage report
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report: coverage.html"
-
-test-golden: ## Run golden tests
-	go test -v ./pkg/rules/... -run Golden
-
-test-golden-update: ## Update golden files
-	go test -v ./pkg/rules/... -run Golden -update
 
 ## Quality
 

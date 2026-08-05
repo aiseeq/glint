@@ -464,6 +464,61 @@ func getValue() int {
 	}
 }
 
+// Сравнение с не-nil идентификатором (mode == modeFake) — не проверка ошибки:
+// возврат fakeClient в этой ветке — осознанный выбор режима, а не деградация.
+func TestFallbackReturnRule_EqualityWithIdentIsNotErrorCondition(t *testing.T) {
+	rule := NewFallbackReturnRule()
+	code := `package main
+
+func selectTransport(mode Mode) Transport {
+	if mode == modeFake {
+		return fakeTransport
+	}
+	return realTransport
+}
+`
+	parser := core.NewParser()
+	ctx := core.NewFileContext("client.go", ".", []byte(code), nil)
+	fset, astFile, err := parser.ParseGoFile("client.go", []byte(code))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx.SetGoAST(fset, astFile)
+
+	violations := rule.AnalyzeFile(ctx)
+	if len(violations) != 0 {
+		t.Fatalf("выбор режима — не error-fallback, got: %+v", violations)
+	}
+}
+
+// Regex- и AST-пути находят один и тот же fallback независимо: на строку должна
+// оставаться ровно одна находка.
+func TestFallbackReturnRule_SingleFindingPerLineWithAST(t *testing.T) {
+	rule := NewFallbackReturnRule()
+	code := `package main
+
+func GetProvider() Provider {
+	provider, err := createProvider()
+	if err != nil {
+		return testProvider
+	}
+	return provider
+}
+`
+	parser := core.NewParser()
+	ctx := core.NewFileContext("provider.go", ".", []byte(code), nil)
+	fset, astFile, err := parser.ParseGoFile("provider.go", []byte(code))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx.SetGoAST(fset, astFile)
+
+	violations := rule.AnalyzeFile(ctx)
+	if len(violations) != 1 {
+		t.Fatalf("want ровно 1 находку на строку fallback-возврата, got %d: %+v", len(violations), violations)
+	}
+}
+
 // Репро аудита 2026-07-02 (saga frontend): классический TS-синглтон
 // `return X.instance` внутри getInstance() флаговался как fallback.
 func TestFallbackReturnRule_TSSingletonGetter(t *testing.T) {

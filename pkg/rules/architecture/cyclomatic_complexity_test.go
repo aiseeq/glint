@@ -179,6 +179,29 @@ func TestCyclomaticComplexityConfigure(t *testing.T) {
 	assert.Equal(t, 15, rule.maxComplexity)
 }
 
+func TestCyclomaticComplexityConfigureFloat64(t *testing.T) {
+	rule := NewCyclomaticComplexityRule()
+
+	// YAML parsers may deliver numbers as float64
+	err := rule.Configure(map[string]any{"max_complexity": float64(15)})
+	assert.NoError(t, err)
+	assert.Equal(t, 15, rule.maxComplexity)
+}
+
+func TestCyclomaticComplexityConfigureReset(t *testing.T) {
+	rule := NewCyclomaticComplexityRule()
+
+	err := rule.Configure(map[string]any{"max_complexity": 15})
+	assert.NoError(t, err)
+	assert.Equal(t, 15, rule.maxComplexity)
+
+	// Re-configuring without the key must reset to the default,
+	// not keep the value from a previously analyzed config
+	err = rule.Configure(map[string]any{})
+	assert.NoError(t, err)
+	assert.Equal(t, defaultMaxComplexity, rule.maxComplexity)
+}
+
 func TestCyclomaticComplexityNoAST(t *testing.T) {
 	rule := NewCyclomaticComplexityRule()
 

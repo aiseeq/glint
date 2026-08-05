@@ -89,25 +89,36 @@ func (r *HTTPBodyCloseRule) checkFunction(
 	// Check for defer resp.Body.Close() or resp.Body.Close()
 	// Note: we DO need to check inside FuncLit because defer func() { resp.Body.Close() }() is common
 	closedVars := make(map[string]bool)
+	// resp, покидающий функцию — return resp или аргумент любого вызова, — передан
+	// по ответственности: закрывать его будет получатель (семантика bodyclose).
+	escapedVars := make(map[string]bool)
 
 	walkReachableHTTPBodyStatements(body.List, func(n ast.Node) {
 		ast.Inspect(n, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
+			switch node := n.(type) {
+			case *ast.CallExpr:
+				if varName := r.getBodyCloseVar(node); varName != "" {
+					closedVars[varName] = true
+				}
+				for _, arg := range node.Args {
+					if ident, ok := ast.Unparen(arg).(*ast.Ident); ok {
+						escapedVars[ident.Name] = true
+					}
+				}
+			case *ast.ReturnStmt:
+				for _, result := range node.Results {
+					if ident, ok := ast.Unparen(result).(*ast.Ident); ok {
+						escapedVars[ident.Name] = true
+					}
+				}
 			}
-
-			if varName := r.getBodyCloseVar(call); varName != "" {
-				closedVars[varName] = true
-			}
-
 			return true
 		})
 	})
 
 	// Report unclosed responses
 	for varName, line := range responseVars {
-		if !closedVars[varName] {
+		if !closedVars[varName] && !escapedVars[varName] {
 			v := r.CreateViolation(ctx.RelPath, line, "HTTP response body not closed - resource leak")
 			v.WithCode(ctx.GetLine(line))
 			v.WithSuggestion("Add defer " + varName + ".Body.Close() after nil check")

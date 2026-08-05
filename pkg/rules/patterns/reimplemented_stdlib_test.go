@@ -71,7 +71,9 @@ func contains(items []string, target string) bool {
 	assert.Contains(t, violations[0].Message, "slices.Contains")
 }
 
-func TestReimplementedStdlibReportsAbs(t *testing.T) {
+// Go has no built-in abs: for ints the advice is one shared helper instead of
+// copies, and the message must not claim a built-in that does not exist.
+func TestReimplementedStdlibReportsIntAbs(t *testing.T) {
 	violations := analyzeStdlibCopies(t, `package helpers
 
 func abs(x int) int {
@@ -83,7 +85,24 @@ func abs(x int) int {
 `)
 
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "abs")
+	assert.Contains(t, violations[0].Message, "shared abs helper")
+	assert.NotContains(t, violations[0].Message, "the built-in abs")
+}
+
+func TestReimplementedStdlibReportsFloatAbs(t *testing.T) {
+	violations := analyzeStdlibCopies(t, `package helpers
+
+func absFloat(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "math.Abs")
+	assert.NotContains(t, violations[0].Message, "built-in")
 }
 
 func TestReimplementedStdlibReportsMin(t *testing.T) {
@@ -113,6 +132,43 @@ func reverse(items []string) {
 
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "slices.Reverse")
+}
+
+// Ranging over a map is indistinguishable in shape from ranging over a slice,
+// but slices.Contains cannot search a map — the advice would be unactionable.
+// Repro: linear search over map values must stay silent.
+func TestReimplementedStdlibIgnoresMapValueSearch(t *testing.T) {
+	violations := analyzeStdlibCopies(t, `package helpers
+
+func hasValue(m map[string]string, target string) bool {
+	for _, v := range m {
+		if v == target {
+			return true
+		}
+	}
+	return false
+}
+`)
+
+	assert.Empty(t, violations, "slices.Contains is no replacement for a map scan: %v", violations)
+}
+
+// The `i = i / 10` spelling of the division must count the same as `i /= 10`.
+func TestReimplementedStdlibReportsItoaWithPlainDivision(t *testing.T) {
+	violations := analyzeStdlibCopies(t, `package helpers
+
+func itoa(i int) string {
+	s := ""
+	for i > 0 {
+		s = string(rune('0'+i%10)) + s
+		i = i / 10
+	}
+	return s
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "strconv.Itoa")
 }
 
 // A search that returns the position rather than a yes/no answer is a different

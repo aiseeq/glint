@@ -324,14 +324,21 @@ func (r *OrphanedInterfaceRule) findUsages(ctx *core.FileContext, interfaces []*
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		switch node := n.(type) {
-		// Function parameters and return types
+		// Function parameters, return types and generic constraints
 		case *ast.FuncType:
+			r.checkFieldList(node.TypeParams, interfaceNames, usages)
 			r.checkFieldList(node.Params, interfaceNames, usages)
 			r.checkFieldList(node.Results, interfaceNames, usages)
 
 		// Struct fields
 		case *ast.StructType:
 			r.checkFieldList(node.Fields, interfaceNames, usages)
+
+		// Embedding into another interface: type B interface { A }.
+		// Named methods carry a FuncType and are ignored by checkExpr, so only
+		// embedded interface identifiers register as usages here.
+		case *ast.InterfaceType:
+			r.checkFieldList(node.Methods, interfaceNames, usages)
 
 		// Type assertions: x.(InterfaceName)
 		case *ast.TypeAssertExpr:

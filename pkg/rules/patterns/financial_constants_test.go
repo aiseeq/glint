@@ -95,6 +95,19 @@ func processPayment() decimal.Decimal {
 			expected: 1,
 		},
 		{
+			name: "package-level var after financial function is not financial context",
+			code: `package main
+
+import "github.com/shopspring/decimal"
+
+func getWithdrawalFee() decimal.Decimal {
+	return decimal.NewFromInt(0)
+}
+
+var scaleFactor = decimal.NewFromInt(100)`,
+			expected: 0,
+		},
+		{
 			name: "allows large non-fee values outside financial context",
 			code: `package main
 

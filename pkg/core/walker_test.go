@@ -10,12 +10,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWalkerVisitFilePropagatesFilesystemError(t *testing.T) {
+func TestWalkerVisitFileReportsFilesystemErrorAndContinues(t *testing.T) {
 	walker := NewWalker(t.TempDir(), DefaultConfig())
 	walkErr := errors.New("permission denied")
+	walkErrors := make(chan error, 1)
 
-	err := walker.visitPath(make(chan string, 1), "blocked", nil, walkErr)
-	require.ErrorIs(t, err, walkErr)
+	// Returning the error would abort the whole filepath.Walk; it must go to
+	// the error channel instead so the rest of the tree is still discovered.
+	err := walker.visitPath(make(chan string, 1), walkErrors, "blocked", nil, walkErr)
+	require.NoError(t, err)
+	require.Len(t, walkErrors, 1)
+	require.ErrorIs(t, <-walkErrors, walkErr)
+}
+
+func TestWalkerContinuesPastUnreadableDir(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	tmpDir := t.TempDir()
+	blocked := filepath.Join(tmpDir, "aaa")
+	require.NoError(t, os.MkdirAll(blocked, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(blocked, "hidden.go"), []byte("package aaa\n"), 0644))
+	require.NoError(t, os.Chmod(blocked, 0))
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0755) })
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "zzz"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "zzz", "z.go"), []byte("package zzz\n"), 0644))
+
+	contexts, errs := NewWalker(tmpDir, DefaultConfig()).WalkSync()
+
+	require.Len(t, errs, 1, "the unreadable directory must surface as an error")
+	require.Len(t, contexts, 1, "files after the unreadable directory must still be discovered")
+	assert.Equal(t, filepath.Join("zzz", "z.go"), contexts[0].RelPath)
 }
 
 func TestWalkerReportsGoParseError(t *testing.T) {

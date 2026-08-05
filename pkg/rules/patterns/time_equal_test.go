@@ -90,6 +90,23 @@ func example(e1, e2 Event) bool {
 			expectMatch: true,
 		},
 		{
+			name: "int64 Timestamp field comparison is not a time comparison",
+			code: `package main
+
+import "time"
+
+type Event struct {
+	Timestamp int64
+}
+
+func example(a, b Event) bool {
+	_ = time.Now()
+	return a.Timestamp == b.Timestamp
+}
+`,
+			expectMatch: false,
+		},
+		{
 			name: "string Date field comparison",
 			code: `package main
 

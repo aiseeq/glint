@@ -127,6 +127,32 @@ func (s *Service) Complete(ctx context.Context) error {
 	assert.Empty(t, violations)
 }
 
+// Хелпер, достижимый и из транзакции, и напрямую, транзакцией не покрыт: голый
+// вызов исполняет обе записи без неё. Исключение — только для функций, достижимых
+// ТОЛЬКО из транзакции.
+func TestMultiWriteNoTransactionRule_HelperAlsoCalledOutsideTransaction(t *testing.T) {
+	violations := analyzeStoreModule(t, `
+func (s *Service) writePair(ctx context.Context) error {
+	if err := s.repo.UpdateThing(ctx); err != nil {
+		return err
+	}
+	return s.repo.CreateThing(ctx)
+}
+
+func (s *Service) Complete(ctx context.Context) error {
+	return s.repo.RunInTx(ctx, func(ctx context.Context) error {
+		return s.writePair(ctx)
+	})
+}
+
+func (s *Service) Fast(ctx context.Context) error {
+	return s.writePair(ctx)
+}
+`)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "writePair")
+}
+
 // Ветка с return исключает то, что идёт после неё: выполняется ровно одна запись.
 func TestMultiWriteNoTransactionRule_ExclusiveBranches(t *testing.T) {
 	violations := analyzeStoreModule(t, `

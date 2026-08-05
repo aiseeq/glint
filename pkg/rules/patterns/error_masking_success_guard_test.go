@@ -196,6 +196,43 @@ func normalizeHost(host string) string {
 	assert.Empty(t, found, "уточнение готового значения нарушением не является: %v", found)
 }
 
+// Параметр приходит со значением от вызывающего: guard лишь уточняет его, провал
+// означает «оставить как передали». hasValueBefore обязан видеть fn.Type.Params,
+// а не только присваивания в теле.
+func TestErrorMasking_ParamRefinementIsFine(t *testing.T) {
+	found := successGuardViolations(t, `package dashboard
+
+import "strconv"
+
+func ChooseLimit(raw string, limit int) int {
+	if v, err := strconv.Atoi(raw); err == nil {
+		limit = v
+	}
+	return limit
+}
+`)
+	assert.Empty(t, found, "параметр уже имеет значение от вызывающего: %v", found)
+}
+
+// Receiver — тот же случай, что и параметр: значение приходит от вызывающего.
+func TestErrorMasking_ReceiverRefinementIsFine(t *testing.T) {
+	found := successGuardViolations(t, `package dashboard
+
+import "strconv"
+
+type cache struct {
+	limit int
+}
+
+func (c *cache) refresh(raw string) {
+	if v, err := strconv.Atoi(raw); err == nil {
+		c.limit = v
+	}
+}
+`)
+	assert.Empty(t, found, "receiver уже имеет значение от вызывающего: %v", found)
+}
+
 // Накопление в срез: при провале элемент молча исчезает из результата, сколько бы
 // значений там уже ни лежало.
 func TestErrorMasking_AppendUnderGuardIsFlagged(t *testing.T) {

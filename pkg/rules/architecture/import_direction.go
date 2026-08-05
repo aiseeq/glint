@@ -36,8 +36,8 @@ func (r *ImportDirectionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 		return nil
 	}
 
-	currentLayer := r.determineLayer(ctx.RelPath)
-	if currentLayer == unknownImportLayer {
+	currentLayer := determineLayerFromPath(ctx.RelPath)
+	if currentLayer == UnknownLayer {
 		return nil
 	}
 
@@ -51,7 +51,7 @@ func (r *ImportDirectionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 		importPath := strings.Trim(imp.Path.Value, `"`)
 		importLayer := r.determineLayerFromImport(importPath)
 
-		if importLayer == unknownImportLayer {
+		if importLayer == UnknownLayer {
 			continue
 		}
 
@@ -64,67 +64,42 @@ func (r *ImportDirectionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	return violations
 }
 
-type importLayerType int
-
-const (
-	unknownImportLayer importLayerType = iota
-	handlerImportLayer
-	serviceImportLayer
-	repositoryImportLayer
-)
-
-func (r *ImportDirectionRule) determineLayer(path string) importLayerType {
-	lowerPath := strings.ToLower(path)
-
-	if strings.Contains(lowerPath, "handler") || strings.Contains(lowerPath, "/routing/") {
-		return handlerImportLayer
-	}
-	if strings.Contains(lowerPath, "service") {
-		return serviceImportLayer
-	}
-	if strings.Contains(lowerPath, "repository") || strings.Contains(lowerPath, "repo") {
-		return repositoryImportLayer
-	}
-
-	return unknownImportLayer
-}
-
-func (r *ImportDirectionRule) determineLayerFromImport(importPath string) importLayerType {
+func (r *ImportDirectionRule) determineLayerFromImport(importPath string) LayerType {
 	lowerPath := strings.ToLower(importPath)
 
 	if strings.Contains(lowerPath, "/handlers") || strings.Contains(lowerPath, "/handler/") ||
 		strings.Contains(lowerPath, "/routing/") {
-		return handlerImportLayer
+		return HandlerLayer
 	}
 	if strings.Contains(lowerPath, "/services") || strings.Contains(lowerPath, "/service/") {
-		return serviceImportLayer
+		return ServiceLayer
 	}
 	if strings.Contains(lowerPath, "/repository") || strings.Contains(lowerPath, "/repo/") ||
 		strings.Contains(lowerPath, "/repositories") {
-		return repositoryImportLayer
+		return RepositoryLayer
 	}
 
-	return unknownImportLayer
+	return UnknownLayer
 }
 
 func (r *ImportDirectionRule) checkImportDirection(
 	ctx *core.FileContext,
 	imp *ast.ImportSpec,
-	currentLayer, importLayer importLayerType,
+	currentLayer, importLayer LayerType,
 	importPath string,
 ) *core.Violation {
 	// Service importing from Handler (wrong direction)
-	if currentLayer == serviceImportLayer && importLayer == handlerImportLayer {
+	if currentLayer == ServiceLayer && importLayer == HandlerLayer {
 		return r.createViolation(ctx, imp, "Service", "Handler", importPath)
 	}
 
 	// Repository importing from Service (wrong direction)
-	if currentLayer == repositoryImportLayer && importLayer == serviceImportLayer {
+	if currentLayer == RepositoryLayer && importLayer == ServiceLayer {
 		return r.createViolation(ctx, imp, "Repository", "Service", importPath)
 	}
 
 	// Repository importing from Handler (wrong direction - skipping a layer)
-	if currentLayer == repositoryImportLayer && importLayer == handlerImportLayer {
+	if currentLayer == RepositoryLayer && importLayer == HandlerLayer {
 		return r.createViolation(ctx, imp, "Repository", "Handler", importPath)
 	}
 

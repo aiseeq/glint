@@ -161,7 +161,29 @@ func (e *Engine) GenerateFixes(violations []*core.Violation, contexts map[string
 		}
 	}
 
-	return fixes
+	return dedupeFixes(fixes)
+}
+
+// dedupeFixes drops textually identical edits. Several violations in one file
+// legitimately generate the same import edit; applying it twice used to leave
+// the file uncompilable.
+func dedupeFixes(fixes []*Fix) []*Fix {
+	type editKey struct {
+		file               string
+		startLine, endLine int
+		oldText, newText   string
+	}
+	seen := make(map[editKey]bool, len(fixes))
+	deduped := fixes[:0]
+	for _, fix := range fixes {
+		key := editKey{fix.File, fix.StartLine, fix.EndLine, fix.OldText, fix.NewText}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		deduped = append(deduped, fix)
+	}
+	return deduped
 }
 
 // ApplyFixes applies fixes to files
@@ -212,55 +234,23 @@ func (e *Engine) applyToFile(file string, fixes []*Fix) Result {
 		return sortedFixes[i].StartLine > sortedFixes[j].StartLine
 	})
 
-	// Apply each fix
+	// Apply each fix. A fix that does not match the file anymore is collected
+	// and reported: silently dropping it made "Applied N fixes" unverifiable.
+	var unapplied []*Fix
 	for _, fix := range sortedFixes {
-		if fix.StartLine < 1 || fix.StartLine > len(lines) {
-			continue
-		}
-
-		// Handle multi-line fixes
-		if fix.EndLine > fix.StartLine && fix.EndLine <= len(lines) {
-			startIdx := fix.StartLine - 1
-			endIdx := fix.EndLine - 1
-
-			// Get the old text from file
-			oldLines := lines[startIdx : endIdx+1]
-			oldText := strings.Join(oldLines, "\n")
-
-			// Verify it matches (or at least starts the same)
-			if oldText == fix.OldText || strings.HasPrefix(oldText, strings.Split(fix.OldText, "\n")[0]) {
-				// Replace the lines
-				newLines := strings.Split(fix.NewText, "\n")
-				// Build new lines slice: before + new + after
-				newSlice := append([]string{}, lines[:startIdx]...)
-				newSlice = append(newSlice, newLines...)
-				newSlice = append(newSlice, lines[endIdx+1:]...)
-				lines = newSlice
-				result.FixesApplied++
-			}
-			continue
-		}
-
-		lineIdx := fix.StartLine - 1
-		line := lines[lineIdx]
-
-		// Apply the fix
-		if fix.StartCol > 0 && fix.EndCol > 0 {
-			// Column-specific replacement
-			startIdx := fix.StartCol - 1
-			endIdx := fix.EndCol - 1
-			if startIdx < len(line) && endIdx <= len(line) {
-				newLine := line[:startIdx] + fix.NewText + line[endIdx:]
-				lines[lineIdx] = newLine
-				result.FixesApplied++
-			}
+		if e.applyFix(fix, &lines) {
+			result.FixesApplied++
 		} else {
-			// Full text replacement within line
-			if strings.Contains(line, fix.OldText) {
-				lines[lineIdx] = strings.Replace(line, fix.OldText, fix.NewText, 1)
-				result.FixesApplied++
-			}
+			unapplied = append(unapplied, fix)
 		}
+	}
+	if len(unapplied) > 0 {
+		names := make([]string, 0, len(unapplied))
+		for _, fix := range unapplied {
+			names = append(names, fmt.Sprintf("%s (line %d)", fix.RuleName, fix.StartLine))
+		}
+		result.Error = fmt.Errorf("%d fix(es) no longer match the file and were not applied: %s",
+			len(unapplied), strings.Join(names, ", "))
 	}
 
 	if e.dryRun {
@@ -275,6 +265,56 @@ func (e *Engine) applyToFile(file string, fixes []*Fix) Result {
 	}
 
 	return result
+}
+
+// applyFix applies one fix to the line slice and reports whether it matched.
+func (e *Engine) applyFix(fix *Fix, lines *[]string) bool {
+	if fix.StartLine < 1 || fix.StartLine > len(*lines) {
+		return false
+	}
+
+	// Multi-line replacement: only an exact match may be replaced. Matching
+	// just the first line allowed overwriting a range another fix had already
+	// changed.
+	if fix.EndLine > fix.StartLine {
+		if fix.EndLine > len(*lines) {
+			return false
+		}
+		startIdx := fix.StartLine - 1
+		endIdx := fix.EndLine - 1
+		if strings.Join((*lines)[startIdx:endIdx+1], "\n") != fix.OldText {
+			return false
+		}
+		newSlice := append([]string{}, (*lines)[:startIdx]...)
+		newSlice = append(newSlice, strings.Split(fix.NewText, "\n")...)
+		newSlice = append(newSlice, (*lines)[endIdx+1:]...)
+		*lines = newSlice
+		return true
+	}
+
+	lineIdx := fix.StartLine - 1
+	line := (*lines)[lineIdx]
+
+	if fix.StartCol > 0 && fix.EndCol > 0 {
+		// Column-specific replacement, verified against OldText when present
+		startIdx := fix.StartCol - 1
+		endIdx := fix.EndCol - 1
+		if startIdx >= len(line) || endIdx > len(line) {
+			return false
+		}
+		if fix.OldText != "" && line[startIdx:endIdx] != fix.OldText {
+			return false
+		}
+		(*lines)[lineIdx] = line[:startIdx] + fix.NewText + line[endIdx:]
+		return true
+	}
+
+	// Full text replacement within line
+	if !strings.Contains(line, fix.OldText) {
+		return false
+	}
+	(*lines)[lineIdx] = strings.Replace(line, fix.OldText, fix.NewText, 1)
+	return true
 }
 
 // Preview formats fixes for display

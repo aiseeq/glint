@@ -166,12 +166,19 @@ func nolintListContains(comment, ruleName string) bool {
 		return false
 	}
 	list := comment[idx+len(prefix):]
-	if fields := strings.Fields(list); len(fields) > 0 {
-		list = fields[0]
-	}
-	for _, name := range strings.Split(list, ",") {
-		if strings.TrimSpace(name) == ruleName {
+	// The list is comma-separated and may have spaces after the commas
+	// (nolint:a, b). Prose after the last rule name ends the list: in
+	// "nolint:a, b justified because" only "a" and "b" are rule names.
+	for _, segment := range strings.Split(list, ",") {
+		fields := strings.Fields(segment)
+		if len(fields) == 0 {
+			return false
+		}
+		if fields[0] == ruleName {
 			return true
+		}
+		if len(fields) > 1 {
+			return false
 		}
 	}
 	return false
@@ -210,8 +217,10 @@ func commentPart(line string) string {
 				return line[i:]
 			}
 		case '*':
-			// Continuation line of a block comment ("  * text").
-			if strings.TrimSpace(line[:i]) == "" {
+			// Continuation line of a block comment ("  * text"). A name char
+			// right after the star is a pointer dereference (*target = ...),
+			// not a comment.
+			if strings.TrimSpace(line[:i]) == "" && !isRuleNameChar(line[i+1]) {
 				return line[i:]
 			}
 		}

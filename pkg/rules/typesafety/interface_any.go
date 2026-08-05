@@ -16,7 +16,12 @@ func init() {
 // InterfaceAnyRule detects interface{} usage that should be replaced with 'any'
 type InterfaceAnyRule struct {
 	*rules.BaseRule
-	patterns map[string]*regexp.Regexp
+	patterns []interfaceAnyPattern
+}
+
+type interfaceAnyPattern struct {
+	name  string
+	regex *regexp.Regexp
 }
 
 // NewInterfaceAnyRule creates the rule
@@ -28,10 +33,12 @@ func NewInterfaceAnyRule() *InterfaceAnyRule {
 			"Detects interface{} that should be replaced with 'any' (Go 1.18+)",
 			core.SeverityMedium,
 		),
-		patterns: map[string]*regexp.Regexp{
-			"interface{}":            regexp.MustCompile(`interface\{\}`),
-			"map[string]interface{}": regexp.MustCompile(`map\[string\]interface\{\}`),
-			"[]interface{}":          regexp.MustCompile(`\[\]interface\{\}`),
+		// Most specific first: the reported message names the replacement,
+		// so map[string]interface{} must not be reported as a bare interface{}
+		patterns: []interfaceAnyPattern{
+			{"map[string]interface{}", regexp.MustCompile(`map\[string\]interface\{\}`)},
+			{"[]interface{}", regexp.MustCompile(`\[\]interface\{\}`)},
+			{"interface{}", regexp.MustCompile(`interface\{\}`)},
 		},
 	}
 }
@@ -67,18 +74,18 @@ func (r *InterfaceAnyRule) checkLine(ctx *core.FileContext, lineNum int, line st
 	}
 
 	// Check each pattern
-	for patternName, pattern := range r.patterns {
-		if !pattern.MatchString(line) {
+	for _, pattern := range r.patterns {
+		if !pattern.regex.MatchString(line) {
 			continue
 		}
 
-		if r.shouldSkipMatch(line, patternName, ctx) {
+		if r.shouldSkipMatch(line, pattern.name, ctx) {
 			continue
 		}
 
-		v := r.CreateViolation(ctx.RelPath, lineNum+1, r.getMessage(patternName))
+		v := r.CreateViolation(ctx.RelPath, lineNum+1, r.getMessage(pattern.name))
 		v.WithCode(trimmed)
-		v.WithSuggestion(r.getSuggestion(patternName))
+		v.WithSuggestion(r.getSuggestion(pattern.name))
 		return v // One violation per line
 	}
 
@@ -106,27 +113,7 @@ func (r *InterfaceAnyRule) isAllowedException(line string, ctx *core.FileContext
 	}
 
 	// JSON unmarshaling may require interface{}
-	if strings.Contains(line, "json.Unmarshal") && strings.Contains(line, "interface{}") {
-		return true
-	}
-
-	// Check if 'any' is already used (Go 1.18+ replacement)
-	return isUsingAny(line)
-}
-
-func isUsingAny(line string) bool {
-	anyPatterns := []string{
-		" any ", " any,", " any)", " any}",
-		"]any ", "]any,", "]any)", "]any}",
-		" any`", "]any`", "\tany ",
-	}
-
-	for _, p := range anyPatterns {
-		if strings.Contains(line, p) {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(line, "json.Unmarshal") && strings.Contains(line, "interface{}")
 }
 
 func getMatchString(patternName string) string {

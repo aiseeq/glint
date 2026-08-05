@@ -62,22 +62,22 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 			},
 			{
 				name:    "password",
-				regex:   regexp.MustCompile(`(?i)(password|passwd|pwd)\s*[:=]\s*["'\x60][^"'\x60]{4,}["'\x60]`),
+				regex:   regexp.MustCompile(`(?i)(password|passwd|pwd)\s*(?::=|[:=])\s*["'\x60][^"'\x60]{4,}["'\x60]`),
 				message: "Hardcoded password detected",
 			},
 			{
 				name:    "api_key",
-				regex:   regexp.MustCompile(`(?i)\b(api[_-]?key|apikey)\s*[:=]\s*["'\x60][A-Za-z0-9_\-]{16,}["'\x60]`),
+				regex:   regexp.MustCompile(`(?i)\b(api[_-]?key|apikey)\s*(?::=|[:=])\s*["'\x60][A-Za-z0-9_\-]{16,}["'\x60]`),
 				message: "Hardcoded API key detected",
 			},
 			{
 				name:    "secret",
-				regex:   regexp.MustCompile(`(?i)(secret|private[_-]?key)\s*[:=]\s*["'\x60][^"'\x60]{8,}["'\x60]`),
+				regex:   regexp.MustCompile(`(?i)(secret|private[_-]?key)\s*(?::=|[:=])\s*["'\x60][^"'\x60]{8,}["'\x60]`),
 				message: "Hardcoded secret detected",
 			},
 			{
 				name:    "token",
-				regex:   regexp.MustCompile(`(?i)(auth[_-]?token|access[_-]?token|bearer)\s*[:=]\s*["'\x60][A-Za-z0-9_\-\.]{20,}["'\x60]`),
+				regex:   regexp.MustCompile(`(?i)(auth[_-]?token|access[_-]?token|bearer)\s*(?::=|[:=])\s*["'\x60][A-Za-z0-9_\-\.]{20,}["'\x60]`),
 				message: "Hardcoded token detected",
 			},
 			{

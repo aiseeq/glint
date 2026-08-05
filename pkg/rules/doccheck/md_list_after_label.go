@@ -81,6 +81,12 @@ func (r *MdListAfterLabelRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			continue
 		}
 
+		// A list item ending with a colon introduces a nested list; that is
+		// valid Markdown and needs no blank line
+		if r.listPattern.MatchString(line) {
+			continue
+		}
+
 		// Check if current line is a label (bold or plain text ending with colon)
 		isLabel := r.boldLabelPattern.MatchString(line) || r.plainLabelPattern.MatchString(line)
 

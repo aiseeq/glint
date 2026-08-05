@@ -114,16 +114,14 @@ Individual findings can also be silenced at the source with `//nolint:<rule>` or
 
 ### Current Categories
 
-| Category | Rules | Description |
-|----------|-------|-------------|
-| architecture | 7 | cyclomatic-complexity, deep-nesting, import-direction, layer-violation, long-function, solid-isp, solid-srp |
-| deadcode | 5 | deprecated-comment, nil-return-stub, stub-method, unused-param, unused-symbol |
-| documentation | 5 | doc-links, doc-missing, md-frontmatter, md-line-break, md-list-after-label |
-| duplication | 2 | cross-file-duplicate, duplicate-block |
-| naming | 1 | naming-convention |
-| patterns | 65 | anon-interface-degradation, append-assign, bool-compare, constructor-nil-return, constructor-swallows-nil-dep, context-background, context-first, defer-in-loop, deprecated-ioutil, deprecated-nginx-http2-listen, deterministic-uuid, empty-block, empty-struct-return, error-length-check, error-masked-as-false-bool, error-masking, error-string, error-string-compare, error-wrap, fallback-return, financial-constants, financial-decimal-float, financial-fp-rounding, financial-json-float, financial-rounded-delta, frontend-env-fallback, frontend-money-arithmetic, frontend-silent-catch, go-modern, http-body-close, idempotency-check-then-create, ignored-error, legacy-comment-marker, legacy-identifier, log-and-return-zero, magic-number, masked-error-in-or-condition, migration-duplicate-version, mutex-lock, nil-di, nil-slice, non-atomic-status-history, non-canonical-logger, nullable-object-call, orphaned-interface, pagination-boundary-truncation, provider-command-before-intent-persist, provider-command-retry, query-in-loop, range-val-pointer, redundant-compatibility, return-nil-error, scattered-construction, shadow-variable, silent-config-error, silent-error-handling, sql-rows-close, string-concat, tech-debt, terminal-after-failed-checkpoint, test-external-service, time-equal, todo-comment, tombstone-comment, unbounded-response-read |
-| security | 3 | hardcoded-secret, sensitive-query-param, sql-injection |
-| typesafety | 3 | any-in-public-contract, interface-any, type-assertion |
+Rules are organized into 8 categories: architecture, deadcode, documentation,
+duplication, naming, patterns, security, typesafety. The authoritative,
+always-current list — names, severities and auto-fix availability — comes from
+the tool itself:
+
+```bash
+glint rules
+```
 
 ### Key Rules
 
@@ -168,7 +166,6 @@ Always add the reason after the marker. Policy rules may opt out of suppression 
 
 ### Known Limitations
 
-- **unused-symbol**: Analyzes single files only, not entire packages. May report false positives for symbols used in other files of the same package. Best for main packages or single-file packages.
 - **go-modern**: May suggest iterator patterns for external library methods (e.g., `router.Walk`) that cannot be changed.
 - **doc-links**: May flag `localhost` or `example.com` in code comments used as format examples.
 
@@ -239,11 +236,7 @@ glint fix --dry-run=false --force
 
 ### Available Fixers
 
-| Rule | Fix | Description |
-|------|-----|-------------|
-| interface-any | `interface{}` → `any` | Go 1.18+ type alias |
-| deprecated-ioutil | `ioutil.*` → `io/os.*` | Go 1.16+ deprecation |
-| bool-compare | `x == true` → `x` | Simplify boolean comparisons |
+Rules with an auto-fix are marked `(auto-fix)` in `glint rules` output.
 
 ### Safety
 
@@ -271,8 +264,6 @@ glint/
 │   ├── fix/            # Auto-fix implementations
 │   ├── rules/          # Rule implementations by category
 │   └── output/         # Output formatters
-├── configs/            # Built-in presets
-└── testdata/           # Test fixtures and golden files
 ```
 
 ## Contributing

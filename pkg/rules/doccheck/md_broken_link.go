@@ -74,7 +74,13 @@ func (r *MdBrokenLinkRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 			if !ok {
 				continue
 			}
-			if _, err := os.Stat(filepath.Join(docDir, target)); err == nil {
+			// A root-relative target resolves from the repository root, as
+			// GitHub renders it; everything else from the document's directory.
+			base := docDir
+			if strings.HasPrefix(target, "/") {
+				base = ctx.ProjectRoot
+			}
+			if _, err := os.Stat(filepath.Join(base, target)); err == nil {
 				continue
 			}
 			violations = append(violations, r.report(ctx, i+1, target))

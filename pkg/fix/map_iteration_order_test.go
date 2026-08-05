@@ -82,25 +82,6 @@ func total(counts map[string]int) int {
 	assert.Empty(t, NewMapIterationOrderFixer().GenerateFix(ctx, mapOrderViolation(5)))
 }
 
-// A file without a grouped import block would need restructuring, which gofmt
-// does better than a line edit.
-func TestMapIterationOrderFixerSkipsImportWhenNoBlock(t *testing.T) {
-	ctx := fixerContext(t, `package rules
-
-func names(sites map[string]int) []string {
-	var out []string
-	for name := range sites {
-		out = append(out, name)
-	}
-	return out
-}
-`)
-
-	fixes := NewMapIterationOrderFixer().GenerateFix(ctx, mapOrderViolation(5))
-	require.Len(t, fixes, 1)
-	assert.Contains(t, fixes[0].NewText, "slices.Sorted")
-}
-
 func TestMapIterationOrderFixerMetadata(t *testing.T) {
 	fixer := NewMapIterationOrderFixer()
 	assert.Equal(t, "map-iteration-order", fixer.RuleName())

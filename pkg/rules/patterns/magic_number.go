@@ -1,8 +1,10 @@
 package patterns
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
+	"math"
 	"strconv"
 	"strings"
 
@@ -36,10 +38,23 @@ func NewMagicNumberRule() *MagicNumberRule {
 // Configure allows setting rule options
 func (r *MagicNumberRule) Configure(settings map[string]any) error {
 	if v, ok := settings["min_value"]; ok {
-		if minVal, ok := v.(int); ok {
-			r.minValue = minVal
+		// YAML/JSON decoders deliver integers as float64; anything else (or a
+		// fractional value) is ambiguous input and must be an error, not a
+		// silent fallback to the default.
+		switch val := v.(type) {
+		case int:
+		case float64:
+			if val != math.Trunc(val) {
+				return fmt.Errorf("magic-number: min_value must be an integer, got %v", val)
+			}
+		default:
+			return fmt.Errorf("magic-number: min_value must be an integer, got %T (%v)", v, v)
 		}
 	}
+	if err := r.BaseRule.Configure(settings); err != nil {
+		return err
+	}
+	r.minValue = r.GetIntSetting("min_value", r.minValue)
 	return nil
 }
 
@@ -83,8 +98,12 @@ func (r *MagicNumberRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 	var violations []*core.Violation
 
+	// One pass over the file collects every literal's context up front; checking
+	// each literal is then O(1) instead of five full traversals per literal.
+	contexts := collectLitContexts(ctx.GoAST)
+
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		if v := r.checkLiteral(ctx, n); v != nil {
+		if v := r.checkLiteral(ctx, n, contexts); v != nil {
 			violations = append(violations, v)
 		}
 		return true
@@ -93,7 +112,7 @@ func (r *MagicNumberRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	return violations
 }
 
-func (r *MagicNumberRule) checkLiteral(ctx *core.FileContext, n ast.Node) *core.Violation {
+func (r *MagicNumberRule) checkLiteral(ctx *core.FileContext, n ast.Node, contexts *litContexts) *core.Violation {
 	lit, ok := n.(*ast.BasicLit)
 	if !ok || lit.Kind != token.INT {
 		return nil
@@ -117,7 +136,7 @@ func (r *MagicNumberRule) checkLiteral(ctx *core.FileContext, n ast.Node) *core.
 		return r.invalidMagicNumberLiteral(ctx, lit, err)
 	}
 
-	if r.shouldSkipValue(ctx, lit, value) {
+	if r.shouldSkipValue(contexts, lit, value) {
 		return nil
 	}
 
@@ -136,44 +155,104 @@ func (r *MagicNumberRule) invalidMagicNumberLiteral(ctx *core.FileContext, lit *
 	return v
 }
 
-func (r *MagicNumberRule) shouldSkipValue(ctx *core.FileContext, lit *ast.BasicLit, value int64) bool {
+func (r *MagicNumberRule) shouldSkipValue(contexts *litContexts, lit *ast.BasicLit, value int64) bool {
 	if value >= 0 && value < int64(r.minValue) {
 		return true
 	}
-	if r.isInConstDecl(ctx.GoAST, lit) {
+	if contexts.inConstDecl(lit) {
 		return true
 	}
 	if r.isAcceptableValue(value) {
 		return true
 	}
-	if r.isArrayContext(ctx.GoAST, lit) {
-		return true
-	}
-	if r.isTimeDurationContext(ctx.GoAST, lit) {
-		return true
-	}
-	if r.isComparisonContext(ctx.GoAST, lit) {
-		return true
-	}
-	return r.isVarDeclContext(ctx.GoAST, lit)
+	return contexts.array[lit] || contexts.timeDuration[lit] ||
+		contexts.comparison[lit] || contexts.varDecl[lit]
 }
 
-func (r *MagicNumberRule) isInConstDecl(file *ast.File, lit *ast.BasicLit) bool {
-	found := false
-	ast.Inspect(file, func(n ast.Node) bool {
-		genDecl, ok := n.(*ast.GenDecl)
-		if !ok || genDecl.Tok != token.CONST {
-			return true
-		}
+// litContexts records, per integer literal, the syntactic contexts in which the
+// literal is not a magic number. Collected once per file in a single traversal.
+type litContexts struct {
+	constRanges  [][2]token.Pos
+	array        map[*ast.BasicLit]bool // array length, index, slice bound
+	timeDuration map[*ast.BasicLit]bool // multiplied by time.Something
+	comparison   map[*ast.BasicLit]bool // operand of a comparison
+	varDecl      map[*ast.BasicLit]bool // value of a named var declaration
+}
 
-		// Check if the literal is within this const declaration
-		if lit.Pos() >= genDecl.Pos() && lit.End() <= genDecl.End() {
-			found = true
-			return false
+func collectLitContexts(file *ast.File) *litContexts {
+	contexts := &litContexts{
+		array:        make(map[*ast.BasicLit]bool),
+		timeDuration: make(map[*ast.BasicLit]bool),
+		comparison:   make(map[*ast.BasicLit]bool),
+		varDecl:      make(map[*ast.BasicLit]bool),
+	}
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.GenDecl:
+			if node.Tok == token.CONST {
+				contexts.constRanges = append(contexts.constRanges, [2]token.Pos{node.Pos(), node.End()})
+			}
+		case *ast.ArrayType:
+			markLit(contexts.array, node.Len)
+		case *ast.IndexExpr:
+			markLit(contexts.array, node.Index)
+		case *ast.SliceExpr:
+			markLit(contexts.array, node.Low)
+			markLit(contexts.array, node.High)
+			markLit(contexts.array, node.Max)
+		case *ast.BinaryExpr:
+			contexts.collectBinaryExpr(node)
+		case *ast.ValueSpec:
+			for _, val := range node.Values {
+				markLit(contexts.varDecl, val)
+			}
 		}
 		return true
 	})
-	return found
+
+	return contexts
+}
+
+func (lc *litContexts) collectBinaryExpr(expr *ast.BinaryExpr) {
+	switch expr.Op {
+	case token.MUL:
+		// 24 * time.Hour: the number gets its meaning from the unit.
+		if isTimeSelector(expr.Y) {
+			markLit(lc.timeDuration, expr.X)
+		}
+		if isTimeSelector(expr.X) {
+			markLit(lc.timeDuration, expr.Y)
+		}
+	case token.LSS, token.GTR, token.LEQ, token.GEQ, token.EQL, token.NEQ:
+		markLit(lc.comparison, expr.X)
+		markLit(lc.comparison, expr.Y)
+	}
+}
+
+func (lc *litContexts) inConstDecl(lit *ast.BasicLit) bool {
+	for _, r := range lc.constRanges {
+		if lit.Pos() >= r[0] && lit.End() <= r[1] {
+			return true
+		}
+	}
+	return false
+}
+
+func markLit(set map[*ast.BasicLit]bool, expr ast.Expr) {
+	if lit, ok := expr.(*ast.BasicLit); ok {
+		set[lit] = true
+	}
+}
+
+// isTimeSelector reports whether expr is time.Hour, time.Minute, etc.
+func isTimeSelector(expr ast.Expr) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	ident, ok := sel.X.(*ast.Ident)
+	return ok && ident.Name == "time"
 }
 
 func (r *MagicNumberRule) isAcceptableValue(value int64) bool {
@@ -209,111 +288,4 @@ func (r *MagicNumberRule) isAcceptableValue(value int64) bool {
 		1337: true,
 	}
 	return acceptable[value]
-}
-
-func (r *MagicNumberRule) isArrayContext(file *ast.File, lit *ast.BasicLit) bool {
-	found := false
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.ArrayType:
-			if node.Len == lit {
-				found = true
-				return false
-			}
-		case *ast.IndexExpr:
-			if node.Index == lit {
-				found = true
-				return false
-			}
-		case *ast.SliceExpr:
-			if node.Low == lit || node.High == lit || node.Max == lit {
-				found = true
-				return false
-			}
-		}
-		return true
-	})
-	return found
-}
-
-// isTimeDurationContext checks if number is used with time.Duration (e.g., 24 * time.Hour)
-func (r *MagicNumberRule) isTimeDurationContext(file *ast.File, lit *ast.BasicLit) bool {
-	found := false
-	ast.Inspect(file, func(n ast.Node) bool {
-		binExpr, ok := n.(*ast.BinaryExpr)
-		if !ok || binExpr.Op != token.MUL {
-			return true
-		}
-
-		// Check if lit is part of this multiplication
-		if binExpr.X != lit && binExpr.Y != lit {
-			return true
-		}
-
-		// Check if the other operand is time.Something
-		var other ast.Expr
-		if binExpr.X == lit {
-			other = binExpr.Y
-		} else {
-			other = binExpr.X
-		}
-
-		if sel, ok := other.(*ast.SelectorExpr); ok {
-			if ident, ok := sel.X.(*ast.Ident); ok {
-				if ident.Name == "time" {
-					// time.Hour, time.Minute, time.Second, etc.
-					found = true
-					return false
-				}
-			}
-		}
-		return true
-	})
-	return found
-}
-
-// isComparisonContext checks if number is used in comparison (len(x) > N, value < N, etc.)
-func (r *MagicNumberRule) isComparisonContext(file *ast.File, lit *ast.BasicLit) bool {
-	found := false
-	ast.Inspect(file, func(n ast.Node) bool {
-		binExpr, ok := n.(*ast.BinaryExpr)
-		if !ok {
-			return true
-		}
-
-		// Check comparison operators
-		switch binExpr.Op {
-		case token.LSS, token.GTR, token.LEQ, token.GEQ, token.EQL, token.NEQ:
-			// Check if lit is part of this comparison
-			if binExpr.X == lit || binExpr.Y == lit {
-				found = true
-				return false
-			}
-		}
-		return true
-	})
-	return found
-}
-
-// isVarDeclContext checks if number is in variable declaration with descriptive name
-func (r *MagicNumberRule) isVarDeclContext(file *ast.File, lit *ast.BasicLit) bool {
-	found := false
-	ast.Inspect(file, func(n ast.Node) bool {
-		// Check var declarations
-		valueSpec, ok := n.(*ast.ValueSpec)
-		if !ok {
-			return true
-		}
-
-		// Check if lit is in this value spec
-		for _, val := range valueSpec.Values {
-			if val == lit {
-				// Variable has a name, so the number has context
-				found = true
-				return false
-			}
-		}
-		return true
-	})
-	return found
 }

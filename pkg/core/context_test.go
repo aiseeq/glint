@@ -218,6 +218,27 @@ func TestFileContextIsSuppressed(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "nolint list with space after comma",
+			lines:    []string{`x := foo() //nolint:first-rule, my-rule`},
+			line:     1,
+			rule:     "my-rule",
+			expected: true,
+		},
+		{
+			name:     "nolint list followed by prose does not read the prose as rules",
+			lines:    []string{`x := foo() //nolint:first-rule, my-rule justified because reasons`},
+			line:     1,
+			rule:     "justified",
+			expected: false,
+		},
+		{
+			name:     "pointer dereference assignment is not a comment",
+			lines:    []string{`*target = "my-rule: safe"`},
+			line:     1,
+			rule:     "my-rule",
+			expected: false,
+		},
+		{
 			name:     "rule-colon-safe on violation line",
 			lines:    []string{`x := foo() // my-rule: safe — reason here`},
 			line:     1,

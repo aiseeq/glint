@@ -127,14 +127,13 @@ func (r *DocLinksRule) checkURL(ctx *core.FileContext, line int, url string) *co
 		}
 	}
 
-	// Check for incomplete URLs
-	if strings.HasSuffix(url, "/") && strings.Count(url, "/") <= 3 {
-		// Just a domain with trailing slash, might be incomplete
-		return nil
+	// Check for obviously malformed URLs: ".." or "//" after the scheme
+	// (the scheme's own "//" is not malformed)
+	rest := url
+	if _, after, found := strings.Cut(rest, "://"); found {
+		rest = after
 	}
-
-	// Check for obviously malformed URLs
-	if strings.Contains(url, "..") || strings.Contains(url, "//") && strings.Count(url, "//") > 1 {
+	if strings.Contains(rest, "..") || strings.Contains(rest, "//") {
 		v := r.CreateViolation(ctx.RelPath, line,
 			"Documentation contains malformed URL: "+truncateURL(url))
 		v.WithCode(ctx.GetLine(line))

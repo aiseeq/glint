@@ -57,6 +57,13 @@ func UserGetByID() {}`,
 			wantViolations: 1,
 		},
 		{
+			name: "unexported function with package prefix - ok (no stutter for callers)",
+			code: `package user
+
+func userFromRow() {}`,
+			wantViolations: 0,
+		},
+		{
 			name: "underscore in exported function",
 			code: `package main
 

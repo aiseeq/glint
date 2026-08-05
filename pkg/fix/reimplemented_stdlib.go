@@ -72,7 +72,11 @@ func (f *ReimplementedStdlibFixer) GenerateFix(ctx *core.FileContext, v *core.Vi
 		RuleName:  "reimplemented-stdlib",
 		Violation: v,
 	}}
-	if importFix := ensureImports(ctx, "slices"); importFix != nil {
+	importFix, ok := ensureImports(ctx, "slices")
+	if !ok {
+		return nil // rewriting the body without its imports breaks the build
+	}
+	if importFix != nil {
 		importFix.RuleName = "reimplemented-stdlib"
 		importFix.Violation = v
 		fixes = append(fixes, importFix)

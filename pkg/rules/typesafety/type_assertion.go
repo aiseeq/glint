@@ -39,43 +39,43 @@ func (r *TypeAssertionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 		return nil
 	}
 
-	var violations []*core.Violation
+	// An assertion is safe only in the comma-ok positions; enumerating unsafe
+	// statement forms instead (the previous approach) missed return values and
+	// call arguments — the most panic-prone places.
+	safe := make(map[*ast.TypeAssertExpr]bool)
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		switch stmt := n.(type) {
 		case *ast.AssignStmt:
-			// Check for v := x.(T) pattern (unsafe, no ok check)
-			if len(stmt.Lhs) == 1 && len(stmt.Rhs) == 1 {
+			// v, ok := x.(T)
+			if len(stmt.Lhs) == 2 && len(stmt.Rhs) == 1 {
 				if typeAssert, ok := stmt.Rhs[0].(*ast.TypeAssertExpr); ok {
-					// This is v := x.(T) - unsafe single-value assertion
-					if typeAssert.Type != nil { // Exclude type switch x.(type)
-						v := r.createViolation(ctx, stmt.Pos(), typeAssert)
-						violations = append(violations, v)
-					}
+					safe[typeAssert] = true
 				}
 			}
-			// len(Lhs) == 2 is safe: v, ok := x.(T)
-
-		case *ast.ExprStmt:
-			// Check for standalone type assertions like _ = x.(T)
-			if typeAssert, ok := stmt.X.(*ast.TypeAssertExpr); ok {
-				if typeAssert.Type != nil {
-					v := r.createViolation(ctx, stmt.Pos(), typeAssert)
-					violations = append(violations, v)
-				}
-			}
-
 		case *ast.ValueSpec:
-			// Check for var v = x.(T)
-			if len(stmt.Names) == 1 && len(stmt.Values) == 1 {
+			// var v, ok = x.(T)
+			if len(stmt.Names) == 2 && len(stmt.Values) == 1 {
 				if typeAssert, ok := stmt.Values[0].(*ast.TypeAssertExpr); ok {
-					if typeAssert.Type != nil {
-						v := r.createViolation(ctx, stmt.Pos(), typeAssert)
-						violations = append(violations, v)
-					}
+					safe[typeAssert] = true
 				}
 			}
 		}
+		return true
+	})
+
+	var violations []*core.Violation
+
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		typeAssert, ok := n.(*ast.TypeAssertExpr)
+		if !ok {
+			return true
+		}
+		// Type == nil is the x.(type) form inside a type switch
+		if typeAssert.Type == nil || safe[typeAssert] {
+			return true
+		}
+		violations = append(violations, r.createViolation(ctx, typeAssert.Pos(), typeAssert))
 		return true
 	})
 

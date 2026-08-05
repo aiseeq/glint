@@ -140,19 +140,15 @@ func (r *TimeEqualRule) isTimeExpr(expr ast.Expr, localInferrer, fileInferrer *T
 		return r.looksLikeTimeVar(e.Name)
 
 	case *ast.SelectorExpr:
-		// Check for field access like obj.CreatedAt
+		// Field access like obj.CreatedAt. When the inferrer knows the field's
+		// declared type (struct fields are collected file-wide), trust it: a
+		// `Timestamp int64` field must not be flagged just because of its name.
 		fieldName := e.Sel.Name
-
-		// Check if the base object has a known time field
-		if ident, ok := e.X.(*ast.Ident); ok {
-			// Check if we know the type of the base object
-			if info, ok := getScopedType(ident.Name, localInferrer, fileInferrer); ok && info.TypeName != "" {
-				// If we have type info, trust the field name heuristic
-				return r.looksLikeTimeField(fieldName)
-			}
+		if info, ok := getScopedType(fieldName, localInferrer, fileInferrer); ok && info.TypeName != "" {
+			return info.IsTime
 		}
 
-		// Common time field names
+		// Type unknown - fall back to common time field names
 		return r.looksLikeTimeField(fieldName)
 
 	case *ast.CallExpr:

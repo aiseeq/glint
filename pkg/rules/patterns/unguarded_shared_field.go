@@ -247,9 +247,6 @@ func collectFieldAccesses(
 			if !ok || isMutexType(field.Type()) {
 				return true
 			}
-			if atomicAccesses[sel.Pos()] {
-				return false
-			}
 			// Доступ через sync/atomic синхронизирован сам по себе — мьютекс ему не нужен.
 			if atomicAccesses[sel.Pos()] {
 				return false

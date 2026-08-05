@@ -43,6 +43,13 @@ if (Math.abs(dailyDelta) < 0.001) return`,
 			wantCount: 0,
 		},
 		{
+			name: "parsed var name matches only as a whole word",
+			code: `const profit = parseFloat(entry.profit)
+const delta = profitRate - profitScore`,
+			filename:  "frontend/src/lib/rates.ts",
+			wantCount: 0,
+		},
+		{
 			name:      "test files are skipped",
 			code:      `const dailyDelta = parseFloat(entry.profit) - parseFloat(prev.profit)`,
 			filename:  "frontend/src/hooks/useOperations.test.ts",

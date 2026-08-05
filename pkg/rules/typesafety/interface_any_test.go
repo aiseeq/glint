@@ -63,6 +63,27 @@ func TestInterfaceAnyRule(t *testing.T) {
 	}
 }
 
+func TestInterfaceAnyReportsMostSpecificPattern(t *testing.T) {
+	rule := NewInterfaceAnyRule()
+
+	// The message must be stable across runs and name the most specific
+	// replacement, not whichever pattern happened to match first.
+	ctx := core.NewFileContext("/src/file.go", "/src", []byte("var m map[string]interface{}"), core.DefaultConfig())
+	violations := rule.AnalyzeFile(ctx)
+	if assert.Len(t, violations, 1) {
+		assert.Equal(t, "Use 'map[string]any' instead of 'map[string]interface{}' (Go 1.18+)", violations[0].Message)
+	}
+}
+
+func TestInterfaceAnyFlagsPartialMigration(t *testing.T) {
+	rule := NewInterfaceAnyRule()
+
+	// 'any' elsewhere on the line must not excuse a remaining interface{}
+	ctx := core.NewFileContext("/src/file.go", "/src", []byte("func F(a any, b interface{}) {}"), core.DefaultConfig())
+	violations := rule.AnalyzeFile(ctx)
+	assert.Len(t, violations, 1)
+}
+
 func TestInterfaceAnyNonGoFile(t *testing.T) {
 	rule := NewInterfaceAnyRule()
 

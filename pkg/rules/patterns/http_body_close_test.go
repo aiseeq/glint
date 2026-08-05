@@ -262,6 +262,42 @@ func example() {
 			expectMatch: true,
 		},
 		{
+			name: "response returned to caller",
+			code: `package main
+
+import "net/http"
+
+func example() (*http.Response, error) {
+	resp, err := http.Get("http://example.com")
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+`,
+			expectMatch: false, // ответственность за Close переходит вызывающему
+		},
+		{
+			name: "close delegated to helper",
+			code: `package main
+
+import "net/http"
+
+func drainAndClose(resp *http.Response) {
+	resp.Body.Close()
+}
+
+func example() {
+	resp, err := http.Get("http://example.com")
+	if err != nil {
+		return
+	}
+	defer drainAndClose(resp)
+}
+`,
+			expectMatch: false, // resp передан в вызов — закрытие в хелпере
+		},
+		{
 			name: "response ignored",
 			code: `package main
 

@@ -14,7 +14,7 @@ func TestMagicNumberReportsInvalidIntegerLiteral(t *testing.T) {
 	rule := NewMagicNumberRule()
 	ctx := core.NewFileContext("/src/service.go", "/src", nil, core.DefaultConfig())
 
-	assert.NotNil(t, rule.checkLiteral(ctx, &ast.BasicLit{Kind: token.INT, Value: "invalid"}))
+	assert.NotNil(t, rule.checkLiteral(ctx, &ast.BasicLit{Kind: token.INT, Value: "invalid"}, &litContexts{}))
 }
 
 // A uint64 constant is a perfectly valid Go literal that does not fit int64.
@@ -24,7 +24,7 @@ func TestMagicNumberAcceptsUint64Literal(t *testing.T) {
 	rule := NewMagicNumberRule()
 	ctx := core.NewFileContext("/src/service.go", "/src", nil, core.DefaultConfig())
 
-	assert.Nil(t, rule.checkLiteral(ctx, &ast.BasicLit{Kind: token.INT, Value: "14695981039346656037"}),
+	assert.Nil(t, rule.checkLiteral(ctx, &ast.BasicLit{Kind: token.INT, Value: "14695981039346656037"}, &litContexts{}),
 		"a uint64 algorithm constant is not a magic number and not an invalid literal")
 }
 
@@ -143,4 +143,32 @@ func TestMagicNumberConfigure(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, 10, rule.minValue)
+}
+
+// YAML/JSON decoders hand integers over as float64; the value is unambiguous
+// and must be accepted, not silently ignored.
+func TestMagicNumberConfigureAcceptsFloatMinValue(t *testing.T) {
+	rule := NewMagicNumberRule()
+
+	err := rule.Configure(map[string]any{
+		"min_value": float64(10),
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, 10, rule.minValue)
+}
+
+// Ambiguous input is an error, not a silent fallback to the default.
+func TestMagicNumberConfigureRejectsInvalidMinValue(t *testing.T) {
+	for name, value := range map[string]any{
+		"string":             "10",
+		"bool":               true,
+		"non-integral float": 10.5,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rule := NewMagicNumberRule()
+			err := rule.Configure(map[string]any{"min_value": value})
+			assert.Error(t, err)
+			assert.Equal(t, 2, rule.minValue, "min_value must stay at default after a rejected setting")
+		})
+	}
 }

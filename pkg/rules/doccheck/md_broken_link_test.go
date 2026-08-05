@@ -64,6 +64,26 @@ func TestMdBrokenLinkResolvesRelativeToDocument(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
+// A root-relative link resolves from the project root, as GitHub renders it,
+// not from the directory of the document that contains it.
+func TestMdBrokenLinkResolvesRootRelativeFromProjectRoot(t *testing.T) {
+	violations := analyzeMarkdown(t, "docs/guide.md", map[string]string{
+		"docs/guide.md": "Back to the [readme](/README.md).\n",
+		"README.md":     "# Glint\n",
+	})
+
+	assert.Empty(t, violations)
+}
+
+func TestMdBrokenLinkReportsMissingRootRelativeTarget(t *testing.T) {
+	violations := analyzeMarkdown(t, "docs/guide.md", map[string]string{
+		"docs/guide.md": "See [reference](/docs/missing.md).\n",
+	})
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "/docs/missing.md")
+}
+
 // A directory is a valid link target.
 func TestMdBrokenLinkAcceptsDirectory(t *testing.T) {
 	violations := analyzeMarkdown(t, "README.md", map[string]string{

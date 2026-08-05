@@ -92,18 +92,6 @@ func (ti *TypeInferrer) remember(name string, info TypeInfo) {
 	}
 }
 
-// IsSlice checks if a variable is a slice
-func (ti *TypeInferrer) IsSlice(name string) bool {
-	info, ok := ti.varTypes[name]
-	return ok && info.IsSlice
-}
-
-// IsTime checks if a variable is time.Time
-func (ti *TypeInferrer) IsTime(name string) bool {
-	info, ok := ti.varTypes[name]
-	return ok && info.IsTime
-}
-
 // IsAny checks if a variable is any/interface{}
 func (ti *TypeInferrer) IsAny(name string) bool {
 	info, ok := ti.varTypes[name]
