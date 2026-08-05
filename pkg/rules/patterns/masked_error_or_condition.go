@@ -230,12 +230,6 @@ func errLikeName(expr ast.Expr) (string, bool) {
 	return "", false
 }
 
-// isNilIdent reports whether the expression is the nil identifier.
-func isNilIdent(expr ast.Expr) bool {
-	ident, ok := expr.(*ast.Ident)
-	return ok && ident.Name == "nil"
-}
-
 // returnsNilError reports whether the return statement's last value is the
 // nil identifier (i.e. the error slot holds literal nil).
 func returnsNilError(ret *ast.ReturnStmt) bool {

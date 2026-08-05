@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -330,27 +331,39 @@ func configLoadCalleeFromAssign(assign *ast.AssignStmt) string {
 	return core.ExtractFullFunctionName(call)
 }
 
-// isErrEqNilCheck reports whether cond is `err == nil` referring to the same
-// err variable assigned by `assign`.
-func isErrEqNilCheck(cond ast.Expr, _ *ast.AssignStmt) bool {
+// isErrEqNilCheck reports whether cond is `err == nil` (either operand order)
+// referring to the same err variable assigned by `assign`.
+func isErrEqNilCheck(cond ast.Expr, assign *ast.AssignStmt) bool {
 	bin, ok := cond.(*ast.BinaryExpr)
-	if !ok || bin.Op.String() != "==" {
+	if !ok || bin.Op != token.EQL {
 		return false
 	}
-	var idName string
-	if id, ok := bin.X.(*ast.Ident); ok {
-		idName = id.Name
-	} else if id, ok := bin.Y.(*ast.Ident); ok {
-		idName = id.Name
-	}
-	if idName != "err" {
+	var checked *ast.Ident
+	switch {
+	case isNilIdent(bin.Y):
+		checked, ok = bin.X.(*ast.Ident)
+	case isNilIdent(bin.X):
+		checked, ok = bin.Y.(*ast.Ident)
+	default:
 		return false
 	}
-	if id, ok := bin.X.(*ast.Ident); ok && id.Name == "nil" {
-		return true
+	if !ok {
+		return false
 	}
-	if id, ok := bin.Y.(*ast.Ident); ok && id.Name == "nil" {
-		return true
+	return assignBindsErrName(assign, checked.Name)
+}
+
+// assignBindsErrName reports whether assign binds an error-named variable with
+// exactly this name on its left-hand side. An `err` from an outer scope that
+// the assignment did not touch is not the error being checked.
+func assignBindsErrName(assign *ast.AssignStmt, name string) bool {
+	if assign == nil || !strings.HasSuffix(strings.ToLower(name), "err") {
+		return false
+	}
+	for _, lhs := range assign.Lhs {
+		if id, ok := lhs.(*ast.Ident); ok && id.Name == name {
+			return true
+		}
 	}
 	return false
 }

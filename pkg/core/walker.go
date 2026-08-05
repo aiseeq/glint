@@ -17,7 +17,7 @@ type Walker struct {
 	parser      *Parser
 	parseGo     bool
 
-	// Worker pool size. The channels belong to one walk: Walk creates them,
+	// Worker pool size. The channels belong to one walk: walk creates them,
 	// so the same walker can be reused.
 	workers int
 
@@ -44,7 +44,7 @@ func NewWalker(projectRoot string, config *Config) *Walker {
 	return &Walker{
 		projectRoot: projectRoot,
 		config:      config,
-		parser:      NewParser(),
+		parser:      SharedParser(),
 		parseGo:     true,
 		workers:     workers,
 	}
@@ -64,9 +64,14 @@ func (w *Walker) WithWorkers(n int) *Walker {
 	return w
 }
 
-// Walk traverses all files and returns FileContexts through a channel. Each
+// walk traverses all files and returns FileContexts through a channel. Each
 // call owns its channels and resets the statistics, so a walker can be reused.
-func (w *Walker) Walk() (<-chan *FileContext, <-chan error) {
+//
+// Contract: the caller must drain both channels concurrently until they are
+// closed. Both are buffered at 100; a consumer that reads them sequentially
+// deadlocks as soon as one overflows, because workers block on sends. That is
+// why walk is unexported — WalkSync is the safe public entry point.
+func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 	const channelBuffer = 100
 	fileQueue := make(chan string, channelBuffer)
 	results := make(chan *FileContext, channelBuffer)
@@ -110,7 +115,7 @@ func (w *Walker) WalkSync() ([]*FileContext, []error) {
 	var contexts []*FileContext
 	var errors []error
 
-	results, errChan := w.Walk()
+	results, errChan := w.walk()
 
 	// Collect results
 	done := make(chan struct{})

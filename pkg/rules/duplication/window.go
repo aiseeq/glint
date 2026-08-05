@@ -110,6 +110,75 @@ func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\v' || c == '\f' || c == '\r'
 }
 
+// normalizeFileLines normalizes every line of the file, blanking the lines
+// inside raw-string literals: their content is data, not code, and both
+// duplication rules must judge it the same way.
+func normalizeFileLines(lines []string) []string {
+	rawStringLines := rawStringLineSet(lines)
+	normalized := make([]string, len(lines))
+	for i, line := range lines {
+		if rawStringLines[i] {
+			continue // stays "", carrying no duplication signal
+		}
+		normalized[i] = normalizeLine(line)
+	}
+	return normalized
+}
+
+// rawStringLineSet marks the lines that open, continue, or close a multi-line
+// raw-string literal.
+func rawStringLineSet(lines []string) map[int]bool {
+	result := make(map[int]bool)
+	inRawString := false
+	for i, line := range lines {
+		if rawStringDelimiters(line, inRawString)%2 == 1 {
+			result[i] = true
+			inRawString = !inRawString
+			continue
+		}
+		if inRawString {
+			result[i] = true
+		}
+	}
+	return result
+}
+
+// rawStringDelimiters counts the backticks on the line that open or close a
+// raw-string literal. A backtick inside a quoted literal ("`", '`') is content,
+// not a delimiter — counting it flipped the raw-string state for the rest of
+// the file.
+func rawStringDelimiters(line string, inRawString bool) int {
+	delimiters := 0
+	var quote byte // the quote character we are inside, 0 outside literals
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if inRawString {
+			if c == '`' {
+				delimiters++
+				inRawString = false
+			}
+			continue
+		}
+		if quote != 0 {
+			switch c {
+			case '\\':
+				i++ // the escaped character cannot close the literal
+			case quote:
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '`':
+			delimiters++
+			inRawString = true
+		case '"', '\'':
+			quote = c
+		}
+	}
+	return delimiters
+}
+
 // isTrivialLine reports whether a normalized line carries no duplication
 // signal: punctuation, boilerplate control flow, comments or very short lines.
 func isTrivialLine(line string) bool {

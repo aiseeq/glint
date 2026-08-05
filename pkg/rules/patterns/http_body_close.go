@@ -393,143 +393,71 @@ func (c *httpClientTypeCollector) collectExpressionIdentifiers(node ast.Node, sc
 	})
 }
 
-type httpBodyReachability struct {
-	next      bool
-	breaks    bool
-	continues bool
+// httpBodyReachRule adapts the shared flow walker into a plain reachability
+// walk: the state is a single "reachable" flag and every visited node is
+// handed to the visit callback.
+type httpBodyReachRule struct {
+	visit func(ast.Node)
 }
 
-func walkReachableHTTPBodyStatements(statements []ast.Stmt, visit func(ast.Node)) httpBodyReachability {
-	flow := httpBodyReachability{next: true}
-	for _, statement := range statements {
-		if !flow.next {
-			break
-		}
-		statementFlow := walkReachableHTTPBodyStatement(statement, visit)
-		flow.breaks = flow.breaks || statementFlow.breaks
-		flow.continues = flow.continues || statementFlow.continues
-		flow.next = statementFlow.next
-	}
-	return flow
+func walkReachableHTTPBodyStatements(statements []ast.Stmt, visit func(ast.Node)) {
+	walker := &flowWalker[bool, struct{}]{rule: &httpBodyReachRule{visit: visit}}
+	walker.stmtList(statements, true, struct{}{})
 }
 
-func walkReachableHTTPBodyStatement(statement ast.Stmt, visit func(ast.Node)) httpBodyReachability {
-	switch node := statement.(type) {
-	case *ast.BlockStmt:
-		return walkReachableHTTPBodyStatements(node.List, visit)
-	case *ast.IfStmt:
-		if node.Init != nil {
-			walkReachableHTTPBodyStatement(node.Init, visit)
-		}
-		visit(node.Cond)
-		body := walkReachableHTTPBodyStatements(node.Body.List, visit)
-		otherwise := httpBodyReachability{next: true}
-		if node.Else != nil {
-			otherwise = walkReachableHTTPBodyStatement(node.Else, visit)
-		}
-		return mergeHTTPBodyReachability(body, otherwise)
-	case *ast.ForStmt:
-		if node.Init != nil {
-			walkReachableHTTPBodyStatement(node.Init, visit)
-		}
-		if node.Cond != nil {
-			visit(node.Cond)
-		}
-		body := walkReachableHTTPBodyStatements(node.Body.List, visit)
-		if node.Post != nil && (body.next || body.continues) {
-			walkReachableHTTPBodyStatement(node.Post, visit)
-		}
-		return httpBodyReachability{next: node.Cond != nil || body.breaks}
-	case *ast.RangeStmt:
-		visit(node.X)
-		walkReachableHTTPBodyStatements(node.Body.List, visit)
-		return httpBodyReachability{next: true}
-	case *ast.SwitchStmt:
-		if node.Init != nil {
-			walkReachableHTTPBodyStatement(node.Init, visit)
-		}
-		if node.Tag != nil {
-			visit(node.Tag)
-		}
-		return walkReachableHTTPBodyClauses(node.Body.List, visit)
-	case *ast.TypeSwitchStmt:
-		if node.Init != nil {
-			walkReachableHTTPBodyStatement(node.Init, visit)
-		}
-		walkReachableHTTPBodyStatement(node.Assign, visit)
-		return walkReachableHTTPBodyClauses(node.Body.List, visit)
-	case *ast.SelectStmt:
-		return walkReachableHTTPBodyComms(node.Body.List, visit)
-	case *ast.LabeledStmt:
-		return walkReachableHTTPBodyStatement(node.Stmt, visit)
-	case *ast.ReturnStmt:
-		visit(node)
-		return httpBodyReachability{}
-	case *ast.BranchStmt:
-		if node.Label != nil {
-			return httpBodyReachability{}
-		}
-		switch node.Tok {
-		case token.BREAK:
-			return httpBodyReachability{breaks: true}
-		case token.CONTINUE:
-			return httpBodyReachability{continues: true}
-		default:
-			return httpBodyReachability{}
-		}
-	default:
-		visit(node)
-		if isPanicStatement(node) {
-			return httpBodyReachability{}
-		}
-		return httpBodyReachability{next: true}
-	}
+func (r *httpBodyReachRule) cloneState(state bool) bool { return state }
+
+func (r *httpBodyReachRule) joinStates(bool, bool) bool { return true }
+
+func (r *httpBodyReachRule) liveState(state bool) bool { return state }
+
+func (r *httpBodyReachRule) deadState() bool { return false }
+
+func (r *httpBodyReachRule) enterScope(_ flowScopeKind, _ ast.Node, parent struct{}, state bool) (struct{}, bool) {
+	return parent, state
 }
 
-func walkReachableHTTPBodyClauses(statements []ast.Stmt, visit func(ast.Node)) httpBodyReachability {
-	result := httpBodyReachability{}
-	hasDefault := false
-	for _, statement := range statements {
-		clause, ok := statement.(*ast.CaseClause)
-		if !ok {
-			continue
-		}
-		for _, expression := range clause.List {
-			visit(expression)
-		}
-		flow := walkReachableHTTPBodyStatements(clause.Body, visit)
-		result.next = result.next || flow.next || flow.breaks
-		result.continues = result.continues || flow.continues
-		hasDefault = hasDefault || len(clause.List) == 0
+func (r *httpBodyReachRule) leaveScope(flowScopeKind, struct{}, *flowEdges[bool]) {}
+
+func (r *httpBodyReachRule) simpleStmt(stmt ast.Stmt, state bool, _ struct{}) (bool, bool) {
+	r.visit(stmt)
+	if _, isReturn := stmt.(*ast.ReturnStmt); isReturn {
+		return false, true
 	}
-	result.next = result.next || !hasDefault
-	return result
+	return state, isPanicStatement(stmt)
 }
 
-func walkReachableHTTPBodyComms(statements []ast.Stmt, visit func(ast.Node)) httpBodyReachability {
-	result := httpBodyReachability{}
-	for _, statement := range statements {
-		clause, ok := statement.(*ast.CommClause)
-		if !ok {
-			continue
-		}
-		if clause.Comm != nil {
-			walkReachableHTTPBodyStatement(clause.Comm, visit)
-		}
-		flow := walkReachableHTTPBodyStatements(clause.Body, visit)
-		result.next = result.next || flow.next || flow.breaks
-		result.continues = result.continues || flow.continues
-	}
-	return result
+func (r *httpBodyReachRule) ifCondition(stmt *ast.IfStmt, state bool, _ struct{}) (bool, bool) {
+	r.visit(stmt.Cond)
+	return state, state
 }
 
-func mergeHTTPBodyReachability(left, right httpBodyReachability) httpBodyReachability {
-	return httpBodyReachability{
-		next:      left.next || right.next,
-		breaks:    left.breaks || right.breaks,
-		continues: left.continues || right.continues,
-	}
+func (r *httpBodyReachRule) flowExpr(expr ast.Expr, state bool, _ struct{}) bool {
+	r.visit(expr)
+	return state
 }
+
+func (r *httpBodyReachRule) rangeVars(_ *ast.RangeStmt, state bool, _ struct{}) bool {
+	return state
+}
+
+func (r *httpBodyReachRule) typeSwitchGuard(stmt ast.Stmt, state bool, scope struct{}) bool {
+	next, _ := r.simpleStmt(stmt, state, scope)
+	return next
+}
+
+func (r *httpBodyReachRule) caseClause(_ ast.Stmt, clause *ast.CaseClause, state bool, parent struct{}) (bool, struct{}) {
+	for _, expression := range clause.List {
+		r.visit(expression)
+	}
+	return state, parent
+}
+
+func (r *httpBodyReachRule) commClause(_ *ast.CommClause, state bool, parent struct{}) (bool, struct{}) {
+	return state, parent
+}
+
+func (r *httpBodyReachRule) normalize(*flowEdges[bool]) {}
 
 func httpImportAliases(ctx *core.FileContext) map[string]struct{} {
 	aliases := make(map[string]struct{})

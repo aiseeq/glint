@@ -37,6 +37,28 @@ func (s *Service) SyncWallet(address string) error {
 	assert.Contains(t, violations[0].Message, "Service.SyncWallet")
 }
 
+// A generic receiver (Cache[T]) still names the method as "Cache.Refresh".
+func TestContextFirstNamesGenericReceiver(t *testing.T) {
+	violations := analyzeContextFirst(t, `package service
+
+import "context"
+
+type Cache[T any] struct{ repo Repo }
+
+type Repo interface {
+	Save(ctx context.Context, address string) error
+}
+
+func (c *Cache[T]) Refresh(address string) error {
+	ctx := context.Background()
+	return c.repo.Save(ctx, address)
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Cache.Refresh")
+}
+
 // The context handed straight to the call is the same mistake written shorter.
 func TestContextFirstReportsInlineBackground(t *testing.T) {
 	violations := analyzeContextFirst(t, `package service

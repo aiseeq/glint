@@ -3,8 +3,6 @@ package deadcode
 import (
 	"fmt"
 	"go/ast"
-	"go/parser"
-	"go/token"
 	"maps"
 	"os"
 	"path/filepath"
@@ -154,6 +152,10 @@ func (r *UnusedSymbolsRule) checkSiblingFileUsages(ctx *core.FileContext, symbol
 // directoryIdentCounts returns how often each identifier appears across the Go
 // files of a directory, parsing them once. Test files are counted too: an
 // unexported symbol used only by tests is not dead code.
+//
+// Siblings go through core.SharedParser: the walker parses every analyzed file
+// into the same content-keyed cache, so this sweep reuses those ASTs instead
+// of parsing the whole project a second time.
 func (r *UnusedSymbolsRule) directoryIdentCounts(dir string) (map[string]int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -168,13 +170,16 @@ func (r *UnusedSymbolsRule) directoryIdentCounts(dir string) (map[string]int, er
 	}
 
 	counts := make(map[string]int)
-	fset := token.NewFileSet()
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		file, err := parser.ParseFile(fset, path, nil, 0)
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read sibling file %q: %w", path, err)
+		}
+		_, file, err := core.SharedParser().ParseGoFile(path, content)
 		if err != nil {
 			return nil, fmt.Errorf("parse sibling file %q: %w", path, err)
 		}

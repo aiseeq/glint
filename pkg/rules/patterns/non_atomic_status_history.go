@@ -145,12 +145,6 @@ type statusHistoryPath struct {
 	mutations []statusHistoryCall
 }
 
-type statusHistoryFlow struct {
-	next      []statusHistoryPath
-	breaks    []statusHistoryPath
-	continues []statusHistoryPath
-}
-
 type statusHistoryLexicalScope struct {
 	parent  *statusHistoryLexicalScope
 	symbols map[string]token.Pos
@@ -183,30 +177,49 @@ type statusHistoryFlowAnalyzer struct {
 }
 
 func statusHistoryPairs(function statusHistoryFunctionScope) []statusHistoryPair {
-	analyzer := statusHistoryFlowAnalyzer{seen: make(map[[2]*ast.CallExpr]bool)}
+	analyzer := &statusHistoryFlowAnalyzer{seen: make(map[[2]*ast.CallExpr]bool)}
 	scope := newStatusHistoryLexicalScope(nil)
 	for _, fields := range function.fields {
 		declareStatusHistoryFields(scope, fields)
 	}
-	analyzer.block(function.body.List, []statusHistoryPath{{}}, scope)
+	walker := &flowWalker[[]statusHistoryPath, *statusHistoryLexicalScope]{rule: analyzer}
+	walker.walk(function.body, []statusHistoryPath{{}}, scope)
 	return analyzer.pairs
 }
 
-func (a *statusHistoryFlowAnalyzer) block(statements []ast.Stmt, paths []statusHistoryPath, scope *statusHistoryLexicalScope) statusHistoryFlow {
-	flow := statusHistoryFlow{next: paths}
-	for _, statement := range statements {
-		if len(flow.next) == 0 {
-			break
-		}
-		statementFlow := a.statement(statement, flow.next, scope)
-		flow.breaks = append(flow.breaks, statementFlow.breaks...)
-		flow.continues = append(flow.continues, statementFlow.continues...)
-		flow.next = statementFlow.next
-	}
-	return flow
+func (a *statusHistoryFlowAnalyzer) cloneState(paths []statusHistoryPath) []statusHistoryPath {
+	return cloneStatusHistoryPaths(paths)
 }
 
-func (a *statusHistoryFlowAnalyzer) statement(statement ast.Stmt, paths []statusHistoryPath, scope *statusHistoryLexicalScope) statusHistoryFlow {
+func (a *statusHistoryFlowAnalyzer) joinStates(left, right []statusHistoryPath) []statusHistoryPath {
+	return append(left, right...)
+}
+
+func (a *statusHistoryFlowAnalyzer) liveState(paths []statusHistoryPath) bool { return len(paths) > 0 }
+
+func (a *statusHistoryFlowAnalyzer) deadState() []statusHistoryPath { return nil }
+
+func (a *statusHistoryFlowAnalyzer) enterScope(
+	_ flowScopeKind,
+	_ ast.Node,
+	parent *statusHistoryLexicalScope,
+	paths []statusHistoryPath,
+) (*statusHistoryLexicalScope, []statusHistoryPath) {
+	return newStatusHistoryLexicalScope(parent), paths
+}
+
+func (a *statusHistoryFlowAnalyzer) leaveScope(
+	flowScopeKind,
+	*statusHistoryLexicalScope,
+	*flowEdges[[]statusHistoryPath],
+) {
+}
+
+func (a *statusHistoryFlowAnalyzer) simpleStmt(
+	statement ast.Stmt,
+	paths []statusHistoryPath,
+	scope *statusHistoryLexicalScope,
+) ([]statusHistoryPath, bool) {
 	switch node := statement.(type) {
 	case *ast.AssignStmt:
 		paths = a.applyCalls(paths, scope, node)
@@ -214,154 +227,78 @@ func (a *statusHistoryFlowAnalyzer) statement(statement ast.Stmt, paths []status
 		if node.Tok == token.DEFINE {
 			declareStatusHistoryExpressions(scope, node.Lhs)
 		}
-		return statusHistoryFlow{next: paths}
+		return paths, false
 	case *ast.DeclStmt:
-		return statusHistoryFlow{next: a.declaration(node.Decl, paths, scope)}
+		return a.declaration(node.Decl, paths, scope), false
 	case *ast.ReturnStmt:
 		a.applyCalls(paths, scope, node)
-		return statusHistoryFlow{}
-	case *ast.BranchStmt:
-		if node.Label != nil {
-			return statusHistoryFlow{}
-		}
-		switch node.Tok {
-		case token.BREAK:
-			return statusHistoryFlow{breaks: paths}
-		case token.CONTINUE:
-			return statusHistoryFlow{continues: paths}
-		default:
-			return statusHistoryFlow{}
-		}
-	case *ast.BlockStmt:
-		return a.block(node.List, paths, newStatusHistoryLexicalScope(scope))
-	case *ast.IfStmt:
-		return a.ifStatement(node, paths, scope)
-	case *ast.ForStmt:
-		return a.forStatement(node, paths, scope)
-	case *ast.RangeStmt:
-		return a.rangeStatement(node, paths, scope)
-	case *ast.SwitchStmt:
-		return a.switchStatement(node, paths, scope)
-	case *ast.TypeSwitchStmt:
-		return a.typeSwitchStatement(node, paths, scope)
-	case *ast.SelectStmt:
-		return a.selectStatement(node, paths, scope)
-	case *ast.LabeledStmt:
-		return a.statement(node.Stmt, paths, scope)
+		return nil, true
 	default:
-		return statusHistoryFlow{next: a.applyCalls(paths, scope, node)}
+		return a.applyCalls(paths, scope, node), false
 	}
 }
 
-func (a *statusHistoryFlowAnalyzer) ifStatement(statement *ast.IfStmt, paths []statusHistoryPath, parent *statusHistoryLexicalScope) statusHistoryFlow {
-	scope := newStatusHistoryLexicalScope(parent)
-	if statement.Init != nil {
-		paths = a.statement(statement.Init, paths, scope).next
-	}
+func (a *statusHistoryFlowAnalyzer) ifCondition(
+	statement *ast.IfStmt,
+	paths []statusHistoryPath,
+	scope *statusHistoryLexicalScope,
+) ([]statusHistoryPath, []statusHistoryPath) {
 	paths = a.applyCalls(paths, scope, statement.Cond)
-	body := a.block(statement.Body.List, cloneStatusHistoryPaths(paths), newStatusHistoryLexicalScope(scope))
-	otherwise := statusHistoryFlow{next: cloneStatusHistoryPaths(paths)}
-	if statement.Else != nil {
-		otherwise = a.statement(statement.Else, otherwise.next, scope)
-	}
-	return mergeStatusHistoryFlows(body, otherwise)
+	return cloneStatusHistoryPaths(paths), cloneStatusHistoryPaths(paths)
 }
 
-func (a *statusHistoryFlowAnalyzer) forStatement(statement *ast.ForStmt, paths []statusHistoryPath, parent *statusHistoryLexicalScope) statusHistoryFlow {
-	scope := newStatusHistoryLexicalScope(parent)
-	if statement.Init != nil {
-		paths = a.statement(statement.Init, paths, scope).next
-	}
-	paths = a.applyCalls(paths, scope, statement.Cond)
-	body := a.block(statement.Body.List, cloneStatusHistoryPaths(paths), newStatusHistoryLexicalScope(scope))
-	if statement.Post != nil {
-		body.next = a.statement(statement.Post, body.next, scope).next
-		body.continues = a.statement(statement.Post, body.continues, scope).next
-	}
-	next := body.breaks
-	if statement.Cond != nil {
-		next = append(next, cloneStatusHistoryPaths(paths)...)
-		next = append(next, body.next...)
-		next = append(next, body.continues...)
-	}
-	return statusHistoryFlow{next: next}
+func (a *statusHistoryFlowAnalyzer) flowExpr(
+	expr ast.Expr,
+	paths []statusHistoryPath,
+	scope *statusHistoryLexicalScope,
+) []statusHistoryPath {
+	return a.applyCalls(paths, scope, expr)
 }
 
-func (a *statusHistoryFlowAnalyzer) rangeStatement(statement *ast.RangeStmt, paths []statusHistoryPath, parent *statusHistoryLexicalScope) statusHistoryFlow {
-	paths = a.applyCalls(paths, parent, statement.X)
-	scope := newStatusHistoryLexicalScope(parent)
+func (a *statusHistoryFlowAnalyzer) rangeVars(
+	statement *ast.RangeStmt,
+	paths []statusHistoryPath,
+	scope *statusHistoryLexicalScope,
+) []statusHistoryPath {
 	if statement.Tok == token.DEFINE {
 		declareStatusHistoryExpressions(scope, []ast.Expr{statement.Key, statement.Value})
 	}
-	body := a.block(statement.Body.List, cloneStatusHistoryPaths(paths), newStatusHistoryLexicalScope(scope))
-	next := append(cloneStatusHistoryPaths(paths), body.next...)
-	next = append(next, body.continues...)
-	next = append(next, body.breaks...)
-	return statusHistoryFlow{next: next}
+	return paths
 }
 
-func (a *statusHistoryFlowAnalyzer) switchStatement(statement *ast.SwitchStmt, paths []statusHistoryPath, parent *statusHistoryLexicalScope) statusHistoryFlow {
+func (a *statusHistoryFlowAnalyzer) typeSwitchGuard(
+	statement ast.Stmt,
+	paths []statusHistoryPath,
+	scope *statusHistoryLexicalScope,
+) []statusHistoryPath {
+	// The legacy engine only scanned the guard for calls without declaring
+	// the guard variable, so shadowed outer identifiers keep resolving to
+	// their outer declarations inside the clauses.
+	return a.applyCalls(paths, scope, statement)
+}
+
+func (a *statusHistoryFlowAnalyzer) caseClause(
+	_ ast.Stmt,
+	clause *ast.CaseClause,
+	paths []statusHistoryPath,
+	parent *statusHistoryLexicalScope,
+) ([]statusHistoryPath, *statusHistoryLexicalScope) {
 	scope := newStatusHistoryLexicalScope(parent)
-	if statement.Init != nil {
-		paths = a.statement(statement.Init, paths, scope).next
+	for _, expression := range clause.List {
+		paths = a.applyCalls(paths, scope, expression)
 	}
-	paths = a.applyCalls(paths, scope, statement.Tag)
-	return a.caseClauses(statement.Body.List, paths, scope)
+	return paths, scope
 }
 
-func (a *statusHistoryFlowAnalyzer) typeSwitchStatement(statement *ast.TypeSwitchStmt, paths []statusHistoryPath, parent *statusHistoryLexicalScope) statusHistoryFlow {
-	scope := newStatusHistoryLexicalScope(parent)
-	if statement.Init != nil {
-		paths = a.statement(statement.Init, paths, scope).next
-	}
-	paths = a.applyCalls(paths, scope, statement.Assign)
-	return a.caseClauses(statement.Body.List, paths, scope)
+func (a *statusHistoryFlowAnalyzer) commClause(
+	_ *ast.CommClause,
+	paths []statusHistoryPath,
+	parent *statusHistoryLexicalScope,
+) ([]statusHistoryPath, *statusHistoryLexicalScope) {
+	return paths, newStatusHistoryLexicalScope(parent)
 }
 
-func (a *statusHistoryFlowAnalyzer) caseClauses(statements []ast.Stmt, paths []statusHistoryPath, parent *statusHistoryLexicalScope) statusHistoryFlow {
-	var result statusHistoryFlow
-	hasDefault := false
-	for _, statement := range statements {
-		clause, ok := statement.(*ast.CaseClause)
-		if !ok {
-			continue
-		}
-		scope := newStatusHistoryLexicalScope(parent)
-		clausePaths := cloneStatusHistoryPaths(paths)
-		for _, expression := range clause.List {
-			clausePaths = a.applyCalls(clausePaths, scope, expression)
-		}
-		flow := a.block(clause.Body, clausePaths, scope)
-		result.next = append(result.next, flow.next...)
-		result.next = append(result.next, flow.breaks...)
-		result.continues = append(result.continues, flow.continues...)
-		hasDefault = hasDefault || len(clause.List) == 0
-	}
-	if !hasDefault {
-		result.next = append(result.next, cloneStatusHistoryPaths(paths)...)
-	}
-	return result
-}
-
-func (a *statusHistoryFlowAnalyzer) selectStatement(statement *ast.SelectStmt, paths []statusHistoryPath, parent *statusHistoryLexicalScope) statusHistoryFlow {
-	var result statusHistoryFlow
-	for _, item := range statement.Body.List {
-		clause, ok := item.(*ast.CommClause)
-		if !ok {
-			continue
-		}
-		scope := newStatusHistoryLexicalScope(parent)
-		clausePaths := cloneStatusHistoryPaths(paths)
-		if clause.Comm != nil {
-			clausePaths = a.statement(clause.Comm, clausePaths, scope).next
-		}
-		flow := a.block(clause.Body, clausePaths, scope)
-		result.next = append(result.next, flow.next...)
-		result.next = append(result.next, flow.breaks...)
-		result.continues = append(result.continues, flow.continues...)
-	}
-	return result
-}
+func (a *statusHistoryFlowAnalyzer) normalize(*flowEdges[[]statusHistoryPath]) {}
 
 func (a *statusHistoryFlowAnalyzer) applyCalls(paths []statusHistoryPath, scope *statusHistoryLexicalScope, node ast.Node) []statusHistoryPath {
 	if node == nil {
@@ -479,16 +416,6 @@ func cloneStatusHistoryPaths(paths []statusHistoryPath) []statusHistoryPath {
 		cloned[i].mutations = append([]statusHistoryCall(nil), path.mutations...)
 	}
 	return cloned
-}
-
-func mergeStatusHistoryFlows(flows ...statusHistoryFlow) statusHistoryFlow {
-	var merged statusHistoryFlow
-	for _, flow := range flows {
-		merged.next = append(merged.next, flow.next...)
-		merged.breaks = append(merged.breaks, flow.breaks...)
-		merged.continues = append(merged.continues, flow.continues...)
-	}
-	return merged
 }
 
 func declareStatusHistoryExpressions(scope *statusHistoryLexicalScope, expressions []ast.Expr) {

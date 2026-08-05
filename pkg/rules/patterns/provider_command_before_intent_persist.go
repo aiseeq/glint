@@ -123,70 +123,121 @@ type providerFlowAnalyzer struct {
 
 func analyzeProviderCommandFlow(body *ast.BlockStmt) []providerCommandCall {
 	analyzer := providerFlowAnalyzer{seen: make(map[*ast.CallExpr]bool)}
-	analyzer.block(body, []providerFlowState{{}})
+	walker := &flowWalker[[]providerFlowState, struct{}]{
+		rule: &analyzer,
+		// The legacy engine stopped a statement list at any branch statement
+		// while keeping the states flowing, and let every loop exit with the
+		// pre-iteration states even without a condition.
+		branchTruncates: true,
+		loopAlwaysExits: true,
+	}
+	walker.walk(body, []providerFlowState{{}}, struct{}{})
 	return analyzer.detected
 }
 
-func (a *providerFlowAnalyzer) block(block *ast.BlockStmt, states []providerFlowState) []providerFlowState {
-	if block == nil {
-		return states
-	}
-	for _, stmt := range block.List {
-		if len(states) == 0 {
-			break
-		}
-		if _, stopsBlock := stmt.(*ast.BranchStmt); stopsBlock {
-			break
-		}
-		states = a.statement(stmt, states)
-	}
-	return compactProviderFlowStates(states)
+func (a *providerFlowAnalyzer) cloneState(states []providerFlowState) []providerFlowState {
+	return cloneProviderFlowStates(states)
 }
 
-func (a *providerFlowAnalyzer) statement(stmt ast.Stmt, states []providerFlowState) []providerFlowState {
+func (a *providerFlowAnalyzer) joinStates(left, right []providerFlowState) []providerFlowState {
+	return append(left, right...)
+}
+
+func (a *providerFlowAnalyzer) liveState(states []providerFlowState) bool { return len(states) > 0 }
+
+func (a *providerFlowAnalyzer) deadState() []providerFlowState { return nil }
+
+func (a *providerFlowAnalyzer) enterScope(
+	_ flowScopeKind,
+	_ ast.Node,
+	parent struct{},
+	states []providerFlowState,
+) (struct{}, []providerFlowState) {
+	return parent, states
+}
+
+func (a *providerFlowAnalyzer) leaveScope(_ flowScopeKind, _ struct{}, edges *flowEdges[[]providerFlowState]) {
+	edges.next = compactProviderFlowStates(edges.next)
+}
+
+func (a *providerFlowAnalyzer) simpleStmt(
+	stmt ast.Stmt,
+	states []providerFlowState,
+	_ struct{},
+) ([]providerFlowState, bool) {
 	switch node := stmt.(type) {
-	case *ast.BlockStmt:
-		return a.block(node, states)
 	case *ast.ExprStmt:
-		return a.expression(node.X, states)
+		return a.expression(node.X, states), false
 	case *ast.AssignStmt:
-		return a.expressions(node.Rhs, states)
+		return a.expressions(node.Rhs, states), false
 	case *ast.DeclStmt:
-		return a.declaration(node.Decl, states)
+		return a.declaration(node.Decl, states), false
 	case *ast.SendStmt:
 		states = a.expression(node.Chan, states)
-		return a.expression(node.Value, states)
+		return a.expression(node.Value, states), false
 	case *ast.IncDecStmt:
-		return a.expression(node.X, states)
+		return a.expression(node.X, states), false
 	case *ast.ReturnStmt:
 		a.expressions(node.Results, states)
-		return nil
-	case *ast.IfStmt:
-		return a.ifStatement(node, states)
-	case *ast.ForStmt:
-		return a.forStatement(node, states)
-	case *ast.RangeStmt:
-		return a.rangeStatement(node, states)
-	case *ast.SwitchStmt:
-		return a.switchStatement(node, states)
-	case *ast.TypeSwitchStmt:
-		return a.typeSwitchStatement(node, states)
-	case *ast.SelectStmt:
-		return a.selectStatement(node, states)
+		return nil, true
 	case *ast.GoStmt:
 		states = a.callOperands(node.Call, states)
 		method, command := matchingSelectorCall(node.Call, providerCommandMethods, providerReceiverMarkers)
 		if !command {
-			return states
+			return states, false
 		}
-		return compactProviderFlowStates(a.recordProviderCommand(node.Call, method, providerCallEntity(node.Call), providerCallEntityOwner(node.Call), states))
+		recorded := a.recordProviderCommand(node.Call, method, providerCallEntity(node.Call), providerCallEntityOwner(node.Call), states)
+		return compactProviderFlowStates(recorded), false
 	case *ast.DeferStmt:
-		return a.callOperands(node.Call, states)
-	case *ast.LabeledStmt:
-		return a.statement(node.Stmt, states)
+		return a.callOperands(node.Call, states), false
 	default:
-		return states
+		return states, false
 	}
+}
+
+func (a *providerFlowAnalyzer) ifCondition(
+	stmt *ast.IfStmt,
+	states []providerFlowState,
+	_ struct{},
+) ([]providerFlowState, []providerFlowState) {
+	return a.condition(stmt.Cond, states)
+}
+
+func (a *providerFlowAnalyzer) flowExpr(expr ast.Expr, states []providerFlowState, _ struct{}) []providerFlowState {
+	return a.expression(expr, states)
+}
+
+func (a *providerFlowAnalyzer) rangeVars(_ *ast.RangeStmt, states []providerFlowState, _ struct{}) []providerFlowState {
+	return states
+}
+
+func (a *providerFlowAnalyzer) typeSwitchGuard(stmt ast.Stmt, states []providerFlowState, scope struct{}) []providerFlowState {
+	next, _ := a.simpleStmt(stmt, states, scope)
+	return next
+}
+
+func (a *providerFlowAnalyzer) caseClause(
+	_ ast.Stmt,
+	_ *ast.CaseClause,
+	states []providerFlowState,
+	parent struct{},
+) ([]providerFlowState, struct{}) {
+	// The legacy engine never evaluated clause guard expressions.
+	return states, parent
+}
+
+func (a *providerFlowAnalyzer) commClause(
+	_ *ast.CommClause,
+	states []providerFlowState,
+	parent struct{},
+) ([]providerFlowState, struct{}) {
+	return states, parent
+}
+
+func (a *providerFlowAnalyzer) normalize(edges *flowEdges[[]providerFlowState]) {
+	edges.next = compactProviderFlowStates(edges.next)
+	edges.breaks = compactProviderFlowStates(edges.breaks)
+	edges.continues = compactProviderFlowStates(edges.continues)
 }
 
 func (a *providerFlowAnalyzer) declaration(decl ast.Decl, states []providerFlowState) []providerFlowState {
@@ -201,20 +252,6 @@ func (a *providerFlowAnalyzer) declaration(decl ast.Decl, states []providerFlowS
 		}
 	}
 	return states
-}
-
-func (a *providerFlowAnalyzer) ifStatement(stmt *ast.IfStmt, states []providerFlowState) []providerFlowState {
-	if stmt.Init != nil {
-		states = a.statement(stmt.Init, states)
-	}
-	trueStates, falseStates := a.condition(stmt.Cond, states)
-	branches := a.block(stmt.Body, trueStates)
-	if stmt.Else == nil {
-		branches = append(branches, falseStates...)
-	} else {
-		branches = append(branches, a.statement(stmt.Else, falseStates)...)
-	}
-	return compactProviderFlowStates(branches)
 }
 
 func (a *providerFlowAnalyzer) condition(
@@ -244,83 +281,6 @@ func (a *providerFlowAnalyzer) condition(
 
 	evaluated := a.expression(expr, states)
 	return cloneProviderFlowStates(evaluated), cloneProviderFlowStates(evaluated)
-}
-
-func (a *providerFlowAnalyzer) forStatement(stmt *ast.ForStmt, states []providerFlowState) []providerFlowState {
-	if stmt.Init != nil {
-		states = a.statement(stmt.Init, states)
-	}
-	if stmt.Cond != nil {
-		states = a.expression(stmt.Cond, states)
-	}
-	exits := cloneProviderFlowStates(states)
-	oneIteration := a.block(stmt.Body, cloneProviderFlowStates(states))
-	if stmt.Post != nil {
-		oneIteration = a.statement(stmt.Post, oneIteration)
-	}
-	return compactProviderFlowStates(append(exits, oneIteration...))
-}
-
-func (a *providerFlowAnalyzer) rangeStatement(stmt *ast.RangeStmt, states []providerFlowState) []providerFlowState {
-	states = a.expression(stmt.X, states)
-	exits := cloneProviderFlowStates(states)
-	oneIteration := a.block(stmt.Body, cloneProviderFlowStates(states))
-	return compactProviderFlowStates(append(exits, oneIteration...))
-}
-
-func (a *providerFlowAnalyzer) switchStatement(stmt *ast.SwitchStmt, states []providerFlowState) []providerFlowState {
-	if stmt.Init != nil {
-		states = a.statement(stmt.Init, states)
-	}
-	if stmt.Tag != nil {
-		states = a.expression(stmt.Tag, states)
-	}
-	return a.caseClauses(stmt.Body, states)
-}
-
-func (a *providerFlowAnalyzer) typeSwitchStatement(stmt *ast.TypeSwitchStmt, states []providerFlowState) []providerFlowState {
-	if stmt.Init != nil {
-		states = a.statement(stmt.Init, states)
-	}
-	if stmt.Assign != nil {
-		states = a.statement(stmt.Assign, states)
-	}
-	return a.caseClauses(stmt.Body, states)
-}
-
-func (a *providerFlowAnalyzer) caseClauses(body *ast.BlockStmt, states []providerFlowState) []providerFlowState {
-	var exits []providerFlowState
-	hasDefault := false
-	for _, item := range body.List {
-		clause, ok := item.(*ast.CaseClause)
-		if !ok {
-			continue
-		}
-		hasDefault = hasDefault || len(clause.List) == 0
-		branch := a.block(&ast.BlockStmt{List: clause.Body}, cloneProviderFlowStates(states))
-		exits = append(exits, branch...)
-	}
-	if !hasDefault {
-		exits = append(exits, cloneProviderFlowStates(states)...)
-	}
-	return compactProviderFlowStates(exits)
-}
-
-func (a *providerFlowAnalyzer) selectStatement(stmt *ast.SelectStmt, states []providerFlowState) []providerFlowState {
-	var exits []providerFlowState
-	for _, item := range stmt.Body.List {
-		clause, ok := item.(*ast.CommClause)
-		if !ok {
-			continue
-		}
-		branch := cloneProviderFlowStates(states)
-		if clause.Comm != nil {
-			branch = a.statement(clause.Comm, branch)
-		}
-		branch = a.block(&ast.BlockStmt{List: clause.Body}, branch)
-		exits = append(exits, branch...)
-	}
-	return compactProviderFlowStates(exits)
 }
 
 func (a *providerFlowAnalyzer) expressions(expressions []ast.Expr, states []providerFlowState) []providerFlowState {

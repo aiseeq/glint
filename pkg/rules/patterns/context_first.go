@@ -227,7 +227,7 @@ func qualifiedFuncName(fn *ast.FuncDecl) string {
 	if fn.Recv == nil || len(fn.Recv.List) == 0 {
 		return fn.Name.Name
 	}
-	if typeName := getReceiverTypeName(fn.Recv.List[0].Type); typeName != "" {
+	if typeName := receiverTypeName(fn.Recv); typeName != "" {
 		return typeName + "." + fn.Name.Name
 	}
 	return fn.Name.Name
@@ -244,16 +244,4 @@ func isContextType(expr ast.Expr) bool {
 		return t.Name == "Context"
 	}
 	return false
-}
-
-func getReceiverTypeName(expr ast.Expr) string {
-	switch t := expr.(type) {
-	case *ast.Ident:
-		return t.Name
-	case *ast.StarExpr:
-		if ident, ok := t.X.(*ast.Ident); ok {
-			return ident.Name
-		}
-	}
-	return ""
 }

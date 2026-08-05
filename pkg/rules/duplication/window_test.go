@@ -76,6 +76,21 @@ func TestDuplicateBlockScalesLinearly(t *testing.T) {
 		"analysis of %d lines took %s — window hashing is not linear", len(ctx.Lines), elapsed)
 }
 
+func TestRawStringLineSet(t *testing.T) {
+	lines := []string{
+		`s := "` + "`" + `"`, // backtick inside a quoted string is not a delimiter
+		"a := 1",
+		"q := `",   // opens a raw string
+		"raw line", // inside it
+		"`",        // closes it
+		"b := 2",
+		`c := '` + "`" + `'`, // backtick as a rune literal is not a delimiter either
+		"d := 3",
+	}
+
+	assert.Equal(t, map[int]bool{2: true, 3: true, 4: true}, rawStringLineSet(lines))
+}
+
 // Findings must not depend on Go's randomized map iteration order.
 func TestCrossFileDuplicateOrderIsDeterministic(t *testing.T) {
 	block := func(seed string) []string {

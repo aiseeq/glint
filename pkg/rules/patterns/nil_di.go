@@ -74,7 +74,7 @@ func (r *NilDIRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 		// Check each argument for nil
 		for i, arg := range call.Args {
-			if !r.isNilIdent(arg) {
+			if !isNilIdent(arg) {
 				continue
 			}
 
@@ -226,15 +226,6 @@ func (r *NilDIRule) isStdlibNonDI(call *ast.CallExpr) bool {
 		return true
 	}
 	return false
-}
-
-// isNilIdent checks if expression is the nil identifier
-func (r *NilDIRule) isNilIdent(expr ast.Expr) bool {
-	ident, ok := expr.(*ast.Ident)
-	if !ok {
-		return false
-	}
-	return ident.Name == "nil"
 }
 
 func (r *NilDIRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {

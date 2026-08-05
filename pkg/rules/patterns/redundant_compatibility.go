@@ -76,24 +76,7 @@ func (r *RedundantCompatibilityRule) AnalyzeFile(ctx *core.FileContext) []*core.
 
 // shouldSkipFile checks if file should be excluded
 func (r *RedundantCompatibilityRule) shouldSkipFile(ctx *core.FileContext) bool {
-	path := ctx.RelPath
-
-	// Skip test files
-	if ctx.IsTestFile() {
-		return true
-	}
-
-	// Skip vendor, node_modules
-	if strings.Contains(path, "vendor/") || strings.Contains(path, "node_modules/") {
-		return true
-	}
-
-	// Skip generated files
-	if strings.Contains(path, "generated") || strings.Contains(path, ".gen.") {
-		return true
-	}
-
-	return false
+	return ctx.IsTestFile() || isVendoredOrGeneratedPath(ctx.RelPath)
 }
 
 // analyzeGoFile analyzes Go file for redundant compatibility patterns

@@ -101,7 +101,7 @@ func (r *DocCompletenessRule) checkGenDecl(ctx *core.FileContext, decl *ast.GenD
 		case *ast.ValueSpec:
 			// Only check if it's a single const/var declaration at top level
 			// Skip if there's a group doc comment
-			if decl.Doc != nil && len(decl.Specs) > 1 {
+			if decl.Doc.Text() != "" && len(decl.Specs) > 1 {
 				continue // Group has doc, individual items don't need it
 			}
 
@@ -281,13 +281,10 @@ func isFieldOf(expr ast.Expr, receiver string) bool {
 	return ok && ident.Name == receiver
 }
 
-// hasDoc checks if there's documentation in either group or individual doc
+// hasDoc reports whether the group or the individual doc carries real
+// documentation. Text strips comment markers and drops directives
+// (//go:generate, //nolint), which instruct tools rather than document the
+// symbol — a directive-only doc group counts as no documentation.
 func (r *DocCompletenessRule) hasDoc(groupDoc, itemDoc *ast.CommentGroup) bool {
-	if groupDoc != nil && len(groupDoc.List) > 0 {
-		return true
-	}
-	if itemDoc != nil && len(itemDoc.List) > 0 {
-		return true
-	}
-	return false
+	return groupDoc.Text() != "" || itemDoc.Text() != ""
 }

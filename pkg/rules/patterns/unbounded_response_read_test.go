@@ -555,13 +555,14 @@ func fetch() {
 
 func TestUnboundedResponseAnalyzer_UnexpectedClausesDoNotPanic(t *testing.T) {
 	analyzer := &unboundedResponseAnalyzer{}
-	state := newResponseState()
+	walker := &flowWalker[*responseState, struct{}]{rule: analyzer}
 
 	require.NotPanics(t, func() {
-		analyzer.checkClauses([]ast.Stmt{&ast.EmptyStmt{}}, state)
-		analyzer.checkSelect(&ast.SelectStmt{
+		switchStmt := &ast.SwitchStmt{Body: &ast.BlockStmt{List: []ast.Stmt{&ast.EmptyStmt{}}}}
+		walker.stmt(switchStmt, newResponseState(), struct{}{})
+		walker.stmt(&ast.SelectStmt{
 			Body: &ast.BlockStmt{List: []ast.Stmt{&ast.EmptyStmt{}}},
-		}, state)
+		}, newResponseState(), struct{}{})
 	})
 }
 

@@ -219,6 +219,42 @@ func GetUser(id string) {}
 	assert.Contains(t, violations[0].Message, "missing documentation")
 }
 
+// A directive is not documentation for types either: a type whose only "doc"
+// group is //go:generate is undocumented.
+func TestDocCompletenessTreatsDirectiveOnlyTypeDocAsMissing(t *testing.T) {
+	rule := NewDocCompletenessRule()
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/gen.go", `package main
+
+//go:generate mockgen -source=gen.go
+type User struct {
+	Name string
+}
+`))
+
+	assert.Len(t, violations, 1)
+	if len(violations) == 1 {
+		assert.Contains(t, violations[0].Message, "missing documentation")
+	}
+}
+
+// The same for constants and variables: a directive-only doc group does not
+// document the value it precedes.
+func TestDocCompletenessTreatsDirectiveOnlyValueDocAsMissing(t *testing.T) {
+	rule := NewDocCompletenessRule()
+
+	violations := rule.AnalyzeFile(docContext(t, "/src/gen.go", `package main
+
+//go:generate stringer -type=int
+const MaxSize = 100
+`))
+
+	assert.Len(t, violations, 1)
+	if len(violations) == 1 {
+		assert.Contains(t, violations[0].Message, "missing documentation")
+	}
+}
+
 // A directive above the real doc comment does not hide it.
 func TestDocCompletenessIgnoresDirectiveBeforeDoc(t *testing.T) {
 	rule := NewDocCompletenessRule()
