@@ -143,6 +143,9 @@ func isDynamicSecretMatch(match string) bool {
 		return false
 	}
 	value := strings.TrimSpace(match[separator+1:])
+	// Кавычка перед $ не делает значение литералом: PGPASSWORD="$DB_PASSWORD"
+	// — та же подстановка переменной, что и без кавычек.
+	value = strings.TrimLeft(value, "\"'`")
 	return strings.HasPrefix(value, "$")
 }
 
