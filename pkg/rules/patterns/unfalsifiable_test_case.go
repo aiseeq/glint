@@ -117,6 +117,72 @@ func (r *UnfalsifiableTestCaseRule) unfalsifiable(subject, matcher, arg string, 
 	return false
 }
 
+// openTest — тест, тело которого сейчас разбирается.
+type openTest struct {
+	name    string
+	line    int
+	depth   int
+	total   int
+	unfals  int  // не могут упасть сами по себе
+	hidden  int  // спрятаны за условием, ложным ровно при поломке
+	mayFail bool // в теле есть действие или хелпер, способные уронить тест
+}
+
+// verdict сообщает, почему тест не может упасть, и сколько в нём проверок.
+// Пустой reason означает, что претензий к тесту нет.
+func (t *openTest) verdict() (reason, assertions string) {
+	// Тест без единой проверки, в котором ничто не может упасть: он сообщает только
+	// о том, что код не бросил исключение, и годами числится покрытием.
+	if t.total == 0 {
+		if t.mayFail {
+			return "", ""
+		}
+		return "has no assertions at all — nothing in its body can fail", "0"
+	}
+	if t.total != t.unfals+t.hidden {
+		return "", ""
+	}
+	switch {
+	case t.hidden > 0 && t.unfals == 0:
+		reason = "has no assertion that could fail — every check sits behind a condition that is false exactly when the feature is broken"
+	case t.hidden > 0:
+		reason = "has no assertion that could fail — every check either holds unconditionally or sits behind a condition that is false exactly when the feature is broken"
+	default:
+		reason = "has no assertion that could fail — every check holds on any rendered page or any HTTP status"
+	}
+	return reason, strconv.Itoa(t.total)
+}
+
+// countScopes собирает переменные, в которые записан счётчик по заведомо общему
+// локатору: сравнение такого счётчика с нулём ничего не проверяет.
+func (r *UnfalsifiableTestCaseRule) countScopes(ctx *core.FileContext) map[string]bool {
+	counters := map[string]bool{}
+	for _, line := range ctx.Lines {
+		if m := r.countFrom.FindStringSubmatch(line); m != nil && r.genericScope.MatchString(m[2]) {
+			counters[m[1]] = true
+		}
+	}
+	return counters
+}
+
+// classifyAssertion учитывает очередную проверку в статистике теста.
+func (r *UnfalsifiableTestCaseRule) classifyAssertion(current *openTest, trimmed string, inGuard bool, counters map[string]bool) {
+	current.total++
+	m := r.assertion.FindStringSubmatch(trimmed)
+	switch {
+	// Спрятанность от матчера не зависит: до проверки внутри условия
+	// дело не доходит, что бы она ни утверждала.
+	case inGuard:
+		current.hidden++
+	// Проверку, которую не удалось разобрать целиком (перенесена на
+	// несколько строк), считаем содержательной: занижать здесь нельзя,
+	// иначе правило обвинит тест, у которого проверка как раз есть.
+	case m == nil:
+	case r.unfalsifiable(m[1], m[2], m[3], counters):
+		current.unfals++
+	}
+}
+
 // AnalyzeFile walks each test body and reports the ones with no falsifiable assertion.
 func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsTestFile() || (!ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile()) {
@@ -124,24 +190,8 @@ func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 	}
 
 	var violations []*core.Violation
-	counters := map[string]bool{}
-	for _, line := range ctx.Lines {
-		if m := r.countFrom.FindStringSubmatch(line); m != nil {
-			if r.genericScope.MatchString(m[2]) {
-				counters[m[1]] = true
-			}
-		}
-	}
+	counters := r.countScopes(ctx)
 
-	type openTest struct {
-		name    string
-		line    int
-		depth   int
-		total   int
-		unfals  int  // не могут упасть сами по себе
-		hidden  int  // спрятаны за условием, ложным ровно при поломке
-		mayFail bool // в теле есть действие или хелпер, способные уронить тест
-	}
 	var current *openTest
 	depth := 0
 	guardDepth := 0
@@ -150,32 +200,12 @@ func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 		if current == nil {
 			return
 		}
-		// Тест без единой проверки, в котором ничто не может упасть: он сообщает только
-		// о том, что код не бросил исключение, и годами числится покрытием.
-		if current.total == 0 && !current.mayFail {
-			v := r.CreateViolation(ctx.RelPath, current.line,
-				"Test '"+current.name+"' has no assertions at all — nothing in its body can fail")
+		if reason, assertions := current.verdict(); reason != "" {
+			v := r.CreateViolation(ctx.RelPath, current.line, "Test '"+current.name+"' "+reason)
 			v.WithCode(strings.TrimSpace(ctx.GetLine(current.line)))
 			v.WithSuggestion("Assert what the feature actually produces (a value, a specific element, a concrete status), or delete the test instead of claiming coverage")
 			v.WithContext("pattern", "unfalsifiable_test_case")
-			v.WithContext("assertions", "0")
-			violations = append(violations, v)
-			current = nil
-			return
-		}
-		if current.total > 0 && current.total == current.unfals+current.hidden {
-			reason := "every check holds on any rendered page or any HTTP status"
-			if current.hidden > 0 && current.unfals == 0 {
-				reason = "every check sits behind a condition that is false exactly when the feature is broken"
-			} else if current.hidden > 0 {
-				reason = "every check either holds unconditionally or sits behind a condition that is false exactly when the feature is broken"
-			}
-			v := r.CreateViolation(ctx.RelPath, current.line,
-				"Test '"+current.name+"' has no assertion that could fail — "+reason)
-			v.WithCode(strings.TrimSpace(ctx.GetLine(current.line)))
-			v.WithSuggestion("Assert what the feature actually produces (a value, a specific element, a concrete status), or delete the test instead of claiming coverage")
-			v.WithContext("pattern", "unfalsifiable_test_case")
-			v.WithContext("assertions", strconv.Itoa(current.total))
+			v.WithContext("assertions", assertions)
 			violations = append(violations, v)
 		}
 		current = nil
@@ -197,20 +227,7 @@ func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 					guardDepth = depth + 1
 				}
 				if r.assertionStart.MatchString(trimmed) {
-					current.total++
-					m := r.assertion.FindStringSubmatch(trimmed)
-					switch {
-					// Спрятанность от матчера не зависит: до проверки внутри условия
-					// дело не доходит, что бы она ни утверждала.
-					case guardDepth > 0 && depth >= guardDepth:
-						current.hidden++
-					// Проверку, которую не удалось разобрать целиком (перенесена на
-					// несколько строк), считаем содержательной: занижать здесь нельзя,
-					// иначе правило обвинит тест, у которого проверка как раз есть.
-					case m == nil:
-					case r.unfalsifiable(m[1], m[2], m[3], counters):
-						current.unfals++
-					}
+					r.classifyAssertion(current, trimmed, guardDepth > 0 && depth >= guardDepth, counters)
 				}
 			}
 		}
