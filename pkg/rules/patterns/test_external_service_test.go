@@ -435,3 +435,81 @@ func messages(violations []*core.Violation) []string {
 	}
 	return out
 }
+
+// Гейт часто перечисляет два секрета через ||: Saga-шный crypto2b-тест пропускался
+// именно так, и правило его не видело — разбирался только одиночный `==`.
+func TestTestExternalServiceRule_CredentialGateWithOrCondition(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"vendor/vendor_test.go": `package vendor
+
+import (
+	"os"
+	"testing"
+)
+
+func TestLiveVendorAPI(t *testing.T) {
+	if os.Getenv("VENDOR_PUBLIC_KEY") == "" || os.Getenv("VENDOR_PRIVATE_KEY") == "" {
+		t.Skip("credentials not configured")
+	}
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1, "%v", messages(violations))
+	assert.Equal(t, "credential_gate", violations[0].Context["kind"])
+	assert.Equal(t, "VENDOR_PUBLIC_KEY", violations[0].Context["env"])
+}
+
+// Тест внутри самого вендорского пакета зовёт клиента без квалификатора — по секции
+// import такой вызов не находится, и живой тест crypto2b оставался невидимым.
+func TestTestExternalServiceRule_InPackageTestIsReported(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"provider/client.go": `package provider
+
+import (
+	"net/http"
+	"time"
+)
+
+type Config struct {
+	BaseURL   string
+	PublicKey string
+}
+
+type HTTPClient struct {
+	config Config
+	http   *http.Client
+}
+
+func NewHTTPClient(cfg Config) *HTTPClient {
+	return &HTTPClient{config: cfg, http: &http.Client{Timeout: time.Second}}
+}
+
+func (c *HTTPClient) TakeChannel(id string) error {
+	req, err := http.NewRequest("POST", c.config.BaseURL+"/channel/"+id, nil)
+	if err != nil {
+		return err
+	}
+	_, err = c.http.Do(req)
+	return err
+}
+`,
+		"provider/client_live_test.go": `package provider
+
+import "testing"
+
+func TestLiveChannel(t *testing.T) {
+	client := NewHTTPClient(Config{})
+	_ = client.TakeChannel("42")
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1, "%v", messages(violations))
+	assert.Equal(t, "outbound_client", violations[0].Context["kind"])
+	assert.Contains(t, violations[0].Message, "TestLiveChannel")
+}
