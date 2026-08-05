@@ -98,12 +98,6 @@ func (p idempotencyPath) clone() idempotencyPath {
 	return clone
 }
 
-type idempotencyFlow struct {
-	next      []idempotencyPath
-	breaks    []idempotencyPath
-	continues []idempotencyPath
-}
-
 type idempotencyFunctionAnalyzer struct {
 	rule                     *IdempotencyCheckThenCreateRule
 	ctx                      *core.FileContext
@@ -145,7 +139,7 @@ func (a *idempotencyFunctionAnalyzer) analyzeFuncDecl(fn *ast.FuncDecl) {
 	declareIdempotencyFields(scope, fn.Recv, a.dataAccessBindings)
 	declareIdempotencyFields(scope, fn.Type.Params, a.dataAccessBindings)
 	declareIdempotencyFields(scope, fn.Type.Results, a.dataAccessBindings)
-	a.analyzeBlock([]idempotencyPath{newIdempotencyPath()}, scope, fn.Body.List)
+	a.walkBody(fn.Body, scope)
 }
 
 func (a *idempotencyFunctionAnalyzer) analyzeFuncLit(fn *ast.FuncLit, parent *idempotencyScope) {
@@ -156,86 +150,131 @@ func (a *idempotencyFunctionAnalyzer) analyzeFuncLit(fn *ast.FuncLit, parent *id
 	scope := newIdempotencyScope(parent)
 	declareIdempotencyFields(scope, fn.Type.Params, a.dataAccessBindings)
 	declareIdempotencyFields(scope, fn.Type.Results, a.dataAccessBindings)
-	a.analyzeBlock([]idempotencyPath{newIdempotencyPath()}, scope, fn.Body.List)
+	a.walkBody(fn.Body, scope)
 }
 
-func (a *idempotencyFunctionAnalyzer) analyzeBlock(paths []idempotencyPath, scope *idempotencyScope, statements []ast.Stmt) idempotencyFlow {
-	flow := idempotencyFlow{next: paths}
-	for _, statement := range statements {
-		if len(flow.next) == 0 {
-			break
-		}
-		statementFlow := a.analyzeStatement(flow.next, scope, statement)
-		flow.breaks = append(flow.breaks, statementFlow.breaks...)
-		flow.continues = append(flow.continues, statementFlow.continues...)
-		flow.next = statementFlow.next
+func (a *idempotencyFunctionAnalyzer) walkBody(body *ast.BlockStmt, scope *idempotencyScope) {
+	walker := &flowWalker[[]idempotencyPath, *idempotencyScope]{rule: a}
+	walker.walk(body, []idempotencyPath{newIdempotencyPath()}, scope)
+}
+
+func (a *idempotencyFunctionAnalyzer) cloneState(paths []idempotencyPath) []idempotencyPath {
+	return cloneIdempotencyPaths(paths)
+}
+
+func (a *idempotencyFunctionAnalyzer) joinStates(left, right []idempotencyPath) []idempotencyPath {
+	return append(left, right...)
+}
+
+func (a *idempotencyFunctionAnalyzer) liveState(paths []idempotencyPath) bool { return len(paths) > 0 }
+
+func (a *idempotencyFunctionAnalyzer) deadState() []idempotencyPath { return nil }
+
+func (a *idempotencyFunctionAnalyzer) enterScope(
+	kind flowScopeKind,
+	_ ast.Node,
+	parent *idempotencyScope,
+	paths []idempotencyPath,
+) (*idempotencyScope, []idempotencyPath) {
+	if kind == flowScopeRangeBody {
+		// The legacy engine analyzed range bodies directly inside the
+		// key/value scope without an extra lexical level.
+		return parent, paths
 	}
-	return flow
+	return newIdempotencyScope(parent), paths
 }
 
-func (a *idempotencyFunctionAnalyzer) analyzeStatement(paths []idempotencyPath, scope *idempotencyScope, statement ast.Stmt) idempotencyFlow {
+func (a *idempotencyFunctionAnalyzer) leaveScope(flowScopeKind, *idempotencyScope, *flowEdges[[]idempotencyPath]) {
+}
+
+func (a *idempotencyFunctionAnalyzer) simpleStmt(
+	statement ast.Stmt,
+	paths []idempotencyPath,
+	scope *idempotencyScope,
+) ([]idempotencyPath, bool) {
 	switch node := statement.(type) {
 	case *ast.AssignStmt:
 		paths = a.applyCalls(paths, scope, node)
 		paths = invalidateIdempotencyAssignments(paths, scope, node)
 		declareIdempotencyAssignment(scope, node)
-		return idempotencyFlow{next: paths}
+		return paths, false
 	case *ast.DeclStmt:
-		return idempotencyFlow{next: a.analyzeDeclaration(paths, scope, node.Decl)}
+		return a.analyzeDeclaration(paths, scope, node.Decl), false
 	case *ast.ReturnStmt:
 		a.applyCalls(paths, scope, node)
-		return idempotencyFlow{}
-	case *ast.BranchStmt:
-		if node.Label != nil {
-			return idempotencyFlow{}
-		}
-		switch node.Tok {
-		case token.BREAK:
-			return idempotencyFlow{breaks: paths}
-		case token.CONTINUE:
-			return idempotencyFlow{continues: paths}
-		default:
-			return idempotencyFlow{}
-		}
-	case *ast.BlockStmt:
-		return a.analyzeBlock(paths, newIdempotencyScope(scope), node.List)
-	case *ast.IfStmt:
-		return a.analyzeIf(paths, scope, node)
-	case *ast.ForStmt:
-		return a.analyzeFor(paths, scope, node)
-	case *ast.RangeStmt:
-		return a.analyzeRange(paths, scope, node)
-	case *ast.SwitchStmt:
-		return a.analyzeSwitch(paths, scope, node)
-	case *ast.TypeSwitchStmt:
-		return a.analyzeTypeSwitch(paths, scope, node)
-	case *ast.SelectStmt:
-		return a.analyzeSelect(paths, scope, node)
-	case *ast.LabeledStmt:
-		return a.analyzeStatement(paths, scope, node.Stmt)
+		return nil, true
 	case *ast.EmptyStmt:
-		return idempotencyFlow{next: paths}
+		return paths, false
 	default:
-		return idempotencyFlow{next: a.applyCalls(paths, scope, node)}
+		return a.applyCalls(paths, scope, node), false
 	}
 }
 
-func (a *idempotencyFunctionAnalyzer) analyzeIf(paths []idempotencyPath, parent *idempotencyScope, statement *ast.IfStmt) idempotencyFlow {
-	scope := newIdempotencyScope(parent)
-	if statement.Init != nil {
-		paths = a.analyzeStatement(paths, scope, statement.Init).next
+func (a *idempotencyFunctionAnalyzer) ifCondition(
+	statement *ast.IfStmt,
+	paths []idempotencyPath,
+	scope *idempotencyScope,
+) ([]idempotencyPath, []idempotencyPath) {
+	return a.analyzeCondition(paths, scope, statement.Cond)
+}
+
+func (a *idempotencyFunctionAnalyzer) flowExpr(
+	expr ast.Expr,
+	paths []idempotencyPath,
+	scope *idempotencyScope,
+) []idempotencyPath {
+	return a.applyCalls(paths, scope, expr)
+}
+
+func (a *idempotencyFunctionAnalyzer) rangeVars(
+	statement *ast.RangeStmt,
+	paths []idempotencyPath,
+	scope *idempotencyScope,
+) []idempotencyPath {
+	if statement.Tok == token.DEFINE {
+		if ident, ok := statement.Key.(*ast.Ident); ok {
+			scope.declare(ident)
+		}
+		if ident, ok := statement.Value.(*ast.Ident); ok {
+			scope.declare(ident)
+		}
 	}
-	truePaths, falsePaths := a.analyzeCondition(paths, scope, statement.Cond)
-	body := a.analyzeBlock(truePaths, newIdempotencyScope(scope), statement.Body.List)
-	otherwise := idempotencyFlow{next: falsePaths}
-	if statement.Else != nil {
-		otherwise = a.analyzeStatement(falsePaths, scope, statement.Else)
+	return paths
+}
+
+func (a *idempotencyFunctionAnalyzer) typeSwitchGuard(
+	statement ast.Stmt,
+	paths []idempotencyPath,
+	scope *idempotencyScope,
+) []idempotencyPath {
+	next, _ := a.simpleStmt(statement, paths, scope)
+	return next
+}
+
+func (a *idempotencyFunctionAnalyzer) caseClause(
+	sw ast.Stmt,
+	clause *ast.CaseClause,
+	paths []idempotencyPath,
+	parent *idempotencyScope,
+) ([]idempotencyPath, *idempotencyScope) {
+	if _, isTypeSwitch := sw.(*ast.TypeSwitchStmt); !isTypeSwitch {
+		for _, expression := range clause.List {
+			paths = a.applyCalls(paths, parent, expression)
+		}
 	}
-	return idempotencyFlow{
-		next:      mergeIdempotencyPaths(append(body.next, otherwise.next...)),
-		breaks:    append(body.breaks, otherwise.breaks...),
-		continues: append(body.continues, otherwise.continues...),
-	}
+	return paths, newIdempotencyScope(parent)
+}
+
+func (a *idempotencyFunctionAnalyzer) commClause(
+	_ *ast.CommClause,
+	paths []idempotencyPath,
+	parent *idempotencyScope,
+) ([]idempotencyPath, *idempotencyScope) {
+	return paths, newIdempotencyScope(parent)
+}
+
+func (a *idempotencyFunctionAnalyzer) normalize(edges *flowEdges[[]idempotencyPath]) {
+	edges.next = mergeIdempotencyPaths(edges.next)
 }
 
 func (a *idempotencyFunctionAnalyzer) analyzeCondition(paths []idempotencyPath, scope *idempotencyScope, expression ast.Expr) ([]idempotencyPath, []idempotencyPath) {
@@ -263,127 +302,6 @@ func (a *idempotencyFunctionAnalyzer) analyzeCondition(paths []idempotencyPath, 
 
 	paths = a.applyCalls(paths, scope, expression)
 	return cloneIdempotencyPaths(paths), cloneIdempotencyPaths(paths)
-}
-
-func (a *idempotencyFunctionAnalyzer) analyzeFor(paths []idempotencyPath, parent *idempotencyScope, statement *ast.ForStmt) idempotencyFlow {
-	scope := newIdempotencyScope(parent)
-	if statement.Init != nil {
-		paths = a.analyzeStatement(paths, scope, statement.Init).next
-	}
-	if statement.Cond != nil {
-		paths = a.applyCalls(paths, scope, statement.Cond)
-	}
-	zeroIterations := cloneIdempotencyPaths(paths)
-	body := a.analyzeBlock(cloneIdempotencyPaths(paths), newIdempotencyScope(scope), statement.Body.List)
-	iterationEnds := append(body.next, body.continues...)
-	if statement.Post != nil {
-		iterationEnds = a.analyzeStatement(iterationEnds, scope, statement.Post).next
-	}
-	after := body.breaks
-	if statement.Cond != nil {
-		after = append(append(zeroIterations, after...), iterationEnds...)
-	}
-	return idempotencyFlow{next: mergeIdempotencyPaths(after)}
-}
-
-func (a *idempotencyFunctionAnalyzer) analyzeRange(paths []idempotencyPath, parent *idempotencyScope, statement *ast.RangeStmt) idempotencyFlow {
-	paths = a.applyCalls(paths, parent, statement.X)
-	bodyScope := newIdempotencyScope(parent)
-	if statement.Tok == token.DEFINE {
-		if ident, ok := statement.Key.(*ast.Ident); ok {
-			bodyScope.declare(ident)
-		}
-		if ident, ok := statement.Value.(*ast.Ident); ok {
-			bodyScope.declare(ident)
-		}
-	}
-	zeroIterations := cloneIdempotencyPaths(paths)
-	body := a.analyzeBlock(cloneIdempotencyPaths(paths), bodyScope, statement.Body.List)
-	iterationEnds := append(body.next, body.continues...)
-	return idempotencyFlow{next: mergeIdempotencyPaths(append(append(zeroIterations, body.breaks...), iterationEnds...))}
-}
-
-func (a *idempotencyFunctionAnalyzer) analyzeSwitch(paths []idempotencyPath, parent *idempotencyScope, statement *ast.SwitchStmt) idempotencyFlow {
-	scope := newIdempotencyScope(parent)
-	if statement.Init != nil {
-		paths = a.analyzeStatement(paths, scope, statement.Init).next
-	}
-	if statement.Tag != nil {
-		paths = a.applyCalls(paths, scope, statement.Tag)
-	}
-	flow := idempotencyFlow{}
-	hasDefault := false
-	for _, item := range statement.Body.List {
-		clause, ok := item.(*ast.CaseClause)
-		if !ok {
-			continue
-		}
-		clausePaths := cloneIdempotencyPaths(paths)
-		if clause.List == nil {
-			hasDefault = true
-		}
-		for _, expression := range clause.List {
-			clausePaths = a.applyCalls(clausePaths, scope, expression)
-		}
-		clauseFlow := a.analyzeBlock(clausePaths, newIdempotencyScope(scope), clause.Body)
-		flow.next = append(flow.next, clauseFlow.next...)
-		flow.next = append(flow.next, clauseFlow.breaks...)
-		flow.continues = append(flow.continues, clauseFlow.continues...)
-	}
-	if !hasDefault {
-		flow.next = append(flow.next, cloneIdempotencyPaths(paths)...)
-	}
-	flow.next = mergeIdempotencyPaths(flow.next)
-	return flow
-}
-
-func (a *idempotencyFunctionAnalyzer) analyzeTypeSwitch(paths []idempotencyPath, parent *idempotencyScope, statement *ast.TypeSwitchStmt) idempotencyFlow {
-	scope := newIdempotencyScope(parent)
-	if statement.Init != nil {
-		paths = a.analyzeStatement(paths, scope, statement.Init).next
-	}
-	paths = a.analyzeStatement(paths, scope, statement.Assign).next
-	flow := idempotencyFlow{}
-	hasDefault := false
-	for _, item := range statement.Body.List {
-		clause, ok := item.(*ast.CaseClause)
-		if !ok {
-			continue
-		}
-		if clause.List == nil {
-			hasDefault = true
-		}
-		clauseFlow := a.analyzeBlock(cloneIdempotencyPaths(paths), newIdempotencyScope(scope), clause.Body)
-		flow.next = append(flow.next, clauseFlow.next...)
-		flow.next = append(flow.next, clauseFlow.breaks...)
-		flow.continues = append(flow.continues, clauseFlow.continues...)
-	}
-	if !hasDefault {
-		flow.next = append(flow.next, cloneIdempotencyPaths(paths)...)
-	}
-	flow.next = mergeIdempotencyPaths(flow.next)
-	return flow
-}
-
-func (a *idempotencyFunctionAnalyzer) analyzeSelect(paths []idempotencyPath, scope *idempotencyScope, statement *ast.SelectStmt) idempotencyFlow {
-	flow := idempotencyFlow{}
-	for _, item := range statement.Body.List {
-		clause, ok := item.(*ast.CommClause)
-		if !ok {
-			continue
-		}
-		clauseScope := newIdempotencyScope(scope)
-		clausePaths := cloneIdempotencyPaths(paths)
-		if clause.Comm != nil {
-			clausePaths = a.analyzeStatement(clausePaths, clauseScope, clause.Comm).next
-		}
-		clauseFlow := a.analyzeBlock(clausePaths, clauseScope, clause.Body)
-		flow.next = append(flow.next, clauseFlow.next...)
-		flow.next = append(flow.next, clauseFlow.breaks...)
-		flow.continues = append(flow.continues, clauseFlow.continues...)
-	}
-	flow.next = mergeIdempotencyPaths(flow.next)
-	return flow
 }
 
 func (a *idempotencyFunctionAnalyzer) analyzeDeclaration(paths []idempotencyPath, scope *idempotencyScope, declaration ast.Decl) []idempotencyPath {

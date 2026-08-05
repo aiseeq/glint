@@ -35,20 +35,14 @@ func NewFinancialConstantsRule() *FinancialConstantsRule {
 // shouldSkipFile checks if file should be skipped
 func (r *FinancialConstantsRule) shouldSkipFile(path string) bool {
 	pathLower := strings.ToLower(path)
+	if isConfigOrConstantsPath(pathLower) {
+		return true
+	}
 	skipPatterns := []string{
-		"config/",
-		"/config/",
-		"_config.go",
-		"config.go",
-		"constants/",
-		"/constants/",
-		"_constants.go",
-		"constants.go",
-		"_test.go",     // Skip test files - they may have test constants
-		"/math.go",     // Skip math utility files (percentage, days calculations)
-		"math/",        // Skip math directories
-		"/monitoring/", // Skip monitoring files (thresholds are not financial)
-		"monitoring/",  // Skip monitoring directories
+		"_test.go",    // Skip test files - they may have test constants
+		"/math.go",    // Skip math utility files (percentage, days calculations)
+		"math/",       // Skip math directories
+		"monitoring/", // Skip monitoring files/directories (thresholds are not financial)
 	}
 	for _, pattern := range skipPatterns {
 		if strings.Contains(pathLower, pattern) {

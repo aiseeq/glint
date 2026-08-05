@@ -2,7 +2,6 @@ package duplication
 
 import (
 	"strconv"
-	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -55,36 +54,8 @@ func (r *DuplicateBlockRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 		return nil
 	}
 
-	rawStringLines := rawStringLineSet(ctx.Lines)
-
-	// Normalize all lines
-	normalized := make([]string, len(ctx.Lines))
-	for i, line := range ctx.Lines {
-		if rawStringLines[i] {
-			normalized[i] = ""
-			continue
-		}
-		normalized[i] = normalizeLine(line)
-	}
-
 	// Find duplicate blocks using sliding window
-	return r.findDuplicateWindows(ctx, normalized)
-}
-
-func rawStringLineSet(lines []string) map[int]bool {
-	result := make(map[int]bool)
-	inRawString := false
-	for i, line := range lines {
-		if strings.Count(line, "`")%2 == 1 {
-			result[i] = true
-			inRawString = !inRawString
-			continue
-		}
-		if inRawString {
-			result[i] = true
-		}
-	}
-	return result
+	return r.findDuplicateWindows(ctx, normalizeFileLines(ctx.Lines))
 }
 
 // findDuplicateWindows hashes every candidate window once and groups equal

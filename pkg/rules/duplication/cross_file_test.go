@@ -176,6 +176,32 @@ func TestCrossFileDuplicateReportsRegionOnce(t *testing.T) {
 	assert.Len(t, violations, 1, "one finding for the whole copied region")
 }
 
+// Content inside raw-string literals is data, not code: duplicate-block blanks
+// those lines before hashing, and the cross-file rule must judge the same
+// content the same way.
+func TestCrossFileDuplicateIgnoresRawStringContent(t *testing.T) {
+	rule := NewCrossFileDuplicateRule()
+	rule.minBlockSize = 8
+
+	sql := "const query = `\n" +
+		"SELECT users.id, users.name, users.email, users.created_at\n" +
+		"FROM users\n" +
+		"JOIN orders ON orders.user_id = users.id\n" +
+		"JOIN payments ON payments.order_id = orders.id\n" +
+		"WHERE payments.status = 'settled' AND orders.total > 1000\n" +
+		"GROUP BY users.id, users.name, users.email, users.created_at\n" +
+		"HAVING COUNT(orders.id) > 10\n" +
+		"ORDER BY users.created_at DESC\n" +
+		"`\n"
+
+	first := createTestContext(t, "backend/reports.go", "package reports\n\n"+sql)
+	second := createTestContext(t, "backend/exports.go", "package exports\n\n"+sql)
+
+	assert.Empty(t, rule.AnalyzeFile(first))
+	assert.Empty(t, rule.AnalyzeFile(second),
+		"identical raw-string content is not code duplication")
+}
+
 func TestCrossFileDuplicateRule_ResetState(t *testing.T) {
 	rule := NewCrossFileDuplicateRule()
 

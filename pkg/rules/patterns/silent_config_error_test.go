@@ -1,6 +1,9 @@
 package patterns
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -79,6 +82,21 @@ func loadEnv() error {
 			wantCount: 0,
 		},
 		{
+			name: "inline if err := godotenv.Load(); nil == err (yoda) - flagged",
+			code: `package config
+
+import "github.com/joho/godotenv"
+
+func loadEnv() error {
+	if err := godotenv.Load("/tmp/.env"); nil == err {
+		return nil
+	}
+	return nil
+}`,
+			filename:  "config/loader.go",
+			wantCount: 1,
+		},
+		{
 			name: "non-config callee - not flagged",
 			code: `package app
 
@@ -134,6 +152,57 @@ func TestLoad(t *testing.T) {
 			}
 		})
 	}
+}
+
+// isErrEqNilCheck обещает сверять имя переменной в условии с err-переменной,
+// присвоенной в assign: чужой err из внешней области — не проверка этого err.
+func TestIsErrEqNilCheckMatchesAssignedErrVariable(t *testing.T) {
+	parseBody := func(t *testing.T, body string) []ast.Stmt {
+		t.Helper()
+		src := "package p\n\nfunc f() {\n" + body + "\n}\n"
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "p.go", src, 0)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return file.Decls[0].(*ast.FuncDecl).Body.List
+	}
+
+	t.Run("same err variable - matches", func(t *testing.T) {
+		stmts := parseBody(t, "err := load()\nif err == nil {\n}")
+		assign := stmts[0].(*ast.AssignStmt)
+		cond := stmts[1].(*ast.IfStmt).Cond
+		if !isErrEqNilCheck(cond, assign) {
+			t.Error("want true: condition checks the err assigned in assign")
+		}
+	})
+
+	t.Run("yoda nil == err - matches", func(t *testing.T) {
+		stmts := parseBody(t, "err := load()\nif nil == err {\n}")
+		assign := stmts[0].(*ast.AssignStmt)
+		cond := stmts[1].(*ast.IfStmt).Cond
+		if !isErrEqNilCheck(cond, assign) {
+			t.Error("want true: nil == err is the same check in reversed order")
+		}
+	})
+
+	t.Run("different err variable from outer scope - no match", func(t *testing.T) {
+		stmts := parseBody(t, "otherErr := load()\nif err == nil {\n}")
+		assign := stmts[0].(*ast.AssignStmt)
+		cond := stmts[1].(*ast.IfStmt).Cond
+		if isErrEqNilCheck(cond, assign) {
+			t.Error("want false: condition checks an err the assign did not bind")
+		}
+	})
+
+	t.Run("non-error variable bound by assign - no match", func(t *testing.T) {
+		stmts := parseBody(t, "cfg, err := load()\nif cfg == nil {\n}")
+		assign := stmts[0].(*ast.AssignStmt)
+		cond := stmts[1].(*ast.IfStmt).Cond
+		if isErrEqNilCheck(cond, assign) {
+			t.Error("want false: cfg == nil is not an error check")
+		}
+	})
 }
 
 func TestSilentConfigErrorRule_PathGatedBlankAssign(t *testing.T) {

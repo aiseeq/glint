@@ -92,22 +92,13 @@ func (r *OrphanedInterfaceRule) shouldSkipFile(ctx *core.FileContext) bool {
 		return true
 	}
 
-	// Skip vendor, node_modules
-	if strings.Contains(path, "vendor/") || strings.Contains(path, "node_modules/") {
-		return true
-	}
-
-	// Skip generated files
-	if strings.Contains(path, "generated") || strings.Contains(path, ".gen.") {
+	if isVendoredOrGeneratedPath(path) {
 		return true
 	}
 
 	// Skip interface definition directories (contracts, interfaces packages)
 	// These are meant to be implemented elsewhere
-	if strings.Contains(path, "/contracts/") ||
-		strings.Contains(path, "/interfaces/") ||
-		strings.Contains(path, "contracts/") ||
-		strings.Contains(path, "interfaces/") {
+	if strings.Contains(path, "contracts/") || strings.Contains(path, "interfaces/") {
 		return true
 	}
 
@@ -253,7 +244,7 @@ func (r *OrphanedInterfaceRule) findImplementations(ctx *core.FileContext, inter
 		}
 
 		// Get receiver type name
-		recvType := r.getReceiverTypeName(funcDecl.Recv)
+		recvType := receiverTypeName(funcDecl.Recv)
 		if recvType == "" {
 			return true
 		}
@@ -281,27 +272,6 @@ func (r *OrphanedInterfaceRule) findImplementations(ctx *core.FileContext, inter
 	}
 
 	return implementations
-}
-
-// getReceiverTypeName extracts the type name from a method receiver
-func (r *OrphanedInterfaceRule) getReceiverTypeName(recv *ast.FieldList) string {
-	if recv == nil || len(recv.List) == 0 {
-		return ""
-	}
-
-	recvType := recv.List[0].Type
-
-	// Handle pointer receiver (*T)
-	if starExpr, ok := recvType.(*ast.StarExpr); ok {
-		recvType = starExpr.X
-	}
-
-	// Get the identifier
-	if ident, ok := recvType.(*ast.Ident); ok {
-		return ident.Name
-	}
-
-	return ""
 }
 
 // implementsInterface checks if a type implements an interface

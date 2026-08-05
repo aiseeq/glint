@@ -13,6 +13,11 @@ func init() {
 	rules.Register(NewCrossFileDuplicateRule())
 }
 
+// defaultCrossFileBlockSize is how many consecutive lines have to repeat in
+// another file before the copy is reported. Higher than a single line yet lower
+// than the within-file threshold: a cross-file copy is significant earlier.
+const defaultCrossFileBlockSize = 10
+
 // BlockLocation stores where a code block was found
 type BlockLocation struct {
 	File      string
@@ -43,7 +48,7 @@ func NewCrossFileDuplicateRule() *CrossFileDuplicateRule {
 			"Detects duplicate code blocks across different files",
 			core.SeverityHigh,
 		),
-		minBlockSize: 10, // Higher threshold for cross-file (more significant)
+		minBlockSize: defaultCrossFileBlockSize,
 		firstSeen:    make(map[windowHash]BlockLocation),
 		reported:     make(map[windowHash]bool),
 	}
@@ -54,7 +59,7 @@ func (r *CrossFileDuplicateRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
-	r.minBlockSize = r.GetIntSetting("min_block_size", 10)
+	r.minBlockSize = r.GetIntSetting("min_block_size", defaultCrossFileBlockSize)
 	return nil
 }
 
@@ -77,14 +82,8 @@ func (r *CrossFileDuplicateRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 		return nil
 	}
 
-	// Normalize lines
-	normalized := make([]string, len(ctx.Lines))
-	for i, line := range ctx.Lines {
-		normalized[i] = normalizeLine(line)
-	}
-
 	// Collect blocks from this file and check for duplicates
-	return r.processFile(ctx, normalized)
+	return r.processFile(ctx, normalizeFileLines(ctx.Lines))
 }
 
 func (r *CrossFileDuplicateRule) processFile(ctx *core.FileContext, normalized []string) []*core.Violation {
@@ -177,9 +176,6 @@ func (r *CrossFileDuplicateRule) collectBlocks(ctx *core.FileContext, normalized
 	return blocks
 }
 
-// isCrossFileTrivialLine extends the shared triviality check with lines that
-// legitimately repeat across files: imports, type switches, and the standard
-// HTTP handler boilerplate.
 // isDuplicationCandidate reports whether the file is in a language whose blocks
 // this rule compares. TypeScript and JavaScript duplicate as readily as Go, and
 // a frontend is where copied components accumulate.
@@ -187,6 +183,9 @@ func isDuplicationCandidate(ctx *core.FileContext) bool {
 	return ctx.IsGoFile() || ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile()
 }
 
+// isCrossFileTrivialLine extends the shared triviality check with lines that
+// legitimately repeat across files: imports, type switches, and the standard
+// HTTP handler boilerplate.
 func isCrossFileTrivialLine(line string) bool {
 	if isTrivialLine(line) || isFrontendBoilerplate(line) {
 		return true

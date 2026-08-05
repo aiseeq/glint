@@ -197,6 +197,40 @@ func main() {
 	}
 }
 
+func TestUnusedSymbolsCountsSiblingUsage(t *testing.T) {
+	dir := t.TempDir()
+	mainCode := "package demo\n\nfunc helper() {}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte(mainCode), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "other.go"),
+		[]byte("package demo\n\nfunc Caller() { helper() }\n"), 0644))
+
+	path := filepath.Join(dir, "main.go")
+	ctx := core.NewFileContext(path, dir, []byte(mainCode), core.DefaultConfig())
+	fset, astFile, err := core.SharedParser().ParseGoFile(path, []byte(mainCode))
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, astFile)
+
+	violations := NewUnusedSymbolsRule().AnalyzeFile(ctx)
+	assert.Empty(t, violations, "helper is used from a sibling file of the same package")
+}
+
+func TestUnusedSymbolsCountsSiblingTestFileUsage(t *testing.T) {
+	dir := t.TempDir()
+	mainCode := "package demo\n\nfunc testedHelper() {}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte(mainCode), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "demo_test.go"),
+		[]byte("package demo\n\nimport \"testing\"\n\nfunc TestOnly(t *testing.T) { testedHelper() }\n"), 0644))
+
+	path := filepath.Join(dir, "main.go")
+	ctx := core.NewFileContext(path, dir, []byte(mainCode), core.DefaultConfig())
+	fset, astFile, err := core.SharedParser().ParseGoFile(path, []byte(mainCode))
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, astFile)
+
+	violations := NewUnusedSymbolsRule().AnalyzeFile(ctx)
+	assert.Empty(t, violations, "a symbol used only by package tests is not dead code")
+}
+
 func TestUnusedSymbolsReportsSiblingReadError(t *testing.T) {
 	code := "package main\nfunc unused() {}"
 	path := filepath.Join(t.TempDir(), "missing", "main.go")

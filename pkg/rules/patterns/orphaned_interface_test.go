@@ -45,6 +45,28 @@ func Sum[T Number](items []T) int {
 	require.Empty(t, NewOrphanedInterfaceRule().AnalyzeFile(ctx))
 }
 
+// Метод generic-типа (Buffer[T]) — реализация: интерфейс не сирота.
+func TestOrphanedInterfaceGenericReceiverImplements(t *testing.T) {
+	src := `package sample
+
+type Flusher interface{ FlushIt() error }
+
+type Buffer[T any] struct{ items []T }
+
+func (b *Buffer[T]) FlushIt() error {
+	b.items = nil
+	return nil
+}
+`
+	ctx, err := core.NewFileContextChecked("buffer.go", ".", []byte(src), core.DefaultConfig())
+	require.NoError(t, err)
+	fset, file, err := core.NewParser().ParseGoFile(ctx.Path, ctx.Content)
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, file)
+
+	require.Empty(t, NewOrphanedInterfaceRule().AnalyzeFile(ctx))
+}
+
 // Интерфейс, встроенный в другой интерфейс (type B interface { A }), используется.
 func TestOrphanedInterfaceEmbeddingIsUsage(t *testing.T) {
 	src := `package sample

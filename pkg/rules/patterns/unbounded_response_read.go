@@ -125,61 +125,43 @@ type unboundedResponseAnalyzer struct {
 	httpAliases map[string]struct{}
 }
 
-type responseFlow struct {
-	next      *responseState
-	breaks    *responseState
-	continues *responseState
-}
-
 func (a *unboundedResponseAnalyzer) checkFunctionBody(body *ast.BlockStmt) {
-	a.checkBlock(body, newResponseState())
+	walker := &flowWalker[*responseState, struct{}]{rule: a}
+	walker.walk(body, newResponseState(), struct{}{})
 }
 
-func (a *unboundedResponseAnalyzer) checkBlock(block *ast.BlockStmt, state *responseState) responseFlow {
-	blockState := state.clone()
-	blockState.pushScope()
-	flow := a.checkStmtList(block.List, blockState)
-	flow.popScope()
-	return flow
+func (a *unboundedResponseAnalyzer) cloneState(state *responseState) *responseState {
+	return state.clone()
 }
 
-func (a *unboundedResponseAnalyzer) checkStmtList(stmts []ast.Stmt, state *responseState) responseFlow {
-	flow := responseFlow{next: state}
-	for _, stmt := range stmts {
-		if flow.next == nil {
-			break
+func (a *unboundedResponseAnalyzer) joinStates(left, right *responseState) *responseState {
+	return mergeResponseStates(left, right)
+}
+
+func (a *unboundedResponseAnalyzer) liveState(state *responseState) bool { return state != nil }
+
+func (a *unboundedResponseAnalyzer) deadState() *responseState { return nil }
+
+func (a *unboundedResponseAnalyzer) enterScope(
+	_ flowScopeKind,
+	_ ast.Node,
+	parent struct{},
+	state *responseState,
+) (struct{}, *responseState) {
+	state.pushScope()
+	return parent, state
+}
+
+func (a *unboundedResponseAnalyzer) leaveScope(_ flowScopeKind, _ struct{}, edges *flowEdges[*responseState]) {
+	for _, state := range []*responseState{edges.next, edges.breaks, edges.continues} {
+		if state != nil {
+			state.popScope()
 		}
-		stmtFlow := a.checkStmt(stmt, flow.next)
-		flow.breaks = mergeResponseStateOptions(flow.breaks, stmtFlow.breaks)
-		flow.continues = mergeResponseStateOptions(flow.continues, stmtFlow.continues)
-		flow.next = stmtFlow.next
-	}
-	return flow
-}
-
-func (a *unboundedResponseAnalyzer) checkStmt(stmt ast.Stmt, state *responseState) responseFlow {
-	switch stmt := stmt.(type) {
-	case *ast.IfStmt:
-		return a.checkIf(stmt, state)
-	case *ast.ForStmt:
-		return a.checkFor(stmt, state)
-	case *ast.RangeStmt:
-		return a.checkRange(stmt, state)
-	case *ast.SwitchStmt:
-		return a.checkSwitch(stmt, state)
-	case *ast.TypeSwitchStmt:
-		return a.checkTypeSwitch(stmt, state)
-	case *ast.SelectStmt:
-		return a.checkSelect(stmt, state)
-	default:
-		return a.checkSimpleStmt(stmt, state)
 	}
 }
 
-func (a *unboundedResponseAnalyzer) checkSimpleStmt(stmt ast.Stmt, state *responseState) responseFlow {
+func (a *unboundedResponseAnalyzer) simpleStmt(stmt ast.Stmt, state *responseState, _ struct{}) (*responseState, bool) {
 	switch stmt := stmt.(type) {
-	case *ast.BlockStmt:
-		return a.checkBlock(stmt, state)
 	case *ast.AssignStmt:
 		a.checkAssignment(stmt, state)
 	case *ast.DeclStmt:
@@ -187,7 +169,7 @@ func (a *unboundedResponseAnalyzer) checkSimpleStmt(stmt ast.Stmt, state *respon
 	case *ast.ExprStmt:
 		a.checkExpr(stmt.X, state)
 		if isPanicStatement(stmt) {
-			return responseFlow{}
+			return nil, true
 		}
 	case *ast.DeferStmt:
 		a.checkExpr(stmt.Call, state)
@@ -197,29 +179,69 @@ func (a *unboundedResponseAnalyzer) checkSimpleStmt(stmt ast.Stmt, state *respon
 		for _, expr := range stmt.Results {
 			a.checkExpr(expr, state)
 		}
-		return responseFlow{}
-	case *ast.BranchStmt:
-		if stmt.Label != nil {
-			return responseFlow{}
-		}
-		switch stmt.Tok {
-		case token.BREAK:
-			return responseFlow{breaks: state}
-		case token.CONTINUE:
-			return responseFlow{continues: state}
-		default:
-			return responseFlow{}
-		}
+		return nil, true
 	case *ast.SendStmt:
 		a.checkExpr(stmt.Chan, state)
 		a.checkExpr(stmt.Value, state)
 	case *ast.IncDecStmt:
 		a.checkExpr(stmt.X, state)
-	case *ast.LabeledStmt:
-		return a.checkStmt(stmt.Stmt, state)
 	}
-	return responseFlow{next: state}
+	return state, false
 }
+
+func (a *unboundedResponseAnalyzer) ifCondition(
+	stmt *ast.IfStmt,
+	state *responseState,
+	_ struct{},
+) (*responseState, *responseState) {
+	a.checkExpr(stmt.Cond, state)
+	return state, state.clone()
+}
+
+func (a *unboundedResponseAnalyzer) flowExpr(expr ast.Expr, state *responseState, _ struct{}) *responseState {
+	a.checkExpr(expr, state)
+	return state
+}
+
+func (a *unboundedResponseAnalyzer) rangeVars(stmt *ast.RangeStmt, state *responseState, _ struct{}) *responseState {
+	define := stmt.Tok == token.DEFINE
+	if ident, ok := stmt.Key.(*ast.Ident); ok {
+		state.assign(ident.Name, false, define)
+	}
+	if ident, ok := stmt.Value.(*ast.Ident); ok {
+		state.assign(ident.Name, false, define)
+	}
+	return state
+}
+
+func (a *unboundedResponseAnalyzer) typeSwitchGuard(stmt ast.Stmt, state *responseState, scope struct{}) *responseState {
+	next, _ := a.simpleStmt(stmt, state, scope)
+	return next
+}
+
+func (a *unboundedResponseAnalyzer) caseClause(
+	_ ast.Stmt,
+	clause *ast.CaseClause,
+	state *responseState,
+	parent struct{},
+) (*responseState, struct{}) {
+	state.pushScope()
+	for _, expr := range clause.List {
+		a.checkExpr(expr, state)
+	}
+	return state, parent
+}
+
+func (a *unboundedResponseAnalyzer) commClause(
+	_ *ast.CommClause,
+	state *responseState,
+	parent struct{},
+) (*responseState, struct{}) {
+	state.pushScope()
+	return state, parent
+}
+
+func (a *unboundedResponseAnalyzer) normalize(*flowEdges[*responseState]) {}
 
 func (a *unboundedResponseAnalyzer) checkAssignment(stmt *ast.AssignStmt, state *responseState) {
 	for _, expr := range stmt.Lhs {
@@ -253,195 +275,6 @@ func (a *unboundedResponseAnalyzer) checkDeclaration(stmt *ast.DeclStmt, state *
 		for i, name := range value.Names {
 			state.assign(name.Name, i == 0 && responseAssignment, true)
 		}
-	}
-}
-
-func (a *unboundedResponseAnalyzer) checkIf(stmt *ast.IfStmt, state *responseState) responseFlow {
-	ifState := state.clone()
-	ifState.pushScope()
-	if stmt.Init != nil {
-		initFlow := a.checkStmt(stmt.Init, ifState)
-		ifState = initFlow.next
-		if ifState == nil {
-			initFlow.popScope()
-			return initFlow
-		}
-	}
-	a.checkExpr(stmt.Cond, ifState)
-
-	thenFlow := a.checkBlock(stmt.Body, ifState)
-	elseFlow := responseFlow{next: ifState.clone()}
-	if stmt.Else != nil {
-		elseFlow = a.checkStmt(stmt.Else, ifState.clone())
-	}
-	flow := mergeResponseFlows(thenFlow, elseFlow)
-	flow.popScope()
-	return flow
-}
-
-func (a *unboundedResponseAnalyzer) checkFor(stmt *ast.ForStmt, state *responseState) responseFlow {
-	loopState := state.clone()
-	loopState.pushScope()
-	if stmt.Init != nil {
-		initFlow := a.checkStmt(stmt.Init, loopState)
-		loopState = initFlow.next
-		if loopState == nil {
-			initFlow.popScope()
-			return initFlow
-		}
-	}
-	if stmt.Cond != nil {
-		a.checkExpr(stmt.Cond, loopState)
-	}
-
-	bodyFlow := a.checkBlock(stmt.Body, loopState)
-	iterationState := mergeResponseStateOptions(bodyFlow.next, bodyFlow.continues)
-	if iterationState != nil && stmt.Post != nil {
-		iterationState = a.checkStmt(stmt.Post, iterationState).next
-	}
-
-	exitState := bodyFlow.breaks
-	if stmt.Cond != nil {
-		exitState = mergeResponseStateOptions(exitState, loopState, iterationState)
-	}
-	flow := responseFlow{next: exitState}
-	flow.popScope()
-	return flow
-}
-
-func (a *unboundedResponseAnalyzer) checkRange(stmt *ast.RangeStmt, state *responseState) responseFlow {
-	rangeState := state.clone()
-	rangeState.pushScope()
-	a.checkExpr(stmt.X, rangeState)
-	iterationState := rangeState.clone()
-	define := stmt.Tok == token.DEFINE
-	if ident, ok := stmt.Key.(*ast.Ident); ok {
-		iterationState.assign(ident.Name, false, define)
-	}
-	if ident, ok := stmt.Value.(*ast.Ident); ok {
-		iterationState.assign(ident.Name, false, define)
-	}
-	bodyFlow := a.checkBlock(stmt.Body, iterationState)
-	exitState := mergeResponseStateOptions(rangeState, bodyFlow.next, bodyFlow.breaks, bodyFlow.continues)
-	flow := responseFlow{next: exitState}
-	flow.popScope()
-	return flow
-}
-
-func (a *unboundedResponseAnalyzer) checkSwitch(stmt *ast.SwitchStmt, state *responseState) responseFlow {
-	switchState := state.clone()
-	switchState.pushScope()
-	if stmt.Init != nil {
-		switchState = a.checkStmt(stmt.Init, switchState).next
-		if switchState == nil {
-			return responseFlow{}
-		}
-	}
-	if stmt.Tag != nil {
-		a.checkExpr(stmt.Tag, switchState)
-	}
-	flow := a.checkClauses(stmt.Body.List, switchState)
-	flow.popScope()
-	return flow
-}
-
-func (a *unboundedResponseAnalyzer) checkTypeSwitch(stmt *ast.TypeSwitchStmt, state *responseState) responseFlow {
-	switchState := state.clone()
-	switchState.pushScope()
-	if stmt.Init != nil {
-		switchState = a.checkStmt(stmt.Init, switchState).next
-		if switchState == nil {
-			return responseFlow{}
-		}
-	}
-	switchState = a.checkStmt(stmt.Assign, switchState).next
-	flow := a.checkClauses(stmt.Body.List, switchState)
-	flow.popScope()
-	return flow
-}
-
-func (a *unboundedResponseAnalyzer) checkClauses(clauses []ast.Stmt, state *responseState) responseFlow {
-	result := responseFlow{}
-	hasDefault := false
-	for _, clauseStmt := range clauses {
-		clause, ok := clauseStmt.(*ast.CaseClause)
-		if !ok {
-			continue
-		}
-		clauseState := state.clone()
-		clauseState.pushScope()
-		for _, expr := range clause.List {
-			a.checkExpr(expr, clauseState)
-		}
-		if len(clause.List) == 0 {
-			hasDefault = true
-		}
-		flow := a.checkStmtList(clause.Body, clauseState)
-		flow.popScope()
-		result.next = mergeResponseStateOptions(result.next, flow.next, flow.breaks)
-		result.continues = mergeResponseStateOptions(result.continues, flow.continues)
-	}
-	if !hasDefault {
-		result.next = mergeResponseStateOptions(result.next, state)
-	}
-	return result
-}
-
-func (a *unboundedResponseAnalyzer) checkSelect(stmt *ast.SelectStmt, state *responseState) responseFlow {
-	result := responseFlow{}
-	for _, clauseStmt := range stmt.Body.List {
-		clause, ok := clauseStmt.(*ast.CommClause)
-		if !ok {
-			continue
-		}
-		clauseState := state.clone()
-		clauseState.pushScope()
-		if clause.Comm != nil {
-			clauseState = a.checkStmt(clause.Comm, clauseState).next
-		}
-		if clauseState == nil {
-			continue
-		}
-		flow := a.checkStmtList(clause.Body, clauseState)
-		flow.popScope()
-		result.next = mergeResponseStateOptions(result.next, flow.next, flow.breaks)
-		result.continues = mergeResponseStateOptions(result.continues, flow.continues)
-	}
-	return result
-}
-
-func mergeResponseFlows(flows ...responseFlow) responseFlow {
-	result := responseFlow{}
-	for _, flow := range flows {
-		result.next = mergeResponseStateOptions(result.next, flow.next)
-		result.breaks = mergeResponseStateOptions(result.breaks, flow.breaks)
-		result.continues = mergeResponseStateOptions(result.continues, flow.continues)
-	}
-	return result
-}
-
-func mergeResponseStateOptions(states ...*responseState) *responseState {
-	present := make([]*responseState, 0, len(states))
-	for _, state := range states {
-		if state != nil {
-			present = append(present, state)
-		}
-	}
-	if len(present) == 0 {
-		return nil
-	}
-	return mergeResponseStates(present...)
-}
-
-func (f *responseFlow) popScope() {
-	if f.next != nil {
-		f.next.popScope()
-	}
-	if f.breaks != nil {
-		f.breaks.popScope()
-	}
-	if f.continues != nil {
-		f.continues.popScope()
 	}
 }
 

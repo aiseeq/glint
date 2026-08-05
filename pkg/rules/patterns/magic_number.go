@@ -61,21 +61,14 @@ func (r *MagicNumberRule) Configure(settings map[string]any) error {
 // shouldSkipFile checks if file should be skipped (config files have many legitimate constants)
 func (r *MagicNumberRule) shouldSkipFile(path string) bool {
 	pathLower := strings.ToLower(path)
+	if isConfigOrConstantsPath(pathLower) {
+		return true
+	}
+	// Blockchain/crypto code often carries chain IDs, which are self-describing.
+	// "chain/" also covers "blockchain/".
 	skipPatterns := []string{
-		"config/",    // config directory
-		"/config/",   // config in subpath
-		"_config.go", // config files
-		"config.go",
-		"constants/",    // constants directory
-		"/constants/",   // constants in subpath
-		"_constants.go", // constants files
-		"constants.go",
-		"blockchain/",  // blockchain code often has chain IDs
-		"/blockchain/", // blockchain in subpath
-		"crypto2b/",    // crypto provider - chain IDs
-		"/crypto2b/",   // crypto in subpath
-		"chain/",       // chain-related code
-		"/chain/",      // chain in subpath
+		"chain/",    // chain-related code (incl. blockchain/)
+		"crypto2b/", // crypto provider - chain IDs
 	}
 	for _, pattern := range skipPatterns {
 		if strings.Contains(pathLower, pattern) {

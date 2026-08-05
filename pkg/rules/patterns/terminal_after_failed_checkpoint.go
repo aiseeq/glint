@@ -106,12 +106,6 @@ type checkpointFlow struct {
 	failures    []failedCheckpoint
 }
 
-type checkpointStatementFlow struct {
-	next      []checkpointFlow
-	breaks    []checkpointFlow
-	continues []checkpointFlow
-}
-
 type checkpointFinding struct {
 	checkpoint failedCheckpoint
 	terminal   terminalCall
@@ -182,269 +176,145 @@ func (a *checkpointFlowAnalyzer) analyzeCallable(
 		declareCheckpointFields(scope, fieldList)
 	}
 	initial := checkpointFlow{assignments: make(map[checkpointBindingID]checkpointAssignment)}
-	a.analyzeBlockInScope(body, []checkpointFlow{initial}, scope)
+	walker := &flowWalker[[]checkpointFlow, *checkpointLexicalScope]{rule: a}
+	walker.walk(body, []checkpointFlow{initial}, scope)
 }
 
-func (a *checkpointFlowAnalyzer) analyzeBlock(
-	block *ast.BlockStmt,
-	paths []checkpointFlow,
+func (a *checkpointFlowAnalyzer) cloneState(paths []checkpointFlow) []checkpointFlow {
+	return cloneCheckpointFlows(paths)
+}
+
+func (a *checkpointFlowAnalyzer) joinStates(left, right []checkpointFlow) []checkpointFlow {
+	return append(left, right...)
+}
+
+func (a *checkpointFlowAnalyzer) liveState(paths []checkpointFlow) bool { return len(paths) > 0 }
+
+func (a *checkpointFlowAnalyzer) deadState() []checkpointFlow { return nil }
+
+func (a *checkpointFlowAnalyzer) enterScope(
+	_ flowScopeKind,
+	_ ast.Node,
 	parent *checkpointLexicalScope,
-) checkpointStatementFlow {
-	return a.analyzeBlockInScope(block, paths, newCheckpointLexicalScope(parent))
-}
-
-func (a *checkpointFlowAnalyzer) analyzeBlockInScope(
-	block *ast.BlockStmt,
 	paths []checkpointFlow,
-	scope *checkpointLexicalScope,
-) checkpointStatementFlow {
-	if block == nil {
-		return checkpointStatementFlow{next: paths}
-	}
-	flow := checkpointStatementFlow{next: paths}
-	for _, stmt := range block.List {
-		if len(flow.next) == 0 {
-			break
-		}
-		statementFlow := a.analyzeStatement(stmt, flow.next, scope)
-		flow.breaks = append(flow.breaks, statementFlow.breaks...)
-		flow.continues = append(flow.continues, statementFlow.continues...)
-		flow.next = statementFlow.next
-	}
-	removeCheckpointAssignments(&flow, scope.declaredBindings())
-	flow.next = compactCheckpointFlows(flow.next)
-	flow.breaks = compactCheckpointFlows(flow.breaks)
-	flow.continues = compactCheckpointFlows(flow.continues)
-	return flow
+) (*checkpointLexicalScope, []checkpointFlow) {
+	return newCheckpointLexicalScope(parent), paths
 }
 
-func (a *checkpointFlowAnalyzer) analyzeStatement(
+func (a *checkpointFlowAnalyzer) leaveScope(
+	kind flowScopeKind,
+	scope *checkpointLexicalScope,
+	edges *flowEdges[[]checkpointFlow],
+) {
+	switch kind {
+	case flowScopeBlock, flowScopeIfBody, flowScopeForBody, flowScopeRangeBody,
+		flowScopeCaseClause, flowScopeCommClause:
+		// Legacy block epilogue: drop the scope's bindings, then compact.
+		removeCheckpointAssignments(edges, scope.declaredBindings())
+		compactCheckpointEdges(edges)
+	default:
+		// Legacy construct epilogue: edges were compacted by normalize before
+		// the header scope's bindings are dropped.
+		removeCheckpointAssignments(edges, scope.declaredBindings())
+	}
+}
+
+func (a *checkpointFlowAnalyzer) simpleStmt(
 	stmt ast.Stmt,
 	paths []checkpointFlow,
 	scope *checkpointLexicalScope,
-) checkpointStatementFlow {
+) ([]checkpointFlow, bool) {
 	switch node := stmt.(type) {
 	case *ast.AssignStmt:
-		return checkpointStatementFlow{next: a.assign(node, paths, scope)}
+		return a.assign(node, paths, scope), false
 	case *ast.DeclStmt:
 		a.findTerminalsOnPaths(node, paths, scope)
 		declareCheckpointDeclaration(scope, node.Decl)
-		return checkpointStatementFlow{next: paths}
-	case *ast.BlockStmt:
-		return a.analyzeBlock(node, cloneCheckpointFlows(paths), scope)
+		return paths, false
 	case *ast.ReturnStmt:
 		a.findTerminalsOnPaths(node, paths, scope)
-		return checkpointStatementFlow{}
-	case *ast.BranchStmt:
-		if node.Label != nil {
-			return checkpointStatementFlow{}
-		}
-		switch node.Tok {
-		case token.BREAK:
-			return checkpointStatementFlow{breaks: paths}
-		case token.CONTINUE:
-			return checkpointStatementFlow{continues: paths}
-		default:
-			return checkpointStatementFlow{}
-		}
-	case *ast.IfStmt:
-		return a.analyzeIf(node, paths, scope)
-	case *ast.ForStmt:
-		return a.analyzeFor(node, paths, scope)
-	case *ast.RangeStmt:
-		return a.analyzeRange(node, paths, scope)
-	case *ast.SwitchStmt:
-		return a.analyzeSwitch(node, paths, scope)
-	case *ast.TypeSwitchStmt:
-		return a.analyzeTypeSwitch(node, paths, scope)
-	case *ast.SelectStmt:
-		return a.analyzeSelect(node, paths, scope)
-	case *ast.LabeledStmt:
-		return a.analyzeStatement(node.Stmt, paths, scope)
+		return nil, true
 	default:
 		a.findTerminalsOnPaths(node, paths, scope)
 		if isPanicStatement(node) {
-			return checkpointStatementFlow{}
+			return nil, true
 		}
-		return checkpointStatementFlow{next: paths}
+		return paths, false
 	}
 }
 
-func (a *checkpointFlowAnalyzer) analyzeIf(
+func (a *checkpointFlowAnalyzer) ifCondition(
 	ifStmt *ast.IfStmt,
 	paths []checkpointFlow,
-	parent *checkpointLexicalScope,
-) checkpointStatementFlow {
-	result := checkpointStatementFlow{}
-	scope := newCheckpointLexicalScope(parent)
-	for _, path := range paths {
-		conditionPaths := []checkpointFlow{copyCheckpointFlow(path)}
-		if ifStmt.Init != nil {
-			conditionPaths = a.analyzeStatement(ifStmt.Init, conditionPaths, scope).next
-		}
-		a.findTerminalsOnPaths(ifStmt.Cond, conditionPaths, scope)
-
-		truePaths, falsePaths := conditionCheckpointPaths(ifStmt, conditionPaths, scope)
-		body := a.analyzeBlock(ifStmt.Body, truePaths, scope)
-		otherwise := checkpointStatementFlow{next: falsePaths}
-		if ifStmt.Else != nil {
-			otherwise = a.analyzeStatement(ifStmt.Else, falsePaths, scope)
-		}
-
-		result.next = append(result.next, body.next...)
-		result.next = append(result.next, otherwise.next...)
-		result.breaks = append(result.breaks, body.breaks...)
-		result.breaks = append(result.breaks, otherwise.breaks...)
-		result.continues = append(result.continues, body.continues...)
-		result.continues = append(result.continues, otherwise.continues...)
-	}
-	result.next = compactCheckpointFlows(result.next)
-	result.breaks = compactCheckpointFlows(result.breaks)
-	result.continues = compactCheckpointFlows(result.continues)
-	removeCheckpointAssignments(&result, scope.declaredBindings())
-	return result
+	scope *checkpointLexicalScope,
+) ([]checkpointFlow, []checkpointFlow) {
+	a.findTerminalsOnPaths(ifStmt.Cond, paths, scope)
+	return conditionCheckpointPaths(ifStmt, paths, scope)
 }
 
-func (a *checkpointFlowAnalyzer) analyzeFor(
-	stmt *ast.ForStmt,
+func (a *checkpointFlowAnalyzer) flowExpr(
+	expr ast.Expr,
 	paths []checkpointFlow,
-	parent *checkpointLexicalScope,
-) checkpointStatementFlow {
-	scope := newCheckpointLexicalScope(parent)
-	if stmt.Init != nil {
-		paths = a.analyzeStatement(stmt.Init, paths, scope).next
-	}
-	if stmt.Cond != nil {
-		a.findTerminalsOnPaths(stmt.Cond, paths, scope)
-	}
-	var exits []checkpointFlow
-	if stmt.Cond != nil {
-		exits = cloneCheckpointFlows(paths)
-	}
-	body := a.analyzeBlock(stmt.Body, cloneCheckpointFlows(paths), scope)
-	iterationEnds := append(body.next, body.continues...)
-	if stmt.Post != nil {
-		iterationEnds = a.analyzeStatement(stmt.Post, iterationEnds, scope).next
-	}
-	exits = append(exits, body.breaks...)
-	if stmt.Cond != nil {
-		exits = append(exits, iterationEnds...)
-	}
-	result := checkpointStatementFlow{next: compactCheckpointFlows(exits)}
-	removeCheckpointAssignments(&result, scope.declaredBindings())
-	return result
+	scope *checkpointLexicalScope,
+) []checkpointFlow {
+	a.findTerminalsOnPaths(expr, paths, scope)
+	return paths
 }
 
-func (a *checkpointFlowAnalyzer) analyzeRange(
+func (a *checkpointFlowAnalyzer) rangeVars(
 	stmt *ast.RangeStmt,
 	paths []checkpointFlow,
-	parent *checkpointLexicalScope,
-) checkpointStatementFlow {
-	a.findTerminalsOnPaths(stmt.X, paths, parent)
-	exits := cloneCheckpointFlows(paths)
-	scope := newCheckpointLexicalScope(parent)
+	scope *checkpointLexicalScope,
+) []checkpointFlow {
 	bindings := checkpointExpressionBindings([]ast.Expr{stmt.Key, stmt.Value}, stmt.Tok, scope)
-	bodyPaths := invalidateCheckpointBindings(cloneCheckpointFlows(paths), bindings)
-	body := a.analyzeBlock(stmt.Body, bodyPaths, scope)
-	exits = append(exits, body.breaks...)
-	exits = append(exits, body.next...)
-	exits = append(exits, body.continues...)
-	result := checkpointStatementFlow{next: compactCheckpointFlows(exits)}
-	removeCheckpointAssignments(&result, scope.declaredBindings())
-	return result
+	return invalidateCheckpointBindings(paths, bindings)
 }
 
-func (a *checkpointFlowAnalyzer) analyzeSwitch(
-	stmt *ast.SwitchStmt,
+func (a *checkpointFlowAnalyzer) typeSwitchGuard(
+	stmt ast.Stmt,
 	paths []checkpointFlow,
-	parent *checkpointLexicalScope,
-) checkpointStatementFlow {
-	scope := newCheckpointLexicalScope(parent)
-	if stmt.Init != nil {
-		paths = a.analyzeStatement(stmt.Init, paths, scope).next
-	}
-	if stmt.Tag != nil {
-		a.findTerminalsOnPaths(stmt.Tag, paths, scope)
-	}
-	result := a.analyzeCaseClauses(stmt.Body, paths, scope, nil)
-	removeCheckpointAssignments(&result, scope.declaredBindings())
-	return result
+	scope *checkpointLexicalScope,
+) []checkpointFlow {
+	// The legacy engine only scanned the guard for terminal calls; the guard
+	// variable is declared per clause in caseClause instead.
+	a.findTerminalsOnPaths(stmt, paths, scope)
+	return paths
 }
 
-func (a *checkpointFlowAnalyzer) analyzeTypeSwitch(
-	stmt *ast.TypeSwitchStmt,
+func (a *checkpointFlowAnalyzer) caseClause(
+	sw ast.Stmt,
+	clause *ast.CaseClause,
 	paths []checkpointFlow,
 	parent *checkpointLexicalScope,
-) checkpointStatementFlow {
-	scope := newCheckpointLexicalScope(parent)
-	if stmt.Init != nil {
-		paths = a.analyzeStatement(stmt.Init, paths, scope).next
-	}
-	a.findTerminalsOnPaths(stmt.Assign, paths, scope)
-	result := a.analyzeCaseClauses(stmt.Body, paths, scope, typeSwitchIdentifiers(stmt.Assign))
-	removeCheckpointAssignments(&result, scope.declaredBindings())
-	return result
-}
-
-func (a *checkpointFlowAnalyzer) analyzeCaseClauses(
-	body *ast.BlockStmt,
-	paths []checkpointFlow,
-	parent *checkpointLexicalScope,
-	clauseDeclarations []*ast.Ident,
-) checkpointStatementFlow {
-	result := checkpointStatementFlow{}
-	hasDefault := false
-	for _, item := range body.List {
-		clause, ok := item.(*ast.CaseClause)
-		if !ok {
-			continue
-		}
-		hasDefault = hasDefault || len(clause.List) == 0
-		clausePaths := cloneCheckpointFlows(paths)
-		clauseScope := newCheckpointLexicalScope(parent)
-		for _, identifier := range clauseDeclarations {
+) ([]checkpointFlow, *checkpointLexicalScope) {
+	clauseScope := newCheckpointLexicalScope(parent)
+	if typeSwitch, ok := sw.(*ast.TypeSwitchStmt); ok {
+		for _, identifier := range typeSwitchIdentifiers(typeSwitch.Assign) {
 			clauseScope.declare(identifier)
 		}
-		for _, expr := range clause.List {
-			a.findTerminalsOnPaths(expr, clausePaths, parent)
-		}
-		clauseFlow := a.analyzeBlockInScope(&ast.BlockStmt{List: clause.Body}, clausePaths, clauseScope)
-		result.next = append(result.next, clauseFlow.next...)
-		result.next = append(result.next, clauseFlow.breaks...)
-		result.continues = append(result.continues, clauseFlow.continues...)
 	}
-	if !hasDefault {
-		result.next = append(result.next, cloneCheckpointFlows(paths)...)
+	for _, expr := range clause.List {
+		a.findTerminalsOnPaths(expr, paths, parent)
 	}
-	result.next = compactCheckpointFlows(result.next)
-	result.continues = compactCheckpointFlows(result.continues)
-	return result
+	return paths, clauseScope
 }
 
-func (a *checkpointFlowAnalyzer) analyzeSelect(
-	stmt *ast.SelectStmt,
+func (a *checkpointFlowAnalyzer) commClause(
+	_ *ast.CommClause,
 	paths []checkpointFlow,
 	parent *checkpointLexicalScope,
-) checkpointStatementFlow {
-	result := checkpointStatementFlow{}
-	for _, item := range stmt.Body.List {
-		clause, ok := item.(*ast.CommClause)
-		if !ok {
-			continue
-		}
-		clausePaths := cloneCheckpointFlows(paths)
-		clauseScope := newCheckpointLexicalScope(parent)
-		if clause.Comm != nil {
-			clausePaths = a.analyzeStatement(clause.Comm, clausePaths, clauseScope).next
-		}
-		clauseFlow := a.analyzeBlockInScope(&ast.BlockStmt{List: clause.Body}, clausePaths, clauseScope)
-		result.next = append(result.next, clauseFlow.next...)
-		result.next = append(result.next, clauseFlow.breaks...)
-		result.continues = append(result.continues, clauseFlow.continues...)
-	}
-	result.next = compactCheckpointFlows(result.next)
-	result.continues = compactCheckpointFlows(result.continues)
-	return result
+) ([]checkpointFlow, *checkpointLexicalScope) {
+	return paths, newCheckpointLexicalScope(parent)
+}
+
+func (a *checkpointFlowAnalyzer) normalize(edges *flowEdges[[]checkpointFlow]) {
+	compactCheckpointEdges(edges)
+}
+
+func compactCheckpointEdges(edges *flowEdges[[]checkpointFlow]) {
+	edges.next = compactCheckpointFlows(edges.next)
+	edges.breaks = compactCheckpointFlows(edges.breaks)
+	edges.continues = compactCheckpointFlows(edges.continues)
 }
 
 func (a *checkpointFlowAnalyzer) assign(
@@ -739,8 +609,8 @@ func cloneCheckpointFlows(flows []checkpointFlow) []checkpointFlow {
 	return clones
 }
 
-func removeCheckpointAssignments(flow *checkpointStatementFlow, bindings []checkpointBindingID) {
-	for _, paths := range [][]checkpointFlow{flow.next, flow.breaks, flow.continues} {
+func removeCheckpointAssignments(edges *flowEdges[[]checkpointFlow], bindings []checkpointBindingID) {
+	for _, paths := range [][]checkpointFlow{edges.next, edges.breaks, edges.continues} {
 		for i := range paths {
 			for _, binding := range bindings {
 				delete(paths[i].assignments, binding)

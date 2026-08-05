@@ -154,6 +154,35 @@ func bar() {
 	assert.Empty(t, violations, "Trivial line patterns should be ignored")
 }
 
+// A backtick inside a regular quoted string is not a raw-string delimiter: it
+// must not flip the raw-string state and hide every duplicate below it.
+func TestDuplicateBlockRule_BacktickInQuotedStringDoesNotHideDuplicates(t *testing.T) {
+	rule := NewDuplicateBlockRule()
+	rule.minBlockSize = 8
+
+	body := "\tconnection := database.GetConnection()\n" +
+		"\ttransaction := connection.BeginTransaction()\n" +
+		"\tvalidator := NewDataValidator(connection)\n" +
+		"\tprocessor := NewDataProcessor(validator)\n" +
+		"\thandler := processor.CreateHandler(id)\n" +
+		"\tresults := handler.Execute()\n" +
+		"\treport := generateReport(results)\n" +
+		"\tsaveResults(results, report)\n"
+	code := "package main\n\n" +
+		"func markdownQuote() string {\n" +
+		"\treturn \"`\"\n" +
+		"}\n\n" +
+		"func processUserData(id int) error {\n" + body + "}\n\n" +
+		"func processAdminData(id int) error {\n" + body + "}\n"
+
+	ctx := createTestContext(t, "backend/service.go", code)
+	violations := rule.AnalyzeFile(ctx)
+
+	require.NotEmpty(t, violations,
+		"a backtick inside \"...\" must not mask the rest of the file as a raw string")
+	assert.Contains(t, violations[0].Message, "Duplicate block")
+}
+
 // Helper function to create test context
 func createTestContext(t *testing.T, path, code string) *core.FileContext {
 	t.Helper()

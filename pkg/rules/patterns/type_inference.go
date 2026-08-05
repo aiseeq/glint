@@ -92,9 +92,11 @@ func (ti *TypeInferrer) remember(name string, info TypeInfo) {
 	}
 }
 
-// IsAny checks if a variable is any/interface{}
+// IsAny checks if a variable is any/interface{}. It follows the GetType
+// contract: a name the file binds to several types is ambiguous and reports
+// no type at all — not the first one seen.
 func (ti *TypeInferrer) IsAny(name string) bool {
-	info, ok := ti.varTypes[name]
+	info, ok := ti.GetType(name)
 	if !ok {
 		return false
 	}

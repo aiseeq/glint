@@ -40,6 +40,41 @@ func TestParserCache(t *testing.T) {
 	assert.Same(t, file1, file2)
 }
 
+func TestParserCacheDistinguishesContent(t *testing.T) {
+	p := NewParser()
+
+	_, file1, err := p.ParseGoFile("test.go", []byte("package main\n\nfunc first() {}\n"))
+	require.NoError(t, err)
+	require.NotNil(t, file1)
+
+	// Same path, different content must not return the stale AST
+	_, file2, err := p.ParseGoFile("test.go", []byte("package main\n\nfunc second() {}\n"))
+	require.NoError(t, err)
+	require.NotNil(t, file2)
+
+	assert.NotSame(t, file1, file2)
+	require.Len(t, file2.Decls, 1)
+	fn, ok := file2.Decls[0].(*ast.FuncDecl)
+	require.True(t, ok)
+	assert.Equal(t, "second", fn.Name.Name)
+}
+
+func TestParserCacheDistinguishesSameLengthContent(t *testing.T) {
+	p := NewParser()
+
+	// Equal length, different bytes: the key must involve the content itself
+	contentA := []byte("package main\n\nvar aa = 1\n")
+	contentB := []byte("package main\n\nvar bb = 2\n")
+	require.Equal(t, len(contentA), len(contentB))
+
+	_, fileA, err := p.ParseGoFile("test.go", contentA)
+	require.NoError(t, err)
+	_, fileB, err := p.ParseGoFile("test.go", contentB)
+	require.NoError(t, err)
+
+	assert.NotSame(t, fileA, fileB)
+}
+
 func TestParserParseError(t *testing.T) {
 	p := NewParser()
 

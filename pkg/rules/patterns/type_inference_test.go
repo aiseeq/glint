@@ -58,3 +58,41 @@ var (
 	_, ok = inferrer.GetType("unknown")
 	assert.False(t, ok)
 }
+
+// IsAny follows the GetType contract: a name the file binds to two different
+// types is ambiguous and must not report any type — including any/interface{}.
+func TestTypeInferrerIsAnyRespectsAmbiguousNames(t *testing.T) {
+	code := `package main
+
+func accept(data any) {}
+
+func slice(data []string) {}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "test.go", code, 0)
+	require.NoError(t, err)
+
+	inferrer := NewTypeInferrer(file)
+
+	assert.True(t, inferrer.IsAmbiguous("data"))
+	assert.False(t, inferrer.IsAny("data"),
+		"ambiguous name must not be reported as any even when any was seen first")
+}
+
+func TestTypeInferrerIsAnyDetectsUnambiguousAny(t *testing.T) {
+	code := `package main
+
+func accept(data any) {}
+
+func raw(payload interface{}) {}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "test.go", code, 0)
+	require.NoError(t, err)
+
+	inferrer := NewTypeInferrer(file)
+
+	assert.True(t, inferrer.IsAny("data"))
+	assert.True(t, inferrer.IsAny("payload"))
+	assert.False(t, inferrer.IsAny("unknown"))
+}

@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,6 +59,30 @@ func TestNewWalker(t *testing.T) {
 
 	walker := NewWalker(tmpDir, cfg)
 	assert.NotNil(t, walker)
+}
+
+func TestNewWalkerUsesSharedParser(t *testing.T) {
+	// Rules that parse sibling files rely on hitting the same content-keyed
+	// cache the walker fills; a private parser per walker breaks that sharing.
+	walker := NewWalker(t.TempDir(), DefaultConfig())
+	assert.Same(t, SharedParser(), walker.parser)
+}
+
+func TestWalkSyncHandlesMoreErrorsThanChannelBuffer(t *testing.T) {
+	// The internal walk() channels are buffered at 100; a consumer that read
+	// them sequentially would deadlock here. WalkSync must drain both
+	// concurrently and return every error.
+	tmpDir := t.TempDir()
+	const files = 150
+	for i := 0; i < files; i++ {
+		path := filepath.Join(tmpDir, fmt.Sprintf("broken%03d.go", i))
+		require.NoError(t, os.WriteFile(path, []byte("package broken\nfunc {"), 0644))
+	}
+
+	contexts, errs := NewWalker(tmpDir, DefaultConfig()).WalkSync()
+
+	assert.Len(t, errs, files)
+	assert.Len(t, contexts, files, "regex rules still analyze files that fail Go parsing")
 }
 
 func TestWalkerAnalyzesNginxConfig(t *testing.T) {

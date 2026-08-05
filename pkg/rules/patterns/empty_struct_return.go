@@ -126,10 +126,10 @@ func (r *EmptyStructReturnRule) isErrorOrNilCheck(cond ast.Expr) bool {
 	case *ast.BinaryExpr:
 		// err != nil, x == nil, etc.
 		if c.Op == token.NEQ || c.Op == token.EQL {
-			if r.isNilIdent(c.Y) {
+			if isNilIdent(c.Y) {
 				return true
 			}
-			if r.isNilIdent(c.X) {
+			if isNilIdent(c.X) {
 				return true
 			}
 			// Check for err variable
@@ -149,11 +149,6 @@ func (r *EmptyStructReturnRule) isErrorOrNilCheck(cond ast.Expr) bool {
 	return false
 }
 
-func (r *EmptyStructReturnRule) isNilIdent(expr ast.Expr) bool {
-	ident, ok := expr.(*ast.Ident)
-	return ok && ident.Name == "nil"
-}
-
 // checkReturnForEmptyStructWithNilError checks if return has empty struct + nil error
 func (r *EmptyStructReturnRule) checkReturnForEmptyStructWithNilError(ctx *core.FileContext, ret *ast.ReturnStmt) *core.Violation {
 	if len(ret.Results) < 2 {
@@ -162,7 +157,7 @@ func (r *EmptyStructReturnRule) checkReturnForEmptyStructWithNilError(ctx *core.
 
 	// Check last result is nil (the error)
 	lastResult := ret.Results[len(ret.Results)-1]
-	if !r.isNilIdent(lastResult) {
+	if !isNilIdent(lastResult) {
 		return nil
 	}
 
