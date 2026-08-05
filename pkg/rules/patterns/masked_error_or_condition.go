@@ -23,9 +23,18 @@ func init() {
 // The caller cannot distinguish a storage failure from an honest zero.
 // CLAUDE.md: "Fail explicitly, never degrade silently".
 //
+// Functions WITHOUT an error result are covered too, and there any return from
+// such a branch masks the failure — the error cannot even be handed back:
+//
+//	func (s *S) dayYield(id string) Decimal {
+//	    share, err := s.share(id)
+//	    if err != nil || share.LessThanOrEqual(zero) {
+//	        return s.cumulative        // DB failure silently yields "no growth"
+//	    }
+//
 // Not flagged: branches that propagate/wrap the error, branches that handle
-// the error in a nested if, &&-narrowing (errors.Is style), and functions
-// without an error result (see log-and-return-zero for those).
+// the error in a nested if, branches that panic, &&-narrowing (errors.Is
+// style), and branches without a return.
 type MaskedErrorOrConditionRule struct {
 	*rules.BaseRule
 }
@@ -52,7 +61,15 @@ func (r *MaskedErrorOrConditionRule) AnalyzeFile(ctx *core.FileContext) []*core.
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		body, results := functionParts(n)
-		if body == nil || !lastResultIsErrorType(results) {
+		if body == nil {
+			return true
+		}
+		// Функция без error в результатах не «возвращает nil в error-слоте» —
+		// там маскировкой является любой возврат значения из такой ветки.
+		returnsError := lastResultIsErrorType(results)
+		// Единственный bool-результат — зона error-masked-as-false-bool: там
+		// false может честно означать «не подходит», и предикаты уже разобраны.
+		if !returnsError && isSingleBoolResult(results) {
 			return true
 		}
 
@@ -65,7 +82,7 @@ func (r *MaskedErrorOrConditionRule) AnalyzeFile(ctx *core.FileContext) []*core.
 			if len(errNames) == 0 {
 				return
 			}
-			violations = append(violations, r.checkBranch(ctx, ifStmt, errNames)...)
+			violations = append(violations, r.checkBranch(ctx, ifStmt, errNames, returnsError)...)
 		})
 
 		return true
@@ -77,7 +94,7 @@ func (r *MaskedErrorOrConditionRule) AnalyzeFile(ctx *core.FileContext) []*core.
 // checkBranch inspects the then-branch of an if whose ||-condition contains
 // an err != nil operand, and reports returns that swallow the error.
 func (r *MaskedErrorOrConditionRule) checkBranch(
-	ctx *core.FileContext, ifStmt *ast.IfStmt, errNames map[string]bool,
+	ctx *core.FileContext, ifStmt *ast.IfStmt, errNames map[string]bool, returnsError bool,
 ) []*core.Violation {
 	handled := false
 	var maskingReturns []*ast.ReturnStmt
@@ -90,13 +107,23 @@ func (r *MaskedErrorOrConditionRule) checkBranch(
 			if exprMentionsAnyName(s.Cond, errNames) {
 				handled = true
 			}
+		case *ast.ExprStmt:
+			// panic() aborts instead of returning a plausible value — explicit,
+			// not masking.
+			if call, ok := s.X.(*ast.CallExpr); ok {
+				if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "panic" {
+					handled = true
+				}
+			}
 		case *ast.ReturnStmt:
 			if returnMentionsAnyName(s, errNames) {
 				// The error is propagated or wrapped — not masking.
 				handled = true
 				return
 			}
-			if returnsNilError(s) {
+			// С error в сигнатуре маскировка — только явный nil в error-слоте.
+			// Без error в сигнатуре деть ошибку некуда: маскирует любой возврат.
+			if !returnsError || returnsNilError(s) {
 				maskingReturns = append(maskingReturns, s)
 			}
 		}
@@ -106,13 +133,19 @@ func (r *MaskedErrorOrConditionRule) checkBranch(
 		return nil
 	}
 
+	message := "Branch guarded by 'err != nil || ...' returns nil error — a real failure is masked as a valid zero value"
+	suggestion := "Split the condition: return the error when err != nil; keep the no-data case as a separate branch"
+	if !returnsError {
+		message = "Branch guarded by 'err != nil || ...' returns a value from a function without an error result — the failure is lost entirely"
+		suggestion = "Give the function an (T, error) signature and return the error when err != nil; keep the no-data case as a separate branch"
+	}
+
 	var violations []*core.Violation
 	for _, ret := range maskingReturns {
 		pos := ctx.PositionFor(ret)
-		v := r.CreateViolation(ctx.RelPath, pos.Line,
-			"Branch guarded by 'err != nil || ...' returns nil error — a real failure is masked as a valid zero value")
+		v := r.CreateViolation(ctx.RelPath, pos.Line, message)
 		v.WithCode(strings.TrimSpace(ctx.GetLine(pos.Line)))
-		v.WithSuggestion("Split the condition: return the error when err != nil; keep the no-data case as a separate branch")
+		v.WithSuggestion(suggestion)
 		violations = append(violations, v)
 	}
 	return violations
@@ -144,6 +177,15 @@ func lastResultIsErrorType(results *ast.FieldList) bool {
 	last := results.List[len(results.List)-1]
 	ident, ok := last.Type.(*ast.Ident)
 	return ok && ident.Name == "error"
+}
+
+// isSingleBoolResult reports whether the function returns exactly one bool.
+func isSingleBoolResult(results *ast.FieldList) bool {
+	if results == nil || len(results.List) != 1 || len(results.List[0].Names) > 1 {
+		return false
+	}
+	ident, ok := results.List[0].Type.(*ast.Ident)
+	return ok && ident.Name == "bool"
 }
 
 // forEachOwnStatement walks all statements inside node, pruning nested
