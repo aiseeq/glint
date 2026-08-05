@@ -127,6 +127,14 @@ func (r *MaskedErrorOrConditionRule) checkBranch(
 					handled = true
 				}
 			}
+			// Для функции без error-результата лог — единственный канал ошибки:
+			// ветка, которая передаёт err куда-то (логгеру, коллектору) или зовёт
+			// Error/Warn/Fatal-логгер, ошибку обработала — это зона
+			// log-and-return-zero, не маскировка. С error в сигнатуре лог не
+			// оправдывает return nil — caller всё равно не отличит сбой от нуля.
+			if !returnsError && (exprMentionsAnyName(s.X, errNames) || isErrorLevelLogCall(s.X)) {
+				handled = true
+			}
 		case *ast.ReturnStmt:
 			if returnMentionsAnyName(s, errNames) {
 				// The error is propagated or wrapped — not masking.
@@ -167,6 +175,28 @@ func (r *MaskedErrorOrConditionRule) checkBranch(
 		violations = append(violations, v)
 	}
 	return violations
+}
+
+// errorLevelLogMethods — имена методов логгеров, объявляющих сбой. Достаточно
+// имени метода: получатель (slog, logrus, zap, самописный) не важен.
+var errorLevelLogMethods = map[string]bool{
+	"Error": true, "Errorf": true, "Errorln": true,
+	"Warn": true, "Warnf": true, "Warning": true, "Warningf": true,
+	"Fatal": true, "Fatalf": true, "Fatalln": true,
+}
+
+// isErrorLevelLogCall reports whether the expression is a method call named
+// like an Error/Warn/Fatal-level log emission.
+func isErrorLevelLogCall(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	return errorLevelLogMethods[sel.Sel.Name]
 }
 
 // functionParts extracts body, params and results from FuncDecl/FuncLit nodes.

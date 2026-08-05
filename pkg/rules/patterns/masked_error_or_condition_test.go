@@ -308,6 +308,59 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			wantCount: 0,
 		},
 		{
+			// Ошибка ушла логгеру вместе с err — канал без error-результата
+			// использован, это зона log-and-return-zero. Репро: decodeSUICursorState
+			// projectB (Warn с err + возврат чистого состояния курсора).
+			name: "value return after logging the error variable is handled, not masked",
+			code: `package svc
+
+func (s *S) decodeState(raw string) State {
+	state := State{Version: 2}
+	if err := json.Unmarshal([]byte(raw), &state); err != nil || state.Version != 2 {
+		s.logger.Warn("resetting incompatible state", slog.Any("error", err))
+		return State{Version: 2}
+	}
+	return state
+}
+`,
+			wantCount: 0,
+		},
+		{
+			// Error-лог без самого err тоже объявляет сбой — недостаёт деталей,
+			// но потерей ошибку не назвать. Репро: newAlertNotifier projectB
+			// (битый EMAIL_SMTP_PORT → Error-лог + явное отключение алармов).
+			name: "value return after an error-level log call is handled, not masked",
+			code: `package svc
+
+func build(v string, logger *slog.Logger) *Notifier {
+	p, err := strconv.Atoi(v)
+	if err != nil || p <= 0 {
+		logger.Error("invalid port, alerts disabled", "value", v)
+		return NewNotifier(nil, logger)
+	}
+	return NewNotifier(&p, logger)
+}
+`,
+			wantCount: 0,
+		},
+		{
+			// С error в сигнатуре лог не оправдание: caller получил nil и не
+			// отличит сбой от честного нуля (исходный projectA-кейс остаётся красным).
+			name: "logging does not excuse returning nil error when the signature has one",
+			code: `package svc
+
+func load(id string) (Value, error) {
+	v, err := fetch(id)
+	if err != nil || v == nil {
+		logger.Error("fetch failed", "error", err)
+		return Value{}, nil
+	}
+	return *v, nil
+}
+`,
+			wantCount: 1,
+		},
+		{
 			name: "no error result and no return in branch: nothing masked",
 			code: `package svc
 

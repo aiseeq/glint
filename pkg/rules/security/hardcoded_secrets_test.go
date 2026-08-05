@@ -33,6 +33,13 @@ var password = "supersecret123"`,
 			wantPattern:    "password",
 		},
 		{
+			// Кавычки вокруг подстановки переменной: PGPASSWORD="$DB_PASSWORD" в
+			// доке/скрипте — не литеральный пароль. Репро: CLAUDE.md projectB.
+			name:           "quoted shell variable is not a hardcoded password",
+			code:           `PGPASSWORD="$PROJECTB_DB_PASSWORD" psql -U "$PROJECTB_DB_USER"`,
+			wantViolations: 0,
+		},
+		{
 			name: "hardcoded password via short variable declaration",
 			code: `package main
 
