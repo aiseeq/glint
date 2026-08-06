@@ -301,11 +301,68 @@ func guardOnlyRefinesReadyValues(fn *ast.FuncDecl, stmt *ast.IfStmt) bool {
 		return false
 	}
 	for name, accumulates := range targets {
-		if accumulates || !hasValueBefore(fn, stmt, name) {
+		if accumulates {
 			return false
 		}
+		if hasValueBefore(fn, stmt, name) || zeroStateHandledAfter(fn, stmt, name) {
+			continue
+		}
+		return false
 	}
 	return true
+}
+
+// zeroStateHandledAfter ищет после guard'а явный фолбек нулевого состояния:
+// `if x.IsZero() { x = ... }`, `if x == "" { x = ... }` и т.п. Такой код решает
+// судьбу провала на месте — провал отличим от «данных не было», и это уже не
+// потеря ошибки, а документированный в коде фолбек.
+func zeroStateHandledAfter(fn *ast.FuncDecl, stmt *ast.IfStmt, name string) bool {
+	handled := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if handled {
+			return false
+		}
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok || ifStmt.Pos() <= stmt.End() {
+			return true
+		}
+		if !isZeroCheckOf(ifStmt.Cond, name) {
+			return true
+		}
+		if _, assigns := guardAssignTargets(ifStmt.Body)[name]; assigns {
+			handled = true
+		}
+		return true
+	})
+	return handled
+}
+
+// isZeroCheckOf распознаёт проверку нулевого состояния переменной:
+// x.IsZero(), x == "", x == 0, x == nil.
+func isZeroCheckOf(cond ast.Expr, name string) bool {
+	switch e := cond.(type) {
+	case *ast.CallExpr:
+		sel, ok := e.Fun.(*ast.SelectorExpr)
+		return ok && sel.Sel.Name == "IsZero" && rootIdentName(sel.X) == name
+	case *ast.BinaryExpr:
+		if e.Op != token.EQL {
+			return false
+		}
+		return (rootIdentName(e.X) == name && isZeroLiteralExpr(e.Y)) ||
+			(rootIdentName(e.Y) == name && isZeroLiteralExpr(e.X))
+	}
+	return false
+}
+
+// isZeroLiteralExpr распознаёт нулевые литералы: "", 0 и nil.
+func isZeroLiteralExpr(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		return e.Value == `""` || e.Value == "0" || e.Value == "``"
+	case *ast.Ident:
+		return e.Name == "nil"
+	}
+	return false
 }
 
 // guardAssignTargets собирает имена, в которые пишет блок успеха. Значение флага —

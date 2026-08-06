@@ -644,6 +644,13 @@ func (r *FallbackReturnRule) detectErrorIgnoringAssignment(ctx *core.FileContext
 		return nil
 	}
 
+	// Переприсваивание err результатом нового вызова — retry: судьбу ошибки
+	// решает следующая проверка err, а сопутствующие присваивания (настройка
+	// повторной команды) не являются fallback-значениями
+	if r.bodyReassignsErrFromCall(ifStmt.Body) {
+		return nil
+	}
+
 	// Check each statement in body
 	for _, stmt := range ifStmt.Body.List {
 		assignStmt, ok := stmt.(*ast.AssignStmt)
@@ -677,6 +684,24 @@ func (r *FallbackReturnRule) detectErrorIgnoringAssignment(ctx *core.FileContext
 	}
 
 	return violations
+}
+
+// bodyReassignsErrFromCall reports whether the block reassigns err with the
+// result of a new call (retry pattern). A literal like `err = nil` does not
+// count — silencing an error is not a retry.
+func (r *FallbackReturnRule) bodyReassignsErrFromCall(body *ast.BlockStmt) bool {
+	for _, stmt := range body.List {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || !r.isErrReassignment(assign) {
+			continue
+		}
+		for _, rhs := range assign.Rhs {
+			if _, ok := rhs.(*ast.CallExpr); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isErrReassignment checks if assignment is to err variable
