@@ -58,6 +58,19 @@ glint check --output=summary
 glint check --tolerate-broken-packages
 ```
 
+## Measuring your history
+
+`tools/history/measure.py` builds a quality curve over a repository's git
+history: a slice every two weeks, each analyzed by today's full rule set
+(project `.glint.yaml` exclusions are ignored, so the instrument stays the
+same across all slices). Output is JSONL with per-slice aggregates:
+findings per 1000 non-test Go lines, split by severity and category.
+
+```bash
+python3 tools/history/measure.py /path/to/repo curve.jsonl
+# plot per_kloc_crit_high over date to see your heavy-findings curve
+```
+
 ## Configuration
 
 Create `.glint.yaml` in your project root:
