@@ -35,3 +35,4 @@ debug
 # Temporary files
 /tmp/
 *.tmp
+.glint-parity
