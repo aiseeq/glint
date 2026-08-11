@@ -67,7 +67,7 @@ func (r *MagicNumberRule) shouldSkipFile(path string) bool {
 	// Blockchain/crypto code often carries chain IDs, which are self-describing.
 	// "chain/" also covers "blockchain/".
 	skipPatterns := []string{
-		"chain/",    // chain-related code (incl. blockchain/)
+		"chain/",      // chain-related code (incl. blockchain/)
 		"cryptoprov/", // crypto provider - chain IDs
 	}
 	for _, pattern := range skipPatterns {
