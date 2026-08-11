@@ -68,8 +68,12 @@ findings per 1000 non-test Go lines, split by severity and category.
 
 ```bash
 python3 tools/history/measure.py /path/to/repo curve.jsonl
-# plot per_kloc_crit_high over date to see your heavy-findings curve
+python3 tools/history/plot.py curve.jsonl -o curve.png  # needs matplotlib
 ```
+
+`plot.py` draws the heavy-findings curve (critical+high per 1000 lines) by
+default; `--metric per_kloc_total` plots all findings, and passing several
+JSONL files draws one line per project.
 
 ## Configuration
 
