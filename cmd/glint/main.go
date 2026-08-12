@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +32,22 @@ import (
 )
 
 var version = "dev"
+
+// resolveVersion prefers the Makefile-injected version and falls back to the
+// module version Go stamps into `go install`-built binaries — otherwise every
+// binary a user installs from a pseudo-version reports itself as "dev" and
+// there is no way to tell which commit they actually got. Explicit by-design
+// fallback: "dev" survives only for builds that carry no version at all
+// (plain `go build` in the repo).
+func resolveVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return version
+}
 
 const (
 	defaultFilePermissions = 0644
@@ -75,7 +92,7 @@ var rootCmd = &cobra.Command{
 	Short: "Glint - Unified Code Analyzer",
 	Long: `Glint is a fast, configurable static analyzer for Go and TypeScript projects.
 Originally built to help AI agents understand codebases.`,
-	Version: version,
+	Version: resolveVersion(),
 	// A failed analysis is not a usage mistake: printing the full help text
 	// after every error buries the message that explains what went wrong.
 	// main reports the error itself, so cobra must not print it a second time.
