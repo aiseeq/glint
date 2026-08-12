@@ -267,9 +267,22 @@ Rules with an auto-fix are marked `(auto-fix)` in `glint rules` output.
 # Show which files are being analyzed
 glint check --verbose
 
-# Full debug output (timing, cache hits)
+# Debug output for rule selection
 glint check --debug
 ```
+
+## Timing
+
+`--timing` reports per-phase and per-rule durations to stderr — total and the
+slowest single file per rule:
+
+```bash
+glint check --timing
+```
+
+If glint hangs on your project, run it with `--timing` and press Ctrl+C: the
+report names the rule and file it is stuck on (or the loading phase, if
+type-checking is the problem). Please attach that output when filing an issue.
 
 ## Project Structure
 

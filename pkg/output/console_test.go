@@ -160,10 +160,10 @@ func TestConsoleOutputPropagatesWriteError(t *testing.T) {
 
 func TestReportWriterStopsAfterFirstError(t *testing.T) {
 	fw := &failingWriter{failAfter: 1}
-	rw := newReportWriter(fw)
-	rw.line("first")                             // ok
-	rw.printf("second")                          // fails
-	rw.line("third")                             // must be skipped
+	rw := NewReportWriter(fw)
+	rw.Line("first")                             // ok
+	rw.Printf("second")                          // fails
+	rw.Line("third")                             // must be skipped
 	rw.colored(color.New(color.FgRed), "fourth") // must be skipped
 
 	require.Error(t, rw.Err())

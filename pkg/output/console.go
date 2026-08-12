@@ -17,21 +17,21 @@ const (
 	topIssuesLimit  = 5
 )
 
-// reportWriter accumulates the first write error so that report code reads as
+// ReportWriter accumulates the first write error so that report code reads as
 // a sequence of writes rather than a chain of identical error checks. Once a
 // write fails every later one is a no-op, and Err returns the failure.
 // ("Errors are values" — https://go.dev/blog/errors-are-values)
-type reportWriter struct {
+type ReportWriter struct {
 	w   io.Writer
 	err error
 }
 
-func newReportWriter(w io.Writer) *reportWriter {
-	return &reportWriter{w: w}
+func NewReportWriter(w io.Writer) *ReportWriter {
+	return &ReportWriter{w: w}
 }
 
 // line writes its arguments followed by a newline.
-func (rw *reportWriter) line(args ...any) {
+func (rw *ReportWriter) Line(args ...any) {
 	if rw.err != nil {
 		return
 	}
@@ -39,7 +39,7 @@ func (rw *reportWriter) line(args ...any) {
 }
 
 // printf writes formatted text.
-func (rw *reportWriter) printf(format string, args ...any) {
+func (rw *ReportWriter) Printf(format string, args ...any) {
 	if rw.err != nil {
 		return
 	}
@@ -47,19 +47,19 @@ func (rw *reportWriter) printf(format string, args ...any) {
 }
 
 // colored writes formatted text in the given color.
-func (rw *reportWriter) colored(c *color.Color, format string, args ...any) {
+func (rw *ReportWriter) colored(c *color.Color, format string, args ...any) {
 	if rw.err != nil {
 		return
 	}
 	if c == nil {
-		rw.printf(format, args...)
+		rw.Printf(format, args...)
 		return
 	}
 	_, rw.err = c.Fprintf(rw.w, format, args...)
 }
 
 // Err returns the first write error, if any.
-func (rw *reportWriter) Err() error {
+func (rw *ReportWriter) Err() error {
 	return rw.err
 }
 
@@ -91,7 +91,7 @@ func (c *ConsoleOutput) WithNoColor(v bool) *ConsoleOutput {
 
 // Write outputs violations to console
 func (c *ConsoleOutput) Write(violations core.ViolationList, stats Stats) error {
-	out := newReportWriter(c.writer)
+	out := NewReportWriter(c.writer)
 
 	if len(violations) == 0 {
 		c.printSuccess(out, stats)
@@ -105,25 +105,25 @@ func (c *ConsoleOutput) Write(violations core.ViolationList, stats Stats) error 
 	return out.Err()
 }
 
-func (c *ConsoleOutput) printHeader(out *reportWriter, stats Stats) {
-	out.line()
-	out.line("GLINT ANALYSIS RESULTS")
-	out.line(strings.Repeat("=", outputLineWidth))
-	out.printf("Files analyzed: %d\n", stats.FilesAnalyzed)
+func (c *ConsoleOutput) printHeader(out *ReportWriter, stats Stats) {
+	out.Line()
+	out.Line("GLINT ANALYSIS RESULTS")
+	out.Line(strings.Repeat("=", outputLineWidth))
+	out.Printf("Files analyzed: %d\n", stats.FilesAnalyzed)
 	if stats.FilesSkipped > 0 {
-		out.printf("Files skipped: %d\n", stats.FilesSkipped)
+		out.Printf("Files skipped: %d\n", stats.FilesSkipped)
 	}
-	out.line()
+	out.Line()
 }
 
-func (c *ConsoleOutput) printSuccess(out *reportWriter, stats Stats) {
-	out.line()
+func (c *ConsoleOutput) printSuccess(out *ReportWriter, stats Stats) {
+	out.Line()
 	out.colored(color.New(color.FgGreen, color.Bold), "No issues found!\n")
-	out.printf("Files analyzed: %d\n", stats.FilesAnalyzed)
-	out.line()
+	out.Printf("Files analyzed: %d\n", stats.FilesAnalyzed)
+	out.Line()
 }
 
-func (c *ConsoleOutput) printViolations(out *reportWriter, violations core.ViolationList) {
+func (c *ConsoleOutput) printViolations(out *ReportWriter, violations core.ViolationList) {
 	// Group by file
 	byFile := make(map[string]core.ViolationList)
 	for _, v := range violations {
@@ -154,11 +154,11 @@ func (c *ConsoleOutput) printViolations(out *reportWriter, violations core.Viola
 		for _, v := range fileViolations {
 			c.printViolation(out, v)
 		}
-		out.line()
+		out.Line()
 	}
 }
 
-func (c *ConsoleOutput) printViolation(out *reportWriter, v *core.Violation) {
+func (c *ConsoleOutput) printViolation(out *ReportWriter, v *core.Violation) {
 	var sevColor *color.Color
 	switch v.Severity {
 	case core.SeverityCritical:
@@ -174,7 +174,7 @@ func (c *ConsoleOutput) printViolation(out *reportWriter, v *core.Violation) {
 	gray := color.New(color.FgHiBlack)
 	out.colored(gray, "  %d: ", v.Line)
 	out.colored(sevColor, "[%s] ", v.Severity.Label())
-	out.printf("%s ", v.Message)
+	out.Printf("%s ", v.Message)
 	out.colored(gray, "(%s)\n", v.Rule)
 
 	if v.Code != "" {
@@ -185,11 +185,11 @@ func (c *ConsoleOutput) printViolation(out *reportWriter, v *core.Violation) {
 	}
 }
 
-func (c *ConsoleOutput) printSummary(out *reportWriter, violations core.ViolationList) {
+func (c *ConsoleOutput) printSummary(out *ReportWriter, violations core.ViolationList) {
 	counts := violations.CountBySeverity()
 
-	out.line(strings.Repeat("-", outputLineWidth))
-	out.printf("SUMMARY: %d issues found\n", len(violations))
+	out.Line(strings.Repeat("-", outputLineWidth))
+	out.Printf("SUMMARY: %d issues found\n", len(violations))
 
 	for _, level := range []struct {
 		severity core.Severity
@@ -206,7 +206,7 @@ func (c *ConsoleOutput) printSummary(out *reportWriter, violations core.Violatio
 		}
 	}
 
-	out.line()
+	out.Line()
 }
 
 // Stats contains analysis statistics
@@ -240,29 +240,29 @@ func (s *SummaryOutput) WithWriter(w io.Writer) *SummaryOutput {
 
 // Write outputs a compact summary
 func (s *SummaryOutput) Write(violations core.ViolationList, stats Stats) error {
-	out := newReportWriter(s.writer)
+	out := NewReportWriter(s.writer)
 
 	s.printHeader(out, violations)
 	if len(violations) > 0 {
 		s.printTopIssues(out, violations)
 	}
-	out.printf("Files analyzed: %d | Duration: %.2fs\n", stats.FilesAnalyzed, stats.Duration)
+	out.Printf("Files analyzed: %d | Duration: %.2fs\n", stats.FilesAnalyzed, stats.Duration)
 
 	return out.Err()
 }
 
-func (s *SummaryOutput) printHeader(out *reportWriter, violations core.ViolationList) {
+func (s *SummaryOutput) printHeader(out *ReportWriter, violations core.ViolationList) {
 	counts := violations.CountBySeverity()
 
-	out.line("GLINT ANALYSIS SUMMARY")
-	out.line("======================")
-	out.printf("Critical: %d | High: %d | Medium: %d | Low: %d\n",
+	out.Line("GLINT ANALYSIS SUMMARY")
+	out.Line("======================")
+	out.Printf("Critical: %d | High: %d | Medium: %d | Low: %d\n",
 		counts[core.SeverityCritical],
 		counts[core.SeverityHigh],
 		counts[core.SeverityMedium],
 		counts[core.SeverityLow],
 	)
-	out.line()
+	out.Line()
 }
 
 type ruleCount struct {
@@ -271,19 +271,19 @@ type ruleCount struct {
 	sev   core.Severity
 }
 
-func (s *SummaryOutput) printTopIssues(out *reportWriter, violations core.ViolationList) {
+func (s *SummaryOutput) printTopIssues(out *ReportWriter, violations core.ViolationList) {
 	ruleCounts := s.buildRuleCounts(violations)
 
-	out.line("TOP ISSUES:")
+	out.Line("TOP ISSUES:")
 	limit := topIssuesLimit
 	if len(ruleCounts) < limit {
 		limit = len(ruleCounts)
 	}
 	for i := 0; i < limit; i++ {
 		rc := ruleCounts[i]
-		out.printf("%d. [%s] %s: %d violations\n", i+1, rc.sev.Label(), rc.rule, rc.count)
+		out.Printf("%d. [%s] %s: %d violations\n", i+1, rc.sev.Label(), rc.rule, rc.count)
 	}
-	out.line()
+	out.Line()
 }
 
 func (s *SummaryOutput) buildRuleCounts(violations core.ViolationList) []ruleCount {

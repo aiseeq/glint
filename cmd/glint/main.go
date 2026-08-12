@@ -46,11 +46,18 @@ var (
 	flagDebug       bool
 	flagNoColor     bool
 	flagTolerant    bool
+	flagTiming      bool
 	// Fix command flags
 	flagDryRun  bool
 	flagForce   bool
 	flagFixRule string
 )
+
+// timings collects per-phase and per-rule durations under --timing; nil (the
+// default) disables collection at every call site. A package-level variable,
+// like the flags above, so the rule funnel does not grow a parameter that
+// every test would have to pass.
+var timings *timingCollector
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
@@ -149,6 +156,7 @@ func init() {
 	checkCmd.Flags().BoolVar(&flagDebug, "debug", false, "Enable debug output")
 	checkCmd.Flags().BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
 	checkCmd.Flags().BoolVar(&flagTolerant, "tolerate-broken-packages", false, "Analyze packages that type-check and report the ones that do not, instead of failing (for trees that do not compile as a whole)")
+	checkCmd.Flags().BoolVar(&flagTiming, "timing", false, "Report per-rule timings to stderr; on Ctrl+C also names the rule and file still running")
 
 	// Rules command flags
 	rulesCmd.Flags().StringVarP(&flagCategory, "category", "c", "", "Filter by category")
@@ -175,6 +183,12 @@ func init() {
 func runCheck(_ *cobra.Command, args []string) error {
 	startTime := time.Now()
 
+	if flagTiming {
+		timings = newTimingCollector()
+		stop := reportTimingsOnInterrupt(timings)
+		defer stop()
+	}
+
 	projectRoots, err := getProjectRoots(args)
 	if err != nil {
 		return err
@@ -200,7 +214,9 @@ func runCheck(_ *cobra.Command, args []string) error {
 			outputFormat = cfg.Settings.Output
 		}
 
+		loadDone := timings.phase("load " + projectRoot)
 		contexts, walker, project, err := prepareAnalysis(projectRoot, cfg, enabledRules)
+		loadDone()
 		if err != nil {
 			return err
 		}
@@ -209,7 +225,9 @@ func runCheck(_ *cobra.Command, args []string) error {
 		// root must not influence this one.
 		rules.ResetState(enabledRules)
 
+		analyzeDone := timings.phase("analyze " + projectRoot)
 		violations, err := analyzeProject(contexts, enabledRules, cfg, project)
+		analyzeDone()
 		if err != nil {
 			return err
 		}
@@ -233,6 +251,9 @@ func runCheck(_ *cobra.Command, args []string) error {
 	// Пересекающиеся пути (./backend и ./backend/auth) дают одну и ту же находку дважды.
 	allViolations = dedupeViolations(allViolations)
 	stats.Duration = time.Since(startTime).Seconds()
+	if err := timings.report(os.Stderr); err != nil {
+		return fmt.Errorf("write timing report: %w", err)
+	}
 
 	if err := outputResults(outputFormat, allViolations, stats); err != nil {
 		return fmt.Errorf("output error: %w", err)
@@ -583,6 +604,7 @@ func runRule(ctx *core.FileContext, rule rules.Rule, cfg *core.Config, overrides
 		return nil
 	}
 
+	defer timings.track(rule.Name(), ctx.RelPath)()
 	violations := rule.AnalyzeFile(ctx)
 	if len(violations) == 0 {
 		return nil
@@ -633,7 +655,9 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 			}
 			return nil, fmt.Errorf("analyze Go project with rule %q: project context is nil", rule.Name())
 		}
+		projectDone := timings.track(rule.Name(), "(go project)")
 		violations, err := projectRule.AnalyzeGoProject(project)
+		projectDone()
 		if err != nil {
 			return nil, fmt.Errorf("analyze Go project with rule %q: %w", rule.Name(), err)
 		}
