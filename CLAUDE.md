@@ -18,7 +18,7 @@
 - Утверждения из README и комментариев (количество правил, поведение) не переносить без проверки: `glint rules`, запуск на тест-кейсе.
 
 Коммиты
-- `make commit MESSAGE="..."` — smoke + stage all + commit, затем `git push`. Разрешён без запроса, так часто, как нужно; после задачи — коммит и push, при массовых правках — промежуточные.
+- `make commit MESSAGE="..."` — smoke + stage all + commit + push во все remotes; отдельный `git push` после него не запускать. Разрешён без запроса, так часто, как нужно; после задачи — коммит и push, при массовых правках — промежуточные.
 - Без запроса разрешены: read-only команды, `git fetch`, `git switch <existing-branch>`, `git switch -c <branch> origin/main`, `git branch --set-upstream-to=...`, `git merge --ff-only`, `git pull --ff-only`.
 - Требуют разрешения: `add`, raw `commit`, `reset`, `restore`, `checkout --`, `clean`, `stash`, `rebase`, `cherry-pick`, обычный merge, удаление веток, force-push, теги.
 - Перед коммитом смотреть только на секреты и большие бинарники. MESSAGE — Conventional Commits.

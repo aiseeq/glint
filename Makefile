@@ -107,6 +107,7 @@ commit: smoke ## Stage all and commit with MESSAGE (usage: make commit MESSAGE="
 		"Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>" \
 		| git commit -F -
 	@echo "Committed: $$(printf '%s' "$$MESSAGE" | head -1)"
+	@git remote | xargs -I% git push % HEAD
 
 ## Help
 
