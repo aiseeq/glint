@@ -316,6 +316,45 @@ func (ctx *FileContext) LineForPos(pos token.Pos) int {
 	return line
 }
 
+// EnclosingFunction returns the name of the function or method declared
+// around the given one-based line; "" when the line lies outside every
+// declaration or the file has no Go AST. Methods report the bare method name,
+// the same key rules use when they annotate findings themselves.
+func (ctx *FileContext) EnclosingFunction(line int) string {
+	if ctx.GoAST == nil || ctx.GoFileSet == nil {
+		return ""
+	}
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		start := ctx.GoFileSet.Position(fn.Pos()).Line
+		end := ctx.GoFileSet.Position(fn.End()).Line
+		if line >= start && line <= end {
+			return fn.Name.Name
+		}
+	}
+	return ""
+}
+
+// AnnotateFunction records the enclosing function of a finding under
+// Context["function"] unless the rule already named one, so that function
+// exceptions in the configuration apply to every rule alike.
+func (ctx *FileContext) AnnotateFunction(v *Violation) {
+	if v == nil {
+		return
+	}
+	if v.Context != nil {
+		if _, ok := v.Context["function"]; ok {
+			return
+		}
+	}
+	if name := ctx.EnclosingFunction(v.Line); name != "" {
+		v.WithContext("function", name)
+	}
+}
+
 // Extension returns the file extension
 func (ctx *FileContext) Extension() string {
 	return filepath.Ext(ctx.Path)

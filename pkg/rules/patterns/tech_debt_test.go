@@ -222,6 +222,84 @@ func TestTechDebtRule_WIPRequiresWordBoundary(t *testing.T) {
 	}
 }
 
+// A godoc comment opens with the name of the thing it documents. When that
+// name happens to be, or start with, a marker word (temporaryFetchError,
+// incomplete), the comment describes an identifier, not a state of the code.
+func TestTechDebtRule_DocCommentNamingIdentifierIsNotMarker(t *testing.T) {
+	rule := NewTechDebtRule()
+
+	tests := []struct {
+		name        string
+		code        string
+		expectMatch bool
+	}{
+		{
+			name: "identifier starts with marker word",
+			code: `package p
+
+// temporaryFetchError tells a transient failure from a permanent one.
+func temporaryFetchError(err error) bool { return false }
+`,
+			expectMatch: false,
+		},
+		{
+			name: "method doc equals marker word",
+			code: `package p
+
+// incomplete returns what the draft still lacks; nil when nothing.
+func (d draft) incomplete() error { return nil }
+`,
+			expectMatch: false,
+		},
+		{
+			name: "grouped const doc equals marker word",
+			code: `package p
+
+const (
+	// workaround is the mode name used by the CLI.
+	workaround = "workaround"
+)
+`,
+			expectMatch: false,
+		},
+		{
+			name: "marker in prose before a function is still a marker",
+			code: `package p
+
+// temporary fix until the upstream bug is closed
+func fetch() error { return nil }
+`,
+			expectMatch: true,
+		},
+		{
+			name: "marker word not followed by its declaration",
+			code: `package p
+
+// incomplete: the parser stops at the first table
+var x = 1
+`,
+			expectMatch: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := &core.FileContext{
+				Path:    "/backend/service.go",
+				RelPath: "backend/service.go",
+				Lines:   splitLines(tt.code),
+				Content: []byte(tt.code),
+			}
+			violations := rule.AnalyzeFile(ctx)
+			if tt.expectMatch {
+				require.NotEmpty(t, violations)
+			} else {
+				assert.Empty(t, violations)
+			}
+		})
+	}
+}
+
 func TestTechDebtRule_DeadCode(t *testing.T) {
 	rule := NewTechDebtRule()
 

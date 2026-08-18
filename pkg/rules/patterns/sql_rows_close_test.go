@@ -92,6 +92,99 @@ func example(ctx context.Context, db *sql.DB) {
 			expectMatch: true,
 		},
 		{
+			name: "rows handed to a same-file helper that closes them",
+			code: `package main
+
+import "database/sql"
+
+func example(db *sql.DB) ([]string, error) {
+	rows, err := db.Query("SELECT name FROM users")
+	if err != nil {
+		return nil, err
+	}
+	return scanNames(rows)
+}
+
+func scanNames(rows *sql.Rows) ([]string, error) {
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "rows handed to a same-file helper that leaks them",
+			code: `package main
+
+import "database/sql"
+
+func example(db *sql.DB) ([]string, error) {
+	rows, err := db.Query("SELECT name FROM users")
+	if err != nil {
+		return nil, err
+	}
+	return scanNames(rows)
+}
+
+func scanNames(rows *sql.Rows) ([]string, error) {
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "rows returned to the caller",
+			code: `package main
+
+import "database/sql"
+
+func example(db *sql.DB) (*sql.Rows, error) {
+	rows, err := db.Query("SELECT name FROM users")
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "rows handed to a method of another package",
+			code: `package main
+
+import (
+	"database/sql"
+
+	"example.com/scan"
+)
+
+func example(db *sql.DB, s *scan.Scanner) ([]string, error) {
+	rows, err := db.Query("SELECT name FROM users")
+	if err != nil {
+		return nil, err
+	}
+	return s.Names(rows)
+}
+`,
+			expectMatch: false,
+		},
+		{
 			name: "rows ignored",
 			code: `package main
 

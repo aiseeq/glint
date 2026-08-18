@@ -287,6 +287,34 @@ func TestReferenceBalances(t *testing.T) {
 	assert.Empty(t, violations, "тест против своего сервера находкой быть не должен: %v", messages(violations))
 }
 
+// Интеграционный тест против собственной локальной БД гейтится паролем этой
+// БД: секрет наш, адрес локальный, но он записан не URL-ом, а DSN, склеенным
+// из кусков вокруг пароля.
+func TestTestExternalServiceRule_LocalDatabaseGateIsNotReported(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"pipeline/pipeline_integration_test.go": `package pipeline
+
+import (
+	"os"
+	"testing"
+)
+
+func TestPipelineIntegration(t *testing.T) {
+	dbPassword := os.Getenv("DB_PASSWORD")
+	if dbPassword == "" {
+		t.Skip("DB_PASSWORD not set, skipping integration test")
+	}
+	dsn := "postgres://app:" + dbPassword + "@127.0.0.1:5432/app?sslmode=disable"
+	_ = dsn
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations, "тест против локальной БД находкой быть не должен: %v", messages(violations))
+}
+
 func TestTestExternalServiceRule_ConfigureGuards(t *testing.T) {
 	rule := NewTestExternalServiceRule()
 

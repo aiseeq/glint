@@ -68,22 +68,7 @@ func (r *SQLRowsCloseRule) checkFunction(ctx *core.FileContext, body *ast.BlockS
 		return
 	}
 
-	// Check for defer rows.Close() or rows.Close()
-	// Also check inside function literals like: defer func() { _ = rows.Close() }()
-	closedVars := make(map[string]bool)
-
-	ast.Inspect(body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-
-		if varName := r.getCloseVar(call); varName != "" {
-			closedVars[varName] = true
-		}
-
-		return true
-	})
+	closedVars := r.closedOrHandedOff(ctx, body)
 
 	// Report unclosed rows
 	for varName, line := range rowsVars {
@@ -96,6 +81,110 @@ func (r *SQLRowsCloseRule) checkFunction(ctx *core.FileContext, body *ast.BlockS
 			*violations = append(*violations, v)
 		}
 	}
+}
+
+// closedOrHandedOff returns the rows variables that body closes itself, or
+// hands off: returned to the caller, or passed as an argument to a call. Once
+// the rows are handed off, closing is the recipient's job. A recipient declared
+// in the same file is checked: if it never closes its parameter, the rows are
+// still reported here — the leak is real, only one call away.
+func (r *SQLRowsCloseRule) closedOrHandedOff(ctx *core.FileContext, body *ast.BlockStmt) map[string]bool {
+	closed := make(map[string]bool)
+
+	// Check for defer rows.Close() or rows.Close()
+	// Also check inside function literals like: defer func() { _ = rows.Close() }()
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			if varName := r.getCloseVar(node); varName != "" {
+				closed[varName] = true
+			}
+			for i, arg := range node.Args {
+				ident, ok := arg.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				if r.recipientCloses(ctx, node.Fun, i) {
+					closed[ident.Name] = true
+				}
+			}
+		case *ast.ReturnStmt:
+			for _, res := range node.Results {
+				if ident, ok := res.(*ast.Ident); ok {
+					closed[ident.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	return closed
+}
+
+// recipientCloses reports whether the callee closes its argIndex-th parameter.
+// A callee that is not a plain function declared in this file cannot be
+// inspected, so it is trusted with the rows it received.
+func (r *SQLRowsCloseRule) recipientCloses(ctx *core.FileContext, fun ast.Expr, argIndex int) bool {
+	ident, ok := fun.(*ast.Ident)
+	if !ok {
+		return true
+	}
+	decl := findFuncDecl(ctx.GoAST, ident.Name)
+	if decl == nil || decl.Body == nil {
+		return true
+	}
+	paramName := paramNameAt(decl.Type, argIndex)
+	if paramName == "" {
+		return true
+	}
+	closes := false
+	ast.Inspect(decl.Body, func(n ast.Node) bool {
+		if closes {
+			return false
+		}
+		if call, ok := n.(*ast.CallExpr); ok && r.getCloseVar(call) == paramName {
+			closes = true
+		}
+		return true
+	})
+	return closes
+}
+
+// findFuncDecl returns the package-level function named name, or nil.
+func findFuncDecl(file *ast.File, name string) *ast.FuncDecl {
+	if file == nil {
+		return nil
+	}
+	for _, d := range file.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == name {
+			return fn
+		}
+	}
+	return nil
+}
+
+// paramNameAt returns the name of the index-th parameter, counting grouped
+// names (a, b T) separately; "" when the parameter is unnamed or absent.
+func paramNameAt(ft *ast.FuncType, index int) string {
+	if ft == nil || ft.Params == nil {
+		return ""
+	}
+	i := 0
+	for _, field := range ft.Params.List {
+		if len(field.Names) == 0 {
+			if i == index {
+				return ""
+			}
+			i++
+			continue
+		}
+		for _, n := range field.Names {
+			if i == index {
+				return n.Name
+			}
+			i++
+		}
+	}
+	return ""
 }
 
 func (r *SQLRowsCloseRule) isQueryCall(expr ast.Expr) bool {

@@ -115,6 +115,10 @@ func (r *TechDebtRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			continue
 		}
 
+		if documentsIdentifier(ctx.Lines, lineNum) {
+			continue
+		}
+
 		for _, patternName := range slices.Sorted(maps.Keys(r.patterns)) {
 			pattern := r.patterns[patternName]
 			if pattern.regex.MatchString(line) {
@@ -131,6 +135,61 @@ func (r *TechDebtRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	}
 
 	return violations
+}
+
+// docFirstWord captures the first word of a comment: the identifier a godoc
+// comment opens with.
+var docFirstWord = regexp.MustCompile(`^\s*//\s*([A-Za-z_][A-Za-z0-9_]*)`)
+
+// documentsIdentifier reports whether the comment at index i is the godoc of
+// the declaration that follows it: its first word names the function, method,
+// type, variable or constant declared on the first non-comment line after the
+// comment block. Such a comment describes an identifier, not the state of the
+// code, whatever the identifier is called (temporaryFetchError, a method named
+// after a marker word).
+func documentsIdentifier(lines []string, i int) bool {
+	m := docFirstWord.FindStringSubmatch(lines[i])
+	if m == nil {
+		return false
+	}
+	word := m[1]
+	j := i + 1
+	for j < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[j]), "//") {
+		j++
+	}
+	if j >= len(lines) {
+		return false
+	}
+	return declaresName(lines[j], word)
+}
+
+// declaresName reports whether line declares name: `func name(`, `func (r T)
+// name(`, `type name`, `var name`, `const name`, or `name =`/`name T` inside a
+// grouped var/const block.
+func declaresName(line, name string) bool {
+	rest := strings.TrimSpace(line)
+	for _, kw := range []string{"func ", "type ", "var ", "const "} {
+		if strings.HasPrefix(rest, kw) {
+			rest = strings.TrimSpace(rest[len(kw):])
+			if kw == "func " && strings.HasPrefix(rest, "(") {
+				end := strings.Index(rest, ")")
+				if end < 0 {
+					return false
+				}
+				rest = strings.TrimSpace(rest[end+1:])
+			}
+			break
+		}
+	}
+	if !strings.HasPrefix(rest, name) {
+		return false
+	}
+	tail := rest[len(name):]
+	return tail == "" || !isIdentChar(tail[0])
+}
+
+func isIdentChar(c byte) bool {
+	return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 func (r *TechDebtRule) shouldSkipFile(path string) bool {

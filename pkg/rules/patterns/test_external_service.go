@@ -54,6 +54,7 @@ type TestExternalServiceRule struct {
 	credentialName  *regexp.Regexp
 	credentialField *regexp.Regexp
 	localHost       *regexp.Regexp
+	localAddress    *regexp.Regexp
 	externalURL     *regexp.Regexp
 }
 
@@ -75,6 +76,9 @@ func NewTestExternalServiceRule() *TestExternalServiceRule {
 		// Локальные адреса и зарезервированные для примеров домены внешними не считаются.
 		localHost:   regexp.MustCompile(`(?i)^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal|[a-z0-9.-]+\.(local|localhost|test|invalid|internal)|example\.(com|org|net))(:\d+)?$`),
 		externalURL: regexp.MustCompile(`^https?://([^/\s]+)`),
+		// A local host embedded in a non-URL literal: the tail of a DSN glued
+		// around a password ("@127.0.0.1:5432/app"), a bare "localhost:8090".
+		localAddress: regexp.MustCompile(`(?i)(?:^|[^a-z0-9.-])(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal)(?::\d+)?(?:[^a-z0-9.-]|$)`),
 	}
 }
 
@@ -375,10 +379,12 @@ func (r *TestExternalServiceRule) externalURLLiteral(file *ast.File) string {
 	return found
 }
 
-// hasLocalURLLiteral reports whether the package names a local address anywhere.
+// hasLocalURLLiteral reports whether the package names a local address anywhere: a URL
+// on a local host, or a local host inside any other literal (a database DSN, a bare
+// host:port).
 //
-// Such a package drives our own server, so credentials in it are our own JWTs rather than a
-// vendor's API key, and it must not be treated as outbound.
+// Such a package drives our own server or database, so credentials in it are our own JWTs
+// and passwords rather than a vendor's API key, and it must not be treated as outbound.
 func (r *TestExternalServiceRule) hasLocalURLLiteral(file *ast.File) bool {
 	found := false
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -394,7 +400,7 @@ func (r *TestExternalServiceRule) hasLocalURLLiteral(file *ast.File) bool {
 			return true
 		}
 		match := r.externalURL.FindStringSubmatch(value)
-		if match != nil && r.localHost.MatchString(match[1]) {
+		if (match != nil && r.localHost.MatchString(match[1])) || r.localAddress.MatchString(value) {
 			found = true
 			return false
 		}

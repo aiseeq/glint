@@ -630,6 +630,7 @@ func runRule(ctx *core.FileContext, rule rules.Rule, cfg *core.Config, overrides
 	honorsSuppression := rules.HonorsSuppression(rule)
 	kept := make(core.ViolationList, 0, len(violations))
 	for _, violation := range violations {
+		ctx.AnnotateFunction(violation)
 		if cfg.IsViolationExcepted(rule.Category(), rule.Name(), ctx.RelPath, violation) {
 			continue
 		}
@@ -686,6 +687,7 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 			if err != nil {
 				return nil, fmt.Errorf("map finding from Go project rule %q: %w", rule.Name(), err)
 			}
+			fileCtx.AnnotateFunction(violation)
 			if cfg.IsFileExcepted(rule.Category(), rule.Name(), fileCtx.RelPath) ||
 				cfg.IsViolationExcepted(rule.Category(), rule.Name(), fileCtx.RelPath, violation) ||
 				(rules.HonorsSuppression(rule) && fileCtx.IsSuppressed(violation.Line, rule.Name())) {

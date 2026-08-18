@@ -150,6 +150,46 @@ func Export() (any, error) {
 	}
 }
 
+// Исключение по function работает для любого правила, а не только для тех,
+// что сами пишут имя функции в Context: движок дописывает объемлющую функцию
+// по строке находки. Репро: sql-rows-close и silent-error-handling не
+// понимали function-исключений в .glint.yaml потребителя.
+func TestAnalyzeFilesFunctionExceptionWorksForEveryRule(t *testing.T) {
+	code := `package svc
+
+import "database/sql"
+
+func Leaky(db *sql.DB) {
+	rows, err := db.Query("SELECT 1")
+	if err != nil {
+		return
+	}
+	_ = rows
+}
+
+func (s *Store) LeakyToo(db *sql.DB) {
+	rows, err := db.Query("SELECT 2")
+	if err != nil {
+		return
+	}
+	_ = rows
+}
+`
+	rule := patterns.NewSQLRowsCloseRule()
+	cfg := core.DefaultConfig()
+	cfg.Categories["patterns"] = core.CategoryConfig{Rules: map[string]core.RuleConfig{
+		"sql-rows-close": {Exceptions: []core.Exception{{Function: "LeakyToo", Reason: "test"}}},
+	}}
+
+	violations := analyzeFiles([]*core.FileContext{goContext(t, "store.go", code)}, []rules.Rule{rule}, cfg, nil)
+	if len(violations) != 1 || violations[0].Line != 6 {
+		t.Fatalf("want only the finding in Leaky (line 6), got %+v", violations)
+	}
+	if got := violations[0].Context["function"]; got != "Leaky" {
+		t.Fatalf("finding must name its enclosing function, got %v", got)
+	}
+}
+
 // exemptStubRule — правило-заглушка, отказывающееся от подавления.
 type exemptStubRule struct {
 	*rules.BaseRule
