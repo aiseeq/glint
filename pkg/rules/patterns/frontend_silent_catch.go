@@ -97,7 +97,15 @@ func (r *FrontendSilentCatchRule) isSilentCatch(block string) bool {
 }
 
 func (r *FrontendSilentCatchRule) shouldSkip(ctx *core.FileContext) bool {
-	path := ctx.RelPath
+	return skipFrontendPath(ctx)
+}
+
+// skipFrontendPath is shared by the frontend rules: tests, e2e, build output and
+// generated files are not hand-written UI code.
+func skipFrontendPath(ctx *core.FileContext) bool {
+	// RelPath has no leading slash, so a top-level node_modules/ would slip past
+	// the "/node_modules/" check without the normalisation.
+	path := "/" + ctx.RelPath
 	if ctx.IsTestFile() {
 		return true
 	}

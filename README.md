@@ -164,6 +164,7 @@ glint rules
 - **doc-missing** — Detects exported types/functions without documentation
 - **error-string-compare** — Detects error comparisons via strings instead of errors.Is/errors.As
 - **error-wrap** — Detects errors returned without context (should use %w)
+- **error-cause-dropped** — Detects error branches that replace the real cause with a fixed message (Go `if err != nil`, TS `catch`) — the caller learns that it failed, never why
 - **go-modern** — Suggests modern Go 1.21+ alternatives (slices.Sort, built-in min/max)
 - **unused-symbol** — Detects unused private functions, types, constants
 - **doc-links** — Detects broken/placeholder URLs in documentation
