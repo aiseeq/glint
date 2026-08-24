@@ -16,6 +16,10 @@ type Walker struct {
 	config      *Config
 	parser      *Parser
 	parseGo     bool
+	// gitignore строится в начале каждого обхода (settings.respect_gitignore);
+	// nil — учёт .gitignore выключен. Заполняется и читается только в
+	// goroutine обнаружения файлов, лока не требует.
+	gitignore *gitignoreIndex
 
 	// Worker pool size. The channels belong to one walk: walk creates them,
 	// so the same walker can be reused.
@@ -92,12 +96,23 @@ func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 
 	// Start file discovery
 	go func() {
+		defer close(fileQueue)
+		w.gitignore = nil
+		if w.config.RespectGitignore() {
+			idx, err := newGitignoreIndex(w.projectRoot)
+			if err != nil {
+				// Нечитаемый .gitignore — не повод молча анализировать
+				// игнорируемое: обход не начинается, caller решает судьбу.
+				walkErrors <- fmt.Errorf("load gitignore patterns: %w", err)
+				return
+			}
+			w.gitignore = idx
+		}
 		if err := filepath.Walk(w.projectRoot, func(path string, info os.FileInfo, err error) error {
 			return w.visitPath(fileQueue, walkErrors, path, info, err)
 		}); err != nil {
 			walkErrors <- err
 		}
-		close(fileQueue)
 	}()
 
 	// Wait for workers to finish and close channels
@@ -151,12 +166,38 @@ func (w *Walker) visitPath(fileQueue chan<- string, walkErrors chan<- error, pat
 		if w.shouldSkipDir(info.Name()) {
 			return filepath.SkipDir
 		}
+		if w.gitignore != nil {
+			// Сначала проверка, потом загрузка собственного .gitignore:
+			// git не даёт каталогу исключить самого себя.
+			skip, ignErr := w.gitignore.ignored(path, true)
+			if ignErr != nil {
+				walkErrors <- ignErr
+			} else if skip {
+				return filepath.SkipDir
+			}
+			if err := w.gitignore.addDir(path); err != nil {
+				walkErrors <- err
+			}
+		}
 		return nil
 	}
 
 	// Skip non-analyzable files
 	if !w.isAnalyzableFile(path) {
 		return nil
+	}
+
+	// Skip files the project itself excluded from git
+	if w.gitignore != nil {
+		skip, ignErr := w.gitignore.ignored(path, false)
+		if ignErr != nil {
+			walkErrors <- ignErr
+		} else if skip {
+			w.mu.Lock()
+			w.stats.SkippedFiles++
+			w.mu.Unlock()
+			return nil
+		}
 	}
 
 	// Check exclusion patterns

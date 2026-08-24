@@ -24,6 +24,11 @@ type SettingsConfig struct {
 	SkipDirs    []string `yaml:"skip_dirs,omitempty"`
 	MinSeverity string   `yaml:"min_severity"`
 	Output      string   `yaml:"output"`
+	// RespectGitignore — учитывать ли .gitignore при обходе (по умолчанию да):
+	// сгенерированные и локальные файлы, которые проект сам исключил из git,
+	// не анализируются. Указатель, потому что zero-value bool не отличим от
+	// явного false в YAML.
+	RespectGitignore *bool `yaml:"respect_gitignore,omitempty"`
 }
 
 // DefaultSkipDirs are the directory names the walker never descends into
@@ -33,6 +38,15 @@ var DefaultSkipDirs = []string{
 	".idea", ".vscode",
 	"node_modules", "vendor",
 	".next", "out", "dist", "build", "bin",
+}
+
+// RespectGitignore reports whether the walker honours .gitignore files.
+// Enabled unless the config explicitly turns it off.
+func (c *Config) RespectGitignore() bool {
+	if c.Settings.RespectGitignore != nil {
+		return *c.Settings.RespectGitignore
+	}
+	return true
 }
 
 // SkipDirs returns the configured directory names to skip, or the defaults.
@@ -319,6 +333,9 @@ func MergeConfigs(base, override *Config) *Config {
 	}
 	if len(override.Settings.SkipDirs) > 0 {
 		result.Settings.SkipDirs = override.Settings.SkipDirs
+	}
+	if override.Settings.RespectGitignore != nil {
+		result.Settings.RespectGitignore = override.Settings.RespectGitignore
 	}
 	if override.Settings.MinSeverity != "" {
 		result.Settings.MinSeverity = override.Settings.MinSeverity

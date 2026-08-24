@@ -60,7 +60,7 @@ categories:
       unused-config-field:
         exceptions:
           - file: "pkg/core/config.go"
-            line: 100
+            pattern: "Exception.Reason"
             reason: >-
               Exception.Reason documents why a suppression exists for whoever
               reads .glint.yaml; the loader deliberately does not act on it.
