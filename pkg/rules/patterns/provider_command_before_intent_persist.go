@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -140,7 +141,21 @@ func (a *providerFlowAnalyzer) cloneState(states []providerFlowState) []provider
 }
 
 func (a *providerFlowAnalyzer) joinStates(left, right []providerFlowState) []providerFlowState {
-	return append(left, right...)
+	return joinFlowPaths(left, right, providerFlowStateKey)
+}
+
+// providerFlowStateKey identifies a path by the durable evidence and the
+// provider commands still pending on it.
+func providerFlowStateKey(state providerFlowState) string {
+	parts := make([]string, 0, 1+len(state.durableEvidence)+len(state.pending))
+	parts = append(parts, strconv.FormatBool(state.durableObserved))
+	for _, evidence := range state.durableEvidence {
+		parts = append(parts, evidence.method+"."+evidence.entity+"."+evidence.owner)
+	}
+	for _, command := range state.pending {
+		parts = append(parts, flowPosKey(command.call.Pos()))
+	}
+	return flowPathKey(parts...)
 }
 
 func (a *providerFlowAnalyzer) liveState(states []providerFlowState) bool { return len(states) > 0 }

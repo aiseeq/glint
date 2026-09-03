@@ -185,7 +185,26 @@ func (a *checkpointFlowAnalyzer) cloneState(paths []checkpointFlow) []checkpoint
 }
 
 func (a *checkpointFlowAnalyzer) joinStates(left, right []checkpointFlow) []checkpointFlow {
-	return append(left, right...)
+	return joinFlowPaths(left, right, checkpointFlowKey)
+}
+
+// checkpointFlowKey identifies a path by its checkpoint bindings and the
+// failures seen on it; bindings are sorted so map order cannot change the key.
+func checkpointFlowKey(flow checkpointFlow) string {
+	bindings := make([]checkpointBindingID, 0, len(flow.assignments))
+	for binding := range flow.assignments {
+		bindings = append(bindings, binding)
+	}
+	slices.Sort(bindings)
+	parts := make([]string, 0, len(bindings)+len(flow.failures))
+	for _, binding := range bindings {
+		assignment := flow.assignments[binding]
+		parts = append(parts, flowPosKey(binding)+"="+assignment.receiver+"."+assignment.method)
+	}
+	for _, failure := range flow.failures {
+		parts = append(parts, flowPosKey(failure.ifStmt.Pos())+"!"+failure.receiver+"."+failure.method)
+	}
+	return flowPathKey(parts...)
 }
 
 func (a *checkpointFlowAnalyzer) liveState(paths []checkpointFlow) bool { return len(paths) > 0 }

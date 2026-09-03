@@ -192,7 +192,17 @@ func (a *statusHistoryFlowAnalyzer) cloneState(paths []statusHistoryPath) []stat
 }
 
 func (a *statusHistoryFlowAnalyzer) joinStates(left, right []statusHistoryPath) []statusHistoryPath {
-	return append(left, right...)
+	return joinFlowPaths(left, right, statusHistoryPathKey)
+}
+
+// statusHistoryPathKey identifies a path by the mutations recorded on it: the
+// rule looks at nothing else, so two paths with the same mutations are one.
+func statusHistoryPathKey(path statusHistoryPath) string {
+	parts := make([]string, 0, len(path.mutations))
+	for _, mutation := range path.mutations {
+		parts = append(parts, flowPosKey(mutation.call.Pos()))
+	}
+	return flowPathKey(parts...)
 }
 
 func (a *statusHistoryFlowAnalyzer) liveState(paths []statusHistoryPath) bool { return len(paths) > 0 }

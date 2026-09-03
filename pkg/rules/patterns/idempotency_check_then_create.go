@@ -3,7 +3,9 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -163,7 +165,38 @@ func (a *idempotencyFunctionAnalyzer) cloneState(paths []idempotencyPath) []idem
 }
 
 func (a *idempotencyFunctionAnalyzer) joinStates(left, right []idempotencyPath) []idempotencyPath {
-	return append(left, right...)
+	return joinFlowPaths(left, right, idempotencyPathKey)
+}
+
+// idempotencyPathKey identifies a path by the lookups recorded per receiver and
+// by the truths known about bindings; both maps are rendered in a stable order.
+func idempotencyPathKey(path idempotencyPath) string {
+	parts := make([]string, 0, len(path.lookups)+len(path.truths))
+	for receiver, calls := range path.lookups {
+		var rendered strings.Builder
+		rendered.WriteString(idempotencyReceiverKeyString(receiver))
+		for _, call := range calls {
+			rendered.WriteString("|")
+			rendered.WriteString(flowPosKey(call.call.Pos()))
+		}
+		parts = append(parts, rendered.String())
+	}
+	for binding, truth := range path.truths {
+		parts = append(parts, idempotencyBindingString(binding)+"="+strconv.FormatBool(truth))
+	}
+	slices.Sort(parts)
+	return flowPathKey(parts...)
+}
+
+func idempotencyReceiverKeyString(receiver idempotencyReceiverKey) string {
+	return idempotencyBindingString(receiver.binding) + "/" + receiver.path
+}
+
+func idempotencyBindingString(binding idempotencyBinding) string {
+	if binding.declaration != nil {
+		return flowPosKey(binding.declaration.Pos())
+	}
+	return "?" + binding.unresolved
 }
 
 func (a *idempotencyFunctionAnalyzer) liveState(paths []idempotencyPath) bool { return len(paths) > 0 }

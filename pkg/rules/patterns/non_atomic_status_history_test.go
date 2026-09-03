@@ -1,6 +1,8 @@
 package patterns
 
 import (
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -347,4 +349,30 @@ func createNonAtomicStatusHistoryContext(t *testing.T, path, code string) *core.
 	require.NoError(t, err)
 	ctx.SetGoAST(fset, file)
 	return ctx
+}
+
+// Paths used to double at every branch: a real 20+ branch function made the
+// rule allocate ~15 GB and the process died.
+func TestNonAtomicStatusHistoryRule_BranchExplosion(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("package service\n\nfunc step(repo Repository, n int) {\n")
+	for i := 0; i < 24; i++ {
+		body.WriteString("\tif n > ")
+		body.WriteString(strconv.Itoa(i))
+		body.WriteString(" {\n\t\tn++\n\t} else {\n\t\tn--\n\t}\n")
+	}
+	body.WriteString("\trepo.UpdateStatus(ctx, id)\n\trepo.RecordStatusHistory(ctx, id)\n}\n")
+
+	rule := NewNonAtomicStatusHistoryRule()
+	ctx := createNonAtomicStatusHistoryContext(t, "branch_explosion.go", body.String())
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	violations := rule.AnalyzeFile(ctx)
+	runtime.ReadMemStats(&after)
+
+	require.Len(t, violations, 1)
+	allocatedMB := float64(after.TotalAlloc-before.TotalAlloc) / (1 << 20)
+	assert.Less(t, allocatedMB, 64.0, "24 branches must not cost %0.f MB", allocatedMB)
 }
