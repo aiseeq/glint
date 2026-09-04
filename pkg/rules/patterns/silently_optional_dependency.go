@@ -321,14 +321,28 @@ func (r *SilentlyOptionalDependencyRule) collectCalls(
 	}
 }
 
-// calleeFunc resolves the function a call refers to, if it is a plain function or method.
+// calleeFunc resolves the function a call refers to, if it is a plain function
+// or method. Parentheses and the index of a generic instantiation are stepped
+// through, so Do[int](x) resolves like Do(x).
 func calleeFunc(pkg *packages.Package, call *ast.CallExpr) *types.Func {
 	var ident *ast.Ident
-	switch fun := call.Fun.(type) {
+	fun := ast.Unparen(call.Fun)
+	for {
+		switch node := fun.(type) {
+		case *ast.IndexExpr:
+			fun = ast.Unparen(node.X)
+			continue
+		case *ast.IndexListExpr:
+			fun = ast.Unparen(node.X)
+			continue
+		}
+		break
+	}
+	switch node := fun.(type) {
 	case *ast.Ident:
-		ident = fun
+		ident = node
 	case *ast.SelectorExpr:
-		ident = fun.Sel
+		ident = node.Sel
 	default:
 		return nil
 	}
