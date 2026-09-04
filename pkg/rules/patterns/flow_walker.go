@@ -393,4 +393,5 @@ var (
 	_ flowRule[[]statusHistoryPath, *statusHistoryLexicalScope] = (*statusHistoryFlowAnalyzer)(nil)
 	_ flowRule[[]providerFlowState, struct{}]                   = (*providerFlowAnalyzer)(nil)
 	_ flowRule[*responseState, struct{}]                        = (*unboundedResponseAnalyzer)(nil)
+	_ flowRule[*lenState, *lenScope]                            = (*lenDivisionAnalyzer)(nil)
 )
