@@ -1,6 +1,8 @@
 package fix
 
 import (
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -48,8 +50,11 @@ func (f *DeprecatedIoutilFixer) GenerateFix(ctx *core.FileContext, v *core.Viola
 
 	line := ctx.Lines[v.Line-1]
 
-	// Find which ioutil function is used
-	for old, replacement := range ioutilReplacements {
+	// Find which ioutil function is used. The names are walked in a fixed
+	// order: a line may use two of them, and the map walk order would then
+	// rewrite a different call on every run.
+	for _, old := range slices.Sorted(maps.Keys(ioutilReplacements)) {
+		replacement := ioutilReplacements[old]
 		if strings.Contains(line, old) {
 			return []*Fix{&Fix{
 				File:      ctx.Path,

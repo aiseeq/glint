@@ -120,6 +120,9 @@ func (r *MapIterationOrderRule) analyzeBody(fileCtx *core.FileContext, fn *ast.F
 			}
 			violations = append(violations, r.report(fileCtx, rangeStmt, name))
 		}
+		if picked, ok := firstMatchSelection(fn, rangeStmt); ok {
+			violations = append(violations, r.reportSelection(fileCtx, rangeStmt, picked))
+		}
 		return true
 	})
 
@@ -135,6 +138,318 @@ func (r *MapIterationOrderRule) report(fileCtx *core.FileContext, rangeStmt *ast
 	v.WithContext("pattern", "map_iteration_order")
 	v.WithContext("variable", name)
 	return v
+}
+
+func (r *MapIterationOrderRule) reportSelection(fileCtx *core.FileContext, rangeStmt *ast.RangeStmt, picked string) *core.Violation {
+	line := fileCtx.LineFor(rangeStmt)
+	v := r.CreateViolation(fileCtx.RelPath, line,
+		fmt.Sprintf("Which entry this loop picks for %q comes from map iteration, which Go randomizes — the loop stops at the first match, and the same input picks a different entry on every run", picked))
+	v.WithCode(strings.TrimSpace(fileCtx.GetLine(line)))
+	v.WithSuggestion("Walk the keys in a defined order (slices.Sorted(maps.Keys(m))), or make the choice by a comparison that has one winner")
+	v.WithContext("pattern", "map_iteration_first_match")
+	v.WithContext("variable", picked)
+	return v
+}
+
+// firstMatchSelection reports a loop that picks one entry out of a map and
+// stops: it returns something built from the key or the value, or it hands one
+// of them to a variable outside the loop and breaks. Which entry wins is then
+// the walk order, which Go randomizes.
+//
+// Three shapes are not such a choice: a lookup narrowed by an equality test
+// (the key of a map is unique, and an identity field of the value is treated as
+// one), an accumulation without a break, where a comparison and not the walk
+// decides the winner, and a walk over a map the function already proved to hold
+// a single entry.
+func firstMatchSelection(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt) (string, bool) {
+	key, value := rangeTargetNames(rangeStmt)
+	if key == "" && value == "" {
+		return "", false
+	}
+	if holdsSingleEntry(fn, types.ExprString(rangeStmt.X)) {
+		return "", false
+	}
+	scanner := &firstMatchScanner{key: key, value: value}
+	scanner.block(rangeStmt.Body.List, selectionPath{breakBinds: true})
+	return scanner.picked, scanner.picked != ""
+}
+
+// rangeTargetNames returns the loop's key and value names, blanks excluded.
+func rangeTargetNames(rangeStmt *ast.RangeStmt) (key, value string) {
+	if ident, ok := rangeStmt.Key.(*ast.Ident); ok && ident.Name != "_" {
+		key = ident.Name
+	}
+	if ident, ok := rangeStmt.Value.(*ast.Ident); ok && ident.Name != "_" {
+		value = ident.Name
+	}
+	return key, value
+}
+
+// selectionPath is what the walk knows about the branch it is in.
+type selectionPath struct {
+	// keyNarrowed: an equality test on the key already picked out one entry.
+	keyNarrowed bool
+	// assigned: the key or the value has been handed to a variable that
+	// outlives the loop, so a break now freezes this entry as the answer.
+	assigned string
+	// breakBinds: a break here belongs to the map loop, not to a nested loop
+	// or switch.
+	breakBinds bool
+}
+
+// firstMatchScanner walks the loop body remembering what the current branch
+// already decided.
+type firstMatchScanner struct {
+	key, value string
+	picked     string
+}
+
+func (s *firstMatchScanner) block(stmts []ast.Stmt, path selectionPath) {
+	for _, stmt := range stmts {
+		path = s.stmt(stmt, path)
+	}
+}
+
+// stmt walks one statement and returns the path as it leaves it.
+func (s *firstMatchScanner) stmt(stmt ast.Stmt, path selectionPath) selectionPath {
+	switch node := stmt.(type) {
+	case *ast.ReturnStmt:
+		if !path.keyNarrowed {
+			for _, result := range node.Results {
+				if name := s.loopVarIn(result); name != "" {
+					s.record(name)
+				}
+			}
+		}
+	case *ast.BranchStmt:
+		if node.Tok == token.BREAK && node.Label == nil && path.breakBinds && !path.keyNarrowed && path.assigned != "" {
+			s.record(path.assigned)
+		}
+	case *ast.AssignStmt:
+		if target := s.outerTarget(node); target != "" {
+			path.assigned = target
+		}
+	case *ast.BlockStmt:
+		s.block(node.List, path)
+	case *ast.IfStmt:
+		thenPath := path
+		thenPath.keyNarrowed = path.keyNarrowed || s.narrowsChoice(node.Cond)
+		s.block(node.Body.List, thenPath)
+		if node.Else != nil {
+			s.stmt(node.Else, path)
+		}
+	case *ast.ForStmt:
+		s.nested(node.Body, path)
+	case *ast.RangeStmt:
+		s.nested(node.Body, path)
+	case *ast.SwitchStmt:
+		s.switchClauses(node.Body, path, isIdent(node.Tag, s.key))
+	case *ast.TypeSwitchStmt:
+		s.switchClauses(node.Body, path, false)
+	case *ast.SelectStmt:
+		s.switchClauses(node.Body, path, false)
+	case *ast.LabeledStmt:
+		return s.stmt(node.Stmt, path)
+	}
+	return path
+}
+
+// nested walks a body where a break belongs to the inner construct.
+func (s *firstMatchScanner) nested(body *ast.BlockStmt, path selectionPath) {
+	if body == nil {
+		return
+	}
+	path.breakBinds = false
+	s.block(body.List, path)
+}
+
+// switchClauses walks the clauses of a switch or select; a switch on the key
+// narrows the choice the same way an equality test does.
+func (s *firstMatchScanner) switchClauses(body *ast.BlockStmt, path selectionPath, onKey bool) {
+	if body == nil {
+		return
+	}
+	path.breakBinds = false
+	path.keyNarrowed = path.keyNarrowed || onKey
+	for _, item := range body.List {
+		switch clause := item.(type) {
+		case *ast.CaseClause:
+			s.block(clause.Body, path)
+		case *ast.CommClause:
+			s.block(clause.Body, path)
+		}
+	}
+}
+
+// outerTarget returns the name of a variable outside the loop that just took
+// the key or the value. A short declaration makes a variable of the loop's own
+// scope, which no later iteration can read.
+func (s *firstMatchScanner) outerTarget(assign *ast.AssignStmt) string {
+	if assign.Tok != token.ASSIGN || len(assign.Lhs) != len(assign.Rhs) {
+		return ""
+	}
+	for i, lhs := range assign.Lhs {
+		ident, ok := lhs.(*ast.Ident)
+		if !ok || ident.Name == "_" || ident.Name == s.key || ident.Name == s.value {
+			continue
+		}
+		if s.loopVarIn(assign.Rhs[i]) != "" {
+			return ident.Name
+		}
+	}
+	return ""
+}
+
+// loopVarIn returns the loop variable the expression carries out, if any.
+func (s *firstMatchScanner) loopVarIn(expr ast.Expr) string {
+	if s.value != "" && carriesLoopVar(expr, s.value) {
+		return s.value
+	}
+	if s.key != "" && carriesLoopVar(expr, s.key) {
+		return s.key
+	}
+	return ""
+}
+
+// carriesLoopVar reports whether the expression hands the loop variable on as
+// the answer. A name that only appears inside a constructed error does not
+// count: a validation loop reports the first offending entry it meets, and
+// which one that is says nothing about the answer the function computes.
+func carriesLoopVar(expr ast.Expr, name string) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if call, ok := n.(*ast.CallExpr); ok {
+			if isErrorConstruction(call) {
+				return false
+			}
+			if fun, ok := call.Fun.(*ast.Ident); ok && (fun.Name == "len" || fun.Name == "cap") {
+				return false
+			}
+		}
+		if ident, ok := n.(*ast.Ident); ok && ident.Name == name {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// isErrorConstruction recognizes the calls that build an error value.
+func isErrorConstruction(call *ast.CallExpr) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	if pkg, ok := selector.X.(*ast.Ident); ok && pkg.Name == "errors" {
+		return true
+	}
+	switch selector.Sel.Name {
+	case "Errorf", "Error", "Wrap", "Wrapf":
+		return true
+	}
+	return strings.HasPrefix(selector.Sel.Name, "Err")
+}
+
+func (s *firstMatchScanner) record(name string) {
+	if s.picked == "" {
+		s.picked = name
+	}
+}
+
+// narrowsChoice reports whether the condition is a lookup rather than a filter:
+// an equality test against the key, which a map holds once, or against a field
+// of the value, which the code treats as its identity. A test that can hold for
+// several entries — a prefix, a substring, a similarity — is not one.
+func (s *firstMatchScanner) narrowsChoice(cond ast.Expr) bool {
+	if cond == nil {
+		return false
+	}
+	narrowed := false
+	ast.Inspect(cond, func(n ast.Node) bool {
+		if narrowed {
+			return false
+		}
+		binary, ok := n.(*ast.BinaryExpr)
+		if !ok || binary.Op != token.EQL {
+			return true
+		}
+		if s.identityOperand(binary.X) || s.identityOperand(binary.Y) {
+			narrowed = true
+			return false
+		}
+		return true
+	})
+	return narrowed
+}
+
+// identityOperand reports whether the operand is the loop key or a field read
+// off the loop value.
+func (s *firstMatchScanner) identityOperand(expr ast.Expr) bool {
+	if isIdent(expr, s.key) {
+		return true
+	}
+	if s.value == "" {
+		return false
+	}
+	if selector, ok := ast.Unparen(expr).(*ast.SelectorExpr); ok {
+		return rootIdent(selector) == s.value
+	}
+	return false
+}
+
+// rootIdent returns the identifier a selector chain starts from.
+func rootIdent(expr ast.Expr) string {
+	for {
+		switch node := ast.Unparen(expr).(type) {
+		case *ast.SelectorExpr:
+			expr = node.X
+		case *ast.Ident:
+			return node.Name
+		default:
+			return ""
+		}
+	}
+}
+
+// holdsSingleEntry reports whether the function already compared the size of
+// the collection with one: `if len(matches) > 1 { … }` before the loop leaves
+// exactly one entry to pick, and picking it is not a choice at all.
+func holdsSingleEntry(fn *ast.FuncDecl, collection string) bool {
+	if fn == nil || fn.Body == nil || collection == "" {
+		return false
+	}
+	single := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if single {
+			return false
+		}
+		binary, ok := n.(*ast.BinaryExpr)
+		if !ok {
+			return true
+		}
+		if lengthOfCollection(binary.X, collection) && isIntLiteral(binary.Y, 1) {
+			single = true
+		}
+		if lengthOfCollection(binary.Y, collection) && isIntLiteral(binary.X, 1) {
+			single = true
+		}
+		return !single
+	})
+	return single
+}
+
+// lengthOfCollection reports whether the expression is len(collection).
+func lengthOfCollection(expr ast.Expr, collection string) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return false
+	}
+	name, ok := call.Fun.(*ast.Ident)
+	return ok && name.Name == "len" && types.ExprString(call.Args[0]) == collection
 }
 
 // isMapRange reports whether the range expression has a map type.

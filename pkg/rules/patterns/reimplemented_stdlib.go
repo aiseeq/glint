@@ -409,8 +409,14 @@ func returnsLiteral(stmt ast.Stmt, literal string) bool {
 	return ok && isIdent(expr, literal)
 }
 
+// isIdent reports whether the expression is exactly the named identifier,
+// parentheses aside. An empty name matches nothing: callers pass the name of a
+// binding that may be absent (a blank range key, for one).
 func isIdent(expr ast.Expr, name string) bool {
-	ident, ok := expr.(*ast.Ident)
+	if expr == nil || name == "" {
+		return false
+	}
+	ident, ok := ast.Unparen(expr).(*ast.Ident)
 	return ok && ident.Name == name
 }
 

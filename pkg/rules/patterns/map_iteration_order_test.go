@@ -200,3 +200,145 @@ func Pairs(unique map[[2]string]bool) [][2]string {
 `)
 	assert.Empty(t, violations, "срез отсортирован перед возвратом: %v", violations)
 }
+
+// Repro from a real project: the configuration was chosen by walking a map and
+// returning the first entry whose key matched loosely, so the same binary got a
+// different configuration from run to run.
+func TestMapIterationOrderReportsFirstMatchReturn(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "strings"
+
+func Config(profiles map[string]int, binary string) int {
+	for name, profile := range profiles {
+		if strings.Contains(binary, name) {
+			return profile
+		}
+	}
+	return 0
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 6, violations[0].Line)
+	assert.Contains(t, violations[0].Message, "picks")
+}
+
+// The same choice made through an outer variable and a break.
+func TestMapIterationOrderReportsFirstMatchBreak(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func Pick(profiles map[string]int, limit int) int {
+	chosen := 0
+	for _, profile := range profiles {
+		if profile < limit {
+			chosen = profile
+			break
+		}
+	}
+	return chosen
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 5, violations[0].Line)
+}
+
+// A lookup by key equality picks the one entry that can match: map keys are
+// unique, so the walk order changes nothing.
+func TestMapIterationOrderAcceptsKeyEqualityLookup(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func Lookup(profiles map[string]int, want string) int {
+	for name, profile := range profiles {
+		if name == want {
+			return profile
+		}
+	}
+	return 0
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// An existence check returns the same answer whatever the order.
+func TestMapIterationOrderAcceptsExistenceCheck(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func AnyOver(profiles map[string]int, limit int) bool {
+	for _, profile := range profiles {
+		if profile > limit {
+			return true
+		}
+	}
+	return false
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// Picking the maximum is order-independent: the comparison, not the walk,
+// decides the winner.
+func TestMapIterationOrderAcceptsMaximumSearch(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func Best(profiles map[string]int) int {
+	best := 0
+	for _, profile := range profiles {
+		if profile > best {
+			best = profile
+		}
+	}
+	return best
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// False positive from a real project: a duplicate is found by comparing an
+// identity field of the value. Such a field is treated as unique, the way a map
+// key is, so the walk order does not decide the answer.
+func TestMapIterationOrderAcceptsValueIdentityLookup(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type Article struct {
+	URL string
+}
+
+func Find(seen map[string]*Article, want *Article) *Article {
+	for _, existing := range seen {
+		if existing.URL == want.URL {
+			return existing
+		}
+	}
+	return nil
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// False positive from a real project: the function has already refused every
+// case but one, so the loop takes the single entry left — there is nothing to
+// choose between.
+func TestMapIterationOrderAcceptsSingleEntryTake(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "errors"
+
+func Only(matches map[string]int) (int, error) {
+	if len(matches) > 1 {
+		return 0, errors.New("ambiguous")
+	}
+	for _, match := range matches {
+		return match, nil
+	}
+	return 0, errors.New("empty")
+}
+`)
+
+	assert.Empty(t, violations)
+}
