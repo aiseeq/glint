@@ -28,10 +28,14 @@ func init() {
 // value costs memory per instance and, worse, tells the next reader that
 // something keeps track of hits when nothing does.
 //
-// Only unexported fields of the analyzed packages are considered: an exported
-// field belongs to the package's API, and its reader may live outside the tree
-// being analyzed. Tagged fields belong to unused-config-field, which knows about
-// values arriving from outside. Embedded and blank fields carry no name to use.
+// Unexported fields of the analyzed packages are considered, and on top of them
+// the exported fields of a settings type — one whose name ends in Opts, Options,
+// Config or Settings. An ordinary exported field belongs to the package's API and
+// its reader may live outside the analyzed tree; a setting is different, because
+// a setting nobody reads does nothing no matter who sets it, and setting it in a
+// composite literal is what hides it from the compiler and from deadcode tools.
+// Tagged fields belong to unused-config-field, which knows about values arriving
+// from outside. Embedded and blank fields carry no name to use.
 type UnusedFieldRule struct {
 	*rules.BaseRule
 }
@@ -60,10 +64,12 @@ func (r *UnusedFieldRule) RequiresSSA() bool { return false }
 type declaredField struct {
 	obj       *types.Var
 	owner     *types.Struct
+	named     *types.Named
 	fileCtx   *core.FileContext
 	line      int
 	typeName  string
 	fieldName string
+	setting   bool
 }
 
 // AnalyzeGoProject reports the unexported fields no compiled file reads.
@@ -79,6 +85,10 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 	read := make(map[token.Pos]bool)
 	written := make(map[token.Pos]bool)
 	compared := make(map[*types.Struct]bool)
+	// An encoder reads every exported field on the program's behalf, so a
+	// setting of a type that is marshalled is not dead.
+	decoded := make(map[*types.Named]bool)
+	encoded := make(map[*types.Named]bool)
 
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
@@ -90,11 +100,12 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
 				continue
 			}
-			declared = append(declared, collectUnexportedFields(fileCtx, info)...)
+			declared = append(declared, collectCheckedFields(fileCtx, info)...)
 		}
 		for _, file := range pkg.Package.Syntax {
 			collectFieldReads(file, info, read, written)
 			collectComparedStructs(file, info, compared)
+			collectSerializedTypes(file, info, decoded, encoded)
 		}
 	}
 
@@ -105,6 +116,9 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 	var violations []*core.Violation
 	for _, field := range declared {
 		if read[field.obj.Pos()] || compared[field.owner] {
+			continue
+		}
+		if field.setting && field.named != nil && encoded[field.named] {
 			continue
 		}
 		if mentions.mentioned(field.fileCtx, field.fieldName) {
@@ -127,9 +141,13 @@ func (r *UnusedFieldRule) report(field declaredField, written bool) *core.Violat
 	if written {
 		state = "is kept up to date but never read"
 	}
-	v := r.CreateViolation(field.fileCtx.RelPath, field.line,
-		fmt.Sprintf("Field %s.%s %s — the work maintaining it produces nothing",
-			field.typeName, field.fieldName, state))
+	message := fmt.Sprintf("Field %s.%s %s — the work maintaining it produces nothing",
+		field.typeName, field.fieldName, state)
+	if field.setting {
+		message = fmt.Sprintf("Setting %s.%s is set but never read — the option does nothing, and the behaviour behind it is unreachable",
+			field.typeName, field.fieldName)
+	}
+	v := r.CreateViolation(field.fileCtx.RelPath, field.line, message)
 	v.WithCode(strings.TrimSpace(field.fileCtx.GetLine(field.line)))
 	v.WithSuggestion(fmt.Sprintf("Use %s where its value is meant to matter, or delete the field and the code that fills it",
 		field.fieldName))
@@ -138,9 +156,22 @@ func (r *UnusedFieldRule) report(field declaredField, written bool) *core.Violat
 	return v
 }
 
-// collectUnexportedFields returns the unexported, untagged, named fields of the
-// file's struct types.
-func collectUnexportedFields(fileCtx *core.FileContext, info *types.Info) []declaredField {
+// settingTypeSuffixes name the structs that carry behaviour switches.
+var settingTypeSuffixes = []string{"Opts", "Options", "Config", "Settings"}
+
+// isSettingType reports whether the type name says the struct holds settings.
+func isSettingType(name string) bool {
+	for _, suffix := range settingTypeSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// collectCheckedFields returns the untagged, named fields this rule judges: the
+// unexported ones of any struct, and every field of a settings struct.
+func collectCheckedFields(fileCtx *core.FileContext, info *types.Info) []declaredField {
 	var fields []declaredField
 
 	ast.Inspect(fileCtx.GoAST, func(n ast.Node) bool {
@@ -156,13 +187,15 @@ func collectUnexportedFields(fileCtx *core.FileContext, info *types.Info) []decl
 		if !ok {
 			return true
 		}
+		named, _ := declaredNamedType(spec, info)
 
+		setting := isSettingType(spec.Name.Name)
 		for _, field := range structType.Fields.List {
 			if field.Tag != nil || len(field.Names) == 0 {
 				continue // tagged fields and embedded ones are other rules' business
 			}
 			for _, name := range field.Names {
-				if name.Name == "_" || name.IsExported() {
+				if name.Name == "_" || (name.IsExported() && !setting) {
 					continue
 				}
 				obj, ok := info.Defs[name].(*types.Var)
@@ -172,10 +205,12 @@ func collectUnexportedFields(fileCtx *core.FileContext, info *types.Info) []decl
 				fields = append(fields, declaredField{
 					obj:       obj,
 					owner:     owner,
+					named:     named,
 					fileCtx:   fileCtx,
 					line:      fileCtx.LineFor(name),
 					typeName:  spec.Name.Name,
 					fieldName: name.Name,
+					setting:   setting && name.IsExported(),
 				})
 			}
 		}

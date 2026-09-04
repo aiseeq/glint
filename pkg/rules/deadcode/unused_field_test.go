@@ -375,3 +375,93 @@ func firstOf(p *pair[string]) string {
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "second")
 }
+
+// Repro from a real project: six behaviour options were set in the literals of
+// a registry and read nowhere, so the code paths behind them were unreachable.
+// A composite literal counts as use for the compiler and for deadcode tools,
+// which is why the settings survived so long.
+func TestUnusedFieldReportsOptionFieldOnlyWritten(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"tactics.go": `package tactics
+
+type Opts struct {
+	Wave     int
+	MacroAt  int
+}
+
+var registry = map[string]Opts{
+	"rush":  {Wave: 6, MacroAt: 3},
+	"macro": {Wave: 0, MacroAt: 1},
+}
+
+func waveOf(name string) int {
+	return registry[name].Wave
+}
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 5, violations[0].Line)
+	assert.Contains(t, violations[0].Message, "MacroAt")
+}
+
+// An exported field of an ordinary struct may well be read outside the analyzed
+// tree; only settings types are checked, where a field nobody reads means the
+// setting does nothing.
+func TestUnusedFieldAcceptsExportedFieldOfPlainStruct(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"model.go": `package model
+
+type Order struct {
+	ID     string
+	Amount int
+}
+
+func New(id string) Order {
+	return Order{ID: id, Amount: 1}
+}
+`,
+	})
+
+	assert.Empty(t, violations)
+}
+
+// A setting that is read somewhere is doing its job.
+func TestUnusedFieldAcceptsReadOptionField(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"tactics.go": `package tactics
+
+type Settings struct {
+	Wave int
+}
+
+var defaults = Settings{Wave: 6}
+
+func wave() int { return defaults.Wave }
+`,
+	})
+
+	assert.Empty(t, violations)
+}
+
+// A setting the program never reads itself is still read by the encoder when
+// the struct is marshalled — the value leaves the process, so the field is not
+// dead.
+func TestUnusedFieldAcceptsMarshalledSettingType(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"report.go": `package report
+
+import "encoding/json"
+
+type ExportOptions struct {
+	Format string
+}
+
+func Dump() ([]byte, error) {
+	return json.Marshal(ExportOptions{Format: "csv"})
+}
+`,
+	})
+
+	assert.Empty(t, violations)
+}
