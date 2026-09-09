@@ -1,11 +1,9 @@
 package typesafety
 
 import (
-	"errors"
 	"go/ast"
 	"go/token"
 	"go/types"
-	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -56,30 +54,7 @@ func (r *TokenPosOffsetRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject inspects the analyzed files of every loaded package.
 func (r *TokenPosOffsetRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	if ctx == nil {
-		return nil, errors.New("token pos offset: nil Go project context")
-	}
-
-	var violations []*core.Violation
-	for _, pkg := range ctx.Packages {
-		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
-			return nil, errors.New("token pos offset: package has no typed syntax")
-		}
-		for _, fileCtx := range pkg.Files {
-			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
-				continue
-			}
-			violations = append(violations, r.analyzeFile(fileCtx, pkg.Package.TypesInfo)...)
-		}
-	}
-
-	sort.SliceStable(violations, func(i, j int) bool {
-		if violations[i].File != violations[j].File {
-			return violations[i].File < violations[j].File
-		}
-		return violations[i].Line < violations[j].Line
-	})
-	return violations, nil
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), r.analyzeFile)
 }
 
 func (r *TokenPosOffsetRule) analyzeFile(fileCtx *core.FileContext, info *types.Info) []*core.Violation {

@@ -3,8 +3,8 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"strings"
-	"unicode"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -27,10 +27,11 @@ func init() {
 // had cancelled reached the boundary as 500 and raised an operational alert
 // every time someone navigated away from a slow page.
 //
-// Not flagged: a call that already wraps a real cause with %w (the chain
-// survives, and a second error printed beside it is a choice, not a loss),
-// formatting of non-error values, and a cause printed into a log line rather
-// than into a returned error.
+// The cause is recognized by its type, not by its name: a decoded payload with
+// an Error field of its own carries no chain to lose. Not flagged either: a
+// call that already wraps a real cause with %w (a second failure printed beside
+// it is a choice), and a cause printed into a log line rather than into a
+// returned error.
 type ErrorRebuiltFromTextRule struct {
 	*rules.BaseRule
 }
@@ -47,17 +48,37 @@ func NewErrorRebuiltFromTextRule() *ErrorRebuiltFromTextRule {
 	}
 }
 
-// AnalyzeFile reports errors built from the text of another error.
-func (r *ErrorRebuiltFromTextRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	return analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
-		return r.checkFunction(ctx, fn)
-	})
+// AnalyzeFile is a no-op: whether an expression is an error or a field that
+// merely spells "Error" is a question about its type, not about the text.
+func (r *ErrorRebuiltFromTextRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
+	return nil
 }
 
-// checkFunction inspects one function body. Messages assembled into a variable
-// first are resolved here: errMsg := fmt.Sprintf("…: %v", err) is the same
-// defect as inlining the call into errors.New.
-func (r *ErrorRebuiltFromTextRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *ErrorRebuiltFromTextRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject reports errors built from the text of another error.
+func (r *ErrorRebuiltFromTextRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), r.analyzeFile)
+}
+
+// analyzeFile inspects every function of one file. Messages assembled into a
+// variable first are resolved here: errMsg := fmt.Sprintf("…: %v", err) is the
+// same defect as inlining the call into errors.New.
+func (r *ErrorRebuiltFromTextRule) analyzeFile(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	var violations []*core.Violation
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		violations = append(violations, r.checkFunction(ctx, info, fn)...)
+	}
+	return violations
+}
+
+// checkFunction inspects one function body.
+func (r *ErrorRebuiltFromTextRule) checkFunction(ctx *core.FileContext, info *types.Info, fn *ast.FuncDecl) []*core.Violation {
 	messages := formattedMessageVars(fn.Body)
 
 	var violations []*core.Violation
@@ -66,7 +87,7 @@ func (r *ErrorRebuiltFromTextRule) checkFunction(ctx *core.FileContext, fn *ast.
 		if !ok {
 			return true
 		}
-		if !r.rebuildsErrorFromText(call, messages) {
+		if !r.rebuildsErrorFromText(call, info, messages) {
 			return true
 		}
 		line := lineFromNode(ctx, call)
@@ -86,33 +107,51 @@ func (r *ErrorRebuiltFromTextRule) checkFunction(ctx *core.FileContext, fn *ast.
 
 // rebuildsErrorFromText reports whether the call produces an error whose cause
 // survives only as text.
-func (r *ErrorRebuiltFromTextRule) rebuildsErrorFromText(call *ast.CallExpr, messages map[string]*ast.CallExpr) bool {
+func (r *ErrorRebuiltFromTextRule) rebuildsErrorFromText(
+	call *ast.CallExpr,
+	info *types.Info,
+	messages map[string][]*ast.CallExpr,
+) bool {
 	switch calleeName(call) {
 	case "fmt.Errorf":
-		return formatsCauseWithoutWrap(call)
+		return formatsCauseWithoutWrap(call, info)
 	case "errors.New":
-		return len(call.Args) == 1 && buildsTextFromCause(call.Args[0], messages)
+		return len(call.Args) == 1 && buildsTextFromCause(call.Args[0], info, messages)
 	}
 	return false
 }
 
 // buildsTextFromCause reports whether the expression is a formatted string that
 // carries a cause, either inline or through a variable holding it.
-func buildsTextFromCause(expr ast.Expr, messages map[string]*ast.CallExpr) bool {
+func buildsTextFromCause(expr ast.Expr, info *types.Info, messages map[string][]*ast.CallExpr) bool {
 	switch current := expr.(type) {
 	case *ast.CallExpr:
-		return calleeName(current) == "fmt.Sprintf" && formatsCauseWithoutWrap(current)
+		return calleeName(current) == "fmt.Sprintf" && formatsCauseWithoutWrap(current, info)
 	case *ast.Ident:
-		if source, ok := messages[current.Name]; ok {
-			return formatsCauseWithoutWrap(source)
+		if source := nearestAssignment(messages[current.Name], current.Pos()); source != nil {
+			return formatsCauseWithoutWrap(source, info)
 		}
 	}
 	return false
 }
 
-// formattedMessageVars maps variables assigned from fmt.Sprintf to that call.
-func formattedMessageVars(body *ast.BlockStmt) map[string]*ast.CallExpr {
-	messages := make(map[string]*ast.CallExpr)
+// nearestAssignment returns the last assignment made above the use. One name
+// commonly holds a different message in every branch of a function, and only
+// the one standing above this use describes it.
+func nearestAssignment(sources []*ast.CallExpr, use token.Pos) *ast.CallExpr {
+	var nearest *ast.CallExpr
+	for _, source := range sources {
+		if source.Pos() < use {
+			nearest = source
+		}
+	}
+	return nearest
+}
+
+// formattedMessageVars maps variables assigned from fmt.Sprintf to those calls,
+// in source order.
+func formattedMessageVars(body *ast.BlockStmt) map[string][]*ast.CallExpr {
+	messages := make(map[string][]*ast.CallExpr)
 	ast.Inspect(body, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
 		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
@@ -126,15 +165,15 @@ func formattedMessageVars(body *ast.BlockStmt) map[string]*ast.CallExpr {
 		if !ok || calleeName(call) != "fmt.Sprintf" {
 			return true
 		}
-		messages[ident.Name] = call
+		messages[ident.Name] = append(messages[ident.Name], call)
 		return true
 	})
 	return messages
 }
 
-// formatsCauseWithoutWrap reports whether any argument that looks like a cause
-// is printed with a verb that does not keep the chain.
-func formatsCauseWithoutWrap(call *ast.CallExpr) bool {
+// formatsCauseWithoutWrap reports whether any argument that carries a cause is
+// printed with a verb that does not keep the chain.
+func formatsCauseWithoutWrap(call *ast.CallExpr, info *types.Info) bool {
 	if len(call.Args) < 2 {
 		return false
 	}
@@ -146,14 +185,15 @@ func formatsCauseWithoutWrap(call *ast.CallExpr) bool {
 	// не порождает и не прячет глаголов формата, а разбор кавычек добавил бы
 	// ошибку там, где она ничего не решает.
 	verbs := formatVerbs(lit.Value)
-	if wrapsRealCause(call.Args[1:], verbs) {
+	args := call.Args[1:]
+	if wrapsRealCause(args, verbs, info) {
 		return false
 	}
-	for i, arg := range call.Args[1:] {
+	for i, arg := range args {
 		if i >= len(verbs) || !isTextLosingVerb(verbs[i]) {
 			continue
 		}
-		if expressionCarriesCause(arg) {
+		if expressionCarriesCause(arg, info) {
 			return true
 		}
 	}
@@ -163,37 +203,36 @@ func formatsCauseWithoutWrap(call *ast.CallExpr) bool {
 // wrapsRealCause reports whether the call already keeps a cause in the chain.
 // A sentinel wrapped with %w does not count: errors.Is keeps matching the
 // category, while the cause standing next to it still arrives as text only.
-func wrapsRealCause(args []ast.Expr, verbs []byte) bool {
+func wrapsRealCause(args []ast.Expr, verbs []byte, info *types.Info) bool {
 	for i, arg := range args {
 		if i >= len(verbs) || verbs[i] != 'w' {
 			continue
 		}
-		if !isSentinelName(arg) {
+		if !isDeclaredSentinel(arg, info) {
 			return true
 		}
 	}
 	return false
 }
 
-// isSentinelName reports whether the expression names a declared error value
-// (ErrNotFound, errInvalidFilter, models.ErrNotFound) rather than a caught one.
-func isSentinelName(expr ast.Expr) bool {
-	var name string
+// isDeclaredSentinel reports whether the expression is a package-level error
+// value (ErrNotFound, models.ErrNotFound): it names a category, not a cause.
+func isDeclaredSentinel(expr ast.Expr, info *types.Info) bool {
+	var ident *ast.Ident
 	switch current := expr.(type) {
 	case *ast.Ident:
-		name = current.Name
+		ident = current
 	case *ast.SelectorExpr:
-		name = current.Sel.Name
+		ident = current.Sel
 	default:
 		return false
 	}
-	for _, prefix := range []string{"Err", "err"} {
-		if !strings.HasPrefix(name, prefix) || len(name) == len(prefix) {
-			continue
-		}
-		return unicode.IsUpper(rune(name[len(prefix)]))
+	variable, ok := info.ObjectOf(ident).(*types.Var)
+	if !ok || variable.IsField() {
+		return false
 	}
-	return false
+	parent := variable.Parent()
+	return parent != nil && parent.Parent() == types.Universe
 }
 
 // isTextLosingVerb reports whether the verb prints an error without keeping it
@@ -225,23 +264,46 @@ func formatVerbs(format string) []byte {
 }
 
 // expressionCarriesCause reports whether the expression is an error or the text
-// of one: err, parseErr, err.Error(), result.Error, result.Error.Message.
-func expressionCarriesCause(expr ast.Expr) bool {
+// of one: err, err.Error(), result.Error, result.Error.Message. A field named
+// Error on a decoded payload is a string of its own and carries no chain.
+func expressionCarriesCause(expr ast.Expr, info *types.Info) bool {
 	switch current := expr.(type) {
-	case *ast.Ident:
-		return looksLikeErrorName(current.Name)
 	case *ast.CallExpr:
-		if sel, ok := current.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Error" && len(current.Args) == 0 {
-			return true
+		sel, ok := current.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Error" || len(current.Args) != 0 {
+			return false
 		}
+		return isErrorValue(sel.X, info)
 	case *ast.SelectorExpr:
-		if looksLikeErrorName(current.Sel.Name) {
-			return true
-		}
-		// result.Error.Message: the field below the error is its text.
-		if inner, ok := current.X.(*ast.SelectorExpr); ok && looksLikeErrorName(inner.Sel.Name) {
+		// result.Error.Message: the field below the error holding its text. A
+		// data field of an error (an id, an address) is not the error itself.
+		if isErrorValue(current.X, info) && isMessageFieldName(current.Sel.Name) {
 			return true
 		}
 	}
-	return false
+	return isErrorValue(expr, info)
+}
+
+// messageFieldNames are the fields an error type keeps its own text in.
+var messageFieldNames = map[string]bool{
+	"Message": true, "Msg": true, "Error": true, "Text": true,
+	"Detail": true, "Details": true, "Reason": true, "Description": true,
+}
+
+// isMessageFieldName reports whether the field holds the text of the error.
+func isMessageFieldName(name string) bool {
+	return messageFieldNames[name]
+}
+
+// isErrorValue reports whether the expression's type implements error.
+func isErrorValue(expr ast.Expr, info *types.Info) bool {
+	typ := info.TypeOf(expr)
+	if typ == nil {
+		return false
+	}
+	errorType, ok := types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
+	if !ok {
+		return false
+	}
+	return types.Implements(typ, errorType)
 }
