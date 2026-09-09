@@ -67,19 +67,9 @@ type sqlRead struct {
 
 // AnalyzeFile checks each function's SQL literals for the read-then-write pattern.
 func (r *SelectThenWriteRaceRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.IsTestFile() || !ctx.HasGoAST() {
-		return nil
-	}
-
-	var violations []*core.Violation
-	for _, decl := range ctx.GoAST.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
-		}
-		violations = append(violations, r.checkFunction(ctx, fn)...)
-	}
-	return violations
+	return analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
+		return r.checkFunction(ctx, fn)
+	})
 }
 
 func (r *SelectThenWriteRaceRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {

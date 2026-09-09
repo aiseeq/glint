@@ -34,7 +34,7 @@ func (s *Service) SyncWallet(ctx context.Context, wallet string, chains []string
 			expectedCount: 1,
 		},
 		{
-			// Repro: zerion client doGetWithRetry-style retry pause.
+			// Repro: provider client doGetWithRetry-style retry pause.
 			name: "sleep between retries with ctx",
 			code: `package main
 import (
@@ -148,6 +148,72 @@ func run(ctx context.Context) {
 			assert.Len(t, violations, tt.expectedCount, "Code: %s", tt.code)
 		})
 	}
+}
+
+func TestSleepWithoutContextRuleSeesContextInStructParam(t *testing.T) {
+	rule := NewSleepWithoutContextRule()
+
+	// Repro (projectA, 2026-09): a payment client carried the caller's context
+	// inside a request struct, so the retry loop looked context-free. Cancelling
+	// the request still waited out every pause and kept sending attempts.
+	code := `package main
+import (
+	"context"
+	"net/http"
+	"time"
+)
+
+type requestContext struct {
+	ctx       context.Context
+	operation string
+}
+
+func (c *Client) executeWithRetry(req *http.Request, rc *requestContext) (*http.Response, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, err := c.httpClient.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		time.Sleep(time.Second)
+	}
+	return nil, nil
+}`
+
+	ctx := core.NewFileContext("/src/client.go", "/src", []byte(code), core.DefaultConfig())
+	parser := core.NewParser()
+	fset, astFile, err := parser.ParseGoFile("/src/client.go", []byte(code))
+	if err == nil {
+		ctx.SetGoAST(fset, astFile)
+	}
+	assert.Len(t, rule.AnalyzeFile(ctx), 1)
+}
+
+// A struct without a context field says nothing about cancellation: a pause in
+// such a function has nothing to select on, and flagging it would be noise.
+func TestSleepWithoutContextRuleIgnoresStructWithoutContext(t *testing.T) {
+	rule := NewSleepWithoutContextRule()
+
+	code := `package main
+import "time"
+
+type retryState struct {
+	attempts int
+}
+
+func backoff(state *retryState) {
+	for state.attempts < 3 {
+		state.attempts++
+		time.Sleep(time.Second)
+	}
+}`
+
+	ctx := core.NewFileContext("/src/backoff.go", "/src", []byte(code), core.DefaultConfig())
+	parser := core.NewParser()
+	fset, astFile, err := parser.ParseGoFile("/src/backoff.go", []byte(code))
+	if err == nil {
+		ctx.SetGoAST(fset, astFile)
+	}
+	assert.Empty(t, rule.AnalyzeFile(ctx))
 }
 
 func TestSleepWithoutContextRuleSkipsTests(t *testing.T) {

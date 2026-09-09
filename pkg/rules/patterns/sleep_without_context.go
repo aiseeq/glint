@@ -42,15 +42,82 @@ func (r *SleepWithoutContextRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 		return nil
 	}
 
+	carriers := structsCarryingContext(ctx.GoAST)
+
 	var violations []*core.Violation
 	for _, decl := range ctx.GoAST.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			continue
 		}
-		violations = append(violations, r.checkBody(ctx, fn.Body, funcHasLiveContextParam(fn.Type))...)
+		available := funcHasLiveContextParam(fn.Type) ||
+			paramsCarryContext(fn.Type, carriers) || paramsCarryContext(receiverAsParams(fn), carriers)
+		violations = append(violations, r.checkBody(ctx, fn.Body, available)...)
 	}
 	return violations
+}
+
+// structsCarryingContext collects same-file struct types with a
+// context.Context field. A function taking such a struct has the caller's
+// context in hand even though its own signature does not name one: the pause
+// still ignores cancellation, and the caller still waits it out.
+func structsCarryingContext(file *ast.File) map[string]bool {
+	carriers := make(map[string]bool)
+	ast.Inspect(file, func(n ast.Node) bool {
+		spec, ok := n.(*ast.TypeSpec)
+		if !ok {
+			return true
+		}
+		structType, ok := spec.Type.(*ast.StructType)
+		if !ok || structType.Fields == nil {
+			return true
+		}
+		for _, field := range structType.Fields.List {
+			if isContextType(field.Type) {
+				carriers[spec.Name.Name] = true
+				break
+			}
+		}
+		return true
+	})
+	return carriers
+}
+
+// paramsCarryContext reports whether any parameter is one of the carrier structs.
+func paramsCarryContext(funcType *ast.FuncType, carriers map[string]bool) bool {
+	if funcType == nil || funcType.Params == nil || len(carriers) == 0 {
+		return false
+	}
+	for _, param := range funcType.Params.List {
+		if len(param.Names) > 0 && allUnderscore(param.Names) {
+			continue
+		}
+		if carriers[localTypeName(param.Type)] {
+			return true
+		}
+	}
+	return false
+}
+
+// receiverAsParams presents the method receiver as a parameter list so the same
+// check covers `func (rc *requestContext) …` shapes.
+func receiverAsParams(fn *ast.FuncDecl) *ast.FuncType {
+	if fn.Recv == nil {
+		return nil
+	}
+	return &ast.FuncType{Params: fn.Recv}
+}
+
+// localTypeName returns the name of a same-package type, following one pointer.
+func localTypeName(expr ast.Expr) string {
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = star.X
+	}
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	return ident.Name
 }
 
 // checkBody walks one function body. ctxAvailable carries whether a live
