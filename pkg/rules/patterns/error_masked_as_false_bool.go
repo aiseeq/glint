@@ -138,6 +138,9 @@ func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *a
 		if r.hasLoggingCall(ifStmt.Body) {
 			return true
 		}
+		if answersClient(fn, ifStmt.Body) {
+			return true
+		}
 
 		pos := ctx.PositionFor(ret)
 		lineContent := ctx.GetLine(pos.Line)
@@ -264,4 +267,52 @@ func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt) bool {
 		return true
 	})
 	return found
+}
+
+// answersClient reports whether the branch hands the function's own
+// http.ResponseWriter to somebody. Ошибка, о которой клиенту ответили, не
+// потеряна: вызывающий узнал о сбое из ответа, а куда при этом уехала строка
+// лога, решает тот помощник, которому writer передали. По имени помощника это
+// не определить, поэтому признак взят по самому writer.
+func answersClient(fn *ast.FuncDecl, body *ast.BlockStmt) bool {
+	writers := responseWriterParamNames(fn)
+	if len(writers) == 0 {
+		return false
+	}
+	answered := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if answered {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		for _, arg := range call.Args {
+			if ident, ok := arg.(*ast.Ident); ok && writers[ident.Name] {
+				answered = true
+				return false
+			}
+		}
+		return true
+	})
+	return answered
+}
+
+// responseWriterParamNames lists the parameters declared as http.ResponseWriter.
+func responseWriterParamNames(fn *ast.FuncDecl) map[string]bool {
+	names := map[string]bool{}
+	if fn.Type.Params == nil {
+		return names
+	}
+	for _, field := range fn.Type.Params.List {
+		sel, ok := field.Type.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "ResponseWriter" {
+			continue
+		}
+		for _, name := range field.Names {
+			names[name.Name] = true
+		}
+	}
+	return names
 }

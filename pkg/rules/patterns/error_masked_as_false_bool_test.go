@@ -199,6 +199,43 @@ func (c *C) Record(k string) (bool, error) {
 }`,
 			expectedCount: 1,
 		},
+		{
+			// Ветка отказа отдаёт ошибку клиенту через общего помощника: и вызывающий
+			// узнал о сбое ответом, и в журнале он есть. Имя помощника ничего не значит.
+			name: "error branch answers the client through the response writer",
+			path: "/src/backend/web.go",
+			code: `package web
+import "net/http"
+type A struct{}
+func (a *A) fail(w http.ResponseWriter, r *http.Request, msg string, err error) {}
+func (a *A) load(ctx interface{}) ([]string, error) { return nil, nil }
+func (a *A) allItemsOr500(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+	items, err := a.load(r.Context())
+	if err != nil {
+		a.fail(w, r, "failed to load items", err)
+		return nil, false
+	}
+	return items, true
+}`,
+			expectedCount: 0,
+		},
+		{
+			// Тот же writer в параметрах, но ветка им не пользуется: ошибка потеряна.
+			name: "response writer in scope but the branch answers nobody",
+			path: "/src/backend/web.go",
+			code: `package web
+import "net/http"
+type A struct{}
+func (a *A) load(ctx interface{}) ([]string, error) { return nil, nil }
+func (a *A) allItemsOr500(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+	items, err := a.load(r.Context())
+	if err != nil {
+		return nil, false
+	}
+	return items, true
+}`,
+			expectedCount: 1,
+		},
 	}
 
 	for _, tt := range tests {
