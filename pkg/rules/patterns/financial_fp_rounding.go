@@ -34,8 +34,6 @@ type FinancialFPRoundingRule struct {
 	jsFloorByPct *regexp.Regexp
 	// Go: math.Floor(... * 100) / 100 on float (we avoid this in finance entirely).
 	goFloorBy100 *regexp.Regexp
-	// Money-context check on the multiplied expression.
-	moneyContext *regexp.Regexp
 	// Epsilon already present? Then the line is safe.
 	hasEpsilon *regexp.Regexp
 }
@@ -52,7 +50,6 @@ func NewFinancialFPRoundingRule() *FinancialFPRoundingRule {
 		jsFloorBy100: regexp.MustCompile(`Math\.(?:floor|ceil|trunc)\s*\(\s*([^)]*?)\s*\*\s*100\s*\)\s*/\s*100`),
 		jsFloorByPct: regexp.MustCompile(`Math\.(?:floor|ceil|trunc)\s*\(\s*([^)]*?)\s*\*\s*([A-Za-z_$][\w$]*|\d+)\s*\)\s*/\s*100`),
 		goFloorBy100: regexp.MustCompile(`math\.(?:Floor|Ceil|Trunc)\s*\(\s*([^)]*?)\s*\*\s*100\s*\)\s*/\s*100`),
-		moneyContext: regexp.MustCompile(`(?i)(amount|balance|price|fee|cost|total|maxReceive|maxWithdraw|sum|usd|usdc|usdt|payout|payment|deposit|withdraw|profit|principal)`),
 		hasEpsilon:   regexp.MustCompile(`(?:\+\s*1e-?\d+|\+\s*0\.0{4,}\d+|EPSILON)`),
 	}
 }
@@ -81,7 +78,7 @@ func (r *FinancialFPRoundingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 
 		if isTSJS {
 			if m := r.jsFloorBy100.FindStringSubmatch(line); m != nil {
-				if r.moneyContext.MatchString(m[1]) {
+				if looksLikeMoney(m[1]) {
 					violations = append(violations, r.violation(ctx, i+1, line,
 						"Math.floor(money * 100)/100 — IEEE-754 shimmer drops cents; use Math.round(v*100)/100 or v.toFixed(2)"))
 					continue
@@ -92,7 +89,7 @@ func (r *FinancialFPRoundingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 				if m[2] == "100" {
 					continue
 				}
-				if r.moneyContext.MatchString(m[1]) {
+				if looksLikeMoney(m[1]) {
 					violations = append(violations, r.violation(ctx, i+1, line,
 						"Math.floor(money * pct)/100 — FP shimmer can drop a cent; add epsilon or use toFixed"))
 				}
@@ -101,7 +98,7 @@ func (r *FinancialFPRoundingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 
 		if isGo {
 			if m := r.goFloorBy100.FindStringSubmatch(line); m != nil {
-				if r.moneyContext.MatchString(m[1]) {
+				if looksLikeMoney(m[1]) {
 					violations = append(violations, r.violation(ctx, i+1, line,
 						"math.Floor on float money — use decimal.Decimal arithmetic"))
 				}
