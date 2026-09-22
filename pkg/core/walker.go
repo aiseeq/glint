@@ -281,8 +281,8 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 
 	analyzableExtensions := []string{
 		".go",
-		".ts", ".tsx",
-		".js", ".jsx",
+		".ts", ".tsx", ".mts", ".cts",
+		".js", ".jsx", ".mjs", ".cjs",
 		".md",
 		".sql",  // migration hygiene rules (rules must guard by extension)
 		".conf", // server configuration rules (rules must guard by extension)

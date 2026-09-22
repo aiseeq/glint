@@ -66,12 +66,14 @@ func (ctx *FileContext) IsGoFile() bool {
 
 // IsTypeScriptFile returns true if this is a TypeScript file
 func (ctx *FileContext) IsTypeScriptFile() bool {
-	return strings.HasSuffix(ctx.Path, ".ts") || strings.HasSuffix(ctx.Path, ".tsx")
+	return strings.HasSuffix(ctx.Path, ".ts") || strings.HasSuffix(ctx.Path, ".tsx") ||
+		strings.HasSuffix(ctx.Path, ".mts") || strings.HasSuffix(ctx.Path, ".cts")
 }
 
 // IsJavaScriptFile returns true if this is a JavaScript file
 func (ctx *FileContext) IsJavaScriptFile() bool {
-	return strings.HasSuffix(ctx.Path, ".js") || strings.HasSuffix(ctx.Path, ".jsx")
+	return strings.HasSuffix(ctx.Path, ".js") || strings.HasSuffix(ctx.Path, ".jsx") ||
+		strings.HasSuffix(ctx.Path, ".mjs") || strings.HasSuffix(ctx.Path, ".cjs")
 }
 
 // IsTestFile returns true if this appears to be a test file
