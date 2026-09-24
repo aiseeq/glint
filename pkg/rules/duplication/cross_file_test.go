@@ -112,25 +112,54 @@ func TestCrossFileDuplicateRule_NoDuplicate(t *testing.T) {
 	}
 }
 
-func TestCrossFileDuplicateRule_SkipsTests(t *testing.T) {
+// Test files carry the same copy-paste debt as production code: a fixture block
+// copied into five test files is fixed five times when the setup changes.
+func TestCrossFileDuplicateComparesTestFiles(t *testing.T) {
 	rule := NewCrossFileDuplicateRule()
-	rule.ResetState()
+	body := `func TestSplit(t *testing.T) {
+	store := newStore(t, "orders", withRetention(30*time.Day))
+	order := store.Create(Order{Customer: "acme", Amount: 1500})
+	parts := splitter.Split(order, SplitPolicy{MaxPart: 500})
+	require.Len(t, parts, 3)
+	assert.Equal(t, order.ID, parts[0].ParentID)
+	assert.Equal(t, int64(500), parts[0].Amount)
+	assert.Equal(t, int64(500), parts[1].Amount)
+	assert.Equal(t, int64(500), parts[2].Amount)
+	assert.NoError(t, store.Verify(order.ID))
+}
+`
+	first := createTestContext(t, "billing/split_test.go", "package billing\n"+body)
+	second := createTestContext(t, "invoices/split_test.go", "package invoices\n"+body)
 
-	ctx := &core.FileContext{
-		Path:    "/test/file_test.go",
-		RelPath: "file_test.go",
-		Lines: []string{
-			"package main",
-			"func TestFoo(t *testing.T) {",
-			"    // test code",
-			"}",
-		},
-	}
+	assert.Empty(t, rule.AnalyzeFile(first))
+	violations := rule.AnalyzeFile(second)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "billing/split_test.go")
+}
 
-	violations := rule.AnalyzeFile(ctx)
-	if violations != nil {
-		t.Error("Expected nil for test files")
-	}
+// Repro: two wrapper scripts each carried the same container launch block, and
+// the copies drifted apart (one lost its "|| true" under pipefail). Shell is
+// code with the same duplication problem.
+func TestCrossFileDuplicateComparesShell(t *testing.T) {
+	rule := NewCrossFileDuplicateRule()
+	body := `MAPS=${MAPS:-$HOME/games/maps}
+IMAGE=${IMAGE:-registry.local/engine:latest}
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/tool-XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+(cd "$(dirname "$0")/.." && CGO_ENABLED=0 go build -o "$WORK/tool" ./cmd/tool)
+$ENGINE run --rm -e TZ=Europe/Belgrade -v "$WORK:/work:z" \\
+    -v "$MAPS:/root/maps:ro,z" --entrypoint /work/tool "$IMAGE" "$@" \\
+    | grep -v 'INFO engine started' || true
+echo "tool finished with status $? in $WORK"
+rm -rf "$WORK/cache" "$WORK/replays" "$WORK/logs"
+`
+	first := createTestContext(t, "tools/scan.sh", "#!/usr/bin/env bash\nset -euo pipefail\n"+body)
+	second := createTestContext(t, "tools/story.sh", "#!/usr/bin/env bash\nset -eu\n"+body)
+
+	assert.Empty(t, rule.AnalyzeFile(first))
+	violations := rule.AnalyzeFile(second)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "tools/scan.sh")
 }
 
 // Repro from projectA: 611 TypeScript files were never compared, because the rule

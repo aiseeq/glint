@@ -74,7 +74,7 @@ func (r *CrossFileDuplicateRule) ResetState() {
 
 // AnalyzeFile collects blocks and detects cross-file duplicates
 func (r *CrossFileDuplicateRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !isDuplicationCandidate(ctx) || ctx.IsTestFile() {
+	if !isDuplicationCandidate(ctx) {
 		return nil
 	}
 
@@ -177,10 +177,12 @@ func (r *CrossFileDuplicateRule) collectBlocks(ctx *core.FileContext, normalized
 }
 
 // isDuplicationCandidate reports whether the file is in a language whose blocks
-// this rule compares. TypeScript and JavaScript duplicate as readily as Go, and
-// a frontend is where copied components accumulate.
+// the duplication rules compare. TypeScript and JavaScript duplicate as readily
+// as Go, and a frontend is where copied components accumulate; wrapper scripts
+// copy launch blocks that then drift apart. Test files are compared too: a
+// fixture copied into several tests is fixed several times.
 func isDuplicationCandidate(ctx *core.FileContext) bool {
-	return ctx.IsGoFile() || ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile()
+	return ctx.IsGoFile() || ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile() || ctx.IsShellFile()
 }
 
 // isCrossFileTrivialLine extends the shared triviality check with lines that

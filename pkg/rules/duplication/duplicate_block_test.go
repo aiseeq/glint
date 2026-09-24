@@ -101,33 +101,38 @@ func bar() {
 	assert.Empty(t, violations, "Small blocks should be ignored")
 }
 
-func TestDuplicateBlockRule_TestFilesExcluded(t *testing.T) {
+func TestDuplicateBlockRule_TestFilesCompared(t *testing.T) {
 	rule := NewDuplicateBlockRule()
+	rule.minBlockSize = 8
 
 	code := `package main
 
-func TestA() {
-	user, err := getUser(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := transform(user)
-	assert.NotNil(t, result)
+func TestUserData(t *testing.T) {
+	connection := database.GetConnection()
+	transaction := connection.BeginTransaction()
+	validator := NewDataValidator(connection)
+	processor := NewDataProcessor(validator)
+	handler := processor.CreateHandler(id)
+	results := handler.Execute()
+	report := generateReport(results)
+	saveResults(results, report)
 }
 
-func TestB() {
-	user, err := getUser(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := transform(user)
-	assert.NotNil(t, result)
+func TestAdminData(t *testing.T) {
+	connection := database.GetConnection()
+	transaction := connection.BeginTransaction()
+	validator := NewDataValidator(connection)
+	processor := NewDataProcessor(validator)
+	handler := processor.CreateHandler(id)
+	results := handler.Execute()
+	report := generateReport(results)
+	saveResults(results, report)
 }
 `
 	ctx := createTestContext(t, "backend/service_test.go", code)
 	violations := rule.AnalyzeFile(ctx)
 
-	assert.Empty(t, violations, "Test files should be excluded")
+	assert.NotEmpty(t, violations, "a block repeated inside a test file is the same debt as in production code")
 }
 
 func TestDuplicateBlockRule_TrivialLinesIgnored(t *testing.T) {

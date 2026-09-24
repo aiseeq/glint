@@ -286,6 +286,7 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 		".md",
 		".sql",  // migration hygiene rules (rules must guard by extension)
 		".conf", // server configuration rules (rules must guard by extension)
+		".sh",   // duplication rules (rules must guard by extension)
 	}
 
 	for _, e := range analyzableExtensions {

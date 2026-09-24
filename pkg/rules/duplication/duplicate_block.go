@@ -50,7 +50,7 @@ func (r *DuplicateBlockRule) Configure(settings map[string]any) error {
 
 // AnalyzeFile checks for duplicate code blocks
 func (r *DuplicateBlockRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if (!ctx.IsGoFile() && !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile()) || ctx.IsTestFile() || len(ctx.Lines) < r.minBlockSize*2 {
+	if !isDuplicationCandidate(ctx) || len(ctx.Lines) < r.minBlockSize*2 {
 		return nil
 	}
 

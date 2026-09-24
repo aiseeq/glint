@@ -74,6 +74,11 @@ func (ctx *FileContext) IsJavaScriptFile() bool {
 	return strings.HasSuffix(ctx.Path, ".js") || strings.HasSuffix(ctx.Path, ".jsx")
 }
 
+// IsShellFile returns true if this is a shell script
+func (ctx *FileContext) IsShellFile() bool {
+	return strings.HasSuffix(ctx.Path, ".sh")
+}
+
 // IsTestFile returns true if this appears to be a test file
 func (ctx *FileContext) IsTestFile() bool {
 	name := filepath.Base(ctx.Path)
