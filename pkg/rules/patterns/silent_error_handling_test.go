@@ -107,6 +107,40 @@ func run() int {
 	require.Empty(t, violations, "ошибка передана обработчику: %v", violations)
 }
 
+// Обёрнутая ошибка, отданная функции, тоже не проглочена. Репро: итератор
+// отдаёт ошибку чтения потребителю через yield(Line{}, fmt.Errorf("…: %w", err)).
+func TestSilentErrorHandlingRule_WrappedErrorPassedToCall(t *testing.T) {
+	code := `package main
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"iter"
+)
+
+type Line struct{ Text string }
+
+func Lines(r io.Reader) iter.Seq2[Line, error] {
+	return func(yield func(Line, error) bool) {
+		sc := bufio.NewScanner(r)
+		for sc.Scan() {
+			if !yield(Line{Text: sc.Text()}, nil) {
+				return
+			}
+		}
+		if err := sc.Err(); err != nil {
+			yield(Line{}, fmt.Errorf("reading log: %w", err))
+		}
+	}
+}
+`
+
+	ctx := createSilentErrorContext(t, "main.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Empty(t, violations, "обёрнутая ошибка передана вызову: %v", violations)
+}
+
 // NewClient() в ветке err != nil — ровно тот silent fallback, который правило
 // должно ловить: «new» в имени вызова не означает создание ошибки.
 func TestSilentErrorHandlingRule_NewCallFallbackIsFlagged(t *testing.T) {

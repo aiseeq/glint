@@ -747,11 +747,12 @@ func argumentIsError(arg ast.Expr) bool {
 		return looksLikeErrorName(a.Sel.Name)
 	case *ast.CallExpr:
 		// err.Error() — the message travels even though the value does not.
-		sel, ok := a.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "Error" {
-			return false
+		if sel, ok := a.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Error" {
+			return argumentIsError(sel.X)
 		}
-		return argumentIsError(sel.X)
+		// fmt.Errorf("...: %w", err), errors.Join(err, ...) — the error travels
+		// wrapped, as when an iterator hands it to the consumer through yield.
+		return callTakesErrorArgument(a)
 	}
 	return false
 }
