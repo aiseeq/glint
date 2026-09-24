@@ -162,6 +162,41 @@ rm -rf "$WORK/cache" "$WORK/replays" "$WORK/logs"
 	assert.Contains(t, violations[0].Message, "tools/scan.sh")
 }
 
+// Repro: a wrapper script is copied for the next tool and the tool name is
+// replaced throughout, so no ten lines match verbatim; the launch block is still
+// the same code. The script's own name is where such copies differ.
+func TestCrossFileDuplicateComparesShellCopiedForAnotherTool(t *testing.T) {
+	rule := NewCrossFileDuplicateRule()
+	block := func(tool string) string {
+		return `repo=$(cd "$(dirname "$0")/.." && pwd)
+. "$repo/tools/engine-lib.sh"
+need_map "$map"
+maps=${ENGINE_MAPS:-$HOME/games/maps}
+image=${ENGINE_IMAGE:-registry.local/engine:v0.8.0}
+work=${TMPDIR:-/tmp}/` + tool + `-$$
+mkdir -p "$work"; trap 'rm -rf "$work"' EXIT
+CGO_ENABLED=0 GOOS=linux go build -o "$work/` + tool + `" "$repo/cmd/` + tool + `"
+name=$(basename "$rep")
+cp "$rep" "$work/$name"
+`
+	}
+	first := createTestContext(t, "tools/replay-scan.sh", "#!/usr/bin/env bash\n# scan\n"+block("replay-scan")+"echo scanned\n")
+	second := createTestContext(t, "tools/replay-story.sh", "#!/usr/bin/env bash\n# story\n"+block("replay-story")+"echo told\n")
+
+	assert.Empty(t, rule.AnalyzeFile(first))
+	violations := rule.AnalyzeFile(second)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "tools/replay-scan.sh")
+}
+
+func TestOwnNameMaskedLeavesShortNames(t *testing.T) {
+	lines := []string{"a=1", "echo $a"}
+	ctx := &core.FileContext{Path: "/p/tools/a.sh", RelPath: "tools/a.sh", Lines: lines}
+	assert.Equal(t, lines, ownNameMasked(ctx))
+	ctx = &core.FileContext{Path: "/p/tools/scan.sh", RelPath: "tools/scan.sh", Lines: []string{"go build ./cmd/scan"}}
+	assert.Equal(t, []string{"go build ./cmd/<script>"}, ownNameMasked(ctx))
+}
+
 // Repro from projectA: 611 TypeScript files were never compared, because the rule
 // only looked at Go. A type declared twice is the same duplication problem.
 func TestCrossFileDuplicateComparesTypeScript(t *testing.T) {

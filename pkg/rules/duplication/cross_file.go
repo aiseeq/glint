@@ -1,6 +1,7 @@
 package duplication
 
 import (
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,7 +84,30 @@ func (r *CrossFileDuplicateRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	}
 
 	// Collect blocks from this file and check for duplicates
-	return r.processFile(ctx, normalizeFileLines(ctx.Lines))
+	return r.processFile(ctx, normalizeFileLines(ownNameMasked(ctx)))
+}
+
+// minMaskedNameLen keeps short script names such as "a.sh" unmasked: replacing
+// every "a" in the text would compare letters, not code.
+const minMaskedNameLen = 4
+
+// ownNameMasked returns the lines of a shell script with the script's own name
+// replaced by one placeholder. A wrapper is copied for the next tool by renaming
+// the tool throughout, and the file is named after that tool: masking the name
+// lets the copy match its original, while other files keep their text.
+func ownNameMasked(ctx *core.FileContext) []string {
+	if !ctx.IsShellFile() {
+		return ctx.Lines
+	}
+	stem := strings.TrimSuffix(filepath.Base(ctx.Path), ".sh")
+	if len(stem) < minMaskedNameLen {
+		return ctx.Lines
+	}
+	masked := make([]string, len(ctx.Lines))
+	for i, line := range ctx.Lines {
+		masked[i] = strings.ReplaceAll(line, stem, "<script>")
+	}
+	return masked
 }
 
 func (r *CrossFileDuplicateRule) processFile(ctx *core.FileContext, normalized []string) []*core.Violation {
