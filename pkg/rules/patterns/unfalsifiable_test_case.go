@@ -104,6 +104,11 @@ func (r *UnfalsifiableTestCaseRule) unfalsifiable(subject, matcher, arg string, 
 	if matcher == "toContain" && httpStatusSet(subject) {
 		return true
 	}
+	// expect(page).toHaveTitle("…") — заголовок ставит приложение, чужой роняет тест.
+	// URL, в отличие от него, совпадает с адресом, по которому тест сам перешёл.
+	if subject == "page" && matcher == "toHaveTitle" && arg != "" {
+		return false
+	}
 	// expect(page.locator('body')).toBeVisible() — есть на любой странице
 	if r.genericScope.MatchString(subject) {
 		return true

@@ -80,6 +80,14 @@ func TestUnfalsifiableTestCaseRule_Detection(t *testing.T) {
 });`,
 		},
 		{
+			// Заголовок вкладки ставит приложение: другой заголовок роняет тест.
+			name: "page title is produced by the app",
+			code: `test('keeps the title', async ({ page }) => {
+  await page.goto('/analytics/');
+  await expect(page).toHaveTitle("Saga — личный кабинет");
+});`,
+		},
+		{
 			// Набор без провальных кодов проверяет реальное поведение.
 			name: "status set without failure codes",
 			code: `test('either page is fine', async ({ request }) => {
