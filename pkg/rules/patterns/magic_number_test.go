@@ -85,6 +85,49 @@ func foo(s []int) int {
 }`,
 			expectedCount: 0,
 		},
+		{
+			// A package-level registry table: the field key names the number,
+			// a const per row would only repeat it.
+			name: "Keyed field in package-level var table - OK",
+			code: `package main
+type netInfo struct {
+	Symbol  string
+	ChainID int64
+}
+var networks = map[string]netInfo{
+	"alpha": {Symbol: "A", ChainID: 42161},
+	"beta":  {Symbol: "B", ChainID: 8453},
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "Positional value in package-level var table - should flag",
+			code: `package main
+type netInfo struct {
+	Symbol  string
+	ChainID int64
+}
+var networks = []netInfo{{"A", 42161}}`,
+			expectedCount: 1,
+		},
+		{
+			name: "Keyed field inside a func literal of a package var - should flag",
+			code: `package main
+type opts struct{ Retries int }
+var build = func() opts {
+	return opts{Retries: 4321}
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "Keyed field inside a function - should flag",
+			code: `package main
+type opts struct{ Retries int }
+func foo() opts {
+	return opts{Retries: 4321}
+}`,
+			expectedCount: 1,
+		},
 	}
 
 	for _, tt := range tests {
