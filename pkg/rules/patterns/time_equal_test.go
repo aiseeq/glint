@@ -248,13 +248,16 @@ func example() bool {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := createTimeEqualContext(t, "service.go", tt.code)
-			violations := rule.AnalyzeFile(ctx)
+			untyped := rule.AnalyzeFile(ctx)
+			typed := runRuleOnFiles(t, rule, map[string]string{"svc/service.go": tt.code})
 
-			if tt.expectMatch {
-				require.NotEmpty(t, violations, "Expected violation for: %s", tt.name)
-				assert.Equal(t, "time_equal", violations[0].Context["pattern"])
-			} else {
-				assert.Empty(t, violations, "Expected no violations for: %s", tt.name)
+			for mode, violations := range map[string][]*core.Violation{"untyped": untyped, "typed": typed} {
+				if tt.expectMatch {
+					require.NotEmpty(t, violations, "%s: expected violation for: %s", mode, tt.name)
+					assert.Equal(t, "time_equal", violations[0].Context["pattern"])
+				} else {
+					assert.Empty(t, violations, "%s: expected no violations for: %s", mode, tt.name)
+				}
 			}
 		})
 	}
@@ -295,4 +298,81 @@ func splitTimeEqualLines(s string) []string {
 		lines = append(lines, s[start:])
 	}
 	return lines
+}
+
+// A field or variable declared in a sibling file is judged by its declared
+// type. The name fallback called an int64 CreatedAt a time.Time, and the
+// suggested .Equal() does not compile on an int64.
+func TestTimeEqualUsesDeclaredTypeFromSiblingFile(t *testing.T) {
+	violations := runRuleOnFiles(t, NewTimeEqualRule(), map[string]string{
+		"events/model.go": `package events
+
+type Event struct {
+	CreatedAt int64
+}
+
+var deadline, timestamp int64
+`,
+		"events/check.go": `package events
+
+import "time"
+
+func same(a, b Event) bool {
+	_ = time.Now()
+	return a.CreatedAt == b.CreatedAt
+}
+
+func expired() bool {
+	return deadline == timestamp
+}
+`,
+	})
+	require.Empty(t, violations)
+}
+
+// A time.Time declared in a sibling file is still a time.Time, whatever the
+// name of the field and whether or not the comparing file imports time.
+func TestTimeEqualReportsTimeFieldFromSiblingFile(t *testing.T) {
+	violations := runRuleOnFiles(t, NewTimeEqualRule(), map[string]string{
+		"events/model.go": `package events
+
+import "time"
+
+type Event struct {
+	At time.Time
+}
+`,
+		"events/check.go": `package events
+
+func same(a, b Event) bool {
+	return a.At == b.At
+}
+`,
+	})
+	require.Len(t, violations, 1)
+	assert.Equal(t, "events/check.go", violations[0].File)
+}
+
+// Without type information an operand the file does not declare is unknown:
+// the rule stays silent rather than guess a time.Time from the name.
+func TestTimeEqualUntypedUndeclaredOperandIsSilent(t *testing.T) {
+	violations := runRuleOnBrokenFiles(t, NewTimeEqualRule(), map[string]string{
+		"events/model.go": "package events\n\ntype Event struct {\n\tCreatedAt int64\n}\n\nvar timestamp int64\n",
+		"events/check.go": `package events
+
+import "time"
+
+func same(a, b Event) bool {
+	_ = time.Now()
+	return a.CreatedAt == b.CreatedAt
+}
+
+func expired(deadline int64) bool {
+	return deadline == timestamp
+}
+
+func broken() int { return "not an int" }
+`,
+	})
+	require.Empty(t, violations)
 }

@@ -3,7 +3,10 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"strings"
+
+	"golang.org/x/tools/go/ast/astutil"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -30,8 +33,26 @@ func NewNilSliceRule() *NilSliceRule {
 	}
 }
 
-// AnalyzeFile checks for nil slice comparisons
+// AnalyzeFile checks one file without type information: the fallback the
+// project analysis uses for files no type-checked package covers.
 func (r *NilSliceRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *NilSliceRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; a variable declared anywhere in the
+// project is judged by its declared type and declaration.
+func (r *NilSliceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyze(fileCtx, info, ctx)
+	})
+}
+
+// analyze checks for nil slice comparisons. info and project are nil for a
+// file without type information.
+func (r *NilSliceRule) analyze(ctx *core.FileContext, info *types.Info, project *core.GoProjectContext) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() {
 		return nil
 	}
@@ -40,8 +61,17 @@ func (r *NilSliceRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		return nil
 	}
 
-	// Build type information from declarations
-	typeInferrer := NewTypeInferrer(ctx.GoAST)
+	isSlice := func(ident *ast.Ident) bool { return r.isStatedSlice(ctx, info, project, ident) }
+	if info == nil {
+		typeInferrer := NewTypeInferrer(ctx.GoAST)
+		isSlice = func(ident *ast.Ident) bool {
+			// Skip any/interface{} types - nil check is correct for them
+			if typeInferrer.IsAny(ident.Name) || r.looksLikeAnyByName(ident.Name) {
+				return false
+			}
+			return r.isSliceVar(ident.Name, typeInferrer)
+		}
+	}
 
 	var violations []*core.Violation
 
@@ -72,23 +102,17 @@ func (r *NilSliceRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			return true
 		}
 
-		// Get variable name and check if it's a slice
-		varName := r.getVarName(other)
-		if varName == "" {
+		// Only a plain variable: a field keeps its nil semantics.
+		ident, ok := other.(*ast.Ident)
+		if !ok {
 			return true
 		}
+		varName := ident.Name
 
-		// Skip any/interface{} types - nil check is correct for them
-		// Check both type inference and common naming patterns
-		if typeInferrer.IsAny(varName) || r.looksLikeAnyByName(varName) {
-			return true
-		}
-
-		// Use type inference to check if it's a slice
 		if r.hasIntentionalNilSemantics(varName) {
 			return true
 		}
-		if !r.isSliceVar(varName, typeInferrer) {
+		if !isSlice(ident) {
 			return true
 		}
 
@@ -114,20 +138,87 @@ func (r *NilSliceRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	return violations
 }
 
-func (r *NilSliceRule) getVarName(expr ast.Expr) string {
-	switch e := expr.(type) {
-	case *ast.Ident:
-		return e.Name
-	case *ast.SelectorExpr:
-		return ""
+// isStatedSlice reports whether ident is a slice variable whose declaration
+// says so: a parameter or variable declared with its type, or one initialized
+// from a composite literal, make or append. A slice obtained from a call
+// keeps the nil contract of the function that produced it (a regexp
+// submatch is nil when nothing matched) and is left alone, as the untyped
+// path leaves it.
+func (r *NilSliceRule) isStatedSlice(ctx *core.FileContext, info *types.Info, project *core.GoProjectContext, ident *ast.Ident) bool {
+	obj, ok := info.Uses[ident].(*types.Var)
+	if !ok || obj.Type() == nil {
+		return false
 	}
-	return ""
+	if _, isSlice := obj.Type().Underlying().(*types.Slice); !isSlice {
+		return false
+	}
+	file := ctx.GoAST
+	if pos := obj.Pos(); pos < file.FileStart || pos >= file.FileEnd {
+		declCtx, err := project.FileForPosition(pos)
+		if err != nil || declCtx.GoAST == nil {
+			return false // declared outside the analyzed files
+		}
+		file = declCtx.GoAST
+	}
+	return declarationStatesSlice(file, obj.Pos())
+}
+
+// declarationStatesSlice classifies the declaration of the variable defined at
+// pos in file.
+func declarationStatesSlice(file *ast.File, pos token.Pos) bool {
+	path, _ := astutil.PathEnclosingInterval(file, pos, pos)
+	if len(path) < 2 {
+		return false
+	}
+	name, ok := path[0].(*ast.Ident)
+	if !ok || name.Pos() != pos {
+		return false
+	}
+	switch decl := path[1].(type) {
+	case *ast.Field:
+		_, variadic := decl.Type.(*ast.Ellipsis)
+		return !variadic
+	case *ast.ValueSpec:
+		if decl.Type != nil {
+			return true
+		}
+		if len(decl.Values) != len(decl.Names) {
+			return false
+		}
+		for i, declared := range decl.Names {
+			if declared == name {
+				return initializesSlice(decl.Values[i])
+			}
+		}
+	case *ast.AssignStmt:
+		if len(decl.Lhs) != len(decl.Rhs) {
+			return false
+		}
+		for i, lhs := range decl.Lhs {
+			if lhs == name {
+				return initializesSlice(decl.Rhs[i])
+			}
+		}
+	}
+	return false
+}
+
+// initializesSlice reports whether expr builds the slice in place rather than
+// receiving it from a call.
+func initializesSlice(expr ast.Expr) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.CompositeLit:
+		return true
+	case *ast.CallExpr:
+		fun, ok := e.Fun.(*ast.Ident)
+		return ok && (fun.Name == "make" || fun.Name == "append")
+	}
+	return false
 }
 
 func (r *NilSliceRule) isSliceVar(name string, inferrer *TypeInferrer) bool {
-	// First, check type inference for slices
-	// Note: type inferrer is file-level, not scope-aware
-	// So we rely primarily on heuristics for accuracy
+	// The inferrer is file-level, not scope-aware: a name it binds to
+	// several types reports no type at all.
 	if info, ok := inferrer.GetType(name); ok {
 		// Double-check: if also marked as any, it's not a slice
 		if info.TypeName == "any" || info.TypeName == "interface{}" {
@@ -136,17 +227,13 @@ func (r *NilSliceRule) isSliceVar(name string, inferrer *TypeInferrer) bool {
 		return info.IsSlice
 	}
 
-	// The file declares this name but its type could not be resolved (an
-	// assignment from a selector or an unknown call): guessing by name here
-	// flagged pointers such as `results := fn.Type.Results` and values with a
-	// documented nil contract such as regexp submatches.
-	if inferrer.IsDeclared(name) {
-		return false
-	}
-
-	// Fallback to heuristic for cases type inference can't catch
-	// (e.g., struct fields from other packages)
-	return r.looksLikeSliceByName(name)
+	// The file either declares this name from an expression whose type
+	// could not be resolved (an assignment from a selector or an unknown
+	// call), or does not declare it at all. Guessing by name flagged
+	// pointers such as `results := fn.Type.Results`, values with a
+	// documented nil contract such as regexp submatches, and pointers
+	// declared in another file of the package.
+	return false
 }
 
 // looksLikeAnyByName checks if variable name suggests it's an any/interface{} type
@@ -172,36 +259,6 @@ func (r *NilSliceRule) looksLikeAnyByName(name string) bool {
 
 func (r *NilSliceRule) hasIntentionalNilSemantics(name string) bool {
 	return name == "options" || strings.HasSuffix(name, "IDs")
-}
-
-func (r *NilSliceRule) looksLikeSliceByName(name string) bool {
-	// Conservative list of names that are almost always slices
-	slicePatterns := map[string]bool{
-		"items":      true,
-		"results":    true,
-		"records":    true,
-		"rows":       true,
-		"elements":   true,
-		"values":     true,
-		"entries":    true,
-		"files":      true,
-		"users":      true,
-		"violations": true,
-		"args":       true,
-		"names":      true,
-		"ids":        true,
-		"keys":       true,
-		"paths":      true,
-		"lines":      true,
-		"tokens":     true,
-		"parts":      true,
-		"chunks":     true,
-		"matches":    true,
-		"children":   true,
-		"nodes":      true,
-	}
-
-	return slicePatterns[name]
 }
 
 func (r *NilSliceRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {

@@ -6,30 +6,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
-// runOrphanedInterface runs the rule the way the check flow does: a project
-// rule gets the loaded project, a file rule gets every file in turn.
-func runOrphanedInterface(t *testing.T, project *core.GoProjectContext) []*core.Violation {
-	t.Helper()
-	var rule rules.Rule = NewOrphanedInterfaceRule()
-	if projectRule, ok := rule.(rules.GoProjectRule); ok {
-		violations, err := projectRule.AnalyzeGoProject(project)
-		require.NoError(t, err)
-		return violations
-	}
-	var violations []*core.Violation
-	for _, fileCtx := range project.Files {
-		violations = append(violations, rule.AnalyzeFile(fileCtx)...)
-	}
-	return violations
-}
-
 func orphanedInterfaceProject(t *testing.T, files map[string]string) []*core.Violation {
 	t.Helper()
-	return runOrphanedInterface(t, rulestest.Project(t, files))
+	return runRuleOnFiles(t, NewOrphanedInterfaceRule(), files)
 }
 
 func TestOrphanedInterfaceSkipsRuleCapabilityInterface(t *testing.T) {
@@ -216,7 +198,7 @@ func Broken() int { return "not an int" }
 	require.NoError(t, err)
 	require.NotEmpty(t, project.SkippedPackages)
 
-	violations := runOrphanedInterface(t, project)
+	violations := runRuleOnProject(t, NewOrphanedInterfaceRule(), project)
 	require.Len(t, violations, 1)
 	require.Contains(t, violations[0].Message, "'Lonely'")
 	require.Equal(t, "broken/types.go", violations[0].File)

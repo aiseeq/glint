@@ -23,6 +23,9 @@ func TestNilSliceRule_Detection(t *testing.T) {
 		name        string
 		code        string
 		expectMatch bool
+		// typedDiffers flips the expectation when the type checker knows
+		// what the file-level inference cannot.
+		typedDiffers bool
 	}{
 		{
 			name: "slice == nil",
@@ -157,7 +160,11 @@ func example() {
 	}
 }
 `,
-			expectMatch: false, // Conservative: make() inference not fully supported yet
+			// Without types the name "data" reads as an any and is left
+			// alone; the type checker knows it is a []byte from make, which
+			// is never nil, so the comparison is a real finding.
+			expectMatch:  false,
+			typedDiffers: true,
 		},
 		{
 			name: "function param slice",
@@ -189,13 +196,20 @@ func example() {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := createNilSliceContext(t, "service.go", tt.code)
-			violations := rule.AnalyzeFile(ctx)
+			untyped := rule.AnalyzeFile(ctx)
+			typed := runRuleOnFiles(t, rule, map[string]string{"svc/service.go": tt.code})
 
-			if tt.expectMatch {
-				require.NotEmpty(t, violations, "Expected violation for: %s", tt.name)
-				assert.Equal(t, "nil_slice_compare", violations[0].Context["pattern"])
-			} else {
-				assert.Empty(t, violations, "Expected no violations for: %s", tt.name)
+			for mode, violations := range map[string][]*core.Violation{"untyped": untyped, "typed": typed} {
+				expectMatch := tt.expectMatch
+				if mode == "typed" {
+					expectMatch = expectMatch != tt.typedDiffers
+				}
+				if expectMatch {
+					require.NotEmpty(t, violations, "%s: expected violation for: %s", mode, tt.name)
+					assert.Equal(t, "nil_slice_compare", violations[0].Context["pattern"])
+				} else {
+					assert.Empty(t, violations, "%s: expected no violations for: %s", mode, tt.name)
+				}
 			}
 		})
 	}
@@ -299,6 +313,10 @@ func find(pattern *regexp.Regexp, content string) string {
 			if len(violations) != 0 {
 				t.Fatalf("expected no findings, got %d: %s", len(violations), violations[0].Suggestion)
 			}
+			// With types the pointers are pointers, and the submatch slice
+			// comes from a call whose nil contract the rule respects.
+			typed := runRuleOnFiles(t, NewNilSliceRule(), map[string]string{"svc/svc.go": tc.code})
+			require.Empty(t, typed)
 		})
 	}
 }
@@ -320,4 +338,62 @@ func process() int {
 	if len(violations) != 1 {
 		t.Fatalf("got %d findings, want 1", len(violations))
 	}
+	typed := runRuleOnFiles(t, NewNilSliceRule(), map[string]string{"svc/svc.go": string(ctx.Content)})
+	require.Len(t, typed, 1)
+}
+
+// A variable declared in a sibling file is judged by its declared type. The
+// name fallback took the pointer `results` for a slice and suggested len(),
+// which does not compile on a pointer.
+func TestNilSliceUsesDeclaredTypeFromSiblingFile(t *testing.T) {
+	violations := runRuleOnFiles(t, NewNilSliceRule(), map[string]string{
+		"search/state.go": `package search
+
+type Result struct{}
+
+var results *Result
+`,
+		"search/check.go": `package search
+
+func missing() bool {
+	return results == nil
+}
+`,
+	})
+	require.Empty(t, violations)
+}
+
+// A slice declared in a sibling file is reported whatever its name.
+func TestNilSliceReportsSliceFromSiblingFile(t *testing.T) {
+	violations := runRuleOnFiles(t, NewNilSliceRule(), map[string]string{
+		"search/state.go": `package search
+
+var queue []int
+`,
+		"search/check.go": `package search
+
+func idle() bool {
+	return queue == nil
+}
+`,
+	})
+	require.Len(t, violations, 1)
+	assert.Equal(t, "search/check.go", violations[0].File)
+}
+
+// Without type information a name the file does not declare is unknown: the
+// rule stays silent rather than guess a slice from the name.
+func TestNilSliceUntypedUndeclaredNameIsSilent(t *testing.T) {
+	violations := runRuleOnBrokenFiles(t, NewNilSliceRule(), map[string]string{
+		"search/state.go": "package search\n\ntype Result struct{}\n\nvar results *Result\n",
+		"search/check.go": `package search
+
+func missing() bool {
+	return results == nil
+}
+
+func broken() int { return "not an int" }
+`,
+	})
+	require.Empty(t, violations)
 }

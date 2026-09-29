@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -29,8 +30,24 @@ func NewBoolCompareRule() *BoolCompareRule {
 	}
 }
 
-// AnalyzeFile checks for redundant boolean comparisons
+// AnalyzeFile checks one file without type information: the fallback the
+// project analysis uses for files no type-checked package covers.
 func (r *BoolCompareRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *BoolCompareRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; an operand declared anywhere in the
+// project is judged by its declared type.
+func (r *BoolCompareRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze checks for redundant boolean comparisons. info is nil for a file
+// without type information.
+func (r *BoolCompareRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() {
 		return nil
 	}
@@ -39,7 +56,10 @@ func (r *BoolCompareRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		return nil
 	}
 
-	typeInferrer := NewTypeInferrer(ctx.GoAST)
+	var typeInferrer *TypeInferrer
+	if info == nil {
+		typeInferrer = NewTypeInferrer(ctx.GoAST)
+	}
 
 	var violations []*core.Violation
 
@@ -82,7 +102,7 @@ func (r *BoolCompareRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		// Comparing a non-bool operand against true/false is not redundant:
 		// a value read out of a map[string]any cannot be used as a condition
 		// on its own.
-		if !r.isKnownBool(other, typeInferrer) {
+		if !r.isKnownBool(other, info, typeInferrer) {
 			return true
 		}
 
@@ -122,24 +142,38 @@ func (r *BoolCompareRule) getLineFromNode(ctx *core.FileContext, node ast.Node) 
 }
 
 // isKnownBool reports whether the operand compared against true/false is
-// itself a boolean. Names the file declares but whose type cannot be resolved
-// (a map[string]any lookup, an unknown call) are left alone: rewriting those
-// comparisons would not compile.
-func (r *BoolCompareRule) isKnownBool(expr ast.Expr, inferrer *TypeInferrer) bool {
+// itself a boolean. With type information its type answers. Without it only
+// what the file declares counts: a name or field the file does not declare, a
+// call or an index expression (a map[string]any lookup) is unknown, and
+// rewriting a comparison on an unknown operand may not compile.
+func (r *BoolCompareRule) isKnownBool(expr ast.Expr, info *types.Info, inferrer *TypeInferrer) bool {
+	if info != nil {
+		return isBooleanType(info.TypeOf(expr))
+	}
 	switch e := expr.(type) {
 	case *ast.Ident:
-		if info, ok := inferrer.GetType(e.Name); ok {
-			return info.TypeName == "bool"
-		}
-		return !inferrer.IsDeclared(e.Name)
+		typ, ok := inferrer.GetType(e.Name)
+		return ok && typ.TypeName == "bool"
+	case *ast.SelectorExpr:
+		typ, ok := inferrer.GetType(e.Sel.Name)
+		return ok && typ.TypeName == "bool"
 	case *ast.BinaryExpr:
 		// Comparisons and logical operators always produce a bool.
 		return true
 	case *ast.UnaryExpr:
 		return e.Op == token.NOT
 	case *ast.ParenExpr:
-		return r.isKnownBool(e.X, inferrer)
+		return r.isKnownBool(e.X, nil, inferrer)
 	}
-	// Selectors and calls: no type information here, keep the finding.
-	return true
+	return false
+}
+
+// isBooleanType reports whether t is a boolean type: bool, an untyped boolean
+// constant or a named type whose underlying type is bool.
+func isBooleanType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	basic, ok := t.Underlying().(*types.Basic)
+	return ok && basic.Info()&types.IsBoolean != 0
 }

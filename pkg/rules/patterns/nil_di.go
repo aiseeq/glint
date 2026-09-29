@@ -2,7 +2,7 @@ package patterns
 
 import (
 	"go/ast"
-	"strconv"
+	"go/types"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -32,8 +32,26 @@ func NewNilDIRule() *NilDIRule {
 	}
 }
 
-// AnalyzeFile checks for nil arguments in constructor calls
+// AnalyzeFile checks one file without type information: the fallback the
+// project analysis uses for files no type-checked package covers.
 func (r *NilDIRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *NilDIRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file: a constructor declared anywhere in the
+// project is resolved through type information, so the nil argument is
+// matched against the parameter it really lands in.
+func (r *NilDIRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze checks for nil arguments in constructor calls. info is nil for a
+// file without type information; a constructor that file does not declare is
+// then unknown, and the rule does not guess its parameters.
+func (r *NilDIRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() {
 		return nil
 	}
@@ -84,29 +102,19 @@ func (r *NilDIRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 				continue
 			}
 
-			// Prefer the real parameter name when the constructor is
-			// declared in this file. For cross-file constructors the
-			// position heuristic only decides whether the arg is high-risk;
-			// the message stays neutral (a guess printed as fact misled the
-			// 2026-07-01 audit: "Nil logger" for a nil balanceService).
-			paramName := resolveParamName(ctx.GoAST, funcName, i)
-			paramHint := paramName
-			message := "Nil " + paramName + " argument to constructor " + funcName
-			if paramName == "" {
-				paramHint = r.guessParamType(funcName, i, len(call.Args))
-				message = "Nil dependency argument #" + strconv.Itoa(i+1) + " to constructor " + funcName
-			}
-
-			// Only flag high-risk nil parameters
-			if !r.isHighRiskParam(paramHint) {
+			// The parameter the nil lands in decides. An unresolved one
+			// (no type information and no declaration in this file) is
+			// not guessed from the constructor name or the position.
+			paramName := constructorParamName(ctx.GoAST, info, call, i)
+			if !r.isHighRiskParam(paramName) {
 				continue
 			}
 
-			v := r.CreateViolation(ctx.RelPath, line, message)
+			v := r.CreateViolation(ctx.RelPath, line, "Nil "+paramName+" argument to constructor "+funcName)
 			v.WithCode(ctx.GetLine(line))
 			v.WithSuggestion("Verify this nil is intentional. Add '// nil-di: safe' comment to suppress if safe.")
 			v.WithContext("constructor", funcName)
-			v.WithContext("param_hint", paramHint)
+			v.WithContext("param_hint", paramName)
 			violations = append(violations, v)
 		}
 
@@ -139,54 +147,6 @@ func (r *NilDIRule) isHighRiskParam(paramHint string) bool {
 	}
 
 	return false
-}
-
-// guessParamType tries to infer what the nil parameter is for based on constructor name and position
-func (r *NilDIRule) guessParamType(funcName string, argIndex, totalArgs int) string {
-	// Common constructor patterns
-	nameLower := strings.ToLower(funcName)
-
-	// For services, common pattern is (config, logger) or (config, repo, logger)
-	if strings.Contains(nameLower, "service") {
-		if argIndex == totalArgs-1 {
-			return "logger"
-		}
-		if argIndex == 1 {
-			return "repo/logger"
-		}
-	}
-
-	// For repositories, common pattern is (db, ..., logger)
-	if strings.Contains(nameLower, "repo") || strings.Contains(nameLower, "repository") {
-		if argIndex == 0 {
-			return "database"
-		}
-		if argIndex == totalArgs-1 {
-			return "logger"
-		}
-	}
-
-	// For middleware
-	if strings.Contains(nameLower, "middleware") {
-		if argIndex == 0 {
-			return "logger"
-		}
-	}
-
-	// For handlers
-	if strings.Contains(nameLower, "handler") {
-		if argIndex == 1 {
-			return "logger"
-		}
-	}
-
-	// Generic: check position patterns
-	// Last arg is often logger in Go constructors
-	if argIndex == totalArgs-1 && totalArgs > 1 {
-		return "logger (last arg)"
-	}
-
-	return "dependency"
 }
 
 // hasSuppression delegates to the canonical core suppression check.
@@ -232,31 +192,70 @@ func (r *NilDIRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
 	return ctx.LineFor(node)
 }
 
-// resolveParamName returns the name of the constructor's parameter at
-// argIndex when the constructor is declared in the same file, or "" when it
-// is declared elsewhere (per-file AST has no cross-file resolution).
-func resolveParamName(file *ast.File, funcName string, argIndex int) string {
+// constructorParamName returns the name of the parameter the argument at
+// argIndex of call lands in, or "" when it cannot be resolved. With type
+// information the callee's signature answers, wherever it is declared.
+// Without it only a plain call of a function declared in file is resolved.
+func constructorParamName(file *ast.File, info *types.Info, call *ast.CallExpr, argIndex int) string {
+	if info != nil {
+		return signatureParamName(info, call, argIndex)
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok {
+		return ""
+	}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name == nil || fn.Name.Name != funcName || fn.Type.Params == nil {
+		if !ok || fn.Recv != nil || fn.Name.Name != ident.Name || fn.Type.Params == nil {
 			continue
 		}
-		idx := 0
-		for _, field := range fn.Type.Params.List {
-			count := len(field.Names)
-			if count == 0 {
-				count = 1 // unnamed parameter still occupies a position
-			}
-			for j := 0; j < count; j++ {
-				if idx == argIndex {
-					if j < len(field.Names) {
-						return field.Names[j].Name
-					}
-					return ""
-				}
-				idx++
-			}
-		}
+		return fieldListParamName(fn.Type.Params, argIndex)
 	}
 	return ""
+}
+
+// signatureParamName reads the parameter name from the type of the called
+// expression; a conversion or a call the checker did not type has none.
+func signatureParamName(info *types.Info, call *ast.CallExpr, argIndex int) string {
+	tv, ok := info.Types[call.Fun]
+	if !ok || !tv.IsValue() || tv.Type == nil {
+		return ""
+	}
+	sig, ok := tv.Type.Underlying().(*types.Signature)
+	if !ok {
+		return ""
+	}
+	params := sig.Params()
+	last := params.Len() - 1
+	if sig.Variadic() && argIndex > last {
+		argIndex = last
+	}
+	if argIndex < 0 || argIndex > last {
+		return ""
+	}
+	return params.At(argIndex).Name()
+}
+
+// fieldListParamName returns the name of the parameter at argIndex, "" for an
+// unnamed one. Arguments past the end land in a trailing variadic parameter.
+func fieldListParamName(params *ast.FieldList, argIndex int) string {
+	var names []string
+	variadic := false
+	for _, field := range params.List {
+		_, variadic = field.Type.(*ast.Ellipsis)
+		if len(field.Names) == 0 {
+			names = append(names, "") // unnamed parameter still occupies a position
+			continue
+		}
+		for _, name := range field.Names {
+			names = append(names, name.Name)
+		}
+	}
+	if variadic && argIndex >= len(names) {
+		argIndex = len(names) - 1
+	}
+	if argIndex < 0 || argIndex >= len(names) {
+		return ""
+	}
+	return names[argIndex]
 }

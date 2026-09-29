@@ -414,3 +414,94 @@ func TestHardcodedSecretsInvalidRegexpPatternIsScanned(t *testing.T) {
 	ctx := rulestest.GoFile(t, "scan/patterns.go", code)
 	assert.Len(t, NewHardcodedSecretsRule().AnalyzeFile(ctx), 1)
 }
+
+// An env entry built from a literal prefix and a value from configuration
+// holds no secret: the pattern matched from the prefix's closing quote to the
+// next literal's opening quote, and took the code in between for a quoted
+// value.
+func TestHardcodedSecretsIgnoresLiteralPrefixJoinedWithValue(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		code string
+	}{
+		{
+			name: "go env entries from config",
+			path: "testdb/testdb.go",
+			code: `package testdb
+
+import (
+	"os"
+	"os/exec"
+)
+
+type Config struct{ User, Password, Database string }
+
+func run(cfg Config) error {
+	cmd := exec.Command("docker", "run")
+	cmd.Env = append(os.Environ(), "POSTGRES_USER="+cfg.User, "POSTGRES_PASSWORD="+cfg.Password, "POSTGRES_DB="+cfg.Database)
+	return cmd.Run()
+}
+`,
+		},
+		{
+			name: "typescript env entries from config",
+			path: "deploy/env.ts",
+			code: `export function env(cfg: { password: string; name: string }): string[] {
+  return ["DB_PASSWORD=" + cfg.password + "", "DB_NAME=" + cfg.name];
+}
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var ctx *core.FileContext
+			if strings.HasSuffix(tt.path, ".go") {
+				ctx = rulestest.GoFile(t, tt.path, tt.code)
+			} else {
+				ctx = rulestest.TextFile(t, tt.path, tt.code)
+			}
+			assert.Empty(t, NewHardcodedSecretsRule().AnalyzeFile(ctx))
+		})
+	}
+}
+
+// A quoted literal value is still a secret, next to a concatenation, inside a
+// config embedded in a Go raw string, and in TypeScript.
+func TestHardcodedSecretsReportsQuotedValueNextToConcatenation(t *testing.T) {
+	value := strings.Join([]string{"super", "secret", "123"}, "")
+	tests := []struct {
+		name string
+		path string
+		code string
+	}{
+		{
+			name: "go literal after a concatenation",
+			path: "cfg/cfg.go",
+			code: "package cfg\n\nfunc f(user string) []string {\n\treturn []string{\"USER=\" + user, `password: \"" + value + "\"`}\n}\n",
+		},
+		{
+			name: "go raw string with embedded config",
+			path: "cfg/cfg.go",
+			code: "package cfg\n\nconst config = `\ndb:\n  password: \"" + value + "\"\n`\n",
+		},
+		{
+			name: "typescript literal",
+			path: "cfg/cfg.ts",
+			code: "export const password = \"" + value + "\";\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var ctx *core.FileContext
+			if strings.HasSuffix(tt.path, ".go") {
+				ctx = rulestest.GoFile(t, tt.path, tt.code)
+			} else {
+				ctx = rulestest.TextFile(t, tt.path, tt.code)
+			}
+			assert.Len(t, NewHardcodedSecretsRule().AnalyzeFile(ctx), 1, "Code:\n%s", tt.code)
+		})
+	}
+}
