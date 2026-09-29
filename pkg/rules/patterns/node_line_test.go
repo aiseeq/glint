@@ -1,34 +1,34 @@
 package patterns
 
 import (
-	"go/parser"
-	"go/token"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
-// sharedFileSetContext parses a file into a file set that already holds
-// another file, exactly like the Go project loader does. Positions are then
-// offset by the earlier file's size — hand-rolled newline counting over
-// ctx.Content silently collapses to line 1.
-func sharedFileSetContext(t *testing.T, name, code string) *core.FileContext {
+// queryInLoopProject loads the source behind a filler file of the same
+// package, so the service file does not start at the beginning of the shared
+// file set - hand-rolled newline counting over ctx.Content would collapse to
+// line 1.
+func queryInLoopProject(t *testing.T) *core.GoProjectContext {
 	t.Helper()
-	fset := token.NewFileSet()
-	filler := "package filler\n\n" + "// padding\n"
-	if _, err := parser.ParseFile(fset, "filler.go", filler, parser.ParseComments); err != nil {
-		t.Fatalf("parse filler: %v", err)
-	}
+	return rulestest.Project(t, map[string]string{
+		"svc/a_filler.go": `package svc
 
-	astFile, err := parser.ParseFile(fset, name, code, parser.ParseComments)
-	require.NoError(t, err)
+import "context"
 
-	ctx := core.NewFileContext(name, ".", []byte(code), nil)
-	ctx.SetGoAST(fset, astFile)
-	return ctx
+// Repo is the storage the service reads through.
+type Repo interface {
+	FindByID(ctx context.Context, id string) (string, error)
+	UpdateStatus(ctx context.Context, item string) error
+}
+`,
+		"svc/service.go": queryInLoopSource,
+	})
 }
 
 const queryInLoopSource = `package svc
@@ -54,9 +54,8 @@ func (s *Service) Sync(ctx context.Context, ids []string) error {
 `
 
 func TestQueryInLoopReportsRealLinesWithSharedFileSet(t *testing.T) {
-	ctx := sharedFileSetContext(t, "service.go", queryInLoopSource)
-
-	violations := NewQueryInLoopRule().AnalyzeFile(ctx)
+	violations, err := NewQueryInLoopRule().AnalyzeGoProject(queryInLoopProject(t))
+	require.NoError(t, err)
 	require.Len(t, violations, 2, "both data-access calls in the loop must be reported")
 
 	lines := []int{violations[0].Line, violations[1].Line}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -52,7 +53,7 @@ func (r *FinancialDirectionalRoundingRule) AnalyzeFile(ctx *core.FileContext) []
 	if !ctx.IsGoFile() || ctx.IsTestFile() || ctx.GoAST == nil {
 		return nil
 	}
-	if len(importedPackageAliases(ctx.GoAST, `"github.com/shopspring/decimal"`, "decimal")) == 0 {
+	if len(helpers.PackageAliases(ctx.GoAST, `"github.com/shopspring/decimal"`, "decimal")) == 0 {
 		return nil
 	}
 

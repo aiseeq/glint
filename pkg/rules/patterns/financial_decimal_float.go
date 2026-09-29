@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -34,7 +35,7 @@ func (r *FinancialDecimalFloatRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 	}
 
 	var violations []*core.Violation
-	decimalAliases := importedPackageAliases(ctx.GoAST, `"github.com/shopspring/decimal"`, "decimal")
+	decimalAliases := helpers.PackageAliases(ctx.GoAST, `"github.com/shopspring/decimal"`, "decimal")
 	if len(decimalAliases) == 0 {
 		return nil
 	}
@@ -81,23 +82,6 @@ func (r *FinancialDecimalFloatRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 func isBlankIdentifier(expr ast.Expr) bool {
 	identifier, ok := expr.(*ast.Ident)
 	return ok && identifier.Name == "_"
-}
-
-func importedPackageAliases(file *ast.File, path, defaultName string) map[string]bool {
-	aliases := make(map[string]bool)
-	for _, spec := range file.Imports {
-		if spec.Path == nil || spec.Path.Value != path {
-			continue
-		}
-		name := defaultName
-		if spec.Name != nil {
-			name = spec.Name.Name
-		}
-		if name != "_" && name != "." {
-			aliases[name] = true
-		}
-	}
-	return aliases
 }
 
 func isShopspringDecimalReceiver(

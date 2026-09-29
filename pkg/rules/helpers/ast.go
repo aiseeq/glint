@@ -70,3 +70,24 @@ func AnalyzeFuncDecls(ctx *core.FileContext, checker FuncDeclChecker) []*core.Vi
 
 	return violations
 }
+
+// PackageAliases returns the identifiers a file uses for an imported package.
+// path is the quoted import path as written in source (`"regexp"`); defaultName
+// is the package's own name, used when the import has no alias. Blank and dot
+// imports give no identifier.
+func PackageAliases(file *ast.File, path, defaultName string) map[string]bool {
+	aliases := make(map[string]bool)
+	for _, spec := range file.Imports {
+		if spec.Path == nil || spec.Path.Value != path {
+			continue
+		}
+		name := defaultName
+		if spec.Name != nil {
+			name = spec.Name.Name
+		}
+		if name != "_" && name != "." {
+			aliases[name] = true
+		}
+	}
+	return aliases
+}

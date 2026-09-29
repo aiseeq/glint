@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestHardcodedSecretsRule(t *testing.T) {
@@ -336,4 +337,80 @@ func TestHardcodedSecretsMasksEveryMatchOnReportedLine(t *testing.T) {
 		assert.NotContains(t, violations[0].Code, jwt)
 		assert.Equal(t, 3, strings.Count(violations[0].Code, "[REDACTED]"))
 	}
+}
+
+// A secret scanner describes credential shapes with regular expressions. The
+// pattern passed to regexp is not a credential: its tail is a character class
+// and a repetition, not a value. Only the fixed text of the pattern can leak a
+// secret, so a literal credential written as a regexp is still reported.
+func TestHardcodedSecretsRegexpPatterns(t *testing.T) {
+	pg := strings.Join([]string{"PGPASS", "WORD="}, "")
+	tests := []struct {
+		name           string
+		code           string
+		wantViolations int
+	}{
+		{
+			name: "credential shape passed to regexp.MustCompile",
+			code: "package scan\n\nimport \"regexp\"\n\n" +
+				"var pgPassword = regexp.MustCompile(`" + pg + "[A-Za-z0-9_./+=-]{20,}`)\n",
+		},
+		{
+			name: "credential shape passed to regexp.Compile under an alias",
+			code: "package scan\n\nimport re \"regexp\"\n\n" +
+				"func compile() (*re.Regexp, error) { return re.Compile(\"" + pg + `[A-Za-z0-9_./+=-]{20,}` + "\") }\n",
+		},
+		{
+			name: "credential shape passed to regexp.MatchString",
+			code: "package scan\n\nimport \"regexp\"\n\n" +
+				"func has(s string) bool { ok, _ := regexp.MatchString(`" + pg + "[A-Za-z0-9_./+=-]{20,}`, s); return ok }\n",
+		},
+		{
+			name: "multi-line raw pattern",
+			code: "package scan\n\nimport \"regexp\"\n\n" +
+				"var pgPassword = regexp.MustCompile(`(?m)\n^" + pg + "[A-Za-z0-9_./+=-]{20,}$`)\n",
+		},
+		{
+			name: "literal credential written as a regexp is still a secret",
+			code: "package scan\n\nimport \"regexp\"\n\n" +
+				"var leaked = regexp.MustCompile(`" + pg + "abcdefghijklmnopqrstuvwxyz\\b`)\n",
+			wantViolations: 1,
+		},
+		{
+			name: "same text outside a regexp call is reported",
+			code: "package scan\n\nimport \"strings\"\n\n" +
+				"func has(s string) bool { return strings.Contains(s, `" + pg + "[A-Za-z0-9_./+=-]{20,}`) }\n",
+			wantViolations: 1,
+		},
+		{
+			name: "a type named regexp from another package is not the regexp package",
+			code: "package scan\n\nimport regexp \"example.com/fake\"\n\n" +
+				"var pgPassword = regexp.MustCompile(`" + pg + "[A-Za-z0-9_./+=-]{20,}`)\n",
+			wantViolations: 1,
+		},
+		{
+			name: "secret on the same line as a regexp pattern",
+			code: "package scan\n\nimport \"regexp\"\n\n" +
+				"var shape, cmd = regexp.MustCompile(`" + pg + "[A-Za-z0-9]{20,}`), \"" + pg + "abcdefghijklmnopqrstuvwxyz psql\"\n",
+			wantViolations: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := rulestest.GoFile(t, "scan/patterns.go", tt.code)
+			violations := NewHardcodedSecretsRule().AnalyzeFile(ctx)
+			assert.Len(t, violations, tt.wantViolations, "Code:\n%s", tt.code)
+		})
+	}
+}
+
+// A literal that does not parse as a pattern describes no shape: its text is
+// scanned like any other string.
+func TestHardcodedSecretsInvalidRegexpPatternIsScanned(t *testing.T) {
+	pg := strings.Join([]string{"PGPASS", "WORD="}, "")
+	code := "package scan\n\nimport \"regexp\"\n\n" +
+		"var broken = regexp.MustCompile(`" + pg + "[A-Za-z0-9_./+=-]{20,}(`)\n"
+	ctx := rulestest.GoFile(t, "scan/patterns.go", code)
+	assert.Len(t, NewHardcodedSecretsRule().AnalyzeFile(ctx), 1)
 }
