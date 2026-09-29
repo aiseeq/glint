@@ -163,7 +163,7 @@ glint rules
 - **sensitive-query-param** (HIGH) — Detects credentials and action tokens exposed in URLs (CWE-598)
 - **sql-injection** (CRITICAL) — Detects SQL injection via string concatenation
 - **error-masking** (CRITICAL) — Detects patterns that mask errors instead of handling them properly
-- **cyclomatic-complexity** — Functions with too many decision paths (default: >10)
+- **cyclomatic-complexity** — Functions with too many decision paths (default: >20, setting `max_complexity`)
 - **cross-file-duplicate** — Detects duplicate code blocks across different files
 - **unused-param** — Function parameters that are never used
 - **naming-convention** — Detects stuttering, ALL_CAPS, underscores in exported names
