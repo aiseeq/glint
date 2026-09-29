@@ -1,0 +1,101 @@
+schema: 1
+graft: '>=0.5.0'
+
+# Versions are annotated tags vX.Y.Z (graft release); the build stamps
+# graft version --describe into the binary.
+version:
+  mode: git-tag
+
+gate:
+  - task: smoke
+
+tasks:
+  # --- build ---
+  build:
+    desc: build the binary into bin/
+    run:
+      - [go, build, -ldflags, '-X main.version=${GRAFT_VERSION}', -o, bin/glint, ./cmd/glint]
+  install:
+    desc: install to ~/bin atomically (a running glint keeps its file)
+    deps: [build]
+    run:
+      - sh: |
+          set -eu
+          mkdir -p "$HOME/bin"
+          tmp=$(mktemp "$HOME/bin/.glint.XXXXXX")
+          trap 'rm -f "$tmp"' EXIT
+          install -m 0755 bin/glint "$tmp"
+          mv -f "$tmp" "$HOME/bin/glint"
+          echo "Installed to $HOME/bin/glint"
+  install-gopath:
+    desc: install to GOPATH/bin with go install
+    run:
+      - [go, install, -ldflags, '-X main.version=${GRAFT_VERSION}', ./cmd/glint]
+  clean:
+    desc: remove build artifacts
+    run:
+      - rm -rf bin
+      - go clean
+
+  # --- tests ---
+  test:
+    desc: all tests
+    usage: <go test flags, e.g. -run TestX>
+    run: ['go test -v {args} ./...']
+  test-short:
+    desc: tests without the long-running ones
+    run: [go test -short -v ./...]
+  test-race:
+    desc: tests with the race detector (analysis runs rules in parallel)
+    run: [go test -race ./...]
+  test-coverage:
+    desc: tests with a coverage report in coverage.html
+    run:
+      - go test -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+      - ['echo', 'Coverage report: coverage.html']
+  smoke:
+    desc: the commit gate - fmt-check, vet, short tests
+    run: [{task: fmt-check}, {task: vet}, {task: test-short}]
+
+  # --- quality ---
+  lint:
+    desc: golangci-lint (installed on first use)
+    run:
+      - sh: |
+          set -eu
+          if ! command -v golangci-lint >/dev/null 2>&1; then
+            echo "Installing golangci-lint..."
+            go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          fi
+          golangci-lint run
+  fmt:
+    desc: format the code
+    run:
+      - go fmt ./...
+      - echo "Code formatted"
+  fmt-check:
+    desc: fail on unformatted code
+    run:
+      - sh: 'test -z "$(gofmt -l .)" || { echo "Code is not formatted. Run graft fmt"; exit 1; }'
+  vet:
+    desc: go vet
+    run: [go vet ./...]
+  all:
+    desc: every check - fmt-check, vet, lint, tests, race; before install
+    run: [{task: fmt-check}, {task: vet}, {task: lint}, {task: test}, {task: test-race}]
+  self-check:
+    desc: glint on itself, built from this tree
+    usage: <glint check flags, e.g. --verbose>
+    deps: [build]
+    run: ['bin/glint check ./... {args}']
+
+  # --- dependencies ---
+  deps:
+    desc: download dependencies
+    run: [go mod download]
+  deps-update:
+    desc: update dependencies
+    run:
+      - go get -u ./...
+      - go mod tidy

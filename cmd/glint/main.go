@@ -33,7 +33,7 @@ import (
 
 var version = "dev"
 
-// resolveVersion prefers the Makefile-injected version and falls back to the
+// resolveVersion prefers the version injected by graft build and falls back to the
 // module version Go stamps into `go install`-built binaries — otherwise every
 // binary a user installs from a pseudo-version reports itself as "dev" and
 // there is no way to tell which commit they actually got. Explicit by-design

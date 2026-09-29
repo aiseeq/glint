@@ -1,0 +1,8 @@
+#!/bin/sh
+# Installed by graft init. The hook logic lives in graft itself.
+if ! command -v graft >/dev/null 2>&1; then
+	echo "graft: not found in PATH, the pre-commit hook cannot run." >&2
+	echo "Install it: go install github.com/aiseeq/graft@v0.5.0" >&2
+	exit 1
+fi
+exec graft hook pre-commit "$@"

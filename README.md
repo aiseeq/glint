@@ -23,12 +23,17 @@ Originally built to help AI agents understand codebases, but useful for any proj
 go install github.com/aiseeq/glint/cmd/glint@latest
 ```
 
-Or build from source:
+Or build from source. Development commands run through
+[graft](https://github.com/aiseeq/graft) (tasks in `.graft.yaml`):
 
 ```bash
+go install github.com/aiseeq/graft@v0.5.0
 git clone https://github.com/aiseeq/glint.git
 cd glint
-make build
+graft init      # git hooks
+graft build     # bin/glint
+graft install   # ~/bin/glint
+graft help      # every task
 ```
 
 ## Quick Start
@@ -305,8 +310,8 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-rule`)
 3. Add tests for your changes
-4. Run tests (`go test ./...`)
-5. Commit your changes (`git commit -m 'Add amazing-rule'`)
+4. Run the checks (`graft all`) and glint on itself (`graft self-check`)
+5. Commit your changes (`graft commit -m 'feat: add amazing-rule'`)
 6. Push to the branch (`git push origin feature/amazing-rule`)
 7. Open a Pull Request
 
