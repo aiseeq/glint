@@ -1,8 +1,10 @@
 package patterns
 
 import (
+	"errors"
 	"go/ast"
 	"go/token"
+	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -13,8 +15,14 @@ func init() {
 	rules.Register(NewOrphanedInterfaceRule())
 }
 
-// OrphanedInterfaceRule detects interfaces with no implementations or usages
-// These are "dead code" interfaces that can be safely removed
+// OrphanedInterfaceRule detects interfaces that nothing implements or uses.
+// These are "dead code" interfaces that can be safely removed.
+//
+// The search scope is the whole loaded project: an interface declared in one
+// file is routinely used as a field or parameter type in a sibling file,
+// implemented in a third one, or consumed by another package. Packages that
+// did not type-check (--tolerant) fall back to the syntax of every file of
+// their package.
 type OrphanedInterfaceRule struct {
 	*rules.BaseRule
 }
@@ -25,7 +33,7 @@ func NewOrphanedInterfaceRule() *OrphanedInterfaceRule {
 		BaseRule: rules.NewBaseRule(
 			"orphaned-interface",
 			"patterns",
-			"Detects interfaces with no implementations or usages in the same file",
+			"Detects interfaces that nothing in the project implements or uses",
 			core.SeverityMedium,
 		),
 	}
@@ -35,52 +43,49 @@ func NewOrphanedInterfaceRule() *OrphanedInterfaceRule {
 type interfaceInfo struct {
 	name    string
 	pos     token.Position
+	spec    *ast.TypeSpec
 	methods []string // method names for implementation matching
 }
 
-// AnalyzeFile checks for orphaned interfaces
-func (r *OrphanedInterfaceRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if r.shouldSkipFile(ctx) {
-		return nil
+// AnalyzeFile is a no-op: whether an interface is used is a question about
+// its package and the packages importing it, answered in AnalyzeGoProject.
+func (r *OrphanedInterfaceRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
+	return nil
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *OrphanedInterfaceRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject reports interfaces without implementations or usages:
+// typed packages are checked against the whole project, untyped files
+// against the syntax of their own package.
+func (r *OrphanedInterfaceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	if ctx == nil {
+		return nil, errors.New(r.Name() + ": nil Go project context")
 	}
-
-	if !ctx.HasGoAST() {
-		return nil
+	typed, err := r.analyzeTyped(ctx)
+	if err != nil {
+		return nil, err
 	}
-
-	// Phase 1: Collect all interfaces
-	interfaces := r.collectInterfaces(ctx)
-	if len(interfaces) == 0 {
-		return nil
-	}
-
-	// Phase 2: Find implementations (types with matching methods)
-	implementedBy := r.findImplementations(ctx, interfaces)
-
-	// Phase 3: Find usages (params, returns, fields, type assertions)
-	usedIn := r.findUsages(ctx, interfaces)
-
-	// Phase 4: Report orphaned interfaces
-	var violations []*core.Violation
-	for _, iface := range interfaces {
-		hasImpl := len(implementedBy[iface.name]) > 0
-		hasUsage := usedIn[iface.name]
-
-		if !hasImpl && !hasUsage {
-			// Check for nolint or "Used by:" comment
-			if r.hasExemptComment(ctx, iface.pos.Line) {
-				continue
-			}
-
-			v := r.CreateViolation(ctx.RelPath, iface.pos.Line,
-				"Interface '"+iface.name+"' has no implementations or usages in this file - potentially orphaned")
-			v.Suggestion = "Remove unused interface or add implementations/usages. " +
-				"If interface is implemented in other files, consider adding a usage comment."
-			violations = append(violations, v)
+	violations := append(typed, r.analyzeUntyped(ctx)...)
+	sort.SliceStable(violations, func(i, j int) bool {
+		if violations[i].File != violations[j].File {
+			return violations[i].File < violations[j].File
 		}
-	}
+		return violations[i].Line < violations[j].Line
+	})
+	return violations, nil
+}
 
-	return violations
+// report builds the violation for an orphaned interface unless it is exempt.
+func (r *OrphanedInterfaceRule) report(ctx *core.FileContext, iface *interfaceInfo, scope string) *core.Violation {
+	if r.hasExemptComment(ctx, iface.pos.Line) {
+		return nil
+	}
+	v := r.CreateViolation(ctx.RelPath, iface.pos.Line,
+		"Interface '"+iface.name+"' has no implementations or usages in "+scope+" - potentially orphaned")
+	v.Suggestion = "Remove the unused interface, or add the implementation or usage it was declared for."
+	return v
 }
 
 // shouldSkipFile checks if file should be excluded
@@ -162,6 +167,7 @@ func (r *OrphanedInterfaceRule) collectInterfaces(ctx *core.FileContext) []*inte
 			iface := &interfaceInfo{
 				name:    name,
 				pos:     ctx.PositionFor(typeSpec),
+				spec:    typeSpec,
 				methods: r.extractMethodNames(ifaceType),
 			}
 			interfaces = append(interfaces, iface)
@@ -228,34 +234,36 @@ func (r *OrphanedInterfaceRule) extractMethodNames(ifaceType *ast.InterfaceType)
 	return methods
 }
 
-// findImplementations checks if any struct types implement the interfaces
-func (r *OrphanedInterfaceRule) findImplementations(ctx *core.FileContext, interfaces []*interfaceInfo) map[string][]string {
+// findImplementations checks if any types declared in files implement the interfaces
+func (r *OrphanedInterfaceRule) findImplementations(files []*ast.File, interfaces []*interfaceInfo) map[string][]string {
 	// Map: interface name -> list of implementing type names
 	implementations := make(map[string][]string)
 
 	// Collect all type declarations and their methods
 	typeMethods := make(map[string]map[string]bool) // type name -> method names
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		// Find method declarations
-		funcDecl, ok := n.(*ast.FuncDecl)
-		if !ok || funcDecl.Recv == nil {
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			// Find method declarations
+			funcDecl, ok := n.(*ast.FuncDecl)
+			if !ok || funcDecl.Recv == nil {
+				return true
+			}
+
+			// Get receiver type name
+			recvType := receiverTypeName(funcDecl.Recv)
+			if recvType == "" {
+				return true
+			}
+
+			if typeMethods[recvType] == nil {
+				typeMethods[recvType] = make(map[string]bool)
+			}
+			typeMethods[recvType][funcDecl.Name.Name] = true
+
 			return true
-		}
-
-		// Get receiver type name
-		recvType := receiverTypeName(funcDecl.Recv)
-		if recvType == "" {
-			return true
-		}
-
-		if typeMethods[recvType] == nil {
-			typeMethods[recvType] = make(map[string]bool)
-		}
-		typeMethods[recvType][funcDecl.Name.Name] = true
-
-		return true
-	})
+		})
+	}
 
 	// Check which types implement which interfaces
 	for _, iface := range interfaces {
@@ -284,66 +292,77 @@ func (r *OrphanedInterfaceRule) implementsInterface(ifaceMethods []string, typeM
 	return true
 }
 
-// findUsages checks if interfaces are used anywhere in the file
-func (r *OrphanedInterfaceRule) findUsages(ctx *core.FileContext, interfaces []*interfaceInfo) map[string]bool {
+// findUsages checks if interfaces are used anywhere in files. The declaration
+// of an interface is not searched: a method returning its own interface is
+// not a usage.
+func (r *OrphanedInterfaceRule) findUsages(files []*ast.File, interfaces []*interfaceInfo) map[string]bool {
 	usages := make(map[string]bool)
 	interfaceNames := make(map[string]bool)
+	ownSpecs := make(map[*ast.TypeSpec]bool)
 	for _, iface := range interfaces {
 		interfaceNames[iface.name] = true
+		ownSpecs[iface.spec] = true
 	}
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		switch node := n.(type) {
-		// Function parameters, return types and generic constraints
-		case *ast.FuncType:
-			r.checkFieldList(node.TypeParams, interfaceNames, usages)
-			r.checkFieldList(node.Params, interfaceNames, usages)
-			r.checkFieldList(node.Results, interfaceNames, usages)
-
-		// Struct fields
-		case *ast.StructType:
-			r.checkFieldList(node.Fields, interfaceNames, usages)
-
-		// Embedding into another interface: type B interface { A }.
-		// Named methods carry a FuncType and are ignored by checkExpr, so only
-		// embedded interface identifiers register as usages here.
-		case *ast.InterfaceType:
-			r.checkFieldList(node.Methods, interfaceNames, usages)
-
-		// Type assertions: x.(InterfaceName)
-		case *ast.TypeAssertExpr:
-			if ident, ok := node.Type.(*ast.Ident); ok {
-				if interfaceNames[ident.Name] {
-					usages[ident.Name] = true
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.TypeSpec:
+				if ownSpecs[node] {
+					return false
 				}
-			}
 
-		// Type switch cases
-		case *ast.TypeSwitchStmt:
-			r.checkTypeSwitchCases(node, interfaceNames, usages)
+			// Function parameters, return types and generic constraints
+			case *ast.FuncType:
+				r.checkFieldList(node.TypeParams, interfaceNames, usages)
+				r.checkFieldList(node.Params, interfaceNames, usages)
+				r.checkFieldList(node.Results, interfaceNames, usages)
 
-		// Variable declarations
-		case *ast.ValueSpec:
-			if node.Type != nil {
+			// Struct fields
+			case *ast.StructType:
+				r.checkFieldList(node.Fields, interfaceNames, usages)
+
+			// Embedding into another interface: type B interface { A }.
+			// Named methods carry a FuncType and are ignored by checkExpr, so only
+			// embedded interface identifiers register as usages here.
+			case *ast.InterfaceType:
+				r.checkFieldList(node.Methods, interfaceNames, usages)
+
+			// Type assertions: x.(InterfaceName)
+			case *ast.TypeAssertExpr:
 				if ident, ok := node.Type.(*ast.Ident); ok {
 					if interfaceNames[ident.Name] {
 						usages[ident.Name] = true
 					}
 				}
+
+			// Type switch cases
+			case *ast.TypeSwitchStmt:
+				r.checkTypeSwitchCases(node, interfaceNames, usages)
+
+			// Variable declarations
+			case *ast.ValueSpec:
+				if node.Type != nil {
+					if ident, ok := node.Type.(*ast.Ident); ok {
+						if interfaceNames[ident.Name] {
+							usages[ident.Name] = true
+						}
+					}
+				}
+
+			// Composite literals (map[InterfaceName]...)
+			case *ast.MapType:
+				r.checkExpr(node.Key, interfaceNames, usages)
+				r.checkExpr(node.Value, interfaceNames, usages)
+
+			// Array/slice types
+			case *ast.ArrayType:
+				r.checkExpr(node.Elt, interfaceNames, usages)
 			}
 
-		// Composite literals (map[InterfaceName]...)
-		case *ast.MapType:
-			r.checkExpr(node.Key, interfaceNames, usages)
-			r.checkExpr(node.Value, interfaceNames, usages)
-
-		// Array/slice types
-		case *ast.ArrayType:
-			r.checkExpr(node.Elt, interfaceNames, usages)
-		}
-
-		return true
-	})
+			return true
+		})
+	}
 
 	return usages
 }
