@@ -159,7 +159,7 @@ func (r *MagicNumberRule) shouldSkipValue(contexts *litContexts, lit *ast.BasicL
 		return true
 	}
 	return contexts.array[lit] || contexts.timeDuration[lit] ||
-		contexts.comparison[lit] || contexts.varDecl[lit]
+		contexts.comparison[lit] || contexts.varDecl[lit] || contexts.tableField[lit]
 }
 
 // litContexts records, per integer literal, the syntactic contexts in which the
@@ -170,6 +170,7 @@ type litContexts struct {
 	timeDuration map[*ast.BasicLit]bool // multiplied by time.Something
 	comparison   map[*ast.BasicLit]bool // operand of a comparison
 	varDecl      map[*ast.BasicLit]bool // value of a named var declaration
+	tableField   map[*ast.BasicLit]bool // keyed field value in a package-level var table
 }
 
 func collectLitContexts(file *ast.File) *litContexts {
@@ -178,7 +179,9 @@ func collectLitContexts(file *ast.File) *litContexts {
 		timeDuration: make(map[*ast.BasicLit]bool),
 		comparison:   make(map[*ast.BasicLit]bool),
 		varDecl:      make(map[*ast.BasicLit]bool),
+		tableField:   make(map[*ast.BasicLit]bool),
 	}
+	contexts.collectTableFields(file)
 
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -205,6 +208,30 @@ func collectLitContexts(file *ast.File) *litContexts {
 	})
 
 	return contexts
+}
+
+// collectTableFields marks numbers written as keyed struct fields inside
+// package-level var declarations: registry tables where the field key names the
+// value (ChainID: 8453). Positional values and keyed fields inside functions,
+// including function literals assigned to a package var, stay reportable.
+func (lc *litContexts) collectTableFields(file *ast.File) {
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		ast.Inspect(gen, func(n ast.Node) bool {
+			if _, isFunc := n.(*ast.FuncLit); isFunc {
+				return false // a function body is code, not table data
+			}
+			if kv, ok := n.(*ast.KeyValueExpr); ok {
+				if _, named := kv.Key.(*ast.Ident); named {
+					markLit(lc.tableField, kv.Value)
+				}
+			}
+			return true
+		})
+	}
 }
 
 func (lc *litContexts) collectBinaryExpr(expr *ast.BinaryExpr) {
