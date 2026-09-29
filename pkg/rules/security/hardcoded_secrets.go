@@ -105,6 +105,7 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 	patternLiterals := regexpPatternLiterals(ctx)
+	contentAt := stringContents(ctx)
 
 	for lineNum, line := range ctx.Lines {
 		// Skip comments
@@ -120,7 +121,7 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			if !pattern.highConfidence && r.isPlaceholder(line) {
 				continue
 			}
-			if hasLiteralSecret(pattern.regex, line, lineNum+1, patternLiterals) {
+			if hasLiteralSecret(pattern.regex, line, lineNum+1, patternLiterals, contentAt) {
 				if ctx.IsSuppressed(lineNum+1, r.Name()) {
 					break
 				}
@@ -139,10 +140,12 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 
 // hasLiteralSecret reports whether a line carries a literal value of the
 // secret pattern. A match inside a regexp pattern counts only when the pattern's
-// fixed text holds the secret by itself: the rest describes a shape.
-func hasLiteralSecret(secret *regexp.Regexp, line string, lineNum int, patternLiterals []regexpPatternLiteral) bool {
+// fixed text holds the secret by itself: the rest describes a shape. A match
+// whose "quoted value" is code between two literals holds no value at all.
+func hasLiteralSecret(secret *regexp.Regexp, line string, lineNum int, patternLiterals []regexpPatternLiteral, contentAt stringContentAt) bool {
 	for _, loc := range secret.FindAllStringIndex(line, -1) {
-		if isDynamicSecretMatch(line[loc[0]:loc[1]]) {
+		match := line[loc[0]:loc[1]]
+		if isDynamicSecretMatch(match) || quotedValueIsCode(match, loc[0], lineNum, contentAt) {
 			continue
 		}
 		if literal, ok := regexpPatternAt(patternLiterals, lineNum, loc[0]+1); ok && literal.exempts(secret) {

@@ -153,16 +153,19 @@ func example() {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := createBoolCompareContext(t, "service.go", tt.code)
-			violations := rule.AnalyzeFile(ctx)
+			untyped := rule.AnalyzeFile(ctx)
+			typed := runRuleOnFiles(t, rule, map[string]string{"svc/service.go": tt.code})
 
-			if tt.expectMatch {
-				require.NotEmpty(t, violations, "Expected violation for: %s", tt.name)
-				assert.Equal(t, "bool_compare", violations[0].Context["pattern"])
-				if tt.suggestion != "" {
-					assert.Equal(t, tt.suggestion, violations[0].Suggestion)
+			for mode, violations := range map[string][]*core.Violation{"untyped": untyped, "typed": typed} {
+				if tt.expectMatch {
+					require.NotEmpty(t, violations, "%s: expected violation for: %s", mode, tt.name)
+					assert.Equal(t, "bool_compare", violations[0].Context["pattern"])
+					if tt.suggestion != "" {
+						assert.Equal(t, tt.suggestion, violations[0].Suggestion)
+					}
+				} else {
+					assert.Empty(t, violations, "%s: expected no violations for: %s", mode, tt.name)
 				}
-			} else {
-				assert.Empty(t, violations, "Expected no violations for: %s", tt.name)
 			}
 		})
 	}
@@ -242,4 +245,68 @@ func check(enabled bool) bool {
 	if violations := NewBoolCompareRule().AnalyzeFile(ctx); len(violations) != 1 {
 		t.Fatalf("got %d findings, want 1", len(violations))
 	}
+}
+
+// An operand declared in a sibling file is judged by its declared type. An
+// undeclared name used to count as a bool, and the autofix turned
+// `mode == true` on an any into `mode`, which does not compile.
+func TestBoolCompareUsesDeclaredTypeFromSiblingFile(t *testing.T) {
+	violations := runRuleOnFiles(t, NewBoolCompareRule(), map[string]string{
+		"flags/state.go": `package flags
+
+var mode any = true
+
+var settings = map[string]any{"debug": true}
+`,
+		"flags/check.go": `package flags
+
+func on() bool {
+	return mode == true
+}
+
+func debug() bool {
+	return settings["debug"] == true
+}
+`,
+	})
+	require.Empty(t, violations)
+}
+
+// A bool declared in a sibling file, a bool field and a bool call result are
+// still redundant comparisons.
+func TestBoolCompareReportsBoolFromSiblingFile(t *testing.T) {
+	violations := runRuleOnFiles(t, NewBoolCompareRule(), map[string]string{
+		"flags/state.go": `package flags
+
+var verbose bool
+
+type Options struct{ Quiet bool }
+
+func enabled() bool { return verbose }
+`,
+		"flags/check.go": `package flags
+
+func loud(o Options) bool {
+	return verbose == true && o.Quiet == false && enabled() != false
+}
+`,
+	})
+	require.Len(t, violations, 3)
+}
+
+// Without type information an operand the file does not declare is unknown:
+// the rule stays silent rather than count it as a bool.
+func TestBoolCompareUntypedUndeclaredOperandIsSilent(t *testing.T) {
+	violations := runRuleOnBrokenFiles(t, NewBoolCompareRule(), map[string]string{
+		"flags/state.go": "package flags\n\nvar mode any = true\n",
+		"flags/check.go": `package flags
+
+func on() bool {
+	return mode == true
+}
+
+func broken() int { return "not an int" }
+`,
+	})
+	require.Empty(t, violations)
 }

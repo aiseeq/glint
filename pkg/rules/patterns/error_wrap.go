@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/types"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -29,8 +30,24 @@ func NewErrorWrapRule() *ErrorWrapRule {
 	}
 }
 
-// AnalyzeFile checks for unwrapped error returns
+// AnalyzeFile checks one file without type information: the fallback the
+// project analysis uses for files no type-checked package covers.
 func (r *ErrorWrapRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *ErrorWrapRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file, test files included; parameter types
+// are resolved wherever the project declares them.
+func (r *ErrorWrapRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze checks for unwrapped error returns. info is nil for a file without
+// type information.
+func (r *ErrorWrapRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.GoAST == nil {
 		return nil
 	}
@@ -74,7 +91,7 @@ func (r *ErrorWrapRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			// caller-supplied callback parameters are transparent pass-throughs:
 			// context is added inside the closure/callback, and wrapping outside
 			// would prefix every propagated error and obscure sentinel errors.
-			if isClosureRunnerCall(call) || isCallbackParamCall(call, fn) {
+			if isClosureRunnerCall(call) || callsCallbackParam(call, fn, info) {
 				continue
 			}
 
@@ -209,9 +226,12 @@ func isClosureRunnerCall(call *ast.CallExpr) bool {
 	return false
 }
 
-// isCallbackParamCall reports whether the call invokes a func-typed parameter
-// of the enclosing function (the callback owns its error context).
-func isCallbackParamCall(call *ast.CallExpr, fn *ast.FuncDecl) bool {
+// callsCallbackParam reports whether the call invokes a parameter of the
+// enclosing function (the callback owns its error context). A parameter that
+// is called is func-typed whatever its type is named or wherever that type is
+// declared, so a named func type needs no resolution. Type information only
+// tells a parameter from a local variable that shadows it.
+func callsCallbackParam(call *ast.CallExpr, fn *ast.FuncDecl, info *types.Info) bool {
 	if call == nil || fn.Type.Params == nil {
 		return false
 	}
@@ -219,10 +239,11 @@ func isCallbackParamCall(call *ast.CallExpr, fn *ast.FuncDecl) bool {
 	if !ok {
 		return false
 	}
+	if info != nil {
+		param, ok := info.Uses[ident].(*types.Var)
+		return ok && param.Pos() >= fn.Type.Params.Pos() && param.Pos() < fn.Type.Params.End()
+	}
 	for _, param := range fn.Type.Params.List {
-		if _, isFunc := param.Type.(*ast.FuncType); !isFunc {
-			continue
-		}
 		for _, name := range param.Names {
 			if name.Name == ident.Name {
 				return true

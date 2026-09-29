@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"go/types"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -46,19 +47,36 @@ func NewReimplementedStdlibRule() *ReimplementedStdlibRule {
 	}
 }
 
-// AnalyzeFile checks every function declared in the file.
+// AnalyzeFile checks one file without type information: the fallback the
+// project analysis uses for files no type-checked package covers.
 func (r *ReimplementedStdlibRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *ReimplementedStdlibRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; the collections and result types the
+// shapes depend on are resolved wherever the project declares them.
+func (r *ReimplementedStdlibRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze checks every function declared in the file. info is nil for a file
+// without type information.
+func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
 
+	operands := stdlibOperands{info: info, file: ctx.GoAST}
 	var violations []*core.Violation
 	for _, decl := range ctx.GoAST.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			continue
 		}
-		replacement, ok := stdlibEquivalent(fn)
+		replacement, ok := stdlibEquivalent(fn, operands)
 		if !ok {
 			continue
 		}
@@ -108,19 +126,131 @@ func wrapsOwnData(fn *ast.FuncDecl) bool {
 	return ownData
 }
 
+// stdlibOperands answers the type questions some shapes depend on. With type
+// information the checker answers, wherever the type is declared. Without it
+// only what the file itself declares is known, and an unknown type is not a
+// slice: a map or a string declared in another file looked like one.
+type stdlibOperands struct {
+	info *types.Info
+	file *ast.File
+}
+
+// rangesOverSlice reports whether target, ranged over in fn, is a slice or an
+// array - the collections slices.Contains can search.
+func (o stdlibOperands) rangesOverSlice(fn *ast.FuncDecl, target ast.Expr) bool {
+	if o.info != nil {
+		t := o.info.TypeOf(target)
+		if t == nil {
+			return false
+		}
+		switch u := t.Underlying().(type) {
+		case *types.Slice, *types.Array:
+			return true
+		case *types.Pointer:
+			_, isArray := u.Elem().Underlying().(*types.Array)
+			return isArray
+		}
+		return false
+	}
+
+	ident, ok := target.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	for _, fields := range []*ast.FieldList{fn.Recv, fn.Type.Params} {
+		if fields == nil {
+			continue
+		}
+		for _, field := range fields.List {
+			for _, name := range field.Names {
+				if name.Name == ident.Name {
+					return o.declaresSliceType(field.Type)
+				}
+			}
+		}
+	}
+	for _, decl := range o.file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range valueSpec.Names {
+				if name.Name != ident.Name {
+					continue
+				}
+				if valueSpec.Type != nil {
+					return o.declaresSliceType(valueSpec.Type)
+				}
+				if i < len(valueSpec.Values) {
+					lit, ok := valueSpec.Values[i].(*ast.CompositeLit)
+					return ok && o.declaresSliceType(lit.Type)
+				}
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// declaresSliceType reports whether a type expression is a slice or array
+// type, spelled out or named by a type this file declares.
+func (o stdlibOperands) declaresSliceType(expr ast.Expr) bool {
+	switch t := expr.(type) {
+	case *ast.ArrayType:
+		return true
+	case *ast.Ident:
+		for _, decl := range o.file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				typeSpec, ok := spec.(*ast.TypeSpec)
+				if ok && typeSpec.Name.Name == t.Name {
+					_, isArray := typeSpec.Type.(*ast.ArrayType)
+					return isArray
+				}
+			}
+		}
+	}
+	return false
+}
+
+// returnsFloat reports whether fn returns a single floating-point value.
+func (o stdlibOperands) returnsFloat(fn *ast.FuncDecl) bool {
+	if o.info == nil {
+		return returnsBasicType(fn, "float64") || returnsBasicType(fn, "float32")
+	}
+	obj, ok := o.info.Defs[fn.Name].(*types.Func)
+	if !ok {
+		return false
+	}
+	results := obj.Signature().Results()
+	if results.Len() != 1 {
+		return false
+	}
+	basic, ok := results.At(0).Type().Underlying().(*types.Basic)
+	return ok && basic.Info()&types.IsFloat != 0
+}
+
 // stdlibEquivalent names the standard-library call a function duplicates.
-func stdlibEquivalent(fn *ast.FuncDecl) (string, bool) {
+func stdlibEquivalent(fn *ast.FuncDecl, operands stdlibOperands) (string, bool) {
 	switch {
 	case formatsDigitByDigit(fn):
 		return "strconv.Itoa", true
 	case parsesDigitByDigit(fn):
 		return "strconv.Atoi", true
-	case searchesLinearly(fn):
+	case searchesLinearly(fn, operands):
 		return "slices.Contains", true
 	case negatesWhenNegative(fn):
 		// Go has no built-in abs: math.Abs covers floats, integer copies
 		// should collapse into one shared helper.
-		if returnsBasicType(fn, "float64") || returnsBasicType(fn, "float32") {
+		if operands.returnsFloat(fn) {
 			return "math.Abs", true
 		}
 		return "a single shared abs helper (Go has no integer abs)", true
@@ -227,7 +357,7 @@ func hasDecimalDigitLoop(body *ast.BlockStmt) bool {
 }
 
 // searchesLinearly recognizes ranging over a collection to answer "is it there".
-func searchesLinearly(fn *ast.FuncDecl) bool {
+func searchesLinearly(fn *ast.FuncDecl, operands stdlibOperands) bool {
 	if !returnsBasicType(fn, "bool") || len(fn.Body.List) == 0 {
 		return false
 	}
@@ -236,9 +366,10 @@ func searchesLinearly(fn *ast.FuncDecl) bool {
 	if !ok || rangeStmt.Value == nil {
 		return false
 	}
-	// Ranging over a map looks identical to ranging over a slice, but
-	// slices.Contains cannot search a map — the advice would be unactionable.
-	if rangesOverMapParam(fn, rangeStmt) {
+	// Ranging over a map or a string looks identical to ranging over a
+	// slice, but slices.Contains cannot search either — the advice would be
+	// unactionable.
+	if !operands.rangesOverSlice(fn, rangeStmt.X) {
 		return false
 	}
 	element, ok := rangeStmt.Value.(*ast.Ident)
@@ -263,24 +394,6 @@ func searchesLinearly(fn *ast.FuncDecl) bool {
 		return false
 	}
 	return returnsLiteral(ifStmt.Body.List[0], "true")
-}
-
-// rangesOverMapParam reports whether the range target is a function parameter
-// declared with an explicit map type in the signature.
-func rangesOverMapParam(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt) bool {
-	ident, ok := rangeStmt.X.(*ast.Ident)
-	if !ok || fn.Type.Params == nil {
-		return false
-	}
-	for _, param := range fn.Type.Params.List {
-		for _, name := range param.Names {
-			if name.Name == ident.Name {
-				_, isMap := param.Type.(*ast.MapType)
-				return isMap
-			}
-		}
-	}
-	return false
 }
 
 // negatesWhenNegative recognizes `if x < 0 { return -x }; return x`.

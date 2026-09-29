@@ -240,3 +240,69 @@ func errorWrapContext(t *testing.T, code string) *core.FileContext {
 	ctx.SetGoAST(fset, astFile)
 	return ctx
 }
+
+// A callback parameter whose func type is named in a sibling file is the same
+// pass-through as a func(...) literal type.
+func TestErrorWrapIgnoresNamedCallbackTypeFromSiblingFile(t *testing.T) {
+	violations := runRuleOnFiles(t, NewErrorWrapRule(), map[string]string{
+		"store/tx.go": `package store
+
+import "context"
+
+type TxFunc func(ctx context.Context) error
+`,
+		"store/run.go": `package store
+
+import "context"
+
+func RunInTx(ctx context.Context, fn TxFunc) error {
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+`,
+	})
+	assert.Empty(t, violations)
+}
+
+// A foreign call in a typed package is still reported.
+func TestErrorWrapReportsForeignCallInTypedPackage(t *testing.T) {
+	violations := runRuleOnFiles(t, NewErrorWrapRule(), map[string]string{
+		"store/load.go": `package store
+
+import "os"
+
+func Load(path string) error {
+	if _, err := os.ReadFile(path); err != nil {
+		return err
+	}
+	return nil
+}
+`,
+	})
+	assert.Len(t, violations, 1)
+}
+
+// Without type information the named func type of a sibling file is not
+// visible, and it does not need to be: a parameter the function calls is a
+// callback whatever its type is named.
+func TestErrorWrapUntypedNamedCallbackTypeIsPassThrough(t *testing.T) {
+	violations := runRuleOnBrokenFiles(t, NewErrorWrapRule(), map[string]string{
+		"store/tx.go": "package store\n\nimport \"context\"\n\ntype TxFunc func(ctx context.Context) error\n",
+		"store/run.go": `package store
+
+import "context"
+
+func RunInTx(ctx context.Context, fn TxFunc) error {
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func broken() int { return "not an int" }
+`,
+	})
+	assert.Empty(t, violations)
+}

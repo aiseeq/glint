@@ -10,9 +10,18 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
+// analyzeStdlibCopies runs the rule on source with and without type
+// information; a self-contained file must get the same verdict both ways.
 func analyzeStdlibCopies(t *testing.T, source string) []*core.Violation {
 	t.Helper()
-	return NewReimplementedStdlibRule().AnalyzeFile(rulestest.GoFile(t, "helpers.go", source))
+	untyped := NewReimplementedStdlibRule().AnalyzeFile(rulestest.GoFile(t, "helpers.go", source))
+	typed := runRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{"helpers/helpers.go": source})
+	require.Len(t, typed, len(untyped), "typed %v, untyped %v", typed, untyped)
+	for i := range typed {
+		require.Equal(t, untyped[i].Line, typed[i].Line)
+		require.Equal(t, untyped[i].Message, typed[i].Message)
+	}
+	return untyped
 }
 
 // Repro from glint itself: four copies of this helper lived in the tree, and
@@ -328,4 +337,126 @@ func join(parts []string) string {
 `)
 
 	assert.Empty(t, violations, "цифра здесь индекс в таблицу слов, а не символ: %v", violations)
+}
+
+// A named map type declared in a sibling file is still a map: ranging over it
+// is no linear search slices.Contains could replace. Neither is ranging over
+// a package-level map or over a string.
+func TestReimplementedStdlibResolvesRangeTargetFromSiblingFile(t *testing.T) {
+	violations := runRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"acl/types.go": `package acl
+
+type Roles map[string]string
+
+var allowed = map[string]string{"admin": "admin"}
+`,
+		"acl/check.go": `package acl
+
+func hasRole(roles Roles, role string) bool {
+	for _, r := range roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+func isAllowed(role string) bool {
+	for _, r := range allowed {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRune(s string, want rune) bool {
+	for _, c := range s {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+`,
+	})
+	require.Empty(t, violations)
+}
+
+// A named slice type and a package-level slice declared in a sibling file
+// are still linear searches.
+func TestReimplementedStdlibReportsSliceSearchAcrossFiles(t *testing.T) {
+	violations := runRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"acl/types.go": `package acl
+
+type Names []string
+
+var known = []string{"admin"}
+`,
+		"acl/check.go": `package acl
+
+func hasName(names Names, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+func isKnown(name string) bool {
+	for _, n := range known {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+`,
+	})
+	require.Len(t, violations, 2)
+	for _, v := range violations {
+		assert.Equal(t, "slices.Contains", v.Context["replacement"])
+	}
+}
+
+// Without type information a range target the file cannot resolve is
+// unknown: the rule stays silent rather than assume a slice.
+func TestReimplementedStdlibUntypedUnresolvedRangeTargetIsSilent(t *testing.T) {
+	violations := runRuleOnBrokenFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"acl/types.go": "package acl\n\ntype Roles map[string]string\n",
+		"acl/check.go": `package acl
+
+func hasRole(roles Roles, role string) bool {
+	for _, r := range roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+func broken() int { return "not an int" }
+`,
+	})
+	require.Empty(t, violations)
+}
+
+// A float named in a sibling file is still a float: its abs is math.Abs, not
+// the integer helper Go lacks.
+func TestReimplementedStdlibResolvesFloatResultFromSiblingFile(t *testing.T) {
+	violations := runRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"money/amount.go": "package money\n\ntype Amount float64\n",
+		"money/abs.go": `package money
+
+func absAmount(a Amount) Amount {
+	if a < 0 {
+		return -a
+	}
+	return a
+}
+`,
+	})
+	require.Len(t, violations, 1)
+	assert.Equal(t, "math.Abs", violations[0].Context["replacement"])
 }
