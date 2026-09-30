@@ -12,7 +12,9 @@ func init() {
 	rules.Register(NewMdListAfterLabelRule())
 }
 
-// MdListAfterLabelRule detects bold labels followed by lists without blank line
+// MdListAfterLabelRule detects bold labels followed by lists without blank
+// line. Files under .claude/ are skipped: they are read as plain text, never
+// rendered.
 type MdListAfterLabelRule struct {
 	*rules.BaseRule
 	// Pattern for bold label on its own line
@@ -21,7 +23,7 @@ type MdListAfterLabelRule struct {
 	plainLabelPattern *regexp.Regexp
 	// Pattern for list item
 	listPattern *regexp.Regexp
-	// Pattern for lines to skip (code blocks, frontmatter, headers, etc.)
+	// Pattern for lines to skip (frontmatter, headers, etc.)
 	skipPattern *regexp.Regexp
 }
 
@@ -31,7 +33,7 @@ func NewMdListAfterLabelRule() *MdListAfterLabelRule {
 		BaseRule: rules.NewBaseRule(
 			"md-list-after-label",
 			"documentation",
-			"Detects labels followed by lists without blank line (causes rendering issues)",
+			"Detects labels followed by lists without blank line (causes rendering issues; outside code blocks, .claude/ is skipped as it is never rendered)",
 			core.SeverityLow,
 		),
 		// Match bold label patterns on their own line:
@@ -45,8 +47,8 @@ func NewMdListAfterLabelRule() *MdListAfterLabelRule {
 		plainLabelPattern: regexp.MustCompile(`^.{10,}:\s*$`),
 		// Match list items (- or * or numbered)
 		listPattern: regexp.MustCompile(`^\s*[-*]\s+|^\s*\d+\.\s+`),
-		// Skip patterns: code blocks, frontmatter, headers, table rows, blockquotes
-		skipPattern: regexp.MustCompile("^```|^---|^#|^\\||^>"),
+		// Skip patterns: frontmatter, headers, table rows, blockquotes
+		skipPattern: regexp.MustCompile("^---|^#|^\\||^>"),
 	}
 }
 
@@ -55,26 +57,21 @@ func (r *MdListAfterLabelRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	if !strings.HasSuffix(ctx.Path, ".md") {
 		return nil
 	}
-	if strings.HasPrefix(ctx.RelPath, "docs/") || strings.HasPrefix(ctx.RelPath, ".claude/") {
+	if isUnrenderedMarkdown(ctx.RelPath) {
 		return nil
 	}
 
 	var violations []*core.Violation
 	lines := ctx.Lines
-	inCodeBlock := false
+	scanned := scanMarkdown(lines)
 
 	for i := 0; i < len(lines)-1; i++ {
+		// Lines of code blocks are literal examples, not prose
+		if scanned[i].code || scanned[i+1].code {
+			continue
+		}
 		line := strings.TrimSpace(lines[i])
 		nextLine := strings.TrimSpace(lines[i+1])
-
-		// Track code blocks
-		if strings.HasPrefix(line, "```") {
-			inCodeBlock = !inCodeBlock
-			continue
-		}
-		if inCodeBlock {
-			continue
-		}
 
 		// Skip certain line types
 		if r.skipPattern.MatchString(line) {

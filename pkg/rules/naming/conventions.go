@@ -13,7 +13,14 @@ func init() {
 	rules.Register(NewConventionsRule())
 }
 
-// ConventionsRule detects Go naming convention violations
+// ConventionsRule detects Go naming convention violations in the names a
+// package declares at top level - its API as other packages read it:
+// stuttering (pkg.PkgThing; not in package main, which nobody imports),
+// underscores in exported names, and ALL_CAPS type names that are not made of
+// initialisms (JSONRPC is JSON + RPC). Names local to a function are never
+// exported and are not checked: the underscore convention of Effective Go
+// covers them too, but this rule keeps to the package API, as it does for
+// unexported package-level names.
 type ConventionsRule struct {
 	*rules.BaseRule
 	// Known acronyms that are correctly written in ALL_CAPS
@@ -26,7 +33,7 @@ func NewConventionsRule() *ConventionsRule {
 		BaseRule: rules.NewBaseRule(
 			"naming-convention",
 			"naming",
-			"Detects Go naming convention violations (stuttering, underscore, ALL_CAPS)",
+			"Detects Go naming convention violations in top-level declarations: stuttering with the package name (except package main), underscores in exported names, ALL_CAPS type names not made of initialisms",
 			core.SeverityLow,
 		),
 		knownAcronyms: map[string]bool{
@@ -40,13 +47,13 @@ func NewConventionsRule() *ConventionsRule {
 			"OS": true, "IO": true, "UI": true, "CLI": true, "GUI": true,
 			"OK": true, "ACL": true, "ASCII": true, "UTF8": true,
 			// Auth/crypto
-			"JWT": true, "JWK": true, "JWKS": true, "JWE": true, "RFI": true, "RFIURL": true,
+			"JWT": true, "JWK": true, "JWKS": true, "JWE": true, "RFI": true,
 			"RSA": true, "AES": true, "SHA": true, "MD5": true,
 			"HMAC": true, "ECDSA": true, "PKCS": true,
 			"MFA": true, "OTP": true, "TOTP": true, "HOTP": true,
 			"CSRF": true, "XSS": true, "CORS": true,
 			// Database
-			"JSONB": true, "BSON": true, "BLOB": true, "CLOB": true,
+			"DB": true, "JSONB": true, "BSON": true, "BLOB": true, "CLOB": true,
 			"DDL": true, "DML": true, "CRUD": true,
 			// Blockchain
 			"ETH": true, "BTC": true, "NFT": true, "ERC": true,
@@ -77,20 +84,23 @@ func (r *ConventionsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 	packageName := ctx.GoAST.Name.Name
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.TypeSpec:
-			violations = append(violations, r.checkTypeName(ctx, node, packageName)...)
-
+	// Only top-level declarations: a name declared inside a function is local
+	// and never part of the package API.
+	for _, decl := range ctx.GoAST.Decls {
+		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			violations = append(violations, r.checkFuncName(ctx, node, packageName)...)
-
-		case *ast.ValueSpec:
-			violations = append(violations, r.checkValueNames(ctx, node)...)
+			violations = append(violations, r.checkFuncName(ctx, d, packageName)...)
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				switch s := spec.(type) {
+				case *ast.TypeSpec:
+					violations = append(violations, r.checkTypeName(ctx, s, packageName)...)
+				case *ast.ValueSpec:
+					violations = append(violations, r.checkValueNames(ctx, s)...)
+				}
+			}
 		}
-
-		return true
-	})
+	}
 
 	return violations
 }
@@ -114,7 +124,7 @@ func (r *ConventionsRule) checkTypeName(ctx *core.FileContext, spec *ast.TypeSpe
 
 	// Check for ALL_CAPS (should be PascalCase)
 	// Skip known acronyms which are correctly ALL_CAPS
-	if r.isAllCaps(name) && len(name) > 2 && !r.knownAcronyms[name] {
+	if r.isAllCaps(name) && len(name) > 2 && !r.isInitialismCompound(name) {
 		pos := ctx.PositionFor(spec.Name)
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
 			"Type name uses ALL_CAPS instead of PascalCase: "+name)
@@ -207,8 +217,13 @@ func (r *ConventionsRule) checkValueNames(ctx *core.FileContext, spec *ast.Value
 	return violations
 }
 
-// stutters checks if name starts with package name (stuttering)
+// stutters checks if name starts with package name (stuttering). Package
+// main is never imported, so its names are never read as main.Name.
 func (r *ConventionsRule) stutters(name, pkgName string) bool {
+	if pkgName == "main" {
+		return false
+	}
+
 	// Convert to lowercase for comparison
 	nameLower := strings.ToLower(name)
 	pkgLower := strings.ToLower(pkgName)
@@ -226,6 +241,20 @@ func (r *ConventionsRule) stutters(name, pkgName string) bool {
 	// The character after package name should be uppercase (new word)
 	nextChar := rune(name[len(pkgName)])
 	return unicode.IsUpper(nextChar)
+}
+
+// isInitialismCompound reports whether the name is a sequence of known
+// initialisms - JSON, JSONRPC, HTTPAPI - which Go writes in capitals.
+func (r *ConventionsRule) isInitialismCompound(name string) bool {
+	// composed[i] reports whether name[:i] splits into known initialisms.
+	composed := make([]bool, len(name)+1)
+	composed[0] = true
+	for end := 1; end <= len(name); end++ {
+		for start := 0; start < end && !composed[end]; start++ {
+			composed[end] = composed[start] && r.knownAcronyms[name[start:end]]
+		}
+	}
+	return composed[len(name)]
 }
 
 // isAllCaps checks if name is ALL_CAPS

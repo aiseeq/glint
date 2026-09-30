@@ -2,6 +2,7 @@ package doccheck
 
 import (
 	"go/ast"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,6 +22,9 @@ type DocLinksRule struct {
 	urlPattern     *regexp.Regexp
 	fileRefPattern *regexp.Regexp
 	brokenURLHints []string
+	// placeholderWord finds a placeholder marker as a whole word: "todomvc"
+	// holds no TODO.
+	placeholderWord *regexp.Regexp
 }
 
 // NewDocLinksRule creates the rule
@@ -40,15 +44,12 @@ func NewDocLinksRule() *DocLinksRule {
 		// URL patterns that often indicate broken links
 		// Note: localhost/127.0.0.1 are valid for local development documentation
 		brokenURLHints: []string{
-			"example.com",
-			"TODO",
-			"FIXME",
-			"XXX",
 			"your-",
 			"<your",
 			"${",
 			"{{",
 		},
+		placeholderWord: regexp.MustCompile(`(?i)\b(?:TODO|FIXME|XXX)\b`),
 	}
 }
 
@@ -87,10 +88,10 @@ func (r *DocLinksRule) checkComment(ctx *core.FileContext, comment *ast.Comment)
 	text := comment.Text
 	pos := ctx.PositionFor(comment)
 
-	// Check URLs
-	urls := r.urlPattern.FindAllString(text, -1)
-	for _, url := range urls {
-		if v := r.checkURL(ctx, pos.Line, url); v != nil {
+	// Check URLs. Sentence punctuation after a URL ends the sentence, not
+	// the URL.
+	for _, found := range r.urlPattern.FindAllString(text, -1) {
+		if v := r.checkURL(ctx, pos.Line, strings.TrimRight(found, ".,;:!?")); v != nil {
 			violations = append(violations, v)
 		}
 	}
@@ -111,38 +112,84 @@ func (r *DocLinksRule) checkComment(ctx *core.FileContext, comment *ast.Comment)
 	return violations
 }
 
-// checkURL checks if a URL looks suspicious or broken
-func (r *DocLinksRule) checkURL(ctx *core.FileContext, line int, url string) *core.Violation {
-	// Check for placeholder/broken URL hints
-	urlLower := strings.ToLower(url)
-	for _, hint := range r.brokenURLHints {
-		if strings.Contains(urlLower, strings.ToLower(hint)) {
-			v := r.CreateViolation(ctx.RelPath, line,
-				"Documentation contains placeholder or suspicious URL: "+truncateURL(url))
-			v.WithCode(ctx.GetLine(line))
-			v.WithSuggestion("Replace placeholder URL with actual documentation link")
-			v.WithContext("url", url)
-			v.WithContext("hint", hint)
-			return v
-		}
+// checkURL checks if a URL looks suspicious or broken. It judges the URL by
+// its parts: the host for example.com, whole words for TODO-like markers, whole
+// path segments for "..", and empty segments for "//" - but not the "//" of a
+// URL embedded in the path (an archive link), nor "..." inside a segment (a
+// compare range).
+func (r *DocLinksRule) checkURL(ctx *core.FileContext, line int, rawURL string) *core.Violation {
+	if hint, ok := r.placeholderHint(rawURL); ok {
+		v := r.CreateViolation(ctx.RelPath, line,
+			"Documentation contains placeholder or suspicious URL: "+truncateURL(rawURL))
+		v.WithCode(ctx.GetLine(line))
+		v.WithSuggestion("Replace placeholder URL with actual documentation link")
+		v.WithContext("url", rawURL)
+		v.WithContext("hint", hint)
+		return v
 	}
 
-	// Check for obviously malformed URLs: ".." or "//" after the scheme
-	// (the scheme's own "//" is not malformed)
-	rest := url
-	if _, after, found := strings.Cut(rest, "://"); found {
-		rest = after
-	}
-	if strings.Contains(rest, "..") || strings.Contains(rest, "//") {
+	if isMalformedURLPath(rawURL) {
 		v := r.CreateViolation(ctx.RelPath, line,
-			"Documentation contains malformed URL: "+truncateURL(url))
+			"Documentation contains malformed URL: "+truncateURL(rawURL))
 		v.WithCode(ctx.GetLine(line))
 		v.WithSuggestion("Fix the URL format")
-		v.WithContext("url", url)
+		v.WithContext("url", rawURL)
 		return v
 	}
 
 	return nil
+}
+
+// placeholderHint returns the placeholder marker a URL carries: an
+// example.com host, a TODO/FIXME/XXX word, or a template fragment.
+func (r *DocLinksRule) placeholderHint(rawURL string) (string, bool) {
+	if parsed, err := url.Parse(rawURL); err == nil {
+		host := strings.ToLower(parsed.Hostname())
+		if host == "example.com" || strings.HasSuffix(host, ".example.com") {
+			return "example.com", true
+		}
+	}
+	if word := r.placeholderWord.FindString(rawURL); word != "" {
+		return word, true
+	}
+	lower := strings.ToLower(rawURL)
+	for _, hint := range r.brokenURLHints {
+		if strings.Contains(lower, strings.ToLower(hint)) {
+			return hint, true
+		}
+	}
+	return "", false
+}
+
+// isMalformedURLPath reports a host with an empty label ("docs..example.org"),
+// a path with a ".." segment or an empty segment ("a//b"). A "//" right
+// after a scheme's colon starts an embedded URL.
+func isMalformedURLPath(rawURL string) bool {
+	_, rest, found := strings.Cut(rawURL, "://")
+	if !found {
+		return false
+	}
+	rest, _, _ = strings.Cut(rest, "?")
+	rest, _, _ = strings.Cut(rest, "#")
+	segments := strings.Split(rest, "/")
+	if strings.Contains(segments[0], "..") {
+		return true
+	}
+	// segments[0] is the host; a trailing "/" leaves one empty last segment.
+	for i := 1; i < len(segments); i++ {
+		segment := segments[i]
+		if segment == ".." {
+			return true
+		}
+		if segment != "" || i == len(segments)-1 {
+			continue
+		}
+		if strings.HasSuffix(segments[i-1], ":") {
+			continue // "https:" + "" + host: an embedded URL
+		}
+		return true
+	}
+	return false
 }
 
 // checkFileRef checks if a file reference exists
@@ -203,9 +250,9 @@ func fileExists(path string) bool {
 }
 
 // truncateURL truncates long URLs for display
-func truncateURL(url string) string {
-	if len(url) > 60 {
-		return url[:57] + "..."
+func truncateURL(rawURL string) string {
+	if len(rawURL) > 60 {
+		return rawURL[:57] + "..."
 	}
-	return url
+	return rawURL
 }

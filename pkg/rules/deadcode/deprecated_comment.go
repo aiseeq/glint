@@ -2,7 +2,6 @@ package deadcode
 
 import (
 	"go/ast"
-	"go/token"
 	"regexp"
 	"strings"
 
@@ -73,12 +72,6 @@ func (r *DeprecatedCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 		return nil
 	}
 
-	// Skip test utility files
-	pathLower := strings.ToLower(ctx.RelPath)
-	if strings.Contains(pathLower, "/test") || strings.Contains(pathLower, "test_") {
-		return nil
-	}
-
 	var violations []*core.Violation
 
 	// Check each function/method declaration
@@ -89,10 +82,7 @@ func (r *DeprecatedCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 				violations = append(violations, v)
 			}
 		case *ast.GenDecl:
-			// Check type declarations with deprecated comments
-			if v := r.checkGenDecl(ctx, decl); v != nil {
-				violations = append(violations, v)
-			}
+			violations = append(violations, r.checkGenDecl(ctx, decl)...)
 		}
 		return true
 	})
@@ -124,36 +114,56 @@ func (r *DeprecatedCommentRule) checkFuncDecl(ctx *core.FileContext, fn *ast.Fun
 	return v
 }
 
-// checkGenDecl checks if a type/const/var declaration has deprecated comments
-func (r *DeprecatedCommentRule) checkGenDecl(ctx *core.FileContext, decl *ast.GenDecl) *core.Violation {
-	if decl.Doc == nil {
+// checkGenDecl checks a type/const/var declaration. A marker above the
+// declaration covers it as a whole and is reported at its first name; inside
+// a grouped declaration each spec carries its own doc, and a marker there is
+// reported at that spec.
+func (r *DeprecatedCommentRule) checkGenDecl(ctx *core.FileContext, decl *ast.GenDecl) []*core.Violation {
+	if len(decl.Specs) == 0 {
+		return nil
+	}
+	if comment := r.deprecationMarker(decl.Doc); comment != nil {
+		if v := r.specViolation(ctx, decl.Specs[0], comment); v != nil {
+			return []*core.Violation{v}
+		}
 		return nil
 	}
 
-	comment := r.deprecationMarker(decl.Doc)
-	if comment == nil || len(decl.Specs) == 0 {
-		return nil
-	}
-
-	var name string
-	var pos token.Pos
-	switch spec := decl.Specs[0].(type) {
-	case *ast.TypeSpec:
-		name = spec.Name.Name
-		pos = spec.Name.Pos()
-	case *ast.ValueSpec:
-		if len(spec.Names) > 0 {
-			name = spec.Names[0].Name
-			pos = spec.Names[0].Pos()
+	var violations []*core.Violation
+	for _, spec := range decl.Specs {
+		var doc *ast.CommentGroup
+		switch s := spec.(type) {
+		case *ast.TypeSpec:
+			doc = s.Doc
+		case *ast.ValueSpec:
+			doc = s.Doc
+		}
+		if marker := r.deprecationMarker(doc); marker != nil {
+			if v := r.specViolation(ctx, spec, marker); v != nil {
+				violations = append(violations, v)
+			}
 		}
 	}
+	return violations
+}
 
-	if name == "" {
+// specViolation reports a deprecated spec at its first name.
+func (r *DeprecatedCommentRule) specViolation(ctx *core.FileContext, spec ast.Spec, comment *ast.Comment) *core.Violation {
+	var name *ast.Ident
+	switch s := spec.(type) {
+	case *ast.TypeSpec:
+		name = s.Name
+	case *ast.ValueSpec:
+		if len(s.Names) > 0 {
+			name = s.Names[0]
+		}
+	}
+	if name == nil {
 		return nil
 	}
 
-	v := r.CreateViolation(ctx.RelPath, ctx.LineForPos(pos),
-		"Type/const '"+name+"' is marked as deprecated - consider removal")
+	v := r.CreateViolation(ctx.RelPath, ctx.LineFor(name),
+		"Type/const '"+name.Name+"' is marked as deprecated - consider removal")
 	v.WithCode(strings.TrimSpace(comment.Text))
 	v.WithSuggestion("Remove deprecated declaration and update all usages")
 	return v

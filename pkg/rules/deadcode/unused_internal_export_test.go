@@ -132,3 +132,55 @@ func init() { _ = Use() }
 	require.NoError(t, err)
 	assert.Empty(t, violations)
 }
+
+// A type that only its own methods mention, and a function that only calls
+// itself, are as dead as a constant nobody names: the self-reference is part
+// of the declaration, not a use.
+func TestUnusedInternalExportRule_IgnoresSelfReferences(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"go.mod": "module example.com/projecta\n\ngo 1.24\n",
+		"internal/k/k.go": `package k
+
+type Widget struct{ n int }
+
+func (w *Widget) Size() int { return w.n }
+
+func Countdown(n int) int {
+	if n == 0 {
+		return 0
+	}
+	return Countdown(n - 1)
+}
+
+const Lonely = 1
+`,
+	})
+
+	violations, err := NewUnusedInternalExportRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+
+	var symbols []string
+	for _, v := range violations {
+		symbols = append(symbols, v.Context["symbol"].(string))
+	}
+	assert.ElementsMatch(t, []string{"Widget", "Countdown", "Lonely"}, symbols)
+}
+
+// Several constants declared on one line share file and line; their findings
+// must still come out in the same order on every run.
+func TestUnusedInternalExportRule_StableOrderOnOneLine(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"go.mod":          "module example.com/projecta\n\ngo 1.24\n",
+		"internal/k/k.go": "package k\n\nconst A, B, C, D, E = 1, 2, 3, 4, 5\n",
+	})
+
+	for range 12 {
+		violations, err := NewUnusedInternalExportRule().AnalyzeGoProject(project)
+		require.NoError(t, err)
+		var symbols []string
+		for _, v := range violations {
+			symbols = append(symbols, v.Context["symbol"].(string))
+		}
+		require.Equal(t, []string{"A", "B", "C", "D", "E"}, symbols)
+	}
+}

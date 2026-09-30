@@ -204,3 +204,90 @@ func (h *Holder) Name() string { return h.inner.Name }
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "inner")
 }
+
+// A decoder fills exported fields by name, without tags: a response struct
+// handed to json.Unmarshal is assigned even though no statement assigns it.
+func TestNeverAssignedFieldAcceptsFieldsOfDecodedType(t *testing.T) {
+	violations := analyzeNeverAssigned(t, map[string]string{
+		"payprov.go": `package payprov
+
+import "encoding/json"
+
+type Page struct{ Token string }
+
+type Response struct {
+	Meta map[string]string
+	Next *Page
+}
+
+func Parse(data []byte) (string, error) {
+	var r Response
+	if err := json.Unmarshal(data, &r); err != nil {
+		return "", err
+	}
+	r.Meta["seen"] = "yes"
+	return r.Next.Token, nil
+}
+`,
+	})
+
+	assert.Empty(t, violations)
+}
+
+// Ranging over a nil slice runs zero times and reading a nil map yields the
+// zero value: neither panics, so a never-assigned slice or a map that is only
+// read is not a crash waiting to happen.
+func TestNeverAssignedFieldIgnoresNilSliceAndMapReads(t *testing.T) {
+	violations := analyzeNeverAssigned(t, map[string]string{
+		"registry.go": `package registry
+
+import "errors"
+
+type registry struct {
+	hooks []func()
+	names map[string]int
+}
+
+func newRegistry() *registry { return &registry{} }
+
+func Run() (int, error) {
+	r := newRegistry()
+	for _, h := range r.hooks {
+		h()
+	}
+	n, ok := r.names["x"]
+	if !ok {
+		return 0, errors.New("none")
+	}
+	return n + len(r.names), nil
+}
+`,
+	})
+
+	assert.Empty(t, violations)
+}
+
+// Storing into a nil map panics: a map field nothing assigns but something
+// writes into is the crash this rule exists for.
+func TestNeverAssignedFieldReportsWriteIntoNilMap(t *testing.T) {
+	violations := analyzeNeverAssigned(t, map[string]string{
+		"registry.go": `package registry
+
+type registry struct {
+	names map[string]int
+	hits  map[string]int
+}
+
+func newRegistry() *registry { return &registry{} }
+
+func (r *registry) Add(name string) {
+	r.names[name] = len(r.names)
+	r.hits[name]++
+}
+`,
+	})
+
+	require.Len(t, violations, 2)
+	assert.Contains(t, violations[0].Message, "registry.names")
+	assert.Contains(t, violations[1].Message, "registry.hits")
+}

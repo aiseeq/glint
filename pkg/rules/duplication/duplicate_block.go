@@ -1,6 +1,8 @@
 package duplication
 
 import (
+	"fmt"
+	"sort"
 	"strconv"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -32,7 +34,7 @@ func NewDuplicateBlockRule() *DuplicateBlockRule {
 		BaseRule: rules.NewBaseRule(
 			"duplicate-block",
 			"duplication",
-			"Detects duplicate code blocks within the same file (copy-paste detection)",
+			"Detects duplicate code blocks within the same file (copy-paste detection), one finding per repeated region",
 			core.SeverityMedium,
 		),
 		minBlockSize: defaultBlockSize,
@@ -44,7 +46,11 @@ func (r *DuplicateBlockRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
-	r.minBlockSize = r.GetIntSetting("min_block_size", defaultBlockSize)
+	size, err := blockSizeSetting(settings, defaultBlockSize, minNonTrivialInBlock)
+	if err != nil {
+		return fmt.Errorf("%s: %w", r.Name(), err)
+	}
+	r.minBlockSize = size
 	return nil
 }
 
@@ -69,12 +75,9 @@ func (r *DuplicateBlockRule) findDuplicateWindows(ctx *core.FileContext, normali
 	starts := make(map[windowHash][]int)
 	var hashOrder []windowHash
 
+	substance := newWindowSubstance(normalized, isTrivialLine)
 	for i := 0; i <= len(normalized)-r.minBlockSize; i++ {
-		if isTrivialLine(normalized[i]) {
-			continue
-		}
-		window := normalized[i : i+r.minBlockSize]
-		if isWindowTrivial(window, minNonTrivialInBlock, isTrivialLine) {
+		if substance.trivial[i] || substance.isTrivial(i, r.minBlockSize, minNonTrivialInBlock) {
 			continue
 		}
 
@@ -85,12 +88,9 @@ func (r *DuplicateBlockRule) findDuplicateWindows(ctx *core.FileContext, normali
 		starts[hash] = append(starts[hash], i)
 	}
 
-	var violations []*core.Violation
+	var matches []windowMatch
 	for _, hash := range hashOrder {
 		group := starts[hash]
-		if len(group) < 2 {
-			continue
-		}
 		first := group[0]
 		window := normalized[first : first+r.minBlockSize]
 		for _, repeat := range group[1:] {
@@ -101,19 +101,24 @@ func (r *DuplicateBlockRule) findDuplicateWindows(ctx *core.FileContext, normali
 			if !windowsMatch(window, normalized[repeat:repeat+r.minBlockSize]) {
 				continue
 			}
-
-			v := r.CreateViolation(ctx.RelPath, repeat+1,
-				"Duplicate block ("+strconv.Itoa(r.minBlockSize)+" lines) - same as lines "+
-					strconv.Itoa(first+1)+"-"+strconv.Itoa(first+r.minBlockSize))
-			v.WithCode(ctx.GetLine(repeat + 1))
-			v.WithSuggestion("Extract duplicate code into a shared function")
-			v.WithContext("first_start", first+1)
-			v.WithContext("first_end", first+r.minBlockSize)
-			v.WithContext("block_size", r.minBlockSize)
-
-			violations = append(violations, v)
+			matches = append(matches, windowMatch{start: repeat, origFile: ctx.RelPath, origStart: first})
 			break
 		}
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].start < matches[j].start })
+
+	var violations []*core.Violation
+	for _, region := range mergeWindowMatches(matches, r.minBlockSize) {
+		v := r.CreateViolation(ctx.RelPath, region.start+1,
+			"Duplicate block ("+strconv.Itoa(region.end-region.start+1)+" lines) - same as lines "+
+				strconv.Itoa(region.origStart+1)+"-"+strconv.Itoa(region.origEnd+1))
+		v.WithCode(ctx.GetLine(region.start + 1))
+		v.WithSuggestion("Extract duplicate code into a shared function")
+		v.WithContext("first_start", region.origStart+1)
+		v.WithContext("first_end", region.origEnd+1)
+		v.WithContext("block_size", r.minBlockSize)
+
+		violations = append(violations, v)
 	}
 
 	return violations

@@ -12,7 +12,9 @@ func init() {
 	rules.Register(NewMdLineBreakRule())
 }
 
-// MdLineBreakRule detects consecutive bold-label lines that need hard line breaks
+// MdLineBreakRule detects consecutive bold-label lines that need hard line
+// breaks. Files under .claude/ are skipped: they are instructions read by a
+// model as plain text, never rendered.
 type MdLineBreakRule struct {
 	*rules.BaseRule
 	// Pattern for lines like **Label:** value
@@ -25,7 +27,7 @@ func NewMdLineBreakRule() *MdLineBreakRule {
 		BaseRule: rules.NewBaseRule(
 			"md-line-break",
 			"documentation",
-			"Detects consecutive bold-label lines in Markdown that will render as single line",
+			"Detects consecutive bold-label lines in Markdown that will render as single line (outside code blocks; .claude/ is skipped as it is never rendered)",
 			core.SeverityLow,
 		),
 		// Match lines starting with **Label:** or **Label**: (colon inside or after bold)
@@ -40,28 +42,20 @@ func (r *MdLineBreakRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !strings.HasSuffix(ctx.Path, ".md") {
 		return nil
 	}
-	if strings.HasPrefix(ctx.RelPath, "docs/") || strings.HasPrefix(ctx.RelPath, ".claude/") {
+	if isUnrenderedMarkdown(ctx.RelPath) {
 		return nil
 	}
 
 	var violations []*core.Violation
-	lines := ctx.Lines
+	scanned := scanMarkdown(ctx.Lines)
 
 	// Track groups of consecutive bold-label lines
 	groupStart := -1
 	groupEnd := -1
-	inFence := false
 
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-
-		// Lines inside fenced code blocks are literal examples, not prose
-		if isFenceDelimiter(line) {
-			inFence = !inFence
-		}
-
-		// Check if line matches bold-label pattern
-		if !inFence && r.boldLabelPattern.MatchString(line) {
+	for i := 0; i < len(scanned); i++ {
+		// Lines of code blocks are literal examples, not prose
+		if !scanned[i].code && r.boldLabelPattern.MatchString(scanned[i].prose) {
 			if groupStart == -1 {
 				groupStart = i
 			}
@@ -111,4 +105,11 @@ func (r *MdLineBreakRule) reportGroup(ctx *core.FileContext, groupStart, groupEn
 	v.WithContext("group_end", groupEnd+1)
 	v.WithContext("lines_count", groupEnd-groupStart+1)
 	return v
+}
+
+// isUnrenderedMarkdown reports whether a Markdown file is read as plain text
+// rather than rendered: instructions for a model under .claude/. Rendering
+// rules have nothing to say about such a file.
+func isUnrenderedMarkdown(relPath string) bool {
+	return strings.HasPrefix(relPath, ".claude/")
 }

@@ -6,7 +6,6 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
-	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -39,21 +38,23 @@ func init() {
 // assignment is deleted while the field and its readers survive — the code still
 // compiles and panics the first time the path runs.
 //
-// Only fields whose type can be nil are considered — interface, map, channel,
-// function, and pointer. A missing int or string is a wrong value; a missing
-// interface is a crash. Fields of basic types are also routinely filled by
-// reflection (json.Unmarshal, sql.Scan), where the absence of an explicit
-// assignment is normal and this rule would only produce noise.
+// Only fields whose nil value can crash are considered — interface, map,
+// channel, function, and pointer. A missing int or string is a wrong value; a
+// missing interface is a crash. A slice is left out: ranging over a nil slice,
+// taking its length and appending to it all work.
 //
-// A pointer field counts as read only where the read dereferences it
-// (p.field.X, *p.field): an always-nil pointer that every caller nil-checks —
-// the shape of an optional filter — misleads but does not crash, and belongs to
-// unused-field's territory rather than here.
+// A pointer field counts only where the read dereferences it (p.field.X,
+// *p.field): an always-nil pointer that every caller nil-checks — the shape of
+// an optional filter — misleads but does not crash, and belongs to
+// unused-field's territory rather than here. A map field counts only where
+// something stores into it (p.field[k] = v): reading a nil map yields the zero
+// value, storing into one panics.
 //
-// Not flagged: fields written anywhere in the analyzed packages, including
+// Not flagged: fields written anywhere in the loaded packages, including
 // positional composite literals (T{a, b, c}), which name no field and are
-// therefore treated as writing all of them; and tagged fields, which reflection
-// fills without any assignment appearing in the source.
+// therefore treated as writing all of them; tagged fields, and the exported
+// fields of a type handed to a decoder (json.Unmarshal and the like), which
+// reflection fills without any assignment appearing in the source.
 type NeverAssignedFieldRule struct {
 	*rules.BaseRule
 }
@@ -64,7 +65,7 @@ func NewNeverAssignedFieldRule() *NeverAssignedFieldRule {
 		BaseRule: rules.NewBaseRule(
 			"never-assigned-field",
 			"deadcode",
-			"Detects nil-able struct fields that are read but never assigned — a guaranteed nil dereference",
+			"Detects nil-able struct fields that are used but never assigned — a guaranteed nil dereference",
 			core.SeverityHigh,
 		),
 	}
@@ -78,83 +79,78 @@ func (r *NeverAssignedFieldRule) AnalyzeFile(_ *core.FileContext) []*core.Violat
 // RequiresSSA reports that typed syntax is enough for this rule.
 func (r *NeverAssignedFieldRule) RequiresSSA() bool { return false }
 
+// nilUse says which access to a nil field crashes.
+type nilUse int
+
+const (
+	nilUseRead  nilUse = iota // interface, func, chan: any use
+	nilUseDeref               // pointer: going through it
+	nilUseStore               // map: storing into it
+)
+
 // nilableField is a field of an analyzed struct whose zero value is nil.
 type nilableField struct {
-	pos       token.Pos
+	obj       *types.Var
+	named     *types.Named
 	fileCtx   *core.FileContext
 	line      int
 	typeName  string
 	fieldName string
-	pointer   bool // требует разыменования, чтобы упасть
+	use       nilUse
 }
 
-// AnalyzeGoProject reports the nil-able fields that are read but never written.
+// AnalyzeGoProject reports the nil-able fields of the analyzed files that are
+// used in a way that crashes on nil but never written.
 func (r *NeverAssignedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	if ctx == nil {
 		return nil, errors.New("never assigned field: nil Go project context")
 	}
-
-	var declared []nilableField
-	read := make(map[token.Pos]bool)
-	dereferenced := make(map[token.Pos]bool)
-	written := make(map[token.Pos]bool)
-
-	for _, pkg := range ctx.Packages {
-		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
-			return nil, errors.New("never assigned field: package has no typed syntax")
-		}
-		info := pkg.Package.TypesInfo
-
-		for _, fileCtx := range pkg.Files {
-			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
-				continue
-			}
-			declared = append(declared, collectNilableFields(fileCtx, info)...)
-		}
-		for _, file := range pkg.Package.Syntax {
-			collectFieldAccess(file, info, read, dereferenced, written)
-		}
+	access, err := collectProjectFieldAccess(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("never assigned field: %w", err)
 	}
 
 	// Test files are outside the typed load; a test assigning the field
 	// (fixture wiring) means it is not "never assigned".
 	mentions := newTestMentions(ctx.Files)
 
-	var violations []*core.Violation
-	for _, field := range declared {
-		if written[field.pos] {
-			continue
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		var violations []*core.Violation
+		for _, field := range collectNilableFields(fileCtx, info) {
+			pos := field.obj.Pos()
+			if access.written[pos] || !crashingUse(field.use, access, pos) {
+				continue
+			}
+			if field.obj.Exported() && field.named != nil && access.decoded[field.named] {
+				continue // a decoder fills exported fields by name
+			}
+			if mentions.mentioned(field.fileCtx, field.fieldName) {
+				continue
+			}
+			violations = append(violations, r.report(field))
 		}
-		if field.pointer && !dereferenced[field.pos] {
-			continue // nil-checked optional, not a crash
-		}
-		if !read[field.pos] {
-			continue
-		}
-		if mentions.mentioned(field.fileCtx, field.fieldName) {
-			continue
-		}
-		if field.fileCtx.IsSuppressed(field.line, r.Name()) {
-			continue
-		}
-		violations = append(violations, r.report(field))
-	}
-
-	sort.SliceStable(violations, func(i, j int) bool {
-		if violations[i].File != violations[j].File {
-			return violations[i].File < violations[j].File
-		}
-		return violations[i].Line < violations[j].Line
+		return violations
 	})
-	return violations, nil
+}
+
+// crashingUse reports whether the field is used the way its nil value crashes.
+func crashingUse(use nilUse, access *fieldAccess, pos token.Pos) bool {
+	switch use {
+	case nilUseDeref:
+		return access.dereferenced[pos]
+	case nilUseStore:
+		return access.storedInto[pos]
+	default:
+		return access.read[pos]
+	}
 }
 
 func (r *NeverAssignedFieldRule) report(field nilableField) *core.Violation {
 	v := r.CreateViolation(field.fileCtx.RelPath, field.line,
-		fmt.Sprintf("Field %s.%s is read but never assigned — it is nil on every instance, so the first read panics",
+		fmt.Sprintf("Field %s.%s is used but never assigned — it is nil on every instance, so the first use panics",
 			field.typeName, field.fieldName))
 	v.WithCode(strings.TrimSpace(field.fileCtx.GetLine(field.line)))
-	v.WithSuggestion(fmt.Sprintf("Assign %s in the constructor, or delete the field and the code that reads it",
+	v.WithSuggestion(fmt.Sprintf("Assign %s in the constructor, or delete the field and the code that uses it",
 		field.fieldName))
 	v.WithContext("pattern", "never_assigned_field")
 	v.WithContext("field", field.typeName+"."+field.fieldName)
@@ -174,11 +170,16 @@ func collectNilableFields(fileCtx *core.FileContext, info *types.Info) []nilable
 		if !ok || structType.Fields == nil {
 			return true
 		}
+		named, _ := declaredNamedType(spec, info)
 
 		for _, field := range structType.Fields.List {
 			// Тегированные поля заполняет рефлексия (json.Unmarshal, sql.Scan, yaml):
 			// явного присваивания там нет по построению.
-			if field.Tag != nil || len(field.Names) == 0 || !isNilableType(info.TypeOf(field.Type)) {
+			if field.Tag != nil || len(field.Names) == 0 {
+				continue
+			}
+			use, ok := nilUseOf(info.TypeOf(field.Type))
+			if !ok {
 				continue
 			}
 			for _, name := range field.Names {
@@ -190,12 +191,13 @@ func collectNilableFields(fileCtx *core.FileContext, info *types.Info) []nilable
 					continue
 				}
 				fields = append(fields, nilableField{
-					pos:       obj.Pos(),
+					obj:       obj,
+					named:     named,
 					fileCtx:   fileCtx,
 					line:      fileCtx.LineFor(name),
 					typeName:  spec.Name.Name,
 					fieldName: name.Name,
-					pointer:   isPointerType(info.TypeOf(field.Type)),
+					use:       use,
 				})
 			}
 		}
@@ -205,127 +207,19 @@ func collectNilableFields(fileCtx *core.FileContext, info *types.Info) []nilable
 	return fields
 }
 
-// isNilableType reports whether the zero value of the type is nil, i.e. whether
-// a missing assignment turns the first read into a panic rather than into a
-// merely wrong value.
-func isNilableType(t types.Type) bool {
+// nilUseOf reports whether a missing assignment of a field of type t can turn
+// a use into a panic rather than into a merely wrong value, and which use.
+func nilUseOf(t types.Type) (nilUse, bool) {
 	if t == nil {
-		return false
+		return 0, false
 	}
 	switch t.Underlying().(type) {
-	case *types.Interface, *types.Pointer, *types.Map, *types.Slice, *types.Chan, *types.Signature:
-		return true
+	case *types.Pointer:
+		return nilUseDeref, true
+	case *types.Map:
+		return nilUseStore, true
+	case *types.Interface, *types.Chan, *types.Signature:
+		return nilUseRead, true
 	}
-	return false
-}
-
-// isPointerType reports whether the field is a pointer, whose nil value only
-// crashes where it is dereferenced.
-func isPointerType(t types.Type) bool {
-	if t == nil {
-		return false
-	}
-	_, ok := t.Underlying().(*types.Pointer)
-	return ok
-}
-
-// collectFieldAccess records, by declaration position, which fields the packages
-// read, which they dereference, and which they write. Positions rather than
-// *types.Var: a field of an instantiated generic type is a different object than
-// its declaration.
-func collectFieldAccess(file *ast.File, info *types.Info, read, dereferenced, written map[token.Pos]bool) {
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.AssignStmt:
-			for _, lhs := range node.Lhs {
-				if sel, ok := lhs.(*ast.SelectorExpr); ok {
-					if pos, ok := fieldPos(info, sel); ok {
-						written[pos] = true
-					}
-				}
-			}
-		case *ast.UnaryExpr:
-			// &s.field hands the address out: assume the callee writes through it.
-			if node.Op == token.AND {
-				if sel, ok := node.X.(*ast.SelectorExpr); ok {
-					if pos, ok := fieldPos(info, sel); ok {
-						written[pos] = true
-					}
-				}
-			}
-		case *ast.StarExpr:
-			// *p.field — явное разыменование
-			if sel, ok := node.X.(*ast.SelectorExpr); ok {
-				if pos, ok := fieldPos(info, sel); ok {
-					dereferenced[pos] = true
-				}
-			}
-		case *ast.CompositeLit:
-			markLiteralWrites(node, info, written)
-		case *ast.SelectorExpr:
-			if pos, ok := fieldPos(info, node); ok {
-				read[pos] = true
-			}
-			// p.field.X / p.field.Method() — обращение сквозь поле разыменовывает его
-			if inner, ok := node.X.(*ast.SelectorExpr); ok {
-				if pos, ok := fieldPos(info, inner); ok {
-					dereferenced[pos] = true
-				}
-			}
-		}
-		return true
-	})
-}
-
-// markLiteralWrites records the fields a composite literal fills. A literal
-// without keys is positional and fills every field, so nothing in that struct
-// can be reported from it.
-func markLiteralWrites(lit *ast.CompositeLit, info *types.Info, written map[token.Pos]bool) {
-	structType, ok := structUnder(info.TypeOf(lit))
-	if !ok {
-		return
-	}
-
-	for _, elt := range lit.Elts {
-		kv, ok := elt.(*ast.KeyValueExpr)
-		if !ok {
-			// Positional literal: every field of the struct is written here.
-			for i := 0; i < structType.NumFields(); i++ {
-				written[structType.Field(i).Pos()] = true
-			}
-			return
-		}
-		ident, ok := kv.Key.(*ast.Ident)
-		if !ok {
-			continue
-		}
-		if v, ok := info.Uses[ident].(*types.Var); ok && v.IsField() {
-			written[v.Pos()] = true
-		}
-	}
-}
-
-// structUnder returns the struct behind a (possibly pointer or named) type.
-func structUnder(t types.Type) (*types.Struct, bool) {
-	if t == nil {
-		return nil, false
-	}
-	if p, ok := t.Underlying().(*types.Pointer); ok {
-		t = p.Elem()
-	}
-	st, ok := t.Underlying().(*types.Struct)
-	return st, ok
-}
-
-// fieldPos returns the declaration position of the field a selector refers to.
-func fieldPos(info *types.Info, sel *ast.SelectorExpr) (token.Pos, bool) {
-	selection, ok := info.Selections[sel]
-	if !ok || selection.Kind() != types.FieldVal {
-		return token.NoPos, false
-	}
-	v, ok := selection.Obj().(*types.Var)
-	if !ok {
-		return token.NoPos, false
-	}
-	return v.Pos(), true
+	return 0, false
 }

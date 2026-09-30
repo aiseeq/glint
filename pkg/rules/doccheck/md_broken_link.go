@@ -15,10 +15,11 @@ func init() {
 	rules.Register(NewMdBrokenLinkRule())
 }
 
-// markdownLinkPattern matches inline links and images: [text](target) and
-// ![alt](target). Reference-style links are resolved elsewhere in the document
-// and are left alone.
-var markdownLinkPattern = regexp.MustCompile(`!?\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)`)
+// markdownLinkOpen matches the start of an inline link or image, [text]( or
+// ![alt](; the destination after it is parsed by linkDestination.
+// Reference-style links are resolved elsewhere in the document and are left
+// alone.
+var markdownLinkOpen = regexp.MustCompile(`!?\[[^\]]*\]\(`)
 
 // externalSchemes name a target this rule cannot verify from the file system.
 var externalSchemes = []string{"http://", "https://", "mailto:", "tel:", "ftp://", "//", "data:"}
@@ -32,8 +33,10 @@ var externalSchemes = []string{"http://", "https://", "mailto:", "tel:", "ftp://
 // keeps rendering, and the reader finds out by clicking. Nothing in the build
 // notices, because Markdown has no compiler.
 //
-// Not flagged: external links, anchors within the page, and links inside fenced
-// code blocks, which are examples rather than references.
+// Not flagged: external links, anchors within the page, and links inside code
+// (fenced and indented blocks, inline code spans) or HTML comments, which are
+// examples or hidden text rather than references. A target is URL-decoded
+// (%20) and may hold balanced parentheses, as CommonMark reads it.
 type MdBrokenLinkRule struct {
 	*rules.BaseRule
 }
@@ -58,19 +61,17 @@ func (r *MdBrokenLinkRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 
 	docDir := filepath.Dir(ctx.Path)
 	var violations []*core.Violation
-	inFence := false
 
-	for i, line := range ctx.Lines {
-		if isFenceDelimiter(line) {
-			inFence = !inFence
+	for i, line := range scanMarkdown(ctx.Lines) {
+		if line.code {
 			continue
 		}
-		if inFence {
-			continue
-		}
-
-		for _, match := range markdownLinkPattern.FindAllStringSubmatch(line, -1) {
-			target, ok := localTarget(match[1])
+		for _, loc := range markdownLinkOpen.FindAllStringIndex(line.prose, -1) {
+			destination, ok := linkDestination(line.prose[loc[1]:])
+			if !ok {
+				continue
+			}
+			target, ok := localTarget(destination)
 			if !ok {
 				continue
 			}
@@ -80,7 +81,7 @@ func (r *MdBrokenLinkRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 			if strings.HasPrefix(target, "/") {
 				base = ctx.ProjectRoot
 			}
-			if _, err := os.Stat(filepath.Join(base, target)); err == nil {
+			if _, err := os.Stat(filepath.Join(base, filePathOf(target))); err == nil {
 				continue
 			}
 			violations = append(violations, r.report(ctx, i+1, target))
@@ -88,6 +89,69 @@ func (r *MdBrokenLinkRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 	}
 
 	return violations
+}
+
+// linkDestination parses the destination at the start of s, the text after
+// "](": <...> in angle brackets, or a run without spaces whose parentheses
+// balance, followed by an optional title and the closing parenthesis.
+func linkDestination(s string) (string, bool) {
+	if strings.HasPrefix(s, "<") {
+		end := strings.IndexByte(s, '>')
+		if end < 0 {
+			return "", false
+		}
+		return s[1:end], true
+	}
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\\' && i+1 < len(s):
+			i++
+		case c == '(':
+			depth++
+		case c == ')' && depth == 0:
+			return s[:i], i > 0
+		case c == ')':
+			depth--
+		case c == ' ' || c == '\t':
+			// A title may follow; the destination ends here either way.
+			return s[:i], i > 0
+		}
+	}
+	return "", false
+}
+
+// filePathOf decodes the percent escapes of a link target (docs/my%20file.md)
+// into the file name it addresses. A % that starts no valid escape stays a
+// literal percent sign, as the WHATWG URL parser leaves it.
+func filePathOf(target string) string {
+	if !strings.Contains(target, "%") {
+		return target
+	}
+	var b strings.Builder
+	for i := 0; i < len(target); i++ {
+		if target[i] == '%' && i+2 < len(target) && isHexDigit(target[i+1]) && isHexDigit(target[i+2]) {
+			b.WriteByte(hexValue(target[i+1])<<4 | hexValue(target[i+2]))
+			i += 2
+			continue
+		}
+		b.WriteByte(target[i])
+	}
+	return b.String()
+}
+
+func isHexDigit(c byte) bool {
+	return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
+}
+
+func hexValue(c byte) byte {
+	switch {
+	case c >= 'a':
+		return c - 'a' + 10
+	case c >= 'A':
+		return c - 'A' + 10
+	}
+	return c - '0'
 }
 
 func (r *MdBrokenLinkRule) report(ctx *core.FileContext, line int, target string) *core.Violation {
@@ -120,10 +184,4 @@ func localTarget(target string) (string, bool) {
 		return "", false
 	}
 	return target, true
-}
-
-// isFenceDelimiter reports whether the line opens or closes a fenced code block.
-func isFenceDelimiter(line string) bool {
-	trimmed := strings.TrimSpace(line)
-	return strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")
 }

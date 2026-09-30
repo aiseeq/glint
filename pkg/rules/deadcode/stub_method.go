@@ -4,7 +4,6 @@ import (
 	"go/ast"
 	"go/token"
 	"regexp"
-	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -71,12 +70,6 @@ func (r *StubMethodRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		return nil
 	}
 
-	// Skip test utility files
-	pathLower := strings.ToLower(ctx.RelPath)
-	if strings.Contains(pathLower, "/test") || strings.Contains(pathLower, "test_") {
-		return nil
-	}
-
 	var violations []*core.Violation
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
@@ -96,79 +89,96 @@ func (r *StubMethodRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	return violations
 }
 
-// checkForStubMethod checks if a function is a stub that only returns an error
+// checkForStubMethod reports a function whose every path ends in a stub: all
+// of its return statements return a fixed "not implemented"/"deprecated"
+// error, or it has none and its body panics with such a message. A function
+// with a single real return path is an implementation whose fallback error
+// merely uses one of those words.
 func (r *StubMethodRule) checkForStubMethod(ctx *core.FileContext, fn *ast.FuncDecl) *core.Violation {
-	// Must have a body
-	if fn.Body == nil || len(fn.Body.List) == 0 {
-		return nil
-	}
-
-	// For short functions (1-3 statements), check if they only return stub errors
-	if len(fn.Body.List) > 5 {
-		return nil // Too complex to be a simple stub
+	if fn.Body == nil || len(fn.Body.List) == 0 || len(fn.Body.List) > 5 {
+		return nil // a stub is short; a long body does real work
 	}
 
 	// A stub returns a fixed error. A function whose parameters feed the
 	// error message is a domain error constructor, not a stub, even when the
 	// message contains a trigger word ("user %s was removed").
 	params := funcParamNames(fn)
+	pos := ctx.PositionFor(fn.Name)
 
-	// Look for return statements with stub patterns
-	for _, stmt := range fn.Body.List {
-		ret, ok := stmt.(*ast.ReturnStmt)
-		if !ok {
-			continue
-		}
-
-		for _, result := range ret.Results {
-			if stubMsg := r.extractStubMessage(result); stubMsg != "" {
-				if r.isStubPattern(stubMsg) && !usesAnyIdent(result, params) {
-					pos := ctx.PositionFor(fn.Name)
-					funcName := fn.Name.Name
-					if fn.Recv != nil && len(fn.Recv.List) > 0 {
-						// It's a method
-						funcName = receiverTypeName(fn.Recv.List[0]) + "." + funcName
-					}
-
-					v := r.CreateViolation(ctx.RelPath, pos.Line,
-						"Stub method '"+funcName+"' only returns deprecated/not-implemented error")
-					v.WithCode(ctx.GetLine(pos.Line))
-					v.WithSuggestion("Either implement the method properly or remove it from the interface")
-					return v
-				}
+	returns := functionReturns(fn.Body)
+	if len(returns) > 0 {
+		for _, ret := range returns {
+			if !r.isStubReturn(ret, params) {
+				return nil
 			}
 		}
+		funcName := fn.Name.Name
+		if fn.Recv != nil && len(fn.Recv.List) > 0 {
+			funcName = receiverTypeName(fn.Recv.List[0]) + "." + funcName
+		}
+		v := r.CreateViolation(ctx.RelPath, pos.Line,
+			"Stub method '"+funcName+"' only returns deprecated/not-implemented error")
+		v.WithCode(ctx.GetLine(pos.Line))
+		v.WithSuggestion("Either implement the method properly or remove it from the interface")
+		return v
 	}
 
-	// Also check for panic calls with deprecated message patterns
+	// No return statement: a top-level panic ends every path.
 	for _, stmt := range fn.Body.List {
-		expr, ok := stmt.(*ast.ExprStmt)
-		if !ok {
-			continue
-		}
-		call, ok := expr.X.(*ast.CallExpr)
-		if !ok {
-			continue
-		}
-		if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "panic" {
-			if len(call.Args) > 0 {
-				if msg := r.extractStringLiteral(call.Args[0]); msg != "" {
-					if r.isStubPattern(msg) {
-						pos := ctx.PositionFor(fn.Name)
-						funcName := fn.Name.Name
-
-						v := r.CreateViolation(ctx.RelPath, pos.Line,
-							"Function '"+funcName+"' exits with deprecated message")
-						v.WithCode(ctx.GetLine(pos.Line))
-						v.WithSuggestion("Remove the deprecated function or redirect callers")
-						return v
-					}
-				}
-			}
+		if msg, ok := r.panicMessage(stmt); ok && r.isStubPattern(msg) {
+			v := r.CreateViolation(ctx.RelPath, pos.Line,
+				"Function '"+fn.Name.Name+"' exits with deprecated message")
+			v.WithCode(ctx.GetLine(pos.Line))
+			v.WithSuggestion("Remove the deprecated function or redirect callers")
+			return v
 		}
 	}
-
 	return nil
+}
+
+// functionReturns collects the return statements of a body, leaving out the
+// ones inside function literals, which return from the literal.
+func functionReturns(body *ast.BlockStmt) []*ast.ReturnStmt {
+	var returns []*ast.ReturnStmt
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			returns = append(returns, node)
+		}
+		return true
+	})
+	return returns
+}
+
+// isStubReturn reports whether a return statement returns a fixed stub error.
+func (r *StubMethodRule) isStubReturn(ret *ast.ReturnStmt, params map[string]bool) bool {
+	for _, result := range ret.Results {
+		msg := r.extractStubMessage(result)
+		if msg != "" && r.isStubPattern(msg) && !usesAnyIdent(result, params) {
+			return true
+		}
+	}
+	return false
+}
+
+// panicMessage returns the literal message of a panic statement.
+func (r *StubMethodRule) panicMessage(stmt ast.Stmt) (string, bool) {
+	expr, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return "", false
+	}
+	call, ok := expr.X.(*ast.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return "", false
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok || ident.Name != "panic" {
+		return "", false
+	}
+	msg := r.extractStringLiteral(call.Args[0])
+	return msg, msg != ""
 }
 
 // extractStubMessage extracts the error message from error constructors

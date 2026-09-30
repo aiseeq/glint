@@ -200,7 +200,7 @@ func TestMdFrontmatterMetadata(t *testing.T) {
 	if rule.Name() != "md-frontmatter" {
 		t.Errorf("unexpected name: %s", rule.Name())
 	}
-	expected := "Validates YAML frontmatter format in Markdown documents"
+	expected := "Validates YAML frontmatter in Markdown documents: valid YAML, date as YYYY-MM-DD or RFC 3339, version as semver (skips README.md and files under generated/ and templates/)"
 	if rule.Description() != expected {
 		t.Errorf("unexpected description:\ngot:      %q\nexpected: %q", rule.Description(), expected)
 	}
@@ -263,7 +263,10 @@ func TestParseFrontmatter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			has, fields := rule.parseFrontmatter(tt.lines)
+			has, fields, err := rule.parseFrontmatter(tt.lines)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
 
 			if has != tt.expectHas {
 				t.Errorf("expected has=%v, got %v", tt.expectHas, has)

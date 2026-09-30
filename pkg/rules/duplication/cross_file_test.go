@@ -270,15 +270,11 @@ func TestCrossFileDuplicateRule_ResetState(t *testing.T) {
 	rule := NewCrossFileDuplicateRule()
 
 	// Add some state
-	rule.firstSeen[1] = BlockLocation{File: "test.go"}
-	rule.reported[1] = true
+	rule.firstSeen[1] = blockOrigin{file: "test.go"}
 
 	rule.ResetState()
 
 	if len(rule.firstSeen) != 0 {
 		t.Error("Expected firstSeen to be empty after ResetState")
-	}
-	if len(rule.reported) != 0 {
-		t.Error("Expected reported to be empty after ResetState")
 	}
 }

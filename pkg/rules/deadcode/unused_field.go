@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/token"
 	"go/types"
-	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -60,10 +58,9 @@ func (r *UnusedFieldRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
 // RequiresSSA reports that typed syntax is enough for this rule.
 func (r *UnusedFieldRule) RequiresSSA() bool { return false }
 
-// declaredField is an unexported field of an analyzed struct type.
+// declaredField is a field of an analyzed struct type this rule judges.
 type declaredField struct {
 	obj       *types.Var
-	owner     *types.Struct
 	named     *types.Named
 	fileCtx   *core.FileContext
 	line      int
@@ -72,68 +69,41 @@ type declaredField struct {
 	setting   bool
 }
 
-// AnalyzeGoProject reports the unexported fields no compiled file reads.
+// AnalyzeGoProject reports the fields of the analyzed files that no compiled
+// file reads. Every loaded package counts as a reader, whether or not its own
+// files are analyzed.
 func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	if ctx == nil {
 		return nil, errors.New("unused field: nil Go project context")
 	}
-
-	var declared []declaredField
-	// Ключ — позиция объявления поля, а не *types.Var: у generic-типа обращение внутри
-	// метода даёт поле инстанцированной структуры (другой *types.Var), и сравнение по
-	// указателю теряло все чтения generic-полей.
-	read := make(map[token.Pos]bool)
-	written := make(map[token.Pos]bool)
-	compared := make(map[*types.Struct]bool)
-	// An encoder reads every exported field on the program's behalf, so a
-	// setting of a type that is marshalled is not dead.
-	decoded := make(map[*types.Named]bool)
-	encoded := make(map[*types.Named]bool)
-
-	for _, pkg := range ctx.Packages {
-		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
-			return nil, errors.New("unused field: package has no typed syntax")
-		}
-		info := pkg.Package.TypesInfo
-
-		for _, fileCtx := range pkg.Files {
-			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
-				continue
-			}
-			declared = append(declared, collectCheckedFields(fileCtx, info)...)
-		}
-		for _, file := range pkg.Package.Syntax {
-			collectFieldReads(file, info, read, written)
-			collectComparedStructs(file, info, compared)
-			collectSerializedTypes(file, info, decoded, encoded)
-		}
+	access, err := collectProjectFieldAccess(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unused field: %w", err)
 	}
 
 	// Test files are outside the typed load; a field read only by its
 	// white-box test must still count as read.
 	mentions := newTestMentions(ctx.Files)
 
-	var violations []*core.Violation
-	for _, field := range declared {
-		if read[field.obj.Pos()] || compared[field.owner] {
-			continue
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		var violations []*core.Violation
+		for _, field := range collectCheckedFields(fileCtx, info) {
+			pos := field.obj.Pos()
+			if access.read[pos] || access.hashed[pos] {
+				continue
+			}
+			// An encoder reads every exported field on the program's behalf,
+			// so a setting of a type that is marshalled is not dead.
+			if field.setting && field.named != nil && access.encoded[field.named] {
+				continue
+			}
+			if mentions.mentioned(field.fileCtx, field.fieldName) {
+				continue
+			}
+			violations = append(violations, r.report(field, access.written[pos]))
 		}
-		if field.setting && field.named != nil && encoded[field.named] {
-			continue
-		}
-		if mentions.mentioned(field.fileCtx, field.fieldName) {
-			continue
-		}
-		violations = append(violations, r.report(field, written[field.obj.Pos()]))
-	}
-
-	sort.SliceStable(violations, func(i, j int) bool {
-		if violations[i].File != violations[j].File {
-			return violations[i].File < violations[j].File
-		}
-		return violations[i].Line < violations[j].Line
+		return violations
 	})
-	return violations, nil
 }
 
 func (r *UnusedFieldRule) report(field declaredField, written bool) *core.Violation {
@@ -183,8 +153,7 @@ func collectCheckedFields(fileCtx *core.FileContext, info *types.Info) []declare
 		if !ok || structType.Fields == nil {
 			return true
 		}
-		owner, ok := declaredStructType(spec, info)
-		if !ok {
+		if _, ok := declaredStructType(spec, info); !ok {
 			return true
 		}
 		named, _ := declaredNamedType(spec, info)
@@ -204,7 +173,6 @@ func collectCheckedFields(fileCtx *core.FileContext, info *types.Info) []declare
 				}
 				fields = append(fields, declaredField{
 					obj:       obj,
-					owner:     owner,
 					named:     named,
 					fileCtx:   fileCtx,
 					line:      fileCtx.LineFor(name),
@@ -228,112 +196,4 @@ func declaredStructType(spec *ast.TypeSpec, info *types.Info) (*types.Struct, bo
 	}
 	structType, ok := obj.Type().Underlying().(*types.Struct)
 	return structType, ok
-}
-
-// collectComparedStructs records the structs whose value is used as a whole:
-// as a map key, or in an equality test. The runtime then reads every field to
-// hash or compare it, so no field of such a struct is dead.
-func collectComparedStructs(file *ast.File, info *types.Info, compared map[*types.Struct]bool) {
-	markStruct := func(t types.Type) {
-		if t == nil {
-			return
-		}
-		if structType, ok := t.Underlying().(*types.Struct); ok {
-			compared[structType] = true
-		}
-	}
-
-	ast.Inspect(file, func(n ast.Node) bool {
-		if binary, ok := n.(*ast.BinaryExpr); ok && (binary.Op == token.EQL || binary.Op == token.NEQ) {
-			markStruct(info.TypeOf(binary.X))
-			markStruct(info.TypeOf(binary.Y))
-		}
-		expr, ok := n.(ast.Expr)
-		if !ok {
-			return true
-		}
-		if mapType, ok := underlyingMap(info.TypeOf(expr)); ok {
-			markStruct(mapType.Key())
-		}
-		return true
-	})
-}
-
-// underlyingMap returns the map behind a type, seeing through pointers.
-func underlyingMap(t types.Type) (*types.Map, bool) {
-	if t == nil {
-		return nil, false
-	}
-	if ptr, ok := t.Underlying().(*types.Pointer); ok {
-		t = ptr.Elem()
-	}
-	mapType, ok := t.Underlying().(*types.Map)
-	return mapType, ok
-}
-
-// collectFieldReads separates the mentions that consume a field's value from the
-// ones that only set it.
-func collectFieldReads(file *ast.File, info *types.Info, read, written map[token.Pos]bool) {
-	writeOnly := writtenSelectors(file)
-
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.SelectorExpr:
-			selection, ok := info.Selections[node]
-			if !ok || selection.Kind() != types.FieldVal {
-				return true
-			}
-			field, ok := selection.Obj().(*types.Var)
-			if !ok {
-				return true
-			}
-			if writeOnly[node] {
-				written[field.Pos()] = true
-				return true
-			}
-			read[field.Pos()] = true
-		case *ast.CompositeLit:
-			for _, elt := range node.Elts {
-				kv, ok := elt.(*ast.KeyValueExpr)
-				if !ok {
-					continue
-				}
-				ident, ok := kv.Key.(*ast.Ident)
-				if !ok {
-					continue
-				}
-				if field, ok := info.Uses[ident].(*types.Var); ok {
-					written[field.Pos()] = true
-				}
-			}
-		}
-		return true
-	})
-}
-
-// writtenSelectors returns the selectors a statement updates: plain assignments
-// and the counter forms (x.n++, x.n += 1). Updating a counter keeps it current
-// but consumes nothing — a counter nobody ever looks at is exactly the case this
-// rule is about. A read on the right-hand side is a separate selector node and
-// still counts as a read.
-func writtenSelectors(file *ast.File) map[*ast.SelectorExpr]bool {
-	targets := make(map[*ast.SelectorExpr]bool)
-
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.AssignStmt:
-			for _, lhs := range node.Lhs {
-				if sel, ok := lhs.(*ast.SelectorExpr); ok {
-					targets[sel] = true
-				}
-			}
-		case *ast.IncDecStmt:
-			if sel, ok := node.X.(*ast.SelectorExpr); ok {
-				targets[sel] = true
-			}
-		}
-		return true
-	})
-
-	return targets
 }

@@ -251,3 +251,138 @@ func TestDeepNestingConfigureReset(t *testing.T) {
 	require.NoError(t, rule.Configure(map[string]any{}))
 	assert.Equal(t, defaultMaxNestingDepth, rule.maxDepth)
 }
+
+// nestingFindings runs the rule with the default maximum of 4 levels.
+func nestingFindings(t *testing.T, code string) []*core.Violation {
+	t.Helper()
+	rule := NewDeepNestingRule()
+	require.NoError(t, rule.Configure(map[string]any{}))
+	return rule.AnalyzeFile(createTestContext(t, "pkg/nest/nest.go", code))
+}
+
+// A label in front of a loop does not take the loop out of the count.
+func TestDeepNestingCountsLabeledLoop(t *testing.T) {
+	violations := nestingFindings(t, `package nest
+
+func Labeled(m [][][][][]int) int {
+	n := 0
+outer:
+	for _, a := range m {
+		for _, b := range a {
+			for _, c := range b {
+				for _, d := range c {
+					for _, e := range d {
+						if e < 0 {
+							break outer
+						}
+						n += e
+					}
+				}
+			}
+		}
+	}
+	return n
+}
+`)
+	require.NotEmpty(t, violations)
+	assert.Contains(t, violations[0].Message, "Nesting depth 5")
+}
+
+// The body of else sits one level below its if, exactly like the body of the
+// if itself.
+func TestDeepNestingCountsElseBodyLikeIfBody(t *testing.T) {
+	elseBranch := nestingFindings(t, `package nest
+
+func ElseBranch(a, b, c, d, e bool) int {
+	if a {
+		return 0
+	} else {
+		if b {
+			if c {
+				if d {
+					if e {
+						return 1
+					}
+				}
+			}
+		}
+	}
+	return 2
+}
+`)
+	ifBranch := nestingFindings(t, `package nest
+
+func IfBranch(a, b, c, d, e bool) int {
+	if a {
+		if b {
+			if c {
+				if d {
+					if e {
+						return 1
+					}
+				}
+			}
+		}
+	}
+	return 2
+}
+`)
+	require.Len(t, ifBranch, 1)
+	require.Len(t, elseBranch, 1)
+	assert.Contains(t, ifBranch[0].Message, "Nesting depth 5")
+	assert.Contains(t, elseBranch[0].Message, "Nesting depth 5")
+}
+
+// An else-if chain stays at the level of its first if.
+func TestDeepNestingKeepsElseIfChainLevel(t *testing.T) {
+	violations := nestingFindings(t, `package nest
+
+func Chain(a, b, c, d, e, f bool) int {
+	if a {
+		return 1
+	} else if b {
+		return 2
+	} else if c {
+		return 3
+	} else if d {
+		return 4
+	} else if e {
+		return 5
+	} else if f {
+		return 6
+	}
+	return 0
+}
+`)
+	assert.Empty(t, violations)
+}
+
+// A closure in the header of a statement (if init, for condition, switch tag)
+// is a function body of its own and is checked like any other.
+func TestDeepNestingChecksClosuresInStatementHeaders(t *testing.T) {
+	violations := nestingFindings(t, `package nest
+
+func Header(m [][][][][]int) bool {
+	if n := func() int {
+		total := 0
+		for _, a := range m {
+			for _, b := range a {
+				for _, c := range b {
+					for _, d := range c {
+						for _, e := range d {
+							total += e
+						}
+					}
+				}
+			}
+		}
+		return total
+	}(); n > 0 {
+		return true
+	}
+	return false
+}
+`)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Nesting depth 5")
+}

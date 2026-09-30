@@ -97,3 +97,50 @@ func TestSolidSRPConfigureReset(t *testing.T) {
 	assert.True(t, rule.infrastructureAreas["logging"])
 	assert.False(t, rule.infrastructureAreas["custom"])
 }
+
+// Area keywords are words of the method name, not substrings of it: "get" in
+// Budget, "read" in Ready, "api" in Rapid and "send" in Resend are no
+// responsibilities at all.
+func TestSolidSRPRule_MatchesWholeWordsOnly(t *testing.T) {
+	rule := NewSolidSRPRule()
+	require.NoError(t, rule.Configure(map[string]any{}))
+
+	ctx := createTestContext(t, "internal/sprint/planner.go", `package sprint
+
+type Planner struct{ points int }
+
+func (p *Planner) Budget() int  { return p.points }
+func (p *Planner) Ready() bool  { return p.points > 0 }
+func (p *Planner) Rapid() bool  { return p.points < 5 }
+func (p *Planner) Resend()      { p.points = 0 }
+`)
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+}
+
+// The methods of a generic type belong to that type.
+func TestSolidSRPRule_CountsMethodsOfGenericType(t *testing.T) {
+	rule := NewSolidSRPRule()
+	require.NoError(t, rule.Configure(map[string]any{}))
+
+	ctx := createTestContext(t, "internal/store/box.go", `package store
+
+type Box[T any] struct{ v T }
+
+func (b *Box[T]) SaveItem() error       { return nil }
+func (b *Box[T]) HandleRequest() error  { return nil }
+func (b *Box[T]) OpenFile() error       { return nil }
+func (b *Box[T]) ConnectPeer() error    { return nil }
+func (b *Box[T]) SchedulePeriodic() error { return nil }
+`)
+	violations := rule.AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Box has")
+}
+
+func TestSolidSRPRule_SplitsAcronymsIntoWords(t *testing.T) {
+	assert.Equal(t, []string{"serve", "http"}, camelWords("ServeHTTP"))
+	assert.Equal(t, []string{"handle", "http", "request"}, camelWords("HandleHTTPRequest"))
+	assert.Equal(t, []string{"get", "user", "by", "id"}, camelWords("getUserByID"))
+	assert.Equal(t, []string{"send", "sms", "v2"}, camelWords("SendSMS_v2"))
+	assert.Equal(t, []string{"database", "http"}, detectResponsibilityAreas([]string{"GetUser", "HandleHTTPRequest"}))
+}

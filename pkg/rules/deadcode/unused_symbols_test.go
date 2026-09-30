@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestUnusedSymbolsRule(t *testing.T) {
@@ -173,76 +174,96 @@ func main() {
 }`,
 			wantViolations: 0,
 		},
+		{
+			name: "recursive function nobody else calls",
+			code: `package main
+
+func countdown(n int) int {
+	if n == 0 {
+		return 0
+	}
+	return countdown(n - 1)
+}
+
+func main() {}`,
+			wantViolations: 1,
+		},
+		{
+			name: "type only its own methods mention",
+			code: `package main
+
+type widget struct{ n int }
+
+func (w *widget) size() int { return w.n }
+
+func main() {}`,
+			wantViolations: 1,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rule := NewUnusedSymbolsRule()
-			dir := t.TempDir()
-			path := filepath.Join(dir, "main.go")
-			require.NoError(t, os.WriteFile(path, []byte(tt.code), 0644))
-
-			parser := core.NewParser()
-			ctx := core.NewFileContext(path, dir, []byte(tt.code), core.DefaultConfig())
-			fset, astFile, err := parser.ParseGoFile(path, []byte(tt.code))
-			if err != nil {
-				t.Fatalf("Parse error: %v", err)
-			}
-			ctx.SetGoAST(fset, astFile)
-
-			violations := rule.AnalyzeFile(ctx)
-
+			violations := analyzeUnusedSymbols(t, map[string]string{"main.go": tt.code})
 			assert.Len(t, violations, tt.wantViolations, "Code:\n%s", tt.code)
 		})
 	}
 }
 
-func TestUnusedSymbolsCountsSiblingUsage(t *testing.T) {
-	dir := t.TempDir()
-	mainCode := "package demo\n\nfunc helper() {}\n"
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte(mainCode), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "other.go"),
-		[]byte("package demo\n\nfunc Caller() { helper() }\n"), 0644))
-
-	path := filepath.Join(dir, "main.go")
-	ctx := core.NewFileContext(path, dir, []byte(mainCode), core.DefaultConfig())
-	fset, astFile, err := core.SharedParser().ParseGoFile(path, []byte(mainCode))
+func analyzeUnusedSymbols(t *testing.T, files map[string]string) []*core.Violation {
+	t.Helper()
+	violations, err := NewUnusedSymbolsRule().AnalyzeGoProject(rulestest.Project(t, files))
 	require.NoError(t, err)
-	ctx.SetGoAST(fset, astFile)
+	return violations
+}
 
-	violations := NewUnusedSymbolsRule().AnalyzeFile(ctx)
+func TestUnusedSymbolsCountsSiblingUsage(t *testing.T) {
+	violations := analyzeUnusedSymbols(t, map[string]string{
+		"main.go":  "package demo\n\nfunc helper() {}\n",
+		"other.go": "package demo\n\nfunc Caller() { helper() }\n",
+	})
 	assert.Empty(t, violations, "helper is used from a sibling file of the same package")
 }
 
 func TestUnusedSymbolsCountsSiblingTestFileUsage(t *testing.T) {
-	dir := t.TempDir()
-	mainCode := "package demo\n\nfunc testedHelper() {}\n"
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte(mainCode), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "demo_test.go"),
-		[]byte("package demo\n\nimport \"testing\"\n\nfunc TestOnly(t *testing.T) { testedHelper() }\n"), 0644))
-
-	path := filepath.Join(dir, "main.go")
-	ctx := core.NewFileContext(path, dir, []byte(mainCode), core.DefaultConfig())
-	fset, astFile, err := core.SharedParser().ParseGoFile(path, []byte(mainCode))
-	require.NoError(t, err)
-	ctx.SetGoAST(fset, astFile)
-
-	violations := NewUnusedSymbolsRule().AnalyzeFile(ctx)
+	violations := analyzeUnusedSymbols(t, map[string]string{
+		"main.go":      "package demo\n\nfunc testedHelper() {}\n",
+		"demo_test.go": "package demo\n\nimport \"testing\"\n\nfunc TestOnly(t *testing.T) { testedHelper() }\n",
+	})
 	assert.Empty(t, violations, "a symbol used only by package tests is not dead code")
 }
 
-func TestUnusedSymbolsReportsSiblingReadError(t *testing.T) {
-	code := "package main\nfunc unused() {}"
-	path := filepath.Join(t.TempDir(), "missing", "main.go")
-	ctx := core.NewFileContext(path, filepath.Dir(path), []byte(code), core.DefaultConfig())
-	parser := core.NewParser()
-	fset, astFile, err := parser.ParseGoFile(path, []byte(code))
-	require.NoError(t, err)
-	ctx.SetGoAST(fset, astFile)
+// A file the build leaves out on this platform still uses what it names: the
+// typed load does not see it, the name scan does.
+func TestUnusedSymbolsCountsBuildConstrainedSiblingUsage(t *testing.T) {
+	violations := analyzeUnusedSymbols(t, map[string]string{
+		"main.go":        "package demo\n\nfunc platformHelper() int { return 1 }\n",
+		"other_plan9.go": "package demo\n\nfunc Caller() int { return platformHelper() }\n",
+	})
+	assert.Empty(t, violations)
+}
 
-	violations := NewUnusedSymbolsRule().AnalyzeFile(ctx)
+// Repro: a directory held a build-ignored template next to real code, and the
+// template was excluded from analysis. The rule reread the directory itself,
+// tried to parse the template and replaced every finding of the package with
+// a CRITICAL "analysis failed". Only the loaded packages and the analyzed
+// files are the rule's input.
+func TestUnusedSymbolsIgnoresExcludedTemplateSibling(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"p/a.go": "package p\n\nfunc helper() int { return 1 }\n\ntype thing struct{ n int }\n\nvar registry = map[string]int{}\n",
+		"p/b.go": "package p\n\n// Use uses symbols from a.go.\nfunc Use() int { _ = registry; t := thing{n: 1}; return helper() + t.n }\n",
+		"q/q.go": "package q\n\n// Q is exported.\nfunc Q() int { return 1 }\n\nfunc dead() {}\n",
+	})
+	template := "//go:build ignore\n\npackage main\n\nfunc main() {\n\t{{range .Items}}\n}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(root, "q", "gen.go"), []byte(template), 0o644))
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	require.NoError(t, err)
+
+	violations, err := NewUnusedSymbolsRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
 	require.Len(t, violations, 1)
-	require.Equal(t, core.SeverityCritical, violations[0].Severity)
+	assert.Equal(t, "q/q.go", violations[0].File)
+	assert.Contains(t, violations[0].Message, "'dead'")
+	assert.NotEqual(t, core.SeverityCritical, violations[0].Severity)
 }
 
 func TestUnusedSymbolsRuleMetadata(t *testing.T) {
@@ -251,26 +272,13 @@ func TestUnusedSymbolsRuleMetadata(t *testing.T) {
 	assert.Equal(t, "unused-symbol", rule.Name())
 	assert.Equal(t, "deadcode", rule.Category())
 	assert.Equal(t, core.SeverityLow, rule.DefaultSeverity())
+	assert.NotContains(t, rule.Description(), "within their file")
 }
 
 func TestUnusedSymbolsSkipsTestFiles(t *testing.T) {
-	rule := NewUnusedSymbolsRule()
-
-	code := `package main
-
-func unusedHelper() {}
-
-func TestSomething(t *testing.T) {}`
-
-	parser := core.NewParser()
-	ctx := core.NewFileContext("/src/main_test.go", "/src", []byte(code), core.DefaultConfig())
-	fset, astFile, err := parser.ParseGoFile("/src/main_test.go", []byte(code))
-	if err != nil {
-		t.Fatalf("Parse error: %v", err)
-	}
-	ctx.SetGoAST(fset, astFile)
-
-	violations := rule.AnalyzeFile(ctx)
-
+	violations := analyzeUnusedSymbols(t, map[string]string{
+		"main.go":      "package main\n\nfunc main() {}\n",
+		"main_test.go": "package main\n\nimport \"testing\"\n\nfunc unusedHelper() {}\n\nfunc TestSomething(t *testing.T) {}\n",
+	})
 	assert.Empty(t, violations, "Should skip test files")
 }
