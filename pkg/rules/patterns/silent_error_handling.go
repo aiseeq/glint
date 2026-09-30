@@ -300,7 +300,7 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[st
 	case *ast.ExprStmt:
 		// Check for logging calls
 		if call, ok := s.X.(*ast.CallExpr); ok {
-			if isLoggerCall(call) || isFactoryLoggerCall(call) {
+			if isLoggerCall(call) {
 				return true
 			}
 			if r.isResponseCall(call) || callWritesResponse(call, writers) {
@@ -624,26 +624,6 @@ func argumentIsError(arg ast.Expr) bool {
 		return callTakesErrorArgument(a)
 	}
 	return false
-}
-
-// isFactoryLoggerCall recognises a logging verb called on a logger that a
-// function hands out: obs.DefaultLogger().Debug(...), zap.L().Error(...).
-// The receiver is a call whose callee is a logger, so isLoggerCall, which
-// reads the receiver as a name, does not see it.
-func isFactoryLoggerCall(call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	factory, ok := sel.X.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	verb := logVerb(sel)
-	if !loggingVerbs[verb] && !strings.HasPrefix(verb, "log") {
-		return false
-	}
-	return isLoggerReceiver(factory.Fun)
 }
 
 // writesToStderr recognises a write to os.Stderr — fmt.Fprintln(os.Stderr, …):
