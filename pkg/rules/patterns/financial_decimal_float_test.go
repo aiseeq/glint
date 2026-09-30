@@ -260,7 +260,7 @@ func convert(rate decimal.Decimal) float64 {
 // With type information the receiver's type decides: a decimal field or method
 // result whose declaration is in another file is still a decimal.
 func TestFinancialDecimalFloatRule_TypedReceivers(t *testing.T) {
-	project := wp3bDecimalProject(t, map[string]string{
+	project := decimalProject(t, map[string]string{
 		"billing/model.go": `package billing
 
 import "github.com/shopspring/decimal"

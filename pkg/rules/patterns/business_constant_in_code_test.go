@@ -10,30 +10,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
-
-// decimalStubModule makes github.com/shopspring/decimal resolvable in a test
-// module without the network: a local replacement with the constructors the
-// rules look at.
-func decimalStubModule(files map[string]string) map[string]string {
-	files["go.mod"] = "module example.com/rulestest\n\ngo 1.24\n\nrequire github.com/shopspring/decimal v0.0.0\n\nreplace github.com/shopspring/decimal => ./decimalstub\n"
-	files["decimalstub/go.mod"] = "module github.com/shopspring/decimal\n\ngo 1.24\n"
-	files["decimalstub/decimal.go"] = `package decimal
-
-type Decimal struct{ v float64 }
-
-func New(value int64, exp int32) Decimal  { return Decimal{} }
-func NewFromInt(value int64) Decimal      { return Decimal{} }
-func NewFromFloat(value float64) Decimal  { return Decimal{} }
-func (d Decimal) IsZero() bool            { return d.v == 0 }
-`
-	return files
-}
 
 func runBusinessConstantRule(t *testing.T, files map[string]string) []*core.Violation {
 	t.Helper()
-	project := rulestest.Project(t, decimalStubModule(files))
+	project := decimalProject(t, files)
 	violations, err := NewBusinessConstantInCodeRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
 	return violations
