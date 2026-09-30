@@ -187,6 +187,24 @@ func save(repo PaymentRepository, firstPayment, secondPayment *Payment) error {
 	assert.Empty(t, rule.AnalyzeFile(ctx))
 }
 
+// A context argument is told apart by its declared type, not by a name
+// ending in ctx: paymentCtx here is the entity, and a different entity is
+// created than the one looked up.
+func TestIdempotencyCheckThenCreateRule_ContextJudgedByDeclaredType(t *testing.T) {
+	rule := NewIdempotencyCheckThenCreateRule()
+	code := `package payments
+
+import "context"
+
+func save(ctx context.Context, repo PaymentRepository, paymentCtx, other *Payment) error {
+	_, _ = repo.GetByIdempotencyKey(ctx, other.IdempotencyKey)
+	return repo.Create(ctx, paymentCtx)
+}`
+
+	ctx := createIdempotencyCheckThenCreateContext(t, "service.go", code)
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+}
+
 func TestIdempotencyCheckThenCreateRule_DoesNotLinkReassignedEntity(t *testing.T) {
 	rule := NewIdempotencyCheckThenCreateRule()
 	code := `package payments
@@ -416,6 +434,7 @@ func TestIdempotencyCheckThenCreateRule_PathCountStaysFlat(t *testing.T) {
 		rule:                     NewIdempotencyCheckThenCreateRule(),
 		ctx:                      ctx,
 		function:                 fn.Name.Name,
+		contexts:                 newContextClassifier(ctx.GoAST, fn, nil),
 		dataAccessBindings:       make(map[*ast.Ident]struct{}),
 		analyzedFunctionLiterals: make(map[*ast.FuncLit]struct{}),
 		reportedCreates:          make(map[*ast.CallExpr]struct{}),

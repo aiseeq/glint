@@ -104,6 +104,7 @@ type idempotencyFunctionAnalyzer struct {
 	rule                     *IdempotencyCheckThenCreateRule
 	ctx                      *core.FileContext
 	function                 string
+	contexts                 contextClassifier
 	dataAccessBindings       map[*ast.Ident]struct{}
 	analyzedFunctionLiterals map[*ast.FuncLit]struct{}
 	reportedCreates          map[*ast.CallExpr]struct{}
@@ -129,6 +130,7 @@ func (r *IdempotencyCheckThenCreateRule) AnalyzeFile(ctx *core.FileContext) []*c
 			rule:                     r,
 			ctx:                      ctx,
 			function:                 fn.Name.Name,
+			contexts:                 newContextClassifier(ctx.GoAST, fn, nil),
 			dataAccessBindings:       make(map[*ast.Ident]struct{}),
 			analyzedFunctionLiterals: make(map[*ast.FuncLit]struct{}),
 			reportedCreates:          make(map[*ast.CallExpr]struct{}),
@@ -388,7 +390,7 @@ func (a *idempotencyFunctionAnalyzer) applyCalls(paths []idempotencyPath, scope 
 	})
 
 	for _, expression := range calls {
-		call, ok := idempotencyDataAccessCall(expression, scope, a.dataAccessBindings)
+		call, ok := idempotencyDataAccessCall(expression, scope, a.dataAccessBindings, a.contexts)
 		if !ok {
 			continue
 		}
@@ -449,7 +451,7 @@ func precedingIdempotencyLookup(path idempotencyPath, create idempotencyReposito
 	return idempotencyRepositoryCall{}, false
 }
 
-func idempotencyDataAccessCall(call *ast.CallExpr, scope *idempotencyScope, dataAccessBindings map[*ast.Ident]struct{}) (idempotencyRepositoryCall, bool) {
+func idempotencyDataAccessCall(call *ast.CallExpr, scope *idempotencyScope, dataAccessBindings map[*ast.Ident]struct{}, contexts contextClassifier) (idempotencyRepositoryCall, bool) {
 	selector, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return idempotencyRepositoryCall{}, false
@@ -467,7 +469,7 @@ func idempotencyDataAccessCall(call *ast.CallExpr, scope *idempotencyScope, data
 	if isIdempotencyLookupMethod(result.method) {
 		result.entity, result.entityIsKnown = idempotencyLookupEntity(call.Args, scope)
 	} else if isNonAtomicCreateMethod(result.method) {
-		result.entity, result.entityIsKnown = idempotencyCreateEntity(call.Args, scope)
+		result.entity, result.entityIsKnown = idempotencyCreateEntity(call.Args, scope, contexts)
 	}
 	return result, true
 }
@@ -506,12 +508,17 @@ func idempotencyLookupEntity(arguments []ast.Expr, scope *idempotencyScope) (ide
 	return idempotencyBinding{}, false
 }
 
-func idempotencyCreateEntity(arguments []ast.Expr, scope *idempotencyScope) (idempotencyBinding, bool) {
+// idempotencyCreateEntity returns the one argument of a create call that is
+// the created entity: every argument but a context and nil.
+func idempotencyCreateEntity(arguments []ast.Expr, scope *idempotencyScope, contexts contextClassifier) (idempotencyBinding, bool) {
 	var entity idempotencyBinding
 	found := false
 	for _, argument := range arguments {
 		ident, ok := directIdempotencyIdent(argument)
-		if !ok || isContextIdentifier(ident.Name) || ident.Name == "nil" {
+		if !ok || ident.Name == "nil" {
+			continue
+		}
+		if isContext, _ := contexts.classify(ident); isContext {
 			continue
 		}
 		if found {
@@ -556,11 +563,6 @@ func idempotencyBindingFor(ident *ast.Ident, scope *idempotencyScope) idempotenc
 func isIdempotencyEntityField(name string) bool {
 	lower := strings.ToLower(name)
 	return strings.Contains(lower, "idempotency") || strings.Contains(lower, "reference")
-}
-
-func isContextIdentifier(name string) bool {
-	lower := strings.ToLower(name)
-	return lower == "ctx" || lower == "context" || strings.HasSuffix(lower, "ctx") || strings.HasSuffix(lower, "context")
 }
 
 func declareIdempotencyFields(scope *idempotencyScope, fields *ast.FieldList, dataAccessBindings map[*ast.Ident]struct{}) {
