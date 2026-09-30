@@ -191,14 +191,15 @@ func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext) []*core.Viola
 		}
 
 		pkgIdent, ok := sel.X.(*ast.Ident)
-		// A resolved object is a local declaration (a parameter or variable named
-		// log), never a package: package names stay unresolved in the syntax tree.
-		if !ok || pkgIdent.Obj != nil {
+		if !ok {
 			return true
 		}
-
 		path, ok := pkgOf[pkgIdent.Name]
 		if !ok || !logPkgCalls[path][sel.Sel.Name] {
+			return true
+		}
+		// A parameter or variable named log is not the log package.
+		if !isPackageName(fileScopes(ctx), pkgIdent) {
 			return true
 		}
 

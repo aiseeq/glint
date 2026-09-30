@@ -222,11 +222,29 @@ func declaresVar(fields *ast.FieldList, variable *types.Var, info *types.Info) b
 	return false
 }
 
-// fileScopes type-checks one file on its own and returns its definitions and
-// scopes. Imports are not resolved and names from other files of the package
-// are missing, so the checker reports errors; they are expected and ignored:
-// they concern types, not the lexical scopes the rule reads.
+// fileScopesKey keys the single-file check in core.FileShared.
+type fileScopesKey struct{}
+
+// fileScopes type-checks one file on its own and returns its definitions,
+// uses and scopes, once per file for every rule that asks; the result must not
+// be modified. Imports are not resolved and names from other files of the
+// package are missing, so the checker reports errors; they are expected and
+// ignored: they concern types, not the lexical scopes read here. An imported
+// package still gets its name: a qualifier resolves to a *types.PkgName.
 func fileScopes(ctx *core.FileContext) *types.Info {
+	return core.FileShared(ctx, fileScopesKey{}, func() *types.Info { return checkFileScopes(ctx) })
+}
+
+// isPackageName reports whether ident names an imported package in the file
+// the scopes were checked from, and not a local declaration of the same name.
+// The parser's own resolution (ast.Ident.Obj) cannot tell: the project load
+// parses without it.
+func isPackageName(scopes *types.Info, ident *ast.Ident) bool {
+	_, ok := scopes.Uses[ident].(*types.PkgName)
+	return ok
+}
+
+func checkFileScopes(ctx *core.FileContext) *types.Info {
 	info := &types.Info{
 		Defs:   make(map[*ast.Ident]types.Object),
 		Uses:   make(map[*ast.Ident]types.Object),
