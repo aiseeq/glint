@@ -8,15 +8,15 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
-	"github.com/aiseeq/glint/pkg/valueset"
 )
 
 func valueSetDriftFindings(t *testing.T, files map[string]string) []*core.Violation {
 	t.Helper()
 	root, _ := rulestest.Module(t, files)
-	contexts, err := valueset.WalkProject(root)
-	require.NoError(t, err)
+	contexts, errs := core.NewWalker(root, core.DefaultConfig()).WalkSync()
+	require.Empty(t, errs)
 	rule := NewValueSetDriftRule()
+	rule.UseProjectFiles(contexts)
 	var violations []*core.Violation
 	for _, ctx := range contexts {
 		violations = append(violations, rule.AnalyzeFile(ctx)...)

@@ -193,6 +193,15 @@ type ReadsOtherFiles interface {
 	ReadsOtherFiles() bool
 }
 
+// ProjectFilesRule is an optional interface for file rules that compare a
+// file with the rest of the project: before it analyzes a root, the check
+// flow hands them every file of the root, the same contexts the analysis
+// then passes one by one. They are stateful: ResetState drops the files.
+type ProjectFilesRule interface {
+	StatefulRule
+	UseProjectFiles(files []*core.FileContext)
+}
+
 // FileLocal reports whether a rule's findings on a file depend only on that
 // file — its path and content — and the configuration, so that they can be
 // reused while the file is unchanged. Project rules see the whole module,

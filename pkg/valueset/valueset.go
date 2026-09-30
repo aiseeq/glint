@@ -12,6 +12,7 @@ import (
 	"go/token"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -315,10 +316,11 @@ func extractJS(ctx *core.FileContext) []Set {
 			sets = append(sets, set)
 		}
 	}
-	for _, m := range jsUnion.FindAllStringSubmatchIndex(text, -1) {
+	unions, enums := strings.Contains(code, "type "), strings.Contains(code, "enum ")
+	for _, m := range jsMatches(jsUnion, text, unions) {
 		add(m[0], text[m[2]:m[3]], Enum, unquoteAll(jsStrings.FindAllString(text[m[4]:m[5]], -1)))
 	}
-	for _, m := range jsEnum.FindAllStringSubmatchIndex(text, -1) {
+	for _, m := range jsMatches(jsEnum, text, enums) {
 		var values []string
 		for _, v := range jsEnumValue.FindAllStringSubmatch(text[m[4]:m[5]], -1) {
 			values = append(values, unquote(v[1]))
@@ -327,7 +329,9 @@ func extractJS(ctx *core.FileContext) []Set {
 	}
 	for _, m := range jsArray.FindAllStringSubmatchIndex(text, -1) {
 		name := ""
-		if a := jsAssigned.FindStringSubmatch(text[:m[0]]); a != nil {
+		// The name is right before the list: look back a line's length, not
+		// over the whole file for every list.
+		if a := jsAssigned.FindStringSubmatch(text[max(0, m[0]-maxDeclaration):m[0]]); a != nil {
 			name = a[1]
 		}
 		add(m[0], name, List, unquoteAll(jsStrings.FindAllString(text[m[2]:m[3]], -1)))
@@ -371,6 +375,17 @@ func extractJS(ctx *core.FileContext) []Set {
 		}
 	}
 	return sets
+}
+
+// maxDeclaration is how far back from a list its declaration is looked for:
+// const NAME: Type = [
+const maxDeclaration = 200
+
+func jsMatches(re *regexp.Regexp, text string, present bool) [][]int {
+	if !present {
+		return nil
+	}
+	return re.FindAllStringSubmatchIndex(text, -1)
 }
 
 // objectEntries returns the keys and, when every value is a string literal,
@@ -519,63 +534,44 @@ func (idx *Index) Overlapping(set Set, minShared int) map[int]int {
 	return shared
 }
 
-// Source reads the files of a project: every Go and TS/JS file the check
-// walks, test and generated files included.
-type Source func(root string) ([]*core.FileContext, error)
+type setsKey struct{}
 
-type cacheEntry struct {
-	once  sync.Once
-	index *Index
-	err   error
+// FileSets is Extract of a file, done once per file for every rule that asks.
+// The result must not be modified.
+func FileSets(ctx *core.FileContext) []Set {
+	return core.FileShared(ctx, setsKey{}, func() []Set { return Extract(ctx) })
 }
 
-var (
-	cacheMu sync.Mutex
-	cache   = make(map[string]*cacheEntry)
-)
-
-// LoadCached indexes a project's sets once per root for the process.
-func LoadCached(root string, source Source) (*Index, error) {
-	cacheMu.Lock()
-	entry, ok := cache[root]
-	if !ok {
-		entry = &cacheEntry{}
-		cache[root] = entry
-	}
-	cacheMu.Unlock()
-	entry.once.Do(func() {
-		files, err := source(root)
-		if err != nil {
-			entry.err = err
-			return
+// IndexFiles indexes the sets of a project's files. Test files and browser
+// tests are left out: they spell out the values they expect, and a copy
+// there is not one anyone keeps in step.
+func IndexFiles(files []*core.FileContext) *Index {
+	var kept []*core.FileContext
+	for _, file := range files {
+		if !file.IsTestFile() && !strings.Contains("/"+filepath.ToSlash(file.RelPath), "/e2e/") {
+			kept = append(kept, file)
 		}
-		var sets []Set
-		for _, file := range files {
-			if skipped(file) {
-				continue
+	}
+	perFile := make([][]Set, len(kept))
+	var wg sync.WaitGroup
+	next := make(chan int)
+	for range runtime.NumCPU() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				perFile[i] = FileSets(kept[i])
 			}
-			sets = append(sets, Extract(file)...)
-		}
-		entry.index = NewIndex(sets)
-	})
-	return entry.index, entry.err
-}
-
-// skipped is a file whose sets are not a copy anyone keeps in step: tests
-// spell out the values they expect.
-func skipped(file *core.FileContext) bool {
-	return file.IsTestFile() || strings.Contains(filepath.ToSlash(file.RelPath), "/e2e/")
-}
-
-// WalkProject is the Source of a checked project: the files its walker
-// finds under the project's configuration. A file the walker cannot read or
-// parse is left out: the check walks the same tree and reports it itself,
-// and here it only hides the sets it holds.
-func WalkProject(root string) ([]*core.FileContext, error) {
-	cfg, err := core.LoadConfigWithDefaults(root)
-	if err != nil {
-		return nil, err
+		}()
 	}
-	files, _ := core.NewWalker(root, cfg).WalkSync()
-	return files, nil
+	for i := range kept {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	var sets []Set
+	for _, fileSets := range perFile {
+		sets = append(sets, fileSets...)
+	}
+	return NewIndex(sets)
 }
