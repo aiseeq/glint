@@ -71,7 +71,8 @@ func (r *ResponseJSONUnguardedRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 				m := matches[next]
 				next++
 				name := line[m[2]:m[3]]
-				if len(tries) > 0 || !(fetched[name] || responseName.MatchString(name)) || caughtInChain(code, i, m[1]) {
+				isResponse := fetched[name] || responseName.MatchString(name)
+				if len(tries) > 0 || !isResponse || caughtInChain(code, i, m[1]) {
 					continue
 				}
 				if ctx.IsSuppressed(i+1, r.Name()) {
