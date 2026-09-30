@@ -283,6 +283,20 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 				}
 			}
 
+		case *ast.BlockStmt:
+			if loopDepth > 0 && endsInReturn(node) {
+				// A block that returns runs once per loop at most: the
+				// calls in it are no query per iteration. A loop inside
+				// it counts again.
+				saved := loopDepth
+				loopDepth = 0
+				for _, stmt := range node.List {
+					visitLoopPart(stmt, inspect)
+				}
+				loopDepth = saved
+				return false
+			}
+
 		case *ast.FuncLit:
 			return false
 		}
@@ -291,6 +305,15 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 
 	ast.Inspect(ctx.GoAST, inspect)
 	return violations
+}
+
+// endsInReturn reports a block whose last statement returns.
+func endsInReturn(block *ast.BlockStmt) bool {
+	if len(block.List) == 0 {
+		return false
+	}
+	_, ok := block.List[len(block.List)-1].(*ast.ReturnStmt)
+	return ok
 }
 
 // visitNestedLoops runs inspect over the loops inside a body that is not
