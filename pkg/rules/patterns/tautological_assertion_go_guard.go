@@ -115,8 +115,7 @@ func failsAfter(body *ast.BlockStmt, stmt ast.Stmt) bool {
 		if !ok {
 			return true
 		}
-		switch sel.Sel.Name {
-		case "Fatal", "Fatalf", "Error", "Errorf", "Fail", "FailNow":
+		if failingTestMethods[sel.Sel.Name] {
 			found = isTestingHandle(sel.X) || helpers.ExprText(sel.X) == "require" || helpers.ExprText(sel.X) == "assert"
 		}
 		return !found
@@ -264,8 +263,7 @@ func containsGoAssertion(node ast.Node, testify map[string]bool) bool {
 		if pkg, ok := sel.X.(*ast.Ident); ok && testify[pkg.Name] {
 			found = true
 		}
-		switch sel.Sel.Name {
-		case "Error", "Errorf", "Fatal", "Fatalf", "Fail", "FailNow":
+		if failingTestMethods[sel.Sel.Name] {
 			found = found || isTestingHandle(sel.X)
 		}
 		return !found

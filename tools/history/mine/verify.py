@@ -8,12 +8,14 @@ commit itself for kind=introduced (the code the fix left). Reports the rules
 that fire on the lines the commit removed (defect) or added (introduced), +-1.
 Only reads the repository: trees come from git archive.
 
-A manifest (.tsv, `commit kind rule[,rule...] [@path:line]` per line) is the
+A manifest (.tsv, `commit kind rule[,rule...] [@path:line] [whole-tree]` per line) is the
 acceptance of new rules: only the listed rules run, every line is checked
 afresh, and the lines where none of its rules fired are printed as misses;
 the exit status is 1 when there is one. A rule that reports the defect on a
 line the commit did not change (a setter, a line the fix kept) is anchored
-with @path:line in the analyzed tree.
+with @path:line in the analyzed tree. A rule that compares files across the
+repository (a TS set against a Go type) is run with whole-tree: glint checks
+the whole tree from its top instead of each changed file's module.
 """
 import json, os, re, shutil, subprocess, sys
 from collections import defaultdict
@@ -57,7 +59,7 @@ def module_root(path, tree_files):
     return os.path.dirname(path) or '.'
 
 
-def run(commit, tree, side, rules, anchor=None):
+def run(commit, tree, side, rules, anchor=None, whole=False):
     lines = changed_lines(commit, side)
     if anchor:
         path, line = anchor.rsplit(':', 1)
@@ -67,7 +69,7 @@ def run(commit, tree, side, rules, anchor=None):
     tree_files = set(git('ls-tree', '-r', '--name-only', tree).split())
     by_root = defaultdict(list)
     for path in lines:
-        by_root[module_root(path, tree_files)].append(path)
+        by_root['.' if whole else module_root(path, tree_files)].append(path)
     fired = defaultdict(set)
     errors = []
     total = 0
@@ -79,7 +81,7 @@ def run(commit, tree, side, rules, anchor=None):
         shutil.rmtree(dest, ignore_errors=True)
         os.makedirs(dest)
         # Files at the top of the repository come alone, not with the whole tree.
-        paths = by_root[root] if root == '.' else [root]
+        paths = [] if whole else by_root[root] if root == '.' else [root]
         archive = subprocess.run(['git', '-C', repo, 'archive', tree, *paths], capture_output=True, check=True).stdout
         # Historical trees may hold entries tar refuses (a symlink with a file
         # body): skip them, the Go and TS sources extract.
@@ -112,12 +114,16 @@ manifest = cand_path.endswith('.tsv')
 expected = defaultdict(set)
 if manifest:
     anchors = {}
+    whole = set()
     for line in open(cand_path):
         if line.strip() and not line.startswith('#'):
             commit, kind, rules, *rest = line.split()
             expected[(commit, kind)].update(rules.split(','))
-            if rest:
-                anchors[(commit, kind)] = rest[0].lstrip('@')
+            for token in rest:
+                if token == 'whole-tree':
+                    whole.add((commit, kind))
+                else:
+                    anchors[(commit, kind)] = token.lstrip('@')
     dates = {c: git('log', '-1', '--format=%ad', '--date=short', c).strip() for c, _ in expected}
     jobs = sorted((dates[c], c, k) for c, k in expected)
 else:
@@ -140,7 +146,8 @@ with open(out_path, 'a' if not manifest else 'w') as out:
         tree = commit + '^' if kind == 'defect' else commit
         rules = sorted(expected[(commit, kind)]) if manifest else None
         try:
-            res = run(commit, tree, side, rules, anchors.get((commit, kind)) if manifest else None)
+            res = run(commit, tree, side, rules, anchors.get((commit, kind)) if manifest else None,
+                      manifest and (commit, kind) in whole)
         except subprocess.CalledProcessError as e:
             res = {'status': 'error', 'errors': [str(e)[:300]]}
         res.update(commit=commit, kind=kind)

@@ -16,7 +16,9 @@ func init() {
 }
 
 // FinancialConstantsRule detects hardcoded financial constants that should be in config
-// Examples: fees, commissions, rates, percentages in financial context
+// Examples: fees, commissions, rates, percentages in financial context. In
+// TS/JS it reports an object property of a money limit or a fee set to a
+// number ({ minAmount: 10 }): the backend owns the value.
 type FinancialConstantsRule struct {
 	*rules.BaseRule
 }
@@ -55,6 +57,9 @@ func (r *FinancialConstantsRule) shouldSkipFile(path string) bool {
 
 // AnalyzeFile checks for hardcoded financial constants
 func (r *FinancialConstantsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile() {
+		return r.analyzeTS(ctx)
+	}
 	if !ctx.IsGoFile() || !ctx.HasGoAST() {
 		return nil
 	}

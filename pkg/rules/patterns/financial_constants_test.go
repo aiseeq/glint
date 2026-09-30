@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestFinancialConstantsReportsInvalidNumericLiteral(t *testing.T) {
@@ -264,4 +265,24 @@ func TestWithdrawalFee(t *testing.T) {
 	violations := rule.AnalyzeFile(ctx)
 
 	assert.Empty(t, violations, "Test file should have no violations")
+}
+
+// A strategy card that writes the minimum investment itself: the backend
+// raised it, the page kept offering 10.
+func TestFinancialConstantsTypeScript(t *testing.T) {
+	lines := func(path, source string) []int {
+		return violationLines(NewFinancialConstantsRule().AnalyzeFile(rulestest.TextFile(t, path, source)))
+	}
+	assert.Equal(t, []int{2, 3}, lines("web/src/app/invest/page.tsx", `const strategies = useMemo(() => [
+  { id: 'starter', minAmount: 10, title: 'Starter' },
+  { id: 'premium', minInvestment: 100, feePercent: 1.5 },
+], [])
+`))
+	assert.Empty(t, lines("web/src/app/invest/page.tsx", `const form = { minAmount: 0, maxAmount: limits.max }
+const style = { minWidth: 10 }
+`), "zero, a value read from data, a layout property")
+	assert.Empty(t, lines("web/src/app/invest/page.test.tsx", `const s = { minAmount: 10 }
+`), "test code")
+	assert.Empty(t, lines("web/src/config/limits.ts", `export const LIMITS = { minAmount: 10 }
+`), "configuration")
 }
