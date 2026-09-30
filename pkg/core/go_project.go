@@ -51,8 +51,16 @@ type GoProjectContext struct {
 
 	filesByPath map[string]*FileContext
 
-	sharedMu sync.Mutex
-	shared   map[any]*sharedValue
+	// shared holds values built once for this project; loadShared holds
+	// values built once for the load behind it, which other roots of the same
+	// module see too.
+	shared     sharedCache
+	loadShared *sharedCache
+}
+
+type sharedCache struct {
+	mu      sync.Mutex
+	entries map[any]*sharedValue
 }
 
 type sharedValue struct {
@@ -67,16 +75,31 @@ type sharedValue struct {
 // the caller's package, so packages cannot collide. The value must not be
 // modified by its users.
 func Shared[T any](ctx *GoProjectContext, key any, build func() (T, error)) (T, error) {
-	ctx.sharedMu.Lock()
-	if ctx.shared == nil {
-		ctx.shared = make(map[any]*sharedValue)
+	return sharedGet(&ctx.shared, key, build)
+}
+
+// SharedLoad is Shared for a value that depends only on the loaded packages —
+// their syntax, types and SSA — never on which files this root analyzes
+// (Files, GoPackageContext.Files, ProjectRoot). Several roots of one module
+// share one load, so such a value is built once for all of them.
+func SharedLoad[T any](ctx *GoProjectContext, key any, build func() (T, error)) (T, error) {
+	if ctx.loadShared == nil {
+		return sharedGet(&ctx.shared, key, build)
 	}
-	entry, ok := ctx.shared[key]
+	return sharedGet(ctx.loadShared, key, build)
+}
+
+func sharedGet[T any](cache *sharedCache, key any, build func() (T, error)) (T, error) {
+	cache.mu.Lock()
+	if cache.entries == nil {
+		cache.entries = make(map[any]*sharedValue)
+	}
+	entry, ok := cache.entries[key]
 	if !ok {
 		entry = &sharedValue{}
-		ctx.shared[key] = entry
+		cache.entries[key] = entry
 	}
-	ctx.sharedMu.Unlock()
+	cache.mu.Unlock()
 
 	entry.once.Do(func() { entry.value, entry.err = build() })
 	if entry.err != nil {
@@ -149,37 +172,123 @@ type goProjectLoader struct {
 
 // LoadGoProject loads all initial packages below root from the already-read file contents.
 func LoadGoProject(root string, contexts []*FileContext, opts GoProjectOptions) (*GoProjectContext, error) {
-	return loadGoProjectWithOptions(root, contexts, opts, nil)
+	return NewGoProjectLoader().Load(root, contexts, opts)
 }
 
-func loadGoProjectWithOptions(root string, contexts []*FileContext, opts GoProjectOptions, onParse func(string)) (*GoProjectContext, error) {
+// GoProjectLoader loads Go projects for one run. The typed load of a module
+// does not depend on which of its files a root analyzes, so the roots of one
+// module — glint check ./cmd/a ./cmd/b ./internal/c — share a single load:
+// the module is listed, parsed, type-checked and built to SSA once, and each
+// root gets its own view of it.
+type GoProjectLoader struct {
+	onParse func(string)
+
+	mu    sync.Mutex
+	loads map[string]*moduleLoad
+}
+
+// moduleLoad is the typed load of a set of modules, shared by the projects
+// built from it.
+type moduleLoad struct {
+	loader      *goProjectLoader
+	loaded      []*packages.Package
+	skipped     []SkippedPackage
+	program     *ssa.Program
+	ssaPackages []*ssa.Package
+	shared      sharedCache
+}
+
+// NewGoProjectLoader creates a loader with no loads cached.
+func NewGoProjectLoader() *GoProjectLoader {
+	return &GoProjectLoader{loads: make(map[string]*moduleLoad)}
+}
+
+// Load builds the project of root from the given file contexts, reusing a load
+// of the same modules made for an earlier root.
+func (l *GoProjectLoader) Load(root string, contexts []*FileContext, opts GoProjectOptions) (*GoProjectContext, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("make Go project root absolute: %w", err)
 	}
 	absRoot = filepath.Clean(absRoot)
-	fset := token.NewFileSet()
 	overlay, filesByPath, goFiles, err := prepareGoProjectFiles(absRoot, contexts)
 	if err != nil {
 		return nil, err
 	}
-	loader := &goProjectLoader{
-		root:    absRoot,
-		fset:    fset,
-		parsed:  make(map[string]parsedProjectFile),
-		onParse: onParse,
-	}
-
 	moduleDirs, outsideModule, err := goModuleDirs(absRoot, goFiles, opts.TolerateBrokenPackages)
 	if err != nil {
 		return nil, err
 	}
-	loaded, err := loader.loadPackages(moduleDirs, overlay)
+	load, err := l.moduleLoad(absRoot, moduleDirs, overlay, opts)
 	if err != nil {
 		return nil, err
 	}
-	if len(loaded) == 0 && !opts.TolerateBrokenPackages {
+	if len(load.loaded) == 0 && !opts.TolerateBrokenPackages {
 		return nil, fmt.Errorf("load Go packages below %q: no packages found", absRoot)
+	}
+
+	project := &GoProjectContext{
+		ProjectRoot:     absRoot,
+		FileSet:         load.loader.fset,
+		Files:           append([]*FileContext(nil), goFiles...),
+		SkippedPackages: append(append([]SkippedPackage(nil), load.skipped...), outsideModule...),
+		filesByPath:     filesByPath,
+		loadShared:      &load.shared,
+	}
+	compiled, err := attachLoadedGoPackages(project, load.loaded, load.loader.parsed)
+	if err != nil {
+		return nil, err
+	}
+	unparsed, err := attachUncompiledGoFiles(project, load.loader, goFiles, compiled, opts.TolerateBrokenPackages)
+	if err != nil {
+		return nil, err
+	}
+	project.SkippedPackages = append(project.SkippedPackages, unparsed...)
+
+	if opts.RequireSSA && len(load.loaded) > 0 {
+		project.Program = load.program
+		for i, ssaPkg := range load.ssaPackages {
+			project.Packages[i].SSA = ssaPkg
+		}
+	}
+	return project, nil
+}
+
+// moduleLoad returns the load of moduleDirs, making it on first use. A load
+// with an overlay — contents that differ from the disk — belongs to its root
+// alone and is not cached.
+func (l *GoProjectLoader) moduleLoad(root string, moduleDirs []string, overlay map[string][]byte, opts GoProjectOptions) (*moduleLoad, error) {
+	key := fmt.Sprintf("%q ssa=%t tolerate=%t", moduleDirs, opts.RequireSSA, opts.TolerateBrokenPackages)
+	if len(overlay) == 0 {
+		l.mu.Lock()
+		cached, ok := l.loads[key]
+		l.mu.Unlock()
+		if ok {
+			return cached, nil
+		}
+	}
+	load, err := newModuleLoad(root, moduleDirs, overlay, opts, l.onParse)
+	if err != nil {
+		return nil, err
+	}
+	if len(overlay) == 0 {
+		l.mu.Lock()
+		l.loads[key] = load
+		l.mu.Unlock()
+	}
+	return load, nil
+}
+
+func newModuleLoad(root string, moduleDirs []string, overlay map[string][]byte, opts GoProjectOptions, onParse func(string)) (*moduleLoad, error) {
+	loader := &goProjectLoader{
+		root:    root,
+		fset:    token.NewFileSet(),
+		parsed:  make(map[string]parsedProjectFile),
+		onParse: onParse,
+	}
+	loaded, err := loader.loadPackages(moduleDirs, overlay)
+	if err != nil {
+		return nil, err
 	}
 	sort.Slice(loaded, func(i, j int) bool {
 		if loaded[i] == nil || loaded[j] == nil {
@@ -190,37 +299,35 @@ func loadGoProjectWithOptions(root string, contexts []*FileContext, opts GoProje
 		}
 		return loaded[i].ID < loaded[j].ID
 	})
-	healthy, skipped := partitionLoadedPackages(loaded, fset)
+	healthy, skipped := partitionLoadedPackages(loaded, loader.fset)
 	if len(skipped) > 0 && !opts.TolerateBrokenPackages {
 		return nil, brokenPackagesError(skipped)
 	}
-	loaded = healthy
-	skipped = append(skipped, outsideModule...)
-
-	project := &GoProjectContext{
-		ProjectRoot:     absRoot,
-		FileSet:         fset,
-		Files:           append([]*FileContext(nil), goFiles...),
-		SkippedPackages: skipped,
-		filesByPath:     filesByPath,
-	}
-	compiled, err := attachLoadedGoPackages(project, loaded, loader.parsed)
-	if err != nil {
-		return nil, err
-	}
-	unparsed, err := attachUncompiledGoFiles(project, loader, goFiles, compiled, opts.TolerateBrokenPackages)
-	if err != nil {
-		return nil, err
-	}
-	project.SkippedPackages = append(project.SkippedPackages, unparsed...)
-
-	if opts.RequireSSA && len(loaded) > 0 {
-		if err := attachGoSSA(project, loaded); err != nil {
+	load := &moduleLoad{loader: loader, loaded: healthy, skipped: skipped}
+	if opts.RequireSSA && len(healthy) > 0 {
+		if err := load.buildSSA(); err != nil {
 			return nil, err
 		}
 	}
+	return load, nil
+}
 
-	return project, nil
+func (load *moduleLoad) buildSSA() error {
+	program, ssaPackages := ssautil.Packages(load.loaded, ssa.InstantiateGenerics)
+	if program == nil {
+		return errors.New("build Go SSA: ssautil returned a nil program")
+	}
+	if len(ssaPackages) != len(load.loaded) {
+		return fmt.Errorf("build Go SSA: got %d packages for %d initial packages", len(ssaPackages), len(load.loaded))
+	}
+	for i, ssaPkg := range ssaPackages {
+		if ssaPkg == nil {
+			return fmt.Errorf("build Go SSA for package %q: nil SSA package", load.loaded[i].ID)
+		}
+	}
+	program.Build()
+	load.program, load.ssaPackages = program, ssaPackages
+	return nil
 }
 
 // goModuleDirs resolves the modules that own the analyzed files. With tolerate
@@ -432,25 +539,6 @@ func attachUncompiledGoFiles(project *GoProjectContext, loader *goProjectLoader,
 		fileCtx.SetGoAST(project.FileSet, file)
 	}
 	return unparsed, nil
-}
-
-func attachGoSSA(project *GoProjectContext, loaded []*packages.Package) error {
-	program, ssaPackages := ssautil.Packages(loaded, ssa.InstantiateGenerics)
-	if program == nil {
-		return errors.New("build Go SSA: ssautil returned a nil program")
-	}
-	if len(ssaPackages) != len(project.Packages) {
-		return fmt.Errorf("build Go SSA: got %d packages for %d initial packages", len(ssaPackages), len(project.Packages))
-	}
-	project.Program = program
-	for i, ssaPkg := range ssaPackages {
-		if ssaPkg == nil {
-			return fmt.Errorf("build Go SSA for package %q: nil SSA package", loaded[i].ID)
-		}
-		project.Packages[i].SSA = ssaPkg
-	}
-	program.Build()
-	return nil
 }
 
 func absoluteContextPath(root string, ctx *FileContext) (string, error) {

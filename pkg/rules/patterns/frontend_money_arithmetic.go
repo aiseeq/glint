@@ -84,13 +84,17 @@ func (r *FrontendMoneyArithmeticRule) AnalyzeFile(ctx *core.FileContext) []*core
 		if trimmed == "" || strings.HasPrefix(trimmed, "*") {
 			continue
 		}
-		if r.isSameFieldComparator(line) {
+		// Needles before the regexps: a parse calls parseFloat or Number, an
+		// accumulation assigns with += or -=.
+		parses := strings.Contains(line, "parseFloat") || strings.Contains(line, "Number")
+		accumulates := strings.Contains(line, "+=") || strings.Contains(line, "-=")
+		if parses && r.isSameFieldComparator(line) {
 			continue
 		}
 
-		if r.lineHasParsedMoneyArithmetic(line) ||
+		if (parses && r.lineHasParsedMoneyArithmetic(line)) ||
 			(strings.Contains(line, r.reduceMarker) && r.reduceRawSum.MatchString(line)) ||
-			r.isMoneyAccumulation(line) {
+			(accumulates && r.isMoneyAccumulation(line)) {
 			v := r.CreateViolation(ctx.RelPath, i+1,
 				"Client-side arithmetic over a money value — financial aggregates must be computed on the backend")
 			v.WithCode(trimmed)

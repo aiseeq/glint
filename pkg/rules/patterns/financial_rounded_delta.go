@@ -68,20 +68,26 @@ func (r *FinancialRoundedDeltaRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 			continue
 		}
 
-		if r.deltaContext.MatchString(line) && r.subtractsParsedMoneyFields(line) {
+		// Needles before the regexps: every delta subtracts, and every parse
+		// calls Number or parseFloat.
+		subtracts := strings.Contains(line, "-")
+		parses := strings.Contains(line, "Number") || strings.Contains(line, "parseFloat")
+		if subtracts && parses && r.deltaContext.MatchString(line) && r.subtractsParsedMoneyFields(line) {
 			violations = append(violations, r.violation(ctx, i+1, line))
 			continue
 		}
 
-		if matches := r.parseAssign.FindStringSubmatch(line); len(matches) == 3 {
-			name := matches[1]
-			expr := matches[2]
-			if cumulativeMoneyField(name) || cumulativeMoneyField(expr) {
-				parsedFinancialVars[name] = true
+		if parses {
+			if matches := r.parseAssign.FindStringSubmatch(line); len(matches) == 3 {
+				name := matches[1]
+				expr := matches[2]
+				if cumulativeMoneyField(name) || cumulativeMoneyField(expr) {
+					parsedFinancialVars[name] = true
+				}
 			}
 		}
 
-		if !strings.Contains(line, "-") {
+		if !subtracts || len(parsedFinancialVars) == 0 {
 			continue
 		}
 		if r.deltaContext.MatchString(line) && r.subtractsParsedFinancialVars(line, parsedFinancialVars) {

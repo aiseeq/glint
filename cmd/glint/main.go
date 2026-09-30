@@ -222,6 +222,8 @@ func runCheck(_ *cobra.Command, args []string) error {
 	}
 
 	findings := newFindingSet()
+	// Roots of one Go module share its typed load.
+	loader := core.NewGoProjectLoader()
 	analyzedFiles := make(map[string]struct{})
 	var stats output.Stats
 	outputFormat := ""
@@ -243,7 +245,7 @@ func runCheck(_ *cobra.Command, args []string) error {
 		}
 
 		loadDone := timings.phase("load " + projectRoot)
-		contexts, walker, project, err := prepareAnalysis(projectRoot, cfg, enabledRules)
+		contexts, walker, project, err := prepareAnalysis(loader, projectRoot, cfg, enabledRules)
 		loadDone()
 		if err != nil {
 			return err
@@ -493,7 +495,7 @@ func walkWithWalker(walker *core.Walker) ([]*core.FileContext, *core.Walker, err
 	return contexts, walker, nil
 }
 
-func prepareAnalysis(projectRoot string, cfg *core.Config, enabledRules []rules.Rule) ([]*core.FileContext, *core.Walker, *core.GoProjectContext, error) {
+func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core.Config, enabledRules []rules.Rule) ([]*core.FileContext, *core.Walker, *core.GoProjectContext, error) {
 	projectRuleCount := 0
 	requireSSA := false
 	for _, rule := range enabledRules {
@@ -515,7 +517,7 @@ func prepareAnalysis(projectRoot string, cfg *core.Config, enabledRules []rules.
 	if projectRuleCount == 0 || !hasGoFiles(contexts) {
 		return contexts, walker, nil, nil
 	}
-	project, err := core.LoadGoProject(projectRoot, contexts, core.GoProjectOptions{
+	project, err := loader.Load(projectRoot, contexts, core.GoProjectOptions{
 		RequireSSA:             requireSSA,
 		TolerateBrokenPackages: flagTolerant,
 	})
@@ -1121,7 +1123,7 @@ func applyFixesUntilStable(projectRoot string, cfg *core.Config, fixableRules []
 // rules run, configuration exceptions and inline suppressions are honored — and
 // returns the fixes for what it finds. Files are read afresh on every call.
 func collectFixes(projectRoot string, cfg *core.Config, fixableRules []rules.Rule, engine *fix.Engine) ([]*fix.Fix, error) {
-	contexts, _, project, err := prepareAnalysis(projectRoot, cfg, fixableRules)
+	contexts, _, project, err := prepareAnalysis(core.NewGoProjectLoader(), projectRoot, cfg, fixableRules)
 	if err != nil {
 		return nil, err
 	}

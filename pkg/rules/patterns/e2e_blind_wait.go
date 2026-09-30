@@ -148,7 +148,7 @@ func (r *E2EBlindWaitRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 	nav := newNavState()
 	// Waits and URLs are read with their string arguments, comments blanked;
 	// brace depth is counted on code alone.
-	src := newJSSource(ctx.Lines)
+	src := newJSSource(ctx)
 
 	for i, line := range src.text {
 		trimmed := strings.TrimSpace(line)

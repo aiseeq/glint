@@ -317,6 +317,74 @@ func Same(a, b point) bool {
 	assert.Empty(t, violations)
 }
 
+// A struct handed over as an empty interface is compared or hashed as the
+// interface's dynamic value: a context key, a key of a map[any]. Every field
+// is read then, although no selector names it.
+func TestUnusedFieldIgnoresStructPassedAsEmptyInterface(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"cache.go": `package cache
+
+type ctxKey struct{ name string }
+
+type entryKey struct{ literal bool }
+
+var values = map[any]int{}
+
+func store(key any, v int) { values[key] = v }
+
+func Save(v int) {
+	store(ctxKey{name: "user"}, v)
+	values[entryKey{literal: true}] = v
+}
+`,
+	})
+
+	assert.Empty(t, violations)
+}
+
+// Formatting or logging a struct through ...any prints its fields and uses
+// none of them.
+func TestUnusedFieldReportsStructPassedToVariadicAny(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"cache.go": `package cache
+
+import "fmt"
+
+type settings struct{ retries int }
+
+func Describe() string { return fmt.Sprint(settings{retries: 3}) }
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "retries")
+}
+
+// An interface with methods is used through them: the methods read what they
+// need, and a field no method reads stays dead.
+func TestUnusedFieldReportsStructPassedAsMethodInterface(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"cache.go": `package cache
+
+type namer interface{ Name() string }
+
+type user struct {
+	name  string
+	cache string
+}
+
+func (u user) Name() string { return u.name }
+
+func show(n namer) string { return n.Name() }
+
+func Show() string { return show(user{name: "a", cache: "b"}) }
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "cache")
+}
+
 func TestUnusedFieldMetadata(t *testing.T) {
 	rule := NewUnusedFieldRule()
 	assert.Equal(t, "unused-field", rule.Name())

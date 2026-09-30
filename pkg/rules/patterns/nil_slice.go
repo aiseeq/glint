@@ -49,11 +49,20 @@ func (r *NilSliceRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; a variable declared anywhere in the
 // project is judged by its declared type and declaration.
 func (r *NilSliceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	nilArgs := parametersPassedNil(ctx)
+	nilArgs, err := core.SharedLoad(ctx, parametersPassedNilKey{}, func() (map[types.Object]bool, error) {
+		return parametersPassedNil(ctx), nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(fileCtx, info, ctx, nilArgs)
 	})
 }
+
+// parametersPassedNilKey caches parametersPassedNil once per module load: it
+// reads every loaded package, whichever files the run analyzes.
+type parametersPassedNilKey struct{}
 
 // parametersPassedNil returns the parameters some call of the project sets
 // to a literal nil: for them nil is part of the function's contract, "none

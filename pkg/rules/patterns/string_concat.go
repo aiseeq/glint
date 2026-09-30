@@ -47,16 +47,26 @@ func (r *StringConcatRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; with type information the accumulator
 // is judged by its type.
 func (r *StringConcatRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	fixedTables := make(map[*types.Info]map[types.Object]bool)
-	for _, pkg := range ctx.Packages {
-		if pkg != nil && pkg.Package != nil && pkg.Package.TypesInfo != nil {
-			fixedTables[pkg.Package.TypesInfo] = smallFixedTables(pkg.Package.Syntax, pkg.Package.TypesInfo)
+	fixedTables, err := core.SharedLoad(ctx, fixedTablesKey{}, func() (map[*types.Info]map[types.Object]bool, error) {
+		fixedTables := make(map[*types.Info]map[types.Object]bool)
+		for _, pkg := range ctx.Packages {
+			if pkg != nil && pkg.Package != nil && pkg.Package.TypesInfo != nil {
+				fixedTables[pkg.Package.TypesInfo] = smallFixedTables(pkg.Package.Syntax, pkg.Package.TypesInfo)
+			}
 		}
+		return fixedTables, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(fileCtx, info, fixedTables[info])
 	})
 }
+
+// fixedTablesKey caches the small fixed tables of every loaded package once
+// per module load.
+type fixedTablesKey struct{}
 
 // maxFixedLoop is the most iterations a loop fixed in the source may have for
 // its concatenations to go unreported.

@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -75,7 +76,7 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		comment := commentTextOfLine(line)
 		// Words every tombstone match holds: most comments are ruled out
 		// without running the regexps.
-		if comment == "" || !containsAny(strings.ToLower(comment), tombstoneNeedles) || r.policyLine.MatchString(comment) {
+		if comment == "" || !helpers.ContainsAny(strings.ToLower(comment), tombstoneNeedles) || r.policyLine.MatchString(comment) {
 			continue
 		}
 		if ctx.IsGoFile() && strings.HasPrefix(comment, "\t") {

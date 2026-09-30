@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -260,7 +261,7 @@ var frontendRescan = regexp.MustCompile(`while\s*\(\s*([\w.]+)\.(?:includes|inde
 // where a collection is scanned by method calls rather than by range.
 func (r *QuadraticLoopRule) analyzeFrontend(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
-	src := newJSSource(ctx.Lines)
+	src := newJSSource(ctx)
 
 	for i := 0; i < len(ctx.Lines); i++ {
 		line := ctx.Lines[i]
@@ -268,7 +269,11 @@ func (r *QuadraticLoopRule) analyzeFrontend(ctx *core.FileContext) []*core.Viola
 		// items.map(...).filter(...) — walks the result of the previous step,
 		// and a second statement further down is a separate pass, not a nested
 		// one.
-		if collection, ok := frontendScanned(line); ok && strings.HasSuffix(strings.TrimSpace(line), "{") {
+		collection, scans := "", false
+		if strings.HasSuffix(strings.TrimSpace(line), "{") {
+			collection, scans = frontendScanned(line)
+		}
+		if scans {
 			block, end, closed := jsBlockAt(src, i, 0)
 			if !closed {
 				continue
@@ -277,6 +282,9 @@ func (r *QuadraticLoopRule) analyzeFrontend(ctx *core.FileContext) []*core.Viola
 				violations = append(violations, r.frontendNested(ctx, i+1, collection, inner))
 			}
 			i = end
+			continue
+		}
+		if !strings.Contains(line, "while") {
 			continue
 		}
 		if match := frontendRescan.FindStringSubmatch(line); match != nil {
@@ -311,8 +319,15 @@ func (r *QuadraticLoopRule) frontendRescan(ctx *core.FileContext, line int, subj
 	return v
 }
 
+// frontendScanNeedles are texts one of which every frontendScanStart match
+// contains; ".forEach" contains "for".
+var frontendScanNeedles = []string{"for", ".map", ".filter", ".some", ".every", ".find", ".reduce"}
+
 // frontendScanned returns the collection a line starts walking over.
 func frontendScanned(line string) (string, bool) {
+	if !helpers.ContainsAny(line, frontendScanNeedles) {
+		return "", false
+	}
 	match := frontendScanStart.FindStringSubmatch(line)
 	if match == nil {
 		return "", false

@@ -58,7 +58,7 @@ func (r *ReactRemountKeyRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 
 	// Structure only: tags, braces and attributes inside comments or string
 	// literals are not markup.
-	code := helpers.MaskJSCommentsAndStrings(ctx.Lines)
+	code := helpers.FileJSCode(ctx)
 
 	var violations []*core.Violation
 	for i, line := range code {

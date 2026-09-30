@@ -48,7 +48,7 @@ func (r *FrontendSilentCatchRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 	}
 
 	// Structure only: a brace or a "throw" inside a string or a comment is not code.
-	code := helpers.MaskJSCommentsAndStrings(ctx.Lines)
+	code := helpers.FileJSCode(ctx)
 
 	var violations []*core.Violation
 	for i, line := range code {

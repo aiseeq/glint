@@ -344,3 +344,69 @@ func TestSharedBuildsOncePerProject(t *testing.T) {
 	_, err := Shared(project, key{}, func() (string, error) { return "", nil })
 	require.Error(t, err, "a key built with another type is an error")
 }
+
+// loadGoProjectWithOptions loads a project with a hook that sees every file
+// the loader parses.
+func loadGoProjectWithOptions(root string, contexts []*FileContext, opts GoProjectOptions, onParse func(string)) (*GoProjectContext, error) {
+	loader := NewGoProjectLoader()
+	loader.onParse = onParse
+	return loader.Load(root, contexts, opts)
+}
+
+// Two roots of one module share one load: every file is parsed once, both
+// projects see the whole module's packages and SSA, each attaches only its
+// own files, and load-wide values are built once while per-root ones are not.
+func TestGoProjectLoaderSharesModuleLoadAcrossRoots(t *testing.T) {
+	root, _ := writeGoModule(t, map[string]string{
+		"a/a.go": "package a\n\nfunc A() int { return 1 }\n",
+		"b/b.go": "package b\n\nimport \"example.com/project/a\"\n\nfunc B() int { return a.A() }\n",
+	})
+	contextsOf := func(dir string) []*FileContext {
+		name := filepath.Join(dir, dir+".go")
+		content, err := os.ReadFile(filepath.Join(root, name))
+		require.NoError(t, err)
+		ctx, err := NewFileContextChecked(filepath.Join(root, name), filepath.Join(root, dir), content, DefaultConfig())
+		require.NoError(t, err)
+		return []*FileContext{ctx}
+	}
+
+	parses := make(map[string]int)
+	var mu sync.Mutex
+	loader := NewGoProjectLoader()
+	loader.onParse = func(path string) {
+		mu.Lock()
+		parses[path]++
+		mu.Unlock()
+	}
+	opts := GoProjectOptions{RequireSSA: true}
+	projectA, err := loader.Load(filepath.Join(root, "a"), contextsOf("a"), opts)
+	require.NoError(t, err)
+	projectB, err := loader.Load(filepath.Join(root, "b"), contextsOf("b"), opts)
+	require.NoError(t, err)
+
+	for path, count := range parses {
+		assert.Equal(t, 1, count, "parse count for %s", path)
+	}
+	assert.Same(t, projectA.Program, projectB.Program)
+	require.Len(t, projectA.Packages, 2)
+	require.Len(t, projectB.Packages, 2)
+	assert.Equal(t, "a.go", projectA.Files[0].RelPath)
+	assert.Equal(t, "b.go", projectB.Files[0].RelPath)
+	for _, pkg := range projectB.Packages {
+		for _, file := range pkg.Files {
+			assert.Equal(t, "b.go", file.RelPath, "a root attaches only its own files")
+		}
+	}
+
+	type loadKey struct{}
+	type rootKey struct{}
+	loadBuilds, rootBuilds := 0, 0
+	for _, project := range []*GoProjectContext{projectA, projectB} {
+		_, err := SharedLoad(project, loadKey{}, func() (int, error) { loadBuilds++; return 0, nil })
+		require.NoError(t, err)
+		_, err = Shared(project, rootKey{}, func() (int, error) { rootBuilds++; return 0, nil })
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, loadBuilds)
+	assert.Equal(t, 2, rootBuilds)
+}

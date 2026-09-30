@@ -328,7 +328,7 @@ func (r *ErrorCauseDroppedRule) goViolation(ctx *core.FileContext, call *ast.Cal
 
 func (r *ErrorCauseDroppedRule) analyzeTS(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
-	src := newJSSource(ctx.Lines)
+	src := newJSSource(ctx)
 	for i := 0; i < len(src.code); i++ {
 		loc := r.catchStart.FindStringSubmatchIndex(src.code[i])
 		if loc == nil {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -142,7 +143,7 @@ func (r *RedundantCompatibilityRule) detectFalseCompatibilityComments(ctx *core.
 
 		commentIdx := strings.Index(line, "//")
 		comment := line[commentIdx:]
-		if !containsAny(strings.ToLower(comment), compatibilityNeedles) {
+		if !helpers.ContainsAny(strings.ToLower(comment), compatibilityNeedles) {
 			continue
 		}
 

@@ -201,8 +201,19 @@ func (r *TypedNilIntoInterfaceRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 		}
 	}
 
-	stores := newParamStores(ctx)
-	checkedInterfaces := nilCheckedInterfaces(ctx)
+	decls, err := core.SharedLoad(ctx, paramStoresDeclsKey{}, func() (map[*types.Func]paramStoresDecl, error) {
+		return collectParamStoresDecls(ctx), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	stores := &paramStores{decls: decls, results: make(map[paramStoresKey]bool)}
+	checkedInterfaces, err := core.SharedLoad(ctx, nilCheckedInterfacesKey{}, func() (*typeutil.Map, error) {
+		return nilCheckedInterfaces(ctx), nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	var violations []*core.Violation
 	for _, pkgCtx := range ctx.Packages {
 		if pkgCtx == nil || pkgCtx.Package == nil {
@@ -317,6 +328,10 @@ func rejectsBranch(pkg *packages.Package, block *ast.BlockStmt) bool {
 	}
 	return false
 }
+
+// nilCheckedInterfacesKey caches nilCheckedInterfaces once per module load: it
+// reads every loaded package, whichever files the run analyzes.
+type nilCheckedInterfacesKey struct{}
 
 // nilCheckedInterfaces collects the interface types whose values some code of
 // the project compares with nil. A typed nil fools only such a check.
@@ -728,11 +743,12 @@ type paramStoresKey struct {
 	index int
 }
 
-func newParamStores(ctx *core.GoProjectContext) *paramStores {
-	stores := &paramStores{
-		decls:   make(map[*types.Func]paramStoresDecl),
-		results: make(map[paramStoresKey]bool),
-	}
+// paramStoresDeclsKey caches the function declarations of every loaded
+// package once per module load; the memoized answers stay per run.
+type paramStoresDeclsKey struct{}
+
+func collectParamStoresDecls(ctx *core.GoProjectContext) map[*types.Func]paramStoresDecl {
+	decls := make(map[*types.Func]paramStoresDecl)
 	for _, pkgCtx := range ctx.Packages {
 		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
 			continue
@@ -745,12 +761,12 @@ func newParamStores(ctx *core.GoProjectContext) *paramStores {
 					continue
 				}
 				if obj, ok := info.Defs[fn.Name].(*types.Func); ok {
-					stores.decls[obj] = paramStoresDecl{decl: fn, info: info}
+					decls[obj] = paramStoresDecl{decl: fn, info: info}
 				}
 			}
 		}
 	}
-	return stores
+	return decls
 }
 
 // storesParam reports whether fn keeps its index-th argument; an argument past

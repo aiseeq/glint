@@ -80,7 +80,12 @@ func (r *ConfigValueFallbackRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 	if ctx == nil {
 		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
-	tests := collectUnsetTests(ctx)
+	tests, err := core.SharedLoad(ctx, unsetTestsKey{}, func() (unsetTests, error) {
+		return collectUnsetTests(ctx), nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(fileCtx, info, tests)
 	})
@@ -92,6 +97,10 @@ func (r *ConfigValueFallbackRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 // (x.f != "" && !x.Args). A test that is the whole condition of an if is a
 // default or a validation and is not recorded.
 type unsetTests map[token.Pos]bool
+
+// unsetTestsKey caches collectUnsetTests once per module load: it reads every
+// loaded package, whichever files the run analyzes.
+type unsetTestsKey struct{}
 
 func collectUnsetTests(ctx *core.GoProjectContext) unsetTests {
 	tests := make(unsetTests)

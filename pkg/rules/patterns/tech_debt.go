@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -30,6 +31,14 @@ type debtPattern struct {
 	severity    core.Severity
 	description string
 	suggestion  string
+}
+
+// techDebtNeedles are lower-case texts one of which every pattern match
+// contains: a comment holding none of them is not matched against the regexps.
+var techDebtNeedles = []string{
+	"code", "instead", "вместо", "temp", "временн", "quick", "hotfix", "work",
+	"refactor", "рефакторинг", "dead", "used", "никогда", "broken", "работ",
+	"сломан", "ignore", "игнорир", "wip", "finished", "incomplete", "незаверш",
 }
 
 // NewTechDebtRule creates the rule
@@ -129,6 +138,9 @@ func (r *TechDebtRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			continue
 		}
 
+		if !helpers.ContainsAny(strings.ToLower(line), techDebtNeedles) {
+			continue
+		}
 		if documentsIdentifier(ctx.Lines, lineNum) {
 			continue
 		}

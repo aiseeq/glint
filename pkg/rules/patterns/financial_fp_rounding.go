@@ -101,6 +101,13 @@ func (r *FinancialFPRoundingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 		if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
 			continue
 		}
+		// Every rounding call names the math package: the needle comes before
+		// the regexps.
+		roundsJS := isTSJS && strings.Contains(line, "Math.")
+		roundsGo := isGo && strings.Contains(line, "math.")
+		if !roundsJS && !roundsGo {
+			continue
+		}
 		if r.hasEpsilon.MatchString(line) {
 			continue
 		}

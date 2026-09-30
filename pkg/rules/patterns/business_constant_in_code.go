@@ -94,42 +94,25 @@ func (r *BusinessConstantInCodeRule) AnalyzeGoProject(ctx *core.GoProjectContext
 		return nil, errors.New("business-constant-in-code: project has no file set")
 	}
 
-	uses := make(map[*types.Const]businessUse)
+	index, err := core.SharedLoad(ctx, businessConstantIndexKey{}, func() (*businessConstantIndex, error) {
+		return r.buildIndex(ctx)
+	})
+	if err != nil {
+		return nil, err
+	}
 	analyzed := make(map[string]bool)
-	settings := newSettingDefaults()
 	for _, pkg := range ctx.Packages {
-		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
-			return nil, errors.New("business-constant-in-code: package has no typed syntax")
-		}
 		for _, fileCtx := range pkg.Files {
 			if !fileCtx.IsTestFile() {
 				analyzed[fileCtx.Path] = true
 			}
 		}
-		info := pkg.Package.TypesInfo
-		for _, file := range pkg.Package.Syntax {
-			ast.Inspect(file, func(n ast.Node) bool {
-				switch node := n.(type) {
-				case *ast.FuncDecl:
-					settings.recordReader(info, node)
-				case *ast.CallExpr:
-					settings.recordCall(info, node)
-					for _, use := range r.businessArgs(info, node) {
-						if prev, seen := uses[use.obj]; !seen || use.pos < prev.pos {
-							uses[use.obj] = businessUse{pos: use.pos, kind: use.kind}
-						}
-					}
-				}
-				return true
-			})
-		}
 	}
-	configurable := settings.defaults()
 
 	var violations []*core.Violation
-	for obj, use := range uses {
+	for obj, use := range index.uses {
 		declared := ctx.FileSet.Position(obj.Pos())
-		if !analyzed[declared.Filename] || configurable[obj] {
+		if !analyzed[declared.Filename] || index.configurable[obj] {
 			continue
 		}
 		at := ctx.FileSet.Position(use.pos)
@@ -150,6 +133,45 @@ func (r *BusinessConstantInCodeRule) AnalyzeGoProject(ctx *core.GoProjectContext
 		return violations[i].Message < violations[j].Message
 	})
 	return violations, nil
+}
+
+// businessConstantIndexKey caches the business uses once per module load: they
+// are collected across all loaded packages, whichever files the run analyzes.
+type businessConstantIndexKey struct{}
+
+// businessConstantIndex holds the earliest business use of each package-level
+// constant and the constants that serve as defaults of configurable settings.
+type businessConstantIndex struct {
+	uses         map[*types.Const]businessUse
+	configurable map[*types.Const]bool
+}
+
+func (r *BusinessConstantInCodeRule) buildIndex(ctx *core.GoProjectContext) (*businessConstantIndex, error) {
+	uses := make(map[*types.Const]businessUse)
+	settings := newSettingDefaults()
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
+			return nil, errors.New("business-constant-in-code: package has no typed syntax")
+		}
+		info := pkg.Package.TypesInfo
+		for _, file := range pkg.Package.Syntax {
+			ast.Inspect(file, func(n ast.Node) bool {
+				switch node := n.(type) {
+				case *ast.FuncDecl:
+					settings.recordReader(info, node)
+				case *ast.CallExpr:
+					settings.recordCall(info, node)
+					for _, use := range r.businessArgs(info, node) {
+						if prev, seen := uses[use.obj]; !seen || use.pos < prev.pos {
+							uses[use.obj] = businessUse{pos: use.pos, kind: use.kind}
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	return &businessConstantIndex{uses: uses, configurable: settings.defaults()}, nil
 }
 
 // constantText prints an integer exactly and a float as a decimal: an exact

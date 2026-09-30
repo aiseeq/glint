@@ -115,6 +115,12 @@ func (r *LegacyCommentMarkerRule) tryMatch(ctx *core.FileContext, lineNum int, l
 		return nil
 	}
 
+	// Every finding holds the word; the directive and quote checks below only
+	// take findings away.
+	if !strings.Contains(strings.ToLower(commentText), "legacy") {
+		return nil
+	}
+
 	// Suppression directives name rules (nolint:legacy-identifier,
 	// legacy-identifier: safe); naming a rule admits nothing about the code.
 	lower := suppressionDirectiveRE.ReplaceAllString(strings.ToLower(commentText), " ")

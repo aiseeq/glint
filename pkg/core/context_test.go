@@ -4,6 +4,8 @@ import (
 	"go/parser"
 	"go/token"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -343,4 +345,22 @@ func TestFileContextIsGenerated(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFileSharedBuildsOncePerFile(t *testing.T) {
+	type key struct{}
+	file := &FileContext{Lines: []string{"a", "b"}}
+	var builds atomic.Int32
+	build := func() int { builds.Add(1); return len(file.Lines) }
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() { assert.Equal(t, 2, FileShared(file, key{}, build)) })
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), builds.Load())
+
+	other := &FileContext{Lines: []string{"c"}}
+	assert.Equal(t, 1, FileShared(other, key{}, func() int { return len(other.Lines) }), "each file has its own cache")
+	assert.Panics(t, func() { FileShared(file, key{}, func() string { return "" }) }, "a key built with another type is a programming error")
 }
