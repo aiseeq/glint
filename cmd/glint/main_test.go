@@ -342,6 +342,31 @@ func TestPrepareAnalysisSkipsGoProjectForTreeWithoutGoFiles(t *testing.T) {
 	}
 }
 
+// A tolerated load in which no package type-checks — a lone Go file outside
+// any module — leaves the project rules nothing typed to analyze: every rule
+// reports nothing instead of failing the run.
+func TestAnalyzeProjectWithEveryPackageSkipped(t *testing.T) {
+	prev := flagTolerant
+	t.Cleanup(func() { flagTolerant = prev })
+	flagTolerant = true
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "tool.go"), []byte("package main\n\nfunc main() {}\n"), 0644); err != nil {
+		t.Fatalf("write tool.go: %v", err)
+	}
+	all := rules.All()
+
+	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), all, false)
+	if err != nil {
+		t.Fatalf("prepare analysis: %v", err)
+	}
+	if prepared.project == nil || len(prepared.project.SkippedPackages) == 0 {
+		t.Fatal("the fixture must leave every package skipped")
+	}
+	if _, err := analyzeProject(prepared.contexts, all, core.DefaultConfig(), prepared.project, nil); err != nil {
+		t.Fatalf("analyze a project without typed packages: %v", err)
+	}
+}
+
 func TestAnalyzeProjectFiltersPackageFindings(t *testing.T) {
 	tests := []struct {
 		name   string

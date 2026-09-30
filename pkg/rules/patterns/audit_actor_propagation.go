@@ -150,6 +150,11 @@ func (r *AuditActorPropagationRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 		return nil, errors.New("audit actor propagation: nil Go project context")
 	}
 	if ctx.Program == nil {
+		// A tolerated load in which no package type-checked has no SSA to
+		// follow; typed packages without SSA are a loader fault.
+		if len(ctx.Packages) == 0 {
+			return nil, nil
+		}
 		return nil, errors.New("audit actor propagation: Go project has no SSA program")
 	}
 	if ctx.FileSet == nil {
