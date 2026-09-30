@@ -70,6 +70,49 @@ func BuildNightly() *Service {
 			expectMsg:   "1 of 2 construction sites",
 		},
 		{
+			// A log line before the return tells an operator, not the
+			// caller: the feature is still off and the call still succeeds.
+			name: "guard logs before the silent return",
+			service: `package svc
+
+import "log/slog"
+
+type Alerter interface{ Send() error }
+
+type Service struct {
+	name    string
+	alerter Alerter
+	logger  *slog.Logger
+}
+
+func NewService(name string) *Service { return &Service{name: name, logger: slog.Default()} }
+
+func (s *Service) SetAlerter(a Alerter) { s.alerter = a }
+
+func (s *Service) Report() error {
+	if s.alerter == nil {
+		s.logger.Warn("alerter not configured, report goes nowhere")
+		return nil
+	}
+	return s.alerter.Send()
+}
+`,
+			wiring: `package svc
+
+func BuildReporting(a Alerter) *Service {
+	s := NewService("reporting")
+	s.SetAlerter(a)
+	return s
+}
+
+func BuildNightly() *Service {
+	return NewService("nightly")
+}
+`,
+			expectField: "alerter",
+			expectMsg:   "1 of 2 construction sites",
+		},
+		{
 			// Сеттер зовут на каждой сборке — сервис собран правильно.
 			name:    "every construction site calls the setter",
 			service: serviceSource,
