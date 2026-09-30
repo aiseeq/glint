@@ -516,6 +516,10 @@ func (s *Schema) alter(stmt *pgquery.AlterTableStmt) {
 			table.applyConstraint(cmd.GetDef().GetConstraint())
 		case pgquery.AlterTableType_AT_DropConstraint:
 			table.dropUnique(cmd.GetName())
+		case pgquery.AlterTableType_AT_AlterColumnType:
+			if names := cmd.GetDef().GetColumnDef().GetTypeName().GetNames(); column != nil && len(names) > 0 {
+				column.Type = strings.ToLower(names[len(names)-1].GetString_().GetSval())
+			}
 		}
 	}
 }
