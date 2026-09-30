@@ -389,7 +389,9 @@ func getValue() (int, error) {
 	}
 }
 
-func TestFallbackReturnRule_LoggingException(t *testing.T) {
+// A log line in the error branch does not make a fallback explicit: the caller
+// still gets the zero value as if the call had succeeded.
+func TestFallbackReturnRule_LoggingDoesNotExcuseFallback(t *testing.T) {
 	rule := NewFallbackReturnRule()
 
 	tests := []struct {
@@ -399,7 +401,7 @@ func TestFallbackReturnRule_LoggingException(t *testing.T) {
 		wantCount int
 	}{
 		{
-			name: "fallback with logger.Warn - should not flag",
+			name: "fallback with logger.Warn - should flag",
 			code: `package main
 
 func getValue() int {
@@ -411,10 +413,10 @@ func getValue() int {
 	return val
 }`,
 			filename:  "parser.go",
-			wantCount: 0,
+			wantCount: 1,
 		},
 		{
-			name: "fallback with s.logger.Error - should not flag",
+			name: "fallback with s.logger.Error - should flag",
 			code: `package main
 
 func (s *Service) getValue() int {
@@ -426,7 +428,7 @@ func (s *Service) getValue() int {
 	return val
 }`,
 			filename:  "service.go",
-			wantCount: 0,
+			wantCount: 1,
 		},
 		{
 			name: "fallback without logging - should flag",

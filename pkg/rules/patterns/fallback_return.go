@@ -149,9 +149,253 @@ func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violati
 			}
 			violations = append(violations, r.checkErrorBranch(ctx, ifStmt)...)
 		})
+		// After the branch checks: where both see an assignment, their
+		// finding stays.
+		forEachOwnStatementList(body, func(list []ast.Stmt) {
+			for i := 0; i+1 < len(list); i++ {
+				results, errName := failedCallResults(list[i])
+				ifStmt, ok := list[i+1].(*ast.IfStmt)
+				if errName == "" || !ok || ifStmt.Init != nil || errNilCheckName(ifStmt.Cond) != errName {
+					continue
+				}
+				violations = append(violations, r.detectReplacedResult(ctx, ifStmt, results, errName)...)
+			}
+		})
 	})
 
+	return uniqueViolationLines(violations)
+}
+
+// uniqueViolationLines keeps the first finding of every line: an assignment
+// both detectors see is reported once.
+func uniqueViolationLines(violations []*core.Violation) []*core.Violation {
+	seen := make(map[int]bool, len(violations))
+	unique := violations[:0]
+	for _, v := range violations {
+		if !seen[v.Line] {
+			seen[v.Line] = true
+			unique = append(unique, v)
+		}
+	}
+	return unique
+}
+
+// failedCallResults returns the result variables and the error variable of
+// `v1, v2, err := call()` (or =).
+func failedCallResults(stmt ast.Stmt) (map[string]bool, string) {
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) < 2 {
+		return nil, ""
+	}
+	if _, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr); !ok {
+		return nil, ""
+	}
+	errIdent, ok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
+	if !ok || !isErrorVarName(errIdent.Name) {
+		return nil, ""
+	}
+	results := make(map[string]bool)
+	for _, lhs := range assign.Lhs[:len(assign.Lhs)-1] {
+		if ident, ok := lhs.(*ast.Ident); ok && ident.Name != "_" {
+			results[ident.Name] = true
+		}
+	}
+	if len(results) == 0 {
+		return nil, ""
+	}
+	return results, errIdent.Name
+}
+
+// detectReplacedResult reports, in the `if err != nil` that follows a call,
+// an assignment that gives the call's result a value no call produced: a
+// zero, a literal, a field of another value, a zero or no-op constructor. The
+// branch goes on, and so does the caller, with a plausible value. A log line
+// in the branch does not change that; the result of another call (failover),
+// an error recorded outside a log, or a retry does.
+func (r *FallbackReturnRule) detectReplacedResult(ctx *core.FileContext, ifStmt *ast.IfStmt, results map[string]bool, errName string) []*core.Violation {
+	body := ifStmt.Body
+	for _, stmt := range body.List {
+		if _, ok := stmt.(*ast.ReturnStmt); ok {
+			return nil
+		}
+	}
+	if readsIdentOutsideLoggers(body, errName) || r.bodyReassignsErrFromCall(body, errName) {
+		return nil
+	}
+	produced := namesAssignedFromCalls(body)
+	var violations []*core.Violation
+	forEachOwnStatement(body, func(stmt ast.Stmt) {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok {
+			return
+		}
+		for i, lhs := range assign.Lhs {
+			ident, ok := lhs.(*ast.Ident)
+			if !ok || !results[ident.Name] || len(assign.Rhs) != len(assign.Lhs) {
+				continue
+			}
+			if !isReplacementValue(assign.Rhs[i], produced) {
+				continue
+			}
+			pos := ctx.PositionFor(assign)
+			if r.branchExplainsFallback(ctx, ifStmt, assign) {
+				continue
+			}
+			v := r.CreateViolation(ctx.RelPath, pos.Line, "The call failed and "+ident.Name+" gets a fallback value instead - callers go on as if it had succeeded")
+			v.WithCode(ctx.GetLine(pos.Line))
+			v.WithSuggestion("Return the error. A deliberate failover takes the result of another call; a deliberate fallback is suppressed with the reason.")
+			v.WithContext("pattern", "replaced-failed-result")
+			violations = append(violations, v)
+		}
+	})
 	return violations
+}
+
+// branchExplainsFallback reports a comment with a legitimate reason where
+// hasLegitimateComment looks, or in the innermost block around the
+// assignment, from its brace down to the assignment: the reason is usually written at the top of the branch, above a
+// log call of several lines. An enclosing block explains its own step of a
+// fallback chain, not this one.
+func (r *FallbackReturnRule) branchExplainsFallback(ctx *core.FileContext, ifStmt *ast.IfStmt, assign ast.Node) bool {
+	block := ifStmt.Body
+	ast.Inspect(ifStmt.Body, func(n ast.Node) bool {
+		if n == nil || n.Pos() > assign.Pos() || n.End() < assign.End() {
+			return false
+		}
+		if inner, ok := n.(*ast.BlockStmt); ok {
+			block = inner
+		}
+		return true
+	})
+	line := ctx.PositionFor(assign).Line
+	if r.hasLegitimateComment(ctx.Lines, line-1) {
+		return true
+	}
+	for l := ctx.PositionFor(block).Line; l <= line && l <= len(ctx.Lines); l++ {
+		// One line at a time: the lines above the block explain another step.
+		if r.hasLegitimateComment(ctx.Lines[l-1:l], 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// readsIdentOutsideLoggers is nodeReadsIdent that does not look into logging
+// calls: a log line reports the error to an operator, not to the caller.
+func readsIdentOutsideLoggers(node ast.Node, name string) bool {
+	targets := make(map[*ast.Ident]bool)
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch current := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.CallExpr:
+			if isLoggerCall(current) {
+				return false
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range current.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok {
+					targets[ident] = true
+				}
+			}
+		case *ast.Ident:
+			found = current.Name == name && !targets[current]
+		}
+		return !found
+	})
+	return found
+}
+
+// namesAssignedFromCalls returns the variables the block assigns from a call:
+// the results of another attempt.
+func namesAssignedFromCalls(body *ast.BlockStmt) map[string]bool {
+	names := make(map[string]bool)
+	forEachOwnStatement(body, func(stmt ast.Stmt) {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || len(assign.Rhs) != 1 {
+			return
+		}
+		call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+		if !ok || isFallbackConstructor(call) {
+			return
+		}
+		for _, lhs := range assign.Lhs {
+			if ident, ok := lhs.(*ast.Ident); ok {
+				names[ident.Name] = true
+			}
+		}
+	})
+	return names
+}
+
+// isReplacementValue reports a value no new call produced: a literal, a
+// composite, a constant or another variable, a field, a zero or no-op
+// constructor, a conversion of one of those.
+func isReplacementValue(expr ast.Expr, produced map[string]bool) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.BasicLit, *ast.CompositeLit:
+		return true
+	case *ast.Ident:
+		return !produced[e.Name]
+	case *ast.SelectorExpr:
+		if root, ok := e.X.(*ast.Ident); ok && produced[root.Name] {
+			return false
+		}
+		return true
+	case *ast.UnaryExpr:
+		return isReplacementValue(e.X, produced)
+	case *ast.CallExpr:
+		if isFallbackConstructor(e) {
+			return true
+		}
+		// A conversion of a replacement: int64(0), Amount("0").
+		return len(e.Args) == 1 && isConversionCallee(e.Fun) && isReplacementValue(e.Args[0], produced)
+	}
+	return false
+}
+
+// fallbackConstructorWords name constructors of stand-in values.
+var fallbackConstructorWords = []string{"nop", "noop", "zero", "empty", "default", "fallback", "mock", "fake", "stub", "dummy", "placeholder"}
+
+// isFallbackConstructor reports a call whose callee names a stand-in value:
+// zap.NewNop(), decimal.Zero(), NewEmptyCache().
+func isFallbackConstructor(call *ast.CallExpr) bool {
+	var name string
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		name = fun.Name
+	case *ast.SelectorExpr:
+		name = fun.Sel.Name
+	default:
+		return false
+	}
+	lower := strings.ToLower(name)
+	for _, word := range fallbackConstructorWords {
+		if strings.Contains(lower, word) {
+			return true
+		}
+	}
+	return false
+}
+
+// isConversionCallee reports a callee that looks like a type: a basic type
+// name, an exported type name, a slice or map type.
+func isConversionCallee(fun ast.Expr) bool {
+	switch f := fun.(type) {
+	case *ast.ArrayType, *ast.MapType:
+		return true
+	case *ast.Ident:
+		switch f.Name {
+		case "string", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64",
+			"float32", "float64", "bool", "byte", "rune":
+			return true
+		}
+	}
+	return false
 }
 
 // checkErrorBranch reports fallback values returned from an error branch and,
@@ -529,8 +773,8 @@ func (r *FallbackReturnRule) hasLegitimateComment(lines []string, lineIdx int) b
 	legitimatePatterns := []string{
 		"optional", "non-critical", "best effort", "graceful",
 		"using 0", "using zero", "baseline", "explicit",
-		"intentional", "acceptable", "allow", "permit",
-		"разрешаем", "устанавливаем", "базовые",
+		"intentional", "acceptable", "allow", "permit", "failover",
+		"разрешаем", "устанавливаем", "базовые", "явный",
 	}
 
 	// Check current line for inline comment
