@@ -52,7 +52,7 @@ func TestLoadGoProjectBuildsCrossFileTypesAndSSAWithSingleParse(t *testing.T) {
 
 	parseCounts := make(map[string]int)
 	var mu sync.Mutex
-	project, err := loadGoProject(root, contexts, true, func(path string) {
+	project, err := loadGoProjectWithOptions(root, contexts, GoProjectOptions{RequireSSA: true}, func(path string) {
 		mu.Lock()
 		parseCounts[path]++
 		mu.Unlock()

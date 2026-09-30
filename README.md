@@ -171,7 +171,7 @@ glint rules
 - **error-string-compare** — Detects error comparisons via strings instead of errors.Is/errors.As
 - **error-wrap** — Detects errors returned without context (should use %w)
 - **error-cause-dropped** — Detects error branches that replace the real cause with a fixed message (Go `if err != nil`, TS `catch`) — the caller learns that it failed, never why
-- **go-modern** — Suggests modern Go 1.21+ alternatives (slices.Sort, built-in min/max)
+- **go-modern** — Detects deprecated reflect.SliceHeader/StringHeader (use unsafe.Slice/SliceData/String/StringData)
 - **unused-symbol** — Detects unused private functions, types, constants
 - **doc-links** — Detects broken/placeholder URLs in documentation
 
@@ -190,7 +190,6 @@ Always add the reason after the marker. Policy rules may opt out of suppression 
 
 ### Known Limitations
 
-- **go-modern**: May suggest iterator patterns for external library methods (e.g., `router.Walk`) that cannot be changed.
 - **doc-links**: May flag `localhost` or `example.com` in code comments used as format examples.
 
 ### Rule Details
