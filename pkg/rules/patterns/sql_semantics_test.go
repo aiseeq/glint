@@ -225,3 +225,40 @@ func (r *Repo) Reset(ctx context.Context, id string) error {
 `)
 	assert.Empty(t, sqlRuleLines(t, NewSQLMissingRowUncheckedRule(), ctx))
 }
+
+// The query filters by a copy of the constant: a new system account added
+// to the constants is still counted by it.
+func TestSQLLiteralCopiesConstant(t *testing.T) {
+	files := map[string]string{
+		"accounts/system.go": `package accounts
+
+const (
+	SystemUserID  = "00000000-0000-0000-0000-000000000001"
+	HoldingUserID = "00000000-0000-0000-0000-000000000002"
+)
+`,
+		"stats/withdrawals.go": `package stats
+
+func Totals(db DB) {
+	db.Query(` + "`" + `SELECT SUM(amount) FROM withdrawals
+		WHERE status = 'completed'
+		  AND user_id NOT IN ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002')` + "`" + `)
+	db.Query("SELECT id FROM tenants WHERE id = '5f0c6b1e-6a53-4c43-9a5c-2d1f3e4b5a69'")
+}
+`,
+	}
+	_, contexts := rulestest.Module(t, files)
+	for _, ctx := range contexts {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, ctx.Path, ctx.Content, parser.ParseComments)
+		require.NoError(t, err)
+		ctx.SetGoAST(fset, file)
+	}
+	rule := NewSQLLiteralCopiesConstantRule()
+	rule.UseProjectFiles(contexts)
+	var lines []int
+	for _, ctx := range contexts {
+		lines = append(lines, violationLines(rule.AnalyzeFile(ctx))...)
+	}
+	assert.Equal(t, []int{6, 6}, lines)
+}
