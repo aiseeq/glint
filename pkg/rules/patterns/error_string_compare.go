@@ -56,17 +56,27 @@ func (r *ErrorStringCompareRule) analyze(ctx *core.FileContext, info *types.Info
 	if info == nil {
 		inferrer = NewTypeInferrer(ctx.GoAST)
 	}
-	isErrorString := func(expr ast.Expr) bool { return isErrorStringCall(expr, info, inferrer) }
-
 	var violations []*core.Violation
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+	for _, decl := range ctx.GoAST.Decls {
+		texts := errorTextLocals(decl, info, inferrer)
+		isErrorString := func(expr ast.Expr) bool { return isErrorText(expr, info, inferrer, texts) }
+		violations = append(violations, r.inspect(ctx, decl, isErrorString)...)
+	}
+	return violations
+}
+
+// inspect reports the comparisons of error text in one declaration.
+func (r *ErrorStringCompareRule) inspect(ctx *core.FileContext, decl ast.Decl, isErrorString func(ast.Expr) bool) []*core.Violation {
+	var violations []*core.Violation
+	ast.Inspect(decl, func(n ast.Node) bool {
 		// Check for err.Error() == "string" or strings.Contains(err.Error(), "...")
 		switch node := n.(type) {
 		case *ast.BinaryExpr:
 			if node.Op == token.EQL || node.Op == token.NEQ {
 				// Check for err.Error() == "string"
-				if isErrorString(node.X) || isErrorString(node.Y) {
+				if (isErrorString(node.X) && isNonEmptyString(node.Y)) || (isErrorString(node.Y) && isNonEmptyString(node.X)) ||
+					(isErrorStringCallExpr(node.X) && isErrorString(node.X)) || (isErrorStringCallExpr(node.Y) && isErrorString(node.Y)) {
 					pos := ctx.PositionFor(node)
 					v := r.CreateViolation(ctx.RelPath, pos.Line,
 						"Comparing error using .Error() string; use errors.Is or errors.As instead")
@@ -76,7 +86,8 @@ func (r *ErrorStringCompareRule) analyze(ctx *core.FileContext, info *types.Info
 				}
 
 				// Check for errorMsg == "" or errMsg == "something"
-				if r.isErrorMessageVarComparison(node.X, node.Y) || r.isErrorMessageVarComparison(node.Y, node.X) {
+				if (r.isErrorMessageVarComparison(node.X, node.Y) || r.isErrorMessageVarComparison(node.Y, node.X)) &&
+					!isErrorString(node.X) && !isErrorString(node.Y) {
 					pos := ctx.PositionFor(node)
 					v := r.CreateViolation(ctx.RelPath, pos.Line,
 						"Comparing error message variable with string; antipattern")
@@ -101,14 +112,89 @@ func (r *ErrorStringCompareRule) analyze(ctx *core.FileContext, info *types.Info
 
 		return true
 	})
-
 	return violations
+}
+
+// isErrorStringCallExpr reports a call x.Error(): compared with anything, it
+// is the error's text.
+func isErrorStringCallExpr(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Error"
+}
+
+// isNonEmptyString reports a string literal with text in it.
+func isNonEmptyString(expr ast.Expr) bool {
+	lit, ok := expr.(*ast.BasicLit)
+	return ok && lit.Kind == token.STRING && lit.Value != `""` && lit.Value != "``"
+}
+
+// errorTextNormalizers return their string argument reworded but still the
+// same text: lowered, trimmed.
+var errorTextNormalizers = map[string]bool{
+	"ToLower": true, "ToUpper": true, "TrimSpace": true, "Trim": true, "TrimPrefix": true, "TrimSuffix": true,
+}
+
+// isErrorText reports an expression holding the text of an error: x.Error(),
+// a local assigned from it, or either lowered or trimmed.
+func isErrorText(expr ast.Expr, info *types.Info, inferrer *TypeInferrer, texts map[any]bool) bool {
+	expr = ast.Unparen(expr)
+	if isErrorStringCall(expr, info, inferrer) {
+		return true
+	}
+	if ident, ok := expr.(*ast.Ident); ok {
+		return texts[localKey(ident, info)]
+	}
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "strings" && errorTextNormalizers[sel.Sel.Name] &&
+		isErrorText(call.Args[0], info, inferrer, texts)
+}
+
+// localKey identifies a variable: by its object with type information, by
+// its name within the declaration without it.
+func localKey(ident *ast.Ident, info *types.Info) any {
+	if info != nil {
+		if obj := info.ObjectOf(ident); obj != nil {
+			return obj
+		}
+	}
+	return ident.Name
+}
+
+// errorTextLocals returns the variables of a declaration assigned the text of
+// an error, in the order the declaration assigns them.
+func errorTextLocals(decl ast.Decl, info *types.Info, inferrer *TypeInferrer) map[any]bool {
+	texts := make(map[any]bool)
+	ast.Inspect(decl, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != len(assign.Rhs) {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			ident, ok := lhs.(*ast.Ident)
+			if ok && ident.Name != "_" && isErrorText(assign.Rhs[i], info, inferrer, texts) {
+				texts[localKey(ident, info)] = true
+			}
+		}
+		return true
+	})
+	return texts
 }
 
 // isErrorStringCall checks if expression is x.Error() on an error value: by
 // its type when type information is there, otherwise by the type the file
-// declares for the receiver. A receiver the file says nothing about is
-// unknown and not reported.
+// declares for the receiver, or by its name when the file gives it no type.
 func isErrorStringCall(expr ast.Expr, info *types.Info, inferrer *TypeInferrer) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok || len(call.Args) != 0 {
@@ -126,7 +212,12 @@ func isErrorStringCall(expr ast.Expr, info *types.Info, inferrer *TypeInferrer) 
 		return false
 	}
 	typ, known := inferrer.GetType(ident.Name)
-	return known && typ.TypeName == "error"
+	if known {
+		return typ.TypeName == "error"
+	}
+	// A name the file never types — the error result of a call in a package
+	// that does not type-check — is judged by the error naming convention.
+	return !inferrer.declared[ident.Name] && isErrorVarName(ident.Name)
 }
 
 // isErrorMessageVarComparison checks if identifier is errorMsg/errMsg compared with string
@@ -167,7 +258,7 @@ func (r *ErrorStringCompareRule) isStringsContainsErrorCall(call *ast.CallExpr, 
 		return false
 	}
 
-	if sel.Sel.Name != "Contains" && sel.Sel.Name != "HasPrefix" && sel.Sel.Name != "HasSuffix" {
+	if sel.Sel.Name != "Contains" && sel.Sel.Name != "HasPrefix" && sel.Sel.Name != "HasSuffix" && sel.Sel.Name != "EqualFold" {
 		return false
 	}
 
