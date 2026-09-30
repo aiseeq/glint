@@ -23,7 +23,15 @@ Originally built to help AI agents understand codebases, but useful for any proj
 go install github.com/aiseeq/glint/cmd/glint@latest
 ```
 
-Or build from source. Development commands run through
+The SQL rules parse with libpg_query compiled to WebAssembly, which needs no
+C compiler but adds about a second and a few hundred MB to a run that parses
+SQL. With a C compiler, build the native parser instead:
+
+```bash
+go install -tags pgquery_cgo github.com/aiseeq/glint/cmd/glint@latest
+```
+
+Or build from source (graft builds the native parser). Development commands run through
 [graft](https://github.com/aiseeq/graft) (tasks in `.graft.yaml`):
 
 ```bash
