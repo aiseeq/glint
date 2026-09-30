@@ -80,6 +80,11 @@ python3 tools/history/plot.py curve.jsonl -o curve.png  # needs matplotlib
 default; `--metric per_kloc_total` plots all findings, and passing several
 JSONL files draws one line per project.
 
+`tools/history/mine/` finds rule candidates in a repository's fix commits:
+agents triage the fixes in batches, the records are grouped into bug classes,
+and today's glint is replayed on the tree before every fix to show which
+classes it misses. The steps are in its README.
+
 ## Configuration
 
 Create `.glint.yaml` in your project root:
