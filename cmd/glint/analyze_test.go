@@ -71,14 +71,14 @@ func TestAnalyzeFilesIsDeterministicAndRaceFree(t *testing.T) {
 	contexts := sampleContexts(t, 12)
 
 	rules.ResetState(allRules)
-	want := fingerprint(analyzeFiles(contexts, allRules, cfg, nil))
+	want := fingerprint(mustAnalyzeFiles(t, contexts, allRules, cfg, nil))
 	if want == "" {
 		t.Fatal("sample files produced no findings — the test would not prove anything")
 	}
 
 	for run := 0; run < 8; run++ {
 		rules.ResetState(allRules)
-		got := fingerprint(analyzeFiles(contexts, allRules, cfg, nil))
+		got := fingerprint(mustAnalyzeFiles(t, contexts, allRules, cfg, nil))
 		if got != want {
 			t.Fatalf("run %d produced different findings:\nwant:\n%s\ngot:\n%s", run, want, got)
 		}
@@ -99,11 +99,11 @@ func TestStatefulRulesSeeFilesInOrder(t *testing.T) {
 
 	contexts := sampleContexts(t, 6)
 	rules.ResetState([]rules.Rule{scattered})
-	want := fingerprint(analyzeFiles(contexts, []rules.Rule{scattered}, cfg, nil))
+	want := fingerprint(mustAnalyzeFiles(t, contexts, []rules.Rule{scattered}, cfg, nil))
 
 	for run := 0; run < 5; run++ {
 		rules.ResetState([]rules.Rule{scattered})
-		if got := fingerprint(analyzeFiles(contexts, []rules.Rule{scattered}, cfg, nil)); got != want {
+		if got := fingerprint(mustAnalyzeFiles(t, contexts, []rules.Rule{scattered}, cfg, nil)); got != want {
 			t.Fatalf("cross-file findings changed between runs:\nwant:\n%s\ngot:\n%s", want, got)
 		}
 	}

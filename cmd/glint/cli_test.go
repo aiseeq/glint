@@ -121,7 +121,7 @@ func TestAnalyzeFilesAppliesSeverityOverride(t *testing.T) {
 	}
 
 	ctx := core.NewFileContext("service.go", ".", []byte("package svc\n"), nil)
-	violations := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{rule}, cfg, overrides)
+	violations := mustAnalyzeFiles(t, []*core.FileContext{ctx}, []rules.Rule{rule}, cfg, overrides)
 
 	if len(violations) != 1 {
 		t.Fatalf("got %d violations, want 1", len(violations))
@@ -168,5 +168,82 @@ func TestWalkWithWalkerSkipsUnreadableFilesWhenTolerant(t *testing.T) {
 	}
 	if len(contexts) == 0 {
 		t.Fatal("readable files must still be analyzed")
+	}
+}
+
+// A rule the configuration disabled by name stays off under --category; the
+// category switch itself is what the flag overrides.
+func TestGetEnabledRulesCategoryKeepsRuleDisabledByName(t *testing.T) {
+	withFlags(t, "architecture", "")
+	cfg := core.DefaultConfig()
+	cfg.Categories["architecture"] = core.CategoryConfig{
+		Enabled: false,
+		Rules:   map[string]core.RuleConfig{"solid-srp": {Enabled: false}},
+	}
+
+	got, err := getEnabledRules(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("an explicitly requested category must run although the config switched it off")
+	}
+	for _, rule := range got {
+		if rule.Name() == "solid-srp" {
+			t.Fatal("solid-srp is disabled by name and must stay off")
+		}
+		if rule.Category() != "architecture" {
+			t.Fatalf("rule %s of category %s leaked into --category architecture", rule.Name(), rule.Category())
+		}
+	}
+}
+
+func TestResolveProjectRootAcceptsPackagePattern(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "internal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveProjectRoot(filepath.Join(dir, "internal") + "/...")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Join(dir, "internal") {
+		t.Fatalf("got %s, want the directory the pattern starts from", got)
+	}
+}
+
+// An unknown -o used to fall through to the console report.
+func TestLoadConfigRejectsUnknownOutputFormat(t *testing.T) {
+	prev := flagOutput
+	flagOutput = "jsn"
+	t.Cleanup(func() { flagOutput = prev })
+
+	_, _, err := loadConfig(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "jsn") {
+		t.Fatalf("got %v, want an error naming the unknown format", err)
+	}
+}
+
+// A misspelled key, an unknown rule and a rule filed under the wrong category
+// used to be ignored: the exception or setting silently never applied.
+func TestLoadConfigRejectsUnknownNames(t *testing.T) {
+	tests := map[string]string{
+		"misspelled key":  "categories:\n  patterns:\n    rules:\n      error-wrap:\n        exeptions:\n          - file: a.go\n",
+		"unknown rule":    "categories:\n  patterns:\n    rules:\n      error-wrapp:\n        enabled: false\n",
+		"wrong category":  "categories:\n  architecture:\n    rules:\n      error-wrap:\n        enabled: false\n",
+		"unknown section": "settings:\n  min_severty: high\n",
+		"empty exception": "categories:\n  patterns:\n    rules:\n      error-wrap:\n        exceptions:\n          - reason: forgot the file\n",
+	}
+	for name, config := range tests {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".glint.yaml"), []byte(config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := loadConfig(dir); err == nil {
+				t.Fatal("the configuration must be rejected")
+			}
+		})
 	}
 }

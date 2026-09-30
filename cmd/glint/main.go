@@ -211,7 +211,8 @@ func runCheck(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	var allViolations core.ViolationList
+	findings := newFindingSet()
+	analyzedFiles := make(map[string]struct{})
 	var stats output.Stats
 	outputFormat := ""
 	// Different roots can enable different rule sets; the reported count is
@@ -252,9 +253,11 @@ func runCheck(_ *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		allViolations = append(allViolations, violations.BySeverity(minSeverity)...)
+		findings.add(projectRoot, violations.BySeverity(minSeverity))
 
-		stats.FilesAnalyzed += len(contexts)
+		for _, ctx := range contexts {
+			analyzedFiles[ctx.Path] = struct{}{}
+		}
 		stats.FilesSkipped += walker.Stats().SkippedFiles
 		if project != nil {
 			stats.PackagesSkipped += len(project.SkippedPackages)
@@ -264,9 +267,9 @@ func runCheck(_ *cobra.Command, args []string) error {
 		}
 	}
 	stats.RulesRun = len(rulesRun)
-
-	// Пересекающиеся пути (./backend и ./backend/auth) дают одну и ту же находку дважды.
-	allViolations = dedupeViolations(allViolations)
+	// Overlapping roots (./backend and ./backend/auth) walk the same file twice.
+	stats.FilesAnalyzed = len(analyzedFiles)
+	allViolations := findings.list
 	stats.Duration = time.Since(startTime).Seconds()
 	if err := timings.report(os.Stderr); err != nil {
 		return fmt.Errorf("write timing report: %w", err)
@@ -288,34 +291,50 @@ func runCheck(_ *cobra.Command, args []string) error {
 // os.Exit keeps the exit path in one place and lets cobra unwind normally.
 var errFindingsReported = errors.New("findings at or above high severity")
 
-// dedupeViolations drops findings that overlapping paths reported twice. The
-// message is part of the identity: one rule can legitimately report several
-// distinct problems on the same line.
-func dedupeViolations(violations core.ViolationList) core.ViolationList {
-	type key struct {
-		file    string
-		line    int
-		column  int
-		rule    string
-		message string
-	}
-	seen := make(map[key]struct{}, len(violations))
-	unique := make(core.ViolationList, 0, len(violations))
+// findingSet collects the findings of every analyzed root and drops the ones
+// that overlapping roots (./backend and ./backend/auth) report twice. A
+// finding's File is relative to the root that produced it, so identity is
+// keyed on the absolute path: the same file reached from two roots has two
+// different relative names. The message is part of the identity: one rule can
+// legitimately report several distinct problems on the same line.
+type findingSet struct {
+	seen map[findingKey]struct{}
+	list core.ViolationList
+}
+
+type findingKey struct {
+	file    string
+	line    int
+	column  int
+	rule    string
+	message string
+}
+
+func newFindingSet() *findingSet {
+	return &findingSet{seen: make(map[findingKey]struct{})}
+}
+
+// add records the findings of one root; the first root to report a finding
+// keeps it, with its own relative path.
+func (s *findingSet) add(root string, violations core.ViolationList) {
 	for _, violation := range violations {
-		k := key{
-			file:    violation.File,
+		file := violation.File
+		if !filepath.IsAbs(file) {
+			file = filepath.Join(root, file)
+		}
+		k := findingKey{
+			file:    file,
 			line:    violation.Line,
 			column:  violation.Column,
 			rule:    violation.Rule,
 			message: violation.Message,
 		}
-		if _, ok := seen[k]; ok {
+		if _, ok := s.seen[k]; ok {
 			continue
 		}
-		seen[k] = struct{}{}
-		unique = append(unique, violation)
+		s.seen[k] = struct{}{}
+		s.list = append(s.list, violation)
 	}
-	return unique
 }
 
 func getProjectRoots(args []string) ([]string, error) {
@@ -340,15 +359,15 @@ func getProjectRoots(args []string) ([]string, error) {
 	return roots, nil
 }
 
+// resolveProjectRoot turns a path argument into an absolute directory. A Go
+// package pattern ("./...", "./internal/...") names the directory it starts
+// from: glint always walks a root recursively.
 func resolveProjectRoot(path string) (string, error) {
 	projectRoot := path
-	if projectRoot == "." || projectRoot == "./..." {
-		var err error
-		projectRoot, err = os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("failed to get working directory: %w", err)
-		}
+	if projectRoot == "..." {
+		projectRoot = "."
 	}
+	projectRoot = strings.TrimSuffix(projectRoot, "/...")
 	absRoot, err := filepath.Abs(projectRoot)
 	if err != nil {
 		return "", fmt.Errorf("make project root %q absolute: %w", projectRoot, err)
@@ -376,6 +395,14 @@ func loadConfig(projectRoot string) (*core.Config, []rules.Rule, error) {
 	if flagOutput != "" {
 		cfg.Settings.Output = flagOutput
 	}
+	// Command-line values go through the same validation as the file: an
+	// unknown -o must not quietly fall back to the console report.
+	if err := cfg.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+	if err := rules.ValidateConfig(cfg); err != nil {
+		return nil, nil, fmt.Errorf("invalid configuration: %w", err)
+	}
 
 	if err := rules.ConfigureAll(cfg); err != nil {
 		return nil, nil, fmt.Errorf("failed to configure rules: %w", err)
@@ -395,10 +422,19 @@ func getEnabledRules(cfg *core.Config) ([]rules.Rule, error) {
 	enabledRules := rules.GetEnabled(cfg)
 
 	if flagCategory != "" {
-		enabledRules = rules.GetByCategory(flagCategory)
-		if len(enabledRules) == 0 {
+		categoryRules := rules.GetByCategory(flagCategory)
+		if len(categoryRules) == 0 {
 			return nil, fmt.Errorf("unknown category %q; known categories: %s",
 				flagCategory, strings.Join(rules.Categories(), ", "))
+		}
+		// Asking for a category runs it even if the configuration switched
+		// the category off, but a rule the configuration disabled by name
+		// stays off: it was disabled for a reason the flag does not revisit.
+		enabledRules = enabledRules[:0:0]
+		for _, rule := range categoryRules {
+			if !cfg.IsRuleDisabled(rule.Category(), rule.Name()) {
+				enabledRules = append(enabledRules, rule)
+			}
 		}
 	}
 
@@ -537,9 +573,9 @@ func (o severityOverrides) apply(violation *core.Violation) {
 // parallel across files; rules that accumulate cross-file state run in a fixed
 // file order afterwards. Findings are collected per (file, rule) and only then
 // flattened, so the output does not depend on scheduling.
-func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides) core.ViolationList {
+func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides) (core.ViolationList, error) {
 	if len(contexts) == 0 || len(enabledRules) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	stateful := make([]bool, len(enabledRules))
@@ -555,18 +591,25 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 	for i := range found {
 		found[i] = make([]core.ViolationList, len(enabledRules))
 	}
+	failures := make([]error, len(contexts))
 
 	if statefulCount < len(enabledRules) {
-		runStatelessRules(contexts, enabledRules, stateful, cfg, overrides, found)
+		runStatelessRules(contexts, enabledRules, stateful, cfg, overrides, found, failures)
 	}
 	if statefulCount > 0 {
 		for fileIndex, ctx := range contexts {
 			for ruleIndex, rule := range enabledRules {
-				if stateful[ruleIndex] {
-					found[fileIndex][ruleIndex] = runRule(ctx, rule, cfg, overrides)
+				if !stateful[ruleIndex] {
+					continue
 				}
+				violations, err := runRule(ctx, rule, cfg, overrides)
+				found[fileIndex][ruleIndex] = violations
+				failures[fileIndex] = errors.Join(failures[fileIndex], err)
 			}
 		}
+	}
+	if err := errors.Join(failures...); err != nil {
+		return nil, err
 	}
 
 	var allViolations core.ViolationList
@@ -575,14 +618,14 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 			allViolations = append(allViolations, violations...)
 		}
 	}
-	return allViolations
+	return allViolations, nil
 }
 
 // runStatelessRules spreads the files over a worker per CPU. Each worker owns
 // its own row of the result matrix, so no synchronization is needed beyond the
 // wait group.
 func runStatelessRules(contexts []*core.FileContext, enabledRules []rules.Rule, stateful []bool,
-	cfg *core.Config, overrides severityOverrides, found [][]core.ViolationList) {
+	cfg *core.Config, overrides severityOverrides, found [][]core.ViolationList, failures []error) {
 	workers := runtime.NumCPU()
 	if workers > len(contexts) {
 		workers = len(contexts)
@@ -606,7 +649,9 @@ func runStatelessRules(contexts []*core.FileContext, enabledRules []rules.Rule, 
 					if stateful[ruleIndex] {
 						continue
 					}
-					found[fileIndex][ruleIndex] = runRule(contexts[fileIndex], rule, cfg, overrides)
+					violations, err := runRule(contexts[fileIndex], rule, cfg, overrides)
+					found[fileIndex][ruleIndex] = violations
+					failures[fileIndex] = errors.Join(failures[fileIndex], err)
 				}
 			}
 		}()
@@ -615,20 +660,28 @@ func runStatelessRules(contexts []*core.FileContext, enabledRules []rules.Rule, 
 }
 
 // runRule applies one rule to one file and filters the findings the same way
-// for every caller: rule exceptions, inline suppression, severity overrides.
-func runRule(ctx *core.FileContext, rule rules.Rule, cfg *core.Config, overrides severityOverrides) core.ViolationList {
-	if cfg.IsFileExcepted(rule.Category(), rule.Name(), ctx.RelPath) {
-		return nil
+// for every caller: generated files, rule exceptions, inline suppression,
+// severity overrides. A panicking rule fails the run with the rule and the
+// file named, instead of a bare stack trace from a worker goroutine.
+func runRule(ctx *core.FileContext, rule rules.Rule, cfg *core.Config, overrides severityOverrides) (kept core.ViolationList, err error) {
+	if cfg.IsFileExcepted(rule.Category(), rule.Name(), ctx.RelPath) || ctx.IsGenerated() {
+		return nil, nil
 	}
 
 	defer timings.track(rule.Name(), ctx.RelPath)()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			kept = nil
+			err = fmt.Errorf("rule %q panicked on %s: %v\n%s", rule.Name(), ctx.RelPath, recovered, debug.Stack())
+		}
+	}()
 	violations := rule.AnalyzeFile(ctx)
 	if len(violations) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	honorsSuppression := rules.HonorsSuppression(rule)
-	kept := make(core.ViolationList, 0, len(violations))
+	kept = make(core.ViolationList, 0, len(violations))
 	for _, violation := range violations {
 		ctx.AnnotateFunction(violation)
 		if cfg.IsViolationExcepted(rule.Category(), rule.Name(), ctx.RelPath, violation) {
@@ -640,7 +693,7 @@ func runRule(ctx *core.FileContext, rule rules.Rule, cfg *core.Config, overrides
 		overrides.apply(violation)
 		kept = append(kept, violation)
 	}
-	return kept
+	return kept, nil
 }
 
 func hasGoFiles(contexts []*core.FileContext) bool {
@@ -673,9 +726,7 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 			}
 			return nil, fmt.Errorf("analyze Go project with rule %q: project context is nil", rule.Name())
 		}
-		projectDone := timings.track(rule.Name(), "(go project)")
-		violations, err := projectRule.AnalyzeGoProject(project)
-		projectDone()
+		violations, err := runProjectRule(projectRule, project)
 		if err != nil {
 			return nil, fmt.Errorf("analyze Go project with rule %q: %w", rule.Name(), err)
 		}
@@ -688,7 +739,8 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 				return nil, fmt.Errorf("map finding from Go project rule %q: %w", rule.Name(), err)
 			}
 			fileCtx.AnnotateFunction(violation)
-			if cfg.IsFileExcepted(rule.Category(), rule.Name(), fileCtx.RelPath) ||
+			if fileCtx.IsGenerated() ||
+				cfg.IsFileExcepted(rule.Category(), rule.Name(), fileCtx.RelPath) ||
 				cfg.IsViolationExcepted(rule.Category(), rule.Name(), fileCtx.RelPath, violation) ||
 				(rules.HonorsSuppression(rule) && fileCtx.IsSuppressed(violation.Line, rule.Name())) {
 				continue
@@ -698,8 +750,24 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 			allViolations = append(allViolations, violation)
 		}
 	}
-	allViolations = append(allViolations, analyzeFiles(contexts, fileRules, cfg, overrides)...)
-	return allViolations, nil
+	fileViolations, err := analyzeFiles(contexts, fileRules, cfg, overrides)
+	if err != nil {
+		return nil, err
+	}
+	return append(allViolations, fileViolations...), nil
+}
+
+// runProjectRule runs one Go project rule; a panic becomes an error that names
+// the rule.
+func runProjectRule(rule rules.GoProjectRule, project *core.GoProjectContext) (violations []*core.Violation, err error) {
+	defer timings.track(rule.Name(), "(go project)")()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			violations = nil
+			err = fmt.Errorf("panic: %v\n%s", recovered, debug.Stack())
+		}
+	}()
+	return rule.AnalyzeGoProject(project)
 }
 
 func outputResults(format string, violations core.ViolationList, stats output.Stats) error {
@@ -710,11 +778,13 @@ func outputResults(format string, violations core.ViolationList, stats output.St
 	case "summary":
 		out := output.NewSummaryOutput().WithWriter(os.Stdout)
 		return out.Write(violations, stats)
-	default:
+	case "console", "":
 		out := output.NewConsoleOutput().
 			WithWriter(os.Stdout).
 			WithNoColor(flagNoColor)
 		return out.Write(violations, stats)
+	default:
+		return fmt.Errorf("unknown output format %q (known: %s)", format, strings.Join(core.OutputFormats, ", "))
 	}
 }
 
@@ -843,9 +913,14 @@ func runConfigShow(_ *cobra.Command, _ []string) error {
 	}
 	fmt.Println()
 	fmt.Println("Categories:")
-	for name, cat := range cfg.Categories {
+	names := make([]string, 0, len(cfg.Categories))
+	for name := range cfg.Categories {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
 		status := "enabled"
-		if !cat.Enabled {
+		if !cfg.Categories[name].Enabled {
 			status = "disabled"
 		}
 		fmt.Printf("  %s: %s\n", name, status)
@@ -870,9 +945,12 @@ func runConfigValidate(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	_, err = core.LoadConfig(configPath)
+	cfg, err := core.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
+	}
+	if err := rules.ValidateConfig(cfg); err != nil {
+		return fmt.Errorf("invalid configuration %q: %w", configPath, err)
 	}
 
 	fmt.Printf("Configuration valid: %s\n", configPath)
@@ -1000,18 +1078,23 @@ func fixProjectRoot(projectRoot string) error {
 	results := engine.ApplyFixes(fixes)
 
 	// Report results
-	totalFixed := 0
+	totalFixed, fixedFiles := 0, 0
+	var failures []error
 	for _, result := range results {
 		if result.Error != nil {
-			fmt.Fprintf(os.Stderr, "Error fixing %s: %v\n", result.File, result.Error)
-		} else {
-			totalFixed += result.FixesApplied
-			if flagVerbose {
-				fmt.Printf("Fixed %d issues in %s\n", result.FixesApplied, result.File)
-			}
+			failures = append(failures, fmt.Errorf("fix %s: %w", result.File, result.Error))
+			continue
+		}
+		totalFixed += result.FixesApplied
+		fixedFiles++
+		if flagVerbose {
+			fmt.Printf("Fixed %d issues in %s\n", result.FixesApplied, result.File)
 		}
 	}
 
-	fmt.Printf("\nApplied %d fixes in %d files.\n", totalFixed, len(results))
+	fmt.Printf("\nApplied %d fixes in %d files.\n", totalFixed, fixedFiles)
+	if len(failures) > 0 {
+		return fmt.Errorf("%d of %d files could not be fixed: %w", len(failures), len(results), errors.Join(failures...))
+	}
 	return nil
 }

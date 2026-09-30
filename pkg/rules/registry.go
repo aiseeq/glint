@@ -3,6 +3,7 @@ package rules
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -87,13 +88,7 @@ func (r *Registry) Categories() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	categories := make([]string, 0, len(r.byCategory))
-	for cat := range r.byCategory {
-		categories = append(categories, cat)
-	}
-	sort.Strings(categories)
-
-	return categories
+	return r.sortedCategories()
 }
 
 // Count returns the total number of registered rules
@@ -152,6 +147,50 @@ func (r *Registry) ConfigureAll(cfg *core.Config) error {
 	}
 
 	return nil
+}
+
+// ValidateConfig reports category and rule names the configuration uses but
+// the registry does not know, and rules configured under a category they do
+// not belong to. Either mistake used to be silent: the misspelled rule kept
+// running, and its exceptions or severity never applied.
+func (r *Registry) ValidateConfig(cfg *core.Config) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	categories := make([]string, 0, len(cfg.Categories))
+	for category := range cfg.Categories {
+		categories = append(categories, category)
+	}
+	sort.Strings(categories)
+	for _, category := range categories {
+		if _, ok := r.byCategory[category]; !ok {
+			return fmt.Errorf("categories.%s: unknown category (known: %s)", category, strings.Join(r.sortedCategories(), ", "))
+		}
+		ruleNames := make([]string, 0, len(cfg.Categories[category].Rules))
+		for name := range cfg.Categories[category].Rules {
+			ruleNames = append(ruleNames, name)
+		}
+		sort.Strings(ruleNames)
+		for _, name := range ruleNames {
+			rule, ok := r.rules[name]
+			if !ok {
+				return fmt.Errorf("categories.%s.rules.%s: unknown rule; run 'glint rules' to list them", category, name)
+			}
+			if rule.Category() != category {
+				return fmt.Errorf("categories.%s.rules.%s: the rule belongs to category %q", category, name, rule.Category())
+			}
+		}
+	}
+	return nil
+}
+
+func (r *Registry) sortedCategories() []string {
+	categories := make([]string, 0, len(r.byCategory))
+	for category := range r.byCategory {
+		categories = append(categories, category)
+	}
+	sort.Strings(categories)
+	return categories
 }
 
 // effectiveSettings merges the category settings of a rule with its own.
@@ -216,6 +255,11 @@ func GetEnabled(cfg *core.Config) []Rule {
 // ConfigureAll configures all rules in the global registry
 func ConfigureAll(cfg *core.Config) error {
 	return globalRegistry.ConfigureAll(cfg)
+}
+
+// ValidateConfig checks the configuration's names against the global registry
+func ValidateConfig(cfg *core.Config) error {
+	return globalRegistry.ValidateConfig(cfg)
 }
 
 // GlobalRegistry returns the global registry instance

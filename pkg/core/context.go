@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -79,31 +80,58 @@ func (ctx *FileContext) IsShellFile() bool {
 	return strings.HasSuffix(ctx.Path, ".sh")
 }
 
-// IsTestFile returns true if this appears to be a test file
+// IsTestFile reports whether the file is test code: a Go _test.go file, a
+// JS/TS *.test.* or *.spec.* file, or any file under a test directory of the
+// project. Directories are matched in the project-relative path: the absolute
+// one also names where the checkout lives, and a project cloned into
+// /builds/test/ is not test code as a whole. A Go file named test_*.go is
+// compiled into its package like any other and is not a test.
 func (ctx *FileContext) IsTestFile() bool {
 	name := filepath.Base(ctx.Path)
 
-	// Go test files
 	if strings.HasSuffix(name, "_test.go") {
 		return true
 	}
-	if strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".go") {
-		return true
-	}
-
-	// JS/TS test files
 	if strings.Contains(name, ".test.") || strings.Contains(name, ".spec.") {
 		return true
 	}
 
-	// Check path for test directories
-	if strings.Contains(ctx.Path, "/test/") ||
-		strings.Contains(ctx.Path, "/tests/") ||
-		strings.Contains(ctx.Path, "/__tests__/") ||
-		strings.Contains(ctx.Path, "/testdata/") {
-		return true
+	dir := "/" + filepath.ToSlash(filepath.Dir(ctx.RelPath)) + "/"
+	for _, marker := range []string{"/test/", "/tests/", "/__tests__/", "/testdata/"} {
+		if strings.Contains(dir, marker) {
+			return true
+		}
 	}
+	return false
+}
 
+// generatedMarker is the line the Go convention puts before the first code of
+// a generated file (https://go.dev/s/generatedcode); code generators for other
+// languages reuse it.
+var generatedMarker = regexp.MustCompile(`^// Code generated .* DO NOT EDIT\.$`)
+
+// IsGenerated reports whether the file is generated code: it carries the
+// "// Code generated ... DO NOT EDIT." marker before its first code line.
+// Nobody edits such a file by hand, so findings in it are not actionable.
+func (ctx *FileContext) IsGenerated() bool {
+	if ctx.GoAST != nil {
+		return ast.IsGenerated(ctx.GoAST)
+	}
+	inBlock := false
+	for _, line := range ctx.Lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case inBlock:
+			inBlock = !strings.Contains(trimmed, "*/")
+		case generatedMarker.MatchString(strings.TrimRight(line, "\r")):
+			return true
+		case trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#!"):
+		case strings.HasPrefix(trimmed, "/*"):
+			inBlock = !strings.Contains(trimmed[2:], "*/")
+		default:
+			return false
+		}
+	}
 	return false
 }
 
