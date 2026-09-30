@@ -83,10 +83,14 @@ func httpStatusSet(arg string) bool {
 		part = strings.TrimSpace(part)
 		// Нечисловой элемент означает, что это не набор кодов ответа, а какой-то другой
 		// список: классификация, а не ошибка разбора, поэтому Atoi сюда не зовётся.
-		if part == "" || strings.Trim(part, "0123456789") != "" {
+		// Код ответа — ровно три цифры; всё остальное — другой список.
+		if len(part) != 3 || strings.Trim(part, "0123456789") != "" {
 			return false
 		}
-		code, _ := strconv.Atoi(part) // строка из одних цифр — ошибки быть не может
+		code := 0
+		for _, digit := range part {
+			code = code*10 + int(digit-'0')
+		}
 		switch {
 		case code >= 200 && code < 300:
 			hasOK = true

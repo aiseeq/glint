@@ -70,7 +70,7 @@ func NewTestExternalServiceRule() *TestExternalServiceRule {
 		),
 		guardFunctions: map[string]bool{},
 		// Имя переменной окружения, которое означает секрет, а не переключатель. Слово
-		// секрета — целый сегмент между подчёркиваниями: KEY в KEYCLOAK секретом не делает.
+		// секрета — целый сегмент между подчёркиваниями: KEY в KEYBOARD секретом не делает.
 		credentialName: regexp.MustCompile(`(?i)(?:^|_)(?:API_?KEYS?|ACCESS_?KEYS?|PRIVATE_?KEYS?|SECRET_?KEYS?|KEYS?|TOKENS?|SECRETS?|PASSWORDS?|PASSWD|CREDENTIALS?|API_?ID)(?:_|$)`),
 		// Имена объявлений строже имён переменных окружения: подстрока «key» есть и в
 		// «monkey», а здесь ошибка выводит целый пакет во внешние.

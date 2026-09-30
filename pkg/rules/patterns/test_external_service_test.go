@@ -221,12 +221,12 @@ func TestVaultSnapshot_CollectLive(t *testing.T) {
 			expectMatch: false,
 		},
 		{
-			// KEY внутри KEYCLOAK — не секрет: это переключатель набора тестов.
+			// KEY внутри KEYBOARD — не секрет: это переключатель набора тестов.
 			name: "переключатель со словом KEY внутри другого слова",
 			code: `package integration
 
-func TestKeycloakOptIn(t *testing.T) {
-	if os.Getenv("RUN_KEYCLOAK_SUITE") == "" {
+func TestKeyboardOptIn(t *testing.T) {
+	if os.Getenv("RUN_KEYBOARD_SUITE") == "" {
 		t.Skip("opt-in")
 	}
 }
