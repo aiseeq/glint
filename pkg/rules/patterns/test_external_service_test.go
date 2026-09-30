@@ -33,6 +33,11 @@ func parseForRule(t *testing.T, src string) *ast.File {
 
 // typedFile парсит и типизирует исходник: детектор исходящих вызовов работает по
 // типам, иначе `once.Do(...)` из sync считался бы отправкой HTTP-запроса.
+// stdImporter reads the standard library from export data once for every
+// test of the package: a source importer per test would parse and check it
+// again each time.
+var stdImporter = importer.ForCompiler(token.NewFileSet(), "gc", nil)
+
 func typedFile(t *testing.T, src string) (*ast.File, *types.Info) {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -44,7 +49,7 @@ func typedFile(t *testing.T, src string) (*ast.File, *types.Info) {
 		Selections: map[*ast.SelectorExpr]*types.Selection{},
 		Types:      map[ast.Expr]types.TypeAndValue{},
 	}
-	conf := types.Config{Importer: importer.ForCompiler(fset, "source", nil)}
+	conf := types.Config{Importer: stdImporter}
 	_, err = conf.Check("sample", fset, []*ast.File{file}, info)
 	require.NoError(t, err)
 	return file, info

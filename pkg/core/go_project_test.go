@@ -275,3 +275,43 @@ func TestGoProjectFileForPositionRejectsUnknownPosition(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown position")
 }
+
+// Dependencies come from export data: only the project's own files are parsed
+// and type-checked from source. An overlay of unchanged files would make
+// go/packages distrust export data and check the whole standard library.
+func TestLoadGoProjectParsesOnlyProjectFiles(t *testing.T) {
+	root, contexts := writeGoModule(t, map[string]string{
+		"client.go": "package project\n\nimport \"net/http\"\n\n" +
+			"func Get(u string) (*http.Response, error) { return http.Get(u) }\n",
+	})
+
+	var parsed []string
+	var mu sync.Mutex
+	project, err := loadGoProjectWithOptions(root, contexts, GoProjectOptions{}, func(path string) {
+		mu.Lock()
+		parsed = append(parsed, path)
+		mu.Unlock()
+	})
+	require.NoError(t, err)
+	require.Len(t, project.Packages, 1)
+	assert.Equal(t, []string{filepath.Join(root, "client.go")}, parsed)
+	get := project.Packages[0].Package.Types.Scope().Lookup("Get")
+	require.NotNil(t, get)
+	assert.Contains(t, get.Type().String(), "*net/http.Response")
+}
+
+// A file context whose content differs from the disk is what the project is
+// type-checked from.
+func TestLoadGoProjectUsesContextContentThatDiffersFromDisk(t *testing.T) {
+	root, contexts := writeGoModule(t, map[string]string{
+		"model.go": "package project\n\ntype User struct{}\n",
+	})
+	edited, err := NewFileContextChecked(contexts[0].Path, root, []byte("package project\n\ntype Account struct{}\n"), DefaultConfig())
+	require.NoError(t, err)
+
+	project, err := LoadGoProject(root, []*FileContext{edited}, GoProjectOptions{})
+	require.NoError(t, err)
+	scope := project.Packages[0].Package.Types.Scope()
+	assert.NotNil(t, scope.Lookup("Account"))
+	assert.Nil(t, scope.Lookup("User"))
+}

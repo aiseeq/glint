@@ -1,11 +1,13 @@
 package core
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -272,9 +274,19 @@ func prepareGoProjectFiles(root string, contexts []*FileContext) (map[string][]b
 			return nil, nil, nil, fmt.Errorf("load Go project: duplicate file context for %q", path)
 		}
 		filesByPath[path] = fileCtx
-		if fileCtx.IsGoFile() {
+		if !fileCtx.IsGoFile() {
+			continue
+		}
+		goFiles = append(goFiles, fileCtx)
+		// Only content the disk does not hold goes into the overlay: any
+		// overlay makes go/packages distrust export data and type-check every
+		// dependency, the standard library included, from source.
+		onDisk, err := os.ReadFile(path)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, nil, fmt.Errorf("load Go project: read %q: %w", path, err)
+		}
+		if err != nil || !bytes.Equal(onDisk, fileCtx.Content) {
 			overlay[path] = fileCtx.Content
-			goFiles = append(goFiles, fileCtx)
 		}
 	}
 	sort.Slice(goFiles, func(i, j int) bool { return goFiles[i].Path < goFiles[j].Path })
@@ -286,16 +298,24 @@ func (loader *goProjectLoader) parseFile(callbackFset *token.FileSet, filename s
 	if err != nil {
 		return nil, err
 	}
-	loader.mu.Lock()
-	defer loader.mu.Unlock()
 	if callbackFset != loader.fset {
 		return nil, fmt.Errorf("parse Go file %q: packages loader used an unexpected file set", path)
 	}
-	if result, ok := loader.parsed[path]; ok {
+	if result, ok := loader.parsedFile(path); ok {
 		return result.file, result.err
 	}
+	// go/packages parses files in parallel; the lock guards only the cache,
+	// the file set is safe for concurrent use.
 	file, parseErr := parser.ParseFile(loader.fset, path, src, parser.ParseComments|parser.SkipObjectResolution)
+	loader.mu.Lock()
+	if earlier, ok := loader.parsed[path]; ok {
+		// Another package parsed the same file meanwhile: every package
+		// shares the first tree.
+		loader.mu.Unlock()
+		return earlier.file, earlier.err
+	}
 	loader.parsed[path] = parsedProjectFile{file: file, err: parseErr}
+	loader.mu.Unlock()
 	if loader.onParse != nil {
 		loader.onParse(path)
 	}
@@ -303,6 +323,13 @@ func (loader *goProjectLoader) parseFile(callbackFset *token.FileSet, filename s
 		return file, fmt.Errorf("parse Go file %q: %w", path, parseErr)
 	}
 	return file, nil
+}
+
+func (loader *goProjectLoader) parsedFile(path string) (parsedProjectFile, bool) {
+	loader.mu.Lock()
+	defer loader.mu.Unlock()
+	result, ok := loader.parsed[path]
+	return result, ok
 }
 
 func attachLoadedGoPackages(project *GoProjectContext, loaded []*packages.Package, parsed map[string]parsedProjectFile) (map[string]bool, error) {
