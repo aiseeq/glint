@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -132,7 +133,7 @@ func isPermissivePredicate(name string) bool {
 		}
 	}
 	for _, verb := range gateVerbs {
-		if hasLeadingWord(name, verb) {
+		if helpers.HasLeadingWord(name, verb) {
 			return true
 		}
 	}

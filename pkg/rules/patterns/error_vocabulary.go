@@ -5,6 +5,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // Shared vocabulary of the error-handling rules: how an error variable is
@@ -24,7 +26,7 @@ func isErrorVarName(name string) bool {
 // isSentinelErrorName reports whether the name is spelled as a declared error
 // value: the word Err leading a camelCase name (ErrNotFound, errClosed).
 func isSentinelErrorName(name string) bool {
-	return hasLeadingWord(name, "Err")
+	return helpers.HasLeadingWord(name, "Err")
 }
 
 // exprCarriesError reports whether the expression hands an error on: an
@@ -87,34 +89,11 @@ var predicatePrefixes = []string{
 // HashPassword, CancelOrder, Issue and Validate are not.
 func isPredicateName(name string) bool {
 	for _, prefix := range predicatePrefixes {
-		if hasLeadingWord(name, prefix) {
+		if helpers.HasLeadingWord(name, prefix) {
 			return true
 		}
 	}
 	return false
-}
-
-// hasLeadingWord reports whether name starts with the camelCase word (its
-// first letter in either case) and the word ends there: the name ends, or the
-// next rune is an upper-case letter, a digit or an underscore.
-func hasLeadingWord(name, word string) bool {
-	if len(name) < len(word) {
-		return false
-	}
-	head := name[:len(word)]
-	if head != word && head != lowerFirst(word) {
-		return false
-	}
-	return wordEndsAt(name, len(word))
-}
-
-// wordEndsAt reports whether a camelCase word of name ends at byte offset i.
-func wordEndsAt(name string, i int) bool {
-	if i >= len(name) {
-		return true
-	}
-	next, _ := utf8.DecodeRuneInString(name[i:])
-	return unicode.IsUpper(next) || unicode.IsDigit(next) || next == '_'
 }
 
 // wordStartsAt reports whether a camelCase word of name starts at byte offset
@@ -144,16 +123,11 @@ func hasCamelWord(name, word string) bool {
 			return false
 		}
 		start := from + idx
-		if wordStartsAt(name, start) && wordEndsAt(name, start+len(word)) {
+		if wordStartsAt(name, start) && helpers.WordEndsAt(name, start+len(word)) {
 			return true
 		}
 		from = start + 1
 	}
-}
-
-func lowerFirst(word string) string {
-	first, size := utf8.DecodeRuneInString(word)
-	return string(unicode.ToLower(first)) + word[size:]
 }
 
 // forEachFunction visits every function of the file with its own signature:

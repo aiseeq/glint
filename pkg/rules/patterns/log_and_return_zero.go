@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -202,7 +203,7 @@ var commandVerbs = []string{"Create", "Insert", "Update", "Delete", "Remove", "S
 // isCommandName reports a function named by a command verb.
 func isCommandName(name string) bool {
 	for _, verb := range commandVerbs {
-		if hasLeadingWord(name, verb) {
+		if helpers.HasLeadingWord(name, verb) {
 			return true
 		}
 	}
@@ -210,7 +211,6 @@ func isCommandName(name string) bool {
 }
 
 // writeVerbs start the names of calls that change stored state.
-var writeVerbs = []string{"Create", "Insert", "Update", "Delete", "Remove", "Save", "Upsert", "Exec", "Store", "Persist", "Commit", "Put", "Mark", "Record"}
 
 // checkSwallowedWrites reports, in a command function without results, a
 // write whose error is logged and dropped as the function ends: the caller has no result
@@ -253,12 +253,7 @@ func isWriteCall(call *ast.CallExpr) bool {
 	if !ok {
 		return false
 	}
-	for _, verb := range writeVerbs {
-		if hasLeadingWord(sel.Sel.Name, verb) {
-			return true
-		}
-	}
-	return false
+	return helpers.IsWriteName(sel.Sel.Name)
 }
 
 // branchLogsAndEnds reports an error branch that logs the error, hands it to
