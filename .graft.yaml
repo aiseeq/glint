@@ -9,10 +9,13 @@ version:
 gate:
   - task: smoke
 
+# Go tasks build the SQL parser natively (cgo): the WebAssembly one a plain
+# go install gets costs a second and hundreds of MB on every run that parses SQL.
 tasks:
   # --- build ---
   build:
     desc: build the binary into bin/
+    env: {GOFLAGS: -tags=pgquery_cgo}
     run:
       - [go, build, -ldflags, '-X main.version=${GRAFT_VERSION}', -o, bin/glint, ./cmd/glint]
   install:
@@ -29,6 +32,7 @@ tasks:
           echo "Installed to $HOME/bin/glint"
   install-gopath:
     desc: install to GOPATH/bin with go install
+    env: {GOFLAGS: -tags=pgquery_cgo}
     run:
       - [go, install, -ldflags, '-X main.version=${GRAFT_VERSION}', ./cmd/glint]
   clean:
@@ -41,15 +45,19 @@ tasks:
   test:
     desc: all tests
     usage: <go test flags, e.g. -run TestX>
+    env: {GOFLAGS: -tags=pgquery_cgo}
     run: ['go test -v {args} ./...']
   test-short:
     desc: tests without the long-running ones
+    env: {GOFLAGS: -tags=pgquery_cgo}
     run: [go test -short -v ./...]
   test-race:
     desc: tests with the race detector (analysis runs rules in parallel)
+    env: {GOFLAGS: -tags=pgquery_cgo}
     run: [go test -race ./...]
   test-coverage:
     desc: tests with a coverage report in coverage.html
+    env: {GOFLAGS: -tags=pgquery_cgo}
     run:
       - go test -coverprofile=coverage.out ./...
       - go tool cover -html=coverage.out -o coverage.html
@@ -82,6 +90,7 @@ tasks:
       - sh: 'test -z "$(git ls-files -co --exclude-standard -- "*.go" | xargs -r gofmt -l)" || { echo "Code is not formatted. Run graft fmt"; exit 1; }'
   vet:
     desc: go vet
+    env: {GOFLAGS: -tags=pgquery_cgo}
     run: [go vet ./...]
   all:
     desc: every check - fmt-check, vet, lint, tests, race; before install
