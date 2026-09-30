@@ -133,3 +133,20 @@ func TestRowWrite(t *testing.T) {
 		assert.False(t, schema.RowWrite(sql), sql)
 	}
 }
+
+// A column changed to timestamptz by a later migration cuts its dates in the
+// session's zone from then on.
+func TestSessionDatesAfterTypeChange(t *testing.T) {
+	root := t.TempDir()
+	writeMigrations(t, root, map[string]string{
+		"migrations/001_init.up.sql":  `CREATE TABLE holdings (id UUID PRIMARY KEY, closed_at TIMESTAMP, opened_at TIMESTAMPTZ);`,
+		"migrations/002_zones.up.sql": `ALTER TABLE holdings ALTER COLUMN closed_at TYPE TIMESTAMPTZ USING closed_at AT TIME ZONE 'UTC';`,
+		"migrations/003_naive.up.sql": `ALTER TABLE holdings ALTER COLUMN opened_at SET DATA TYPE TIMESTAMP;`,
+	})
+	schema, err := Load(root, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "timestamptz", schema.Table("holdings").Column("closed_at").Type)
+	assert.Equal(t, "timestamp", schema.Table("holdings").Column("opened_at").Type)
+	sql := `SELECT id FROM holdings WHERE closed_at::date = $1 AND opened_at::date = $1`
+	assert.Equal(t, at(sql, "::date"), schema.SessionDates(sql))
+}
