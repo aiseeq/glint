@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -33,6 +34,11 @@ func init() {
 //
 // Методы не проверяются: они могут закрывать интерфейсы. Интерфейсные типы —
 // зона orphaned-interface.
+//
+// Outside internal/ an export may serve another module, so only an
+// initializer (Init*, Setup*, Configure*, Register*) that tests call and
+// production code does not is reported: production runs without it, and what
+// it would have set up answers as if it had.
 type UnusedInternalExportRule struct {
 	*rules.BaseRule
 }
@@ -62,6 +68,9 @@ type exportUsage struct {
 	object   types.Object
 	kind     string
 	testUses int
+	// initializer marks a candidate outside internal/: reported only when
+	// tests, and nothing else, call it.
+	initializer bool
 }
 
 // AnalyzeGoProject collects the exported symbols the analyzed files of
@@ -80,14 +89,19 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
 			return nil, errors.New("unused internal export: package has no typed syntax")
 		}
-		if !isInternalPackage(pkgCtx.Package.PkgPath) {
-			continue
-		}
+		internal := isInternalPackage(pkgCtx.Package.PkgPath)
 		for _, fileCtx := range pkgCtx.Files {
 			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
 				continue
 			}
 			for _, usage := range exportedDeclarations(fileCtx.GoAST, pkgCtx.Package.TypesInfo) {
+				if !internal {
+					if usage.kind != "function" || !isInitializerName(usage.object.Name()) ||
+						isTestSupport(pkgCtx.Package.Name, usage.object.Name()) {
+						continue
+					}
+					usage.initializer = true
+				}
 				candidates[usage.object] = usage
 				byFile[fileCtx] = append(byFile[fileCtx], usage)
 			}
@@ -114,7 +128,7 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, usage := range byFile[fileCtx] {
-			if uses[usage.object] > 0 {
+			if uses[usage.object] > 0 || (usage.initializer && usage.testUses == 0) {
 				continue
 			}
 			violations = append(violations, r.violationFor(ctx, usage))
@@ -171,6 +185,10 @@ func (r *UnusedInternalExportRule) violationFor(ctx *core.GoProjectContext, usag
 		message = "Exported " + usage.kind + " '" + name + "' in internal package is used only by tests — production code never touches it"
 		suggestion = "Remove the " + usage.kind + " together with its tests, or use it from production code"
 	}
+	if usage.initializer {
+		message = "Initializer '" + name + "' is called only by tests — production runs without what it sets up"
+		suggestion = "Call it on the production start path, or remove it with the state it initializes"
+	}
 
 	v := r.CreateViolation(rel, pos.Line, message)
 	v.WithSuggestion(suggestion)
@@ -205,6 +223,37 @@ func countTestIdentUses(ctx *core.GoProjectContext, candidates map[types.Object]
 			return true
 		})
 	}
+}
+
+// initializerVerbs lead the names of functions that set a package up.
+var initializerVerbs = []string{"Init", "Initialize", "Setup", "Configure", "Register"}
+
+// isInitializerName reports InitErrorConfig, SetupLogging, RegisterHandlers.
+func isInitializerName(name string) bool {
+	for _, verb := range initializerVerbs {
+		if helpers.HasLeadingWord(name, verb) {
+			return true
+		}
+	}
+	return false
+}
+
+// isTestSupport reports a function tests are its only intended callers of:
+// in a test-support package (testing, testutil, mocks, fixtures) or named for
+// tests (SetupTestConfig, RegisterMocks).
+func isTestSupport(pkgName, name string) bool {
+	lowerPkg := strings.ToLower(pkgName)
+	for _, suffix := range []string{"test", "testing", "testutil", "testutils", "testhelpers", "mocks", "fixtures"} {
+		if strings.HasSuffix(lowerPkg, suffix) {
+			return true
+		}
+	}
+	for _, word := range []string{"Test", "Mock", "Fake", "Fixture", "Stub"} {
+		if strings.Contains(name, word) {
+			return true
+		}
+	}
+	return false
 }
 
 // isInternalPackage reports whether a package path lies under an internal/

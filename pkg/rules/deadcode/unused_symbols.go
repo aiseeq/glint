@@ -25,7 +25,9 @@ func init() {
 // A reference from inside the symbol's own declaration (a recursive call, a
 // type named only by its own methods) does not keep it alive.
 //
-// Methods are not checked: they may satisfy an interface.
+// An unexported method counts as used when an interface of its package
+// declares a method of that name: it may be how the type satisfies it. An
+// exported method may satisfy an interface anywhere and is not checked.
 type UnusedSymbolsRule struct {
 	*rules.BaseRule
 }
@@ -77,11 +79,12 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		}
 		info := pkg.Package.TypesInfo
 		found := false
+		interfaceMethods := interfaceMethodNames(pkg.Package.Syntax)
 		for _, fileCtx := range pkg.Files {
 			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
 				continue
 			}
-			for _, sym := range unexportedDeclarations(fileCtx, info) {
+			for _, sym := range unexportedDeclarations(fileCtx, info, interfaceMethods) {
 				uses[sym.obj] = 0
 				byFile[fileCtx] = append(byFile[fileCtx], sym)
 				found = true
@@ -101,7 +104,7 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		var violations []*core.Violation
 		for _, sym := range byFile[fileCtx] {
 			name := sym.obj.Name()
-			if uses[sym.obj] > 0 || mentions.mentioned(fileCtx, name) {
+			if uses[sym.obj] > 0 || mentions.mentioned(fileCtx, name) || ofUnusedType(sym.obj, uses) {
 				continue
 			}
 			v := r.CreateViolation(fileCtx.RelPath, sym.line,
@@ -117,9 +120,10 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 }
 
 // unexportedDeclarations returns the unexported package-level functions,
-// types, variables and constants of a file in source order. main, init, the
-// blank identifier and methods are left out.
-func unexportedDeclarations(fileCtx *core.FileContext, info *types.Info) []declaredSymbol {
+// methods, types, variables and constants of a file in source order. main,
+// init, the blank identifier and a method an interface of the package names
+// are left out.
+func unexportedDeclarations(fileCtx *core.FileContext, info *types.Info, interfaceMethods map[string]bool) []declaredSymbol {
 	var symbols []declaredSymbol
 	add := func(name *ast.Ident, kind string) {
 		if name.Name == "_" || ast.IsExported(name.Name) {
@@ -135,10 +139,12 @@ func unexportedDeclarations(fileCtx *core.FileContext, info *types.Info) []decla
 	for _, decl := range fileCtx.GoAST.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			if d.Recv != nil || d.Name.Name == "main" || d.Name.Name == "init" {
-				continue
+			switch {
+			case d.Recv != nil && !interfaceMethods[d.Name.Name]:
+				add(d.Name, "method")
+			case d.Recv == nil && d.Name.Name != "main" && d.Name.Name != "init":
+				add(d.Name, "function")
 			}
-			add(d.Name, "function")
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
 				switch s := spec.(type) {
@@ -157,4 +163,39 @@ func unexportedDeclarations(fileCtx *core.FileContext, info *types.Info) []decla
 		}
 	}
 	return symbols
+}
+
+// interfaceMethodNames returns the unexported method names the interfaces of
+// a package declare.
+func interfaceMethodNames(files []*ast.File) map[string]bool {
+	names := make(map[string]bool)
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			iface, ok := n.(*ast.InterfaceType)
+			if !ok || iface.Methods == nil {
+				return true
+			}
+			for _, method := range iface.Methods.List {
+				for _, name := range method.Names {
+					if !ast.IsExported(name.Name) {
+						names[name.Name] = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	return names
+}
+
+// ofUnusedType reports a method of a type that is itself reported unused:
+// the type's finding covers it.
+func ofUnusedType(obj types.Object, uses map[types.Object]int) bool {
+	method, ok := obj.(*types.Func)
+	if !ok {
+		return false
+	}
+	owner := receiverTypeObject(method)
+	count, tracked := uses[owner]
+	return owner != nil && tracked && count == 0
 }

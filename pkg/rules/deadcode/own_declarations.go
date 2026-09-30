@@ -38,8 +38,8 @@ func (own ownDeclarations) addFunc(fn *ast.FuncDecl, info *types.Info) {
 	if !ok {
 		return
 	}
+	own[obj] = append(own[obj], span)
 	if fn.Recv == nil {
-		own[obj] = append(own[obj], span)
 		return
 	}
 	if owner := receiverTypeObject(obj); owner != nil {

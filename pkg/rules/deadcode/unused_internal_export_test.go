@@ -184,3 +184,65 @@ func TestUnusedInternalExportRule_StableOrderOnOneLine(t *testing.T) {
 		require.Equal(t, []string{"A", "B", "C", "D", "E"}, symbols)
 	}
 }
+
+// An initializer outside internal/ that only tests call: production never
+// runs it, and the getters it feeds answer as if it had.
+func TestUnusedInternalExportRule_InitializerOnlyTestsCall(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"errors/config.go": `package errors
+
+import "sync"
+
+var (
+	once sync.Once
+	cfg  map[string]string
+)
+
+func InitErrorConfig(c map[string]string) { once.Do(func() { cfg = c }) }
+
+func SetupDefaults() {}
+
+func Message(code string) string { return cfg[code] }
+
+func Format(code string) string { return "[" + code + "]" }
+`,
+		"errors/config_test.go": `package errors
+
+import "testing"
+
+func TestMessage(t *testing.T) {
+	InitErrorConfig(map[string]string{"x": "y"})
+	if Message("x") != "y" {
+		t.Fatal("message")
+	}
+	_ = Format("x")
+}
+`,
+		"app/main.go": `package app
+
+import "example.com/rulestest/errors"
+
+func Run() string { return errors.Message("x") }
+`,
+		"shared/testing/helpers.go": `package testing
+
+func SetupTestConfig() map[string]string { return nil }
+
+func InitStore() {}
+`,
+		"shared/testing/helpers_test.go": `package testing
+
+import "testing"
+
+func TestHelpers(t *testing.T) {
+	_ = SetupTestConfig()
+	InitStore()
+}
+`,
+	})
+	violations, err := NewUnusedInternalExportRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "InitErrorConfig")
+	assert.Equal(t, 10, violations[0].Line)
+}
