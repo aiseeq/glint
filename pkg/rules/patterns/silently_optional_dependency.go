@@ -64,9 +64,9 @@ type setterInfo struct {
 	field  string
 	method string
 	decl   *ast.FuncDecl
-	// analyzed is set when the setter lives in a file of the analyzed set: the
-	// typed load covers the whole module, findings only the analyzed files.
-	analyzed bool
+	// file holds the setter: the typed load covers the whole module, findings
+	// only the analyzed files.
+	file *ast.File
 }
 
 // depKey identifies a dependency: the type that holds it plus the field name.
@@ -164,39 +164,31 @@ func (r *SilentlyOptionalDependencyRule) AnalyzeGoProject(ctx *core.GoProjectCon
 		return nil, errors.New("silently optional dependency: nil Go project context")
 	}
 
-	setters := map[depKey]setterInfo{}
-	guarded := map[depKey]bool{}
-	fromConstructor := map[depKey]bool{}
-	ctorSites := map[string]int{}
-	setterCalls := map[depKey]int{}
-
-	// pkg.Syntax holds every non-test file of the module (the typed load runs
-	// with Tests=false), so construction sites count project-wide; only the
-	// files the run analyzes may carry a finding.
+	index, err := core.SharedLoad(ctx, optionalDependencyIndexKey{}, func() (*optionalDependencyIndex, error) {
+		return r.buildIndex(ctx), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	analyzed := make(map[*ast.File]bool)
 	for _, pkgCtx := range ctx.Packages {
-		if pkgCtx == nil || pkgCtx.Package == nil {
+		if pkgCtx == nil {
 			continue
 		}
-		analyzed := make(map[*ast.File]bool, len(pkgCtx.Files))
 		for _, fileCtx := range pkgCtx.Files {
 			if fileCtx != nil && fileCtx.GoAST != nil {
 				analyzed[fileCtx.GoAST] = true
 			}
 		}
-		pkg := pkgCtx.Package
-		for _, file := range pkg.Syntax {
-			r.collectDeclarations(pkg, file, analyzed[file], setters, guarded, fromConstructor)
-			r.collectCalls(pkg, file, ctorSites, setterCalls)
-		}
 	}
 
 	var violations []*core.Violation
-	for key, setter := range setters {
-		if !setter.analyzed || !guarded[key] || fromConstructor[key] {
+	for key, setter := range index.setters {
+		if !analyzed[setter.file] || !index.guarded[key] || index.fromConstructor[key] {
 			continue
 		}
-		sites := ctorSites[key.owner]
-		calls := setterCalls[methodKey(key.owner, setter.method)]
+		sites := index.ctorSites[key.owner]
+		calls := index.setterCalls[methodKey(key.owner, setter.method)]
 		// Хотя бы одна точка сборки осталась без сеттера. Сервис с единственной
 		// точкой сборки, где сеттер зовут, собран правильно — про него молчим.
 		if sites < 2 || calls >= sites {
@@ -217,11 +209,49 @@ func (r *SilentlyOptionalDependencyRule) AnalyzeGoProject(ctx *core.GoProjectCon
 	return violations, nil
 }
 
+// optionalDependencyIndexKey caches the module-wide index once per module
+// load: it reads every typed file, whichever of them the run analyzes.
+type optionalDependencyIndexKey struct{}
+
+// optionalDependencyIndex holds the setters, silent guards and
+// constructor-assigned fields of the module, with its construction sites per
+// type and setter calls per dependency.
+type optionalDependencyIndex struct {
+	setters         map[depKey]setterInfo
+	guarded         map[depKey]bool
+	fromConstructor map[depKey]bool
+	ctorSites       map[string]int
+	setterCalls     map[depKey]int
+}
+
+// buildIndex reads pkg.Syntax, which holds every non-test file of the module
+// (the typed load runs with Tests=false), so construction sites count
+// project-wide.
+func (r *SilentlyOptionalDependencyRule) buildIndex(ctx *core.GoProjectContext) *optionalDependencyIndex {
+	index := &optionalDependencyIndex{
+		setters:         map[depKey]setterInfo{},
+		guarded:         map[depKey]bool{},
+		fromConstructor: map[depKey]bool{},
+		ctorSites:       map[string]int{},
+		setterCalls:     map[depKey]int{},
+	}
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil {
+			continue
+		}
+		pkg := pkgCtx.Package
+		for _, file := range pkg.Syntax {
+			r.collectDeclarations(pkg, file, index.setters, index.guarded, index.fromConstructor)
+			r.collectCalls(pkg, file, index.ctorSites, index.setterCalls)
+		}
+	}
+	return index
+}
+
 // collectDeclarations records setters, silent guards and constructor-assigned fields.
 func (r *SilentlyOptionalDependencyRule) collectDeclarations(
 	pkg *packages.Package,
 	file *ast.File,
-	analyzed bool,
 	setters map[depKey]setterInfo,
 	guarded map[depKey]bool,
 	fromConstructor map[depKey]bool,
@@ -234,7 +264,7 @@ func (r *SilentlyOptionalDependencyRule) collectDeclarations(
 		if _, field, ok := setterDecl(fn); ok {
 			if owner := r.receiverNamed(pkg, fn); owner != nil {
 				setters[depKey{namedKey(owner), field}] = setterInfo{
-					field: field, method: fn.Name.Name, decl: fn, analyzed: analyzed,
+					field: field, method: fn.Name.Name, decl: fn, file: file,
 				}
 			}
 		}

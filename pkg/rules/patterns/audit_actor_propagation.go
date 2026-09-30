@@ -159,11 +159,11 @@ func (r *AuditActorPropagationRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	analyzer := &auditActorAnalyzer{
 		rule:           r,
 		project:        ctx,
-		targets:        make(map[ssa.CallInstruction][]*ssa.Function),
 		seen:           make(map[auditStateKey]bool),
 		reported:       make(map[auditFindingKey]bool),
 		sourcePackages: make(map[*ssa.Package]bool),
 		sourceFiles:    make(map[string]bool),
+		humanRoots:     make(map[*ssa.Function]bool),
 	}
 	for _, pkg := range ctx.Packages {
 		if pkg != nil && pkg.SSA != nil {
@@ -270,22 +270,62 @@ type auditActorAnalyzer struct {
 	targets        map[ssa.CallInstruction][]*ssa.Function
 	sourcePackages map[*ssa.Package]bool
 	sourceFiles    map[string]bool
+	sources        map[*ssa.Function]bool
+	humanRoots     map[*ssa.Function]bool
 	worklist       []auditState
 	seen           map[auditStateKey]bool
 	reported       map[auditFindingKey]bool
 	violations     []*core.Violation
 }
 
-func (a *auditActorAnalyzer) initialize() error {
-	allFunctions := ssautil.AllFunctions(a.project.Program)
-	functions := make([]*ssa.Function, 0, len(allFunctions))
-	for function := range allFunctions {
-		functions = append(functions, function)
-	}
-	sortFunctionsByName(functions)
+// auditCallIndexKey caches the call index once per module load: the SSA
+// functions, the call graph and the call targets do not depend on which files
+// the run analyzes.
+type auditCallIndexKey struct{}
 
-	graph := cha.CallGraph(a.project.Program)
-	sourceIncoming := make(map[*ssa.Function]bool)
+// auditCallIndex is the analyzed-root independent part of the analysis: every
+// SSA function sorted by name, the file declaring each one, the targets of
+// each call site with the reverse view, and the caller-callee edges of the
+// call graph between distinct functions.
+type auditCallIndex struct {
+	functions []*ssa.Function
+	files     map[*ssa.Function]string
+	targets   map[ssa.CallInstruction][]*ssa.Function
+	callSites map[*ssa.Function][]auditCallSite
+	edges     []auditCallEdge
+}
+
+// auditCallSite is one call that may reach a target, in caller order.
+type auditCallSite struct {
+	caller *ssa.Function
+	call   ssa.CallInstruction
+}
+
+type auditCallEdge struct {
+	caller *ssa.Function
+	callee *ssa.Function
+}
+
+func buildAuditCallIndex(program *ssa.Program, fset *token.FileSet) *auditCallIndex {
+	allFunctions := ssautil.AllFunctions(program)
+	index := &auditCallIndex{
+		functions: make([]*ssa.Function, 0, len(allFunctions)),
+		files:     make(map[*ssa.Function]string),
+		targets:   make(map[ssa.CallInstruction][]*ssa.Function),
+		callSites: make(map[*ssa.Function][]auditCallSite),
+	}
+	for function := range allFunctions {
+		index.functions = append(index.functions, function)
+		if function.Syntax() == nil {
+			continue
+		}
+		if position := fset.PositionFor(function.Syntax().Pos(), false); position.IsValid() {
+			index.files[function] = filepath.Clean(position.Filename)
+		}
+	}
+	sortFunctionsByName(index.functions)
+
+	graph := cha.CallGraph(program)
 	for _, node := range graph.Nodes {
 		if node == nil {
 			continue
@@ -294,15 +334,13 @@ func (a *auditActorAnalyzer) initialize() error {
 			if edge == nil || edge.Site == nil || edge.Callee == nil || edge.Callee.Func == nil {
 				continue
 			}
-			a.addTarget(edge.Site, edge.Callee.Func)
-			if edge.Caller != nil && edge.Caller.Func != nil && edge.Caller.Func != edge.Callee.Func &&
-				a.isSourceFunction(edge.Caller.Func) && a.isSourceFunction(edge.Callee.Func) {
-				sourceIncoming[edge.Callee.Func] = true
+			index.addTarget(edge.Site, edge.Callee.Func)
+			if edge.Caller != nil && edge.Caller.Func != nil && edge.Caller.Func != edge.Callee.Func {
+				index.edges = append(index.edges, auditCallEdge{caller: edge.Caller.Func, callee: edge.Callee.Func})
 			}
 		}
 	}
-
-	for _, function := range functions {
+	for _, function := range index.functions {
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {
 				call, ok := instruction.(ssa.CallInstruction)
@@ -310,10 +348,60 @@ func (a *auditActorAnalyzer) initialize() error {
 					continue
 				}
 				if static := call.Common().StaticCallee(); static != nil {
-					a.addTarget(call, static)
+					index.addTarget(call, static)
 				}
 			}
 		}
+	}
+	for _, targets := range index.targets {
+		sortFunctionsByName(targets)
+	}
+	for _, function := range index.functions {
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok {
+					continue
+				}
+				for _, target := range index.targets[call] {
+					index.callSites[target] = append(index.callSites[target], auditCallSite{caller: function, call: call})
+				}
+			}
+		}
+	}
+	return index
+}
+
+func (index *auditCallIndex) addTarget(call ssa.CallInstruction, target *ssa.Function) {
+	for _, existing := range index.targets[call] {
+		if existing == target {
+			return
+		}
+	}
+	index.targets[call] = append(index.targets[call], target)
+}
+
+func (a *auditActorAnalyzer) initialize() error {
+	index, err := core.SharedLoad(a.project, auditCallIndexKey{}, func() (*auditCallIndex, error) {
+		return buildAuditCallIndex(a.project.Program, a.project.FileSet), nil
+	})
+	if err != nil {
+		return err
+	}
+	a.targets = index.targets
+	a.sources = make(map[*ssa.Function]bool)
+	for _, function := range index.functions {
+		if a.sourcePackages[function.Package()] && a.sourceFiles[index.files[function]] {
+			a.sources[function] = true
+		}
+	}
+	sourceIncoming := make(map[*ssa.Function]bool)
+	for _, edge := range index.edges {
+		if a.isSourceFunction(edge.caller) && a.isSourceFunction(edge.callee) {
+			sourceIncoming[edge.callee] = true
+		}
+	}
+	for _, function := range index.functions {
 		if a.isSourceFunction(function) {
 			a.enqueue(auditState{
 				function: function,
@@ -325,10 +413,7 @@ func (a *auditActorAnalyzer) initialize() error {
 			}
 		}
 	}
-	for _, targets := range a.targets {
-		sortFunctionsByName(targets)
-	}
-	return a.validateSourceSinkCalls(functions)
+	return a.validateSourceSinkCalls(index)
 }
 
 // sortFunctionsByName orders functions by their full name for a stable walk.
@@ -350,47 +435,30 @@ func auditExportedFunction(function *ssa.Function) bool {
 	return object != nil && object.Exported()
 }
 
-func (a *auditActorAnalyzer) addTarget(call ssa.CallInstruction, target *ssa.Function) {
-	for _, existing := range a.targets[call] {
-		if existing == target {
-			return
-		}
-	}
-	a.targets[call] = append(a.targets[call], target)
-}
-
+// isSourceFunction reports whether the function is declared in an analyzed
+// file of a loaded package.
 func (a *auditActorAnalyzer) isSourceFunction(function *ssa.Function) bool {
-	if function == nil || function.Syntax() == nil || !a.sourcePackages[function.Package()] {
-		return false
-	}
-	position := a.project.FileSet.PositionFor(function.Syntax().Pos(), false)
-	return position.IsValid() && a.sourceFiles[filepath.Clean(position.Filename)]
+	return a.sources[function]
 }
 
-func (a *auditActorAnalyzer) validateSourceSinkCalls(functions []*ssa.Function) error {
-	for _, function := range functions {
-		for _, block := range function.Blocks {
-			for _, instruction := range block.Instrs {
-				call, ok := instruction.(ssa.CallInstruction)
-				if !ok {
-					continue
-				}
-				for _, target := range a.targets[call] {
-					if !a.rule.sinks[target.Name()] || !a.isSourceFunction(target) {
-						continue
-					}
-					roles, inScope := auditRoles(target)
-					if !inScope {
-						continue
-					}
-					actuals := auditCallActuals(call.Common())
-					if len(actuals) != len(target.Params) || roles.actor >= len(actuals) || roles.source >= len(actuals) {
-						return fmt.Errorf("malformed audit sink call to %s: got %d actuals for %d formal parameters", target, len(actuals), len(target.Params))
-					}
-					if _, _, err := a.sourcePosition(call.Pos()); err != nil {
-						return fmt.Errorf("validate source sink call to %s from %s: %w", target, function, err)
-					}
-				}
+// validateSourceSinkCalls checks every call that may reach a sink declared in
+// an analyzed file, from anywhere in the module.
+func (a *auditActorAnalyzer) validateSourceSinkCalls(index *auditCallIndex) error {
+	for _, target := range index.functions {
+		if !a.rule.sinks[target.Name()] || !a.isSourceFunction(target) {
+			continue
+		}
+		roles, inScope := auditRoles(target)
+		if !inScope {
+			continue
+		}
+		for _, site := range index.callSites[target] {
+			actuals := auditCallActuals(site.call.Common())
+			if len(actuals) != len(target.Params) || roles.actor >= len(actuals) || roles.source >= len(actuals) {
+				return fmt.Errorf("malformed audit sink call to %s: got %d actuals for %d formal parameters", target, len(actuals), len(target.Params))
+			}
+			if _, _, err := a.sourcePosition(site.call.Pos()); err != nil {
+				return fmt.Errorf("validate source sink call to %s from %s: %w", target, site.caller, err)
 			}
 		}
 	}
@@ -446,7 +514,7 @@ func (a *auditActorAnalyzer) run() error {
 }
 
 func (a *auditActorAnalyzer) analyzeFunction(state auditState) error {
-	localHuman := state.human || auditFunctionHasHumanRoot(state.function)
+	localHuman := state.human || a.hasHumanRoot(state.function)
 	for _, block := range state.function.Blocks {
 		for _, instruction := range block.Instrs {
 			call, ok := instruction.(ssa.CallInstruction)
@@ -828,6 +896,17 @@ func auditFreeVarIndex(function *ssa.Function, variable *ssa.FreeVar) int {
 		}
 	}
 	return -1
+}
+
+// hasHumanRoot memoizes auditFunctionHasHumanRoot: a function is analyzed in
+// many taint states.
+func (a *auditActorAnalyzer) hasHumanRoot(function *ssa.Function) bool {
+	human, done := a.humanRoots[function]
+	if !done {
+		human = auditFunctionHasHumanRoot(function)
+		a.humanRoots[function] = human
+	}
+	return human
 }
 
 func auditFunctionHasHumanRoot(function *ssa.Function) bool {

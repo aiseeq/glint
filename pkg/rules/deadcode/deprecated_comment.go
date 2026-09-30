@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -41,6 +42,10 @@ func NewDeprecatedCommentRule() *DeprecatedCommentRule {
 	r.deprecatedPatterns = r.initDeprecatedPatterns()
 	return r
 }
+
+// deprecationNeedles are lower-case texts one of which every deprecated
+// pattern match contains: a comment holding none of them skips the regexps.
+var deprecationNeedles = []string{"deprecated", "legacy", "obsolete", "remov", "not"}
 
 // initDeprecatedPatterns initializes patterns for detecting deprecated comments
 func (r *DeprecatedCommentRule) initDeprecatedPatterns() []*regexp.Regexp {
@@ -226,6 +231,9 @@ func isBlankDocLine(text string) bool {
 
 // isDeprecatedComment checks if comment matches deprecated patterns
 func (r *DeprecatedCommentRule) isDeprecatedComment(text string) bool {
+	if !helpers.ContainsAny(strings.ToLower(text), deprecationNeedles) {
+		return false
+	}
 	for _, pattern := range r.deprecatedPatterns {
 		if pattern.MatchString(text) {
 			return true

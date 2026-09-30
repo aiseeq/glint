@@ -62,6 +62,22 @@ func (r *UnusedParamRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 	if ctx == nil {
 		return nil, errors.New("unused param: nil Go project context")
 	}
+	fixed, err := core.SharedLoad(ctx, fixedSignaturesKey{}, func() (*fixedSignatures, error) {
+		return collectFixedSignatures(ctx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyze(fileCtx, info, fixed)
+	})
+}
+
+// fixedSignaturesKey caches the signatures fixed by interfaces and function
+// values once per module load: they depend only on the loaded packages.
+type fixedSignaturesKey struct{}
+
+func collectFixedSignatures(ctx *core.GoProjectContext) (*fixedSignatures, error) {
 	fixed := &fixedSignatures{
 		interfaceMethods: make(map[string][]*types.Func),
 		funcValues:       make(map[*types.Func]bool),
@@ -76,9 +92,7 @@ func (r *UnusedParamRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 			fixed.addFuncValues(file, pkg.Package.TypesInfo)
 		}
 	}
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
-		return r.analyze(fileCtx, info, fixed)
-	})
+	return fixed, nil
 }
 
 // addInterfaces indexes the methods of the named interfaces declared in a

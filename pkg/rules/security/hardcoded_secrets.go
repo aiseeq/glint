@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -32,12 +33,7 @@ type secretPattern struct {
 
 // mayMatch reports whether the lower-cased line holds one of the needles.
 func (p *secretPattern) mayMatch(lowerLine string) bool {
-	for _, needle := range p.needles {
-		if strings.Contains(lowerLine, needle) {
-			return true
-		}
-	}
-	return false
+	return helpers.ContainsAny(lowerLine, p.needles)
 }
 
 // NewHardcodedSecretsRule creates the rule

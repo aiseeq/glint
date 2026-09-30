@@ -3,6 +3,7 @@ package patterns
 import (
 	"strings"
 
+	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
@@ -18,10 +19,10 @@ type jsSource struct {
 	text []string
 }
 
-func newJSSource(lines []string) jsSource {
+func newJSSource(ctx *core.FileContext) jsSource {
 	return jsSource{
-		code: helpers.MaskJSCommentsAndStrings(lines),
-		text: helpers.MaskJSComments(lines),
+		code: helpers.FileJSCode(ctx),
+		text: helpers.FileJSText(ctx),
 	}
 }
 

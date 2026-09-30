@@ -1,7 +1,11 @@
 // Package helpers provides shared utilities for rule implementations.
 package helpers
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/aiseeq/glint/pkg/core"
+)
 
 // IsInsideString checks if a substring appears inside a double-quoted string literal.
 // It counts quotes before the substring - odd count means inside a string.
@@ -63,6 +67,32 @@ func IsInStringOrComment(line, substr string) bool {
 // where an operand is expected. Both keep the damage within one line.
 func MaskJSCommentsAndStrings(lines []string) []string {
 	return maskJS(lines, true)
+}
+
+// ContainsAny reports whether s contains one of the needles: the cheap check
+// rules run before a regexp every match of which holds a needle.
+func ContainsAny(s string, needles []string) bool {
+	for _, needle := range needles {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// jsMaskKey keys the masked views of a file in core.FileShared.
+type jsMaskKey struct{ maskLiterals bool }
+
+// FileJSCode is MaskJSCommentsAndStrings of the file's lines, masked once per
+// file for all rules. The result must not be modified.
+func FileJSCode(ctx *core.FileContext) []string {
+	return core.FileShared(ctx, jsMaskKey{maskLiterals: true}, func() []string { return maskJS(ctx.Lines, true) })
+}
+
+// FileJSText is MaskJSComments of the file's lines, masked once per file for
+// all rules. The result must not be modified.
+func FileJSText(ctx *core.FileContext) []string {
+	return core.FileShared(ctx, jsMaskKey{maskLiterals: false}, func() []string { return maskJS(ctx.Lines, false) })
 }
 
 // MaskJSComments is MaskJSCommentsAndStrings for rules that read literal text

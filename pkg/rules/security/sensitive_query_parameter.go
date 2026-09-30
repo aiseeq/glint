@@ -44,8 +44,16 @@ func (r *SensitiveQueryParameterRule) AnalyzeFile(ctx *core.FileContext) []*core
 		return nil
 	}
 
+	// Needles every match contains: the getter needs query() or searchParams in
+	// the file, a URL literal needs '=' after '?' or '&' on its line.
+	lower := strings.ToLower(string(ctx.Content))
+	getterPossible := strings.Contains(lower, "query()") || strings.Contains(lower, "searchparams")
 	var violations []*core.Violation
 	for i, line := range ctx.Lines {
+		urlPossible := strings.IndexByte(line, '=') >= 0 && strings.ContainsAny(line, "?&")
+		if !getterPossible && !urlPossible {
+			continue
+		}
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
 			continue
@@ -57,9 +65,9 @@ func (r *SensitiveQueryParameterRule) AnalyzeFile(ctx *core.FileContext) []*core
 
 		pattern := ""
 		switch {
-		case r.queryGetter.MatchString(line):
+		case getterPossible && r.queryGetter.MatchString(line):
 			pattern = "query-read"
-		case r.urlLiteral.MatchString(line):
+		case urlPossible && r.urlLiteral.MatchString(line):
 			pattern = "url-literal"
 		default:
 			continue

@@ -47,7 +47,7 @@ func (r *FrontendEnvFallbackRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 	// Comments are blanked, literals kept: the env names and placeholder hosts
 	// the rule looks for live inside strings, and a JSDoc that warns against
 	// bracket access is not bracket access.
-	text := helpers.MaskJSComments(ctx.Lines)
+	text := helpers.FileJSText(ctx)
 
 	var violations []*core.Violation
 	for i, line := range text {

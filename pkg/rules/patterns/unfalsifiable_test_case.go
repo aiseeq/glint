@@ -224,7 +224,7 @@ func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 
 	// Проверки читаются по тексту без комментариев (селекторы и коды ответа —
 	// в строках), глубина скобок — только по коду.
-	src := newJSSource(ctx.Lines)
+	src := newJSSource(ctx)
 	counters := r.countScopes(src.text)
 
 	for i, line := range src.text {

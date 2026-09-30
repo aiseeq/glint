@@ -28,6 +28,23 @@ type FileContext struct {
 
 	// Configuration
 	Config *Config
+
+	// shared holds views derived from the content (masked source and the
+	// like), computed once per file for every rule that asks.
+	shared sharedCache
+}
+
+// FileShared returns the value build derives from the file, building it once
+// per file however many rules ask. key is a comparable value of a type private
+// to the caller's package, so packages cannot collide. The value must not be
+// modified by its users.
+func FileShared[T any](ctx *FileContext, key any, build func() T) T {
+	value, err := sharedGet(&ctx.shared, key, func() (T, error) { return build(), nil })
+	if err != nil {
+		// build cannot fail: only one key requested with two types gets here.
+		panic(err)
+	}
+	return value
 }
 
 // NewFileContext creates a file context and panics on an invalid path pair.

@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -52,7 +53,7 @@ func (r *NullableObjectCallRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 		return nil
 	}
 
-	src := newJSSource(ctx.Lines)
+	src := newJSSource(ctx)
 	var violations []*core.Violation
 	for i, code := range src.code {
 		for _, loc := range r.objectCall.FindAllStringIndex(code, -1) {
@@ -117,10 +118,10 @@ func (r *NullableObjectCallRule) guardedAbove(src jsSource, callLine int, arg st
 		opensEnclosing := rel < minRel
 		minRel = rel
 		compact := jsCompact(src.text[j])
-		if opensEnclosing && containsAny(compact, enclosing) {
+		if opensEnclosing && helpers.ContainsAny(compact, enclosing) {
 			return true
 		}
-		if containsAny(compact, earlyExits) && r.exitsAfter(src, j, callLine) {
+		if helpers.ContainsAny(compact, earlyExits) && r.exitsAfter(src, j, callLine) {
 			return true
 		}
 	}
@@ -134,15 +135,6 @@ func (r *NullableObjectCallRule) exitsAfter(src jsSource, j, callLine int) bool 
 		return true
 	}
 	return j+1 < callLine && r.exitsBlock.MatchString(src.code[j+1])
-}
-
-func containsAny(s string, needles []string) bool {
-	for _, needle := range needles {
-		if strings.Contains(s, needle) {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *NullableObjectCallRule) violation(ctx *core.FileContext, lineNum int, line string, arg string) *core.Violation {

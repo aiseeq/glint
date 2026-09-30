@@ -59,7 +59,7 @@ type fieldAccessKey struct{}
 // projectFieldAccess is collectProjectFieldAccess built once per project and
 // shared by the field rules.
 func projectFieldAccess(ctx *core.GoProjectContext) (*fieldAccess, error) {
-	return core.Shared(ctx, fieldAccessKey{}, func() (*fieldAccess, error) {
+	return core.SharedLoad(ctx, fieldAccessKey{}, func() (*fieldAccess, error) {
 		return collectProjectFieldAccess(ctx)
 	})
 }
@@ -113,6 +113,13 @@ func (a *fieldAccess) collect(file *ast.File, info *types.Info) {
 			}
 		case *ast.CallExpr:
 			a.serialization(node, info)
+			a.emptyInterfaceArguments(node, info)
+		case *ast.IndexExpr:
+			// m[k] of a map[any]: the key is hashed as the interface's
+			// dynamic value.
+			if mapType, ok := underlyingMap(info.TypeOf(node.X)); ok && isEmptyInterface(mapType.Key()) {
+				a.markHashed(info.TypeOf(node.Index))
+			}
 		}
 		if expr, ok := n.(ast.Expr); ok {
 			if mapType, ok := underlyingMap(info.TypeOf(expr)); ok {
@@ -121,6 +128,38 @@ func (a *fieldAccess) collect(file *ast.File, info *types.Info) {
 		}
 		return true
 	})
+}
+
+// emptyInterfaceArguments marks the struct values a call hands over as an
+// empty interface parameter: such a value is compared or hashed whole (a
+// context key, a key of a map[any]). The variadic tail is left out: ...any
+// formats or logs its arguments, and printing a field does not use it. An
+// interface with methods is used through them, and the methods' own selectors
+// count.
+func (a *fieldAccess) emptyInterfaceArguments(call *ast.CallExpr, info *types.Info) {
+	signature, ok := types.Unalias(info.TypeOf(call.Fun)).(*types.Signature)
+	if !ok {
+		return
+	}
+	fixed := signature.Params().Len()
+	if signature.Variadic() {
+		fixed--
+	}
+	for i, arg := range call.Args {
+		if i >= fixed {
+			break
+		}
+		if isEmptyInterface(signature.Params().At(i).Type()) {
+			a.markHashed(info.TypeOf(arg))
+		}
+	}
+}
+
+// isEmptyInterface reports whether t is an interface without methods: any,
+// interface{}.
+func isEmptyInterface(t types.Type) bool {
+	iface, ok := t.Underlying().(*types.Interface)
+	return ok && iface.NumMethods() == 0
 }
 
 // selector classifies one field selector.

@@ -208,7 +208,7 @@ func isGoLiteral(expr ast.Expr) bool {
 
 func (r *TautologicalAssertionRule) analyzeTypeScript(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
-	src := newJSSource(ctx.Lines)
+	src := newJSSource(ctx)
 	// Names are scoped to their test case: a variable of test a and a namesake
 	// of test b are different values.
 	pureReads := map[string]string{}
