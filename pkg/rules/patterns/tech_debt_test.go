@@ -202,6 +202,29 @@ func TestTechDebtRule_BrokenFeature(t *testing.T) {
 	}
 }
 
+// An unexplained "ignore errors" is reported in Russian as in English; with a
+// reason after it, it is not.
+func TestTechDebtRule_IgnoreErrors(t *testing.T) {
+	rule := NewTechDebtRule()
+	for code, reported := range map[string]bool{
+		"// ignore errors":                        true,
+		"// игнорируем ошибки":                    true,
+		"//Игнорирую ошибку":                      true,
+		"// тут игнорируем ошибки":                true,
+		"// игнорируем ошибки: кэш необязателен":  false,
+		"// ignore errors, the cache is optional": false,
+		"// неигнорируемые ошибки":                false,
+	} {
+		violations := rule.AnalyzeFile(createTechDebtContext(t, "backend/service.go", code))
+		if !reported {
+			assert.Empty(t, violations, code)
+			continue
+		}
+		require.Len(t, violations, 1, code)
+		assert.Equal(t, "ignore_errors", violations[0].Context["pattern"], code)
+	}
+}
+
 // "broken" describing the world (a pipe, a link) is not an admission about the code.
 func TestTechDebtRule_BrokenAsOrdinaryWord(t *testing.T) {
 	rule := NewTechDebtRule()

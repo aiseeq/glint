@@ -109,7 +109,7 @@ func (r *ErrorWrapRule) checkErrorBranch(ctx *core.FileContext, info *types.Info
 	}
 	// Only an error from foreign code lacks context: a function of the
 	// project is checked by this rule where its own errors arise.
-	origin, crosses := errorFromForeignCode(ctx.GoAST, info, own, call)
+	origin, crosses := errorFromForeignCode(ctx, info, own, call)
 	if !crosses || returnsToCallingPackage(info, fn, call) {
 		return nil
 	}
@@ -294,12 +294,12 @@ func errVarObject(info *types.Info, ifStmt *ast.IfStmt, errName string) types.Ob
 // and errors that describe themselves (constructors, context cancellation)
 // are not reported either. Without type information only a call qualified by
 // an imported package name counts. The first result names the callee.
-func errorFromForeignCode(file *ast.File, info *types.Info, own projectCode, call *ast.CallExpr) (string, bool) {
+func errorFromForeignCode(ctx *core.FileContext, info *types.Info, own projectCode, call *ast.CallExpr) (string, bool) {
 	if call == nil {
 		return "", false
 	}
 	if info == nil {
-		return untypedForeignCall(file, own, call)
+		return untypedForeignCall(ctx, own, call)
 	}
 	callee := typeutil.Callee(info, call)
 	if callee == nil || callee.Pkg() == nil || isSelfDescribingError(callee.Pkg().Path(), callee.Name()) {
@@ -346,13 +346,14 @@ func isSelfDescribingError(pkgPath, name string) bool {
 // untypedForeignCall reports whether call is qualified by a name the file
 // imports from foreign code: an explicit alias or the last element of the
 // import path. A package whose name differs from its path is not guessed at.
-func untypedForeignCall(file *ast.File, own projectCode, call *ast.CallExpr) (string, bool) {
+func untypedForeignCall(ctx *core.FileContext, own projectCode, call *ast.CallExpr) (string, bool) {
 	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	file := ctx.GoAST
 	if !ok || file == nil {
 		return "", false
 	}
 	qualifier, ok := sel.X.(*ast.Ident)
-	if !ok || qualifier.Obj != nil {
+	if !ok {
 		return "", false
 	}
 	for _, spec := range file.Imports {
@@ -364,6 +365,10 @@ func untypedForeignCall(file *ast.File, own projectCode, call *ast.CallExpr) (st
 		}
 		if name != qualifier.Name {
 			continue
+		}
+		// A parameter or variable named like the package is not the package.
+		if !isPackageName(fileScopes(ctx), qualifier) {
+			return "", false
 		}
 		if isSelfDescribingError(importPath, sel.Sel.Name) || !own.isForeign(importPath) {
 			return "", false

@@ -103,10 +103,11 @@ func (r *TechDebtRule) initPatterns() {
 			suggestion:  "Fix the broken feature or remove it",
 		},
 		"ignore_errors": {
-			// Only an explicit "ignore error" with no explanation counts.
+			// Only an explicit "ignore error" with no explanation counts. \b
+			// and \w know ASCII letters only, so the word edges are \p{L}.
 			// Phrases like "non-critical" or "safe to ignore" usually justify
 			// why ignoring is fine, so they are not lazy markers.
-			regex:       regexp.MustCompile(`(?i)//.*\b(ignore\s+errors?\s*$|игнорир\w*\s+ошибк\w*\s*$)`),
+			regex:       regexp.MustCompile(`(?i)//(?:.*[^\p{L}\p{N}_])?(ignore\s+errors?\s*$|игнорир\p{L}*\s+ошибк\p{L}*\s*$)`),
 			severity:    core.SeverityCritical,
 			description: "Ignoring errors without explanation - document why it's safe",
 			suggestion:  "Add explanation why ignoring is safe (e.g. 'Non-critical: uses defaults if fails')",

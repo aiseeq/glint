@@ -29,7 +29,7 @@ func TestTechDebtNeedlesAdmitEveryMatch(t *testing.T) {
 		"broken_feature": {
 			"// BROKEN:", "// broken logic", "// не работает", "// doesn't work", "// Сломано",
 		},
-		"ignore_errors":   {"// ignore errors", "// Ignore error"},
+		"ignore_errors":   {"// ignore errors", "// Ignore error", "// игнорируем ошибки", "//Игнорирую ошибку"},
 		"unfinished_work": {"// WIP", "// work in progress", "// not finished", "// Incomplete", "// незавершено", "// в работе"},
 	}
 	for _, needle := range techDebtNeedles {
