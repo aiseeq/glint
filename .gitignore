@@ -36,3 +36,6 @@ debug
 /tmp/
 *.tmp
 .glint-parity
+
+# Claude Code agent worktrees
+/.claude/worktrees/
