@@ -15,6 +15,7 @@ import (
 //	if data, ok := resp["data"].(map[string]any); ok { assert.False(t, data["ok"].(bool)) }
 //	if w.TransactionID == nil { t.Logf("not created yet") } else { assert.NotEmpty(...) }
 //	if err != nil { t.Skipf("server unavailable: %v", err) }
+//	for _, f := range fixtures { data, err := os.ReadFile(f); if err != nil { continue } ... }
 //
 // The assertion runs only when the value is there, and the test passes when
 // it is not; a failure of the code under test turns into a skip. Skips on the
@@ -56,6 +57,13 @@ func (r *TautologicalAssertionRule) goGuardsAndSkips(ctx *core.FileContext, test
 				if i > 0 {
 					before = list[i-1]
 				}
+				if errName := errNilCheckName(ifStmt.Cond); errName != "" && ifStmt.Else == nil && onlyContinues(ifStmt.Body) &&
+					!fromEnvironmentProbe(errName, ifStmt.Init, before) && !hasCommentIn(ctx.GoAST, ifStmt.Body) {
+					violations = append(violations, r.violation(ctx, ctx.LineFor(ifStmt),
+						"The item that failed is skipped without a word — a broken fixture drops out of the check and the test stays green",
+						"Fail the test on the error (t.Fatalf, require.NoError), or return it from the helper",
+						"error_skipped"))
+				}
 				if skip := skipCall(ifStmt.Body); skip != nil && isFailureCondition(ifStmt, before) {
 					violations = append(violations, r.violation(ctx, ctx.LineFor(skip),
 						"The test skips when the code under test fails — the failure shows as a skip and the suite stays green",
@@ -66,6 +74,25 @@ func (r *TautologicalAssertionRule) goGuardsAndSkips(ctx *core.FileContext, test
 		})
 	})
 	return violations
+}
+
+// onlyContinues reports a branch that is a bare continue.
+func onlyContinues(body *ast.BlockStmt) bool {
+	if len(body.List) != 1 {
+		return false
+	}
+	branch, ok := body.List[0].(*ast.BranchStmt)
+	return ok && branch.Tok == token.CONTINUE
+}
+
+// hasCommentIn reports a comment inside a block: the author saying why.
+func hasCommentIn(file *ast.File, block *ast.BlockStmt) bool {
+	for _, group := range file.Comments {
+		if group.Pos() > block.Lbrace && group.End() < block.Rbrace {
+			return true
+		}
+	}
+	return false
 }
 
 // isCommaOkGuard reports if v, ok := x.(T); ok or if v, ok := m[k]; ok && ...
