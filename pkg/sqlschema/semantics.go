@@ -426,7 +426,9 @@ func momentInSession(node *pgquery.Node, tables []*Table) bool {
 
 // RowWrite reports a single UPDATE or DELETE without RETURNING and without
 // FROM or USING, whose WHERE fixes one row of its table by a parameter: an
-// id, or a unique key the schema knows. When no row matches, it succeeds having changed
+// id, or a unique key the schema knows. An UPDATE whose WHERE also tests a
+// column it sets (AND hidden_at IS NULL) is left out: no row there means
+// the change is already made. When no row matches, it succeeds having changed
 // nothing, and only the count of affected rows tells.
 func (s *Schema) RowWrite(sql string) bool {
 	result, ok := parse(sql)
@@ -445,6 +447,9 @@ func (s *Schema) RowWrite(sql string) bool {
 			return false
 		}
 		relation, where = update.GetRelation(), update.GetWhereClause()
+		if guardsOwnChange(update) {
+			return false
+		}
 	case stmt.GetDeleteStmt() != nil:
 		del := stmt.GetDeleteStmt()
 		if len(del.GetReturningList()) > 0 || len(del.GetUsingClause()) > 0 {
@@ -476,4 +481,25 @@ func (s *Schema) RowWrite(sql string) bool {
 	}
 	table := s.Table(relation.GetRelname())
 	return table != nil && table.UniqueWithin(pinned)
+}
+
+// guardsOwnChange reports an UPDATE whose WHERE tests a column its SET
+// writes, other than the key it pins the row by: an idempotent change that
+// matches no row once made.
+func guardsOwnChange(update *pgquery.UpdateStmt) bool {
+	set := make(map[string]bool)
+	for _, target := range update.GetTargetList() {
+		set[strings.ToLower(target.GetResTarget().GetName())] = true
+	}
+	for _, ref := range pinnedColumns(update.GetWhereClause()) {
+		delete(set, ref.name)
+	}
+	guarded := false
+	walk(update.GetWhereClause().ProtoReflect(), func(m proto.Message) {
+		if ref, ok := m.(*pgquery.ColumnRef); ok {
+			node := &pgquery.Node{Node: &pgquery.Node_ColumnRef{ColumnRef: ref}}
+			guarded = guarded || set[refName(node)]
+		}
+	})
+	return guarded
 }

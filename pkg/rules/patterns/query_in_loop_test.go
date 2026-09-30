@@ -35,6 +35,9 @@ func (r *UserRepo) GetByID(id string) (string, error) {
 	err := r.db.QueryRow("SELECT name FROM users WHERE id = $1", id).Scan(&name)
 	return name, err
 }
+
+// IsConflict classifies an error: nothing to query with.
+func IsConflict(err error) bool { return err != nil }
 `,
 	// A repository whose own package only reaches the database through a
 	// project package in between.
@@ -86,6 +89,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"time"
 
 	"example.com/rulestest/memo"
 	"example.com/rulestest/orders"
@@ -164,6 +168,48 @@ func memoryStoreInLoop(cacheStore *memo.Store, ids []string) {
 		cacheStore.Get(id)
 	}
 }
+
+func (s *Service) nameOf(id string) string {
+	name, _ := s.repo.GetByID(id)
+	return name
+}
+
+func retryAttempts(s *Service, id string) {
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err := s.repo.GetByID(id); err == nil || !store.IsConflict(err) {
+			return
+		}
+	}
+}
+
+func worker(s *Service, ticks <-chan time.Time, stop chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticks:
+			s.repo.GetByID("due")
+		}
+	}
+}
+
+func tickWorker(s *Service, ticks <-chan time.Time) {
+	for range ticks {
+		s.nameOf("due")
+	}
+}
+
+func pureInLoop(errs []error) {
+	for _, err := range errs {
+		store.IsConflict(err)
+	}
+}
+
+func helperInLoop(s *Service, ids []string) {
+	for _, id := range ids {
+		s.nameOf(id)
+	}
+}
 `,
 }
 
@@ -181,6 +227,7 @@ func TestQueryInLoopRule_Detection(t *testing.T) {
 	sort.Strings(reported)
 	assert.Equal(t, []string{
 		"dbFieldInFor",
+		"helperInLoop",
 		"interfaceRepoInLoop",
 		"remoteStoreInLoop",
 		"repoFieldInRange",

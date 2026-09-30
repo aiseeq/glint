@@ -127,6 +127,8 @@ func TestRowWrite(t *testing.T) {
 		`UPDATE members SET code = $1 WHERE code IS NULL`,
 		`DELETE FROM members WHERE nickname = $1`,
 		`UPDATE members SET code = $1 WHERE id = 'singleton'`,
+		`UPDATE members SET code = $2 WHERE id = $1 AND code IS NULL`,
+		`UPDATE members SET nickname = $2 WHERE external_ref = $1 AND (nickname IS NULL OR nickname <> $2)`,
 		`INSERT INTO members (id) VALUES ($1)`,
 		`UPDATE members SET code = $2 WHERE id = $1; UPDATE members SET code = $2 WHERE id = $3`,
 	} {
