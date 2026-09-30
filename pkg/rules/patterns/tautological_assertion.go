@@ -20,11 +20,12 @@ func init() {
 // A green suite is trusted, so an assertion that holds no matter what the code does is worse
 // than no test at all: it claims coverage of exactly the behaviour nobody is watching.
 //
-// Three shapes, all seen in production repositories:
+// Shapes seen in production repositories:
 //   - both sides of an equality assertion are the same expression;
 //   - the asserted value is a literal constant (expect(true).toBe(true));
 //   - the assertion sits inside a condition derived from the same value, so it skips itself
-//     precisely when the value would have been interesting.
+//     precisely when the value would have been interesting;
+//   - in Go, a skip on the failure of the code under test (tautological_assertion_go_guard.go).
 //
 // Real case (ProjectA, 2026-07-29): a regression test named "withdrawal and analytics headline
 // numbers stay in lockstep" compared displayedBalance with displayedBalance and documented a
@@ -110,11 +111,10 @@ func (r *TautologicalAssertionRule) analyzeGo(ctx *core.FileContext) []*core.Vio
 	for alias := range helpers.PackageAliases(ctx.GoAST, `"github.com/stretchr/testify/require"`, "require") {
 		testify[alias] = true
 	}
+	violations := r.goGuardsAndSkips(ctx, testify)
 	if len(testify) == 0 {
-		return nil
+		return violations
 	}
-
-	var violations []*core.Violation
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
