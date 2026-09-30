@@ -112,7 +112,7 @@ func (r *TimeDerivedIDRule) analyzeGo(ctx *core.FileContext) []*core.Violation {
 				report(at, "The identifier is made from the clock — two calls in the same tick get the same one, and it is guessed from the time",
 					"id_from_clock")
 			}
-			if (isIDName(target) || uniqueNumberName.MatchString(target)) && clockModulo(value, clock) {
+			if namesUniqueValue(target) && clockModulo(value, clock) {
 				report(at, "The clock modulo a small number picks one of a few values — two runs in the same window get the same one",
 					"clock_modulo")
 			}
@@ -266,6 +266,12 @@ func disambiguated(expr ast.Expr) bool {
 	return found
 }
 
+// namesUniqueValue reports a name for a value meant to tell records apart:
+// an identifier or a unique number.
+func namesUniqueValue(name string) bool {
+	return isIDName(name) || uniqueNumberName.MatchString(name)
+}
+
 // isIDName reports a name that holds an identifier: id, userID, RequestID,
 // generateJTI, user_id, nonce.
 func isIDName(name string) bool {
@@ -297,7 +303,7 @@ func (r *TimeDerivedIDRule) analyzeScript(ctx *core.FileContext) []*core.Violati
 	var violations []*core.Violation
 	for i, line := range code {
 		m := r.tsDecl.FindStringSubmatch(line)
-		if m == nil || !(isIDName(m[1]) || uniqueNumberName.MatchString(m[1])) || !modulo.MatchString(m[2]) {
+		if m == nil || !namesUniqueValue(m[1]) || !modulo.MatchString(m[2]) {
 			continue
 		}
 		if disambiguator.MatchString(m[2]) || ctx.IsSuppressed(i+1, r.Name()) {
