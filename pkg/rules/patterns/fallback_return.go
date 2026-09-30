@@ -879,7 +879,7 @@ func (r *FallbackReturnRule) isFunctionException(funcName string) bool {
 		return true
 	}
 
-	if !hasLeadingWord(funcName, "Get") {
+	if !helpers.HasLeadingWord(funcName, "Get") {
 		return false
 	}
 
