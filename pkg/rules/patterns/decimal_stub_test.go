@@ -7,15 +7,16 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
-// wp3bDecimalStub is the part of github.com/shopspring/decimal the money
+// decimalStub is the part of github.com/shopspring/decimal the money
 // rules reason about. Tests load it as a replaced module so that the code
 // under test type-checks against the real import path.
-const wp3bDecimalStub = `package decimal
+const decimalStub = `package decimal
 
 type Decimal struct{ value int64 }
 
 var Zero = Decimal{}
 
+func New(v int64, exp int32) Decimal          { return Decimal{value: v} }
 func NewFromInt(v int64) Decimal              { return Decimal{value: v} }
 func NewFromFloat(v float64) Decimal          { return Decimal{} }
 func NewFromString(v string) (Decimal, error) { return Decimal{}, nil }
@@ -38,18 +39,19 @@ func (d Decimal) IntPart() int64                  { return d.value }
 func (d Decimal) String() string                  { return "" }
 func (d Decimal) StringFixed(places int32) string { return "" }
 func (d Decimal) Equal(o Decimal) bool            { return d == o }
+func (d Decimal) IsZero() bool                    { return d.value == 0 }
 `
 
-// wp3bDecimalProject loads the given files as a typed module that can import
+// decimalProject loads the given files as a typed module that can import
 // github.com/shopspring/decimal.
-func wp3bDecimalProject(t *testing.T, files map[string]string) *core.GoProjectContext {
+func decimalProject(t *testing.T, files map[string]string) *core.GoProjectContext {
 	t.Helper()
 	all := map[string]string{
 		"go.mod": "module example.com/rulestest\n\ngo 1.24\n\n" +
 			"require github.com/shopspring/decimal v0.0.0\n\n" +
 			"replace github.com/shopspring/decimal => ./third_party/decimal\n",
 		"third_party/decimal/go.mod":     "module github.com/shopspring/decimal\n\ngo 1.24\n",
-		"third_party/decimal/decimal.go": wp3bDecimalStub,
+		"third_party/decimal/decimal.go": decimalStub,
 	}
 	for name, content := range files {
 		all[name] = content

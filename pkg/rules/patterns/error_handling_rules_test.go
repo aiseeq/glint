@@ -10,7 +10,7 @@ import (
 )
 
 // errorHandlingRules lists the error-handling rules that share the helpers of
-// wp2_error_helpers.go.
+// error_vocabulary.go.
 func errorHandlingRules() []rules.Rule {
 	return []rules.Rule{
 		NewReturnNilErrorRule(), NewErrorMaskingRule(), NewFallbackReturnRule(),

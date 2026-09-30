@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 const configFallbackConfigPackage = `package config
@@ -32,10 +31,10 @@ func (c *Config) ApplyDefaults() {
 
 func runConfigValueFallbackRule(t *testing.T, service string) []*core.Violation {
 	t.Helper()
-	project := rulestest.Project(t, decimalStubModule(map[string]string{
+	project := decimalProject(t, map[string]string{
 		"config/config.go":   configFallbackConfigPackage,
 		"service/service.go": service,
-	}))
+	})
 	violations, err := NewConfigValueFallbackRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
 	return violations

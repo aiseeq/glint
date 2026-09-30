@@ -178,7 +178,7 @@ func (m money) rounded() float64 {
 // or method result declared in another file is still a decimal, and a type
 // that only shares the method names is not.
 func TestFinancialDirectionalRoundingRule_TypedReceivers(t *testing.T) {
-	project := wp3bDecimalProject(t, map[string]string{
+	project := decimalProject(t, map[string]string{
 		"billing/model.go": `package billing
 
 import "github.com/shopspring/decimal"
