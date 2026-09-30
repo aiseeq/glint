@@ -149,7 +149,12 @@ func isErrorOrWarnLogStmt(stmt ast.Stmt) bool {
 		return false
 	}
 	call, ok := exprStmt.X.(*ast.CallExpr)
-	return ok && (isErrorLevelLogCall(call) || isPrintedError(call))
+	return ok && isErrorReport(call)
+}
+
+// isErrorReport reports an Error/Warn log call or a print of an error.
+func isErrorReport(call *ast.CallExpr) bool {
+	return isErrorLevelLogCall(call) || isPrintedError(call)
 }
 
 // errorMessageWords mark the text of an unleveled print as an error report.
@@ -265,7 +270,7 @@ func branchLogsAndEnds(body *ast.BlockStmt, rest []ast.Stmt) bool {
 		switch s := stmt.(type) {
 		case *ast.ExprStmt:
 			call, ok := s.X.(*ast.CallExpr)
-			if !ok || !(isErrorLevelLogCall(call) || isPrintedError(call)) {
+			if !ok || !isErrorReport(call) {
 				return false
 			}
 			logs = true

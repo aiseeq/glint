@@ -135,7 +135,7 @@ func silentNilGuardField(stmt ast.Stmt) (field string, ok bool) {
 		if !ok {
 			return "", false
 		}
-		if call, ok := exprStmt.X.(*ast.CallExpr); !ok || !(isLoggerCall(call) || isFmtPrint(call)) {
+		if call, ok := exprStmt.X.(*ast.CallExpr); !ok || !isReportCall(call) {
 			return "", false
 		}
 	}
