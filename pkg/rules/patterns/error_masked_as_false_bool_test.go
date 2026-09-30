@@ -34,6 +34,40 @@ func (c *C) ValidateUserPermission(userRole, perm string) bool {
 			expectedCount: 1,
 		},
 		{
+			name: "error logged by the receiver's own log method NOT flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type Ctx struct{}
+func (c *Ctx) log(format string, args ...any) {}
+func (c *Ctx) Load(id string) (int, error) { return 0, nil }
+func (c *Ctx) PlaceBuilding(id string) bool {
+	n, err := c.Load(id)
+	if err != nil {
+		c.log("place %s: %v", id, err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "math.Log is not logging — flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+import "math"
+type Ctx struct{}
+func (c *Ctx) Load(id string) (float64, error) { return 0, nil }
+func (c *Ctx) Worth(id string) bool {
+	v, err := c.Load(id)
+	if err != nil {
+		_ = math.Log(v)
+		return false
+	}
+	return v > 0
+}`,
+			expectedCount: 1,
+		},
+		{
 			name: "HasRole pure predicate NOT flagged",
 			path: "/src/backend/auth.go",
 			code: `package auth

@@ -251,7 +251,17 @@ func isLoggerCall(call *ast.CallExpr) bool {
 	if !loggingVerbs[verb] && !strings.HasPrefix(verb, "log") {
 		return false
 	}
+	// A method named log or logf says what it does whatever its receiver
+	// is called (c.log(...)); the math packages' Log is a logarithm.
+	if (verb == "log" || verb == "logf") && !isMathPackage(sel.X) {
+		return true
+	}
 	return isLoggerReceiver(sel.X)
+}
+
+func isMathPackage(expr ast.Expr) bool {
+	ident, ok := ast.Unparen(expr).(*ast.Ident)
+	return ok && (ident.Name == "math" || ident.Name == "cmplx")
 }
 
 // logVerb returns the method name of a logging call in lower case, without

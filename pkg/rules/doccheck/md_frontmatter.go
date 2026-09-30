@@ -47,11 +47,6 @@ func (r *MdFrontmatterRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	}
 
 	// Skip certain directories and files
-	if strings.Contains(ctx.Path, "/generated/") ||
-		strings.Contains(ctx.Path, "/templates/") ||
-		strings.HasSuffix(ctx.Path, "README.md") {
-		return nil
-	}
 
 	hasFrontmatter, fields, err := r.parseFrontmatter(ctx.Lines)
 	if !hasFrontmatter {

@@ -83,12 +83,11 @@ func (r *SilentConfigErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 
 	path := strings.ToLower(ctx.RelPath)
 
-	// Skip generated + _test.go (real unit tests may legitimately use
-	// `err == nil` patterns; test helpers under /tests/common/ are still
-	// scanned because the callee-gated check is narrow).
-	if strings.HasSuffix(path, ".gen.go") || strings.HasSuffix(path, "_gen.go") ||
-		strings.Contains(path, "/generated/") || strings.Contains(path, "vendor/") ||
-		strings.HasSuffix(path, "_test.go") {
+	// Real unit tests (_test.go) may legitimately use `err == nil` patterns;
+	// test helpers under tests/ are still scanned because the callee-gated
+	// check is narrow. Generated files are dropped centrally by their
+	// "Code generated" marker.
+	if strings.HasSuffix(path, "_test.go") {
 		return nil
 	}
 
