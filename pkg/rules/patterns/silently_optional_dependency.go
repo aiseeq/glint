@@ -124,10 +124,22 @@ func silentNilGuardField(stmt ast.Stmt) (field string, ok bool) {
 	if _, ok := sel.X.(*ast.Ident); !ok {
 		return "", false
 	}
-	if len(ifStmt.Body.List) != 1 {
+	// Log lines before the return tell an operator, not the caller: the
+	// feature is off and the call answers as if it had run.
+	body := ifStmt.Body.List
+	if len(body) == 0 {
 		return "", false
 	}
-	ret, ok := ifStmt.Body.List[0].(*ast.ReturnStmt)
+	for _, stmt := range body[:len(body)-1] {
+		exprStmt, ok := stmt.(*ast.ExprStmt)
+		if !ok {
+			return "", false
+		}
+		if call, ok := exprStmt.X.(*ast.CallExpr); !ok || !(isLoggerCall(call) || isFmtPrint(call)) {
+			return "", false
+		}
+	}
+	ret, ok := body[len(body)-1].(*ast.ReturnStmt)
 	if !ok {
 		return "", false
 	}

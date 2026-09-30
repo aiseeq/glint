@@ -8,10 +8,12 @@ commit itself for kind=introduced (the code the fix left). Reports the rules
 that fire on the lines the commit removed (defect) or added (introduced), +-1.
 Only reads the repository: trees come from git archive.
 
-A manifest (.tsv, `commit kind rule[,rule...]` per line) is the acceptance of
-new rules: only the listed rules run, every line is checked afresh, and the
-lines where none of its rules fired are printed as misses; the exit status
-is 1 when there is one.
+A manifest (.tsv, `commit kind rule[,rule...] [@path:line]` per line) is the
+acceptance of new rules: only the listed rules run, every line is checked
+afresh, and the lines where none of its rules fired are printed as misses;
+the exit status is 1 when there is one. A rule that reports the defect on a
+line the commit did not change (a setter, a line the fix kept) is anchored
+with @path:line in the analyzed tree.
 """
 import json, os, re, shutil, subprocess, sys
 from collections import defaultdict
@@ -55,8 +57,11 @@ def module_root(path, tree_files):
     return os.path.dirname(path) or '.'
 
 
-def run(commit, tree, side, rules):
+def run(commit, tree, side, rules, anchor=None):
     lines = changed_lines(commit, side)
+    if anchor:
+        path, line = anchor.rsplit(':', 1)
+        lines.setdefault(path, set()).add(int(line))
     if not lines:
         return {'status': 'no-code-lines'}
     tree_files = set(git('ls-tree', '-r', '--name-only', tree).split())
@@ -106,10 +111,13 @@ def run(commit, tree, side, rules):
 manifest = cand_path.endswith('.tsv')
 expected = defaultdict(set)
 if manifest:
+    anchors = {}
     for line in open(cand_path):
         if line.strip() and not line.startswith('#'):
-            commit, kind, rules = line.split()
+            commit, kind, rules, *rest = line.split()
             expected[(commit, kind)].update(rules.split(','))
+            if rest:
+                anchors[(commit, kind)] = rest[0].lstrip('@')
     dates = {c: git('log', '-1', '--format=%ad', '--date=short', c).strip() for c, _ in expected}
     jobs = sorted((dates[c], c, k) for c, k in expected)
 else:
@@ -132,7 +140,7 @@ with open(out_path, 'a' if not manifest else 'w') as out:
         tree = commit + '^' if kind == 'defect' else commit
         rules = sorted(expected[(commit, kind)]) if manifest else None
         try:
-            res = run(commit, tree, side, rules)
+            res = run(commit, tree, side, rules, anchors.get((commit, kind)) if manifest else None)
         except subprocess.CalledProcessError as e:
             res = {'status': 'error', 'errors': [str(e)[:300]]}
         res.update(commit=commit, kind=kind)
