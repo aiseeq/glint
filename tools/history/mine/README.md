@@ -51,6 +51,11 @@ repository: commits come from `git log`/`git show`, trees from `git archive`.
    another linter the project already runs covers is not glint's. Estimate
    the noise of a draft detector on the current code before proposing a rule.
 
+7. **Measure the noise of the release.** Before installing a changed rule, run
+   it on every consumer — every project with a `.glint.yaml` — from the
+   project root with its own configuration, not on the mined repository
+   alone: an install makes every one of them fail its gate on a new finding.
+
 ## Outputs
 
 - `batch-NN.tsv` — `hash date changed_files subject`, oldest first.

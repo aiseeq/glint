@@ -197,6 +197,10 @@ func (r *FallbackReturnRule) checkFailedCalls(ctx *core.FileContext, body *ast.B
 			if !ok || ifStmt.Init != nil {
 				continue
 			}
+			// A reason written right above the call explains the branch too.
+			if r.hasLegitimateComment(ctx.Lines, ctx.PositionFor(list[i]).Line-1) {
+				continue
+			}
 			failed := failedCall{list: list, index: i, inLoop: inLoop}
 			if results, errName := failedCallResults(list[i]); errName != "" && errNilCheckName(ifStmt.Cond) == errName {
 				failed.results, failed.errName = results, errName
@@ -1194,8 +1198,10 @@ func (r *FallbackReturnRule) hasLegitimateComment(lines []string, lineIdx int) b
 	legitimatePatterns := []string{
 		"optional", "non-critical", "best effort", "graceful",
 		"using 0", "using zero", "baseline", "explicit",
-		"intentional", "acceptable", "allow", "permit", "failover",
-		"разрешаем", "устанавливаем", "базовые", "явный",
+		"intentional", "acceptable", "allow", "permit", "failover", "fall back",
+		"still", "anyway", "disabled", "degrad", "partial", "skip",
+		"разрешаем", "устанавливаем", "базовые", "явный", "всё равно", "все равно",
+		"без ", "деград", "частичн", "пропуск", "как раньше",
 	}
 
 	// Check current line for inline comment
