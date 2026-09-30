@@ -98,26 +98,7 @@ func (r *OrphanedInterfaceRule) shouldSkipFile(ctx *core.FileContext) bool {
 		return true
 	}
 
-	if isVendoredOrGeneratedPath(path) {
-		return true
-	}
-
-	// Skip interface definition directories (contracts, interfaces packages)
-	// These are meant to be implemented elsewhere
-	if strings.Contains(path, "contracts/") || strings.Contains(path, "interfaces/") {
-		return true
-	}
-
-	// Skip files specifically named for interface definitions
-	baseName := ctx.BaseName()
-	if strings.HasSuffix(baseName, "_interface.go") ||
-		strings.HasSuffix(baseName, "_interfaces.go") ||
-		baseName == "interfaces.go" ||
-		baseName == "interface.go" {
-		return true
-	}
-
-	return false
+	return isVendoredOrGeneratedPath(path)
 }
 
 // hasExemptComment reports an interface whose own doc comment suppresses this

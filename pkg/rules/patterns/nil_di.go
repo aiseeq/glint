@@ -58,9 +58,6 @@ func (r *NilDIRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Vio
 	}
 
 	// Skip files named test.go (benchmark files, etc.)
-	if strings.HasSuffix(ctx.RelPath, "/test.go") || ctx.RelPath == "test.go" {
-		return nil
-	}
 
 	if ctx.GoAST == nil {
 		return nil

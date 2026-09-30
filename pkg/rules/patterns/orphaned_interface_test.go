@@ -216,3 +216,19 @@ func Broken() int { return "not an int" }
 	require.Equal(t, "broken/types.go", violations[0].File)
 	require.Equal(t, 5, violations[0].Line)
 }
+
+// Where an interface lives says nothing about whether anything uses it: an
+// orphan in an interfaces/ package or an interfaces.go file is still one.
+func TestOrphanedInterfaceReportsOrphanWhateverTheFileName(t *testing.T) {
+	violations := orphanedInterfaceProject(t, map[string]string{
+		"store/interfaces/interfaces.go": `package interfaces
+
+type Ledger interface{ Post() error }
+`,
+		"store/contracts/store_interface.go": `package contracts
+
+type Archive interface{ Seal() error }
+`,
+	})
+	require.Len(t, violations, 2)
+}
