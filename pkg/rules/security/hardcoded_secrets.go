@@ -1,6 +1,7 @@
 package security
 
 import (
+	"go/ast"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -161,7 +162,41 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			}
 		}
 	}
+	if !testData {
+		violations = append(violations, r.defaultTagSecrets(ctx)...)
+	}
 
+	return violations
+}
+
+// defaultTagSecrets reports a credential written as the default of a struct
+// field (Password string `env:"DB_PASSWORD" default:"..."`): whenever the
+// environment sets nothing, the binary's own copy is the password.
+func (r *HardcodedSecretsRule) defaultTagSecrets(ctx *core.FileContext) []*core.Violation {
+	if ctx.GoAST == nil {
+		return nil
+	}
+	var violations []*core.Violation
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		field, ok := n.(*ast.Field)
+		if !ok || field.Tag == nil || len(field.Names) != 1 || !secretFieldName.MatchString(field.Names[0].Name) {
+			return true
+		}
+		value, ok := fieldTag(field).Lookup("default")
+		if !ok || value == "" || isNotSecretValue(field.Names[0].Name, value) {
+			return true
+		}
+		line := ctx.LineFor(field)
+		if ctx.IsSuppressed(line, r.Name()) {
+			return true
+		}
+		v := r.CreateViolation(ctx.RelPath, line, "Hardcoded secret as the default value of a configuration field")
+		v.WithCode(r.maskSecretMatches(strings.Replace(ctx.GetLine(line), value, "***", 1)))
+		v.WithSuggestion("Leave the default empty and fail at startup when the environment does not set it")
+		v.WithContext("pattern", "default_tag")
+		violations = append(violations, v)
+		return true
+	})
 	return violations
 }
 

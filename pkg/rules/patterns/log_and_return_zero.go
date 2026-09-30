@@ -174,7 +174,7 @@ func isPrintedError(call *ast.CallExpr) bool {
 	}
 	args := call.Args
 	if strings.HasPrefix(sel.Sel.Name, "Fprint") {
-		if !isStderrPrint(sel, call) {
+		if !helpers.IsStderrPrint(sel, call) {
 			return false
 		}
 		args = args[1:]
@@ -285,7 +285,7 @@ func branchLogsAndEnds(body *ast.BlockStmt, rest []ast.Stmt) bool {
 		if !ok {
 			return false
 		}
-		if call, ok := exprStmt.X.(*ast.CallExpr); !ok || !isLoggerCall(call) {
+		if call, ok := exprStmt.X.(*ast.CallExpr); !ok || !helpers.IsLoggerCall(call) {
 			return false
 		}
 	}

@@ -722,7 +722,7 @@ func readsIdentOutsideLoggers(node ast.Node, name string) bool {
 // isReportCall reports a log line or a fmt.Print line: it tells an operator,
 // not the caller.
 func isReportCall(call *ast.CallExpr) bool {
-	return isLoggerCall(call) || isFmtPrint(call)
+	return helpers.IsLoggerCall(call) || isFmtPrint(call)
 }
 
 // isFmtPrint reports fmt.Print, Printf or Println.
@@ -1230,11 +1230,11 @@ func (r *FallbackReturnRule) hasLegitimateComment(lines []string, lineIdx int) b
 	return false
 }
 
-// hasLoggingStatement checks if the if block logs (see isLoggerCall).
+// hasLoggingStatement checks if the if block logs (see helpers.IsLoggerCall).
 func (r *FallbackReturnRule) hasLoggingStatement(ifStmt *ast.IfStmt) bool {
 	for _, stmt := range ifStmt.Body.List {
 		if exprStmt, ok := stmt.(*ast.ExprStmt); ok {
-			if call, ok := exprStmt.X.(*ast.CallExpr); ok && isLoggerCall(call) {
+			if call, ok := exprStmt.X.(*ast.CallExpr); ok && helpers.IsLoggerCall(call) {
 				return true
 			}
 		}

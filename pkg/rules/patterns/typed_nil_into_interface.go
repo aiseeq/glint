@@ -10,6 +10,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/types/typeutil"
 )
@@ -70,25 +71,6 @@ func (r *TypedNilIntoInterfaceRule) RequiresSSA() bool { return false }
 // AnalyzeFile does nothing: nil-ability evidence is collected across the whole project.
 func (r *TypedNilIntoInterfaceRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
 	return nil
-}
-
-// exprText renders an identifier chain (x, x.y, x.y.z) as text. Пустая строка — выражение
-// сложнее цепочки полей, и сопоставлять его по тексту нельзя.
-func exprText(expr ast.Expr) string {
-	switch e := expr.(type) {
-	case *ast.Ident:
-		return e.Name
-	case *ast.SelectorExpr:
-		base := exprText(e.X)
-		if base == "" {
-			return ""
-		}
-		return base + "." + e.Sel.Name
-	case *ast.ParenExpr:
-		return exprText(e.X)
-	default:
-		return ""
-	}
 }
 
 // nilComparison reports the operand a comparison checks against nil.
@@ -678,7 +660,7 @@ func (w *typedNilWalker) checkAssign(assign *ast.AssignStmt) {
 		return
 	}
 	for i, lhs := range assign.Lhs {
-		w.report(assign.Rhs[i], w.pkg.TypesInfo.TypeOf(lhs), exprText(lhs))
+		w.report(assign.Rhs[i], w.pkg.TypesInfo.TypeOf(lhs), helpers.ExprText(lhs))
 	}
 }
 
@@ -705,7 +687,7 @@ func (w *typedNilWalker) report(arg ast.Expr, target types.Type, sink string) {
 	if obj == nil || !w.nilable[obj] || w.guarded[obj] {
 		return
 	}
-	text := exprText(arg)
+	text := helpers.ExprText(arg)
 	if text == "" {
 		text = obj.Name()
 	}

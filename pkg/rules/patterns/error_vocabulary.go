@@ -74,7 +74,7 @@ var errorLevelVerbs = map[string]bool{
 // isLoggerReceiver) at Error, Warn or Fatal level.
 func isErrorLevelLogCall(call *ast.CallExpr) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	return ok && errorLevelVerbs[logVerb(sel)] && isLoggerReceiver(sel.X)
+	return ok && errorLevelVerbs[helpers.LogVerb(sel)] && helpers.IsLoggerReceiver(sel.X)
 }
 
 // predicatePrefixes are the leading words of a function whose bool result is

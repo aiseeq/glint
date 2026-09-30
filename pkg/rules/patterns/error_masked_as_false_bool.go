@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -232,14 +233,14 @@ func isIdentNamed(expr ast.Expr, name string) bool {
 }
 
 // hasLoggingCall returns true if any statement in the block calls a logger
-// (see isLoggerCall).
+// (see helpers.IsLoggerCall).
 func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if found {
 			return false
 		}
-		if call, ok := n.(*ast.CallExpr); ok && isLoggerCall(call) {
+		if call, ok := n.(*ast.CallExpr); ok && helpers.IsLoggerCall(call) {
 			found = true
 		}
 		return !found

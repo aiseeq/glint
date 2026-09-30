@@ -1,6 +1,9 @@
 package security
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // Credential names by kind, as regexp alternatives matched case-insensitively.
 // The security rules that recognize a credential by the name it is stored or
@@ -15,6 +18,12 @@ var (
 	secretNames      = []string{`secret`, `private[-_]?key`}
 	oneTimeCodeNames = []string{`otp`, `otp[-_]?code`}
 )
+
+// secretFieldName matches a field or variable whose value is a credential by
+// the name's ending: Password, DBPassword, JWTSecret, ClientSecret,
+// PrivateKey, APIKey, AccessToken. A name that goes on after the word
+// (SecretName, PasswordPolicy) describes the credential, not its value.
+var secretFieldName = regexp.MustCompile(`(?i)(?:` + nameAlternation(passwordNames[:2], apiKeyNames, apiSecretNames, tokenNames, secretNames) + `)$`)
 
 // nameAlternation joins name lists into one non-capturing regexp group.
 func nameAlternation(lists ...[]string) string {
