@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,7 +25,7 @@ import (
 
 	// Rule packages - imported for init() registration
 	_ "github.com/aiseeq/glint/pkg/rules/architecture"
-	_ "github.com/aiseeq/glint/pkg/rules/deadcode"
+	"github.com/aiseeq/glint/pkg/rules/deadcode"
 	_ "github.com/aiseeq/glint/pkg/rules/doccheck"
 	_ "github.com/aiseeq/glint/pkg/rules/duplication"
 	_ "github.com/aiseeq/glint/pkg/rules/naming"
@@ -234,11 +235,21 @@ func runCheck(_ *cobra.Command, args []string) error {
 	// Different roots can enable different rule sets; the reported count is
 	// how many distinct rules ran overall.
 	rulesRun := make(map[string]struct{})
+	// The configurations of the roots whose rules include the dead
+	// exception check, by file: each is checked once.
+	deadCheckConfigs := make(map[string]*core.Config)
+	var deadRule *deadcode.DeadConfigExceptionRule
 
 	for _, projectRoot := range projectRoots {
 		cfg, enabledRules, err := loadConfig(projectRoot)
 		if err != nil {
 			return err
+		}
+		for _, rule := range enabledRules {
+			if dead, ok := rule.(*deadcode.DeadConfigExceptionRule); ok && cfg.ConfigPath() != "" {
+				deadRule = dead
+				deadCheckConfigs[cfg.ConfigPath()] = cfg
+			}
 		}
 
 		if len(enabledRules) == 0 {
@@ -290,6 +301,9 @@ func runCheck(_ *cobra.Command, args []string) error {
 			rulesRun[rule.Name()] = struct{}{}
 		}
 	}
+	if err := addDeadExceptions(findings, deadRule, deadCheckConfigs); err != nil {
+		return err
+	}
 	stats.RulesRun = len(rulesRun)
 	// Overlapping roots (./backend and ./backend/auth) walk the same file twice.
 	stats.FilesAnalyzed = len(analyzedFiles)
@@ -307,6 +321,35 @@ func runCheck(_ *cobra.Command, args []string) error {
 		return errFindingsReported
 	}
 
+	return nil
+}
+
+// addDeadExceptions reports the exceptions of each configuration that match
+// no file under its directory, named relative to the working directory.
+func addDeadExceptions(findings *findingSet, rule *deadcode.DeadConfigExceptionRule, configs map[string]*core.Config) error {
+	if len(configs) == 0 {
+		return nil
+	}
+	base, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	for _, path := range slices.Sorted(maps.Keys(configs)) {
+		cfg := configs[path]
+		files, err := cfg.ConfigFiles()
+		if err != nil {
+			return err
+		}
+		violations, err := rule.CheckConfig(cfg, files, base)
+		if err != nil {
+			return err
+		}
+		minSeverity, err := cfg.GetMinSeverity()
+		if err != nil {
+			return err
+		}
+		findings.add(base, core.ViolationList(violations).BySeverity(minSeverity))
+	}
 	return nil
 }
 

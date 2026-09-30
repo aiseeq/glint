@@ -202,6 +202,7 @@ func migrationRelPath(root, path string) string {
 // sqlLiteral is SQL text assembled from string literals, with where each
 // piece of it is written.
 type sqlLiteral struct {
+	expr   ast.Expr // the literal or the concatenation in the code
 	text   string
 	pieces []sqlPiece
 	// bare is the text with the operands that are not literals left out
@@ -256,7 +257,7 @@ func sqlLiterals(root ast.Node) []sqlLiteral {
 		if !isStringOrConcat(expr) {
 			return true
 		}
-		var literal sqlLiteral
+		literal := sqlLiteral{expr: expr}
 		var builder strings.Builder
 		var gaps []int
 		hasLiteral := false
