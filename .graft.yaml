@@ -77,7 +77,9 @@ tasks:
   fmt-check:
     desc: fail on unformatted code
     run:
-      - sh: 'test -z "$(gofmt -l .)" || { echo "Code is not formatted. Run graft fmt"; exit 1; }'
+      # Only the repository's files: ignored trees (agent worktrees, tmp) are
+      # someone else's work in progress.
+      - sh: 'test -z "$(git ls-files -co --exclude-standard -- "*.go" | xargs -r gofmt -l)" || { echo "Code is not formatted. Run graft fmt"; exit 1; }'
   vet:
     desc: go vet
     run: [go vet ./...]
