@@ -105,14 +105,17 @@ func (r *NeverAssignedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 	if ctx == nil {
 		return nil, errors.New("never assigned field: nil Go project context")
 	}
-	access, err := collectProjectFieldAccess(ctx)
+	access, err := projectFieldAccess(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("never assigned field: %w", err)
 	}
 
 	// Test files are outside the typed load; a test assigning the field
 	// (fixture wiring) means it is not "never assigned".
-	mentions := newTestMentions(ctx.Files)
+	mentions, err := projectMentions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("never assigned field: %w", err)
+	}
 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation

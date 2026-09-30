@@ -54,6 +54,16 @@ func newFieldAccess() *fieldAccess {
 // collectProjectFieldAccess records the field accesses of every loaded
 // package: a package whose files are not analyzed still reads and writes the
 // fields of the ones that are.
+type fieldAccessKey struct{}
+
+// projectFieldAccess is collectProjectFieldAccess built once per project and
+// shared by the field rules.
+func projectFieldAccess(ctx *core.GoProjectContext) (*fieldAccess, error) {
+	return core.Shared(ctx, fieldAccessKey{}, func() (*fieldAccess, error) {
+		return collectProjectFieldAccess(ctx)
+	})
+}
+
 func collectProjectFieldAccess(ctx *core.GoProjectContext) (*fieldAccess, error) {
 	access := newFieldAccess()
 	for _, pkg := range ctx.Packages {

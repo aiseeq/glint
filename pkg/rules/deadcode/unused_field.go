@@ -76,14 +76,17 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 	if ctx == nil {
 		return nil, errors.New("unused field: nil Go project context")
 	}
-	access, err := collectProjectFieldAccess(ctx)
+	access, err := projectFieldAccess(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("unused field: %w", err)
 	}
 
 	// Test files are outside the typed load; a field read only by its
 	// white-box test must still count as read.
-	mentions := newTestMentions(ctx.Files)
+	mentions, err := projectMentions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unused field: %w", err)
+	}
 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation

@@ -20,10 +20,24 @@ type HardcodedSecretsRule struct {
 }
 
 type secretPattern struct {
-	name           string
-	regex          *regexp.Regexp
+	name  string
+	regex *regexp.Regexp
+	// needles are lower-case texts one of which every match contains: a line
+	// holding none of them is skipped without running the regexp, whose
+	// leading \b or (?i) alternation rules out a fast literal-prefix scan.
+	needles        []string
 	message        string
 	highConfidence bool
+}
+
+// mayMatch reports whether the lower-cased line holds one of the needles.
+func (p *secretPattern) mayMatch(lowerLine string) bool {
+	for _, needle := range p.needles {
+		if strings.Contains(lowerLine, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // NewHardcodedSecretsRule creates the rule
@@ -39,62 +53,73 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 			{
 				name:           "resend_key",
 				regex:          regexp.MustCompile(`\bre_[A-Za-z0-9_-]{20,}\b`),
+				needles:        []string{"re_"},
 				message:        "Resend API key detected",
 				highConfidence: true,
 			},
 			{
 				name:           "google_oauth_secret",
 				regex:          regexp.MustCompile(`\bGOCSPX-[A-Za-z0-9_-]{20,}\b`),
+				needles:        []string{"gocspx-"},
 				message:        "Google OAuth client secret detected",
 				highConfidence: true,
 			},
 			{
 				name:           "stripe_key",
 				regex:          regexp.MustCompile(`\bsk_live_[A-Za-z0-9]{20,}\b`),
+				needles:        []string{"sk_live_"},
 				message:        "Stripe live secret key detected",
 				highConfidence: true,
 			},
 			{
 				name:           "pgpassword",
 				regex:          regexp.MustCompile(`\bPGPASSWORD=\S{20,}`),
+				needles:        []string{"pgpassword="},
 				message:        "Hardcoded PostgreSQL password detected",
 				highConfidence: true,
 			},
 			{
 				name:    "password",
+				needles: []string{"pass", "pwd"},
 				regex:   regexp.MustCompile(`(?i)` + nameAlternation(passwordNames) + `\s*(?::=|[:=])\s*["'\x60][^"'\x60]{4,}["'\x60]`),
 				message: "Hardcoded password detected",
 			},
 			{
 				name:    "api_key",
+				needles: []string{"api"},
 				regex:   regexp.MustCompile(`(?i)\b` + nameAlternation(apiKeyNames) + `\s*(?::=|[:=])\s*["'\x60][A-Za-z0-9_\-]{16,}["'\x60]`),
 				message: "Hardcoded API key detected",
 			},
 			{
 				name:    "secret",
+				needles: []string{"secret", "private"},
 				regex:   regexp.MustCompile(`(?i)` + nameAlternation(secretNames) + `\s*(?::=|[:=])\s*["'\x60][^"'\x60]{8,}["'\x60]`),
 				message: "Hardcoded secret detected",
 			},
 			{
 				name:    "token",
+				needles: []string{"token", "bearer"},
 				regex:   regexp.MustCompile(`(?i)` + nameAlternation(tokenNames, []string{`bearer`}) + `\s*(?::=|[:=])\s*["'\x60][A-Za-z0-9_\-\.]{20,}["'\x60]`),
 				message: "Hardcoded token detected",
 			},
 			{
 				name:           "aws_key",
 				regex:          regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
+				needles:        []string{"akia"},
 				message:        "AWS access key detected",
 				highConfidence: true,
 			},
 			{
 				name:           "private_key",
 				regex:          regexp.MustCompile(`-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`),
+				needles:        []string{"-----begin "},
 				message:        "Private key detected in source code",
 				highConfidence: true,
 			},
 			{
 				name:    "jwt",
 				regex:   regexp.MustCompile(`eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*`),
+				needles: []string{"eyj"},
 				message: "JWT token detected in source code",
 			},
 		},
@@ -106,6 +131,7 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	var violations []*core.Violation
 	patternLiterals := regexpPatternLiterals(ctx)
 	contentAt := stringContents(ctx)
+	testData := ctx.IsTestFile() || isTestConfigPath(ctx.RelPath)
 
 	for lineNum, line := range ctx.Lines {
 		// Skip comments
@@ -113,9 +139,13 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
 			continue
 		}
+		lower := strings.ToLower(line)
 
 		for _, pattern := range r.patterns {
-			if (ctx.IsTestFile() || isTestConfigPath(ctx.RelPath)) && !pattern.highConfidence {
+			if testData && !pattern.highConfidence {
+				continue
+			}
+			if !pattern.mayMatch(lower) {
 				continue
 			}
 			var notSecret func(key, value string) bool

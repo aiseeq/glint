@@ -127,6 +127,10 @@ func (r *RedundantCompatibilityRule) analyzeGoFile(ctx *core.FileContext) []*cor
 }
 
 // detectFalseCompatibilityComments finds comments claiming backward compatibility
+// compatibilityNeedles are lower-case texts one of which every match of the
+// compatibility comment patterns contains.
+var compatibilityNeedles = []string{"совместим", "legacy", "compat", "fallback", "key"}
+
 func (r *RedundantCompatibilityRule) detectFalseCompatibilityComments(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 
@@ -138,6 +142,9 @@ func (r *RedundantCompatibilityRule) detectFalseCompatibilityComments(ctx *core.
 
 		commentIdx := strings.Index(line, "//")
 		comment := line[commentIdx:]
+		if !containsAny(strings.ToLower(comment), compatibilityNeedles) {
+			continue
+		}
 
 		for _, pattern := range r.compatibilityCommentPatterns {
 			if pattern.MatchString(comment) {

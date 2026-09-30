@@ -85,14 +85,17 @@ func (r *UnusedConfigFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 	if ctx == nil {
 		return nil, errors.New("unused config field: nil Go project context")
 	}
-	access, err := collectProjectFieldAccess(ctx)
+	access, err := projectFieldAccess(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("unused config field: %w", err)
 	}
 
 	// Test files are outside the typed load; a field used only by its
 	// white-box test must still count as used.
-	mentions := newTestMentions(ctx.Files)
+	mentions, err := projectMentions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unused config field: %w", err)
+	}
 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation

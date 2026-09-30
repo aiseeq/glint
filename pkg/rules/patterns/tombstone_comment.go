@@ -57,6 +57,10 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 }
 
 // AnalyzeFile checks comment lines for tombstones
+// tombstoneNeedles are lower-case texts one of which every match of the
+// tombstone pattern contains.
+var tombstoneNeedles = []string{"removed", "deleted", "удал", "больше не использ", "no longer"}
+
 func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() && !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
 		return nil
@@ -69,7 +73,9 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 
 	for i, line := range ctx.Lines {
 		comment := commentTextOfLine(line)
-		if comment == "" || r.policyLine.MatchString(comment) {
+		// Words every tombstone match holds: most comments are ruled out
+		// without running the regexps.
+		if comment == "" || !containsAny(strings.ToLower(comment), tombstoneNeedles) || r.policyLine.MatchString(comment) {
 			continue
 		}
 		if ctx.IsGoFile() && strings.HasPrefix(comment, "\t") {

@@ -282,7 +282,7 @@ func (a *auditActorAnalyzer) initialize() error {
 	for function := range allFunctions {
 		functions = append(functions, function)
 	}
-	sort.Slice(functions, func(i, j int) bool { return functions[i].String() < functions[j].String() })
+	sortFunctionsByName(functions)
 
 	graph := cha.CallGraph(a.project.Program)
 	sourceIncoming := make(map[*ssa.Function]bool)
@@ -325,12 +325,24 @@ func (a *auditActorAnalyzer) initialize() error {
 			}
 		}
 	}
-	for call := range a.targets {
-		sort.Slice(a.targets[call], func(i, j int) bool {
-			return a.targets[call][i].String() < a.targets[call][j].String()
-		})
+	for _, targets := range a.targets {
+		sortFunctionsByName(targets)
 	}
 	return a.validateSourceSinkCalls(functions)
+}
+
+// sortFunctionsByName orders functions by their full name for a stable walk.
+// The name is built once per function: ssa.Function.String formats the whole
+// qualified signature, and building it in every comparison dominated the rule.
+func sortFunctionsByName(functions []*ssa.Function) {
+	if len(functions) < 2 {
+		return
+	}
+	names := make(map[*ssa.Function]string, len(functions))
+	for _, function := range functions {
+		names[function] = function.String()
+	}
+	sort.Slice(functions, func(i, j int) bool { return names[functions[i]] < names[functions[j]] })
 }
 
 func auditExportedFunction(function *ssa.Function) bool {

@@ -50,6 +50,45 @@ type GoProjectContext struct {
 	SkippedPackages []SkippedPackage
 
 	filesByPath map[string]*FileContext
+
+	sharedMu sync.Mutex
+	shared   map[any]*sharedValue
+}
+
+type sharedValue struct {
+	once  sync.Once
+	value any
+	err   error
+}
+
+// Shared returns the value build computes for key, building it once per
+// project: several rules that need the same project-wide scan share one pass
+// instead of each repeating it. key is a comparable value of a type private to
+// the caller's package, so packages cannot collide. The value must not be
+// modified by its users.
+func Shared[T any](ctx *GoProjectContext, key any, build func() (T, error)) (T, error) {
+	ctx.sharedMu.Lock()
+	if ctx.shared == nil {
+		ctx.shared = make(map[any]*sharedValue)
+	}
+	entry, ok := ctx.shared[key]
+	if !ok {
+		entry = &sharedValue{}
+		ctx.shared[key] = entry
+	}
+	ctx.sharedMu.Unlock()
+
+	entry.once.Do(func() { entry.value, entry.err = build() })
+	if entry.err != nil {
+		var zero T
+		return zero, entry.err
+	}
+	value, ok := entry.value.(T)
+	if !ok {
+		var zero T
+		return zero, fmt.Errorf("shared project value %v: stored %T, requested %T", key, entry.value, zero)
+	}
+	return value, nil
 }
 
 // GoPackageContext connects a loaded typed package and its optional SSA package

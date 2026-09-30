@@ -46,8 +46,8 @@ tasks:
     desc: tests without the long-running ones
     run: [go test -short -v ./...]
   test-race:
-    desc: tests with the race detector (analysis runs rules in parallel); typed rule tests load packages, so the race build of patterns exceeds the default 10m
-    run: [go test -race -timeout 30m ./...]
+    desc: tests with the race detector (analysis runs rules in parallel)
+    run: [go test -race ./...]
   test-coverage:
     desc: tests with a coverage report in coverage.html
     run:

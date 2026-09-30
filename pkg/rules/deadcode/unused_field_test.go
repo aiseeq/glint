@@ -543,3 +543,25 @@ func Same(a, b int) bool {
 
 	assert.Empty(t, violations)
 }
+
+// A field read only by a test that the configuration excluded from analysis
+// is still read: excluding a file hides its findings, not its references.
+func TestUnusedFieldCountsTestFileExcludedFromAnalysis(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"p/worker.go":      "package p\n\ntype worker struct {\n\tlimit int\n\tspare int\n}\n\nfunc New() *worker { return &worker{limit: 3, spare: 1} }\n",
+		"p/worker_test.go": "package p\n\nimport \"testing\"\n\nfunc TestLimit(t *testing.T) { _ = New().limit }\n",
+	})
+	analyzed := make([]*core.FileContext, 0, len(contexts))
+	for _, fileCtx := range contexts {
+		if !fileCtx.IsTestFile() {
+			analyzed = append(analyzed, fileCtx)
+		}
+	}
+	project, err := core.LoadGoProject(root, analyzed, core.GoProjectOptions{})
+	require.NoError(t, err)
+
+	violations, err := NewUnusedFieldRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "spare")
+}
