@@ -2,7 +2,6 @@ package patterns
 
 import (
 	"go/ast"
-	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -96,6 +95,52 @@ import (
 func post(client *http.Client) {
 	resp, _ := client.Post("https://example.com", "text/plain", nil)
 	_, _ = io.ReadAll(resp.Body)
+}`,
+			wantCount: 1,
+		},
+		{
+			// Repro: a client kept in a struct field was not recognized as an
+			// *http.Client, so the unbounded read of its response went unseen.
+			name: "client in a struct field",
+			path: "field_client.go",
+			code: `package payprov
+
+import (
+	"io"
+	"net/http"
+)
+
+type API struct{ client *http.Client }
+
+func (a *API) fetch(req *http.Request) ([]byte, error) {
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}`,
+			wantCount: 1,
+		},
+		{
+			name: "response inside a handler closure",
+			path: "closure_handler.go",
+			code: `package payprov
+
+import (
+	"io"
+	"net/http"
+)
+
+func register(mux *http.ServeMux) {
+	mux.HandleFunc("/x", func(w http.ResponseWriter, r *http.Request) {
+		resp, err := http.Get("http://example.com")
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+		_, _ = io.ReadAll(resp.Body)
+	})
 }`,
 			wantCount: 1,
 		},
@@ -538,8 +583,7 @@ func fetch() {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := createUnboundedResponseReadContext(t, tt.path, tt.code)
-			violations := rule.AnalyzeFile(ctx)
+			violations := runRuleOnFiles(t, rule, map[string]string{tt.path: tt.code})
 			require.Len(t, violations, tt.wantCount)
 			if tt.wantCount == 0 {
 				return
@@ -564,19 +608,4 @@ func TestUnboundedResponseAnalyzer_UnexpectedClausesDoNotPanic(t *testing.T) {
 			Body: &ast.BlockStmt{List: []ast.Stmt{&ast.EmptyStmt{}}},
 		}, newResponseState(), struct{}{})
 	})
-}
-
-func createUnboundedResponseReadContext(t *testing.T, path, code string) *core.FileContext {
-	t.Helper()
-	ctx := &core.FileContext{
-		Path:    "/" + path,
-		RelPath: path,
-		Lines:   strings.Split(code, "\n"),
-		Content: []byte(code),
-	}
-	parser := core.NewParser()
-	fset, astFile, err := parser.ParseGoFile(path, []byte(code))
-	require.NoError(t, err)
-	ctx.SetGoAST(fset, astFile)
-	return ctx
 }

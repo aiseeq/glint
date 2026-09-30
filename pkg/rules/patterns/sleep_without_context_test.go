@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -233,4 +234,47 @@ func helper(ctx context.Context) {
 		ctx.SetGoAST(fset, astFile)
 	}
 	assert.Empty(t, rule.AnalyzeFile(ctx))
+}
+
+// With types the carrier struct can live in another file, and the imports can
+// be aliased: the context is still in hand, and the pause still ignores it.
+func TestSleepWithoutContextRuleTyped(t *testing.T) {
+	violations := runRuleOnFiles(t, NewSleepWithoutContextRule(), map[string]string{
+		"client/types.go": `package client
+
+import "context"
+
+type requestContext struct {
+	ctx       context.Context
+	operation string
+}
+`,
+		"client/retry.go": `package client
+
+import (
+	stdctx "context"
+	clock "time"
+)
+
+func retry(rc *requestContext, attempt func() error) {
+	for i := 0; i < 3; i++ {
+		if attempt() == nil {
+			return
+		}
+		clock.Sleep(clock.Second)
+	}
+}
+
+func discard(_ stdctx.Context) {
+	clock.Sleep(clock.Second)
+}
+
+func live(ctx stdctx.Context) {
+	clock.Sleep(clock.Second)
+}
+`,
+	})
+	require.Len(t, violations, 2)
+	assert.Equal(t, 13, violations[0].Line)
+	assert.Equal(t, 22, violations[1].Line)
 }

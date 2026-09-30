@@ -4,14 +4,16 @@ import (
 	"errors"
 	"go/ast"
 	"go/constant"
+	"go/token"
 	"go/types"
 	"sort"
 	"strconv"
 	"strings"
 
+	"golang.org/x/tools/go/types/typeutil"
+
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
-	"golang.org/x/tools/go/packages"
 )
 
 func init() {
@@ -29,12 +31,15 @@ func init() {
 // и запись в мониторинге. На живом трафике таких записей набегает больше, чем
 // настоящих сбоев, и за ними перестают следить.
 //
-// Признаков нужно три сразу:
-//  1. функция принимает http.ResponseWriter и пишет код из диапазона 5xx — это ответ об отказе;
-//  2. среди параметров нет ни *http.Request, ни context.Context — отмену ей взять негде;
-//  3. её зовут из нескольких мест — то есть это общая точка отказа, а не разовый ответ.
+// Признаков нужно четыре сразу:
+//  1. функция принимает http.ResponseWriter и пишет статус 5xx — через WriteHeader, http.Error
+//     или помощник, чей int-параметр доходит до них; 5xx, который она пишет только при сбое
+//     собственного json.Marshal/Encode, — это её сбой, а не ответ об ошибке вызывающего;
+//  2. среди параметров есть error — ошибка, которую она классифицирует;
+//  3. среди параметров нет ни *http.Request, ни context.Context — отмену ей взять негде;
+//  4. её зовут из нескольких мест — то есть это общая точка отказа, а не разовый ответ.
 //
-// Третий признак и делает правило точным: единственный вызов чинится на месте, а общий
+// Четвёртый признак и делает правило точным: единственный вызов чинится на месте, а общий
 // помощник переписывают один раз и лечат им весь слой. Правило молчит, если пакет уже
 // знает про context.Canceled: значит отмену там разбирают, и где именно — решать автору.
 type ServerErrorHidesClientCancelRule struct {
@@ -72,11 +77,24 @@ func (r *ServerErrorHidesClientCancelRule) AnalyzeFile(_ *core.FileContext) []*c
 	return nil
 }
 
+// declaredFunc is one function declaration of the project with the type
+// information of its package.
+type declaredFunc struct {
+	decl *ast.FuncDecl
+	info *types.Info
+}
+
+// statusForward is a call inside a function that hands one of its int
+// parameters to a status argument of the callee.
+type statusForward struct {
+	call       *ast.CallExpr
+	argIndex   int
+	paramIndex int
+}
+
 // blindResponder is a 5xx helper that cannot see the request.
 type blindResponder struct {
-	obj      types.Object
 	decl     *ast.FuncDecl
-	pkgPath  string
 	callers  map[string]bool
 	statuses map[int64]bool
 }
@@ -87,127 +105,271 @@ func (r *ServerErrorHidesClientCancelRule) AnalyzeGoProject(ctx *core.GoProjectC
 		return nil, errors.New("server error hides client cancel: nil Go project context")
 	}
 
-	responders := map[types.Object]*blindResponder{}
-	cancelAware := map[string]bool{}
-
-	for _, pkgCtx := range ctx.Packages {
-		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
-			continue
+	funcs := map[types.Object]*declaredFunc{}
+	cancelAware := map[*types.Info]bool{}
+	_, err := rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		if referencesCancellation(info, fileCtx.GoAST) {
+			cancelAware[info] = true
 		}
-		pkg := pkgCtx.Package
-		for _, file := range pkg.Syntax {
-			if isGoTestFile(ctx, file) {
+		for _, decl := range fileCtx.GoAST.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
 				continue
 			}
-			if referencesCancellation(pkg.TypesInfo, file) {
-				cancelAware[pkg.PkgPath] = true
-			}
-			collectBlindResponders(pkg, file, responders)
-		}
-	}
-	// Второй проход нужен только когда есть за чем считать вызовы.
-	if len(responders) > 0 {
-		for _, pkgCtx := range ctx.Packages {
-			if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
-				continue
-			}
-			pkg := pkgCtx.Package
-			for _, file := range pkg.Syntax {
-				if isGoTestFile(ctx, file) {
-					continue
-				}
-				collectResponderCalls(pkg, file, responders)
+			if obj := info.Defs[fn.Name]; obj != nil {
+				funcs[obj] = &declaredFunc{decl: fn, info: info}
 			}
 		}
-	}
-
-	var violations []*core.Violation
-	for _, resp := range responders {
-		if cancelAware[resp.pkgPath] || len(resp.callers) < r.minCallSites {
-			continue
-		}
-		violations = append(violations, r.violationFor(ctx, resp))
-	}
-
-	sort.Slice(violations, func(i, j int) bool {
-		if violations[i].File != violations[j].File {
-			return violations[i].File < violations[j].File
-		}
-		return violations[i].Line < violations[j].Line
+		return nil
 	})
-	return violations, nil
-}
+	if err != nil {
+		return nil, err
+	}
 
-// collectBlindResponders records functions that answer 5xx without access to the request.
-func collectBlindResponders(pkg *packages.Package, file *ast.File, out map[types.Object]*blindResponder) {
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
+	statusParams := statusParameters(funcs)
+	responders := map[types.Object]*blindResponder{}
+	for obj, fn := range funcs {
+		if cancelAware[fn.info] || !takesWriterAndErrorBlind(fn.info, fn.decl) {
 			continue
 		}
-		writer, blind := responderParams(pkg.TypesInfo, fn)
-		if !writer || !blind {
-			continue
-		}
-		statuses := serverErrorStatuses(pkg.TypesInfo, fn.Body)
+		statuses := serverErrorStatuses(fn.info, fn.decl.Body, statusParams)
 		if len(statuses) == 0 {
 			continue
 		}
-		obj := pkg.TypesInfo.Defs[fn.Name]
-		if obj == nil {
-			continue
-		}
-		out[obj] = &blindResponder{
-			obj:      obj,
-			decl:     fn,
-			pkgPath:  pkg.PkgPath,
-			callers:  map[string]bool{},
-			statuses: statuses,
-		}
+		responders[obj] = &blindResponder{decl: fn.decl, callers: map[string]bool{}, statuses: statuses}
 	}
+	// Вызовы стоит считать, только когда есть чьи.
+	for obj, fn := range funcs {
+		if len(responders) == 0 {
+			break
+		}
+		collectResponderCalls(obj, fn, responders)
+	}
+
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		var violations []*core.Violation
+		for _, decl := range fileCtx.GoAST.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			resp, tracked := responders[info.Defs[fn.Name]]
+			if !tracked || len(resp.callers) < r.minCallSites {
+				continue
+			}
+			violations = append(violations, r.violationFor(fileCtx, resp))
+		}
+		return violations
+	})
 }
 
-// responderParams reports whether the function takes an http.ResponseWriter and
-// whether it is blind: no *http.Request and no context.Context among the parameters.
-func responderParams(info *types.Info, fn *ast.FuncDecl) (writer, blind bool) {
-	blind = true
+// takesWriterAndErrorBlind reports whether the function takes an
+// http.ResponseWriter and an error, and is blind: no *http.Request and no
+// context.Context among the parameters. Without an error it has no failure to
+// misclassify — it answers what it was told to.
+func takesWriterAndErrorBlind(info *types.Info, fn *ast.FuncDecl) bool {
 	if fn.Type.Params == nil {
-		return false, false
+		return false
 	}
+	writer, withError := false, false
 	for _, field := range fn.Type.Params.List {
-		tv, ok := info.Types[field.Type]
-		if !ok || tv.Type == nil {
-			continue
-		}
-		switch types.TypeString(tv.Type, nil) {
-		case "net/http.ResponseWriter":
+		t := info.TypeOf(field.Type)
+		switch {
+		case isNamedType(t, "net/http", "ResponseWriter"):
 			writer = true
-		case "*net/http.Request", "context.Context":
-			blind = false
+		case isPointerToNamedType(t, "net/http", "Request"), isNamedType(t, "context", "Context"):
+			return false
+		case isErrorType(t):
+			withError = true
 		}
 	}
-	return writer, blind
+	return writer && withError
 }
 
-// serverErrorStatuses collects the 5xx codes the body writes. A status is taken from
-// any call argument that is a constant in the 5xx range: that covers http.Error,
-// w.WriteHeader and every project's own JSON responder alike, without knowing its name.
-func serverErrorStatuses(info *types.Info, body *ast.BlockStmt) map[int64]bool {
+// statusArgIndexes returns the indexes of the arguments that carries the HTTP
+// status in call: w.WriteHeader(code), http.Error(w, msg, code), or a project
+// function whose parameter reaches one of them.
+func statusArgIndexes(info *types.Info, call *ast.CallExpr, statusParams map[types.Object]map[int]bool) []int {
+	callee := typeutil.Callee(info, call)
+	fn, ok := callee.(*types.Func)
+	if !ok {
+		return nil
+	}
+	if fn.Pkg() != nil && fn.Pkg().Path() == "net/http" && fn.Name() == "Error" && len(call.Args) == 3 {
+		return []int{2}
+	}
+	if sig, isFunc := fn.Type().(*types.Signature); isFunc && sig.Recv() != nil &&
+		fn.Name() == "WriteHeader" && len(call.Args) == 1 && isIntType(info.TypeOf(call.Args[0])) {
+		// http.ResponseWriter.WriteHeader, or a wrapper's own WriteHeader(code int).
+		return []int{0}
+	}
+	var indexes []int
+	for index := range statusParams[fn.Origin()] {
+		if index < len(call.Args) {
+			indexes = append(indexes, index)
+		}
+	}
+	sort.Ints(indexes)
+	return indexes
+}
+
+// statusParameters returns, for every project function, the indexes of the
+// int parameters its body passes on as an HTTP status — directly to
+// WriteHeader/http.Error or through another such function.
+func statusParameters(funcs map[types.Object]*declaredFunc) map[types.Object]map[int]bool {
+	candidates := map[types.Object][]statusForward{}
+	for obj, fn := range funcs {
+		params := intParamIndexes(fn.info, fn.decl)
+		if len(params) == 0 {
+			continue
+		}
+		ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			for argIndex, arg := range call.Args {
+				variable := variableOf(fn.info, ast.Unparen(arg))
+				if paramIndex, isParam := params[variable]; isParam {
+					candidates[obj] = append(candidates[obj], statusForward{call: call, argIndex: argIndex, paramIndex: paramIndex})
+				}
+			}
+			return true
+		})
+	}
+
+	statusParams := map[types.Object]map[int]bool{}
+	for changed := true; changed; {
+		changed = false
+		for obj, forwards := range candidates {
+			info := funcs[obj].info
+			for _, forward := range forwards {
+				if statusParams[obj][forward.paramIndex] {
+					continue
+				}
+				for _, index := range statusArgIndexes(info, forward.call, statusParams) {
+					if index != forward.argIndex {
+						continue
+					}
+					if statusParams[obj] == nil {
+						statusParams[obj] = map[int]bool{}
+					}
+					statusParams[obj][forward.paramIndex] = true
+					changed = true
+				}
+			}
+		}
+	}
+	return statusParams
+}
+
+// intParamIndexes maps the int parameters of the function to their positions.
+func intParamIndexes(info *types.Info, fn *ast.FuncDecl) map[types.Object]int {
+	params := map[types.Object]int{}
+	if fn.Type.Params == nil {
+		return params
+	}
+	position := 0
+	for _, field := range fn.Type.Params.List {
+		if len(field.Names) == 0 {
+			position++
+			continue
+		}
+		for _, name := range field.Names {
+			if obj := info.Defs[name]; obj != nil && isIntType(obj.Type()) {
+				params[obj] = position
+			}
+			position++
+		}
+	}
+	return params
+}
+
+// isIntType reports whether t is an integer type.
+func isIntType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	basic, ok := t.Underlying().(*types.Basic)
+	return ok && basic.Info()&types.IsInteger != 0
+}
+
+// serverErrorStatuses collects the 5xx codes the body writes as a status. A
+// 5xx the body writes only when its own JSON encoding failed is the writer's
+// failure, not an answer about the caller's error, and is left out.
+func serverErrorStatuses(info *types.Info, body *ast.BlockStmt, statusParams map[types.Object]map[int]bool) map[int64]bool {
+	encodeErrors := jsonEncodeErrors(info, body)
 	found := map[int64]bool{}
+	var stack []ast.Node
 	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		for _, arg := range call.Args {
-			code, ok := constantInt(info, arg)
-			if ok && code >= 500 && code <= 599 {
-				found[code] = true
+		for _, index := range statusArgIndexes(info, call, statusParams) {
+			code, ok := constantInt(info, call.Args[index])
+			if !ok || code < 500 || code > 599 || guardedByEncodeFailure(info, stack, encodeErrors) {
+				continue
 			}
+			found[code] = true
 		}
 		return true
 	})
 	return found
+}
+
+// jsonEncodeErrors returns the error variables assigned from json.Marshal,
+// json.MarshalIndent or (*json.Encoder).Encode in the body.
+func jsonEncodeErrors(info *types.Info, body *ast.BlockStmt) map[types.Object]bool {
+	errs := map[types.Object]bool{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Rhs) != 1 {
+			return true
+		}
+		call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		fn, ok := typeutil.Callee(info, call).(*types.Func)
+		if !ok || fn.Pkg() == nil || fn.Pkg().Path() != "encoding/json" {
+			return true
+		}
+		if name := fn.Name(); name != "Marshal" && name != "MarshalIndent" && name != "Encode" {
+			return true
+		}
+		for _, lhs := range assign.Lhs {
+			if variable := variableOf(info, lhs); variable != nil && isErrorType(variable.Type()) {
+				errs[variable] = true
+			}
+		}
+		return true
+	})
+	return errs
+}
+
+// guardedByEncodeFailure reports whether the innermost node of stack sits in
+// the body of an `if err != nil` on a JSON encoding error.
+func guardedByEncodeFailure(info *types.Info, stack []ast.Node, encodeErrors map[types.Object]bool) bool {
+	if len(encodeErrors) == 0 {
+		return false
+	}
+	for i := len(stack) - 2; i >= 0; i-- {
+		branch, ok := stack[i].(*ast.IfStmt)
+		if !ok || stack[i+1] != branch.Body {
+			continue
+		}
+		cond, ok := branch.Cond.(*ast.BinaryExpr)
+		if ok && cond.Op == token.NEQ && isNilIdent(cond.Y) && encodeErrors[variableOf(info, cond.X)] {
+			return true
+		}
+	}
+	return false
 }
 
 // constantInt resolves an expression to its integer constant value, if it has one.
@@ -244,51 +406,28 @@ func referencesCancellation(info *types.Info, file *ast.File) bool {
 }
 
 // collectResponderCalls records the distinct functions that call each responder.
-func collectResponderCalls(pkg *packages.Package, file *ast.File, responders map[types.Object]*blindResponder) {
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
-		}
-		caller := pkg.PkgPath + "." + fn.Name.Name
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			obj := calleeObject(pkg.TypesInfo, call.Fun)
-			if obj == nil {
-				return true
-			}
-			resp, tracked := responders[obj]
-			// Рекурсивный вызов вызовом со стороны не считается.
-			if tracked && obj != pkg.TypesInfo.Defs[fn.Name] {
-				resp.callers[caller] = true
-			}
+func collectResponderCalls(caller types.Object, fn *declaredFunc, responders map[types.Object]*blindResponder) {
+	callerName := caller.Pkg().Path() + "." + fn.decl.Name.Name
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
 			return true
-		})
-	}
-}
-
-// calleeObject resolves the callee of a call expression to its declared object.
-func calleeObject(info *types.Info, fun ast.Expr) types.Object {
-	switch callee := fun.(type) {
-	case *ast.Ident:
-		return info.Uses[callee]
-	case *ast.SelectorExpr:
-		return info.Uses[callee.Sel]
-	}
-	return nil
+		}
+		callee, ok := typeutil.Callee(fn.info, call).(*types.Func)
+		if !ok {
+			return true
+		}
+		resp, tracked := responders[callee.Origin()]
+		// Рекурсивный вызов вызовом со стороны не считается.
+		if tracked && callee.Origin() != caller {
+			resp.callers[callerName] = true
+		}
+		return true
+	})
 }
 
 // violationFor renders the finding at the responder declaration.
-func (r *ServerErrorHidesClientCancelRule) violationFor(
-	ctx *core.GoProjectContext,
-	resp *blindResponder,
-) *core.Violation {
-	pos := ctx.FileSet.Position(resp.decl.Pos())
-	// cmd/glint maps the absolute path to the project-relative one.
-	rel := pos.Filename
+func (r *ServerErrorHidesClientCancelRule) violationFor(ctx *core.FileContext, resp *blindResponder) *core.Violation {
 	codes := make([]int, 0, len(resp.statuses))
 	for code := range resp.statuses {
 		codes = append(codes, int(code))
@@ -299,7 +438,7 @@ func (r *ServerErrorHidesClientCancelRule) violationFor(
 		codeText = append(codeText, strconv.Itoa(code))
 	}
 
-	v := r.CreateViolation(rel, pos.Line,
+	v := r.CreateViolation(ctx.RelPath, ctx.LineFor(resp.decl),
 		resp.decl.Name.Name+"() answers "+strings.Join(codeText, "/")+" for "+
 			strconv.Itoa(len(resp.callers))+" call sites but takes neither the request nor a context — "+
 			"a client that closed the connection is reported as a server failure")

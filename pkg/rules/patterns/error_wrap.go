@@ -3,7 +3,6 @@ package patterns
 import (
 	"go/ast"
 	"go/types"
-	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -51,71 +50,66 @@ func (r *ErrorWrapRule) analyze(ctx *core.FileContext, info *types.Info) []*core
 	if !ctx.IsGoFile() || ctx.GoAST == nil {
 		return nil
 	}
-	if strings.HasPrefix(ctx.RelPath, "internal/") || strings.HasPrefix(ctx.RelPath, "cmd/") {
+
+	var violations []*core.Violation
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || !r.returnsError(fn) {
+			continue
+		}
+		// Error branches anywhere in the body — loops, switch cases, nested
+		// ifs; a closure returns through its own signature.
+		forEachOwnStatementList(fn.Body, func(list []ast.Stmt) {
+			for i, stmt := range list {
+				ifStmt, ok := stmt.(*ast.IfStmt)
+				if !ok {
+					continue
+				}
+				violations = append(violations, r.checkErrorBranch(ctx, info, fn, ifStmt, list[:i])...)
+			}
+		})
+	}
+
+	return violations
+}
+
+// checkErrorBranch reports bare returns of the checked error from an
+// `if err != nil` branch; before holds the statements preceding the if in its
+// block, where the error was produced.
+func (r *ErrorWrapRule) checkErrorBranch(ctx *core.FileContext, info *types.Info, fn *ast.FuncDecl, ifStmt *ast.IfStmt, before []ast.Stmt) []*core.Violation {
+	errName := errNilCheckName(ifStmt.Cond)
+	if errName == "" {
+		return nil
+	}
+
+	// Delegating to the same method on an embedded type is a pass
+	// through, not a lost context: the caller of this method adds the
+	// context, and wrapping here would duplicate it.
+	call := errorSourceCall(ifStmt, before, errName)
+	if callee := callName(call); callee != "" && callee == fn.Name.Name {
+		return nil
+	}
+	// Closure-runners (RunInTx-style calls taking a func literal) and
+	// caller-supplied callback parameters are transparent pass-throughs:
+	// context is added inside the closure/callback, and wrapping outside
+	// would prefix every propagated error and obscure sentinel errors.
+	if isClosureRunnerCall(call) || callsCallbackParam(call, fn, info) {
 		return nil
 	}
 
 	var violations []*core.Violation
-
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			return true
+	for _, bodyStmt := range ifStmt.Body.List {
+		retStmt, ok := bodyStmt.(*ast.ReturnStmt)
+		if !ok || !isBareErrorReturn(retStmt, errName) {
+			continue
 		}
-
-		// Check if function returns error
-		if !r.returnsError(fn) {
-			return true
-		}
-
-		// Find if-err-return patterns
-		for i, stmt := range fn.Body.List {
-			ifStmt, ok := stmt.(*ast.IfStmt)
-			if !ok {
-				continue
-			}
-
-			// Check for if err != nil pattern
-			if !r.isErrCheck(ifStmt.Cond) {
-				continue
-			}
-
-			// Delegating to the same method on an embedded type is a pass
-			// through, not a lost context: the caller of this method adds the
-			// context, and wrapping here would duplicate it.
-			call := errorSourceCall(ifStmt, fn.Body.List[:i])
-			if callee := callName(call); callee != "" && callee == fn.Name.Name {
-				continue
-			}
-			// Closure-runners (RunInTx-style calls taking a func literal) and
-			// caller-supplied callback parameters are transparent pass-throughs:
-			// context is added inside the closure/callback, and wrapping outside
-			// would prefix every propagated error and obscure sentinel errors.
-			if isClosureRunnerCall(call) || callsCallbackParam(call, fn, info) {
-				continue
-			}
-
-			// Check body for bare return err
-			for _, bodyStmt := range ifStmt.Body.List {
-				retStmt, ok := bodyStmt.(*ast.ReturnStmt)
-				if !ok {
-					continue
-				}
-
-				if r.isBareErrorReturn(retStmt) {
-					pos := ctx.PositionFor(retStmt)
-					v := r.CreateViolation(ctx.RelPath, pos.Line,
-						"Error returned without context; consider wrapping with fmt.Errorf")
-					v.WithCode(ctx.GetLine(pos.Line))
-					v.WithSuggestion("Use fmt.Errorf(\"context: %w\", err) to add context")
-					violations = append(violations, v)
-				}
-			}
-		}
-
-		return true
-	})
-
+		pos := ctx.PositionFor(retStmt)
+		v := r.CreateViolation(ctx.RelPath, pos.Line,
+			"Error returned without context; consider wrapping with fmt.Errorf")
+		v.WithCode(ctx.GetLine(pos.Line))
+		v.WithSuggestion("Use fmt.Errorf(\"context: %w\", err) to add context")
+		violations = append(violations, v)
+	}
 	return violations
 }
 
@@ -136,53 +130,20 @@ func (r *ErrorWrapRule) returnsError(fn *ast.FuncDecl) bool {
 	return false
 }
 
-// isErrCheck checks for err != nil
-func (r *ErrorWrapRule) isErrCheck(cond ast.Expr) bool {
-	binExpr, ok := cond.(*ast.BinaryExpr)
-	if !ok {
-		return false
-	}
-
-	// Check for err != nil
-	ident, ok := binExpr.X.(*ast.Ident)
-	if !ok {
-		return false
-	}
-
-	if ident.Name != "err" {
-		return false
-	}
-
-	nilIdent, ok := binExpr.Y.(*ast.Ident)
-	if !ok {
-		return false
-	}
-
-	return nilIdent.Name == "nil"
-}
-
-// isBareErrorReturn checks if return statement just returns err without wrapping
-func (r *ErrorWrapRule) isBareErrorReturn(ret *ast.ReturnStmt) bool {
+// isBareErrorReturn checks if the return hands the checked error back as is:
+// its last result is the error variable itself.
+func isBareErrorReturn(ret *ast.ReturnStmt, errName string) bool {
 	if len(ret.Results) == 0 {
 		return false
 	}
-
-	// Check last result (error is usually last)
-	lastResult := ret.Results[len(ret.Results)-1]
-
-	// Check for bare err identifier
-	ident, ok := lastResult.(*ast.Ident)
-	if !ok {
-		return false
-	}
-
-	return ident.Name == "err"
+	ident, ok := ret.Results[len(ret.Results)-1].(*ast.Ident)
+	return ok && ident.Name == errName
 }
 
 // errorSourceCall returns the call that produced the error the if-statement
 // checks, looking at the statement's own initializer first and then at the
 // preceding statements. It returns nil when the source cannot be identified.
-func errorSourceCall(ifStmt *ast.IfStmt, before []ast.Stmt) *ast.CallExpr {
+func errorSourceCall(ifStmt *ast.IfStmt, before []ast.Stmt, errName string) *ast.CallExpr {
 	if init, ok := ifStmt.Init.(*ast.AssignStmt); ok {
 		if call := assignedCall(init); call != nil {
 			return call
@@ -190,7 +151,7 @@ func errorSourceCall(ifStmt *ast.IfStmt, before []ast.Stmt) *ast.CallExpr {
 	}
 	for i := len(before) - 1; i >= 0; i-- {
 		previous, ok := before[i].(*ast.AssignStmt)
-		if !ok || !assignsError(previous) {
+		if !ok || !assignsName(previous, errName) {
 			continue
 		}
 		return assignedCall(previous)
@@ -253,10 +214,10 @@ func callsCallbackParam(call *ast.CallExpr, fn *ast.FuncDecl, info *types.Info) 
 	return false
 }
 
-// assignsError reports whether the assignment binds a variable named "err".
-func assignsError(assign *ast.AssignStmt) bool {
+// assignsName reports whether the assignment binds the named variable.
+func assignsName(assign *ast.AssignStmt, name string) bool {
 	for _, lhs := range assign.Lhs {
-		if ident, ok := lhs.(*ast.Ident); ok && ident.Name == "err" {
+		if ident, ok := lhs.(*ast.Ident); ok && ident.Name == name {
 			return true
 		}
 	}

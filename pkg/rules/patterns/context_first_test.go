@@ -272,3 +272,30 @@ func TestContextFirstMetadata(t *testing.T) {
 	assert.Equal(t, "patterns", rule.Category())
 	assert.Equal(t, core.SeverityMedium, rule.DefaultSeverity())
 }
+
+// One typed check decides whether a function takes a context: an aliased
+// import is still context.Context, and a `_ context.Context` parameter still
+// means the function accepts one (what it does with it is context-background's
+// business).
+func TestContextFirstTypedContextParams(t *testing.T) {
+	violations := runRuleOnFiles(t, NewContextFirstRule(), map[string]string{"service/service.go": `package service
+
+import stdctx "context"
+
+type Repo interface {
+	Save(ctx stdctx.Context, address string) error
+}
+
+type Service struct{ repo Repo }
+
+func (s *Service) Sync(address string) error {
+	return s.repo.Save(stdctx.Background(), address)
+}
+
+func (s *Service) Discard(_ stdctx.Context, address string) error {
+	return s.repo.Save(stdctx.Background(), address)
+}
+`})
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Service.Sync")
+}

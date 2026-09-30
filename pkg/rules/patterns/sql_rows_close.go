@@ -2,10 +2,10 @@ package patterns
 
 import (
 	"go/ast"
+	"go/types"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
-	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -29,220 +29,75 @@ func NewSQLRowsCloseRule() *SQLRowsCloseRule {
 	}
 }
 
-// AnalyzeFile checks for unclosed SQL rows
-func (r *SQLRowsCloseRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.IsTestFile() {
-		return nil
-	}
-	return helpers.AnalyzeFuncBodies(ctx, r.checkFunction)
-}
-
-func (r *SQLRowsCloseRule) checkFunction(ctx *core.FileContext, body *ast.BlockStmt, violations *[]*core.Violation) {
-	// Track rows variable names
-	rowsVars := make(map[string]int) // varName -> line
-
-	ast.Inspect(body, func(n ast.Node) bool {
-		// Skip nested function literals
-		if _, ok := n.(*ast.FuncLit); ok {
-			return false
-		}
-
-		assign, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-
-		// Check for rows, err := db.Query(...) or similar
-		if len(assign.Lhs) >= 1 && len(assign.Rhs) == 1 {
-			if r.isQueryCall(assign.Rhs[0]) {
-				if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
-					rowsVars[ident.Name] = ctx.LineFor(assign)
-				}
-			}
-		}
-
-		return true
-	})
-
-	if len(rowsVars) == 0 {
-		return
-	}
-
-	closedVars := r.closedOrHandedOff(ctx, body)
-
-	// Report unclosed rows
-	for varName, line := range rowsVars {
-		if !closedVars[varName] {
-			v := r.CreateViolation(ctx.RelPath, line, "SQL rows not closed - connection leak")
-			v.WithCode(ctx.GetLine(line))
-			v.WithSuggestion("Add defer " + varName + ".Close() after error check")
-			v.WithContext("pattern", "sql_rows_leak")
-			v.WithContext("variable", varName)
-			*violations = append(*violations, v)
-		}
-	}
-}
-
-// closedOrHandedOff returns the rows variables that body closes itself, or
-// hands off: returned to the caller, or passed as an argument to a call. Once
-// the rows are handed off, closing is the recipient's job. A recipient declared
-// in the same file is checked: if it never closes its parameter, the rows are
-// still reported here — the leak is real, only one call away.
-func (r *SQLRowsCloseRule) closedOrHandedOff(ctx *core.FileContext, body *ast.BlockStmt) map[string]bool {
-	closed := make(map[string]bool)
-
-	// Check for defer rows.Close() or rows.Close()
-	// Also check inside function literals like: defer func() { _ = rows.Close() }()
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.CallExpr:
-			if varName := r.getCloseVar(node); varName != "" {
-				closed[varName] = true
-			}
-			for i, arg := range node.Args {
-				ident, ok := arg.(*ast.Ident)
-				if !ok {
-					continue
-				}
-				if r.recipientCloses(ctx, node.Fun, i) {
-					closed[ident.Name] = true
-				}
-			}
-		case *ast.ReturnStmt:
-			for _, res := range node.Results {
-				if ident, ok := res.(*ast.Ident); ok {
-					closed[ident.Name] = true
-				}
-			}
-		}
-		return true
-	})
-	return closed
-}
-
-// recipientCloses reports whether the callee closes its argIndex-th parameter.
-// A callee that is not a plain function declared in this file cannot be
-// inspected, so it is trusted with the rows it received.
-func (r *SQLRowsCloseRule) recipientCloses(ctx *core.FileContext, fun ast.Expr, argIndex int) bool {
-	ident, ok := fun.(*ast.Ident)
-	if !ok {
-		return true
-	}
-	decl := findFuncDecl(ctx.GoAST, ident.Name)
-	if decl == nil || decl.Body == nil {
-		return true
-	}
-	paramName := paramNameAt(decl.Type, argIndex)
-	if paramName == "" {
-		return true
-	}
-	closes := false
-	ast.Inspect(decl.Body, func(n ast.Node) bool {
-		if closes {
-			return false
-		}
-		if call, ok := n.(*ast.CallExpr); ok && r.getCloseVar(call) == paramName {
-			closes = true
-		}
-		return true
-	})
-	return closes
-}
-
-// findFuncDecl returns the package-level function named name, or nil.
-func findFuncDecl(file *ast.File, name string) *ast.FuncDecl {
-	if file == nil {
-		return nil
-	}
-	for _, d := range file.Decls {
-		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == name {
-			return fn
-		}
-	}
+// AnalyzeFile is a no-op: whether a Query call yields rows is a question about
+// its result type — url.Values and a query-string getter are spelled the same.
+func (r *SQLRowsCloseRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
 	return nil
 }
 
-// paramNameAt returns the name of the index-th parameter, counting grouped
-// names (a, b T) separately; "" when the parameter is unnamed or absent.
-func paramNameAt(ft *ast.FuncType, index int) string {
-	if ft == nil || ft.Params == nil {
-		return ""
-	}
-	i := 0
-	for _, field := range ft.Params.List {
-		if len(field.Names) == 0 {
-			if i == index {
-				return ""
-			}
-			i++
-			continue
-		}
-		for _, n := range field.Names {
-			if i == index {
-				return n.Name
-			}
-			i++
-		}
-	}
-	return ""
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *SQLRowsCloseRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject reports rows no path closes or hands on.
+func (r *SQLRowsCloseRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), r.analyzeFile)
 }
 
-func (r *SQLRowsCloseRule) isQueryCall(expr ast.Expr) bool {
-	call, ok := expr.(*ast.CallExpr)
-	if !ok {
+// analyzeFile checks every function of the file, function literals included.
+// Rows are any value a call returns whose type is *database/sql.Rows or has
+// the cursor methods Close, Next, Scan and Err (sqlx, pgx and the like).
+func (r *SQLRowsCloseRule) analyzeFile(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	check := &resourceLeakCheck{
+		file: ctx.GoAST,
+		info: info,
+		opens: func(expr ast.Expr) bool {
+			_, isCall := ast.Unparen(expr).(*ast.CallExpr)
+			return isCall && isRowsType(firstResultType(info, expr))
+		},
+		releases: func(call *ast.CallExpr) types.Object {
+			// rows.Close()
+			sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Close" {
+				return nil
+			}
+			return variableOf(info, ast.Unparen(sel.X))
+		},
+		carries: func(expr ast.Expr) types.Object {
+			return variableOf(info, expr)
+		},
+	}
+
+	var violations []*core.Violation
+	for _, leak := range check.leaks() {
+		line := ctx.LineFor(leak.at)
+		v := r.CreateViolation(ctx.RelPath, line, "SQL rows not closed - connection leak")
+		v.WithCode(ctx.GetLine(line))
+		v.WithSuggestion("Add defer " + leak.name + ".Close() after error check")
+		v.WithContext("pattern", "sql_rows_leak")
+		v.WithContext("variable", leak.name)
+		violations = append(violations, v)
+	}
+	return violations
+}
+
+// rowsCursorMethods are the methods every SQL row cursor has; *sql.Row lacks
+// Close and Next, url.Values lacks them all.
+var rowsCursorMethods = []string{"Close", "Next", "Scan", "Err"}
+
+// isRowsType reports whether t is *database/sql.Rows or a cursor type with
+// the same methods.
+func isRowsType(t types.Type) bool {
+	if t == nil {
 		return false
 	}
-
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
+	if isPointerToNamedType(t, "database/sql", "Rows") {
+		return true
 	}
-
-	method := sel.Sel.Name
-
-	// Check for db.Query, db.QueryContext, db.QueryRow is NOT included (returns *Row, not *Rows)
-	sqlMethods := map[string]bool{
-		"Query": true, "QueryContext": true,
-		"QueryxContext": true, "Queryx": true,
-		"NamedQuery": true, "NamedQueryContext": true,
+	for _, method := range rowsCursorMethods {
+		obj, _, _ := types.LookupFieldOrMethod(t, true, nil, method)
+		if _, isMethod := obj.(*types.Func); !isMethod {
+			return false
+		}
 	}
-
-	if !sqlMethods[method] {
-		return false
-	}
-
-	// Check that receiver looks like a database connection
-	// Exclude URL.Query() and similar non-database Query methods
-	receiverName := r.getReceiverName(sel.X)
-	if receiverName == "URL" || receiverName == "url" {
-		return false // URL.Query() returns url.Values, not *sql.Rows
-	}
-
 	return true
-}
-
-func (r *SQLRowsCloseRule) getReceiverName(expr ast.Expr) string {
-	switch e := expr.(type) {
-	case *ast.Ident:
-		return e.Name
-	case *ast.SelectorExpr:
-		// For chains like r.URL.Query(), get the last selector
-		return e.Sel.Name
-	}
-	return ""
-}
-
-func (r *SQLRowsCloseRule) getCloseVar(call *ast.CallExpr) string {
-	// Looking for rows.Close()
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "Close" {
-		return ""
-	}
-
-	// Get the variable name
-	if ident, ok := sel.X.(*ast.Ident); ok {
-		return ident.Name
-	}
-
-	return ""
 }

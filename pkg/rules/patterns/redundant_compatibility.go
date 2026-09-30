@@ -268,14 +268,14 @@ func (r *RedundantCompatibilityRule) extractKeyName(expr ast.Expr) string {
 func (r *RedundantCompatibilityRule) detectDuplicateKeyDefinitions(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 
-	// Collect all context key definitions
+	// Collect the package-level key definitions: a local variable named key
+	// in a function body is not a context key of the package.
 	keyDefs := make(map[string][]keyDefinition)
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		// Check for const or var declarations
-		genDecl, ok := n.(*ast.GenDecl)
+	for _, decl := range ctx.GoAST.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
 		if !ok {
-			return true
+			continue
 		}
 
 		for _, spec := range genDecl.Specs {
@@ -297,9 +297,7 @@ func (r *RedundantCompatibilityRule) detectDuplicateKeyDefinitions(ctx *core.Fil
 				}
 			}
 		}
-
-		return true
-	})
+	}
 
 	// Report duplicates
 	for _, baseName := range slices.Sorted(maps.Keys(keyDefs)) {
@@ -327,19 +325,13 @@ type keyDefinition struct {
 	pos  token.Position
 }
 
-// getBaseKeyName extracts base name from key (AdminIDKeyAlt -> AdminIDKey)
+// getBaseKeyName extracts base name from key (AdminIDKeyAlt -> AdminIDKey).
+// Only names ending in key or keyalt are collected, so "alt" is the one
+// suffix there is to remove.
 func (r *RedundantCompatibilityRule) getBaseKeyName(name string) string {
-	nameLower := strings.ToLower(name)
-
-	// Remove common alt suffixes
-	suffixes := []string{"alt", "_alt", "alternative", "fallback", "backup", "2", "v2"}
-	for _, suffix := range suffixes {
-		if strings.HasSuffix(nameLower, suffix) {
-			// Remove suffix preserving case
-			return name[:len(name)-len(suffix)]
-		}
+	if strings.HasSuffix(strings.ToLower(name), "alt") {
+		return name[:len(name)-len("alt")]
 	}
-
 	return name
 }
 

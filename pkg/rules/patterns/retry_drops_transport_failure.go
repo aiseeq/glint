@@ -3,7 +3,10 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"strings"
+
+	"golang.org/x/tools/go/types/typeutil"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -29,7 +32,8 @@ func init() {
 //
 // Not flagged: a loop that also asks the error itself whether to retry
 // (errors.Is, a retriable predicate) — the decision is then not the status
-// alone.
+// alone; and a loop that does not repeat a request at all (no attempt
+// counter, no pause, no continue), such as a pagination walk.
 type RetryDropsTransportFailureRule struct {
 	*rules.BaseRule
 }
@@ -46,22 +50,33 @@ func NewRetryDropsTransportFailureRule() *RetryDropsTransportFailureRule {
 	}
 }
 
-// AnalyzeFile reports retry loops whose only retry decision is the status code.
-func (r *RetryDropsTransportFailureRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	return analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
-		return r.checkFunction(ctx, fn)
+// AnalyzeFile is a no-op: which result of a send is the status code, and
+// which is the error, is a question about types.
+func (r *RetryDropsTransportFailureRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
+	return nil
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *RetryDropsTransportFailureRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject reports retry loops whose only retry decision is the status code.
+func (r *RetryDropsTransportFailureRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return analyzeGoFunctions(fileCtx, func(fn *ast.FuncDecl) []*core.Violation {
+			return r.checkFunction(fileCtx, info, fn)
+		})
 	})
 }
 
 // checkFunction inspects the loops of one function.
-func (r *RetryDropsTransportFailureRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+func (r *RetryDropsTransportFailureRule) checkFunction(ctx *core.FileContext, info *types.Info, fn *ast.FuncDecl) []*core.Violation {
 	var violations []*core.Violation
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		loop, ok := n.(*ast.ForStmt)
 		if !ok || loop.Body == nil {
 			return true
 		}
-		exit := r.statusOnlyExit(loop.Body)
+		exit := r.statusOnlyExit(ctx.GoAST, info, loop)
 		if exit == nil {
 			return true
 		}
@@ -81,11 +96,13 @@ func (r *RetryDropsTransportFailureRule) checkFunction(ctx *core.FileContext, fn
 }
 
 // statusOnlyExit returns the branch that ends the loop by status code, when the
-// loop sends a request per iteration, returns its error under a status
-// condition and never asks the error whether it is worth another attempt.
-func (r *RetryDropsTransportFailureRule) statusOnlyExit(body *ast.BlockStmt) *ast.IfStmt {
-	status, errName := sendResultNames(body)
-	if status == "" || errName == "" {
+// loop repeats a request, sends it once per iteration, returns its error under
+// a status condition and never asks the error whether it is worth another
+// attempt.
+func (r *RetryDropsTransportFailureRule) statusOnlyExit(file *ast.File, info *types.Info, loop *ast.ForStmt) *ast.IfStmt {
+	body := loop.Body
+	status, errName := sendResultNames(info, body)
+	if status == "" || errName == "" || !loopRepeatsRequest(file, info, loop) {
 		return nil
 	}
 	if endsWithReturn(body) || errorConsulted(body, errName) || errorPathMayLoop(body, errName) {
@@ -95,8 +112,10 @@ func (r *RetryDropsTransportFailureRule) statusOnlyExit(body *ast.BlockStmt) *as
 }
 
 // sendResultNames returns the status and error variables of a send made once
-// per iteration: body, statusCode, resp, err := c.doGetRaw(...).
-func sendResultNames(body *ast.BlockStmt) (status, errName string) {
+// per iteration: body, statusCode, err := c.doGetRaw(...). The status is the
+// one integer result, the error the one of type error; a send with no integer
+// result, or with several, has no status to decide by.
+func sendResultNames(info *types.Info, body *ast.BlockStmt) (status, errName string) {
 	for _, stmt := range body.List {
 		assign, ok := stmt.(*ast.AssignStmt)
 		if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) < 2 {
@@ -105,30 +124,69 @@ func sendResultNames(body *ast.BlockStmt) (status, errName string) {
 		if _, ok := assign.Rhs[0].(*ast.CallExpr); !ok {
 			continue
 		}
-		var foundStatus, foundErr string
+		var statuses []string
+		var foundErr string
 		for _, lhs := range assign.Lhs {
 			ident, ok := lhs.(*ast.Ident)
-			if !ok {
+			if !ok || ident.Name == "_" {
+				continue
+			}
+			variable := info.ObjectOf(ident)
+			if variable == nil {
 				continue
 			}
 			switch {
-			case looksLikeStatusName(ident.Name):
-				foundStatus = ident.Name
-			case looksLikeErrorName(ident.Name):
+			case isIntType(variable.Type()):
+				statuses = append(statuses, ident.Name)
+			case isErrorType(variable.Type()):
 				foundErr = ident.Name
 			}
 		}
-		if foundStatus != "" && foundErr != "" {
-			return foundStatus, foundErr
+		if len(statuses) == 1 && foundErr != "" {
+			return statuses[0], foundErr
 		}
 	}
 	return "", ""
 }
 
-// looksLikeStatusName reports whether the variable holds an HTTP status code.
-func looksLikeStatusName(name string) bool {
+// loopRepeatsRequest reports whether the loop is a retry at all: it counts
+// attempts (for i := 0; i < n; i++), waits between iterations (time.Sleep,
+// time.After, a sleep or backoff helper) or jumps back with continue. A loop
+// with none of these — a pagination walk — asks for something new each time,
+// and an error ending it is the right answer.
+func loopRepeatsRequest(file *ast.File, info *types.Info, loop *ast.ForStmt) bool {
+	if loop.Init != nil && loop.Cond != nil {
+		if _, counted := loop.Post.(*ast.IncDecStmt); counted {
+			return true
+		}
+	}
+	if containsContinue(loop.Body) {
+		return true
+	}
+	waits := false
+	ast.Inspect(loop.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || waits {
+			return !waits
+		}
+		if isPackageFuncCall(file, info, call, "time", "Sleep", "After", "NewTimer", "Tick") {
+			waits = true
+			return false
+		}
+		if fn, ok := typeutil.Callee(info, call).(*types.Func); ok && isWaitHelperName(fn.Name()) {
+			waits = true
+			return false
+		}
+		return true
+	})
+	return waits
+}
+
+// isWaitHelperName reports whether a function's declared name says it pauses
+// between attempts: sleep, sleepWithContext, backoff.Wait.
+func isWaitHelperName(name string) bool {
 	lower := strings.ToLower(name)
-	return strings.Contains(lower, "status") || lower == "code" || strings.HasSuffix(lower, "statuscode")
+	return strings.Contains(lower, "sleep") || strings.Contains(lower, "backoff") || lower == "wait"
 }
 
 // statusGuardedReturn returns the if that ends the loop on a status condition

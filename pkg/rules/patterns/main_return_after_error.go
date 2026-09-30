@@ -61,7 +61,11 @@ func (r *MainReturnAfterErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 		if !ok || fn.Recv != nil || fn.Name.Name != "main" || fn.Body == nil {
 			continue
 		}
+		exitCodes := deferredExitCodeVars(fn.Body)
 		forEachErrorBranch(fn.Body, func(branch *ast.BlockStmt) {
+			if assignsAnyOf(branch, exitCodes) {
+				return // the deferred os.Exit reports the code this branch set
+			}
 			for _, ret := range bareReturnsIn(branch) {
 				if seen[ret.Pos()] {
 					continue
@@ -111,21 +115,67 @@ func errCondOp(cond ast.Expr) token.Token {
 	if !ok || (binary.Op != token.NEQ && binary.Op != token.EQL) {
 		return token.ILLEGAL
 	}
-	value, isNilCompare := binary.X, exprIsNil(binary.Y)
+	value, isNilCompare := binary.X, isNilIdent(binary.Y)
 	if !isNilCompare {
-		value, isNilCompare = binary.Y, exprIsNil(binary.X)
+		value, isNilCompare = binary.Y, isNilIdent(binary.X)
 	}
 	ident, isIdent := value.(*ast.Ident)
-	if !isNilCompare || !isIdent || !strings.Contains(strings.ToLower(ident.Name), "err") {
+	if !isNilCompare || !isIdent || !isErrorVarName(ident.Name) {
 		return token.ILLEGAL
 	}
 	return binary.Op
 }
 
-// exprIsNil reports whether the expression is the nil identifier.
-func exprIsNil(expr ast.Expr) bool {
-	ident, ok := expr.(*ast.Ident)
-	return ok && ident.Name == "nil"
+// deferredExitCodeVars returns the variables a deferred function literal
+// hands to os.Exit: `defer func() { os.Exit(code) }()`. main that sets such a
+// variable and returns lets its deferred cleanups run and still exits with
+// the code it set. `defer os.Exit(code)` evaluates code at the defer and is
+// not this idiom.
+func deferredExitCodeVars(body *ast.BlockStmt) map[string]bool {
+	vars := make(map[string]bool)
+	ast.Inspect(body, func(n ast.Node) bool {
+		deferStmt, ok := n.(*ast.DeferStmt)
+		if !ok {
+			return true
+		}
+		lit, ok := deferStmt.Call.Fun.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+		ast.Inspect(lit.Body, func(inner ast.Node) bool {
+			call, ok := inner.(*ast.CallExpr)
+			if !ok || core.ExtractFullFunctionName(call) != "os.Exit" || len(call.Args) != 1 {
+				return true
+			}
+			if ident, ok := call.Args[0].(*ast.Ident); ok {
+				vars[ident.Name] = true
+			}
+			return true
+		})
+		return false
+	})
+	return vars
+}
+
+// assignsAnyOf reports whether the block assigns one of the named variables,
+// nested function literals aside.
+func assignsAnyOf(block *ast.BlockStmt, names map[string]bool) bool {
+	if len(names) == 0 {
+		return false
+	}
+	assigns := false
+	forEachOwnStatement(block, func(stmt ast.Stmt) {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok {
+			return
+		}
+		for _, lhs := range assign.Lhs {
+			if ident, ok := lhs.(*ast.Ident); ok && names[ident.Name] {
+				assigns = true
+			}
+		}
+	})
+	return assigns
 }
 
 // bareReturnsIn collects the bare return statements of a branch, pruning

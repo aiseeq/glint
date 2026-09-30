@@ -253,7 +253,7 @@ func TestServerErrorHidesClientCancelRule_WriteHeaderForm(t *testing.T) {
 
 import "net/http"
 
-func fail(w http.ResponseWriter) {
+func fail(w http.ResponseWriter, err error) {
 	w.WriteHeader(503)
 }
 `,
@@ -265,19 +265,19 @@ func work(r *http.Request) error { return nil }
 
 func handleA(w http.ResponseWriter, r *http.Request) {
 	if err := work(r); err != nil {
-		fail(w)
+		fail(w, err)
 	}
 }
 
 func handleB(w http.ResponseWriter, r *http.Request) {
 	if err := work(r); err != nil {
-		fail(w)
+		fail(w, err)
 	}
 }
 
 func handleC(w http.ResponseWriter, r *http.Request) {
 	if err := work(r); err != nil {
-		fail(w)
+		fail(w, err)
 	}
 }
 `,
@@ -314,6 +314,133 @@ import (
 
 func TestOne(t *testing.T) { serverError(httptest.NewRecorder(), errors.New("x")) }
 func TestTwo(t *testing.T) { serverError(httptest.NewRecorder(), errors.New("y")) }
+`,
+	})
+	violations, err := NewServerErrorHidesClientCancelRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+}
+
+// Repro: every 5xx constant in any call counted as a status — a buffer of 512
+// bytes made the JSON writer "answer 500/512". The writer takes no error, and
+// its only 5xx is its own json.Marshal failure: it hides no client cancel.
+func TestServerErrorHidesClientCancelRule_JSONWriterIsNotAResponder(t *testing.T) {
+	project := cancelResponderProject(t, map[string]string{
+		"responder.go": `package web
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	buf := make([]byte, 0, 512)
+	b, err := json.Marshal(v)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	buf = append(buf, b...)
+	w.WriteHeader(status)
+	_, _ = w.Write(buf)
+}
+
+func reportFailure(w http.ResponseWriter, err error) {
+	payload := make([]byte, 0, 512)
+	b, merr := json.Marshal(map[string]string{"error": err.Error()})
+	if merr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	payload = append(payload, b...)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(payload)
+}
+`,
+		"handlers.go": `package web
+
+import "net/http"
+
+func work(r *http.Request) error { return nil }
+
+func handleA(w http.ResponseWriter, r *http.Request) {
+	if err := work(r); err != nil {
+		reportFailure(w, err)
+		return
+	}
+	writeJSON(w, 200, 1)
+}
+
+func handleB(w http.ResponseWriter, r *http.Request) {
+	if err := work(r); err != nil {
+		reportFailure(w, err)
+		return
+	}
+	writeJSON(w, 200, 2)
+}
+
+func handleC(w http.ResponseWriter, r *http.Request) {
+	if err := work(r); err != nil {
+		reportFailure(w, err)
+		return
+	}
+	writeJSON(w, 200, 3)
+}
+`,
+	})
+	violations, err := NewServerErrorHidesClientCancelRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+}
+
+// A responder that hands its 5xx to the project's JSON writer answers 5xx all
+// the same: the writer's status parameter reaches WriteHeader.
+func TestServerErrorHidesClientCancelRule_StatusThroughJSONWriter(t *testing.T) {
+	project := cancelResponderProject(t, map[string]string{
+		"responder.go": `package web
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func serverError(w http.ResponseWriter, err error) {
+	writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+}
+`,
+		"handlers.go": threeHandlers,
+	})
+	violations, err := NewServerErrorHidesClientCancelRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "serverError", violations[0].Context["responder"])
+	assert.Contains(t, violations[0].Message, "answers 502 for 3 call sites")
+}
+
+// Without an error among its parameters the helper has no failure to
+// misclassify: it is told to answer 5xx and does.
+func TestServerErrorHidesClientCancelRule_RequiresErrorParameter(t *testing.T) {
+	project := cancelResponderProject(t, map[string]string{
+		"responder.go": `package web
+
+import "net/http"
+
+func unavailable(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusServiceUnavailable)
+}
+`,
+		"handlers.go": `package web
+
+import "net/http"
+
+func handleA(w http.ResponseWriter, r *http.Request) { unavailable(w) }
+func handleB(w http.ResponseWriter, r *http.Request) { unavailable(w) }
+func handleC(w http.ResponseWriter, r *http.Request) { unavailable(w) }
 `,
 	})
 	violations, err := NewServerErrorHidesClientCancelRule().AnalyzeGoProject(project)

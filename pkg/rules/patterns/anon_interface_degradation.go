@@ -85,7 +85,7 @@ func (r *AnonInterfaceDegradationRule) checkFunctionBody(ctx *core.FileContext, 
 		// Check if next statement is a degradation return
 		if i+1 < len(stmts) {
 			if ret, ok := stmts[i+1].(*ast.ReturnStmt); ok {
-				if r.isDegradationReturn(ret) {
+				if r.isDegradationReturn(ret) && !isOptionalInterfaceIdiom(fn, ifStmt, ret) {
 					pos := ctx.PositionFor(ret)
 					lineContent := ctx.GetLine(pos.Line)
 
@@ -104,6 +104,107 @@ func (r *AnonInterfaceDegradationRule) checkFunctionBody(ctx *core.FileContext, 
 	}
 
 	return violations
+}
+
+// isOptionalInterfaceIdiom recognises the optional-interface idiom:
+//
+//	func Flush(w io.Writer) error {
+//	    if f, ok := w.(interface{ Flush() error }); ok {
+//	        return f.Flush()
+//	    }
+//	    return nil
+//	}
+//
+// The value the caller handed in may or may not have the capability; the
+// branch delegates to the method the assertion checked for, and the tail
+// answers with the zero value — "no such capability, nothing to do". A made-up
+// non-zero answer in the tail still degrades, and so does a wrapper that
+// delegates to its own dependency (d.inner): that is the dead delegation this
+// rule is about.
+func isOptionalInterfaceIdiom(fn *ast.FuncDecl, ifStmt *ast.IfStmt, tail *ast.ReturnStmt) bool {
+	for _, result := range tail.Results {
+		if !isZeroValueExpr(result) && !isFalseIdent(result) {
+			return false
+		}
+	}
+	delegates := false
+	inspectOwnIfTree(ifStmt, func(nested *ast.IfStmt) {
+		bound, asserted := assertedInterfaceVar(nested)
+		if bound != "" && isParamName(fn, asserted) && returnsMethodCallOn(nested.Body, bound) {
+			delegates = true
+		}
+	})
+	return delegates
+}
+
+// inspectOwnIfTree visits the if statement and every if nested in it, pruning
+// function literals.
+func inspectOwnIfTree(ifStmt *ast.IfStmt, visit func(*ast.IfStmt)) {
+	ast.Inspect(ifStmt, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.IfStmt:
+			visit(node)
+		}
+		return true
+	})
+}
+
+// assertedInterfaceVar returns the variable bound by an `if v, ok :=
+// x.(interface{...}); ok` initializer and the asserted expression x.
+func assertedInterfaceVar(ifStmt *ast.IfStmt) (string, ast.Expr) {
+	assign, ok := ifStmt.Init.(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) == 0 || len(assign.Rhs) != 1 {
+		return "", nil
+	}
+	typeAssert, ok := assign.Rhs[0].(*ast.TypeAssertExpr)
+	if !ok {
+		return "", nil
+	}
+	if _, ok := typeAssert.Type.(*ast.InterfaceType); !ok {
+		return "", nil
+	}
+	ident, ok := assign.Lhs[0].(*ast.Ident)
+	if !ok || ident.Name == "_" {
+		return "", nil
+	}
+	return ident.Name, typeAssert.X
+}
+
+// isParamName reports whether the expression is a parameter of the function.
+func isParamName(fn *ast.FuncDecl, expr ast.Expr) bool {
+	ident, ok := expr.(*ast.Ident)
+	return ok && fieldListsContainName(ident.Name, fn.Type.Params)
+}
+
+// returnsMethodCallOn reports whether the block returns the result of a method
+// called on the named variable.
+func returnsMethodCallOn(body *ast.BlockStmt, name string) bool {
+	for _, stmt := range body.List {
+		ret, ok := stmt.(*ast.ReturnStmt)
+		if !ok {
+			continue
+		}
+		for _, result := range ret.Results {
+			call, ok := result.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if recv, ok := sel.X.(*ast.Ident); ok && recv.Name == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isFalseIdent reports whether the expression is the false identifier.
+func isFalseIdent(expr ast.Expr) bool {
+	ident, ok := expr.(*ast.Ident)
+	return ok && ident.Name == "false"
 }
 
 // containsAnonymousInterfaceAssertion recursively checks if any nested if has assertion
@@ -193,36 +294,13 @@ func (r *AnonInterfaceDegradationRule) isDegradationReturn(ret *ast.ReturnStmt) 
 	// Check if any result is an explicit error (fmt.Errorf, errors.New)
 	// This is NOT a degradation - it's proper error handling
 	for _, result := range ret.Results {
-		if r.isExplicitError(result) {
+		if exprCarriesError(result) {
 			return false
 		}
 	}
 
 	for _, result := range ret.Results {
 		if r.isMagicValue(result) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// isExplicitError checks if expression is an explicit error (fmt.Errorf, errors.New, etc.)
-func (r *AnonInterfaceDegradationRule) isExplicitError(expr ast.Expr) bool {
-	call, ok := expr.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-
-	funcName := core.ExtractFullFunctionName(call)
-	// Check for common error constructors
-	errorFuncs := []string{
-		"fmt.Errorf", "errors.New", "errors.Wrap", "errors.Wrapf",
-		"Errorf", "New", "Wrap", "Wrapf",
-	}
-
-	for _, fn := range errorFuncs {
-		if strings.HasSuffix(funcName, fn) || funcName == fn {
 			return true
 		}
 	}

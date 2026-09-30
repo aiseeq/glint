@@ -107,11 +107,7 @@ func errNilCheckName(cond ast.Expr) string {
 		return ""
 	}
 	ident, ok := bin.X.(*ast.Ident)
-	if !ok || !isNilIdent(bin.Y) {
-		return ""
-	}
-	lower := strings.ToLower(ident.Name)
-	if lower != "err" && !strings.HasSuffix(lower, "err") && !strings.HasSuffix(lower, "error") {
+	if !ok || !isNilIdent(bin.Y) || !isErrorVarName(ident.Name) {
 		return ""
 	}
 	return ident.Name
@@ -251,12 +247,26 @@ func isLoggerCall(call *ast.CallExpr) bool {
 	if !ok {
 		return false
 	}
-	verb := strings.ToLower(sel.Sel.Name)
-	if !loggingVerbs[strings.TrimSuffix(strings.TrimSuffix(verb, "structured"), "context")] &&
-		!strings.HasPrefix(verb, "log") {
+	verb := logVerb(sel)
+	if !loggingVerbs[verb] && !strings.HasPrefix(verb, "log") {
 		return false
 	}
-	receiver := strings.ToLower(exprText(sel.X))
+	return isLoggerReceiver(sel.X)
+}
+
+// logVerb returns the method name of a logging call in lower case, without
+// the Structured/Context suffix of structured loggers: ErrorStructured and
+// WarnContext are error and warn.
+func logVerb(sel *ast.SelectorExpr) string {
+	verb := strings.ToLower(sel.Sel.Name)
+	return strings.TrimSuffix(strings.TrimSuffix(verb, "structured"), "context")
+}
+
+// isLoggerReceiver reports whether the receiver of a call is a logger: its
+// text mentions log (log, logger, slog, zlog, r.logger, logging.X) or it is a
+// known logging package.
+func isLoggerReceiver(expr ast.Expr) bool {
+	receiver := strings.ToLower(exprText(expr))
 	return strings.Contains(receiver, "log") ||
 		strings.HasPrefix(receiver, "zap") || strings.HasPrefix(receiver, "logrus") ||
 		strings.HasPrefix(receiver, "zerolog") || strings.HasPrefix(receiver, "slog") ||
@@ -347,8 +357,31 @@ func (r *ErrorCauseDroppedRule) tsDropsCause(block, binding string) bool {
 	if idx := strings.Index(body, "{"); idx >= 0 {
 		body = body[idx+1:]
 	}
-	use := regexp.MustCompile(`(?:^|[^A-Za-z0-9_$.])` + regexp.QuoteMeta(name) + `\b`)
-	return !use.MatchString(body)
+	return !mentionsBinding(body, name)
+}
+
+// mentionsBinding reports whether text uses the binding name the way the
+// pattern (?:^|[^A-Za-z0-9_$.])name\b reads it: not as a part of a longer
+// identifier and not as a property after a dot. Matching by hand spares a
+// regexp compiled for every catch block.
+func mentionsBinding(text, name string) bool {
+	if name == "" {
+		return false
+	}
+	for from := 0; ; {
+		idx := strings.Index(text[from:], name)
+		if idx < 0 {
+			return false
+		}
+		start := from + idx
+		end := start + len(name)
+		beforeOK := start == 0 || !(isWordChar(text[start-1]) || text[start-1] == '$' || text[start-1] == '.')
+		afterOK := isWordChar(name[len(name)-1]) != (end < len(text) && isWordChar(text[end]))
+		if beforeOK && afterOK {
+			return true
+		}
+		from = start + 1
+	}
 }
 
 func (r *ErrorCauseDroppedRule) tsViolation(ctx *core.FileContext, lineNum int, line, binding string) *core.Violation {

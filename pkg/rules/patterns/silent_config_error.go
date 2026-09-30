@@ -50,8 +50,10 @@ func NewSilentConfigErrorRule() *SilentConfigErrorRule {
 }
 
 // configLoadFuncNames — function-name fragments that indicate an env/config
-// load call. Matched against the fully-qualified callee name (e.g.
-// `cleanenv.ReadEnv`, `godotenv.Load`, `c.loadEnvFileDirectly`).
+// load call. Matched case-insensitively against the fully-qualified callee
+// name (e.g. `cleanenv.ReadEnv`, `godotenv.Load`, `c.loadEnvFileDirectly`) as
+// whole camelCase words: parseenv matches parseEnv and mustParseEnv, not
+// parseEnvelope.
 var configLoadFuncNames = []string{
 	"cleanenv.readenv",
 	"cleanenv.readconfig",
@@ -61,7 +63,8 @@ var configLoadFuncNames = []string{
 	"loadenvironment",  // *.loadEnvironment / *.loadEnvironmentFile
 	"readenvironment",  // *.readEnvironment
 	"applyenvironment", // applyEnvironmentFixes / applyEnvironment
-	"parseenv",         // parseEnv / parseEnvironment
+	"parseenv",         // parseEnv
+	"parseenvironment", // parseEnvironment
 	"viper.readinconfig",
 	"viper.mergeconfig",
 }
@@ -202,12 +205,12 @@ var projectConfigLoader = regexp.MustCompile(`(^|\.)load[a-z0-9_]*config$`)
 // isConfigLoadCall reports whether the fully-qualified callee name indicates
 // an env/config load function whose error must not be silently dropped.
 func (r *SilentConfigErrorRule) isConfigLoadCall(funcName string) bool {
-	lower := strings.ToLower(funcName)
 	for _, needle := range configLoadFuncNames {
-		if strings.Contains(lower, needle) {
+		if hasCamelWord(funcName, needle) {
 			return true
 		}
 	}
+	lower := strings.ToLower(funcName)
 	// Project-wide config loaders (LoadConfig, LoadAppConfig) aggregate the
 	// env/godotenv functions above — dropping their error hides the same class
 	// of misconfiguration.
@@ -308,7 +311,7 @@ func (r *SilentConfigErrorRule) checkPrecedingAssignErrNilSwallow(ctx *core.File
 }
 
 // configLoadCalleeFromAssign returns the callee name if the assignment's RHS
-// is a single call and one of its return targets is a variable named `err`.
+// is a single call and one of its return targets is spelled as an error.
 // Returns "" otherwise.
 func configLoadCalleeFromAssign(assign *ast.AssignStmt) string {
 	if len(assign.Rhs) != 1 {
@@ -320,7 +323,7 @@ func configLoadCalleeFromAssign(assign *ast.AssignStmt) string {
 	}
 	hasErr := false
 	for _, lhs := range assign.Lhs {
-		if id, ok := lhs.(*ast.Ident); ok && id.Name == "err" {
+		if id, ok := lhs.(*ast.Ident); ok && isErrorVarName(id.Name) {
 			hasErr = true
 			break
 		}
@@ -357,7 +360,7 @@ func isErrEqNilCheck(cond ast.Expr, assign *ast.AssignStmt) bool {
 // exactly this name on its left-hand side. An `err` from an outer scope that
 // the assignment did not touch is not the error being checked.
 func assignBindsErrName(assign *ast.AssignStmt, name string) bool {
-	if assign == nil || !strings.HasSuffix(strings.ToLower(name), "err") {
+	if assign == nil || !isErrorVarName(name) {
 		return false
 	}
 	for _, lhs := range assign.Lhs {

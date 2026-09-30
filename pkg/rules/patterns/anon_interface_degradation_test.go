@@ -224,9 +224,8 @@ func (d *Dispatcher) Timeout() (time.Duration, error) {
 			wantCount: 0,
 		},
 		{
-			// isExplicitError матчит хвосты "New"/"Wrap"/"Errorf" без пакета, поэтому
-			// любой конструктор с таким именем гасит находку. Известная переширь.
-			name:     "any call named New in the results is taken for an explicit error",
+			// Конструктор по имени New — не ошибка: хвост с нулём остаётся деградацией.
+			name:     "a constructor named New in the results is not an explicit error",
 			filename: "dispatcher.go",
 			code: `package dispatch
 
@@ -237,7 +236,7 @@ func (d *Dispatcher) Codec() (Codec, time.Duration) {
 	return registry.New(), 0
 }
 `,
-			wantCount: 0,
+			wantCount: 1,
 		},
 		{
 			name:     "fallthrough delegates to a real call",

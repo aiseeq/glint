@@ -154,32 +154,25 @@ func Export() (any, error) {
 // Исключение по function работает для любого правила, а не только для тех,
 // что сами пишут имя функции в Context: движок дописывает объемлющую функцию
 // по строке находки. Репро: sql-rows-close и silent-error-handling не
-// понимали function-исключений в .glint.yaml потребителя.
+// понимали function-исключений в .glint.yaml потребителя; здесь правило без
+// собственного Context["function"] — select-star-struct-scan.
 func TestAnalyzeFilesFunctionExceptionWorksForEveryRule(t *testing.T) {
 	code := `package svc
 
 import "database/sql"
 
 func Leaky(db *sql.DB) {
-	rows, err := db.Query("SELECT 1")
-	if err != nil {
-		return
-	}
-	_ = rows
+	_, _ = db.Query("SELECT * FROM users")
 }
 
 func (s *Store) LeakyToo(db *sql.DB) {
-	rows, err := db.Query("SELECT 2")
-	if err != nil {
-		return
-	}
-	_ = rows
+	_, _ = db.Query("SELECT * FROM orders")
 }
 `
-	rule := patterns.NewSQLRowsCloseRule()
+	rule := patterns.NewSelectStarStructScanRule()
 	cfg := core.DefaultConfig()
 	cfg.Categories["patterns"] = core.CategoryConfig{Rules: map[string]core.RuleConfig{
-		"sql-rows-close": {Exceptions: []core.Exception{{Function: "LeakyToo", Reason: "test"}}},
+		"select-star-struct-scan": {Exceptions: []core.Exception{{Function: "LeakyToo", Reason: "test"}}},
 	}}
 
 	violations := mustAnalyzeFiles(t, []*core.FileContext{goContext(t, "store.go", code)}, []rules.Rule{rule}, cfg, nil)

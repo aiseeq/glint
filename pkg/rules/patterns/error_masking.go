@@ -179,47 +179,31 @@ func (r *ErrorMaskingRule) analyzeGoRegex(ctx *core.FileContext) []*core.Violati
 	return violations
 }
 
-// analyzeGoAST uses Go AST for precise detection
+// analyzeGoAST uses Go AST for precise detection. Every function is walked
+// once with its own signature: the error slot of that signature decides
+// whether a return in an error branch hands the error over.
 func (r *ErrorMaskingRule) analyzeGoAST(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 
-	// Check if statements for error masking
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		if stmt, ok := n.(*ast.IfStmt); ok {
-			if v := r.checkErrorIfStmt(ctx, stmt); v != nil {
+	forEachFunction(ctx.GoAST, func(name string, ftype *ast.FuncType, body *ast.BlockStmt) {
+		// Semantic boolean functions (IsEmpty, HasPermission, CanAccess,
+		// ShouldRetry) answer with true/false on error by contract. A closure
+		// inherits the name of the declaration around it.
+		if isPredicateName(name) {
+			return
+		}
+		forEachOwnStatement(body, func(stmt ast.Stmt) {
+			ifStmt, ok := stmt.(*ast.IfStmt)
+			if !ok {
+				return
+			}
+			if v := r.checkErrorIfStmt(ctx, ftype.Results, ifStmt); v != nil {
 				violations = append(violations, v)
 			}
-		}
-		return true
+		})
 	})
 
 	violations = append(violations, r.checkSuccessOnlyGuards(ctx)...)
-
-	// Check switch statements in functions that return error
-	// This is more conservative to avoid false positives on display/label functions
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		funcDecl, ok := n.(*ast.FuncDecl)
-		if !ok {
-			return true
-		}
-
-		// Only check functions that should return error but might not
-		if !r.functionShouldReturnError(funcDecl) {
-			return true
-		}
-
-		// Check switch statements in this function
-		ast.Inspect(funcDecl.Body, func(inner ast.Node) bool {
-			if stmt, ok := inner.(*ast.SwitchStmt); ok {
-				if v := r.checkSwitchDefault(ctx, stmt); v != nil {
-					violations = append(violations, v)
-				}
-			}
-			return true
-		})
-
-		return true
-	})
 
 	return violations
 }
@@ -235,31 +219,27 @@ func (r *ErrorMaskingRule) analyzeGoAST(ctx *core.FileContext) []*core.Violation
 // is how a broken repository query surfaced as "no operations today" in the balance
 // card while the headline kept showing yesterday's snapshot.
 func (r *ErrorMaskingRule) checkSuccessOnlyGuards(ctx *core.FileContext) []*core.Violation {
-	var violations []*core.Violation
-
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			return true
-		}
+	return analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
+		var violations []*core.Violation
+		var assigned map[*ast.Ident]bool
 		ast.Inspect(fn.Body, func(inner ast.Node) bool {
 			ifStmt, ok := inner.(*ast.IfStmt)
 			if !ok {
 				return true
 			}
-			if v := r.checkSuccessOnlyGuard(ctx, fn, ifStmt); v != nil {
+			if assigned == nil {
+				assigned = assignedIdents(fn.Body)
+			}
+			if v := r.checkSuccessOnlyGuard(ctx, fn, ifStmt, assigned); v != nil {
 				violations = append(violations, v)
 			}
 			return true
 		})
-
-		return false
+		return violations
 	})
-
-	return violations
 }
 
-func (r *ErrorMaskingRule) checkSuccessOnlyGuard(ctx *core.FileContext, fn *ast.FuncDecl, stmt *ast.IfStmt) *core.Violation {
+func (r *ErrorMaskingRule) checkSuccessOnlyGuard(ctx *core.FileContext, fn *ast.FuncDecl, stmt *ast.IfStmt, assigned map[*ast.Ident]bool) *core.Violation {
 	if stmt.Else != nil {
 		return nil
 	}
@@ -277,7 +257,7 @@ func (r *ErrorMaskingRule) checkSuccessOnlyGuard(ctx *core.FileContext, fn *ast.
 	if guardOnlyRefinesReadyValues(fn, stmt) {
 		return nil
 	}
-	if errUsedElsewhere(fn, stmt, errName) {
+	if errUsedElsewhere(fn, stmt, errName, assigned) {
 		return nil
 	}
 
@@ -348,19 +328,8 @@ func isZeroCheckOf(cond ast.Expr, name string) bool {
 		if e.Op != token.EQL {
 			return false
 		}
-		return (rootIdentName(e.X) == name && isZeroLiteralExpr(e.Y)) ||
-			(rootIdentName(e.Y) == name && isZeroLiteralExpr(e.X))
-	}
-	return false
-}
-
-// isZeroLiteralExpr распознаёт нулевые литералы: "", 0 и nil.
-func isZeroLiteralExpr(expr ast.Expr) bool {
-	switch e := expr.(type) {
-	case *ast.BasicLit:
-		return e.Value == `""` || e.Value == "0" || e.Value == "``"
-	case *ast.Ident:
-		return e.Name == "nil"
+		return (rootIdentName(e.X) == name && isZeroValueExpr(e.Y)) ||
+			(rootIdentName(e.Y) == name && isZeroValueExpr(e.X))
 	}
 	return false
 }
@@ -481,16 +450,10 @@ func successGuardErrName(cond ast.Expr) (string, bool) {
 	if !ok || !isErrorVarName(ident.Name) {
 		return "", false
 	}
-	nilIdent, isNil := bin.Y.(*ast.Ident)
-	if !isNil || nilIdent.Name != "nil" {
+	if !isNilIdent(bin.Y) {
 		return "", false
 	}
 	return ident.Name, true
-}
-
-func isErrorVarName(name string) bool {
-	lower := strings.ToLower(name)
-	return lower == "err" || strings.HasSuffix(lower, "err") || strings.HasSuffix(lower, "error")
 }
 
 // errSourceCall находит вызов, из которого пришла ошибка: либо в Init самого if,
@@ -569,9 +532,13 @@ func guardBodyOnlyAssigns(body *ast.BlockStmt) bool {
 
 // errUsedElsewhere проверяет, смотрит ли на ошибку кто-то ещё в этой функции:
 // лог, второй if, возврат. Собственное присваивание и условие не считаются.
-func errUsedElsewhere(fn *ast.FuncDecl, stmt *ast.IfStmt, errName string) bool {
+// assigned — идентификаторы, стоящие слева в присваиваниях тела функции.
+func errUsedElsewhere(fn *ast.FuncDecl, stmt *ast.IfStmt, errName string, assigned map[*ast.Ident]bool) bool {
 	used := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if used {
+			return false
+		}
 		ident, ok := n.(*ast.Ident)
 		if !ok || ident.Name != errName {
 			return true
@@ -579,7 +546,7 @@ func errUsedElsewhere(fn *ast.FuncDecl, stmt *ast.IfStmt, errName string) bool {
 		if ident.Pos() >= stmt.Pos() && ident.End() <= stmt.End() {
 			return true // внутри самого if: Init и условие
 		}
-		if assign, ok := enclosingAssign(fn.Body, ident); ok && identInLhs(assign, ident) {
+		if assigned[ident] {
 			return true // строка, где ошибка получена
 		}
 		used = true
@@ -588,74 +555,30 @@ func errUsedElsewhere(fn *ast.FuncDecl, stmt *ast.IfStmt, errName string) bool {
 	return used
 }
 
-func enclosingAssign(body *ast.BlockStmt, target *ast.Ident) (*ast.AssignStmt, bool) {
-	var found *ast.AssignStmt
+// assignedIdents собирает идентификаторы, стоящие непосредственно слева в
+// присваиваниях тела: один проход на функцию вместо поиска объемлющего
+// присваивания для каждого упоминания.
+func assignedIdents(body *ast.BlockStmt) map[*ast.Ident]bool {
+	assigned := make(map[*ast.Ident]bool)
 	ast.Inspect(body, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
 		if !ok {
 			return true
 		}
-		if assign.Pos() <= target.Pos() && target.End() <= assign.End() {
-			found = assign
+		for _, lhs := range assign.Lhs {
+			if ident, ok := lhs.(*ast.Ident); ok {
+				assigned[ident] = true
+			}
 		}
 		return true
 	})
-	return found, found != nil
+	return assigned
 }
 
-func identInLhs(assign *ast.AssignStmt, target *ast.Ident) bool {
-	return slices.Contains(assign.Lhs, ast.Expr(target))
-}
-
-// functionShouldReturnError checks if function signature suggests it should return error
-func (r *ErrorMaskingRule) functionShouldReturnError(fn *ast.FuncDecl) bool {
-	if fn.Type.Results == nil {
-		return false
-	}
-
-	// Check if function name suggests error-returning behavior
-	name := fn.Name.Name
-	errorIndicators := []string{
-		"Get", "Load", "Fetch", "Read", "Write", "Create", "Delete",
-		"Update", "Save", "Open", "Close", "Connect", "Send", "Receive",
-		"Parse", "Validate", "Process", "Execute", "Handle",
-	}
-
-	hasIndicator := false
-	for _, ind := range errorIndicators {
-		if strings.HasPrefix(name, ind) || strings.Contains(name, ind) {
-			hasIndicator = true
-			break
-		}
-	}
-
-	if !hasIndicator {
-		return false
-	}
-
-	// Check if last return type is error
-	results := fn.Type.Results.List
-	if len(results) == 0 {
-		return false
-	}
-
-	lastResult := results[len(results)-1]
-	if ident, ok := lastResult.Type.(*ast.Ident); ok {
-		return ident.Name == "error"
-	}
-
-	return false
-}
-
-// checkErrorIfStmt checks if statement for error masking patterns
-func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, stmt *ast.IfStmt) *core.Violation {
-	// Check if condition is "err != nil"
-	if !r.isErrNilCheck(stmt.Cond) {
-		return nil
-	}
-
-	// Skip semantic boolean functions (Is*, Has*, Can*, Should*, etc.)
-	if r.isInSemanticBooleanFunc(ctx, stmt) {
+// checkErrorIfStmt checks an `if err != nil` of a function with the given
+// results for a return that hands out a success value instead of the error.
+func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, results *ast.FieldList, stmt *ast.IfStmt) *core.Violation {
+	if errNilCheckName(stmt.Cond) == "" {
 		return nil
 	}
 
@@ -666,7 +589,7 @@ func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, stmt *ast.IfS
 	}
 
 	// Find first problematic return
-	return r.findProblematicReturn(ctx, stmt)
+	return r.findProblematicReturn(ctx, results, stmt)
 }
 
 // blockAnalysis holds analysis results of an error handling block
@@ -680,11 +603,8 @@ func (r *ErrorMaskingRule) analyzeErrorBlock(stmts []ast.Stmt) blockAnalysis {
 	var info blockAnalysis
 	for _, bodyStmt := range stmts {
 		if exprStmt, ok := bodyStmt.(*ast.ExprStmt); ok {
-			if call, ok := exprStmt.X.(*ast.CallExpr); ok {
-				funcName := core.ExtractFullFunctionName(call)
-				if r.isLoggingCall(funcName) {
-					info.hasLogging = true
-				}
+			if call, ok := exprStmt.X.(*ast.CallExpr); ok && isLoggerCall(call) {
+				info.hasLogging = true
 			}
 		}
 		if ret, ok := bodyStmt.(*ast.ReturnStmt); ok {
@@ -692,12 +612,6 @@ func (r *ErrorMaskingRule) analyzeErrorBlock(stmts []ast.Stmt) blockAnalysis {
 		}
 	}
 	return info
-}
-
-// isLoggingCall checks if function name indicates a logging call
-func (r *ErrorMaskingRule) isLoggingCall(funcName string) bool {
-	return strings.Contains(funcName, "log") || strings.Contains(funcName, "Log") ||
-		strings.Contains(funcName, "Error") || strings.Contains(funcName, "Warn")
 }
 
 // isAcceptableDenialPattern checks if block is an acceptable logged denial pattern
@@ -717,13 +631,13 @@ func (r *ErrorMaskingRule) isAcceptableDenialPattern(info blockAnalysis) bool {
 }
 
 // findProblematicReturn finds problematic returns in error handling block
-func (r *ErrorMaskingRule) findProblematicReturn(ctx *core.FileContext, stmt *ast.IfStmt) *core.Violation {
+func (r *ErrorMaskingRule) findProblematicReturn(ctx *core.FileContext, results *ast.FieldList, stmt *ast.IfStmt) *core.Violation {
 	for _, bodyStmt := range stmt.Body.List {
 		retStmt, ok := bodyStmt.(*ast.ReturnStmt)
 		if !ok {
 			continue
 		}
-		if r.returnIncludesError(retStmt) || r.isCommaOkReturnWithFalse(retStmt) {
+		if returnHandsOverError(results, retStmt) || r.isCommaOkReturnWithFalse(retStmt) {
 			continue
 		}
 		for _, result := range retStmt.Results {
@@ -756,90 +670,15 @@ func (r *ErrorMaskingRule) isCommaOkReturnWithFalse(stmt *ast.ReturnStmt) bool {
 	return false
 }
 
-// returnIncludesError checks if return statement includes proper error handling
-func (r *ErrorMaskingRule) returnIncludesError(stmt *ast.ReturnStmt) bool {
-	for _, result := range stmt.Results {
-		// Check for error variable (err)
-		if ident, ok := result.(*ast.Ident); ok {
-			if ident.Name == "err" {
-				return true
-			}
-		}
-
-		// Check for fmt.Errorf or errors.New
-		if call, ok := result.(*ast.CallExpr); ok {
-			funcName := core.ExtractFullFunctionName(call)
-			if funcName == "fmt.Errorf" || funcName == "errors.New" ||
-				strings.HasSuffix(funcName, "Errorf") || strings.HasSuffix(funcName, "Error") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// isInSemanticBooleanFunc checks if statement is inside a semantic boolean function
-// Functions like IsEmpty, HasPermission, CanAccess, ShouldRetry have semantic boolean returns
-// where returning true/false on error is intentional behavior, not error masking
-func (r *ErrorMaskingRule) isInSemanticBooleanFunc(ctx *core.FileContext, stmt ast.Stmt) bool {
-	// Find the enclosing function
-	var funcName string
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok {
-			return true
-		}
-		// Check if stmt is within this function's body
-		if fn.Body != nil && fn.Body.Pos() <= stmt.Pos() && stmt.End() <= fn.Body.End() {
-			funcName = fn.Name.Name
-			return false // Found it, stop searching
-		}
-		return true
-	})
-
-	if funcName == "" {
+// returnHandsOverError reports whether the return passes an error to the
+// caller: the function's last result is error and the value in that slot is
+// not nil. A sentinel, a wrap helper or any other expression there is the
+// error, whatever it is called.
+func returnHandsOverError(results *ast.FieldList, ret *ast.ReturnStmt) bool {
+	if !lastResultIsErrorType(results) || len(ret.Results) == 0 {
 		return false
 	}
-
-	// Check for semantic boolean function prefixes
-	semanticPrefixes := []string{
-		"Is", "Has", "Can", "Should", "Must", "Will", "Was", "Does", "Did",
-		"Contains", "Exists", "Valid", "Empty", "Nil", "Zero", "Equal",
-	}
-
-	for _, prefix := range semanticPrefixes {
-		if strings.HasPrefix(funcName, prefix) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// isErrNilCheck checks if condition is "err != nil" (not "err == nil")
-func (r *ErrorMaskingRule) isErrNilCheck(expr ast.Expr) bool {
-	binExpr, ok := expr.(*ast.BinaryExpr)
-	if !ok {
-		return false
-	}
-
-	// Must be "err != nil", not "err == nil"
-	// "err == nil" with return false is valid pattern for error type checking (IsNotFound, etc.)
-	if binExpr.Op != token.NEQ {
-		return false
-	}
-
-	ident, ok := binExpr.X.(*ast.Ident)
-	if !ok {
-		return false
-	}
-
-	if ident.Name != "err" {
-		return false
-	}
-
-	nilIdent, isNil := binExpr.Y.(*ast.Ident)
-	return isNil && nilIdent.Name == "nil"
+	return !isNilIdent(ret.Results[len(ret.Results)-1])
 }
 
 // isProblematicReturn checks if return value masks the error
@@ -853,64 +692,6 @@ func (r *ErrorMaskingRule) isProblematicReturn(expr ast.Expr) bool {
 		// Empty string, zero values
 		return v.Value == `""` || v.Value == "0"
 	}
-	return false
-}
-
-// checkSwitchDefault checks switch for problematic default
-func (r *ErrorMaskingRule) checkSwitchDefault(ctx *core.FileContext, stmt *ast.SwitchStmt) *core.Violation {
-	if stmt.Body == nil {
-		return nil
-	}
-
-	for _, clause := range stmt.Body.List {
-		caseClause, ok := clause.(*ast.CaseClause)
-		if !ok {
-			continue
-		}
-
-		// Only check default clause (List is nil for default)
-		if caseClause.List != nil {
-			continue
-		}
-
-		// Check if default returns a value (not error)
-		for _, bodyStmt := range caseClause.Body {
-			retStmt, ok := bodyStmt.(*ast.ReturnStmt)
-			if !ok {
-				continue
-			}
-
-			// Check if return is not an error
-			if r.isDefaultMaskingReturn(retStmt) {
-				pos := ctx.PositionFor(stmt)
-				v := r.CreateViolation(ctx.RelPath, pos.Line, "Switch default returns value instead of error")
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Return an error for unknown cases: default: return fmt.Errorf(\"unknown case\")")
-				v.WithContext("pattern", "switch_default_value")
-				return v
-			}
-		}
-	}
-
-	return nil
-}
-
-// isDefaultMaskingReturn checks if return is a problematic masking
-func (r *ErrorMaskingRule) isDefaultMaskingReturn(stmt *ast.ReturnStmt) bool {
-	if len(stmt.Results) == 0 {
-		return false
-	}
-
-	// Single value return that's not an error
-	if len(stmt.Results) == 1 {
-		switch v := stmt.Results[0].(type) {
-		case *ast.Ident:
-			return v.Name == "true" || v.Name == "false" || v.Name == "nil"
-		case *ast.BasicLit:
-			return true // Any literal is suspicious in default
-		}
-	}
-
 	return false
 }
 

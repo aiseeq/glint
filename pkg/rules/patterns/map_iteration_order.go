@@ -10,6 +10,7 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/helpers"
+	"golang.org/x/tools/go/types/typeutil"
 )
 
 func init() {
@@ -592,7 +593,7 @@ func passesOrderOn(call *ast.CallExpr, info *types.Info) bool {
 	if isSortingCall(call.Fun) {
 		return false // sorting defines the order, isSortedBefore judges it
 	}
-	switch obj := calleeObject(info, ast.Unparen(call.Fun)).(type) {
+	switch obj := typeutil.Callee(info, call).(type) {
 	case *types.Builtin:
 		return obj.Name() == "print" || obj.Name() == "println"
 	case *types.TypeName:
@@ -605,7 +606,7 @@ func passesOrderOn(call *ast.CallExpr, info *types.Info) bool {
 // its arguments come in: an order-insensitive slices function, or a predicate
 // answering yes or no - no order can come out of a single bool.
 func discardsOrder(call *ast.CallExpr, info *types.Info) bool {
-	if fn, ok := calleeObject(info, ast.Unparen(call.Fun)).(*types.Func); ok && fn.Pkg() != nil &&
+	if fn, ok := typeutil.Callee(info, call).(*types.Func); ok && fn.Pkg() != nil &&
 		fn.Pkg().Path() == "slices" && orderInsensitiveSlicesFuncs[fn.Name()] {
 		return true
 	}

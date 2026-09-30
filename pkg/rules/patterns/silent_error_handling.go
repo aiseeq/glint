@@ -38,23 +38,8 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 		return nil
 	}
 
-	pathLower := strings.ToLower(ctx.RelPath)
-
-	// Strict _test.go files: unit tests legitimately assert with `t.Error` etc.
-	// Skip them entirely.
-	if strings.HasSuffix(pathLower, "_test.go") {
+	if ctx.IsTestFile() {
 		return nil
-	}
-
-	// Test helpers under /tests/ are in-scope per CLAUDE.md "Log all errors,
-	// never ignore silently" — a helper that silently returns `nil` masks
-	// genuine API failures as missing data and hides infrastructure bugs.
-	// Generic /test-prefixed utility files unrelated to /tests/ are skipped.
-	if !strings.Contains(pathLower, "/tests/") {
-		if strings.Contains(pathLower, "test_") ||
-			strings.HasSuffix(pathLower, "/test.go") || strings.HasSuffix(pathLower, "/testing.go") {
-			return nil
-		}
 	}
 
 	// Build a set of if statements that are inside defer function literals
@@ -90,7 +75,11 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 	}
 
 	funcReturnsValueBool := r.funcTypeReturnsValueBool(ftype)
-	funcIsBoolPredicate := r.funcIsBoolPredicate(ftype, name)
+	// A declared function answering with one bool: its branches that return
+	// true/false are error-masking's (true) and error-masked-as-false-bool's
+	// (false) — one branch is reported by one rule. Closures have no such
+	// owner and stay here.
+	boolAnswerFunc := name != "" && ftype != nil && isSingleBoolResult(ftype.Results)
 
 	var violations []*core.Violation
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -106,7 +95,7 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 		}
 
 		// Check if this is err != nil
-		if !r.isErrNotNilCheck(ifStmt.Cond) {
+		if errNilCheckName(ifStmt.Cond) == "" {
 			return true
 		}
 
@@ -134,9 +123,7 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 			return true
 		}
 
-		// Skip if we're in a predicate function (IsEmpty, IsValid, etc.)
-		// Converting error to true/false is acceptable for predicates
-		if funcIsBoolPredicate && r.bodyReturnsBool(ifStmt.Body) {
+		if boolAnswerFunc && r.bodyReturnsBool(ifStmt.Body) {
 			return true
 		}
 
@@ -156,29 +143,6 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 	})
 
 	return violations
-}
-
-// isErrNotNilCheck detects `if err != nil` patterns
-func (r *SilentErrorHandlingRule) isErrNotNilCheck(cond ast.Expr) bool {
-	bin, ok := cond.(*ast.BinaryExpr)
-	if !ok || bin.Op != token.NEQ {
-		return false
-	}
-
-	// Check if comparing to nil
-	yNil, yIsNil := bin.Y.(*ast.Ident)
-	if !yIsNil || yNil.Name != "nil" {
-		return false
-	}
-
-	// Check if X is err or *err variable
-	xIdent, xIsIdent := bin.X.(*ast.Ident)
-	if !xIsIdent {
-		return false
-	}
-
-	nameLower := strings.ToLower(xIdent.Name)
-	return nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error")
 }
 
 // bodyHandlesError checks if the if body logs or propagates error
@@ -223,49 +187,6 @@ func (r *SilentErrorHandlingRule) funcTypeReturnsValueBool(ftype *ast.FuncType) 
 	lastResult := results[len(results)-1]
 	if ident, ok := lastResult.Type.(*ast.Ident); ok {
 		return ident.Name == "bool"
-	}
-
-	return false
-}
-
-// funcIsBoolPredicate checks if function is a predicate returning only bool
-// For predicates (IsEmpty, IsValid, HasX, CanX, etc.), converting error to bool is acceptable
-func (r *SilentErrorHandlingRule) funcIsBoolPredicate(ftype *ast.FuncType, name string) bool {
-	if ftype == nil || ftype.Results == nil {
-		return false
-	}
-
-	results := ftype.Results.List
-
-	// Must return exactly one value
-	if len(results) != 1 {
-		return false
-	}
-
-	// Must be bool
-	if ident, ok := results[0].Type.(*ast.Ident); ok {
-		if ident.Name != "bool" {
-			return false
-		}
-	} else {
-		return false
-	}
-
-	// Function name must be a predicate pattern (closures have no name)
-	if name == "" {
-		return false
-	}
-	nameLower := strings.ToLower(name)
-
-	predicatePatterns := []string{
-		"is", "has", "can", "should", "must", "check", "verify", "validate",
-		"contains", "exists", "empty", "valid", "equal", "match",
-	}
-
-	for _, pattern := range predicatePatterns {
-		if strings.HasPrefix(nameLower, pattern) || strings.Contains(nameLower, pattern) {
-			return true
-		}
 	}
 
 	return false
@@ -373,7 +294,7 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsVal
 	case *ast.ExprStmt:
 		// Check for logging calls
 		if call, ok := s.X.(*ast.CallExpr); ok {
-			if r.isLoggingCall(call) {
+			if isLoggerCall(call) {
 				return true
 			}
 			if r.isResponseCall(call) {
@@ -547,11 +468,8 @@ func (r *SilentErrorHandlingRule) exprUsesErrorValue(expr ast.Expr) bool {
 		// Check for err.Error() pattern
 		if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
 			// Check if X is an error variable
-			if ident, ok := sel.X.(*ast.Ident); ok {
-				nameLower := strings.ToLower(ident.Name)
-				if nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error") {
-					return true
-				}
+			if ident, ok := sel.X.(*ast.Ident); ok && isErrorVarName(ident.Name) {
+				return true
 			}
 			// Check for fmt.Errorf(..., err).Error() pattern
 			// The X is a CallExpr (fmt.Errorf) and its args contain error
@@ -571,11 +489,8 @@ func (r *SilentErrorHandlingRule) exprUsesErrorValue(expr ast.Expr) bool {
 		}
 	case *ast.SelectorExpr:
 		// err.someField
-		if ident, ok := e.X.(*ast.Ident); ok {
-			nameLower := strings.ToLower(ident.Name)
-			if nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error") {
-				return true
-			}
+		if ident, ok := e.X.(*ast.Ident); ok && isErrorVarName(ident.Name) {
+			return true
 		}
 	case *ast.CompositeLit:
 		// Check struct literals for error usage in field values
@@ -596,51 +511,14 @@ func (r *SilentErrorHandlingRule) exprUsesErrorValue(expr ast.Expr) bool {
 		return r.exprUsesErrorValue(e.X) || r.exprUsesErrorValue(e.Y)
 	case *ast.Ident:
 		// Direct error variable reference
-		nameLower := strings.ToLower(e.Name)
-		if nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error") {
-			return true
-		}
+		return isErrorVarName(e.Name)
 	}
 	return false
 }
 
 // exprReferencesError checks if expression references err variable or creates an error
 func (r *SilentErrorHandlingRule) exprReferencesError(expr ast.Expr) bool {
-	switch e := expr.(type) {
-	case *ast.Ident:
-		nameLower := strings.ToLower(e.Name)
-		// Standard error variable names
-		if nameLower == "err" || strings.HasSuffix(nameLower, "err") || strings.HasSuffix(nameLower, "error") {
-			return true
-		}
-		// Sentinel errors: ErrInvalidAmount, ErrNotFound, etc.
-		if strings.HasPrefix(e.Name, "Err") {
-			return true
-		}
-		return false
-
-	case *ast.SelectorExpr:
-		// Qualified sentinel errors: models.ErrInvalidUUID, storageErrors.ErrNotFound, etc.
-		if strings.HasPrefix(e.Sel.Name, "Err") {
-			return true
-		}
-		return false
-
-	case *ast.CallExpr:
-		if callCreatesError(e) {
-			return true
-		}
-
-		// Also check if err is passed as argument (for Wrap patterns:
-		// errors.Wrap(err, ...), errors.Join(err, ...), custom wrappers)
-		for _, arg := range e.Args {
-			if r.exprReferencesError(arg) {
-				return true
-			}
-		}
-	}
-
-	return false
+	return exprCarriesError(expr)
 }
 
 // callCreatesError распознаёт вызовы, создающие ошибку: errors.New, fmt.Errorf
@@ -659,33 +537,6 @@ func callCreatesError(call *ast.CallExpr) bool {
 	}
 	baseLower := strings.ToLower(base)
 	return strings.HasSuffix(baseLower, "error") || strings.HasSuffix(baseLower, "errorf")
-}
-
-// isLoggingCall checks if call is a logging function
-func (r *SilentErrorHandlingRule) isLoggingCall(call *ast.CallExpr) bool {
-	funcName := core.ExtractFullFunctionName(call)
-	funcNameLower := strings.ToLower(funcName)
-
-	// Common logging patterns
-	loggingPatterns := []string{
-		"log.", "logger.", "logging.",
-		"error", "warn", "info", "debug",
-		"errorf", "warnf", "infof", "debugf",
-		"errorstructured", "warnstructured", "infostructured",
-		"printf", "println",
-		"slog.",
-		"record", // recordFailure, recordError, etc.
-		"report", // reportError, etc.
-		"notify", // notifyError, etc.
-	}
-
-	for _, pattern := range loggingPatterns {
-		if strings.Contains(funcNameLower, pattern) {
-			return true
-		}
-	}
-
-	return false
 }
 
 // isPanicCall checks if call is panic
@@ -742,9 +593,9 @@ func callTakesErrorArgument(call *ast.CallExpr) bool {
 func argumentIsError(arg ast.Expr) bool {
 	switch a := arg.(type) {
 	case *ast.Ident:
-		return looksLikeErrorName(a.Name)
+		return isErrorVarName(a.Name)
 	case *ast.SelectorExpr:
-		return looksLikeErrorName(a.Sel.Name)
+		return isErrorVarName(a.Sel.Name)
 	case *ast.CallExpr:
 		// err.Error() — the message travels even though the value does not.
 		if sel, ok := a.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Error" {
@@ -755,9 +606,4 @@ func argumentIsError(arg ast.Expr) bool {
 		return callTakesErrorArgument(a)
 	}
 	return false
-}
-
-func looksLikeErrorName(name string) bool {
-	lower := strings.ToLower(name)
-	return lower == "err" || strings.HasSuffix(lower, "err") || strings.HasSuffix(lower, "error")
 }
