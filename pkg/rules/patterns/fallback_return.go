@@ -2,7 +2,10 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -151,16 +154,7 @@ func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violati
 		})
 		// After the branch checks: where both see an assignment, their
 		// finding stays.
-		forEachOwnStatementList(body, func(list []ast.Stmt) {
-			for i := 0; i+1 < len(list); i++ {
-				results, errName := failedCallResults(list[i])
-				ifStmt, ok := list[i+1].(*ast.IfStmt)
-				if errName == "" || !ok || ifStmt.Init != nil || errNilCheckName(ifStmt.Cond) != errName {
-					continue
-				}
-				violations = append(violations, r.detectReplacedResult(ctx, ifStmt, results, errName)...)
-			}
-		})
+		violations = append(violations, r.checkFailedCalls(ctx, body)...)
 	})
 
 	return uniqueViolationLines(violations)
@@ -178,6 +172,416 @@ func uniqueViolationLines(violations []*core.Violation) []*core.Violation {
 		}
 	}
 	return unique
+}
+
+// checkFailedCalls pairs every call with the check of its outcome that
+// follows it — `v, err := f()` with `if err != nil`, `v, ok := f()` with
+// `if !ok` — and reports what the rest of the function makes of a failure.
+func (r *FallbackReturnRule) checkFailedCalls(ctx *core.FileContext, body *ast.BlockStmt) []*core.Violation {
+	loopBodies := make(map[*ast.BlockStmt]bool)
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch loop := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ForStmt:
+			loopBodies[loop.Body] = true
+		case *ast.RangeStmt:
+			loopBodies[loop.Body] = true
+		}
+		return true
+	})
+	var violations []*core.Violation
+	check := func(list []ast.Stmt, inLoop bool) {
+		for i := 0; i+1 < len(list); i++ {
+			ifStmt, ok := list[i+1].(*ast.IfStmt)
+			if !ok || ifStmt.Init != nil {
+				continue
+			}
+			failed := failedCall{list: list, index: i, inLoop: inLoop}
+			if results, errName := failedCallResults(list[i]); errName != "" && errNilCheckName(ifStmt.Cond) == errName {
+				failed.results, failed.errName = results, errName
+				violations = append(violations, r.detectReplacedResult(ctx, ifStmt, results, errName)...)
+			} else if results, okName := okCallResults(list[i]); okName != "" && isNegatedIdent(ifStmt.Cond, okName) {
+				failed.results = results
+			} else {
+				continue
+			}
+			if v := r.detectUsedFailedResult(ctx, ifStmt, failed); v != nil {
+				violations = append(violations, v)
+			}
+		}
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.BlockStmt:
+			check(node.List, loopBodies[node])
+		case *ast.CaseClause:
+			check(node.Body, false)
+		case *ast.CommClause:
+			check(node.Body, false)
+		}
+		return true
+	})
+	return violations
+}
+
+// failedCall is a call whose outcome the next statement checks: the call is
+// list[index], its results and the error variable ("" for an ok flag).
+type failedCall struct {
+	list    []ast.Stmt
+	index   int
+	inLoop  bool
+	results map[string]bool
+	errName string
+}
+
+// okCallResults returns the result variables of `v, ok := call()`.
+func okCallResults(stmt ast.Stmt) (map[string]bool, string) {
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) < 2 {
+		return nil, ""
+	}
+	if _, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr); !ok {
+		return nil, ""
+	}
+	okIdent, ok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
+	if !ok || okIdent.Name != "ok" {
+		return nil, ""
+	}
+	results := make(map[string]bool)
+	for _, lhs := range assign.Lhs[:len(assign.Lhs)-1] {
+		if ident, ok := lhs.(*ast.Ident); ok && ident.Name != "_" {
+			results[ident.Name] = true
+		}
+	}
+	if len(results) == 0 {
+		return nil, ""
+	}
+	return results, okIdent.Name
+}
+
+// isNegatedIdent reports `!name`.
+func isNegatedIdent(cond ast.Expr, name string) bool {
+	unary, ok := ast.Unparen(cond).(*ast.UnaryExpr)
+	if !ok || unary.Op != token.NOT {
+		return false
+	}
+	ident, ok := ast.Unparen(unary.X).(*ast.Ident)
+	return ok && ident.Name == name
+}
+
+// detectUsedFailedResult reports a failure the branch notes and moves past,
+// while the code after it takes the call's result as good: the branch goes
+// on and the result is read below; the result is taken only in the else
+// branch and a default stands for it after a failure; in a loop, the failed
+// item is skipped and the others are summed into a total.
+func (r *FallbackReturnRule) detectUsedFailedResult(ctx *core.FileContext, ifStmt *ast.IfStmt, failed failedCall) *core.Violation {
+	body := ifStmt.Body
+	if failed.errName != "" && (readsIdentOutsideLoggers(body, failed.errName) || r.bodyReassignsErrFromCall(body, failed.errName)) {
+		return nil
+	}
+	if assignsAnyOf(body, failed.results) || r.blockExplainsFallback(ctx, body) {
+		return nil
+	}
+	rest := failed.list[failed.index+2:]
+	var message string
+	switch branchExit(body) {
+	case exitNone:
+		switch elseBlock := ifStmt.Else.(type) {
+		case nil:
+			if name := firstReadBeforeAssign(rest, failed.results); name != "" {
+				message = "The call failed, the branch goes on and " + name + " is used below as if the call had succeeded"
+			}
+		case *ast.BlockStmt:
+			if name := defaultKeptOnFailure(body, elseBlock, failed.results); name != "" {
+				message = "The call failed and " + name + " keeps its default, which is used below as the call's result"
+			}
+		}
+	case exitContinue:
+		// A false ok says the item has no value, not that fetching it failed.
+		if failed.inLoop && failed.errName != "" {
+			if name := accumulatedFrom(failed.list, rest, failed.results); name != "" {
+				message = "Items whose call failed are skipped and the rest summed into " + name + " - the total comes out partial"
+			}
+		}
+	}
+	if message == "" {
+		return nil
+	}
+	pos := ctx.PositionFor(ifStmt)
+	v := r.CreateViolation(ctx.RelPath, pos.Line, message)
+	v.WithCode(ctx.GetLine(pos.Line))
+	v.WithSuggestion("Return the error, or leave the branch. A deliberate fallback is suppressed with the reason.")
+	v.WithContext("pattern", "failed-result-used")
+	return v
+}
+
+// blockExplainsFallback reports a comment with a legitimate reason on any
+// line of the block.
+func (r *FallbackReturnRule) blockExplainsFallback(ctx *core.FileContext, block *ast.BlockStmt) bool {
+	end := ctx.GoFileSet.Position(block.Rbrace).Line
+	for l := ctx.PositionFor(block).Line; l <= end && l <= len(ctx.Lines); l++ {
+		if r.hasLegitimateComment(ctx.Lines[l-1:l], 0) {
+			return true
+		}
+	}
+	return false
+}
+
+type branchExitKind int
+
+const (
+	exitNone branchExitKind = iota
+	exitContinue
+	exitOther
+)
+
+// branchExit tells how the branch leaves: not at all, by a continue at its
+// end, or otherwise (return, break, goto, panic, a fatal log, exit).
+func branchExit(body *ast.BlockStmt) branchExitKind {
+	kind := exitNone
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			kind = exitOther
+		case *ast.BranchStmt:
+			if node.Tok == token.CONTINUE && kind == exitNone {
+				kind = exitContinue
+			} else if node.Tok != token.CONTINUE {
+				kind = exitOther
+			}
+		case *ast.CallExpr:
+			if leavesFlow(node) {
+				kind = exitOther
+			}
+		}
+		return kind != exitOther
+	})
+	return kind
+}
+
+// leavesFlow reports a call that does not return: panic, os.Exit, a Fatal or
+// FailNow, a helper named fatal or die.
+func leavesFlow(call *ast.CallExpr) bool {
+	var name string
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		name = fun.Name
+	case *ast.SelectorExpr:
+		name = fun.Sel.Name
+	}
+	lower := strings.ToLower(name)
+	return name == "panic" || name == "Exit" || name == "Goexit" || name == "FailNow" || name == "SkipNow" ||
+		strings.HasPrefix(lower, "fatal") || strings.HasPrefix(lower, "die") || name == "Skip" || name == "Skipf"
+}
+
+// firstReadBeforeAssign returns the first of the names the statements read
+// before assigning it anew. A read inside a log line is not a use, and an if
+// that tests one of the values for its zero value, or a bool result as its
+// condition, checks the outcome: from there on the results are guarded.
+func firstReadBeforeAssign(stmts []ast.Stmt, names map[string]bool) string {
+	live := make(map[string]bool, len(names))
+	for name := range names {
+		live[name] = true
+	}
+	for _, stmt := range stmts {
+		if ifStmt, ok := stmt.(*ast.IfStmt); ok && ifStmt.Init == nil {
+			for name := range live {
+				if checksOutcome(ifStmt.Cond, name) {
+					// The if tests the outcome: what it reads under the
+					// test is guarded.
+					return ""
+				}
+			}
+		}
+		for _, name := range slices.Sorted(maps.Keys(live)) {
+			if assign, ok := stmt.(*ast.AssignStmt); ok {
+				readsRight := false
+				for _, rhs := range assign.Rhs {
+					readsRight = readsRight || readsIdentOutsideLoggers(rhs, name)
+				}
+				if readsRight {
+					return name
+				}
+				for _, lhs := range assign.Lhs {
+					if ident, ok := lhs.(*ast.Ident); ok && ident.Name == name {
+						delete(live, name)
+					} else if readsIdentOutsideLoggers(lhs, name) {
+						return name
+					}
+				}
+				continue
+			}
+			if readsIdentOutsideLoggers(stmt, name) {
+				return name
+			}
+		}
+		if len(live) == 0 {
+			return ""
+		}
+	}
+	return ""
+}
+
+// checksOutcome reports a condition that tests the value for what a failed
+// call leaves: v == "" / 0 / nil, len(v) == 0, v.IsZero(), or a bool v itself.
+func checksOutcome(cond ast.Expr, name string) bool {
+	isName := func(expr ast.Expr) bool {
+		ident, ok := ast.Unparen(expr).(*ast.Ident)
+		return ok && ident.Name == name
+	}
+	found := false
+	ast.Inspect(cond, func(n ast.Node) bool {
+		switch e := n.(type) {
+		case *ast.BinaryExpr:
+			if e.Op == token.EQL || e.Op == token.NEQ {
+				for _, pair := range [][2]ast.Expr{{e.X, e.Y}, {e.Y, e.X}} {
+					if (isName(pair[0]) || isLenOf(pair[0], name)) && isZeroLiteral(pair[1]) {
+						found = true
+					}
+				}
+			}
+			if e.Op == token.LAND || e.Op == token.LOR {
+				found = found || isName(e.X) || isName(e.Y)
+			}
+		case *ast.UnaryExpr:
+			found = found || (e.Op == token.NOT && isName(e.X))
+		case *ast.CallExpr:
+			if sel, ok := e.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "IsZero" && isName(sel.X) {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found || isName(cond)
+}
+
+// isLenOf reports len(name).
+func isLenOf(expr ast.Expr, name string) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return false
+	}
+	fun, ok := call.Fun.(*ast.Ident)
+	arg, argOK := ast.Unparen(call.Args[0]).(*ast.Ident)
+	return ok && argOK && fun.Name == "len" && arg.Name == name
+}
+
+// isZeroLiteral reports "", 0, nil.
+func isZeroLiteral(expr ast.Expr) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.BasicLit:
+		return e.Value == `""` || e.Value == "0" || e.Value == "``"
+	case *ast.Ident:
+		return e.Name == "nil"
+	}
+	return false
+}
+
+// defaultKeptOnFailure returns the variable the else branch sets from the
+// call's result while the failure branch leaves it alone: after a failure it
+// holds whatever it held before.
+func defaultKeptOnFailure(body, elseBlock *ast.BlockStmt, results map[string]bool) string {
+	for _, stmt := range elseBlock.List {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != len(assign.Rhs) {
+			continue
+		}
+		for i, lhs := range assign.Lhs {
+			ident, ok := lhs.(*ast.Ident)
+			if !ok || results[ident.Name] || !readsAnyOf(assign.Rhs[i], results) {
+				continue
+			}
+			if !assignsAnyOf(body, map[string]bool{ident.Name: true}) {
+				return ident.Name
+			}
+		}
+	}
+	return ""
+}
+
+// accumulatedFrom returns a variable declared outside the loop body that the
+// statements after the branch add a result to: total += v, total = total.Add(v).
+func accumulatedFrom(loopBody, stmts []ast.Stmt, results map[string]bool) string {
+	for _, stmt := range stmts {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			continue
+		}
+		ident, ok := assign.Lhs[0].(*ast.Ident)
+		if !ok || stmtsDeclare(loopBody, ident.Name) || !readsAnyOf(assign.Rhs[0], results) {
+			continue
+		}
+		switch assign.Tok {
+		case token.ADD_ASSIGN, token.SUB_ASSIGN:
+			return ident.Name
+		case token.ASSIGN:
+			if isArithmeticOn(assign.Rhs[0], ident.Name) {
+				return ident.Name
+			}
+		}
+	}
+	return ""
+}
+
+// isArithmeticOn reports name + x, name - x, name.Add(x), name.Sub(x).
+func isArithmeticOn(expr ast.Expr, name string) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.BinaryExpr:
+		ident, ok := ast.Unparen(e.X).(*ast.Ident)
+		return ok && ident.Name == name && (e.Op == token.ADD || e.Op == token.SUB)
+	case *ast.CallExpr:
+		sel, ok := e.Fun.(*ast.SelectorExpr)
+		if !ok || (sel.Sel.Name != "Add" && sel.Sel.Name != "Sub") {
+			return false
+		}
+		ident, ok := ast.Unparen(sel.X).(*ast.Ident)
+		return ok && ident.Name == name
+	}
+	return false
+}
+
+// stmtsDeclare reports a := or var declaration of the name among the
+// statements, nested blocks included.
+func stmtsDeclare(stmts []ast.Stmt, name string) bool {
+	found := false
+	for _, stmt := range stmts {
+		forEachOwnStatement(stmt, func(inner ast.Stmt) {
+			switch s := inner.(type) {
+			case *ast.AssignStmt:
+				if s.Tok != token.DEFINE {
+					return
+				}
+				for _, lhs := range s.Lhs {
+					if ident, ok := lhs.(*ast.Ident); ok && ident.Name == name {
+						found = true
+					}
+				}
+			case *ast.DeclStmt:
+				ast.Inspect(s, func(n ast.Node) bool {
+					if ident, ok := n.(*ast.Ident); ok && ident.Name == name {
+						found = true
+					}
+					return !found
+				})
+			}
+		})
+	}
+	return found
+}
+
+// readsAnyOf reports a read of one of the names in the expression.
+func readsAnyOf(expr ast.Expr, names map[string]bool) bool {
+	for name := range names {
+		if nodeReadsIdent(expr, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // failedCallResults returns the result variables and the error variable of
@@ -281,7 +685,8 @@ func (r *FallbackReturnRule) branchExplainsFallback(ctx *core.FileContext, ifStm
 }
 
 // readsIdentOutsideLoggers is nodeReadsIdent that does not look into logging
-// calls: a log line reports the error to an operator, not to the caller.
+// calls and fmt.Print*: a log or a printed line reports the error to an
+// operator, not to the caller.
 func readsIdentOutsideLoggers(node ast.Node, name string) bool {
 	targets := make(map[*ast.Ident]bool)
 	found := false
@@ -293,7 +698,7 @@ func readsIdentOutsideLoggers(node ast.Node, name string) bool {
 		case *ast.FuncLit:
 			return false
 		case *ast.CallExpr:
-			if isLoggerCall(current) {
+			if isLoggerCall(current) || isFmtPrint(current) {
 				return false
 			}
 		case *ast.AssignStmt:
@@ -308,6 +713,16 @@ func readsIdentOutsideLoggers(node ast.Node, name string) bool {
 		return !found
 	})
 	return found
+}
+
+// isFmtPrint reports fmt.Print, Printf or Println.
+func isFmtPrint(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "fmt" && (sel.Sel.Name == "Print" || sel.Sel.Name == "Printf" || sel.Sel.Name == "Println")
 }
 
 // namesAssignedFromCalls returns the variables the block assigns from a call:
