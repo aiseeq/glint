@@ -1,8 +1,11 @@
 package patterns
 
 import (
+	"fmt"
 	"go/ast"
 	"go/types"
+
+	"golang.org/x/tools/go/types/typeutil"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -41,19 +44,128 @@ func (r *HTTPBodyCloseRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports responses whose body no path closes.
 func (r *HTTPBodyCloseRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), r.analyzeFile)
+	if ctx == nil {
+		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
+	}
+	closers := bodyClosingHelpers(ctx)
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyzeFile(fileCtx, info, closers)
+	})
+}
+
+// bodyClosingHelpers returns the project functions that hand back an
+// *http.Response whose body they have already closed: a client helper that
+// reads the body, closes it and returns the response for its status and
+// headers. Their callers have nothing left to close.
+func bodyClosingHelpers(ctx *core.GoProjectContext) map[*types.Func]bool {
+	closers := map[*types.Func]bool{}
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
+			continue
+		}
+		info := pkgCtx.Package.TypesInfo
+		for _, file := range pkgCtx.Package.Syntax {
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+				obj, ok := info.Defs[fn.Name].(*types.Func)
+				if ok && closesReturnedBody(fn, info) {
+					closers[obj] = true
+				}
+			}
+		}
+	}
+	return closers
+}
+
+// closesReturnedBody reports whether every response the function returns is
+// a variable whose body the function closes somewhere, deferred closures
+// included. A response returned straight from a call, or one never closed,
+// is the caller's to close.
+func closesReturnedBody(fn *ast.FuncDecl, info *types.Info) bool {
+	signature, ok := info.Defs[fn.Name].Type().(*types.Signature)
+	if !ok {
+		return false
+	}
+	position := -1
+	for i := range signature.Results().Len() {
+		if isPointerToNamedType(signature.Results().At(i).Type(), "net/http", "Response") {
+			position = i
+			break
+		}
+	}
+	if position < 0 {
+		return false
+	}
+	closed := map[types.Object]bool{}
+	var returned []ast.Expr
+	allClosed := true
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			if sel, ok := ast.Unparen(node.Fun).(*ast.SelectorExpr); ok && sel.Sel.Name == "Close" {
+				if response := httpResponseOfBody(info, sel.X); response != nil {
+					closed[response] = true
+				}
+			}
+		case *ast.FuncLit:
+			// A closure's returns are its own; its Close calls still count.
+			ast.Inspect(node.Body, func(inner ast.Node) bool {
+				if call, ok := inner.(*ast.CallExpr); ok {
+					if sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok && sel.Sel.Name == "Close" {
+						if response := httpResponseOfBody(info, sel.X); response != nil {
+							closed[response] = true
+						}
+					}
+				}
+				return true
+			})
+			return false
+		case *ast.ReturnStmt:
+			if len(node.Results) != signature.Results().Len() {
+				allClosed = false // bare return or `return f()`
+				return true
+			}
+			returned = append(returned, node.Results[position])
+		}
+		return true
+	})
+	if !allClosed {
+		return false
+	}
+	closesAny := false
+	for _, expr := range returned {
+		if isNilIdent(ast.Unparen(expr)) {
+			continue
+		}
+		variable := variableOf(info, ast.Unparen(expr))
+		if variable == nil || !closed[variable] {
+			return false
+		}
+		closesAny = true
+	}
+	return closesAny
 }
 
 // analyzeFile checks every function of the file, function literals included:
 // a response is any value of type *net/http.Response a call returns, however
-// the client was reached.
-func (r *HTTPBodyCloseRule) analyzeFile(ctx *core.FileContext, info *types.Info) []*core.Violation {
+// the client was reached, except from a project helper that already closed
+// its body.
+func (r *HTTPBodyCloseRule) analyzeFile(ctx *core.FileContext, info *types.Info, closers map[*types.Func]bool) []*core.Violation {
 	check := &resourceLeakCheck{
 		file: ctx.GoAST,
 		info: info,
 		opens: func(expr ast.Expr) bool {
-			_, isCall := ast.Unparen(expr).(*ast.CallExpr)
-			return isCall && isPointerToNamedType(firstResultType(info, expr), "net/http", "Response")
+			call, isCall := ast.Unparen(expr).(*ast.CallExpr)
+			if !isCall || !isPointerToNamedType(firstResultType(info, expr), "net/http", "Response") {
+				return false
+			}
+			if callee, ok := typeutil.Callee(info, call).(*types.Func); ok && closers[callee.Origin()] {
+				return false
+			}
+			return true
 		},
 		releases: func(call *ast.CallExpr) types.Object {
 			// resp.Body.Close()
@@ -101,11 +213,16 @@ func httpResponseOfBody(info *types.Info, expr ast.Expr) types.Object {
 // walk: the state is a single "reachable" flag and every visited node is
 // handed to the visit callback.
 type httpBodyReachRule struct {
+	info  *types.Info
+	file  *ast.File
 	visit func(ast.Node)
 }
 
-func walkReachableStatements(statements []ast.Stmt, visit func(ast.Node)) {
-	walker := &flowWalker[bool, struct{}]{rule: &httpBodyReachRule{visit: visit}}
+// walkReachableStatements hands visit every statement a path reaches; a call
+// that never returns (panic, os.Exit, log.Fatal) ends the path. info and file
+// may be nil.
+func walkReachableStatements(statements []ast.Stmt, info *types.Info, file *ast.File, visit func(ast.Node)) {
+	walker := &flowWalker[bool, struct{}]{rule: &httpBodyReachRule{info: info, file: file, visit: visit}}
 	walker.stmtList(statements, true, struct{}{})
 }
 
@@ -128,7 +245,7 @@ func (r *httpBodyReachRule) simpleStmt(stmt ast.Stmt, state bool, _ struct{}) (b
 	if _, isReturn := stmt.(*ast.ReturnStmt); isReturn {
 		return false, true
 	}
-	return state, isPanicStatement(stmt)
+	return state, stmtNoReturn(stmt, r.info, r.file) != callReturns
 }
 
 func (r *httpBodyReachRule) ifCondition(stmt *ast.IfStmt, state bool, _ struct{}) (bool, bool) {

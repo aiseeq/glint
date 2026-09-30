@@ -104,6 +104,36 @@ func fetch(maxPages int, since *time.Time) error {
 			want: 0,
 		},
 		{
+			// The walk returns from inside once it passes the boundary; running
+			// out of pages falls out of the loop into an explicit error.
+			name: "cap in the loop condition followed by a truncation error",
+			code: `package sync
+func fetch(since *time.Time) ([]string, error) {
+	var rows []string
+	for page := 1; page <= historyMaxPages; page++ {
+		items := getPage()
+		if since != nil && items[0].Time.Before(*since) { return rows, nil }
+		rows = append(rows, items[0].ID)
+	}
+	return nil, fmt.Errorf("history exceeded %d pages", historyMaxPages)
+}`,
+			want: 0,
+		},
+		{
+			name: "cap in the loop condition followed by a success",
+			code: `package sync
+func fetch(since *time.Time) ([]string, error) {
+	var rows []string
+	for page := 1; page <= historyMaxPages; page++ {
+		items := getPage()
+		if since != nil && items[0].Time.Before(*since) { return rows, nil }
+		rows = append(rows, items[0].ID)
+	}
+	return rows, nil
+}`,
+			want: 1,
+		},
+		{
 			name: "bounded retry loop has no time boundary",
 			code: `package sync
 func fetch(maxAttempts int) error {

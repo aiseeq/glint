@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 	"strings"
 
@@ -22,7 +23,8 @@ func init() {
 // computed ID collides for equal input and exists before the record does.
 //
 // Only the calls of the UUID libraries are recognized; a string that merely
-// looks like an ID (a cache key, an ETag) is not one.
+// looks like an ID (a cache key, an ETag) is not one, and neither is a
+// name-based UUID folded into a longer string such as an idempotency key.
 type DeterministicUUIDRule struct {
 	*rules.BaseRule
 }
@@ -76,9 +78,10 @@ func (r *DeterministicUUIDRule) analyze(ctx *core.FileContext, info *types.Info)
 			continue
 		}
 		hashes := hashVariables(ctx.GoAST, info, fn.Body)
+		keyParts := uuidsFoldedIntoText(ctx.GoAST, info, fn.Body)
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
-			if !ok {
+			if !ok || keyParts[call] {
 				return true
 			}
 			if message, found := r.computedUUID(ctx.GoAST, info, call, hashes); found {
@@ -107,6 +110,43 @@ func (r *DeterministicUUIDRule) computedUUID(file *ast.File, info *types.Info, c
 		}
 	}
 	return "", false
+}
+
+// uuidsFoldedIntoText returns the calls whose UUID only becomes part of a
+// longer string: concatenated with other text or formatted by fmt.Sprintf.
+// Such a string is a key or a fingerprint - an idempotency key has to come
+// out the same for the same input - and never a record ID, which is the UUID
+// alone.
+func uuidsFoldedIntoText(file *ast.File, info *types.Info, body *ast.BlockStmt) map[*ast.CallExpr]bool {
+	folded := map[*ast.CallExpr]bool{}
+	mark := func(expr ast.Expr) {
+		expr = ast.Unparen(expr)
+		if call, ok := expr.(*ast.CallExpr); ok && len(call.Args) == 0 {
+			if selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok && selector.Sel.Name == "String" {
+				expr = ast.Unparen(selector.X)
+			}
+		}
+		if call, ok := expr.(*ast.CallExpr); ok {
+			folded[call] = true
+		}
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.BinaryExpr:
+			if node.Op == token.ADD {
+				mark(node.X)
+				mark(node.Y)
+			}
+		case *ast.CallExpr:
+			if isPackageFuncCall(file, info, node, "fmt", "Sprintf") && len(node.Args) > 1 {
+				for _, arg := range node.Args[1:] {
+					mark(arg)
+				}
+			}
+		}
+		return true
+	})
+	return folded
 }
 
 // hashPackages are the packages whose functions return a digest.

@@ -550,3 +550,78 @@ func HasLong(m map[string]int) bool {
 
 	assert.Empty(t, violations)
 }
+
+// Keys collected to fetch or update a batch go to a callee that treats them as
+// a set: a lookup keyed by id or a query with `= ANY($1)` answers the same
+// whatever order the ids come in. Only a call that writes the values out
+// carries their order to the outside.
+func TestMapIterationOrderIgnoresCollectPassedToBatchCall(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "context"
+
+type priceClient interface {
+	Prices(ctx context.Context, ids []string) (map[string]float64, error)
+}
+
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (int64, error)
+}
+
+func Refresh(ctx context.Context, client priceClient, wanted map[string]bool) (map[string]float64, error) {
+	ids := make([]string, 0, len(wanted))
+	for id := range wanted {
+		ids = append(ids, id)
+	}
+	return client.Prices(ctx, ids)
+}
+
+func Relabel(ctx context.Context, db execer, labels map[string]string) error {
+	addresses := make([]string, 0, len(labels))
+	names := make([]string, 0, len(labels))
+	for address, label := range labels {
+		addresses = append(addresses, address)
+		names = append(names, label)
+	}
+	_, err := db.ExecContext(ctx, "UPDATE t SET label = v.label FROM unnest($1, $2) AS v(address, label)", addresses, names)
+	return err
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// Handing the collected keys to a writer that leaves the function prints them
+// in walk order.
+func TestMapIterationOrderReportsCollectWrittenOut(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"fmt"
+	"io"
+	"strings"
+)
+
+func Dump(w io.Writer, m map[string]int) {
+	var keys []string
+	for k := range m {
+		keys = append(keys, k)
+	}
+	fmt.Fprintln(w, strings.Join(keys, ","))
+}
+
+func Local(m map[string]int) int {
+	var keys []string
+	for k := range m {
+		keys = append(keys, k)
+	}
+	var sb strings.Builder
+	fmt.Fprint(&sb, keys)
+	return sb.Len()
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "keys")
+	assert.Equal(t, 11, violations[0].Line)
+}

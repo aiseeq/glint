@@ -79,7 +79,7 @@ func (c *resourceLeakCheck) leaksIn(body *ast.BlockStmt) []openedResource {
 		seen[variable] = true
 		opened = append(opened, openedResource{variable: variable, name: ident.Name, at: at})
 	}
-	walkReachableStatements(body.List, func(n ast.Node) {
+	walkReachableStatements(body.List, c.info, c.file, func(n ast.Node) {
 		ast.Inspect(n, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.FuncLit:
@@ -114,7 +114,7 @@ func (c *resourceLeakCheck) leaksIn(body *ast.BlockStmt) []openedResource {
 // or hand on, including inside the function literals it defers or calls.
 func (c *resourceLeakCheck) releasedIn(body *ast.BlockStmt) map[types.Object]bool {
 	released := make(map[types.Object]bool)
-	walkReachableStatements(body.List, func(n ast.Node) {
+	walkReachableStatements(body.List, c.info, c.file, func(n ast.Node) {
 		ast.Inspect(n, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.CallExpr:

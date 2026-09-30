@@ -24,7 +24,7 @@ func NewUnboundedResponseReadRule() *UnboundedResponseReadRule {
 		BaseRule: rules.NewBaseRule(
 			"unbounded-response-read",
 			"patterns",
-			"Detects unbounded io.ReadAll calls on HTTP response bodies",
+			"Detects unbounded io.ReadAll (or ioutil.ReadAll) calls on HTTP response bodies",
 			core.SeverityHigh,
 		),
 	}
@@ -186,7 +186,7 @@ func (a *unboundedResponseAnalyzer) simpleStmt(stmt ast.Stmt, state *responseSta
 		a.checkDeclaration(stmt, state)
 	case *ast.ExprStmt:
 		a.checkExpr(stmt.X, state)
-		if isPanicStatement(stmt) {
+		if stmtNoReturn(stmt, a.info, a.ctx.GoAST) != callReturns {
 			return nil, true
 		}
 	case *ast.DeferStmt:
@@ -338,12 +338,14 @@ func (a *unboundedResponseAnalyzer) isResponseCall(expr ast.Expr) bool {
 	return isCall && isPointerToNamedType(firstResultType(a.info, expr), "net/http", "Response")
 }
 
-// unboundedResponseBodyRead returns x for io.ReadAll(x.Body).
+// unboundedResponseBodyRead returns x for io.ReadAll(x.Body) and for its
+// deprecated alias ioutil.ReadAll(x.Body).
 func (a *unboundedResponseAnalyzer) unboundedResponseBodyRead(call *ast.CallExpr) (*ast.Ident, bool) {
 	if len(call.Args) != 1 {
 		return nil, false
 	}
-	if !isPackageFuncCall(a.ctx.GoAST, a.info, call, "io", "ReadAll") {
+	if !isPackageFuncCall(a.ctx.GoAST, a.info, call, "io", "ReadAll") &&
+		!isPackageFuncCall(a.ctx.GoAST, a.info, call, "io/ioutil", "ReadAll") {
 		return nil, false
 	}
 	body, ok := ast.Unparen(call.Args[0]).(*ast.SelectorExpr)

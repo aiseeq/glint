@@ -11,6 +11,7 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/go/types/typeutil"
 )
 
 func init() {
@@ -39,6 +40,11 @@ func init() {
 //     модуль), неизвестен — и молчание; передача в обходчик вроде ast.Inspect не в счёт;
 //   - проверка на nil в Cleanup/Close доказательством не считается: teardown по замыслу
 //     переживает частично собранный объект;
+//   - проверка, которая пустой указатель отвергает (ветка возвращает ошибку или
+//     паникует), тоже не доказательство: она говорит, что nil там недопустим;
+//   - значения этого интерфейсного типа должны где-то в проекте сравниваться с nil:
+//     типизированный nil обманывает только такую проверку, без неё держатель вызывает
+//     метод так же, как вызвал бы его на самом указателе;
 //   - присваивание внутри `if ptr != nil { ... }`, код после `if ptr == nil { return }`
 //     и после `if ptr == nil { ptr = &T{} }` (или любого `ptr = &T{}` / `new(T)`)
 //     признаются правильными — это и есть нужная нормализация.
@@ -196,6 +202,7 @@ func (r *TypedNilIntoInterfaceRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	}
 
 	stores := newParamStores(ctx)
+	checkedInterfaces := nilCheckedInterfaces(ctx)
 	var violations []*core.Violation
 	for _, pkgCtx := range ctx.Packages {
 		if pkgCtx == nil || pkgCtx.Package == nil {
@@ -222,6 +229,7 @@ func (r *TypedNilIntoInterfaceRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 				w := &typedNilWalker{
 					rule: r, ctx: ctx, pkg: pkgCtx.Package, stores: stores,
 					nilable: nilable, guarded: map[types.Object]bool{},
+					checkedInterfaces: checkedInterfaces,
 				}
 				w.walkStmt(fn.Body)
 				violations = append(violations, w.found...)
@@ -257,11 +265,101 @@ func collectNilablePointers(pkg *packages.Package, file *ast.File, nilable map[t
 	}
 }
 
+// rejectingNilChecks returns the `p == nil` comparisons whose branch rejects the
+// empty pointer: it returns an error or ends the program. Such a check says nil is
+// not allowed there, not that the pointer is sometimes empty.
+func rejectingNilChecks(pkg *packages.Package, node ast.Node) map[*ast.BinaryExpr]bool {
+	rejecting := map[*ast.BinaryExpr]bool{}
+	ast.Inspect(node, func(n ast.Node) bool {
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok || !rejectsBranch(pkg, ifStmt.Body) {
+			return true
+		}
+		for _, check := range disjunctNilChecks(ifStmt.Cond) {
+			rejecting[check] = true
+		}
+		return true
+	})
+	return rejecting
+}
+
+// disjunctNilChecks returns the `x == nil` comparisons any of which alone
+// makes the condition true: the condition itself or a disjunct of an || chain.
+func disjunctNilChecks(cond ast.Expr) []*ast.BinaryExpr {
+	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
+	if !ok {
+		return nil
+	}
+	if bin.Op == token.LOR {
+		return append(disjunctNilChecks(bin.X), disjunctNilChecks(bin.Y)...)
+	}
+	if _, equal, ok := nilComparison(bin); ok && equal {
+		return []*ast.BinaryExpr{bin}
+	}
+	return nil
+}
+
+// rejectsBranch reports whether the block ends by refusing to go on: a return
+// whose last result is an error other than nil, or a call that does not return.
+func rejectsBranch(pkg *packages.Package, block *ast.BlockStmt) bool {
+	if block == nil || len(block.List) == 0 {
+		return false
+	}
+	switch last := block.List[len(block.List)-1].(type) {
+	case *ast.ReturnStmt:
+		if len(last.Results) == 0 {
+			return false
+		}
+		result := ast.Unparen(last.Results[len(last.Results)-1])
+		return !isNilIdent(result) && isErrorValue(result, pkg.TypesInfo)
+	case *ast.ExprStmt:
+		return stmtNoReturn(last, pkg.TypesInfo, nil) != callReturns
+	}
+	return false
+}
+
+// nilCheckedInterfaces collects the interface types whose values some code of
+// the project compares with nil. A typed nil fools only such a check.
+func nilCheckedInterfaces(ctx *core.GoProjectContext) *typeutil.Map {
+	checked := &typeutil.Map{}
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
+			continue
+		}
+		info := pkgCtx.Package.TypesInfo
+		for _, file := range pkgCtx.Package.Syntax {
+			if isGoTestFile(ctx, file) {
+				continue
+			}
+			ast.Inspect(file, func(n ast.Node) bool {
+				bin, ok := n.(*ast.BinaryExpr)
+				if !ok {
+					return true
+				}
+				operand, _, ok := nilComparison(bin)
+				if !ok {
+					return true
+				}
+				operandType := info.TypeOf(operand)
+				if operandType == nil {
+					return true
+				}
+				if _, isInterface := operandType.Underlying().(*types.Interface); isInterface {
+					checked.Set(operandType, true)
+				}
+				return true
+			})
+		}
+	}
+	return checked
+}
+
 // collectNilableInNode walks one declaration looking for nil comparisons over pointers.
 func collectNilableInNode(pkg *packages.Package, node ast.Node, nilable map[types.Object]bool) {
+	rejecting := rejectingNilChecks(pkg, node)
 	ast.Inspect(node, func(n ast.Node) bool {
 		bin, ok := n.(*ast.BinaryExpr)
-		if !ok {
+		if !ok || rejecting[bin] {
 			return true
 		}
 		operand, _, ok := nilComparison(bin)
@@ -287,6 +385,8 @@ type typedNilWalker struct {
 	nilable map[types.Object]bool
 	guarded map[types.Object]bool
 	found   []*core.Violation
+	// checkedInterfaces are the interface types some code compares with nil.
+	checkedInterfaces *typeutil.Map
 }
 
 // walkStmt descends into a statement structurally. Обход именно по структуре, а не
@@ -580,7 +680,7 @@ func (w *typedNilWalker) checkValueSpec(spec *ast.ValueSpec) {
 
 // report records a finding when a nil-able pointer lands in a methodful interface.
 func (w *typedNilWalker) report(arg ast.Expr, target types.Type, sink string) {
-	if target == nil || !methodfulInterface(target) {
+	if target == nil || !methodfulInterface(target) || w.checkedInterfaces.At(target) == nil {
 		return
 	}
 	if _, isPointer := w.pkg.TypesInfo.TypeOf(arg).(*types.Pointer); !isPointer {

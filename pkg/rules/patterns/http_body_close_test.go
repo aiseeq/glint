@@ -475,3 +475,60 @@ func closes() error {
 	require.Len(t, violations, 1)
 	assert.Equal(t, "leakedResp", violations[0].Context["variable"])
 }
+
+// A client helper that reads the body, closes it and hands back the response
+// for its status and headers leaves nothing for the caller to close. A helper
+// that returns the response unread still does.
+func TestHTTPBodyCloseRule_HelperThatClosesTheBody(t *testing.T) {
+	files := map[string]string{
+		"client.go": `package payprov
+
+import (
+	"io"
+	"net/http"
+)
+
+type Client struct{ http *http.Client }
+
+func (c *Client) do(req *http.Request) (*http.Response, []byte, error) {
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+	return resp, raw, nil
+}
+
+func (c *Client) send(req *http.Request) (*http.Response, error) {
+	return c.http.Do(req)
+}
+`,
+		"status.go": `package payprov
+
+import "net/http"
+
+func (c *Client) Status(req *http.Request) (string, error) {
+	resp, raw, err := c.do(req)
+	if err != nil {
+		return "", err
+	}
+	return resp.Header.Get("X-Request-Id") + string(raw), nil
+}
+
+func (c *Client) Ping(req *http.Request) (int, error) {
+	openResp, err := c.send(req)
+	if err != nil {
+		return 0, err
+	}
+	return openResp.StatusCode, nil
+}
+`,
+	}
+	violations := runRuleOnFiles(t, NewHTTPBodyCloseRule(), files)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "openResp", violations[0].Context["variable"])
+}

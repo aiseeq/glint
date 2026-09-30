@@ -16,11 +16,12 @@ func init() {
 }
 
 // ShadowVariableRule detects a local variable declared in a nested scope with
-// the name of a variable of the same function that is still visible there:
-// a receiver, a parameter, a result or an outer local. Scopes are the ones the
-// type checker builds, so switch and select cases, closures and if/for/switch
-// headers are all seen, and a name declared in an if header does not leak
-// past the if statement.
+// the name of a variable of the same function that is still visible there -
+// a receiver, a parameter, a result or an outer local - when the function
+// reads the outer variable again after the inner declaration. Scopes are the
+// ones the type checker builds, so switch and select cases, closures and
+// if/for/switch headers are all seen, and a name declared in an if header does
+// not leak past the if statement.
 type ShadowVariableRule struct {
 	*rules.BaseRule
 	// Common Go variable names that are safe to shadow
@@ -33,7 +34,7 @@ func NewShadowVariableRule() *ShadowVariableRule {
 		BaseRule: rules.NewBaseRule(
 			"shadow-variable",
 			"patterns",
-			"Detects variable shadowing (same name in nested scope)",
+			"Detects a variable redeclared in a nested scope while the function still reads the outer one afterwards",
 			core.SeverityMedium,
 		),
 		safeToShadow: map[string]bool{
@@ -92,7 +93,7 @@ func (r *ShadowVariableRule) analyze(ctx *core.FileContext, info *types.Info) []
 					if len(stmt.Rhs) == len(stmt.Lhs) {
 						rhs = stmt.Rhs[i]
 					}
-					violations = r.check(ctx, info, fn, lhs, rhs, violations)
+					violations = r.check(ctx, info, fn, lhs, rhs, stmt.End(), violations)
 				}
 			case *ast.ValueSpec:
 				for i, name := range stmt.Names {
@@ -100,12 +101,12 @@ func (r *ShadowVariableRule) analyze(ctx *core.FileContext, info *types.Info) []
 					if len(stmt.Values) == len(stmt.Names) {
 						rhs = stmt.Values[i]
 					}
-					violations = r.check(ctx, info, fn, name, rhs, violations)
+					violations = r.check(ctx, info, fn, name, rhs, stmt.End(), violations)
 				}
 			case *ast.RangeStmt:
 				if stmt.Tok == token.DEFINE {
-					violations = r.check(ctx, info, fn, stmt.Key, nil, violations)
-					violations = r.check(ctx, info, fn, stmt.Value, nil, violations)
+					violations = r.check(ctx, info, fn, stmt.Key, nil, stmt.X.End(), violations)
+					violations = r.check(ctx, info, fn, stmt.Value, nil, stmt.X.End(), violations)
 				}
 			}
 			return true
@@ -115,12 +116,23 @@ func (r *ShadowVariableRule) analyze(ctx *core.FileContext, info *types.Info) []
 }
 
 // check reports the variable declared by expr when it hides a variable of the
-// same function. rhs is its initializer, when it has its own.
+// same function that the function still reads once the declaration is done.
+// rhs is its initializer, when it has its own; declEnd is where the
+// declaration ends.
+//
+// Hiding a variable nobody reads any more cannot mix the two up: the if/else-if
+// lookup, the double-checked lock and the loop over candidates after the first
+// guess are all written that way on purpose. The bug is a later read of the
+// outer variable that expected the inner assignment to reach it, and so is a
+// bare return of a named result the branch meant to set. Variables of
+// different types are two different things, as the shadow analyzer of the Go
+// tools has it.
 func (r *ShadowVariableRule) check(
 	ctx *core.FileContext,
 	info *types.Info,
 	fn *ast.FuncDecl,
 	expr, rhs ast.Expr,
+	declEnd token.Pos,
 	violations []*core.Violation,
 ) []*core.Violation {
 	name, ok := expr.(*ast.Ident)
@@ -141,6 +153,9 @@ func (r *ShadowVariableRule) check(
 	if ident, ok := ast.Unparen(rhs).(*ast.Ident); ok && info.Uses[ident] == shadowed {
 		return violations
 	}
+	if typesDiffer(obj.Type(), shadowed.Type()) || !readAfter(fn, info, shadowed, declEnd) {
+		return violations
+	}
 
 	line := ctx.LineFor(name)
 	v := r.CreateViolation(ctx.RelPath, line, "Variable '"+name.Name+"' shadows declaration from line "+strconv.Itoa(ctx.LineForPos(shadowed.Pos())))
@@ -149,6 +164,62 @@ func (r *ShadowVariableRule) check(
 	v.WithContext("pattern", "shadow_variable")
 	v.WithContext("shadowed_name", name.Name)
 	return append(violations, v)
+}
+
+// typesDiffer reports whether both types are known and not the same. A file
+// checked on its own leaves the types of unresolved names invalid, and those
+// say nothing.
+func typesDiffer(a, b types.Type) bool {
+	if !isValidType(a) || !isValidType(b) {
+		return false
+	}
+	return !types.Identical(a, b)
+}
+
+func isValidType(t types.Type) bool {
+	return t != nil && t != types.Typ[types.Invalid]
+}
+
+// readAfter reports whether the function reads the variable after pos: a use
+// of the name, or a bare return of the function literal or declaration whose
+// named result it is.
+func readAfter(fn *ast.FuncDecl, info *types.Info, variable *types.Var, pos token.Pos) bool {
+	found := false
+	var walk func(body ast.Node, results *ast.FieldList)
+	walk = func(body ast.Node, results *ast.FieldList) {
+		ast.Inspect(body, func(n ast.Node) bool {
+			if found {
+				return false
+			}
+			switch node := n.(type) {
+			case *ast.FuncLit:
+				walk(node.Body, node.Type.Results)
+				return false
+			case *ast.Ident:
+				found = node.Pos() > pos && info.Uses[node] == variable
+			case *ast.ReturnStmt:
+				found = node.Pos() > pos && len(node.Results) == 0 && declaresVar(results, variable, info)
+			}
+			return !found
+		})
+	}
+	walk(fn.Body, fn.Type.Results)
+	return found
+}
+
+// declaresVar reports whether the field list declares the variable.
+func declaresVar(fields *ast.FieldList, variable *types.Var, info *types.Info) bool {
+	if fields == nil {
+		return false
+	}
+	for _, field := range fields.List {
+		for _, name := range field.Names {
+			if info.Defs[name] == variable {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // fileScopes type-checks one file on its own and returns its definitions and

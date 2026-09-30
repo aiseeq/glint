@@ -33,6 +33,7 @@ func example(user *User) {
 		user := getAdmin()
 		_ = user
 	}
+	_ = user
 }
 
 func getAdmin() *User { return nil }
@@ -79,6 +80,7 @@ func example(item *Item) {
 	for _, item := range items {
 		_ = item
 	}
+	_ = item
 }
 
 type Item struct{}
@@ -106,9 +108,10 @@ type T struct{}
 
 func (t *T) Method(ready bool) {
 	if ready {
-		t := "shadowed"
+		t := &T{}
 		_ = t
 	}
+	_ = t
 }
 `,
 			expectMatch: true,

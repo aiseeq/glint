@@ -31,8 +31,9 @@ func init() {
 // CI diffs show phantom changes, and findings swap places between runs.
 //
 // Not flagged: order-independent aggregation (sums, counters), collecting into
-// another map, values that never leave the function, and slices sorted before
-// they are used.
+// another map, values that never leave the function, slices sorted before
+// they are used, and slices handed to a call other than a writer - a batch
+// lookup or a query over a set of ids answers the same in any order.
 type MapIterationOrderRule struct {
 	*rules.BaseRule
 }
@@ -531,11 +532,21 @@ func isStringType(t types.Type) bool {
 }
 
 // escapesFunction reports whether the value reaches the caller or the outside
-// world: it is returned, stored into a field, or handed to a call as an
-// argument. Built-ins other than print and println keep the value inside the
-// function, and so do the calls whose answer does not depend on the order: a
-// membership test, a minimum or a maximum, any predicate returning one bool.
+// world: it is returned, stored into a field, or written out - printed, or
+// handed to a writer that is visible outside the function.
+//
+// Handing the value to any other call is not an escape. The callee's answer
+// may not depend on the order at all - a batch lookup keyed by id, a query
+// with `= ANY($1)`, a membership test - and the rule cannot see inside it.
 func escapesFunction(fn *ast.FuncDecl, name string, info *types.Info) bool {
+	return escapesWithin(fn, name, info, 0)
+}
+
+// maxWriterChain bounds how many local writers the escape check follows: a
+// builder written into another builder that is written out, and so on.
+const maxWriterChain = 4
+
+func escapesWithin(fn *ast.FuncDecl, name string, info *types.Info, depth int) bool {
 	escapes := false
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -564,20 +575,42 @@ func escapesFunction(fn *ast.FuncDecl, name string, info *types.Info) bool {
 				}
 			}
 		case *ast.CallExpr:
-			if !passesOrderOn(stmt, info) {
-				return true
-			}
-			for _, arg := range stmt.Args {
-				if mentionsOrderSensitive(arg, name, info) {
-					escapes = true
-					return false
-				}
+			if writesOut(fn, stmt, name, info, depth) {
+				escapes = true
+				return false
 			}
 		}
 		return true
 	})
 
 	return escapes
+}
+
+// writesOut reports whether the call writes the value out: print and println,
+// the fmt printers, or a Write method of a writer seen outside the function.
+func writesOut(fn *ast.FuncDecl, call *ast.CallExpr, name string, info *types.Info, depth int) bool {
+	if builtin, ok := typeutil.Callee(info, call).(*types.Builtin); ok {
+		if builtin.Name() != "print" && builtin.Name() != "println" {
+			return false
+		}
+		return argsMentionOrderSensitive(call.Args, name, info)
+	}
+	writer, args, ok := outputCall(call, info)
+	if !ok || !argsMentionOrderSensitive(args, name, info) {
+		return false
+	}
+	return writer == nil || writerLeavesWithin(fn, writer, info, depth+1)
+}
+
+// argsMentionOrderSensitive reports whether any of the arguments carries the
+// variable's order.
+func argsMentionOrderSensitive(args []ast.Expr, name string, info *types.Info) bool {
+	for _, arg := range args {
+		if mentionsOrderSensitive(arg, name, info) {
+			return true
+		}
+	}
+	return false
 }
 
 // orderInsensitiveSlicesFuncs are the slices functions whose result is the
@@ -587,31 +620,39 @@ var orderInsensitiveSlicesFuncs = map[string]bool{
 	"Max": true, "MaxFunc": true, "Min": true, "MinFunc": true,
 }
 
-// passesOrderOn reports whether the arguments of the call carry their order
-// to somewhere outside the function.
-func passesOrderOn(call *ast.CallExpr, info *types.Info) bool {
-	if isSortingCall(call.Fun) {
-		return false // sorting defines the order, isSortedBefore judges it
-	}
-	switch obj := typeutil.Callee(info, call).(type) {
-	case *types.Builtin:
-		return obj.Name() == "print" || obj.Name() == "println"
-	case *types.TypeName:
-		return false // a conversion
-	}
-	return !discardsOrder(call, info)
-}
-
 // discardsOrder reports whether the call's result is the same whatever order
-// its arguments come in: an order-insensitive slices function, or a predicate
-// answering yes or no - no order can come out of a single bool.
+// its arguments come in: an order-insensitive slices function, or a call whose
+// results cannot hold an order - bools, maps and errors. A predicate answers
+// yes or no, and a lookup that returns a map keyed by the ids it was given
+// has no walk order left in it.
 func discardsOrder(call *ast.CallExpr, info *types.Info) bool {
 	if fn, ok := typeutil.Callee(info, call).(*types.Func); ok && fn.Pkg() != nil &&
 		fn.Pkg().Path() == "slices" && orderInsensitiveSlicesFuncs[fn.Name()] {
 		return true
 	}
 	signature, ok := info.TypeOf(call.Fun).(*types.Signature)
-	return ok && signature.Results().Len() == 1 && isBooleanType(signature.Results().At(0).Type())
+	if !ok || signature.Results().Len() == 0 {
+		return false
+	}
+	orderless := false
+	for result := range signature.Results().Variables() {
+		switch {
+		case isBooleanType(result.Type()):
+			orderless = true
+		case isMapType(result.Type()):
+			orderless = true
+		case isErrorType(result.Type()):
+		default:
+			return false
+		}
+	}
+	return orderless
+}
+
+// isMapType reports whether t is a map type, named or not.
+func isMapType(t types.Type) bool {
+	_, ok := t.Underlying().(*types.Map)
+	return ok
 }
 
 // outputInLoop reports a loop over a map that writes its entries out as it
@@ -699,8 +740,12 @@ func argsCarryEntry(args []ast.Expr, key, value string) bool {
 // receiver or named result, or a local one that itself escapes. A writer the
 // expression does not name plainly is unknown and not reported.
 func writerLeaves(fn *ast.FuncDecl, writer ast.Expr, info *types.Info) bool {
+	return writerLeavesWithin(fn, writer, info, 0)
+}
+
+func writerLeavesWithin(fn *ast.FuncDecl, writer ast.Expr, info *types.Info, depth int) bool {
 	root := writerRoot(writer)
-	if root == nil {
+	if root == nil || depth > maxWriterChain {
 		return false
 	}
 	switch obj := info.Uses[root].(type) {
@@ -713,7 +758,7 @@ func writerLeaves(fn *ast.FuncDecl, writer ast.Expr, info *types.Info) bool {
 		if obj.Pos() >= fn.Pos() && obj.Pos() < fn.Body.Lbrace {
 			return true // declared in the signature
 		}
-		return escapesFunction(fn, root.Name, info)
+		return escapesWithin(fn, root.Name, info, depth)
 	}
 	return false
 }

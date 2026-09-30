@@ -222,7 +222,7 @@ func (a *lenDivisionAnalyzer) simpleStmt(stmt ast.Stmt, state *lenState, _ *lenS
 	if _, isReturn := stmt.(*ast.ReturnStmt); isReturn {
 		return nil, true
 	}
-	return state, isPanicStatement(stmt)
+	return state, stmtNoReturn(stmt, a.info, nil) != callReturns
 }
 
 // trackAssignment remembers `n := len(xs)` and `xs = append(xs, v)`, and

@@ -597,6 +597,39 @@ func fetch() {
 	}
 }
 
+// ioutil.ReadAll is io.ReadAll under its old name: the same unbounded read.
+func TestUnboundedResponseReadRule_DeprecatedIoutil(t *testing.T) {
+	violations := runRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"legacy.go": `package fetch
+
+import (
+	"io"
+	"io/ioutil"
+	"net/http"
+)
+
+func fetch(client *http.Client, req *http.Request) ([]byte, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return ioutil.ReadAll(resp.Body)
+}
+
+func bounded(client *http.Client, req *http.Request) ([]byte, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return ioutil.ReadAll(io.LimitReader(resp.Body, 1<<20))
+}
+`})
+	require.Len(t, violations, 1)
+	assert.Equal(t, 15, violations[0].Line)
+	assert.Equal(t, "resp", violations[0].Context["variable"])
+}
+
 func TestUnboundedResponseAnalyzer_UnexpectedClausesDoNotPanic(t *testing.T) {
 	analyzer := &unboundedResponseAnalyzer{}
 	walker := &flowWalker[*responseState, struct{}]{rule: analyzer}

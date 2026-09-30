@@ -826,16 +826,3 @@ func appendCheckpointFailure(current []failedCheckpoint, addition failedCheckpoi
 func compactCheckpointFlows(flows []checkpointFlow) []checkpointFlow {
 	return joinFlowPaths(flows, nil, checkpointFlowKey)
 }
-
-func isPanicStatement(stmt ast.Stmt) bool {
-	expr, ok := stmt.(*ast.ExprStmt)
-	if !ok {
-		return false
-	}
-	call, ok := expr.X.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	ident, ok := call.Fun.(*ast.Ident)
-	return ok && ident.Name == "panic"
-}

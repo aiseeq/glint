@@ -53,7 +53,7 @@ func (r *PaginationBoundaryTruncationRule) AnalyzeFile(ctx *core.FileContext) []
 			if !loopHasTemporalBreak(loop, boundaryNames, exit) {
 				return true
 			}
-			if cap := silentPageCap(loop, boundaryNames, exit); cap != nil {
+			if cap := silentPageCap(fn.Body, loop, boundaryNames, exit); cap != nil {
 				line := ctx.GoFileSet.Position(cap.Pos()).Line
 				v := r.CreateViolation(ctx.RelPath, line, "page cap can silently truncate history before the temporal boundary is reached")
 				v.WithCode(ctx.GetLine(line))
@@ -137,8 +137,8 @@ func loopHasTemporalBreak(loop *ast.ForStmt, boundaryNames map[string]bool, exit
 	return found
 }
 
-func silentPageCap(loop *ast.ForStmt, boundaryNames map[string]bool, exit paginationLoopExit) ast.Node {
-	if containsPageCapName(loop.Cond) {
+func silentPageCap(body *ast.BlockStmt, loop *ast.ForStmt, boundaryNames map[string]bool, exit paginationLoopExit) ast.Node {
+	if containsPageCapName(loop.Cond) && !reportsExhaustion(statementAfter(body, loop)) {
 		return loop
 	}
 	var result *ast.IfStmt
@@ -157,6 +157,70 @@ func silentPageCap(loop *ast.ForStmt, boundaryNames map[string]bool, exit pagina
 		return nil
 	}
 	return result
+}
+
+// statementAfter returns the statement that follows the loop in its block, or
+// nil when the loop is the last one.
+func statementAfter(body *ast.BlockStmt, loop *ast.ForStmt) ast.Stmt {
+	var next ast.Stmt
+	ast.Inspect(body, func(node ast.Node) bool {
+		if next != nil {
+			return false
+		}
+		var list []ast.Stmt
+		switch block := node.(type) {
+		case *ast.BlockStmt:
+			list = block.List
+		case *ast.CaseClause:
+			list = block.Body
+		case *ast.CommClause:
+			list = block.Body
+		default:
+			return true
+		}
+		for i, stmt := range list {
+			if labeled, ok := stmt.(*ast.LabeledStmt); ok {
+				stmt = labeled.Stmt
+			}
+			if stmt == loop && i+1 < len(list) {
+				next = list[i+1]
+				return false
+			}
+		}
+		return true
+	})
+	return next
+}
+
+// reportsExhaustion reports whether the statement tells the caller that the
+// walk ran out of pages: a return of a freshly built or sentinel error, or a
+// panic. A loop whose condition carries the page cap falls out into it only
+// when the cap is reached, the boundary returning from inside the loop.
+func reportsExhaustion(stmt ast.Stmt) bool {
+	switch node := stmt.(type) {
+	case *ast.ReturnStmt:
+		if len(node.Results) == 0 {
+			return false
+		}
+		switch last := ast.Unparen(node.Results[len(node.Results)-1]).(type) {
+		case *ast.CallExpr:
+			return isErrorConstruction(last)
+		case *ast.Ident:
+			return isSentinelErrorName(last.Name)
+		case *ast.SelectorExpr:
+			return isSentinelErrorName(last.Sel.Name)
+		}
+	case *ast.ExprStmt:
+		call, ok := node.X.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		switch name := mutationCalleeName(call.Fun); name {
+		case "panic", "Fatal", "Fatalf", "Panic", "Panicf":
+			return true
+		}
+	}
+	return false
 }
 
 // blockHasUnsafeCapBreak reports whether the cap block leaves the loop through
