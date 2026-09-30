@@ -23,9 +23,6 @@ func init() {
 	rules.Register(NewBusinessConstantInCodeRule())
 }
 
-// decimalPackage is the import path of the decimal type money code uses.
-const decimalPackage = "github.com/shopspring/decimal"
-
 // decimalConstructors build a decimal from a number; their first argument is
 // the value.
 var decimalConstructors = map[string]bool{
@@ -272,7 +269,7 @@ func (r *BusinessConstantInCodeRule) businessArgs(info *types.Info, call *ast.Ca
 				uses = append(uses, constUse{obj: obj, pos: arg.Pos(), kind: "calendar arithmetic"})
 			}
 		}
-	case fn.Pkg().Path() == decimalPackage && decimalConstructors[fn.Name()] && len(call.Args) > 0:
+	case fn.Pkg().Path() == shopspringDecimalPath && decimalConstructors[fn.Name()] && len(call.Args) > 0:
 		if obj := packageConstant(info, call.Args[0]); obj != nil && !isPowerOfTen(obj.Val()) && !isCalendarUnit(obj.Val()) {
 			uses = append(uses, constUse{obj: obj, pos: call.Args[0].Pos(), kind: "a decimal amount (money or a rate)"})
 		}

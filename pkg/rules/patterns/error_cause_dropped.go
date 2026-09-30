@@ -266,6 +266,11 @@ func logVerb(sel *ast.SelectorExpr) string {
 // text mentions log (log, logger, slog, zlog, r.logger, logging.X) or it is a
 // known logging package.
 func isLoggerReceiver(expr ast.Expr) bool {
+	// A logger a factory returns — logging.Get().Error(...) — is named by the
+	// factory.
+	if call, ok := ast.Unparen(expr).(*ast.CallExpr); ok {
+		expr = call.Fun
+	}
 	receiver := strings.ToLower(exprText(expr))
 	return strings.Contains(receiver, "log") ||
 		strings.HasPrefix(receiver, "zap") || strings.HasPrefix(receiver, "logrus") ||
