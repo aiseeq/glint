@@ -68,20 +68,8 @@ func (r *ProxyHeaderTrustRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	if !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
-	var violations []*core.Violation
-	reported := make(map[int]bool)
-	report := func(node ast.Node, message, suggestion, pattern string) {
-		line := ctx.LineFor(node)
-		if reported[line] || ctx.IsSuppressed(line, r.Name()) {
-			return
-		}
-		reported[line] = true
-		v := r.CreateViolation(ctx.RelPath, line, message)
-		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
-		v.WithSuggestion(suggestion)
-		v.WithContext("pattern", pattern)
-		violations = append(violations, v)
-	}
+	lr := newLineReporter(ctx, r.BaseRule)
+	report := lr.report
 	for _, decl := range ctx.GoAST.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -107,7 +95,7 @@ func (r *ProxyHeaderTrustRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 				"leftmost_hop")
 		}
 	}
-	return violations
+	return lr.violations
 }
 
 // headerRead is a read of a proxy header and the places its value is used.

@@ -79,20 +79,8 @@ func (r *JWTParseValidationRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	}
 	claimsCompared := comparesIssuerOrAudience(ctx.GoAST)
 	keySet := usesKeySet(ctx.GoAST)
-	var violations []*core.Violation
-	reported := make(map[int]bool)
-	report := func(node ast.Node, message, suggestion, pattern string) {
-		line := ctx.LineFor(node)
-		if reported[line] || ctx.IsSuppressed(line, r.Name()) {
-			return
-		}
-		reported[line] = true
-		v := r.CreateViolation(ctx.RelPath, line, message)
-		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
-		v.WithSuggestion(suggestion)
-		v.WithContext("pattern", pattern)
-		violations = append(violations, v)
-	}
+	lr := newLineReporter(ctx, r.BaseRule)
+	report := lr.report
 	for _, fn := range funcs {
 		for _, parse := range jwtParses(fn.Body, pkg) {
 			if !hasOption(parse.options, "WithValidMethods", "ValidMethods") && !keyfuncChecksMethod(parse.keyfunc, funcs) {
@@ -108,7 +96,7 @@ func (r *JWTParseValidationRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 			}
 		}
 	}
-	return violations
+	return lr.violations
 }
 
 // jwtPackageName returns the name a file imports a JWT library under.

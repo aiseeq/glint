@@ -53,18 +53,8 @@ func (r *RemoteAddrMisuseRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	if !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
-	var violations []*core.Violation
-	report := func(node ast.Node, message, suggestion, pattern string) {
-		line := ctx.LineFor(node)
-		if ctx.IsSuppressed(line, r.Name()) {
-			return
-		}
-		v := r.CreateViolation(ctx.RelPath, line, message)
-		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
-		v.WithSuggestion(suggestion)
-		v.WithContext("pattern", pattern)
-		violations = append(violations, v)
-	}
+	lr := newLineReporter(ctx, r.BaseRule)
+	report := lr.report
 	for _, decl := range ctx.GoAST.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -94,7 +84,7 @@ func (r *RemoteAddrMisuseRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 				"port_in_ip")
 		}
 	}
-	return violations
+	return lr.violations
 }
 
 // colonSplits returns strings.Split and strings.SplitN of the address at ":".
