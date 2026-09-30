@@ -185,6 +185,8 @@ type GoProjectLoader struct {
 
 	mu    sync.Mutex
 	loads map[string]*moduleLoad
+
+	inputs goInputs
 }
 
 // moduleLoad is the typed load of a set of modules, shared by the projects
@@ -452,7 +454,7 @@ func (loader *goProjectLoader) parseFile(callbackFset *token.FileSet, filename s
 	}
 	// go/packages parses files in parallel; the lock guards only the cache,
 	// the file set is safe for concurrent use.
-	file, parseErr := parser.ParseFile(loader.fset, path, src, parser.ParseComments|parser.SkipObjectResolution)
+	file, parseErr := parseGoSource(loader.fset, path, src)
 	loader.mu.Lock()
 	if earlier, ok := loader.parsed[path]; ok {
 		// Another package parsed the same file meanwhile: every package
@@ -469,6 +471,40 @@ func (loader *goProjectLoader) parseFile(callbackFset *token.FileSet, filename s
 		return file, fmt.Errorf("parse Go file %q: %w", path, parseErr)
 	}
 	return file, nil
+}
+
+// parseGoSource parses one file the way the project load does: comments kept,
+// identifiers left unresolved (go/types resolves them).
+func parseGoSource(fset *token.FileSet, path string, src []byte) (*ast.File, error) {
+	return parser.ParseFile(fset, path, src, parser.ParseComments|parser.SkipObjectResolution)
+}
+
+// ParseGoFiles gives the Go files among contexts the syntax trees a project
+// load would give them, without loading packages: for a run that takes the
+// project findings from a cache but still runs file rules. As in the load, a
+// file that does not parse and is excluded by build constraints stays without
+// a tree; any other such file fails, or with tolerate stays without one.
+func ParseGoFiles(root string, contexts []*FileContext, tolerate bool) error {
+	fset := token.NewFileSet()
+	for _, fileCtx := range contexts {
+		if fileCtx == nil || !fileCtx.IsGoFile() {
+			continue
+		}
+		path, err := absoluteContextPath(root, fileCtx)
+		if err != nil {
+			return err
+		}
+		file, err := parseGoSource(fset, path, fileCtx.Content)
+		if err != nil {
+			err = classifyParseError(path, fmt.Errorf("parse Go file %q: %w", path, err))
+			if errors.Is(err, errExcludedByBuild) || tolerate {
+				continue
+			}
+			return err
+		}
+		fileCtx.SetGoAST(fset, file)
+	}
+	return nil
 }
 
 func (loader *goProjectLoader) parsedFile(path string) (parsedProjectFile, bool) {

@@ -41,6 +41,23 @@ type resultCache struct {
 	// that are gone drop out.
 	current map[string]cacheEntry
 	reused  int
+
+	// The project findings are stored for the inputs of the typed load
+	// (core.GoProjectLoader.GoInputs); projectKeyed is false when this run
+	// could not identify them, and nothing is stored then.
+	previousProject *projectEntry
+	projectInputs   string
+	projectKeyed    bool
+	projectHit      *projectEntry
+	currentProject  *projectEntry
+}
+
+// projectEntry holds the findings of the project rules, filtered like every
+// finding, and the packages the load left out.
+type projectEntry struct {
+	Inputs     string
+	Violations []core.Violation
+	Skipped    []core.SkippedPackage
 }
 
 type cacheEntry struct {
@@ -53,15 +70,12 @@ type cacheEntry struct {
 type cacheContents struct {
 	Stamp   string
 	Entries map[string]cacheEntry
+	Project *projectEntry
 }
 
-// openRootCache opens the result cache of a root, or returns nil under
-// --no-cache. A cache that cannot be used is reported and the root is analyzed
+// openRootCache opens the result cache of a root. A cache that cannot be used is reported and the root is analyzed
 // in full: the cache only saves time, it never decides a finding.
 func openRootCache(root string, cfg *core.Config, goTreesFromLoader bool) *resultCache {
-	if flagNoCache {
-		return nil
-	}
 	cache, err := newRootCache(root, cfg, goTreesFromLoader)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: result cache off for %s: %v\n", root, err)
@@ -105,6 +119,7 @@ func openResultCache(dir, root, stamp string) (*resultCache, error) {
 	}
 	if stored.Stamp == stamp {
 		cache.previous = stored.Entries
+		cache.previousProject = stored.Project
 	}
 	return cache, nil
 }
@@ -126,6 +141,41 @@ func (c *resultCache) store(relPath string, content [sha256.Size]byte, found map
 	maps.Copy(merged, c.lookup(relPath, content))
 	maps.Copy(merged, found)
 	c.current[relPath] = cacheEntry{Content: content, Rules: merged}
+}
+
+// keyProject records the inputs of this run's typed load and returns the
+// stored project findings when they were computed for the same inputs.
+func (c *resultCache) keyProject(inputs string) *projectEntry {
+	c.projectInputs, c.projectKeyed = inputs, true
+	if c.previousProject != nil && c.previousProject.Inputs == inputs {
+		c.projectHit = c.previousProject
+		c.currentProject = c.previousProject
+	}
+	return c.projectHit
+}
+
+// storeProject records the project findings of this run's load.
+func (c *resultCache) storeProject(found core.ViolationList, skipped []core.SkippedPackage) {
+	if !c.projectKeyed {
+		return
+	}
+	c.currentProject = &projectEntry{
+		Inputs:     c.projectInputs,
+		Violations: storedViolations(found),
+		Skipped:    append([]core.SkippedPackage(nil), skipped...),
+	}
+}
+
+// projectState describes for --timing where the project findings came from.
+func (c *resultCache) projectState() string {
+	switch {
+	case c.projectHit != nil:
+		return "reused"
+	case c.projectKeyed:
+		return "analyzed"
+	default:
+		return "not cached"
+	}
 }
 
 // storeFile records the findings of a file's file-local rules and counts the
@@ -152,7 +202,7 @@ func (c *resultCache) storeFile(relPath string, content [sha256.Size]byte, list 
 // concurrent run reads either the old cache or the new one.
 func (c *resultCache) save() error {
 	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(cacheContents{Stamp: c.stamp, Entries: c.current}); err != nil {
+	if err := gob.NewEncoder(&buf).Encode(cacheContents{Stamp: c.stamp, Entries: c.current, Project: c.currentProject}); err != nil {
 		return fmt.Errorf("encode result cache: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {

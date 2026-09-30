@@ -51,6 +51,44 @@ func (c *Ctx) PlaceBuilding(id string) bool {
 			expectedCount: 0,
 		},
 		{
+			name: "error written to stderr by a CLI NOT flagged",
+			path: "/src/cmd/tool/cache.go",
+			code: `package main
+import (
+	"fmt"
+	"os"
+)
+func load(dir string) (string, error) { return "", nil }
+func cached(dir string) bool {
+	key, err := load(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cache off for %s: %v\n", dir, err)
+		return false
+	}
+	return key != ""
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "error written to stdout or a buffer — flagged",
+			path: "/src/cmd/tool/cache.go",
+			code: `package main
+import (
+	"fmt"
+	"os"
+)
+func load(dir string) (string, error) { return "", nil }
+func cached(dir string) bool {
+	key, err := load(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stdout, "cache off: %v\n", err)
+		return false
+	}
+	return key != ""
+}`,
+			expectedCount: 1,
+		},
+		{
 			name: "math.Log is not logging — flagged",
 			path: "/src/backend/plan.go",
 			code: `package plan

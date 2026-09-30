@@ -248,19 +248,19 @@ func runCheck(_ *cobra.Command, args []string) error {
 		}
 
 		loadDone := timings.phase("load " + projectRoot)
-		contexts, walker, project, err := prepareAnalysis(loader, projectRoot, cfg, enabledRules)
+		prepared, err := prepareAnalysis(loader, projectRoot, cfg, enabledRules, !flagNoCache)
 		loadDone()
 		if err != nil {
 			return err
 		}
+		contexts, cache := prepared.contexts, prepared.cache
 
 		// Rules are process-wide singletons: cross-file state from a previous
 		// root must not influence this one.
 		rules.ResetState(enabledRules)
 
-		cache := openRootCache(projectRoot, cfg, project != nil)
 		analyzeDone := timings.phase("analyze " + projectRoot)
-		violations, err := analyzeProject(contexts, enabledRules, cfg, project, cache)
+		violations, err := analyzeProject(contexts, enabledRules, cfg, prepared.project, cache)
 		analyzeDone()
 		if err != nil {
 			return err
@@ -270,7 +270,8 @@ func runCheck(_ *cobra.Command, args []string) error {
 				fmt.Fprintf(os.Stderr, "warning: result cache of %s not saved: %v\n", projectRoot, err)
 			}
 			if flagTiming {
-				fmt.Fprintf(os.Stderr, "result cache %s: %d of %d files unchanged\n", projectRoot, cache.reused, len(contexts))
+				fmt.Fprintf(os.Stderr, "result cache %s: %d of %d files unchanged, project rules %s\n",
+					projectRoot, cache.reused, len(contexts), cache.projectState())
 			}
 		}
 		minSeverity, err := cfg.GetMinSeverity()
@@ -282,10 +283,8 @@ func runCheck(_ *cobra.Command, args []string) error {
 		for _, ctx := range contexts {
 			analyzedFiles[ctx.Path] = struct{}{}
 		}
-		stats.FilesSkipped += walker.Stats().SkippedFiles
-		if project != nil {
-			stats.PackagesSkipped += len(project.SkippedPackages)
-		}
+		stats.FilesSkipped += prepared.walker.Stats().SkippedFiles
+		stats.PackagesSkipped += len(prepared.skipped)
 		for _, rule := range enabledRules {
 			rulesRun[rule.Name()] = struct{}{}
 		}
@@ -507,7 +506,21 @@ func walkWithWalker(walker *core.Walker) ([]*core.FileContext, *core.Walker, err
 	return contexts, walker, nil
 }
 
-func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core.Config, enabledRules []rules.Rule) ([]*core.FileContext, *core.Walker, *core.GoProjectContext, error) {
+// preparedRoot is a walked project root ready for analysis.
+type preparedRoot struct {
+	contexts []*core.FileContext
+	walker   *core.Walker
+	// project is the typed load, nil when no project rule runs, the root has
+	// no Go files, or the cache holds the project findings for unchanged
+	// inputs; the Go files have their syntax trees in every case.
+	project *core.GoProjectContext
+	// skipped are the packages left out of typed analysis, from the load or
+	// from the cache.
+	skipped []core.SkippedPackage
+	cache   *resultCache
+}
+
+func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core.Config, enabledRules []rules.Rule, useCache bool) (*preparedRoot, error) {
 	projectRuleCount := 0
 	requireSSA := false
 	for _, rule := range enabledRules {
@@ -521,39 +534,76 @@ func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core
 
 	walker := core.NewWalker(projectRoot, cfg).WithGoParsing(projectRuleCount == 0)
 	contexts, walker, err := walkWithWalker(walker)
+	prepared := &preparedRoot{contexts: contexts, walker: walker}
 	if err != nil {
-		return nil, walker, nil, err
+		return prepared, err
 	}
 	// Дерево без Go-файлов (например, frontend): Go-project правилам нечего
 	// анализировать, а загрузка Go-контекста упала бы с "no packages found".
-	if projectRuleCount == 0 || !hasGoFiles(contexts) {
-		return contexts, walker, nil, nil
+	needProject := projectRuleCount > 0 && hasGoFiles(contexts)
+	if useCache {
+		prepared.cache = openRootCache(projectRoot, cfg, needProject)
+	}
+	if !needProject {
+		return prepared, nil
+	}
+	if hit, err := prepared.cachedProject(loader, projectRoot); err != nil || hit {
+		return prepared, err
 	}
 	project, err := loader.Load(projectRoot, contexts, core.GoProjectOptions{
 		RequireSSA:             requireSSA,
 		TolerateBrokenPackages: flagTolerant,
 	})
 	if err != nil {
-		return nil, walker, nil, fmt.Errorf("load Go project context: %w", err)
+		return prepared, fmt.Errorf("load Go project context: %w", err)
 	}
-	reportSkippedPackages(project, cfg.Settings.Output)
-	return contexts, walker, project, nil
+	prepared.project = project
+	prepared.skipped = project.SkippedPackages
+	reportSkippedPackages(prepared.skipped, cfg.Settings.Output)
+	return prepared, nil
+}
+
+// cachedProject takes the project findings from the cache when no input of
+// the typed load changed, and gives the Go files the syntax trees the load
+// would have given them. An input hash that cannot be computed is reported and
+// the project is loaded.
+func (p *preparedRoot) cachedProject(loader *core.GoProjectLoader, projectRoot string) (bool, error) {
+	if p.cache == nil {
+		return false, nil
+	}
+	inputs, cacheable, err := loader.GoInputs(projectRoot, p.contexts, flagTolerant)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: project findings of %s not cached: %v\n", projectRoot, err)
+		return false, nil
+	}
+	if !cacheable {
+		return false, nil
+	}
+	hit := p.cache.keyProject(inputs)
+	if hit == nil {
+		return false, nil
+	}
+	if err := core.ParseGoFiles(projectRoot, p.contexts, flagTolerant); err != nil {
+		return false, fmt.Errorf("parse Go files of %s: %w", projectRoot, err)
+	}
+	p.skipped = hit.Skipped
+	return true, nil
 }
 
 // reportSkippedPackages keeps a tolerated load honest: whatever was left out of
 // typed analysis is named, so findings are never read as full coverage.
-func reportSkippedPackages(project *core.GoProjectContext, outputFormat string) {
-	if project == nil || len(project.SkippedPackages) == 0 {
+func reportSkippedPackages(skipped []core.SkippedPackage, outputFormat string) {
+	if len(skipped) == 0 {
 		return
 	}
 	if outputFormat == "json" {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "Skipped %d package(s) that do not type-check; their files are analyzed without type information\n", len(project.SkippedPackages))
+	fmt.Fprintf(os.Stderr, "Skipped %d package(s) that do not type-check; their files are analyzed without type information\n", len(skipped))
 	if !flagVerbose {
 		return
 	}
-	for _, pkg := range project.SkippedPackages {
+	for _, pkg := range skipped {
 		fmt.Fprintf(os.Stderr, "  %s: %s\n", pkg.PkgPath, pkg.Reason)
 	}
 }
@@ -775,10 +825,17 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 
 	var allViolations core.ViolationList
 	fileRules := make([]rules.Rule, 0, len(enabledRules))
+	cachedProject := cache != nil && cache.projectHit != nil
+	if cachedProject {
+		allViolations = cachedViolations(cache.projectHit.Violations)
+	}
 	for _, rule := range enabledRules {
 		projectRule, ok := rule.(rules.GoProjectRule)
 		if !ok {
 			fileRules = append(fileRules, rule)
+			continue
+		}
+		if cachedProject {
 			continue
 		}
 		if project == nil {
@@ -811,6 +868,9 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 			overrides.apply(violation)
 			allViolations = append(allViolations, violation)
 		}
+	}
+	if cache != nil && project != nil {
+		cache.storeProject(allViolations, project.SkippedPackages)
 	}
 	fileViolations, err := analyzeFiles(contexts, fileRules, cfg, overrides, cache)
 	if err != nil {
@@ -1173,10 +1233,11 @@ func applyFixesUntilStable(projectRoot string, cfg *core.Config, fixableRules []
 // rules run, configuration exceptions and inline suppressions are honored — and
 // returns the fixes for what it finds. Files are read afresh on every call.
 func collectFixes(projectRoot string, cfg *core.Config, fixableRules []rules.Rule, engine *fix.Engine) ([]*fix.Fix, error) {
-	contexts, _, project, err := prepareAnalysis(core.NewGoProjectLoader(), projectRoot, cfg, fixableRules)
+	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), projectRoot, cfg, fixableRules, false)
 	if err != nil {
 		return nil, err
 	}
+	contexts, project := prepared.contexts, prepared.project
 	contextMap := make(map[string]*core.FileContext, 2*len(contexts))
 	for _, ctx := range contexts {
 		contextMap[ctx.Path] = ctx
