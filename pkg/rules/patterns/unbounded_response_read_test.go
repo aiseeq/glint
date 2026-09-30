@@ -642,3 +642,63 @@ func TestUnboundedResponseAnalyzer_UnexpectedClausesDoNotPanic(t *testing.T) {
 		}, newResponseState(), struct{}{})
 	})
 }
+
+// A decompressing reader turns a small bounded input into an unbounded
+// output: reading it whole without a limit is a decompression bomb, wherever
+// the compressed bytes came from.
+func TestUnboundedResponseReadRule_DecompressedStream(t *testing.T) {
+	violations := runRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"inflate.go": `package fetch
+
+import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
+	"io"
+)
+
+func gunzip(body []byte) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
+}
+
+func inflate(src io.Reader) ([]byte, error) {
+	zr, err := zlib.NewReader(src)
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(zr)
+}
+
+func raw(src io.Reader) ([]byte, error) {
+	return io.ReadAll(flate.NewReader(src))
+}
+
+func bounded(body []byte, max int64) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(io.LimitReader(r, max))
+}
+
+func replaced(src io.Reader, max int64) ([]byte, error) {
+	var r io.Reader = flate.NewReader(src)
+	r = io.LimitReader(r, max)
+	return io.ReadAll(r)
+}
+
+func plain(src io.Reader) ([]byte, error) {
+	return io.ReadAll(src)
+}
+`})
+	require.Len(t, violations, 3)
+	assert.Equal(t, 17, violations[0].Line)
+	assert.Equal(t, 25, violations[1].Line)
+	assert.Equal(t, 29, violations[2].Line)
+	assert.Contains(t, violations[0].Message, "Decompressed stream")
+}

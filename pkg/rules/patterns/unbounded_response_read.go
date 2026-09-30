@@ -7,13 +7,15 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"golang.org/x/tools/go/types/typeutil"
 )
 
 func init() {
 	rules.Register(NewUnboundedResponseReadRule())
 }
 
-// UnboundedResponseReadRule detects unbounded reads of HTTP response bodies.
+// UnboundedResponseReadRule detects unbounded reads of HTTP response bodies
+// and of decompressed streams.
 type UnboundedResponseReadRule struct {
 	*rules.BaseRule
 }
@@ -24,7 +26,7 @@ func NewUnboundedResponseReadRule() *UnboundedResponseReadRule {
 		BaseRule: rules.NewBaseRule(
 			"unbounded-response-read",
 			"patterns",
-			"Detects unbounded io.ReadAll (or ioutil.ReadAll) calls on HTTP response bodies",
+			"Detects unbounded io.ReadAll (or ioutil.ReadAll) calls on HTTP response bodies and on decompressing readers (gzip, zlib, flate, lzw, bzip2, zstd)",
 			core.SeverityHigh,
 		),
 	}
@@ -64,6 +66,112 @@ func (r *UnboundedResponseReadRule) analyzeFile(ctx *core.FileContext, info *typ
 		}
 		analyzer.checkFunctionBody(fn.Body)
 	}
+	return append(violations, r.decompressedReads(ctx, info, reported)...)
+}
+
+// decompressorConstructors are the functions, by import path, whose first
+// result reads decompressed data.
+var decompressorConstructors = map[string]map[string]bool{
+	"compress/gzip":                       {"NewReader": true},
+	"compress/zlib":                       {"NewReader": true, "NewReaderDict": true},
+	"compress/flate":                      {"NewReader": true, "NewReaderDict": true},
+	"compress/lzw":                        {"NewReader": true},
+	"compress/bzip2":                      {"NewReader": true},
+	"github.com/klauspost/compress/gzip":  {"NewReader": true},
+	"github.com/klauspost/compress/zlib":  {"NewReader": true, "NewReaderDict": true},
+	"github.com/klauspost/compress/flate": {"NewReader": true, "NewReaderDict": true},
+	"github.com/klauspost/compress/zstd":  {"NewReader": true},
+}
+
+func isDecompressorCall(info *types.Info, expr ast.Expr) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	fn, ok := typeutil.Callee(info, call).(*types.Func)
+	if !ok || fn.Pkg() == nil {
+		return false
+	}
+	return decompressorConstructors[fn.Pkg().Path()][fn.Name()]
+}
+
+// decompressedReads reports io.ReadAll over a decompressing reader: a small
+// compressed input, bounded or not, expands without bound. A reader is a
+// variable every assignment of which is a decompressor constructor, or the
+// constructor call itself.
+func (r *UnboundedResponseReadRule) decompressedReads(ctx *core.FileContext, info *types.Info, reported map[token.Pos]struct{}) []*core.Violation {
+	decompressors := make(map[types.Object]bool)
+	record := func(lhs ast.Expr, decompressor bool) {
+		ident, ok := ast.Unparen(lhs).(*ast.Ident)
+		if !ok {
+			return
+		}
+		obj := info.ObjectOf(ident)
+		if obj == nil {
+			return
+		}
+		if seen, ok := decompressors[obj]; ok && !seen {
+			return
+		}
+		decompressors[obj] = decompressor
+	}
+	recordValues := func(lhs []ast.Expr, rhs []ast.Expr) {
+		for i, target := range lhs {
+			switch {
+			case len(rhs) == len(lhs):
+				record(target, isDecompressorCall(info, rhs[i]))
+			case len(rhs) == 1:
+				record(target, i == 0 && isDecompressorCall(info, rhs[0]))
+			}
+		}
+	}
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			recordValues(node.Lhs, node.Rhs)
+		case *ast.ValueSpec:
+			names := make([]ast.Expr, len(node.Names))
+			for i, name := range node.Names {
+				names[i] = name
+			}
+			recordValues(names, node.Values)
+		}
+		return true
+	})
+
+	var violations []*core.Violation
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) != 1 {
+			return true
+		}
+		if !isPackageFuncCall(ctx.GoAST, info, call, "io", "ReadAll") &&
+			!isPackageFuncCall(ctx.GoAST, info, call, "io/ioutil", "ReadAll") {
+			return true
+		}
+		arg := ast.Unparen(call.Args[0])
+		decompressed := isDecompressorCall(info, arg)
+		if ident, ok := arg.(*ast.Ident); ok {
+			decompressed = decompressors[info.ObjectOf(ident)]
+		}
+		if !decompressed {
+			return true
+		}
+		if _, exists := reported[call.Pos()]; exists {
+			return true
+		}
+		line := ctx.PositionFor(call).Line
+		if ctx.IsSuppressed(line, r.Name()) {
+			return true
+		}
+		reported[call.Pos()] = struct{}{}
+		v := r.CreateViolation(ctx.RelPath, line, "Decompressed stream read without a size limit: a small compressed input can expand without bound")
+		v.WithCode(ctx.GetLine(line))
+		v.WithSuggestion("Wrap the decompressing reader with io.LimitReader before calling io.ReadAll")
+		v.WithContext("pattern", "unbounded_decompressed_read")
+		violations = append(violations, v)
+		return true
+	})
 	return violations
 }
 
