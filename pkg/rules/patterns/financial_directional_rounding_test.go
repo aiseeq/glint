@@ -6,6 +6,7 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFinancialDirectionalRoundingRule_MetadataAndRegistration(t *testing.T) {
@@ -124,6 +125,35 @@ func fits(value decimal.Decimal, scale int32) bool {
 			want: 0,
 		},
 		{
+			// "consumed" contains "sum", but no word of the name is money.
+			name: "a word merely containing a money fragment",
+			path: "usage.go",
+			code: `package usage
+import "github.com/shopspring/decimal"
+func consumption(consumedUnits decimal.Decimal) decimal.Decimal {
+	return consumedUnits.Ceil()
+}`,
+			want: 0,
+		},
+		{
+			name: "truncating a buffer is not decimal rounding",
+			path: "render.go",
+			code: `package render
+import (
+	"bytes"
+
+	"github.com/shopspring/decimal"
+)
+func render(x decimal.Decimal) string {
+	var sumBuf bytes.Buffer
+	sumBuf.WriteString(x.String())
+	s := sumBuf.String()
+	sumBuf.Truncate(0)
+	return s
+}`,
+			want: 0,
+		},
+		{
 			name: "file without the decimal package",
 			path: "report.go",
 			code: `package report
@@ -142,6 +172,58 @@ func (m money) rounded() float64 {
 			assert.Len(t, rule.AnalyzeFile(ctx), tt.want)
 		})
 	}
+}
+
+// With type information the receiver is judged by its type: a decimal field
+// or method result declared in another file is still a decimal, and a type
+// that only shares the method names is not.
+func TestFinancialDirectionalRoundingRule_TypedReceivers(t *testing.T) {
+	project := wp3bDecimalProject(t, map[string]string{
+		"billing/model.go": `package billing
+
+import "github.com/shopspring/decimal"
+
+type Order struct{ Amount decimal.Decimal }
+
+func (o Order) Total() decimal.Decimal { return o.Amount }
+
+type price struct{}
+
+func (price) Floor() price { return price{} }
+`,
+		"billing/use.go": `package billing
+
+import (
+	"bytes"
+
+	"github.com/shopspring/decimal"
+)
+
+func fieldFromOtherFile(o Order) decimal.Decimal { return o.Amount.RoundUp(2) }
+
+func methodResult(o Order) decimal.Decimal { return o.Total().Truncate(2) }
+
+func notDecimal(unitPrice price) price { return unitPrice.Floor() }
+
+func buffer(x decimal.Decimal) string {
+	var summaryBuf bytes.Buffer
+	summaryBuf.WriteString(x.String())
+	s := summaryBuf.String()
+	summaryBuf.Truncate(0)
+	return s
+}
+
+func units(consumedUnits decimal.Decimal) decimal.Decimal { return consumedUnits.Ceil() }
+`,
+	})
+
+	violations, err := NewFinancialDirectionalRoundingRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var lines []int
+	for _, v := range violations {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{9, 11}, lines)
 }
 
 func TestFinancialDirectionalRoundingRule_SkipsTestFiles(t *testing.T) {

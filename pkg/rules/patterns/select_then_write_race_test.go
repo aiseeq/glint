@@ -4,8 +4,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestSelectThenWriteRaceRule(t *testing.T) {
@@ -137,6 +139,44 @@ func (r *Repo) Transition(ctx context.Context, id string) error {
 			expectedCount: 1,
 		},
 		{
+			// The recommended fix: the UPDATE compares the column it read, so a
+			// concurrent change makes it affect no row instead of overwriting.
+			name: "optimistic compare-and-set on the value read is silent",
+			code: `package repo
+import "context"
+func (r *Repo) Close(ctx context.Context, id string) error {
+	var st string
+	_ = r.db.GetContext(ctx, &st, ` + "`SELECT status FROM orders WHERE id = $1`" + `, id)
+	_, err := r.db.ExecContext(ctx, ` + "`UPDATE orders SET status = $1 WHERE id = $2 AND o.status = $3`" + `, "closed", id, st)
+	return err
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "conditional update on an allowed set is silent",
+			code: `package repo
+import "context"
+func (r *Repo) Close(ctx context.Context, id string) error {
+	var st string
+	_ = r.db.GetContext(ctx, &st, ` + "`SELECT status FROM orders WHERE id = $1`" + `, id)
+	_, err := r.db.ExecContext(ctx, ` + "`UPDATE orders SET status = 'closed' WHERE id = $1 AND status IN ('open', 'pending')`" + `, id)
+	return err
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "a quoted word in WHERE is not the column",
+			code: `package repo
+import "context"
+func (r *Repo) Close(ctx context.Context, id string) error {
+	var st string
+	_ = r.db.GetContext(ctx, &st, ` + "`SELECT status FROM orders WHERE id = $1`" + `, id)
+	_, err := r.db.ExecContext(ctx, ` + "`UPDATE orders SET status = $1 WHERE id = $2 AND note <> 'status'`" + `, "closed", id)
+	return err
+}`,
+			expectedCount: 1,
+		},
+		{
 			name: "suppression comment is honored",
 			code: `package repo
 import "context"
@@ -164,4 +204,54 @@ func (r *Repo) Transition(ctx context.Context, id string) error {
 			assert.Len(t, violations, tt.expectedCount, "Code: %s", tt.code)
 		})
 	}
+}
+
+// Queries held in package constants are read through the type checker's
+// constant values.
+func TestSelectThenWriteRaceRule_PackageConstants(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"repo/queries.go": `package repo
+
+const selectStatus = "SELECT status FROM orders WHERE id = $1"
+
+const (
+	updatePrefix = "UPDATE orders "
+	updateStatus = updatePrefix + "SET status = $1 WHERE id = $2"
+)
+`,
+		"repo/repo.go": `package repo
+
+import (
+	"context"
+	"database/sql"
+)
+
+type Repo struct{ db *sql.DB }
+
+func (r *Repo) Close(ctx context.Context, id int) error {
+	var st string
+	if err := r.db.QueryRowContext(ctx, selectStatus, id).Scan(&st); err != nil {
+		return err
+	}
+	_, err := r.db.ExecContext(ctx, updateStatus, "closed", id)
+	return err
+}
+
+func (r *Repo) CloseLocked(ctx context.Context, id int) error {
+	var st string
+	if err := r.db.QueryRowContext(ctx, selectStatus+" FOR UPDATE", id).Scan(&st); err != nil {
+		return err
+	}
+	_, err := r.db.ExecContext(ctx, updateStatus, "closed", id)
+	return err
+}
+`,
+	})
+
+	violations, err := NewSelectThenWriteRaceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "Close", violations[0].Context["function"])
+	assert.Equal(t, "status", violations[0].Context["column"])
+	assert.Equal(t, 15, violations[0].Line)
 }

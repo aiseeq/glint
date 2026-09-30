@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -62,6 +63,11 @@ func (r *FinancialConstantsRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 		return nil
 	}
 
+	aliases := decimalPackageAliases(ctx.GoAST)
+	if len(aliases) == 0 {
+		return nil
+	}
+
 	var violations []*core.Violation
 
 	// Function context is scoped to the declaration: calls in package-level var
@@ -69,11 +75,11 @@ func (r *FinancialConstantsRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	for _, decl := range ctx.GoAST.Decls {
 		funcName := ""
 		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name != nil {
-			funcName = strings.ToLower(fn.Name.Name)
+			funcName = fn.Name.Name
 		}
 		ast.Inspect(decl, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
-				if v := r.checkDecimalCall(ctx, call, funcName); v != nil {
+				if v := r.checkDecimalCall(ctx, call, funcName, aliases); v != nil {
 					violations = append(violations, v)
 				}
 			}
@@ -84,67 +90,79 @@ func (r *FinancialConstantsRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	return violations
 }
 
-// isExplicitlyNonFinancial checks if function name clearly indicates non-financial context
-func (r *FinancialConstantsRule) isExplicitlyNonFinancial(funcName string) bool {
-	nonFinancialKeywords := []string{
-		"test",      // Test functions
-		"analytics", // Analytics/dashboard
-		"dashboard", // Dashboard
-		"metrics",   // Metrics/monitoring
-		"exchange",  // Exchange rate placeholders
-		"balance",   // Balance utilities (not fees)
-		"limits",    // Validation limits
-		"validate",  // Validation functions
-		"build",     // Builder functions (usually not fees)
-		"create",    // Factory functions
-		"result",    // Result builders
-	}
+// nonFinancialFunctionWords are function-name words that mark code whose
+// numbers are not fees: tests, analytics, validation limits, builders.
+var nonFinancialFunctionWords = wordSet(
+	"test", "analytics", "dashboard", "metrics", "exchange", "balance",
+	"limits", "validate", "build", "create", "result",
+)
 
-	for _, keyword := range nonFinancialKeywords {
-		if strings.Contains(funcName, keyword) {
-			return true
-		}
-	}
-	return false
+// feeContextFunctionWords are function-name words that put every number in
+// the function under suspicion of being a fee, rate or charge. They name what
+// a fee applies to rather than an amount, so the set is its own and not the
+// money-value vocabulary: a "balance" function is explicitly not a fee context.
+var feeContextFunctionWords = wordSet(
+	"fee", "commission", "price", "cost", "charge", "premium", "margin", "spread",
+	"withdrawal", "transfer",
+)
+
+// isExplicitlyNonFinancial checks if the function name clearly indicates a
+// non-financial context. Names are read word by word: "latest" is not a test.
+func (r *FinancialConstantsRule) isExplicitlyNonFinancial(funcName string) bool {
+	return hasTokenIn(funcName, nonFinancialFunctionWords)
 }
 
-// isFinancialContext checks if function name suggests financial context
+// isFinancialContext checks if the function name suggests a financial context.
+// Names are read word by word: "feedback" is not a fee.
 func (r *FinancialConstantsRule) isFinancialContext(funcName string) bool {
-	// First check if explicitly non-financial
 	if r.isExplicitlyNonFinancial(funcName) {
 		return false
 	}
-
-	financialKeywords := []string{
-		"fee", "commission", "price", "cost",
-		"charge", "premium", "margin", "spread",
-		"withdrawal", "transfer",
-	}
-
-	for _, keyword := range financialKeywords {
-		if strings.Contains(funcName, keyword) {
-			return true
-		}
-	}
-	return false
+	return hasTokenIn(funcName, feeContextFunctionWords)
 }
 
-// checkDecimalCall checks decimal.NewFromInt/NewFromFloat calls for hardcoded financial values
-func (r *FinancialConstantsRule) checkDecimalCall(ctx *core.FileContext, call *ast.CallExpr, funcName string) *core.Violation {
-	// Check if it's a decimal.NewFromInt or decimal.NewFromFloat call
+// decimalPackageAliases returns the identifiers the file uses for an imported
+// decimal package: github.com/shopspring/decimal or a project package with the
+// same last path element (a wrapper keeping its constructor API).
+func decimalPackageAliases(file *ast.File) map[string]bool {
+	aliases := make(map[string]bool)
+	for _, spec := range file.Imports {
+		if spec.Path == nil {
+			continue
+		}
+		path, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || (path != "decimal" && !strings.HasSuffix(path, "/decimal")) {
+			continue
+		}
+		for alias := range helpers.PackageAliases(file, spec.Path.Value, "decimal") {
+			aliases[alias] = true
+		}
+	}
+	return aliases
+}
+
+// decimalStringConstructors take the value as a decimal string literal.
+var decimalStringConstructors = map[string]bool{
+	"NewFromString":     true,
+	"RequireFromString": true,
+}
+
+// checkDecimalCall checks decimal constructor calls (NewFromInt, NewFromFloat,
+// NewFromString, RequireFromString, ...) for hardcoded financial values.
+// aliases are the names the file imports the decimal package under.
+func (r *FinancialConstantsRule) checkDecimalCall(ctx *core.FileContext, call *ast.CallExpr, funcName string, aliases map[string]bool) *core.Violation {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return nil
 	}
 
 	ident, ok := sel.X.(*ast.Ident)
-	if !ok || ident.Name != "decimal" {
+	if !ok || !aliases[ident.Name] {
 		return nil
 	}
 
-	// Check for NewFromInt, NewFromFloat, NewFromInt32, NewFromInt64
 	methodName := sel.Sel.Name
-	if !strings.HasPrefix(methodName, "NewFrom") {
+	if !strings.HasPrefix(methodName, "NewFrom") && !decimalStringConstructors[methodName] {
 		return nil
 	}
 
@@ -159,24 +177,32 @@ func (r *FinancialConstantsRule) checkDecimalCall(ctx *core.FileContext, call *a
 		return nil
 	}
 
-	if lit.Kind != token.INT && lit.Kind != token.FLOAT {
-		return nil
-	}
-
-	// Parse numeric value
 	var value float64
-	if lit.Kind == token.INT {
+	switch {
+	case lit.Kind == token.INT:
 		v, err := strconv.ParseInt(lit.Value, 0, 64)
 		if err != nil {
 			return r.invalidNumericLiteral(ctx, lit, err)
 		}
 		value = float64(v)
-	} else {
+	case lit.Kind == token.FLOAT:
 		v, err := strconv.ParseFloat(lit.Value, 64)
 		if err != nil {
 			return r.invalidNumericLiteral(ctx, lit, err)
 		}
 		value = v
+	case lit.Kind == token.STRING && decimalStringConstructors[methodName]:
+		text, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return r.invalidNumericLiteral(ctx, lit, err)
+		}
+		v, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
+		if err != nil {
+			return r.invalidNumericLiteral(ctx, lit, err)
+		}
+		value = v
+	default:
+		return nil
 	}
 
 	// Skip only 0 - often used for initialization

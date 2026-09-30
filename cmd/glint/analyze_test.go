@@ -89,21 +89,24 @@ func TestAnalyzeFilesIsDeterministicAndRaceFree(t *testing.T) {
 // reproducible even though the rest of the analysis is parallel.
 func TestStatefulRulesSeeFilesInOrder(t *testing.T) {
 	cfg := core.DefaultConfig()
-	scattered, ok := rules.Get("scattered-construction")
+	crossFile, ok := rules.Get("cross-file-duplicate")
 	if !ok {
-		t.Fatal("scattered-construction rule must be registered")
+		t.Fatal("cross-file-duplicate rule must be registered")
 	}
-	if _, ok := scattered.(rules.StatefulRule); !ok {
-		t.Fatal("scattered-construction accumulates state across files and must implement StatefulRule")
+	if _, ok := crossFile.(rules.StatefulRule); !ok {
+		t.Fatal("cross-file-duplicate accumulates state across files and must implement StatefulRule")
 	}
 
 	contexts := sampleContexts(t, 6)
-	rules.ResetState([]rules.Rule{scattered})
-	want := fingerprint(mustAnalyzeFiles(t, contexts, []rules.Rule{scattered}, cfg, nil))
+	rules.ResetState([]rules.Rule{crossFile})
+	want := fingerprint(mustAnalyzeFiles(t, contexts, []rules.Rule{crossFile}, cfg, nil))
+	if want == "" {
+		t.Fatal("the sample files are near-copies; cross-file-duplicate must report them")
+	}
 
 	for run := 0; run < 5; run++ {
-		rules.ResetState([]rules.Rule{scattered})
-		if got := fingerprint(mustAnalyzeFiles(t, contexts, []rules.Rule{scattered}, cfg, nil)); got != want {
+		rules.ResetState([]rules.Rule{crossFile})
+		if got := fingerprint(mustAnalyzeFiles(t, contexts, []rules.Rule{crossFile}, cfg, nil)); got != want {
 			t.Fatalf("cross-file findings changed between runs:\nwant:\n%s\ngot:\n%s", want, got)
 		}
 	}

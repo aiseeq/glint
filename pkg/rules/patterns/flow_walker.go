@@ -15,10 +15,19 @@ import (
 //   - Statements are visited in source order. A construct's outgoing states
 //     are grouped into flowEdges: next (normal fallthrough), breaks and
 //     continues (pending unlabeled break/continue for the nearest enclosing
-//     loop, switch, or select). deadState marks a terminated branch: return,
-//     labeled branch, goto, fallthrough, and any simpleStmt reporting
-//     termination produce dead edges. Hooks are never invoked with a dead
-//     state, and dead code after a terminated statement is not visited.
+//     loop, switch, or select). deadState marks a terminated branch: return
+//     and any simpleStmt reporting termination produce dead edges. Hooks are
+//     never invoked with a dead state, and dead code after a terminated
+//     statement is not visited.
+//   - Labeled branches keep their state: `break L` joins the state into the
+//     exit of the statement labeled L, `continue L` into the iteration state
+//     of the loop labeled L, `fallthrough` into the entry of the next case
+//     clause body, and a forward `goto L` into the state reaching the label
+//     (which revives a statement list after a return). A backward goto is
+//     treated conservatively as a no-op: the state keeps flowing past it, as
+//     if the jumped-over code ran once more. These states travel inside the
+//     walker, so they skip the leaveScope and normalize calls of the
+//     constructs they jump out of.
 //   - joinStates is called with two live states whenever branches meet:
 //     the if/else join, loop exits (zero-iteration clone, break states,
 //     post-iteration state — in that order), and clause joins of
@@ -52,6 +61,99 @@ type flowWalker[S, C any] struct {
 	// loopAlwaysExits makes loop exits carry the zero-iteration and
 	// post-iteration states even for loops without a condition.
 	loopAlwaysExits bool
+
+	// labels holds the pending labeled-branch states of the callable body
+	// being walked; walk saves and restores it around every body.
+	labels *flowLabels[S]
+}
+
+// flowLabels carries the states of labeled branches, goto and fallthrough
+// until they reach their target. Go labels are scoped to the function body,
+// so the label name identifies the target.
+type flowLabels[S any] struct {
+	breaks    map[string]S
+	continues map[string]S
+	gotos     map[string]S
+	// seen marks labels already passed in source order: a goto to one of
+	// them jumps backwards.
+	seen map[string]bool
+	// loopLabel is the label of the loop statement about to be walked.
+	loopLabel string
+	// fallState is the state of a fallthrough ending the current clause.
+	fallState S
+	carries   bool
+}
+
+func newFlowLabels[S any]() *flowLabels[S] {
+	return &flowLabels[S]{
+		breaks:    make(map[string]S),
+		continues: make(map[string]S),
+		gotos:     make(map[string]S),
+		seen:      make(map[string]bool),
+	}
+}
+
+func (w *flowWalker[S, C]) pendingLabels() *flowLabels[S] {
+	if w.labels == nil {
+		w.labels = newFlowLabels[S]()
+	}
+	return w.labels
+}
+
+// takeLabeled removes and returns the pending state of a label, or the dead
+// state when nothing jumps there.
+func (w *flowWalker[S, C]) takeLabeled(pending map[string]S, label string) S {
+	state, ok := pending[label]
+	if !ok {
+		return w.rule.deadState()
+	}
+	delete(pending, label)
+	return state
+}
+
+func (w *flowWalker[S, C]) addLabeled(pending map[string]S, label string, state S) {
+	if existing, ok := pending[label]; ok {
+		pending[label] = w.join(existing, state)
+		return
+	}
+	pending[label] = state
+}
+
+// takeLoopLabel returns and clears the label of the loop being entered.
+func (w *flowWalker[S, C]) takeLoopLabel() string {
+	labels := w.pendingLabels()
+	label := labels.loopLabel
+	labels.loopLabel = ""
+	return label
+}
+
+// takeFallthrough returns and clears the state a fallthrough carries into
+// the next case clause.
+func (w *flowWalker[S, C]) takeFallthrough() S {
+	labels := w.pendingLabels()
+	if !labels.carries {
+		return w.rule.deadState()
+	}
+	state := labels.fallState
+	labels.fallState = w.rule.deadState()
+	labels.carries = false
+	return state
+}
+
+// reachLabels marks the labels heading stmt as passed and joins the states of
+// forward gotos to them into the incoming state.
+func (w *flowWalker[S, C]) reachLabels(stmt ast.Stmt, state S) S {
+	labels := w.pendingLabels()
+	for {
+		labeled, ok := stmt.(*ast.LabeledStmt)
+		if !ok {
+			return state
+		}
+		name := labeled.Label.Name
+		labels.seen[name] = true
+		state = w.join(state, w.takeLabeled(labels.gotos, name))
+		stmt = labeled.Stmt
+	}
 }
 
 // flowScopeKind identifies the structural site of an enterScope/leaveScope
@@ -120,6 +222,9 @@ func (w *flowWalker[S, C]) walk(body *ast.BlockStmt, state S, scope C) flowEdges
 		edges.next = state
 		return edges
 	}
+	outer := w.labels
+	w.labels = newFlowLabels[S]()
+	defer func() { w.labels = outer }()
 	return w.stmtList(body.List, state, scope)
 }
 
@@ -142,12 +247,19 @@ func (w *flowWalker[S, C]) stmtList(stmts []ast.Stmt, state S, scope C) flowEdge
 	edges := w.deadEdges()
 	edges.next = state
 	for _, stmt := range stmts {
-		if !w.rule.liveState(edges.next) {
-			break
-		}
 		if w.branchTruncates {
+			if !w.rule.liveState(edges.next) {
+				break
+			}
 			if _, branch := stmt.(*ast.BranchStmt); branch {
 				break
+			}
+		} else {
+			// A forward goto revives the list at its label, so the list is
+			// scanned past a terminated statement for labels.
+			edges.next = w.reachLabels(stmt, edges.next)
+			if !w.rule.liveState(edges.next) {
+				continue
 			}
 		}
 		stmtEdges := w.stmt(stmt, edges.next, scope)
@@ -175,7 +287,7 @@ func (w *flowWalker[S, C]) stmt(stmt ast.Stmt, state S, scope C) flowEdges[S] {
 	case *ast.SelectStmt:
 		return w.selectStmt(node, state, scope)
 	case *ast.LabeledStmt:
-		return w.stmt(node.Stmt, state, scope)
+		return w.labeledStmt(node, state, scope)
 	case *ast.BranchStmt:
 		return w.branchStmt(node, state)
 	default:
@@ -188,6 +300,25 @@ func (w *flowWalker[S, C]) stmt(stmt ast.Stmt, state S, scope C) flowEdges[S] {
 	}
 }
 
+func (w *flowWalker[S, C]) labeledStmt(stmt *ast.LabeledStmt, state S, scope C) flowEdges[S] {
+	if w.branchTruncates {
+		return w.stmt(stmt.Stmt, state, scope)
+	}
+	name := stmt.Label.Name
+	labels := w.pendingLabels()
+	switch stmt.Stmt.(type) {
+	case *ast.ForStmt, *ast.RangeStmt:
+		labels.loopLabel = name
+	}
+	edges := w.stmt(stmt.Stmt, state, scope)
+	labels.loopLabel = ""
+	if broken := w.takeLabeled(labels.breaks, name); w.rule.liveState(broken) {
+		edges.next = w.join(edges.next, broken)
+		w.rule.normalize(&edges)
+	}
+	return edges
+}
+
 func (w *flowWalker[S, C]) branchStmt(stmt *ast.BranchStmt, state S) flowEdges[S] {
 	edges := w.deadEdges()
 	if w.branchTruncates {
@@ -196,7 +327,23 @@ func (w *flowWalker[S, C]) branchStmt(stmt *ast.BranchStmt, state S) flowEdges[S
 		edges.next = state
 		return edges
 	}
+	labels := w.pendingLabels()
 	if stmt.Label != nil {
+		name := stmt.Label.Name
+		switch stmt.Tok {
+		case token.BREAK:
+			w.addLabeled(labels.breaks, name, state)
+		case token.CONTINUE:
+			w.addLabeled(labels.continues, name, state)
+		case token.GOTO:
+			if labels.seen[name] {
+				// Backward jump: without iterating to a fixpoint the walker
+				// lets the state flow on instead of losing the path.
+				edges.next = state
+				return edges
+			}
+			w.addLabeled(labels.gotos, name, state)
+		}
 		return edges
 	}
 	switch stmt.Tok {
@@ -204,6 +351,9 @@ func (w *flowWalker[S, C]) branchStmt(stmt *ast.BranchStmt, state S) flowEdges[S
 		edges.breaks = state
 	case token.CONTINUE:
 		edges.continues = state
+	case token.FALLTHROUGH:
+		labels.fallState = state
+		labels.carries = true
 	}
 	return edges
 }
@@ -251,6 +401,7 @@ func (w *flowWalker[S, C]) ifStmt(stmt *ast.IfStmt, state S, parent C) flowEdges
 }
 
 func (w *flowWalker[S, C]) forStmt(stmt *ast.ForStmt, state S, parent C) flowEdges[S] {
+	label := w.takeLoopLabel()
 	scope, entered := w.rule.enterScope(flowScopeForHeader, stmt, parent, state)
 	if stmt.Init != nil {
 		initEdges := w.stmt(stmt.Init, entered, scope)
@@ -273,6 +424,9 @@ func (w *flowWalker[S, C]) forStmt(stmt *ast.ForStmt, state S, parent C) flowEdg
 		bodyEdges = w.body(stmt.Body, entered, scope, flowScopeForBody)
 	}
 	iteration := w.join(bodyEdges.next, bodyEdges.continues)
+	if label != "" {
+		iteration = w.join(iteration, w.takeLabeled(w.pendingLabels().continues, label))
+	}
 	if stmt.Post != nil && w.rule.liveState(iteration) {
 		iteration = w.stmt(stmt.Post, iteration, scope).next
 	}
@@ -288,6 +442,7 @@ func (w *flowWalker[S, C]) forStmt(stmt *ast.ForStmt, state S, parent C) flowEdg
 }
 
 func (w *flowWalker[S, C]) rangeStmt(stmt *ast.RangeStmt, state S, parent C) flowEdges[S] {
+	label := w.takeLoopLabel()
 	state = w.rule.flowExpr(stmt.X, state, parent)
 	scope, entered := w.rule.enterScope(flowScopeRangeHeader, stmt, parent, state)
 	zero := w.rule.cloneState(entered)
@@ -301,6 +456,9 @@ func (w *flowWalker[S, C]) rangeStmt(stmt *ast.RangeStmt, state S, parent C) flo
 	edges.next = w.join(edges.next, bodyEdges.breaks)
 	edges.next = w.join(edges.next, bodyEdges.next)
 	edges.next = w.join(edges.next, bodyEdges.continues)
+	if label != "" {
+		edges.next = w.join(edges.next, w.takeLabeled(w.pendingLabels().continues, label))
+	}
 	w.rule.normalize(&edges)
 	w.rule.leaveScope(flowScopeRangeHeader, scope, &edges)
 	return edges
@@ -336,6 +494,7 @@ func (w *flowWalker[S, C]) switchLike(
 		return edges
 	}
 	hasDefault := false
+	carried := w.rule.deadState()
 	for _, item := range body.List {
 		clause, ok := item.(*ast.CaseClause)
 		if !ok {
@@ -343,10 +502,14 @@ func (w *flowWalker[S, C]) switchLike(
 		}
 		hasDefault = hasDefault || len(clause.List) == 0
 		clauseState, clauseScope := w.rule.caseClause(sw, clause, w.rule.cloneState(entered), scope)
+		// A fallthrough from the previous clause enters this body without
+		// evaluating its guard.
+		clauseState = w.join(clauseState, carried)
 		clauseEdges := w.deadEdges()
 		if w.rule.liveState(clauseState) {
 			clauseEdges = w.stmtList(clause.Body, clauseState, clauseScope)
 		}
+		carried = w.takeFallthrough()
 		w.rule.leaveScope(flowScopeCaseClause, clauseScope, &clauseEdges)
 		edges.next = w.join(edges.next, clauseEdges.next)
 		edges.next = w.join(edges.next, clauseEdges.breaks)

@@ -28,12 +28,15 @@ func init() {
 //   - In Go: use `decimal.Decimal` arithmetic, never float64
 type FinancialFPRoundingRule struct {
 	*rules.BaseRule
-	// JS/TS: Math.floor|ceil|trunc(<expr> * 100) / 100 — without epsilon.
-	jsFloorBy100 *regexp.Regexp
-	// JS/TS: Math.floor|ceil|trunc(<expr> * <pct>) / 100 — pct is var/literal
-	jsFloorByPct *regexp.Regexp
-	// Go: math.Floor(... * 100) / 100 on float (we avoid this in finance entirely).
-	goFloorBy100 *regexp.Regexp
+	// JS/TS: the opening of Math.floor|ceil|trunc( — the argument is taken up
+	// to its matching parenthesis, so nested calls stay inside it.
+	jsRoundCall *regexp.Regexp
+	// Go: the opening of math.Floor|Ceil|Trunc( (we avoid float money entirely).
+	goRoundCall *regexp.Regexp
+	// The rounded argument: <money> * <factor>, factor an identifier or a number.
+	scaledArgument *regexp.Regexp
+	// What follows the rounding call: / 100.
+	divideBy100 *regexp.Regexp
 	// Epsilon already present? Then the line is safe.
 	hasEpsilon *regexp.Regexp
 }
@@ -47,11 +50,37 @@ func NewFinancialFPRoundingRule() *FinancialFPRoundingRule {
 			"Detects unsafe Math.floor/ceil/trunc(money * 100)/100 — IEEE-754 shimmer silently drops cents (e.g. 5055.19 → 5055.18)",
 			core.SeverityHigh,
 		),
-		jsFloorBy100: regexp.MustCompile(`Math\.(?:floor|ceil|trunc)\s*\(\s*([^)]*?)\s*\*\s*100\s*\)\s*/\s*100`),
-		jsFloorByPct: regexp.MustCompile(`Math\.(?:floor|ceil|trunc)\s*\(\s*([^)]*?)\s*\*\s*([A-Za-z_$][\w$]*|\d+)\s*\)\s*/\s*100`),
-		goFloorBy100: regexp.MustCompile(`math\.(?:Floor|Ceil|Trunc)\s*\(\s*([^)]*?)\s*\*\s*100\s*\)\s*/\s*100`),
-		hasEpsilon:   regexp.MustCompile(`(?:\+\s*1e-?\d+|\+\s*0\.0{4,}\d+|EPSILON)`),
+		jsRoundCall:    regexp.MustCompile(`Math\.(?:floor|ceil|trunc)\s*\(`),
+		goRoundCall:    regexp.MustCompile(`math\.(?:Floor|Ceil|Trunc)\s*\(`),
+		scaledArgument: regexp.MustCompile(`^\s*(.*\S)\s*\*\s*([A-Za-z_$][\w$]*|\d+)\s*$`),
+		divideBy100:    regexp.MustCompile(`^\s*/\s*100\b`),
+		hasEpsilon:     regexp.MustCompile(`(?:\+\s*1e-?\d+|\+\s*0\.0{4,}\d+|EPSILON)`),
 	}
+}
+
+// roundedMoney is one floor/ceil/trunc(<money> * <factor>) / 100 on a line.
+type roundedMoney struct {
+	factor string
+}
+
+// roundedMoneyCalls finds the rounding calls of the line whose argument scales
+// a money operand and whose result is divided by 100. The argument is cut at
+// its matching parenthesis, so Math.floor(Number(amount) * 100) / 100 is seen
+// whole.
+func (r *FinancialFPRoundingRule) roundedMoneyCalls(line string, call *regexp.Regexp) []roundedMoney {
+	var found []roundedMoney
+	for _, loc := range call.FindAllStringIndex(line, -1) {
+		end := matchingParenEnd(line, loc[1])
+		if end < 0 || !r.divideBy100.MatchString(line[end+1:]) {
+			continue
+		}
+		scaled := r.scaledArgument.FindStringSubmatch(line[loc[1]:end])
+		if scaled == nil || !looksLikeMoney(scaled[1]) {
+			continue
+		}
+		found = append(found, roundedMoney{factor: scaled[2]})
+	}
+	return found
 }
 
 // AnalyzeFile checks for floating-point rounding of money
@@ -77,30 +106,25 @@ func (r *FinancialFPRoundingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 		}
 
 		if isTSJS {
-			if m := r.jsFloorBy100.FindStringSubmatch(line); m != nil {
-				if looksLikeMoney(m[1]) {
-					violations = append(violations, r.violation(ctx, i+1, line,
-						"Math.floor(money * 100)/100 — IEEE-754 shimmer drops cents; use Math.round(v*100)/100 or v.toFixed(2)"))
-					continue
+			if calls := r.roundedMoneyCalls(line, r.jsRoundCall); len(calls) > 0 {
+				message := "Math.floor(money * pct)/100 — FP shimmer can drop a cent; add epsilon or use toFixed"
+				for _, call := range calls {
+					if call.factor == "100" {
+						message = "Math.floor(money * 100)/100 — IEEE-754 shimmer drops cents; use Math.round(v*100)/100 or v.toFixed(2)"
+						break
+					}
 				}
-			}
-			if m := r.jsFloorByPct.FindStringSubmatch(line); m != nil {
-				// Skip the *100 case (already handled above).
-				if m[2] == "100" {
-					continue
-				}
-				if looksLikeMoney(m[1]) {
-					violations = append(violations, r.violation(ctx, i+1, line,
-						"Math.floor(money * pct)/100 — FP shimmer can drop a cent; add epsilon or use toFixed"))
-				}
+				violations = append(violations, r.violation(ctx, i+1, line, message))
+				continue
 			}
 		}
 
 		if isGo {
-			if m := r.goFloorBy100.FindStringSubmatch(line); m != nil {
-				if looksLikeMoney(m[1]) {
+			for _, call := range r.roundedMoneyCalls(line, r.goRoundCall) {
+				if call.factor == "100" {
 					violations = append(violations, r.violation(ctx, i+1, line,
 						"math.Floor on float money — use decimal.Decimal arithmetic"))
+					break
 				}
 			}
 		}

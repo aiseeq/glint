@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/types"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -48,13 +49,37 @@ func NewFinancialDirectionalRoundingRule() *FinancialDirectionalRoundingRule {
 	)}
 }
 
-// AnalyzeFile reports directional rounding applied to money.
+// AnalyzeFile reports directional rounding applied to money, judging the
+// receiver by what the file itself declares.
 func (r *FinancialDirectionalRoundingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *FinancialDirectionalRoundingRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; with type information the receiver's
+// type decides whether the call rounds a decimal.
+func (r *FinancialDirectionalRoundingRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze reports directional rounding of decimal.Decimal values named as
+// money. info is nil for a file without type information: then a receiver is a
+// decimal only when the file declares it as one (a parameter, variable, field
+// or a decimal method chain over one); anything else is unknown and not
+// reported.
+func (r *FinancialDirectionalRoundingRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() || ctx.GoAST == nil {
 		return nil
 	}
-	if len(helpers.PackageAliases(ctx.GoAST, `"github.com/shopspring/decimal"`, "decimal")) == 0 {
+	aliases := helpers.PackageAliases(ctx.GoAST, `"`+shopspringDecimalPath+`"`, "decimal")
+	if len(aliases) == 0 {
 		return nil
+	}
+	var decimalFields decimalFieldEvidence
+	if info == nil {
+		decimalFields = collectDecimalFieldEvidence(ctx.GoAST, aliases)
 	}
 
 	var violations []*core.Violation
@@ -63,7 +88,13 @@ func (r *FinancialDirectionalRoundingRule) AnalyzeFile(ctx *core.FileContext) []
 		if !ok || function.Body == nil {
 			continue
 		}
-		types := NewTypeInferrerFromNode(function)
+		isDecimal := func(expr ast.Expr) bool { return isShopspringDecimalType(info.TypeOf(expr)) }
+		if info == nil {
+			inferred := NewTypeInferrerFromNode(function)
+			isDecimal = func(expr ast.Expr) bool {
+				return declaredDecimalValue(expr, function, inferred, aliases, decimalFields)
+			}
+		}
 		ast.Inspect(function.Body, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
 			if !ok {
@@ -81,7 +112,7 @@ func (r *FinancialDirectionalRoundingRule) AnalyzeFile(ctx *core.FileContext) []
 			if receiver == "" || !looksLikeMoney(receiver) {
 				return true
 			}
-			if isTimeValue(types, selector.X) || takesDuration(types, call) || isMoneyRatio(selector.X) {
+			if !isDecimal(selector.X) || isMoneyRatio(selector.X) {
 				return true
 			}
 			line := ctx.LineFor(call)
@@ -90,6 +121,39 @@ func (r *FinancialDirectionalRoundingRule) AnalyzeFile(ctx *core.FileContext) []
 		})
 	}
 	return violations
+}
+
+// decimalResultMethods are decimal.Decimal methods returning a decimal.Decimal.
+var decimalResultMethods = map[string]bool{
+	"Abs": true, "Add": true, "Ceil": true, "Div": true, "DivRound": true, "Floor": true,
+	"Mod": true, "Mul": true, "Neg": true, "Pow": true, "Round": true, "RoundBank": true,
+	"RoundCash": true, "RoundCeil": true, "RoundDown": true, "RoundFloor": true, "RoundUp": true,
+	"Shift": true, "Sub": true, "Truncate": true,
+}
+
+// declaredDecimalValue reports whether the file declares expr as a
+// decimal.Decimal: a declared variable, parameter or struct field, a decimal
+// constructor, or a decimal method whose receiver is one of those.
+func declaredDecimalValue(
+	expr ast.Expr,
+	function *ast.FuncDecl,
+	inferred *TypeInferrer,
+	aliases map[string]bool,
+	decimalFields decimalFieldEvidence,
+) bool {
+	expr = ast.Unparen(expr)
+	if call, ok := expr.(*ast.CallExpr); ok {
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		if pkg, ok := selector.X.(*ast.Ident); ok && aliases[pkg.Name] {
+			return strings.HasPrefix(selector.Sel.Name, "NewFrom") || selector.Sel.Name == "RequireFromString"
+		}
+		return decimalResultMethods[selector.Sel.Name] &&
+			declaredDecimalValue(selector.X, function, inferred, aliases, decimalFields)
+	}
+	return isShopspringDecimalReceiver(expr, expr.Pos(), function, inferred, aliases, decimalFields)
 }
 
 // receiverExpression renders the identifiers a call is made on, so the rule can
@@ -116,31 +180,6 @@ func receiverExpression(expr ast.Expr) string {
 	}
 }
 
-// takesDuration reports whether the call rounds by a duration. decimal rounds
-// by an int32 scale, so a duration argument means this is time.Time's own
-// Truncate — reached through a chain like `record.UpdatedAt.UTC()`, where the
-// receiver still reads as money by name.
-func takesDuration(types *TypeInferrer, call *ast.CallExpr) bool {
-	if len(call.Args) != 1 {
-		return false
-	}
-	duration := false
-	ast.Inspect(call.Args[0], func(node ast.Node) bool {
-		switch typed := node.(type) {
-		case *ast.SelectorExpr:
-			if pkg, ok := typed.X.(*ast.Ident); ok && pkg.Name == "time" {
-				duration = true
-			}
-		case *ast.Ident:
-			if info, known := types.GetType(typed.Name); known && strings.HasPrefix(info.TypeName, "time.") {
-				duration = true
-			}
-		}
-		return !duration
-	})
-	return duration
-}
-
 // isMoneyRatio reports whether the receiver is one money value divided by
 // another: the result is a count, not an amount, and rounding it one way is how
 // a caller covers the whole sum (how many parts a payout has to be split into).
@@ -154,17 +193,6 @@ func isMoneyRatio(expr ast.Expr) bool {
 		return false
 	}
 	return looksLikeMoney(receiverExpression(call.Args[0]))
-}
-
-// isTimeValue reports whether the receiver is a time value: time.Time carries
-// its own Truncate, and truncating a deadline to the hour is not a money bug.
-func isTimeValue(types *TypeInferrer, expr ast.Expr) bool {
-	ident, ok := expr.(*ast.Ident)
-	if !ok {
-		return false
-	}
-	info, known := types.GetType(ident.Name)
-	return known && (info.IsTime || strings.HasPrefix(info.TypeName, "time."))
 }
 
 func (r *FinancialDirectionalRoundingRule) violation(ctx *core.FileContext, line int, method, effect string) *core.Violation {

@@ -104,9 +104,11 @@ func example(i int) {
 
 type T struct{}
 
-func (t *T) Method() {
-	t := "shadowed"
-	_ = t
+func (t *T) Method(ready bool) {
+	if ready {
+		t := "shadowed"
+		_ = t
+	}
 }
 `,
 			expectMatch: true,

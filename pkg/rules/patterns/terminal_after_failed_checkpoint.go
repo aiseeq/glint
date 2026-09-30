@@ -104,6 +104,9 @@ func (s *checkpointLexicalScope) declaredBindings() []checkpointBindingID {
 type checkpointFlow struct {
 	assignments map[checkpointBindingID]checkpointAssignment
 	failures    []failedCheckpoint
+	// deferred lists the terminal calls deferred on this path: they run on
+	// every later exit from the function that unwinds normally.
+	deferred []terminalCall
 }
 
 type checkpointFinding struct {
@@ -112,6 +115,8 @@ type checkpointFinding struct {
 }
 
 type checkpointFlowAnalyzer struct {
+	// file resolves the package qualifiers of calls that never return.
+	file             *ast.File
 	findings         []checkpointFinding
 	reported         map[*ast.IfStmt]bool
 	analyzedClosures map[*ast.FuncLit]bool
@@ -131,7 +136,7 @@ func (r *TerminalAfterFailedCheckpointRule) AnalyzeFile(ctx *core.FileContext) [
 			continue
 		}
 
-		for _, finding := range checkpointFindings(fn, fileScope) {
+		for _, finding := range checkpointFindings(ctx.GoAST, fn, fileScope) {
 			checkpoint := finding.checkpoint
 			terminal := finding.terminal
 
@@ -157,8 +162,9 @@ func (r *TerminalAfterFailedCheckpointRule) AnalyzeFile(ctx *core.FileContext) [
 	return violations
 }
 
-func checkpointFindings(function *ast.FuncDecl, fileScope *checkpointLexicalScope) []checkpointFinding {
+func checkpointFindings(file *ast.File, function *ast.FuncDecl, fileScope *checkpointLexicalScope) []checkpointFinding {
 	analyzer := &checkpointFlowAnalyzer{
+		file:             file,
 		reported:         make(map[*ast.IfStmt]bool),
 		analyzedClosures: make(map[*ast.FuncLit]bool),
 	}
@@ -177,7 +183,44 @@ func (a *checkpointFlowAnalyzer) analyzeCallable(
 	}
 	initial := checkpointFlow{assignments: make(map[checkpointBindingID]checkpointAssignment)}
 	walker := &flowWalker[[]checkpointFlow, *checkpointLexicalScope]{rule: a}
-	walker.walk(body, []checkpointFlow{initial}, scope)
+	edges := walker.walk(body, []checkpointFlow{initial}, scope)
+	// Falling off the end of the body is an exit too.
+	a.runDeferred(edges.next)
+}
+
+// runDeferred matches the deferred terminal calls of every path leaving the
+// function against the failures on that path.
+func (a *checkpointFlowAnalyzer) runDeferred(paths []checkpointFlow) {
+	for _, path := range paths {
+		for _, terminal := range path.deferred {
+			a.matchFailures(terminal, path.failures)
+		}
+	}
+}
+
+// deferTerminals lists the terminal calls a defer statement registers: the
+// deferred call itself, or the calls in the body of a deferred closure.
+func deferTerminals(stmt *ast.DeferStmt) []terminalCall {
+	if closure, ok := ast.Unparen(stmt.Call.Fun).(*ast.FuncLit); ok {
+		var terminals []terminalCall
+		ast.Inspect(closure.Body, func(node ast.Node) bool {
+			if _, nested := node.(*ast.FuncLit); nested {
+				return false
+			}
+			if call, ok := node.(*ast.CallExpr); ok {
+				if receiver, method, ok := selectedCall(call, terminalAfterCheckpointTerminalMethods); ok {
+					terminals = append(terminals, terminalCall{call: call, receiver: receiver, method: method})
+				}
+			}
+			return true
+		})
+		return terminals
+	}
+	receiver, method, ok := selectedCall(stmt.Call, terminalAfterCheckpointTerminalMethods)
+	if !ok {
+		return nil
+	}
+	return []terminalCall{{call: stmt.Call, receiver: receiver, method: method}}
 }
 
 func (a *checkpointFlowAnalyzer) cloneState(paths []checkpointFlow) []checkpointFlow {
@@ -203,6 +246,9 @@ func checkpointFlowKey(flow checkpointFlow) string {
 	}
 	for _, failure := range flow.failures {
 		parts = append(parts, flowPosKey(failure.ifStmt.Pos())+"!"+failure.receiver+"."+failure.method)
+	}
+	for _, terminal := range flow.deferred {
+		parts = append(parts, "defer@"+flowPosKey(terminal.call.Pos()))
 	}
 	return flowPathKey(parts...)
 }
@@ -252,10 +298,34 @@ func (a *checkpointFlowAnalyzer) simpleStmt(
 		return paths, false
 	case *ast.ReturnStmt:
 		a.findTerminalsOnPaths(node, paths, scope)
+		a.runDeferred(paths)
 		return nil, true
+	case *ast.DeferStmt:
+		// The deferred call's function value and arguments are evaluated
+		// now; the call itself runs at the exits.
+		a.findTerminalsOnPaths(node.Call.Fun, paths, scope)
+		for _, arg := range node.Call.Args {
+			a.findTerminalsOnPaths(arg, paths, scope)
+		}
+		terminals := deferTerminals(node)
+		if len(terminals) == 0 {
+			return paths, false
+		}
+		deferred := make([]checkpointFlow, 0, len(paths))
+		for _, path := range paths {
+			path = copyCheckpointFlow(path)
+			path.deferred = append(path.deferred, terminals...)
+			deferred = append(deferred, path)
+		}
+		return deferred, false
 	default:
 		a.findTerminalsOnPaths(node, paths, scope)
-		if isPanicStatement(node) {
+		switch stmtNoReturn(node, nil, a.file) {
+		case callUnwinds:
+			// panic and runtime.Goexit still run the deferred calls.
+			a.runDeferred(paths)
+			return nil, true
+		case callExits:
 			return nil, true
 		}
 		return paths, false
@@ -381,16 +451,21 @@ func (a *checkpointFlowAnalyzer) findTerminals(
 		if !ok {
 			return true
 		}
-		terminal := terminalCall{call: call, receiver: receiver, method: method}
-		for _, failure := range failures {
-			if failure.receiver != terminal.receiver || a.reported[failure.ifStmt] {
-				continue
-			}
-			a.findings = append(a.findings, checkpointFinding{checkpoint: failure, terminal: terminal})
-			a.reported[failure.ifStmt] = true
-		}
+		a.matchFailures(terminalCall{call: call, receiver: receiver, method: method}, failures)
 		return true
 	})
+}
+
+// matchFailures reports a terminal call running after an unhandled failure of
+// a checkpoint on the same receiver.
+func (a *checkpointFlowAnalyzer) matchFailures(terminal terminalCall, failures []failedCheckpoint) {
+	for _, failure := range failures {
+		if failure.receiver != terminal.receiver || a.reported[failure.ifStmt] {
+			continue
+		}
+		a.findings = append(a.findings, checkpointFinding{checkpoint: failure, terminal: terminal})
+		a.reported[failure.ifStmt] = true
+	}
 }
 
 func flowWithAssignment(
@@ -613,6 +688,7 @@ func copyCheckpointFlow(flow checkpointFlow) checkpointFlow {
 	copyFlow := checkpointFlow{
 		assignments: make(map[checkpointBindingID]checkpointAssignment, len(flow.assignments)),
 		failures:    append([]failedCheckpoint(nil), flow.failures...),
+		deferred:    append([]terminalCall(nil), flow.deferred...),
 	}
 	for object, assignment := range flow.assignments {
 		copyFlow.assignments[object] = assignment
@@ -746,38 +822,9 @@ func appendCheckpointFailure(current []failedCheckpoint, addition failedCheckpoi
 	return append(current, addition)
 }
 
+// compactCheckpointFlows drops paths that carry the same evidence.
 func compactCheckpointFlows(flows []checkpointFlow) []checkpointFlow {
-	compacted := make([]checkpointFlow, 0, len(flows))
-	for _, flow := range flows {
-		duplicate := false
-		for _, existing := range compacted {
-			if equalCheckpointFlow(existing, flow) {
-				duplicate = true
-				break
-			}
-		}
-		if !duplicate {
-			compacted = append(compacted, flow)
-		}
-	}
-	return compacted
-}
-
-func equalCheckpointFlow(left, right checkpointFlow) bool {
-	if len(left.assignments) != len(right.assignments) || len(left.failures) != len(right.failures) {
-		return false
-	}
-	for object, assignment := range left.assignments {
-		if right.assignments[object] != assignment {
-			return false
-		}
-	}
-	for i, failure := range left.failures {
-		if right.failures[i].ifStmt != failure.ifStmt {
-			return false
-		}
-	}
-	return true
+	return joinFlowPaths(flows, nil, checkpointFlowKey)
 }
 
 func isPanicStatement(stmt ast.Stmt) bool {

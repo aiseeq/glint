@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"slices"
 	"strconv"
 	"strings"
@@ -51,15 +52,34 @@ func NewProviderCommandBeforeIntentPersistRule() *ProviderCommandBeforeIntentPer
 	)}
 }
 
-// AnalyzeFile checks command and persistence ordering within each function.
+// AnalyzeFile checks command and persistence ordering within each function,
+// recognising context arguments by what the file declares.
 func (r *ProviderCommandBeforeIntentPersistRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *ProviderCommandBeforeIntentPersistRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; with type information a context
+// argument is recognised by its type.
+func (r *ProviderCommandBeforeIntentPersistRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze checks command and persistence ordering within each function. The
+// entity a call is about is its first argument that is not a context.Context;
+// info is nil for a file without type information, and then an argument is a
+// context only when the file declares it as one.
+func (r *ProviderCommandBeforeIntentPersistRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() || ctx.GoAST == nil {
 		return nil
 	}
 
 	var violations []*core.Violation
 	for _, root := range providerAnalysisRoots(ctx.GoAST) {
-		for _, command := range analyzeProviderCommandFlow(root.body) {
+		contexts := newContextClassifier(ctx.GoAST, root.scope, info)
+		for _, command := range analyzeProviderCommandFlow(root.body, contexts) {
 			line := ctx.GoFileSet.Position(command.call.Pos()).Line
 			if ctx.IsSuppressed(line, r.Name()) {
 				continue
@@ -79,6 +99,9 @@ func (r *ProviderCommandBeforeIntentPersistRule) AnalyzeFile(ctx *core.FileConte
 type providerAnalysisRoot struct {
 	body *ast.BlockStmt
 	name string
+	// scope is the top-level declaration holding the body: its declarations
+	// are the ones visible in the body.
+	scope ast.Decl
 }
 
 func providerAnalysisRoots(file *ast.File) []providerAnalysisRoot {
@@ -88,15 +111,17 @@ func providerAnalysisRoots(file *ast.File) []providerAnalysisRoot {
 		if !ok || fn.Body == nil {
 			continue
 		}
-		roots = append(roots, providerAnalysisRoot{body: fn.Body, name: fn.Name.Name})
+		roots = append(roots, providerAnalysisRoot{body: fn.Body, name: fn.Name.Name, scope: fn})
 	}
-	ast.Inspect(file, func(node ast.Node) bool {
-		literal, ok := node.(*ast.FuncLit)
-		if ok && literal.Body != nil {
-			roots = append(roots, providerAnalysisRoot{body: literal.Body, name: "(anonymous)"})
-		}
-		return true
-	})
+	for _, decl := range file.Decls {
+		ast.Inspect(decl, func(node ast.Node) bool {
+			literal, ok := node.(*ast.FuncLit)
+			if ok && literal.Body != nil {
+				roots = append(roots, providerAnalysisRoot{body: literal.Body, name: "(anonymous)", scope: decl})
+			}
+			return true
+		})
+	}
 	return roots
 }
 
@@ -120,10 +145,11 @@ type providerFlowState struct {
 type providerFlowAnalyzer struct {
 	detected []providerCommandCall
 	seen     map[*ast.CallExpr]bool
+	contexts contextClassifier
 }
 
-func analyzeProviderCommandFlow(body *ast.BlockStmt) []providerCommandCall {
-	analyzer := providerFlowAnalyzer{seen: make(map[*ast.CallExpr]bool)}
+func analyzeProviderCommandFlow(body *ast.BlockStmt, contexts contextClassifier) []providerCommandCall {
+	analyzer := providerFlowAnalyzer{seen: make(map[*ast.CallExpr]bool), contexts: contexts}
 	walker := &flowWalker[[]providerFlowState, struct{}]{
 		rule: &analyzer,
 		// The legacy engine stopped a statement list at any branch statement
@@ -141,7 +167,7 @@ func (a *providerFlowAnalyzer) cloneState(states []providerFlowState) []provider
 }
 
 func (a *providerFlowAnalyzer) joinStates(left, right []providerFlowState) []providerFlowState {
-	return joinFlowPaths(left, right, providerFlowStateKey)
+	return joinProviderFlowStates(left, right)
 }
 
 // providerFlowStateKey identifies a path by the durable evidence and the
@@ -197,11 +223,11 @@ func (a *providerFlowAnalyzer) simpleStmt(
 		return nil, true
 	case *ast.GoStmt:
 		states = a.callOperands(node.Call, states)
-		method, command := matchingSelectorCall(node.Call, providerCommandMethods, providerReceiverMarkers)
+		method, command := providerCommandMethod(node.Call)
 		if !command {
 			return states, false
 		}
-		recorded := a.recordProviderCommand(node.Call, method, providerCallEntity(node.Call), providerCallEntityOwner(node.Call), states)
+		recorded := a.recordProviderCommand(node.Call, method, a.callEntity(node.Call), a.callEntityOwner(node.Call), states)
 		return compactProviderFlowStates(recorded), false
 	case *ast.DeferStmt:
 		return a.callOperands(node.Call, states), false
@@ -286,11 +312,11 @@ func (a *providerFlowAnalyzer) condition(
 		case token.LAND:
 			leftTrue, leftFalse := a.condition(node.X, states)
 			rightTrue, rightFalse := a.condition(node.Y, leftTrue)
-			return rightTrue, compactProviderFlowStates(append(leftFalse, rightFalse...))
+			return rightTrue, joinProviderFlowStates(leftFalse, rightFalse)
 		case token.LOR:
 			leftTrue, leftFalse := a.condition(node.X, states)
 			rightTrue, rightFalse := a.condition(node.Y, leftFalse)
-			return compactProviderFlowStates(append(leftTrue, rightTrue...)), rightFalse
+			return joinProviderFlowStates(leftTrue, rightTrue), rightFalse
 		}
 	}
 
@@ -336,7 +362,7 @@ func (a *providerFlowAnalyzer) expression(expr ast.Expr, states []providerFlowSt
 		if node.Op == token.LAND || node.Op == token.LOR {
 			skipped := cloneProviderFlowStates(states)
 			evaluated := a.expression(node.Y, cloneProviderFlowStates(states))
-			return compactProviderFlowStates(append(skipped, evaluated...))
+			return joinProviderFlowStates(skipped, evaluated)
 		}
 		return a.expression(node.Y, states)
 	case *ast.KeyValueExpr:
@@ -357,11 +383,11 @@ func (a *providerFlowAnalyzer) callOperands(call *ast.CallExpr, states []provide
 }
 
 func (a *providerFlowAnalyzer) call(call *ast.CallExpr, states []providerFlowState) []providerFlowState {
-	method, command := matchingSelectorCall(call, providerCommandMethods, providerReceiverMarkers)
+	method, command := providerCommandMethod(call)
 	persistsState := matchesSelectorCallPrefix(call, statePersistencePrefixes, stateReceiverMarkers)
 	durable := isDurableIntentCall(call)
-	entity := providerCallEntity(call)
-	entityOwner := providerCallEntityOwner(call)
+	entity := a.callEntity(call)
+	entityOwner := a.callEntityOwner(call)
 	if command {
 		states = a.recordProviderCommand(call, method, entity, entityOwner, states)
 	}
@@ -437,59 +463,86 @@ func cloneProviderFlowStates(states []providerFlowState) []providerFlowState {
 	return cloned
 }
 
+// joinProviderFlowStates merges the states meeting at a control-flow join.
+func joinProviderFlowStates(left, right []providerFlowState) []providerFlowState {
+	return compactProviderFlowStates(joinFlowPaths(left, right, providerFlowStateKey))
+}
+
+// compactProviderFlowStates folds states with the same durable evidence into
+// one whose pending commands are the union of theirs. The fold loses nothing
+// the rule reads: whether a command stays pending depends only on a state's
+// evidence, and a later persistence reports every pending command of every
+// state it reaches. Without it each optional command doubles the states (40
+// guarded sends are 2^40 paths), and the path cap would then drop the paths
+// that carry the later commands.
 func compactProviderFlowStates(states []providerFlowState) []providerFlowState {
 	compacted := make([]providerFlowState, 0, len(states))
+	byEvidence := make(map[string]int, len(states))
+	pendingSeen := make([]map[*ast.CallExpr]bool, 0, len(states))
 	for _, state := range states {
-		duplicate := false
-		for _, existing := range compacted {
-			if sameProviderFlowState(existing, state) {
-				duplicate = true
-				break
+		key := providerEvidenceKey(state)
+		index, merged := byEvidence[key]
+		if !merged {
+			byEvidence[key] = len(compacted)
+			seen := make(map[*ast.CallExpr]bool, len(state.pending))
+			for _, command := range state.pending {
+				seen[command.call] = true
 			}
-		}
-		if !duplicate {
 			compacted = append(compacted, state)
+			pendingSeen = append(pendingSeen, seen)
+			continue
+		}
+		for _, command := range state.pending {
+			if pendingSeen[index][command.call] {
+				continue
+			}
+			pendingSeen[index][command.call] = true
+			// Copy on write: the pending slice may be shared with other states.
+			compacted[index].pending = append(slices.Clip(compacted[index].pending), command)
 		}
 	}
 	return compacted
 }
 
-func sameProviderFlowState(left, right providerFlowState) bool {
-	if left.durableObserved != right.durableObserved ||
-		len(left.durableEvidence) != len(right.durableEvidence) || len(left.pending) != len(right.pending) {
-		return false
+// providerEvidenceKey identifies the durable evidence of a state, the part of
+// the state that decides what a later command or persistence means.
+func providerEvidenceKey(state providerFlowState) string {
+	parts := make([]string, 0, 1+len(state.durableEvidence))
+	parts = append(parts, strconv.FormatBool(state.durableObserved))
+	for _, evidence := range state.durableEvidence {
+		parts = append(parts, evidence.method+"."+evidence.entity+"."+evidence.owner)
 	}
-	for i := range left.durableEvidence {
-		if left.durableEvidence[i] != right.durableEvidence[i] {
-			return false
-		}
-	}
-	for i := range left.pending {
-		if left.pending[i].call != right.pending[i].call {
-			return false
-		}
-	}
-	return true
+	return flowPathKey(parts...)
 }
 
-func providerCallEntity(call *ast.CallExpr) string {
+// entityArgument returns the argument a call is about: the first one that is
+// not a context.Context. An argument not known to be a context is the entity:
+// taking it keeps the rule quiet when both calls pass it, rather than
+// guessing from its name that it should be skipped.
+func (a *providerFlowAnalyzer) entityArgument(call *ast.CallExpr) (ast.Expr, bool) {
 	for _, arg := range call.Args {
-		if isProviderContextArgument(arg) {
+		if isContext, known := a.contexts.classify(arg); known && isContext {
 			continue
 		}
-		return normalizedProviderEntity(arg)
+		return arg, true
 	}
-	return ""
+	return nil, false
 }
 
-func providerCallEntityOwner(call *ast.CallExpr) string {
-	for _, arg := range call.Args {
-		if isProviderContextArgument(arg) {
-			continue
-		}
-		return providerEntityOwner(arg)
+func (a *providerFlowAnalyzer) callEntity(call *ast.CallExpr) string {
+	arg, ok := a.entityArgument(call)
+	if !ok {
+		return ""
 	}
-	return ""
+	return normalizedProviderEntity(arg)
+}
+
+func (a *providerFlowAnalyzer) callEntityOwner(call *ast.CallExpr) string {
+	arg, ok := a.entityArgument(call)
+	if !ok {
+		return ""
+	}
+	return providerEntityOwner(arg)
 }
 
 func providerEntityOwner(expr ast.Expr) string {
@@ -510,34 +563,6 @@ func providerEntityOwner(expr ast.Expr) string {
 		return normalizedProviderEntity(node)
 	}
 	return ""
-}
-
-func isProviderContextArgument(expr ast.Expr) bool {
-	switch node := expr.(type) {
-	case *ast.ParenExpr:
-		return isProviderContextArgument(node.X)
-	case *ast.StarExpr:
-		return isProviderContextArgument(node.X)
-	case *ast.UnaryExpr:
-		return node.Op == token.AND && isProviderContextArgument(node.X)
-	case *ast.Ident:
-		return isProviderContextName(node.Name)
-	case *ast.SelectorExpr:
-		return isProviderContextName(node.Sel.Name)
-	case *ast.CallExpr:
-		switch fun := node.Fun.(type) {
-		case *ast.Ident:
-			return isProviderContextName(fun.Name)
-		case *ast.SelectorExpr:
-			return isProviderContextName(fun.Sel.Name) || isProviderContextArgument(fun.X)
-		}
-	}
-	return false
-}
-
-func isProviderContextName(name string) bool {
-	lower := strings.ToLower(name)
-	return lower == "ctx" || strings.HasSuffix(lower, "ctx") || strings.HasSuffix(lower, "context")
 }
 
 func normalizedProviderEntity(expr ast.Expr) string {
@@ -622,19 +647,25 @@ func canonicalProviderOperation(method string) string {
 }
 
 func providerReceiverName(expr ast.Expr) string {
+	return strings.ToLower(nearestReceiverName(expr))
+}
+
+// nearestReceiverName returns the name closest to the method: "payoutRepo"
+// for s.payoutRepo.CreatePayout.
+func nearestReceiverName(expr ast.Expr) string {
 	switch node := expr.(type) {
 	case *ast.Ident:
-		return strings.ToLower(node.Name)
+		return node.Name
 	case *ast.SelectorExpr:
-		return strings.ToLower(node.Sel.Name)
+		return node.Sel.Name
 	case *ast.IndexExpr:
-		return providerReceiverName(node.X)
+		return nearestReceiverName(node.X)
 	case *ast.IndexListExpr:
-		return providerReceiverName(node.X)
+		return nearestReceiverName(node.X)
 	case *ast.ParenExpr:
-		return providerReceiverName(node.X)
+		return nearestReceiverName(node.X)
 	case *ast.StarExpr:
-		return providerReceiverName(node.X)
+		return nearestReceiverName(node.X)
 	default:
 		return ""
 	}
@@ -644,9 +675,22 @@ func isGenericProviderReceiver(receiver string) bool {
 	return slices.Contains([]string{"provider", "payment", "payout", "bank", "remit"}, receiver)
 }
 
-func matchingSelectorCall(call *ast.CallExpr, methods map[string]bool, receiverMarkers []string) (string, bool) {
+// stateReceiverWords are the words of a receiver name that make it the
+// service's own persistence rather than a provider.
+var stateReceiverWords = wordSet("repo", "repository", "store", "storage", "db", "dao", "outbox", "ledger")
+
+// providerCommandMethod returns the command name when the call sends a
+// destructive command to a provider: a command method on a receiver named
+// like a provider. A receiver whose own name is a repository or store
+// (payoutRepo, paymentStore) is the service's persistence even when the
+// method reads like a command (CreatePayout inserts a row). Names are read
+// word by word, so a provider called sandboxBank is not a "db".
+func providerCommandMethod(call *ast.CallExpr) (string, bool) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || !methods[sel.Sel.Name] || !receiverContainsAny(sel.X, receiverMarkers) {
+	if !ok || !providerCommandMethods[sel.Sel.Name] || !receiverContainsAny(sel.X, providerReceiverMarkers) {
+		return "", false
+	}
+	if hasTokenIn(nearestReceiverName(sel.X), stateReceiverWords) {
 		return "", false
 	}
 	return sel.Sel.Name, true

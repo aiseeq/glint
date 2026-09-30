@@ -20,8 +20,19 @@ type FinancialRoundedDeltaRule struct {
 	*rules.BaseRule
 	parseAssign       *regexp.Regexp
 	directParsedDelta *regexp.Regexp
-	financialField    *regexp.Regexp
 	deltaContext      *regexp.Regexp
+}
+
+// cumulativeMoneyFieldTokens are the words naming the cumulative money fields
+// an API returns: a balance, a total, a portfolio value. The set is narrower
+// than strongFinancialName on purpose: a fee or a price is not cumulative, and
+// the difference of two of them is not a reconstructed delta.
+var cumulativeMoneyFieldTokens = wordSet("amount", "balance", "profit", "yield", "total", "subtotal", "value")
+
+// cumulativeMoneyField reports whether a word of the text names a cumulative
+// money field.
+func cumulativeMoneyField(text string) bool {
+	return hasTokenIn(text, cumulativeMoneyFieldTokens)
 }
 
 // NewFinancialRoundedDeltaRule creates the rule
@@ -34,8 +45,7 @@ func NewFinancialRoundedDeltaRule() *FinancialRoundedDeltaRule {
 			core.SeverityHigh,
 		),
 		parseAssign:       regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:Number|parseFloat)\s*\(([^)]*)\)`),
-		directParsedDelta: regexp.MustCompile(`(?:Number|parseFloat)\s*\([^)]*(?:amount|balance|profit|yield|total|value)[^)]*\)\s*-\s*(?:Number|parseFloat)\s*\([^)]*(?:amount|balance|profit|yield|total|value)[^)]*\)`),
-		financialField:    regexp.MustCompile(`(?i)(amount|balance|profit|yield|total|value)`),
+		directParsedDelta: regexp.MustCompile(`(?:Number|parseFloat)\s*\(([^)]*)\)\s*-\s*(?:Number|parseFloat)\s*\(([^)]*)\)`),
 		deltaContext:      regexp.MustCompile(`(?i)(delta|change|daily|difference|diff|yesterday|today|profit|yield)`),
 	}
 }
@@ -58,7 +68,7 @@ func (r *FinancialRoundedDeltaRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 			continue
 		}
 
-		if r.deltaContext.MatchString(line) && r.directParsedDelta.MatchString(line) {
+		if r.deltaContext.MatchString(line) && r.subtractsParsedMoneyFields(line) {
 			violations = append(violations, r.violation(ctx, i+1, line))
 			continue
 		}
@@ -66,7 +76,7 @@ func (r *FinancialRoundedDeltaRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 		if matches := r.parseAssign.FindStringSubmatch(line); len(matches) == 3 {
 			name := matches[1]
 			expr := matches[2]
-			if r.financialField.MatchString(name) || r.financialField.MatchString(expr) {
+			if cumulativeMoneyField(name) || cumulativeMoneyField(expr) {
 				parsedFinancialVars[name] = true
 			}
 		}
@@ -96,10 +106,21 @@ func (r *FinancialRoundedDeltaRule) subtractsParsedFinancialVars(line string, va
 		if leftParsed && rightParsed {
 			return true
 		}
-		if leftParsed && r.financialField.MatchString(right) {
+		if leftParsed && cumulativeMoneyField(right) {
 			return true
 		}
-		if rightParsed && r.financialField.MatchString(left) {
+		if rightParsed && cumulativeMoneyField(left) {
+			return true
+		}
+	}
+	return false
+}
+
+// subtractsParsedMoneyFields reports whether the line subtracts one parsed
+// cumulative money field from another: Number(a.balance) - Number(b.balance).
+func (r *FinancialRoundedDeltaRule) subtractsParsedMoneyFields(line string) bool {
+	for _, match := range r.directParsedDelta.FindAllStringSubmatch(line, -1) {
+		if cumulativeMoneyField(match[1]) && cumulativeMoneyField(match[2]) {
 			return true
 		}
 	}

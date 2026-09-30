@@ -1,7 +1,10 @@
 package patterns
 
 import (
+	"fmt"
 	"go/ast"
+	"go/token"
+	"go/types"
 	"strconv"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -12,7 +15,12 @@ func init() {
 	rules.Register(NewShadowVariableRule())
 }
 
-// ShadowVariableRule detects variable shadowing
+// ShadowVariableRule detects a local variable declared in a nested scope with
+// the name of a variable of the same function that is still visible there:
+// a receiver, a parameter, a result or an outer local. Scopes are the ones the
+// type checker builds, so switch and select cases, closures and if/for/switch
+// headers are all seen, and a name declared in an if header does not leak
+// past the if statement.
 type ShadowVariableRule struct {
 	*rules.BaseRule
 	// Common Go variable names that are safe to shadow
@@ -40,184 +48,133 @@ func NewShadowVariableRule() *ShadowVariableRule {
 	}
 }
 
-// AnalyzeFile checks for variable shadowing
+// AnalyzeFile checks one file without the type information of its package.
+// Shadowing is lexical: the file is type-checked on its own to get its
+// scopes, and names it cannot resolve (imports, other files of the package)
+// stay unresolved, which does not change the scopes of its local variables.
 func (r *ShadowVariableRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.IsTestFile() {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *ShadowVariableRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file with the scopes of its package.
+func (r *ShadowVariableRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+func (r *ShadowVariableRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	if !ctx.IsGoFile() || ctx.IsTestFile() || ctx.GoAST == nil {
 		return nil
 	}
-
-	if ctx.GoAST == nil {
-		return nil
+	if info == nil {
+		if ctx.GoFileSet == nil {
+			return nil
+		}
+		info = fileScopes(ctx)
 	}
 
 	var violations []*core.Violation
-
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok {
-			return true
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
 		}
-
-		if fn.Body == nil {
-			return true
-		}
-
-		// Collect parameter and receiver names
-		outerScope := make(map[string]int) // name -> line
-
-		// Add receiver if present
-		if fn.Recv != nil {
-			for _, field := range fn.Recv.List {
-				for _, name := range field.Names {
-					if name.Name != "_" {
-						outerScope[name.Name] = ctx.LineFor(name)
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch stmt := n.(type) {
+			case *ast.AssignStmt:
+				if stmt.Tok != token.DEFINE {
+					return true
+				}
+				for i, lhs := range stmt.Lhs {
+					var rhs ast.Expr
+					if len(stmt.Rhs) == len(stmt.Lhs) {
+						rhs = stmt.Rhs[i]
 					}
+					violations = r.check(ctx, info, fn, lhs, rhs, violations)
+				}
+			case *ast.ValueSpec:
+				for i, name := range stmt.Names {
+					var rhs ast.Expr
+					if len(stmt.Values) == len(stmt.Names) {
+						rhs = stmt.Values[i]
+					}
+					violations = r.check(ctx, info, fn, name, rhs, violations)
+				}
+			case *ast.RangeStmt:
+				if stmt.Tok == token.DEFINE {
+					violations = r.check(ctx, info, fn, stmt.Key, nil, violations)
+					violations = r.check(ctx, info, fn, stmt.Value, nil, violations)
 				}
 			}
-		}
-
-		// Add parameters
-		if fn.Type.Params != nil {
-			for _, field := range fn.Type.Params.List {
-				for _, name := range field.Names {
-					if name.Name != "_" {
-						outerScope[name.Name] = ctx.LineFor(name)
-					}
-				}
-			}
-		}
-
-		// Check function body for shadowing
-		r.checkBlock(ctx, fn.Body, outerScope, &violations)
-
-		return true
-	})
-
+			return true
+		})
+	}
 	return violations
 }
 
-func (r *ShadowVariableRule) checkBlock(ctx *core.FileContext, block *ast.BlockStmt, outerScope map[string]int, violations *[]*core.Violation) {
-	if block == nil {
-		return
+// check reports the variable declared by expr when it hides a variable of the
+// same function. rhs is its initializer, when it has its own.
+func (r *ShadowVariableRule) check(
+	ctx *core.FileContext,
+	info *types.Info,
+	fn *ast.FuncDecl,
+	expr, rhs ast.Expr,
+	violations []*core.Violation,
+) []*core.Violation {
+	name, ok := expr.(*ast.Ident)
+	if !ok || name.Name == "_" || r.safeToShadow[name.Name] {
+		return violations
 	}
-	currentScope := r.copyScope(outerScope)
-	for _, stmt := range block.List {
-		r.checkStmt(ctx, stmt, currentScope, outerScope, violations)
+	obj, ok := info.Defs[name].(*types.Var)
+	if !ok || obj.Parent() == nil || obj.Parent().Parent() == nil {
+		return violations
 	}
-}
+	_, outer := obj.Parent().Parent().LookupParent(name.Name, name.Pos())
+	shadowed, ok := outer.(*types.Var)
+	if !ok || shadowed.IsField() || shadowed.Pos() < fn.Pos() || shadowed.Pos() >= fn.End() {
+		return violations
+	}
+	// `name := name` copies the outer variable on purpose - the capture
+	// idiom for closures and goroutines.
+	if ident, ok := ast.Unparen(rhs).(*ast.Ident); ok && info.Uses[ident] == shadowed {
+		return violations
+	}
 
-// copyScope creates a copy of the scope map
-func (r *ShadowVariableRule) copyScope(scope map[string]int) map[string]int {
-	newScope := make(map[string]int, len(scope))
-	for k, v := range scope {
-		newScope[k] = v
-	}
-	return newScope
-}
-
-// reportShadow creates a violation if the variable shadows an outer declaration
-func (r *ShadowVariableRule) reportShadow(ctx *core.FileContext, name *ast.Ident, outerScope map[string]int, violations *[]*core.Violation) {
-	if name.Name == "_" || r.safeToShadow[name.Name] {
-		return
-	}
-	origLine, exists := outerScope[name.Name]
-	if !exists {
-		return
-	}
 	line := ctx.LineFor(name)
-	v := r.CreateViolation(ctx.RelPath, line, "Variable '"+name.Name+"' shadows declaration from line "+strconv.Itoa(origLine))
+	v := r.CreateViolation(ctx.RelPath, line, "Variable '"+name.Name+"' shadows declaration from line "+strconv.Itoa(ctx.LineForPos(shadowed.Pos())))
 	v.WithCode(ctx.GetLine(line))
 	v.WithSuggestion("Use a different variable name to avoid confusion")
 	v.WithContext("pattern", "shadow_variable")
 	v.WithContext("shadowed_name", name.Name)
-	*violations = append(*violations, v)
+	return append(violations, v)
 }
 
-func (r *ShadowVariableRule) checkStmt(ctx *core.FileContext, stmt ast.Stmt, currentScope, outerScope map[string]int, violations *[]*core.Violation) {
-	switch s := stmt.(type) {
-	case *ast.AssignStmt:
-		r.checkAssign(ctx, s, currentScope, outerScope, violations)
-	case *ast.DeclStmt:
-		r.checkDecl(ctx, s, currentScope, outerScope, violations)
-	case *ast.IfStmt:
-		r.checkIf(ctx, s, currentScope, outerScope, violations)
-	case *ast.ForStmt:
-		r.checkFor(ctx, s, currentScope, outerScope, violations)
-	case *ast.RangeStmt:
-		r.checkRange(ctx, s, currentScope, outerScope, violations)
-	case *ast.BlockStmt:
-		r.checkBlock(ctx, s, currentScope, violations)
+// fileScopes type-checks one file on its own and returns its definitions and
+// scopes. Imports are not resolved and names from other files of the package
+// are missing, so the checker reports errors; they are expected and ignored:
+// they concern types, not the lexical scopes the rule reads.
+func fileScopes(ctx *core.FileContext) *types.Info {
+	info := &types.Info{
+		Defs:   make(map[*ast.Ident]types.Object),
+		Uses:   make(map[*ast.Ident]types.Object),
+		Scopes: make(map[ast.Node]*types.Scope),
 	}
+	conf := types.Config{
+		Importer: unresolvedImporter{},
+		Error:    func(error) {},
+	}
+	_, _ = conf.Check(ctx.GoAST.Name.Name, ctx.GoFileSet, []*ast.File{ctx.GoAST}, info) // ignored-error: safe — the first of the expected unresolved-name errors; the scopes are complete regardless
+	return info
 }
 
-func (r *ShadowVariableRule) checkAssign(ctx *core.FileContext, s *ast.AssignStmt, currentScope, outerScope map[string]int, violations *[]*core.Violation) {
-	if s.Tok.String() != ":=" {
-		return
-	}
-	for _, lhs := range s.Lhs {
-		if ident, ok := lhs.(*ast.Ident); ok && ident.Name != "_" {
-			r.reportShadow(ctx, ident, outerScope, violations)
-			currentScope[ident.Name] = ctx.LineFor(ident)
-		}
-	}
+// unresolvedImporter refuses every import: a file checked on its own has no
+// access to the packages it imports.
+type unresolvedImporter struct{}
+
+func (unresolvedImporter) Import(path string) (*types.Package, error) {
+	return nil, fmt.Errorf("import %q: not resolved in a single-file check", path)
 }
 
-func (r *ShadowVariableRule) checkDecl(ctx *core.FileContext, s *ast.DeclStmt, currentScope, outerScope map[string]int, violations *[]*core.Violation) {
-	genDecl, ok := s.Decl.(*ast.GenDecl)
-	if !ok {
-		return
-	}
-	for _, spec := range genDecl.Specs {
-		valueSpec, ok := spec.(*ast.ValueSpec)
-		if !ok {
-			continue
-		}
-		for _, name := range valueSpec.Names {
-			if name.Name != "_" {
-				r.reportShadow(ctx, name, outerScope, violations)
-				currentScope[name.Name] = ctx.LineFor(name)
-			}
-		}
-	}
-}
-
-func (r *ShadowVariableRule) checkIf(ctx *core.FileContext, s *ast.IfStmt, currentScope, outerScope map[string]int, violations *[]*core.Violation) {
-	if s.Init != nil {
-		r.checkStmt(ctx, s.Init, currentScope, outerScope, violations)
-	}
-	mergedScope := r.copyScope(currentScope)
-	r.checkBlock(ctx, s.Body, mergedScope, violations)
-	if s.Else != nil {
-		switch e := s.Else.(type) {
-		case *ast.BlockStmt:
-			r.checkBlock(ctx, e, mergedScope, violations)
-		case *ast.IfStmt:
-			r.checkStmt(ctx, e, mergedScope, outerScope, violations)
-		}
-	}
-}
-
-func (r *ShadowVariableRule) checkFor(ctx *core.FileContext, s *ast.ForStmt, currentScope, outerScope map[string]int, violations *[]*core.Violation) {
-	mergedScope := r.copyScope(currentScope)
-	if s.Init != nil {
-		r.checkStmt(ctx, s.Init, mergedScope, outerScope, violations)
-	}
-	r.checkBlock(ctx, s.Body, mergedScope, violations)
-}
-
-func (r *ShadowVariableRule) checkRange(ctx *core.FileContext, s *ast.RangeStmt, currentScope, outerScope map[string]int, violations *[]*core.Violation) {
-	mergedScope := r.copyScope(currentScope)
-	if s.Tok.String() == ":=" {
-		if key, ok := s.Key.(*ast.Ident); ok && key.Name != "_" {
-			r.reportShadow(ctx, key, outerScope, violations)
-			mergedScope[key.Name] = ctx.LineFor(key)
-		}
-		if s.Value != nil {
-			if value, ok := s.Value.(*ast.Ident); ok && value.Name != "_" {
-				r.reportShadow(ctx, value, outerScope, violations)
-				mergedScope[value.Name] = ctx.LineFor(value)
-			}
-		}
-	}
-	r.checkBlock(ctx, s.Body, mergedScope, violations)
-}
+var _ types.Importer = unresolvedImporter{}

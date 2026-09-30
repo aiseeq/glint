@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -42,15 +43,17 @@ func (r *PaginationBoundaryTruncationRule) AnalyzeFile(ctx *core.FileContext) []
 		if len(boundaryNames) == 0 {
 			return false
 		}
+		labels := loopLabels(fn.Body)
 		ast.Inspect(fn.Body, func(child ast.Node) bool {
 			loop, ok := child.(*ast.ForStmt)
 			if !ok {
 				return true
 			}
-			if !loopHasTemporalBreak(loop, boundaryNames) {
+			exit := paginationLoopExit{label: labels[loop]}
+			if !loopHasTemporalBreak(loop, boundaryNames, exit) {
 				return true
 			}
-			if cap := silentPageCap(loop, boundaryNames); cap != nil {
+			if cap := silentPageCap(loop, boundaryNames, exit); cap != nil {
 				line := ctx.GoFileSet.Position(cap.Pos()).Line
 				v := r.CreateViolation(ctx.RelPath, line, "page cap can silently truncate history before the temporal boundary is reached")
 				v.WithCode(ctx.GetLine(line))
@@ -84,14 +87,48 @@ func temporalBoundaryNames(fn *ast.FuncDecl) map[string]bool {
 	return names
 }
 
-func loopHasTemporalBreak(loop *ast.ForStmt, boundaryNames map[string]bool) bool {
+// loopLabels maps every labeled for statement of a body to its label.
+func loopLabels(body *ast.BlockStmt) map[*ast.ForStmt]string {
+	labels := make(map[*ast.ForStmt]string)
+	ast.Inspect(body, func(node ast.Node) bool {
+		labeled, ok := node.(*ast.LabeledStmt)
+		if !ok {
+			return true
+		}
+		if loop, isLoop := labeled.Stmt.(*ast.ForStmt); isLoop {
+			labels[loop] = labeled.Label.Name
+		}
+		return true
+	})
+	return labels
+}
+
+// paginationLoopExit says which statements leave the pagination loop: an
+// unlabeled break, a break naming the loop's label, and (for the temporal
+// boundary) a return.
+type paginationLoopExit struct {
+	label string
+}
+
+// breaks reports whether the branch statement is a break of the loop.
+func (e paginationLoopExit) breaks(stmt *ast.BranchStmt) bool {
+	if stmt.Tok != token.BREAK {
+		return false
+	}
+	return stmt.Label == nil || (e.label != "" && stmt.Label.Name == e.label)
+}
+
+func loopHasTemporalBreak(loop *ast.ForStmt, boundaryNames map[string]bool, exit paginationLoopExit) bool {
 	found := false
 	ast.Inspect(loop.Body, func(node ast.Node) bool {
 		if found {
 			return false
 		}
+		if _, nested := node.(*ast.FuncLit); nested {
+			return false
+		}
 		ifStmt, ok := node.(*ast.IfStmt)
-		if !ok || !containsIdentifier(ifStmt.Cond, boundaryNames) || !blockBreaksCurrentLoop(ifStmt.Body) {
+		if !ok || !containsIdentifier(ifStmt.Cond, boundaryNames) || !blockEndsWalk(ifStmt.Body, exit) {
 			return true
 		}
 		found = true
@@ -100,7 +137,7 @@ func loopHasTemporalBreak(loop *ast.ForStmt, boundaryNames map[string]bool) bool
 	return found
 }
 
-func silentPageCap(loop *ast.ForStmt, boundaryNames map[string]bool) ast.Node {
+func silentPageCap(loop *ast.ForStmt, boundaryNames map[string]bool, exit paginationLoopExit) ast.Node {
 	if containsPageCapName(loop.Cond) {
 		return loop
 	}
@@ -110,7 +147,7 @@ func silentPageCap(loop *ast.ForStmt, boundaryNames map[string]bool) ast.Node {
 			return false
 		}
 		ifStmt, ok := node.(*ast.IfStmt)
-		if !ok || !containsPageCapName(ifStmt.Cond) || !blockHasUnsafeCapBreak(ifStmt.Body, boundaryNames) {
+		if !ok || !containsPageCapName(ifStmt.Cond) || !blockHasUnsafeCapBreak(ifStmt.Body, boundaryNames, exit) {
 			return true
 		}
 		result = ifStmt
@@ -122,25 +159,28 @@ func silentPageCap(loop *ast.ForStmt, boundaryNames map[string]bool) ast.Node {
 	return result
 }
 
-func blockHasUnsafeCapBreak(block *ast.BlockStmt, boundaryNames map[string]bool) bool {
+// blockHasUnsafeCapBreak reports whether the cap block leaves the loop through
+// a break. A return is not silent: it hands the caller what it returns,
+// typically an explicit truncation error.
+func blockHasUnsafeCapBreak(block *ast.BlockStmt, boundaryNames map[string]bool, exit paginationLoopExit) bool {
 	for _, stmt := range block.List {
 		if ifStmt, ok := stmt.(*ast.IfStmt); ok && boundaryAbsentCondition(ifStmt.Cond, boundaryNames) {
 			continue
 		}
 		switch node := stmt.(type) {
 		case *ast.BranchStmt:
-			if node.Tok.String() == "break" && node.Label == nil {
+			if exit.breaks(node) {
 				return true
 			}
 		case *ast.BlockStmt:
-			if blockHasUnsafeCapBreak(node, boundaryNames) {
+			if blockHasUnsafeCapBreak(node, boundaryNames, exit) {
 				return true
 			}
 		case *ast.IfStmt:
-			if blockHasUnsafeCapBreak(node.Body, boundaryNames) {
+			if blockHasUnsafeCapBreak(node.Body, boundaryNames, exit) {
 				return true
 			}
-			if elseBlock, ok := node.Else.(*ast.BlockStmt); ok && blockHasUnsafeCapBreak(elseBlock, boundaryNames) {
+			if elseBlock, ok := node.Else.(*ast.BlockStmt); ok && blockHasUnsafeCapBreak(elseBlock, boundaryNames, exit) {
 				return true
 			}
 		}
@@ -187,22 +227,26 @@ func containsPageCapName(node ast.Node) bool {
 	return found
 }
 
-func blockBreaksCurrentLoop(block *ast.BlockStmt) bool {
+// blockEndsWalk reports whether the block ends the pagination walk: a break of
+// the loop or a return.
+func blockEndsWalk(block *ast.BlockStmt, exit paginationLoopExit) bool {
 	for _, stmt := range block.List {
 		switch node := stmt.(type) {
+		case *ast.ReturnStmt:
+			return true
 		case *ast.BranchStmt:
-			if node.Tok.String() == "break" && node.Label == nil {
+			if exit.breaks(node) {
 				return true
 			}
 		case *ast.BlockStmt:
-			if blockBreaksCurrentLoop(node) {
+			if blockEndsWalk(node, exit) {
 				return true
 			}
 		case *ast.IfStmt:
-			if blockBreaksCurrentLoop(node.Body) {
+			if blockEndsWalk(node.Body, exit) {
 				return true
 			}
-			if elseBlock, ok := node.Else.(*ast.BlockStmt); ok && blockBreaksCurrentLoop(elseBlock) {
+			if elseBlock, ok := node.Else.(*ast.BlockStmt); ok && blockEndsWalk(elseBlock, exit) {
 				return true
 			}
 		}

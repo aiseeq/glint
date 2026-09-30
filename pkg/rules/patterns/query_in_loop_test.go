@@ -209,6 +209,78 @@ func ex(repo Repo, ids []string) {
 	assert.Empty(t, violations)
 }
 
+// The range operand and the init statement run once, before the first
+// iteration; only the condition, the post statement and the body repeat.
+func TestQueryInLoopRule_LoopHeaderEvaluatedOnce(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"svc/svc.go": `package svc
+
+import (
+	"context"
+	"database/sql"
+)
+
+type UserRepo struct{ db *sql.DB }
+
+func (r *UserRepo) ListUsers(ctx context.Context) []string { _ = r.db.PingContext(ctx); return nil }
+func (r *UserRepo) Count(ctx context.Context) int          { _ = r.db.PingContext(ctx); return 0 }
+func (r *UserRepo) Exists(ctx context.Context, i int) bool  { _ = r.db.PingContext(ctx); return i > 0 }
+func (r *UserRepo) Next(ctx context.Context, i int) int     { _ = r.db.PingContext(ctx); return i - 1 }
+
+type Svc struct{ repo *UserRepo }
+
+func rangeOperand(ctx context.Context, s *Svc) int {
+	n := 0
+	for _, u := range s.repo.ListUsers(ctx) {
+		n += len(u)
+	}
+	return n
+}
+
+func initStatement(ctx context.Context, s *Svc) int {
+	n := 0
+	for i := s.repo.Count(ctx); i > 0; i-- {
+		n++
+	}
+	return n
+}
+
+func nestedRangeOperand(ctx context.Context, s *Svc, groups []int) int {
+	n := 0
+	for range groups {
+		for _, u := range s.repo.ListUsers(ctx) {
+			n += len(u)
+		}
+	}
+	return n
+}
+
+func conditionAndPost(ctx context.Context, s *Svc) int {
+	n := 0
+	for i := 10; s.repo.Exists(ctx, i); i = s.repo.Next(ctx, i) {
+		n++
+	}
+	return n
+}
+`,
+	})
+
+	violations, err := NewQueryInLoopRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+
+	var reported []string
+	for _, v := range violations {
+		call := v.Message[strings.Index(v.Message, "'")+1 : strings.LastIndex(v.Message, "'")]
+		reported = append(reported, v.Context["function"].(string)+":"+call)
+	}
+	sort.Strings(reported)
+	assert.Equal(t, []string{
+		"conditionAndPost:repo.Exists",
+		"conditionAndPost:repo.Next",
+		"nestedRangeOperand:repo.ListUsers",
+	}, reported)
+}
+
 func createQueryContext(t *testing.T, path, code string) *core.FileContext {
 	t.Helper()
 	ctx := &core.FileContext{

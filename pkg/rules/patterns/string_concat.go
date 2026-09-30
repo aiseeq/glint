@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -29,8 +30,24 @@ func NewStringConcatRule() *StringConcatRule {
 	}
 }
 
-// AnalyzeFile checks for string concatenation in loops
+// AnalyzeFile checks one file without type information: only concatenations
+// with a string literal are known to be string concatenations.
 func (r *StringConcatRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *StringConcatRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; with type information the accumulator
+// is judged by its type.
+func (r *StringConcatRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze checks for string concatenation in loops. info is nil for a file
+// without type information.
+func (r *StringConcatRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() {
 		return nil
 	}
@@ -45,9 +62,9 @@ func (r *StringConcatRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 		// Check for loops
 		switch loop := n.(type) {
 		case *ast.ForStmt:
-			r.checkLoop(ctx, loop.Body, &violations)
+			r.checkLoop(ctx, info, loop.Body, &violations)
 		case *ast.RangeStmt:
-			r.checkLoop(ctx, loop.Body, &violations)
+			r.checkLoop(ctx, info, loop.Body, &violations)
 		}
 
 		return true
@@ -56,7 +73,7 @@ func (r *StringConcatRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 	return violations
 }
 
-func (r *StringConcatRule) checkLoop(ctx *core.FileContext, body *ast.BlockStmt, violations *[]*core.Violation) {
+func (r *StringConcatRule) checkLoop(ctx *core.FileContext, info *types.Info, body *ast.BlockStmt, violations *[]*core.Violation) {
 	if body == nil {
 		return
 	}
@@ -75,7 +92,7 @@ func (r *StringConcatRule) checkLoop(ctx *core.FileContext, body *ast.BlockStmt,
 
 		// Check for += with string
 		if assign.Tok == token.ADD_ASSIGN {
-			if len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && r.isStringConcat(assign.Rhs[0]) {
+			if len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && r.isStringAccumulation(info, assign.Lhs[0], assign.Rhs[0]) {
 				if !r.variableResetBefore(body, assign) {
 					r.reportConcatViolation(ctx, assign, violations)
 				}
@@ -85,7 +102,7 @@ func (r *StringConcatRule) checkLoop(ctx *core.FileContext, body *ast.BlockStmt,
 
 		// Check for s = s + "..."
 		if assign.Tok == token.ASSIGN && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 {
-			if r.isAssignPlusPattern(assign) {
+			if r.isAssignPlusPattern(info, assign) {
 				if !r.variableResetBefore(body, assign) {
 					r.reportConcatViolation(ctx, assign, violations)
 				}
@@ -131,23 +148,19 @@ func (r *StringConcatRule) variableResetBefore(body *ast.BlockStmt, target *ast.
 	return reset
 }
 
-func (r *StringConcatRule) isAssignPlusPattern(assign *ast.AssignStmt) bool {
+// isAssignPlusPattern matches `s = s + x` on a string accumulator.
+func (r *StringConcatRule) isAssignPlusPattern(info *types.Info, assign *ast.AssignStmt) bool {
 	binary, ok := assign.Rhs[0].(*ast.BinaryExpr)
 	if !ok || binary.Op != token.ADD {
 		return false
 	}
-
-	lhsIdent, ok := assign.Lhs[0].(*ast.Ident)
-	if !ok {
+	if types.ExprString(assign.Lhs[0]) != types.ExprString(binary.X) {
 		return false
 	}
-
-	rhsIdent, ok := binary.X.(*ast.Ident)
-	if !ok {
-		return false
+	if info != nil {
+		return isStringKind(info.TypeOf(assign.Lhs[0]))
 	}
-
-	return lhsIdent.Name == rhsIdent.Name && r.isStringExpr(binary.Y)
+	return isStringBasicLit(binary.Y)
 }
 
 func (r *StringConcatRule) reportConcatViolation(ctx *core.FileContext, assign *ast.AssignStmt, violations *[]*core.Violation) {
@@ -159,53 +172,30 @@ func (r *StringConcatRule) reportConcatViolation(ctx *core.FileContext, assign *
 	*violations = append(*violations, v)
 }
 
-func (r *StringConcatRule) isStringConcat(expr ast.Expr) bool {
-	// Check for string literal - definitely string concat
-	if lit, ok := expr.(*ast.BasicLit); ok {
-		return lit.Kind == token.STRING
+// isStringAccumulation reports `lhs += rhs` on a string. With type
+// information the type of the accumulator decides; without it only a string
+// literal on the right says the operands are strings.
+func (r *StringConcatRule) isStringAccumulation(info *types.Info, lhs, rhs ast.Expr) bool {
+	if info != nil {
+		return isStringKind(info.TypeOf(lhs))
 	}
-
-	// Check for variable - be conservative, only flag if it looks like string
-	if ident, ok := expr.(*ast.Ident); ok {
-		// Common numeric variable names - don't flag these
-		numericNames := map[string]bool{
-			"i": true, "j": true, "k": true, "n": true, "m": true,
-			"count": true, "total": true, "sum": true, "size": true,
-			"len": true, "length": true, "num": true, "idx": true,
-			"index": true, "offset": true, "pos": true, "x": true,
-			"y": true, "z": true, "d": true, "t": true, "v": true,
-			"result": true, "val": true, "value": true, "amount": true,
-		}
-		if numericNames[ident.Name] {
-			return false
-		}
-		// Only flag variables with string-like names
-		// This is conservative - better to miss some than have false positives
-		return false
+	if isStringBasicLit(rhs) {
+		return true
 	}
-
-	// Check for binary expression with + where at least one side is string literal
-	if binary, ok := expr.(*ast.BinaryExpr); ok {
-		if binary.Op == token.ADD {
-			// Only flag if we can confirm string involvement
-			if xLiteral, ok := binary.X.(*ast.BasicLit); ok && xLiteral.Kind == token.STRING {
-				return true
-			}
-			if yLiteral, ok := binary.Y.(*ast.BasicLit); ok && yLiteral.Kind == token.STRING {
-				return true
-			}
-		}
-	}
-
-	return false
+	binary, ok := rhs.(*ast.BinaryExpr)
+	return ok && binary.Op == token.ADD && (isStringBasicLit(binary.X) || isStringBasicLit(binary.Y))
 }
 
-func (r *StringConcatRule) isStringExpr(expr ast.Expr) bool {
-	// Check for string literal
-	if lit, ok := expr.(*ast.BasicLit); ok {
-		return lit.Kind == token.STRING
-	}
+func isStringBasicLit(expr ast.Expr) bool {
+	lit, ok := expr.(*ast.BasicLit)
+	return ok && lit.Kind == token.STRING
+}
 
-	// Check for string conversion or function call
-	return true // Be conservative
+// isStringKind reports a string type, named string types included.
+func isStringKind(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	basic, ok := t.Underlying().(*types.Basic)
+	return ok && basic.Info()&types.IsString != 0
 }

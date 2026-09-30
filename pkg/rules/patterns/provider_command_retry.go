@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -19,6 +20,15 @@ func init() {
 }
 
 // ProviderCommandRetryRule detects automatic retries of destructive provider commands.
+//
+// A retry is a retry callback (Retry(func() { ... })), a same-file helper
+// called with its retry flag set, or a loop that repeats one command: every
+// iteration calls the same receiver with the same arguments (nothing derived
+// from the loop variables or from a channel receive), and the loop repeats by
+// construction (an attempt counter, a range without values) or on failure
+// (a sleep or backoff, an error check that continues, a success check that
+// leaves). A loop over providers or a worker draining a channel sends a new
+// command each time and is not a retry.
 type ProviderCommandRetryRule struct {
 	*rules.BaseRule
 }
@@ -108,14 +118,171 @@ func (a *providerCommandRetryAnalyzer) analyzeFunction(function *ast.FuncDecl) {
 				a.detectRetryCallbacks(function.Name.Name, current)
 			}
 		case *ast.ForStmt:
+			if !countingForLoop(current) && !retryBodyEvidence(current.Body) {
+				return true
+			}
 			variables := derivedLoopVariables(current.Body, forLoopVariables(current))
 			a.detectCommands(function.Name.Name, current.Body, "loop", variables)
 		case *ast.RangeStmt:
+			if !repetitionRange(current) && !retryBodyEvidence(current.Body) {
+				return true
+			}
 			variables := derivedLoopVariables(current.Body, rangeLoopVariables(current))
 			a.detectCommands(function.Name.Name, current.Body, "loop", variables)
 		}
 		return true
 	})
+}
+
+// countingForLoop reports whether the loop counts its iterations itself
+// (for attempt := 0; attempt < n; attempt++): each iteration is one more
+// attempt, not one more item.
+func countingForLoop(loop *ast.ForStmt) bool {
+	return loop.Init != nil && loop.Cond != nil
+}
+
+// repetitionRange reports whether a range loop repeats rather than walks:
+// it binds no value (for range delays) or binds an attempt number
+// (for attempt := range maxAttempts).
+func repetitionRange(loop *ast.RangeStmt) bool {
+	bound := false
+	for _, expression := range []ast.Expr{loop.Key, loop.Value} {
+		identifier, ok := expression.(*ast.Ident)
+		if expression == nil || (ok && identifier.Name == "_") {
+			continue
+		}
+		bound = true
+		if ok && attemptCounterName(identifier.Name) {
+			return true
+		}
+	}
+	return !bound
+}
+
+// attemptCounterName reports whether a variable counts attempts.
+func attemptCounterName(name string) bool {
+	for _, token := range identifierTokens(name) {
+		switch token {
+		case "attempt", "attempts", "retry", "retries", "try", "tries":
+			return true
+		}
+	}
+	return false
+}
+
+// retryBodyEvidence reports whether a loop body repeats its work on failure:
+// it waits between iterations (a sleep, a timer, a backoff), counts attempts,
+// continues after an error or leaves on success. Nested loops and function
+// literals are not searched: their continue, break and counters are their own.
+func retryBodyEvidence(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		if found {
+			return false
+		}
+		switch current := node.(type) {
+		case *ast.FuncLit, *ast.ForStmt, *ast.RangeStmt:
+			return false
+		case *ast.CallExpr:
+			found = waitsBetweenAttempts(current)
+		case *ast.IncDecStmt:
+			identifier, ok := current.X.(*ast.Ident)
+			found = ok && current.Tok == token.INC && attemptCounterName(identifier.Name)
+		case *ast.AssignStmt:
+			if current.Tok == token.ADD_ASSIGN && len(current.Lhs) == 1 {
+				identifier, ok := current.Lhs[0].(*ast.Ident)
+				found = ok && attemptCounterName(identifier.Name)
+			}
+		case *ast.IfStmt:
+			found = errorCheckRepeats(current)
+		}
+		return !found
+	})
+	return found
+}
+
+// waitsBetweenAttempts reports whether the call pauses before the next
+// attempt: time.Sleep, time.After, time.NewTimer, or a sleep/backoff helper.
+func waitsBetweenAttempts(call *ast.CallExpr) bool {
+	name := calledFunctionName(call.Fun)
+	lower := strings.ToLower(name)
+	if strings.Contains(lower, "sleep") || strings.Contains(lower, "backoff") {
+		return true
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := selector.X.(*ast.Ident)
+	return ok && pkg.Name == "time" && (name == "After" || name == "NewTimer")
+}
+
+// errorCheckRepeats reports whether the if statement turns an error into
+// another iteration (err != nil → continue) or success into leaving the loop
+// (err == nil → return/break).
+func errorCheckRepeats(stmt *ast.IfStmt) bool {
+	comparison, ok := ast.Unparen(stmt.Cond).(*ast.BinaryExpr)
+	if !ok || (comparison.Op != token.NEQ && comparison.Op != token.EQL) {
+		return false
+	}
+	if !comparesErrorWithNil(comparison) {
+		return false
+	}
+	if comparison.Op == token.NEQ {
+		return blockBranches(stmt.Body, func(branch ast.Stmt) bool {
+			jump, ok := branch.(*ast.BranchStmt)
+			return ok && jump.Tok == token.CONTINUE && jump.Label == nil
+		})
+	}
+	return blockBranches(stmt.Body, func(branch ast.Stmt) bool {
+		if _, ok := branch.(*ast.ReturnStmt); ok {
+			return true
+		}
+		jump, ok := branch.(*ast.BranchStmt)
+		return ok && jump.Tok == token.BREAK && jump.Label == nil
+	})
+}
+
+// comparesErrorWithNil reports whether a comparison is err == nil / err != nil.
+func comparesErrorWithNil(comparison *ast.BinaryExpr) bool {
+	for _, pair := range [2][2]ast.Expr{{comparison.X, comparison.Y}, {comparison.Y, comparison.X}} {
+		value, valueOK := pair[0].(*ast.Ident)
+		nilIdent, nilOK := pair[1].(*ast.Ident)
+		if !valueOK || !nilOK || nilIdent.Name != "nil" {
+			continue
+		}
+		for _, token := range identifierTokens(value.Name) {
+			if token == "err" || token == "error" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// blockBranches reports whether a statement of the block, or of a block or if
+// nested in it, satisfies match.
+func blockBranches(block *ast.BlockStmt, match func(ast.Stmt) bool) bool {
+	for _, stmt := range block.List {
+		switch current := stmt.(type) {
+		case *ast.BlockStmt:
+			if blockBranches(current, match) {
+				return true
+			}
+		case *ast.IfStmt:
+			if blockBranches(current.Body, match) {
+				return true
+			}
+			if elseBlock, ok := current.Else.(*ast.BlockStmt); ok && blockBranches(elseBlock, match) {
+				return true
+			}
+		default:
+			if match(stmt) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *providerCommandRetryAnalyzer) detectBoolHelperCalls(function *ast.FuncDecl) {
@@ -136,7 +303,7 @@ func (a *providerCommandRetryAnalyzer) detectBoolHelperCalls(function *ast.FuncD
 
 func (a *providerCommandRetryAnalyzer) detectRetryCallbacks(function string, retryCall *ast.CallExpr) {
 	for _, argument := range retryCall.Args {
-		callback, ok := unparenProviderRetryExpr(argument).(*ast.FuncLit)
+		callback, ok := ast.Unparen(argument).(*ast.FuncLit)
 		if !ok {
 			continue
 		}
@@ -153,10 +320,8 @@ func (a *providerCommandRetryAnalyzer) detectCommands(function string, root ast.
 		if !ok {
 			return true
 		}
-		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if ok && providerCommandMethods[selector.Sel.Name] &&
-			receiverContainsAny(selector.X, providerReceiverMarkers) && !callUsesIdentifiers(call, loopVariables) {
-			a.report(call, function, selector.Sel.Name, evidence)
+		if command, ok := providerCommandMethod(call); ok && !callUsesIdentifiers(call, loopVariables) {
+			a.report(call, function, command, evidence)
 		}
 		return true
 	})
@@ -178,11 +343,13 @@ func derivedLoopVariables(root ast.Node, loopVariables map[string]bool) map[stri
 					changed = addDerivedIdentifiers([]ast.Expr{current.Key, current.Value}, derived) || changed
 				}
 			case *ast.AssignStmt:
-				if expressionsUseIdentifiers(current.Rhs, derived) {
+				// A value received from a channel is new on every iteration,
+				// as is anything derived from a loop variable.
+				if expressionsUseIdentifiers(current.Rhs, derived) || receivesFromChannel(current.Rhs) {
 					changed = addDerivedIdentifiers(current.Lhs, derived) || changed
 				}
 			case *ast.ValueSpec:
-				if expressionsUseIdentifiers(current.Values, derived) {
+				if expressionsUseIdentifiers(current.Values, derived) || receivesFromChannel(current.Values) {
 					for _, name := range current.Names {
 						if name.Name != "_" && !derived[name.Name] {
 							derived[name.Name] = true
@@ -195,6 +362,17 @@ func derivedLoopVariables(root ast.Node, loopVariables map[string]bool) map[stri
 		})
 	}
 	return derived
+}
+
+// receivesFromChannel reports whether an expression is a channel receive.
+func receivesFromChannel(expressions []ast.Expr) bool {
+	for _, expression := range expressions {
+		unary, ok := ast.Unparen(expression).(*ast.UnaryExpr)
+		if ok && unary.Op == token.ARROW {
+			return true
+		}
+	}
+	return false
 }
 
 func addDerivedIdentifiers(expressions []ast.Expr, identifiers map[string]bool) bool {
@@ -233,8 +411,15 @@ func rangeLoopVariables(loop *ast.RangeStmt) map[string]bool {
 	return variables
 }
 
+// callUsesIdentifiers reports whether the call's receiver or arguments use one
+// of the identifiers: a loop over providers calls a different receiver on
+// every iteration just as a loop over payouts sends a different payout.
 func callUsesIdentifiers(call *ast.CallExpr, identifiers map[string]bool) bool {
-	return expressionsUseIdentifiers(call.Args, identifiers)
+	operands := call.Args
+	if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
+		operands = append([]ast.Expr{selector.X}, call.Args...)
+	}
+	return expressionsUseIdentifiers(operands, identifiers)
 }
 
 func expressionsUseIdentifiers(expressions []ast.Expr, identifiers map[string]bool) bool {
@@ -280,7 +465,7 @@ func (a *providerCommandRetryAnalyzer) report(call *ast.CallExpr, function, comm
 }
 
 func calledFunctionName(expression ast.Expr) string {
-	switch function := unparenProviderRetryExpr(expression).(type) {
+	switch function := ast.Unparen(expression).(type) {
 	case *ast.Ident:
 		return function.Name
 	case *ast.SelectorExpr:
@@ -291,16 +476,6 @@ func calledFunctionName(expression ast.Expr) string {
 }
 
 func isTrueLiteral(expression ast.Expr) bool {
-	ident, ok := unparenProviderRetryExpr(expression).(*ast.Ident)
+	ident, ok := ast.Unparen(expression).(*ast.Ident)
 	return ok && ident.Name == "true"
-}
-
-func unparenProviderRetryExpr(expression ast.Expr) ast.Expr {
-	for {
-		parenthesized, ok := expression.(*ast.ParenExpr)
-		if !ok {
-			return expression
-		}
-		expression = parenthesized.X
-	}
 }

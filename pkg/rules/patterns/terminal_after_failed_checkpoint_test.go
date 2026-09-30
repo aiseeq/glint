@@ -610,6 +610,185 @@ func run() {
 	assert.Empty(t, NewTerminalAfterFailedCheckpointRule().AnalyzeFile(ctx))
 }
 
+// Paths through labeled branches, goto and fallthrough reach the terminal
+// call; calls that never return stop the failure path; deferred terminal
+// calls run on every exit taken after they were registered.
+func TestTerminalAfterFailedCheckpointRule_JumpsExitsAndDefers(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		want int
+	}{
+		{
+			name: "goto to a label after return",
+			code: `package jobs
+import "log"
+func run(j *Job) {
+	if err := j.SaveProgress(); err != nil {
+		log.Printf("save: %v", err)
+		goto done
+	}
+	return
+done:
+	j.Complete()
+}`,
+			want: 1,
+		},
+		{
+			name: "fallthrough into the clause with the terminal call",
+			code: `package jobs
+import "log"
+func run(j *Job, k int) {
+	switch k {
+	case 1:
+		if err := j.SaveProgress(); err != nil {
+			log.Printf("save: %v", err)
+		}
+		fallthrough
+	case 2:
+		j.Complete()
+	}
+}`,
+			want: 1,
+		},
+		{
+			name: "labeled break out of an infinite loop",
+			code: `package jobs
+import "log"
+func run(j *Job, ch chan int) {
+outer:
+	for {
+		select {
+		case <-ch:
+			if err := j.SaveProgress(); err != nil {
+				log.Printf("save: %v", err)
+			}
+			break outer
+		}
+	}
+	j.Complete()
+}`,
+			want: 1,
+		},
+		{
+			name: "log.Fatalf ends the process",
+			code: `package jobs
+import "log"
+func run(j *Job) {
+	if err := j.SaveProgress(); err != nil {
+		log.Fatalf("save: %v", err)
+	}
+	j.Complete()
+}`,
+			want: 0,
+		},
+		{
+			name: "renamed os.Exit ends the process",
+			code: `package jobs
+import sys "os"
+func run(j *Job) {
+	if err := j.SaveProgress(); err != nil {
+		sys.Exit(1)
+	}
+	j.Complete()
+}`,
+			want: 0,
+		},
+		{
+			name: "Fatalf of an unknown receiver is not known to stop",
+			code: `package jobs
+func run(j *Job, logger Logger) {
+	if err := j.SaveProgress(); err != nil {
+		logger.Fatalf("save: %v", err)
+	}
+	j.Complete()
+}`,
+			want: 1,
+		},
+		{
+			name: "deferred terminal call runs after the logged failure",
+			code: `package jobs
+import "log"
+func run(j *Job) {
+	defer j.Complete()
+	if err := j.SaveProgress(); err != nil {
+		log.Printf("save: %v", err)
+	}
+}`,
+			want: 1,
+		},
+		{
+			name: "deferred terminal call runs on the returning failure path",
+			code: `package jobs
+func run(j *Job) error {
+	defer j.Complete()
+	if err := j.SaveProgress(); err != nil {
+		return err
+	}
+	return nil
+}`,
+			want: 1,
+		},
+		{
+			name: "deferred closure with the terminal call",
+			code: `package jobs
+import "log"
+func run(j *Job) {
+	defer func() {
+		j.Complete()
+	}()
+	if err := j.SaveProgress(); err != nil {
+		log.Printf("save: %v", err)
+	}
+}`,
+			want: 1,
+		},
+		{
+			name: "defer registered only after a successful checkpoint",
+			code: `package jobs
+func run(j *Job) error {
+	if err := j.SaveProgress(); err != nil {
+		return err
+	}
+	defer j.Complete()
+	return nil
+}`,
+			want: 0,
+		},
+		{
+			name: "os.Exit skips deferred calls",
+			code: `package jobs
+import "os"
+func run(j *Job) {
+	defer j.Complete()
+	if err := j.SaveProgress(); err != nil {
+		os.Exit(1)
+	}
+}`,
+			want: 0,
+		},
+		{
+			name: "deferred terminal call on another receiver",
+			code: `package jobs
+import "log"
+func run(j *Job, other *Job) {
+	defer other.Complete()
+	if err := j.SaveProgress(); err != nil {
+		log.Printf("save: %v", err)
+	}
+}`,
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := terminalAfterFailedCheckpointContext(t, "job.go", tt.code)
+			assert.Len(t, NewTerminalAfterFailedCheckpointRule().AnalyzeFile(ctx), tt.want)
+		})
+	}
+}
+
 func terminalAfterFailedCheckpointContext(t *testing.T, path, code string) *core.FileContext {
 	t.Helper()
 	ctx := core.NewFileContext(path, ".", []byte(code), nil)

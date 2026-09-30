@@ -363,34 +363,73 @@ func update(repo *Repo) {
 	assert.Equal(t, "WriteAudit", violations[0].Context["sink"])
 }
 
-func TestAuditActorPropagationRule_RejectsMalformedSinkRoles(t *testing.T) {
-	_, err := analyzeAuditModuleError(t, NewAuditActorPropagationRule(), map[string]string{
-		"audit.go": `package audit
+// A function that only shares its name with a default sink (an ordinary
+// get-or-create keyed by userID, a method with two actor parameters, one whose
+// roles have the wrong types) is not an audit sink: the rule skips it instead
+// of aborting the whole run.
+func TestAuditActorPropagationRule_SkipsFunctionsWithoutSinkSignature(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "actor without source",
+			source: `package audit
+type UserRepo struct{}
+func (r *UserRepo) CreateOrGet(userID int64, name string) (int64, error) { return userID, nil }
+func use(r *UserRepo) { _, _ = r.CreateOrGet(1, "x") }
+`,
+		},
+		{
+			name: "two actor parameters",
+			source: `package audit
 type Repo struct{}
 func (r *Repo) RecordStatusHistory(source string, actorUserID int, operatorUserID int) {}
 func update(repo *Repo, actorUserID int) {
 	repo.RecordStatusHistory("api", actorUserID, actorUserID)
 }
 `,
-	})
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "malformed")
-}
-
-func TestAuditActorPropagationRule_RejectsMalformedSinkRoleTypes(t *testing.T) {
-	_, err := analyzeAuditModuleError(t, NewAuditActorPropagationRule(), map[string]string{
-		"audit.go": `package audit
+		},
+		{
+			name: "role types do not match",
+			source: `package audit
 type Repo struct{}
 func (r *Repo) RecordStatusHistory(source int, actorUserID string) {}
 func update(repo *Repo) {
 	repo.RecordStatusHistory(1, "admin")
 }
 `,
-	})
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			violations, err := analyzeAuditModuleError(t, NewAuditActorPropagationRule(), map[string]string{
+				"audit.go": tt.source,
+			})
+			require.NoError(t, err)
+			assert.Empty(t, violations)
+		})
+	}
+}
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "role types")
+// YAML configuration decodes a list as []any; the rule accepts it as long as
+// every item is a non-empty string.
+func TestAuditActorPropagationRule_ConfigureSinks(t *testing.T) {
+	rule := NewAuditActorPropagationRule()
+	require.NoError(t, rule.Configure(map[string]any{"sinks": []any{"WriteAudit", "RecordStatusHistory"}}))
+	assert.Equal(t, auditSinkSet([]string{"WriteAudit", "RecordStatusHistory"}), rule.sinks)
+
+	for name, value := range map[string]any{
+		"non-string item": []any{"WriteAudit", 7},
+		"empty item":      []any{"WriteAudit", " "},
+		"not a list":      "WriteAudit",
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := NewAuditActorPropagationRule().Configure(map[string]any{"sinks": value})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "audit-actor-propagation sinks")
+		})
+	}
 }
 
 func TestAuditActorPropagationRule_RejectsUnmappableSourceSinkPosition(t *testing.T) {

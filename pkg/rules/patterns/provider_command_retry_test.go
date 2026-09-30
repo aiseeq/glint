@@ -277,6 +277,142 @@ func statuses(s *Service, refs []string) error {
 	}
 }
 
+// A loop that calls a provider is a retry only when every iteration sends the
+// same command and something in the loop repeats it on failure: an attempt
+// counter, a sleep or backoff, an error check that continues, a success check
+// that leaves.
+func TestProviderCommandRetryRule_LoopsThatAreNotRetries(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "fan-out over providers: the loop variable is the receiver",
+			body: `for _, bank := range banks {
+		_ = bank.TransferFunds(ctx, amount)
+	}`,
+		},
+		{
+			name: "fan-out over an indexed provider slice",
+			body: `for i := 0; i < len(banks); i++ {
+		_ = banks[i].TransferFunds(ctx, amount)
+	}`,
+		},
+		{
+			name: "worker receiving the command from a channel in select",
+			body: `for {
+		select {
+		case <-ctx.Done():
+			return
+		case p := <-ch:
+			if err := s.provider.SendPayout(ctx, p); err != nil {
+				continue
+			}
+		}
+	}`,
+		},
+		{
+			name: "worker receiving the command with comma-ok",
+			body: `for {
+		p, ok := <-ch
+		if !ok {
+			return
+		}
+		if err := s.provider.SendPayout(ctx, p); err != nil {
+			continue
+		}
+	}`,
+		},
+		{
+			name: "repository insert named like a command",
+			body: `for attempt := 0; attempt < 3; attempt++ {
+		if err := s.payoutRepo.CreatePayout(ctx, req); err == nil {
+			return
+		}
+	}`,
+		},
+		{
+			name: "loop without any retry evidence",
+			body: `for _, item := range items {
+		log(item)
+		_ = s.provider.SendPayout(ctx, req)
+	}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code := fmt.Sprintf(`package service
+func run(ctx Context, s *Service, banks []*Bank, amount int, ch chan Payout, items []Item, req Payout) {
+	%s
+}`, tt.body)
+			ctx := createQueryContext(t, "service.go", code)
+			assert.Empty(t, NewProviderCommandRetryRule().AnalyzeFile(ctx))
+		})
+	}
+}
+
+func TestProviderCommandRetryRule_RetryEvidenceInOpenLoops(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "error check continues after a sleep",
+			body: `for {
+		if err := s.provider.SendPayout(ctx, req); err != nil {
+			time.Sleep(time.Second)
+			continue
+		}
+		break
+	}`,
+		},
+		{
+			name: "success check leaves the loop",
+			body: `for {
+		err := s.provider.CancelTransaction(ref)
+		if err == nil {
+			return
+		}
+	}`,
+		},
+		{
+			name: "attempt counter",
+			body: `for attempts < 3 {
+		attempts++
+		_ = s.provider.RefundPayment(ref)
+	}`,
+		},
+		{
+			name: "backoff between attempts",
+			body: `for !done {
+		done = s.provider.SendPayout(ctx, req) == nil
+		policy.WaitBackoff()
+	}`,
+		},
+		{
+			name: "range over an attempt count",
+			body: `for attempt := range maxAttempts {
+		log(attempt)
+		_ = s.provider.SendPayout(ctx, req)
+	}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code := fmt.Sprintf(`package service
+func run(ctx Context, s *Service, req Payout, ref string, attempts, maxAttempts int, done bool) {
+	%s
+}`, tt.body)
+			ctx := createQueryContext(t, "service.go", code)
+			violations := NewProviderCommandRetryRule().AnalyzeFile(ctx)
+			require.Len(t, violations, 1)
+			assert.Equal(t, "loop", violations[0].Context["retry_evidence"])
+		})
+	}
+}
+
 func TestProviderCommandRetryRule_SuppressionAndTestFiles(t *testing.T) {
 	code := `package service
 func cancel(s *Service, ref string) error {
