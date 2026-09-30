@@ -126,7 +126,7 @@ func main() {}`,
 			wantViolations: 0,
 		},
 		{
-			name: "method - skip (might implement interface)",
+			name: "unexported method no interface of the package declares",
 			code: `package main
 
 type myType struct{}
@@ -136,7 +136,7 @@ func (m *myType) unusedMethod() {}
 func main() {
 	var _ myType
 }`,
-			wantViolations: 0,
+			wantViolations: 1,
 		},
 		{
 			name: "blank identifier - skip",
@@ -307,4 +307,38 @@ func TestUnusedSymbolsSkipsTestFiles(t *testing.T) {
 		"main_test.go": "package main\n\nimport \"testing\"\n\nfunc unusedHelper() {}\n\nfunc TestSomething(t *testing.T) {}\n",
 	})
 	assert.Empty(t, violations, "Should skip test files")
+}
+
+// An unexported method can satisfy only an interface of its own package that
+// declares it: without one and without a call, nothing reaches it.
+func TestUnusedSymbolsReportsUnexportedMethodNeverCalled(t *testing.T) {
+	violations := analyzeUnusedSymbols(t, map[string]string{
+		"routing/factory.go": `package routing
+
+type Router struct{}
+
+type Factory struct{}
+
+func (f *Factory) Build() *Router { return f.createRouter() }
+
+func (f *Factory) createRouter() *Router { return &Router{} }
+
+func (f *Factory) createCleanRouter() (*Router, error) {
+	return f.createCleanRouter()
+}
+
+type closer interface{ closeAll() error }
+
+type pool struct{}
+
+func (p *pool) closeAll() error { return nil }
+
+var _ closer = (*pool)(nil)
+
+func (p *pool) String() string { return "pool" }
+`,
+	})
+	require.Len(t, violations, 1)
+	assert.Equal(t, 11, violations[0].Line)
+	assert.Contains(t, violations[0].Message, "createCleanRouter")
 }
