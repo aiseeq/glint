@@ -88,13 +88,13 @@ func (r *ErrorLengthCheckRule) checkLengthComparison(ctx *core.FileContext, expr
 	var lenCall *ast.CallExpr
 	var numLit *ast.BasicLit
 
-	if call := r.extractLenCall(expr.X); call != nil {
-		lenCall = call
+	if leftLen := r.extractLenCall(expr.X); leftLen != nil {
+		lenCall = leftLen
 		if lit, ok := expr.Y.(*ast.BasicLit); ok && lit.Kind == token.INT {
 			numLit = lit
 		}
-	} else if call := r.extractLenCall(expr.Y); call != nil {
-		lenCall = call
+	} else if rightLen := r.extractLenCall(expr.Y); rightLen != nil {
+		lenCall = rightLen
 		if lit, ok := expr.X.(*ast.BasicLit); ok && lit.Kind == token.INT {
 			numLit = lit
 		}

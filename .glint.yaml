@@ -34,6 +34,12 @@ categories:
   patterns:
     enabled: true
     rules:
+      mock-identifier:
+        exceptions:
+          - files: "pkg/rules/deadcode/{stub_method,nil_return_stub}.go"
+            reason: >-
+              These rules detect stub methods: "Stub" in their names is the
+              subject they report on, not a fake implementation in production.
       error-wrap:
         exceptions:
           - files: "pkg/core/**"
