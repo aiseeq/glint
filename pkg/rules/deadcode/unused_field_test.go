@@ -403,6 +403,29 @@ func waveOf(name string) int {
 	require.Len(t, violations, 1)
 	assert.Equal(t, 5, violations[0].Line)
 	assert.Contains(t, violations[0].Message, "MacroAt")
+	assert.Contains(t, violations[0].Message, "is set but never read")
+}
+
+// A setting nothing sets and nothing reads is declared and forgotten: the
+// message must not claim it is set.
+func TestUnusedFieldReportsSettingNeitherSetNorRead(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"feed.go": `package feed
+
+type Config struct {
+	Limit    int
+	Keywords []string
+}
+
+func Limit(cfg Config) int {
+	return cfg.Limit
+}
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Config.Keywords is never set nor read")
+	assert.NotContains(t, violations[0].Message, "is set but")
 }
 
 // An exported field of an ordinary struct may well be read outside the analyzed

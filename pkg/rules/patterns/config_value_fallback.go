@@ -33,13 +33,24 @@ var configFieldTags = []string{"yaml", "toml", "mapstructure", "env", "ini", "ko
 // The literal is a second default the configuration does not know about: the
 // operator sets 0 to switch something off and gets 14, the configuration's own
 // default drifts from the code's, and a broken config file is never noticed.
-// fallback-return misses the shape because nothing is returned. The value must
+// fallback-return misses the shape because no error is involved. The value must
 // be validated where the configuration loads, and its default declared there.
 //
-// Reported: an if without else whose condition tests a configuration field —
-// or a variable initialised from one — for its zero value (== 0, <= 0, < 0,
-// == "", == nil, .IsZero()) and whose body only assigns a constant, or a
-// constructor call over constants, to that same field or variable.
+// Reported, for a configuration field or a variable initialised from one:
+//   - assignment: an if without else whose condition tests the value for zero
+//     (== 0, <= 0, < 0, == "", == nil, .IsZero()) and whose body only assigns
+//     a constant, or a constructor call over constants, to that same value;
+//   - return: `if <zero> { return <constant> }`, or `if <set> { return
+//     <value> }` (!= 0, > 0, != "", != nil, !.IsZero()) followed by, or with an
+//     else of, `return <constant>` — the constant non-zero, of the value's own
+//     type, any error result nil; a zero value or an error is validation.
+//     Not reported when the program tests the field for zero inside a larger
+//     condition elsewhere (x.f != "" && !x.Args): the unset state carries
+//     meaning, and the default cannot move into the field.
+//
+// The package that declares the configuration is skipped for the assignment
+// only: an applyDefaults there writes the default into the field, while a
+// getter returning a literal leaves the loaded configuration empty.
 type ConfigValueFallbackRule struct {
 	*rules.BaseRule
 }
@@ -50,7 +61,7 @@ func NewConfigValueFallbackRule() *ConfigValueFallbackRule {
 		BaseRule: rules.NewBaseRule(
 			"config-value-fallback",
 			"patterns",
-			"Detects a configuration value replaced by a hardcoded literal when unset — a second default the configuration does not know about",
+			"Detects a configuration value replaced by, or a getter falling back to, a hardcoded literal when unset — a second default the configuration does not know about",
 			core.SeverityMedium,
 		),
 	}
@@ -66,7 +77,67 @@ func (r *ConfigValueFallbackRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject checks every typed production file.
 func (r *ConfigValueFallbackRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), r.analyze)
+	if ctx == nil {
+		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
+	}
+	tests := collectUnsetTests(ctx)
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyze(fileCtx, info, tests)
+	})
+}
+
+// unsetTests records the configuration fields (by declaration position)
+// whose unset state takes part in the program's logic beyond a default: a
+// zero or non-zero test combined with other conditions, stored, or passed on
+// (x.f != "" && !x.Args). A test that is the whole condition of an if is a
+// default or a validation and is not recorded.
+type unsetTests map[token.Pos]bool
+
+func collectUnsetTests(ctx *core.GoProjectContext) unsetTests {
+	tests := make(unsetTests)
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
+			continue
+		}
+		info := pkg.Package.TypesInfo
+		for _, file := range pkg.Package.Syntax {
+			// Inspect visits an if before its condition.
+			whole := make(map[ast.Expr]bool)
+			ast.Inspect(file, func(n ast.Node) bool {
+				var operand ast.Expr
+				switch node := n.(type) {
+				case *ast.IfStmt:
+					cond := ast.Unparen(node.Cond)
+					whole[cond] = true
+					if not, ok := cond.(*ast.UnaryExpr); ok && not.Op == token.NOT {
+						whole[ast.Unparen(not.X)] = true
+					}
+				case *ast.BinaryExpr:
+					if !whole[node] {
+						operand, _, _ = comparedWithZero(info, node)
+					}
+				case *ast.CallExpr:
+					if !whole[node] {
+						operand, _ = isZeroCall(node)
+					}
+				}
+				if sel, ok := operand.(*ast.SelectorExpr); ok {
+					if source, ok := configField(info, sel); ok {
+						tests[source.field.Origin().Pos()] = true
+					}
+				}
+				return true
+			})
+		}
+	}
+	return tests
+}
+
+// usedInLogic reports whether the field's unset state takes part in the
+// program's logic: then the default cannot be written into the field without
+// losing that state, and a getter is where it belongs.
+func (t unsetTests) usedInLogic(field *types.Var) bool {
+	return t[field.Origin().Pos()]
 }
 
 // configSource is the configuration field a value was read from.
@@ -76,10 +147,10 @@ type configSource struct {
 	path  string
 }
 
-func (r *ConfigValueFallbackRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
-	var violations []*core.Violation
+func (r *ConfigValueFallbackRule) analyze(ctx *core.FileContext, info *types.Info, tests unsetTests) []*core.Violation {
 	// Variables initialised from a configuration field, anywhere in the file:
-	// objects are unique, so one map serves every function.
+	// objects are unique, so one map serves every function. Collected first,
+	// so an if sees the variables declared before it in any shape.
 	derived := make(map[types.Object]configSource)
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -95,14 +166,200 @@ func (r *ConfigValueFallbackRule) analyze(ctx *core.FileContext, info *types.Inf
 					r.recordDerived(info, derived, name, node.Values[i])
 				}
 			}
+		}
+		return true
+	})
+
+	var violations []*core.Violation
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		switch node := n.(type) {
 		case *ast.IfStmt:
 			if v := r.checkIf(ctx, info, derived, node); v != nil {
 				violations = append(violations, v)
+			}
+		case *ast.FuncDecl:
+			if fn, ok := info.Defs[node.Name].(*types.Func); ok && node.Body != nil {
+				if sig, ok := fn.Type().(*types.Signature); ok {
+					violations = append(violations, r.checkReturns(ctx, info, derived, tests, sig, node.Body)...)
+				}
+			}
+		case *ast.FuncLit:
+			if sig, ok := info.TypeOf(node).(*types.Signature); ok {
+				violations = append(violations, r.checkReturns(ctx, info, derived, tests, sig, node.Body)...)
 			}
 		}
 		return true
 	})
 	return violations
+}
+
+// checkReturns walks the statement lists of one function body, leaving nested
+// function literals to their own visit, and checks every if together with the
+// statement that follows it.
+func (r *ConfigValueFallbackRule) checkReturns(ctx *core.FileContext, info *types.Info, derived map[types.Object]configSource, tests unsetTests, sig *types.Signature, body *ast.BlockStmt) []*core.Violation {
+	if sig.Results().Len() == 0 {
+		return nil
+	}
+	var violations []*core.Violation
+	checkList := func(list []ast.Stmt) {
+		for i, stmt := range list {
+			ifStmt, ok := stmt.(*ast.IfStmt)
+			if !ok {
+				continue
+			}
+			var next ast.Stmt
+			if i+1 < len(list) {
+				next = list[i+1]
+			}
+			if v := r.checkReturnIf(ctx, info, derived, tests, sig, ifStmt, next); v != nil {
+				violations = append(violations, v)
+			}
+		}
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.BlockStmt:
+			checkList(node.List)
+		case *ast.CaseClause:
+			checkList(node.Body)
+		case *ast.CommClause:
+			checkList(node.Body)
+		}
+		return true
+	})
+	return violations
+}
+
+// checkReturnIf reports a configuration value replaced by a returned literal:
+//
+//	if <value is zero> { return <constant> }
+//	if <value is set> { return <value> }; return <constant>
+//	if <value is set> { return <value> } else { return <constant> }
+//
+// The function must return the value's own type, error results must be nil,
+// and the constant must not be a zero value: returning 0 or "" with an error
+// is validation, not a default.
+func (r *ConfigValueFallbackRule) checkReturnIf(ctx *core.FileContext, info *types.Info, derived map[types.Object]configSource, tests unsetTests, sig *types.Signature, ifStmt *ast.IfStmt, next ast.Stmt) *core.Violation {
+	if target, ok := zeroTested(info, ifStmt.Cond); ok {
+		replacement, ok := returnedFallback(info, sig, soleReturn(ifStmt.Body), target)
+		if !ok {
+			return nil
+		}
+		source, ok := r.sourceOf(info, derived, target)
+		if !ok || tests.usedInLogic(source.field) {
+			return nil
+		}
+		return r.report(ctx, ifStmt, source, replacement, "falls back to")
+	}
+
+	target, ok := nonZeroTested(info, ifStmt.Cond)
+	if !ok {
+		return nil
+	}
+	kept, _, ok := returnedValue(info, sig, soleReturn(ifStmt.Body))
+	if !ok || !sameTarget(info, kept, target) {
+		return nil
+	}
+	fallback := next
+	if ifStmt.Else != nil {
+		block, ok := ifStmt.Else.(*ast.BlockStmt)
+		if !ok {
+			return nil
+		}
+		fallback = soleReturn(block)
+	}
+	ret, ok := fallback.(*ast.ReturnStmt)
+	if !ok {
+		return nil
+	}
+	replacement, ok := returnedFallback(info, sig, ret, target)
+	if !ok {
+		return nil
+	}
+	source, ok := r.sourceOf(info, derived, target)
+	if !ok || tests.usedInLogic(source.field) {
+		return nil
+	}
+	return r.report(ctx, ifStmt, source, replacement, "falls back to")
+}
+
+// soleReturn returns the return statement a block consists of, or nil.
+func soleReturn(block *ast.BlockStmt) *ast.ReturnStmt {
+	if block == nil || len(block.List) != 1 {
+		return nil
+	}
+	ret, ok := block.List[0].(*ast.ReturnStmt)
+	if !ok {
+		return nil
+	}
+	return ret
+}
+
+// returnedValue returns the one non-error result of a return statement whose
+// error results are all nil, with the type of its result slot.
+func returnedValue(info *types.Info, sig *types.Signature, ret *ast.ReturnStmt) (ast.Expr, types.Type, bool) {
+	if ret == nil || len(ret.Results) != sig.Results().Len() {
+		return nil, nil, false
+	}
+	var value ast.Expr
+	var slot types.Type
+	for i, result := range ret.Results {
+		resultType := sig.Results().At(i).Type()
+		if implementsError(resultType) {
+			if tv, ok := info.Types[result]; !ok || !tv.IsNil() {
+				return nil, nil, false
+			}
+			continue
+		}
+		if value != nil {
+			return nil, nil, false
+		}
+		value, slot = result, resultType
+	}
+	return value, slot, value != nil
+}
+
+// returnedFallback returns the constant a return statement hands out in place
+// of the tested value: a non-zero constant, or a constructor over constants,
+// in a result of the value's own type.
+func returnedFallback(info *types.Info, sig *types.Signature, ret *ast.ReturnStmt, target ast.Expr) (ast.Expr, bool) {
+	value, slot, ok := returnedValue(info, sig, ret)
+	if !ok || !isConstantValue(info, value) || isZeroValue(info, value) {
+		return nil, false
+	}
+	targetType := info.TypeOf(target)
+	if targetType == nil || !types.Identical(slot, targetType) {
+		return nil, false
+	}
+	return value, true
+}
+
+// isZeroValue reports a zero constant, or a constructor whose arguments are
+// all zero constants (decimal.NewFromInt(0)).
+func isZeroValue(info *types.Info, expr ast.Expr) bool {
+	if isZeroConstant(info, expr) {
+		return true
+	}
+	if tv, ok := info.Types[expr]; ok && tv.Value != nil && tv.Value.Kind() == constant.Bool {
+		return !constant.BoolVal(tv.Value)
+	}
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return false
+	}
+	for _, arg := range call.Args {
+		if !isZeroConstant(info, arg) {
+			return false
+		}
+	}
+	return true
+}
+
+// implementsError reports whether a result slot carries an error.
+func implementsError(t types.Type) bool {
+	return types.AssignableTo(t, types.Universe.Lookup("error").Type())
 }
 
 func (r *ConfigValueFallbackRule) recordDerived(info *types.Info, derived map[types.Object]configSource, lhs, rhs ast.Expr) {
@@ -206,8 +463,14 @@ func (r *ConfigValueFallbackRule) checkIf(ctx *core.FileContext, info *types.Inf
 		replacement = assign.Rhs[0]
 	}
 
-	message := fmt.Sprintf("Configuration value %s is replaced with %s when unset — a hardcoded second default the configuration does not know about",
-		source.path, types.ExprString(replacement))
+	return r.report(ctx, ifStmt, source, replacement, "is replaced with")
+}
+
+// report builds the finding; how names the shape: "is replaced with" for an
+// assignment, "falls back to" for a returned literal.
+func (r *ConfigValueFallbackRule) report(ctx *core.FileContext, ifStmt *ast.IfStmt, source configSource, replacement ast.Expr, how string) *core.Violation {
+	message := fmt.Sprintf("Configuration value %s %s %s when unset — a hardcoded second default the configuration does not know about",
+		source.path, how, types.ExprString(replacement))
 	if def, found := source.tag.Lookup("default"); found {
 		message += fmt.Sprintf(" (the field already declares default:%q)", def)
 	}
@@ -231,21 +494,64 @@ func (r *ConfigValueFallbackRule) sourceOf(info *types.Info, derived map[types.O
 	return configSource{}, false
 }
 
-// zeroTested returns the expression a condition tests for its zero value.
+// zeroTested returns the expression a condition tests for its zero value:
+// == 0, <= 0, < 0, == "", == nil, .IsZero().
 func zeroTested(info *types.Info, cond ast.Expr) (ast.Expr, bool) {
 	switch c := ast.Unparen(cond).(type) {
 	case *ast.BinaryExpr:
-		if c.Op != token.EQL && c.Op != token.LEQ && c.Op != token.LSS {
-			return nil, false
-		}
-		if isZeroConstant(info, c.Y) {
-			return ast.Unparen(c.X), true
+		x, op, ok := comparedWithZero(info, c)
+		if ok && (op == token.EQL || op == token.LEQ || op == token.LSS) {
+			return x, true
 		}
 	case *ast.CallExpr:
-		sel, ok := ast.Unparen(c.Fun).(*ast.SelectorExpr)
-		if ok && sel.Sel.Name == "IsZero" && len(c.Args) == 0 {
-			return ast.Unparen(sel.X), true
+		if x, ok := isZeroCall(c); ok {
+			return x, true
 		}
+	}
+	return nil, false
+}
+
+// nonZeroTested returns the expression a condition tests for being set:
+// != 0, > 0, != "", != nil, !x.IsZero().
+func nonZeroTested(info *types.Info, cond ast.Expr) (ast.Expr, bool) {
+	switch c := ast.Unparen(cond).(type) {
+	case *ast.BinaryExpr:
+		x, op, ok := comparedWithZero(info, c)
+		if ok && (op == token.NEQ || op == token.GTR) {
+			return x, true
+		}
+	case *ast.UnaryExpr:
+		if call, ok := ast.Unparen(c.X).(*ast.CallExpr); ok && c.Op == token.NOT {
+			return isZeroCall(call)
+		}
+	}
+	return nil, false
+}
+
+// comparedWithZero returns the operand a comparison sets against a zero
+// constant and the operator read with that operand on the left: 0 < x is
+// x > 0.
+func comparedWithZero(info *types.Info, c *ast.BinaryExpr) (ast.Expr, token.Token, bool) {
+	if isZeroConstant(info, c.Y) {
+		return ast.Unparen(c.X), c.Op, true
+	}
+	if !isZeroConstant(info, c.X) {
+		return nil, token.ILLEGAL, false
+	}
+	mirrored := map[token.Token]token.Token{
+		token.EQL: token.EQL, token.NEQ: token.NEQ,
+		token.LSS: token.GTR, token.GTR: token.LSS,
+		token.LEQ: token.GEQ, token.GEQ: token.LEQ,
+	}
+	op, ok := mirrored[c.Op]
+	return ast.Unparen(c.Y), op, ok
+}
+
+// isZeroCall returns the receiver of x.IsZero().
+func isZeroCall(call *ast.CallExpr) (ast.Expr, bool) {
+	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if ok && sel.Sel.Name == "IsZero" && len(call.Args) == 0 {
+		return ast.Unparen(sel.X), true
 	}
 	return nil, false
 }

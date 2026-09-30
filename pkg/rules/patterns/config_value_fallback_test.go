@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -135,4 +136,204 @@ func Days(cfg *config.Config, other int) (int, error) {
 `)
 
 	assert.Empty(t, violations)
+}
+
+// A getter that returns a literal when the field is unset is the same second
+// default in another shape: nothing writes the default into the field, the
+// loaded configuration stays empty and the code runs on a value the
+// configuration does not know. That holds in the configuration's own package
+// too, unlike an applyDefaults that fills the field.
+func TestConfigValueFallback_GetterReturnsLiteral(t *testing.T) {
+	project := decimalProject(t, map[string]string{
+		"config/config.go": configFallbackConfigPackage,
+		"config/getters.go": `package config
+
+func (c *Config) DefaultRegion() string {
+	if c.Report.Region != "" {
+		return c.Report.Region
+	}
+	return "eu"
+}
+
+func (c *Config) WindowDays() int {
+	if c.Report.WindowDays <= 0 {
+		return 14
+	}
+	return c.Report.WindowDays
+}
+`,
+		"service/service.go": `package service
+
+import (
+	"github.com/shopspring/decimal"
+
+	"example.com/rulestest/config"
+)
+
+func Region(cfg *config.Config) (string, error) {
+	region := cfg.Report.Region
+	if region == "" {
+		return "eu", nil
+	}
+	return region, nil
+}
+
+func Days(cfg *config.Config) int {
+	if days := cfg.Report.WindowDays; days > 0 {
+		return days
+	} else {
+		return 7
+	}
+}
+
+func Threshold(cfg *config.Config) decimal.Decimal {
+	threshold := decimal.NewFromFloat(cfg.Report.ThresholdPercent)
+	if !threshold.IsZero() {
+		return threshold
+	}
+	return decimal.NewFromFloat(-1.0)
+}
+
+func Mirrored(cfg *config.Config) int {
+	if 0 < cfg.Report.WindowDays {
+		return cfg.Report.WindowDays
+	}
+	return 21
+}
+`,
+	})
+	violations, err := NewConfigValueFallbackRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+
+	lines := make(map[string][]int)
+	for _, v := range violations {
+		lines[filepath.Base(v.File)] = append(lines[filepath.Base(v.File)], v.Line)
+		assert.Contains(t, v.Message, "falls back to")
+	}
+	assert.Equal(t, []int{4, 11}, lines["getters.go"], "getters in the configuration package are reported")
+	assert.Equal(t, []int{11, 18, 27, 34}, lines["service.go"])
+	require.NotEmpty(t, violations)
+	for _, v := range violations {
+		if filepath.Base(v.File) == "getters.go" && v.Line == 4 {
+			assert.Contains(t, v.Message, `c.Report.Region falls back to "eu"`)
+		}
+		if filepath.Base(v.File) == "getters.go" && v.Line == 11 {
+			assert.Contains(t, v.Message, `(the field already declares default:"14")`)
+		}
+	}
+}
+
+// Returning a zero value or an error is validation, not a default; a returned
+// literal of another type than the value is not its replacement; a parameter
+// default is not configuration; the return after the if must be the very next
+// statement and return a constant.
+func TestConfigValueFallback_ReturnFormNotReported(t *testing.T) {
+	violations := runConfigValueFallbackRule(t, `package service
+
+import (
+	"errors"
+	"fmt"
+
+	"example.com/rulestest/config"
+)
+
+var errNoRegion = errors.New("no region")
+
+func Region(cfg *config.Config) (string, error) {
+	region := cfg.Report.Region
+	if region == "" {
+		return "", fmt.Errorf("region is required")
+	}
+	return region, nil
+}
+
+func RegionErr(cfg *config.Config) (string, error) {
+	if cfg.Report.Region == "" {
+		return "eu", errNoRegion
+	}
+	return cfg.Report.Region, nil
+}
+
+func Score(cfg *config.Config) int {
+	if cfg.Report.Region == "" {
+		return 3
+	}
+	return 1
+}
+
+func Days(cfg *config.Config, other int) int {
+	if cfg.Report.WindowDays > 0 {
+		return cfg.Report.WindowDays
+	}
+	return other
+}
+
+func Zero(cfg *config.Config) string {
+	if cfg.Report.Region != "" {
+		return cfg.Report.Region
+	}
+	return ""
+}
+
+func Later(cfg *config.Config) int {
+	if cfg.Report.WindowDays > 0 {
+		return cfg.Report.WindowDays
+	}
+	fmt.Println("unset")
+	return 14
+}
+
+func Limit(n int) int {
+	if n <= 0 {
+		return 50
+	}
+	return n
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// When the program tells an unset value apart elsewhere — a validation that
+// rejects a usage text without arguments — the default cannot be written into
+// the field without losing that state, and the getter is where it belongs.
+func TestConfigValueFallback_GetterOfFieldWhoseUnsetStateMatters(t *testing.T) {
+	project := decimalProject(t, map[string]string{
+		"tasks/tasks.go": `package tasks
+
+import "errors"
+
+type Task struct {
+	Usage   string ` + "`yaml:\"usage\"`" + `
+	Summary string ` + "`yaml:\"summary\"`" + `
+	Args    bool
+}
+
+func (t *Task) Validate() error {
+	if t.Usage != "" && !t.Args {
+		return errors.New("usage needs args")
+	}
+	return nil
+}
+
+func (t *Task) UsageText() string {
+	if t.Usage != "" {
+		return t.Usage
+	}
+	return "args..."
+}
+
+func (t *Task) SummaryText() string {
+	if t.Summary != "" {
+		return t.Summary
+	}
+	return "no summary"
+}
+`,
+	})
+	violations, err := NewConfigValueFallbackRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "t.Summary falls back to")
 }
