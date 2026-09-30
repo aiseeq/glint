@@ -111,10 +111,6 @@ func LoadGoProject(root string, contexts []*FileContext, opts GoProjectOptions) 
 	return loadGoProjectWithOptions(root, contexts, opts, nil)
 }
 
-func loadGoProject(root string, contexts []*FileContext, requireSSA bool, onParse func(string)) (*GoProjectContext, error) {
-	return loadGoProjectWithOptions(root, contexts, GoProjectOptions{RequireSSA: requireSSA}, onParse)
-}
-
 func loadGoProjectWithOptions(root string, contexts []*FileContext, opts GoProjectOptions, onParse func(string)) (*GoProjectContext, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
