@@ -116,3 +116,52 @@ func TestTool(t *testing.T) {
 `
 	assert.Equal(t, []int{18, 22, 25}, tautologicalGoLines(t, code))
 }
+
+// A test helper that skips a fixture it failed to read or decode: the broken
+// fixture drops out of the check and the test stays green. A missing optional
+// path probed with os.Stat is the environment; a branch with a comment says
+// the failure is the expected outcome.
+func TestTautologicalAssertion_GoFixtureDroppedOnError(t *testing.T) {
+	code := `package service
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+)
+
+type Article struct{ Title string }
+
+func loadArticles(dir string) ([]Article, error) {
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var articles []Article
+	for _, file := range files {
+		if filepath.Ext(file.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, file.Name()))
+		if err != nil {
+			continue
+		}
+		var article Article
+		if err := json.Unmarshal(data, &article); err != nil {
+			continue
+		}
+		articles = append(articles, article)
+	}
+	for _, extra := range []string{"a", "b"} {
+		if _, err := os.Stat(extra); err != nil {
+			continue
+		}
+		if _, err := os.ReadFile(extra); err != nil {
+			continue // a refused read is the behaviour under test
+		}
+	}
+	return articles, nil
+}
+`
+	assert.Equal(t, []int{22, 26}, tautologicalGoLines(t, code))
+}

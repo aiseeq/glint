@@ -30,7 +30,9 @@ func init() {
 //
 // A constructor that silently replaces a nil dependency (a logger, a client,
 // a repository) with a package default or a no-op hides the same wiring
-// mistake: `if logger == nil { logger = slog.Default() }` with no log.
+// mistake: `if logger == nil { logger = slog.Default() }` with no log. So
+// does a function or a method that makes the swap where it uses the
+// dependency: a parameter, a local copy of a receiver field, the field itself.
 //
 // Not flagged: returning an error, panicking, a default for a parameter that
 // is not a dependency (options-defaulting), a replacement that is logged, and
@@ -61,7 +63,11 @@ func (r *ConstructorSwallowsNilDepRule) AnalyzeFile(ctx *core.FileContext) []*co
 
 	for _, decl := range ctx.GoAST.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || !isPlainConstructor(fn) {
+		if !ok || fn.Body == nil {
+			continue
+		}
+		if !isPlainConstructor(fn) {
+			violations = append(violations, r.useSiteDefaults(ctx, fn)...)
 			continue
 		}
 		params := paramNames(fn)
@@ -99,6 +105,72 @@ func (r *ConstructorSwallowsNilDepRule) AnalyzeFile(ctx *core.FileContext) []*co
 	}
 
 	return violations
+}
+
+// useSiteDefaults reports a function or a method that replaces a nil
+// dependency with a package default where it uses it: a parameter, a local
+// copy of a receiver field, or the receiver field itself.
+func (r *ConstructorSwallowsNilDepRule) useSiteDefaults(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+	names := paramNames(fn)
+	recv := ""
+	if fn.Recv != nil {
+		recv, _ = receiverName(fn)
+	}
+	if recv != "" {
+		forEachOwnStatement(fn.Body, func(stmt ast.Stmt) {
+			assign, ok := stmt.(*ast.AssignStmt)
+			if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+				return
+			}
+			ident, isIdent := assign.Lhs[0].(*ast.Ident)
+			if sel, ok := assign.Rhs[0].(*ast.SelectorExpr); ok && isIdent && isIdentNamed(sel.X, recv) {
+				names[ident.Name] = true
+			}
+		})
+	}
+	var violations []*core.Violation
+	forEachOwnStatement(fn.Body, func(stmt ast.Stmt) {
+		ifStmt, ok := stmt.(*ast.IfStmt)
+		if !ok {
+			return
+		}
+		name, value := silentDefault(ifStmt.Body, nilCheckedParams(ifStmt.Cond, names))
+		if name == "" {
+			name, value = silentFieldDefault(ifStmt, recv)
+		}
+		if name == "" {
+			return
+		}
+		line := ctx.PositionFor(ifStmt).Line
+		v := r.CreateViolation(ctx.RelPath, line,
+			fn.Name.Name+" silently replaces a nil "+name+" with "+value+" — the code that left it nil is never told")
+		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+		v.WithSuggestion("Require the dependency where the value is built (the constructor returns an error for nil) and use it as is")
+		violations = append(violations, v)
+	})
+	return violations
+}
+
+// silentFieldDefault matches if c.logger == nil { c.logger = slog.Default() }
+// on the receiver and returns the field and the value.
+func silentFieldDefault(ifStmt *ast.IfStmt, recv string) (string, string) {
+	cond, ok := ast.Unparen(ifStmt.Cond).(*ast.BinaryExpr)
+	if !ok || cond.Op != token.EQL || !isNilIdent(cond.Y) || len(ifStmt.Body.List) != 1 {
+		return "", ""
+	}
+	field, ok := cond.X.(*ast.SelectorExpr)
+	if !ok || !isIdentNamed(field.X, recv) || !isDependencyName(field.Sel.Name) {
+		return "", ""
+	}
+	assign, ok := ifStmt.Body.List[0].(*ast.AssignStmt)
+	if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return "", ""
+	}
+	target, ok := assign.Lhs[0].(*ast.SelectorExpr)
+	if !ok || !isIdentNamed(target.X, recv) || target.Sel.Name != field.Sel.Name || !isPackageDefault(assign.Rhs[0]) {
+		return "", ""
+	}
+	return field.Sel.Name, types.ExprString(assign.Rhs[0])
 }
 
 // bodySwallows reports whether the nil-check body only logs at Error/Warn
