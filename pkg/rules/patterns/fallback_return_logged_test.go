@@ -191,3 +191,46 @@ func (s *Svc) Payouts() []byte {
 `
 	assert.Empty(t, fallbackReturnLines(t, source))
 }
+
+// A comment right above the call that explains the degradation counts like
+// one in the branch: the reason is written where the call is made.
+func TestFallbackReturn_CallCommentExplainsDegradation(t *testing.T) {
+	const source = `package svc
+
+import "log/slog"
+
+type Manager struct{}
+
+type Svc struct{ logger *slog.Logger }
+
+func newManager() (*Manager, error) { return &Manager{}, nil }
+
+func (s *Svc) Start() *Manager {
+	// Без справочника демон работает как раньше, только по новостям
+	manager, err := newManager()
+	if err != nil {
+		s.logger.Warn("filings disabled", "error", err)
+	}
+	return manager
+}
+
+func (s *Svc) Ancestors(load func() ([]int, error)) []int {
+	// An incomplete chain still works: the window may belong to the part we have
+	chain, err := load()
+	if err != nil {
+		s.logger.Warn("ancestry incomplete", "error", err)
+	}
+	return chain
+}
+
+func (s *Svc) Count(load func() (int, error)) int {
+	// Получаем количество активных адресов
+	count, err := load()
+	if err != nil {
+		s.logger.Warn("count failed", "error", err)
+	}
+	return count
+}
+`
+	assert.Equal(t, []int{32}, fallbackReturnLines(t, source))
+}
