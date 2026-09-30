@@ -2,7 +2,6 @@ package patterns
 
 import (
 	"go/ast"
-	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -47,7 +46,7 @@ func TestCallNoReturn(t *testing.T) {
 	file, err := parser.ParseFile(fset, "p.go", noReturnSource, parser.SkipObjectResolution)
 	require.NoError(t, err)
 	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
-	conf := types.Config{Importer: importer.ForCompiler(fset, "source", nil)}
+	conf := types.Config{Importer: stdImporter}
 	_, err = conf.Check("p", fset, []*ast.File{file}, info)
 	require.NoError(t, err)
 
