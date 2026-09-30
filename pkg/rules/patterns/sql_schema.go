@@ -253,9 +253,7 @@ func sqlLiterals(root ast.Node) []sqlLiteral {
 		if !ok {
 			return true
 		}
-		bin, isBin := expr.(*ast.BinaryExpr)
-		lit, isLit := expr.(*ast.BasicLit)
-		if !(isBin && bin.Op == token.ADD) && !(isLit && lit.Kind == token.STRING) {
+		if !isStringOrConcat(expr) {
 			return true
 		}
 		var literal sqlLiteral
@@ -292,6 +290,18 @@ func sqlLiterals(root ast.Node) []sqlLiteral {
 		return false
 	})
 	return literals
+}
+
+// isStringOrConcat reports a string literal or a + expression, which may
+// join string literals.
+func isStringOrConcat(expr ast.Expr) bool {
+	switch x := expr.(type) {
+	case *ast.BinaryExpr:
+		return x.Op == token.ADD
+	case *ast.BasicLit:
+		return x.Kind == token.STRING
+	}
+	return false
 }
 
 // concatOperands flattens a + b + c into its operands.
