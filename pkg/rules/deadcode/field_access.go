@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // fieldAccess records how the loaded packages touch struct fields. It is the
@@ -24,6 +25,9 @@ type fieldAccess struct {
 	// written: assigned, updated, named as a key in a composite literal, filled
 	// by a positional literal, or handed out by address.
 	written map[token.Pos]bool
+	// valueWritten: written with something other than a provable nil — a
+	// field only ever given nil or (*T)(nil) holds no value.
+	valueWritten map[token.Pos]bool
 	// dereferenced: a pointer field used through (x.f.y, x.f.M(), *x.f).
 	dereferenced map[token.Pos]bool
 	// storedInto: a map field indexed on the left of an assignment or of
@@ -43,6 +47,7 @@ func newFieldAccess() *fieldAccess {
 	return &fieldAccess{
 		read:         make(map[token.Pos]bool),
 		written:      make(map[token.Pos]bool),
+		valueWritten: make(map[token.Pos]bool),
 		dereferenced: make(map[token.Pos]bool),
 		storedInto:   make(map[token.Pos]bool),
 		hashed:       make(map[token.Pos]bool),
@@ -82,22 +87,26 @@ func (a *fieldAccess) collect(file *ast.File, info *types.Info) {
 	// Inspect visits a statement before its operands, so the targets of an
 	// assignment are known by the time its selectors are classified.
 	targets := make(map[ast.Expr]bool)
+	nilTargets := make(map[ast.Expr]bool)
 
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.AssignStmt:
-			for _, lhs := range node.Lhs {
+			for i, lhs := range node.Lhs {
 				a.target(lhs, info, targets)
+				if len(node.Lhs) == len(node.Rhs) && helpers.IsNilValue(node.Rhs[i], info) {
+					nilTargets[ast.Unparen(lhs)] = true
+				}
 			}
 		case *ast.IncDecStmt:
 			a.target(node.X, info, targets)
 		case *ast.SelectorExpr:
-			a.selector(node, info, targets)
+			a.selector(node, info, targets, nilTargets)
 		case *ast.UnaryExpr:
 			// &x.f hands the address out: assume the callee writes through it.
 			if node.Op == token.AND {
 				if pos, ok := selectedField(info, node.X); ok {
-					a.written[pos] = true
+					a.markWritten(pos, true)
 				}
 			}
 		case *ast.StarExpr:
@@ -163,10 +172,10 @@ func isEmptyInterface(t types.Type) bool {
 }
 
 // selector classifies one field selector.
-func (a *fieldAccess) selector(sel *ast.SelectorExpr, info *types.Info, targets map[ast.Expr]bool) {
+func (a *fieldAccess) selector(sel *ast.SelectorExpr, info *types.Info, targets, nilTargets map[ast.Expr]bool) {
 	if pos, ok := selectedField(info, sel); ok {
 		if targets[sel] {
-			a.written[pos] = true
+			a.markWritten(pos, !nilTargets[sel])
 		} else {
 			a.read[pos] = true
 		}
@@ -188,7 +197,7 @@ func (a *fieldAccess) literal(lit *ast.CompositeLit, info *types.Info) {
 		kv, ok := elt.(*ast.KeyValueExpr)
 		if !ok {
 			for i := range structType.NumFields() {
-				a.written[structType.Field(i).Origin().Pos()] = true
+				a.markWritten(structType.Field(i).Origin().Pos(), true)
 			}
 			return
 		}
@@ -197,8 +206,17 @@ func (a *fieldAccess) literal(lit *ast.CompositeLit, info *types.Info) {
 			continue
 		}
 		if v, ok := info.Uses[ident].(*types.Var); ok && v.IsField() {
-			a.written[v.Origin().Pos()] = true
+			a.markWritten(v.Origin().Pos(), !helpers.IsNilValue(kv.Value, info))
 		}
+	}
+}
+
+// markWritten records a write of the field, and whether it gave the field a
+// value rather than nil.
+func (a *fieldAccess) markWritten(pos token.Pos, value bool) {
+	a.written[pos] = true
+	if value {
+		a.valueWritten[pos] = true
 	}
 }
 

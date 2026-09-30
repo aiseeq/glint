@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -22,7 +23,7 @@ import (
 )
 
 // cacheFormat changes whenever the stored layout does.
-const cacheFormat = "glint-results-1"
+const cacheFormat = "glint-results-2"
 
 // resultCache keeps the findings of file-local rules (rules.FileLocal) per
 // file of one project root between runs. A file whose content is unchanged
@@ -47,15 +48,18 @@ type resultCache struct {
 	// could not identify them, and nothing is stored then.
 	previousProject *projectEntry
 	projectInputs   string
+	projectRules    []string
 	projectKeyed    bool
 	projectHit      *projectEntry
 	currentProject  *projectEntry
 }
 
 // projectEntry holds the findings of the project rules, filtered like every
-// finding, and the packages the load left out.
+// finding, the names of the rules that produced them, and the packages the
+// load left out.
 type projectEntry struct {
 	Inputs     string
+	Rules      []string
 	Violations []core.Violation
 	Skipped    []core.SkippedPackage
 }
@@ -143,11 +147,12 @@ func (c *resultCache) store(relPath string, content [sha256.Size]byte, found map
 	c.current[relPath] = cacheEntry{Content: content, Rules: merged}
 }
 
-// keyProject records the inputs of this run's typed load and returns the
-// stored project findings when they were computed for the same inputs.
-func (c *resultCache) keyProject(inputs string) *projectEntry {
-	c.projectInputs, c.projectKeyed = inputs, true
-	if c.previousProject != nil && c.previousProject.Inputs == inputs {
+// keyProject records the inputs of this run's typed load and the project
+// rules it runs (sorted names), and returns the stored project findings when
+// they were computed by the same rules for the same inputs.
+func (c *resultCache) keyProject(inputs string, projectRules []string) *projectEntry {
+	c.projectInputs, c.projectRules, c.projectKeyed = inputs, projectRules, true
+	if c.previousProject != nil && c.previousProject.Inputs == inputs && slices.Equal(c.previousProject.Rules, projectRules) {
 		c.projectHit = c.previousProject
 		c.currentProject = c.previousProject
 	}
@@ -161,6 +166,7 @@ func (c *resultCache) storeProject(found core.ViolationList, skipped []core.Skip
 	}
 	c.currentProject = &projectEntry{
 		Inputs:     c.projectInputs,
+		Rules:      c.projectRules,
 		Violations: storedViolations(found),
 		Skipped:    append([]core.SkippedPackage(nil), skipped...),
 	}

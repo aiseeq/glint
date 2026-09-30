@@ -50,6 +50,11 @@ func init() {
 // something stores into it (p.field[k] = v): reading a nil map yields the zero
 // value, storing into one panics.
 //
+// A write of nil or (*T)(nil) gives the field no value. A literal of the type
+// outside the functions that return it (its constructors) is reported when it
+// leaves nil a field the constructors fill and the code uses that way: the
+// value built around the constructor crashes where the constructed one works.
+//
 // Not flagged: fields written anywhere in the loaded packages, including
 // positional composite literals (T{a, b, c}), which name no field and are
 // therefore treated as writing all of them; tagged fields, and the exported
@@ -117,11 +122,13 @@ func (r *NeverAssignedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 		return nil, fmt.Errorf("never assigned field: %w", err)
 	}
 
+	ctors := collectConstructorFields(ctx)
+
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
-		var violations []*core.Violation
+		violations := r.bypassingLiterals(fileCtx, info, ctors)
 		for _, field := range collectNilableFields(fileCtx, info) {
 			pos := field.obj.Pos()
-			if access.written[pos] || !crashingUse(field.use, access, pos) {
+			if access.valueWritten[pos] || !crashingUse(field.use, access, pos) {
 				continue
 			}
 			if field.obj.Exported() && field.named != nil && access.decoded[field.named] {
