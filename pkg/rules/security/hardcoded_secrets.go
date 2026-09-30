@@ -62,22 +62,22 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 			},
 			{
 				name:    "password",
-				regex:   regexp.MustCompile(`(?i)(password|passwd|pwd)\s*(?::=|[:=])\s*["'\x60][^"'\x60]{4,}["'\x60]`),
+				regex:   regexp.MustCompile(`(?i)` + nameAlternation(passwordNames) + `\s*(?::=|[:=])\s*["'\x60][^"'\x60]{4,}["'\x60]`),
 				message: "Hardcoded password detected",
 			},
 			{
 				name:    "api_key",
-				regex:   regexp.MustCompile(`(?i)\b(api[_-]?key|apikey)\s*(?::=|[:=])\s*["'\x60][A-Za-z0-9_\-]{16,}["'\x60]`),
+				regex:   regexp.MustCompile(`(?i)\b` + nameAlternation(apiKeyNames) + `\s*(?::=|[:=])\s*["'\x60][A-Za-z0-9_\-]{16,}["'\x60]`),
 				message: "Hardcoded API key detected",
 			},
 			{
 				name:    "secret",
-				regex:   regexp.MustCompile(`(?i)(secret|private[_-]?key)\s*(?::=|[:=])\s*["'\x60][^"'\x60]{8,}["'\x60]`),
+				regex:   regexp.MustCompile(`(?i)` + nameAlternation(secretNames) + `\s*(?::=|[:=])\s*["'\x60][^"'\x60]{8,}["'\x60]`),
 				message: "Hardcoded secret detected",
 			},
 			{
 				name:    "token",
-				regex:   regexp.MustCompile(`(?i)(auth[_-]?token|access[_-]?token|bearer)\s*(?::=|[:=])\s*["'\x60][A-Za-z0-9_\-\.]{20,}["'\x60]`),
+				regex:   regexp.MustCompile(`(?i)` + nameAlternation(tokenNames, []string{`bearer`}) + `\s*(?::=|[:=])\s*["'\x60][A-Za-z0-9_\-\.]{20,}["'\x60]`),
 				message: "Hardcoded token detected",
 			},
 			{
@@ -118,10 +118,11 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			if (ctx.IsTestFile() || isTestConfigPath(ctx.RelPath)) && !pattern.highConfidence {
 				continue
 			}
-			if !pattern.highConfidence && r.isPlaceholder(line) {
-				continue
+			var notSecret func(key, value string) bool
+			if !pattern.highConfidence {
+				notSecret = isNotSecretValue
 			}
-			if hasLiteralSecret(pattern.regex, line, lineNum+1, patternLiterals, contentAt) {
+			if hasLiteralSecret(pattern.regex, line, lineNum+1, patternLiterals, contentAt, notSecret) {
 				if ctx.IsSuppressed(lineNum+1, r.Name()) {
 					break
 				}
@@ -142,11 +143,19 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 // secret pattern. A match inside a regexp pattern counts only when the pattern's
 // fixed text holds the secret by itself: the rest describes a shape. A match
 // whose "quoted value" is code between two literals holds no value at all.
-func hasLiteralSecret(secret *regexp.Regexp, line string, lineNum int, patternLiterals []regexpPatternLiteral, contentAt stringContentAt) bool {
+// notSecret, when set, judges the matched value and the text before it (the
+// key): a placeholder, an environment variable name or a sentence is no secret.
+func hasLiteralSecret(secret *regexp.Regexp, line string, lineNum int, patternLiterals []regexpPatternLiteral, contentAt stringContentAt, notSecret func(key, value string) bool) bool {
 	for _, loc := range secret.FindAllStringIndex(line, -1) {
 		match := line[loc[0]:loc[1]]
 		if isDynamicSecretMatch(match) || quotedValueIsCode(match, loc[0], lineNum, contentAt) {
 			continue
+		}
+		if notSecret != nil {
+			valueStart, value := matchedValue(match)
+			if notSecret(line[:loc[0]+valueStart], value) {
+				continue
+			}
 		}
 		if literal, ok := regexpPatternAt(patternLiterals, lineNum, loc[0]+1); ok && literal.exempts(secret) {
 			continue
@@ -175,29 +184,65 @@ func isTestConfigPath(path string) bool {
 		strings.Contains(lower, "/testing/")
 }
 
-func (r *HardcodedSecretsRule) isPlaceholder(line string) bool {
-	lower := strings.ToLower(line)
-	placeholders := []string{
-		"xxx", "your_", "example", "placeholder", "<your",
-		"todo", "fixme", "change_me", "replace_with",
-		"test_", "dummy", "sample", "demo", "${",
-		"process.env", "os.getenv", "os.lookupenv",
+// matchedValue returns the value of a key = "value" match and its offset in
+// the match: the text between the first quote after the separator and the
+// closing quote that ends the match. A match without a quoted value (a bare
+// token) is its own value.
+func matchedValue(match string) (int, string) {
+	separator := strings.IndexAny(match, ":=")
+	if separator < 0 {
+		return 0, match
 	}
+	open := strings.IndexAny(match[separator:], "\"'`")
+	if open < 0 {
+		return 0, match
+	}
+	start := separator + open + 1
+	end := len(match)
+	if end > start && strings.ContainsRune("\"'`", rune(match[end-1])) {
+		end--
+	}
+	return start, match[start:end]
+}
 
-	for _, p := range placeholders {
-		if strings.Contains(lower, p) {
+// placeholderMarkers are the fragments of a value that is written to be
+// replaced: your_password_here, example_api_key, ${DB_PASSWORD}.
+var placeholderMarkers = []string{
+	"xxx", "your_", "example", "placeholder", "<your",
+	"todo", "fixme", "change_me", "replace_with",
+	"test_", "dummy", "sample", "demo", "${",
+	"process.env", "os.getenv", "os.lookupenv",
+}
+
+// testConfigMarkers are key fragments of explicit testing configuration
+// (Testing.Security.*, testConfig.*).
+var testConfigMarkers = []string{"testing.security", "testsecurity", "testconfig"}
+
+// envVarName is the shape of an environment variable name: DB_PASSWORD.
+var envVarName = regexp.MustCompile(`^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$`)
+
+// urlPath is the shape of a route: /auth/reset-password.
+var urlPath = regexp.MustCompile(`^/[A-Za-z0-9._~:{}/-]*$`)
+
+// isNotSecretValue reports whether a matched value holds no secret: a
+// placeholder, the name of an environment variable, a URL path, a phrase with
+// spaces, or a value under an explicit testing-configuration key. Markers
+// count only in the value (and the key for test configuration), never in a
+// trailing comment.
+func isNotSecretValue(key, value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range placeholderMarkers {
+		if strings.Contains(lower, marker) {
 			return true
 		}
 	}
-
-	// Skip explicit testing configuration (Testing.Security.*, etc.)
-	if strings.Contains(lower, "testing.security") ||
-		strings.Contains(lower, "testsecurity") ||
-		strings.Contains(lower, "testconfig") {
-		return true
+	lowerKey := strings.ToLower(key)
+	for _, marker := range testConfigMarkers {
+		if strings.Contains(lowerKey, marker) {
+			return true
+		}
 	}
-
-	return false
+	return envVarName.MatchString(value) || urlPath.MatchString(value) || strings.ContainsAny(strings.TrimSpace(value), " \t")
 }
 
 func (r *HardcodedSecretsRule) maskSecretMatches(line string) string {

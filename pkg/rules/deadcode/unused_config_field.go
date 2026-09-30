@@ -6,8 +6,6 @@ import (
 	"go/ast"
 	"go/types"
 	"reflect"
-	"slices"
-	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -24,16 +22,8 @@ func init() {
 // response and reads a part of it.
 var configTags = []string{"yaml", "toml", "mapstructure", "env", "ini"}
 
-// decodeFuncs fill a Go value from bytes: whatever they write into is a
-// configuration or a payload the program receives.
-var decodeFuncs = []string{"Unmarshal", "UnmarshalStrict", "Decode", "DecodeFile", "ReadConfig"}
-
-// encodeFuncs turn a Go value into bytes: the encoder reads every exported
-// field, so those fields are used even when no statement mentions them.
-var encodeFuncs = []string{"Marshal", "MarshalIndent", "Encode", "NewEncoder"}
-
 // UnusedConfigFieldRule detects struct fields that are parsed from configuration
-// or from a payload but never mentioned anywhere in the code:
+// or from a payload but never read anywhere in the code:
 //
 //	type RuleConfig struct {
 //	    Enabled  bool   `yaml:"enabled"`
@@ -45,7 +35,10 @@ var encodeFuncs = []string{"Marshal", "MarshalIndent", "Encode", "NewEncoder"}
 // silent by construction — there is no error to see and no behaviour to notice.
 //
 // Only types that are actually decoded are examined: the rule follows the types
-// reaching Unmarshal/Decode through their fields. Types that are also encoded
+// reaching a decoder (Unmarshal, Decode, env Parse/Process and the like, taking
+// the target as an untyped value) through their fields. A field only written —
+// a default in a composite literal, an assignment — is still unused: the value
+// from the configuration overwrites it and nothing reads it. Types that are also encoded
 // are left alone, because there the encoder reads the field on the program's
 // behalf.
 type UnusedConfigFieldRule struct {
@@ -84,57 +77,37 @@ type taggedField struct {
 	tagValue  string
 }
 
-// AnalyzeGoProject finds the decoded types, then reports their tagged fields
-// that no compiled file mentions.
+// AnalyzeGoProject finds the decoded types, then reports the tagged fields of
+// the analyzed files that no compiled file reads. Writing a field — a default
+// in a composite literal, an assignment — does not use it: the setting still
+// does nothing.
 func (r *UnusedConfigFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	if ctx == nil {
 		return nil, errors.New("unused config field: nil Go project context")
 	}
-
-	decoded := make(map[*types.Named]bool)
-	encoded := make(map[*types.Named]bool)
-	used := make(map[*types.Var]bool)
-
-	for _, pkg := range ctx.Packages {
-		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
-			return nil, errors.New("unused config field: package has no typed syntax")
-		}
-		for _, file := range pkg.Package.Syntax {
-			collectSerializedTypes(file, pkg.Package.TypesInfo, decoded, encoded)
-			collectFieldUses(file, pkg.Package.TypesInfo, used)
-		}
+	access, err := collectProjectFieldAccess(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unused config field: %w", err)
 	}
 
 	// Test files are outside the typed load; a field used only by its
 	// white-box test must still count as used.
 	mentions := newTestMentions(ctx.Files)
 
-	var violations []*core.Violation
-	for _, pkg := range ctx.Packages {
-		info := pkg.Package.TypesInfo
-		for _, fileCtx := range pkg.Files {
-			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		var violations []*core.Violation
+		for _, field := range collectTaggedFields(fileCtx, info, access.decoded, access.encoded) {
+			pos := field.obj.Pos()
+			if access.read[pos] || access.hashed[pos] {
 				continue
 			}
-			for _, field := range collectTaggedFields(fileCtx, info, decoded, encoded) {
-				if used[field.obj] {
-					continue
-				}
-				if mentions.mentioned(field.fileCtx, field.fieldName) {
-					continue
-				}
-				violations = append(violations, r.report(field))
+			if mentions.mentioned(field.fileCtx, field.fieldName) {
+				continue
 			}
+			violations = append(violations, r.report(field))
 		}
-	}
-
-	sort.SliceStable(violations, func(i, j int) bool {
-		if violations[i].File != violations[j].File {
-			return violations[i].File < violations[j].File
-		}
-		return violations[i].Line < violations[j].Line
+		return violations
 	})
-	return violations, nil
 }
 
 func (r *UnusedConfigFieldRule) report(field taggedField) *core.Violation {
@@ -147,77 +120,6 @@ func (r *UnusedConfigFieldRule) report(field taggedField) *core.Violation {
 	v.WithContext("pattern", "unused_config_field")
 	v.WithContext("field", field.typeName+"."+field.fieldName)
 	return v
-}
-
-// collectSerializedTypes records the types that reach a decoder or an encoder,
-// following their fields: a config struct is decoded as a whole, and its nested
-// sections come from the same file.
-func collectSerializedTypes(file *ast.File, info *types.Info, decoded, encoded map[*types.Named]bool) {
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		name := calleeName(call.Fun)
-		if name == "" {
-			return true
-		}
-
-		var target map[*types.Named]bool
-		switch {
-		case slices.Contains(decodeFuncs, name):
-			target = decoded
-		case slices.Contains(encodeFuncs, name):
-			target = encoded
-		default:
-			return true
-		}
-		for _, arg := range call.Args {
-			addReachableStructs(target, info.TypeOf(arg))
-		}
-		return true
-	})
-}
-
-func calleeName(fun ast.Expr) string {
-	switch f := fun.(type) {
-	case *ast.SelectorExpr:
-		return f.Sel.Name
-	case *ast.Ident:
-		return f.Name
-	}
-	return ""
-}
-
-// addReachableStructs walks a type and records every named struct it can reach
-// through pointers, slices, maps and fields.
-func addReachableStructs(set map[*types.Named]bool, t types.Type) {
-	switch typ := t.(type) {
-	case *types.Pointer:
-		addReachableStructs(set, typ.Elem())
-	case *types.Slice:
-		addReachableStructs(set, typ.Elem())
-	case *types.Array:
-		addReachableStructs(set, typ.Elem())
-	case *types.Map:
-		addReachableStructs(set, typ.Elem())
-	case *types.Named:
-		if set[typ] {
-			return
-		}
-		structType, ok := typ.Underlying().(*types.Struct)
-		if !ok {
-			return
-		}
-		set[typ] = true
-		for i := range structType.NumFields() {
-			addReachableStructs(set, structType.Field(i).Type())
-		}
-	case *types.Struct:
-		for i := range typ.NumFields() {
-			addReachableStructs(set, typ.Field(i).Type())
-		}
-	}
 }
 
 // collectTaggedFields returns the tagged fields of the file's decoded struct
@@ -297,36 +199,4 @@ func configTag(raw string) (key, value string, ok bool) {
 		return name, value, true
 	}
 	return "", "", false
-}
-
-// collectFieldUses marks every field the file mentions: read or written through
-// a selector, or named as a key in a composite literal.
-func collectFieldUses(file *ast.File, info *types.Info, used map[*types.Var]bool) {
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.SelectorExpr:
-			selection, ok := info.Selections[node]
-			if !ok || selection.Kind() != types.FieldVal {
-				return true
-			}
-			if field, ok := selection.Obj().(*types.Var); ok {
-				used[field] = true
-			}
-		case *ast.CompositeLit:
-			for _, elt := range node.Elts {
-				kv, ok := elt.(*ast.KeyValueExpr)
-				if !ok {
-					continue
-				}
-				ident, ok := kv.Key.(*ast.Ident)
-				if !ok {
-					continue
-				}
-				if field, ok := info.Uses[ident].(*types.Var); ok {
-					used[field] = true
-				}
-			}
-		}
-		return true
-	})
 }

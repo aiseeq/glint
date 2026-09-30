@@ -3,6 +3,7 @@ package doccheck
 import (
 	"go/ast"
 	"go/token"
+	"path/filepath"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -25,7 +26,7 @@ func NewDocCompletenessRule() *DocCompletenessRule {
 		BaseRule: rules.NewBaseRule(
 			"doc-missing",
 			"documentation",
-			"Detects exported types, functions, and methods without documentation comments",
+			"Detects exported types, functions, and methods of exported types without documentation comments (files under an internal/ directory at any depth are skipped)",
 			core.SeverityLow,
 		),
 		skipTrivial: true,
@@ -55,7 +56,7 @@ func (r *DocCompletenessRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	if ctx.IsTestFile() {
 		return nil
 	}
-	if strings.HasPrefix(ctx.RelPath, "internal/") {
+	if isInternalPackagePath(ctx.RelPath) {
 		return nil
 	}
 
@@ -72,6 +73,43 @@ func (r *DocCompletenessRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	}
 
 	return violations
+}
+
+// isInternalPackagePath reports whether a file lies in an internal/ directory
+// at any depth: pkg/x/internal/y is as private to its parent as internal/y.
+func isInternalPackagePath(relPath string) bool {
+	dirs := strings.Split(filepath.ToSlash(filepath.Dir(relPath)), "/")
+	for _, dir := range dirs {
+		if dir == "internal" {
+			return true
+		}
+	}
+	return false
+}
+
+// receiverTypeExported reports whether a method's receiver base type is
+// exported.
+func receiverTypeExported(recv *ast.FieldList) bool {
+	if len(recv.List) == 0 {
+		return false
+	}
+	expr := recv.List[0].Type
+	for {
+		switch t := expr.(type) {
+		case *ast.StarExpr:
+			expr = t.X
+		case *ast.ParenExpr:
+			expr = t.X
+		case *ast.IndexExpr:
+			expr = t.X
+		case *ast.IndexListExpr:
+			expr = t.X
+		case *ast.Ident:
+			return t.IsExported()
+		default:
+			return false
+		}
+	}
 }
 
 // checkGenDecl checks type and const/var declarations
@@ -156,8 +194,9 @@ func isEnumMember(name, enumType string) bool {
 func (r *DocCompletenessRule) checkFuncDecl(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
 	var violations []*core.Violation
 
-	// Skip unexported functions
-	if !ast.IsExported(fn.Name.Name) {
+	// Skip unexported functions and methods of unexported types: neither is
+	// part of the package API
+	if !ast.IsExported(fn.Name.Name) || (fn.Recv != nil && !receiverTypeExported(fn.Recv)) {
 		return nil
 	}
 

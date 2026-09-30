@@ -24,9 +24,15 @@ const defaultExcludedMethods = "Scan,Value,MarshalJSON,UnmarshalJSON,MarshalYAML
 // Public contracts must be typed: `any` erases the schema, breaks generated
 // TS types, and pushes type assertions onto every caller.
 //
-// Not flagged: unexported symbols, comma-ok lookups (any, bool), stdlib-fixed
-// signatures (Scan, MarshalJSON, ...), parameters (variadic logger-style
-// ...any is idiomatic).
+// Flagged: results of exported functions and of exported methods of exported
+// types, and exported fields of exported structs, typed as bare
+// any/interface{} or as a map of them.
+//
+// Not flagged: unexported symbols and methods of unexported types, comma-ok
+// lookups (any, bool), stdlib-fixed signatures (Scan, MarshalJSON, ...),
+// parameters (variadic logger-style ...any is idiomatic), slices of any.
+// A field that genuinely carries external data keeps its any with a
+// "// any-in-public-contract: safe" comment.
 type AnyInPublicContractRule struct {
 	*rules.BaseRule
 	excludedMethods map[string]bool
@@ -38,7 +44,7 @@ func NewAnyInPublicContractRule() *AnyInPublicContractRule {
 		BaseRule: rules.NewBaseRule(
 			"any-in-public-contract",
 			"typesafety",
-			"Detects bare any/interface{} in exported function results and struct fields",
+			"Detects bare any/interface{} (or a map of it) in results of exported functions and methods of exported types, and in exported fields of exported structs",
 			core.SeverityMedium,
 		),
 	}
@@ -73,6 +79,9 @@ func (r *AnyInPublicContractRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.FuncDecl:
+			if node.Recv != nil && !receiverTypeExported(node.Recv) {
+				return true
+			}
 			violations = append(violations, r.checkFuncSignature(ctx, node.Name, node.Type)...)
 		case *ast.TypeSpec:
 			if !node.Name.IsExported() {
@@ -119,7 +128,8 @@ func (r *AnyInPublicContractRule) checkFuncSignature(
 	return violations
 }
 
-// checkStructFields reports exported fields typed as map with any values.
+// checkStructFields reports exported fields typed as bare any or as a map with
+// any values.
 func (r *AnyInPublicContractRule) checkStructFields(
 	ctx *core.FileContext, structType *ast.StructType,
 ) []*core.Violation {
@@ -133,18 +143,47 @@ func (r *AnyInPublicContractRule) checkStructFields(
 				fieldName = name.Name
 			}
 		}
-		if !exported || !isMapWithAnyValue(field.Type) {
+		if !exported || !typeContainsAny(field.Type) {
 			continue
 		}
 		pos := ctx.PositionFor(field.Type)
+		shape := "untyped any"
+		if isMapWithAnyValue(field.Type) {
+			shape = "map[string]any"
+		}
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
-			"Exported field "+fieldName+" is map[string]any — schema-less payload in a public contract")
+			"Exported field "+fieldName+" is "+shape+" — schema-less payload in a public contract")
 		v.WithCode(strings.TrimSpace(ctx.GetLine(pos.Line)))
-		v.WithSuggestion("Define a typed struct for the payload; keep map[string]any only for genuinely external data (configurable via excluded file exceptions)")
+		v.WithSuggestion("Define a typed struct for the payload; keep any only for genuinely external data, with an \"any-in-public-contract: safe\" comment saying why")
 		v.Severity = core.SeverityLow
 		violations = append(violations, v)
 	}
 	return violations
+}
+
+// receiverTypeExported reports whether a method's receiver base type is
+// exported: a method of an unexported type is not part of the public API.
+func receiverTypeExported(recv *ast.FieldList) bool {
+	if len(recv.List) == 0 {
+		return false
+	}
+	expr := recv.List[0].Type
+	for {
+		switch t := expr.(type) {
+		case *ast.StarExpr:
+			expr = t.X
+		case *ast.ParenExpr:
+			expr = t.X
+		case *ast.IndexExpr:
+			expr = t.X
+		case *ast.IndexListExpr:
+			expr = t.X
+		case *ast.Ident:
+			return t.IsExported()
+		default:
+			return false
+		}
+	}
 }
 
 // checkInterfaceMethods reports interface methods whose results contain any.

@@ -1,11 +1,14 @@
 package security
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestSecretInQueryURLRule(t *testing.T) {
@@ -53,6 +56,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+
+	"example.com/rulestest/httpclient"
 )
 func (c *Client) GetHoldings(ctx context.Context, address string) error {
 	q := url.Values{}
@@ -72,14 +77,16 @@ func (c *Client) GetHoldings(ctx context.Context, address string) error {
 			expectedCount: 0,
 		},
 		{
-			// Etherscan post-fix shape: apikey in query, but the request goes
-			// through a shared helper that owns the sanitation.
+			// Post-fix shape: apikey in query, but the request goes through a
+			// shared helper that owns the sanitation.
 			name: "shared HTTP helper is silent",
 			code: `package api
 import (
 	"context"
 	"fmt"
 	"net/url"
+
+	"example.com/rulestest/httpclient"
 )
 func (c *Client) Get(ctx context.Context, params url.Values) ([]byte, error) {
 	query := url.Values{}
@@ -87,7 +94,7 @@ func (c *Client) Get(ctx context.Context, params url.Values) ([]byte, error) {
 	requestURL := c.baseURL + "?" + query.Encode()
 	body, err := httpclient.DoGet(ctx, c.httpClient, requestURL)
 	if err != nil {
-		return nil, fmt.Errorf("etherscan request: %w", err)
+		return nil, fmt.Errorf("explorer request: %w", err)
 	}
 	return body, nil
 }`,
@@ -164,7 +171,6 @@ func (c *Client) List(ctx context.Context, page string) error {
 			code: `package api
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/url"
 )
@@ -189,14 +195,110 @@ func (c *Client) GetHoldings(ctx context.Context) error {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := core.NewFileContext("/src/file.go", "/src", []byte(tt.code), core.DefaultConfig())
-			parser := core.NewParser()
-			fset, astFile, err := parser.ParseGoFile("/src/file.go", []byte(tt.code))
-			if err == nil {
-				ctx.SetGoAST(fset, astFile)
-			}
-			violations := rule.AnalyzeFile(ctx)
+			t.Parallel() // each case loads its own module
+			violations := analyzeSecretInQueryURL(t, rule, tt.code)
 			assert.Len(t, violations, tt.expectedCount, "Code: %s", tt.code)
 		})
 	}
+}
+
+// secretInQueryURLSupport declares what the cases use besides the standard
+// library: the client type and a shared HTTP helper package.
+var secretInQueryURLSupport = map[string]string{
+	"api/client.go": `package api
+
+import (
+	"errors"
+	"net/http"
+)
+
+type Client struct {
+	http       *http.Client
+	httpClient *http.Client
+	apiKey     string
+	baseURL    string
+	token      string
+}
+
+var errUnavailable = errors.New("unavailable")
+`,
+	"httpclient/httpclient.go": `package httpclient
+
+import (
+	"context"
+	"net/http"
+)
+
+func SanitizeTransportError(err error) error { return err }
+
+func DoGet(ctx context.Context, c *http.Client, url string) ([]byte, error) { return nil, nil }
+`,
+}
+
+// analyzeSecretInQueryURL loads code as api/case.go of a typed module and
+// returns the rule's findings in it.
+func analyzeSecretInQueryURL(t *testing.T, rule *SecretInQueryURLRule, code string) []*core.Violation {
+	t.Helper()
+	files := map[string]string{"api/case.go": code}
+	for name, content := range secretInQueryURLSupport {
+		files[name] = content
+	}
+	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	var inCase []*core.Violation
+	for _, v := range violations {
+		if filepath.ToSlash(v.File) == "api/case.go" {
+			inCase = append(inCase, v)
+		}
+	}
+	return inCase
+}
+
+// Only an HTTP transport is a transport: sync.Once.Do, a worker pool's Do or
+// any other one-argument Do does not wrap errors in *url.Error.
+func TestSecretInQueryURLTransportByReceiverType(t *testing.T) {
+	code := `package api
+
+import (
+	"net/http"
+	"net/url"
+	"sync"
+)
+
+var once sync.Once
+
+func Link(base, t string) string {
+	once.Do(func() {})
+	return base + "?token=" + url.QueryEscape(t)
+}
+
+func Fetch(c *http.Client, base, key string) error {
+	u := base + "?api_key=" + key
+	req, _ := http.NewRequest(http.MethodGet, u, nil)
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
+type Doer interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+func FetchVia(d Doer, base, key string) error {
+	req, _ := http.NewRequest(http.MethodGet, base+"?api_key="+key, nil)
+	resp, err := d.Do(req)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+`
+	violations := analyzeSecretInQueryURL(t, NewSecretInQueryURLRule(), code)
+	var functions []any
+	for _, v := range violations {
+		functions = append(functions, v.Context["function"])
+	}
+	assert.Equal(t, []any{"Fetch", "FetchVia"}, functions)
 }

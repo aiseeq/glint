@@ -92,3 +92,15 @@ func TestLongFunctionConfigure(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 100, rule.maxLines)
 }
+
+// A method of a generic type is named with its type, like any other method.
+func TestLongFunctionNamesGenericReceiver(t *testing.T) {
+	rule := NewLongFunctionRule()
+	require.NoError(t, rule.Configure(map[string]any{"max_lines": 3}))
+
+	code := "package box\n\ntype Box[T any] struct{ v T }\n\nfunc (b *Box[T]) Fill(v T) {\n" +
+		strings.Repeat("\tb.v = v\n", 5) + "}\n"
+	violations := rule.AnalyzeFile(createTestContext(t, "pkg/box/box.go", code))
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "*Box.Fill is")
+}

@@ -6,14 +6,15 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 )
 
-// testMentions answers "does a *_test.go file of this package mention this
-// name". Test packages are not part of the typed load (packages.Load runs with
-// Tests:false), so a white-box test reading an internal field or symbol is
-// invisible to typed analysis; this name-based scan keeps such members from
-// being reported as dead. Name matching is coarse on purpose: erring toward
-// "mentioned" only costs a finding, erring the other way reports live code.
+// testMentions answers "does a Go file outside the typed load in this
+// package's directory mention this name". Test packages are not part of the
+// typed load (packages.Load runs with Tests:false), so a white-box test
+// reading an internal field or symbol is invisible to typed analysis; this
+// name-based scan keeps such members from being reported as dead. Name
+// matching is coarse on purpose: erring toward "mentioned" only costs a
+// finding, erring the other way reports live code.
 type testMentions struct {
-	// identifiers mentioned in test files, keyed by package directory
+	// identifiers mentioned in the scanned files, keyed by package directory
 	names map[string]map[string]bool
 }
 
@@ -24,19 +25,49 @@ func newTestMentions(files []*core.FileContext) *testMentions {
 		if fileCtx == nil || !fileCtx.IsTestFile() || !fileCtx.IsGoFile() {
 			continue
 		}
-		dir := filepath.Dir(fileCtx.Path)
-		set := mentions.names[dir]
-		if set == nil {
-			set = make(map[string]bool)
-			mentions.names[dir] = set
-		}
-		collectIdentifierWords(string(fileCtx.Content), set)
+		mentions.add(fileCtx)
 	}
 	return mentions
 }
 
-// mentioned reports whether a test file in the package directory of declCtx
-// uses the identifier.
+// newUntypedMentions scans every Go file the typed load leaves out: test
+// files, and files the build excludes on this platform (foo_windows.go, a
+// build tag). Such a file can still use a package's symbols; the scan reads
+// the text, so a file that does not even parse (a template behind
+// //go:build ignore) costs nothing but a few spurious words.
+func newUntypedMentions(ctx *core.GoProjectContext) *testMentions {
+	typed := make(map[*core.FileContext]bool)
+	for _, pkg := range ctx.Packages {
+		if pkg == nil {
+			continue
+		}
+		for _, fileCtx := range pkg.Files {
+			typed[fileCtx] = true
+		}
+	}
+	mentions := &testMentions{names: make(map[string]map[string]bool)}
+	for _, fileCtx := range ctx.Files {
+		if fileCtx == nil || !fileCtx.IsGoFile() || (typed[fileCtx] && !fileCtx.IsTestFile()) {
+			continue
+		}
+		mentions.add(fileCtx)
+	}
+	return mentions
+}
+
+// add records the identifier-shaped words of one file under its directory.
+func (m *testMentions) add(fileCtx *core.FileContext) {
+	dir := filepath.Dir(fileCtx.Path)
+	set := m.names[dir]
+	if set == nil {
+		set = make(map[string]bool)
+		m.names[dir] = set
+	}
+	collectIdentifierWords(string(fileCtx.Content), set)
+}
+
+// mentioned reports whether a scanned file in the package directory of
+// declCtx uses the identifier.
 func (m *testMentions) mentioned(declCtx *core.FileContext, name string) bool {
 	return m.names[filepath.Dir(declCtx.Path)][name]
 }

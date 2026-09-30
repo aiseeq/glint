@@ -64,32 +64,48 @@ func (r *DeepNestingRule) checkNesting(ctx *core.FileContext, node ast.Node, dep
 	case *ast.BlockStmt:
 		violations = r.checkBlockStatements(ctx, n.List, depth, funcName)
 
+	case *ast.LabeledStmt:
+		violations = r.checkNesting(ctx, n.Stmt, depth, funcName)
+
 	case *ast.IfStmt:
-		violations = r.checkNestedBlock(ctx, n, n.Body, depth, funcName)
-		if n.Else != nil {
-			violations = append(violations, r.checkNesting(ctx, n.Else, depth, funcName)...)
+		violations = r.checkHeader(ctx, funcName, n.Init, n.Cond)
+		violations = append(violations, r.checkNestedBlock(ctx, n, n.Body, depth, funcName)...)
+		switch elseNode := n.Else.(type) {
+		case *ast.IfStmt:
+			// else if continues the chain at the level of the first if
+			violations = append(violations, r.checkNesting(ctx, elseNode, depth, funcName)...)
+		case *ast.BlockStmt:
+			// the else body sits one level below, like the if body; the
+			// depth was already reported for the if itself
+			violations = append(violations, r.checkBlockStatements(ctx, elseNode.List, depth+1, funcName)...)
 		}
 
 	case *ast.ForStmt:
-		violations = r.checkNestedBlock(ctx, n, n.Body, depth, funcName)
+		violations = r.checkHeader(ctx, funcName, n.Init, n.Cond, n.Post)
+		violations = append(violations, r.checkNestedBlock(ctx, n, n.Body, depth, funcName)...)
 
 	case *ast.RangeStmt:
-		violations = r.checkNestedBlock(ctx, n, n.Body, depth, funcName)
+		violations = r.checkHeader(ctx, funcName, n.X)
+		violations = append(violations, r.checkNestedBlock(ctx, n, n.Body, depth, funcName)...)
 
 	case *ast.SwitchStmt:
-		violations = r.checkNestedBlock(ctx, n, n.Body, depth, funcName)
+		violations = r.checkHeader(ctx, funcName, n.Init, n.Tag)
+		violations = append(violations, r.checkNestedBlock(ctx, n, n.Body, depth, funcName)...)
 
 	case *ast.TypeSwitchStmt:
-		violations = r.checkNestedBlock(ctx, n, n.Body, depth, funcName)
+		violations = r.checkHeader(ctx, funcName, n.Init, n.Assign)
+		violations = append(violations, r.checkNestedBlock(ctx, n, n.Body, depth, funcName)...)
 
 	case *ast.SelectStmt:
 		violations = r.checkNestedBlock(ctx, n, n.Body, depth, funcName)
 
 	case *ast.CaseClause:
-		violations = r.checkBlockStatements(ctx, n.Body, depth, funcName)
+		violations = r.checkHeader(ctx, funcName, exprNodes(n.List)...)
+		violations = append(violations, r.checkBlockStatements(ctx, n.Body, depth, funcName)...)
 
 	case *ast.CommClause:
-		violations = r.checkBlockStatements(ctx, n.Body, depth, funcName)
+		violations = r.checkHeader(ctx, funcName, n.Comm)
+		violations = append(violations, r.checkBlockStatements(ctx, n.Body, depth, funcName)...)
 
 	default:
 		// Statements without their own blocks (assignments, declarations,
@@ -113,6 +129,29 @@ func (r *DeepNestingRule) checkFuncLits(ctx *core.FileContext, node ast.Node, fu
 		return true
 	})
 	return violations
+}
+
+// checkHeader checks the function literals in the header of a statement —
+// if/for/switch init, condition, post, tag, case expressions. An absent part
+// is a nil interface and is skipped.
+func (r *DeepNestingRule) checkHeader(ctx *core.FileContext, funcName string, parts ...ast.Node) []*core.Violation {
+	var violations []*core.Violation
+	for _, part := range parts {
+		if part == nil {
+			continue
+		}
+		violations = append(violations, r.checkFuncLits(ctx, part, funcName)...)
+	}
+	return violations
+}
+
+// exprNodes widens a list of expressions to nodes.
+func exprNodes(exprs []ast.Expr) []ast.Node {
+	nodes := make([]ast.Node, len(exprs))
+	for i, expr := range exprs {
+		nodes[i] = expr
+	}
+	return nodes
 }
 
 func (r *DeepNestingRule) checkNestedBlock(ctx *core.FileContext, node ast.Node, body *ast.BlockStmt, depth int, funcName string) []*core.Violation {

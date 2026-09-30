@@ -5,9 +5,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 const (
@@ -198,7 +200,7 @@ func (r *SolidSRPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 		case *ast.FuncDecl:
 			if node.Recv != nil && len(node.Recv.List) > 0 {
-				if typeName := getStructName(node.Recv.List[0].Type); typeName != "" {
+				if typeName := helpers.ReceiverTypeName(node.Recv.List[0].Type); typeName != "" {
 					structMethods[typeName] = append(structMethods[typeName], node.Name.Name)
 				}
 			}
@@ -279,18 +281,6 @@ func (r *SolidSRPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	return violations
 }
 
-func getStructName(expr ast.Expr) string {
-	switch t := expr.(type) {
-	case *ast.Ident:
-		return t.Name
-	case *ast.StarExpr:
-		if ident, ok := t.X.(*ast.Ident); ok {
-			return ident.Name
-		}
-	}
-	return ""
-}
-
 // areaPatterns maps responsibility areas to method-name patterns that signal them
 var areaPatterns = map[string][]string{
 	"database":     {"Get", "Find", "Create", "Update", "Delete", "Save", "Load", "Query", "Insert", "Select"},
@@ -310,15 +300,20 @@ var areaPatterns = map[string][]string{
 	"notification": {"Notify", "Alert", "Email", "SMS", "Push"},
 }
 
-// detectResponsibilityAreas analyzes method names to detect different responsibility areas
+// detectResponsibilityAreas analyzes method names to detect different
+// responsibility areas. A keyword counts only as a whole camelCase word of
+// the name: "Get" is in GetUser, not in Budget.
 func detectResponsibilityAreas(methods []string) []string {
 	detectedAreas := make(map[string]bool)
 
 	for _, method := range methods {
-		methodLower := strings.ToLower(method)
+		words := make(map[string]bool)
+		for _, word := range camelWords(method) {
+			words[word] = true
+		}
 		for area, patterns := range areaPatterns {
 			for _, pattern := range patterns {
-				if strings.Contains(methodLower, strings.ToLower(pattern)) {
+				if words[strings.ToLower(pattern)] {
 					detectedAreas[area] = true
 					break
 				}
@@ -335,4 +330,40 @@ func detectResponsibilityAreas(methods []string) []string {
 	sort.Strings(areas)
 
 	return areas
+}
+
+// camelWords splits an identifier into its lower-cased words: at an upper
+// case letter after a lower case one or a digit, at the last capital of an
+// acronym followed by a lower case letter (HTTPRequest → http, request), and
+// at underscores. Digits stay with the word they follow.
+func camelWords(name string) []string {
+	runes := []rune(name)
+	var words []string
+	start := -1
+	flush := func(end int) {
+		if start >= 0 && end > start {
+			words = append(words, strings.ToLower(string(runes[start:end])))
+		}
+		start = -1
+	}
+	for i, c := range runes {
+		if c == '_' {
+			flush(i)
+			continue
+		}
+		if start < 0 {
+			start = i
+			continue
+		}
+		if unicode.IsUpper(c) {
+			prev := runes[i-1]
+			nextLower := i+1 < len(runes) && unicode.IsLower(runes[i+1])
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (unicode.IsUpper(prev) && nextLower) {
+				flush(i)
+				start = i
+			}
+		}
+	}
+	flush(len(runes))
+	return words
 }

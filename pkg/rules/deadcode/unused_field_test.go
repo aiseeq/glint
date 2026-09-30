@@ -465,3 +465,58 @@ func Dump() ([]byte, error) {
 
 	assert.Empty(t, violations)
 }
+
+// A map keyed by an instantiated generic struct hashes the fields of that
+// instance: the fields of the generic declaration are read.
+func TestUnusedFieldIgnoresGenericStructUsedAsMapKey(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"dedup.go": `package dedup
+
+type pair[K comparable] struct {
+	left  K
+	right K
+}
+
+func Seen(a, b int) bool {
+	seen := map[pair[int]]bool{}
+	k := pair[int]{left: a, right: b}
+	if seen[k] {
+		return true
+	}
+	seen[k] = true
+	return false
+}
+`,
+	})
+
+	assert.Empty(t, violations)
+}
+
+// Comparing a struct compares the structs and arrays nested in it, field by
+// field, all the way down.
+func TestUnusedFieldIgnoresFieldsOfNestedComparedStruct(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"same.go": `package same
+
+type cell struct{ v int }
+
+type inner struct {
+	id    int
+	cells [2]cell
+}
+
+type outer struct {
+	in   inner
+	name string
+}
+
+func Same(a, b int) bool {
+	x := outer{in: inner{id: a}, name: "x"}
+	y := outer{in: inner{id: b}, name: "x"}
+	return x == y
+}
+`,
+	})
+
+	assert.Empty(t, violations)
+}

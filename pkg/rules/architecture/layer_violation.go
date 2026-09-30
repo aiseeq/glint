@@ -3,7 +3,9 @@ package architecture
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -14,7 +16,16 @@ func init() {
 	rules.Register(NewLayerViolationRule())
 }
 
-// LayerViolationRule detects architecture violations (Handler→Service→Repository)
+// LayerViolationRule detects architecture violations (Handler→Service→Repository):
+// SQL in the handler and service layers, HTTP response handling in the
+// repository layer.
+//
+// A call is judged by the type of what it calls: a Query/Exec method of a
+// database handle (database/sql, sqlx, pgx), an HTTP operation of net/http —
+// however the variable or field holding the handle is named. A method that
+// merely shares a name (a getter HTTPTimeout, a cache's Query) is not one. A
+// file without type information keeps the SQL-text check, which needs no
+// types, and is silent about calls.
 type LayerViolationRule struct {
 	*rules.BaseRule
 }
@@ -31,90 +42,64 @@ func NewLayerViolationRule() *LayerViolationRule {
 	}
 }
 
-// AnalyzeFile checks for architecture violations
+// AnalyzeFile checks one file without type information: the fallback for
+// files no type-checked package covers.
 func (r *LayerViolationRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.HasGoAST() || ctx.IsTestFile() {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *LayerViolationRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every Go file, typed where the project allows.
+func (r *LayerViolationRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze checks one file. info is nil for a file without type information.
+func (r *LayerViolationRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	if !ctx.IsGoFile() || !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
 
-	// Skip test infrastructure files (test_router, test_helper, etc.)
-	if strings.Contains(ctx.RelPath, "test_") || strings.HasPrefix(ctx.RelPath, "test") {
-		return nil
-	}
-
-	layer := determineLayerFromPath(ctx.RelPath)
-	if layer == UnknownLayer {
-		return nil
-	}
-
-	var violations []*core.Violation
-
-	// Check for layer-specific violations
-	switch layer {
+	var layerName string
+	switch determineLayerFromPath(ctx.RelPath) {
 	case HandlerLayer:
-		violations = append(violations, r.checkHandlerViolations(ctx)...)
+		layerName = "Handler"
 	case ServiceLayer:
-		violations = append(violations, r.checkServiceViolations(ctx)...)
+		layerName = "Service"
 	case RepositoryLayer:
-		violations = append(violations, r.checkRepositoryViolations(ctx)...)
+		return r.checkRepositoryViolations(ctx, info)
+	default:
+		return nil
 	}
 
-	return violations
-}
-
-// checkHandlerViolations checks for violations in handler layer
-func (r *LayerViolationRule) checkHandlerViolations(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
-
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.CallExpr:
-			if v := r.checkDirectSQLCall(ctx, node, "Handler"); v != nil {
+			if v := r.checkDirectSQLCall(ctx, info, node, layerName); v != nil {
 				violations = append(violations, v)
 			}
 		case *ast.BasicLit:
 			if node.Kind == token.STRING {
-				if v := r.checkSQLString(ctx, node, "Handler"); v != nil {
+				if v := r.checkSQLString(ctx, node, layerName); v != nil {
 					violations = append(violations, v)
 				}
 			}
 		}
 		return true
 	})
-
-	return violations
-}
-
-// checkServiceViolations checks for violations in service layer
-func (r *LayerViolationRule) checkServiceViolations(ctx *core.FileContext) []*core.Violation {
-	var violations []*core.Violation
-
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.CallExpr:
-			if v := r.checkDirectSQLCall(ctx, node, "Service"); v != nil {
-				violations = append(violations, v)
-			}
-		case *ast.BasicLit:
-			if node.Kind == token.STRING {
-				if v := r.checkSQLString(ctx, node, "Service"); v != nil {
-					violations = append(violations, v)
-				}
-			}
-		}
-		return true
-	})
-
 	return violations
 }
 
 // checkRepositoryViolations checks for violations in repository layer
-func (r *LayerViolationRule) checkRepositoryViolations(ctx *core.FileContext) []*core.Violation {
+func (r *LayerViolationRule) checkRepositoryViolations(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	var violations []*core.Violation
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
-			if v := r.checkHTTPCall(ctx, call); v != nil {
+			if v := r.checkHTTPCall(ctx, info, call); v != nil {
 				violations = append(violations, v)
 			}
 		}
@@ -124,37 +109,85 @@ func (r *LayerViolationRule) checkRepositoryViolations(ctx *core.FileContext) []
 	return violations
 }
 
-// checkDirectSQLCall checks for direct SQL calls
-func (r *LayerViolationRule) checkDirectSQLCall(ctx *core.FileContext, call *ast.CallExpr, layer string) *core.Violation {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return nil
-	}
+// sqlPackages are the packages whose handles run SQL. A subpackage counts
+// (pgx/v5/pgxpool).
+var sqlPackages = []string{"database/sql", "github.com/jmoiron/sqlx", "github.com/jackc/pgx"}
 
-	ident, ok := sel.X.(*ast.Ident)
-	if !ok {
-		return nil
-	}
+// sqlMethods are the methods of a database handle that run or prepare SQL.
+var sqlMethods = []string{
+	"Query", "QueryRow", "QueryContext", "QueryRowContext",
+	"Exec", "ExecContext", "Prepare", "PrepareContext",
+	"Begin", "BeginTx",
+}
 
-	// Check if receiver looks like a database connection
-	if !r.isSQLReceiver(ident.Name) {
-		return nil
-	}
+// httpOperations are the net/http functions and methods that handle a
+// request or a response.
+var httpOperations = []string{"WriteHeader", "ServeHTTP", "Redirect", "ParseForm", "Cookie", "SetCookie"}
 
-	// Check if method is a SQL method
-	if !r.isSQLMethod(sel.Sel.Name) {
+// checkDirectSQLCall reports a SQL method called on a database handle.
+func (r *LayerViolationRule) checkDirectSQLCall(ctx *core.FileContext, info *types.Info, call *ast.CallExpr, layer string) *core.Violation {
+	sel, fn, ok := calledMethod(info, call)
+	if !ok || !slices.Contains(sqlMethods, fn.Name()) || !inPackages(fn, sqlPackages) {
 		return nil
 	}
 
 	pos := ctx.PositionFor(call)
 	v := r.CreateViolation(ctx.RelPath, pos.Line,
-		layer+" contains direct SQL call: "+ident.Name+"."+sel.Sel.Name)
+		layer+" contains direct SQL call: "+types.ExprString(sel.X)+"."+sel.Sel.Name)
 	v.WithCode(ctx.GetLine(pos.Line))
 	v.WithSuggestion("Move SQL operations to Repository layer")
 	v.WithContext("layer", layer)
 	v.WithContext("pattern", "direct_sql_call")
 
 	return v
+}
+
+// checkHTTPCall reports an HTTP operation of net/http called from the
+// repository layer.
+func (r *LayerViolationRule) checkHTTPCall(ctx *core.FileContext, info *types.Info, call *ast.CallExpr) *core.Violation {
+	sel, fn, ok := calledMethod(info, call)
+	if !ok || !slices.Contains(httpOperations, fn.Name()) || !inPackages(fn, []string{"net/http"}) {
+		return nil
+	}
+
+	pos := ctx.PositionFor(call)
+	v := r.CreateViolation(ctx.RelPath, pos.Line,
+		"Repository contains HTTP operation: "+sel.Sel.Name)
+	v.WithCode(ctx.GetLine(pos.Line))
+	v.WithSuggestion("Repository should only handle data access, move HTTP logic to Service/Handler")
+	v.WithContext("layer", "Repository")
+	v.WithContext("pattern", "http_in_repo")
+
+	return v
+}
+
+// calledMethod resolves a call of the form x.f(...) to the function or
+// method it invokes. Without type information nothing is resolved.
+func calledMethod(info *types.Info, call *ast.CallExpr) (*ast.SelectorExpr, *types.Func, bool) {
+	if info == nil {
+		return nil, nil, false
+	}
+	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return nil, nil, false
+	}
+	fn, ok := info.Uses[sel.Sel].(*types.Func)
+	if !ok || fn.Pkg() == nil {
+		return nil, nil, false
+	}
+	return sel, fn, true
+}
+
+// inPackages reports whether fn is declared in one of the packages or below
+// one of them.
+func inPackages(fn *types.Func, paths []string) bool {
+	pkgPath := fn.Pkg().Path()
+	for _, path := range paths {
+		if pkgPath == path || strings.HasPrefix(pkgPath, path+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // checkSQLString checks for SQL strings in non-repository layers
@@ -179,56 +212,6 @@ func (r *LayerViolationRule) checkSQLString(ctx *core.FileContext, lit *ast.Basi
 	v.WithContext("pattern", "sql_string")
 
 	return v
-}
-
-// checkHTTPCall checks for HTTP operations in repository layer
-func (r *LayerViolationRule) checkHTTPCall(ctx *core.FileContext, call *ast.CallExpr) *core.Violation {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return nil
-	}
-
-	methodName := sel.Sel.Name
-
-	if !r.isHTTPOperation(methodName) {
-		return nil
-	}
-
-	pos := ctx.PositionFor(call)
-	v := r.CreateViolation(ctx.RelPath, pos.Line,
-		"Repository contains HTTP operation: "+methodName)
-	v.WithCode(ctx.GetLine(pos.Line))
-	v.WithSuggestion("Repository should only handle data access, move HTTP logic to Service/Handler")
-	v.WithContext("layer", "Repository")
-	v.WithContext("pattern", "http_in_repo")
-
-	return v
-}
-
-// isSQLReceiver checks if the receiver name looks like a DB connection
-func (r *LayerViolationRule) isSQLReceiver(name string) bool {
-	sqlReceivers := []string{"db", "DB", "tx", "TX", "conn", "database", "pool"}
-	for _, recv := range sqlReceivers {
-		if name == recv {
-			return true
-		}
-	}
-	return false
-}
-
-// isSQLMethod checks if the method is a SQL operation
-func (r *LayerViolationRule) isSQLMethod(name string) bool {
-	sqlMethods := []string{
-		"Query", "QueryRow", "QueryContext", "QueryRowContext",
-		"Exec", "ExecContext", "Prepare", "PrepareContext",
-		"Begin", "BeginTx",
-	}
-	for _, method := range sqlMethods {
-		if name == method {
-			return true
-		}
-	}
-	return false
 }
 
 // SQL patterns for detection
@@ -268,27 +251,6 @@ func (r *LayerViolationRule) isSQLString(value string) bool {
 		if pattern.MatchString(trimmed) {
 			return true
 		}
-	}
-
-	return false
-}
-
-// isHTTPOperation checks if a method name indicates HTTP operation
-func (r *LayerViolationRule) isHTTPOperation(name string) bool {
-	httpOps := []string{
-		"WriteHeader", "ServeHTTP", "Redirect",
-		"ParseForm", "Cookie", "SetCookie",
-	}
-	for _, op := range httpOps {
-		if name == op {
-			return true
-		}
-	}
-
-	// HTTP methods in context of web frameworks
-	if strings.HasPrefix(name, "HTTP") ||
-		strings.Contains(name, "Response") && strings.Contains(name, "Writer") {
-		return true
 	}
 
 	return false

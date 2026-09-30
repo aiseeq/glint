@@ -4,7 +4,6 @@ import (
 	"errors"
 	"go/ast"
 	"go/types"
-	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -60,58 +59,51 @@ func (r *UnusedInternalExportRule) AnalyzeFile(_ *core.FileContext) []*core.Viol
 
 // exportUsage tracks how a candidate symbol is referenced across the module.
 type exportUsage struct {
-	object         types.Object
-	kind           string
-	productionUses int
-	testUses       int
+	object   types.Object
+	kind     string
+	testUses int
 }
 
-// AnalyzeGoProject collects exported symbols of internal packages and counts
-// their references across the whole module.
+// AnalyzeGoProject collects the exported symbols the analyzed files of
+// internal packages declare and counts their references across every loaded
+// package. A package outside the analyzed files (a path argument, an exclude
+// pattern) still counts as a user, but its own symbols are not judged: they
+// have no file to report into.
 func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	if ctx == nil {
 		return nil, errors.New("unused internal export: nil Go project context")
 	}
-	return r.findDeadExports(ctx), nil
-}
 
-// findDeadExports does the actual work; a project without internal/ exports
-// yields no violations.
-func (r *UnusedInternalExportRule) findDeadExports(ctx *core.GoProjectContext) []*core.Violation {
-	candidates := map[types.Object]*exportUsage{}
+	byFile := make(map[*core.FileContext][]*exportUsage)
+	candidates := make(map[types.Object]*exportUsage)
 	for _, pkgCtx := range ctx.Packages {
-		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.Types == nil {
-			continue
+		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
+			return nil, errors.New("unused internal export: package has no typed syntax")
 		}
 		if !isInternalPackage(pkgCtx.Package.PkgPath) {
 			continue
 		}
-		scope := pkgCtx.Package.Types.Scope()
-		for _, name := range scope.Names() {
-			obj := scope.Lookup(name)
-			if obj == nil || !obj.Exported() {
+		for _, fileCtx := range pkgCtx.Files {
+			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
 				continue
 			}
-			kind, ok := exportKind(obj)
-			if !ok {
-				continue
+			for _, usage := range exportedDeclarations(fileCtx.GoAST, pkgCtx.Package.TypesInfo) {
+				candidates[usage.object] = usage
+				byFile[fileCtx] = append(byFile[fileCtx], usage)
 			}
-			candidates[obj] = &exportUsage{object: obj, kind: kind}
 		}
-	}
-	if len(candidates) == 0 {
-		return nil
 	}
 
+	own := make(ownDeclarations)
+	uses := make(map[types.Object]int, len(candidates))
+	for obj := range candidates {
+		uses[obj] = 0
+	}
 	for _, pkgCtx := range ctx.Packages {
-		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
-			continue
-		}
-		for _, obj := range pkgCtx.Package.TypesInfo.Uses {
-			if usage, ok := candidates[obj]; ok {
-				usage.productionUses++
-			}
-		}
+		own.addPackage(pkgCtx.Package.Syntax, pkgCtx.Package.TypesInfo)
+	}
+	for _, pkgCtx := range ctx.Packages {
+		countOutsideUses(pkgCtx.Package.TypesInfo, own, uses)
 	}
 
 	// Тестовые файлы не входят в типизированную загрузку (Tests: false), поэтому
@@ -119,21 +111,51 @@ func (r *UnusedInternalExportRule) findDeadExports(ctx *core.GoProjectContext) [
 	// _test.go достаточно, чтобы отличить «мёртвый совсем» от «нужен только тестам»
 	countTestIdentUses(ctx, candidates)
 
-	var violations []*core.Violation
-	for _, usage := range candidates {
-		if usage.productionUses > 0 {
-			continue
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
+		var violations []*core.Violation
+		for _, usage := range byFile[fileCtx] {
+			if uses[usage.object] > 0 {
+				continue
+			}
+			violations = append(violations, r.violationFor(ctx, usage))
 		}
-		violations = append(violations, r.violationFor(ctx, usage))
-	}
-
-	sort.Slice(violations, func(i, j int) bool {
-		if violations[i].File != violations[j].File {
-			return violations[i].File < violations[j].File
-		}
-		return violations[i].Line < violations[j].Line
+		return violations
 	})
-	return violations
+}
+
+// exportedDeclarations returns the exported package-level objects a file
+// declares, in source order, so findings on one line keep a stable order.
+func exportedDeclarations(file *ast.File, info *types.Info) []*exportUsage {
+	var declared []*exportUsage
+	add := func(name *ast.Ident) {
+		obj := info.Defs[name]
+		if obj == nil || !obj.Exported() || obj.Parent() != obj.Pkg().Scope() {
+			return
+		}
+		if kind, ok := exportKind(obj); ok {
+			declared = append(declared, &exportUsage{object: obj, kind: kind})
+		}
+	}
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Recv == nil {
+				add(d.Name)
+			}
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				switch s := spec.(type) {
+				case *ast.TypeSpec:
+					add(s.Name)
+				case *ast.ValueSpec:
+					for _, name := range s.Names {
+						add(name)
+					}
+				}
+			}
+		}
+	}
+	return declared
 }
 
 // violationFor renders the finding at the symbol declaration.

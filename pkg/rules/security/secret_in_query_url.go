@@ -3,12 +3,14 @@ package security
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -29,6 +31,11 @@ func init() {
 // (any call whose name contains "Sanitize"), and when the request goes through
 // a shared HTTP helper instead of a raw Do — the helper is the right single
 // place for sanitation.
+//
+// A transport call is recognized by its callee's type: a method of
+// *net/http.Client (Do, Get, Post, PostForm, Head), an interface method
+// Do(*http.Request), or the net/http package functions Get, Post, PostForm,
+// Head. Without type information only the package functions are recognized.
 type SecretInQueryURLRule struct {
 	*rules.BaseRule
 	secretParam   *regexp.Regexp
@@ -39,7 +46,7 @@ type SecretInQueryURLRule struct {
 func NewSecretInQueryURLRule() *SecretInQueryURLRule {
 	// Built by concatenation so the source of this rule does not itself match
 	// line-based secret detectors.
-	secretName := `(?:api[-_]?key|apikey|api[-_]?secret|access[-_]?token|auth[-_]?token|token|secret|private[-_]?key)`
+	secretName := nameAlternation(apiKeyNames, apiSecretNames, tokenNames, bareTokenNames, secretNames)
 	return &SecretInQueryURLRule{
 		BaseRule: rules.NewBaseRule(
 			"secret-in-query-url",
@@ -52,17 +59,33 @@ func NewSecretInQueryURLRule() *SecretInQueryURLRule {
 	}
 }
 
-// AnalyzeFile checks each function for the secret-in-query + raw transport
-// call combination.
+// AnalyzeFile checks one file without type information: only the net/http
+// package functions are recognized as transport calls.
 func (r *SecretInQueryURLRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *SecretInQueryURLRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; transport calls are recognized by the
+// type of their receiver.
+func (r *SecretInQueryURLRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze checks each function for the secret-in-query + raw transport call
+// combination. info is nil for a file without type information.
+func (r *SecretInQueryURLRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() || !ctx.HasGoAST() {
 		return nil
 	}
 
+	transport := transportCallMatcher{info: info, httpAliases: helpers.PackageAliases(ctx.GoAST, `"net/http"`, "http")}
 	var violations []*core.Violation
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		if fn, ok := n.(*ast.FuncDecl); ok && fn.Body != nil {
-			violations = append(violations, r.checkFunction(ctx, fn)...)
+			violations = append(violations, r.checkFunction(ctx, fn, transport)...)
 			return false
 		}
 		return true
@@ -70,7 +93,7 @@ func (r *SecretInQueryURLRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	return violations
 }
 
-func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl, transport transportCallMatcher) []*core.Violation {
 	secretInQuery := false
 	sanitized := false
 	var transportCalls []*ast.CallExpr
@@ -84,7 +107,7 @@ func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.Func
 			if callNameContainsSanitize(node) {
 				sanitized = true
 			}
-			if isRawTransportCall(node) {
+			if transport.matches(node) {
 				transportCalls = append(transportCalls, node)
 			}
 		case *ast.BasicLit:
@@ -137,25 +160,54 @@ func (r *SecretInQueryURLRule) isSecretQuerySet(call *ast.CallExpr) bool {
 	return !strings.Contains(strings.ToLower(receiverChain(sel.X)), "header")
 }
 
-// isRawTransportCall recognizes the direct HTTP transport calls whose errors
-// carry *url.Error: client.Do(req), http.Get/Post/PostForm/Head(url).
-func isRawTransportCall(call *ast.CallExpr) bool {
+// httpTransportFuncs are the net/http functions and *http.Client methods that
+// send a request and wrap a transport failure in *url.Error.
+var httpTransportFuncs = map[string]bool{"Do": true, "Get": true, "Post": true, "PostForm": true, "Head": true}
+
+// transportCallMatcher recognizes the direct HTTP transport calls whose errors
+// carry *url.Error. info is nil for a file without type information; then only
+// the package functions under an import of net/http are recognized.
+type transportCallMatcher struct {
+	info        *types.Info
+	httpAliases map[string]bool
+}
+
+func (m transportCallMatcher) matches(call *ast.CallExpr) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !httpTransportFuncs[sel.Sel.Name] {
+		return false
+	}
+	if m.info == nil {
+		pkg, ok := sel.X.(*ast.Ident)
+		return ok && sel.Sel.Name != "Do" && m.httpAliases[pkg.Name]
+	}
+	fn, ok := m.info.Uses[sel.Sel].(*types.Func)
 	if !ok {
 		return false
 	}
-	if sel.Sel.Name == "Do" && len(call.Args) == 1 {
-		return true
-	}
-	ident, ok := sel.X.(*ast.Ident)
-	if !ok || ident.Name != "http" {
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok {
 		return false
 	}
-	switch sel.Sel.Name {
-	case "Get", "Post", "PostForm", "Head":
-		return true
+	if fn.Pkg() != nil && fn.Pkg().Path() == "net/http" {
+		// Package functions http.Get/...; methods of *http.Client. Other
+		// net/http methods with these names (Header.Get) are not transport.
+		return sig.Recv() == nil || isNamedType(sig.Recv().Type(), "net/http", "Client")
 	}
-	return false
+	return sel.Sel.Name == "Do" && sig.Recv() != nil && types.IsInterface(sig.Recv().Type()) &&
+		sig.Params().Len() == 1 && isNamedType(sig.Params().At(0).Type(), "net/http", "Request")
+}
+
+// isNamedType reports whether t is the named type path.name or a pointer to it.
+func isNamedType(t types.Type, path, name string) bool {
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Pkg().Path() == path && named.Obj().Name() == name
 }
 
 func callNameContainsSanitize(call *ast.CallExpr) bool {

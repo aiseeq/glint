@@ -22,7 +22,7 @@ type SensitiveQueryParameterRule struct {
 
 // NewSensitiveQueryParameterRule creates the rule.
 func NewSensitiveQueryParameterRule() *SensitiveQueryParameterRule {
-	sensitiveName := `(?:token|access[_-]?token|refresh[_-]?token|auth[_-]?token|authz[_-]?token|api[_-]?key|secret|password|passwd|pwd|otp|otp[_-]?code)`
+	sensitiveName := nameAlternation(bareTokenNames, tokenNames, apiKeyNames, apiSecretNames, secretNames, passwordNames, oneTimeCodeNames)
 	return &SensitiveQueryParameterRule{
 		BaseRule: rules.NewBaseRule(
 			"sensitive-query-param",

@@ -1,14 +1,10 @@
 package deadcode
 
 import (
-	"fmt"
+	"errors"
 	"go/ast"
-	"maps"
-	"os"
-	"path/filepath"
-	"slices"
-	"strings"
-	"sync"
+	"go/token"
+	"go/types"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -18,16 +14,17 @@ func init() {
 	rules.Register(NewUnusedSymbolsRule())
 }
 
-// UnusedSymbolsRule detects unexported symbols that appear unused within their file
+// UnusedSymbolsRule detects unexported package-level functions, types,
+// variables and constants that nothing in their package uses. References are
+// resolved by the type checker over every compiled file of the package; the
+// files the typed load leaves out — tests, files the build excludes on this
+// platform — are scanned by name, so a symbol only they use is not reported.
+// A reference from inside the symbol's own declaration (a recursive call, a
+// type named only by its own methods) does not keep it alive.
+//
+// Methods are not checked: they may satisfy an interface.
 type UnusedSymbolsRule struct {
 	*rules.BaseRule
-
-	// identCounts caches, per package directory, how often each identifier
-	// appears in it. Without the cache every file reparsed all of its siblings,
-	// which made the work quadratic in the size of a package — on projectA this rule
-	// alone took 7.7s of the 17s all file rules needed together.
-	mu          sync.Mutex
-	identCounts map[string]map[string]int
 }
 
 // NewUnusedSymbolsRule creates the rule
@@ -36,253 +33,123 @@ func NewUnusedSymbolsRule() *UnusedSymbolsRule {
 		BaseRule: rules.NewBaseRule(
 			"unused-symbol",
 			"deadcode",
-			"Detects unexported functions, types, and variables that appear unused within their file",
+			"Detects unexported package-level functions, types, variables and constants that nothing in their package uses",
 			core.SeverityLow,
 		),
-		identCounts: make(map[string]map[string]int),
 	}
 }
 
-// ResetState drops the per-directory cache, so a second project root never
-// inherits the counts of the first.
-func (r *UnusedSymbolsRule) ResetState() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.identCounts = make(map[string]map[string]int)
+// AnalyzeFile does nothing: whether a symbol is used is a question about its
+// whole package, answered by AnalyzeGoProject.
+func (r *UnusedSymbolsRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
+	return nil
 }
 
-// symbolInfo tracks a declared symbol
-type symbolInfo struct {
-	kind   string // "func", "type", "const", "var"
-	line   int
-	node   ast.Node
-	usages int
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *UnusedSymbolsRule) RequiresSSA() bool { return false }
+
+// declaredSymbol is an unexported package-level declaration of an analyzed file.
+type declaredSymbol struct {
+	obj  types.Object
+	kind string
+	line int
 }
 
-// AnalyzeFile checks for unused symbols
-func (r *UnusedSymbolsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.GoAST == nil {
-		return nil
+// AnalyzeGoProject reports the unexported symbols of the analyzed files that
+// no other part of their package references.
+func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	if ctx == nil {
+		return nil, errors.New("unused symbol: nil Go project context")
 	}
 
-	// Skip test files - they often have helper functions
-	if ctx.IsTestFile() {
-		return nil
-	}
-
-	// Collect all unexported symbol declarations
-	symbols := make(map[string]*symbolInfo)
-
-	// First pass: collect declarations
-	for _, decl := range ctx.GoAST.Decls {
-		switch d := decl.(type) {
-		case *ast.FuncDecl:
-			r.collectFunc(ctx, d, symbols)
-
-		case *ast.GenDecl:
-			r.collectGenDecl(ctx, d, symbols)
+	byFile := make(map[*core.FileContext][]declaredSymbol)
+	uses := make(map[types.Object]int)
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
+			return nil, errors.New("unused symbol: package has no typed syntax")
 		}
-	}
-
-	// If no symbols to check, return early
-	if len(symbols) == 0 {
-		return nil
-	}
-
-	// Second pass: count usages in current file
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok {
-			if sym, exists := symbols[ident.Name]; exists {
-				// Check if this is not the declaration itself
-				if !r.isDeclaration(ident, sym) {
-					sym.usages++
-				}
+		info := pkg.Package.TypesInfo
+		found := false
+		for _, fileCtx := range pkg.Files {
+			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
+				continue
+			}
+			for _, sym := range unexportedDeclarations(fileCtx, info) {
+				uses[sym.obj] = 0
+				byFile[fileCtx] = append(byFile[fileCtx], sym)
+				found = true
 			}
 		}
-		return true
-	})
-
-	// Third pass: check usages in sibling files (same package)
-	// This catches cross-file usage within the same Go package
-	if err := r.checkSiblingFileUsages(ctx, symbols); err != nil {
-		v := r.CreateViolation(ctx.RelPath, 1, "Unused-symbol analysis failed: "+err.Error())
-		v.Severity = core.SeverityCritical
-		v.WithCode(ctx.RelPath)
-		v.WithSuggestion("Fix filesystem access or invalid sibling Go source, then rerun analysis")
-		return []*core.Violation{v}
+		if !found {
+			continue
+		}
+		// Unexported symbols are visible only inside their package, so its
+		// own syntax holds every typed reference.
+		own := make(ownDeclarations)
+		own.addPackage(pkg.Package.Syntax, info)
+		countOutsideUses(info, own, uses)
 	}
 
-	// Generate violations for unused symbols
-	var violations []*core.Violation
-	for _, name := range slices.Sorted(maps.Keys(symbols)) {
-		sym := symbols[name]
-		if sym.usages == 0 {
-			v := r.CreateViolation(ctx.RelPath, sym.line,
+	mentions := newUntypedMentions(ctx)
+
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
+		var violations []*core.Violation
+		for _, sym := range byFile[fileCtx] {
+			name := sym.obj.Name()
+			if uses[sym.obj] > 0 || mentions.mentioned(fileCtx, name) {
+				continue
+			}
+			v := r.CreateViolation(fileCtx.RelPath, sym.line,
 				"Unexported "+sym.kind+" '"+name+"' appears to be unused")
-			v.WithCode(ctx.GetLine(sym.line))
+			v.WithCode(fileCtx.GetLine(sym.line))
 			v.WithSuggestion("Remove unused " + sym.kind + " or export it if intended for external use")
 			v.WithContext("symbol", name)
 			v.WithContext("kind", sym.kind)
 			violations = append(violations, v)
 		}
-	}
-
-	return violations
-}
-
-// checkSiblingFileUsages adds the usages a symbol has in the other files of its
-// package. The counts come from a per-directory cache built once, rather than by
-// reparsing every sibling for every file.
-func (r *UnusedSymbolsRule) checkSiblingFileUsages(ctx *core.FileContext, symbols map[string]*symbolInfo) error {
-	dir := filepath.Dir(ctx.Path)
-	counts, err := r.directoryIdentCounts(dir)
-	if err != nil {
-		return fmt.Errorf("count identifiers of package %q: %w", dir, err)
-	}
-
-	own := identCountsOf(ctx.GoAST)
-	for name, sym := range symbols {
-		if siblings := counts[name] - own[name]; siblings > 0 {
-			sym.usages += siblings
-		}
-	}
-	return nil
-}
-
-// directoryIdentCounts returns how often each identifier appears across the Go
-// files of a directory, parsing them once. Test files are counted too: an
-// unexported symbol used only by tests is not dead code.
-//
-// Siblings go through core.SharedParser: the walker parses every analyzed file
-// into the same content-keyed cache, so this sweep reuses those ASTs instead
-// of parsing the whole project a second time.
-func (r *UnusedSymbolsRule) directoryIdentCounts(dir string) (map[string]int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if counts, ok := r.identCounts[dir]; ok {
-		return counts, nil
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("read package directory %q: %w", dir, err)
-	}
-
-	counts := make(map[string]int)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
-			continue
-		}
-		path := filepath.Join(dir, entry.Name())
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read sibling file %q: %w", path, err)
-		}
-		_, file, err := core.SharedParser().ParseGoFile(path, content)
-		if err != nil {
-			return nil, fmt.Errorf("parse sibling file %q: %w", path, err)
-		}
-		for name, count := range identCountsOf(file) {
-			counts[name] += count
-		}
-	}
-
-	r.identCounts[dir] = counts
-	return counts, nil
-}
-
-// identCountsOf counts every identifier occurrence in a syntax tree.
-func identCountsOf(file *ast.File) map[string]int {
-	counts := make(map[string]int)
-	ast.Inspect(file, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok {
-			counts[ident.Name]++
-		}
-		return true
+		return violations
 	})
-	return counts
 }
 
-// collectFunc collects function declarations
-func (r *UnusedSymbolsRule) collectFunc(ctx *core.FileContext, fn *ast.FuncDecl, symbols map[string]*symbolInfo) {
-	name := fn.Name.Name
-
-	// Skip exported functions
-	if ast.IsExported(name) {
-		return
+// unexportedDeclarations returns the unexported package-level functions,
+// types, variables and constants of a file in source order. main, init, the
+// blank identifier and methods are left out.
+func unexportedDeclarations(fileCtx *core.FileContext, info *types.Info) []declaredSymbol {
+	var symbols []declaredSymbol
+	add := func(name *ast.Ident, kind string) {
+		if name.Name == "_" || ast.IsExported(name.Name) {
+			return
+		}
+		obj := info.Defs[name]
+		if obj == nil {
+			return
+		}
+		symbols = append(symbols, declaredSymbol{obj: obj, kind: kind, line: fileCtx.LineFor(name)})
 	}
 
-	// Skip main, init, and test functions
-	if name == "main" || name == "init" {
-		return
-	}
-
-	// Skip methods - they might implement interfaces
-	if fn.Recv != nil {
-		return
-	}
-
-	pos := ctx.PositionFor(fn.Name)
-	symbols[name] = &symbolInfo{
-		kind: "function",
-		line: pos.Line,
-		node: fn,
-	}
-}
-
-// collectGenDecl collects type, const, and var declarations
-func (r *UnusedSymbolsRule) collectGenDecl(ctx *core.FileContext, decl *ast.GenDecl, symbols map[string]*symbolInfo) {
-	for _, spec := range decl.Specs {
-		switch s := spec.(type) {
-		case *ast.TypeSpec:
-			name := s.Name.Name
-			if !ast.IsExported(name) {
-				pos := ctx.PositionFor(s.Name)
-				symbols[name] = &symbolInfo{
-					kind: "type",
-					line: pos.Line,
-					node: s,
-				}
+	for _, decl := range fileCtx.GoAST.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Recv != nil || d.Name.Name == "main" || d.Name.Name == "init" {
+				continue
 			}
-
-		case *ast.ValueSpec:
-			for _, ident := range s.Names {
-				name := ident.Name
-				// Skip blank identifier and exported names
-				if name == "_" || ast.IsExported(name) {
-					continue
-				}
-
-				pos := ctx.PositionFor(ident)
-				kind := "variable"
-				if decl.Tok.String() == "const" {
-					kind = "constant"
-				}
-
-				symbols[name] = &symbolInfo{
-					kind: kind,
-					line: pos.Line,
-					node: s,
+			add(d.Name, "function")
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				switch s := spec.(type) {
+				case *ast.TypeSpec:
+					add(s.Name, "type")
+				case *ast.ValueSpec:
+					kind := "variable"
+					if d.Tok == token.CONST {
+						kind = "constant"
+					}
+					for _, name := range s.Names {
+						add(name, kind)
+					}
 				}
 			}
 		}
 	}
-}
-
-// isDeclaration checks if an identifier is the declaration itself
-func (r *UnusedSymbolsRule) isDeclaration(ident *ast.Ident, sym *symbolInfo) bool {
-	switch node := sym.node.(type) {
-	case *ast.FuncDecl:
-		return ident == node.Name
-	case *ast.TypeSpec:
-		return ident == node.Name
-	case *ast.ValueSpec:
-		for _, name := range node.Names {
-			if ident == name {
-				return true
-			}
-		}
-	}
-	return false
+	return symbols
 }

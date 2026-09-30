@@ -103,9 +103,32 @@ func Format(r Root) string {
 	assert.Empty(t, violations)
 }
 
-// A field filled in a composite literal is used: the value comes from the
-// program itself, not only from the config file.
-func TestUnusedConfigFieldAcceptsFieldWrittenInLiteral(t *testing.T) {
+// A default written into a composite literal is a write, not a use: the
+// setting still does nothing, whatever value it starts with.
+func TestUnusedConfigFieldReportsFieldOnlyGivenDefault(t *testing.T) {
+	violations := analyzeConfigFields(t, map[string]string{
+		"loader.go": configLoader,
+		"config.go": `package config
+
+type Root struct {
+	Host    string ` + "`yaml:\"host\"`" + `
+	Timeout int    ` + "`yaml:\"timeout\"`" + `
+}
+
+func Default() Root {
+	return Root{Timeout: 30}
+}
+
+func Address(r Root) string { return r.Host }
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Root.Timeout")
+}
+
+// An assignment only sets the field; nothing reads what it holds.
+func TestUnusedConfigFieldReportsFieldOnlyAssigned(t *testing.T) {
 	violations := analyzeConfigFields(t, map[string]string{
 		"loader.go": configLoader,
 		"config.go": `package config
@@ -114,9 +137,76 @@ type Root struct {
 	Code int ` + "`yaml:\"code\"`" + `
 }
 
-func Default() Root {
-	return Root{Code: 200}
+func Reset(r *Root) { r.Code = 200 }
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Root.Code")
 }
+
+// env tags are filled by an environment decoder (env.Parse, envconfig.Process
+// style): a function of that name taking the target as an untyped value is a
+// decoder, wherever it lives.
+func TestUnusedConfigFieldFollowsEnvironmentDecoder(t *testing.T) {
+	violations := analyzeConfigFields(t, map[string]string{
+		"env/env.go": `package env
+
+func Parse(v any) error { _ = v; return nil }
+`,
+		"envconfig/envconfig.go": `package envconfig
+
+func Process(prefix string, spec interface{}) error { _, _ = prefix, spec; return nil }
+`,
+		"app.go": `package app
+
+import (
+	"example.com/rulestest/env"
+	"example.com/rulestest/envconfig"
+)
+
+type EnvConfig struct {
+	Port int    ` + "`env:\"PORT\"`" + `
+	Name string ` + "`env:\"NAME\"`" + `
+}
+
+type SpecConfig struct {
+	Debug bool ` + "`env:\"DEBUG\"`" + `
+}
+
+func Load() (string, error) {
+	var e EnvConfig
+	if err := env.Parse(&e); err != nil {
+		return "", err
+	}
+	var s SpecConfig
+	if err := envconfig.Process("app", &s); err != nil {
+		return "", err
+	}
+	return e.Name, nil
+}
+`,
+	})
+
+	require.Len(t, violations, 2)
+	assert.Contains(t, violations[0].Message, "EnvConfig.Port")
+	assert.Contains(t, violations[1].Message, "SpecConfig.Debug")
+}
+
+// A function merely named like a decoder, taking the struct by its own type,
+// decodes nothing into it: the name alone does not make the struct external
+// input.
+func TestUnusedConfigFieldIgnoresDecoderNameWithTypedParameter(t *testing.T) {
+	violations := analyzeConfigFields(t, map[string]string{
+		"config.go": `package config
+
+type Root struct {
+	Code int ` + "`yaml:\"code\"`" + `
+}
+
+func Decode(r *Root) error { _ = r; return nil }
+
+func Run() error { return Decode(&Root{}) }
 `,
 	})
 

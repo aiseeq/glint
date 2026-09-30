@@ -1,6 +1,9 @@
 package duplication
 
 import (
+	"fmt"
+	"hash/maphash"
+	"math"
 	"strings"
 )
 
@@ -11,9 +14,10 @@ import (
 // Shorter windows carry too little signal to be worth reporting.
 const minWindowContent = 150
 
-// windowHash identifies a window by content. Both rules verify a hash match by
-// comparing the windows line by line, so a collision can never produce a
-// finding — it can only cost one extra comparison.
+// windowHash identifies a window by content. duplicate-block verifies a hash
+// match by comparing the windows line by line. cross-file-duplicate keeps no
+// text of earlier files and verifies with a second, independent hash of the
+// window (checkHash): a false finding needs both 64-bit hashes to collide.
 type windowHash uint64
 
 const (
@@ -52,6 +56,98 @@ func hashWindow(lineHashes []windowHash, start, size int) windowHash {
 		hash *= fnvPrime64
 	}
 	return hash
+}
+
+// checkSeed seeds the verification hash. It only has to be the same for every
+// window of one process run.
+var checkSeed = maphash.MakeSeed()
+
+// checkLines returns per-line verification hashes, computed by a hash function
+// independent of hashLine.
+func checkLines(normalized []string) []windowHash {
+	hashes := make([]windowHash, len(normalized))
+	for i, line := range normalized {
+		hashes[i] = windowHash(maphash.String(checkSeed, line))
+	}
+	return hashes
+}
+
+// checkWindow folds the verification hashes of a window.
+func checkWindow(lineChecks []windowHash, start, size int) windowHash {
+	const checkPrime = 0x9E3779B97F4A7C15
+	var hash windowHash
+	for _, lineCheck := range lineChecks[start : start+size] {
+		hash = hash*checkPrime + lineCheck + 1
+	}
+	return hash
+}
+
+// blockSizeSetting reads min_block_size: a whole number no smaller than
+// minimum, the least window that can hold enough meaningful lines to be
+// reported. An absent setting is the default; any other value is an error.
+func blockSizeSetting(settings map[string]any, defaultSize, minimum int) (int, error) {
+	raw, ok := settings["min_block_size"]
+	if !ok {
+		return defaultSize, nil
+	}
+	var size int
+	switch v := raw.(type) {
+	case int:
+		size = v
+	case float64:
+		if v != math.Trunc(v) || v > math.MaxInt32 {
+			return 0, fmt.Errorf("min_block_size must be a whole number of lines, got %v", v)
+		}
+		size = int(v)
+	default:
+		return 0, fmt.Errorf("min_block_size must be a whole number of lines, got %T %v", raw, raw)
+	}
+	if size < minimum {
+		return 0, fmt.Errorf("min_block_size must be at least %d lines (a smaller window never holds enough meaningful lines to be reported), got %d", minimum, size)
+	}
+	return size, nil
+}
+
+// windowMatch is a window of the analyzed file (start) equal to a window of
+// origFile starting at origStart. Lines are 0-based.
+type windowMatch struct {
+	start     int
+	origFile  string
+	origStart int
+}
+
+// duplicateRegion is a run of overlapping or adjacent matched windows: lines
+// start..end (0-based, inclusive) of the analyzed file, the same as lines
+// origStart..origEnd of origFile.
+type duplicateRegion struct {
+	start, end         int
+	origFile           string
+	origStart, origEnd int
+}
+
+// mergeWindowMatches joins matched windows into regions. Windows slide one
+// line at a time, so a long copied region matches at every offset inside it:
+// the reader needs the region once, not once per window. matches must be
+// sorted by start. The original range grows only while the windows keep the
+// same shift against the same file; a window that overlaps the region but
+// matches elsewhere is absorbed without widening it.
+func mergeWindowMatches(matches []windowMatch, size int) []duplicateRegion {
+	var regions []duplicateRegion
+	for _, m := range matches {
+		if n := len(regions); n > 0 && m.start <= regions[n-1].end+1 {
+			current := &regions[n-1]
+			current.end = max(current.end, m.start+size-1)
+			if m.origFile == current.origFile && m.origStart-current.origStart == m.start-current.start {
+				current.origEnd = max(current.origEnd, m.origStart+size-1)
+			}
+			continue
+		}
+		regions = append(regions, duplicateRegion{
+			start: m.start, end: m.start + size - 1,
+			origFile: m.origFile, origStart: m.origStart, origEnd: m.origStart + size - 1,
+		})
+	}
+	return regions
 }
 
 // windowsMatch reports whether two windows are identical line by line.
@@ -129,37 +225,47 @@ func normalizeFileLines(lines []string) []string {
 // raw-string literal.
 func rawStringLineSet(lines []string) map[int]bool {
 	result := make(map[int]bool)
-	inRawString := false
+	var state rawScanState
 	for i, line := range lines {
-		if rawStringDelimiters(line, inRawString)%2 == 1 {
-			result[i] = true
-			inRawString = !inRawString
-			continue
-		}
-		if inRawString {
+		wasInRawString := state.inRawString
+		state = scanRawStringLine(line, state)
+		// A line that starts or ends inside a literal opens, continues or
+		// closes it. A literal opened and closed on one line is ordinary code.
+		if wasInRawString || state.inRawString {
 			result[i] = true
 		}
 	}
 	return result
 }
 
-// rawStringDelimiters counts the backticks on the line that open or close a
-// raw-string literal. A backtick inside a quoted literal ("`", '`') is content,
-// not a delimiter — counting it flipped the raw-string state for the rest of
-// the file.
-func rawStringDelimiters(line string, inRawString bool) int {
-	delimiters := 0
+// rawScanState is what scanning carries from one line to the next: whether a
+// raw-string literal or a block comment is still open.
+type rawScanState struct {
+	inRawString    bool
+	inBlockComment bool
+}
+
+// scanRawStringLine follows the backticks on the line that open or close a
+// raw-string literal. A backtick inside a quoted literal ("`", '`') or inside
+// a comment (// or /* */) is content, not a delimiter: counting it flipped the
+// raw-string state for the rest of the file.
+func scanRawStringLine(line string, state rawScanState) rawScanState {
 	var quote byte // the quote character we are inside, 0 outside literals
 	for i := 0; i < len(line); i++ {
 		c := line[i]
-		if inRawString {
+		switch {
+		case state.inRawString:
 			if c == '`' {
-				delimiters++
-				inRawString = false
+				state.inRawString = false
 			}
 			continue
-		}
-		if quote != 0 {
+		case state.inBlockComment:
+			if c == '*' && i+1 < len(line) && line[i+1] == '/' {
+				state.inBlockComment = false
+				i++
+			}
+			continue
+		case quote != 0:
 			switch c {
 			case '\\':
 				i++ // the escaped character cannot close the literal
@@ -170,13 +276,20 @@ func rawStringDelimiters(line string, inRawString bool) int {
 		}
 		switch c {
 		case '`':
-			delimiters++
-			inRawString = true
+			state.inRawString = true
 		case '"', '\'':
 			quote = c
+		case '/':
+			if i+1 < len(line) && line[i+1] == '/' {
+				return state // the rest of the line is a comment
+			}
+			if i+1 < len(line) && line[i+1] == '*' {
+				state.inBlockComment = true
+				i++
+			}
 		}
 	}
-	return delimiters
+	return state
 }
 
 // isTrivialLine reports whether a normalized line carries no duplication
@@ -214,17 +327,39 @@ func isTrivialLine(line string) bool {
 	return strings.HasPrefix(line, "//") || strings.HasPrefix(line, "/*")
 }
 
-// isWindowTrivial reports whether a window has too little substance to be worth
-// reporting: fewer than minNonTrivial meaningful lines or too little content.
-// The trivial predicate decides what "meaningful" means for the calling rule.
-func isWindowTrivial(window []string, minNonTrivial int, trivial func(string) bool) bool {
-	nonTrivial := 0
-	totalLength := 0
-	for _, line := range window {
-		totalLength += len(line)
-		if !trivial(line) {
-			nonTrivial++
-		}
+// windowSubstance answers, in constant time per window, whether a window has
+// enough substance to be worth reporting. The trivial predicate is evaluated
+// once per line and summed into prefix counts: evaluating it for every line
+// of every window cost windowSize times as much and dominated the analysis.
+type windowSubstance struct {
+	nonTrivial []int // nonTrivial[i] = meaningful lines among the first i
+	length     []int // length[i] = total length of the first i lines
+	trivial    []bool
+}
+
+// newWindowSubstance evaluates the trivial predicate - what "meaningful"
+// means for the calling rule - on every normalized line.
+func newWindowSubstance(normalized []string, trivial func(string) bool) windowSubstance {
+	ws := windowSubstance{
+		nonTrivial: make([]int, len(normalized)+1),
+		length:     make([]int, len(normalized)+1),
+		trivial:    make([]bool, len(normalized)),
 	}
+	for i, line := range normalized {
+		ws.trivial[i] = trivial(line)
+		ws.nonTrivial[i+1] = ws.nonTrivial[i]
+		if !ws.trivial[i] {
+			ws.nonTrivial[i+1]++
+		}
+		ws.length[i+1] = ws.length[i] + len(line)
+	}
+	return ws
+}
+
+// isTrivial reports whether the window of size lines at start has too little
+// substance: fewer than minNonTrivial meaningful lines or too little content.
+func (ws windowSubstance) isTrivial(start, size, minNonTrivial int) bool {
+	nonTrivial := ws.nonTrivial[start+size] - ws.nonTrivial[start]
+	totalLength := ws.length[start+size] - ws.length[start]
 	return nonTrivial < minNonTrivial || totalLength < minWindowContent
 }

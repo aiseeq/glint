@@ -2,6 +2,7 @@ package architecture
 
 import (
 	"go/ast"
+	"go/types"
 	"strconv"
 	"strings"
 
@@ -45,9 +46,47 @@ func (r *SolidISPRule) Configure(settings map[string]any) error {
 	return nil
 }
 
-// AnalyzeFile checks for ISP violations
+// AnalyzeFile checks one file without type information: the fallback for
+// files no type-checked package covers.
 func (r *SolidISPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.HasGoAST() || ctx.IsTestFile() {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *SolidISPRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every Go file; with types an embedded interface
+// counts with its whole method set.
+func (r *SolidISPRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// interfaceMethodCount returns the size of the method set an implementation
+// has to provide. With type information that is the full set, embedded
+// interfaces included. Without it only the methods the declaration spells out
+// are known — a lower bound, so an interface is reported only when that bound
+// alone is over the limit.
+func interfaceMethodCount(typeSpec *ast.TypeSpec, iface *ast.InterfaceType, info *types.Info) int {
+	if info != nil {
+		if obj, ok := info.Defs[typeSpec.Name].(*types.TypeName); ok {
+			if checked, ok := obj.Type().Underlying().(*types.Interface); ok {
+				return checked.NumMethods()
+			}
+		}
+	}
+	count := 0
+	if iface.Methods != nil {
+		for _, method := range iface.Methods.List {
+			count += len(method.Names) // embedded interfaces have no names
+		}
+	}
+	return count
+}
+
+// analyze checks for ISP violations. info is nil for a file without type
+// information.
+func (r *SolidISPRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	if !ctx.IsGoFile() || !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
 
@@ -71,18 +110,7 @@ func (r *SolidISPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			return true
 		}
 
-		methodCount := 0
-		if interfaceType.Methods != nil {
-			for _, method := range interfaceType.Methods.List {
-				// Each field can have multiple names (though rare for methods)
-				if len(method.Names) == 0 {
-					// Embedded interface
-					methodCount++
-				} else {
-					methodCount += len(method.Names)
-				}
-			}
-		}
+		methodCount := interfaceMethodCount(typeSpec, interfaceType, info)
 
 		if methodCount > r.maxMethods {
 			pos := ctx.PositionFor(typeSpec)

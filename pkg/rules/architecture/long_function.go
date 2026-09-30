@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 const (
@@ -70,8 +71,8 @@ func (r *LongFunctionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 				funcName := fn.Name.Name
 				if fn.Recv != nil && len(fn.Recv.List) > 0 {
 					// Method - prepend receiver type
-					if ident, ok := getReceiverType(fn.Recv.List[0].Type); ok {
-						funcName = ident + "." + funcName
+					if name := receiverDisplayName(fn.Recv.List[0].Type); name != "" {
+						funcName = name + "." + funcName
 					}
 				}
 
@@ -96,16 +97,14 @@ func (r *LongFunctionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 	return violations
 }
 
-func getReceiverType(expr ast.Expr) (string, bool) {
-	switch t := expr.(type) {
-	case *ast.Ident:
-		return t.Name, true
-	case *ast.StarExpr:
-		if ident, ok := t.X.(*ast.Ident); ok {
-			return "*" + ident.Name, true
-		}
+// receiverDisplayName names a receiver type the way the finding shows it:
+// the base type, with a star for a pointer receiver (*Box for *Box[T]).
+func receiverDisplayName(expr ast.Expr) string {
+	name := helpers.ReceiverTypeName(expr)
+	if _, pointer := expr.(*ast.StarExpr); pointer && name != "" {
+		return "*" + name
 	}
-	return "", false
+	return name
 }
 
 func formatLongFuncMessage(name string, lines, max int) string {

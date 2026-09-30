@@ -1,6 +1,7 @@
 package deadcode
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -52,6 +53,47 @@ type OldFinder struct{}
 `
 	ctx := parseGoContext(t, "svc.go", code)
 	if violations := NewDeprecatedCommentRule().AnalyzeFile(ctx); len(violations) != 1 {
+		t.Fatalf("got %d findings, want 1", len(violations))
+	}
+}
+
+// A marker on one constant of a grouped declaration documents that constant:
+// godoc attaches it to the spec, not to the const block.
+func TestDeprecatedCommentReportsSpecInsideGroup(t *testing.T) {
+	code := `package svc
+
+// Mode is a processing mode.
+type Mode int
+
+// Modes.
+const (
+	Fast Mode = iota + 1
+	Safe
+	// Deprecated: use Safe.
+	Legacy
+)
+`
+	violations := NewDeprecatedCommentRule().AnalyzeFile(parseGoContext(t, "svc.go", code))
+	if len(violations) != 1 {
+		t.Fatalf("got %d findings, want 1", len(violations))
+	}
+	if violations[0].Line != 11 || !strings.Contains(violations[0].Message, "Legacy") {
+		t.Fatalf("finding %d:%s does not point at Legacy", violations[0].Line, violations[0].Message)
+	}
+}
+
+// A production file whose name merely contains "test_" (latest_release.go)
+// is not a test utility.
+func TestDeprecatedCommentChecksFileNamedLikeTestPrefix(t *testing.T) {
+	code := `package svc
+
+type Client struct{}
+
+// Deprecated: use Fetch.
+func (c *Client) Get() error { return nil }
+`
+	violations := NewDeprecatedCommentRule().AnalyzeFile(parseGoContext(t, "latest_release.go", code))
+	if len(violations) != 1 {
 		t.Fatalf("got %d findings, want 1", len(violations))
 	}
 }

@@ -1,6 +1,7 @@
 package duplication
 
 import (
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,12 +20,17 @@ func init() {
 // than the within-file threshold: a cross-file copy is significant earlier.
 const defaultCrossFileBlockSize = 10
 
-// BlockLocation stores where a code block was found
-type BlockLocation struct {
-	File      string
-	StartLine int
-	EndLine   int
-	Content   []string
+// minCrossFileNonTrivial is how many meaningful lines a window must carry at
+// least; it is also the smallest block size that can ever be reported.
+const minCrossFileNonTrivial = 4
+
+// blockOrigin is where a window was seen first: the file, its 0-based start
+// line and the window's verification hash. No text is kept: holding the
+// normalized lines of every analyzed file made memory grow with the project.
+type blockOrigin struct {
+	file  string
+	start int
+	check windowHash
 }
 
 // CrossFileDuplicateRule detects duplicate code blocks across different files
@@ -33,11 +39,9 @@ type CrossFileDuplicateRule struct {
 	minBlockSize int
 
 	// Shared state for cross-file detection. Only the first location of each
-	// block is kept: it is the one every later file is reported against, and
-	// keeping every occurrence made memory grow with the whole project.
+	// window is kept: every later copy is reported against it.
 	mu        sync.Mutex
-	firstSeen map[windowHash]BlockLocation
-	reported  map[windowHash]bool
+	firstSeen map[windowHash]blockOrigin
 }
 
 // NewCrossFileDuplicateRule creates the rule
@@ -46,12 +50,11 @@ func NewCrossFileDuplicateRule() *CrossFileDuplicateRule {
 		BaseRule: rules.NewBaseRule(
 			"cross-file-duplicate",
 			"duplication",
-			"Detects duplicate code blocks across different files",
+			"Detects duplicate code blocks across different files: every later copy of a block is reported once per copied region against the first file it was seen in",
 			core.SeverityHigh,
 		),
 		minBlockSize: defaultCrossFileBlockSize,
-		firstSeen:    make(map[windowHash]BlockLocation),
-		reported:     make(map[windowHash]bool),
+		firstSeen:    make(map[windowHash]blockOrigin),
 	}
 }
 
@@ -60,7 +63,11 @@ func (r *CrossFileDuplicateRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
-	r.minBlockSize = r.GetIntSetting("min_block_size", defaultCrossFileBlockSize)
+	size, err := blockSizeSetting(settings, defaultCrossFileBlockSize, minCrossFileNonTrivial)
+	if err != nil {
+		return fmt.Errorf("%s: %w", r.Name(), err)
+	}
+	r.minBlockSize = size
 	return nil
 }
 
@@ -69,8 +76,7 @@ func (r *CrossFileDuplicateRule) Configure(settings map[string]any) error {
 func (r *CrossFileDuplicateRule) ResetState() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.firstSeen = make(map[windowHash]BlockLocation)
-	r.reported = make(map[windowHash]bool)
+	r.firstSeen = make(map[windowHash]blockOrigin)
 }
 
 // AnalyzeFile collects blocks and detects cross-file duplicates
@@ -110,74 +116,67 @@ func ownNameMasked(ctx *core.FileContext) []string {
 	return masked
 }
 
+// processFile compares the file's windows with the first occurrence of each
+// window in the files analyzed before it, records the windows seen for the
+// first time, and reports each copied region once.
 func (r *CrossFileDuplicateRule) processFile(ctx *core.FileContext, normalized []string) []*core.Violation {
-	blocks := r.collectBlocks(ctx, normalized)
+	blocks := r.collectBlocks(normalized)
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	var matches []windowMatch
+	for _, block := range blocks {
+		origin, seen := r.firstSeen[block.hash]
+		if !seen {
+			r.firstSeen[block.hash] = blockOrigin{file: ctx.RelPath, start: block.start, check: block.check}
+			continue
+		}
+		// A file is analyzed once, so a stored window of the same hash always
+		// comes from another file.
+		if origin.check != block.check {
+			continue
+		}
+		matches = append(matches, windowMatch{start: block.start, origFile: origin.file, origStart: origin.start})
+	}
+	r.mu.Unlock()
 
 	var violations []*core.Violation
-	// -1 rather than 0: a duplicate may legitimately start on the first line.
-	reportedThrough := -1
-	for _, block := range blocks {
-		existing, seen := r.firstSeen[block.hash]
-		if !seen {
-			r.firstSeen[block.hash] = block.location
-			continue
-		}
-		// Windows slide one line at a time, so a long copied region matches at
-		// every offset inside it, and a region longer than the window matches in
-		// consecutive pieces. Report the region once, not once per window.
-		if block.location.StartLine <= reportedThrough+1 {
-			reportedThrough = max(reportedThrough, block.location.EndLine)
-			continue
-		}
-		// A file is analyzed once, so a previously stored block of the same
-		// hash always comes from another file.
-		if r.reported[block.hash] || !windowsMatch(block.location.Content, existing.Content) {
-			continue
-		}
-		r.reported[block.hash] = true
-		reportedThrough = block.location.EndLine
-
-		v := r.CreateViolation(ctx.RelPath, block.location.StartLine,
-			"Cross-file duplicate: same as "+existing.File+":"+
-				strconv.Itoa(existing.StartLine)+"-"+strconv.Itoa(existing.EndLine))
-		v.WithCode(ctx.GetLine(block.location.StartLine))
+	for _, region := range mergeWindowMatches(matches, r.minBlockSize) {
+		line := region.start + 1
+		v := r.CreateViolation(ctx.RelPath, line,
+			"Cross-file duplicate (lines "+strconv.Itoa(line)+"-"+strconv.Itoa(region.end+1)+"): same as "+
+				region.origFile+":"+strconv.Itoa(region.origStart+1)+"-"+strconv.Itoa(region.origEnd+1))
+		v.WithCode(ctx.GetLine(line))
 		v.WithSuggestion("Extract to shared package or utility function")
-		v.WithContext("original_file", existing.File)
-		v.WithContext("original_start", existing.StartLine)
-		v.WithContext("original_end", existing.EndLine)
+		v.WithContext("original_file", region.origFile)
+		v.WithContext("original_start", region.origStart+1)
+		v.WithContext("original_end", region.origEnd+1)
 		v.WithContext("block_size", r.minBlockSize)
-
 		violations = append(violations, v)
 	}
-
 	return violations
 }
 
-// hashedBlock is one candidate window of the file being analyzed.
+// hashedBlock is one candidate window of the file being analyzed: its 0-based
+// start line, its hash and its verification hash.
 type hashedBlock struct {
-	hash     windowHash
-	location BlockLocation
+	start int
+	hash  windowHash
+	check windowHash
 }
 
 // collectBlocks returns the file's candidate windows in ascending line order,
 // keeping the first occurrence of each distinct window. Ordering by line — not
 // by map iteration — is what makes the reported findings reproducible.
-func (r *CrossFileDuplicateRule) collectBlocks(ctx *core.FileContext, normalized []string) []hashedBlock {
+func (r *CrossFileDuplicateRule) collectBlocks(normalized []string) []hashedBlock {
 	lineHashes := hashLines(normalized)
+	lineChecks := checkLines(normalized)
+	substance := newWindowSubstance(normalized, isCrossFileTrivialLine)
+	minNonTrivial := max(r.minBlockSize/2, minCrossFileNonTrivial)
 	seen := make(map[windowHash]bool)
 	var blocks []hashedBlock
 
 	for i := 0; i <= len(normalized)-r.minBlockSize; i++ {
-		if isCrossFileTrivialLine(normalized[i]) {
-			continue
-		}
-
-		window := normalized[i : i+r.minBlockSize]
-		minNonTrivial := max(len(window)/2, 4)
-		if isWindowTrivial(window, minNonTrivial, isCrossFileTrivialLine) {
+		if substance.trivial[i] || substance.isTrivial(i, r.minBlockSize, minNonTrivial) {
 			continue
 		}
 
@@ -186,15 +185,7 @@ func (r *CrossFileDuplicateRule) collectBlocks(ctx *core.FileContext, normalized
 			continue
 		}
 		seen[hash] = true
-		blocks = append(blocks, hashedBlock{
-			hash: hash,
-			location: BlockLocation{
-				File:      ctx.RelPath,
-				StartLine: i + 1,
-				EndLine:   i + r.minBlockSize,
-				Content:   window,
-			},
-		})
+		blocks = append(blocks, hashedBlock{start: i, hash: hash, check: checkWindow(lineChecks, i, r.minBlockSize)})
 	}
 
 	return blocks
