@@ -53,11 +53,11 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 			if fn.Name != nil {
 				name = fn.Name.Name
 			}
-			violations = append(violations, r.analyzeFuncBody(ctx, fn.Type, name, fn.Body, ifStmtsInDefer)...)
+			violations = append(violations, r.analyzeFuncBody(ctx, fn.Type, name, fn.Body, nil, ifStmtsInDefer)...)
 			return false
 		case *ast.FuncLit:
 			// Функциональный литерал вне FuncDecl (var handler = func() {...}).
-			violations = append(violations, r.analyzeFuncBody(ctx, fn.Type, "", fn.Body, ifStmtsInDefer)...)
+			violations = append(violations, r.analyzeFuncBody(ctx, fn.Type, "", fn.Body, nil, ifStmtsInDefer)...)
 			return false
 		}
 		return true
@@ -69,7 +69,7 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 // analyzeFuncBody проверяет `if err != nil` внутри тела одной функции. Вложенные
 // замыкания разбираются рекурсивно со своей сигнатурой: исключения для
 // (T, bool)-функций и bool-предикатов не наследуются от объемлющей функции.
-func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *ast.FuncType, name string, body *ast.BlockStmt, ifStmtsInDefer map[*ast.IfStmt]bool) []*core.Violation {
+func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *ast.FuncType, name string, body *ast.BlockStmt, outerWriters map[string]bool, ifStmtsInDefer map[*ast.IfStmt]bool) []*core.Violation {
 	if body == nil {
 		return nil
 	}
@@ -80,12 +80,18 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 	// (false) — one branch is reported by one rule. Closures have no such
 	// owner and stay here.
 	boolAnswerFunc := name != "" && ftype != nil && isSingleBoolResult(ftype.Results)
+	// The http.ResponseWriter parameters in scope: the function's own and the
+	// ones a closure captures from the function around it.
+	writers := responseWriterParamNames(ftype)
+	for writer := range outerWriters {
+		writers[writer] = true
+	}
 
 	var violations []*core.Violation
 	ast.Inspect(body, func(n ast.Node) bool {
 		// Тело замыкания живёт со своей сигнатурой — рекурсия вместо спуска.
 		if lit, ok := n.(*ast.FuncLit); ok {
-			violations = append(violations, r.analyzeFuncBody(ctx, lit.Type, "", lit.Body, ifStmtsInDefer)...)
+			violations = append(violations, r.analyzeFuncBody(ctx, lit.Type, "", lit.Body, writers, ifStmtsInDefer)...)
 			return false
 		}
 
@@ -106,7 +112,7 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 
 		// Check if the if body handles the error properly
 		// For (T, bool) functions, returning false is acceptable error handling
-		if r.bodyHandlesError(ifStmt.Body, funcReturnsValueBool) {
+		if r.bodyHandlesError(ifStmt.Body, writers) {
 			return true
 		}
 
@@ -146,13 +152,13 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 }
 
 // bodyHandlesError checks if the if body logs or propagates error
-func (r *SilentErrorHandlingRule) bodyHandlesError(body *ast.BlockStmt, funcReturnsValueBool bool) bool {
+func (r *SilentErrorHandlingRule) bodyHandlesError(body *ast.BlockStmt, writers map[string]bool) bool {
 	if body == nil {
 		return false
 	}
 
 	for _, stmt := range body.List {
-		if r.stmtHandlesError(stmt, funcReturnsValueBool) {
+		if r.stmtHandlesError(stmt, writers) {
 			return true
 		}
 	}
@@ -274,7 +280,7 @@ func (r *SilentErrorHandlingRule) bodyHasErrorHandledComment(ctx *core.FileConte
 }
 
 // stmtHandlesError checks if a statement handles error
-func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsValueBool bool) bool {
+func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[string]bool) bool {
 	switch s := stmt.(type) {
 	case *ast.ReturnStmt:
 		// Check if return includes error or uses error value
@@ -294,10 +300,13 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsVal
 	case *ast.ExprStmt:
 		// Check for logging calls
 		if call, ok := s.X.(*ast.CallExpr); ok {
-			if isLoggerCall(call) {
+			if isLoggerCall(call) || isFactoryLoggerCall(call) {
 				return true
 			}
-			if r.isResponseCall(call) {
+			if r.isResponseCall(call) || callWritesResponse(call, writers) {
+				return true
+			}
+			if writesToStderr(call) {
 				return true
 			}
 			// Check for panic
@@ -315,13 +324,13 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, funcReturnsVal
 
 	case *ast.IfStmt:
 		// Nested if might handle error
-		if r.bodyHandlesError(s.Body, funcReturnsValueBool) {
+		if r.bodyHandlesError(s.Body, writers) {
 			return true
 		}
 
 	case *ast.BlockStmt:
 		for _, inner := range s.List {
-			if r.stmtHandlesError(inner, funcReturnsValueBool) {
+			if r.stmtHandlesError(inner, writers) {
 				return true
 			}
 		}
@@ -595,7 +604,16 @@ func argumentIsError(arg ast.Expr) bool {
 	case *ast.Ident:
 		return isErrorVarName(a.Name)
 	case *ast.SelectorExpr:
+		// r.lastErr, or queryErr.message: a field of the error value is its text.
+		if x, ok := a.X.(*ast.Ident); ok && isErrorVarName(x.Name) {
+			return true
+		}
 		return isErrorVarName(a.Sel.Name)
+	case *ast.BinaryExpr:
+		// "invalid 'from': " + parseErr.Error() — the cause travels in the message.
+		return argumentIsError(a.X) || argumentIsError(a.Y)
+	case *ast.ParenExpr:
+		return argumentIsError(a.X)
 	case *ast.CallExpr:
 		// err.Error() — the message travels even though the value does not.
 		if sel, ok := a.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Error" {
@@ -604,6 +622,42 @@ func argumentIsError(arg ast.Expr) bool {
 		// fmt.Errorf("...: %w", err), errors.Join(err, ...) — the error travels
 		// wrapped, as when an iterator hands it to the consumer through yield.
 		return callTakesErrorArgument(a)
+	}
+	return false
+}
+
+// isFactoryLoggerCall recognises a logging verb called on a logger that a
+// function hands out: obs.DefaultLogger().Debug(...), zap.L().Error(...).
+// The receiver is a call whose callee is a logger, so isLoggerCall, which
+// reads the receiver as a name, does not see it.
+func isFactoryLoggerCall(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	factory, ok := sel.X.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	verb := logVerb(sel)
+	if !loggingVerbs[verb] && !strings.HasPrefix(verb, "log") {
+		return false
+	}
+	return isLoggerReceiver(factory.Fun)
+}
+
+// writesToStderr recognises a write to os.Stderr — fmt.Fprintln(os.Stderr, …):
+// a command-line tool reports its failure to the operator there, next to the
+// exit code it returns.
+func writesToStderr(call *ast.CallExpr) bool {
+	for _, arg := range call.Args {
+		sel, ok := arg.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Stderr" {
+			continue
+		}
+		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "os" {
+			return true
+		}
 	}
 	return false
 }

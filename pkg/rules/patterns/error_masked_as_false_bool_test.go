@@ -236,6 +236,66 @@ func (a *A) allItemsOr500(w http.ResponseWriter, r *http.Request) ([]string, boo
 }`,
 			expectedCount: 1,
 		},
+		{
+			// Лукап (value, found, error): ErrNoRows, опознанный через errors.Is,
+			// и есть «не найдено»; прочие ошибки уходят вызывающему.
+			name: "classified not-found answers false, the rest is returned",
+			path: "/src/backend/store.go",
+			code: `package store
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+)
+type Repo struct{ db *sql.DB }
+func (r *Repo) FindOwner(id string) (string, bool, error) {
+	var owner string
+	err := r.db.QueryRow("SELECT owner FROM wallets WHERE id = $1", id).Scan(&owner)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("find owner: %w", err)
+	}
+	return owner, true, nil
+}
+func (r *Repo) FindOwnerSwitch(id string) (string, bool, error) {
+	var owner string
+	err := r.db.QueryRow("SELECT owner FROM wallets WHERE id = $1", id).Scan(&owner)
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return "", false, nil
+		default:
+			return "", false, fmt.Errorf("find owner: %w", err)
+		}
+	}
+	return owner, true, nil
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "classified not-found beside an unclassified false still reported",
+			path: "/src/backend/store.go",
+			code: `package store
+import (
+	"database/sql"
+	"errors"
+)
+type Repo struct{ db *sql.DB }
+func (r *Repo) FindOwner(id string) (string, bool, error) {
+	var owner string
+	err := r.db.QueryRow("SELECT owner FROM wallets WHERE id = $1", id).Scan(&owner)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, nil
+	}
+	return owner, true, nil
+}`,
+			expectedCount: 1,
+		},
 	}
 
 	for _, tt := range tests {

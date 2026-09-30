@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -41,6 +42,8 @@ func init() {
 //   - Test files
 //   - Pure predicate functions (Is/Has/Can/Should prefix)
 //   - Blocks that log the error before returning false
+//   - Returns under a classification of the error (errors.Is(err, ErrNoRows))
+//   - Branches that answer the client through the http.ResponseWriter
 type ErrorMaskedAsFalseBoolRule struct {
 	*rules.BaseRule
 }
@@ -108,11 +111,12 @@ func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *a
 		if !ok {
 			return true
 		}
-		if errNilCheckName(ifStmt.Cond) == "" {
+		errName := errNilCheckName(ifStmt.Cond)
+		if errName == "" {
 			return true
 		}
 
-		ret := r.findReturnFalse(ifStmt.Body)
+		ret := r.findReturnFalse(ifStmt.Body, errName)
 		if ret == nil {
 			return true
 		}
@@ -146,11 +150,33 @@ func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *a
 
 // findReturnFalse returns the first `return false` (or `return false, ...`)
 // inside the body, or nil.
-func (r *ErrorMaskedAsFalseBoolRule) findReturnFalse(body *ast.BlockStmt) *ast.ReturnStmt {
+//
+// A branch that has classified the error — `if errors.Is(err, sql.ErrNoRows)`,
+// `case errors.Is(err, ErrNotFound):` — answers false for that one kind of
+// failure: "not found" is the answer, not a failure hidden behind it. Such
+// branches are skipped; an else next to them is still read.
+func (r *ErrorMaskedAsFalseBoolRule) findReturnFalse(body *ast.BlockStmt, errName string) *ast.ReturnStmt {
 	var found *ast.ReturnStmt
+	classified := map[*ast.BlockStmt]bool{}
 	ast.Inspect(body, func(n ast.Node) bool {
 		if found != nil {
 			return false
+		}
+		switch node := n.(type) {
+		case *ast.IfStmt:
+			if classifiesError(node.Cond, errName) {
+				classified[node.Body] = true
+			}
+		case *ast.BlockStmt:
+			if classified[node] {
+				return false
+			}
+		case *ast.CaseClause:
+			for _, expr := range node.List {
+				if classifiesError(expr, errName) {
+					return false
+				}
+			}
 		}
 		ret, ok := n.(*ast.ReturnStmt)
 		if !ok || len(ret.Results) == 0 {
@@ -171,6 +197,38 @@ func (r *ErrorMaskedAsFalseBoolRule) findReturnFalse(body *ast.BlockStmt) *ast.R
 		return true
 	})
 	return found
+}
+
+// classifiesError reports whether the condition picks out one kind of the
+// error: a call handed the error (errors.Is(err, X), errors.As(err, &t),
+// os.IsNotExist(err)) or a comparison with a sentinel (err == io.EOF), alone
+// or joined with ||. A negation selects everything but that kind, so it does
+// not classify.
+func classifiesError(cond ast.Expr, errName string) bool {
+	switch c := cond.(type) {
+	case *ast.ParenExpr:
+		return classifiesError(c.X, errName)
+	case *ast.BinaryExpr:
+		switch c.Op {
+		case token.LOR:
+			return classifiesError(c.X, errName) && classifiesError(c.Y, errName)
+		case token.EQL:
+			return (isIdentNamed(c.X, errName) && !isNilIdent(c.Y)) ||
+				(isIdentNamed(c.Y, errName) && !isNilIdent(c.X))
+		}
+	case *ast.CallExpr:
+		for _, arg := range c.Args {
+			if isIdentNamed(arg, errName) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isIdentNamed(expr ast.Expr, name string) bool {
+	ident, ok := expr.(*ast.Ident)
+	return ok && ident.Name == name
 }
 
 // hasLoggingCall returns true if any statement in the block calls a logger
@@ -195,7 +253,7 @@ func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt) bool {
 // лога, решает тот помощник, которому writer передали. По имени помощника это
 // не определить, поэтому признак взят по самому writer.
 func answersClient(fn *ast.FuncDecl, body *ast.BlockStmt) bool {
-	writers := responseWriterParamNames(fn)
+	writers := responseWriterParamNames(fn.Type)
 	if len(writers) == 0 {
 		return false
 	}
@@ -204,28 +262,40 @@ func answersClient(fn *ast.FuncDecl, body *ast.BlockStmt) bool {
 		if answered {
 			return false
 		}
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+		if call, ok := n.(*ast.CallExpr); ok && callWritesResponse(call, writers) {
+			answered = true
 		}
-		for _, arg := range call.Args {
-			if ident, ok := arg.(*ast.Ident); ok && writers[ident.Name] {
-				answered = true
-				return false
-			}
-		}
-		return true
+		return !answered
 	})
 	return answered
 }
 
+// callWritesResponse reports whether the call is given one of the writers:
+// as an argument (a responder helper) or as the receiver (w.WriteHeader).
+func callWritesResponse(call *ast.CallExpr, writers map[string]bool) bool {
+	if len(writers) == 0 {
+		return false
+	}
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if ident, ok := sel.X.(*ast.Ident); ok && writers[ident.Name] {
+			return true
+		}
+	}
+	for _, arg := range call.Args {
+		if ident, ok := arg.(*ast.Ident); ok && writers[ident.Name] {
+			return true
+		}
+	}
+	return false
+}
+
 // responseWriterParamNames lists the parameters declared as http.ResponseWriter.
-func responseWriterParamNames(fn *ast.FuncDecl) map[string]bool {
+func responseWriterParamNames(ftype *ast.FuncType) map[string]bool {
 	names := map[string]bool{}
-	if fn.Type.Params == nil {
+	if ftype == nil || ftype.Params == nil {
 		return names
 	}
-	for _, field := range fn.Type.Params.List {
+	for _, field := range ftype.Params.List {
 		sel, ok := field.Type.(*ast.SelectorExpr)
 		if !ok || sel.Sel.Name != "ResponseWriter" {
 			continue

@@ -2,8 +2,6 @@ package security
 
 import (
 	"go/ast"
-	"go/constant"
-	"go/token"
 	"go/types"
 	"regexp"
 	"strings"
@@ -16,15 +14,18 @@ func init() {
 	rules.Register(NewSQLInjectionRule())
 }
 
-// SQLInjectionRule detects SQL queries assembled from runtime values by
-// string concatenation or fmt.Sprintf and handed to a database call.
+// SQLInjectionRule detects SQL queries whose text, by string concatenation or
+// fmt.Sprintf, takes in a string that came from outside the function - a
+// parameter, a field of one, an element ranged from one - without a whitelist
+// check, and is handed to a database call.
 //
 // The query argument is found by the callee's signature, not by position: it
 // is the string parameter named query or sql of a method declared in a known
 // database package (database/sql, sqlx, pgx), or of a method with a database
 // method name (Query, ExecContext, Get, ...) declared elsewhere - a wrapper or
-// a DBTX-style interface. Operands that are Go constants are not runtime
-// values: "SELECT * FROM " + usersTable with a constant table is safe.
+// a DBTX-style interface. Where the text comes from is judged by
+// sqlTaintCheck: constants, numbers, placeholders built from counters and
+// fragments returned by helpers carry no outside string.
 type SQLInjectionRule struct {
 	*rules.BaseRule
 }
@@ -35,7 +36,7 @@ func NewSQLInjectionRule() *SQLInjectionRule {
 		BaseRule: rules.NewBaseRule(
 			"sql-injection",
 			"security",
-			"Detects SQL queries built from non-constant values by string concatenation or fmt.Sprintf (directly or through a local variable) and passed as the query parameter of a database/sql, sqlx or pgx call or of a wrapper method with a query/sql parameter",
+			"Detects SQL text built by string concatenation or fmt.Sprintf (directly or through local variables and slices) from a string parameter of the enclosing function, a field of one or an element ranged from one, not checked against a whitelist, and passed as the query parameter of a database/sql, sqlx or pgx call or of a wrapper method with a query/sql parameter",
 			core.SeverityCritical,
 		),
 	}
@@ -94,7 +95,7 @@ func (r *SQLInjectionRule) analyze(ctx *core.FileContext, info *types.Info) []*c
 		return nil
 	}
 
-	check := sqlQueryCheck{info: info, assigned: localAssignments(ctx.GoAST, info)}
+	check := newSQLTaintCheck(ctx.GoAST, info)
 	var violations []*core.Violation
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -105,7 +106,7 @@ func (r *SQLInjectionRule) analyze(ctx *core.FileContext, info *types.Info) []*c
 		if query == nil {
 			return true
 		}
-		pattern := check.unsafe(query, map[*types.Var]bool{})
+		pattern := check.injectedPattern(query)
 		if pattern == "" {
 			return true
 		}
@@ -167,241 +168,4 @@ func isSQLDatabasePackage(path string) bool {
 		}
 	}
 	return false
-}
-
-// localAssignments maps each variable of the file to the values assigned to
-// it, so a query held in a variable is judged by what was put there. A
-// compound assignment q += x is recorded as the concatenation it performs. A
-// nil value stands for a source the rule does not model: a parameter, a range
-// variable, one result of a multi-value call.
-func localAssignments(file *ast.File, info *types.Info) map[*types.Var][]ast.Expr {
-	assigned := make(map[*types.Var][]ast.Expr)
-	record := func(ident *ast.Ident, value ast.Expr) {
-		obj := info.ObjectOf(ident)
-		if v, ok := obj.(*types.Var); ok && !v.IsField() {
-			assigned[v] = append(assigned[v], value)
-		}
-	}
-	recordFields := func(fields *ast.FieldList) {
-		if fields == nil {
-			return
-		}
-		for _, field := range fields.List {
-			for _, name := range field.Names {
-				record(name, nil)
-			}
-		}
-	}
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.FuncType:
-			recordFields(node.Params)
-			recordFields(node.Results)
-		case *ast.RangeStmt:
-			for _, target := range []ast.Expr{node.Key, node.Value} {
-				if ident, ok := target.(*ast.Ident); ok {
-					record(ident, nil)
-				}
-			}
-		case *ast.AssignStmt:
-			for i, lhs := range node.Lhs {
-				ident, ok := lhs.(*ast.Ident)
-				if !ok {
-					continue
-				}
-				var value ast.Expr
-				if len(node.Lhs) == len(node.Rhs) {
-					value = node.Rhs[i]
-					if node.Tok == token.ADD_ASSIGN {
-						value = &ast.BinaryExpr{X: ident, OpPos: node.TokPos, Op: token.ADD, Y: node.Rhs[i]}
-					}
-				}
-				record(ident, value)
-			}
-		case *ast.ValueSpec:
-			for i, name := range node.Names {
-				var value ast.Expr
-				switch {
-				case len(node.Names) == len(node.Values):
-					value = node.Values[i]
-				case len(node.Values) == 0:
-					// var q string: the zero value is a constant "".
-					value = &ast.BasicLit{ValuePos: name.Pos(), Kind: token.STRING, Value: `""`}
-				}
-				record(name, value)
-			}
-		}
-		return true
-	})
-	return assigned
-}
-
-type sqlQueryCheck struct {
-	info     *types.Info
-	assigned map[*types.Var][]ast.Expr
-}
-
-// unsafe reports how a query expression mixes runtime values into SQL text:
-// "concatenation", "sprintf", or "" when it does not. visiting guards against
-// a variable assigned from itself.
-func (c sqlQueryCheck) unsafe(expr ast.Expr, visiting map[*types.Var]bool) string {
-	expr = ast.Unparen(expr)
-	if c.isConstant(expr) {
-		return ""
-	}
-	switch node := expr.(type) {
-	case *ast.BinaryExpr:
-		if node.Op == token.ADD && c.isDynamicSQLConcatenation(node, visiting) {
-			return "concatenation"
-		}
-	case *ast.CallExpr:
-		if c.isDynamicSQLSprintf(node) {
-			return "sprintf"
-		}
-	case *ast.Ident:
-		v, ok := c.info.Uses[node].(*types.Var)
-		if !ok || visiting[v] {
-			return ""
-		}
-		visiting[v] = true
-		defer delete(visiting, v)
-		for _, value := range c.assigned[v] {
-			if value == nil {
-				continue
-			}
-			if pattern := c.unsafe(value, visiting); pattern != "" {
-				return pattern
-			}
-		}
-	}
-	return ""
-}
-
-// isStatic reports whether an expression holds only constant text: a Go
-// constant, a concatenation of static parts, or a variable of this file every
-// assignment of which is static. A variable of unknown source is not static.
-func (c sqlQueryCheck) isStatic(expr ast.Expr, visiting map[*types.Var]bool) bool {
-	expr = ast.Unparen(expr)
-	if c.isConstant(expr) {
-		return true
-	}
-	switch node := expr.(type) {
-	case *ast.BasicLit:
-		// The zero value localAssignments stands in for var q string.
-		return node.Kind == token.STRING
-	case *ast.BinaryExpr:
-		return node.Op == token.ADD && c.isStatic(node.X, visiting) && c.isStatic(node.Y, visiting)
-	case *ast.Ident:
-		v, ok := c.info.Uses[node].(*types.Var)
-		if !ok {
-			return false
-		}
-		if visiting[v] {
-			// A cycle adds no source beyond the assignments already checked.
-			return true
-		}
-		values := c.assigned[v]
-		if len(values) == 0 {
-			return false
-		}
-		visiting[v] = true
-		defer delete(visiting, v)
-		for _, value := range values {
-			if value == nil || !c.isStatic(value, visiting) {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
-// isDynamicSQLConcatenation reports whether a chain of + joins SQL text with
-// at least one runtime value. SQL text is a keyword in constant text the chain
-// holds, directly or through a variable; an operand that itself holds an
-// unsafe query (q + " LIMIT 1") makes the whole chain unsafe.
-func (c sqlQueryCheck) isDynamicSQLConcatenation(binary *ast.BinaryExpr, visiting map[*types.Var]bool) bool {
-	hasSQL, hasDynamic := false, false
-	for _, operand := range concatOperands(binary) {
-		if c.unsafe(operand, visiting) != "" {
-			return true
-		}
-		if !hasSQL && c.mentionsSQL(operand, map[*types.Var]bool{}) {
-			hasSQL = true
-		}
-		if !hasDynamic && !c.isStatic(operand, map[*types.Var]bool{}) {
-			hasDynamic = true
-		}
-	}
-	return hasSQL && hasDynamic
-}
-
-// mentionsSQL reports whether constant text an expression is built from holds
-// an SQL keyword.
-func (c sqlQueryCheck) mentionsSQL(expr ast.Expr, visiting map[*types.Var]bool) bool {
-	expr = ast.Unparen(expr)
-	if text, ok := c.constantString(expr); ok {
-		return sqlKeyword.MatchString(text)
-	}
-	switch node := expr.(type) {
-	case *ast.BinaryExpr:
-		return node.Op == token.ADD && (c.mentionsSQL(node.X, visiting) || c.mentionsSQL(node.Y, visiting))
-	case *ast.Ident:
-		v, ok := c.info.Uses[node].(*types.Var)
-		if !ok || visiting[v] {
-			return false
-		}
-		visiting[v] = true
-		for _, value := range c.assigned[v] {
-			if value != nil && c.mentionsSQL(value, visiting) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// isDynamicSQLSprintf reports whether a call is fmt.Sprintf with a constant
-// SQL format and at least one runtime argument.
-func (c sqlQueryCheck) isDynamicSQLSprintf(call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || len(call.Args) < 2 {
-		return false
-	}
-	fn, ok := c.info.Uses[sel.Sel].(*types.Func)
-	if !ok || fn.Pkg() == nil || fn.Pkg().Path() != "fmt" || fn.Name() != "Sprintf" {
-		return false
-	}
-	format, ok := c.constantString(call.Args[0])
-	if !ok || !sqlKeyword.MatchString(format) {
-		return false
-	}
-	for _, arg := range call.Args[1:] {
-		if !c.isConstant(arg) {
-			return true
-		}
-	}
-	return false
-}
-
-func (c sqlQueryCheck) isConstant(expr ast.Expr) bool {
-	tv, ok := c.info.Types[expr]
-	return ok && tv.Value != nil
-}
-
-func (c sqlQueryCheck) constantString(expr ast.Expr) (string, bool) {
-	tv, ok := c.info.Types[expr]
-	if !ok || tv.Value == nil || tv.Value.Kind() != constant.String {
-		return "", false
-	}
-	return constant.StringVal(tv.Value), true
-}
-
-// concatOperands flattens a + chain into its operands.
-func concatOperands(expr ast.Expr) []ast.Expr {
-	expr = ast.Unparen(expr)
-	if binary, ok := expr.(*ast.BinaryExpr); ok && binary.Op == token.ADD {
-		return append(concatOperands(binary.X), concatOperands(binary.Y)...)
-	}
-	return []ast.Expr{expr}
 }
