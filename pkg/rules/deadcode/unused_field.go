@@ -44,7 +44,7 @@ func NewUnusedFieldRule() *UnusedFieldRule {
 		BaseRule: rules.NewBaseRule(
 			"unused-field",
 			"deadcode",
-			"Detects unexported struct fields that are never read — dead state kept up to date for nobody",
+			"Detects struct fields that are never read — unexported fields, and every field of a settings type (…Opts, …Options, …Config, …Settings): dead state kept up to date for nobody",
 			core.SeverityMedium,
 		),
 	}
@@ -114,8 +114,12 @@ func (r *UnusedFieldRule) report(field declaredField, written bool) *core.Violat
 	message := fmt.Sprintf("Field %s.%s %s — the work maintaining it produces nothing",
 		field.typeName, field.fieldName, state)
 	if field.setting {
-		message = fmt.Sprintf("Setting %s.%s is set but never read — the option does nothing, and the behaviour behind it is unreachable",
-			field.typeName, field.fieldName)
+		settingState := "is never set nor read"
+		if written {
+			settingState = "is set but never read"
+		}
+		message = fmt.Sprintf("Setting %s.%s %s — the option does nothing, and the behaviour behind it is unreachable",
+			field.typeName, field.fieldName, settingState)
 	}
 	v := r.CreateViolation(field.fileCtx.RelPath, field.line, message)
 	v.WithCode(strings.TrimSpace(field.fileCtx.GetLine(field.line)))
