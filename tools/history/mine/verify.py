@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""usage: verify.py <repo> <candidates.jsonl> <workdir> <out.jsonl>
+"""usage: verify.py <repo> <candidates.jsonl | manifest.tsv> <workdir> <out.jsonl>
 
 For every candidate commit, runs the current glint (all rules, no project
 config) on the directories of the files the commit changed, on the tree the
@@ -7,6 +7,11 @@ record is about: the parent for kind=defect (the code before the fix), the
 commit itself for kind=introduced (the code the fix left). Reports the rules
 that fire on the lines the commit removed (defect) or added (introduced), +-1.
 Only reads the repository: trees come from git archive.
+
+A manifest (.tsv, `commit kind rule[,rule...]` per line) is the acceptance of
+new rules: only the listed rules run, every line is checked afresh, and the
+lines where none of its rules fired are printed as misses; the exit status
+is 1 when there is one.
 """
 import json, os, re, shutil, subprocess, sys
 from collections import defaultdict
@@ -50,7 +55,7 @@ def module_root(path, tree_files):
     return os.path.dirname(path) or '.'
 
 
-def run(commit, tree, side):
+def run(commit, tree, side, rules):
     lines = changed_lines(commit, side)
     if not lines:
         return {'status': 'no-code-lines'}
@@ -75,16 +80,21 @@ def run(commit, tree, side):
         # body): skip them, the Go and TS sources extract.
         subprocess.run(['tar', '-x', '-C', dest], input=archive, stderr=subprocess.DEVNULL)
         target = os.path.join(dest, root)
-        proc = subprocess.run(['glint', 'check', '--tolerate-broken-packages', '--output=json', '--min-severity=low', '.'],
-                              cwd=target, capture_output=True, text=True)
-        try:
-            report = json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            errors.append(f'{root}: exit {proc.returncode}: {proc.stderr.strip()[:300]}')
-            continue
-        total += len(report.get('issues') or [])
-        skipped += report.get('stats', {}).get('packagesSkipped', 0)
-        for issue in report.get('issues') or []:
+        issues = []
+        for rule in rules or [None]:
+            args = ['glint', 'check', '--tolerate-broken-packages', '--output=json', '--min-severity=low']
+            if rule:
+                args.append('--rule=' + rule)
+            proc = subprocess.run([*args, '.'], cwd=target, capture_output=True, text=True)
+            try:
+                report = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                errors.append(f'{root}: exit {proc.returncode}: {proc.stderr.strip()[:300]}')
+                continue
+            issues += report.get('issues') or []
+            skipped = max(skipped, report.get('stats', {}).get('packagesSkipped', 0))
+        total += len(issues)
+        for issue in issues:
             rel = os.path.normpath(os.path.join(root, issue['file']))
             want = lines.get(rel)
             if want and any(n in want for n in (issue['line'] - 1, issue['line'], issue['line'] + 1)):
@@ -93,26 +103,49 @@ def run(commit, tree, side):
             'issues_in_roots': total, 'packages_skipped': skipped, 'fired': {p: sorted(r) for p, r in fired.items()}}
 
 
-records = [json.loads(l) for l in open(cand_path) if l.strip()]
+manifest = cand_path.endswith('.tsv')
+expected = defaultdict(set)
+if manifest:
+    for line in open(cand_path):
+        if line.strip() and not line.startswith('#'):
+            commit, kind, rules = line.split()
+            expected[(commit, kind)].update(rules.split(','))
+    dates = {c: git('log', '-1', '--format=%ad', '--date=short', c).strip() for c, _ in expected}
+    jobs = sorted((dates[c], c, k) for c, k in expected)
+else:
+    records = [json.loads(l) for l in open(cand_path) if l.strip()]
+    jobs = sorted({(r['date'], r['commit'], r.get('kind') or 'defect') for r in records})
 # Oldest first: neighbouring trees share most files, and the result cache
-# serves them.
-jobs = sorted({(r['date'], r['commit'], r.get('kind') or 'defect') for r in records})
+# serves them. A candidate run resumes where it stopped; a manifest is
+# checked afresh.
 done = set()
-if os.path.exists(out_path):
+if not manifest and os.path.exists(out_path):
     for l in open(out_path):
         d = json.loads(l)
         done.add((d['commit'], d['kind']))
-with open(out_path, 'a') as out:
+misses = []
+with open(out_path, 'a' if not manifest else 'w') as out:
     for i, (_, commit, kind) in enumerate(jobs):
         if (commit, kind) in done:
             continue
         side = 'old' if kind == 'defect' else 'new'
         tree = commit + '^' if kind == 'defect' else commit
+        rules = sorted(expected[(commit, kind)]) if manifest else None
         try:
-            res = run(commit, tree, side)
+            res = run(commit, tree, side, rules)
         except subprocess.CalledProcessError as e:
             res = {'status': 'error', 'errors': [str(e)[:300]]}
         res.update(commit=commit, kind=kind)
+        if manifest:
+            fired = {r for rs in res.get('fired', {}).values() for r in rs}
+            res.update(expected=rules, hit=bool(fired & set(rules)))
+            if not res['hit']:
+                misses.append(f'{commit} {kind} {",".join(rules)} {res["status"]}')
         out.write(json.dumps(res, ensure_ascii=False) + '\n')
         out.flush()
-        print(f'{i + 1}/{len(jobs)} {commit} {kind} {res["status"]}', flush=True)
+        print(f'{i + 1}/{len(jobs)} {commit} {kind} {res["status"]}' + (f' hit={res["hit"]}' if manifest else ''), flush=True)
+if manifest:
+    print(f'misses: {len(misses)} of {len(jobs)}')
+    for miss in misses:
+        print('  ' + miss)
+    sys.exit(1 if misses else 0)

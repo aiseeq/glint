@@ -40,6 +40,11 @@ repository: commits come from `git log`/`git show`, trees from `git archive`.
    the run can be stopped and resumed. `packages_skipped` counts the packages
    of the tree that did not type-check: typed rules are silent in them.
 
+   The same script accepts new rules: given a manifest (`.tsv`, one
+   `commit kind rule[,rule...]` per line — the commits a rule must catch), it
+   runs only those rules, checks every line afresh and prints the lines where
+   none of its rules fired; the exit status is 1 while there is one.
+
 6. **Rank.** Per family: how many commits, how universal, how hard to detect
    (syntactic, typed, flow, cross-file), which existing rule missed it and
    why. A gap of an existing rule is usually cheaper than a new rule; a class
