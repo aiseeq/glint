@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/go/types/typeutil"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -16,7 +17,10 @@ func init() {
 	rules.Register(NewNilSliceRule())
 }
 
-// NilSliceRule detects nil slice comparisons and returns
+// NilSliceRule detects nil slice comparisons and returns. A nil check that
+// tells nil from empty on purpose is left alone: the slice is also compared
+// by length, callers pass a literal nil for it, or it is a variable left nil
+// until one path sets it to a slice it did not build.
 type NilSliceRule struct {
 	*rules.BaseRule
 }
@@ -36,7 +40,7 @@ func NewNilSliceRule() *NilSliceRule {
 // AnalyzeFile checks one file without type information: the fallback the
 // project analysis uses for files no type-checked package covers.
 func (r *NilSliceRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	return r.analyze(ctx, nil, nil)
+	return r.analyze(ctx, nil, nil, nil)
 }
 
 // RequiresSSA reports that typed syntax is enough for this rule.
@@ -45,14 +49,82 @@ func (r *NilSliceRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; a variable declared anywhere in the
 // project is judged by its declared type and declaration.
 func (r *NilSliceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	nilArgs := parametersPassedNil(ctx)
 	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
-		return r.analyze(fileCtx, info, ctx)
+		return r.analyze(fileCtx, info, ctx, nilArgs)
 	})
 }
 
+// parametersPassedNil returns the parameters some call of the project sets
+// to a literal nil: for them nil is part of the function's contract, "none
+// given", and not an empty slice mixed up with a missing one.
+func parametersPassedNil(ctx *core.GoProjectContext) map[types.Object]bool {
+	passed := map[types.Object]bool{}
+	if ctx == nil {
+		return passed
+	}
+	forwarded := map[types.Object][]types.Object{}
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
+			continue
+		}
+		info := pkgCtx.Package.TypesInfo
+		for _, file := range pkgCtx.Package.Syntax {
+			ast.Inspect(file, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				callee, ok := typeutil.Callee(info, call).(*types.Func)
+				if !ok {
+					return true
+				}
+				signature, ok := callee.Origin().Type().(*types.Signature)
+				if !ok {
+					return true
+				}
+				for i, arg := range call.Args {
+					if i >= signature.Params().Len() || (signature.Variadic() && i >= signature.Params().Len()-1) {
+						break
+					}
+					ident, ok := ast.Unparen(arg).(*ast.Ident)
+					if !ok {
+						continue
+					}
+					switch used := info.Uses[ident].(type) {
+					case *types.Nil:
+						passed[signature.Params().At(i)] = true
+					case *types.Var:
+						forwarded[used] = append(forwarded[used], signature.Params().At(i))
+					}
+				}
+				return true
+			})
+		}
+	}
+	// A parameter handed on unchanged to another function brings its nil
+	// along: the helper behind a wrapper gets the same "none given".
+	queue := make([]types.Object, 0, len(passed))
+	for param := range passed {
+		queue = append(queue, param)
+	}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, next := range forwarded[current] {
+			if !passed[next] {
+				passed[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	return passed
+}
+
 // analyze checks for nil slice comparisons. info and project are nil for a
-// file without type information.
-func (r *NilSliceRule) analyze(ctx *core.FileContext, info *types.Info, project *core.GoProjectContext) []*core.Violation {
+// file without type information; nilArgs are the parameters callers set to
+// nil.
+func (r *NilSliceRule) analyze(ctx *core.FileContext, info *types.Info, project *core.GoProjectContext, nilArgs map[types.Object]bool) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() {
 		return nil
 	}
@@ -69,7 +141,10 @@ func (r *NilSliceRule) analyze(ctx *core.FileContext, info *types.Info, project 
 	if info != nil {
 		emptinessChecked := lengthComparedObjects(ctx.GoAST, info)
 		isSlice = func(ident *ast.Ident) bool { return r.isStatedSlice(ctx, info, project, ident) }
-		intentionalNil = func(ident *ast.Ident) bool { return emptinessChecked[info.Uses[ident]] }
+		intentionalNil = func(ident *ast.Ident) bool {
+			obj := info.Uses[ident]
+			return emptinessChecked[obj] || nilArgs[obj] || r.nilMeansUnset(ctx, info, project, obj)
+		}
 	} else {
 		typeInferrer := NewTypeInferrer(ctx.GoAST)
 		isSlice = func(ident *ast.Ident) bool {
@@ -170,6 +245,51 @@ func (r *NilSliceRule) isStatedSlice(ctx *core.FileContext, info *types.Info, pr
 		file = declCtx.GoAST
 	}
 	return declarationStatesSlice(file, obj.Pos())
+}
+
+// nilMeansUnset reports a variable declared without a value and set, on some
+// path, to a slice it did not build itself: a part of another slice, a call
+// result, another variable. Its nil check asks whether that path ran - the
+// part it got may be empty. A variable only ever built with append, make or
+// a literal is nil exactly when it is empty.
+func (r *NilSliceRule) nilMeansUnset(ctx *core.FileContext, info *types.Info, project *core.GoProjectContext, obj types.Object) bool {
+	if obj == nil {
+		return false
+	}
+	file := ctx.GoAST
+	if pos := obj.Pos(); pos < file.FileStart || pos >= file.FileEnd {
+		declCtx, err := project.FileForPosition(pos)
+		if err != nil || declCtx.GoAST == nil {
+			return false
+		}
+		file = declCtx.GoAST
+	}
+	path, _ := astutil.PathEnclosingInterval(file, obj.Pos(), obj.Pos())
+	if len(path) < 2 {
+		return false
+	}
+	spec, ok := path[1].(*ast.ValueSpec)
+	if !ok || len(spec.Values) != 0 {
+		return false
+	}
+	unset := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || unset {
+			return !unset
+		}
+		for i, lhs := range assign.Lhs {
+			ident, ok := ast.Unparen(lhs).(*ast.Ident)
+			if !ok || info.Uses[ident] != obj {
+				continue
+			}
+			if len(assign.Rhs) != len(assign.Lhs) || !initializesSlice(assign.Rhs[i]) {
+				unset = true
+			}
+		}
+		return !unset
+	})
+	return unset
 }
 
 // declarationStatesSlice classifies the declaration of the variable defined at

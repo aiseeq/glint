@@ -302,3 +302,88 @@ func notDecimal(o Order) float64 { amount, _ := o.Note.Float64(); return amount 
 	}
 	assert.Equal(t, []int{7, 9, 11}, lines)
 }
+
+// A float taken only to compare a price with a threshold, or amounts with a
+// tolerance, makes a yes-or-no judgement; the approximation never becomes an
+// amount anyone stores or pays. The same float leaving the function - returned,
+// stored in a field, handed to a call - is reported.
+func TestFinancialDecimalFloatRule_ComparisonOnlyFloats(t *testing.T) {
+	project := decimalProject(t, map[string]string{
+		"monitor/monitor.go": `package monitor
+
+import (
+	"math"
+
+	"github.com/shopspring/decimal"
+)
+
+const stableMin, stableMax, tolerance = 0.97, 1.03, 0.05
+
+type Token struct {
+	Symbol   string
+	PriceUSD decimal.Decimal
+	Amount   decimal.Decimal
+}
+
+type Report struct{ Price float64 }
+
+func stable(tokens []Token) bool {
+	for _, token := range tokens {
+		price, _ := token.PriceUSD.Float64()
+		return price >= stableMin && price <= stableMax
+	}
+	return false
+}
+
+func shifted(prev, curr []Token) bool {
+	prevAmounts := map[string]float64{}
+	for _, token := range prev {
+		amount, _ := token.Amount.Float64()
+		prevAmounts[token.Symbol] += amount
+	}
+	currAmounts := map[string]float64{}
+	for _, token := range curr {
+		amount, _ := token.Amount.Float64()
+		currAmounts[token.Symbol] += amount
+	}
+	if len(prevAmounts) != len(currAmounts) {
+		return true
+	}
+	for symbol, prevAmount := range prevAmounts {
+		currAmount, ok := currAmounts[symbol]
+		if !ok {
+			return true
+		}
+		base := math.Abs(prevAmount)
+		diff := math.Abs(currAmount - prevAmount)
+		if base == 0 {
+			return diff != 0
+		}
+		if diff/base > tolerance {
+			return true
+		}
+	}
+	return false
+}
+
+func report(token Token, out *Report) {
+	price, _ := token.PriceUSD.Float64()
+	out.Price = price
+}
+
+func scaled(token Token) float64 {
+	amount, _ := token.Amount.Float64()
+	total := amount * 2
+	return total
+}
+`,
+	})
+
+	violations, err := NewFinancialDecimalFloatRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var lines []int
+	for _, v := range violations {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{59, 64}, lines)
+}

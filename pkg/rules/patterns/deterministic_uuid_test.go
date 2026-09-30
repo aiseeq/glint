@@ -163,6 +163,30 @@ func ETag(userID string, body []byte) string {
 }`,
 			expectedCount: 0,
 		},
+		{
+			// An idempotency key must come out the same for the same event:
+			// the name-based UUID only shortens the input to fit a key column,
+			// and the prefixed string it becomes is no record ID.
+			name: "name-based UUID folded into a string key",
+			code: `package ids
+
+import (
+	"fmt"
+
+	"github.com/google/uuid"
+)
+
+var keyNamespace = uuid.NameSpaceDNS
+
+func settleKey(txHash string) string {
+	return "settle:" + uuid.NewSHA1(keyNamespace, []byte(txHash)).String()
+}
+
+func refundKey(txHash string) string {
+	return fmt.Sprintf("refund:%s", uuid.NewSHA1(keyNamespace, []byte(txHash)))
+}`,
+			expectedCount: 0,
+		},
 	}
 
 	for _, tt := range tests {

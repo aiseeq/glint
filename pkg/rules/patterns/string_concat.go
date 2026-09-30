@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 
@@ -13,7 +14,11 @@ func init() {
 	rules.Register(NewStringConcatRule())
 }
 
-// StringConcatRule detects string concatenation in loops
+// StringConcatRule detects string concatenation in loops. A loop over a
+// handful of entries fixed in the source - an array, a literal, a package
+// table nothing reassigns - is left alone: it concatenates a known small
+// number of times, and the quadratic copying strings.Builder avoids is not
+// there.
 type StringConcatRule struct {
 	*rules.BaseRule
 }
@@ -33,7 +38,7 @@ func NewStringConcatRule() *StringConcatRule {
 // AnalyzeFile checks one file without type information: only concatenations
 // with a string literal are known to be string concatenations.
 func (r *StringConcatRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	return r.analyze(ctx, nil)
+	return r.analyze(ctx, nil, nil)
 }
 
 // RequiresSSA reports that typed syntax is enough for this rule.
@@ -42,12 +47,106 @@ func (r *StringConcatRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; with type information the accumulator
 // is judged by its type.
 func (r *StringConcatRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	fixedTables := make(map[*types.Info]map[types.Object]bool)
+	for _, pkg := range ctx.Packages {
+		if pkg != nil && pkg.Package != nil && pkg.Package.TypesInfo != nil {
+			fixedTables[pkg.Package.TypesInfo] = smallFixedTables(pkg.Package.Syntax, pkg.Package.TypesInfo)
+		}
+	}
+	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyze(fileCtx, info, fixedTables[info])
+	})
+}
+
+// maxFixedLoop is the most iterations a loop fixed in the source may have for
+// its concatenations to go unreported.
+const maxFixedLoop = 16
+
+// smallFixedTables returns the package-level variables of the package whose
+// initializer is a composite literal of at most maxFixedLoop entries and that
+// nothing in the package reassigns or takes the address of. Only unexported
+// ones: another package may grow an exported table.
+func smallFixedTables(files []*ast.File, info *types.Info) map[types.Object]bool {
+	tables := make(map[types.Object]bool)
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				value, ok := spec.(*ast.ValueSpec)
+				if !ok || len(value.Values) != len(value.Names) {
+					continue
+				}
+				for i, name := range value.Names {
+					literal, ok := value.Values[i].(*ast.CompositeLit)
+					if !ok || name.IsExported() || len(literal.Elts) > maxFixedLoop {
+						continue
+					}
+					if obj := info.Defs[name]; obj != nil {
+						tables[obj] = true
+					}
+				}
+			}
+		}
+	}
+	if len(tables) == 0 {
+		return tables
+	}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.AssignStmt:
+				for _, lhs := range node.Lhs {
+					if ident, ok := ast.Unparen(lhs).(*ast.Ident); ok {
+						delete(tables, info.Uses[ident])
+					}
+				}
+			case *ast.UnaryExpr:
+				if ident, ok := ast.Unparen(node.X).(*ast.Ident); ok && node.Op == token.AND {
+					delete(tables, info.Uses[ident])
+				}
+			}
+			return true
+		})
+	}
+	return tables
+}
+
+// rangesOverFixedSmall reports whether the range walks a collection whose
+// size the source fixes at no more than maxFixedLoop entries: an array, a
+// composite literal, a constant count, or one of the fixed package tables.
+func rangesOverFixedSmall(info *types.Info, fixedTables map[types.Object]bool, expr ast.Expr) bool {
+	if info == nil {
+		return false
+	}
+	expr = ast.Unparen(expr)
+	if literal, ok := expr.(*ast.CompositeLit); ok {
+		return len(literal.Elts) <= maxFixedLoop
+	}
+	if ident, ok := expr.(*ast.Ident); ok && fixedTables[info.Uses[ident]] {
+		return true
+	}
+	if tv, ok := info.Types[expr]; ok && tv.Value != nil && tv.Value.Kind() == constant.Int {
+		count, exact := constant.Int64Val(tv.Value)
+		return exact && count <= maxFixedLoop
+	}
+	collection := info.TypeOf(expr)
+	if collection == nil {
+		return false
+	}
+	if pointer, ok := collection.Underlying().(*types.Pointer); ok {
+		collection = pointer.Elem()
+	}
+	array, ok := collection.Underlying().(*types.Array)
+	return ok && array.Len() <= maxFixedLoop
 }
 
 // analyze checks for string concatenation in loops. info is nil for a file
-// without type information.
-func (r *StringConcatRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+// without type information; fixedTables are the package tables of fixed small
+// size.
+func (r *StringConcatRule) analyze(ctx *core.FileContext, info *types.Info, fixedTables map[types.Object]bool) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() {
 		return nil
 	}
@@ -64,7 +163,9 @@ func (r *StringConcatRule) analyze(ctx *core.FileContext, info *types.Info) []*c
 		case *ast.ForStmt:
 			r.checkLoop(ctx, info, loop.Body, &violations)
 		case *ast.RangeStmt:
-			r.checkLoop(ctx, info, loop.Body, &violations)
+			if !rangesOverFixedSmall(info, fixedTables, loop.X) {
+				r.checkLoop(ctx, info, loop.Body, &violations)
+			}
 		}
 
 		return true

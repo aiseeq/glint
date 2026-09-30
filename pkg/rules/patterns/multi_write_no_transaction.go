@@ -10,10 +10,12 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"golang.org/x/tools/go/types/typeutil"
 )
 
 func init() {
@@ -45,6 +47,13 @@ func init() {
 //     panic) before the other one. Helpers are summarised per path too, so a helper
 //     that writes one thing or the other contributes one write per path.
 //   - A retry of the same call: the same method name twice is one write attempted twice.
+//   - A write whose error sends the path away: a write that failed did not happen, and a
+//     helper that wrote and then returned an error leaves a caller that returns on that
+//     error without meeting the caller's next write.
+//   - Writes made while a failure is handled - in the branch on `err != nil` that ends
+//     the function: they record the failure, and a transaction would roll that record
+//     back exactly when it is needed. The pair to fix, if any, is the writes of the
+//     operation itself.
 //   - Writes inside a goroutine body: that work outlives the function and cannot share its
 //     transaction. Project spawners that hide the `go` inside a helper, and telemetry that
 //     must survive precisely when the business operation fails, are listed in
@@ -71,32 +80,46 @@ type MultiWriteNoTransactionRule struct {
 	independent map[string]bool
 }
 
+// multiWriteMutation matches the name of a method that changes state;
+// Get/List/Find/Count do not match.
+var multiWriteMutation = regexp.MustCompile(`^(Create|Insert|Update|Upsert|Delete|Remove|Save|Store|Set|Mark|Apply|Attach|Detach|Claim|Reject|Approve|Cancel|Expire|Increment|Decrement)[A-Z]\w*$`)
+
+// multiWriteStoreType is the default store_types: the receiver types that
+// count as a store.
+var multiWriteStoreType = regexp.MustCompile(`(?i)(repo|repository|store|dao)(interface|impl)?$`)
+
 // NewMultiWriteNoTransactionRule creates the rule.
 func NewMultiWriteNoTransactionRule() *MultiWriteNoTransactionRule {
-	return &MultiWriteNoTransactionRule{
+	r := &MultiWriteNoTransactionRule{
 		BaseRule: rules.NewBaseRule(
 			"multi-write-no-transaction",
 			"patterns",
 			"Detects two or more persistent writes in one function that are not wrapped in a transaction",
 			core.SeverityHigh,
 		),
-		// Имя метода, меняющего состояние. Get/List/Find/Count сюда не попадают.
-		mutation: regexp.MustCompile(`^(Create|Insert|Update|Upsert|Delete|Remove|Save|Store|Set|Mark|Apply|Attach|Detach|Claim|Reject|Approve|Cancel|Expire|Increment|Decrement)[A-Z]\w*$`),
-		// Тип получателя, который считается хранилищем.
-		storeType: regexp.MustCompile(`(?i)(repo|repository|store|dao)(interface|impl)?$`),
-		txRunners: map[string]bool{
-			"RunInTx":          true,
-			"RunInTransaction": true,
-			"WithTransaction":  true,
-			"InTransaction":    true,
-			"Transact":         true,
-		},
-		// Функция, сама открывающая транзакцию и пишущая через её объект, а не через колбэк.
-		txOpeners: map[string]bool{"BeginTx": true, "BeginTxx": true, "Begin": true},
-		// Проектные запускалки горутин и телеметрия задаются в конфиге: в языке ни те, ни
-		// другие ничем не выделены. Голый `go` разбирается без настройки.
-		independent: map[string]bool{},
 	}
+	r.setDefaults()
+	return r
+}
+
+// setDefaults sets the settings Configure may override, so that a setting
+// left out of a configuration keeps its default rather than a value an earlier
+// configuration gave.
+func (r *MultiWriteNoTransactionRule) setDefaults() {
+	r.mutation = multiWriteMutation
+	r.storeType = multiWriteStoreType
+	r.txRunners = map[string]bool{
+		"RunInTx":          true,
+		"RunInTransaction": true,
+		"WithTransaction":  true,
+		"InTransaction":    true,
+		"Transact":         true,
+	}
+	// Функция, сама открывающая транзакцию и пишущая через её объект, а не через колбэк.
+	r.txOpeners = map[string]bool{"BeginTx": true, "BeginTxx": true, "Begin": true}
+	// Проектные запускалки горутин и телеметрия задаются в конфиге: в языке ни те, ни
+	// другие ничем не выделены. Голый `go` разбирается без настройки.
+	r.independent = map[string]bool{}
 }
 
 // Configure accepts overrides for what counts as a store and as a transaction runner.
@@ -104,6 +127,7 @@ func (r *MultiWriteNoTransactionRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return fmt.Errorf("configure multi-write-no-transaction: %w", err)
 	}
+	r.setDefaults()
 	if raw, ok := settings["store_types"]; ok {
 		pattern, ok := raw.(string)
 		if !ok {
@@ -202,6 +226,8 @@ type writeCall struct {
 	// via — цепочка хелперов от разбираемой функции до самой записи. Без неё находку
 	// через два уровня вызовов невозможно проверить: в теле функции записи не видно.
 	via []string
+	// failing: the write runs while a failure is handled, and records it.
+	failing bool
 }
 
 // where describes the write for the report: имя метода и путь до него.
@@ -209,28 +235,66 @@ func (w writeCall) where() string {
 	if len(w.via) == 0 {
 		return w.method
 	}
-	return w.method + " (через " + strings.Join(w.via, " → ") + ")"
+	return w.method + " (via " + strings.Join(w.via, " → ") + ")"
 }
 
 // through returns the write as seen from a caller of helper.
 func (w writeCall) through(helper string) writeCall {
-	return writeCall{method: w.method, via: append([]string{helper}, w.via...)}
+	return writeCall{method: w.method, via: append([]string{helper}, w.via...), failing: w.failing}
 }
+
+// errOutcome is what a path knows about an error value: nothing, that it is
+// nil, or that it is not.
+type errOutcome int
+
+const (
+	outcomeUnknown errOutcome = iota
+	outcomeNil
+	outcomeNonNil
+)
 
 // writePath is the flow state of one control-flow path: the write it has
 // performed so far, if any. A path never carries two distinct writes — the
 // second one is the finding, recorded in the function summary, and the path
 // keeps its first write — so a function has at most one path per written
 // method plus the path without writes.
+//
+// The path also knows what became of the errors it met, so that the branch
+// on `err != nil` keeps only the paths on which the call failed: a write
+// that failed did not happen, and a helper that returned an error goes on
+// with its failing exits only.
 type writePath struct {
 	write *writeCall
+	// failing: the path is inside the handling of an error, in a branch that
+	// ends the function.
+	failing bool
+	// errVar is the error variable the path last assigned, errState what the
+	// path knows about it; at a function exit errVar is nil and errState is
+	// the outcome of the returned error.
+	errVar   types.Object
+	errState errOutcome
+	// resultCall is the call just evaluated and result the outcome of its
+	// error result on this path; the statement that holds the call binds it.
+	resultCall *ast.CallExpr
+	result     errOutcome
 }
 
 func writePathKey(path writePath) string {
-	if path.write == nil {
-		return ""
+	method := ""
+	if path.write != nil {
+		method = path.write.method
+		if path.write.failing {
+			method += "!"
+		}
 	}
-	return path.write.method
+	errVar, resultCall := "", ""
+	if path.errVar != nil {
+		errVar = flowPosKey(path.errVar.Pos())
+	}
+	if path.resultCall != nil {
+		resultCall = flowPosKey(path.resultCall.Pos())
+	}
+	return flowPathKey(method, strconv.FormatBool(path.failing), errVar, strconv.Itoa(int(path.errState)), resultCall, strconv.Itoa(int(path.result)))
 }
 
 func joinWritePaths(left, right []writePath) []writePath {
@@ -262,8 +326,13 @@ type writeSummary struct {
 }
 
 func (s *writeSummary) record(write writeCall) {
-	for _, known := range s.writes {
+	for i, known := range s.writes {
 		if known.method == write.method {
+			// A write made on the main path pairs in the callers; the same
+			// method met only while handling a failure does not.
+			if known.failing && !write.failing {
+				s.writes[i] = write
+			}
 			return
 		}
 	}
@@ -305,7 +374,11 @@ func (g *callGraph) summary(name string) *writeSummary {
 	g.visiting[name] = true
 	summary := &writeSummary{}
 	analyzer := &writeFlowAnalyzer{graph: g, info: node.info, summary: summary}
-	summary.exits = analyzer.walkBody(node.decl.Body, []writePath{{}})
+	var signature *types.Signature
+	if fn, ok := node.info.Defs[node.decl.Name].(*types.Func); ok {
+		signature, _ = fn.Type().(*types.Signature)
+	}
+	summary.exits = analyzer.walkBody(node.decl.Body, signature, []writePath{{}})
 	delete(g.visiting, name)
 	g.summaries[name] = summary
 	return summary
@@ -380,17 +453,19 @@ type writeFlowAnalyzer struct {
 	summary *writeSummary
 	// exits collects the paths returning from the body being walked.
 	exits []writePath
+	// signature is the signature of the body being walked, nil when unknown.
+	signature *types.Signature
 }
 
 // walkBody walks a function or closure body and returns the states of the
 // paths leaving it.
-func (a *writeFlowAnalyzer) walkBody(body *ast.BlockStmt, paths []writePath) []writePath {
-	outer := a.exits
-	a.exits = nil
+func (a *writeFlowAnalyzer) walkBody(body *ast.BlockStmt, signature *types.Signature, paths []writePath) []writePath {
+	outer, outerSignature := a.exits, a.signature
+	a.exits, a.signature = nil, signature
 	walker := &flowWalker[[]writePath, struct{}]{rule: a}
 	edges := walker.walk(body, paths, struct{}{})
-	exits := joinWritePaths(a.exits, edges.next)
-	a.exits = outer
+	exits := joinWritePaths(a.exits, settleWritePaths(edges.next))
+	a.exits, a.signature = outer, outerSignature
 	return exits
 }
 
@@ -416,8 +491,18 @@ func (a *writeFlowAnalyzer) simpleStmt(stmt ast.Stmt, paths []writePath, _ struc
 		for _, result := range node.Results {
 			paths = a.scan(result, paths)
 		}
-		a.exits = joinWritePaths(a.exits, paths)
+		exits := make([]writePath, 0, len(paths))
+		for _, path := range paths {
+			outcome := a.returnOutcome(node, path)
+			path.errVar, path.errState = nil, outcome
+			path.resultCall, path.result = nil, outcomeUnknown
+			exits = append(exits, path)
+		}
+		a.exits = joinWritePaths(a.exits, exits)
 		return nil, true
+	case *ast.AssignStmt:
+		paths = a.bindErrors(node, a.scan(node, paths))
+		return paths, len(paths) == 0
 	case *ast.GoStmt:
 		// Тело горутины — отдельная единица работы: она переживает возврат из
 		// функции и физически не может делить с ней транзакцию. Аргументы вызова
@@ -436,16 +521,35 @@ func (a *writeFlowAnalyzer) simpleStmt(stmt ast.Stmt, paths []writePath, _ struc
 		// exit after that point, which is the same set of paths.
 		paths = a.scan(stmt, paths)
 	}
+	paths = settleWritePaths(paths)
 	return paths, len(paths) == 0
 }
 
+// settleWritePaths forgets the outcome of the last call once the statement
+// holding it is done.
+func settleWritePaths(paths []writePath) []writePath {
+	for i := range paths {
+		paths[i].resultCall, paths[i].result = nil, outcomeUnknown
+	}
+	return joinWritePaths(paths, nil)
+}
+
 func (a *writeFlowAnalyzer) ifCondition(stmt *ast.IfStmt, paths []writePath, _ struct{}) ([]writePath, []writePath) {
-	paths = a.scan(stmt.Cond, paths)
-	return paths, slices.Clone(paths)
+	paths = settleWritePaths(a.scan(stmt.Cond, paths))
+	thenFacts, elseFacts := a.errorFacts(stmt.Cond)
+	thenPaths := assumeErrors(slices.Clone(paths), thenFacts)
+	elsePaths := assumeErrors(paths, elseFacts)
+	if failureFact(thenFacts) && branchEndsFunction(stmt.Body, a.info) {
+		thenPaths = markFailing(thenPaths)
+	}
+	if failureFact(elseFacts) && stmt.Else != nil && branchEndsFunction(stmt.Else, a.info) {
+		elsePaths = markFailing(elsePaths)
+	}
+	return thenPaths, elsePaths
 }
 
 func (a *writeFlowAnalyzer) flowExpr(expr ast.Expr, paths []writePath, _ struct{}) []writePath {
-	return a.scan(expr, paths)
+	return settleWritePaths(a.scan(expr, paths))
 }
 
 func (a *writeFlowAnalyzer) rangeVars(_ *ast.RangeStmt, paths []writePath, _ struct{}) []writePath {
@@ -453,7 +557,7 @@ func (a *writeFlowAnalyzer) rangeVars(_ *ast.RangeStmt, paths []writePath, _ str
 }
 
 func (a *writeFlowAnalyzer) typeSwitchGuard(stmt ast.Stmt, paths []writePath, _ struct{}) []writePath {
-	return a.scan(stmt, paths)
+	return settleWritePaths(a.scan(stmt, paths))
 }
 
 func (a *writeFlowAnalyzer) caseClause(sw ast.Stmt, clause *ast.CaseClause, paths []writePath, parent struct{}) ([]writePath, struct{}) {
@@ -462,7 +566,7 @@ func (a *writeFlowAnalyzer) caseClause(sw ast.Stmt, clause *ast.CaseClause, path
 			paths = a.scan(expr, paths)
 		}
 	}
-	return paths, parent
+	return settleWritePaths(paths), parent
 }
 
 func (a *writeFlowAnalyzer) commClause(_ *ast.CommClause, paths []writePath, parent struct{}) ([]writePath, struct{}) {
@@ -481,7 +585,13 @@ func (a *writeFlowAnalyzer) scan(node ast.Node, paths []writePath) []writePath {
 	case *ast.FuncLit:
 		// A closure may run here or not at all: the paths through its body
 		// join the paths that skip it. Pairs inside it are found on the way.
-		return joinWritePaths(paths, a.walkBody(current.Body, slices.Clone(paths)))
+		// What the closure returned is not an error of this function.
+		signature, _ := a.info.TypeOf(current).(*types.Signature)
+		closed := a.walkBody(current.Body, signature, slices.Clone(paths))
+		for i := range closed {
+			closed[i].errVar, closed[i].errState = nil, outcomeUnknown
+		}
+		return joinWritePaths(paths, closed)
 	case *ast.CallExpr:
 		return a.call(current, paths)
 	}
@@ -497,12 +607,12 @@ func (a *writeFlowAnalyzer) call(call *ast.CallExpr, paths []writePath) []writeP
 	rule := a.graph.rule
 	if rule.isTransactionRunner(call) {
 		// Записи внутри колбэка транзакции уже защищены — вглубь не идём.
-		return paths
+		return withResult(paths, call, outcomeUnknown)
 	}
 	if rule.isIndependent(call) {
 		// Запуск фоновой задачи или телеметрия: эти записи принадлежат другой
 		// единице работы и в транзакцию вызывающего попасть не должны.
-		return paths
+		return withResult(paths, call, outcomeUnknown)
 	}
 	paths = a.scan(call.Fun, paths)
 	for _, arg := range call.Args {
@@ -511,50 +621,76 @@ func (a *writeFlowAnalyzer) call(call *ast.CallExpr, paths []writePath) []writeP
 	// Вызов, сам являющийся записью, дальше не разворачиваем: делегирующая
 	// обёртка иначе считалась бы второй записью поверх той же самой.
 	if method, ok := rule.storeMutation(call, a.info); ok {
-		return a.write(paths, writeCall{method: method})
+		return a.write(paths, writeCall{method: method}, call)
 	}
 	name := resolvedCalleeName(call, a.info)
 	if name == "" {
-		return paths
+		return withResult(paths, call, outcomeUnknown)
 	}
 	callee := a.graph.summary(name)
 	if callee == nil {
-		return paths
+		return withResult(paths, call, outcomeUnknown)
 	}
-	return a.through(paths, callee, a.graph.funcs[name].display)
+	return a.through(paths, callee, a.graph.funcs[name].display, call)
 }
 
-// write adds one write to every path.
-func (a *writeFlowAnalyzer) write(paths []writePath, write writeCall) []writePath {
+// withResult records the call as the one just evaluated, with the given
+// outcome of its error result.
+func withResult(paths []writePath, call *ast.CallExpr, outcome errOutcome) []writePath {
+	for i := range paths {
+		paths[i].resultCall, paths[i].result = call, outcome
+	}
+	return joinWritePaths(paths, nil)
+}
+
+// write adds one write to every path. A write that reports an error splits
+// the path: it applied and returned nil, or it failed, did not happen, and
+// returned an error.
+func (a *writeFlowAnalyzer) write(paths []writePath, write writeCall, call *ast.CallExpr) []writePath {
+	write.failing = allFailing(paths)
 	a.summary.record(write)
-	next := make([]writePath, 0, len(paths))
+	next := make([]writePath, 0, 2*len(paths))
 	for _, path := range paths {
 		switch {
 		case path.write == nil:
 			written := write
-			next = append(next, writePath{write: &written})
-		case path.write.method != write.method:
+			written.failing = path.failing
+			applied := path
+			applied.write = &written
+			next = append(next, applied)
+		case path.write.method != write.method && !path.failing:
 			a.summary.offend(*path.write, write)
 			next = append(next, path)
 		default:
-			// A retry of the same write: one write attempted twice.
+			// A retry of the same write is one write attempted twice; a
+			// write while a failure is handled records the failure.
 			next = append(next, path)
 		}
 	}
-	return joinWritePaths(next, nil)
+	if !returnsError(call, a.info) {
+		return withResult(next, call, outcomeUnknown)
+	}
+	failed := withResult(slices.Clone(paths), call, outcomeNonNil)
+	return joinWritePaths(withResult(next, call, outcomeNil), failed)
 }
 
 // through continues every path through a call of a summarised function.
-func (a *writeFlowAnalyzer) through(paths []writePath, callee *writeSummary, helper string) []writePath {
+func (a *writeFlowAnalyzer) through(paths []writePath, callee *writeSummary, helper string, call *ast.CallExpr) []writePath {
 	if callee.offends {
 		a.summary.calleeOffends = true
 		a.summary.offend(callee.pair[0].through(helper), callee.pair[1].through(helper))
 	}
+	failing := allFailing(paths)
 	for _, write := range callee.writes {
 		write = write.through(helper)
-		a.summary.record(write)
+		recorded := write
+		recorded.failing = write.failing || failing
+		a.summary.record(recorded)
+		if write.failing {
+			continue
+		}
 		for _, path := range paths {
-			if path.write != nil && path.write.method != write.method {
+			if path.write != nil && path.write.method != write.method && !path.failing {
 				a.summary.offend(*path.write, write)
 			}
 		}
@@ -562,17 +698,246 @@ func (a *writeFlowAnalyzer) through(paths []writePath, callee *writeSummary, hel
 	next := make([]writePath, 0, len(paths)*len(callee.exits))
 	for _, path := range paths {
 		for _, exit := range callee.exits {
-			if path.write != nil || exit.write == nil {
-				// The path's own write stays; a different one from the
-				// callee is already recorded as the pair.
-				next = append(next, path)
-				continue
+			continued := path
+			continued.resultCall, continued.result = call, exit.errState
+			if path.write == nil && exit.write != nil {
+				written := exit.write.through(helper)
+				written.failing = written.failing || path.failing
+				continued.write = &written
 			}
-			written := exit.write.through(helper)
-			next = append(next, writePath{write: &written})
+			// Otherwise the path's own write stays; a different one from
+			// the callee is already recorded as the pair.
+			next = append(next, continued)
 		}
 	}
 	return joinWritePaths(next, nil)
+}
+
+// allFailing reports whether every path is handling a failure.
+func allFailing(paths []writePath) bool {
+	for _, path := range paths {
+		if !path.failing {
+			return false
+		}
+	}
+	return len(paths) > 0
+}
+
+// markFailing marks the paths as handling a failure.
+func markFailing(paths []writePath) []writePath {
+	for i := range paths {
+		paths[i].failing = true
+	}
+	return joinWritePaths(paths, nil)
+}
+
+// returnsError reports whether the call's last result is an error.
+func returnsError(call *ast.CallExpr, info *types.Info) bool {
+	signature, ok := info.TypeOf(call.Fun).(*types.Signature)
+	return ok && lastResultIsError(signature)
+}
+
+// lastResultIsError reports whether the signature's last result is an error.
+func lastResultIsError(signature *types.Signature) bool {
+	if signature == nil || signature.Results().Len() == 0 {
+		return false
+	}
+	return isErrorType(signature.Results().At(signature.Results().Len() - 1).Type())
+}
+
+// bindErrors hands the outcome of the call just evaluated to the error
+// variable the assignment stores it in; any other value assigned to an error
+// variable is judged by its spelling.
+func (a *writeFlowAnalyzer) bindErrors(assign *ast.AssignStmt, paths []writePath) []writePath {
+	for i, lhs := range assign.Lhs {
+		ident, ok := lhs.(*ast.Ident)
+		if !ok || ident.Name == "_" {
+			continue
+		}
+		obj := a.info.Defs[ident]
+		if obj == nil {
+			obj = a.info.Uses[ident]
+		}
+		if obj == nil || !isErrorType(obj.Type()) {
+			continue
+		}
+		var rhs ast.Expr
+		switch {
+		case len(assign.Rhs) == len(assign.Lhs):
+			rhs = ast.Unparen(assign.Rhs[i])
+		case len(assign.Rhs) == 1 && i == len(assign.Lhs)-1:
+			rhs = ast.Unparen(assign.Rhs[0]) // the error of a call returning several values
+		}
+		for j := range paths {
+			outcome := outcomeUnknown
+			if call, isCall := rhs.(*ast.CallExpr); isCall && call == paths[j].resultCall {
+				outcome = paths[j].result
+			}
+			if outcome == outcomeUnknown && rhs != nil && len(assign.Rhs) == len(assign.Lhs) {
+				outcome = a.errorExprOutcome(rhs, paths[j])
+			}
+			paths[j].errVar, paths[j].errState = obj, outcome
+		}
+	}
+	return settleWritePaths(paths)
+}
+
+// returnOutcome judges the error a return statement hands back on the path.
+func (a *writeFlowAnalyzer) returnOutcome(ret *ast.ReturnStmt, path writePath) errOutcome {
+	if !lastResultIsError(a.signature) || len(ret.Results) == 0 {
+		return outcomeUnknown
+	}
+	last := ast.Unparen(ret.Results[len(ret.Results)-1])
+	if call, ok := last.(*ast.CallExpr); ok && call == path.resultCall && path.result != outcomeUnknown {
+		return path.result
+	}
+	if len(ret.Results) != a.signature.Results().Len() {
+		return outcomeUnknown // `return f()` of a call returning several values
+	}
+	return a.errorExprOutcome(last, path)
+}
+
+// errorExprOutcome judges an error expression by its spelling: nil, the
+// error variable the path tracks, a sentinel error variable of a package, or
+// a freshly built error.
+func (a *writeFlowAnalyzer) errorExprOutcome(expr ast.Expr, path writePath) errOutcome {
+	switch node := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		switch obj := a.info.Uses[node].(type) {
+		case *types.Nil:
+			return outcomeNil
+		case *types.Var:
+			if path.errVar != nil && types.Object(obj) == path.errVar {
+				return path.errState
+			}
+			if isPackageLevelVar(obj) {
+				return outcomeNonNil
+			}
+		}
+	case *ast.SelectorExpr:
+		if obj, ok := a.info.Uses[node.Sel].(*types.Var); ok && isPackageLevelVar(obj) {
+			return outcomeNonNil
+		}
+	case *ast.CallExpr:
+		if fn, ok := typeutil.Callee(a.info, node).(*types.Func); ok && fn.Pkg() != nil &&
+			((fn.Pkg().Path() == "fmt" && fn.Name() == "Errorf") || (fn.Pkg().Path() == "errors" && fn.Name() == "New")) {
+			return outcomeNonNil
+		}
+	case *ast.UnaryExpr:
+		if node.Op == token.AND {
+			if _, ok := node.X.(*ast.CompositeLit); ok {
+				return outcomeNonNil
+			}
+		}
+	case *ast.CompositeLit:
+		return outcomeNonNil
+	}
+	return outcomeUnknown
+}
+
+// isPackageLevelVar reports whether the variable is declared at package level:
+// a sentinel error such as ErrNotFound.
+func isPackageLevelVar(obj *types.Var) bool {
+	return obj.Pkg() != nil && obj.Parent() == obj.Pkg().Scope()
+}
+
+// errorFact is what a branch condition says about an error variable.
+type errorFact struct {
+	variable types.Object
+	nonNil   bool
+}
+
+// errorFacts returns what the condition says about error variables in the
+// branch it holds in and in the one it does not: `err != nil` in the then
+// branch, and through && and || what every conjunct or disjunct says.
+func (a *writeFlowAnalyzer) errorFacts(cond ast.Expr) (thenFacts, elseFacts []errorFact) {
+	binary, ok := ast.Unparen(cond).(*ast.BinaryExpr)
+	if !ok {
+		return nil, nil
+	}
+	switch binary.Op {
+	case token.LAND:
+		leftThen, _ := a.errorFacts(binary.X)
+		rightThen, _ := a.errorFacts(binary.Y)
+		return append(leftThen, rightThen...), nil
+	case token.LOR:
+		_, leftElse := a.errorFacts(binary.X)
+		_, rightElse := a.errorFacts(binary.Y)
+		return nil, append(leftElse, rightElse...)
+	case token.NEQ, token.EQL:
+		operand := binary.X
+		if isNilIdent(ast.Unparen(operand)) {
+			operand = binary.Y
+		} else if !isNilIdent(ast.Unparen(binary.Y)) {
+			return nil, nil
+		}
+		ident, ok := ast.Unparen(operand).(*ast.Ident)
+		if !ok {
+			return nil, nil
+		}
+		obj := a.info.Uses[ident]
+		if obj == nil || !isErrorType(obj.Type()) {
+			return nil, nil
+		}
+		failed := binary.Op == token.NEQ
+		return []errorFact{{variable: obj, nonNil: failed}}, []errorFact{{variable: obj, nonNil: !failed}}
+	}
+	return nil, nil
+}
+
+// assumeErrors keeps the paths the facts allow and refines what they know.
+func assumeErrors(paths []writePath, facts []errorFact) []writePath {
+	if len(facts) == 0 {
+		return paths
+	}
+	kept := paths[:0]
+	for _, path := range paths {
+		possible := true
+		for _, fact := range facts {
+			if path.errVar == nil || path.errVar != fact.variable {
+				continue
+			}
+			known := outcomeNil
+			if fact.nonNil {
+				known = outcomeNonNil
+			}
+			if path.errState != outcomeUnknown && path.errState != known {
+				possible = false
+				break
+			}
+			path.errState = known
+		}
+		if possible {
+			kept = append(kept, path)
+		}
+	}
+	return joinWritePaths(kept, nil)
+}
+
+// failureFact reports whether the facts say that an error is set.
+func failureFact(facts []errorFact) bool {
+	for _, fact := range facts {
+		if fact.nonNil {
+			return true
+		}
+	}
+	return false
+}
+
+// branchEndsFunction reports whether the branch ends by leaving the function:
+// its last statement returns, panics or exits.
+func branchEndsFunction(branch ast.Stmt, info *types.Info) bool {
+	block, ok := branch.(*ast.BlockStmt)
+	if !ok || len(block.List) == 0 {
+		return false
+	}
+	switch last := block.List[len(block.List)-1].(type) {
+	case *ast.ReturnStmt:
+		return true
+	case *ast.ExprStmt:
+		return stmtNoReturn(last, info, nil) != callReturns
+	}
+	return false
 }
 
 // resolvedCalleeName resolves the callee of a direct call, or "" if it is not a known function.

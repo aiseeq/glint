@@ -106,3 +106,32 @@ func wavg(total float64) float64 {
 	require.Len(t, violations, 1)
 	assert.Equal(t, "weights.go", violations[0].File)
 }
+
+// A guard that stops the process — log.Fatal, os.Exit — ends the empty path
+// just as a return does.
+func TestUncheckedLenDivisionTypedAcceptsNoReturnGuard(t *testing.T) {
+	violations := runRuleOnFiles(t, NewUncheckedLenDivisionRule(), map[string]string{
+		"avg.go": `package geometry
+
+import (
+	"log"
+	"os"
+)
+
+func avg(xs []int, total int) int {
+	if len(xs) == 0 {
+		log.Fatal("no samples")
+	}
+	return total / len(xs)
+}
+
+func mean(xs []float64, sum float64) float64 {
+	if len(xs) == 0 {
+		os.Exit(2)
+	}
+	return sum / float64(len(xs))
+}
+`,
+	})
+	assert.Empty(t, violations)
+}

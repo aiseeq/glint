@@ -44,6 +44,7 @@ func example(name string, xs []int) {
 		name := "a"
 		fmt.Println(name)
 	}
+	fmt.Println(name)
 }
 `,
 		wantLines: []int{8},
@@ -60,6 +61,7 @@ func example(name string, v any) {
 		name := "a"
 		fmt.Println(name)
 	}
+	fmt.Println(name)
 }
 `,
 		wantLines: []int{8},
@@ -77,6 +79,7 @@ func example(count int, ch chan int) {
 		fmt.Println(count)
 	default:
 	}
+	fmt.Println(count)
 }
 `,
 		wantLines: []int{8},
@@ -92,6 +95,7 @@ func example(name string) {
 		name := "b"
 		fmt.Println(name)
 	}()
+	fmt.Println(name)
 }
 `,
 		wantLines: []int{7},
@@ -127,6 +131,97 @@ func example(path string) error {
 	return nil
 }
 `,
+	},
+	{
+		name: "outer variable no longer read after the inner declaration",
+		code: `package main
+
+import "fmt"
+
+func lookup(primary, fallback map[string]string, key string) string {
+	if value, found := primary[key]; found {
+		return value
+	} else if value := fallback[key]; value != "" {
+		return value
+	}
+	return ""
+}
+
+func first(paths []string, configured string) string {
+	path := configured
+	if path != "" {
+		return path
+	}
+	for _, path := range paths {
+		fmt.Println(path)
+	}
+	return ""
+}
+`,
+	},
+	{
+		name: "named result shadowed in a branch that returns",
+		code: `package main
+
+func parse(raw string) (value string, err error) {
+	if raw == "" {
+		value, err := fallback()
+		return value, err
+	}
+	return raw, nil
+}
+
+func fallback() (string, error) { return "", nil }
+`,
+	},
+	{
+		name: "named result shadowed before a bare return",
+		code: `package main
+
+func parse(raw string) (value string, err error) {
+	if raw == "" {
+		value, err := fallback()
+		_, _ = value, err
+	}
+	return
+}
+
+func fallback() (string, error) { return "", nil }
+`,
+		wantLines: []int{5},
+	},
+	{
+		name: "a variable of another type is another thing",
+		code: `package main
+
+import "fmt"
+
+func describe(size string, sizes []int) string {
+	for _, size := range sizes {
+		fmt.Println(size)
+	}
+	return size
+}
+`,
+	},
+	{
+		name: "outer variable read after the inner declaration",
+		code: `package main
+
+import "fmt"
+
+func load(ids []string) string {
+	result := ""
+	for _, id := range ids {
+		if id != "" {
+			result := id
+			fmt.Println(result)
+		}
+	}
+	return result
+}
+`,
+		wantLines: []int{9},
 	},
 	{
 		name: "variables of sibling functions do not shadow each other",

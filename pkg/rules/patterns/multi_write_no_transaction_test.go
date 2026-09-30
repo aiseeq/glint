@@ -241,6 +241,24 @@ func (s *Service) Save(ctx context.Context) error {
 	assert.Empty(t, violations)
 }
 
+// A setting left out of a later configuration returns to its default.
+func TestMultiWriteNoTransactionRule_ConfigureResetsOmittedSettings(t *testing.T) {
+	rule := NewMultiWriteNoTransactionRule()
+
+	require.NoError(t, rule.Configure(map[string]any{
+		"store_types":           "(?i)ledger$",
+		"transaction_functions": []any{"Atomically"},
+		"independent_calls":     []any{"Go"},
+	}))
+	require.NoError(t, rule.Configure(map[string]any{}))
+
+	assert.True(t, rule.storeType.MatchString("OrderRepository"))
+	assert.False(t, rule.storeType.MatchString("Ledger"))
+	assert.True(t, rule.txRunners["RunInTx"])
+	assert.False(t, rule.txRunners["Atomically"])
+	assert.Empty(t, rule.independent)
+}
+
 func TestMultiWriteNoTransactionRule_ConfigureRejectsBadSettings(t *testing.T) {
 	rule := NewMultiWriteNoTransactionRule()
 
@@ -545,4 +563,207 @@ func analyzeStoreModuleImports(t *testing.T, rule *MultiWriteNoTransactionRule, 
 	violations, err := rule.AnalyzeGoProject(project)
 	require.NoError(t, err)
 	return violations
+}
+
+// A write that failed did not happen, and a write made while handling a
+// failure records that failure: a transaction around it would roll the record
+// back exactly when it is needed. Neither pairs with the writes before it. A
+// helper that writes and then reports an error is left behind by a caller
+// that returns on that error, so its write never meets the caller's next one.
+func TestMultiWriteNoTransactionRule_FailurePaths(t *testing.T) {
+	const recorder = `
+var errExpired = errors.New("expired")
+
+var _ = fmt.Sprint
+
+type failureLog struct{ repo *Repo }
+
+func (f *failureLog) record(ctx context.Context, cause error) {
+	_ = f.repo.DeleteThing(ctx)
+}
+`
+	tests := []struct {
+		name   string
+		source string
+		want   int
+	}{
+		{
+			name: "failed write recorded in its error branch",
+			source: `
+func (s *Service) Submit(ctx context.Context, log *failureLog) error {
+	if err := s.repo.UpdateThing(ctx); err != nil {
+		log.record(ctx, err)
+		return fmt.Errorf("submit: %w", err)
+	}
+	return nil
+}
+`,
+			want: 0,
+		},
+		{
+			name: "failed write through a helper recorded in the error branch",
+			source: `
+func (s *Service) persist(ctx context.Context) error {
+	return s.repo.UpdateThing(ctx)
+}
+
+func (s *Service) Submit(ctx context.Context, log *failureLog) error {
+	if err := s.persist(ctx); err != nil {
+		log.record(ctx, err)
+		return err
+	}
+	return nil
+}
+`,
+			want: 0,
+		},
+		{
+			name: "failure of a later step recorded after an earlier write",
+			source: `
+func check(x bool) error {
+	if x {
+		return errExpired
+	}
+	return nil
+}
+
+func (s *Service) Quote(ctx context.Context, log *failureLog, x bool) error {
+	if err := s.repo.UpdateThing(ctx); err != nil {
+		return err
+	}
+	if err := check(x); err != nil {
+		log.record(ctx, err)
+		return err
+	}
+	return nil
+}
+`,
+			want: 0,
+		},
+		{
+			name: "helper writes and then reports an error the caller returns on",
+			source: `
+func (s *Service) validate(ctx context.Context, overdue bool) (string, error) {
+	if overdue {
+		if err := s.repo.UpdateThing(ctx); err != nil {
+			return "", fmt.Errorf("expire: %w", err)
+		}
+		return "", errExpired
+	}
+	return "code", nil
+}
+
+func (s *Service) Claim(ctx context.Context, overdue bool) error {
+	code, err := s.validate(ctx, overdue)
+	if err != nil {
+		return fmt.Errorf("validate: %w", err)
+	}
+	_ = code
+	return s.repo.CreateThing(ctx)
+}
+`,
+			want: 0,
+		},
+		{
+			name: "helper records its failure and wraps the error, caller returns on it",
+			source: `
+func lookup(x bool) (int, error) {
+	if x {
+		return 0, errExpired
+	}
+	return 1, nil
+}
+
+func (s *Service) compute(ctx context.Context, log *failureLog, x bool) (int, error) {
+	rate, err := lookup(x)
+	if err != nil {
+		log.record(ctx, err)
+		return 0, fmt.Errorf("lookup: %w", err)
+	}
+	return rate, nil
+}
+
+func (s *Service) Edit(ctx context.Context, log *failureLog, x bool) error {
+	rate, err := s.compute(ctx, log, x)
+	if err != nil {
+		return err
+	}
+	_ = rate
+	return s.repo.CreateThing(ctx)
+}
+`,
+			want: 0,
+		},
+		{
+			name: "second write whose failure is checked still pairs with the first",
+			source: `
+func (s *Service) Move(ctx context.Context) error {
+	if err := s.repo.UpdateThing(ctx); err != nil {
+		return err
+	}
+	if err := s.repo.CreateThing(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+`,
+			want: 1,
+		},
+		{
+			name: "helper that writes and succeeds pairs with the caller's write",
+			source: `
+func (s *Service) prepare(ctx context.Context) (string, error) {
+	if err := s.repo.UpdateThing(ctx); err != nil {
+		return "", err
+	}
+	return "code", nil
+}
+
+func (s *Service) Claim(ctx context.Context) error {
+	code, err := s.prepare(ctx)
+	if err != nil {
+		return err
+	}
+	_ = code
+	return s.repo.CreateThing(ctx)
+}
+`,
+			want: 1,
+		},
+		{
+			name: "error ignored after a helper that wrote",
+			source: `
+func (s *Service) validate(ctx context.Context) error {
+	if err := s.repo.UpdateThing(ctx); err != nil {
+		return err
+	}
+	return errExpired
+}
+
+func (s *Service) Claim(ctx context.Context) error {
+	_ = s.validate(ctx)
+	return s.repo.CreateThing(ctx)
+}
+`,
+			want: 1,
+		},
+		{
+			name: "error branch that carries on writes on the main path",
+			source: `
+func (s *Service) Sync(ctx context.Context) error {
+	if err := s.repo.UpdateThing(ctx); err != nil {
+		_ = s.repo.DeleteThing(ctx)
+	}
+	return s.repo.CreateThing(ctx)
+}
+`,
+			want: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			violations := analyzeStoreModuleImports(t, NewMultiWriteNoTransactionRule(), "\"errors\"\n\t\"fmt\"", recorder+tt.source)
+			assert.Len(t, violations, tt.want)
+		})
+	}
 }
