@@ -53,3 +53,71 @@ func Labeled(e Entry) bool {
 	violations := runRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})
 	assert.Equal(t, []int{13}, violationLines(violations))
 }
+
+// The text of an error kept in a variable, or lowered first, is matched the
+// same way: the wording decides the branch whatever the variable is called.
+func TestErrorStringCompare_TextThroughVariable(t *testing.T) {
+	const source = `package cmp
+
+import (
+	"errors"
+	"strings"
+)
+
+func approve() error { return errors.New("already processed") }
+
+func Status() int {
+	err := approve()
+	if err == nil {
+		return 200
+	}
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "already processed") {
+		return 409
+	}
+	text := strings.ToLower(err.Error())
+	if strings.HasPrefix(text, "invalid") {
+		return 400
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		return 504
+	}
+	return 500
+}
+
+func Logged() string {
+	err := approve()
+	errStr := err.Error()
+	if strings.Contains("prefix", "p") {
+		return errStr
+	}
+	return strings.TrimSpace(errStr)
+}
+`
+	violations := runRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})
+	assert.Equal(t, []int{16, 20, 23}, violationLines(violations))
+}
+
+// Without type information an error the file never types — the result of a
+// call — is known by its name.
+func TestErrorStringCompare_UntypedErrorByName(t *testing.T) {
+	const source = `package cmp
+
+import "strings"
+
+type Svc struct{ approve func() (int, error) }
+
+func (s *Svc) Status() int {
+	_, err := s.approve()
+	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "already processed") {
+			return 409
+		}
+	}
+	return 200
+}
+`
+	ctx := rulestest.GoFile(t, "cmp/c.go", source)
+	assert.Equal(t, []int{11}, violationLines(NewErrorStringCompareRule().AnalyzeFile(ctx)))
+}

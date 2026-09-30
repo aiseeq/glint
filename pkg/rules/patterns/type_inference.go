@@ -184,9 +184,15 @@ func (ti *TypeInferrer) processAssignment(assign *ast.AssignStmt) {
 		}
 
 		var typeInfo TypeInfo
-		if i < len(assign.Rhs) {
+		_, fromCall := assign.Rhs[0].(*ast.CallExpr)
+		switch {
+		case fromCall && len(assign.Rhs) == 1 && i == len(assign.Lhs)-1 && isErrorVarName(ident.Name):
+			// The last result of a call named like an error is the error:
+			// v, err := load().
+			typeInfo = TypeInfo{IsError: true, TypeName: "error"}
+		case i < len(assign.Rhs):
 			typeInfo = ti.analyzeExpr(assign.Rhs[i])
-		} else if len(assign.Rhs) == 1 {
+		case len(assign.Rhs) == 1:
 			// Multiple returns: a, b := funcReturningTwo()
 			typeInfo = ti.analyzeExpr(assign.Rhs[0])
 		}
