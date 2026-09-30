@@ -147,6 +147,13 @@ Reference:
 | `categories.<name>.rules.<rule>.severity` | Reported severity for one rule; wins over the category override. |
 | `categories.<name>.rules.<rule>.exceptions` | `file` / `files` / `line` / `pattern` / `function` + `reason`. |
 
+Paths in `exclude` and `exceptions` are relative to the directory of the
+configuration file, whichever directory a run checks: with the configuration at
+the repository root, `glint check ./backend` still matches `backend/services/**`,
+not `services/**`. An exception whose `file` or `files` matches no file under
+that directory suppresses nothing, and the `dead-config-exception` rule reports
+it on its line of `.glint.yaml`.
+
 Individual findings can also be silenced at the source with `//nolint:<rule>` or
 `// <rule>: safe — reason`, on the offending line or the line above it.
 

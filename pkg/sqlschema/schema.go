@@ -52,6 +52,50 @@ type Table struct {
 	// known.
 	View    bool
 	columns []*Column
+	// unique are the table's unique keys: its primary key, UNIQUE
+	// constraints, unique indexes without a WHERE.
+	unique []uniqueKey
+}
+
+// uniqueKey is a set of columns no two rows share, by the name of the
+// constraint or index that makes it so.
+type uniqueKey struct {
+	name    string
+	columns []*Column
+}
+
+// UniqueWithin reports whether the given columns include every column of one
+// of the table's unique keys: a row is fixed by them.
+func (t *Table) UniqueWithin(columns map[string]bool) bool {
+	for _, key := range t.unique {
+		all := len(key.columns) > 0
+		for _, column := range key.columns {
+			all = all && columns[column.Name]
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
+// addUnique records a unique key over the named columns; a column the table
+// lacks leaves the key out.
+func (t *Table) addUnique(name string, columns []string) {
+	key := uniqueKey{name: strings.ToLower(name)}
+	for _, columnName := range columns {
+		column := t.Column(columnName)
+		if column == nil {
+			return
+		}
+		key.columns = append(key.columns, column)
+	}
+	t.unique = append(t.unique, key)
+}
+
+func (t *Table) dropUnique(name string) {
+	name = strings.ToLower(name)
+	t.unique = slices.DeleteFunc(t.unique, func(k uniqueKey) bool { return k.name == name })
 }
 
 // Column is a column of a table.
@@ -118,6 +162,9 @@ func (t *Table) Column(name string) *Column {
 func (t *Table) dropColumn(name string) {
 	name = strings.ToLower(name)
 	t.columns = slices.DeleteFunc(t.columns, func(c *Column) bool { return c.Name == name })
+	t.unique = slices.DeleteFunc(t.unique, func(k uniqueKey) bool {
+		return slices.ContainsFunc(k.columns, func(c *Column) bool { return c.Name == name })
+	})
 }
 
 // skippedDirs are directories whose migrations are not the project's schema:
@@ -279,6 +326,8 @@ func (s *Schema) apply(stmt *pgquery.Node) {
 		s.rename(stmt.GetRenameStmt())
 	case stmt.GetDropStmt() != nil:
 		s.drop(stmt.GetDropStmt())
+	case stmt.GetIndexStmt() != nil:
+		s.index(stmt.GetIndexStmt())
 	case stmt.GetViewStmt() != nil:
 		name := strings.ToLower(stmt.GetViewStmt().GetView().GetRelname())
 		s.tables[name] = &Table{Name: name, View: true}
@@ -307,7 +356,7 @@ func (s *Schema) create(stmt *pgquery.CreateStmt) {
 	for _, elt := range stmt.GetTableElts() {
 		switch {
 		case elt.GetColumnDef() != nil:
-			table.columns = append(table.columns, newColumn(elt.GetColumnDef()))
+			table.addColumn(elt.GetColumnDef())
 		case elt.GetConstraint() != nil:
 			table.applyConstraint(elt.GetConstraint())
 		}
@@ -370,14 +419,61 @@ func isGeneratedExpr(expr *pgquery.Node) bool {
 
 // applyConstraint marks the columns of a table-level primary key NOT NULL.
 func (t *Table) applyConstraint(constraint *pgquery.Constraint) {
-	if constraint.GetContype() != pgquery.ConstrType_CONSTR_PRIMARY {
-		return
-	}
+	var columns []string
 	for _, key := range constraint.GetKeys() {
-		if column := t.Column(key.GetString_().GetSval()); column != nil {
-			column.NotNull = true
+		columns = append(columns, key.GetString_().GetSval())
+	}
+	switch constraint.GetContype() {
+	case pgquery.ConstrType_CONSTR_PRIMARY:
+		for _, name := range columns {
+			if column := t.Column(name); column != nil {
+				column.NotNull = true
+			}
+		}
+		t.addUnique(cmp.Or(constraint.GetConname(), t.Name+"_pkey"), columns)
+	case pgquery.ConstrType_CONSTR_UNIQUE:
+		t.addUnique(cmp.Or(constraint.GetConname(), t.Name+"_"+strings.Join(columns, "_")+"_key"), columns)
+	}
+}
+
+// addColumn adds a column and the unique key its own constraints make.
+func (t *Table) addColumn(def *pgquery.ColumnDef) {
+	column := newColumn(def)
+	t.columns = append(t.columns, column)
+	for _, node := range def.GetConstraints() {
+		constraint := node.GetConstraint()
+		switch constraint.GetContype() {
+		case pgquery.ConstrType_CONSTR_PRIMARY:
+			t.addUnique(cmp.Or(constraint.GetConname(), t.Name+"_pkey"), []string{column.Name})
+		case pgquery.ConstrType_CONSTR_UNIQUE:
+			t.addUnique(cmp.Or(constraint.GetConname(), t.Name+"_"+column.Name+"_key"), []string{column.Name})
 		}
 	}
+}
+
+// index records a unique index without a WHERE as a unique key; a key
+// part lower(col) or upper(col) counts as the column.
+func (s *Schema) index(stmt *pgquery.IndexStmt) {
+	table := s.Table(stmt.GetRelation().GetRelname())
+	if table == nil || !stmt.GetUnique() || stmt.GetWhereClause() != nil {
+		return
+	}
+	var columns []string
+	for _, param := range stmt.GetIndexParams() {
+		elem := param.GetIndexElem()
+		name := elem.GetName()
+		if call := elem.GetExpr().GetFuncCall(); name == "" && call != nil && len(call.GetArgs()) == 1 {
+			fn := call.GetFuncname()
+			if f := strings.ToLower(fn[len(fn)-1].GetString_().GetSval()); f == "lower" || f == "upper" {
+				name = refName(call.GetArgs()[0])
+			}
+		}
+		if name == "" {
+			return
+		}
+		columns = append(columns, name)
+	}
+	table.addUnique(stmt.GetIdxname(), columns)
 }
 
 func (s *Schema) alter(stmt *pgquery.AlterTableStmt) {
@@ -395,7 +491,7 @@ func (s *Schema) alter(stmt *pgquery.AlterTableStmt) {
 		case pgquery.AlterTableType_AT_AddColumn:
 			def := cmd.GetDef().GetColumnDef()
 			if table.Column(def.GetColname()) == nil {
-				table.columns = append(table.columns, newColumn(def))
+				table.addColumn(def)
 			}
 		case pgquery.AlterTableType_AT_DropColumn:
 			table.dropColumn(cmd.GetName())
@@ -418,6 +514,8 @@ func (s *Schema) alter(stmt *pgquery.AlterTableStmt) {
 			}
 		case pgquery.AlterTableType_AT_AddConstraint:
 			table.applyConstraint(cmd.GetDef().GetConstraint())
+		case pgquery.AlterTableType_AT_DropConstraint:
+			table.dropUnique(cmd.GetName())
 		}
 	}
 }
@@ -457,6 +555,16 @@ func (s *Schema) rename(stmt *pgquery.RenameStmt) {
 func (s *Schema) drop(stmt *pgquery.DropStmt) {
 	switch stmt.GetRemoveType() {
 	case pgquery.ObjectType_OBJECT_TABLE, pgquery.ObjectType_OBJECT_VIEW, pgquery.ObjectType_OBJECT_MATVIEW:
+	case pgquery.ObjectType_OBJECT_INDEX:
+		for _, object := range stmt.GetObjects() {
+			if items := object.GetList().GetItems(); len(items) > 0 {
+				name := items[len(items)-1].GetString_().GetSval()
+				for _, table := range s.tables {
+					table.dropUnique(name)
+				}
+			}
+		}
+		return
 	default:
 		return
 	}

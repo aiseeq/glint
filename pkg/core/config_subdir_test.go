@@ -44,3 +44,40 @@ categories:
 		assert.True(t, cfg.IsViolationExcepted("patterns", "frontend-money-arithmetic", run.prefix+"app/total.ts", &Violation{Line: 3}), run.dir)
 	}
 }
+
+// An exception written relative to a checked subdirectory instead of the
+// configuration's directory suppresses nothing; it is dead whichever
+// directory the run checks.
+func TestDeadExceptions(t *testing.T) {
+	root := t.TempDir()
+	config := `version: 1
+categories:
+  patterns:
+    enabled: true
+    rules:
+      frontend-money-arithmetic:
+        exceptions:
+          - files: "frontend/e2e/utils/**"
+          - files: "services/billing/**"
+          - file: "total.ts"
+            line: 3
+          - pattern: "legacy"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".glint.yaml"), []byte(config), 0o644))
+	for _, dir := range []string{"frontend/e2e/utils", "backend/services/billing", "frontend/app", "node_modules/x/services/billing"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755))
+	}
+	for _, file := range []string{"frontend/e2e/utils/users.ts", "backend/services/billing/invoice.go", "frontend/app/total.ts", "node_modules/x/services/billing/a.js"} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, file), nil, 0o644))
+	}
+	cfg, err := LoadConfigWithDefaults(filepath.Join(root, "backend"))
+	require.NoError(t, err)
+	files, err := cfg.ConfigFiles()
+	require.NoError(t, err)
+	assert.NotContains(t, files, "node_modules/x/services/billing/a.js")
+	dead := cfg.DeadExceptions(files)
+	require.Len(t, dead, 1)
+	assert.Equal(t, "services/billing/**", dead[0].Exception.Files)
+	assert.Equal(t, 9, dead[0].Line)
+	assert.Equal(t, filepath.Join(root, ".glint.yaml"), dead[0].Source)
+}

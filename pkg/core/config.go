@@ -2,6 +2,8 @@ package core
 
 import (
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -23,6 +25,8 @@ type Config struct {
 	// configuration file, when the file was found above it: the paths the
 	// configuration names start at its own directory.
 	rootPrefix string
+	// path is the configuration file, absolute; empty for the defaults.
+	path string
 }
 
 // SettingsConfig contains global settings
@@ -119,7 +123,98 @@ type Exception struct {
 	Pattern  string `yaml:"pattern,omitempty"`  // Code pattern
 	Function string `yaml:"function,omitempty"` // Function name
 	Reason   string `yaml:"reason,omitempty"`
+
+	// source and at are the configuration file and the line that declare
+	// the exception.
+	source string
+	at     int
 }
+
+// UnmarshalYAML keeps the line of the exception in its file.
+func (e *Exception) UnmarshalYAML(value *yaml.Node) error {
+	type plainException Exception
+	var decoded plainException
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*e = Exception(decoded)
+	e.at = value.Line
+	return nil
+}
+
+// DeadException is a rule exception naming files, none of which exists.
+type DeadException struct {
+	Category, Rule string
+	Exception      Exception
+	// Source and Line are the configuration file and the line that declare it.
+	Source string
+	Line   int
+}
+
+// DeadExceptions returns the rule exceptions that name files (file or
+// files) and match none of the given ones: paths relative to the directory of
+// the configuration, the way exceptions name them. Such an exception
+// suppresses nothing - it was written for a path that moved or relative to
+// another directory.
+func (c *Config) DeadExceptions(files []string) []DeadException {
+	var dead []DeadException
+	for _, category := range slices.Sorted(maps.Keys(c.Categories)) {
+		cat := c.Categories[category]
+		for _, rule := range slices.Sorted(maps.Keys(cat.Rules)) {
+			for _, exc := range cat.Rules[rule].Exceptions {
+				if (exc.File == "" && exc.Files == "") || slices.ContainsFunc(files, exc.namesFile) {
+					continue
+				}
+				dead = append(dead, DeadException{Category: category, Rule: rule, Exception: exc, Source: exc.source, Line: exc.at})
+			}
+		}
+	}
+	return dead
+}
+
+// namesFile reports whether the exception's file or files names the path.
+func (e Exception) namesFile(path string) bool {
+	if e.Files != "" && !matchGlobPattern(e.Files, path) {
+		return false
+	}
+	return e.File == "" || e.File == path || e.File == filepath.Base(path)
+}
+
+// ConfigFiles returns the files under the configuration's directory,
+// relative to it, leaving out the directories settings.skip_dirs names and
+// .git; nil for the defaults.
+func (c *Config) ConfigFiles() ([]string, error) {
+	if c.path == "" {
+		return nil, nil
+	}
+	dir := filepath.Dir(c.path)
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if path != dir && (entry.Name() == ".git" || slices.Contains(c.SkipDirs(), entry.Name())) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list the files under the configuration's directory %q: %w", dir, err)
+	}
+	return files, nil
+}
+
+// ConfigPath returns the configuration file the settings were read from, ""
+// for the defaults.
+func (c *Config) ConfigPath() string { return c.path }
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
@@ -197,6 +292,13 @@ func loadConfigChain(path string, visiting map[string]bool) (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file %q: %w", absPath, err)
+	}
+	for _, cat := range cfg.Categories {
+		for _, rule := range cat.Rules {
+			for i := range rule.Exceptions {
+				rule.Exceptions[i].source = absPath
+			}
+		}
 	}
 	var document yaml.Node
 	if err := yaml.Unmarshal(data, &document); err != nil {
@@ -344,6 +446,9 @@ func LoadConfigWithDefaults(projectRoot string) (*Config, error) {
 			return nil, err
 		}
 		cfg.rootPrefix = prefix
+		if cfg.path, err = filepath.Abs(configPath); err != nil {
+			return nil, fmt.Errorf("resolve configuration path %q: %w", configPath, err)
+		}
 	}
 
 	return cfg, nil
