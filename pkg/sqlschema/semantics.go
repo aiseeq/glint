@@ -423,3 +423,57 @@ func momentInSession(node *pgquery.Node, tables []*Table) bool {
 	}
 	return false
 }
+
+// RowWrite reports a single UPDATE or DELETE without RETURNING and without
+// FROM or USING, whose WHERE fixes one row of its table by a parameter: an
+// id, or a unique key the schema knows. When no row matches, it succeeds having changed
+// nothing, and only the count of affected rows tells.
+func (s *Schema) RowWrite(sql string) bool {
+	result, ok := parse(sql)
+	if !ok || len(result.GetStmts()) != 1 {
+		return false
+	}
+	stmt := result.GetStmts()[0].GetStmt()
+	var (
+		relation *pgquery.RangeVar
+		where    *pgquery.Node
+	)
+	switch {
+	case stmt.GetUpdateStmt() != nil:
+		update := stmt.GetUpdateStmt()
+		if len(update.GetReturningList()) > 0 || len(update.GetFromClause()) > 0 {
+			return false
+		}
+		relation, where = update.GetRelation(), update.GetWhereClause()
+	case stmt.GetDeleteStmt() != nil:
+		del := stmt.GetDeleteStmt()
+		if len(del.GetReturningList()) > 0 || len(del.GetUsingClause()) > 0 {
+			return false
+		}
+		relation, where = del.GetRelation(), del.GetWhereClause()
+	default:
+		return false
+	}
+	// A row named by a constant (WHERE id = 1) is the table's one row of
+	// settings, there by the migration.
+	params := false
+	walk(where.ProtoReflect(), func(m proto.Message) {
+		_, isParam := m.(*pgquery.ParamRef)
+		params = params || isParam
+	})
+	if !params {
+		return false
+	}
+	pinned := make(map[string]bool)
+	for _, ref := range pinnedColumns(where) {
+		pinned[ref.name] = true
+	}
+	if pinned["id"] {
+		return true
+	}
+	if s == nil {
+		return false
+	}
+	table := s.Table(relation.GetRelname())
+	return table != nil && table.UniqueWithin(pinned)
+}

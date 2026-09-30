@@ -147,3 +147,81 @@ func Params(config *pgx.ConnConfig) { config.RuntimeParams["timezone"] = "UTC" }
 	delete(files, "storage/db.go")
 	assert.Empty(t, run(files, "storage/repo.go"), "the connection string comes from the environment")
 }
+
+// An update by id that matches no row succeeds having changed nothing; only
+// the affected count tells the caller the row was not there.
+func TestSQLMissingRowUnchecked(t *testing.T) {
+	ctx := sqlSchemaProject(t, sqlSchemaMigration, `package storage
+
+func (r *Repo) Update(ctx context.Context, p *Position) error {
+	_, err := r.db.ExecContext(ctx, "UPDATE positions SET amount = $2 WHERE id = $1", p.ID, p.Amount)
+	return err
+}
+
+func (r *Repo) Extend(ctx context.Context, id string) error {
+	result, err := r.db.ExecContext(ctx, "UPDATE positions SET updated_at = now() WHERE id = $1", id)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		r.log.Warn("position not found", id)
+	}
+	return nil
+}
+
+func (r *Repo) Delete(ctx context.Context, id string) error {
+	result, err := r.db.ExecContext(ctx, "DELETE FROM positions WHERE id = $1", id)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repo) Touch(ctx context.Context, account string) error {
+	_, err := r.db.ExecContext(ctx, "UPDATE positions SET updated_at = now() WHERE account_id = $1", account)
+	return err
+}
+
+func (r *Repo) Close(ctx context.Context, id string) error {
+	return r.db.QueryRowContext(ctx, "UPDATE positions SET amount = 0 WHERE id = $1 RETURNING id", id).Scan(&id)
+}
+
+func (r *Repo) Forget(ctx context.Context, id string) {
+	r.db.ExecContext(ctx, "DELETE FROM positions WHERE id = $1", id)
+}
+`)
+	assert.Equal(t, []int{4, 9}, sqlRuleLines(t, NewSQLMissingRowUncheckedRule(), ctx))
+}
+
+// pgx returns the command tag: the count is read right in the condition.
+func TestSQLMissingRowUncheckedTag(t *testing.T) {
+	ctx := sqlSchemaProject(t, sqlSchemaMigration, `package storage
+
+func (r *Repo) Claim(ctx context.Context, id string) (bool, error) {
+	tag, err := r.pool.Exec(ctx, "UPDATE positions SET amount = 0 WHERE id = $1", id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (r *Repo) Reset(ctx context.Context, id string) error {
+	tag, err := r.pool.Exec(ctx, "UPDATE positions SET amount = 0 WHERE id = $1", id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+`)
+	assert.Empty(t, sqlRuleLines(t, NewSQLMissingRowUncheckedRule(), ctx))
+}
