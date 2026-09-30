@@ -4,7 +4,6 @@ import (
 	"errors"
 	"go/ast"
 	"go/types"
-	"sort"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -15,8 +14,8 @@ func init() {
 }
 
 // UnboundedSyncMapRule detects package-level sync.Map variables that production
-// code grows (Store/LoadOrStore) but never shrinks (Delete/CompareAndDelete/
-// Clear). In a long-running process such a map is a slow leak: every new key
+// code grows (Store/LoadOrStore/Swap) but never shrinks (Delete/LoadAndDelete/
+// CompareAndDelete/Clear). In a long-running process such a map is a slow leak: every new key
 // stays forever.
 //
 // Родилось из ревью projectD 2026-08 (№22): пакетные sync.Map доменных расписаний,
@@ -59,31 +58,37 @@ type syncMapUsage struct {
 	escaped  bool
 }
 
-// AnalyzeGoProject inspects every package for grow-only package-level sync.Maps.
+// AnalyzeGoProject inspects every package for grow-only package-level
+// sync.Maps and reports each at its declaration.
 func (r *UnboundedSyncMapRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	if ctx == nil {
 		return nil, errors.New("unbounded sync map: nil Go project context")
 	}
 
-	var violations []*core.Violation
+	growOnly := map[*types.Info][]*syncMapUsage{}
 	for _, pkgCtx := range ctx.Packages {
 		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.Types == nil || pkgCtx.Package.TypesInfo == nil {
 			continue
 		}
-		violations = append(violations, r.analyzePackage(ctx, pkgCtx)...)
+		growOnly[pkgCtx.Package.TypesInfo] = growOnlySyncMaps(pkgCtx)
 	}
 
-	sort.Slice(violations, func(i, j int) bool {
-		if violations[i].File != violations[j].File {
-			return violations[i].File < violations[j].File
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		var violations []*core.Violation
+		for _, usage := range growOnly[info] {
+			pos := usage.variable.Pos()
+			if pos < fileCtx.GoAST.FileStart || pos >= fileCtx.GoAST.FileEnd {
+				continue
+			}
+			violations = append(violations, r.violationFor(fileCtx, usage))
 		}
-		return violations[i].Line < violations[j].Line
+		return violations
 	})
-	return violations, nil
 }
 
-// analyzePackage finds the package-level sync.Map vars and classifies their uses.
-func (r *UnboundedSyncMapRule) analyzePackage(ctx *core.GoProjectContext, pkgCtx *core.GoPackageContext) []*core.Violation {
+// growOnlySyncMaps finds the package-level sync.Map vars that are grown and
+// never shrunk.
+func growOnlySyncMaps(pkgCtx *core.GoPackageContext) []*syncMapUsage {
 	pkg := pkgCtx.Package
 	scope := pkg.Types.Scope()
 
@@ -140,27 +145,30 @@ func (r *UnboundedSyncMapRule) analyzePackage(ctx *core.GoProjectContext, pkgCtx
 		}
 	}
 
-	var violations []*core.Violation
+	var growing []*syncMapUsage
 	for _, usage := range ordered {
-		if usage.escaped {
+		if usage.escaped || !usage.grows() || usage.shrinks() {
 			continue
 		}
-		grows := usage.methods["Store"] || usage.methods["LoadOrStore"] || usage.methods["Swap"]
-		shrinks := usage.methods["Delete"] || usage.methods["CompareAndDelete"] || usage.methods["Clear"]
-		if !grows || shrinks {
-			continue
-		}
-		violations = append(violations, r.violationFor(ctx, usage))
+		growing = append(growing, usage)
 	}
-	return violations
+	return growing
+}
+
+// grows reports whether some call can add a key: Store, LoadOrStore and Swap
+// all insert a missing one. CompareAndSwap only replaces an existing value.
+func (u *syncMapUsage) grows() bool {
+	return u.methods["Store"] || u.methods["LoadOrStore"] || u.methods["Swap"]
+}
+
+// shrinks reports whether some call removes keys.
+func (u *syncMapUsage) shrinks() bool {
+	return u.methods["Delete"] || u.methods["LoadAndDelete"] || u.methods["CompareAndDelete"] || u.methods["Clear"]
 }
 
 // violationFor renders the finding at the variable declaration.
-func (r *UnboundedSyncMapRule) violationFor(ctx *core.GoProjectContext, usage *syncMapUsage) *core.Violation {
-	pos := ctx.FileSet.Position(usage.variable.Pos())
-	// cmd/glint maps the absolute path to the project-relative one.
-	rel := pos.Filename
-	v := r.CreateViolation(rel, pos.Line,
+func (r *UnboundedSyncMapRule) violationFor(ctx *core.FileContext, usage *syncMapUsage) *core.Violation {
+	v := r.CreateViolation(ctx.RelPath, ctx.LineForPos(usage.variable.Pos()),
 		"Package-level sync.Map '"+usage.variable.Name()+"' only grows: entries are stored but no production code ever deletes them — a slow leak in long-running processes")
 	v.WithSuggestion("Add eviction (TTL sweep with Delete, or Clear on rollover), or document why the key set is bounded and suppress")
 	v.WithContext("variable", usage.variable.Name())

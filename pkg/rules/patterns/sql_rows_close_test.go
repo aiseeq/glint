@@ -22,6 +22,7 @@ func TestSQLRowsCloseRule_Detection(t *testing.T) {
 	tests := []struct {
 		name        string
 		code        string
+		extra       map[string]string
 		expectMatch bool
 	}{
 		{
@@ -171,7 +172,7 @@ func example(db *sql.DB) (*sql.Rows, error) {
 import (
 	"database/sql"
 
-	"example.com/scan"
+	"example.com/rulestest/scan"
 )
 
 func example(db *sql.DB, s *scan.Scanner) ([]string, error) {
@@ -182,7 +183,104 @@ func example(db *sql.DB, s *scan.Scanner) ([]string, error) {
 	return s.Names(rows)
 }
 `,
+			extra: map[string]string{"scan/scan.go": `package scan
+
+import "database/sql"
+
+type Scanner struct{}
+
+func (s *Scanner) Names(rows *sql.Rows) ([]string, error) {
+	defer rows.Close()
+	return nil, rows.Err()
+}
+`},
 			expectMatch: false,
+		},
+		{
+			// Repro: url.Values from URL.Query() was taken for SQL rows —
+			// only receivers spelled URL or url were excluded.
+			name: "url values are not rows",
+			code: `package main
+
+import "net/url"
+
+func example(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	values := parsed.Query()
+	return values.Get("a"), nil
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "query string getter is not rows",
+			code: `package main
+
+type ginLike struct{}
+
+func (ginLike) Query(key string) string { return key }
+
+func example(c ginLike) string {
+	id := c.Query("id")
+	return id
+}
+`,
+			expectMatch: false,
+		},
+		{
+			// Repro: the rows leaked inside the returned handler closure were
+			// never looked at — function literals were skipped.
+			name: "rows leaked inside a returned handler",
+			code: `package main
+
+import (
+	"database/sql"
+	"net/http"
+)
+
+type API struct{ db *sql.DB }
+
+func (a *API) Handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rows, err := a.db.Query("SELECT id FROM t")
+		if err != nil {
+			return
+		}
+		for rows.Next() {
+		}
+	}
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "rows-like interface of another driver",
+			code: `package main
+
+type Rows interface {
+	Close()
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}
+
+type Pool interface {
+	Query(sql string, args ...any) (Rows, error)
+}
+
+func example(p Pool) {
+	rows, err := p.Query("SELECT 1")
+	if err != nil {
+		return
+	}
+	for rows.Next() {
+	}
+}
+`,
+			expectMatch: true,
 		},
 		{
 			name: "rows ignored",
@@ -203,8 +301,11 @@ func example(db *sql.DB) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := createSQLContext(t, "service.go", tt.code)
-			violations := rule.AnalyzeFile(ctx)
+			files := map[string]string{"service.go": tt.code}
+			for name, source := range tt.extra {
+				files[name] = source
+			}
+			violations := runRuleOnFiles(t, rule, files)
 
 			if tt.expectMatch {
 				require.NotEmpty(t, violations, "Expected violation for: %s", tt.name)
@@ -214,41 +315,4 @@ func example(db *sql.DB) {
 			}
 		})
 	}
-}
-
-// Helper function
-func createSQLContext(t *testing.T, path, code string) *core.FileContext {
-	t.Helper()
-	ctx := &core.FileContext{
-		Path:    "/" + path,
-		RelPath: path,
-		Lines:   splitSQLLines(code),
-		Content: []byte(code),
-	}
-
-	if len(path) > 3 && path[len(path)-3:] == ".go" {
-		parser := core.NewParser()
-		fset, ast, err := parser.ParseGoFile(path, []byte(code))
-		if err != nil {
-			t.Fatalf("Failed to parse Go code: %v", err)
-		}
-		ctx.SetGoAST(fset, ast)
-	}
-
-	return ctx
-}
-
-func splitSQLLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
 }

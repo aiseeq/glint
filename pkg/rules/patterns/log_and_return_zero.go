@@ -141,7 +141,7 @@ func isErrorOrWarnLogStmt(stmt ast.Stmt) bool {
 		return false
 	}
 	call, ok := exprStmt.X.(*ast.CallExpr)
-	return ok && isErrorOrWarnLogCall(call)
+	return ok && isErrorLevelLogCall(call)
 }
 
 // allResultsAreZeroValues reports whether every returned expression is a zero

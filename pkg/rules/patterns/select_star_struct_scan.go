@@ -16,6 +16,10 @@ func init() {
 // selectStar ловит `SELECT *` и `SELECT alias.*` — начало выборки всех колонок.
 var selectStar = regexp.MustCompile(`(?is)\bselect\s+(?:[a-z_][a-z0-9_]*\.)?\*`)
 
+// existsOpen — звёздочка сразу за `EXISTS (`: подзапрос только проверяет наличие строки,
+// его колонки никуда не сканируются.
+var existsOpen = regexp.MustCompile(`(?is)\bexists\s*\(\s*$`)
+
 // tableName — имя таблицы сразу после FROM. Скобка означает производную таблицу.
 var tableName = regexp.MustCompile(`(?is)^\s*([a-z_][a-z0-9_]*)`)
 
@@ -27,7 +31,8 @@ var tableName = regexp.MustCompile(`(?is)^\s*([a-z_][a-z0-9_]*)`)
 // хотя Go-код не менялся и сборка прошла. Явный список колонок снимает эту связь.
 //
 // Производные таблицы (`SELECT * FROM (...) t`) правилом не считаются нарушением: там
-// звёздочка берёт колонки подзапроса, а их набор задан тут же в коде.
+// звёздочка берёт колонки подзапроса, а их набор задан тут же в коде. Не считается и
+// `EXISTS (SELECT * ...)`: подзапрос проверяет только наличие строки.
 type SelectStarStructScanRule struct {
 	*rules.BaseRule
 }
@@ -47,11 +52,17 @@ func NewSelectStarStructScanRule() *SelectStarStructScanRule {
 // starredTable возвращает имя таблицы, все колонки которой выбирает звёздочка.
 // Пустая строка — звёздочки нет либо она относится к производной таблице.
 func starredTable(sql string) string {
-	loc := selectStar.FindStringIndex(sql)
-	if loc == nil {
-		return ""
+	for _, loc := range selectStar.FindAllStringIndex(sql, -1) {
+		if existsOpen.MatchString(sql[:loc[0]]) {
+			continue
+		}
+		return tableAfterStar(sql[loc[1]:])
 	}
-	rest := sql[loc[1]:]
+	return ""
+}
+
+// tableAfterStar возвращает таблицу первого FROM после звёздочки.
+func tableAfterStar(rest string) string {
 	lower := strings.ToLower(rest)
 	// Первый FROM после звёздочки — именно тот, к которому она относится.
 	for i := 0; i+4 <= len(lower); i++ {

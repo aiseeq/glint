@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestFallbackReturnRule(t *testing.T) {
@@ -156,7 +157,8 @@ func InitProvider() {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := core.NewFileContext(tt.filename, ".", []byte(tt.code), nil)
+			// Go is analyzed on the syntax tree only, as in the check flow.
+			ctx := rulestest.GoFile(t, tt.filename, tt.code)
 
 			violations := rule.AnalyzeFile(ctx)
 
@@ -491,8 +493,7 @@ func selectTransport(mode Mode) Transport {
 	}
 }
 
-// Regex- и AST-пути находят один и тот же fallback независимо: на строку должна
-// оставаться ровно одна находка.
+// На строку fallback-возврата — ровно одна находка.
 func TestFallbackReturnRule_SingleFindingPerLineWithAST(t *testing.T) {
 	rule := NewFallbackReturnRule()
 	code := `package main

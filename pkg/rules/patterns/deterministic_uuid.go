@@ -2,8 +2,10 @@ package patterns
 
 import (
 	"go/ast"
-	"regexp"
+	"go/types"
 	"strings"
+
+	"golang.org/x/tools/go/types/typeutil"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -13,187 +15,156 @@ func init() {
 	rules.Register(NewDeterministicUUIDRule())
 }
 
-// DeterministicUUIDRule detects patterns where UUIDs are generated from strings
-// (email, namespace) instead of using real UUIDs from the database.
-// Principle: "ID always comes from DB, never computed"
+// DeterministicUUIDRule detects IDs computed from names or hashes instead of
+// issued by the database: name-based UUIDs (google/uuid NewSHA1/NewMD5/NewHash,
+// gofrs and satori NewV3/NewV5) and a UUID assembled with FromBytes from a
+// crypto hash. Principle: "ID always comes from DB, never computed" — a
+// computed ID collides for equal input and exists before the record does.
+//
+// Only the calls of the UUID libraries are recognized; a string that merely
+// looks like an ID (a cache key, an ETag) is not one.
 type DeterministicUUIDRule struct {
 	*rules.BaseRule
-	funcNamePatterns []*regexp.Regexp
-	codePatterns     []*regexp.Regexp
-	stringIDPatterns []*regexp.Regexp
 }
 
 // NewDeterministicUUIDRule creates the rule
 func NewDeterministicUUIDRule() *DeterministicUUIDRule {
-	r := &DeterministicUUIDRule{
+	return &DeterministicUUIDRule{
 		BaseRule: rules.NewBaseRule(
 			"deterministic-uuid",
 			"patterns",
-			"Detects deterministic/synthetic UUID generation from strings instead of using real DB UUIDs",
+			"Detects UUIDs computed from names or hashes (uuid.NewSHA1/NewMD5/NewHash, NewV3/NewV5, FromBytes of a hash) instead of real DB UUIDs",
 			core.SeverityHigh,
 		),
 	}
-	r.funcNamePatterns = r.initFuncNamePatterns()
-	r.codePatterns = r.initCodePatterns()
-	r.stringIDPatterns = r.initStringIDPatterns()
-	return r
 }
 
-// initFuncNamePatterns detects function names that generate deterministic UUIDs
-func (r *DeterministicUUIDRule) initFuncNamePatterns() []*regexp.Regexp {
-	return []*regexp.Regexp{
-		regexp.MustCompile(`generateDeterministic(?:Admin)?UUID`),
-		regexp.MustCompile(`deterministicUUID`),
-		regexp.MustCompile(`(?i)uuid.*from.*(?:email|string|hash)`),
-	}
+// nameBasedUUIDFuncs lists, per UUID library, the constructors that derive
+// the UUID from a name.
+var nameBasedUUIDFuncs = map[string][]string{
+	"github.com/google/uuid":    {"NewSHA1", "NewMD5", "NewHash"},
+	"github.com/gofrs/uuid":     {"NewV3", "NewV5"},
+	"github.com/gofrs/uuid/v5":  {"NewV3", "NewV5"},
+	"github.com/satori/go.uuid": {"NewV3", "NewV5"},
 }
 
-// initCodePatterns detects code that computes UUIDs from hashes
-func (r *DeterministicUUIDRule) initCodePatterns() []*regexp.Regexp {
-	return []*regexp.Regexp{
-		// uuid.FromBytes(hash...) — UUID from hash bytes
-		regexp.MustCompile(`uuid\.FromBytes\(\s*hash`),
-		// sha256.Sum256([]byte( — SHA256 of string for UUID generation
-		regexp.MustCompile(`sha256\.Sum256\(\[\]byte\(`),
-	}
-}
-
-// initStringIDPatterns detects string concatenation as ID
-func (r *DeterministicUUIDRule) initStringIDPatterns() []*regexp.Regexp {
-	return []*regexp.Regexp{
-		// fmt.Sprintf("admin-%s" or "user-%s" — string template as ID
-		regexp.MustCompile(`fmt\.Sprintf\(\s*"(?:admin|user)-%s"`),
-		// "admin-" + email / "admin-" + variable — string concat as ID
-		regexp.MustCompile(`"(?:admin|user)-"\s*\+\s*\w+`),
-	}
-}
-
-// AnalyzeFile checks for deterministic UUID generation patterns
+// AnalyzeFile checks one file without type information: the UUID and hash
+// packages are known through the file's imports.
 func (r *DeterministicUUIDRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *DeterministicUUIDRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file, with type information where the package
+// has it.
+func (r *DeterministicUUIDRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze reports the computed UUIDs of one file.
+func (r *DeterministicUUIDRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	if !ctx.IsGoFile() || ctx.IsTestFile() || !ctx.HasGoAST() {
 		return nil
 	}
-	if r.shouldSkipFile(ctx) {
-		return nil
-	}
 
 	var violations []*core.Violation
-
-	// AST-based: detect function declarations with deterministic UUID names
-	if ctx.HasGoAST() {
-		violations = append(violations, r.analyzeAST(ctx)...)
-	}
-
-	// Regex-based: detect code patterns
-	violations = append(violations, r.analyzeRegex(ctx)...)
-
-	return violations
-}
-
-func (r *DeterministicUUIDRule) shouldSkipFile(ctx *core.FileContext) bool {
-	path := ctx.RelPath
-	// Skip vendor, node_modules, generated
-	if strings.Contains(path, "vendor/") || strings.Contains(path, "node_modules/") ||
-		strings.Contains(path, "generated") || strings.Contains(path, ".gen.") {
-		return true
-	}
-	return false
-}
-
-// analyzeAST detects function declarations with deterministic UUID names
-func (r *DeterministicUUIDRule) analyzeAST(ctx *core.FileContext) []*core.Violation {
-	var violations []*core.Violation
-
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		funcDecl, ok := n.(*ast.FuncDecl)
-		if !ok {
-			return true
-		}
-
-		funcName := funcDecl.Name.Name
-		for _, pattern := range r.funcNamePatterns {
-			if pattern.MatchString(funcName) {
-				pos := ctx.GoFileSet.Position(funcDecl.Pos())
-				v := r.CreateViolation(ctx.RelPath, pos.Line,
-					"Function '"+funcName+"' generates deterministic UUID from strings — use real UUID from DB")
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Replace with DB lookup: SELECT id FROM users WHERE email = $1")
-				violations = append(violations, v)
-				break
-			}
-		}
-
-		return true
-	})
-
-	return violations
-}
-
-// analyzeRegex detects code patterns via regex
-func (r *DeterministicUUIDRule) analyzeRegex(ctx *core.FileContext) []*core.Violation {
-	var violations []*core.Violation
-	seen := make(map[int]bool) // avoid duplicate violations on same line
-
-	for lineNum, line := range ctx.Lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
 			continue
 		}
-
-		// Check code patterns (sha256→UUID, uuid.FromBytes)
-		for _, pattern := range r.codePatterns {
-			if pattern.MatchString(line) && !seen[lineNum] {
-				if r.isInUUIDGenerationContext(ctx.Lines, lineNum) {
-					v := r.CreateViolation(ctx.RelPath, lineNum+1,
-						"Deterministic UUID generation from hash — use real UUID from DB")
-					v.WithCode(trimmed)
-					v.WithSuggestion("IDs must come from database, never be computed from strings")
-					violations = append(violations, v)
-					seen[lineNum] = true
-				}
+		hashes := hashVariables(ctx.GoAST, info, fn.Body)
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
 			}
-		}
-
-		// Check string ID patterns ("admin-" + email)
-		for _, pattern := range r.stringIDPatterns {
-			if pattern.MatchString(line) && !seen[lineNum] {
-				v := r.CreateViolation(ctx.RelPath, lineNum+1,
-					"String concatenation used as ID — use real UUID from DB")
-				v.WithCode(trimmed)
-				v.WithSuggestion("IDs must be real UUIDs from database, not constructed strings")
+			if message, found := r.computedUUID(ctx.GoAST, info, call, hashes); found {
+				line := ctx.LineFor(call)
+				v := r.CreateViolation(ctx.RelPath, line, message)
+				v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+				v.WithSuggestion("IDs must come from the database (or uuid.New for a new record), never be computed from a name or a hash")
+				v.WithContext("pattern", "deterministic_uuid")
 				violations = append(violations, v)
-				seen[lineNum] = true
 			}
-		}
+			return true
+		})
 	}
-
 	return violations
 }
 
-// isInUUIDGenerationContext checks if sha256/hash code is related to UUID generation
-func (r *DeterministicUUIDRule) isInUUIDGenerationContext(lines []string, lineNum int) bool {
-	// Check surrounding 10 lines for UUID-related code
-	start := lineNum - 5
-	if start < 0 {
-		start = 0
-	}
-	end := lineNum + 5
-	if end >= len(lines) {
-		end = len(lines) - 1
-	}
-
-	uuidIndicators := []string{
-		"uuid", "UUID", "FromBytes", "adminUUID", "userID",
-		"realUserID", "deterministic", "Deterministic",
-	}
-
-	for i := start; i <= end; i++ {
-		for _, indicator := range uuidIndicators {
-			if strings.Contains(lines[i], indicator) {
-				return true
-			}
+// computedUUID reports whether the call derives a UUID from a name or a hash.
+func (r *DeterministicUUIDRule) computedUUID(file *ast.File, info *types.Info, call *ast.CallExpr, hashes map[string]bool) (string, bool) {
+	for pkgPath, constructors := range nameBasedUUIDFuncs {
+		if isPackageFuncCall(file, info, call, pkgPath, constructors...) {
+			return "Name-based UUID computed from input — use real UUID from DB", true
+		}
+		if isPackageFuncCall(file, info, call, pkgPath, "FromBytes") && len(call.Args) == 1 &&
+			isHashDerived(file, info, call.Args[0], hashes) {
+			return "UUID assembled from hash bytes — use real UUID from DB", true
 		}
 	}
+	return "", false
+}
 
-	return false
+// hashPackages are the packages whose functions return a digest.
+var hashPackages = []string{"crypto/md5", "crypto/sha1", "crypto/sha256", "crypto/sha512"}
+
+// isHashCall reports whether the call computes a digest: sha256.Sum256(b),
+// md5.Sum(b), or h.Sum(nil) on a hash.Hash.
+func isHashCall(file *ast.File, info *types.Info, expr ast.Expr) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	for _, pkgPath := range hashPackages {
+		if _, ok := packageFuncName(file, info, call, pkgPath); ok {
+			return true
+		}
+	}
+	if info == nil {
+		return false
+	}
+	fn, ok := typeutil.Callee(info, call).(*types.Func)
+	return ok && fn.Name() == "Sum" && fn.Pkg() != nil && fn.Pkg().Path() == "hash"
+}
+
+// hashVariables returns the names the body assigns a digest to.
+func hashVariables(file *ast.File, info *types.Info, body *ast.BlockStmt) map[string]bool {
+	names := map[string]bool{}
+	record := func(target, value ast.Expr) {
+		if ident, ok := target.(*ast.Ident); ok && ident.Name != "_" && isHashCall(file, info, value) {
+			names[ident.Name] = true
+		}
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			if len(node.Rhs) == 1 && len(node.Lhs) >= 1 {
+				record(node.Lhs[0], node.Rhs[0])
+			}
+		case *ast.ValueSpec:
+			if len(node.Values) == 1 && len(node.Names) >= 1 {
+				record(node.Names[0], node.Values[0])
+			}
+		}
+		return true
+	})
+	return names
+}
+
+// isHashDerived reports whether the bytes handed to FromBytes are a digest:
+// the hash call itself or a variable holding one, sliced or not.
+func isHashDerived(file *ast.File, info *types.Info, arg ast.Expr, hashes map[string]bool) bool {
+	expr := ast.Unparen(arg)
+	if slice, ok := expr.(*ast.SliceExpr); ok {
+		expr = ast.Unparen(slice.X)
+	}
+	if isHashCall(file, info, expr) {
+		return true
+	}
+	ident, ok := expr.(*ast.Ident)
+	return ok && hashes[ident.Name]
 }

@@ -1,9 +1,6 @@
 package patterns
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -316,8 +313,7 @@ func example() {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := createHTTPContext(t, "service.go", tt.code)
-			violations := rule.AnalyzeFile(ctx)
+			violations := runRuleOnFiles(t, rule, map[string]string{"service.go": tt.code})
 
 			if tt.expectMatch {
 				require.NotEmpty(t, violations, "Expected violation for: %s", tt.name)
@@ -329,17 +325,19 @@ func example() {
 	}
 }
 
-func TestHTTPBodyCloseRule_DetectsTypedClientWithoutIdentifierObjects(t *testing.T) {
+func TestHTTPBodyCloseRule_ClientsKnownByType(t *testing.T) {
 	code := `package main
 
-import nethttp "net/http"
+import (
+	nethttp "net/http"
+)
 
 type worker struct{}
 type result struct{}
 
 func (worker) Do() (*result, error) { return nil, nil }
 
-func (worker worker) example(client *nethttp.Client, req *nethttp.Request) {
+func (w worker) example(client *nethttp.Client, req *nethttp.Request) {
 	httpResp, httpErr := client.Do(req)
 	if httpErr != nil {
 		return
@@ -360,32 +358,14 @@ func (worker worker) example(client *nethttp.Client, req *nethttp.Request) {
 	}
 	_ = assignedResp
 
-	workerResp, workerErr := worker.Do()
+	workerResp, workerErr := w.Do()
 	if workerErr != nil {
 		return
 	}
 	_ = workerResp
 }
 `
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "service.go", code, parser.ParseComments|parser.SkipObjectResolution)
-	require.NoError(t, err)
-	ast.Inspect(file, func(node ast.Node) bool {
-		if ident, ok := node.(*ast.Ident); ok {
-			assert.Nil(t, ident.Obj)
-		}
-		return true
-	})
-
-	ctx := &core.FileContext{
-		Path:    "/service.go",
-		RelPath: "service.go",
-		Lines:   splitHTTPLines(code),
-		Content: []byte(code),
-	}
-	ctx.SetGoAST(fset, file)
-
-	violations := NewHTTPBodyCloseRule().AnalyzeFile(ctx)
+	violations := runRuleOnFiles(t, NewHTTPBodyCloseRule(), map[string]string{"service.go": code})
 	require.Len(t, violations, 3)
 	variables := make([]string, 0, len(violations))
 	for _, violation := range violations {
@@ -396,39 +376,102 @@ func (worker worker) example(client *nethttp.Client, req *nethttp.Request) {
 	assert.ElementsMatch(t, []string{"httpResp", "declaredResp", "assignedResp"}, variables)
 }
 
-// Helper function
-func createHTTPContext(t *testing.T, path, code string) *core.FileContext {
-	t.Helper()
-	ctx := &core.FileContext{
-		Path:    "/" + path,
-		RelPath: path,
-		Lines:   splitHTTPLines(code),
-		Content: []byte(code),
-	}
+// Repro: a client kept in a struct field and a response taken inside a handler
+// closure were both invisible — only function declarations were walked, and a
+// field was not recognized as an *http.Client.
+func TestHTTPBodyCloseRule_FieldClientAndClosures(t *testing.T) {
+	code := `package payprov
 
-	if len(path) > 3 && path[len(path)-3:] == ".go" {
-		parser := core.NewParser()
-		fset, ast, err := parser.ParseGoFile(path, []byte(code))
-		if err != nil {
-			t.Fatalf("Failed to parse Go code: %v", err)
-		}
-		ctx.SetGoAST(fset, ast)
-	}
+import (
+	"database/sql"
+	"io"
+	"net/http"
+)
 
-	return ctx
+type API struct {
+	client *http.Client
+	db     *sql.DB
 }
 
-func splitHTTPLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
+func (a *API) Fetch(u string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	fieldResp, err := a.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	b, err := io.ReadAll(fieldResp.Body)
+	return b, err
+}
+
+func Register(mux *http.ServeMux) {
+	mux.HandleFunc("/x", func(w http.ResponseWriter, r *http.Request) {
+		closureResp, err := http.Get("http://example.com")
+		if err != nil {
+			return
 		}
+		_, _ = io.ReadAll(closureResp.Body)
+	})
+}
+
+func (a *API) Handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		closedResp, err := a.client.Get("http://example.com")
+		if err != nil {
+			return
+		}
+		defer closedResp.Body.Close()
 	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
+}
+`
+	violations := runRuleOnFiles(t, NewHTTPBodyCloseRule(), map[string]string{"api.go": code})
+	variables := make([]string, 0, len(violations))
+	for _, violation := range violations {
+		variable, ok := violation.Context["variable"].(string)
+		require.True(t, ok)
+		variables = append(variables, variable)
 	}
-	return lines
+	assert.ElementsMatch(t, []string{"fieldResp", "closureResp"}, variables)
+}
+
+// A response handed to a helper of the same file is released only when the
+// helper closes it: the leak is one call away otherwise. The same rule as for
+// SQL rows.
+func TestHTTPBodyCloseRule_SameFileHelperMustClose(t *testing.T) {
+	code := `package payprov
+
+import (
+	"io"
+	"net/http"
+)
+
+func consume(resp *http.Response) ([]byte, error) {
+	return io.ReadAll(resp.Body)
+}
+
+func closeBody(body io.Closer) { _ = body.Close() }
+
+func leaks() ([]byte, error) {
+	leakedResp, err := http.Get("http://example.com")
+	if err != nil {
+		return nil, err
+	}
+	b, err := consume(leakedResp)
+	return b, err
+}
+
+func closes() error {
+	resp, err := http.Get("http://example.com")
+	if err != nil {
+		return err
+	}
+	defer closeBody(resp.Body)
+	return nil
+}
+`
+	violations := runRuleOnFiles(t, NewHTTPBodyCloseRule(), map[string]string{"api.go": code})
+	require.Len(t, violations, 1)
+	assert.Equal(t, "leakedResp", violations[0].Context["variable"])
 }

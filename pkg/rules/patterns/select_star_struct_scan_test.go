@@ -44,6 +44,17 @@ func TestSelectStarStructScanRule_Detection(t *testing.T) {
 			code: "package main\nfunc ex(db *D) {\n\tdb.Select(&x, `SELECT * FROM (SELECT id FROM a UNION SELECT id FROM b) t ORDER BY id`)\n}",
 		},
 		{
+			// Repro: EXISTS only asks whether a row is there; nothing scans
+			// its columns into a struct.
+			name: "star inside EXISTS is not a column list",
+			code: "package main\nfunc ex(db *D) {\n\tdb.QueryRow(`SELECT EXISTS (SELECT * FROM users WHERE id = $1)`, id)\n}",
+		},
+		{
+			name:        "star after an EXISTS subquery still counts",
+			code:        "package main\nfunc ex(db *D) {\n\tdb.Select(&x, `SELECT * FROM orders o WHERE NOT EXISTS (SELECT * FROM refunds r WHERE r.order_id = o.id)`)\n}",
+			expectTable: "orders",
+		},
+		{
 			name: "explicit columns",
 			code: "package main\nfunc ex(db *D) {\n\tdb.Select(&x, `SELECT id, name FROM users`)\n}",
 		},

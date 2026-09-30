@@ -2,7 +2,8 @@ package patterns
 
 import (
 	"go/ast"
-	"strings"
+	"go/token"
+	"go/types"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -12,7 +13,13 @@ func init() {
 	rules.Register(NewContextBackgroundRule())
 }
 
-// ContextBackgroundRule detects context.Background/TODO usage in functions that receive context
+// ContextBackgroundRule detects context.Background/TODO usage in functions that
+// receive a context.
+//
+// Not flagged: a context created after the function has waited for its ctx to
+// end (<-ctx.Done()) — the graceful-shutdown shape, where the cancelled ctx
+// would abort the cleanup at once; a context parameter declared `_`, which the
+// function deliberately discards; test files.
 type ContextBackgroundRule struct {
 	*rules.BaseRule
 }
@@ -29,122 +36,97 @@ func NewContextBackgroundRule() *ContextBackgroundRule {
 	}
 }
 
-// AnalyzeFile checks for context.Background/TODO misuse
+// AnalyzeFile checks one file without type information: context.Context and
+// context.Background are known through the file's import of "context".
 func (r *ContextBackgroundRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || !ctx.HasGoAST() {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *ContextBackgroundRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file, with type information where the package
+// has it.
+func (r *ContextBackgroundRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze reports context.Background/TODO in functions with a live context
+// parameter.
+func (r *ContextBackgroundRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	if !ctx.IsGoFile() || !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
 
 	var violations []*core.Violation
-
-	// Track functions that have context.Context parameter
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
-			return true
+			continue
 		}
-
-		// Check if function has context.Context parameter
-		hasCtxParam := r.hasContextParam(fn)
-		if !hasCtxParam {
-			return true
+		if _, live := contextParams(ctx.GoAST, info, fn.Type); !live {
+			continue
 		}
+		doneAt := firstDoneWait(ctx.GoAST, info, fn)
 
-		// Look for context.Background() or context.TODO() calls inside
-		ast.Inspect(fn.Body, func(inner ast.Node) bool {
-			call, ok := inner.(*ast.CallExpr)
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-
-			if r.isContextBackgroundOrTodo(call) {
-				pos := ctx.PositionFor(call)
-				message := r.getMessage(call)
-				v := r.CreateViolation(ctx.RelPath, pos.Line, message)
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Use the context parameter passed to the function")
-				violations = append(violations, v)
+			name, ok := packageFuncName(ctx.GoAST, info, call, "context")
+			if !ok || (name != "Background" && name != "TODO") {
+				return true
 			}
-
+			// After the caller's ctx has ended, a fresh context is the only
+			// one left for the cleanup.
+			if doneAt.IsValid() && call.Pos() > doneAt {
+				return true
+			}
+			line := ctx.LineFor(call)
+			v := r.CreateViolation(ctx.RelPath, line,
+				"Using context."+name+"() in a function that receives context parameter")
+			v.WithCode(ctx.GetLine(line))
+			v.WithSuggestion("Use the context parameter passed to the function; work that must outlive its cancellation can derive from it with context.WithoutCancel(ctx)")
+			violations = append(violations, v)
 			return true
 		})
-
-		return true
-	})
-
+	}
 	return violations
 }
 
-func (r *ContextBackgroundRule) hasContextParam(fn *ast.FuncDecl) bool {
-	if fn.Type.Params == nil {
-		return false
-	}
-
-	for _, param := range fn.Type.Params.List {
-		if !r.isContextType(param.Type) {
+// firstDoneWait returns the position of the first receive from the Done
+// channel of one of the function's context parameters, or token.NoPos.
+func firstDoneWait(file *ast.File, info *types.Info, fn *ast.FuncDecl) token.Pos {
+	params := map[string]bool{}
+	for _, field := range fn.Type.Params.List {
+		if !isContextTypeExpr(file, info, field.Type) {
 			continue
 		}
-		// Skip params explicitly marked as unused (`_ context.Context`). The caller ctx is
-		// intentionally ignored — context.Background()/TODO() is the correct choice then.
-		if len(param.Names) > 0 && allUnderscore(param.Names) {
-			continue
+		for _, name := range field.Names {
+			params[name.Name] = true
+		}
+	}
+	first := token.NoPos
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		recv, ok := n.(*ast.UnaryExpr)
+		if !ok || recv.Op != token.ARROW {
+			return true
+		}
+		call, ok := ast.Unparen(recv.X).(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Done" {
+			return true
+		}
+		if ident, ok := ast.Unparen(sel.X).(*ast.Ident); ok && params[ident.Name] {
+			if !first.IsValid() || recv.Pos() < first {
+				first = recv.Pos()
+			}
 		}
 		return true
-	}
-
-	return false
-}
-
-func allUnderscore(names []*ast.Ident) bool {
-	for _, n := range names {
-		if n.Name != "_" {
-			return false
-		}
-	}
-	return true
-}
-
-func (r *ContextBackgroundRule) isContextType(expr ast.Expr) bool {
-	sel, ok := expr.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-
-	ident, ok := sel.X.(*ast.Ident)
-	if !ok {
-		return false
-	}
-
-	return ident.Name == "context" && sel.Sel.Name == "Context"
-}
-
-func (r *ContextBackgroundRule) isContextBackgroundOrTodo(call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-
-	ident, ok := sel.X.(*ast.Ident)
-	if !ok {
-		return false
-	}
-
-	if ident.Name != "context" {
-		return false
-	}
-
-	return sel.Sel.Name == "Background" || sel.Sel.Name == "TODO"
-}
-
-func (r *ContextBackgroundRule) getMessage(call *ast.CallExpr) string {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return "Using context.Background()/TODO() in a function that receives context parameter"
-	}
-	name := sel.Sel.Name
-
-	if strings.ToLower(name) == "todo" {
-		return "Using context.TODO() in a function that receives context parameter"
-	}
-	return "Using context.Background() in a function that receives context parameter"
+	})
+	return first
 }

@@ -241,9 +241,22 @@ func isTextLosingVerb(verb byte) bool {
 	return verb == 'v' || verb == 's' || verb == 'q'
 }
 
-// formatVerbs returns the verb of every operand of a format string, in order.
+// formatVerbs returns, for every operand of a format string, the verb that
+// prints it: verbs[i] is the verb of the i-th argument after the format, 0 for
+// an argument consumed by a `*` width or precision. Argument indexes follow
+// fmt: %[n]v prints the n-th argument and the ones after continue from there.
+// An argument printed more than once keeps %w if any of its verbs is %w.
 func formatVerbs(format string) []byte {
 	var verbs []byte
+	set := func(arg int, verb byte) {
+		for len(verbs) <= arg {
+			verbs = append(verbs, 0)
+		}
+		if verbs[arg] == 0 || verb == 'w' {
+			verbs[arg] = verb
+		}
+	}
+	argNum := 0
 	for i := 0; i < len(format); i++ {
 		if format[i] != '%' {
 			continue
@@ -252,15 +265,63 @@ func formatVerbs(format string) []byte {
 		if i >= len(format) || format[i] == '%' {
 			continue
 		}
-		// Skip flags, width and precision: %+v, %-10s, %.2f.
-		for i < len(format) && strings.ContainsRune("+-# 0123456789.*", rune(format[i])) {
+		// Flags: %+v, %-10s, %#x, % d, %05d.
+		for i < len(format) && strings.IndexByte("+-# 0", format[i]) >= 0 {
 			i++
 		}
-		if i < len(format) {
-			verbs = append(verbs, format[i])
+		// A malformed index makes fmt print %!v(BADINDEX): the verb takes
+		// no argument.
+		var good bool
+		i, argNum, good = formatArgIndex(format, i, argNum, true)
+		i, argNum = formatWidth(format, i, argNum)
+		if i < len(format) && format[i] == '.' {
+			i, argNum, good = formatArgIndex(format, i+1, argNum, good)
+			i, argNum = formatWidth(format, i, argNum)
+		}
+		i, argNum, good = formatArgIndex(format, i, argNum, good)
+		if i < len(format) && good {
+			set(argNum, format[i])
+			argNum++
 		}
 	}
 	return verbs
+}
+
+// formatArgIndex reads an explicit argument index [n] at i and returns the
+// position after it with the argument it selects; without one, position and
+// argument stay. good turns false on an index that is not a positive number
+// or is not closed, and stays false once it is.
+func formatArgIndex(format string, i, argNum int, good bool) (int, int, bool) {
+	if i >= len(format) || format[i] != '[' {
+		return i, argNum, good
+	}
+	end := strings.IndexByte(format[i:], ']')
+	if end < 0 {
+		return i, argNum, false
+	}
+	n := 0
+	for _, digit := range format[i+1 : i+end] {
+		if digit < '0' || digit > '9' {
+			return i + end + 1, argNum, false
+		}
+		n = n*10 + int(digit-'0')
+	}
+	if n < 1 {
+		return i + end + 1, argNum, false
+	}
+	return i + end + 1, n - 1, good
+}
+
+// formatWidth skips a width or precision at i: digits, or a `*` that takes
+// the current argument.
+func formatWidth(format string, i, argNum int) (int, int) {
+	if i < len(format) && format[i] == '*' {
+		return i + 1, argNum + 1
+	}
+	for i < len(format) && format[i] >= '0' && format[i] <= '9' {
+		i++
+	}
+	return i, argNum
 }
 
 // expressionCarriesCause reports whether the expression is an error or the text

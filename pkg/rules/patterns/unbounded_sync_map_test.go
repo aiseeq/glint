@@ -50,6 +50,60 @@ func Get(domain string) (any, bool) {
 			expects: []string{"domainSchedules"},
 		},
 		{
+			// Repro: taking an entry out with LoadAndDelete shrinks the map,
+			// but only Delete/CompareAndDelete/Clear were counted.
+			name: "LoadAndDelete evicts",
+			files: map[string]string{
+				"cache/cache.go": `package cache
+
+import "sync"
+
+var pending sync.Map
+
+func Put(k string, v int) { pending.Store(k, v) }
+
+func Take(k string) (any, bool) { return pending.LoadAndDelete(k) }
+`,
+			},
+		},
+		{
+			name: "Swap grows, CompareAndSwap only replaces",
+			files: map[string]string{
+				"cache/cache.go": `package cache
+
+import "sync"
+
+var swapped sync.Map
+
+var replaced sync.Map
+
+func Set(k string, v int) (any, bool) { return swapped.Swap(k, v) }
+
+func Replace(k string, old, v int) bool { return replaced.CompareAndSwap(k, old, v) }
+`,
+			},
+			expects: []string{"swapped"},
+		},
+		{
+			name: "CompareAndDelete and Clear evict",
+			files: map[string]string{
+				"cache/cache.go": `package cache
+
+import "sync"
+
+var byKey sync.Map
+
+var all sync.Map
+
+func Put(k string, v int) { byKey.Store(k, v); all.Store(k, v) }
+
+func Drop(k string, v int) bool { return byKey.CompareAndDelete(k, v) }
+
+func Reset() { all.Clear() }
+`,
+			},
+		},
+		{
 			name: "LoadOrStore also grows the map",
 			files: map[string]string{
 				"cache/cache.go": `package cache

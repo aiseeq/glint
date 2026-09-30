@@ -1,10 +1,8 @@
 package patterns
 
 import (
-	"errors"
 	"go/ast"
 	"go/types"
-	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -48,46 +46,13 @@ func (r *IgnoredErrorRule) RequiresSSA() bool { return false }
 // AnalyzeFile is unused: the rule works on the typed project.
 func (r *IgnoredErrorRule) AnalyzeFile(_ *core.FileContext) []*core.Violation { return nil }
 
-// AnalyzeGoProject walks assignments and reports blanks that swallow an error value.
+// AnalyzeGoProject walks assignments and reports blanks that swallow an error
+// value. Test files are skipped; every other file of a typed package is
+// production code whatever its name looks like.
 func (r *IgnoredErrorRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	if ctx == nil {
-		return nil, errors.New("ignored error: nil Go project context")
-	}
-
-	var violations []*core.Violation
-	for _, pkg := range ctx.Packages {
-		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
-			continue
-		}
-		for _, file := range pkg.Package.Syntax {
-			fileCtx, err := ctx.FileForPosition(file.Pos())
-			if err != nil || fileCtx == nil {
-				continue
-			}
-			if r.shouldSkipFile(fileCtx) {
-				continue
-			}
-			violations = append(violations, r.analyzeFile(fileCtx, file, pkg.Package.TypesInfo)...)
-		}
-	}
-
-	sort.Slice(violations, func(i, j int) bool {
-		if violations[i].File != violations[j].File {
-			return violations[i].File < violations[j].File
-		}
-		return violations[i].Line < violations[j].Line
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyzeFile(fileCtx, fileCtx.GoAST, info)
 	})
-	return violations, nil
-}
-
-func (r *IgnoredErrorRule) shouldSkipFile(ctx *core.FileContext) bool {
-	if ctx.IsTestFile() {
-		return true
-	}
-	// Тестовая обвязка вне *_test.go: хелперы, фикстуры, генераторы данных.
-	pathLower := strings.ToLower(ctx.RelPath)
-	return strings.Contains(pathLower, "/test") || strings.Contains(pathLower, "test_") ||
-		strings.HasSuffix(pathLower, "/testing.go")
 }
 
 func (r *IgnoredErrorRule) analyzeFile(fileCtx *core.FileContext, file *ast.File, info *types.Info) []*core.Violation {

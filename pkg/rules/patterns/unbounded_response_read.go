@@ -3,10 +3,10 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
-	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -30,23 +30,41 @@ func NewUnboundedResponseReadRule() *UnboundedResponseReadRule {
 	}
 }
 
-// AnalyzeFile checks for unbounded HTTP response body reads.
-func (r *UnboundedResponseReadRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.IsTestFile() {
-		return nil
-	}
-	return helpers.AnalyzeFuncBodies(ctx, r.checkFunction)
+// AnalyzeFile is a no-op: whether a call yields an *http.Response is a
+// question about its type, which one file without type information cannot
+// answer.
+func (r *UnboundedResponseReadRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
+	return nil
 }
 
-func (r *UnboundedResponseReadRule) checkFunction(ctx *core.FileContext, body *ast.BlockStmt, violations *[]*core.Violation) {
-	analyzer := &unboundedResponseAnalyzer{
-		rule:        r,
-		ctx:         ctx,
-		violations:  violations,
-		reported:    make(map[token.Pos]struct{}),
-		httpAliases: httpImportAliases(ctx),
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *UnboundedResponseReadRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject reports unbounded reads of response bodies.
+func (r *UnboundedResponseReadRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), r.analyzeFile)
+}
+
+// analyzeFile checks every declared function of the file; function literals
+// are checked as their own scopes from inside them.
+func (r *UnboundedResponseReadRule) analyzeFile(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	var violations []*core.Violation
+	reported := make(map[token.Pos]struct{})
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		analyzer := &unboundedResponseAnalyzer{
+			rule:       r,
+			ctx:        ctx,
+			info:       info,
+			violations: &violations,
+			reported:   reported,
+		}
+		analyzer.checkFunctionBody(fn.Body)
 	}
-	analyzer.checkFunctionBody(body)
+	return violations
 }
 
 type responseState struct {
@@ -118,11 +136,11 @@ func mergeResponseStates(states ...*responseState) *responseState {
 }
 
 type unboundedResponseAnalyzer struct {
-	rule        *UnboundedResponseReadRule
-	ctx         *core.FileContext
-	violations  *[]*core.Violation
-	reported    map[token.Pos]struct{}
-	httpAliases map[string]struct{}
+	rule       *UnboundedResponseReadRule
+	ctx        *core.FileContext
+	info       *types.Info
+	violations *[]*core.Violation
+	reported   map[token.Pos]struct{}
 }
 
 func (a *unboundedResponseAnalyzer) checkFunctionBody(body *ast.BlockStmt) {
@@ -250,7 +268,7 @@ func (a *unboundedResponseAnalyzer) checkAssignment(stmt *ast.AssignStmt, state 
 	for _, expr := range stmt.Rhs {
 		a.checkExpr(expr, state)
 	}
-	responseAssignment := len(stmt.Rhs) == 1 && isHTTPResponseCall(stmt.Rhs[0], a.httpAliases)
+	responseAssignment := len(stmt.Rhs) == 1 && a.isResponseCall(stmt.Rhs[0])
 	for i, lhs := range stmt.Lhs {
 		if ident, ok := lhs.(*ast.Ident); ok {
 			state.assign(ident.Name, i == 0 && responseAssignment, stmt.Tok == token.DEFINE)
@@ -271,7 +289,7 @@ func (a *unboundedResponseAnalyzer) checkDeclaration(stmt *ast.DeclStmt, state *
 		for _, expr := range value.Values {
 			a.checkExpr(expr, state)
 		}
-		responseAssignment := len(value.Values) == 1 && isHTTPResponseCall(value.Values[0], a.httpAliases)
+		responseAssignment := len(value.Values) == 1 && a.isResponseCall(value.Values[0])
 		for i, name := range value.Names {
 			state.assign(name.Name, i == 0 && responseAssignment, true)
 		}
@@ -292,7 +310,7 @@ func (a *unboundedResponseAnalyzer) checkExpr(expr ast.Expr, state *responseStat
 }
 
 func (a *unboundedResponseAnalyzer) checkCall(call *ast.CallExpr, state *responseState) {
-	response, ok := unboundedResponseBodyRead(call)
+	response, ok := a.unboundedResponseBodyRead(call)
 	if !ok || !state.isTracked(response.Name) {
 		return
 	}
@@ -312,20 +330,27 @@ func (a *unboundedResponseAnalyzer) checkCall(call *ast.CallExpr, state *respons
 	*a.violations = append(*a.violations, finding)
 }
 
-func unboundedResponseBodyRead(call *ast.CallExpr) (*ast.Ident, bool) {
-	readAll, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || readAll.Sel.Name != "ReadAll" || len(call.Args) != 1 {
+// isResponseCall reports whether expr is a call whose (first) result is an
+// *http.Response: http.Get, a client's Do reached through any expression, or
+// a wrapper that returns the response.
+func (a *unboundedResponseAnalyzer) isResponseCall(expr ast.Expr) bool {
+	_, isCall := ast.Unparen(expr).(*ast.CallExpr)
+	return isCall && isPointerToNamedType(firstResultType(a.info, expr), "net/http", "Response")
+}
+
+// unboundedResponseBodyRead returns x for io.ReadAll(x.Body).
+func (a *unboundedResponseAnalyzer) unboundedResponseBodyRead(call *ast.CallExpr) (*ast.Ident, bool) {
+	if len(call.Args) != 1 {
 		return nil, false
 	}
-	ioPackage, ok := readAll.X.(*ast.Ident)
-	if !ok || ioPackage.Name != "io" {
+	if !isPackageFuncCall(a.ctx.GoAST, a.info, call, "io", "ReadAll") {
 		return nil, false
 	}
-	body, ok := call.Args[0].(*ast.SelectorExpr)
+	body, ok := ast.Unparen(call.Args[0]).(*ast.SelectorExpr)
 	if !ok || body.Sel.Name != "Body" {
 		return nil, false
 	}
-	response, ok := body.X.(*ast.Ident)
+	response, ok := ast.Unparen(body.X).(*ast.Ident)
 	if !ok {
 		return nil, false
 	}

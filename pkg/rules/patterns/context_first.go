@@ -3,6 +3,7 @@ package patterns
 import (
 	"fmt"
 	"go/ast"
+	"go/types"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -54,9 +55,24 @@ func NewContextFirstRule() *ContextFirstRule {
 	}
 }
 
-// AnalyzeFile reports every function that manufactures the context it should
-// have been given.
+// AnalyzeFile checks one file without type information: context.Context and
+// context.Background are known through the file's import of "context".
 func (r *ContextFirstRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *ContextFirstRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file, with type information where the package
+// has it.
+func (r *ContextFirstRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze reports every function that manufactures the context it should have
+// been given.
+func (r *ContextFirstRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
@@ -73,10 +89,10 @@ func (r *ContextFirstRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 		if !ok || fn.Body == nil || fn.Name == nil {
 			continue
 		}
-		if entryPointFuncs[fn.Name.Name] || hasContextParam(fn.Type) {
+		if accepts, _ := contextParams(ctx.GoAST, info, fn.Type); entryPointFuncs[fn.Name.Name] || accepts {
 			continue
 		}
-		for _, call := range manufacturedContexts(fn.Body) {
+		for _, call := range manufacturedContexts(ctx.GoAST, info, fn.Body) {
 			violations = append(violations, r.report(ctx, fn, call))
 		}
 	}
@@ -101,7 +117,7 @@ func (r *ContextFirstRule) report(ctx *core.FileContext, fn *ast.FuncDecl, call 
 // whose result is handed to another call — that is what makes the function the
 // place where cancellation ends, rather than a place that merely mentions a
 // context.
-func manufacturedContexts(body *ast.BlockStmt) []*ast.CallExpr {
+func manufacturedContexts(file *ast.File, info *types.Info, body *ast.BlockStmt) []*ast.CallExpr {
 	var created []*ast.CallExpr
 	names := make(map[string]*ast.CallExpr)
 	deferredCancels := deferredCalls(body)
@@ -113,7 +129,7 @@ func manufacturedContexts(body *ast.BlockStmt) []*ast.CallExpr {
 			return false
 		case *ast.AssignStmt:
 			for i, rhs := range node.Rhs {
-				call, ok := rootContextCall(rhs)
+				call, ok := rootContextCall(file, info, rhs)
 				if !ok || i >= len(node.Lhs) {
 					continue
 				}
@@ -125,13 +141,13 @@ func manufacturedContexts(body *ast.BlockStmt) []*ast.CallExpr {
 				}
 			}
 		case *ast.CallExpr:
-			if _, building := rootContextCall(node); building {
+			if _, building := rootContextCall(file, info, node); building {
 				// context.WithTimeout(context.Background(), d) still builds the
 				// context; what counts is where the result is handed over.
 				return true
 			}
 			for _, arg := range node.Args {
-				if call, ok := rootContextCall(arg); ok {
+				if call, ok := rootContextCall(file, info, arg); ok {
 					created = append(created, call)
 					continue
 				}
@@ -187,40 +203,22 @@ func deferredCalls(body *ast.BlockStmt) map[string]bool {
 // rootContextCall reports whether the expression starts a fresh context chain,
 // seeing through the wrappers that derive from one: context.WithTimeout(context.
 // Background(), d) is still a root.
-func rootContextCall(expr ast.Expr) (*ast.CallExpr, bool) {
+func rootContextCall(file *ast.File, info *types.Info, expr ast.Expr) (*ast.CallExpr, bool) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return nil, false
 	}
-	sel, ok := call.Fun.(*ast.SelectorExpr)
+	name, ok := packageFuncName(file, info, call, "context")
 	if !ok {
 		return nil, false
 	}
-	pkg, ok := sel.X.(*ast.Ident)
-	if !ok || pkg.Name != "context" {
-		return nil, false
-	}
-
-	if sel.Sel.Name == "Background" || sel.Sel.Name == "TODO" {
+	if name == "Background" || name == "TODO" {
 		return call, true
 	}
-	if !strings.HasPrefix(sel.Sel.Name, "With") || len(call.Args) == 0 {
+	if !strings.HasPrefix(name, "With") || len(call.Args) == 0 {
 		return nil, false
 	}
-	return rootContextCall(call.Args[0])
-}
-
-// hasContextParam reports whether the signature accepts a context.
-func hasContextParam(funcType *ast.FuncType) bool {
-	if funcType == nil || funcType.Params == nil {
-		return false
-	}
-	for _, param := range funcType.Params.List {
-		if isContextType(param.Type) {
-			return true
-		}
-	}
-	return false
+	return rootContextCall(file, info, call.Args[0])
 }
 
 func qualifiedFuncName(fn *ast.FuncDecl) string {
@@ -231,17 +229,4 @@ func qualifiedFuncName(fn *ast.FuncDecl) string {
 		return typeName + "." + fn.Name.Name
 	}
 	return fn.Name.Name
-}
-
-func isContextType(expr ast.Expr) bool {
-	switch t := expr.(type) {
-	case *ast.SelectorExpr:
-		if ident, ok := t.X.(*ast.Ident); ok {
-			return ident.Name == "context" && t.Sel.Name == "Context"
-		}
-	case *ast.Ident:
-		// An aliased import still names the type Context.
-		return t.Name == "Context"
-	}
-	return false
 }

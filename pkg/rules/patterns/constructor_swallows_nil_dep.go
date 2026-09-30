@@ -108,7 +108,7 @@ func (r *ConstructorSwallowsNilDepRule) bodySwallows(body *ast.BlockStmt, checke
 				switch {
 				case isPanicOrExitCall(call):
 					aborts = true
-				case isErrorOrWarnLogCall(call):
+				case isErrorLevelLogCall(call):
 					hasErrorLog = true
 				}
 			}
@@ -170,15 +170,4 @@ func isPanicOrExitCall(call *ast.CallExpr) bool {
 		return name == "Exit" || strings.HasPrefix(name, "Fatal")
 	}
 	return false
-}
-
-// isErrorOrWarnLogCall matches logger calls at Error/Warn level, including
-// structured variants (ErrorStructured, Warnf, Warnw, ...).
-func isErrorOrWarnLogCall(call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	name := sel.Sel.Name
-	return strings.HasPrefix(name, "Error") || strings.HasPrefix(name, "Warn")
 }

@@ -35,41 +35,28 @@ func NewEmptyStructReturnRule() *EmptyStructReturnRule {
 
 // AnalyzeFile checks for empty struct returns in error contexts
 func (r *EmptyStructReturnRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.HasGoAST() || ctx.IsTestFile() {
-		return nil
-	}
-
-	// Skip test utility files
-	pathLower := strings.ToLower(ctx.RelPath)
-	if strings.Contains(pathLower, "/test") || strings.Contains(pathLower, "test_") ||
-		strings.HasSuffix(pathLower, "/test.go") || strings.HasSuffix(pathLower, "/testing.go") {
-		return nil
-	}
-
-	var violations []*core.Violation
-
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		// Look for function declarations
-		funcDecl, ok := n.(*ast.FuncDecl)
-		if !ok || funcDecl.Body == nil {
-			return true
-		}
-
-		// Check if function has error in return type
+	return analyzeGoFunctions(ctx, func(funcDecl *ast.FuncDecl) []*core.Violation {
 		if !r.hasErrorReturn(funcDecl) {
-			return true
+			return nil
 		}
-
-		// Find return statements inside if blocks that check errors/nil
-		for _, stmt := range funcDecl.Body.List {
-			v := r.checkStatement(ctx, stmt)
-			violations = append(violations, v...)
-		}
-
-		return true
+		// Error branches anywhere in the body — loops, switch and select cases
+		// included; a closure returns through its own signature.
+		var violations []*core.Violation
+		forEachOwnStatement(funcDecl.Body, func(stmt ast.Stmt) {
+			ifStmt, ok := stmt.(*ast.IfStmt)
+			if !ok || !r.isErrorOrNilCheck(ifStmt.Cond) {
+				return
+			}
+			for _, bodyStmt := range ifStmt.Body.List {
+				if ret, ok := bodyStmt.(*ast.ReturnStmt); ok {
+					if v := r.checkReturnForEmptyStructWithNilError(ctx, ret); v != nil {
+						violations = append(violations, v)
+					}
+				}
+			}
+		})
+		return violations
 	})
-
-	return violations
 }
 
 // hasErrorReturn checks if function returns error type
@@ -85,41 +72,6 @@ func (r *EmptyStructReturnRule) hasErrorReturn(fn *ast.FuncDecl) bool {
 	return false
 }
 
-// checkStatement recursively checks statements for problematic patterns
-func (r *EmptyStructReturnRule) checkStatement(ctx *core.FileContext, stmt ast.Stmt) []*core.Violation {
-	var violations []*core.Violation
-
-	switch s := stmt.(type) {
-	case *ast.IfStmt:
-		// Check if this is an error/nil check
-		if r.isErrorOrNilCheck(s.Cond) {
-			// Check body for problematic returns
-			for _, bodyStmt := range s.Body.List {
-				if ret, ok := bodyStmt.(*ast.ReturnStmt); ok {
-					if v := r.checkReturnForEmptyStructWithNilError(ctx, ret); v != nil {
-						violations = append(violations, v)
-					}
-				}
-			}
-			// Also check else branch
-			if s.Else != nil {
-				violations = append(violations, r.checkStatement(ctx, s.Else)...)
-			}
-		}
-		// Recurse into body
-		for _, bodyStmt := range s.Body.List {
-			violations = append(violations, r.checkStatement(ctx, bodyStmt)...)
-		}
-
-	case *ast.BlockStmt:
-		for _, blockStmt := range s.List {
-			violations = append(violations, r.checkStatement(ctx, blockStmt)...)
-		}
-	}
-
-	return violations
-}
-
 // isErrorOrNilCheck determines if condition checks for error or nil
 func (r *EmptyStructReturnRule) isErrorOrNilCheck(cond ast.Expr) bool {
 	switch c := cond.(type) {
@@ -133,11 +85,8 @@ func (r *EmptyStructReturnRule) isErrorOrNilCheck(cond ast.Expr) bool {
 				return true
 			}
 			// Check for err variable
-			if ident, ok := c.X.(*ast.Ident); ok {
-				nameLower := strings.ToLower(ident.Name)
-				if nameLower == "err" || strings.HasSuffix(nameLower, "err") {
-					return true
-				}
+			if ident, ok := c.X.(*ast.Ident); ok && isErrorVarName(ident.Name) {
+				return true
 			}
 		}
 	case *ast.UnaryExpr:
@@ -204,16 +153,6 @@ func (r *EmptyStructReturnRule) extractTypeName(expr ast.Expr) string {
 
 // isAllowedEmptyStruct returns true for structs that are OK to return empty
 func (r *EmptyStructReturnRule) isAllowedEmptyStruct(typeName string) bool {
-	// Common value objects that don't need error wrapping
-	allowed := []string{
-		"struct", // anonymous struct{}
-		"Time",   // time.Time zero value is valid
-	}
-
-	for _, a := range allowed {
-		if strings.HasSuffix(typeName, a) {
-			return true
-		}
-	}
-	return false
+	// time.Time: its zero value is a valid, checkable value (IsZero).
+	return strings.HasSuffix(typeName, "Time")
 }

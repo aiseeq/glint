@@ -340,9 +340,8 @@ func (l *Loader) Load(path string) (Config, error) {
 			wantCount: 0,
 		},
 		{
-			// Ветка else обходится только когда условие внешнего if само является
-			// error/nil-guard'ом. Иначе else-if пропускается. Граница текущего поведения.
-			name:     "else-if guard under a non-guard if is not detected",
+			// Guard в else-if проверяется так же, как любой другой if тела.
+			name:     "else-if guard under a non-guard if is detected",
 			filename: "config/loader.go",
 			code: `package config
 
@@ -355,11 +354,11 @@ func (l *Loader) Load(path string) (Config, error) {
 	return decode(path)
 }
 `,
-			wantCount: 0,
+			wantCount: 1,
 		},
 		{
-			// Тело for/switch не обходится вовсе.
-			name:     "guard inside a loop body is out of scope",
+			// Guard в теле цикла — такая же ветка ошибки.
+			name:     "guard inside a loop body is detected",
 			filename: "config/loader.go",
 			code: `package config
 
@@ -374,7 +373,7 @@ func (l *Loader) LoadAll(paths []string) (Config, error) {
 	return l.result, nil
 }
 `,
-			wantCount: 0,
+			wantCount: 1,
 		},
 		{
 			name:     "nolint on the return line suppresses",
@@ -405,7 +404,7 @@ func buildConfig() (Config, error) {
 			wantCount: 0,
 		},
 		{
-			name:     "test helper directory is skipped",
+			name:     "test helper package outside test directories is analyzed",
 			filename: "internal/testutil/fixtures.go",
 			code: `package testutil
 
@@ -416,10 +415,10 @@ func BuildConfig() (Config, error) {
 	return fixture.Config, nil
 }
 `,
-			wantCount: 0,
+			wantCount: 1,
 		},
 		{
-			name:     "test_-prefixed file is skipped",
+			name:     "test_-prefixed file is compiled into the package and analyzed",
 			filename: "config/test_fixtures.go",
 			code: `package config
 
@@ -430,10 +429,10 @@ func BuildConfig() (Config, error) {
 	return fixture.Config, nil
 }
 `,
-			wantCount: 0,
+			wantCount: 1,
 		},
 		{
-			name:     "testing.go helper file is skipped",
+			name:     "testing.go file is compiled into the package and analyzed",
 			filename: "config/testing.go",
 			code: `package config
 
@@ -444,7 +443,7 @@ func BuildConfig() (Config, error) {
 	return fixture.Config, nil
 }
 `,
-			wantCount: 0,
+			wantCount: 1,
 		},
 	}
 

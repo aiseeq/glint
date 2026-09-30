@@ -74,7 +74,7 @@ func (r *ErrorMaskedAsFalseBoolRule) AnalyzeFile(ctx *core.FileContext) []*core.
 		if !r.returnsBool(fn) {
 			return true
 		}
-		if r.isPurePredicate(fn.Name.Name) {
+		if isPredicateName(fn.Name.Name) {
 			return true
 		}
 
@@ -98,25 +98,6 @@ func (r *ErrorMaskedAsFalseBoolRule) returnsBool(fn *ast.FuncDecl) bool {
 	return false
 }
 
-// isPurePredicate exempts conventional bool-returning predicates. Returning
-// false from these on "not found" or error is their contract.
-func (r *ErrorMaskedAsFalseBoolRule) isPurePredicate(name string) bool {
-	prefixes := []string{"Is", "Has", "Can", "Should", "Contains", "Matches", "Exists", "Supports"}
-	for _, p := range prefixes {
-		if strings.HasPrefix(name, p) {
-			// Ensure next char is uppercase (IsFoo, not "Issue")
-			if len(name) == len(p) {
-				return true
-			}
-			next := name[len(p)]
-			if next >= 'A' && next <= 'Z' {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // findViolations scans a function body for `if err != nil { return false }`
 // patterns without logging.
 func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
@@ -127,7 +108,7 @@ func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *a
 		if !ok {
 			return true
 		}
-		if !r.isErrNilCheck(ifStmt.Cond) {
+		if errNilCheckName(ifStmt.Cond) == "" {
 			return true
 		}
 
@@ -163,23 +144,6 @@ func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *a
 	return violations
 }
 
-// isErrNilCheck matches `err != nil`.
-func (r *ErrorMaskedAsFalseBoolRule) isErrNilCheck(cond ast.Expr) bool {
-	bin, ok := cond.(*ast.BinaryExpr)
-	if !ok {
-		return false
-	}
-	if bin.Op.String() != "!=" {
-		return false
-	}
-	lhs, lhsOk := bin.X.(*ast.Ident)
-	rhs, rhsOk := bin.Y.(*ast.Ident)
-	if !lhsOk || !rhsOk {
-		return false
-	}
-	return (lhs.Name == "err" || strings.HasSuffix(lhs.Name, "Err")) && rhs.Name == "nil"
-}
-
 // findReturnFalse returns the first `return false` (or `return false, ...`)
 // inside the body, or nil.
 func (r *ErrorMaskedAsFalseBoolRule) findReturnFalse(body *ast.BlockStmt) *ast.ReturnStmt {
@@ -195,7 +159,7 @@ func (r *ErrorMaskedAsFalseBoolRule) findReturnFalse(body *ast.BlockStmt) *ast.R
 		// `return false, err` hands the error to the caller alongside the
 		// bool — that is propagation, which is what this rule asks for, not
 		// the masking it looks for.
-		if returnsError(ret) {
+		if returnCarriesError(ret) {
 			return true
 		}
 		for _, res := range ret.Results {
@@ -209,62 +173,18 @@ func (r *ErrorMaskedAsFalseBoolRule) findReturnFalse(body *ast.BlockStmt) *ast.R
 	return found
 }
 
-// returnsError reports whether a return statement passes an error along. It
-// matches the error by name, the same way isErrNilCheck matches the check that
-// guards it, and treats an explicit nil as no error.
-func returnsError(ret *ast.ReturnStmt) bool {
-	for _, res := range ret.Results {
-		switch expr := res.(type) {
-		case *ast.Ident:
-			if isErrorName(expr.Name) {
-				return true
-			}
-		case *ast.CallExpr:
-			// fmt.Errorf(...), errors.New(...), a wrap helper — anything
-			// constructing the error being returned.
-			if selector, ok := expr.Fun.(*ast.SelectorExpr); ok && isErrorName(selector.Sel.Name) {
-				return true
-			}
-			if ident, ok := expr.Fun.(*ast.Ident); ok && isErrorName(ident.Name) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// isErrorName recognises the conventional spellings of an error value or of a
-// call that builds one.
-func isErrorName(name string) bool {
-	lower := strings.ToLower(name)
-	if lower == "nil" {
-		return false
-	}
-	return strings.HasPrefix(lower, "err") ||
-		strings.HasSuffix(lower, "err") ||
-		strings.HasSuffix(lower, "error")
-}
-
-// hasLoggingCall returns true if any statement in the block calls something
-// that looks like a logger (log.*, slog.*, logger.*, Log*/Error*/Warn*).
+// hasLoggingCall returns true if any statement in the block calls a logger
+// (see isLoggerCall).
 func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if found {
 			return false
 		}
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		name := core.ExtractFullFunctionName(call)
-		lower := strings.ToLower(name)
-		if strings.Contains(lower, "log") || strings.Contains(lower, "error") ||
-			strings.Contains(lower, "warn") || strings.Contains(lower, "slog") {
+		if call, ok := n.(*ast.CallExpr); ok && isLoggerCall(call) {
 			found = true
-			return false
 		}
-		return true
+		return !found
 	})
 	return found
 }

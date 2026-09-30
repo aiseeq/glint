@@ -20,9 +20,6 @@ func init() {
 // Excludes: functions with "OrDefault" in name, parse* functions, singleton getters, middleware defensive code
 type FallbackReturnRule struct {
 	*rules.BaseRule
-	fallbackPatterns  []*regexp.Regexp
-	goContextPatterns []*regexp.Regexp
-	tsContextPatterns []*regexp.Regexp
 }
 
 // NewFallbackReturnRule creates the rule
@@ -35,64 +32,50 @@ func NewFallbackReturnRule() *FallbackReturnRule {
 			core.SeverityCritical,
 		),
 	}
-	r.fallbackPatterns = r.initFallbackPatterns()
-	r.goContextPatterns = r.initGoContextPatterns()
-	r.tsContextPatterns = r.initTSContextPatterns()
 	return r
 }
 
-// initFallbackPatterns initializes patterns for detecting fallback returns
-func (r *FallbackReturnRule) initFallbackPatterns() []*regexp.Regexp {
-	return []*regexp.Regexp{
-		// Return provider/service fallbacks (test*, mock*, fake*, stub*, dummy*, fallback*)
-		regexp.MustCompile(`return\s+(?:test|mock|fake|stub|dummy|fallback)[A-Z]\w*`),
+// tsContextPatterns detect an error/failure context for TypeScript.
+var tsContextPatterns = []*regexp.Regexp{
+	// Error check context - TS style
+	regexp.MustCompile(`if\s*\(\s*!\w+`),                   // if (!svc)
+	regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*null`),      // if (x === null)
+	regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*undefined`), // if (x === undefined)
+	regexp.MustCompile(`if\s*\(\s*err`),                    // if (err...)
 
-		// Return *Provider fallback after error (but not singleton getters)
-		regexp.MustCompile(`return\s+\w*(?:Provider|Service|Client|Handler)\s*$`),
+	// Error in comment
+	regexp.MustCompile(`//.*(?i)(?:error|fail|unavailable|fallback)`),
 
-		// Explicit fallback naming
-		regexp.MustCompile(`(?i)return\s+\w*fallback\w*`),
-
-		// Return new*Mock/Test/Fake
-		regexp.MustCompile(`return\s+[Nn]ew(?:Mock|Test|Fake|Stub|Dummy)\w*\(`),
-
-		// Assignment then return pattern: provider = testProvider
-		regexp.MustCompile(`=\s*(?:test|mock|fake|stub|dummy|fallback)[A-Z]\w*`),
-	}
+	// Fallback comment
+	regexp.MustCompile(`//.*(?i)(?:use|return|fall\s*back|degrad)`),
 }
 
-// initGoContextPatterns detects error/failure context for Go
-func (r *FallbackReturnRule) initGoContextPatterns() []*regexp.Regexp {
-	return []*regexp.Regexp{
-		// Error check context
-		regexp.MustCompile(`if\s+err\s*!=\s*nil`),
-		regexp.MustCompile(`if\s+\w+\s*==\s*nil`),
-		regexp.MustCompile(`if\s+!\w+`),
+// tsFallbackPatterns detect fallback values in TypeScript. Fallback values are
+// lowerCamel (testProvider) or UPPER_SNAKE (TEST_DEFAULT); PascalCase
+// (TestEnvironmentSchemas) is a class/namespace of test infrastructure, not a
+// fallback value.
+var tsFallbackPatterns = []*regexp.Regexp{
+	// Return mock/test/fake value
+	regexp.MustCompile(`return\s+(?:mock|test|fake|stub|dummy|MOCK_|TEST_|FAKE_|STUB_|DUMMY_)\w+`),
 
-		// Error in comment
-		regexp.MustCompile(`//.*(?i)(?:error|fail|unavailable|fallback)`),
+	// Fallback in variable assignment
+	regexp.MustCompile(`=\s+(?:mock|test|fake|fallback|MOCK_|TEST_|FAKE_|FALLBACK_)\w+`),
 
-		// Fallback comment
-		regexp.MustCompile(`//.*(?i)(?:use|return|fall\s*back|degrad)`),
-	}
+	// || fallback pattern (but not for common defaults)
+	regexp.MustCompile(`\|\|\s*(?:mock|test|fake|MOCK_|TEST_|FAKE_)\w+`),
+
+	// ?? fallback pattern
+	regexp.MustCompile(`\?\?\s*(?:mock|test|fake|fallback|MOCK_|TEST_|FAKE_|FALLBACK_)\w+`),
+
+	// Method/function calls named *Fallback*(...) invoked inside an
+	// error-handling branch: the "primary check failed → call fallback
+	// detector" pattern.
+	regexp.MustCompile(`\.[A-Za-z_]\w*[Ff]allback\w*\s*\(`),
 }
 
-// initTSContextPatterns detects error/failure context for TypeScript
-func (r *FallbackReturnRule) initTSContextPatterns() []*regexp.Regexp {
-	return []*regexp.Regexp{
-		// Error check context - TS style
-		regexp.MustCompile(`if\s*\(\s*!\w+`),                   // if (!svc)
-		regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*null`),      // if (x === null)
-		regexp.MustCompile(`if\s*\(\s*\w+\s*===?\s*undefined`), // if (x === undefined)
-		regexp.MustCompile(`if\s*\(\s*err`),                    // if (err...)
-
-		// Error in comment
-		regexp.MustCompile(`//.*(?i)(?:error|fail|unavailable|fallback)`),
-
-		// Fallback comment
-		regexp.MustCompile(`//.*(?i)(?:use|return|fall\s*back|degrad)`),
-	}
-}
+// tsSingletonReturn matches `return X.instance` — классический синглтон-геттер,
+// не fallback.
+var tsSingletonReturn = regexp.MustCompile(`return\s+\w+\.instance\b`)
 
 // AnalyzeFile checks for fallback return patterns
 func (r *FallbackReturnRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
@@ -137,184 +120,80 @@ func (r *FallbackReturnRule) shouldSkipFile(ctx *core.FileContext) bool {
 	return false
 }
 
-// analyzeGoFile analyzes Go file for fallback patterns
+// analyzeGoFile analyzes Go file for fallback patterns. Only the syntax tree
+// tells an error branch apart from a lazy initializer or a comment that
+// happens to say "use"; line patterns cannot.
 func (r *FallbackReturnRule) analyzeGoFile(ctx *core.FileContext) []*core.Violation {
-	var violations []*core.Violation
-
-	// Regex-based analysis
-	violations = append(violations, r.analyzeGoRegex(ctx)...)
-
-	// AST-based analysis for more precise detection
-	if ctx.HasGoAST() {
-		violations = append(violations, r.analyzeGoAST(ctx)...)
+	if !ctx.HasGoAST() {
+		return nil
 	}
-
-	// Regex- и AST-пути находят один и тот же fallback независимо —
-	// оставляем одну находку на строку.
-	return dedupeViolationsByLine(violations)
+	return r.analyzeGoAST(ctx)
 }
 
-// dedupeViolationsByLine оставляет первую находку для каждой строки.
-func dedupeViolationsByLine(violations []*core.Violation) []*core.Violation {
-	seen := make(map[int]bool, len(violations))
-	deduped := violations[:0]
-	for _, v := range violations {
-		if seen[v.Line] {
-			continue
-		}
-		seen[v.Line] = true
-		deduped = append(deduped, v)
-	}
-	return deduped
-}
-
-// analyzeGoRegex uses regex patterns for Go files
-func (r *FallbackReturnRule) analyzeGoRegex(ctx *core.FileContext) []*core.Violation {
-	var violations []*core.Violation
-
-	for lineNum, line := range ctx.Lines {
-		trimmed := strings.TrimSpace(line)
-
-		// Skip comments and empty lines
-		if trimmed == "" || strings.HasPrefix(trimmed, "//") {
-			continue
-		}
-
-		// Check for fallback patterns
-		for _, pattern := range r.fallbackPatterns {
-			if pattern.MatchString(line) {
-				// Check if this is in error handling context
-				if r.isInGoContext(ctx.Lines, lineNum) {
-					if !r.isGoException(ctx, line, lineNum) {
-						v := r.createViolation(ctx, lineNum+1, line)
-						violations = append(violations, v)
-						break // One violation per line
-					}
-				}
-			}
-		}
-	}
-
-	return violations
-}
-
-// isInGoContext checks if line is within error handling context for Go
-func (r *FallbackReturnRule) isInGoContext(lines []string, lineNum int) bool {
-	// Check previous 5 lines for error context
-	start := lineNum - 5
-	if start < 0 {
-		start = 0
-	}
-
-	for i := start; i <= lineNum; i++ {
-		for _, pattern := range r.goContextPatterns {
-			if pattern.MatchString(lines[i]) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-// analyzeGoAST uses Go AST for precise detection
+// analyzeGoAST walks every function once, with the name that decides its
+// exceptions.
 func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 
 	// First pass: detect implicit else fallback patterns at function level
 	violations = append(violations, r.detectImplicitElseFallback(ctx)...)
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		// Check if statements with error handling
-		ifStmt, ok := n.(*ast.IfStmt)
-		if !ok {
-			return true
+	forEachFunction(ctx.GoAST, func(name string, _ *ast.FuncType, body *ast.BlockStmt) {
+		if r.isFunctionException(name) {
+			return
 		}
-
-		// Check if condition involves error
-		if !r.isErrorCondition(ifStmt.Cond) {
-			return true
-		}
-
-		// Check function-level exceptions first
-		if r.isFunctionException(ctx, ifStmt) {
-			return true
-		}
-
-		// Check body for fallback returns
-		hasReturn := false
-		for _, stmt := range ifStmt.Body.List {
-			retStmt, ok := stmt.(*ast.ReturnStmt)
-			if !ok {
-				continue
+		forEachOwnStatement(body, func(stmt ast.Stmt) {
+			ifStmt, ok := stmt.(*ast.IfStmt)
+			if !ok || !r.isErrorCondition(ifStmt.Cond) {
+				return
 			}
-			hasReturn = true
-
-			// Skip if error is returned explicitly
-			if r.returnsError(retStmt) {
-				continue
-			}
-
-			for _, result := range retStmt.Results {
-				if r.isFallbackReturn(result) {
-					pos := ctx.PositionFor(retStmt)
-					v := r.CreateViolation(ctx.RelPath, pos.Line, "Fallback return on error - silently degrades instead of failing explicitly")
-					v.WithCode(ctx.GetLine(pos.Line))
-					v.WithSuggestion("Return the error instead of fallback value. Caller should decide recovery strategy.")
-					violations = append(violations, v)
-				}
-			}
-		}
-
-		// NEW: Detect error-ignoring assignment pattern (CLAUDE.md violation)
-		// Pattern: if err != nil { variable = fallbackValue } without return
-		if !hasReturn && r.isErrNotNilCondition(ifStmt.Cond) {
-			violations = append(violations, r.detectErrorIgnoringAssignment(ctx, ifStmt)...)
-		}
-
-		return true
+			violations = append(violations, r.checkErrorBranch(ctx, ifStmt)...)
+		})
 	})
 
 	return violations
 }
 
-// returnsError checks if return statement includes an error
-func (r *FallbackReturnRule) returnsError(stmt *ast.ReturnStmt) bool {
-	for _, result := range stmt.Results {
-		// Check for error variable
-		if ident, ok := result.(*ast.Ident); ok {
-			if ident.Name == "err" {
-				return true
-			}
+// checkErrorBranch reports fallback values returned from an error branch and,
+// for an `if err != nil` without a return, fallback values assigned instead.
+func (r *FallbackReturnRule) checkErrorBranch(ctx *core.FileContext, ifStmt *ast.IfStmt) []*core.Violation {
+	var violations []*core.Violation
+	hasReturn := false
+	for _, stmt := range ifStmt.Body.List {
+		retStmt, ok := stmt.(*ast.ReturnStmt)
+		if !ok {
+			continue
 		}
-		// Check for fmt.Errorf, errors.New, etc.
-		if call, ok := result.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if sel.Sel.Name == "Errorf" || sel.Sel.Name == "New" || sel.Sel.Name == "Wrap" {
-					return true
-				}
+		hasReturn = true
+
+		// Skip if error is returned explicitly
+		if returnCarriesError(retStmt) {
+			continue
+		}
+
+		for _, result := range retStmt.Results {
+			if !r.isFallbackReturn(result) {
+				continue
 			}
+			pos := ctx.PositionFor(retStmt)
+			v := r.CreateViolation(ctx.RelPath, pos.Line, "Fallback return on error - silently degrades instead of failing explicitly")
+			v.WithCode(ctx.GetLine(pos.Line))
+			v.WithSuggestion("Return the error instead of fallback value. Caller should decide recovery strategy.")
+			violations = append(violations, v)
+			break // one finding per return
 		}
 	}
-	return false
+
+	// Pattern: if err != nil { variable = fallbackValue } without return
+	if errName := errNilCheckName(ifStmt.Cond); !hasReturn && errName != "" {
+		violations = append(violations, r.detectErrorIgnoringAssignment(ctx, ifStmt, errName)...)
+	}
+	return violations
 }
 
-// isFunctionException checks if the enclosing function is an exception
-func (r *FallbackReturnRule) isFunctionException(ctx *core.FileContext, stmt ast.Node) bool {
-	// Find enclosing function
-	var funcName string
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok {
-			return true
-		}
-		if fn.Body != nil && fn.Body.Pos() <= stmt.Pos() && stmt.End() <= fn.Body.End() {
-			funcName = fn.Name.Name
-			return false
-		}
-		return true
-	})
-
+// isFunctionException checks whether the function's name declares fallbacks
+// as its contract.
+func (r *FallbackReturnRule) isFunctionException(funcName string) bool {
 	if funcName == "" {
 		return false
 	}
@@ -331,19 +210,19 @@ func (r *FallbackReturnRule) isFunctionException(ctx *core.FileContext, stmt ast
 		return true
 	}
 
+	if !hasLeadingWord(funcName, "Get") {
+		return false
+	}
+
 	// Singleton getters (Get*Manager, Get*EventManager) - not fallbacks
-	if strings.HasPrefix(funcLower, "get") && (strings.HasSuffix(funcLower, "manager") ||
-		strings.HasSuffix(funcLower, "eventmanager") || strings.HasSuffix(funcLower, "instance")) {
+	if strings.HasSuffix(funcLower, "manager") || strings.HasSuffix(funcLower, "instance") {
 		return true
 	}
 
-	// GetRealIP, GetClientKey - defensive programming for middleware
-	if strings.HasPrefix(funcLower, "get") && (strings.Contains(funcLower, "ip") ||
-		strings.Contains(funcLower, "key") || strings.Contains(funcLower, "client")) {
-		return true
-	}
-
-	return false
+	// GetRealIP, GetClientKey - defensive programming for middleware that
+	// derives a request key. Whole words only: GetRecipient merely contains
+	// the letters "ip", and GetClient builds a client, it derives no key.
+	return hasCamelWord(funcName, "IP") || hasCamelWord(funcName, "Key")
 }
 
 // isErrorCondition checks if condition is error-related
@@ -351,10 +230,8 @@ func (r *FallbackReturnRule) isErrorCondition(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.BinaryExpr:
 		// err != nil or err == nil
-		if ident, ok := e.X.(*ast.Ident); ok {
-			if ident.Name == "err" {
-				return true
-			}
+		if ident, ok := e.X.(*ast.Ident); ok && isErrorVarName(ident.Name) {
+			return true
 		}
 		// something == nil / nil == something (nil check). Сравнение с любым
 		// другим идентификатором (mode == modeFake) — выбор режима, не ошибка.
@@ -428,116 +305,20 @@ func (r *FallbackReturnRule) isFallbackReturn(expr ast.Expr) bool {
 	return false
 }
 
-// isGoException checks if this is a valid exception
-func (r *FallbackReturnRule) isGoException(ctx *core.FileContext, line string, lineNum int) bool {
-	lineLower := strings.ToLower(line)
-	path := ctx.RelPath
-	lines := ctx.Lines
-
-	// Factory functions that create test implementations
-	if strings.Contains(path, "factory") || strings.Contains(path, "builder") {
-		return true
-	}
-
-	// Middleware code - defensive programming is expected
-	if strings.Contains(path, "middleware") || strings.Contains(path, "rate_limit") {
-		return true
-	}
-
-	// Health check code - test status constants
-	if strings.Contains(path, "health") {
-		return true
-	}
-
-	// Helpers with explicit default parameters
-	if strings.Contains(path, "helpers") || strings.Contains(path, "helper") {
-		// Check if function has "default" in parameter name (by looking at func signature)
-		for i := lineNum; i >= 0 && i > lineNum-15; i-- {
-			if strings.Contains(lines[i], "func ") && strings.Contains(strings.ToLower(lines[i]), "default") {
-				return true
-			}
-		}
-	}
-
-	// Explicit "for testing" comment
-	if strings.Contains(lineLower, "// for test") || strings.Contains(lineLower, "//for test") {
-		return true
-	}
-
-	// Check if function is explicitly a test factory
-	for i := lineNum; i >= 0 && i > lineNum-15; i-- {
-		funcLine := lines[i]
-		funcLower := strings.ToLower(funcLine)
-
-		// Functions with OrDefault, Default in name
-		if strings.Contains(funcLine, "func ") {
-			if strings.Contains(funcLower, "ordefault") || strings.Contains(funcLower, "default") {
-				return true
-			}
-			// Parse functions with default parameter
-			if strings.Contains(funcLower, "parse") {
-				return true
-			}
-			// Singleton getters
-			if strings.Contains(funcLower, "get") && strings.Contains(funcLower, "manager") {
-				return true
-			}
-			break // Found function declaration, stop looking
-		}
-	}
-
-	// Check if error is already being returned on the same line
-	if strings.Contains(line, "fmt.Errorf") || strings.Contains(line, "errors.") {
-		return true
-	}
-
-	// DI container test mode setup
-	if strings.Contains(lineLower, "// di") || strings.Contains(lineLower, "// dependency injection") {
-		return true
-	}
-
-	return false
-}
-
 // analyzeTSFile analyzes TypeScript/JavaScript file for fallback patterns
 func (r *FallbackReturnRule) analyzeTSFile(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
-
-	// Patterns for TS. Fallback values are lowerCamel (testProvider) or
-	// UPPER_SNAKE (TEST_DEFAULT); PascalCase (TestEnvironmentSchemas) is a
-	// class/namespace of test infrastructure, not a fallback value.
-	tsPatterns := []*regexp.Regexp{
-		// Return mock/test/fake value
-		regexp.MustCompile(`return\s+(?:mock|test|fake|stub|dummy|MOCK_|TEST_|FAKE_|STUB_|DUMMY_)\w+`),
-
-		// Fallback in variable assignment
-		regexp.MustCompile(`=\s+(?:mock|test|fake|fallback|MOCK_|TEST_|FAKE_|FALLBACK_)\w+`),
-
-		// || fallback pattern (but not for common defaults)
-		regexp.MustCompile(`\|\|\s*(?:mock|test|fake|MOCK_|TEST_|FAKE_)\w+`),
-
-		// ?? fallback pattern
-		regexp.MustCompile(`\?\?\s*(?:mock|test|fake|fallback|MOCK_|TEST_|FAKE_|FALLBACK_)\w+`),
-
-		// Method/function calls named *Fallback*(...) invoked inside an
-		// error-handling branch. Picks up the "primary check failed → call
-		// fallback detector" pattern (TestDataValidator.ts:118).
-		regexp.MustCompile(`\.[A-Za-z_]\w*[Ff]allback\w*\s*\(`),
-	}
-
-	// `return X.instance` — классический синглтон-геттер, не fallback
-	singletonReturn := regexp.MustCompile(`return\s+\w+\.instance\b`)
 
 	for lineNum, line := range ctx.Lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
 			continue
 		}
-		if singletonReturn.MatchString(line) {
+		if tsSingletonReturn.MatchString(line) {
 			continue
 		}
 
-		for _, pattern := range tsPatterns {
+		for _, pattern := range tsFallbackPatterns {
 			if pattern.MatchString(line) {
 				if r.isInTSContext(ctx.Lines, lineNum) && !r.isTSException(ctx.RelPath) {
 					v := r.createTSViolation(ctx, lineNum+1, line)
@@ -560,7 +341,7 @@ func (r *FallbackReturnRule) isInTSContext(lines []string, lineNum int) bool {
 	}
 
 	for i := start; i <= lineNum; i++ {
-		for _, pattern := range r.tsContextPatterns {
+		for _, pattern := range tsContextPatterns {
 			if pattern.MatchString(lines[i]) {
 				return true
 			}
@@ -592,16 +373,6 @@ func (r *FallbackReturnRule) isTSException(path string) bool {
 	return false
 }
 
-// createViolation creates a violation for Go fallback
-func (r *FallbackReturnRule) createViolation(ctx *core.FileContext, lineNum int, line string) *core.Violation {
-	v := r.CreateViolation(ctx.RelPath, lineNum, "Fallback return detected - silently degrades instead of failing explicitly")
-	v.WithCode(strings.TrimSpace(line))
-	v.WithSuggestion("Return error instead of fallback. Principle: 'Fail explicitly, never degrade silently'")
-	v.WithContext("pattern", "fallback-return")
-	v.WithContext("language", "go")
-	return v
-}
-
 // createTSViolation creates a violation for TypeScript fallback
 func (r *FallbackReturnRule) createTSViolation(ctx *core.FileContext, lineNum int, line string) *core.Violation {
 	v := r.CreateViolation(ctx.RelPath, lineNum, "Fallback return detected - silently degrades instead of failing explicitly")
@@ -612,31 +383,9 @@ func (r *FallbackReturnRule) createTSViolation(ctx *core.FileContext, lineNum in
 	return v
 }
 
-// isErrNotNilCondition checks specifically for "err != nil" condition
-func (r *FallbackReturnRule) isErrNotNilCondition(expr ast.Expr) bool {
-	binExpr, ok := expr.(*ast.BinaryExpr)
-	if !ok {
-		return false
-	}
-
-	// Check for err != nil
-	if binExpr.Op.String() != "!=" {
-		return false
-	}
-
-	xIdent, xOk := binExpr.X.(*ast.Ident)
-	yIdent, yOk := binExpr.Y.(*ast.Ident)
-
-	if xOk && xIdent.Name == "err" && yOk && yIdent.Name == "nil" {
-		return true
-	}
-
-	return false
-}
-
 // detectErrorIgnoringAssignment detects pattern where error is caught but ignored with assignment
 // Example violation: if err != nil { secretKeyBytes = []byte(h.secretKey) }
-func (r *FallbackReturnRule) detectErrorIgnoringAssignment(ctx *core.FileContext, ifStmt *ast.IfStmt) []*core.Violation {
+func (r *FallbackReturnRule) detectErrorIgnoringAssignment(ctx *core.FileContext, ifStmt *ast.IfStmt, errName string) []*core.Violation {
 	var violations []*core.Violation
 
 	// Skip if body is empty
@@ -644,10 +393,17 @@ func (r *FallbackReturnRule) detectErrorIgnoringAssignment(ctx *core.FileContext
 		return nil
 	}
 
+	// A branch that reads the error (res.Message = err.Error(), a log line,
+	// a collector) records the failure; the values assigned beside it are
+	// the report, not a replacement for it.
+	if nodeReadsIdent(ifStmt.Body, errName) {
+		return nil
+	}
+
 	// Переприсваивание err результатом нового вызова — retry: судьбу ошибки
 	// решает следующая проверка err, а сопутствующие присваивания (настройка
 	// повторной команды) не являются fallback-значениями
-	if r.bodyReassignsErrFromCall(ifStmt.Body) {
+	if r.bodyReassignsErrFromCall(ifStmt.Body, errName) {
 		return nil
 	}
 
@@ -659,7 +415,7 @@ func (r *FallbackReturnRule) detectErrorIgnoringAssignment(ctx *core.FileContext
 		}
 
 		// Skip if this is err = ... (error reassignment)
-		if r.isErrReassignment(assignStmt) {
+		if assignsName(assignStmt, errName) {
 			continue
 		}
 
@@ -689,26 +445,14 @@ func (r *FallbackReturnRule) detectErrorIgnoringAssignment(ctx *core.FileContext
 // bodyReassignsErrFromCall reports whether the block reassigns err with the
 // result of a new call (retry pattern). A literal like `err = nil` does not
 // count — silencing an error is not a retry.
-func (r *FallbackReturnRule) bodyReassignsErrFromCall(body *ast.BlockStmt) bool {
+func (r *FallbackReturnRule) bodyReassignsErrFromCall(body *ast.BlockStmt, errName string) bool {
 	for _, stmt := range body.List {
 		assign, ok := stmt.(*ast.AssignStmt)
-		if !ok || !r.isErrReassignment(assign) {
+		if !ok || !assignsName(assign, errName) {
 			continue
 		}
 		for _, rhs := range assign.Rhs {
 			if _, ok := rhs.(*ast.CallExpr); ok {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// isErrReassignment checks if assignment is to err variable
-func (r *FallbackReturnRule) isErrReassignment(stmt *ast.AssignStmt) bool {
-	for _, lhs := range stmt.Lhs {
-		if ident, ok := lhs.(*ast.Ident); ok {
-			if ident.Name == "err" {
 				return true
 			}
 		}
@@ -815,22 +559,12 @@ func (r *FallbackReturnRule) hasLegitimateComment(lines []string, lineIdx int) b
 	return false
 }
 
-// hasLoggingStatement checks if there's a logging statement in the if block before the assignment
+// hasLoggingStatement checks if the if block logs (see isLoggerCall).
 func (r *FallbackReturnRule) hasLoggingStatement(ifStmt *ast.IfStmt) bool {
 	for _, stmt := range ifStmt.Body.List {
-		// Check for logging calls like logger.Warn, log.Printf, s.logger.Error, etc.
 		if exprStmt, ok := stmt.(*ast.ExprStmt); ok {
-			if call, ok := exprStmt.X.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					methodName := strings.ToLower(sel.Sel.Name)
-					// Common logging methods
-					if methodName == "warn" || methodName == "error" || methodName == "info" ||
-						methodName == "debug" || methodName == "printf" || methodName == "println" ||
-						methodName == "warnstructured" || methodName == "errorstructured" ||
-						methodName == "infostructured" {
-						return true
-					}
-				}
+			if call, ok := exprStmt.X.(*ast.CallExpr); ok && isLoggerCall(call) {
+				return true
 			}
 		}
 	}
@@ -928,7 +662,7 @@ func (r *FallbackReturnRule) checkForImplicitFallback(ctx *core.FileContext, fun
 		}
 
 		// Skip if the return includes an error
-		if r.returnsError(nextReturn) {
+		if returnCarriesError(nextReturn) {
 			continue
 		}
 
@@ -951,17 +685,23 @@ func (r *FallbackReturnRule) checkForImplicitFallback(ctx *core.FileContext, fun
 func (r *FallbackReturnRule) bodyReturnsWithoutError(body *ast.BlockStmt) bool {
 	for _, stmt := range body.List {
 		if retStmt, ok := stmt.(*ast.ReturnStmt); ok {
-			return !r.returnsError(retStmt)
+			return !returnCarriesError(retStmt)
 		}
 	}
 	return false
 }
 
-// hasFallbackCommentNearby checks if theres a comment with fallback nearby
+// hasFallbackCommentNearby checks if theres a comment with fallback nearby.
+// Only the comment part of a line counts: code that names a fallbackX value is
+// not a comment announcing a fallback.
 func (r *FallbackReturnRule) hasFallbackCommentNearby(lines []string, lineIdx int) bool {
 	// Check 3 lines before
 	for i := lineIdx; i >= 0 && i > lineIdx-4; i-- {
-		lineLower := strings.ToLower(lines[i])
+		commentIdx := strings.Index(lines[i], "//")
+		if commentIdx < 0 {
+			continue
+		}
+		lineLower := strings.ToLower(lines[i][commentIdx:])
 		if strings.Contains(lineLower, "fallback") || strings.Contains(lineLower, "fall back") ||
 			strings.Contains(lineLower, "fall-back") {
 			return true

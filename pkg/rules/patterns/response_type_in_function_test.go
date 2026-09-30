@@ -140,6 +140,110 @@ func sendDashboard(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+// Repro: the contract built into a variable first and encoded after was not
+// seen — only a literal written right in the call or return counted. With
+// types every value of the local type that reaches a call or a return does.
+func TestResponseTypeInFunctionRule_ValueThroughVariable(t *testing.T) {
+	tests := []struct {
+		name   string
+		code   string
+		expect []string
+	}{
+		{
+			name: "composed into a variable, then encoded",
+			code: `package handlers
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+func Dash(w http.ResponseWriter, r *http.Request) {
+	type dashboard struct {
+		Balance int ` + "`json:\"balance\"`" + `
+	}
+	out := dashboard{Balance: 1}
+	_ = json.NewEncoder(w).Encode(out)
+}
+`,
+			expect: []string{"dashboard"},
+		},
+		{
+			name: "slice of the local type returned",
+			code: `package handlers
+
+func rows() any {
+	type row struct {
+		ID string ` + "`json:\"id\"`" + `
+	}
+	var out []row
+	for _, id := range []string{"a", "b"} {
+		out = append(out, row{ID: id})
+	}
+	return out
+}
+`,
+			expect: []string{"row"},
+		},
+		{
+			name: "declared in a nested block",
+			code: `package handlers
+
+import (
+	"encoding/json"
+	"io"
+)
+
+func write(w io.Writer, ok bool) error {
+	if ok {
+		type status struct {
+			OK bool ` + "`json:\"ok\"`" + `
+		}
+		st := &status{OK: true}
+		return json.NewEncoder(w).Encode(st)
+	}
+	return nil
+}
+`,
+			expect: []string{"status"},
+		},
+		{
+			name: "decode target filled by the decoder",
+			code: `package handlers
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+func parse(req *http.Request) (string, error) {
+	type body struct {
+		Amount string ` + "`json:\"amount\"`" + `
+	}
+	var payload body
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		return "", err
+	}
+	return payload.Amount, nil
+}
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			violations := runRuleOnFiles(t, NewResponseTypeInFunctionRule(), map[string]string{"handlers/handler.go": tt.code})
+			var got []string
+			for _, v := range violations {
+				name, ok := v.Context["type"].(string)
+				require.True(t, ok)
+				got = append(got, name)
+			}
+			assert.ElementsMatch(t, tt.expect, got)
+		})
+	}
+}
+
 // Тестовые файлы правило не смотрит: локальный контракт в тесте — это фикстура.
 func TestResponseTypeInFunctionRule_SkipsTestFiles(t *testing.T) {
 	rule := NewResponseTypeInFunctionRule()

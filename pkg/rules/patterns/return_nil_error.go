@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/types"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -29,60 +30,73 @@ func NewReturnNilErrorRule() *ReturnNilErrorRule {
 	}
 }
 
-// AnalyzeFile checks for (nil, nil) returns
+// AnalyzeFile checks one file without type information: the fallback the
+// project analysis uses for files no type-checked package covers.
 func (r *ReturnNilErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.IsTestFile() {
-		return nil
-	}
+	return r.analyze(ctx, nil)
+}
 
-	if ctx.GoAST == nil {
-		return nil
-	}
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *ReturnNilErrorRule) RequiresSSA() bool { return false }
 
-	var violations []*core.Violation
+// AnalyzeGoProject checks every file; a first result declared through a named
+// type is judged by its underlying type.
+func (r *ReturnNilErrorRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok {
-			return true
+// analyze checks for (nil, nil) returns. info is nil for a file without type
+// information.
+func (r *ReturnNilErrorRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	return analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
+		if !r.hasErrorReturn(fn) || r.isValidNilNilPattern(fn) || nilIsEmptyFirstResult(fn, info) {
+			return nil
 		}
 
-		// Check if function returns (T, error) pattern
-		if !r.hasErrorReturn(fn) {
-			return true
-		}
+		var violations []*core.Violation
+		// Returns of a nested closure answer for the closure's own signature.
+		forEachOwnStatement(fn.Body, func(stmt ast.Stmt) {
+			ret, ok := stmt.(*ast.ReturnStmt)
+			if !ok || !r.isNilNilReturn(ret) {
+				return
+			}
+			line := ctx.LineFor(ret)
+			if ctx.IsSuppressed(line, r.Name()) {
+				return
+			}
+			v := r.CreateViolation(ctx.RelPath, line, "Returning (nil, nil) - possible missing error")
+			v.WithCode(ctx.GetLine(line))
+			v.WithSuggestion("Return an error or a valid value, not both nil")
+			v.WithContext("pattern", "nil_nil_return")
+			violations = append(violations, v)
+		})
+		return violations
+	})
+}
 
-		// Skip valid (nil, nil) patterns
-		if r.isValidNilNilPattern(fn) {
-			return true
-		}
-
-		// Find return statements with (nil, nil)
-		ast.Inspect(fn.Body, func(inner ast.Node) bool {
-			ret, ok := inner.(*ast.ReturnStmt)
-			if !ok {
+// nilIsEmptyFirstResult reports whether nil is the empty value of the first
+// result: a slice, a map, a channel or a function. (nil, nil) from such a
+// function says "nothing", not "an error went missing". Without type
+// information only a type spelled out in the signature is known; a named type
+// stays unknown and the return is still reported.
+func nilIsEmptyFirstResult(fn *ast.FuncDecl, info *types.Info) bool {
+	first := fn.Type.Results.List[0].Type
+	if info != nil {
+		if typ := info.TypeOf(first); typ != nil {
+			switch typ.Underlying().(type) {
+			case *types.Slice, *types.Map, *types.Chan, *types.Signature:
 				return true
 			}
-
-			if r.isNilNilReturn(ret) {
-				line := ctx.LineFor(ret)
-				if ctx.IsSuppressed(line, r.Name()) {
-					return true
-				}
-				v := r.CreateViolation(ctx.RelPath, line, "Returning (nil, nil) - possible missing error")
-				v.WithCode(ctx.GetLine(line))
-				v.WithSuggestion("Return an error or a valid value, not both nil")
-				v.WithContext("pattern", "nil_nil_return")
-				violations = append(violations, v)
-			}
-
-			return true
-		})
-
+			return false
+		}
+	}
+	switch t := first.(type) {
+	case *ast.ArrayType:
+		return t.Len == nil
+	case *ast.MapType, *ast.ChanType, *ast.FuncType:
 		return true
-	})
-
-	return violations
+	}
+	return false
 }
 
 // isValidNilNilPattern checks if (nil, nil) return is a valid Go pattern
@@ -164,24 +178,5 @@ func (r *ReturnNilErrorRule) hasErrorReturn(fn *ast.FuncDecl) bool {
 
 // isNilNilReturn checks if return statement returns (nil, nil)
 func (r *ReturnNilErrorRule) isNilNilReturn(ret *ast.ReturnStmt) bool {
-	if len(ret.Results) != 2 {
-		return false
-	}
-
-	// Check both values are nil
-	for _, result := range ret.Results {
-		if !r.isNil(result) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func (r *ReturnNilErrorRule) isNil(expr ast.Expr) bool {
-	ident, ok := expr.(*ast.Ident)
-	if !ok {
-		return false
-	}
-	return ident.Name == "nil"
+	return len(ret.Results) == 2 && isNilIdent(ret.Results[0]) && isNilIdent(ret.Results[1])
 }
