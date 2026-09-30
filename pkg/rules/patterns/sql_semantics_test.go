@@ -1,9 +1,13 @@
 package patterns
 
 import (
+	"go/parser"
+	"go/token"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
@@ -87,4 +91,59 @@ func Save(db DB, hash, status string) {
 	db.ExecContext(ctx, upsert, row.ID, row.Hash, status)
 }
 `))
+}
+
+// A date cut in the session's zone moves with the machine: the lookup of a
+// row written on one machine misses it on another and writes it again.
+func TestSQLSessionTimeZone(t *testing.T) {
+	files := map[string]string{
+		"storage/migrations/001_init.up.sql": sqlSchemaMigration,
+		"storage/db.go": `package storage
+
+import "fmt"
+
+func DSN(host, name string) string {
+	return fmt.Sprintf("host=%s dbname=%s sslmode=disable", host, name)
+}
+
+var fields = []string{"name", "timezone"}
+`,
+		"storage/repo.go": `package storage
+
+func Find(db DB, account string, day time.Time) {
+	db.QueryRowContext(ctx, "SELECT id FROM positions WHERE account_id = $1 AND created_at::date = $2", account, day)
+	db.QueryRowContext(ctx, "SELECT id FROM positions WHERE account_id = $1 AND created_at >= $2 AND created_at < $3", account, day, day.AddDate(0, 0, 1))
+	db.QueryContext(ctx, "SELECT id FROM positions WHERE updated_at > CURRENT_DATE")
+}
+`,
+	}
+	run := func(files map[string]string, path string) []int {
+		_, contexts := rulestest.Module(t, files)
+		rule := NewSQLSessionTimeZoneRule()
+		for _, ctx := range contexts {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, ctx.Path, ctx.Content, parser.ParseComments)
+			require.NoError(t, err)
+			ctx.SetGoAST(fset, file)
+		}
+		rule.UseProjectFiles(contexts)
+		for _, ctx := range contexts {
+			if ctx.RelPath == path {
+				return sqlRuleLines(t, rule, ctx)
+			}
+		}
+		t.Fatal("no " + path)
+		return nil
+	}
+	assert.Equal(t, []int{4, 6}, run(files, "storage/repo.go"))
+	assert.Equal(t, []int{6}, run(files, "storage/db.go"))
+
+	files["storage/db.go"] = strings.Replace(files["storage/db.go"], "sslmode=disable", "sslmode=disable timezone=UTC", 1)
+	assert.Empty(t, run(files, "storage/repo.go"))
+	files["storage/db.go"] = strings.Replace(files["storage/db.go"], " timezone=UTC", "", 1) + `
+func Params(config *pgx.ConnConfig) { config.RuntimeParams["timezone"] = "UTC" }
+`
+	assert.Empty(t, run(files, "storage/repo.go"))
+	delete(files, "storage/db.go")
+	assert.Empty(t, run(files, "storage/repo.go"), "the connection string comes from the environment")
 }
