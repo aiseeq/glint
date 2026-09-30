@@ -14,10 +14,15 @@ func init() {
 	rules.Register(NewTechDebtRule())
 }
 
-// TechDebtRule detects technical debt patterns beyond simple TODO comments
+// TechDebtRule detects technical debt patterns beyond simple TODO comments in
+// the // comments of Go, TypeScript and JavaScript files. Comments about old
+// code paths that legacy-comment-marker reports are not reported again here.
 type TechDebtRule struct {
 	*rules.BaseRule
 	patterns map[string]*debtPattern
+	// order is the pattern names sorted once: the first matching pattern wins,
+	// and the choice must not depend on map iteration.
+	order []string
 }
 
 type debtPattern struct {
@@ -33,21 +38,22 @@ func NewTechDebtRule() *TechDebtRule {
 		BaseRule: rules.NewBaseRule(
 			"tech-debt",
 			"patterns",
-			"Detects technical debt patterns: legacy markers, fake refactoring, compliance spam",
+			"Detects technical debt markers in code comments: obsolete code, fake refactoring, temporary or broken code, unfinished work",
 			core.SeverityMedium,
 		),
 	}
 	r.initPatterns()
+	r.order = slices.Sorted(maps.Keys(r.patterns))
 	return r
 }
 
 func (r *TechDebtRule) initPatterns() {
 	r.patterns = map[string]*debtPattern{
-		"legacy_marker": {
-			regex:       regexp.MustCompile(`(?i)//.*\b(legacy\s+code|deprecated\s+code|old\s+code|remove\s+legacy|migrate\s+from\s+legacy)`),
+		"obsolete_code_marker": {
+			regex:       regexp.MustCompile(`(?i)//.*\b(deprecated\s+code|old\s+code)`),
 			severity:    core.SeverityMedium,
-			description: "Legacy/deprecated code marker",
-			suggestion:  "Remove legacy code or create migration task",
+			description: "Obsolete code marker",
+			suggestion:  "Remove the obsolete code or create a migration task",
 		},
 		"fake_refactoring": {
 			regex:       regexp.MustCompile(`(?i)//.*(?:wrapper|делегирует|delegates?).*(?:вместо|instead\s+of).*(?:удаления|removal|eliminating)`),
@@ -56,7 +62,10 @@ func (r *TechDebtRule) initPatterns() {
 			suggestion:  "Remove wrapper and use canonical implementation directly",
 		},
 		"temporary_solution": {
-			regex:       regexp.MustCompile(`(?i)//\s*(temporary|временн|temp\s+fix|quick\s+fix|hotfix|workaround)`),
+			// "temporary" alone is an ordinary adjective (temporary credentials,
+			// a temporary file); it marks debt only next to what is temporary
+			// about the code, or as a label ("Temporary:").
+			regex:       regexp.MustCompile(`(?i)//\s*(temporary\s+(?:fix|hack|workaround|solution|patch|code|measure|kludge|hotfix)\b|temporary\s*(?:[:!(\-—]|$)|временн\S*\s+(?:решени|костыл|фикс|заплатк|обход|хак)|temp\s+fix|quick\s+fix|hotfix|workaround)`),
 			severity:    core.SeverityMedium,
 			description: "Temporary solution marker",
 			suggestion:  "Replace with proper implementation",
@@ -77,7 +86,9 @@ func (r *TechDebtRule) initPatterns() {
 			suggestion:  "Remove dead code - git remembers history",
 		},
 		"broken_feature": {
-			regex:       regexp.MustCompile(`(?i)//\s*(broken|не\s+работает|doesn.?t\s+work|сломан)`),
+			// "broken pipe", "broken links" describe the world, not the code:
+			// "broken" counts as a label or next to a code noun.
+			regex:       regexp.MustCompile(`(?i)//\s*(broken\s*(?:[:!(\-—]|$)|broken\s+(?:feature|functionality|code|implementation|logic|behaviou?r|test|build|fix|hack|workaround)\b|не\s+работает|doesn.?t\s+work|сломан)`),
 			severity:    core.SeverityHigh,
 			description: "Broken feature marker",
 			suggestion:  "Fix the broken feature or remove it",
@@ -102,7 +113,10 @@ func (r *TechDebtRule) initPatterns() {
 
 // AnalyzeFile checks for tech debt patterns
 func (r *TechDebtRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if ctx.IsTestFile() || r.shouldSkipFile(ctx.RelPath) {
+	if !ctx.IsGoFile() && !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
+		return nil
+	}
+	if ctx.IsTestFile() {
 		return nil
 	}
 
@@ -119,7 +133,7 @@ func (r *TechDebtRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 			continue
 		}
 
-		for _, patternName := range slices.Sorted(maps.Keys(r.patterns)) {
+		for _, patternName := range r.order {
 			pattern := r.patterns[patternName]
 			if pattern.regex.MatchString(line) {
 				v := r.CreateViolation(ctx.RelPath, lineNum+1, pattern.description)
@@ -190,25 +204,4 @@ func declaresName(line, name string) bool {
 
 func isIdentChar(c byte) bool {
 	return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-}
-
-func (r *TechDebtRule) shouldSkipFile(path string) bool {
-	if strings.HasSuffix(path, "legacy_comment_marker.go") || strings.HasSuffix(path, "legacy_identifier.go") {
-		return true
-	}
-	skipPatterns := []string{
-		"vendor/",
-		"node_modules/",
-		"/generated/",
-		".generated.",
-	}
-
-	lowerPath := strings.ToLower(path)
-	for _, pattern := range skipPatterns {
-		if strings.Contains(lowerPath, pattern) {
-			return true
-		}
-	}
-
-	return false
 }

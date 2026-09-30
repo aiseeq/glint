@@ -52,16 +52,18 @@ func NewUnfalsifiableTestCaseRule() *UnfalsifiableTestCaseRule {
 		),
 		// describe/suite — это группа, а не тест: утверждения живут в отдельных test(...)
 		testStart: regexp.MustCompile(`^\s*(?:it|test)(?:\.(?:only|skip|fixme|failing|concurrent|serial))?\s*\(\s*['"` + "`" + `](.+?)['"` + "`" + `]\s*,`),
-		// начало проверки: expect(, но не expect.any/expect.objectContaining внутри матчера
-		assertionStart: regexp.MustCompile(`\bexpect\s*\(`),
+		// начало проверки: expect(, expect.soft(, expect.poll(, но не expect.any/
+		// expect.objectContaining внутри матчера
+		assertionStart: regexp.MustCompile(`\bexpect(?:\.(?:soft|poll))?\s*\(`),
 		// разбираемая целиком однострочная проверка; хвостовой комментарий не мешает
-		assertion: regexp.MustCompile(`expect\s*\((.*)\)\s*\.\s*(?:resolves\s*\.\s*|rejects\s*\.\s*)?(?:not\s*\.\s*)?(\w+)\s*\((.*?)\)\s*;?\s*(?://.*)?$`),
+		assertion: regexp.MustCompile(`expect(?:\.(?:soft|poll))?\s*\((.*)\)\s*\.\s*(?:resolves\s*\.\s*|rejects\s*\.\s*)?(?:not\s*\.\s*)?(\w+)\s*\((.*?)\)\s*;?\s*(?://.*)?$`),
 		// body/html/div и звёздочка есть на любой отрисованной странице, включая 404
 		genericScope: regexp.MustCompile(`locator\s*\(\s*['"` + "`" + `]\s*(?:body|html|div|\*|div,\s*body)\s*['"` + "`" + `]\s*\)|^\s*page\s*$`),
 		countFrom:    regexp.MustCompile(`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+([^\n;]*\.count\s*\(\s*\))`),
 		// `if (resp.ok())`, `if (items.length > 0)` — условие ложно ровно тогда, когда
 		// проверяемое поведение сломано, поэтому проверки внутри до дела не доходят.
-		optionalGuard: regexp.MustCompile(`^\s*\}?\s*if\s*\(\s*[^)]*(?:\.ok\s*\(\s*\)|\.length\s*>\s*0|\.length\s*!==?\s*0|!==?\s*(?:null|undefined)|^\s*[A-Za-z_$][\w$.]*\s*)\)\s*\{`),
+		// Условие из одного значения (`if (row)`) — проверка на истинность, та же ловушка.
+		optionalGuard: regexp.MustCompile(`^\s*\}?\s*if\s*\(\s*(?:[^)]*(?:\.ok\s*\(\s*\)|\.length\s*>\s*0|\.length\s*!==?\s*0|!==?\s*(?:null|undefined))|[A-Za-z_$][\w$.]*)\s*\)\s*\{`),
 		// Действия, которые сами роняют тест при поломке: клик по несуществующему элементу
 		// бросает исключение, ожидание состояния — тоже, а вызванный хелпер может
 		// проверять внутри. HTTP-запрос сюда не входит: request.get не падает на 4xx.
@@ -131,6 +133,7 @@ type openTest struct {
 	unfals  int  // не могут упасть сами по себе
 	hidden  int  // спрятаны за условием, ложным ровно при поломке
 	mayFail bool // в теле есть действие или хелпер, способные уронить тест
+	opened  bool // тело теста уже открылось фигурной скобкой
 }
 
 // verdict сообщает, почему тест не может упасть, и сколько в нём проверок.
@@ -160,9 +163,9 @@ func (t *openTest) verdict() (reason, assertions string) {
 
 // countScopes собирает переменные, в которые записан счётчик по заведомо общему
 // локатору: сравнение такого счётчика с нулём ничего не проверяет.
-func (r *UnfalsifiableTestCaseRule) countScopes(ctx *core.FileContext) map[string]bool {
+func (r *UnfalsifiableTestCaseRule) countScopes(lines []string) map[string]bool {
 	counters := map[string]bool{}
-	for _, line := range ctx.Lines {
+	for _, line := range lines {
 		if m := r.countFrom.FindStringSubmatch(line); m != nil && r.genericScope.MatchString(m[2]) {
 			counters[m[1]] = true
 		}
@@ -195,7 +198,6 @@ func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 	}
 
 	var violations []*core.Violation
-	counters := r.countScopes(ctx)
 
 	var current *openTest
 	depth := 0
@@ -216,9 +218,20 @@ func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 		current = nil
 	}
 
-	for i, line := range ctx.Lines {
+	// Проверки читаются по тексту без комментариев (селекторы и коды ответа —
+	// в строках), глубина скобок — только по коду.
+	src := newJSSource(ctx.Lines)
+	counters := r.countScopes(src.text)
+
+	for i, line := range src.text {
 		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "*") {
+		if trimmed != "" {
+			// Заголовок без тела (`test('x', helper)`) кончается сам; следующий тест
+			// начинается заново, а не дописывается к нему.
+			if current != nil && !current.opened && i > current.line-1 && r.testStart.MatchString(line) {
+				guardDepth = 0
+				flush()
+			}
 			if current == nil {
 				if m := r.testStart.FindStringSubmatch(line); m != nil {
 					current = &openTest{name: m[1], line: i + 1, depth: depth}
@@ -236,11 +249,16 @@ func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 				}
 			}
 		}
-		depth += strings.Count(line, "{") - strings.Count(line, "}")
+		code := src.code[i]
+		if current != nil && strings.Contains(code, "{") {
+			current.opened = true
+		}
+		depth += strings.Count(code, "{") - strings.Count(code, "}")
 		if guardDepth > 0 && depth < guardDepth {
 			guardDepth = 0
 		}
-		if current != nil && depth <= current.depth && i > current.line-1 {
+		// Однострочный тест закрывается на своей же строке.
+		if current != nil && depth <= current.depth && (current.opened || i > current.line-1) {
 			guardDepth = 0
 			flush()
 		}

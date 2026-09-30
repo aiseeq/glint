@@ -30,16 +30,16 @@ func init() {
 //   - var dummy_response = ...              — snake_case value identifier
 //
 // Skips:
-//   - Test files
-//   - Generated files (*.gen.go, *_gen.go, /generated/)
+//   - Test files (generated files such as MockGen output are dropped by the
+//     core for every rule)
 //   - //nolint:mock-identifier opt-outs on the declaration line
-type MockIdentifierRule struct {
+type MockIdentifierRule struct { // mock-identifier: safe — named after the marker this rule detects
 	*rules.BaseRule
 	mockPattern *regexp.Regexp
 }
 
 // NewMockIdentifierRule creates the rule
-func NewMockIdentifierRule() *MockIdentifierRule {
+func NewMockIdentifierRule() *MockIdentifierRule { // mock-identifier: safe — named after the marker this rule detects
 	return &MockIdentifierRule{
 		BaseRule: rules.NewBaseRule(
 			"mock-identifier",
@@ -62,10 +62,6 @@ func NewMockIdentifierRule() *MockIdentifierRule {
 // AnalyzeFile checks for Mock/Fake/Stub/Dummy identifiers
 func (r *MockIdentifierRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() {
-		return nil
-	}
-
-	if r.shouldSkipFile(ctx) {
 		return nil
 	}
 
@@ -130,22 +126,4 @@ func (r *MockIdentifierRule) violation(ctx *core.FileContext, pos token.Pos, nam
 	v.WithContext("kind", kind)
 	v.WithContext("name", name)
 	return v
-}
-
-// shouldSkipFile excludes generated files and diagnostic implementations
-// whose subject is the marker itself (this rule, the stub-detection rules).
-func (r *MockIdentifierRule) shouldSkipFile(ctx *core.FileContext) bool {
-	path := ctx.RelPath
-	if strings.HasSuffix(path, "mock_identifier.go") ||
-		strings.HasSuffix(path, "stub_method.go") ||
-		strings.HasSuffix(path, "nil_return_stub.go") {
-		return true
-	}
-	if strings.HasSuffix(path, ".gen.go") || strings.HasSuffix(path, "_gen.go") {
-		return true
-	}
-	if strings.Contains(path, "/generated/") || strings.Contains(path, "vendor/") {
-		return true
-	}
-	return false
 }

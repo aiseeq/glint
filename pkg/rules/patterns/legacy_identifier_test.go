@@ -84,10 +84,40 @@ func registerLegacyAdminRoutes() {}`,
 			expectedCount: 0,
 		},
 		{
-			name: "generated file skipped",
+			// Generated code is recognised by its "Code generated … DO NOT EDIT." header
+			// and dropped by the core for every rule; a file name proves nothing.
+			name: "gen.go name without the generated header is checked",
 			path: "/src/backend/types.gen.go",
 			code: `package types
 type LegacyUser struct{}`,
+			expectedCount: 1,
+		},
+		{
+			name: "lowerCamel var legacyMode",
+			path: "/src/app/app.go",
+			code: `package app
+var legacyMode = true`,
+			expectedCount: 1,
+		},
+		{
+			name: "lowerCamel func legacyHandler",
+			path: "/src/app/app.go",
+			code: `package app
+func legacyHandler() {}`,
+			expectedCount: 1,
+		},
+		{
+			name: "legacy followed by a digit",
+			path: "/src/app/app.go",
+			code: `package app
+func legacy2Handler() {}`,
+			expectedCount: 1,
+		},
+		{
+			name: "legacyish words NOT flagged",
+			path: "/src/app/app.go",
+			code: `package app
+var legacyish, legacies = 1, 2`,
 			expectedCount: 0,
 		},
 		{
@@ -130,15 +160,16 @@ func (r *Router) RegisterAdminRoutes() {}`,
 	}
 }
 
-func TestLegacyIdentifierRuleSkipsDiagnosticImplementation(t *testing.T) {
-	code := `package patterns
-type LegacyCommentMarkerRule struct{}
-func NewLegacyIdentifierRule() *LegacyCommentMarkerRule { return nil }`
-	ctx := core.NewFileContext("/src/pkg/rules/patterns/legacy_identifier.go", "/src", []byte(code), core.DefaultConfig())
+// A project file that happens to share a name with a glint source is checked
+// like any other file.
+func TestLegacyIdentifierRuleChecksFilesNamedLikeGlintSources(t *testing.T) {
+	code := `package rules
+func LegacyServe() {}`
+	ctx := core.NewFileContext("/src/rules/legacy_identifier.go", "/src", []byte(code), core.DefaultConfig())
 	parser := core.NewParser()
 	fset, file, err := parser.ParseGoFile(ctx.Path, ctx.Content)
 	require.NoError(t, err)
 	ctx.SetGoAST(fset, file)
 
-	require.Empty(t, NewLegacyIdentifierRule().AnalyzeFile(ctx))
+	require.Len(t, NewLegacyIdentifierRule().AnalyzeFile(ctx), 1)
 }

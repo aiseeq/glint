@@ -106,3 +106,16 @@ func TestTodoCommentSeverity(t *testing.T) {
 		})
 	}
 }
+
+// Markdown lists and fenced examples are documentation, not code comments.
+func TestTodoCommentOnlyCodeFiles(t *testing.T) {
+	rule := NewTodoCommentRule()
+	code := "# Docs\n\n* TODO: describe the deploy\n\n```go\n// TODO: example\n```\n"
+	ctx := core.NewFileContext("/test/docs/README.md", "/test", []byte(code), core.DefaultConfig())
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+
+	for _, path := range []string{"/test/web/api.ts", "/test/web/api.js", "/test/api.go"} {
+		ctx := core.NewFileContext(path, "/test", []byte("// TODO: implement"), core.DefaultConfig())
+		assert.Len(t, rule.AnalyzeFile(ctx), 1, "code file must be checked: %s", path)
+	}
+}

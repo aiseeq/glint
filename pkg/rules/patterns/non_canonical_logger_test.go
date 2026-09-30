@@ -161,6 +161,54 @@ import "log/slog"
 func H() { slog.Info("ok") }`,
 			expectedCount: 0,
 		},
+		{
+			// The project's own logger package is also called log — it is the canonical one.
+			name: "project's own log package is NOT flagged",
+			path: "/src/app/app.go",
+			code: `package app
+import "example.com/misc/internal/log"
+func Serve() { log.Printf("started") }`,
+			expectedCount: 0,
+		},
+		{
+			name: "aliased stdlib log is flagged",
+			path: "/src/app/app.go",
+			code: `package app
+import stdlog "log"
+func Serve() { stdlog.Printf("started") }`,
+			expectedCount: 1,
+		},
+		{
+			name: "local variable named log is NOT the log package",
+			path: "/src/app/app.go",
+			code: `package app
+func Serve(log Logger) { log.Printf("started") }`,
+			expectedCount: 0,
+		},
+		{
+			name: "zerolog subpackage import is flagged",
+			path: "/src/app/app.go",
+			code: `package app
+import "github.com/rs/zerolog/log"
+func Serve() { log.Info().Msg("x") }`,
+			expectedCount: 1,
+		},
+		{
+			name: "zapcore import is flagged",
+			path: "/src/app/app.go",
+			code: `package app
+import "go.uber.org/zap/zapcore"
+var level = zapcore.InfoLevel`,
+			expectedCount: 1,
+		},
+		{
+			name: "module with a forbidden prefix but another name is NOT flagged",
+			path: "/src/app/app.go",
+			code: `package app
+import "go.uber.org/zapx"
+var x = zapx.X`,
+			expectedCount: 0,
+		},
 	}
 
 	for _, tt := range tests {

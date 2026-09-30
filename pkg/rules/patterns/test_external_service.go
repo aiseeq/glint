@@ -4,11 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/constant"
+	"go/token"
 	"go/types"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -68,8 +69,9 @@ func NewTestExternalServiceRule() *TestExternalServiceRule {
 			core.SeverityHigh,
 		),
 		guardFunctions: map[string]bool{},
-		// Имя переменной окружения, которое означает секрет, а не переключатель.
-		credentialName: regexp.MustCompile(`(?i)(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?ID)`),
+		// Имя переменной окружения, которое означает секрет, а не переключатель. Слово
+		// секрета — целый сегмент между подчёркиваниями: KEY в KEYCLOAK секретом не делает.
+		credentialName: regexp.MustCompile(`(?i)(?:^|_)(?:API_?KEYS?|ACCESS_?KEYS?|PRIVATE_?KEYS?|SECRET_?KEYS?|KEYS?|TOKENS?|SECRETS?|PASSWORDS?|PASSWD|CREDENTIALS?|API_?ID)(?:_|$)`),
 		// Имена объявлений строже имён переменных окружения: подстрока «key» есть и в
 		// «monkey», а здесь ошибка выводит целый пакет во внешние.
 		credentialField: regexp.MustCompile(`(?i)^[a-z0-9_]*(api_?key|access_?key|private_?key|public_?key|secret_?key|apisecret|api_secret|clientsecret|client_secret|signature)[a-z0-9_]*$`),
@@ -178,11 +180,13 @@ type outboundPackage struct {
 	// evidence renders inside the message: either the vendor URL or the credential the
 	// package signs its requests with.
 	evidence string
+	// name is the package's own name — what an unaliased import is called at the call site.
+	name string
 	// entries are the exported functions that actually hand a test the wire: either they
 	// reach an HTTP call themselves, or they return a client whose methods do. Everything
 	// else the package exports — config readers, decoders, constructors of inert types —
 	// is left alone, otherwise a test that never sends anything gets reported.
-	entries map[string]bool
+	entries map[string]liveEntry
 }
 
 // outboundPackages finds packages that issue HTTP requests to somebody else's server.
@@ -239,7 +243,7 @@ func (r *TestExternalServiceRule) outboundPackages(ctx *core.GoProjectContext) m
 		if len(entries) == 0 {
 			continue
 		}
-		outbound[pkg.Package.PkgPath] = outboundPackage{evidence: evidence, entries: entries}
+		outbound[pkg.Package.PkgPath] = outboundPackage{evidence: evidence, name: pkg.Package.Name, entries: entries}
 	}
 	return outbound
 }
@@ -351,10 +355,7 @@ func (r *TestExternalServiceRule) externalURLLiteral(file *ast.File) string {
 			return false
 		}
 		if field, ok := n.(*ast.Field); ok {
-			// Обходим поле без его тега.
-			for _, name := range field.Names {
-				ast.Inspect(name, func(ast.Node) bool { return true })
-			}
+			// Обходим тип поля без его тега; в именах литералов не бывает.
 			if field.Type != nil {
 				ast.Inspect(field.Type, func(inner ast.Node) bool {
 					if lit, ok := inner.(*ast.BasicLit); ok {
@@ -392,11 +393,11 @@ func (r *TestExternalServiceRule) hasLocalURLLiteral(file *ast.File) bool {
 			return false
 		}
 		lit, ok := n.(*ast.BasicLit)
-		if !ok || lit.Kind.String() != "STRING" {
+		if !ok {
 			return true
 		}
-		value, err := strconv.Unquote(lit.Value)
-		if err != nil {
+		value, ok := goStringLiteral(lit)
+		if !ok {
 			return true
 		}
 		match := r.externalURL.FindStringSubmatch(value)
@@ -440,11 +441,8 @@ func (r *TestExternalServiceRule) credentialIdentifier(file *ast.File) string {
 
 // externalHost returns the literal's URL when it points at a third-party host.
 func (r *TestExternalServiceRule) externalHost(lit *ast.BasicLit) string {
-	if lit.Kind.String() != "STRING" {
-		return ""
-	}
-	value, err := strconv.Unquote(lit.Value)
-	if err != nil {
+	value, ok := goStringLiteral(lit)
+	if !ok {
 		return ""
 	}
 	match := r.externalURL.FindStringSubmatch(value)
@@ -461,7 +459,7 @@ func (r *TestExternalServiceRule) externalHost(lit *ast.BasicLit) string {
 func (r *TestExternalServiceRule) analyzeTestFile(
 	file *core.FileContext, outbound map[string]outboundPackage, outboundDirs map[string]outboundPackage,
 ) []*core.Violation {
-	imports := importAliases(file.GoAST)
+	imports := importAliases(file.GoAST, outbound)
 	// Тест, поднявший свой httptest-сервер, никуда наружу не идёт.
 	usesHTTPTest := false
 	for _, imp := range file.GoImports {
@@ -476,10 +474,12 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 	// в http://localhost:8090.
 	drivesOwnServer := r.hasLocalURLLiteral(file.GoAST)
 
+	testingPkgs := testingImportNames(file.GoAST)
+
 	var violations []*core.Violation
 	for _, decl := range file.GoAST.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil || !strings.HasPrefix(fn.Name.Name, "Test") {
+		if !ok || fn.Body == nil || goTestFuncKind(fn, testingPkgs) == goNotTest {
 			continue
 		}
 		if r.hasGuard(fn) {
@@ -513,7 +513,7 @@ func (r *TestExternalServiceRule) hasGuard(fn *ast.FuncDecl) bool {
 		if !ok {
 			return true
 		}
-		if name := calleeName(call); name != "" && r.guardFunctions[name] {
+		if name := core.ExtractFullFunctionName(call); name != "" && r.guardFunctions[name] {
 			guarded = true
 			return false
 		}
@@ -522,18 +522,10 @@ func (r *TestExternalServiceRule) hasGuard(fn *ast.FuncDecl) bool {
 	return guarded
 }
 
-// calleeName renders `pkg.Func` or `Func` for a call expression.
+// calleeName renders `pkg.Func` or `Func` for a call expression; the rendering
+// itself is core.ExtractFullFunctionName.
 func calleeName(call *ast.CallExpr) string {
-	switch fun := call.Fun.(type) {
-	case *ast.Ident:
-		return fun.Name
-	case *ast.SelectorExpr:
-		if ident, ok := fun.X.(*ast.Ident); ok {
-			return ident.Name + "." + fun.Sel.Name
-		}
-		return fun.Sel.Name
-	}
-	return ""
+	return core.ExtractFullFunctionName(call)
 }
 
 // outboundCalls reports calls into packages that talk to a third party.
@@ -561,13 +553,18 @@ func (r *TestExternalServiceRule) outboundCalls(
 			return true
 		}
 		evidence, ok := outbound[path]
-		if !ok || !evidence.entries[sel.Sel.Name] {
+		if !ok {
+			return true
+		}
+		entry, ok := evidence.entries[sel.Sel.Name]
+		if !ok {
 			return true
 		}
 		// Конструктор, которому транспорт передали как nil, никуда не пойдёт: так тесты
 		// собирают настоящий сервис ради его работы с БД. ProjectA-шный тест на пыль
-		// (cryptoprov.NewDepositService(nil, …)) именно такой.
-		if hasNilArgument(call) {
+		// (cryptoprov.NewDepositService(nil, …)) именно такой. nil на месте опций или
+		// контекста запрос не отменяет.
+		if entry.nilTransport(call) {
 			return true
 		}
 		key := path + "." + sel.Sel.Name
@@ -608,7 +605,11 @@ func (r *TestExternalServiceRule) inPackageCalls(
 			return true
 		}
 		ident, ok := call.Fun.(*ast.Ident)
-		if !ok || !own.entries[ident.Name] || hasNilArgument(call) {
+		if !ok {
+			return true
+		}
+		entry, ok := own.entries[ident.Name]
+		if !ok || entry.nilTransport(call) {
 			return true
 		}
 		if reported[ident.Name] {
@@ -628,16 +629,6 @@ func (r *TestExternalServiceRule) inPackageCalls(
 		return true
 	})
 	return violations
-}
-
-// hasNilArgument reports whether the call passes an explicit nil.
-func hasNilArgument(call *ast.CallExpr) bool {
-	for _, arg := range call.Args {
-		if ident, ok := arg.(*ast.Ident); ok && ident.Name == "nil" {
-			return true
-		}
-	}
-	return false
 }
 
 // credentialGates reports skips that only check whether a secret is configured.
@@ -701,8 +692,8 @@ func (r *TestExternalServiceRule) credentialEnvName(expr ast.Expr) string {
 	if !ok {
 		return ""
 	}
-	name, err := strconv.Unquote(lit.Value)
-	if err != nil || !r.credentialName.MatchString(name) {
+	name, ok := goStringLiteral(lit)
+	if !ok || !r.credentialName.MatchString(name) {
 		return ""
 	}
 	return name
@@ -741,8 +732,24 @@ func isEmptyStringLiteral(expr ast.Expr) bool {
 	if !ok {
 		return false
 	}
-	value, err := strconv.Unquote(lit.Value)
-	return err == nil && value == ""
+	value, ok := goStringLiteral(lit)
+	return ok && value == ""
+}
+
+// goStringLiteral returns the value of a string literal, or false for any other
+// literal kind. The literal comes from go/parser, which only produces
+// well-formed string literals, so decoding one cannot fail; a failure means the
+// AST was built by hand wrongly, and that is a bug to surface, not a value to
+// guess.
+func goStringLiteral(lit *ast.BasicLit) (string, bool) {
+	if lit.Kind != token.STRING {
+		return "", false
+	}
+	value := constant.MakeFromLiteral(lit.Value, token.STRING, 0)
+	if value.Kind() != constant.String {
+		panic(fmt.Sprintf("malformed string literal from go/parser: %s", lit.Value))
+	}
+	return constant.StringVal(value), true
 }
 
 // bodySkips reports whether the block calls t.Skip / t.Skipf / t.SkipNow.
@@ -772,20 +779,23 @@ func bodySkips(body *ast.BlockStmt) bool {
 	return skips
 }
 
-// importAliases maps the identifier used in code to the imported package path.
-// Explicit aliases win; otherwise the last path segment is the package name, which
-// matches Go's own default and is what a test file writes at the call site.
-func importAliases(file *ast.File) map[string]string {
+// importAliases maps the identifier a test file uses at the call site to the imported
+// path of an outbound package. An unaliased import is called by the package's own
+// name, which the loaded package states — the last path segment is not it for
+// ".../v2" or "gopkg.in/x.v1". Imports of other packages cannot reach an outbound
+// client and are left out.
+func importAliases(file *ast.File, outbound map[string]outboundPackage) map[string]string {
 	aliases := make(map[string]string, len(file.Imports))
 	for _, imp := range file.Imports {
-		path, err := strconv.Unquote(imp.Path.Value)
-		if err != nil {
+		path, ok := goStringLiteral(imp.Path)
+		if !ok {
 			continue
 		}
-		name := path
-		if idx := strings.LastIndex(path, "/"); idx >= 0 {
-			name = path[idx+1:]
+		pkg, ok := outbound[path]
+		if !ok {
+			continue
 		}
+		name := pkg.name
 		if imp.Name != nil {
 			if imp.Name.Name == "_" || imp.Name.Name == "." {
 				continue

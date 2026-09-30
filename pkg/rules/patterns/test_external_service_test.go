@@ -221,6 +221,31 @@ func TestVaultSnapshot_CollectLive(t *testing.T) {
 			expectMatch: false,
 		},
 		{
+			// KEY внутри KEYCLOAK — не секрет: это переключатель набора тестов.
+			name: "переключатель со словом KEY внутри другого слова",
+			code: `package integration
+
+func TestKeycloakOptIn(t *testing.T) {
+	if os.Getenv("RUN_KEYCLOAK_SUITE") == "" {
+		t.Skip("opt-in")
+	}
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "слитное APIKEY — секрет",
+			code: `package integration
+
+func TestPayments(t *testing.T) {
+	if os.Getenv("PAYPROV_APIKEY") == "" {
+		t.Skip("no key")
+	}
+}
+`,
+			expectMatch: true,
+		},
+		{
 			name: "skip по short-режиму не гейт секретом",
 			code: `package integration
 
@@ -540,4 +565,140 @@ func TestLiveChannel(t *testing.T) {
 	require.Len(t, violations, 1, "%v", messages(violations))
 	assert.Equal(t, "outbound_client", violations[0].Context["kind"])
 	assert.Contains(t, violations[0].Message, "TestLiveChannel")
+}
+
+// nil гасит находку только на месте транспорта: nil вместо необязательных опций
+// запрос не отменяет, и payprov.FetchRates(ctx, nil) уходит к провайдеру.
+func TestTestExternalServiceRule_NilOptionsStillReachTheWire(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"payprov/client.go": `package payprov
+
+import (
+	"context"
+	"net/http"
+)
+
+const baseURL = "https://api.payprov.io/v1"
+
+type Opts struct{ Verbose bool }
+
+func FetchRates(ctx context.Context, opts *Opts) (*http.Response, error) {
+	_ = opts
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/rates", nil)
+	if err != nil {
+		return nil, err
+	}
+	return http.DefaultClient.Do(req)
+}
+`,
+		"svc/svc_test.go": `package svc
+
+import (
+	"context"
+	"testing"
+
+	"example.com/rulestest/payprov"
+)
+
+func TestRatesLive(t *testing.T) {
+	_, _ = payprov.FetchRates(context.Background(), nil)
+}
+
+func TestRatesLive2(t *testing.T) {
+	_, _ = payprov.FetchRates(context.Background(), &payprov.Opts{})
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 2, "%v", messages(violations))
+	assert.Contains(t, violations[0].Message, "TestRatesLive ")
+	assert.Contains(t, violations[1].Message, "TestRatesLive2")
+}
+
+// nil на месте интерфейса, который реализует живой клиент пакета, — транспорта нет.
+func TestTestExternalServiceRule_NilInterfaceTransportIsSilent(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"payprov/client.go": `package payprov
+
+import "net/http"
+
+type Doer interface {
+	Take(id string) error
+}
+
+type Client struct{ http *http.Client }
+
+func (c *Client) Take(id string) error {
+	req, err := http.NewRequest("POST", "https://api.payprov.io/take/"+id, nil)
+	if err != nil {
+		return err
+	}
+	_, err = c.http.Do(req)
+	return err
+}
+
+type Service struct{ doer Doer }
+
+func NewService(doer Doer) *Service { return &Service{doer: doer} }
+
+func (s *Service) Allocate(id string) error { return s.doer.Take(id) }
+
+func Allocate(doer Doer, id string) error { return (&Client{}).Take(id) }
+`,
+		"svc/svc_test.go": `package svc
+
+import (
+	"testing"
+
+	"example.com/rulestest/payprov"
+)
+
+func TestAllocateOffline(t *testing.T) {
+	_ = payprov.Allocate(nil, "42")
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations, "%v", messages(violations))
+}
+
+// Пакет с версией в пути импорта называется по своему package, а не "v2".
+func TestTestExternalServiceRule_VersionedImportPath(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"provider/v2/client.go": `package provider
+
+import "net/http"
+
+func Fetch() error {
+	_, err := http.Get("https://api.provider.io/v2/things")
+	return err
+}
+`,
+		"svc/svc_test.go": `package svc
+
+import (
+	"testing"
+
+	"example.com/rulestest/provider/v2"
+)
+
+func TestFetchLive(t *testing.T) {
+	_ = provider.Fetch()
+}
+
+// Testdata is not a test function: a lower-case letter follows "Test".
+func Testdata() {
+	_ = provider.Fetch()
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1, "%v", messages(violations))
+	assert.Contains(t, violations[0].Message, "TestFetchLive")
 }

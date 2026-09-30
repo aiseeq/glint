@@ -3,7 +3,6 @@ package patterns
 import (
 	"go/ast"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -23,8 +22,10 @@ func init() {
 // («column already exists»), а чужие тесты получают базу, не совпадающую со схемой из
 // миграций, и падают в стороне от причины.
 //
-// Правило требует, чтобы рядом с DDL стояла отмена: t.Cleanup или defer. Что именно там
-// написано, правило не проверяет — важно, что автор про возврат схемы подумал.
+// Правило требует, чтобы рядом с DDL стояла отмена: t.Cleanup или defer, которые сами
+// отправляют SQL в базу. Какой именно запрос там написан, правило не проверяет — важно,
+// что автор про возврат схемы подумал; а defer cancel() или t.Cleanup(cancel) схему не
+// трогают и отменой не считаются.
 type TestSchemaMutationWithoutCleanupRule struct {
 	*rules.BaseRule
 
@@ -47,9 +48,9 @@ func NewTestSchemaMutationWithoutCleanupRule() *TestSchemaMutationWithoutCleanup
 	}
 }
 
-// undoRegistered reports whether the function registers any deferred undo: t.Cleanup(...) или
-// defer. Содержимое не разбирается: наличие отмены — уже решение автора, а её правильность
-// проверяет сам прогон.
+// undoRegistered reports whether the function registers a deferred undo that talks to the
+// database: t.Cleanup(...) или defer, внутри которых есть вызов исполнителя SQL. Сам запрос
+// не разбирается: его правильность проверяет прогон.
 func undoRegistered(fn *ast.FuncDecl) bool {
 	found := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -58,9 +59,23 @@ func undoRegistered(fn *ast.FuncDecl) bool {
 		}
 		switch node := n.(type) {
 		case *ast.DeferStmt:
-			found = true
+			found = executesSQL(node.Call)
 		case *ast.CallExpr:
 			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Cleanup" {
+				found = executesSQL(node)
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// executesSQL reports whether the subtree calls a SQL executor (Exec, ExecContext, …).
+func executesSQL(root ast.Node) bool {
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && executors[sel.Sel.Name] {
 				found = true
 			}
 		}
@@ -94,12 +109,12 @@ func (r *TestSchemaMutationWithoutCleanupRule) ddlLiteral(fn *ast.FuncDecl) (nod
 		}
 		for _, arg := range call.Args {
 			lit, ok := arg.(*ast.BasicLit)
-			if !ok || lit.Kind.String() != "STRING" {
+			if !ok {
 				continue
 			}
-			value, err := strconv.Unquote(lit.Value)
-			if err != nil {
-				value = lit.Value
+			value, ok := goStringLiteral(lit)
+			if !ok {
+				continue
 			}
 			if r.ddl.MatchString(value) && !r.sessionScoped.MatchString(value) {
 				node, text = lit, value
@@ -116,14 +131,17 @@ func (r *TestSchemaMutationWithoutCleanupRule) AnalyzeFile(ctx *core.FileContext
 	if !ctx.IsGoFile() || !ctx.IsTestFile() || ctx.GoAST == nil {
 		return nil
 	}
+	testingPkgs := testingImportNames(ctx.GoAST)
 
 	var violations []*core.Violation
 	for _, decl := range ctx.GoAST.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Recv != nil || fn.Body == nil {
+		if !ok || fn.Body == nil {
 			continue
 		}
-		if !strings.HasPrefix(fn.Name.Name, "Test") && !strings.HasPrefix(fn.Name.Name, "Benchmark") {
+		switch goTestFuncKind(fn, testingPkgs) {
+		case goTestCase, goBenchmark, goFuzz:
+		default:
 			continue
 		}
 		lit, sql := r.ddlLiteral(fn)

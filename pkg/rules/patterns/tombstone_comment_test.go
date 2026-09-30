@@ -155,6 +155,47 @@ func counts() {}
 			wantCount: 0,
 		},
 		{
+			// Godoc of an error or a condition in the past tense describes behaviour.
+			name:     "was/were past-tense behaviour is not a tombstone",
+			filename: "store.go",
+			code: `package store
+
+// ErrGone is returned when the key was deleted concurrently.
+var ErrGone = errors.New("gone")
+
+// Get fails with ErrGone if the record was removed by another worker.
+func Get() error { return ErrGone }
+
+// Rows that were deleted by the sweeper are skipped.
+func List() {}
+`,
+			wantCount: 0,
+		},
+		{
+			// A godoc code block (//<tab>) quotes an example; it does not annotate this code.
+			name:     "godoc code block example is not a tombstone",
+			filename: "rules/doc.go",
+			code: `package rules
+
+// Rule detects notes like these:
+//
+//	// GetDB removed — architectural boundary violation eliminated
+//	_ = disableFixes // provider fixes removed
+func Rule() {}
+`,
+			wantCount: 0,
+		},
+		{
+			name:     "file named like a glint source is checked",
+			filename: "rules/tombstone_comment.go",
+			code: `package rules
+
+// GetDB removed — architectural boundary violation eliminated
+func Serve() {}
+`,
+			wantCount: 1,
+		},
+		{
 			name:     "test files are skipped",
 			filename: "handler_test.go",
 			code: `package routing

@@ -8,16 +8,12 @@ import (
 	"github.com/aiseeq/glint/pkg/rules"
 )
 
-const (
-	matchesWithKeyword = 2 // Regex match with keyword
-	matchesWithMessage = 3 // Regex match with keyword and message
-)
-
 func init() {
 	rules.Register(NewTodoCommentRule())
 }
 
-// TodoCommentRule finds actionable TODO/FIXME/HACK/XXX comments in code
+// TodoCommentRule finds actionable TODO/FIXME/HACK/XXX comments in Go,
+// TypeScript and JavaScript code. Markdown and other prose files are not code.
 type TodoCommentRule struct {
 	*rules.BaseRule
 	pattern *regexp.Regexp
@@ -41,6 +37,10 @@ func NewTodoCommentRule() *TodoCommentRule {
 
 // AnalyzeFile finds actionable task comments
 func (r *TodoCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if !ctx.IsGoFile() && !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
+		return nil
+	}
+
 	var violations []*core.Violation
 
 	for lineNum, line := range ctx.Lines {
@@ -62,23 +62,22 @@ func (r *TodoCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		}
 		commentText = strings.TrimSpace(commentText)
 
+		// The pattern is case-sensitive and has both groups: a match carries the
+		// upper-case keyword and the (possibly empty) message.
 		matches := r.pattern.FindStringSubmatch(commentText)
-		if len(matches) >= matchesWithKeyword {
-			keyword := strings.ToUpper(matches[1])
-			message := ""
-			if len(matches) >= matchesWithMessage {
-				message = strings.TrimSpace(matches[2])
-			}
-
-			v := r.CreateViolation(ctx.RelPath, lineNum+1, formatMessage(keyword, message))
-			v.WithCode(trimmed)
-
-			if keyword == "FIXME" || keyword == "HACK" {
-				v.Severity = core.SeverityMedium
-			}
-
-			violations = append(violations, v)
+		if matches == nil {
+			continue
 		}
+		keyword, message := matches[1], strings.TrimSpace(matches[2])
+
+		v := r.CreateViolation(ctx.RelPath, lineNum+1, formatMessage(keyword, message))
+		v.WithCode(trimmed)
+
+		if keyword == "FIXME" || keyword == "HACK" {
+			v.Severity = core.SeverityMedium
+		}
+
+		violations = append(violations, v)
 	}
 
 	return violations

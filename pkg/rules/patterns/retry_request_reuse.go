@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -244,7 +245,7 @@ func requestHasNoBody(file *ast.File, info *types.Info, call *ast.CallExpr, buil
 		return ok && variable.Pkg() != nil && variable.Pkg().Path() == "net/http"
 	}
 	pkg, ok := sel.X.(*ast.Ident)
-	return ok && importAliases(file)[pkg.Name] == "net/http"
+	return ok && helpers.PackageAliases(file, `"net/http"`, "http")[pkg.Name]
 }
 
 // requestParameterNames collects *http.Request parameters: the caller built
@@ -282,5 +283,5 @@ func isHTTPRequestPointerType(file *ast.File, info *types.Info, expr ast.Expr) b
 		return false
 	}
 	pkg, ok := sel.X.(*ast.Ident)
-	return ok && importAliases(file)[pkg.Name] == "net/http"
+	return ok && helpers.PackageAliases(file, `"net/http"`, "http")[pkg.Name]
 }

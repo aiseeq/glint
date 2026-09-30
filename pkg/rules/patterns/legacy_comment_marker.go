@@ -18,31 +18,28 @@ func init() {
 // legacy-identifier) and godoc-level Deprecated comments (covered by
 // deprecated-comment).
 //
-// Why inline: composite_router.go:831 has `// 2. Legacy mode: separate admin/
-// user path handling` — not a symbol name, not a godoc. The comment itself
-// admits a runtime legacy branch exists, which CLAUDE.md's "No legacy, only
-// current code" forbids.
+// Why inline: a router carrying `// 2. Legacy mode: separate admin/user path
+// handling` — not a symbol name, not a godoc. The comment itself admits a
+// runtime legacy branch exists, which CLAUDE.md's "No legacy, only current
+// code" forbids.
 //
-// Detects in Go and TypeScript/TSX files:
+// Detects in Go, TypeScript and JavaScript files:
 //   - `// Legacy mode`, `// Legacy compatibility`, `// Legacy:`
 //   - `// legacy foo`, `// (legacy)`, `// SMTP_* (legacy)`
 //   - multiline /* Legacy ... */ / /** Legacy ... */ prefix
 //
 // Skips:
-//   - Test files and generated code
+//   - Test files (generated code is dropped by the core for every rule)
 //   - Comments that quote CLAUDE.md policy (contain "CLAUDE.md", "No legacy",
 //     "policy", "запрет", "запрещ") — self-references to the rule itself
 //   - //nolint:legacy-comment-marker on the line
-//   - The legacy-identifier rule's own file (which prints "Legacy" as a
-//     string literal for diagnostic messages — it's the rule implementation,
-//     not a legacy code path)
-type LegacyCommentMarkerRule struct {
+type LegacyCommentMarkerRule struct { // legacy-identifier: safe — named after the marker this rule detects
 	*rules.BaseRule
 	policyQuoteMarkers []string
 }
 
 // NewLegacyCommentMarkerRule creates the rule
-func NewLegacyCommentMarkerRule() *LegacyCommentMarkerRule {
+func NewLegacyCommentMarkerRule() *LegacyCommentMarkerRule { // legacy-identifier: safe — named after the marker this rule detects
 	r := &LegacyCommentMarkerRule{
 		BaseRule: rules.NewBaseRule(
 			"legacy-comment-marker",
@@ -63,15 +60,12 @@ func NewLegacyCommentMarkerRule() *LegacyCommentMarkerRule {
 	return r
 }
 
-// AnalyzeFile scans line-by-line for legacy comments in Go and TS files.
+// AnalyzeFile scans line-by-line for legacy comments in Go, TypeScript and JavaScript files.
 func (r *LegacyCommentMarkerRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() && !ctx.IsTypeScriptFile() {
+	if !ctx.IsGoFile() && !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
 		return nil
 	}
 	if ctx.IsTestFile() {
-		return nil
-	}
-	if r.shouldSkipFile(ctx.RelPath) {
 		return nil
 	}
 
@@ -121,7 +115,9 @@ func (r *LegacyCommentMarkerRule) tryMatch(ctx *core.FileContext, lineNum int, l
 		return nil
 	}
 
-	lower := strings.ToLower(commentText)
+	// Suppression directives name rules (nolint:legacy-identifier,
+	// legacy-identifier: safe); naming a rule admits nothing about the code.
+	lower := suppressionDirectiveRE.ReplaceAllString(strings.ToLower(commentText), " ")
 	// Policy quote — self-reference to the rule being enforced, not a legacy code path.
 	for _, m := range r.policyQuoteMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) {
@@ -160,12 +156,17 @@ func (r *LegacyCommentMarkerRule) extractComment(line string, isBlock bool) stri
 	return core.CommentPart(line)
 }
 
+// suppressionDirectiveRE matches, in a lowercased comment, what names a rule
+// rather than admits anything: a nolint rule list, a "<rule>: safe" marker, and
+// the rule names legacy-identifier and legacy-comment-marker in prose.
+var suppressionDirectiveRE = regexp.MustCompile(`nolint:[a-z0-9_-]+(?:,\s*[a-z0-9_-]+)*|[a-z0-9_-]+:\s*safe\b|\blegacy-(?:identifier|comment-marker)\b`)
+
 // legacyWordRE matches "legacy" as a standalone word, not as a substring
 // (e.g., "legally", "legacies").
-var legacyWordRE = regexp.MustCompile(`\blegacy\b`)
+var legacyWordRE = regexp.MustCompile(`\blegacy\b`) // legacy-identifier: safe — named after the marker this rule detects
 
 // containsLegacyWord checks that "legacy" appears as a standalone word.
-func containsLegacyWord(lowerText string) bool {
+func containsLegacyWord(lowerText string) bool { // legacy-identifier: safe — named after the marker this rule detects
 	return legacyWordRE.MatchString(lowerText)
 }
 
@@ -173,35 +174,14 @@ func containsLegacyWord(lowerText string) bool {
 // line that also contains a URL — i.e., the comment is describing a 3rd-party
 // service's capability (e.g., "Google Tag Manager (legacy browser support)"),
 // not admitting a legacy code path in this project.
-var urlAdjacentLegacyParenRE = regexp.MustCompile(`\([^)]*\blegacy\b[^)]*\)`)
+var urlAdjacentLegacyParenRE = regexp.MustCompile(`\([^)]*\blegacy\b[^)]*\)`) // legacy-identifier: safe — named after the marker this rule detects
 
 // isURLAdjacentLegacyDescriptor reports whether the line carries a URL plus a
 // parenthetical "legacy ..." descriptor — a canonical 3rd-party-capability
 // comment pattern that should not trip the rule.
-func isURLAdjacentLegacyDescriptor(rawLine, lowerComment string) bool {
+func isURLAdjacentLegacyDescriptor(rawLine, lowerComment string) bool { // legacy-identifier: safe — named after the marker this rule detects
 	if !strings.Contains(rawLine, "http://") && !strings.Contains(rawLine, "https://") {
 		return false
 	}
 	return urlAdjacentLegacyParenRE.MatchString(lowerComment)
-}
-
-// shouldSkipFile excludes generated code, vendor, and the file that prints
-// "Legacy" as part of its own diagnostic machinery.
-func (r *LegacyCommentMarkerRule) shouldSkipFile(relPath string) bool {
-	lower := strings.ToLower(relPath)
-	if strings.HasSuffix(lower, ".gen.go") ||
-		strings.HasSuffix(lower, "_gen.go") ||
-		strings.Contains(lower, "/generated/") ||
-		strings.Contains(lower, "node_modules/") ||
-		strings.Contains(lower, "vendor/") {
-		return true
-	}
-	// The legacy-identifier rule (and this one) reference "Legacy" as string
-	// literals / comments for diagnostic purposes. Skip them.
-	if strings.Contains(lower, "legacy_identifier.go") ||
-		strings.Contains(lower, "legacy_comment_marker.go") ||
-		strings.Contains(lower, "deprecated_comment.go") {
-		return true
-	}
-	return false
 }

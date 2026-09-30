@@ -78,6 +78,37 @@ func TestMigrationDuplicateVersionRule(t *testing.T) {
 		}
 	})
 
+	// golang-migrate parses the version as a number: 029 and 29 are one version.
+	t.Run("versions equal as numbers are duplicates", func(t *testing.T) {
+		rule := NewMigrationDuplicateVersionRule()
+		paths := writeMigrations(t, t.TempDir(),
+			"029_a.up.sql", "029_a.down.sql",
+			"29_b.up.sql", "29_b.down.sql",
+		)
+		var total []*core.Violation
+		for _, path := range paths {
+			total = append(total, analyzeMigrationFile(rule, path)...)
+		}
+		if len(total) != 2 {
+			t.Fatalf("want 2 violations (29_b up and down), got %d: %+v", len(total), total)
+		}
+	})
+
+	t.Run("same name under two spellings of one version is a duplicate", func(t *testing.T) {
+		rule := NewMigrationDuplicateVersionRule()
+		paths := writeMigrations(t, t.TempDir(), "029_a.up.sql", "29_a.up.sql")
+		if err := rule.Configure(map[string]any{"require_pairs": false}); err != nil {
+			t.Fatal(err)
+		}
+		var total []*core.Violation
+		for _, path := range paths {
+			total = append(total, analyzeMigrationFile(rule, path)...)
+		}
+		if len(total) != 1 {
+			t.Fatalf("want 1 violation, got %d: %+v", len(total), total)
+		}
+	})
+
 	t.Run("non-migration sql files are ignored", func(t *testing.T) {
 		rule := NewMigrationDuplicateVersionRule()
 		violations := analyzeMigrationFile(rule, "/repo/queries/report.sql")
@@ -111,5 +142,27 @@ func TestMigrationDuplicateVersionRule_Pairing(t *testing.T) {
 	}
 	if got[0].Severity != core.SeverityHigh {
 		t.Errorf("pairing violation must be HIGH, got %v", got[0].Severity)
+	}
+}
+
+// golang-migrate does not require down files: a project on it turns the pair
+// check off and keeps the duplicate-version check.
+func TestMigrationDuplicateVersionRule_PairingCanBeTurnedOff(t *testing.T) {
+	dir := t.TempDir()
+	lonelyUp := filepath.Join(dir, "030_c.up.sql")
+	if err := os.WriteFile(lonelyUp, []byte("-- sql"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rule := NewMigrationDuplicateVersionRule()
+	if err := rule.Configure(map[string]any{"require_pairs": false}); err != nil {
+		t.Fatal(err)
+	}
+	if got := analyzeMigrationFile(rule, lonelyUp); len(got) != 0 {
+		t.Fatalf("pair check is off, got: %+v", got)
+	}
+
+	if err := NewMigrationDuplicateVersionRule().Configure(map[string]any{"require_pairs": "no"}); err == nil {
+		t.Fatal("a non-boolean require_pairs must be a configuration error")
 	}
 }

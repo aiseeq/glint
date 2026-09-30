@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -207,7 +208,7 @@ func responseWriterParams(file *ast.File, info *types.Info) map[string]bool {
 				continue
 			}
 			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || importAliases(file)[pkg.Name] != "net/http" {
+			if !ok || !helpers.PackageAliases(file, `"net/http"`, "http")[pkg.Name] {
 				continue
 			}
 			for _, name := range field.Names {
