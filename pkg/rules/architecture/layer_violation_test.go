@@ -252,6 +252,77 @@ func Render(w http.ResponseWriter) {
 	assert.Empty(t, violations, "reports package must not be classified as repository layer")
 }
 
+// A health check asks the server for a scalar to prove the connection works:
+// the query reads no table, so there is nothing a repository would own.
+func TestLayerViolationRule_TablelessProbeQueryIsNotDataAccess(t *testing.T) {
+	violations := analyzeLayers(t, map[string]string{"internal/services/health/health.go": `package health
+
+import (
+	"context"
+	"database/sql"
+	"time"
+)
+
+type Checker struct{ db *sql.DB }
+
+func (c *Checker) ServerTime(ctx context.Context) (time.Time, error) {
+	var now time.Time
+	err := c.db.QueryRowContext(ctx, "SELECT NOW()").Scan(&now)
+	return now, err
+}
+
+const pingQuery = "SELECT 1"
+
+func (c *Checker) Ping(ctx context.Context) error {
+	var one int
+	return c.db.QueryRowContext(ctx, pingQuery).Scan(&one)
+}
+`})
+
+	assert.Empty(t, violations)
+}
+
+// A constant query that reads tables stays a violation however it starts —
+// a CTE opens with WITH, not SELECT — and so does a query whose text is not
+// known.
+func TestLayerViolationRule_QueryReadingTablesInService(t *testing.T) {
+	violations := analyzeLayers(t, map[string]string{"internal/services/stats/stats.go": `package stats
+
+import (
+	"context"
+	"database/sql"
+)
+
+type Service struct{ db *sql.DB }
+
+func (s *Service) Active(ctx context.Context) (*sql.Rows, error) {
+	return s.db.QueryContext(ctx, ` + "`" + `
+		WITH recent AS (SELECT account_id FROM events)
+		SELECT account_id, COUNT(*) FROM recent GROUP BY account_id` + "`" + `)
+}
+
+func (s *Service) Stamp(ctx context.Context) (*sql.Rows, error) {
+	return s.db.QueryContext(ctx, "SELECT NOW() FROM ledger")
+}
+
+func (s *Service) Run(ctx context.Context, q string) (*sql.Rows, error) {
+	return s.db.QueryContext(ctx, q)
+}
+
+func (s *Service) Settle(ctx context.Context) *sql.Row {
+	return s.db.QueryRowContext(ctx, "SELECT settle_pending_batches()")
+}
+`})
+
+	lines := make([]int, 0, len(violations))
+	for _, v := range violations {
+		if v.Context["pattern"] == "direct_sql_call" {
+			lines = append(lines, v.Line)
+		}
+	}
+	assert.Equal(t, []int{11, 17, 21, 25}, lines, "a stored function called through SELECT is data access")
+}
+
 // Helper function to create test context with parsed Go AST
 func createTestContext(t *testing.T, path, code string) *core.FileContext {
 	t.Helper()

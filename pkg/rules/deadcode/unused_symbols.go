@@ -19,6 +19,8 @@ func init() {
 // resolved by the type checker over every compiled file of the package; the
 // files the typed load leaves out — tests, files the build excludes on this
 // platform — are scanned by name, so a symbol only they use is not reported.
+// They are read from the package directory even when the project excluded
+// them from analysis.
 // A reference from inside the symbol's own declaration (a recursive call, a
 // type named only by its own methods) does not keep it alive.
 //
@@ -64,6 +66,7 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 
 	byFile := make(map[*core.FileContext][]declaredSymbol)
 	uses := make(map[types.Object]int)
+	mentions := newUntypedMentions(ctx)
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
 			return nil, errors.New("unused symbol: package has no typed syntax")
@@ -88,9 +91,10 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		own := make(ownDeclarations)
 		own.addPackage(pkg.Package.Syntax, info)
 		countOutsideUses(info, own, uses)
+		if err := mentions.addUnloadedPackageFiles(pkg); err != nil {
+			return nil, err
+		}
 	}
-
-	mentions := newUntypedMentions(ctx)
 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
 		var violations []*core.Violation

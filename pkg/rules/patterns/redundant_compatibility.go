@@ -46,17 +46,48 @@ func NewRedundantCompatibilityRule() *RedundantCompatibilityRule {
 // initCompatibilityCommentPatterns initializes patterns for detecting false compatibility comments
 func (r *RedundantCompatibilityRule) initCompatibilityCommentPatterns() []*regexp.Regexp {
 	return []*regexp.Regexp{
-		// Russian compatibility mentions
-		regexp.MustCompile(`(?i)обратн\w*\s*совместим`),
-		regexp.MustCompile(`(?i)для\s+совместимости`),
+		// Russian compatibility mentions; \w is ASCII in Go, so a Cyrillic
+		// ending needs \p{L}
+		regexp.MustCompile(`(?i)обратн\p{L}*\s*совместим`),
+		plainCompatibilityRU,
 		regexp.MustCompile(`(?i)legacy\s*support`),
 		regexp.MustCompile(`(?i)backward\s*compat`),
 		regexp.MustCompile(`(?i)backwards\s*compat`),
-		regexp.MustCompile(`(?i)for\s+compatibility`),
+		plainCompatibilityEN,
 		// Fallback key patterns
 		regexp.MustCompile(`(?i)fallback:?\s*(?:check|проверяем|key)`),
 		regexp.MustCompile(`(?i)alt(?:ernative)?\s*key`),
 	}
+}
+
+// plainCompatibilityRU and plainCompatibilityEN are the claims that name no
+// direction: "для совместимости" / "for compatibility". They are a backward
+// compatibility claim unless interfaceConformance says what they are
+// compatible with is a Go interface or type.
+var (
+	plainCompatibilityRU = regexp.MustCompile(`(?i)для\s+совместимости`)
+	plainCompatibilityEN = regexp.MustCompile(`(?i)for\s+compatibility`)
+)
+
+// interfaceConformance matches "compatible with <Go type>": methods added so
+// a type satisfies an interface — "для совместимости с RecordingLogger",
+// "с интерфейсом Store", "for compatibility with io.Writer", "with the Sink
+// interface". That is conformance, not an old API kept alive. The type is
+// recognised by its spelling: a qualified name, a CamelCase name of two words
+// or more, or the word interface next to it.
+var interfaceConformance = regexp.MustCompile(
+	`(?:(?i:для\s+совместимости\s+со?)|(?i:for\s+compatibility\s+with))\s+` +
+		`(?:(?i:интерфейс)` +
+		`|(?i:interface)\b` +
+		`|(?i:the\s+)?[A-Za-z_]\w*\s+(?i:interface)\b` +
+		`|[a-z_]\w*\.[A-Z]\w*` +
+		`|[A-Z][a-z0-9]+[A-Z]\w*)`)
+
+// isInterfaceConformance reports whether a plain compatibility pattern
+// matched a comment that speaks of satisfying a Go interface or type.
+func isInterfaceConformance(pattern *regexp.Regexp, comment string) bool {
+	return (pattern == plainCompatibilityRU || pattern == plainCompatibilityEN) &&
+		interfaceConformance.MatchString(comment)
 }
 
 // AnalyzeFile checks for redundant compatibility patterns
@@ -110,8 +141,9 @@ func (r *RedundantCompatibilityRule) detectFalseCompatibilityComments(ctx *core.
 
 		for _, pattern := range r.compatibilityCommentPatterns {
 			if pattern.MatchString(comment) {
-				// Skip if this is in an actual API compatibility layer
-				if r.isLegitimateCompatibilityContext(ctx, lineNum) {
+				// Skip if this is in an actual API compatibility layer or
+				// the comment speaks of satisfying an interface
+				if isInterfaceConformance(pattern, comment) || r.isLegitimateCompatibilityContext(ctx, lineNum) {
 					continue
 				}
 
