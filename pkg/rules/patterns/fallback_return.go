@@ -698,7 +698,7 @@ func readsIdentOutsideLoggers(node ast.Node, name string) bool {
 		case *ast.FuncLit:
 			return false
 		case *ast.CallExpr:
-			if isLoggerCall(current) || isFmtPrint(current) {
+			if isReportCall(current) {
 				return false
 			}
 		case *ast.AssignStmt:
@@ -713,6 +713,12 @@ func readsIdentOutsideLoggers(node ast.Node, name string) bool {
 		return !found
 	})
 	return found
+}
+
+// isReportCall reports a log line or a fmt.Print line: it tells an operator,
+// not the caller.
+func isReportCall(call *ast.CallExpr) bool {
+	return isLoggerCall(call) || isFmtPrint(call)
 }
 
 // isFmtPrint reports fmt.Print, Printf or Println.

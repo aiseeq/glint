@@ -187,7 +187,7 @@ func trueReturnAfterLogs(body *ast.BlockStmt) *ast.ReturnStmt {
 		if !ok {
 			return nil
 		}
-		if call, ok := exprStmt.X.(*ast.CallExpr); !ok || !(isLoggerCall(call) || isFmtPrint(call)) {
+		if call, ok := exprStmt.X.(*ast.CallExpr); !ok || !isReportCall(call) {
 			return nil
 		}
 	}
