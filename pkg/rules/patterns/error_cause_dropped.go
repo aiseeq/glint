@@ -247,6 +247,9 @@ func isLoggerCall(call *ast.CallExpr) bool {
 	if !ok {
 		return false
 	}
+	if isStderrPrint(sel, call) {
+		return true
+	}
 	verb := logVerb(sel)
 	if !loggingVerbs[verb] && !strings.HasPrefix(verb, "log") {
 		return false
@@ -257,6 +260,21 @@ func isLoggerCall(call *ast.CallExpr) bool {
 		return true
 	}
 	return isLoggerReceiver(sel.X)
+}
+
+// isStderrPrint reports fmt.Fprint, Fprintf or Fprintln to os.Stderr: the log
+// of a command-line tool.
+func isStderrPrint(sel *ast.SelectorExpr, call *ast.CallExpr) bool {
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok || pkg.Name != "fmt" || !strings.HasPrefix(sel.Sel.Name, "Fprint") || len(call.Args) == 0 {
+		return false
+	}
+	stream, ok := ast.Unparen(call.Args[0]).(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	osPkg, ok := stream.X.(*ast.Ident)
+	return ok && osPkg.Name == "os" && stream.Sel.Name == "Stderr"
 }
 
 func isMathPackage(expr ast.Expr) bool {

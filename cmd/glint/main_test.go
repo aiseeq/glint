@@ -276,7 +276,8 @@ func TestPrepareAnalysisUsesLoaderASTForProjectAndFileRules(t *testing.T) {
 	projectRule.requireSSA = true
 	fileRule := newASTStubRule()
 
-	contexts, _, project, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), []rules.Rule{projectRule, fileRule})
+	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), []rules.Rule{projectRule, fileRule}, false)
+	contexts, project := prepared.contexts, prepared.project
 	if err != nil {
 		t.Fatalf("prepare analysis: %v", err)
 	}
@@ -301,7 +302,8 @@ func TestPrepareAnalysisWithoutProjectRuleUsesWalkerParser(t *testing.T) {
 	root := writeAnalysisModule(t, "package check\n")
 	fileRule := newASTStubRule()
 
-	contexts, _, project, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), []rules.Rule{fileRule})
+	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), []rules.Rule{fileRule}, false)
+	contexts, project := prepared.contexts, prepared.project
 	if err != nil {
 		t.Fatalf("prepare analysis: %v", err)
 	}
@@ -320,7 +322,8 @@ func TestPrepareAnalysisSkipsGoProjectForTreeWithoutGoFiles(t *testing.T) {
 	}
 	projectRule := newProjectStubRule()
 
-	contexts, _, project, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), []rules.Rule{projectRule})
+	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), []rules.Rule{projectRule}, false)
+	contexts, project := prepared.contexts, prepared.project
 	if err != nil {
 		t.Fatalf("prepare analysis on TS-only tree must not fail: %v", err)
 	}
@@ -370,7 +373,8 @@ func TestAnalyzeProjectFiltersPackageFindings(t *testing.T) {
 			root := writeAnalysisModule(t, tt.source)
 			rule := newProjectStubRule()
 			rule.findings = []*core.Violation{rule.CreateViolation("check.go", 4, "finding")}
-			contexts, _, project, err := prepareAnalysis(core.NewGoProjectLoader(), root, tt.cfg, []rules.Rule{rule})
+			prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, tt.cfg, []rules.Rule{rule}, false)
+			contexts, project := prepared.contexts, prepared.project
 			if err != nil {
 				t.Fatalf("prepare analysis: %v", err)
 			}
@@ -390,7 +394,7 @@ func TestPrepareAnalysisReturnsLoaderTypeError(t *testing.T) {
 	root := writeAnalysisModule(t, "package check\n\nvar Number int = \"wrong\"\n")
 	rule := newProjectStubRule()
 
-	_, _, _, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), []rules.Rule{rule})
+	_, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), []rules.Rule{rule}, false)
 	if err == nil {
 		t.Fatal("expected typed loader error")
 	}
@@ -400,7 +404,8 @@ func TestAnalyzeProjectReturnsRuleError(t *testing.T) {
 	root := writeAnalysisModule(t, "package check\n")
 	rule := newProjectStubRule()
 	rule.err = errors.New("project analysis failed")
-	contexts, _, project, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), []rules.Rule{rule})
+	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), []rules.Rule{rule}, false)
+	contexts, project := prepared.contexts, prepared.project
 	if err != nil {
 		t.Fatalf("prepare analysis: %v", err)
 	}

@@ -149,3 +149,57 @@ func TestPruneResultCachesRemovesOnlyStaleCaches(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"fresh.gob", "other.txt"}, names)
 }
+
+// analyzeCachedRoot runs one root through the check pipeline with the cache,
+// as runCheck does.
+func analyzeCachedRoot(t *testing.T, root string, list []rules.Rule) (*preparedRoot, core.ViolationList) {
+	t.Helper()
+	cfg := core.DefaultConfig()
+	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, cfg, list, true)
+	require.NoError(t, err)
+	require.NotNil(t, prepared.cache)
+	violations, err := analyzeProject(prepared.contexts, list, cfg, prepared.project, prepared.cache)
+	require.NoError(t, err)
+	require.NoError(t, prepared.cache.save())
+	return prepared, violations
+}
+
+// While no input of the typed load changes, the project is not loaded and its
+// findings come from the cache; the Go files still get their syntax trees. A
+// frontend edit changes no input, a Go edit anywhere in the module does.
+func TestProjectCacheSkipsTheLoadWhileGoInputsAreUnchanged(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	module := t.TempDir()
+	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
+	writeModuleFile(t, module, "svc/check.go", "package svc\n\nfunc Value() int { return 1 }\n")
+	writeModuleFile(t, module, "lib/lib.go", "package lib\n\nvar X = 1\n")
+	writeModuleFile(t, module, "svc/web/app.ts", "export const a = 1\n")
+	root := filepath.Join(module, "svc")
+	rule := newProjectStubRule()
+	rule.findings = []*core.Violation{rule.CreateViolation("check.go", 3, "finding")}
+	list := []rules.Rule{rule}
+
+	first, want := analyzeCachedRoot(t, root, list)
+	require.NotNil(t, first.project)
+	require.Equal(t, 1, rule.projectCalls)
+	require.Len(t, want, 1)
+
+	second, got := analyzeCachedRoot(t, root, list)
+	assert.Nil(t, second.project, "unchanged inputs are not loaded")
+	assert.Equal(t, 1, rule.projectCalls)
+	assert.Equal(t, fingerprint(want), fingerprint(got))
+	for _, ctx := range second.contexts {
+		if ctx.IsGoFile() {
+			assert.NotNil(t, ctx.GoAST, "%s keeps its syntax tree for the file rules", ctx.RelPath)
+		}
+	}
+
+	writeModuleFile(t, root, "web/app.ts", "export const a = 2\n")
+	analyzeCachedRoot(t, root, list)
+	assert.Equal(t, 1, rule.projectCalls, "a frontend edit leaves the typed load as it was")
+
+	writeModuleFile(t, module, "lib/lib.go", "package lib\n\nvar X = 2\n")
+	third, _ := analyzeCachedRoot(t, root, list)
+	assert.NotNil(t, third.project)
+	assert.Equal(t, 2, rule.projectCalls, "a Go edit outside the analyzed files still reloads")
+}

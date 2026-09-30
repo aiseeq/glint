@@ -82,7 +82,8 @@ func analyzeRoot(t *testing.T, loader *core.GoProjectLoader, root string) []stri
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	contexts, _, project, err := prepareAnalysis(loader, root, cfg, enabledRules)
+	prepared, err := prepareAnalysis(loader, root, cfg, enabledRules, false)
+	contexts, project := prepared.contexts, prepared.project
 	if err != nil {
 		t.Fatalf("prepare %s: %v", root, err)
 	}
