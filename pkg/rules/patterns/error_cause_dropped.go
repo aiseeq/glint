@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -132,7 +133,7 @@ func (r *ErrorCauseDroppedRule) droppedCauseEmission(body *ast.BlockStmt, errNam
 				terminates = true
 				return false
 			}
-			if isLoggerCall(node) {
+			if helpers.IsLoggerCall(node) {
 				// The cause may be logged — that is not the caller seeing it.
 				return false
 			}
@@ -237,84 +238,6 @@ func isErrorResponder(call *ast.CallExpr) bool {
 	}
 	lower := strings.ToLower(base)
 	return strings.Contains(lower, "error") || strings.Contains(lower, "fail") || strings.HasPrefix(lower, "abort")
-}
-
-// isLoggerCall recognises calls on a logger: the receiver mentions log (log, logger,
-// slog, zlog, r.logger, logging.X) or is a known logging package, and the method is a
-// logging verb. fmt.Print* is not a logger: on a CLI stdout is the caller.
-func isLoggerCall(call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	if isStderrPrint(sel, call) {
-		return true
-	}
-	verb := logVerb(sel)
-	if !loggingVerbs[verb] && !strings.HasPrefix(verb, "log") {
-		return false
-	}
-	// A method named log or logf says what it does whatever its receiver
-	// is called (c.log(...)); the math packages' Log is a logarithm.
-	if (verb == "log" || verb == "logf") && !isMathPackage(sel.X) {
-		return true
-	}
-	return isLoggerReceiver(sel.X)
-}
-
-// isStderrPrint reports fmt.Fprint, Fprintf or Fprintln to os.Stderr: the log
-// of a command-line tool.
-func isStderrPrint(sel *ast.SelectorExpr, call *ast.CallExpr) bool {
-	pkg, ok := sel.X.(*ast.Ident)
-	if !ok || pkg.Name != "fmt" || !strings.HasPrefix(sel.Sel.Name, "Fprint") || len(call.Args) == 0 {
-		return false
-	}
-	stream, ok := ast.Unparen(call.Args[0]).(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	osPkg, ok := stream.X.(*ast.Ident)
-	return ok && osPkg.Name == "os" && stream.Sel.Name == "Stderr"
-}
-
-func isMathPackage(expr ast.Expr) bool {
-	ident, ok := ast.Unparen(expr).(*ast.Ident)
-	return ok && (ident.Name == "math" || ident.Name == "cmplx")
-}
-
-// logVerb returns the method name of a logging call in lower case, without
-// the Structured/Context suffix of structured loggers: ErrorStructured and
-// WarnContext are error and warn.
-func logVerb(sel *ast.SelectorExpr) string {
-	verb := strings.ToLower(sel.Sel.Name)
-	return strings.TrimSuffix(strings.TrimSuffix(verb, "structured"), "context")
-}
-
-// isLoggerReceiver reports whether the receiver of a call is a logger: its
-// text mentions log (log, logger, slog, zlog, r.logger, logging.X) or it is a
-// known logging package.
-func isLoggerReceiver(expr ast.Expr) bool {
-	// A logger a factory returns — logging.Get().Error(...) — is named by the
-	// factory.
-	if call, ok := ast.Unparen(expr).(*ast.CallExpr); ok {
-		expr = call.Fun
-	}
-	receiver := strings.ToLower(exprText(expr))
-	return strings.Contains(receiver, "log") ||
-		strings.HasPrefix(receiver, "zap") || strings.HasPrefix(receiver, "logrus") ||
-		strings.HasPrefix(receiver, "zerolog") || strings.HasPrefix(receiver, "slog") ||
-		strings.HasPrefix(receiver, "sentry") || strings.HasPrefix(receiver, "span")
-}
-
-var loggingVerbs = map[string]bool{
-	"error": true, "errorf": true, "errorw": true, "errorln": true,
-	"warn": true, "warnf": true, "warnw": true, "warning": true, "warningf": true,
-	"info": true, "infof": true, "infow": true,
-	"debug": true, "debugf": true, "debugw": true,
-	"trace": true, "tracef": true,
-	"print": true, "printf": true, "println": true,
-	"log": true, "logf": true,
-	"capture": true, "captureexception": true, "capturemessage": true, "recorderror": true,
 }
 
 // isProcessStop recognises panic, os.Exit and log.Fatal*: the cause is printed and

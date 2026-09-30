@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -300,7 +301,7 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[st
 	case *ast.ExprStmt:
 		// Check for logging calls
 		if call, ok := s.X.(*ast.CallExpr); ok {
-			if isLoggerCall(call) {
+			if helpers.IsLoggerCall(call) {
 				return true
 			}
 			if r.isResponseCall(call) || callWritesResponse(call, writers) {

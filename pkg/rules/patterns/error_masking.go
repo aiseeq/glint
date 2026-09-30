@@ -607,7 +607,7 @@ func (r *ErrorMaskingRule) analyzeErrorBlock(stmts []ast.Stmt, errName string) b
 	var info blockAnalysis
 	for _, bodyStmt := range stmts {
 		if exprStmt, ok := bodyStmt.(*ast.ExprStmt); ok {
-			if call, ok := exprStmt.X.(*ast.CallExpr); ok && isLoggerCall(call) {
+			if call, ok := exprStmt.X.(*ast.CallExpr); ok && helpers.IsLoggerCall(call) {
 				info.hasLogging = true
 				if isErrorLevelLogCall(call) && nodeReadsIdent(call, errName) {
 					info.causeLogged = true
