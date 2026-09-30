@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -46,19 +47,20 @@ func (r *FrontendSilentCatchRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 		return nil
 	}
 
-	var violations []*core.Violation
-	for i := 0; i < len(ctx.Lines); i++ {
-		line := ctx.Lines[i]
-		if !r.catchStart.MatchString(line) {
-			continue
-		}
+	// Structure only: a brace or a "throw" inside a string or a comment is not code.
+	code := helpers.MaskJSCommentsAndStrings(ctx.Lines)
 
-		block, end := collectBraceBlock(ctx.Lines, i)
-		if end > i {
-			i = end
-		}
-		if r.isSilentCatch(block) {
-			violations = append(violations, r.violation(ctx, i+1, line))
+	var violations []*core.Violation
+	for i, line := range code {
+		for _, loc := range r.catchStart.FindAllStringIndex(line, -1) {
+			open := loc[1] - 1 // the pattern ends with the block's '{'
+			endLine, endCol, ok := jsBlockEnd(code, i, open)
+			if !ok {
+				continue
+			}
+			if r.isSilentCatch(jsSpan(code, i, open, endLine, endCol)) {
+				violations = append(violations, r.violation(ctx, i+1, ctx.Lines[i]))
+			}
 		}
 	}
 
@@ -98,26 +100,6 @@ func (r *FrontendSilentCatchRule) isSilentCatch(block string) bool {
 
 func (r *FrontendSilentCatchRule) shouldSkip(ctx *core.FileContext) bool {
 	return skipFrontendPath(ctx)
-}
-
-// skipFrontendPath is shared by the frontend rules: tests, e2e, build output and
-// generated files are not hand-written UI code.
-func skipFrontendPath(ctx *core.FileContext) bool {
-	// RelPath has no leading slash, so a top-level node_modules/ would slip past
-	// the "/node_modules/" check without the normalisation.
-	path := "/" + ctx.RelPath
-	if ctx.IsTestFile() {
-		return true
-	}
-	return strings.Contains(path, "/node_modules/") ||
-		(strings.Contains(path, "/e2e/") || strings.HasPrefix(path, "e2e/")) ||
-		strings.Contains(path, "/.next/") ||
-		strings.Contains(path, "/out/") ||
-		strings.Contains(path, "/dist/") ||
-		strings.Contains(path, "/generated/") ||
-		strings.Contains(path, "generated-") ||
-		strings.Contains(path, ".generated") ||
-		strings.HasSuffix(path, "jest.setup.js")
 }
 
 func (r *FrontendSilentCatchRule) violation(ctx *core.FileContext, lineNum int, line string) *core.Violation {

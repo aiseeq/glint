@@ -201,6 +201,64 @@ func main() {
 }`,
 			wantViolations: 0,
 		},
+		{
+			// Real-world shape: the header is a type in a conversion, not a call.
+			name: "reflect.SliceHeader conversion is flagged",
+			code: `package main
+
+import (
+	"reflect"
+	"unsafe"
+)
+
+func main() {
+	b := []byte("x")
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	_ = hdr
+}`,
+			wantViolations: 1,
+		},
+		{
+			name: "reflect.StringHeader variable and field are flagged",
+			code: `package main
+
+import "reflect"
+
+type view struct{ h reflect.StringHeader }
+
+func main() {
+	var h reflect.StringHeader
+	_ = h
+}`,
+			wantViolations: 2,
+		},
+		{
+			name: "aliased reflect import is resolved",
+			code: `package main
+
+import (
+	r "reflect"
+	"unsafe"
+)
+
+func main() {
+	b := []byte("x")
+	_ = (*r.SliceHeader)(unsafe.Pointer(&b))
+}`,
+			wantViolations: 1,
+		},
+		{
+			name: "a local package named reflect is not the standard one",
+			code: `package main
+
+import "example.com/app/reflect"
+
+func main() {
+	var h reflect.SliceHeader
+	_ = h
+}`,
+			wantViolations: 0,
+		},
 	}
 
 	for _, tt := range tests {

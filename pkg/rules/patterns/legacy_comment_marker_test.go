@@ -101,14 +101,53 @@ func LoadOld() {}
 			wantCount: 1,
 		},
 		{
-			name: "self-exclusion file skipped (legacy_identifier.go)",
+			// A user file named like a glint source is an ordinary file.
+			name: "file named like a glint source is checked",
 			code: `package rules
 
-// Legacy is flagged by this rule.
+// legacy code path kept for old clients
+func Serve() {}
+`,
+			filename:  "rules/test_external_service.go",
+			wantCount: 1,
+		},
+		{
+			name: "file named legacy_identifier.go is checked",
+			code: `package rules
+
+// Legacy mode for old clients
 var name = "legacy"
 `,
 			filename:  "rules/legacy_identifier.go",
+			wantCount: 1,
+		},
+		{
+			// A suppression names the sibling rule; naming a rule admits nothing.
+			name: "suppression directive of legacy-identifier is not an admission",
+			code: `package router
+
+func registerOldRoutes() {} //nolint:legacy-identifier // external API stability
+func serveOld() {} // legacy-identifier: safe — kept for the public SDK
+`,
+			filename:  "router/r.go",
 			wantCount: 0,
+		},
+		{
+			name: "admission next to a suppression directive is still reported",
+			code: `package router
+
+var x = 1 //nolint:magic-number // legacy mode default
+`,
+			filename:  "router/r.go",
+			wantCount: 1,
+		},
+		{
+			name: "javascript legacy comment",
+			code: `// Legacy mode: old payload shape
+export const x = 1
+`,
+			filename:  "web/src/api.js",
+			wantCount: 1,
 		},
 	}
 

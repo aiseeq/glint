@@ -3,6 +3,9 @@ package patterns
 import (
 	"go/ast"
 	"go/types"
+	"maps"
+	"slices"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -29,7 +32,7 @@ import (
 // package, and DeFiPositionService — ten repository-backed methods, one of which eventually
 // asks DefiLlama for a price — was reported in 24 tests that only exercise linking logic
 // against a local database.
-func liveEntryPoints(pkg *core.GoPackageContext) map[string]bool {
+func liveEntryPoints(pkg *core.GoPackageContext) map[string]liveEntry {
 	info := pkg.Package.TypesInfo
 	if info == nil || pkg.Package.Types == nil {
 		return nil
@@ -70,19 +73,116 @@ func liveEntryPoints(pkg *core.GoPackageContext) map[string]bool {
 		}
 	}
 
-	entries := map[string]bool{}
+	liveTypes := liveTypesOf(pkg.Package.Types, live)
+	entries := map[string]liveEntry{}
 	for key, fn := range decls {
 		if fn.Recv != nil || !fn.Name.IsExported() {
 			continue
 		}
 		if live[key] || returnsLiveType(fn, info, pkg.Package.Types, live) {
-			entries[fn.Name.Name] = true
+			entries[fn.Name.Name] = newLiveEntry(fn, info, liveTypes)
 		}
 	}
 	if len(entries) == 0 {
 		return nil
 	}
 	return entries
+}
+
+// liveEntry is an exported function through which a test reaches the wire.
+type liveEntry struct {
+	// transport marks the parameters that hand the function its connection: an HTTP
+	// client or round tripper, a type of this package whose methods reach the network,
+	// or an interface such a type implements. A nil passed there leaves the function
+	// nothing to send with — that is how tests build a real service for its database
+	// logic. A nil anywhere else (options, a callback, a context) sends all the same.
+	transport []bool
+	variadic  bool
+}
+
+// nilTransport reports whether the call passes nil in place of a transport parameter.
+func (e liveEntry) nilTransport(call *ast.CallExpr) bool {
+	for i, arg := range call.Args {
+		ident, ok := arg.(*ast.Ident)
+		if !ok || ident.Name != "nil" {
+			continue
+		}
+		idx := i
+		if idx >= len(e.transport) {
+			if !e.variadic || len(e.transport) == 0 {
+				continue
+			}
+			idx = len(e.transport) - 1
+		}
+		if e.transport[idx] {
+			return true
+		}
+	}
+	return false
+}
+
+// newLiveEntry reads the entry's parameters from its type-checked signature.
+func newLiveEntry(fn *ast.FuncDecl, info *types.Info, liveTypes []*types.Named) liveEntry {
+	obj, ok := info.Defs[fn.Name].(*types.Func)
+	if !ok {
+		return liveEntry{}
+	}
+	signature, ok := obj.Type().(*types.Signature)
+	if !ok {
+		return liveEntry{}
+	}
+	params := signature.Params()
+	entry := liveEntry{transport: make([]bool, params.Len()), variadic: signature.Variadic()}
+	for i := 0; i < params.Len(); i++ {
+		entry.transport[i] = isTransportType(params.At(i).Type(), liveTypes)
+	}
+	return entry
+}
+
+// liveTypesOf returns the package's named types that have a method reaching the network.
+func liveTypesOf(self *types.Package, live map[string]bool) []*types.Named {
+	seen := map[string]bool{}
+	var named []*types.Named
+	for _, key := range slices.Sorted(maps.Keys(live)) {
+		typeName, _, isMethod := strings.Cut(key, ".")
+		if !live[key] || !isMethod || seen[typeName] {
+			continue
+		}
+		seen[typeName] = true
+		if obj, ok := self.Scope().Lookup(typeName).(*types.TypeName); ok {
+			if n, ok := obj.Type().(*types.Named); ok {
+				named = append(named, n)
+			}
+		}
+	}
+	return named
+}
+
+// isTransportType reports whether a parameter of this type carries the connection.
+func isTransportType(typ types.Type, liveTypes []*types.Named) bool {
+	if named := namedOf(typ); named != nil {
+		if named.Obj().Pkg().Path() == netHTTPPath {
+			switch named.Obj().Name() {
+			case "Client", "Transport", "RoundTripper":
+				return true
+			}
+		}
+		for _, lt := range liveTypes {
+			if types.Identical(named, lt) {
+				return true
+			}
+		}
+	}
+	iface, ok := typ.Underlying().(*types.Interface)
+	if !ok || iface.NumMethods() == 0 {
+		return false
+	}
+	for _, lt := range liveTypes {
+		if types.Implements(lt, iface) || types.Implements(types.NewPointer(lt), iface) {
+			return true
+		}
+	}
+	return false
 }
 
 // packageFuncs indexes the package's own functions: "Func" for plain ones, "Type.Method" for methods.

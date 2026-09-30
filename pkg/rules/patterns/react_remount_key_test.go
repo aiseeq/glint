@@ -100,6 +100,54 @@ func TestReactRemountKeyRule(t *testing.T) {
 ))}`,
 			wantCount: 0,
 		},
+		{
+			// The keyed <li> closes on its own line; the input below belongs to a
+			// form outside the list and never remounts with the rows.
+			name: "input outside the keyed element does not count",
+			code: `export function Rows({ items, draft, setDraft }: Props) {
+  return (
+    <div>
+      <ul>
+        {items.map((item) => (
+          <li key={draft.name}>{item.label}</li>
+        ))}
+      </ul>
+      <form>
+        <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+      </form>
+    </div>
+  )
+}`,
+			wantCount: 0,
+		},
+		{
+			name: "nested tags of the same name stay inside the keyed element",
+			code: `{rows.map(row => (
+  <div key={row.label}>
+    <div className="field">
+      <input value={row.label} onChange={e => setLabel(e.target.value)} />
+    </div>
+  </div>
+))}`,
+			wantCount: 1,
+		},
+		{
+			name: "self-closing keyed component edits its own key",
+			code: `{rows.map(row => (
+  <LabelInput key={row.label} value={row.label} onChange={setLabel} />
+))}`,
+			wantCount: 1,
+		},
+		{
+			name: "commented-out key is not code",
+			code: `{rows.map(row => (
+  <section key={row.id}>
+    {/* was: <section key={row.label}> */}
+    <input value={row.label} onChange={e => setLabel(e.target.value)} />
+  </section>
+))}`,
+			wantCount: 0,
+		},
 	}
 
 	for _, tt := range tests {

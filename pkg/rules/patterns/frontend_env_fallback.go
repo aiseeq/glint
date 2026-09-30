@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -39,45 +40,38 @@ func (r *FrontendEnvFallbackRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 	if !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
 		return nil
 	}
-	if r.shouldSkip(ctx) {
+	if skipFrontendPath(ctx) {
 		return nil
 	}
 
+	// Comments are blanked, literals kept: the env names and placeholder hosts
+	// the rule looks for live inside strings, and a JSDoc that warns against
+	// bracket access is not bracket access.
+	text := helpers.MaskJSComments(ctx.Lines)
+
 	var violations []*core.Violation
-	for i, line := range ctx.Lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+	for i, line := range text {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
 
 		switch {
 		case strings.Contains(line, "placeholder.supabase.co") || strings.Contains(line, "placeholder-key"):
-			violations = append(violations, r.violation(ctx, i+1, line,
+			violations = append(violations, r.violation(ctx, i+1, ctx.Lines[i],
 				"Supabase placeholder configuration detected in frontend code",
 				"Remove placeholder credentials. Required public config must fail explicitly when missing."))
 		case r.bracketNextPublicEnv.MatchString(line):
-			violations = append(violations, r.violation(ctx, i+1, line,
+			violations = append(violations, r.violation(ctx, i+1, ctx.Lines[i],
 				"Bracket access for NEXT_PUBLIC env prevents reliable Next.js build-time inlining",
 				"Use dot access like process.env.NEXT_PUBLIC_SUPABASE_URL, then validate required values explicitly."))
 		case r.requiredSupabaseEnv.MatchString(line):
-			violations = append(violations, r.violation(ctx, i+1, line,
+			violations = append(violations, r.violation(ctx, i+1, ctx.Lines[i],
 				"Required Supabase public env uses a fallback operator",
 				"Remove ||/?? fallback and throw an explicit error when Supabase public config is missing."))
 		}
 	}
 
 	return violations
-}
-
-func (r *FrontendEnvFallbackRule) shouldSkip(ctx *core.FileContext) bool {
-	path := ctx.RelPath
-	if ctx.IsTestFile() {
-		return true
-	}
-	return strings.Contains(path, "/node_modules/") ||
-		strings.Contains(path, "/.next/") ||
-		strings.Contains(path, "/out/") ||
-		strings.Contains(path, "/dist/")
 }
 
 func (r *FrontendEnvFallbackRule) violation(ctx *core.FileContext, lineNum int, line string, msg string, suggestion string) *core.Violation {

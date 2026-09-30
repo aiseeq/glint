@@ -55,6 +55,27 @@ if (!supabaseUrl || !supabaseAnonKey) {
 			filename:  "frontend/e2e/tests/auth-redirect.spec.ts",
 			wantCount: 0,
 		},
+		{
+			name: "JSDoc that warns against bracket access is not code",
+			code: `/**
+ * Never write process.env['NEXT_PUBLIC_API_URL'] — Next.js cannot inline it.
+ */
+export const apiUrl = process.env.NEXT_PUBLIC_API_URL`,
+			filename:  "frontend/src/lib/env.ts",
+			wantCount: 0,
+		},
+		{
+			name:      "trailing comment is not code",
+			code:      `export const apiUrl = process.env.NEXT_PUBLIC_API_URL // not process.env['NEXT_PUBLIC_API_URL']`,
+			filename:  "frontend/src/lib/env.ts",
+			wantCount: 0,
+		},
+		{
+			name:      "placeholder inside a comment is not configuration",
+			code:      `const url = requireEnv('NEXT_PUBLIC_SUPABASE_URL') // never 'https://placeholder.supabase.co'`,
+			filename:  "frontend/src/lib/supabase.ts",
+			wantCount: 0,
+		},
 	}
 
 	for _, tt := range tests {

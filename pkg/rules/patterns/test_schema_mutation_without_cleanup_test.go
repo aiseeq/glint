@@ -27,6 +27,9 @@ func TestSchemaMutationWithoutCleanupRule_Detection(t *testing.T) {
 			// Ровно тот случай, что отравил базу из пула: колонка осталась после прогона.
 			name: "add column without cleanup",
 			code: `package tests
+
+import "testing"
+
 func TestReadSurvivesNewColumn(t *testing.T) {
 	db := CreateIsolatedTestDB(t)
 	db.MustExec("ALTER TABLE vault_snapshots ADD COLUMN probe TEXT")
@@ -37,6 +40,9 @@ func TestReadSurvivesNewColumn(t *testing.T) {
 		{
 			name: "add column with t.Cleanup",
 			code: `package tests
+
+import "testing"
+
 func TestReadSurvivesNewColumn(t *testing.T) {
 	db := CreateIsolatedTestDB(t)
 	db.MustExec("ALTER TABLE vault_snapshots ADD COLUMN probe TEXT")
@@ -46,6 +52,9 @@ func TestReadSurvivesNewColumn(t *testing.T) {
 		{
 			name: "drop table with defer",
 			code: `package tests
+
+import "testing"
+
 func TestScratch(t *testing.T) {
 	db.MustExec("CREATE TABLE scratch (id int)")
 	defer db.MustExec("DROP TABLE scratch")
@@ -55,6 +64,9 @@ func TestScratch(t *testing.T) {
 			// Временная таблица исчезает вместе с сессией и общую базу не портит.
 			name: "temporary table needs no cleanup",
 			code: `package tests
+
+import "testing"
+
 func TestScratch(t *testing.T) {
 	db.MustExec("CREATE TEMPORARY TABLE scratch (id int)")
 }`,
@@ -63,6 +75,9 @@ func TestScratch(t *testing.T) {
 			// Полезная нагрузка инъекции в security-тесте до базы не доезжает.
 			name: "sql injection payload is not executed ddl",
 			code: `package tests
+
+import "testing"
+
 func TestRejectsInjection(t *testing.T) {
 	payloads := []string{"'; DROP TABLE users; --", "' OR '1'='1"}
 	for _, p := range payloads {
@@ -73,6 +88,9 @@ func TestRejectsInjection(t *testing.T) {
 		{
 			name: "no ddl at all",
 			code: `package tests
+
+import "testing"
+
 func TestInsert(t *testing.T) {
 	db.MustExec("INSERT INTO users (id) VALUES ($1)", 1)
 }`,
@@ -81,11 +99,78 @@ func TestInsert(t *testing.T) {
 			// Хелпер не тест: за ним чистит вызывающий, и правило туда не лезет.
 			name: "helper function is not a test",
 			code: `package tests
+
+import "testing"
+
 func seedProbeColumn(db *sqlx.DB) {
 	db.MustExec("ALTER TABLE vault_snapshots ADD COLUMN probe TEXT")
 }`,
 		},
 	}
+
+	tests = append(tests, []struct {
+		name   string
+		code   string
+		expect bool
+	}{
+		{
+			// defer cancel() откатывает контекст, а не схему.
+			name: "deferred cancel is not a schema undo",
+			code: `package tests
+
+import (
+	"context"
+	"testing"
+)
+
+func TestAlterWithCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, _ = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN tmp_flag bool")
+}`,
+			expect: true,
+		},
+		{
+			name: "cleanup that only cancels is not a schema undo",
+			code: `package tests
+
+import (
+	"context"
+	"testing"
+)
+
+func TestAlterWithCleanupCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	_, _ = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN tmp_flag bool")
+}`,
+			expect: true,
+		},
+		{
+			name: "deferred closure that runs SQL is an undo",
+			code: `package tests
+
+import "testing"
+
+func TestAlterDeferredClosure(t *testing.T) {
+	db.MustExec("ALTER TABLE users ADD COLUMN tmp_flag bool")
+	defer func() {
+		db.MustExec("ALTER TABLE users DROP COLUMN tmp_flag")
+	}()
+}`,
+		},
+		{
+			name: "benchmark is checked too",
+			code: `package tests
+
+import "testing"
+
+func BenchmarkScan(b *testing.B) {
+	db.MustExec("CREATE INDEX idx_probe ON users (email)")
+}`,
+			expect: true,
+		},
+	}...)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -104,6 +189,9 @@ func seedProbeColumn(db *sqlx.DB) {
 func TestSchemaMutationWithoutCleanupRule_NonTestFileIgnored(t *testing.T) {
 	rule := NewTestSchemaMutationWithoutCleanupRule()
 	code := `package tests
+
+import "testing"
+
 func TestScratch(t *testing.T) {
 	db.MustExec("ALTER TABLE users ADD COLUMN probe TEXT")
 }`

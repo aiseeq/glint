@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -47,8 +48,9 @@ func NewNonCanonicalLoggerRule() *NonCanonicalLoggerRule {
 }
 
 // forbiddenLoggerImports is the set of parallel logger libraries that should not
-// coexist with the project's canonical logger. Every matched import raises a
-// violation regardless of call site.
+// coexist with the project's canonical logger. An import of the module or of any
+// of its packages (zerolog/log, zap/zapcore) raises a violation regardless of
+// call site.
 var forbiddenLoggerImports = []string{
 	"go.uber.org/zap",
 	"github.com/sirupsen/logrus",
@@ -56,10 +58,11 @@ var forbiddenLoggerImports = []string{
 	"github.com/rs/zerolog",
 }
 
-// logPkgCalls maps callee package to forbidden function names. "log" covers
-// both the stdlib log package and common project aliases. "fmt" covers
-// diagnostic-oriented Print* calls (fmt.Errorf is intentionally not listed —
-// it constructs errors, not log output).
+// logPkgCalls maps a standard-library import path to its forbidden function
+// names. The call's package identifier is resolved through the file's imports,
+// so an alias of "log" counts and the project's own package named log does not.
+// "fmt" covers diagnostic-oriented Print* calls (fmt.Errorf is intentionally not
+// listed — it constructs errors, not log output).
 var logPkgCalls = map[string]map[string]bool{
 	"log": {
 		"Printf": true, "Println": true, "Print": true,
@@ -81,15 +84,17 @@ func (r *NonCanonicalLoggerRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 		return nil
 	}
 
+	if !ctx.HasGoAST() {
+		return nil
+	}
+
 	var violations []*core.Violation
 
 	// 1. Detect forbidden imports
 	violations = append(violations, r.checkImports(ctx)...)
 
 	// 2. Detect log.Printf / fmt.Println calls via AST
-	if ctx.HasGoAST() {
-		violations = append(violations, r.checkCalls(ctx)...)
-	}
+	violations = append(violations, r.checkCalls(ctx)...)
 
 	return violations
 }
@@ -121,44 +126,58 @@ func (r *NonCanonicalLoggerRule) shouldSkipFile(ctx *core.FileContext) bool {
 	return false
 }
 
-// checkImports flags any import of a known parallel-logger library.
+// checkImports flags any import of a known parallel-logger library or of one of
+// its packages.
 func (r *NonCanonicalLoggerRule) checkImports(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
 
-	for _, imp := range ctx.GoImports {
-		for _, forbidden := range forbiddenLoggerImports {
-			if imp != forbidden {
-				continue
-			}
-			lineNum := r.findImportLine(ctx, forbidden)
-			v := r.CreateViolation(ctx.RelPath, lineNum,
-				"Non-canonical logger library imported: "+forbidden)
-			v.WithCode(`"` + forbidden + `"`)
-			v.WithSuggestion("Use the project's canonical logger (slog or shared/logging). " +
-				"Parallel logger libraries fragment diagnostics and formatting.")
-			v.WithContext("library", forbidden)
-			violations = append(violations, v)
+	for _, spec := range ctx.GoAST.Imports {
+		imp, ok := goStringLiteral(spec.Path)
+		if !ok {
+			continue
 		}
+		library := forbiddenLoggerLibrary(imp)
+		if library == "" {
+			continue
+		}
+		lineNum := ctx.PositionFor(spec).Line
+		v := r.CreateViolation(ctx.RelPath, lineNum,
+			"Non-canonical logger library imported: "+imp)
+		v.WithCode(`"` + imp + `"`)
+		v.WithSuggestion("Use the project's canonical logger (slog or shared/logging). " +
+			"Parallel logger libraries fragment diagnostics and formatting.")
+		v.WithContext("library", library)
+		violations = append(violations, v)
 	}
 
 	return violations
 }
 
-// findImportLine returns the 1-based line number of the import, or 1 if the
-// literal is not found (defensive — GoImports is parsed from the same AST).
-func (r *NonCanonicalLoggerRule) findImportLine(ctx *core.FileContext, importPath string) int {
-	needle := `"` + importPath + `"`
-	for idx, line := range ctx.Lines {
-		if strings.Contains(line, needle) {
-			return idx + 1
+// forbiddenLoggerLibrary returns the parallel logger module the import path
+// belongs to, or "" when it belongs to none.
+func forbiddenLoggerLibrary(importPath string) string {
+	for _, forbidden := range forbiddenLoggerImports {
+		if importPath == forbidden || strings.HasPrefix(importPath, forbidden+"/") {
+			return forbidden
 		}
 	}
-	return 1
+	return ""
 }
 
 // checkCalls walks the AST and flags log.Printf / fmt.Println style calls.
 func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
+
+	// Identifier the file uses → standard-library import path it stands for.
+	pkgOf := make(map[string]string, len(logPkgCalls))
+	for path := range logPkgCalls {
+		for alias := range helpers.PackageAliases(ctx.GoAST, `"`+path+`"`, path) {
+			pkgOf[alias] = path
+		}
+	}
+	if len(pkgOf) == 0 {
+		return nil
+	}
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -172,12 +191,14 @@ func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext) []*core.Viola
 		}
 
 		pkgIdent, ok := sel.X.(*ast.Ident)
-		if !ok {
+		// A resolved object is a local declaration (a parameter or variable named
+		// log), never a package: package names stay unresolved in the syntax tree.
+		if !ok || pkgIdent.Obj != nil {
 			return true
 		}
 
-		funcs, ok := logPkgCalls[pkgIdent.Name]
-		if !ok || !funcs[sel.Sel.Name] {
+		path, ok := pkgOf[pkgIdent.Name]
+		if !ok || !logPkgCalls[path][sel.Sel.Name] {
 			return true
 		}
 
@@ -190,11 +211,11 @@ func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext) []*core.Viola
 		}
 
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
-			"Non-canonical logger call: "+pkgIdent.Name+"."+sel.Sel.Name)
+			"Non-canonical logger call: "+path+"."+sel.Sel.Name)
 		v.WithCode(strings.TrimSpace(lineContent))
 		v.WithSuggestion("Route through the project's canonical logger (slog / shared/logging). " +
-			"Direct " + pkgIdent.Name + "." + sel.Sel.Name + " bypasses structured logging and sampling.")
-		v.WithContext("package", pkgIdent.Name)
+			"Direct " + path + "." + sel.Sel.Name + " bypasses structured logging and sampling.")
+		v.WithContext("package", path)
 		v.WithContext("function", sel.Sel.Name)
 		violations = append(violations, v)
 		return true

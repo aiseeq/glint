@@ -17,10 +17,17 @@ func init() {
 // is not an object.
 type NullableObjectCallRule struct {
 	*rules.BaseRule
-	objectCollectionCall *regexp.Regexp
-	hasOwnPropertyCall   *regexp.Regexp
-	objectHasOwnCall     *regexp.Regexp
+	// objectCall matches the opening of a call whose first argument must be an
+	// object: Object.keys/values/entries/hasOwn and hasOwnProperty.call.
+	objectCall *regexp.Regexp
+	exitsBlock *regexp.Regexp
 }
+
+// nullableArgMaxLines bounds how far a call split over lines is followed.
+const nullableArgMaxLines = 10
+
+// nullableGuardWindow bounds how many lines above the call a guard is looked for.
+const nullableGuardWindow = 40
 
 // NewNullableObjectCallRule creates the rule
 func NewNullableObjectCallRule() *NullableObjectCallRule {
@@ -31,9 +38,8 @@ func NewNullableObjectCallRule() *NullableObjectCallRule {
 			"Detects Object.* calls on possibly nullable nested values",
 			core.SeverityHigh,
 		),
-		objectCollectionCall: regexp.MustCompile(`Object\.(?:keys|values|entries)\s*\(([^)]*)\)`),
-		hasOwnPropertyCall:   regexp.MustCompile(`Object\.prototype\.hasOwnProperty\.call\s*\(([^,)]*)`),
-		objectHasOwnCall:     regexp.MustCompile(`Object\.hasOwn\s*\(([^,)]*)`),
+		objectCall: regexp.MustCompile(`\bObject\.(?:keys|values|entries|hasOwn|prototype\.hasOwnProperty\.call)\s*\(`),
+		exitsBlock: regexp.MustCompile(`\b(?:return|throw)\b`),
 	}
 }
 
@@ -42,62 +48,31 @@ func (r *NullableObjectCallRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	if !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
 		return nil
 	}
-	if r.shouldSkip(ctx) {
+	if skipFrontendPath(ctx) {
 		return nil
 	}
 
+	src := newJSSource(ctx.Lines)
 	var violations []*core.Violation
-	for i, line := range ctx.Lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "//") {
-			continue
-		}
-
-		if arg, ok := r.unsafeObjectCollectionArg(line); ok {
-			violations = append(violations, r.violation(ctx, i+1, line, arg))
-			continue
-		}
-
-		if arg, ok := r.unsafeHasOwnArg(line); ok {
-			violations = append(violations, r.violation(ctx, i+1, line, arg))
+	for i, code := range src.code {
+		for _, loc := range r.objectCall.FindAllStringIndex(code, -1) {
+			arg, ok := jsFirstArgument(src, i, loc[1]-1, nullableArgMaxLines)
+			if !ok || !isUnsafeNullableObjectArg(src.text[i][:loc[0]], arg) {
+				continue
+			}
+			if r.guardedAbove(src, i, arg) {
+				continue
+			}
+			violations = append(violations, r.violation(ctx, i+1, ctx.Lines[i], arg))
+			break
 		}
 	}
 
 	return violations
 }
 
-func (r *NullableObjectCallRule) unsafeObjectCollectionArg(line string) (string, bool) {
-	matches := r.objectCollectionCall.FindAllStringSubmatch(line, -1)
-	for _, match := range matches {
-		if len(match) < 2 {
-			continue
-		}
-		arg := strings.TrimSpace(match[1])
-		if isUnsafeNullableObjectArg(line, arg) {
-			return arg, true
-		}
-	}
-	return "", false
-}
-
-func (r *NullableObjectCallRule) unsafeHasOwnArg(line string) (string, bool) {
-	for _, pattern := range []*regexp.Regexp{r.hasOwnPropertyCall, r.objectHasOwnCall} {
-		matches := pattern.FindAllStringSubmatch(line, -1)
-		for _, match := range matches {
-			if len(match) < 2 {
-				continue
-			}
-			arg := strings.TrimSpace(match[1])
-			if isUnsafeNullableObjectArg(line, arg) {
-				return arg, true
-			}
-		}
-	}
-	return "", false
-}
-
-func isUnsafeNullableObjectArg(line string, arg string) bool {
-	if arg == "" || hasObjectFallback(arg) || hasSameLineObjectGuard(line, arg) {
+func isUnsafeNullableObjectArg(prefix string, arg string) bool {
+	if arg == "" || hasObjectFallback(arg) || hasSameLineObjectGuard(prefix, arg) {
 		return false
 	}
 	if strings.HasPrefix(arg, "{") || strings.HasPrefix(arg, "[") || strings.HasPrefix(arg, "new ") {
@@ -111,27 +86,63 @@ func hasObjectFallback(arg string) bool {
 	return strings.Contains(arg, "?? {}") || strings.Contains(arg, "|| {}") || strings.Contains(arg, "? {}")
 }
 
-func hasSameLineObjectGuard(line string, arg string) bool {
-	idx := strings.Index(line, "Object.")
-	if idx <= 0 {
-		return false
-	}
-	prefix := line[:idx]
+// hasSameLineObjectGuard reports a guard written before the call on its own
+// line: `x.y && Object.keys(x.y)`, `typeof x.y === 'object' && …`.
+func hasSameLineObjectGuard(prefix string, arg string) bool {
 	return strings.Contains(prefix, arg+" &&") || strings.Contains(prefix, "typeof "+arg+" === 'object'") || strings.Contains(prefix, "typeof "+arg+" === \"object\"")
 }
 
-func (r *NullableObjectCallRule) shouldSkip(ctx *core.FileContext) bool {
-	path := ctx.RelPath
-	if ctx.IsTestFile() {
+// guardedAbove reports whether a line above the call, in the same block or an
+// enclosing one, already rules out a missing value: an early exit
+// (`if (!x.y) return []`, `if (x.y == null) { throw … }`) or an enclosing
+// `if (x.y) {` / `if (x.y && …) {`. Lines inside blocks that closed before the
+// call — a sibling branch, another function — do not count.
+func (r *NullableObjectCallRule) guardedAbove(src jsSource, callLine int, arg string) bool {
+	a := jsCompact(arg)
+	earlyExits := []string{
+		"if(!" + a + ")", "if(!" + a + "||", "||!" + a + ")", "||!" + a + "||",
+		"if(" + a + "==null)", "if(" + a + "===null)", "if(" + a + "==undefined)", "if(" + a + "===undefined)",
+		"if(" + a + "==null||", "if(" + a + "===undefined||",
+	}
+	enclosing := []string{"if(" + a + ")", "if(" + a + "&&"}
+
+	// rel is the brace depth at the start of line j relative to the call line;
+	// minRel is the shallowest depth seen between them.
+	rel, minRel := 0, 0
+	for j := callLine - 1; j >= 0 && j >= callLine-nullableGuardWindow; j-- {
+		rel -= strings.Count(src.code[j], "{") - strings.Count(src.code[j], "}")
+		if rel > minRel {
+			continue
+		}
+		opensEnclosing := rel < minRel
+		minRel = rel
+		compact := jsCompact(src.text[j])
+		if opensEnclosing && containsAny(compact, enclosing) {
+			return true
+		}
+		if containsAny(compact, earlyExits) && r.exitsAfter(src, j, callLine) {
+			return true
+		}
+	}
+	return false
+}
+
+// exitsAfter reports whether the guard at line j leaves the block: return or
+// throw on the guard line itself or on the next one.
+func (r *NullableObjectCallRule) exitsAfter(src jsSource, j, callLine int) bool {
+	if r.exitsBlock.MatchString(src.code[j]) {
 		return true
 	}
-	return strings.Contains(path, "/node_modules/") ||
-		strings.Contains(path, "/.next/") ||
-		strings.Contains(path, "/out/") ||
-		strings.Contains(path, "/dist/") ||
-		strings.Contains(path, "/generated/") ||
-		strings.Contains(path, "generated-") ||
-		strings.Contains(path, ".generated")
+	return j+1 < callLine && r.exitsBlock.MatchString(src.code[j+1])
+}
+
+func containsAny(s string, needles []string) bool {
+	for _, needle := range needles {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *NullableObjectCallRule) violation(ctx *core.FileContext, lineNum int, line string, arg string) *core.Violation {

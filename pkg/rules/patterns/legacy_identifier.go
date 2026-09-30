@@ -15,8 +15,8 @@ func init() {
 }
 
 // LegacyIdentifierRule detects identifiers (func/method/type/const/var) whose
-// name contains "Legacy" / "legacy_". Comments are covered by the separate
-// `deprecated-comment` rule; this one exists because renaming a symbol to
+// name contains a Legacy/legacy segment. Comments are covered by the separate
+// legacy-comment-marker and deprecated-comment rules; this one exists because renaming a symbol to
 // include "Legacy" is a common way to ship a parallel implementation that
 // never actually gets removed — the mirror of what CLAUDE.md forbids under
 // "No legacy, only current code".
@@ -28,16 +28,15 @@ func init() {
 //   - var/const LegacyTimeout = ...           — value identifier
 //
 // Skips:
-//   - Test files
-//   - Generated files (*.gen.go, *_gen.go, /generated/)
+//   - Test files (generated files are dropped by the core for every rule)
 //   - //nolint:legacy-identifier opt-outs on the declaration line
-type LegacyIdentifierRule struct {
+type LegacyIdentifierRule struct { // legacy-identifier: safe — named after the marker this rule detects
 	*rules.BaseRule
 	legacyPattern *regexp.Regexp
 }
 
 // NewLegacyIdentifierRule creates the rule
-func NewLegacyIdentifierRule() *LegacyIdentifierRule {
+func NewLegacyIdentifierRule() *LegacyIdentifierRule { // legacy-identifier: safe — named after the marker this rule detects
 	return &LegacyIdentifierRule{
 		BaseRule: rules.NewBaseRule(
 			"legacy-identifier",
@@ -46,23 +45,21 @@ func NewLegacyIdentifierRule() *LegacyIdentifierRule {
 			core.SeverityMedium,
 		),
 		// "Legacy" as a CamelCase segment (LegacyFoo, FooLegacy, FooLegacyBar,
-		// registerLegacyRoutes) or "legacy" as a snake_case segment
-		// (legacy_foo, handle_legacy_x). The CamelCase boundary requires the
-		// preceding char to be start-of-name, underscore, or *lowercase* (end
-		// of previous word — e.g. "register" + "Legacy"); the following char
-		// must be start of next word (uppercase) or end.
+		// registerLegacyRoutes) or "legacy" as a lowercase segment at a
+		// name/underscore boundary (legacyMode, legacy_foo, handle_legacy_x).
+		// The CamelCase boundary requires the preceding char to be
+		// start-of-name, underscore, or *lowercase* (end of previous word —
+		// e.g. "register" + "Legacy"); on both branches the following char
+		// must start the next word (uppercase, underscore, digit) or end the
+		// name — the same shape as mock-identifier's pattern.
 		// Intentionally does not match incidental substrings like "legally".
-		legacyPattern: regexp.MustCompile(`(^|[a-z_])Legacy([A-Z_]|$)|(^|_)legacy(_|$)`),
+		legacyPattern: regexp.MustCompile(`(^|[a-z_])Legacy([A-Z_0-9]|$)|(^|_)legacy([A-Z_0-9]|$)`),
 	}
 }
 
 // AnalyzeFile checks for Legacy identifiers
 func (r *LegacyIdentifierRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() {
-		return nil
-	}
-
-	if r.shouldSkipFile(ctx) {
 		return nil
 	}
 
@@ -126,19 +123,4 @@ func (r *LegacyIdentifierRule) violation(ctx *core.FileContext, pos token.Pos, n
 	v.WithContext("kind", kind)
 	v.WithContext("name", name)
 	return v
-}
-
-// shouldSkipFile excludes generated files.
-func (r *LegacyIdentifierRule) shouldSkipFile(ctx *core.FileContext) bool {
-	path := ctx.RelPath
-	if strings.HasSuffix(path, "legacy_identifier.go") || strings.HasSuffix(path, "legacy_comment_marker.go") {
-		return true
-	}
-	if strings.HasSuffix(path, ".gen.go") || strings.HasSuffix(path, "_gen.go") {
-		return true
-	}
-	if strings.Contains(path, "/generated/") || strings.Contains(path, "vendor/") {
-		return true
-	}
-	return false
 }

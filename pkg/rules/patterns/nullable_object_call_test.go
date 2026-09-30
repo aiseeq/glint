@@ -57,6 +57,80 @@ func TestNullableObjectCallRule(t *testing.T) {
 			filename:  "frontend/admin-app/src/app/employees/page.test.tsx",
 			wantCount: 0,
 		},
+		{
+			name: "JSDoc mentioning the call is not code",
+			code: `/**
+ * Object.keys(resp.data) throws when data is null.
+ */
+export const x = 1`,
+			filename:  "frontend/src/lib/api.ts",
+			wantCount: 0,
+		},
+		{
+			name: "early-return guard on a previous line is valid",
+			code: `export function keys(data: Resp) {
+  if (!data.items) return []
+  return Object.keys(data.items)
+}`,
+			filename:  "frontend/src/lib/objs.ts",
+			wantCount: 0,
+		},
+		{
+			name: "early-return guard block is valid",
+			code: `export function keys(data: Resp) {
+  if (data.items == null) {
+    throw new Error('items are required')
+  }
+  return Object.keys(data.items)
+}`,
+			filename:  "frontend/src/lib/objs.ts",
+			wantCount: 0,
+		},
+		{
+			name: "enclosing truthy guard is valid",
+			code: `export function keys(data: Resp) {
+  if (data.items) {
+    const names = Object.keys(data.items)
+    return names
+  }
+  return []
+}`,
+			filename:  "frontend/src/lib/objs.ts",
+			wantCount: 0,
+		},
+		{
+			name: "guard inside a sibling block does not cover the call",
+			code: `export function keys(data: Resp, strict: boolean) {
+  if (strict) {
+    if (!data.items) return []
+  }
+  return Object.keys(data.items)
+}`,
+			filename:  "frontend/src/lib/objs.ts",
+			wantCount: 1,
+		},
+		{
+			name: "guard in another function does not cover the call",
+			code: `export function a(data: Resp) {
+  if (!data.items) return []
+  return 1
+}
+export function b(data: Resp) {
+  return Object.keys(data.items)
+}`,
+			filename:  "frontend/src/lib/objs.ts",
+			wantCount: 1,
+		},
+		{
+			name: "call split over lines is checked",
+			code: `export function k2(cfg: Cfg) {
+  return Object.keys(
+    cfg.routes
+  )
+}`,
+			filename:  "frontend/src/lib/objs.ts",
+			wantCount: 1,
+		},
 	}
 
 	for _, tt := range tests {

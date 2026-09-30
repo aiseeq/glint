@@ -128,6 +128,38 @@ func TestE2EBlindWait_CommentedOutWaitIsIgnored(t *testing.T) {
 	}
 }
 
+// Хвостовой комментарий и многострочный JSDoc — тоже не код.
+func TestE2EBlindWait_TrailingAndBlockCommentsAreIgnored(t *testing.T) {
+	code := `/**
+ * Never await page.waitForTimeout(500) here,
+ * and never page.waitForLoadState('networkidle') either.
+ */
+test('login', async ({ page }) => {
+  await page.goto('/login')
+  await page.getByRole('button').click() // no waitForTimeout( here: we wait for the URL
+  await page.waitForURL(/dashboard/)
+  await expect(page).toHaveURL(/dashboard/)
+})
+`
+	if got := analyzeBlindWait("frontend/e2e/tests/login.spec.ts", code); len(got) != 0 {
+		t.Fatalf("ожидание в комментарии не находка, получили: %+v", got)
+	}
+}
+
+// Скобка в строке не сдвигает глубину try: networkidle после блока снова находка.
+func TestE2EBlindWait_BraceInsideStringDoesNotExtendTry(t *testing.T) {
+	code := `test('opens', async ({ page }) => {
+  try {
+    await page.fill('#q', '{')
+  } catch (e) {}
+  await page.waitForLoadState('networkidle')
+})
+`
+	if got := analyzeBlindWait("frontend/e2e/tests/q.spec.ts", code); len(got) != 1 {
+		t.Fatalf("networkidle вне try должен быть найден, получили: %+v", got)
+	}
+}
+
 // Репро из projectA: стадия e2e_regression регулярно уходила в перезапуск, потому что
 // проверка адреса шла до того, как клиентский роутер уводил со страницы.
 func TestE2EBlindWait_URLAssertedWithoutWaitingForNavigation(t *testing.T) {

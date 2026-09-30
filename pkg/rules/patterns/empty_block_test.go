@@ -4,8 +4,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestEmptyBlockRule(t *testing.T) {
@@ -75,6 +77,37 @@ func foo() {
 }`,
 			expectedCount: 1,
 		},
+		{
+			// select {} blocks forever on purpose: the idiom for "run until killed".
+			name: "empty select is a deliberate block",
+			code: `package main
+func wait() {
+	select {}
+}`,
+			expectedCount: 0,
+		},
+		{
+			// A drain loop over a value that may be a channel: without types the
+			// rule cannot tell, so it stays silent.
+			name: "drain loop over a possible channel is not reported",
+			code: `package main
+func drain(ch chan int) {
+	for range ch {
+	}
+	for _ = range ch {
+	}
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "empty range with a variable over a literal is reported",
+			code: `package main
+func foo() {
+	for range 10 {
+	}
+}`,
+			expectedCount: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -92,6 +125,31 @@ func foo() {
 			assert.Len(t, violations, tt.expectedCount, "Code: %s", tt.code)
 		})
 	}
+}
+
+// With types the rule knows what is ranged over: draining a channel (or a
+// range-over-func iterator) is a real action, an empty loop over a slice is not.
+func TestEmptyBlockRuleTypedRange(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"app/app.go": `package app
+
+type holder struct {
+	events chan int
+	items  []int
+}
+
+func Drain(h holder) {
+	for range h.events {
+	}
+	for range h.items {
+	}
+}
+`,
+	})
+	violations, err := NewEmptyBlockRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, 11, violations[0].Line)
 }
 
 func TestEmptyBlockRuleNoAST(t *testing.T) {

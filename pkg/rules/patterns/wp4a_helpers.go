@@ -3,7 +3,10 @@ package patterns
 import (
 	"go/ast"
 	"go/types"
+	"path"
+	"strconv"
 
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"golang.org/x/tools/go/types/typeutil"
 )
 
@@ -42,7 +45,7 @@ func packageFuncName(file *ast.File, info *types.Info, call *ast.CallExpr, pkgPa
 		return "", false
 	}
 	pkg, ok := sel.X.(*ast.Ident)
-	if !ok || file == nil || importAliases(file)[pkg.Name] != pkgPath {
+	if !ok || file == nil || !helpers.PackageAliases(file, strconv.Quote(pkgPath), path.Base(pkgPath))[pkg.Name] {
 		return "", false
 	}
 	return sel.Sel.Name, true
@@ -98,7 +101,7 @@ func isContextTypeExpr(file *ast.File, info *types.Info, expr ast.Expr) bool {
 		return false
 	}
 	pkg, ok := sel.X.(*ast.Ident)
-	return ok && file != nil && importAliases(file)[pkg.Name] == "context"
+	return ok && file != nil && helpers.PackageAliases(file, `"context"`, "context")[pkg.Name]
 }
 
 // contextParams reports whether the signature takes a context.Context at all

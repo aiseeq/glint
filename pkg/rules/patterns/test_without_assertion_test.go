@@ -190,6 +190,90 @@ func TestMain(m *testing.M) {
 		},
 	}
 
+	tests = append(tests, []struct {
+		name      string
+		code      string
+		wantCount int
+	}{
+		{
+			// Хелпер получает T подтеста под другим именем — он и проверяет.
+			name: "subtest handle with another name is forwarded to a helper",
+			code: `package calc
+
+import "testing"
+
+func TestSubtestHelper(t *testing.T) {
+	t.Run("a", func(st *testing.T) {
+		check(st, Add(1, 2))
+	})
+	t.Log("done")
+}
+`,
+			wantCount: 0,
+		},
+		{
+			// err.Error() — метод ошибки, а не провал теста.
+			name: "Error method of an error value is not an assertion",
+			code: `package calc
+
+import (
+	"errors"
+	"testing"
+)
+
+func TestDocumentsOnly(t *testing.T) {
+	err := errors.New("overflow not detected")
+	t.Logf("VULNERABILITY: %s", err.Error())
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "testing.TB parameter of a subtest closure",
+			code: `package calc
+
+import "testing"
+
+func TestTB(t *testing.T) {
+	run := func(tb testing.TB) {
+		if Add(1, 2) != 3 {
+			tb.Fatal("bad")
+		}
+	}
+	run(t)
+	t.Log("done")
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "aliased testing import",
+			code: `package calc
+
+import tst "testing"
+
+func TestAliased(tt *tst.T) {
+	tt.Logf("VULNERABILITY: nothing checked")
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "a variable named t that is not the test handle does not assert",
+			code: `package calc
+
+import "testing"
+
+func TestShadow(x *testing.T) {
+	t := newTracker()
+	t.Error("recorded")
+	x.Log("done")
+}
+`,
+			wantCount: 1,
+		},
+	}...)
+
 	rule := NewTestWithoutAssertionRule()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

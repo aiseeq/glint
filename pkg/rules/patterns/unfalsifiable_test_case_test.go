@@ -117,6 +117,55 @@ func TestUnfalsifiableTestCaseRule_Detection(t *testing.T) {
 		},
 	}
 
+	tests = append(tests, []struct {
+		name       string
+		code       string
+		expectTest string
+	}{
+		{
+			// expect.soft — та же проверка, только не останавливает тест.
+			name: "soft assertion on a specific element is an assertion",
+			code: `test('soft assertions only', async ({ page }) => {
+  await page.goto('/orders')
+  await expect.soft(page.getByText('Order #1')).toBeVisible()
+})`,
+		},
+		{
+			name: "polled assertion is an assertion",
+			code: `test('poll assertion', async ({ page }) => {
+  await page.goto('/orders')
+  await expect.poll(async () => (await page.request.get('/api/orders')).status()).toBe(200)
+})`,
+		},
+		{
+			// Однострочный тест закрывается на своей строке и не поглощает следующий.
+			name: "one-line test does not swallow the next one",
+			code: `test('real', async ({ page }) => { expect(await page.title()).toBe('Orders') })
+test('empty page', async ({ page }) => { await expect(page.locator('body')).toBeVisible() })`,
+			expectTest: "empty page",
+		},
+		{
+			// if (row) ложно ровно тогда, когда строки нет — проверка до дела не доходит.
+			name: "truthiness guard hides the only assertion",
+			code: `test('guarded by truthy value', async ({ page }) => {
+  const row = await page.$('tr')
+  if (row) {
+    expect(await row.textContent()).toBe('x')
+  }
+})`,
+			expectTest: "guarded by truthy value",
+		},
+		{
+			name: "comparison is not a truthiness guard",
+			code: `test('threshold', async ({ page }) => {
+  const count = await readCount(page)
+  if (count > limit) {
+    expect(count).toBe(3)
+  }
+})`,
+		},
+	}...)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := createUnfalsifiableContext("balance.spec.ts", tt.code)

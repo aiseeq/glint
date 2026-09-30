@@ -16,7 +16,9 @@ func TestTechDebtRule_Metadata(t *testing.T) {
 	assert.Equal(t, core.SeverityMedium, rule.DefaultSeverity())
 }
 
-func TestTechDebtRule_LegacyMarkers(t *testing.T) {
+// Comments admitting legacy code belong to legacy-comment-marker; tech-debt keeps
+// the other obsolete-code admissions, so one comment is never reported twice.
+func TestTechDebtRule_ObsoleteCodeMarkers(t *testing.T) {
 	rule := NewTechDebtRule()
 
 	tests := []struct {
@@ -25,9 +27,9 @@ func TestTechDebtRule_LegacyMarkers(t *testing.T) {
 		expectMatch bool
 	}{
 		{
-			name:        "legacy code marker",
+			name:        "legacy code marker is legacy-comment-marker's",
 			code:        "// legacy code - needs migration",
-			expectMatch: true,
+			expectMatch: false,
 		},
 		{
 			name:        "deprecated code",
@@ -40,9 +42,9 @@ func TestTechDebtRule_LegacyMarkers(t *testing.T) {
 			expectMatch: true,
 		},
 		{
-			name:        "remove legacy",
+			name:        "remove legacy is legacy-comment-marker's",
 			code:        "// TODO: remove legacy implementation",
-			expectMatch: true,
+			expectMatch: false,
 		},
 		{
 			name:        "normal comment",
@@ -58,7 +60,7 @@ func TestTechDebtRule_LegacyMarkers(t *testing.T) {
 
 			if tt.expectMatch {
 				require.NotEmpty(t, violations, "Expected violation for: %s", tt.code)
-				assert.Equal(t, "legacy_marker", violations[0].Context["pattern"])
+				assert.Equal(t, "obsolete_code_marker", violations[0].Context["pattern"])
 			} else {
 				assert.Empty(t, violations)
 			}
@@ -145,6 +147,27 @@ func TestTechDebtRule_TemporarySolutions(t *testing.T) {
 			code:        "// временное решение",
 			expectMatch: true,
 		},
+		{
+			name:        "temporary workaround",
+			code:        "// temporary workaround for the vendor bug",
+			expectMatch: true,
+		},
+		{
+			name:        "temporary as a marker label",
+			code:        "// Temporary: until the new endpoint ships",
+			expectMatch: true,
+		},
+		{
+			// Describes the domain (short-lived credentials), not the code.
+			name:        "temporary as an ordinary adjective",
+			code:        "// temporary credentials expire after one hour",
+			expectMatch: false,
+		},
+		{
+			name:        "russian temporary as an ordinary adjective",
+			code:        "// временный файл удаляется после загрузки",
+			expectMatch: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -172,6 +195,41 @@ func TestTechDebtRule_BrokenFeature(t *testing.T) {
 	require.NotEmpty(t, violations)
 	assert.Equal(t, "broken_feature", violations[0].Context["pattern"])
 	assert.Equal(t, core.SeverityHigh, violations[0].Severity)
+
+	for _, marker := range []string{"// BROKEN: returns stale rows", "// broken feature, see the issue", "// broken"} {
+		ctx := createTechDebtContext(t, "backend/service.go", marker)
+		require.NotEmpty(t, rule.AnalyzeFile(ctx), "marker must be reported: %s", marker)
+	}
+}
+
+// "broken" describing the world (a pipe, a link) is not an admission about the code.
+func TestTechDebtRule_BrokenAsOrdinaryWord(t *testing.T) {
+	rule := NewTechDebtRule()
+	for _, code := range []string{
+		"// broken pipe is expected when the client disconnects",
+		"// broken links are reported to the author",
+	} {
+		ctx := createTechDebtContext(t, "backend/service.go", code)
+		assert.Empty(t, rule.AnalyzeFile(ctx), "not a marker: %s", code)
+	}
+}
+
+// Markdown prose and fenced examples are documentation, not code comments.
+func TestTechDebtRule_OnlyCodeFiles(t *testing.T) {
+	rule := NewTechDebtRule()
+	code := "# Docs\n\n```go\n// temporary workaround for the vendor bug\nx := 1\n```\n"
+	ctx := &core.FileContext{
+		Path:    "/docs/README.md",
+		RelPath: "docs/README.md",
+		Lines:   splitLines(code),
+		Content: []byte(code),
+	}
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+
+	for _, path := range []string{"web/src/api.ts", "web/src/api.js", "backend/api.go"} {
+		ctx := createTechDebtContext(t, path, "// temporary workaround for the vendor bug")
+		assert.NotEmpty(t, rule.AnalyzeFile(ctx), "code file must be checked: %s", path)
+	}
 }
 
 func TestTechDebtRule_NeedsRefactoring(t *testing.T) {
@@ -344,21 +402,11 @@ func TestTechDebtRule_UnusedProseStillFlagged(t *testing.T) {
 func TestTechDebtRule_TestFilesExcluded(t *testing.T) {
 	rule := NewTechDebtRule()
 
-	code := "// legacy code that needs migration"
+	code := "// temporary fix that needs a real one"
 	ctx := createTechDebtContext(t, "backend/service_test.go", code)
 	violations := rule.AnalyzeFile(ctx)
 
 	assert.Empty(t, violations, "Test files should be excluded")
-}
-
-func TestTechDebtRule_VendorExcluded(t *testing.T) {
-	rule := NewTechDebtRule()
-
-	code := "// legacy code"
-	ctx := createTechDebtContext(t, "vendor/lib/file.go", code)
-	violations := rule.AnalyzeFile(ctx)
-
-	assert.Empty(t, violations, "Vendor files should be excluded")
 }
 
 func TestTechDebtRule_NonCommentLinesSkipped(t *testing.T) {
@@ -383,15 +431,17 @@ func legacy() {
 	assert.Empty(t, violations, "Non-comment lines should not trigger violations")
 }
 
-func TestTechDebtRuleSkipsDiagnosticImplementation(t *testing.T) {
+// A project file that happens to share a name with a glint source is checked
+// like any other file.
+func TestTechDebtRuleChecksFilesNamedLikeGlintSources(t *testing.T) {
 	ctx := core.NewFileContext(
-		"/src/pkg/rules/patterns/legacy_comment_marker.go",
+		"/src/rules/legacy_comment_marker.go",
 		"/src",
-		[]byte("// legacy code path marker detected by this rule"),
+		[]byte("// deprecated code path kept for old clients"),
 		core.DefaultConfig(),
 	)
 
-	assert.Empty(t, NewTechDebtRule().AnalyzeFile(ctx))
+	assert.NotEmpty(t, NewTechDebtRule().AnalyzeFile(ctx))
 }
 
 // Helper functions

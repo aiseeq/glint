@@ -146,10 +146,13 @@ func (r *E2EBlindWaitRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 	depth := 0
 	tryDepth := -1
 	nav := newNavState()
+	// Waits and URLs are read with their string arguments, comments blanked;
+	// brace depth is counted on code alone.
+	src := newJSSource(ctx.Lines)
 
-	for i, line := range ctx.Lines {
+	for i, line := range src.text {
 		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "*") {
+		if trimmed != "" {
 			inTry := tryDepth >= 0 && depth >= tryDepth
 			if r.networkIdle.MatchString(line) && !inTry {
 				violations = append(violations, r.report(ctx, i+1,
@@ -170,7 +173,7 @@ func (r *E2EBlindWaitRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 			}
 			r.advance(nav, trimmed)
 		}
-		depth += strings.Count(line, "{") - strings.Count(line, "}")
+		depth += strings.Count(src.code[i], "{") - strings.Count(src.code[i], "}")
 		if tryDepth >= 0 && depth < tryDepth {
 			tryDepth = -1
 		}
