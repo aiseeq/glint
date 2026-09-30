@@ -2,6 +2,7 @@ package architecture
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"regexp"
@@ -24,8 +25,9 @@ func init() {
 // database handle (database/sql, sqlx, pgx), an HTTP operation of net/http —
 // however the variable or field holding the handle is named. A method that
 // merely shares a name (a getter HTTPTimeout, a cache's Query) is not one. A
-// file without type information keeps the SQL-text check, which needs no
-// types, and is silent about calls.
+// constant connectivity probe (SELECT 1, SELECT NOW()) reads no data and is
+// not reported. A file without type information keeps the SQL-text check,
+// which needs no types, and is silent about calls.
 type LayerViolationRule struct {
 	*rules.BaseRule
 }
@@ -124,10 +126,19 @@ var sqlMethods = []string{
 // request or a response.
 var httpOperations = []string{"WriteHeader", "ServeHTTP", "Redirect", "ParseForm", "Cookie", "SetCookie"}
 
-// checkDirectSQLCall reports a SQL method called on a database handle.
+// probeQuery matches a connectivity probe: a SELECT of a literal or of the
+// server clock or version. It reads no table and calls no function of the
+// schema, so there is nothing a repository would own.
+var probeQuery = regexp.MustCompile(`(?i)^\s*SELECT\s+(?:\d+|TRUE|NOW\(\)|CURRENT_TIMESTAMP|CURRENT_DATE|VERSION\(\))\s*;?\s*$`)
+
+// checkDirectSQLCall reports a SQL method called on a database handle, unless
+// the query is a constant connectivity probe.
 func (r *LayerViolationRule) checkDirectSQLCall(ctx *core.FileContext, info *types.Info, call *ast.CallExpr, layer string) *core.Violation {
 	sel, fn, ok := calledMethod(info, call)
 	if !ok || !slices.Contains(sqlMethods, fn.Name()) || !inPackages(fn, sqlPackages) {
+		return nil
+	}
+	if query, known := constantQuery(info, fn, call); known && probeQuery.MatchString(query) {
 		return nil
 	}
 
@@ -176,6 +187,34 @@ func calledMethod(info *types.Info, call *ast.CallExpr) (*ast.SelectorExpr, *typ
 		return nil, nil, false
 	}
 	return sel, fn, true
+}
+
+// sqlQueryParams are the names database/sql, sqlx and pgx give the query
+// parameter.
+var sqlQueryParams = []string{"query", "sql"}
+
+// constantQuery returns the text of the query a SQL method is called with,
+// when that argument is a compile-time constant string.
+func constantQuery(info *types.Info, fn *types.Func, call *ast.CallExpr) (string, bool) {
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok {
+		return "", false
+	}
+	params := sig.Params()
+	for i := 0; i < params.Len() && i < len(call.Args); i++ {
+		if sig.Variadic() && i == params.Len()-1 {
+			break
+		}
+		if !slices.Contains(sqlQueryParams, params.At(i).Name()) {
+			continue
+		}
+		value := info.Types[call.Args[i]].Value
+		if value == nil || value.Kind() != constant.String {
+			return "", false
+		}
+		return constant.StringVal(value), true
+	}
+	return "", false
 }
 
 // inPackages reports whether fn is declared in one of the packages or below

@@ -45,6 +45,57 @@ func HandleLegacy() {}
 			wantReason: "False backward compatibility claim",
 		},
 		{
+			// \w in Go regexps is ASCII: a Cyrillic ending must not hide the claim.
+			name: "Russian backward compatibility with a Cyrillic ending",
+			code: `package main
+
+// Store keeps Load and Save для обратной совместимости
+func Load() {}
+`,
+			wantCount:  1,
+			wantReason: "False backward compatibility claim",
+		},
+		{
+			name: "Compatibility with an old format",
+			code: `package main
+
+// ParseLegacy для совместимости со старым форматом
+func ParseLegacy() {}
+`,
+			wantCount:  1,
+			wantReason: "False backward compatibility claim",
+		},
+		{
+			name: "Backward compatibility with a named type is still a claim",
+			code: `package main
+
+// Alias для обратной совместимости с OldClient
+type Alias = int
+`,
+			wantCount:  1,
+			wantReason: "False backward compatibility claim",
+		},
+		{
+			// Methods added so a type satisfies an interface: conformance, not
+			// a kept-alive old API.
+			name: "Compatibility with a Go interface - no violation",
+			code: `package main
+
+// Добавлены контекстные методы для совместимости с RecordingLogger
+func (l *memLogger) InfoContext() {}
+
+// для совместимости с интерфейсом Store
+func (l *memLogger) Save() {}
+
+// For compatibility with io.Writer
+func (l *memLogger) Write(p []byte) (int, error) { return len(p), nil }
+
+// kept for compatibility with the Sink interface
+func (l *memLogger) Flush() {}
+`,
+			wantCount: 0,
+		},
+		{
 			name: "Normal comment - no violation",
 			code: `package main
 

@@ -245,8 +245,8 @@ func TestUnusedSymbolsCountsBuildConstrainedSiblingUsage(t *testing.T) {
 // Repro: a directory held a build-ignored template next to real code, and the
 // template was excluded from analysis. The rule reread the directory itself,
 // tried to parse the template and replaced every finding of the package with
-// a CRITICAL "analysis failed". Only the loaded packages and the analyzed
-// files are the rule's input.
+// a CRITICAL "analysis failed". Files outside the typed load are read only as
+// text, never parsed.
 func TestUnusedSymbolsIgnoresExcludedTemplateSibling(t *testing.T) {
 	root, contexts := rulestest.Module(t, map[string]string{
 		"p/a.go": "package p\n\nfunc helper() int { return 1 }\n\ntype thing struct{ n int }\n\nvar registry = map[string]int{}\n",
@@ -264,6 +264,32 @@ func TestUnusedSymbolsIgnoresExcludedTemplateSibling(t *testing.T) {
 	assert.Equal(t, "q/q.go", violations[0].File)
 	assert.Contains(t, violations[0].Message, "'dead'")
 	assert.NotEqual(t, core.SeverityCritical, violations[0].Severity)
+}
+
+// Repro: a project excluded "*_test.go" from analysis to keep test code out
+// of its findings. The test files then never reached the rule, and every
+// helper only the tests call was reported as dead. Excluding a file from the
+// findings does not make its references disappear: the files of the package
+// directory the typed load leaves out are read as text all the same.
+func TestUnusedSymbolsCountsTestFileExcludedFromAnalysis(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"p/amount.go":      "package p\n\nfunc parseAmount(s string) int { return len(s) }\n\nconst currentVersion = 1\n\nfunc dead() {}\n",
+		"p/amount_test.go": "package p\n\nimport \"testing\"\n\nfunc TestParse(t *testing.T) { _ = parseAmount(\"1\") + currentVersion }\n",
+	})
+	analyzed := make([]*core.FileContext, 0, len(contexts))
+	for _, fileCtx := range contexts {
+		if !fileCtx.IsTestFile() {
+			analyzed = append(analyzed, fileCtx)
+		}
+	}
+	require.Len(t, analyzed, 1)
+	project, err := core.LoadGoProject(root, analyzed, core.GoProjectOptions{})
+	require.NoError(t, err)
+
+	violations, err := NewUnusedSymbolsRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "'dead'")
 }
 
 func TestUnusedSymbolsRuleMetadata(t *testing.T) {
