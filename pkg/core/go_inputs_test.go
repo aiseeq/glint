@@ -81,6 +81,25 @@ func TestGoInputsChangeWithWhatTheLoadReads(t *testing.T) {
 	}
 }
 
+// Project rules check SQL against the schema the migrations leave: the SQL
+// files under the root are inputs too, wherever the module is.
+func TestGoInputsChangeWithSQLFiles(t *testing.T) {
+	_, root := inputsModule(t)
+	writeInputsFile(t, root, "migrations/001_init.up.sql", "CREATE TABLE a (id INT);\n")
+	hashWith := func() string {
+		contexts := []*FileContext{
+			NewFileContext(filepath.Join(root, "svc.go"), root, mustRead(t, filepath.Join(root, "svc.go")), DefaultConfig()),
+			NewFileContext(filepath.Join(root, "migrations/001_init.up.sql"), root, mustRead(t, filepath.Join(root, "migrations/001_init.up.sql")), DefaultConfig()),
+		}
+		hash, _, err := NewGoProjectLoader().GoInputs(root, contexts, false)
+		require.NoError(t, err)
+		return hash
+	}
+	base := hashWith()
+	writeInputsFile(t, root, "migrations/001_init.up.sql", "CREATE TABLE a (id INT, name TEXT);\n")
+	assert.NotEqual(t, base, hashWith(), "a changed migration changes the project findings")
+}
+
 // A replace to a local directory makes the load read a tree the hash does not
 // walk: such a project is not cached.
 func TestGoInputsNotCacheableWithLocalReplace(t *testing.T) {

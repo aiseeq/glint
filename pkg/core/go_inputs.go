@@ -41,8 +41,9 @@ type moduleInputs struct {
 	err       error
 }
 
-// GoInputs identifies everything the typed load of root reads: the analyzed
-// Go files, every Go and cgo source and module file of the modules that own
+// GoInputs identifies everything the typed load of root reads, and the SQL
+// files under root, which project rules check SQL against: the analyzed Go
+// and SQL files, every Go and cgo source and module file of the modules that own
 // them and of their workspace, and the Go toolchain and build environment.
 // Modules come from the module cache by the versions go.sum pins, so they are
 // covered by go.sum. cacheable is false when the load reads what the hash
@@ -55,10 +56,16 @@ func (l *GoProjectLoader) GoInputs(root string, contexts []*FileContext, tolerat
 	if err != nil {
 		return "", false, fmt.Errorf("make Go project root absolute: %w", err)
 	}
-	var goFiles []*FileContext
+	var goFiles, analyzed []*FileContext
 	for _, fileCtx := range contexts {
-		if fileCtx != nil && fileCtx.IsGoFile() {
+		if fileCtx == nil {
+			continue
+		}
+		if fileCtx.IsGoFile() {
 			goFiles = append(goFiles, fileCtx)
+		}
+		if fileCtx.IsGoFile() || strings.EqualFold(filepath.Ext(fileCtx.RelPath), ".sql") {
+			analyzed = append(analyzed, fileCtx)
 		}
 	}
 	moduleDirs, _, err := goModuleDirs(absRoot, goFiles, tolerate)
@@ -75,13 +82,13 @@ func (l *GoProjectLoader) GoInputs(root string, contexts []*FileContext, tolerat
 		}
 		writeHashLine(sum, "module %s %s\n", moduleDir, inputs.hash)
 	}
-	relPaths := make([]string, 0, len(goFiles))
-	for _, fileCtx := range goFiles {
+	relPaths := make([]string, 0, len(analyzed))
+	for _, fileCtx := range analyzed {
 		relPaths = append(relPaths, fileCtx.RelPath)
 	}
 	sort.Strings(relPaths)
-	byPath := make(map[string]*FileContext, len(goFiles))
-	for _, fileCtx := range goFiles {
+	byPath := make(map[string]*FileContext, len(analyzed))
+	for _, fileCtx := range analyzed {
 		byPath[fileCtx.RelPath] = fileCtx
 	}
 	for _, relPath := range relPaths {
