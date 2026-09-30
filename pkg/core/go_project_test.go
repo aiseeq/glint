@@ -169,6 +169,23 @@ func TestLoadGoProjectTolerateBrokenPackagesReportsUnparsableFiles(t *testing.T)
 	assert.Nil(t, fileCtx.GoAST, "an unparsable file carries no syntax tree")
 }
 
+// A //go:build ignore file is often a template or a generator script that is
+// not valid Go; the toolchain never parses it, and neither may the load fail
+// on it.
+func TestLoadGoProjectSkipsUnparsableFileExcludedByBuild(t *testing.T) {
+	root, contexts := writeGoModule(t, map[string]string{
+		"value.go":    "package project\n\nfunc Value() string { return \"ok\" }\n",
+		"template.go": "//go:build ignore\n\npackage main\n\nfunc main() { {{ .Body }} }\n",
+	})
+
+	project, err := LoadGoProject(root, contexts, GoProjectOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, project.SkippedPackages, "a file outside every build is no broken package")
+	fileCtx, err := project.File(filepath.Join(root, "template.go"))
+	require.NoError(t, err)
+	assert.Nil(t, fileCtx.GoAST)
+}
+
 func TestLoadGoProjectUsesExcludedCompiledFileForTypesWithoutAnalyzingIt(t *testing.T) {
 	root, contexts := writeGoModule(t, map[string]string{
 		"first.go":  "package project\n\nfunc First() Second { return Second{} }\n",

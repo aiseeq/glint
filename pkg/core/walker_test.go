@@ -53,6 +53,17 @@ func TestWalkerReportsGoParseError(t *testing.T) {
 	require.Len(t, errs, 1)
 }
 
+func TestWalkerSkipsParseErrorOfFileExcludedByBuild(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := "//go:build ignore\n\npackage main\n\nfunc main() { {{ .Body }} }\n"
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "template.go"), []byte(source), 0644))
+
+	contexts, errs := NewWalker(tmpDir, DefaultConfig()).WalkSync()
+	require.Empty(t, errs)
+	require.Len(t, contexts, 1, "line rules still read the file")
+	assert.Nil(t, contexts[0].GoAST)
+}
+
 func TestNewWalker(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := DefaultConfig()

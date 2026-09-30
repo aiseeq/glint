@@ -355,6 +355,12 @@ func attachUncompiledGoFiles(project *GoProjectContext, loader *goProjectLoader,
 		}
 		file, err := loader.parseFile(project.FileSet, path, fileCtx.Content)
 		if err != nil {
+			err = classifyParseError(path, err)
+			if errors.Is(err, errExcludedByBuild) {
+				// Not part of any build, so not a package that failed to
+				// type-check either; line rules still read the file.
+				continue
+			}
 			if !tolerate {
 				return nil, err
 			}

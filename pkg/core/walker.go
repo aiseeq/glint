@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -254,18 +255,20 @@ func (w *Walker) processFile(path string) (*FileContext, error) {
 		return nil, err
 	}
 
-	// Parse Go files
-	if ctx.IsGoFile() && w.parseGo {
-		fset, astFile, err := w.parser.ParseGoFile(path, content)
-		if err != nil {
-			ctx.SetGoAST(nil, nil)
-			return ctx, fmt.Errorf("parse Go file %q: %w", path, err)
-		} else {
-			ctx.SetGoAST(fset, astFile)
-		}
+	if !ctx.IsGoFile() || !w.parseGo {
+		return ctx, nil
 	}
-
-	return ctx, nil
+	fset, astFile, err := w.parser.ParseGoFile(path, content)
+	if err == nil {
+		ctx.SetGoAST(fset, astFile)
+		return ctx, nil
+	}
+	err = classifyParseError(path, err)
+	if errors.Is(err, errExcludedByBuild) {
+		// Line rules still read the file; syntax rules have no tree to see.
+		return ctx, nil
+	}
+	return ctx, fmt.Errorf("parse Go file %q: %w", path, err)
 }
 
 // shouldSkipDir reports whether a directory is not descended into at all. The

@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -142,7 +143,7 @@ func Export() (any, error) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := goContext(t, "service.go", tt.code)
-			violations := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{tt.rule}, cfg, nil)
+			violations := mustAnalyzeFiles(t, []*core.FileContext{ctx}, []rules.Rule{tt.rule}, cfg, nil)
 			if len(violations) != tt.wantCount {
 				t.Errorf("got %d violations, want %d: %+v", len(violations), tt.wantCount, violations)
 			}
@@ -181,7 +182,7 @@ func (s *Store) LeakyToo(db *sql.DB) {
 		"sql-rows-close": {Exceptions: []core.Exception{{Function: "LeakyToo", Reason: "test"}}},
 	}}
 
-	violations := analyzeFiles([]*core.FileContext{goContext(t, "store.go", code)}, []rules.Rule{rule}, cfg, nil)
+	violations := mustAnalyzeFiles(t, []*core.FileContext{goContext(t, "store.go", code)}, []rules.Rule{rule}, cfg, nil)
 	if len(violations) != 1 || violations[0].Line != 6 {
 		t.Fatalf("want only the finding in Leaky (line 6), got %+v", violations)
 	}
@@ -211,7 +212,7 @@ func TestAnalyzeFilesRespectsSuppressionExempt(t *testing.T) {
 	cfg := core.DefaultConfig()
 	ctx := core.NewFileContext("service.go", ".", []byte("x //nolint:exempt-stub\n"), nil)
 
-	violations := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{newExemptStubRule()}, cfg, nil)
+	violations := mustAnalyzeFiles(t, []*core.FileContext{ctx}, []rules.Rule{newExemptStubRule()}, cfg, nil)
 	if len(violations) != 1 {
 		t.Fatalf("exempt rule must not be suppressed, got %d violations", len(violations))
 	}
@@ -448,7 +449,13 @@ func TestGetProjectRootsDeduplicatesRepeatedPath(t *testing.T) {
 	}
 }
 
-func TestDedupeViolationsDropsRepeatedFinding(t *testing.T) {
+func dedupeViolations(root string, violations core.ViolationList) core.ViolationList {
+	findings := newFindingSet()
+	findings.add(root, violations)
+	return findings.list
+}
+
+func TestFindingSetDropsRepeatedFinding(t *testing.T) {
 	violations := core.ViolationList{
 		{Rule: "error-wrap", File: "a.go", Line: 10, Message: "wrap it"},
 		{Rule: "error-wrap", File: "a.go", Line: 10, Message: "wrap it"},
@@ -456,7 +463,7 @@ func TestDedupeViolationsDropsRepeatedFinding(t *testing.T) {
 		{Rule: "magic-number", File: "a.go", Line: 10, Message: "42"},
 	}
 
-	got := dedupeViolations(violations)
+	got := dedupeViolations("/project", violations)
 	if len(got) != 3 {
 		t.Fatalf("got %d violations, want 3", len(got))
 	}
@@ -464,13 +471,50 @@ func TestDedupeViolationsDropsRepeatedFinding(t *testing.T) {
 
 // One rule can report several distinct problems on the same line — for
 // example two magic numbers in one expression. Those are not duplicates.
-func TestDedupeViolationsKeepsDistinctFindingsOnOneLine(t *testing.T) {
+func TestFindingSetKeepsDistinctFindingsOnOneLine(t *testing.T) {
 	violations := core.ViolationList{
 		{Rule: "magic-number", File: "a.go", Line: 10, Column: 12, Message: "Magic number 86400"},
 		{Rule: "magic-number", File: "a.go", Line: 10, Column: 30, Message: "Magic number 3600"},
 	}
 
-	if got := dedupeViolations(violations); len(got) != 2 {
+	if got := dedupeViolations("/project", violations); len(got) != 2 {
 		t.Fatalf("got %d violations, want both distinct findings kept", len(got))
+	}
+}
+
+// Overlapping roots name the same file differently: "sub/a.go" from the
+// parent, "a.go" from sub itself. It is still one finding.
+func TestFindingSetDropsFindingOfOverlappingRoot(t *testing.T) {
+	findings := newFindingSet()
+	findings.add("/project", core.ViolationList{{Rule: "magic-number", File: "sub/a.go", Line: 5, Message: "777"}})
+	findings.add("/project/sub", core.ViolationList{{Rule: "magic-number", File: "a.go", Line: 5, Message: "777"}})
+
+	if len(findings.list) != 1 || findings.list[0].File != "sub/a.go" {
+		t.Fatalf("got %v, want the single finding of the first root", findings.list)
+	}
+}
+
+func mustAnalyzeFiles(t *testing.T, contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides) core.ViolationList {
+	t.Helper()
+	violations, err := analyzeFiles(contexts, enabledRules, cfg, overrides)
+	if err != nil {
+		t.Fatalf("analyze files: %v", err)
+	}
+	return violations
+}
+
+type panickingRule struct{ *rules.BaseRule }
+
+func (r *panickingRule) AnalyzeFile(*core.FileContext) []*core.Violation { panic("boom") }
+
+// A rule that panics fails the run with its name and the file it choked on,
+// not with a stack trace from an anonymous worker goroutine.
+func TestAnalyzeFilesReportsPanickingRule(t *testing.T) {
+	rule := &panickingRule{rules.NewBaseRule("boom-rule", "patterns", "panics", core.SeverityLow)}
+	ctx := goContext(t, "store.go", "package store\n")
+
+	_, err := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{rule}, core.DefaultConfig(), nil)
+	if err == nil || !strings.Contains(err.Error(), "boom-rule") || !strings.Contains(err.Error(), "store.go") {
+		t.Fatalf("got %v, want an error naming the rule and the file", err)
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -189,7 +191,14 @@ func loadConfigChain(path string, visiting map[string]bool) (*Config, error) {
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
+		return nil, fmt.Errorf("failed to parse config file %q: %w", absPath, err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return nil, fmt.Errorf("failed to parse config file %q: %w", absPath, err)
+	}
+	if err := checkKnownKeys(&document, reflect.TypeOf(cfg), ""); err != nil {
+		return nil, fmt.Errorf("config file %q: %w", absPath, err)
 	}
 
 	if cfg.Extends == "" {
@@ -207,8 +216,12 @@ func loadConfigChain(path string, visiting map[string]bool) (*Config, error) {
 	return MergeConfigs(base, &cfg), nil
 }
 
+// OutputFormats lists the report formats settings.output and --output accept.
+var OutputFormats = []string{"console", "json", "summary"}
+
 // Validate reports configuration values that glint would otherwise have to
-// guess about: unparseable severities anywhere in the file.
+// guess about: unparseable severities, unknown output formats, malformed globs
+// and exceptions that match nothing.
 func (c *Config) Validate() error {
 	// Version 0 means the key is absent, which older configs rely on.
 	if c.Version != 0 && c.Version != SupportedConfigVersion {
@@ -219,6 +232,10 @@ func (c *Config) Validate() error {
 		if _, err := ParseSeverity(c.Settings.MinSeverity); err != nil {
 			return fmt.Errorf("settings.min_severity: %w", err)
 		}
+	}
+	if c.Settings.Output != "" && !slices.Contains(OutputFormats, c.Settings.Output) {
+		return fmt.Errorf("settings.output: unknown format %q (known: %s)",
+			c.Settings.Output, strings.Join(OutputFormats, ", "))
 	}
 	for i, pattern := range c.Settings.Exclude {
 		if !doublestar.ValidatePattern(pattern) {
@@ -238,6 +255,10 @@ func (c *Config) Validate() error {
 				}
 			}
 			for i, exc := range ruleCfg.Exceptions {
+				if exc.File == "" && exc.Files == "" && exc.Line == 0 && exc.Pattern == "" && exc.Function == "" {
+					return fmt.Errorf("categories.%s.rules.%s.exceptions[%d]: names no file, files, line, pattern or function, so it matches nothing",
+						name, ruleName, i)
+				}
 				if exc.Files != "" && !doublestar.ValidatePattern(exc.Files) {
 					return fmt.Errorf("categories.%s.rules.%s.exceptions[%d].files: malformed glob pattern %q",
 						name, ruleName, i, exc.Files)
@@ -429,6 +450,13 @@ func (c *Config) IsRuleEnabled(category, rule string) bool {
 	}
 
 	return true
+}
+
+// IsRuleDisabled reports whether the configuration switches the rule off by
+// name, whatever its category's switch says.
+func (c *Config) IsRuleDisabled(category, rule string) bool {
+	ruleCfg, ok := c.Categories[category].Rules[rule]
+	return ok && !ruleCfg.Enabled
 }
 
 // GetRuleExceptions returns exceptions for a specific rule
