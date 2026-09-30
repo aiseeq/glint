@@ -3,6 +3,8 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -23,12 +25,16 @@ func init() {
 //	    return &PermissionManager{repo: repo}
 //	}
 //
-// This is the "graceful degradation" anti-pattern forbidden by CLAUDE.md:
-// the caller receives a half-alive object and the failure surfaces far from
+// The caller receives a half-alive object and the failure surfaces far from
 // its cause. A nil dependency must abort construction with an error.
 //
-// Not flagged: returning an error, panicking, or assigning a default to the
-// parameter (options-defaulting), and Debug/Info-level notes.
+// A constructor that silently replaces a nil dependency (a logger, a client,
+// a repository) with a package default or a no-op hides the same wiring
+// mistake: `if logger == nil { logger = slog.Default() }` with no log.
+//
+// Not flagged: returning an error, panicking, a default for a parameter that
+// is not a dependency (options-defaulting), a replacement that is logged, and
+// Debug/Info-level notes.
 type ConstructorSwallowsNilDepRule struct {
 	*rules.BaseRule
 }
@@ -72,10 +78,18 @@ func (r *ConstructorSwallowsNilDepRule) AnalyzeFile(ctx *core.FileContext) []*co
 			if len(checked) == 0 {
 				return
 			}
+			pos := ctx.PositionFor(ifStmt)
+			if param, value := silentDefault(ifStmt.Body, checked); param != "" {
+				v := r.CreateViolation(ctx.RelPath, pos.Line,
+					"Constructor "+fn.Name.Name+" silently replaces a nil "+param+" with "+value+" — the caller that passed nil is never told")
+				v.WithCode(strings.TrimSpace(ctx.GetLine(pos.Line)))
+				v.WithSuggestion("Return an error for the nil dependency, or pass the default at the call site")
+				violations = append(violations, v)
+				return
+			}
 			if !r.bodySwallows(ifStmt.Body, checked) {
 				return
 			}
-			pos := ctx.PositionFor(ifStmt)
 			v := r.CreateViolation(ctx.RelPath, pos.Line,
 				"Constructor "+fn.Name.Name+" logs nil dependency ("+strings.Join(checked, ", ")+") and continues — the object is built half-alive")
 			v.WithCode(strings.TrimSpace(ctx.GetLine(pos.Line)))
@@ -123,6 +137,53 @@ func (r *ConstructorSwallowsNilDepRule) bodySwallows(body *ast.BlockStmt, checke
 	})
 
 	return hasErrorLog && !aborts
+}
+
+// silentDefault returns the dependency parameter a nil-check body replaces
+// with a package default or a no-op and the value, when the body does
+// nothing else: slog.Default(), http.DefaultClient, zap.NewNop().
+func silentDefault(body *ast.BlockStmt, checked []string) (string, string) {
+	if len(body.List) != 1 {
+		return "", ""
+	}
+	assign, ok := body.List[0].(*ast.AssignStmt)
+	if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return "", ""
+	}
+	ident, ok := assign.Lhs[0].(*ast.Ident)
+	if !ok || !slices.Contains(checked, ident.Name) || !isDependencyName(ident.Name) {
+		return "", ""
+	}
+	if !isPackageDefault(assign.Rhs[0]) {
+		return "", ""
+	}
+	return ident.Name, types.ExprString(assign.Rhs[0])
+}
+
+// isPackageDefault reports a package-level default or no-op value: pkg.Default(),
+// pkg.DefaultClient, pkg.NewNop(), pkg.Discard.
+func isPackageDefault(expr ast.Expr) bool {
+	expr = ast.Unparen(expr)
+	if call, ok := expr.(*ast.CallExpr); ok {
+		if len(call.Args) != 0 {
+			return false
+		}
+		expr = call.Fun
+	}
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	if _, ok := sel.X.(*ast.Ident); !ok {
+		return false
+	}
+	name := sel.Sel.Name
+	for _, prefix := range []string{"Default", "Nop", "NewNop", "Noop", "NewNoop", "Discard"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // paramNames collects parameter names of the function.

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -521,16 +522,18 @@ type preparedRoot struct {
 }
 
 func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core.Config, enabledRules []rules.Rule, useCache bool) (*preparedRoot, error) {
-	projectRuleCount := 0
+	var projectRules []string
 	requireSSA := false
 	for _, rule := range enabledRules {
 		projectRule, ok := rule.(rules.GoProjectRule)
 		if !ok {
 			continue
 		}
-		projectRuleCount++
+		projectRules = append(projectRules, rule.Name())
 		requireSSA = requireSSA || projectRule.RequiresSSA()
 	}
+	slices.Sort(projectRules)
+	projectRuleCount := len(projectRules)
 
 	walker := core.NewWalker(projectRoot, cfg).WithGoParsing(projectRuleCount == 0)
 	contexts, walker, err := walkWithWalker(walker)
@@ -547,7 +550,7 @@ func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core
 	if !needProject {
 		return prepared, nil
 	}
-	if hit, err := prepared.cachedProject(loader, projectRoot); err != nil || hit {
+	if hit, err := prepared.cachedProject(loader, projectRoot, projectRules); err != nil || hit {
 		return prepared, err
 	}
 	project, err := loader.Load(projectRoot, contexts, core.GoProjectOptions{
@@ -564,10 +567,10 @@ func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core
 }
 
 // cachedProject takes the project findings from the cache when no input of
-// the typed load changed, and gives the Go files the syntax trees the load
+// the typed load changed and the same project rules run, and gives the Go files the syntax trees the load
 // would have given them. An input hash that cannot be computed is reported and
 // the project is loaded.
-func (p *preparedRoot) cachedProject(loader *core.GoProjectLoader, projectRoot string) (bool, error) {
+func (p *preparedRoot) cachedProject(loader *core.GoProjectLoader, projectRoot string, projectRules []string) (bool, error) {
 	if p.cache == nil {
 		return false, nil
 	}
@@ -579,7 +582,7 @@ func (p *preparedRoot) cachedProject(loader *core.GoProjectLoader, projectRoot s
 	if !cacheable {
 		return false, nil
 	}
-	hit := p.cache.keyProject(inputs)
+	hit := p.cache.keyProject(inputs, projectRules)
 	if hit == nil {
 		return false, nil
 	}

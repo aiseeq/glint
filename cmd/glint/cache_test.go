@@ -203,3 +203,28 @@ func TestProjectCacheSkipsTheLoadWhileGoInputsAreUnchanged(t *testing.T) {
 	assert.NotNil(t, third.project)
 	assert.Equal(t, 2, rule.projectCalls, "a Go edit outside the analyzed files still reloads")
 }
+
+// The project findings are those of the project rules that ran: a run with
+// another rule selection (--rule) loads the project and runs its own rules
+// instead of taking the other rule's findings.
+func TestProjectCacheKeysOnTheProjectRulesThatRan(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	module := t.TempDir()
+	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
+	writeModuleFile(t, module, "svc/check.go", "package svc\n\nfunc Value() int { return 1 }\n")
+	root := filepath.Join(module, "svc")
+	first := newProjectStubRule()
+	first.findings = []*core.Violation{first.CreateViolation("check.go", 3, "first finding")}
+	second := &projectStubRule{BaseRule: rules.NewBaseRule("project-stub-2", "patterns", "another project rule", core.SeverityMedium)}
+	second.findings = []*core.Violation{second.CreateViolation("check.go", 3, "second finding")}
+
+	analyzeCachedRoot(t, root, []rules.Rule{first})
+	prepared, got := analyzeCachedRoot(t, root, []rules.Rule{second})
+	assert.NotNil(t, prepared.project, "another rule selection loads the project")
+	assert.Equal(t, 1, second.projectCalls)
+	require.Len(t, got, 1)
+	assert.Equal(t, "project-stub-2", got[0].Rule)
+
+	analyzeCachedRoot(t, root, []rules.Rule{second})
+	assert.Equal(t, 1, second.projectCalls, "the same selection reuses its findings")
+}
