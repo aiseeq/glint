@@ -313,20 +313,24 @@ func (r *ErrorCauseDroppedRule) goViolation(ctx *core.FileContext, call *ast.Cal
 
 func (r *ErrorCauseDroppedRule) analyzeTS(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
-	for i := 0; i < len(ctx.Lines); i++ {
-		line := ctx.Lines[i]
-		m := r.catchStart.FindStringSubmatch(line)
-		if m == nil {
+	src := newJSSource(ctx.Lines)
+	for i := 0; i < len(src.code); i++ {
+		loc := r.catchStart.FindStringSubmatchIndex(src.code[i])
+		if loc == nil {
 			continue
 		}
-		start := i
-		block, end := collectBraceBlock(ctx.Lines, i)
-		if end > i {
-			i = end
+		binding := ""
+		if loc[2] >= 0 {
+			binding = src.code[i][loc[2]:loc[3]]
 		}
-		if r.tsDropsCause(block, m[1]) {
-			violations = append(violations, r.tsViolation(ctx, start+1, line, m[1]))
+		block, end, ok := jsBlockAt(src, i, loc[0])
+		if !ok {
+			continue
 		}
+		if r.tsDropsCause(block, binding) {
+			violations = append(violations, r.tsViolation(ctx, i+1, ctx.Lines[i], binding))
+		}
+		i = end
 	}
 	return violations
 }

@@ -199,6 +199,25 @@ func TestQuadraticLoopReportsNestedFrontendLoop(t *testing.T) {
 	assert.Contains(t, violations[0].Message, "items")
 }
 
+// A brace inside a string does not close the outer loop early.
+func TestQuadraticLoopFrontendBraceInString(t *testing.T) {
+	ctx := rulestest.TextFile(t, "scan.ts", `export function pairs(items: Item[]) {
+  const found: string[] = []
+  for (const a of items) {
+    const label = '}'
+    for (const b of items) {
+      if (a.name === b.name) found.push(label)
+    }
+  }
+  return found
+}
+`)
+
+	violations := NewQuadraticLoopRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+	assert.Equal(t, 3, violations[0].Line)
+}
+
 // Array methods walk the collection just as a loop does.
 func TestQuadraticLoopReportsNestedArrayMethods(t *testing.T) {
 	ctx := rulestest.TextFile(t, "scan.ts", `export function duplicates(items: Item[]) {

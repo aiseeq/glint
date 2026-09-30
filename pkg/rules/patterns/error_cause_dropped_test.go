@@ -361,6 +361,30 @@ func TestErrorCauseDropped_TS(t *testing.T) {
 			expected: 0,
 		},
 		{
+			name: "a brace inside a string or comment does not end the block — flagged",
+			code: `async function load() {
+  try {
+    await api.load()
+  } catch (error) {
+    console.error('load failed: }', error) // closes with }
+    setMessage('Could not load')
+  }
+}`,
+			expected: 1,
+		},
+		{
+			name: "a brace inside a string does not hide a later use — ok",
+			code: `async function load() {
+  try {
+    await api.load()
+  } catch (error) {
+    setMessage('Could not load }')
+    report(error)
+  }
+}`,
+			expected: 0,
+		},
+		{
 			name:     "rethrown as is — ok",
 			code:     `try { go() } catch (e) { console.error(e); throw e }`,
 			expected: 0,
