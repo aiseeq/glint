@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -56,10 +57,16 @@ func (r *LogAndReturnZeroRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
+		if !ok || fn.Body == nil || hasResponseWriterParam(fn.Type.Params) {
 			return true
 		}
-		if !hasNonErrorResults(fn.Type.Results) || hasResponseWriterParam(fn.Type.Params) {
+		if fn.Type.Results == nil || len(fn.Type.Results.List) == 0 {
+			if isCommandName(fn.Name.Name) {
+				violations = append(violations, r.checkSwallowedWrites(ctx, fn.Body)...)
+			}
+			return true
+		}
+		if !hasNonErrorResults(fn.Type.Results) {
 			return true
 		}
 
@@ -134,14 +141,160 @@ func forEachOwnStatementList(body *ast.BlockStmt, visit func([]ast.Stmt)) {
 }
 
 // isErrorOrWarnLogStmt reports whether the statement is a bare Error/Warn
-// logger call.
+// logger call, or an unleveled print (log.Printf, fmt.Printf) whose message
+// says it reports an error.
 func isErrorOrWarnLogStmt(stmt ast.Stmt) bool {
 	exprStmt, ok := stmt.(*ast.ExprStmt)
 	if !ok {
 		return false
 	}
 	call, ok := exprStmt.X.(*ast.CallExpr)
-	return ok && isErrorLevelLogCall(call)
+	return ok && (isErrorLevelLogCall(call) || isPrintedError(call))
+}
+
+// errorMessageWords mark the text of an unleveled print as an error report.
+var errorMessageWords = []string{"error", "fail", "critical", "fatal", "cannot", "unable", "ошибк", "не удалось", "❌"}
+
+// isPrintedError reports log.Print*, fmt.Print* or fmt.Fprint*(os.Stderr)
+// whose message literal names an error.
+func isPrintedError(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !strings.HasPrefix(sel.Sel.Name, "Print") && !strings.HasPrefix(sel.Sel.Name, "Fprint") {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok || (pkg.Name != "log" && pkg.Name != "fmt") {
+		return false
+	}
+	args := call.Args
+	if strings.HasPrefix(sel.Sel.Name, "Fprint") {
+		if !isStderrPrint(sel, call) {
+			return false
+		}
+		args = args[1:]
+	}
+	for _, arg := range args {
+		lit, ok := ast.Unparen(arg).(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			continue
+		}
+		text := strings.ToLower(lit.Value)
+		for _, word := range errorMessageWords {
+			if strings.Contains(text, word) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// commandVerbs start the names of functions that carry out a business
+// action. Their caller takes the action as done; a helper that records an
+// audit entry, a metric or a history row after the action is not one of them.
+var commandVerbs = []string{"Create", "Insert", "Update", "Delete", "Remove", "Save", "Upsert", "Store", "Persist",
+	"Process", "Apply", "Complete", "Commit", "Settle", "Credit", "Debit", "Transfer", "Withdraw", "Deposit"}
+
+// isCommandName reports a function named by a command verb.
+func isCommandName(name string) bool {
+	for _, verb := range commandVerbs {
+		if hasLeadingWord(name, verb) {
+			return true
+		}
+	}
+	return false
+}
+
+// writeVerbs start the names of calls that change stored state.
+var writeVerbs = []string{"Create", "Insert", "Update", "Delete", "Remove", "Save", "Upsert", "Exec", "Store", "Persist", "Commit", "Put", "Mark", "Record"}
+
+// checkSwallowedWrites reports, in a command function without results, a
+// write whose error is logged and dropped as the function ends: the caller has no result
+// to check and goes on as if the state had changed. A branch that goes on
+// with a loop (continue) is left out: the loop decides.
+func (r *LogAndReturnZeroRule) checkSwallowedWrites(ctx *core.FileContext, body *ast.BlockStmt) []*core.Violation {
+	var violations []*core.Violation
+	report := func(ifStmt *ast.IfStmt, call *ast.CallExpr, rest []ast.Stmt) {
+		if !isWriteCall(call) || !branchLogsAndEnds(ifStmt.Body, rest) {
+			return
+		}
+		pos := ctx.PositionFor(ifStmt)
+		v := r.CreateViolation(ctx.RelPath, pos.Line,
+			"A failed write is logged and dropped in a function without an error result - the caller goes on as if it had succeeded")
+		v.WithCode(strings.TrimSpace(ctx.GetLine(pos.Line)))
+		v.WithSuggestion("Return the error and let the caller stop, or make the write part of the caller's transaction")
+		violations = append(violations, v)
+	}
+	forEachOwnStatementList(body, func(list []ast.Stmt) {
+		for i, stmt := range list {
+			ifStmt, ok := stmt.(*ast.IfStmt)
+			if !ok {
+				continue
+			}
+			errName := errNilCheckName(ifStmt.Cond)
+			if errName == "" {
+				continue
+			}
+			if call := errorSourceCall(nil, nil, ifStmt, list[:i], errName); call != nil {
+				report(ifStmt, call, list[i+1:])
+			}
+		}
+	})
+	return violations
+}
+
+// isWriteCall reports a method call whose name starts with a write verb.
+func isWriteCall(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	for _, verb := range writeVerbs {
+		if hasLeadingWord(sel.Sel.Name, verb) {
+			return true
+		}
+	}
+	return false
+}
+
+// branchLogsAndEnds reports an error branch that logs the error, hands it to
+// nothing else, and ends the function: it returns, or nothing but logging
+// follows the if.
+func branchLogsAndEnds(body *ast.BlockStmt, rest []ast.Stmt) bool {
+	logs := false
+	for _, stmt := range body.List {
+		switch s := stmt.(type) {
+		case *ast.ExprStmt:
+			call, ok := s.X.(*ast.CallExpr)
+			if !ok || !(isErrorLevelLogCall(call) || isPrintedError(call)) {
+				return false
+			}
+			logs = true
+		case *ast.ReturnStmt:
+		default:
+			return false
+		}
+	}
+	if !logs {
+		return false
+	}
+	if last := body.List[len(body.List)-1]; isReturnStmt(last) {
+		return true
+	}
+	for _, stmt := range rest {
+		exprStmt, ok := stmt.(*ast.ExprStmt)
+		if !ok {
+			return false
+		}
+		if call, ok := exprStmt.X.(*ast.CallExpr); !ok || !isLoggerCall(call) {
+			return false
+		}
+	}
+	return true
+}
+
+func isReturnStmt(stmt ast.Stmt) bool {
+	_, ok := stmt.(*ast.ReturnStmt)
+	return ok
 }
 
 // allResultsAreZeroValues reports whether every returned expression is a zero
