@@ -151,3 +151,46 @@ const modalSizes = { sm: 'w-64', md: 'w-96', lg: 'w-128' }
 	}
 	assert.Equal(t, wantedLines(files, "value-set-drift"), foundLines(valueSetDriftFindings(t, files)))
 }
+
+// Not copies kept by hand: a constant whose last word is two words
+// (StatusInProgress) belongs to its block's group, HTTP methods are the
+// protocol's vocabulary, and a tool's configuration names the tool's options.
+func TestValueSetDriftNotCopies(t *testing.T) {
+	files := map[string]string{
+		"backend/models/transfer.go": `package models
+
+const (
+	TransferStatusPending    = "pending"
+	TransferStatusInProgress = "in_progress"
+	TransferStatusCompleted  = "completed"
+	TransferStatusFailed     = "failed"
+	TransferStatusCancelled  = "cancelled"
+)
+
+type PaymentStatus string
+
+const (
+	PaymentStatusPending   PaymentStatus = "pending"
+	PaymentStatusCompleted PaymentStatus = "completed"
+	PaymentStatusFailed    PaymentStatus = "failed"
+	PaymentStatusCancelled PaymentStatus = "cancelled"
+	PaymentStatusRefunded  PaymentStatus = "refunded"
+)
+`,
+		"backend/middleware/csrf.go": `package middleware
+
+func safe(method string) bool {
+	safeMethods := []string{"GET", "HEAD", "OPTIONS"}
+	return slices.Contains(safeMethods, method)
+}
+`,
+		"web/src/transfer.ts": `export const transferLabels = { pending: 'Waiting', in_progress: 'Moving', completed: 'Done', failed: 'Failed', cancelled: 'Cancelled' }
+export const RETRY_METHODS = ['GET', 'HEAD', 'OPTIONS']
+`,
+		"web/app/jest.config.js": `module.exports = { moduleFileExtensions: ['ts', 'tsx', 'js', 'json'] }
+`,
+		"web/admin/jest.config.js": `module.exports = { moduleFileExtensions: ['ts', 'tsx', 'js', 'json'] }
+`,
+	}
+	assert.Empty(t, foundLines(valueSetDriftFindings(t, files)))
+}

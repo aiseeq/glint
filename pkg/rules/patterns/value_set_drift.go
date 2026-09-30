@@ -128,7 +128,12 @@ func bestMatch(idx *valueset.Index, set valueset.Set) (setMatch, bool) {
 			// A list repeating another: a copy kept by hand. A label or a
 			// handler for each value of a set is not a copy, and a list
 			// equal to a declared set is in step with it.
-			if other.Kind == valueset.Enum || (set.Kind == valueset.Keyed && other.Kind == valueset.Keyed) {
+			if other.Kind == valueset.Enum {
+				// In step with a declared set: it mirrors that one, and
+				// the near sets are other domains.
+				return setMatch{}, false
+			}
+			if set.Kind == valueset.Keyed && other.Kind == valueset.Keyed {
 				continue
 			}
 			if !before(other, set) {

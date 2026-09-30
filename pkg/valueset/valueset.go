@@ -70,10 +70,21 @@ func newSet(path string, line int, name string, kind Kind, isGo bool, values []s
 	values = slices.Clone(values)
 	slices.Sort(values)
 	values = slices.Compact(values)
-	if len(values) < MinMembers {
+	if len(values) < MinMembers || !slices.ContainsFunc(values, notHTTPMethod) {
 		return Set{}, false
 	}
 	return Set{Path: path, Line: line, Name: name, Kind: kind, Go: isGo, Members: values}, true
+}
+
+// notHTTPMethod reports a value other than an HTTP method: sets of methods
+// (safe, idempotent, allowed by CORS) are the protocol's vocabulary, the same
+// wherever they are written.
+func notHTTPMethod(value string) bool {
+	switch strings.ToUpper(value) {
+	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT":
+		return false
+	}
+	return true
 }
 
 // Extract returns the sets written in a Go or TS/JS file.
@@ -124,6 +135,7 @@ func (g *goSets) enums() {
 		if !ok || gen.Tok != token.CONST {
 			continue
 		}
+		families := nameFamilies(gen)
 		for _, spec := range gen.Specs {
 			vs, ok := spec.(*ast.ValueSpec)
 			if !ok || len(vs.Names) != len(vs.Values) {
@@ -131,7 +143,7 @@ func (g *goSets) enums() {
 			}
 			for i, value := range vs.Values {
 				s, ok := goString(value)
-				key := constGroup(gen, vs, i)
+				key := constGroup(gen, vs, i, families)
 				if !ok || key == "" {
 					continue
 				}
@@ -150,16 +162,39 @@ func (g *goSets) enums() {
 }
 
 // constGroup is the set the i-th constant of a spec belongs to: its type, or
-// the prefix of its name within its declaration.
-func constGroup(gen *ast.GenDecl, vs *ast.ValueSpec, i int) string {
+// the prefix of its name within its declaration - the longest one that
+// another constant of the declaration ends a word before its last with:
+// StatusInProgress goes with StatusPending to Status, not to StatusIn.
+func constGroup(gen *ast.GenDecl, vs *ast.ValueSpec, i int, families map[string]int) string {
 	if vs.Type != nil {
 		return goTypeName(vs.Type)
 	}
-	prefix := namePrefix(vs.Names[i].Name)
+	name := vs.Names[i].Name
+	prefix := namePrefix(name)
 	if prefix == "" {
 		return ""
 	}
+	for p := prefix; p != ""; p = namePrefix(p) {
+		if families[p] > 1 {
+			prefix = p
+			break
+		}
+	}
 	return fmt.Sprintf("%s\x00%d", prefix, gen.Pos())
+}
+
+// nameFamilies counts the untyped constants of a declaration by their names
+// without the last word.
+func nameFamilies(gen *ast.GenDecl) map[string]int {
+	families := make(map[string]int)
+	for _, spec := range gen.Specs {
+		if vs, ok := spec.(*ast.ValueSpec); ok && vs.Type == nil {
+			for _, name := range vs.Names {
+				families[namePrefix(name.Name)]++
+			}
+		}
+	}
+	return families
 }
 
 func (g *goSets) visit(n ast.Node) bool {
@@ -542,13 +577,18 @@ func FileSets(ctx *core.FileContext) []Set {
 	return core.FileShared(ctx, setsKey{}, func() []Set { return Extract(ctx) })
 }
 
-// IndexFiles indexes the sets of a project's files. Test files and browser
-// tests are left out: they spell out the values they expect, and a copy
-// there is not one anyone keeps in step.
+// toolConfig matches the configuration files of build and test tools
+// (jest.config.js, vite.config.ts, .eslintrc.cjs): their lists are the tool's
+// options.
+var toolConfig = regexp.MustCompile(`^(?:[\w-]+\.config|\.\w+rc)\.[cm]?[jt]s$`)
+
+// IndexFiles indexes the sets of a project's files. Test files, browser
+// tests and tools' configuration are left out: they spell out the values
+// they expect, and a copy there is not one anyone keeps in step.
 func IndexFiles(files []*core.FileContext) *Index {
 	var kept []*core.FileContext
 	for _, file := range files {
-		if !file.IsTestFile() && !strings.Contains("/"+filepath.ToSlash(file.RelPath), "/e2e/") {
+		if !file.IsTestFile() && !strings.Contains("/"+filepath.ToSlash(file.RelPath), "/e2e/") && !toolConfig.MatchString(filepath.Base(file.RelPath)) {
 			kept = append(kept, file)
 		}
 	}
