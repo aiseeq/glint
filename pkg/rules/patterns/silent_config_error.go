@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"regexp"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -194,6 +195,10 @@ func (r *SilentConfigErrorRule) checkBareCall(ctx *core.FileContext, stmt *ast.E
 	return v
 }
 
+// projectConfigLoader matches a lowercased callee named Load<Something>Config,
+// qualified or not.
+var projectConfigLoader = regexp.MustCompile(`(^|\.)load[a-z0-9_]*config$`)
+
 // isConfigLoadCall reports whether the fully-qualified callee name indicates
 // an env/config load function whose error must not be silently dropped.
 func (r *SilentConfigErrorRule) isConfigLoadCall(funcName string) bool {
@@ -203,15 +208,10 @@ func (r *SilentConfigErrorRule) isConfigLoadCall(funcName string) bool {
 			return true
 		}
 	}
-	// Project-wide config loaders: LoadUnifiedConfig, LoadConfig, NewConfig.
-	// These are aggregators over the env/godotenv functions above — dropping
-	// their error hides the same class of misconfiguration.
-	if strings.HasSuffix(lower, ".loadunifiedconfig") ||
-		strings.HasSuffix(lower, ".loadconfig") ||
-		lower == "loadunifiedconfig" || lower == "loadconfig" {
-		return true
-	}
-	return false
+	// Project-wide config loaders (LoadConfig, LoadAppConfig) aggregate the
+	// env/godotenv functions above — dropping their error hides the same class
+	// of misconfiguration.
+	return projectConfigLoader.MatchString(lower)
 }
 
 // checkErrNilSwallowInBlock walks a block looking for the `err == nil` swallow
@@ -282,7 +282,7 @@ func (r *SilentConfigErrorRule) checkInlineErrNilSwallow(ctx *core.FileContext, 
 
 // checkPrecedingAssignErrNilSwallow handles the 2-statement form:
 //
-//	cfg, err := config.LoadUnifiedConfig()
+//	cfg, err := config.LoadAppConfig()
 //	if err == nil { ... }
 //
 // The error path is the implicit fall-through after the if.

@@ -61,7 +61,7 @@ func (r *DeferInLoopRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 		case *ast.DeferStmt:
 			if loopDepth > 0 {
-				line := r.getLineFromNode(ctx, stmt)
+				line := ctx.LineFor(stmt)
 				v := r.CreateViolation(ctx.RelPath, line, "defer inside loop - resources won't be released until function returns")
 				v.WithCode(ctx.GetLine(line))
 				v.WithSuggestion("Move defer outside the loop or use immediate function call")
@@ -79,8 +79,4 @@ func (r *DeferInLoopRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	ast.Inspect(ctx.GoAST, inspect)
 
 	return violations
-}
-
-func (r *DeferInLoopRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }

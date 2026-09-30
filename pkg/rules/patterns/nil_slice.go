@@ -116,7 +116,7 @@ func (r *NilSliceRule) analyze(ctx *core.FileContext, info *types.Info, project 
 			return true
 		}
 
-		line := r.getLineFromNode(ctx, binary)
+		line := ctx.LineFor(binary)
 		var suggestion string
 		if binary.Op == token.EQL {
 			suggestion = "Use 'len(" + varName + ") == 0' instead of '" + varName + " == nil'"
@@ -259,8 +259,4 @@ func (r *NilSliceRule) looksLikeAnyByName(name string) bool {
 
 func (r *NilSliceRule) hasIntentionalNilSemantics(name string) bool {
 	return name == "options" || strings.HasSuffix(name, "IDs")
-}
-
-func (r *NilSliceRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }

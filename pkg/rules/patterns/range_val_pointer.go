@@ -78,7 +78,7 @@ func (r *RangeValPointerRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 			// Check if operand is a range variable
 			if ident, ok := unary.X.(*ast.Ident); ok {
 				if rangeVars[ident.Name] {
-					line := r.getLineFromNode(ctx, unary)
+					line := ctx.LineFor(unary)
 					v := r.CreateViolation(ctx.RelPath, line, "Taking address of range variable '"+ident.Name+"' - all iterations share same address")
 					v.WithCode(ctx.GetLine(line))
 					v.WithSuggestion("Create a local copy: copy := " + ident.Name + "; use &copy")
@@ -95,8 +95,4 @@ func (r *RangeValPointerRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	})
 
 	return violations
-}
-
-func (r *RangeValPointerRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }

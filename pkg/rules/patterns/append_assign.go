@@ -55,7 +55,7 @@ func (r *AppendAssignRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 
 		// Check if it's append()
 		if r.isAppendCall(callExpr) {
-			line := r.getLineFromNode(ctx, exprStmt)
+			line := ctx.LineFor(exprStmt)
 			v := r.CreateViolation(ctx.RelPath, line, "append() result is not assigned - slice is not modified")
 			v.WithCode(ctx.GetLine(line))
 			v.WithSuggestion("Assign the result: slice = append(slice, item)")
@@ -75,8 +75,4 @@ func (r *AppendAssignRule) isAppendCall(call *ast.CallExpr) bool {
 		return false
 	}
 	return ident.Name == "append"
-}
-
-func (r *AppendAssignRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }

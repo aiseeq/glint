@@ -25,9 +25,9 @@ func init() {
 // nothing in the logs says "half of this operation happened". The record simply disagrees
 // with itself from then on, and the disagreement is found later, by a human, in money.
 //
-// Real case (ProjectA, 2026-07-31). Completing a withdrawal wrote four rows in sequence: the
+// Real case (ProjectA). Completing a withdrawal wrote four rows in sequence: the
 // transaction hash onto the request, a posting into `transactions`, the request's status to
-// `completed`, and finally the ledger entries in `fund_transfers`. The last step was allowed
+// `completed`, and finally the ledger entries. The last step was allowed
 // to fail — the code even carried a comment saying rollback was impossible at that point. A
 // failure there left the withdrawal marked completed, with a posting under it, and no ledger
 // entry: the money was recorded as gone and unaccounted for at the same time. The four writes

@@ -21,7 +21,7 @@ var tableName = regexp.MustCompile(`(?is)^\s*([a-z_][a-z0-9_]*)`)
 
 // SelectStarStructScanRule detects `SELECT *` against a real table in Go SQL literals.
 //
-// Родилось из REF-410. sqlx без Unsafe() требует, чтобы каждой колонке ответа нашлось поле
+// sqlx без Unsafe() требует, чтобы каждой колонке ответа нашлось поле
 // в структуре назначения. Поэтому `SELECT *` привязывает чтение к текущему набору колонок:
 // миграция, добавляющая колонку, ломает выборку на рантайме с "missing destination name",
 // хотя Go-код не менялся и сборка прошла. Явный список колонок снимает эту связь.

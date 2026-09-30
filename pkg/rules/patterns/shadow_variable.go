@@ -70,7 +70,7 @@ func (r *ShadowVariableRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 			for _, field := range fn.Recv.List {
 				for _, name := range field.Names {
 					if name.Name != "_" {
-						outerScope[name.Name] = r.getLineFromNode(ctx, name)
+						outerScope[name.Name] = ctx.LineFor(name)
 					}
 				}
 			}
@@ -81,7 +81,7 @@ func (r *ShadowVariableRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 			for _, field := range fn.Type.Params.List {
 				for _, name := range field.Names {
 					if name.Name != "_" {
-						outerScope[name.Name] = r.getLineFromNode(ctx, name)
+						outerScope[name.Name] = ctx.LineFor(name)
 					}
 				}
 			}
@@ -124,7 +124,7 @@ func (r *ShadowVariableRule) reportShadow(ctx *core.FileContext, name *ast.Ident
 	if !exists {
 		return
 	}
-	line := r.getLineFromNode(ctx, name)
+	line := ctx.LineFor(name)
 	v := r.CreateViolation(ctx.RelPath, line, "Variable '"+name.Name+"' shadows declaration from line "+strconv.Itoa(origLine))
 	v.WithCode(ctx.GetLine(line))
 	v.WithSuggestion("Use a different variable name to avoid confusion")
@@ -157,7 +157,7 @@ func (r *ShadowVariableRule) checkAssign(ctx *core.FileContext, s *ast.AssignStm
 	for _, lhs := range s.Lhs {
 		if ident, ok := lhs.(*ast.Ident); ok && ident.Name != "_" {
 			r.reportShadow(ctx, ident, outerScope, violations)
-			currentScope[ident.Name] = r.getLineFromNode(ctx, ident)
+			currentScope[ident.Name] = ctx.LineFor(ident)
 		}
 	}
 }
@@ -175,7 +175,7 @@ func (r *ShadowVariableRule) checkDecl(ctx *core.FileContext, s *ast.DeclStmt, c
 		for _, name := range valueSpec.Names {
 			if name.Name != "_" {
 				r.reportShadow(ctx, name, outerScope, violations)
-				currentScope[name.Name] = r.getLineFromNode(ctx, name)
+				currentScope[name.Name] = ctx.LineFor(name)
 			}
 		}
 	}
@@ -210,18 +210,14 @@ func (r *ShadowVariableRule) checkRange(ctx *core.FileContext, s *ast.RangeStmt,
 	if s.Tok.String() == ":=" {
 		if key, ok := s.Key.(*ast.Ident); ok && key.Name != "_" {
 			r.reportShadow(ctx, key, outerScope, violations)
-			mergedScope[key.Name] = r.getLineFromNode(ctx, key)
+			mergedScope[key.Name] = ctx.LineFor(key)
 		}
 		if s.Value != nil {
 			if value, ok := s.Value.(*ast.Ident); ok && value.Name != "_" {
 				r.reportShadow(ctx, value, outerScope, violations)
-				mergedScope[value.Name] = r.getLineFromNode(ctx, value)
+				mergedScope[value.Name] = ctx.LineFor(value)
 			}
 		}
 	}
 	r.checkBlock(ctx, s.Body, mergedScope, violations)
-}
-
-func (r *ShadowVariableRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }

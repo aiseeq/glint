@@ -17,7 +17,7 @@ func TestReactRemountKeyRule(t *testing.T) {
 		wantCount int
 	}{
 		{
-			// Repro: projectB settings/page.tsx before aa0bf07 — the wallet
+			// Repro: a settings page — the wallet
 			// address is both the key and the edited input value.
 			name: "key from edited field",
 			code: `{walletDrafts.map((wallet, index) => (

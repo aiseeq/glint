@@ -39,7 +39,7 @@ func loadEnv() error {
 
 func GetBaseURL() string {
 	var baseURL string
-	cfg, err := LoadUnifiedConfig()
+	cfg, err := LoadAppConfig()
 	if err == nil {
 		baseURL = cfg.URL
 		return baseURL

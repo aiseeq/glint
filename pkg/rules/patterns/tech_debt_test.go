@@ -334,7 +334,7 @@ func TestTechDebtRule_UnusedProseStillFlagged(t *testing.T) {
 	for _, code := range []string{
 		"// unused variable kept for compatibility",
 		"// unused: remove after migration",
-		"// unused, see task REF-123",
+		"// unused, see task ABC-123",
 	} {
 		ctx := createTechDebtContext(t, "backend/service.go", code)
 		require.NotEmpty(t, rule.AnalyzeFile(ctx), "метка мёртвого кода должна ловиться: %s", code)

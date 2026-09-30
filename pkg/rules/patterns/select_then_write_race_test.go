@@ -18,7 +18,7 @@ func TestSelectThenWriteRaceRule(t *testing.T) {
 	}{
 		{
 			// Repro: projectB financial_repository.go UpdateTransactionStatusLocked
-			// before 52352f4 — status read, validated, written without a lock.
+			// — status read, validated, written without a lock.
 			name: "status read then written without lock",
 			code: `package repo
 import "context"

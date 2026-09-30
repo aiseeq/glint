@@ -21,7 +21,7 @@ func init() {
 // function returning it. The name-based version of this rule matched a fixed list of verbs
 // (Read, Parse, Query, Marshal…) and therefore stayed silent on every domain method — the
 // shape `items, _ = repo.List(ctx)` reads as "no data" downstream while the query may well
-// have failed (REF-462).
+// have failed.
 //
 // Closing a resource stays exempt: `_ = conn.Close()` and the print family cannot report
 // anything useful to the caller, and writing the blank there is the documented way to say

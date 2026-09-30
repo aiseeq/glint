@@ -210,7 +210,7 @@ func (r *FinancialConstantsRule) checkDecimalCall(ctx *core.FileContext, call *a
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
 			"Hardcoded financial constant detected - move to config")
 		v.WithCode(lit.Value)
-		v.WithSuggestion("Define this value in config (e.g., config/limits.yaml) and access via UnifiedConfig")
+		v.WithSuggestion("Define this value in the configuration and read it from there")
 		return v
 	}
 
@@ -221,7 +221,7 @@ func (r *FinancialConstantsRule) checkDecimalCall(ctx *core.FileContext, call *a
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
 			"Hardcoded financial constant detected - move to config")
 		v.WithCode(lit.Value)
-		v.WithSuggestion("Define this value in config (e.g., config/limits.yaml) and access via UnifiedConfig")
+		v.WithSuggestion("Define this value in the configuration and read it from there")
 		return v
 	}
 

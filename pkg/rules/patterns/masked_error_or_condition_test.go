@@ -18,11 +18,11 @@ func TestMaskedErrorOrConditionRule(t *testing.T) {
 			name: "db error conflated with no-data returns zero and nil",
 			code: `package svc
 
-func GetEffectiveAPY(ctx context.Context, strategy string) (SafeDecimal, error) {
+func GetEffectiveAPY(ctx context.Context, strategy string) (Money, error) {
 	latest, err := repo.GetLatestSnapshot(ctx, strategy)
 	if err != nil || latest == nil {
 		logger.Warn("no latest snapshot", "error", err)
-		return SafeDecimal{Decimal: decimal.Zero}, nil
+		return Money{Decimal: decimal.Zero}, nil
 	}
 	return compute(latest), nil
 }
@@ -48,13 +48,13 @@ func Load() (*Data, error) {
 			name: "proper split of error and no-data branches",
 			code: `package svc
 
-func GetEffectiveAPY(ctx context.Context, strategy string) (SafeDecimal, error) {
+func GetEffectiveAPY(ctx context.Context, strategy string) (Money, error) {
 	latest, err := repo.GetLatestSnapshot(ctx, strategy)
 	if err != nil {
-		return SafeDecimal{}, fmt.Errorf("get snapshot: %w", err)
+		return Money{}, fmt.Errorf("get snapshot: %w", err)
 	}
 	if latest == nil {
-		return SafeDecimal{Decimal: decimal.Zero}, nil
+		return Money{Decimal: decimal.Zero}, nil
 	}
 	return compute(latest), nil
 }
@@ -109,7 +109,7 @@ func Get() (*Data, error) {
 		{
 			// Раньше здесь ожидался 0: случай считался зоной log-and-return-zero.
 			// Но то правило требует Error/Warn-лог в ветке, а без лога ошибка
-			// исчезала вовсе и не ловилась никем (ревью projectA REF-487).
+			// исчезала вовсе и не ловилась никем (ревью projectA).
 			name: "function without error result masks the failure entirely",
 			code: `package svc
 
@@ -213,7 +213,7 @@ func Get() (*Data, error) {
 	}
 }
 
-// Дыра между правилами, вскрытая ревью projectA (REF-487): функция БЕЗ error в
+// Дыра между правилами, вскрытая ревью projectA: функция БЕЗ error в
 // сигнатуре схлопывает err с «нет данных» через || и молча возвращает значение.
 // masked-error-in-or-condition требовал error в результатах, log-and-return-zero —
 // наличия лога; случай «без error и без лога» не ловил никто, хотя он опаснее

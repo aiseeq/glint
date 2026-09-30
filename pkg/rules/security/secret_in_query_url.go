@@ -21,10 +21,9 @@ func init() {
 // *url.Error, which carries the full URL — so a timeout or DNS failure leaks
 // the key into every log line that prints the error.
 //
-// Real case (projectB, 2026-08-05): Helius authorizes only via ?api-key=...;
-// a transport failure logged the key through the wrapped *url.Error. The fix
-// added a SanitizeTransportError helper that strips the query from the
-// *url.Error before the error is wrapped.
+// Some providers accept a key only as ?api-key=...; there a transport failure
+// logs the key through the wrapped *url.Error unless a sanitizer strips the
+// query from the *url.Error before the error is wrapped.
 //
 // The rule is silent when the function routes the error through a sanitizer
 // (any call whose name contains "Sanitize"), and when the request goes through

@@ -6,9 +6,9 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 )
 
-// Класс, вскрытый ревью projectA (REF-487): Go-тесты, которые «документируют»
-// поведение через t.Logf и не могут упасть никогда. Пять функций в
-// safe_decimal_security_test.go годами числились зелёным покрытием и печатали
+// Класс, вскрытый ревью projectA: Go-тесты, которые «документируют»
+// поведение через t.Logf и не могут упасть никогда. Пять функций
+// годами числились зелёным покрытием и печатали
 // «⚠️ VULNERABILITY: no overflow detection», ничего не проверяя.
 // unfalsifiable-test-case это не ловил: он работает только по TS/JS и требует
 // хотя бы одной ассерции, а здесь их ноль.
@@ -144,7 +144,7 @@ func TestAdapter_HasGetUsersByIDs(t *testing.T) {
 import "testing"
 
 func TestPending(t *testing.T) {
-	t.Skip("blocked by REF-999")
+	t.Skip("blocked by ABC-999")
 	t.Logf("unreachable")
 }
 `,

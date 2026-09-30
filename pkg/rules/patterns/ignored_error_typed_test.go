@@ -22,7 +22,7 @@ func ignoredErrorMessages(t *testing.T, files map[string]string) []string {
 	return out
 }
 
-// Второй случай из REF-462: ошибка выброшена blank identifier'ом. Имя метода
+// Ошибка выброшена blank identifier'ом. Имя метода
 // ничего не говорит о том, что он возвращает error, поэтому проверка по списку
 // имён (Read/Parse/Query...) на нём молчала.
 func TestIgnoredError_BlankFromDomainMethod(t *testing.T) {

@@ -472,8 +472,8 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 	}
 
 	// Файл, называющий локальный адрес, гоняет наш собственный сервер, и «секрет» в нём —
-	// наш же JWT. В projectB на этом ловился reference-тест, который гейтится
-	// BO_ADMIN_TOKEN и ходит в http://localhost:8090.
+	// наш же JWT: reference-тест, который гейтится токеном администратора и ходит
+	// в http://localhost:8090.
 	drivesOwnServer := r.hasLocalURLLiteral(file.GoAST)
 
 	var violations []*core.Violation

@@ -106,7 +106,7 @@ func (r *BoolCompareRule) analyze(ctx *core.FileContext, info *types.Info) []*co
 			return true
 		}
 
-		line := r.getLineFromNode(ctx, binary)
+		line := ctx.LineFor(binary)
 		var suggestion string
 
 		if binary.Op == token.EQL {
@@ -135,10 +135,6 @@ func (r *BoolCompareRule) analyze(ctx *core.FileContext, info *types.Info) []*co
 	})
 
 	return violations
-}
-
-func (r *BoolCompareRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }
 
 // isKnownBool reports whether the operand compared against true/false is

@@ -53,7 +53,7 @@ func TestTypedNilIntoInterfaceRule_Detection(t *testing.T) {
 		expectInMsg string
 	}{
 		{
-			// Ровно случай REF-446: указатель сравнивают с nil в другом месте, значит он
+			// Ровно случай инцидента: указатель сравнивают с nil в другом месте, значит он
 			// бывает пустым, а тут он уходит в интерфейс напрямую.
 			name: "nil-able pointer passed to interface parameter",
 			wiring: `package app
