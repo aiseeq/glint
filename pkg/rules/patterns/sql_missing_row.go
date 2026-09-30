@@ -137,8 +137,8 @@ func errorFunctions(file *ast.File) []*ast.BlockStmt {
 }
 
 // countChecked reports a write statement whose result the function asks
-// RowsAffected and acts on the count: tests it in an if returning an error,
-// returns it or passes it on, right away or through a variable.
+// RowsAffected and acts on the count: tests it in an if that returns or
+// jumps, returns it or passes it on, right away or through a variable.
 func countChecked(stmt ast.Stmt, body *ast.BlockStmt) bool {
 	result := resultName(stmt)
 	if result == "" {
@@ -209,14 +209,14 @@ func resultName(stmt ast.Stmt) string {
 	return ""
 }
 
-// countActedOn reports a count that an if returning an error tests, that
+// countActedOn reports a count that an if returning or jumping tests, that
 // is returned, or that is passed to a call.
 func countActedOn(holds func(ast.Expr) bool, body *ast.BlockStmt) bool {
 	acted := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.IfStmt:
-			if holds(node.Cond) && (blockReturnsError(node.Body) || elseReturnsError(node.Else)) {
+			if holds(node.Cond) && (blockLeaves(node.Body) || elseLeaves(node.Else)) {
 				acted = true
 			}
 		case *ast.ReturnStmt:
@@ -233,7 +233,19 @@ func countActedOn(holds func(ast.Expr) bool, body *ast.BlockStmt) bool {
 	return acted
 }
 
-func elseReturnsError(stmt ast.Stmt) bool {
+// blockLeaves reports a block that returns or jumps: the flow after it
+// depends on the count.
+func blockLeaves(body *ast.BlockStmt) bool {
+	for _, stmt := range body.List {
+		switch stmt.(type) {
+		case *ast.ReturnStmt, *ast.BranchStmt:
+			return true
+		}
+	}
+	return false
+}
+
+func elseLeaves(stmt ast.Stmt) bool {
 	block, ok := stmt.(*ast.BlockStmt)
-	return ok && blockReturnsError(block)
+	return ok && blockLeaves(block)
 }

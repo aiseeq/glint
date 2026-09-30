@@ -3,6 +3,8 @@ package patterns
 import (
 	"go/ast"
 	"go/types"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -125,13 +127,83 @@ func (r *QueryInLoopRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject walks the loops of every loaded file.
 func (r *QueryInLoopRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	reach := storageReach{}
+	helpers := queryHelpers(ctx, reach)
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
-		return r.analyzeFile(file, info, reach)
+		return r.analyzeFile(file, info, reach, helpers)
 	})
 }
 
+// queryHelpers maps the functions of the project that make a data-access
+// call themselves (outside a function literal) to that call, "repo.Get".
+// A loop calling one of them from its own package queries on every
+// iteration as much as a loop calling the repository.
+func queryHelpers(ctx *core.GoProjectContext, reach storageReach) map[*types.Func]queryHelper {
+	helpers := make(map[*types.Func]queryHelper)
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
+			continue
+		}
+		info := pkg.Package.TypesInfo
+		for _, file := range pkg.Files {
+			if file.GoAST == nil || file.IsTestFile() {
+				continue
+			}
+			for _, decl := range file.GoAST.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+				obj, ok := info.Defs[fn.Name].(*types.Func)
+				if !ok {
+					continue
+				}
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					if _, nested := n.(*ast.FuncLit); nested || helpers[obj].call != "" {
+						return false
+					}
+					if call, ok := n.(*ast.CallExpr); ok {
+						if recv, method, ok := dataAccessCall(call, info, reach); ok {
+							helpers[obj] = queryHelper{call: recv + "." + method, dir: filepath.Dir(file.Path)}
+						}
+					}
+					return true
+				})
+			}
+		}
+	}
+	return helpers
+}
+
+// queryHelper is a function making a data-access call: the call, and the
+// directory of the file declaring the function.
+type queryHelper struct {
+	call, dir string
+}
+
+// calledFunc returns the function or method a call names, nil for a call
+// through a value (a func variable, an interface).
+func calledFunc(call *ast.CallExpr, info *types.Info) *types.Func {
+	var id *ast.Ident
+	switch fun := ast.Unparen(call.Fun).(type) {
+	case *ast.Ident:
+		id = fun
+	case *ast.SelectorExpr:
+		id = fun.Sel
+	default:
+		return nil
+	}
+	fn, _ := info.Uses[id].(*types.Func)
+	if fn == nil {
+		return nil
+	}
+	if sig, ok := fn.Type().(*types.Signature); ok && sig.Recv() != nil && types.IsInterface(sig.Recv().Type()) {
+		return nil
+	}
+	return fn
+}
+
 // analyzeFile walks loops and flags data-access calls directly inside them.
-func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, reach storageReach) []*core.Violation {
+func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, reach storageReach, helpers map[*types.Func]queryHelper) []*core.Violation {
 	var violations []*core.Violation
 	loopDepth := 0
 	currentFunc := ""
@@ -154,6 +226,12 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 			// Init runs once, before the first iteration; Cond, Post and
 			// Body run on every iteration.
 			visitLoopPart(node.Init, inspect)
+			if node.Cond == nil || retryLoop(node.Init, node.Cond) {
+				// A worker's loop, a page walk, the attempts of one
+				// operation: not one query per item.
+				visitNestedLoops(node.Body, inspect)
+				return false
+			}
 			loopDepth++
 			for _, part := range []ast.Node{node.Cond, node.Post, node.Body} {
 				visitLoopPart(part, inspect)
@@ -164,6 +242,11 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 		case *ast.RangeStmt:
 			// The range operand is evaluated once; only the body repeats.
 			visitLoopPart(node.X, inspect)
+			if _, events := types.Unalias(typeUnder(info, node.X)).(*types.Chan); events {
+				// A worker taking events or ticks: one query per event.
+				visitNestedLoops(node.Body, inspect)
+				return false
+			}
 			loopDepth++
 			visitLoopPart(node.Body, inspect)
 			loopDepth--
@@ -182,6 +265,17 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 						v.WithContext("function", currentFunc)
 					}
 					violations = append(violations, v)
+				} else if fn := calledFunc(node, info); fn != nil && helpers[fn].dir == filepath.Dir(ctx.Path) {
+					line := lineFromNode(ctx, node)
+					v := r.CreateViolation(ctx.RelPath, line,
+						"call to '"+fn.Name()+"' inside loop — it queries through '"+helpers[fn].call+"' on every iteration (N+1)")
+					v.WithCode(ctx.GetLine(line))
+					v.WithSuggestion("Load what the helper reads in one batch query before the loop and pass it in, or cache per-request")
+					v.WithContext("pattern", "query_in_loop")
+					if currentFunc != "" {
+						v.WithContext("function", currentFunc)
+					}
+					violations = append(violations, v)
 				}
 			}
 
@@ -193,6 +287,50 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 
 	ast.Inspect(ctx.GoAST, inspect)
 	return violations
+}
+
+// visitNestedLoops runs inspect over the loops inside a body that is not
+// itself a loop over items.
+func visitNestedLoops(body ast.Node, inspect func(ast.Node) bool) {
+	visitLoopPart(body, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.ForStmt, *ast.RangeStmt:
+			return inspect(n)
+		}
+		return true
+	})
+}
+
+// typeUnder returns the underlying type of an expression, nil without type
+// information.
+func typeUnder(info *types.Info, expr ast.Expr) types.Type {
+	if info == nil {
+		return nil
+	}
+	if t := info.TypeOf(expr); t != nil {
+		return t.Underlying()
+	}
+	return nil
+}
+
+var retryCounter = regexp.MustCompile(`(?i)attempt|retr|tries`)
+
+// retryLoop reports a loop counting attempts: its init or condition names
+// a variable or a limit like attempt, retry, maxTries.
+func retryLoop(init ast.Stmt, cond ast.Expr) bool {
+	found := false
+	for _, part := range []ast.Node{init, cond} {
+		if part == nil {
+			continue
+		}
+		ast.Inspect(part, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && retryCounter.MatchString(id.Name) {
+				found = true
+			}
+			return !found
+		})
+	}
+	return found
 }
 
 // visitLoopPart runs inspect over one part of a loop statement. A nested
@@ -233,7 +371,48 @@ func dataAccessCall(call *ast.CallExpr, info *types.Info, reach storageReach) (s
 	if pkg, ok := concreteReceiverPackage(sel.X, info); ok && !reach.reaches(pkg) {
 		return "", "", false
 	}
+	if pureRepositoryFunc(sel, info) {
+		return "", "", false
+	}
 	return recvName, method, true
+}
+
+// pureRepositoryFunc reports a package-level function of a repository
+// package that takes neither a context nor a database handle - an error
+// classifier, a key builder: it has nothing to query with.
+func pureRepositoryFunc(sel *ast.SelectorExpr, info *types.Info) bool {
+	if info == nil {
+		return false
+	}
+	if _, isPkg := info.Uses[identOf(sel.X)].(*types.PkgName); !isPkg {
+		return false
+	}
+	fn, ok := info.Uses[sel.Sel].(*types.Func)
+	if !ok {
+		return false
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok {
+		return false
+	}
+	params := sig.Params()
+	for i := range params.Len() {
+		switch t := types.Unalias(params.At(i).Type()).(type) {
+		case *types.Named:
+			if name := t.Obj().Name(); name == "Context" || strings.HasSuffix(name, "DB") || strings.HasSuffix(name, "Tx") || name == "Conn" || name == "Pool" {
+				return false
+			}
+		case *types.Pointer, *types.Interface:
+			return false
+		}
+	}
+	return true
+}
+
+// identOf returns the identifier an expression is, nil otherwise.
+func identOf(expr ast.Expr) *ast.Ident {
+	id, _ := expr.(*ast.Ident)
+	return id
 }
 
 // concreteReceiverPackage returns the package whose code runs for a call on
