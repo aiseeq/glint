@@ -23,15 +23,19 @@ Originally built to help AI agents understand codebases, but useful for any proj
 go install github.com/aiseeq/glint/cmd/glint@latest
 ```
 
-The SQL rules parse with libpg_query compiled to WebAssembly, which needs no
-C compiler but adds about a second and a few hundred MB to a run that parses
-SQL. With a C compiler, build the native parser instead:
+This build needs no C compiler: the SQL rules parse with libpg_query compiled
+to WebAssembly, which adds about a second and a few hundred MB to a run that
+parses SQL. Where a C compiler (gcc or clang) is installed and cgo is on,
+build the native parser instead:
 
 ```bash
 go install -tags pgquery_cgo github.com/aiseeq/glint/cmd/glint@latest
 ```
 
-Or build from source (graft builds the native parser). Development commands run through
+Without cgo that build stops with `undefined: pganalyze.FingerprintToHexStr`:
+drop the tag, or install a C compiler.
+
+Or build from source (graft builds the native parser, so it needs a C compiler). Development commands run through
 [graft](https://github.com/aiseeq/graft) (tasks in `.graft.yaml`):
 
 ```bash
