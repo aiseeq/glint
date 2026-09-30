@@ -578,12 +578,13 @@ func assignedIdents(body *ast.BlockStmt) map[*ast.Ident]bool {
 // checkErrorIfStmt checks an `if err != nil` of a function with the given
 // results for a return that hands out a success value instead of the error.
 func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, results *ast.FieldList, stmt *ast.IfStmt) *core.Violation {
-	if errNilCheckName(stmt.Cond) == "" {
+	errName := errNilCheckName(stmt.Cond)
+	if errName == "" {
 		return nil
 	}
 
 	// Check if error is logged before return (acceptable pattern)
-	info := r.analyzeErrorBlock(stmt.Body.List)
+	info := r.analyzeErrorBlock(stmt.Body.List, errName)
 	if r.isAcceptableDenialPattern(info) {
 		return nil
 	}
@@ -595,16 +596,22 @@ func (r *ErrorMaskingRule) checkErrorIfStmt(ctx *core.FileContext, results *ast.
 // blockAnalysis holds analysis results of an error handling block
 type blockAnalysis struct {
 	hasLogging bool
-	returnStmt *ast.ReturnStmt
+	// causeLogged: the branch logs the error value itself at Error, Warn or
+	// Fatal level — the failure is on record whatever the function answers.
+	causeLogged bool
+	returnStmt  *ast.ReturnStmt
 }
 
 // analyzeErrorBlock analyzes statements in error handling block for logging and return
-func (r *ErrorMaskingRule) analyzeErrorBlock(stmts []ast.Stmt) blockAnalysis {
+func (r *ErrorMaskingRule) analyzeErrorBlock(stmts []ast.Stmt, errName string) blockAnalysis {
 	var info blockAnalysis
 	for _, bodyStmt := range stmts {
 		if exprStmt, ok := bodyStmt.(*ast.ExprStmt); ok {
 			if call, ok := exprStmt.X.(*ast.CallExpr); ok && isLoggerCall(call) {
 				info.hasLogging = true
+				if isErrorLevelLogCall(call) && nodeReadsIdent(call, errName) {
+					info.causeLogged = true
+				}
 			}
 		}
 		if ret, ok := bodyStmt.(*ast.ReturnStmt); ok {
@@ -618,6 +625,13 @@ func (r *ErrorMaskingRule) analyzeErrorBlock(stmts []ast.Stmt) blockAnalysis {
 func (r *ErrorMaskingRule) isAcceptableDenialPattern(info blockAnalysis) bool {
 	if !info.hasLogging || info.returnStmt == nil {
 		return false
+	}
+	// A bool cannot carry the error. Once the cause is logged at error level,
+	// the bool answers what to do next (skip the event and keep streaming), not
+	// whether the operation succeeded; a number or a string in the same place
+	// would still stand in for data the caller never got.
+	if info.causeLogged && returnsOnlyBoolLiterals(info.returnStmt) {
+		return true
 	}
 	for _, result := range info.returnStmt.Results {
 		if ident, ok := result.(*ast.Ident); ok && ident.Name == "false" {
@@ -674,11 +688,34 @@ func (r *ErrorMaskingRule) isCommaOkReturnWithFalse(stmt *ast.ReturnStmt) bool {
 // caller: the function's last result is error and the value in that slot is
 // not nil. A sentinel, a wrap helper or any other expression there is the
 // error, whatever it is called.
+//
+// A function may declare its own error type in that slot (*RequestError):
+// there the value hands the failure over when it carries an error — built by
+// an error constructor or wrapping the cause.
 func returnHandsOverError(results *ast.FieldList, ret *ast.ReturnStmt) bool {
-	if !lastResultIsErrorType(results) || len(ret.Results) == 0 {
+	if len(ret.Results) == 0 {
 		return false
 	}
-	return !isNilIdent(ret.Results[len(ret.Results)-1])
+	last := ret.Results[len(ret.Results)-1]
+	if lastResultIsErrorType(results) {
+		return !isNilIdent(last)
+	}
+	return exprCarriesError(last)
+}
+
+// returnsOnlyBoolLiterals reports whether every value of the return is true or
+// false.
+func returnsOnlyBoolLiterals(ret *ast.ReturnStmt) bool {
+	if len(ret.Results) == 0 {
+		return false
+	}
+	for _, result := range ret.Results {
+		ident, ok := result.(*ast.Ident)
+		if !ok || (ident.Name != "true" && ident.Name != "false") {
+			return false
+		}
+	}
+	return true
 }
 
 // isProblematicReturn checks if return value masks the error

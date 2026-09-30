@@ -32,7 +32,22 @@ func operation() error { return nil }`,
 			wantViolations: 0,
 		},
 		{
-			name: "bare error return",
+			name: "bare error return from the standard library",
+			code: `package main
+
+import "os"
+
+func doSomething() error {
+	err := os.Remove("state.lock")
+	if err != nil {
+		return err
+	}
+	return nil
+}`,
+			wantViolations: 1,
+		},
+		{
+			name: "bare error return from a function of the same package - ok",
 			code: `package main
 
 func doSomething() error {
@@ -44,43 +59,42 @@ func doSomething() error {
 }
 
 func operation() error { return nil }`,
-			wantViolations: 1,
+			wantViolations: 0,
 		},
 		{
 			name: "multiple bare returns",
 			code: `package main
 
+import "os"
+
 func doSomething() error {
-	err := step1()
+	err := os.Mkdir("cache", 0o755)
 	if err != nil {
 		return err
 	}
 
-	err = step2()
+	err = os.Chdir("cache")
 	if err != nil {
 		return err
 	}
 
 	return nil
-}
-
-func step1() error { return nil }
-func step2() error { return nil }`,
+}`,
 			wantViolations: 2,
 		},
 		{
 			name: "function with multiple returns including error",
 			code: `package main
 
+import "os"
+
 func getData() (string, error) {
-	err := validate()
+	_, err := os.Stat("data")
 	if err != nil {
 		return "", err
 	}
 	return "data", nil
-}
-
-func validate() error { return nil }`,
+}`,
 			wantViolations: 1,
 		},
 		{

@@ -17,6 +17,8 @@ func init() {
 // instead of returning explicit error. This violates "Fail explicitly, never degrade silently"
 // Catches: return Money{}, nil (in error context)
 // Catches: return Config{} (without error, in error context)
+// Not flagged: an empty value under a nil or comma-ok guard when the function
+// also returns that empty value as a regular answer outside such guards.
 type EmptyStructReturnRule struct {
 	*rules.BaseRule
 }
@@ -41,7 +43,12 @@ func (r *EmptyStructReturnRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 		}
 		// Error branches anywhere in the body — loops, switch and select cases
 		// included; a closure returns through its own signature.
-		var violations []*core.Violation
+		type guardedReturn struct {
+			ret        *ast.ReturnStmt
+			errorGuard bool
+		}
+		var guarded []guardedReturn
+		inGuard := map[*ast.ReturnStmt]bool{}
 		forEachOwnStatement(funcDecl.Body, func(stmt ast.Stmt) {
 			ifStmt, ok := stmt.(*ast.IfStmt)
 			if !ok || !r.isErrorOrNilCheck(ifStmt.Cond) {
@@ -49,12 +56,26 @@ func (r *EmptyStructReturnRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 			}
 			for _, bodyStmt := range ifStmt.Body.List {
 				if ret, ok := bodyStmt.(*ast.ReturnStmt); ok {
-					if v := r.checkReturnForEmptyStructWithNilError(ctx, ret); v != nil {
-						violations = append(violations, v)
-					}
+					guarded = append(guarded, guardedReturn{ret: ret, errorGuard: r.isErrorValueCheck(ifStmt.Cond)})
+					inGuard[ret] = true
 				}
 			}
 		})
+		regular := r.regularEmptyAnswers(funcDecl.Body, inGuard)
+
+		var violations []*core.Violation
+		for _, g := range guarded {
+			// Under a nil or comma-ok guard the empty value means "absent". When
+			// the function hands out the same empty value as a regular answer
+			// elsewhere ("no match", "nothing linked"), absent is that answer
+			// too; under an error check it never is.
+			if !g.errorGuard && regular[r.emptyStructTypeName(g.ret)] {
+				continue
+			}
+			if v := r.checkReturnForEmptyStructWithNilError(ctx, g.ret); v != nil {
+				violations = append(violations, v)
+			}
+		}
 		return violations
 	})
 }
@@ -70,6 +91,52 @@ func (r *EmptyStructReturnRule) hasErrorReturn(fn *ast.FuncDecl) bool {
 		}
 	}
 	return false
+}
+
+// isErrorValueCheck reports whether the condition looks at an error variable
+// (err != nil, parseErr != errNone), as opposed to a nil or comma-ok guard.
+func (r *EmptyStructReturnRule) isErrorValueCheck(cond ast.Expr) bool {
+	bin, ok := cond.(*ast.BinaryExpr)
+	if !ok {
+		return false
+	}
+	for _, side := range []ast.Expr{bin.X, bin.Y} {
+		if ident, ok := side.(*ast.Ident); ok && isErrorVarName(ident.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+// regularEmptyAnswers collects the types the function returns empty with a nil
+// error outside the guarded branches: at the end of the body, under a length
+// check, after a loop — the value is one of its ordinary answers.
+func (r *EmptyStructReturnRule) regularEmptyAnswers(body *ast.BlockStmt, inGuard map[*ast.ReturnStmt]bool) map[string]bool {
+	regular := map[string]bool{}
+	forEachOwnStatement(body, func(stmt ast.Stmt) {
+		ret, ok := stmt.(*ast.ReturnStmt)
+		if !ok || inGuard[ret] {
+			return
+		}
+		if name := r.emptyStructTypeName(ret); name != "" {
+			regular[name] = true
+		}
+	})
+	return regular
+}
+
+// emptyStructTypeName returns the type of the first empty composite literal
+// of a return whose last value is nil, or "".
+func (r *EmptyStructReturnRule) emptyStructTypeName(ret *ast.ReturnStmt) string {
+	if len(ret.Results) < 2 || !isNilIdent(ret.Results[len(ret.Results)-1]) {
+		return ""
+	}
+	for _, result := range ret.Results[:len(ret.Results)-1] {
+		if lit, ok := result.(*ast.CompositeLit); ok && len(lit.Elts) == 0 {
+			return r.extractTypeName(lit.Type)
+		}
+	}
+	return ""
 }
 
 // isErrorOrNilCheck determines if condition checks for error or nil

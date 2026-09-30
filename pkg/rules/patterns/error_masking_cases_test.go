@@ -131,3 +131,71 @@ func isStale(s string) bool {
 func TestErrorMasking_FunctionWithoutBody(t *testing.T) {
 	assert.Empty(t, errorMaskingLines(t, "package svc\n\nfunc ReadCounter() (int, error)\n"))
 }
+
+// A function whose last result is a typed error of its own (*RequestError)
+// hands the failure over when that slot carries an error built from the cause,
+// just as a plain error slot would. A bool that answers "keep going" after the
+// cause was logged at error level is a decision, not a masked failure; the same
+// return without the log, or with a log that does not carry the cause, still is
+// one.
+func TestErrorMasking_TypedErrorSlotAndLoggedDecision(t *testing.T) {
+	const source = `package svc
+
+import (
+	"log/slog"
+	"strconv"
+)
+
+type RequestError struct{ Message string }
+
+func (e *RequestError) Error() string { return e.Message }
+
+func newRequestError(msg string, cause error) *RequestError { return &RequestError{Message: msg} }
+
+func parseLimit(s string) (int, int, *RequestError) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, 0, newRequestError(err.Error(), err)
+	}
+	return n, n, nil
+}
+
+type streamer struct{ logger *slog.Logger }
+
+func (s *streamer) sendEvent(raw string) bool {
+	_, formatErr := strconv.Atoi(raw)
+	if formatErr != nil {
+		s.logger.Error("skipping event", "error", formatErr)
+		return true
+	}
+	return true
+}
+
+func (s *streamer) sendQuiet(raw string) bool {
+	_, formatErr := strconv.Atoi(raw)
+	if formatErr != nil {
+		return true
+	}
+	return true
+}
+
+func (s *streamer) sendNoted(raw string) bool {
+	_, formatErr := strconv.Atoi(raw)
+	if formatErr != nil {
+		s.logger.Info("event", "error", formatErr)
+		return true
+	}
+	return true
+}
+
+func (s *streamer) readCount(raw string) int {
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		s.logger.Error("bad count", "error", err)
+		return 0
+	}
+	return n
+}
+`
+	assert.Equal(t, []int{35, 43, 52}, errorMaskingLines(t, source))
+}

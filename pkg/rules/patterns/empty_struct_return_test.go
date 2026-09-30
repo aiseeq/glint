@@ -445,6 +445,59 @@ func BuildConfig() (Config, error) {
 `,
 			wantCount: 1,
 		},
+		{
+			// Пустой match — штатный ответ «совпадения нет»: функция отдаёт его
+			// и вне проверок на nil. Отсутствующая запись под nil-проверкой —
+			// тот же ответ, а не спрятанный сбой.
+			name:     "empty value is the function's regular no-match answer",
+			filename: "ledger/matcher.go",
+			code: `package ledger
+
+type lotMatch struct {
+	lot       *Lot
+	ambiguous bool
+}
+
+func (s *Matcher) findLot(ids map[string]bool) (lotMatch, error) {
+	if len(ids) == 0 {
+		return lotMatch{}, nil
+	}
+	for id := range ids {
+		lot, err := s.store.GetLot(id)
+		if err != nil {
+			return lotMatch{}, fmt.Errorf("get lot: %w", err)
+		}
+		if lot == nil {
+			return lotMatch{}, nil
+		}
+		return lotMatch{lot: lot}, nil
+	}
+	return lotMatch{}, nil
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name:     "regular empty answer does not excuse a swallowed error",
+			filename: "ledger/matcher.go",
+			code: `package ledger
+
+func (s *Matcher) findLot(ids map[string]bool) (lotMatch, error) {
+	if len(ids) == 0 {
+		return lotMatch{}, nil
+	}
+	for id := range ids {
+		lot, err := s.store.GetLot(id)
+		if err != nil {
+			return lotMatch{}, nil
+		}
+		return lotMatch{lot: lot}, nil
+	}
+	return lotMatch{}, nil
+}
+`,
+			wantCount: 1,
+		},
 	}
 
 	for _, tt := range tests {

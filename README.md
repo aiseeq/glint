@@ -161,7 +161,7 @@ glint rules
 - **import-direction** (HIGH) — Detects imports that violate layered architecture direction
 - **hardcoded-secret** (CRITICAL) — Detects passwords, API keys, tokens in code
 - **sensitive-query-param** (HIGH) — Detects credentials and action tokens exposed in URLs (CWE-598)
-- **sql-injection** (CRITICAL) — Detects SQL injection via string concatenation
+- **sql-injection** (CRITICAL) — Detects SQL text built from a string parameter (concatenation or fmt.Sprintf, through local variables) without a whitelist check and passed to a database call
 - **error-masking** (CRITICAL) — Detects patterns that mask errors instead of handling them properly
 - **cyclomatic-complexity** — Functions with too many decision paths (default: >20, setting `max_complexity`)
 - **cross-file-duplicate** — Detects duplicate code blocks across different files
@@ -169,7 +169,7 @@ glint rules
 - **naming-convention** — Detects stuttering, ALL_CAPS, underscores in exported names
 - **doc-missing** — Detects exported types/functions without documentation
 - **error-string-compare** — Detects error comparisons via strings instead of errors.Is/errors.As
-- **error-wrap** — Detects errors returned without context (should use %w)
+- **error-wrap** — Detects errors from the standard library or other modules returned without context (should use fmt.Errorf with %w)
 - **error-cause-dropped** — Detects error branches that replace the real cause with a fixed message (Go `if err != nil`, TS `catch`) — the caller learns that it failed, never why
 - **go-modern** — Detects deprecated reflect.SliceHeader/StringHeader (use unsafe.Slice/SliceData/String/StringData)
 - **unused-symbol** — Detects unused private functions, types, constants
