@@ -128,7 +128,7 @@ func (r *TimeEqualRule) analyzeComparisons(ctx *core.FileContext, node ast.Node,
 			return true
 		}
 
-		line := r.getLineFromNode(ctx, binary)
+		line := ctx.LineFor(binary)
 		var suggestion string
 		if binary.Op == token.EQL {
 			suggestion = "Use t1.Equal(t2) instead of t1 == t2 for time.Time comparison"
@@ -214,8 +214,4 @@ func (r *TimeEqualRule) isTimeCall(call *ast.CallExpr) bool {
 		}
 	}
 	return false
-}
-
-func (r *TimeEqualRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }

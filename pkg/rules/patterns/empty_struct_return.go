@@ -15,7 +15,7 @@ func init() {
 
 // EmptyStructReturnRule detects functions that return empty structs with nil error
 // instead of returning explicit error. This violates "Fail explicitly, never degrade silently"
-// Catches: return SafeDecimal{}, nil (in error context)
+// Catches: return Money{}, nil (in error context)
 // Catches: return Config{} (without error, in error context)
 type EmptyStructReturnRule struct {
 	*rules.BaseRule

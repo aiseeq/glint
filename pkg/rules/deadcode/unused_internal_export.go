@@ -4,7 +4,6 @@ import (
 	"errors"
 	"go/ast"
 	"go/types"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -140,12 +139,8 @@ func (r *UnusedInternalExportRule) findDeadExports(ctx *core.GoProjectContext) [
 // violationFor renders the finding at the symbol declaration.
 func (r *UnusedInternalExportRule) violationFor(ctx *core.GoProjectContext, usage *exportUsage) *core.Violation {
 	pos := ctx.FileSet.Position(usage.object.Pos())
+	// cmd/glint maps the absolute path to the project-relative one.
 	rel := pos.Filename
-	if ctx.ProjectRoot != "" {
-		if relPath, err := filepath.Rel(ctx.ProjectRoot, pos.Filename); err == nil {
-			rel = relPath
-		}
-	}
 
 	name := usage.object.Name()
 	message := "Exported " + usage.kind + " '" + name + "' in internal package is never used — the internal/ boundary makes it dead code"

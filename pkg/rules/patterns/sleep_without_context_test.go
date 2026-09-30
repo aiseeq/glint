@@ -17,7 +17,7 @@ func TestSleepWithoutContextRule(t *testing.T) {
 		expectedCount int
 	}{
 		{
-			// Repro: projectB transaction_service.go before 471e1a1 — 200ms
+			// Repro: a sync service — 200ms
 			// pause between provider APIs with a live ctx parameter.
 			name: "sleep in loop of ctx function",
 			code: `package main

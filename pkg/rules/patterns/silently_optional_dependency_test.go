@@ -51,7 +51,7 @@ func TestSilentlyOptionalDependencyRule_Detection(t *testing.T) {
 		expectMsg   string
 	}{
 		{
-			// Ровно форма REF-446: сборок больше, чем вызовов сеттера.
+			// Ровно форма инцидента: сборок больше, чем вызовов сеттера.
 			name:    "one of two construction sites skips the setter",
 			service: serviceSource,
 			wiring: `package svc

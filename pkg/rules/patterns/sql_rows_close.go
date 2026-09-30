@@ -56,7 +56,7 @@ func (r *SQLRowsCloseRule) checkFunction(ctx *core.FileContext, body *ast.BlockS
 		if len(assign.Lhs) >= 1 && len(assign.Rhs) == 1 {
 			if r.isQueryCall(assign.Rhs[0]) {
 				if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
-					rowsVars[ident.Name] = r.getLineFromNode(ctx, assign)
+					rowsVars[ident.Name] = ctx.LineFor(assign)
 				}
 			}
 		}
@@ -245,8 +245,4 @@ func (r *SQLRowsCloseRule) getCloseVar(call *ast.CallExpr) string {
 	}
 
 	return ""
-}
-
-func (r *SQLRowsCloseRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }

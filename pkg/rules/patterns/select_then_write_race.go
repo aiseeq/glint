@@ -21,10 +21,9 @@ func init() {
 // both pass the validation performed between the queries, and the second one
 // silently overwrites the first.
 //
-// Real case (projectB, 2026-08-05): status transitions read `status`, ran a
-// state-machine check on the value, then wrote `status` back. Concurrent
-// sync-materializer and manual close both read the same status and both passed
-// the transition validation.
+// Typical case: a status transition reads `status`, runs a state-machine
+// check on the value, then writes `status` back. A background job and a manual
+// action read the same status concurrently and both pass the validation.
 //
 // The rule is silent when the SELECT locks the row (FOR UPDATE / FOR NO KEY
 // UPDATE / FOR SHARE) — that is exactly the fix.

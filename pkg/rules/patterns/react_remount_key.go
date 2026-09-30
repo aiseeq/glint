@@ -17,7 +17,7 @@ func init() {
 // element: every keystroke unmounts the subtree, the fresh input mounts empty
 // of focus, and the user can type exactly one character at a time.
 //
-// Real case (projectB, 2026-08-05): a wallet row used
+// Typical case: a wallet row used
 // key={`${wallet.walletAddress}-${index}`} while its <input
 // value={wallet.walletAddress} onChange=.../> edited that very address.
 //

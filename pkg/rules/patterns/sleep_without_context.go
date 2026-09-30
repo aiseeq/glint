@@ -17,9 +17,8 @@ func init() {
 // sleeping 250ms per item keeps running long after the caller gave up, and a
 // graceful shutdown waits out every pending sleep.
 //
-// Real case (projectB, 2026-08-05): wallet sync slept 200ms between provider
-// APIs and 250ms per Solana transaction with a live ctx in scope; stopping the
-// sync had to wait for the whole backlog of pauses.
+// Typical case: a sync job sleeps between provider calls with a live ctx in
+// scope; stopping the sync has to wait for the whole backlog of pauses.
 type SleepWithoutContextRule struct {
 	*rules.BaseRule
 }

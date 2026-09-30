@@ -259,7 +259,7 @@ func TestHeavy(t *testing.T) {
 	}
 }
 
-// Репро из projectB: reference-тест гейтится BO_ADMIN_TOKEN, но токен — наш
+// Репро из projectB: reference-тест гейтится ADMIN_TOKEN, но токен — наш
 // собственный JWT, а ходит тест в http://localhost:8090.
 func TestTestExternalServiceRule_LocalServerGateIsNotReported(t *testing.T) {
 	project := rulestest.Project(t, map[string]string{
@@ -273,9 +273,9 @@ import (
 const defaultAPIURL = "http://localhost:8090"
 
 func TestReferenceBalances(t *testing.T) {
-	token := os.Getenv("BO_ADMIN_TOKEN")
+	token := os.Getenv("ADMIN_TOKEN")
 	if token == "" {
-		t.Skip("BO_ADMIN_TOKEN не задан")
+		t.Skip("ADMIN_TOKEN не задан")
 	}
 	_ = defaultAPIURL
 }

@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/constant"
 	"go/types"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -288,12 +287,8 @@ func (r *ServerErrorHidesClientCancelRule) violationFor(
 	resp *blindResponder,
 ) *core.Violation {
 	pos := ctx.FileSet.Position(resp.decl.Pos())
+	// cmd/glint maps the absolute path to the project-relative one.
 	rel := pos.Filename
-	if ctx.ProjectRoot != "" {
-		if relPath, err := filepath.Rel(ctx.ProjectRoot, pos.Filename); err == nil {
-			rel = relPath
-		}
-	}
 	codes := make([]int, 0, len(resp.statuses))
 	for code := range resp.statuses {
 		codes = append(codes, int(code))

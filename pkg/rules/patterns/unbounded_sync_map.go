@@ -4,7 +4,6 @@ import (
 	"errors"
 	"go/ast"
 	"go/types"
-	"path/filepath"
 	"sort"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -159,12 +158,8 @@ func (r *UnboundedSyncMapRule) analyzePackage(ctx *core.GoProjectContext, pkgCtx
 // violationFor renders the finding at the variable declaration.
 func (r *UnboundedSyncMapRule) violationFor(ctx *core.GoProjectContext, usage *syncMapUsage) *core.Violation {
 	pos := ctx.FileSet.Position(usage.variable.Pos())
+	// cmd/glint maps the absolute path to the project-relative one.
 	rel := pos.Filename
-	if ctx.ProjectRoot != "" {
-		if relPath, err := filepath.Rel(ctx.ProjectRoot, pos.Filename); err == nil {
-			rel = relPath
-		}
-	}
 	v := r.CreateViolation(rel, pos.Line,
 		"Package-level sync.Map '"+usage.variable.Name()+"' only grows: entries are stored but no production code ever deletes them — a slow leak in long-running processes")
 	v.WithSuggestion("Add eviction (TTL sweep with Delete, or Clear on rollover), or document why the key set is bounded and suppress")

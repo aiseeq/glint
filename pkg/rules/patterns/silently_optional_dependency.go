@@ -4,7 +4,6 @@ import (
 	"errors"
 	"go/ast"
 	"go/types"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,7 +21,7 @@ func init() {
 // absence silently switches a feature off, and which at least one construction site cannot
 // have received.
 //
-// Родилось из реального инцидента (REF-446). У сервиса расчёта доходности был метод
+// Родилось из реального инцидента. У сервиса расчёта доходности был метод
 // SetAnomalyAlerter, а в детекторе аномалий стояло `if s.anomalyAlerter == nil { return }`.
 // Сервис собирался в девяти местах, сеттер звали в восьми — и алерты по аномалиям
 // доходности не ушли ни разу за всю историю прода. Ничего не падало и не логировалось:
@@ -378,12 +377,8 @@ func (r *SilentlyOptionalDependencyRule) violationFor(
 	sites, calls int,
 ) *core.Violation {
 	pos := ctx.FileSet.Position(setter.decl.Pos())
+	// cmd/glint maps the absolute path to the project-relative one.
 	rel := pos.Filename
-	if ctx.ProjectRoot != "" {
-		if relPath, err := filepath.Rel(ctx.ProjectRoot, pos.Filename); err == nil {
-			rel = relPath
-		}
-	}
 	v := r.CreateViolation(rel, pos.Line,
 		"Dependency '"+setter.field+"' is injected by "+setter.method+"(), its absence silently skips work, and "+
 			strconv.Itoa(sites-calls)+" of "+strconv.Itoa(sites)+" construction sites never call the setter — "+

@@ -81,7 +81,7 @@ func (r *FinancialJSONFloatRule) inspectJSONStruct(ctx *core.FileContext, struct
 			line := ctx.GoFileSet.Position(field.Pos()).Line
 			v := r.CreateViolation(ctx.RelPath, line, "monetary JSON field '"+jsonName+"' uses float32/float64 and can lose precision")
 			v.WithCode(ctx.GetLine(line))
-			v.WithSuggestion("Decode monetary JSON values into decimal.Decimal, SafeDecimal, an integer smallest-unit type, or an exact numeric string")
+			v.WithSuggestion("Decode monetary JSON values into decimal.Decimal, a decimal wrapper type, an integer smallest-unit type, or an exact numeric string")
 			v.WithContext("pattern", "financial_json_float")
 			violations = append(violations, v)
 		}

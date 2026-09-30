@@ -17,7 +17,7 @@ func TestSecretInQueryURLRule(t *testing.T) {
 		expectedCount int
 	}{
 		{
-			// Repro: projectB helius_das.go before 658dac0 — ?api-key= in the
+			// Repro: a provider client that put ?api-key= in the
 			// query, raw Do, error wrapped without sanitation.
 			name: "query api-key with raw Do and no sanitizer",
 			code: `package api
@@ -37,7 +37,7 @@ func (c *Client) GetHoldings(ctx context.Context, address string) error {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("helius searchAssets: %w", err)
+		return fmt.Errorf("search assets: %w", err)
 	}
 	defer resp.Body.Close()
 	return nil
@@ -64,7 +64,7 @@ func (c *Client) GetHoldings(ctx context.Context, address string) error {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("helius searchAssets: %w", httpclient.SanitizeTransportError(err))
+		return fmt.Errorf("search assets: %w", httpclient.SanitizeTransportError(err))
 	}
 	defer resp.Body.Close()
 	return nil

@@ -16,7 +16,7 @@ func init() {
 // UnfalsifiableTestCaseRule detects a browser/API test whose every assertion holds no matter
 // what the code under test does.
 //
-// Родилось из разбора e2e-набора projectA (REF-410/REF-468). Два спека «проверяли» показ
+// Родилось из разбора e2e-набора projectA. Два спека «проверяли» показ
 // балансов так: мокали два адреса, которых на бэкенде не существует, шли на страницу,
 // которой в приложении нет, и утверждали «URL содержит deposits, body виден, элементов
 // больше нуля». Они годами проходили против страницы 404 и считались покрытием. Ещё

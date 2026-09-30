@@ -97,7 +97,7 @@ func (r *NilDIRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Vio
 			}
 
 			// Check if this line has suppression comment
-			line := r.getLineFromNode(ctx, call)
+			line := ctx.LineFor(call)
 			if r.hasSuppression(ctx, line) {
 				continue
 			}
@@ -186,10 +186,6 @@ func (r *NilDIRule) isStdlibNonDI(call *ast.CallExpr) bool {
 		return true
 	}
 	return false
-}
-
-func (r *NilDIRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }
 
 // constructorParamName returns the name of the parameter the argument at

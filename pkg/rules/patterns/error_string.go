@@ -175,7 +175,7 @@ func (r *ErrorStringRule) startsWithCapital(s string) bool {
 	}
 
 	// Check if it looks like a Go identifier (PascalCase function/type name)
-	// e.g., "ValidationService", "GetAdminByEmail", "UnifiedConfig"
+	// e.g., "ValidationService", "GetAdminByEmail", "AppConfig"
 	if r.isPascalCaseIdentifier(firstWord) {
 		return false
 	}

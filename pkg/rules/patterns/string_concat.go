@@ -151,7 +151,7 @@ func (r *StringConcatRule) isAssignPlusPattern(assign *ast.AssignStmt) bool {
 }
 
 func (r *StringConcatRule) reportConcatViolation(ctx *core.FileContext, assign *ast.AssignStmt, violations *[]*core.Violation) {
-	line := r.getLineFromNode(ctx, assign)
+	line := ctx.LineFor(assign)
 	v := r.CreateViolation(ctx.RelPath, line, "String concatenation in loop - use strings.Builder")
 	v.WithCode(ctx.GetLine(line))
 	v.WithSuggestion("Use var sb strings.Builder; sb.WriteString(...)")
@@ -208,8 +208,4 @@ func (r *StringConcatRule) isStringExpr(expr ast.Expr) bool {
 
 	// Check for string conversion or function call
 	return true // Be conservative
-}
-
-func (r *StringConcatRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"go/ast"
 	"go/types"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -23,7 +22,7 @@ func init() {
 // есть тип, поэтому `iface == nil` даёт false. Получатель, который отличает отсутствие
 // зависимости именно этой проверкой, пропускает её и вызывает метод на nil-получателе.
 //
-// Реальный случай (projectA, REF-446): сервис доходности принял алертер параметром
+// Реальный случай (projectA): сервис доходности принял алертер параметром
 // конструктора, и точки сборки стали передавать *email.Service напрямую. Без SMTP это
 // nil-указатель. Проверка `if s.anomalyAlerter == nil { return }` его не поймала, и
 // первый же аномальный день в истории vault уронил пользовательский график баланса
@@ -481,12 +480,8 @@ func (w *typedNilWalker) report(arg ast.Expr, target types.Type, sink string) {
 	}
 
 	pos := w.ctx.FileSet.Position(arg.Pos())
+	// cmd/glint maps the absolute path to the project-relative one.
 	rel := pos.Filename
-	if w.ctx.ProjectRoot != "" {
-		if relPath, err := filepath.Rel(w.ctx.ProjectRoot, pos.Filename); err == nil {
-			rel = relPath
-		}
-	}
 	v := w.rule.CreateViolation(rel, pos.Line,
 		"Pointer '"+text+"' is checked against nil elsewhere, so it can be empty, and here it goes into the interface behind "+
 			sink+" — a nil pointer stored in an interface is not nil, so the receiver's nil check passes and the first method call panics")

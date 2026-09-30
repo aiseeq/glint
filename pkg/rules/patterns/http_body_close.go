@@ -73,7 +73,7 @@ func (r *HTTPBodyCloseRule) checkFunction(
 			if len(assign.Lhs) >= 1 && len(assign.Rhs) == 1 {
 				if isHTTPResponseCall(assign.Rhs[0], httpAliases) {
 					if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
-						responseVars[ident.Name] = r.getLineFromNode(ctx, assign)
+						responseVars[ident.Name] = ctx.LineFor(assign)
 					}
 				}
 			}
@@ -620,8 +620,4 @@ func (r *HTTPBodyCloseRule) getBodyCloseVar(call *ast.CallExpr) string {
 	}
 
 	return ""
-}
-
-func (r *HTTPBodyCloseRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }

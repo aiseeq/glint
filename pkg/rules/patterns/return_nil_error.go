@@ -65,7 +65,7 @@ func (r *ReturnNilErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 			}
 
 			if r.isNilNilReturn(ret) {
-				line := r.getLineFromNode(ctx, ret)
+				line := ctx.LineFor(ret)
 				if ctx.IsSuppressed(line, r.Name()) {
 					return true
 				}
@@ -184,8 +184,4 @@ func (r *ReturnNilErrorRule) isNil(expr ast.Expr) bool {
 		return false
 	}
 	return ident.Name == "nil"
-}
-
-func (r *ReturnNilErrorRule) getLineFromNode(ctx *core.FileContext, node ast.Node) int {
-	return ctx.LineFor(node)
 }

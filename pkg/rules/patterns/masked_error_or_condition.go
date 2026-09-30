@@ -17,7 +17,7 @@ func init() {
 // a legitimate "no data" case via ||, then swallow the error:
 //
 //	if err != nil || latest == nil {
-//	    return SafeDecimal{}, nil   // DB failure masked as valid zero value
+//	    return Money{}, nil   // DB failure masked as valid zero value
 //	}
 //
 // The caller cannot distinguish a storage failure from an honest zero.

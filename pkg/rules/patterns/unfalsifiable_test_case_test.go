@@ -84,7 +84,7 @@ func TestUnfalsifiableTestCaseRule_Detection(t *testing.T) {
 			name: "page title is produced by the app",
 			code: `test('keeps the title', async ({ page }) => {
   await page.goto('/analytics/');
-  await expect(page).toHaveTitle("Saga — личный кабинет");
+  await expect(page).toHaveTitle("Account — dashboard");
 });`,
 		},
 		{
