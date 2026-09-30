@@ -28,6 +28,12 @@ func TestSkippedTestTypeScript(t *testing.T) {
 		"test.skip('details error scenarios', async ({ page }) => {})\n"))
 	assert.Equal(t, []int{2}, skippedTestLines(t, "e2e/tests/details.spec.ts",
 		"describe('details', () => {\n  it.skip('loads', () => {})\n})\n"))
+	// A reason covers the skip it stands by: not the next skip, not the one
+	// after a skip whose title names a ticket.
+	assert.Equal(t, []int{3, 4}, skippedTestLines(t, "e2e/tests/suites.spec.ts",
+		"// TODO: PROJ-1\ntest.describe.skip('a', () => {})\ntest.describe.skip('b', () => {})\ntest.describe.skip('c', () => {})\n"))
+	assert.Equal(t, []int{2}, skippedTestLines(t, "e2e/tests/suites.spec.ts",
+		"test.skip('PROJ-7 flaky upstream', () => {})\ntest.skip('checkout', () => {})\n"))
 }
 
 // A skip decided at run time adapts to the environment; a skip with a reason
@@ -37,6 +43,9 @@ func TestSkippedTestTypeScriptAllowed(t *testing.T) {
 		"test('external headers', async ({ page }) => {\n  test.skip(!process.env.EXTERNAL_ENABLED, 'external env not available')\n  test.skip()\n})\n"))
 	assert.Empty(t, skippedTestLines(t, "e2e/tests/admin/mfa.spec.ts",
 		"// PROJ-372: enable once the auth provider is mocked\ntest.skip('admin MFA requirement', async ({ page }) => {})\n"))
+	assert.Empty(t, skippedTestLines(t, "e2e/tests/mfa.spec.ts",
+		"// PROJ-372: the auth provider has no sandbox,\n// enable once it is mocked\ntest.skip('admin MFA requirement', async ({ page }) => {})\n"),
+		"a comment block above")
 	assert.Empty(t, skippedTestLines(t, "web/src/lib/helpers.ts",
 		"test.describe.skip('whatever', () => {})\n"), "not a test file")
 	assert.Empty(t, skippedTestLines(t, "e2e/tests/notes.spec.ts",

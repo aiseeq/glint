@@ -27,8 +27,8 @@ func init() {
 // A skip hides a broken test instead of fixing it, and nobody sees the suite
 // go quiet. A skip decided at run time — test.skip(condition, ...), t.Skip
 // inside an if or a switch — adapts to the environment and is not reported;
-// neither is a TypeScript skip with a reason beside it: a ticket key, a link,
-// a TODO or the word reason or because. An unconditional t.Skip is reported
+// neither is a TypeScript skip with a reason on its line or in the comment
+// right above it: a ticket key, a link, a TODO or the word reason or because. An unconditional t.Skip is reported
 // whatever its message: the test never runs.
 type SkippedTestRule struct {
 	*rules.BaseRule
@@ -70,11 +70,9 @@ func (r *SkippedTestRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 func (r *SkippedTestRule) analyzeJS(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
-	for i, line := range newJSSource(ctx).code {
-		if !jsStaticSkip.MatchString(line) {
-			continue
-		}
-		if skipReason.MatchString(ctx.Lines[i]) || (i > 0 && skipReason.MatchString(ctx.Lines[i-1])) {
+	code := newJSSource(ctx).code
+	for i, line := range code {
+		if !jsStaticSkip.MatchString(line) || skipReasonBeside(ctx.Lines, code, i) {
 			continue
 		}
 		violations = append(violations, r.report(ctx, i+1,
@@ -82,6 +80,24 @@ func (r *SkippedTestRule) analyzeJS(ctx *core.FileContext) []*core.Violation {
 			"Fix the test or delete it; a skip that must stay says why, with a ticket, on the line above"))
 	}
 	return violations
+}
+
+// skipReasonBeside reports a reason on the skip's own line or in the comment
+// lines right above it — never on a neighbouring skip or other code.
+func skipReasonBeside(lines, code []string, i int) bool {
+	if skipReason.MatchString(lines[i]) {
+		return true
+	}
+	for j := i - 1; j >= 0; j-- {
+		comment := strings.TrimSpace(code[j]) == "" && strings.TrimSpace(lines[j]) != ""
+		if !comment {
+			return false
+		}
+		if skipReason.MatchString(lines[j]) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *SkippedTestRule) analyzeGo(ctx *core.FileContext) []*core.Violation {
