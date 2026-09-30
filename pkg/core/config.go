@@ -18,6 +18,11 @@ type Config struct {
 	Extends    string                    `yaml:"extends,omitempty"`
 	Settings   SettingsConfig            `yaml:"settings"`
 	Categories map[string]CategoryConfig `yaml:"categories"`
+
+	// rootPrefix is the checked directory relative to the directory of the
+	// configuration file, when the file was found above it: the paths the
+	// configuration names start at its own directory.
+	rootPrefix string
 }
 
 // SettingsConfig contains global settings
@@ -334,9 +339,44 @@ func LoadConfigWithDefaults(projectRoot string) (*Config, error) {
 			return nil, err
 		}
 		cfg = MergeConfigs(cfg, projectCfg)
+		prefix, err := configRootPrefix(configPath, projectRoot)
+		if err != nil {
+			return nil, err
+		}
+		cfg.rootPrefix = prefix
 	}
 
 	return cfg, nil
+}
+
+// configRootPrefix returns the checked directory relative to the directory
+// of its configuration file, "" when they are the same.
+func configRootPrefix(configPath, projectRoot string) (string, error) {
+	configDir, err := filepath.Abs(filepath.Dir(configPath))
+	if err != nil {
+		return "", fmt.Errorf("resolve configuration directory %q: %w", configPath, err)
+	}
+	root, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve project root %q: %w", projectRoot, err)
+	}
+	rel, err := filepath.Rel(configDir, root)
+	if err != nil {
+		return "", fmt.Errorf("make %q relative to configuration directory %q: %w", root, configDir, err)
+	}
+	if rel == "." {
+		return "", nil
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+// configPath returns a path relative to the checked directory as the
+// configuration names it: relative to the configuration's own directory.
+func (c *Config) configPath(path string) string {
+	if c.rootPrefix == "" {
+		return path
+	}
+	return c.rootPrefix + "/" + filepath.ToSlash(path)
 }
 
 // MergeConfigs merges two configs, with override taking precedence
@@ -489,6 +529,7 @@ func (c *Config) GetMinSeverity() (Severity, error) {
 // IsFileExcepted checks if a file should be excepted from a specific rule based on YAML exceptions.
 // Supports ** glob patterns by converting to substring match on path segments.
 func (c *Config) IsFileExcepted(category, rule, filePath string) bool {
+	filePath = c.configPath(filePath)
 	exceptions := c.GetRuleExceptions(category, rule)
 	for _, exc := range exceptions {
 		if !exc.isFileOnly() {
@@ -506,6 +547,7 @@ func (c *Config) IsFileExcepted(category, rule, filePath string) bool {
 
 // IsViolationExcepted checks whether a specific violation matches a rule exception.
 func (c *Config) IsViolationExcepted(category, rule, filePath string, violation *Violation) bool {
+	filePath = c.configPath(filePath)
 	exceptions := c.GetRuleExceptions(category, rule)
 	for _, exc := range exceptions {
 		if exc.matchesViolation(filePath, violation) {
@@ -588,6 +630,7 @@ func globMatches(pattern, path string) bool {
 
 // ShouldExclude checks if a path should be excluded based on glob patterns
 func (c *Config) ShouldExclude(path string) bool {
+	path = c.configPath(path)
 	for _, pattern := range c.Settings.Exclude {
 		if matchGlobPattern(pattern, path) {
 			return true

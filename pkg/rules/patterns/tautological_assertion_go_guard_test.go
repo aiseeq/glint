@@ -165,3 +165,56 @@ func loadArticles(dir string) ([]Article, error) {
 `
 	assert.Equal(t, []int{22, 26}, tautologicalGoLines(t, code))
 }
+
+// A guard anywhere inside a loop filters the items the test is about; the
+// completeness is checked after the loop. A guard whose body returns falls
+// through to a failure when the value is not there.
+func TestTautologicalAssertion_GoGuardWithFailurePath(t *testing.T) {
+	code := `package service
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestStrategies(t *testing.T) {
+	items := []map[string]any{}
+	found := map[string]bool{"basic": false}
+	for _, s := range items {
+		if name, ok := s["name"].(string); ok {
+			if _, want := found[name]; want {
+				found[name] = true
+				assert.Contains(t, s, "description")
+			}
+		} else {
+			assert.IsType(t, "", s["name"])
+		}
+	}
+	for name, f := range found {
+		assert.True(t, f, name)
+	}
+}
+
+func listOf(t *testing.T, resp map[string]any) []any {
+	if m, ok := resp["data"].(map[string]any); ok {
+		if items, has := m["items"]; has {
+			list, ok := items.([]any)
+			require.True(t, ok)
+			return list
+		}
+	}
+	t.Fatalf("unexpected shape: %T", resp["data"])
+	return nil
+}
+
+func TestShape(t *testing.T) {
+	resp := map[string]any{}
+	if m, ok := resp["data"].(map[string]any); ok {
+		assert.NotEmpty(t, m["items"])
+	}
+}
+`
+	assert.Equal(t, []int{42}, tautologicalGoLines(t, code))
+}

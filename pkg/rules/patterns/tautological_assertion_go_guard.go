@@ -40,9 +40,11 @@ func (r *TautologicalAssertionRule) goGuardsAndSkips(ctx *core.FileContext, test
 					continue
 				}
 				switch {
-				// A guard right in a loop body filters the items the test is
-				// about; a branch that only fails makes the guard the check.
-				case ifStmt.Else == nil && !inLoop[ifStmt] && isCommaOkGuard(ifStmt) && containsValueAssertion(ifStmt.Body, testify):
+				// A guard in a loop filters the items the test is about; a
+				// branch that only fails makes the guard the check, and so does
+				// a failure the guard returns past.
+				case ifStmt.Else == nil && !inLoop[ifStmt] && isCommaOkGuard(ifStmt) && containsValueAssertion(ifStmt.Body, testify) &&
+					!failsPastGuard(body, ifStmt):
 					violations = append(violations, r.violation(ctx, ctx.LineFor(ifStmt),
 						"Assertion runs only when the value is there — without it the test passes checking nothing",
 						"Assert the guard itself (require.True(t, ok)) and then the value, or fail in an else branch",
@@ -74,6 +76,52 @@ func (r *TautologicalAssertionRule) goGuardsAndSkips(ctx *core.FileContext, test
 		})
 	})
 	return violations
+}
+
+// failsPastGuard reports a guard that returns when the value is there and
+// falls through to a test failure when it is not.
+func failsPastGuard(body *ast.BlockStmt, guard *ast.IfStmt) bool {
+	return terminatesBlock(guard.Body) && failsAfter(body, guard)
+}
+
+// terminatesBlock reports a block that ends in a return, at its end or at
+// the end of the last guard in it.
+func terminatesBlock(block *ast.BlockStmt) bool {
+	if len(block.List) == 0 {
+		return false
+	}
+	switch last := block.List[len(block.List)-1].(type) {
+	case *ast.ReturnStmt:
+		return true
+	case *ast.IfStmt:
+		return last.Else == nil && terminatesBlock(last.Body)
+	}
+	return false
+}
+
+// failsAfter reports a test failure (t.Fatalf, t.Errorf, require.Fail) the
+// function reaches after the statement, outside it.
+func failsAfter(body *ast.BlockStmt, stmt ast.Stmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok || call.Pos() < stmt.End() {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "Fatal", "Fatalf", "Error", "Errorf", "Fail", "FailNow":
+			found = isTestingHandle(sel.X) || helpers.ExprText(sel.X) == "require" || helpers.ExprText(sel.X) == "assert"
+		}
+		return !found
+	})
+	return found
 }
 
 // onlyContinues reports a branch that is a bare continue.
@@ -154,7 +202,8 @@ func isTestLog(call *ast.CallExpr) bool {
 	return sel.Sel.Name == "Log" || sel.Sel.Name == "Logf" || isFmtPrint(call) || helpers.IsLoggerCall(call)
 }
 
-// loopStatements returns the statements directly in the body of a loop.
+// loopStatements returns the statements anywhere in the body of a loop, out
+// of the function literals in it.
 func loopStatements(body *ast.BlockStmt) map[ast.Stmt]bool {
 	inLoop := make(map[ast.Stmt]bool)
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -166,9 +215,15 @@ func loopStatements(body *ast.BlockStmt) map[ast.Stmt]bool {
 			loopBody = loop.Body
 		}
 		if loopBody != nil {
-			for _, stmt := range loopBody.List {
-				inLoop[stmt] = true
-			}
+			ast.Inspect(loopBody, func(m ast.Node) bool {
+				if _, isLit := m.(*ast.FuncLit); isLit {
+					return false
+				}
+				if stmt, ok := m.(ast.Stmt); ok {
+					inLoop[stmt] = true
+				}
+				return true
+			})
 		}
 		return true
 	})
