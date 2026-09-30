@@ -24,7 +24,7 @@ func (m *testMentions) addUnloadedPackageFiles(pkg *core.GoPackageContext) error
 	dir := filepath.Dir(pkg.Package.GoFiles[0])
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("unused symbol: list package directory %q: %w", dir, err)
+		return fmt.Errorf("list package directory %q: %w", dir, err)
 	}
 
 	words := make(map[string]bool)
@@ -36,7 +36,7 @@ func (m *testMentions) addUnloadedPackageFiles(pkg *core.GoPackageContext) error
 		}
 		content, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("unused symbol: read package file %q: %w", path, err)
+			return fmt.Errorf("read package file %q: %w", path, err)
 		}
 		collectIdentifierWords(string(content), words)
 	}

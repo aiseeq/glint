@@ -2,6 +2,7 @@ package deadcode
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -66,7 +67,10 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 
 	byFile := make(map[*core.FileContext][]declaredSymbol)
 	uses := make(map[types.Object]int)
-	mentions := newUntypedMentions(ctx)
+	mentions, err := projectMentions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unused symbol: %w", err)
+	}
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
 			return nil, errors.New("unused symbol: package has no typed syntax")
@@ -91,9 +95,6 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		own := make(ownDeclarations)
 		own.addPackage(pkg.Package.Syntax, info)
 		countOutsideUses(info, own, uses)
-		if err := mentions.addUnloadedPackageFiles(pkg); err != nil {
-			return nil, err
-		}
 	}
 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {

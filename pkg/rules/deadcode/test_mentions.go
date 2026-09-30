@@ -18,16 +18,24 @@ type testMentions struct {
 	names map[string]map[string]bool
 }
 
-// newTestMentions scans every *_test.go context once.
-func newTestMentions(files []*core.FileContext) *testMentions {
-	mentions := &testMentions{names: make(map[string]map[string]bool)}
-	for _, fileCtx := range files {
-		if fileCtx == nil || !fileCtx.IsTestFile() || !fileCtx.IsGoFile() {
-			continue
+type mentionsKey struct{}
+
+// projectMentions is the name scan of every Go file outside the typed load —
+// tests, build-excluded files, and package files the configuration excluded
+// from analysis — built once per project and shared by the dead-code rules.
+func projectMentions(ctx *core.GoProjectContext) (*testMentions, error) {
+	return core.Shared(ctx, mentionsKey{}, func() (*testMentions, error) {
+		mentions := newUntypedMentions(ctx)
+		for _, pkg := range ctx.Packages {
+			if pkg == nil || pkg.Package == nil {
+				continue
+			}
+			if err := mentions.addUnloadedPackageFiles(pkg); err != nil {
+				return nil, err
+			}
 		}
-		mentions.add(fileCtx)
-	}
-	return mentions
+		return mentions, nil
+	})
 }
 
 // newUntypedMentions scans every Go file the typed load leaves out: test

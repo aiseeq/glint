@@ -64,6 +64,7 @@ var (
 	flagNoColor     bool
 	flagTolerant    bool
 	flagTiming      bool
+	flagCPUProfile  string
 	// Fix command flags
 	flagDryRun  bool
 	flagForce   bool
@@ -174,6 +175,7 @@ func init() {
 	checkCmd.Flags().BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
 	checkCmd.Flags().BoolVar(&flagTolerant, "tolerate-broken-packages", false, "Analyze packages that type-check and report the ones that do not, instead of failing (for trees that do not compile as a whole)")
 	checkCmd.Flags().BoolVar(&flagTiming, "timing", false, "Report per-rule timings to stderr; on Ctrl+C also names the rule and file still running")
+	checkCmd.Flags().StringVar(&flagCPUProfile, "cpuprofile", "", "Write a CPU profile of the run to this file (go tool pprof)")
 
 	// Rules command flags
 	rulesCmd.Flags().StringVarP(&flagCategory, "category", "c", "", "Filter by category")
@@ -204,6 +206,13 @@ func runCheck(_ *cobra.Command, args []string) error {
 	if flagTiming {
 		timings = newTimingCollector()
 		stop := reportTimingsOnInterrupt(timings)
+		defer stop()
+	}
+	if flagCPUProfile != "" {
+		stop, err := startCPUProfile(flagCPUProfile)
+		if err != nil {
+			return err
+		}
 		defer stop()
 	}
 

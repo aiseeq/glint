@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -314,4 +315,32 @@ func TestLoadGoProjectUsesContextContentThatDiffersFromDisk(t *testing.T) {
 	scope := project.Packages[0].Package.Types.Scope()
 	assert.NotNil(t, scope.Lookup("Account"))
 	assert.Nil(t, scope.Lookup("User"))
+}
+
+func TestSharedBuildsOncePerProject(t *testing.T) {
+	type key struct{}
+	type failingKey struct{}
+	project := &GoProjectContext{}
+	builds := 0
+	build := func() (int, error) { builds++; return 42, nil }
+
+	for range 3 {
+		value, err := Shared(project, key{}, build)
+		require.NoError(t, err)
+		assert.Equal(t, 42, value)
+	}
+	assert.Equal(t, 1, builds)
+
+	failures := 0
+	for range 2 {
+		_, err := Shared(project, failingKey{}, func() (string, error) {
+			failures++
+			return "", errors.New("scan failed")
+		})
+		require.EqualError(t, err, "scan failed")
+	}
+	assert.Equal(t, 1, failures, "a failed build is not retried")
+
+	_, err := Shared(project, key{}, func() (string, error) { return "", nil })
+	require.Error(t, err, "a key built with another type is an error")
 }

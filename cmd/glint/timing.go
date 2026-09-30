@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"sort"
 	"sync"
 	"time"
@@ -201,4 +202,23 @@ func formatDuration(d time.Duration) string {
 		return d.Round(time.Millisecond).String()
 	}
 	return d.Round(100 * time.Millisecond).String()
+}
+
+// startCPUProfile starts writing a CPU profile to path; the returned function
+// stops it and closes the file.
+func startCPUProfile(path string) (func(), error) {
+	file, err := os.Create(path)
+	if err != nil {
+		return nil, fmt.Errorf("create CPU profile: %w", err)
+	}
+	if err := pprof.StartCPUProfile(file); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("start CPU profile: %w", err)
+	}
+	return func() {
+		pprof.StopCPUProfile()
+		if err := file.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "close CPU profile: %v\n", err)
+		}
+	}, nil
 }
