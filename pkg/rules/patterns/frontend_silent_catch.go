@@ -67,33 +67,6 @@ func (r *FrontendSilentCatchRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 	return violations
 }
 
-func collectBraceBlock(lines []string, start int) (string, int) {
-	var builder strings.Builder
-	depth := 0
-	started := false
-	for i := start; i < len(lines); i++ {
-		line := lines[i]
-		builder.WriteString(line)
-		builder.WriteByte('\n')
-
-		for _, char := range line {
-			switch char {
-			case '{':
-				depth++
-				started = true
-			case '}':
-				if started {
-					depth--
-				}
-			}
-		}
-		if started && depth <= 0 {
-			return builder.String(), i
-		}
-	}
-	return builder.String(), start
-}
-
 func (r *FrontendSilentCatchRule) isSilentCatch(block string) bool {
 	return r.loggerCall.MatchString(block) && !r.userFeedbackCall.MatchString(block)
 }

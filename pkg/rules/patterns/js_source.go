@@ -49,6 +49,28 @@ func jsBlockEnd(code []string, line, col int) (int, int, bool) {
 	return 0, 0, false
 }
 
+// jsBlockAt returns the block that opens with the first '{' of the code view
+// at or after (line, col): its text view from (line, col) through the closing
+// '}', and the line of that '}'. Braces in comments and literals do not count.
+func jsBlockAt(src jsSource, line, col int) (string, int, bool) {
+	for i := line; i < len(src.code); i++ {
+		from := 0
+		if i == line {
+			from = col
+		}
+		open := strings.IndexByte(src.code[i][from:], '{')
+		if open < 0 {
+			continue
+		}
+		endLine, endCol, ok := jsBlockEnd(src.code, i, from+open)
+		if !ok {
+			return "", 0, false
+		}
+		return jsSpan(src.text, line, col, endLine, endCol), endLine, true
+	}
+	return "", 0, false
+}
+
 // jsSpan joins lines from (fromLine, fromCol) through (toLine, toCol), both
 // ends included.
 func jsSpan(lines []string, fromLine, fromCol, toLine, toCol int) string {

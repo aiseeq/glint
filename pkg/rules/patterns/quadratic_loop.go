@@ -260,6 +260,7 @@ var frontendRescan = regexp.MustCompile(`while\s*\(\s*([\w.]+)\.(?:includes|inde
 // where a collection is scanned by method calls rather than by range.
 func (r *QuadraticLoopRule) analyzeFrontend(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
+	src := newJSSource(ctx.Lines)
 
 	for i := 0; i < len(ctx.Lines); i++ {
 		line := ctx.Lines[i]
@@ -268,18 +269,19 @@ func (r *QuadraticLoopRule) analyzeFrontend(ctx *core.FileContext) []*core.Viola
 		// and a second statement further down is a separate pass, not a nested
 		// one.
 		if collection, ok := frontendScanned(line); ok && strings.HasSuffix(strings.TrimSpace(line), "{") {
-			block, end := collectBraceBlock(ctx.Lines, i)
+			block, end, closed := jsBlockAt(src, i, 0)
+			if !closed {
+				continue
+			}
 			if inner, ok := frontendNestedScan(block, collection); ok {
 				violations = append(violations, r.frontendNested(ctx, i+1, collection, inner))
 			}
-			if end > i {
-				i = end
-			}
+			i = end
 			continue
 		}
 		if match := frontendRescan.FindStringSubmatch(line); match != nil {
-			block, _ := collectBraceBlock(ctx.Lines, i)
-			if frontendReplacesInBlock(block, match[1]) {
+			block, _, closed := jsBlockAt(src, i, 0)
+			if closed && frontendReplacesInBlock(block, match[1]) {
 				violations = append(violations, r.frontendRescan(ctx, i+1, match[1]))
 			}
 		}
