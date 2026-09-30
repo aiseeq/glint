@@ -48,7 +48,7 @@ func NewMdListAfterLabelRule() *MdListAfterLabelRule {
 		// Match list items (- or * or numbered)
 		listPattern: regexp.MustCompile(`^\s*[-*]\s+|^\s*\d+\.\s+`),
 		// Skip patterns: frontmatter, headers, table rows, blockquotes
-		skipPattern: regexp.MustCompile("^---|^#|^\\||^>"),
+		skipPattern: regexp.MustCompile(`^---|^#|^\||^>`),
 	}
 }
 

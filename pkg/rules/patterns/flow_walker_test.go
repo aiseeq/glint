@@ -19,6 +19,9 @@ type flowTraceRule struct {
 	exits []string
 }
 
+// Tells the unused linter that the methods are reached through the walker.
+var _ flowRule[[]string, struct{}] = (*flowTraceRule)(nil)
+
 func (r *flowTraceRule) cloneState(paths []string) []string { return slices.Clone(paths) }
 
 func (r *flowTraceRule) joinStates(left, right []string) []string {
