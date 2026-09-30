@@ -184,3 +184,29 @@ func HonorsSuppression(r Rule) bool {
 	}
 	return true
 }
+
+// ReadsOtherFiles is an optional interface for file rules whose findings
+// depend on more than the analyzed file — links checked against the disk, for
+// instance. Their findings are never reused from the result cache.
+type ReadsOtherFiles interface {
+	Rule
+	ReadsOtherFiles() bool
+}
+
+// FileLocal reports whether a rule's findings on a file depend only on that
+// file — its path and content — and the configuration, so that they can be
+// reused while the file is unchanged. Project rules see the whole module,
+// stateful rules the files analyzed before, and rules that read other files
+// the disk; none of them is file-local.
+func FileLocal(r Rule) bool {
+	if _, ok := r.(GoProjectRule); ok {
+		return false
+	}
+	if _, ok := r.(StatefulRule); ok {
+		return false
+	}
+	if reader, ok := r.(ReadsOtherFiles); ok && reader.ReadsOtherFiles() {
+		return false
+	}
+	return true
+}

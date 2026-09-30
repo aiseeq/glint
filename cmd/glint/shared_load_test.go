@@ -87,7 +87,7 @@ func analyzeRoot(t *testing.T, loader *core.GoProjectLoader, root string) []stri
 		t.Fatalf("prepare %s: %v", root, err)
 	}
 	rules.ResetState(enabledRules)
-	violations, err := analyzeProject(contexts, enabledRules, cfg, project)
+	violations, err := analyzeProject(contexts, enabledRules, cfg, project, nil)
 	if err != nil {
 		t.Fatalf("analyze %s: %v", root, err)
 	}

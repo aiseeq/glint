@@ -290,6 +290,23 @@ If glint hangs on your project, run it with `--timing` and press Ctrl+C: the
 report names the rule and file it is stuck on (or the loading phase, if
 type-checking is the problem). Please attach that output when filing an issue.
 
+## Result Cache
+
+Findings of rules that look at one file only are kept per project root in the
+user cache directory (`~/.cache/glint/results` on Linux). A file whose content
+is unchanged gets them back instead of being analyzed again. Another glint
+build, another configuration or another loading mode discards the cache; rules
+that see the whole module, other files or the disk always run. A root not
+checked for 30 days loses its cache.
+
+```bash
+glint check --no-cache    # analyze every file
+```
+
+A rule whose findings depend on more than its file must implement
+`rules.ReadsOtherFiles`; a test walks the call graph of every other file rule
+and fails when it reaches the disk, the environment or the clock.
+
 ## Project Structure
 
 ```

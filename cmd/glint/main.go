@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -65,6 +66,7 @@ var (
 	flagTolerant    bool
 	flagTiming      bool
 	flagCPUProfile  string
+	flagNoCache     bool
 	// Fix command flags
 	flagDryRun  bool
 	flagForce   bool
@@ -176,6 +178,7 @@ func init() {
 	checkCmd.Flags().BoolVar(&flagTolerant, "tolerate-broken-packages", false, "Analyze packages that type-check and report the ones that do not, instead of failing (for trees that do not compile as a whole)")
 	checkCmd.Flags().BoolVar(&flagTiming, "timing", false, "Report per-rule timings to stderr; on Ctrl+C also names the rule and file still running")
 	checkCmd.Flags().StringVar(&flagCPUProfile, "cpuprofile", "", "Write a CPU profile of the run to this file (go tool pprof)")
+	checkCmd.Flags().BoolVar(&flagNoCache, "no-cache", false, "Analyze every file instead of reusing the findings of unchanged files from the previous run")
 
 	// Rules command flags
 	rulesCmd.Flags().StringVarP(&flagCategory, "category", "c", "", "Filter by category")
@@ -255,11 +258,20 @@ func runCheck(_ *cobra.Command, args []string) error {
 		// root must not influence this one.
 		rules.ResetState(enabledRules)
 
+		cache := openRootCache(projectRoot, cfg, project != nil)
 		analyzeDone := timings.phase("analyze " + projectRoot)
-		violations, err := analyzeProject(contexts, enabledRules, cfg, project)
+		violations, err := analyzeProject(contexts, enabledRules, cfg, project, cache)
 		analyzeDone()
 		if err != nil {
 			return err
+		}
+		if cache != nil {
+			if err := cache.save(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: result cache of %s not saved: %v\n", projectRoot, err)
+			}
+			if flagTiming {
+				fmt.Fprintf(os.Stderr, "result cache %s: %d of %d files unchanged\n", projectRoot, cache.reused, len(contexts))
+			}
 		}
 		minSeverity, err := cfg.GetMinSeverity()
 		if err != nil {
@@ -585,7 +597,10 @@ func (o severityOverrides) apply(violation *core.Violation) {
 // parallel across files; rules that accumulate cross-file state run in a fixed
 // file order afterwards. Findings are collected per (file, rule) and only then
 // flattened, so the output does not depend on scheduling.
-func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides) (core.ViolationList, error) {
+// analyzeFiles runs the file rules. With a cache, an unchanged file gets the
+// stored findings of its file-local rules back, and every file's findings are
+// stored for the next run.
+func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides, cache *resultCache) (core.ViolationList, error) {
 	if len(contexts) == 0 || len(enabledRules) == 0 {
 		return nil, nil
 	}
@@ -605,8 +620,21 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 	}
 	failures := make([]error, len(contexts))
 
+	local := fileLocalRules(enabledRules)
+	var contents [][sha256.Size]byte
+	var reuse []map[string][]core.Violation
+	if cache != nil {
+		contents = make([][sha256.Size]byte, len(contexts))
+		reuse = make([]map[string][]core.Violation, len(contexts))
+		for i, ctx := range contexts {
+			contents[i] = sha256.Sum256(ctx.Content)
+			reuse[i] = cache.lookup(ctx.RelPath, contents[i])
+		}
+	}
+
 	if statefulCount < len(enabledRules) {
-		runStatelessRules(contexts, enabledRules, stateful, cfg, overrides, found, failures)
+		run := statelessRun{rules: enabledRules, stateful: stateful, local: local, reuse: reuse, cfg: cfg, overrides: overrides}
+		run.execute(contexts, found, failures)
 	}
 	if statefulCount > 0 {
 		for fileIndex, ctx := range contexts {
@@ -623,6 +651,11 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 	if err := errors.Join(failures...); err != nil {
 		return nil, err
 	}
+	if cache != nil {
+		for fileIndex, ctx := range contexts {
+			cache.storeFile(ctx.RelPath, contents[fileIndex], enabledRules, local, found[fileIndex], reuse[fileIndex])
+		}
+	}
 
 	var allViolations core.ViolationList
 	for _, perRule := range found {
@@ -633,11 +666,22 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 	return allViolations, nil
 }
 
-// runStatelessRules spreads the files over a worker per CPU. Each worker owns
-// its own row of the result matrix, so no synchronization is needed beyond the
-// wait group.
-func runStatelessRules(contexts []*core.FileContext, enabledRules []rules.Rule, stateful []bool,
-	cfg *core.Config, overrides severityOverrides, found [][]core.ViolationList, failures []error) {
+// statelessRun is one pass of the stateless file rules. reuse, when set,
+// holds per file the cached findings by rule name; a file-local rule found
+// there is not run.
+type statelessRun struct {
+	rules     []rules.Rule
+	stateful  []bool
+	local     []bool
+	reuse     []map[string][]core.Violation
+	cfg       *core.Config
+	overrides severityOverrides
+}
+
+// execute spreads the files over a worker per CPU. Each worker owns its own
+// row of the result matrix, so no synchronization is needed beyond the wait
+// group.
+func (s statelessRun) execute(contexts []*core.FileContext, found [][]core.ViolationList, failures []error) {
 	workers := runtime.NumCPU()
 	if workers > len(contexts) {
 		workers = len(contexts)
@@ -657,11 +701,17 @@ func runStatelessRules(contexts []*core.FileContext, enabledRules []rules.Rule, 
 				if fileIndex >= len(contexts) {
 					return
 				}
-				for ruleIndex, rule := range enabledRules {
-					if stateful[ruleIndex] {
+				for ruleIndex, rule := range s.rules {
+					if s.stateful[ruleIndex] {
 						continue
 					}
-					violations, err := runRule(contexts[fileIndex], rule, cfg, overrides)
+					if s.local[ruleIndex] && s.reuse != nil {
+						if stored, ok := s.reuse[fileIndex][rule.Name()]; ok {
+							found[fileIndex][ruleIndex] = cachedViolations(stored)
+							continue
+						}
+					}
+					violations, err := runRule(contexts[fileIndex], rule, s.cfg, s.overrides)
 					found[fileIndex][ruleIndex] = violations
 					failures[fileIndex] = errors.Join(failures[fileIndex], err)
 				}
@@ -717,7 +767,7 @@ func hasGoFiles(contexts []*core.FileContext) bool {
 	return false
 }
 
-func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext) (core.ViolationList, error) {
+func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext, cache *resultCache) (core.ViolationList, error) {
 	overrides, err := buildSeverityOverrides(cfg, enabledRules)
 	if err != nil {
 		return nil, err
@@ -762,7 +812,7 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 			allViolations = append(allViolations, violation)
 		}
 	}
-	fileViolations, err := analyzeFiles(contexts, fileRules, cfg, overrides)
+	fileViolations, err := analyzeFiles(contexts, fileRules, cfg, overrides, cache)
 	if err != nil {
 		return nil, err
 	}
@@ -1134,7 +1184,7 @@ func collectFixes(projectRoot string, cfg *core.Config, fixableRules []rules.Rul
 	}
 
 	rules.ResetState(fixableRules)
-	violations, err := analyzeProject(contexts, fixableRules, cfg, project)
+	violations, err := analyzeProject(contexts, fixableRules, cfg, project, nil)
 	if err != nil {
 		return nil, err
 	}

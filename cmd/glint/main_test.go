@@ -283,7 +283,7 @@ func TestPrepareAnalysisUsesLoaderASTForProjectAndFileRules(t *testing.T) {
 	if project == nil || project.Packages[0].SSA == nil {
 		t.Fatal("expected built SSA project")
 	}
-	if _, err := analyzeProject(contexts, []rules.Rule{projectRule, fileRule}, core.DefaultConfig(), project); err != nil {
+	if _, err := analyzeProject(contexts, []rules.Rule{projectRule, fileRule}, core.DefaultConfig(), project, nil); err != nil {
 		t.Fatalf("analyze project: %v", err)
 	}
 	if projectRule.projectCalls != 1 || projectRule.fileCalls != 0 {
@@ -331,7 +331,7 @@ func TestPrepareAnalysisSkipsGoProjectForTreeWithoutGoFiles(t *testing.T) {
 		t.Fatalf("contexts=%d, want 1 (app.ts)", len(contexts))
 	}
 
-	if _, err := analyzeProject(contexts, []rules.Rule{projectRule}, core.DefaultConfig(), project); err != nil {
+	if _, err := analyzeProject(contexts, []rules.Rule{projectRule}, core.DefaultConfig(), project, nil); err != nil {
 		t.Fatalf("analyze TS-only tree with project rule must not fail: %v", err)
 	}
 	if projectRule.projectCalls != 0 {
@@ -375,7 +375,7 @@ func TestAnalyzeProjectFiltersPackageFindings(t *testing.T) {
 				t.Fatalf("prepare analysis: %v", err)
 			}
 
-			violations, err := analyzeProject(contexts, []rules.Rule{rule}, tt.cfg, project)
+			violations, err := analyzeProject(contexts, []rules.Rule{rule}, tt.cfg, project, nil)
 			if err != nil {
 				t.Fatalf("analyze project: %v", err)
 			}
@@ -405,7 +405,7 @@ func TestAnalyzeProjectReturnsRuleError(t *testing.T) {
 		t.Fatalf("prepare analysis: %v", err)
 	}
 
-	_, err = analyzeProject(contexts, []rules.Rule{rule}, core.DefaultConfig(), project)
+	_, err = analyzeProject(contexts, []rules.Rule{rule}, core.DefaultConfig(), project, nil)
 	if !errors.Is(err, rule.err) {
 		t.Fatalf("got error %v, want %v", err, rule.err)
 	}
@@ -489,7 +489,7 @@ func TestFindingSetDropsFindingOfOverlappingRoot(t *testing.T) {
 
 func mustAnalyzeFiles(t *testing.T, contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides) core.ViolationList {
 	t.Helper()
-	violations, err := analyzeFiles(contexts, enabledRules, cfg, overrides)
+	violations, err := analyzeFiles(contexts, enabledRules, cfg, overrides, nil)
 	if err != nil {
 		t.Fatalf("analyze files: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestAnalyzeFilesReportsPanickingRule(t *testing.T) {
 	rule := &panickingRule{rules.NewBaseRule("boom-rule", "patterns", "panics", core.SeverityLow)}
 	ctx := goContext(t, "store.go", "package store\n")
 
-	_, err := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{rule}, core.DefaultConfig(), nil)
+	_, err := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{rule}, core.DefaultConfig(), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "boom-rule") || !strings.Contains(err.Error(), "store.go") {
 		t.Fatalf("got %v, want an error naming the rule and the file", err)
 	}
