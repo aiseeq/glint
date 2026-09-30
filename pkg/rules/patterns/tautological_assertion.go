@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -43,6 +44,9 @@ type TautologicalAssertionRule struct {
 	tsPureRead     *regexp.Regexp
 	tsTestStart    *regexp.Regexp
 	tsElse         *regexp.Regexp
+	tsStatusGuard  *regexp.Regexp
+	tsFuncStart    *regexp.Regexp
+	tsExpect       *regexp.Regexp
 }
 
 // NewTautologicalAssertionRule creates the rule
@@ -70,12 +74,16 @@ func NewTautologicalAssertionRule() *TautologicalAssertionRule {
 		// A test case: the scope of the names it declares.
 		tsTestStart: regexp.MustCompile(`^\s*(?:it|test)(?:\.\w+)?\s*\(`),
 		tsElse:      regexp.MustCompile(`^\s*(?:\}\s*)?else\b`),
+		// A condition over the answer of the server: its status or ok().
+		tsStatusGuard: regexp.MustCompile(`^\s*if\s*\(.*(?:\.status\s*\(\s*\)|\.status\b|\.ok\s*\(\s*\))`),
+		tsFuncStart:   regexp.MustCompile(`^(?:export\s+)?(?:async\s+)?function\b|^(?:export\s+)?const\s+\w+\s*=|^\s*(?:it|test)(?:\.\w+)?\s*\(|^\}`),
+		tsExpect:      regexp.MustCompile(`\bexpect\s*\(`),
 	}
 }
 
 // AnalyzeFile inspects test files only: an assertion outside a test is not an assertion.
 func (r *TautologicalAssertionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsTestFile() {
+	if !ctx.IsTestFile() && !isBrowserTestScript(ctx) {
 		return nil
 	}
 
@@ -229,6 +237,10 @@ func (r *TautologicalAssertionRule) analyzeTypeScript(ctx *core.FileContext) []*
 		}
 		if v := r.checkTSSelfSkipping(ctx, src, i); v != nil {
 			violations = append(violations, v)
+			continue
+		}
+		if v := r.checkTSReturnBeforeAssertions(ctx, src, i); v != nil {
+			violations = append(violations, v)
 		}
 	}
 
@@ -325,6 +337,36 @@ func (r *TautologicalAssertionRule) checkTSSelfSkipping(ctx *core.FileContext, s
 	}
 
 	return nil
+}
+
+// checkTSReturnBeforeAssertions finds a function that returns before its
+// assertions when the server answers with some status: the check passes
+// having checked nothing. Real case: a route helper returned on 429 and every
+// page test built on it stayed green under rate limiting.
+func (r *TautologicalAssertionRule) checkTSReturnBeforeAssertions(ctx *core.FileContext, src jsSource, index int) *core.Violation {
+	if !r.tsStatusGuard.MatchString(src.code[index]) {
+		return nil
+	}
+	body, afterLine, _, ok := guardedBody(src, index)
+	if !ok || strings.Trim(body, "{}; \t\n") != "return" {
+		return nil
+	}
+	for line := afterLine; line < len(src.code) && !r.tsFuncStart.MatchString(src.code[line]); line++ {
+		if r.tsExpect.MatchString(src.code[line]) {
+			return r.violation(ctx, index+1,
+				"The function returns before its assertions on this status — the check passes having checked nothing",
+				"Fail on the status (expect it, or throw), or retry until the answer is the one under test",
+				"return_before_assertions")
+		}
+	}
+	return nil
+}
+
+// isBrowserTestScript reports a script under an e2e/ directory: helpers of
+// browser tests are test code whatever their name.
+func isBrowserTestScript(ctx *core.FileContext) bool {
+	return (ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile()) &&
+		strings.Contains("/"+filepath.ToSlash(ctx.RelPath), "/e2e/")
 }
 
 // guardedBody returns the text the if on the given line guards — a braced block,
