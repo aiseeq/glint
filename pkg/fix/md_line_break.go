@@ -73,17 +73,22 @@ func (f *MdLineBreakFixer) GenerateFix(ctx *core.FileContext, v *core.Violation)
 		return nil
 	}
 
-	// Build old and new text
+	// Every line of the group but the last gets the two trailing spaces of a
+	// hard line break, before a CR of a CRLF line. The last line is left out
+	// of the edit: another fix may add a blank line after it.
 	var oldLines, newLines []string
-	for i := groupStart; i <= groupEnd; i++ {
+	for i := groupStart; i < groupEnd; i++ {
 		line := ctx.Lines[i]
 		oldLines = append(oldLines, line)
 
-		// Add trailing spaces to all lines except the last one
-		if i < groupEnd && !strings.HasSuffix(line, "  ") {
-			line = line + "  "
+		text, cr := strings.CutSuffix(line, "\r")
+		if !strings.HasSuffix(text, "  ") {
+			text += "  "
 		}
-		newLines = append(newLines, line)
+		if cr {
+			text += "\r"
+		}
+		newLines = append(newLines, text)
 	}
 
 	oldText := strings.Join(oldLines, "\n")
@@ -97,7 +102,7 @@ func (f *MdLineBreakFixer) GenerateFix(ctx *core.FileContext, v *core.Violation)
 	return []*Fix{&Fix{
 		File:      ctx.Path,
 		StartLine: groupStart + 1,
-		EndLine:   groupEnd + 1,
+		EndLine:   groupEnd,
 		OldText:   oldText,
 		NewText:   newText,
 		Message:   "Add hard line breaks to consecutive bold-label lines",

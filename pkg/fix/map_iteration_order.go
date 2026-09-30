@@ -1,16 +1,10 @@
 package fix
 
 import (
-	"fmt"
-	"regexp"
-	"strings"
+	"go/ast"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
-
-// mapRangePattern matches the range statement the rule reports: both the
-// key-only and the key-value form.
-var mapRangePattern = regexp.MustCompile(`^(\s*)for\s+(\w+)(?:\s*,\s*(\w+))?\s*:=\s*range\s+([\w.\[\]]+)\s*\{\s*$`)
 
 // MapIterationOrderFixer rewrites a map range into a walk over sorted keys, so
 // that the value the loop builds comes out the same on every run.
@@ -26,53 +20,65 @@ func (f *MapIterationOrderFixer) RuleName() string {
 	return "map-iteration-order"
 }
 
-// CanFix reports whether the violation is one this fixer handles.
+// CanFix reports whether the rule marked the loop as one whose keys can be
+// sorted: the rule knows the key type (slices.Sorted needs cmp.Ordered), the
+// Go version and whether the body edits the map; the fixer does not.
 func (f *MapIterationOrderFixer) CanFix(v *core.Violation) bool {
-	return v != nil && v.Rule == "map-iteration-order"
+	if v == nil || v.Rule != "map-iteration-order" || v.Column < 1 {
+		return false
+	}
+	sortable, ok := v.Context["sortable_keys"].(bool)
+	return ok && sortable
 }
 
-// GenerateFix rewrites `for k, v := range m {` into a sorted walk and adds the
-// imports that walk needs.
+// GenerateFix rewrites `for k, v := range m {` into
+// `for _, k := range slices.Sorted(maps.Keys(m)) {` followed by `v := m[k]`.
 func (f *MapIterationOrderFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) []*Fix {
-	if ctx == nil || v == nil || v.Line < 1 || v.Line > len(ctx.Lines) {
+	if ctx == nil || ctx.GoAST == nil || !f.CanFix(v) {
+		return nil
+	}
+	if !canReferToPackage(ctx.GoAST, "maps") || !canReferToPackage(ctx.GoAST, "slices") {
 		return nil
 	}
 
-	line := ctx.Lines[v.Line-1]
-	match := mapRangePattern.FindStringSubmatch(line)
-	if match == nil {
+	var loop *ast.RangeStmt
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		if loop != nil {
+			return false
+		}
+		rangeStmt, ok := n.(*ast.RangeStmt)
+		if ok && violationPosition(ctx, v, rangeStmt) {
+			loop = rangeStmt
+			return false
+		}
+		return true
+	})
+	if loop == nil || loop.Key == nil || loop.Body == nil {
 		return nil
 	}
-	indent, key, value, collection := match[1], match[2], match[3], match[4]
-	if key == "_" {
+	key, ok := loop.Key.(*ast.Ident)
+	if !ok || key.Name == "_" {
 		return nil // the loop does not use the key, so sorting it changes nothing
 	}
-
-	rewritten := fmt.Sprintf("%sfor _, %s := range slices.Sorted(maps.Keys(%s)) {", indent, key, collection)
-	if value != "" && value != "_" {
-		rewritten += fmt.Sprintf("\n%s\t%s := %s[%s]", indent, value, collection, key)
-	}
-
-	fixes := []*Fix{{
-		File:      ctx.Path,
-		StartLine: v.Line,
-		EndLine:   v.Line,
-		OldText:   strings.TrimRight(line, " \t"),
-		NewText:   rewritten,
-		Message:   "Walk the map in sorted key order",
-		RuleName:  "map-iteration-order",
-		Violation: v,
-	}}
-	importFix, ok := ensureImports(ctx, "maps", "slices")
+	collection, ok := sourceOf(ctx, loop.X)
 	if !ok {
-		return nil // rewriting the body without its imports breaks the build
+		return nil
 	}
-	if importFix != nil {
-		importFix.RuleName = "map-iteration-order"
-		importFix.Violation = v
-		fixes = append(fixes, importFix)
+
+	rewritten := "_, " + key.Name + " := range slices.Sorted(maps.Keys(" + collection + ")) {"
+	if value, ok := loop.Value.(*ast.Ident); ok && value.Name != "_" {
+		rewritten += "\n" + value.Name + " := " + collection + "[" + key.Name + "]"
 	}
-	return fixes
+
+	fix, ok := nodeFix(ctx, loop.Key.Pos(), loop.Body.Lbrace+1, rewritten)
+	if !ok {
+		return nil
+	}
+	fix.Message = "Walk the map in sorted key order"
+	fix.RuleName = "map-iteration-order"
+	fix.Violation = v
+	fix.Imports = []string{"maps", "slices"}
+	return []*Fix{fix}
 }
 
 func init() {

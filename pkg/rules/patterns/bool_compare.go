@@ -98,6 +98,11 @@ func (r *BoolCompareRule) analyze(ctx *core.FileContext, info *types.Info) []*co
 		if boolLit == nil {
 			return true
 		}
+		// A package may declare its own true or false; only the predeclared
+		// constants make the comparison redundant.
+		if info != nil && info.Uses[boolLit] != types.Universe.Lookup(boolLit.Name) {
+			return true
+		}
 
 		// Comparing a non-bool operand against true/false is not redundant:
 		// a value read out of a map[string]any cannot be used as a condition
@@ -124,6 +129,9 @@ func (r *BoolCompareRule) analyze(ctx *core.FileContext, info *types.Info) []*co
 		}
 
 		v := r.CreateViolation(ctx.RelPath, line, "Redundant boolean comparison")
+		// The column pins the comparison, so the fixer rewrites this one and
+		// not another on the same line.
+		v.WithColumn(ctx.PositionFor(binary).Column)
 		v.WithCode(ctx.GetLine(line))
 		v.WithSuggestion(suggestion)
 		v.WithContext("pattern", "bool_compare")

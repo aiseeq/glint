@@ -1,8 +1,7 @@
 package fix
 
 import (
-	"maps"
-	"slices"
+	"go/ast"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -21,55 +20,71 @@ func (f *DeprecatedIoutilFixer) RuleName() string {
 	return "deprecated-ioutil"
 }
 
-// Replacement mappings for ioutil functions
-var ioutilReplacements = map[string]string{
-	"ioutil.ReadFile":  "os.ReadFile",
-	"ioutil.WriteFile": "os.WriteFile",
-	"ioutil.ReadAll":   "io.ReadAll",
-	"ioutil.ReadDir":   "os.ReadDir",
-	"ioutil.TempFile":  "os.CreateTemp",
-	"ioutil.TempDir":   "os.MkdirTemp",
-	"ioutil.NopCloser": "io.NopCloser",
-	"ioutil.Discard":   "io.Discard",
-}
+// ioutilReplacementPackages are the packages a replacement may come from.
+var ioutilReplacementPackages = map[string]bool{"io": true, "os": true}
 
-// CanFix returns true if the violation can be fixed
+// CanFix reports whether the rule named a drop-in replacement for the use it
+// points to. The rule names none for ioutil.ReadDir: its replacement returns a
+// different type, and the call sites would stop compiling.
 func (f *DeprecatedIoutilFixer) CanFix(v *core.Violation) bool {
-	return v != nil && v.Rule == "deprecated-ioutil"
+	if v == nil || v.Rule != "deprecated-ioutil" || v.Column < 1 {
+		return false
+	}
+	_, _, ok := ioutilReplacement(v)
+	return ok
 }
 
-// GenerateFix generates the fix for a violation
+// ioutilReplacement splits the replacement the rule named into its package and
+// the full selector.
+func ioutilReplacement(v *core.Violation) (pkg, replacement string, ok bool) {
+	replacement, ok = v.Context["replacement"].(string)
+	if !ok {
+		return "", "", false
+	}
+	pkg, _, found := strings.Cut(replacement, ".")
+	if !found || !ioutilReplacementPackages[pkg] {
+		return "", "", false
+	}
+	return pkg, replacement, true
+}
+
+// GenerateFix replaces the ioutil selector the violation points to, adds the
+// import of its replacement and drops io/ioutil once nothing uses it.
 func (f *DeprecatedIoutilFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) []*Fix {
-	if ctx == nil || v == nil {
+	if ctx == nil || ctx.GoAST == nil || !f.CanFix(v) {
+		return nil
+	}
+	pkg, replacement, _ := ioutilReplacement(v)
+	if !canReferToPackage(ctx.GoAST, pkg) {
 		return nil
 	}
 
-	if v.Line < 1 || v.Line > len(ctx.Lines) {
-		return nil
-	}
-
-	line := ctx.Lines[v.Line-1]
-
-	// Find which ioutil function is used. The names are walked in a fixed
-	// order: a line may use two of them, and the map walk order would then
-	// rewrite a different call on every run.
-	for _, old := range slices.Sorted(maps.Keys(ioutilReplacements)) {
-		replacement := ioutilReplacements[old]
-		if strings.Contains(line, old) {
-			return []*Fix{&Fix{
-				File:      ctx.Path,
-				StartLine: v.Line,
-				EndLine:   v.Line,
-				OldText:   old,
-				NewText:   replacement,
-				Message:   "Replace deprecated " + old + " with " + replacement,
-				RuleName:  "deprecated-ioutil",
-				Violation: v,
-			}}
+	var use *ast.SelectorExpr
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		if use != nil {
+			return false
 		}
+		selector, ok := n.(*ast.SelectorExpr)
+		if ok && violationPosition(ctx, v, selector) {
+			use = selector
+			return false
+		}
+		return true
+	})
+	if use == nil || use.Sel.Name != v.Context["ioutil_function"] {
+		return nil
 	}
 
-	return nil
+	fix, ok := nodeFix(ctx, use.Pos(), use.End(), replacement)
+	if !ok {
+		return nil
+	}
+	fix.Message = "Replace deprecated ioutil." + use.Sel.Name + " with " + replacement
+	fix.RuleName = "deprecated-ioutil"
+	fix.Violation = v
+	fix.Imports = []string{pkg}
+	fix.DropImports = []string{"io/ioutil"}
+	return []*Fix{fix}
 }
 
 func init() {

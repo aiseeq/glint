@@ -1,7 +1,8 @@
 package fix
 
 import (
-	"regexp"
+	"go/ast"
+	"go/token"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -19,96 +20,100 @@ func (f *BoolCompareFixer) RuleName() string {
 	return "bool-compare"
 }
 
-// Patterns for bool comparisons
-var (
-	// x == true, x == false
-	boolCompareRight = regexp.MustCompile(`(\w+(?:\.\w+)*)\s*==\s*(true|false)`)
-	// true == x, false == x
-	boolCompareLeft = regexp.MustCompile(`(true|false)\s*==\s*(\w+(?:\.\w+)*)`)
-	// x != true, x != false
-	boolNotCompareRight = regexp.MustCompile(`(\w+(?:\.\w+)*)\s*!=\s*(true|false)`)
-	// true != x, false != x
-	boolNotCompareLeft = regexp.MustCompile(`(true|false)\s*!=\s*(\w+(?:\.\w+)*)`)
-)
-
-// CanFix returns true if the violation can be fixed
+// CanFix reports whether the violation pins the comparison it is about: the
+// column tells it apart from other comparisons on the same line.
 func (f *BoolCompareFixer) CanFix(v *core.Violation) bool {
-	return v != nil && v.Rule == "bool-compare"
+	return v != nil && v.Rule == "bool-compare" && v.Column > 0
 }
 
-// GenerateFix generates the fix for a violation
+// GenerateFix rewrites the comparison the violation points to. The operand is
+// taken from the syntax tree, so the rewrite keeps the operand whole
+// (`n > 0 == false` becomes `!(n > 0)`) and never cuts a name in two.
 func (f *BoolCompareFixer) GenerateFix(ctx *core.FileContext, v *core.Violation) []*Fix {
-	if ctx == nil || v == nil {
+	if ctx == nil || ctx.GoAST == nil || !f.CanFix(v) {
 		return nil
 	}
 
-	if v.Line < 1 || v.Line > len(ctx.Lines) {
+	var comparison *ast.BinaryExpr
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		if comparison != nil {
+			return false
+		}
+		binary, ok := n.(*ast.BinaryExpr)
+		if ok && violationPosition(ctx, v, binary) && (binary.Op == token.EQL || binary.Op == token.NEQ) {
+			comparison = binary
+			return false
+		}
+		return true
+	})
+	if comparison == nil {
 		return nil
 	}
 
-	line := ctx.Lines[v.Line-1]
+	operand, literal := boolComparisonOperand(comparison)
+	if operand == nil {
+		return nil
+	}
+	negate := (comparison.Op == token.EQL) == (literal == "false")
 
-	// Try each pattern
-	if fix := f.tryFixPattern(ctx.Path, v.Line, line, boolCompareRight, true, false); fix != nil {
-		return []*Fix{fix}
+	replacement, ok := sourceOf(ctx, operand)
+	if !ok {
+		return nil
 	}
-	if fix := f.tryFixPattern(ctx.Path, v.Line, line, boolCompareLeft, true, true); fix != nil {
-		return []*Fix{fix}
-	}
-	if fix := f.tryFixPattern(ctx.Path, v.Line, line, boolNotCompareRight, false, false); fix != nil {
-		return []*Fix{fix}
-	}
-	if fix := f.tryFixPattern(ctx.Path, v.Line, line, boolNotCompareLeft, false, true); fix != nil {
-		return []*Fix{fix}
+	if negate {
+		replacement, ok = negatedSource(ctx, operand)
+		if !ok {
+			return nil
+		}
 	}
 
-	return nil
+	fix, ok := nodeFix(ctx, comparison.Pos(), comparison.End(), replacement)
+	if !ok {
+		return nil
+	}
+	fix.Message = "Simplify boolean comparison"
+	fix.RuleName = "bool-compare"
+	fix.Violation = v
+	return []*Fix{fix}
 }
 
-func (f *BoolCompareFixer) tryFixPattern(file string, line int, content string, pattern *regexp.Regexp, isEqual bool, boolFirst bool) *Fix {
-	matches := pattern.FindStringSubmatch(content)
-	if matches == nil {
-		return nil
+// boolComparisonOperand returns the side of the comparison that is not the
+// true/false literal, and the literal.
+func boolComparisonOperand(comparison *ast.BinaryExpr) (ast.Expr, string) {
+	if literal, ok := boolLiteral(comparison.Y); ok {
+		return comparison.X, literal
 	}
-
-	var varName, boolVal string
-	if boolFirst {
-		boolVal = matches[1]
-		varName = matches[2]
-	} else {
-		varName = matches[1]
-		boolVal = matches[2]
+	if literal, ok := boolLiteral(comparison.X); ok {
+		return comparison.Y, literal
 	}
+	return nil, ""
+}
 
-	oldText := matches[0]
-	var newText string
-
-	// Determine the replacement based on operator and bool value
-	if isEqual {
-		// == operator
-		if boolVal == "true" {
-			newText = varName // x == true -> x
-		} else {
-			newText = "!" + varName // x == false -> !x
-		}
-	} else {
-		// != operator
-		if boolVal == "true" {
-			newText = "!" + varName // x != true -> !x
-		} else {
-			newText = varName // x != false -> x
-		}
+func boolLiteral(expr ast.Expr) (string, bool) {
+	ident, ok := expr.(*ast.Ident)
+	if !ok || (ident.Name != "true" && ident.Name != "false") {
+		return "", false
 	}
+	return ident.Name, true
+}
 
-	return &Fix{
-		File:      file,
-		StartLine: line,
-		EndLine:   line,
-		OldText:   oldText,
-		NewText:   newText,
-		Message:   "Simplify boolean comparison",
-		RuleName:  "bool-compare",
+// negatedSource spells the negation of the operand. A negation is undone
+// rather than doubled; an operand that is not a unary expression is put in
+// parentheses, because `!` binds tighter than every binary operator.
+func negatedSource(ctx *core.FileContext, operand ast.Expr) (string, bool) {
+	if unary, ok := operand.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
+		return sourceOf(ctx, unary.X)
 	}
+	text, ok := sourceOf(ctx, operand)
+	if !ok {
+		return "", false
+	}
+	switch operand.(type) {
+	case *ast.Ident, *ast.SelectorExpr, *ast.CallExpr, *ast.IndexExpr, *ast.IndexListExpr,
+		*ast.ParenExpr, *ast.StarExpr, *ast.UnaryExpr, *ast.TypeAssertExpr:
+		return "!" + text, true
+	}
+	return "!(" + text + ")", true
 }
 
 func init() {

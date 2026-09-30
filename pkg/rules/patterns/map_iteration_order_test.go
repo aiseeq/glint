@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func mapOrderProject(t *testing.T, source string) *core.GoProjectContext {
@@ -337,6 +338,213 @@ func Only(matches map[string]int) (int, error) {
 		return match, nil
 	}
 	return 0, errors.New("empty")
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// Passing the collected keys to a call hands their order on as surely as
+// returning them does.
+func TestMapIterationOrderReportsCollectPassedToCall(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"fmt"
+	"strings"
+)
+
+func Print(m map[string]int) {
+	var keys []string
+	for k := range m {
+		keys = append(keys, k)
+	}
+	fmt.Println(strings.Join(keys, ","))
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "keys")
+}
+
+// Printing inside the loop writes the entries in walk order.
+func TestMapIterationOrderReportsPrintInsideLoop(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"fmt"
+	"io"
+)
+
+func Dump(w io.Writer, m map[string]int) {
+	for k, v := range m {
+		fmt.Fprintf(w, "%s=%d\n", k, v)
+	}
+}
+
+func Show(m map[string]int) {
+	for k := range m {
+		fmt.Println(k)
+	}
+}
+`)
+
+	require.Len(t, violations, 2)
+	assert.Equal(t, "map_iteration_output", violations[0].Context["pattern"])
+	assert.Equal(t, "map_iteration_output", violations[1].Context["pattern"])
+}
+
+// A builder filled in walk order and returned carries the order out.
+func TestMapIterationOrderReportsBuilderThatLeaves(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "strings"
+
+func Render(m map[string]int) string {
+	var sb strings.Builder
+	for k := range m {
+		sb.WriteString(k)
+	}
+	return sb.String()
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, "map_iteration_output", violations[0].Context["pattern"])
+}
+
+// A builder whose content never leaves the function keeps the order inside.
+func TestMapIterationOrderIgnoresBuilderThatStays(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "strings"
+
+func Width(m map[string]int) int {
+	var sb strings.Builder
+	for k := range m {
+		sb.WriteString(k)
+	}
+	return sb.Len()
+}
+
+func Quiet(m map[string]int) {
+	for range m {
+		println()
+	}
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// Concatenating string variables is text as much as concatenating literals.
+func TestMapIterationOrderReportsConcatenationOfKeys(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func Join(m map[string]int) string {
+	out := ""
+	for k := range m {
+		out += k
+	}
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "out")
+}
+
+func sortableKeys(t *testing.T, gomod, source string) []any {
+	t.Helper()
+	project := rulestest.Project(t, map[string]string{"go.mod": gomod, "order/order.go": source})
+	violations, err := NewMapIterationOrderRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	marks := make([]any, 0, len(violations))
+	for _, v := range violations {
+		marks = append(marks, v.Context["sortable_keys"])
+	}
+	return marks
+}
+
+const orderGoMod = "module example.com/order\n\ngo 1.24\n"
+
+// The fixer sorts the keys with slices.Sorted(maps.Keys(m)); the rule marks the
+// loops where that compiles and keeps the meaning.
+func TestMapIterationOrderMarksSortableKeys(t *testing.T) {
+	collect := func(keyType, body string) string {
+		return `package order
+
+type point struct{ X, Y int }
+
+type accountID int64
+
+func Keys(m map[` + keyType + `]int) []` + keyType + ` {
+	var out []` + keyType + `
+	for k, v := range m {
+		out = append(out, k)
+		_ = v
+` + body + `	}
+	return out
+}
+`
+	}
+
+	assert.Equal(t, []any{true}, sortableKeys(t, orderGoMod, collect("string", "")))
+	assert.Equal(t, []any{true}, sortableKeys(t, orderGoMod, collect("accountID", "")))
+	assert.Equal(t, []any{nil}, sortableKeys(t, orderGoMod, collect("point", "")), "a struct key is not cmp.Ordered")
+	assert.Equal(t, []any{nil}, sortableKeys(t, orderGoMod, collect("string", "\t\tdelete(m, k)\n")), "a loop that edits the map sees the edits")
+	assert.Equal(t, []any{nil}, sortableKeys(t, orderGoMod, collect("string", "\t\tv := 1\n\t\t_ = v\n")), "the value lookup would clash with the body's own v")
+	assert.Equal(t, []any{nil}, sortableKeys(t, "module example.com/order\n\ngo 1.22\n", collect("string", "")), "slices.Sorted needs Go 1.23")
+	assert.Equal(t, []any{nil}, sortableKeys(t, orderGoMod, `package order
+
+var slices = 1
+
+func Keys(m map[string]int) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+`), "slices must name the package")
+}
+
+// The column pins the loop for the fixer.
+func TestMapIterationOrderReportsColumn(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func Keys(m map[string]int) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+`)
+	require.Len(t, violations, 1)
+	assert.Equal(t, 2, violations[0].Column)
+}
+
+// A predicate over the collected values answers yes or no; the walk order
+// cannot come out of it.
+func TestMapIterationOrderIgnoresCollectPassedToPredicate(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func anyLong(names []string) bool {
+	for _, name := range names {
+		if len(name) > 10 {
+			return true
+		}
+	}
+	return false
+}
+
+func HasLong(m map[string]int) bool {
+	var names []string
+	for k := range m {
+		names = append(names, k)
+	}
+	return anyLong(names)
 }
 `)
 

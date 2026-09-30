@@ -1,6 +1,8 @@
 package fix
 
 import (
+	"strings"
+
 	"github.com/aiseeq/glint/pkg/core"
 )
 
@@ -47,20 +49,26 @@ func (f *MdListAfterLabelFixer) GenerateFix(ctx *core.FileContext, v *core.Viola
 		return nil
 	}
 
+	// The blank line is inserted at the start of the line after the label,
+	// so the edit does not touch the label line another fix may change. It
+	// ends the way the label line does, LF or CRLF.
 	idx := labelLine - 1
-	if idx < 0 || idx >= len(ctx.Lines) {
+	if idx < 0 || idx+1 >= len(ctx.Lines) {
 		return nil
 	}
-
-	oldLine := ctx.Lines[idx]
-	newText := oldLine + "\n"
+	blank := "\n"
+	if strings.HasSuffix(ctx.Lines[idx], "\r") {
+		blank = "\r\n"
+	}
 
 	return []*Fix{&Fix{
 		File:      ctx.Path,
-		StartLine: labelLine,
-		EndLine:   labelLine,
-		OldText:   oldLine,
-		NewText:   newText,
+		StartLine: labelLine + 1,
+		EndLine:   labelLine + 1,
+		StartCol:  1,
+		EndCol:    1,
+		OldText:   "",
+		NewText:   blank,
 		Message:   "Add blank line between label and list",
 		RuleName:  "md-list-after-label",
 	}}
