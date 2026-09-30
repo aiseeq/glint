@@ -310,3 +310,30 @@ func broken() int { return "not an int" }
 	})
 	require.Empty(t, violations)
 }
+
+// Each comparison carries its column, so a fixer rewrites that one and not
+// another comparison on the same line.
+func TestBoolCompareRule_ReportsColumnOfEachComparison(t *testing.T) {
+	code := `package main
+
+func example(a, b bool) bool {
+	return a == true && b == false
+}
+`
+	violations := runRuleOnFiles(t, NewBoolCompareRule(), map[string]string{"svc/service.go": code})
+	require.Len(t, violations, 2)
+	assert.Equal(t, 9, violations[0].Column)
+	assert.Equal(t, 22, violations[1].Column)
+}
+
+// A local true is not the predeclared constant.
+func TestBoolCompareRule_IgnoresShadowedLiteral(t *testing.T) {
+	code := `package main
+
+func example(a bool) bool {
+	true := a
+	return a == true
+}
+`
+	assert.Empty(t, runRuleOnFiles(t, NewBoolCompareRule(), map[string]string{"svc/service.go": code}))
+}

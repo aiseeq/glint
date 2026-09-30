@@ -1,15 +1,29 @@
 package patterns
 
 import (
+	"go/ast"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
-	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
 	rules.Register(NewDeprecatedIoutilRule())
+}
+
+// ioutilReplacements maps each io/ioutil identifier to the drop-in
+// replacement a fixer may substitute. ReadDir has none: os.ReadDir returns
+// []fs.DirEntry instead of []fs.FileInfo, so its callers change too.
+var ioutilReplacements = map[string]string{
+	"ReadAll":   "io.ReadAll",
+	"ReadFile":  "os.ReadFile",
+	"WriteFile": "os.WriteFile",
+	"TempDir":   "os.MkdirTemp",
+	"TempFile":  "os.CreateTemp",
+	"NopCloser": "io.NopCloser",
+	"Discard":   "io.Discard",
 }
 
 // DeprecatedIoutilRule detects usage of deprecated io/ioutil package
@@ -29,144 +43,71 @@ func NewDeprecatedIoutilRule() *DeprecatedIoutilRule {
 	}
 }
 
-// AnalyzeFile checks for io/ioutil usage
+// AnalyzeFile reports the io/ioutil imports of the file and every selector on
+// the name they are imported under. The syntax tree decides what is code:
+// text in strings and comments is not, and a package that merely ends in
+// "ioutil" is another package.
 func (r *DeprecatedIoutilRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() {
+	if !ctx.IsGoFile() || ctx.GoAST == nil {
 		return nil
 	}
 
 	var violations []*core.Violation
-	inMultiLineBacktick := false
-
-	for lineNum, line := range ctx.Lines {
-		wasInBacktick := inMultiLineBacktick
-		inMultiLineBacktick = r.updateBacktickState(line, inMultiLineBacktick)
-
-		if r.shouldSkipLine(line, wasInBacktick) {
+	names := make(map[string]bool)
+	for _, spec := range ctx.GoAST.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || importPath != "io/ioutil" {
 			continue
 		}
-
-		if v := r.checkLine(ctx, lineNum, line); v != nil {
-			violations = append(violations, v)
+		name := "ioutil"
+		if spec.Name != nil {
+			name = spec.Name.Name
 		}
+		if name != "_" && name != "." {
+			names[name] = true
+		}
+		line := ctx.LineFor(spec)
+		v := r.CreateViolation(ctx.RelPath, line, "io/ioutil is deprecated since Go 1.16")
+		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+		v.WithSuggestion("Use io.ReadAll, os.ReadFile, os.WriteFile instead")
+		violations = append(violations, v)
 	}
+	if len(names) == 0 {
+		return violations
+	}
+
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		selector, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		qualifier, ok := selector.X.(*ast.Ident)
+		if !ok || !names[qualifier.Name] {
+			return true
+		}
+		violations = append(violations, r.reportUse(ctx, selector))
+		return true
+	})
 
 	return violations
 }
 
-func (r *DeprecatedIoutilRule) updateBacktickState(line string, current bool) bool {
-	backtickCount := strings.Count(line, "`")
-	if backtickCount > 0 && backtickCount%2 == 1 {
-		return !current
-	}
-	return current
-}
+func (r *DeprecatedIoutilRule) reportUse(ctx *core.FileContext, selector *ast.SelectorExpr) *core.Violation {
+	pos := ctx.PositionFor(selector)
+	v := r.CreateViolation(ctx.RelPath, pos.Line, "ioutil functions are deprecated")
+	v.WithColumn(pos.Column)
+	v.WithCode(strings.TrimSpace(ctx.GetLine(pos.Line)))
+	v.WithContext("ioutil_function", selector.Sel.Name)
 
-func (r *DeprecatedIoutilRule) shouldSkipLine(line string, wasInBacktick bool) bool {
-	backtickCount := strings.Count(line, "`")
-
-	// Skip lines completely inside multi-line backtick strings
-	if wasInBacktick && backtickCount == 0 {
-		return true
-	}
-
-	// Skip if ioutil. appears in the backtick portion of this line
-	if r.isIoutilInBacktickPortion(line, wasInBacktick, backtickCount) {
-		return true
-	}
-
-	trimmed := strings.TrimSpace(line)
-	return strings.HasPrefix(trimmed, "//")
-}
-
-func (r *DeprecatedIoutilRule) checkLine(ctx *core.FileContext, lineNum int, line string) *core.Violation {
-	trimmed := strings.TrimSpace(line)
-
-	if r.isIoutilImport(line) {
-		v := r.CreateViolation(ctx.RelPath, lineNum+1, "io/ioutil is deprecated since Go 1.16")
-		v.WithCode(trimmed)
-		v.WithSuggestion("Use io.ReadAll, os.ReadFile, os.WriteFile instead")
-		return v
-	}
-
-	if strings.Contains(line, "ioutil.") {
-		if isInsideLiteral(line, "ioutil.") || isInInlineComment(line, "ioutil.") {
-			return nil
-		}
-
-		v := r.CreateViolation(ctx.RelPath, lineNum+1, "ioutil functions are deprecated")
-		v.WithCode(trimmed)
-		v.WithSuggestion(r.getSuggestion(line))
-		return v
-	}
-
-	return nil
-}
-
-// isIoutilInBacktickPortion checks if ioutil. is in the backtick-enclosed portion of a line
-func (r *DeprecatedIoutilRule) isIoutilInBacktickPortion(line string, wasInBacktick bool, backtickCount int) bool {
-	if !strings.Contains(line, "ioutil.") {
-		return false
-	}
-
-	ioutilIdx := strings.Index(line, "ioutil.")
-	backtickIdx := strings.Index(line, "`")
-
-	// If we were inside a backtick and this line closes it,
-	// check if ioutil. is before the closing backtick
-	if wasInBacktick && backtickCount > 0 && backtickIdx >= 0 {
-		if ioutilIdx < backtickIdx {
-			return true // ioutil. is inside the backtick string
-		}
-	}
-
-	return false
-}
-
-// isIoutilImport checks if this line imports io/ioutil
-func (r *DeprecatedIoutilRule) isIoutilImport(line string) bool {
-	// Must have the import path in double quotes, not inside backticks
-	if !strings.Contains(line, `"io/ioutil"`) {
-		return false
-	}
-
-	// Skip if inside backtick string (test data, etc.)
-	if helpers.IsInsideBackticks(line, `"io/ioutil"`) {
-		return false
-	}
-
-	return true
-}
-
-// isInsideLiteral checks if substr is inside any string literal
-func isInsideLiteral(line, substr string) bool {
-	return helpers.IsInsideString(line, substr) || helpers.IsInsideBackticks(line, substr)
-}
-
-// isInInlineComment checks if substr appears only after // in the line
-func isInInlineComment(line, substr string) bool {
-	return helpers.IsInComment(line, substr)
-}
-
-func (r *DeprecatedIoutilRule) getSuggestion(line string) string {
+	replacement, ok := ioutilReplacements[selector.Sel.Name]
 	switch {
-	case strings.Contains(line, "ioutil.ReadAll"):
-		return "Replace with io.ReadAll"
-	case strings.Contains(line, "ioutil.ReadFile"):
-		return "Replace with os.ReadFile"
-	case strings.Contains(line, "ioutil.WriteFile"):
-		return "Replace with os.WriteFile"
-	case strings.Contains(line, "ioutil.ReadDir"):
-		return "Replace with os.ReadDir"
-	case strings.Contains(line, "ioutil.TempDir"):
-		return "Replace with os.MkdirTemp"
-	case strings.Contains(line, "ioutil.TempFile"):
-		return "Replace with os.CreateTemp"
-	case strings.Contains(line, "ioutil.NopCloser"):
-		return "Replace with io.NopCloser"
-	case strings.Contains(line, "ioutil.Discard"):
-		return "Replace with io.Discard"
+	case ok:
+		v.WithSuggestion("Replace with " + replacement)
+		v.WithContext("replacement", replacement)
+	case selector.Sel.Name == "ReadDir":
+		v.WithSuggestion("Replace with os.ReadDir, which returns []fs.DirEntry instead of []fs.FileInfo")
 	default:
-		return "Replace with equivalent functions from io or os packages"
+		v.WithSuggestion("Replace with equivalent functions from io or os packages")
 	}
+	return v
 }

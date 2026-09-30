@@ -9,12 +9,15 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 )
 
+// stdlibViolation is a finding at the start of the declaration on line, as
+// the rule marks an exact slices.Contains.
 func stdlibViolation(line int, replacement string) *core.Violation {
 	return &core.Violation{
 		Rule:    "reimplemented-stdlib",
 		File:    "rule.go",
 		Line:    line,
-		Context: map[string]any{"replacement": replacement},
+		Column:  1,
+		Context: map[string]any{"replacement": replacement, "fix_collection": "names", "fix_target": "name"},
 	}
 }
 
@@ -39,51 +42,31 @@ func use() { fmt.Println(contains(nil, "")) }
 `)
 
 	fixes := NewReimplementedStdlibFixer().GenerateFix(ctx, stdlibViolation(7, "slices.Contains"))
-	require.Len(t, fixes, 2)
-	assert.Equal(t, `func contains(names []string, name string) bool {
-	return slices.Contains(names, name)
-}`, fixes[0].NewText)
-	assert.Equal(t, 7, fixes[0].StartLine)
-	assert.Equal(t, 14, fixes[0].EndLine)
-	assert.Contains(t, fixes[1].NewText, `"slices"`)
+	require.Len(t, fixes, 1)
+	assert.Equal(t, "return slices.Contains(names, name)", fixes[0].NewText)
+	assert.Equal(t, 8, fixes[0].StartLine)
+	assert.Equal(t, 13, fixes[0].EndLine)
+	assert.Equal(t, []string{"slices"}, fixes[0].Imports)
 }
 
-// A helper searching its own list keeps its name; only the message applies.
-func TestReimplementedStdlibFixerSkipsWrapperOverOwnList(t *testing.T) {
-	ctx := fixerContext(t, `package rules
-
-var supported = []string{"USDC", "USDT"}
-
-func isSupported(currency string) bool {
-	for _, candidate := range supported {
-		if candidate == currency {
-			return true
-		}
-	}
-	return false
-}
-`)
-
-	assert.Empty(t, NewReimplementedStdlibFixer().GenerateFix(ctx, stdlibViolation(5, "slices.Contains")))
-}
-
-// Shapes other than the linear search have no mechanical rewrite here.
+// Shapes other than the exact linear search have no mechanical rewrite: the
+// rule leaves the operands out, and the fixer does not guess them.
 func TestReimplementedStdlibFixerSkipsOtherReplacements(t *testing.T) {
 	fixer := NewReimplementedStdlibFixer()
 	assert.False(t, fixer.CanFix(stdlibViolation(1, "strconv.Itoa")))
-	assert.False(t, fixer.CanFix(&core.Violation{Rule: "reimplemented-stdlib", Line: 1}))
+	assert.False(t, fixer.CanFix(&core.Violation{Rule: "reimplemented-stdlib", Line: 1, Column: 1,
+		Context: map[string]any{"replacement": "slices.Contains"}}))
 	assert.True(t, fixer.CanFix(stdlibViolation(1, "slices.Contains")))
 }
 
-// A body that does anything else must be left to a human.
-func TestReimplementedStdlibFixerSkipsDifferentBody(t *testing.T) {
+// A comment in the body would be lost with the body.
+func TestReimplementedStdlibFixerKeepsCommentedBody(t *testing.T) {
 	ctx := fixerContext(t, `package rules
-
-import "strings"
 
 func contains(names []string, name string) bool {
 	for _, candidate := range names {
-		if strings.EqualFold(candidate, name) {
+		// exact match only
+		if candidate == name {
 			return true
 		}
 	}
@@ -91,7 +74,7 @@ func contains(names []string, name string) bool {
 }
 `)
 
-	assert.Empty(t, NewReimplementedStdlibFixer().GenerateFix(ctx, stdlibViolation(5, "slices.Contains")))
+	assert.Empty(t, NewReimplementedStdlibFixer().GenerateFix(ctx, stdlibViolation(3, "slices.Contains")))
 }
 
 func TestReimplementedStdlibFixerMetadata(t *testing.T) {

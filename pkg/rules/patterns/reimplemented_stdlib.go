@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -50,7 +51,7 @@ func NewReimplementedStdlibRule() *ReimplementedStdlibRule {
 // AnalyzeFile checks one file without type information: the fallback the
 // project analysis uses for files no type-checked package covers.
 func (r *ReimplementedStdlibRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	return r.analyze(ctx, nil)
+	return r.analyze(ctx, nil, nil)
 }
 
 // RequiresSSA reports that typed syntax is enough for this rule.
@@ -59,12 +60,15 @@ func (r *ReimplementedStdlibRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; the collections and result types the
 // shapes depend on are resolved wherever the project declares them.
 func (r *ReimplementedStdlibRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	versions := helpers.NewGoVersions(ctx)
+	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyze(fileCtx, info, versions)
+	})
 }
 
 // analyze checks every function declared in the file. info is nil for a file
-// without type information.
-func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+// without type information; versions is nil outside a project analysis.
+func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Info, versions *helpers.GoVersions) []*core.Violation {
 	if !ctx.IsGoFile() || !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
@@ -91,8 +95,14 @@ func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Inf
 		} else {
 			v.WithSuggestion(fmt.Sprintf("Delete %s and call %s at its call sites", fn.Name.Name, replacement))
 		}
+		v.WithColumn(ctx.PositionFor(fn).Column)
 		v.WithContext("pattern", "reimplemented_stdlib")
 		v.WithContext("replacement", replacement)
+		if collection, target, ok := exactContainsSearch(ctx, fn, info, versions); ok && replacement == "slices.Contains" {
+			// The fixer may replace the body with slices.Contains(collection, target).
+			v.WithContext("fix_collection", collection)
+			v.WithContext("fix_target", target)
+		}
 		violations = append(violations, v)
 	}
 

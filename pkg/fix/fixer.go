@@ -26,29 +26,44 @@ type Fixer interface {
 	GenerateFix(ctx *core.FileContext, v *core.Violation) []*Fix
 }
 
-// Fix represents a single code fix
+// Fix represents a single code fix: the text between (StartLine, StartCol)
+// and (EndLine, EndCol) is replaced with NewText. A column of 0 stands for the
+// start of the start line and the end of the end line, so StartCol = EndCol = 0
+// replaces whole lines. The engine replaces the span only when it still holds
+// exactly OldText.
 type Fix struct {
 	File      string // File path
 	StartLine int    // Start line (1-based)
 	EndLine   int    // End line (1-based, same as StartLine for single-line)
-	StartCol  int    // Start column (1-based, 0 = entire line)
-	EndCol    int    // End column (1-based, 0 = entire line)
+	StartCol  int    // Start column (1-based byte offset, 0 = start of the line)
+	EndCol    int    // End column (1-based, exclusive, 0 = end of the line)
 	OldText   string // Text to replace
 	NewText   string // Replacement text
 	Message   string // Description of the fix
 	RuleName  string // Rule that triggered this fix
 	Violation *core.Violation
+	// Imports lists the import paths NewText refers to. The engine adds the
+	// missing ones once per file, whichever fixes asked for them.
+	Imports []string
+	// DropImports lists the import paths OldText referred to. The engine
+	// removes such an import once no code of the fixed file refers to it.
+	DropImports []string
 }
 
 // fixedFilePermissions is the mode used when a fixed file has to be created.
 const fixedFilePermissions = 0o644
 
-// Result represents the outcome of applying fixes to one file.
+// Result represents the outcome of applying fixes to one file. When Error is
+// set, the file was left as it was and FixesApplied is 0.
 type Result struct {
 	File         string
 	FixesApplied int
 	Fixes        []*Fix
-	Error        error
+	// Deferred holds the fixes that overlap a fix applied in this run: their
+	// text changed under them, so they were not applied. Analyzing the fixed
+	// file again finds them anew.
+	Deferred []*Fix
+	Error    error
 }
 
 // Registry holds all registered fixers
@@ -164,19 +179,25 @@ func (e *Engine) GenerateFixes(violations []*core.Violation, contexts map[string
 	return dedupeFixes(fixes)
 }
 
-// dedupeFixes drops textually identical edits. Several violations in one file
-// legitimately generate the same import edit; applying it twice used to leave
-// the file uncompilable.
+// dedupeFixes drops textually identical edits. Several violations of one
+// construct legitimately generate the same edit (a loop that both collects and
+// picks from a map), and applying it twice would duplicate the text.
 func dedupeFixes(fixes []*Fix) []*Fix {
 	type editKey struct {
-		file               string
-		startLine, endLine int
-		oldText, newText   string
+		file                  string
+		startLine, endLine    int
+		startCol, endCol      int
+		oldText, newText      string
+		imports, dropsImports string
 	}
 	seen := make(map[editKey]bool, len(fixes))
 	deduped := fixes[:0]
 	for _, fix := range fixes {
-		key := editKey{fix.File, fix.StartLine, fix.EndLine, fix.OldText, fix.NewText}
+		key := editKey{
+			fix.File, fix.StartLine, fix.EndLine, fix.StartCol, fix.EndCol,
+			fix.OldText, fix.NewText,
+			strings.Join(fix.Imports, ","), strings.Join(fix.DropImports, ","),
+		}
 		if seen[key] {
 			continue
 		}
@@ -225,96 +246,25 @@ func (e *Engine) applyToFile(file string, fixes []*Fix) Result {
 		return result
 	}
 
-	lines := strings.Split(string(content), "\n")
-
-	// Apply from the bottom up, so that earlier fixes keep their line numbers.
-	sortedFixes := make([]*Fix, len(fixes))
-	copy(sortedFixes, fixes)
-	sort.SliceStable(sortedFixes, func(i, j int) bool {
-		return sortedFixes[i].StartLine > sortedFixes[j].StartLine
-	})
-
-	// Apply each fix. A fix that does not match the file anymore is collected
-	// and reported: silently dropping it made "Applied N fixes" unverifiable.
-	var unapplied []*Fix
-	for _, fix := range sortedFixes {
-		if e.applyFix(fix, &lines) {
-			result.FixesApplied++
-		} else {
-			unapplied = append(unapplied, fix)
-		}
+	fixed, applied, deferred, err := applyEdits(file, content, fixes)
+	if err != nil {
+		result.Error = err
+		return result
 	}
-	if len(unapplied) > 0 {
-		names := make([]string, 0, len(unapplied))
-		for _, fix := range unapplied {
-			names = append(names, fmt.Sprintf("%s (line %d)", fix.RuleName, fix.StartLine))
-		}
-		result.Error = fmt.Errorf("%d fix(es) no longer match the file and were not applied: %s",
-			len(unapplied), strings.Join(names, ", "))
-	}
+	result.FixesApplied = len(applied)
+	result.Deferred = deferred
 
-	if e.dryRun {
+	if e.dryRun || len(applied) == 0 {
 		return result
 	}
 
-	// Write back to file
-	newContent := strings.Join(lines, "\n")
-	if err := os.WriteFile(file, []byte(newContent), fixedFilePermissions); err != nil {
+	if err := os.WriteFile(file, fixed, fixedFilePermissions); err != nil {
+		result.FixesApplied = 0
 		result.Error = fmt.Errorf("write file: %w", err)
 		return result
 	}
 
 	return result
-}
-
-// applyFix applies one fix to the line slice and reports whether it matched.
-func (e *Engine) applyFix(fix *Fix, lines *[]string) bool {
-	if fix.StartLine < 1 || fix.StartLine > len(*lines) {
-		return false
-	}
-
-	// Multi-line replacement: only an exact match may be replaced. Matching
-	// just the first line allowed overwriting a range another fix had already
-	// changed.
-	if fix.EndLine > fix.StartLine {
-		if fix.EndLine > len(*lines) {
-			return false
-		}
-		startIdx := fix.StartLine - 1
-		endIdx := fix.EndLine - 1
-		if strings.Join((*lines)[startIdx:endIdx+1], "\n") != fix.OldText {
-			return false
-		}
-		newSlice := append([]string{}, (*lines)[:startIdx]...)
-		newSlice = append(newSlice, strings.Split(fix.NewText, "\n")...)
-		newSlice = append(newSlice, (*lines)[endIdx+1:]...)
-		*lines = newSlice
-		return true
-	}
-
-	lineIdx := fix.StartLine - 1
-	line := (*lines)[lineIdx]
-
-	if fix.StartCol > 0 && fix.EndCol > 0 {
-		// Column-specific replacement, verified against OldText when present
-		startIdx := fix.StartCol - 1
-		endIdx := fix.EndCol - 1
-		if startIdx >= len(line) || endIdx > len(line) {
-			return false
-		}
-		if fix.OldText != "" && line[startIdx:endIdx] != fix.OldText {
-			return false
-		}
-		(*lines)[lineIdx] = line[:startIdx] + fix.NewText + line[endIdx:]
-		return true
-	}
-
-	// Full text replacement within line
-	if !strings.Contains(line, fix.OldText) {
-		return false
-	}
-	(*lines)[lineIdx] = strings.Replace(line, fix.OldText, fix.NewText, 1)
-	return true
 }
 
 // Preview formats fixes for display
@@ -345,6 +295,12 @@ func (e *Engine) Preview(fixes []*Fix) string {
 			fmt.Fprintf(&sb, "  %s:%d [%s]\n", relPath, fix.StartLine, fix.RuleName)
 			fmt.Fprintf(&sb, "    - %s\n", fix.OldText)
 			fmt.Fprintf(&sb, "    + %s\n", fix.NewText)
+			for _, path := range fix.Imports {
+				fmt.Fprintf(&sb, "    + import %q\n", path)
+			}
+			for _, path := range fix.DropImports {
+				fmt.Fprintf(&sb, "    - import %q (once unused)\n", path)
+			}
 			sb.WriteString("\n")
 		}
 	}

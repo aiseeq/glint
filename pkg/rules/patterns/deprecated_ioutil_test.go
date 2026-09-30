@@ -4,13 +4,18 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
-func TestDeprecatedIoutilRule(t *testing.T) {
-	rule := NewDeprecatedIoutilRule()
+func ioutilFindings(t *testing.T, source string) []*core.Violation {
+	t.Helper()
+	return NewDeprecatedIoutilRule().AnalyzeFile(rulestest.GoFile(t, "src/file.go", source))
+}
 
+func TestDeprecatedIoutilRule(t *testing.T) {
 	tests := []struct {
 		name          string
 		code          string
@@ -18,52 +23,98 @@ func TestDeprecatedIoutilRule(t *testing.T) {
 	}{
 		{
 			name:          "Import io/ioutil",
-			code:          `import "io/ioutil"`,
+			code:          "package main\n\nimport _ \"io/ioutil\"\n",
 			expectedCount: 1,
 		},
 		{
 			name: "ioutil.ReadFile usage",
 			code: `package main
+
 import "io/ioutil"
+
 func main() {
 	data, _ := ioutil.ReadFile("test.txt")
 	_ = data
-}`,
+}
+`,
 			expectedCount: 2, // import + function call
-		},
-		{
-			name: "ioutil.ReadAll usage",
-			code: `resp, _ := http.Get(url)
-data, _ := ioutil.ReadAll(resp.Body)`,
-			expectedCount: 1,
-		},
-		{
-			name:          "ioutil.WriteFile usage",
-			code:          `ioutil.WriteFile("test.txt", data, 0644)`,
-			expectedCount: 1,
 		},
 		{
 			name: "No ioutil usage - OK",
 			code: `package main
+
 import "os"
+
 func main() {
 	data, _ := os.ReadFile("test.txt")
 	_ = data
-}`,
+}
+`,
 			expectedCount: 0,
 		},
 		{
-			name:          "ioutil in string literal - OK",
-			code:          `fmt.Println("Use os.ReadFile instead of ioutil.ReadFile")`,
+			name: "ioutil in string literal - OK",
+			code: `package main
+
+import "fmt"
+
+func main() { fmt.Println("Use os.ReadFile instead of ioutil.ReadFile") }
+`,
+			expectedCount: 0,
+		},
+		{
+			name: "call after a string holding //",
+			code: `package main
+
+import (
+	"io"
+	"io/ioutil"
+)
+
+func read(r io.Reader) {
+	u := "http://example.com"; data, _ := ioutil.ReadAll(r)
+	_, _ = u, data
+}
+`,
+			expectedCount: 2,
+		},
+		{
+			name: "two calls on one line",
+			code: `package main
+
+import "io/ioutil"
+
+func copyFile(src, dst string) {
+	data, _ := ioutil.ReadFile(src); _ = ioutil.WriteFile(dst, data, 0o600)
+}
+`,
+			expectedCount: 3,
+		},
+		{
+			name: "aliased import",
+			code: `package main
+
+import legacy "io/ioutil"
+
+func read(p string) { _, _ = legacy.ReadFile(p) }
+`,
+			expectedCount: 2,
+		},
+		{
+			name: "other package whose name ends in ioutil",
+			code: `package main
+
+import "example.com/projecta/fsioutil"
+
+func read() { _ = fsioutil.ReadFile("x") }
+`,
 			expectedCount: 0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := core.NewFileContext("/src/file.go", "/src", []byte(tt.code), core.DefaultConfig())
-			violations := rule.AnalyzeFile(ctx)
-			assert.Len(t, violations, tt.expectedCount, "Code: %s", tt.code)
+			assert.Len(t, ioutilFindings(t, tt.code), tt.expectedCount, "Code: %s", tt.code)
 		})
 	}
 }
@@ -78,44 +129,35 @@ func TestDeprecatedIoutilNonGoFile(t *testing.T) {
 }
 
 func TestDeprecatedIoutilSuggestions(t *testing.T) {
-	rule := NewDeprecatedIoutilRule()
-
 	tests := []struct {
-		code       string
-		suggestion string
+		call        string
+		suggestion  string
+		replacement string
 	}{
-		{
-			code:       "data, _ := ioutil.ReadAll(r)",
-			suggestion: "Replace with io.ReadAll",
-		},
-		{
-			code:       "data, _ := ioutil.ReadFile(path)",
-			suggestion: "Replace with os.ReadFile",
-		},
-		{
-			code:       "ioutil.WriteFile(path, data, 0644)",
-			suggestion: "Replace with os.WriteFile",
-		},
-		{
-			code:       "files, _ := ioutil.ReadDir(path)",
-			suggestion: "Replace with os.ReadDir",
-		},
-		{
-			code:       "dir, _ := ioutil.TempDir(\"\", \"test\")",
-			suggestion: "Replace with os.MkdirTemp",
-		},
-		{
-			code:       "f, _ := ioutil.TempFile(\"\", \"test\")",
-			suggestion: "Replace with os.CreateTemp",
-		},
+		{"ioutil.ReadAll(nil)", "Replace with io.ReadAll", "io.ReadAll"},
+		{"ioutil.ReadFile(\"p\")", "Replace with os.ReadFile", "os.ReadFile"},
+		{"ioutil.WriteFile(\"p\", nil, 0o600)", "Replace with os.WriteFile", "os.WriteFile"},
+		{"ioutil.TempDir(\"\", \"test\")", "Replace with os.MkdirTemp", "os.MkdirTemp"},
+		{"ioutil.TempFile(\"\", \"test\")", "Replace with os.CreateTemp", "os.CreateTemp"},
+		{"ioutil.NopCloser(nil)", "Replace with io.NopCloser", "io.NopCloser"},
+		{"ioutil.Discard", "Replace with io.Discard", "io.Discard"},
+		// os.ReadDir returns []fs.DirEntry, not []fs.FileInfo: the call sites
+		// change, so there is no mechanical replacement.
+		{"ioutil.ReadDir(\"p\")", "Replace with os.ReadDir, which returns []fs.DirEntry instead of []fs.FileInfo", ""},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.code, func(t *testing.T) {
-			ctx := core.NewFileContext("/src/file.go", "/src", []byte(tt.code), core.DefaultConfig())
-			violations := rule.AnalyzeFile(ctx)
-			if assert.Len(t, violations, 1) {
-				assert.Equal(t, tt.suggestion, violations[0].Suggestion)
+		t.Run(tt.call, func(t *testing.T) {
+			violations := ioutilFindings(t, "package main\n\nimport \"io/ioutil\"\n\nvar _ = "+tt.call+"\n")
+			require.Len(t, violations, 2)
+			use := violations[1]
+			assert.Equal(t, tt.suggestion, use.Suggestion)
+			assert.Equal(t, 5, use.Line)
+			assert.Equal(t, 9, use.Column)
+			if tt.replacement == "" {
+				assert.NotContains(t, use.Context, "replacement")
+			} else {
+				assert.Equal(t, tt.replacement, use.Context["replacement"])
 			}
 		})
 	}

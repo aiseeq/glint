@@ -187,6 +187,7 @@ func init() {
 	fixCmd.Flags().BoolVar(&flagForce, "force", false, "Apply fixes even with uncommitted changes")
 	fixCmd.Flags().StringVarP(&flagFixRule, "rule", "r", "", "Fix only specified rule")
 	fixCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed output")
+	fixCmd.Flags().BoolVar(&flagTolerant, "tolerate-broken-packages", false, "Fix the packages that type-check and report the ones that do not, instead of failing")
 
 	// Root commands
 	rootCmd.AddCommand(checkCmd)
@@ -1033,16 +1034,89 @@ func fixProjectRoot(projectRoot string) error {
 		fmt.Printf("Running %d fixable rules...\n", len(fixableRules))
 	}
 
-	// Collect findings through the same pipeline as `check`, so that project
-	// rules run, and configuration exceptions and inline suppression comments
-	// are honored.
+	if dryRun {
+		fixes, err := collectFixes(projectRoot, cfg, fixableRules, engine)
+		if err != nil || len(fixes) == 0 {
+			return err
+		}
+		fmt.Print(engine.Preview(fixes))
+		return nil
+	}
+	return applyFixesUntilStable(projectRoot, cfg, fixableRules, engine)
+}
+
+// maxFixPasses bounds the analyze-and-fix loop. A fix that overlaps another
+// one is deferred to the next pass; a chain longer than this means the fixers
+// keep producing work and the run must say so rather than stop silently.
+const maxFixPasses = 5
+
+// applyFixesUntilStable applies fixes, analyzes the fixed files again and
+// repeats while a pass still applies something: overlapping fixes are deferred
+// by the engine and only the fresh analysis of the changed text finds them anew.
+func applyFixesUntilStable(projectRoot string, cfg *core.Config, fixableRules []rules.Rule, engine *fix.Engine) error {
+	totalFixed := 0
+	fixedFiles := make(map[string]struct{})
+	for pass := 1; pass <= maxFixPasses; pass++ {
+		fixes, err := collectFixes(projectRoot, cfg, fixableRules, engine)
+		if err != nil {
+			return err
+		}
+		if len(fixes) == 0 {
+			if pass > 1 {
+				fmt.Printf("\nApplied %d fixes in %d files.\n", totalFixed, len(fixedFiles))
+			}
+			return nil
+		}
+		if pass == 1 {
+			fmt.Print(engine.Preview(fixes))
+		}
+
+		applied, deferred := 0, 0
+		var failures []error
+		results := engine.ApplyFixes(fixes)
+		for _, result := range results {
+			deferred += len(result.Deferred)
+			if result.Error != nil {
+				failures = append(failures, fmt.Errorf("fix %s: %w", result.File, result.Error))
+				continue
+			}
+			if result.FixesApplied > 0 {
+				applied += result.FixesApplied
+				fixedFiles[result.File] = struct{}{}
+				if flagVerbose {
+					fmt.Printf("Fixed %d issues in %s\n", result.FixesApplied, result.File)
+				}
+			}
+		}
+		totalFixed += applied
+		if len(failures) > 0 {
+			fmt.Printf("\nApplied %d fixes in %d files.\n", totalFixed, len(fixedFiles))
+			return fmt.Errorf("%d of %d files could not be fixed: %w", len(failures), len(results), errors.Join(failures...))
+		}
+		if deferred == 0 {
+			fmt.Printf("\nApplied %d fixes in %d files.\n", totalFixed, len(fixedFiles))
+			return nil
+		}
+		if applied == 0 {
+			return fmt.Errorf("%d overlapping fixes could not be applied", deferred)
+		}
+		if flagVerbose {
+			fmt.Printf("%d overlapping fixes deferred to pass %d\n", deferred, pass+1)
+		}
+	}
+	fmt.Printf("\nApplied %d fixes in %d files.\n", totalFixed, len(fixedFiles))
+	return fmt.Errorf("fixes still overlapping after %d passes; run glint fix again", maxFixPasses)
+}
+
+// collectFixes analyzes the root through the same pipeline as `check` — project
+// rules run, configuration exceptions and inline suppressions are honored — and
+// returns the fixes for what it finds. Files are read afresh on every call.
+func collectFixes(projectRoot string, cfg *core.Config, fixableRules []rules.Rule, engine *fix.Engine) ([]*fix.Fix, error) {
 	contexts, _, project, err := prepareAnalysis(projectRoot, cfg, fixableRules)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	// Build context map for fixers (by both absolute and relative paths)
-	contextMap := make(map[string]*core.FileContext)
+	contextMap := make(map[string]*core.FileContext, 2*len(contexts))
 	for _, ctx := range contexts {
 		contextMap[ctx.Path] = ctx
 		contextMap[ctx.RelPath] = ctx
@@ -1051,50 +1125,15 @@ func fixProjectRoot(projectRoot string) error {
 	rules.ResetState(fixableRules)
 	violations, err := analyzeProject(contexts, fixableRules, cfg, project)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
 	if len(violations) == 0 {
 		fmt.Println("No issues found that can be fixed.")
-		return nil
+		return nil, nil
 	}
-
-	// Generate fixes
 	fixes := engine.GenerateFixes(violations, contextMap)
-
 	if len(fixes) == 0 {
 		fmt.Println("No automatic fixes available for the found issues.")
-		return nil
 	}
-
-	// Show preview
-	fmt.Print(engine.Preview(fixes))
-
-	if dryRun {
-		return nil
-	}
-
-	// Apply fixes
-	results := engine.ApplyFixes(fixes)
-
-	// Report results
-	totalFixed, fixedFiles := 0, 0
-	var failures []error
-	for _, result := range results {
-		if result.Error != nil {
-			failures = append(failures, fmt.Errorf("fix %s: %w", result.File, result.Error))
-			continue
-		}
-		totalFixed += result.FixesApplied
-		fixedFiles++
-		if flagVerbose {
-			fmt.Printf("Fixed %d issues in %s\n", result.FixesApplied, result.File)
-		}
-	}
-
-	fmt.Printf("\nApplied %d fixes in %d files.\n", totalFixed, fixedFiles)
-	if len(failures) > 0 {
-		return fmt.Errorf("%d of %d files could not be fixed: %w", len(failures), len(results), errors.Join(failures...))
-	}
-	return nil
+	return fixes, nil
 }

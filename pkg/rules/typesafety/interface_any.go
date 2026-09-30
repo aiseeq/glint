@@ -1,7 +1,8 @@
 package typesafety
 
 import (
-	"regexp"
+	"go/ast"
+	"go/types"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -13,15 +14,12 @@ func init() {
 	rules.Register(NewInterfaceAnyRule())
 }
 
-// InterfaceAnyRule detects interface{} usage that should be replaced with 'any'
+// InterfaceAnyRule detects interface{} usage that should be replaced with 'any'.
+// It reads the syntax tree, so interface{} inside strings and comments is
+// data, and it stays silent where 'any' would not compile: in a module older
+// than Go 1.18 and where the package declares its own 'any'.
 type InterfaceAnyRule struct {
 	*rules.BaseRule
-	patterns []interfaceAnyPattern
-}
-
-type interfaceAnyPattern struct {
-	name  string
-	regex *regexp.Regexp
 }
 
 // NewInterfaceAnyRule creates the rule
@@ -30,107 +28,130 @@ func NewInterfaceAnyRule() *InterfaceAnyRule {
 		BaseRule: rules.NewBaseRule(
 			"interface-any",
 			"typesafety",
-			"Detects interface{} that should be replaced with 'any' (Go 1.18+)",
+			"Detects interface{} that should be replaced with 'any' (Go 1.18+ modules only)",
 			core.SeverityMedium,
 		),
-		// Most specific first: the reported message names the replacement,
-		// so map[string]interface{} must not be reported as a bare interface{}
-		patterns: []interfaceAnyPattern{
-			{"map[string]interface{}", regexp.MustCompile(`map\[string\]interface\{\}`)},
-			{"[]interface{}", regexp.MustCompile(`\[\]interface\{\}`)},
-			{"interface{}", regexp.MustCompile(`interface\{\}`)},
-		},
 	}
 }
 
-// AnalyzeFile checks for interface{} usage
-func (r *InterfaceAnyRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() {
+// AnalyzeFile reports nothing: whether 'any' compiles depends on the Go version
+// of the module, which only the project analysis knows.
+func (r *InterfaceAnyRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
+	return nil
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *InterfaceAnyRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every Go file of the project against the Go version
+// of the module it belongs to.
+func (r *InterfaceAnyRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	versions := helpers.NewGoVersions(ctx)
+	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyze(fileCtx, info, versions)
+	})
+}
+
+func (r *InterfaceAnyRule) analyze(ctx *core.FileContext, info *types.Info, versions *helpers.GoVersions) []*core.Violation {
+	if !ctx.IsGoFile() || ctx.GoAST == nil {
+		return nil
+	}
+	if !versions.AtLeast(ctx, info, "go1.18") || anyIsShadowed(ctx.GoAST, info) {
 		return nil
 	}
 
 	var violations []*core.Violation
-
-	for lineNum, line := range ctx.Lines {
-		if v := r.checkLine(ctx, lineNum, line); v != nil {
-			violations = append(violations, v)
+	var stack []ast.Node
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
 		}
-	}
+		var parent ast.Node
+		if len(stack) > 0 {
+			parent = stack[len(stack)-1]
+		}
+		stack = append(stack, n)
+
+		iface, ok := n.(*ast.InterfaceType)
+		if !ok || iface.Incomplete || (iface.Methods != nil && len(iface.Methods.List) > 0) {
+			return true
+		}
+		pattern := interfaceAnyPattern(iface, parent)
+		pos := ctx.PositionFor(iface)
+		if r.isAllowedException(ctx, pos.Line, pattern) {
+			return true
+		}
+		v := r.CreateViolation(ctx.RelPath, pos.Line, r.getMessage(pattern))
+		v.WithColumn(pos.Column)
+		v.WithCode(strings.TrimSpace(ctx.GetLine(pos.Line)))
+		v.WithSuggestion(r.getSuggestion(pattern))
+		v.WithContext("pattern", pattern)
+		violations = append(violations, v)
+		return true
+	})
 
 	return violations
 }
 
-func (r *InterfaceAnyRule) checkLine(ctx *core.FileContext, lineNum int, line string) *core.Violation {
-	trimmed := strings.TrimSpace(line)
-
-	// Skip comments
-	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
-		return nil
-	}
-
-	// Skip regex patterns
-	if strings.Contains(line, "regexp.") && strings.Contains(line, `interface\{\}`) {
-		return nil
-	}
-
-	// Check each pattern
-	for _, pattern := range r.patterns {
-		if !pattern.regex.MatchString(line) {
-			continue
+// interfaceAnyPattern names the construct the empty interface is part of, so
+// the message can name the replacement the reader sees in the code.
+func interfaceAnyPattern(iface *ast.InterfaceType, parent ast.Node) string {
+	switch p := parent.(type) {
+	case *ast.MapType:
+		if key, ok := p.Key.(*ast.Ident); ok && key.Name == "string" && p.Value == iface {
+			return "map[string]interface{}"
 		}
-
-		if r.shouldSkipMatch(line, pattern.name, ctx) {
-			continue
+	case *ast.ArrayType:
+		if p.Len == nil && p.Elt == iface {
+			return "[]interface{}"
 		}
-
-		v := r.CreateViolation(ctx.RelPath, lineNum+1, r.getMessage(pattern.name))
-		v.WithCode(trimmed)
-		v.WithSuggestion(r.getSuggestion(pattern.name))
-		return v // One violation per line
 	}
-
-	return nil
+	return "interface{}"
 }
 
-func (r *InterfaceAnyRule) shouldSkipMatch(line, patternName string, ctx *core.FileContext) bool {
-	matchStr := getMatchString(patternName)
-	if helpers.IsInStringOrComment(line, matchStr) {
-		return true
+// anyIsShadowed reports whether 'any' in this file may mean something other
+// than the predeclared alias. With type information the package and file
+// scopes answer; without it only the file's own declarations are known.
+func anyIsShadowed(file *ast.File, info *types.Info) bool {
+	if info != nil {
+		fileScope := info.Scopes[file]
+		if fileScope == nil {
+			return true
+		}
+		if fileScope.Lookup("any") != nil || (fileScope.Parent() != nil && fileScope.Parent().Lookup("any") != nil) {
+			return true
+		}
+		declared := false
+		ast.Inspect(file, func(n ast.Node) bool {
+			if ident, ok := n.(*ast.Ident); ok && ident.Name == "any" && info.Defs[ident] != nil {
+				declared = true
+			}
+			return !declared
+		})
+		return declared
 	}
-
-	return r.isAllowedException(line, ctx)
+	return helpers.DeclaresName(file, "any")
 }
 
-func (r *InterfaceAnyRule) isAllowedException(line string, ctx *core.FileContext) bool {
+func (r *InterfaceAnyRule) isAllowedException(ctx *core.FileContext, line int, pattern string) bool {
 	// Test files: allow map[string]interface{} for flexible test data
-	if ctx.IsTestFile() && strings.Contains(line, "map[string]interface{}") {
+	if ctx.IsTestFile() && pattern == "map[string]interface{}" {
 		return true
 	}
 
+	text := ctx.GetLine(line)
 	// JWT library callback signature
-	if strings.Contains(line, "func(token *jwt.Token) (interface{}, error)") {
+	if strings.Contains(text, "func(token *jwt.Token) (interface{}, error)") {
 		return true
 	}
 
 	// JSON unmarshaling may require interface{}
-	return strings.Contains(line, "json.Unmarshal") && strings.Contains(line, "interface{}")
-}
-
-func getMatchString(patternName string) string {
-	switch patternName {
-	case "map[string]interface{}":
-		return "map[string]interface{}"
-	case "[]interface{}":
-		return "[]interface{}"
-	default:
-		return "interface{}"
-	}
+	return strings.Contains(text, "json.Unmarshal")
 }
 
 func (r *InterfaceAnyRule) getMessage(patternName string) string {
 	switch patternName {
-	case "interface{}":
-		return "Use 'any' instead of 'interface{}' (Go 1.18+)"
 	case "map[string]interface{}":
 		return "Use 'map[string]any' instead of 'map[string]interface{}' (Go 1.18+)"
 	case "[]interface{}":
@@ -142,8 +163,6 @@ func (r *InterfaceAnyRule) getMessage(patternName string) string {
 
 func (r *InterfaceAnyRule) getSuggestion(patternName string) string {
 	switch patternName {
-	case "interface{}":
-		return "Replace with 'any' type alias"
 	case "map[string]interface{}":
 		return "Replace with 'map[string]any' or define a typed struct"
 	case "[]interface{}":

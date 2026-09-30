@@ -1,16 +1,15 @@
 package patterns
 
 import (
-	"errors"
 	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
-	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -60,53 +59,28 @@ func (r *MapIterationOrderRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject inspects every function of the loaded packages.
 func (r *MapIterationOrderRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	if ctx == nil {
-		return nil, errors.New("map iteration order: nil Go project context")
-	}
-	if ctx.FileSet == nil {
-		return nil, errors.New("map iteration order: project has no file set for source positions")
-	}
-
-	var violations []*core.Violation
-	for _, pkg := range ctx.Packages {
-		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
-			return nil, errors.New("map iteration order: package has no typed syntax")
-		}
-		// pkg.Files holds exactly the walker-selected files of this package,
-		// each with the syntax tree the type checker used.
-		for _, fileCtx := range pkg.Files {
-			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
-				continue
-			}
-			violations = append(violations, r.analyzeFile(fileCtx, fileCtx.GoAST, pkg.Package.TypesInfo)...)
-		}
-	}
-
-	sort.SliceStable(violations, func(i, j int) bool {
-		if violations[i].File != violations[j].File {
-			return violations[i].File < violations[j].File
-		}
-		return violations[i].Line < violations[j].Line
+	versions := helpers.NewGoVersions(ctx)
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyzeFile(fileCtx, info, versions)
 	})
-	return violations, nil
 }
 
-func (r *MapIterationOrderRule) analyzeFile(fileCtx *core.FileContext, file *ast.File, info *types.Info) []*core.Violation {
+func (r *MapIterationOrderRule) analyzeFile(fileCtx *core.FileContext, info *types.Info, versions *helpers.GoVersions) []*core.Violation {
 	var violations []*core.Violation
 
-	ast.Inspect(file, func(n ast.Node) bool {
+	ast.Inspect(fileCtx.GoAST, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			return true
 		}
-		violations = append(violations, r.analyzeBody(fileCtx, fn, info)...)
+		violations = append(violations, r.analyzeBody(fileCtx, fn, info, versions)...)
 		return true
 	})
 
 	return violations
 }
 
-func (r *MapIterationOrderRule) analyzeBody(fileCtx *core.FileContext, fn *ast.FuncDecl, info *types.Info) []*core.Violation {
+func (r *MapIterationOrderRule) analyzeBody(fileCtx *core.FileContext, fn *ast.FuncDecl, info *types.Info, versions *helpers.GoVersions) []*core.Violation {
 	var violations []*core.Violation
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -114,15 +88,33 @@ func (r *MapIterationOrderRule) analyzeBody(fileCtx *core.FileContext, fn *ast.F
 		if !ok || !isMapRange(rangeStmt, info) {
 			return true
 		}
-		for _, name := range orderedTargets(rangeStmt) {
-			if !escapesFunction(fn, name) || isSortedBefore(fn, name, rangeStmt.End()) {
+		var found []*core.Violation
+		for _, name := range orderedTargets(rangeStmt, info) {
+			if !escapesFunction(fn, name, info) || isSortedBefore(fn, name, rangeStmt.End()) {
 				continue
 			}
-			violations = append(violations, r.report(fileCtx, rangeStmt, name))
+			found = append(found, r.report(fileCtx, rangeStmt, name))
 		}
 		if picked, ok := firstMatchSelection(fn, rangeStmt); ok {
-			violations = append(violations, r.reportSelection(fileCtx, rangeStmt, picked))
+			found = append(found, r.reportSelection(fileCtx, rangeStmt, picked))
 		}
+		if writer, ok := outputInLoop(fn, rangeStmt, info); ok {
+			found = append(found, r.reportOutput(fileCtx, rangeStmt, writer))
+		}
+		if len(found) == 0 {
+			return true
+		}
+		sortable := keysSortable(fileCtx, rangeStmt, info, versions)
+		column := fileCtx.PositionFor(rangeStmt).Column
+		for _, v := range found {
+			v.WithColumn(column)
+			if sortable {
+				// The fixer rewrites the loop into a walk over sorted keys
+				// only where that compiles and keeps the loop's meaning.
+				v.WithContext("sortable_keys", true)
+			}
+		}
+		violations = append(violations, found...)
 		return true
 	})
 
@@ -148,6 +140,17 @@ func (r *MapIterationOrderRule) reportSelection(fileCtx *core.FileContext, range
 	v.WithSuggestion("Walk the keys in a defined order (slices.Sorted(maps.Keys(m))), or make the choice by a comparison that has one winner")
 	v.WithContext("pattern", "map_iteration_first_match")
 	v.WithContext("variable", picked)
+	return v
+}
+
+func (r *MapIterationOrderRule) reportOutput(fileCtx *core.FileContext, rangeStmt *ast.RangeStmt, writer string) *core.Violation {
+	line := fileCtx.LineFor(rangeStmt)
+	v := r.CreateViolation(fileCtx.RelPath, line,
+		fmt.Sprintf("Output written to %s inside this loop comes out in map iteration order, which Go randomizes — the same input produces different output on every run", writer))
+	v.WithCode(strings.TrimSpace(fileCtx.GetLine(line)))
+	v.WithSuggestion("Walk the keys in a defined order (slices.Sorted(maps.Keys(m))) before writing the entries")
+	v.WithContext("pattern", "map_iteration_output")
+	v.WithContext("variable", writer)
 	return v
 }
 
@@ -466,7 +469,7 @@ func isMapRange(rangeStmt *ast.RangeStmt, info *types.Info) bool {
 // iteration order: slices grown with append and strings grown by concatenation.
 // Order-independent updates (sums, counters, writes into another map) are not
 // reported, because their result does not depend on the walk order.
-func orderedTargets(rangeStmt *ast.RangeStmt) []string {
+func orderedTargets(rangeStmt *ast.RangeStmt, info *types.Info) []string {
 	seen := make(map[string]bool)
 	var names []string
 
@@ -497,7 +500,7 @@ func orderedTargets(rangeStmt *ast.RangeStmt) []string {
 		case token.ADD_ASSIGN:
 			// message += ... — only string concatenation keeps an order;
 			// numeric accumulation is order-independent.
-			if isStringConcat(assign.Rhs[0]) {
+			if isStringType(info.TypeOf(target)) {
 				add(target.Name)
 			}
 		}
@@ -517,26 +520,21 @@ func isAppendTo(call *ast.CallExpr, name string) bool {
 	return ok && first.Name == name
 }
 
-// isStringConcat reports whether the expression looks like text rather than a
-// number: a string literal, or a concatenation involving one.
-func isStringConcat(expr ast.Expr) bool {
-	switch e := expr.(type) {
-	case *ast.BasicLit:
-		return e.Kind == token.STRING
-	case *ast.BinaryExpr:
-		return e.Op == token.ADD && (isStringConcat(e.X) || isStringConcat(e.Y))
-	case *ast.CallExpr:
-		// fmt.Sprintf(...), strconv.Itoa(...) and friends.
-		if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
-			return strings.HasPrefix(sel.Sel.Name, "Sprint") || sel.Sel.Name == "Itoa" || sel.Sel.Name == "String"
-		}
+// isStringType reports whether t is a string type, named or not.
+func isStringType(t types.Type) bool {
+	if t == nil {
+		return false
 	}
-	return false
+	basic, ok := t.Underlying().(*types.Basic)
+	return ok && basic.Info()&types.IsString != 0
 }
 
-// escapesFunction reports whether the value reaches the caller: it is returned,
-// or stored into a field or an argument.
-func escapesFunction(fn *ast.FuncDecl, name string) bool {
+// escapesFunction reports whether the value reaches the caller or the outside
+// world: it is returned, stored into a field, or handed to a call as an
+// argument. Built-ins other than print and println keep the value inside the
+// function, and so do the calls whose answer does not depend on the order: a
+// membership test, a minimum or a maximum, any predicate returning one bool.
+func escapesFunction(fn *ast.FuncDecl, name string, info *types.Info) bool {
 	escapes := false
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -546,7 +544,7 @@ func escapesFunction(fn *ast.FuncDecl, name string) bool {
 		switch stmt := n.(type) {
 		case *ast.ReturnStmt:
 			for _, result := range stmt.Results {
-				if mentionsOrderSensitive(result, name) {
+				if mentionsOrderSensitive(result, name, info) {
 					escapes = true
 					return false
 				}
@@ -558,10 +556,20 @@ func escapesFunction(fn *ast.FuncDecl, name string) bool {
 					continue
 				}
 				for _, rhs := range stmt.Rhs {
-					if mentionsOrderSensitive(rhs, name) {
+					if mentionsOrderSensitive(rhs, name, info) {
 						escapes = true
 						return false
 					}
+				}
+			}
+		case *ast.CallExpr:
+			if !passesOrderOn(stmt, info) {
+				return true
+			}
+			for _, arg := range stmt.Args {
+				if mentionsOrderSensitive(arg, name, info) {
+					escapes = true
+					return false
 				}
 			}
 		}
@@ -571,18 +579,362 @@ func escapesFunction(fn *ast.FuncDecl, name string) bool {
 	return escapes
 }
 
+// orderInsensitiveSlicesFuncs are the slices functions whose result is the
+// same whatever order the elements come in.
+var orderInsensitiveSlicesFuncs = map[string]bool{
+	"Contains": true, "ContainsFunc": true,
+	"Max": true, "MaxFunc": true, "Min": true, "MinFunc": true,
+}
+
+// passesOrderOn reports whether the arguments of the call carry their order
+// to somewhere outside the function.
+func passesOrderOn(call *ast.CallExpr, info *types.Info) bool {
+	if isSortingCall(call.Fun) {
+		return false // sorting defines the order, isSortedBefore judges it
+	}
+	switch obj := calleeObject(info, ast.Unparen(call.Fun)).(type) {
+	case *types.Builtin:
+		return obj.Name() == "print" || obj.Name() == "println"
+	case *types.TypeName:
+		return false // a conversion
+	}
+	return !discardsOrder(call, info)
+}
+
+// discardsOrder reports whether the call's result is the same whatever order
+// its arguments come in: an order-insensitive slices function, or a predicate
+// answering yes or no - no order can come out of a single bool.
+func discardsOrder(call *ast.CallExpr, info *types.Info) bool {
+	if fn, ok := calleeObject(info, ast.Unparen(call.Fun)).(*types.Func); ok && fn.Pkg() != nil &&
+		fn.Pkg().Path() == "slices" && orderInsensitiveSlicesFuncs[fn.Name()] {
+		return true
+	}
+	signature, ok := info.TypeOf(call.Fun).(*types.Signature)
+	return ok && signature.Results().Len() == 1 && isBooleanType(signature.Results().At(0).Type())
+}
+
+// outputInLoop reports a loop over a map that writes its entries out as it
+// walks: printing to standard output, or writing to a writer or builder that
+// is visible outside the function. The entries then appear in walk order.
+// It returns how the destination is spelled.
+func outputInLoop(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt, info *types.Info) (string, bool) {
+	key, value := rangeTargetNames(rangeStmt)
+	if key == "" && value == "" {
+		return "", false
+	}
+
+	destination := ""
+	ast.Inspect(rangeStmt.Body, func(n ast.Node) bool {
+		if destination != "" {
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		writer, args, ok := outputCall(call, info)
+		if !ok || !argsCarryEntry(args, key, value) {
+			return true
+		}
+		if writer == nil {
+			destination = "standard output"
+			return false
+		}
+		if writerLeaves(fn, writer, info) {
+			destination = types.ExprString(writer)
+			return false
+		}
+		return true
+	})
+	return destination, destination != ""
+}
+
+// outputCall recognizes the calls that write text out: fmt.Print* (writer
+// nil, standard output), fmt.Fprint* (the writer is the first argument) and
+// the Write* methods of writers and builders (the writer is the receiver).
+func outputCall(call *ast.CallExpr, info *types.Info) (writer ast.Expr, args []ast.Expr, ok bool) {
+	selector, isSelector := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !isSelector {
+		return nil, nil, false
+	}
+	if fn, isFunc := info.Uses[selector.Sel].(*types.Func); isFunc && fn.Pkg() != nil && fn.Pkg().Path() == "fmt" {
+		switch fn.Name() {
+		case "Print", "Printf", "Println":
+			return nil, call.Args, true
+		case "Fprint", "Fprintf", "Fprintln":
+			if len(call.Args) > 0 {
+				return call.Args[0], call.Args[1:], true
+			}
+		}
+		return nil, nil, false
+	}
+	selection, isMethod := info.Selections[selector]
+	if !isMethod || selection.Kind() != types.MethodVal {
+		return nil, nil, false
+	}
+	switch selector.Sel.Name {
+	case "Write", "WriteString", "WriteByte", "WriteRune":
+		return selector.X, call.Args, true
+	}
+	return nil, nil, false
+}
+
+// argsCarryEntry reports whether the written arguments depend on the entry
+// the loop is at: writing the same text on every iteration has no order.
+func argsCarryEntry(args []ast.Expr, key, value string) bool {
+	for _, arg := range args {
+		if (key != "" && mentions(arg, key)) || (value != "" && mentions(arg, value)) {
+			return true
+		}
+	}
+	return false
+}
+
+// writerLeaves reports whether what is written to the writer can be seen
+// outside the function: a package-level writer (os.Stdout), a parameter,
+// receiver or named result, or a local one that itself escapes. A writer the
+// expression does not name plainly is unknown and not reported.
+func writerLeaves(fn *ast.FuncDecl, writer ast.Expr, info *types.Info) bool {
+	root := writerRoot(writer)
+	if root == nil {
+		return false
+	}
+	switch obj := info.Uses[root].(type) {
+	case *types.PkgName:
+		return true
+	case *types.Var:
+		if obj.Pkg() != nil && obj.Parent() == obj.Pkg().Scope() {
+			return true
+		}
+		if obj.Pos() >= fn.Pos() && obj.Pos() < fn.Body.Lbrace {
+			return true // declared in the signature
+		}
+		return escapesFunction(fn, root.Name, info)
+	}
+	return false
+}
+
+// writerRoot returns the variable a writer expression starts from: sb for
+// &sb, sb.inner or (*sb).
+func writerRoot(expr ast.Expr) *ast.Ident {
+	for {
+		switch node := ast.Unparen(expr).(type) {
+		case *ast.Ident:
+			return node
+		case *ast.SelectorExpr:
+			expr = node.X
+		case *ast.UnaryExpr:
+			if node.Op != token.AND {
+				return nil
+			}
+			expr = node.X
+		case *ast.StarExpr:
+			expr = node.X
+		default:
+			return nil
+		}
+	}
+}
+
+// keysSortable reports whether the fixer may rewrite the loop into
+// `for _, k := range slices.Sorted(maps.Keys(m))` with `v := m[k]` as the first
+// statement of the body. That needs a cmp.Ordered key, Go 1.23 for
+// slices.Sorted over an iterator, a map expression that can be evaluated twice,
+// a body that neither edits the map nor declares the value name again, and
+// maps and slices that name those packages where the loop is.
+func keysSortable(fileCtx *core.FileContext, rangeStmt *ast.RangeStmt, info *types.Info, versions *helpers.GoVersions) bool {
+	if rangeStmt.Tok != token.DEFINE {
+		return false
+	}
+	key, ok := rangeStmt.Key.(*ast.Ident)
+	if !ok || key.Name == "_" {
+		return false
+	}
+	if rangeStmt.Value != nil {
+		value, ok := rangeStmt.Value.(*ast.Ident)
+		if !ok || (value.Name != "_" && redeclaresInBody(rangeStmt.Body, value.Name)) {
+			return false
+		}
+	}
+	if !isPlainOperand(rangeStmt.X) {
+		return false
+	}
+	mapType, ok := info.TypeOf(rangeStmt.X).Underlying().(*types.Map)
+	if !ok {
+		return false
+	}
+	keyType, ok := mapType.Key().Underlying().(*types.Basic)
+	if !ok || keyType.Info()&types.IsOrdered == 0 {
+		return false
+	}
+	if !versions.AtLeast(fileCtx, info, "go1.23") {
+		return false
+	}
+	if editsMap(rangeStmt.Body, types.ExprString(rangeStmt.X), info) {
+		return false
+	}
+	return namesStdlibPackages(fileCtx.GoAST, rangeStmt.Pos(), info, "maps", "slices")
+}
+
+// namesStdlibPackages reports whether each of the standard packages, spelled by
+// its name at pos, would refer to that package: the name is free or already
+// imports it. A variable or another package of that name in any enclosing
+// scope - including a package-level declaration in another file - would
+// capture the call the fixer writes.
+func namesStdlibPackages(file *ast.File, pos token.Pos, info *types.Info, packages ...string) bool {
+	fileScope := info.Scopes[file]
+	if fileScope == nil {
+		return false
+	}
+	scope := fileScope.Innermost(pos)
+	if scope == nil {
+		return false
+	}
+	for _, pkg := range packages {
+		_, obj := scope.LookupParent(pkg, pos)
+		if obj == nil {
+			continue
+		}
+		pkgName, ok := obj.(*types.PkgName)
+		if !ok || pkgName.Imported().Path() != pkg {
+			return false
+		}
+	}
+	return true
+}
+
+// isPlainOperand reports whether the expression is a name or a chain of field
+// selections: evaluating it twice gives the same map.
+func isPlainOperand(expr ast.Expr) bool {
+	switch node := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		return true
+	case *ast.SelectorExpr:
+		return isPlainOperand(node.X)
+	}
+	return false
+}
+
+// redeclaresInBody reports whether a top-level statement of the body declares
+// the name, which the inserted `v := m[k]` would then clash with.
+func redeclaresInBody(body *ast.BlockStmt, name string) bool {
+	for _, stmt := range body.List {
+		for _, declared := range declaredNames(stmt) {
+			if declared == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// declaredNames returns the names a statement declares in its own block.
+func declaredNames(stmt ast.Stmt) []string {
+	var names []string
+	switch node := stmt.(type) {
+	case *ast.AssignStmt:
+		if node.Tok != token.DEFINE {
+			return nil
+		}
+		for _, lhs := range node.Lhs {
+			if ident, ok := lhs.(*ast.Ident); ok {
+				names = append(names, ident.Name)
+			}
+		}
+	case *ast.DeclStmt:
+		gen, ok := node.Decl.(*ast.GenDecl)
+		if !ok {
+			return nil
+		}
+		for _, spec := range gen.Specs {
+			names = append(names, specNames(spec)...)
+		}
+	}
+	return names
+}
+
+// specNames returns the names a var, const or type spec declares.
+func specNames(spec ast.Spec) []string {
+	switch s := spec.(type) {
+	case *ast.ValueSpec:
+		names := make([]string, 0, len(s.Names))
+		for _, ident := range s.Names {
+			names = append(names, ident.Name)
+		}
+		return names
+	case *ast.TypeSpec:
+		return []string{s.Name.Name}
+	}
+	return nil
+}
+
+// editsMap reports whether the body may change the map it walks: a delete or
+// clear, a write to an entry, an assignment to the map itself, taking its
+// address, or handing it to a call other than len. A walk over a snapshot of
+// the keys would then see different entries than the walk over the map.
+func editsMap(body *ast.BlockStmt, mapExpr string, info *types.Info) bool {
+	isMap := func(expr ast.Expr) bool { return types.ExprString(ast.Unparen(expr)) == mapExpr }
+	edits := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if edits {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range node.Lhs {
+				index, isIndex := lhs.(*ast.IndexExpr)
+				if (isIndex && isMap(index.X)) || isMap(lhs) {
+					edits = true
+				}
+			}
+		case *ast.IncDecStmt:
+			if index, ok := node.X.(*ast.IndexExpr); ok && isMap(index.X) {
+				edits = true
+			}
+		case *ast.UnaryExpr:
+			if node.Op == token.AND && isMap(node.X) {
+				edits = true
+			}
+		case *ast.CallExpr:
+			if fun, ok := ast.Unparen(node.Fun).(*ast.Ident); ok {
+				if builtin, ok := info.Uses[fun].(*types.Builtin); ok && builtin.Name() == "len" {
+					return true
+				}
+			}
+			for _, arg := range node.Args {
+				if isMap(arg) {
+					edits = true
+				}
+			}
+		}
+		return !edits
+	})
+	return edits
+}
+
 // mentionsOrderSensitive reports whether the expression carries the variable's
-// order outwards. Aggregates that discard the order — len, cap — do not count,
-// so `return len(areas)` is not a leak while `return areas` and
+// order outwards. Aggregates that discard the order — len, cap, the Len and
+// Cap methods of a builder or buffer, the calls discardsOrder names — do not
+// count, so `return len(areas)` is not a leak while `return areas` and
 // `return strings.Join(areas, ",")` are.
-func mentionsOrderSensitive(expr ast.Expr, name string) bool {
+func mentionsOrderSensitive(expr ast.Expr, name string, info *types.Info) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
 		if found {
 			return false
 		}
 		if call, ok := n.(*ast.CallExpr); ok {
+			if discardsOrder(call, info) {
+				return false
+			}
 			if fun, ok := call.Fun.(*ast.Ident); ok && (fun.Name == "len" || fun.Name == "cap") {
+				return false
+			}
+			if method, ok := call.Fun.(*ast.SelectorExpr); ok && len(call.Args) == 0 &&
+				(method.Sel.Name == "Len" || method.Sel.Name == "Cap") {
 				return false
 			}
 		}
