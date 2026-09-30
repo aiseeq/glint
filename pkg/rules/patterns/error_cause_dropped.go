@@ -384,7 +384,7 @@ func mentionsBinding(text, name string) bool {
 		}
 		start := from + idx
 		end := start + len(name)
-		beforeOK := start == 0 || !(isWordChar(text[start-1]) || text[start-1] == '$' || text[start-1] == '.')
+		beforeOK := start == 0 || (!isWordChar(text[start-1]) && text[start-1] != '$' && text[start-1] != '.')
 		afterOK := isWordChar(name[len(name)-1]) != (end < len(text) && isWordChar(text[end]))
 		if beforeOK && afterOK {
 			return true

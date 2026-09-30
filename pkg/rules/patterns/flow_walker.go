@@ -557,4 +557,5 @@ var (
 	_ flowRule[[]providerFlowState, struct{}]                   = (*providerFlowAnalyzer)(nil)
 	_ flowRule[*responseState, struct{}]                        = (*unboundedResponseAnalyzer)(nil)
 	_ flowRule[*lenState, *lenScope]                            = (*lenDivisionAnalyzer)(nil)
+	_ flowRule[[]writePath, struct{}]                           = (*writeFlowAnalyzer)(nil)
 )

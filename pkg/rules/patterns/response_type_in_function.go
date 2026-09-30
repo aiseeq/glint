@@ -254,7 +254,7 @@ func isComposedAndPassedOnTyped(info *types.Info, body *ast.BlockStmt, t types.T
 				}
 			}
 		}
-		return !(composed && passed)
+		return !composed || !passed
 	})
 	return composed && passed
 }
