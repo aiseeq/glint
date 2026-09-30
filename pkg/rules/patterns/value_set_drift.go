@@ -44,6 +44,9 @@ func init() {
 // of a set - the terminal statuses - is its own set.
 type ValueSetDriftRule struct {
 	*rules.BaseRule
+	// index holds the sets of the root under analysis; the check flow sets it
+	// before it analyzes any file and resets it between roots.
+	index *valueset.Index
 }
 
 // NewValueSetDriftRule creates the rule
@@ -56,8 +59,13 @@ func NewValueSetDriftRule() *ValueSetDriftRule {
 	)}
 }
 
-// ReadsOtherFiles reports that the findings depend on the sets of the whole project.
-func (r *ValueSetDriftRule) ReadsOtherFiles() bool { return true }
+// UseProjectFiles indexes the sets of every file of the root.
+func (r *ValueSetDriftRule) UseProjectFiles(files []*core.FileContext) {
+	r.index = valueset.IndexFiles(files)
+}
+
+// ResetState drops the sets of the previous root.
+func (r *ValueSetDriftRule) ResetState() { r.index = nil }
 
 type setMatch struct {
 	other  valueset.Set
@@ -70,19 +78,15 @@ func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	if ctx.ProjectRoot == "" || ctx.IsTestFile() || ctx.IsGenerated() || isE2EPath(ctx.RelPath) {
 		return nil
 	}
-	sets := valueset.Extract(ctx)
-	if len(sets) == 0 {
-		return nil
-	}
-	idx, err := valueset.LoadCached(ctx.ProjectRoot, valueset.WalkProject)
-	if err != nil {
-		v := r.CreateViolation(ctx.RelPath, 1, "The project's files cannot be listed, so value sets were not compared: "+err.Error())
+	if r.index == nil {
+		v := r.CreateViolation(ctx.RelPath, 1, "The project's files were not handed to the rule, so value sets were not compared")
 		v.Severity = core.SeverityCritical
 		return []*core.Violation{v}
 	}
+	sets := valueset.FileSets(ctx)
 	var violations []*core.Violation
 	for _, set := range sets {
-		match, ok := bestMatch(idx, set)
+		match, ok := bestMatch(r.index, set)
 		if !ok || ctx.IsSuppressed(set.Line, r.Name()) {
 			continue
 		}

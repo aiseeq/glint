@@ -875,6 +875,11 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 	if cache != nil && project != nil {
 		cache.storeProject(allViolations, project.SkippedPackages)
 	}
+	for _, rule := range fileRules {
+		if projectFiles, ok := rule.(rules.ProjectFilesRule); ok {
+			projectFiles.UseProjectFiles(contexts)
+		}
+	}
 	fileViolations, err := analyzeFiles(contexts, fileRules, cfg, overrides, cache)
 	if err != nil {
 		return nil, err
