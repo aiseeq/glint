@@ -199,6 +199,16 @@ func tickWorker(s *Service, ticks <-chan time.Time) {
 	}
 }
 
+func (s *Service) saveResult(id string) {
+	s.db.Exec("UPDATE items SET done = true WHERE id = $1", id)
+}
+
+func pipeline(s *Service, ids []string) {
+	for _, id := range ids {
+		s.saveResult(id)
+	}
+}
+
 func pureInLoop(errs []error) {
 	for _, err := range errs {
 		store.IsConflict(err)

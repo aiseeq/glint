@@ -133,10 +133,12 @@ func (r *QueryInLoopRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 	})
 }
 
-// queryHelpers maps the functions of the project that make a data-access
-// call themselves (outside a function literal) to that call, "repo.Get".
-// A loop calling one of them from its own package queries on every
-// iteration as much as a loop calling the repository.
+// queryHelpers maps the functions of the project that read through a
+// data-access call themselves (outside a function literal) to that call,
+// "repo.Get". A loop calling one of them from its own package queries on
+// every iteration as much as a loop calling the repository. A helper that
+// only writes is left out: storing each item's own result (a pipeline
+// persisting what it fetched) is no read to batch.
 func queryHelpers(ctx *core.GoProjectContext, reach storageReach) map[*types.Func]queryHelper {
 	helpers := make(map[*types.Func]queryHelper)
 	for _, pkg := range ctx.Packages {
@@ -162,7 +164,7 @@ func queryHelpers(ctx *core.GoProjectContext, reach storageReach) map[*types.Fun
 						return false
 					}
 					if call, ok := n.(*ast.CallExpr); ok {
-						if recv, method, ok := dataAccessCall(call, info, reach); ok {
+						if recv, method, ok := dataAccessCall(call, info, reach); ok && readMethod.MatchString(method) {
 							helpers[obj] = queryHelper{call: recv + "." + method, dir: filepath.Dir(file.Path)}
 						}
 					}
@@ -173,6 +175,8 @@ func queryHelpers(ctx *core.GoProjectContext, reach storageReach) map[*types.Fun
 	}
 	return helpers
 }
+
+var readMethod = regexp.MustCompile(`^(?:Get|Find|List|Load|Select|Query|Count|Read|Lookup|Search|Exists|Sum)`)
 
 // queryHelper is a function making a data-access call: the call, and the
 // directory of the file declaring the function.
