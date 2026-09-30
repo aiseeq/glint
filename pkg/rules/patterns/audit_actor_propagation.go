@@ -92,17 +92,40 @@ func (r *AuditActorPropagationRule) Configure(settings map[string]any) error {
 	if !ok {
 		return nil
 	}
-	sinks, ok := configured.([]string)
-	if !ok {
-		return fmt.Errorf("configure audit-actor-propagation sinks: expected []string, got %T", configured)
-	}
-	for i, sink := range sinks {
-		if strings.TrimSpace(sink) == "" {
-			return fmt.Errorf("configure audit-actor-propagation sinks: item %d is empty", i)
-		}
+	sinks, err := auditSinkNames(configured)
+	if err != nil {
+		return err
 	}
 	r.sinks = auditSinkSet(sinks)
 	return nil
+}
+
+// auditSinkNames reads the sinks setting: a list of non-empty function names,
+// as []string from code or []any from a YAML configuration.
+func auditSinkNames(configured any) ([]string, error) {
+	var items []any
+	switch list := configured.(type) {
+	case []string:
+		for _, name := range list {
+			items = append(items, name)
+		}
+	case []any:
+		items = list
+	default:
+		return nil, fmt.Errorf("configure audit-actor-propagation sinks: expected a list of function names, got %T", configured)
+	}
+	sinks := make([]string, 0, len(items))
+	for i, item := range items {
+		name, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("configure audit-actor-propagation sinks: item %d is %T, expected a function name string", i, item)
+		}
+		if strings.TrimSpace(name) == "" {
+			return nil, fmt.Errorf("configure audit-actor-propagation sinks: item %d is empty", i)
+		}
+		sinks = append(sinks, name)
+	}
+	return sinks, nil
 }
 
 func auditSinkSet(names []string) map[string]bool {
@@ -344,10 +367,7 @@ func (a *auditActorAnalyzer) validateSourceSinkCalls(functions []*ssa.Function) 
 					if !a.rule.sinks[target.Name()] || !a.isSourceFunction(target) {
 						continue
 					}
-					roles, inScope, err := auditRoles(target)
-					if err != nil {
-						return err
-					}
+					roles, inScope := auditRoles(target)
 					if !inScope {
 						continue
 					}
@@ -553,7 +573,12 @@ type auditSinkRoles struct {
 	source int
 }
 
-func auditRoles(target *ssa.Function) (auditSinkRoles, bool, error) {
+// auditRoles finds the actor and source parameters of a function named like a
+// sink. Only a function with exactly one integer actor parameter and exactly
+// one string source parameter is an audit sink; any other signature (a
+// get-or-create keyed by userID, two actor parameters, wrong role types) merely
+// shares the name and is skipped.
+func auditRoles(target *ssa.Function) (auditSinkRoles, bool) {
 	roles := auditSinkRoles{actor: -1, source: -1}
 	actorCount := 0
 	sourceCount := 0
@@ -567,17 +592,13 @@ func auditRoles(target *ssa.Function) (auditSinkRoles, bool, error) {
 			sourceCount++
 		}
 	}
-	if actorCount == 0 {
-		return roles, false, nil
-	}
 	if actorCount != 1 || sourceCount != 1 {
-		return roles, false, fmt.Errorf("malformed audit sink %s roles: found %d actor and %d source parameters", target, actorCount, sourceCount)
+		return roles, false
 	}
 	if !auditActorRoleType(target.Params[roles.actor].Type()) || !auditSourceRoleType(target.Params[roles.source].Type()) {
-		return roles, false, fmt.Errorf("malformed audit sink %s role types: actor is %s and source is %s",
-			target, target.Params[roles.actor].Type(), target.Params[roles.source].Type())
+		return roles, false
 	}
-	return roles, true, nil
+	return roles, true
 }
 
 func auditActorRoleType(roleType types.Type) bool {
@@ -600,10 +621,7 @@ func (a *auditActorAnalyzer) inspectSink(
 	call ssa.CallInstruction,
 	target *ssa.Function,
 ) error {
-	roles, inScope, err := auditRoles(target)
-	if err != nil {
-		return err
-	}
+	roles, inScope := auditRoles(target)
 	if !inScope {
 		return nil
 	}

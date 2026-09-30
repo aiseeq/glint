@@ -34,6 +34,30 @@ func TestFinancialFPRoundingRule(t *testing.T) {
 			wantCount: 1,
 		},
 		{
+			name:      "money operand with nested parentheses",
+			code:      `return Math.floor(Number(amount) * 100) / 100;`,
+			filename:  "frontend/src/lib/money.ts",
+			wantCount: 1,
+		},
+		{
+			name:      "percentage of a money operand with nested parentheses",
+			code:      `const part = Math.floor(Number(String(p.balance)) * pct) / 100;`,
+			filename:  "frontend/src/lib/money.ts",
+			wantCount: 1,
+		},
+		{
+			name:      "non-money operand with nested parentheses",
+			code:      `const n = Math.floor(Number(count) * 100) / 100;`,
+			filename:  "frontend/src/lib/stats.ts",
+			wantCount: 0,
+		},
+		{
+			name:      "math.Floor on converted float money in Go with nested parentheses",
+			code:      `cents := math.Floor(float64(balanceCents(x)) * 100) / 100`,
+			filename:  "backend/services/balance.go",
+			wantCount: 1,
+		},
+		{
 			name:      "explicit epsilon is safe",
 			code:      `const safe = Math.floor(balance * 100 + 1e-9) / 100`,
 			filename:  "frontend/src/components/Withdrawal.tsx",

@@ -64,6 +64,9 @@ type setterInfo struct {
 	field  string
 	method string
 	decl   *ast.FuncDecl
+	// analyzed is set when the setter lives in a file of the analyzed set: the
+	// typed load covers the whole module, findings only the analyzed files.
+	analyzed bool
 }
 
 // depKey identifies a dependency: the type that holds it plus the field name.
@@ -167,23 +170,29 @@ func (r *SilentlyOptionalDependencyRule) AnalyzeGoProject(ctx *core.GoProjectCon
 	ctorSites := map[string]int{}
 	setterCalls := map[depKey]int{}
 
+	// pkg.Syntax holds every non-test file of the module (the typed load runs
+	// with Tests=false), so construction sites count project-wide; only the
+	// files the run analyzes may carry a finding.
 	for _, pkgCtx := range ctx.Packages {
 		if pkgCtx == nil || pkgCtx.Package == nil {
 			continue
 		}
+		analyzed := make(map[*ast.File]bool, len(pkgCtx.Files))
+		for _, fileCtx := range pkgCtx.Files {
+			if fileCtx != nil && fileCtx.GoAST != nil {
+				analyzed[fileCtx.GoAST] = true
+			}
+		}
 		pkg := pkgCtx.Package
 		for _, file := range pkg.Syntax {
-			if isGoTestFile(ctx, file) {
-				continue
-			}
-			r.collectDeclarations(pkg, file, setters, guarded, fromConstructor)
+			r.collectDeclarations(pkg, file, analyzed[file], setters, guarded, fromConstructor)
 			r.collectCalls(pkg, file, ctorSites, setterCalls)
 		}
 	}
 
 	var violations []*core.Violation
 	for key, setter := range setters {
-		if !guarded[key] || fromConstructor[key] {
+		if !setter.analyzed || !guarded[key] || fromConstructor[key] {
 			continue
 		}
 		sites := ctorSites[key.owner]
@@ -212,6 +221,7 @@ func (r *SilentlyOptionalDependencyRule) AnalyzeGoProject(ctx *core.GoProjectCon
 func (r *SilentlyOptionalDependencyRule) collectDeclarations(
 	pkg *packages.Package,
 	file *ast.File,
+	analyzed bool,
 	setters map[depKey]setterInfo,
 	guarded map[depKey]bool,
 	fromConstructor map[depKey]bool,
@@ -224,7 +234,7 @@ func (r *SilentlyOptionalDependencyRule) collectDeclarations(
 		if _, field, ok := setterDecl(fn); ok {
 			if owner := r.receiverNamed(pkg, fn); owner != nil {
 				setters[depKey{namedKey(owner), field}] = setterInfo{
-					field: field, method: fn.Name.Name, decl: fn,
+					field: field, method: fn.Name.Name, decl: fn, analyzed: analyzed,
 				}
 			}
 		}
@@ -361,7 +371,8 @@ func (r *SilentlyOptionalDependencyRule) receiverNamed(pkg *packages.Package, fn
 	return namedOf(pkg.TypesInfo.TypeOf(fn.Recv.List[0].Type))
 }
 
-// isGoTestFile reports whether the file is a _test.go one.
+// isGoTestFile reports whether the file is a _test.go one. This rule does not
+// need it (the typed load has no test files); other rules of the package do.
 func isGoTestFile(ctx *core.GoProjectContext, file *ast.File) bool {
 	if ctx.FileSet == nil {
 		return false

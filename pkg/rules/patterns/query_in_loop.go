@@ -150,17 +150,22 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 			currentFunc = prevFunc
 			return false
 
-		case *ast.ForStmt, *ast.RangeStmt:
+		case *ast.ForStmt:
+			// Init runs once, before the first iteration; Cond, Post and
+			// Body run on every iteration.
+			visitLoopPart(node.Init, inspect)
 			loopDepth++
-			ast.Inspect(n, func(child ast.Node) bool {
-				if child == n {
-					return true
-				}
-				if _, ok := child.(*ast.FuncLit); ok {
-					return false // nested func has its own scope; calls there may run async/batched
-				}
-				return inspect(child)
-			})
+			for _, part := range []ast.Node{node.Cond, node.Post, node.Body} {
+				visitLoopPart(part, inspect)
+			}
+			loopDepth--
+			return false
+
+		case *ast.RangeStmt:
+			// The range operand is evaluated once; only the body repeats.
+			visitLoopPart(node.X, inspect)
+			loopDepth++
+			visitLoopPart(node.Body, inspect)
 			loopDepth--
 			return false
 
@@ -188,6 +193,20 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 
 	ast.Inspect(ctx.GoAST, inspect)
 	return violations
+}
+
+// visitLoopPart runs inspect over one part of a loop statement. A nested
+// function literal has its own scope: calls there may run async or batched.
+func visitLoopPart(part ast.Node, inspect func(ast.Node) bool) {
+	if part == nil {
+		return
+	}
+	ast.Inspect(part, func(child ast.Node) bool {
+		if _, ok := child.(*ast.FuncLit); ok {
+			return false
+		}
+		return inspect(child)
+	})
 }
 
 // dataAccessCall returns (receiver, method, true) if call is recv.Method(...) where recv looks

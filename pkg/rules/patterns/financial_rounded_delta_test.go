@@ -50,6 +50,22 @@ const delta = profitRate - profitScore`,
 			wantCount: 0,
 		},
 		{
+			// "profitability" and "evaluation" only contain money fragments;
+			// no word of either name is a money field.
+			name: "money fragments inside other words are not money fields",
+			code: `const dailyDelta = parseFloat(today.profitability) - parseFloat(yesterday.profitability)
+const score = parseFloat(entry.evaluation)
+const scoreChange = score - parseFloat(prev.evaluation)`,
+			filename:  "frontend/src/lib/ratios.ts",
+			wantCount: 0,
+		},
+		{
+			name:      "camel-case money field words are still money",
+			code:      `const dailyChange = Number(today.totalValue) - Number(yesterday.totalValue)`,
+			filename:  "frontend/src/lib/portfolio.ts",
+			wantCount: 1,
+		},
+		{
 			name:      "test files are skipped",
 			code:      `const dailyDelta = parseFloat(entry.profit) - parseFloat(prev.profit)`,
 			filename:  "frontend/src/hooks/useOperations.test.ts",

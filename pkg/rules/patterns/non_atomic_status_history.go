@@ -1,8 +1,10 @@
 package patterns
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
+	"go/types"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -13,10 +15,32 @@ func init() {
 	rules.Register(NewNonAtomicStatusHistoryRule())
 }
 
+// defaultStatusMutationMethods are the repository methods that change an
+// entity's status when the config names none (setting mutation_methods).
+var defaultStatusMutationMethods = []string{
+	"UpdateStatus", "UpdateStatusWithPayprov", "UpdateQuote", "UpdateSentToProvider",
+	"MarkWaitingApproval", "Create", "CreateOrGet",
+}
+
+// defaultStatusHistoryMethods are the repository methods that append a status
+// history row when the config names none (setting history_methods).
+var defaultStatusHistoryMethods = []string{"RecordStatusHistory"}
+
 // NonAtomicStatusHistoryRule detects status mutations followed by a separate
-// history write on the same repository in one function.
+// history write on the same repository and entity in one function.
+//
+// The method names are the project's vocabulary: mutation_methods and
+// history_methods replace the defaults. A method whose name holds both
+// "update" and "quote" is a status mutation as well. Writes inside the
+// callback of a transaction runner (transaction_functions, the same setting
+// and defaults multi-write-no-transaction reads) are atomic and not reported.
 type NonAtomicStatusHistoryRule struct {
 	*rules.BaseRule
+
+	mutationMethods map[string]bool
+	historyMethods  map[string]bool
+	// transactions recognises transaction runner calls.
+	transactions *MultiWriteNoTransactionRule
 }
 
 // NewNonAtomicStatusHistoryRule creates the rule.
@@ -28,11 +52,88 @@ func NewNonAtomicStatusHistoryRule() *NonAtomicStatusHistoryRule {
 			"Detects status mutations followed by a separate non-atomic status history write",
 			core.SeverityHigh,
 		),
+		mutationMethods: statusHistoryNameSet(defaultStatusMutationMethods),
+		historyMethods:  statusHistoryNameSet(defaultStatusHistoryMethods),
+		transactions:    NewMultiWriteNoTransactionRule(),
 	}
 }
 
-// AnalyzeFile checks each production Go function independently.
+func statusHistoryNameSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
+// Configure reads mutation_methods, history_methods and
+// transaction_functions; a setting left out keeps its default.
+func (r *NonAtomicStatusHistoryRule) Configure(settings map[string]any) error {
+	if err := r.BaseRule.Configure(settings); err != nil {
+		return fmt.Errorf("configure non-atomic-status-history: %w", err)
+	}
+	mutations, err := configuredStatusHistoryNames(settings, "mutation_methods", defaultStatusMutationMethods)
+	if err != nil {
+		return err
+	}
+	histories, err := configuredStatusHistoryNames(settings, "history_methods", defaultStatusHistoryMethods)
+	if err != nil {
+		return err
+	}
+	transactions := NewMultiWriteNoTransactionRule()
+	if raw, ok := settings["transaction_functions"]; ok {
+		if err := transactions.Configure(map[string]any{"transaction_functions": raw}); err != nil {
+			return fmt.Errorf("configure non-atomic-status-history: %w", err)
+		}
+	}
+	r.mutationMethods, r.historyMethods, r.transactions = mutations, histories, transactions
+	return nil
+}
+
+// configuredStatusHistoryNames reads a list-of-names setting.
+func configuredStatusHistoryNames(settings map[string]any, key string, defaults []string) (map[string]bool, error) {
+	raw, ok := settings[key]
+	if !ok {
+		return statusHistoryNameSet(defaults), nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("configure non-atomic-status-history: %s must be a list, got %T", key, raw)
+	}
+	names := make(map[string]bool, len(list))
+	for i, item := range list {
+		name, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("configure non-atomic-status-history: %s item %d must be a string, got %T", key, i, item)
+		}
+		if strings.TrimSpace(name) == "" {
+			return nil, fmt.Errorf("configure non-atomic-status-history: %s item %d is empty", key, i)
+		}
+		names[name] = true
+	}
+	return names, nil
+}
+
+// AnalyzeFile checks each production Go function independently, judging
+// identities and context arguments by what the file declares.
 func (r *NonAtomicStatusHistoryRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *NonAtomicStatusHistoryRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; with type information identities are
+// the type checker's objects and a context argument is known by its type.
+func (r *NonAtomicStatusHistoryRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze checks each function. info is nil for a file without type
+// information: then an identifier resolves through the lexical scopes the
+// rule tracks, and a first argument the file does not declare leaves the
+// entity unknown and the call out of the analysis.
+func (r *NonAtomicStatusHistoryRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() || !ctx.HasGoAST() {
 		return nil
 	}
@@ -43,18 +144,38 @@ func (r *NonAtomicStatusHistoryRule) AnalyzeFile(ctx *core.FileContext) []*core.
 		if !ok || fn.Name == nil || fn.Body == nil {
 			continue
 		}
-		for _, scope := range statusHistoryScopes(fn) {
-			violations = append(violations, r.analyzeStatusHistoryScope(ctx, fn.Name.Name, scope)...)
+		env := statusHistoryEnv{
+			rule:     r,
+			info:     info,
+			contexts: newContextClassifier(ctx.GoAST, fn, info),
+		}
+		for _, scope := range r.statusHistoryScopes(fn) {
+			violations = append(violations, r.analyzeStatusHistoryScope(ctx, fn.Name.Name, scope, env)...)
 		}
 	}
 
 	return violations
 }
 
-func (r *NonAtomicStatusHistoryRule) analyzeStatusHistoryScope(ctx *core.FileContext, function string, scope statusHistoryFunctionScope) []*core.Violation {
+// statusHistoryEnv is what the flow analysis of one function needs besides
+// the syntax: the rule's vocabulary, type information and the context
+// classifier.
+type statusHistoryEnv struct {
+	rule     *NonAtomicStatusHistoryRule
+	info     *types.Info
+	contexts contextClassifier
+}
+
+// isMutationMethod reports whether a method changes an entity's status: a
+// configured mutation method or a quote-update helper.
+func (r *NonAtomicStatusHistoryRule) isMutationMethod(name string) bool {
+	return r.mutationMethods[name] || isStatusHistoryQuoteHelper(name)
+}
+
+func (r *NonAtomicStatusHistoryRule) analyzeStatusHistoryScope(ctx *core.FileContext, function string, scope statusHistoryFunctionScope, env statusHistoryEnv) []*core.Violation {
 	var violations []*core.Violation
 	reported := make(map[*ast.CallExpr]bool)
-	for _, pair := range statusHistoryPairs(scope) {
+	for _, pair := range statusHistoryPairs(scope, env) {
 		mutation := pair.mutation
 		history := pair.history
 		if reported[mutation.call] {
@@ -76,7 +197,7 @@ func (r *NonAtomicStatusHistoryRule) analyzeStatusHistoryScope(ctx *core.FileCon
 		}
 
 		v := r.CreateViolation(ctx.RelPath, mutationLine,
-			mutation.method+" followed by separate RecordStatusHistory is not atomic")
+			mutation.method+" followed by separate "+history.method+" is not atomic")
 		v.WithCode(ctx.GetLine(mutationLine))
 		v.WithEndLine(historyLine)
 		v.WithSuggestion("Combine the status mutation and history insert in one atomic repository method or transaction")
@@ -96,7 +217,24 @@ type statusHistoryFunctionScope struct {
 	fields []*ast.FieldList
 }
 
-func statusHistoryScopes(function *ast.FuncDecl) []statusHistoryFunctionScope {
+// statusHistoryScopes lists the function body and every function literal in
+// it as separate flows. A literal handed to a transaction runner is left out
+// together with everything inside it: its writes commit or roll back as one.
+func (r *NonAtomicStatusHistoryRule) statusHistoryScopes(function *ast.FuncDecl) []statusHistoryFunctionScope {
+	transactional := make(map[*ast.FuncLit]bool)
+	ast.Inspect(function.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok || !r.transactions.isTransactionRunner(call) {
+			return true
+		}
+		for _, argument := range call.Args {
+			if literal, isLiteral := ast.Unparen(argument).(*ast.FuncLit); isLiteral {
+				transactional[literal] = true
+			}
+		}
+		return true
+	})
+
 	scopes := []statusHistoryFunctionScope{{
 		body:   function.Body,
 		fields: []*ast.FieldList{function.Recv, function.Type.Params, function.Type.Results},
@@ -106,6 +244,9 @@ func statusHistoryScopes(function *ast.FuncDecl) []statusHistoryFunctionScope {
 			literal, ok := node.(*ast.FuncLit)
 			if !ok {
 				return true
+			}
+			if transactional[literal] {
+				return false
 			}
 			scopes = append(scopes, statusHistoryFunctionScope{
 				body:   literal.Body,
@@ -145,13 +286,21 @@ type statusHistoryPath struct {
 	mutations []statusHistoryCall
 }
 
+// statusHistoryLexicalScope resolves identifiers to their declarations. With
+// type information the type checker's object is the declaration; without it
+// the scope tracks the declarations the walk has seen.
 type statusHistoryLexicalScope struct {
 	parent  *statusHistoryLexicalScope
 	symbols map[string]token.Pos
+	info    *types.Info
 }
 
 func newStatusHistoryLexicalScope(parent *statusHistoryLexicalScope) *statusHistoryLexicalScope {
-	return &statusHistoryLexicalScope{parent: parent, symbols: make(map[string]token.Pos)}
+	scope := &statusHistoryLexicalScope{parent: parent, symbols: make(map[string]token.Pos)}
+	if parent != nil {
+		scope.info = parent.info
+	}
+	return scope
 }
 
 func (s *statusHistoryLexicalScope) declare(identifier *ast.Ident) {
@@ -163,6 +312,11 @@ func (s *statusHistoryLexicalScope) declare(identifier *ast.Ident) {
 }
 
 func (s *statusHistoryLexicalScope) resolve(identifier *ast.Ident) statusHistoryIdentity {
+	if s.info != nil {
+		if object := s.info.ObjectOf(identifier); object != nil {
+			return statusHistoryIdentity{name: identifier.Name, declaration: object.Pos()}
+		}
+	}
 	for current := s; current != nil; current = current.parent {
 		if position, ok := current.symbols[identifier.Name]; ok {
 			return statusHistoryIdentity{name: identifier.Name, declaration: position}
@@ -174,11 +328,13 @@ func (s *statusHistoryLexicalScope) resolve(identifier *ast.Ident) statusHistory
 type statusHistoryFlowAnalyzer struct {
 	pairs []statusHistoryPair
 	seen  map[[2]*ast.CallExpr]bool
+	env   statusHistoryEnv
 }
 
-func statusHistoryPairs(function statusHistoryFunctionScope) []statusHistoryPair {
-	analyzer := &statusHistoryFlowAnalyzer{seen: make(map[[2]*ast.CallExpr]bool)}
+func statusHistoryPairs(function statusHistoryFunctionScope, env statusHistoryEnv) []statusHistoryPair {
+	analyzer := &statusHistoryFlowAnalyzer{seen: make(map[[2]*ast.CallExpr]bool), env: env}
 	scope := newStatusHistoryLexicalScope(nil)
+	scope.info = env.info
 	for _, fields := range function.fields {
 		declareStatusHistoryFields(scope, fields)
 	}
@@ -322,11 +478,11 @@ func (a *statusHistoryFlowAnalyzer) applyCalls(paths []statusHistoryPath, scope 
 		if !ok {
 			return true
 		}
-		statusCall, ok := newStatusHistoryCall(call, scope)
+		statusCall, ok := a.newStatusHistoryCall(call, scope)
 		if !ok {
 			return true
 		}
-		if isStatusMutationMethod(statusCall.method) {
+		if a.env.rule.isMutationMethod(statusCall.method) {
 			for i := range paths {
 				paths[i].mutations = append(paths[i].mutations, statusCall)
 			}
@@ -401,16 +557,16 @@ func invalidateStatusHistoryAssignments(paths []statusHistoryPath, scope *status
 	return paths
 }
 
-func newStatusHistoryCall(call *ast.CallExpr, scope *statusHistoryLexicalScope) (statusHistoryCall, bool) {
+func (a *statusHistoryFlowAnalyzer) newStatusHistoryCall(call *ast.CallExpr, scope *statusHistoryLexicalScope) (statusHistoryCall, bool) {
 	selector, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || (!isStatusMutationMethod(selector.Sel.Name) && selector.Sel.Name != "RecordStatusHistory") {
+	if !ok || (!a.env.rule.isMutationMethod(selector.Sel.Name) && !a.env.rule.historyMethods[selector.Sel.Name]) {
 		return statusHistoryCall{}, false
 	}
 	receiver, ok := statusHistoryReferenceFor(selector.X, scope)
 	if !ok {
 		return statusHistoryCall{}, false
 	}
-	entity, hasEntity := statusHistoryEntity(call.Args, scope)
+	entity, hasEntity := a.statusHistoryEntity(call.Args, scope)
 	return statusHistoryCall{
 		call:      call,
 		receiver:  receiver,
@@ -447,25 +603,24 @@ func declareStatusHistoryFields(scope *statusHistoryLexicalScope, fields *ast.Fi
 	}
 }
 
-func statusHistoryEntity(args []ast.Expr, scope *statusHistoryLexicalScope) (statusHistoryReference, bool) {
+// statusHistoryEntity returns the entity a call is about: its first argument,
+// or the second when the first is a context.Context. When it is not known
+// whether a leading argument is a context, the entity is unknown.
+func (a *statusHistoryFlowAnalyzer) statusHistoryEntity(args []ast.Expr, scope *statusHistoryLexicalScope) (statusHistoryReference, bool) {
 	if len(args) == 0 {
 		return statusHistoryReference{}, false
 	}
 	entityIndex := 0
-	if len(args) > 1 && isStatusHistoryContext(args[0], scope) {
-		entityIndex = 1
+	if len(args) > 1 {
+		isContext, known := a.env.contexts.classify(args[0])
+		if !known {
+			return statusHistoryReference{}, false
+		}
+		if isContext {
+			entityIndex = 1
+		}
 	}
 	return statusHistoryEntityRoot(args[entityIndex], scope)
-}
-
-func isStatusHistoryContext(expr ast.Expr, scope *statusHistoryLexicalScope) bool {
-	reference, ok := statusHistoryReferenceFor(expr, scope)
-	if !ok {
-		return false
-	}
-	parts := strings.Split(reference.display, ".")
-	name := strings.ToLower(parts[len(parts)-1])
-	return name == "context" || strings.HasSuffix(name, "ctx")
 }
 
 func statusHistoryEntityRoot(expr ast.Expr, scope *statusHistoryLexicalScope) (statusHistoryReference, bool) {
@@ -504,17 +659,6 @@ func statusHistoryReferenceFor(expr ast.Expr, scope *statusHistoryLexicalScope) 
 		return statusHistoryReferenceFor(value.X, scope)
 	default:
 		return statusHistoryReference{}, false
-	}
-}
-
-func isStatusMutationMethod(name string) bool {
-	switch name {
-	case "UpdateStatus", "UpdateStatusWithPayprov", "UpdateQuote", "UpdateSentToProvider",
-		"MarkWaitingApproval", "Create", "CreateOrGet":
-		return true
-	default:
-		lower := strings.ToLower(name)
-		return strings.Contains(lower, "update") && strings.Contains(lower, "quote")
 	}
 }
 

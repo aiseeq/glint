@@ -6,6 +6,7 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFinancialDecimalFloatRule_MetadataAndRegistration(t *testing.T) {
@@ -254,4 +255,50 @@ func convert(rate decimal.Decimal) float64 {
 			assert.Len(t, NewFinancialDecimalFloatRule().AnalyzeFile(ctx), tt.want)
 		})
 	}
+}
+
+// With type information the receiver's type decides: a decimal field or method
+// result whose declaration is in another file is still a decimal.
+func TestFinancialDecimalFloatRule_TypedReceivers(t *testing.T) {
+	project := wp3bDecimalProject(t, map[string]string{
+		"billing/model.go": `package billing
+
+import "github.com/shopspring/decimal"
+
+type Order struct {
+	Amount decimal.Decimal
+	Note   Note
+}
+
+func (o Order) Total() decimal.Decimal { return o.Amount }
+
+type Note struct{}
+
+func (Note) Float64() (float64, bool) { return 0, true }
+`,
+		"billing/use.go": `package billing
+
+import "github.com/shopspring/decimal"
+
+var _ decimal.Decimal
+
+func field(o Order) float64 { amount, _ := o.Amount.Float64(); return amount }
+
+func method(o Order) float64 { total, _ := o.Total().Float64(); return total }
+
+func param(amount decimal.Decimal) float64 { f, _ := amount.Float64(); return f }
+
+func exactHandled(o Order) (float64, bool) { amount, exact := o.Amount.Float64(); return amount, exact }
+
+func notDecimal(o Order) float64 { amount, _ := o.Note.Float64(); return amount }
+`,
+	})
+
+	violations, err := NewFinancialDecimalFloatRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var lines []int
+	for _, v := range violations {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{7, 9, 11}, lines)
 }

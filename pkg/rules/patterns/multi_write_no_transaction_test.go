@@ -1,11 +1,13 @@
 package patterns
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -350,4 +352,197 @@ func (s *Service) Boot(ctx context.Context) error {
 }
 `)
 	assert.Empty(t, violations)
+}
+
+// Writes are paired along control-flow paths: what matters is whether both
+// can run in one pass, not how the arms of the enclosing branches look.
+func TestMultiWriteNoTransactionRule_PathSensitivity(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   int
+	}{
+		{
+			// The first write is unconditional; the returning arm adds the second.
+			name: "write before a returning arm that writes",
+			source: `
+func (s *Service) Pay(ctx context.Context, x bool) error {
+	if err := s.repo.UpdateThing(ctx); err != nil {
+		return err
+	}
+	if x {
+		_ = s.repo.CreateThing(ctx)
+		return nil
+	}
+	return nil
+}
+`,
+			want: 1,
+		},
+		{
+			// break leaves the loop, not the function: the write after the loop runs.
+			name: "break out of a loop that wrote",
+			source: `
+func (s *Service) Brk(ctx context.Context, ids []string) error {
+	for _, id := range ids {
+		if id == "x" {
+			_ = s.repo.UpdateThing(ctx)
+			break
+		}
+	}
+	return s.repo.CreateThing(ctx)
+}
+`,
+			want: 1,
+		},
+		{
+			name: "labeled break out of an infinite loop",
+			source: `
+func (s *Service) Loop(ctx context.Context, ch chan int) error {
+outer:
+	for {
+		select {
+		case <-ch:
+			_ = s.repo.UpdateThing(ctx)
+			break outer
+		}
+	}
+	return s.repo.CreateThing(ctx)
+}
+`,
+			want: 1,
+		},
+		{
+			// Only one select clause runs.
+			name: "writes in different select clauses",
+			source: `
+func (s *Service) Sel(ctx context.Context, a, b chan int) {
+	select {
+	case <-a:
+		_ = s.repo.UpdateThing(ctx)
+	case <-b:
+		_ = s.repo.CreateThing(ctx)
+	}
+}
+`,
+			want: 0,
+		},
+		{
+			name: "writes in different arms of a closure",
+			source: `
+func (s *Service) Pick(ctx context.Context, x bool) func() {
+	return func() {
+		if x {
+			_ = s.repo.UpdateThing(ctx)
+			return
+		}
+		_ = s.repo.CreateThing(ctx)
+	}
+}
+`,
+			want: 0,
+		},
+		{
+			// The helper writes one thing or the other; the caller wrote before.
+			name: "helper with exclusive writes after a caller write",
+			source: `
+func (s *Service) either(ctx context.Context, x bool) error {
+	if x {
+		return s.repo.UpdateThing(ctx)
+	}
+	return s.repo.DeleteThing(ctx)
+}
+
+func (s *Service) Run(ctx context.Context, x bool) error {
+	if err := s.repo.CreateThing(ctx); err != nil {
+		return err
+	}
+	return s.either(ctx, x)
+}
+`,
+			want: 1,
+		},
+		{
+			// Each exit of the helper leaves one write; the caller adds none.
+			name: "helper with exclusive writes alone",
+			source: `
+func (s *Service) either(ctx context.Context, x bool) error {
+	if x {
+		return s.repo.UpdateThing(ctx)
+	}
+	return s.repo.DeleteThing(ctx)
+}
+
+func (s *Service) Run(ctx context.Context, x bool) error {
+	return s.either(ctx, x)
+}
+`,
+			want: 0,
+		},
+		{
+			name: "log.Fatal ends the path of the first write",
+			source: `
+func (s *Service) Stop(ctx context.Context, x bool) error {
+	if x {
+		_ = s.repo.UpdateThing(ctx)
+		log.Fatal("stop")
+	}
+	return s.repo.CreateThing(ctx)
+}
+`,
+			want: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			imports := ""
+			if strings.Contains(tt.source, "log.") {
+				imports = `"log"`
+			}
+			assert.Len(t, analyzeStoreModuleImports(t, NewMultiWriteNoTransactionRule(), imports, tt.source), tt.want)
+		})
+	}
+}
+
+// A chain of helpers that each call the next from both arms of an if used to
+// be re-expanded for every path: depth 16 cost 18 s, depth 18 almost three
+// minutes. Every function is summarised once.
+func TestMultiWriteNoTransactionRule_DeepHelperChainIsLinear(t *testing.T) {
+	const depth = 40
+	var source strings.Builder
+	fmt.Fprintf(&source, "func (s *Service) f%d(ctx context.Context) { _ = s.repo.UpdateThing(ctx) }\n", depth)
+	for i := depth - 1; i >= 0; i-- {
+		fmt.Fprintf(&source, "func (s *Service) f%d(ctx context.Context, b bool) {\n\tif b {\n\t\ts.f%d(ctx%s)\n\t} else {\n\t\ts.f%d(ctx%s)\n\t}\n}\n",
+			i, i+1, chainArg(i+1, depth), i+1, chainArg(i+1, depth))
+	}
+	source.WriteString("func (s *Service) Top(ctx context.Context) error {\n\ts.f0(ctx, true)\n\treturn s.repo.CreateThing(ctx)\n}\n")
+
+	done := make(chan []*core.Violation, 1)
+	go func() { done <- analyzeStoreModule(t, source.String()) }()
+	select {
+	case violations := <-done:
+		require.Len(t, violations, 1)
+		assert.Contains(t, violations[0].Message, "Top")
+		assert.Contains(t, violations[0].Message, "f0 → f1")
+	case <-time.After(20 * time.Second):
+		t.Fatal("the helper chain is expanded per path instead of once per function")
+	}
+}
+
+func chainArg(i, depth int) string {
+	if i == depth {
+		return ""
+	}
+	return ", b"
+}
+
+func analyzeStoreModuleImports(t *testing.T, rule *MultiWriteNoTransactionRule, imports, body string) []*core.Violation {
+	t.Helper()
+	source := "package sample\n\nimport (\n\t\"context\"\n\t" + imports + "\n)\n" + storeDefinition + body
+	root, contexts := writeStoreModule(t, map[string]string{"sample.go": source})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	require.NoError(t, err)
+	violations, err := rule.AnalyzeGoProject(project)
+	require.NoError(t, err)
+	return violations
 }

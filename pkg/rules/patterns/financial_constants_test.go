@@ -18,7 +18,7 @@ func TestFinancialConstantsReportsInvalidNumericLiteral(t *testing.T) {
 		Args: []ast.Expr{&ast.BasicLit{Kind: token.INT, Value: "invalid"}},
 	}
 
-	assert.NotNil(t, rule.checkDecimalCall(ctx, call, "NewFromInt"))
+	assert.NotNil(t, rule.checkDecimalCall(ctx, call, "NewFromInt", map[string]bool{"decimal": true}))
 }
 
 func TestFinancialConstantsRule(t *testing.T) {
@@ -105,6 +105,75 @@ func getWithdrawalFee() decimal.Decimal {
 }
 
 var scaleFactor = decimal.NewFromInt(100)`,
+			expected: 0,
+		},
+		{
+			// Function names are read word by word: "feedback" is not a fee,
+			// and "latest" is not a test.
+			name: "a fee fragment inside another word is not a fee",
+			code: `package main
+
+import "github.com/shopspring/decimal"
+
+func feedbackWeight() decimal.Decimal {
+	return decimal.NewFromInt(100)
+}`,
+			expected: 0,
+		},
+		{
+			name: "a test fragment inside another word is not a test",
+			code: `package main
+
+import "github.com/shopspring/decimal"
+
+func latestWithdrawalFee() decimal.Decimal {
+	return decimal.NewFromInt(1)
+}`,
+			expected: 1,
+		},
+		{
+			name: "aliased decimal import",
+			code: `package main
+
+import dec "github.com/shopspring/decimal"
+
+func withdrawalFee() dec.Decimal {
+	return dec.NewFromFloat(2.5)
+}`,
+			expected: 1,
+		},
+		{
+			name: "string constructors carry the constant too",
+			code: `package main
+
+import "github.com/shopspring/decimal"
+
+func withdrawalFee() decimal.Decimal {
+	return decimal.RequireFromString("2.5")
+}
+
+func transferFee() (decimal.Decimal, error) {
+	return decimal.NewFromString("1.25")
+}
+
+func depositLimitFee() decimal.Decimal {
+	return decimal.RequireFromString("0")
+}`,
+			expected: 2,
+		},
+		{
+			name: "a local value named like the package is not the package",
+			code: `package main
+
+import money "github.com/shopspring/decimal"
+
+type builder struct{}
+
+func (builder) NewFromInt(v int64) money.Decimal { return money.Zero }
+
+func withdrawalFee(decimal builder) money.Decimal {
+	return decimal.NewFromInt(7)
+}`,
 			expected: 0,
 		},
 		{

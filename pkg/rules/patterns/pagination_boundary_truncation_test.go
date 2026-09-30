@@ -115,6 +115,74 @@ func fetch(maxAttempts int) error {
 			want: 0,
 		},
 		{
+			// The walk reaches its boundary inside the per-page range and
+			// returns from there; the page cap breaks silently.
+			name: "temporal boundary returns from nested range",
+			code: `package sync
+func history(cutoff time.Time) []Item {
+	var out []Item
+	maxPages := 10
+	for page := 0; ; page++ {
+		if page >= maxPages {
+			break
+		}
+		for _, it := range fetch(page) {
+			if it.CreatedAt.Before(cutoff) {
+				return out
+			}
+			out = append(out, it)
+		}
+	}
+	return out
+}`,
+			want: 1,
+		},
+		{
+			name: "temporal boundary breaks the labeled pagination loop",
+			code: `package sync
+func history(cutoff time.Time) []Item {
+	var out []Item
+	maxPages := 10
+pages:
+	for page := 0; ; page++ {
+		if page >= maxPages {
+			break
+		}
+		for _, it := range fetch(page) {
+			if it.CreatedAt.Before(cutoff) {
+				break pages
+			}
+			out = append(out, it)
+		}
+	}
+	return out
+}`,
+			want: 1,
+		},
+		{
+			name: "labeled break to another loop is not the boundary",
+			code: `package sync
+func history(cutoff time.Time) []Item {
+	var out []Item
+	maxPages := 10
+outer:
+	for range sources {
+		for page := 0; ; page++ {
+			if page >= maxPages {
+				break
+			}
+			for _, it := range fetch(page) {
+				if it.CreatedAt.Before(cutoff) {
+					continue outer
+				}
+			}
+		}
+	}
+	return out
+}`,
+			want: 0,
+		},
+		{
 			name: "time walk without page cap",
 			code: `package sync
 func fetch(minMinedAt *time.Time) error {

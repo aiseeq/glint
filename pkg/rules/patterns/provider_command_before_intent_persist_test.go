@@ -2,10 +2,13 @@ package patterns
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -256,7 +259,8 @@ func send(s *Service, reqA, reqB Request) error {
 
 func TestProviderCommandBeforeIntentPersistRule_SkipsContextWhenCorrelatingEntity(t *testing.T) {
 	code := `package service
-func send(s *Service, requestCtx Context, reqA, reqB Request) error {
+import "context"
+func send(s *Service, requestCtx context.Context, reqA, reqB Request) error {
 	if err := s.repo.SavePaymentIntent(requestCtx, reqA); err != nil { return err }
 	_, err := s.provider.SendTransaction(requestCtx, reqB)
 	return err
@@ -358,6 +362,126 @@ func send(s *Service, req Request, execute bool) error {
 	ctx := createQueryContext(t, "service.go", code)
 
 	assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
+}
+
+// The context argument is recognised by its type, not by its name: a context
+// called "c" is skipped when correlating the entity, and a request envelope
+// called "callContext" is the entity.
+func TestProviderCommandBeforeIntentPersistRule_ContextByType(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"svc/svc.go": `package svc
+
+import "context"
+
+type Request struct{ ID string }
+
+type Envelope struct{ Request Request }
+
+type Repo struct{}
+
+func (r *Repo) SavePaymentIntent(ctx context.Context, req Request) error { return nil }
+func (r *Repo) SaveEnvelopeIntent(env Envelope, req Request) error      { return nil }
+func (r *Repo) UpdateState(id string) error                             { return nil }
+
+type Provider struct{}
+
+func (p *Provider) SendTransaction(ctx context.Context, req Request) (Request, error) { return req, nil }
+func (p *Provider) SendPayout(env Envelope, req Request) (Request, error)            { return req, nil }
+
+type Service struct {
+	repo     *Repo
+	provider *Provider
+}
+
+func (s *Service) contextNamedC(c context.Context, reqA, reqB Request) error {
+	if err := s.repo.SavePaymentIntent(c, reqA); err != nil {
+		return err
+	}
+	_, err := s.provider.SendTransaction(c, reqB)
+	return err
+}
+
+func (s *Service) envelopeNamedLikeContext(callContext Envelope, reqA, reqB Request) error {
+	if err := s.repo.SaveEnvelopeIntent(callContext, reqA); err != nil {
+		return err
+	}
+	_, err := s.provider.SendPayout(callContext, reqB)
+	return err
+}
+`,
+	})
+
+	violations, err := NewProviderCommandBeforeIntentPersistRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var functions []string
+	for _, v := range violations {
+		functions = append(functions, v.Context["function"].(string))
+	}
+	assert.Equal(t, []string{"contextNamedC"}, functions)
+}
+
+// Without type information a context is what the file declares as one.
+func TestProviderCommandBeforeIntentPersistRule_DeclaredContextWithoutTypes(t *testing.T) {
+	code := `package service
+import "context"
+func send(s *Service, c context.Context, reqA, reqB Request) error {
+	if err := s.repo.SavePaymentIntent(c, reqA); err != nil { return err }
+	_, err := s.provider.SendTransaction(c, reqB)
+	return err
+}`
+	ctx := createQueryContext(t, "service.go", code)
+	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
+}
+
+// A repository insert whose name reads like a provider command is still a
+// write to the rule's own store: the receiver's name says it is a repository.
+func TestProviderCommandBeforeIntentPersistRule_RepositoryIsNotAProvider(t *testing.T) {
+	for _, receiver := range []string{"payoutRepo", "paymentStore", "bankDB", "payoutRepository", "remitLedger"} {
+		t.Run(receiver, func(t *testing.T) {
+			code := fmt.Sprintf(`package service
+func (s *Svc) Create(ctx Context, p *Payout) error {
+	if err := s.%s.CreatePayout(ctx, p); err != nil {
+		return err
+	}
+	return s.%s.UpdateStatus(ctx, p.ID, "pending")
+}`, receiver, receiver)
+			ctx := createQueryContext(t, "service.go", code)
+			assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
+		})
+	}
+}
+
+// A provider whose name merely contains a store word ("sandbox" holds "db")
+// is still a provider.
+func TestProviderCommandBeforeIntentPersistRule_StoreFragmentInProviderName(t *testing.T) {
+	code := `package service
+func (s *Svc) Send(req Request) error {
+	resp, err := s.sandboxBank.SendPayout(req)
+	if err != nil { return err }
+	return s.repo.UpdateState(resp.ID)
+}`
+	ctx := createQueryContext(t, "service.go", code)
+	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
+}
+
+// Short-circuit operators fork the path list; the fork goes through the
+// shared path cap, so a long chain of them stays linear.
+func TestProviderCommandBeforeIntentPersistRule_ShortCircuitChainIsBounded(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&body, "\tok = ok && s.provider.SendPayout(req%d) == nil\n", i)
+	}
+	code := "package service\nfunc send(s *Service, ok bool) error {\n" + body.String() + "\treturn s.repo.UpdateState(1)\n}"
+	ctx := createQueryContext(t, "service.go", code)
+
+	done := make(chan []*core.Violation, 1)
+	go func() { done <- NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx) }()
+	select {
+	case violations := <-done:
+		assert.Len(t, violations, 40)
+	case <-time.After(10 * time.Second):
+		t.Fatal("short-circuit chain did not finish: path list grows without the cap")
+	}
 }
 
 func TestProviderCommandBeforeIntentPersistRule_AnalyzesFuncLitAsIndependentRoot(t *testing.T) {

@@ -194,25 +194,10 @@ func exprTypeName(expr ast.Expr) string {
 	}
 }
 
+// strongFinancialName reports whether a name alone says the value is money: a
+// money value or market figure word, or an exchange/FX rate.
 func strongFinancialName(name string) bool {
-	if compoundMarketFinancialName(name) {
-		return true
-	}
-	financialTokens := map[string]bool{
-		"amount": true, "amounts": true, "balance": true, "balances": true,
-		"cost": true, "costs": true, "fee": true, "fees": true,
-		"price": true, "prices": true, "profit": true, "profits": true,
-		"revenue": true, "revenues": true,
-		"tvl": true, "usd": true,
-		"valuation": true, "valuations": true,
-		"yield": true, "yields": true,
-	}
-	for _, token := range identifierTokens(name) {
-		if financialTokens[token] {
-			return true
-		}
-	}
-	return false
+	return compoundMarketFinancialName(name) || hasTokenIn(name, moneyValueTokens, moneyMarketTokens)
 }
 
 func compoundMarketFinancialName(name string) bool {

@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"maps"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -20,16 +21,19 @@ func init() {
 // when a new field is added — the field will be silently missing in all but the updated sites.
 //
 // Principle: "One conversion function per type pair, not scattered literals"
+//
+// The sites are collected over the whole project first, so every site of a
+// scattered type is reported, not only those in files seen after the count
+// passed the threshold.
 type ScatteredConstructionRule struct {
 	*rules.BaseRule
-	constructions map[string][]constructionSite
-	maxSites      int
+	maxSites int
 }
 
 type constructionSite struct {
-	file  string
-	line  int
-	funcN string
+	fileCtx *core.FileContext
+	line    int
+	funcN   string
 }
 
 // NewScatteredConstructionRule creates the rule
@@ -41,8 +45,7 @@ func NewScatteredConstructionRule() *ScatteredConstructionRule {
 			"Detects struct types constructed in too many places — each site risks missing new fields",
 			core.SeverityHigh,
 		),
-		constructions: make(map[string][]constructionSite),
-		maxSites:      2,
+		maxSites: 2,
 	}
 }
 
@@ -55,27 +58,38 @@ func (r *ScatteredConstructionRule) Configure(settings map[string]any) error {
 	return nil
 }
 
-// ResetState clears the construction sites collected so far. The rule
-// accumulates them across files, so without a reset a second project root
-// would inherit the sites of the first one.
-func (r *ScatteredConstructionRule) ResetState() {
-	r.constructions = make(map[string][]constructionSite)
+// AnalyzeFile is a no-op: the sites of a type are spread over the project.
+func (r *ScatteredConstructionRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
+	return nil
 }
 
-// AnalyzeFile checks for struct types constructed in too many places
-func (r *ScatteredConstructionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.GoAST == nil {
-		return nil
-	}
-	if ctx.IsTestFile() {
-		return nil
+// RequiresSSA reports that syntax is enough for this rule.
+func (r *ScatteredConstructionRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject collects the construction sites of every Go file of the
+// project, then reports every site of each type built in too many functions.
+func (r *ScatteredConstructionRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
 
-	r.collectConstructions(ctx)
-	return r.reportViolations(ctx)
+	files := make([]*core.FileContext, 0, len(ctx.Files))
+	for _, fileCtx := range ctx.Files {
+		if fileCtx == nil || !fileCtx.IsGoFile() || fileCtx.GoAST == nil || fileCtx.IsTestFile() {
+			continue
+		}
+		files = append(files, fileCtx)
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].RelPath < files[j].RelPath })
+
+	constructions := make(map[string][]constructionSite)
+	for _, fileCtx := range files {
+		collectConstructions(fileCtx, constructions)
+	}
+	return r.reportViolations(constructions), nil
 }
 
-func (r *ScatteredConstructionRule) collectConstructions(ctx *core.FileContext) {
+func collectConstructions(ctx *core.FileContext, constructions map[string][]constructionSite) {
 	currentFunc := ""
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
@@ -104,25 +118,24 @@ func (r *ScatteredConstructionRule) collectConstructions(ctx *core.FileContext) 
 			return true
 		}
 
-		pos := ctx.GoFileSet.Position(lit.Pos())
-		r.constructions[typeName] = append(r.constructions[typeName], constructionSite{
-			file:  ctx.Path,
-			line:  pos.Line,
-			funcN: currentFunc,
+		constructions[typeName] = append(constructions[typeName], constructionSite{
+			fileCtx: ctx,
+			line:    ctx.LineFor(lit),
+			funcN:   currentFunc,
 		})
 
 		return true
 	})
 }
 
-func (r *ScatteredConstructionRule) reportViolations(ctx *core.FileContext) []*core.Violation {
+func (r *ScatteredConstructionRule) reportViolations(constructions map[string][]constructionSite) []*core.Violation {
 	var violations []*core.Violation
 
-	for _, typeName := range slices.Sorted(maps.Keys(r.constructions)) {
-		sites := r.constructions[typeName]
+	for _, typeName := range slices.Sorted(maps.Keys(constructions)) {
+		sites := constructions[typeName]
 		uniqueFuncs := make(map[string]bool)
 		for _, s := range sites {
-			uniqueFuncs[s.file+":"+s.funcN] = true
+			uniqueFuncs[s.fileCtx.RelPath+":"+s.funcN] = true
 		}
 
 		if len(uniqueFuncs) <= r.maxSites {
@@ -130,14 +143,10 @@ func (r *ScatteredConstructionRule) reportViolations(ctx *core.FileContext) []*c
 		}
 
 		for _, site := range sites {
-			if site.file != ctx.Path {
-				continue
-			}
-
 			locations := formatOtherLocations(sites, site)
 
 			violations = append(violations, r.CreateViolation(
-				ctx.Path,
+				site.fileCtx.RelPath,
 				site.line,
 				fmt.Sprintf("%s constructed in %d places (%d functions) — adding a field risks silent omission",
 					typeName, len(sites), len(uniqueFuncs)),
@@ -147,6 +156,12 @@ func (r *ScatteredConstructionRule) reportViolations(ctx *core.FileContext) []*c
 		}
 	}
 
+	sort.SliceStable(violations, func(i, j int) bool {
+		if violations[i].File != violations[j].File {
+			return violations[i].File < violations[j].File
+		}
+		return violations[i].Line < violations[j].Line
+	})
 	return violations
 }
 
@@ -167,12 +182,10 @@ func resolveConstructedTypeName(expr ast.Expr) string {
 func formatOtherLocations(sites []constructionSite, exclude constructionSite) string {
 	var others []string
 	for _, s := range sites {
-		if s.file == exclude.file && s.line == exclude.line {
+		if s.fileCtx == exclude.fileCtx && s.line == exclude.line {
 			continue
 		}
-		parts := strings.Split(s.file, "/")
-		short := parts[len(parts)-1]
-		others = append(others, fmt.Sprintf("%s:%d", short, s.line))
+		others = append(others, fmt.Sprintf("%s:%d", s.fileCtx.RelPath, s.line))
 	}
 	if len(others) > 3 {
 		return strings.Join(others[:3], ", ") + fmt.Sprintf(" +%d more", len(others)-3)

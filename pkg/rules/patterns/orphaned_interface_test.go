@@ -14,9 +14,21 @@ func orphanedInterfaceProject(t *testing.T, files map[string]string) []*core.Vio
 	return runRuleOnFiles(t, NewOrphanedInterfaceRule(), files)
 }
 
-func TestOrphanedInterfaceSkipsRuleCapabilityInterface(t *testing.T) {
+// A capability interface probed with a type assertion is used; the typed
+// search sees the assertion, the name suffix is not what exempts it.
+func TestOrphanedInterfaceCapabilityInterfaceUsedByAssertion(t *testing.T) {
 	violations := orphanedInterfaceProject(t, map[string]string{
-		"rules/rule.go": "package rules\n\ntype ProjectRule interface { AnalyzeProject() error }\n",
+		"rules/rule.go": `package rules
+
+type ProjectRule interface{ AnalyzeProject() error }
+
+func Run(rule any) error {
+	if projectRule, ok := rule.(ProjectRule); ok {
+		return projectRule.AnalyzeProject()
+	}
+	return nil
+}
+`,
 	})
 	require.Empty(t, violations)
 }

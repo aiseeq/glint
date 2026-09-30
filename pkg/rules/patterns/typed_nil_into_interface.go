@@ -3,6 +3,7 @@ package patterns
 import (
 	"errors"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"sort"
 	"strings"
@@ -31,11 +32,15 @@ func init() {
 // Правило намеренно узкое, иначе тонет в шуме:
 //   - указатель должен где-то в этом же файле сравниваться с nil — иначе считать его
 //     пустым нет оснований;
-//   - получатель должен зависимость сохранять: конструктор, сеттер или присваивание
-//     в интерфейсную переменную. Передача в обходчик вроде ast.Inspect не в счёт;
+//   - получатель должен зависимость сохранять: присваивание в интерфейсную переменную,
+//     поле интерфейсного типа в составном литерале или вызов функции проекта, которая
+//     параметр сохраняет (в поле, в литерал, в возвращаемое значение, дальше по цепочке
+//     вызовов). Получатель, чьё тело не загружено (стандартная библиотека, внешний
+//     модуль), неизвестен — и молчание; передача в обходчик вроде ast.Inspect не в счёт;
 //   - проверка на nil в Cleanup/Close доказательством не считается: teardown по замыслу
 //     переживает частично собранный объект;
-//   - присваивание внутри `if ptr != nil { ... }` и код после `if ptr == nil { return }`
+//   - присваивание внутри `if ptr != nil { ... }`, код после `if ptr == nil { return }`
+//     и после `if ptr == nil { ptr = &T{} }` (или любого `ptr = &T{}` / `new(T)`)
 //     признаются правильными — это и есть нужная нормализация.
 type TypedNilIntoInterfaceRule struct {
 	*rules.BaseRule
@@ -190,6 +195,7 @@ func (r *TypedNilIntoInterfaceRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 		}
 	}
 
+	stores := newParamStores(ctx)
 	var violations []*core.Violation
 	for _, pkgCtx := range ctx.Packages {
 		if pkgCtx == nil || pkgCtx.Package == nil {
@@ -214,7 +220,7 @@ func (r *TypedNilIntoInterfaceRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 					continue
 				}
 				w := &typedNilWalker{
-					rule: r, ctx: ctx, pkg: pkgCtx.Package,
+					rule: r, ctx: ctx, pkg: pkgCtx.Package, stores: stores,
 					nilable: nilable, guarded: map[types.Object]bool{},
 				}
 				w.walkStmt(fn.Body)
@@ -277,6 +283,7 @@ type typedNilWalker struct {
 	rule    *TypedNilIntoInterfaceRule
 	ctx     *core.GoProjectContext
 	pkg     *packages.Package
+	stores  *paramStores
 	nilable map[types.Object]bool
 	guarded map[types.Object]bool
 	found   []*core.Violation
@@ -341,6 +348,8 @@ func (w *typedNilWalker) walkLeaf(node ast.Node) {
 			w.checkAssign(inner)
 		case *ast.ValueSpec:
 			w.checkValueSpec(inner)
+		case *ast.CompositeLit:
+			w.checkCompositeLit(inner)
 		}
 		return true
 	})
@@ -363,19 +372,94 @@ func (w *typedNilWalker) walkList(list []ast.Stmt) {
 		}
 	}()
 
+	lift := func(obj types.Object) {
+		if !w.guarded[obj] {
+			w.guarded[obj] = true
+			lifted = append(lifted, obj)
+		}
+	}
+
 	for _, stmt := range list {
-		if ifStmt, ok := stmt.(*ast.IfStmt); ok && terminates(ifStmt.Body) && ifStmt.Else == nil {
-			w.walkIf(ifStmt)
+		if ifStmt, ok := stmt.(*ast.IfStmt); ok && ifStmt.Else == nil {
+			exits := terminates(ifStmt.Body)
+			// `if p == nil { return }` and `if p == nil { p = &T{} }` both
+			// leave p non-nil after the if.
+			var normalized []types.Object
 			for _, obj := range nilOperands(w.pkg, ifStmt.Cond, true) {
-				if !w.guarded[obj] {
-					w.guarded[obj] = true
-					lifted = append(lifted, obj)
+				if exits || w.assignsNonNil(ifStmt.Body, obj) {
+					normalized = append(normalized, obj)
 				}
 			}
-			continue
+			if exits || len(normalized) > 0 {
+				w.walkIf(ifStmt)
+				for _, obj := range normalized {
+					lift(obj)
+				}
+				continue
+			}
 		}
 		w.walkStmt(stmt)
+		if assign, ok := stmt.(*ast.AssignStmt); ok {
+			w.trackAssignedValues(assign, lift)
+		}
 	}
+}
+
+// trackAssignedValues follows assignments to nil-able pointers in a statement
+// list: `p = &T{}` or `p = new(T)` makes p non-nil for the statements after
+// it, any other value may be nil again.
+func (w *typedNilWalker) trackAssignedValues(assign *ast.AssignStmt, lift func(types.Object)) {
+	if len(assign.Lhs) != len(assign.Rhs) {
+		return
+	}
+	for i, lhs := range assign.Lhs {
+		obj := nilableObject(w.pkg, lhs)
+		if obj == nil || !w.nilable[obj] {
+			continue
+		}
+		if w.isNonNilPointer(assign.Rhs[i]) {
+			lift(obj)
+			continue
+		}
+		delete(w.guarded, obj)
+	}
+}
+
+// assignsNonNil reports whether the block assigns obj a non-nil pointer in one
+// of its own statements.
+func (w *typedNilWalker) assignsNonNil(block *ast.BlockStmt, obj types.Object) bool {
+	if block == nil {
+		return false
+	}
+	for _, stmt := range block.List {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != len(assign.Rhs) {
+			continue
+		}
+		for i, lhs := range assign.Lhs {
+			if nilableObject(w.pkg, lhs) == obj && w.isNonNilPointer(assign.Rhs[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isNonNilPointer reports an expression that is a non-nil pointer by
+// construction: an address (&T{}, &x) or new(T).
+func (w *typedNilWalker) isNonNilPointer(expr ast.Expr) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.UnaryExpr:
+		return e.Op == token.AND
+	case *ast.CallExpr:
+		ident, ok := ast.Unparen(e.Fun).(*ast.Ident)
+		if !ok {
+			return false
+		}
+		builtin, ok := w.pkg.TypesInfo.Uses[ident].(*types.Builtin)
+		return ok && builtin.Name() == "new"
+	}
+	return false
 }
 
 // walkBlock walks a block as an ordered statement list.
@@ -406,15 +490,13 @@ func (w *typedNilWalker) walkIf(ifStmt *ast.IfStmt) {
 }
 
 // checkCall reports pointer arguments handed to interface parameters of a callee that
-// stores them. Проверяются конструкторы и сеттеры: опасен не любой указатель, попавший в
-// интерфейс, а тот, который получатель кладёт в поле и позже сверяет с nil. Передача узла
-// в обходчик вроде ast.Inspect ничего не сохраняет и к этому классу не относится.
+// stores them: опасен не любой указатель, попавший в интерфейс, а тот, который получатель
+// сохраняет и позже сверяет с nil. Сохраняет ли — решает тело получателя, а не его имя;
+// передача узла в обходчик вроде ast.Inspect ничего не сохраняет и к этому классу не
+// относится.
 func (w *typedNilWalker) checkCall(call *ast.CallExpr) {
 	callee := calleeFunc(w.pkg, call)
 	if callee == nil {
-		return
-	}
-	if !strings.HasPrefix(callee.Name(), "New") && !strings.HasPrefix(callee.Name(), "Set") {
 		return
 	}
 	sig, ok := callee.Type().(*types.Signature)
@@ -437,7 +519,41 @@ func (w *typedNilWalker) checkCall(call *ast.CallExpr) {
 		default:
 			continue
 		}
+		if !methodfulInterface(paramType) || !w.stores.storesParam(callee, i) {
+			continue
+		}
 		w.report(arg, paramType, callee.Name()+"()")
+	}
+}
+
+// checkCompositeLit reports pointers placed in interface-typed fields of a struct
+// literal: `&Service{alerter: m}` сохраняет указатель в интерфейс так же, как сеттер.
+func (w *typedNilWalker) checkCompositeLit(lit *ast.CompositeLit) {
+	litType := w.pkg.TypesInfo.TypeOf(lit)
+	if litType == nil {
+		return
+	}
+	st, ok := litType.Underlying().(*types.Struct)
+	if !ok {
+		return
+	}
+	typeName := types.TypeString(litType, types.RelativeTo(w.pkg.Types))
+	for i, elt := range lit.Elts {
+		if kv, isKeyValue := elt.(*ast.KeyValueExpr); isKeyValue {
+			key, isIdent := kv.Key.(*ast.Ident)
+			if !isIdent {
+				continue
+			}
+			field, isField := w.pkg.TypesInfo.Uses[key].(*types.Var)
+			if !isField || !field.IsField() {
+				continue
+			}
+			w.report(kv.Value, field.Type(), typeName+"{"+field.Name()+"}")
+			continue
+		}
+		if i < st.NumFields() {
+			w.report(elt, st.Field(i).Type(), typeName+"{"+st.Field(i).Name()+"}")
+		}
 	}
 }
 
@@ -490,4 +606,233 @@ func (w *typedNilWalker) report(arg ast.Expr, target types.Type, sink string) {
 	v.WithContext("pattern", "typed_nil_into_interface")
 	v.WithContext("pointer", text)
 	w.found = append(w.found, v)
+}
+
+// paramStores answers whether a function of the project keeps a parameter
+// beyond the call: stores it in a field, a map, a package variable or a
+// composite literal, returns it, sends it, appends it, or passes it on to a
+// function that does. The declarations come from the loaded packages; a
+// function whose body is not loaded is unknown and does not store.
+type paramStores struct {
+	decls   map[*types.Func]paramStoresDecl
+	results map[paramStoresKey]bool
+}
+
+type paramStoresDecl struct {
+	decl *ast.FuncDecl
+	info *types.Info
+}
+
+type paramStoresKey struct {
+	fn    *types.Func
+	index int
+}
+
+func newParamStores(ctx *core.GoProjectContext) *paramStores {
+	stores := &paramStores{
+		decls:   make(map[*types.Func]paramStoresDecl),
+		results: make(map[paramStoresKey]bool),
+	}
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
+			continue
+		}
+		info := pkgCtx.Package.TypesInfo
+		for _, file := range pkgCtx.Package.Syntax {
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+				if obj, ok := info.Defs[fn.Name].(*types.Func); ok {
+					stores.decls[obj] = paramStoresDecl{decl: fn, info: info}
+				}
+			}
+		}
+	}
+	return stores
+}
+
+// storesParam reports whether fn keeps its index-th argument; an argument past
+// the last parameter belongs to the variadic one.
+func (s *paramStores) storesParam(fn *types.Func, index int) bool {
+	fn = fn.Origin()
+	key := paramStoresKey{fn: fn, index: index}
+	if result, done := s.results[key]; done {
+		return result
+	}
+	// A recursive chain answers "no" for itself while it is being decided.
+	s.results[key] = false
+	found, ok := s.decls[fn]
+	if !ok {
+		return false
+	}
+	var params []*ast.Ident
+	for _, field := range found.decl.Type.Params.List {
+		params = append(params, field.Names...)
+	}
+	if len(params) == 0 {
+		return false
+	}
+	if index >= len(params) {
+		index = len(params) - 1
+	}
+	param := found.info.Defs[params[index]]
+	if param == nil {
+		return false
+	}
+	result := s.keeps(found.decl.Body, found.info, param)
+	s.results[key] = result
+	return result
+}
+
+// keeps reports whether the body keeps the value of obj beyond the call,
+// following local copies (`x := a`, `for _, x := range a`).
+func (s *paramStores) keeps(body *ast.BlockStmt, info *types.Info, obj types.Object) bool {
+	tracked := map[types.Object]bool{obj: true}
+	queue := []types.Object{obj}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		kept, aliases := s.usesOf(body, info, current)
+		if kept {
+			return true
+		}
+		for _, alias := range aliases {
+			if !tracked[alias] {
+				tracked[alias] = true
+				queue = append(queue, alias)
+			}
+		}
+	}
+	return false
+}
+
+// usesOf classifies every use of obj in the body: whether one of them keeps
+// the value, and which local variables receive a copy of it.
+func (s *paramStores) usesOf(body *ast.BlockStmt, info *types.Info, obj types.Object) (bool, []types.Object) {
+	var aliases []types.Object
+	kept := false
+	var stack []ast.Node
+	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		if ident, ok := n.(*ast.Ident); ok && !kept && info.Uses[ident] == obj {
+			var alias types.Object
+			kept, alias = s.useKeeps(ident, stack, info)
+			if alias != nil {
+				aliases = append(aliases, alias)
+			}
+		}
+		stack = append(stack, n)
+		return true
+	})
+	return kept, aliases
+}
+
+// useKeeps walks up from one use of the value through the expressions that
+// carry it (parentheses, composite literals, conversions) to the statement
+// that decides its fate.
+func (s *paramStores) useKeeps(use ast.Expr, stack []ast.Node, info *types.Info) (bool, types.Object) {
+	current := ast.Node(use)
+	for i := len(stack) - 1; i >= 0; i-- {
+		switch parent := stack[i].(type) {
+		case *ast.ParenExpr, *ast.CompositeLit, *ast.KeyValueExpr:
+		case *ast.UnaryExpr:
+			if parent.Op != token.AND {
+				return false, nil
+			}
+		case *ast.CallExpr:
+			if tv, ok := info.Types[parent.Fun]; ok && tv.IsType() {
+				break // a conversion carries the value on
+			}
+			return s.callKeeps(parent, current, info), nil
+		case *ast.AssignStmt:
+			return assignKeeps(parent.Lhs, parent.Rhs, current, info)
+		case *ast.ValueSpec:
+			lhs := make([]ast.Expr, len(parent.Names))
+			for j, name := range parent.Names {
+				lhs[j] = name
+			}
+			return assignKeeps(lhs, parent.Values, current, info)
+		case *ast.RangeStmt:
+			if current != parent.X || parent.Tok != token.DEFINE {
+				return false, nil
+			}
+			if value, ok := parent.Value.(*ast.Ident); ok {
+				return false, info.Defs[value]
+			}
+			return false, nil
+		case *ast.ReturnStmt:
+			return true, nil
+		case *ast.SendStmt:
+			return current == parent.Value, nil
+		default:
+			return false, nil
+		}
+		current = stack[i]
+	}
+	return false, nil
+}
+
+// callKeeps reports whether a call keeps the argument: append does, a project
+// function does when it keeps its parameter, anything else is unknown.
+func (s *paramStores) callKeeps(call *ast.CallExpr, arg ast.Node, info *types.Info) bool {
+	if ident, ok := ast.Unparen(call.Fun).(*ast.Ident); ok {
+		if builtin, ok := info.Uses[ident].(*types.Builtin); ok {
+			return builtin.Name() == "append" && len(call.Args) > 0 && arg != call.Args[0]
+		}
+	}
+	callee := calleeFromInfo(info, call)
+	if callee == nil {
+		return false
+	}
+	for i, candidate := range call.Args {
+		if candidate == arg {
+			return s.storesParam(callee, i)
+		}
+	}
+	return false
+}
+
+// calleeFromInfo resolves the function or method a call invokes.
+func calleeFromInfo(info *types.Info, call *ast.CallExpr) *types.Func {
+	switch fun := ast.Unparen(call.Fun).(type) {
+	case *ast.Ident:
+		fn, _ := info.Uses[fun].(*types.Func)
+		return fn
+	case *ast.SelectorExpr:
+		fn, _ := info.Uses[fun.Sel].(*types.Func)
+		return fn
+	}
+	return nil
+}
+
+// assignKeeps decides an assignment of the value: into a field, an element,
+// a dereferenced pointer or a package variable it is kept; into a local
+// variable it is copied, and the copy is followed.
+func assignKeeps(lhs, rhs []ast.Expr, value ast.Node, info *types.Info) (bool, types.Object) {
+	if len(lhs) != len(rhs) {
+		return false, nil
+	}
+	for i, expr := range rhs {
+		if expr != value {
+			continue
+		}
+		ident, ok := ast.Unparen(lhs[i]).(*ast.Ident)
+		if !ok {
+			return true, nil
+		}
+		obj := info.ObjectOf(ident)
+		if obj == nil || obj.Pkg() == nil {
+			return false, nil
+		}
+		if obj.Parent() == obj.Pkg().Scope() {
+			return true, nil
+		}
+		return false, obj
+	}
+	return false, nil
 }

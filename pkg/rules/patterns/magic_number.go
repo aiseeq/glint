@@ -64,18 +64,10 @@ func (r *MagicNumberRule) shouldSkipFile(path string) bool {
 	if isConfigOrConstantsPath(pathLower) {
 		return true
 	}
-	// Blockchain/crypto code often carries chain IDs, which are self-describing.
-	// "chain/" also covers "blockchain/".
-	skipPatterns := []string{
-		"chain/",      // chain-related code (incl. blockchain/)
-		"cryptoprov/", // crypto provider - chain IDs
-	}
-	for _, pattern := range skipPatterns {
-		if strings.Contains(pathLower, pattern) {
-			return true
-		}
-	}
-	return false
+	// Blockchain code is full of chain IDs, which are self-describing.
+	// "chain/" also covers "blockchain/". Chain IDs elsewhere are recognized
+	// where the code labels them (see chainID in litContexts).
+	return strings.Contains(pathLower, "chain/")
 }
 
 // AnalyzeFile checks for magic numbers
@@ -159,7 +151,8 @@ func (r *MagicNumberRule) shouldSkipValue(contexts *litContexts, lit *ast.BasicL
 		return true
 	}
 	return contexts.array[lit] || contexts.timeDuration[lit] ||
-		contexts.comparison[lit] || contexts.varDecl[lit] || contexts.tableField[lit]
+		contexts.comparison[lit] || contexts.varDecl[lit] || contexts.tableField[lit] ||
+		contexts.chainID[lit]
 }
 
 // litContexts records, per integer literal, the syntactic contexts in which the
@@ -171,6 +164,7 @@ type litContexts struct {
 	comparison   map[*ast.BasicLit]bool // operand of a comparison
 	varDecl      map[*ast.BasicLit]bool // value of a named var declaration
 	tableField   map[*ast.BasicLit]bool // keyed field value in a package-level var table
+	chainID      map[*ast.BasicLit]bool // a value the code labels as a chain ID
 }
 
 func collectLitContexts(file *ast.File) *litContexts {
@@ -180,6 +174,7 @@ func collectLitContexts(file *ast.File) *litContexts {
 		comparison:   make(map[*ast.BasicLit]bool),
 		varDecl:      make(map[*ast.BasicLit]bool),
 		tableField:   make(map[*ast.BasicLit]bool),
+		chainID:      make(map[*ast.BasicLit]bool),
 	}
 	contexts.collectTableFields(file)
 
@@ -203,11 +198,49 @@ func collectLitContexts(file *ast.File) *litContexts {
 			for _, val := range node.Values {
 				markLit(contexts.varDecl, val)
 			}
+		case *ast.KeyValueExpr:
+			if namesChainID(node.Key) {
+				markLit(contexts.chainID, node.Value)
+			}
+		case *ast.AssignStmt:
+			if len(node.Lhs) == len(node.Rhs) {
+				for i, lhs := range node.Lhs {
+					if namesChainID(lhs) {
+						markLit(contexts.chainID, node.Rhs[i])
+					}
+				}
+			}
+		case *ast.SwitchStmt:
+			if node.Tag != nil && namesChainID(node.Tag) {
+				for _, stmt := range node.Body.List {
+					if clause, ok := stmt.(*ast.CaseClause); ok {
+						for _, value := range clause.List {
+							markLit(contexts.chainID, value)
+						}
+					}
+				}
+			}
 		}
 		return true
 	})
 
 	return contexts
+}
+
+// namesChainID reports a key, variable or field named as a chain ID
+// (ChainID, chainId, cfg.ChainID): EIP-155 chain IDs are registry numbers a
+// named constant would only repeat.
+func namesChainID(expr ast.Expr) bool {
+	var name string
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		name = e.Name
+	case *ast.SelectorExpr:
+		name = e.Sel.Name
+	default:
+		return false
+	}
+	return strings.Contains(strings.ToLower(name), "chainid")
 }
 
 // collectTableFields marks numbers written as keyed struct fields inside

@@ -68,6 +68,41 @@ func example() []int {
 `,
 			expectMatch: false,
 		},
+		{
+			// The compilable form of a discarded append: a bare append
+			// statement does not compile, `_ =` silences the compiler.
+			name: "append assigned to blank",
+			code: `package main
+
+func example(slice []int) []int {
+	_ = append(slice, 4)
+	return slice
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "append beside a blank in a tuple assignment",
+			code: `package main
+
+func example(slice []int) ([]int, int) {
+	var n int
+	_, slice = n, append(slice, 4)
+	return slice, n
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "append in a blank var declaration",
+			code: `package main
+
+var base = []int{1}
+
+var _ = append(base, 2)
+`,
+			expectMatch: true,
+		},
 	}
 
 	for _, tt := range tests {

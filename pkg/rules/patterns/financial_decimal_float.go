@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -28,24 +29,54 @@ func NewFinancialDecimalFloatRule() *FinancialDecimalFloatRule {
 	)}
 }
 
-// AnalyzeFile checks two-result Float64 assignments on shopspring decimal values.
+// AnalyzeFile checks two-result Float64 assignments on shopspring decimal
+// values, judging the receiver by what the file itself declares.
 func (r *FinancialDecimalFloatRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *FinancialDecimalFloatRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; with type information the receiver's
+// type decides whether Float64 is decimal.Decimal's.
+func (r *FinancialDecimalFloatRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze reports `x, _ := d.Float64()` on a decimal named as money. info is
+// nil for a file without type information: then a receiver is a decimal only
+// when the file declares it as one, and anything else is unknown and not
+// reported.
+func (r *FinancialDecimalFloatRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() || ctx.GoAST == nil {
 		return nil
 	}
 
 	var violations []*core.Violation
-	decimalAliases := helpers.PackageAliases(ctx.GoAST, `"github.com/shopspring/decimal"`, "decimal")
+	decimalAliases := helpers.PackageAliases(ctx.GoAST, `"`+shopspringDecimalPath+`"`, "decimal")
 	if len(decimalAliases) == 0 {
 		return nil
 	}
-	decimalFields := collectDecimalFieldEvidence(ctx.GoAST, decimalAliases)
+	var decimalFields decimalFieldEvidence
+	if info == nil {
+		decimalFields = collectDecimalFieldEvidence(ctx.GoAST, decimalAliases)
+	}
 	for _, declaration := range ctx.GoAST.Decls {
 		function, ok := declaration.(*ast.FuncDecl)
 		if !ok || function.Body == nil {
 			continue
 		}
-		types := NewTypeInferrerFromNode(function)
+		var inferred *TypeInferrer
+		if info == nil {
+			inferred = NewTypeInferrerFromNode(function)
+		}
+		isDecimal := func(expr ast.Expr, position token.Pos) bool {
+			if info != nil {
+				return isShopspringDecimalType(info.TypeOf(expr))
+			}
+			return isShopspringDecimalReceiver(expr, position, function, inferred, decimalAliases, decimalFields)
+		}
 		ast.Inspect(function.Body, func(node ast.Node) bool {
 			assignment, ok := node.(*ast.AssignStmt)
 			if !ok || len(assignment.Lhs) != 2 || len(assignment.Rhs) != 1 || !isBlankIdentifier(assignment.Lhs[1]) {
@@ -60,7 +91,7 @@ func (r *FinancialDecimalFloatRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 			if !ok || selector.Sel.Name != "Float64" {
 				return true
 			}
-			if !isShopspringDecimalReceiver(selector.X, assignment.Pos(), function, types, decimalAliases, decimalFields) {
+			if !isDecimal(selector.X, assignment.Pos()) {
 				return true
 			}
 			if !hasFinancialValueName(assignment.Lhs[0]) && !hasFinancialValueName(selector.X) {
@@ -88,19 +119,19 @@ func isShopspringDecimalReceiver(
 	expr ast.Expr,
 	position token.Pos,
 	function *ast.FuncDecl,
-	types *TypeInferrer,
+	inferred *TypeInferrer,
 	aliases map[string]bool,
 	decimalFields decimalFieldEvidence,
 ) bool {
 	if identifier, ok := expr.(*ast.Ident); ok {
-		if typeName, scoped := rangeValueTypeAt(function, identifier.Name, position, types); scoped {
+		if typeName, scoped := rangeValueTypeAt(function, identifier.Name, position, inferred); scoped {
 			return isShopspringDecimalTypeName(typeName, aliases)
 		}
 	}
-	if selector, ok := expr.(*ast.SelectorExpr); ok && decimalFields.matchesSelector(selector, types) {
+	if selector, ok := expr.(*ast.SelectorExpr); ok && decimalFields.matchesSelector(selector, inferred) {
 		return true
 	}
-	typeName := types.analyzeExpr(expr).TypeName
+	typeName := inferred.analyzeExpr(expr).TypeName
 	return isShopspringDecimalTypeName(typeName, aliases)
 }
 
@@ -171,11 +202,11 @@ func collectDecimalFieldEvidence(file *ast.File, aliases map[string]bool) decima
 	return evidence
 }
 
-func (evidence decimalFieldEvidence) matchesSelector(selector *ast.SelectorExpr, types *TypeInferrer) bool {
+func (evidence decimalFieldEvidence) matchesSelector(selector *ast.SelectorExpr, inferred *TypeInferrer) bool {
 	if !evidence.unambiguous[selector.Sel.Name] {
 		return false
 	}
-	typeName := types.analyzeExpr(selector.X).TypeName
+	typeName := inferred.analyzeExpr(selector.X).TypeName
 	for len(typeName) > 0 && typeName[0] == '*' {
 		typeName = typeName[1:]
 	}
@@ -196,7 +227,7 @@ func isShopspringDecimalTypeExpr(expr ast.Expr, aliases map[string]bool) bool {
 	}
 }
 
-func rangeValueTypeAt(function *ast.FuncDecl, name string, position token.Pos, types *TypeInferrer) (string, bool) {
+func rangeValueTypeAt(function *ast.FuncDecl, name string, position token.Pos, inferred *TypeInferrer) (string, bool) {
 	var innermost *ast.RangeStmt
 	ast.Inspect(function.Body, func(node ast.Node) bool {
 		rangeStmt, ok := node.(*ast.RangeStmt)
@@ -212,9 +243,12 @@ func rangeValueTypeAt(function *ast.FuncDecl, name string, position token.Pos, t
 	if innermost == nil {
 		return "", false
 	}
-	return types.analyzeExpr(innermost.X).ElementTypeName, true
+	return inferred.analyzeExpr(innermost.X).ElementTypeName, true
 }
 
+// hasFinancialValueName reports whether an identifier of the expression names
+// money. The value is already a decimal, so money flow words (total, payout,
+// payment, ...) count alongside the value and market words.
 func hasFinancialValueName(expr ast.Expr) bool {
 	found := false
 	ast.Inspect(expr, func(node ast.Node) bool {
@@ -222,7 +256,7 @@ func hasFinancialValueName(expr ast.Expr) bool {
 		if !ok {
 			return true
 		}
-		if financialValueName(identifier.Name) {
+		if financialValueName(identifier.Name) || hasTokenIn(identifier.Name, moneyFlowTokens) {
 			found = true
 			return false
 		}

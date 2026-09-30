@@ -6,7 +6,9 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -38,7 +40,10 @@ func init() {
 // (a receiver whose type name reads as a repository, store or DAO) and that can both run in
 // the same pass through the function. What is not reported:
 //
-//   - Calls in mutually exclusive arms of the same if or switch — only one of them runs.
+//   - Writes no single control-flow path reaches together: different arms of an if,
+//     switch or select, a write in an arm that returns (or calls os.Exit, log.Fatal,
+//     panic) before the other one. Helpers are summarised per path too, so a helper
+//     that writes one thing or the other contributes one write per path.
 //   - A retry of the same call: the same method name twice is one write attempted twice.
 //   - Writes inside a goroutine body: that work outlives the function and cannot share its
 //     transaction. Project spawners that hide the `go` inside a helper, and telemetry that
@@ -168,20 +173,18 @@ func (r *MultiWriteNoTransactionRule) AnalyzeGoProject(ctx *core.GoProjectContex
 	graph := r.buildGraph(ctx)
 
 	var violations []*core.Violation
-	for _, node := range graph {
-		if node.name != "" && covered[node.name] {
+	// Sorted, so that summaries cut at a recursive call come out the same on every run.
+	for _, name := range slices.Sorted(maps.Keys(graph.funcs)) {
+		if covered[name] {
 			continue
 		}
-		writes := graph.writesOf(node.name, node, map[string]bool{})
-		if _, ok := firstConcurrentPair(writes); !ok {
-			continue
-		}
+		summary := graph.summary(name)
 		// Сообщаем о самом внутреннем нарушителе: если записи разъезжаются уже
 		// в вызываемой функции, чинить надо её, а не каждого её вызывающего.
-		if graph.calleeAlreadyOffends(node) {
+		if !summary.offends || summary.calleeOffends {
 			continue
 		}
-		violations = append(violations, r.violation(ctx, node, writes))
+		violations = append(violations, r.violation(ctx, graph.funcs[name], summary.pair))
 	}
 
 	sort.Slice(violations, func(i, j int) bool {
@@ -193,19 +196,9 @@ func (r *MultiWriteNoTransactionRule) AnalyzeGoProject(ctx *core.GoProjectContex
 	return violations, nil
 }
 
-// branchArm identifies one arm of one branching statement, and says whether that arm
-// leaves the function. An arm that returns makes everything after the branch unreachable
-// from inside it, so its writes never meet the later ones.
-type branchArm struct {
-	node       string
-	arm        string
-	terminates bool
-}
-
-// writeCall is one mutating call together with the branch arms enclosing it.
+// writeCall is one mutating call.
 type writeCall struct {
 	method string
-	arms   []branchArm
 	// via — цепочка хелперов от разбираемой функции до самой записи. Без неё находку
 	// через два уровня вызовов невозможно проверить: в теле функции записи не видно.
 	via []string
@@ -219,67 +212,113 @@ func (w writeCall) where() string {
 	return w.method + " (через " + strings.Join(w.via, " → ") + ")"
 }
 
-// funcNode is one analysed function: its own writes and the functions it calls outside a
-// transaction callback.
+// through returns the write as seen from a caller of helper.
+func (w writeCall) through(helper string) writeCall {
+	return writeCall{method: w.method, via: append([]string{helper}, w.via...)}
+}
+
+// writePath is the flow state of one control-flow path: the write it has
+// performed so far, if any. A path never carries two distinct writes — the
+// second one is the finding, recorded in the function summary, and the path
+// keeps its first write — so a function has at most one path per written
+// method plus the path without writes.
+type writePath struct {
+	write *writeCall
+}
+
+func writePathKey(path writePath) string {
+	if path.write == nil {
+		return ""
+	}
+	return path.write.method
+}
+
+func joinWritePaths(left, right []writePath) []writePath {
+	return joinFlowPaths(left, right, writePathKey)
+}
+
+// funcNode is one analysed function.
 type funcNode struct {
-	name    string
 	display string
 	file    string
 	pos     token.Pos
-	writes  []writeCall
-	// callArms — плечи ветвления в точке вызова: записи вызываемой функции наследуют их,
-	// иначе вызов из ветки if выглядел бы безусловным.
-	calls []callSite
+	decl    *ast.FuncDecl
+	info    *types.Info
 }
 
-type callSite struct {
-	name string
-	arms []branchArm
+// writeSummary is what one function contributes to the paths of its callers.
+type writeSummary struct {
+	// exits are the states of the paths that return to the caller.
+	exits []writePath
+	// writes lists every write the function may perform, one per method,
+	// including those on paths that never return.
+	writes []writeCall
+	// offends is set when two distinct writes run on one path, directly or
+	// inside a callee; pair is the first such pair found.
+	offends bool
+	pair    [2]writeCall
+	// calleeOffends is set when a called function already offends on its own.
+	calleeOffends bool
 }
 
-// callGraph maps a function's full name to its node.
-type callGraph map[string]*funcNode
+func (s *writeSummary) record(write writeCall) {
+	for _, known := range s.writes {
+		if known.method == write.method {
+			return
+		}
+	}
+	s.writes = append(s.writes, write)
+}
 
-// writesOf returns the writes the function performs directly and through its callees.
-func (g callGraph) writesOf(name string, node *funcNode, visiting map[string]bool) []writeCall {
-	if node == nil || visiting[name] {
+func (s *writeSummary) offend(first, second writeCall) {
+	if s.offends {
+		return
+	}
+	s.offends = true
+	s.pair = [2]writeCall{first, second}
+}
+
+// callGraph holds every project function and the summaries computed so far.
+// Each function is summarised once; its callers reuse the summary.
+type callGraph struct {
+	rule      *MultiWriteNoTransactionRule
+	funcs     map[string]*funcNode
+	summaries map[string]*writeSummary
+	visiting  map[string]bool
+}
+
+// summary returns the write summary of a project function, or nil for a
+// function outside the graph.
+func (g *callGraph) summary(name string) *writeSummary {
+	if summary, ok := g.summaries[name]; ok {
+		return summary
+	}
+	node, ok := g.funcs[name]
+	if !ok {
 		return nil
 	}
-	visiting[name] = true
-	defer delete(visiting, name)
-
-	writes := append([]writeCall(nil), node.writes...)
-	for _, call := range node.calls {
-		callee, ok := g[call.name]
-		if !ok {
-			continue
-		}
-		for _, w := range g.writesOf(call.name, callee, visiting) {
-			w.arms = append(append([]branchArm(nil), call.arms...), w.arms...)
-			w.via = append([]string{callee.display}, w.via...)
-			writes = append(writes, w)
-		}
+	if g.visiting[name] {
+		// A recursive call re-enters a function still being summarised: its
+		// writes are already on the paths of the outer activation.
+		return &writeSummary{exits: []writePath{{}}}
 	}
-	return writes
+	g.visiting[name] = true
+	summary := &writeSummary{}
+	analyzer := &writeFlowAnalyzer{graph: g, info: node.info, summary: summary}
+	summary.exits = analyzer.walkBody(node.decl.Body, []writePath{{}})
+	delete(g.visiting, name)
+	g.summaries[name] = summary
+	return summary
 }
 
-// calleeAlreadyOffends reports whether some callee already splits writes on its own.
-func (g callGraph) calleeAlreadyOffends(node *funcNode) bool {
-	for _, call := range node.calls {
-		callee, ok := g[call.name]
-		if !ok {
-			continue
-		}
-		if _, offends := firstConcurrentPair(g.writesOf(call.name, callee, map[string]bool{})); offends {
-			return true
-		}
+// buildGraph collects every project function.
+func (r *MultiWriteNoTransactionRule) buildGraph(ctx *core.GoProjectContext) *callGraph {
+	graph := &callGraph{
+		rule:      r,
+		funcs:     make(map[string]*funcNode),
+		summaries: make(map[string]*writeSummary),
+		visiting:  make(map[string]bool),
 	}
-	return false
-}
-
-// buildGraph collects every project function with its own writes and outgoing calls.
-func (r *MultiWriteNoTransactionRule) buildGraph(ctx *core.GoProjectContext) callGraph {
-	graph := make(callGraph)
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil {
 			continue
@@ -298,14 +337,12 @@ func (r *MultiWriteNoTransactionRule) buildGraph(ctx *core.GoProjectContext) cal
 				if !ok {
 					continue
 				}
-				writes, calls := r.scanBody(fn.Body, info)
-				graph[obj.FullName()] = &funcNode{
-					name:    obj.FullName(),
+				graph.funcs[obj.FullName()] = &funcNode{
 					display: fn.Name.Name,
 					file:    file.RelPath,
 					pos:     fn.Pos(),
-					writes:  writes,
-					calls:   calls,
+					decl:    fn,
+					info:    info,
 				}
 			}
 		}
@@ -314,8 +351,7 @@ func (r *MultiWriteNoTransactionRule) buildGraph(ctx *core.GoProjectContext) cal
 }
 
 // violation renders the report for a function whose writes are not atomic.
-func (r *MultiWriteNoTransactionRule) violation(ctx *core.GoProjectContext, node *funcNode, writes []writeCall) *core.Violation {
-	pair, _ := firstConcurrentPair(writes)
+func (r *MultiWriteNoTransactionRule) violation(ctx *core.GoProjectContext, node *funcNode, pair [2]writeCall) *core.Violation {
 	pos := ctx.FileSet.Position(node.pos)
 	return &core.Violation{
 		Rule:   r.Name(),
@@ -335,85 +371,208 @@ func (r *MultiWriteNoTransactionRule) violation(ctx *core.GoProjectContext, node
 	}
 }
 
-// scanBody collects the store mutations the body performs itself and the project functions
-// it calls, both outside any transaction callback.
-func (r *MultiWriteNoTransactionRule) scanBody(body *ast.BlockStmt, info *types.Info) ([]writeCall, []callSite) {
-	var writes []writeCall
-	var calls []callSite
-	var arms []branchArm
+// writeFlowAnalyzer walks one function body with the shared flow walker. The
+// state is the list of writePaths; calls of project functions splice in the
+// callee's summary, closures are walked in place.
+type writeFlowAnalyzer struct {
+	graph   *callGraph
+	info    *types.Info
+	summary *writeSummary
+	// exits collects the paths returning from the body being walked.
+	exits []writePath
+}
 
-	var walk func(n ast.Node)
-	visitWithArm := func(n ast.Node, arm branchArm) {
-		if n == nil {
-			return
-		}
-		arms = append(arms, arm)
-		walk(n)
-		arms = arms[:len(arms)-1]
-	}
-	walkChildren := func(n ast.Node) {
-		for _, child := range directChildren(n) {
-			walk(child)
-		}
-	}
+// walkBody walks a function or closure body and returns the states of the
+// paths leaving it.
+func (a *writeFlowAnalyzer) walkBody(body *ast.BlockStmt, paths []writePath) []writePath {
+	outer := a.exits
+	a.exits = nil
+	walker := &flowWalker[[]writePath, struct{}]{rule: a}
+	edges := walker.walk(body, paths, struct{}{})
+	exits := joinWritePaths(a.exits, edges.next)
+	a.exits = outer
+	return exits
+}
 
-	walk = func(n ast.Node) {
-		if n == nil {
-			return
-		}
-		switch node := n.(type) {
-		case *ast.IfStmt:
-			// Ветки одного if исключают друг друга — помечаем их разными метками
-			// с общим идентификатором ветвления.
-			id := fmt.Sprintf("if%d", node.Pos())
-			walk(node.Init)
-			walk(node.Cond)
-			visitWithArm(node.Body, branchArm{node: id, arm: "then", terminates: blockTerminates(node.Body)})
-			visitWithArm(node.Else, branchArm{node: id, arm: "else", terminates: nodeTerminates(node.Else)})
-			return
-		case *ast.SwitchStmt:
-			id := fmt.Sprintf("switch%d", node.Pos())
-			walk(node.Init)
-			walk(node.Tag)
-			walkCases(node.Body, id, visitWithArm, walk)
-			return
-		case *ast.TypeSwitchStmt:
-			id := fmt.Sprintf("typeswitch%d", node.Pos())
-			walk(node.Init)
-			walk(node.Assign)
-			walkCases(node.Body, id, visitWithArm, walk)
-			return
-		case *ast.GoStmt:
-			// Тело горутины — отдельная единица работы: она переживает возврат из
-			// функции и физически не может делить с ней транзакцию. Аргументы вызова
-			// вычисляются в текущей горутине (spec: Go statements), их смотрим.
-			for _, arg := range node.Call.Args {
-				walk(arg)
-			}
-			return
-		case *ast.CallExpr:
-			if r.isTransactionRunner(node) {
-				// Записи внутри колбэка транзакции уже защищены — вглубь не идём.
-				return
-			}
-			if r.isIndependent(node) {
-				// Запуск фоновой задачи или телеметрия: эти записи принадлежат другой
-				// единице работы и в транзакцию вызывающего попасть не должны.
-				return
-			}
-			// Вызов, сам являющийся записью, дальше не разворачиваем: делегирующая
-			// обёртка иначе считалась бы второй записью поверх той же самой.
-			if method, ok := r.storeMutation(node, info); ok {
-				writes = append(writes, writeCall{method: method, arms: append([]branchArm(nil), arms...)})
-			} else if callee := resolvedCalleeName(node, info); callee != "" {
-				calls = append(calls, callSite{name: callee, arms: append([]branchArm(nil), arms...)})
-			}
-		}
-		walkChildren(n)
-	}
+func (a *writeFlowAnalyzer) cloneState(paths []writePath) []writePath { return slices.Clone(paths) }
 
-	walk(body)
-	return writes, calls
+func (a *writeFlowAnalyzer) joinStates(left, right []writePath) []writePath {
+	return joinWritePaths(left, right)
+}
+
+func (a *writeFlowAnalyzer) liveState(paths []writePath) bool { return len(paths) > 0 }
+
+func (a *writeFlowAnalyzer) deadState() []writePath { return nil }
+
+func (a *writeFlowAnalyzer) enterScope(_ flowScopeKind, _ ast.Node, parent struct{}, paths []writePath) (struct{}, []writePath) {
+	return parent, paths
+}
+
+func (a *writeFlowAnalyzer) leaveScope(flowScopeKind, struct{}, *flowEdges[[]writePath]) {}
+
+func (a *writeFlowAnalyzer) simpleStmt(stmt ast.Stmt, paths []writePath, _ struct{}) ([]writePath, bool) {
+	switch node := stmt.(type) {
+	case *ast.ReturnStmt:
+		for _, result := range node.Results {
+			paths = a.scan(result, paths)
+		}
+		a.exits = joinWritePaths(a.exits, paths)
+		return nil, true
+	case *ast.GoStmt:
+		// Тело горутины — отдельная единица работы: она переживает возврат из
+		// функции и физически не может делить с ней транзакцию. Аргументы вызова
+		// вычисляются в текущей горутине (spec: Go statements), их смотрим.
+		for _, arg := range node.Call.Args {
+			paths = a.scan(arg, paths)
+		}
+		return paths, false
+	case *ast.ExprStmt:
+		paths = a.scan(node.X, paths)
+		if stmtNoReturn(node, a.info, nil) != callReturns {
+			return nil, true
+		}
+	default:
+		// A deferred write is added where it is registered: it runs on every
+		// exit after that point, which is the same set of paths.
+		paths = a.scan(stmt, paths)
+	}
+	return paths, len(paths) == 0
+}
+
+func (a *writeFlowAnalyzer) ifCondition(stmt *ast.IfStmt, paths []writePath, _ struct{}) ([]writePath, []writePath) {
+	paths = a.scan(stmt.Cond, paths)
+	return paths, slices.Clone(paths)
+}
+
+func (a *writeFlowAnalyzer) flowExpr(expr ast.Expr, paths []writePath, _ struct{}) []writePath {
+	return a.scan(expr, paths)
+}
+
+func (a *writeFlowAnalyzer) rangeVars(_ *ast.RangeStmt, paths []writePath, _ struct{}) []writePath {
+	return paths
+}
+
+func (a *writeFlowAnalyzer) typeSwitchGuard(stmt ast.Stmt, paths []writePath, _ struct{}) []writePath {
+	return a.scan(stmt, paths)
+}
+
+func (a *writeFlowAnalyzer) caseClause(sw ast.Stmt, clause *ast.CaseClause, paths []writePath, parent struct{}) ([]writePath, struct{}) {
+	if _, isTypeSwitch := sw.(*ast.TypeSwitchStmt); !isTypeSwitch {
+		for _, expr := range clause.List {
+			paths = a.scan(expr, paths)
+		}
+	}
+	return paths, parent
+}
+
+func (a *writeFlowAnalyzer) commClause(_ *ast.CommClause, paths []writePath, parent struct{}) ([]writePath, struct{}) {
+	return paths, parent
+}
+
+func (a *writeFlowAnalyzer) normalize(*flowEdges[[]writePath]) {}
+
+// scan evaluates the calls inside a node in evaluation order: operands and
+// arguments before the call itself.
+func (a *writeFlowAnalyzer) scan(node ast.Node, paths []writePath) []writePath {
+	if node == nil || len(paths) == 0 {
+		return paths
+	}
+	switch current := node.(type) {
+	case *ast.FuncLit:
+		// A closure may run here or not at all: the paths through its body
+		// join the paths that skip it. Pairs inside it are found on the way.
+		return joinWritePaths(paths, a.walkBody(current.Body, slices.Clone(paths)))
+	case *ast.CallExpr:
+		return a.call(current, paths)
+	}
+	for _, child := range directChildren(node) {
+		paths = a.scan(child, paths)
+	}
+	return paths
+}
+
+// call applies one call to the paths: a store mutation adds its write, a call
+// of a project function splices in that function's summary.
+func (a *writeFlowAnalyzer) call(call *ast.CallExpr, paths []writePath) []writePath {
+	rule := a.graph.rule
+	if rule.isTransactionRunner(call) {
+		// Записи внутри колбэка транзакции уже защищены — вглубь не идём.
+		return paths
+	}
+	if rule.isIndependent(call) {
+		// Запуск фоновой задачи или телеметрия: эти записи принадлежат другой
+		// единице работы и в транзакцию вызывающего попасть не должны.
+		return paths
+	}
+	paths = a.scan(call.Fun, paths)
+	for _, arg := range call.Args {
+		paths = a.scan(arg, paths)
+	}
+	// Вызов, сам являющийся записью, дальше не разворачиваем: делегирующая
+	// обёртка иначе считалась бы второй записью поверх той же самой.
+	if method, ok := rule.storeMutation(call, a.info); ok {
+		return a.write(paths, writeCall{method: method})
+	}
+	name := resolvedCalleeName(call, a.info)
+	if name == "" {
+		return paths
+	}
+	callee := a.graph.summary(name)
+	if callee == nil {
+		return paths
+	}
+	return a.through(paths, callee, a.graph.funcs[name].display)
+}
+
+// write adds one write to every path.
+func (a *writeFlowAnalyzer) write(paths []writePath, write writeCall) []writePath {
+	a.summary.record(write)
+	next := make([]writePath, 0, len(paths))
+	for _, path := range paths {
+		switch {
+		case path.write == nil:
+			written := write
+			next = append(next, writePath{write: &written})
+		case path.write.method != write.method:
+			a.summary.offend(*path.write, write)
+			next = append(next, path)
+		default:
+			// A retry of the same write: one write attempted twice.
+			next = append(next, path)
+		}
+	}
+	return joinWritePaths(next, nil)
+}
+
+// through continues every path through a call of a summarised function.
+func (a *writeFlowAnalyzer) through(paths []writePath, callee *writeSummary, helper string) []writePath {
+	if callee.offends {
+		a.summary.calleeOffends = true
+		a.summary.offend(callee.pair[0].through(helper), callee.pair[1].through(helper))
+	}
+	for _, write := range callee.writes {
+		write = write.through(helper)
+		a.summary.record(write)
+		for _, path := range paths {
+			if path.write != nil && path.write.method != write.method {
+				a.summary.offend(*path.write, write)
+			}
+		}
+	}
+	next := make([]writePath, 0, len(paths)*len(callee.exits))
+	for _, path := range paths {
+		for _, exit := range callee.exits {
+			if path.write != nil || exit.write == nil {
+				// The path's own write stays; a different one from the
+				// callee is already recorded as the pair.
+				next = append(next, path)
+				continue
+			}
+			written := exit.write.through(helper)
+			next = append(next, writePath{write: &written})
+		}
+	}
+	return joinWritePaths(next, nil)
 }
 
 // resolvedCalleeName resolves the callee of a direct call, or "" if it is not a known function.
@@ -432,27 +591,6 @@ func resolvedCalleeName(call *ast.CallExpr, info *types.Info) string {
 		return fn.FullName()
 	}
 	return ""
-}
-
-// walkCases обходит ветки switch, помечая каждую своим плечом общего ветвления.
-func walkCases(body *ast.BlockStmt, id string, visitWithArm func(ast.Node, branchArm), walk func(ast.Node)) {
-	if body == nil {
-		return
-	}
-	for i, stmt := range body.List {
-		clause, ok := stmt.(*ast.CaseClause)
-		if !ok {
-			walk(stmt)
-			continue
-		}
-		for _, expr := range clause.List {
-			walk(expr)
-		}
-		arm := branchArm{node: id, arm: fmt.Sprintf("case%d", i), terminates: stmtsTerminate(clause.Body)}
-		for _, inner := range clause.Body {
-			visitWithArm(inner, arm)
-		}
-	}
 }
 
 // directChildren returns the node's immediate children.
@@ -673,97 +811,4 @@ func typeBaseName(t types.Type) string {
 			return ""
 		}
 	}
-}
-
-// firstConcurrentPair returns two writes with distinct method names that can both run in one
-// pass. Calls in different arms of the same if or switch are excluded: only one of them runs.
-func firstConcurrentPair(writes []writeCall) ([2]writeCall, bool) {
-	for i := range writes {
-		for j := i + 1; j < len(writes); j++ {
-			if writes[i].method == writes[j].method {
-				continue
-			}
-			if exclusiveArms(writes[i].arms, writes[j].arms) {
-				continue
-			}
-			return [2]writeCall{writes[i], writes[j]}, true
-		}
-	}
-	return [2]writeCall{}, false
-}
-
-// exclusiveArms reports whether the two writes can never both run in one pass.
-//
-// Two shapes count. The writes sit in different arms of the same if or switch, so only one
-// of them is taken. Or one of them sits in an arm the other is not in, and that arm returns
-// — the classic `if updated { …; return }` followed by the create path.
-func exclusiveArms(a, b []branchArm) bool {
-	inA := make(map[string]branchArm, len(a))
-	for _, arm := range a {
-		inA[arm.node] = arm
-	}
-	inB := make(map[string]branchArm, len(b))
-	for _, arm := range b {
-		inB[arm.node] = arm
-	}
-
-	for node, armA := range inA {
-		armB, shared := inB[node]
-		if shared && armA.arm != armB.arm {
-			return true
-		}
-		if !shared && armA.terminates {
-			return true
-		}
-	}
-	for node, armB := range inB {
-		if _, shared := inA[node]; !shared && armB.terminates {
-			return true
-		}
-	}
-	return false
-}
-
-// blockTerminates reports whether the block always leaves the enclosing function or loop.
-func blockTerminates(block *ast.BlockStmt) bool {
-	if block == nil {
-		return false
-	}
-	return stmtsTerminate(block.List)
-}
-
-// nodeTerminates handles the else arm, which is either a block or another if.
-func nodeTerminates(node ast.Stmt) bool {
-	switch v := node.(type) {
-	case nil:
-		return false
-	case *ast.BlockStmt:
-		return blockTerminates(v)
-	case *ast.IfStmt:
-		return blockTerminates(v.Body) && nodeTerminates(v.Else)
-	}
-	return false
-}
-
-// stmtsTerminate reports whether the statement list ends in an unconditional exit.
-func stmtsTerminate(stmts []ast.Stmt) bool {
-	if len(stmts) == 0 {
-		return false
-	}
-	switch last := stmts[len(stmts)-1].(type) {
-	case *ast.ReturnStmt:
-		return true
-	case *ast.BranchStmt:
-		return last.Tok == token.BREAK || last.Tok == token.CONTINUE || last.Tok == token.GOTO
-	case *ast.ExprStmt:
-		call, ok := last.X.(*ast.CallExpr)
-		if !ok {
-			return false
-		}
-		return mutationCalleeName(call.Fun) == "panic" || mutationCalleeName(call.Fun) == "Fatal" ||
-			mutationCalleeName(call.Fun) == "Fatalf" || mutationCalleeName(call.Fun) == "Exit"
-	case *ast.BlockStmt:
-		return blockTerminates(last)
-	}
-	return false
 }

@@ -68,6 +68,7 @@ type fieldAccess struct {
 	fileCtx  *core.FileContext
 	pos      token.Pos
 	method   string
+	methodFn *types.Func
 	mutex    string
 	guarded  bool
 	mutating bool
@@ -101,7 +102,7 @@ func (r *UnguardedSharedFieldRule) analyzePackage(pkg *core.GoPackageContext) []
 	info := pkg.Package.TypesInfo
 	accesses := make(map[*types.Var][]fieldAccess)
 	fieldOrder := make([]*types.Var, 0)
-	calledUnderLock := make(map[string]bool)
+	calledUnderLock := make(map[*types.Func]bool)
 
 	for _, fileCtx := range pkg.Files {
 		if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
@@ -128,7 +129,7 @@ func (r *UnguardedSharedFieldRule) analyzePackage(pkg *core.GoPackageContext) []
 		}
 		mutex := guardingMutex(list)
 		for _, access := range list {
-			if access.guarded || calledUnderLock[access.method] || hasLockedName(access.method) {
+			if access.guarded || calledUnderLock[access.methodFn] || hasLockedName(access.method) {
 				continue
 			}
 			violations = append(violations, r.report(field, access, mutex))
@@ -151,9 +152,10 @@ func (r *UnguardedSharedFieldRule) report(field *types.Var, access fieldAccess, 
 }
 
 // guardedByMutex reports whether a lock is meant to protect this field.
-// A mutation under the lock says so outright. For a map, a slice or a channel,
-// reading it under the lock says so too, because the contents are what the lock
-// protects. A plain value merely read inside a critical section proves nothing:
+// A mutation under the lock says so outright. For a map or a slice, reading it
+// under the lock says so too, because the contents are what the lock protects.
+// A channel is not among them: it synchronizes itself, and closing or
+// receiving from it under a lock says nothing about the other uses. A plain value merely read inside a critical section proves nothing:
 // a setting configured once before any goroutine starts is often read there by
 // accident.
 func guardedByMutex(field *types.Var, list []fieldAccess) bool {
@@ -190,10 +192,10 @@ func guardingMutex(list []fieldAccess) string {
 }
 
 // hasSharedContents reports whether the value behind the field is mutated
-// through the field rather than by replacing it.
+// through the field rather than by replacing it, without synchronizing itself.
 func hasSharedContents(t types.Type) bool {
 	switch t.Underlying().(type) {
-	case *types.Map, *types.Slice, *types.Chan:
+	case *types.Map, *types.Slice:
 		return true
 	}
 	return false
@@ -220,10 +222,11 @@ func collectFieldAccesses(
 	info *types.Info,
 	accesses map[*types.Var][]fieldAccess,
 	fieldOrder *[]*types.Var,
-	calledUnderLock map[string]bool,
+	calledUnderLock map[*types.Func]bool,
 ) {
 	sections := criticalSections(fn, info)
-	mutations, atomicAccesses := mutatedSelectors(fn)
+	mutations, atomicAccesses := mutatedSelectors(fn, info)
+	methodFn, _ := info.Defs[fn.Name].(*types.Func)
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
@@ -244,7 +247,7 @@ func collectFieldAccesses(
 		switch selection.Kind() {
 		case types.FieldVal:
 			field, ok := selection.Obj().(*types.Var)
-			if !ok || isMutexType(field.Type()) {
+			if !ok || isMutexType(field.Type()) || isAtomicType(field.Type()) {
 				return true
 			}
 			// Доступ через sync/atomic синхронизирован сам по себе — мьютекс ему не нужен.
@@ -258,6 +261,7 @@ func collectFieldAccesses(
 				fileCtx:  fileCtx,
 				pos:      sel.Pos(),
 				method:   fn.Name.Name,
+				methodFn: methodFn,
 				mutex:    mutex,
 				guarded:  inSection,
 				mutating: mutations[sel.Pos()],
@@ -266,8 +270,8 @@ func collectFieldAccesses(
 			// to metrics.
 			return false
 		case types.MethodVal:
-			if inSection && !isMutexMethod(selection) {
-				calledUnderLock[sel.Sel.Name] = true
+			if called, ok := selection.Obj().(*types.Func); ok && inSection && !isMutexMethod(selection) {
+				calledUnderLock[called.Origin()] = true
 			}
 		}
 		return true
@@ -277,7 +281,7 @@ func collectFieldAccesses(
 // mutatedSelectors returns the positions of the selectors the method writes to
 // — assignment targets, ++/--, map and slice element writes, delete arguments
 // and taken addresses — and, separately, those handed to sync/atomic.
-func mutatedSelectors(fn *ast.FuncDecl) (mutated, atomicAccess map[token.Pos]bool) {
+func mutatedSelectors(fn *ast.FuncDecl, info *types.Info) (mutated, atomicAccess map[token.Pos]bool) {
 	mutated = make(map[token.Pos]bool)
 	atomicAccess = make(map[token.Pos]bool)
 
@@ -330,17 +334,17 @@ func mutatedSelectors(fn *ast.FuncDecl) (mutated, atomicAccess map[token.Pos]boo
 				mark(node.X)
 			}
 		case *ast.CallExpr:
-			if ident, ok := node.Fun.(*ast.Ident); ok && ident.Name == "delete" && len(node.Args) > 0 {
-				mark(node.Args[0])
+			if ident, ok := node.Fun.(*ast.Ident); ok && len(node.Args) > 0 {
+				if builtin, ok := info.Uses[ident].(*types.Builtin); ok && builtin.Name() == "delete" {
+					mark(node.Args[0])
+				}
 			}
 			// atomic.AddInt64(&s.counter) synchronizes on its own: counting such
 			// an access as unguarded would demand a lock where none is needed.
-			if sel, ok := node.Fun.(*ast.SelectorExpr); ok {
-				if pkgIdent, ok := sel.X.(*ast.Ident); ok && pkgIdent.Name == "atomic" {
-					for _, arg := range node.Args {
-						if unary, ok := arg.(*ast.UnaryExpr); ok && unary.Op == token.AND {
-							markAtomic(unary.X)
-						}
+			if isSyncAtomicCall(node, info) {
+				for _, arg := range node.Args {
+					if unary, ok := arg.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+						markAtomic(unary.X)
 					}
 				}
 			}
@@ -499,6 +503,26 @@ func isMutexType(t types.Type) bool {
 		return false
 	}
 	return named.Obj().Name() == "Mutex" || named.Obj().Name() == "RWMutex"
+}
+
+// isSyncAtomicCall reports a call of a function of package sync/atomic.
+func isSyncAtomicCall(call *ast.CallExpr, info *types.Info) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	fn, ok := info.Uses[sel.Sel].(*types.Func)
+	return ok && fn.Pkg() != nil && fn.Pkg().Path() == "sync/atomic"
+}
+
+// isAtomicType reports a type of package sync/atomic (atomic.Int64,
+// atomic.Value, atomic.Pointer[T]): its methods synchronize on their own.
+func isAtomicType(t types.Type) bool {
+	named, ok := types.Unalias(t).(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Pkg().Path() == "sync/atomic"
 }
 
 // coveringSection reports whether a lock covering the accessed path is held at

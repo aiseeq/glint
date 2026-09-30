@@ -11,7 +11,10 @@ func init() {
 	rules.Register(NewAppendAssignRule())
 }
 
-// AppendAssignRule detects append() calls without assignment
+// AppendAssignRule detects an append() whose result is thrown away: assigned
+// to the blank identifier (`_ = append(xs, v)`, the form that compiles), or a
+// bare append statement, which the compiler rejects and which only reaches the
+// rule in a file that does not build.
 type AppendAssignRule struct {
 	*rules.BaseRule
 }
@@ -22,7 +25,7 @@ func NewAppendAssignRule() *AppendAssignRule {
 		BaseRule: rules.NewBaseRule(
 			"append-assign",
 			"patterns",
-			"Detects append() without assignment (result is discarded)",
+			"Detects append() whose result is discarded (assigned to _ or used as a bare statement)",
 			core.SeverityHigh,
 		),
 	}
@@ -39,34 +42,51 @@ func (r *AppendAssignRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 	}
 
 	var violations []*core.Violation
+	report := func(node ast.Node) {
+		line := ctx.LineFor(node)
+		v := r.CreateViolation(ctx.RelPath, line, "append() result is not assigned - slice is not modified")
+		v.WithCode(ctx.GetLine(line))
+		v.WithSuggestion("Assign the result: slice = append(slice, item)")
+		v.WithContext("pattern", "append_no_assign")
+		violations = append(violations, v)
+	}
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		// Look for expression statements (not assignments)
-		exprStmt, ok := n.(*ast.ExprStmt)
-		if !ok {
-			return true
+		switch node := n.(type) {
+		case *ast.ExprStmt:
+			if call, ok := node.X.(*ast.CallExpr); ok && r.isAppendCall(call) {
+				report(node)
+			}
+		case *ast.AssignStmt:
+			r.checkBlankTargets(node.Lhs, node.Rhs, report)
+		case *ast.ValueSpec:
+			names := make([]ast.Expr, len(node.Names))
+			for i, name := range node.Names {
+				names[i] = name
+			}
+			r.checkBlankTargets(names, node.Values, report)
 		}
-
-		// Check if it's a call expression
-		callExpr, ok := exprStmt.X.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-
-		// Check if it's append()
-		if r.isAppendCall(callExpr) {
-			line := ctx.LineFor(exprStmt)
-			v := r.CreateViolation(ctx.RelPath, line, "append() result is not assigned - slice is not modified")
-			v.WithCode(ctx.GetLine(line))
-			v.WithSuggestion("Assign the result: slice = append(slice, item)")
-			v.WithContext("pattern", "append_no_assign")
-			violations = append(violations, v)
-		}
-
 		return true
 	})
 
 	return violations
+}
+
+// checkBlankTargets reports an append whose value goes to the blank
+// identifier.
+func (r *AppendAssignRule) checkBlankTargets(lhs, rhs []ast.Expr, report func(ast.Node)) {
+	if len(lhs) != len(rhs) {
+		return
+	}
+	for i, value := range rhs {
+		call, ok := ast.Unparen(value).(*ast.CallExpr)
+		if !ok || !r.isAppendCall(call) {
+			continue
+		}
+		if target, ok := lhs[i].(*ast.Ident); ok && target.Name == "_" {
+			report(value)
+		}
+	}
 }
 
 func (r *AppendAssignRule) isAppendCall(call *ast.CallExpr) bool {

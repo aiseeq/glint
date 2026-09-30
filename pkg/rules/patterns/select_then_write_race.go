@@ -2,7 +2,9 @@ package patterns
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
+	"go/types"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,6 +37,11 @@ type SelectThenWriteRaceRule struct {
 	rowLock     *regexp.Regexp
 	whereClause *regexp.Regexp
 	identifier  *regexp.Regexp
+	// quotedText is a single-quoted SQL string: a word inside it is data,
+	// not a column.
+	quotedText *regexp.Regexp
+	// columnReference is a column name, optionally table-qualified.
+	columnReference *regexp.Regexp
 }
 
 // NewSelectThenWriteRaceRule creates the rule.
@@ -48,11 +55,13 @@ func NewSelectThenWriteRaceRule() *SelectThenWriteRaceRule {
 		),
 		// Anchored at the start of the literal so subqueries inside a larger
 		// statement are not mistaken for the read.
-		selectQuery: regexp.MustCompile(`(?is)^\s*SELECT\s+(.+?)\s+FROM\s+([A-Za-z_][A-Za-z0-9_.]*)`),
-		updateQuery: regexp.MustCompile(`(?is)^\s*UPDATE\s+([A-Za-z_][A-Za-z0-9_.]*)\s+SET\s+(.+)`),
-		rowLock:     regexp.MustCompile(`(?i)\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b|\bFOR\s+(?:KEY\s+)?SHARE\b`),
-		whereClause: regexp.MustCompile(`(?i)\bWHERE\b`),
-		identifier:  regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`),
+		selectQuery:     regexp.MustCompile(`(?is)^\s*SELECT\s+(.+?)\s+FROM\s+([A-Za-z_][A-Za-z0-9_.]*)`),
+		updateQuery:     regexp.MustCompile(`(?is)^\s*UPDATE\s+([A-Za-z_][A-Za-z0-9_.]*)\s+SET\s+(.+)`),
+		rowLock:         regexp.MustCompile(`(?i)\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b|\bFOR\s+(?:KEY\s+)?SHARE\b`),
+		whereClause:     regexp.MustCompile(`(?i)\bWHERE\b`),
+		identifier:      regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`),
+		quotedText:      regexp.MustCompile(`'(?:[^']|'')*'`),
+		columnReference: regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?`),
 	}
 }
 
@@ -64,51 +73,90 @@ type sqlRead struct {
 	line    int
 }
 
-// AnalyzeFile checks each function's SQL literals for the read-then-write pattern.
+// AnalyzeFile checks the SQL string literals of each function; queries held
+// in constants need type information and are read by AnalyzeGoProject.
 func (r *SelectThenWriteRaceRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *SelectThenWriteRaceRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; with type information a query held in
+// a constant (a package const, a concatenation of consts) is read by its value.
+func (r *SelectThenWriteRaceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze checks each function of the file. info is nil for a file without
+// type information: then only string literals written in the function are
+// queries, a constant declared elsewhere is unknown.
+func (r *SelectThenWriteRaceRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	return analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
-		return r.checkFunction(ctx, fn)
+		return r.checkFunction(ctx, fn, info)
 	})
 }
 
-func (r *SelectThenWriteRaceRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+func (r *SelectThenWriteRaceRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl, info *types.Info) []*core.Violation {
 	var reads []sqlRead
 	var violations []*core.Violation
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		lit, ok := n.(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
+		expr, ok := n.(ast.Expr)
+		if !ok {
 			return true
 		}
-		// A literal that does not unquote is not SQL; skipping it is the
-		// success path here, not a masked failure.
-		// error-masking: safe — non-string literal is skipped by design
-		if query, err := strconv.Unquote(lit.Value); err == nil {
-			reads = r.checkLiteral(ctx, fn, query, lit, reads, &violations)
+		query, ok := constantString(expr, info)
+		if !ok {
+			return true
 		}
-		return true
+		reads = r.checkQuery(ctx, fn, query, expr, reads, &violations)
+		// The whole constant is one query: its operands are not visited again.
+		return false
 	})
 	return violations
 }
 
-// checkLiteral classifies one SQL string literal, extending the list of
-// unlocked reads or reporting a read-then-write pair.
-func (r *SelectThenWriteRaceRule) checkLiteral(ctx *core.FileContext, fn *ast.FuncDecl, query string, lit *ast.BasicLit, reads []sqlRead, violations *[]*core.Violation) []sqlRead {
-	if read, ok := r.parseSelect(query, lit, ctx); ok {
+// constantString returns the string value of a constant expression: with type
+// information any constant (literal, named const, concatenation), without it
+// only a string literal.
+func constantString(expr ast.Expr, info *types.Info) (string, bool) {
+	if info != nil {
+		value := info.Types[expr].Value
+		if value == nil || value.Kind() != constant.String {
+			return "", false
+		}
+		return constant.StringVal(value), true
+	}
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	// A string literal the parser accepted always unquotes; one that does not
+	// is not a query, so skipping it is the success path, not a masked failure.
+	// error-masking: safe — a literal that does not unquote is not SQL
+	query, err := strconv.Unquote(lit.Value)
+	return query, err == nil
+}
+
+// checkQuery classifies one SQL string, extending the list of unlocked reads
+// or reporting a read-then-write pair.
+func (r *SelectThenWriteRaceRule) checkQuery(ctx *core.FileContext, fn *ast.FuncDecl, query string, node ast.Expr, reads []sqlRead, violations *[]*core.Violation) []sqlRead {
+	if read, ok := r.parseSelect(query, node, ctx); ok {
 		return append(reads, read)
 	}
 
-	table, columns, ok := r.parseUpdate(query)
+	table, columns, guarded, ok := r.parseUpdate(query)
 	if ok {
 		for _, prior := range reads {
-			if prior.table != table || prior.pos >= lit.Pos() {
+			if prior.table != table || prior.pos >= node.Pos() {
 				continue
 			}
-			shared := intersectColumn(prior.columns, columns)
+			shared := intersectColumn(prior.columns, columns, guarded)
 			if shared == "" {
 				continue
 			}
-			line := lineFromNode(ctx, lit)
+			line := lineFromNode(ctx, node)
 			if ctx.IsSuppressed(line, r.Name()) {
 				continue
 			}
@@ -131,7 +179,7 @@ func (r *SelectThenWriteRaceRule) checkLiteral(ctx *core.FileContext, fn *ast.Fu
 // parseSelect recognizes a SELECT literal that reads concrete columns and does
 // not lock the row. SELECT * is ignored: without an explicit column list the
 // read-modify-write link cannot be proven and the rule prefers precision.
-func (r *SelectThenWriteRaceRule) parseSelect(query string, lit *ast.BasicLit, ctx *core.FileContext) (sqlRead, bool) {
+func (r *SelectThenWriteRaceRule) parseSelect(query string, lit ast.Expr, ctx *core.FileContext) (sqlRead, bool) {
 	match := r.selectQuery.FindStringSubmatch(query)
 	if match == nil || r.rowLock.MatchString(query) {
 		return sqlRead{}, false
@@ -148,14 +196,24 @@ func (r *SelectThenWriteRaceRule) parseSelect(query string, lit *ast.BasicLit, c
 	}, true
 }
 
-// parseUpdate recognizes an UPDATE literal and returns the SET column set.
-func (r *SelectThenWriteRaceRule) parseUpdate(query string) (string, map[string]bool, bool) {
+// parseUpdate recognizes an UPDATE literal and returns the SET column set and
+// the columns its WHERE clause compares. A column the WHERE compares is a
+// compare-and-set: a concurrent change makes the UPDATE match no row instead
+// of overwriting it.
+func (r *SelectThenWriteRaceRule) parseUpdate(query string) (string, map[string]bool, map[string]bool, bool) {
 	match := r.updateQuery.FindStringSubmatch(query)
 	if match == nil {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	setClause := match[2]
+	guarded := make(map[string]bool)
 	if loc := r.whereClause.FindStringIndex(setClause); loc != nil {
+		where := r.quotedText.ReplaceAllString(setClause[loc[1]:], "''")
+		for _, reference := range r.columnReference.FindAllString(where, -1) {
+			if column, ok := r.columnName(reference); ok {
+				guarded[column] = true
+			}
+		}
 		setClause = setClause[:loc[0]]
 	}
 	columns := make(map[string]bool)
@@ -169,9 +227,9 @@ func (r *SelectThenWriteRaceRule) parseUpdate(query string) (string, map[string]
 		}
 	}
 	if len(columns) == 0 {
-		return "", nil, false
+		return "", nil, nil, false
 	}
-	return strings.ToLower(match[1]), columns, true
+	return strings.ToLower(match[1]), columns, guarded, true
 }
 
 // columnSet parses a SELECT list into simple column names. Expressions,
@@ -200,12 +258,13 @@ func (r *SelectThenWriteRaceRule) columnName(raw string) (string, bool) {
 	return strings.ToLower(name), true
 }
 
-// intersectColumn returns the alphabetically first shared column so the
-// reported column does not depend on map iteration order.
-func intersectColumn(read, written map[string]bool) string {
+// intersectColumn returns the alphabetically first column that is read and
+// written back without the UPDATE comparing it, so the reported column does
+// not depend on map iteration order.
+func intersectColumn(read, written, guarded map[string]bool) string {
 	shared := ""
 	for column := range read {
-		if !written[column] {
+		if !written[column] || guarded[column] {
 			continue
 		}
 		if shared == "" || column < shared {

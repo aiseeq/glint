@@ -107,7 +107,10 @@ type idempotencyFunctionAnalyzer struct {
 	dataAccessBindings       map[*ast.Ident]struct{}
 	analyzedFunctionLiterals map[*ast.FuncLit]struct{}
 	reportedCreates          map[*ast.CallExpr]struct{}
-	violations               []*core.Violation
+	// correlated names the identifiers tested by more than one if condition
+	// of the function: only their truth values can prune a later branch.
+	correlated map[string]bool
+	violations []*core.Violation
 }
 
 // AnalyzeFile checks each production function independently.
@@ -129,6 +132,7 @@ func (r *IdempotencyCheckThenCreateRule) AnalyzeFile(ctx *core.FileContext) []*c
 			dataAccessBindings:       make(map[*ast.Ident]struct{}),
 			analyzedFunctionLiterals: make(map[*ast.FuncLit]struct{}),
 			reportedCreates:          make(map[*ast.CallExpr]struct{}),
+			correlated:               idempotencyCorrelatedNames(fn),
 		}
 		analyzer.analyzeFuncDecl(fn)
 		violations = append(violations, analyzer.violations...)
@@ -307,12 +311,16 @@ func (a *idempotencyFunctionAnalyzer) commClause(
 }
 
 func (a *idempotencyFunctionAnalyzer) normalize(edges *flowEdges[[]idempotencyPath]) {
-	edges.next = mergeIdempotencyPaths(edges.next)
+	edges.next = joinFlowPaths(edges.next, nil, idempotencyPathKey)
 }
 
 func (a *idempotencyFunctionAnalyzer) analyzeCondition(paths []idempotencyPath, scope *idempotencyScope, expression ast.Expr) ([]idempotencyPath, []idempotencyPath) {
 	switch node := unparenIdempotencyExpr(expression).(type) {
 	case *ast.Ident:
+		if !a.correlated[node.Name] {
+			// No other condition tests this flag: its value prunes nothing.
+			return cloneIdempotencyPaths(paths), cloneIdempotencyPaths(paths)
+		}
 		binding := idempotencyBindingFor(node, scope)
 		return constrainIdempotencyPaths(paths, binding, true), constrainIdempotencyPaths(paths, binding, false)
 	case *ast.UnaryExpr:
@@ -325,11 +333,11 @@ func (a *idempotencyFunctionAnalyzer) analyzeCondition(paths []idempotencyPath, 
 		case token.LAND:
 			leftTrue, leftFalse := a.analyzeCondition(paths, scope, node.X)
 			rightTrue, rightFalse := a.analyzeCondition(leftTrue, scope, node.Y)
-			return rightTrue, mergeIdempotencyPaths(append(leftFalse, rightFalse...))
+			return rightTrue, a.joinStates(leftFalse, rightFalse)
 		case token.LOR:
 			leftTrue, leftFalse := a.analyzeCondition(paths, scope, node.X)
 			rightTrue, rightFalse := a.analyzeCondition(leftFalse, scope, node.Y)
-			return mergeIdempotencyPaths(append(leftTrue, rightTrue...)), rightFalse
+			return a.joinStates(leftTrue, rightTrue), rightFalse
 		}
 	}
 
@@ -654,46 +662,6 @@ func constrainIdempotencyPaths(paths []idempotencyPath, binding idempotencyBindi
 	return constrained
 }
 
-func mergeIdempotencyPaths(paths []idempotencyPath) []idempotencyPath {
-	merged := make([]idempotencyPath, 0, len(paths))
-	for _, candidate := range paths {
-		duplicate := false
-		for _, existing := range merged {
-			if equalIdempotencyPaths(existing, candidate) {
-				duplicate = true
-				break
-			}
-		}
-		if !duplicate {
-			merged = append(merged, candidate)
-		}
-	}
-	return merged
-}
-
-func equalIdempotencyPaths(left, right idempotencyPath) bool {
-	if len(left.lookups) != len(right.lookups) || len(left.truths) != len(right.truths) {
-		return false
-	}
-	for receiver, leftCalls := range left.lookups {
-		rightCalls, ok := right.lookups[receiver]
-		if !ok || len(leftCalls) != len(rightCalls) {
-			return false
-		}
-		for index := range leftCalls {
-			if leftCalls[index].call != rightCalls[index].call {
-				return false
-			}
-		}
-	}
-	for binding, leftTruth := range left.truths {
-		if rightTruth, ok := right.truths[binding]; !ok || leftTruth != rightTruth {
-			return false
-		}
-	}
-	return true
-}
-
 func idempotencyReceiverTypeName(expr ast.Expr) string {
 	switch node := expr.(type) {
 	case *ast.Ident:
@@ -736,4 +704,50 @@ func isNonAtomicCreateMethod(method string) bool {
 		return false
 	}
 	return strings.HasPrefix(lower, "create") || strings.HasPrefix(lower, "insert")
+}
+
+// idempotencyCorrelatedNames lists the identifiers that appear as a condition
+// operand (bare, negated, or under && and ||) of more than one if statement
+// in the function, closures included. A flag tested once cannot correlate two
+// branches, and recording its truth value would only split the paths: N such
+// flags make 2^N paths that differ in nothing the rule reports on.
+func idempotencyCorrelatedNames(fn *ast.FuncDecl) map[string]bool {
+	counts := make(map[string]int)
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		ifStmt, ok := node.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		seen := make(map[string]bool)
+		collectIdempotencyConditionIdents(ifStmt.Cond, seen)
+		for name := range seen {
+			counts[name]++
+		}
+		return true
+	})
+	correlated := make(map[string]bool)
+	for name, count := range counts {
+		if count > 1 {
+			correlated[name] = true
+		}
+	}
+	return correlated
+}
+
+// collectIdempotencyConditionIdents mirrors the operands analyzeCondition
+// constrains.
+func collectIdempotencyConditionIdents(expr ast.Expr, names map[string]bool) {
+	switch node := unparenIdempotencyExpr(expr).(type) {
+	case *ast.Ident:
+		names[node.Name] = true
+	case *ast.UnaryExpr:
+		if node.Op == token.NOT {
+			collectIdempotencyConditionIdents(node.X, names)
+		}
+	case *ast.BinaryExpr:
+		if node.Op == token.LAND || node.Op == token.LOR {
+			collectIdempotencyConditionIdents(node.X, names)
+			collectIdempotencyConditionIdents(node.Y, names)
+		}
+	}
 }

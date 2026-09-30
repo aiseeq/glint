@@ -61,8 +61,16 @@ func (r *NilSliceRule) analyze(ctx *core.FileContext, info *types.Info, project 
 		return nil
 	}
 
-	isSlice := func(ident *ast.Ident) bool { return r.isStatedSlice(ctx, info, project, ident) }
-	if info == nil {
+	// intentionalNil reports a nil check that tells nil apart from empty on
+	// purpose. With types the evidence is the code itself: the same slice is
+	// also compared by length. Without types the name is all there is.
+	var isSlice func(ident *ast.Ident) bool
+	var intentionalNil func(ident *ast.Ident) bool
+	if info != nil {
+		emptinessChecked := lengthComparedObjects(ctx.GoAST, info)
+		isSlice = func(ident *ast.Ident) bool { return r.isStatedSlice(ctx, info, project, ident) }
+		intentionalNil = func(ident *ast.Ident) bool { return emptinessChecked[info.Uses[ident]] }
+	} else {
 		typeInferrer := NewTypeInferrer(ctx.GoAST)
 		isSlice = func(ident *ast.Ident) bool {
 			// Skip any/interface{} types - nil check is correct for them
@@ -71,6 +79,7 @@ func (r *NilSliceRule) analyze(ctx *core.FileContext, info *types.Info, project 
 			}
 			return r.isSliceVar(ident.Name, typeInferrer)
 		}
+		intentionalNil = func(ident *ast.Ident) bool { return r.hasIntentionalNilSemantics(ident.Name) }
 	}
 
 	var violations []*core.Violation
@@ -90,10 +99,10 @@ func (r *NilSliceRule) analyze(ctx *core.FileContext, info *types.Info, project 
 		var other ast.Expr
 		isNilComparison := false
 
-		if ident, ok := binary.Y.(*ast.Ident); ok && ident.Name == "nil" {
+		if isNilIdent(binary.Y) {
 			other = binary.X
 			isNilComparison = true
-		} else if ident, ok := binary.X.(*ast.Ident); ok && ident.Name == "nil" {
+		} else if isNilIdent(binary.X) {
 			other = binary.Y
 			isNilComparison = true
 		}
@@ -109,7 +118,7 @@ func (r *NilSliceRule) analyze(ctx *core.FileContext, info *types.Info, project 
 		}
 		varName := ident.Name
 
-		if r.hasIntentionalNilSemantics(varName) {
+		if intentionalNil(ident) {
 			return true
 		}
 		if !isSlice(ident) {
@@ -257,6 +266,51 @@ func (r *NilSliceRule) looksLikeAnyByName(name string) bool {
 	return anyPatterns[name]
 }
 
+// lengthComparedObjects returns the variables whose length the file compares
+// with zero (len(x) == 0, len(x) > 0, len(x) < 1, ...).
+func lengthComparedObjects(file *ast.File, info *types.Info) map[types.Object]bool {
+	compared := make(map[types.Object]bool)
+	ast.Inspect(file, func(n ast.Node) bool {
+		binary, ok := n.(*ast.BinaryExpr)
+		if !ok {
+			return true
+		}
+		for _, pair := range [][2]ast.Expr{{binary.X, binary.Y}, {binary.Y, binary.X}} {
+			obj := lengthOperandObject(pair[0], info)
+			if obj == nil {
+				continue
+			}
+			if lit, ok := ast.Unparen(pair[1]).(*ast.BasicLit); ok && lit.Kind == token.INT && (lit.Value == "0" || lit.Value == "1") {
+				compared[obj] = true
+			}
+		}
+		return true
+	})
+	return compared
+}
+
+// lengthOperandObject returns x for len(x) with x a plain variable.
+func lengthOperandObject(expr ast.Expr, info *types.Info) types.Object {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return nil
+	}
+	fun, ok := ast.Unparen(call.Fun).(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	if builtin, ok := info.Uses[fun].(*types.Builtin); !ok || builtin.Name() != "len" {
+		return nil
+	}
+	arg, ok := ast.Unparen(call.Args[0]).(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	return info.Uses[arg]
+}
+
+// hasIntentionalNilSemantics guesses deliberate nil semantics from the name,
+// for files without type information only.
 func (r *NilSliceRule) hasIntentionalNilSemantics(name string) bool {
 	return name == "options" || strings.HasSuffix(name, "IDs")
 }

@@ -50,8 +50,23 @@ func NewUncheckedLenDivisionRule() *UncheckedLenDivisionRule {
 	}
 }
 
-// AnalyzeFile walks every function of the file.
+// AnalyzeFile walks every function of the file without type information.
 func (r *UncheckedLenDivisionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *UncheckedLenDivisionRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject walks every file; with type information the length of an
+// array, a compile-time constant, is not taken for a collection size.
+func (r *UncheckedLenDivisionRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze walks every function of the file. info is nil for a file without
+// type information.
+func (r *UncheckedLenDivisionRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() || ctx.GoAST == nil {
 		return nil
 	}
@@ -71,7 +86,7 @@ func (r *UncheckedLenDivisionRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 		if body == nil {
 			return true
 		}
-		for _, found := range analyzeLenDivisions(body) {
+		for _, found := range analyzeLenDivisions(body, info) {
 			// `Point{X: x / n, Y: y / n}` is one mistake, not two.
 			key := fmt.Sprintf("%d:%s", ctx.LineFor(found.node), found.collection)
 			if seen[key] {
@@ -120,15 +135,17 @@ type lenScope struct {
 	bodyGuard []string
 }
 
-// lenDivisionAnalyzer walks one function body.
+// lenDivisionAnalyzer walks one function body. info is nil for a file
+// without type information.
 type lenDivisionAnalyzer struct {
 	found    []lenDivision
 	reported map[token.Pos]bool
+	info     *types.Info
 }
 
 // analyzeLenDivisions returns the unguarded divisions of one function body.
-func analyzeLenDivisions(body *ast.BlockStmt) []lenDivision {
-	analyzer := &lenDivisionAnalyzer{reported: make(map[token.Pos]bool)}
+func analyzeLenDivisions(body *ast.BlockStmt, info *types.Info) []lenDivision {
+	analyzer := &lenDivisionAnalyzer{reported: make(map[token.Pos]bool), info: info}
 	walker := &flowWalker[*lenState, *lenScope]{rule: analyzer}
 	walker.walk(body, newLenState(), &lenScope{})
 	return analyzer.found
@@ -182,7 +199,7 @@ func (a *lenDivisionAnalyzer) enterScope(
 	case flowScopeForHeader:
 		scope := &lenScope{}
 		if loop, ok := node.(*ast.ForStmt); ok && loop.Cond != nil {
-			scope.bodyGuard = loopBodyGuards(loop.Cond)
+			scope.bodyGuard = a.loopBodyGuards(loop.Cond, state)
 		}
 		return scope, state
 	case flowScopeForBody:
@@ -208,28 +225,72 @@ func (a *lenDivisionAnalyzer) simpleStmt(stmt ast.Stmt, state *lenState, _ *lenS
 	return state, isPanicStatement(stmt)
 }
 
-// trackAssignment remembers `n := len(xs)` and forgets a name that stopped
-// holding a length or a collection that was replaced.
+// trackAssignment remembers `n := len(xs)` and `xs = append(xs, v)`, and
+// forgets a name that stopped holding a length or a collection that was
+// replaced.
 func (a *lenDivisionAnalyzer) trackAssignment(assign *ast.AssignStmt, state *lenState) {
+	// The right-hand side is evaluated before any name changes.
+	lengths := make([]string, len(assign.Lhs))
+	isLength := make([]bool, len(assign.Lhs))
+	appended := make([]bool, len(assign.Lhs))
+	if len(assign.Rhs) == len(assign.Lhs) {
+		for i, rhs := range assign.Rhs {
+			lengths[i], isLength[i] = a.lengthCollection(rhs, state)
+			appended[i] = a.appendsElements(rhs)
+		}
+	}
 	for i, lhs := range assign.Lhs {
-		name, ok := lhs.(*ast.Ident)
-		if !ok || name.Name == "_" {
+		var key string
+		switch target := ast.Unparen(lhs).(type) {
+		case *ast.Ident:
+			if target.Name == "_" {
+				continue
+			}
+			key = target.Name
+		case *ast.SelectorExpr:
+			key = types.ExprString(target)
+		default:
 			continue
 		}
-		delete(state.lengthOf, name.Name)
-		delete(state.nonEmpty, name.Name)
-		if len(assign.Rhs) != len(assign.Lhs) {
-			continue
+		delete(state.lengthOf, key)
+		delete(state.nonEmpty, key)
+		if isLength[i] {
+			state.lengthOf[key] = lengths[i]
 		}
-		if collection, ok := lengthExprCollection(assign.Rhs[i]); ok {
-			state.lengthOf[name.Name] = collection
+		if appended[i] {
+			state.nonEmpty[key] = true
 		}
 	}
 }
 
+// appendsElements reports `append(s, v, …)` with at least one element written
+// out: its result is never empty. Spreading a slice (`append(s, other...)`)
+// proves nothing, other may be empty.
+func (a *lenDivisionAnalyzer) appendsElements(expr ast.Expr) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || len(call.Args) < 2 || call.Ellipsis.IsValid() {
+		return false
+	}
+	return a.isBuiltinCall(call, "append")
+}
+
+// isBuiltinCall reports a call of the named builtin. Without type
+// information the name is all there is.
+func (a *lenDivisionAnalyzer) isBuiltinCall(call *ast.CallExpr, name string) bool {
+	ident, ok := ast.Unparen(call.Fun).(*ast.Ident)
+	if !ok || ident.Name != name {
+		return false
+	}
+	if a.info == nil {
+		return true
+	}
+	builtin, ok := a.info.Uses[ident].(*types.Builtin)
+	return ok && builtin.Name() == name
+}
+
 func (a *lenDivisionAnalyzer) ifCondition(stmt *ast.IfStmt, state *lenState, _ *lenScope) (*lenState, *lenState) {
 	a.inspectExpr(stmt.Cond, state)
-	thenGuards, elseGuards := guardedCollections(stmt.Cond)
+	thenGuards, elseGuards := a.guardedCollections(stmt.Cond, state)
 
 	thenState := a.cloneState(state)
 	for _, collection := range thenGuards {
@@ -271,7 +332,7 @@ func (a *lenDivisionAnalyzer) caseClause(
 		if !tagless || switchStmt.Tag != nil {
 			continue
 		}
-		guards, _ := guardedCollections(expression)
+		guards, _ := a.guardedCollections(expression, state)
 		for _, collection := range guards {
 			state.nonEmpty[collection] = true
 		}
@@ -318,7 +379,7 @@ func (a *lenDivisionAnalyzer) inspectExpr(expr ast.Expr, state *lenState) {
 // check reports the division when its divisor is the length of a collection
 // that nothing on this path proved non-empty.
 func (a *lenDivisionAnalyzer) check(site ast.Node, divisor ast.Expr, state *lenState) {
-	collection, ok := divisorCollection(divisor, state)
+	collection, ok := a.lengthCollection(divisor, state)
 	if !ok || state.nonEmpty[collection] {
 		return
 	}
@@ -329,36 +390,47 @@ func (a *lenDivisionAnalyzer) check(site ast.Node, divisor ast.Expr, state *lenS
 	a.found = append(a.found, lenDivision{node: site, collection: collection})
 }
 
-// divisorCollection returns the collection whose length is the divisor, either
-// written out or held in a local variable.
-func divisorCollection(divisor ast.Expr, state *lenState) (string, bool) {
-	if collection, ok := lengthExprCollection(divisor); ok {
-		return collection, true
-	}
-	if ident, ok := ast.Unparen(divisor).(*ast.Ident); ok {
-		held, isLength := state.lengthOf[ident.Name]
+// lengthCollection returns the collection whose length expr is: len(x)
+// written out or a local variable holding it, under any numeric conversions.
+// With type information the length of an array is a constant, not a
+// collection size, and is not returned.
+func (a *lenDivisionAnalyzer) lengthCollection(expr ast.Expr, state *lenState) (string, bool) {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		held, isLength := state.lengthOf[e.Name]
 		return held, isLength
+	case *ast.CallExpr:
+		if len(e.Args) != 1 {
+			return "", false
+		}
+		if a.isBuiltinCall(e, "len") {
+			if a.info != nil {
+				if tv, ok := a.info.Types[e]; ok && tv.Value != nil {
+					return "", false
+				}
+			}
+			return types.ExprString(e.Args[0]), true
+		}
+		if a.isNumericConversion(e) {
+			return a.lengthCollection(e.Args[0], state)
+		}
 	}
 	return "", false
 }
 
-// lengthExprCollection unwraps numeric conversions around len(x) and returns x.
-func lengthExprCollection(expr ast.Expr) (string, bool) {
-	call, ok := ast.Unparen(expr).(*ast.CallExpr)
-	if !ok || len(call.Args) != 1 {
-		return "", false
+// isNumericConversion reports a conversion to a numeric type. Without type
+// information only the builtin type names are recognized.
+func (a *lenDivisionAnalyzer) isNumericConversion(call *ast.CallExpr) bool {
+	if a.info != nil {
+		tv, ok := a.info.Types[call.Fun]
+		if !ok || !tv.IsType() {
+			return false
+		}
+		basic, ok := tv.Type.Underlying().(*types.Basic)
+		return ok && basic.Info()&types.IsNumeric != 0
 	}
 	name, ok := ast.Unparen(call.Fun).(*ast.Ident)
-	if !ok {
-		return "", false
-	}
-	if name.Name == "len" {
-		return types.ExprString(call.Args[0]), true
-	}
-	if isNumericConversionName(name.Name) {
-		return lengthExprCollection(call.Args[0])
-	}
-	return "", false
+	return ok && isNumericConversionName(name.Name)
 }
 
 // numericConversions are the builtin types a length is converted to before it
@@ -373,11 +445,11 @@ func isNumericConversionName(name string) bool { return numericConversions[name]
 
 // guardedCollections reads a condition and returns the collections proved
 // non-empty in its true branch and in its false branch.
-func guardedCollections(cond ast.Expr) (whenTrue, whenFalse []string) {
+func (a *lenDivisionAnalyzer) guardedCollections(cond ast.Expr, state *lenState) (whenTrue, whenFalse []string) {
 	switch expr := ast.Unparen(cond).(type) {
 	case *ast.UnaryExpr:
 		if expr.Op == token.NOT {
-			inner, outer := guardedCollections(expr.X)
+			inner, outer := a.guardedCollections(expr.X, state)
 			return outer, inner
 		}
 	case *ast.BinaryExpr:
@@ -385,15 +457,15 @@ func guardedCollections(cond ast.Expr) (whenTrue, whenFalse []string) {
 		case token.LAND:
 			// Both operands hold in the true branch; the false branch says
 			// only that one of them failed.
-			leftTrue, _ := guardedCollections(expr.X)
-			rightTrue, _ := guardedCollections(expr.Y)
+			leftTrue, _ := a.guardedCollections(expr.X, state)
+			rightTrue, _ := a.guardedCollections(expr.Y, state)
 			return append(leftTrue, rightTrue...), nil
 		case token.LOR:
-			_, leftFalse := guardedCollections(expr.X)
-			_, rightFalse := guardedCollections(expr.Y)
+			_, leftFalse := a.guardedCollections(expr.X, state)
+			_, rightFalse := a.guardedCollections(expr.Y, state)
 			return nil, append(leftFalse, rightFalse...)
 		default:
-			return lengthComparisonGuard(expr)
+			return a.lengthComparisonGuard(expr, state)
 		}
 	}
 	return nil, nil
@@ -403,8 +475,8 @@ func guardedCollections(cond ast.Expr) (whenTrue, whenFalse []string) {
 // the body. Besides the plain guards, a counted loop qualifies: the body of
 // `for i := 0; i < len(xs); i++` runs only while something is below the length,
 // so the length is not zero.
-func loopBodyGuards(cond ast.Expr) []string {
-	guards, _ := guardedCollections(cond)
+func (a *lenDivisionAnalyzer) loopBodyGuards(cond ast.Expr, state *lenState) []string {
+	guards, _ := a.guardedCollections(cond, state)
 
 	ast.Inspect(cond, func(n ast.Node) bool {
 		expr, ok := n.(*ast.BinaryExpr)
@@ -420,7 +492,7 @@ func loopBodyGuards(cond ast.Expr) []string {
 		default:
 			return true
 		}
-		if collection, ok := lengthExprCollection(side); ok {
+		if collection, ok := a.lengthCollection(side, state); ok {
 			guards = append(guards, collection)
 		}
 		return true
@@ -429,10 +501,11 @@ func loopBodyGuards(cond ast.Expr) []string {
 	return guards
 }
 
-// lengthComparisonGuard reads a comparison of len(x) with an integer literal
-// and reports in which branch the collection is known to have elements.
-func lengthComparisonGuard(expr *ast.BinaryExpr) (whenTrue, whenFalse []string) {
-	collection, bound, op, ok := lengthComparison(expr)
+// lengthComparisonGuard reads a comparison of a length (len(x) or a variable
+// holding it) with an integer literal and reports in which branch the
+// collection is known to have elements.
+func (a *lenDivisionAnalyzer) lengthComparisonGuard(expr *ast.BinaryExpr, state *lenState) (whenTrue, whenFalse []string) {
+	collection, bound, op, ok := a.lengthComparison(expr, state)
 	if !ok {
 		return nil, nil
 	}
@@ -448,14 +521,14 @@ func lengthComparisonGuard(expr *ast.BinaryExpr) (whenTrue, whenFalse []string) 
 
 // lengthComparison normalizes `len(x) op N` and `N op len(x)` into the first
 // form.
-func lengthComparison(expr *ast.BinaryExpr) (collection string, bound int, op token.Token, ok bool) {
-	if collection, ok = lengthExprCollection(expr.X); ok {
+func (a *lenDivisionAnalyzer) lengthComparison(expr *ast.BinaryExpr, state *lenState) (collection string, bound int, op token.Token, ok bool) {
+	if collection, ok = a.lengthCollection(expr.X, state); ok {
 		if bound, ok = intLiteral(expr.Y); ok {
 			return collection, bound, expr.Op, true
 		}
 		return "", 0, expr.Op, false
 	}
-	if collection, ok = lengthExprCollection(expr.Y); ok {
+	if collection, ok = a.lengthCollection(expr.Y, state); ok {
 		if bound, ok = intLiteral(expr.X); ok {
 			return collection, bound, mirrorComparison(expr.Op), true
 		}

@@ -1,6 +1,8 @@
 package patterns
 
 import (
+	"fmt"
+	"go/ast"
 	"strings"
 	"testing"
 
@@ -379,6 +381,53 @@ func save(repo PaymentRepository, key string, payment *Payment) error {
 
 	productionCtx := createIdempotencyCheckThenCreateContext(t, "service.go", code)
 	assert.Empty(t, rule.AnalyzeFile(productionCtx))
+}
+
+// A flag tested only once cannot correlate two branches, so its truth value
+// must not split the paths: 80 independent `if flag {}` used to fill the path
+// cap (512) and cost seconds per function.
+func TestIdempotencyCheckThenCreateRule_IndependentFlagsDoNotMultiplyPaths(t *testing.T) {
+	var code strings.Builder
+	code.WriteString("package payments\nfunc save(repo PaymentRepository, key string, payment *Payment, flags []bool) error {\n")
+	code.WriteString("\t_, _ = repo.GetByIdempotencyKey(key)\n")
+	for i := 0; i < 80; i++ {
+		fmt.Fprintf(&code, "\tb%d := flags[%d]\n\tif b%d {\n\t\tcount++\n\t}\n", i, i, i)
+	}
+	code.WriteString("\treturn repo.Create(payment)\n}")
+
+	ctx := createIdempotencyCheckThenCreateContext(t, "service.go", code.String())
+	assert.Len(t, NewIdempotencyCheckThenCreateRule().AnalyzeFile(ctx), 1)
+}
+
+// The number of paths reaching a point is what the independent flags used to
+// blow up; a flag tested twice still prunes the infeasible combination.
+func TestIdempotencyCheckThenCreateRule_PathCountStaysFlat(t *testing.T) {
+	var code strings.Builder
+	code.WriteString("package payments\nfunc save(repo PaymentRepository, key string, payment *Payment, enabled bool, flags []bool) {\n")
+	code.WriteString("\tif enabled {\n\t\t_, _ = repo.GetByIdempotencyKey(key)\n\t}\n")
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&code, "\tb%d := flags[%d]\n\tif b%d {\n\t\tcount++\n\t}\n", i, i, i)
+	}
+	code.WriteString("\tif enabled {\n\t\treturn\n\t}\n\t_ = repo.Create(payment)\n}")
+
+	ctx := createIdempotencyCheckThenCreateContext(t, "service.go", code.String())
+	fn := ctx.GoAST.Decls[0].(*ast.FuncDecl)
+	analyzer := &idempotencyFunctionAnalyzer{
+		rule:                     NewIdempotencyCheckThenCreateRule(),
+		ctx:                      ctx,
+		function:                 fn.Name.Name,
+		dataAccessBindings:       make(map[*ast.Ident]struct{}),
+		analyzedFunctionLiterals: make(map[*ast.FuncLit]struct{}),
+		reportedCreates:          make(map[*ast.CallExpr]struct{}),
+		correlated:               idempotencyCorrelatedNames(fn),
+	}
+	scope := newIdempotencyScope(nil)
+	declareIdempotencyFields(scope, fn.Type.Params, analyzer.dataAccessBindings)
+	walker := &flowWalker[[]idempotencyPath, *idempotencyScope]{rule: analyzer}
+	edges := walker.walk(fn.Body, []idempotencyPath{newIdempotencyPath()}, scope)
+
+	assert.LessOrEqual(t, len(edges.next), 2)
+	assert.Empty(t, analyzer.violations, "enabled=true returns before the create")
 }
 
 func createIdempotencyCheckThenCreateContext(t *testing.T, path, code string) *core.FileContext {

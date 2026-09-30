@@ -32,7 +32,7 @@ func (r *OrphanedInterfaceRule) analyzeTyped(ctx *core.GoProjectContext) ([]*cor
 			if fileCtx.GoAST == nil || r.shouldSkipFile(fileCtx) {
 				continue
 			}
-			for _, iface := range r.collectInterfaces(fileCtx) {
+			for _, iface := range r.collectInterfaces(fileCtx, false) {
 				obj, ok := pkg.Package.TypesInfo.Defs[iface.spec.Name].(*types.TypeName)
 				if !ok {
 					return nil, fmt.Errorf("%s: interface %q in %s has no type object", r.Name(), iface.name, fileCtx.RelPath)
@@ -187,7 +187,7 @@ func (r *OrphanedInterfaceRule) analyzeUntyped(ctx *core.GoProjectContext) []*co
 // analyzeSyntax reports interfaces of fileCtx that no file of syntax
 // implements by method names or references as a type.
 func (r *OrphanedInterfaceRule) analyzeSyntax(fileCtx *core.FileContext, syntax []*ast.File) []*core.Violation {
-	interfaces := r.collectInterfaces(fileCtx)
+	interfaces := r.collectInterfaces(fileCtx, true)
 	if len(interfaces) == 0 {
 		return nil
 	}

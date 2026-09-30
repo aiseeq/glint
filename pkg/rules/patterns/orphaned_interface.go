@@ -44,7 +44,8 @@ type interfaceInfo struct {
 	name    string
 	pos     token.Position
 	spec    *ast.TypeSpec
-	methods []string // method names for implementation matching
+	docs    []*ast.CommentGroup // doc comments of the spec and its declaration
+	methods []string            // method names for implementation matching
 }
 
 // AnalyzeFile is a no-op: whether an interface is used is a question about
@@ -79,7 +80,7 @@ func (r *OrphanedInterfaceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 
 // report builds the violation for an orphaned interface unless it is exempt.
 func (r *OrphanedInterfaceRule) report(ctx *core.FileContext, iface *interfaceInfo, scope string) *core.Violation {
-	if r.hasExemptComment(ctx, iface.pos.Line) {
+	if r.hasExemptComment(iface) {
 		return nil
 	}
 	v := r.CreateViolation(ctx.RelPath, iface.pos.Line,
@@ -119,25 +120,34 @@ func (r *OrphanedInterfaceRule) shouldSkipFile(ctx *core.FileContext) bool {
 	return false
 }
 
-// hasExemptComment checks if interface has nolint or "Used by:" documentation
-func (r *OrphanedInterfaceRule) hasExemptComment(ctx *core.FileContext, line int) bool {
-	// Check 5 lines above interface declaration for comments
-	for i := max(1, line-5); i <= line; i++ {
-		lineContent := ctx.GetLine(i)
-		// Check for nolint comment
-		if strings.Contains(lineContent, "nolint") {
-			return true
+// hasExemptComment reports an interface whose own doc comment suppresses this
+// rule (nolint:orphaned-interface anywhere in it) or documents its users
+// ("Used by:"). The check flow already honours a marker on the declaration
+// line or right above it; a doc comment is often longer than that. Comments
+// of neighbouring declarations do not count.
+func (r *OrphanedInterfaceRule) hasExemptComment(iface *interfaceInfo) bool {
+	for _, doc := range iface.docs {
+		if doc == nil {
+			continue
 		}
-		// Check for "Used by:" documentation pattern
-		if strings.Contains(lineContent, "Used by:") || strings.Contains(lineContent, "USED BY:") {
-			return true
+		for _, comment := range doc.List {
+			if core.LineSuppresses(comment.Text, r.Name()) {
+				return true
+			}
+			if strings.Contains(comment.Text, "Used by:") || strings.Contains(comment.Text, "USED BY:") {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// collectInterfaces finds all interface type declarations
-func (r *OrphanedInterfaceRule) collectInterfaces(ctx *core.FileContext) []*interfaceInfo {
+// collectInterfaces finds all interface type declarations. skipDINames drops
+// interfaces whose name promises a use elsewhere (…Service, …Reader): the
+// syntax-only search sees one package, so an interface consumed by another
+// package would look orphaned. The typed search sees the whole project and
+// passes false.
+func (r *OrphanedInterfaceRule) collectInterfaces(ctx *core.FileContext, skipDINames bool) []*interfaceInfo {
 	var interfaces []*interfaceInfo
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
@@ -160,7 +170,7 @@ func (r *OrphanedInterfaceRule) collectInterfaces(ctx *core.FileContext) []*inte
 			// Skip interfaces with common DI/abstraction suffixes
 			// These are typically defined in one file and used elsewhere
 			name := typeSpec.Name.Name
-			if r.isDIInterface(name) {
+			if skipDINames && r.isDIInterface(name) {
 				continue
 			}
 
@@ -168,6 +178,7 @@ func (r *OrphanedInterfaceRule) collectInterfaces(ctx *core.FileContext) []*inte
 				name:    name,
 				pos:     ctx.PositionFor(typeSpec),
 				spec:    typeSpec,
+				docs:    []*ast.CommentGroup{typeSpec.Doc, genDecl.Doc},
 				methods: r.extractMethodNames(ifaceType),
 			}
 			interfaces = append(interfaces, iface)
@@ -180,7 +191,8 @@ func (r *OrphanedInterfaceRule) collectInterfaces(ctx *core.FileContext) []*inte
 }
 
 // isDIInterface checks if interface name suggests it's a DI/abstraction interface
-// These are typically defined in type files and implemented/used elsewhere
+// These are typically defined in type files and implemented/used elsewhere —
+// in another package, which only the typed search can see.
 func (r *OrphanedInterfaceRule) isDIInterface(name string) bool {
 	diSuffixes := []string{
 		"Interface",

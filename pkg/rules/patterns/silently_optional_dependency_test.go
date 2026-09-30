@@ -293,3 +293,59 @@ func optDepProject(t *testing.T, files map[string]string) *core.GoProjectContext
 	require.NoError(t, err)
 	return project
 }
+
+// The typed load covers the whole module, but findings may only point at the
+// analyzed files: a finding in a file outside the analyzed set has no file
+// context and breaks the whole run. Construction sites still count module-wide.
+func TestSilentlyOptionalDependencyRule_ReportsOnlyAnalyzedFiles(t *testing.T) {
+	disk := map[string]string{
+		"svc/service.go": serviceSource,
+		"svc/wiring.go": `package svc
+
+func BuildOne() *Service { return NewService("one") }
+func BuildTwo() *Service { return NewService("two") }
+`,
+		"other/other.go": "package other\n\nfunc X() {}\n",
+	}
+
+	t.Run("setter file outside the analyzed set", func(t *testing.T) {
+		project := optDepProjectSubset(t, disk, "other/other.go")
+		violations, err := NewSilentlyOptionalDependencyRule().AnalyzeGoProject(project)
+		require.NoError(t, err)
+		assert.Empty(t, violations)
+	})
+
+	t.Run("setter file analyzed, wiring counted from the module", func(t *testing.T) {
+		project := optDepProjectSubset(t, disk, "svc/service.go")
+		violations, err := NewSilentlyOptionalDependencyRule().AnalyzeGoProject(project)
+		require.NoError(t, err)
+		require.Len(t, violations, 1)
+		assert.Contains(t, violations[0].Message, "2 of 2 construction sites")
+		_, err = project.File(violations[0].File)
+		require.NoError(t, err, "finding must point at an analyzed file")
+	})
+}
+
+// optDepProjectSubset writes every file to disk but hands only the listed ones
+// to the loader as analyzed files.
+func optDepProjectSubset(t *testing.T, files map[string]string, analyzed ...string) *core.GoProjectContext {
+	t.Helper()
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/svc\n\ngo 1.24\n"), 0o644))
+	for name, source := range files {
+		path := filepath.Join(root, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(source), 0o644))
+	}
+	var contexts []*core.FileContext
+	for _, name := range analyzed {
+		path := filepath.Join(root, name)
+		ctx, err := core.NewFileContextChecked(path, root, []byte(files[name]), core.DefaultConfig())
+		require.NoError(t, err)
+		contexts = append(contexts, ctx)
+	}
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	require.NoError(t, err)
+	return project
+}

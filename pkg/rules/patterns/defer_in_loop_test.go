@@ -95,6 +95,54 @@ func example() {
 `,
 			expectMatch: true,
 		},
+		{
+			name: "defer in loop inside goroutine closure",
+			code: `package main
+
+func example(names []string) {
+	go func() {
+		for _, n := range names {
+			f, _ := os.Open(n)
+			defer f.Close()
+		}
+	}()
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "defer in loop inside per-iteration closure",
+			code: `package main
+
+func example(groups [][]string) {
+	for _, names := range groups {
+		func() {
+			for _, n := range names {
+				f, _ := os.Open(n)
+				defer f.Close()
+			}
+		}()
+	}
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "defer in closure launched from loop header",
+			code: `package main
+
+func example(load func(func()) []string) {
+	for _, n := range load(func() {
+		defer cleanup()
+	}) {
+		_ = n
+	}
+}
+
+func cleanup() {}
+`,
+			expectMatch: false,
+		},
 	}
 
 	for _, tt := range tests {
