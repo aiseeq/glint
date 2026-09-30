@@ -53,6 +53,10 @@ func NewMdBrokenLinkRule() *MdBrokenLinkRule {
 	}
 }
 
+// ReadsOtherFiles reports that findings depend on whether the files a link points to
+// exist on disk.
+func (r *MdBrokenLinkRule) ReadsOtherFiles() bool { return true }
+
 // AnalyzeFile checks every local link of a Markdown document.
 func (r *MdBrokenLinkRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !strings.HasSuffix(ctx.Path, ".md") {

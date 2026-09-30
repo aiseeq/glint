@@ -53,6 +53,10 @@ func NewDocLinksRule() *DocLinksRule {
 	}
 }
 
+// ReadsOtherFiles reports that findings depend on whether the files a comment links to
+// exist on disk.
+func (r *DocLinksRule) ReadsOtherFiles() bool { return true }
+
 // AnalyzeFile checks for broken links in documentation
 func (r *DocLinksRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.GoAST == nil {
