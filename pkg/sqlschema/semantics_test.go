@@ -112,3 +112,24 @@ func TestSessionDates(t *testing.T) {
 		assert.Empty(t, schema.SessionDates(allowed), allowed)
 	}
 }
+
+func TestRowWrite(t *testing.T) {
+	schema := uniqueSchema(t)
+	for _, sql := range []string{
+		`UPDATE members SET code = $2 WHERE id = $1`,
+		`DELETE FROM members WHERE external_ref = $1 AND code IS NULL`,
+		`UPDATE members SET code = $3 WHERE org_id = $1 AND code = $2`,
+	} {
+		assert.True(t, schema.RowWrite(sql), sql)
+	}
+	for _, sql := range []string{
+		`UPDATE members SET code = $2 WHERE id = $1 RETURNING id`,
+		`UPDATE members SET code = $1 WHERE code IS NULL`,
+		`DELETE FROM members WHERE nickname = $1`,
+		`UPDATE members SET code = $1 WHERE id = 'singleton'`,
+		`INSERT INTO members (id) VALUES ($1)`,
+		`UPDATE members SET code = $2 WHERE id = $1; UPDATE members SET code = $2 WHERE id = $3`,
+	} {
+		assert.False(t, schema.RowWrite(sql), sql)
+	}
+}
