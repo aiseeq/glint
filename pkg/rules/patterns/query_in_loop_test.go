@@ -209,6 +209,25 @@ func pipeline(s *Service, ids []string) {
 	}
 }
 
+func firstMatch(s *Service, ids []string) (string, error) {
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if name, err := s.repo.GetByID(id); err != nil || name != "" {
+			return name, err
+		}
+		return "", nil
+	}
+	for _, id := range ids {
+		if id != "" {
+			name, err := s.repo.GetByID(id)
+			return name, err
+		}
+	}
+	return "", nil
+}
+
 func pureInLoop(errs []error) {
 	for _, err := range errs {
 		store.IsConflict(err)
