@@ -56,15 +56,7 @@ func (r *ReactCallbackDependsOnStateRule) AnalyzeFile(ctx *core.FileContext) []*
 	}
 	f := newJSFlat(ctx)
 
-	// setters maps a component's block to its state names and their setters.
-	setters := make(map[int]map[string]string)
-	for _, m := range reactStatePair.FindAllStringSubmatchIndex(f.code, -1) {
-		scope := f.enclosingBrace(m[0])
-		if setters[scope] == nil {
-			setters[scope] = make(map[string]string)
-		}
-		setters[scope][f.code[m[2]:m[3]]] = f.code[m[4]:m[5]]
-	}
+	setters := componentSetters(f)
 	if len(setters) == 0 {
 		return nil
 	}
