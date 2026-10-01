@@ -218,6 +218,9 @@ func silentDefault(body *ast.BlockStmt, checked []string) (string, string) {
 	if len(body.List) != 1 {
 		return "", ""
 	}
+	if ret, ok := body.List[0].(*ast.ReturnStmt); ok {
+		return freshInstanceReturn(ret, checked)
+	}
 	assign, ok := body.List[0].(*ast.AssignStmt)
 	if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
 		return "", ""
@@ -230,6 +233,41 @@ func silentDefault(body *ast.BlockStmt, checked []string) (string, string) {
 		return "", ""
 	}
 	return ident.Name, types.ExprString(assign.Rhs[0])
+}
+
+// freshInstanceReturn matches `if cache == nil { return NewCache() }`: the only
+// checked dependency is answered with a new instance built without arguments
+// (or a package default), so the caller that left it nil gets a private,
+// unconfigured copy and is never told. A constructor given arguments makes a
+// configured value and is left alone.
+func freshInstanceReturn(ret *ast.ReturnStmt, checked []string) (string, string) {
+	if len(ret.Results) != 1 || len(checked) != 1 || !isDependencyName(checked[0]) {
+		return "", ""
+	}
+	value := ast.Unparen(ret.Results[0])
+	if assert, ok := value.(*ast.TypeAssertExpr); ok {
+		value = ast.Unparen(assert.X)
+	}
+	if !isPackageDefault(value) && !isNoArgConstructorCall(value) {
+		return "", ""
+	}
+	return checked[0], types.ExprString(ret.Results[0])
+}
+
+// isNoArgConstructorCall reports New...() or pkg.New...() called without arguments.
+func isNoArgConstructorCall(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 {
+		return false
+	}
+	name := ""
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		name = fun.Name
+	case *ast.SelectorExpr:
+		name = fun.Sel.Name
+	}
+	return strings.HasPrefix(name, "New")
 }
 
 // isPackageDefault reports a package-level default or no-op value: pkg.Default(),

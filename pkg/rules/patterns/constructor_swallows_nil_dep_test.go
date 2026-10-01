@@ -121,6 +121,48 @@ func NewService(cfg *Config) *Service {
 `,
 			wantCount: 0,
 		},
+		{
+			name: "helper answers a nil dependency with a fresh default instance",
+			code: `package factory
+
+func cacheOrDefault(cache CacheInterface) *Cache {
+	if cache == nil {
+		return NewCache().(*Cache)
+	}
+	if c, ok := cache.(*Cache); ok {
+		return c
+	}
+	return NewCache().(*Cache)
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "helper builds a configured instance for a nil dependency",
+			code: `package factory
+
+func cacheFor(cache *Cache, size int) *Cache {
+	if cache == nil {
+		return NewCache(size)
+	}
+	return cache
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "fresh value for a nil option is defaulting, not wiring",
+			code: `package factory
+
+func optionsOrDefault(opts *Options) *Options {
+	if opts == nil {
+		return NewOptions()
+	}
+	return opts
+}
+`,
+			wantCount: 0,
+		},
 	}
 
 	for _, tt := range tests {

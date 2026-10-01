@@ -32,6 +32,11 @@ func init() {
 //	        return s.cumulative        // DB failure silently yields "no growth"
 //	    }
 //
+// In a loop the same branch ending in continue drops the failure with the
+// item: `if err != nil || active > 0 { continue }` reports a failed check as
+// "did not qualify". A branch that logs the error or hands it on keeps it on
+// record and is left alone.
+//
 // Not flagged: branches that propagate/wrap the error, branches that handle
 // the error in a nested if, branches that panic, &&-narrowing (errors.Is
 // style), and branches without a return.
@@ -53,7 +58,7 @@ func NewMaskedErrorOrConditionRule() *MaskedErrorOrConditionRule {
 		BaseRule: rules.NewBaseRule(
 			"masked-error-in-or-condition",
 			"patterns",
-			"Detects err != nil conflated with no-data via || in a branch that returns nil error",
+			"Detects err != nil conflated with no-data via || in a branch that returns nil error or skips the item with continue",
 			core.SeverityHigh,
 		),
 	}
@@ -94,7 +99,7 @@ func (r *MaskedErrorOrConditionRule) AnalyzeFile(ctx *core.FileContext) []*core.
 			if len(errNames) == 0 {
 				return
 			}
-			violations = append(violations, r.checkBranch(ctx, ifStmt, errNames, returnsError)...)
+			violations = append(violations, r.checkBranch(ctx, body, ifStmt, errNames, returnsError)...)
 		})
 
 		return true
@@ -106,10 +111,14 @@ func (r *MaskedErrorOrConditionRule) AnalyzeFile(ctx *core.FileContext) []*core.
 // checkBranch inspects the then-branch of an if whose ||-condition contains
 // an err != nil operand, and reports returns that swallow the error.
 func (r *MaskedErrorOrConditionRule) checkBranch(
-	ctx *core.FileContext, ifStmt *ast.IfStmt, errNames map[string]bool, returnsError bool,
+	ctx *core.FileContext, body *ast.BlockStmt, ifStmt *ast.IfStmt, errNames map[string]bool, returnsError bool,
 ) []*core.Violation {
 	handled := false
+	// recorded: the branch logs the error or hands it on — a skipped item is
+	// then on record, whatever the function returns.
+	recorded := false
 	var maskingReturns []*ast.ReturnStmt
+	var skips []*ast.BranchStmt
 
 	forEachOwnStatement(ifStmt.Body, func(stmt ast.Stmt) {
 		switch s := stmt.(type) {
@@ -132,8 +141,17 @@ func (r *MaskedErrorOrConditionRule) checkBranch(
 			// Error/Warn/Fatal-логгер, ошибку обработала — это зона
 			// log-and-return-zero, не маскировка. С error в сигнатуре лог не
 			// оправдывает return nil — caller всё равно не отличит сбой от нуля.
-			if !returnsError && (exprMentionsAnyName(s.X, errNames) || isErrorLevelLogExpr(s.X)) {
-				handled = true
+			if exprMentionsAnyName(s.X, errNames) || isErrorLevelLogExpr(s.X) {
+				recorded = true
+				if !returnsError {
+					handled = true
+				}
+			}
+		case *ast.BranchStmt:
+			// continue skips the item: the failure goes with it unless the
+			// branch put it on record.
+			if s.Tok == token.CONTINUE {
+				skips = append(skips, s)
 			}
 		case *ast.ReturnStmt:
 			if returnMentionsAnyName(s, errNames) {
@@ -159,6 +177,18 @@ func (r *MaskedErrorOrConditionRule) checkBranch(
 		return nil
 	}
 
+	var violations []*core.Violation
+	if !recorded && !skipsUnparsed(body, ifStmt, errNames) {
+		for _, skip := range skips {
+			pos := ctx.PositionFor(skip)
+			v := r.CreateViolation(ctx.RelPath, pos.Line,
+				"Branch guarded by 'err != nil || ...' skips the item with continue — a failure is dropped as if the item simply did not qualify")
+			v.WithCode(strings.TrimSpace(ctx.GetLine(pos.Line)))
+			v.WithSuggestion("Split the condition: return or log the error when err != nil; keep the skip for the condition alone")
+			violations = append(violations, v)
+		}
+	}
+
 	message := "Branch guarded by 'err != nil || ...' returns nil error — a real failure is masked as a valid zero value"
 	suggestion := "Split the condition: return the error when err != nil; keep the no-data case as a separate branch"
 	if !returnsError {
@@ -166,7 +196,6 @@ func (r *MaskedErrorOrConditionRule) checkBranch(
 		suggestion = "Give the function an (T, error) signature and return the error when err != nil; keep the no-data case as a separate branch"
 	}
 
-	var violations []*core.Violation
 	for _, ret := range maskingReturns {
 		pos := ctx.PositionFor(ret)
 		v := r.CreateViolation(ctx.RelPath, pos.Line, message)
@@ -175,6 +204,18 @@ func (r *MaskedErrorOrConditionRule) checkBranch(
 		violations = append(violations, v)
 	}
 	return violations
+}
+
+// skipsUnparsed reports a skip whose error comes from a parse of the item:
+// an item that does not parse is not one of those looked for, and skipping
+// it is the filter itself.
+func skipsUnparsed(body *ast.BlockStmt, ifStmt *ast.IfStmt, errNames map[string]bool) bool {
+	for name := range errNames {
+		if call := errSourceExpr(body, ifStmt, name); isParseCall(call) && !parsesRequestInput(body, call) {
+			return true
+		}
+	}
+	return false
 }
 
 // isErrorLevelLogExpr reports whether the expression is an Error/Warn/Fatal

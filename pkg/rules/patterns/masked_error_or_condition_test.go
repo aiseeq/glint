@@ -192,6 +192,85 @@ func Get() (*Data, error) {
 `,
 			wantCount: 1,
 		},
+		{
+			// A failed query and a busy database both skip the item: the
+			// cleanup report says "nothing to drop" while the check never ran.
+			name: "loop skips the item on error or condition and drops the error",
+			code: `package cleanup
+
+func orphaned(names []string) ([]string, error) {
+	var out []string
+	for _, name := range names {
+		var active int
+		err := db.QueryRow(activeQuery, name).Scan(&active)
+		if err != nil || active > 0 {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out, nil
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "loop skip that logs the error keeps it on record",
+			code: `package cleanup
+
+func orphaned(names []string) ([]string, error) {
+	var out []string
+	for _, name := range names {
+		var active int
+		err := db.QueryRow(activeQuery, name).Scan(&active)
+		if err != nil || active > 0 {
+			logger.Warn("skip", "name", name, "error", err)
+			continue
+		}
+		out = append(out, name)
+	}
+	return out, nil
+}
+`,
+			wantCount: 0,
+		},
+		{
+			// An item that does not parse is not one of those looked for:
+			// the skip is the filter, no failure is lost.
+			name: "loop skips the item that does not parse",
+			code: `package scan
+
+func paths(lits []string) ([]string, error) {
+	var out []string
+	for _, lit := range lits {
+		path, err := strconv.Unquote(lit)
+		if err != nil || path != "io/ioutil" {
+			continue
+		}
+		out = append(out, path)
+	}
+	return out, nil
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "loop skips the line its own parser rejects",
+			code: `package scan
+
+func entries(lines []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, line := range lines {
+		key, value, err := parseLine(line)
+		if err != nil || key == "" {
+			continue
+		}
+		out[key] = value
+	}
+	return out, nil
+}
+`,
+			wantCount: 0,
+		},
 	}
 
 	for _, tt := range tests {

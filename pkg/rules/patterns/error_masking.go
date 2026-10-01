@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"maps"
 	"regexp"
 	"slices"
@@ -90,8 +91,24 @@ func (r *ErrorMaskingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 	if r.shouldSkipFile(ctx) {
 		return nil
 	}
+	// A command package holds CLI tools, whose regex-shaped fallbacks are
+	// left alone, and the main package of a server, whose handlers drop
+	// errors the same way as any other code: the success-only guard is
+	// checked there.
+	if isCommandPath(ctx.RelPath) {
+		if !ctx.HasGoAST() {
+			return nil
+		}
+		return r.checkSuccessOnlyGuards(ctx)
+	}
 
 	return helpers.AnalyzeGoAndFrontend(ctx, r.analyzeGoFile, r.analyzeTSFile)
+}
+
+// isCommandPath reports a file of a command package or of an analyzer tool.
+func isCommandPath(path string) bool {
+	return strings.Contains(path, "/cmd/") || strings.HasPrefix(path, "cmd/") ||
+		strings.Contains(path, "/tools/analyzers/") || strings.HasPrefix(path, "tools/analyzers/")
 }
 
 // shouldSkipFile checks if file should be excluded
@@ -110,12 +127,6 @@ func (r *ErrorMaskingRule) shouldSkipFile(ctx *core.FileContext) bool {
 
 	// Skip generated files
 	if strings.Contains(path, "generated") || strings.Contains(path, ".gen.") {
-		return true
-	}
-
-	// Skip CLI tools and analyzers (handle both /cmd/ and cmd/ paths)
-	if strings.Contains(path, "/cmd/") || strings.HasPrefix(path, "cmd/") ||
-		strings.Contains(path, "/tools/analyzers/") || strings.HasPrefix(path, "tools/analyzers/") {
 		return true
 	}
 
@@ -254,7 +265,17 @@ func (r *ErrorMaskingRule) checkSuccessOnlyGuard(ctx *core.FileContext, fn *ast.
 	if !guardBodyOnlyAssigns(stmt.Body) {
 		return nil
 	}
-	if guardOnlyRefinesReadyValues(fn, stmt) {
+	// Уточнение готового значения прощается, пока разбирается не запрос
+	// клиента: неразобранный параметр запроса — ошибка клиента, и ответ с
+	// подставленным значением её прячет.
+	sourceCall := errSourceExpr(fn.Body, stmt, errName)
+	fromRequest := parsesRequestInput(fn.Body, sourceCall)
+	if guardOnlyRefinesReadyValues(fn, stmt) && !fromRequest {
+		return nil
+	}
+	// err == nil && v > 0 on a parse is a test of the input's shape: a value
+	// that does not parse simply is not the one looked for.
+	if len(flattenAnd(stmt.Cond)) > 1 && isParseCall(sourceCall) && !fromRequest {
 		return nil
 	}
 	if errUsedElsewhere(fn, stmt, errName, assigned) {
@@ -441,8 +462,10 @@ func fieldListsContainName(name string, lists ...*ast.FieldList) bool {
 }
 
 // successGuardErrName распознаёт условие «ошибки нет» и возвращает имя переменной.
+// Условие может уточнять успех дальше: err == nil && parsed > 0 — провал
+// и тогда молча оставляет всё как было.
 func successGuardErrName(cond ast.Expr) (string, bool) {
-	bin, ok := cond.(*ast.BinaryExpr)
+	bin, ok := ast.Unparen(flattenAnd(cond)[0]).(*ast.BinaryExpr)
 	if !ok || bin.Op != token.EQL {
 		return "", false
 	}
@@ -533,9 +556,19 @@ func guardBodyOnlyAssigns(body *ast.BlockStmt) bool {
 // errUsedElsewhere проверяет, смотрит ли на ошибку кто-то ещё в этой функции:
 // лог, второй if, возврат. Собственное присваивание и условие не считаются.
 // assigned — идентификаторы, стоящие слева в присваиваниях тела функции.
+// Ошибка, объявленная в Init самого if, за его пределами не видна; объявленная
+// через := в блоке — видна только в этом блоке: одноимённая err в другом
+// месте функции — другая переменная.
 func errUsedElsewhere(fn *ast.FuncDecl, stmt *ast.IfStmt, errName string, assigned map[*ast.Ident]bool) bool {
+	if assign, ok := stmt.Init.(*ast.AssignStmt); ok && assign.Tok == token.DEFINE && assignsName(assign, errName) {
+		return false
+	}
+	var scope ast.Node = fn.Body
+	if block := definingBlock(fn.Body, stmt, errName); block != nil {
+		scope = block
+	}
 	used := false
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
+	ast.Inspect(scope, func(n ast.Node) bool {
 		if used {
 			return false
 		}
@@ -553,6 +586,154 @@ func errUsedElsewhere(fn *ast.FuncDecl, stmt *ast.IfStmt, errName string, assign
 		return false
 	})
 	return used
+}
+
+// definingBlock returns the block whose own statement declares name with :=
+// last before stmt — the scope of the variable stmt checks — or nil when the
+// nearest assignment before stmt is a plain = (the variable is shared).
+func definingBlock(body *ast.BlockStmt, stmt *ast.IfStmt, name string) *ast.BlockStmt {
+	var block *ast.BlockStmt
+	var nearest token.Pos
+	ast.Inspect(body, func(n ast.Node) bool {
+		list, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		for _, own := range list.List {
+			assign, ok := own.(*ast.AssignStmt)
+			if !ok || assign.Pos() >= stmt.Pos() || assign.Pos() < nearest || !assignsName(assign, name) {
+				continue
+			}
+			nearest = assign.Pos()
+			block = nil
+			if assign.Tok == token.DEFINE && list.Pos() <= stmt.Pos() && stmt.End() <= list.End() {
+				block = list
+			}
+		}
+		return true
+	})
+	return block
+}
+
+// errSourceExpr returns the call the checked error comes from: in the Init of
+// the if or in the nearest assignment before it.
+func errSourceExpr(body *ast.BlockStmt, stmt *ast.IfStmt, errName string) *ast.CallExpr {
+	var source *ast.CallExpr
+	consider := func(assign *ast.AssignStmt) {
+		if len(assign.Rhs) != 1 || !assignsName(assign, errName) {
+			return
+		}
+		if call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr); ok {
+			source = call
+		}
+	}
+	if assign, ok := stmt.Init.(*ast.AssignStmt); ok {
+		consider(assign)
+		return source
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		if assign, ok := n.(*ast.AssignStmt); ok && assign.Pos() < stmt.Pos() {
+			consider(assign)
+		}
+		return true
+	})
+	return source
+}
+
+// isParseCall reports a call that checks the shape of its input: strconv,
+// a function or method named Parse..., Unquote. Its error says the input is
+// not of that shape, not that something broke.
+func isParseCall(call *ast.CallExpr) bool {
+	if call == nil {
+		return false
+	}
+	name := ""
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		name = fun.Name
+	case *ast.SelectorExpr:
+		if isIdentNamed(fun.X, "strconv") {
+			return true
+		}
+		name = fun.Sel.Name
+	}
+	return strings.HasPrefix(name, "Parse") || strings.HasPrefix(name, "parse") || name == "Unquote" || name == "Atoi"
+}
+
+// requestValueMethods read a value the client sent.
+var requestValueMethods = map[string]bool{"FormValue": true, "PostFormValue": true, "PathValue": true}
+
+// parsesRequestInput reports a call that parses a value of the request: an
+// argument read by r.URL.Query().Get, a query copy's Get, FormValue,
+// PostFormValue, PathValue or mux.Vars(r)[...], directly or through a local.
+func parsesRequestInput(body *ast.BlockStmt, call *ast.CallExpr) bool {
+	if call == nil {
+		return false
+	}
+	for _, arg := range call.Args {
+		if isRequestValue(body, arg, 2) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRequestValue(body *ast.BlockStmt, expr ast.Expr, depth int) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		value := localValue(body, e.Name)
+		return depth > 0 && value != nil && isRequestValue(body, value, depth-1)
+	case *ast.IndexExpr:
+		inner, ok := ast.Unparen(e.X).(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		sel, ok := inner.Fun.(*ast.SelectorExpr)
+		return ok && sel.Sel.Name == "Vars"
+	case *ast.CallExpr:
+		sel, ok := e.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		if requestValueMethods[sel.Sel.Name] {
+			return true
+		}
+		return sel.Sel.Name == "Get" && isQueryValues(body, sel.X)
+	}
+	return false
+}
+
+// isQueryValues reports r.URL.Query() or a local holding it.
+func isQueryValues(body *ast.BlockStmt, expr ast.Expr) bool {
+	if ident, ok := ast.Unparen(expr).(*ast.Ident); ok {
+		value := localValue(body, ident.Name)
+		return value != nil && strings.HasSuffix(types.ExprString(value), ".URL.Query()")
+	}
+	return strings.HasSuffix(types.ExprString(expr), ".URL.Query()")
+}
+
+// localValue returns the value a := (an if-init too) gives name in the
+// function; nil when there is none or more than one.
+func localValue(body *ast.BlockStmt, name string) ast.Expr {
+	var value ast.Expr
+	count := 0
+	ast.Inspect(body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != len(assign.Rhs) {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			if isIdentNamed(lhs, name) {
+				value = assign.Rhs[i]
+				count++
+			}
+		}
+		return true
+	})
+	if count != 1 {
+		return nil
+	}
+	return value
 }
 
 // assignedIdents собирает идентификаторы, стоящие непосредственно слева в
