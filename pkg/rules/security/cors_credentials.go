@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -80,7 +81,7 @@ func (r *CORSCredentialsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 }
 
 func (r *CORSCredentialsRule) checkAllowOrigin(body *ast.BlockStmt, report func(ast.Node, string, string, string)) {
-	parents := parentMap(body)
+	parents := helpers.ParentMap(body)
 	origins := make(map[string]bool)
 	assignedValues(body, func(name *ast.Ident, value ast.Expr) {
 		if call, ok := ast.Unparen(value).(*ast.CallExpr); ok && strings.EqualFold(headerGet(call), "Origin") {

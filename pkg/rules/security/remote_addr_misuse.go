@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -60,7 +61,7 @@ func (r *RemoteAddrMisuseRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if !ok || fn.Body == nil {
 			continue
 		}
-		parents := parentMap(fn.Body)
+		parents := helpers.ParentMap(fn.Body)
 		addrNames := make(map[string]bool)
 		assignedValues(fn.Body, func(name *ast.Ident, value ast.Expr) {
 			if isRemoteAddr(value, parents) {

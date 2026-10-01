@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 	"strings"
 
@@ -49,29 +50,88 @@ func (r *ReturnNilErrorRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*co
 // information.
 func (r *ReturnNilErrorRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	return analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
-		if !r.hasErrorReturn(fn) || r.isValidNilNilPattern(fn) || nilIsEmptyFirstResult(fn, info) {
+		if !r.hasErrorReturn(fn) || nilIsEmptyFirstResult(fn, info) {
 			return nil
 		}
+		notFound := noRowsReturns(fn)
+		conventional := r.isValidNilNilPattern(fn)
 
 		var violations []*core.Violation
-		// Returns of a nested closure answer for the closure's own signature.
 		forEachOwnStatement(fn.Body, func(stmt ast.Stmt) {
 			ret, ok := stmt.(*ast.ReturnStmt)
-			if !ok || !r.isNilNilReturn(ret) {
+			if !ok || !r.isNilNilReturn(ret) || (conventional && !notFound[ret]) {
 				return
 			}
 			line := ctx.LineFor(ret)
 			if ctx.IsSuppressed(line, r.Name()) {
 				return
 			}
-			v := r.CreateViolation(ctx.RelPath, line, "Returning (nil, nil) - possible missing error")
-			v.WithCode(ctx.GetLine(line))
-			v.WithSuggestion("Return an error or a valid value, not both nil")
-			v.WithContext("pattern", "nil_nil_return")
-			violations = append(violations, v)
+			violations = append(violations, r.report(ctx, line, notFound[ret]))
 		})
 		return violations
 	})
+}
+
+func (r *ReturnNilErrorRule) report(ctx *core.FileContext, line int, notFound bool) *core.Violation {
+	if notFound {
+		v := r.CreateViolation(ctx.RelPath, line, "Missing row answered with (nil, nil) — not found passes for success, and a caller that does not check for nil counts the record as zero")
+		v.WithCode(ctx.GetLine(line))
+		v.WithSuggestion("Return a not-found error (wrapping the project's ErrNotFound) and let the caller decide what an absent record means")
+		v.WithContext("pattern", "not_found_as_success")
+		return v
+	}
+	v := r.CreateViolation(ctx.RelPath, line, "Returning (nil, nil) - possible missing error")
+	v.WithCode(ctx.GetLine(line))
+	v.WithSuggestion("Return an error or a valid value, not both nil")
+	v.WithContext("pattern", "nil_nil_return")
+	return v
+}
+
+// noRowsReturns returns the return statements of branches taken when a query
+// found no row: if errors.Is(err, sql.ErrNoRows) { ... } or err == pgx.ErrNoRows.
+// The name-based exemption of lookups does not cover them: answering a
+// missing row with (nil, nil) is the ambiguity the rule exists for.
+func noRowsReturns(fn *ast.FuncDecl) map[*ast.ReturnStmt]bool {
+	returns := make(map[*ast.ReturnStmt]bool)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		branch, ok := n.(*ast.IfStmt)
+		if !ok || !testsNoRows(branch.Cond) {
+			return true
+		}
+		for _, stmt := range branch.Body.List {
+			if ret, ok := stmt.(*ast.ReturnStmt); ok {
+				returns[ret] = true
+			}
+		}
+		return true
+	})
+	return returns
+}
+
+// testsNoRows reports a condition that holds when the error is ErrNoRows.
+func testsNoRows(cond ast.Expr) bool {
+	switch c := ast.Unparen(cond).(type) {
+	case *ast.BinaryExpr:
+		switch c.Op {
+		case token.LOR:
+			return testsNoRows(c.X) || testsNoRows(c.Y)
+		case token.EQL:
+			return namesNoRows(c.X) || namesNoRows(c.Y)
+		}
+	case *ast.CallExpr:
+		sel, ok := c.Fun.(*ast.SelectorExpr)
+		return ok && sel.Sel.Name == "Is" && len(c.Args) == 2 && namesNoRows(c.Args[1])
+	}
+	return false
+}
+
+// namesNoRows reports <pkg>.ErrNoRows (database/sql, pgx).
+func namesNoRows(expr ast.Expr) bool {
+	sel, ok := ast.Unparen(expr).(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "ErrNoRows"
 }
 
 // nilIsEmptyFirstResult reports whether nil is the empty value of the first
