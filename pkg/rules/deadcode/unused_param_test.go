@@ -56,6 +56,45 @@ func handler(_ int, name string) string {
 			wantViolations: 0,
 		},
 		{
+			name: "blank context in a function nothing calls through a signature",
+			code: `package main
+
+import "context"
+
+type settings struct{}
+
+func classify(_ context.Context, name string) string {
+	return name
+}
+
+func (s settings) effectiveAt(_ context.Context, day int) int {
+	return day
+}`,
+			wantViolations: 2,
+			wantParams:     []string{"_"},
+		},
+		{
+			name: "blank context required by an interface or a function type",
+			code: `package main
+
+import "context"
+
+type classifier interface{ Classify(ctx context.Context, name string) string }
+
+type plain struct{}
+
+func (plain) Classify(_ context.Context, name string) string { return name }
+
+func register(fn func(context.Context, string) string) { _ = fn(context.Background(), "") }
+
+func named(_ context.Context, name string) string { return name }
+
+var _ classifier = plain{}
+
+func wire() { register(named) }`,
+			wantViolations: 0,
+		},
+		{
 			name: "main function skipped",
 			code: `package main
 
