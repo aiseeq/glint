@@ -35,8 +35,9 @@ func init() {
 // lock, and when the SELECT locks the row (FOR UPDATE / FOR NO KEY
 // UPDATE / FOR SHARE) — that is exactly the fix. A read is serialized too when
 // the function earlier locks some row FOR UPDATE with an argument the read
-// also passes: concurrent callers for that key queue on the parent row, and
-// the second one finds what the first wrote.
+// also passes, through the same handle: concurrent callers for that key queue
+// on the parent row, and the second one finds what the first wrote. A lock
+// taken through another handle is outside the read's transaction.
 type SelectThenWriteRaceRule struct {
 	*rules.BaseRule
 
@@ -174,7 +175,8 @@ func (r *SelectThenWriteRaceRule) checkFunction(ctx *core.FileContext, fn *ast.F
 }
 
 // queryArguments maps each query constant passed to a call to the source text
-// of the arguments that follow it: the values bound to its parameters.
+// of the arguments that follow it, the values bound to its parameters, each
+// prefixed with the handle the call runs on (tx, r.db).
 func queryArguments(fn *ast.FuncDecl, info *types.Info) map[ast.Expr][]string {
 	arguments := make(map[ast.Expr][]string)
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -182,12 +184,16 @@ func queryArguments(fn *ast.FuncDecl, info *types.Info) map[ast.Expr][]string {
 		if !ok {
 			return true
 		}
+		handle := ""
+		if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
+			handle = types.ExprString(selector.X)
+		}
 		for i, arg := range call.Args {
 			if _, ok := constantString(arg, info); !ok {
 				continue
 			}
 			for _, bound := range call.Args[i+1:] {
-				arguments[arg] = append(arguments[arg], types.ExprString(bound))
+				arguments[arg] = append(arguments[arg], handle+" "+types.ExprString(bound))
 			}
 			break
 		}

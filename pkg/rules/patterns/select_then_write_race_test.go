@@ -270,6 +270,26 @@ func persist(ctx context.Context, tx Tx, userID, otherID string) error {
 			expectedCount: 1,
 		},
 		{
+			// A lock taken through another handle than the lookup's is outside
+			// its transaction: autocommit releases it at once.
+			name: "parent row locked through another handle",
+			code: `package repo
+import "context"
+func (r *Repo) persist(ctx context.Context, tx Tx, userID string) error {
+	var locked string
+	if err := r.db.QueryRowxContext(ctx, ` + "`SELECT id FROM users WHERE id = $1 FOR UPDATE`" + `, userID).Scan(&locked); err != nil {
+		return err
+	}
+	var id string
+	err := tx.QueryRowxContext(ctx, ` + "`SELECT id FROM transactions WHERE user_id = $1 LIMIT 1`" + `, userID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, ` + "`INSERT INTO transactions (id, user_id) VALUES ($1, $2)`" + `, newID(), userID)
+	}
+	return err
+}`,
+			expectedCount: 1,
+		},
+		{
 			// A shared lock is held by both callers at once and serializes nothing.
 			name: "parent row locked FOR SHARE",
 			code: `package repo
