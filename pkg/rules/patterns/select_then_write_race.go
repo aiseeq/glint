@@ -33,15 +33,21 @@ func init() {
 //
 // The rule is silent when the function first takes an advisory or a table
 // lock, and when the SELECT locks the row (FOR UPDATE / FOR NO KEY
-// UPDATE / FOR SHARE) — that is exactly the fix.
+// UPDATE / FOR SHARE) — that is exactly the fix. A read is serialized too when
+// the function earlier locks some row FOR UPDATE with an argument the read
+// also passes: concurrent callers for that key queue on the parent row, and
+// the second one finds what the first wrote.
 type SelectThenWriteRaceRule struct {
 	*rules.BaseRule
 
 	selectQuery *regexp.Regexp
 	updateQuery *regexp.Regexp
 	rowLock     *regexp.Regexp
-	whereClause *regexp.Regexp
-	identifier  *regexp.Regexp
+	// exclusiveLock is a row lock two transactions cannot hold at once;
+	// FOR SHARE is held by both and serializes nothing.
+	exclusiveLock *regexp.Regexp
+	whereClause   *regexp.Regexp
+	identifier    *regexp.Regexp
 	// quotedText is a single-quoted SQL string: a word inside it is data,
 	// not a column.
 	quotedText *regexp.Regexp
@@ -71,6 +77,7 @@ func NewSelectThenWriteRaceRule() *SelectThenWriteRaceRule {
 		selectQuery:     regexp.MustCompile(`(?is)^\s*SELECT\s+(.+?)\s+FROM\s+([A-Za-z_][A-Za-z0-9_.]*)`),
 		updateQuery:     regexp.MustCompile(`(?is)^\s*UPDATE\s+([A-Za-z_][A-Za-z0-9_.]*)\s+SET\s+(.+)`),
 		rowLock:         regexp.MustCompile(`(?i)\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b|\bFOR\s+(?:KEY\s+)?SHARE\b`),
+		exclusiveLock:   regexp.MustCompile(`(?i)\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b`),
 		whereClause:     regexp.MustCompile(`(?i)\bWHERE\b`),
 		identifier:      regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`),
 		quotedText:      regexp.MustCompile(`'(?:[^']|'')*'`),
@@ -136,6 +143,9 @@ func (r *SelectThenWriteRaceRule) checkFunction(ctx *core.FileContext, fn *ast.F
 		return nil
 	}
 
+	arguments := queryArguments(fn, info)
+	// lockedKeys are the arguments of earlier exclusive row locks.
+	lockedKeys := make(map[string]bool)
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		expr, ok := n.(ast.Expr)
 		if !ok {
@@ -145,11 +155,55 @@ func (r *SelectThenWriteRaceRule) checkFunction(ctx *core.FileContext, fn *ast.F
 		if !ok {
 			return true
 		}
+		if r.selectQuery.MatchString(query) {
+			if r.exclusiveLock.MatchString(query) {
+				for _, arg := range arguments[expr] {
+					lockedKeys[arg] = true
+				}
+				return false
+			}
+			if sharesKey(lockedKeys, arguments[expr]) {
+				return false
+			}
+		}
 		reads = r.checkQuery(ctx, fn, query, expr, reads, &violations)
 		// The whole constant is one query: its operands are not visited again.
 		return false
 	})
 	return violations
+}
+
+// queryArguments maps each query constant passed to a call to the source text
+// of the arguments that follow it: the values bound to its parameters.
+func queryArguments(fn *ast.FuncDecl, info *types.Info) map[ast.Expr][]string {
+	arguments := make(map[ast.Expr][]string)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		for i, arg := range call.Args {
+			if _, ok := constantString(arg, info); !ok {
+				continue
+			}
+			for _, bound := range call.Args[i+1:] {
+				arguments[arg] = append(arguments[arg], types.ExprString(bound))
+			}
+			break
+		}
+		return true
+	})
+	return arguments
+}
+
+// sharesKey reports whether a query binds one of the locked arguments.
+func sharesKey(lockedKeys map[string]bool, arguments []string) bool {
+	for _, arg := range arguments {
+		if lockedKeys[arg] {
+			return true
+		}
+	}
+	return false
 }
 
 // constantString returns the string value of a constant expression: with type
