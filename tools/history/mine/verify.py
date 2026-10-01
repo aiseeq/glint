@@ -10,7 +10,8 @@ Only reads the repository: trees come from git archive.
 
 A manifest (.tsv, `commit kind rule[,rule...] [@path:line] [whole-tree]` per line) is the
 acceptance of new rules: only the listed rules run, every line is checked
-afresh, and the lines where none of its rules fired are printed as misses;
+afresh and on its own - lines of one commit and kind share a glint run, not a
+verdict - and the lines where none of its rules fired are printed as misses;
 the exit status is 1 when there is one. A rule that reports the defect on a
 line the commit did not change (a setter, a line the fix kept) is anchored
 with @path:line in the analyzed tree. A rule that compares files across the
@@ -59,9 +60,10 @@ def module_root(path, tree_files):
     return os.path.dirname(path) or '.'
 
 
-def run(commit, tree, side, rules, anchor=None, whole=False):
+def run(commit, tree, side, rules, anchors=(), whole=False):
     lines = changed_lines(commit, side)
-    if anchor:
+    changed = {p: set(s) for p, s in lines.items()}
+    for anchor in anchors:
         path, line = anchor.rsplit(':', 1)
         lines.setdefault(path, set()).add(int(line))
     if not lines:
@@ -71,6 +73,8 @@ def run(commit, tree, side, rules, anchor=None, whole=False):
     for path in lines:
         by_root['.' if whole else module_root(path, tree_files)].append(path)
     fired = defaultdict(set)
+    # hits keep where each rule fired: on a changed line, or on which anchor.
+    hits = set()
     errors = []
     total = 0
     skipped = 0
@@ -104,26 +108,37 @@ def run(commit, tree, side, rules, anchor=None, whole=False):
         for issue in issues:
             rel = os.path.normpath(os.path.join(root, issue['file']))
             want = lines.get(rel)
-            if want and any(n in want for n in (issue['line'] - 1, issue['line'], issue['line'] + 1)):
+            near = (issue['line'] - 1, issue['line'], issue['line'] + 1)
+            if want and any(n in want for n in near):
                 fired[rel].add(issue['rule'])
+                if any(n in changed.get(rel, ()) for n in near):
+                    hits.add((issue['rule'], 'changed'))
+                for anchor in anchors:
+                    path, line = anchor.rsplit(':', 1)
+                    if path == rel and int(line) in near:
+                        hits.add((issue['rule'], anchor))
     return {'status': 'ok' if not errors else 'partial', 'errors': errors, 'files': sorted(lines),
-            'issues_in_roots': total, 'packages_skipped': skipped, 'fired': {p: sorted(r) for p, r in fired.items()}}
+            'issues_in_roots': total, 'packages_skipped': skipped, 'fired': {p: sorted(r) for p, r in fired.items()},
+            'hits': sorted(hits)}
 
 
 manifest = cand_path.endswith('.tsv')
 expected = defaultdict(set)
+# checks are the manifest lines of each commit and kind: (rules, anchor or None).
+checks = defaultdict(list)
 if manifest:
-    anchors = {}
     whole = set()
     for line in open(cand_path):
         if line.strip() and not line.startswith('#'):
             commit, kind, rules, *rest = line.split()
             expected[(commit, kind)].update(rules.split(','))
+            anchor = None
             for token in rest:
                 if token == 'whole-tree':
                     whole.add((commit, kind))
                 else:
-                    anchors[(commit, kind)] = token.lstrip('@')
+                    anchor = token.lstrip('@')
+            checks[(commit, kind)].append((rules.split(','), anchor))
     dates = {c: git('log', '-1', '--format=%ad', '--date=short', c).strip() for c, _ in expected}
     jobs = sorted((dates[c], c, k) for c, k in expected)
 else:
@@ -146,21 +161,28 @@ with open(out_path, 'a' if not manifest else 'w') as out:
         tree = commit + '^' if kind == 'defect' else commit
         rules = sorted(expected[(commit, kind)]) if manifest else None
         try:
-            res = run(commit, tree, side, rules, anchors.get((commit, kind)) if manifest else None,
+            res = run(commit, tree, side, rules,
+                      [a for _, a in checks[(commit, kind)] if a] if manifest else (),
                       manifest and (commit, kind) in whole)
         except subprocess.CalledProcessError as e:
             res = {'status': 'error', 'errors': [str(e)[:300]]}
         res.update(commit=commit, kind=kind)
         if manifest:
-            fired = {r for rs in res.get('fired', {}).values() for r in rs}
-            res.update(expected=rules, hit=bool(fired & set(rules)))
-            if not res['hit']:
-                misses.append(f'{commit} {kind} {",".join(rules)} {res["status"]}')
+            # A line is hit by one of its own rules, on a changed line or on
+            # its own anchor; another line's rule or anchor does not count.
+            hits = {tuple(h) for h in res.get('hits', [])}
+            verdicts = []
+            for line_rules, anchor in checks[(commit, kind)]:
+                hit = any((r, 'changed') in hits or (anchor and (r, anchor) in hits) for r in line_rules)
+                verdicts.append(hit)
+                if not hit:
+                    misses.append(f'{commit} {kind} {",".join(line_rules)}' + (f' @{anchor}' if anchor else '') + f' {res["status"]}')
+            res.update(expected=rules, hit=all(verdicts))
         out.write(json.dumps(res, ensure_ascii=False) + '\n')
         out.flush()
         print(f'{i + 1}/{len(jobs)} {commit} {kind} {res["status"]}' + (f' hit={res["hit"]}' if manifest else ''), flush=True)
 if manifest:
-    print(f'misses: {len(misses)} of {len(jobs)}')
+    print(f'misses: {len(misses)} of {sum(len(c) for c in checks.values())}')
     for miss in misses:
         print('  ' + miss)
     sys.exit(1 if misses else 0)

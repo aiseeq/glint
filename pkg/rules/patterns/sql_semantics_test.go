@@ -238,6 +238,39 @@ func (r *Repo) Forget(ctx context.Context, id string) {
 	assert.Equal(t, []int{4, 9}, sqlRuleLines(t, NewSQLMissingRowUncheckedRule(), ctx))
 }
 
+// An upsert whose DO UPDATE has a WHERE may change nothing: the caller that
+// cannot tell runs its side effects (an auto-invest, a notification) for a
+// webhook another request already applied.
+func TestSQLMissingRowUncheckedConditionalUpsert(t *testing.T) {
+	ctx := sqlSchemaProject(t, sqlSchemaMigration, `package storage
+
+func (r *Repo) Upsert(ctx context.Context, p *Position) error {
+	query := `+"`"+`INSERT INTO positions (id, account_id, amount, updated_at) VALUES ($1, $2, $3, now())
+		ON CONFLICT (id) DO UPDATE SET amount = EXCLUDED.amount
+		WHERE positions.amount != EXCLUDED.amount`+"`"+`
+	_, err := r.db.ExecContext(ctx, query, p.ID, p.AccountID, p.Amount)
+	return err
+}
+
+func (r *Repo) Save(ctx context.Context, p *Position) error {
+	_, err := r.db.ExecContext(ctx, `+"`"+`INSERT INTO positions (id, account_id, amount, updated_at) VALUES ($1, $2, $3, now())
+		ON CONFLICT (id) DO UPDATE SET amount = EXCLUDED.amount`+"`"+`, p.ID, p.AccountID, p.Amount)
+	return err
+}
+
+func (r *Repo) Apply(ctx context.Context, p *Position) (bool, error) {
+	result, err := r.db.ExecContext(ctx, `+"`"+`INSERT INTO positions (id, account_id, amount, updated_at) VALUES ($1, $2, $3, now())
+		ON CONFLICT (id) DO UPDATE SET amount = EXCLUDED.amount WHERE positions.amount != EXCLUDED.amount`+"`"+`, p.ID, p.AccountID, p.Amount)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
+}
+`)
+	assert.Equal(t, []int{7}, sqlRuleLines(t, NewSQLMissingRowUncheckedRule(), ctx))
+}
+
 // pgx returns the command tag: the count is read right in the condition.
 func TestSQLMissingRowUncheckedTag(t *testing.T) {
 	ctx := sqlSchemaProject(t, sqlSchemaMigration, `package storage
