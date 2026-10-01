@@ -122,4 +122,17 @@ var markers = []string{
 }
 `)
 	assert.Equal(t, []int{3, 6, 7}, violationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(testCtx)))
+
+	// A domain assembled around a substitution is still the registrable
+	// domain it names.
+	templated := rulestest.TextFile(t, "e2e/helpers/users.ts", "export const user = (pid: number) => `test-${Date.now()}@shop-test-w${pid}.com`\nexport const safe = (pid: number) => `test-${pid}@w${pid}.example.com`\n")
+	assert.Equal(t, []int{1}, violationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(templated)))
+
+	formatted := rulestest.GoFile(t, "tests/users_test.go", `package tests
+
+import "fmt"
+
+func email(worker int) string { return fmt.Sprintf("user@shop-test-w%d.com", worker) }
+`)
+	assert.Equal(t, []int{5}, violationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(formatted)))
 }
