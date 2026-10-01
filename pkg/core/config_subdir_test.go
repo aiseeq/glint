@@ -62,6 +62,12 @@ categories:
           - file: "total.ts"
             line: 3
           - pattern: "legacy"
+          - file: "backend/services/billing/invoice.go"
+            function: renamedAway
+          - file: "backend/services/billing/invoice.go"
+            function: Issue
+          - files: "frontend/**"
+            function: anyTS
 `
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".glint.yaml"), []byte(config), 0o644))
 	for _, dir := range []string{"frontend/e2e/utils", "backend/services/billing", "frontend/app", "node_modules/x/services/billing"} {
@@ -75,9 +81,19 @@ categories:
 	files, err := cfg.ConfigFiles()
 	require.NoError(t, err)
 	assert.NotContains(t, files, "node_modules/x/services/billing/a.js")
-	dead := cfg.DeadExceptions(files)
-	require.Len(t, dead, 1)
+	functions := func(path string) ([]string, bool, error) {
+		if path == "backend/services/billing/invoice.go" {
+			return []string{"Issue"}, true, nil
+		}
+		return nil, false, nil
+	}
+	dead, err := cfg.DeadExceptions(files, functions)
+	require.NoError(t, err)
+	require.Len(t, dead, 2)
 	assert.Equal(t, "services/billing/**", dead[0].Exception.Files)
 	assert.Equal(t, 9, dead[0].Line)
 	assert.Equal(t, filepath.Join(root, ".glint.yaml"), dead[0].Source)
+	assert.False(t, dead[0].NoFunction)
+	assert.Equal(t, "renamedAway", dead[1].Exception.Function)
+	assert.True(t, dead[1].NoFunction)
 }

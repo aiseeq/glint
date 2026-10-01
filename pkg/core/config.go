@@ -142,34 +142,66 @@ func (e *Exception) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// DeadException is a rule exception naming files, none of which exists.
+// DeadException is a rule exception that suppresses nothing: the files it
+// names do not exist, or none of them declares the function it names.
 type DeadException struct {
 	Category, Rule string
 	Exception      Exception
 	// Source and Line are the configuration file and the line that declare it.
 	Source string
 	Line   int
+	// NoFunction is set when the files exist and the function does not.
+	NoFunction bool
 }
 
 // DeadExceptions returns the rule exceptions that name files (file or
-// files) and match none of the given ones: paths relative to the directory of
-// the configuration, the way exceptions name them. Such an exception
-// suppresses nothing - it was written for a path that moved or relative to
-// another directory.
-func (c *Config) DeadExceptions(files []string) []DeadException {
+// files) and match none of the given ones - paths relative to the directory
+// of the configuration, the way exceptions name them - or whose function
+// none of the matched files declares. functions lists the functions a file
+// declares, false when it cannot tell (not Go): such a file keeps the
+// exception. A dead exception was written for a path or a function that
+// moved, or relative to another directory.
+func (c *Config) DeadExceptions(files []string, functions func(path string) ([]string, bool, error)) ([]DeadException, error) {
 	var dead []DeadException
 	for _, category := range slices.Sorted(maps.Keys(c.Categories)) {
 		cat := c.Categories[category]
 		for _, rule := range slices.Sorted(maps.Keys(cat.Rules)) {
 			for _, exc := range cat.Rules[rule].Exceptions {
-				if (exc.File == "" && exc.Files == "") || slices.ContainsFunc(files, exc.namesFile) {
+				if exc.File == "" && exc.Files == "" {
 					continue
 				}
-				dead = append(dead, DeadException{Category: category, Rule: rule, Exception: exc, Source: exc.source, Line: exc.at})
+				matched := slices.DeleteFunc(slices.Clone(files), func(path string) bool { return !exc.namesFile(path) })
+				noFunction := false
+				if len(matched) > 0 && exc.Function != "" {
+					declared, err := declaresFunction(matched, exc.Function, functions)
+					if err != nil {
+						return nil, err
+					}
+					noFunction = !declared
+				}
+				if len(matched) > 0 && !noFunction {
+					continue
+				}
+				dead = append(dead, DeadException{Category: category, Rule: rule, Exception: exc, Source: exc.source, Line: exc.at, NoFunction: noFunction})
 			}
 		}
 	}
-	return dead
+	return dead, nil
+}
+
+// declaresFunction reports whether one of the files declares the function,
+// or cannot tell (a file that is not Go).
+func declaresFunction(files []string, name string, functions func(path string) ([]string, bool, error)) (bool, error) {
+	for _, path := range files {
+		names, known, err := functions(path)
+		if err != nil {
+			return false, err
+		}
+		if !known || slices.Contains(names, name) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // namesFile reports whether the exception's file or files names the path.
