@@ -231,6 +231,64 @@ func (h *Handler) Save(ctx context.Context, hash, userID string) error {
 			expectedCount: 0,
 		},
 		{
+			// A parent row locked FOR UPDATE by the key the lookup uses serializes
+			// the callers for that key: the second waits and finds the first insert.
+			name: "parent row locked FOR UPDATE by the same key",
+			code: `package repo
+import "context"
+func persist(ctx context.Context, tx Tx, userID, otherID string) error {
+	var locked string
+	if err := tx.QueryRowxContext(ctx, ` + "`SELECT id FROM users WHERE id = $1 FOR UPDATE`" + `, userID).Scan(&locked); err != nil {
+		return err
+	}
+	var id string
+	err := tx.QueryRowxContext(ctx, ` + "`SELECT id FROM transactions WHERE user_id = $1 AND type = 'correction' LIMIT 1`" + `, userID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, ` + "`INSERT INTO transactions (id, user_id, type) VALUES ($1, $2, 'correction')`" + `, newID(), userID)
+	}
+	return err
+}`,
+			expectedCount: 0,
+		},
+		{
+			// A lock on a row the lookup key does not name serializes nothing.
+			name: "parent row locked by another key",
+			code: `package repo
+import "context"
+func persist(ctx context.Context, tx Tx, userID, otherID string) error {
+	var locked string
+	if err := tx.QueryRowxContext(ctx, ` + "`SELECT id FROM users WHERE id = $1 FOR UPDATE`" + `, otherID).Scan(&locked); err != nil {
+		return err
+	}
+	var id string
+	err := tx.QueryRowxContext(ctx, ` + "`SELECT id FROM transactions WHERE user_id = $1 AND type = 'correction' LIMIT 1`" + `, userID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, ` + "`INSERT INTO transactions (id, user_id, type) VALUES ($1, $2, 'correction')`" + `, newID(), userID)
+	}
+	return err
+}`,
+			expectedCount: 1,
+		},
+		{
+			// A shared lock is held by both callers at once and serializes nothing.
+			name: "parent row locked FOR SHARE",
+			code: `package repo
+import "context"
+func persist(ctx context.Context, tx Tx, userID, otherID string) error {
+	var locked string
+	if err := tx.QueryRowxContext(ctx, ` + "`SELECT id FROM users WHERE id = $1 FOR SHARE`" + `, userID).Scan(&locked); err != nil {
+		return err
+	}
+	var id string
+	err := tx.QueryRowxContext(ctx, ` + "`SELECT id FROM transactions WHERE user_id = $1 AND type = 'correction' LIMIT 1`" + `, userID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, ` + "`INSERT INTO transactions (id, user_id, type) VALUES ($1, $2, 'correction')`" + `, newID(), userID)
+	}
+	return err
+}`,
+			expectedCount: 1,
+		},
+		{
 			// An advisory lock taken first serializes the callers.
 			name: "advisory lock before lookup and insert",
 			code: `package repo
