@@ -150,3 +150,73 @@ func TestContextBackgroundRuleNoAST(t *testing.T) {
 
 	assert.Empty(t, violations)
 }
+
+// Repro: WithoutCancel(ctx) in place of Background() keeps the values and
+// still drops the caller's cancellation — a read the request waits for runs
+// on after the client is gone. Detaching a write that must complete, work
+// handed to a goroutine and a context handed back to the caller is the
+// function's purpose and stays silent.
+func TestContextBackgroundRuleWithoutCancel(t *testing.T) {
+	violations := runRuleOnFiles(t, NewContextBackgroundRule(), map[string]string{"svc/balance.go": `package svc
+
+import (
+	"context"
+	"time"
+)
+
+type Repo interface {
+	ListTransactions(ctx context.Context, userID string) ([]string, error)
+	GetUser(ctx context.Context, userID string) (string, error)
+	UpsertRates(ctx context.Context, rates []string) error
+}
+
+type Service struct{ repo Repo }
+
+type job struct{ ctx context.Context }
+
+func (s *Service) Load(ctx context.Context, userID string) ([]string, error) {
+	sqlCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+	return s.repo.ListTransactions(sqlCtx, userID)
+}
+
+func (s *Service) User(ctx context.Context, userID string) (string, error) {
+	return s.repo.GetUser(context.WithoutCancel(ctx), userID)
+}
+
+func (s *Service) Persist(ctx context.Context, rates []string) error {
+	return s.repo.UpsertRates(context.WithoutCancel(ctx), rates)
+}
+
+func (s *Service) Mixed(ctx context.Context, userID string) error {
+	detached := context.WithoutCancel(ctx)
+	if _, err := s.repo.GetUser(detached, userID); err != nil {
+		return err
+	}
+	return s.repo.UpsertRates(detached, nil)
+}
+
+func (s *Service) Handle(ctx context.Context, userID string) {
+	go s.refreshAsync(ctx, userID)
+	detached := context.WithoutCancel(ctx)
+	go func() { _, _ = s.repo.GetUser(detached, userID) }()
+}
+
+func (s *Service) refreshAsync(ctx context.Context, userID string) {
+	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	_, _ = s.repo.ListTransactions(bg, userID)
+}
+
+func (s *Service) Persistence(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+}
+
+func (s *Service) Store(ctx context.Context) *job {
+	j := &job{}
+	j.ctx = context.WithoutCancel(ctx)
+	return j
+}
+`})
+	assert.Equal(t, []string{"svc/balance.go:19", "svc/balance.go:25"}, foundLines(violations))
+}
