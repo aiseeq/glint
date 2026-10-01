@@ -110,6 +110,24 @@ func isMakefileName(name string) bool {
 	return strings.HasSuffix(name, ".mk")
 }
 
+// IsDockerfile reports a container build file: Dockerfile, Dockerfile.<name>,
+// <name>.dockerfile or Containerfile.
+func (ctx *FileContext) IsDockerfile() bool {
+	return isDockerfileName(filepath.Base(ctx.Path))
+}
+
+func isDockerfileName(name string) bool {
+	switch {
+	case name == "Dockerfile", name == "Containerfile":
+		return true
+	case strings.HasPrefix(name, "Dockerfile."), strings.HasPrefix(name, "Containerfile."):
+		// Dockerfile.dockerignore is the ignore list of that Dockerfile.
+		ext := strings.ToLower(filepath.Ext(name))
+		return ext != ".md" && ext != ".txt" && ext != ".dockerignore"
+	}
+	return strings.HasSuffix(strings.ToLower(name), ".dockerfile")
+}
+
 // IsTestFile reports whether the file is test code: a Go _test.go file, a
 // JS/TS *.test.* or *.spec.* file, or any file under a test directory of the
 // project. Directories are matched in the project-relative path: the absolute

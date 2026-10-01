@@ -295,6 +295,9 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 	if isMakefileName(filepath.Base(path)) {
 		return true // recipe rules (rules must guard with IsMakefile)
 	}
+	if isDockerfileName(filepath.Base(path)) {
+		return true // image build rules (rules must guard with IsDockerfile)
+	}
 
 	for _, e := range analyzableExtensions {
 		if ext == e {

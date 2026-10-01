@@ -90,6 +90,83 @@ func handle(w http.ResponseWriter, err error, upstreamErr error) {
 	assert.Equal(t, []int{13, 14, 15, 16}, ruleLines(t, NewErrorDetailIn5xxResponseRule(), code))
 }
 
+// The text of an error that rejected a request goes to the unauthenticated
+// caller in a 401 or 403 answer: a token parser's or a signature check's
+// message names the expected key, the claims and the upstream. A fixed text,
+// and a 4xx validation answer, are fine.
+func TestErrorDetailInAuthFailureResponse(t *testing.T) {
+	code := `package api
+
+import (
+	"fmt"
+	"net/http"
+)
+
+func SendError(w http.ResponseWriter, status int, msg, code, details string) {}
+func SendUnauthorized(w http.ResponseWriter, msg string) {}
+
+func handle(w http.ResponseWriter, err error) {
+	http.Error(w, err.Error(), http.StatusUnauthorized)
+	SendError(w, http.StatusUnauthorized, "Invalid cookie", "UNAUTHORIZED", err.Error())
+	SendError(w, 403, "forbidden", "FORBIDDEN", fmt.Sprintf("denied: %v", err))
+	SendUnauthorized(w, err.Error())
+	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	SendError(w, http.StatusBadRequest, "invalid", "VALIDATION", err.Error())
+	SendError(w, http.StatusUnauthorized, "Invalid cookie", "UNAUTHORIZED", "")
+}
+`
+	assert.Equal(t, []int{12, 13, 14, 15}, ruleLines(t, NewErrorDetailInAuthFailureResponseRule(), code))
+}
+
+// An access check that returns only fixed texts written for the caller
+// ("access denied: project not assigned") is the designed answer; the error
+// of a token parser passed through is not.
+func TestErrorDetailInAuthFailureResponseFixedTexts(t *testing.T) {
+	found := projectFileLines(t, NewErrorDetailInAuthFailureResponseRule(), map[string]string{
+		"admin/access.go": `package admin
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+)
+
+var errNotFound = errors.New("transaction not found")
+
+func checkAccess(r *http.Request, allowed bool, missing bool) error {
+	if missing {
+		return errNotFound
+	}
+	if !allowed {
+		return fmt.Errorf("access denied: project not assigned")
+	}
+	return nil
+}
+
+func parseToken(raw string) error {
+	if err := verify(raw); err != nil {
+		return fmt.Errorf("token rejected: %w", err)
+	}
+	return nil
+}
+
+func verify(raw string) error { return nil }
+
+func handle(w http.ResponseWriter, r *http.Request) {
+	if err := checkAccess(r, false, false); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	err := parseToken(r.Header.Get("Authorization"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+	}
+}
+`,
+	})
+	assert.Equal(t, []string{"admin/access.go:37"}, found)
+}
+
 // A project helper that logs or reports the details and sends a fixed text,
 // or puts them in the body only under a condition (outside production, below
 // 500), does not leak them; one that encodes them into the body does, also
