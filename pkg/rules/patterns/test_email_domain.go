@@ -70,7 +70,7 @@ func (r *TestEmailRegistrableDomainRule) analyzeGo(ctx *core.FileContext) []*cor
 		if !ok {
 			return true
 		}
-		if domain := registrableTestDomain(text); domain != "" {
+		if domain := registrableTestDomain(fillSubstitutions(text, formatVerb)); domain != "" {
 			violations = r.add(violations, ctx, ctx.LineFor(lit), domain)
 		}
 		return true
@@ -82,6 +82,7 @@ func (r *TestEmailRegistrableDomainRule) analyzeJS(ctx *core.FileContext) []*cor
 	src := newJSSource(ctx)
 	var violations []*core.Violation
 	for i, line := range src.text {
+		line = fillSubstitutions(line, templateSubstitution)
 		for _, loc := range emailDomain.FindAllStringSubmatchIndex(line, -1) {
 			// Only literal text: the code view blanks it.
 			if loc[0] >= len(src.code[i]) || src.code[i][loc[0]] != ' ' {
@@ -103,6 +104,19 @@ func (r *TestEmailRegistrableDomainRule) add(violations []*core.Violation, ctx *
 	return append(violations, testReport(r.BaseRule, ctx, line,
 		"Test address on the registrable domain "+domain+" — mail to it reaches whoever owns the domain, and code trusting it as a test domain trusts them",
 		"Use a reserved name that never resolves: example.com, or a .test / .example / .invalid domain"))
+}
+
+var (
+	templateSubstitution = regexp.MustCompile(`\$\{[^}]*\}`)
+	formatVerb           = regexp.MustCompile(`%[-+# 0-9.]*[sdvxXq]`)
+)
+
+// fillSubstitutions replaces each substitution (a template's ${...}, a
+// format verb) with letters of the same length: a domain assembled around
+// one — shop-test-w${pid}.com — still names the registrable domain, and the
+// columns of the line stay where they were.
+func fillSubstitutions(text string, substitution *regexp.Regexp) string {
+	return substitution.ReplaceAllStringFunc(text, func(s string) string { return strings.Repeat("x", len(s)) })
 }
 
 // registrableTestDomain returns the first domain after an @ in the text
