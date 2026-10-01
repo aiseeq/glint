@@ -152,3 +152,50 @@ func TestSessionDatesAfterTypeChange(t *testing.T) {
 	sql := `SELECT id FROM holdings WHERE closed_at::date = $1 AND opened_at::date = $1`
 	assert.Equal(t, at(sql, "::date"), schema.SessionDates(sql))
 }
+
+// A constant named as a real column reads like the column: every row of the
+// branch shows 'done' whatever the table holds.
+func TestConstantColumns(t *testing.T) {
+	root := t.TempDir()
+	writeMigrations(t, root, map[string]string{
+		"migrations/001_init.up.sql": `
+CREATE TABLE payouts (id UUID PRIMARY KEY, account_id UUID, kind TEXT, state TEXT, receipt TEXT);
+CREATE TABLE payout_requests (id UUID PRIMARY KEY, account_id UUID, kind TEXT, state TEXT);
+CREATE TABLE accounts (id UUID PRIMARY KEY, email TEXT);
+`,
+	})
+	schema, err := Load(root, nil)
+	require.NoError(t, err)
+	sql := `SELECT * FROM (
+		SELECT r.id, 'payout' AS kind, r.state, '' AS receipt, '' AS note FROM payout_requests r WHERE r.account_id = $1 AND r.kind = 'payout'
+		UNION ALL
+		SELECT p.id, 'payout' AS kind, 'done' AS state, p.receipt, '' AS note FROM payouts p LEFT JOIN accounts a ON a.id = p.account_id WHERE p.account_id = $2 AND p.kind = 'payout'
+	) rows ORDER BY id`
+	assert.Equal(t, at(sql, "'done'"), schema.ConstantColumns(sql))
+
+	for _, allowed := range []string{
+		`INSERT INTO payouts (id, state) SELECT id, 'done' AS state FROM payout_requests WHERE id = $1`,
+		`SELECT 'done' AS state`,
+		`SELECT p.id, NULL AS state FROM payouts p`,
+		`SELECT p.id, '' AS state FROM payouts p`,
+		`SELECT p.id, 'paid' AS state FROM payouts p UNION ALL SELECT r.id, 'asked' AS state FROM payout_requests r`,
+		`SELECT p.id, 'done' AS status FROM payouts p`,
+		`SELECT p.id, 'done' AS state FROM payouts p WHERE p.state = 'done'`,
+	} {
+		assert.Empty(t, schema.ConstantColumns(allowed), allowed)
+	}
+	var none *Schema
+	assert.Empty(t, none.ConstantColumns(sql))
+}
+
+// A test that creates a migrated table again keeps its own copy of the
+// definition, and the copy stays as the migrations move on.
+func TestMigratedTables(t *testing.T) {
+	schema := uniqueSchema(t)
+	sql := `CREATE TABLE IF NOT EXISTS members (id UUID PRIMARY KEY, email TEXT);
+CREATE TABLE scratch (id INT);
+CREATE TEMP TABLE roles (member_id UUID);`
+	assert.Equal(t, at(sql, "members"), schema.MigratedTables(sql))
+	var none *Schema
+	assert.Empty(t, none.MigratedTables(sql))
+}

@@ -448,6 +448,134 @@ func handleC(w http.ResponseWriter, r *http.Request) { unavailable(w) }
 	assert.Empty(t, violations)
 }
 
+// sightedResponderSource — помощник получает запрос и статус параметром, но в контекст
+// запроса не смотрит; пакет при этом знает context.Canceled (разбор обёрнутых ошибок).
+const sightedResponderSource = `package web
+
+import (
+	"context"
+	"errors"
+	"net/http"
+)
+
+func traceOf(r *http.Request) string { return r.Header.Get("traceparent") }
+
+func sendError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	w.Header().Set("X-Trace", traceOf(r))
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(message))
+}
+
+func classify(err error) int {
+	if errors.Is(err, context.Canceled) {
+		return 499
+	}
+	return http.StatusInternalServerError
+}
+`
+
+func sightedHandlers(status string) string {
+	return `package web
+
+import "net/http"
+
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	sendError(w, r, ` + status + `, "index failed")
+}
+
+func handleDetail(w http.ResponseWriter, r *http.Request) {
+	sendError(w, r, ` + status + `, "detail failed")
+}
+
+func handleSearch(w http.ResponseWriter, r *http.Request) {
+	sendError(w, r, ` + status + `, "search failed")
+}
+`
+}
+
+func TestServerErrorHidesClientCancelRule_SightedResponder(t *testing.T) {
+	tests := []struct {
+		name      string
+		responder string
+		handlers  string
+		expect    bool
+	}{
+		{name: "takes the request, never looks at its context", responder: sightedResponderSource,
+			handlers: sightedHandlers("http.StatusInternalServerError"), expect: true},
+		{name: "callers pass only client errors", responder: sightedResponderSource,
+			handlers: sightedHandlers("http.StatusBadRequest")},
+		{name: "responder checks the request context", responder: `package web
+
+import (
+	"context"
+	"errors"
+	"net/http"
+)
+
+func sendError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	if status >= 500 && errors.Is(r.Context().Err(), context.Canceled) {
+		w.WriteHeader(499)
+		return
+	}
+	w.WriteHeader(status)
+}
+`, handlers: sightedHandlers("http.StatusInternalServerError")},
+		{name: "responder delegates the check", responder: `package web
+
+import "net/http"
+
+func gone(r *http.Request) bool { return r.Context().Err() != nil }
+
+func sendError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	if gone(r) {
+		return
+	}
+	w.WriteHeader(status)
+}
+`, handlers: sightedHandlers("http.StatusInternalServerError")},
+		{name: "callers check the cancellation themselves", responder: sightedResponderSource, handlers: `package web
+
+import "net/http"
+
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.Context().Err() != nil {
+		return
+	}
+	sendError(w, r, http.StatusInternalServerError, "index failed")
+}
+
+func handleDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Context().Err() != nil {
+		return
+	}
+	sendError(w, r, http.StatusInternalServerError, "detail failed")
+}
+
+func handleSearch(w http.ResponseWriter, r *http.Request) {
+	sendError(w, r, http.StatusInternalServerError, "search failed")
+}
+`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project := cancelResponderProject(t, map[string]string{
+				"responder.go": tt.responder,
+				"handlers.go":  tt.handlers,
+			})
+			violations, err := NewServerErrorHidesClientCancelRule().AnalyzeGoProject(project)
+			require.NoError(t, err)
+			if !tt.expect {
+				assert.Empty(t, violations)
+				return
+			}
+			require.Len(t, violations, 1)
+			assert.Equal(t, "sendError", violations[0].Context["responder"])
+			assert.Equal(t, "3", violations[0].Context["call_sites"])
+			assert.Contains(t, violations[0].Message, "answers 500 for 3 call sites and takes the request, but never looks at its context")
+		})
+	}
+}
+
 func TestServerErrorHidesClientCancelRule_NilProject(t *testing.T) {
 	_, err := NewServerErrorHidesClientCancelRule().AnalyzeGoProject(nil)
 	require.Error(t, err)
