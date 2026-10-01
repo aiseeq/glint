@@ -25,9 +25,9 @@ func init() {
 // reserved names (RFC 2606, RFC 6761) never resolve: example.com, .test,
 // .example, .invalid, .localhost.
 //
-// In a test file only a domain without a local part ("@test.com",
-// "%@test.com") is reported: it matches users by domain, so it picks real
-// users on it too. A fixture address there sends nothing by itself.
+// Test files and end-to-end suites are checked too: tests that register
+// users run against environments that send mail, and a fixture address copied
+// from test to test is how the domain comes back after a clean-up.
 type TestEmailRegistrableDomainRule struct {
 	*rules.BaseRule
 }
@@ -70,7 +70,7 @@ func (r *TestEmailRegistrableDomainRule) analyzeGo(ctx *core.FileContext) []*cor
 		if !ok {
 			return true
 		}
-		if domain := registrableTestDomain(text, markersOnly(ctx)); domain != "" {
+		if domain := registrableTestDomain(text); domain != "" {
 			violations = r.add(violations, ctx, ctx.LineFor(lit), domain)
 		}
 		return true
@@ -80,7 +80,6 @@ func (r *TestEmailRegistrableDomainRule) analyzeGo(ctx *core.FileContext) []*cor
 
 func (r *TestEmailRegistrableDomainRule) analyzeJS(ctx *core.FileContext) []*core.Violation {
 	src := newJSSource(ctx)
-	onlyMarkers := markersOnly(ctx)
 	var violations []*core.Violation
 	for i, line := range src.text {
 		for _, loc := range emailDomain.FindAllStringSubmatchIndex(line, -1) {
@@ -88,10 +87,7 @@ func (r *TestEmailRegistrableDomainRule) analyzeJS(ctx *core.FileContext) []*cor
 			if loc[0] >= len(src.code[i]) || src.code[i][loc[0]] != ' ' {
 				continue
 			}
-			if onlyMarkers && !domainMarker(line, loc[0]) {
-				continue
-			}
-			if domain := registrableTestDomain(line[loc[0]:loc[1]], false); domain != "" {
+			if domain := registrableTestDomain(line[loc[0]:loc[1]]); domain != "" {
 				violations = r.add(violations, ctx, i+1, domain)
 				break
 			}
@@ -109,25 +105,10 @@ func (r *TestEmailRegistrableDomainRule) add(violations []*core.Violation, ctx *
 		"Use a reserved name that never resolves: example.com, or a .test / .example / .invalid domain"))
 }
 
-// markersOnly reports a file of a test tree, where only domain markers count.
-func markersOnly(ctx *core.FileContext) bool {
-	return ctx.IsTestFile() || isE2EPath(ctx.RelPath)
-}
-
-// domainMarker reports an @ at index at with no local part before it: the
-// start of the text, a quote, or a LIKE/glob wildcard.
-func domainMarker(text string, at int) bool {
-	return at == 0 || strings.ContainsRune("%*'\"`", rune(text[at-1]))
-}
-
 // registrableTestDomain returns the first domain after an @ in the text
-// that is named as a test domain but can be registered; with onlyMarkers,
-// only a domain without a local part.
-func registrableTestDomain(text string, onlyMarkers bool) string {
+// that is named as a test domain but can be registered.
+func registrableTestDomain(text string) string {
 	for _, loc := range emailDomain.FindAllStringSubmatchIndex(text, -1) {
-		if onlyMarkers && !domainMarker(text, loc[0]) {
-			continue
-		}
 		domain := strings.ToLower(text[loc[2]:loc[3]])
 		labels := strings.Split(domain, ".")
 		tld := labels[len(labels)-1]

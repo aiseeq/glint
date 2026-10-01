@@ -107,10 +107,11 @@ export const other = 'user@example.com'
 const at = user@testmail.com
 export const cleanup = ['%@app-test.com']
 `)
-	assert.Equal(t, []int{5}, violationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(tsCtx)))
+	assert.Equal(t, []int{2, 5}, violationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(tsCtx)))
 
-	// A test's own fixture address sends nothing by itself; a domain it
-	// matches users by does.
+	// A fixture address in a test is reported too: tests that register users
+	// run against environments that send mail, and a fixture copied from one
+	// test to the next is how the domain comes back after a clean-up.
 	testCtx := rulestest.GoFile(t, "tests/integration/users_test.go", `package integration
 
 var fixture = "qa@test.com"
@@ -120,5 +121,5 @@ var markers = []string{
 	"%@shop-test.com",
 }
 `)
-	assert.Equal(t, []int{6, 7}, violationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(testCtx)))
+	assert.Equal(t, []int{3, 6, 7}, violationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(testCtx)))
 }
