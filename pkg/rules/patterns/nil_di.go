@@ -6,7 +6,6 @@ import (
 	"go/types"
 	"path/filepath"
 	"strings"
-	"unicode"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -328,42 +327,13 @@ func (r *NilDIRule) isHighRiskParam(paramHint string) bool {
 
 // isDependencyName reports a name one of whose words marks a dependency.
 func isDependencyName(paramHint string) bool {
-	for _, word := range identifierWords(paramHint) {
+	for _, word := range helpers.IdentifierWords(paramHint) {
 		// A plural names several of the same dependency: loggers, repos.
 		if highRiskParamWords[word] || highRiskParamWords[strings.TrimSuffix(word, "s")] {
 			return true
 		}
 	}
 	return false
-}
-
-// identifierWords splits an identifier into lower-case words at underscores
-// and camelCase boundaries; an acronym is one word (HTTPClient: http, client).
-func identifierWords(name string) []string {
-	var words []string
-	runes := []rune(name)
-	start := 0
-	flush := func(end int) {
-		if end > start {
-			words = append(words, strings.ToLower(string(runes[start:end])))
-		}
-		start = end
-	}
-	for i := 0; i < len(runes); i++ {
-		switch {
-		case runes[i] == '_':
-			flush(i)
-			start = i + 1
-		case i > start && unicode.IsUpper(runes[i]):
-			prevLower := !unicode.IsUpper(runes[i-1])
-			nextLower := i+1 < len(runes) && unicode.IsLower(runes[i+1])
-			if prevLower || nextLower {
-				flush(i)
-			}
-		}
-	}
-	flush(len(runes))
-	return words
 }
 
 // hasSuppression delegates to the canonical core suppression check.
