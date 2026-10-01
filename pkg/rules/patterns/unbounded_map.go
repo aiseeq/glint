@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"golang.org/x/tools/go/types/typeutil"
 )
 
@@ -445,7 +446,7 @@ func externalKey(info *types.Info, body *ast.BlockStmt, key ast.Expr) bool {
 
 // externalName reports an identifier naming an unbounded outside value.
 func externalName(name string) bool {
-	words := identifierWords(name)
+	words := helpers.IdentifierWords(name)
 	for i, word := range words {
 		if externalKeyWords[word] {
 			return true

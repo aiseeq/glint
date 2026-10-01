@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -128,7 +129,7 @@ func checkingDependencyName(name string) bool {
 	if isDependencyName(name) {
 		return true
 	}
-	for _, word := range identifierWords(name) {
+	for _, word := range helpers.IdentifierWords(name) {
 		if checkerWords[word] {
 			return true
 		}
