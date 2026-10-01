@@ -97,6 +97,19 @@ func (ctx *FileContext) IsShellFile() bool {
 	return strings.HasSuffix(ctx.Path, ".sh")
 }
 
+// IsMakefile reports a make file: Makefile, GNUmakefile, makefile or *.mk.
+func (ctx *FileContext) IsMakefile() bool {
+	return isMakefileName(filepath.Base(ctx.Path))
+}
+
+func isMakefileName(name string) bool {
+	switch name {
+	case "Makefile", "GNUmakefile", "makefile":
+		return true
+	}
+	return strings.HasSuffix(name, ".mk")
+}
+
 // IsTestFile reports whether the file is test code: a Go _test.go file, a
 // JS/TS *.test.* or *.spec.* file, or any file under a test directory of the
 // project. Directories are matched in the project-relative path: the absolute

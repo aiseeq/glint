@@ -21,7 +21,7 @@ import json, os, re, shutil, subprocess, sys
 from collections import defaultdict
 
 repo, cand_path, work, out_path = sys.argv[1:5]
-CODE = re.compile(r'\.(go|ts|tsx|js|jsx|mjs)$')
+CODE = re.compile(r'\.(go|ts|tsx|js|jsx|mjs|sh|mk)$|(^|/)(GNUmakefile|[Mm]akefile)$')
 
 
 def git(*args):
