@@ -3,6 +3,8 @@ package patterns
 import (
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -146,6 +148,42 @@ func Params(config *pgx.ConnConfig) { config.RuntimeParams["timezone"] = "UTC" }
 	assert.Empty(t, run(files, "storage/repo.go"))
 	delete(files, "storage/db.go")
 	assert.Empty(t, run(files, "storage/repo.go"), "the connection string comes from the environment")
+}
+
+// A constant named as the table's column reads like the column: every row
+// of the list shows the same amount.
+func TestSQLConstantShadowsColumn(t *testing.T) {
+	ctx := sqlSchemaProject(t, sqlSchemaMigration, `package storage
+
+func (r *Repo) List(ctx context.Context, account string) {
+	r.db.QueryContext(ctx, `+"`"+`
+		SELECT p.id, 0 AS amount, p.created_at
+		FROM positions p
+		WHERE p.account_id = $1`+"`"+`, account)
+	r.db.QueryContext(ctx, "SELECT p.id, '' AS kind, NULL AS amount FROM positions p")
+	r.db.QueryContext(ctx, "SELECT p.id, 0 AS amount FROM positions p WHERE p.amount = 0")
+}
+`)
+	assert.Equal(t, []int{5}, sqlRuleLines(t, NewSQLConstantShadowsColumnRule(), ctx))
+}
+
+// A test that creates a migrated table tests its own copy of the schema.
+func TestSQLTestDDLDuplicatesMigration(t *testing.T) {
+	ctx := rulestest.GoFile(t, "storage/repo_test.go", `package storage
+
+func setup(db DB) {
+	db.Exec(`+"`"+`CREATE TABLE IF NOT EXISTS positions (
+		id UUID PRIMARY KEY,
+		amount NUMERIC
+	)`+"`"+`)
+	db.Exec("CREATE TEMP TABLE accounts (id UUID)")
+	db.Exec("CREATE TABLE fixtures (id INT)")
+}
+`)
+	path := filepath.Join(ctx.ProjectRoot, "storage/migrations/001_init.up.sql")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(sqlSchemaMigration), 0o644))
+	assert.Equal(t, []int{4}, sqlRuleLines(t, NewSQLTestDDLDuplicatesMigrationRule(), ctx))
 }
 
 // An update by id that matches no row succeeds having changed nothing; only

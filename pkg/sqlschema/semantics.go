@@ -67,6 +67,154 @@ func onlyAggregates(sel *pgquery.SelectStmt) bool {
 	return true
 }
 
+// ConstantColumns returns the offsets of the constants a SELECT names as a
+// column of a table it reads: 'completed' AS status over a table with a
+// status column shows one value for every row, whatever the row holds. Not
+// reported: NULL or ” (a placeholder in a UNION branch), a column the WHERE pins
+// to a value (the constant then says the same), and the SELECT of an INSERT,
+// where the constant is the value written. The schema may be nil.
+func (s *Schema) ConstantColumns(sql string) []int {
+	if s == nil {
+		return nil
+	}
+	result, ok := parse(sql)
+	if !ok {
+		return nil
+	}
+	written := make(map[*pgquery.SelectStmt]bool)
+	var selects []*pgquery.SelectStmt
+	for _, raw := range result.GetStmts() {
+		walk(raw.GetStmt().ProtoReflect(), func(m proto.Message) {
+			switch node := m.(type) {
+			case *pgquery.InsertStmt:
+				written[node.GetSelectStmt().GetSelectStmt()] = true
+			case *pgquery.SelectStmt:
+				selects = append(selects, node)
+			}
+		})
+	}
+	tags := unionTags(selects)
+	var offsets []int
+	for _, sel := range selects {
+		if written[sel] || sel.GetOp() != pgquery.SetOperation_SETOP_NONE {
+			continue
+		}
+		tables, _ := s.fromTables(sel)
+		pinned := make(map[string]bool)
+		for _, ref := range pinnedColumns(sel.GetWhereClause()) {
+			pinned[ref.name] = true
+		}
+		for i, target := range sel.GetTargetList() {
+			res := target.GetResTarget()
+			name := strings.ToLower(res.GetName())
+			value := constantTarget(target)
+			if name == "" || pinned[name] || placeholder(value.GetAConst()) || tags[sel][i] || !anyHasColumn(tables, name) {
+				continue
+			}
+			offsets = append(offsets, location(value))
+		}
+	}
+	return offsets
+}
+
+// MigratedTables returns the offsets of the CREATE TABLE statements of the
+// text that create a table the migrations already define: a second
+// definition that drifts from the real one as migrations change it.
+// Temporary tables are work space and are not reported. The schema may be
+// nil.
+func (s *Schema) MigratedTables(sql string) []int {
+	if s == nil {
+		return nil
+	}
+	result, ok := parse(sql)
+	if !ok {
+		return nil
+	}
+	var offsets []int
+	for _, raw := range result.GetStmts() {
+		create := raw.GetStmt().GetCreateStmt()
+		if create == nil || create.GetRelation().GetRelpersistence() == "t" || s.relation(create.GetRelation(), nil) == nil {
+			continue
+		}
+		offsets = append(offsets, int(create.GetRelation().GetLocation()))
+	}
+	return offsets
+}
+
+// anyHasColumn reports a table among those of a FROM with the column.
+func anyHasColumn(tables map[string]*Table, name string) bool {
+	for _, table := range tables {
+		if table != nil && table.Column(name) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// constantTarget returns a target's value through type casts.
+func constantTarget(target *pgquery.Node) *pgquery.Node {
+	value := target.GetResTarget().GetVal()
+	for value.GetTypeCast() != nil {
+		value = value.GetTypeCast().GetArg()
+	}
+	return value
+}
+
+// unionTags returns, for the branches of each UNION, the target positions
+// every branch fills with a constant: a tag saying which branch a row came
+// from ('client' AS source, 'system' AS source), not a value of the column.
+func unionTags(selects []*pgquery.SelectStmt) map[*pgquery.SelectStmt]map[int]bool {
+	tags := make(map[*pgquery.SelectStmt]map[int]bool)
+	inner := make(map[*pgquery.SelectStmt]bool)
+	for _, sel := range selects {
+		if sel.GetOp() != pgquery.SetOperation_SETOP_NONE {
+			inner[sel.GetLarg()] = true
+			inner[sel.GetRarg()] = true
+		}
+	}
+	for _, sel := range selects {
+		if sel.GetOp() == pgquery.SetOperation_SETOP_NONE || inner[sel] {
+			continue
+		}
+		var leaves []*pgquery.SelectStmt
+		var collect func(*pgquery.SelectStmt)
+		collect = func(s *pgquery.SelectStmt) {
+			if s.GetOp() == pgquery.SetOperation_SETOP_NONE {
+				leaves = append(leaves, s)
+				return
+			}
+			collect(s.GetLarg())
+			collect(s.GetRarg())
+		}
+		collect(sel)
+		for i := range leaves[0].GetTargetList() {
+			constant := true
+			for _, leaf := range leaves {
+				if i >= len(leaf.GetTargetList()) || placeholder(constantTarget(leaf.GetTargetList()[i]).GetAConst()) {
+					constant = false
+					break
+				}
+			}
+			if !constant {
+				continue
+			}
+			for _, leaf := range leaves {
+				if tags[leaf] == nil {
+					tags[leaf] = make(map[int]bool)
+				}
+				tags[leaf][i] = true
+			}
+		}
+	}
+	return tags
+}
+
+// placeholder reports a value that is not a constant, or one that fills a
+// column a UNION branch has no value for: NULL or ”.
+func placeholder(c *pgquery.A_Const) bool {
+	return c == nil || c.GetIsnull() || (c.GetSval() != nil && c.GetSval().GetSval() == "")
+}
+
 // fromTables maps the names a SELECT's FROM gives its tables - the alias,
 // or the table's own name - to the tables; a table the schema lacks maps to
 // nil. joined reports more than one relation.

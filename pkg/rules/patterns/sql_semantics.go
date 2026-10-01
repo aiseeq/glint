@@ -19,6 +19,8 @@ func init() {
 	rules.Register(NewSQLRuntimeDDLRule())
 	rules.Register(NewSQLGroupBySingleRowRule())
 	rules.Register(NewSQLUpsertFreshKeyRule())
+	rules.Register(NewSQLConstantShadowsColumnRule())
+	rules.Register(NewSQLTestDDLDuplicatesMigrationRule())
 }
 
 // productionGoFile is a Go file the SQL rules read: parsed, not a test.
@@ -91,6 +93,106 @@ func (r *SQLLimitWithoutOrderRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 			violations = append(violations, sqlViolation(r.BaseRule, ctx, line,
 				"LIMIT with no ORDER BY — which rows come first is up to the query plan, and it changes with the data",
 				"Order by what decides which row is wanted (ORDER BY created_at DESC, id), or aggregate if any row will do"))
+		}
+	}
+	return violations
+}
+
+// SQLConstantShadowsColumnRule detects a constant a SELECT names as a column
+// of a table it reads:
+//
+//	SELECT t.id, t.amount, 'completed' AS status FROM transfers t WHERE t.user_id = $1
+//
+// The result reads like the table's status, but every row shows the
+// constant: a pending or failed row is reported as completed. Not reported:
+// NULL, a column the WHERE pins to a value, and the SELECT of an INSERT.
+type SQLConstantShadowsColumnRule struct {
+	*rules.BaseRule
+}
+
+// NewSQLConstantShadowsColumnRule creates the rule
+func NewSQLConstantShadowsColumnRule() *SQLConstantShadowsColumnRule {
+	return &SQLConstantShadowsColumnRule{BaseRule: rules.NewBaseRule(
+		"sql-constant-shadows-column",
+		"patterns",
+		"Detects a SELECT naming a constant as a column of the table it reads ('completed' AS status) — every row shows the constant, not its value",
+		core.SeverityHigh,
+	)}
+}
+
+// ReadsOtherFiles reports that the findings depend on the migrations' columns.
+func (r *SQLConstantShadowsColumnRule) ReadsOtherFiles() bool { return true }
+
+// AnalyzeFile reports the constants of a file's SQL named as table columns.
+func (r *SQLConstantShadowsColumnRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if !productionGoFile(ctx) {
+		return nil
+	}
+	schema, ok := fileSchema(ctx, r.BaseRule)
+	if !ok || schema == nil {
+		return nil
+	}
+	var violations []*core.Violation
+	for _, literal := range sqlLiterals(ctx.GoAST) {
+		for _, offset := range schema.ConstantColumns(literal.text) {
+			line := literal.lineAt(ctx, offset)
+			if ctx.IsSuppressed(line, r.Name()) {
+				continue
+			}
+			violations = append(violations, sqlViolation(r.BaseRule, ctx, line,
+				"Constant named as a column of the table the SELECT reads — every row shows the constant, not the row's value",
+				"Select the column itself (t.status), or name the constant so it does not pass for the column"))
+		}
+	}
+	return violations
+}
+
+// SQLTestDDLDuplicatesMigrationRule detects a test creating a table the
+// migrations define:
+//
+//	db.Exec(`CREATE TABLE IF NOT EXISTS payout_orders (id UUID PRIMARY KEY, amount NUMERIC)`)
+//
+// The test runs against its own copy of the definition: on a database the
+// migrations built the statement does nothing, on a fresh one it builds the
+// old shape, and the test passes against columns the code no longer has, or
+// fails against columns the migrations added. Apply the migrations instead.
+// Temporary tables are not reported.
+type SQLTestDDLDuplicatesMigrationRule struct {
+	*rules.BaseRule
+}
+
+// NewSQLTestDDLDuplicatesMigrationRule creates the rule
+func NewSQLTestDDLDuplicatesMigrationRule() *SQLTestDDLDuplicatesMigrationRule {
+	return &SQLTestDDLDuplicatesMigrationRule{BaseRule: rules.NewBaseRule(
+		"sql-test-ddl-duplicates-migration",
+		"patterns",
+		"Detects a test creating a table the migrations define — its copy of the schema drifts from the real one",
+		core.SeverityMedium,
+	)}
+}
+
+// ReadsOtherFiles reports that the findings depend on the migrations' tables.
+func (r *SQLTestDDLDuplicatesMigrationRule) ReadsOtherFiles() bool { return true }
+
+// AnalyzeFile reports the CREATE TABLE of migrated tables in a test file.
+func (r *SQLTestDDLDuplicatesMigrationRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if !ctx.IsGoFile() || !ctx.HasGoAST() || !ctx.IsTestFile() {
+		return nil
+	}
+	schema, ok := fileSchema(ctx, r.BaseRule)
+	if !ok || schema == nil {
+		return nil
+	}
+	var violations []*core.Violation
+	for _, literal := range sqlLiterals(ctx.GoAST) {
+		for _, offset := range schema.MigratedTables(literal.text) {
+			line := literal.lineAt(ctx, offset)
+			if ctx.IsSuppressed(line, r.Name()) {
+				continue
+			}
+			violations = append(violations, sqlViolation(r.BaseRule, ctx, line,
+				"Test creates a table the migrations define — it tests against its own copy of the schema, which drifts from the migrations",
+				"Build the test database by applying the migrations, and drop the CREATE TABLE from the test"))
 		}
 	}
 	return violations

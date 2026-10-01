@@ -42,6 +42,13 @@ func init() {
 // Четвёртый признак и делает правило точным: единственный вызов чинится на месте, а общий
 // помощник переписывают один раз и лечат им весь слой. Правило молчит, если пакет уже
 // знает про context.Canceled: значит отмену там разбирают, и где именно — решать автору.
+//
+// Вторая форма — помощник, которому запрос передали, а он в контекст не смотрит: статус
+// приходит int-параметром и доходит до WriteHeader, пятисотку передают из нескольких
+// функций, а ни сам помощник, ни то, что он зовёт, не спрашивает ctx.Err(), ctx.Done()
+// и context.Canceled. Знание пакета об отмене здесь не оправдание: разбор, который ловит
+// только обёрнутый %w context.Canceled, пропускает отмену, потерянную по дороге, а запрос
+// под рукой у помощника. Вызов из функции, которая сама разбирает отмену, не считается.
 type ServerErrorHidesClientCancelRule struct {
 	*rules.BaseRule
 	minCallSites int
@@ -53,7 +60,7 @@ func NewServerErrorHidesClientCancelRule() *ServerErrorHidesClientCancelRule {
 		BaseRule: rules.NewBaseRule(
 			"server-error-hides-client-cancel",
 			"patterns",
-			"Detects a shared 5xx responder that takes neither the request nor a context — a client that walked away is answered as a server failure",
+			"Detects a shared 5xx responder that takes neither the request nor a context, or takes the request and never looks at its context — a client that walked away is answered as a server failure",
 			core.SeverityMedium,
 		),
 		minCallSites: 3,
@@ -146,11 +153,17 @@ func (r *ServerErrorHidesClientCancelRule) AnalyzeGoProject(ctx *core.GoProjectC
 		collectResponderCalls(obj, fn, responders)
 	}
 
+	sighted := sightedResponders(funcs, statusParams, responders)
+
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range fileCtx.GoAST.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
+				continue
+			}
+			if resp, tracked := sighted[info.Defs[fn.Name]]; tracked && len(resp.callers) >= r.minCallSites {
+				violations = append(violations, r.sightedViolationFor(fileCtx, resp))
 				continue
 			}
 			resp, tracked := responders[info.Defs[fn.Name]]
@@ -161,6 +174,122 @@ func (r *ServerErrorHidesClientCancelRule) AnalyzeGoProject(ctx *core.GoProjectC
 		}
 		return violations
 	})
+}
+
+// sightedResponders returns the responders that take the request or a context
+// and a status parameter, never consult the cancellation, and are handed a 5xx
+// constant by callers that do not consult it either.
+func sightedResponders(funcs map[types.Object]*declaredFunc, statusParams map[types.Object]map[int]bool,
+	blind map[types.Object]*blindResponder) map[types.Object]*blindResponder {
+	consults := map[types.Object]bool{}
+	visiting := map[types.Object]bool{}
+	candidates := map[types.Object]*blindResponder{}
+	for obj, fn := range funcs {
+		if _, isBlind := blind[obj]; isBlind || len(statusParams[obj]) == 0 || !takesWriterAndRequest(fn.info, fn.decl) {
+			continue
+		}
+		if consultsCancellation(obj, funcs, consults, visiting) {
+			continue
+		}
+		candidates[obj] = &blindResponder{decl: fn.decl, callers: map[string]bool{}, statuses: map[int64]bool{}}
+	}
+	if len(candidates) == 0 {
+		return candidates
+	}
+	for caller, fn := range funcs {
+		if consultsCancellation(caller, funcs, consults, visiting) {
+			continue
+		}
+		callerName := caller.Pkg().Path() + "." + fn.decl.Name.Name
+		ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			callee, ok := typeutil.Callee(fn.info, call).(*types.Func)
+			if !ok || callee.Origin() == caller {
+				return true
+			}
+			resp, tracked := candidates[callee.Origin()]
+			if !tracked {
+				return true
+			}
+			for index := range statusParams[callee.Origin()] {
+				if index >= len(call.Args) {
+					continue
+				}
+				if code, ok := constantInt(fn.info, call.Args[index]); ok && code >= 500 && code <= 599 {
+					resp.callers[callerName] = true
+					resp.statuses[code] = true
+				}
+			}
+			return true
+		})
+	}
+	return candidates
+}
+
+// takesWriterAndRequest reports whether the function takes an
+// http.ResponseWriter and the request or a context.
+func takesWriterAndRequest(info *types.Info, fn *ast.FuncDecl) bool {
+	if fn.Type.Params == nil {
+		return false
+	}
+	writer, request := false, false
+	for _, field := range fn.Type.Params.List {
+		t := info.TypeOf(field.Type)
+		switch {
+		case isNamedType(t, "net/http", "ResponseWriter"):
+			writer = true
+		case isPointerToNamedType(t, "net/http", "Request"), isNamedType(t, "context", "Context"):
+			request = true
+		}
+	}
+	return writer && request
+}
+
+// consultsCancellation reports whether the function, or a project function it
+// calls, asks a context whether it ended (Err, Done) or names
+// context.Canceled or context.DeadlineExceeded.
+func consultsCancellation(obj types.Object, funcs map[types.Object]*declaredFunc, memo, visiting map[types.Object]bool) bool {
+	if done, ok := memo[obj]; ok {
+		return done
+	}
+	fn, ok := funcs[obj]
+	if !ok || visiting[obj] {
+		return false
+	}
+	visiting[obj] = true
+	defer delete(visiting, obj)
+	found := false
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.SelectorExpr:
+			if node.Sel.Name != "Canceled" && node.Sel.Name != "DeadlineExceeded" {
+				return true
+			}
+			if used := fn.info.Uses[node.Sel]; used != nil && used.Pkg() != nil && used.Pkg().Path() == "context" {
+				found = true
+			}
+		case *ast.CallExpr:
+			callee, ok := typeutil.Callee(fn.info, node).(*types.Func)
+			if !ok {
+				return true
+			}
+			if sig, isFunc := callee.Type().(*types.Signature); isFunc && sig.Recv() != nil &&
+				(callee.Name() == "Err" || callee.Name() == "Done") && isNamedType(sig.Recv().Type(), "context", "Context") {
+				found = true
+				return false
+			}
+			found = consultsCancellation(callee.Origin(), funcs, memo, visiting)
+		}
+		return !found
+	})
+	memo[obj] = found
+	return found
 }
 
 // takesWriterAndErrorBlind reports whether the function takes an
@@ -426,10 +555,26 @@ func collectResponderCalls(caller types.Object, fn *declaredFunc, responders map
 	})
 }
 
-// violationFor renders the finding at the responder declaration.
-func (r *ServerErrorHidesClientCancelRule) violationFor(ctx *core.FileContext, resp *blindResponder) *core.Violation {
-	codes := make([]int, 0, len(resp.statuses))
-	for code := range resp.statuses {
+// sightedViolationFor renders the finding at a responder that has the request
+// and does not look at its context.
+func (r *ServerErrorHidesClientCancelRule) sightedViolationFor(ctx *core.FileContext, resp *blindResponder) *core.Violation {
+	v := r.CreateViolation(ctx.RelPath, ctx.LineFor(resp.decl),
+		resp.decl.Name.Name+"() answers "+statusText(resp.statuses)+" for "+
+			strconv.Itoa(len(resp.callers))+" call sites and takes the request, but never looks at its context — "+
+			"a client that closed the connection is reported as a server failure")
+	v.WithSuggestion("Before answering 5xx, check the request's own context " +
+		"(errors.Is(r.Context().Err(), context.Canceled)): log a cancelled request below error level and reply 499; " +
+		"a cancellation lost on the way (an error rebuilt from text) is still visible there")
+	v.WithContext("pattern", "server_error_hides_client_cancel")
+	v.WithContext("responder", resp.decl.Name.Name)
+	v.WithContext("call_sites", strconv.Itoa(len(resp.callers)))
+	return v
+}
+
+// statusText lists the status codes in order: 500/503.
+func statusText(statuses map[int64]bool) string {
+	codes := make([]int, 0, len(statuses))
+	for code := range statuses {
 		codes = append(codes, int(code))
 	}
 	sort.Ints(codes)
@@ -437,9 +582,13 @@ func (r *ServerErrorHidesClientCancelRule) violationFor(ctx *core.FileContext, r
 	for _, code := range codes {
 		codeText = append(codeText, strconv.Itoa(code))
 	}
+	return strings.Join(codeText, "/")
+}
 
+// violationFor renders the finding at the responder declaration.
+func (r *ServerErrorHidesClientCancelRule) violationFor(ctx *core.FileContext, resp *blindResponder) *core.Violation {
 	v := r.CreateViolation(ctx.RelPath, ctx.LineFor(resp.decl),
-		resp.decl.Name.Name+"() answers "+strings.Join(codeText, "/")+" for "+
+		resp.decl.Name.Name+"() answers "+statusText(resp.statuses)+" for "+
 			strconv.Itoa(len(resp.callers))+" call sites but takes neither the request nor a context — "+
 			"a client that closed the connection is reported as a server failure")
 	v.WithSuggestion("Pass *http.Request to the responder and answer a cancelled request separately " +
