@@ -5,8 +5,10 @@ import (
 	"go/token"
 	"go/types"
 	"regexp"
+	"regexp/syntax"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -81,7 +83,7 @@ func (r *StringTruncationSplitsRuneRule) AnalyzeGoProject(ctx *core.GoProjectCon
 				}
 				limit := limitOf(slice.High)
 				if !limits[limitKey(slice.X, limit)] || compared[slice] || machineText(slice.X) ||
-					!textLimit(limit, ellipsized[slice]) {
+					!textLimit(limit, ellipsized[slice]) || asciiBefore(file.GoAST, fn.Body, slice, info) {
 					return true
 				}
 				line := file.LineFor(slice)
@@ -257,4 +259,170 @@ func looksAtRunes(body *ast.BlockStmt, info *types.Info) bool {
 		return !found
 	})
 	return found
+}
+
+// asciiBefore reports a sliced variable that holds ASCII only at the cut: a
+// regexp removed every character outside a set of ASCII characters, and the
+// steps after it (ASCII replacements, case changes, trims) kept it ASCII. Each
+// byte of such a string is a whole character.
+func asciiBefore(file *ast.File, body *ast.BlockStmt, slice *ast.SliceExpr, info *types.Info) bool {
+	return asciiValue(file, body, slice.X, slice.Pos(), info, maxASCIITrace)
+}
+
+// maxASCIITrace bounds the assignments followed back from a cut.
+const maxASCIITrace = 8
+
+// asciiValue reports an expression, evaluated at pos, whose value is ASCII.
+func asciiValue(file *ast.File, body *ast.BlockStmt, expr ast.Expr, pos token.Pos, info *types.Info, depth int) bool {
+	if depth == 0 {
+		return false
+	}
+	switch value := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		rhs, at, ok := lastAssignment(body, info.ObjectOf(value), pos, info)
+		return ok && asciiValue(file, body, rhs, at, info, depth-1)
+	case *ast.CallExpr:
+		return asciiCall(file, body, value, info, depth)
+	}
+	return false
+}
+
+// asciiCall reports a call whose result is ASCII: a regexp replacement that
+// removes non-ASCII or replaces with ASCII in ASCII input, or a strings
+// function that keeps ASCII input ASCII.
+func asciiCall(file *ast.File, body *ast.BlockStmt, call *ast.CallExpr, info *types.Info, depth int) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	input := func() bool { return asciiValue(file, body, call.Args[0], call.Pos(), info, depth-1) }
+	if isPackageFuncCall(file, info, call, "strings", "ToLower", "ToUpper", "TrimSpace", "Trim", "TrimLeft", "TrimRight", "TrimPrefix", "TrimSuffix") {
+		return input()
+	}
+	if isPackageFuncCall(file, info, call, "strings", "ReplaceAll", "Replace") {
+		return len(call.Args) >= 3 && asciiLiteral(call.Args[2]) && input()
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || len(call.Args) != 2 || (sel.Sel.Name != "ReplaceAllString" && sel.Sel.Name != "ReplaceAllLiteralString") || !asciiLiteral(call.Args[1]) {
+		return false
+	}
+	pattern, ok := compiledPattern(file, sel.X, info)
+	return ok && (removesNonASCII(pattern) || input())
+}
+
+// lastAssignment returns the value last assigned to obj by a statement that
+// ends before pos, and where that statement starts.
+func lastAssignment(body *ast.BlockStmt, obj types.Object, pos token.Pos, info *types.Info) (ast.Expr, token.Pos, bool) {
+	if obj == nil {
+		return nil, token.NoPos, false
+	}
+	var last ast.Expr
+	at := token.NoPos
+	ast.Inspect(body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.End() > pos || len(assign.Lhs) != len(assign.Rhs) {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			if ident, ok := lhs.(*ast.Ident); ok && info.ObjectOf(ident) == obj {
+				last, at = assign.Rhs[i], assign.Pos()
+			}
+		}
+		return true
+	})
+	return last, at, last != nil
+}
+
+// compiledPattern returns the parsed pattern of regexp.MustCompile(<literal>),
+// written in place or as the initializer of a package variable of the file.
+// A pattern that does not parse panics at start-up and proves nothing here.
+func compiledPattern(file *ast.File, expr ast.Expr, info *types.Info) (*syntax.Regexp, bool) {
+	if ident, ok := expr.(*ast.Ident); ok {
+		init, found := packageVarInit(file, info.ObjectOf(ident), info)
+		if !found {
+			return nil, false
+		}
+		expr = init
+	}
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 || !isPackageFuncCall(file, info, call, "regexp", "MustCompile", "MustCompilePOSIX") {
+		return nil, false
+	}
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	if !ok {
+		return nil, false
+	}
+	pattern, ok := goStringLiteral(lit)
+	if !ok {
+		return nil, false
+	}
+	re, err := syntax.Parse(pattern, syntax.Perl)
+	return re, err == nil
+}
+
+// packageVarInit returns the initializer of a package variable declared in file.
+func packageVarInit(file *ast.File, obj types.Object, info *types.Info) (ast.Expr, bool) {
+	if obj == nil {
+		return nil, false
+	}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Values) != len(vs.Names) {
+				continue
+			}
+			for i, name := range vs.Names {
+				if info.Defs[name] == obj {
+					return vs.Values[i], true
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+// removesNonASCII reports a pattern matching one character class (possibly
+// repeated) that takes in every character from U+0080 up: what it leaves
+// behind is ASCII.
+func removesNonASCII(re *syntax.Regexp) bool {
+	re = re.Simplify()
+	for (re.Op == syntax.OpPlus || re.Op == syntax.OpStar || re.Op == syntax.OpQuest || re.Op == syntax.OpRepeat) && len(re.Sub) == 1 {
+		re = re.Sub[0]
+	}
+	if re.Op != syntax.OpCharClass {
+		return false
+	}
+	next := rune(utf8.RuneSelf)
+	for i := 0; i+1 < len(re.Rune); i += 2 {
+		lo, hi := re.Rune[i], re.Rune[i+1]
+		if hi < next {
+			continue
+		}
+		if lo > next {
+			return false
+		}
+		next = hi + 1
+	}
+	return next > utf8.MaxRune
+}
+
+// asciiLiteral reports a string literal of ASCII characters.
+func asciiLiteral(expr ast.Expr) bool {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok {
+		return false
+	}
+	text, ok := goStringLiteral(lit)
+	if !ok {
+		return false
+	}
+	for i := 0; i < len(text); i++ {
+		if text[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }

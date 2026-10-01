@@ -212,10 +212,57 @@ func before(line string, col int) string {
 	return line
 }
 `,
+		// A negated class of ASCII characters leaves ASCII only: every byte is
+		// a whole character and the cut cannot split one.
+		"store/slug.go": `package store
+
+import (
+	"regexp"
+	"strings"
+)
+
+var nonWord = regexp.MustCompile(` + "`[^a-z0-9\\s]+`" + `)
+
+func slugTitle(title string) string {
+	title = strings.ToLower(title)
+	title = regexp.MustCompile(` + "`[^a-z0-9\\s]`" + `).ReplaceAllString(title, "")
+	title = regexp.MustCompile(` + "`\\s+`" + `).ReplaceAllString(title, "-")
+	title = strings.TrimSpace(title)
+	if len(title) > 50 {
+		title = title[:50]
+	}
+	return title
+}
+
+func slugName(name string) string {
+	name = nonWord.ReplaceAllString(name, "-")
+	if len(name) > 40 {
+		name = name[:40]
+	}
+	return name
+}
+
+func keepLetters(title string) string {
+	title = regexp.MustCompile(` + "`[^a-zа-я\\s]`" + `).ReplaceAllString(title, "")
+	if len(title) > 50 {
+		title = title[:50]
+	}
+	return title
+}
+
+func cleanedThenRestored(title, original string) string {
+	title = nonWord.ReplaceAllString(title, "")
+	title = original
+	if len(title) > 50 {
+		title = title[:50]
+	}
+	return title
+}
+`,
 	}
 	violations, err := NewStringTruncationSplitsRuneRule().AnalyzeGoProject(rulestest.Project(t, files))
 	require.NoError(t, err)
-	assert.Equal(t, []string{"store/text.go:14", "store/text.go:19", "store/text.go:53", "store/text.go:60"}, foundLines(violations))
+	assert.Equal(t, []string{"store/slug.go:32", "store/slug.go:41", "store/text.go:14", "store/text.go:19", "store/text.go:53", "store/text.go:60"}, foundLines(violations))
 }
 
 // A project that already parses .env with a library keeps a second, weaker

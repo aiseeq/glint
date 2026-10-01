@@ -495,7 +495,13 @@ func divisorSources(fn *ast.FuncDecl, info *types.Info, divisor ast.Expr) diviso
 						origins.lengths[types.ExprString(x.Args[0])] = true
 					}
 				}
-				return true
+				if keepsNonZero(info, x) {
+					return true
+				}
+				// What the call makes of its arguments is unknown; only a
+				// check of the call itself guards its value.
+				origins.texts = append(origins.texts, types.ExprString(x))
+				return false
 			case *ast.Ident:
 				v, ok := info.Uses[x].(*types.Var)
 				if !ok || isPackageLevelVar(v) || origins.vars[v] {
@@ -519,6 +525,35 @@ func divisorSources(fn *ast.FuncDecl, info *types.Info, divisor ast.Expr) diviso
 	}
 	collect(divisor, 2)
 	return origins
+}
+
+// nonZeroKeepers are the decimal functions and methods whose result is not
+// zero when their operands are not: a check of an operand still guards it.
+// Any other call — Pow, Round, a function of the project — can turn a
+// checked operand into zero, so a check of its arguments guards nothing.
+// The constructors from a number are decimalConstructors.
+var nonZeroKeepers = map[string]bool{
+	"NewFromBigInt": true, "NewFromString": true, "RequireFromString": true,
+	"Abs": true, "Neg": true, "Mul": true, "Div": true, "Copy": true, "Max": true, "Min": true, "len": true,
+}
+
+// keepsNonZero reports a call through which the divisor's sources are
+// followed: a conversion, the len builtin, or a decimal function that keeps a
+// non-zero operand non-zero.
+func keepsNonZero(info *types.Info, call *ast.CallExpr) bool {
+	if tv, ok := info.Types[call.Fun]; ok && tv.IsType() {
+		return true
+	}
+	switch fun := ast.Unparen(call.Fun).(type) {
+	case *ast.Ident:
+		_, builtin := info.Uses[fun].(*types.Builtin)
+		return builtin && nonZeroKeepers[fun.Name]
+	case *ast.SelectorExpr:
+		obj, ok := info.Uses[fun.Sel].(*types.Func)
+		return ok && obj.Pkg() != nil && obj.Pkg().Path() == shopspringDecimalPath &&
+			(nonZeroKeepers[fun.Sel.Name] || decimalConstructors[fun.Sel.Name])
+	}
+	return false
 }
 
 // fieldChain reports a.b.c: a value that only names a field.
