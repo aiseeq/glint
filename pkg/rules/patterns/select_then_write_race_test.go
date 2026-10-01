@@ -177,6 +177,79 @@ func (r *Repo) Close(ctx context.Context, id string) error {
 			expectedCount: 1,
 		},
 		{
+			// An upsert replaced by a lookup and an INSERT: two webhooks
+			// for one hash both find no row and both insert.
+			name: "lookup by key then insert without ON CONFLICT",
+			code: `package repo
+import "context"
+func (h *Handler) Save(ctx context.Context, hash, status string) error {
+	var existingID, existingStatus string
+	err := h.db.QueryRowContext(ctx, ` + "`SELECT id, status FROM transactions WHERE transaction_hash = $1`" + `, hash).Scan(&existingID, &existingStatus)
+	if err == nil {
+		return nil
+	}
+	_, err = h.db.ExecContext(ctx, ` + "`INSERT INTO transactions (id, status, transaction_hash) VALUES ($1, $2, $3)`" + `, newID(), status, hash)
+	return err
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "existence count then insert",
+			code: `package repo
+import "context"
+func (r *Repo) Register(ctx context.Context, email string) error {
+	var n int
+	_ = r.db.QueryRowContext(ctx, ` + "`SELECT COUNT(*) FROM users WHERE email = $1`" + `, email).Scan(&n)
+	if n > 0 {
+		return errExists
+	}
+	_, err := r.db.ExecContext(ctx, ` + "`INSERT INTO users (id, email) VALUES ($1, $2)`" + `, newID(), email)
+	return err
+}`,
+			expectedCount: 1,
+		},
+		{
+			// The upsert itself, and an insert of a key the lookup did not
+			// read, stay silent.
+			name: "insert with ON CONFLICT or of another key",
+			code: `package repo
+import "context"
+func (h *Handler) Save(ctx context.Context, hash, userID string) error {
+	var id string
+	_ = h.db.QueryRowContext(ctx, ` + "`SELECT id FROM transactions WHERE transaction_hash = $1`" + `, hash).Scan(&id)
+	_, err := h.db.ExecContext(ctx, ` + "`INSERT INTO transactions (id, transaction_hash) VALUES ($1, $2) ON CONFLICT (transaction_hash) DO UPDATE SET updated_at = now()`" + `, id, hash)
+	if err != nil {
+		return err
+	}
+	_, err = h.db.ExecContext(ctx, ` + "`INSERT INTO audit_log (id, user_id) VALUES ($1, $2)`" + `, id, userID)
+	if err != nil {
+		return err
+	}
+	_, err = h.db.ExecContext(ctx, ` + "`INSERT INTO transactions (id, user_id) VALUES ($1, $2)`" + `, id, userID)
+	return err
+}`,
+			expectedCount: 0,
+		},
+		{
+			// An advisory lock taken first serializes the callers.
+			name: "advisory lock before lookup and insert",
+			code: `package repo
+import "context"
+func (r *Repo) Apply(ctx context.Context, tx Tx, name string) error {
+	if _, err := tx.Exec(ctx, ` + "`SELECT pg_advisory_xact_lock($1)`" + `, lockKey); err != nil {
+		return err
+	}
+	var applied bool
+	_ = tx.QueryRow(ctx, ` + "`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE filename = $1)`" + `, name).Scan(&applied)
+	if applied {
+		return nil
+	}
+	_, err := tx.Exec(ctx, ` + "`INSERT INTO schema_migrations (filename) VALUES ($1)`" + `, name)
+	return err
+}`,
+			expectedCount: 0,
+		},
+		{
 			name: "suppression comment is honored",
 			code: `package repo
 import "context"

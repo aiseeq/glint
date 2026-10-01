@@ -189,6 +189,22 @@ export class Client {
 `))
 }
 
+// A balance field missing from the response read as '0' through ||: the
+// dashboard shows a zero balance instead of an error.
+func TestDefaultInventsDomainValueOrZero(t *testing.T) {
+	assert.Equal(t, []string{"src/lib/dashboard.ts:2", "src/lib/dashboard.ts:3", "src/lib/dashboard.ts:5", "src/lib/dashboard.ts:6"}, linesOf(t, NewDefaultInventsDomainValueRule(), "src/lib/dashboard.ts", `export function stats(balance: Balance, inv: Investment, page: Page) {
+  const totalBalance = parseFloat(balance.total || '0')
+  const locked = Number(userBalance.locked || 0)
+  const count = page.total || 0
+  const invested = parseFloat(inv.amount || '0')
+  const current = parseFloat(inv.currentValue || inv.amount || '0')
+  const hasFee = Number(inv.fee || 0) > 0
+  const items = page.feeCount || 0
+  return { totalBalance, locked, count, invested, current, hasFee, items }
+}
+`))
+}
+
 // A parser that answers anything it cannot read with 0, used on amounts: a
 // broken payload shows as a zero-amount operation.
 func TestMissingAmountCoercedToZero(t *testing.T) {

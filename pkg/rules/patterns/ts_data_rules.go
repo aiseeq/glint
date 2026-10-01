@@ -406,6 +406,7 @@ func (r *EnvSecretLiteralFallbackRule) AnalyzeFile(ctx *core.FileContext) []*cor
 //
 //	network: w.network ?? 'polygon',
 //	serviceFee: w.serviceFee?.toString() ?? '0',
+//	const total = parseFloat(balance.total || '0')
 //	async depositAddress(currency: string = 'USDC') { ... }
 //
 // The record says nothing about the network or the fee, and the screen shows
@@ -432,9 +433,11 @@ var (
 	jsDomainParamDefault = regexp.MustCompile(`[(,{]\s*(?:` + jsDomainNames + `)\s*(?::\s*string\s*)?=\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]`)
 	// jsDomainCode is a value that names a network or a currency: USDC,
 	// polygon, eth-mainnet. Words for a missing value are not codes.
-	jsDomainCode     = regexp.MustCompile(`^[A-Za-z][\w.-]*$`)
-	jsMissingWord    = regexp.MustCompile(`(?i)^(?:unknown|none|n/?a|null|undefined|tbd|empty|missing)$`)
-	jsMoneyFieldZero = regexp.MustCompile(`(?:^|[^?])\.\s*\w*(?:[Aa]mount|[Ff]ee|[Bb]alance|[Pp]rice)\s*(?:\?\.\s*toString\s*\(\s*\))?\s*\?\?\s*(?:'0'|"0"|0\b)\s*\)?\s*([<>!=]?)`)
+	jsDomainCode  = regexp.MustCompile(`^[A-Za-z][\w.-]*$`)
+	jsMissingWord = regexp.MustCompile(`(?i)^(?:unknown|none|n/?a|null|undefined|tbd|empty|missing)$`)
+	// jsMoneyFieldZero is a money field, or any field of a balance record,
+	// defaulted to 0 with ?? or ||.
+	jsMoneyFieldZero = regexp.MustCompile(`(?:(?:^|[^?])\.\s*\w*(?:[Aa]mount|[Ff]ee|[Bb]alance|[Pp]rice)|\b\w*[Bb]alance\s*\.\s*[a-z]\w*)\s*(?:\?\.\s*toString\s*\(\s*\))?\s*(?:\?\?|\|\|)\s*(?:'0'|"0"|0\b)\s*\)?\s*([<>!=]?)`)
 )
 
 // inventsDomainCode reports a default of the pattern that is a network or

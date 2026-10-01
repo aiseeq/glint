@@ -27,7 +27,12 @@ func init() {
 // check on the value, then writes `status` back. A background job and a manual
 // action read the same status concurrently and both pass the validation.
 //
-// The rule is silent when the SELECT locks the row (FOR UPDATE / FOR NO KEY
+// The same race splits an upsert in two: a lookup by a key followed by a
+// plain INSERT of that key. Two concurrent webhooks both find no row and both
+// insert; INSERT ... ON CONFLICT is the fix.
+//
+// The rule is silent when the function first takes an advisory or a table
+// lock, and when the SELECT locks the row (FOR UPDATE / FOR NO KEY
 // UPDATE / FOR SHARE) — that is exactly the fix.
 type SelectThenWriteRaceRule struct {
 	*rules.BaseRule
@@ -42,6 +47,14 @@ type SelectThenWriteRaceRule struct {
 	quotedText *regexp.Regexp
 	// columnReference is a column name, optionally table-qualified.
 	columnReference *regexp.Regexp
+	// insertQuery is an INSERT with its column list; onConflict marks an
+	// upsert.
+	insertQuery *regexp.Regexp
+	onConflict  *regexp.Regexp
+	// keyComparison is a WHERE column compared with a bind parameter.
+	keyComparison *regexp.Regexp
+	// sessionLock is a blocking advisory lock or a table lock.
+	sessionLock *regexp.Regexp
 }
 
 // NewSelectThenWriteRaceRule creates the rule.
@@ -50,7 +63,7 @@ func NewSelectThenWriteRaceRule() *SelectThenWriteRaceRule {
 		BaseRule: rules.NewBaseRule(
 			"select-then-write-race",
 			"patterns",
-			"Detects SELECT without FOR UPDATE followed by an UPDATE of the same column in one function (read-validate-write race)",
+			"Detects SELECT without FOR UPDATE followed by an UPDATE of the same column, or by an INSERT of the looked-up key without ON CONFLICT, in one function (read-validate-write race)",
 			core.SeverityMedium,
 		),
 		// Anchored at the start of the literal so subqueries inside a larger
@@ -62,6 +75,10 @@ func NewSelectThenWriteRaceRule() *SelectThenWriteRaceRule {
 		identifier:      regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`),
 		quotedText:      regexp.MustCompile(`'(?:[^']|'')*'`),
 		columnReference: regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?`),
+		insertQuery:     regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_.]*)\s*\(([^)]*)\)`),
+		onConflict:      regexp.MustCompile(`(?i)\bON\s+CONFLICT\b`),
+		sessionLock:     regexp.MustCompile(`(?i)\bpg_advisory(?:_xact)?_lock\s*\(|\bLOCK\s+TABLE\b`),
+		keyComparison:   regexp.MustCompile(`(?i)([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*=\s*(?:\$\d+|\?)`),
 	}
 }
 
@@ -69,8 +86,11 @@ func NewSelectThenWriteRaceRule() *SelectThenWriteRaceRule {
 type sqlRead struct {
 	table   string
 	columns map[string]bool
-	pos     token.Pos
-	line    int
+	// keys are the WHERE columns compared with a parameter: what the read
+	// looks the row up by.
+	keys map[string]bool
+	pos  token.Pos
+	line int
 }
 
 // AnalyzeFile checks the SQL string literals of each function; queries held
@@ -100,6 +120,21 @@ func (r *SelectThenWriteRaceRule) analyze(ctx *core.FileContext, info *types.Inf
 func (r *SelectThenWriteRaceRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl, info *types.Info) []*core.Violation {
 	var reads []sqlRead
 	var violations []*core.Violation
+
+	// A function that takes an advisory or a table lock first serializes
+	// its callers: the read and the write cannot interleave.
+	locked := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if expr, ok := n.(ast.Expr); ok && !locked {
+			if query, ok := constantString(expr, info); ok && r.sessionLock.MatchString(query) {
+				locked = true
+			}
+		}
+		return !locked
+	})
+	if locked {
+		return nil
+	}
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		expr, ok := n.(ast.Expr)
@@ -146,6 +181,11 @@ func (r *SelectThenWriteRaceRule) checkQuery(ctx *core.FileContext, fn *ast.Func
 		return append(reads, read)
 	}
 
+	if table, columns, ok := r.parseInsert(query); ok {
+		r.checkInsert(ctx, fn, node, table, columns, reads, violations)
+		return reads
+	}
+
 	table, columns, guarded, ok := r.parseUpdate(query)
 	if ok {
 		for _, prior := range reads {
@@ -176,21 +216,80 @@ func (r *SelectThenWriteRaceRule) checkQuery(ctx *core.FileContext, fn *ast.Func
 	return reads
 }
 
-// parseSelect recognizes a SELECT literal that reads concrete columns and does
-// not lock the row. SELECT * is ignored: without an explicit column list the
-// read-modify-write link cannot be proven and the rule prefers precision.
+// checkInsert reports an INSERT of a key that an earlier read of the same
+// table looked up: the read-then-insert pair is an upsert split in two, and
+// two concurrent calls both find no row and both insert.
+func (r *SelectThenWriteRaceRule) checkInsert(ctx *core.FileContext, fn *ast.FuncDecl, node ast.Expr, table string, columns map[string]bool, reads []sqlRead, violations *[]*core.Violation) {
+	for _, prior := range reads {
+		if prior.table != table || prior.pos >= node.Pos() {
+			continue
+		}
+		key := intersectColumn(prior.keys, columns, nil)
+		if key == "" {
+			continue
+		}
+		line := lineFromNode(ctx, node)
+		if ctx.IsSuppressed(line, r.Name()) {
+			return
+		}
+		v := r.CreateViolation(ctx.RelPath, line,
+			"'"+table+"' is looked up by "+key+" (line "+strconv.Itoa(prior.line)+") and then inserted without ON CONFLICT — two concurrent calls both find no row and both insert")
+		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+		v.WithSuggestion("Make it one statement: INSERT ... ON CONFLICT (" + key + ") DO UPDATE/NOTHING, with a unique index on " + key)
+		v.WithContext("pattern", "select-then-insert-race")
+		v.WithContext("function", fn.Name.Name)
+		v.WithContext("table", table)
+		v.WithContext("column", key)
+		v.WithContext("select_line", prior.line)
+		*violations = append(*violations, v)
+		return
+	}
+}
+
+// parseInsert recognizes a plain INSERT with a column list; an upsert (ON
+// CONFLICT) is the fix and is not returned.
+func (r *SelectThenWriteRaceRule) parseInsert(query string) (string, map[string]bool, bool) {
+	match := r.insertQuery.FindStringSubmatch(query)
+	if match == nil || r.onConflict.MatchString(query) {
+		return "", nil, false
+	}
+	columns := r.columnSet(match[2])
+	return strings.ToLower(match[1]), columns, len(columns) > 0
+}
+
+// whereKeys returns the columns the WHERE clause compares with a parameter.
+func (r *SelectThenWriteRaceRule) whereKeys(query string) map[string]bool {
+	keys := make(map[string]bool)
+	loc := r.whereClause.FindStringIndex(query)
+	if loc == nil {
+		return keys
+	}
+	for _, m := range r.keyComparison.FindAllStringSubmatch(query[loc[1]:], -1) {
+		if column, ok := r.columnName(m[1]); ok {
+			keys[column] = true
+		}
+	}
+	return keys
+}
+
+// parseSelect recognizes a SELECT literal that reads concrete columns or
+// looks a row up by a parameter, and does not lock the row. SELECT * alone
+// is ignored: without an explicit column list the read-modify-write link
+// cannot be proven and the rule prefers precision.
 func (r *SelectThenWriteRaceRule) parseSelect(query string, lit ast.Expr, ctx *core.FileContext) (sqlRead, bool) {
 	match := r.selectQuery.FindStringSubmatch(query)
 	if match == nil || r.rowLock.MatchString(query) {
 		return sqlRead{}, false
 	}
 	columns := r.columnSet(match[1])
-	if len(columns) == 0 {
+	keys := r.whereKeys(query)
+	if len(columns) == 0 && len(keys) == 0 {
 		return sqlRead{}, false
 	}
 	return sqlRead{
 		table:   strings.ToLower(match[2]),
 		columns: columns,
+		keys:    keys,
 		pos:     lit.Pos(),
 		line:    lineFromNode(ctx, lit),
 	}, true
