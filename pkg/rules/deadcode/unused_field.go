@@ -28,10 +28,12 @@ func init() {
 //
 // Unexported fields of the analyzed packages are considered, and on top of them
 // the exported fields of a settings type — one whose name ends in Opts, Options,
-// Config or Settings. An ordinary exported field belongs to the package's API and
-// its reader may live outside the analyzed tree; a setting is different, because
-// a setting nobody reads does nothing no matter who sets it, and setting it in a
-// composite literal is what hides it from the compiler and from deadcode tools.
+// Config or Settings — and of a filter (Filter, Filters, Criteria). An ordinary
+// exported field belongs to the package's API and its reader may live outside
+// the analyzed tree; a setting or a filter is different, because one nobody
+// reads does nothing no matter who sets it - a caller asking for transactions
+// created after a date gets them all - and setting it in a composite literal
+// is what hides it from the compiler and from deadcode tools.
 // Tagged fields belong to unused-config-field, which knows about values arriving
 // from outside. Embedded and blank fields carry no name to use.
 type UnusedFieldRule struct {
@@ -44,7 +46,7 @@ func NewUnusedFieldRule() *UnusedFieldRule {
 		BaseRule: rules.NewBaseRule(
 			"unused-field",
 			"deadcode",
-			"Detects struct fields that are never read — unexported fields, and every field of a settings type (…Opts, …Options, …Config, …Settings): dead state kept up to date for nobody",
+			"Detects struct fields that are never read — unexported fields, and every field of a settings type (…Opts, …Options, …Config, …Settings) or a filter (…Filter, …Filters, …Criteria): dead state kept up to date for nobody",
 			core.SeverityMedium,
 		),
 	}
@@ -67,6 +69,7 @@ type declaredField struct {
 	typeName  string
 	fieldName string
 	setting   bool
+	filter    bool // an exported field of a filter: reported only when set
 }
 
 // AnalyzeGoProject reports the fields of the analyzed files that no compiled
@@ -103,6 +106,11 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 			if mentions.mentioned(field.fileCtx, field.fieldName) {
 				continue
 			}
+			// A filter field nobody sets is unused surface; one callers set
+			// and nothing reads is a filter that filters nothing.
+			if field.filter && !access.written[pos] {
+				continue
+			}
 			violations = append(violations, r.report(field, access.written[pos]))
 		}
 		return violations
@@ -116,7 +124,10 @@ func (r *UnusedFieldRule) report(field declaredField, written bool) *core.Violat
 	}
 	message := fmt.Sprintf("Field %s.%s %s — the work maintaining it produces nothing",
 		field.typeName, field.fieldName, state)
-	if field.setting {
+	if field.filter {
+		message = fmt.Sprintf("Filter %s.%s is set but never read — a caller narrowing by it gets every record",
+			field.typeName, field.fieldName)
+	} else if field.setting {
 		settingState := "is never set nor read"
 		if written {
 			settingState = "is set but never read"
@@ -136,9 +147,21 @@ func (r *UnusedFieldRule) report(field declaredField, written bool) *core.Violat
 // settingTypeSuffixes name the structs that carry behaviour switches.
 var settingTypeSuffixes = []string{"Opts", "Options", "Config", "Settings"}
 
-// isSettingType reports whether the type name says the struct holds settings.
+// filterTypeSuffixes name the structs that narrow a query. Their tagged
+// fields are judged too: a filter is filled by its callers, not decoded from
+// a configuration.
+var filterTypeSuffixes = []string{"Filter", "Filters", "Criteria"}
+
+// isSettingType reports whether the type name says the struct holds settings
+// or a filter.
 func isSettingType(name string) bool {
-	for _, suffix := range settingTypeSuffixes {
+	return hasAnySuffix(name, settingTypeSuffixes) || isFilterType(name)
+}
+
+func isFilterType(name string) bool { return hasAnySuffix(name, filterTypeSuffixes) }
+
+func hasAnySuffix(name string, suffixes []string) bool {
+	for _, suffix := range suffixes {
 		if strings.HasSuffix(name, suffix) {
 			return true
 		}
@@ -146,8 +169,9 @@ func isSettingType(name string) bool {
 	return false
 }
 
-// collectCheckedFields returns the untagged, named fields this rule judges: the
-// unexported ones of any struct, and every field of a settings struct.
+// collectCheckedFields returns the named fields this rule judges: the untagged
+// unexported ones of any struct, every untagged field of a settings struct,
+// and every field of a filter.
 func collectCheckedFields(fileCtx *core.FileContext, info *types.Info) []declaredField {
 	var fields []declaredField
 
@@ -166,8 +190,9 @@ func collectCheckedFields(fileCtx *core.FileContext, info *types.Info) []declare
 		named, _ := declaredNamedType(spec, info)
 
 		setting := isSettingType(spec.Name.Name)
+		filter := isFilterType(spec.Name.Name)
 		for _, field := range structType.Fields.List {
-			if field.Tag != nil || len(field.Names) == 0 {
+			if (field.Tag != nil && !filter) || len(field.Names) == 0 {
 				continue // tagged fields and embedded ones are other rules' business
 			}
 			for _, name := range field.Names {
@@ -186,6 +211,7 @@ func collectCheckedFields(fileCtx *core.FileContext, info *types.Info) []declare
 					typeName:  spec.Name.Name,
 					fieldName: name.Name,
 					setting:   setting && name.IsExported(),
+					filter:    filter && name.IsExported(),
 				})
 			}
 		}

@@ -633,3 +633,40 @@ func TestUnusedFieldCountsTestFileExcludedFromAnalysis(t *testing.T) {
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "spare")
 }
+
+// A filter field callers set and nothing reads: the caller asking for
+// records created after a date gets them all.
+func TestUnusedFieldReportsUnreadFilterField(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"history.go": `package history
+
+import "time"
+
+type HistoryFilters struct {
+	Kind         string     ` + "`json:\"kind\"`" + `
+	CreatedAfter *time.Time ` + "`json:\"createdAfter\"`" + `
+}
+
+type Record struct {
+	Kind string
+}
+
+func Apply(records []Record, f *HistoryFilters) []Record {
+	var out []Record
+	for _, r := range records {
+		if f.Kind == "" || r.Kind == f.Kind {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func Today(records []Record, start time.Time) []Record {
+	return Apply(records, &HistoryFilters{CreatedAfter: &start})
+}
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "CreatedAfter")
+}
