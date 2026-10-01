@@ -459,6 +459,22 @@ func ownerTable(tables map[string]*Table, ref pinnedRef) *Table {
 	return owner
 }
 
+// ConditionalUpsert reports an INSERT ... ON CONFLICT ... DO UPDATE ... WHERE
+// without RETURNING: on a conflict whose row fails the WHERE the statement
+// succeeds having written nothing, and only the affected count tells.
+func ConditionalUpsert(sql string) bool {
+	result, ok := parse(sql)
+	if !ok || len(result.GetStmts()) != 1 {
+		return false
+	}
+	insert := result.GetStmts()[0].GetStmt().GetInsertStmt()
+	if insert == nil || len(insert.GetReturningList()) > 0 {
+		return false
+	}
+	conflict := insert.GetOnConflictClause()
+	return conflict != nil && conflict.GetAction() == pgquery.OnConflictAction_ONCONFLICT_UPDATE && conflict.GetWhereClause() != nil
+}
+
 // ConflictParams returns, for an INSERT ... VALUES ... ON CONFLICT (columns)
 // DO UPDATE, the parameter number bound to each conflict column, and the
 // offset of the ON CONFLICT clause.

@@ -16,7 +16,15 @@ func init() {
 	rules.Register(NewFinancialJSONFloatRule())
 }
 
-// FinancialJSONFloatRule detects precision-losing floats in monetary JSON contracts.
+// FinancialJSONFloatRule detects precision-losing floats in monetary JSON
+// contracts: a float field of a monetary DTO, and a decimal type's
+// UnmarshalJSON that decodes a JSON number into a float before building the
+// decimal from it:
+//
+//	var f float64
+//	if err := json.Unmarshal(data, &f); err == nil {
+//		a.Decimal = decimal.NewFromFloat(f)   // 12345678901234567.891 arrives as 12345678901234568
+//	}
 type FinancialJSONFloatRule struct {
 	*rules.BaseRule
 }
@@ -26,7 +34,7 @@ func NewFinancialJSONFloatRule() *FinancialJSONFloatRule {
 	return &FinancialJSONFloatRule{BaseRule: rules.NewBaseRule(
 		"financial-json-float",
 		"patterns",
-		"Detects float32/float64 monetary fields in Go JSON contracts",
+		"Detects float32/float64 monetary fields in Go JSON contracts, and a decimal UnmarshalJSON that decodes the number through a float",
 		core.SeverityHigh,
 	)}
 }
@@ -53,7 +61,67 @@ func (r *FinancialJSONFloatRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 			violations = append(violations, r.inspectJSONStruct(ctx, structType, false, financialContextName(typeName), allowDefaultJSON, types, map[string]bool{typeName: true}, reported)...)
 		}
 	}
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil || fn.Body == nil || fn.Name.Name != "UnmarshalJSON" {
+			continue
+		}
+		if call := decimalDecodedThroughFloat(fn.Body); call != nil {
+			line := ctx.GoFileSet.Position(call.Pos()).Line
+			v := r.CreateViolation(ctx.RelPath, line, "UnmarshalJSON decodes the JSON number into a float before building the decimal — a long amount loses its last digits")
+			v.WithCode(ctx.GetLine(line))
+			v.WithSuggestion("Decode into json.Number or a string and parse it with decimal.NewFromString, or delegate to the decimal type's own UnmarshalJSON")
+			v.WithContext("pattern", "decimal_unmarshal_via_float")
+			violations = append(violations, v)
+		}
+	}
 	return violations
+}
+
+// decimalDecodedThroughFloat returns the json.Unmarshal call of the body that
+// fills a float variable later handed to NewFromFloat, nil when there is none.
+func decimalDecodedThroughFloat(body *ast.BlockStmt) *ast.CallExpr {
+	floats := make(map[string]bool)
+	converted := make(map[string]bool)
+	var decodes []*ast.CallExpr
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.ValueSpec:
+			if id, ok := node.Type.(*ast.Ident); ok && (id.Name == "float64" || id.Name == "float32") {
+				for _, name := range node.Names {
+					floats[name.Name] = true
+				}
+			}
+		case *ast.CallExpr:
+			sel, ok := node.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			switch sel.Sel.Name {
+			case "Unmarshal":
+				if len(node.Args) == 2 {
+					decodes = append(decodes, node)
+				}
+			case "NewFromFloat", "NewFromFloat32":
+				if len(node.Args) == 1 {
+					if id, ok := node.Args[0].(*ast.Ident); ok {
+						converted[id.Name] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+	for _, call := range decodes {
+		addr, ok := call.Args[1].(*ast.UnaryExpr)
+		if !ok {
+			continue
+		}
+		if id, ok := addr.X.(*ast.Ident); ok && floats[id.Name] && converted[id.Name] {
+			return call
+		}
+	}
+	return nil
 }
 
 type tokenPos = int

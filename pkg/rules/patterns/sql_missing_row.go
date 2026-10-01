@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/sqlschema"
 )
 
 func init() {
@@ -28,6 +29,12 @@ func init() {
 // Not reported: RETURNING (the scan finds no rows), a function without an
 // error to return, a function that reads or locks rows too (the row is
 // known to exist).
+//
+// An upsert whose DO UPDATE carries a WHERE is the same write: on a conflict
+// the WHERE rejects it succeeds having changed nothing. The caller that
+// cannot tell runs its side effects for a change another request already
+// made - two webhooks for one deposit both pass a status read before the
+// upsert and both trigger the follow-up.
 type SQLMissingRowUncheckedRule struct {
 	*rules.BaseRule
 }
@@ -37,7 +44,7 @@ func NewSQLMissingRowUncheckedRule() *SQLMissingRowUncheckedRule {
 	return &SQLMissingRowUncheckedRule{BaseRule: rules.NewBaseRule(
 		"sql-missing-row-unchecked",
 		"patterns",
-		"Detects an UPDATE or DELETE of one row whose affected count nobody checks — a missing row passes as success",
+		"Detects an UPDATE or DELETE of one row, or an upsert with DO UPDATE ... WHERE, whose affected count nobody checks — a write that changed nothing passes as success",
 		core.SeverityMedium,
 	)}
 }
@@ -56,11 +63,19 @@ func (r *SQLMissingRowUncheckedRule) AnalyzeFile(ctx *core.FileContext) []*core.
 	if !ok {
 		return nil
 	}
+	// writes maps each unchecked-able write to whether it is a conditional
+	// upsert rather than a one-row UPDATE/DELETE.
 	writes := make(map[*ast.CallExpr]bool)
 	for _, call := range sqlCalls(ctx.GoAST) {
 		sel, ok := call.call.Fun.(*ast.SelectorExpr)
-		if ok && execMethods[sel.Sel.Name] && schema.RowWrite(call.literal.text) {
+		if !ok || !execMethods[sel.Sel.Name] {
+			continue
+		}
+		switch {
+		case sqlschema.ConditionalUpsert(call.literal.text):
 			writes[call.call] = true
+		case schema.RowWrite(call.literal.text):
+			writes[call.call] = false
 		}
 	}
 	if len(writes) == 0 {
@@ -77,15 +92,26 @@ func (r *SQLMissingRowUncheckedRule) AnalyzeFile(ctx *core.FileContext) []*core.
 				return true
 			}
 			call := statementCall(stmt)
-			if call == nil || !writes[call] || countChecked(stmt, fn) || databaseCalls(fn) > 1 {
+			if call == nil {
+				return true
+			}
+			upsert, isWrite := writes[call]
+			if !isWrite || countChecked(stmt, fn) || databaseCalls(fn) > 1 {
 				return true
 			}
 			line := ctx.LineFor(call)
-			if !ctx.IsSuppressed(line, r.Name()) {
-				violations = append(violations, sqlViolation(r.BaseRule, ctx, line,
-					"One-row UPDATE/DELETE whose affected count nobody checks — with no such row it succeeds having changed nothing",
-					"Check RowsAffected and return a not-found error when it is 0, or add RETURNING and scan it"))
+			if ctx.IsSuppressed(line, r.Name()) {
+				return true
 			}
+			if upsert {
+				violations = append(violations, sqlViolation(r.BaseRule, ctx, line,
+					"Upsert with DO UPDATE ... WHERE whose affected count nobody checks — when the WHERE rejects the conflicting row it succeeds having written nothing, and the caller acts as if it had",
+					"Check RowsAffected and return whether the row changed, so the caller runs its side effects only for a real change; or add RETURNING and scan it"))
+				return true
+			}
+			violations = append(violations, sqlViolation(r.BaseRule, ctx, line,
+				"One-row UPDATE/DELETE whose affected count nobody checks — with no such row it succeeds having changed nothing",
+				"Check RowsAffected and return a not-found error when it is 0, or add RETURNING and scan it"))
 			return true
 		})
 	}

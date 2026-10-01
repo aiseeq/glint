@@ -117,6 +117,60 @@ type PriceData struct {
 			want: 0,
 		},
 		{
+			// A decimal wrapper decoding JSON numbers through float64: a
+			// long amount loses its last digits before it becomes a decimal.
+			name: "decimal UnmarshalJSON through float64",
+			code: `package money
+import (
+	"encoding/json"
+	"github.com/shopspring/decimal"
+)
+type Amount struct{ decimal.Decimal }
+func (a *Amount) UnmarshalJSON(data []byte) error {
+	var f float64
+	if err := json.Unmarshal(data, &f); err == nil {
+		a.Decimal = decimal.NewFromFloat(f)
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	d, err := decimal.NewFromString(s)
+	a.Decimal = d
+	return err
+}`,
+			want: 1,
+		},
+		{
+			name: "decimal UnmarshalJSON through json.Number or a string is allowed",
+			code: `package money
+import (
+	"encoding/json"
+	"github.com/shopspring/decimal"
+)
+type Amount struct{ decimal.Decimal }
+func (a *Amount) UnmarshalJSON(data []byte) error {
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	d, err := decimal.NewFromString(n.String())
+	a.Decimal = d
+	return err
+}
+type Point struct{ X float64 }
+func (p *Point) UnmarshalJSON(data []byte) error {
+	var f float64
+	if err := json.Unmarshal(data, &f); err != nil {
+		return err
+	}
+	p.X = f
+	return nil
+}`,
+			want: 0,
+		},
+		{
 			name: "financial decimal and integer are allowed",
 			code: `package api
 type Response struct {
