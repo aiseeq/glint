@@ -292,6 +292,10 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 		".sh",   // duplication rules (rules must guard by extension)
 	}
 
+	if isMakefileName(filepath.Base(path)) {
+		return true // recipe rules (rules must guard with IsMakefile)
+	}
+
 	for _, e := range analyzableExtensions {
 		if ext == e {
 			// Debug: uncomment to see which files are considered
