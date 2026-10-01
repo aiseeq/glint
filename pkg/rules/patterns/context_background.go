@@ -14,7 +14,8 @@ func init() {
 }
 
 // ContextBackgroundRule detects context.Background/TODO usage in functions that
-// receive a context.
+// receive a context, and context.WithoutCancel(ctx) whose context only feeds
+// reads the function waits for — the same detachment under another name.
 //
 // Not flagged: a context created after the function has waited for its ctx to
 // end (<-ctx.Done()) — the graceful-shutdown shape, where the cancelled ctx
@@ -30,7 +31,7 @@ func NewContextBackgroundRule() *ContextBackgroundRule {
 		BaseRule: rules.NewBaseRule(
 			"context-background",
 			"patterns",
-			"Detects context.Background/TODO usage where a passed context should be used",
+			"Detects context.Background/TODO usage where a passed context should be used, and context.WithoutCancel(ctx) detaching a read the function waits for",
 			core.SeverityMedium,
 		),
 	}
@@ -59,6 +60,7 @@ func (r *ContextBackgroundRule) analyze(ctx *core.FileContext, info *types.Info)
 	}
 
 	var violations []*core.Violation
+	launched := launchedFunctions(ctx.GoAST)
 	for _, decl := range ctx.GoAST.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -91,6 +93,7 @@ func (r *ContextBackgroundRule) analyze(ctx *core.FileContext, info *types.Info)
 			violations = append(violations, v)
 			return true
 		})
+		violations = append(violations, r.detachedReads(ctx, info, fn, doneAt, launched)...)
 	}
 	return violations
 }
@@ -98,15 +101,7 @@ func (r *ContextBackgroundRule) analyze(ctx *core.FileContext, info *types.Info)
 // firstDoneWait returns the position of the first receive from the Done
 // channel of one of the function's context parameters, or token.NoPos.
 func firstDoneWait(file *ast.File, info *types.Info, fn *ast.FuncDecl) token.Pos {
-	params := map[string]bool{}
-	for _, field := range fn.Type.Params.List {
-		if !isContextTypeExpr(file, info, field.Type) {
-			continue
-		}
-		for _, name := range field.Names {
-			params[name.Name] = true
-		}
-	}
+	params := contextParamNames(file, info, fn.Type)
 	first := token.NoPos
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		recv, ok := n.(*ast.UnaryExpr)
