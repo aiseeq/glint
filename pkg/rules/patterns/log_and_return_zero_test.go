@@ -140,6 +140,72 @@ func helper() string {
 `,
 			wantCount: 1,
 		},
+		{
+			// A setup helper that warns and returns leaves the dependency
+			// nil: the router starts, every session endpoint fails later.
+			name: "setup helper warns and leaves the dependency unset",
+			code: `package routing
+
+func createSessionManager(ctx *routerContext) {
+	cfg, ok := ctx.config.(*Config)
+	if !ok {
+		ctx.logger.Warn("config is not the full config, session management disabled")
+		return
+	}
+	if cfg.Secret == "" {
+		ctx.logger.Warn("secret not configured, session management disabled")
+		return
+	}
+	ctx.sessionManager = NewSessionManager(cfg.Secret)
+	ctx.logger.Info("session manager initialized")
+}
+
+func (s *Server) startMetrics() {
+	if s.cfg.MetricsAddr == "" {
+		s.logger.Info("metrics disabled")
+		return
+	}
+	s.metrics = NewMetrics(s.cfg.MetricsAddr)
+}
+
+func (s *Service) appendRewards(address string, wb *WalletBalance) {
+	if s.client == nil {
+		return
+	}
+	rewards, err := s.client.Rewards(address)
+	if err != nil {
+		s.logger.Warn("rewards lookup failed", "error", err)
+		return
+	}
+	wb.Tokens = append(wb.Tokens, rewards...)
+	cfg := DefaultConfig()
+	if !s.enabled {
+		s.logger.Error("scheduler disabled")
+		return
+	}
+	cfg.Port = NewPort()
+	wb.Total = sumTokens(wb.Tokens)
+}
+
+func stampRate(logger *Logger, pos *Position, snapshot *Snapshot) {
+	rate, err := resolveRate(pos)
+	if err != nil {
+		logger.Warn("rate not resolved", "error", err)
+		return
+	}
+	snapshot.APY = NewDecimal(rate)
+}
+
+func (s *Server) refresh() {
+	if err := s.load(); err != nil {
+		s.logger.Warn("refresh failed", "error", err)
+		return
+	}
+	s.count++
+}
+`,
+			wantCount: 2,
+		},
 	}
 
 	for _, tt := range tests {

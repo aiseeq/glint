@@ -3,6 +3,8 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -29,6 +31,10 @@ func init() {
 // / nil) indistinguishable from a valid value. CLAUDE.md: a function that can
 // fail must return (T, error).
 //
+// A setup function without results has the same failure in another shape: it
+// warns and returns before building the dependency it exists to build, and
+// the field stays nil.
+//
 // Not flagged: Info/Debug logs, `return false` (see
 // error-masked-as-false-bool), computed recovery values, and HTTP handlers
 // (they report the failure via ResponseWriter).
@@ -42,7 +48,7 @@ func NewLogAndReturnZeroRule() *LogAndReturnZeroRule {
 		BaseRule: rules.NewBaseRule(
 			"log-and-return-zero",
 			"patterns",
-			"Detects Error/Warn log followed by a zero-value return in functions without an error result",
+			"Detects Error/Warn log followed by a zero-value return in functions without an error result, or by a return that leaves the dependency a setup function builds unset",
 			core.SeverityMedium,
 		),
 	}
@@ -65,6 +71,7 @@ func (r *LogAndReturnZeroRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			if isCommandName(fn.Name.Name) {
 				violations = append(violations, r.checkSwallowedWrites(ctx, fn.Body)...)
 			}
+			violations = append(violations, r.checkSetupLeavesUnset(ctx, fn)...)
 			return true
 		}
 		if !hasNonErrorResults(fn.Type.Results) {
@@ -245,6 +252,91 @@ func (r *LogAndReturnZeroRule) checkSwallowedWrites(ctx *core.FileContext, body 
 		}
 	})
 	return violations
+}
+
+// checkSetupLeavesUnset reports, in a function without results that builds a
+// dependency into a field (ctx.sessionManager = NewSessionManager(...)), an
+// earlier branch that logs an error or a warning and returns: the field
+// stays nil, startup goes on, and the failure surfaces later as errors on
+// every call that needs the dependency.
+func (r *LogAndReturnZeroRule) checkSetupLeavesUnset(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+	if words := helpers.IdentifierWords(fn.Name.Name); len(words) == 0 || !slices.Contains(setupVerbs, words[0]) {
+		return nil
+	}
+	holders := make(map[string]bool)
+	for _, list := range []*ast.FieldList{fn.Recv, fn.Type.Params} {
+		if list == nil {
+			continue
+		}
+		for _, field := range list.List {
+			for _, name := range field.Names {
+				holders[name.Name] = true
+			}
+		}
+	}
+	body := fn.Body
+	var violations []*core.Violation
+	for i, stmt := range body.List {
+		ifStmt, ok := stmt.(*ast.IfStmt)
+		if !ok || ifStmt.Else != nil || len(ifStmt.Body.List) < 2 {
+			continue
+		}
+		ret, ok := ifStmt.Body.List[len(ifStmt.Body.List)-1].(*ast.ReturnStmt)
+		if !ok || len(ret.Results) != 0 || !slices.ContainsFunc(ifStmt.Body.List, isErrorOrWarnLogStmt) {
+			continue
+		}
+		field := builtField(body.List[i+1:], holders)
+		if field == "" {
+			continue
+		}
+		line := ctx.LineFor(ret)
+		if ctx.IsSuppressed(line, r.Name()) {
+			continue
+		}
+		v := r.CreateViolation(ctx.RelPath, line,
+			"Setup logs a problem and returns, leaving "+field+" unset — startup goes on and the nil dependency fails later, on every call that needs it")
+		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+		v.WithSuggestion("Return an error and let startup fail, or make the dependency optional where it is used")
+		violations = append(violations, v)
+	}
+	return violations
+}
+
+// setupVerbs start the names of functions that wire a dependency at startup.
+var setupVerbs = []string{"create", "init", "initialize", "setup", "build", "configure", "wire", "register", "start"}
+
+// builtField returns the field of a receiver or a parameter that a later
+// top-level statement fills with a constructor's result
+// (ctx.sessionManager = NewSessionManager(...)), or "".
+func builtField(rest []ast.Stmt, holders map[string]bool) string {
+	for _, stmt := range rest {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			continue
+		}
+		sel, ok := assign.Lhs[0].(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		if holder, ok := sel.X.(*ast.Ident); !ok || !holders[holder.Name] {
+			continue
+		}
+		call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+		if !ok {
+			continue
+		}
+		name := ""
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			name = fun.Name
+		case *ast.SelectorExpr:
+			name = fun.Sel.Name
+		}
+		if helpers.HasLeadingWord(name, "New") {
+			return types.ExprString(sel)
+		}
+	}
+	return ""
 }
 
 // isWriteCall reports a method call whose name starts with a write verb.
