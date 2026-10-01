@@ -63,24 +63,6 @@ func isRequestExpr(expr ast.Expr) bool {
 	return false
 }
 
-// parentMap maps every node under root to its parent.
-func parentMap(root ast.Node) map[ast.Node]ast.Node {
-	parents := make(map[ast.Node]ast.Node)
-	var stack []ast.Node
-	ast.Inspect(root, func(n ast.Node) bool {
-		if n == nil {
-			stack = stack[:len(stack)-1]
-			return false
-		}
-		if len(stack) > 0 {
-			parents[n] = stack[len(stack)-1]
-		}
-		stack = append(stack, n)
-		return true
-	})
-	return parents
-}
-
 // insideLogCall reports a node that is an argument, at any depth, of a log
 // line or a print.
 func insideLogCall(node ast.Node, parents map[ast.Node]ast.Node) bool {

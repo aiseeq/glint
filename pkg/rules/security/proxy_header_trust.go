@@ -75,7 +75,7 @@ func (r *ProxyHeaderTrustRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if !ok || fn.Body == nil {
 			continue
 		}
-		parents := parentMap(fn.Body)
+		parents := helpers.ParentMap(fn.Body)
 		guards := collectTrustGuards(fn.Body)
 		for _, read := range proxyHeaderReads(fn.Body, parents) {
 			switch guards.weakest(read.uses) {

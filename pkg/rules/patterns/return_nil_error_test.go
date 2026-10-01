@@ -121,6 +121,63 @@ func example() (int, *User, error) {
 	}
 }
 
+// A lookup that answers a missing row with (nil, nil) passes "not found" off
+// as success, whatever the function is named: the caller cannot tell an
+// absent record from a found one without checking for nil, and a caller that
+// forgets counts it as zero.
+func TestReturnNilErrorRule_NoRowsAsSuccess(t *testing.T) {
+	code := `package repo
+
+import (
+	"database/sql"
+	"errors"
+
+	"github.com/jackc/pgx/v5"
+)
+
+func (r *Repo) GetLatest(id string) (*Snapshot, error) {
+	err := r.db.Get(id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return &Snapshot{}, err
+}
+
+func (r *Repo) FindByDate(id string) (*Snapshot, error) {
+	err := r.db.Get(id)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return &Snapshot{}, err
+}
+
+func (r *Repo) GetOptional(id string) (*Snapshot, error) {
+	if id == "" {
+		return nil, nil
+	}
+	err := r.db.Get(id)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	return &Snapshot{}, nil
+}
+
+func (r *Repo) ListAll() ([]Snapshot, error) {
+	err := r.db.Get("")
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return nil, err
+}
+`
+	ctx := createReturnNilContext(t, "repo.go", code)
+	violations := NewReturnNilErrorRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 2)
+	assert.Equal(t, 13, violations[0].Line)
+	assert.Equal(t, 21, violations[1].Line)
+	assert.Equal(t, "not_found_as_success", violations[0].Context["pattern"])
+}
+
 func TestReturnNilErrorRule_TestFilesExcluded(t *testing.T) {
 	rule := NewReturnNilErrorRule()
 
