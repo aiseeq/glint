@@ -128,3 +128,45 @@ func jsFirstArgument(src jsSource, line, col, maxLines int) (string, bool) {
 func jsCompact(s string) string {
 	return strings.Join(strings.Fields(s), "")
 }
+
+// jsReceiverStart returns the column where the receiver of the member access
+// whose '.' is at dot of the code line begins: a chain of names, calls and
+// indexes (Math.abs(op.amount), rows[i].fee) read backwards on that line.
+func jsReceiverStart(code string, dot int) int {
+	j := dot - 1
+	for j >= 0 {
+		c := code[j]
+		switch {
+		case c == ')' || c == ']':
+			open := jsOpeningBefore(code, j)
+			if open < 0 {
+				return j + 1
+			}
+			j = open - 1
+		case c == '.' || c == '?' || c == '!' || c == '_' || c == '$' ||
+			'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9':
+			j--
+		default:
+			return j + 1
+		}
+	}
+	return 0
+}
+
+// jsOpeningBefore returns the column of the '(' or '[' that the bracket at
+// closing of the line closes, or -1.
+func jsOpeningBefore(code string, closing int) int {
+	depth := 0
+	for j := closing; j >= 0; j-- {
+		switch code[j] {
+		case ')', ']':
+			depth++
+		case '(', '[':
+			depth--
+			if depth == 0 {
+				return j
+			}
+		}
+	}
+	return -1
+}

@@ -160,9 +160,11 @@ func (r *SecretInQueryURLRule) isSecretQuerySet(call *ast.CallExpr) bool {
 	return !strings.Contains(strings.ToLower(receiverChain(sel.X)), "header")
 }
 
-// httpTransportFuncs are the net/http functions and *http.Client methods that
-// send a request and wrap a transport failure in *url.Error.
-var httpTransportFuncs = map[string]bool{"Do": true, "Get": true, "Post": true, "PostForm": true, "Head": true}
+// isHTTPTransportFunc reports the net/http functions and *http.Client methods
+// that send a request and wrap a transport failure in *url.Error.
+func isHTTPTransportFunc(name string) bool {
+	return name == "Do" || helpers.NetHTTPSendFuncs[name]
+}
 
 // transportCallMatcher recognizes the direct HTTP transport calls whose errors
 // carry *url.Error. info is nil for a file without type information; then only
@@ -174,7 +176,7 @@ type transportCallMatcher struct {
 
 func (m transportCallMatcher) matches(call *ast.CallExpr) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || !httpTransportFuncs[sel.Sel.Name] {
+	if !ok || !isHTTPTransportFunc(sel.Sel.Name) {
 		return false
 	}
 	if m.info == nil {

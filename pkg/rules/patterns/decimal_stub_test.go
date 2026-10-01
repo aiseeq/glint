@@ -12,6 +12,8 @@ import (
 // under test type-checks against the real import path.
 const decimalStub = `package decimal
 
+import "math/big"
+
 type Decimal struct{ value int64 }
 
 var Zero = Decimal{}
@@ -21,6 +23,7 @@ func NewFromInt(v int64) Decimal              { return Decimal{value: v} }
 func NewFromFloat(v float64) Decimal          { return Decimal{} }
 func NewFromString(v string) (Decimal, error) { return Decimal{}, nil }
 func RequireFromString(v string) Decimal      { return Decimal{} }
+func NewFromBigInt(v *big.Int, exp int32) Decimal { return Decimal{} }
 
 func (d Decimal) Add(o Decimal) Decimal       { return d }
 func (d Decimal) Sub(o Decimal) Decimal       { return d }
@@ -40,6 +43,21 @@ func (d Decimal) String() string                  { return "" }
 func (d Decimal) StringFixed(places int32) string { return "" }
 func (d Decimal) Equal(o Decimal) bool            { return d == o }
 func (d Decimal) IsZero() bool                    { return d.value == 0 }
+func (d Decimal) DivRound(o Decimal, p int32) Decimal { return d }
+func (d Decimal) Mod(o Decimal) Decimal             { return d }
+func (d Decimal) QuoRem(o Decimal, p int32) (Decimal, Decimal) { return d, d }
+func (d Decimal) Abs() Decimal                      { return d }
+func (d Decimal) Neg() Decimal                      { return d }
+func (d Decimal) Sign() int                         { return 0 }
+func (d Decimal) Cmp(o Decimal) int                 { return 0 }
+func (d Decimal) GreaterThan(o Decimal) bool        { return false }
+func (d Decimal) GreaterThanOrEqual(o Decimal) bool { return false }
+func (d Decimal) LessThan(o Decimal) bool           { return false }
+func (d Decimal) LessThanOrEqual(o Decimal) bool    { return false }
+func (d Decimal) IsPositive() bool                  { return false }
+func (d Decimal) IsNegative() bool                  { return false }
+func (d Decimal) RoundBank(places int32) Decimal    { return d }
+func (d Decimal) StringFixedBank(places int32) string { return "" }
 `
 
 // decimalProject loads the given files as a typed module that can import
