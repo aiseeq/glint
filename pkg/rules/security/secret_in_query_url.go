@@ -25,10 +25,14 @@ func init() {
 //
 // Some providers accept a key only as ?api-key=...; there a transport failure
 // logs the key through the wrapped *url.Error unless a sanitizer strips the
-// query from the *url.Error before the error is wrapped.
+// query from the *url.Error before the error is wrapped. A bot API that takes
+// its token as a path segment (fmt.Sprintf("https://%s/bot%s/send", host,
+// token)) leaks it the same way.
 //
 // The rule is silent when the function routes the error through a sanitizer
-// (any call whose name contains "Sanitize"), and when the request goes through
+// (any call whose name contains "Sanitize" or "Redact", or a function of the
+// file that takes *url.Error apart), when it handles *url.Error itself, and
+// when the request goes through
 // a shared HTTP helper instead of a raw Do — the helper is the right single
 // place for sanitation.
 //
@@ -51,7 +55,7 @@ func NewSecretInQueryURLRule() *SecretInQueryURLRule {
 		BaseRule: rules.NewBaseRule(
 			"secret-in-query-url",
 			"security",
-			"Detects an API key in the URL query combined with an unsanitized transport error — *url.Error carries the full URL into logs",
+			"Detects an API key or token in the URL query or path combined with an unsanitized transport error — *url.Error carries the full URL into logs",
 			core.SeverityMedium,
 		),
 		secretParam:   regexp.MustCompile(`(?i)^` + secretName + `$`),
@@ -82,10 +86,21 @@ func (r *SecretInQueryURLRule) analyze(ctx *core.FileContext, info *types.Info) 
 	}
 
 	transport := transportCallMatcher{info: info, httpAliases: helpers.PackageAliases(ctx.GoAST, `"net/http"`, "http")}
+	urlAliases := helpers.PackageAliases(ctx.GoAST, `"net/url"`, "url")
+	// Functions of the file that take *url.Error apart sanitize the error
+	// they are given.
+	unwrappers := make(map[string]bool)
+	for _, decl := range ctx.GoAST.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil && handlesURLError(fn.Body, urlAliases) {
+			unwrappers[fn.Name.Name] = true
+		}
+	}
 	var violations []*core.Violation
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		if fn, ok := n.(*ast.FuncDecl); ok && fn.Body != nil {
-			violations = append(violations, r.checkFunction(ctx, fn, transport)...)
+			if !unwrappers[fn.Name.Name] {
+				violations = append(violations, r.checkFunction(ctx, fn, transport, unwrappers)...)
+			}
 			return false
 		}
 		return true
@@ -93,8 +108,23 @@ func (r *SecretInQueryURLRule) analyze(ctx *core.FileContext, info *types.Info) 
 	return violations
 }
 
-func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl, transport transportCallMatcher) []*core.Violation {
+// handlesURLError reports a body naming the *url.Error type.
+func handlesURLError(body *ast.BlockStmt, urlAliases map[string]bool) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Error" {
+			if pkg, ok := sel.X.(*ast.Ident); ok && urlAliases[pkg.Name] {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl, transport transportCallMatcher, unwrappers map[string]bool) []*core.Violation {
 	secretInQuery := false
+	secretInPath := false
 	sanitized := false
 	var transportCalls []*ast.CallExpr
 
@@ -104,7 +134,10 @@ func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.Func
 			if r.isSecretQuerySet(node) {
 				secretInQuery = true
 			}
-			if callNameContainsSanitize(node) {
+			if r.isSecretPathFormat(node) {
+				secretInPath = true
+			}
+			if callNameContainsSanitize(node) || unwrappers[callName(node)] {
 				sanitized = true
 			}
 			if transport.matches(node) {
@@ -120,8 +153,12 @@ func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.Func
 		return true
 	})
 
-	if !secretInQuery || sanitized || len(transportCalls) == 0 {
+	if (!secretInQuery && !secretInPath) || sanitized || len(transportCalls) == 0 {
 		return nil
+	}
+	message := "API key travels in the URL query — a transport failure here wraps the full URL in *url.Error and leaks the key into logs"
+	if !secretInQuery {
+		message = "A token travels in the URL path — a transport failure here wraps the full URL in *url.Error and leaks the token into logs"
 	}
 
 	var violations []*core.Violation
@@ -130,8 +167,7 @@ func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.Func
 		if ctx.IsSuppressed(line, r.Name()) {
 			continue
 		}
-		v := r.CreateViolation(ctx.RelPath, line,
-			"API key travels in the URL query — a transport failure here wraps the full URL in *url.Error and leaks the key into logs")
+		v := r.CreateViolation(ctx.RelPath, line, message)
 		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
 		v.WithSuggestion("Sanitize the transport error before wrapping or logging it (a SanitizeTransportError helper that strips the query from *url.Error), or move the secret out of the URL into a header")
 		v.WithContext("pattern", "secret-in-query-url")
@@ -158,6 +194,56 @@ func (r *SecretInQueryURLRule) isSecretQuerySet(call *ast.CallExpr) bool {
 		return false
 	}
 	return !strings.Contains(strings.ToLower(receiverChain(sel.X)), "header")
+}
+
+// isSecretPathFormat recognizes fmt.Sprintf putting a secret-named value
+// into the path of a URL: a verb after a "/" of the format that is not the
+// "//" of the scheme, and before any "?".
+func (r *SecretInQueryURLRule) isSecretPathFormat(call *ast.CallExpr) bool {
+	if pkg, ok := callPackage(call); !ok || pkg != "fmt" || callName(call) != "Sprintf" || len(call.Args) < 2 {
+		return false
+	}
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return false
+	}
+	format, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return false
+	}
+	verbs, ok := formatVerbs(format)
+	if !ok {
+		return false
+	}
+	for i, verb := range verbs {
+		if i+1 >= len(call.Args) || !inURLPath(format[:verb.start]) {
+			continue
+		}
+		if name := valueName(call.Args[i+1]); name != "" && r.secretParam.MatchString(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// inURLPath reports format text before a verb that ends inside a URL path.
+func inURLPath(prefix string) bool {
+	if i := strings.Index(prefix, "://"); i >= 0 {
+		prefix = prefix[i+len("://"):]
+	}
+	return strings.Contains(prefix, "/") && !strings.Contains(prefix, "?")
+}
+
+// valueName returns the name of a variable or field, or "" for another
+// expression.
+func valueName(expr ast.Expr) string {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.SelectorExpr:
+		return e.Sel.Name
+	}
+	return ""
 }
 
 // isHTTPTransportFunc reports the net/http functions and *http.Client methods
@@ -215,9 +301,9 @@ func isNamedType(t types.Type, path, name string) bool {
 func callNameContainsSanitize(call *ast.CallExpr) bool {
 	switch fun := call.Fun.(type) {
 	case *ast.Ident:
-		return strings.Contains(fun.Name, "Sanitize")
+		return strings.Contains(fun.Name, "Sanitize") || strings.Contains(fun.Name, "Redact")
 	case *ast.SelectorExpr:
-		return strings.Contains(fun.Sel.Name, "Sanitize")
+		return strings.Contains(fun.Sel.Name, "Sanitize") || strings.Contains(fun.Sel.Name, "Redact")
 	}
 	return false
 }

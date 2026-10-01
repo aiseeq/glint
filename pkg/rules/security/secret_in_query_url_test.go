@@ -191,6 +191,115 @@ func (c *Client) GetHoldings(ctx context.Context) error {
 }`,
 			expectedCount: 0,
 		},
+		{
+			// A bot token placed in the URL path by a format verb: the
+			// *url.Error of a failed request prints the whole URL.
+			name: "token in the URL path with raw Do and no sanitizer",
+			code: `package api
+import (
+	"context"
+	"fmt"
+	"net/http"
+)
+func (c *Client) doGet(ctx context.Context, method string) error {
+	requestURL := fmt.Sprintf("https://%s/v2%s%s", c.domain, c.token, method)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	return nil
+}`,
+			expectedCount: 1,
+		},
+		{
+			// The same request with the error redacted before wrapping.
+			name: "token in the URL path with a redacting sanitizer",
+			code: `package api
+import (
+	"context"
+	"fmt"
+	"net/http"
+)
+func RedactURLError(err error) error { return err }
+func (c *Client) doGet(ctx context.Context, method string) error {
+	requestURL := fmt.Sprintf("%s/bot%s/%s", c.domain, c.token, method)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", RedactURLError(err))
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", RedactURLError(err))
+	}
+	defer resp.Body.Close()
+	return nil
+}`,
+			expectedCount: 0,
+		},
+		{
+			// The transport error goes through a helper that unwraps
+			// *url.Error: the URL does not reach the caller.
+			name: "token in the URL path with a url.Error unwrapping helper",
+			code: `package api
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	neturl "net/url"
+)
+func (c *Client) transportError(op string, err error) error {
+	var urlErr *neturl.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("%s failed: %w", op, urlErr.Err)
+	}
+	return err
+}
+func (c *Client) doGet(ctx context.Context, method string) error {
+	requestURL := fmt.Sprintf("https://%s/v2%s/%s", c.domain, c.token, method)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return c.transportError("create", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return c.transportError("send", err)
+	}
+	defer resp.Body.Close()
+	return nil
+}`,
+			expectedCount: 0,
+		},
+		{
+			// A path segment that is not a secret, and a secret only in the
+			// host part, are not reported.
+			name: "non-secret path segment",
+			code: `package api
+import (
+	"context"
+	"fmt"
+	"net/http"
+)
+func (c *Client) doGet(ctx context.Context, id string) error {
+	requestURL := fmt.Sprintf("https://%s/v1/items/%s", c.token, id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}`,
+			expectedCount: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -217,6 +326,7 @@ type Client struct {
 	httpClient *http.Client
 	apiKey     string
 	baseURL    string
+	domain     string
 	token      string
 }
 
