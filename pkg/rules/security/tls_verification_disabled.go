@@ -18,6 +18,7 @@ func init() {
 //	&tls.Config{InsecureSkipVerify: true}
 //	process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0'
 //	new https.Agent({ rejectUnauthorized: false })
+//	browser.newContext({ ignoreHTTPSErrors: true })   // Playwright
 //
 // Without verification anyone on the path presents their own certificate and
 // reads or changes the traffic, credentials included. NODE_TLS_REJECT_UNAUTHORIZED
@@ -35,12 +36,12 @@ func NewTLSVerificationDisabledRule() *TLSVerificationDisabledRule {
 	return &TLSVerificationDisabledRule{BaseRule: rules.NewBaseRule(
 		"tls-verification-disabled",
 		"security",
-		"Detects TLS certificate verification turned off (InsecureSkipVerify, NODE_TLS_REJECT_UNAUTHORIZED=0, rejectUnauthorized: false)",
+		"Detects TLS certificate verification turned off (InsecureSkipVerify, NODE_TLS_REJECT_UNAUTHORIZED=0, rejectUnauthorized: false, ignoreHTTPSErrors: true)",
 		core.SeverityHigh,
 	)}
 }
 
-var scriptTLSOff = regexp.MustCompile(`NODE_TLS_REJECT_UNAUTHORIZED['"\]]*\s*=\s*['"]?0|rejectUnauthorized\s*:\s*false`)
+var scriptTLSOff = regexp.MustCompile(`NODE_TLS_REJECT_UNAUTHORIZED['"\]]*\s*=\s*['"]?0|rejectUnauthorized\s*:\s*false|ignoreHTTPSErrors\s*:\s*true`)
 
 const tlsSuggestion = "Trust the certificate explicitly (a CA bundle, RootCAs, NODE_EXTRA_CA_CERTS) instead of turning verification off"
 

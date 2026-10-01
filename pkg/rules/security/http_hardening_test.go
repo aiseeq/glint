@@ -322,7 +322,14 @@ process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0'
 // process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 const agent = new https.Agent({ rejectUnauthorized: false })
 const strict = new https.Agent({ rejectUnauthorized: true })
-export default defineConfig({ use: { baseURL: process.env.BASE_URL } })
+export default defineConfig({ use: { baseURL: process.env.BASE_URL, ignoreHTTPSErrors: true } })
+const local = defineConfig({ use: { ignoreHTTPSErrors: false } })
 `
-	assert.Equal(t, []int{3, 5}, textRuleLines(t, NewTLSVerificationDisabledRule(), "e2e/playwright.deploy-test.config.ts", script))
+	assert.Equal(t, []int{3, 5, 7}, textRuleLines(t, NewTLSVerificationDisabledRule(), "e2e/playwright.deploy-test.config.ts", script))
+
+	spec := `test('money flow', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport })
+})
+`
+	assert.Equal(t, []int{2}, textRuleLines(t, NewTLSVerificationDisabledRule(), "e2e/tests/deploy/flow.spec.ts", spec))
 }
