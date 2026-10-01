@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -240,7 +241,11 @@ func (r *LayerViolationRule) checkSQLString(ctx *core.FileContext, lit *ast.Basi
 	pos := ctx.PositionFor(lit)
 	truncated := value
 	if len(truncated) > 50 {
-		truncated = truncated[:50] + "..."
+		cut := 50
+		for cut > 0 && !utf8.RuneStart(truncated[cut]) {
+			cut-- // a query may hold non-ASCII text; keep the message valid UTF-8
+		}
+		truncated = truncated[:cut] + "..."
 	}
 
 	v := r.CreateViolation(ctx.RelPath, pos.Line,
