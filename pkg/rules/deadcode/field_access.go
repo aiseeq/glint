@@ -308,17 +308,14 @@ func underlyingMap(t types.Type) (*types.Map, bool) {
 }
 
 // decodeFuncs fill a Go value from outside the program: files, payloads, the
-// environment. encodeFuncs turn a value into bytes and read every exported
-// field on the program's behalf.
-var (
-	decodeFuncs = []string{
-		"Unmarshal", "UnmarshalStrict", "UnmarshalExact", "UnmarshalKey",
-		"Decode", "DecodeFile", "DecodeReader", "WeakDecode",
-		"ReadConfig", "ReadEnv", "MapTo", "StrictMapTo",
-		"Parse", "ParseWithOptions", "Process", "MustProcess",
-	}
-	encodeFuncs = []string{"Marshal", "MarshalIndent", "Encode"}
-)
+// environment. helpers.EncodeFuncs turn a value into bytes and read every
+// exported field on the program's behalf.
+var decodeFuncs = []string{
+	"Unmarshal", "UnmarshalStrict", "UnmarshalExact", "UnmarshalKey",
+	"Decode", "DecodeFile", "DecodeReader", "WeakDecode",
+	"ReadConfig", "ReadEnv", "MapTo", "StrictMapTo",
+	"Parse", "ParseWithOptions", "Process", "MustProcess",
+}
 
 // serialization records the types a decoder or an encoder call receives. A
 // call counts when the callee has one of the known names and the argument
@@ -334,7 +331,7 @@ func (a *fieldAccess) serialization(call *ast.CallExpr, info *types.Info) {
 	switch {
 	case slices.Contains(decodeFuncs, fn.Name()):
 		target = a.decoded
-	case slices.Contains(encodeFuncs, fn.Name()):
+	case slices.Contains(helpers.EncodeFuncs, fn.Name()):
 		target = a.encoded
 	default:
 		return
