@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/tools/go/types/typeutil"
+
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/helpers"
@@ -30,8 +32,9 @@ func init() {
 // token)) leaks it the same way.
 //
 // The rule is silent when the function routes the error through a sanitizer
-// (any call whose name contains "Sanitize" or "Redact", or a function of the
-// file that takes *url.Error apart), when it handles *url.Error itself, and
+// (any call whose name contains "sanitize" or "redact" in any case, or a
+// function of the package that takes *url.Error apart; without type
+// information, of the file), when it handles *url.Error itself, and
 // when the request goes through
 // a shared HTTP helper instead of a raw Do — the helper is the right single
 // place for sanitation.
@@ -66,7 +69,7 @@ func NewSecretInQueryURLRule() *SecretInQueryURLRule {
 // AnalyzeFile checks one file without type information: only the net/http
 // package functions are recognized as transport calls.
 func (r *SecretInQueryURLRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	return r.analyze(ctx, nil)
+	return r.analyze(ctx, nil, nil)
 }
 
 // RequiresSSA reports that typed syntax is enough for this rule.
@@ -75,12 +78,44 @@ func (r *SecretInQueryURLRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; transport calls are recognized by the
 // type of their receiver.
 func (r *SecretInQueryURLRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	unwrappers := urlErrorUnwrappers(ctx)
+	return rules.AnalyzeGoFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyze(file, info, unwrappers)
+	})
+}
+
+// urlErrorUnwrappers returns the functions of the loaded packages that take
+// *url.Error apart: a call to one sanitizes the error it is given, whichever
+// file of the package declares it.
+func urlErrorUnwrappers(ctx *core.GoProjectContext) map[*types.Func]bool {
+	unwrappers := make(map[*types.Func]bool)
+	if ctx == nil {
+		return unwrappers
+	}
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
+			continue
+		}
+		for _, file := range pkgCtx.Package.Syntax {
+			urlAliases := helpers.PackageAliases(file, `"net/url"`, "url")
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil || !handlesURLError(fn.Body, urlAliases) {
+					continue
+				}
+				if obj, ok := pkgCtx.Package.TypesInfo.Defs[fn.Name].(*types.Func); ok {
+					unwrappers[obj] = true
+				}
+			}
+		}
+	}
+	return unwrappers
 }
 
 // analyze checks each function for the secret-in-query + raw transport call
-// combination. info is nil for a file without type information.
-func (r *SecretInQueryURLRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+// combination. info is nil for a file without type information; then
+// pkgUnwrappers is nil too and only the file's own unwrappers are known.
+func (r *SecretInQueryURLRule) analyze(ctx *core.FileContext, info *types.Info, pkgUnwrappers map[*types.Func]bool) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() || !ctx.HasGoAST() {
 		return nil
 	}
@@ -99,7 +134,7 @@ func (r *SecretInQueryURLRule) analyze(ctx *core.FileContext, info *types.Info) 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		if fn, ok := n.(*ast.FuncDecl); ok && fn.Body != nil {
 			if !unwrappers[fn.Name.Name] {
-				violations = append(violations, r.checkFunction(ctx, fn, transport, unwrappers)...)
+				violations = append(violations, r.checkFunction(ctx, fn, transport, unwrappers, pkgUnwrappers)...)
 			}
 			return false
 		}
@@ -122,7 +157,7 @@ func handlesURLError(body *ast.BlockStmt, urlAliases map[string]bool) bool {
 	return found
 }
 
-func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl, transport transportCallMatcher, unwrappers map[string]bool) []*core.Violation {
+func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl, transport transportCallMatcher, unwrappers map[string]bool, pkgUnwrappers map[*types.Func]bool) []*core.Violation {
 	secretInQuery := false
 	secretInPath := false
 	sanitized := false
@@ -137,7 +172,7 @@ func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.Func
 			if r.isSecretPathFormat(node) {
 				secretInPath = true
 			}
-			if callNameContainsSanitize(node) || unwrappers[callName(node)] {
+			if callNameContainsSanitize(node) || unwrappers[callName(node)] || callsUnwrapper(transport.info, node, pkgUnwrappers) {
 				sanitized = true
 			}
 			if transport.matches(node) {
@@ -298,14 +333,21 @@ func isNamedType(t types.Type, path, name string) bool {
 	return named.Obj().Pkg().Path() == path && named.Obj().Name() == name
 }
 
+// callNameContainsSanitize reports a callee named as a sanitizer, in any
+// case: SanitizeTransportError and redactTransportError alike.
 func callNameContainsSanitize(call *ast.CallExpr) bool {
-	switch fun := call.Fun.(type) {
-	case *ast.Ident:
-		return strings.Contains(fun.Name, "Sanitize") || strings.Contains(fun.Name, "Redact")
-	case *ast.SelectorExpr:
-		return strings.Contains(fun.Sel.Name, "Sanitize") || strings.Contains(fun.Sel.Name, "Redact")
+	name := strings.ToLower(callName(call))
+	return strings.Contains(name, "sanitize") || strings.Contains(name, "redact")
+}
+
+// callsUnwrapper reports a call to a function of the analyzed packages that
+// takes *url.Error apart.
+func callsUnwrapper(info *types.Info, call *ast.CallExpr, pkgUnwrappers map[*types.Func]bool) bool {
+	if info == nil || len(pkgUnwrappers) == 0 {
+		return false
 	}
-	return false
+	callee := typeutil.StaticCallee(info, call)
+	return callee != nil && pkgUnwrappers[callee]
 }
 
 // receiverChain flattens a selector chain (req.Header) into a dotted string

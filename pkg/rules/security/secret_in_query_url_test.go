@@ -412,3 +412,79 @@ func FetchVia(d Doer, base, key string) error {
 	}
 	assert.Equal(t, []any{"Fetch", "FetchVia"}, functions)
 }
+
+// A sanitizer is recognized whatever the case of its name, and a function that
+// takes *url.Error apart counts across the files of its package.
+func TestSecretInQueryURLSanitizerInPackage(t *testing.T) {
+	rule := NewSecretInQueryURLRule()
+	send := func(sanitizer string) string {
+		return `package delivery
+
+import (
+	"fmt"
+	"net/http"
+)
+
+func send(c *http.Client, host, token string) error {
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("https://%s/bot%s/send", host, token), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("send: %w", ` + sanitizer + `(err))
+	}
+	return resp.Body.Close()
+}
+`
+	}
+	tests := []struct {
+		name     string
+		files    map[string]string
+		expected int
+	}{
+		{
+			name: "unexported helper in another file of the package takes url.Error apart",
+			files: map[string]string{
+				"delivery/send.go": send("scrubTransportError"),
+				"delivery/scrub.go": `package delivery
+
+import (
+	"errors"
+	"net/url"
+)
+
+func scrubTransportError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		ue.URL = "[hidden]"
+	}
+	return err
+}
+`,
+			},
+		},
+		{
+			name: "lower-case redact in the name",
+			files: map[string]string{
+				"delivery/send.go":  send("redactTransportError"),
+				"delivery/other.go": "package delivery\n\nfunc redactTransportError(err error) error { return err }\n",
+			},
+		},
+		{
+			name: "helper of the package that does not touch url.Error",
+			files: map[string]string{
+				"delivery/send.go":  send("wrapTransportError"),
+				"delivery/other.go": "package delivery\n\nfunc wrapTransportError(err error) error { return err }\n",
+			},
+			expected: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			violations, err := rule.AnalyzeGoProject(rulestest.Project(t, tt.files))
+			require.NoError(t, err)
+			assert.Len(t, violations, tt.expected)
+		})
+	}
+}
