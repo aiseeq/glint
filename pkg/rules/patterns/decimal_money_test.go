@@ -202,11 +202,43 @@ const scale = 1000
 func constant(part decimal.Decimal) decimal.Decimal {
 	return part.Div(decimal.NewFromInt(scale))
 }
+
+type curve struct{ base decimal.Decimal }
+
+func (c curve) factor(rate decimal.Decimal, years int64) decimal.Decimal { return c.base }
+
+// A check of years says nothing of what factor makes of it: a discount
+// factor of a long term at a high rate rounds to zero.
+func discounted(price, rate decimal.Decimal, years int64, c curve) decimal.Decimal {
+	if years <= 0 {
+		return price
+	}
+	factor := c.factor(rate, years)
+	return price.DivRound(factor, 18)
+}
+
+func drift(out, in decimal.Decimal) decimal.Decimal {
+	if !out.IsPositive() || !in.IsPositive() {
+		return decimal.Zero
+	}
+	return out.Sub(in).Abs().Div(decimal.Max(out, in))
+}
+
+type tally struct{ done, failed int }
+
+func (t tally) total() int { return t.done + t.failed }
+
+func (t tally) rate() decimal.Decimal {
+	if t.total() == 0 {
+		return decimal.Zero
+	}
+	return decimal.NewFromInt(int64(t.done)).Div(decimal.NewFromInt(int64(t.total())))
+}
 `,
 	})
 	violations, err := NewDecimalDivUnguardedRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
-	assert.Equal(t, []int{18, 48}, violationLines(violations))
+	assert.Equal(t, []int{18, 48, 68}, violationLines(violations))
 }
 
 // Divisors that cannot be zero by construction are not reported; a sum

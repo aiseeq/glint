@@ -20,6 +20,8 @@ var Zero = Decimal{}
 
 func New(v int64, exp int32) Decimal          { return Decimal{value: v} }
 func NewFromInt(v int64) Decimal              { return Decimal{value: v} }
+func Max(first Decimal, rest ...Decimal) Decimal { return first }
+func Min(first Decimal, rest ...Decimal) Decimal { return first }
 func NewFromFloat(v float64) Decimal          { return Decimal{} }
 func NewFromString(v string) (Decimal, error) { return Decimal{}, nil }
 func RequireFromString(v string) Decimal      { return Decimal{} }
