@@ -164,7 +164,7 @@ func migrationDirs(rule *rules.BaseRule) []string {
 func migrationViolations(ctx *core.FileContext, rule *rules.BaseRule, schema *sqlschema.Schema, err error, reportFaults bool) []*core.Violation {
 	var migrationErr *sqlschema.MigrationError
 	if errors.As(err, &migrationErr) {
-		if migrationRelPath(ctx.ProjectRoot, migrationErr.Path) != ctx.RelPath {
+		if projectRelPath(ctx.ProjectRoot, migrationErr.Path) != ctx.RelPath {
 			return nil
 		}
 		v := rule.CreateViolation(ctx.RelPath, 1, "The migration cannot be read, so the SQL was not checked against the schema: "+migrationErr.Err.Error())
@@ -177,7 +177,7 @@ func migrationViolations(ctx *core.FileContext, rule *rules.BaseRule, schema *sq
 	}
 	var violations []*core.Violation
 	for _, fault := range schema.Faults {
-		if migrationRelPath(ctx.ProjectRoot, fault.Path) != ctx.RelPath || ctx.IsSuppressed(fault.Line, rule.Name()) {
+		if projectRelPath(ctx.ProjectRoot, fault.Path) != ctx.RelPath || ctx.IsSuppressed(fault.Line, rule.Name()) {
 			continue
 		}
 		v := rule.CreateViolation(ctx.RelPath, fault.Line, fmt.Sprintf(
@@ -190,9 +190,9 @@ func migrationViolations(ctx *core.FileContext, rule *rules.BaseRule, schema *sq
 	return violations
 }
 
-// migrationRelPath returns the path of a migration as the file contexts under
+// projectRelPath returns the path of a file as the file contexts under
 // root name it.
-func migrationRelPath(root, path string) string {
+func projectRelPath(root, path string) string {
 	if rel, err := filepath.Rel(root, path); err == nil {
 		return filepath.ToSlash(rel)
 	}

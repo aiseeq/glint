@@ -244,6 +244,11 @@ func (a *scanAnalysis) targetsOf(fn *ast.FuncDecl, arg ast.Expr) (sqlLiteral, []
 // context, by its signature: (ctx?, dest any, query string, args ...any)
 // error. It returns the indexes of dest and query.
 func (a *scanAnalysis) sqlxRead(call *ast.CallExpr) (int, int, bool) {
+	return sqlxReadArgs(a.info, call)
+}
+
+// sqlxReadArgs is sqlxRead for any typed call.
+func sqlxReadArgs(info *types.Info, call *ast.CallExpr) (int, int, bool) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return 0, 0, false
@@ -258,7 +263,7 @@ func (a *scanAnalysis) sqlxRead(call *ast.CallExpr) (int, int, bool) {
 			return 0, 0, false // Unsafe ignores the columns the struct lacks
 		}
 	}
-	sig, ok := a.info.TypeOf(call.Fun).(*types.Signature)
+	sig, ok := info.TypeOf(call.Fun).(*types.Signature)
 	if !ok || !sig.Variadic() || sig.Params().Len() < 3 || sig.Results().Len() != 1 {
 		return 0, 0, false
 	}
