@@ -41,7 +41,8 @@ repository: commits come from `git log`/`git show`, trees from `git archive`.
    of the tree that did not type-check: typed rules are silent in them. A
    module whose go.mod replaces a dependency with a path into a sibling
    repository needs `--sibling NAME=REPO`: the sibling is extracted, as it was
-   at the date of the tree, to where the replace points.
+   at the date of the tree, to where the replace points; when packages still
+   do not type-check, the sibling as of the fix's date is tried as well.
 
    The same script accepts new rules: given a manifest (`.tsv`, one
    `commit kind rule[,rule...] [@path:line] [whole-tree]` per line — the

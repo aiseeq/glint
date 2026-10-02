@@ -142,16 +142,25 @@ func unreadErrorResults(body *ast.BlockStmt, structs map[string]bool) *ast.Retur
 // (issue := snapshotIssue(wb) for out[i] = wb, check(results[i])): the
 // callee may read the Error field for it.
 func inspectsItems(body *ast.BlockStmt, slices map[string]bool) bool {
-	// The items are the values stored into the results: out[i] = wb.
+	// The items are the values stored into the results: out[i] = wb, or
+	// results = append(results, result).
 	items := make(map[string]bool)
 	ast.Inspect(body, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
 		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
 			return true
 		}
-		index, ok := assign.Lhs[0].(*ast.IndexExpr)
-		if value, isIdent := assign.Rhs[0].(*ast.Ident); ok && isIdent && readsAnyOf(index.X, slices) {
-			items[value.Name] = true
+		if index, ok := assign.Lhs[0].(*ast.IndexExpr); ok && readsAnyOf(index.X, slices) {
+			if value, ok := assign.Rhs[0].(*ast.Ident); ok {
+				items[value.Name] = true
+			}
+		}
+		if call, ok := assign.Rhs[0].(*ast.CallExpr); ok && isIdentNamed(call.Fun, "append") && len(call.Args) > 1 && readsAnyOf(call.Args[0], slices) {
+			for _, arg := range call.Args[1:] {
+				if value, ok := arg.(*ast.Ident); ok {
+					items[value.Name] = true
+				}
+			}
 		}
 		return true
 	})

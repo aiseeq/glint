@@ -30,7 +30,8 @@ func init() {
 // same name and an assignable type. The value the source had never reaches
 // the target: the response shows it empty, the next step reads a zero.
 // Not reported: fields the function sets afterwards (w.TxHash = ...,
-// &w.TxHash) or a literal handed to a call that may fill it, fields an
+// &w.TxHash) or a literal handed to a call that may fill it (a repository
+// write stores it as it is), fields an
 // outer literal sets, fields tagged json:"-", credentials (password,
 // secret, tokens), a copy into the source's own type, a group holding a
 // list of sources, and the ID and timestamps of a new record (a literal
@@ -272,6 +273,10 @@ func setAfter(lit *ast.CompositeLit, body *ast.BlockStmt, info *types.Info) (set
 				set[sel.Sel.Name] = true
 			}
 		case *ast.CallExpr:
+			if persistsValue(node, info) {
+				// A repository write stores the value as it is.
+				return true
+			}
 			for _, arg := range node.Args {
 				unary, isAddr := ast.Unparen(arg).(*ast.UnaryExpr)
 				if isAddr && unary.Op == token.AND && isHolder(unary.X) || pointer && isHolder(arg) {
@@ -282,6 +287,20 @@ func setAfter(lit *ast.CompositeLit, body *ast.BlockStmt, info *types.Info) (set
 		return true
 	})
 	return set, filled
+}
+
+// persistWrite names a repository method that stores the value it is given.
+var persistWrite = regexp.MustCompile(`^(Create|Insert|Save|Upsert|Store|Add|Put|Persist|Record)`)
+
+// persistsValue reports a call of a store's write method: it stores the
+// value, it does not fill it.
+func persistsValue(call *ast.CallExpr, info *types.Info) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !persistWrite.MatchString(sel.Sel.Name) {
+		return false
+	}
+	recv := info.TypeOf(sel.X)
+	return recv != nil && multiWriteStoreType.MatchString(typeBaseName(recv))
 }
 
 // literalHolder returns the variable a literal is assigned to: w := T{...},

@@ -82,7 +82,7 @@ type MultiWriteNoTransactionRule struct {
 
 // multiWriteMutation matches the name of a method that changes state;
 // Get/List/Find/Count do not match.
-var multiWriteMutation = regexp.MustCompile(`^(Create|Insert|Update|Upsert|Delete|Remove|Save|Store|Set|Mark|Apply|Attach|Detach|Claim|Reject|Approve|Cancel|Expire|Increment|Decrement)[A-Z]\w*$`)
+var multiWriteMutation = regexp.MustCompile(`^(Create|Insert|Update|Upsert|Delete|Remove|Save|Store|Set|Mark|Apply|Attach|Detach|Claim|Reject|Approve|Cancel|Expire|Increment|Decrement|Backfill)[A-Z]\w*$`)
 
 // multiWriteStoreType is the default store_types: the receiver types that
 // count as a store.
@@ -228,6 +228,9 @@ type writeCall struct {
 	via []string
 	// failing: the write runs while a failure is handled, and records it.
 	failing bool
+	// loop: the write is the next item of a loop that returns at the first
+	// failed item.
+	loop bool
 }
 
 // where describes the write for the report: имя метода и путь до него.
@@ -240,7 +243,7 @@ func (w writeCall) where() string {
 
 // through returns the write as seen from a caller of helper.
 func (w writeCall) through(helper string) writeCall {
-	return writeCall{method: w.method, via: append([]string{helper}, w.via...), failing: w.failing}
+	return writeCall{method: w.method, via: append([]string{helper}, w.via...), failing: w.failing, loop: w.loop}
 }
 
 // errOutcome is what a path knows about an error value: nothing, that it is
@@ -373,7 +376,7 @@ func (g *callGraph) summary(name string) *writeSummary {
 	}
 	g.visiting[name] = true
 	summary := &writeSummary{}
-	analyzer := &writeFlowAnalyzer{graph: g, info: node.info, summary: summary}
+	analyzer := &writeFlowAnalyzer{graph: g, info: node.info, summary: summary, aborting: loopAbortingCalls(node.decl.Body)}
 	var signature *types.Signature
 	if fn, ok := node.info.Defs[node.decl.Name].(*types.Func); ok {
 		signature, _ = fn.Type().(*types.Signature)
@@ -426,15 +429,22 @@ func (r *MultiWriteNoTransactionRule) buildGraph(ctx *core.GoProjectContext) *ca
 // violation renders the report for a function whose writes are not atomic.
 func (r *MultiWriteNoTransactionRule) violation(ctx *core.GoProjectContext, node *funcNode, pair [2]writeCall) *core.Violation {
 	pos := ctx.FileSet.Position(node.pos)
+	message := fmt.Sprintf(
+		"%s changes stored state more than once without a transaction: %s and %s — a failure between them leaves the record half-applied",
+		node.display, pair[0].where(), pair[1].where(),
+	)
+	if pair[1].loop {
+		message = fmt.Sprintf(
+			"%s writes %s once per item of a loop without a transaction and returns at the first failure — the items before it stay written, the rest do not",
+			node.display, pair[1].where(),
+		)
+	}
 	return &core.Violation{
-		Rule:   r.Name(),
-		File:   node.file,
-		Line:   pos.Line,
-		Column: pos.Column,
-		Message: fmt.Sprintf(
-			"%s changes stored state more than once without a transaction: %s and %s — a failure between them leaves the record half-applied",
-			node.display, pair[0].where(), pair[1].where(),
-		),
+		Rule:       r.Name(),
+		File:       node.file,
+		Line:       pos.Line,
+		Column:     pos.Column,
+		Message:    message,
 		Severity:   r.DefaultSeverity(),
 		Category:   r.Category(),
 		Suggestion: "Wrap the writes in one transaction so the operation either applies fully or leaves no trace",
@@ -455,6 +465,9 @@ type writeFlowAnalyzer struct {
 	exits []writePath
 	// signature is the signature of the body being walked, nil when unknown.
 	signature *types.Signature
+	// aborting are the calls made once per item of a loop that returns at
+	// the first one failing.
+	aborting map[*ast.CallExpr]bool
 }
 
 // walkBody walks a function or closure body and returns the states of the
@@ -649,6 +662,12 @@ func withResult(paths []writePath, call *ast.CallExpr, outcome errOutcome) []wri
 func (a *writeFlowAnalyzer) write(paths []writePath, write writeCall, call *ast.CallExpr) []writePath {
 	write.failing = allFailing(paths)
 	a.summary.record(write)
+	if a.aborting[call] && !write.failing {
+		// The items written before the failing one stay written.
+		next := write
+		next.loop = true
+		a.summary.offend(write, next)
+	}
 	next := make([]writePath, 0, 2*len(paths))
 	for _, path := range paths {
 		switch {
@@ -1176,4 +1195,131 @@ func typeBaseName(t types.Type) string {
 			return ""
 		}
 	}
+}
+
+// loopAbortingCalls returns the calls a loop makes once per item and whose
+// failure returns from the function:
+//
+//	for _, item := range items {
+//	    if err := repo.UpdateItem(ctx, item); err != nil {
+//	        return err
+//	    }
+//	}
+//
+// A failing item ends the function with the items before it written.
+// Closures are left out: they run on their own schedule.
+func loopAbortingCalls(body *ast.BlockStmt) map[*ast.CallExpr]bool {
+	aborting := make(map[*ast.CallExpr]bool)
+	var walk func(n ast.Node, inLoop bool)
+	walk = func(n ast.Node, inLoop bool) {
+		ast.Inspect(n, func(child ast.Node) bool {
+			switch node := child.(type) {
+			case *ast.FuncLit:
+				return false
+			case *ast.ForStmt:
+				if child != n {
+					walk(node.Body, !advancesCursor(node.Body))
+					return false
+				}
+			case *ast.RangeStmt:
+				if child != n {
+					walk(node.Body, !advancesCursor(node.Body))
+					return false
+				}
+			case *ast.BlockStmt:
+				if inLoop {
+					markAbortingCalls(node.List, aborting)
+				}
+			case *ast.CaseClause:
+				if inLoop {
+					markAbortingCalls(node.Body, aborting)
+				}
+			}
+			return true
+		})
+	}
+	walk(body, false)
+	return aborting
+}
+
+// cursorName names the position a page walk resumes from.
+var cursorName = regexp.MustCompile(`(?i)cursor|offset|after|since|next|token|checkpoint`)
+
+// advancesCursor reports a loop body moving a cursor on: a page walk whose
+// every write is progress kept, and the next run resumes after it.
+func advancesCursor(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if assign, ok := n.(*ast.AssignStmt); ok && assign.Tok == token.ASSIGN {
+			for _, lhs := range assign.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && cursorName.MatchString(id.Name) {
+					found = true
+				}
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// markAbortingCalls marks the calls of a statement list whose error the next
+// check returns: if err := call(); err != nil { return }, or err := call()
+// followed by that check.
+func markAbortingCalls(list []ast.Stmt, aborting map[*ast.CallExpr]bool) {
+	for i, stmt := range list {
+		if ifStmt, ok := stmt.(*ast.IfStmt); ok && ifStmt.Init != nil {
+			if call, errName := errorCallAssign(ifStmt.Init); call != nil && returnsOnError(ifStmt, errName) {
+				aborting[call] = true
+			}
+			continue
+		}
+		if i+1 >= len(list) {
+			continue
+		}
+		next, ok := list[i+1].(*ast.IfStmt)
+		if !ok || next.Init != nil {
+			continue
+		}
+		if call, errName := errorCallAssign(stmt); call != nil && returnsOnError(next, errName) {
+			aborting[call] = true
+		}
+	}
+}
+
+// errorCallAssign returns the call an assignment takes its last result,
+// named as an error variable, from.
+func errorCallAssign(stmt ast.Stmt) (*ast.CallExpr, string) {
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) == 0 {
+		return nil, ""
+	}
+	call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+	if !ok {
+		return nil, ""
+	}
+	last, ok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
+	if !ok || last.Name == "_" {
+		return nil, ""
+	}
+	return call, last.Name
+}
+
+// returnsOnError reports an if on `name != nil` whose body ends in a return.
+func returnsOnError(stmt *ast.IfStmt, name string) bool {
+	cond, ok := ast.Unparen(stmt.Cond).(*ast.BinaryExpr)
+	if !ok || cond.Op != token.NEQ {
+		return false
+	}
+	id, ok := ast.Unparen(cond.X).(*ast.Ident)
+	if !ok || id.Name != name {
+		return false
+	}
+	if nilIdent, ok := ast.Unparen(cond.Y).(*ast.Ident); !ok || nilIdent.Name != "nil" {
+		return false
+	}
+	if len(stmt.Body.List) == 0 {
+		return false
+	}
+	_, returns := stmt.Body.List[len(stmt.Body.List)-1].(*ast.ReturnStmt)
+	return returns
 }

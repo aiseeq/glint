@@ -3,6 +3,7 @@ package security
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"regexp"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -24,7 +25,9 @@ func init() {
 // limit=10000000 loads the whole table into memory and into the response:
 // one request is enough to slow the database and the server for everyone. A
 // comparison of the parsed value (or a variable it went into) with anything
-// but 0 or 1, or min(), counts as a bound.
+// but 0 or 1, or min(), counts as a bound. A bound that replaces a larger
+// page size by another value (limit > 500 → limit = 100) is reported too:
+// the caller gets a shorter page than it asked for and takes it as complete.
 type PaginationLimitUncappedRule struct {
 	*rules.BaseRule
 }
@@ -34,7 +37,7 @@ func NewPaginationLimitUncappedRule() *PaginationLimitUncappedRule {
 	return &PaginationLimitUncappedRule{BaseRule: rules.NewBaseRule(
 		"pagination-limit-uncapped",
 		"security",
-		"Detects a page size (limit, page_size, per_page) parsed from the request with no upper bound — one request loads the whole table",
+		"Detects a page size (limit, page_size, per_page) parsed from the request with no upper bound — one request loads the whole table; or one above its bound silently replaced by a smaller value",
 		core.SeverityMedium,
 	)}
 }
@@ -53,8 +56,84 @@ func (r *PaginationLimitUncappedRule) AnalyzeFile(ctx *core.FileContext) []*core
 			continue
 		}
 		r.checkFunction(fn.Body, lr)
+		r.checkReplacedBound(fn.Body, lr)
 	}
 	return lr.violations
+}
+
+// checkReplacedBound reports a page size above its upper bound replaced by
+// another value instead of rejected or clamped to the bound:
+//
+//	if limit <= 0 || limit > 500 {
+//	    limit = 100
+//	}
+//
+// A caller asking for 1000 rows gets 100 and takes the page as all of them.
+func (r *PaginationLimitUncappedRule) checkReplacedBound(body *ast.BlockStmt, lr *lineReporter) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok || len(ifStmt.Body.List) != 1 {
+			return true
+		}
+		assign, ok := ifStmt.Body.List[0].(*ast.AssignStmt)
+		if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			return true
+		}
+		target, ok := assign.Lhs[0].(*ast.Ident)
+		if !ok || !pageSizeParam.MatchString(target.Name) {
+			return true
+		}
+		bound := upperBound(ifStmt.Cond, target.Name)
+		if bound == nil || !constantLike(assign.Rhs[0]) || types.ExprString(bound) == types.ExprString(assign.Rhs[0]) {
+			return true
+		}
+		lr.report(assign, "Page size above its bound is replaced by "+types.ExprString(assign.Rhs[0])+" — the caller asked for more, gets a shorter page and takes it as all of the rows",
+			"Reject a page size out of range with an error, or clamp it to the bound itself", "pagination_limit_replaced")
+		return true
+	})
+}
+
+// upperBound returns what name is compared to as its upper bound in a
+// condition (name > N, name >= N, N < name), through || and &&.
+func upperBound(cond ast.Expr, name string) ast.Expr {
+	switch e := ast.Unparen(cond).(type) {
+	case *ast.BinaryExpr:
+		switch e.Op {
+		case token.LOR, token.LAND:
+			if bound := upperBound(e.X, name); bound != nil {
+				return bound
+			}
+			return upperBound(e.Y, name)
+		case token.GTR, token.GEQ:
+			if isIdentNamed(e.X, name) && !lowBound(e.Y) {
+				return e.Y
+			}
+		case token.LSS, token.LEQ:
+			if isIdentNamed(e.Y, name) && !lowBound(e.X) {
+				return e.X
+			}
+		}
+	}
+	return nil
+}
+
+func isIdentNamed(expr ast.Expr, name string) bool {
+	id, ok := ast.Unparen(expr).(*ast.Ident)
+	return ok && id.Name == name
+}
+
+// constantLike reports a number or a named constant: a value someone wrote.
+func constantLike(expr ast.Expr) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.BasicLit:
+		return e.Kind == token.INT
+	case *ast.Ident:
+		return e.Obj == nil || e.Obj.Kind == ast.Con
+	case *ast.SelectorExpr:
+		_, ok := e.X.(*ast.Ident)
+		return ok
+	}
+	return false
 }
 
 func (r *PaginationLimitUncappedRule) checkFunction(body *ast.BlockStmt, lr *lineReporter) {

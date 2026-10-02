@@ -166,3 +166,43 @@ func (s *Service) gate(fresh []*WalletBalance) ([]*WalletBalance, error) {
 `,
 	}))
 }
+
+// A result appended to the slice and handed to a helper that records the
+// failure in its Error field is not a failure lost.
+func TestAggregateSkipsFailedPart_AppendedResultFailureRecordedByHelper(t *testing.T) {
+	assert.Empty(t, aggregateSkipFindings(t, map[string]string{
+		"sync/model.go": `package sync
+
+type RunResult struct {
+	Account string
+	Count   int
+	Error   string
+}
+
+func recordFailure(result *RunResult, err error) {
+	if result.Error != "" {
+		result.Error += "; " + err.Error()
+		return
+	}
+	result.Error = err.Error()
+}
+`,
+		"sync/run.go": `package sync
+
+func (s *Service) Run(accounts []string) ([]*RunResult, error) {
+	results := make([]*RunResult, 0, len(accounts))
+	for _, account := range accounts {
+		result := &RunResult{Account: account}
+		results = append(results, result)
+		n, err := s.read(account)
+		if err != nil {
+			recordFailure(result, err)
+			continue
+		}
+		result.Count = n
+	}
+	return results, nil
+}
+`,
+	}))
+}
