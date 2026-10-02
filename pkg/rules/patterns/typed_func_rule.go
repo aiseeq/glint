@@ -42,6 +42,10 @@ type typedFuncRule struct {
 	*rules.BaseRule
 	suggestion string
 	check      func(scope funcScope, fn *ast.FuncDecl) []funcFinding
+	// forProject, when set, builds the check of one run from the declarations
+	// of the whole project: what the check compares a function with is
+	// collected once per run, not kept on the shared rule.
+	forProject func(decls map[*types.Func]typedFuncDecl) func(scope funcScope, fn *ast.FuncDecl) []funcFinding
 }
 
 // AnalyzeFile is a no-op: the check needs types.
@@ -63,11 +67,15 @@ func (r *typedFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Vi
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
+	check := r.check
+	if r.forProject != nil {
+		check = r.forProject(decls)
+	}
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		scope := funcScope{info: info, decls: decls, callers: callers}
 		return analyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {
 			var violations []*core.Violation
-			for _, f := range r.check(scope, fn) {
+			for _, f := range check(scope, fn) {
 				line := file.LineFor(f.node)
 				if file.IsSuppressed(line, r.Name()) {
 					continue
