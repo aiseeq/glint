@@ -44,3 +44,37 @@ func funcDeclsByObject(ctx *core.GoProjectContext) (map[*types.Func]typedFuncDec
 		return decls, nil
 	})
 }
+
+// funcCallSite is a static call of a loaded function from a loaded body.
+type funcCallSite struct {
+	call   *ast.CallExpr
+	caller typedFuncDecl
+}
+
+// callSitesKey caches the call sites of every loaded body once per module
+// load.
+type callSitesKey struct{}
+
+// funcCallSites indexes the static calls of the loaded bodies by callee, so
+// a rule can follow a parameter up to what the callers pass.
+func funcCallSites(ctx *core.GoProjectContext, decls map[*types.Func]typedFuncDecl) (map[*types.Func][]funcCallSite, error) {
+	return core.SharedLoad(ctx, callSitesKey{}, func() (map[*types.Func][]funcCallSite, error) {
+		return collectCallSites(decls), nil
+	})
+}
+
+// collectCallSites indexes the static calls of the loaded bodies by callee.
+func collectCallSites(decls map[*types.Func]typedFuncDecl) map[*types.Func][]funcCallSite {
+	sites := make(map[*types.Func][]funcCallSite)
+	for _, caller := range decls {
+		ast.Inspect(caller.decl.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if fn := staticFunc(caller.info, call); fn != nil {
+					sites[fn.Origin()] = append(sites[fn.Origin()], funcCallSite{call: call, caller: caller})
+				}
+			}
+			return true
+		})
+	}
+	return sites
+}

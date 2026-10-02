@@ -249,3 +249,25 @@ export const ensureUser = 1
 		t.Fatalf("past-condition behavior must not be flagged, got: %+v", violations)
 	}
 }
+
+// A state named among alternatives ("удалено или нередактируемо", "deleted or
+// archived") describes an object the code handles, not code that was deleted.
+func TestTombstoneComment_StateAmongAlternativesIsBehavior(t *testing.T) {
+	code := `package notify
+
+// recreate replaces the pinned note only if the service rejected the edit
+// (сообщение удалено или нередактируемо); a network failure is returned.
+func recreate() {}
+
+// The upstream record may be deleted or archived by its owner.
+func refresh() {}
+
+// Old pin handler removed.
+func pin() {}
+`
+	ctx := core.NewFileContext("notify/pin.go", ".", []byte(code), nil)
+	violations := NewTombstoneCommentRule().AnalyzeFile(ctx)
+	if len(violations) != 1 || violations[0].Line != 10 {
+		t.Fatalf("want only the tombstone on line 10, got: %+v", violations)
+	}
+}

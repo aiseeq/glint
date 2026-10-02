@@ -248,6 +248,22 @@ var fmtVerb = regexp.MustCompile(`%[sdvq]`)
 // literal becomes a parameter; where it stood for a name the text does not
 // parse.
 func sqlLiterals(root ast.Node) []sqlLiteral {
+	return sqlTexts(root, sqlStart.MatchString)
+}
+
+// sqlQueryPart is text that holds a query or a part of one: a condition
+// written apart from its statement (EXISTS (SELECT ...)).
+var sqlQueryPart = regexp.MustCompile(`(?i)\bselect\b|\bjoin\b`)
+
+// sqlFragments returns the string literals and concatenations of literals
+// under a node that hold a query or a part of one, wherever it begins.
+func sqlFragments(root ast.Node) []sqlLiteral {
+	return sqlTexts(root, sqlQueryPart.MatchString)
+}
+
+// sqlTexts returns the string literals and concatenations of literals under
+// a node whose text accept takes.
+func sqlTexts(root ast.Node, accept func(string) bool) []sqlLiteral {
 	var literals []sqlLiteral
 	ast.Inspect(root, func(n ast.Node) bool {
 		expr, ok := n.(ast.Expr)
@@ -285,7 +301,7 @@ func sqlLiterals(root ast.Node) []sqlLiteral {
 			}
 			literal.bare = string(bare)
 		}
-		if hasLiteral && sqlStart.MatchString(literal.text) {
+		if hasLiteral && accept(literal.text) {
 			literals = append(literals, literal)
 		}
 		return false

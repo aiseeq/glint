@@ -51,7 +51,7 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 		behaviorAux: regexp.MustCompile(
 			`(?i)(?:\b(?:is|are|was|were|be|being|been|get|gets|got|to|soft)\s+(?:\w+ly\s+)?|будут\s+|будет\s+|был[аио]?\s+|должн\w*\s+быть\s+|могут\s+быть\s+|не\s+|что\s+|сколько\s+)$`),
 		behaviorTail: regexp.MustCompile(
-			`(?i)^(?:\s+from\b|\s*(?:->|→))`),
+			`(?i)^(?:\s+from\b|\s*(?:->|→)|\s*(?:или|либо|or)\s)`),
 		policyLine: regexp.MustCompile(
 			`(?i)CLAUDE\.md|принцип|запрещ|policy|deprecated:`),
 	}
@@ -93,7 +93,7 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			continue // Status=deleted, 'deleted', soft-deleted — a value, not a tombstone
 		}
 		if r.behaviorTail.MatchString(comment[loc[1]:]) {
-			continue // "removed from X", "deleted -> *" — data-flow/state docs
+			continue // "removed from X", "deleted -> *", "удалено или ..." — data-flow/state docs
 		}
 		v := r.CreateViolation(ctx.RelPath, i+1,
 			"Tombstone comment about deleted code — git history already remembers; delete the note")

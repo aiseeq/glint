@@ -54,23 +54,13 @@ func (r *OrdinalInPersistentKeyRule) AnalyzeFile(_ *core.FileContext) []*core.Vi
 // RequiresSSA reports that typed syntax is enough.
 func (r *OrdinalInPersistentKeyRule) RequiresSSA() bool { return false }
 
-type callSitesKey struct{}
-
-// funcCallSite is a static call of a loaded function from a loaded body.
-type funcCallSite struct {
-	call   *ast.CallExpr
-	caller typedFuncDecl
-}
-
 // AnalyzeGoProject reports identifiers built from list positions.
 func (r *OrdinalInPersistentKeyRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	decls, err := funcDeclsByObject(ctx)
 	if err != nil {
 		return nil, err
 	}
-	sites, err := core.SharedLoad(ctx, callSitesKey{}, func() (map[*types.Func][]funcCallSite, error) {
-		return collectCallSites(decls), nil
-	})
+	sites, err := funcCallSites(ctx, decls)
 	if err != nil {
 		return nil, err
 	}
@@ -97,22 +87,6 @@ func (r *OrdinalInPersistentKeyRule) AnalyzeGoProject(ctx *core.GoProjectContext
 		return findings
 	}
 	return inner.AnalyzeGoProject(ctx)
-}
-
-// collectCallSites indexes the static calls of the loaded bodies by callee.
-func collectCallSites(decls map[*types.Func]typedFuncDecl) map[*types.Func][]funcCallSite {
-	sites := make(map[*types.Func][]funcCallSite)
-	for _, caller := range decls {
-		ast.Inspect(caller.decl.Body, func(n ast.Node) bool {
-			if call, ok := n.(*ast.CallExpr); ok {
-				if fn := staticFunc(caller.info, call); fn != nil {
-					sites[fn.Origin()] = append(sites[fn.Origin()], funcCallSite{call: call, caller: caller})
-				}
-			}
-			return true
-		})
-	}
-	return sites
 }
 
 // identifierFormats returns the fmt.Sprintf calls of a function that build
