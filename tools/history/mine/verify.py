@@ -11,7 +11,9 @@ Only reads the repository: trees come from git archive.
 A module that reaches a sibling repository through a local replace in go.mod
 (replace example.com/lib => ../../lib/backend) does not type-check alone:
 --sibling lib=/path/to/lib extracts that repository, as it was at the date of
-the analyzed tree, to where the replace points.
+the analyzed tree, to where the replace points. When packages still fail to
+type-check on the tree before a fix, the sibling as of the fix's date is tried
+too: that tree was often built against sibling changes committed later.
 
 A manifest (.tsv, `commit kind rule[,rule...] [@path:line] [whole-tree]` per line) is the
 acceptance of new rules: only the listed rules run, every line is checked
@@ -74,18 +76,20 @@ def module_root(path, tree_files):
     return os.path.dirname(path) or '.'
 
 
-def provide_siblings(target, tree):
+def provide_siblings(target, at):
     """Extracts the sibling repositories a local replace of target's go.mod
-    points to, as they were at the date of tree; a path already holding that
-    revision is kept."""
+    points to, as they were at the date of commit at; a path already holding
+    that revision is kept. Returns whether target has such a replace."""
     gomod = os.path.join(target, 'go.mod')
     if not siblings or not os.path.exists(gomod):
-        return
-    date = git('log', '-1', '--format=%cI', tree).strip()
+        return False
+    date = git('log', '-1', '--format=%cI', at).strip()
+    provided = False
     for rel in LOCAL_REPLACE.findall(open(gomod).read()):
         parts = [p for p in rel.split('/') if p not in ('.', '..')]
         if not parts or parts[0] not in siblings:
             continue
+        provided = True
         sibling, sub = siblings[parts[0]], '/'.join(parts[1:])
         dest = os.path.normpath(os.path.join(target, rel))
         rev = subprocess.run(['git', '-C', sibling, 'rev-list', '-1', '--before=' + date, 'HEAD'],
@@ -101,6 +105,7 @@ def provide_siblings(target, tree):
         subprocess.run(['tar', '-x', '-C', top], input=archive, stderr=subprocess.DEVNULL)
         with open(marker, 'w') as f:
             f.write(rev)
+    return provided
 
 
 def run(commit, tree, side, rules, anchors=(), whole=False):
@@ -134,18 +139,31 @@ def run(commit, tree, side, rules, anchors=(), whole=False):
         # body): skip them, the Go and TS sources extract.
         subprocess.run(['tar', '-x', '-C', dest], input=archive, stderr=subprocess.DEVNULL)
         target = os.path.join(dest, root)
-        provide_siblings(target, tree)
-        issues = []
         args = ['glint', 'check', '--tolerate-broken-packages', '--output=json', '--min-severity=low']
         if rules:
             args.append('--rule=' + ','.join(rules))
-        proc = subprocess.run([*args, '.'], cwd=target, capture_output=True, text=True)
-        try:
-            report = json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            errors.append(f'{root}: exit {proc.returncode}: {proc.stderr.strip()[:300]}')
+        report, failure = None, None
+        # The tree before a fix was often built against sibling changes
+        # committed later, up to the fix itself: when packages do not
+        # type-check with the sibling of the tree's date, the sibling of the
+        # fix's date is tried, and the run with fewer of them kept.
+        for at in ([tree, commit] if tree != commit else [tree]):
+            if not provide_siblings(target, at) and at != tree:
+                break
+            proc = subprocess.run([*args, '.'], cwd=target, capture_output=True, text=True)
+            try:
+                attempt = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                failure = f'{root}: exit {proc.returncode}: {proc.stderr.strip()[:300]}'
+                continue
+            if report is None or attempt.get('stats', {}).get('packagesSkipped', 0) < report.get('stats', {}).get('packagesSkipped', 0):
+                report = attempt
+            if not report.get('stats', {}).get('packagesSkipped', 0):
+                break
+        if report is None:
+            errors.append(failure)
             continue
-        issues += report.get('issues') or []
+        issues = report.get('issues') or []
         skipped = max(skipped, report.get('stats', {}).get('packagesSkipped', 0))
         total += len(issues)
         for issue in issues:

@@ -57,6 +57,10 @@ func sqlViolation(rule *rules.BaseRule, ctx *core.FileContext, line int, message
 // locking its rows (FOR UPDATE SKIP LOCKED takes any free rows on purpose),
 // one whose WHERE fixes a row of its only table (an id, a unique key of the
 // migrations), one reading a migration tool's table.
+//
+// An ORDER BY on date columns alone, over a table whose unique keys the sort
+// and the WHERE do not cover, is reported too: rows of one day come in plan
+// order, and a consumer burning them first-in first-out takes another one.
 type SQLLimitWithoutOrderRule struct {
 	*rules.BaseRule
 }
@@ -66,7 +70,7 @@ func NewSQLLimitWithoutOrderRule() *SQLLimitWithoutOrderRule {
 	return &SQLLimitWithoutOrderRule{BaseRule: rules.NewBaseRule(
 		"sql-limit-without-order",
 		"patterns",
-		"Detects a SELECT that takes its first rows by LIMIT with no ORDER BY — which rows come first is up to the plan",
+		"Detects a SELECT whose row order is up to the plan: LIMIT with no ORDER BY, or ORDER BY a date column alone",
 		core.SeverityMedium,
 	)}
 }
@@ -93,6 +97,15 @@ func (r *SQLLimitWithoutOrderRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 			violations = append(violations, sqlViolation(r.BaseRule, ctx, line,
 				"LIMIT with no ORDER BY — which rows come first is up to the query plan, and it changes with the data",
 				"Order by what decides which row is wanted (ORDER BY created_at DESC, id), or aggregate if any row will do"))
+		}
+		for _, offset := range schema.DateOnlyOrders(literal.text) {
+			line := literal.lineAt(ctx, offset)
+			if ctx.IsSuppressed(line, r.Name()) {
+				continue
+			}
+			violations = append(violations, sqlViolation(r.BaseRule, ctx, line,
+				"ORDER BY a date alone — rows of one day come in plan order, and whoever takes them first-in first-out takes another row when the plan changes",
+				"Add a unique tiebreaker after the date (created_at, id)"))
 		}
 	}
 	return violations

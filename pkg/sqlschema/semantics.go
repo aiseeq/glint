@@ -45,6 +45,122 @@ func (s *Schema) UnorderedLimits(sql string) []int {
 	return offsets
 }
 
+// DateOnlyOrders returns the offsets of the ORDER BY keys of the SELECTs of
+// one table that sort by date columns alone: rows of one day come in plan
+// order, and a consumer taking them first-in first-out takes another one when
+// the plan changes. Not reported: a sort the WHERE and the keys make unique,
+// a grouped or distinct SELECT, a join, a table the schema does not know.
+func (s *Schema) DateOnlyOrders(sql string) []int {
+	if s == nil {
+		return nil
+	}
+	result, ok := parse(sql)
+	if !ok {
+		return nil
+	}
+	var offsets []int
+	for _, raw := range result.GetStmts() {
+		walk(raw.GetStmt().ProtoReflect(), func(m proto.Message) {
+			sel, ok := m.(*pgquery.SelectStmt)
+			if !ok || len(sel.GetSortClause()) == 0 || len(sel.GetGroupClause()) > 0 || len(sel.GetDistinctClause()) > 0 {
+				return
+			}
+			tables, joined := s.fromTables(sel)
+			if joined || len(tables) != 1 {
+				return
+			}
+			var table *Table
+			var alias string
+			for name, t := range tables {
+				alias, table = name, t
+			}
+			if table == nil || table.View {
+				return
+			}
+			keys := make(map[string]bool)
+			for _, ref := range pinnedColumns(sel.GetWhereClause()) {
+				keys[ref.name] = true
+			}
+			for _, name := range correlatedColumns(sel.GetWhereClause(), alias, table) {
+				keys[name] = true
+			}
+			sorted := make(map[string]bool)
+			for _, item := range sel.GetSortClause() {
+				ref := item.GetSortBy().GetNode().GetColumnRef()
+				if ref == nil {
+					return
+				}
+				fields := ref.GetFields()
+				column := table.Column(fields[len(fields)-1].GetString_().GetSval())
+				if column == nil || column.Type != "date" {
+					return
+				}
+				keys[column.Name] = true
+				sorted[column.Name] = true
+			}
+			if table.UniqueWithin(keys) || selectsOnly(sel, sorted) {
+				return
+			}
+			offsets = append(offsets, location(sel.GetSortClause()[0].GetSortBy().GetNode()))
+		})
+	}
+	return offsets
+}
+
+// correlatedColumns returns the columns of the table the AND terms of a
+// condition set equal to a column of another relation: in a subquery per
+// outer row (WHERE position_id = dp.id) they are fixed as by a parameter.
+func correlatedColumns(where *pgquery.Node, alias string, table *Table) []string {
+	if where == nil {
+		return nil
+	}
+	if b := where.GetBoolExpr(); b != nil {
+		if b.GetBoolop() != pgquery.BoolExprType_AND_EXPR {
+			return nil
+		}
+		var names []string
+		for _, arg := range b.GetArgs() {
+			names = append(names, correlatedColumns(arg, alias, table)...)
+		}
+		return names
+	}
+	expr := where.GetAExpr()
+	if expr == nil || expr.GetKind() != pgquery.A_Expr_Kind_AEXPR_OP || len(expr.GetName()) != 1 ||
+		expr.GetName()[0].GetString_().GetSval() != "=" {
+		return nil
+	}
+	own := func(ref pinnedRef) bool {
+		return (ref.qualifier == "" || ref.qualifier == alias || ref.qualifier == table.Name) && table.Column(ref.name) != nil
+	}
+	left, leftOK := columnOf(expr.GetLexpr())
+	right, rightOK := columnOf(expr.GetRexpr())
+	if !leftOK || !rightOK {
+		return nil
+	}
+	switch {
+	case own(left) && right.qualifier != "" && !own(right):
+		return []string{left.name}
+	case own(right) && left.qualifier != "" && !own(left):
+		return []string{right.name}
+	}
+	return nil
+}
+
+// selectsOnly reports a SELECT whose every target is one of the columns:
+// rows tied on them read the same.
+func selectsOnly(sel *pgquery.SelectStmt, columns map[string]bool) bool {
+	if len(sel.GetTargetList()) == 0 {
+		return false
+	}
+	for _, target := range sel.GetTargetList() {
+		ref, ok := columnOf(target.GetResTarget().GetVal())
+		if !ok || !columns[ref.name] {
+			return false
+		}
+	}
+	return true
+}
+
 var aggregates = map[string]bool{
 	"count": true, "sum": true, "min": true, "max": true, "avg": true,
 	"bool_and": true, "bool_or": true, "every": true, "array_agg": true, "string_agg": true, "json_agg": true, "jsonb_agg": true,

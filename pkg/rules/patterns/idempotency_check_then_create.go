@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -138,8 +139,91 @@ func (r *IdempotencyCheckThenCreateRule) AnalyzeFile(ctx *core.FileContext) []*c
 		}
 		analyzer.analyzeFuncDecl(fn)
 		violations = append(violations, analyzer.violations...)
+		violations = append(violations, r.periodGuards(ctx, fn)...)
 	}
 	return violations
+}
+
+// periodLookupName names a read of the latest record of something.
+var periodLookupName = regexp.MustCompile(`^(Get|Find|Load|Fetch|Read)?(Latest|Last|Current|Recent)`)
+
+// periodFieldName names the period a record was made for.
+var periodFieldName = regexp.MustCompile(`(?i)date|day|period|month|week`)
+
+// periodGuards reports a once-per-period action guarded by the latest
+// record, read with its error dropped:
+//
+//	existing, _ := s.nav.GetLatestNAV(ctx, id)
+//	if existing == nil || existing.Date != today {
+//	    s.fees.AccrueFees(ctx, id)
+//	}
+//
+// A failed lookup reads as "not done yet" and the action runs again, and two
+// runners pass the check together: once per period holds only when the
+// database refuses the second write (a unique key on the period).
+func (r *IdempotencyCheckThenCreateRule) periodGuards(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+	var violations []*core.Violation
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		block, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		for i := 0; i+1 < len(block.List); i++ {
+			assign, ok := block.List[i].(*ast.AssignStmt)
+			if !ok || len(assign.Lhs) != 2 || len(assign.Rhs) != 1 {
+				continue
+			}
+			record, ok := assign.Lhs[0].(*ast.Ident)
+			if blank, isIdent := assign.Lhs[1].(*ast.Ident); !ok || !isIdent || blank.Name != "_" {
+				continue
+			}
+			call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+			if !ok || !periodLookupName.MatchString(callName(call)) {
+				continue
+			}
+			guard, ok := block.List[i+1].(*ast.IfStmt)
+			if !ok || !periodCondition(guard.Cond, record.Name) {
+				continue
+			}
+			line := ctx.LineFor(assign)
+			if ctx.IsSuppressed(line, r.Name()) {
+				continue
+			}
+			v := r.CreateViolation(ctx.RelPath, line, "Once-per-period guard reads the latest record with its error dropped — a failed lookup reads as not done and the action runs again, and two runners pass the check together")
+			v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+			v.WithSuggestion("Handle the lookup error, and let the database refuse a second write for the period (a unique key on it, INSERT ... ON CONFLICT DO NOTHING)")
+			violations = append(violations, v)
+		}
+		return true
+	})
+	return violations
+}
+
+// periodCondition reports `record == nil || record.Date != today`.
+func periodCondition(cond ast.Expr, record string) bool {
+	or, ok := ast.Unparen(cond).(*ast.BinaryExpr)
+	if !ok || or.Op != token.LOR {
+		return false
+	}
+	isNil, ok := ast.Unparen(or.X).(*ast.BinaryExpr)
+	if !ok || isNil.Op != token.EQL || !isIdentNamedExpr(isNil.X, record) {
+		return false
+	}
+	differs, ok := ast.Unparen(or.Y).(*ast.BinaryExpr)
+	if !ok || differs.Op != token.NEQ {
+		return false
+	}
+	for _, side := range []ast.Expr{differs.X, differs.Y} {
+		if sel, ok := ast.Unparen(side).(*ast.SelectorExpr); ok && isIdentNamedExpr(sel.X, record) && periodFieldName.MatchString(sel.Sel.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+func isIdentNamedExpr(expr ast.Expr, name string) bool {
+	id, ok := ast.Unparen(expr).(*ast.Ident)
+	return ok && id.Name == name
 }
 
 func (a *idempotencyFunctionAnalyzer) analyzeFuncDecl(fn *ast.FuncDecl) {

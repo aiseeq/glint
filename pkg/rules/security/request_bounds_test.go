@@ -103,3 +103,44 @@ sudo mv "$REMOTE_TMP" /opt/app/bin/app
 `
 	assert.Equal(t, []int{5, 8, 16, 19, 20}, textRuleLines(t, NewShellPredictableTmpRule(), "deploy/diagnose.sh", script))
 }
+
+// A page size above the bound replaced by a smaller default: the caller asked
+// for more and takes the shorter page as all of it.
+func TestPaginationLimitReplacedWithDefault(t *testing.T) {
+	code := `package journal
+
+const maxLimit = 500
+
+const defaultLimit = 100
+
+type Filter struct{ Limit, Offset int }
+
+func list(f Filter) (int, int) {
+	limit := f.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	return limit, f.Offset
+}
+
+func listNamed(f Filter) int {
+	limit := f.Limit
+	if limit > maxLimit {
+		limit = defaultLimit
+	}
+	return limit
+}
+
+func clamped(f Filter) int {
+	limit := f.Limit
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	return limit
+}
+`
+	assert.Equal(t, []int{12, 20}, ruleLines(t, NewPaginationLimitUncappedRule(), code))
+}

@@ -199,3 +199,29 @@ CREATE TEMP TABLE roles (member_id UUID);`
 	var none *Schema
 	assert.Empty(t, none.MigratedTables(sql))
 }
+
+// Rows ordered by a date alone: rows of one day come in plan order, and a
+// FIFO consumer takes them in an order that changes with the plan.
+func TestDateOnlyOrders(t *testing.T) {
+	root := t.TempDir()
+	writeMigrations(t, root, map[string]string{
+		"migrations/001_init.up.sql": `
+CREATE TABLE cohorts (id UUID PRIMARY KEY, account_id UUID NOT NULL, event_date DATE NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE daily (account_id UUID NOT NULL, day DATE NOT NULL, amount NUMERIC, UNIQUE (account_id, day));`,
+	})
+	schema, err := Load(root, nil)
+	require.NoError(t, err)
+	sql := `SELECT * FROM cohorts WHERE account_id = $1 ORDER BY event_date ASC`
+	assert.Equal(t, at(sql, "event_date ASC"), schema.DateOnlyOrders(sql))
+	for _, allowed := range []string{
+		`SELECT * FROM cohorts WHERE account_id = $1 ORDER BY event_date ASC, created_at ASC`,
+		`SELECT * FROM cohorts WHERE account_id = $1 ORDER BY created_at`,
+		`SELECT * FROM daily WHERE account_id = $1 ORDER BY day`,
+		`SELECT event_date, count(*) FROM cohorts GROUP BY event_date ORDER BY event_date`,
+		`SELECT c.* FROM cohorts c JOIN daily d ON d.account_id = c.account_id ORDER BY c.event_date`,
+		`SELECT event_date FROM cohorts WHERE event_date <= $1 ORDER BY event_date DESC LIMIT 1`,
+		`SELECT a.id, s.amount FROM accounts a LEFT JOIN LATERAL (SELECT amount FROM daily WHERE account_id = a.id AND day <= $1 ORDER BY day DESC LIMIT 1) s ON true`,
+	} {
+		assert.Empty(t, schema.DateOnlyOrders(allowed), allowed)
+	}
+}

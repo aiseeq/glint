@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"regexp"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -23,7 +24,7 @@ func NewPaginationBoundaryTruncationRule() *PaginationBoundaryTruncationRule {
 	return &PaginationBoundaryTruncationRule{BaseRule: rules.NewBaseRule(
 		"pagination-boundary-truncation",
 		"patterns",
-		"Detects pagination that can silently stop at a page cap before reaching its time boundary",
+		"Detects pagination that can silently stop before its end: at a page cap short of its time boundary, or at a page that says more rows exist but carries no cursor",
 		core.SeverityMedium,
 	)}
 }
@@ -33,7 +34,7 @@ func (r *PaginationBoundaryTruncationRule) AnalyzeFile(ctx *core.FileContext) []
 	if !ctx.IsGoFile() || ctx.IsTestFile() || ctx.GoAST == nil {
 		return nil
 	}
-	var violations []*core.Violation
+	violations := r.missingCursorExits(ctx)
 	ast.Inspect(ctx.GoAST, func(node ast.Node) bool {
 		fn, ok := node.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -314,6 +315,125 @@ func blockEndsWalk(block *ast.BlockStmt, exit paginationLoopExit) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// hasMoreField names what a page says about the rest of the list.
+var hasMoreField = regexp.MustCompile(`(?i)^has_?(next|more)`)
+
+// cursorField names the cursor a page hands for the next one.
+var cursorField = regexp.MustCompile(`(?i)cursor|next_?page_?token|continuation`)
+
+// missingCursorExits reports a loop that ends the walk on a page saying more
+// rows exist but carrying no cursor, as on the last page:
+//
+//	if !result.HasNextPage || result.NextCursor == "" {
+//	    break
+//	}
+//
+// The inconsistent page is a provider fault; read as the end, it marks the
+// history complete with its tail missing.
+func (r *PaginationBoundaryTruncationRule) missingCursorExits(ctx *core.FileContext) []*core.Violation {
+	var violations []*core.Violation
+	var loops []ast.Node
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.ForStmt, *ast.RangeStmt:
+			loops = append(loops, n)
+		}
+		return true
+	})
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok || !insidePageLoop(ifStmt, loops) || !missingCursorCondition(ifStmt.Cond) || !endsWalkQuietly(ifStmt.Body) {
+			return true
+		}
+		line := ctx.LineFor(ifStmt)
+		if ctx.IsSuppressed(line, r.Name()) {
+			return true
+		}
+		v := r.CreateViolation(ctx.RelPath, line, "A page saying more rows exist but carrying no cursor ends the walk as if it were the last — the history is marked complete with its tail missing")
+		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+		v.WithSuggestion("End the walk when the page says there is no more; a page with more and no cursor is an error")
+		violations = append(violations, v)
+		return true
+	})
+	return violations
+}
+
+// missingCursorCondition reports `!page.HasNext || page.Cursor == ""`, in
+// either order.
+func missingCursorCondition(cond ast.Expr) bool {
+	or, ok := ast.Unparen(cond).(*ast.BinaryExpr)
+	if !ok || or.Op != token.LOR {
+		return false
+	}
+	return noMore(or.X) && emptyCursor(or.Y) || noMore(or.Y) && emptyCursor(or.X)
+}
+
+func noMore(expr ast.Expr) bool {
+	not, ok := ast.Unparen(expr).(*ast.UnaryExpr)
+	if !ok || not.Op != token.NOT {
+		return false
+	}
+	sel, ok := ast.Unparen(not.X).(*ast.SelectorExpr)
+	return ok && hasMoreField.MatchString(sel.Sel.Name)
+}
+
+func emptyCursor(expr ast.Expr) bool {
+	cmp, ok := ast.Unparen(expr).(*ast.BinaryExpr)
+	if !ok || cmp.Op != token.EQL {
+		return false
+	}
+	var field ast.Expr
+	switch {
+	case emptyValue(cmp.Y):
+		field = cmp.X
+	case emptyValue(cmp.X):
+		field = cmp.Y
+	default:
+		return false
+	}
+	if star, ok := ast.Unparen(field).(*ast.StarExpr); ok {
+		field = star.X
+	}
+	sel, ok := ast.Unparen(field).(*ast.SelectorExpr)
+	return ok && cursorField.MatchString(sel.Sel.Name)
+}
+
+func emptyValue(expr ast.Expr) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.BasicLit:
+		return e.Kind == token.STRING && (e.Value == `""` || e.Value == "``")
+	case *ast.Ident:
+		return e.Name == "nil"
+	}
+	return false
+}
+
+// endsWalkQuietly reports a block that leaves the loop by break, or returns
+// without an error.
+func endsWalkQuietly(block *ast.BlockStmt) bool {
+	if len(block.List) == 0 {
+		return false
+	}
+	switch last := block.List[len(block.List)-1].(type) {
+	case *ast.BranchStmt:
+		return last.Tok == token.BREAK
+	case *ast.ReturnStmt:
+		for _, result := range last.Results {
+			if id, ok := ast.Unparen(result).(*ast.Ident); ok {
+				if strings.Contains(strings.ToLower(id.Name), "err") {
+					return false
+				}
+				continue
+			}
+			if call, ok := ast.Unparen(result).(*ast.CallExpr); ok && strings.Contains(strings.ToLower(callName(call)), "err") {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }

@@ -333,3 +333,30 @@ func Totals(db DB) {
 	}
 	assert.Equal(t, []int{6, 6}, lines)
 }
+
+// Cohorts of one day burnt in plan order: a redemption takes another cohort
+// when the plan changes.
+func TestSQLLimitWithoutOrderDateOnlySort(t *testing.T) {
+	_, contexts := rulestest.Module(t, map[string]string{
+		"storage/migrations/001_init.up.sql": `CREATE TABLE cohorts (id UUID PRIMARY KEY, account_id UUID NOT NULL, event_date DATE NOT NULL, created_at TIMESTAMPTZ NOT NULL);`,
+		"storage/repo.go": `package storage
+
+func Cohorts(db DB, account string) {
+	db.QueryContext(ctx, "SELECT * FROM cohorts WHERE account_id = $1 ORDER BY event_date ASC", account)
+	db.QueryContext(ctx, "SELECT * FROM cohorts WHERE account_id = $1 ORDER BY event_date ASC, created_at ASC", account)
+}
+`,
+	})
+	for _, ctx := range contexts {
+		if ctx.RelPath != "storage/repo.go" {
+			continue
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, ctx.Path, ctx.Content, parser.ParseComments)
+		require.NoError(t, err)
+		ctx.SetGoAST(fset, file)
+		assert.Equal(t, []int{4}, sqlRuleLines(t, NewSQLLimitWithoutOrderRule(), ctx))
+		return
+	}
+	t.Fatal("no storage/repo.go")
+}
