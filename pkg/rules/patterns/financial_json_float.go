@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/types"
 	"maps"
 	"reflect"
 	"slices"
@@ -39,12 +40,50 @@ func NewFinancialJSONFloatRule() *FinancialJSONFloatRule {
 	)}
 }
 
-// AnalyzeFile checks JSON DTO structs while preserving financial context through anonymous fields.
+// AnalyzeFile checks one file without type information: the fallback the
+// project analysis uses for files no type-checked package covers.
 func (r *FinancialJSONFloatRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil, "")
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *FinancialJSONFloatRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; with types it also follows a float
+// field of another module's JSON struct into decimal.NewFromFloat.
+func (r *FinancialJSONFloatRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	modules := make(map[*core.FileContext]string)
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil || pkg.Package.Module == nil {
+			continue
+		}
+		for _, file := range pkg.Files {
+			modules[file] = pkg.Package.Module.Path
+		}
+	}
+	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyze(fileCtx, info, modules[fileCtx])
+	})
+}
+
+// analyze checks JSON DTO structs while preserving financial context through
+// anonymous fields; module is the path of the file's own module, "" when it
+// is not known.
+func (r *FinancialJSONFloatRule) analyze(ctx *core.FileContext, info *types.Info, module string) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() || ctx.GoAST == nil {
 		return nil
 	}
 	var violations []*core.Violation
+	if info != nil && module != "" {
+		for _, call := range foreignFloatFieldsToDecimal(ctx.GoAST, info, module) {
+			line := ctx.GoFileSet.Position(call.Pos()).Line
+			v := r.CreateViolation(ctx.RelPath, line, "A float money field of another module's JSON struct is turned into a decimal here — the amount already lost precision when it was decoded")
+			v.WithCode(ctx.GetLine(line))
+			v.WithSuggestion("Decode the field as a decimal or a string in the client struct (or a json.Number) and build the decimal from its text")
+			v.WithContext("pattern", "foreign_float_field_to_decimal")
+			violations = append(violations, v)
+		}
+	}
 	types := make(map[string]ast.Expr)
 	ast.Inspect(ctx.GoAST, func(node ast.Node) bool {
 		typeSpec, ok := node.(*ast.TypeSpec)

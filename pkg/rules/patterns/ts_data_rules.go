@@ -649,7 +649,82 @@ func (r *MissingAmountCoercedToZeroRule) AnalyzeFile(ctx *core.FileContext) []*c
 			name+" answers unreadable input with 0 and is applied to money fields — a missing amount shows as zero",
 			"Return an error or undefined for unreadable input and show the field as missing")
 	}
+	for _, head := range zeroCoercingFormatters(f) {
+		violations = jsReport(violations, r.BaseRule, ctx, f.line(head.pos),
+			head.name+" renders a missing or unreadable value as 0 — the screen shows a real-looking $0.00 or 0.00% for data that is not there",
+			"Answer a value that is not a finite number with a dash (or an empty cell), not with 0")
+	}
 	return violations
+}
+
+// jsFormatterHead is the start of a function whose first parameter carries
+// a type: function formatUsd(value: ... or const formatPct = (value: ...
+var jsFormatterHead = regexp.MustCompile(`(?:\bfunction\s+([A-Za-z_$][\w$]*)\s*|\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*)\(\s*([A-Za-z_$][\w$]*)\s*(\??)\s*:`)
+
+var (
+	jsFormatterName   = regexp.MustCompile(`^(?:format|fmt|display|render)[A-Z0-9_]`)
+	jsMissingType     = regexp.MustCompile(`\b(?:unknown|any|undefined|null)\b`)
+	jsStringResult    = regexp.MustCompile(`^\s*:\s*string\s*(=>\s*)?`)
+	jsCurrencyStyle   = regexp.MustCompile(`style\s*:\s*['"]currency['"]`)
+	jsZeroAsMissingOf = func(v string) *regexp.Regexp {
+		return regexp.MustCompile(`!\s*` + regexp.QuoteMeta(v) + `\b|\b` + regexp.QuoteMeta(v) + `\s*===?\s*0\b`)
+	}
+)
+
+type jsFormatterAt struct {
+	name string
+	pos  int
+}
+
+// zeroCoercingFormatters returns the display formatters that turn a missing
+// value into 0: the first parameter admits a missing value (unknown, any,
+// undefined, null or optional), the result is a string, and the body
+// coerces the parameter with Number(value) || 0, parseFloat(...) || 0 or
+// value ?? 0. A body that afterwards treats the zero as missing (if (!n)
+// return '-') renders it as missing after all.
+func zeroCoercingFormatters(f jsFlat) []jsFormatterAt {
+	var found []jsFormatterAt
+	for _, m := range jsFormatterHead.FindAllStringSubmatchIndex(f.code, -1) {
+		name := ""
+		for _, g := range []int{2, 4} {
+			if m[g] >= 0 {
+				name = f.code[m[g]:m[g+1]]
+			}
+		}
+		param := f.code[m[6]:m[7]]
+		open := strings.LastIndexByte(f.code[m[0]:m[6]], '(') + m[0]
+		closeParen, ok := f.closing(open)
+		if !ok {
+			continue
+		}
+		paramType := f.code[m[1]:closeParen]
+		if comma := strings.IndexByte(paramType, ','); comma >= 0 {
+			paramType = paramType[:comma]
+		}
+		if m[9] == m[8] && !jsMissingType.MatchString(paramType) {
+			continue
+		}
+		result := jsStringResult.FindStringIndex(f.code[closeParen+1:])
+		if result == nil {
+			continue
+		}
+		body := arrowOrBlockBody(f, closeParen+1+result[1])
+		if !jsFormatterName.MatchString(name) && !jsCurrencyStyle.MatchString(body) {
+			continue
+		}
+		p := regexp.QuoteMeta(param)
+		coercion := regexp.MustCompile(`(?:\b(?:Number|parseFloat|parseInt)\(\s*(?:String\(\s*)?` + p + `\s*\)?\s*\)\s*\|\|\s*0\b|\b` + p + `\s*\?\?\s*0\b)`)
+		loc := coercion.FindStringIndex(body)
+		if loc == nil {
+			continue
+		}
+		lineStart := strings.LastIndexAny(body[:loc[0]], "\n;{") + 1
+		if v := regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=`).FindStringSubmatch(body[lineStart:loc[0]]); v != nil && jsZeroAsMissingOf(v[1]).MatchString(body[loc[1]:]) {
+			continue
+		}
+		found = append(found, jsFormatterAt{name: name, pos: m[0]})
+	}
+	return found
 }
 
 // arrowOrBlockBody returns the body that starts at pos: a '{' block, or an
