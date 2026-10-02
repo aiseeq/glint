@@ -34,7 +34,12 @@ and record.
    continues the topic of its neighbours, look at the series (`git -C REPO log
    --oneline -S<string>` or by file) and record the defect once, where it shows.
 5. A cherry-pick or a repeat of an already triaged fix is a duplicate: do not
-   record it, count it as duplicate in the summary.
+   record it, count it as duplicate in the summary. A later commit fixing the
+   same class in places the first fix missed is not a duplicate: those places
+   held the defect too, so record it - every instance is a case a rule must
+   catch.
+6. Parts of a `fix:` commit that only restructure code without changing
+   behaviour are not fixes: skip them.
 
 ## What counts as a candidate
 A candidate is a fix where the code before it held a defect RECOGNIZABLE FROM
@@ -55,13 +60,15 @@ with universal=low: that is a candidate for the project's own linter.
 
 NOT_RULEABLE: business logic, values, layout, texts, infrastructure settings
 without a common pattern, fixes where the defect is not visible in the code
-(an external service changed behaviour, data in the database).
+(an external service changed behaviour, data in the database), tuning to an
+external API's limits or filters (rate limits, page sizes, event filters).
 
 COVERED: if the class is already in RULES — check against the rule whether it
 would catch this exact code. If the rule exists but misses this variant, that
 is valuable: record a candidate with covered_by=<rule> and explain in
 covered_note what the rule lacked. If it would catch it — just COVERED (not in
-the JSONL, only in the counter).
+the JSONL, only in the counter). A commit whose only finding is an antipattern
+the fix introduced and an existing rule catches is COVERED too.
 
 ## OUT format (JSONL, one line per record)
 A record has one of two kinds (field kind):
@@ -76,11 +83,16 @@ A record has one of two kinds (field kind):
  "before":"<1-3 lines: what the defective code looked like, abridged>",
  "after":"<1-2 lines: what the fix did>",
  "why_bug":"<one sentence: what broke>",
- "detect":"syntactic|typed|flow|cross-file",
+ "detect":"syntactic|typed|flow|cross-file|cross-lang",
  "detector":"<one or two sentences: by which sign a rule would find the code BEFORE the fix>",
  "universal":"high|medium|low",
  "covered_by":"<glint rule or none>",
  "covered_note":"<if covered_by is not none: what the rule lacked>"}
+
+universal: high - any project of the language; medium - a library or a
+domain beyond this project (payments, blockchain integrations); low - this
+project only. detect cross-lang: the defect is a mismatch between code in two
+languages (a Go response field against a TS type).
 
 For "introduced", before/after describe the code the fix added (before —
 what was there, after — what came, the antipattern is in after).
