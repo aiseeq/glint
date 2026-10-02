@@ -183,9 +183,7 @@ func (r *TypedNilIntoInterfaceRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 		}
 	}
 
-	decls, err := core.SharedLoad(ctx, paramStoresDeclsKey{}, func() (map[*types.Func]paramStoresDecl, error) {
-		return collectParamStoresDecls(ctx), nil
-	})
+	decls, err := funcDeclsByObject(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -711,44 +709,13 @@ func (w *typedNilWalker) report(arg ast.Expr, target types.Type, sink string) {
 // function that does. The declarations come from the loaded packages; a
 // function whose body is not loaded is unknown and does not store.
 type paramStores struct {
-	decls   map[*types.Func]paramStoresDecl
+	decls   map[*types.Func]typedFuncDecl
 	results map[paramStoresKey]bool
-}
-
-type paramStoresDecl struct {
-	decl *ast.FuncDecl
-	info *types.Info
 }
 
 type paramStoresKey struct {
 	fn    *types.Func
 	index int
-}
-
-// paramStoresDeclsKey caches the function declarations of every loaded
-// package once per module load; the memoized answers stay per run.
-type paramStoresDeclsKey struct{}
-
-func collectParamStoresDecls(ctx *core.GoProjectContext) map[*types.Func]paramStoresDecl {
-	decls := make(map[*types.Func]paramStoresDecl)
-	for _, pkgCtx := range ctx.Packages {
-		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
-			continue
-		}
-		info := pkgCtx.Package.TypesInfo
-		for _, file := range pkgCtx.Package.Syntax {
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil {
-					continue
-				}
-				if obj, ok := info.Defs[fn.Name].(*types.Func); ok {
-					decls[obj] = paramStoresDecl{decl: fn, info: info}
-				}
-			}
-		}
-	}
-	return decls
 }
 
 // storesParam reports whether fn keeps its index-th argument; an argument past

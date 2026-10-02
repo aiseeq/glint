@@ -309,3 +309,63 @@ func (r *Router) classify(w http.ResponseWriter, req *http.Request) {
 `,
 	}))
 }
+
+// A record the handler has just written is read back by the id the server
+// gave it: a miss there is a server inconsistency, not the client's unknown
+// id, and 404 would make the client repeat the write.
+func TestNotFoundAnsweredAsServerErrorReadBackOfWrittenRecord(t *testing.T) {
+	assert.Empty(t, notFoundServerErrorFindings(t, map[string]string{
+		"store/store.go": notFoundStoreSource,
+		"ledger/ledger.go": `package ledger
+
+import (
+	"context"
+
+	"example.com/rulestest/store"
+)
+
+type Entry struct {
+	ID     string
+	Amount string
+}
+
+func NewEntry(amount string) *Entry { return &Entry{ID: "generated", Amount: amount} }
+
+type Ledger struct{ store *store.Store }
+
+func (l *Ledger) RecordEntry(ctx context.Context, e *Entry) error { return nil }
+
+func (l *Ledger) Entry(ctx context.Context, id string) (*store.Position, error) {
+	return l.store.Position(ctx, id)
+}
+`,
+		"api/api.go": `package api
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"example.com/rulestest/ledger"
+)
+
+type Router struct{ ledger *ledger.Ledger }
+
+func (r *Router) create(w http.ResponseWriter, req *http.Request) {
+	var body struct{ Amount string }
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	entry := ledger.NewEntry(body.Amount)
+	if err := r.ledger.RecordEntry(req.Context(), entry); err != nil {
+		http.Error(w, "record failed", http.StatusInternalServerError)
+		return
+	}
+	if _, err := r.ledger.Entry(req.Context(), entry.ID); err != nil {
+		http.Error(w, "recorded, read back failed", http.StatusInternalServerError)
+		return
+	}
+}
+`,
+	}))
+}

@@ -401,21 +401,23 @@ func (s *firstMatchScanner) identityOperand(expr ast.Expr) bool {
 		return false
 	}
 	if selector, ok := ast.Unparen(expr).(*ast.SelectorExpr); ok {
-		return rootIdent(selector) == s.value
+		root := rootIdent(selector)
+		return root != nil && root.Name == s.value
 	}
 	return false
 }
 
-// rootIdent returns the identifier a selector chain starts from.
-func rootIdent(expr ast.Expr) string {
+// rootIdent returns the identifier a selector chain starts from: entry in
+// entry.ID, nil for anything that is not a chain of selectors.
+func rootIdent(expr ast.Expr) *ast.Ident {
 	for {
 		switch node := ast.Unparen(expr).(type) {
 		case *ast.SelectorExpr:
 			expr = node.X
 		case *ast.Ident:
-			return node.Name
+			return node
 		default:
-			return ""
+			return nil
 		}
 	}
 }

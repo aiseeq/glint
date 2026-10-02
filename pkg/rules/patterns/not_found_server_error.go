@@ -13,6 +13,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -264,9 +265,15 @@ func requestValues(flow *errorFlow, fn typedFunc, request *types.Var) map[types.
 // takesRequestValue reports a call handed what the client sent, other than
 // a number.
 func takesRequestValue(flow *errorFlow, fn typedFunc, call *ast.CallExpr, request *types.Var, values map[types.Object]bool) bool {
+	written := writtenBefore(fn, call)
 	for _, arg := range call.Args {
 		// A number the client sent (a page size, a limit) names no record.
 		if basic, ok := fn.info.TypeOf(arg).Underlying().(*types.Basic); ok && basic.Info()&(types.IsNumeric|types.IsBoolean) != 0 {
+			continue
+		}
+		// The id of a record the handler has just written was given by the
+		// server: a miss reading it back is the server's inconsistency.
+		if root := rootIdent(arg); root != nil && written[fn.info.ObjectOf(root)] {
 			continue
 		}
 		if mentionsRequestData(flow, fn, arg, request, values, 0) {
@@ -274,6 +281,40 @@ func takesRequestValue(flow *errorFlow, fn typedFunc, call *ast.CallExpr, reques
 		}
 	}
 	return false
+}
+
+// writtenBefore returns the variables a handler hands to a write call
+// (RecordEntry(ctx, entry), Create(&row)) before call.
+func writtenBefore(fn typedFunc, call *ast.CallExpr) map[types.Object]bool {
+	written := map[types.Object]bool{}
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		write, ok := n.(*ast.CallExpr)
+		if !ok || write.Pos() >= call.Pos() {
+			return true
+		}
+		name := ""
+		switch fun := write.Fun.(type) {
+		case *ast.SelectorExpr:
+			name = fun.Sel.Name
+		case *ast.Ident:
+			name = fun.Name
+		}
+		if !helpers.IsWriteName(name) {
+			return true
+		}
+		for _, arg := range write.Args {
+			if unary, ok := ast.Unparen(arg).(*ast.UnaryExpr); ok && unary.Op == token.AND {
+				arg = unary.X
+			}
+			if ident, ok := ast.Unparen(arg).(*ast.Ident); ok {
+				if obj := fn.info.ObjectOf(ident); obj != nil {
+					written[obj] = true
+				}
+			}
+		}
+		return true
+	})
+	return written
 }
 
 // errNotNilIdent returns err of a condition `err != nil`.

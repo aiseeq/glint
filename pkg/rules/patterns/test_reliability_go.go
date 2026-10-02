@@ -730,7 +730,11 @@ func creatingReceiver(call *ast.CallExpr, handles map[string]bool) string {
 	if !ok || !creatingCall.MatchString(sel.Sel.Name) || callForwardsTestingT(call, handles) {
 		return ""
 	}
-	root := rootIdent(sel.X)
+	ident := rootIdent(sel.X)
+	if ident == nil {
+		return ""
+	}
+	root := ident.Name
 	if handles[root] || root == "require" || root == "assert" {
 		return ""
 	}
