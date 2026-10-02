@@ -11,11 +11,11 @@ import (
 	"github.com/aiseeq/glint/pkg/rules"
 )
 
-func withFlags(t *testing.T, category, rule string) {
+func withFlags(t *testing.T, category string, ruleNames ...string) {
 	t.Helper()
-	prevCategory, prevRule := flagCategory, flagRule
-	flagCategory, flagRule = category, rule
-	t.Cleanup(func() { flagCategory, flagRule = prevCategory, prevRule })
+	prevCategory, prevRules := flagCategory, flagRules
+	flagCategory, flagRules = category, ruleNames
+	t.Cleanup(func() { flagCategory, flagRules = prevCategory, prevRules })
 }
 
 // An unknown --rule used to leave the full rule set in place, so glint reported
@@ -33,7 +33,7 @@ func TestGetEnabledRulesRejectsUnknownRule(t *testing.T) {
 }
 
 func TestGetEnabledRulesRejectsUnknownCategory(t *testing.T) {
-	withFlags(t, "no-such-category", "")
+	withFlags(t, "no-such-category")
 
 	_, err := getEnabledRules(core.DefaultConfig())
 	if err == nil {
@@ -89,6 +89,46 @@ func TestGetEnabledRulesAcceptsKnownRule(t *testing.T) {
 	}
 	if len(enabled) != 1 || enabled[0].Name() != "interface-any" {
 		t.Fatalf("got %d rules, want only interface-any", len(enabled))
+	}
+}
+
+// Several --rule values used to keep only the last one: a pflag string flag
+// silently overwrites on repeat. Every rule asked for must run.
+func TestGetEnabledRulesRunsEveryRequestedRule(t *testing.T) {
+	flags := checkCmd.Flags()
+	prev := flagRules
+	t.Cleanup(func() { flagRules = prev })
+	for _, args := range [][]string{
+		{"--rule=interface-any", "--rule=magic-number"},
+		{"--rule=interface-any,magic-number"},
+	} {
+		flagRules = nil
+		if err := flags.Lookup("rule").Value.(interface{ Replace([]string) error }).Replace(nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := flags.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		enabled, err := getEnabledRules(core.DefaultConfig())
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		var names []string
+		for _, rule := range enabled {
+			names = append(names, rule.Name())
+		}
+		if strings.Join(names, ",") != "interface-any,magic-number" {
+			t.Fatalf("%v: got %v, want both rules", args, names)
+		}
+	}
+}
+
+// An unknown name among several --rule values is an error too.
+func TestGetEnabledRulesRejectsUnknownRuleAmongSeveral(t *testing.T) {
+	withFlags(t, "", "interface-any", "no-such-rule")
+
+	if _, err := getEnabledRules(core.DefaultConfig()); err == nil || !strings.Contains(err.Error(), "no-such-rule") {
+		t.Fatalf("unknown rule among several must be an error naming it, got: %v", err)
 	}
 }
 
@@ -174,7 +214,7 @@ func TestWalkWithWalkerSkipsUnreadableFilesWhenTolerant(t *testing.T) {
 // A rule the configuration disabled by name stays off under --category; the
 // category switch itself is what the flag overrides.
 func TestGetEnabledRulesCategoryKeepsRuleDisabledByName(t *testing.T) {
-	withFlags(t, "architecture", "")
+	withFlags(t, "architecture")
 	cfg := core.DefaultConfig()
 	cfg.Categories["architecture"] = core.CategoryConfig{
 		Enabled: false,

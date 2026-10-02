@@ -70,3 +70,16 @@ func TestFrontendErrorMessageMatch_SkipsTestsAndDisplay(t *testing.T) {
 `
 	assert.Empty(t, frontendErrorMessageLines(t, "frontend/src/run.test.ts", source))
 }
+
+// isErrorName keeps the names the former ^(?:e|err|error|\w*Err|\w*Error)$
+// expression accepted.
+func TestFrontendErrorMessageMatchErrorName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"e": true, "err": true, "error": true, "Err": true, "fetchErr": true, "apiError": true,
+		"errors": false, "ErrorBoundary": false, "$error": false, "x$Error": false, "er": false,
+	} {
+		if got := isErrorName(name); got != want {
+			t.Errorf("isErrorName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

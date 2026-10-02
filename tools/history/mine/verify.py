@@ -92,18 +92,17 @@ def run(commit, tree, side, rules, anchors=(), whole=False):
         subprocess.run(['tar', '-x', '-C', dest], input=archive, stderr=subprocess.DEVNULL)
         target = os.path.join(dest, root)
         issues = []
-        for rule in rules or [None]:
-            args = ['glint', 'check', '--tolerate-broken-packages', '--output=json', '--min-severity=low']
-            if rule:
-                args.append('--rule=' + rule)
-            proc = subprocess.run([*args, '.'], cwd=target, capture_output=True, text=True)
-            try:
-                report = json.loads(proc.stdout)
-            except json.JSONDecodeError:
-                errors.append(f'{root}: exit {proc.returncode}: {proc.stderr.strip()[:300]}')
-                continue
-            issues += report.get('issues') or []
-            skipped = max(skipped, report.get('stats', {}).get('packagesSkipped', 0))
+        args = ['glint', 'check', '--tolerate-broken-packages', '--output=json', '--min-severity=low']
+        if rules:
+            args.append('--rule=' + ','.join(rules))
+        proc = subprocess.run([*args, '.'], cwd=target, capture_output=True, text=True)
+        try:
+            report = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            errors.append(f'{root}: exit {proc.returncode}: {proc.stderr.strip()[:300]}')
+            continue
+        issues += report.get('issues') or []
+        skipped = max(skipped, report.get('stats', {}).get('packagesSkipped', 0))
         total += len(issues)
         for issue in issues:
             rel = os.path.normpath(os.path.join(root, issue['file']))
