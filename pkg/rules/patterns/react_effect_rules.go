@@ -53,6 +53,11 @@ func newFrontendViolation(rule *rules.BaseRule, ctx *core.FileContext, line int,
 // clears (let active = true ... return () => { active = false }) or a request
 // id compared with the latest settles it. An effect with an empty dependency
 // list runs once and is not reported.
+//
+// The load may live in a useCallback loader the effect calls. Such a loader
+// counts only when it awaits a read whose arguments come from its
+// dependencies or parameters: a dependency that only guards the load, or a
+// call that writes, asks for the same thing every time.
 type ReactEffectAsyncWithoutCleanupRule struct{ *rules.BaseRule }
 
 // NewReactEffectAsyncWithoutCleanupRule creates the rule
@@ -546,10 +551,109 @@ func callbackLoaders(f jsFlat, scope int, body string) []jsSpanRange {
 			continue
 		}
 		args := f.callArgs(def[0] + strings.Index(f.code[def[0]:], "("))
-		if len(args) == 0 || (noArgs && len(args) >= 2 && runsOnce(f, args[len(args)-1])) {
+		if len(args) == 0 || (noArgs && len(args) >= 2 && runsOnce(f, args[len(args)-1])) || !loaderReadsDeps(f, args) {
 			continue
 		}
 		loads = append(loads, args[0])
 	}
 	return loads
+}
+
+var (
+	jsLocalDecl     = regexp.MustCompile(`\b(?:const|let|var)\s+(\{[^}]*\}|\[[^\]]*\]|[A-Za-z_$][\w$]*)\s*=`)
+	jsAwaitCall     = regexp.MustCompile(`\bawait\s+(?:[\w$]+\s*\??\.\s*)*([\w$]+)\s*(?:<[^()]*>\s*)?\(`)
+	jsReadCall      = regexp.MustCompile(`^(?i:get|load|fetch|list|query|search|find|read)`)
+	jsResultTaken   = regexp.MustCompile(`(?:[^=!<>]=|\breturn|\bset[A-Z][\w$]*\s*\()\s*$`)
+	jsLoaderParams  = regexp.MustCompile(`^\s*async\s*(?:\(([^)]*)\)|([A-Za-z_$][\w$]*))\s*=>`)
+	jsIdentifierAny = regexp.MustCompile(`[A-Za-z_$][\w$]*`)
+)
+
+// loaderReadsDeps reports whether a useCallback loader (its arguments in
+// args) awaits a read whose arguments come from the loader's dependencies,
+// from locals computed from them, or from its own parameters. Only such a
+// read asks for something else when the dependencies change; a dependency
+// that only guards the load, or a call that writes, leaves nothing for a late
+// answer to overwrite with stale data.
+func loaderReadsDeps(f jsFlat, args []jsSpanRange) bool {
+	fn := args[0]
+	body := f.text[fn.start:fn.end]
+	var sources []string
+	if m := jsLoaderParams.FindStringSubmatch(body); m != nil {
+		for _, param := range strings.Split(m[1]+m[2], ",") {
+			sources = append(sources, jsIdentifierAny.FindAllString(strings.SplitN(strings.SplitN(param, ":", 2)[0], "=", 2)[0], -1)...)
+		}
+	}
+	if len(args) >= 2 {
+		deps := args[len(args)-1]
+		if open := strings.Index(f.code[deps.start:deps.end], "["); open >= 0 {
+			if end, ok := f.closing(deps.start + open); ok {
+				for _, item := range f.items(deps.start+open, end) {
+					sources = append(sources, strings.TrimSpace(f.code[item.start:item.end]))
+				}
+			}
+		}
+	}
+	for _, decl := range jsLocalDecl.FindAllStringSubmatchIndex(body, -1) {
+		if mentionsAny(body[decl[1]:f.expressionEnd(fn.start+decl[1], fn.end)-fn.start], sources) {
+			sources = append(sources, jsIdentifierAny.FindAllString(body[decl[2]:decl[3]], -1)...)
+		}
+	}
+	for _, call := range jsAwaitCall.FindAllStringSubmatchIndex(body, -1) {
+		open := fn.start + call[1] - 1
+		end, ok := f.closing(open)
+		if !ok || !mentionsAny(f.text[open+1:end], sources) {
+			continue
+		}
+		if jsReadCall.MatchString(body[call[2]:call[3]]) || jsResultTaken.MatchString(body[:call[0]]) {
+			return true
+		}
+	}
+	return false
+}
+
+// mentionsAny reports whether text uses one of the expressions in names as a
+// whole: a name followed by a property access counts, a property of the same
+// name does not.
+func mentionsAny(text string, names []string) bool {
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		for from := 0; ; {
+			i := strings.Index(text[from:], name)
+			if i < 0 {
+				break
+			}
+			i += from
+			end := i + len(name)
+			if (i == 0 || !isJSIdentByte(text[i-1]) && text[i-1] != '.') && (end == len(text) || !isJSIdentByte(text[end]) && text[end] != '$') {
+				return true
+			}
+			from = i + 1
+		}
+	}
+	return false
+}
+
+// expressionEnd returns where the expression that starts at pos ends: the
+// first ';', line end or unbalanced closing bracket outside brackets, or
+// limit.
+func (f jsFlat) expressionEnd(pos, limit int) int {
+	depth := 0
+	for i := pos; i < limit; i++ {
+		switch f.code[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		case ';', '\n':
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return limit
 }
