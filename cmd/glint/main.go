@@ -66,6 +66,7 @@ var (
 	flagDebug       bool
 	flagNoColor     bool
 	flagTolerant    bool
+	flagJobs        int
 	flagTiming      bool
 	flagCPUProfile  string
 	flagNoCache     bool
@@ -177,6 +178,7 @@ func init() {
 	checkCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show analyzed files")
 	checkCmd.Flags().BoolVar(&flagDebug, "debug", false, "Enable debug output")
 	checkCmd.Flags().BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
+	checkCmd.Flags().IntVarP(&flagJobs, "jobs", "j", defaultJobs, "Threads the run may use (type checking and the rules)")
 	checkCmd.Flags().BoolVar(&flagTolerant, "tolerate-broken-packages", false, "Analyze packages that type-check and report the ones that do not, instead of failing (for trees that do not compile as a whole)")
 	checkCmd.Flags().BoolVar(&flagTiming, "timing", false, "Report per-rule timings to stderr; on Ctrl+C also names the rule and file still running")
 	checkCmd.Flags().StringVar(&flagCPUProfile, "cpuprofile", "", "Write a CPU profile of the run to this file (go tool pprof)")
@@ -194,6 +196,7 @@ func init() {
 	fixCmd.Flags().BoolVar(&flagForce, "force", false, "Apply fixes even with uncommitted changes")
 	fixCmd.Flags().StringSliceVarP(&flagFixRules, "rule", "r", nil, "Fix only the specified rules (repeat the flag or separate names with commas)")
 	fixCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed output")
+	fixCmd.Flags().IntVarP(&flagJobs, "jobs", "j", defaultJobs, "Threads the run may use (type checking and the rules)")
 	fixCmd.Flags().BoolVar(&flagTolerant, "tolerate-broken-packages", false, "Fix the packages that type-check and report the ones that do not, instead of failing")
 
 	// Root commands
@@ -205,8 +208,26 @@ func init() {
 	rootCmd.AddCommand(fixCmd)
 }
 
+// defaultJobs is how many threads a run takes unless --jobs says otherwise:
+// glint runs in gates next to builds and tests on a shared machine, and every
+// CPU at once slows them down for little gain.
+const defaultJobs = 4
+
+// applyJobs limits the run to --jobs threads: GOMAXPROCS bounds type checking,
+// and the walker and the rule workers size their pools by it.
+func applyJobs() error {
+	if flagJobs < 1 {
+		return fmt.Errorf("--jobs must be at least 1, got %d", flagJobs)
+	}
+	runtime.GOMAXPROCS(flagJobs)
+	return nil
+}
+
 func runCheck(_ *cobra.Command, args []string) error {
 	startTime := time.Now()
+	if err := applyJobs(); err != nil {
+		return err
+	}
 
 	if flagTiming {
 		timings = newTimingCollector()
@@ -793,11 +814,11 @@ type statelessRun struct {
 	overrides severityOverrides
 }
 
-// execute spreads the files over a worker per CPU. Each worker owns its own
+// execute spreads the files over a worker per thread the run may use. Each worker owns its own
 // row of the result matrix, so no synchronization is needed beyond the wait
 // group.
 func (s statelessRun) execute(contexts []*core.FileContext, found [][]core.ViolationList, failures []error) {
-	workers := runtime.NumCPU()
+	workers := runtime.GOMAXPROCS(0)
 	if workers > len(contexts) {
 		workers = len(contexts)
 	}
@@ -1150,6 +1171,9 @@ func runConfigValidate(_ *cobra.Command, _ []string) error {
 }
 
 func runFix(_ *cobra.Command, args []string) error {
+	if err := applyJobs(); err != nil {
+		return err
+	}
 	projectRoots, err := getProjectRoots(args)
 	if err != nil {
 		return err
