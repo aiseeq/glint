@@ -12,6 +12,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -99,13 +100,21 @@ func (r *SQLSessionTimeZoneRule) UseProjectFiles(files []*core.FileContext) {
 	if len(found) == 0 {
 		return
 	}
+	storedTimes := storedTimeFields(files)
+	for _, ctx := range files {
+		if productionGoFile(ctx) {
+			for _, line := range storedTimeDateCuts(ctx, storedTimes) {
+				found[ctx.RelPath] = append(found[ctx.RelPath], sessionZoneSite{line: line})
+			}
+		}
+	}
 	for _, ctx := range files {
 		if !productionGoFile(ctx) {
 			continue
 		}
 		schema, ok := fileSchema(ctx, r.BaseRule)
 		if !ok {
-			return
+			break
 		}
 		for _, literal := range sqlLiterals(ctx.GoAST) {
 			for _, offset := range schema.SessionDates(literal.text) {
@@ -128,6 +137,76 @@ func (r *SQLSessionTimeZoneRule) UseProjectFiles(files []*core.FileContext) {
 	if r.dates > 0 {
 		r.found = found
 	}
+}
+
+// storedTimeFields returns the names of the time.Time fields of the
+// project's structs tagged db: timestamps scanned in the session's zone.
+func storedTimeFields(files []*core.FileContext) map[string]bool {
+	names := make(map[string]bool)
+	for _, ctx := range files {
+		if !productionGoFile(ctx) {
+			continue
+		}
+		ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+			field, ok := n.(*ast.Field)
+			if !ok || field.Tag == nil || !strings.Contains(field.Tag.Value, `db:"`) {
+				return true
+			}
+			typ := field.Type
+			if star, ok := typ.(*ast.StarExpr); ok {
+				typ = star.X
+			}
+			if sel, ok := typ.(*ast.SelectorExpr); ok && sel.Sel.Name == "Time" && isIdentNamed(sel.X, "time") {
+				for _, name := range field.Names {
+					names[name.Name] = true
+				}
+			}
+			return true
+		})
+	}
+	return names
+}
+
+// storedTimeDateCuts returns the lines of a file that cut a calendar date
+// from a stored timestamp with no UTC() or In(loc): tx.Timestamp.Format("2006-01-02").
+// A date only glued into text or printed is left out.
+func storedTimeDateCuts(ctx *core.FileContext, stored map[string]bool) []int {
+	var lines []int
+	parents := helpers.ParentMap(ctx.GoAST)
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) != 1 {
+			return true
+		}
+		format, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || format.Sel.Name != "Format" || !dateOnlyLayoutSyntax(call.Args[0]) {
+			return true
+		}
+		if field, ok := ast.Unparen(format.X).(*ast.SelectorExpr); ok && stored[field.Sel.Name] && !textOperand(parents, call) {
+			lines = append(lines, ctx.GoFileSet.Position(call.Pos()).Line)
+		}
+		return true
+	})
+	return lines
+}
+
+// textOperand reports an expression glued into a string or handed to fmt or
+// a logger, judged by syntax.
+func textOperand(parents map[ast.Node]ast.Node, expr ast.Expr) bool {
+	switch parent := parents[expr].(type) {
+	case *ast.ParenExpr:
+		return textOperand(parents, parent)
+	case *ast.BinaryExpr:
+		return parent.Op == token.ADD
+	case *ast.CallExpr:
+		if helpers.IsLoggerCall(parent) {
+			return true
+		}
+		// fmt's formatting, a slog attribute (slog.String("day", d)).
+		sel, ok := parent.Fun.(*ast.SelectorExpr)
+		return ok && (isIdentNamed(sel.X, "fmt") || isIdentNamed(sel.X, "slog"))
+	}
+	return false
 }
 
 // zoneParameter reports the key "timezone" of a connection's runtime
