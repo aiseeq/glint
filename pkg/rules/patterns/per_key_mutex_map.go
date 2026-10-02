@@ -121,58 +121,8 @@ func (r *PerKeyMutexMapRule) structMutexes(ctx *core.FileContext) []*core.Violat
 			continue
 		}
 		recv := fn.Recv.List[0].Names[0].Name
-		var locked []mutexKey
-		touchesState := false
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			sel, ok := n.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			owner, ok := sel.X.(*ast.Ident)
-			if !ok || owner.Name != recv {
-				return true
-			}
-			if holder.state[sel.Sel.Name] {
-				touchesState = true
-			}
-			return true
-		})
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			switch node := n.(type) {
-			case *ast.CallExpr:
-				method, ok := node.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				field, ok := method.X.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				owner, ok := field.X.(*ast.Ident)
-				if !ok || owner.Name != recv || !holder.mutexes[field.Sel.Name] {
-					return true
-				}
-				key := mutexKey{typeName, field.Sel.Name}
-				switch method.Sel.Name {
-				case "Lock", "RLock":
-					locks[key] = append(locks[key], node)
-					locked = append(locked, key)
-				case "Unlock", "RUnlock":
-				default:
-					guards[key] = true
-				}
-				return false
-			case *ast.UnaryExpr:
-				// &s.mu handed on: what it guards is decided elsewhere.
-				if field, ok := node.X.(*ast.SelectorExpr); ok && node.Op == token.AND {
-					if owner, ok := field.X.(*ast.Ident); ok && owner.Name == recv && holder.mutexes[field.Sel.Name] {
-						guards[mutexKey{typeName, field.Sel.Name}] = true
-					}
-				}
-			}
-			return true
-		})
-		if touchesState {
+		locked := mutexUses(fn.Body, typeName, recv, holder, locks, guards)
+		if touchesHolderState(fn.Body, recv, holder) {
 			for _, key := range locked {
 				guards[key] = true
 			}
@@ -196,6 +146,66 @@ func (r *PerKeyMutexMapRule) structMutexes(ctx *core.FileContext) []*core.Violat
 	}
 	sort.Slice(violations, func(i, j int) bool { return violations[i].Line < violations[j].Line })
 	return violations
+}
+
+// touchesHolderState reports a method body reading or writing a data field
+// of its receiver.
+func touchesHolderState(body *ast.BlockStmt, recv string, holder *mutexHolder) bool {
+	touches := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return !touches
+		}
+		if owner, ok := sel.X.(*ast.Ident); ok && owner.Name == recv && holder.state[sel.Sel.Name] {
+			touches = true
+		}
+		return !touches
+	})
+	return touches
+}
+
+// mutexUses records the Lock calls on the receiver's mutexes into locks and
+// marks as guards a mutex used otherwise (handed on, a TryLock); it returns
+// the mutexes the body locks.
+func mutexUses(body *ast.BlockStmt, typeName, recv string, holder *mutexHolder, locks map[mutexKey][]*ast.CallExpr, guards map[mutexKey]bool) []mutexKey {
+	var locked []mutexKey
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			method, ok := node.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			field, ok := method.X.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			owner, ok := field.X.(*ast.Ident)
+			if !ok || owner.Name != recv || !holder.mutexes[field.Sel.Name] {
+				return true
+			}
+			key := mutexKey{typeName, field.Sel.Name}
+			switch method.Sel.Name {
+			case "Lock", "RLock":
+				locks[key] = append(locks[key], node)
+				locked = append(locked, key)
+			case "Unlock", "RUnlock":
+			default:
+				guards[key] = true
+			}
+			return false
+		case *ast.UnaryExpr:
+			// &s.mu handed on: what it guards is decided elsewhere.
+			if field, ok := node.X.(*ast.SelectorExpr); ok && node.Op == token.AND {
+				if owner, ok := field.X.(*ast.Ident); ok && owner.Name == recv && holder.mutexes[field.Sel.Name] {
+					guards[mutexKey{typeName, field.Sel.Name}] = true
+				}
+			}
+		}
+		return true
+	})
+	return locked
 }
 
 // mutexHolders returns the struct types of a file with mutex fields.

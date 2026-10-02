@@ -147,11 +147,8 @@ func (idx *tableIndex) constValue(name string) (string, bool) {
 
 // constGroup is the set a constant belongs to, if its name is not ambiguous.
 func (idx *tableIndex) constGroup(name string) (string, bool) {
-	decls := idx.consts[name]
-	if len(decls) != 1 {
-		return "", false
-	}
-	return decls[0].Group, true
+	d, ok := idx.constDecl(name)
+	return d.Group, ok
 }
 
 // addSet resolves a written set into sets of constants. A list or a clause
@@ -312,14 +309,26 @@ func (idx *tableIndex) copiedSet(set constSet) string {
 // declaredAfter reports a constant declared in the same file after every
 // one of names: the newest member, the one a copy written before it lacks.
 func (idx *tableIndex) declaredAfter(name string, names []string) bool {
-	last := idx.consts[name][0]
+	last, ok := idx.constDecl(name)
+	if !ok {
+		return false
+	}
 	for _, n := range names {
-		d := idx.consts[n][0]
-		if d.Path != last.Path || d.Line >= last.Line {
+		d, ok := idx.constDecl(n)
+		if !ok || d.Path != last.Path || d.Line >= last.Line {
 			return false
 		}
 	}
 	return true
+}
+
+// constDecl is the declaration of a constant declared once under its name.
+func (idx *tableIndex) constDecl(name string) (valueset.ConstDecl, bool) {
+	decls := idx.consts[name]
+	if len(decls) != 1 {
+		return valueset.ConstDecl{}, false
+	}
+	return decls[0], true
 }
 
 func samePlace(a, b constSet) bool { return a.path == b.path && a.line == b.line }
