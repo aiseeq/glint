@@ -132,17 +132,32 @@ func (r *ReactEffectAsyncWithoutCleanupRule) AnalyzeFile(ctx *core.FileContext) 
 		// An effect with no dependencies, or only ones that never change, runs
 		// once: no newer answer for it to overwrite, and a late one after
 		// unmount is dropped by React.
-		if len(args) >= 2 && runsOnce(f, args[len(args)-1]) {
+		if len(args) >= 2 && (runsOnce(f, args[len(args)-1]) || loadersRunOnce(f, f.enclosingBrace(m[0]), args[len(args)-1])) {
 			continue
 		}
 		body := f.code[args[0].start:args[0].end]
-		if !jsAsyncWork.MatchString(body) || jsEffectCleanup.MatchString(body) {
+		if jsEffectCleanup.MatchString(body) {
 			continue
 		}
 		scope, setter := f.enclosingBrace(m[0]), ""
-		for _, pair := range pairs {
-			if name := f.code[pair[4]:pair[5]]; f.enclosingBrace(pair[0]) == scope && setsAfterLoad(f, scope, args[0].start, body, name) {
-				setter = name
+		// The load is the effect's own, or that of a useCallback loader of
+		// the component the effect calls.
+		loads := []jsSpanRange{args[0]}
+		if !jsAsyncWork.MatchString(body) {
+			loads = callbackLoaders(f, scope, body)
+		}
+		for _, load := range loads {
+			loadBody := f.code[load.start:load.end]
+			if load != args[0] && jsLoaderGuard.MatchString(loadBody) {
+				continue
+			}
+			for _, pair := range pairs {
+				if name := f.code[pair[4]:pair[5]]; f.enclosingBrace(pair[0]) == scope && setsAfterLoad(f, scope, load.start, loadBody, name) {
+					setter = name
+					break
+				}
+			}
+			if setter != "" {
 				break
 			}
 		}
@@ -479,4 +494,62 @@ func calledAfterLoad(f jsFlat, scope, pos int) bool {
 	return strings.Contains(f.code[fn.brace:pos], "await") ||
 		jsThenCallback.MatchString(f.code[max(scope, fn.start-40):fn.brace]) ||
 		strings.Contains(f.code[max(scope, pos-80):pos], ".then(")
+}
+
+var (
+	jsCallName       = regexp.MustCompile(`(?:^|[^\w$.])([A-Za-z_$][\w$]*)\s*\((\s*\))?`)
+	jsCallbackLoader = `\bconst\s+%s\s*=\s*(?:React\s*\.\s*)?useCallback\s*\(\s*async\b`
+	// jsLoaderGuard is what lets a loader drop a late answer: an abort, a
+	// flag, or a request id compared with the latest.
+	jsLoaderGuard = regexp.MustCompile(`AbortController|\bsignal\b|\b(?:cancell?ed|ignore|isActive|active|alive|stale|unsubscribed)\b|(?i:mounted)|[!=]==?\s*[A-Za-z_$][\w$]*\.current\b|\.current\s*[!=]==?`)
+)
+
+// loadersRunOnce reports effect dependencies that are all useCallback
+// loaders of the component whose own dependencies never change: the loaders
+// keep their identity, and the effect runs once.
+func loadersRunOnce(f jsFlat, scope int, deps jsSpanRange) bool {
+	idents := f.arrayIdents(deps)
+	text := f.code[deps.start:deps.end]
+	open, close := deps.start+strings.Index(text, "["), deps.start+strings.LastIndex(text, "]")
+	if len(idents) == 0 || len(idents) != len(f.items(open, close)) {
+		return false
+	}
+	for _, dep := range idents {
+		def := regexp.MustCompile(fmt.Sprintf(jsCallbackLoader, regexp.QuoteMeta(dep.name))).FindStringIndex(f.code)
+		if def == nil || f.enclosingBrace(def[0]) != scope {
+			return false
+		}
+		args := f.callArgs(def[0] + strings.Index(f.code[def[0]:], "("))
+		if len(args) < 2 || !runsOnce(f, args[len(args)-1]) {
+			return false
+		}
+	}
+	return true
+}
+
+// callbackLoaders returns the bodies of the async useCallback functions of
+// the component at scope that an effect body calls: useEffect(() => {
+// loadData() }, [loadData]) loads through them. A loader whose dependencies
+// never change, called with no arguments, asks the same thing every time: a
+// late answer is not one for another key.
+func callbackLoaders(f jsFlat, scope int, body string) []jsSpanRange {
+	var loads []jsSpanRange
+	seen := make(map[string]bool)
+	for _, call := range jsCallName.FindAllStringSubmatch(body, -1) {
+		name, noArgs := call[1], call[2] != ""
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		def := regexp.MustCompile(fmt.Sprintf(jsCallbackLoader, regexp.QuoteMeta(name))).FindStringIndex(f.code)
+		if def == nil || f.enclosingBrace(def[0]) != scope {
+			continue
+		}
+		args := f.callArgs(def[0] + strings.Index(f.code[def[0]:], "("))
+		if len(args) == 0 || (noArgs && len(args) >= 2 && runsOnce(f, args[len(args)-1])) {
+			continue
+		}
+		loads = append(loads, args[0])
+	}
+	return loads
 }

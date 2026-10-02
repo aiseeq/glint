@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"regexp"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -28,6 +29,8 @@ func init() {
 // library arrives quoted through the copy. Use the library's parser
 // (godotenv.Parse / godotenv.Read, gotenv.StrictParse).
 // The shape: a loop over lines that skips "#" comments and splits at "=".
+// In a script or a make recipe, a sed or awk program that turns .env into
+// another env file is the same parser, whatever library the code uses.
 type HandRolledDotenvParserRule struct {
 	*rules.BaseRule
 	// library is the dotenv package some production file of the root imports,
@@ -71,6 +74,9 @@ func (r *HandRolledDotenvParserRule) ResetState() { r.library = "" }
 
 // AnalyzeFile reports the functions of a file that parse .env by hand.
 func (r *HandRolledDotenvParserRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if src, ok := readShell(ctx); ok {
+		return r.shellRewrites(src)
+	}
 	if r.library == "" || !productionGoFile(ctx) {
 		return nil
 	}
@@ -128,4 +134,30 @@ func parsesDotenv(body *ast.BlockStmt) bool {
 		return !found
 	})
 	return found
+}
+
+var (
+	dotenvPath   = regexp.MustCompile(`(?:^|[\s/"'])\.env(?:["'\s;)]|$)`)
+	textFilter   = regexp.MustCompile(`(?:^|[\s|;(])(?:sed|awk|gawk)\s`)
+	inPlaceEdit  = regexp.MustCompile(`\bsed\s+(?:-[a-zA-Z]*i|--in-place)`)
+	dotenvSyntax = regexp.MustCompile(`\^#|="|\\"|'\\''|"'"'"'`)
+)
+
+// shellRewrites reports sed or awk turning .env into another env file: the
+// program strips comments and quotes its own way, and a value with quotes,
+// $ or an inline comment arrives changed. An in-place edit of a key is not
+// a parser.
+func (r *HandRolledDotenvParserRule) shellRewrites(src *shellSource) []*core.Violation {
+	var out []*core.Violation
+	for _, l := range src.lines {
+		for _, seg := range segments(l.text) {
+			if !textFilter.MatchString(seg.text) || inPlaceEdit.MatchString(seg.text) || !dotenvPath.MatchString(seg.text) || !dotenvSyntax.MatchString(seg.text) {
+				continue
+			}
+			out = appendReport(out, src.report(r, l.lineAt(seg.offset),
+				"sed/awk rewrites .env by hand — quotes, export, $ and inline comments come out differently than the shell or a dotenv parser reads them",
+				"Source the file (set -a; . ./.env; set +a) and print the evaluated values, or use a dotenv parser"))
+		}
+	}
+	return out
 }

@@ -222,6 +222,13 @@ func checkCapturedFunctionOutput(r *shellRule, src *shellSource) []*core.Violati
 				}
 			}
 		}
+		if src.ctx.IsTestFile() || strings.HasSuffix(src.ctx.RelPath, "_test.sh") {
+			continue // a test stub prints the output it imitates
+		}
+		for _, line := range src.ownMessages(funcs[name]) {
+			add(line, name+" prints a message on the stdout that carries its data while a caller captures $("+name+") — the message becomes part of the captured value",
+				"Write the message to stderr: printf '...' >&2")
+		}
 	}
 	return out
 }
@@ -349,12 +356,23 @@ var (
 // checkPsqlOnErrorStop reports psql reading a script without ON_ERROR_STOP.
 func checkPsqlOnErrorStop(r *shellRule, src *shellSource) []*core.Violation {
 	setsOnErrorStop := strings.Contains(strings.Join(src.ctx.Lines, "\n"), "ON_ERROR_STOP")
+	commandVars := psqlCommandVariables(src)
+	reportedVars := make(map[string]bool)
 	var out []*core.Violation
 	for _, l := range src.lines {
 		if strings.Contains(l.text, "ON_ERROR_STOP") {
 			continue
 		}
 		for _, seg := range segments(l.text) {
+			if name := expandedCommand(seg.trimmed()); commandVars[name] > 0 && psqlScriptInput.MatchString(seg.text) {
+				if !reportedVars[name] {
+					reportedVars[name] = true
+					out = appendReport(out, src.report(r, commandVars[name],
+						name+" holds a psql command without ON_ERROR_STOP, and $"+name+" runs a script — it goes on after a failed statement and exits 0",
+						"Add -v ON_ERROR_STOP=1 to the command in "+name))
+				}
+				continue
+			}
 			at := psqlCommand.FindStringIndex(seg.text)
 			if at == nil {
 				continue
@@ -380,7 +398,16 @@ var fallbackValue = regexp.MustCompile(`\$\((?:[^()]|\([^()]*\))*\|\|\s*echo\s+"
 // checkFallbackValue reports $(cmd || echo "$other").
 func checkFallbackValue(r *shellRule, src *shellSource) []*core.Violation {
 	var out []*core.Violation
+	funcs := src.functions()
 	for _, l := range src.lines {
+		segs := segments(l.text)
+		for k := 0; k+1 < len(segs); k++ {
+			if segs[k].sep == "||" && droppedStatus(segs[k].trimmed(), segs[k+1].trimmed(), funcs) {
+				out = appendReport(out, src.report(r, l.lineAt(segs[k].offset),
+					"The status of the captured command is dropped with || true — a failed call goes on as an empty value",
+					"Fail when the command fails: x=$(cmd) || { echo 'cmd failed' >&2; exit 1; }"))
+			}
+		}
 		for _, loc := range fallbackValue.FindAllStringIndex(l.text, -1) {
 			out = appendReport(out, src.report(r, l.lineAt(loc[0]),
 				"A failed command is replaced by another variable's value — the failure is not seen and the old value passes for the new",

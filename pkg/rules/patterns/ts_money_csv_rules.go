@@ -90,7 +90,9 @@ func (r *MoneyZeroShownAsOtherFieldRule) AnalyzeFile(ctx *core.FileContext) []*c
 //
 // A spreadsheet runs a cell starting with = as a formula: a user who puts
 // =HYPERLINK(...) into a name field gets it executed on the admin's machine
-// when the export is opened. Prefix such cells with a quote.
+// when the export is opened. Prefix such cells with a quote. In Go,
+// encoding/csv quotes but never neutralizes: a row of a file writing it that
+// takes a free-text field (a name, a description) as is is reported.
 type CSVFormulaInjectionRule struct {
 	*rules.BaseRule
 }
@@ -114,6 +116,9 @@ var (
 
 // AnalyzeFile reports the CSV cell escapers of files without a formula guard.
 func (r *CSVFormulaInjectionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if productionGoFile(ctx) {
+		return r.analyzeGo(ctx)
+	}
 	if !productionFrontendFile(ctx) {
 		return nil
 	}

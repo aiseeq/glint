@@ -30,8 +30,15 @@ func init() {
 // neither is a TypeScript skip with a reason on its line or in the comment
 // right above it: a ticket key, a link, a TODO or the word reason or because. An unconditional t.Skip is reported
 // whatever its message: the test never runs.
+//
+// A test that skips when a variable is empty is reported when a make recipe
+// or a script exists to run it (go test -run TestX) and sets that variable:
+// the dedicated run goes green with the check never made.
 type SkippedTestRule struct {
 	*rules.BaseRule
+	// runs are the go test -run commands of the root's make files and
+	// scripts, with the variables each sets.
+	runs []targetRun
 }
 
 // NewSkippedTestRule creates the rule
@@ -118,6 +125,7 @@ func (r *SkippedTestRule) analyzeGo(ctx *core.FileContext) []*core.Violation {
 	for _, decl := range ctx.GoAST.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
 			violations = append(violations, r.unconditionalSkips(ctx, fn.Body.List)...)
+			violations = append(violations, r.skipsOnProvidedEnv(ctx, fn)...)
 		}
 	}
 	return violations

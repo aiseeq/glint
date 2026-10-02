@@ -294,7 +294,7 @@ func (r *ErrorCauseDroppedRule) analyzeTS(ctx *core.FileContext) []*core.Violati
 // tsDropsCause: the block shows the user a literal message (or rethrows a fresh
 // literal error) and the caught value is not referenced outside logging calls.
 func (r *ErrorCauseDroppedRule) tsDropsCause(block, binding string) bool {
-	if !r.tsFeedback.MatchString(block) && !r.tsMessageProp.MatchString(block) {
+	if !r.tsFeedback.MatchString(block) && !r.tsMessageProp.MatchString(block) && !errorEnvelope(r.withoutLogging(block)) {
 		return false
 	}
 	name := ""
@@ -318,6 +318,37 @@ func (r *ErrorCauseDroppedRule) tsDropsCause(block, binding string) bool {
 		body = body[idx+1:]
 	}
 	return !mentionsBinding(body, name)
+}
+
+// withoutLogging returns the lines of a block that are not logging calls: the
+// fields of a log record ({ error: String(err) }) are not an answer.
+func (r *ErrorCauseDroppedRule) withoutLogging(block string) string {
+	var rest []string
+	for _, l := range strings.Split(block, "\n") {
+		if !r.tsLogging.MatchString(l) {
+			rest = append(rest, l)
+		}
+	}
+	return strings.Join(rest, "\n")
+}
+
+// tsErrorProp is an `error:` property of an object literal: after its '{',
+// a ',' or at the start of a line, so "load error:" in a message and
+// `res.error :` in a ternary are not one.
+var tsErrorProp = regexp.MustCompile(`(?m)(?:[{,]|^)\s*error\s*:\s*([^\s,}]+)`)
+
+// errorEnvelope reports an object built with an error property that carries
+// a value ({ error: response.statusText }): the catch answers its caller with
+// an error of its own making. { error: null } is the absence of one.
+func errorEnvelope(block string) bool {
+	for _, m := range tsErrorProp.FindAllStringSubmatch(block, -1) {
+		switch m[1] {
+		case "null", "undefined", "false", "true", "''", `""`:
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // mentionsBinding reports whether text uses the binding name the way the
