@@ -49,8 +49,12 @@ type Set struct {
 	Go   bool
 	// Switch is a switch's labels: a switch handles some values of a set
 	// and leaves the rest to its default on purpose.
-	Switch  bool
-	Members []string // sorted, unique
+	Switch bool
+	// Exhaustive is a TS switch the compiler holds to its union: no default
+	// in a function that cannot return undefined, or a default assigning the
+	// value to never. A member added to the union breaks the build there.
+	Exhaustive bool
+	Members    []string // sorted, unique
 }
 
 // MinMembers is the least number of members a set needs to be collected: two
@@ -339,6 +343,12 @@ var (
 	jsNumber    = regexp.MustCompile(`^\d+$`)
 	jsScalar    = regexp.MustCompile(`^(?:-?\d[\d_.]*|true|false|null)$`)
 	jsCase      = regexp.MustCompile(`\bcase\s+(` + jsString + `)\s*:`)
+	jsDefault   = regexp.MustCompile(`\bdefault\s*:`)
+	jsNever     = regexp.MustCompile(`:\s*never\b|\bassertNever\s*\(|\bsatisfies\s+never\b`)
+	// jsReturnType is the declared return type at the end of a function
+	// header: function f(...): T {, (...): T => {, method(...): T {.
+	jsReturnType = regexp.MustCompile(`\)\s*:\s*([^{};=]+?)\s*(?:=>\s*)?$`)
+	jsMayBeUndef = regexp.MustCompile(`\b(?:undefined|void|any|unknown)\b|\?\s*$`)
 )
 
 func extractJS(ctx *core.FileContext) []Set {
@@ -406,10 +416,62 @@ func extractJS(ctx *core.FileContext) []Set {
 		}
 		if set, ok := newSet(ctx.RelPath, lineAt(m[0]), "", Keyed, false, labels); ok {
 			set.Switch = true
+			set.Exhaustive = exhaustiveSwitch(code, open, end)
 			sets = append(sets, set)
 		}
 	}
 	return sets
+}
+
+// exhaustiveSwitch reports a switch body code[open:end] the compiler checks
+// for missing cases: its default assigns the value to never, or it has no
+// default, ends the function, and the function's declared return type does
+// not admit undefined - a missing case is then TS2366, a function lacking an
+// ending return.
+func exhaustiveSwitch(code string, open, end int) bool {
+	body := code[open:end]
+	if loc := topLevelDefault(body); loc >= 0 {
+		return jsNever.MatchString(body[loc:])
+	}
+	rest := strings.TrimLeft(code[end+1:], " \t\r\n;")
+	if !strings.HasPrefix(rest, "}") {
+		return false // code after the switch may return what the cases do not
+	}
+	fnClose := len(code) - len(rest)
+	fnOpen := matchingOpen(code, fnClose)
+	if fnOpen < 0 {
+		return false
+	}
+	m := jsReturnType.FindStringSubmatch(code[max(0, fnOpen-maxDeclaration):fnOpen])
+	return m != nil && !jsMayBeUndef.MatchString(m[1])
+}
+
+// topLevelDefault returns the offset of the switch's own default label in its
+// body, -1 when it has none.
+func topLevelDefault(body string) int {
+	for _, loc := range jsDefault.FindAllStringIndex(body, -1) {
+		if braceDepth(body[:loc[0]]) == 1 {
+			return loc[0]
+		}
+	}
+	return -1
+}
+
+// matchingOpen returns the brace that the one at close closes, -1 if none.
+func matchingOpen(code string, close int) int {
+	depth := 0
+	for i := close; i >= 0; i-- {
+		switch code[i] {
+		case '}':
+			depth++
+		case '{':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // maxDeclaration is how far back from a list its declaration is looked for:
