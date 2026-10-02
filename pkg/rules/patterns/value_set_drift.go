@@ -43,11 +43,25 @@ func init() {
 // (variants declared side by side differ on purpose) and shares at least four
 // values and three quarters of the larger set; a list that takes only a part
 // of a set - the terminal statuses - is its own set.
+//
+// Sets written with named constants are compared by the constants: a set of
+// four or more (a list, a case clause, the arguments filling an SQL IN list)
+// copied exactly, and a set one constant short of a set written the same way
+// in two other places, the missing one declared after the others - the
+// constant added there did not reach this copy. A translation table (a map
+// of literals to constants or back, a switch returning one value per case)
+// sharing three or more entries with another one is the same table kept
+// twice. A switch over some constants of a set whose default makes the value
+// up from its input invents a value for every constant added later. A TS
+// union of a property lacks a value the backend assigns to the field of the
+// struct of the same name sent under that JSON name.
 type ValueSetDriftRule struct {
 	*rules.BaseRule
 	// index holds the sets of the root under analysis; the check flow sets it
 	// before it analyzes any file and resets it between roots.
 	index *valueset.Index
+	// tables holds the root's sets and tables of named constants.
+	tables *tableIndex
 }
 
 // NewValueSetDriftRule creates the rule
@@ -63,10 +77,11 @@ func NewValueSetDriftRule() *ValueSetDriftRule {
 // UseProjectFiles indexes the sets of every file of the root.
 func (r *ValueSetDriftRule) UseProjectFiles(files []*core.FileContext) {
 	r.index = valueset.IndexFiles(files)
+	r.tables = newTableIndex(files)
 }
 
 // ResetState drops the sets of the previous root.
-func (r *ValueSetDriftRule) ResetState() { r.index = nil }
+func (r *ValueSetDriftRule) ResetState() { r.index, r.tables = nil, nil }
 
 type setMatch struct {
 	other  valueset.Set
@@ -79,7 +94,7 @@ func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	if ctx.ProjectRoot == "" || ctx.IsTestFile() || ctx.IsGenerated() || isE2EPath(ctx.RelPath) {
 		return nil
 	}
-	if r.index == nil {
+	if r.index == nil || r.tables == nil {
 		v := r.CreateViolation(ctx.RelPath, 1, "The project's files were not handed to the rule, so value sets were not compared")
 		v.Severity = core.SeverityCritical
 		return []*core.Violation{v}
@@ -94,6 +109,15 @@ func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 		v := r.CreateViolation(ctx.RelPath, set.Line, valueSetMessage(set, match))
 		v.WithCode(strings.TrimSpace(ctx.GetLine(set.Line)))
 		v.WithSuggestion("Keep one source of the set - the declared type, a shared constant list, a generated contract - and derive the others from it")
+		violations = append(violations, v)
+	}
+	for _, f := range r.tables.tableFindings(ctx.RelPath) {
+		if ctx.IsSuppressed(f.line, r.Name()) {
+			continue
+		}
+		v := r.CreateViolation(ctx.RelPath, f.line, f.message)
+		v.WithCode(strings.TrimSpace(ctx.GetLine(f.line)))
+		v.WithSuggestion("Keep one source of the set or table - a shared list, map or function the other places call - and derive the others from it")
 		violations = append(violations, v)
 	}
 	return violations

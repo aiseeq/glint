@@ -220,14 +220,40 @@ func (c *Config) ConfigFiles() ([]string, error) {
 		return nil, nil
 	}
 	dir := filepath.Dir(c.path)
+	// Files git ignores are not analyzed (respect_gitignore), so an exception
+	// naming one suppresses nothing in any checkout; leaving them out keeps
+	// the verdict the same in a clean clone and in a tree with local files.
+	var ignore *gitignoreIndex
+	if c.RespectGitignore() {
+		idx, err := newGitignoreIndex(dir)
+		if err != nil {
+			return nil, fmt.Errorf("load gitignore patterns for the configuration's directory %q: %w", dir, err)
+		}
+		ignore = idx
+	}
 	var files []string
 	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+		if ignore != nil && path != dir {
+			skip, err := ignore.ignored(path, entry.IsDir())
+			if err != nil {
+				return err
+			}
+			if skip && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			if skip {
+				return nil
+			}
+		}
 		if entry.IsDir() {
 			if path != dir && (entry.Name() == ".git" || slices.Contains(c.SkipDirs(), entry.Name())) {
 				return filepath.SkipDir
+			}
+			if ignore != nil {
+				return ignore.addDir(path)
 			}
 			return nil
 		}
