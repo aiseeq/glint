@@ -34,6 +34,9 @@ type Schema struct {
 	// pending holds the ALTERs of tables not created yet, applied when a
 	// later migration creates the table.
 	pending map[string][]*pgquery.AlterTableStmt
+	// stampFuncs are the trigger functions that set a column of the new row
+	// to the current time (NEW.updated_at = NOW()), by function name.
+	stampFuncs map[string]string
 	// file and text are the migration being applied.
 	file, text string
 }
@@ -62,6 +65,9 @@ type Table struct {
 	// foreign are the columns of each named foreign key constraint, to undo
 	// the references when a migration drops it.
 	foreign map[string][]string
+	// stamped is the column a BEFORE UPDATE trigger sets to the current time
+	// on every update of a row, "" for none.
+	stamped string
 }
 
 // partialKey is a unique index with a WHERE: no two rows the predicate
@@ -364,6 +370,10 @@ func (s *Schema) apply(stmt *pgquery.Node) {
 	case stmt.GetCreateTableAsStmt() != nil:
 		name := strings.ToLower(stmt.GetCreateTableAsStmt().GetInto().GetRel().GetRelname())
 		s.tables[name] = &Table{Name: name, View: true}
+	case stmt.GetCreateFunctionStmt() != nil:
+		s.function(stmt.GetCreateFunctionStmt())
+	case stmt.GetCreateTrigStmt() != nil:
+		s.trigger(stmt.GetCreateTrigStmt())
 	}
 }
 

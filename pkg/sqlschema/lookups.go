@@ -107,25 +107,48 @@ func SelfComparisons(sql string) []int {
 // at its own level: aliases, or table names; not those inside subqueries.
 func levelAliases(from []*pgquery.Node) map[string]bool {
 	aliases := make(map[string]bool)
+	for name := range levelTables(from) {
+		if name != "" {
+			aliases[name] = true
+		}
+	}
+	return aliases
+}
+
+// levelTables returns the tables of a FROM list by the names its own level
+// knows them by - the alias, or the table name - not those inside
+// subqueries; "" names the only relation of a list that has one, which an
+// unqualified column belongs to.
+func levelTables(from []*pgquery.Node) map[string]string {
+	tables := make(map[string]string)
+	relations := 0
 	var visit func(node *pgquery.Node)
 	visit = func(node *pgquery.Node) {
 		switch {
 		case node.GetRangeVar() != nil:
+			relations++
 			rv := node.GetRangeVar()
+			name := strings.ToLower(rv.GetRelname())
 			if rv.GetAlias() != nil {
-				aliases[strings.ToLower(rv.GetAlias().GetAliasname())] = true
+				tables[strings.ToLower(rv.GetAlias().GetAliasname())] = name
 			} else {
-				aliases[strings.ToLower(rv.GetRelname())] = true
+				tables[name] = name
 			}
+			tables[""] = name
 		case node.GetJoinExpr() != nil:
 			visit(node.GetJoinExpr().GetLarg())
 			visit(node.GetJoinExpr().GetRarg())
+		case node.GetRangeSubselect() != nil, node.GetRangeFunction() != nil:
+			relations++
 		}
 	}
 	for _, item := range from {
 		visit(item)
 	}
-	return aliases
+	if relations != 1 {
+		delete(tables, "")
+	}
+	return tables
 }
 
 // joinQuals returns the ON conditions of the joins of a FROM item.
