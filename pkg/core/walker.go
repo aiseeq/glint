@@ -41,7 +41,8 @@ type WalkerStats struct {
 
 // NewWalker creates a new file walker
 func NewWalker(projectRoot string, config *Config) *Walker {
-	workers := runtime.NumCPU()
+	// The run's thread limit (glint --jobs sets GOMAXPROCS), not the CPU count.
+	workers := runtime.GOMAXPROCS(0)
 	if workers < 1 {
 		workers = 1
 	}

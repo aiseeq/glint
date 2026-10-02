@@ -3,8 +3,11 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/fix"
@@ -285,5 +288,25 @@ func TestLoadConfigRejectsUnknownNames(t *testing.T) {
 				t.Fatal("the configuration must be rejected")
 			}
 		})
+	}
+}
+
+// A run takes four threads unless told otherwise: the machine is shared with
+// other jobs, and every CPU at once slows them down for little gain.
+func TestJobsDefaultsToFourAndRejectsZero(t *testing.T) {
+	for _, cmd := range []*cobra.Command{checkCmd, fixCmd} {
+		if def := cmd.Flags().Lookup("jobs").DefValue; def != "4" {
+			t.Fatalf("%s --jobs default = %s, want 4", cmd.Name(), def)
+		}
+	}
+	prev := flagJobs
+	t.Cleanup(func() { flagJobs = prev; runtime.GOMAXPROCS(runtime.NumCPU()) })
+	flagJobs = 0
+	if err := applyJobs(); err == nil {
+		t.Fatal("--jobs 0 must be an error")
+	}
+	flagJobs = 3
+	if err := applyJobs(); err != nil || runtime.GOMAXPROCS(0) != 3 {
+		t.Fatalf("--jobs 3 must set GOMAXPROCS to 3, got %d, %v", runtime.GOMAXPROCS(0), err)
 	}
 }
