@@ -97,3 +97,26 @@ categories:
 	assert.Equal(t, "renamedAway", dead[1].Exception.Function)
 	assert.True(t, dead[1].NoFunction)
 }
+
+// A file git ignores is not analyzed, so an exception naming it suppresses
+// nothing in any checkout: the files of the configuration leave it out.
+func TestConfigFilesLeaveOutGitignoredFiles(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".glint.yaml"), []byte("version: 1\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("keys/\n*.local.go\n"), 0o644))
+	for _, dir := range []string{"keys", "app"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "app/.gitignore"), []byte("scratch.go\n"), 0o644))
+	for _, file := range []string{"keys/README.md", "app/main.go", "app/dev.local.go", "app/scratch.go"} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, file), nil, 0o644))
+	}
+	cfg, err := LoadConfigWithDefaults(root)
+	require.NoError(t, err)
+	files, err := cfg.ConfigFiles()
+	require.NoError(t, err)
+	assert.Contains(t, files, "app/main.go")
+	assert.NotContains(t, files, "keys/README.md")
+	assert.NotContains(t, files, "app/dev.local.go")
+	assert.NotContains(t, files, "app/scratch.go")
+}
