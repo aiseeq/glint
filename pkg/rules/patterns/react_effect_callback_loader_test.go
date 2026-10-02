@@ -57,8 +57,41 @@ func TestReactEffectAsyncWithoutCleanupCallbackLoader(t *testing.T) {
     setRates(res)
   }, [portfolioId])
   useEffect(() => { void loadWallets() }, [loadWallets])
+  const loadBalances = useCallback(async () => {
+    if (!isAuthenticated) return
+    const res = await api.getBalances()
+    setRates(res)
+  }, [isAuthenticated])
+  useEffect(() => { void loadBalances() }, [loadBalances])
+  const persist = useCallback(async () => {
+    await api.recordConsent({ version: pending.version })
+    setRates([])
+  }, [user?.email])
+  useEffect(() => { void persist() }, [persist])
+  const loadPage = useCallback(async () => {
+    const offset = (page - 1) * size
+    const res = await api.getItems({ offset, status })
+    setRates(res)
+  }, [page, status])
+  useEffect(() => { void loadPage() }, [loadPage])
   return null
 }
 `
-	assert.Equal(t, []int{9, 16}, reportedLines(t, NewReactEffectAsyncWithoutCleanupRule(), "app/investments/page.tsx", source))
+	assert.Equal(t, []int{9, 16, 64}, reportedLines(t, NewReactEffectAsyncWithoutCleanupRule(), "app/investments/page.tsx", source))
+}
+
+// A dependency that reaches the request only inside a template literal still
+// makes the loader ask for something else when it changes.
+func TestReactEffectAsyncWithoutCleanupLoaderTemplateURL(t *testing.T) {
+	source := `export default function Invoice() {
+  const [invoice, setInvoice] = useState(null)
+  const loadInvoice = useCallback(async () => {
+    const res = await fetch(` + "`/api/invoices/${invoiceId}`" + `)
+    setInvoice(await res.json())
+  }, [invoiceId])
+  useEffect(() => { void loadInvoice() }, [loadInvoice])
+  return null
+}
+`
+	assert.Equal(t, []int{7}, reportedLines(t, NewReactEffectAsyncWithoutCleanupRule(), "app/invoice/page.tsx", source))
 }
