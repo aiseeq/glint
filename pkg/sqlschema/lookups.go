@@ -490,6 +490,26 @@ func UpdatesOnConflict(sql string) bool {
 	return conflict != nil && conflict.GetAction() == pgquery.OnConflictAction_ONCONFLICT_UPDATE
 }
 
+// ColumnMostlyOfType reports a column name that more than half of the tables
+// holding it give the type typ: an id column that is uuid in most tables.
+func (s *Schema) ColumnMostlyOfType(name, typ string) bool {
+	if s == nil {
+		return false
+	}
+	match, total := 0, 0
+	for _, table := range s.tables {
+		column := table.Column(name)
+		if column == nil || table.View {
+			continue
+		}
+		total++
+		if column.Type == typ {
+			match++
+		}
+	}
+	return match*2 > total
+}
+
 // ColumnTypes returns the types the tables of the schema give a column of
 // that name.
 func (s *Schema) ColumnTypes(name string) []string {
