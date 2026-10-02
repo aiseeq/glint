@@ -320,6 +320,75 @@ func even(parts []string) map[string]decimal.Decimal {
 	assert.Equal(t, []int{16, 39, 42}, violationLines(violations))
 }
 
+// A divisor returned by a parser that rejects zero is not zero: the function
+// returns the value only after checking it, every other return carries an
+// error, and a wrapper hands its result on. The divisor of a parser without
+// that check is reported.
+func TestDecimalDivUnguardedCheckedByCallee(t *testing.T) {
+	project := decimalProject(t, map[string]string{
+		"rates/parse.go": `package rates
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/shopspring/decimal"
+)
+
+func parseRate(value string) (decimal.Decimal, error) {
+	rate, err := decimal.NewFromString(value)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+	if !rate.IsPositive() {
+		return decimal.Decimal{}, errors.New("rate must be positive")
+	}
+	return rate, nil
+}
+
+func parseQuoted(value string) (decimal.Decimal, error) {
+	rate, err := parseRate(strings.TrimSpace(value))
+	if err != nil {
+		return decimal.Decimal{}, fmt.Errorf("parse quoted: %w", err)
+	}
+	return rate, nil
+}
+
+func parseLoose(value string) (decimal.Decimal, error) {
+	return decimal.NewFromString(value)
+}
+
+func Cross(base, target string) (decimal.Decimal, error) {
+	baseRate, err := parseQuoted(base)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+	targetRate, err := parseQuoted(target)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+	return targetRate.Div(baseRate), nil
+}
+
+func LooseCross(base, target string) (decimal.Decimal, error) {
+	baseRate, err := parseLoose(base)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+	targetRate, err := parseLoose(target)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+	return targetRate.Div(baseRate), nil
+}
+`,
+	})
+	violations, err := NewDecimalDivUnguardedRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Equal(t, []int{55}, violationLines(violations))
+}
+
 func TestMoneyIntegerDivisionTruncates(t *testing.T) {
 	project := decimalProject(t, map[string]string{
 		"chain/amounts.go": `package chain
