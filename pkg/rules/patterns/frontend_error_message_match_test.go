@@ -83,3 +83,37 @@ func TestFrontendErrorMessageMatchErrorName(t *testing.T) {
 		}
 	}
 }
+
+// A helper's first parameter holds a message only when the first argument
+// carries one: a message passed further along the argument list does not make
+// the first argument, and what is read from it, an error message.
+func TestFrontendErrorMessageMatch_MessageInLaterArgument(t *testing.T) {
+	const source = `function bodyError(response: Response, text: string, reason: string): Error {
+  return new Error(response.status + text + reason)
+}
+
+export async function readBody(response: Response) {
+  const text = await response.text()
+  try {
+    return JSON.parse(text)
+  } catch (parseError) {
+    throw bodyError(response, text, parseError instanceof Error ? parseError.message : String(parseError))
+  }
+}
+
+export function appendCode(text: string, code: string): string {
+  if (text.endsWith(code)) return text
+  return text + ' ' + code
+}
+
+function describe(msg: string): string {
+  if (msg.includes('expired')) return 'Code expired'
+  return msg
+}
+
+export function show(err: Error, code: string) {
+  return describe(err.message) + appendCode('x', code)
+}
+`
+	assert.Equal(t, []int{20}, frontendErrorMessageLines(t, "web/src/lib/body.ts", source))
+}

@@ -190,7 +190,7 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, messageOf *r
 				if texts[param] || !strings.Contains(line, helper) {
 					continue
 				}
-				if m := calls[helper].FindStringSubmatch(line); m != nil && carries(m[1]) {
+				if m := calls[helper].FindStringSubmatch(line); m != nil && carries(firstArgument(m[1])) {
 					texts[param] = true
 					changed = true
 				}
@@ -198,6 +198,38 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, messageOf *r
 		}
 	}
 	return mapKeys(texts)
+}
+
+// firstArgument returns the first argument of an argument list: the text up
+// to the first comma outside brackets, quotes and template literals. Only the
+// first argument lands in the helper's first parameter.
+func firstArgument(args string) string {
+	depth := 0
+	var quote byte
+	for i := 0; i < len(args); i++ {
+		c := args[i]
+		switch {
+		case quote != 0:
+			switch c {
+			case '\\':
+				i++
+			case quote:
+				quote = 0
+			}
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case c == '(' || c == '[' || c == '{':
+			depth++
+		case c == ')' || c == ']' || c == '}':
+			if depth == 0 {
+				return args[:i]
+			}
+			depth--
+		case c == ',' && depth == 0:
+			return args[:i]
+		}
+	}
+	return args
 }
 
 // alternation joins names into a regular expression alternation.
