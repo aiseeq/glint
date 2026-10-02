@@ -33,7 +33,8 @@ func init() {
 // production-сборки, и сообщение это называет отдельно.
 //
 // Методы не проверяются: они могут закрывать интерфейсы. Интерфейсные типы —
-// зона orphaned-interface.
+// зона orphaned-interface. Пакет, чьи файлы импортируют testing, существует для
+// тестов, и его экспорт, нужный только тестам, — его назначение.
 //
 // Outside internal/ an export may serve another module, so only an
 // initializer (Init*, Setup*, Configure*, Register*) that tests call and
@@ -88,6 +89,11 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	for _, pkgCtx := range ctx.Packages {
 		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
 			return nil, errors.New("unused internal export: package has no typed syntax")
+		}
+		// A package whose own files import "testing" exists for tests:
+		// production code cannot use it, so tests are its intended callers.
+		if _, testSupport := pkgCtx.Package.Imports["testing"]; testSupport {
+			continue
 		}
 		internal := isInternalPackage(pkgCtx.Package.PkgPath)
 		for _, fileCtx := range pkgCtx.Files {

@@ -246,3 +246,50 @@ func TestHelpers(t *testing.T) {
 	assert.Contains(t, violations[0].Message, "InitErrorConfig")
 	assert.Equal(t, 10, violations[0].Line)
 }
+
+// A package whose own files import "testing" exists for tests: production code
+// cannot use it, so an export only tests call is its purpose, not dead code.
+// The same export in an ordinary package is still reported.
+func TestUnusedInternalExportRule_SkipsTestSupportPackage(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
+		"internal/dbhelp/dbhelp.go": `package dbhelp
+
+import "testing"
+
+// DSN returns the database a test runs against.
+func DSN(t testing.TB) string {
+	t.Helper()
+	return "postgres://localhost/test"
+}
+`,
+		"internal/plain/plain.go": `package plain
+
+// Address is used by tests only.
+func Address() string { return "localhost" }
+`,
+		"internal/store/store_test.go": `package store
+
+import (
+	"testing"
+
+	"example.com/rulestest/internal/dbhelp"
+	"example.com/rulestest/internal/plain"
+)
+
+func TestStore(t *testing.T) {
+	_ = dbhelp.DSN(t)
+	_ = plain.Address()
+}
+`,
+		"internal/store/store.go": "package store\n",
+	})
+
+	violations, err := NewUnusedInternalExportRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var symbols []string
+	for _, v := range violations {
+		symbols = append(symbols, v.Context["symbol"].(string))
+	}
+	assert.Equal(t, []string{"Address"}, symbols)
+}

@@ -20,8 +20,8 @@ func init() {
 // constructor (New*, Create*) for a pointer or interface parameter named like
 // a dependency (logger, service, repo, manager, deps, ...), or such a field of
 // a struct literal. The nil may be written as nil or (*T)(nil), or come
-// through a local variable that holds nothing else. In a test file only a
-// constructor that stores the nil without checking it is reported.
+// through a local variable that holds nothing else. Test files are not
+// checked: a nil that crashes a test fails that test.
 type NilDIRule struct {
 	*rules.BaseRule
 }

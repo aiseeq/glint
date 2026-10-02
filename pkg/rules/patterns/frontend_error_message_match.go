@@ -35,7 +35,6 @@ func init() {
 type FrontendErrorMessageMatchRule struct {
 	*rules.BaseRule
 	catchParam  *regexp.Regexp
-	errorName   *regexp.Regexp
 	declaration *regexp.Regexp
 	function    *regexp.Regexp
 }
@@ -50,7 +49,6 @@ func NewFrontendErrorMessageMatchRule() *FrontendErrorMessageMatchRule {
 			core.SeverityMedium,
 		),
 		catchParam:  regexp.MustCompile(`\bcatch\s*\(\s*([A-Za-z_$][\w$]*)|\.catch\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)|\bon[A-Z]\w*Error\w*\s*[:=]\s*\(?\s*([A-Za-z_$][\w$]*)|\bon[Ee]rror\s*[:=]\s*\(?\s*([A-Za-z_$][\w$]*)`),
-		errorName:   regexp.MustCompile(`^(?:e|err|error|\w*Err|\w*Error)$`),
 		declaration: regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(.+)$`),
 		function:    regexp.MustCompile(`\bfunction\s+([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)|\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(\s*([A-Za-z_$][\w$]*)`),
 	}
@@ -82,6 +80,9 @@ func (r *FrontendErrorMessageMatchRule) AnalyzeFile(ctx *core.FileContext) []*co
 
 	var violations []*core.Violation
 	for i, line := range code {
+		if !mayTestText(line) {
+			continue
+		}
 		// typeof x === 'string' tests the kind of value, not its wording.
 		line = typeofOperand.ReplaceAllString(line, "")
 		if !match.MatchString(line) || ctx.IsSuppressed(i+1, r.Name()) {
@@ -97,6 +98,34 @@ func (r *FrontendErrorMessageMatchRule) AnalyzeFile(ctx *core.FileContext) []*co
 
 var typeofOperand = regexp.MustCompile(`\btypeof\s+[A-Za-z_$][\w$.]*`)
 
+// textTests are the words every form the rule matches contains: a string
+// method, a comparison, a regular expression's test.
+var textTests = []string{"includes", "startsWith", "endsWith", "indexOf", "match", "search", "==", "!=", "test"}
+
+// mayTestText is the cheap filter in front of the per-file expression: a line
+// without any of textTests cannot match it.
+func mayTestText(line string) bool {
+	for _, word := range textTests {
+		if strings.Contains(line, word) {
+			return true
+		}
+	}
+	return false
+}
+
+// jsWord is one JS identifier inside a line.
+var jsWord = regexp.MustCompile(`[A-Za-z_$][\w$]*`)
+
+// isErrorName reports a name errors go by: e, err, error, or a name ending in
+// Err or Error. A name with $ is not one: $ is no word character.
+func isErrorName(name string) bool {
+	switch name {
+	case "e", "err", "error":
+		return true
+	}
+	return !strings.Contains(name, "$") && (strings.HasSuffix(name, "Err") || strings.HasSuffix(name, "Error"))
+}
+
 // errorNames returns the names errors go by in the file: catch parameters,
 // onError callback parameters, and every name ending in err or error.
 func (r *FrontendErrorMessageMatchRule) errorNames(code []string) []string {
@@ -108,15 +137,14 @@ func (r *FrontendErrorMessageMatchRule) errorNames(code []string) []string {
 			names = append(names, name)
 		}
 	}
-	identifier := regexp.MustCompile(`[A-Za-z_$][\w$]*`)
 	for _, line := range code {
 		for _, m := range r.catchParam.FindAllStringSubmatch(line, -1) {
 			for _, name := range m[1:] {
 				add(name)
 			}
 		}
-		for _, name := range identifier.FindAllString(line, -1) {
-			if r.errorName.MatchString(name) {
+		for _, name := range jsWord.FindAllString(line, -1) {
+			if isErrorName(name) {
 				add(name)
 			}
 		}
@@ -139,6 +167,11 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, messageOf *r
 			}
 		}
 	}
+	// Each helper call is matched by an expression compiled once per file.
+	calls := make(map[string]*regexp.Regexp, len(helperParams))
+	for helper := range helperParams {
+		calls[helper] = regexp.MustCompile(`\b` + regexp.QuoteMeta(helper) + `\s*\(([^;]*)`)
+	}
 	for changed := true; changed; {
 		changed = false
 		var holds *regexp.Regexp
@@ -154,11 +187,10 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, messageOf *r
 				changed = true
 			}
 			for helper, param := range helperParams {
-				if texts[param] {
+				if texts[param] || !strings.Contains(line, helper) {
 					continue
 				}
-				call := regexp.MustCompile(`\b` + regexp.QuoteMeta(helper) + `\s*\(([^;]*)`)
-				if m := call.FindStringSubmatch(line); m != nil && carries(m[1]) {
+				if m := calls[helper].FindStringSubmatch(line); m != nil && carries(m[1]) {
 					texts[param] = true
 					changed = true
 				}

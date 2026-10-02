@@ -59,7 +59,7 @@ const (
 // CLI flags
 var (
 	flagCategory    string
-	flagRule        string
+	flagRules       []string
 	flagMinSeverity string
 	flagOutput      string
 	flagVerbose     bool
@@ -70,9 +70,9 @@ var (
 	flagCPUProfile  string
 	flagNoCache     bool
 	// Fix command flags
-	flagDryRun  bool
-	flagForce   bool
-	flagFixRule string
+	flagDryRun   bool
+	flagForce    bool
+	flagFixRules []string
 )
 
 // timings collects per-phase and per-rule durations under --timing; nil (the
@@ -169,7 +169,7 @@ Available fixers:
 func init() {
 	// Check command flags
 	checkCmd.Flags().StringVarP(&flagCategory, "category", "c", "", "Run only specified category")
-	checkCmd.Flags().StringVarP(&flagRule, "rule", "r", "", "Run only specified rule")
+	checkCmd.Flags().StringSliceVarP(&flagRules, "rule", "r", nil, "Run only the specified rules (repeat the flag or separate names with commas)")
 	checkCmd.Flags().StringVarP(&flagMinSeverity, "min-severity", "s", "", "Minimum severity (low, medium, high, critical)")
 	// Empty default: a non-empty one would be indistinguishable from an
 	// explicit -o and would override settings.output from the config.
@@ -192,7 +192,7 @@ func init() {
 	// Fix command flags
 	fixCmd.Flags().BoolVar(&flagDryRun, "dry-run", true, "Show what would be fixed without applying (default: true)")
 	fixCmd.Flags().BoolVar(&flagForce, "force", false, "Apply fixes even with uncommitted changes")
-	fixCmd.Flags().StringVarP(&flagFixRule, "rule", "r", "", "Fix only specified rule")
+	fixCmd.Flags().StringSliceVarP(&flagFixRules, "rule", "r", nil, "Fix only the specified rules (repeat the flag or separate names with commas)")
 	fixCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed output")
 	fixCmd.Flags().BoolVar(&flagTolerant, "tolerate-broken-packages", false, "Fix the packages that type-check and report the ones that do not, instead of failing")
 
@@ -505,15 +505,17 @@ func getEnabledRules(cfg *core.Config) ([]rules.Rule, error) {
 		}
 	}
 
-	if flagRule != "" {
-		rule, ok := rules.Get(flagRule)
-		if !ok {
-			return nil, fmt.Errorf("unknown rule %q; run 'glint rules' to list them", flagRule)
+	if len(flagRules) > 0 {
+		requested, err := requestedRules(flagRules)
+		if err != nil {
+			return nil, err
 		}
 		if flagDebug {
-			fmt.Printf("DEBUG: Found rule %s in category %s\n", rule.Name(), rule.Category())
+			for _, rule := range requested {
+				fmt.Printf("DEBUG: Found rule %s in category %s\n", rule.Name(), rule.Category())
+			}
 		}
-		enabledRules = []rules.Rule{rule}
+		enabledRules = requested
 	}
 
 	if flagVerbose {
@@ -521,6 +523,23 @@ func getEnabledRules(cfg *core.Config) ([]rules.Rule, error) {
 	}
 
 	return enabledRules, nil
+}
+
+// requestedRules resolves the --rule names, each once, in the order given.
+func requestedRules(names []string) ([]rules.Rule, error) {
+	var requested []rules.Rule
+	seen := make(map[string]bool)
+	for _, name := range names {
+		rule, ok := rules.Get(name)
+		if !ok {
+			return nil, fmt.Errorf("unknown rule %q; run 'glint rules' to list them", name)
+		}
+		if !seen[name] {
+			seen[name] = true
+			requested = append(requested, rule)
+		}
+	}
+	return requested, nil
 }
 
 func walkWithWalker(walker *core.Walker) ([]*core.FileContext, *core.Walker, error) {
@@ -1136,10 +1155,8 @@ func runFix(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	if flagFixRule != "" {
-		if _, ok := rules.Get(flagFixRule); !ok {
-			return fmt.Errorf("unknown rule %q; run 'glint rules' to list them", flagFixRule)
-		}
+	if _, err := requestedRules(flagFixRules); err != nil {
+		return err
 	}
 
 	for _, projectRoot := range projectRoots {
@@ -1185,7 +1202,7 @@ func fixProjectRoot(projectRoot string) error {
 	// Filter to only rules that have fixers
 	var fixableRules []rules.Rule
 	for _, r := range enabledRules {
-		if flagFixRule != "" && r.Name() != flagFixRule {
+		if len(flagFixRules) > 0 && !slices.Contains(flagFixRules, r.Name()) {
 			continue
 		}
 		if _, ok := fix.DefaultRegistry.Get(r.Name()); ok {
@@ -1194,8 +1211,8 @@ func fixProjectRoot(projectRoot string) error {
 	}
 
 	if len(fixableRules) == 0 {
-		if flagFixRule != "" {
-			fmt.Printf("No fixer available for rule: %s\n", flagFixRule)
+		if len(flagFixRules) > 0 {
+			fmt.Printf("No fixer available for rules: %s\n", strings.Join(flagFixRules, ", "))
 		} else {
 			fmt.Println("No fixable rules enabled.")
 		}
