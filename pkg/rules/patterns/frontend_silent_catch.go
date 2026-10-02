@@ -35,7 +35,7 @@ func NewFrontendSilentCatchRule() *FrontendSilentCatchRule {
 		),
 		catchStart:       regexp.MustCompile(`\bcatch\b(?:\s*\([^)]*\))?\s*\{`),
 		loggerCall:       regexp.MustCompile(`\b(?:console|logger)\.error\s*\(`),
-		userFeedbackCall: regexp.MustCompile(`\b(?:set[A-Za-z0-9_]*(?:Error|Errors|Failed|Failure|Message|Notice|Alert|Toast|Status)|toast\.|showToast\s*\(|alert\s*\(|throw\b|Promise\.reject\s*\()`),
+		userFeedbackCall: regexp.MustCompile(`\b(?:set[A-Za-z0-9_]*(?:Error|Errors|Failed|Failure|Message|Notice|Alert|Toast|Status)|toast\.|showToast\s*\(|alert\s*\(|throw\b|Promise\.reject\s*\(|\bon[A-Za-z0-9_]*(?:Error|Failure|Failed|Fail)\s*\()`),
 	}
 }
 

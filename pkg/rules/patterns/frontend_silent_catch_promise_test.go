@@ -63,3 +63,24 @@ func TestFrontendSilentCatchPromiseErrorState(t *testing.T) {
 	ctx := core.NewFileContext("frontend/src/card.tsx", ".", []byte(code), nil)
 	assert.Empty(t, NewFrontendSilentCatchRule().AnalyzeFile(ctx))
 }
+
+// A hook that hands the failure to its caller's error callback (onError,
+// onLoadError, onFailure) shows it wherever the caller does.
+func TestFrontendSilentCatchPromiseCallerErrorCallback(t *testing.T) {
+	code := `export function useRecord(load: (id: string) => Promise<Rec>, onError: (message: string) => void, onLoadFailure: () => void) {
+  useEffect(() => {
+    let cancelled = false
+    load(id).then(setRec).catch((err: unknown) => {
+      console.error('load failed:', err)
+      if (!cancelled) onError(err instanceof Error ? err.message : String(err))
+    })
+    load(other).catch(err => {
+      console.error('other failed:', err)
+      onLoadFailure()
+    })
+    return () => { cancelled = true }
+  }, [id])
+}`
+	ctx := core.NewFileContext("frontend/src/use-record.ts", ".", []byte(code), nil)
+	assert.Empty(t, NewFrontendSilentCatchRule().AnalyzeFile(ctx))
+}

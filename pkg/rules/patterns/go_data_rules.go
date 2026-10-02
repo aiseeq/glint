@@ -921,7 +921,11 @@ func (r *SQLQuoteEscapedByHandRule) analyze(ctx *core.FileContext, info *types.I
 //
 // The column the metric was computed from went away and the query keeps
 // answering: every client reads a real-looking zero return. A UNION branch
-// that fills a column the other branch has is left out.
+// that fills a column the other branch has is left out. The Go form is a
+// money local that stays at its zero and still enters a calculation:
+//
+//	totalLiabilities := models.MoneyZero()
+//	nav := gav.Sub(totalLiabilities)
 type SQLMetricLiteralZeroRule struct {
 	*rules.BaseRule
 }
@@ -956,11 +960,16 @@ func (r *SQLMetricLiteralZeroRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
 }
 
-func (r *SQLMetricLiteralZeroRule) analyze(ctx *core.FileContext, _ *types.Info) []*core.Violation {
+func (r *SQLMetricLiteralZeroRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !productionGoFile(ctx) {
 		return nil
 	}
 	var violations []*core.Violation
+	for _, local := range zeroMetricPlaceholders(ctx.GoAST, info) {
+		violations = jsReport(violations, r.BaseRule, ctx, ctx.LineFor(local),
+			"Metric "+local.Name+" stays at its zero and still enters the calculation — the result is stored as if the amount had been computed",
+			"Compute the amount, or leave the field out until it can be computed")
+	}
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		lit, ok := n.(*ast.BasicLit)
 		if !ok {
