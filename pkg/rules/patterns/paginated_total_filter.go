@@ -65,12 +65,16 @@ func handMappedFilters(pkg *core.GoPackageContext) map[*core.FileContext][]handM
 	// A helper maps a source when it reads three of its items and another
 	// function hands it that source.
 	helpers := make(map[*types.Func]filterMapping)
+	bySource := make(map[filterSource][]filterMapping)
+	for _, m := range mappings {
+		bySource[m.source] = append(bySource[m.source], m)
+	}
 	for _, m := range mappings {
 		obj, ok := info.Defs[m.fn.Name].(*types.Func)
 		if !ok || len(distinctItems(m.items)) < 3 {
 			continue
 		}
-		for _, other := range mappings {
+		for _, other := range bySource[m.source] {
 			if other.fn != m.fn && other.source == m.source && other.helpers[obj] {
 				helpers[obj] = m
 				break
