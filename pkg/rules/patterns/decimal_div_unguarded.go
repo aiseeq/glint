@@ -214,7 +214,13 @@ func (s divisorSite) nonZero(expr ast.Expr, depth int) bool {
 			return false
 		}
 		for _, value := range values {
-			if !s.nonZero(value, depth-1) {
+			if value.call != nil {
+				if !s.nonZeroResult(value.call, value.result, depth-1) {
+					return false
+				}
+				continue
+			}
+			if !s.nonZero(value.expr, depth-1) {
 				return false
 			}
 		}
@@ -235,15 +241,20 @@ func (s divisorSite) nonZero(expr ast.Expr, depth int) bool {
 		}
 		return len(values) > 0
 	case *ast.CallExpr:
-		return s.nonZeroCall(e, depth)
+		return s.nonZeroResult(e, 0, depth)
 	}
 	return false
 }
 
-// nonZeroCall judges a divisor that is a call: a conversion, max with a
+// nonZeroResult judges result index of a call: a conversion, max with a
 // positive constant, decimal's constructors and arithmetic, a project
-// function whose every return is non-zero.
-func (s divisorSite) nonZeroCall(call *ast.CallExpr, depth int) bool {
+// function whose every successful return is non-zero there.
+func (s divisorSite) nonZeroResult(call *ast.CallExpr, index, depth int) bool {
+	if index > 0 {
+		callee := staticFunc(s.info, call)
+		site, ok := s.index.funcs[callee]
+		return ok && callee != nil && site.returnsNonZero(index, depth-1)
+	}
 	if tv, ok := s.info.Types[call.Fun]; ok && tv.IsType() && len(call.Args) == 1 {
 		return s.nonZero(call.Args[0], depth)
 	}
@@ -288,12 +299,28 @@ func (s divisorSite) nonZeroCall(call *ast.CallExpr, depth int) bool {
 	if !ok {
 		return false
 	}
-	return site.returnsNonZero(depth - 1)
+	return site.returnsNonZero(0, depth-1)
 }
 
-// returnsNonZero reports a function whose every return statement returns a
-// non-zero first value.
-func (s divisorSite) returnsNonZero(depth int) bool {
+// staticFunc returns the function a call names, nil for anything else.
+func staticFunc(info *types.Info, call *ast.CallExpr) *types.Func {
+	switch fun := ast.Unparen(call.Fun).(type) {
+	case *ast.Ident:
+		callee, _ := info.Uses[fun].(*types.Func)
+		return callee
+	case *ast.SelectorExpr:
+		callee, _ := info.Uses[fun.Sel].(*types.Func)
+		return callee
+	}
+	return nil
+}
+
+// returnsNonZero reports a function whose every successful return statement
+// returns a non-zero value at result index: a non-zero expression, a value
+// the function compared before returning it, or the same result of a call
+// that returns non-zero. A return that hands back a zero value together with
+// an error is the failure path, which the caller handles through the error.
+func (s divisorSite) returnsNonZero(index, depth int) bool {
 	returns := 0
 	nonZero := true
 	ast.Inspect(s.fn.Body, func(n ast.Node) bool {
@@ -305,18 +332,50 @@ func (s divisorSite) returnsNonZero(depth int) bool {
 			return true
 		}
 		returns++
-		nonZero = nonZero && len(ret.Results) > 0 && s.nonZero(ret.Results[0], depth)
+		switch {
+		case len(ret.Results) == 1 && index > 0:
+			call, isCall := ast.Unparen(ret.Results[0]).(*ast.CallExpr)
+			nonZero = isCall && s.nonZeroResult(call, index, depth)
+		case index >= len(ret.Results):
+			nonZero = false
+		case s.failureReturn(ret, index):
+		default:
+			value := ret.Results[index]
+			nonZero = s.nonZero(value, depth) || (identOf(value) != nil && divisorChecked(s.fn, s.info, value, ret))
+		}
 		return nonZero
 	})
 	return returns > 0 && nonZero
+}
+
+// failureReturn reports a return of the zero value at index together with an
+// error that is not nil: the failure path.
+func (s divisorSite) failureReturn(ret *ast.ReturnStmt, index int) bool {
+	last := ret.Results[len(ret.Results)-1]
+	if len(ret.Results) < 2 || index == len(ret.Results)-1 || !isErrorType(s.info.TypeOf(last)) {
+		return false
+	}
+	if ident, ok := last.(*ast.Ident); ok && ident.Name == "nil" {
+		return false
+	}
+	lit, ok := ast.Unparen(ret.Results[index]).(*ast.CompositeLit)
+	return ok && len(lit.Elts) == 0
+}
+
+// divisorLocal is a value a local variable is given: an expression, or,
+// when call is set, its result number result.
+type divisorLocal struct {
+	expr   ast.Expr
+	call   *ast.CallExpr
+	result int
 }
 
 // localValues returns every value a local variable is given: its
 // definition and each later assignment. ok is false when one of them is not
 // a plain single value - the zero value of a bare declaration, one result of
 // a call, a compound assignment - or the variable's address is taken.
-func localValues(fn *ast.FuncDecl, info *types.Info, v *types.Var) ([]ast.Expr, bool) {
-	var values []ast.Expr
+func localValues(fn *ast.FuncDecl, info *types.Info, v *types.Var) ([]divisorLocal, bool) {
+	var values []divisorLocal
 	ok := true
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -326,11 +385,21 @@ func localValues(fn *ast.FuncDecl, info *types.Info, v *types.Var) ([]ast.Expr, 
 				if !isIdent || (info.Defs[ident] != v && info.Uses[ident] != v) {
 					continue
 				}
-				if len(node.Lhs) != len(node.Rhs) || (node.Tok != token.DEFINE && node.Tok != token.ASSIGN) {
+				if node.Tok != token.DEFINE && node.Tok != token.ASSIGN {
 					ok = false
 					continue
 				}
-				values = append(values, node.Rhs[i])
+				if len(node.Lhs) != len(node.Rhs) {
+					// x, err := f(): result i of the call.
+					call, isCall := node.Rhs[0].(*ast.CallExpr)
+					if len(node.Rhs) != 1 || !isCall {
+						ok = false
+						continue
+					}
+					values = append(values, divisorLocal{call: call, result: i})
+					continue
+				}
+				values = append(values, divisorLocal{expr: node.Rhs[i]})
 			}
 		case *ast.ValueSpec:
 			for i, name := range node.Names {
@@ -341,7 +410,7 @@ func localValues(fn *ast.FuncDecl, info *types.Info, v *types.Var) ([]ast.Expr, 
 					ok = false
 					continue
 				}
-				values = append(values, node.Values[i])
+				values = append(values, divisorLocal{expr: node.Values[i]})
 			}
 		case *ast.UnaryExpr:
 			if ident, isIdent := node.X.(*ast.Ident); isIdent && node.Op == token.AND && info.Uses[ident] == v {
@@ -392,7 +461,7 @@ func (s divisorSite) divisionHelperParam(divisor ast.Expr) bool {
 // divisorChecked reports a comparison of the divisor, or of a local value it
 // was built from, anywhere in the function before the division, or a
 // division by the length of a collection inside a loop over it.
-func divisorChecked(fn *ast.FuncDecl, info *types.Info, divisor ast.Expr, division *ast.CallExpr) bool {
+func divisorChecked(fn *ast.FuncDecl, info *types.Info, divisor ast.Expr, division ast.Node) bool {
 	sources := divisorSources(fn, info, divisor)
 	if insideRangeOver(fn, division, sources.lengths) {
 		return true
@@ -440,7 +509,7 @@ func divisorChecked(fn *ast.FuncDecl, info *types.Info, divisor ast.Expr, divisi
 // insideRangeOver reports a division inside a range loop over one of the
 // collections whose length the divisor holds: the loop body runs only when
 // the collection has elements.
-func insideRangeOver(fn *ast.FuncDecl, division *ast.CallExpr, collections map[string]bool) bool {
+func insideRangeOver(fn *ast.FuncDecl, division ast.Node, collections map[string]bool) bool {
 	if len(collections) == 0 {
 		return false
 	}
