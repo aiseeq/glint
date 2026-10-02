@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/types"
 	"reflect"
+	"regexp"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -34,7 +35,9 @@ var configTags = []string{"yaml", "toml", "mapstructure", "env", "ini"}
 // the loader accepts it without complaint, and nothing changes. The failure is
 // silent by construction — there is no error to see and no behaviour to notice.
 //
-// Only types that are actually decoded are examined: the rule follows the types
+// A json payload field is left out, except a bool that flags the item unsafe
+// or invalid (is_scam, failed): decoding it and never reading it lets the
+// flagged items through. Only types that are actually decoded are examined: the rule follows the types
 // reaching a decoder (Unmarshal, Decode, env Parse/Process and the like, taking
 // the target as an untyped value) through their fields. A field only written —
 // a default in a composite literal, an assignment — is still unused: the value
@@ -151,6 +154,9 @@ func collectTaggedFields(fileCtx *core.FileContext, info *types.Info, decoded, e
 			}
 			key, value, ok := configTag(field.Tag.Value)
 			if !ok {
+				key, value, ok = safetyFlagTag(field)
+			}
+			if !ok {
 				continue
 			}
 			for _, name := range field.Names {
@@ -182,6 +188,29 @@ func declaredNamedType(spec *ast.TypeSpec, info *types.Info) (*types.Named, bool
 	}
 	named, ok := obj.Type().(*types.Named)
 	return named, ok
+}
+
+// safetyFlag names a payload flag that marks an item unsafe or invalid: an
+// item carrying it must not be taken as a valid one.
+var safetyFlag = regexp.MustCompile(`(?i)^(?:is_?)?(?:scam|spam|suspicious|phishing|fraud|malicious|honeypot|blacklisted|blocked|failed|reverted|deleted)$`)
+
+// safetyFlagTag returns the json tag of a bool payload field that flags the
+// item unsafe or invalid (is_scam, failed, reverted). Payload fields are left
+// out of the rule, but a decoded safety flag nobody reads lets the flagged
+// items through as valid ones.
+func safetyFlagTag(field *ast.Field) (key, value string, ok bool) {
+	if typ, isIdent := field.Type.(*ast.Ident); !isIdent || typ.Name != "bool" {
+		return "", "", false
+	}
+	content, found := reflect.StructTag(strings.Trim(field.Tag.Value, "`")).Lookup("json")
+	if !found {
+		return "", "", false
+	}
+	value = strings.Split(content, ",")[0]
+	if !safetyFlag.MatchString(value) {
+		return "", "", false
+	}
+	return "json", value, true
 }
 
 // configTag returns the first configuration tag of the raw tag literal.

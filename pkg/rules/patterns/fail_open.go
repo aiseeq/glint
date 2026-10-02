@@ -29,7 +29,9 @@ func init() {
 // true on an error or on a missing dependency; a middleware that passes the
 // request on when its own check failed; an error branch that answers with a
 // success response. The gate opens exactly when the check is broken, and the
-// log line, if any, does not close it.
+// log line, if any, does not close it. A middleware that passes a request
+// without the restricting context value on unchecked, or runs its check only
+// when the body was read and decoded, opens the same gate.
 type FailOpenRule struct {
 	*rules.BaseRule
 }
@@ -78,6 +80,7 @@ func (r *FailOpenRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	forEachFunction(ctx.GoAST, func(name string, ftype *ast.FuncType, body *ast.BlockStmt) {
 		permissive := returnsSingleBool(ftype) && isPermissivePredicate(name)
 		receiver := receivers[body]
+		violations = append(violations, r.middlewareChecks(ctx, body)...)
 		forEachOwnStatement(body, func(stmt ast.Stmt) {
 			ifStmt, ok := stmt.(*ast.IfStmt)
 			if !ok {

@@ -41,6 +41,10 @@ type fieldAccess struct {
 	// encoder, following their fields.
 	decoded map[*types.Named]bool
 	encoded map[*types.Named]bool
+	// decoderWrappers are the functions that hand an untyped parameter to a
+	// decoder (get(path string, out any) { ... Decode(out) }), with the
+	// indexes of those parameters.
+	decoderWrappers map[*types.Func][]int
 }
 
 func newFieldAccess() *fieldAccess {
@@ -53,6 +57,8 @@ func newFieldAccess() *fieldAccess {
 		hashed:       make(map[token.Pos]bool),
 		decoded:      make(map[*types.Named]bool),
 		encoded:      make(map[*types.Named]bool),
+
+		decoderWrappers: make(map[*types.Func][]int),
 	}
 }
 
@@ -76,10 +82,66 @@ func collectProjectFieldAccess(ctx *core.GoProjectContext) (*fieldAccess, error)
 			return nil, errors.New("package has no typed syntax")
 		}
 		for _, file := range pkg.Package.Syntax {
+			access.findDecoderWrappers(file, pkg.Package.TypesInfo)
+		}
+	}
+	for _, pkg := range ctx.Packages {
+		for _, file := range pkg.Package.Syntax {
 			access.collect(file, pkg.Package.TypesInfo)
 		}
 	}
 	return access, nil
+}
+
+// findDecoderWrappers records the functions of a file whose untyped
+// parameter goes straight into a decoder call.
+func (a *fieldAccess) findDecoderWrappers(file *ast.File, info *types.Info) {
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		obj, ok := info.Defs[fn.Name].(*types.Func)
+		if !ok {
+			continue
+		}
+		untyped := make(map[types.Object]int)
+		index := 0
+		for _, field := range fn.Type.Params.List {
+			names := field.Names
+			if len(names) == 0 {
+				index++
+				continue
+			}
+			for _, name := range names {
+				if param := info.Defs[name]; param != nil && isEmptyInterface(param.Type()) {
+					untyped[param] = index
+				}
+				index++
+			}
+		}
+		if len(untyped) == 0 {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			callee := calledFunc(call, info)
+			if callee == nil || !slices.Contains(decodeFuncs, callee.Name()) {
+				return true
+			}
+			for _, arg := range call.Args {
+				if id, ok := ast.Unparen(arg).(*ast.Ident); ok {
+					if i, found := untyped[info.Uses[id]]; found && !slices.Contains(a.decoderWrappers[obj], i) {
+						a.decoderWrappers[obj] = append(a.decoderWrappers[obj], i)
+					}
+				}
+			}
+			return true
+		})
+	}
 }
 
 // collect records the field accesses of one file in a single pass.
@@ -325,6 +387,14 @@ var decodeFuncs = []string{
 func (a *fieldAccess) serialization(call *ast.CallExpr, info *types.Info) {
 	fn := calledFunc(call, info)
 	if fn == nil {
+		return
+	}
+	if params, ok := a.decoderWrappers[fn.Origin()]; ok {
+		for _, i := range params {
+			if i < len(call.Args) {
+				addReachableStructs(a.decoded, info.TypeOf(call.Args[i]))
+			}
+		}
 		return
 	}
 	var target map[*types.Named]bool

@@ -33,7 +33,8 @@ func init() {
 // the second takes a missing setting for development and skips the
 // restriction. Both fail open on configuration that is absent. List where the
 // dangerous operation is allowed (test, development) and refuse otherwise;
-// treat an empty setting as an error.
+// treat an empty setting as an error. An access predicate that answers true
+// for an empty allowlist read from the environment fails open the same way.
 type EnvironmentCheckFailsOpenRule struct {
 	*rules.BaseRule
 }
@@ -68,6 +69,14 @@ func (r *EnvironmentCheckFailsOpenRule) AnalyzeFile(ctx *core.FileContext) []*co
 		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
 		v.WithSuggestion(suggestion)
 		violations = append(violations, v)
+	}
+	for _, decl := range ctx.GoAST.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			for _, stmt := range emptyAllowlistPasses(ctx.GoAST, fn) {
+				report(stmt, "The predicate answers yes when its allowlist is empty — a deploy without the setting lets everybody through",
+					"Answer no for an empty allowlist, and refuse to start when the setting is missing")
+			}
+		}
 	}
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		stmt, ok := n.(*ast.IfStmt)

@@ -36,6 +36,9 @@ func init() {
 // зона orphaned-interface. Пакет, чьи файлы импортируют testing, существует для
 // тестов, и его экспорт, нужный только тестам, — его назначение.
 //
+// A main package cannot be imported either, and its exports are judged the
+// same way.
+//
 // Outside internal/ an export may serve another module, so only an
 // initializer (Init*, Setup*, Configure*, Register*) that tests call and
 // production code does not is reported: production runs without it, and what
@@ -72,6 +75,8 @@ type exportUsage struct {
 	// initializer marks a candidate outside internal/: reported only when
 	// tests, and nothing else, call it.
 	initializer bool
+	// mainPackage marks a candidate of a main package.
+	mainPackage bool
 }
 
 // AnalyzeGoProject collects the exported symbols the analyzed files of
@@ -95,7 +100,10 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 		if _, testSupport := pkgCtx.Package.Imports["testing"]; testSupport {
 			continue
 		}
-		internal := isInternalPackage(pkgCtx.Package.PkgPath)
+		// Nothing imports a main package either: its exports serve the
+		// package alone, like those of an internal one.
+		mainPackage := pkgCtx.Package.Name == "main"
+		internal := isInternalPackage(pkgCtx.Package.PkgPath) || mainPackage
 		for _, fileCtx := range pkgCtx.Files {
 			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
 				continue
@@ -108,6 +116,7 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 					}
 					usage.initializer = true
 				}
+				usage.mainPackage = mainPackage
 				candidates[usage.object] = usage
 				byFile[fileCtx] = append(byFile[fileCtx], usage)
 			}
@@ -187,8 +196,16 @@ func (r *UnusedInternalExportRule) violationFor(ctx *core.GoProjectContext, usag
 	name := usage.object.Name()
 	message := "Exported " + usage.kind + " '" + name + "' in internal package is never used — the internal/ boundary makes it dead code"
 	suggestion := "Remove the " + usage.kind + " — internal/ packages cannot be imported from outside the module"
+	if usage.mainPackage {
+		message = "Exported " + usage.kind + " '" + name + "' in a main package is never used — nothing can import a main package"
+		suggestion = "Remove the " + usage.kind + ", or use it where it was meant to take effect"
+	}
 	if usage.testUses > 0 {
-		message = "Exported " + usage.kind + " '" + name + "' in internal package is used only by tests — production code never touches it"
+		where := "internal package"
+		if usage.mainPackage {
+			where = "main package"
+		}
+		message = "Exported " + usage.kind + " '" + name + "' in " + where + " is used only by tests — production code never touches it"
 		suggestion = "Remove the " + usage.kind + " together with its tests, or use it from production code"
 	}
 	if usage.initializer {

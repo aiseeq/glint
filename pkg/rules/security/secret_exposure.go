@@ -60,6 +60,9 @@ var credentialWord = regexp.MustCompile(`(?i)(?:key|secret|token|signature|passw
 
 // AnalyzeFile reports the credentials a Go file writes out.
 func (r *SecretExposureRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if ctx.IsShellFile() || ctx.IsMakefile() {
+		return r.shellSecretPrints(ctx)
+	}
 	if !ctx.HasGoAST() || ctx.IsTestFile() {
 		return nil
 	}
