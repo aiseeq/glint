@@ -38,7 +38,10 @@ repository: commits come from `git log`/`git show`, trees from `git archive`.
    the commit removed or added. Commits are replayed oldest first into the
    same directories, so the result cache serves the files that did not change;
    the run can be stopped and resumed. `packages_skipped` counts the packages
-   of the tree that did not type-check: typed rules are silent in them.
+   of the tree that did not type-check: typed rules are silent in them. A
+   module whose go.mod replaces a dependency with a path into a sibling
+   repository needs `--sibling NAME=REPO`: the sibling is extracted, as it was
+   at the date of the tree, to where the replace points.
 
    The same script accepts new rules: given a manifest (`.tsv`, one
    `commit kind rule[,rule...] [@path:line] [whole-tree]` per line — the
