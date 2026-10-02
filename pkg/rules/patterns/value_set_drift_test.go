@@ -194,3 +194,44 @@ export const RETRY_METHODS = ['GET', 'HEAD', 'OPTIONS']
 	}
 	assert.Empty(t, foundLines(valueSetDriftFindings(t, files)))
 }
+
+// A switch the compiler holds to its union is not a copy kept by hand: with no
+// default in a function that cannot return undefined, or with a default that
+// assigns the value to never, a member added to the list breaks the build.
+// A switch the compiler does not check is still a copy.
+func TestValueSetDriftExhaustiveSwitch(t *testing.T) {
+	files := map[string]string{
+		"web/src/sort.ts": `const SORT_KEYS = ['value', 'income', 'opened'] as const
+type SortKey = typeof SORT_KEYS[number]
+
+export function sortValue(key: SortKey, row: { value: number; income: number }): number | null {
+  switch (key) {
+    case 'value': return row.value
+    case 'income': return row.income
+    case 'opened': return null
+  }
+}
+
+export const sortLabel = (key: SortKey) => {
+  switch (key) {
+    case 'value': return 'Value'
+    case 'income': return 'Income'
+    case 'opened': return 'Opened'
+    default: {
+      const unreachable: never = key
+      throw new Error(String(unreachable))
+    }
+  }
+}
+
+export function logSort(key: SortKey): void {
+  switch (key) { // want value-set-drift
+    case 'value': console.log(1); break
+    case 'income': console.log(2); break
+    case 'opened': console.log(3); break
+  }
+}
+`,
+	}
+	assert.Equal(t, wantedLines(files, "value-set-drift"), foundLines(valueSetDriftFindings(t, files)))
+}

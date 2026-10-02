@@ -38,7 +38,8 @@ func init() {
 // compared with each other - two label maps overlap on common words as often
 // as they share a domain - and an object typed Record<Union, V> is kept to
 // the union by the compiler. A switch counts only as an exact copy: it
-// leaves values to its default on purpose. A drifted copy is in another file
+// leaves values to its default on purpose; and a switch the compiler checks
+// for missing cases is held to its union, not kept by hand. A drifted copy is in another file
 // (variants declared side by side differ on purpose) and shares at least four
 // values and three quarters of the larger set; a list that takes only a part
 // of a set - the terminal statuses - is its own set.
@@ -124,6 +125,8 @@ func bestMatch(idx *valueset.Index, set valueset.Set) (setMatch, bool) {
 			}
 		case set.Kind == valueset.Enum:
 			continue // the list copying it is reported
+		case set.Exhaustive || other.Exhaustive:
+			continue // the compiler holds the switch to its union
 		case same:
 			// A list repeating another: a copy kept by hand. A label or a
 			// handler for each value of a set is not a copy, and a list
