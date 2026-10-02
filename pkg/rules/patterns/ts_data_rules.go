@@ -1,6 +1,9 @@
 package patterns
 
 import (
+	"go/ast"
+	"go/token"
+	"go/types"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -421,7 +424,7 @@ func NewDefaultInventsDomainValueRule() *DefaultInventsDomainValueRule {
 	return &DefaultInventsDomainValueRule{BaseRule: rules.NewBaseRule(
 		"default-invents-domain-value",
 		"patterns",
-		"Detects a missing network, currency or money field replaced with a made-up value in frontend code",
+		"Detects a missing network, currency or money field replaced with a made-up value in frontend code, and an unknown variant kept with a made-up domain value in a Go switch default",
 		core.SeverityMedium,
 	)}
 }
@@ -465,6 +468,11 @@ func moneyFieldZeroed(line string) bool {
 
 // AnalyzeFile reports the invented domain values.
 func (r *DefaultInventsDomainValueRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if ctx.HasGoAST() {
+		return analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
+			return r.checkGoSwitchDefaults(ctx, fn)
+		})
+	}
 	if !productionFrontendFile(ctx) {
 		return nil
 	}
@@ -482,6 +490,107 @@ func (r *DefaultInventsDomainValueRule) AnalyzeFile(ctx *core.FileContext) []*co
 		}
 	}
 	return violations
+}
+
+// checkGoSwitchDefaults reports a switch over a field of external data
+// whose cases are string literals (the source's vocabulary) and whose default
+// keeps the record with a domain constant made up for it:
+//
+//	switch action.Type {
+//	case "TonTransfer": ...
+//	default:
+//	    tx.Direction = model.DirectionOut // an unknown event becomes an outgoing transfer
+//	}
+//
+// A constant naming the unknown (DirectionUnknown, KindOther) is a visible
+// label and is left alone; so is a default that leaves the flow.
+func (r *DefaultInventsDomainValueRule) checkGoSwitchDefaults(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+	var violations []*core.Violation
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		sw, ok := n.(*ast.SwitchStmt)
+		if !ok {
+			return true
+		}
+		if _, ok := sw.Tag.(*ast.SelectorExpr); !ok {
+			return true
+		}
+		def := literalSwitchDefault(sw)
+		if def == nil {
+			return true
+		}
+		for _, stmt := range def.Body {
+			if _, ok := stmt.(*ast.ReturnStmt); ok {
+				return true
+			}
+			if _, ok := stmt.(*ast.BranchStmt); ok {
+				return true
+			}
+		}
+		for _, stmt := range def.Body {
+			assign, ok := stmt.(*ast.AssignStmt)
+			if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+				continue
+			}
+			if _, ok := assign.Lhs[0].(*ast.SelectorExpr); !ok {
+				continue
+			}
+			value, ok := assign.Rhs[0].(*ast.SelectorExpr)
+			if !ok || namesMissingValue(value.Sel.Name) {
+				continue
+			}
+			if _, ok := value.X.(*ast.Ident); !ok {
+				continue
+			}
+			line := ctx.LineFor(assign)
+			v := r.CreateViolation(ctx.RelPath, line,
+				"Unknown variant kept with a made-up "+types.ExprString(assign.Lhs[0])+" - a value the source did not send passes for a known one")
+			v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+			v.WithSuggestion("Skip or reject the unknown variant, or store it with a value that says unknown")
+			violations = append(violations, v)
+		}
+		return true
+	})
+	return violations
+}
+
+// literalSwitchDefault returns the default clause of a switch whose other
+// cases are all string literals.
+func literalSwitchDefault(sw *ast.SwitchStmt) *ast.CaseClause {
+	var def *ast.CaseClause
+	cases := 0
+	for _, stmt := range sw.Body.List {
+		clause, ok := stmt.(*ast.CaseClause)
+		if !ok {
+			return nil
+		}
+		if clause.List == nil {
+			def = clause
+			continue
+		}
+		for _, expr := range clause.List {
+			lit, ok := expr.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return nil
+			}
+		}
+		cases++
+	}
+	if cases == 0 {
+		return nil
+	}
+	return def
+}
+
+// namesMissingValue reports a constant whose name says the value is not
+// known: DirectionUnknown, KindOther.
+func namesMissingValue(name string) bool {
+	for _, word := range helpers.IdentifierWords(name) {
+		switch strings.ToLower(word) {
+		case "unknown", "other", "unclassified", "unsupported", "none", "unspecified":
+			return true
+		}
+	}
+	return false
 }
 
 // MissingAmountCoercedToZeroRule detects a parser of untyped input that

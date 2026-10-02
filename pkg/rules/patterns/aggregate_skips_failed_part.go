@@ -34,10 +34,19 @@ func init() {
 // a range over a literal list or a package variable holding one; a loop over
 // rows or request items, where skipping a bad one is a decision about the
 // data, is left alone.
+//
+// The same partial answer has other shapes, reported in any function with an
+// error result: a failed source logged with its share left out of the total
+// (if err != nil { log } else { total = total.Add(...) }), a failed item
+// counted as skipped, errors returned only when every item failed, and a
+// slice of results carrying an Error field handed out with a nil error by a
+// function that never reads the field.
 type AggregateSkipsFailedPartRule struct {
 	*rules.BaseRule
 	// lists maps a directory to its package variables holding a literal list.
 	lists map[string]map[string]bool
+	// errorStructs are the project's struct types with an Error string field.
+	errorStructs map[string]bool
 }
 
 // NewAggregateSkipsFailedPartRule creates the rule
@@ -45,7 +54,7 @@ func NewAggregateSkipsFailedPartRule() *AggregateSkipsFailedPartRule {
 	return &AggregateSkipsFailedPartRule{BaseRule: rules.NewBaseRule(
 		"aggregate-skips-failed-part",
 		"patterns",
-		"Detects a loop over a fixed list (currencies, networks) that logs a failed load and continues, then returns the sum or collection as complete",
+		"Detects a failed part left out of a total returned as complete: a fixed list's item logged and skipped, a failed source logged, a failure counted as skipped, errors returned only when all failed, results with an unread Error field",
 		core.SeverityHigh,
 	)}
 }
@@ -53,9 +62,13 @@ func NewAggregateSkipsFailedPartRule() *AggregateSkipsFailedPartRule {
 // UseProjectFiles collects the package variables holding literal lists.
 func (r *AggregateSkipsFailedPartRule) UseProjectFiles(files []*core.FileContext) {
 	r.lists = make(map[string]map[string]bool)
+	r.errorStructs = make(map[string]bool)
 	for _, ctx := range files {
 		if !ctx.IsGoFile() || !ctx.HasGoAST() {
 			continue
+		}
+		for _, name := range errorFieldStructs(ctx.GoAST) {
+			r.errorStructs[name] = true
 		}
 		dir := filepath.Dir(ctx.Path)
 		for _, name := range literalListVars(ctx.GoAST) {
@@ -91,7 +104,7 @@ func literalListVars(file *ast.File) []string {
 }
 
 // ResetState drops the lists of the previous root.
-func (r *AggregateSkipsFailedPartRule) ResetState() { r.lists = nil }
+func (r *AggregateSkipsFailedPartRule) ResetState() { r.lists, r.errorStructs = nil, nil }
 
 // literalList reports a slice or array literal of literals and constants.
 func literalList(expr ast.Expr) bool {
@@ -124,6 +137,7 @@ func (r *AggregateSkipsFailedPartRule) AnalyzeFile(ctx *core.FileContext) []*cor
 	lists := r.lists[filepath.Dir(ctx.Path)]
 	var violations []*core.Violation
 	for _, body := range errorFunctions(ctx.GoAST) {
+		violations = append(violations, r.partialChecks(ctx, body)...)
 		ast.Inspect(body, func(n ast.Node) bool {
 			if _, nested := n.(*ast.FuncLit); nested {
 				return false // checked with its own results

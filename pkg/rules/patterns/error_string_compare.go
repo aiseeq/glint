@@ -4,9 +4,11 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -59,15 +61,23 @@ func (r *ErrorStringCompareRule) analyze(ctx *core.FileContext, info *types.Info
 	var violations []*core.Violation
 
 	for _, decl := range ctx.GoAST.Decls {
-		texts := errorTextLocals(decl, info, inferrer)
+		texts := errorMessageParams(decl, info)
+		stored := storedTextLocals(decl, info, errorMessageParams(decl, info))
+		errorTextLocals(decl, info, inferrer, texts)
 		isErrorString := func(expr ast.Expr) bool { return isErrorText(expr, info, inferrer, texts) }
-		violations = append(violations, r.inspect(ctx, decl, isErrorString)...)
+		// A stored message tested against a named marker the program writes
+		// itself (strings.HasPrefix(*rec.Error, warningPrefix)) reads its own
+		// encoding, not a provider's wording.
+		ownMarker := func(call *ast.CallExpr) bool {
+			return len(call.Args) == 2 && isStoredText(call.Args[0], info, stored) && !isStringLiteral(call.Args[1])
+		}
+		violations = append(violations, r.inspect(ctx, decl, isErrorString, ownMarker)...)
 	}
 	return violations
 }
 
 // inspect reports the comparisons of error text in one declaration.
-func (r *ErrorStringCompareRule) inspect(ctx *core.FileContext, decl ast.Decl, isErrorString func(ast.Expr) bool) []*core.Violation {
+func (r *ErrorStringCompareRule) inspect(ctx *core.FileContext, decl ast.Decl, isErrorString func(ast.Expr) bool, ownMarker func(*ast.CallExpr) bool) []*core.Violation {
 	var violations []*core.Violation
 	ast.Inspect(decl, func(n ast.Node) bool {
 		// Check for err.Error() == "string" or strings.Contains(err.Error(), "...")
@@ -100,7 +110,7 @@ func (r *ErrorStringCompareRule) inspect(ctx *core.FileContext, decl ast.Decl, i
 
 		case *ast.CallExpr:
 			// Check strings.Contains(err.Error(), "...")
-			if r.isStringsContainsErrorCall(node, isErrorString) {
+			if r.isStringsContainsErrorCall(node, isErrorString) && !ownMarker(node) {
 				pos := ctx.PositionFor(node)
 				v := r.CreateViolation(ctx.RelPath, pos.Line,
 					"Using strings.Contains on error message; fragile and may break")
@@ -145,6 +155,12 @@ func isErrorText(expr ast.Expr, info *types.Info, inferrer *TypeInferrer, texts 
 	if isErrorStringCall(expr, info, inferrer) {
 		return true
 	}
+	if star, ok := expr.(*ast.StarExpr); ok {
+		return isErrorText(star.X, info, inferrer, texts)
+	}
+	if sel, ok := expr.(*ast.SelectorExpr); ok {
+		return isStoredErrorField(sel, info)
+	}
 	if ident, ok := expr.(*ast.Ident); ok {
 		return texts[localKey(ident, info)]
 	}
@@ -172,10 +188,111 @@ func localKey(ident *ast.Ident, info *types.Info) any {
 	return ident.Name
 }
 
-// errorTextLocals returns the variables of a declaration assigned the text of
-// an error, in the order the declaration assigns them.
-func errorTextLocals(decl ast.Decl, info *types.Info, inferrer *TypeInferrer) map[any]bool {
+// storedErrorFields name a field that keeps the message of a failure as data.
+var storedErrorFields = map[string]bool{
+	"Error": true, "ErrorMessage": true, "ErrorMsg": true, "ErrMsg": true, "ErrorText": true, "LastError": true,
+}
+
+// isStoredErrorField reports a string field keeping an error message
+// (rec.Error of type *string): the selector is not a method value, and with
+// type information its type is string or *string.
+func isStoredErrorField(sel *ast.SelectorExpr, info *types.Info) bool {
+	if !storedErrorFields[sel.Sel.Name] {
+		return false
+	}
+	if info == nil {
+		return true
+	}
+	selection := info.Selections[sel]
+	if selection == nil || selection.Kind() != types.FieldVal {
+		return false
+	}
+	return isStringOrPointer(selection.Type())
+}
+
+func isStringOrPointer(typ types.Type) bool {
+	if ptr, ok := typ.Underlying().(*types.Pointer); ok {
+		typ = ptr.Elem()
+	}
+	basic, ok := typ.Underlying().(*types.Basic)
+	return ok && basic.Kind() == types.String
+}
+
+// isStoredText reports the text of a stored error message: a field kept as
+// data (*rec.Error), a message parameter, a local assigned from either, or
+// any of them lowered or trimmed.
+func isStoredText(expr ast.Expr, info *types.Info, stored map[any]bool) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.StarExpr:
+		return isStoredText(e.X, info, stored)
+	case *ast.SelectorExpr:
+		return isStoredErrorField(e, info)
+	case *ast.Ident:
+		return stored[localKey(e, info)]
+	case *ast.CallExpr:
+		sel, ok := e.Fun.(*ast.SelectorExpr)
+		if !ok || len(e.Args) == 0 || !isIdentNamed(sel.X, "strings") || !errorTextNormalizers[sel.Sel.Name] {
+			return false
+		}
+		return isStoredText(e.Args[0], info, stored)
+	}
+	return false
+}
+
+// storedTextLocals adds to stored the locals assigned a stored message.
+func storedTextLocals(decl ast.Decl, info *types.Info, stored map[any]bool) map[any]bool {
+	ast.Inspect(decl, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != len(assign.Rhs) {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			if ident, ok := lhs.(*ast.Ident); ok && ident.Name != "_" && isStoredText(assign.Rhs[i], info, stored) {
+				stored[localKey(ident, info)] = true
+			}
+		}
+		return true
+	})
+	return stored
+}
+
+func isStringLiteral(expr ast.Expr) bool {
+	lit, ok := ast.Unparen(expr).(*ast.BasicLit)
+	return ok && lit.Kind == token.STRING
+}
+
+// errorMessageParams returns the string parameters of a predicate about an
+// error (isTransientSyncError(message *string)): what it gets is the text of
+// a failure.
+func errorMessageParams(decl ast.Decl, info *types.Info) map[any]bool {
 	texts := make(map[any]bool)
+	fn, ok := decl.(*ast.FuncDecl)
+	if !ok || !isPredicateName(fn.Name.Name) {
+		return texts
+	}
+	// The predicate is about an error: isTransientSyncError. isErrorVarName
+	// is about a name.
+	if words := helpers.IdentifierWords(fn.Name.Name); !strings.EqualFold(words[len(words)-1], "error") {
+		return texts
+	}
+	for _, field := range fn.Type.Params.List {
+		typ := field.Type
+		if star, ok := typ.(*ast.StarExpr); ok {
+			typ = star.X
+		}
+		if ident, ok := typ.(*ast.Ident); !ok || ident.Name != "string" {
+			continue
+		}
+		for _, name := range field.Names {
+			texts[localKey(name, info)] = true
+		}
+	}
+	return texts
+}
+
+// errorTextLocals adds to texts the variables of a declaration assigned the
+// text of an error, in the order the declaration assigns them.
+func errorTextLocals(decl ast.Decl, info *types.Info, inferrer *TypeInferrer, texts map[any]bool) {
 	ast.Inspect(decl, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
 		if !ok || len(assign.Lhs) != len(assign.Rhs) {
@@ -189,7 +306,6 @@ func errorTextLocals(decl ast.Decl, info *types.Info, inferrer *TypeInferrer) ma
 		}
 		return true
 	})
-	return texts
 }
 
 // isErrorStringCall checks if expression is x.Error() on an error value: by

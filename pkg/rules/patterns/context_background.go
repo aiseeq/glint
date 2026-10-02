@@ -17,6 +17,9 @@ func init() {
 // receive a context, and context.WithoutCancel(ctx) whose context only feeds
 // reads the function waits for — the same detachment under another name.
 //
+// Also reported: context.Background/TODO inside a goroutine that stops on a
+// channel - the stop reaches the loop, not the work it runs.
+//
 // Not flagged: a context created after the function has waited for its ctx to
 // end (<-ctx.Done()) — the graceful-shutdown shape, where the cancelled ctx
 // would abort the cleanup at once; a context parameter declared `_`, which the
@@ -67,6 +70,7 @@ func (r *ContextBackgroundRule) analyze(ctx *core.FileContext, info *types.Info)
 			continue
 		}
 		if _, live := contextParams(ctx.GoAST, info, fn.Type); !live {
+			violations = append(violations, r.stoppableLoopDetachedWork(ctx, info, fn)...)
 			continue
 		}
 		doneAt := firstDoneWait(ctx.GoAST, info, fn)
@@ -96,6 +100,76 @@ func (r *ContextBackgroundRule) analyze(ctx *core.FileContext, info *types.Info)
 		violations = append(violations, r.detachedReads(ctx, info, fn, doneAt, launched)...)
 	}
 	return violations
+}
+
+// stoppableLoopDetachedWork reports context.Background/TODO inside a
+// goroutine that stops on a channel (case <-s.stop: return): the loop can be
+// stopped, the work it runs cannot be cancelled, so stopping waits for the
+// work in flight or a shutdown cuts it mid-write.
+func (r *ContextBackgroundRule) stoppableLoopDetachedWork(ctx *core.FileContext, info *types.Info, fn *ast.FuncDecl) []*core.Violation {
+	var violations []*core.Violation
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok {
+			return true
+		}
+		lit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+		if !ok || !selectsStopAndReturns(lit.Body) {
+			return false
+		}
+		ast.Inspect(lit.Body, func(inner ast.Node) bool {
+			call, ok := inner.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name, ok := packageFuncName(ctx.GoAST, info, call, "context")
+			if !ok || (name != "Background" && name != "TODO") {
+				return true
+			}
+			line := ctx.LineFor(call)
+			if ctx.IsSuppressed(line, r.Name()) {
+				return true
+			}
+			v := r.CreateViolation(ctx.RelPath, line,
+				"The goroutine stops on its stop channel, but its work runs under context."+name+"() - stopping cannot cancel the work in flight, and a shutdown cuts it mid-write")
+			v.WithCode(ctx.GetLine(line))
+			v.WithSuggestion("Run the loop under a root context that the stop cancels, and pass that context to the work")
+			violations = append(violations, v)
+			return true
+		})
+		return false
+	})
+	return violations
+}
+
+// selectsStopAndReturns reports a select with a case receiving from a
+// channel that returns: the goroutine's way to stop.
+func selectsStopAndReturns(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		clause, ok := n.(*ast.CommClause)
+		if !ok || found || clause.Comm == nil {
+			return !found
+		}
+		expr, ok := clause.Comm.(*ast.ExprStmt)
+		if !ok {
+			return true
+		}
+		recv, ok := expr.X.(*ast.UnaryExpr)
+		if !ok || recv.Op != token.ARROW {
+			return true
+		}
+		if sel, ok := recv.X.(*ast.SelectorExpr); ok && sel.Sel.Name == "C" {
+			return true // a ticker's tick, not a stop
+		}
+		for _, stmt := range clause.Body {
+			if _, ok := stmt.(*ast.ReturnStmt); ok {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // firstDoneWait returns the position of the first receive from the Done

@@ -35,7 +35,14 @@ func init() {
 // warns and returns before building the dependency it exists to build, and
 // the field stays nil.
 //
-// Not flagged: Info/Debug logs, `return false` (see
+// Inside an `if err != nil` branch of a function that fetches data (fetch,
+// load, get...) a log at any level counts: a Debug line hides the failure
+// even better. There the rule also reports a function that
+// converts its input and answers a failed lookup with the input itself, and a
+// builder that logs a failed constructor and stores the dependency only in
+// the else branch.
+//
+// Not flagged: Info/Debug logs outside an error branch, `return false` (see
 // error-masked-as-false-bool), computed recovery values, and HTTP handlers
 // (they report the failure via ResponseWriter).
 type LogAndReturnZeroRule struct {
@@ -48,7 +55,7 @@ func NewLogAndReturnZeroRule() *LogAndReturnZeroRule {
 		BaseRule: rules.NewBaseRule(
 			"log-and-return-zero",
 			"patterns",
-			"Detects Error/Warn log followed by a zero-value return in functions without an error result, or by a return that leaves the dependency a setup function builds unset",
+			"Detects a logged failure followed by a zero-value or own-input return in functions without an error result, or by a return or else branch that leaves the dependency a setup function builds unset",
 			core.SeverityMedium,
 		),
 	}
@@ -78,28 +85,295 @@ func (r *LogAndReturnZeroRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			return true
 		}
 
+		// A Debug line in an error branch hides a failure of a function that
+		// fetches data; a try-function answering nil ("not this way") has
+		// that contract.
+		errBranches := map[*ast.Stmt]bool{}
+		if fetchesData(fn.Name.Name) {
+			errBranches = errorBranchBodies(fn.Body)
+		}
+		inputs := inputValues(fn)
+		allErrBranches := errorBranchBodies(fn.Body)
 		forEachOwnStatementList(fn.Body, func(list []ast.Stmt) {
+			inErrBranch := len(list) > 0 && allErrBranches[&list[0]]
+			quietCounts := len(list) > 0 && errBranches[&list[0]]
 			for i := 0; i+1 < len(list); i++ {
-				if !isErrorOrWarnLogStmt(list[i]) {
+				// In an `if err != nil` branch of a data fetch a log at any
+				// level reports the failure; elsewhere only Error/Warn says
+				// something failed.
+				if !isErrorOrWarnLogStmt(list[i]) && (!quietCounts || !isLoggerStmt(list[i])) {
 					continue
 				}
 				ret, ok := list[i+1].(*ast.ReturnStmt)
-				if !ok || !allResultsAreZeroValues(ret) {
+				if !ok {
 					continue
 				}
-				pos := ctx.PositionFor(ret)
-				v := r.CreateViolation(ctx.RelPath, pos.Line,
-					"Error/Warn log followed by a zero-value return — the caller cannot distinguish this failure from a valid value")
-				v.WithCode(strings.TrimSpace(ctx.GetLine(pos.Line)))
-				v.WithSuggestion("Change the signature to (T, error) and return an explicit error instead of the zero sentinel")
-				violations = append(violations, v)
+				switch {
+				case allResultsAreZeroValues(ret):
+					violations = append(violations, r.violationAt(ctx, ret,
+						"Log followed by a zero-value return — the caller cannot distinguish this failure from a valid value"))
+				case inErrBranch && returnsInputFallback(fn.Body, ret, inputs):
+					violations = append(violations, r.violationAt(ctx, ret,
+						"A failed lookup is logged and answered with the function's own input — the caller takes the unconverted value for the looked-up one"))
+				}
 			}
 		})
+		violations = append(violations, r.checkConstructorLeftUnset(ctx, fn)...)
+		violations = append(violations, r.checkWriteMissingFromResultError(ctx, fn)...)
 
 		return true
 	})
 
 	return violations
+}
+
+func (r *LogAndReturnZeroRule) violationAt(ctx *core.FileContext, node ast.Node, message string) *core.Violation {
+	pos := ctx.PositionFor(node)
+	v := r.CreateViolation(ctx.RelPath, pos.Line, message)
+	v.WithCode(strings.TrimSpace(ctx.GetLine(pos.Line)))
+	v.WithSuggestion("Change the signature to (T, error) and return an explicit error instead of the substitute value")
+	return v
+}
+
+// fetchVerbs lead the names of functions that bring data.
+var fetchVerbs = []string{"fetch", "load", "get", "list", "read", "query", "collect"}
+
+func fetchesData(name string) bool {
+	words := helpers.IdentifierWords(name)
+	return len(words) > 0 && slices.Contains(fetchVerbs, strings.ToLower(words[0]))
+}
+
+// errorBranchBodies returns the first statements of the bodies of
+// `if err != nil` branches, the key forEachOwnStatementList lists share.
+func errorBranchBodies(body *ast.BlockStmt) map[*ast.Stmt]bool {
+	bodies := make(map[*ast.Stmt]bool)
+	ast.Inspect(body, func(n ast.Node) bool {
+		if ifStmt, ok := n.(*ast.IfStmt); ok && errNilCheckName(ifStmt.Cond) != "" && len(ifStmt.Body.List) > 0 {
+			bodies[&ifStmt.Body.List[0]] = true
+		}
+		return true
+	})
+	return bodies
+}
+
+// isLoggerStmt reports a statement that is a bare logger call at any level.
+func isLoggerStmt(stmt ast.Stmt) bool {
+	exprStmt, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := exprStmt.X.(*ast.CallExpr)
+	return ok && helpers.IsLoggerCall(call)
+}
+
+// inputValues returns the names of the function's parameters and of the
+// locals set once from nothing but them (trimmed := strings.TrimSpace(wallet)).
+func inputValues(fn *ast.FuncDecl) map[string]bool {
+	inputs := make(map[string]bool)
+	for _, field := range fn.Type.Params.List {
+		for _, name := range field.Names {
+			inputs[name.Name] = true
+		}
+	}
+	for _, stmt := range fn.Body.List {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			continue
+		}
+		name, ok := assign.Lhs[0].(*ast.Ident)
+		if ok && derivedOnlyFrom(assign.Rhs[0], inputs) {
+			inputs[name.Name] = true
+		}
+	}
+	return inputs
+}
+
+// derivedOnlyFrom reports an expression whose variables are all inputs: a
+// call may name a package function (strings.TrimSpace), not a receiver.
+func derivedOnlyFrom(expr ast.Expr, inputs map[string]bool) bool {
+	usesInput, other := false, false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.SelectorExpr:
+			if pkg, ok := node.X.(*ast.Ident); ok && !inputs[pkg.Name] {
+				return false
+			}
+		case *ast.Ident:
+			if inputs[node.Name] {
+				usesInput = true
+			} else if node.Obj != nil {
+				other = true
+			}
+		}
+		return true
+	})
+	return usesInput && !other
+}
+
+// returnsInputFallback reports a single-value return of an input while
+// another return of the function hands out something else: the function
+// converts its input, and the failed conversion answers with the input.
+func returnsInputFallback(body *ast.BlockStmt, ret *ast.ReturnStmt, inputs map[string]bool) bool {
+	if len(ret.Results) != 1 {
+		return false
+	}
+	ident, ok := ret.Results[0].(*ast.Ident)
+	if !ok || !inputs[ident.Name] {
+		return false
+	}
+	converts := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			if len(node.Results) == 1 && !derivedOnlyFrom(node.Results[0], inputs) && !isZeroValueExpr(node.Results[0]) {
+				converts = true
+			}
+		}
+		return true
+	})
+	return converts
+}
+
+// checkConstructorLeftUnset reports, in a function returning values without
+// an error, a constructor whose error is only logged while the dependency is
+// stored in the else branch: the function hands back a value with that
+// dependency silently missing.
+func (r *LogAndReturnZeroRule) checkConstructorLeftUnset(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+	var violations []*core.Violation
+	for i, stmt := range fn.Body.List {
+		ifStmt, ok := stmt.(*ast.IfStmt)
+		if !ok || i == 0 || errNilCheckName(ifStmt.Cond) == "" || len(ifStmt.Body.List) == 0 {
+			continue
+		}
+		if !slices.ContainsFunc(ifStmt.Body.List, isLoggerStmt) || !allStmtsAreLogs(ifStmt.Body.List) {
+			continue
+		}
+		elseBlock, ok := ifStmt.Else.(*ast.BlockStmt)
+		if !ok {
+			continue
+		}
+		built := constructedName(fn.Body.List[i-1], errNilCheckName(ifStmt.Cond))
+		if built == "" || !storesIntoField(elseBlock, built) {
+			continue
+		}
+		if ctx.IsSuppressed(ctx.LineFor(ifStmt), r.Name()) {
+			continue
+		}
+		violations = append(violations, r.violationAt(ctx, ifStmt,
+			"A failed constructor is only logged and the dependency is left unset - the function returns a value without it and nobody learns why"))
+	}
+	return violations
+}
+
+// checkWriteMissingFromResultError reports, in a function that reports its
+// failures through result.Error, a write (a save of progress, FinishSync)
+// whose error is only logged: the result goes out with an empty Error and the
+// caller takes the run as complete while its progress was never stored.
+func (r *LogAndReturnZeroRule) checkWriteMissingFromResultError(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+	carriers := make(map[string]bool)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 {
+			return true
+		}
+		if sel, ok := assign.Lhs[0].(*ast.SelectorExpr); ok && sel.Sel.Name == "Error" {
+			if holder, ok := sel.X.(*ast.Ident); ok {
+				carriers[holder.Name] = true
+			}
+		}
+		return true
+	})
+	if len(carriers) == 0 {
+		return nil
+	}
+	var violations []*core.Violation
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok || ifStmt.Else != nil || errNilCheckName(ifStmt.Cond) == "" || !allStmtsAreLogs(ifStmt.Body.List) {
+			return true
+		}
+		assign, ok := ifStmt.Init.(*ast.AssignStmt)
+		if !ok || len(assign.Rhs) != 1 {
+			return true
+		}
+		call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+		if !ok || !isProgressWrite(call) {
+			return true
+		}
+		if ctx.IsSuppressed(ctx.LineFor(ifStmt), r.Name()) {
+			return true
+		}
+		violations = append(violations, r.violationAt(ctx, ifStmt,
+			"A failed write is only logged in a function that reports failures through its result's Error field - the result goes out as a success"))
+		return true
+	})
+	return violations
+}
+
+// isProgressWrite reports a method call that stores state or closes a run:
+// a write verb, or Finish/Complete.
+func isProgressWrite(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	name := sel.Sel.Name
+	return helpers.IsWriteName(name) || helpers.HasLeadingWord(name, "Finish") || helpers.HasLeadingWord(name, "Complete")
+}
+
+func allStmtsAreLogs(list []ast.Stmt) bool {
+	for _, stmt := range list {
+		if !isLoggerStmt(stmt) {
+			return false
+		}
+	}
+	return true
+}
+
+// constructedName returns the value of `x, err := NewX(...)` (or
+// pkg.NewClient(...)) whose error is errName, or "".
+func constructedName(stmt ast.Stmt, errName string) string {
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 2 || len(assign.Rhs) != 1 {
+		return ""
+	}
+	value, ok1 := assign.Lhs[0].(*ast.Ident)
+	errIdent, ok2 := assign.Lhs[1].(*ast.Ident)
+	call, ok3 := assign.Rhs[0].(*ast.CallExpr)
+	if !ok1 || !ok2 || !ok3 || errIdent.Name != errName {
+		return ""
+	}
+	name := ""
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		name = fun.Name
+	case *ast.SelectorExpr:
+		name = fun.Sel.Name
+	}
+	if !helpers.HasLeadingWord(name, "New") {
+		return ""
+	}
+	return value.Name
+}
+
+// storesIntoField reports a block that assigns name to a field (c.chain = name).
+func storesIntoField(block *ast.BlockStmt, name string) bool {
+	for _, stmt := range block.List {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			continue
+		}
+		_, isField := assign.Lhs[0].(*ast.SelectorExpr)
+		if value, ok := assign.Rhs[0].(*ast.Ident); ok && isField && value.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // hasNonErrorResults reports whether the function returns at least one value

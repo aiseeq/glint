@@ -121,3 +121,87 @@ func (s *Svc) Status() int {
 	ctx := rulestest.GoFile(t, "cmp/c.go", source)
 	assert.Equal(t, []int{11}, violationLines(NewErrorStringCompareRule().AnalyzeFile(ctx)))
 }
+
+// An error message kept as data - a status row's Error column, the message
+// parameter of an is...Error predicate - is still the wording of a failure:
+// matching it by substrings classifies failures by their text.
+func TestErrorStringCompare_StoredErrorMessage(t *testing.T) {
+	const source = `package cmp
+
+import "strings"
+
+type SyncStatus struct {
+	Error   *string
+	Message string
+}
+
+func isTransientSyncError(message *string) bool {
+	if message == nil {
+		return false
+	}
+	lower := strings.ToLower(*message)
+	return strings.Contains(lower, "429") || strings.Contains(lower, "rate limit")
+}
+
+func Classify(rec SyncStatus) string {
+	if rec.Error != nil && strings.Contains(strings.ToLower(*rec.Error), "degraded") {
+		return "warning"
+	}
+	if strings.Contains(rec.Message, "done") {
+		return "ok"
+	}
+	return "error"
+}
+
+func hasPrefixWord(message string) bool {
+	return strings.HasPrefix(message, "warn")
+}
+`
+	for name, run := range map[string]func() []int{
+		"typed": func() []int {
+			return violationLines(runRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source}))
+		},
+		"untyped": func() []int {
+			return violationLines(NewErrorStringCompareRule().AnalyzeFile(rulestest.GoFile(t, "cmp/c.go", source)))
+		},
+	} {
+		assert.Equal(t, []int{15, 15, 19}, run(), name)
+	}
+}
+
+// A stored message tested against a marker the program writes itself reads
+// the program's own encoding.
+func TestErrorStringCompare_StoredMessageOwnMarker(t *testing.T) {
+	const source = `package cmp
+
+import "strings"
+
+const warningPrefix = "warning: "
+
+type Record struct{ Error *string }
+
+func Split(rec *Record) (string, string) {
+	if rec == nil || rec.Error == nil {
+		return "", ""
+	}
+	if strings.HasPrefix(*rec.Error, warningPrefix) {
+		return "", strings.TrimPrefix(*rec.Error, warningPrefix)
+	}
+	return *rec.Error, ""
+}
+`
+	assert.Empty(t, violationLines(runRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})))
+}
+
+// A predicate about an error's name, not an error's text.
+func TestErrorStringCompare_PredicateAboutAName(t *testing.T) {
+	const source = `package cmp
+
+import "strings"
+
+func isErrorVarName(name string) bool {
+	return name == "err" || strings.HasSuffix(name, "Err")
+}
+`
+	assert.Empty(t, violationLines(runRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})))
+}

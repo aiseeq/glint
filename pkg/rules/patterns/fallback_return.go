@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"maps"
 	"regexp"
 	"slices"
@@ -140,6 +141,9 @@ func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violati
 
 	// First pass: detect implicit else fallback patterns at function level
 	violations = append(violations, r.detectImplicitElseFallback(ctx)...)
+	violations = append(violations, analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
+		return r.checkIdentifierMapperMiss(ctx, fn)
+	})...)
 
 	forEachFunction(ctx.GoAST, func(name string, _ *ast.FuncType, body *ast.BlockStmt) {
 		if r.isFunctionException(name) {
@@ -839,6 +843,15 @@ func (r *FallbackReturnRule) checkErrorBranch(ctx *core.FileContext, ifStmt *ast
 		if returnCarriesError(retStmt) {
 			continue
 		}
+		if sibling := siblingSourceReturn(ifStmt, retStmt); sibling != "" {
+			pos := ctx.PositionFor(retStmt)
+			v := r.CreateViolation(ctx.RelPath, pos.Line,
+				"A failed source is answered by "+sibling+" with the same arguments - the caller gets a degraded answer as the real one, and the failure is only in the log")
+			v.WithCode(ctx.GetLine(pos.Line))
+			v.WithSuggestion("Mark the result as degraded (a warning field built from the error) or return the first error joined with the second")
+			violations = append(violations, v)
+			continue
+		}
 
 		for _, result := range retStmt.Results {
 			if !r.isFallbackReturn(result) {
@@ -858,6 +871,89 @@ func (r *FallbackReturnRule) checkErrorBranch(ctx *core.FileContext, ifStmt *ast
 		violations = append(violations, r.detectErrorIgnoringAssignment(ctx, ifStmt, errName)...)
 	}
 	return violations
+}
+
+// identifierWords end the name of a function whose result identifies
+// something: tickerToCoinID, walletKey.
+var identifierWords = map[string]bool{"id": true, "key": true}
+
+// checkIdentifierMapperMiss reports a function producing an identifier that
+// looks its input up in a map and, on a miss, returns the input itself:
+//
+//	if id, ok := coinIDs[lower]; ok {
+//	    return id
+//	}
+//	return lower // a ticker passes for an id
+func (r *FallbackReturnRule) checkIdentifierMapperMiss(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+	words := helpers.IdentifierWords(fn.Name.Name)
+	if len(words) == 0 || !identifierWords[strings.ToLower(words[len(words)-1])] ||
+		fn.Type.Results == nil || len(fn.Type.Results.List) != 1 || len(fn.Type.Results.List[0].Names) > 1 {
+		return nil
+	}
+	list := fn.Body.List
+	if len(list) < 2 {
+		return nil
+	}
+	ret, ok := list[len(list)-1].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 || !derivedOnlyFrom(ret.Results[0], inputValues(fn)) {
+		return nil
+	}
+	if !isCommaOkMapHit(list[len(list)-2]) {
+		return nil
+	}
+	pos := ctx.PositionFor(ret)
+	v := r.CreateViolation(ctx.RelPath, pos.Line,
+		"An unknown key is answered with the key itself - the caller takes the input for the identifier it asked for")
+	v.WithCode(ctx.GetLine(pos.Line))
+	v.WithSuggestion("Return (string, error) or (string, bool) and let the caller decide what an unknown key means")
+	return []*core.Violation{v}
+}
+
+// isCommaOkMapHit reports `if v, ok := m[k]; ok { return v }`.
+func isCommaOkMapHit(stmt ast.Stmt) bool {
+	ifStmt, ok := stmt.(*ast.IfStmt)
+	if !ok || ifStmt.Else != nil || len(ifStmt.Body.List) != 1 {
+		return false
+	}
+	assign, ok := ifStmt.Init.(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 2 || len(assign.Rhs) != 1 {
+		return false
+	}
+	if _, ok := assign.Rhs[0].(*ast.IndexExpr); !ok {
+		return false
+	}
+	value, ok1 := assign.Lhs[0].(*ast.Ident)
+	flag, ok2 := assign.Lhs[1].(*ast.Ident)
+	cond, ok3 := ifStmt.Cond.(*ast.Ident)
+	ret, ok4 := ifStmt.Body.List[0].(*ast.ReturnStmt)
+	return ok1 && ok2 && ok3 && ok4 && cond.Name == flag.Name && len(ret.Results) == 1 && isIdentNamed(ret.Results[0], value.Name)
+}
+
+// siblingSourceReturn returns the name of the call a return in the branch of
+// `if err := s.fetchA(args); err != nil` hands back when it is another method
+// of the same receiver with the same arguments (s.fetchB(args)), and the
+// branch passes err to nothing but a logger; "" otherwise.
+func siblingSourceReturn(ifStmt *ast.IfStmt, ret *ast.ReturnStmt) string {
+	errName := errNilCheckName(ifStmt.Cond)
+	assign, ok := ifStmt.Init.(*ast.AssignStmt)
+	if errName == "" || !ok || len(assign.Rhs) != 1 || len(ret.Results) != 1 {
+		return ""
+	}
+	failed, ok1 := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+	answer, ok2 := ast.Unparen(ret.Results[0]).(*ast.CallExpr)
+	if !ok1 || !ok2 {
+		return ""
+	}
+	failedSel, ok1 := failed.Fun.(*ast.SelectorExpr)
+	answerSel, ok2 := answer.Fun.(*ast.SelectorExpr)
+	if !ok1 || !ok2 || failedSel.Sel.Name == answerSel.Sel.Name ||
+		types.ExprString(failedSel.X) != types.ExprString(answerSel.X) || len(failed.Args) == 0 {
+		return ""
+	}
+	if exprListText(failed.Args) != exprListText(answer.Args) || readsIdentOutsideLoggers(ifStmt.Body, errName) {
+		return ""
+	}
+	return types.ExprString(answer.Fun)
 }
 
 // isFunctionException checks whether the function's name declares fallbacks

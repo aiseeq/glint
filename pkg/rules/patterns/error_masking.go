@@ -215,6 +215,10 @@ func (r *ErrorMaskingRule) analyzeGoAST(ctx *core.FileContext) []*core.Violation
 	})
 
 	violations = append(violations, r.checkSuccessOnlyGuards(ctx)...)
+	violations = append(violations, analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
+		return r.checkSwitchDefaultMember(ctx, fn)
+	})...)
+	violations = append(violations, r.checkParseHelperDefaults(ctx)...)
 
 	return violations
 }
@@ -251,7 +255,9 @@ func (r *ErrorMaskingRule) checkSuccessOnlyGuards(ctx *core.FileContext) []*core
 }
 
 func (r *ErrorMaskingRule) checkSuccessOnlyGuard(ctx *core.FileContext, fn *ast.FuncDecl, stmt *ast.IfStmt, assigned map[*ast.Ident]bool) *core.Violation {
-	if stmt.Else != nil {
+	// An else that only logs below Warn is no handling: the line is not
+	// seen in production and the target keeps its zero.
+	if stmt.Else != nil && !onlyQuietLogs(stmt.Else) {
 		return nil
 	}
 	errName, ok := successGuardErrName(stmt.Cond)
@@ -313,10 +319,10 @@ func guardOnlyRefinesReadyValues(fn *ast.FuncDecl, stmt *ast.IfStmt) bool {
 	return true
 }
 
-// zeroStateHandledAfter ищет после guard'а явный фолбек нулевого состояния:
-// `if x.IsZero() { x = ... }`, `if x == "" { x = ... }` и т.п. Такой код решает
+// zeroStateHandledAfter ищет после guard'а явную проверку нулевого состояния:
+// `if x.IsZero() { x = ... }`, `if x == "" { return ... }` и т.п. Такой код решает
 // судьбу провала на месте — провал отличим от «данных не было», и это уже не
-// потеря ошибки, а документированный в коде фолбек.
+// потеря ошибки, а документированный в коде фолбек или отказ.
 func zeroStateHandledAfter(fn *ast.FuncDecl, stmt *ast.IfStmt, name string) bool {
 	handled := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -327,10 +333,9 @@ func zeroStateHandledAfter(fn *ast.FuncDecl, stmt *ast.IfStmt, name string) bool
 		if !ok || ifStmt.Pos() <= stmt.End() {
 			return true
 		}
-		if !isZeroCheckOf(ifStmt.Cond, name) {
-			return true
-		}
-		if _, assigns := guardAssignTargets(ifStmt.Body)[name]; assigns {
+		// A later test of the zero state tells the failure apart: the
+		// branch gives the value a default or refuses to go on.
+		if isZeroCheckOf(ifStmt.Cond, name) {
 			handled = true
 		}
 		return true
@@ -424,8 +429,9 @@ func hasValueBefore(fn *ast.FuncDecl, stmt *ast.IfStmt, name string) bool {
 		}
 		switch node := n.(type) {
 		case *ast.AssignStmt:
-			for _, lhs := range node.Lhs {
-				if rootIdentName(lhs) == name {
+			for i, lhs := range node.Lhs {
+				// x := decimal.Zero is the zero the failure leaves, not a value.
+				if rootIdentName(lhs) == name && (len(node.Rhs) != len(node.Lhs) || !isZeroInit(node.Rhs[i])) {
 					found = true
 				}
 			}
@@ -442,6 +448,44 @@ func hasValueBefore(fn *ast.FuncDecl, stmt *ast.IfStmt, name string) bool {
 		return true
 	})
 	return found
+}
+
+// isZeroInit reports a zero value used as an initializer: "", 0, nil, T{},
+// decimal.Zero.
+func isZeroInit(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.SelectorExpr:
+		return e.Sel.Name == "Zero"
+	case *ast.CompositeLit:
+		// An empty map or slice is a container the guard fills, not a zero
+		// left in place of a value.
+		switch e.Type.(type) {
+		case *ast.ArrayType, *ast.MapType, nil:
+			return false
+		}
+		return len(e.Elts) == 0
+	}
+	return isZeroValueExpr(expr)
+}
+
+// onlyQuietLogs reports an else block holding nothing but Debug, Info or
+// Trace log calls.
+func onlyQuietLogs(stmt ast.Stmt) bool {
+	block, ok := stmt.(*ast.BlockStmt)
+	if !ok || len(block.List) == 0 {
+		return false
+	}
+	for _, own := range block.List {
+		exprStmt, ok := own.(*ast.ExprStmt)
+		if !ok {
+			return false
+		}
+		call, ok := exprStmt.X.(*ast.CallExpr)
+		if !ok || !helpers.IsLoggerCall(call) || isErrorReport(call) {
+			return false
+		}
+	}
+	return true
 }
 
 // fieldListsContainName ищет имя среди объявлений полей (параметры, receiver).
@@ -836,6 +880,14 @@ func (r *ErrorMaskingRule) findProblematicReturn(ctx *core.FileContext, results 
 			continue
 		}
 		for _, result := range retStmt.Results {
+			// A zero struct next to a non-nil value in the last slot (a
+			// custom error type) is the usual "no value, here is why"; after
+			// other statements (fail(...) collecting the problem) the branch
+			// has reported it.
+			if _, zeroStruct := result.(*ast.CompositeLit); zeroStruct && (len(stmt.Body.List) > 1 ||
+				len(retStmt.Results) > 1 && !isNilIdent(retStmt.Results[len(retStmt.Results)-1])) {
+				continue
+			}
 			if r.isProblematicReturn(result) {
 				pos := ctx.PositionFor(stmt)
 				v := r.CreateViolation(ctx.RelPath, pos.Line, "Error condition returns success value, masking the error")
@@ -909,6 +961,14 @@ func (r *ErrorMaskingRule) isProblematicReturn(expr ast.Expr) bool {
 	case *ast.BasicLit:
 		// Empty string, zero values
 		return v.Value == `""` || v.Value == "0"
+	case *ast.CompositeLit:
+		// A zero struct (time.Time{}) passes for a real value; an empty
+		// slice or map stays with nil, an answer of "nothing".
+		switch v.Type.(type) {
+		case *ast.ArrayType, *ast.MapType, nil:
+			return false
+		}
+		return len(v.Elts) == 0
 	}
 	return false
 }

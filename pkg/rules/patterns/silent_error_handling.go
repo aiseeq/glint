@@ -113,7 +113,7 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 
 		// Check if the if body handles the error properly
 		// For (T, bool) functions, returning false is acceptable error handling
-		if r.bodyHandlesError(ifStmt.Body, writers) {
+		if !debugOnlyLostValue(body, ifStmt) && r.bodyHandlesError(ifStmt.Body, writers) {
 			return true
 		}
 
@@ -301,6 +301,8 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[st
 	case *ast.ExprStmt:
 		// Check for logging calls
 		if call, ok := s.X.(*ast.CallExpr); ok {
+			// A Debug or Trace line is off in production: the failure it
+			// records is as silent as one never logged.
 			if helpers.IsLoggerCall(call) {
 				return true
 			}
@@ -641,4 +643,62 @@ func writesToStderr(call *ast.CallExpr) bool {
 		}
 	}
 	return false
+}
+
+// debugOnlyLostValue reports a branch holding only Debug or Trace lines for
+// the error of a call that produced a value (data, err := fetch()): the
+// function goes on without the data as if nothing failed, and the line is off
+// in production. A failed Close or drain produces nothing to lose.
+func debugOnlyLostValue(body *ast.BlockStmt, ifStmt *ast.IfStmt) bool {
+	if !onlyDebugLogs(ifStmt.Body.List) {
+		return false
+	}
+	errName := errNilCheckName(ifStmt.Cond)
+	var source *ast.AssignStmt
+	if assign, ok := ifStmt.Init.(*ast.AssignStmt); ok {
+		source = assign
+	} else {
+		ast.Inspect(body, func(n ast.Node) bool {
+			if assign, ok := n.(*ast.AssignStmt); ok && assign.Pos() < ifStmt.Pos() && assignsName(assign, errName) {
+				source = assign
+			}
+			return true
+		})
+	}
+	if source == nil || len(source.Rhs) != 1 || !assignsName(source, errName) {
+		return false
+	}
+	for _, lhs := range source.Lhs {
+		if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" && id.Name != errName {
+			return true
+		}
+	}
+	return false
+}
+
+func onlyDebugLogs(list []ast.Stmt) bool {
+	if len(list) == 0 {
+		return false
+	}
+	for _, stmt := range list {
+		exprStmt, ok := stmt.(*ast.ExprStmt)
+		if !ok {
+			return false
+		}
+		call, ok := exprStmt.X.(*ast.CallExpr)
+		if !ok || !helpers.IsLoggerCall(call) || !isDebugLogCall(call) {
+			return false
+		}
+	}
+	return true
+}
+
+// isDebugLogCall reports a log call at Debug or Trace level.
+func isDebugLogCall(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	verb := helpers.LogVerb(sel)
+	return strings.HasPrefix(verb, "debug") || strings.HasPrefix(verb, "trace")
 }
