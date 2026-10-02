@@ -41,9 +41,13 @@ repository: commits come from `git log`/`git show`, trees from `git archive`.
    of the tree that did not type-check: typed rules are silent in them.
 
    The same script accepts new rules: given a manifest (`.tsv`, one
-   `commit kind rule[,rule...]` per line — the commits a rule must catch), it
-   runs only those rules, checks every line afresh and prints the lines where
-   none of its rules fired; the exit status is 1 while there is one.
+   `commit kind rule[,rule...] [@path:line] [whole-tree]` per line — the
+   commits a rule must catch), it runs only those rules, checks every line
+   afresh and on its own, and prints the lines where none of its rules fired;
+   the exit status is 1 while there is one. One line stands for one record:
+   a commit with two classes gets two lines, each with the rule of its class.
+   Several rules on one line are alternatives for one class, and the line
+   passes when any of them fires.
 
 6. **Rank.** Per family: how many commits, how universal, how hard to detect
    (syntactic, typed, flow, cross-file), which existing rule missed it and
@@ -51,7 +55,13 @@ repository: commits come from `git log`/`git show`, trees from `git archive`.
    another linter the project already runs covers is not glint's. Estimate
    the noise of a draft detector on the current code before proposing a rule.
 
-7. **Measure the noise of the release.** Before installing a changed rule, run
+7. **Plan with a check of completeness.** Every record ends up either under
+   a rule, with its manifest line, or struck with a reason. Compare the plan
+   with `all-candidates.jsonl` record by record - commit, kind and class - not
+   by commit: a commit carries classes of several families, and a plan picked
+   by commit drops the classes of the families that did not take it.
+
+8. **Measure the noise of the release.** Before installing a changed rule, run
    it on every consumer — every project with a `.glint.yaml` — from the
    project root with its own configuration, not on the mined repository
    alone: an install makes every one of them fail its gate on a new finding.

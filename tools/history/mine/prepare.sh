@@ -19,7 +19,7 @@ git -C "$repo" log --no-merges --format='%h%x09%ad%x09%s' --date=short \
 # Drop commits that touch documentation only; keep the count of changed files.
 : > "$out/fix.tsv"
 while IFS=$'\t' read -r hash date msg; do
-  files=$(git -C "$repo" show --name-only --format= "$hash" | grep -cvE '\.(md|txt)$|^docs/' || true)
+  files=$(git -C "$repo" show --name-only --format= "$hash" | grep -cvE '\.(md|txt)$|^docs/|(^|/)VERSION$' || true)
   [ "$files" -gt 0 ] && printf '%s\t%s\t%s\t%s\n' "$hash" "$date" "$files" "$msg" >> "$out/fix.tsv"
 done < "$out/fix-all.tsv"
 
