@@ -31,6 +31,10 @@ func init() {
 // comment where JSON should be, a simulation reported as done. Return the
 // error; a template function can have one in its signature.
 //
+// A loop that appends each failure's text to a list field of the result
+// (agg.Errors = append(agg.Errors, err.Error()); continue) and ends with
+// return agg, nil folds the failures the same way.
+//
 // Judged are the functions of a template.FuncMap and the functions with an
 // error result that return a result literal marked unsuccessful (a field set
 // to false) next to a nil error. Elsewhere a value with the error's text is
@@ -70,6 +74,7 @@ func (r *ErrorTextAsResultRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 		if !returnsError && !templateFuncs[ftype] {
 			return
 		}
+		folded := returnedNilErrorHolders(body)
 		forEachOwnStatement(body, func(stmt ast.Stmt) {
 			ifStmt, ok := stmt.(*ast.IfStmt)
 			if !ok {
@@ -78,6 +83,17 @@ func (r *ErrorTextAsResultRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 			errName := errNilCheckName(ifStmt.Cond)
 			if errName == "" {
 				return
+			}
+			if returnsError {
+				if assign := foldedIntoResultList(ifStmt, errName, folded); assign != nil {
+					line := ctx.LineFor(assign)
+					if !ctx.IsSuppressed(line, r.Name()) {
+						v := r.CreateViolation(ctx.RelPath, line, "The error's text is added to the result's list and the loop goes on — the function then returns the result with a nil error, and the caller takes the run as clean")
+						v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+						v.WithSuggestion("Collect the errors and return errors.Join of them next to the partial result")
+						violations = append(violations, v)
+					}
+				}
 			}
 			forEachOwnStatement(ifStmt.Body, func(inner ast.Stmt) {
 				ret, ok := inner.(*ast.ReturnStmt)
@@ -96,6 +112,74 @@ func (r *ErrorTextAsResultRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 		})
 	})
 	return violations
+}
+
+// returnedNilErrorHolders returns the variables the function's last
+// statement returns next to a nil error (return agg, nil).
+func returnedNilErrorHolders(body *ast.BlockStmt) map[string]bool {
+	holders := make(map[string]bool)
+	if len(body.List) == 0 {
+		return holders
+	}
+	ret, ok := body.List[len(body.List)-1].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) < 2 || !isNilIdent(ret.Results[len(ret.Results)-1]) {
+		return holders
+	}
+	for _, value := range ret.Results[:len(ret.Results)-1] {
+		if id, ok := value.(*ast.Ident); ok {
+			holders[id.Name] = true
+		}
+	}
+	return holders
+}
+
+// foldedIntoResultList returns the assignment of an error branch that ends
+// with continue and appends the error's text to a list field of a returned
+// holder: agg.Errors = append(agg.Errors, err.Error()).
+func foldedIntoResultList(ifStmt *ast.IfStmt, errName string, holders map[string]bool) *ast.AssignStmt {
+	list := ifStmt.Body.List
+	if len(holders) == 0 || len(list) < 2 {
+		return nil
+	}
+	if branch, ok := list[len(list)-1].(*ast.BranchStmt); !ok || branch.Tok.String() != "continue" {
+		return nil
+	}
+	for _, stmt := range list[:len(list)-1] {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			continue
+		}
+		sel, ok := assign.Lhs[0].(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		holder, ok := sel.X.(*ast.Ident)
+		if !ok || !holders[holder.Name] || !isAppendExprTo(assign.Rhs[0], holder.Name) || !namesFailures(sel.Sel.Name) {
+			continue
+		}
+		if carriesErrorText(assign.Rhs[0], errName) && !errUsedBesides(list, assign, errName) {
+			return assign
+		}
+	}
+	return nil
+}
+
+// namesFailures reports a list field named for failures (Errors, Failures);
+// a list of skip reasons is a report of what the input lacked.
+func namesFailures(field string) bool {
+	lower := strings.ToLower(field)
+	return strings.Contains(lower, "err") || strings.Contains(lower, "fail")
+}
+
+// errUsedBesides reports a branch that hands the error to something other
+// than the folded text and a logger: failed = append(failed, err).
+func errUsedBesides(list []ast.Stmt, fold *ast.AssignStmt, errName string) bool {
+	for _, stmt := range list {
+		if stmt != ast.Stmt(fold) && readsIdentOutsideLoggers(stmt, errName) {
+			return true
+		}
+	}
+	return false
 }
 
 // templateFuncTypes returns the function literals of template.FuncMap

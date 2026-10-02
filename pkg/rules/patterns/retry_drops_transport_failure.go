@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -29,6 +30,11 @@ func init() {
 // Real case (projectA, 2026-09): a monitor polled a vendor every seven minutes
 // through such a loop. A TLS handshake timeout ended the whole tick and raised
 // an operational alert, while the same request one second later succeeded.
+//
+// A switch over helpers that only read the status out of the error
+// (errors.As to a status error, then StatusCode >= 500) with a default that
+// returns is the same decision: a reset connection carries no status error
+// and falls to the default.
 //
 // Not flagged: a loop that also asks the error itself whether to retry
 // (errors.Is, a retriable predicate) — the decision is then not the status
@@ -59,24 +65,102 @@ func (r *RetryDropsTransportFailureRule) AnalyzeFile(_ *core.FileContext) []*cor
 // RequiresSSA reports that typed syntax is enough for this rule.
 func (r *RetryDropsTransportFailureRule) RequiresSSA() bool { return false }
 
+type statusPredicatesKey struct{}
+
 // AnalyzeGoProject reports retry loops whose only retry decision is the status code.
 func (r *RetryDropsTransportFailureRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
+	}
+	predicates, err := core.SharedLoad(ctx, statusPredicatesKey{}, func() (map[*types.Func]bool, error) {
+		return collectStatusPredicates(ctx)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", r.Name(), err)
+	}
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return analyzeGoFunctions(fileCtx, func(fn *ast.FuncDecl) []*core.Violation {
-			return r.checkFunction(fileCtx, info, fn)
+			return r.checkFunction(fileCtx, info, fn, predicates)
 		})
 	})
 }
 
+// collectStatusPredicates indexes the functions that answer about an error
+// by the status it carries and nothing else:
+//
+//	func isServerError(err error) bool {
+//	    var statusErr *StatusError
+//	    return errors.As(err, &statusErr) && statusErr.StatusCode >= 500
+//	}
+func collectStatusPredicates(ctx *core.GoProjectContext) (map[*types.Func]bool, error) {
+	predicates := make(map[*types.Func]bool)
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
+			return nil, fmt.Errorf("package has no typed syntax")
+		}
+		for _, file := range pkg.Package.Syntax {
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil || !readsOnlyStatus(fn.Body) {
+					continue
+				}
+				if f, ok := pkg.Package.TypesInfo.Defs[fn.Name].(*types.Func); ok {
+					predicates[f] = true
+				}
+			}
+		}
+	}
+	return predicates, nil
+}
+
+// readsOnlyStatus reports a body ending in `return errors.As(err, &v) &&
+// v.StatusCode <op> N`: every operand after the As compares a status field.
+func readsOnlyStatus(body *ast.BlockStmt) bool {
+	if len(body.List) == 0 {
+		return false
+	}
+	ret, ok := body.List[len(body.List)-1].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return false
+	}
+	parts := flattenAnd(ret.Results[0])
+	if len(parts) < 2 {
+		return false
+	}
+	as, ok := ast.Unparen(parts[0]).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	if sel, ok := as.Fun.(*ast.SelectorExpr); !ok || sel.Sel.Name != "As" || !isIdentNamed(sel.X, "errors") {
+		return false
+	}
+	for _, part := range parts[1:] {
+		cmp, ok := ast.Unparen(part).(*ast.BinaryExpr)
+		if !ok {
+			return false
+		}
+		field, ok := cmp.X.(*ast.SelectorExpr)
+		if !ok || (field.Sel.Name != "StatusCode" && field.Sel.Name != "Status" && field.Sel.Name != "Code") {
+			return false
+		}
+	}
+	return true
+}
+
 // checkFunction inspects the loops of one function.
-func (r *RetryDropsTransportFailureRule) checkFunction(ctx *core.FileContext, info *types.Info, fn *ast.FuncDecl) []*core.Violation {
+func (r *RetryDropsTransportFailureRule) checkFunction(ctx *core.FileContext, info *types.Info, fn *ast.FuncDecl, predicates map[*types.Func]bool) []*core.Violation {
 	var violations []*core.Violation
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		loop, ok := n.(*ast.ForStmt)
 		if !ok || loop.Body == nil {
 			return true
 		}
-		exit := r.statusOnlyExit(ctx.GoAST, info, loop)
+		var exit ast.Node
+		if statusExit := r.statusOnlyExit(ctx.GoAST, info, loop); statusExit != nil {
+			exit = statusExit
+		} else if predicateExit := statusPredicateExit(ctx.GoAST, info, loop, predicates); predicateExit != nil {
+			exit = predicateExit
+		}
 		if exit == nil {
 			return true
 		}
@@ -109,6 +193,56 @@ func (r *RetryDropsTransportFailureRule) statusOnlyExit(file *ast.File, info *ty
 		return nil
 	}
 	return statusGuardedReturn(body, status, errName)
+}
+
+// statusPredicateExit returns the switch of a retry loop whose cases ask
+// the send error only for its status (isServerError(err), isTooManyRequests(err))
+// and whose default returns the error: a failure without a status falls to
+// the default and ends the loop.
+func statusPredicateExit(file *ast.File, info *types.Info, loop *ast.ForStmt, predicates map[*types.Func]bool) *ast.SwitchStmt {
+	if len(predicates) == 0 || !loopRepeatsRequest(file, info, loop) {
+		return nil
+	}
+	var found *ast.SwitchStmt
+	ast.Inspect(loop.Body, func(n ast.Node) bool {
+		sw, ok := n.(*ast.SwitchStmt)
+		if !ok || found != nil || sw.Tag != nil {
+			return found == nil
+		}
+		errName, asked := "", 0
+		var def *ast.CaseClause
+		for _, stmt := range sw.Body.List {
+			clause, ok := stmt.(*ast.CaseClause)
+			if !ok {
+				return true
+			}
+			if clause.List == nil {
+				def = clause
+				continue
+			}
+			for _, expr := range clause.List {
+				call, ok := ast.Unparen(expr).(*ast.CallExpr)
+				if !ok || len(call.Args) != 1 {
+					return true
+				}
+				arg, ok := call.Args[0].(*ast.Ident)
+				callee, isFunc := typeutil.Callee(info, call).(*types.Func)
+				if !ok || !isFunc || !predicates[callee] || errName != "" && arg.Name != errName {
+					return true
+				}
+				errName = arg.Name
+				asked++
+			}
+		}
+		if def == nil || asked == 0 || len(def.Body) == 0 {
+			return true
+		}
+		if ret, ok := def.Body[len(def.Body)-1].(*ast.ReturnStmt); ok && returnsIdent(ret, errName) {
+			found = sw
+		}
+		return found == nil
+	})
+	return found
 }
 
 // sendResultNames returns the status and error variables of a send made once

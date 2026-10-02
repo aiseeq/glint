@@ -206,6 +206,136 @@ func (s *Server) refresh() {
 `,
 			wantCount: 2,
 		},
+		{
+			name: "debug log in an error branch hides the failure as well",
+			code: `package svc
+
+func (s *Service) fetchTokens(ctx context.Context, addr string) []Token {
+	if err := s.wait(ctx); err != nil {
+		s.logger.Debug("wait failed", "error", err)
+		return nil
+	}
+	return s.load(addr)
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "lookup failure answered with the function's own input",
+			code: `package svc
+
+func (s *Service) canonicalWallet(ctx context.Context, wallet string) string {
+	trimmed := strings.TrimSpace(wallet)
+	stored, err := s.repo.StoredSpelling(ctx, trimmed)
+	if err != nil {
+		s.logger.Error("spelling lookup failed", "error", err)
+		return trimmed
+	}
+	if stored != "" {
+		return stored
+	}
+	return trimmed
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "normalizer that only ever returns its input is not a fallback",
+			code: `package svc
+
+func (s *Service) clean(name string) string {
+	if err := s.check(name); err != nil {
+		s.logger.Warn("odd name", "error", err)
+		return name
+	}
+	return name
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "builder warns on a failed constructor and leaves the client unset",
+			code: `package svc
+
+func newClients(cfg *Config) clients {
+	c := clients{prices: prices.NewClient(cfg.Timeout)}
+	chainClient, err := chain.NewClient(cfg.Timeout, os.Getenv("CHAIN_KEY"))
+	if err != nil {
+		cfg.Logger.Warn("chain source disabled", "error", err)
+	} else {
+		c.chain = chainClient
+	}
+	return c
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "builder that fails on a constructor error is fine",
+			code: `package svc
+
+func newClients(cfg *Config) (clients, error) {
+	c := clients{}
+	chainClient, err := chain.NewClient(cfg.Timeout)
+	if err != nil {
+		cfg.Logger.Warn("chain source disabled", "error", err)
+		return c, err
+	}
+	c.chain = chainClient
+	return c, nil
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "progress write failure only logged while the result reports failures in its Error field",
+			code: `package sync
+
+func (s *Service) syncChain(ctx context.Context, wallet, chain string) *Result {
+	result := &Result{Wallet: wallet, Chain: chain}
+	outcome, err := s.fetch(ctx, wallet, chain)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	result.NewCount = outcome.count
+	if err := s.repo.FinishSync(ctx, wallet, chain, outcome.cursor); err != nil {
+		s.logger.Warn("failed to finish sync", "error", err)
+	}
+	return result
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "a result without an Error field leaves the logged write to the caller's contract",
+			code: `package sync
+
+func (s *Service) touch(ctx context.Context, id string) *Entry {
+	entry := &Entry{ID: id}
+	if err := s.repo.UpdateSeen(ctx, id); err != nil {
+		s.logger.Warn("failed to update seen", "error", err)
+	}
+	return entry
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "try function answers nil after a debug line by contract",
+			code: `package auth
+
+func (m *Middleware) tryClaimsFromHeader(r *http.Request) *Claims {
+	token, err := extractBearer(r)
+	if err != nil {
+		m.logger.Debug("no bearer token", "reason", err.Error())
+		return nil
+	}
+	return parse(token)
+}
+`,
+			wantCount: 0,
+		},
 	}
 
 	for _, tt := range tests {

@@ -19,7 +19,8 @@ import (
 // ending in error (loadError, lastError). stderr and interrupted are words of
 // their own, not errors.
 func isErrorVarName(name string) bool {
-	return name == "err" || strings.HasSuffix(name, "Err") ||
+	// One letter before err (perr, rerr, werr) is the short local idiom.
+	return name == "err" || len(name) == 4 && strings.HasSuffix(name, "err") || strings.HasSuffix(name, "Err") ||
 		strings.HasSuffix(strings.ToLower(name), "error")
 }
 

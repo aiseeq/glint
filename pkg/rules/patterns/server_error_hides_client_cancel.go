@@ -49,6 +49,11 @@ func init() {
 // и context.Canceled. Знание пакета об отмене здесь не оправдание: разбор, который ловит
 // только обёрнутый %w context.Canceled, пропускает отмену, потерянную по дороге, а запрос
 // под рукой у помощника. Вызов из функции, которая сама разбирает отмену, не считается.
+//
+// Третья форма — та же слепота на исходящей стороне: наблюдатель отказов
+// клиента внешнего API сообщает об отказе провайдера на статусе 0 (ответа
+// нет), а собственная отмена вызывающего тоже приходит без статуса. Функция
+// получает ошибку и не спрашивает её про context.Canceled и истёкший срок.
 type ServerErrorHidesClientCancelRule struct {
 	*rules.BaseRule
 	minCallSites int
@@ -60,7 +65,7 @@ func NewServerErrorHidesClientCancelRule() *ServerErrorHidesClientCancelRule {
 		BaseRule: rules.NewBaseRule(
 			"server-error-hides-client-cancel",
 			"patterns",
-			"Detects a shared 5xx responder that takes neither the request nor a context, or takes the request and never looks at its context — a client that walked away is answered as a server failure",
+			"Detects a shared 5xx responder that takes neither the request nor a context, or takes the request and never looks at its context — a client that walked away is answered as a server failure; and an outbound failure observer that reports the caller's own cancellation as a provider failure",
 			core.SeverityMedium,
 		),
 		minCallSites: 3,
@@ -161,6 +166,16 @@ func (r *ServerErrorHidesClientCancelRule) AnalyzeGoProject(ctx *core.GoProjectC
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
+			}
+			if notify := outboundCancelAsFailure(info, fn); notify != nil {
+				line := fileCtx.LineFor(notify)
+				if !fileCtx.IsSuppressed(line, r.Name()) {
+					v := r.CreateViolation(fileCtx.RelPath, line,
+						"A request without a response status is reported as a provider failure, and the caller's own cancellation has no status either - a shutdown or an abandoned request raises a provider outage")
+					v.WithCode(strings.TrimSpace(fileCtx.GetLine(line)))
+					v.WithSuggestion("Leave out errors.Is(err, context.Canceled) (and the caller's deadline) before reporting the provider")
+					violations = append(violations, v)
+				}
 			}
 			if resp, tracked := sighted[info.Defs[fn.Name]]; tracked && len(resp.callers) >= r.minCallSites {
 				violations = append(violations, r.sightedViolationFor(fileCtx, resp))
@@ -532,6 +547,97 @@ func referencesCancellation(info *types.Info, file *ast.File) bool {
 		return true
 	})
 	return found
+}
+
+// outboundCancelAsFailure returns the call reporting a provider failure in
+// a branch taken for a status of 0 - no response, which a cancelled request
+// also has - in a function given the error that never asks it about
+// cancellation.
+func outboundCancelAsFailure(info *types.Info, fn *ast.FuncDecl) *ast.CallExpr {
+	if fn.Body == nil || !hasErrorParam(info, fn) || asksAboutCancellation(info, fn.Body) {
+		return nil
+	}
+	var found *ast.CallExpr
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok || found != nil || !testsZeroStatus(ifStmt.Cond) {
+			return found == nil
+		}
+		ast.Inspect(ifStmt.Body, func(inner ast.Node) bool {
+			call, ok := inner.(*ast.CallExpr)
+			if ok && found == nil && reportsProviderFailure(call) {
+				found = call
+			}
+			return found == nil
+		})
+		return found == nil
+	})
+	return found
+}
+
+func hasErrorParam(info *types.Info, fn *ast.FuncDecl) bool {
+	for _, field := range fn.Type.Params.List {
+		if t := info.TypeOf(field.Type); t != nil && isErrorType(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// asksAboutCancellation reports a body that names context.Canceled or
+// DeadlineExceeded, or asks a context for Err().
+func asksAboutCancellation(info *types.Info, body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok || found {
+			return !found
+		}
+		if obj := info.Uses[sel.Sel]; obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == "context" &&
+			(sel.Sel.Name == "Canceled" || sel.Sel.Name == "DeadlineExceeded") {
+			found = true
+		}
+		if sel.Sel.Name == "Err" {
+			if t := info.TypeOf(sel.X); t != nil && strings.HasSuffix(t.String(), "context.Context") {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// testsZeroStatus reports a condition with status == 0 (code == 0) in it.
+func testsZeroStatus(cond ast.Expr) bool {
+	found := false
+	ast.Inspect(cond, func(n ast.Node) bool {
+		bin, ok := n.(*ast.BinaryExpr)
+		if !ok || bin.Op != token.EQL || found {
+			return !found
+		}
+		id, ok := bin.X.(*ast.Ident)
+		lit, isLit := bin.Y.(*ast.BasicLit)
+		if ok && isLit && lit.Value == "0" {
+			name := strings.ToLower(id.Name)
+			found = strings.Contains(name, "status") || strings.HasSuffix(name, "code")
+		}
+		return !found
+	})
+	return found
+}
+
+// reportsProviderFailure reports a call named for a failure or an outage
+// report: notifyProviderFailure, reportOutage.
+func reportsProviderFailure(call *ast.CallExpr) bool {
+	name := ""
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		name = fun.Name
+	case *ast.SelectorExpr:
+		name = fun.Sel.Name
+	}
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "failure") || strings.Contains(lower, "outage") || strings.Contains(lower, "unavailable")
 }
 
 // collectResponderCalls records the distinct functions that call each responder.

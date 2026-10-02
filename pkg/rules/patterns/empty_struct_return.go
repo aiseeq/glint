@@ -64,6 +64,14 @@ func (r *EmptyStructReturnRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 		regular := r.regularEmptyAnswers(funcDecl.Body, inGuard)
 
 		var violations []*core.Violation
+		if ret := cacheMissZeroAnswer(funcDecl.Body); ret != nil {
+			line := ctx.LineFor(ret)
+			v := r.CreateViolation(ctx.RelPath, line,
+				"A cache that holds nothing is answered with a zero value and no error - the caller shows an empty result instead of \"not loaded yet\"")
+			v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+			v.WithSuggestion("Return an error (or a not-ready flag) when the cache has not been filled")
+			violations = append(violations, v)
+		}
 		for _, g := range guarded {
 			// Under a nil or comma-ok guard the empty value means "absent". When
 			// the function hands out the same empty value as a regular answer
@@ -222,4 +230,62 @@ func (r *EmptyStructReturnRule) extractTypeName(expr ast.Expr) string {
 func (r *EmptyStructReturnRule) isAllowedEmptyStruct(typeName string) bool {
 	// time.Time: its zero value is a valid, checkable value (IsZero).
 	return strings.HasSuffix(typeName, "Time")
+}
+
+// cacheMissZeroAnswer returns the final return of a function that reads a
+// cached value (data := s.cachedData), answers from it under len(data) > 0,
+// and otherwise returns a literal of zero values with a nil error.
+func cacheMissZeroAnswer(body *ast.BlockStmt) *ast.ReturnStmt {
+	list := body.List
+	if len(list) < 2 {
+		return nil
+	}
+	ret, ok := list[len(list)-1].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 2 || !isNilIdent(ret.Results[1]) || !isAllZeroLiteral(ret.Results[0]) {
+		return nil
+	}
+	check, ok := list[len(list)-2].(*ast.IfStmt)
+	if !ok || check.Else != nil {
+		return nil
+	}
+	bin, ok := check.Cond.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.GTR || !isLenCall(bin.X) {
+		return nil
+	}
+	cached, ok := lenArgument(bin.X).(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	for _, stmt := range list[:len(list)-2] {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !isIdentNamed(assign.Lhs[0], cached.Name) {
+			continue
+		}
+		if sel, ok := assign.Rhs[0].(*ast.SelectorExpr); ok && strings.Contains(strings.ToLower(sel.Sel.Name), "cache") {
+			return ret
+		}
+	}
+	return nil
+}
+
+// isAllZeroLiteral reports a composite literal (or its address) whose fields
+// are all zero values: 0, "", false, nil, an empty literal.
+func isAllZeroLiteral(expr ast.Expr) bool {
+	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+		expr = unary.X
+	}
+	lit, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	for _, elt := range lit.Elts {
+		value := elt
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			value = kv.Value
+		}
+		if !isZeroValueExpr(value) && !isIdentNamed(value, "false") {
+			return false
+		}
+	}
+	return true
 }
