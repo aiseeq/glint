@@ -591,6 +591,32 @@ func ConditionalUpsert(sql string) bool {
 	return conflict != nil && conflict.GetAction() == pgquery.OnConflictAction_ONCONFLICT_UPDATE && conflict.GetWhereClause() != nil
 }
 
+// ReturningMayBeEmpty reports an INSERT ... ON CONFLICT ... RETURNING that
+// returns no row on a conflict: DO NOTHING, or DO UPDATE ... WHERE whose row
+// fails the WHERE. A single-row read of it gets the driver's no-rows error
+// for the conflict, and every other error is a failure of the insert.
+func ReturningMayBeEmpty(sql string) bool {
+	result, ok := parse(sql)
+	if !ok || len(result.GetStmts()) != 1 {
+		return false
+	}
+	insert := result.GetStmts()[0].GetStmt().GetInsertStmt()
+	if insert == nil || len(insert.GetReturningList()) == 0 {
+		return false
+	}
+	conflict := insert.GetOnConflictClause()
+	if conflict == nil {
+		return false
+	}
+	switch conflict.GetAction() {
+	case pgquery.OnConflictAction_ONCONFLICT_NOTHING:
+		return true
+	case pgquery.OnConflictAction_ONCONFLICT_UPDATE:
+		return conflict.GetWhereClause() != nil
+	}
+	return false
+}
+
 // ConflictParams returns, for an INSERT ... VALUES ... ON CONFLICT (columns)
 // DO UPDATE, the parameter number bound to each conflict column, and the
 // offset of the ON CONFLICT clause.

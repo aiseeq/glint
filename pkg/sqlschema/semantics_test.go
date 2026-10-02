@@ -225,3 +225,11 @@ CREATE TABLE daily (account_id UUID NOT NULL, day DATE NOT NULL, amount NUMERIC,
 		assert.Empty(t, schema.DateOnlyOrders(allowed), allowed)
 	}
 }
+
+func TestReturningMayBeEmpty(t *testing.T) {
+	assert.True(t, ReturningMayBeEmpty(`INSERT INTO sync (id, wallet) VALUES ($1, $2) ON CONFLICT (wallet) DO NOTHING RETURNING *`))
+	assert.True(t, ReturningMayBeEmpty(`INSERT INTO sync (id, wallet) VALUES ($1, $2) ON CONFLICT (wallet) DO UPDATE SET id = EXCLUDED.id WHERE sync.id < EXCLUDED.id RETURNING id`))
+	assert.False(t, ReturningMayBeEmpty(`INSERT INTO sync (id, wallet) VALUES ($1, $2) ON CONFLICT (wallet) DO UPDATE SET id = EXCLUDED.id RETURNING id`))
+	assert.False(t, ReturningMayBeEmpty(`INSERT INTO sync (id, wallet) VALUES ($1, $2) ON CONFLICT (wallet) DO NOTHING`))
+	assert.False(t, ReturningMayBeEmpty(`INSERT INTO sync (id, wallet) VALUES ($1, $2) RETURNING id`))
+}
