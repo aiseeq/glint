@@ -22,6 +22,7 @@ import (
 
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 	parser "github.com/wasilibs/go-pgquery"
+	"google.golang.org/protobuf/proto"
 )
 
 // Schema is the set of tables the migrations create.
@@ -55,6 +56,22 @@ type Table struct {
 	// unique are the table's unique keys: its primary key, UNIQUE
 	// constraints, unique indexes without a WHERE.
 	unique []uniqueKey
+	// partial are the unique indexes with a WHERE: the columns are unique
+	// only among the rows the predicate admits.
+	partial []partialKey
+	// foreign are the columns of each named foreign key constraint, to undo
+	// the references when a migration drops it.
+	foreign map[string][]string
+}
+
+// partialKey is a unique index with a WHERE: no two rows the predicate
+// admits share its columns.
+type partialKey struct {
+	name    string
+	columns []string
+	// predicate are the columns the WHERE tests other than by IS NOT NULL,
+	// which a lookup by the key's columns already implies.
+	predicate []string
 }
 
 // uniqueKey is a set of columns no two rows share, by the name of the
@@ -95,7 +112,14 @@ func (t *Table) addUnique(name string, columns []string) {
 
 func (t *Table) dropUnique(name string) {
 	name = strings.ToLower(name)
+	for _, columnName := range t.foreign[name] {
+		if column := t.Column(columnName); column != nil {
+			column.References = ""
+		}
+	}
+	delete(t.foreign, name)
 	t.unique = slices.DeleteFunc(t.unique, func(k uniqueKey) bool { return k.name == name })
+	t.partial = slices.DeleteFunc(t.partial, func(k partialKey) bool { return k.name == name })
 }
 
 // Column is a column of a table.
@@ -109,6 +133,9 @@ type Column struct {
 	GeneratedDefault bool
 	// Type is the type name as written, lower case: text, numeric, uuid.
 	Type string
+	// References is the table a foreign key of the column points to, "" for
+	// a column without one.
+	References string
 }
 
 // Table returns the table or view named name, or nil.
@@ -164,6 +191,9 @@ func (t *Table) dropColumn(name string) {
 	t.columns = slices.DeleteFunc(t.columns, func(c *Column) bool { return c.Name == name })
 	t.unique = slices.DeleteFunc(t.unique, func(k uniqueKey) bool {
 		return slices.ContainsFunc(k.columns, func(c *Column) bool { return c.Name == name })
+	})
+	t.partial = slices.DeleteFunc(t.partial, func(k partialKey) bool {
+		return slices.Contains(k.columns, name) || slices.Contains(k.predicate, name)
 	})
 }
 
@@ -433,6 +463,28 @@ func (t *Table) applyConstraint(constraint *pgquery.Constraint) {
 		t.addUnique(cmp.Or(constraint.GetConname(), t.Name+"_pkey"), columns)
 	case pgquery.ConstrType_CONSTR_UNIQUE:
 		t.addUnique(cmp.Or(constraint.GetConname(), t.Name+"_"+strings.Join(columns, "_")+"_key"), columns)
+	case pgquery.ConstrType_CONSTR_FOREIGN:
+		var attrs []string
+		for _, attr := range constraint.GetFkAttrs() {
+			attrs = append(attrs, strings.ToLower(attr.GetString_().GetSval()))
+		}
+		t.addForeign(constraint, attrs)
+	}
+}
+
+// addForeign records a foreign key of the columns to the table it references.
+func (t *Table) addForeign(constraint *pgquery.Constraint, columns []string) {
+	target := strings.ToLower(constraint.GetPktable().GetRelname())
+	for _, name := range columns {
+		if column := t.Column(name); column != nil {
+			column.References = target
+		}
+	}
+	if name := strings.ToLower(constraint.GetConname()); name != "" {
+		if t.foreign == nil {
+			t.foreign = make(map[string][]string)
+		}
+		t.foreign[name] = columns
 	}
 }
 
@@ -447,6 +499,8 @@ func (t *Table) addColumn(def *pgquery.ColumnDef) {
 			t.addUnique(cmp.Or(constraint.GetConname(), t.Name+"_pkey"), []string{column.Name})
 		case pgquery.ConstrType_CONSTR_UNIQUE:
 			t.addUnique(cmp.Or(constraint.GetConname(), t.Name+"_"+column.Name+"_key"), []string{column.Name})
+		case pgquery.ConstrType_CONSTR_FOREIGN:
+			t.addForeign(constraint, []string{column.Name})
 		}
 	}
 }
@@ -455,7 +509,7 @@ func (t *Table) addColumn(def *pgquery.ColumnDef) {
 // part lower(col) or upper(col) counts as the column.
 func (s *Schema) index(stmt *pgquery.IndexStmt) {
 	table := s.Table(stmt.GetRelation().GetRelname())
-	if table == nil || !stmt.GetUnique() || stmt.GetWhereClause() != nil {
+	if table == nil || !stmt.GetUnique() {
 		return
 	}
 	var columns []string
@@ -473,7 +527,49 @@ func (s *Schema) index(stmt *pgquery.IndexStmt) {
 		}
 		columns = append(columns, name)
 	}
+	// A WHERE that only leaves out NULL keys, or tests only the key's own
+	// values (email <> ''), makes no difference to a lookup by a key value
+	// the predicate admits: an equality is never true of NULL, and the
+	// caller picks the value.
+	predicate := slices.DeleteFunc(predicateColumns(stmt.GetWhereClause()), func(name string) bool { return slices.Contains(columns, name) })
+	if len(predicate) > 0 {
+		table.partial = append(table.partial, partialKey{name: strings.ToLower(stmt.GetIdxname()), columns: columns, predicate: predicate})
+		return
+	}
 	table.addUnique(stmt.GetIdxname(), columns)
+}
+
+// predicateColumns returns the columns a partial index's WHERE tests other
+// than by IS NOT NULL.
+func predicateColumns(where *pgquery.Node) []string {
+	if where == nil {
+		return nil
+	}
+	var columns []string
+	visit := func(node *pgquery.Node) {
+		if test := node.GetNullTest(); test != nil && test.GetNulltesttype() == pgquery.NullTestType_IS_NOT_NULL && refName(test.GetArg()) != "" {
+			return
+		}
+		walk(node.ProtoReflect(), func(m proto.Message) {
+			if ref, ok := m.(*pgquery.ColumnRef); ok {
+				fields := ref.GetFields()
+				if len(fields) > 0 && fields[len(fields)-1].GetString_() != nil {
+					name := strings.ToLower(fields[len(fields)-1].GetString_().GetSval())
+					if !slices.Contains(columns, name) {
+						columns = append(columns, name)
+					}
+				}
+			}
+		})
+	}
+	if b := where.GetBoolExpr(); b != nil && b.GetBoolop() == pgquery.BoolExprType_AND_EXPR {
+		for _, arg := range b.GetArgs() {
+			visit(arg)
+		}
+		return columns
+	}
+	visit(where)
+	return columns
 }
 
 func (s *Schema) alter(stmt *pgquery.AlterTableStmt) {

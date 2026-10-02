@@ -13,8 +13,9 @@ import (
 // funcScope is what a typed function check sees: the types of the function's
 // package and the declarations of the loaded packages, to follow a call.
 type funcScope struct {
-	info  *types.Info
-	decls map[*types.Func]typedFuncDecl
+	info    *types.Info
+	decls   map[*types.Func]typedFuncDecl
+	callers map[*types.Func][]funcCallSite
 }
 
 // callee returns the declaration a static call reaches, ok false for a call
@@ -58,8 +59,12 @@ func (r *typedFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Vi
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
+	callers, err := funcCallSites(ctx, decls)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", r.Name(), err)
+	}
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
-		scope := funcScope{info: info, decls: decls}
+		scope := funcScope{info: info, decls: decls, callers: callers}
 		return analyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {
 			var violations []*core.Violation
 			for _, f := range r.check(scope, fn) {
