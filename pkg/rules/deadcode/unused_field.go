@@ -34,10 +34,38 @@ func init() {
 // reads does nothing no matter who sets it - a caller asking for transactions
 // created after a date gets them all - and setting it in a composite literal
 // is what hides it from the compiler and from deadcode tools.
+// Every exported field is judged too where no reader can live outside the
+// tree: in a package under internal/, which nothing outside the module may
+// import, and anywhere in a module configured as an application
+// (application: true) - a program with no importers. An exported field of a
+// struct an encoder reads, or whose value reaches an empty interface (a
+// template, fmt or an encoder behind a wrapper reads it by reflection), stays
+// alive there as well.
 // Tagged fields belong to unused-config-field, which knows about values arriving
 // from outside. Embedded and blank fields carry no name to use.
 type UnusedFieldRule struct {
 	*rules.BaseRule
+	// application judges every exported field (setting application).
+	application bool
+}
+
+// Configure reads application: the module is a program nothing imports, so its
+// exported fields have no readers outside the analyzed tree.
+func (r *UnusedFieldRule) Configure(settings map[string]any) error {
+	if err := r.BaseRule.Configure(settings); err != nil {
+		return err
+	}
+	r.application = false
+	raw, ok := settings["application"]
+	if !ok {
+		return nil
+	}
+	app, ok := raw.(bool)
+	if !ok {
+		return fmt.Errorf("configure unused-field: application must be a boolean, got %T", raw)
+	}
+	r.application = app
+	return nil
 }
 
 // NewUnusedFieldRule creates the rule
@@ -70,6 +98,7 @@ type declaredField struct {
 	fieldName string
 	setting   bool
 	filter    bool // an exported field of a filter: reported only when set
+	exported  bool // an exported field judged because no reader lives outside the tree
 }
 
 // AnalyzeGoProject reports the fields of the analyzed files that no compiled
@@ -93,17 +122,21 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
-		for _, field := range collectCheckedFields(fileCtx, info) {
+		for _, field := range collectCheckedFields(fileCtx, info, r.application) {
 			pos := field.obj.Pos()
 			if access.read[pos] || access.hashed[pos] {
 				continue
 			}
 			// An encoder reads every exported field on the program's behalf,
 			// so a setting of a type that is marshalled is not dead.
-			if field.setting && field.named != nil && access.encoded[field.named] {
+			if (field.setting || field.exported) && field.named != nil && access.encoded[field.named] {
 				continue
 			}
-			if mentions.mentioned(field.fileCtx, field.fieldName) {
+			// A value boxed into any may be read by reflection behind it.
+			if field.exported && field.named != nil && access.boxed[field.named] {
+				continue
+			}
+			if mentions.mentioned(field.fileCtx, field.fieldName) || (field.exported && mentions.mentionedAnywhere(field.fieldName)) {
 				continue
 			}
 			// A filter field nobody sets is unused surface; one callers set
@@ -171,8 +204,9 @@ func hasAnySuffix(name string, suffixes []string) bool {
 
 // collectCheckedFields returns the named fields this rule judges: the untagged
 // unexported ones of any struct, every untagged field of a settings struct,
-// and every field of a filter.
-func collectCheckedFields(fileCtx *core.FileContext, info *types.Info) []declaredField {
+// every field of a filter, and every untagged exported field where no reader
+// lives outside the tree (an application, an internal package).
+func collectCheckedFields(fileCtx *core.FileContext, info *types.Info, application bool) []declaredField {
 	var fields []declaredField
 
 	ast.Inspect(fileCtx.GoAST, func(n ast.Node) bool {
@@ -191,12 +225,13 @@ func collectCheckedFields(fileCtx *core.FileContext, info *types.Info) []declare
 
 		setting := isSettingType(spec.Name.Name)
 		filter := isFilterType(spec.Name.Name)
+		closed := application || (named != nil && internalPackage(named.Obj().Pkg()))
 		for _, field := range structType.Fields.List {
 			if (field.Tag != nil && !filter) || len(field.Names) == 0 {
 				continue // tagged fields and embedded ones are other rules' business
 			}
 			for _, name := range field.Names {
-				if name.Name == "_" || (name.IsExported() && !setting) {
+				if name.Name == "_" || (name.IsExported() && !setting && !closed) {
 					continue
 				}
 				obj, ok := info.Defs[name].(*types.Var)
@@ -212,6 +247,7 @@ func collectCheckedFields(fileCtx *core.FileContext, info *types.Info) []declare
 					fieldName: name.Name,
 					setting:   setting && name.IsExported(),
 					filter:    filter && name.IsExported(),
+					exported:  closed && name.IsExported() && !setting,
 				})
 			}
 		}
@@ -219,6 +255,15 @@ func collectCheckedFields(fileCtx *core.FileContext, info *types.Info) []declare
 	})
 
 	return fields
+}
+
+// internalPackage reports a package nothing outside its module may import.
+func internalPackage(pkg *types.Package) bool {
+	if pkg == nil {
+		return false
+	}
+	path := pkg.Path()
+	return strings.HasPrefix(path, "internal/") || strings.Contains(path, "/internal/") || strings.HasSuffix(path, "/internal")
 }
 
 // declaredStructType returns the checked struct behind a type declaration.

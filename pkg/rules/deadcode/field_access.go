@@ -41,6 +41,11 @@ type fieldAccess struct {
 	// encoder, following their fields.
 	decoded map[*types.Named]bool
 	encoded map[*types.Named]bool
+	// boxed are the named structs whose values reach an empty interface - an
+	// any parameter, fixed or variadic, or an element of a literal of any -
+	// following pointers, slices, maps and fields: reflection behind it
+	// (templates, fmt, encoders behind a wrapper) may read every exported field.
+	boxed map[*types.Named]bool
 	// decoderWrappers are the functions that hand an untyped parameter to a
 	// decoder (get(path string, out any) { ... Decode(out) }), with the
 	// indexes of those parameters.
@@ -57,6 +62,7 @@ func newFieldAccess() *fieldAccess {
 		hashed:       make(map[token.Pos]bool),
 		decoded:      make(map[*types.Named]bool),
 		encoded:      make(map[*types.Named]bool),
+		boxed:        make(map[*types.Named]bool),
 
 		decoderWrappers: make(map[*types.Func][]int),
 	}
@@ -177,6 +183,7 @@ func (a *fieldAccess) collect(file *ast.File, info *types.Info) {
 			}
 		case *ast.CompositeLit:
 			a.literal(node, info)
+			a.boxedElements(node, info)
 		case *ast.BinaryExpr:
 			if node.Op == token.EQL || node.Op == token.NEQ {
 				a.markHashed(info.TypeOf(node.X))
@@ -217,12 +224,40 @@ func (a *fieldAccess) emptyInterfaceArguments(call *ast.CallExpr, info *types.In
 		fixed--
 	}
 	for i, arg := range call.Args {
+		if isUntypedParam(signature, i) && call.Ellipsis == token.NoPos {
+			addReachableStructs(a.boxed, info.TypeOf(arg))
+		}
 		if i >= fixed {
-			break
+			continue
 		}
 		if isEmptyInterface(signature.Params().At(i).Type()) {
 			a.markHashed(info.TypeOf(arg))
 		}
+	}
+}
+
+// boxedElements records the values of a slice or map literal whose elements
+// are an empty interface (map[string]any{"rows": rows}).
+func (a *fieldAccess) boxedElements(lit *ast.CompositeLit, info *types.Info) {
+	var elem types.Type
+	switch typ := types.Unalias(info.TypeOf(lit)).Underlying().(type) {
+	case *types.Slice:
+		elem = typ.Elem()
+	case *types.Array:
+		elem = typ.Elem()
+	case *types.Map:
+		elem = typ.Elem()
+	default:
+		return
+	}
+	if !isEmptyInterface(elem) {
+		return
+	}
+	for _, elt := range lit.Elts {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			elt = kv.Value
+		}
+		addReachableStructs(a.boxed, info.TypeOf(elt))
 	}
 }
 
