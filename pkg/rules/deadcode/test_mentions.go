@@ -80,6 +80,18 @@ func (m *testMentions) mentioned(declCtx *core.FileContext, name string) bool {
 	return m.names[filepath.Dir(declCtx.Path)][name]
 }
 
+// mentionedAnywhere reports whether any scanned file of the project uses the
+// identifier: an exported member is reachable from tests of other packages
+// (a test helper's counter asserted by the package it fakes for).
+func (m *testMentions) mentionedAnywhere(name string) bool {
+	for _, set := range m.names {
+		if set[name] {
+			return true
+		}
+	}
+	return false
+}
+
 // collectIdentifierWords splits source text into identifier-shaped words. A
 // lexer would also see through strings and comments, but a mention in either
 // still signals intent, and over-matching is the safe direction here.
