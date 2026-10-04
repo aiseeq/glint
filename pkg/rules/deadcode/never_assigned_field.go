@@ -122,7 +122,10 @@ func (r *NeverAssignedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 		return nil, fmt.Errorf("never assigned field: %w", err)
 	}
 
-	ctors := collectConstructorFields(ctx)
+	ctors, err := collectConstructorFields(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("never assigned field: %w", err)
+	}
 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		violations := r.bypassingLiterals(fileCtx, info, ctors)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/ast"
 	"maps"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -74,11 +75,23 @@ func (r *ScatteredConstructionRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	}
 
 	files := make([]*core.FileContext, 0, len(ctx.Files))
+	helperDir := map[string]bool{} // fixtures of a test-helper package are test code
 	for _, fileCtx := range ctx.Files {
 		if fileCtx == nil || !fileCtx.IsGoFile() || fileCtx.GoAST == nil || fileCtx.IsTestFile() {
 			continue
 		}
-		files = append(files, fileCtx)
+		dir := filepath.Dir(fileCtx.Path)
+		helper, seen := helperDir[dir]
+		if !seen {
+			var err error
+			if helper, err = core.IsTestHelperDir(dir); err != nil {
+				return nil, fmt.Errorf("%s: %w", r.Name(), err)
+			}
+			helperDir[dir] = helper
+		}
+		if !helper {
+			files = append(files, fileCtx)
+		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].RelPath < files[j].RelPath })
 

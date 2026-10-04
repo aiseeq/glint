@@ -3,7 +3,9 @@ package core
 import (
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -151,6 +153,41 @@ func (ctx *FileContext) IsTestFile() bool {
 		}
 	}
 	return false
+}
+
+// IsTestHelperDir reports whether dir holds a Go test-helper package, the idiom
+// of net/http/httptest and testing/fstest: the package name ends in "test" and
+// one of its files imports testing. Such a package is compiled like any other
+// so that tests of several packages can share it, but its code is test code:
+// fixtures built there are not the program's construction sites. The name
+// alone is not enough — a package latest is not a test helper. It reads the
+// other files of dir, so only project-wide rules may ask it; IsTestFile stays
+// a property of the file alone.
+func IsTestHelperDir(dir string) (bool, error) {
+	if !strings.HasSuffix(filepath.Base(dir), "test") {
+		return false, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("test helper dir %s: %w", dir, err)
+	}
+	fset := token.NewFileSet()
+	named, imports := false, false
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, n), nil, parser.ImportsOnly)
+		if err != nil {
+			return false, fmt.Errorf("test helper dir %s: %w", dir, err)
+		}
+		named = named || strings.HasSuffix(f.Name.Name, "test")
+		for _, im := range f.Imports {
+			imports = imports || im.Path.Value == `"testing"`
+		}
+	}
+	return named && imports, nil
 }
 
 // generatedMarker is the line the Go convention puts before the first code of

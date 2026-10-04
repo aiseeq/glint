@@ -3,6 +3,8 @@ package core
 import (
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -119,6 +121,31 @@ func TestFileContextIsTestFile(t *testing.T) {
 func TestFileContextIsTestFileIgnoresDirectoriesAboveProjectRoot(t *testing.T) {
 	ctx := NewFileContext("/builds/test/project/internal/app.go", "/builds/test/project", nil, nil)
 	assert.False(t, ctx.IsTestFile())
+}
+
+// A Go test-helper package — the idiom of net/http/httptest and testing/fstest:
+// its name ends in "test" and one of its files imports testing. A package
+// named latest that never imports testing is not, nor is an ordinary package
+// that imports testing; IsTestFile does not look at the directory.
+func TestIsTestHelperDir(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, src string) string {
+		path := filepath.Join(root, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(src), 0o644))
+		return path
+	}
+	write("internal/storetest/scene.go", "package storetest\n\nimport \"testing\"\n\nfunc Scene(t *testing.T) { t.Helper() }\n")
+	fixture := write("internal/storetest/fixture.go", "package storetest\n\nfunc Fixture() int { return 1 }\n")
+	write("api/latest/handler.go", "package latest\n\nfunc Handle() int { return 2 }\n")
+	write("internal/store/store.go", "package store\n\nimport \"testing\"\n\nvar _ = testing.Short\n")
+
+	for dir, want := range map[string]bool{"internal/storetest": true, "api/latest": false, "internal/store": false} {
+		got, err := IsTestHelperDir(filepath.Join(root, dir))
+		require.NoError(t, err)
+		assert.Equal(t, want, got, dir)
+	}
+	assert.False(t, NewFileContext(fixture, root, nil, nil).IsTestFile(), "IsTestFile is a property of the file alone")
 }
 
 func TestFileContextGetLine(t *testing.T) {

@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -63,4 +64,17 @@ func TestScatteredConstructionRunsAreIndependent(t *testing.T) {
 	}
 	assert.Empty(t, runRuleOnFiles(t, rule, files))
 	assert.Empty(t, runRuleOnFiles(t, rule, files))
+}
+
+// Fixtures of a test-helper package (srvtest: the name ends in test, it imports
+// testing) are test code like _test.go files: their literals are not
+// construction sites of the program.
+func TestScatteredConstructionSkipsTestHelperPackage(t *testing.T) {
+	violations := runRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+		"srv/a.go":              scatteredServerFile("serverA"),
+		"srv/b.go":              scatteredServerFile("serverB"),
+		"srv/srvtest/server.go": strings.Replace(scatteredServerFile("Server"), "package projecta", "package srvtest", 1),
+		"srv/srvtest/t.go":      "package srvtest\n\nimport \"testing\"\n\nfunc Helper(t *testing.T) { t.Helper() }\n",
+	})
+	assert.Empty(t, violations)
 }
