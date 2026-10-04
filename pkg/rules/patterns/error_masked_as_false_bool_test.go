@@ -51,6 +51,40 @@ func (c *Ctx) PlaceBuilding(id string) bool {
 			expectedCount: 0,
 		},
 		{
+			name: "error logged by the receiver's Log<Word> method NOT flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type Ctx struct{ Log func(string) }
+func (c *Ctx) LogLine(msg string, kv ...any) {}
+func (c *Ctx) Load(id string) (int, error) { return 0, nil }
+func (c *Ctx) PlaceBuilding(id string) bool {
+	n, err := c.Load(id)
+	if err != nil {
+		c.LogLine("place", "id", id, "error", err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "Login is not a logging verb — masked error still flagged",
+			path: "/src/backend/session.go",
+			code: `package session
+type S struct{}
+func (s *S) Login(user string) {}
+func (s *S) Load(id string) (int, error) { return 0, nil }
+func (s *S) Ready(id string) bool {
+	n, err := s.Load(id)
+	if err != nil {
+		s.Login(id)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
 			name: "error written to stderr by a CLI NOT flagged",
 			path: "/src/cmd/tool/cache.go",
 			code: `package main

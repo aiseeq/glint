@@ -3,6 +3,8 @@ package helpers
 import (
 	"go/ast"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // IsLoggerCall recognises calls on a logger: the receiver mentions log (log, logger,
@@ -20,9 +22,10 @@ func IsLoggerCall(call *ast.CallExpr) bool {
 	if !loggingVerbs[verb] && !strings.HasPrefix(verb, "log") {
 		return false
 	}
-	// A method named log or logf says what it does whatever its receiver
-	// is called (c.log(...)); the math packages' Log is a logarithm.
-	if (verb == "log" || verb == "logf") && !isMathPackage(sel.X) {
+	// A method named log or logf — or Log<Word> (c.LogLine) — says what it does
+	// whatever its receiver is called (c.log(...)); the math packages' Log is a
+	// logarithm, and Login is not a log at all.
+	if (verb == "log" || verb == "logf" || isLogWordName(sel.Sel.Name)) && !isMathPackage(sel.X) {
 		return true
 	}
 	return IsLoggerReceiver(sel.X)
@@ -41,6 +44,15 @@ func IsStderrPrint(sel *ast.SelectorExpr, call *ast.CallExpr) bool {
 	}
 	osPkg, ok := stream.X.(*ast.Ident)
 	return ok && osPkg.Name == "os" && stream.Sel.Name == "Stderr"
+}
+
+// isLogWordName — Log or log followed by a capitalised word: LogLine, logEvent.
+func isLogWordName(name string) bool {
+	if len(name) <= 3 || !strings.EqualFold(name[:3], "log") {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(name[3:])
+	return unicode.IsUpper(r)
 }
 
 func isMathPackage(expr ast.Expr) bool {
