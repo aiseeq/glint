@@ -1,6 +1,7 @@
 package doccheck
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -214,5 +215,31 @@ func TestDocStaleReferenceSkipsTestFiles(t *testing.T) {
 func fixture() {}
 `))
 
+	assert.Empty(t, violations)
+}
+
+// A check of one directory loads only its files, yet a comment there names a
+// test of another package of the module: the test counts all the same.
+func TestDocStaleReferenceSeesTestsOutsideCheckedFiles(t *testing.T) {
+	files := withFile("catalog/a.go", `package catalog
+
+import "example.com/rulestest/planner"
+
+// run is held by planner.TestRun.
+func run(*planner.Ctx) {}
+`)
+	files["planner/run_test.go"] = "package planner\n\nimport \"testing\"\n\nfunc TestRun(t *testing.T) {}\n"
+	root, contexts := rulestest.Module(t, files)
+	var checked []*core.FileContext
+	for _, fileCtx := range contexts {
+		if strings.HasPrefix(fileCtx.RelPath, "catalog/") || fileCtx.RelPath == "go.mod" {
+			checked = append(checked, fileCtx)
+		}
+	}
+	project, err := core.LoadGoProject(root, checked, core.GoProjectOptions{})
+	require.NoError(t, err)
+
+	violations, err := NewDocStaleReferenceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
 	assert.Empty(t, violations)
 }
