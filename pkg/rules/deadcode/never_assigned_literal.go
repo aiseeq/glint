@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -24,7 +25,7 @@ type constructorFields struct {
 }
 
 // collectConstructorFields reads every type-checked file of the project.
-func collectConstructorFields(ctx *core.GoProjectContext) constructorFields {
+func collectConstructorFields(ctx *core.GoProjectContext) (constructorFields, error) {
 	fields := constructorFields{
 		set:      make(map[*types.Named]map[*types.Var]bool),
 		used:     make(map[*types.Named]map[*types.Var]bool),
@@ -33,6 +34,16 @@ func collectConstructorFields(ctx *core.GoProjectContext) constructorFields {
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
 			continue
+		}
+		// a fixture of a test-helper package is not the type's constructor
+		if len(pkg.Package.GoFiles) > 0 {
+			helper, err := core.IsTestHelperDir(filepath.Dir(pkg.Package.GoFiles[0]))
+			if err != nil {
+				return fields, err
+			}
+			if helper {
+				continue
+			}
 		}
 		info := pkg.Package.TypesInfo
 		for _, file := range pkg.Package.Syntax {
@@ -74,7 +85,7 @@ func collectConstructorFields(ctx *core.GoProjectContext) constructorFields {
 			}
 		}
 	}
-	return fields
+	return fields, nil
 }
 
 // collectMethodUses records the fields of the receiver a method goes through

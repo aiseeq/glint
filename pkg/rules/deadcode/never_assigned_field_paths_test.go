@@ -167,3 +167,42 @@ func query() (*Filter, error) {
 	})
 	assert.Empty(t, places)
 }
+
+// A helper of a test-helper package (jobtest: the name ends in test, it
+// imports testing) that returns a fully filled literal is a test fixture, not
+// the constructor of the type: the program's literal that a wiring function
+// completes is not a bypass.
+func TestNeverAssignedFieldIgnoresTestHelperConstructor(t *testing.T) {
+	places := neverAssignedPlaces(t, map[string]string{
+		"pipeline/job.go": `package pipeline
+
+type Job struct {
+	Watch func()
+	Line  string
+}
+
+func (p *Job) Run() { p.Watch() }
+
+func wire(p *Job) *Job {
+	p.Watch = func() {}
+	return p
+}
+
+func Line() int { return len(wire(&Job{Line: "x"}).Line) }
+`,
+		"pipeline/jobtest/scene.go": `package jobtest
+
+import (
+	"testing"
+
+	"example.com/rulestest/pipeline"
+)
+
+func Scene(t *testing.T) *pipeline.Job {
+	t.Helper()
+	return &pipeline.Job{Watch: func() {}, Line: "scene"}
+}
+`,
+	})
+	assert.Empty(t, places)
+}
