@@ -4,11 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/parser"
+	"go/token"
 	"go/types"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -86,14 +87,6 @@ type modulePackages struct {
 
 func collectModulePackages(ctx *core.GoProjectContext) (*modulePackages, error) {
 	m := &modulePackages{byPath: map[string]map[string]bool{}, byName: map[string]map[string]bool{}, any: map[string]bool{}}
-	// the typed packages carry no _test.go files: their declarations come from the project files by directory
-	testFiles := map[string][]*ast.File{}
-	for _, fileCtx := range ctx.Files {
-		if fileCtx != nil && fileCtx.GoAST != nil && fileCtx.IsTestFile() {
-			dir := filepath.Dir(fileCtx.Path)
-			testFiles[dir] = append(testFiles[dir], fileCtx.GoAST)
-		}
-	}
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil {
 			return nil, errors.New("doc stale reference: package has no syntax")
@@ -110,10 +103,8 @@ func collectModulePackages(ctx *core.GoProjectContext) (*modulePackages, error) 
 		}
 		addScopeNames(names, p.Types.Scope())
 		if len(p.GoFiles) > 0 {
-			for _, file := range testFiles[filepath.Dir(p.GoFiles[0])] {
-				if file.Name.Name == p.Name || file.Name.Name == p.Name+"_test" {
-					addDeclNames(names, file)
-				}
+			if err := addTestNames(names, filepath.Dir(p.GoFiles[0]), p.Name); err != nil {
+				return nil, err
 			}
 		}
 		for name := range names {
@@ -147,6 +138,28 @@ func addScopeNames(names map[string]bool, scope *types.Scope) {
 			}
 		}
 	}
+}
+
+// addTestNames — top-level names of the package's _test.go files. The typed
+// packages carry no test files, and the project files hold only those under
+// the checked root, while a comment names a test of any module package: the
+// files are read from the package directory.
+func addTestNames(names map[string]bool, dir, pkg string) error {
+	paths, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
+	if err != nil {
+		return fmt.Errorf("doc stale reference: %w", err)
+	}
+	fset := token.NewFileSet()
+	for _, path := range paths {
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return fmt.Errorf("doc stale reference: %w", err)
+		}
+		if file.Name.Name == pkg || file.Name.Name == pkg+"_test" {
+			addDeclNames(names, file)
+		}
+	}
+	return nil
 }
 
 // addDeclNames — top-level names of one _test.go file of the package, internal or external.
@@ -271,10 +284,7 @@ func resolvePackage(name, own, ownPath string, imports map[string]string, mod *m
 func fileImports(file *ast.File) map[string]string {
 	out := map[string]string{}
 	for _, spec := range file.Imports {
-		path, err := strconv.Unquote(spec.Path.Value)
-		if err != nil {
-			continue
-		}
+		path := strings.Trim(spec.Path.Value, "\"`") // the parser keeps the literal quoted
 		name := path[strings.LastIndex(path, "/")+1:]
 		if spec.Name != nil {
 			name = spec.Name.Name
