@@ -243,3 +243,19 @@ func run(*planner.Ctx) {}
 	require.NoError(t, err)
 	assert.Empty(t, violations)
 }
+
+// Repro from a real project: a comment names a family of constants by its
+// prefix, pkg.Prefix*. The reference is live while the package declares a
+// name with the prefix, and stale once none is left.
+func TestDocStaleReferenceAcceptsPrefixFamily(t *testing.T) {
+	files := withFile("catalog/a.go", `package catalog
+
+// run maps the reply onto one of planner.Status* and never onto planner.Phase*.
+func run() {}
+`)
+	files["planner/status.go"] = "package planner\n\nconst (\n\tStatusPending = \"pending\"\n\tStatusDone = \"done\"\n)\n"
+	violations := analyzeStaleReference(t, files)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "planner.Phase*")
+}

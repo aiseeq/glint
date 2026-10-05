@@ -13,6 +13,9 @@ import (
 func init() {
 	rules.Register(NewMoneyZeroShownAsOtherFieldRule())
 	rules.Register(NewCSVFormulaInjectionRule())
+	rules.Register(newTSRule("csv-formula-guard-mangles-negative-number",
+		"Detects a CSV formula guard that quotes a cell starting with - or + with no exemption for numbers — a negative amount becomes text the spreadsheet does not sum",
+		checkFormulaGuardNumbers))
 }
 
 // MoneyZeroShownAsOtherFieldRule detects a money value that is used only when
@@ -133,4 +136,48 @@ func (r *CSVFormulaInjectionRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 			"Prefix a cell that starts with =, +, -, @, tab or CR with a single quote before quoting it")
 	}
 	return violations
+}
+
+var (
+	// jsFormulaSignList is a list of formula characters with a sign in it:
+	// ['=', '+', '-', '@'].
+	jsFormulaSignList = regexp.MustCompile(`\[\s*['"]=['"]\s*,[^\]\n]*['"][-+]['"]`)
+	// jsNumberExemption is a test that tells a number from a formula.
+	jsNumberExemption = regexp.MustCompile(`\\d|isNaN\s*\(|isFinite\s*\(|Number\s*\(|parseFloat\s*\(`)
+)
+
+// checkFormulaGuardNumbers reports a formula guard whose characters include
+// a sign in a function that never tells a number from a formula.
+func checkFormulaGuardNumbers(r *tsRule, ctx *core.FileContext, f jsFlat) []*core.Violation {
+	if !jsCSVMention.MatchString(f.text) {
+		return nil
+	}
+	var out []*core.Violation
+	for _, m := range jsFormulaSignList.FindAllStringIndex(f.text, -1) {
+		scope := f.text
+		if fn, ok := f.enclosingFunction(m[0]); ok {
+			if end, ok := f.closing(fn.brace); ok {
+				scope = f.text[fn.brace:end]
+			}
+		}
+		if jsNumberExemption.MatchString(scope) || jsNumberExemption.MatchString(fileConstants(f.text)) {
+			continue
+		}
+		out = jsReport(out, r.BaseRule, ctx, f.line(m[0]),
+			"The formula guard quotes a cell that starts with - or +, numbers included — a negative amount becomes text the spreadsheet does not sum",
+			"Leave a plain decimal number (/^-?\\d+(\\.\\d+)?$/) unquoted, and quote the rest")
+	}
+	return out
+}
+
+// fileConstants returns the top-level const declarations of a file, where a
+// number pattern used by the guard is defined.
+func fileConstants(text string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "const ") || strings.HasPrefix(line, "export const ") {
+			b.WriteString(line + "\n")
+		}
+	}
+	return b.String()
 }
