@@ -97,8 +97,12 @@ var (
 	libpqKeyword      = regexp.MustCompile(`(?i)\b(?:dbname|host|user)=`)
 )
 
-// checkDBPasswordLiteral reports a database password written as a literal.
+// checkDBPasswordLiteral reports a database password written as a literal;
+// a test script's DSN is a fixture.
 func checkDBPasswordLiteral(r *shellRule, src *shellSource) []*core.Violation {
+	if src.ctx.IsTestFile() {
+		return nil
+	}
 	var out []*core.Violation
 	for _, l := range src.lines {
 		for _, m := range dbPasswordLiteral.FindAllStringSubmatchIndex(l.text, -1) {

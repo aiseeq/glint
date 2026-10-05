@@ -162,15 +162,15 @@ func isEnvTemplateName(name string) bool {
 }
 
 // IsTestFile reports whether the file is test code: a Go _test.go file, a
-// JS/TS *.test.* or *.spec.* file, or any file under a test directory of the
-// project. Directories are matched in the project-relative path: the absolute
+// shell _test.sh file, a JS/TS *.test.* or *.spec.* file, or any file under
+// a test directory of the project. Directories are matched in the project-relative path: the absolute
 // one also names where the checkout lives, and a project cloned into
 // /builds/test/ is not test code as a whole. A Go file named test_*.go is
 // compiled into its package like any other and is not a test.
 func (ctx *FileContext) IsTestFile() bool {
 	name := filepath.Base(ctx.Path)
 
-	if strings.HasSuffix(name, "_test.go") {
+	if strings.HasSuffix(name, "_test.go") || strings.HasSuffix(name, "_test.sh") {
 		return true
 	}
 	if strings.Contains(name, ".test.") || strings.Contains(name, ".spec.") {

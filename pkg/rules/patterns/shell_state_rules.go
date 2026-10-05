@@ -250,7 +250,7 @@ func checkGetterDefault(r *shellRule, src *shellSource) []*core.Violation {
 	if src.make {
 		return nil
 	}
-	if src.ctx.IsTestFile() || strings.HasSuffix(src.ctx.RelPath, "_test.sh") {
+	if src.ctx.IsTestFile() {
 		return nil // a test stub prints the answer it imitates
 	}
 	funcs := src.functions()

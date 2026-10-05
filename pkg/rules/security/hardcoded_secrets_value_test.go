@@ -56,3 +56,15 @@ func TestHardcodedSecretsPlaceholderOnlyInValue(t *testing.T) {
 		})
 	}
 }
+
+// A test script's one-line PEM with a stub body exercises the parsing and
+// holds no key; a full key block in a test file is still a leak.
+func TestHardcodedSecretsStubPEMInTest(t *testing.T) {
+	begin, end := "-----BEGIN "+"PRIVATE KEY-----", "-----END "+"PRIVATE KEY-----"
+	stub := rulestest.TextFile(t, "scripts/loader_test.sh",
+		"PEM=$'"+begin+"\\nMIIBOgIBAAJBAKj34GkxFhD9\\n"+end+"\\n'\n")
+	assert.Empty(t, NewHardcodedSecretsRule().AnalyzeFile(stub))
+	full := rulestest.TextFile(t, "scripts/loader_test.sh",
+		"PEM='"+begin+"\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n"+end+"'\n")
+	assert.Len(t, NewHardcodedSecretsRule().AnalyzeFile(full), 1)
+}

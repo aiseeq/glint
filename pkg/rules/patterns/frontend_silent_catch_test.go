@@ -298,3 +298,38 @@ export function register() {
 		t.Fatalf("a service worker registration is best effort, got line %d", found[0].Line)
 	}
 }
+
+// An event handler's .catch on a function that catches and shows its own
+// failures only keeps the promise from floating; on a function without a
+// catch it is the only handling there is.
+func TestFrontendSilentCatchWrappedHandler(t *testing.T) {
+	code := `const log = createLogger('mfa')
+export function Mfa() {
+  const submit = async (e: Event) => {
+    try {
+      await verify(e)
+    } catch (err) {
+      setCodeError(errorText(err))
+    }
+  }
+  const copy = async () => {
+    await navigator.clipboard.writeText(code)
+  }
+  const onSubmit = (e: Event) => {
+    submit(e).catch((error: unknown) => { log.error('submit failed', error) })
+  }
+  const onCopy = () => {
+    copy().catch((error: unknown) => { log.error('copy failed', error) })
+  }
+  return null
+}
+`
+	ctx := core.NewFileContext("frontend/src/components/Mfa.tsx", ".", []byte(code), nil)
+	var lines []int
+	for _, v := range NewFrontendSilentCatchRule().AnalyzeFile(ctx) {
+		lines = append(lines, v.Line)
+	}
+	if len(lines) != 1 || lines[0] != 17 {
+		t.Fatalf("want one finding on line 17, got %v", lines)
+	}
+}

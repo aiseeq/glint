@@ -80,7 +80,7 @@ var (
 	heredocCatCommand  = regexp.MustCompile(`\bcat\b`)
 	envAssignmentLine  = regexp.MustCompile(`^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=(.*)$`)
 	envExampleRequired = regexp.MustCompile(`(?i)\brequired\b|обязател`)
-	envExampleOptional = regexp.MustCompile(`(?i)optional|default|по умолчанию|необязат|опционал|пусто|empty|only (?:for|when|if)|только (?:для|при|если)|\bif set\b|\bunset\b|если`)
+	envExampleOptional = regexp.MustCompile(`(?i)optional|default|по умолчанию|необязат|опционал|пусто|empty|only (?:for|when|if)|только (?:для|при|если)|\bif set\b|\bunset\b|если|\btests? only\b|\bCI only\b`)
 	composeEnvEntry    = regexp.MustCompile(`^\s*-\s*["']?([A-Za-z_][A-Za-z0-9_]*)=|^\s+([A-Za-z_][A-Za-z0-9_]*):\s`)
 )
 
@@ -109,16 +109,26 @@ func (r *EnvKeyMissingFromDeployEnvRule) UseProjectFiles(files []*core.FileConte
 	provided := make(map[string]bool)
 	reads := make(map[string]bool)
 	example := make(map[string]envExampleKey)
+	carried := false // a loader carries keys from a secret store
 	for _, ctx := range files {
 		switch {
 		case ctx.IsEnvTemplate():
 			readEnvExample(ctx.Lines, example)
 		case productionGoFile(ctx):
+			if importsTesting(ctx.GoAST) {
+				continue // a test helper package: its keys are the tests'
+			}
 			for key := range goEnvReads(ctx.GoAST) {
 				reads[key] = true
 			}
 		case ctx.IsShellFile() || ctx.IsMakefile():
 			writers = append(writers, shellEnvWriters(ctx)...)
+			if keys := loaderEnvKeys(ctx); len(keys) > 0 {
+				carried = true
+				for _, key := range keys {
+					provided[key] = true
+				}
+			}
 		case ctx.IsComposeFile():
 			for _, key := range composeEnvKeys(ctx.Lines) {
 				provided[key] = true
@@ -133,7 +143,7 @@ func (r *EnvKeyMissingFromDeployEnvRule) UseProjectFiles(files []*core.FileConte
 		return
 	}
 	filled := make(map[string]bool) // written with a value or by a deploy writer
-	hasDeployWriter := false
+	hasDeployWriter := carried
 	for _, w := range writers {
 		hasDeployWriter = hasDeployWriter || !w.template
 		for key, empty := range w.keys {
@@ -233,30 +243,103 @@ func (r *EnvKeyMissingFromDeployEnvRule) AnalyzeFile(ctx *core.FileContext) []*c
 }
 
 // readEnvExample records the keys of an env template with their comments:
-// the one after the value and the comment lines right above.
+// the one after the value and the comment above the key's block (keys on
+// consecutive lines share it). A feature switched off in the template
+// (PAYOUT_ENABLED=false) makes the keys of its prefix optional.
 func readEnvExample(lines []string, into map[string]envExampleKey) {
 	var above []string
+	inBlock := false // the previous line was a key
+	var disabled []string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
+			if inBlock {
+				above, inBlock = nil, false
+			}
 			above = append(above, trimmed)
 			continue
 		}
 		m := envAssignmentLine.FindStringSubmatch(line)
 		if m == nil {
-			above = nil
+			above, inBlock = nil, false
 			continue
 		}
+		inBlock = true
 		comment := strings.Join(above, " ")
-		if i := strings.Index(m[2], "#"); i >= 0 {
-			comment += " " + m[2][i:]
+		value := m[2]
+		if i := strings.Index(value, "#"); i >= 0 {
+			comment += " " + value[i:]
+			value = value[:i]
 		}
-		above = nil
+		if strings.HasSuffix(m[1], "_ENABLED") && strings.TrimSpace(value) == "false" {
+			disabled = append(disabled, strings.TrimSuffix(m[1], "ENABLED"))
+		}
 		into[m[1]] = envExampleKey{
 			required: envExampleRequired.MatchString(comment),
 			optional: envExampleOptional.MatchString(comment),
 		}
 	}
+	for key, ex := range into {
+		for _, prefix := range disabled {
+			if strings.HasPrefix(key, prefix) {
+				ex.optional = true
+				into[key] = ex
+			}
+		}
+	}
+}
+
+// importsTesting reports a Go file that imports testing: outside _test.go
+// files only test helpers do.
+func importsTesting(file *ast.File) bool {
+	for _, imp := range file.Imports {
+		if imp.Path.Value == `"testing"` {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	// envFileLiteral is the name of an env file in a script: "secrets.env",
+	// /opt/app/.env.
+	envFileLiteral = regexp.MustCompile(`[\w-]*\.env\b`)
+	envKeyArray    = regexp.MustCompile(`^\s*(?:declare\s+-a\s+|readonly\s+)?([A-Za-z_][A-Za-z0-9_]*)=\(`)
+	envKeyArrayOf  = regexp.MustCompile(`(?i)env|keys|fields|vars`)
+	envKeyPair     = regexp.MustCompile(`\(\s*["']([A-Z][A-Z0-9_]*)["']\s*,`)
+	envKeyElement  = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+)
+
+// loaderEnvKeys returns the keys a script that names an env file loads into
+// it from elsewhere (a secret store): the elements of an array of key names
+// (LOADER_ENV_FIELDS=( A B )) and ("KEY", value) pairs its embedded program
+// writes.
+func loaderEnvKeys(ctx *core.FileContext) []string {
+	if !envFileLiteral.MatchString(string(ctx.Content)) {
+		return nil
+	}
+	var keys []string
+	inArray := false
+	for _, line := range ctx.Lines {
+		if m := envKeyArray.FindStringSubmatch(line); m != nil && envKeyArrayOf.MatchString(m[1]) {
+			inArray = !strings.Contains(line, ")")
+			continue
+		}
+		if inArray {
+			item := strings.Trim(strings.TrimSpace(line), `"'`)
+			switch {
+			case strings.HasPrefix(item, ")"):
+				inArray = false
+			case envKeyElement.MatchString(item):
+				keys = append(keys, item)
+			}
+			continue
+		}
+		for _, m := range envKeyPair.FindAllStringSubmatch(line, -1) {
+			keys = append(keys, m[1])
+		}
+	}
+	return keys
 }
 
 // goEnvReads returns the keys a Go file reads without a default: the literal
@@ -465,8 +548,8 @@ func envStructTag(field *ast.Field) (string, bool) {
 func shellEnvWriters(ctx *core.FileContext) []envWriter {
 	var out []envWriter
 	for _, doc := range heredocs(ctx.Lines) {
-		if !envFileName(doc.target) {
-			continue
+		if !envFileName(doc.target) && !envWordInName.MatchString(path.Base(doc.target)) {
+			continue // the file of the server, or a temp file the deploy copies there
 		}
 		w := envWriter{file: ctx.RelPath, line: doc.line, keys: make(map[string]bool), template: true}
 		for _, line := range doc.body {

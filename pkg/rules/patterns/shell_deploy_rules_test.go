@@ -551,3 +551,13 @@ show_status
 `,
 	}))
 }
+
+// A DSN with a password in a test script is a fixture of the test.
+func TestShellDBPasswordLiteralSkipsTestScripts(t *testing.T) {
+	assert.Empty(t, shellFindings(t, "shell-db-password-literal", map[string]string{
+		"scripts/loader_test.sh": "#!/bin/bash\nDSN='postgres://app:p%40ss@127.0.0.1:5432/app'\n",
+	}))
+	assert.Equal(t, []string{"scripts/loader.sh:2"}, shellFindings(t, "shell-db-password-literal", map[string]string{
+		"scripts/loader.sh": "#!/bin/bash\nDSN='postgres://app:secret@127.0.0.1:5432/app'\n",
+	}))
+}
