@@ -50,3 +50,14 @@ echo "db: $DB_PASS"
 `
 	assert.Equal(t, []int{5}, shellSecretLines(t, "status.sh", script))
 }
+
+// A print inside a command substitution is captured into a variable, not
+// shown: the value never reaches the terminal.
+func TestSecretExposureShellCapturedPrint(t *testing.T) {
+	script := `DB_PASSWORD=$(set -a; . "$ROOT/.env"; printf '%s' "${DB_PASSWORD:-}")
+TOKEN=` + "`echo $API_TOKEN`" + `
+(cd /tmp; echo "$API_TOKEN")
+VALUE=$(get_value) ; echo "$API_TOKEN"
+`
+	assert.Equal(t, []int{3, 4}, shellSecretLines(t, "load.sh", script))
+}

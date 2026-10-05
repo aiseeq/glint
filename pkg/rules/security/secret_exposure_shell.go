@@ -36,8 +36,12 @@ func (r *SecretExposureRule) shellSecretPrints(ctx *core.FileContext) []*core.Vi
 		for j := i; strings.HasSuffix(strings.TrimSpace(ctx.Lines[j]), "\\") && j+1 < len(ctx.Lines); j++ {
 			logical = strings.TrimSuffix(logical, "\\") + " " + strings.TrimSpace(ctx.Lines[j+1])
 		}
-		m := shellPrint.FindStringSubmatch(logical)
-		if m == nil || shellPipeOrFile.MatchString(m[1]) {
+		loc := shellPrint.FindStringSubmatchIndex(logical)
+		if loc == nil {
+			continue
+		}
+		m := []string{logical[loc[0]:loc[1]], logical[loc[2]:loc[3]]}
+		if shellPipeOrFile.MatchString(m[1]) || insideCommandSubstitution(logical[:loc[2]]) {
 			continue
 		}
 		for _, v := range shellVariable.FindAllStringSubmatch(m[1], -1) {
@@ -56,4 +60,30 @@ func (r *SecretExposureRule) shellSecretPrints(ctx *core.FileContext) []*core.Vi
 		}
 	}
 	return violations
+}
+
+// insideCommandSubstitution reports a line prefix that leaves a $( ... ) or
+// a backquote open: what the command prints there is captured into a value,
+// not shown on the terminal.
+func insideCommandSubstitution(prefix string) bool {
+	var open []bool // true for $(, false for a plain (
+	backquote := false
+	for i := 0; i < len(prefix); i++ {
+		switch prefix[i] {
+		case '`':
+			backquote = !backquote
+		case '(':
+			open = append(open, i > 0 && prefix[i-1] == '$')
+		case ')':
+			if len(open) > 0 {
+				open = open[:len(open)-1]
+			}
+		}
+	}
+	for _, substitution := range open {
+		if substitution {
+			return true
+		}
+	}
+	return backquote
 }
