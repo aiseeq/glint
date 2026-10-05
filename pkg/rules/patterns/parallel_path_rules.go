@@ -29,7 +29,7 @@ func init() {
 // second path moved keeps the stale provider fields:
 //
 //	status := MapStatus(payload.Status, payload.Reason)            // webhook
-//	repo.UpdateFromWebhook(ctx, id, status, payload.Status, payload.Reason)
+//	repo.UpdateFromCallback(ctx, id, status, payload.Status, payload.Reason)
 //
 //	status := MapStatus(resp.Status, resp.Reason)                  // poller
 //	repo.UpdateStatus(ctx, id, status)
@@ -637,8 +637,8 @@ func readsDefinitionName(expr ast.Expr) bool {
 // positions its other call sites fill from computed values - the row written
 // through this call lacks what the other paths store:
 //
-//	repo.ApplyQuote(ctx, id, amount, tx.AmountLocal, tx.RateLocal, tx.RateSource, ...) // live path
-//	repo.ApplyQuote(ctx, id, amount, decimal.Decimal{}, decimal.Decimal{}, "", ...) // admin path
+//	repo.StoreQuote(ctx, id, amount, tx.AmountLocal, tx.RateLocal, tx.RateSource, ...) // live path
+//	repo.StoreQuote(ctx, id, amount, decimal.Decimal{}, decimal.Decimal{}, "", ...) // admin path
 func NewZeroPlaceholdersPassedForPersistedFieldsRule() *typedFuncRule {
 	r := &typedFuncRule{
 		BaseRule: rules.NewBaseRule(

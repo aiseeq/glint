@@ -204,7 +204,7 @@ func NewPublishedValueRoundedAfterUseRule() *typedFuncRule {
 }
 
 // isRoundCall reports an expression whose last call rounds: x.Mul(y).Round(8),
-// or a helper named for rounding, RoundPublishedRate(r).
+// or a helper named for rounding, RoundShownPrice(p).
 func isRoundCall(expr ast.Expr) bool {
 	call, ok := ast.Unparen(expr).(*ast.CallExpr)
 	if !ok {

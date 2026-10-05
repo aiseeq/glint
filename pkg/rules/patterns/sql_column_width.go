@@ -22,11 +22,11 @@ func init() {
 // a bind parameter of a column the migrations declare narrower than the
 // constant, directly or through the parameters of the project's functions:
 //
-//	o.recordError(ctx, tx, "send transaction to provider", err)
-//	func (o *Orchestrator) recordError(ctx context.Context, tx *Tx, operation string, err error) {
-//		o.repo.SetError(ctx, tx.ID, operation, err.Error())
+//	o.noteFailure(ctx, order, "send order to the carrier", err)
+//	func (o *Orchestrator) noteFailure(ctx context.Context, order *Order, operation string, err error) {
+//		o.repo.SetError(ctx, order.ID, operation, err.Error())
 //	func (r *Repo) SetError(ctx context.Context, id uuid.UUID, code, message string) error {
-//		_, err := r.db.Exec(ctx, `UPDATE txs SET error_code = $1, error_message = $2 WHERE id = $3`, code, message, id)
+//		_, err := r.db.Exec(ctx, `UPDATE orders SET error_code = $1, error_message = $2 WHERE id = $3`, code, message, id)
 //	-- error_code VARCHAR(20)
 //
 // PostgreSQL refuses the value (value too long for type character varying),

@@ -34,7 +34,7 @@ type routeScope struct {
 
 // routeUse is the middleware one statement applies: r.Use(...) itself, or a
 // call of a helper that applies it to the router it is given
-// (a.useAdminMiddleware(r, limit)); at is the statement's call, info types
+// (a.useCommonMiddleware(r, limit)); at is the statement's call, info types
 // the middleware expressions.
 type routeUse struct {
 	at   *ast.CallExpr
@@ -249,7 +249,7 @@ func reachesStorage(_ *types.Info, call *ast.CallExpr) bool {
 // them reaches the database or checks a shared secret - a flood of it loads
 // the database, or guesses the secret, with no limit:
 //
-//	r.Get("/ready", s.handleReady)             // pings the database
+//	r.Get("/ready", s.readiness)             // pings the database
 //	r.Route("/api", func(r chi.Router) {
 //		r.Use(limiter.middleware())
 func NewUnauthenticatedRouteOutsideRateLimitRule() *typedFuncRule {
@@ -572,8 +572,8 @@ var testGateWords = map[string]bool{"cfg": true, "config": true, "conf": true, "
 // stores it, with no configuration check on the way - in production it
 // creates real records from fake people:
 //
-//	tx := input.newTestTransaction(corridor)
-//	flow, err := a.createQuote(ctx, input, tx)
+//	order := input.newTestOrder()
+//	err := a.createOrder(ctx, order)
 func NewTestDataPathUngatedInProductionRule() *typedFuncRule {
 	r := &typedFuncRule{
 		BaseRule: rules.NewBaseRule(
@@ -608,8 +608,8 @@ func NewTestDataPathUngatedInProductionRule() *typedFuncRule {
 	return r
 }
 
-// namesTestData reports a function named for test data: newTestTransaction,
-// applyTestSenderData.
+// namesTestData reports a function named for test data: newTestOrder,
+// applyTestCustomer.
 func namesTestData(name string) bool {
 	words := helpers.IdentifierWords(name)
 	for i, word := range words {
@@ -688,13 +688,13 @@ func storedIn(scope funcScope, body *ast.BlockStmt, entity *types.Var) bool {
 }
 
 // NewNilSliceAsUnrestrictedScopeRule creates nil-slice-as-unrestricted-scope:
-// a field read as "nil means everything" (if u.ProjectIDs == nil { return
+// a field read as "nil means everything" (if u.TeamIDs == nil { return
 // true }) filled from a loader that builds its slice with var s []T and
 // append - for a user with no rows the loader returns nil, and the user with
 // nothing assigned is given everything:
 //
-//	pids, err := repo.ProjectIDsForUser(ctx, id)   // var ids []int; ids = append(ids, ...)
-//	uc.ProjectIDs = pids
+//	pids, err := repo.TeamIDsForUser(ctx, id)   // var ids []int; ids = append(ids, ...)
+//	uc.TeamIDs = pids
 func NewNilSliceAsUnrestrictedScopeRule() *typedFuncRule {
 	r := &typedFuncRule{
 		BaseRule: rules.NewBaseRule(
@@ -769,7 +769,7 @@ func nilComparedSliceFields(decls map[*types.Func]typedFuncDecl) map[*types.Var]
 }
 
 // loaderResults maps the variables a body defines as the first result of a
-// call to that call: pids, err := repo.ProjectIDs(ctx, id).
+// call to that call: pids, err := repo.TeamIDs(ctx, id).
 func loaderResults(info *types.Info, body *ast.BlockStmt) map[*types.Var]*ast.CallExpr {
 	results := make(map[*types.Var]*ast.CallExpr)
 	ast.Inspect(body, func(n ast.Node) bool {
