@@ -391,3 +391,18 @@ func TestFileSharedBuildsOncePerFile(t *testing.T) {
 	assert.Equal(t, 1, FileShared(other, key{}, func() int { return len(other.Lines) }), "each file has its own cache")
 	assert.Panics(t, func() { FileShared(file, key{}, func() string { return "" }) }, "a key built with another type is a programming error")
 }
+
+func TestDeployFileNames(t *testing.T) {
+	for name, want := range map[string]bool{
+		"docker-compose.yml": true, "docker-compose.prod.yaml": true, "compose.yaml": true,
+		"compose.override.yml": true, "docker-compose.md": false, "my-compose.yml": false,
+	} {
+		assert.Equal(t, want, IsComposeFileName(name), name)
+	}
+	for name, want := range map[string]bool{
+		".env.example": true, "backend.env.example": true, ".env.sample": true, ".env.dist": true,
+		".env": false, ".env.prod": false, "env.example.go": false,
+	} {
+		assert.Equal(t, want, isEnvTemplateName(name), name)
+	}
+}
