@@ -1,12 +1,17 @@
 package patterns
 
 import (
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestUnfalsifiableTestCaseRule_Metadata(t *testing.T) {
@@ -227,4 +232,51 @@ test('opens menu', async ({ page }) => {
 `))
 
 	assert.Empty(t, violations)
+}
+
+// A handler test asserts the page holds a CSS class that the shared layout's
+// stylesheet names on every page: the check passes whether the error block
+// is rendered or not. A marker only the page itself renders is left alone.
+func TestUnfalsifiableTestCase_GoAssertsUbiquitousMarker(t *testing.T) {
+	sources := map[string]string{
+		"admin/templates/layout.html": `<html><head><style>
+    .callout-error { border-left-color: #ff4136; }
+</style></head><body><nav>Transactions</nav>{{template "content" .}}</body></html>
+`,
+		"admin/templates/channels.html": `{{define "content"}}<article class="callout callout-error">{{.Error}}</article>{{end}}
+`,
+		"admin/channels_test.go": `package admin
+
+func TestChannelsRejectsCountry(t *testing.T) {
+	body := render(t)
+	if !strings.Contains(body, "callout-error") {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(body, "<article class=\"callout callout-error\">") {
+		t.Fatal("expected the error block")
+	}
+	assert.Contains(t, body, "Transactions")
+}
+`,
+	}
+	root, _ := rulestest.Module(t, sources)
+	var files []*core.FileContext
+	for _, name := range []string{"admin/channels_test.go", "admin/templates/channels.html", "admin/templates/layout.html"} {
+		file, err := core.NewFileContextChecked(filepath.Join(root, name), root, []byte(sources[name]), core.DefaultConfig())
+		require.NoError(t, err)
+		if strings.HasSuffix(name, ".go") {
+			fset := token.NewFileSet()
+			syntax, err := parser.ParseFile(fset, file.Path, sources[name], parser.ParseComments)
+			require.NoError(t, err)
+			file.SetGoAST(fset, syntax)
+		}
+		files = append(files, file)
+	}
+	rule := NewUnfalsifiableTestCaseRule()
+	rule.UseProjectFiles(files)
+	var found []string
+	for _, file := range files {
+		found = append(found, foundLines(rule.AnalyzeFile(file))...)
+	}
+	assert.ElementsMatch(t, []string{"admin/channels_test.go:5", "admin/channels_test.go:11"}, found)
 }

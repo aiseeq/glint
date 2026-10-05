@@ -330,3 +330,56 @@ func TestShellDBPasswordLiteral(t *testing.T) {
 `,
 	}))
 }
+
+// A captured function ends in grep | head | cut without pipefail: an
+// unreadable file (grep status 2) gives the caller an empty value and
+// status 0, the same as a missing key. pipefail set only inside a heredoc
+// for a remote shell does not cover the script.
+func TestShellStatusOfPipeTailInCapturedFunction(t *testing.T) {
+	assert.Equal(t, []string{"lib.sh:4"}, shellFindings(t, "shell-status-of-pipe-tail", map[string]string{
+		"lib.sh": `#!/bin/bash
+local_dsn() {
+    if [ -n "${DSN:-}" ]; then printf '%s' "$DSN"; return; fi
+    [ -f "$ROOT/.env" ] && grep -E '^DSN=' "$ROOT/.env" | head -1 | cut -d= -f2-
+}
+names() {
+    printf '%s\n' a b c | sort
+}
+dsn="$(local_dsn)"
+list="$(names)"
+out=$(ssh_cmd "bash -s" <<'REMOTE'
+set -euo pipefail
+ls /srv
+REMOTE
+)
+`,
+	}))
+	assert.Empty(t, shellFindings(t, "shell-status-of-pipe-tail", map[string]string{
+		"lib.sh": `#!/bin/bash
+set -o pipefail
+local_dsn() {
+    grep -E '^DSN=' "$ROOT/.env" | head -1 | cut -d= -f2-
+}
+dsn="$(local_dsn)"
+`,
+	}))
+}
+
+// stderr merged into a captured value that is then compared exactly: a
+// warning the remote prints ("could not change directory") makes the value
+// match no case.
+func TestShellCapturedStderrComparedExactly(t *testing.T) {
+	assert.Equal(t, []string{"preflight.sh:3"}, shellFindings(t, "shell-captured-function-writes-logs", map[string]string{
+		"preflight.sh": `#!/bin/bash
+check() {
+    result=$(ssh_cmd "sudo -u app psql '$DSN' -XqAt -c \"SELECT true\"" 2>&1) || rc=$?
+    case "$result" in
+        t) return 1 ;;
+        f) return 0 ;;
+    esac
+    log=$(make build 2>&1)
+    printf '%s\n' "$log"
+}
+`,
+	}))
+}

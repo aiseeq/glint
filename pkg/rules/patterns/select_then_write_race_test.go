@@ -406,3 +406,143 @@ func (r *Repo) CloseLocked(ctx context.Context, id int) error {
 	assert.Equal(t, "status", violations[0].Context["column"])
 	assert.Equal(t, 15, violations[0].Line)
 }
+
+// selectThenWriteLines runs the rule on one file without type information and
+// returns the reported lines.
+func selectThenWriteLines(t *testing.T, code string) []int {
+	t.Helper()
+	ctx := core.NewFileContext("/src/file.go", "/src", []byte(code), core.DefaultConfig())
+	fset, astFile, err := core.NewParser().ParseGoFile("/src/file.go", []byte(code))
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, astFile)
+	var lines []int
+	for _, v := range NewSelectThenWriteRaceRule().AnalyzeFile(ctx) {
+		lines = append(lines, v.Line)
+	}
+	return lines
+}
+
+// A worker lists unfinished jobs and flips each to running by its id alone:
+// two instances (a deploy overlap) both "claim" the same job and both run it.
+// A claim that names the expected status, or reads RowsAffected, is the fix;
+// a status that is not a claim (done) is an ordinary transition.
+func TestSelectThenWriteRaceRule_ClaimByKeyOnly(t *testing.T) {
+	assert.Equal(t, []int{12, 17}, selectThenWriteLines(t, `package repo
+
+import "context"
+
+const (
+	JobRunning = "running"
+	JobPending = "pending"
+	JobDone    = "done"
+)
+
+func (r *Repo) MarkRunning(ctx context.Context, id string) error {
+	_, err := r.db.Pool.Exec(ctx, `+"`UPDATE jobs SET status = $1, updated_at = now() WHERE id = $2`"+`, JobRunning, id)
+	return err
+}
+
+func (r *Repo) MarkProcessing(ctx context.Context, id string) error {
+	_, err := r.db.Pool.Exec(ctx, `+"`UPDATE jobs SET status = 'processing' WHERE id = $1`"+`, id)
+	return err
+}
+
+func (r *Repo) Claim(ctx context.Context, id string) error {
+	_, err := r.db.Pool.Exec(ctx, `+"`UPDATE jobs SET status = $1 WHERE id = $2 AND status = $3`"+`, JobRunning, id, JobPending)
+	return err
+}
+
+func (r *Repo) ClaimCounted(ctx context.Context, id string) (bool, error) {
+	tag, err := r.db.Pool.Exec(ctx, `+"`UPDATE jobs SET status = $1 WHERE id = $2`"+`, JobRunning, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (r *Repo) MarkDone(ctx context.Context, id string) error {
+	_, err := r.db.Pool.Exec(ctx, `+"`UPDATE jobs SET status = $1 WHERE id = $2`"+`, JobDone, id)
+	return err
+}
+`))
+}
+
+// An approval loads the order, checks its status in Go and sends the payout:
+// a double click passes the check twice and pays twice. A claim on the version
+// (or a Claim call) between the check and the send serializes the approvals.
+func TestSelectThenWriteRaceRule_SendAfterStatusCheck(t *testing.T) {
+	assert.Equal(t, []int{25}, selectThenWriteLines(t, `package svc
+
+import (
+	"context"
+	"errors"
+)
+
+type Service struct {
+	repo   Repo
+	client Client
+	log    Logger
+}
+
+func (s *Service) Approve(ctx context.Context, id string) error {
+	order, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if order.Status != "waiting_approval" {
+		return errors.New("not waiting")
+	}
+	if err := s.repo.SetApprover(ctx, order.ID); err != nil {
+		s.log.Error("approver", err)
+	}
+	return s.dispatch(ctx, order)
+}
+
+func (s *Service) ApproveClaimed(ctx context.Context, id string) error {
+	order, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if order.Status != "waiting_approval" {
+		return errors.New("not waiting")
+	}
+	if err := s.repo.ClaimForApproval(ctx, order.ID, order.Version); err != nil {
+		return err
+	}
+	return s.dispatch(ctx, order)
+}
+
+func (s *Service) Notify(ctx context.Context, id string) error {
+	order, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if order.Status != "sent" {
+		return nil
+	}
+	return s.repo.Touch(ctx, order.ID)
+}
+
+func (s *Service) dispatch(ctx context.Context, order *Order) error {
+	return s.client.SendPayout(ctx, order.ID)
+}
+
+func (s *Service) ApproveThroughClaimingSend(ctx context.Context, id string) error {
+	order, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if order.Status != "waiting_approval" {
+		return errors.New("not waiting")
+	}
+	return s.claimAndSend(ctx, order)
+}
+
+func (s *Service) claimAndSend(ctx context.Context, order *Order) error {
+	if err := s.repo.RecordSendIntent(ctx, order.ID, order.Version); err != nil {
+		return err
+	}
+	return s.client.SendPayout(ctx, order.ID)
+}
+`))
+}

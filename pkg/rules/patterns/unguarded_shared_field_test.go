@@ -405,6 +405,53 @@ func TestUnguardedSharedFieldMetadata(t *testing.T) {
 	assert.Nil(t, rule.AnalyzeFile(nil))
 }
 
+// The constructor starts a goroutine that warms a cache and publishes it in
+// plain fields; request handlers read those fields meanwhile. No lock covers
+// them anywhere, so the never-guarded exemption does not apply: the writer is
+// a goroutine by construction. An atomic flag and fields the goroutine only
+// reads are fine.
+func TestUnguardedSharedFieldReportsGoroutinePublishingToHandlers(t *testing.T) {
+	violations := analyzeGuardedFields(t, `package cache
+
+import (
+	"net/http"
+	"sync/atomic"
+)
+
+type Admin struct {
+	corridors []string
+	ready     bool
+	loaded    atomic.Bool
+	name      string
+}
+
+func New(name string) *Admin {
+	a := &Admin{name: name}
+	go a.warm()
+	return a
+}
+
+func (a *Admin) warm() {
+	list := []string{a.name}
+	a.corridors = list
+	a.ready = true
+	a.loaded.Store(true)
+}
+
+func (a *Admin) Corridors(w http.ResponseWriter, r *http.Request) {
+	if a.ready && a.corridors != nil && a.loaded.Load() {
+		_, _ = w.Write([]byte(a.corridors[0] + a.name))
+	}
+}
+`)
+
+	var lines []int
+	for _, v := range violations {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{23, 24}, lines)
+}
+
 func TestUnguardedSharedFieldRejectsNilProject(t *testing.T) {
 	_, err := NewUnguardedSharedFieldRule().AnalyzeGoProject(nil)
 	require.Error(t, err)

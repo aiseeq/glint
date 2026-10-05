@@ -39,6 +39,10 @@ var lockedNameSuffixes = []string{"locked", "nolock", "unsafe", "unlocked"}
 // afterwards), helpers called from inside a critical section, methods whose name
 // promises the caller holds the lock (…Locked, …NoLock, …Unsafe), and plain
 // functions such as constructors, where the value is not shared yet.
+//
+// A field no lock covers is reported when a method started with `go` writes
+// it and a request handler reads it: a background goroutine publishing a
+// cache while requests are served is not a set-once value.
 type UnguardedSharedFieldRule struct {
 	*rules.BaseRule
 }
@@ -49,7 +53,7 @@ func NewUnguardedSharedFieldRule() *UnguardedSharedFieldRule {
 		BaseRule: rules.NewBaseRule(
 			"unguarded-shared-field",
 			"patterns",
-			"Detects fields guarded by a mutex in some methods and touched without it in others (data race)",
+			"Detects fields guarded by a mutex in some methods and touched without it in others, or written by a goroutine and read by request handlers with no lock at all (data race)",
 			core.SeverityHigh,
 		),
 	}
@@ -121,10 +125,12 @@ func (r *UnguardedSharedFieldRule) analyzePackage(pkg *core.GoPackageContext) []
 		}
 	}
 
+	goStarted, servesRequests := concurrentMethods(pkg, info)
 	var violations []*core.Violation
 	for _, field := range fieldOrder {
 		list := accesses[field]
 		if !guardedByMutex(field, list) {
+			violations = append(violations, r.publishedByGoroutine(field, list, goStarted, servesRequests)...)
 			continue
 		}
 		mutex := guardingMutex(list)
@@ -136,6 +142,82 @@ func (r *UnguardedSharedFieldRule) analyzePackage(pkg *core.GoPackageContext) []
 		}
 	}
 	return violations
+}
+
+// concurrentMethods returns the methods of the package started with `go`
+// (go a.warm()) and those serving HTTP requests: both run beside every other
+// goroutine of the value from their first instruction.
+func concurrentMethods(pkg *core.GoPackageContext, info *types.Info) (goStarted, servesRequests map[*types.Func]bool) {
+	goStarted = make(map[*types.Func]bool)
+	servesRequests = make(map[*types.Func]bool)
+	for _, fileCtx := range pkg.Files {
+		if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
+			continue
+		}
+		for _, decl := range fileCtx.GoAST.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			if method, ok := info.Defs[fn.Name].(*types.Func); ok && fn.Recv != nil && servesRequest(info, fn.Type) {
+				servesRequests[method] = true
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				stmt, ok := n.(*ast.GoStmt)
+				if !ok {
+					return true
+				}
+				if sel, ok := stmt.Call.Fun.(*ast.SelectorExpr); ok {
+					if selection, ok := info.Selections[sel]; ok && selection.Kind() == types.MethodVal {
+						if method, ok := selection.Obj().(*types.Func); ok {
+							goStarted[method.Origin()] = true
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	return goStarted, servesRequests
+}
+
+// publishedByGoroutine reports the writes of a field no lock covers when a
+// method started with `go` writes it and a request handler reads it: the
+// set-once exemption does not hold for a value a background goroutine
+// publishes while requests are already served.
+func (r *UnguardedSharedFieldRule) publishedByGoroutine(field *types.Var, list []fieldAccess, goStarted, servesRequests map[*types.Func]bool) []*core.Violation {
+	if !servedRead(list, servesRequests) {
+		return nil
+	}
+	var violations []*core.Violation
+	for _, access := range list {
+		if !access.mutating || access.guarded || access.methodFn == nil || !goStarted[access.methodFn.Origin()] {
+			continue
+		}
+		line := access.fileCtx.LineForPos(access.pos)
+		if access.fileCtx.IsSuppressed(line, r.Name()) {
+			continue
+		}
+		v := r.CreateViolation(access.fileCtx.RelPath, line,
+			fmt.Sprintf("Field %q is written by %s, which runs as a goroutine, and read by request handlers with no lock or atomic on either side — a data race, and a handler may see the fields half-published",
+				field.Name(), access.method))
+		v.WithCode(strings.TrimSpace(access.fileCtx.GetLine(line)))
+		v.WithSuggestion("Guard the fields with a sync.RWMutex, or publish them at once through an atomic.Pointer to an immutable value")
+		v.WithContext("pattern", "goroutine_published_field")
+		v.WithContext("field", field.Name())
+		violations = append(violations, v)
+	}
+	return violations
+}
+
+// servedRead reports an unguarded access of the field from a request handler.
+func servedRead(list []fieldAccess, servesRequests map[*types.Func]bool) bool {
+	for _, access := range list {
+		if !access.guarded && access.methodFn != nil && servesRequests[access.methodFn.Origin()] {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *UnguardedSharedFieldRule) report(field *types.Var, access fieldAccess, mutex string) *core.Violation {

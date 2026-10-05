@@ -218,6 +218,69 @@ func (f *Fanout) Go(work func()) { go work() }
 	assert.Equal(t, []string{"events/service.go:30"}, projectRuleLines(t, NewGoroutineUntrackedOnCloseRule(), files))
 }
 
+// main starts the workers on a cancellable context and returns after the
+// HTTP shutdown: the deferred cancel stops them, nothing waits, and the
+// process exits in the middle of an iteration. A main that counts its workers
+// in a WaitGroup, or a goroutine without a context (the HTTP server), is fine.
+func TestGoroutineUntrackedInMain(t *testing.T) {
+	worker := `package worker
+
+import "context"
+
+type Poller struct{}
+
+func (p *Poller) Run(ctx context.Context) { <-ctx.Done() }
+`
+	untracked := `package main
+
+import (
+	"context"
+	"net/http"
+
+	"example.com/rulestest/worker"
+)
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startWorkers(ctx)
+	srv := &http.Server{}
+	go func() { _ = srv.ListenAndServe() }()
+	_ = srv.Shutdown(context.Background())
+}
+
+func startWorkers(ctx context.Context) {
+	p := &worker.Poller{}
+	go p.Run(ctx)
+}
+`
+	tracked := `package main
+
+import (
+	"context"
+	"sync"
+
+	"example.com/rulestest/worker"
+)
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	p := &worker.Poller{}
+	wg.Add(1)
+	go func() { defer wg.Done(); p.Run(ctx) }()
+	go p.Run(ctx)
+	cancel()
+	wg.Wait()
+}
+`
+	assert.Equal(t, []string{"cmd/server/main.go:21"}, projectRuleLines(t, NewGoroutineUntrackedOnCloseRule(), map[string]string{
+		"worker/poller.go":    worker,
+		"cmd/server/main.go":  untracked,
+		"cmd/tracked/main.go": tracked,
+	}))
+}
+
 // A package default swapped for one call and put back: two calls at once
 // see each other's value.
 func TestGlobalSwapRestore(t *testing.T) {

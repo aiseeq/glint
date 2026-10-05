@@ -6,6 +6,7 @@ import (
 	"go/types"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -36,6 +37,11 @@ func init() {
 // secret, tokens), a copy into the source's own type, a group holding a
 // list of sources, and the ID and timestamps of a new record (a literal
 // that does not copy the source's ID).
+//
+// A literal that flattens a nested value under its parent's name
+// (SenderFirstName: req.Sender.FirstName) is checked the same way: a field
+// of the nested value whose prefixed name the target has and the literal
+// skips is reported.
 type StructMappingDropsFieldRule struct {
 	*rules.BaseRule
 }
@@ -78,11 +84,17 @@ func (r *StructMappingDropsFieldRule) AnalyzeGoProject(ctx *core.GoProjectContex
 					return true
 				}
 				src, dropped := droppedFields(lit, body, info, outer[lit])
-				if len(dropped) == 0 {
-					return true
-				}
 				line := file.LineFor(lit)
 				if file.IsSuppressed(line, r.Name()) {
+					return true
+				}
+				if prefixed := prefixedDrops(lit, body, info, outer[lit]); len(prefixed) > 0 {
+					v := r.CreateViolation(file.RelPath, line, "Struct literal flattens nested fields under their parent's name (SenderFirstName: req.Sender.FirstName) but leaves out "+strings.Join(prefixed, ", ")+" — the nested source has them, and the target gets zero values")
+					v.WithCode(strings.TrimSpace(file.GetLine(line)))
+					v.WithSuggestion("Copy the fields too; a nested field added to the request needs its flat counterpart mapped")
+					violations = append(violations, v)
+				}
+				if len(dropped) == 0 {
 					return true
 				}
 				v := r.CreateViolation(file.RelPath, line, "Struct literal copies fields from "+types.ExprString(src)+" by name but leaves out "+strings.Join(dropped, ", ")+" — the source has them, and the target gets zero values")
@@ -150,6 +162,73 @@ func droppedFields(lit *ast.CompositeLit, body *ast.BlockStmt, info *types.Info,
 		dropped = append(dropped, name)
 	}
 	return src, dropped
+}
+
+// prefixedDrops returns the fields of a literal that flattens nested values
+// under their parent field's name (SenderFirstName: req.Sender.FirstName, at
+// least two such copies from one nested value) which the nested value has
+// and the literal leaves out: SenderGender while req.Sender.Gender exists.
+// A call the literal is handed to gets the target alone and cannot fill a
+// field from the nested source, so only fields set afterwards are left out.
+func prefixedDrops(lit *ast.CompositeLit, body *ast.BlockStmt, info *types.Info, outerSet map[string]bool) []string {
+	target, ok := structOf(info.TypeOf(lit))
+	if !ok {
+		return nil
+	}
+	set := make(map[string]bool)
+	for name := range outerSet {
+		set[name] = true
+	}
+	after, _ := setAfter(lit, body, info)
+	for name := range after {
+		set[name] = true
+	}
+	counts := make(map[string]int)
+	sources := make(map[string]*ast.SelectorExpr)
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		set[key.Name] = true
+		sel, ok := copiedField(kv.Value, info)
+		if !ok {
+			continue
+		}
+		parent, ok := ast.Unparen(sel.X).(*ast.SelectorExpr)
+		if !ok || key.Name != parent.Sel.Name+sel.Sel.Name {
+			continue
+		}
+		text := types.ExprString(parent)
+		counts[text]++
+		sources[text] = parent
+	}
+	var dropped []string
+	for text, parent := range sources {
+		if counts[text] < 2 {
+			continue
+		}
+		srcType := info.TypeOf(parent)
+		for i := range target.fields.NumFields() {
+			field := target.fields.Field(i)
+			name := field.Name()
+			rest, isPrefixed := strings.CutPrefix(name, parent.Sel.Name)
+			if !isPrefixed || rest == "" || set[name] || credentialField.MatchString(name) || jsonOmitted(target.fields.Tag(i)) {
+				continue
+			}
+			obj, _, _ := types.LookupFieldOrMethod(srcType, true, target.pkg, rest)
+			srcField, ok := obj.(*types.Var)
+			if ok && srcField.IsField() && types.AssignableTo(srcField.Type(), field.Type()) {
+				dropped = append(dropped, name)
+			}
+		}
+	}
+	sort.Strings(dropped)
+	return dropped
 }
 
 type structTarget struct {

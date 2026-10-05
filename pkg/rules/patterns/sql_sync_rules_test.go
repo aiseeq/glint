@@ -105,6 +105,52 @@ func (l *Ledger) Drafts(out any) error {
 	}, "repo/ledger.go"))
 }
 
+// A dashboard counts orders by status with FILTER, failed ones apart, but sums
+// the amounts of every order, failed ones too, into the turnover beside them.
+// The same column summed both with and without a filter is a deliberate
+// total, a WHERE on the status already narrows every aggregate, a filter by a
+// lifecycle status (active) says nothing of the sum, a sum that reads the
+// status itself is narrowed, and a sum of a count is not money.
+func TestSQLUnfilteredSumBesideStatusFilters(t *testing.T) {
+	assert.Equal(t, []int{11}, projectSQLRuleLines(t, NewSQLChildRowsIncludeVoidedParentRule(), map[string]string{
+		"repo/migrations/001_init.up.sql": "CREATE TABLE orders (id UUID PRIMARY KEY, status TEXT NOT NULL, amount NUMERIC NOT NULL, fee NUMERIC NOT NULL);",
+		"repo/stats.go": `package repo
+
+type DB interface{ Select(dest any, query string, args ...any) error }
+
+type Stats struct{ db DB }
+
+func (s *Stats) Dashboard(out any, where string) error {
+	return s.db.Select(out, ` + "`SELECT\n\t\tCOUNT(*) FILTER (WHERE status = 'done'),\n\t\tCOUNT(*) FILTER (WHERE status = 'failed'),\n\t\tCOALESCE(SUM(amount), 0),\n\t\tCOALESCE(SUM(fee) FILTER (WHERE status = 'done'), 0)\n\t\tFROM orders`" + ` + where)
+}
+
+func (s *Stats) Totals(out any) error {
+	return s.db.Select(out, "SELECT SUM(amount), SUM(amount) FILTER (WHERE status = 'done') FROM orders")
+}
+
+func (s *Stats) Done(out any) error {
+	return s.db.Select(out, "SELECT COUNT(*) FILTER (WHERE status = 'done'), SUM(amount) FROM orders WHERE status <> 'failed'")
+}
+
+func (s *Stats) Plain(out any) error {
+	return s.db.Select(out, "SELECT COUNT(*), SUM(amount) FROM orders")
+}
+
+func (s *Stats) Lifecycle(out any) error {
+	return s.db.Select(out, "SELECT COUNT(*) FILTER (WHERE status = 'active'), SUM(amount) FROM orders")
+}
+
+func (s *Stats) Cased(out any) error {
+	return s.db.Select(out, "SELECT COUNT(*) FILTER (WHERE status = 'failed'), SUM(CASE WHEN status = 'done' THEN amount ELSE 0 END) FROM orders")
+}
+
+func (s *Stats) Counts(out any) error {
+	return s.db.Select(out, "SELECT COUNT(*) FILTER (WHERE status = 'failed'), SUM(retries) FROM orders")
+}
+`,
+	}, "repo/stats.go"))
+}
+
 // A delta transfer reads batches changed since the last one; unlinking a
 // member or an item changes the batch, but leaves its updated_at, so the
 // next transfer never carries the removal.
@@ -408,4 +454,53 @@ func runPasses(items []Item, link func(Item) bool) tally {
 }
 `)
 	assert.Equal(t, []int{13, 61}, sqlRuleLines(t, NewPendingPageSkipsStayAtHeadRule(), ctx))
+}
+
+// A poller takes the stale pending rows oldest-change first; a poll that
+// finds no change does not touch updated_at, so the same rows stay at the
+// head of every page and the rest of the queue is never polled. A read that
+// marks the rows it took (a poll mark written in the statement), or moves by
+// a cursor, rotates.
+func TestPendingPageOrderedByUntouchedChangeTime(t *testing.T) {
+	ctx := rulestest.GoFile(t, "storage/repo.go", `package storage
+
+import (
+	"context"
+	"time"
+)
+
+type Repo struct{ db DB }
+
+func (r *Repo) GetPendingTransactions(ctx context.Context, olderThan time.Duration, limit int) error {
+	query := `+"`"+`
+		SELECT id, status
+		FROM transactions
+		WHERE status NOT IN ('COMPLETED', 'REJECTED')
+			AND updated_at < $1
+		ORDER BY updated_at ASC
+		LIMIT $2`+"`"+`
+	return r.db.Query(ctx, query, time.Now().Add(-olderThan), limit)
+}
+
+func (r *Repo) GetPendingMarked(ctx context.Context, olderThan time.Duration, limit int) error {
+	query := `+"`"+`
+		WITH candidates AS (
+			SELECT id FROM transactions
+			WHERE status NOT IN ('COMPLETED') AND updated_at < $1
+			ORDER BY updated_at ASC LIMIT $2
+		)
+		INSERT INTO poll_state (id, polled_at) SELECT id, NOW() FROM candidates
+		ON CONFLICT (id) DO UPDATE SET polled_at = EXCLUDED.polled_at`+"`"+`
+	return r.db.Query(ctx, query, time.Now().Add(-olderThan), limit)
+}
+
+func (r *Repo) GetPendingAfter(ctx context.Context, after time.Time, limit int) error {
+	return r.db.Query(ctx, "SELECT id FROM transactions WHERE status <> 'DONE' AND updated_at < $1 ORDER BY updated_at LIMIT $2", after, limit)
+}
+
+func (r *Repo) ListRecent(ctx context.Context, limit int) error {
+	return r.db.Query(ctx, "SELECT id FROM transactions WHERE updated_at < now() ORDER BY updated_at LIMIT $1", limit)
+}
+`)
+	assert.Equal(t, []int{16}, sqlRuleLines(t, NewPendingPageSkipsStayAtHeadRule(), ctx))
 }

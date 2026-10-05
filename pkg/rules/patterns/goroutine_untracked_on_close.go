@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"path/filepath"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -30,6 +31,10 @@ func init() {
 // Close, Shutdown or Stop waits on a WaitGroup field: a goroutine of such a
 // method whose function (a literal or a method of the type) never calls Done
 // on that field is reported, unless the method calls Add on it.
+//
+// A main package is the same service without a Close: a worker it starts with
+// a context (go poller.Run(ctx)) in a program that refers to no WaitGroup or
+// errgroup is cancelled on shutdown and never waited for.
 type GoroutineUntrackedOnCloseRule struct {
 	*rules.BaseRule
 }
@@ -39,7 +44,7 @@ func NewGoroutineUntrackedOnCloseRule() *GoroutineUntrackedOnCloseRule {
 	return &GoroutineUntrackedOnCloseRule{BaseRule: rules.NewBaseRule(
 		"goroutine-untracked-on-close",
 		"patterns",
-		"Detects a goroutine started by a service outside the WaitGroup its Close waits on — Close returns while it runs and its work is cut off",
+		"Detects a goroutine started by a service outside the WaitGroup its Close waits on — Close returns while it runs and its work is cut off; also workers main starts with a context in a program that waits on no WaitGroup",
 		core.SeverityMedium,
 	)}
 }
@@ -68,9 +73,10 @@ func (r *GoroutineUntrackedOnCloseRule) AnalyzeGoProject(ctx *core.GoProjectCont
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
+	mainWaits := mainPackagesWaiting(ctx)
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		waited := make(map[*types.Named]closeWaits)
-		var violations []*core.Violation
+		violations := r.untrackedMainWorkers(file, info, mainWaits)
 		for _, decl := range file.GoAST.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Recv == nil || fn.Body == nil {
@@ -117,6 +123,63 @@ func (r *GoroutineUntrackedOnCloseRule) AnalyzeGoProject(ctx *core.GoProjectCont
 		}
 		return violations
 	})
+}
+
+// mainPackagesWaiting returns, by directory, whether each main package
+// refers to a sync.WaitGroup or an errgroup.Group: a program that waits for
+// some goroutines has a shutdown it can extend to the others.
+func mainPackagesWaiting(ctx *core.GoProjectContext) map[string]bool {
+	waits := make(map[string]bool)
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil || pkg.Package.Name != "main" || pkg.Package.TypesInfo == nil {
+			continue
+		}
+		found := false
+		for _, obj := range pkg.Package.TypesInfo.Uses {
+			if tn, ok := obj.(*types.TypeName); ok && tn.Pkg() != nil &&
+				((tn.Pkg().Path() == "sync" && tn.Name() == "WaitGroup") || (tn.Pkg().Path() == "golang.org/x/sync/errgroup" && tn.Name() == "Group")) {
+				found = true
+				break
+			}
+		}
+		for _, file := range pkg.Files {
+			waits[filepath.Dir(file.Path)] = found
+		}
+	}
+	return waits
+}
+
+// untrackedMainWorkers reports the workers a main package without any
+// WaitGroup starts with a context (go poller.Run(ctx)): main returns after
+// cancelling them and the process exits in the middle of their iteration.
+// A goroutine without a context argument (the HTTP server's ListenAndServe
+// in a literal) has its own shutdown.
+func (r *GoroutineUntrackedOnCloseRule) untrackedMainWorkers(file *core.FileContext, info *types.Info, mainWaits map[string]bool) []*core.Violation {
+	waits, isMain := mainWaits[filepath.Dir(file.Path)]
+	if !isMain || waits || file.IsTestFile() {
+		return nil
+	}
+	var violations []*core.Violation
+	ast.Inspect(file.GoAST, func(n ast.Node) bool {
+		stmt, ok := n.(*ast.GoStmt)
+		if !ok {
+			return true
+		}
+		if _, literal := stmt.Call.Fun.(*ast.FuncLit); literal || !passesContext(info, stmt.Call) {
+			return true
+		}
+		line := file.LineFor(stmt)
+		if file.IsSuppressed(line, r.Name()) {
+			return true
+		}
+		v := r.CreateViolation(file.RelPath, line,
+			"Worker started by main with a context and no WaitGroup in the program — on shutdown main cancels it and returns without waiting, and the process exits in the middle of its iteration")
+		v.WithCode(strings.TrimSpace(file.GetLine(line)))
+		v.WithSuggestion("Count the workers in a sync.WaitGroup (Add before go, Done when Run returns) and wait on it, with a deadline, after cancelling them")
+		violations = append(violations, v)
+		return true
+	})
+	return violations
 }
 
 // collectMethodDecls indexes the method declarations of the loaded packages.

@@ -37,6 +37,10 @@ func init() {
 // left out), a SELECT scanned into a model the function returns hands back
 // the zero value, a column list written in a method of the model misses a
 // field every statement built from it then skips.
+//
+// A model without db tags, bound into an INSERT field by field, is checked
+// without the schema: a field the code sets that the repository package never
+// mentions, neither in the write nor in a read, is lost on the next load.
 type SQLModelFieldSkippedRule struct {
 	*rules.BaseRule
 }
@@ -46,7 +50,7 @@ func NewSQLModelFieldSkippedRule() *SQLModelFieldSkippedRule {
 	return &SQLModelFieldSkippedRule{BaseRule: rules.NewBaseRule(
 		"sql-model-field-skipped",
 		"patterns",
-		"Detects SQL writing or reading a model that leaves out a column the model maps with a db tag",
+		"Detects SQL writing or reading a model that leaves out a column the model maps with a db tag, or a hand-mapped INSERT of a model leaving out fields the code sets and the repository never stores or reads",
 		core.SeverityMedium,
 	)}
 }
@@ -62,16 +66,17 @@ func (r *SQLModelFieldSkippedRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks the statements of the project that write or read a
 // model against the schema.
 func (r *SQLModelFieldSkippedRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	unpersisted := r.unpersistedModelFields(ctx)
 	schema, err := sqlschema.LoadCached(ctx.ProjectRoot, migrationDirs(r.BaseRule))
 	var migrationErr *sqlschema.MigrationError
 	if errors.As(err, &migrationErr) {
-		return nil, nil // the schema rules report the migration; nothing to check against
+		return unpersisted, nil // the schema rules report the migration; nothing to check against
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list migrations: %w", err)
 	}
 	if schema == nil {
-		return nil, nil
+		return unpersisted, nil
 	}
 	funcsByInfo := make(map[*types.Info]map[string]*ast.FuncDecl)
 	updatedByInfo := make(map[*types.Info]map[string]bool)
@@ -81,7 +86,7 @@ func (r *SQLModelFieldSkippedRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 			updatedByInfo[pkg.Package.TypesInfo] = updatedColumns(pkg, schema)
 		}
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	violations, err := rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		check := &modelFieldCheck{rule: r, ctx: fileCtx, info: info, schema: schema,
 			funcs: funcsByInfo[info], updated: updatedByInfo[info]}
 		for _, decl := range fileCtx.GoAST.Decls {
@@ -91,6 +96,10 @@ func (r *SQLModelFieldSkippedRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 		}
 		return check.violations
 	})
+	if err != nil {
+		return nil, err
+	}
+	return append(unpersisted, violations...), nil
 }
 
 type modelFieldCheck struct {

@@ -3,6 +3,7 @@ package patterns
 import (
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -103,7 +104,77 @@ func checkPipeTailStatus(r *shellRule, src *shellSource) []*core.Violation {
 				"Run the recipe or script with set -o pipefail (SHELL := bash, .SHELLFLAGS := -eo pipefail -c), or read ${PIPESTATUS[0]} under bash"))
 		}
 	}
+	return append(out, capturedPipeTails(r, src)...)
+}
+
+// failingProducers are commands that fail with a status of their own (an
+// unreadable file, a refused connection) besides finding nothing.
+var failingProducers = map[string]bool{
+	"grep": true, "psql": true, "curl": true, "ssh": true, "jq": true, "git": true,
+	"docker": true, "kubectl": true, "mysql": true, "aws": true, "gcloud": true,
+}
+
+// capturedPipeTails reports a function captured with $(...) whose last
+// command is a pipeline from a command that can fail into a filter, with no
+// pipefail in the script: the function returns the filter's 0 and an empty
+// value, and the caller takes a failure for an absent result.
+func capturedPipeTails(r *shellRule, src *shellSource) []*core.Violation {
+	if src.make || scriptSetsPipefail(src) {
+		return nil
+	}
+	funcs := src.functions()
+	captured := capturedFunctions(src, funcs)
+	names := make([]string, 0, len(captured))
+	for name := range captured {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []*core.Violation
+	for _, name := range names {
+		body := src.body(funcs[name])
+		if len(body) == 0 {
+			continue
+		}
+		last := body[len(body)-1]
+		if strings.TrimSpace(last.text) == "}" && len(body) > 1 {
+			last = body[len(body)-2]
+		}
+		segs := segments(last.text)
+		if len(segs) == 0 {
+			continue
+		}
+		tail := segs[len(segs)-1]
+		filter := lastPipeCommand(tail.text)
+		producer, _, _ := strings.Cut(commandPrefix.ReplaceAllString(tail.trimmed(), ""), " ")
+		if !pipeFilters[filter] || !failingProducers[producer] || pipeStatusMarker.MatchString(tail.text) {
+			continue
+		}
+		out = appendReport(out, src.report(r, last.lineAt(tail.offset),
+			name+" is captured with $(...) and ends in "+producer+" | ... | "+filter+" — without pipefail a failed "+producer+" returns the filter's 0 and an empty value",
+			"Set -o pipefail in the function or the script, or capture "+producer+" alone and check its status"))
+	}
 	return out
+}
+
+// scriptSetsPipefail reports pipefail set in the script itself, outside the
+// heredocs it sends to other shells.
+func scriptSetsPipefail(src *shellSource) bool {
+	terminator := ""
+	for _, line := range src.ctx.Lines {
+		if terminator != "" {
+			if strings.TrimSpace(line) == terminator {
+				terminator = ""
+			}
+			continue
+		}
+		if m := heredocStart.FindStringSubmatch(line); m != nil {
+			terminator = m[1]
+		}
+		if pipefailSetting.MatchString(line) && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			return true
+		}
+	}
+	return false
 }
 
 var gluedRedirect = regexp.MustCompile(`[A-Za-z_.-]([12])>(?:&[0-9]|/dev/null|\s|$)`)
@@ -230,7 +301,38 @@ func checkCapturedFunctionOutput(r *shellRule, src *shellSource) []*core.Violati
 				"Write the message to stderr: printf '...' >&2")
 		}
 	}
+	for _, line := range stderrCapturesComparedExactly(src) {
+		add(line, "The command's stderr is merged into a captured value that is then compared exactly — a warning the command prints makes the value match nothing",
+			"Capture stdout only and keep stderr for the error message (2>err.log), or compare after taking the last line")
+	}
 	return out
+}
+
+var (
+	// stderrCapture is NAME=$(... 2>&1) with the merge at the end of the
+	// substitution.
+	stderrCapture = regexp.MustCompile(`(?:^|[\s;&(])([A-Za-z_][A-Za-z0-9_]*)=\$\(.*2>&1\s*\)`)
+)
+
+// stderrCapturesComparedExactly returns the lines that capture a command
+// with its stderr merged into a variable that a later case or [ x = y ]
+// compares with a literal.
+func stderrCapturesComparedExactly(src *shellSource) []int {
+	var lines []int
+	for i, l := range src.lines {
+		m := stderrCapture.FindStringSubmatch(l.text)
+		if m == nil {
+			continue
+		}
+		exact := regexp.MustCompile(`case\s+"?\$\{?` + m[1] + `\}?"?\s+in\b|\[\[?\s+"?\$\{?` + m[1] + `\}?"?\s+==?\s+['"]?\w`)
+		for _, later := range src.lines[i+1:] {
+			if exact.MatchString(later.text) {
+				lines = append(lines, l.lineAt(0))
+				break
+			}
+		}
+	}
+	return lines
 }
 
 // writesToStdout reports a command whose output is not redirected.

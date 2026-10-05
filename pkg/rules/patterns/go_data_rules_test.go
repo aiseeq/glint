@@ -345,3 +345,46 @@ func Query() string { return summaryQuery + unionQuery + flagQuery }
 	})
 	assert.Equal(t, []string{"repo/portfolio.go:7", "repo/portfolio.go:8"}, found)
 }
+
+// A template passes a permission name to a FuncMap helper that converts it
+// to the permission type: a name no constant holds (a permission of an
+// older set) hides the button for everyone, and nothing compiles it.
+func TestEnumComparedToForeignLiteralInTemplate(t *testing.T) {
+	found := projectRuleLines(t, NewEnumComparedToForeignLiteralRule(), map[string]string{
+		"domain/perm.go": `package domain
+
+type Permission string
+
+const (
+	PermOperations Permission = "operations"
+	PermExport     Permission = "export"
+)
+
+type Role string
+
+func HasPermission(role Role, perm Permission) bool { return role == "admin" || perm == PermExport }
+`,
+		"admin/funcs.go": `package admin
+
+import (
+	"html/template"
+
+	"example.com/rulestest/domain"
+)
+
+var funcs = template.FuncMap{
+	"hasPerm": func(role, perm string) bool {
+		return domain.HasPermission(domain.Role(role), domain.Permission(perm))
+	},
+	"upper": func(s string) string { return s },
+}
+`,
+		"admin/templates/layout.html": `<nav>
+{{if hasPerm .Role "execute_transaction"}}<a href="/run">Run</a>{{end}}
+{{if hasPerm .Role "operations"}}<a href="/ops">Ops</a>{{end}}
+{{upper "anything"}}
+</nav>
+`,
+	})
+	assert.Equal(t, []string{"admin/funcs.go:10"}, found)
+}

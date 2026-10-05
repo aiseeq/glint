@@ -3,6 +3,8 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -29,6 +31,12 @@ func init() {
 // (a sleep or backoff, an error check that continues, a success check that
 // leaves). A loop over providers or a worker draining a channel sends a new
 // command each time and is not a retry.
+//
+// The retry may sit lower than the command: SendTransaction calls a POST
+// helper that wraps the request in a same-file retry helper (a function that
+// calls its func parameter in a retry loop). And it may be spread over time:
+// a resend entry point (ResendConfirmed) that a reconciler calls for rows of
+// an unknown outcome reaches the command again.
 type ProviderCommandRetryRule struct {
 	*rules.BaseRule
 }
@@ -70,7 +78,189 @@ func (r *ProviderCommandRetryRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 		}
 		analyzer.analyzeFunction(function)
 	}
+	decls := fileFunctions(ctx.GoAST)
+	analyzer.detectRetryHelperPaths(decls)
+	analyzer.detectResends(ctx.GoAST, decls)
 	return analyzer.violations
+}
+
+// fileFunctions indexes the file's function declarations by name.
+func fileFunctions(file *ast.File) map[string]*ast.FuncDecl {
+	decls := make(map[string]*ast.FuncDecl)
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+			decls[fn.Name.Name] = fn
+		}
+	}
+	return decls
+}
+
+// detectRetryHelperPaths reports a destructive command whose request goes
+// through a same-file retry helper: SendTransaction -> signedPOST ->
+// withRetry(func() { POST }). The helper repeats the POST on errors that come
+// after the server took the request (a timeout, a decode error after a 2xx),
+// and the command is executed twice. A helper is a function taking a func
+// parameter that it calls inside a retry loop.
+func (a *providerCommandRetryAnalyzer) detectRetryHelperPaths(decls map[string]*ast.FuncDecl) {
+	helpers := make(map[string]bool)
+	for name, fn := range decls {
+		if retriesFuncParam(fn) {
+			helpers[name] = true
+		}
+	}
+	if len(helpers) == 0 {
+		return
+	}
+	names := make([]string, 0, len(decls))
+	for name := range decls {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !providerCommandMethods[name] {
+			continue
+		}
+		for _, call := range retriedPosts(decls[name], decls, helpers, map[string]bool{name: true}) {
+			a.report(call, name, name, "retry_helper")
+		}
+	}
+}
+
+// retriesFuncParam reports a function that calls one of its func parameters
+// inside a retry loop (an attempt counter, a backoff, an error check that
+// continues).
+func retriesFuncParam(fn *ast.FuncDecl) bool {
+	params := make(map[string]bool)
+	for _, field := range fn.Type.Params.List {
+		if _, ok := field.Type.(*ast.FuncType); ok {
+			for _, name := range field.Names {
+				params[name.Name] = true
+			}
+		}
+	}
+	if len(params) == 0 {
+		return false
+	}
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		loop, ok := n.(*ast.ForStmt)
+		if !ok || found {
+			return !found
+		}
+		if countingForLoop(loop) || retryBodyEvidence(loop.Body) {
+			ast.Inspect(loop.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if ident, ok := call.Fun.(*ast.Ident); ok && params[ident.Name] {
+						found = true
+					}
+				}
+				return !found
+			})
+		}
+		return !found
+	})
+	return found
+}
+
+// retriedPosts returns the calls of retry helpers, reached from fn through
+// same-file calls, whose callback sends a POST request.
+func retriedPosts(fn *ast.FuncDecl, decls map[string]*ast.FuncDecl, helpers, seen map[string]bool) []*ast.CallExpr {
+	var calls []*ast.CallExpr
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name := calledFunctionName(call.Fun)
+		if helpers[name] {
+			for _, arg := range call.Args {
+				if lit, ok := ast.Unparen(arg).(*ast.FuncLit); ok && buildsPost(lit.Body) {
+					calls = append(calls, call)
+				}
+			}
+			return true
+		}
+		if callee, ok := decls[name]; ok && !seen[name] {
+			seen[name] = true
+			calls = append(calls, retriedPosts(callee, decls, helpers, seen)...)
+		}
+		return true
+	})
+	return calls
+}
+
+// buildsPost reports a body that creates a POST request:
+// http.NewRequest(http.MethodPost, ...) or with "POST".
+func buildsPost(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || found {
+			return !found
+		}
+		if name := calledFunctionName(call.Fun); (name == "NewRequest" || name == "NewRequestWithContext") && len(call.Args) >= 2 {
+			for _, arg := range call.Args[:2] {
+				switch arg := arg.(type) {
+				case *ast.SelectorExpr:
+					found = found || arg.Sel.Name == "MethodPost"
+				case *ast.BasicLit:
+					found = found || arg.Value == `"POST"`
+				}
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// resendName is an entry point that executes a command again: a reconciler's
+// resend of a row whose first send has an unknown outcome.
+var resendName = regexp.MustCompile(`(?i)^re(?:send|submit|dispatch|execute|drive|play)`)
+
+// detectResends reports a resend entry point that reaches a destructive
+// provider command through same-file calls: a reconciler calling it on every
+// tick repeats the command for a row whose first send may have succeeded.
+func (a *providerCommandRetryAnalyzer) detectResends(file *ast.File, decls map[string]*ast.FuncDecl) {
+	sends := sendingFunctions(file)
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || !resendName.MatchString(fn.Name.Name) {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || !sendsCommand(call, sends) {
+				return true
+			}
+			command := reachedCommand(call, decls, map[string]bool{fn.Name.Name: true})
+			if command != "" {
+				a.report(call, fn.Name.Name, command, "resend")
+			}
+			return false
+		})
+	}
+}
+
+// reachedCommand returns the provider command a call issues, directly or
+// through same-file functions.
+func reachedCommand(call *ast.CallExpr, decls map[string]*ast.FuncDecl, seen map[string]bool) string {
+	name := calledFunctionName(call.Fun)
+	if _, method := call.Fun.(*ast.SelectorExpr); method && providerCommandMethods[name] {
+		return name
+	}
+	callee, ok := decls[name]
+	if !ok || seen[name] {
+		return ""
+	}
+	seen[name] = true
+	command := ""
+	ast.Inspect(callee.Body, func(n ast.Node) bool {
+		if inner, ok := n.(*ast.CallExpr); ok && command == "" {
+			command = reachedCommand(inner, decls, seen)
+		}
+		return command == ""
+	})
+	return command
 }
 
 func collectRetryBoolParameters(file *ast.File) map[string][]int {

@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"fmt"
 	"go/ast"
 	"go/constant"
 	"go/token"
@@ -446,7 +447,7 @@ func NewEnumComparedToForeignLiteralRule() *EnumComparedToForeignLiteralRule {
 	return &EnumComparedToForeignLiteralRule{BaseRule: rules.NewBaseRule(
 		"enum-compared-to-foreign-literal",
 		"patterns",
-		"Detects a value of a string enum type compared with a literal that none of the type's constants holds — a status from another set",
+		"Detects a value of a string enum type compared with a literal that none of the type's constants holds — a status from another set — and such a literal a template passes to a FuncMap function that converts it to the type",
 		core.SeverityHigh,
 	)}
 }
@@ -467,9 +468,17 @@ func (r *EnumComparedToForeignLiteralRule) AnalyzeGoProject(ctx *core.GoProjectC
 			enums.own[pkg.Package.Types] = true
 		}
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	violations, err := rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(fileCtx, info, enums)
 	})
+	if err != nil {
+		return nil, err
+	}
+	inTemplates, err := r.templateForeignLiterals(ctx, enums)
+	if err != nil {
+		return nil, fmt.Errorf("%s: templates: %w", r.Name(), err)
+	}
+	return append(violations, inTemplates...), nil
 }
 
 // enumLiteral is a literal that can be an enum value: a word, not the empty
@@ -538,7 +547,16 @@ func (e enumIndex) lookup(expr ast.Expr, info *types.Info) (*types.Named, map[st
 		}
 	}
 	named, ok := types.Unalias(info.TypeOf(expr)).(*types.Named)
-	if !ok || !e.own[named.Obj().Pkg()] {
+	if !ok {
+		return nil, nil
+	}
+	return e.enumValues(named)
+}
+
+// enumValues returns a named string type of the project and the values of
+// its declared constants; nil for any other type or one without constants.
+func (e enumIndex) enumValues(named *types.Named) (*types.Named, map[string]bool) {
+	if !e.own[named.Obj().Pkg()] {
 		return nil, nil
 	}
 	if basic, ok := named.Underlying().(*types.Basic); !ok || basic.Info()&types.IsString == 0 {
