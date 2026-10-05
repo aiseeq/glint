@@ -49,7 +49,7 @@ type Fault struct {
 	Table string
 }
 
-// Table is a table or a view of the schema.
+// Table is a table, a view or a sequence of the schema.
 type Table struct {
 	Name string
 	// View is a view or a table created from a query: its columns are not
@@ -386,11 +386,35 @@ func (s *Schema) apply(stmt *pgquery.Node) {
 	case stmt.GetCreateTableAsStmt() != nil:
 		name := strings.ToLower(stmt.GetCreateTableAsStmt().GetInto().GetRel().GetRelname())
 		s.tables[name] = &Table{Name: name, View: true}
+	case stmt.GetCreateSeqStmt() != nil:
+		s.sequence(stmt.GetCreateSeqStmt())
 	case stmt.GetCreateFunctionStmt() != nil:
 		s.function(stmt.GetCreateFunctionStmt())
 	case stmt.GetCreateTrigStmt() != nil:
 		s.trigger(stmt.GetCreateTrigStmt())
 	}
+}
+
+// sequenceColumns are the columns a SELECT from a sequence reads.
+var sequenceColumns = []*Column{
+	{Name: "last_value", NotNull: true, Type: "int8"},
+	{Name: "log_cnt", NotNull: true, Type: "int8"},
+	{Name: "is_called", NotNull: true, Type: "bool"},
+}
+
+// sequence records a sequence as a relation with the columns a query reads
+// its state from: SELECT last_value FROM order_seq.
+func (s *Schema) sequence(stmt *pgquery.CreateSeqStmt) {
+	name := strings.ToLower(stmt.GetSequence().GetRelname())
+	if _, exists := s.tables[name]; exists && stmt.GetIfNotExists() {
+		return
+	}
+	table := &Table{Name: name}
+	for _, column := range sequenceColumns {
+		copied := *column
+		table.columns = append(table.columns, &copied)
+	}
+	s.tables[name] = table
 }
 
 func (s *Schema) create(stmt *pgquery.CreateStmt) {
@@ -692,7 +716,7 @@ func (s *Schema) deferAlter(stmt *pgquery.AlterTableStmt) {
 
 func (s *Schema) rename(stmt *pgquery.RenameStmt) {
 	switch stmt.GetRenameType() {
-	case pgquery.ObjectType_OBJECT_TABLE, pgquery.ObjectType_OBJECT_VIEW:
+	case pgquery.ObjectType_OBJECT_TABLE, pgquery.ObjectType_OBJECT_VIEW, pgquery.ObjectType_OBJECT_SEQUENCE:
 		old := strings.ToLower(stmt.GetRelation().GetRelname())
 		if table, ok := s.tables[old]; ok {
 			delete(s.tables, old)
@@ -710,7 +734,7 @@ func (s *Schema) rename(stmt *pgquery.RenameStmt) {
 
 func (s *Schema) drop(stmt *pgquery.DropStmt) {
 	switch stmt.GetRemoveType() {
-	case pgquery.ObjectType_OBJECT_TABLE, pgquery.ObjectType_OBJECT_VIEW, pgquery.ObjectType_OBJECT_MATVIEW:
+	case pgquery.ObjectType_OBJECT_TABLE, pgquery.ObjectType_OBJECT_VIEW, pgquery.ObjectType_OBJECT_MATVIEW, pgquery.ObjectType_OBJECT_SEQUENCE:
 	case pgquery.ObjectType_OBJECT_INDEX:
 		for _, object := range stmt.GetObjects() {
 			if items := object.GetList().GetItems(); len(items) > 0 {
