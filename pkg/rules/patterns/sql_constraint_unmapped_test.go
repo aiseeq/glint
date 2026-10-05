@@ -175,3 +175,107 @@ func (s *Server) importAll(ctx context.Context) error {
 	require.NoError(t, err)
 	assert.Equal(t, wantedLines(files, "sql-constraint-violation-unmapped"), foundLines(violations))
 }
+
+const replaceSetMigration = `
+CREATE TABLE staff (id SERIAL PRIMARY KEY, email TEXT NOT NULL UNIQUE);
+CREATE TABLE staff_roles (
+    staff_id INT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    PRIMARY KEY (staff_id, role)
+);
+CREATE TABLE fee_schedules (id SERIAL PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE fee_links (fee_schedule_id INT NOT NULL REFERENCES fee_schedules(id), tx TEXT NOT NULL);
+`
+
+// A child row keyed by a parent the function has just inserted, a set of
+// rows replaced after a DELETE of the same table, a parent deleted after the
+// rows pointing at it: the function itself rules the violation out.
+func TestSQLConstraintViolationUnmappedRuledOutInFunction(t *testing.T) {
+	files := map[string]string{
+		"storage/migrations/001_init.up.sql": replaceSetMigration,
+		"storage/staff.go": `package storage
+
+import (
+	"context"
+	"database/sql"
+)
+
+type Repo struct{ db *sql.Tx }
+
+// EnsureSeeded gives a staff member it has just created a role.
+func (r *Repo) EnsureSeeded(ctx context.Context, email, role string) error {
+	var id int
+	if err := r.db.QueryRowContext(ctx, ` + "`INSERT INTO staff (email) VALUES ($1) ON CONFLICT (email) DO NOTHING RETURNING id`" + `, email).Scan(&id); err != nil {
+		return err
+	}
+	_, err := r.db.ExecContext(ctx, ` + "`INSERT INTO staff_roles (staff_id, role) VALUES ($1, $2)`" + `, id, role)
+	return err
+}
+
+// ReplaceRoles replaces the set of roles of one staff member.
+func (r *Repo) ReplaceRoles(ctx context.Context, id int, roles map[string]bool) error {
+	if _, err := r.db.ExecContext(ctx, ` + "`DELETE FROM staff_roles WHERE staff_id = $1`" + `, id); err != nil {
+		return err
+	}
+	for role := range roles {
+		if _, err := r.db.ExecContext(ctx, ` + "`INSERT INTO staff_roles (staff_id, role) VALUES ($1, $2)`" + `, id, role); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AssignRole inserts one role; what makes it unique is not seen here.
+func (r *Repo) AssignRole(ctx context.Context, id int, role string) error {
+	_, err := r.db.ExecContext(ctx, ` + "`INSERT INTO staff_roles (staff_id, role) VALUES ($1, $2)`" + `, id, role) // want sql-constraint-violation-unmapped
+	return err
+}
+
+// DeleteFee removes the links to a schedule before the schedule.
+func (r *Repo) DeleteFee(ctx context.Context, id int) error {
+	if _, err := r.db.ExecContext(ctx, ` + "`DELETE FROM fee_links WHERE fee_schedule_id = $1`" + `, id); err != nil {
+		return err
+	}
+	_, err := r.db.ExecContext(ctx, ` + "`DELETE FROM fee_schedules WHERE id = $1`" + `, id)
+	return err
+}
+
+func (r *Repo) DeleteFeeOnly(ctx context.Context, id int) error {
+	_, err := r.db.ExecContext(ctx, ` + "`DELETE FROM fee_schedules WHERE id = $1`" + `, id) // want sql-constraint-violation-unmapped
+	return err
+}
+`,
+		"web/handlers.go": `package web
+
+import (
+	"net/http"
+
+	"example.com/rulestest/storage"
+)
+
+type Server struct{ repo *storage.Repo }
+
+func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if err := s.repo.EnsureSeeded(ctx, "a", "admin"); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	if err := s.repo.ReplaceRoles(ctx, 1, nil); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	if err := s.repo.AssignRole(ctx, 1, "x"); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	if err := s.repo.DeleteFee(ctx, 1); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	if err := s.repo.DeleteFeeOnly(ctx, 1); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+`,
+	}
+	violations, err := NewSQLConstraintViolationUnmappedRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, wantedLines(files, "sql-constraint-violation-unmapped"), foundLines(violations))
+}

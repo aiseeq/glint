@@ -116,3 +116,33 @@ func keyColumns(key uniqueKey) []string {
 	}
 	return names
 }
+
+// ReturningInserts returns the tables the INSERTs of a statement add a row to
+// and read back (RETURNING): a row the caller has just made and holds.
+func ReturningInserts(sql string) []string {
+	result, _, ok := parseCode(sql)
+	if !ok {
+		return nil
+	}
+	var tables []string
+	for _, raw := range result.GetStmts() {
+		walk(raw.GetStmt().ProtoReflect(), func(m proto.Message) {
+			if insert, ok := m.(*pgquery.InsertStmt); ok && len(insert.GetReturningList()) > 0 {
+				tables = append(tables, strings.ToLower(insert.GetRelation().GetRelname()))
+			}
+		})
+	}
+	return tables
+}
+
+// ForeignKeyTarget returns the table the foreign key of a column points to,
+// "" for a column without one.
+func (s *Schema) ForeignKeyTarget(table, column string) string {
+	if s == nil || s.Table(table) == nil {
+		return ""
+	}
+	if col := s.Table(table).Column(column); col != nil {
+		return col.References
+	}
+	return ""
+}
