@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"path/filepath"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -29,10 +30,16 @@ func init() {
 //
 // Skips:
 //   - Test files (*_test.go, /tests/, /testdata/)
-//   - cmd/**/main.go (CLI entry points can use bare fmt/log)
+//   - cmd/**/main.go (CLI entry points can use bare fmt/log) - unless the
+//     program installs a slog default (slog.SetDefault in any file of its
+//     directory): the standard log package then writes through slog at INFO,
+//     and log.Fatal reports a fatal failure below any ERROR alerting
 //   - Files explicitly configured as exceptions in .glint.yaml
 type NonCanonicalLoggerRule struct {
 	*rules.BaseRule
+	// slogDefaultDirs are the directories with a file calling
+	// slog.SetDefault.
+	slogDefaultDirs map[string]bool
 }
 
 // NewNonCanonicalLoggerRule creates the rule
@@ -74,17 +81,30 @@ var logPkgCalls = map[string]map[string]bool{
 	},
 }
 
+// UseProjectFiles records the directories whose programs install a slog
+// default.
+func (r *NonCanonicalLoggerRule) UseProjectFiles(files []*core.FileContext) {
+	r.slogDefaultDirs = make(map[string]bool)
+	for _, ctx := range files {
+		if ctx.IsGoFile() && ctx.HasGoAST() && !ctx.IsTestFile() && callsSlogSetDefault(ctx) {
+			r.slogDefaultDirs[filepath.Dir(ctx.Path)] = true
+		}
+	}
+}
+
+// ResetState drops the directories of the previous root.
+func (r *NonCanonicalLoggerRule) ResetState() { r.slogDefaultDirs = nil }
+
 // AnalyzeFile checks for non-canonical logger usage
 func (r *NonCanonicalLoggerRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !ctx.IsGoFile() || ctx.IsTestFile() {
+	if !ctx.IsGoFile() || ctx.IsTestFile() || !ctx.HasGoAST() {
 		return nil
 	}
 
 	if r.shouldSkipFile(ctx) {
-		return nil
-	}
-
-	if !ctx.HasGoAST() {
+		if r.slogDefaultDirs[filepath.Dir(ctx.Path)] || callsSlogSetDefault(ctx) {
+			return r.checkCalls(ctx, true)
+		}
 		return nil
 	}
 
@@ -94,7 +114,7 @@ func (r *NonCanonicalLoggerRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	violations = append(violations, r.checkImports(ctx)...)
 
 	// 2. Detect log.Printf / fmt.Println calls via AST
-	violations = append(violations, r.checkCalls(ctx)...)
+	violations = append(violations, r.checkCalls(ctx, false)...)
 
 	return violations
 }
@@ -164,13 +184,39 @@ func forbiddenLoggerLibrary(importPath string) string {
 	return ""
 }
 
+// callsSlogSetDefault reports a file calling slog.SetDefault.
+func callsSlogSetDefault(ctx *core.FileContext) bool {
+	aliases := helpers.PackageAliases(ctx.GoAST, `"log/slog"`, "slog")
+	found := false
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || found {
+			return !found
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "SetDefault" {
+			return true
+		}
+		if pkg, ok := sel.X.(*ast.Ident); ok && aliases[pkg.Name] && isPackageName(fileScopes(ctx), pkg) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
 // checkCalls walks the AST and flags log.Printf / fmt.Println style calls.
-func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext) []*core.Violation {
+// underSlog limits it to the log package of an entry point whose program
+// installs a slog default.
+func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext, underSlog bool) []*core.Violation {
 	var violations []*core.Violation
 
 	// Identifier the file uses → standard-library import path it stands for.
 	pkgOf := make(map[string]string, len(logPkgCalls))
 	for path := range logPkgCalls {
+		if underSlog && path != "log" {
+			continue
+		}
 		for alias := range helpers.PackageAliases(ctx.GoAST, `"`+path+`"`, path) {
 			pkgOf[alias] = path
 		}
@@ -211,11 +257,16 @@ func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext) []*core.Viola
 			return true
 		}
 
-		v := r.CreateViolation(ctx.RelPath, pos.Line,
-			"Non-canonical logger call: "+path+"."+sel.Sel.Name)
+		message := "Non-canonical logger call: " + path + "." + sel.Sel.Name
+		suggestion := "Route through the project's canonical logger (slog / shared/logging). " +
+			"Direct " + path + "." + sel.Sel.Name + " bypasses structured logging and sampling."
+		if underSlog {
+			message = "log." + sel.Sel.Name + " in a program that calls slog.SetDefault — the log package then writes through slog at INFO, so this failure is logged below any ERROR alerting"
+			suggestion = "Log the failure with slog.Error (and os.Exit(1) where log.Fatal exited)"
+		}
+		v := r.CreateViolation(ctx.RelPath, pos.Line, message)
 		v.WithCode(strings.TrimSpace(lineContent))
-		v.WithSuggestion("Route through the project's canonical logger (slog / shared/logging). " +
-			"Direct " + path + "." + sel.Sel.Name + " bypasses structured logging and sampling.")
+		v.WithSuggestion(suggestion)
 		v.WithContext("package", path)
 		v.WithContext("function", sel.Sel.Name)
 		violations = append(violations, v)
