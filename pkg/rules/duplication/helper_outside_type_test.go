@@ -213,7 +213,7 @@ type Issue struct {
 
 import "example.com/rulestest/models"
 
-func pickDisplayed(yesterday, live models.Amount) (models.Amount, bool) {
+func headlineAmount(yesterday, live models.Amount) (models.Amount, bool) {
 	if yesterday.Int.Sign() > 0 {
 		return yesterday, true
 	}
