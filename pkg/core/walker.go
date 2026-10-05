@@ -288,12 +288,14 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 		".ts", ".tsx",
 		".js", ".jsx",
 		".md",
-		".sql",                      // migration hygiene rules (rules must guard by extension)
-		".conf",                     // server configuration rules (rules must guard by extension)
-		".sh",                       // duplication rules (rules must guard by extension)
-		".html", ".tmpl", ".gohtml", // template rules (rules must guard by extension)
+		".sql",  // migration hygiene rules (rules must guard by extension)
+		".conf", // server configuration rules (rules must guard by extension)
+		".sh",   // duplication rules (rules must guard by extension)
 	}
 
+	if IsTemplateName(path) {
+		return true // template rules (rules must guard with IsTemplate)
+	}
 	if isMakefileName(filepath.Base(path)) {
 		return true // recipe rules (rules must guard with IsMakefile)
 	}

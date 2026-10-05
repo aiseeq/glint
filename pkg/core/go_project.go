@@ -130,15 +130,22 @@ func (ctx *GoProjectContext) File(path string) (*FileContext, error) {
 	if path == "" {
 		return nil, errors.New("resolve Go project file: empty path")
 	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(ctx.ProjectRoot, path)
-	}
-	path = filepath.Clean(path)
-	fileCtx, ok := ctx.filesByPath[path]
+	fileCtx, ok := ctx.RunFile(path)
 	if !ok {
 		return nil, fmt.Errorf("resolve Go project file %q: no file context", path)
 	}
 	return fileCtx, nil
+}
+
+// RunFile returns the file context of an absolute or project-relative path
+// and whether the run analyzes that file: a rule that looks at every file
+// under the root reports only on the ones of the run.
+func (ctx *GoProjectContext) RunFile(path string) (*FileContext, bool) {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(ctx.ProjectRoot, path)
+	}
+	fileCtx, ok := ctx.filesByPath[filepath.Clean(path)]
+	return fileCtx, ok
 }
 
 // FileForPosition maps a position in the shared file set to its file context.

@@ -42,9 +42,10 @@ type moduleInputs struct {
 }
 
 // GoInputs identifies everything the typed load of root reads, and the SQL
-// files under root, which project rules check SQL against: the analyzed Go
-// and SQL files, every Go and cgo source and module file of the modules that own
-// them and of their workspace, and the Go toolchain and build environment.
+// and template files under root, which project rules check code against: the
+// analyzed Go, SQL and template files, every Go and cgo source and module
+// file of the modules that own them and of their workspace, and the Go
+// toolchain and build environment.
 // Modules come from the module cache by the versions go.sum pins, so they are
 // covered by go.sum. cacheable is false when the load reads what the hash
 // cannot cover: a replace directive pointing at a local directory.
@@ -64,7 +65,7 @@ func (l *GoProjectLoader) GoInputs(root string, contexts []*FileContext, tolerat
 		if fileCtx.IsGoFile() {
 			goFiles = append(goFiles, fileCtx)
 		}
-		if fileCtx.IsGoFile() || strings.EqualFold(filepath.Ext(fileCtx.RelPath), ".sql") {
+		if fileCtx.IsGoFile() || strings.EqualFold(filepath.Ext(fileCtx.RelPath), ".sql") || fileCtx.IsTemplate() {
 			analyzed = append(analyzed, fileCtx)
 		}
 	}

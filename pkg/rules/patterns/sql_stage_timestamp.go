@@ -482,7 +482,8 @@ func columnsOf(update sqlschema.UpdateWrite) []string {
 	return columns
 }
 
-func sortedKeys(m map[string]string) []string {
+// sortedKeys returns the keys of a string-keyed map in order.
+func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for key := range m {
 		keys = append(keys, key)

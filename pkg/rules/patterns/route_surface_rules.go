@@ -411,9 +411,7 @@ var (
 // AnalyzeFile reports the external assets of a template that carry no
 // integrity hash.
 func (r *CDNAssetWithoutIntegrityRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	switch strings.ToLower(filepath.Ext(ctx.RelPath)) {
-	case ".html", ".tmpl", ".gohtml":
-	default:
+	if !ctx.IsTemplate() {
 		return nil
 	}
 	// Pages kept with the documentation (mockups, prototypes, reports) are

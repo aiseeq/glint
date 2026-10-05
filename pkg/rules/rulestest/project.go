@@ -44,7 +44,7 @@ func Module(t *testing.T, files map[string]string) (string, []*core.FileContext)
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 
-		if !strings.HasSuffix(name, ".go") {
+		if !strings.HasSuffix(name, ".go") && !core.IsTemplateName(name) {
 			continue
 		}
 		ctx, err := core.NewFileContextChecked(path, root, []byte(content), core.DefaultConfig())

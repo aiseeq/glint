@@ -112,6 +112,20 @@ func isMakefileName(name string) bool {
 	return strings.HasSuffix(name, ".mk")
 }
 
+// IsTemplate reports an HTML or Go template file: *.html, *.tmpl, *.gohtml.
+func (ctx *FileContext) IsTemplate() bool {
+	return IsTemplateName(ctx.Path)
+}
+
+// IsTemplateName reports the name of an HTML or Go template file.
+func IsTemplateName(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".html", ".tmpl", ".gohtml":
+		return true
+	}
+	return false
+}
+
 // IsDockerfile reports a container build file: Dockerfile, Dockerfile.<name>,
 // <name>.dockerfile or Containerfile.
 func (ctx *FileContext) IsDockerfile() bool {
