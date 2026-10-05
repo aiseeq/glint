@@ -1,9 +1,15 @@
 package patterns
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
 )
 
 // A malformed response answered with an empty list or a zero total shows
@@ -256,11 +262,10 @@ export function escapeCsvCell(value: string): string {
 }
 
 // The mock is an untyped constant: the client's response type does not check
-// it, and it keeps the old shape after the API changes.
+// it, and it keeps the old shape after the API changes. A spec no type check
+// compiles is left to ts-test-outside-typecheck: a type would not help it.
 func TestTestMockResponseUntypedDriftsFromAPI(t *testing.T) {
-	assert.Equal(t, []string{"frontend/e2e/tests/list-api.spec.ts:1", "frontend/e2e/tests/list-api.spec.ts:13"},
-		deployFindings(t, "test-mock-response-untyped-drifts-from-api", map[string]string{
-			"frontend/e2e/tests/list-api.spec.ts": `const MOCK_LIST = {
+	spec := `const MOCK_LIST = {
   success: true,
   data: { transactions: [{ id: 'tx-1' }], total: 1 },
 }
@@ -277,11 +282,77 @@ async function setup(page: Page) {
   })
   await page.route('**/api/again', route => route.fulfill({ json: MOCK_LIST }))
 }
-`,
-			"frontend/src/list.ts": `const DEFAULT = { rows: [] }
-route.fulfill({ json: DEFAULT })
-`,
-		}))
+`
+	files := map[string]string{
+		"frontend/package.json":      `{"scripts": {"type-check": "tsc --noEmit && tsc --noEmit -p e2e"}}`,
+		"frontend/tsconfig.json":     `{"include": ["**/*.ts"], "exclude": ["node_modules", "e2e"]}`,
+		"frontend/e2e/tsconfig.json": `{"extends": "../tsconfig.json", "include": ["**/*.ts"], "exclude": []}`,
+		"frontend/e2e/list.spec.ts":  spec,
+		"frontend/src/list.ts":       "const DEFAULT = { rows: [] }\nroute.fulfill({ json: DEFAULT })\n",
+	}
+	assert.Equal(t, []string{"frontend/e2e/list.spec.ts:1", "frontend/e2e/list.spec.ts:13"},
+		projectTSFindings(t, "test-mock-response-untyped-drifts-from-api", files))
+	files["frontend/package.json"] = `{"scripts": {"type-check": "tsc --noEmit"}}`
+	assert.Empty(t, projectTSFindings(t, "test-mock-response-untyped-drifts-from-api", files))
+}
+
+// The app's tsconfig leaves the specs out and no script checks a tsconfig
+// that takes them: the finding goes on the runner config above them. A spec
+// directory with its own checked tsconfig, or included by the app's, is fine.
+func TestTSTestOutsideTypecheck(t *testing.T) {
+	files := map[string]string{
+		"frontend/package.json":           `{"scripts": {"type-check": "tsc --noEmit", "build": "next build"}}`,
+		"frontend/tsconfig.json":          "{\n  // the app\n  \"include\": [\"**/*.ts\", \"**/*.tsx\"],\n  \"exclude\": [\"node_modules\", \"e2e\"],\n}\n",
+		"frontend/e2e/tsconfig.json":      `{"extends": "../tsconfig.json", "include": ["**/*.ts"], "exclude": []}`,
+		"frontend/playwright.config.ts":   "export default defineConfig({ testDir: './e2e' })\n",
+		"frontend/e2e/tests/list.spec.ts": "test('list', async () => {})\n",
+		"frontend/e2e/tests/form.spec.ts": "test('form', async () => {})\n",
+		"frontend/src/lib/format.test.ts": "test('format', () => {})\n",
+	}
+	assert.Equal(t, []string{"frontend/playwright.config.ts:1"}, projectTSFindings(t, "ts-test-outside-typecheck", files))
+	files["frontend/package.json"] = `{"scripts": {"type-check": "tsc --noEmit && npm run type-check:e2e", "type-check:e2e": "tsc --noEmit -p e2e"}}`
+	assert.Empty(t, projectTSFindings(t, "ts-test-outside-typecheck", files))
+
+	// Unit tests no tsconfig takes: one finding per directory on its first
+	// test; a directory whose jest compiles with ts-jest is checked.
+	units := map[string]string{
+		"web/package.json":               `{"scripts": {"type-check": "tsc --noEmit -p app"}}`,
+		"web/app/tsconfig.json":          `{"include": ["**/*.ts"]}`,
+		"web/shared/__tests__/b.test.ts": "test('b', () => {})\n",
+		"web/shared/__tests__/a.test.ts": "test('a', () => {})\n",
+		"web/lib/__tests__/c.test.ts":    "test('c', () => {})\n",
+		"web/lib/jest.config.cjs":        "module.exports = { preset: 'ts-jest' }\n",
+	}
+	assert.Equal(t, []string{"web/shared/__tests__/a.test.ts:1"}, projectTSFindings(t, "ts-test-outside-typecheck", units))
+}
+
+// projectTSFindings writes the files into one project and runs a rule over
+// them the way the check does: project files first, then each file.
+func projectTSFindings(t *testing.T, name string, files map[string]string) []string {
+	t.Helper()
+	rule, ok := rules.Get(name)
+	require.True(t, ok, name)
+	root := t.TempDir()
+	var contexts []*core.FileContext
+	for path, source := range files {
+		full := filepath.Join(root, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+		require.NoError(t, os.WriteFile(full, []byte(source), 0o644))
+		if filepath.Ext(path) == ".json" {
+			continue
+		}
+		ctx, err := core.NewFileContextChecked(full, root, []byte(source), core.DefaultConfig())
+		require.NoError(t, err)
+		contexts = append(contexts, ctx)
+	}
+	if project, ok := rule.(rules.ProjectFilesRule); ok {
+		project.UseProjectFiles(contexts)
+	}
+	var found []*core.Violation
+	for _, ctx := range contexts {
+		found = append(found, rule.AnalyzeFile(ctx)...)
+	}
+	return foundLines(found)
 }
 
 // An API spec where every request is answered by a mock never calls the API.

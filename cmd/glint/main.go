@@ -500,6 +500,9 @@ func loadConfig(projectRoot string) (*core.Config, []rules.Rule, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	if warning := excludedTestRulesWarning(cfg, enabledRules); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 	return cfg, enabledRules, nil
 }
 
