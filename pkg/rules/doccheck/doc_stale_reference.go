@@ -202,6 +202,24 @@ func (m *modulePackages) stale(pkg, path, name string) bool {
 	return !unicode.IsLower(first) || m.any[name]
 }
 
+// staleFamily — a reference pkg.Prefix*, resolved to the package at path,
+// points nowhere: neither that package nor a namesake of it declares a name
+// with the prefix.
+func (m *modulePackages) staleFamily(pkg, path, prefix string) bool {
+	paths := []string{path}
+	for other := range m.byName[pkg] {
+		paths = append(paths, other)
+	}
+	for _, p := range paths {
+		for name := range m.byPath[p] {
+			if strings.HasPrefix(name, prefix) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // AnalyzeGoProject checks the comments of every non-test file.
 func (r *DocStaleReferenceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	if ctx == nil {
@@ -241,15 +259,23 @@ func (r *DocStaleReferenceRule) analyzeFile(fileCtx *core.FileContext, ownPath s
 		for _, c := range group.List {
 			first := fileCtx.LineFor(c)
 			for i, text := range strings.Split(c.Text, "\n") {
-				for _, m := range staleRefPattern.FindAllStringSubmatch(text, -1) {
-					name, ident := m[1], m[2]
+				for _, at := range staleRefPattern.FindAllStringSubmatchIndex(text, -1) {
+					name, ident := text[at[2]:at[3]], text[at[4]:at[5]]
 					lead, _ := utf8.DecodeRuneInString(ident)
-					if fileExtensions[ident] || m[3] != "" && unicode.IsLower(lead) {
+					if fileExtensions[ident] || at[6] >= 0 && unicode.IsLower(lead) {
 						continue
 					}
 					path, ok := resolvePackage(name, own, ownPath, imports, mod)
-					if !ok || !mod.stale(name, path, ident) {
+					if !ok {
 						continue
+					}
+					// pkg.Prefix* names a family of names by its prefix.
+					family := at[5] < len(text) && text[at[5]] == '*'
+					if family && !mod.staleFamily(name, path, ident) || !family && !mod.stale(name, path, ident) {
+						continue
+					}
+					if family {
+						ident += "*"
 					}
 					violations = append(violations, r.report(fileCtx, first+i, name, ident))
 				}
