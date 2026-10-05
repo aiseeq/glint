@@ -2,6 +2,7 @@ package duplication
 
 import (
 	"fmt"
+	"github.com/aiseeq/glint/pkg/core"
 	"strings"
 	"testing"
 
@@ -99,4 +100,20 @@ func TestDuplicationRulesRejectInvalidBlockSize(t *testing.T) {
 	assert.Equal(t, 30, block.minBlockSize)
 	require.NoError(t, block.Configure(map[string]any{}))
 	assert.Equal(t, defaultBlockSize, block.minBlockSize)
+}
+
+// A file read from disk ends with a newline, and splitting it leaves an empty
+// last element that is not a line of the file: a region running to the end of
+// the file stops at its last line.
+func TestCrossFileDuplicateRegionStopsAtLastLine(t *testing.T) {
+	rule := NewCrossFileDuplicateRule()
+	body := regionBody(25)
+	a := core.NewFileContext("/copies/a.go", "/", []byte("package copies\n\nfunc a() {\n"+body+"}\n"), nil)
+	b := core.NewFileContext("/copies/b.go", "/", []byte("package copies\n\n\nfunc b() {\n"+body+"}\n"), nil)
+
+	assert.Empty(t, rule.AnalyzeFile(a))
+	violations := rule.AnalyzeFile(b)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, "Cross-file duplicate (lines 5-30): same as copies/a.go:4-29", violations[0].Message)
 }

@@ -210,6 +210,11 @@ func isSpace(c byte) bool {
 // inside raw-string literals: their content is data, not code, and both
 // duplication rules must judge it the same way.
 func normalizeFileLines(lines []string) []string {
+	// A file that ends with a newline splits into an empty last element that
+	// is not a line of the file; a region must not run onto it.
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
 	rawStringLines := rawStringLineSet(lines)
 	normalized := make([]string, len(lines))
 	for i, line := range lines {

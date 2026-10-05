@@ -1,6 +1,7 @@
 package duplication
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -196,26 +197,9 @@ func createTestContext(t *testing.T, path, code string) *core.FileContext {
 	ctx := &core.FileContext{
 		Path:    "/" + path,
 		RelPath: path,
-		Lines:   splitLines(code),
+		Lines:   strings.Split(code, "\n"),
 		Content: []byte(code),
 	}
 
 	return ctx
-}
-
-// splitLines drops the empty element strings.Split leaves after a final
-// newline, so the region tests count only the lines the source has.
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
 }
