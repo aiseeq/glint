@@ -403,3 +403,151 @@ docker compose up -d
 `,
 	}))
 }
+
+// jq -r prints the string null for a missing key and exits 0: the getter
+// hands "null" on as the value, and a comparison or a name built from it
+// takes a wrong turn.
+func TestShellJqNullPassesAsValue(t *testing.T) {
+	assert.Equal(t, []string{"deploy.sh:5", "deploy.sh:9"}, shellFindings(t, "shell-jq-null-passes-as-value", map[string]string{
+		"deploy.sh": `#!/bin/bash
+set -euo pipefail
+
+get_active_color() {
+    jq -r '.active_color' "$STATE_FILE"
+}
+
+deploy() {
+    local image=$(jq -r '.image.tag' "$STATE_FILE")
+    docker run --name "app-$image" "registry/app:$image"
+    local active=$(get_active_color)
+    if [[ "$active" == "blue" ]]; then
+        target=green
+    else
+        target=blue
+    fi
+}
+`,
+	}))
+	// -e fails on null, // gives the missing key a value, the script checks
+	// for null, the other branch of the test fails or warns, the value is only
+	// printed, or a namesake local of another function is the one tested.
+	assert.Empty(t, shellFindings(t, "shell-jq-null-passes-as-value", map[string]string{
+		"ok.sh": `#!/bin/bash
+get_active_color() {
+    jq -er '.active_color' "$STATE_FILE"
+}
+active=$(get_active_color)
+[[ "$active" == "blue" ]] && target=green
+tag=$(jq -r '.image.tag // empty' "$STATE_FILE")
+[[ "$tag" == "latest" ]] && exit 1
+port=$(jq -r '.port' "$STATE_FILE")
+if [[ -z "$port" || "$port" == "null" ]]; then exit 1; fi
+[[ "$port" == "8081" ]] && echo blue
+version=$(jq -r '.version' "$STATE_FILE")
+echo "deployed version: $version"
+names=$(jq -r '.services[].name' "$STATE_FILE")
+[[ "$names" == "" ]] && exit 1
+check_health() {
+    local health=$(curl -s "$url" | jq -r '.data.status')
+    if [[ "$health" == "healthy" ]]; then
+        log_ok "healthy"
+    else
+        log_warn "$health"
+    fi
+    local rollback=$(jq -r '.rollback_available' "$STATE_FILE")
+    if [[ "$rollback" != "true" ]]; then
+        log_error "No rollback available"
+        exit 1
+    fi
+}
+show_state() {
+    local active=$(jq -r '.active_environment' "$STATE_FILE")
+    echo "active: $active"
+}
+pick() {
+    local active=$1
+    if [[ "$active" == "blue" ]]; then echo green; else echo blue; fi
+}
+status() {
+    local active=$(jq -r '.active_environment' "$STATE_FILE")
+    local active_port=$(jq -r '.active_port' "$STATE_FILE")
+    if [[ "$active_port" != "8081" && "$active_port" != "8082" ]]; then
+        log_error "bad port: $active_port"
+        exit 1
+    fi
+    curl -f "http://localhost:${active_port}/health"
+    echo "active: $active-$active_port"
+}
+`,
+	}))
+}
+
+// A getter that prints a literal when its state file is missing hides the
+// missing state: the caller acts on the made-up value as on the real one.
+func TestShellGetterDefaultOnMissingFile(t *testing.T) {
+	assert.Equal(t, []string{"deploy.sh:12", "deploy.sh:19", "deploy.sh:6"}, shellFindings(t, "shell-getter-default-on-missing-file", map[string]string{
+		"deploy.sh": `#!/bin/bash
+get_active_color() {
+    if [[ -f "$STATE_FILE" ]]; then
+        jq -er '.active_color' "$STATE_FILE"
+    else
+        echo "blue"
+    fi
+}
+
+get_release() {
+    if [ ! -f "$RELEASE_FILE" ]; then
+        echo none
+        return 0
+    fi
+    cat "$RELEASE_FILE"
+}
+
+get_port() {
+    [[ -r "$PORT_FILE" ]] || { echo "8081"; return; }
+    cat "$PORT_FILE"
+}
+
+active=$(get_active_color)
+release=$(get_release)
+port=$(get_port)
+`,
+	}))
+	// The missing file is an error, the default is not a literal, or nobody
+	// captures the function's output.
+	assert.Empty(t, shellFindings(t, "shell-getter-default-on-missing-file", map[string]string{
+		"ok.sh": `#!/bin/bash
+get_active_color() {
+    if [[ -f "$STATE_FILE" ]]; then
+        jq -er '.active_color' "$STATE_FILE"
+    else
+        echo "state file $STATE_FILE is missing" >&2
+        return 1
+    fi
+}
+
+get_branch() {
+    if [[ -f "$BRANCH_FILE" ]]; then
+        cat "$BRANCH_FILE"
+    else
+        echo "$DEFAULT_BRANCH"
+    fi
+}
+
+show_status() {
+    if [[ -f "$STATE_FILE" ]]; then
+        cat "$STATE_FILE"
+    else
+        echo "no deployments yet"
+    fi
+}
+
+has_image() { [[ -f "$IMAGES/$1" ]] && echo yes || echo no; }
+present=$(has_image app)
+
+active=$(get_active_color)
+branch=$(get_branch)
+show_status
+`,
+	}))
+}

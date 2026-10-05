@@ -56,7 +56,7 @@ func NewEnvKeyMissingFromDeployEnvRule() *EnvKeyMissingFromDeployEnvRule {
 	r := &EnvKeyMissingFromDeployEnvRule{BaseRule: rules.NewBaseRule(
 		"env-key-missing-from-deploy-env",
 		"patterns",
-		"Detects an environment key the Go code reads and the env template lists that no deploy writer of the server's env file writes — the setting is empty on the server",
+		"Detects an environment key the Go code reads and the env template lists that no deploy writer of the server's env file writes — the server has it only if someone adds it by hand",
 		core.SeverityMedium,
 	)}
 	r.ResetState()
