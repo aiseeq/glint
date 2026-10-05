@@ -190,3 +190,103 @@ func measure(h *Handler) int {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"api/api.go:93", "store/store.go:20", "store/store.go:28"}, foundLines(violations))
 }
+
+// A list left nil reaches the client by three more roads: an argument of the
+// handler's own JSON helper, an exported field without a json tag in a
+// response type, and a field of the response filled only by append in a
+// loop.
+func TestNilSliceJSONNullResponseShapes(t *testing.T) {
+	violations, err := NewNilSliceJSONNullRule().AnalyzeGoProject(rulestest.Project(t, map[string]string{
+		"api/api.go": `package api
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+type Device struct{ Name string }
+
+type securityResponse struct {
+	Enabled bool ` + "`json:\"enabled\"`" + `
+	Devices []Device
+	Methods []string ` + "`json:\"methods\"`" + `
+}
+
+// plain is not a JSON type: no field of it has a json tag.
+type plain struct {
+	Devices []Device
+}
+
+type Handler struct{ devices []Device }
+
+func respondJSON(w http.ResponseWriter, status int, payload any) {
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
+	var names []string
+	for _, d := range h.devices {
+		names = append(names, d.Name)
+	}
+	respondJSON(w, http.StatusOK, names)
+}
+
+func (h *Handler) listMade(w http.ResponseWriter, r *http.Request) {
+	names := make([]string, 0, len(h.devices))
+	for _, d := range h.devices {
+		names = append(names, d.Name)
+	}
+	respondJSON(w, http.StatusOK, names)
+}
+
+func (h *Handler) security(w http.ResponseWriter, r *http.Request) {
+	var devices []Device
+	for _, d := range h.devices {
+		devices = append(devices, d)
+	}
+	respondJSON(w, http.StatusOK, securityResponse{Enabled: true, Devices: devices, Methods: []string{}})
+}
+
+func (h *Handler) methods(w http.ResponseWriter, r *http.Request) {
+	resp := securityResponse{Enabled: true, Devices: []Device{}}
+	for _, d := range h.devices {
+		resp.Methods = append(resp.Methods, d.Name)
+	}
+	respondJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) methodsMade(w http.ResponseWriter, r *http.Request) {
+	resp := securityResponse{Devices: []Device{}, Methods: []string{}}
+	for _, d := range h.devices {
+		resp.Methods = append(resp.Methods, d.Name)
+	}
+	respondJSON(w, http.StatusOK, resp)
+}
+
+// Config hides its secret from a dump; it is not a payload.
+type Config struct {
+	APIKey  string ` + "`json:\"-\"`" + `
+	Sources []string
+}
+
+func loadConfig(env []string) Config {
+	var sources []string
+	for _, s := range env {
+		sources = append(sources, s)
+	}
+	return Config{Sources: sources}
+}
+
+func (h *Handler) internal() plain {
+	var devices []Device
+	for _, d := range h.devices {
+		devices = append(devices, d)
+	}
+	return plain{Devices: devices}
+}
+`,
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"api/api.go:29", "api/api.go:45", "api/api.go:53"}, foundLines(violations))
+}

@@ -7,6 +7,7 @@ import (
 	"go/types"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/types/typeutil"
@@ -72,11 +73,12 @@ type typedFunc struct {
 func (r *NilSliceJSONNullRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	funcs := projectFuncDecls(ctx)
 	sources := nilSliceFuncs(funcs, projectInterfaces(ctx))
+	responders := jsonResponders(funcs)
 
 	reported := make(map[*ast.Ident]bool)
 	var violations []*core.Violation
 	for _, fn := range funcs {
-		for _, sink := range nilSliceSinks(fn, sources) {
+		for _, sink := range nilSliceSinks(fn, sources, responders) {
 			src := sink.source
 			if reported[src.name] {
 				continue
@@ -93,8 +95,252 @@ func (r *NilSliceJSONNullRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*
 			v.WithSuggestion(fmt.Sprintf("Start with an empty slice: %s := make(T, 0), or replace nil before encoding", src.name.Name))
 			violations = append(violations, v)
 		}
+		for _, field := range appendOnlyFields(fn, responders) {
+			line := fn.file.LineFor(field.owner)
+			if reported[field.owner] || fn.file.IsSuppressed(line, r.Name()) {
+				continue
+			}
+			reported[field.owner] = true
+			v := r.CreateViolation(fn.file.RelPath, line, fmt.Sprintf(
+				"Field %s of %s is filled only by append in a loop and %s reaches a JSON response — with nothing to add it stays nil, encoding/json writes null, and a client expecting a list breaks",
+				field.json, field.owner.Name, field.owner.Name))
+			v.WithCode(strings.TrimSpace(fn.file.GetLine(line)))
+			v.WithSuggestion("Set the field to an empty slice where the value is built")
+			violations = append(violations, v)
+		}
 	}
 	return violations, nil
+}
+
+// jsonResponders returns the functions that write one of their parameters
+// to an http.ResponseWriter as JSON, with the index of that parameter:
+// respondJSON(w, status, payload).
+func jsonResponders(funcs []typedFunc) map[*types.Func]int {
+	responders := make(map[*types.Func]int)
+	for _, fn := range funcs {
+		obj, ok := fn.info.Defs[fn.decl.Name].(*types.Func)
+		if !ok || !hasResponseWriterParam(fn.decl.Type.Params) {
+			continue
+		}
+		params := obj.Signature().Params()
+		ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || !jsonEncodeCall(call, fn.info) || len(call.Args) == 0 {
+				return true
+			}
+			id, ok := ast.Unparen(call.Args[0]).(*ast.Ident)
+			if !ok {
+				return true
+			}
+			for i := range params.Len() {
+				if params.At(i) == fn.info.Uses[id] {
+					responders[obj] = i
+				}
+			}
+			return true
+		})
+	}
+	return responders
+}
+
+// responderPayload returns the argument a call passes as the JSON payload
+// of a responder, nil for any other call.
+func responderPayload(call *ast.CallExpr, info *types.Info, responders map[*types.Func]int) ast.Expr {
+	fn, ok := typeutil.Callee(info, call).(*types.Func)
+	if !ok {
+		return nil
+	}
+	if i, ok := responders[fn]; ok && i < len(call.Args) {
+		return call.Args[i]
+	}
+	return nil
+}
+
+// appendOnlyField is a JSON list field of a local response value that only
+// appends inside a loop fill.
+type appendOnlyField struct {
+	owner *ast.Ident
+	json  string
+}
+
+// responseLocal is a local built from a JSON struct literal, with the
+// fields the function sets other than by append in a loop.
+type responseLocal struct {
+	owner    *ast.Ident
+	st       *types.Struct
+	set      map[string]bool
+	appended map[string]bool
+	reaches  bool
+	escaped  bool
+}
+
+// appendOnlyFields returns the locals of a function built as a JSON struct
+// without a list field, that field then only appended to inside a loop, and
+// the local encoded or passed to a JSON responder.
+func appendOnlyFields(fn typedFunc, responders map[*types.Func]int) []appendOnlyField {
+	locals := responseLocals(fn)
+	if len(locals) == 0 {
+		return nil
+	}
+	w := responseLocalWalker{fn: fn, responders: responders, locals: locals}
+	w.visit(fn.decl.Body, false)
+	var fields []appendOnlyField
+	for _, local := range locals {
+		if !local.reaches || local.escaped {
+			continue
+		}
+		for _, name := range sortedKeys(local.appended) {
+			if tag, ok := listJSONField(local.st, name); ok && !local.set[name] {
+				fields = append(fields, appendOnlyField{owner: local.owner, json: tag})
+				break
+			}
+		}
+	}
+	sort.Slice(fields, func(i, j int) bool { return fields[i].owner.Pos() < fields[j].owner.Pos() })
+	return fields
+}
+
+// responseLocals returns the locals a function defines from a literal of a
+// JSON struct, with the fields the literal sets.
+func responseLocals(fn typedFunc) map[types.Object]*responseLocal {
+	locals := make(map[types.Object]*responseLocal)
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			return true
+		}
+		lit, isLit := ast.Unparen(assign.Rhs[0]).(*ast.CompositeLit)
+		id, isIdent := assign.Lhs[0].(*ast.Ident)
+		if !isLit || !isIdent || fn.info.Defs[id] == nil {
+			return true
+		}
+		st, ok := fn.info.TypeOf(lit).Underlying().(*types.Struct)
+		if !ok || !isJSONStruct(st) {
+			return true
+		}
+		local := &responseLocal{owner: id, st: st, set: make(map[string]bool), appended: make(map[string]bool)}
+		for _, elt := range lit.Elts {
+			if kv, ok := elt.(*ast.KeyValueExpr); ok {
+				if key, ok := kv.Key.(*ast.Ident); ok {
+					local.set[key.Name] = true
+				}
+			}
+		}
+		locals[fn.info.Defs[id]] = local
+		return true
+	})
+	return locals
+}
+
+// responseLocalWalker records what a function does with its response
+// locals: fields appended in loops or set otherwise, the address taken, the
+// value encoded.
+type responseLocalWalker struct {
+	fn         typedFunc
+	responders map[*types.Func]int
+	locals     map[types.Object]*responseLocal
+}
+
+func (w responseLocalWalker) local(expr ast.Expr) (*responseLocal, types.Object) {
+	id, ok := ast.Unparen(expr).(*ast.Ident)
+	if !ok {
+		return nil, nil
+	}
+	obj := w.fn.info.Uses[id]
+	return w.locals[obj], obj
+}
+
+func (w responseLocalWalker) visit(root ast.Node, inLoop bool) {
+	ast.Inspect(root, func(node ast.Node) bool {
+		switch x := node.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ForStmt:
+			if x == root {
+				return true
+			}
+			w.visit(x.Body, true)
+			return false
+		case *ast.RangeStmt:
+			if x == root {
+				return true
+			}
+			w.visit(x.Body, true)
+			return false
+		case *ast.AssignStmt:
+			w.assign(x, inLoop)
+		case *ast.UnaryExpr:
+			if local, _ := w.local(x.X); local != nil && x.Op == token.AND {
+				local.escaped = true
+			}
+		case *ast.CallExpr:
+			if local, _ := w.local(w.payload(x)); local != nil {
+				local.reaches = true
+			}
+		}
+		return true
+	})
+}
+
+// assign records a write to a field of a response local.
+func (w responseLocalWalker) assign(stmt *ast.AssignStmt, inLoop bool) {
+	for i, lhs := range stmt.Lhs {
+		sel, ok := lhs.(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		local, obj := w.local(sel.X)
+		if local == nil {
+			continue
+		}
+		if inLoop && len(stmt.Lhs) == len(stmt.Rhs) && appendsToField(stmt.Rhs[i], obj, sel.Sel.Name, w.fn.info) {
+			local.appended[sel.Sel.Name] = true
+		} else {
+			local.set[sel.Sel.Name] = true
+		}
+	}
+}
+
+// payload returns what a call writes to the client as JSON: the payload of
+// a responder, or the value a handler encodes; nil for any other call.
+func (w responseLocalWalker) payload(call *ast.CallExpr) ast.Expr {
+	if payload := responderPayload(call, w.fn.info, w.responders); payload != nil {
+		return payload
+	}
+	if jsonEncodeCall(call, w.fn.info) && len(call.Args) > 0 && hasResponseWriterParam(w.fn.decl.Type.Params) {
+		return call.Args[0]
+	}
+	return nil
+}
+
+// appendsToField reports v.F = append(v.F, ...).
+func appendsToField(expr ast.Expr, owner types.Object, field string, info *types.Info) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || len(call.Args) < 2 {
+		return false
+	}
+	if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "append" {
+		return false
+	}
+	sel, ok := call.Args[0].(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != field {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && info.Uses[id] == owner
+}
+
+// isJSONStruct reports a struct some field of which a json tag names: a
+// type written as JSON, where an untagged exported field is encoded too. A
+// type whose tags only hide fields (json:"-") is a configuration kept out
+// of logs, not a payload.
+func isJSONStruct(st *types.Struct) bool {
+	for i := range st.NumFields() {
+		if tag, ok := reflect.StructTag(st.Tag(i)).Lookup("json"); ok && tag != "-" {
+			return true
+		}
+	}
+	return false
 }
 
 // projectFuncDecls returns the function declarations of the analyzed
@@ -436,7 +682,7 @@ type nilSliceSink struct {
 // nilSliceSinks returns the places a function puts a possibly nil slice into
 // JSON: a tagged field without omitempty, a key of a map an HTTP handler
 // builds, or the argument of json.Marshal or Encode.
-func nilSliceSinks(fn typedFunc, sources map[*types.Func]nilSliceSource) []nilSliceSink {
+func nilSliceSinks(fn typedFunc, sources map[*types.Func]nilSliceSource, responders map[*types.Func]int) []nilSliceSink {
 	locals := nilSliceLocals(fn, sources)
 	handler := hasResponseWriterParam(fn.decl.Type.Params)
 	var sinks []nilSliceSink
@@ -500,6 +746,9 @@ func nilSliceSinks(fn typedFunc, sources map[*types.Func]nilSliceSource) []nilSl
 			if handler && jsonEncodeCall(node, fn.info) && len(node.Args) > 0 {
 				add(node.Args[0], node, "json encoding")
 			}
+			if payload := responderPayload(node, fn.info, responders); payload != nil {
+				add(payload, node, "the JSON response")
+			}
 		}
 		return true
 	})
@@ -527,6 +776,11 @@ func listJSONField(st *types.Struct, field string) (string, bool) {
 		}
 		tag, ok := reflect.StructTag(st.Tag(i)).Lookup("json")
 		if !ok {
+			// An untagged exported field of a JSON type is encoded under
+			// its Go name.
+			if f.Exported() && !f.Anonymous() && isJSONStruct(st) {
+				return f.Name(), true
+			}
 			return "", false
 		}
 		parts := strings.Split(tag, ",")
