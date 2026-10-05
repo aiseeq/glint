@@ -369,3 +369,94 @@ func (r *Router) create(w http.ResponseWriter, req *http.Request) {
 `,
 	}))
 }
+
+// The callee says "not found" only in the text of a plain error: the handler
+// cannot tell a currency the client mistyped from an outage and answers 502.
+func TestNotFoundAnsweredAsServerErrorUntypedText(t *testing.T) {
+	assert.Equal(t, []string{"api/api.go:25"}, notFoundServerErrorFindings(t, map[string]string{
+		"rates/rates.go": `package rates
+
+import "fmt"
+
+func Rate(to string) (float64, error) {
+	if to != "AAA" {
+		return 0, fmt.Errorf("rates: currency %s not found", to)
+	}
+	return 1, nil
+}
+
+func Ping() error {
+	return fmt.Errorf("rates: upstream down")
+}
+
+type Token struct{ Access string }
+
+func Refresh(refresh string) Token { return Token{Access: refresh + "x"} }
+`,
+		"api/api.go": `package api
+
+import (
+	"net/http"
+
+	"example.com/rulestest/rates"
+)
+
+func refreshed(w http.ResponseWriter, req *http.Request) {
+	token := rates.Refresh(req.Header.Get("X-Refresh"))
+	if _, err := rates.Rate(token.Access); err != nil {
+		http.Error(w, "verify failed", http.StatusBadGateway)
+		return
+	}
+}
+
+func ping(w http.ResponseWriter, req *http.Request) {
+	if err := rates.Ping(); err != nil {
+		http.Error(w, "down", http.StatusBadGateway)
+	}
+}
+
+func rate(w http.ResponseWriter, req *http.Request) {
+	if _, err := rates.Rate(req.URL.Query().Get("to")); err != nil {
+		http.Error(w, "rate failed", http.StatusBadGateway)
+		return
+	}
+}
+`,
+	}))
+}
+
+// A handler helper takes what its caller parsed from the request as a value
+// struct: a currency the client named still reaches the lookup.
+func TestNotFoundAnsweredAsServerErrorHelperParams(t *testing.T) {
+	assert.Equal(t, []string{"api/api.go:17"}, notFoundServerErrorFindings(t, map[string]string{
+		"rates/rates.go": `package rates
+
+import "fmt"
+
+func Rate(to string) (float64, error) {
+	return 0, fmt.Errorf("rates: currency %s not found", to)
+}
+`,
+		"api/api.go": `package api
+
+import (
+	"net/http"
+
+	"example.com/rulestest/rates"
+)
+
+type convertParams struct{ to string }
+
+func convert(w http.ResponseWriter, req *http.Request) {
+	convertTo(w, req, convertParams{to: req.URL.Query().Get("to")})
+}
+
+func convertTo(w http.ResponseWriter, req *http.Request, params convertParams) {
+	if _, err := rates.Rate(params.to); err != nil {
+		http.Error(w, "rate failed", http.StatusBadGateway)
+		return
+	}
+}
+`,
+	}))
+}

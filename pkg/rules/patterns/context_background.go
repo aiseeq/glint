@@ -34,7 +34,7 @@ func NewContextBackgroundRule() *ContextBackgroundRule {
 		BaseRule: rules.NewBaseRule(
 			"context-background",
 			"patterns",
-			"Detects context.Background/TODO usage where a passed context should be used, and context.WithoutCancel(ctx) detaching a read the function waits for",
+			"Detects context.Background/TODO usage where a passed context should be used (in the function or in a helper whose every caller holds one), and context.WithoutCancel(ctx) detaching a read the function waits for",
 			core.SeverityMedium,
 		),
 	}
@@ -52,7 +52,11 @@ func (r *ContextBackgroundRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file, with type information where the package
 // has it.
 func (r *ContextBackgroundRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	violations, err := rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	if err != nil {
+		return nil, err
+	}
+	return append(violations, r.requestPathHelpers(ctx)...), nil
 }
 
 // analyze reports context.Background/TODO in functions with a live context

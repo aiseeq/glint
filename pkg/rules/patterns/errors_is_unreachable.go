@@ -170,6 +170,9 @@ type errorSet struct {
 	libraries map[*types.Package]bool // packages outside the project the error may come from
 	unknown   bool
 	opaque    bool // an error type with its own Unwrap or Is
+	// notFoundText marks an error made by errors.New or fmt.Errorf whose text
+	// says "not found": a not-found no caller can tell apart.
+	notFoundText bool
 }
 
 func newErrorSet() *errorSet {
@@ -212,6 +215,7 @@ func (s *errorSet) add(other *errorSet, drop map[*types.Var]bool) {
 	}
 	s.unknown = s.unknown || other.unknown
 	s.opaque = s.opaque || other.opaque
+	s.notFoundText = s.notFoundText || other.notFoundText
 }
 
 // errorFlow follows what the project's functions return as errors.
@@ -498,7 +502,9 @@ func (f *errorFlow) libraryErrors(fn typedFunc, callee *types.Func, call *ast.Ca
 	path := callee.Pkg().Path()
 	switch {
 	case path == "errors" && callee.Name() == "New":
-		return newErrorSet()
+		set := newErrorSet()
+		set.notFoundText = len(call.Args) == 1 && saysNotFound(fn.info, call.Args[0])
+		return set
 	case path == "fmt" && callee.Name() == "Errorf":
 		return f.errorfErrors(fn, call, at)
 	case path == "errors" && callee.Name() == "Join":
@@ -728,6 +734,7 @@ func (f *errorFlow) errorfErrors(fn typedFunc, call *ast.CallExpr, at ast.Node) 
 	if len(call.Args) == 0 {
 		return set
 	}
+	set.notFoundText = saysNotFound(fn.info, call.Args[0])
 	format := ""
 	if tv, ok := fn.info.Types[call.Args[0]]; ok && tv.Value != nil && tv.Value.Kind() == constant.String {
 		format = constant.StringVal(tv.Value)
@@ -741,6 +748,15 @@ func (f *errorFlow) errorfErrors(fn typedFunc, call *ast.CallExpr, at ast.Node) 
 		}
 	}
 	return set
+}
+
+// saysNotFound reports a constant error text that says "not found".
+func saysNotFound(info *types.Info, expr ast.Expr) bool {
+	tv, ok := info.Types[expr]
+	if !ok || tv.Value == nil || tv.Value.Kind() != constant.String {
+		return false
+	}
+	return strings.Contains(strings.ToLower(constant.StringVal(tv.Value)), "not found")
 }
 
 // maxErrorTrace bounds the local assignments followed back from one value.

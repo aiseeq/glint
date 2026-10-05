@@ -240,6 +240,59 @@ func (s *Service) canonicalWallet(ctx context.Context, wallet string) string {
 			wantCount: 1,
 		},
 		{
+			name: "parser loop that hands back the text none of the layouts read",
+			code: `package bulk
+
+func normalizeDate(value string) string {
+	if value == "" {
+		return ""
+	}
+	for _, layout := range []string{"2006-01-02", "02.01.2006"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.Format("2006-01-02")
+		}
+	}
+	return value
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "env helper answering a bad value with its default parameter",
+			code: `package cfg
+
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+func normID(id string) string {
+	if u, err := uuid.Parse(id); err == nil {
+		return u.String()
+	}
+	return id
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "lookup that keeps the input when the table has no entry is not a parse",
+			code: `package bulk
+
+func alias(names map[string]string, value string) string {
+	if canonical, ok := names[value]; ok {
+		return canonical
+	}
+	return value
+}
+`,
+			wantCount: 0,
+		},
+		{
 			name: "normalizer that only ever returns its input is not a fallback",
 			code: `package svc
 
