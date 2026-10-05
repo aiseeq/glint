@@ -110,3 +110,19 @@ func TextFile(t *testing.T, path, source string) *core.FileContext {
 	require.NoError(t, err)
 	return ctx
 }
+
+// InMemoryGoFile builds a file context for a path under projectRoot without
+// writing anything to disk and attaches the syntax tree core's parser builds,
+// so the rule sees exactly the path the test names. cfg may be nil.
+func InMemoryGoFile(t *testing.T, path, projectRoot, source string, cfg *core.Config) *core.FileContext {
+	t.Helper()
+
+	ctx, err := core.NewFileContextChecked(path, projectRoot, []byte(source), cfg)
+	require.NoError(t, err)
+
+	fset, file, err := core.NewParser().ParseGoFile(path, []byte(source))
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, file)
+
+	return ctx
+}

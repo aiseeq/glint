@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestDeepNestingRule(t *testing.T) {
@@ -88,13 +89,7 @@ func foo() {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := core.NewFileContext("/src/file.go", "/src", []byte(tt.code), core.DefaultConfig())
-
-			parser := core.NewParser()
-			fset, astFile, err := parser.ParseGoFile("/src/file.go", []byte(tt.code))
-			if err == nil {
-				ctx.SetGoAST(fset, astFile)
-			}
+			ctx := rulestest.InMemoryGoFile(t, "/src/file.go", "/src", tt.code, core.DefaultConfig())
 
 			violations := rule.AnalyzeFile(ctx)
 			assert.Len(t, violations, tt.expectedCount, "Code: %s", tt.code)

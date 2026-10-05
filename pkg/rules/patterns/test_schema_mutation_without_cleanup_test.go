@@ -214,3 +214,69 @@ func createOptDepContext(t *testing.T, path, code string) *core.FileContext {
 	ctx.SetGoAST(fset, astFile)
 	return ctx
 }
+
+// A test whose database the project creates for it and drops on cleanup
+// (through a chain of helpers) changes nothing the next run sees; a database
+// handed out by a pool is reused, and the change is still reported.
+func TestSchemaMutationWithoutCleanupRule_DisposableDatabase(t *testing.T) {
+	files := map[string]string{
+		"internal/testdb/testdb.go": `package testdb
+
+import (
+	"fmt"
+	"testing"
+)
+
+func NewDSN(t *testing.T) string {
+	name := uniqueName(t)
+	admin.Exec(fmt.Sprintf("CREATE DATABASE %s TEMPLATE app_test_template", name))
+	t.Cleanup(func() { dropDB(name) })
+	return dsnFor(name)
+}
+
+func Connect(t *testing.T) *Pool { return open(NewDSN(t)) }
+`,
+		"internal/storage/storage_test.go": `package storage
+
+import (
+	"testing"
+
+	"example.com/app/internal/testdb"
+)
+
+func testDB(t *testing.T) *Postgres { return &Postgres{Pool: testdb.Connect(t)} }
+
+func TestSchemaBehind(t *testing.T) {
+	db := testDB(t)
+	db.Pool.Exec(ctx, "ALTER TABLE projects DROP COLUMN legacy_flag")
+}
+`,
+		"tests/pool_test.go": `package tests
+
+import "testing"
+
+func createDatabaseFromTemplate(t *testing.T) string {
+	admin.Exec(fmt.Sprintf("CREATE DATABASE %s TEMPLATE tmpl", name(t)))
+	return name(t)
+}
+
+func TestPooled(t *testing.T) {
+	db := takeFromPool(t)
+	db.MustExec("ALTER TABLE vault_snapshots ADD COLUMN probe TEXT")
+}
+`,
+	}
+	rule := NewTestSchemaMutationWithoutCleanupRule()
+	var contexts []*core.FileContext
+	for path, code := range files {
+		contexts = append(contexts, createPatternContext(t, path, code))
+	}
+	rule.UseProjectFiles(contexts)
+	var found []string
+	for _, ctx := range contexts {
+		for _, v := range rule.AnalyzeFile(ctx) {
+			found = append(found, v.File)
+		}
+	}
+	assert.Equal(t, []string{"tests/pool_test.go"}, found)
+}

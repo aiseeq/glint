@@ -156,7 +156,11 @@ func (r *TestFixtureWriteOverriddenByDBTriggerRule) AnalyzeFile(ctx *core.FileCo
 	}
 	var out []*core.Violation
 	for _, literal := range literals {
+		off := triggersOffBefore(ctx.GoAST, literal.expr.Pos())
 		for _, overwrite := range schema.StampOverwrites(literal.text) {
+			if off.all || off.tables[overwrite.Table] {
+				continue
+			}
 			line := ctx.LineFor(literal.expr)
 			if ctx.IsSuppressed(line, r.Name()) {
 				continue
@@ -168,6 +172,48 @@ func (r *TestFixtureWriteOverriddenByDBTriggerRule) AnalyzeFile(ctx *core.FileCo
 		}
 	}
 	return out
+}
+
+var (
+	disableTrigger     = regexp.MustCompile(`(?i)\bALTER\s+TABLE\s+(?:ONLY\s+)?(?:\w+\.)?"?(\w+)"?\s+DISABLE\s+TRIGGER\b`)
+	replicationReplica = regexp.MustCompile(`(?i)\bsession_replication_role\s*(?:=|\bTO\b)\s*'?replica\b`)
+)
+
+// triggersOff are the triggers a function switched off before a statement:
+// on some tables, or all of them for the session.
+type triggersOff struct {
+	all    bool
+	tables map[string]bool
+}
+
+// triggersOffBefore reads the string literals of the function holding pos
+// that come before it: ALTER TABLE t DISABLE TRIGGER switches off the
+// triggers of t, SET session_replication_role = 'replica' the ordinary
+// triggers of every table.
+func triggersOffBefore(file *ast.File, pos token.Pos) triggersOff {
+	off := triggersOff{tables: make(map[string]bool)}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || pos < fn.Body.Pos() || pos >= fn.Body.End() {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Pos() >= pos {
+				return true
+			}
+			text, ok := goStringLiteral(lit)
+			if !ok {
+				return true
+			}
+			off.all = off.all || replicationReplica.MatchString(text)
+			for _, m := range disableTrigger.FindAllStringSubmatch(text, -1) {
+				off.tables[strings.ToLower(m[1])] = true
+			}
+			return true
+		})
+	}
+	return off
 }
 
 // TestWaitsOnProxySignalRule detects a test that waits for a counter its fake

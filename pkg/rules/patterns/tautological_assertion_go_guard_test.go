@@ -218,3 +218,47 @@ func TestShape(t *testing.T) {
 `
 	assert.Equal(t, []int{42}, tautologicalGoLines(t, code))
 }
+
+// A guard in a callback that visits many items (ast.Inspect, a walk) filters
+// the items like a guard in a loop; a helper that returns from the guard and
+// handles the other kind after it dispatches by type. A test function whose
+// guard holds its only assertion is still reported.
+func TestTautologicalAssertion_GoGuardInVisitorOrDispatch(t *testing.T) {
+	code := `package service
+
+import (
+	"go/ast"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestIdentsUnresolved(t *testing.T) {
+	var file *ast.File
+	ast.Inspect(file, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok {
+			assert.Nil(t, ident.Obj)
+		}
+		return true
+	})
+}
+
+func run(t *testing.T, rule any) []string {
+	if project, ok := rule.(interface{ Run() ([]string, error) }); ok {
+		found, err := project.Run()
+		require.NoError(t, err)
+		return found
+	}
+	return nil
+}
+
+func TestRuleKind(t *testing.T) {
+	var rule any
+	if project, ok := rule.(interface{ Name() string }); ok {
+		assert.Equal(t, "x", project.Name())
+	}
+}
+`
+	assert.Equal(t, []int{32}, tautologicalGoLines(t, code))
+}

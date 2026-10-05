@@ -7,6 +7,8 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -39,10 +41,11 @@ func init() {
 //     third-party URL. Packages that merely hold configuration, or clients aimed at localhost,
 //     do not qualify — the package must actually make outbound requests.
 //
-//   - credential_gate: a test guards itself with "skip unless the credential is present".
-//     That is not a guard at all. Credentials live in .env, and test runners export it
+//   - credential_gate: a test guards itself with "skip unless the credential is present",
+//     and the credential is a key of an env file of the project (.env, .env.example and the
+//     like). That is not a guard at all: test runners export the env file
 //     (`set -a && source .env`), so the gate is open in exactly the environment where the test
-//     runs. Both ProjectA vault tests carried `if os.Getenv("EXTVAULT_ACCESS_KEY") == "" { t.Skip() }`
+//     runs. A variable no env file of the project names is a dedicated opt-in and is left out. Both ProjectA vault tests carried `if os.Getenv("EXTVAULT_ACCESS_KEY") == "" { t.Skip() }`
 //     and were documented as manual; they ran every single time. An opt-in must be a switch
 //     nobody sets by accident, not a secret everybody has.
 //
@@ -136,12 +139,16 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 	// поэтому у *_test.go типовой информации нет, и они висят только в ctx.Files.
 	// Имя пакета в вызове разрешается по секции import самого файла — этого хватает
 	// и заодно корректно обрабатывает алиасы импорта.
+	envKeys, err := envFileKeys(ctx.ProjectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("test external service: %w", err)
+	}
 	var violations []*core.Violation
 	for _, file := range ctx.Files {
 		if file == nil || !file.IsTestFile() || file.GoAST == nil {
 			continue
 		}
-		violations = append(violations, r.analyzeTestFile(file, outbound, outboundDirs)...)
+		violations = append(violations, r.analyzeTestFile(file, outbound, outboundDirs, envKeys)...)
 	}
 
 	sort.Slice(violations, func(i, j int) bool {
@@ -151,6 +158,49 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 		return violations[i].Line < violations[j].Line
 	})
 	return violations, nil
+}
+
+// envFileSkipDirs are the directories whose env files are not the project's.
+var envFileSkipDirs = map[string]bool{"node_modules": true, ".git": true, "vendor": true, "dist": true}
+
+// envFileKeys returns the keys of the env files of the project (.env,
+// .env.example, .env.test) up to three directories deep: the variables a
+// developer's environment holds when the runner exports the file. Only the
+// key names are kept.
+func envFileKeys(root string) (map[string]bool, error) {
+	keys := make(map[string]bool)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != root && (envFileSkipDirs[d.Name()] || strings.Count(rel, string(filepath.Separator)) >= 3) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != ".env" && !strings.HasPrefix(d.Name(), ".env.") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read env file %s: %w", rel, err)
+		}
+		for _, line := range strings.Split(string(content), "\n") {
+			if m := envAssignmentLine.FindStringSubmatch(line); m != nil {
+				keys[m[1]] = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list env files under %s: %w", root, err)
+	}
+	return keys, nil
 }
 
 // outboundDirectories maps a package directory to its outbound description, so an in-package
@@ -457,7 +507,7 @@ func (r *TestExternalServiceRule) externalHost(lit *ast.BasicLit) string {
 
 // analyzeTestFile reports live calls and credential gates inside one test file.
 func (r *TestExternalServiceRule) analyzeTestFile(
-	file *core.FileContext, outbound map[string]outboundPackage, outboundDirs map[string]outboundPackage,
+	file *core.FileContext, outbound map[string]outboundPackage, outboundDirs map[string]outboundPackage, envKeys map[string]bool,
 ) []*core.Violation {
 	imports := importAliases(file.GoAST, outbound)
 	// Тест, поднявший свой httptest-сервер, никуда наружу не идёт.
@@ -486,7 +536,7 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 			continue
 		}
 		if !drivesOwnServer {
-			violations = append(violations, r.credentialGates(file, fn)...)
+			violations = append(violations, r.credentialGates(file, fn, envKeys)...)
 		}
 		if usesHTTPTest {
 			continue
@@ -631,8 +681,9 @@ func (r *TestExternalServiceRule) inPackageCalls(
 	return violations
 }
 
-// credentialGates reports skips that only check whether a secret is configured.
-func (r *TestExternalServiceRule) credentialGates(file *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+// credentialGates reports skips that only check whether a secret is configured,
+// when the secret is a key of an env file of the project.
+func (r *TestExternalServiceRule) credentialGates(file *core.FileContext, fn *ast.FuncDecl, envKeys map[string]bool) []*core.Violation {
 	// Переменные, которым присвоен os.Getenv("NAME") с секретоподобным именем.
 	fromCredential := map[string]string{}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -657,7 +708,7 @@ func (r *TestExternalServiceRule) credentialGates(file *core.FileContext, fn *as
 			return true
 		}
 		envName := r.emptyCredentialCheck(ifStmt.Cond, fromCredential)
-		if envName == "" {
+		if envName == "" || !envKeys[envName] {
 			return true
 		}
 		pos := file.PositionFor(ifStmt)

@@ -1,15 +1,10 @@
 package patterns
 
 import (
-	"go/parser"
-	"go/token"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
-	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 // A timestamp read from the database carries the session's zone: cut into a
@@ -56,26 +51,8 @@ func dates(tr *model.Transfer) []string {
 }
 `,
 	}
-	run := func(path string) []int {
-		_, contexts := rulestest.Module(t, files)
-		rule := NewSQLSessionTimeZoneRule()
-		for _, ctx := range contexts {
-			fset := token.NewFileSet()
-			file, err := parser.ParseFile(fset, ctx.Path, ctx.Content, parser.ParseComments)
-			require.NoError(t, err)
-			ctx.SetGoAST(fset, file)
-		}
-		rule.UseProjectFiles(contexts)
-		for _, ctx := range contexts {
-			if ctx.RelPath == path {
-				return sqlRuleLines(t, rule, ctx)
-			}
-		}
-		t.Fatal("no " + path)
-		return nil
-	}
-	assert.Equal(t, []int{10, 14}, run("ledger/ledger.go"))
-	assert.Equal(t, []int{6}, run("storage/db.go"))
+	assert.Equal(t, []int{10, 14}, sessionTimeZoneLines(t, files, "ledger/ledger.go"))
+	assert.Equal(t, []int{6}, sessionTimeZoneLines(t, files, "storage/db.go"))
 	files["storage/db.go"] = strings.Replace(files["storage/db.go"], "sslmode=disable", "sslmode=disable timezone=UTC", 1)
-	assert.Empty(t, run("ledger/ledger.go"))
+	assert.Empty(t, sessionTimeZoneLines(t, files, "ledger/ledger.go"))
 }

@@ -119,35 +119,39 @@ func Find(db DB, account string, day time.Time) {
 }
 `,
 	}
-	run := func(files map[string]string, path string) []int {
-		_, contexts := rulestest.Module(t, files)
-		rule := NewSQLSessionTimeZoneRule()
-		for _, ctx := range contexts {
-			fset := token.NewFileSet()
-			file, err := parser.ParseFile(fset, ctx.Path, ctx.Content, parser.ParseComments)
-			require.NoError(t, err)
-			ctx.SetGoAST(fset, file)
-		}
-		rule.UseProjectFiles(contexts)
-		for _, ctx := range contexts {
-			if ctx.RelPath == path {
-				return sqlRuleLines(t, rule, ctx)
-			}
-		}
-		t.Fatal("no " + path)
-		return nil
-	}
-	assert.Equal(t, []int{4, 6}, run(files, "storage/repo.go"))
-	assert.Equal(t, []int{6}, run(files, "storage/db.go"))
+	assert.Equal(t, []int{4, 6}, sessionTimeZoneLines(t, files, "storage/repo.go"))
+	assert.Equal(t, []int{6}, sessionTimeZoneLines(t, files, "storage/db.go"))
 
 	files["storage/db.go"] = strings.Replace(files["storage/db.go"], "sslmode=disable", "sslmode=disable timezone=UTC", 1)
-	assert.Empty(t, run(files, "storage/repo.go"))
+	assert.Empty(t, sessionTimeZoneLines(t, files, "storage/repo.go"))
 	files["storage/db.go"] = strings.Replace(files["storage/db.go"], " timezone=UTC", "", 1) + `
 func Params(config *pgx.ConnConfig) { config.RuntimeParams["timezone"] = "UTC" }
 `
-	assert.Empty(t, run(files, "storage/repo.go"))
+	assert.Empty(t, sessionTimeZoneLines(t, files, "storage/repo.go"))
 	delete(files, "storage/db.go")
-	assert.Empty(t, run(files, "storage/repo.go"), "the connection string comes from the environment")
+	assert.Empty(t, sessionTimeZoneLines(t, files, "storage/repo.go"), "the connection string comes from the environment")
+}
+
+// sessionTimeZoneLines loads files as a module, hands every file to the session
+// time zone rule and returns the lines it reports in the file at path.
+func sessionTimeZoneLines(t *testing.T, files map[string]string, path string) []int {
+	t.Helper()
+	_, contexts := rulestest.Module(t, files)
+	rule := NewSQLSessionTimeZoneRule()
+	for _, ctx := range contexts {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, ctx.Path, ctx.Content, parser.ParseComments)
+		require.NoError(t, err)
+		ctx.SetGoAST(fset, file)
+	}
+	rule.UseProjectFiles(contexts)
+	for _, ctx := range contexts {
+		if ctx.RelPath == path {
+			return sqlRuleLines(t, rule, ctx)
+		}
+	}
+	t.Fatal("no " + path)
+	return nil
 }
 
 // A constant named as the table's column reads like the column: every row

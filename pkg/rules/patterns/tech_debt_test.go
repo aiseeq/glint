@@ -3,9 +3,10 @@ package patterns
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/aiseeq/glint/pkg/core"
 )
 
 func TestTechDebtRule_Metadata(t *testing.T) {
@@ -241,12 +242,7 @@ func TestTechDebtRule_BrokenAsOrdinaryWord(t *testing.T) {
 func TestTechDebtRule_OnlyCodeFiles(t *testing.T) {
 	rule := NewTechDebtRule()
 	code := "# Docs\n\n```go\n// temporary workaround for the vendor bug\nx := 1\n```\n"
-	ctx := &core.FileContext{
-		Path:    "/docs/README.md",
-		RelPath: "docs/README.md",
-		Lines:   splitLines(code),
-		Content: []byte(code),
-	}
+	ctx := core.NewFileContext("/docs/README.md", "/", []byte(code), nil)
 	assert.Empty(t, rule.AnalyzeFile(ctx))
 
 	for _, path := range []string{"web/src/api.ts", "web/src/api.js", "backend/api.go"} {
@@ -365,12 +361,7 @@ var x = 1
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := &core.FileContext{
-				Path:    "/backend/service.go",
-				RelPath: "backend/service.go",
-				Lines:   splitLines(tt.code),
-				Content: []byte(tt.code),
-			}
+			ctx := core.NewFileContext("/backend/service.go", "/", []byte(tt.code), nil)
 			violations := rule.AnalyzeFile(ctx)
 			if tt.expectMatch {
 				require.NotEmpty(t, violations)
@@ -443,12 +434,7 @@ func legacy() {
 }
 
 `
-	ctx := &core.FileContext{
-		Path:    "/backend/service.go",
-		RelPath: "backend/service.go",
-		Lines:   splitLines(code),
-		Content: []byte(code),
-	}
+	ctx := core.NewFileContext("/backend/service.go", "/", []byte(code), nil)
 	violations := rule.AnalyzeFile(ctx)
 
 	assert.Empty(t, violations, "Non-comment lines should not trigger violations")
@@ -476,19 +462,4 @@ func createTechDebtContext(t *testing.T, path, code string) *core.FileContext {
 		Lines:   []string{code},
 		Content: []byte(code),
 	}
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
 }

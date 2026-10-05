@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestErrorStringCompareRule(t *testing.T) {
@@ -137,13 +138,7 @@ func check(err error) bool {
 		t.Run(tt.name, func(t *testing.T) {
 			rule := NewErrorStringCompareRule()
 
-			parser := core.NewParser()
-			ctx := core.NewFileContext("/src/test.go", "/src", []byte(tt.code), core.DefaultConfig())
-			fset, astFile, err := parser.ParseGoFile("/src/test.go", []byte(tt.code))
-			if err != nil {
-				t.Fatalf("Parse error: %v", err)
-			}
-			ctx.SetGoAST(fset, astFile)
+			ctx := rulestest.InMemoryGoFile(t, "/src/test.go", "/src", tt.code, core.DefaultConfig())
 
 			violations := rule.AnalyzeFile(ctx)
 

@@ -1,10 +1,8 @@
 package patterns
 
 import (
-	"fmt"
 	"go/parser"
 	"go/token"
-	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -193,20 +191,6 @@ func (b *Batches) RemoveMember(batch, member string) error {
 	}, "repo/batches.go"))
 }
 
-func typedSyncFindings(t *testing.T, rule interface {
-	AnalyzeGoProject(*core.GoProjectContext) ([]*core.Violation, error)
-}, files map[string]string) []string {
-	t.Helper()
-	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var out []string
-	for _, v := range violations {
-		out = append(out, fmt.Sprintf("%s:%d", v.File, v.Line))
-	}
-	sort.Strings(out)
-	return out
-}
-
 const syncStoreSource = `package store
 
 import "time"
@@ -236,7 +220,7 @@ func (s *Store) UpdateItem(id, note string, at time.Time) error {
 // written row with the time of the write: the receiving copy becomes newer
 // than its source, and each transfer copies the row back.
 func TestSyncNewerWinsOnStampedTable(t *testing.T) {
-	assert.ElementsMatch(t, []string{"sync/sync.go:9", "sync/sync.go:26", "sync/sync.go:40"}, typedSyncFindings(t, NewSyncNewerWinsOnStampedTableRule(), map[string]string{
+	assert.ElementsMatch(t, []string{"sync/sync.go:9", "sync/sync.go:26", "sync/sync.go:40"}, typedRuleFindings(t, NewSyncNewerWinsOnStampedTableRule(), map[string]string{
 		"migrations/001_init.up.sql": syncMigrations,
 		"store/store.go":             syncStoreSource,
 		"sync/sync.go": `package sync
