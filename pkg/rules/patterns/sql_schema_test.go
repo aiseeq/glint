@@ -70,6 +70,26 @@ func TestSQLUnknownColumn(t *testing.T) {
 	assert.Equal(t, []int{5, 11, 14, 15, 16}, sqlRuleLines(t, NewSQLUnknownColumnRule(), ctx))
 }
 
+// A sequence is a relation a query reads its state from: last_value,
+// is_called and log_cnt are its columns, anything else is not.
+func TestSQLUnknownColumnSequence(t *testing.T) {
+	migration := sqlSchemaMigration + `
+CREATE SEQUENCE order_number_seq START WITH 1000;
+CREATE SEQUENCE IF NOT EXISTS invoice_seq;
+CREATE SEQUENCE dropped_seq;
+DROP SEQUENCE dropped_seq;
+ALTER SEQUENCE invoice_seq RENAME TO bill_seq;
+`
+	source := "package storage\n\n" +
+		"const current = \"SELECT last_value, is_called FROM order_number_seq\"\n\n" +
+		"const counted = \"SELECT log_cnt FROM bill_seq\"\n\n" +
+		"const wrong = \"SELECT next_value FROM order_number_seq\"\n\n" +
+		"const dropped = \"SELECT last_value FROM dropped_seq\"\n\n" +
+		"const renamed = \"SELECT last_value FROM invoice_seq\"\n"
+	ctx := sqlSchemaProject(t, migration, source)
+	assert.Equal(t, []int{7, 9, 11}, sqlRuleLines(t, NewSQLUnknownColumnRule(), ctx))
+}
+
 // An INSERT listing its columns without a NOT NULL column that has no default
 // fails on every run.
 func TestSQLInsertMissingNotNull(t *testing.T) {
