@@ -100,6 +100,25 @@ func TestGoInputsChangeWithSQLFiles(t *testing.T) {
 	assert.NotEqual(t, base, hashWith(), "a changed migration changes the project findings")
 }
 
+// Project rules check templates against the Go types rendered into them: a
+// changed template changes the project findings.
+func TestGoInputsChangeWithTemplates(t *testing.T) {
+	_, root := inputsModule(t)
+	writeInputsFile(t, root, "templates/page.html", "{{.Title}}\n")
+	hashWith := func() string {
+		contexts := []*FileContext{
+			NewFileContext(filepath.Join(root, "svc.go"), root, mustRead(t, filepath.Join(root, "svc.go")), DefaultConfig()),
+			NewFileContext(filepath.Join(root, "templates/page.html"), root, mustRead(t, filepath.Join(root, "templates/page.html")), DefaultConfig()),
+		}
+		hash, _, err := NewGoProjectLoader().GoInputs(root, contexts, false)
+		require.NoError(t, err)
+		return hash
+	}
+	base := hashWith()
+	writeInputsFile(t, root, "templates/page.html", "{{range .Rows}}{{.Title}}{{end}}\n")
+	assert.NotEqual(t, base, hashWith(), "a changed template changes the project findings")
+}
+
 // A replace to a local directory makes the load read a tree the hash does not
 // walk: such a project is not cached.
 func TestGoInputsNotCacheableWithLocalReplace(t *testing.T) {
