@@ -62,6 +62,10 @@ type ValueSetDriftRule struct {
 	index *valueset.Index
 	// tables holds the root's sets and tables of named constants.
 	tables *tableIndex
+	// options are the literal <select> options of the root's templates,
+	// which the analysis does not list; optionsErr is why they are missing.
+	options    []optionSet
+	optionsErr error
 }
 
 // NewValueSetDriftRule creates the rule
@@ -78,10 +82,16 @@ func NewValueSetDriftRule() *ValueSetDriftRule {
 func (r *ValueSetDriftRule) UseProjectFiles(files []*core.FileContext) {
 	r.index = valueset.IndexFiles(files)
 	r.tables = newTableIndex(files)
+	r.options, r.optionsErr = nil, nil
+	if len(files) > 0 && files[0].ProjectRoot != "" {
+		r.options, r.optionsErr = templateOptionSets(files[0].ProjectRoot)
+	}
 }
 
 // ResetState drops the sets of the previous root.
-func (r *ValueSetDriftRule) ResetState() { r.index, r.tables = nil, nil }
+func (r *ValueSetDriftRule) ResetState() {
+	r.index, r.tables, r.options, r.optionsErr = nil, nil, nil, nil
+}
 
 type setMatch struct {
 	other  valueset.Set
@@ -99,8 +109,13 @@ func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 		v.Severity = core.SeverityCritical
 		return []*core.Violation{v}
 	}
+	if r.optionsErr != nil {
+		v := r.CreateViolation(ctx.RelPath, 1, "The project's templates could not be read, so their options were not compared: "+r.optionsErr.Error())
+		v.Severity = core.SeverityCritical
+		return []*core.Violation{v}
+	}
 	sets := valueset.FileSets(ctx)
-	var violations []*core.Violation
+	violations := r.optionLabelDrift(ctx)
 	for _, set := range sets {
 		match, ok := bestMatch(r.index, set)
 		if !ok || ctx.IsSuppressed(set.Line, r.Name()) {

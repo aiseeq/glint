@@ -122,3 +122,68 @@ func Exists(ctx context.Context, db DB, id string) (bool, error) {
 	slices.Sort(places)
 	assert.Equal(t, []string{"storage/model.go:21", "storage/repo.go:15", "storage/repo.go:29"}, places)
 }
+
+// A model without db tags is mapped by hand: the repository binds its fields
+// one by one into the INSERT and scans them back. Fields the handler fills
+// (Remark, State) that neither the INSERT nor any read of the repository
+// mentions are lost on the first reload, though the request builder reads
+// them later. A field nobody sets (a computed one) is not a loss, and a field
+// with a db tag is the tagged check's: db:"-" says it is not kept, a column
+// tag is read by name.
+func TestSQLModelFieldNeverPersistedByHandMapping(t *testing.T) {
+	files := map[string]string{
+		"domain/txn.go": `package domain
+
+type Transaction struct {
+	ID, Ref, Status, Currency, Country, FirstName, LastName, Email, Phone, City string
+	Amount, Fee                                                                int64
+	Remark, State                                                              string
+	Display                                                                    string
+	Derived                                                                    bool ` + "`db:\"-\"`" + `
+}
+`,
+		"storage/repo.go": `package storage
+
+import "example.com/rulestest/domain"
+
+type DB interface {
+	Exec(query string, args ...any) error
+	Scan(dest ...any) error
+}
+
+type Repo struct{ db DB }
+
+func (r *Repo) Create(tx *domain.Transaction) error {
+	query := "INSERT INTO transactions (id, ref, status, currency, country, first_name, last_name, email, phone, city, amount, fee) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
+	return r.db.Exec(query, tx.ID, tx.Ref, tx.Status, tx.Currency, tx.Country, tx.FirstName,
+		tx.LastName, nullStr(tx.Email), tx.Phone, tx.City, tx.Amount, tx.Fee)
+}
+
+func (r *Repo) Get(tx *domain.Transaction) error {
+	return r.db.Scan(&tx.ID, &tx.Ref, &tx.Status, &tx.Currency, &tx.Country, &tx.FirstName,
+		&tx.LastName, &tx.Email, &tx.Phone, &tx.City, &tx.Amount, &tx.Fee)
+}
+
+func nullStr(s string) *string { return &s }
+`,
+		"admin/handler.go": `package admin
+
+import "example.com/rulestest/domain"
+
+func build(remark, state string) *domain.Transaction {
+	tx := &domain.Transaction{Remark: remark}
+	tx.State = state
+	tx.Derived = true
+	return tx
+}
+
+func request(tx *domain.Transaction) string { return tx.Remark + tx.State + tx.Display }
+`,
+	}
+	violations, err := NewSQLModelFieldSkippedRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "storage/repo.go", violations[0].File)
+	assert.Equal(t, 14, violations[0].Line)
+	assert.Contains(t, violations[0].Message, "leaves out Remark, State,")
+}

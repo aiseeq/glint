@@ -81,6 +81,37 @@ func TestSQLInsertMissingNotNull(t *testing.T) {
 	assert.Equal(t, []int{3}, sqlRuleLines(t, NewSQLInsertMissingNotNullRule(), ctx))
 }
 
+// A NOT NULL column bound through a helper that turns an empty string into
+// NULL fails the INSERT for every empty value, though the column is listed.
+// The same helper on a nullable column is what it is for.
+func TestSQLInsertNotNullBoundAsNullForEmpty(t *testing.T) {
+	source := `package storage
+
+import "database/sql"
+
+type DB interface{ Exec(query string, args ...any) error }
+
+func save(db DB, email, note string) error {
+	query := "INSERT INTO accounts (id, email, note) VALUES ($1, $2, $3)"
+	return db.Exec(query, "id", nullStr(email), nullStr(note))
+}
+
+func rename(db DB, email string) error {
+	return db.Exec("UPDATE accounts SET email = $1 WHERE id = $2",
+		sql.NullString{String: email, Valid: email != ""}, "id")
+}
+
+func nullStr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+`
+	ctx := sqlSchemaProject(t, sqlSchemaMigration, source)
+	assert.Equal(t, []int{9, 14}, sqlRuleLines(t, NewSQLInsertMissingNotNullRule(), ctx))
+}
+
 // A migration that does not parse is reported on the migration: the schema
 // rules checked nothing.
 func TestSQLUnknownColumnReportsBrokenMigration(t *testing.T) {

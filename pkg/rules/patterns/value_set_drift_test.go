@@ -235,3 +235,45 @@ export function logSort(key: SortKey): void {
 	}
 	assert.Equal(t, wantedLines(files, "value-set-drift"), foundLines(valueSetDriftFindings(t, files)))
 }
+
+// A screen lists payout method codes as literal options under labels of its
+// own, and the code's label switch gives the same codes other meanings: an
+// operator picks "Mobile Wallet" and saves the code for cash pickup. A select
+// of another name sharing the codes is left alone.
+func TestValueSetDriftTemplateOptionsAgainstLabelSwitch(t *testing.T) {
+	found := foundLines(valueSetDriftFindings(t, map[string]string{
+		"admin/pricing.go": `package admin
+
+import "fmt"
+
+func payoutMethodDesc(pm int) string {
+	switch pm {
+	case 1:
+		return "Bank Transfer"
+	case 2:
+		return "Card Transfer"
+	case 3:
+		return "Cash Pickup"
+	case 5:
+		return "Wallet"
+	default:
+		return fmt.Sprintf("Method %d", pm)
+	}
+}
+`,
+		"admin/templates/channels.html": `<form>
+<select name="payout_method" required>
+  <option value="1" selected>1 — Bank Transfer</option>
+  <option value="2">2 — Cash Pickup</option>
+  <option value="3">3 — Mobile Wallet</option>
+</select>
+<select name="transfer_type">
+  <option value="1">1 — B2B</option>
+  <option value="2">2 — B2C</option>
+  <option value="3">3 — C2C</option>
+</select>
+</form>
+`,
+	}))
+	assert.Equal(t, []string{"admin/pricing.go:6"}, found)
+}

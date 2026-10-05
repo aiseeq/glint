@@ -34,6 +34,9 @@ func init() {
 // and methods named …Locked, …NoLock, …Unsafe (called with the lock held by
 // convention), are not reported, and neither are test doubles: packages named
 // …test, …testutil, …testing and files with fake or mock in the name.
+//
+// A shared map written the same way (m[k] = v, delete(m, k)) is reported
+// too: concurrent map writes abort the program.
 type HandlerCounterRaceRule struct {
 	*rules.BaseRule
 }
@@ -44,7 +47,7 @@ func NewHandlerCounterRaceRule() *HandlerCounterRaceRule {
 		BaseRule: rules.NewBaseRule(
 			"handler-counter-race",
 			"patterns",
-			"Detects a shared counter bumped with ++ or += in HTTP request code without a mutex or sync/atomic — a data race that loses counts",
+			"Detects a shared counter bumped with ++ or += in HTTP request code without a mutex or sync/atomic — a data race that loses counts; also a shared map written there without a lock",
 			core.SeverityHigh,
 		),
 	}
@@ -112,10 +115,22 @@ func (c *counterRaceCheck) scope(ftype *ast.FuncType, body *ast.BlockStmt, reque
 		case *ast.IncDecStmt:
 			if requestPath && !locked {
 				c.bumped(node, node.X)
+				c.mapWritten(node, node.X)
 			}
 		case *ast.AssignStmt:
 			if requestPath && !locked && (node.Tok == token.ADD_ASSIGN || node.Tok == token.SUB_ASSIGN) && len(node.Lhs) == 1 {
 				c.bumped(node, node.Lhs[0])
+			}
+			if requestPath && !locked && node.Tok != token.DEFINE {
+				for _, lhs := range node.Lhs {
+					c.mapWritten(node, lhs)
+				}
+			}
+		case *ast.ExprStmt:
+			if call, ok := node.X.(*ast.CallExpr); ok && requestPath && !locked && len(call.Args) == 2 {
+				if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "delete" {
+					c.mapWritten(node, &ast.IndexExpr{X: call.Args[0], Index: call.Args[1]})
+				}
 			}
 		}
 		return true
@@ -141,6 +156,33 @@ func (c *counterRaceCheck) bumped(stmt ast.Stmt, target ast.Expr) {
 	v.WithCode(strings.TrimSpace(c.file.GetLine(line)))
 	v.WithSuggestion("Make the field an atomic.Int64 (or use atomic.AddInt64), or update it under the struct's mutex")
 	v.WithContext("counter", name)
+	c.violations = append(c.violations, v)
+}
+
+// mapWritten reports the statement when it writes an element of a map shared
+// by all requests: concurrent writes abort the program ("concurrent map
+// writes"), not only lose data.
+func (c *counterRaceCheck) mapWritten(stmt ast.Stmt, target ast.Expr) {
+	index, ok := ast.Unparen(target).(*ast.IndexExpr)
+	if !ok {
+		return
+	}
+	if _, isMap := typeUnder(c.info, index.X).(*types.Map); !isMap {
+		return
+	}
+	name, shared := c.sharedCounter(index.X)
+	if !shared {
+		return
+	}
+	line := c.file.LineFor(stmt)
+	if c.file.IsSuppressed(line, c.rule.Name()) {
+		return
+	}
+	v := c.rule.CreateViolation(c.file.RelPath, line,
+		"Map '"+name+"' is shared by all requests and written without a mutex — concurrent requests write it at once and the runtime aborts with \"concurrent map writes\"")
+	v.WithCode(strings.TrimSpace(c.file.GetLine(line)))
+	v.WithSuggestion("Guard the map with a sync.RWMutex (Lock for writes, RLock for reads), or use sync.Map")
+	v.WithContext("map", name)
 	c.violations = append(c.violations, v)
 }
 

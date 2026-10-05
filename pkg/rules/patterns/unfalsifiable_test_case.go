@@ -39,6 +39,10 @@ type UnfalsifiableTestCaseRule struct {
 	countFrom      *regexp.Regexp
 	optionalGuard  *regexp.Regexp
 	mayFail        *regexp.Regexp
+	// sharedPageText maps a directory to the text of the layouts and
+	// stylesheets under it.
+	sharedPageText map[string]string
+	sharedPageErr  error
 }
 
 // NewUnfalsifiableTestCaseRule creates the rule.
@@ -47,7 +51,7 @@ func NewUnfalsifiableTestCaseRule() *UnfalsifiableTestCaseRule {
 		BaseRule: rules.NewBaseRule(
 			"unfalsifiable-test-case",
 			"patterns",
-			"Detects a test whose every assertion holds regardless of the behaviour under test",
+			"Detects a test whose every assertion holds regardless of the behaviour under test, and a Go test looking in the body for a marker the shared layout carries on every page",
 			core.SeverityHigh,
 		),
 		// describe/suite — это группа, а не тест: утверждения живут в отдельных test(...)
@@ -197,6 +201,9 @@ func (r *UnfalsifiableTestCaseRule) classifyAssertion(current *openTest, trimmed
 
 // AnalyzeFile walks each test body and reports the ones with no falsifiable assertion.
 func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if ctx.IsTestFile() && ctx.IsGoFile() && ctx.HasGoAST() {
+		return r.analyzeGoBodyMarkers(ctx)
+	}
 	if !ctx.IsTestFile() || (!ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile()) {
 		return nil
 	}

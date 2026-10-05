@@ -37,6 +37,9 @@ func init() {
 // list, a count or an existence check, which answers another question; so is
 // a soft-deleted parent (its children's history stays valid); so is a
 // nullable reference, which does not make a row a part of its parent.
+//
+// The same miss within one query is reported too: a SUM that takes rows of
+// every status beside aggregates that filter theirs by status.
 type SQLChildRowsIncludeVoidedParentRule struct {
 	*rules.BaseRule
 	// voided are the void status values the project leaves out, by table.
@@ -48,7 +51,7 @@ func NewSQLChildRowsIncludeVoidedParentRule() *SQLChildRowsIncludeVoidedParentRu
 	return &SQLChildRowsIncludeVoidedParentRule{BaseRule: rules.NewBaseRule(
 		"sql-child-rows-include-voided-parent",
 		"patterns",
-		"Detects a total of child rows (SUM, AVG) that never joins their parent while the project leaves parents with a void status (reversed, cancelled) out elsewhere — the children of a voided parent still count",
+		"Detects a total of child rows (SUM, AVG) that never joins their parent while the project leaves parents with a void status (reversed, cancelled) out elsewhere — the children of a voided parent still count; also a SUM without the status FILTER its neighbouring aggregates have",
 		core.SeverityMedium,
 	)}
 }
@@ -85,20 +88,41 @@ func (r *SQLChildRowsIncludeVoidedParentRule) ResetState() { r.voided = nil }
 
 // AnalyzeFile reports the reads of child rows that skip their voided parents.
 func (r *SQLChildRowsIncludeVoidedParentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !productionGoFile(ctx) || len(r.voided) == 0 {
+	if !productionGoFile(ctx) {
 		return nil
+	}
+	var violations []*core.Violation
+	reported := make(map[int]bool)
+	literals := sqlLiterals(ctx.GoAST)
+	for _, literal := range literals {
+		// A query finished by a built condition (+ where) parses without it.
+		text := literal.text
+		if literal.bare != "" {
+			text = literal.bare
+		}
+		for _, offset := range sqlschema.UnfilteredSums(text) {
+			line := literal.lineAt(ctx, offset)
+			if reported[line] || ctx.IsSuppressed(line, r.Name()) {
+				continue
+			}
+			reported[line] = true
+			violations = append(violations, sqlViolation(r.BaseRule, ctx, line,
+				"This SUM takes rows of every status while the other aggregates of the query filter theirs by status: refused and cancelled rows still count in the total",
+				"Give the SUM the FILTER (WHERE status ...) its neighbours have, or sum the column both ways when a total of every status is meant"))
+		}
+	}
+	if len(r.voided) == 0 {
+		return violations
 	}
 	schema, ok := fileSchema(ctx, r.BaseRule)
 	if !ok || schema == nil {
-		return nil
+		return violations
 	}
 	voided := make(map[string]bool, len(r.voided))
 	for table := range r.voided {
 		voided[table] = true
 	}
-	var violations []*core.Violation
-	reported := make(map[int]bool)
-	for _, literal := range sqlLiterals(ctx.GoAST) {
+	for _, literal := range literals {
 		for _, read := range schema.ChildReadsWithoutParent(literal.text, voided) {
 			line := literal.lineAt(ctx, read.Offset)
 			if reported[line] || ctx.IsSuppressed(line, r.Name()) {
@@ -563,6 +587,11 @@ var skipCounter = regexp.MustCompile(`(?i)skip|ignor|unmatched|unlinked|leftover
 // A skipped item stays pending, and the next pass reads the same page: once
 // a page's worth of items is skipped, the rest of the queue is never reached.
 // A read that moves past the seen items (offset, cursor, after) is left out.
+//
+// The read itself shows the same trap when a pending-queue function takes the
+// stale rows by their change time (WHERE updated_at < $1 ORDER BY updated_at
+// LIMIT $2) and marks nothing: a pass that finds no change does not touch
+// updated_at, so the same rows head every page.
 type PendingPageSkipsStayAtHeadRule struct {
 	*rules.BaseRule
 }
@@ -604,6 +633,70 @@ func (r *PendingPageSkipsStayAtHeadRule) AnalyzeFile(ctx *core.FileContext) []*c
 			v.WithSuggestion("Move past the skipped items (an offset or a cursor), give them a terminal state, or report that the page was full of them")
 			violations = append(violations, v)
 		}
+		violations = append(violations, r.stalePageReads(ctx, fn)...)
+	}
+	return violations
+}
+
+// staleOrder is the first key of an ORDER BY that is a change time.
+var staleOrder = regexp.MustCompile(`(?i)\bORDER\s+BY\s+(?:\w+\.)?(\w*(?:updated|modified|changed)_at)\b(?:\s+ASC)?\s*(?:,|\bLIMIT\b|\)|$)`)
+
+// sqlLimit and sqlWrite mark a page read and a statement that writes.
+var (
+	sqlLimit = regexp.MustCompile(`(?i)\bLIMIT\b`)
+	sqlWrite = regexp.MustCompile(`(?i)\b(?:INSERT|UPDATE|DELETE)\b`)
+)
+
+// upperBound is a column compared below a parameter: updated_at < $1.
+var upperBound = regexp.MustCompile(`(?i)\b(\w+)\s*<=?\s*\$\d+`)
+
+// boundBefore reports a condition of text that keeps the column below a
+// parameter: the read takes the stale rows only.
+func boundBefore(text, column string) bool {
+	for _, m := range upperBound.FindAllStringSubmatch(text, -1) {
+		if strings.EqualFold(m[1], column) {
+			return true
+		}
+	}
+	return false
+}
+
+// stalePageReads reports the reads of a pending-queue function (by name,
+// with no page position among its parameters) that take the first page of
+// stale rows by their change time - WHERE updated_at < $1 ORDER BY updated_at
+// LIMIT $2 - and mark nothing: a poll that finds no change leaves updated_at
+// as it is, so the same rows head every page and the rest of the queue is
+// never reached.
+func (r *PendingPageSkipsStayAtHeadRule) stalePageReads(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+	if !pendingQueueRead.MatchString(fn.Name.Name) {
+		return nil
+	}
+	for _, field := range fn.Type.Params.List {
+		for _, name := range field.Names {
+			if pagePosition.MatchString(name.Name) {
+				return nil
+			}
+		}
+	}
+	var violations []*core.Violation
+	for _, literal := range sqlLiterals(fn.Body) {
+		text := literal.text
+		m := staleOrder.FindStringSubmatchIndex(text)
+		if m == nil || !sqlLimit.MatchString(text[m[0]:]) || sqlWrite.MatchString(text) {
+			continue
+		}
+		column := text[m[2]:m[3]]
+		if !boundBefore(text[:m[0]], column) {
+			continue
+		}
+		line := literal.lineAt(ctx, m[0])
+		if ctx.IsSuppressed(line, r.Name()) {
+			continue
+		}
+		v := r.CreateViolation(ctx.RelPath, line, "The pending queue is read by its oldest "+column+" with a LIMIT and nothing marks the rows taken — a pass that finds no change leaves "+column+" as it is, so the same rows head every page and the rest of the queue is never reached")
+		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+		v.WithSuggestion("Order by a poll mark the read itself writes (polled_at NULLS FIRST, set in the same statement), or move past the rows taken with a cursor")
+		violations = append(violations, v)
 	}
 	return violations
 }

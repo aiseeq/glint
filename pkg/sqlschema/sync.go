@@ -369,6 +369,126 @@ func chosenColumns(where *pgquery.Node) map[string]bool {
 	return chosen
 }
 
+// nullifiedStatus is a status value of a record that never took effect: a
+// refused, cancelled or failed payment moved no money.
+var nullifiedStatus = regexp.MustCompile(`(?i)^(?:cancell?ed|rejected|declined|failed|error|void|voided|reversed|reverted|refunded|rolled_?back)$`)
+
+// moneyColumn names a column holding an amount.
+var moneyColumn = regexp.MustCompile(`(?i)amount|fee|price|cost|volume|revenue|turnover|balance|_usd|_eur|_rub`)
+
+// UnfilteredSums returns the offsets of the SUMs of money of a SELECT that
+// take rows of every status while other aggregates of the same SELECT filter
+// theirs by a status the project gives records that never took effect
+// (COUNT(*) FILTER (WHERE status = 'rejected'), ... NOT IN ('CANCELLED')):
+// the turnover beside them still includes refused and cancelled rows. A
+// filter by a lifecycle status alone (active, closed) says nothing of the
+// sum; a column summed both with and without a filter is a deliberate total;
+// a sum that looks at the status itself (SUM(CASE WHEN status ...)) and a
+// WHERE on the status narrow it already.
+func UnfilteredSums(sql string) []int {
+	result, shift, ok := parseCode(sql)
+	if !ok {
+		return nil
+	}
+	var offsets []int
+	for _, raw := range result.GetStmts() {
+		walk(raw.GetStmt().ProtoReflect(), func(m proto.Message) {
+			sel, ok := m.(*pgquery.SelectStmt)
+			if !ok || len(sel.GetTargetList()) == 0 {
+				return
+			}
+			filteredBy := ""
+			filteredArgs := make(map[string]bool)
+			var bare []*pgquery.FuncCall
+			for _, target := range sel.GetTargetList() {
+				walk(target.ProtoReflect(), func(m proto.Message) {
+					call, ok := m.(*pgquery.FuncCall)
+					if !ok {
+						return
+					}
+					sum := funcName(call) == "sum"
+					if filter := call.GetAggFilter(); filter != nil {
+						if column := statusColumn(filter); column != "" && namesNullified(filter) {
+							filteredBy = column
+						}
+						if sum {
+							filteredArgs[argColumns(call)] = true
+						}
+						return
+					}
+					if sum {
+						bare = append(bare, call)
+					}
+				})
+			}
+			if filteredBy == "" || statusColumn(sel.GetWhereClause()) == filteredBy {
+				return
+			}
+			for _, call := range bare {
+				args := argColumns(call)
+				if !filteredArgs[args] && moneyColumn.MatchString(args) && !strings.Contains(args, "status") {
+					offsets = append(offsets, int(call.GetLocation())-shift)
+				}
+			}
+		})
+	}
+	return offsets
+}
+
+// funcName returns the lower-case unqualified name of a called function.
+func funcName(call *pgquery.FuncCall) string {
+	names := call.GetFuncname()
+	if len(names) == 0 {
+		return ""
+	}
+	return strings.ToLower(names[len(names)-1].GetString_().GetSval())
+}
+
+// argColumns names the columns a call's arguments read, to tell SUM(amount)
+// from SUM(fee).
+func argColumns(call *pgquery.FuncCall) string {
+	var names []string
+	for _, arg := range call.GetArgs() {
+		walk(arg.ProtoReflect(), func(m proto.Message) {
+			if ref, ok := m.(*pgquery.ColumnRef); ok {
+				names = append(names, refName(&pgquery.Node{Node: &pgquery.Node_ColumnRef{ColumnRef: ref}}))
+			}
+		})
+	}
+	return strings.Join(names, ",")
+}
+
+// namesNullified reports a condition holding a string constant that is a
+// status of a record that never took effect.
+func namesNullified(cond *pgquery.Node) bool {
+	found := false
+	walk(cond.ProtoReflect(), func(m proto.Message) {
+		if c, ok := m.(*pgquery.A_Const); ok && c.GetSval() != nil && nullifiedStatus.MatchString(c.GetSval().GetSval()) {
+			found = true
+		}
+	})
+	return found
+}
+
+// statusColumn returns the name of a status column a condition compares, or
+// "" when it compares none.
+func statusColumn(cond *pgquery.Node) string {
+	if cond == nil {
+		return ""
+	}
+	found := ""
+	walk(cond.ProtoReflect(), func(m proto.Message) {
+		expr, ok := m.(*pgquery.A_Expr)
+		if !ok || found != "" {
+			return
+		}
+		if ref, ok := columnOf(expr.GetLexpr()); ok && strings.Contains(ref.name, "status") {
+			found = ref.name
+		}
+	})
+	return found
+}
+
 // relations returns the names of the tables a statement reads or writes.
 func relations(stmt *pgquery.Node) map[string]bool {
 	names := make(map[string]bool)

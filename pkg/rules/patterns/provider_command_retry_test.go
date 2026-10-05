@@ -38,6 +38,88 @@ func (c *Client) CancelTransaction(request Request) (Response, error) {
 	assert.Equal(t, "bool_helper", violations[0].Context["retry_evidence"])
 }
 
+// The send goes through a POST helper that wraps the request in a same-file
+// retry loop: a decode error after a 2xx, or a timeout after the server took
+// the request, sends the payout again. A GET helper on the same loop is a
+// read and safe to repeat.
+func TestProviderCommandRetryRule_PostHelperOnRetryLoop(t *testing.T) {
+	code := `package payprov
+
+import "net/http"
+
+func (c *Client) SendTransaction(req Request) error {
+	return c.signedPOST("/send", req)
+}
+
+func (c *Client) GetStatus(ref string) error {
+	return c.signedGET("/status")
+}
+
+func (c *Client) signedPOST(path string, body any) error {
+	return c.withRetry(func() error {
+		req, err := http.NewRequest(http.MethodPost, c.base+path, nil)
+		if err != nil {
+			return err
+		}
+		return c.do(req)
+	})
+}
+
+func (c *Client) signedGET(path string) error {
+	return c.withRetry(func() error {
+		req, err := http.NewRequest(http.MethodGet, c.base+path, nil)
+		if err != nil {
+			return err
+		}
+		return c.do(req)
+	})
+}
+
+func (c *Client) withRetry(fn func() error) error {
+	var err error
+	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+	}
+	return err
+}`
+	violations := NewProviderCommandRetryRule().AnalyzeFile(createQueryContext(t, "client.go", code))
+	require.Len(t, violations, 1)
+	assert.Equal(t, 14, violations[0].Line)
+	assert.Equal(t, "SendTransaction", violations[0].Context["command"])
+	assert.Equal(t, "retry_helper", violations[0].Context["retry_evidence"])
+}
+
+// A reconciler entry point named resend reaches the provider send again for
+// a row whose first send has an unknown outcome: it is the same retry, only
+// spread over ticks. A reconcile that reads the provider status is fine.
+func TestProviderCommandRetryRule_ResendReachesCommand(t *testing.T) {
+	code := `package orchestrator
+
+func (s *Service) ResendConfirmed(id string) error {
+	tx := s.repo.Get(id)
+	if tx.Ref != "" {
+		return nil
+	}
+	return s.sendTransaction(tx)
+}
+
+func (s *Service) ReconcileConfirmed(id string) error {
+	tx := s.repo.Get(id)
+	return s.client.GetTransactionStatus(tx.Ref)
+}
+
+func (s *Service) sendTransaction(tx Tx) error {
+	return s.client.SendTransaction(tx.Request)
+}`
+	violations := NewProviderCommandRetryRule().AnalyzeFile(createQueryContext(t, "service.go", code))
+	require.Len(t, violations, 1)
+	assert.Equal(t, 8, violations[0].Line)
+	assert.Equal(t, "SendTransaction", violations[0].Context["command"])
+	assert.Equal(t, "resend", violations[0].Context["retry_evidence"])
+}
+
 func TestProviderCommandRetryRule_DestructiveVocabulary(t *testing.T) {
 	for _, method := range []string{
 		"SendTransaction",

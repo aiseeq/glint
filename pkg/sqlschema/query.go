@@ -262,6 +262,49 @@ func (s *Schema) missingNotNull(insert *pgquery.InsertStmt) []Problem {
 	return problems
 }
 
+// NotNullBinds returns, for an INSERT ... VALUES or an UPDATE ... SET, the
+// NOT NULL column each bind parameter is written to, by parameter number: a
+// NULL bound there fails the statement whatever the column's default.
+func (s *Schema) NotNullBinds(sql string) map[int]string {
+	result, ok := parse(sql)
+	if !ok || len(result.GetStmts()) != 1 {
+		return nil
+	}
+	binds := make(map[int]string)
+	bind := func(table *Table, column string, value *pgquery.Node) {
+		for value.GetTypeCast() != nil {
+			value = value.GetTypeCast().GetArg()
+		}
+		ref := value.GetParamRef()
+		if table == nil || ref == nil {
+			return
+		}
+		if col := table.Column(column); col != nil && col.NotNull {
+			binds[int(ref.GetNumber())] = col.Name
+		}
+	}
+	stmt := result.GetStmts()[0].GetStmt()
+	if insert := stmt.GetInsertStmt(); insert != nil {
+		table := s.relation(insert.GetRelation(), nil)
+		for _, row := range insert.GetSelectStmt().GetSelectStmt().GetValuesLists() {
+			items := row.GetList().GetItems()
+			for i, col := range insert.GetCols() {
+				if i < len(items) {
+					bind(table, strings.ToLower(col.GetResTarget().GetName()), items[i])
+				}
+			}
+		}
+	}
+	if update := stmt.GetUpdateStmt(); update != nil {
+		table := s.relation(update.GetRelation(), nil)
+		for _, target := range update.GetTargetList() {
+			res := target.GetResTarget()
+			bind(table, strings.ToLower(res.GetName()), res.GetVal())
+		}
+	}
+	return binds
+}
+
 // walk calls visit for every message of a parse tree.
 func walk(m protoreflect.Message, visit func(proto.Message)) {
 	if !m.IsValid() {

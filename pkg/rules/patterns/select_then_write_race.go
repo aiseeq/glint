@@ -38,6 +38,12 @@ func init() {
 // also passes, through the same handle: concurrent callers for that key queue
 // on the parent row, and the second one finds what the first wrote. A lock
 // taken through another handle is outside the read's transaction.
+//
+// Two more forms of the race split the check from the write across calls: a
+// worker claims a row by flipping it to running by its key alone, never
+// reading RowsAffected, so two workers both take it; and a function loads an
+// entity, checks its status in Go and sends a provider command with no claim
+// of the row between the check and the send.
 type SelectThenWriteRaceRule struct {
 	*rules.BaseRule
 
@@ -70,7 +76,7 @@ func NewSelectThenWriteRaceRule() *SelectThenWriteRaceRule {
 		BaseRule: rules.NewBaseRule(
 			"select-then-write-race",
 			"patterns",
-			"Detects SELECT without FOR UPDATE followed by an UPDATE of the same column, or by an INSERT of the looked-up key without ON CONFLICT, in one function (read-validate-write race)",
+			"Detects SELECT without FOR UPDATE followed by an UPDATE of the same column, or by an INSERT of the looked-up key without ON CONFLICT, in one function (read-validate-write race); a claim status set by key alone with RowsAffected unread; a provider command sent after a Go status check with no claim of the row",
 			core.SeverityMedium,
 		),
 		// Anchored at the start of the literal so subqueries inside a larger
@@ -120,9 +126,213 @@ func (r *SelectThenWriteRaceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 // type information: then only string literals written in the function are
 // queries, a constant declared elsewhere is unknown.
 func (r *SelectThenWriteRaceRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	if ctx.GoAST == nil {
+		return nil
+	}
+	sends := unclaimedSendingFunctions(ctx.GoAST)
 	return analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
-		return r.checkFunction(ctx, fn, info)
+		return append(r.checkFunction(ctx, fn, info), r.sendAfterStatusCheck(ctx, fn, sends)...)
 	})
+}
+
+// sendingFunctions returns the names of the file's functions that issue a
+// provider command (SendPayout, TransferFunds), directly or through another
+// function of the file.
+func sendingFunctions(file *ast.File) map[string]bool {
+	sends := make(map[string]bool)
+	for changed := true; changed; {
+		changed = false
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || sends[fn.Name.Name] {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok && sendsCommand(call, sends) {
+					sends[fn.Name.Name], changed = true, true
+				}
+				return !sends[fn.Name.Name]
+			})
+		}
+	}
+	return sends
+}
+
+// unclaimedSendingFunctions returns the names of the file's functions that
+// reach a provider command before anything claims the row: a function that
+// claims first (ClaimSendIntent(ctx, tx.ID, tx.Version), a version-checked
+// write) serializes its callers itself.
+func unclaimedSendingFunctions(file *ast.File) map[string]bool {
+	sends := make(map[string]bool)
+	for changed := true; changed; {
+		changed = false
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || sends[fn.Name.Name] {
+				continue
+			}
+			if sendsBeforeClaim(fn.Body, sends) {
+				sends[fn.Name.Name], changed = true, true
+			}
+		}
+	}
+	return sends
+}
+
+// sendsBeforeClaim reports a body whose first claim or send, in source order,
+// is a send.
+func sendsBeforeClaim(body *ast.BlockStmt, sends map[string]bool) bool {
+	decided, sent := false, false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if decided {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if claimCall.MatchString(calledFunctionName(call.Fun)) || passesVersion(call) {
+			decided = true
+			return false
+		}
+		if sendsCommand(call, sends) {
+			decided, sent = true, true
+			return false
+		}
+		return true
+	})
+	return sent
+}
+
+// passesVersion reports a call handing on a Version field: an optimistic
+// write that fails when the row changed.
+func passesVersion(call *ast.CallExpr) bool {
+	for _, arg := range call.Args {
+		if sel, ok := arg.(*ast.SelectorExpr); ok && sel.Sel.Name == "Version" {
+			return true
+		}
+	}
+	return false
+}
+
+// sendsCommand reports a call of a provider command or of a function that
+// issues one.
+func sendsCommand(call *ast.CallExpr, sends map[string]bool) bool {
+	name := calledFunctionName(call.Fun)
+	if _, method := call.Fun.(*ast.SelectorExpr); method && providerCommandMethods[name] {
+		return true
+	}
+	return sends[name]
+}
+
+// entityLoader is a repository read of one entity.
+var entityLoader = regexp.MustCompile(`^(?:Get|Load|Find|Fetch)[A-Z]?\w*$`)
+
+// claimCall is a write that takes the entity conditionally: a claim, a lock,
+// a compare-and-set transition.
+var claimCall = regexp.MustCompile(`(?i)claim|lock|acquire|reserve|compareandswap|transition`)
+
+// sendAfterStatusCheck reports a provider command sent after a status check of
+// an entity loaded by a repository read, with nothing between the check and
+// the command that claims the row: two concurrent calls (a double click, a
+// retried request) both see the old status, both pass and both send.
+func (r *SelectThenWriteRaceRule) sendAfterStatusCheck(ctx *core.FileContext, fn *ast.FuncDecl, sends map[string]bool) []*core.Violation {
+	loaded := ""
+	var guard ast.Node
+	for _, stmt := range fn.Body.List {
+		if guard != nil {
+			break
+		}
+		switch stmt := stmt.(type) {
+		case *ast.AssignStmt:
+			if loaded == "" && len(stmt.Rhs) == 1 && len(stmt.Lhs) >= 1 {
+				call, ok := stmt.Rhs[0].(*ast.CallExpr)
+				ident, isIdent := stmt.Lhs[0].(*ast.Ident)
+				if ok && isIdent && ident.Name != "_" && entityLoader.MatchString(calledFunctionName(call.Fun)) {
+					loaded = ident.Name
+				}
+			}
+		case *ast.IfStmt:
+			if loaded != "" && checksStatus(stmt.Cond, loaded) && blockBranches(stmt.Body, isReturn) {
+				guard = stmt
+			}
+		}
+	}
+	if guard == nil {
+		return nil
+	}
+	var send *ast.CallExpr
+	claimed := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if send != nil || claimed {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok || call.Pos() < guard.End() {
+			return true
+		}
+		if claimCall.MatchString(calledFunctionName(call.Fun)) || passesField(call, loaded, "Version") {
+			claimed = true
+			return false
+		}
+		if sendsCommand(call, sends) {
+			send = call
+		}
+		return true
+	})
+	if send == nil || claimed {
+		return nil
+	}
+	line := lineFromNode(ctx, send)
+	if ctx.IsSuppressed(line, r.Name()) {
+		return nil
+	}
+	v := r.CreateViolation(ctx.RelPath, line,
+		"'"+loaded+"' is loaded and its status checked in Go, then the provider command is sent with no claim of the row in between — two concurrent calls both pass the check and both send")
+	v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+	v.WithSuggestion("Claim the row before the send: UPDATE ... WHERE id = $1 AND status = <checked status> (or version = $2) and refuse when RowsAffected() is 0")
+	v.WithContext("pattern", "send-after-status-check")
+	v.WithContext("function", fn.Name.Name)
+	return []*core.Violation{v}
+}
+
+// checksStatus reports a condition comparing the Status or State field of
+// the named variable.
+func checksStatus(cond ast.Expr, name string) bool {
+	found := false
+	ast.Inspect(cond, func(n ast.Node) bool {
+		bin, ok := n.(*ast.BinaryExpr)
+		if !ok || (bin.Op != token.EQL && bin.Op != token.NEQ) {
+			return true
+		}
+		for _, side := range []ast.Expr{bin.X, bin.Y} {
+			if sel, ok := side.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Status" || sel.Sel.Name == "State") {
+				if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == name {
+					found = true
+				}
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// isReturn reports a return statement.
+func isReturn(stmt ast.Stmt) bool {
+	_, ok := stmt.(*ast.ReturnStmt)
+	return ok
+}
+
+// passesField reports a call that passes the named field of a variable.
+func passesField(call *ast.CallExpr, name, field string) bool {
+	for _, arg := range call.Args {
+		if sel, ok := arg.(*ast.SelectorExpr); ok && sel.Sel.Name == field {
+			if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *SelectThenWriteRaceRule) checkFunction(ctx *core.FileContext, fn *ast.FuncDecl, info *types.Info) []*core.Violation {
@@ -171,7 +381,106 @@ func (r *SelectThenWriteRaceRule) checkFunction(ctx *core.FileContext, fn *ast.F
 		// The whole constant is one query: its operands are not visited again.
 		return false
 	})
+	if len(lockedKeys) == 0 {
+		violations = append(violations, r.keyOnlyClaims(ctx, fn, info)...)
+	}
 	return violations
+}
+
+// claimValue is a status that takes a row for one worker: setting it is a
+// claim, and only a claim conditional on the current status is exclusive.
+var claimValue = regexp.MustCompile(`(?i)^(?:running|processing|in_?progress|claimed|locked|sending|executing)$`)
+
+// claimConstName is a constant naming such a status (JobRunning, StatusProcessing).
+var claimConstName = regexp.MustCompile(`(?i)(?:running|processing|inprogress|claimed|locked|sending|executing)$`)
+
+// statusAssignment is the SET of a status column: a literal or a parameter.
+var statusAssignment = regexp.MustCompile(`(?i)\bstatus\s*=\s*(?:'(\w+)'|\$(\d+))`)
+
+// keyOnlyClaims reports an UPDATE that sets a claim status (running,
+// processing) on a row found by its key alone, in a function that never reads
+// RowsAffected: two workers both flip the row and both believe they took it.
+// WHERE id = $1 AND status = 'pending' with the affected count read is the
+// claim; a lock taken earlier in the function serializes the writers anyway.
+func (r *SelectThenWriteRaceRule) keyOnlyClaims(ctx *core.FileContext, fn *ast.FuncDecl, info *types.Info) []*core.Violation {
+	if callsSelector(fn.Body, "RowsAffected") {
+		return nil
+	}
+	var violations []*core.Violation
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		for i, arg := range call.Args {
+			query, ok := constantString(arg, info)
+			if !ok {
+				continue
+			}
+			table, columns, guarded, ok := r.parseUpdate(query)
+			if !ok || !columns["status"] || len(guarded) != 1 || guarded["status"] {
+				break
+			}
+			m := statusAssignment.FindStringSubmatch(query)
+			if m == nil || !r.claims(m, call.Args[i+1:], info) {
+				break
+			}
+			line := lineFromNode(ctx, arg)
+			if ctx.IsSuppressed(line, r.Name()) {
+				break
+			}
+			v := r.CreateViolation(ctx.RelPath, line,
+				"'"+table+"' is claimed by its key alone and the affected row count is never read — two workers both flip the row to the claim status and both process it")
+			v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+			v.WithSuggestion("Claim conditionally: UPDATE ... WHERE id = $1 AND status = <the status the worker expects>, and go on only when RowsAffected() is 1")
+			v.WithContext("pattern", "claim-by-key-only")
+			v.WithContext("function", fn.Name.Name)
+			v.WithContext("table", table)
+			violations = append(violations, v)
+			break
+		}
+		return true
+	})
+	return violations
+}
+
+// claims reports a status assignment whose value is a claim status: the
+// literal of the SQL or the argument bound to its parameter.
+func (r *SelectThenWriteRaceRule) claims(assignment []string, args []ast.Expr, info *types.Info) bool {
+	if assignment[1] != "" {
+		return claimValue.MatchString(assignment[1])
+	}
+	index, err := strconv.Atoi(assignment[2])
+	if err != nil || index < 1 || index > len(args) {
+		return false
+	}
+	arg := args[index-1]
+	if value, ok := constantString(arg, info); ok && info != nil {
+		return claimValue.MatchString(value)
+	}
+	switch arg := arg.(type) {
+	case *ast.Ident:
+		return claimConstName.MatchString(arg.Name)
+	case *ast.SelectorExpr:
+		return claimConstName.MatchString(arg.Sel.Name)
+	case *ast.CallExpr: // string(StatusRunning)
+		return len(arg.Args) == 1 && r.claims([]string{"", "1"}, arg.Args, info)
+	}
+	return false
+}
+
+// callsSelector reports a call of a method or field named name under root.
+func callsSelector(root ast.Node, name string) bool {
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // queryArguments maps each query constant passed to a call to the source text

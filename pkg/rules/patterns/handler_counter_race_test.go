@@ -165,6 +165,50 @@ func (rec *recorder) Write(b []byte) (int, error) {
 }
 `,
 		},
+		{
+			// A package-level cache map that a handler fills: two requests
+			// write it at once and the runtime aborts with "concurrent map
+			// writes". A map behind the handler's lock, or one the handler
+			// builds for itself, is fine.
+			name: "handler writes a package-level map without a lock",
+			source: `package app
+
+import (
+	"net/http"
+	"sync"
+)
+
+var optionsCache = map[string][]string{}
+
+var (
+	mu     sync.Mutex
+	locked = map[string]int{}
+)
+
+type Admin struct{ seen map[string]bool }
+
+func (a *Admin) Options(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("k")
+	if v, ok := optionsCache[key]; ok {
+		_ = v
+		return
+	}
+	optionsCache[key] = []string{key}
+	a.seen[key] = true
+	delete(optionsCache, "old")
+	own := map[string]int{}
+	own[key] = 1
+}
+
+func (a *Admin) Locked(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
+	locked[r.URL.Path]++
+	locked["x"] = 1
+}
+`,
+			expects: []string{"app/app.go:23", "app/app.go:24", "app/app.go:25"},
+		},
 	}
 
 	for _, tt := range tests {
