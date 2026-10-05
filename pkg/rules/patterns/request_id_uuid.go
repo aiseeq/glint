@@ -54,10 +54,20 @@ func (r *RequestIDUnparsedForUUIDColumnRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports the request ids that reach a call unparsed.
 func (r *RequestIDUnparsedForUUIDColumnRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return analyzeAgainstSchema(ctx, r.BaseRule,
+		"Parse the id with uuid.Parse where it is read (a shared helper such as pathUUID/queryUUID) and answer 400 on failure",
+		unparsedRequestIDs)
+}
+
+// analyzeAgainstSchema runs a typed check of every function of a project
+// that needs the schema of its migrations; a project without migrations, or
+// with one that does not load (the schema rules report it), is not checked.
+func analyzeAgainstSchema(ctx *core.GoProjectContext, rule *rules.BaseRule, suggestion string,
+	check func(funcScope, *sqlschema.Schema, *ast.FuncDecl) []funcFinding) ([]*core.Violation, error) {
 	if ctx == nil {
-		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
+		return nil, fmt.Errorf("%s: nil Go project context", rule.Name())
 	}
-	schema, err := sqlschema.LoadCached(ctx.ProjectRoot, migrationDirs(r.BaseRule))
+	schema, err := sqlschema.LoadCached(ctx.ProjectRoot, migrationDirs(rule))
 	var migrationErr *sqlschema.MigrationError
 	if errors.As(err, &migrationErr) {
 		return nil, nil // the schema rules report the migration; nothing to check against
@@ -69,10 +79,10 @@ func (r *RequestIDUnparsedForUUIDColumnRule) AnalyzeGoProject(ctx *core.GoProjec
 		return nil, nil
 	}
 	inner := &typedFuncRule{
-		BaseRule:   r.BaseRule,
-		suggestion: "Parse the id with uuid.Parse where it is read (a shared helper such as pathUUID/queryUUID) and answer 400 on failure",
+		BaseRule:   rule,
+		suggestion: suggestion,
 		check: func(scope funcScope, fn *ast.FuncDecl) []funcFinding {
-			return unparsedRequestIDs(scope, schema, fn)
+			return check(scope, schema, fn)
 		},
 	}
 	return inner.AnalyzeGoProject(ctx)

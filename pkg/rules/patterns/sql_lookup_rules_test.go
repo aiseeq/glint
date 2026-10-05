@@ -146,3 +146,40 @@ func DropNotes(db DB, id string) { db.ExecContext(ctx, "DELETE FROM notes WHERE 
 	}
 	assert.Equal(t, []int{4}, moduleSQLRuleLines(t, NewSQLDeleteReferencedWithoutKeyRule(), files, "storage/repo.go"))
 }
+
+const externalKeyMigration = `CREATE TABLE transfers (
+    id UUID PRIMARY KEY,
+    provider_reference TEXT,
+    partner_reference TEXT NOT NULL UNIQUE,
+    carrier_ref TEXT,
+    batch_reference TEXT,
+    account_id UUID NOT NULL
+);
+CREATE UNIQUE INDEX ux_transfers_carrier_ref ON transfers (carrier_ref) WHERE carrier_ref <> '';`
+
+// One transfer read by the provider's reference that no unique index covers
+// takes either of two rows sharing it; a unique column, a partially unique
+// one, a read of every row, a LIMIT and a lookup fixed by the id are left
+// alone.
+func TestExternalReferenceLookupWithoutUniqueIndex(t *testing.T) {
+	files := map[string]string{
+		"storage/migrations/001_init.up.sql": externalKeyMigration,
+		"storage/repo.go": `package storage
+
+const transferColumns = "id, provider_reference, account_id"
+
+func Find(db DB, ref string) {
+	db.QueryRowContext(ctx, "SELECT " + transferColumns + " FROM transfers WHERE provider_reference = $1", ref)
+	db.QueryRowContext(ctx, "SELECT id FROM transfers WHERE partner_reference = $1", ref)
+	db.QueryRowContext(ctx, "SELECT id FROM transfers WHERE carrier_ref = $1", ref)
+	db.QueryContext(ctx, "SELECT id FROM transfers WHERE batch_reference = $1", ref)
+	db.QueryRowContext(ctx, "SELECT id FROM transfers WHERE batch_reference = $1 ORDER BY id LIMIT 1", ref)
+	db.QueryRowContext(ctx, "SELECT id FROM transfers WHERE id = $1 AND provider_reference = $2", id, ref)
+	db.GetContext(ctx, &t, ` + "`" + `SELECT id FROM transfers
+		WHERE account_id = $1
+		  AND batch_reference = $2` + "`" + `, account, ref)
+}
+`,
+	}
+	assert.Equal(t, []int{6, 14}, moduleSQLRuleLines(t, NewExternalReferenceLookupWithoutUniqueIndexRule(), files, "storage/repo.go"))
+}

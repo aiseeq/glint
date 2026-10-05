@@ -184,3 +184,87 @@ func TestSQLScanRules(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, wantedLines(files, "sqlx-column-without-field"), foundLines(violations))
 }
+
+const sqlScanCountRepo = `package storage
+
+import (
+	"context"
+	"fmt"
+)
+
+type Rows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Close() error
+}
+
+type Row interface{ Scan(dest ...any) error }
+
+type DB interface {
+	QueryContext(ctx context.Context, query string, args ...any) (Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) Row
+}
+
+type Account struct {
+	ID, Email, Nickname, Source string
+}
+
+const accountColumns = "id, email, nickname"
+
+func ByID(ctx context.Context, db DB, id string) (*Account, error) {
+	query := ` + "`SELECT id, email, nickname FROM accounts WHERE id = $1`" + `
+	var a Account
+	err := db.QueryRowContext(ctx, query, id).Scan(&a.ID, &a.Email, &a.Source, &a.Nickname) // want sql-scan-arg-count-mismatch
+	return &a, err
+}
+
+func List(ctx context.Context, db DB) ([]Account, error) {
+	rows, err := db.QueryContext(ctx, "SELECT id, email FROM accounts ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Account
+	for rows.Next() {
+		var a Account
+		if err := rows.Scan(&a.ID, &a.Email, &a.Nickname); err != nil { // want sql-scan-arg-count-mismatch
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+func Matching(ctx context.Context, db DB, id string) (*Account, error) {
+	var a Account
+	err := db.QueryRowContext(ctx, "SELECT "+accountColumns+" FROM accounts WHERE id = $1", id).Scan(&a.ID, &a.Email, &a.Nickname)
+	return &a, err
+}
+
+func Built(ctx context.Context, db DB, columns string, id string) (*Account, error) {
+	var a Account
+	err := db.QueryRowContext(ctx, "SELECT id, "+columns+" FROM accounts WHERE id = $1", id).Scan(&a.ID, &a.Email, &a.Nickname)
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf("SELECT %s FROM accounts WHERE id = $1", columns)
+	err = db.QueryRowContext(ctx, query, id).Scan(&a.ID, &a.Email)
+	return &a, err
+}
+
+func Spread(ctx context.Context, db DB, id string, dest []any) error {
+	return db.QueryRowContext(ctx, "SELECT id, email FROM accounts WHERE id = $1", id).Scan(dest...)
+}
+`
+
+// A Scan with more or fewer destinations than the SELECT has columns is
+// refused on every row; a select list the code builds is not counted.
+func TestSQLScanArgCountMismatch(t *testing.T) {
+	files := map[string]string{
+		"storage/migrations/001_init.up.sql": sqlScanMigration,
+		"storage/repo.go":                    sqlScanCountRepo,
+	}
+	violations, err := NewSQLScanArgCountRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, wantedLines(files, "sql-scan-arg-count-mismatch"), foundLines(violations))
+}

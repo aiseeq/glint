@@ -17,6 +17,7 @@ import (
 func init() {
 	rules.Register(NewSQLScanNullableRule())
 	rules.Register(NewSQLXColumnWithoutFieldRule())
+	rules.Register(NewSQLScanArgCountRule())
 }
 
 // SQLScanNullableRule detects a column that can be NULL read into a Go value
@@ -97,6 +98,40 @@ func (r *SQLXColumnWithoutFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext
 	return analyzeScans(ctx, r.BaseRule, scanUnmapped)
 }
 
+// SQLScanArgCountRule detects a Scan whose destinations do not match the
+// columns of the SELECT the rows come from:
+//
+//	query := `SELECT id, name, is_active FROM projects WHERE id = $1`
+//	db.QueryRow(ctx, query, id).Scan(&p.ID, &p.Name, &p.Source, &p.IsActive)
+//
+// The drivers refuse the call on every row (expected 3 destination
+// arguments in Scan, not 4): a column added to the Scan and not to the query,
+// or the other way round, breaks the read for good.
+type SQLScanArgCountRule struct {
+	*rules.BaseRule
+}
+
+// NewSQLScanArgCountRule creates the rule
+func NewSQLScanArgCountRule() *SQLScanArgCountRule {
+	return &SQLScanArgCountRule{BaseRule: rules.NewBaseRule(
+		"sql-scan-arg-count-mismatch",
+		"patterns",
+		"Detects a Scan with a different number of destinations than the columns its SELECT returns — the driver refuses every row",
+		core.SeverityHigh,
+	)}
+}
+
+// AnalyzeFile is a no-op: destinations are known only with type information.
+func (r *SQLScanArgCountRule) AnalyzeFile(_ *core.FileContext) []*core.Violation { return nil }
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *SQLScanArgCountRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks the scans of the project against their queries.
+func (r *SQLScanArgCountRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return analyzeScans(ctx, r.BaseRule, scanCount)
+}
+
 const nullableSuggestion = "Read into a pointer or a sql.Null* value, COALESCE the column, or make it NOT NULL in a migration where the code means it"
 
 // scanCheck is what analyzeScans reports.
@@ -105,6 +140,7 @@ type scanCheck int
 const (
 	scanNullable scanCheck = iota
 	scanUnmapped
+	scanCount
 )
 
 func analyzeScans(ctx *core.GoProjectContext, rule *rules.BaseRule, check scanCheck) ([]*core.Violation, error) {
@@ -166,15 +202,21 @@ func (a *scanAnalysis) function(fn *ast.FuncDecl) {
 // rowScan checks Scan(&a, &b) against the query the rows come from:
 // db.QueryRow(q).Scan(...) or rows.Scan(...) on rows := db.Query(q).
 func (a *scanAnalysis) rowScan(fn *ast.FuncDecl, scan *ast.CallExpr, sel *ast.SelectorExpr) {
-	if a.check != scanNullable {
+	if a.check == scanUnmapped {
 		return
 	}
 	queryCall := a.rowsSource(fn, sel.X)
-	if queryCall == nil {
+	if queryCall == nil || scan.Ellipsis.IsValid() {
 		return
 	}
-	targets, ok := a.queryTargets(fn, queryCall)
-	if !ok || len(targets) != len(scan.Args) || scan.Ellipsis.IsValid() {
+	literal, targets, ok := a.queryTargets(fn, queryCall)
+	if ok && a.check == scanCount && len(targets) != len(scan.Args) && !builtTargets(literal, targets) {
+		a.report(a.ctx, a.ctx.LineFor(sel.Sel), fmt.Sprintf(
+			"The SELECT returns %d columns and Scan takes %d destinations — the driver refuses every row",
+			len(targets), len(scan.Args)), "List the same columns in the query and in the Scan, in the same order", "scan_count")
+		return
+	}
+	if !ok || a.check != scanNullable || len(targets) != len(scan.Args) {
 		return
 	}
 	for i, arg := range scan.Args {
@@ -206,15 +248,25 @@ func (a *scanAnalysis) rowsSource(fn *ast.FuncDecl, expr ast.Expr) *ast.CallExpr
 
 // queryTargets returns the SELECT a query call runs, with its columns: the
 // first string argument, a literal or a local variable assigned one.
-func (a *scanAnalysis) queryTargets(fn *ast.FuncDecl, call *ast.CallExpr) ([]sqlschema.Target, bool) {
+func (a *scanAnalysis) queryTargets(fn *ast.FuncDecl, call *ast.CallExpr) (sqlLiteral, []sqlschema.Target, bool) {
 	for _, arg := range call.Args {
 		if !isStringType(a.info.TypeOf(arg)) {
 			continue
 		}
-		_, targets, ok := a.targetsOf(fn, arg)
-		return targets, ok
+		return a.targetsOf(fn, arg)
 	}
-	return nil, false
+	return sqlLiteral{}, nil, false
+}
+
+// builtTargets reports a select list with a part the code builds (a
+// variable joined in, a %s of Sprintf): the columns it adds are not known.
+func builtTargets(literal sqlLiteral, targets []sqlschema.Target) bool {
+	for _, target := range targets {
+		if target.Offset < len(literal.text) && literal.text[target.Offset] == '$' {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *scanAnalysis) targetsOf(fn *ast.FuncDecl, arg ast.Expr) (sqlLiteral, []sqlschema.Target, bool) {

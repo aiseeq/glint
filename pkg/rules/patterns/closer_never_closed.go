@@ -415,9 +415,8 @@ func enclosingFuncDecl(stack []ast.Node) *ast.FuncDecl {
 // caller's to close: by the body for the functions of the typed packages, by
 // the name for the rest.
 type closerCallees struct {
-	decls    map[*types.Func]closerCalleeDecl
-	memo     map[*types.Func]bool
-	packages map[string]bool // import paths of the typed packages
+	decls map[*types.Func]closerCalleeDecl
+	memo  map[*types.Func]bool
 }
 
 type closerCalleeDecl struct {
@@ -427,21 +426,18 @@ type closerCalleeDecl struct {
 
 func newCloserCallees(ctx *core.GoProjectContext) *closerCallees {
 	callees := &closerCallees{
-		decls:    make(map[*types.Func]closerCalleeDecl),
-		memo:     make(map[*types.Func]bool),
-		packages: make(map[string]bool),
+		decls: make(map[*types.Func]closerCalleeDecl),
+		memo:  make(map[*types.Func]bool),
 	}
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
 			continue
 		}
-		callees.packages[pkg.Package.PkgPath] = true
 		info := pkg.Package.TypesInfo
-		for _, fileCtx := range pkg.Files {
-			if fileCtx == nil || fileCtx.GoAST == nil {
-				continue
-			}
-			for _, decl := range fileCtx.GoAST.Decls {
+		// Every file of a typed package, not only the analyzed ones: a run
+		// over part of a module judges a getter by its body all the same.
+		for _, file := range pkg.Package.Syntax {
+			for _, decl := range file.Decls {
 				fd, ok := decl.(*ast.FuncDecl)
 				if !ok || fd.Body == nil {
 					continue
@@ -456,10 +452,11 @@ func newCloserCallees(ctx *core.GoProjectContext) *closerCallees {
 }
 
 // notCallersToClose reports a callee whose result the caller does not own:
-// a method of exec.Cmd (Wait closes its pipes), a function outside the
-// project whose name does not say it creates the value (a shared connection
-// getter), a project function that returns a shared instance or hands the
-// value to a test Cleanup itself.
+// a method of exec.Cmd (Wait closes its pipes), a function whose body is not
+// loaded (outside the project, or outside the analyzed files) and whose name
+// does not say it creates the value (a shared connection getter), a project
+// function that returns a shared instance or hands the value to a test
+// Cleanup itself.
 func (c *closerCallees) notCallersToClose(fn *types.Func) bool {
 	if fn == nil {
 		return false
@@ -468,14 +465,16 @@ func (c *closerCallees) notCallersToClose(fn *types.Func) bool {
 	if sig, ok := fn.Type().(*types.Signature); ok && sig.Recv() != nil && isNamedFrom(derefType(sig.Recv().Type()), "os/exec") {
 		return true
 	}
-	if fn.Pkg() != nil && !c.packages[fn.Pkg().Path()] {
+	d, ok := c.decls[fn]
+	if !ok {
+		// Outside the project, or in a package typed for the analyzed files
+		// whose own files are not analyzed: the body is out of sight.
 		return !createsResource(fn.Name())
 	}
 	if known, ok := c.memo[fn]; ok {
 		return known
 	}
-	d, ok := c.decls[fn]
-	keeps := ok && (registersCleanup(d.decl.Body) || returnsSharedValue(d.decl.Body, d.info))
+	keeps := registersCleanup(d.decl.Body) || returnsSharedValue(d.decl.Body, d.info)
 	c.memo[fn] = keeps
 	return keeps
 }
