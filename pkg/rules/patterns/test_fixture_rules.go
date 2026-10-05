@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -15,6 +17,7 @@ import (
 
 func init() {
 	rules.Register(NewTestTemplateDBSharedAcrossSourcesRule())
+	rules.Register(NewTestSharedDBRecreatedWithoutCrossProcessLockRule())
 	rules.Register(NewTestFixtureWriteOverriddenByDBTriggerRule())
 	rules.Register(NewTestWaitsOnProxySignalRule())
 	rules.Register(NewTestAuthSchemeDriftRule())
@@ -108,6 +111,84 @@ func goFileConstants(file *ast.File) map[string]bool {
 		return true
 	})
 	return consts
+}
+
+// TestSharedDBRecreatedWithoutCrossProcessLockRule detects a test helper
+// that drops and creates a database under a fixed name with nothing but a
+// process-local guard (sync.Once) around it:
+//
+//	templateOnce.Do(func() { templateErr = createTemplate() })
+//	...
+//	adminDB.Exec(fmt.Sprintf("DROP DATABASE %s", templateDBName))
+//	adminDB.Exec(fmt.Sprintf("CREATE DATABASE %s TEMPLATE %s", templateDBName, source))
+//
+// go test runs the packages of a module as parallel processes: each one
+// drops the database the others are copying from, and their tests fail at
+// random.
+type TestSharedDBRecreatedWithoutCrossProcessLockRule struct {
+	*rules.BaseRule
+}
+
+// NewTestSharedDBRecreatedWithoutCrossProcessLockRule creates the rule.
+func NewTestSharedDBRecreatedWithoutCrossProcessLockRule() *TestSharedDBRecreatedWithoutCrossProcessLockRule {
+	return &TestSharedDBRecreatedWithoutCrossProcessLockRule{BaseRule: rules.NewBaseRule(
+		"test-shared-db-recreated-without-cross-process-lock",
+		"patterns",
+		"Detects a test helper that drops and recreates a database with a fixed name and no advisory lock — parallel test processes drop it under each other",
+		core.SeverityMedium,
+	)}
+}
+
+var (
+	dropDatabaseFormat   = regexp.MustCompile(`(?i)\bDROP\s+DATABASE\s+(?:IF\s+EXISTS\s+)?"?%[sqv]`)
+	createDatabaseFormat = regexp.MustCompile(`(?i)\bCREATE\s+DATABASE\s+"?%[sqv]`)
+)
+
+// AnalyzeFile reports the drop of a fixed-name database the file also
+// creates, in a test helper that takes no advisory lock.
+func (r *TestSharedDBRecreatedWithoutCrossProcessLockRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if !ctx.IsGoFile() || ctx.GoAST == nil || !importsPackage(ctx.GoAST, "testing") || strings.Contains(string(ctx.Content), "pg_advisory") {
+		return nil
+	}
+	consts := goFileConstants(ctx.GoAST)
+	drops := make(map[string]*ast.CallExpr)
+	created := make(map[string]bool)
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !isSelectorCall(call, "fmt", "Sprintf") || len(call.Args) < 2 {
+			return true
+		}
+		format, ok := stringLiteral(call.Args[0])
+		name, isConst := call.Args[1].(*ast.Ident)
+		if !ok || !isConst || !consts[name.Name] {
+			return true
+		}
+		if dropDatabaseFormat.MatchString(format) {
+			if _, seen := drops[name.Name]; !seen {
+				drops[name.Name] = call
+			}
+		}
+		if createDatabaseFormat.MatchString(format) {
+			created[name.Name] = true
+		}
+		return true
+	})
+	var out []*core.Violation
+	for _, name := range slices.Sorted(maps.Keys(drops)) {
+		call := drops[name]
+		if !created[name] {
+			continue
+		}
+		line := ctx.LineFor(call)
+		if ctx.IsSuppressed(line, r.Name()) {
+			continue
+		}
+		v := r.CreateViolation(ctx.RelPath, line, "The database "+name+" is dropped and created again under a fixed name with no advisory lock — test packages run as parallel processes and drop it under each other")
+		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+		v.WithSuggestion("Serialize the recreation with pg_advisory_lock on a dedicated connection, or give each process its own database name")
+		out = append(out, v)
+	}
+	return out
 }
 
 // TestFixtureWriteOverriddenByDBTriggerRule detects a test that sets a
