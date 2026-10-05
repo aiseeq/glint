@@ -324,6 +324,12 @@ func TestTSTestOutsideTypecheck(t *testing.T) {
 		"web/lib/jest.config.cjs":        "module.exports = { preset: 'ts-jest' }\n",
 	}
 	assert.Equal(t, []string{"web/shared/__tests__/a.test.ts:1"}, projectTSFindings(t, "ts-test-outside-typecheck", units))
+
+	// A tsconfig takes files outside its directory by an explicit include:
+	// the app's test config checks the shared tests next to its own.
+	units["web/app/package.json"] = `{"scripts": {"type-check:test": "tsc --noEmit -p tsconfig.test.json"}}`
+	units["web/app/tsconfig.test.json"] = `{"extends": "./tsconfig.json", "include": ["**/*.ts", "../shared/**/*.test.ts", "../shared/**/__tests__/**"]}`
+	assert.Empty(t, projectTSFindings(t, "ts-test-outside-typecheck", units))
 }
 
 // projectTSFindings writes the files into one project and runs a rule over

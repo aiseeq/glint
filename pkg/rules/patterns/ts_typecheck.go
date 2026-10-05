@@ -22,36 +22,47 @@ type tsconfigScope struct {
 }
 
 // covers reports a file the tsconfig compiles.
-func (s tsconfigScope) covers(file string) bool {
+func (s tsconfigScope) covers(file string) (bool, error) {
 	rel, err := filepath.Rel(s.base, file)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return false
+	if err != nil {
+		return false, fmt.Errorf("place %s against %s: %w", file, s.path, err)
 	}
+	// The default include takes the tsconfig's directory; an explicit one
+	// may reach outside it (../shared/**/*.test.ts).
 	rel = filepath.ToSlash(rel)
+	if s.include == nil && strings.HasPrefix(rel, "../") {
+		return false, nil
+	}
 	included := s.include == nil
 	for _, glob := range s.include {
 		included = included || glob.match(rel)
 	}
 	if !included {
-		return false
+		return false, nil
 	}
 	for _, glob := range s.exclude {
 		if glob.match(rel) {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 // tsGlob is a tsconfig include or exclude pattern: ** spans directories, *
 // and ? stay within one, and a pattern without a wildcard or an extension
 // names a directory and everything under it.
 type tsGlob struct {
-	dir string         // set for a directory pattern
-	re  *regexp.Regexp // set for a wildcard or file pattern
+	dir     string         // set for a directory pattern
+	re      *regexp.Regexp // set for a wildcard or file pattern
+	outside bool           // the pattern starts above the tsconfig's directory (../shared/**)
 }
 
 func (g tsGlob) match(rel string) bool {
+	// ** spans directories but not up out of the tsconfig's own: a file
+	// above it matches only a pattern that names the way there.
+	if strings.HasPrefix(rel, "../") && !g.outside {
+		return false
+	}
 	if g.re == nil {
 		return g.dir != "" && (rel == g.dir || strings.HasPrefix(rel, g.dir+"/"))
 	}
@@ -61,8 +72,9 @@ func (g tsGlob) match(rel string) bool {
 // compileTSGlob builds the matcher of one pattern.
 func compileTSGlob(pattern string) (tsGlob, error) {
 	pattern = strings.TrimPrefix(filepath.ToSlash(pattern), "./")
+	outside := strings.HasPrefix(pattern, "../")
 	if !strings.ContainsAny(pattern, "*?") && filepath.Ext(pattern) == "" {
-		return tsGlob{dir: strings.TrimSuffix(pattern, "/")}, nil
+		return tsGlob{dir: strings.TrimSuffix(pattern, "/"), outside: outside}, nil
 	}
 	var re strings.Builder
 	re.WriteString("^")
@@ -87,7 +99,7 @@ func compileTSGlob(pattern string) (tsGlob, error) {
 	if err != nil {
 		return tsGlob{}, fmt.Errorf("tsconfig pattern %q: %w", pattern, err)
 	}
-	return tsGlob{re: compiled}, nil
+	return tsGlob{re: compiled, outside: outside}, nil
 }
 
 // tsconfigFile is the part of a tsconfig the scope needs.
@@ -305,7 +317,11 @@ func tsFileTypeChecked(root, file string) (bool, error) {
 		return false, result.err
 	}
 	for _, scope := range result.scopes {
-		if scope.covers(file) {
+		covered, err := scope.covers(file)
+		if err != nil {
+			return false, err
+		}
+		if covered {
 			return true, nil
 		}
 	}
