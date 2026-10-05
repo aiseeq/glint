@@ -34,6 +34,12 @@ var readMethodName = regexp.MustCompile(`^(?:Get|List|Find|Search|Load|Fetch)`)
 // The page served by GetHistory shows what the rest of the section hides
 // from the same viewer. A reader with a filtered twin (List and ListFor) is
 // left out: the twin is what handlers are meant to call.
+//
+// The same gap shows on the handler side when the scope is a slice of the
+// viewer (TenantIDs []int, nil for all) that some readers take and an access
+// check reads: a handler calling another reader with neither that scope nor
+// a check of the ids it passes or the records it gets serves every tenant's
+// records (a batch by URL id, a log page listing every row).
 func NewReadMethodSkipsAccessFilterRule() *typedFuncRule {
 	r := &typedFuncRule{
 		BaseRule: rules.NewBaseRule(
@@ -43,6 +49,18 @@ func NewReadMethodSkipsAccessFilterRule() *typedFuncRule {
 			core.SeverityMedium,
 		),
 		suggestion: "Take the viewer's access like the sibling methods and filter by it before the limit, or name a filtered twin and call it from the handler",
+	}
+	r.forProject = func(decls map[*types.Func]typedFuncDecl) func(scope funcScope, fn *ast.FuncDecl) []funcFinding {
+		viewer := collectViewerScope(decls)
+		return func(scope funcScope, fn *ast.FuncDecl) []funcFinding {
+			findings := r.check(scope, fn)
+			for _, call := range viewer.handlerReadsOutsideScope(scope.info, fn) {
+				name := callName(call)
+				findings = append(findings, funcFinding{node: call, message: name +
+					" is called with neither the viewer's scope that the package's other readers take nor a check of what it reads or returns — the viewer gets records of every scope"})
+			}
+			return findings
+		}
 	}
 	r.check = func(scope funcScope, fn *ast.FuncDecl) []funcFinding {
 		obj, ok := scope.info.Defs[fn.Name].(*types.Func)

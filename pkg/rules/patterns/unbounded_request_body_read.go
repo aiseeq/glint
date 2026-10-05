@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 	"strings"
 
@@ -26,8 +27,10 @@ func init() {
 // The limit set by hand in some handlers shows the project relies on it; the
 // handler that forgot it lets a client stream as much as the proxy in front
 // allows, and a public endpoint does so without authentication. A project
-// that limits nowhere has another policy (a proxy cap) and is not judged. A
-// global limit is a middleware assigning MaxBytesReader to the body and
+// that limits nowhere may rely on a proxy cap: there only a raw read of the
+// whole body (io.ReadAll, io.Copy) is reported, the copy a signature check or
+// a webhook makes of everything the client sent, while a decoder that stops
+// at the first malformed byte is left alone. A global limit is a middleware assigning MaxBytesReader to the body and
 // calling the next handler, http.MaxBytesHandler, or a framework's body-limit
 // middleware (chi RequestSize, echo BodyLimit).
 type UnboundedRequestBodyReadRule struct {
@@ -56,11 +59,11 @@ func (r *UnboundedRequestBodyReadRule) AnalyzeFile(_ *core.FileContext) []*core.
 // bodies per handler and not globally.
 func (r *UnboundedRequestBodyReadRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	perHandler, global := bodyLimitPolicy(ctx)
-	if !perHandler || global {
+	if global {
 		return nil, nil
 	}
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
-		check := &bodyReadCheck{rule: r, file: file, info: info}
+		check := &bodyReadCheck{rule: r, file: file, info: info, rawOnly: !perHandler}
 		for _, decl := range file.GoAST.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
 				check.scope(fn.Type, fn.Body, false, nil)
@@ -185,22 +188,28 @@ type bodyReadCheck struct {
 	rule       *UnboundedRequestBodyReadRule
 	file       *core.FileContext
 	info       *types.Info
+	rawOnly    bool // the project limits nowhere: only raw whole-body reads count
 	violations []*core.Violation
 }
 
 // scope checks a function body. A literal inherits being a handler and the
-// bodies already replaced from the function it is written in.
-func (c *bodyReadCheck) scope(ftype *ast.FuncType, body *ast.BlockStmt, handler bool, replaced map[string]bool) {
+// bodies already replaced from the function it is written in. A body counts
+// as replaced for the reads after the assignment to it: a handler that
+// restores the body it has just read (r.Body = io.NopCloser(...)) did not
+// limit that read.
+func (c *bodyReadCheck) scope(ftype *ast.FuncType, body *ast.BlockStmt, handler bool, replaced map[string]token.Pos) {
 	handler = handler || servesIncomingRequest(c.info, ftype)
-	own := map[string]bool{}
-	for request := range replaced {
-		own[request] = true
+	own := map[string]token.Pos{}
+	for request, pos := range replaced {
+		own[request] = pos
 	}
 	ast.Inspect(body, func(n ast.Node) bool {
 		if assign, ok := n.(*ast.AssignStmt); ok {
 			for _, lhs := range assign.Lhs {
 				if request := requestBody(c.info, lhs); request != "" {
-					own[request] = true
+					if pos, seen := own[request]; !seen || assign.Pos() < pos {
+						own[request] = assign.Pos()
+					}
 				}
 			}
 		}
@@ -215,7 +224,11 @@ func (c *bodyReadCheck) scope(ftype *ast.FuncType, body *ast.BlockStmt, handler 
 			if !handler {
 				return true
 			}
-			if request := c.wholeBodyRead(node); request != "" && !own[request] {
+			request, raw := c.wholeBodyRead(node)
+			if request == "" || (!raw && c.rawOnly) {
+				return true
+			}
+			if pos, seen := own[request]; !seen || pos > node.Pos() {
 				c.report(node)
 			}
 		}
@@ -223,23 +236,27 @@ func (c *bodyReadCheck) scope(ftype *ast.FuncType, body *ast.BlockStmt, handler 
 	})
 }
 
-// wholeBodyRead returns the request whose body the call reads to the end.
-func (c *bodyReadCheck) wholeBodyRead(call *ast.CallExpr) string {
+// wholeBodyRead returns the request whose body the call reads to the end,
+// and whether it copies the raw bytes rather than decoding them.
+func (c *bodyReadCheck) wholeBodyRead(call *ast.CallExpr) (request string, raw bool) {
 	file := c.file.GoAST
 	switch {
 	case isPackageFuncCall(file, c.info, call, "encoding/json", "NewDecoder"),
-		isPackageFuncCall(file, c.info, call, "encoding/xml", "NewDecoder"),
-		isPackageFuncCall(file, c.info, call, "io", "ReadAll"),
+		isPackageFuncCall(file, c.info, call, "encoding/xml", "NewDecoder"):
+		if len(call.Args) == 1 {
+			return requestBody(c.info, call.Args[0]), false
+		}
+	case isPackageFuncCall(file, c.info, call, "io", "ReadAll"),
 		isPackageFuncCall(file, c.info, call, "io/ioutil", "ReadAll"):
 		if len(call.Args) == 1 {
-			return requestBody(c.info, call.Args[0])
+			return requestBody(c.info, call.Args[0]), true
 		}
 	case isPackageFuncCall(file, c.info, call, "io", "Copy", "CopyBuffer"):
 		if len(call.Args) >= 2 {
-			return requestBody(c.info, call.Args[1])
+			return requestBody(c.info, call.Args[1]), true
 		}
 	}
-	return ""
+	return "", false
 }
 
 func (c *bodyReadCheck) report(call *ast.CallExpr) {
@@ -247,8 +264,11 @@ func (c *bodyReadCheck) report(call *ast.CallExpr) {
 	if c.file.IsSuppressed(line, c.rule.Name()) {
 		return
 	}
-	v := c.rule.CreateViolation(c.file.RelPath, line,
-		"Request body read without http.MaxBytesReader, while other handlers of the project limit theirs and no middleware limits all — a client can send a body of any size and the handler holds it in memory")
+	message := "Request body read without http.MaxBytesReader, while other handlers of the project limit theirs and no middleware limits all — a client can send a body of any size and the handler holds it in memory"
+	if c.rawOnly {
+		message = "Whole request body copied without http.MaxBytesReader, and nothing in the project limits bodies — a client can send a body of any size and the handler holds it in memory"
+	}
+	v := c.rule.CreateViolation(c.file.RelPath, line, message)
 	v.WithCode(strings.TrimSpace(c.file.GetLine(line)))
 	v.WithSuggestion("Wrap the body first (r.Body = http.MaxBytesReader(w, r.Body, limit)), or limit every body in one middleware")
 	c.violations = append(c.violations, v)

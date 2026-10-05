@@ -133,11 +133,22 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	patternLiterals := regexpPatternLiterals(ctx)
 	contentAt := stringContents(ctx)
 	testData := ctx.IsTestFile() || isTestConfigPath(ctx.RelPath)
+	envTemplate := ctx.IsEnvTemplate()
 
 	for lineNum, line := range ctx.Lines {
 		// Skip comments
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || (envTemplate && strings.HasPrefix(trimmed, "#")) {
+			continue
+		}
+		if credential := credentialInLine(line, envTemplate); credential != "" {
+			if !ctx.IsSuppressed(lineNum+1, r.Name()) {
+				v := r.CreateViolation(ctx.RelPath, lineNum+1, "Hardcoded credential: a real-looking password in a URL's userinfo or a secret value in an env template")
+				v.WithCode(strings.ReplaceAll(line, credential, "[REDACTED]"))
+				v.WithSuggestion("Read the credential from the environment or a secrets manager; leave a placeholder (user:password@) in templates")
+				v.WithContext("pattern", "url_userinfo")
+				violations = append(violations, v)
+			}
 			continue
 		}
 		lower := strings.ToLower(line)

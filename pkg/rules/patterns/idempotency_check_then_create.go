@@ -140,6 +140,7 @@ func (r *IdempotencyCheckThenCreateRule) AnalyzeFile(ctx *core.FileContext) []*c
 		analyzer.analyzeFuncDecl(fn)
 		violations = append(violations, analyzer.violations...)
 		violations = append(violations, r.periodGuards(ctx, fn)...)
+		violations = append(violations, r.replayGuards(ctx, fn)...)
 	}
 	return violations
 }

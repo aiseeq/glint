@@ -310,3 +310,19 @@ func parseHeaders(data string) map[string]string {
 	rule.UseProjectFiles([]*core.FileContext{parser})
 	assert.Empty(t, rule.AnalyzeFile(parser), "without a dotenv library there is nothing to use instead")
 }
+
+// A script reads one key of .env with grep and strips the name with cut or a
+// parameter expansion: quotes, export and comments stay in the value. A grep
+// that only tests for the key, and a source of the file, are left alone.
+func TestHandRolledDotenvParserShellGrepCut(t *testing.T) {
+	src := rulestest.TextFile(t, "scripts/test-db.sh", `#!/bin/bash
+dsn=$(grep -E '^TEST_DB_DSN=' "$ROOT/.env" | head -1 | cut -d= -f2-)
+line=$(grep -m 1 -E '^TEST_DB_DSN=' "$ROOT/.env")
+printf '%s' "${line#TEST_DB_DSN=}"
+url=$(grep '^API_URL=' .env | sed 's/^API_URL=//')
+if grep -q '^TEST_DB_DSN=' "$ROOT/.env"; then echo present; fi
+value=$(set -a; . "$ROOT/.env"; printf '%s' "${TEST_DB_DSN:-}")
+`)
+	rule := NewHandRolledDotenvParserRule()
+	assert.Equal(t, []string{"scripts/test-db.sh:2", "scripts/test-db.sh:3", "scripts/test-db.sh:5"}, foundLines(rule.AnalyzeFile(src)))
+}

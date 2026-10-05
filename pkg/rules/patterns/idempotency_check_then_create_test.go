@@ -39,7 +39,11 @@ func (s *quoteService) CreateQuote(ctx context.Context, tx *Transaction) error {
 	ctx := createIdempotencyCheckThenCreateContext(t, "quote_service.go", code)
 	violations := rule.AnalyzeFile(ctx)
 
-	require.Len(t, violations, 1)
+	// The replay copies the stored record without comparing the request:
+	// a finding of its own on the lookup line.
+	require.Len(t, violations, 2)
+	assert.Equal(t, 4, violations[1].Line)
+	assert.Contains(t, violations[1].Message, "without comparing it with the incoming request")
 	v := violations[0]
 	assert.Equal(t, 12, v.Line)
 	assert.Contains(t, v.Message, "GetByIdempotencyKey")
