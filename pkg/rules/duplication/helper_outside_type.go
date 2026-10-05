@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"regexp"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -81,7 +82,7 @@ func (r *HelperOutsideTypePackageRule) AnalyzeGoProject(ctx *core.GoProjectConte
 				continue
 			}
 			home := signatureHome(fn.Signature(), fn.Pkg(), local)
-			if home == nil || !readsFieldOf(fd.Body, info, home) || leansElsewhere(fd.Body, info, fn.Pkg(), home, local) {
+			if home == nil || !readsFieldOf(fd.Body, info, home) || leansElsewhere(fd.Body, info, fn.Pkg(), home, local) || speaksVocabulary(fd.Body) {
 				continue
 			}
 			line := file.LineFor(fd)
@@ -173,13 +174,72 @@ func readsFieldOf(body *ast.BlockStmt, info *types.Info, home *types.Package) bo
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if sel, ok := n.(*ast.SelectorExpr); ok && !written[sel] {
-			if s := info.Selections[sel]; s != nil && s.Kind() == types.FieldVal && s.Obj().Pkg() == home {
+			if s := info.Selections[sel]; s != nil && s.Kind() == types.FieldVal && s.Obj().Pkg() == home && !wrappedValue(s) {
 				found = true
 			}
 		}
 		return !found
 	})
 	return found
+}
+
+// wrappedValue reports the embedded field of a struct that has no other one
+// (Amount{big.Int}): the struct is a scalar, and reading the field is using
+// the number, not the type's fields.
+func wrappedValue(s *types.Selection) bool {
+	field, ok := s.Obj().(*types.Var)
+	if !ok || !field.Embedded() || len(s.Index()) != 1 {
+		return false
+	}
+	recv := s.Recv()
+	if ptr, ok := recv.Underlying().(*types.Pointer); ok {
+		recv = ptr.Elem()
+	}
+	st, ok := recv.Underlying().(*types.Struct)
+	return ok && st.NumFields() == 1
+}
+
+// speaksVocabulary reports a body with a non-empty string literal that is not
+// a message (a format, the text of an error or a log line): statuses,
+// severities and ID suffixes are the consumer's words, so the function is a
+// rule of the consumer, not math on the type.
+func speaksVocabulary(body *ast.BlockStmt) bool {
+	messages := make(map[*ast.BasicLit]bool)
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !messageCall.MatchString(calleeName(call)) {
+			return true
+		}
+		for _, arg := range call.Args {
+			if lit, ok := arg.(*ast.BasicLit); ok {
+				messages[lit] = true
+			}
+		}
+		return true
+	})
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if ok && lit.Kind == token.STRING && len(lit.Value) > 2 && !messages[lit] && !strings.Contains(lit.Value, "%") {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// messageCall names the calls whose string arguments are messages.
+var messageCall = regexp.MustCompile(`^(?:Errorf|New|Wrap\w*|Sprint\w*|Print\w*|Fatal\w*|Panic\w*|Debug\w*|Info\w*|Warn\w*|Error\w*|Log\w*)$`)
+
+// calleeName returns the name of the called function or method.
+func calleeName(call *ast.CallExpr) string {
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name
+	case *ast.SelectorExpr:
+		return fun.Sel.Name
+	}
+	return ""
 }
 
 // unwrapIndex returns the expression an index assignment writes into: p.F
