@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -298,12 +299,6 @@ func (r *TestExternalServiceRule) outboundPackages(ctx *core.GoProjectContext) m
 	return outbound
 }
 
-// httpRequestFuncs are the net/http entry points that put a request on the wire.
-var httpRequestFuncs = map[string]bool{
-	"Get": true, "Post": true, "Head": true, "PostForm": true,
-	"NewRequest": true, "NewRequestWithContext": true,
-}
-
 const netHTTPPath = "net/http"
 
 // fileIssuesHTTPRequest reports whether the file builds or sends an HTTP request.
@@ -335,7 +330,7 @@ func nodeIssuesHTTPRequest(root ast.Node, info *types.Info) bool {
 			// http.Get / http.NewRequest и прочие пакетные функции.
 			if ident, ok := sel.X.(*ast.Ident); ok {
 				if pkgName, ok := info.Uses[ident].(*types.PkgName); ok {
-					if pkgName.Imported().Path() == netHTTPPath && httpRequestFuncs[sel.Sel.Name] {
+					if pkgName.Imported().Path() == netHTTPPath && helpers.NetHTTPRequestFuncs[sel.Sel.Name] {
 						found = true
 						return false
 					}
