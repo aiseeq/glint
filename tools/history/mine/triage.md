@@ -57,6 +57,13 @@ project:
   recognizable from the code.
 Project specifics (particular tables, endpoints, business rules) — record too,
 with universal=low: that is a candidate for the project's own linter.
+Deploy and provisioning scripts: a defect visible in the script whose shell or
+tool pattern recurs elsewhere (`$(cmd || echo 0)` after a command that prints
+on failure, `set -e` before the handler of that failure, `eval` of remote
+output) is a candidate; the value of a server setting is not.
+A commit that mixes an external API's quirk with a defect of our own code
+(a retry of every error, a signature over other bytes than sent): record the
+code part, leave the quirk out.
 
 NOT_RULEABLE: business logic, values, layout, texts, infrastructure settings
 without a common pattern, fixes where the defect is not visible in the code
