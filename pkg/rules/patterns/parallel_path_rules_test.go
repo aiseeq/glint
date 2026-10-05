@@ -27,7 +27,7 @@ type Repo struct{}
 
 func (r *Repo) UpdateStatus(id string, status domain.Status) error { return nil }
 
-func (r *Repo) UpdateFromWebhook(id string, status domain.Status, raw, subStatus, errorCode string) error {
+func (r *Repo) UpdateFromCallback(id string, status domain.Status, raw, subStatus, errorCode string) error {
 	return nil
 }
 
@@ -46,7 +46,7 @@ type Handler struct{ repo *store.Repo }
 
 func (h *Handler) Apply(id string, payload Payload) error {
 	status := domain.MapProviderStatus(payload.Status, payload.SubStatus)
-	return h.repo.UpdateFromWebhook(id, status, payload.Status, payload.SubStatus, payload.ErrorCode)
+	return h.repo.UpdateFromCallback(id, status, payload.Status, payload.SubStatus, payload.ErrorCode)
 }
 `,
 		"poll/poller.go": `package poll
@@ -81,7 +81,7 @@ func (p *Poller) Recheck(id, ref string) error {
 		return err
 	}
 	status := domain.MapProviderStatus(resp.Status, resp.SubStatus)
-	return p.repo.UpdateFromWebhook(id, status, resp.Status, resp.SubStatus, resp.ErrorCode)
+	return p.repo.UpdateFromCallback(id, status, resp.Status, resp.SubStatus, resp.ErrorCode)
 }
 
 // Code maps a value no other path stores raw.
@@ -245,7 +245,7 @@ type Amount struct{ v int64 }
 
 type TxRepo struct{}
 
-func (r *TxRepo) ApplyQuote(id string, amount Amount, local, rate Amount, source string, at *time.Time, actor string) error {
+func (r *TxRepo) StoreQuote(id string, amount Amount, local, rate Amount, source string, at *time.Time, actor string) error {
 	return nil
 }
 
@@ -305,7 +305,7 @@ type Tx struct {
 type Service struct{ repo *store.TxRepo }
 
 func (s *Service) Save(tx *Tx, raw []byte) error {
-	if err := s.repo.ApplyQuote(tx.ID, tx.Amount, tx.Local, tx.Rate, tx.Source, tx.At, "api"); err != nil {
+	if err := s.repo.StoreQuote(tx.ID, tx.Amount, tx.Local, tx.Rate, tx.Source, tx.At, "api"); err != nil {
 		return err
 	}
 	return s.repo.RecordHistory(tx.ID, "a", "b", raw)
@@ -323,7 +323,7 @@ type Tx struct {
 }
 
 func (a *Admin) Save(tx *Tx) error {
-	if err := a.repo.ApplyQuote(tx.ID, tx.Amount,
+	if err := a.repo.StoreQuote(tx.ID, tx.Amount,
 		store.Amount{}, store.Amount{}, "", nil,
 		"admin"); err != nil {
 		return err

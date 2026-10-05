@@ -45,7 +45,7 @@ func (r *Repo) MarkFailed(ctx context.Context, id int64, status Status, code str
 	return err
 }
 
-func (r *Repo) UpdateFromWebhook(ctx context.Context, id int64, status Status, completedAt *time.Time) error {
+func (r *Repo) UpdateFromProviderEvent(ctx context.Context, id int64, status Status, completedAt *time.Time) error {
 	_, err := r.pool.Exec(ctx, ` + "`" + `UPDATE transfers
 		SET status = $1,
 			completed_at = $2, -- want terminal-timestamp-overwritten-on-later-update

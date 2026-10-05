@@ -264,9 +264,9 @@ type Admin struct {
 
 type quoteInput struct{ amount int }
 
-func (in quoteInput) newTestTransaction() *Tx { return &Tx{Sender: "TEST SENDER"} }
+func (in quoteInput) newTestOrder() *Tx { return &Tx{Sender: "TEST SENDER"} }
 
-func applyTestSenderData(tx *Tx) { tx.Sender = "TEST SENDER" }
+func applyTestCustomer(tx *Tx) { tx.Sender = "TEST SENDER" }
 
 func (a *Admin) createQuote(tx *Tx) error { return a.repo.CreateTx(tx) }
 
@@ -274,13 +274,13 @@ func parse(r *http.Request) quoteInput { return quoteInput{} }
 
 func (a *Admin) quick(w http.ResponseWriter, r *http.Request) {
 	input := parse(r)
-	tx := input.newTestTransaction()
+	tx := input.newTestOrder()
 	_ = a.createQuote(tx)
 }
 
 func (a *Admin) fill(w http.ResponseWriter, r *http.Request) {
 	tx := &Tx{}
-	applyTestSenderData(tx)
+	applyTestCustomer(tx)
 	_ = a.repo.CreateTx(tx)
 }
 
@@ -289,13 +289,13 @@ func (a *Admin) gated(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	tx := parse(r).newTestTransaction()
+	tx := parse(r).newTestOrder()
 	_ = a.createQuote(tx)
 }
 
 // preview shows the sample without storing it.
 func (a *Admin) preview(w http.ResponseWriter, r *http.Request) {
-	tx := parse(r).newTestTransaction()
+	tx := parse(r).newTestOrder()
 	_, _ = w.Write([]byte(tx.Sender))
 }
 `,
@@ -310,7 +310,7 @@ func TestNilSliceAsUnrestrictedScope(t *testing.T) {
 
 type Repo struct{ rows map[int][]int }
 
-func (r *Repo) ProjectIDs(user int) ([]int, error) {
+func (r *Repo) TeamIDs(user int) ([]int, error) {
 	var ids []int
 	for _, id := range r.rows[user] {
 		ids = append(ids, id)
@@ -339,18 +339,18 @@ func (r *Repo) TagIDs(user int) ([]int, error) {
 import "example.com/rulestest/store"
 
 type User struct {
-	ProjectIDs []int
+	TeamIDs []int
 	RoleIDs    []int
 	TagIDs     []int
 }
 
 func load(repo *store.Repo, id int) (*User, error) {
 	u := &User{}
-	pids, err := repo.ProjectIDs(id)
+	pids, err := repo.TeamIDs(id)
 	if err != nil {
 		return nil, err
 	}
-	u.ProjectIDs = pids
+	u.TeamIDs = pids
 	rids, err := repo.RoleIDs(id)
 	if err != nil {
 		return nil, err
@@ -365,10 +365,10 @@ func load(repo *store.Repo, id int) (*User, error) {
 }
 
 func allowed(u *User, project int) bool {
-	if u.ProjectIDs == nil {
+	if u.TeamIDs == nil {
 		return true
 	}
-	for _, p := range u.ProjectIDs {
+	for _, p := range u.TeamIDs {
 		if p == project {
 			return true
 		}

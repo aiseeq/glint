@@ -55,7 +55,7 @@ func NewStatusWriteSkipsStageTimestampRule() *typedFuncRule {
 // <stage>_at column set straight from a parameter in a function applying
 // repeated events:
 //
-//	func (r *Repo) UpdateFromWebhook(ctx context.Context, id uuid.UUID, status string, completedAt *time.Time) error {
+//	func (r *Repo) UpdateFromProviderEvent(ctx context.Context, id uuid.UUID, status string, completedAt *time.Time) error {
 //		_, err := r.db.Exec(ctx, `UPDATE transfers SET status = $1, completed_at = $2 WHERE id = $3`, status, completedAt, id)
 //
 // The next event of the same row - a cancel after completion, a repeated
