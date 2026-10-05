@@ -39,6 +39,10 @@ func (r *MissingAmountCoercedToZeroRule) analyzeGoMissingAmounts(ctx *core.FileC
 			}
 		case *ast.BlockStmt:
 			for i := 0; i+1 < len(node.List); i++ {
+				if ret, name := zeroReturnForNilAmount(node.List[i], node.List[i+1]); ret != nil {
+					report(ret, "Missing "+name+" answered with decimal.Zero - the caller reads 0 for an amount nobody knows",
+						"Return the amount as absent (a nil pointer, null) or an error, and let the caller decide")
+				}
 				if name := zeroPresetOverNilAmount(node.List[i], node.List[i+1]); name != "" {
 					report(node.List[i], "Missing "+name+" replaced with decimal.Zero - the receiver reads 0 for an amount nobody knows",
 						"Send the amount as absent (null) or refuse to build the message without it")
@@ -120,6 +124,43 @@ func returnsZeroDecimalWithoutError(ret *ast.ReturnStmt) bool {
 	return false
 }
 
+// zeroReturnForNilAmount returns the return of `if amount == nil { return
+// ...decimal.Zero... }` and the pointer's name, when the pointer is named for
+// money or the next statement returns its value (*amount) - decimal.Zero
+// stands in for it: the early-return form of zeroPresetOverNilAmount. A
+// return that also hands back an error refuses the missing amount and is not
+// reported.
+func zeroReturnForNilAmount(first, next ast.Stmt) (*ast.ReturnStmt, string) {
+	check, ok := first.(*ast.IfStmt)
+	if !ok {
+		return nil, ""
+	}
+	cond, ok := check.Cond.(*ast.BinaryExpr)
+	if !ok || cond.Op != token.EQL || !isNilIdent(cond.Y) || check.Init != nil || len(check.Body.List) != 1 {
+		return nil, ""
+	}
+	ret, ok := check.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return nil, ""
+	}
+	source := types.ExprString(cond.X)
+	last := source[strings.LastIndex(source, ".")+1:]
+	if !hasWordFrom(last, moneyWords) && !returnsDeref(next, source) {
+		return nil, ""
+	}
+	zero := false
+	ast.Inspect(ret.Results[0], func(n ast.Node) bool {
+		if expr, ok := n.(ast.Expr); ok && isDecimalZeroSyntax(expr) {
+			zero = true
+		}
+		return !zero
+	})
+	if !zero {
+		return nil, ""
+	}
+	return ret, last
+}
+
 // zeroPresetOverNilAmount returns the money variable of
 //
 //	payout := decimal.Zero
@@ -155,4 +196,22 @@ func zeroPresetOverNilAmount(first, second ast.Stmt) string {
 		return ""
 	}
 	return target.Name
+}
+
+// returnsDeref reports a return statement that reads *source.
+func returnsDeref(stmt ast.Stmt, source string) bool {
+	ret, ok := stmt.(*ast.ReturnStmt)
+	if !ok {
+		return false
+	}
+	found := false
+	for _, result := range ret.Results {
+		ast.Inspect(result, func(n ast.Node) bool {
+			if star, ok := n.(*ast.StarExpr); ok && types.ExprString(star.X) == source {
+				found = true
+			}
+			return !found
+		})
+	}
+	return found
 }
