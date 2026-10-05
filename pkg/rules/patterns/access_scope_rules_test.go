@@ -104,6 +104,178 @@ func Tick(ctx context.Context, s *board.Service) { _ = s.List(ctx) }
 	}))
 }
 
+// The viewer's scope (the tenant ids of the signed-in user) is handed to some
+// readers of the handlers' package; a handler that calls another reader with
+// neither the scope nor a check of what it returns serves every tenant's
+// records to every viewer.
+func TestReadMethodSkipsAccessFilterHandlerScope(t *testing.T) {
+	assert.Equal(t, []string{"web/batches.go:13", "web/batches.go:28", "web/hooks.go:11", "web/hooks.go:12"}, typedRuleFindings(t, NewReadMethodSkipsAccessFilterRule(), map[string]string{
+		"store/store.go": `package store
+
+import "context"
+
+type Order struct {
+	ID       int
+	TenantID int
+}
+
+type Batch struct {
+	ID, Input string
+	TenantID  int
+}
+
+type Hook struct{ ID, OrderID int }
+
+type Tenant struct{ ID int }
+
+type User struct{ Name string }
+
+type Orders struct{}
+
+func (Orders) ListRecent(ctx context.Context, limit int, tenantIDs []int) ([]Order, error) { return nil, nil }
+func (Orders) GetByID(ctx context.Context, id int) (*Order, error)                         { return nil, nil }
+
+type Batches struct{}
+
+func (Batches) Get(ctx context.Context, id string) (*Batch, error) { return nil, nil }
+
+type Hooks struct{}
+
+func (Hooks) ListHooks(ctx context.Context, limit int) ([]Hook, error) { return nil, nil }
+
+type Tenants struct{}
+
+func (Tenants) GetAll(ctx context.Context) ([]Tenant, error) { return nil, nil }
+
+type Currency struct{ Code string }
+
+func (Tenants) ListCurrencies(ctx context.Context) ([]Currency, error) { return nil, nil }
+
+type Users struct{}
+
+func (Users) TenantIDsFor(ctx context.Context, name string) ([]int, error) { return nil, nil }
+`,
+		"web/web.go": `package web
+
+import (
+	"context"
+	"net/http"
+
+	"example.com/rulestest/store"
+)
+
+type Viewer struct {
+	Name      string
+	TenantIDs []int // nil = every tenant
+}
+
+type Admin struct {
+	orders  store.Orders
+	batches store.Batches
+	hooks   store.Hooks
+	tenants store.Tenants
+	users   store.Users
+}
+
+func viewerOf(r *http.Request) *Viewer { return &Viewer{} }
+
+func allowed(v *Viewer, tenantID int) bool {
+	if v.TenantIDs == nil {
+		return true
+	}
+	for _, id := range v.TenantIDs {
+		if id == tenantID {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Admin) checkOrder(v *Viewer, o *store.Order) bool { return allowed(v, o.TenantID) }
+
+func (a *Admin) load(ctx context.Context, v *Viewer) {
+	ids, _ := a.users.TenantIDsFor(ctx, v.Name)
+	v.TenantIDs = ids
+}
+
+func (a *Admin) dashboard(w http.ResponseWriter, r *http.Request) {
+	v := viewerOf(r)
+	ids := v.TenantIDs
+	_, _ = a.orders.ListRecent(r.Context(), 20, ids)
+}
+
+func (a *Admin) order(w http.ResponseWriter, r *http.Request) {
+	v := viewerOf(r)
+	o, err := a.orders.GetByID(r.Context(), 1)
+	if err != nil || !a.checkOrder(v, o) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}
+}
+
+func (a *Admin) tenantList(w http.ResponseWriter, r *http.Request) {
+	v := viewerOf(r)
+	all, _ := a.tenants.GetAll(r.Context())
+	for _, t := range all {
+		if allowed(v, t.ID) {
+			_ = t
+		}
+	}
+}
+`,
+		"web/batches.go": `package web
+
+import (
+	"net/http"
+
+	"example.com/rulestest/store"
+)
+
+var _ store.Batch
+
+func (a *Admin) batch(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	b, err := a.batches.Get(r.Context(), id)
+	if err != nil {
+		http.Error(w, "missing", http.StatusNotFound)
+		return
+	}
+	_, _ = w.Write([]byte(b.Input))
+}
+
+func (a *Admin) confirm(w http.ResponseWriter, r *http.Request) {
+	v := viewerOf(r)
+	_, _ = a.orders.ListRecent(r.Context(), 5, v.TenantIDs)
+	_ = a.process(w, r)
+}
+
+func (a *Admin) process(w http.ResponseWriter, r *http.Request) error {
+	o, err := a.orders.GetByID(r.Context(), 7)
+	if err != nil {
+		return err
+	}
+	_ = o.ID
+	return nil
+}
+`,
+		"web/hooks.go": `package web
+
+import "net/http"
+
+type hookPage struct{ Rows, Tenants, Currencies int }
+
+// A hook belongs to a tenant through its order, and the tenant list itself is
+// read unfiltered. Currencies belong to no tenant: a reference list.
+func (a *Admin) hooksPage(w http.ResponseWriter, r *http.Request) {
+	page := hookPage{}
+	rows, _ := a.hooks.ListHooks(r.Context(), 50)
+	tenants, _ := a.tenants.GetAll(r.Context())
+	currencies, _ := a.tenants.ListCurrencies(r.Context())
+	page.Rows, page.Tenants, page.Currencies = len(rows), len(tenants), len(currencies)
+}
+`,
+	}))
+}
+
 // A report scoped to one portfolio carries a list read from a process-wide
 // source that is not handed the portfolio: every portfolio shows the alerts
 // of all of them.

@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestSensitiveQueryParameterRuleIsRegistered(t *testing.T) {
@@ -66,6 +67,34 @@ func TestSensitiveQueryParameterRule(t *testing.T) {
 			assert.Len(t, rule.AnalyzeFile(ctx), tt.wantViolations)
 		})
 	}
+}
+
+// A generated password handed to a redirect helper ends up in the query of
+// the redirect URL whatever the parameter is called: browser history, proxy
+// and access logs keep it.
+func TestSensitiveQueryParameterSecretInRedirect(t *testing.T) {
+	code := `package admin
+
+func (a *Admin) create(w http.ResponseWriter, r *http.Request) {
+	password, _ := generatePassword()
+	a.redirectUsers(w, r, "success",
+		fmt.Sprintf("created %s with password %s", name, password))
+	http.Redirect(w, r, "/done?msg="+url.QueryEscape(newToken), http.StatusSeeOther)
+	a.redirectUsers(w, r, "error", a.t(r, "msg.password_mismatch"))
+	a.redirectUsers(w, r, "success", "password changed for "+user.Name)
+	a.render(w, "created.html", password)
+}
+
+func (a *Admin) redirectUsers(w http.ResponseWriter, r *http.Request, key, msg string) {
+	http.Redirect(w, r, "/users?"+key+"="+url.QueryEscape(msg), http.StatusSeeOther)
+}
+`
+	ctx := rulestest.GoFile(t, "admin/users.go", code)
+	var lines []int
+	for _, v := range NewSensitiveQueryParameterRule().AnalyzeFile(ctx) {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{5, 7}, lines)
 }
 
 func TestSensitiveQueryParameterSuppression(t *testing.T) {

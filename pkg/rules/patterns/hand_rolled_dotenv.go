@@ -75,7 +75,7 @@ func (r *HandRolledDotenvParserRule) ResetState() { r.library = "" }
 // AnalyzeFile reports the functions of a file that parse .env by hand.
 func (r *HandRolledDotenvParserRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if src, ok := readShell(ctx); ok {
-		return r.shellRewrites(src)
+		return append(r.shellRewrites(src), r.shellKeyReads(src)...)
 	}
 	if r.library == "" || !productionGoFile(ctx) {
 		return nil
@@ -158,6 +158,46 @@ func (r *HandRolledDotenvParserRule) shellRewrites(src *shellSource) []*core.Vio
 				"sed/awk rewrites .env by hand — quotes, export, $ and inline comments come out differently than the shell or a dotenv parser reads them",
 				"Source the file (set -a; . ./.env; set +a) and print the evaluated values, or use a dotenv parser"))
 		}
+	}
+	return out
+}
+
+var (
+	// dotenvKeyGrep is a grep for the line of one key: grep '^KEY='.
+	dotenvKeyGrep  = regexp.MustCompile(`\bgrep\b[^|]*\^([A-Za-z_][A-Za-z0-9_]*)=`)
+	cutAfterEquals = regexp.MustCompile(`\bcut\s+-d\s*['"]?=['"]?\s+-f\s*2`)
+	captureVar     = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)=\$\(`)
+)
+
+// shellKeyReads reports a key read out of .env with grep and its name cut
+// off - by cut -d= -f2-, sed 's/^KEY=//' or ${line#KEY=}: the value keeps
+// its quotes, an export prefix and an inline comment, which the shell or a
+// dotenv parser would strip.
+func (r *HandRolledDotenvParserRule) shellKeyReads(src *shellSource) []*core.Violation {
+	var out []*core.Violation
+	for i, l := range src.lines {
+		m := dotenvKeyGrep.FindStringSubmatch(l.text)
+		if m == nil || !dotenvPath.MatchString(l.text) || strings.Contains(l.text, "grep -q") {
+			continue
+		}
+		key := m[1]
+		stripped := cutAfterEquals.MatchString(l.text) || strings.Contains(l.text, "s/^"+key+"=//")
+		if !stripped {
+			if c := captureVar.FindStringSubmatch(l.text); c != nil {
+				for _, later := range src.lines[i+1:] {
+					if strings.Contains(later.text, "${"+c[1]+"#"+key+"=}") {
+						stripped = true
+						break
+					}
+				}
+			}
+		}
+		if !stripped {
+			continue
+		}
+		out = appendReport(out, src.report(r, l.lineAt(0),
+			"A .env value is read with grep and its name cut off — quotes, export and an inline comment stay in the value the shell would strip",
+			"Source the file in a subshell (set -a; . ./.env; printf '%s' \"$KEY\") or use a dotenv parser"))
 	}
 	return out
 }

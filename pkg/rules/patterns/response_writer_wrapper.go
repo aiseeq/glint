@@ -29,7 +29,10 @@ func init() {
 // (server-sent events, a long download) behind the middleware finds no
 // Flusher and fails, and http.ResponseController cannot reach the writer
 // without Unwrap. Forward Flush, or give the wrapper
-// Unwrap() http.ResponseWriter.
+// Unwrap() http.ResponseWriter. In a project that calls
+// http.NewResponseController a forwarded Flush is not enough: the controller
+// reaches deadlines and hijacking only through Unwrap, and a handler behind
+// the wrapper gets http.ErrNotSupported.
 type ResponseWriterWrapperRule struct {
 	*rules.BaseRule
 }
@@ -55,6 +58,7 @@ func (r *ResponseWriterWrapperRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	if ctx == nil {
 		return nil, errors.New("response writer wrapper: nil Go project context")
 	}
+	controller := usesResponseController(ctx)
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		ast.Inspect(file.GoAST, func(n ast.Node) bool {
@@ -71,15 +75,21 @@ func (r *ResponseWriterWrapperRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 				return true
 			}
 			methods := types.NewMethodSet(types.NewPointer(obj.Type()))
-			if methods.Lookup(nil, "Flush") != nil || methods.Lookup(nil, "Unwrap") != nil {
+			if methods.Lookup(nil, "Unwrap") != nil {
 				return true
+			}
+			message := "Type " + spec.Name.Name + " wraps http.ResponseWriter with neither Flush nor Unwrap — a streaming handler behind it finds no http.Flusher"
+			if methods.Lookup(nil, "Flush") != nil {
+				if !controller {
+					return true
+				}
+				message = "Type " + spec.Name.Name + " wraps http.ResponseWriter without Unwrap, while the project uses http.ResponseController — deadline and hijack calls behind it return http.ErrNotSupported"
 			}
 			line := file.LineFor(spec)
 			if file.IsSuppressed(line, r.Name()) {
 				return true
 			}
-			v := r.CreateViolation(file.RelPath, line,
-				"Type "+spec.Name.Name+" wraps http.ResponseWriter with neither Flush nor Unwrap — a streaming handler behind it finds no http.Flusher")
+			v := r.CreateViolation(file.RelPath, line, message)
 			v.WithCode(strings.TrimSpace(file.GetLine(line)))
 			v.WithSuggestion("Add Unwrap() http.ResponseWriter returning the inner writer, and forward Flush to it when it is an http.Flusher")
 			violations = append(violations, v)
@@ -98,6 +108,28 @@ func embedsResponseWriter(structType *ast.StructType, info *types.Info) bool {
 		named, ok := types.Unalias(info.TypeOf(field.Type)).(*types.Named)
 		if ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "net/http" && named.Obj().Name() == "ResponseWriter" {
 			return true
+		}
+	}
+	return false
+}
+
+// usesResponseController reports a project calling http.NewResponseController.
+func usesResponseController(ctx *core.GoProjectContext) bool {
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
+			continue
+		}
+		for _, file := range pkgCtx.Package.Syntax {
+			found := false
+			ast.Inspect(file, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok && isPackageFuncCall(file, pkgCtx.Package.TypesInfo, call, "net/http", "NewResponseController") {
+					found = true
+				}
+				return !found
+			})
+			if found {
+				return true
+			}
 		}
 	}
 	return false

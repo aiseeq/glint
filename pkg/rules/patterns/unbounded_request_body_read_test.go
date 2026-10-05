@@ -107,7 +107,7 @@ func Validate(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		{
-			name: "a project that limits nowhere is left alone",
+			name: "a project that limits nowhere is left alone for decoders",
 			files: map[string]string{
 				"api/codes.go": `package api
 
@@ -122,6 +122,39 @@ func Validate(w http.ResponseWriter, r *http.Request) {
 }
 `,
 			},
+		},
+		{
+			// A project with no limit anywhere: the signature middleware and the
+			// webhook handler copied the whole raw body into memory.
+			name: "a project that limits nowhere still reports a raw read of the whole body",
+			files: map[string]string{
+				"api/auth.go": `package api
+
+import (
+	"bytes"
+	"io"
+	"net/http"
+)
+
+func Signed(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		next.ServeHTTP(w, r)
+	})
+}
+
+func Hook(w http.ResponseWriter, r *http.Request) {
+	payload, _ := io.ReadAll(r.Body)
+	_, _ = w.Write(payload)
+}
+`,
+			},
+			expects: []string{"api/auth.go:11", "api/auth.go:22"},
 		},
 		{
 			name: "client code reading its own outgoing request is not a handler",

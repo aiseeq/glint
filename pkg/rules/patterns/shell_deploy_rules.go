@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -601,7 +602,69 @@ func checkCScriptSplit(r *shellRule, src *shellSource) []*core.Violation {
 				"Use double quotes inside the script, or write a quote as '\\'' (or '\"'\"')"))
 		}
 	}
+	return append(out, checkCScriptWrappers(r, src)...)
+}
+
+// argsInCScript is '$*', '$@' or '$1' pasted into the quotes of a bash -c.
+var argsInCScript = regexp.MustCompile(`(?:bash|sh)\s+-c\s+'\$(?:\*|@|\{?1\}?)'`)
+
+// checkCScriptWrappers reports a function that pastes its arguments into the
+// single quotes of a bash -c inside a double-quoted command line
+//
+//	remote_sudo() { remote "sudo bash -c '$*'"; }
+//	remote_sudo "grep DSN $ENV | sed 's/x/y/'"
+//
+// when a caller of it passes a single quote: the quotes come from the
+// caller's text, and its first ' closes the script on the far side.
+func checkCScriptWrappers(r *shellRule, src *shellSource) []*core.Violation {
+	funcs := src.functions()
+	names := make([]string, 0, len(funcs))
+	for name := range funcs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []*core.Violation
+	for _, name := range names {
+		pasted := 0
+		for _, l := range src.body(funcs[name]) {
+			if loc := argsInCScript.FindStringIndex(l.text); loc != nil && quoteAt(l.text, loc[0]) == '"' {
+				pasted = l.lineAt(loc[0])
+				break
+			}
+		}
+		if pasted == 0 {
+			continue
+		}
+		for _, l := range src.lines {
+			if callsWithQuote(l.text, name) {
+				out = appendReport(out, src.report(r, pasted,
+					name+" pastes its arguments into bash -c '...', and a caller passes a single quote — the quote closes the script early and the rest runs as arguments of bash",
+					"Quote the arguments with printf '%q', or pass the script on stdin (bash -s)"))
+				break
+			}
+		}
+	}
 	return out
+}
+
+// callsWithQuote reports a call of the function whose double-quoted argument
+// holds a single quote.
+func callsWithQuote(line, name string) bool {
+	for at := strings.Index(line, name+" "); at >= 0; {
+		before := strings.TrimRight(line[:at], " \t")
+		if before == "" || strings.HasSuffix(before, "$(") || strings.HasSuffix(before, ";") || strings.HasSuffix(before, "&&") {
+			rest := strings.TrimSpace(line[at+len(name):])
+			if strings.HasPrefix(rest, `"`) && strings.Contains(rest, "'") {
+				return true
+			}
+		}
+		next := strings.Index(line[at+1:], name+" ")
+		if next < 0 {
+			break
+		}
+		at += next + 1
+	}
+	return false
 }
 
 // shellWordEnd returns where the shell word starting at offset ends and
@@ -648,7 +711,48 @@ var (
 	notSecretVar   = regexp.MustCompile(`(?i)_(?:file|path|dir|name|id|len|length|url|header|env|var)$`)
 	sqlPassword    = regexp.MustCompile(`(?i)\bPASSWORD\s+'?\$\{?\(?([A-Za-z_][A-Za-z0-9_]*)`)
 	curlArgsHolder = regexp.MustCompile(`^(?:local\s+|declare\s+(?:-\w+\s+)*)?[A-Za-z_]*(?:curl|args|headers|opts)[A-Za-z_]*\+?=\(`)
+	secretIDVar    = regexp.MustCompile(`(?i)(?:^|_)secret_id$`)
+	interpreterRun = regexp.MustCompile(`(?:^|[\s(;|&])(?:python[0-9.]*|node|perl|ruby|php)\s`)
+	shellVarRef    = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)`)
+	curlDataArg    = regexp.MustCompile(`\s(?:-d|--data(?:-binary|-raw|-urlencode)?)(?:\s+|=)("(?:[^"\\]|\\.)*"|[^\s"']+)`)
 )
+
+// secretVarName reports a variable name that holds a secret: a secret word
+// in it and no suffix naming a file, a path or another non-secret about it.
+// SECRET_ID is the secret half of an AppRole pair, not an id of a secret.
+func secretVarName(name string) bool {
+	return shellSecretVar.MatchString(name) && (!notSecretVar.MatchString(name) || secretIDVar.MatchString(name))
+}
+
+// interpreterSecretArg returns a secret variable passed as an argument to an
+// interpreter (python3 -c '...' "$secret", node sign.js --key "$KEY") in the
+// command: its argv is in ps for every user of the host. Variables in the
+// environment prefix and in single-quoted code are not arguments.
+func interpreterSecretArg(text string) string {
+	loc := interpreterRun.FindStringIndex(text)
+	if loc == nil || insideQuotes(text, loc[0]) {
+		return ""
+	}
+	end := len(text)
+	var q quoteScanner
+	for i := loc[1]; i < len(text); {
+		if n := q.step(text, i); n > 0 {
+			i += n
+			continue
+		}
+		if strings.IndexByte("|;&)", text[i]) >= 0 {
+			end = i
+			break
+		}
+		i++
+	}
+	for _, m := range shellVarRef.FindAllStringSubmatchIndex(text[:end], -1) {
+		if m[0] >= loc[1] && !insideSingleQuotes(text, m[0]) && secretVarName(text[m[2]:m[3]]) {
+			return text[m[2]:m[3]]
+		}
+	}
+	return ""
+}
 
 // checkSecretInArgument reports a secret in a token header of curl (in the
 // command or in an argument array) and a password in psql -c or mysql -c.
@@ -663,7 +767,8 @@ func checkSecretInArgument(r *shellRule, src *shellSource) []*core.Violation {
 		if strings.Contains(text, "curl") || curlArgsHolder.MatchString(text) {
 			for _, h := range secretHeader.FindAllStringSubmatch(text, -1) {
 				v := headerVariable.FindStringSubmatch(h[1])
-				if v == nil || notSecretVar.MatchString(v[1]) || (!headerSecret.MatchString(h[1]) && !shellSecretVar.MatchString(v[1])) {
+				// A token header is a secret whatever its variable is called.
+				if v == nil || (!headerSecret.MatchString(h[1]) && !secretVarName(v[1])) {
 					continue
 				}
 				out = appendReport(out, src.report(r, s.line,
@@ -671,6 +776,22 @@ func checkSecretInArgument(r *shellRule, src *shellSource) []*core.Violation {
 					"Write the header to a 0600 file and pass -H @file, or give curl a --config file"))
 				break
 			}
+			for _, d := range curlDataArg.FindAllStringSubmatch(text, -1) {
+				if strings.HasPrefix(strings.TrimPrefix(d[1], `"`), "@") {
+					continue
+				}
+				if v := secretInRefs(d[1]); v != "" {
+					out = appendReport(out, src.report(r, s.line,
+						"$"+v+" goes into a curl request body on the command line — the secret is visible in ps to every user of the host",
+						"Feed the body on stdin (--data-binary @-) or from a 0600 file (--data-binary @file)"))
+					break
+				}
+			}
+		}
+		if v := interpreterSecretArg(text); v != "" {
+			out = appendReport(out, src.report(r, s.line,
+				"$"+v+" is passed to an interpreter as an argument — the secret is visible in ps to every user of the host",
+				"Pass it through the environment (NAME=\"$value\" python3 ...) or on stdin"))
 		}
 		if (word == "psql" || word == "mysql" || strings.Contains(text, " psql ")) && strings.Contains(text, "-c") {
 			if m := sqlPassword.FindStringSubmatch(text); m != nil {
@@ -681,6 +802,16 @@ func checkSecretInArgument(r *shellRule, src *shellSource) []*core.Violation {
 		}
 	}
 	return out
+}
+
+// secretInRefs returns the first secret variable a shell word expands.
+func secretInRefs(word string) string {
+	for _, m := range shellVarRef.FindAllStringSubmatch(word, -1) {
+		if secretVarName(m[1]) {
+			return m[1]
+		}
+	}
+	return ""
 }
 
 var (

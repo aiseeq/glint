@@ -371,6 +371,35 @@ echo "token file: $TOKEN_FILE"
 	}))
 }
 
+// A secret header is a secret whatever its variable is called, and a secret
+// handed to an interpreter or a curl body as an argument is in ps as well.
+func TestSecretInCommandArgumentInterpreterAndBody(t *testing.T) {
+	assert.Equal(t, []string{"login.sh:10", "login.sh:4", "login.sh:7", "login.sh:9"}, shellFindings(t, "secret-in-command-argument", map[string]string{
+		"login.sh": `#!/bin/bash
+http() {
+    local -a args=(-s -X "$1")
+    [ -n "${STORE_TOKEN_HEADER-}" ] && args+=(-H "X-Store-Token: ${STORE_TOKEN_HEADER}")
+    curl "${args[@]}" "$2"
+}
+body=$(python3 -c 'import json,sys; print(json.dumps({"id": sys.argv[1], "secret": sys.argv[2]}))' \
+    "$role_id" "$secret_id")
+node sign.js --key "$PRIVATE_KEY"
+curl -fsS --data-binary "{\"password\": \"$ADMIN_PASSWORD\"}" "$url"
+`,
+	}))
+	assert.Empty(t, shellFindings(t, "secret-in-command-argument", map[string]string{
+		"ok.sh": `#!/bin/bash
+SECRET_ID="$secret_id" python3 -c 'import os; print(os.environ["SECRET_ID"])'
+python3 - "$role_id" <<'PY'
+import sys
+PY
+printf '%s' "$body" | curl -fsS --data-binary @- "$url"
+curl -fsS --data-binary "@$payload_file" "$url"
+python3 tool.py --token-file "$TOKEN_FILE"
+`,
+	}))
+}
+
 // A generated secret applied to a database or service before it is written
 // anywhere is lost when the script stops in between; a rerun makes another.
 func TestGeneratedSecretUsedBeforeSaved(t *testing.T) {
@@ -559,5 +588,22 @@ func TestShellDBPasswordLiteralSkipsTestScripts(t *testing.T) {
 	}))
 	assert.Equal(t, []string{"scripts/loader.sh:2"}, shellFindings(t, "shell-db-password-literal", map[string]string{
 		"scripts/loader.sh": "#!/bin/bash\nDSN='postgres://app:secret@127.0.0.1:5432/app'\n",
+	}))
+}
+
+// A wrapper pastes its arguments into '...' of a remote bash -c: a caller
+// whose command holds a single quote closes the script early. A wrapper that
+// quotes with printf %q, and one whose callers pass no quote, are left alone.
+func TestShellCScriptSplitByQuoteInWrapper(t *testing.T) {
+	assert.Equal(t, []string{"deploy.sh:2"}, shellFindings(t, "shell-c-script-split-by-quote", map[string]string{
+		"deploy.sh": `#!/bin/bash
+remote_sudo() { remote "sudo bash -c '$*'"; }
+quoted_sudo() { remote "sudo bash -c $(printf '%q' "$*")"; }
+plain_sudo() { remote "sudo bash -c '$*'"; }
+remote_sudo "mv /tmp/new $APP_BIN && chmod +x $APP_BIN"
+PASS=$(remote_sudo "grep DSN $ENV_FILE | sed 's/.*:\([^@]*\)@.*/\1/'")
+quoted_sudo "grep DSN $ENV_FILE | sed 's/x/y/'"
+plain_sudo "systemctl restart app"
+`,
 	}))
 }
