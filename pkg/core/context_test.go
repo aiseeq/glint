@@ -405,6 +405,12 @@ func TestDeployFileNames(t *testing.T) {
 	} {
 		assert.Equal(t, want, isEnvTemplateName(name), name)
 	}
+	for path, want := range map[string]bool{
+		"bitbucket-pipelines.yml": true, "ci/.gitlab-ci.yml": true, ".github/workflows/test.yaml": true,
+		".github/dependabot.yml": false, "workflows/test.yml": false, "pipelines.yml": false,
+	} {
+		assert.Equal(t, want, isCIConfigPath(path), path)
+	}
 }
 
 func TestShellTestScriptIsTestFile(t *testing.T) {

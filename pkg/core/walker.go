@@ -308,6 +308,9 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 	if isEnvTemplateName(filepath.Base(path)) {
 		return true // deploy env rules (rules must guard with IsEnvTemplate)
 	}
+	if isCIConfigPath(path) {
+		return true // CI pipeline rules (rules must guard with IsCIConfig)
+	}
 
 	for _, e := range analyzableExtensions {
 		if ext == e {

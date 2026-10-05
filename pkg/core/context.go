@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -171,6 +172,23 @@ func isEnvTemplateName(name string) bool {
 		if strings.HasSuffix(name, suffix) {
 			return true
 		}
+	}
+	return false
+}
+
+// IsCIConfig reports the pipeline configuration of a CI service:
+// bitbucket-pipelines.yml, .gitlab-ci.yml or a GitHub Actions workflow.
+func (ctx *FileContext) IsCIConfig() bool {
+	return isCIConfigPath(ctx.Path)
+}
+
+func isCIConfigPath(path string) bool {
+	path = filepath.ToSlash(path)
+	switch base := pathpkg.Base(path); {
+	case base == "bitbucket-pipelines.yml", base == ".gitlab-ci.yml":
+		return true
+	case strings.HasSuffix(base, ".yml"), strings.HasSuffix(base, ".yaml"):
+		return strings.HasSuffix(pathpkg.Dir(path), ".github/workflows")
 	}
 	return false
 }
