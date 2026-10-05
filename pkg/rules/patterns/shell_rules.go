@@ -222,7 +222,7 @@ func checkCapturedFunctionOutput(r *shellRule, src *shellSource) []*core.Violati
 				}
 			}
 		}
-		if src.ctx.IsTestFile() || strings.HasSuffix(src.ctx.RelPath, "_test.sh") {
+		if src.ctx.IsTestFile() {
 			continue // a test stub prints the output it imitates
 		}
 		for _, line := range src.ownMessages(funcs[name]) {

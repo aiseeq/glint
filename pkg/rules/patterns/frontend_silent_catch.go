@@ -76,7 +76,8 @@ func (r *FrontendSilentCatchRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 	for i, line := range code {
 		for _, loc := range promiseCatch.FindAllStringIndex(line, -1) {
 			handler, ok := jsFirstArgument(src, i, loc[1]-1, 15)
-			if ok && !reported[i] && !sideChannel.MatchString(chainBefore(code, i, loc[0])) && r.isSilentHandler(handler, loggers) {
+			chain := chainBefore(code, i, loc[0])
+			if ok && !reported[i] && !sideChannel.MatchString(chain) && !catchesInside(code, chain) && r.isSilentHandler(handler, loggers) {
 				reported[i] = true
 				violations = append(violations, r.violation(ctx, i+1, ctx.Lines[i]))
 			}
@@ -132,6 +133,37 @@ func chainBefore(code []string, line, col int) string {
 		chain = code[i] + "\n" + chain
 	}
 	return chain
+}
+
+// chainCallee is the call a .catch is attached to: handleSubmit(e).catch(...).
+var chainCallee = regexp.MustCompile(`(?:^|[^\w$.])([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*$`)
+
+// catchesInside reports a .catch on a call of a function of the file that has
+// a catch of its own: the function handles its failures, and the outer catch
+// only keeps an event handler from leaving a floating promise.
+func catchesInside(code []string, chain string) bool {
+	m := chainCallee.FindStringSubmatch(chain)
+	if m == nil {
+		return false
+	}
+	flat := strings.Join(code, "\n")
+	def := regexp.MustCompile(`\b(?:const|let|function)\s+` + regexp.QuoteMeta(m[1]) + `\b[^{]*\{`).FindStringIndex(flat)
+	if def == nil {
+		return false
+	}
+	depth := 0
+	for i := def[1] - 1; i < len(flat); i++ {
+		switch flat[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return regexp.MustCompile(`\bcatch\b`).MatchString(flat[def[1]:i])
+			}
+		}
+	}
+	return false
 }
 
 // guardsSideChannel reports a catch at (line, col) whose try block only

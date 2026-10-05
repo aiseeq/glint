@@ -406,3 +406,8 @@ func TestDeployFileNames(t *testing.T) {
 		assert.Equal(t, want, isEnvTemplateName(name), name)
 	}
 }
+
+func TestShellTestScriptIsTestFile(t *testing.T) {
+	assert.True(t, NewFileContext("scripts/loader_test.sh", ".", nil, nil).IsTestFile())
+	assert.False(t, NewFileContext("scripts/loader.sh", ".", nil, nil).IsTestFile())
+}

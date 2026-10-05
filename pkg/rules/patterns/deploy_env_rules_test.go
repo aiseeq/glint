@@ -331,3 +331,71 @@ func load() (time.Duration, bool, string, error) {
 `,
 	}))
 }
+
+// The shapes of a real deploy: the env file generated into a temp file and
+// copied over, a secrets loader listing its keys in an array and writing
+// them to secrets.env, a test helper package reading its own key, a block
+// comment that calls the whole block optional, and a feature switched off
+// in the example.
+func TestEnvKeyMissingFromDeployEnvDeployShapes(t *testing.T) {
+	assert.Equal(t, []string{"scripts/deploy-lib.sh:4"}, deployFindings(t, "env-key-missing-from-deploy-env", map[string]string{
+		"internal/config/config.go": `package config
+
+import "os"
+
+func Load() []string {
+	return []string{
+		os.Getenv("SERVER_HOST"), os.Getenv("DB_DSN"), os.Getenv("RATES_API_KEY"),
+		os.Getenv("BANK_API_URL"), os.Getenv("BANK_API_TOKEN"), os.Getenv("BANK_ACCOUNT"),
+		os.Getenv("PAYOUT_BASE_URL"), os.Getenv("PAYOUT_USERNAME"), os.Getenv("REPORTS_URL"),
+	}
+}
+`,
+		"internal/testdb/testdb.go": `package testdb
+
+import (
+	"os"
+	"testing"
+)
+
+func DSN(t *testing.T) string { return os.Getenv("TEST_DB_DSN") }
+`,
+		".env.example": `SERVER_HOST=127.0.0.1:8080
+DB_DSN=
+# Local/CI tests only.
+TEST_DB_DSN=postgres://test@127.0.0.1/test
+RATES_API_KEY=
+
+# Bank payouts.
+# All empty = off; partially set = startup fails.
+BANK_API_URL=
+BANK_API_TOKEN=
+BANK_ACCOUNT=
+
+PAYOUT_ENABLED=false
+PAYOUT_BASE_URL=https://staging.payout.example
+PAYOUT_USERNAME=
+REPORTS_URL=
+`,
+		"scripts/deploy-lib.sh": `#!/bin/bash
+generate_env() {
+    env_tmp=$(mktemp)
+    cat > "$env_tmp" <<EOF
+SERVER_HOST=127.0.0.1:8080
+DB_DSN=postgres://${DB_USER}:${DB_PASS}@127.0.0.1/${DB_NAME}
+EOF
+    scp "$env_tmp" "$HOST:/tmp/app-env"
+}
+`,
+		"scripts/secrets-loader.sh": `#!/bin/bash
+LOADER_ENV_FIELDS=(
+    RATES_API_KEY
+    BANK_API_TOKEN
+)
+python3 - <<'PY'
+lines.append(("DB_DSN", dsn))
+env_path = os.path.join(runtime, "secrets.env")
+PY
+`,
+	}))
+}

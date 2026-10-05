@@ -123,6 +123,10 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 	}
 }
 
+// truncatedPEMBlock is a whole PEM block on one line with a body too short to be
+// a key: test fixtures write them to exercise the parsing.
+var truncatedPEMBlock = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----(?:\\n|\s)*[A-Za-z0-9+/=\\n]{0,120}-----END [A-Z ]*PRIVATE KEY-----`)
+
 // AnalyzeFile checks for hardcoded secrets
 func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
@@ -144,6 +148,9 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			}
 			if !pattern.mayMatch(lower) {
 				continue
+			}
+			if testData && pattern.name == "private_key" && truncatedPEMBlock.MatchString(line) {
+				continue // a test's truncated PEM: a real key body is far longer
 			}
 			var notSecret func(key, value string) bool
 			if !pattern.highConfidence {

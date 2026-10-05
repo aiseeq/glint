@@ -323,3 +323,28 @@ func (s *Service) Resync(ctx context.Context, walletAddress string) error {
 `,
 	}))
 }
+
+// A fold in a function whose query folds the column the same way mirrors
+// the database: the argument for LOWER(address) IN (...) and the key of the
+// rows it selects must be spelled as the database spells them.
+func TestAddressFoldedPastCanonicalKeyMirrorsSQLFold(t *testing.T) {
+	assert.Equal(t, []string{"repo/repo.go:14"}, projectRuleLines(t, NewAddressFoldedPastCanonicalKeyRule(), map[string]string{
+		"keys/keys.go": addressKeySource,
+		"repo/repo.go": `package repo
+
+import "strings"
+
+func labels(addresses []string, query func(string, []string) map[string]string) map[string]string {
+	lower := make([]string, len(addresses))
+	for i, address := range addresses {
+		lower[i] = strings.ToLower(address)
+	}
+	return query("SELECT address, label FROM aliases WHERE LOWER(address) = ANY($1)", lower)
+}
+
+func cacheKey(walletAddress string) string {
+	return strings.ToLower(walletAddress)
+}
+`,
+	}))
+}

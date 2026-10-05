@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -408,7 +409,9 @@ func elementsOfOneList(left, right ast.Expr) bool {
 // The hand-made fold knows one form: it splits an account of a chain whose
 // spellings differ otherwise, and it breaks a case-sensitive (base58) address.
 // A fold that reads the address's form rather than keying it (a prefix test,
-// a hex-only branch, a lower-case check) is left out.
+// a hex-only branch, a lower-case check) is left out, and so is a fold in a
+// function whose query folds a column with LOWER(...): it mirrors the
+// database, and the keys must match the rows it selects.
 func NewAddressFoldedPastCanonicalKeyRule() *addressRule {
 	r := &addressRule{
 		BaseRule: rules.NewBaseRule(
@@ -420,7 +423,7 @@ func NewAddressFoldedPastCanonicalKeyRule() *addressRule {
 		suggestion: "Use the module's canonical address key instead of strings.ToLower",
 	}
 	r.check = func(scope funcScope, fn *ast.FuncDecl, index addressIndex) []funcFinding {
-		if len(index.keys) == 0 {
+		if len(index.keys) == 0 || foldsInSQL(fn.Body) {
 			return nil
 		}
 		flow := newAddressFlow(scope.info, fn)
@@ -443,6 +446,20 @@ func NewAddressFoldedPastCanonicalKeyRule() *addressRule {
 		return findings
 	}
 	return r
+}
+
+var sqlLowerFold = regexp.MustCompile(`(?i)\blower\s*\(`)
+
+// foldsInSQL reports a body with a string literal that folds a column in SQL.
+func foldsInSQL(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && sqlLowerFold.MatchString(lit.Value) {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // foldsNotKeys returns the folds of a body that read an address's form
