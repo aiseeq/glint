@@ -8,12 +8,13 @@ repository: commits come from `git log`/`git show`, trees from `git archive`.
 
 ## Steps
 
-1. **List the fixes.** `prepare.sh REPO OUT [BATCH_SIZE]` keeps the
+1. **List the fixes.** `prepare.sh REPO OUT [BATCH_SIZE] [REF]` keeps the
    Conventional Commits `fix`/`security`/`perf` subjects, drops analyzer,
    formatting and documentation work and commits that touch only documents,
    orders them oldest first and splits them into `batch-NN.tsv` (180 by
    default). It saves `glint rules` next to them as the list of what is
-   already caught.
+   already caught. REF (default HEAD) names the history to mine: the trunk,
+   when the working tree is on a feature branch.
 
 2. **Pilot.** Triage about 30 commits of one batch by `triage.md` and read the
    records before starting the rest: the instructions are what makes records
