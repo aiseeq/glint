@@ -1,6 +1,8 @@
 package sqlschema
 
 import (
+	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode"
@@ -326,6 +328,70 @@ func (s *Schema) PartialKeyReads(sql string) []int {
 		return []int{columnLocation(sel.GetWhereClause(), key.columns[0])}
 	}
 	return nil
+}
+
+// ExternalKey is a column holding an identity another system gave a row,
+// read as the key of one row while no unique index makes it one.
+type ExternalKey struct {
+	Table, Column string
+	Offset        int
+}
+
+// externalIdentity matches the name of a column holding another system's
+// identity of the row: provider_reference, external_id, partner_ref.
+var externalIdentity = regexp.MustCompile(`(?:^|_)(?:reference|ref|external_id|ext_id)$|^(?:external|provider|partner)_\w*id$`)
+
+// UnkeyedExternalReads returns the external identity columns a single SELECT
+// matches one row by while no unique key of the table, full or partial,
+// covers what the WHERE fixes:
+//
+//	SELECT * FROM transfers WHERE provider_reference = $1
+//
+// Nothing keeps two rows from sharing the other system's id: a retry or a
+// replay stores it twice, and the read takes either. Not reported: a read
+// with LIMIT, a grouped or aggregate one, a join.
+func (s *Schema) UnkeyedExternalReads(sql string) []ExternalKey {
+	if s == nil {
+		return nil
+	}
+	result, ok := parse(sql)
+	if !ok || len(result.GetStmts()) != 1 {
+		return nil
+	}
+	sel := result.GetStmts()[0].GetStmt().GetSelectStmt()
+	if sel == nil || sel.GetWhereClause() == nil || sel.GetLimitCount() != nil || len(sel.GetGroupClause()) > 0 || onlyAggregates(sel) {
+		return nil
+	}
+	tables, joined := s.fromTables(sel)
+	if joined || len(tables) != 1 {
+		return nil
+	}
+	var table *Table
+	for _, t := range tables {
+		table = t
+	}
+	if table == nil || table.View {
+		return nil
+	}
+	pinned := make(map[string]bool)
+	for _, ref := range pinnedColumns(sel.GetWhereClause()) {
+		pinned[ref.name] = true
+	}
+	if pinned["id"] || table.UniqueWithin(pinned) {
+		return nil
+	}
+	for _, key := range table.partial {
+		if len(key.columns) > 0 && allIn(key.columns, pinned) {
+			return nil
+		}
+	}
+	var keys []ExternalKey
+	for _, name := range slices.Sorted(maps.Keys(pinned)) {
+		if externalIdentity.MatchString(name) && table.Column(name) != nil {
+			keys = append(keys, ExternalKey{Table: table.Name, Column: name, Offset: columnLocation(sel.GetWhereClause(), name)})
+		}
+	}
+	return keys
 }
 
 func allIn(names []string, set map[string]bool) bool {

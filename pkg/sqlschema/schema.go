@@ -143,7 +143,15 @@ type Column struct {
 	// supplies.
 	GeneratedDefault bool
 	// Type is the type name as written, lower case: text, numeric, uuid.
+	// CHAR(n) is bpchar, VARCHAR(n) is varchar.
 	Type string
+	// Width is the declared length of a varchar or bpchar column, 0 for
+	// none.
+	Width int
+	// TypePath and TypeLine are the migration and the line that gave the
+	// column its type last; empty for a table the code creates.
+	TypePath string
+	TypeLine int
 	// References is the table a foreign key of the column points to, "" for
 	// a column without one.
 	References string
@@ -405,6 +413,7 @@ func (s *Schema) create(stmt *pgquery.CreateStmt) {
 		switch {
 		case elt.GetColumnDef() != nil:
 			table.addColumn(elt.GetColumnDef())
+			s.markType(table.columns[len(table.columns)-1], elt.GetColumnDef().GetTypeName())
 		case elt.GetConstraint() != nil:
 			table.applyConstraint(elt.GetConstraint())
 		}
@@ -426,9 +435,7 @@ var serialTypes = map[string]bool{
 
 func newColumn(def *pgquery.ColumnDef) *Column {
 	column := &Column{Name: strings.ToLower(def.GetColname()), NotNull: def.GetIsNotNull()}
-	if names := def.GetTypeName().GetNames(); len(names) > 0 {
-		column.Type = strings.ToLower(names[len(names)-1].GetString_().GetSval())
-	}
+	column.Type, column.Width = typeOf(def.GetTypeName())
 	column.HasDefault = serialTypes[column.Type] || def.GetRawDefault() != nil || def.GetIdentity() != "" || def.GetGenerated() != ""
 	column.GeneratedDefault = serialTypes[column.Type] || def.GetIdentity() != "" || def.GetGenerated() != "" ||
 		isGeneratedExpr(def.GetRawDefault())
@@ -451,6 +458,31 @@ func newColumn(def *pgquery.ColumnDef) *Column {
 		}
 	}
 	return column
+}
+
+// typeOf returns the type name, lower case, and the declared length of a
+// varchar or bpchar type (0 for none).
+func typeOf(name *pgquery.TypeName) (string, int) {
+	names := name.GetNames()
+	if len(names) == 0 {
+		return "", 0
+	}
+	typ := strings.ToLower(names[len(names)-1].GetString_().GetSval())
+	width := 0
+	if mods := name.GetTypmods(); (typ == "varchar" || typ == "bpchar") && len(mods) == 1 {
+		width = int(mods[0].GetAConst().GetIval().GetIval())
+	}
+	return typ, width
+}
+
+// markType records where the migration being applied gives the column its
+// type.
+func (s *Schema) markType(column *Column, name *pgquery.TypeName) {
+	if column == nil || s.file == "" {
+		return
+	}
+	offset := min(max(int(name.GetLocation()), 0), len(s.text))
+	column.TypePath, column.TypeLine = s.file, strings.Count(s.text[:offset], "\n")+1
 }
 
 // isGeneratedExpr reports a default the database computes per row: a call
@@ -610,6 +642,7 @@ func (s *Schema) alter(stmt *pgquery.AlterTableStmt) {
 			def := cmd.GetDef().GetColumnDef()
 			if table.Column(def.GetColname()) == nil {
 				table.addColumn(def)
+				s.markType(table.Column(def.GetColname()), def.GetTypeName())
 			}
 		case pgquery.AlterTableType_AT_DropColumn:
 			table.dropColumn(cmd.GetName())
@@ -635,8 +668,9 @@ func (s *Schema) alter(stmt *pgquery.AlterTableStmt) {
 		case pgquery.AlterTableType_AT_DropConstraint:
 			table.dropUnique(cmd.GetName())
 		case pgquery.AlterTableType_AT_AlterColumnType:
-			if names := cmd.GetDef().GetColumnDef().GetTypeName().GetNames(); column != nil && len(names) > 0 {
-				column.Type = strings.ToLower(names[len(names)-1].GetString_().GetSval())
+			if typeName := cmd.GetDef().GetColumnDef().GetTypeName(); column != nil && len(typeName.GetNames()) > 0 {
+				column.Type, column.Width = typeOf(typeName)
+				s.markType(column, typeName)
 			}
 		}
 	}

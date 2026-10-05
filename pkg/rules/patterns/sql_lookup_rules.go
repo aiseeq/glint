@@ -15,6 +15,7 @@ func init() {
 	rules.Register(NewSQLLinkUpdateIgnoresParentRule())
 	rules.Register(NewSQLPartialKeyReadRule())
 	rules.Register(NewSQLDeleteReferencedWithoutKeyRule())
+	rules.Register(NewExternalReferenceLookupWithoutUniqueIndexRule())
 }
 
 // SQLColumnComparedWithItselfRule detects a comparison of a column with
@@ -179,6 +180,63 @@ func (r *SQLPartialKeyReadRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 			violations = append(violations, sqlViolation(r.BaseRule, ctx, line,
 				"One row is read by the columns of a partial unique index without its WHERE — rows outside the predicate share the key, and "+sel.Sel.Name+" takes any of them",
 				"Repeat the index's predicate in the WHERE, or read every row of the key and decide"))
+		}
+	}
+	return violations
+}
+
+// ExternalReferenceLookupWithoutUniqueIndexRule detects one row read by the
+// identity another system gave it while the migrations make that column
+// unique nowhere:
+//
+//	CREATE TABLE transfers (id uuid PRIMARY KEY, provider_reference text, ...);
+//	db.QueryRow(ctx, `SELECT ... FROM transfers WHERE provider_reference = $1`, ref)
+//
+// Nothing keeps two rows from sharing the other system's id: a retried
+// create or a replayed callback stores it twice, and the read takes either
+// row — the update meant for one lands on the other. A unique index (partial
+// over the non-empty values, if the column starts empty) makes the second
+// write fail instead.
+type ExternalReferenceLookupWithoutUniqueIndexRule struct {
+	*rules.BaseRule
+}
+
+// NewExternalReferenceLookupWithoutUniqueIndexRule creates the rule
+func NewExternalReferenceLookupWithoutUniqueIndexRule() *ExternalReferenceLookupWithoutUniqueIndexRule {
+	return &ExternalReferenceLookupWithoutUniqueIndexRule{BaseRule: rules.NewBaseRule(
+		"external-reference-lookup-without-unique-index",
+		"patterns",
+		"Detects one row read by another system's id (*_reference, external_id) that no unique index of the migrations covers — two rows can share it, and the read takes either",
+		core.SeverityMedium,
+	)}
+}
+
+// ReadsOtherFiles reports that the findings depend on the migrations' indexes.
+func (r *ExternalReferenceLookupWithoutUniqueIndexRule) ReadsOtherFiles() bool { return true }
+
+// AnalyzeFile reports the single-row reads by an unkeyed external id.
+func (r *ExternalReferenceLookupWithoutUniqueIndexRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if !productionGoFile(ctx) {
+		return nil
+	}
+	schema, ok := fileSchema(ctx, r.BaseRule)
+	if !ok || schema == nil {
+		return nil
+	}
+	var violations []*core.Violation
+	for _, call := range sqlCalls(ctx.GoAST) {
+		sel, ok := call.call.Fun.(*ast.SelectorExpr)
+		if !ok || !singleRowCalls[sel.Sel.Name] {
+			continue
+		}
+		for _, key := range schema.UnkeyedExternalReads(call.literal.text) {
+			line := call.literal.lineAt(ctx, key.Offset)
+			if ctx.IsSuppressed(line, r.Name()) {
+				continue
+			}
+			violations = append(violations, sqlViolation(r.BaseRule, ctx, line,
+				"One row of "+key.Table+" is read by "+key.Column+", another system's id, and no unique index covers it — two rows can share it, and "+sel.Sel.Name+" takes either",
+				"Add a unique index on "+key.Table+" ("+key.Column+") — partial (WHERE "+key.Column+" <> '') if the column starts empty — or read every row of the id and refuse a duplicate"))
 		}
 	}
 	return violations

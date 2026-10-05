@@ -266,11 +266,24 @@ func (s *Schema) missingNotNull(insert *pgquery.InsertStmt) []Problem {
 // NOT NULL column each bind parameter is written to, by parameter number: a
 // NULL bound there fails the statement whatever the column's default.
 func (s *Schema) NotNullBinds(sql string) map[int]string {
+	binds := make(map[int]string)
+	for param, column := range s.Binds(sql) {
+		if column.NotNull {
+			binds[param] = column.Name
+		}
+	}
+	return binds
+}
+
+// Binds returns, for an INSERT ... VALUES or an UPDATE ... SET, the column
+// each bind parameter is written to as it is (a cast aside), by parameter
+// number.
+func (s *Schema) Binds(sql string) map[int]*Column {
 	result, ok := parse(sql)
 	if !ok || len(result.GetStmts()) != 1 {
 		return nil
 	}
-	binds := make(map[int]string)
+	binds := make(map[int]*Column)
 	bind := func(table *Table, column string, value *pgquery.Node) {
 		for value.GetTypeCast() != nil {
 			value = value.GetTypeCast().GetArg()
@@ -279,8 +292,8 @@ func (s *Schema) NotNullBinds(sql string) map[int]string {
 		if table == nil || ref == nil {
 			return
 		}
-		if col := table.Column(column); col != nil && col.NotNull {
-			binds[int(ref.GetNumber())] = col.Name
+		if col := table.Column(column); col != nil {
+			binds[int(ref.GetNumber())] = col
 		}
 	}
 	stmt := result.GetStmts()[0].GetStmt()

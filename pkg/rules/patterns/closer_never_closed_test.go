@@ -3,11 +3,13 @@ package patterns
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
@@ -331,4 +333,58 @@ func TestReturnedFromHelper(t *testing.T) {
 		"store/store.go:75",
 		"store/store_test.go:6",
 	}, found)
+}
+
+// A run over some packages of a module types the package of a shared getter
+// without analyzing its files: the getter is still judged by its body, so a
+// shared instance is not taken for a fresh one the caller has to close.
+func TestCloserNeverClosedGetterBodyNotLoaded(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"analytics/analytics.go": `package analytics
+
+type Service struct{}
+
+func (s *Service) Close() {}
+
+func (s *Service) Track(event string) {}
+
+var global *Service
+
+func Get() *Service { return global }
+
+func OpenShared() *Service { return global }
+
+func NewService() *Service { return &Service{} }
+`,
+		"deposits/deposits.go": `package deposits
+
+import "example.com/rulestest/analytics"
+
+func Record() {
+	amp := analytics.Get()
+	amp.Track("deposit")
+}
+
+func Leak() {
+	svc := analytics.NewService()
+	svc.Track("deposit")
+}
+
+func Shared() {
+	svc := analytics.OpenShared()
+	svc.Track("deposit")
+}
+`,
+	})
+	var analyzed []*core.FileContext
+	for _, file := range contexts {
+		if strings.HasSuffix(file.Path, "deposits.go") {
+			analyzed = append(analyzed, file)
+		}
+	}
+	project, err := core.LoadGoProject(root, analyzed, core.GoProjectOptions{})
+	require.NoError(t, err)
+	violations, err := NewCloserNeverClosedRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"deposits/deposits.go:11"}, foundLines(violations))
 }
