@@ -75,3 +75,40 @@ func observe(desired Desired) ([]byte, error) {
 	violations := NewMissingAmountCoercedToZeroRule().AnalyzeFile(rulestest.GoFile(t, "hook/observe.go", source))
 	assert.Equal(t, []int{4}, violationLines(violations))
 }
+
+// The same substitution through an early return: a nil amount answered with
+// zero before the real value is read.
+func TestMissingAmountCoercedToZero_GoNilAmountReturnsZero(t *testing.T) {
+	const source = `package hook
+
+func payoutText(payout *decimal.Decimal) string {
+	if payout == nil {
+		return MoneyString(decimal.Zero)
+	}
+	return MoneyString(*payout)
+}
+
+func feeOf(q *Quote) decimal.Decimal {
+	if q.FeeAmount == nil {
+		return decimal.Zero
+	}
+	return *q.FeeAmount
+}
+
+func countOf(n *int) int {
+	if n == nil {
+		return 0
+	}
+	return *n
+}
+
+func required(amount *decimal.Decimal) (decimal.Decimal, error) {
+	if amount == nil {
+		return decimal.Zero, errors.New("amount is required")
+	}
+	return *amount, nil
+}
+`
+	violations := NewMissingAmountCoercedToZeroRule().AnalyzeFile(rulestest.GoFile(t, "hook/payout.go", source))
+	assert.Equal(t, []int{5, 12}, violationLines(violations))
+}
