@@ -506,7 +506,7 @@ func emptyCheckedFields(decls map[*types.Func]typedFuncDecl) map[*types.Var]bool
 		})
 		ast.Inspect(decl.decl.Body, func(n ast.Node) bool {
 			if expr, ok := n.(ast.Expr); ok {
-				if x, field, ok := fieldSelection(decl.info, expr); ok && requiredField(decl.info.TypeOf(x), field) {
+				if x, field, ok := fieldSelection(decl.info, expr); ok && taggedRequired(decl.info.TypeOf(x), field) {
 					checked[field] = true
 				}
 			}
@@ -516,8 +516,8 @@ func emptyCheckedFields(decls map[*types.Func]typedFuncDecl) map[*types.Var]bool
 	return checked
 }
 
-// requiredField reports a field whose tag marks it required.
-func requiredField(owner types.Type, field *types.Var) bool {
+// taggedRequired reports a field whose tag marks it required.
+func taggedRequired(owner types.Type, field *types.Var) bool {
 	if ptr, ok := owner.(*types.Pointer); ok {
 		owner = ptr.Elem()
 	}
