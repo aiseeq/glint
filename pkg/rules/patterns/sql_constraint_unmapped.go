@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/types"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -99,9 +100,10 @@ func (r *SQLConstraintViolationUnmappedRule) AnalyzeGoProject(ctx *core.GoProjec
 		if !ok || checksConstraints(fn.file, fn.decl, checkers) || !callers.reachesHandlerUnmapped(obj, 0, map[*types.Func]bool{}) {
 			continue
 		}
-		for _, literal := range literals {
+		for i, literal := range literals {
+			earlier := earlierStatements(literals[:i])
 			for _, del := range sqlschema.Deletes(literal.text) {
-				refs := schema.RestrictingReferences(del.Table)
+				refs := slices.DeleteFunc(schema.RestrictingReferences(del.Table), func(ref sqlschema.Reference) bool { return earlier.deleted[ref.Table] })
 				if len(refs) == 0 {
 					continue
 				}
@@ -113,6 +115,9 @@ func (r *SQLConstraintViolationUnmappedRule) AnalyzeGoProject(ctx *core.GoProjec
 					"Rows of "+del.Table+" are deleted while "+strings.Join(names, ", ")+" point at them with a foreign key that refuses the delete, and nothing between here and the handler checks the database error — a row still in use comes back to the user as a server error")
 			}
 			for _, conflict := range schema.UniqueConflicts(literal.text) {
+				if earlier.rulesOut(schema, conflict) {
+					continue
+				}
 				violations = r.report(fn.file, violations, literal.lineAt(fn.file, conflict.Offset),
 					"The INSERT writes the whole unique key ("+strings.Join(conflict.Key, ", ")+") of "+conflict.Table+" with no ON CONFLICT, and nothing between here and the handler checks the database error — a duplicate comes back to the user as a server error")
 			}
@@ -258,4 +263,42 @@ func funcText(ctx *core.FileContext, fn *ast.FuncDecl) string {
 		return ""
 	}
 	return string(ctx.Content[start:end])
+}
+
+// earlierWrites are what the statements before one in a function did: the
+// tables they deleted rows of and the tables they inserted a row into and
+// read it back.
+type earlierWrites struct {
+	deleted  map[string]bool
+	returned map[string]bool
+}
+
+// earlierStatements collects the deletes and the returning inserts of the
+// statements of a function before the one checked.
+func earlierStatements(literals []sqlLiteral) earlierWrites {
+	writes := earlierWrites{deleted: make(map[string]bool), returned: make(map[string]bool)}
+	for _, literal := range literals {
+		for _, del := range sqlschema.Deletes(literal.text) {
+			writes.deleted[del.Table] = true
+		}
+		for _, table := range sqlschema.ReturningInserts(literal.text) {
+			writes.returned[table] = true
+		}
+	}
+	return writes
+}
+
+// rulesOut reports a unique conflict the function itself rules out: it
+// cleared the table before (a set of rows replaced), or a key column points
+// at a row it has just inserted - a new parent has no children yet.
+func (w earlierWrites) rulesOut(schema *sqlschema.Schema, conflict sqlschema.UniqueConflict) bool {
+	if w.deleted[conflict.Table] {
+		return true
+	}
+	for _, column := range conflict.Key {
+		if target := schema.ForeignKeyTarget(conflict.Table, column); target != "" && w.returned[target] {
+			return true
+		}
+	}
+	return false
 }
