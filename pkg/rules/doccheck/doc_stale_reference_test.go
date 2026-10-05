@@ -259,3 +259,42 @@ func run() {}
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "planner.Phase*")
 }
+
+// A module package shares its name with a standard library package the
+// project imports: a package http that imports net/http means net/http by
+// http.Cookie, and a comment elsewhere naming sql.ErrNoRows may mean
+// database/sql. A local package whose name nothing outside the module has is
+// still checked.
+func TestDocStaleReferenceLeavesNamesOfImportedOutsidePackages(t *testing.T) {
+	files := withFile("shared/http/jwt.go", `package http
+
+import nethttp "net/http"
+
+// Read takes the token from the request's http.Cookie.
+func Read(r *nethttp.Request) {}
+`)
+	files["shared/errors/types.go"] = `package errors
+
+import "errors"
+
+// Is wraps errors.Is.
+func Is(err, target error) bool { return errors.Is(err, target) }
+`
+	files["shared/sql/db.go"] = "package sql\n\nfunc Open() {}\n"
+	files["service/users.go"] = `package service
+
+import "database/sql"
+
+var _ = sql.ErrNoRows
+`
+	files["service/orders.go"] = `package service
+
+// find answers sql.ErrNoRows for a missing order; the order lives in build.Gone.
+func find() {}
+`
+
+	violations := analyzeStaleReference(t, files)
+
+	require.Len(t, violations, 1, "%v", violations)
+	assert.Contains(t, violations[0].Message, "build.Gone")
+}

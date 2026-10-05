@@ -83,15 +83,24 @@ type modulePackages struct {
 	byPath map[string]map[string]bool // import path → declared names
 	byName map[string]map[string]bool // package name → import paths
 	any    map[string]bool            // names declared anywhere in the module
+	// external are the names of the packages outside the module that the
+	// module imports (sql, http, decimal): a comment may mean either.
+	external map[string]bool
 }
 
 func collectModulePackages(ctx *core.GoProjectContext) (*modulePackages, error) {
-	m := &modulePackages{byPath: map[string]map[string]bool{}, byName: map[string]map[string]bool{}, any: map[string]bool{}}
+	m := &modulePackages{byPath: map[string]map[string]bool{}, byName: map[string]map[string]bool{}, any: map[string]bool{}, external: map[string]bool{}}
+	imported := map[string]string{} // import path → package name
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil {
 			return nil, errors.New("doc stale reference: package has no syntax")
 		}
 		p := pkg.Package
+		if p.Types != nil {
+			for _, imp := range p.Types.Imports() {
+				imported[imp.Path()] = imp.Name()
+			}
+		}
 		// a main package is never imported: main.X in a comment is prose
 		if p.Types == nil || p.Name == "main" || strings.HasSuffix(p.Name, "_test") {
 			continue
@@ -114,6 +123,11 @@ func collectModulePackages(ctx *core.GoProjectContext) (*modulePackages, error) 
 			m.byName[p.Name] = map[string]bool{}
 		}
 		m.byName[p.Name][p.PkgPath] = true
+	}
+	for path, name := range imported {
+		if _, inModule := m.byPath[path]; !inModule {
+			m.external[name] = true
+		}
 	}
 	return m, nil
 }
@@ -285,16 +299,22 @@ func (r *DocStaleReferenceRule) analyzeFile(fileCtx *core.FileContext, ownPath s
 	return violations
 }
 
-// resolvePackage — the module package a comment means by name: the file's own
-// package, an import under that name, or the only module package with it.
+// resolvePackage — the module package a comment means by name: an import of
+// the file under that name (package http importing net/http means net/http
+// by http.Cookie), else nothing when a package outside the module that the
+// project imports has the name (the comment may mean it, under an alias too),
+// else the file's own package or the only module package with the name.
 func resolvePackage(name, own, ownPath string, imports map[string]string, mod *modulePackages) (string, bool) {
-	if name == own {
-		_, checked := mod.byPath[ownPath] // a main package is not checked
-		return ownPath, checked
-	}
 	if path, ok := imports[name]; ok {
 		_, inModule := mod.byPath[path]
 		return path, inModule
+	}
+	if mod.external[name] {
+		return "", false
+	}
+	if name == own {
+		_, checked := mod.byPath[ownPath] // a main package is not checked
+		return ownPath, checked
 	}
 	paths := mod.byName[name]
 	if len(paths) != 1 {

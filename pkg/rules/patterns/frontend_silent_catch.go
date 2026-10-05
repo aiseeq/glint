@@ -55,6 +55,7 @@ func (r *FrontendSilentCatchRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 	code := helpers.FileJSCode(ctx)
 	text := helpers.FileJSText(ctx)
 	loggers := fileLoggers(code)
+	loggers.screens = screenSetters(strings.Join(text, "\n"))
 
 	var violations []*core.Violation
 	reported := make(map[int]bool)
@@ -105,7 +106,12 @@ var (
 
 // loggerSet is the logger objects of a file: console, logger and the file's
 // own loggers.
-type loggerSet struct{ call, bare *regexp.Regexp }
+type loggerSet struct {
+	call, bare *regexp.Regexp
+	// screens are the file's screen state setters with their initial values
+	// (screenSetters): setting one in a catch shows the failure.
+	screens map[string]string
+}
 
 // fileLoggers returns the loggers of a file.
 func fileLoggers(code []string) loggerSet {
@@ -231,7 +237,45 @@ func (r *FrontendSilentCatchRule) isSilentCatch(block catchBlock, loggers logger
 		return false
 	}
 	return loggers.call.MatchString(block.code) && !r.userFeedbackCall.MatchString(block.code) &&
-		!failureReturn.MatchString(block.text) && !errorStateSet.MatchString(block.text)
+		!failureReturn.MatchString(block.text) && !errorStateSet.MatchString(block.text) && !switchesScreen(block.text, loggers.screens)
+}
+
+var (
+	literalUseState = regexp.MustCompile(`\bconst\s*\[\s*([A-Za-z_$][\w$]*)\s*,\s*(set[A-Z][\w$]*)\s*\]\s*=\s*(?:React\.)?useState(?:<[^>()]*>)?\(\s*['"]([\w-]+)['"]\s*\)`)
+	literalSetCall  = regexp.MustCompile(`\b(set[A-Z][\w$]*)\s*\(\s*['"]([\w-]+)['"]\s*\)`)
+	renderedAsProp  = regexp.MustCompile(`=\{\s*([A-Za-z_$][\w$]*)\s*\}`)
+	comparedToText  = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*[!=]==?\s*['"]`)
+)
+
+// screenSetters returns the setters of the file's string states that pick
+// what the page shows: the state starts at a literal ('pending') and the
+// markup reads it (state={state}, state === 'expired'). Initial values by
+// setter.
+func screenSetters(text string) map[string]string {
+	read := make(map[string]bool)
+	for _, re := range []*regexp.Regexp{renderedAsProp, comparedToText} {
+		for _, m := range re.FindAllStringSubmatch(text, -1) {
+			read[m[1]] = true
+		}
+	}
+	screens := make(map[string]string)
+	for _, m := range literalUseState.FindAllStringSubmatch(text, -1) {
+		if read[m[1]] {
+			screens[m[2]] = m[3]
+		}
+	}
+	return screens
+}
+
+// switchesScreen reports a block that sets a screen state to another literal
+// than its initial one: the page shows the failure.
+func switchesScreen(block string, screens map[string]string) bool {
+	for _, m := range literalSetCall.FindAllStringSubmatch(block, -1) {
+		if initial, ok := screens[m[1]]; ok && m[2] != initial {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *FrontendSilentCatchRule) shouldSkip(ctx *core.FileContext) bool {

@@ -191,3 +191,63 @@ func validateApprovable(tx *domain.Transaction) error {
 	}
 	assert.Empty(t, helperOutsideLines(t, files))
 }
+
+// A wrapper of one embedded number (Amount{big.Int}) is a scalar: reading the
+// wrapped value is using the number, and a choice between two amounts is the
+// consumer's rule. A function that speaks the consumer's vocabulary (string
+// statuses, an ID suffix the consumer builds) is a rule of the consumer too.
+func TestHelperOutsideTypePackageScalarWrapperAndVocabulary(t *testing.T) {
+	files := map[string]string{
+		"models/models.go": `package models
+
+import "math/big"
+
+type Amount struct{ big.Int }
+
+type Issue struct {
+	ID    string
+	Count int
+}
+`,
+		"summary/balance.go": `package summary
+
+import "example.com/rulestest/models"
+
+func pickDisplayed(yesterday, live models.Amount) (models.Amount, bool) {
+	if yesterday.Int.Sign() > 0 {
+		return yesterday, true
+	}
+	return live, false
+}
+`,
+		"routes/consistency.go": `package routes
+
+import (
+	"strings"
+
+	"example.com/rulestest/models"
+)
+
+func severity(gaps []models.Issue, takenHere bool) string {
+	if !takenHere {
+		return "warning"
+	}
+	for _, gap := range gaps {
+		if strings.HasSuffix(gap.ID, "_recent") {
+			return "critical"
+		}
+	}
+	return "warning"
+}
+
+func total(issues []models.Issue) int {
+	n := 0
+	for _, issue := range issues {
+		n += issue.Count
+	}
+	return n
+}
+`,
+	}
+	assert.Equal(t, []string{"routes/consistency.go:21"}, helperOutsideLines(t, files))
+}

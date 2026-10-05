@@ -333,3 +333,37 @@ export function Mfa() {
 		t.Fatalf("want one finding on line 17, got %v", lines)
 	}
 }
+
+// A page state that starts at 'pending' and that the markup reads is the
+// screen: setting it to another value in a catch shows the failure, whatever
+// the value is called. A state the page never reads is not a screen.
+func TestFrontendSilentCatchScreenState(t *testing.T) {
+	code := `const log = createLogger('callback')
+
+function CallbackPage() {
+  const [state, setState] = useState<CallbackState>('pending')
+  const [tab, setTab] = useState('main')
+  useEffect(() => {
+    exchange()
+      .then(() => router.push('/'))
+      .catch((err: unknown) => {
+        log.error('callback failed', err)
+        setState('provider')
+      })
+    load().catch((err: unknown) => {
+      log.error('load failed', err)
+      setTab('other')
+    })
+  }, [])
+  return <CallbackStatus state={state} />
+}
+`
+	ctx := core.NewFileContext("frontend/src/app/callback/page.tsx", ".", []byte(code), nil)
+	var lines []int
+	for _, v := range NewFrontendSilentCatchRule().AnalyzeFile(ctx) {
+		lines = append(lines, v.Line)
+	}
+	if len(lines) != 1 || lines[0] != 13 {
+		t.Fatalf("want one finding on line 13, got %v", lines)
+	}
+}
