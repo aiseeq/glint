@@ -94,18 +94,26 @@ func (r *NotFoundAnsweredAsServerErrorRule) AnalyzeGoProject(ctx *core.GoProject
 			if call == nil || !takesRequestValue(flow, fn, call, request, fromRequest) {
 				return true
 			}
-			sentinel := notFoundSentinel(flow.exprErrors(fn, errIdent, check.Body.List[0], 0))
-			if sentinel == nil {
+			set := flow.exprErrors(fn, errIdent, check.Body.List[0], 0)
+			sentinel := notFoundSentinel(set)
+			if sentinel == nil && (!set.notFoundText || !takesClientValueDirectly(flow, fn, call, request)) {
 				return true
 			}
 			line := fn.file.LineFor(answer)
 			if fn.file.IsSuppressed(line, r.Name()) {
 				return true
 			}
-			v := r.CreateViolation(fn.file.RelPath, line, "Every error of this call is answered with a 5xx, and the call can return "+sentinel.Name()+
-				" — a client's unknown id is reported as a server failure")
+			var message, suggestion string
+			if sentinel != nil {
+				message = "Every error of this call is answered with a 5xx, and the call can return " + sentinel.Name() + " — a client's unknown id is reported as a server failure"
+				suggestion = "Answer " + sentinel.Name() + " with 404 (errors.Is) before the generic 5xx, or pass the error to the package's not-found-aware responder"
+			} else {
+				message = "Every error of this call is answered with a 5xx, and the call fails with a plain \"not found\" error no caller can tell apart — a client's unknown value is reported as a server failure"
+				suggestion = "Return a not-found sentinel or error type from the callee and answer it with 4xx (errors.Is/As) before the generic 5xx"
+			}
+			v := r.CreateViolation(fn.file.RelPath, line, message)
 			v.WithCode(strings.TrimSpace(fn.file.GetLine(line)))
-			v.WithSuggestion("Answer " + sentinel.Name() + " with 404 (errors.Is) before the generic 5xx, or pass the error to the package's not-found-aware responder")
+			v.WithSuggestion(suggestion)
 			violations = append(violations, v)
 			return true
 		})
@@ -224,8 +232,28 @@ func helperReadsRequest(flow *errorFlow, fn typedFunc, call *ast.CallExpr, reque
 
 // requestValues returns the variables of a handler holding what the client
 // sent: a path or query value, a decoded body, and what is computed from them.
+//
+// A handler helper's own parameters next to the writer and the request
+// (convertFrom(w, r, params convertFromParams), show(w, r, id string)) hold
+// what its caller parsed from the request: strings and value structs count.
 func requestValues(flow *errorFlow, fn typedFunc, request *types.Var) map[types.Object]bool {
 	values := map[types.Object]bool{}
+	if sig := funcSignature(fn); sig != nil {
+		params := sig.Params()
+		for i := range params.Len() {
+			param := params.At(i)
+			switch t := param.Type().(type) {
+			case *types.Named:
+				if _, isStruct := t.Underlying().(*types.Struct); isStruct && t.Obj().Pkg() != nil && t.Obj().Pkg().Path() != "net/http" {
+					values[param] = true
+				}
+			case *types.Basic:
+				if t.Info()&types.IsString != 0 {
+					values[param] = true
+				}
+			}
+		}
+	}
 	for changed := true; changed; {
 		changed = false
 		mark := func(expr ast.Expr) {
@@ -278,6 +306,44 @@ func takesRequestValue(flow *errorFlow, fn typedFunc, call *ast.CallExpr, reques
 		}
 		if mentionsRequestData(flow, fn, arg, request, values, 0) {
 			return true
+		}
+	}
+	return false
+}
+
+// funcSignature returns the signature of the declared function, nil when
+// the declaration has no type.
+func funcSignature(fn typedFunc) *types.Signature {
+	obj, ok := fn.info.Defs[fn.decl.Name].(*types.Func)
+	if !ok {
+		return nil
+	}
+	sig, _ := obj.Type().(*types.Signature)
+	return sig
+}
+
+// takesClientValueDirectly reports a call handed request data itself or a
+// field of the handler helper's own parameter: a plain "not found" text is
+// weak evidence, so a value the server fetched with the client's input in
+// hand (a token a refresh call returned) does not count.
+func takesClientValueDirectly(flow *errorFlow, fn typedFunc, call *ast.CallExpr, request *types.Var) bool {
+	sig := funcSignature(fn)
+	if sig == nil {
+		return false
+	}
+	params := sig.Params()
+	for _, arg := range call.Args {
+		if mentionsRequestData(flow, fn, arg, request, map[types.Object]bool{}, 0) {
+			return true
+		}
+		root := rootIdent(arg)
+		if root == nil {
+			continue
+		}
+		for i := range params.Len() {
+			if fn.info.ObjectOf(root) == params.At(i) && params.At(i) != request {
+				return true
+			}
 		}
 	}
 	return false

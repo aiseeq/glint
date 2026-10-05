@@ -276,7 +276,8 @@ func (r *ErrorMaskingRule) checkSuccessOnlyGuard(ctx *core.FileContext, fn *ast.
 	// подставленным значением её прячет.
 	sourceCall := errSourceExpr(fn.Body, stmt, errName)
 	fromRequest := parsesRequestInput(fn.Body, sourceCall)
-	if guardOnlyRefinesReadyValues(fn, stmt) && !fromRequest {
+	if guardOnlyRefinesReadyValues(fn, stmt) && !fromRequest &&
+		!setsFilterParam(fn, stmt) && !keepsDomainPresetOnRead(fn, stmt, sourceCall) {
 		return nil
 	}
 	// err == nil && v > 0 on a parse is a test of the input's shape: a value
@@ -317,6 +318,84 @@ func guardOnlyRefinesReadyValues(fn *ast.FuncDecl, stmt *ast.IfStmt) bool {
 		return false
 	}
 	return true
+}
+
+// setsFilterParam reports a guard that writes a field of a filter parameter
+// (*ListFilter, SearchCriteria): input that does not parse drops the bound,
+// and the query widens to rows the caller did not ask for.
+func setsFilterParam(fn *ast.FuncDecl, stmt *ast.IfStmt) bool {
+	filters := make(map[string]bool)
+	for _, field := range fn.Type.Params.List {
+		typeName := ""
+		switch t := ast.Unparen(stripStar(field.Type)).(type) {
+		case *ast.Ident:
+			typeName = t.Name
+		case *ast.SelectorExpr:
+			typeName = t.Sel.Name
+		}
+		if !strings.HasSuffix(typeName, "Filter") && !strings.HasSuffix(typeName, "Criteria") {
+			continue
+		}
+		for _, name := range field.Names {
+			filters[name.Name] = true
+		}
+	}
+	for name := range guardAssignTargets(stmt.Body) {
+		if filters[name] {
+			return true
+		}
+	}
+	return false
+}
+
+func stripStar(expr ast.Expr) ast.Expr {
+	if star, ok := expr.(*ast.StarExpr); ok {
+		return star.X
+	}
+	return expr
+}
+
+// keepsDomainPresetOnRead reports a guard over a read that takes a context
+// (storage, network) whose target was preset to another package's constant:
+//
+//	fxSource := domain.FXSourceProvider
+//	if project, err := repo.GetByID(ctx, id); err == nil { fxSource = project.FXSource }
+//
+// The preset is not a default of this code but a domain choice made up for
+// the failure: a broken read takes the money path the record never chose.
+func keepsDomainPresetOnRead(fn *ast.FuncDecl, stmt *ast.IfStmt, source *ast.CallExpr) bool {
+	if source == nil || len(source.Args) == 0 || !isIdentNamed(source.Args[0], "ctx") {
+		return false
+	}
+	for name := range guardAssignTargets(stmt.Body) {
+		if presetToPackageConstant(fn.Body, stmt, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// presetToPackageConstant reports a `name := pkg.Const` before the guard,
+// where pkg is not a variable of the function.
+func presetToPackageConstant(body *ast.BlockStmt, stmt *ast.IfStmt, name string) bool {
+	preset := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.Pos() >= stmt.Pos() || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			return true
+		}
+		if !isIdentNamed(assign.Lhs[0], name) {
+			return true
+		}
+		sel, ok := assign.Rhs[0].(*ast.SelectorExpr)
+		if !ok || !sel.Sel.IsExported() {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		preset = ok && pkg.Obj == nil && !strings.Contains(strings.ToLower(sel.Sel.Name), "default")
+		return true
+	})
+	return preset
 }
 
 // zeroStateHandledAfter ищет после guard'а явную проверку нулевого состояния:

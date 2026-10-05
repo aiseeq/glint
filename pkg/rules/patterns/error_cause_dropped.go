@@ -158,6 +158,9 @@ func (r *ErrorCauseDroppedRule) droppedCauseEmission(body *ast.BlockStmt, errNam
 // whose text is a string literal: errors.New("…"), fmt.Errorf("…") without cause,
 // http.Error(w, "…", 500), writeError(w, 500, "…"), respondError(w, 500, "…", code).
 func emitsFixedMessage(call *ast.CallExpr) bool {
+	if text, ok := errorFlashText(call); ok {
+		return !selfExplanatoryText.MatchString(text)
+	}
 	if !callCreatesError(call) && !isErrorResponder(call) {
 		return false
 	}
@@ -186,6 +189,28 @@ func emitsFixedMessage(call *ast.CallExpr) bool {
 		return true
 	}
 	return false
+}
+
+// errorFlashLevels are the levels a flash message or a redirect helper takes
+// for a failure.
+var errorFlashLevels = map[string]bool{"error": true, "danger": true, "err": true, "fail": true, "failure": true}
+
+// errorFlashText returns the literal message of a flash or redirect helper
+// called with an error level: redirectProjects(w, r, "error", "Cannot delete").
+// The level is the argument right before the message.
+func errorFlashText(call *ast.CallExpr) (string, bool) {
+	for i := 0; i+1 < len(call.Args); i++ {
+		level, ok := stringLiteral(call.Args[i])
+		if !ok || !errorFlashLevels[strings.ToLower(level)] {
+			continue
+		}
+		text, ok := stringLiteral(call.Args[i+1])
+		if !ok || strings.TrimSpace(text) == "" {
+			return "", false
+		}
+		return text, true
+	}
+	return "", false
 }
 
 // selfExplanatoryText matches validation verdicts: a message that says what was expected

@@ -113,3 +113,57 @@ func (c *Calc) warm(ctx context.Context) {
 `,
 	}))
 }
+
+// A loop over pairs read from configuration that fetches each from a remote
+// client and logs and skips every failure: a timeout or a block drops the
+// pair like a missing page, and the run reports success. A branch that
+// classifies the error keeps the skip a decision.
+func TestAggregateSkipsFailedPart_RemoteFetchSkipsEveryError(t *testing.T) {
+	const source = `package sched
+
+func (r *Refresher) fetchAll(ctx context.Context, pairs [][2]string) error {
+	var stored []Rate
+	for _, pair := range pairs {
+		rate, err := r.client.FetchRate(ctx, pair[0], pair[1])
+		if err != nil {
+			r.logger.Warn("fetch failed", "error", err)
+			continue
+		}
+		stored = append(stored, NewRate(pair, rate))
+	}
+	return r.store.Save(ctx, stored)
+}
+
+func (r *Refresher) fetchKnown(ctx context.Context, pairs [][2]string) error {
+	var stored []Rate
+	for _, pair := range pairs {
+		rate, err := r.client.FetchRate(ctx, pair[0], pair[1])
+		if err != nil {
+			if !errors.Is(err, ErrNoPage) {
+				return err
+			}
+			continue
+		}
+		stored = append(stored, NewRate(pair, rate))
+	}
+	return r.store.Save(ctx, stored)
+}
+
+func (s *Importer) importRows(ctx context.Context, rows []Row) error {
+	var saved []Item
+	for _, row := range rows {
+		item, err := parseRow(row)
+		if err != nil {
+			s.logger.Warn("bad row", "error", err)
+			continue
+		}
+		saved = append(saved, item)
+	}
+	return s.store.Save(ctx, saved)
+}
+`
+	rule := NewAggregateSkipsFailedPartRule()
+	ctx := rulestest.GoFile(t, "sched/refresh.go", source)
+	rule.UseProjectFiles([]*core.FileContext{ctx})
+	assert.Equal(t, []int{7}, violationLines(rule.AnalyzeFile(ctx)))
+}

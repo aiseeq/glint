@@ -424,7 +424,7 @@ func NewDefaultInventsDomainValueRule() *DefaultInventsDomainValueRule {
 	return &DefaultInventsDomainValueRule{BaseRule: rules.NewBaseRule(
 		"default-invents-domain-value",
 		"patterns",
-		"Detects a missing network, currency or money field replaced with a made-up value in frontend code, and an unknown variant kept with a made-up domain value in a Go switch default",
+		"Detects a missing network, currency or money field replaced with a made-up value in frontend code, and in Go an unknown variant kept with a made-up domain value in a switch default, a failed rate or amount lookup answered with a made-up number, and a first-non-empty helper that fills an identity field with a literal or a company's field",
 		core.SeverityMedium,
 	)}
 }
@@ -470,7 +470,9 @@ func moneyFieldZeroed(line string) bool {
 func (r *DefaultInventsDomainValueRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if ctx.HasGoAST() {
 		return analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
-			return r.checkGoSwitchDefaults(ctx, fn)
+			violations := r.checkGoSwitchDefaults(ctx, fn)
+			violations = append(violations, r.checkGoLookupMissLiterals(ctx, fn)...)
+			return append(violations, r.checkGoCoalesceDefaults(ctx, fn)...)
 		})
 	}
 	if !productionFrontendFile(ctx) {
@@ -612,7 +614,7 @@ func NewMissingAmountCoercedToZeroRule() *MissingAmountCoercedToZeroRule {
 	return &MissingAmountCoercedToZeroRule{BaseRule: rules.NewBaseRule(
 		"missing-amount-coerced-to-zero",
 		"patterns",
-		"Detects a parser that turns unreadable input into 0, applied to money fields — a missing amount becomes a zero amount",
+		"Detects a parser that turns unreadable input into 0, applied to money fields, and in Go a nil amount replaced with decimal.Zero — a missing amount becomes a zero amount",
 		core.SeverityHigh,
 	)}
 }
@@ -627,6 +629,9 @@ const jsMoneyArgument = `\s*\(\s*[\w$.?\[\]]*\.\s*\w*(?:[Aa]mount|[Ff]ee|[Bb]ala
 
 // AnalyzeFile reports the zero-answering parsers used on money.
 func (r *MissingAmountCoercedToZeroRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if ctx.HasGoAST() {
+		return r.analyzeGoMissingAmounts(ctx)
+	}
 	if !productionFrontendFile(ctx) {
 		return nil
 	}

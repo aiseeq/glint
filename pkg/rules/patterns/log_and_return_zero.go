@@ -118,6 +118,10 @@ func (r *LogAndReturnZeroRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 				}
 			}
 		})
+		if ret := unparsedInputReturned(fn, inputs); ret != nil {
+			violations = append(violations, r.violationAt(ctx, ret,
+				"Input that none of the parsers read is returned unchanged — the caller takes the raw text for a parsed value"))
+		}
 		violations = append(violations, r.checkConstructorLeftUnset(ctx, fn)...)
 		violations = append(violations, r.checkWriteMissingFromResultError(ctx, fn)...)
 
@@ -208,6 +212,64 @@ func derivedOnlyFrom(expr ast.Expr, inputs map[string]bool) bool {
 		return true
 	})
 	return usesInput && !other
+}
+
+// unparsedInputReturned returns the final `return value` of a function that
+// tries parsers on its input and returns the parsed form on success:
+//
+//	for _, layout := range layouts {
+//	    if parsed, err := time.Parse(layout, value); err == nil { return parsed.Format(...) }
+//	}
+//	return value // text no layout reads passes for a date
+//
+// The function has no error result, so the failure leaves without a sign.
+func unparsedInputReturned(fn *ast.FuncDecl, inputs map[string]bool) *ast.ReturnStmt {
+	if len(fn.Body.List) == 0 || fn.Type.Results.NumFields() != 1 {
+		return nil
+	}
+	ret, ok := fn.Body.List[len(fn.Body.List)-1].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return nil
+	}
+	input, ok := ret.Results[0].(*ast.Ident)
+	if !ok || !inputs[input.Name] {
+		return nil
+	}
+	// The parsers are tried in a loop (layouts, formats) on the value that is
+	// returned: one parse with a default parameter is an env helper's shape.
+	parses := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		var body *ast.BlockStmt
+		switch loop := n.(type) {
+		case *ast.RangeStmt:
+			body = loop.Body
+		case *ast.ForStmt:
+			body = loop.Body
+		default:
+			return !parses
+		}
+		for _, stmt := range body.List {
+			ifStmt, ok := stmt.(*ast.IfStmt)
+			if !ok {
+				continue
+			}
+			errName, ok := successGuardErrName(ifStmt.Cond)
+			if !ok || len(ifStmt.Body.List) != 1 {
+				continue
+			}
+			source := errSourceExpr(fn.Body, ifStmt, errName)
+			if !isParseCall(source) || !slices.ContainsFunc(source.Args, func(arg ast.Expr) bool { return isIdentNamed(arg, input.Name) }) {
+				continue
+			}
+			success, ok := ifStmt.Body.List[0].(*ast.ReturnStmt)
+			parses = parses || ok && len(success.Results) == 1 && !derivedOnlyFrom(success.Results[0], inputs)
+		}
+		return !parses
+	})
+	if !parses {
+		return nil
+	}
+	return ret
 }
 
 // returnsInputFallback reports a single-value return of an input while

@@ -272,3 +272,48 @@ func business(r repo) (int, error) {
 `)
 	require.Len(t, found, 1, "ошибка выброшена внутри guard'а: %v", found)
 }
+
+// A domain choice preset to one constant and overwritten only when the
+// storage read succeeds: a failed read silently picks the preset for the
+// money path, while a config default or a local refinement stays forgiven.
+func TestErrorMasking_SuccessOnlyGuardKeepsDomainPresetOnIOFailure(t *testing.T) {
+	found := successGuardViolations(t, `package dashboard
+
+func source(ctx context.Context, repo Repo, id int64) string {
+	fxSource := domain.FXSourceProvider
+	if project, err := repo.GetByID(ctx, id); err == nil {
+		fxSource = project.FXSource
+	}
+	return fxSource
+}
+
+func timeout(path string) int {
+	limit := config.DefaultLimit
+	if cfg, err := load(path); err == nil {
+		limit = cfg.Limit
+	}
+	return limit
+}
+`)
+	require.Len(t, found, 1, "%v", found)
+}
+
+// A filter field set only when its text parses: a bad date drops the bound
+// and the list widens to everything instead of answering 400.
+func TestErrorMasking_SuccessOnlyGuardDropsFilterField(t *testing.T) {
+	found := successGuardViolations(t, `package dashboard
+
+func parseRange(fromStr, toStr string, filter *storage.ListFilter) {
+	if t, err := time.Parse("2006-01-02", fromStr); err == nil {
+		filter.DateFrom = &t
+	}
+}
+
+func refine(text string, out *Report) {
+	if n, err := strconv.Atoi(text); err == nil {
+		out.Count = n
+	}
+}
+`)
+	require.Len(t, found, 1, "%v", found)
+}

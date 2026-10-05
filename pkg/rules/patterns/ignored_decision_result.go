@@ -61,7 +61,7 @@ func NewIgnoredDecisionResultRule() *IgnoredDecisionResultRule {
 		BaseRule: rules.NewBaseRule(
 			"ignored-decision-result",
 			"patterns",
-			"Detects a dropped bool result of a function that decides whether the action may happen — the action then happens anyway",
+			"Detects a dropped bool result of a function that decides whether the action may happen — the action then happens anyway — and a failure flag result (invalid, failed) whose only reader is a branch that logs and goes on with the fallback",
 			core.SeverityHigh,
 		),
 	}
@@ -129,6 +129,8 @@ func (r *IgnoredDecisionResultRule) analyzeFile(
 			}
 		case *ast.AssignStmt:
 			violations = append(violations, r.checkAssign(fileCtx, node, pkg, docs)...)
+		case *ast.BlockStmt:
+			violations = append(violations, r.checkFlagsReadByLogs(fileCtx, node, pkg)...)
 		}
 		return true
 	})
@@ -167,6 +169,94 @@ func (r *IgnoredDecisionResultRule) checkAssign(
 		return []*core.Violation{r.report(fileCtx, call, fn)}
 	}
 	return nil
+}
+
+// failureFlagNames are the names of a bool result that says the input was
+// refused and the other results are a fallback.
+var failureFlagNames = map[string]bool{
+	"invalid": true, "failed": true, "malformed": true, "rejected": true, "denied": true, "unauthorized": true,
+}
+
+// checkFlagsReadByLogs reports a failure flag result whose only reader is a
+// branch that logs and goes on:
+//
+//	ids, _, invalid := resolveScope(text, allowed)
+//	if invalid { logger.Warn("invalid scope") }
+//	return ids // the fallback the resolver answered the bad input with
+//
+// The resolver marked its other results as a fallback; the caller uses them
+// as an answer.
+func (r *IgnoredDecisionResultRule) checkFlagsReadByLogs(fileCtx *core.FileContext, block *ast.BlockStmt, pkg *packages.Package) []*core.Violation {
+	var violations []*core.Violation
+	for i := 0; i+1 < len(block.List); i++ {
+		flag, fn := failureFlagAssigned(block.List[i], pkg)
+		if flag == "" {
+			continue
+		}
+		ifStmt, ok := block.List[i+1].(*ast.IfStmt)
+		if !ok || ifStmt.Init != nil || ifStmt.Else != nil || !isIdentNamed(ifStmt.Cond, flag) || !allStmtsAreLogs(ifStmt.Body.List) {
+			continue
+		}
+		if readsAfter(block.List[i+2:], flag) {
+			continue
+		}
+		line := fileCtx.LineFor(ifStmt)
+		v := r.CreateViolation(fileCtx.RelPath, line,
+			fmt.Sprintf("%s reports %s, and the branch only logs it - the fallback %s answered the bad input with is used as the result", fn.Name(), flag, fn.Name()))
+		v.WithCode(strings.TrimSpace(fileCtx.GetLine(line)))
+		v.WithSuggestion("Refuse the request in the branch, or make the function return an error instead of a fallback")
+		v.WithContext("pattern", "failure_flag_only_logged")
+		violations = append(violations, v)
+	}
+	return violations
+}
+
+// failureFlagAssigned returns the variable that receives a failure flag
+// result of the called function, and the function.
+func failureFlagAssigned(stmt ast.Stmt, pkg *packages.Package) (string, *types.Func) {
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || len(assign.Rhs) != 1 {
+		return "", nil
+	}
+	call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+	if !ok {
+		return "", nil
+	}
+	fn := calleeFunc(pkg, call)
+	if fn == nil {
+		return "", nil
+	}
+	signature, ok := fn.Type().(*types.Signature)
+	if !ok || signature.Results().Len() != len(assign.Lhs) || signature.Results().Len() < 2 {
+		return "", nil
+	}
+	for i := 0; i < signature.Results().Len(); i++ {
+		result := signature.Results().At(i)
+		if !isBoolType(result.Type()) || !failureFlagNames[strings.ToLower(result.Name())] {
+			continue
+		}
+		if ident, ok := assign.Lhs[i].(*ast.Ident); ok && ident.Name != "_" {
+			return ident.Name, fn
+		}
+	}
+	return "", nil
+}
+
+// readsAfter reports a statement that reads the name.
+func readsAfter(stmts []ast.Stmt, name string) bool {
+	for _, stmt := range stmts {
+		found := false
+		ast.Inspect(stmt, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == name {
+				found = true
+			}
+			return !found
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 // decisionCallee returns the called function when its bool result is a decision

@@ -45,7 +45,7 @@ func NewSilentlyOptionalDependencyRule() *SilentlyOptionalDependencyRule {
 		BaseRule: rules.NewBaseRule(
 			"silently-optional-dependency",
 			"patterns",
-			"Detects a setter-injected dependency that some construction site leaves unset, silently turning a feature off",
+			"Detects a setter-injected dependency that some construction site leaves unset, silently turning a feature off, and a mode flag a constructor derives from a dependency being non-nil that switches the code into a mock",
 			core.SeverityHigh,
 		),
 	}
@@ -211,6 +211,8 @@ func (r *SilentlyOptionalDependencyRule) AnalyzeGoProject(ctx *core.GoProjectCon
 			violations = append(violations, v)
 		}
 	}
+
+	violations = append(violations, r.nilSwitchedStandInModes(ctx)...)
 
 	sort.Slice(violations, func(i, j int) bool {
 		if violations[i].File != violations[j].File {

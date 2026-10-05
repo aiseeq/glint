@@ -143,14 +143,21 @@ func (r *AggregateSkipsFailedPartRule) AnalyzeFile(ctx *core.FileContext) []*cor
 				return false // checked with its own results
 			}
 			loop, ok := n.(*ast.RangeStmt)
-			if !ok || !fixedList(loop.X, lists) {
+			if !ok {
 				return true
 			}
-			if skip := skippedFailure(loop); skip != nil {
+			message := "A failed item of a fixed list is logged and skipped while the loop builds a total — the result is computed from part of the list and returned as complete"
+			var skip *ast.IfStmt
+			if fixedList(loop.X, lists) {
+				skip = skippedFailure(loop, nil)
+			} else {
+				skip = skippedFailure(loop, remoteFetchSkippedBlindly)
+				message = "A failed remote fetch is logged and skipped whatever the error — a timeout drops the item like a missing one, and the result is returned as complete"
+			}
+			if skip != nil {
 				line := ctx.LineFor(skip)
 				if !ctx.IsSuppressed(line, r.Name()) {
-					v := r.CreateViolation(ctx.RelPath, line,
-						"A failed item of a fixed list is logged and skipped while the loop builds a total — the result is computed from part of the list and returned as complete")
+					v := r.CreateViolation(ctx.RelPath, line, message)
 					v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
 					v.WithSuggestion("Return the error (wrapped with the item), or report the result as partial to the caller")
 					violations = append(violations, v)
@@ -183,14 +190,17 @@ func fixedList(expr ast.Expr, lists map[string]bool) bool {
 // skippedFailure returns the if of the loop body that continues past a
 // failed call whose result the loop then accumulates into a variable from
 // outside the loop, nil when there is none.
-func skippedFailure(loop *ast.RangeStmt) *ast.IfStmt {
+//
+// accept, when set, narrows the failed calls that count.
+func skippedFailure(loop *ast.RangeStmt, accept func(call *ast.CallExpr, check *ast.IfStmt, errName string) bool) *ast.IfStmt {
 	list := loop.Body.List
 	for i := 0; i+1 < len(list); i++ {
 		assign, ok := list[i].(*ast.AssignStmt)
 		if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) < 2 {
 			continue
 		}
-		if _, isCall := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr); !isCall {
+		call, isCall := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+		if !isCall {
 			continue
 		}
 		errVar, ok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
@@ -207,6 +217,9 @@ func skippedFailure(loop *ast.RangeStmt) *ast.IfStmt {
 		if !ok || !errNotNil(check.Cond, errVar.Name) || !continuesOnly(check.Body) {
 			continue
 		}
+		if accept != nil && !accept(call, check, errVar.Name) {
+			continue
+		}
 		for _, stmt := range list[i+2:] {
 			if accumulates(stmt, values, loop.Pos()) {
 				return check
@@ -214,6 +227,47 @@ func skippedFailure(loop *ast.RangeStmt) *ast.IfStmt {
 		}
 	}
 	return nil
+}
+
+// remoteFetchSkippedBlindly reports a fetch through a client (r.client.Fetch,
+// api.GetRate) whose failure branch does not look at the kind of the error:
+// a missing item and a timeout are skipped alike.
+func remoteFetchSkippedBlindly(call *ast.CallExpr, check *ast.IfStmt, errName string) bool {
+	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || !fetchesData(sel.Sel.Name) || !namesClient(sel.X) {
+		return false
+	}
+	classified := false
+	ast.Inspect(check.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.IfStmt:
+			classified = classified || classifiesError(node.Cond, errName)
+		case *ast.TypeSwitchStmt, *ast.SwitchStmt:
+			classified = true
+		case *ast.CallExpr:
+			if name := callName(node); name == "As" || name == "Is" {
+				classified = true
+			}
+		}
+		return !classified
+	})
+	return !classified
+}
+
+// namesClient reports a receiver chain ending in a field or variable named
+// for a remote client: r.client, api, ratesAPI.
+func namesClient(expr ast.Expr) bool {
+	name := ""
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		name = e.Name
+	case *ast.SelectorExpr:
+		name = e.Sel.Name
+	default:
+		return false
+	}
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, "client") || lower == "api" || strings.HasSuffix(name, "API")
 }
 
 // errNotNil reports the condition err != nil.

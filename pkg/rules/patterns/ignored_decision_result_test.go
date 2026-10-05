@@ -221,3 +221,40 @@ func TestBuy(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, violations)
 }
+
+// A resolver answers a malformed input with a widened fallback and an invalid
+// flag; the caller reads the flag only to log it and then lists with the
+// fallback, so a bad filter shows everything the user may see instead of a
+// refusal. A branch that refuses keeps the flag's meaning.
+func TestIgnoredDecisionResultReportsFlagReadOnlyByLog(t *testing.T) {
+	violations := analyzeDecision(t, `package budget
+
+import "log/slog"
+
+func resolveScope(text string, allowed []int) (ids []int, selected int, invalid bool) {
+	if text == "" {
+		return allowed, 0, false
+	}
+	return allowed, 0, true
+}
+
+func list(logger *slog.Logger, text string, allowed []int) []int {
+	ids, _, invalid := resolveScope(text, allowed)
+	if invalid {
+		logger.Warn("invalid scope", "scope", text)
+	}
+	return ids
+}
+
+func export(logger *slog.Logger, text string, allowed []int) ([]int, bool) {
+	ids, _, invalid := resolveScope(text, allowed)
+	if invalid {
+		logger.Warn("invalid scope", "scope", text)
+		return nil, false
+	}
+	return ids, true
+}
+`)
+	require.Len(t, violations, 1)
+	assert.Equal(t, 14, violations[0].Line)
+}
