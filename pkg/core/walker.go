@@ -299,6 +299,12 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 	if isDockerfileName(filepath.Base(path)) {
 		return true // image build rules (rules must guard with IsDockerfile)
 	}
+	if IsComposeFileName(filepath.Base(path)) {
+		return true // deploy rules (rules must guard with IsComposeFile)
+	}
+	if isEnvTemplateName(filepath.Base(path)) {
+		return true // deploy env rules (rules must guard with IsEnvTemplate)
+	}
 
 	for _, e := range analyzableExtensions {
 		if ext == e {

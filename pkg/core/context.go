@@ -130,6 +130,37 @@ func isDockerfileName(name string) bool {
 	return strings.HasSuffix(strings.ToLower(name), ".dockerfile")
 }
 
+// IsComposeFile reports a Compose file: compose.yaml, docker-compose.yml and
+// their variants (docker-compose.prod.yml, compose.override.yaml).
+func (ctx *FileContext) IsComposeFile() bool {
+	return IsComposeFileName(filepath.Base(ctx.Path))
+}
+
+// IsComposeFileName reports the base name of a Compose file.
+func IsComposeFileName(name string) bool {
+	lower := strings.ToLower(name)
+	if !strings.HasSuffix(lower, ".yml") && !strings.HasSuffix(lower, ".yaml") {
+		return false
+	}
+	return strings.HasPrefix(lower, "compose.") || strings.HasPrefix(lower, "docker-compose")
+}
+
+// IsEnvTemplate reports the committed template of an environment file:
+// .env.example, .env.sample, .env.template or .env.dist, with an optional
+// prefix (backend.env.example).
+func (ctx *FileContext) IsEnvTemplate() bool {
+	return isEnvTemplateName(filepath.Base(ctx.Path))
+}
+
+func isEnvTemplateName(name string) bool {
+	for _, suffix := range []string{".env.example", ".env.sample", ".env.template", ".env.dist"} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsTestFile reports whether the file is test code: a Go _test.go file, a
 // JS/TS *.test.* or *.spec.* file, or any file under a test directory of the
 // project. Directories are matched in the project-relative path: the absolute
