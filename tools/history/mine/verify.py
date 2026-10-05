@@ -73,6 +73,10 @@ def module_root(path, tree_files):
     for i in range(len(parts) - 1, 0, -1):
         if '/'.join(parts[:i]) + '/go.mod' in tree_files:
             return '/'.join(parts[:i])
+    # A module at the top of the repository is the whole tree: its packages
+    # import each other and type-check only together.
+    if 'go.mod' in tree_files:
+        return '.'
     return os.path.dirname(path) or '.'
 
 
@@ -132,13 +136,20 @@ def run(commit, tree, side, rules, anchors=(), whole=False):
         dest = os.path.join(work, 'top' if root == '.' else root.replace('/', '__'))
         shutil.rmtree(dest, ignore_errors=True)
         os.makedirs(dest)
-        # Files at the top of the repository come alone, not with the whole tree.
-        paths = [] if whole else by_root[root] if root == '.' else [root]
+        # Files at the top of the repository come alone, not with the whole
+        # tree - unless the top is a Go module, which is the whole tree.
+        top_module = root == '.' and 'go.mod' in tree_files
+        paths = [] if whole or top_module else by_root[root] if root == '.' else [root]
         archive = subprocess.run(['git', '-C', repo, 'archive', tree, *paths], capture_output=True, check=True).stdout
         # Historical trees may hold entries tar refuses (a symlink with a file
         # body): skip them, the Go and TS sources extract.
         subprocess.run(['tar', '-x', '-C', dest], input=archive, stderr=subprocess.DEVNULL)
         target = os.path.join(dest, root)
+        # Today's rules run without the project's configuration: its
+        # exceptions would hide the very findings the replay looks for.
+        for config in {os.path.join(dest, '.glint.yaml'), os.path.join(target, '.glint.yaml')}:
+            if os.path.exists(config):
+                os.remove(config)
         args = ['glint', 'check', '--tolerate-broken-packages', '--output=json', '--min-severity=low']
         if rules:
             args.append('--rule=' + ','.join(rules))
