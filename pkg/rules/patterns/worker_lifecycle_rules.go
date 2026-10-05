@@ -226,7 +226,7 @@ func droppingSend(info *types.Info, sel *ast.SelectStmt) (*types.Var, *ast.CommC
 		}
 		queue = v
 	}
-	if queue == nil || drop == nil || !onlyLogs(drop.Body) {
+	if queue == nil || drop == nil || (len(drop.Body) > 0 && !onlyLogs(&ast.BlockStmt{List: drop.Body})) {
 		return nil, nil
 	}
 	return queue, drop
@@ -244,21 +244,6 @@ func signalValue(t types.Type) bool {
 		return u.Kind() == types.Bool
 	}
 	return false
-}
-
-// onlyLogs reports statements that do nothing but log.
-func onlyLogs(stmts []ast.Stmt) bool {
-	for _, stmt := range stmts {
-		expr, ok := stmt.(*ast.ExprStmt)
-		if !ok {
-			return false
-		}
-		call, ok := expr.X.(*ast.CallExpr)
-		if !ok || !isLoggerCall(call) {
-			return false
-		}
-	}
-	return true
 }
 
 // queueConsumer returns the name of a loaded function that receives from
@@ -1020,8 +1005,11 @@ func expiryHandedOn(info *types.Info, body *ast.BlockStmt, value ast.Expr) bool 
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || found || isLoggerCall(call) {
+		if !ok || found {
 			return !found
+		}
+		if helpers.IsLoggerCall(call) {
+			return false
 		}
 		for _, arg := range call.Args {
 			if ident, ok := ast.Unparen(arg).(*ast.Ident); ok && info.ObjectOf(ident) == obj {

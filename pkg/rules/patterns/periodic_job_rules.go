@@ -429,28 +429,16 @@ func doesWork(stmts []ast.Stmt) bool {
 	found := false
 	for _, stmt := range stmts {
 		ast.Inspect(stmt, func(n ast.Node) bool {
-			if call, ok := n.(*ast.CallExpr); ok && !isLoggerCall(call) {
-				found = true
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return !found
 			}
-			return !found
+			if helpers.IsLoggerCall(call) {
+				return false
+			}
+			found = true
+			return false
 		})
 	}
 	return found
-}
-
-// isLoggerCall reports a call on a logger: r.logger.Info, slog.Warn, log.Printf.
-func isLoggerCall(call *ast.CallExpr) bool {
-	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	var base string
-	switch x := ast.Unparen(sel.X).(type) {
-	case *ast.Ident:
-		base = x.Name
-	case *ast.SelectorExpr:
-		base = x.Sel.Name
-	}
-	words := helpers.IdentifierWords(base)
-	return slices.Contains(words, "log") || slices.Contains(words, "logger") || slices.Contains(words, "slog")
 }

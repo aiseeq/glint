@@ -125,6 +125,7 @@ func (t *Table) dropUnique(name string) {
 	for _, columnName := range t.foreign[name] {
 		if column := t.Column(columnName); column != nil {
 			column.References = ""
+			column.RestrictsDelete = false
 		}
 	}
 	delete(t.foreign, name)
@@ -146,6 +147,9 @@ type Column struct {
 	// References is the table a foreign key of the column points to, "" for
 	// a column without one.
 	References string
+	// RestrictsDelete marks a foreign key with no ON DELETE action (or with
+	// RESTRICT): a delete of the row it points to fails while it does.
+	RestrictsDelete bool
 }
 
 // Table returns the table or view named name, or nil.
@@ -489,9 +493,13 @@ func (t *Table) applyConstraint(constraint *pgquery.Constraint) {
 // addForeign records a foreign key of the columns to the table it references.
 func (t *Table) addForeign(constraint *pgquery.Constraint, columns []string) {
 	target := strings.ToLower(constraint.GetPktable().GetRelname())
+	// pg_query spells the action as the catalog does: a NO ACTION, r
+	// RESTRICT, c CASCADE, n SET NULL, d SET DEFAULT.
+	action := constraint.GetFkDelAction()
 	for _, name := range columns {
 		if column := t.Column(name); column != nil {
 			column.References = target
+			column.RestrictsDelete = action == "" || action == "a" || action == "r"
 		}
 	}
 	if name := strings.ToLower(constraint.GetConname()); name != "" {
