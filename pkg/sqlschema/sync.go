@@ -19,6 +19,33 @@ const (
 // a column of the new row: NEW.updated_at = NOW().
 var stampAssignment = regexp.MustCompile(`(?i)\bNEW\.(\w+)\s*:?=\s*(?:now\s*\(\s*\)|current_timestamp|localtimestamp|clock_timestamp\s*\(\s*\)|statement_timestamp\s*\(\s*\)|transaction_timestamp\s*\(\s*\))`)
 
+// stampFunc is a trigger function's stamp: the column and whether an IF
+// guards the assignment.
+type stampFunc struct {
+	column      string
+	conditional bool
+}
+
+// plpgsqlIf and plpgsqlEndIf open and close a PL/pgSQL IF block; IF EXISTS
+// of a DDL statement is not one.
+var (
+	plpgsqlIf    = regexp.MustCompile(`(?i)\b(?:ELS)?IF\b(?:\s+NOT)?(?:\s+EXISTS\b)?`)
+	plpgsqlEndIf = regexp.MustCompile(`(?i)\bEND\s+IF\b`)
+)
+
+// insideIf reports an offset of a PL/pgSQL body inside an IF block.
+func insideIf(body string, offset int) bool {
+	before := plpgsqlEndIf.ReplaceAllString(body[:offset], " ENDIF ")
+	depth := 0
+	for _, m := range plpgsqlIf.FindAllString(before, -1) {
+		if strings.HasSuffix(strings.ToUpper(m), "EXISTS") || strings.HasPrefix(strings.ToUpper(m), "ELSIF") {
+			continue
+		}
+		depth++
+	}
+	return depth > strings.Count(before, " ENDIF ")
+}
+
 // function records a trigger function that stamps a column of the new row.
 func (s *Schema) function(stmt *pgquery.CreateFunctionStmt) {
 	name := qualifiedName(stmt.GetFuncname())
@@ -28,11 +55,12 @@ func (s *Schema) function(stmt *pgquery.CreateFunctionStmt) {
 			continue
 		}
 		for _, item := range def.GetArg().GetList().GetItems() {
-			if m := stampAssignment.FindStringSubmatch(item.GetString_().GetSval()); m != nil {
+			body := item.GetString_().GetSval()
+			if m := stampAssignment.FindStringSubmatchIndex(body); m != nil {
 				if s.stampFuncs == nil {
-					s.stampFuncs = make(map[string]string)
+					s.stampFuncs = make(map[string]stampFunc)
 				}
-				s.stampFuncs[name] = strings.ToLower(m[1])
+				s.stampFuncs[name] = stampFunc{column: strings.ToLower(body[m[2]:m[3]]), conditional: insideIf(body, m[0])}
 				return
 			}
 		}
@@ -43,12 +71,12 @@ func (s *Schema) function(stmt *pgquery.CreateFunctionStmt) {
 // trigger marks the table of a BEFORE UPDATE trigger whose function stamps a
 // column of the new row.
 func (s *Schema) trigger(stmt *pgquery.CreateTrigStmt) {
-	column, ok := s.stampFuncs[qualifiedName(stmt.GetFuncname())]
+	stamp, ok := s.stampFuncs[qualifiedName(stmt.GetFuncname())]
 	if !ok || stmt.GetTiming()&triggerBefore == 0 || stmt.GetEvents()&triggerUpdate == 0 {
 		return
 	}
 	if table := s.Table(stmt.GetRelation().GetRelname()); table != nil {
-		table.stamped = column
+		table.stamped, table.stampConditional = stamp.column, stamp.conditional
 	}
 }
 
@@ -97,6 +125,58 @@ func UpdatedTables(sql string) []string {
 	slices.Sort(tables)
 	return slices.Compact(tables)
 }
+
+// StampOverwrite is an UPDATE that writes its own value into the column a
+// BEFORE UPDATE trigger stamps with the current time: the trigger replaces it.
+type StampOverwrite struct {
+	Table, Column string
+}
+
+// StampOverwrites returns the assignments of a statement's UPDATEs to a
+// column stamped on every update with a value other than the current time.
+// A stamp under an IF is left out: the write may leave its condition false.
+func (s *Schema) StampOverwrites(sql string) []StampOverwrite {
+	if s == nil {
+		return nil
+	}
+	result, _, ok := parseCode(sql)
+	if !ok {
+		return nil
+	}
+	var overwrites []StampOverwrite
+	for _, raw := range result.GetStmts() {
+		walk(raw.GetStmt().ProtoReflect(), func(m proto.Message) {
+			update, ok := m.(*pgquery.UpdateStmt)
+			if !ok {
+				return
+			}
+			table := s.Table(update.GetRelation().GetRelname())
+			if table == nil || table.stamped == "" || table.stampConditional {
+				return
+			}
+			for _, target := range update.GetTargetList() {
+				res := target.GetResTarget()
+				if strings.EqualFold(res.GetName(), table.stamped) && !isCurrentTime(res.GetVal()) {
+					overwrites = append(overwrites, StampOverwrite{Table: table.Name, Column: table.stamped})
+				}
+			}
+		})
+	}
+	return overwrites
+}
+
+// isCurrentTime reports NOW(), CURRENT_TIMESTAMP and their kin: the value the
+// trigger writes anyway.
+func isCurrentTime(node *pgquery.Node) bool {
+	if node.GetSqlvalueFunction() != nil {
+		return true
+	}
+	call := node.GetFuncCall()
+	return call != nil && len(call.GetArgs()) == 0 &&
+		currentTimeFunc.MatchString(qualifiedName(call.GetFuncname()))
+}
+
+var currentTimeFunc = regexp.MustCompile(`^(?:now|clock_timestamp|statement_timestamp|transaction_timestamp)$`)
 
 // voidStatus is a status value that takes a row out of the books: a
 // reversed, cancelled or voided record.

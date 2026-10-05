@@ -36,7 +36,7 @@ type Schema struct {
 	pending map[string][]*pgquery.AlterTableStmt
 	// stampFuncs are the trigger functions that set a column of the new row
 	// to the current time (NEW.updated_at = NOW()), by function name.
-	stampFuncs map[string]string
+	stampFuncs map[string]stampFunc
 	// file and text are the migration being applied.
 	file, text string
 }
@@ -68,6 +68,10 @@ type Table struct {
 	// stamped is the column a BEFORE UPDATE trigger sets to the current time
 	// on every update of a row, "" for none.
 	stamped string
+	// stampConditional marks a stamp the trigger makes only under an IF
+	// (a changed status): a write that leaves the condition false keeps its
+	// own value.
+	stampConditional bool
 }
 
 // partialKey is a unique index with a WHERE: no two rows the predicate
