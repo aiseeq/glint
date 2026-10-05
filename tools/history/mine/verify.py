@@ -38,7 +38,7 @@ while rest:
         sys.exit(f'unknown argument {flag} {value}: expected --sibling NAME=REPO')
     siblings[name] = os.path.expanduser(path)
 LOCAL_REPLACE = re.compile(r'=>\s*(\.\.?/\S+)')
-CODE = re.compile(r'\.(go|ts|tsx|js|jsx|mjs|sh|mk|dockerfile)$|(^|/)(GNUmakefile|[Mm]akefile|Dockerfile(\.[\w-]+)?|Containerfile|(docker-)?compose[\w.-]*\.ya?ml)$')
+CODE = re.compile(r'\.(go|ts|tsx|js|jsx|mjs|sh|mk|dockerfile|html|tmpl|gohtml)$|(^|/)(GNUmakefile|[Mm]akefile|Dockerfile(\.[\w-]+)?|Containerfile|(docker-)?compose[\w.-]*\.ya?ml)$')
 
 
 def git(*args):

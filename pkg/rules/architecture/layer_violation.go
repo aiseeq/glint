@@ -12,6 +12,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -116,13 +117,6 @@ func (r *LayerViolationRule) checkRepositoryViolations(ctx *core.FileContext, in
 // (pgx/v5/pgxpool).
 var sqlPackages = []string{"database/sql", "github.com/jmoiron/sqlx", "github.com/jackc/pgx"}
 
-// sqlMethods are the methods of a database handle that run or prepare SQL.
-var sqlMethods = []string{
-	"Query", "QueryRow", "QueryContext", "QueryRowContext",
-	"Exec", "ExecContext", "Prepare", "PrepareContext",
-	"Begin", "BeginTx",
-}
-
 // httpOperations are the net/http functions and methods that handle a
 // request or a response.
 var httpOperations = []string{"WriteHeader", "ServeHTTP", "Redirect", "ParseForm", "Cookie", "SetCookie"}
@@ -136,7 +130,7 @@ var probeQuery = regexp.MustCompile(`(?i)^\s*SELECT\s+(?:\d+|TRUE|NOW\(\)|CURREN
 // the query is a constant connectivity probe.
 func (r *LayerViolationRule) checkDirectSQLCall(ctx *core.FileContext, info *types.Info, call *ast.CallExpr, layer string) *core.Violation {
 	sel, fn, ok := calledMethod(info, call)
-	if !ok || !slices.Contains(sqlMethods, fn.Name()) || !inPackages(fn, sqlPackages) {
+	if !ok || !slices.Contains(helpers.SQLMethods, fn.Name()) || !inPackages(fn, sqlPackages) {
 		return nil
 	}
 	if query, known := constantQuery(info, fn, call); known && probeQuery.MatchString(query) {
