@@ -111,3 +111,40 @@ func TestParentUnlinks(t *testing.T) {
 	}
 	assert.Equal(t, []string{"batches", "items"}, UpdatedTables(`WITH gone AS (UPDATE items SET batch_id = NULL WHERE batch_id = $1 RETURNING id), touched AS (UPDATE batches SET updated_at = NOW() WHERE id = $1) SELECT COUNT(*) FROM gone`))
 }
+
+func TestStampOverwrites(t *testing.T) {
+	schema := syncSchema(t)
+	assert.Equal(t, []StampOverwrite{{Table: "journals", Column: "updated_at"}},
+		schema.StampOverwrites(`UPDATE journals SET updated_at = NOW() - INTERVAL '30 days' WHERE id = $1`))
+	assert.Empty(t, schema.StampOverwrites(`UPDATE journals SET updated_at = NOW(), status = 'x'`), "the trigger writes the same")
+	assert.Empty(t, schema.StampOverwrites(`UPDATE journals SET updated_at = CURRENT_TIMESTAMP`))
+	assert.Empty(t, schema.StampOverwrites(`UPDATE batches SET updated_at = $1`), "no stamping trigger")
+	assert.Empty(t, schema.StampOverwrites(`UPDATE journals SET status = 'x'`))
+}
+
+// A trigger that stamps only when the status changes keeps the value of a
+// write that leaves the status alone.
+func TestStampOverwritesSkipsConditionalStamp(t *testing.T) {
+	root := t.TempDir()
+	writeMigrations(t, root, map[string]string{
+		"migrations/001_init.up.sql": `
+CREATE TABLE requests (id UUID PRIMARY KEY, status TEXT NOT NULL, status_changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+
+CREATE OR REPLACE FUNCTION track_status() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.status IS DISTINCT FROM OLD.status THEN
+        NEW.status_changed_at := NOW();
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS requests_status ON requests;
+CREATE TRIGGER requests_status BEFORE UPDATE ON requests FOR EACH ROW EXECUTE FUNCTION track_status();
+`,
+	})
+	schema, err := Load(root, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "status_changed_at", schema.Table("requests").StampedOnUpdate())
+	assert.Empty(t, schema.StampOverwrites(`UPDATE requests SET status_changed_at = NOW() - INTERVAL '5 days' WHERE id = $1`))
+}

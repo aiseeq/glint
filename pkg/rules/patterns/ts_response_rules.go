@@ -27,19 +27,27 @@ func init() {
 		checkURLFilterEnum))
 }
 
-// tsRule is a rule over one production frontend file read as jsFlat.
+// tsRule is a rule over one TS/JS file read as jsFlat: a production
+// frontend file, or a test file for the rules about tests.
 type tsRule struct {
 	*rules.BaseRule
-	check func(r *tsRule, ctx *core.FileContext, f jsFlat) []*core.Violation
+	accept func(ctx *core.FileContext) bool
+	check  func(r *tsRule, ctx *core.FileContext, f jsFlat) []*core.Violation
 }
 
 func newTSRule(name, description string, check func(*tsRule, *core.FileContext, jsFlat) []*core.Violation) *tsRule {
-	return &tsRule{BaseRule: rules.NewBaseRule(name, "patterns", description, core.SeverityMedium), check: check}
+	return &tsRule{BaseRule: rules.NewBaseRule(name, "patterns", description, core.SeverityMedium), accept: productionFrontendFile, check: check}
 }
 
-// AnalyzeFile reads a production TS/JS file and checks it.
+// newTSTestRule makes a rule over the TS/JS test and e2e files and the test
+// runner configs.
+func newTSTestRule(name, description string, check func(*tsRule, *core.FileContext, jsFlat) []*core.Violation) *tsRule {
+	return &tsRule{BaseRule: rules.NewBaseRule(name, "patterns", description, core.SeverityMedium), accept: frontendTestFile, check: check}
+}
+
+// AnalyzeFile reads a TS/JS file the rule accepts and checks it.
 func (r *tsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !productionFrontendFile(ctx) {
+	if !r.accept(ctx) {
 		return nil
 	}
 	return r.check(r, ctx, newJSFlat(ctx))

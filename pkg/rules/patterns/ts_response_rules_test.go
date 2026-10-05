@@ -254,3 +254,84 @@ export function escapeCsvCell(value: string): string {
 `,
 	}))
 }
+
+// The mock is an untyped constant: the client's response type does not check
+// it, and it keeps the old shape after the API changes.
+func TestTestMockResponseUntypedDriftsFromAPI(t *testing.T) {
+	assert.Equal(t, []string{"frontend/e2e/tests/list-api.spec.ts:1", "frontend/e2e/tests/list-api.spec.ts:13"},
+		deployFindings(t, "test-mock-response-untyped-drifts-from-api", map[string]string{
+			"frontend/e2e/tests/list-api.spec.ts": `const MOCK_LIST = {
+  success: true,
+  data: { transactions: [{ id: 'tx-1' }], total: 1 },
+}
+const MOCK_TYPED: ListResponse = { success: true, data: { groups: [], total: 0 } }
+const MOCK_CHECKED = { success: true, data: { groups: [], total: 0 } } satisfies ListResponse
+
+async function setup(page: Page) {
+  await page.route('**/api/list', route => route.fulfill({ json: MOCK_LIST }))
+  await page.route('**/api/typed', route => route.fulfill({ json: MOCK_TYPED }))
+  await page.route('**/api/checked', route => route.fulfill({ status: 200, body: JSON.stringify(MOCK_CHECKED) }))
+  await page.route('**/api/filtered', async route => {
+    const filtered = { success: true, data: { transactions: [] } }
+    await route.fulfill({ json: filtered })
+  })
+  await page.route('**/api/again', route => route.fulfill({ json: MOCK_LIST }))
+}
+`,
+			"frontend/src/list.ts": `const DEFAULT = { rows: [] }
+route.fulfill({ json: DEFAULT })
+`,
+		}))
+}
+
+// An API spec where every request is answered by a mock never calls the API.
+func TestE2EAPISpecMocksEndpointUnderTest(t *testing.T) {
+	mocked := `test('stats', async ({ page }) => {
+  await page.route('**/api/stats', route => route.fulfill({ json: MOCK_STATS }))
+  await page.goto('/dashboard')
+})
+`
+	assert.Equal(t, []string{"e2e/tests/dashboard-api.spec.ts:2"}, deployFindings(t, "e2e-api-spec-mocks-endpoint-under-test", map[string]string{
+		"e2e/tests/dashboard-api.spec.ts": mocked,
+		"e2e/tests/dashboard-ui.spec.ts":  mocked,
+	}))
+	assert.Empty(t, deployFindings(t, "e2e-api-spec-mocks-endpoint-under-test", map[string]string{
+		"e2e/tests/dashboard-api.spec.ts": `test('stats', async ({ page, request }) => {
+  const resp = await request.get('/api/stats')
+  await page.route('**/api/other', route => route.fulfill({ json: {} }))
+})
+`,
+		"e2e/tests/users-api.spec.ts": `test('users', async ({ page }) => {
+  await page.route('**/api/users', async route => {
+    if (route.request().method() === 'DELETE') return route.fulfill({ status: 204 })
+    return route.continue()
+  })
+})
+`,
+	}))
+}
+
+// Unconditional retries hide flaky tests; retries enabled for the CI only
+// are left out.
+func TestTestRetriesMaskFlakiness(t *testing.T) {
+	assert.Equal(t, []string{"frontend/e2e/tests/slow.spec.ts:1", "frontend/playwright.config.ts:3"}, deployFindings(t, "test-retries-mask-flakiness", map[string]string{
+		"frontend/playwright.config.ts": `export default defineConfig({
+  testDir: './e2e',
+  retries: 1,
+  workers: 4,
+})
+`,
+		"frontend/e2e/tests/slow.spec.ts": `test.describe.configure({ mode: 'serial', retries: 2 })
+`,
+	}))
+	assert.Empty(t, deployFindings(t, "test-retries-mask-flakiness", map[string]string{
+		"frontend/playwright.config.ts": `export default defineConfig({
+  retries: process.env.CI ? 2 : 0,
+})
+`,
+		"frontend/src/http.ts": `const client = createClient({ retries: 3 })
+`,
+		"frontend/e2e/tests/net.spec.ts": `const api = createClient({ retries: 3 })
+`,
+	}))
+}
