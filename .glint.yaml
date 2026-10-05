@@ -5,7 +5,6 @@ settings:
   exclude:
     - "vendor/*"
     - "node_modules/*"
-    - "*_test.go"
   min_severity: medium
   output: console
 
@@ -34,6 +33,12 @@ categories:
   patterns:
     enabled: true
     rules:
+      test-email-registrable-domain:
+        exceptions:
+          - file: "pkg/rules/patterns/test_reliability_ts_test.go"
+            reason: >-
+              The addresses on registrable domains are the inputs of the
+              rule's own test: the test checks that the rule reports them.
       mock-identifier:
         exceptions:
           - files: "pkg/rules/deadcode/{stub_method,nil_return_stub}.go"
@@ -59,6 +64,17 @@ categories:
               exclusive branches — a property of the pair, not of either write
               alone. The collection is one function's writes, single digits in
               practice, so the shape cannot grow into a cost.
+
+  security:
+    enabled: true
+    rules:
+      hardcoded-secret:
+        exceptions:
+          - files: "pkg/rules/security/hardcoded_secrets*_test.go"
+            reason: >-
+              The keys and passwords there are the samples the rule's own
+              tests feed it; they are made up and the tests check that the
+              rule reports them.
 
   deadcode:
     enabled: true

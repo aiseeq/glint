@@ -29,6 +29,11 @@ func init() {
 type TestSchemaMutationWithoutCleanupRule struct {
 	*rules.BaseRule
 
+	// disposable are the functions (package.Name) that hand a test a database
+	// of its own: they create it and drop it with t.Cleanup, or call one that
+	// does.
+	disposable map[string]bool
+
 	ddl           *regexp.Regexp
 	sessionScoped *regexp.Regexp
 }
@@ -51,6 +56,112 @@ func NewTestSchemaMutationWithoutCleanupRule() *TestSchemaMutationWithoutCleanup
 // undoRegistered reports whether the function registers a deferred undo that talks to the
 // database: t.Cleanup(...) или defer, внутри которых есть вызов исполнителя SQL. Сам запрос
 // не разбирается: его правильность проверяет прогон.
+var createDatabase = regexp.MustCompile(`(?i)\bCREATE\s+DATABASE\b`)
+
+// UseProjectFiles finds the helpers that give each test a database of its
+// own: a function that runs CREATE DATABASE and registers t.Cleanup, and the
+// functions that reach one through calls by name.
+func (r *TestSchemaMutationWithoutCleanupRule) UseProjectFiles(files []*core.FileContext) {
+	r.ResetState()
+	calls := make(map[string][]string)
+	for _, ctx := range files {
+		if !ctx.IsGoFile() || ctx.GoAST == nil {
+			continue
+		}
+		pkg := ctx.GoAST.Name.Name
+		for _, decl := range ctx.GoAST.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Recv != nil {
+				continue
+			}
+			key := pkg + "." + fn.Name.Name
+			if createsDatabase(fn.Body) && registersTestCleanup(fn.Body) {
+				r.disposable[key] = true
+			}
+			calls[key] = calledFuncKeys(fn.Body, pkg)
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for key, callees := range calls {
+			if r.disposable[key] {
+				continue
+			}
+			for _, callee := range callees {
+				if r.disposable[callee] {
+					r.disposable[key], changed = true, true
+					break
+				}
+			}
+		}
+	}
+}
+
+// ResetState forgets the helpers of the previous project.
+func (r *TestSchemaMutationWithoutCleanupRule) ResetState() {
+	r.disposable = make(map[string]bool)
+}
+
+// createsDatabase reports a string literal with CREATE DATABASE in the body.
+func createsDatabase(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.BasicLit); ok && !found {
+			if text, ok := goStringLiteral(lit); ok {
+				found = createDatabase.MatchString(text)
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// registersTestCleanup reports t.Cleanup(...) on a testing handle.
+func registersTestCleanup(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && !found {
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			found = ok && sel.Sel.Name == "Cleanup" && isTestingHandle(sel.X)
+		}
+		return !found
+	})
+	return found
+}
+
+// calledFuncKeys returns the package.Name of the plain function calls in the
+// body: f() of the same package and pkg.F() of another.
+func calledFuncKeys(body *ast.BlockStmt, pkg string) []string {
+	var keys []string
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			keys = append(keys, pkg+"."+fun.Name)
+		case *ast.SelectorExpr:
+			if x, ok := fun.X.(*ast.Ident); ok {
+				keys = append(keys, x.Name+"."+fun.Sel.Name)
+			}
+		}
+		return true
+	})
+	return keys
+}
+
+// usesDisposableDatabase reports a test that gets its database from a helper
+// that creates one for it.
+func (r *TestSchemaMutationWithoutCleanupRule) usesDisposableDatabase(fn *ast.FuncDecl, pkg string) bool {
+	for _, key := range calledFuncKeys(fn.Body, pkg) {
+		if r.disposable[key] {
+			return true
+		}
+	}
+	return false
+}
+
 func undoRegistered(fn *ast.FuncDecl) bool {
 	found := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -145,7 +256,7 @@ func (r *TestSchemaMutationWithoutCleanupRule) AnalyzeFile(ctx *core.FileContext
 			continue
 		}
 		lit, sql := r.ddlLiteral(fn)
-		if lit == nil || undoRegistered(fn) {
+		if lit == nil || undoRegistered(fn) || r.usesDisposableDatabase(fn, ctx.GoAST.Name.Name) {
 			continue
 		}
 		line := ctx.LineFor(lit)

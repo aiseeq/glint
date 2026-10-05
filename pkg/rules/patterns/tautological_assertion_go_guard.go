@@ -31,7 +31,8 @@ var environmentProbes = map[string]bool{
 
 func (r *TautologicalAssertionRule) goGuardsAndSkips(ctx *core.FileContext, testify map[string]bool) []*core.Violation {
 	var violations []*core.Violation
-	forEachFunction(ctx.GoAST, func(_ string, _ *ast.FuncType, body *ast.BlockStmt) {
+	visitors := visitorBodies(ctx.GoAST)
+	forEachFunction(ctx.GoAST, func(_ string, ftype *ast.FuncType, body *ast.BlockStmt) {
 		inLoop := loopStatements(body)
 		forEachOwnStatementList(body, func(list []ast.Stmt) {
 			for i, stmt := range list {
@@ -40,11 +41,13 @@ func (r *TautologicalAssertionRule) goGuardsAndSkips(ctx *core.FileContext, test
 					continue
 				}
 				switch {
-				// A guard in a loop filters the items the test is about; a
-				// branch that only fails makes the guard the check, and so does
-				// a failure the guard returns past.
-				case ifStmt.Else == nil && !inLoop[ifStmt] && isCommaOkGuard(ifStmt) && containsValueAssertion(ifStmt.Body, testify) &&
-					!failsPastGuard(body, ifStmt):
+				// A guard in a loop or in a visitor filters the items the test
+				// is about; a branch that only fails makes the guard the check,
+				// and so does a failure the guard returns past. A helper that
+				// returns from the guard and goes on with the other kind
+				// dispatches by type.
+				case ifStmt.Else == nil && !inLoop[ifStmt] && !visitors[body] && isCommaOkGuard(ifStmt) && containsValueAssertion(ifStmt.Body, testify) &&
+					!failsPastGuard(body, ifStmt) && !dispatchesByKind(ftype, ifStmt):
 					violations = append(violations, r.violation(ctx, ctx.LineFor(ifStmt),
 						"Assertion runs only when the value is there — without it the test passes checking nothing",
 						"Assert the guard itself (require.True(t, ok)) and then the value, or fail in an else branch",
@@ -76,6 +79,48 @@ func (r *TautologicalAssertionRule) goGuardsAndSkips(ctx *core.FileContext, test
 		})
 	})
 	return violations
+}
+
+// visitorCalls are the calls that run their function argument once per item:
+// a walk over a tree or a range over a collection.
+var visitorCalls = map[string]bool{
+	"Inspect": true, "Walk": true, "WalkDir": true, "Preorder": true, "Range": true, "ForEach": true, "Each": true,
+}
+
+// visitorBodies returns the bodies of the function literals passed to a
+// visitor call.
+func visitorBodies(file *ast.File) map[*ast.BlockStmt]bool {
+	bodies := make(map[*ast.BlockStmt]bool)
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name := ""
+		switch fun := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			name = fun.Sel.Name
+		case *ast.Ident:
+			name = fun.Name
+		}
+		if !visitorCalls[name] {
+			return true
+		}
+		for _, arg := range call.Args {
+			if lit, ok := arg.(*ast.FuncLit); ok {
+				bodies[lit.Body] = true
+			}
+		}
+		return true
+	})
+	return bodies
+}
+
+// dispatchesByKind reports a guard of a function with results that returns
+// from the guard: the code after it handles the values the guard does not
+// take.
+func dispatchesByKind(ftype *ast.FuncType, guard *ast.IfStmt) bool {
+	return ftype.Results != nil && len(ftype.Results.List) > 0 && terminatesBlock(guard.Body)
 }
 
 // failsPastGuard reports a guard that returns when the value is there and

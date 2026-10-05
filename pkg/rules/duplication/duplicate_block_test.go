@@ -3,9 +3,10 @@ package duplication
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/aiseeq/glint/pkg/core"
 )
 
 func TestDuplicateBlockRule_Metadata(t *testing.T) {
@@ -202,6 +203,8 @@ func createTestContext(t *testing.T, path, code string) *core.FileContext {
 	return ctx
 }
 
+// splitLines drops the empty element strings.Split leaves after a final
+// newline, so the region tests count only the lines the source has.
 func splitLines(s string) []string {
 	var lines []string
 	start := 0

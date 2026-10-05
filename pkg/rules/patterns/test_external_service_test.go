@@ -275,7 +275,10 @@ func TestHeavy(t *testing.T) {
 				if !ok {
 					continue
 				}
-				found = append(found, rule.credentialGates(ctx, fn)...)
+				found = append(found, rule.credentialGates(ctx, fn, map[string]bool{
+					"EXTVAULT_ACCESS_KEY": true, "STRIPE_SECRET": true, "PAYPROV_APIKEY": true,
+					"PROJECTA_LIVE_EXTERNAL": true, "RUN_KEYBOARD_SUITE": true,
+				})...)
 			}
 
 			if tt.expectMatch {
@@ -511,6 +514,7 @@ func TestLiveVendorAPI(t *testing.T) {
 	}
 }
 `,
+		".env.example": "VENDOR_PUBLIC_KEY=\nVENDOR_PRIVATE_KEY=\n",
 	})
 
 	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
@@ -706,4 +710,36 @@ func Testdata() {
 	require.NoError(t, err)
 	require.Len(t, violations, 1, "%v", messages(violations))
 	assert.Contains(t, violations[0].Message, "TestFetchLive")
+}
+
+// A gate on variables that no env file of the project names is a dedicated
+// opt-in: the runner has nothing to export, and the test stays skipped.
+func TestTestExternalServiceRule_CredentialGateOutsideEnvFilesIsNotReported(t *testing.T) {
+	files := map[string]string{
+		"vault/live_test.go": `package vault
+
+import (
+	"os"
+	"testing"
+)
+
+func TestLiveVault(t *testing.T) {
+	addr := os.Getenv("LIVE_VAULT_ADDR")
+	token := os.Getenv("LIVE_VAULT_TOKEN")
+	if addr == "" || token == "" {
+		t.Skip("live vault check needs LIVE_VAULT_ADDR and LIVE_VAULT_TOKEN")
+	}
+}
+`,
+		".env": "DB_HOST=localhost\n",
+	}
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Empty(t, violations, "%v", messages(violations))
+
+	files["deploy/.env.example"] = "LIVE_VAULT_TOKEN=\n"
+	violations, err = NewTestExternalServiceRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	require.Len(t, violations, 1, "%v", messages(violations))
+	assert.Equal(t, "LIVE_VAULT_TOKEN", violations[0].Context["env"])
 }

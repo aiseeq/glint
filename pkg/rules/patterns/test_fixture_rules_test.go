@@ -43,6 +43,16 @@ func TestTestFixtureWriteOverriddenByDBTrigger(t *testing.T) {
 			"\tdb.Exec(`UPDATE batches SET updated_at = NOW() - INTERVAL '30 days' WHERE id = $1`, id)\n" +
 			"\tdb.Exec(`UPDATE batches SET updated_at = NOW(), name = 'x' WHERE id = $1`, id)\n" +
 			"\tdb.Exec(`UPDATE items SET updated_at = $2 WHERE id = $1`, id)\n" +
+			"}\n\nfunc disabled(db DB, id string) {\n" +
+			"\tdb.Exec(`ALTER TABLE batches DISABLE TRIGGER batches_touch`)\n" +
+			"\tdefer db.Exec(`ALTER TABLE batches ENABLE TRIGGER batches_touch`)\n" +
+			"\tdb.Exec(`UPDATE batches SET updated_at = NOW() - INTERVAL '1 day' WHERE id = $1`, id)\n" +
+			"}\n\nfunc replica(tx DB, id string) {\n" +
+			"\ttx.Exec(`SET LOCAL session_replication_role = 'replica'`)\n" +
+			"\ttx.Exec(`UPDATE batches SET updated_at = $2 WHERE id = $1`, id)\n" +
+			"}\n\nfunc enabledAfter(db DB, id string) {\n" +
+			"\tdb.Exec(`UPDATE batches SET updated_at = $2 WHERE id = $1`, id)\n" +
+			"\tdb.Exec(`ALTER TABLE batches DISABLE TRIGGER ALL`)\n" +
 			"}\n",
 		"repo/sync.go": "package repo\n\nfunc backfill(db DB) {\n" +
 			"\tdb.Exec(`UPDATE batches SET updated_at = $1`)\n" +
@@ -61,7 +71,7 @@ func TestTestFixtureWriteOverriddenByDBTrigger(t *testing.T) {
 			lines = append(lines, v.Line)
 		}
 	}
-	assert.Equal(t, []int{4}, lines)
+	assert.Equal(t, []int{4, 21}, lines)
 }
 
 const proxySignalHelper = `package client

@@ -3,7 +3,7 @@ package typesafety
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestAnyInPublicContractRule(t *testing.T) {
@@ -127,13 +127,7 @@ func (s *Service) Export() (interface{}, error) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := core.NewFileContext("service.go", ".", []byte(tt.code), nil)
-			parser := core.NewParser()
-			fset, astFile, err := parser.ParseGoFile("service.go", []byte(tt.code))
-			if err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			ctx.SetGoAST(fset, astFile)
+			ctx := rulestest.InMemoryGoFile(t, "service.go", ".", tt.code, nil)
 
 			violations := rule.AnalyzeFile(ctx)
 			if len(violations) != tt.wantCount {

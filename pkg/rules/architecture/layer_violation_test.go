@@ -3,10 +3,11 @@ package architecture
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestLayerViolationRule_Metadata(t *testing.T) {
@@ -327,35 +328,5 @@ func (s *Service) Settle(ctx context.Context) *sql.Row {
 func createTestContext(t *testing.T, path, code string) *core.FileContext {
 	t.Helper()
 
-	ctx := &core.FileContext{
-		Path:    "/" + path,
-		RelPath: path,
-		Lines:   splitLines(code),
-		Content: []byte(code),
-	}
-
-	// Parse Go AST
-	parser := core.NewParser()
-	fset, ast, err := parser.ParseGoFile(path, []byte(code))
-	if err != nil {
-		t.Fatalf("Failed to parse Go code: %v", err)
-	}
-	ctx.SetGoAST(fset, ast)
-
-	return ctx
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
+	return rulestest.InMemoryGoFile(t, "/"+path, "/", code, nil)
 }

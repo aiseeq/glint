@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestLegacyIdentifierRule(t *testing.T) {
@@ -148,12 +149,7 @@ func (r *Router) RegisterAdminRoutes() {}`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := core.NewFileContext(tt.path, "/src", []byte(tt.code), core.DefaultConfig())
-			parser := core.NewParser()
-			fset, astFile, err := parser.ParseGoFile(tt.path, []byte(tt.code))
-			if err == nil {
-				ctx.SetGoAST(fset, astFile)
-			}
+			ctx := rulestest.InMemoryGoFile(t, tt.path, "/src", tt.code, core.DefaultConfig())
 			violations := rule.AnalyzeFile(ctx)
 			assert.Len(t, violations, tt.expectedCount, "Code: %s", tt.code)
 		})
