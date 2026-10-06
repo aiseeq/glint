@@ -439,7 +439,7 @@ func checkPipeProducerStderr(r *shellRule, src *shellSource) []*core.Violation {
 // to /dev/null and stdout left to the caller.
 func quietServiceCall(command string) bool {
 	word := commandWord(command)
-	if !remoteCommands[word] && word != "make" {
+	if !remoteCommands[word] && word != "make" && !isSiblingScript(word) {
 		return false
 	}
 	loc := devNullStderr.FindStringIndex(command)

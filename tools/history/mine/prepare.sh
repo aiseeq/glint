@@ -15,8 +15,8 @@ mkdir -p "$out"
 # documentation work.
 git -C "$repo" log "$ref" --no-merges --format='%h%x09%ad%x09%s' --date=short \
   | awk -F'\t' '$3 ~ /^(fix|security|perf)/' \
-  | grep -viE 'violation|analy[sz]er|lint|glint|golangci|quality|compliance|spam|прогресс|progress|итерац|typo|опечат|prettier|gofmt|форматир|readme|\bdocs?\b|документац|claude\.md|agents\.md' \
-  > "$out/fix-all.tsv" || true
+  | { grep -viE 'violation|analy[sz]er|lint|glint|golangci|quality|compliance|spam|прогресс|progress|итерац|typo|опечат|prettier|gofmt|форматир|readme|\bdocs?\b|документац|claude\.md|agents\.md' || true; } \
+  > "$out/fix-all.tsv"
 
 # Drop commits that touch documentation only; keep the count of changed files.
 : > "$out/fix.tsv"

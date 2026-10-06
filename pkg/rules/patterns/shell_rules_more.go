@@ -132,13 +132,16 @@ var (
 // droppedStatus reports x=$(cmd) || true (or || :) where cmd calls a service
 // or a function of the script.
 func droppedStatus(command, fallback string, funcs map[string]shellFunc) bool {
-	if fallback != "true" && fallback != ":" {
+	if word := firstShellWord(fallback); word != "true" && word != ":" {
 		return false
 	}
-	m := capturedAssign.FindStringSubmatch(commandPrefix.ReplaceAllString(command, ""))
-	if m == nil {
-		return false
+	command = commandPrefix.ReplaceAllString(command, "")
+	if m := capturedAssign.FindStringSubmatch(command); m != nil {
+		_, ownFunction := funcs[m[1]]
+		return remoteCommands[m[1]] || ownFunction
 	}
-	_, ownFunction := funcs[m[1]]
-	return remoteCommands[m[1]] || ownFunction
+	// A sibling script run by its path: x=$("$repo/tools/run.sh" ...).
+	return siblingCapture.MatchString(command)
 }
+
+var siblingCapture = regexp.MustCompile(`^(?:(?:local|export|readonly|declare)\s+)?[A-Za-z_][A-Za-z0-9_]*=\$\(\s*"?[^\s"()]*\.sh"?(?:\s|\))`)

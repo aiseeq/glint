@@ -104,7 +104,37 @@ func checkPipeTailStatus(r *shellRule, src *shellSource) []*core.Violation {
 				"Run the recipe or script with set -o pipefail (SHELL := bash, .SHELLFLAGS := -eo pipefail -c), or read ${PIPESTATUS[0]} under bash"))
 		}
 	}
+	out = append(out, recipeCheckPiped(r, src)...)
 	return append(out, capturedPipeTails(r, src)...)
+}
+
+var pipeTailFilter = map[string]bool{"grep": true}
+
+// recipeCheckPiped reports a recipe line ending in a test or build run piped
+// into a filter: make reads the filter's status, and a failed run passes the
+// target.
+func recipeCheckPiped(r *shellRule, src *shellSource) []*core.Violation {
+	if !src.make {
+		return nil
+	}
+	var out []*core.Violation
+	for _, unit := range src.units() {
+		segs := segments(unit.text)
+		last := segs[len(segs)-1]
+		elements := pipeElements(last.trimmed())
+		if len(elements) < 2 || pipeStatusMarker.MatchString(unit.text) {
+			continue
+		}
+		head := envPrefix.ReplaceAllString(commandPrefix.ReplaceAllString(elements[0], ""), "")
+		tail := commandWord(elements[len(elements)-1])
+		if !checkRun.MatchString(head) || (!pipeFilters[tail] && !pipeTailFilter[tail]) {
+			continue
+		}
+		out = appendReport(out, src.report(r, unit.lineAt(last.offset),
+			"The recipe line ends in "+tail+", and make reads its status — a failed "+strings.Join(strings.Fields(head)[:2], " ")+" passes the target",
+			"Set SHELL := /bin/bash and .SHELLFLAGS := -eo pipefail -c, or end the line with ; exit $${PIPESTATUS[0]}"))
+	}
+	return out
 }
 
 // failingProducers are commands that fail with a status of their own (an
@@ -167,10 +197,13 @@ func scriptSetsPipefail(src *shellSource) bool {
 			}
 			continue
 		}
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue // a usage comment may show a heredoc
+		}
 		if m := heredocStart.FindStringSubmatch(line); m != nil {
 			terminator = m[1]
 		}
-		if pipefailSetting.MatchString(line) && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+		if pipefailSetting.MatchString(line) {
 			return true
 		}
 	}
@@ -516,7 +549,7 @@ func checkFallbackValue(r *shellRule, src *shellSource) []*core.Violation {
 				"Fail when the command fails: x=$(cmd) || { echo 'cmd failed' >&2; exit 1; }"))
 		}
 	}
-	return out
+	return append(out, fallbackInSubstitution(r, src, funcs)...)
 }
 
 var (
@@ -526,8 +559,12 @@ var (
 	breakCmd    = regexp.MustCompile(`(?:^|\s)break\b`)
 	// timeoutBranch is the loop's own handling of the last attempt: it
 	// fails, or tests the counter against the bound.
-	timeoutBranch = regexp.MustCompile(`(?:^|[\s;])(?:exit|return)\b|\s-(?:eq|ge|gt)\s`)
-	afterCheck    = regexp.MustCompile(`^(?:if\b|\[|test\b|!|exit\b|return\b|case\b)`)
+	// A forced kill settles the outcome a wait-for-exit loop polls for.
+	timeoutBranch = regexp.MustCompile(`(?:^|[\s;])(?:exit|return)\b|\bkill\s+-(?:9|KILL|s\s+KILL)\b`)
+	counterTest   = regexp.MustCompile(`\s-(?:eq|ge|gt)\s+"?\$?\{?([A-Za-z0-9_]+)`)
+	// loopBound reads the last value of seq, of {1..N} or of a -lt/-le bound.
+	loopBound  = regexp.MustCompile(`\$\(seq\s+(?:\S+\s+)*?"?\$?\{?([A-Za-z0-9_]+)\}?"?\s*\)|\{\d+\.\.(\d+)\}|\s-l[te]\s+"?\$?\{?([A-Za-z0-9_]+)`)
+	afterCheck = regexp.MustCompile(`^(?:if\b|\[|test\b|!|exit\b|return\b|case\b)`)
 )
 
 // checkPollFallsThrough reports a bounded loop with sleep that breaks on
@@ -541,14 +578,14 @@ func checkPollFallsThrough(r *shellRule, src *shellSource) []*core.Violation {
 			t := strings.TrimSpace(strings.TrimPrefix(seg.trimmed(), "do "))
 			switch {
 			case loopStart.MatchString(t):
-				open = append(open, pollLoop{start: j, bounded: boundedLoop.MatchString(t)})
+				open = append(open, pollLoop{start: j, bounded: boundedLoop.MatchString(t), bound: boundOf(t)})
 				continue
 			case len(open) == 0:
 				continue
 			}
 			top := &open[len(open)-1]
 			top.hasBreak = top.hasBreak || breakCmd.MatchString(t)
-			top.handled = top.handled || timeoutBranch.MatchString(t)
+			top.handled = top.handled || timeoutBranch.MatchString(t) || top.testsBound(t)
 			top.hasSleep = top.hasSleep || strings.HasPrefix(t, "sleep") || strings.Contains(t, " sleep ")
 			if !loopEnd.MatchString(t) {
 				continue
@@ -574,7 +611,29 @@ func checkPollFallsThrough(r *shellRule, src *shellSource) []*core.Violation {
 type pollLoop struct {
 	start                       int // index of its header segment
 	bounded                     bool
+	bound                       string // the last counter value, "" when unknown
 	hasBreak, hasSleep, handled bool
+}
+
+// boundOf returns the bound a loop header counts to.
+func boundOf(header string) string {
+	m := loopBound.FindStringSubmatch(header)
+	if m == nil {
+		return ""
+	}
+	return m[1] + m[2] + m[3]
+}
+
+// testsBound reports a comparison of the counter with the loop's bound (any
+// comparison when the bound is unknown): the loop handles its last attempt.
+// A comparison with a step of a retry ladder leaves the timeout open.
+func (l pollLoop) testsBound(text string) bool {
+	for _, m := range counterTest.FindAllStringSubmatch(text, -1) {
+		if l.bound == "" || m[1] == l.bound {
+			return true
+		}
+	}
+	return false
 }
 
 // fallsThrough reports a bounded polling loop, ending at segment end, that
