@@ -9,7 +9,8 @@ that fire on the lines the commit removed (defect) or added (introduced), +-1.
 Only reads the repository: trees come from git archive.
 
 A module that reaches a sibling repository through a local replace in go.mod
-(replace example.com/lib => ../../lib/backend) does not type-check alone:
+(replace example.com/lib => ../../lib/backend) or a use of go.work
+(use ../lib) does not type-check alone:
 --sibling lib=/path/to/lib extracts that repository, as it was at the date of
 the analyzed tree, to where the replace points. When packages still fail to
 type-check on the tree before a fix, the sibling as of the fix's date is tried
@@ -38,6 +39,8 @@ while rest:
         sys.exit(f'unknown argument {flag} {value}: expected --sibling NAME=REPO')
     siblings[name] = os.path.expanduser(path)
 LOCAL_REPLACE = re.compile(r'=>\s*(\.\.?/\S+)')
+# A go.work use of a directory: `use ../lib` or a line of a use ( ... ) block.
+WORK_USE = re.compile(r'^\s*(?:use\s+)?(\.\.?/[^\s)]+)\s*$', re.M)
 CODE = re.compile(r'\.(go|ts|tsx|js|jsx|mjs|sh|mk|dockerfile|html|tmpl|gohtml)$|(^|/)(GNUmakefile|[Mm]akefile|Dockerfile(\.[\w-]+)?|Containerfile|(docker-)?compose[\w.-]*\.ya?ml|bitbucket-pipelines\.yml|\.gitlab-ci\.yml|\.github/workflows/[^/]+\.ya?ml)$')
 
 
@@ -80,16 +83,30 @@ def module_root(path, tree_files):
     return os.path.dirname(path) or '.'
 
 
+def local_sibling_paths(target):
+    """Returns the relative paths target's go.mod replaces and its go.work
+    uses point to."""
+    rels = []
+    for name, pattern in (('go.mod', LOCAL_REPLACE), ('go.work', WORK_USE)):
+        path = os.path.join(target, name)
+        if os.path.exists(path):
+            rels += pattern.findall(open(path).read())
+    return rels
+
+
 def provide_siblings(target, at):
     """Extracts the sibling repositories a local replace of target's go.mod
-    points to, as they were at the date of commit at; a path already holding
-    that revision is kept. Returns whether target has such a replace."""
-    gomod = os.path.join(target, 'go.mod')
-    if not siblings or not os.path.exists(gomod):
+    or a use of its go.work points to, as they were at the date of commit at;
+    a path already holding that revision is kept. Returns whether target has
+    such a reference."""
+    if not siblings:
+        return False
+    rels = local_sibling_paths(target)
+    if not rels:
         return False
     date = git('log', '-1', '--format=%cI', at).strip()
     provided = False
-    for rel in LOCAL_REPLACE.findall(open(gomod).read()):
+    for rel in rels:
         parts = [p for p in rel.split('/') if p not in ('.', '..')]
         if not parts or parts[0] not in siblings:
             continue
