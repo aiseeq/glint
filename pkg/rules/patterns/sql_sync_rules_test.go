@@ -556,7 +556,72 @@ func (s *Syncer) LoadPaged(ctx context.Context, after string) error {
 	return nil
 }
 `)
-	assert.Equal(t, []int{23, 41}, sqlRuleLines(t, NewPendingPageSkipsStayAtHeadRule(), ctx))
+	assert.Equal(t, []int{23, 41, 67}, sqlRuleLines(t, NewPendingPageSkipsStayAtHeadRule(), ctx))
+}
+
+// A pass that goes on past an item whose call fails, counting or collecting
+// the failure, leaves the item pending too: it heads the next page again, and
+// once a page's worth of items keeps failing the rest of the queue is never
+// read. Marking the failed item moves the queue on.
+func TestPendingPageGoesOnPastFailedItems(t *testing.T) {
+	ctx := rulestest.GoFile(t, "work/details.go", `package work
+
+import (
+	"context"
+	"log/slog"
+)
+
+type Details struct{ ID string }
+
+type Repo interface {
+	ListPaidWithoutDetails(ctx context.Context, limit int) ([]string, error)
+	StoreDetails(ctx context.Context, details []Details) error
+	MarkFailed(ctx context.Context, id string, cause error) error
+}
+
+type Syncer struct {
+	repo   Repo
+	logger *slog.Logger
+}
+
+func (s *Syncer) read(ctx context.Context, id string) (Details, error) { return Details{ID: id}, nil }
+
+func (s *Syncer) LoadCounted(ctx context.Context) error {
+	ids, err := s.repo.ListPaidWithoutDetails(ctx, 50)
+	if err != nil {
+		return err
+	}
+	read := make([]Details, 0, len(ids))
+	failed := 0
+	for _, id := range ids {
+		details, err := s.read(ctx, id)
+		if err != nil {
+			s.logger.Error("details not read", "id", id, "error", err)
+			failed++
+			continue
+		}
+		read = append(read, details)
+	}
+	return s.repo.StoreDetails(ctx, read)
+}
+
+func (s *Syncer) LoadMarkedOnFailure(ctx context.Context) error {
+	ids, err := s.repo.ListPaidWithoutDetails(ctx, 50)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := s.read(ctx, id); err != nil {
+			if markErr := s.repo.MarkFailed(ctx, id, err); markErr != nil {
+				return markErr
+			}
+			continue
+		}
+	}
+	return nil
+}
+`)
+	assert.Equal(t, []int{24}, sqlRuleLines(t, NewPendingPageSkipsStayAtHeadRule(), ctx))
 }
 
 // A poller takes the stale pending rows oldest-change first; a poll that
