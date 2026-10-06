@@ -17,9 +17,18 @@ and record.
 - Read the repository only: `git -C REPO show/log/diff/blame`, reading files.
   No checkout, switch, stash, restore, reset, clean, commit, add, worktree;
   do not create or change files in REPO. Do not run tests, builds, deploys or
-  project make targets. Write only to OUT.
+  project make targets. Write only to OUT, with the Write/Edit tools.
+- Do not run glint or any other tool on copies or probe files, and do not
+  write files outside OUT: every such command waits for the user's
+  permission. Decide coverage from the rule sources and tests; when they do
+  not settle it, record the candidate with covered_by=<rule> and say in
+  covered_note that coverage is unverified.
 - Do not spend time on cosmetics: a commit that is clearly about UI layout,
   texts, constant values or business formulas is NOT_RULEABLE, stop reading.
+- In a domain-heavy project (a game, trading strategies) most fixes tune
+  behaviour: thresholds, timings, priorities, choice of target. A commit whose
+  message names only such behaviour and whose --stat shows no script, tool or
+  infrastructure file is NOT_RULEABLE after step 1.
 
 ## How to read a commit
 1. `git -C REPO show --stat --format='%H%n%B' HASH` — message and files.
@@ -40,6 +49,19 @@ and record.
    catch.
 6. Parts of a `fix:` commit that only restructure code without changing
    behaviour are not fixes: skip them.
+7. Shell files: open the diff of every shell file a commit changes, whatever
+   the message says - the general defect is often mixed into a commit whose
+   message describes only the domain part. Record a defect when the shell or
+   tool pattern is in the minus lines; screen or threshold heuristics, click
+   coordinates, timeouts and quirks of external programs are NOT_RULEABLE.
+8. `perf:` commits are triaged like fixes when the slowness comes from a
+   recognizable misuse: a full log scan, a hardcoded resource id, a lock held
+   by a child process.
+9. A fix that replaces one fallback with another (`|| echo 0` with `|| true`)
+   gives two records: the defect it removed and the one it introduced.
+10. When a shell rule should catch the code but does not, say in covered_note
+   whether the miss is in the rule or in glint's reading of the script (an
+   unrecognized construct can hide the rest of the file from every rule).
 
 ## What counts as a candidate
 A candidate is a fix where the code before it held a defect RECOGNIZABLE FROM
