@@ -10,7 +10,7 @@ import (
 // commits, with its failure only logged, leaves the action done without its
 // audit entry.
 func TestAuditWrittenAfterTransaction(t *testing.T) {
-	assert.Equal(t, []string{"payout/admin.go:39", "payout/admin.go:51"}, typedFuncFindings(t, NewAuditWrittenAfterTransactionRule(), map[string]string{
+	assert.Equal(t, []string{"payout/admin.go:39", "payout/admin.go:50", "payout/admin.go:51", "payout/admin.go:70", "payout/admin.go:86"}, typedFuncFindings(t, NewAuditWrittenAfterTransactionRule(), map[string]string{
 		"payout/admin.go": `package payout
 
 import (
@@ -72,6 +72,45 @@ func (s *Service) CompleteAudited(ctx context.Context, id string) error {
 		}
 		return s.audit.Record(ctx, "completed")
 	})
+}
+
+func (s *Service) CancelBySupport(ctx context.Context, id string) error {
+	if err := s.repos.RunInTx(ctx, func(ctx context.Context) error {
+		return s.complete(ctx, id)
+	}); err != nil {
+		return err
+	}
+	if err := s.audit.Record(ctx, "cancelled_by_admin"); err != nil {
+		log.Printf("audit failed: %v", err)
+	}
+	return nil
+}
+
+func (s *Service) Expire(ctx context.Context, id string) (bool, error) {
+	done := false
+	err := s.repos.RunInTx(ctx, func(ctx context.Context) error {
+		done = true
+		return s.complete(ctx, id)
+	})
+	if err != nil {
+		return false, err
+	}
+	if done {
+		s.recordLedgerAudit(ctx, "expired")
+	}
+	return done, nil
+}
+
+func (s *Service) CancelChecked(ctx context.Context, id string) error {
+	if err := s.repos.RunInTx(ctx, func(ctx context.Context) error {
+		return s.complete(ctx, id)
+	}); err != nil {
+		return err
+	}
+	if err := s.audit.Record(ctx, "cancelled"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Service) CompleteNoTx(ctx context.Context, id string) error {
