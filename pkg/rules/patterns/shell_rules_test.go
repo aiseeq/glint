@@ -383,3 +383,26 @@ check() {
 `,
 	}))
 }
+
+// A function whose opening brace is followed only by a comment reads like
+// one whose brace ends the line: the loop inside it is seen like any other,
+// and so is a loop after it, which a brace taken for an unclosed group hid.
+func TestShellGroupClosedByBraceOnItsOwnLine(t *testing.T) {
+	assert.Equal(t, []string{"carousel.sh:10", "carousel.sh:3"}, shellFindings(t, "shell-poll-loop-falls-through", map[string]string{
+		"carousel.sh": `wait_session() { # waits for the compositor
+  local i
+  for i in $(seq 1 40); do
+    pgrep -x sway >/dev/null && break
+    sleep 1
+  done
+  start_player
+}
+
+for i in $(seq 1 30); do
+  curl -fs localhost/health && break
+  sleep 2
+done
+switch_traffic
+`,
+	}))
+}

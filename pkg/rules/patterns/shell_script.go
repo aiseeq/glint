@@ -317,7 +317,10 @@ func groupChange(text string, i, depth int) int {
 	case ')':
 		return -1
 	case '{':
-		if i+1 < len(text) && (text[i+1] == ' ' || text[i+1] == '\t') {
+		// A brace ending its line - f() { or f() { # comment - leaves the
+		// body's commands at the level of the line, closed by a } in the
+		// first column; one followed by a command on the line opens a group.
+		if i+1 < len(text) && (text[i+1] == ' ' || text[i+1] == '\t') && !restIsComment(text[i+1:]) {
 			return 1
 		}
 	case '}':
@@ -326,6 +329,14 @@ func groupChange(text string, i, depth int) int {
 		}
 	}
 	return 0
+}
+
+// restIsComment reports a line remainder that holds only blanks and a
+// comment, or nothing.
+func restIsComment(rest string) bool {
+	line, _, _ := strings.Cut(rest, "\n")
+	line = strings.TrimLeft(line, " \t")
+	return line == "" || line[0] == '#'
 }
 
 // listOperator returns the list operator at an unquoted byte: a newline, ;,
