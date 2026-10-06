@@ -6,6 +6,8 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"regexp"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/ast/astutil"
@@ -173,6 +175,10 @@ type errorSet struct {
 	// notFoundText marks an error made by errors.New or fmt.Errorf whose text
 	// says "not found": a not-found no caller can tell apart.
 	notFoundText bool
+	// invalid are the errors made by errors.New or fmt.Errorf without %w
+	// that reject an input ("name is required", "must be positive"): a
+	// client's mistake no caller can tell apart.
+	invalid []inputCheck
 }
 
 func newErrorSet() *errorSet {
@@ -216,6 +222,11 @@ func (s *errorSet) add(other *errorSet, drop map[*types.Var]bool) {
 	s.unknown = s.unknown || other.unknown
 	s.opaque = s.opaque || other.opaque
 	s.notFoundText = s.notFoundText || other.notFoundText
+	for _, check := range other.invalid {
+		if !slices.Contains(s.invalid, check) {
+			s.invalid = append(s.invalid, check)
+		}
+	}
 }
 
 // errorFlow follows what the project's functions return as errors.
@@ -504,6 +515,9 @@ func (f *errorFlow) libraryErrors(fn typedFunc, callee *types.Func, call *ast.Ca
 	case path == "errors" && callee.Name() == "New":
 		set := newErrorSet()
 		set.notFoundText = len(call.Args) == 1 && saysNotFound(fn.info, call.Args[0])
+		if len(call.Args) == 1 {
+			set.invalid = rejectedInput(fn, call, call.Args[0])
+		}
 		return set
 	case path == "fmt" && callee.Name() == "Errorf":
 		return f.errorfErrors(fn, call, at)
@@ -739,13 +753,21 @@ func (f *errorFlow) errorfErrors(fn typedFunc, call *ast.CallExpr, at ast.Node) 
 	if tv, ok := fn.info.Types[call.Args[0]]; ok && tv.Value != nil && tv.Value.Kind() == constant.String {
 		format = constant.StringVal(tv.Value)
 		if !strings.Contains(format, "%w") {
+			set.invalid = rejectedInput(fn, call, call.Args[0])
 			return set
 		}
 	}
+	classified := false
 	for _, arg := range call.Args[1:] {
 		if implementsError(fn.info.TypeOf(arg)) {
 			set.add(f.exprErrors(fn, arg, at, 0), nil)
+			classified = classified || sentinelVar(fn.info, ast.Unparen(arg)) != nil
 		}
+	}
+	// An input check wrapped together with a sentinel (%w: %w, ErrInvalid,
+	// err) is told apart by it.
+	if classified {
+		set.invalid = nil
 	}
 	return set
 }
@@ -757,6 +779,69 @@ func saysNotFound(info *types.Info, expr ast.Expr) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(constant.StringVal(tv.Value)), "not found")
+}
+
+// inputRejection is an error text refusing an input value.
+var inputRejection = regexp.MustCompile(`(?i)\b(?:is|are) required\b|\bmust (?:be|not|have|contain)\b|\b(?:cannot|can't|must not) be empty\b|\bis empty\b`)
+
+// inputCheck is an error refusing an input value: its text, and the field
+// of the parameter the check reads ("" for the parameter itself).
+type inputCheck struct {
+	text  string
+	field string
+}
+
+// rejectedInput returns the error a call makes when it refuses an input
+// value - a constant text, under an if testing a parameter of fn (name == "",
+// req.Amount <= 0): a check of the caller's input, not of the server's own
+// state (s.repo == nil); nil for any other error.
+func rejectedInput(fn typedFunc, made *ast.CallExpr, text ast.Expr) []inputCheck {
+	tv, ok := fn.info.Types[text]
+	if !ok || tv.Value == nil || tv.Value.Kind() != constant.String || !inputRejection.MatchString(constant.StringVal(tv.Value)) {
+		return nil
+	}
+	path, _ := astutil.PathEnclosingInterval(fn.file.GoAST, made.Pos(), made.End())
+	for _, node := range path {
+		check, ok := node.(*ast.IfStmt)
+		if !ok || made.Pos() < check.Body.Pos() {
+			continue
+		}
+		if field, ok := testedParameter(fn, check.Cond); ok {
+			return []inputCheck{{text: constant.StringVal(tv.Value), field: field}}
+		}
+		return nil
+	}
+	return nil
+}
+
+// testedParameter reports a condition reading a parameter of fn other than
+// by a nil comparison, and the field of it the condition reads.
+func testedParameter(fn typedFunc, cond ast.Expr) (string, bool) {
+	sig := funcSignature(fn)
+	if sig == nil {
+		return "", false
+	}
+	params := map[types.Object]bool{}
+	for i := range sig.Params().Len() {
+		params[sig.Params().At(i)] = true
+	}
+	found, field := false, ""
+	ast.Inspect(cond, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.BinaryExpr:
+			if isNilIdent(ast.Unparen(node.X)) || isNilIdent(ast.Unparen(node.Y)) {
+				return false
+			}
+		case *ast.SelectorExpr:
+			if id, ok := ast.Unparen(node.X).(*ast.Ident); ok && params[fn.info.Uses[id]] {
+				found, field = true, node.Sel.Name
+			}
+		case *ast.Ident:
+			found = found || params[fn.info.Uses[node]]
+		}
+		return !found
+	})
+	return field, found
 }
 
 // maxErrorTrace bounds the local assignments followed back from one value.

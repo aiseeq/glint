@@ -566,8 +566,8 @@ func callsNamed(node ast.Node, name *regexp.Regexp) bool {
 }
 
 // pendingQueueRead names a read of the items still waiting for work:
-// GetUnclassified, ListUnmatchedByOwner, FetchPending.
-var pendingQueueRead = regexp.MustCompile(`^(?:Get|List|Fetch|Find|Load|Select|Query)\w*(?:Un[a-z]+ed|Pending|Queued)(?:[A-Z]\w*)?$`)
+// GetUnsorted, ListUnmatchedByOwner, FetchPending, ListPaidWithoutDetails.
+var pendingQueueRead = regexp.MustCompile(`^(?:Get|List|Fetch|Find|Load|Select|Query)\w*(?:(?:Un[a-z]+ed|Pending|Queued)(?:[A-Z]\w*)?|Without[A-Z]\w*)$`)
 
 // pagePosition names an argument that moves a read past the items already
 // seen.
@@ -587,6 +587,10 @@ var skipCounter = regexp.MustCompile(`(?i)skip|ignor|unmatched|unlinked|leftover
 // A skipped item stays pending, and the next pass reads the same page: once
 // a page's worth of items is skipped, the rest of the queue is never reached.
 // A read that moves past the seen items (offset, cursor, after) is left out.
+//
+// A pass that stops at an item whose call fails (break or return on its
+// error, the item not marked) is the same trap: the item stays at the head,
+// and every pass stops on it before reaching the items after it.
 //
 // The read itself shows the same trap when a pending-queue function takes the
 // stale rows by their change time (WHERE updated_at < $1 ORDER BY updated_at
@@ -624,13 +628,19 @@ func (r *PendingPageSkipsStayAtHeadRule) AnalyzeFile(ctx *core.FileContext) []*c
 			continue
 		}
 		for _, read := range skippedPendingReads(fn.Body, funcs) {
-			line := ctx.LineFor(read)
+			line := ctx.LineFor(read.call)
 			if ctx.IsSuppressed(line, r.Name()) {
 				continue
 			}
-			v := r.CreateViolation(ctx.RelPath, line, "The pass reads the first page of a pending queue and counts skipped items, which stay pending — the next pass reads the same page, and the rest of the queue is never reached")
+			message := "The pass reads the first page of a pending queue and counts skipped items, which stay pending — the next pass reads the same page, and the rest of the queue is never reached"
+			suggestion := "Move past the skipped items (an offset or a cursor), give them a terminal state, or report that the page was full of them"
+			if read.stops {
+				message = "The pass reads the first page of a pending queue and stops at an item whose call fails without marking it — the item stays first in the queue, every pass stops on it, and the items after it are never reached"
+				suggestion = "Collect the item's failure (errors.Join) and go on with the next item, or mark the failed item (attempts, a terminal state) so the next pass moves past it"
+			}
+			v := r.CreateViolation(ctx.RelPath, line, message)
 			v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
-			v.WithSuggestion("Move past the skipped items (an offset or a cursor), give them a terminal state, or report that the page was full of them")
+			v.WithSuggestion(suggestion)
 			violations = append(violations, v)
 		}
 		violations = append(violations, r.stalePageReads(ctx, fn)...)
@@ -701,10 +711,18 @@ func (r *PendingPageSkipsStayAtHeadRule) stalePageReads(ctx *core.FileContext, f
 	return violations
 }
 
+// pendingRead is a read of a pending queue whose pass leaves items at the
+// head: skipped ones, or the failed one it stops at.
+type pendingRead struct {
+	call  *ast.CallExpr
+	stops bool
+}
+
 // skippedPendingReads returns the reads of a pending queue in body, by a
 // limit and with no page position, whose items a range loop counts as
-// skipped - in body, or in a function of the file the items are handed to.
-func skippedPendingReads(body *ast.BlockStmt, funcs map[string]*ast.FuncDecl) []*ast.CallExpr {
+// skipped or stops at on a failure - in body, or in a function of the file
+// the items are handed to.
+func skippedPendingReads(body *ast.BlockStmt, funcs map[string]*ast.FuncDecl) []pendingRead {
 	reads := make(map[string]*ast.CallExpr)
 	ast.Inspect(body, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
@@ -724,19 +742,24 @@ func skippedPendingReads(body *ast.BlockStmt, funcs map[string]*ast.FuncDecl) []
 		}
 		return true
 	})
-	var found []*ast.CallExpr
+	var found []pendingRead
 	seen := make(map[*ast.CallExpr]bool)
-	report := func(items string) {
+	report := func(items string, stops bool) {
 		if read := reads[items]; read != nil && !seen[read] {
 			seen[read] = true
-			found = append(found, read)
+			found = append(found, pendingRead{call: read, stops: stops})
 		}
 	}
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.RangeStmt:
-			if id, ok := ast.Unparen(node.X).(*ast.Ident); ok && countsSkipped(node.Body) {
-				report(id.Name)
+			id, ok := ast.Unparen(node.X).(*ast.Ident)
+			switch {
+			case !ok:
+			case countsSkipped(node.Body):
+				report(id.Name, false)
+			case stopsAtFailedItem(node):
+				report(id.Name, true)
 			}
 		case *ast.CallExpr:
 			callee, ok := node.Fun.(*ast.Ident)
@@ -745,13 +768,116 @@ func skippedPendingReads(body *ast.BlockStmt, funcs map[string]*ast.FuncDecl) []
 			}
 			for i, arg := range node.Args {
 				if id, ok := ast.Unparen(arg).(*ast.Ident); ok && reads[id.Name] != nil && skipsParam(funcs[callee.Name], i) {
-					report(id.Name)
+					report(id.Name, false)
 				}
 			}
 		}
 		return true
 	})
-	sort.Slice(found, func(i, j int) bool { return found[i].Pos() < found[j].Pos() })
+	sort.Slice(found, func(i, j int) bool { return found[i].call.Pos() < found[j].call.Pos() })
+	return found
+}
+
+// stopsAtFailedItem reports a loop that leaves on the failure of a call
+// handed its item - `if err != nil { ...; break }` or a return - and does not
+// mark the item on the way out: no call but a logger or an error constructor
+// takes it.
+func stopsAtFailedItem(loop *ast.RangeStmt) bool {
+	item := make(map[string]bool)
+	for _, v := range []ast.Expr{loop.Key, loop.Value} {
+		if id, ok := v.(*ast.Ident); ok && id.Name != "_" {
+			item[id.Name] = true
+		}
+	}
+	if len(item) == 0 {
+		return false
+	}
+	// itemErrs are the error variables set by a call handed the item.
+	itemErrs := make(map[string]bool)
+	noteItemErrs := func(assign *ast.AssignStmt) {
+		if len(assign.Rhs) == 1 && callTakesNames(assign.Rhs[0], item) {
+			for _, lhs := range assign.Lhs {
+				if name, ok := errLikeName(lhs); ok {
+					itemErrs[name] = true
+				}
+			}
+		}
+	}
+	stops := false
+	ast.Inspect(loop.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit, *ast.RangeStmt, *ast.ForStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+			return false
+		case *ast.AssignStmt:
+			noteItemErrs(node)
+		case *ast.IfStmt:
+			if init, ok := node.Init.(*ast.AssignStmt); ok {
+				noteItemErrs(init)
+			}
+			name, isCheck := errNotNilName(node.Cond)
+			if !isCheck || !itemErrs[name] || len(node.Body.List) == 0 || marksItem(node.Body, item) {
+				return true
+			}
+			switch last := node.Body.List[len(node.Body.List)-1].(type) {
+			case *ast.ReturnStmt:
+				stops = true
+			case *ast.BranchStmt:
+				stops = stops || (last.Tok == token.BREAK && last.Label == nil)
+			}
+		}
+		return !stops
+	})
+	return stops
+}
+
+// callTakesNames reports a call expression handed one of names in its
+// arguments.
+func callTakesNames(expr ast.Expr, names map[string]bool) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	for _, arg := range call.Args {
+		if mentionsNames(arg, names) {
+			return true
+		}
+	}
+	return false
+}
+
+// mentionsNames reports an expression reading an identifier of names.
+func mentionsNames(expr ast.Expr, names map[string]bool) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && names[id.Name] {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// marksItem reports a block that hands the item to a call other than a
+// logger or an error constructor (fmt.Errorf, errors.Join): it records the
+// failure on the item.
+func marksItem(body *ast.BlockStmt, item map[string]bool) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || found {
+			return !found
+		}
+		if helpers.IsLoggerCall(call) {
+			return false
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if pkg, ok := sel.X.(*ast.Ident); ok && (pkg.Name == "fmt" || pkg.Name == "errors") {
+				return true
+			}
+		}
+		found = callTakesNames(call, item)
+		return !found
+	})
 	return found
 }
 

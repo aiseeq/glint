@@ -40,7 +40,10 @@ func init() {
 // (if err != nil { log } else { total = total.Add(...) }), a failed item
 // counted as skipped, errors returned only when every item failed, and a
 // slice of results carrying an Error field handed out with a nil error by a
-// function that never reads the field.
+// function that never reads the field. A function returning through a
+// success constructor is reported for a loop that keeps an item only when its
+// result object says success (if res.IsSuccess() { acc[id] = res.Data }, no
+// else): the failed items are left out without a trace.
 type AggregateSkipsFailedPartRule struct {
 	*rules.BaseRule
 	// lists maps a directory to its package variables holding a literal list.
@@ -54,7 +57,7 @@ func NewAggregateSkipsFailedPartRule() *AggregateSkipsFailedPartRule {
 	return &AggregateSkipsFailedPartRule{BaseRule: rules.NewBaseRule(
 		"aggregate-skips-failed-part",
 		"patterns",
-		"Detects a failed part left out of a total returned as complete: a fixed list's item logged and skipped, a failed source logged, a failure counted as skipped, errors returned only when all failed, results with an unread Error field",
+		"Detects a failed part left out of a total returned as complete: a fixed list's item logged and skipped, a failed source logged, a failure counted as skipped, errors returned only when all failed, results with an unread Error field, an item kept only when its result object says success",
 		core.SeverityHigh,
 	)}
 }
@@ -136,6 +139,16 @@ func (r *AggregateSkipsFailedPartRule) AnalyzeFile(ctx *core.FileContext) []*cor
 	}
 	lists := r.lists[filepath.Dir(ctx.Path)]
 	var violations []*core.Violation
+	for _, skip := range resultKeptOnlyOnSuccess(ctx.GoAST) {
+		line := ctx.LineFor(skip)
+		if ctx.IsSuppressed(line, r.Name()) {
+			continue
+		}
+		v := r.CreateViolation(ctx.RelPath, line, "An item whose result is not a success is left out silently (no else) while the function returns the collected set as a success — the caller works on an incomplete set it cannot tell from a whole one")
+		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+		v.WithSuggestion("Fail the batch on the item's failure (or report it as partial to the caller) instead of leaving it out")
+		violations = append(violations, v)
+	}
 	for _, body := range errorFunctions(ctx.GoAST) {
 		violations = append(violations, r.partialChecks(ctx, body)...)
 		ast.Inspect(body, func(n ast.Node) bool {

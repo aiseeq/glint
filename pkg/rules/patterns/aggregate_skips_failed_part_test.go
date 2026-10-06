@@ -167,3 +167,66 @@ func (s *Importer) importRows(ctx context.Context, rows []Row) error {
 	rule.UseProjectFiles([]*core.FileContext{ctx})
 	assert.Equal(t, []int{7}, violationLines(rule.AnalyzeFile(ctx)))
 }
+
+// A batch that keeps only the items whose result object says success, with
+// no else, and returns the set as a success hands the caller a silently
+// incomplete set: a sum over it misses the failed items.
+func TestAggregateSkipsFailedPart_ResultObjectKeptOnlyOnSuccess(t *testing.T) {
+	assert.Equal(t, []string{"wallet/batch.go:18"}, aggregateSkipFindings(t, map[string]string{
+		"wallet/batch.go": `package wallet
+
+type Result[T any] struct {
+	Data T
+	Err  error
+}
+
+func (r Result[T]) IsSuccess() bool { return r.Err == nil }
+
+func Success[T any](data T) Result[T] { return Result[T]{Data: data} }
+
+func Failure[T any](err error) Result[T] { return Result[T]{Err: err} }
+
+func (s *Service) Balances(ids []string) Result[map[string]int] {
+	balances := make(map[string]int)
+	for _, id := range ids {
+		res := s.Balance(id)
+		if res.IsSuccess() {
+			balances[id] = res.Data
+		}
+	}
+	return Success(balances)
+}
+
+func (s *Service) BalancesStrict(ids []string) Result[map[string]int] {
+	balances := make(map[string]int)
+	for _, id := range ids {
+		res := s.Balance(id)
+		if !res.IsSuccess() {
+			return Failure[map[string]int](res.Err)
+		}
+		balances[id] = res.Data
+	}
+	return Success(balances)
+}
+
+func (s *Service) BalancesCounted(ids []string) Result[map[string]int] {
+	balances := make(map[string]int)
+	failed := 0
+	for _, id := range ids {
+		res := s.Balance(id)
+		if res.IsSuccess() {
+			balances[id] = res.Data
+		} else {
+			failed++
+		}
+	}
+	_ = failed
+	return Success(balances)
+}
+
+func (s *Service) Balance(id string) Result[int] { return Success(len(id)) }
+
+type Service struct{}
+`,
+	}))
+}
