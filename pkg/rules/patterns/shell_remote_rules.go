@@ -509,7 +509,7 @@ func checkSetEBeforeHandler(r *shellRule, src *shellSource) []*core.Violation {
 	var out []*core.Violation
 	errexit := false
 	for i, l := range src.lines {
-		text := strings.TrimSpace(l.text)
+		text := withoutComment(strings.TrimSpace(l.text))
 		switch {
 		case errexitSetting.MatchString(text):
 			errexit = true
@@ -520,11 +520,18 @@ func checkSetEBeforeHandler(r *shellRule, src *shellSource) []*core.Violation {
 		if !errexit || m == nil || strings.Contains(m[2], "||") || len(segments(text)) > 1 {
 			continue
 		}
-		if !failsOnAnswer(m[2], pipefail) || !testedNext(src.lines, i, m[1]) || conditionalCaller(src, funcs, i) {
+		if !failsOnAnswer(m[2], pipefail) || conditionalCaller(src, funcs, i) {
 			continue
 		}
-		out = appendReport(out, src.report(r, l.lineAt(0),
-			"Under set -e the capture stops the script when the command fails, and it fails for the very value the next lines test "+m[1]+" for — the handler never runs",
+		message := "Under set -e the capture stops the script when the command fails, and it fails for the very value the next lines test " + m[1] + " for — the handler never runs"
+		switch {
+		case testedNext(src.lines, i, m[1]):
+		case iteratedNext(src.lines, i, m[1]):
+			message = "Under set -e and pipefail the capture stops the script when grep finds nothing, though the next lines iterate over " + m[1] + " and an empty list is a valid answer"
+		default:
+			continue
+		}
+		out = appendReport(out, src.report(r, l.lineAt(0), message,
 			"Keep the status from stopping the script: "+m[1]+"=$(cmd) || true, or test the command itself: if ! cmd; then ..."))
 	}
 	return out
@@ -551,6 +558,18 @@ func testedNext(lines []shellLine, i int, name string) bool {
 	for j := i + 1; j < len(lines) && j <= i+3; j++ {
 		text := strings.TrimSpace(lines[j].text)
 		if valueTestStart.MatchString(text) && read.MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
+// iteratedNext reports a loop over $name among the three logical lines
+// after i.
+func iteratedNext(lines []shellLine, i int, name string) bool {
+	loop := regexp.MustCompile(`\bfor\s+\w+\s+in\s+[^;]*\$\{?` + name + `\b`)
+	for j := i + 1; j < len(lines) && j <= i+3; j++ {
+		if loop.MatchString(lines[j].text) {
 			return true
 		}
 	}

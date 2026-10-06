@@ -119,6 +119,10 @@ func scriptLines(lines []string) []shellLine {
 			cur.text.WriteString(" ")
 			continue
 		}
+		if continuesCommand(cur.text.String()) {
+			cur.text.WriteString(" ")
+			continue
+		}
 		out = append(out, cur.line(0))
 		cur = nil
 	}
@@ -126,6 +130,16 @@ func scriptLines(lines []string) []shellLine {
 		out = append(out, cur.line(0))
 	}
 	return out
+}
+
+// continuesCommand reports a command line ending in an unquoted |, && or
+// ||: the command goes on on the next line.
+func continuesCommand(text string) bool {
+	trimmed := strings.TrimRight(withoutComment(text), " \t")
+	if !strings.HasSuffix(trimmed, "|") && !strings.HasSuffix(trimmed, "&&") {
+		return false
+	}
+	return quoteAt(trimmed, len(trimmed)-1) == 0
 }
 
 func recipeLines(lines []string, src *shellSource) []shellLine {
@@ -329,6 +343,22 @@ func groupChange(text string, i, depth int) int {
 		}
 	}
 	return 0
+}
+
+// withoutComment cuts a trailing comment: an unquoted # that starts a word.
+func withoutComment(text string) string {
+	var q quoteScanner
+	for i := 0; i < len(text); {
+		if n := q.step(text, i); n > 0 {
+			i += n
+			continue
+		}
+		if text[i] == '#' && (i == 0 || text[i-1] == ' ' || text[i-1] == '\t') {
+			return strings.TrimRight(text[:i], " \t")
+		}
+		i++
+	}
+	return text
 }
 
 // restIsComment reports a line remainder that holds only blanks and a
