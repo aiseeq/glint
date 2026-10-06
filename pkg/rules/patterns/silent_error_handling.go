@@ -101,8 +101,10 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 			return true
 		}
 
-		// Check if this is err != nil
-		if errNilCheckName(ifStmt.Cond) == "" {
+		// Check if this is err != nil, alone or narrowed by a test that does
+		// not look at the error: err != nil && optional { continue } takes
+		// every failure of an optional source for its absence.
+		if errNilCheckName(ifStmt.Cond) == "" && !narrowedErrCheck(ifStmt.Cond) {
 			return true
 		}
 
@@ -701,4 +703,15 @@ func isDebugLogCall(call *ast.CallExpr) bool {
 	}
 	verb := helpers.LogVerb(sel)
 	return strings.HasPrefix(verb, "debug") || strings.HasPrefix(verb, "trace")
+}
+
+// narrowedErrCheck reports err != nil && cond where cond does not read the
+// error: the branch fires for every error of the call, whatever its cause.
+func narrowedErrCheck(cond ast.Expr) bool {
+	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
+	if !ok || bin.Op != token.LAND {
+		return false
+	}
+	name := errNilCheckName(ast.Unparen(bin.X))
+	return name != "" && !mentions(bin.Y, name)
 }
