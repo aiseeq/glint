@@ -141,19 +141,17 @@ func checkRemoteScriptErrexit(r *shellRule, src *shellSource) []*core.Violation 
 	}
 	text, starts := blankedScript(src.ctx.Lines)
 	var out []*core.Violation
-	for _, sp := range quotedSpans(text) {
+	for _, word := range quotedWords(quotedSpans(text)) {
+		sp := word[0]
 		lineStart := strings.LastIndexByte(text[:sp.open], '\n') + 1
 		prefix := text[lineStart:sp.open]
 		runner := invokedCommand(prefix)
 		if !cShellBefore.MatchString(prefix) && !remoteRunner.MatchString(runner) {
 			continue
 		}
-		open, body := sp.open, text[sp.open+1:sp.close]
-		if text[sp.open] == '"' {
-			body = unescapeDoubleQuoted(body)
-		}
+		open, body := sp.open, wordText(text, word)
 		// ssh host 'sudo bash -c "..."': the script is the inner string.
-		if inner := innerCScript(body); inner != nil {
+		if inner := innerCScript(body); inner != nil && len(word) == 1 {
 			open, body = sp.open+1+inner.open, body[inner.open+1:inner.close]
 		}
 		if !strings.Contains(strings.TrimSpace(body), "\n") || !independentCommands(body) {
@@ -167,6 +165,38 @@ func checkRemoteScriptErrexit(r *shellRule, src *shellSource) []*core.Violation 
 			"Start the script with set -e (set -euo pipefail), or join the steps with &&"))
 	}
 	return out
+}
+
+// quotedWords groups the quoted strings that touch into the shell words they
+// make: "set -e; x=$v; "'cmd "$x"' is one argument, and its script is the
+// text of both parts.
+func quotedWords(spans []quotedSpan) [][]quotedSpan {
+	var out [][]quotedSpan
+	for _, sp := range spans {
+		if n := len(out); n > 0 {
+			last := out[n-1]
+			if last[len(last)-1].close+1 == sp.open {
+				out[n-1] = append(last, sp)
+				continue
+			}
+		}
+		out = append(out, []quotedSpan{sp})
+	}
+	return out
+}
+
+// wordText returns the text a word of quoted strings stands for: the bodies
+// of its parts, the double-quoted ones unescaped.
+func wordText(text string, word []quotedSpan) string {
+	var b strings.Builder
+	for _, sp := range word {
+		body := text[sp.open+1 : sp.close]
+		if text[sp.open] == '"' {
+			body = unescapeDoubleQuoted(body)
+		}
+		b.WriteString(body)
+	}
+	return b.String()
 }
 
 // unescapeDoubleQuoted returns the text a double-quoted string stands for,

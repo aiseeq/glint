@@ -357,3 +357,15 @@ pipelines:
 	}
 	assert.Equal(t, []string{".github/workflows/ci.yml:3", "Dockerfile:1", "bitbucket-pipelines.yml:1", "bitbucket-pipelines.yml:11"}, foundLines(found))
 }
+
+// Repro from a real project: a deploy script glued a double-quoted part with
+// set -e and the variables to expand to a single-quoted part with the remote
+// commands - one shell word, and set -e is in it.
+func TestRemoteScriptErrexitGluedQuotes(t *testing.T) {
+	shellWanted(t, "remote-multiline-script-without-errexit", "deploy.sh", `#!/bin/bash
+ssh "$HOST" "set -euo pipefail; tag=$TAG; "'docker pull "app:$tag"
+    docker tag "app:$tag" app:current'
+ssh "$HOST" "tag=$TAG; "'docker pull "app:$tag" # want
+    docker tag "app:$tag" app:current'
+`)
+}
