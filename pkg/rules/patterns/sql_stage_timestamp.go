@@ -127,6 +127,7 @@ func newStageIndex(decls map[*types.Func]typedFuncDecl) *stageIndex {
 				index.writes[bound.update.Table] = append(index.writes[bound.update.Table], bound)
 			}
 		}
+		index.addUpsertStamps(decl)
 	}
 	for _, writes := range index.writes {
 		for _, write := range writes {
@@ -150,6 +151,107 @@ func newStageIndex(decls map[*types.Func]typedFuncDecl) *stageIndex {
 		}
 	}
 	return index
+}
+
+// addUpsertStamps records the <word>_at columns an upsert of the function
+// sets with the status from a value the function stamps only for one
+// status:
+//
+//	if settledAt == nil && p.Status == string(StatusCompleted) { settledAt = &now }
+//	INSERT ... ON CONFLICT DO UPDATE SET status = EXCLUDED.status, settled_at = ... EXCLUDED.settled_at
+//
+// settled_at then belongs to COMPLETED, though the names differ.
+func (index *stageIndex) addUpsertStamps(decl typedFuncDecl) {
+	queries := namedStrings(decl.decl)
+	ast.Inspect(decl.decl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !runsQuery(call) {
+			return true
+		}
+		for i, arg := range call.Args {
+			if ident, ok := arg.(*ast.Ident); ok && queries[ident.Name] != nil {
+				arg = queries[ident.Name]
+			}
+			literals := sqlLiterals(arg)
+			if !isStringOrConcat(arg) || len(literals) != 1 {
+				continue
+			}
+			for _, write := range sqlschema.UpsertWrites(literals[0].text) {
+				if _, ok := write.Assignment("status"); !ok {
+					continue
+				}
+				for _, set := range write.Sets {
+					if set.Param == 0 || i+set.Param >= len(call.Args) || !stageTimestamp(set.Column) {
+						continue
+					}
+					stage := stampedOnlyFor(decl, call.Args[i+set.Param])
+					if stage == "" {
+						continue
+					}
+					if index.stamps[write.Table] == nil {
+						index.stamps[write.Table] = make(map[string]string)
+					}
+					index.stamps[write.Table][set.Column] = stage
+					index.statuses[stage] = true
+				}
+			}
+		}
+		return true
+	})
+}
+
+// stampedOnlyFor returns the status, upper case, under which the function
+// sets the variable passed for a stamp - an if comparing a status with a
+// constant and assigning the variable - or "" when it sets it otherwise.
+func stampedOnlyFor(decl typedFuncDecl, value ast.Expr) string {
+	ident, ok := ast.Unparen(value).(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	stage := ""
+	ast.Inspect(decl.decl.Body, func(n ast.Node) bool {
+		branch, ok := n.(*ast.IfStmt)
+		if !ok || stage != "" || !blockAssignsName(branch.Body, ident.Name) {
+			return stage == ""
+		}
+		ast.Inspect(branch.Cond, func(c ast.Node) bool {
+			bin, ok := c.(*ast.BinaryExpr)
+			if !ok || bin.Op != token.EQL {
+				return true
+			}
+			for _, pair := range [][2]ast.Expr{{bin.X, bin.Y}, {bin.Y, bin.X}} {
+				if text, ok := stringConstant(decl.info, pair[1]); ok && namesStatus(pair[0]) {
+					stage = strings.ToUpper(text)
+				}
+			}
+			return stage == ""
+		})
+		return stage == ""
+	})
+	return stage
+}
+
+// blockAssignsName reports a block assigning the variable with =.
+func blockAssignsName(block *ast.BlockStmt, name string) bool {
+	found := false
+	ast.Inspect(block, func(n ast.Node) bool {
+		if assign, ok := n.(*ast.AssignStmt); ok && assign.Tok == token.ASSIGN {
+			found = found || slices.ContainsFunc(assign.Lhs, func(lhs ast.Expr) bool { return isIdentNamed(lhs, name) })
+		}
+		return !found
+	})
+	return found
+}
+
+// namesStatus reports an expression naming a status: status, p.Status.
+func namesStatus(expr ast.Expr) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		return statusOrStateName(e.Name)
+	case *ast.SelectorExpr:
+		return statusOrStateName(e.Sel.Name)
+	}
+	return false
 }
 
 // addConstants records the status constants of a package: string constants
@@ -425,7 +527,9 @@ func (index *stageIndex) skippingWriter(table, column, stage string) string {
 
 // stampsAny reports an UPDATE setting a <stage>_at column.
 func (index *stageIndex) stampsAny(update sqlschema.UpdateWrite) bool {
-	return slices.ContainsFunc(update.Sets, func(set sqlschema.ColumnWrite) bool { return index.stageOf(set.Column) != "" })
+	return slices.ContainsFunc(update.Sets, func(set sqlschema.ColumnWrite) bool {
+		return index.stageOf(set.Column) != "" || index.stamps[update.Table][set.Column] != ""
+	})
 }
 
 // eventWords name a function applying repeated events to a row.

@@ -80,15 +80,17 @@ func (r *SQLModelFieldSkippedRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	}
 	funcsByInfo := make(map[*types.Info]map[string]*ast.FuncDecl)
 	updatedByInfo := make(map[*types.Info]map[string]bool)
+	insertedByInfo := make(map[*types.Info]map[string]bool)
 	for _, pkg := range ctx.Packages {
 		if pkg != nil && pkg.Package != nil {
 			funcsByInfo[pkg.Package.TypesInfo] = packageFuncs(pkg)
-			updatedByInfo[pkg.Package.TypesInfo] = updatedColumns(pkg, schema)
+			updatedByInfo[pkg.Package.TypesInfo] = writtenColumns(pkg, schema, "update")
+			insertedByInfo[pkg.Package.TypesInfo] = writtenColumns(pkg, schema, "insert")
 		}
 	}
 	violations, err := rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		check := &modelFieldCheck{rule: r, ctx: fileCtx, info: info, schema: schema,
-			funcs: funcsByInfo[info], updated: updatedByInfo[info]}
+			funcs: funcsByInfo[info], updated: updatedByInfo[info], inserted: insertedByInfo[info]}
 		for _, decl := range fileCtx.GoAST.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
 				check.function(fn)
@@ -109,26 +111,34 @@ type modelFieldCheck struct {
 	schema     *sqlschema.Schema
 	funcs      map[string]*ast.FuncDecl // the package's own functions, see packageFuncs
 	updated    map[string]bool          // table.column an UPDATE of the package sets
+	inserted   map[string]bool          // table.column an INSERT of the package lists
 	violations []*core.Violation
 }
 
-// updatedColumns returns the columns, as table.column, the UPDATE statements
-// of a package set.
-func updatedColumns(pkg *core.GoPackageContext, schema *sqlschema.Schema) map[string]bool {
-	updated := make(map[string]bool)
+// stageTimestamp reports a <stage>_at column that records when a row reached
+// a stage: settled_at, not the bookkeeping updated_at.
+func stageTimestamp(column string) bool {
+	stem, ok := strings.CutSuffix(column, "_at")
+	return ok && stem != "" && !bookkeepingStamps[stem]
+}
+
+// writtenColumns returns the columns, as table.column, the statements of a
+// package of the kind (insert, update) list.
+func writtenColumns(pkg *core.GoPackageContext, schema *sqlschema.Schema, kind string) map[string]bool {
+	written := make(map[string]bool)
 	for _, file := range pkg.Files {
 		if file == nil || file.GoAST == nil || file.IsTestFile() {
 			continue
 		}
 		for _, literal := range sqlLiterals(file.GoAST) {
-			if shape, ok := literal.shape(schema); ok && shape.Kind == "update" {
+			if shape, ok := literal.shape(schema); ok && shape.Kind == kind {
 				for _, column := range shape.Columns {
-					updated[shape.Table+"."+column] = true
+					written[shape.Table+"."+column] = true
 				}
 			}
 		}
 	}
-	return updated
+	return written
 }
 
 // shape returns the shape of the statement, reading it without the operands
@@ -170,7 +180,11 @@ func (c *modelFieldCheck) function(fn *ast.FuncDecl) {
 // insert reports the columns with a constant default an INSERT leaves out
 // while it stores fields of the model beside them. A column an UPDATE of the
 // package sets is written later in the row's life — a run created first and
-// finished with its counters.
+// finished with its counters. A nullable <stage>_at column without a default
+// (settled_at) is reported when another INSERT of the package lists it:
+// one way of creating the row records when it reached the stage, this one
+// stores NULL. Other nullable columns are left out by design often enough
+// (a reference only some rows have).
 func (c *modelFieldCheck) insert(fn *ast.FuncDecl, s modelShape) {
 	listed := s.shape.Columns
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -192,18 +206,32 @@ func (c *modelFieldCheck) insert(fn *ast.FuncDecl, s modelShape) {
 			return true
 		}
 		table := c.schema.Table(s.shape.Table)
-		var missing []string
+		var missing, nulled []string
 		for _, tag := range model.tags {
 			column := table.Column(tag)
-			if column != nil && column.HasDefault && !column.GeneratedDefault && !slices.Contains(listed, tag) &&
-				!c.updated[table.Name+"."+tag] {
+			if column == nil || slices.Contains(listed, tag) {
+				continue
+			}
+			switch {
+			case column.HasDefault && !column.GeneratedDefault && !c.updated[table.Name+"."+tag]:
 				missing = append(missing, tag)
+			case !column.HasDefault && !column.NotNull && stageTimestamp(tag) && c.inserted[table.Name+"."+tag]:
+				nulled = append(nulled, tag)
 			}
 		}
+		var losses []string
+		pattern := "insert"
 		if len(missing) > 0 {
+			losses = append(losses, strings.Join(missing, ", ")+" — the column default replaces the model's value")
+		}
+		if len(nulled) > 0 {
+			losses = append(losses, strings.Join(nulled, ", ")+", which another INSERT of the package stores — rows created here keep NULL in place of the model's value")
+			pattern = "insert_null"
+		}
+		if len(losses) > 0 {
 			c.report(s.literal.lineAt(c.ctx, s.shape.LastOffset), fmt.Sprintf(
-				"INSERT into %s stores fields of %s but leaves out %s — the column default replaces the model's value",
-				s.shape.Table, model.name, strings.Join(missing, ", ")), "insert")
+				"INSERT into %s stores fields of %s but leaves out %s",
+				s.shape.Table, model.name, strings.Join(losses, "; and ")), pattern)
 		}
 		return false
 	})

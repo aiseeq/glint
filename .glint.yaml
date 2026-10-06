@@ -39,6 +39,10 @@ categories:
             reason: >-
               The addresses on registrable domains are the inputs of the
               rule's own test: the test checks that the rule reports them.
+          - file: "pkg/rules/patterns/test_email_domain_sql_test.go"
+            reason: >-
+              The SQL patterns on registrable domains are the inputs of the
+              rule's own test: the test checks that the rule reports them.
       mock-identifier:
         exceptions:
           - files: "pkg/rules/deadcode/{stub_method,nil_return_stub}.go"

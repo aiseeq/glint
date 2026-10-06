@@ -187,3 +187,60 @@ func request(tx *domain.Transaction) string { return tx.Remark + tx.State + tx.D
 	assert.Equal(t, 14, violations[0].Line)
 	assert.Contains(t, violations[0].Message, "leaves out Remark, State,")
 }
+
+// Two INSERTs create rows of one table from the same model: one lists the
+// nullable settled_at, the other leaves it out, and the rows it creates
+// keep NULL whatever the model holds. A nullable column no INSERT lists
+// (stamped later by an UPDATE) is the row's life, not a loss, and a nullable
+// reference only some rows have (note) is left out by design.
+func TestSQLModelFieldSkippedNullableStoredElsewhere(t *testing.T) {
+	files := map[string]string{
+		"storage/migrations/001_init.up.sql": `
+CREATE TABLE orders (
+    id UUID PRIMARY KEY,
+    status TEXT NOT NULL,
+    amount NUMERIC NOT NULL,
+    settled_at TIMESTAMPTZ,
+    shipped_at TIMESTAMPTZ,
+    note TEXT
+);`,
+		"storage/repo.go": `package storage
+
+import "context"
+
+type Order struct {
+	ID          string ` + "`db:\"id\"`" + `
+	Status      string ` + "`db:\"status\"`" + `
+	Amount      string ` + "`db:\"amount\"`" + `
+	SettledAt *string ` + "`db:\"settled_at\"`" + `
+	ShippedAt   *string ` + "`db:\"shipped_at\"`" + `
+	Note        *string ` + "`db:\"note\"`" + `
+}
+
+type DB interface {
+	ExecContext(ctx context.Context, query string, args ...any) (any, error)
+}
+
+func Create(ctx context.Context, db DB, o *Order) error {
+	_, err := db.ExecContext(ctx, ` + "`INSERT INTO orders (id, status, amount) VALUES ($1, $2, $3)`" + `, o.ID, o.Status, o.Amount)
+	return err
+}
+
+func Upsert(ctx context.Context, db DB, o *Order) error {
+	_, err := db.ExecContext(ctx, ` + "`INSERT INTO orders (id, status, amount, settled_at, note) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status`" + `,
+		o.ID, o.Status, o.Amount, o.SettledAt, o.Note)
+	return err
+}
+
+func Ship(ctx context.Context, db DB, o *Order) error {
+	_, err := db.ExecContext(ctx, "UPDATE orders SET shipped_at = $1 WHERE id = $2", o.ShippedAt, o.ID)
+	return err
+}
+`,
+	}
+	violations, err := NewSQLModelFieldSkippedRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "storage/repo.go:19", fmt.Sprintf("%s:%d", violations[0].File, violations[0].Line))
+	assert.Contains(t, violations[0].Message, "leaves out settled_at, which another INSERT")
+}
