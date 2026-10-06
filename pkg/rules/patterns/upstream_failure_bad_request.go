@@ -27,7 +27,11 @@ func init() {
 // reads as "fix your request", the client does not retry, and monitoring of
 // 5xx answers never sees it. Tell the client's errors apart (errors.Is on a
 // validation sentinel) and answer the rest as 502 or 500. The callee must be
-// declared in the file and pass a context to a call of its own.
+// declared in the file and pass a context to a call of its own, or be handed
+// the request's context directly (r.verifier.Verify(req.Context(), token)).
+//
+// A 401 for every error of such a call is the same trap: a token check that
+// fetches the signing keys answers an outage with "log in again".
 type UpstreamFailureAnsweredAsBadRequestRule struct {
 	*rules.BaseRule
 }
@@ -37,7 +41,7 @@ func NewUpstreamFailureAnsweredAsBadRequestRule() *UpstreamFailureAnsweredAsBadR
 	return &UpstreamFailureAnsweredAsBadRequestRule{BaseRule: rules.NewBaseRule(
 		"upstream-failure-answered-as-bad-request",
 		"patterns",
-		"Detects a handler answering 400 for every error of a call that also fetches with a context — an unavailable source reads as the client's mistake",
+		"Detects a handler answering 400 or 401 for every error of a call that also fetches with a context — an unavailable source reads as the client's mistake",
 		core.SeverityMedium,
 	)}
 }
@@ -45,6 +49,8 @@ func NewUpstreamFailureAnsweredAsBadRequestRule() *UpstreamFailureAnsweredAsBadR
 var (
 	// badRequestResponder names a helper that answers 400.
 	badRequestResponder = regexp.MustCompile(`(?i)validation|badrequest|invalidrequest`)
+	// contextValueRead names a call reading a value the context carries.
+	contextValueRead = regexp.MustCompile(`(?i)from(?:ctx|context)$`)
 	// answerVerb starts the name of a helper that writes an answer.
 	answerVerb = regexp.MustCompile(`(?i)^(?:send|respond|write|reply)`)
 )
@@ -68,16 +74,16 @@ func (r *UpstreamFailureAnsweredAsBadRequestRule) AnalyzeFile(ctx *core.FileCont
 			continue
 		}
 		forEachStmtPair(fn.Body, func(first, second ast.Stmt) {
-			callee := errAssignedCallee(first)
+			call := errAssignedCall(first)
 			ifStmt, ok := second.(*ast.IfStmt)
-			if callee == "" || !ok || ifStmt.Init != nil || !isErrNotNil(ifStmt.Cond) {
+			if call == nil || !ok || ifStmt.Init != nil || !isErrNotNil(ifStmt.Cond) {
 				return
 			}
-			target, ok := funcs[callee]
-			if !ok || isHTTPHandlerDecl(target) || !handsContextOn(target.Body) {
+			callee := callName(call)
+			if !fetches(call, funcs[callee]) {
 				return
 			}
-			answer := badRequestAnswer(ifStmt.Body)
+			answer, status := clientErrorAnswer(ifStmt.Body)
 			if answer == nil {
 				return
 			}
@@ -85,7 +91,7 @@ func (r *UpstreamFailureAnsweredAsBadRequestRule) AnalyzeFile(ctx *core.FileCont
 			if ctx.IsSuppressed(line, r.Name()) {
 				return
 			}
-			v := r.CreateViolation(ctx.RelPath, line, "Every error of "+callee+" is answered as a bad request, though it also fails when what it fetches does not answer")
+			v := r.CreateViolation(ctx.RelPath, line, "Every error of "+callee+" is answered as "+status+", though it also fails when what it fetches does not answer")
 			v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
 			v.WithSuggestion("Mark the request's own errors (errors.Is on a validation sentinel) and answer the rest as 502 or 500")
 			violations = append(violations, v)
@@ -119,24 +125,39 @@ func forEachStmtPair(body *ast.BlockStmt, visit func(first, second ast.Stmt)) {
 	})
 }
 
-// errAssignedCallee returns the name of the function or method called by an
-// assignment whose last target is err: x, err := r.build(req).
-func errAssignedCallee(stmt ast.Stmt) string {
+// errAssignedCall returns the call of an assignment whose last target is
+// err: x, err := r.build(req).
+func errAssignedCall(stmt ast.Stmt) *ast.CallExpr {
 	assign, ok := stmt.(*ast.AssignStmt)
 	if !ok || len(assign.Rhs) != 1 || !isIdentNamed(assign.Lhs[len(assign.Lhs)-1], "err") {
-		return ""
+		return nil
 	}
-	call, ok := assign.Rhs[0].(*ast.CallExpr)
-	if !ok {
-		return ""
+	call, _ := assign.Rhs[0].(*ast.CallExpr)
+	return call
+}
+
+// fetches reports a call that can fail on what it fetches: a function of the
+// file (target) that hands a context on, or any call handed the request's
+// context (req.Context()) or ctx itself. A read of a context value
+// (UserIDFromContext) fetches nothing.
+func fetches(call *ast.CallExpr, target *ast.FuncDecl) bool {
+	if contextValueRead.MatchString(callName(call)) {
+		return false
 	}
-	switch fun := call.Fun.(type) {
-	case *ast.Ident:
-		return fun.Name
-	case *ast.SelectorExpr:
-		return fun.Sel.Name
+	if target != nil {
+		return !isHTTPHandlerDecl(target) && handsContextOn(target.Body)
 	}
-	return ""
+	for _, arg := range call.Args {
+		if isIdentNamed(arg, "ctx") {
+			return true
+		}
+		if inner, ok := ast.Unparen(arg).(*ast.CallExpr); ok && len(inner.Args) == 0 {
+			if sel, ok := inner.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Context" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // handsContextOn reports a body that hands a context to a call: ctx, or
@@ -161,10 +182,11 @@ func handsContextOn(body *ast.BlockStmt) bool {
 	return found
 }
 
-// badRequestAnswer returns the call of an error branch that answers 400 when
-// the branch does not tell errors apart.
-func badRequestAnswer(body *ast.BlockStmt) *ast.CallExpr {
+// clientErrorAnswer returns the call of an error branch that answers 400 or
+// 401, and how it answers, when the branch does not tell errors apart.
+func clientErrorAnswer(body *ast.BlockStmt) (*ast.CallExpr, string) {
 	var answer *ast.CallExpr
+	status := ""
 	split := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -174,15 +196,37 @@ func badRequestAnswer(body *ast.BlockStmt) *ast.CallExpr {
 		if isSelectorCall(call, "errors", "Is") || isSelectorCall(call, "errors", "As") {
 			split = true
 		}
-		if answer == nil && answersBadRequest(call) {
-			answer = call
+		if answer == nil {
+			switch {
+			case answersBadRequest(call):
+				answer, status = call, "a bad request"
+			case answersUnauthorized(call):
+				answer, status = call, "unauthorized"
+			}
 		}
 		return true
 	})
 	if split {
-		return nil
+		return nil, ""
 	}
-	return answer
+	return answer, status
+}
+
+// answersUnauthorized reports a call of a 401 helper or one given
+// http.StatusUnauthorized.
+func answersUnauthorized(call *ast.CallExpr) bool {
+	if name := callName(call); answerVerb.MatchString(name) && strings.Contains(strings.ToLower(name), "unauthorized") {
+		return true
+	}
+	for _, arg := range call.Args {
+		if sel, ok := arg.(*ast.SelectorExpr); ok && sel.Sel.Name == "StatusUnauthorized" && isIdentNamed(sel.X, "http") {
+			return true
+		}
+		if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.INT && lit.Value == "401" {
+			return true
+		}
+	}
+	return false
 }
 
 // answersBadRequest reports a call of a 400 helper or one given
