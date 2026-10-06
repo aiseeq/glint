@@ -84,11 +84,13 @@ func (r *IgnoredDecisionResultRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	}
 
 	docs := make(map[*types.Func]string)
+	skippers := make(map[*types.Func]bool)
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
 			return nil, errors.New("ignored decision result: package has no typed syntax")
 		}
 		collectFuncDocs(pkg.Package.Syntax, pkg.Package.TypesInfo, docs)
+		collectSkippers(pkg.Package.Syntax, pkg.Package.TypesInfo, skippers)
 	}
 
 	var violations []*core.Violation
@@ -97,7 +99,7 @@ func (r *IgnoredDecisionResultRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
 				continue
 			}
-			violations = append(violations, r.analyzeFile(fileCtx, pkg.Package, docs)...)
+			violations = append(violations, r.analyzeFile(fileCtx, pkg.Package, docs, skippers)...)
 		}
 	}
 
@@ -114,6 +116,7 @@ func (r *IgnoredDecisionResultRule) analyzeFile(
 	fileCtx *core.FileContext,
 	pkg *packages.Package,
 	docs map[*types.Func]string,
+	skippers map[*types.Func]bool,
 ) []*core.Violation {
 	var violations []*core.Violation
 
@@ -131,6 +134,10 @@ func (r *IgnoredDecisionResultRule) analyzeFile(
 			violations = append(violations, r.checkAssign(fileCtx, node, pkg, docs)...)
 		case *ast.BlockStmt:
 			violations = append(violations, r.checkFlagsReadByLogs(fileCtx, node, pkg)...)
+		case *ast.IfStmt:
+			if v := r.checkDoneFlagWithSuccessLog(fileCtx, node, pkg, skippers); v != nil {
+				violations = append(violations, v)
+			}
 		}
 		return true
 	})
@@ -169,6 +176,72 @@ func (r *IgnoredDecisionResultRule) checkAssign(
 		return []*core.Violation{r.report(fileCtx, call, fn)}
 	}
 	return nil
+}
+
+// checkDoneFlagWithSuccessLog reports a (bool, error) call whose bool - "the
+// work was done" - is dropped while the branch for no error logs success:
+//
+//	if _, err := c.Download(u, dst); err != nil { … } else { slog.Info("downloaded", …) }
+//
+// The callee answers (false, nil) when it skipped the work; the caller then
+// reports work that did not happen. A dropped bool alone is left to
+// idempotent callers, which ignore an "already done" note on purpose.
+func (r *IgnoredDecisionResultRule) checkDoneFlagWithSuccessLog(fileCtx *core.FileContext, ifStmt *ast.IfStmt, pkg *packages.Package, skippers map[*types.Func]bool) *core.Violation {
+	assign, ok := ifStmt.Init.(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 2 || len(assign.Rhs) != 1 || !isBlank(assign.Lhs[0]) {
+		return nil
+	}
+	call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	fn := calleeFunc(pkg, call)
+	if fn == nil || !skippers[fn] {
+		return nil
+	}
+	successBranch, ok := ifStmt.Else.(*ast.BlockStmt)
+	if !ok || len(successBranch.List) == 0 || !allStmtsAreLogs(successBranch.List) {
+		return nil
+	}
+	line := fileCtx.LineFor(call)
+	v := r.CreateViolation(fileCtx.RelPath, line,
+		fmt.Sprintf("%s answers (false, nil) when it skips the work, the bool is dropped, and the success branch logs the work as done", fn.Name()))
+	v.WithCode(strings.TrimSpace(fileCtx.GetLine(line)))
+	v.WithSuggestion(fmt.Sprintf("Take the bool of %s and report the skipped case, or make the call do the work it is asked to", fn.Name()))
+	v.WithContext("pattern", "done_flag_dropped_success_logged")
+	v.WithContext("function", fn.Name())
+	return v
+}
+
+// collectSkippers marks the functions with a (bool, error) result that have a
+// path answering false, nil: the call succeeded without doing the work.
+func collectSkippers(files []*ast.File, info *types.Info, skippers map[*types.Func]bool) {
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			obj, ok := info.Defs[fn.Name].(*types.Func)
+			if !ok {
+				continue
+			}
+			results := obj.Signature().Results()
+			if results.Len() != 2 || !isBoolType(results.At(0).Type()) || !isErrorType(results.At(1).Type()) {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if _, ok := n.(*ast.FuncLit); ok {
+					return false
+				}
+				if ret, ok := n.(*ast.ReturnStmt); ok && len(ret.Results) == 2 &&
+					isIdentNamed(ret.Results[0], "false") && isNilIdent(ret.Results[1]) {
+					skippers[obj] = true
+				}
+				return !skippers[obj]
+			})
+		}
+	}
 }
 
 // failureFlagNames are the names of a bool result that says the input was

@@ -258,3 +258,38 @@ func export(logger *slog.Logger, text string, allowed []int) ([]int, bool) {
 	require.Len(t, violations, 1)
 	assert.Equal(t, 14, violations[0].Line)
 }
+
+// Repro from a real project: Download skips a file already on disk and says
+// so with (false, nil); the caller dropped the bool and logged the old file
+// as freshly downloaded.
+func TestIgnoredDecisionResultReportsDoneFlagWithSuccessLog(t *testing.T) {
+	violations := analyzeDecision(t, `package budget
+
+import (
+	"log/slog"
+	"os"
+)
+
+type Client struct{}
+
+// Download stores u in dst, skipping a dst that already exists.
+func (c *Client) Download(u, dst string) (bool, error) {
+	if _, err := os.Stat(dst); err == nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+func Pull(c *Client, u, dst string) {
+	if _, err := c.Download(u, dst); err != nil {
+		slog.Warn("bot data", "err", err)
+	} else {
+		slog.Info("bot data downloaded", "file", dst)
+	}
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 19, violations[0].Line)
+	assert.Contains(t, violations[0].Message, "Download")
+}

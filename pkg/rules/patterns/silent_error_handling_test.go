@@ -287,3 +287,59 @@ func classify(report *Report, keys []string) {
 	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
 	require.Empty(t, violations, "текст ошибки попал в отчёт: %v", violations)
 }
+
+// Repro from a real project: a missing optional ticket was meant to be
+// skipped, but every error of reading it - a renamed file, a permission
+// problem - was taken as "the ticket is closed" and skipped without a trace.
+func TestSilentErrorHandlingRule_OptionalSourceAnyError(t *testing.T) {
+	code := `package main
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+)
+
+const optional = "chronic"
+
+func read(name string) (string, error) {
+	b, err := os.ReadFile(name)
+	return string(b), err
+}
+
+func collect(slug string) ([]string, error) {
+	var out []string
+	for _, s := range []string{optional, slug} {
+		text, err := read(s)
+		if err != nil && s == optional {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, text)
+	}
+	return out, nil
+}
+
+func collectChecked(slug string) ([]string, error) {
+	var out []string
+	for _, s := range []string{optional, slug} {
+		text, err := read(s)
+		if err != nil && errors.Is(err, fs.ErrNotExist) && s == optional {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, text)
+	}
+	return out, nil
+}
+`
+
+	ctx := createSilentErrorContext(t, "service.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+	require.Equal(t, 20, violations[0].Line)
+}
