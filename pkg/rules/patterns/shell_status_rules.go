@@ -360,7 +360,7 @@ func checkLoopIgnoresStepFailure(r *shellRule, src *shellSource) []*core.Violati
 	for i, s := range steps {
 		text := strings.TrimSpace(commandPrefix.ReplaceAllString(s.text, ""))
 		switch {
-		case loopStart.MatchString(s.text):
+		case shellLoopStart(s.text):
 			depth++
 		case loopEnd.MatchString(text):
 			depth--

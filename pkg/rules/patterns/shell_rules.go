@@ -707,7 +707,8 @@ func checkBinaryInPlace(r *shellRule, src *shellSource) []*core.Violation {
 				"Copy to a temporary name next to it and rename it into place (mv is atomic on one filesystem)"))
 		}
 	}
-	return out
+	out = append(out, builtByWorkers(r, src)...)
+	return append(out, scriptsOverRunning(r, src)...)
 }
 
 // envCopy is a copy of the local .env onto the server's .env or into its directory;
