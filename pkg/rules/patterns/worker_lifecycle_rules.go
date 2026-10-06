@@ -318,8 +318,9 @@ func isQueueField(info *types.Info, expr ast.Expr, queue *types.Var) bool {
 var sendVerbs = []string{"Send", "Deliver", "Transfer", "Charge", "Submit", "Payout", "Refund", "Capture", "Dispatch", "Publish"}
 
 // recordVerbs lead the names of calls that record an outcome besides the
-// write verbs: finalize a lease, complete a job, acknowledge a message.
-var recordVerbs = []string{"Finalize", "Complete", "Ack", "Acknowledge", "Settle"}
+// write verbs: finalize a lease, complete a job, acknowledge a message,
+// confirm a pending mark.
+var recordVerbs = []string{"Finalize", "Complete", "Ack", "Acknowledge", "Settle", "Confirm"}
 
 // NewPostSideEffectWriteUsesRequestContextRule creates
 // post-side-effect-write-uses-request-context: the write that records the
@@ -330,6 +331,10 @@ var recordVerbs = []string{"Finalize", "Complete", "Ack", "Acknowledge", "Settle
 //	resp, err := s.gateway.SendTransfer(req)
 //	if err != nil { ... }
 //	if err := s.repo.UpdateSent(ctx, id, resp.Ref); err != nil {   // ctx of the request
+//
+// The removal of a mark on the send's failure path is reported the same way:
+// when the send failed because the caller went away, the removal on that
+// context fails too and the mark blocks every retry.
 func NewPostSideEffectWriteUsesRequestContextRule() *typedFuncRule {
 	r := &typedFuncRule{
 		BaseRule: rules.NewBaseRule(
@@ -368,6 +373,10 @@ func NewPostSideEffectWriteUsesRequestContextRule() *typedFuncRule {
 				if write := successRecord(scope.info, after, cancellable); write != nil && !reported[write] {
 					reported[write] = true
 					findings = append(findings, funcFinding{node: write, message: callName(write) + " records the outcome of " + send + " with the caller's cancellable context — when the caller goes away after the send the record is lost and the command is sent again"})
+				}
+				if undo := failureUndo(scope.info, stmt, block.List[i+1:], cancellable); undo != nil && !reported[undo] {
+					reported[undo] = true
+					findings = append(findings, funcFinding{node: undo, message: callName(undo) + " takes the mark back on the failure of " + send + " with the caller's cancellable context — when the send failed because the caller went away, the removal fails too, the mark stays, and the retry is dropped as a duplicate"})
 				}
 			}
 			return true
@@ -513,6 +522,43 @@ func successRecord(info *types.Info, stmts []ast.Stmt, cancellable map[types.Obj
 		}
 	}
 	return nil
+}
+
+// failureUndo returns the call removing a mark (markerRelease verbs) handed
+// one of the cancellable contexts in the error branch of a send: the branch
+// of send itself when it is an if, or of the if right after it.
+func failureUndo(info *types.Info, send ast.Stmt, after []ast.Stmt, cancellable map[types.Object]bool) *ast.CallExpr {
+	check, ok := send.(*ast.IfStmt)
+	if !ok && len(after) > 0 {
+		check, ok = after[0].(*ast.IfStmt)
+	}
+	if !ok || !isErrNotNil(check.Cond) {
+		return nil
+	}
+	var found *ast.CallExpr
+	ast.Inspect(check.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.CallExpr:
+			name := callName(node)
+			if slices.ContainsFunc(markerRelease, func(verb string) bool { return helpers.HasLeadingWord(name, verb) }) && handedAny(info, node, cancellable) {
+				found = node
+			}
+		}
+		return found == nil
+	})
+	return found
+}
+
+// handedAny reports a call handed one of objs as a plain argument.
+func handedAny(info *types.Info, call *ast.CallExpr, objs map[types.Object]bool) bool {
+	for _, arg := range call.Args {
+		if ident, ok := ast.Unparen(arg).(*ast.Ident); ok && objs[info.ObjectOf(ident)] {
+			return true
+		}
+	}
+	return false
 }
 
 // recordsOn reports a write call handed one of the cancellable contexts.

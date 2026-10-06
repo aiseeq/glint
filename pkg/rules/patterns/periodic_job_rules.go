@@ -114,6 +114,13 @@ func NewPeriodAttemptMarkerIgnoresWorkSetRule() *typedFuncRule {
 //		return
 //	}
 //	r.fetchAndStore(ctx, date)    // fails: no retry today
+//
+// An event marked processed by its duplicate check, before the processing,
+// is the same trap per event: the sender's redelivery of an event whose
+// processing failed is dropped as a duplicate.
+//
+//	if d.isDuplicate(key) { return true }
+//	d.markProcessed(key)          // the processing comes after, in the caller
 func NewAttemptMarkerWrittenBeforeWorkRule() *typedFuncRule {
 	r := &typedFuncRule{
 		BaseRule: rules.NewBaseRule(
@@ -135,9 +142,159 @@ func NewAttemptMarkerWrittenBeforeWorkRule() *typedFuncRule {
 			}
 			findings = append(findings, funcFinding{node: marker, message: "The once-per-period marker " + callName(marker) + " is written before the work it guards and never removed when the work fails — one transient failure skips the rest of the period"})
 		})
+		for _, marker := range dedupMarkersBeforeWork(scope, fn) {
+			findings = append(findings, funcFinding{node: marker, message: "The event is marked by " + callName(marker) + " right after its duplicate check, before it is processed, and nothing removes the mark when the processing fails — the redelivery of a failed event is dropped as a duplicate"})
+		}
 		return findings
 	}
 	return r
+}
+
+// dedupStateWords name the state a duplicate check reads and a dedup marker
+// writes.
+var dedupStateWords = []string{"duplicate", "processed", "seen", "handled", "delivered"}
+
+// dedupMarkVerbs lead the names of calls writing a dedup marker.
+var dedupMarkVerbs = []string{"Mark", "Set", "Record", "Remember", "Add", "Save", "Store", "Put"}
+
+// isDedupMarker reports markProcessed, MarkSeen, SetHandled.
+func isDedupMarker(name string) bool {
+	words := helpers.IdentifierWords(name)
+	return slices.ContainsFunc(dedupMarkVerbs, func(verb string) bool { return helpers.HasLeadingWord(name, verb) }) &&
+		slices.ContainsFunc(words, func(w string) bool { return w != "duplicate" && slices.Contains(dedupStateWords, w) })
+}
+
+// isDedupCheck reports isDuplicate, IsProcessed, alreadySeen.
+func isDedupCheck(name string) bool {
+	words := helpers.IdentifierWords(name)
+	return !isDedupMarker(name) && !helpers.IsWriteName(name) &&
+		slices.ContainsFunc(words, func(w string) bool { return slices.Contains(dedupStateWords, w) })
+}
+
+// dedupMarkersBeforeWork returns the dedup markers fn writes right after the
+// guard that leaves on a duplicate, with the processing still ahead - later
+// in fn, or in a caller of fn acting on its verdict - and nothing in fn or
+// its callers removing the mark.
+func dedupMarkersBeforeWork(scope funcScope, fn *ast.FuncDecl) []*ast.CallExpr {
+	stmts := fn.Body.List
+	var markers []*ast.CallExpr
+	for i := range stmts {
+		keys := dedupGuardKeys(scope.info, stmts, i)
+		if len(keys) == 0 || i+1 >= len(stmts) {
+			continue
+		}
+		marker := dedupMarkerIn(scope.info, stmts[i+1], keys)
+		if marker == nil {
+			continue
+		}
+		if !doesWork(stmts[i+2:]) && !callersTakeVerdict(scope, fn) {
+			continue
+		}
+		markers = append(markers, marker)
+	}
+	return markers
+}
+
+// callersTakeVerdict reports a function whose callers exist and none of them
+// takes a marker back: the work after its verdict runs with the mark set.
+func callersTakeVerdict(scope funcScope, fn *ast.FuncDecl) bool {
+	obj, ok := scope.info.Defs[fn.Name].(*types.Func)
+	if !ok {
+		return false
+	}
+	sites := scope.callers[obj.Origin()]
+	for _, site := range sites {
+		if takesBackMarker(site.caller.decl.Body) {
+			return false
+		}
+	}
+	return len(sites) > 0
+}
+
+// dedupGuardKeys returns the keys of the duplicate check that the if at
+// stmts[at] leaves on: a check call in its condition, or a variable a check
+// call set before it.
+func dedupGuardKeys(info *types.Info, stmts []ast.Stmt, at int) map[types.Object]bool {
+	guard, ok := stmts[at].(*ast.IfStmt)
+	if !ok || !blockLeaves(guard.Body) {
+		return nil
+	}
+	keys := make(map[types.Object]bool)
+	for _, operand := range flattenOr(guard.Cond) {
+		ast.Inspect(operand, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.CallExpr:
+				if isDedupCheck(callName(node)) {
+					addIdentArgs(info, node, keys)
+				}
+			case *ast.Ident:
+				if check := dedupCheckSetting(info, stmts[:at], info.ObjectOf(node)); check != nil {
+					addIdentArgs(info, check, keys)
+				}
+			}
+			return true
+		})
+	}
+	return keys
+}
+
+// dedupCheckSetting returns the duplicate check call whose result stmts
+// assign to v.
+func dedupCheckSetting(info *types.Info, stmts []ast.Stmt, v types.Object) *ast.CallExpr {
+	if v == nil {
+		return nil
+	}
+	for _, stmt := range stmts {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || len(assign.Rhs) != 1 {
+			continue
+		}
+		call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+		if !ok || !isDedupCheck(callName(call)) {
+			continue
+		}
+		if id, ok := assign.Lhs[0].(*ast.Ident); ok && info.ObjectOf(id) == v {
+			return call
+		}
+	}
+	return nil
+}
+
+// addIdentArgs adds the variables call is handed as plain arguments.
+func addIdentArgs(info *types.Info, call *ast.CallExpr, keys map[types.Object]bool) {
+	for _, arg := range call.Args {
+		if id, ok := ast.Unparen(arg).(*ast.Ident); ok {
+			if v, isVar := info.ObjectOf(id).(*types.Var); isVar && !isNamedType(v.Type(), "context", "Context") {
+				keys[v] = true
+			}
+		}
+	}
+}
+
+// dedupMarkerIn returns the dedup marker stmt calls with one of keys: a bare
+// call, an assignment of its result, or the init of an if.
+func dedupMarkerIn(info *types.Info, stmt ast.Stmt, keys map[types.Object]bool) *ast.CallExpr {
+	var expr ast.Expr
+	switch node := stmt.(type) {
+	case *ast.ExprStmt:
+		expr = node.X
+	case *ast.AssignStmt:
+		if len(node.Rhs) == 1 {
+			expr = node.Rhs[0]
+		}
+	case *ast.IfStmt:
+		return dedupMarkerIn(info, node.Init, keys)
+	}
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || !isDedupMarker(callName(call)) {
+		return nil
+	}
+	for _, arg := range call.Args {
+		if id, ok := ast.Unparen(arg).(*ast.Ident); ok && keys[info.ObjectOf(id)] {
+			return call
+		}
+	}
+	return nil
 }
 
 // checkKind tells an existence check of the period's data from an attempt

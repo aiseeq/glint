@@ -579,3 +579,107 @@ func (w wireItem) toItem() (Item, error) {
 `,
 	}))
 }
+
+// An event marked processed in its duplicate check, before the processing,
+// stays marked when the processing fails: the sender's redelivery of the
+// failed event is dropped as a duplicate.
+func TestAttemptMarkerWrittenBeforeWorkDedup(t *testing.T) {
+	assert.Equal(t, []string{"hooks/handler.go:39", "hooks/handler.go:66"}, typedFuncFindings(t, NewAttemptMarkerWrittenBeforeWorkRule(), map[string]string{
+		"hooks/handler.go": `package hooks
+
+import (
+	"context"
+	"sync"
+	"time"
+)
+
+type dedup struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+}
+
+func (d *dedup) isDuplicate(key string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	at, ok := d.seen[key]
+	return ok && time.Since(at) < time.Minute
+}
+
+func (d *dedup) markProcessed(key string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.seen[key] = time.Now()
+}
+
+func (d *dedup) forget(key string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.seen, key)
+}
+
+type Handler struct{ d *dedup }
+
+func (h *Handler) checkDuplicate(key string) bool {
+	if h.d.isDuplicate(key) {
+		return true
+	}
+	h.d.markProcessed(key)
+	return false
+}
+
+func (h *Handler) Handle(key string) {
+	if h.checkDuplicate(key) {
+		return
+	}
+	go h.process(key)
+}
+
+func (h *Handler) process(key string) {}
+
+type repo interface {
+	IsProcessed(ctx context.Context, id string) (bool, error)
+	MarkProcessed(ctx context.Context, id string) error
+	Run(ctx context.Context, id string) error
+}
+
+func HandleEvent(ctx context.Context, r repo, id string) error {
+	seen, err := r.IsProcessed(ctx, id)
+	if err != nil {
+		return err
+	}
+	if seen {
+		return nil
+	}
+	if err := r.MarkProcessed(ctx, id); err != nil {
+		return err
+	}
+	return r.Run(ctx, id)
+}
+
+func HandleAfter(ctx context.Context, r repo, id string) error {
+	seen, err := r.IsProcessed(ctx, id)
+	if err != nil || seen {
+		return err
+	}
+	if err := r.Run(ctx, id); err != nil {
+		return err
+	}
+	return r.MarkProcessed(ctx, id)
+}
+
+func (h *Handler) HandleReleased(key string) {
+	if h.d.isDuplicate(key) {
+		return
+	}
+	h.d.markProcessed(key)
+	go func() {
+		if !h.run(key) {
+			h.d.forget(key)
+		}
+	}()
+}
+
+func (h *Handler) run(key string) bool { return key != "" }
+`,
+	}))
+}

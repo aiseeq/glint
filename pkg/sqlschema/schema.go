@@ -158,6 +158,9 @@ type Column struct {
 	// RestrictsDelete marks a foreign key with no ON DELETE action (or with
 	// RESTRICT): a delete of the row it points to fails while it does.
 	RestrictsDelete bool
+	// Check is a CHECK constraint keeping the column within a set of values
+	// or a range, nil for none.
+	Check *ValueCheck
 }
 
 // Table returns the table or view named name, or nil.
@@ -543,6 +546,8 @@ func (t *Table) applyConstraint(constraint *pgquery.Constraint) {
 			attrs = append(attrs, strings.ToLower(attr.GetString_().GetSval()))
 		}
 		t.addForeign(constraint, attrs)
+	case pgquery.ConstrType_CONSTR_CHECK:
+		t.addCheck(constraint.GetConname(), "", constraint.GetRawExpr())
 	}
 }
 
@@ -579,6 +584,8 @@ func (t *Table) addColumn(def *pgquery.ColumnDef) {
 			t.addUnique(cmp.Or(constraint.GetConname(), t.Name+"_"+column.Name+"_key"), []string{column.Name})
 		case pgquery.ConstrType_CONSTR_FOREIGN:
 			t.addForeign(constraint, []string{column.Name})
+		case pgquery.ConstrType_CONSTR_CHECK:
+			t.addCheck(constraint.GetConname(), column.Name, constraint.GetRawExpr())
 		}
 	}
 }
@@ -691,6 +698,7 @@ func (s *Schema) alter(stmt *pgquery.AlterTableStmt) {
 			table.applyConstraint(cmd.GetDef().GetConstraint())
 		case pgquery.AlterTableType_AT_DropConstraint:
 			table.dropUnique(cmd.GetName())
+			table.dropCheck(cmd.GetName())
 		case pgquery.AlterTableType_AT_AlterColumnType:
 			if typeName := cmd.GetDef().GetColumnDef().GetTypeName(); column != nil && len(typeName.GetNames()) > 0 {
 				column.Type, column.Width = typeOf(typeName)

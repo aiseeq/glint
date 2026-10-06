@@ -195,6 +195,126 @@ func NoProgress(ctx context.Context, c client, ids []string) (int, error) {
 	}))
 }
 
+// A batch that leaves some items out with a report (no match, an ambiguous
+// match) treats its items as independent too: a write failure of one item's
+// part, returned with the progress, stops every later item.
+func TestBatchAbortsOnItemErrorAfterReportedSkip(t *testing.T) {
+	assert.Equal(t, []string{"link/run.go:36", "link/run.go:67"}, typedFuncFindings(t, NewBatchAbortsOnItemErrorRule(), map[string]string{
+		"link/run.go": `package link
+
+import (
+	"context"
+	"log/slog"
+)
+
+type Row struct{ ID string }
+
+type Position struct{ ID string }
+
+type Match struct {
+	Position  *Position
+	Ambiguous bool
+}
+
+type store interface {
+	Find(ctx context.Context, rows []*Row) (Match, error)
+	Link(ctx context.Context, row *Row, positionID string) (bool, error)
+}
+
+type Service struct {
+	store  store
+	logger *slog.Logger
+}
+
+func (s *Service) reportAmbiguous(rows []*Row) {
+	s.logger.Warn("ambiguous", "rows", len(rows))
+}
+
+func (s *Service) LinkGroups(ctx context.Context, groups map[string][]*Row) (int, error) {
+	var linked int
+	for _, rows := range groups {
+		match, err := s.store.Find(ctx, rows)
+		if err != nil {
+			return linked, err
+		}
+		if match.Position == nil {
+			if match.Ambiguous {
+				s.reportAmbiguous(rows)
+			}
+			continue
+		}
+		for _, row := range rows {
+			changed, err := s.store.Link(ctx, row, match.Position.ID)
+			if err != nil {
+				return linked, err
+			}
+			if changed {
+				linked++
+			}
+		}
+	}
+	return linked, nil
+}
+
+func (s *Service) LinkParts(ctx context.Context, groups map[string][]*Row) (int, error) {
+	var linked int
+	for _, rows := range groups {
+		if len(rows) == 0 {
+			s.logger.Warn("empty group")
+			continue
+		}
+		for _, row := range rows {
+			changed, err := s.store.Link(ctx, row, "p")
+			if err != nil {
+				return linked, err
+			}
+			if changed {
+				linked++
+			}
+		}
+	}
+	return linked, nil
+}
+
+func (s *Service) PlainSkip(ctx context.Context, groups map[string][]*Row) (int, error) {
+	var linked int
+	for _, rows := range groups {
+		if len(rows) == 0 {
+			continue
+		}
+		for _, row := range rows {
+			changed, err := s.store.Link(ctx, row, "p")
+			if err != nil {
+				return linked, err
+			}
+			if changed {
+				linked++
+			}
+		}
+	}
+	return linked, nil
+}
+
+func (s *Service) OtherList(ctx context.Context, groups map[string][]*Row, extra []*Row) (int, error) {
+	var linked int
+	for _, rows := range groups {
+		if len(rows) == 0 {
+			s.logger.Warn("empty group")
+			continue
+		}
+		linked += len(rows)
+	}
+	for _, row := range extra {
+		if _, err := s.store.Link(ctx, row, "p"); err != nil {
+			return linked, err
+		}
+	}
+	return linked, nil
+}
+`,
+	}))
+}
+
 // A periodic pass running two unrelated checks returns on the first one's
 // failure: the second check is silent whenever the first fails.
 func TestIndependentChecksAbortTogether(t *testing.T) {

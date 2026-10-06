@@ -332,6 +332,66 @@ func (w *Worker) ProcessDetached(ctx context.Context, item Item) {
 	}))
 }
 
+// A mark written before a send is taken back on the send's failure with the
+// caller's context: when the send failed because the caller went away, the
+// removal fails too, the mark stays, and every redelivery is dropped as a
+// duplicate. The confirm callback after the send records the outcome the same
+// way.
+func TestPostSideEffectCompensationUsesRequestContext(t *testing.T) {
+	assert.Equal(t, []string{"relay/forward.go:27", "relay/forward.go:32"}, typedFuncFindings(t, NewPostSideEffectWriteUsesRequestContextRule(), map[string]string{
+		"relay/forward.go": `package relay
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+type Request struct{ Text string }
+
+type Client struct{}
+
+func (c *Client) Send(ctx context.Context, req Request) (int64, error) { return 1, nil }
+
+type Repo struct{}
+
+func (r *Repo) DeletePendingMark(ctx context.Context, id string) error { return nil }
+
+type Relay struct {
+	client *Client
+	repo   *Repo
+}
+
+func (s *Relay) Forward(ctx context.Context, id string, req Request, confirm func(ctx context.Context, sentID int64) error) (int64, error) {
+	sentID, err := s.client.Send(ctx, req)
+	if err != nil {
+		if delErr := s.repo.DeletePendingMark(ctx, id); delErr != nil {
+			return 0, fmt.Errorf("send: %w; mark kept: %w", err, delErr)
+		}
+		return 0, fmt.Errorf("send: %w", err)
+	}
+	if err := confirm(ctx, sentID); err != nil {
+		return 0, err
+	}
+	return sentID, nil
+}
+
+func (s *Relay) ForwardSettled(ctx context.Context, id string, req Request, confirm func(ctx context.Context, sentID int64) error) (int64, error) {
+	sentID, err := s.client.Send(ctx, req)
+	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err != nil {
+		if delErr := s.repo.DeletePendingMark(settleCtx, id); delErr != nil {
+			return 0, delErr
+		}
+		return 0, err
+	}
+	return sentID, confirm(settleCtx, sentID)
+}
+`,
+	}))
+}
+
 // Cancelling the workers' context before the HTTP server drains takes the
 // workers away from the requests still being served.
 func TestWorkersCancelledBeforeHTTPDrain(t *testing.T) {

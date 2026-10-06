@@ -327,3 +327,128 @@ func lenArgument(expr ast.Expr) ast.Expr {
 	}
 	return call.Args[0]
 }
+
+// successCheck names the method a result object answers success with.
+var successCheck = map[string]bool{"IsSuccess": true, "IsOK": true, "IsOk": true, "Succeeded": true}
+
+// resultKeptOnlyOnSuccess returns the ifs of range loops that keep an
+// item's result only when the result object says success - res :=
+// s.Load(id); if res.IsSuccess() { acc[id] = res.Data } with no else - in a
+// function that returns the collected set through a success constructor.
+func resultKeptOnlyOnSuccess(file *ast.File) []*ast.IfStmt {
+	var found []*ast.IfStmt
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || !returnsSuccessResult(fn.Body) {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.FuncLit:
+				return false
+			case *ast.RangeStmt:
+				if skip := keptOnlyOnSuccess(node); skip != nil {
+					found = append(found, skip)
+				}
+			}
+			return true
+		})
+	}
+	return found
+}
+
+// returnsSuccessResult reports a body whose last statement returns a call
+// to a success constructor (Success, NewSuccess, TotalsSuccess).
+func returnsSuccessResult(body *ast.BlockStmt) bool {
+	if len(body.List) == 0 {
+		return false
+	}
+	ret, ok := body.List[len(body.List)-1].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return false
+	}
+	call, ok := ast.Unparen(ret.Results[0]).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	fun := call.Fun
+	if index, isIndex := fun.(*ast.IndexExpr); isIndex {
+		fun = index.X
+	}
+	name := ""
+	switch f := fun.(type) {
+	case *ast.Ident:
+		name = f.Name
+	case *ast.SelectorExpr:
+		name = f.Sel.Name
+	}
+	for _, word := range helpers.IdentifierWords(name) {
+		if word == "success" {
+			return true
+		}
+	}
+	return false
+}
+
+// keptOnlyOnSuccess returns the if of loop's body that collects a result
+// into a variable from outside the loop only when it is a success, with no
+// else, right after the result is taken.
+func keptOnlyOnSuccess(loop *ast.RangeStmt) *ast.IfStmt {
+	list := loop.Body.List
+	for i := 0; i+1 < len(list); i++ {
+		assign, ok := list[i].(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			continue
+		}
+		res, ok := assign.Lhs[0].(*ast.Ident)
+		if _, isCall := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr); !ok || !isCall {
+			continue
+		}
+		check, ok := list[i+1].(*ast.IfStmt)
+		if !ok || check.Init != nil || check.Else != nil || !asksSuccess(check.Cond, res.Name) {
+			continue
+		}
+		values := map[string]bool{res.Name: true}
+		for _, stmt := range check.Body.List {
+			if accumulates(stmt, values, loop.Pos()) || storesInOuterMap(stmt, values, loop.Pos()) {
+				return check
+			}
+		}
+	}
+	return nil
+}
+
+// asksSuccess reports res.IsSuccess() for the result variable named res.
+func asksSuccess(cond ast.Expr, res string) bool {
+	call, ok := ast.Unparen(cond).(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && successCheck[sel.Sel.Name] && isIdentNamedExpr(sel.X, res)
+}
+
+// storesInOuterMap reports acc[k] = v for a map declared before the loop and
+// a value read from values.
+func storesInOuterMap(stmt ast.Stmt, values map[string]bool, loopPos token.Pos) bool {
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || assign.Tok != token.ASSIGN {
+		return false
+	}
+	index, ok := assign.Lhs[0].(*ast.IndexExpr)
+	if !ok {
+		return false
+	}
+	acc, ok := index.X.(*ast.Ident)
+	if !ok || acc.Obj == nil || acc.Obj.Pos() > loopPos {
+		return false
+	}
+	usesValue := false
+	ast.Inspect(assign.Rhs[0], func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && values[id.Name] {
+			usesValue = true
+		}
+		return !usesValue
+	})
+	return usesValue
+}

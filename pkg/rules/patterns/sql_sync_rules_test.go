@@ -456,6 +456,109 @@ func runPasses(items []Item, link func(Item) bool) tally {
 	assert.Equal(t, []int{13, 61}, sqlRuleLines(t, NewPendingPageSkipsStayAtHeadRule(), ctx))
 }
 
+// A pass over the first page of a pending queue that stops at an item whose
+// call fails leaves the item pending at the head: the next pass takes it
+// first again and stops on it, and the items after it are never reached.
+func TestPendingPageStopsAtFailedHead(t *testing.T) {
+	ctx := rulestest.GoFile(t, "work/details.go", `package work
+
+import (
+	"context"
+	"errors"
+	"fmt"
+)
+
+type Details struct{ ID string }
+
+type Repo interface {
+	ListPaidWithoutDetails(ctx context.Context, limit int) ([]string, error)
+	ListPendingAfter(ctx context.Context, after string, limit int) ([]string, error)
+	StoreDetails(ctx context.Context, details []Details) error
+	MarkFailed(ctx context.Context, id string, cause error) error
+}
+
+type Syncer struct{ repo Repo }
+
+func (s *Syncer) read(ctx context.Context, id string) (Details, error) { return Details{ID: id}, nil }
+
+func (s *Syncer) LoadDetails(ctx context.Context) error {
+	ids, err := s.repo.ListPaidWithoutDetails(ctx, 50)
+	if err != nil {
+		return err
+	}
+	read := make([]Details, 0, len(ids))
+	var readErr error
+	for _, id := range ids {
+		details, err := s.read(ctx, id)
+		if err != nil {
+			readErr = err
+			break
+		}
+		read = append(read, details)
+	}
+	return errors.Join(s.repo.StoreDetails(ctx, read), readErr)
+}
+
+func (s *Syncer) LoadReturning(ctx context.Context) error {
+	ids, err := s.repo.ListPaidWithoutDetails(ctx, 50)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := s.read(ctx, id); err != nil {
+			return fmt.Errorf("read %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func (s *Syncer) LoadMarked(ctx context.Context) error {
+	ids, err := s.repo.ListPaidWithoutDetails(ctx, 50)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := s.read(ctx, id); err != nil {
+			return errors.Join(err, s.repo.MarkFailed(ctx, id, err))
+		}
+	}
+	return nil
+}
+
+func (s *Syncer) LoadCollected(ctx context.Context) error {
+	ids, err := s.repo.ListPaidWithoutDetails(ctx, 50)
+	if err != nil {
+		return err
+	}
+	var failed []error
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := s.read(ctx, id); err != nil {
+			failed = append(failed, err)
+			continue
+		}
+	}
+	return errors.Join(failed...)
+}
+
+func (s *Syncer) LoadPaged(ctx context.Context, after string) error {
+	ids, err := s.repo.ListPendingAfter(ctx, after, 50)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := s.read(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+`)
+	assert.Equal(t, []int{23, 41}, sqlRuleLines(t, NewPendingPageSkipsStayAtHeadRule(), ctx))
+}
+
 // A poller takes the stale pending rows oldest-change first; a poll that
 // finds no change does not touch updated_at, so the same rows stay at the
 // head of every page and the rest of the queue is never polled. A read that

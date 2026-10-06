@@ -4,9 +4,11 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -25,6 +27,10 @@ func init() {
 //	    ...; corrected++
 //	}
 //
+// A loop that leaves an item out with a report (no match found: log it and
+// continue) treats its items as independent the same way, and so does a
+// return from a loop over the parts of the item (the rows of a group).
+//
 // Reported: the return, inside such a loop, of a value the loop accumulates
 // (a counter, an appended slice) together with the error.
 func NewBatchAbortsOnItemErrorRule() *typedFuncRule {
@@ -32,7 +38,7 @@ func NewBatchAbortsOnItemErrorRule() *typedFuncRule {
 		BaseRule: rules.NewBaseRule(
 			"batch-aborts-on-item-error",
 			"patterns",
-			"Detects a batch loop that skips some failed items but returns its progress on another item's failure — every later item stays unprocessed",
+			"Detects a batch loop that skips some items (a failed or unmatched one) but returns its progress on another item's failure — every later item stays unprocessed",
 			core.SeverityMedium,
 		),
 		suggestion: "Collect the failure (errors.Join) and continue with the next item, or document why one item must stop the batch",
@@ -49,7 +55,7 @@ func NewBatchAbortsOnItemErrorRule() *typedFuncRule {
 			}
 			// One report per loop: its aborts share one fix.
 			if aborts := batchAborts(scope.info, loop); len(aborts) > 0 {
-				findings = append(findings, funcFinding{node: aborts[0], message: "A batch that skips some failed items returns its progress on another item's failure — every later item stays unprocessed"})
+				findings = append(findings, funcFinding{node: aborts[0], message: "A batch that skips some items (a failed or unmatched one) returns its progress on another item's failure — every later item stays unprocessed"})
 			}
 			return true
 		})
@@ -66,26 +72,74 @@ func batchAborts(info *types.Info, loop *ast.RangeStmt) []*ast.ReturnStmt {
 		return nil
 	}
 	skips := false
-	var aborts []*ast.ReturnStmt
 	inspectOwnLoopBody(loop.Body, func(check *ast.IfStmt) {
 		if len(check.Body.List) == 0 {
 			return
 		}
-		switch last := check.Body.List[len(check.Body.List)-1].(type) {
-		case *ast.BranchStmt:
-			if last.Tok == token.CONTINUE && last.Label == nil && conditionOnError(info, check.Cond) {
-				skips = true
-			}
-		case *ast.ReturnStmt:
-			if _, isCheck := errNotNilName(check.Cond); isCheck && returnsProgress(info, last, accumulated) && !returnsJoined(info, last) {
-				aborts = append(aborts, last)
-			}
+		last, ok := check.Body.List[len(check.Body.List)-1].(*ast.BranchStmt)
+		if ok && last.Tok == token.CONTINUE && last.Label == nil && (conditionOnError(info, check.Cond) || reportsItem(check.Body)) {
+			skips = true
 		}
 	})
 	if !skips {
 		return nil
 	}
+	var aborts []*ast.ReturnStmt
+	inspectItemBody(info, loop, func(check *ast.IfStmt) {
+		if len(check.Body.List) == 0 {
+			return
+		}
+		last, ok := check.Body.List[len(check.Body.List)-1].(*ast.ReturnStmt)
+		if _, isCheck := errNotNilName(check.Cond); ok && isCheck && returnsProgress(info, last, accumulated) && !returnsJoined(info, last) {
+			aborts = append(aborts, last)
+		}
+	})
 	return aborts
+}
+
+// itemReport leads the name of a call that reports a skipped item.
+var itemReport = []string{"report", "warn", "log", "notify", "alert"}
+
+// reportsItem reports a skip that tells about the item it leaves out: a
+// logger call or a report (reportAmbiguous) anywhere in the block.
+func reportsItem(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.CallExpr:
+			name := callName(node)
+			found = helpers.IsLoggerCall(node) || slices.ContainsFunc(itemReport, func(verb string) bool { return helpers.HasLeadingWord(name, verb) })
+		}
+		return !found
+	})
+	return found
+}
+
+// inspectItemBody visits the if statements of one iteration of loop: its own
+// body and the loops over the parts of its item (a range over the rows of
+// the group the iteration took), not other nested loops or function literals.
+func inspectItemBody(info *types.Info, loop *ast.RangeStmt, visit func(*ast.IfStmt)) {
+	item := make(map[types.Object]bool)
+	for _, v := range []ast.Expr{loop.Key, loop.Value} {
+		if id, ok := v.(*ast.Ident); ok && id.Name != "_" {
+			if obj := info.ObjectOf(id); obj != nil {
+				item[obj] = true
+			}
+		}
+	}
+	ast.Inspect(loop.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit, *ast.ForStmt:
+			return false
+		case *ast.RangeStmt:
+			return rootedInParam(info, node.X, item)
+		case *ast.IfStmt:
+			visit(node)
+		}
+		return true
+	})
 }
 
 // inspectOwnLoopBody visits the if statements of a loop body outside nested
