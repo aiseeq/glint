@@ -107,3 +107,55 @@ func token(r *http.Request) string {
 	ctx := core.NewFileContext("/src/auth.go", "/src", []byte(code), core.DefaultConfig())
 	assert.Empty(t, rule.AnalyzeFile(ctx))
 }
+
+// A token put into url.Values that end up in the query of a redirect is in
+// the access log of the page it lands on and in its Referer; the same values
+// posted as a form body to a token endpoint, or encoded after '#', do not
+// travel to a server.
+func TestSensitiveQueryParameterValuesIntoRedirect(t *testing.T) {
+	code := `package auth
+
+func (a *Auth) callback(w http.ResponseWriter, r *http.Request, result Result, gift string) {
+	frontendURL := frontendCallbackURL(a.domain, url.Values{"id_token": {result.IDToken}}, gift)
+	http.Redirect(w, r, frontendURL, http.StatusTemporaryRedirect)
+}
+
+func (a *Auth) fragment(w http.ResponseWriter, r *http.Request, result Result) {
+	target := "https://app/cb#" + url.Values{"id_token": {result.IDToken}}.Encode()
+	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+}
+
+func (a *Auth) exchange(code string) (*http.Response, error) {
+	return http.PostForm(a.tokenURL, url.Values{"client_secret": {a.secret}, "code": {code}})
+}
+
+func (a *Auth) plain(w http.ResponseWriter, r *http.Request, gift string) {
+	http.Redirect(w, r, "/done?"+url.Values{"gift_code": {gift}}.Encode(), http.StatusSeeOther)
+}
+`
+	ctx := rulestest.GoFile(t, "auth/callback.go", code)
+	var lines []int
+	for _, v := range NewSensitiveQueryParameterRule().AnalyzeFile(ctx) {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{4}, lines)
+}
+
+// The search params of the page read through a variable are the query all
+// the same: the token came in the URL the server and its logs saw.
+func TestSensitiveQueryParameterSearchParamsVariable(t *testing.T) {
+	code := `export function Callback() {
+  const params = new URLSearchParams(window.location.search)
+  const gift = params.get('gift_code')
+  const idToken = params.get('id_token')
+  const fromHash = new URLSearchParams(window.location.hash.slice(1)).get('id_token')
+  return { gift, idToken, fromHash }
+}
+`
+	ctx := core.NewFileContext("/src/app/callback/page.tsx", "/src", []byte(code), core.DefaultConfig())
+	var lines []int
+	for _, v := range NewSensitiveQueryParameterRule().AnalyzeFile(ctx) {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{4}, lines)
+}

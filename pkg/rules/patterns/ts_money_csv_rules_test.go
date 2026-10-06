@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -45,7 +46,7 @@ func TestCSVFormulaInjection(t *testing.T) {
 	assert.Equal(t, []string{"src/export.ts:4"}, linesOf(t, rule, "src/export.ts", unguarded))
 
 	guarded := `function sanitize(value: string): string {
-  return /^[=+\-@]/.test(value) ? "'" + value : value
+  return /^[=+\-@\t\r]/.test(value) ? "'" + value : value
 }
 ` + unguarded
 	assert.Empty(t, linesOf(t, rule, "src/export.ts", guarded))
@@ -53,4 +54,38 @@ func TestCSVFormulaInjection(t *testing.T) {
 	notCSV := `export const quote = (s: string) => s.replace(/"/g, '""')
 `
 	assert.Empty(t, linesOf(t, rule, "src/sql.ts", notCSV))
+}
+
+// A spreadsheet takes a leading tab or carriage return for a formula start
+// too, and a carriage return inside an unquoted cell breaks the row: a guard
+// of =, +, - and @ only, or quoting on \n but not \r, lets them through.
+func TestCSVFormulaInjectionIncompleteGuard(t *testing.T) {
+	rule := NewCSVFormulaInjectionRule()
+	partial := `const SIGNED_NUMBER = /^[+-]?\d+(?:\.\d+)?$/
+
+export function sanitizeCsvField(value: string): string {
+  if (/^[=+\-@]/.test(value) && !SIGNED_NUMBER.test(value)) {
+    return "'" + value
+  }
+  return value
+}
+
+export function escapeCsvCell(value: unknown): string {
+  const str = sanitizeCsvField(String(value))
+  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+    return '"' + str.replace(/"/g, '""') + '"'
+  }
+  return str
+}
+`
+	assert.Equal(t, []string{"src/csv.ts:12", "src/csv.ts:4"}, linesOf(t, rule, "src/csv.ts", partial))
+
+	guardOnly := strings.NewReplacer(`@]`, `@\t\r]`).Replace(partial)
+	assert.Equal(t, []string{"src/csv.ts:12"}, linesOf(t, rule, "src/csv.ts", guardOnly))
+
+	complete := strings.NewReplacer(`@]`, `@\t\r]`, `str.includes('\n')`, `str.includes('\n') || str.includes('\r')`).Replace(partial)
+	assert.Empty(t, linesOf(t, rule, "src/csv.ts", complete))
+
+	classQuoted := strings.NewReplacer(`@]`, `@\t\r]`, `str.includes(',') || str.includes('"') || str.includes('\n')`, `/[",\r\n]/.test(str)`).Replace(partial)
+	assert.Empty(t, linesOf(t, rule, "src/csv.ts", classQuoted))
 }

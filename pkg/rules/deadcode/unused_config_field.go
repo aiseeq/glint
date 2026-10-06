@@ -37,7 +37,12 @@ var configTags = []string{"yaml", "toml", "mapstructure", "env", "ini"}
 //
 // A json payload field is left out, except a bool that flags the item unsafe
 // or invalid (is_scam, failed): decoding it and never reading it lets the
-// flagged items through. Only types that are actually decoded are examined: the rule follows the types
+// flagged items through. The body of an incoming request is not a payload of
+// someone else: a json field of a type declared for a request (named
+// ...Request, ...Input, ...Params, ...Payload) that a handler decodes from
+// r.Body and no code reads is a setting its client sends and the server
+// ignores. A model shared with responses is left out: its server-set fields
+// (CreatedAt, computed figures) are not the client's to send. Only types that are actually decoded are examined: the rule follows the types
 // reaching a decoder (Unmarshal, Decode, env Parse/Process and the like, taking
 // the target as an untyped value) through their fields. A field only written —
 // a default in a composite literal, an assignment — is still unused: the value
@@ -102,7 +107,7 @@ func (r *UnusedConfigFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
-		for _, field := range collectTaggedFields(fileCtx, info, access.decoded, access.encoded) {
+		for _, field := range collectTaggedFields(fileCtx, info, access) {
 			pos := field.obj.Pos()
 			if access.read[pos] || access.hashed[pos] {
 				continue
@@ -131,7 +136,7 @@ func (r *UnusedConfigFieldRule) report(field taggedField) *core.Violation {
 // collectTaggedFields returns the tagged fields of the file's decoded struct
 // types. A type that is also encoded is skipped: its fields are read by the
 // encoder, not ignored.
-func collectTaggedFields(fileCtx *core.FileContext, info *types.Info, decoded, encoded map[*types.Named]bool) []taggedField {
+func collectTaggedFields(fileCtx *core.FileContext, info *types.Info, access *fieldAccess) []taggedField {
 	var fields []taggedField
 
 	ast.Inspect(fileCtx.GoAST, func(n ast.Node) bool {
@@ -144,9 +149,10 @@ func collectTaggedFields(fileCtx *core.FileContext, info *types.Info, decoded, e
 			return true
 		}
 		named, ok := declaredNamedType(spec, info)
-		if !ok || !decoded[named] || encoded[named] {
+		if !ok || !access.decoded[named] || access.encoded[named] {
 			return true
 		}
+		request := access.requestDecoded[named] && requestTypeName.MatchString(spec.Name.Name)
 
 		for _, field := range structType.Fields.List {
 			if field.Tag == nil {
@@ -155,6 +161,9 @@ func collectTaggedFields(fileCtx *core.FileContext, info *types.Info, decoded, e
 			key, value, ok := configTag(field.Tag.Value)
 			if !ok {
 				key, value, ok = safetyFlagTag(field)
+			}
+			if !ok && request {
+				key, value, ok = requestTag(field.Tag.Value)
 			}
 			if !ok {
 				continue
@@ -208,6 +217,22 @@ func safetyFlagTag(field *ast.Field) (key, value string, ok bool) {
 	}
 	value = strings.Split(content, ",")[0]
 	if !safetyFlag.MatchString(value) {
+		return "", "", false
+	}
+	return "json", value, true
+}
+
+// requestTypeName names a type declared for the body of a request.
+var requestTypeName = regexp.MustCompile(`(?:Request|Req|Input|Params|Payload|Body|Form|Command)$`)
+
+// requestTag returns the json tag of a field of a request body type.
+func requestTag(raw string) (key, value string, ok bool) {
+	content, found := reflect.StructTag(strings.Trim(raw, "`")).Lookup("json")
+	if !found {
+		return "", "", false
+	}
+	value = strings.Split(content, ",")[0]
+	if value == "-" || value == "" {
 		return "", "", false
 	}
 	return "json", value, true

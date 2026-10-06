@@ -93,7 +93,10 @@ func (r *MoneyZeroShownAsOtherFieldRule) AnalyzeFile(ctx *core.FileContext) []*c
 //
 // A spreadsheet runs a cell starting with = as a formula: a user who puts
 // =HYPERLINK(...) into a name field gets it executed on the admin's machine
-// when the export is opened. Prefix such cells with a quote. In Go,
+// when the export is opened. Prefix such cells with a quote. A leading tab or
+// carriage return starts a formula too (OWASP): a guard character class
+// without them is reported, and so is a cell quoted for \n but not for \r,
+// which breaks the row. In Go,
 // encoding/csv quotes but never neutralizes: a row of a file writing it that
 // takes a free-text field (a name, a description) as is is reported.
 type CSVFormulaInjectionRule struct {
@@ -115,6 +118,14 @@ var (
 	jsCSVQuoteDoubling = regexp.MustCompile(`\.\s*replace(?:All)?\s*\(\s*(?:/"/g|'"'|"\\"")\s*,\s*(?:'""'|"\\"\\""|` + "`\"\"`" + `)\s*\)`)
 	// jsFormulaGuard is a check of a leading formula character.
 	jsFormulaGuard = regexp.MustCompile(`\^\[[^\]\n]*[=+@]|startsWith\s*\(\s*['"][=+@-]|['"]=['"]\s*,\s*['"][+@-]['"]`)
+	// jsFormulaClass is the character class of a regexp formula guard,
+	// ^[=+\-@]: = is in every guard and in no number pattern (^[+-]?\d).
+	jsFormulaClass = regexp.MustCompile(`\^\[([^\]\n]*=[^\]\n]*)\]`)
+	// jsQuotesOnNewline is a quoting condition that looks for \n in a cell.
+	jsQuotesOnNewline = regexp.MustCompile(`\.includes\(\s*['"` + "`" + `]\\n['"` + "`" + `]\s*\)`)
+	// jsQuotesOnCarriageReturn looks for \r in a cell: includes('\r') or a
+	// class with \r in it that is not anchored at the start, as a guard is.
+	jsQuotesOnCarriageReturn = regexp.MustCompile(`\.includes\(\s*['"` + "`" + `]\\r['"` + "`" + `]\s*\)|(?:^|[^^])\[[^\]\n]*\\r[^\]\n]*\]`)
 )
 
 // AnalyzeFile reports the CSV cell escapers of files without a formula guard.
@@ -126,14 +137,42 @@ func (r *CSVFormulaInjectionRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 		return nil
 	}
 	f := newJSFlat(ctx)
-	if !jsCSVMention.MatchString(f.text) || jsFormulaGuard.MatchString(f.text) {
+	if !jsCSVMention.MatchString(f.text) {
 		return nil
+	}
+	if jsFormulaGuard.MatchString(f.text) {
+		return r.incompleteGuard(ctx, f)
 	}
 	var violations []*core.Violation
 	for _, m := range jsCSVQuoteDoubling.FindAllStringIndex(f.text, -1) {
 		violations = jsReport(violations, r.BaseRule, ctx, f.line(m[0]),
 			"CSV cell is quoted but a leading =, +, - or @ is kept — the spreadsheet runs the cell as a formula",
 			"Prefix a cell that starts with =, +, -, @, tab or CR with a single quote before quoting it")
+	}
+	return violations
+}
+
+// incompleteGuard reports the formula guard classes of a CSV file that leave
+// out a leading tab or carriage return, and a quoting condition of a file that
+// doubles quotes which looks for \n in a cell but never for \r.
+func (r *CSVFormulaInjectionRule) incompleteGuard(ctx *core.FileContext, f jsFlat) []*core.Violation {
+	var violations []*core.Violation
+	for _, m := range jsFormulaClass.FindAllStringSubmatchIndex(f.text, -1) {
+		class := f.text[m[2]:m[3]]
+		if strings.Contains(class, `\t`) && strings.Contains(class, `\r`) {
+			continue
+		}
+		violations = jsReport(violations, r.BaseRule, ctx, f.line(m[0]),
+			"The formula guard leaves out a leading tab or carriage return — the spreadsheet still runs such a cell as a formula",
+			"Add \\t and \\r to the leading characters the guard prefixes with a quote")
+	}
+	if !jsCSVQuoteDoubling.MatchString(f.text) || jsQuotesOnCarriageReturn.MatchString(f.text) {
+		return violations
+	}
+	for _, m := range jsQuotesOnNewline.FindAllStringIndex(f.text, -1) {
+		violations = jsReport(violations, r.BaseRule, ctx, f.line(m[0]),
+			"The cell is quoted for \\n but not for \\r — a carriage return in an unquoted cell breaks the row",
+			"Quote a cell that contains \\r as well as \\n, a comma or a quote")
 	}
 	return violations
 }

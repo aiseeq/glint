@@ -75,3 +75,16 @@ func TestSecretExposureSerializableConfigSecret(t *testing.T) {
 		"}\n"
 	assert.Equal(t, []int{5}, secretExposureLines(t, "config/config.go", code))
 }
+
+// A prefix of a secret is the secret's first characters: logged, it shortens
+// the guess to the rest; a masked form built by strings.Repeat is not the value.
+func TestSecretExposureSecretPrefix(t *testing.T) {
+	code := "package cli\n\n" +
+		"import (\n\t\"log/slog\"\n\t\"strings\"\n)\n\n" +
+		"func check(logger *slog.Logger, jwtSecret string) {\n" +
+		"\tlogger.Info(\"secret prefix\", \"prefix\", jwtSecret[:8])\n" +
+		"\tlogger.Info(\"secret length\", \"length\", len(jwtSecret[:8]))\n" +
+		"\tlogger.Info(\"secret masked\", \"masked\", strings.Repeat(\"*\", len(jwtSecret)))\n" +
+		"}\n"
+	assert.Equal(t, []int{9}, secretExposureLines(t, "cli/main.go", code))
+}

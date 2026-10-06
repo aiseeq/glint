@@ -32,8 +32,9 @@ func init() {
 // whenever the configuration is encoded (a config endpoint, a debug dump).
 //
 // A value is judged by its name: Password, JWTSecret, PrivateKey, APIKey,
-// AccessToken, a DSN or a database URL. Its length or a hash of it is not the
-// value; building a connection string is not writing it out.
+// AccessToken, a DSN or a database URL; a prefix of it (secret[:8]) is part of
+// the value. Its length or a hash of it is not the value; building a
+// connection string is not writing it out.
 type SecretExposureRule struct {
 	*rules.BaseRule
 }
@@ -135,6 +136,9 @@ func secretIn(expr ast.Expr) string {
 		if !helpers.HasLeadingWord(name, "Err") && (secretFieldName.MatchString(name) || connectionStringName.MatchString(name)) {
 			return name
 		}
+	case *ast.SliceExpr:
+		// jwtSecret[:8] is the secret's first characters.
+		return secretIn(e.X)
 	case *ast.BinaryExpr:
 		if e.Op == token.ADD {
 			if name := secretIn(e.X); name != "" {

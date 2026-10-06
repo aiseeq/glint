@@ -29,7 +29,10 @@ func init() {
 // identity provider (a file naming a kid or a JWKS) verifies every token the provider signs,
 // for any application: without jwt.WithIssuer and jwt.WithAudience, or a
 // comparison of the claims in the file, a token issued for another audience
-// passes. A key function the file does not declare is not judged.
+// passes. The library checks exp only when the token carries one: a key-set
+// token without exp verifies forever unless jwt.WithExpirationRequired is
+// passed or the file looks at the claims' expiry. A key function the file
+// does not declare is not judged.
 type JWTParseValidationRule struct {
 	*rules.BaseRule
 }
@@ -78,6 +81,7 @@ func (r *JWTParseValidationRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 		}
 	}
 	claimsCompared := comparesIssuerOrAudience(ctx.GoAST)
+	expiryChecked := checksExpiry(ctx.GoAST)
 	keySet := usesKeySet(ctx.GoAST)
 	lr := newLineReporter(ctx, r.BaseRule)
 	report := lr.report
@@ -93,6 +97,12 @@ func (r *JWTParseValidationRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 				report(parse.call, "A key from an identity provider's key set verifies every token it signs — without the issuer and the audience a token issued for another application passes",
 					"Pass jwt.WithIssuer and jwt.WithAudience, or compare the claims' issuer and audience after parsing",
 					"issuer_audience_unchecked")
+			}
+			if !expiryChecked && !hasOption(parse.options, "WithExpirationRequired") && keySet &&
+				!keyfuncReturnsSecret(parse.keyfunc, funcs) {
+				report(parse.call, "The library checks exp only when the token has one — an identity provider's token without exp verifies forever",
+					"Pass jwt.WithExpirationRequired() or reject claims whose ExpiresAt is nil after parsing",
+					"expiry_not_required")
 			}
 		}
 	}
@@ -318,6 +328,22 @@ func usesKeySet(file *ast.File) bool {
 			found = found || keySetWord.MatchString(e.Name)
 		case *ast.BasicLit:
 			found = found || e.Kind == token.STRING && e.Value == `"kid"`
+		}
+		return !found
+	})
+	return found
+}
+
+// checksExpiry reports a file that looks at the expiry of claims: ExpiresAt,
+// a claims map's "exp", VerifyExpiresAt.
+func checksExpiry(file *ast.File) bool {
+	found := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.SelectorExpr:
+			found = found || node.Sel.Name == "ExpiresAt" || node.Sel.Name == "VerifyExpiresAt"
+		case *ast.BasicLit:
+			found = found || node.Kind == token.STRING && node.Value == `"exp"`
 		}
 		return !found
 	})
