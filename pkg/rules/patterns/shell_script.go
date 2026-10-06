@@ -361,6 +361,15 @@ func withoutComment(text string) string {
 	return text
 }
 
+// awkLoop is for ( or while ( of an awk or C program quoted into the script;
+// a shell loop takes a word or (( after for and a command after while.
+var awkLoop = regexp.MustCompile(`^(?:for|while)\s*\([^(]`)
+
+// shellLoopStart reports a step that opens a shell loop.
+func shellLoopStart(text string) bool {
+	return loopStart.MatchString(text) && !awkLoop.MatchString(text)
+}
+
 // restIsComment reports a line remainder that holds only blanks and a
 // comment, or nothing.
 func restIsComment(rest string) bool {

@@ -62,8 +62,8 @@ func (src *shellSource) steps() []shellStep {
 	var out []shellStep
 	for _, l := range src.lines {
 		for _, seg := range segments(l.text) {
-			if seg.trimmed() == "" {
-				continue
+			if seg.trimmed() == "" || strings.HasPrefix(seg.trimmed(), "#") {
+				continue // a comment after a command is no step of its own
 			}
 			sep := seg.sep
 			if sep == "" {
