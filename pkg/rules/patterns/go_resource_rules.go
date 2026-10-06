@@ -19,6 +19,7 @@ func init() {
 	rules.Register(NewSprintOfAnyMapEntryRule())
 	rules.Register(NewErrorLoggedAtInfoRule())
 	rules.Register(NewBatchStatusResultsDroppedRule())
+	rules.Register(NewFixedTempNameRenamedRule())
 }
 
 func newFuncRule(name, description string, severity core.Severity, suggestion string, check func(scope funcScope, fn *ast.FuncDecl) []funcFinding) *typedFuncRule {
@@ -651,3 +652,139 @@ func isStatusEnum(t types.Type) bool {
 
 // packageName qualifies a type by the name of its package.
 func packageName(pkg *types.Package) string { return pkg.Name() }
+
+// NewFixedTempNameRenamedRule reports a temp file named after its target
+// with a fixed suffix, written and renamed onto the target:
+//
+//	tmp := dst + ".part"
+//	f, err := os.Create(tmp)
+//	...
+//	return os.Rename(tmp, dst)
+//
+// Two writers of one target share the temp name: the second truncates the
+// first one's file, and the first renames a half-written file into place.
+func NewFixedTempNameRenamedRule() *typedFuncRule {
+	return newFuncRule("fixed-temp-name-renamed",
+		"Detects a temp file named target+\".tmp\" (a fixed suffix), written and renamed onto the target — two writers of one target truncate each other's temp file, and one renames a half-written file into place",
+		core.SeverityMedium,
+		"Create the temp file with a unique name next to the target: os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+\".*.tmp\"), then rename f.Name()",
+		fixedTempNameRenamed)
+}
+
+// tempSuffixes are the fixed endings a temp file name is made of.
+var tempSuffixes = []string{".tmp", ".part", ".partial", ".new", ".temp", "~"}
+
+func fixedTempNameRenamed(scope funcScope, fn *ast.FuncDecl) []funcFinding {
+	info := scope.info
+	if holdsLock(fn.Body) {
+		return nil
+	}
+	// The temp names: variables assigned a fixed-suffix name, and the names
+	// written inline, by their text.
+	named := make(map[types.Object]ast.Node)
+	inline := make(map[string]ast.Node)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.AssignStmt:
+			if len(v.Lhs) == 1 && len(v.Rhs) == 1 && fixedTempName(v.Rhs[0], info) {
+				if ident, ok := v.Lhs[0].(*ast.Ident); ok {
+					if obj := info.ObjectOf(ident); obj != nil {
+						named[obj] = v
+					}
+				}
+			}
+		case *ast.CallExpr:
+			if calleeIn(v, info, "os", "Create", "WriteFile", "OpenFile") && len(v.Args) > 0 && fixedTempName(v.Args[0], info) {
+				inline[types.ExprString(v.Args[0])] = v
+			}
+		}
+		return true
+	})
+	if len(named) == 0 && len(inline) == 0 {
+		return nil
+	}
+	written := make(map[ast.Node]bool)
+	var found []funcFinding
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		site := tempSite(call.Args[0], info, named, inline)
+		switch {
+		case site == nil:
+		case calleeIn(call, info, "os", "Create", "WriteFile", "OpenFile"):
+			written[site] = true
+		case calleeIn(call, info, "os", "Rename") && written[site]:
+			found = append(found, funcFinding{site, "The temp file is the target's name with a fixed suffix — two writers of one target truncate each other's temp file, and one renames a half-written file into place"})
+			written[site] = false
+		}
+		return true
+	})
+	return found
+}
+
+// tempSite returns the statement that names a temp path: the assignment of
+// a variable, or the first inline write of the same text.
+func tempSite(arg ast.Expr, info *types.Info, named map[types.Object]ast.Node, inline map[string]ast.Node) ast.Node {
+	if ident, ok := ast.Unparen(arg).(*ast.Ident); ok {
+		return named[info.ObjectOf(ident)]
+	}
+	return inline[types.ExprString(arg)]
+}
+
+// fixedTempName reports a name made of another name and a constant temp
+// suffix, directly or as the last element of a filepath.Join, with nothing
+// that differs between processes (a pid, a clock, a random part).
+func fixedTempName(e ast.Expr, info *types.Info) bool {
+	e = ast.Unparen(e)
+	if call, ok := e.(*ast.CallExpr); ok && (calleeIn(call, info, "path/filepath", "Join") || calleeIn(call, info, "path", "Join")) && len(call.Args) > 0 {
+		return fixedTempName(call.Args[len(call.Args)-1], info)
+	}
+	bin, ok := e.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.ADD {
+		return false
+	}
+	tv, ok := info.Types[bin.Y]
+	if !ok || tv.Value == nil || tv.Value.Kind() != constant.String {
+		return false
+	}
+	suffix := constant.StringVal(tv.Value)
+	fixed := false
+	for _, s := range tempSuffixes {
+		fixed = fixed || strings.HasSuffix(suffix, s)
+	}
+	return fixed && !variesByProcess(bin.X)
+}
+
+// variesByProcess reports a name part that differs between processes.
+func variesByProcess(e ast.Expr) bool {
+	text := types.ExprString(e)
+	for _, part := range []string{"Getpid", "Now()", "rand.", "uuid", "UUID", "Unix"} {
+		if strings.Contains(text, part) {
+			return true
+		}
+	}
+	return false
+}
+
+// holdsLock reports a function that takes a lock: a mutex or a file lock.
+func holdsLock(body *ast.BlockStmt) bool {
+	locked := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return !locked
+		}
+		name := ""
+		switch f := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			name = f.Sel.Name
+		case *ast.Ident:
+			name = f.Name
+		}
+		locked = locked || name == "Lock" || name == "TryLock" || strings.Contains(strings.ToLower(name), "flock") || strings.Contains(name, "LockFile")
+		return !locked
+	})
+	return locked
+}

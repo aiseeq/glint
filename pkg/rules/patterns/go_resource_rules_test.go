@@ -584,3 +584,88 @@ func Run(c *client) error {
 }
 `))
 }
+
+// Repro from a real project: a download wrote dst+".part" and renamed it onto
+// dst, and a history store wrote path+".tmp" the same way. Two processes
+// writing one destination truncated each other's temp file, and one of them
+// renamed a half-written file into place.
+func TestFixedTempNameRenamed(t *testing.T) {
+	assertWanted(t, NewFixedTempNameRenamedRule(), `package app
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+)
+
+func Download(dst string, body io.Reader) error {
+	tmp := dst + ".part" // want
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, body); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+func SaveTable(dir, name string, data []byte) error {
+	tmp := filepath.Join(dir, name+".tmp") // want
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(dir, name))
+}
+
+func SaveInline(path string, data []byte) error {
+	if err := os.WriteFile(path+".tmp", data, 0o600); err != nil { // want
+		return err
+	}
+	return os.Rename(path+".tmp", path)
+}
+
+func SaveUnique(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
+func SavePid(path string, data []byte) error {
+	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+var mu sync.Mutex
+
+func SaveLocked(path string, data []byte) error {
+	mu.Lock()
+	defer mu.Unlock()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func Backup(path string) error {
+	return os.Rename(path, path+".bak")
+}
+`)
+}
