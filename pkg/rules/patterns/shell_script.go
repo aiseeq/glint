@@ -466,7 +466,7 @@ func (src *shellSource) functions() map[string]shellFunc {
 			continue
 		}
 		fn := shellFunc{name: m[2], first: i, last: i, inline: m[3], indent: len(m[1])}
-		if strings.HasSuffix(strings.TrimSpace(m[3]), "}") {
+		if strings.HasSuffix(strings.TrimSpace(withoutComment(m[3])), "}") {
 			funcs[fn.name] = fn
 			continue
 		}
