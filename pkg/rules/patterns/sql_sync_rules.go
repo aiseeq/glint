@@ -634,9 +634,13 @@ func (r *PendingPageSkipsStayAtHeadRule) AnalyzeFile(ctx *core.FileContext) []*c
 			}
 			message := "The pass reads the first page of a pending queue and counts skipped items, which stay pending — the next pass reads the same page, and the rest of the queue is never reached"
 			suggestion := "Move past the skipped items (an offset or a cursor), give them a terminal state, or report that the page was full of them"
-			if read.stops {
+			switch read.outcome {
+			case itemStops:
 				message = "The pass reads the first page of a pending queue and stops at an item whose call fails without marking it — the item stays first in the queue, every pass stops on it, and the items after it are never reached"
-				suggestion = "Collect the item's failure (errors.Join) and go on with the next item, or mark the failed item (attempts, a terminal state) so the next pass moves past it"
+				suggestion = "Mark the failed item (attempts, a terminal state) so the next pass moves past it"
+			case itemPassed:
+				message = "The pass reads the first page of a pending queue and goes on past items whose call fails without marking them — they stay pending at the head, and once a page's worth keeps failing the rest of the queue is never reached"
+				suggestion = "Mark the failed item (attempts, a terminal state) so the next pass moves past it, or move past it with a cursor; counting or collecting the failure leaves it at the head"
 			}
 			v := r.CreateViolation(ctx.RelPath, line, message)
 			v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
@@ -712,11 +716,22 @@ func (r *PendingPageSkipsStayAtHeadRule) stalePageReads(ctx *core.FileContext, f
 }
 
 // pendingRead is a read of a pending queue whose pass leaves items at the
-// head: skipped ones, or the failed one it stops at.
+// head: skipped ones, failed ones it goes on past, or the failed one it
+// stops at.
 type pendingRead struct {
-	call  *ast.CallExpr
-	stops bool
+	call    *ast.CallExpr
+	outcome failedItemOutcome
 }
+
+// failedItemOutcome is what a pass does at an item whose call fails and that
+// it leaves unmarked.
+type failedItemOutcome int
+
+const (
+	itemSkipped failedItemOutcome = iota // counted as skipped (skipped++)
+	itemPassed                           // goes on to the next item (continue)
+	itemStops                            // leaves the pass (break, return)
+)
 
 // skippedPendingReads returns the reads of a pending queue in body, by a
 // limit and with no page position, whose items a range loop counts as
@@ -744,22 +759,23 @@ func skippedPendingReads(body *ast.BlockStmt, funcs map[string]*ast.FuncDecl) []
 	})
 	var found []pendingRead
 	seen := make(map[*ast.CallExpr]bool)
-	report := func(items string, stops bool) {
+	report := func(items string, outcome failedItemOutcome) {
 		if read := reads[items]; read != nil && !seen[read] {
 			seen[read] = true
-			found = append(found, pendingRead{call: read, stops: stops})
+			found = append(found, pendingRead{call: read, outcome: outcome})
 		}
 	}
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.RangeStmt:
 			id, ok := ast.Unparen(node.X).(*ast.Ident)
-			switch {
-			case !ok:
-			case countsSkipped(node.Body):
-				report(id.Name, false)
-			case stopsAtFailedItem(node):
-				report(id.Name, true)
+			if !ok {
+				break
+			}
+			if countsSkipped(node.Body) {
+				report(id.Name, itemSkipped)
+			} else if outcome, ok := leavesFailedItem(node); ok {
+				report(id.Name, outcome)
 			}
 		case *ast.CallExpr:
 			callee, ok := node.Fun.(*ast.Ident)
@@ -768,7 +784,7 @@ func skippedPendingReads(body *ast.BlockStmt, funcs map[string]*ast.FuncDecl) []
 			}
 			for i, arg := range node.Args {
 				if id, ok := ast.Unparen(arg).(*ast.Ident); ok && reads[id.Name] != nil && skipsParam(funcs[callee.Name], i) {
-					report(id.Name, false)
+					report(id.Name, itemSkipped)
 				}
 			}
 		}
@@ -778,11 +794,13 @@ func skippedPendingReads(body *ast.BlockStmt, funcs map[string]*ast.FuncDecl) []
 	return found
 }
 
-// stopsAtFailedItem reports a loop that leaves on the failure of a call
-// handed its item - `if err != nil { ...; break }` or a return - and does not
-// mark the item on the way out: no call but a logger or an error constructor
-// takes it.
-func stopsAtFailedItem(loop *ast.RangeStmt) bool {
+// leavesFailedItem reports a loop that, on the failure of a call handed its
+// item, leaves the pass (`if err != nil { ...; break }` or a return) or goes
+// on to the next item (continue) and does not mark the item on the way: no
+// call but a logger or an error constructor takes it. The failed item stays
+// pending either way. A branch that marks the item is not looked into: the
+// marking call's own failure is checked there.
+func leavesFailedItem(loop *ast.RangeStmt) (failedItemOutcome, bool) {
 	item := make(map[string]bool)
 	for _, v := range []ast.Expr{loop.Key, loop.Value} {
 		if id, ok := v.(*ast.Ident); ok && id.Name != "_" {
@@ -790,7 +808,7 @@ func stopsAtFailedItem(loop *ast.RangeStmt) bool {
 		}
 	}
 	if len(item) == 0 {
-		return false
+		return 0, false
 	}
 	// itemErrs are the error variables set by a call handed the item.
 	itemErrs := make(map[string]bool)
@@ -803,7 +821,7 @@ func stopsAtFailedItem(loop *ast.RangeStmt) bool {
 			}
 		}
 	}
-	stops := false
+	stops, passes := false, false
 	ast.Inspect(loop.Body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.FuncLit, *ast.RangeStmt, *ast.ForStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
@@ -815,19 +833,29 @@ func stopsAtFailedItem(loop *ast.RangeStmt) bool {
 				noteItemErrs(init)
 			}
 			name, isCheck := errNotNilName(node.Cond)
-			if !isCheck || !itemErrs[name] || len(node.Body.List) == 0 || marksItem(node.Body, item) {
+			if !isCheck || !itemErrs[name] || len(node.Body.List) == 0 {
 				return true
+			}
+			if marksItem(node.Body, item) {
+				return false
 			}
 			switch last := node.Body.List[len(node.Body.List)-1].(type) {
 			case *ast.ReturnStmt:
 				stops = true
 			case *ast.BranchStmt:
 				stops = stops || (last.Tok == token.BREAK && last.Label == nil)
+				passes = passes || (last.Tok == token.CONTINUE && last.Label == nil)
 			}
 		}
 		return !stops
 	})
-	return stops
+	switch {
+	case stops:
+		return itemStops, true
+	case passes:
+		return itemPassed, true
+	}
+	return 0, false
 }
 
 // callTakesNames reports a call expression handed one of names in its
