@@ -7,7 +7,8 @@ import "testing"
 // its own mistake. Errors told apart with errors.Is, or a call that only
 // parses, are fine. A 401 for every error of a call handed the request's
 // context (a token check that fetches the signing keys) is the same trap: an
-// outage logs the client out.
+// outage logs the client out. So is a 404 for every error of a read: a
+// failed database reads as "no such item".
 func TestUpstreamFailureAnsweredAsBadRequest(t *testing.T) {
 	assertWanted(t, NewUpstreamFailureAnsweredAsBadRequestRule(), `package routing
 
@@ -119,6 +120,68 @@ func (r *ClaimRouter) claim(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	_ = userID
+}
+
+type RoleRepo interface {
+	GetRole(ctx context.Context, name string) (string, error)
+}
+
+type RoleRouter struct{ roles RoleRepo }
+
+var ErrRoleNotFound = errors.New("role not found")
+
+func sendNotFoundError(w http.ResponseWriter, r *http.Request, message string) {
+	http.Error(w, message, http.StatusNotFound)
+}
+
+func (r *RoleRouter) updateRole(w http.ResponseWriter, req *http.Request) {
+	role, err := r.roles.GetRole(req.Context(), "admin")
+	if err != nil {
+		sendNotFoundError(w, req, "role not found") // want
+		return
+	}
+	_ = role
+}
+
+func (r *RoleRouter) showRole(w http.ResponseWriter, req *http.Request) {
+	role, err := r.roles.GetRole(req.Context(), "admin")
+	if err != nil {
+		if errors.Is(err, ErrRoleNotFound) {
+			http.Error(w, "role not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "role read failed", http.StatusInternalServerError)
+		return
+	}
+	_ = role
+}
+
+func isCodedError(err error, code string) bool { return err != nil && code != "" }
+
+func (r *RoleRouter) showRoleCoded(w http.ResponseWriter, req *http.Request) {
+	role, err := r.roles.GetRole(req.Context(), "admin")
+	if err != nil {
+		if isCodedError(err, "not_found") {
+			http.Error(w, "role not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "role read failed", http.StatusInternalServerError)
+		return
+	}
+	_ = role
+}
+
+func (r *RoleRouter) showRoleCompared(w http.ResponseWriter, req *http.Request) {
+	role, err := r.roles.GetRole(req.Context(), "admin")
+	if err != nil {
+		if err == ErrRoleNotFound {
+			http.Error(w, "role not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "role read failed", http.StatusInternalServerError)
+		return
+	}
+	_ = role
 }
 
 func (r *AdminRouter) checkToken(w http.ResponseWriter, req *http.Request, token string) {
