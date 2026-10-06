@@ -290,3 +290,112 @@ func (h *Handler) internal() plain {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"api/api.go:29", "api/api.go:45", "api/api.go:53"}, foundLines(violations))
 }
+
+// Repro from a real project: the handler answered through a generic helper
+// that wrapped the list into the response envelope (Data: dataPtr(data)) and
+// passed the envelope to the helper that encodes it - an empty table sent
+// "data": null and the admin page failed on null.filter.
+func TestNilSliceJSONNullThroughEnvelopeHelper(t *testing.T) {
+	violations, err := NewNilSliceJSONNullRule().AnalyzeGoProject(rulestest.Project(t, map[string]string{
+		"store/store.go": `package store
+
+import "context"
+
+type Hold struct{ ID int }
+
+type DB struct{}
+
+func (d *DB) SelectContext(ctx context.Context, dest any, query string) error { return nil }
+
+type Repo struct{ db *DB }
+
+func (r *Repo) ListAll(ctx context.Context) ([]Hold, error) {
+	var holds []Hold
+	if err := r.db.SelectContext(ctx, &holds, "SELECT 1"); err != nil {
+		return nil, err
+	}
+	return holds, nil
+}
+
+func (r *Repo) ListFresh(ctx context.Context) ([]Hold, error) {
+	holds := []Hold{}
+	if err := r.db.SelectContext(ctx, &holds, "SELECT 1"); err != nil {
+		return nil, err
+	}
+	return holds, nil
+}
+`,
+		"web/web.go": `package web
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+type Response[T any] struct {
+	Success bool ` + "`json:\"success\"`" + `
+	Data    *T   ` + "`json:\"data,omitempty\"`" + `
+}
+
+func dataPtr[T any](data T) *T { return &data }
+
+func write[T any](w http.ResponseWriter, response Response[T]) {
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+type Response2[T any] struct {
+	Data    *T     ` + "`json:\"data,omitempty\"`" + `
+	Message string ` + "`json:\"message,omitempty\"`" + `
+}
+
+func write2[T any](w http.ResponseWriter, response Response2[T]) {
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func ReplyOK[T any](w http.ResponseWriter, data T, message string) {
+	write2(w, Response2[T]{Data: dataPtr(data), Message: message})
+}
+
+func SendCount(w http.ResponseWriter, data []int) {
+	write(w, Response[int]{Success: true, Data: dataPtr(len(data))})
+}
+`,
+		"api/api.go": `package api
+
+import (
+	"net/http"
+
+	"example.com/rulestest/store"
+	"example.com/rulestest/web"
+)
+
+type Service struct{ repo *store.Repo }
+
+func (s *Service) List(r *http.Request) ([]store.Hold, error) {
+	holds, err := s.repo.ListAll(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	return holds, nil
+}
+
+func (s *Service) HandleList(w http.ResponseWriter, r *http.Request) {
+	holds, err := s.List(r)
+	if err != nil {
+		return
+	}
+	web.ReplyOK(w, holds, "")
+}
+
+func (s *Service) HandleFresh(w http.ResponseWriter, r *http.Request) {
+	holds, err := s.repo.ListFresh(r.Context())
+	if err != nil {
+		return
+	}
+	web.ReplyOK(w, holds, "")
+}
+`,
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"store/store.go:14"}, foundLines(violations))
+}
