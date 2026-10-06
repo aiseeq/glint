@@ -529,6 +529,16 @@ const (
 	OrderLineStatusPending OrderLineStatus = "pending"
 	OrderLineStatusFailed  OrderLineStatus = "failed"
 )
+
+// Rule numbers named by what they do share no prefix: the block is the
+// family.
+const (
+	Gather  = "A1"
+	Attack  = "A2"
+	Retreat = "A3"
+	Defend  = "A4"
+	Probe   = "A2" // want
+)
 `)
 }
 

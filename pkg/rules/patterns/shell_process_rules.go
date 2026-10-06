@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -213,9 +214,14 @@ func checkPgrepOwnWrapper(r *shellRule, src *shellSource) []*core.Violation {
 			"pgrep -f runs inside a script passed to another shell, whose command line carries the same pattern — pgrep finds the wrapper",
 			"Write one character of the pattern as a class (pgrep -f '[s]ession.sh'), or match the process name exactly (pgrep -x)"))
 	}
+	script := ""
+	if !src.make {
+		script = filepath.Base(src.ctx.Path)
+	}
 	for _, l := range src.lines {
 		for _, loc := range pgrepPattern.FindAllStringIndex(l.text, -1) {
-			if insideQuotes(l.text, loc[0]) && findsWrapper(l.text[loc[1]:]) {
+			rest := l.text[loc[1]:]
+			if (insideQuotes(l.text, loc[0]) || namesScript(rest, script)) && findsWrapper(rest) {
 				report(l.lineAt(loc[0]))
 			}
 		}
@@ -255,6 +261,15 @@ func findsWrapper(rest string) bool {
 		rest = rest[:end]
 	}
 	return !strings.Contains(rest, "[") && !strings.HasPrefix(strings.TrimLeft(rest, `"'\`), "^")
+}
+
+// namesScript reports a pgrep -f pattern (the text after -f) that the
+// script's own name contains: the $( ) subshell running pgrep carries the
+// script's command line.
+func namesScript(rest, script string) bool {
+	word, _, _ := strings.Cut(strings.TrimSpace(rest), " ")
+	word = strings.ReplaceAll(strings.Trim(word, `"'`), `\`, "")
+	return script != "" && len(word) >= 3 && strings.Contains(script, word)
 }
 
 // runsScript reports a quoted string at open that is the script of bash -c,
