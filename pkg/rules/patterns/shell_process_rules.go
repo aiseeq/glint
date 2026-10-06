@@ -122,7 +122,7 @@ func scriptsOverRunning(r *shellRule, src *shellSource) []*core.Violation {
 var (
 	dateStamp  = regexp.MustCompile(`\$\(date\s+['"]?\+([^)'"]+)['"]?\)`)
 	stampVar   = regexp.MustCompile(`^(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)=\$\(date\s+['"]?\+([^)'"]+)['"]?\)$`)
-	pathValue  = regexp.MustCompile(`^(?:local\s+)?[A-Za-z_][A-Za-z0-9_]*="?([^"]*)"?$`)
+	pathValue  = regexp.MustCompile(`^(?:local\s+)?[A-Za-z_][A-Za-z0-9_]*=("(.*)"|[^"\s]*)$`)
 	uniquePart = regexp.MustCompile(`\$\$|\$\{?RANDOM|\$\{?BASHPID|mktemp|%N`)
 	timeToken  = regexp.MustCompile(`%[HMSTRIlkp]`)
 	dateToken  = regexp.MustCompile(`%[YymdFDjseBbhCGgVUWu]`)
@@ -158,7 +158,14 @@ func checkTimeOfDayNames(r *shellRule, src *shellSource) []*core.Violation {
 			continue
 		}
 		m := pathValue.FindStringSubmatch(text)
-		if m == nil || !looksLikePath(m[1]) {
+		if m == nil {
+			continue
+		}
+		// The value inside its quotes, which may hold "$(f "$x")".
+		if strings.HasPrefix(m[1], `"`) {
+			m[1] = m[2]
+		}
+		if !looksLikePath(m[1]) {
 			continue
 		}
 		unique := uniquePart.MatchString(m[1])
@@ -185,34 +192,109 @@ func looksLikePath(value string) bool {
 	return strings.Contains(value, "/") || regexp.MustCompile(`\.[A-Za-z][A-Za-z0-9]{1,9}$`).MatchString(value)
 }
 
-var pgrepPattern = regexp.MustCompile(`\bpgrep\s+(?:-[A-Za-z]+\s+)*?-[A-Za-z]*f[A-Za-z]*\s+`)
+var (
+	pgrepPattern   = regexp.MustCompile(`\bpgrep\s+(?:-[A-Za-z]+\s+)*?-[A-Za-z]*f[A-Za-z]*\s+`)
+	capturedScript = regexp.MustCompile(`^\s*(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)=\$\(\s*cat\s*<<`)
+)
 
 // checkPgrepOwnWrapper reports pgrep -f inside a quoted script run by
-// another shell.
+// another shell: a quoted string on one line, a quoted script of bash -c,
+// sh -c or ssh spanning lines, or a heredoc captured into a variable that is
+// passed to one of them.
 func checkPgrepOwnWrapper(r *shellRule, src *shellSource) []*core.Violation {
 	var out []*core.Violation
+	reported := map[int]bool{}
+	report := func(line int) {
+		if reported[line] {
+			return
+		}
+		reported[line] = true
+		out = appendReport(out, src.report(r, line,
+			"pgrep -f runs inside a script passed to another shell, whose command line carries the same pattern — pgrep finds the wrapper",
+			"Write one character of the pattern as a class (pgrep -f '[s]ession.sh'), or match the process name exactly (pgrep -x)"))
+	}
 	for _, l := range src.lines {
 		for _, loc := range pgrepPattern.FindAllStringIndex(l.text, -1) {
-			if !insideQuotes(l.text, loc[0]) {
-				continue
+			if insideQuotes(l.text, loc[0]) && findsWrapper(l.text[loc[1]:]) {
+				report(l.lineAt(loc[0]))
 			}
-			pattern := l.text[loc[1]:]
-			if end := strings.IndexAny(pattern, "|);"); end >= 0 {
-				pattern = pattern[:end]
+		}
+	}
+	if src.make {
+		return out
+	}
+	text, starts := blankedScript(src.ctx.Lines)
+	for _, sp := range quotedSpans(text) {
+		body := text[sp.open:sp.close]
+		if !strings.Contains(body, "\n") || !runsScript(text, sp.open) {
+			continue
+		}
+		for _, loc := range pgrepPattern.FindAllStringIndex(body, -1) {
+			if findsWrapper(body[loc[1]:]) {
+				report(lineOf(starts, sp.open+loc[0]))
 			}
-			if strings.Contains(pattern, "[") || strings.HasPrefix(strings.TrimLeft(pattern, `"'`), "^") {
-				continue // [x] or an anchor keeps the pattern off the wrapper's command line
+		}
+	}
+	for _, h := range capturedHeredocs(src.ctx.Lines) {
+		if !regexp.MustCompile(`(?:\s-c|\bssh\b[^\n]*)\s+"\$\{?` + h.name + `\}?"`).MatchString(text) {
+			continue
+		}
+		for i := h.first; i < h.last; i++ {
+			if loc := pgrepPattern.FindStringIndex(src.ctx.Lines[i]); loc != nil && findsWrapper(src.ctx.Lines[i][loc[1]:]) {
+				report(i + 1)
 			}
-			out = appendReport(out, src.report(r, l.lineAt(loc[0]),
-				"pgrep -f runs inside a script passed to another shell, whose command line carries the same pattern — pgrep finds the wrapper",
-				"Write one character of the pattern as a class (pgrep -f '[s]ession.sh'), or match the process name exactly (pgrep -x)"))
+		}
+	}
+	return out
+}
+
+// findsWrapper reports a pgrep -f pattern (the text after -f) that matches
+// the command line of a wrapper carrying it: no [x] class and no ^ anchor.
+func findsWrapper(rest string) bool {
+	if end := strings.IndexAny(rest, "|);"); end >= 0 {
+		rest = rest[:end]
+	}
+	return !strings.Contains(rest, "[") && !strings.HasPrefix(strings.TrimLeft(rest, `"'\`), "^")
+}
+
+// runsScript reports a quoted string at open that is the script of bash -c,
+// sh -c or a remote runner.
+func runsScript(text string, open int) bool {
+	prefix := text[strings.LastIndexByte(text[:open], '\n')+1 : open]
+	return cShellBefore.MatchString(prefix) || remoteRunner.MatchString(invokedCommand(prefix))
+}
+
+// heredocCapture is a heredoc read into a variable by name=$(cat <<TAG: the
+// 0-based indexes of its first body line and of its terminator.
+type heredocCapture struct {
+	name        string
+	first, last int
+}
+
+func capturedHeredocs(lines []string) []heredocCapture {
+	var out []heredocCapture
+	var open *heredocCapture
+	terminator := ""
+	for i, line := range lines {
+		if open != nil {
+			if strings.TrimRight(strings.TrimSpace(line), `"')`) == terminator {
+				open.last = i
+				out = append(out, *open)
+				open = nil
+			}
+			continue
+		}
+		m := capturedScript.FindStringSubmatch(line)
+		start := heredocOpen.FindStringSubmatch(line)
+		if m != nil && start != nil {
+			open, terminator = &heredocCapture{name: m[1], first: i + 1}, start[1]
 		}
 	}
 	return out
 }
 
 var (
-	savedPid = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=\$!$`)
+	savedPid = regexp.MustCompile(`^(?:local\s+|declare\s+)?([A-Za-z_][A-Za-z0-9_]*)=\$!$`)
 	trapLine = regexp.MustCompile(`(?m)^\s*trap\s+.*\b(?:EXIT|INT|TERM|0)\b`)
 	detached = regexp.MustCompile(`^(?:nohup|setsid|disown)\b`)
 )
@@ -222,7 +304,9 @@ var (
 // behind on an exit for failure.
 func checkBackgroundWithoutTrap(r *shellRule, src *shellSource) []*core.Violation {
 	whole := strings.Join(src.ctx.Lines, "\n")
-	if src.make || trapLine.MatchString(whole) || regexp.MustCompile(`(?m)^\s*wait\b`).MatchString(whole) {
+	// A bare wait lets every job finish on its own; wait "$pid" at the end
+	// of the normal path does not stop the job on an error or Ctrl-C.
+	if src.make || trapLine.MatchString(whole) || regexp.MustCompile(`(?m)^\s*wait\s*(?:$|[;&|#])`).MatchString(whole) {
 		return nil
 	}
 	var out []*core.Violation
@@ -235,6 +319,11 @@ func checkBackgroundWithoutTrap(r *shellRule, src *shellSource) []*core.Violatio
 		if i+1 < len(steps) {
 			if m := savedPid.FindStringSubmatch(withoutComment(steps[i+1].text)); m != nil {
 				killedLater = regexp.MustCompile(`\bkill\b[^;|&]*\$\{?` + m[1] + `\b`).MatchString(whole)
+				// A job waited for by its pid and never killed runs to its
+				// end: a fan-out of short jobs.
+				if !killedLater && regexp.MustCompile(`\bwait\b[^;|&]*\$\{?`+m[1]+`\b`).MatchString(whole) {
+					continue
+				}
 			}
 		}
 		failsLater := false
@@ -588,11 +677,14 @@ func checkFixedSleepAfterStart(r *shellRule, src *shellSource) []*core.Violation
 		return nil
 	}
 	steps := src.steps()
+	heredoc := heredocBodies(src.ctx.Lines)
 	var out []*core.Violation
 	depth := 0
 	for i, s := range steps {
 		text := withoutComment(strings.TrimSpace(commandPrefix.ReplaceAllString(s.text, "")))
 		switch {
+		case heredoc[s.line]:
+			continue
 		case shellLoopStart(s.text):
 			depth++
 			continue
@@ -601,18 +693,39 @@ func checkFixedSleepAfterStart(r *shellRule, src *shellSource) []*core.Violation
 			continue
 		}
 		m := sleepSeconds.FindStringSubmatch(text)
-		if m == nil || depth > 0 || i == 0 {
+		if m == nil || i == 0 {
 			continue
 		}
 		if n, err := strconv.Atoi(m[1]); err != nil || n < 3 {
 			continue
 		}
-		if !afterStart(steps, i) {
-			continue
+		switch {
+		case depth == 0 && afterStart(steps, i):
+			out = appendReport(out, src.report(r, s.line,
+				"A fixed sleep waits for what was just started — a slow start breaks the next step, a fast one wastes the wait",
+				"Poll for readiness with a deadline: for i in $(seq 1 30); do ready && break; sleep 1; done; ready || exit 1"))
+		case depth > 0 && actsOnTimer(steps, i):
+			out = appendReport(out, src.report(r, s.line,
+				"The loop acts, waits a fixed time and looks once — a miss is a silent wait, and a slow response reads as a refusal",
+				"After the action poll for its effect with a short sleep and a deadline (for j in $(seq 1 8); do effect && break 2; sleep 1; done)"))
 		}
-		out = appendReport(out, src.report(r, s.line,
-			"A fixed sleep waits for what was just started — a slow start breaks the next step, a fast one wastes the wait",
-			"Poll for readiness with a deadline: for i in $(seq 1 30); do ready && break; sleep 1; done; ready || exit 1"))
 	}
 	return out
+}
+
+var loopExitWord = regexp.MustCompile(`^(?:break|return|exit)\b`)
+
+// actsOnTimer reports a sleep inside a retry loop that stands between an
+// action and the one check that leaves the loop: act; sleep 8; seen && break.
+func actsOnTimer(steps []shellStep, i int) bool {
+	prev := strings.TrimSpace(commandPrefix.ReplaceAllString(steps[i-1].text, ""))
+	if shellLoopStart(steps[i-1].text) || testCommand.MatchString(prev) || sleepSeconds.MatchString(withoutComment(prev)) {
+		return false
+	}
+	for j := i + 1; j+1 < len(steps) && steps[j].sep == "&&"; j++ {
+		if loopExitWord.MatchString(strings.TrimSpace(steps[j+1].text)) {
+			return true
+		}
+	}
+	return false
 }

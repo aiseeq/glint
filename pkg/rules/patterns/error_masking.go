@@ -56,7 +56,9 @@ func (r *ErrorMaskingRule) initGoPatterns() map[string]*regexp.Regexp {
 		// Regex would cause false positives on display/suggestion functions
 
 		// Fake/mock data in production
-		"fake_data_return": regexp.MustCompile(`return\s+"(?:fake|mock|dummy|stub|test)[^"]*"`),
+		// The word ends where the value does or at a separator: "testdata" is a
+		// directory, "test_user" a made-up value.
+		"fake_data_return": regexp.MustCompile(`return\s+"(?:fake|mock|dummy|stub|test)(?:[^a-z"][^"]*)?"`),
 
 		// Zero balance on error
 		"zero_on_error": regexp.MustCompile(`(?:buildZero|returnZero|getZero).*(?:error|fail|unavailable)`),

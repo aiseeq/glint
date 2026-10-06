@@ -66,9 +66,9 @@ func blankedScript(lines []string) (string, []int) {
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case terminator != "":
-			if word := strings.TrimRight(trimmed, `"')`); word == terminator {
+			if endsHeredoc(trimmed, terminator) {
+				line = strings.Replace(line, terminator, strings.Repeat(" ", len(terminator)), 1)
 				terminator = ""
-				line = strings.Replace(line, word, strings.Repeat(" ", len(word)), 1)
 			} else {
 				line = strings.Repeat(" ", len(line))
 			}
@@ -82,6 +82,38 @@ func blankedScript(lines []string) (string, []int) {
 		b.WriteString(line)
 	}
 	return b.String(), starts
+}
+
+// endsHeredoc reports the terminator line of a heredoc. A heredoc inside a
+// quoted bash -c script ends on a line the closing quote shares:
+// PY' 2>/dev/null.
+func endsHeredoc(trimmed, terminator string) bool {
+	rest, ok := strings.CutPrefix(trimmed, terminator)
+	return ok && (rest == "" || strings.ContainsRune(`"')`, rune(rest[0])))
+}
+
+// heredocBodies returns the 1-based numbers of the lines of heredoc bodies:
+// text fed to a command, not shell of the script.
+func heredocBodies(lines []string) map[int]bool {
+	body := map[int]bool{}
+	terminator := ""
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case terminator != "":
+			if endsHeredoc(trimmed, terminator) {
+				terminator = ""
+			} else {
+				body[i+1] = true
+			}
+		case strings.HasPrefix(trimmed, "#"):
+		default:
+			if m := heredocOpen.FindStringSubmatch(line); m != nil {
+				terminator = m[1]
+			}
+		}
+	}
+	return body
 }
 
 // lineOf returns the 1-based line of an offset of a blankedScript text.

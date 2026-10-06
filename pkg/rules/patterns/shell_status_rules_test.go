@@ -54,6 +54,27 @@ fi
 `)
 }
 
+// Repro from a real project: the parallel runs of a series wrote their logs
+// with || true, and the totals defaulted every missing figure to 0 - a crashed
+// match entered the averages as a game with no kills.
+func TestShellFailureFallbackValueRunLog(t *testing.T) {
+	shellWanted(t, "shell-failure-fallback-value", "series.sh", `#!/bin/bash
+run_one() {
+    WORKER=$(( base + ($1 - 1) % jobs + 1 )) "$repo/tools/match.sh" "$v" "$foe" > "$tmp/$1.log" 2>&1 || true # want
+}
+for i in 1 2 3; do run_one "$i" & done
+wait
+for i in 1 2 3; do
+    k=$(grep -o 'kills=[0-9]*' "$tmp/$i.log" | cut -d= -f2); k=${k:-0}
+    kills=$((kills + k))
+done
+`)
+	shellWanted(t, "shell-failure-fallback-value", "keep.sh", `#!/bin/bash
+"$repo/tools/match.sh" "$v" > "$tmp/run.log" 2>&1 || true
+grep -c ERROR "$tmp/run.log" || true
+`)
+}
+
 // Repro from a real project: a count read from a log or a remote query fell
 // back to a literal 0, and the 0 then started a restart or named a file.
 func TestShellFailureFallbackValueLiteral(t *testing.T) {
@@ -113,6 +134,26 @@ for i in $(seq 1 30); do
 done
 stage "second"
 `)
+	// The check after the loop is a command with a failure branch, or stands
+	// after the if that closes around the loop.
+	shellWanted(t, "shell-poll-loop-falls-through", "checked.sh", `#!/bin/bash
+for i in $(seq 1 40); do
+    docker exec "$c" sh -c 'grep -q ":1388" /proc/net/tcp' 2>/dev/null && break
+    sleep 2
+done
+docker exec "$c" sh -c 'grep -q ":1388" /proc/net/tcp' 2>/dev/null \
+    || { echo "api did not come up" >&2; exit 1; }
+if [ -z "$tgt" ]; then
+    case "$mode" in a) echo a;; *) echo b;; esac
+    for i in $(seq 1 50); do
+        if ready "$a"; then tgt=$a; break; fi
+        sleep 3
+    done
+fi
+if [ -z "$tgt" ]; then
+    tgt=$fallback
+fi
+`)
 }
 
 // Repro from a real project: two timelines made by a sibling script with its
@@ -122,6 +163,28 @@ func TestShellPipeProducerStderrSiblingScript(t *testing.T) {
 "$repo/tools/timeline.sh" "$a" "$map" 2>/dev/null | pick > "$work/a" # want
 "$repo/tools/timeline.sh" "$a" "$map" | pick > "$work/b"
 diff "$work/a" "$work/b"
+`)
+	// The output goes to a file the next steps read: without set -e and a
+	// status check a failure leaves an empty file that compares as a result.
+	shellWanted(t, "shell-pipe-producer-stderr-discarded", "check.sh", `#!/bin/bash
+set -uo pipefail
+fact=$(mktemp)
+"$repo/tools/render.sh" "$replay" "$map" > "$fact" 2>/dev/null # want
+docker run --rm -v "$dir:/data" parser /data/a.bin 2>/dev/null > "$out" # want
+"$repo/tools/render.sh" "$replay" > "$checked" 2>/dev/null || exit 1
+if "$repo/tools/render.sh" "$replay" > "$tested" 2>/dev/null; then cat "$tested"; fi
+"$repo/tools/render.sh" "$replay" > "$sized" 2>/dev/null
+[ -s "$sized" ] || exit 1
+engine=docker
+docker info > /dev/null 2>&1 || engine=podman
+run_one() {
+    $engine run --rm --entrypoint /work/parse "$image" -in "$1" 2>/dev/null > "$2" # want
+}
+awk -f compare.awk "$fact" "$out" "$checked" "$sized"
+`)
+	shellWanted(t, "shell-pipe-producer-stderr-discarded", "strict.sh", `#!/bin/bash
+set -euo pipefail
+"$repo/tools/render.sh" "$replay" "$map" > "$fact" 2>/dev/null
 `)
 }
 

@@ -534,13 +534,22 @@ var fallbackValue = regexp.MustCompile(`\$\((?:[^()]|\([^()]*\))*\|\|\s*echo\s+"
 func checkFallbackValue(r *shellRule, src *shellSource) []*core.Violation {
 	var out []*core.Violation
 	funcs := src.functions()
+	defaultsZero := zeroDefault.MatchString(strings.Join(src.ctx.Lines, "\n"))
 	for _, l := range src.lines {
 		segs := segments(l.text)
 		for k := 0; k+1 < len(segs); k++ {
-			if segs[k].sep == "||" && droppedStatus(segs[k].trimmed(), segs[k+1].trimmed(), funcs) {
+			if segs[k].sep != "||" {
+				continue
+			}
+			switch {
+			case droppedStatus(segs[k].trimmed(), segs[k+1].trimmed(), funcs):
 				out = appendReport(out, src.report(r, l.lineAt(segs[k].offset),
 					"The status of the captured command is dropped with || true — a failed call goes on as an empty value",
 					"Fail when the command fails: x=$(cmd) || { echo 'cmd failed' >&2; exit 1; }"))
+			case defaultsZero && droppedRunLog(segs[k].trimmed(), segs[k+1].trimmed()):
+				out = appendReport(out, src.report(r, l.lineAt(segs[k].offset),
+					"The run writes its log with || true, and the figures read from logs default to 0 — a failed run is counted as a result with zeros",
+					"Keep the status of each run (cmd > \"$log\" 2>&1; echo $? > \"$log.rc\") and leave failed runs out of the totals"))
 			}
 		}
 		for _, loc := range fallbackValue.FindAllStringIndex(l.text, -1) {
@@ -550,6 +559,22 @@ func checkFallbackValue(r *shellRule, src *shellSource) []*core.Violation {
 		}
 	}
 	return append(out, fallbackInSubstitution(r, src, funcs)...)
+}
+
+var (
+	zeroDefault = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*:-0\}`)
+	siblingRun  = regexp.MustCompile(`^(?:[A-Za-z_][A-Za-z0-9_]*=[^|]*?\s+)?"?[^\s"()]*\.sh"?\s[^|]*?(?:^|[^0-9&])>\s*"?([^\s&"]+)"?`)
+)
+
+// droppedRunLog reports a sibling script run with its output sent to a file
+// and its status dropped with || true.
+func droppedRunLog(command, fallback string) bool {
+	if word := firstShellWord(fallback); word != "true" && word != ":" {
+		return false
+	}
+	command = commandPrefix.ReplaceAllString(command, "")
+	m := siblingRun.FindStringSubmatch(command)
+	return m != nil && m[1] != "/dev/null"
 }
 
 var (
@@ -645,8 +670,19 @@ func (l pollLoop) fallsThrough(segs []shellSegment, end int) bool {
 	if segs[end].sep == "||" || segs[end].sep == "&&" {
 		return false
 	}
-	return end+1 >= len(segs) || !afterCheck.MatchString(segs[end+1].trimmed())
+	// The check may stand after the blocks that close around the loop.
+	next := end + 1
+	for next < len(segs) && blockCloser.MatchString(segs[next].trimmed()) {
+		next++
+	}
+	if next >= len(segs) {
+		return true
+	}
+	// A command with a failure branch is a check: probe || { ...; exit 1; }.
+	return segs[next].sep != "||" && !afterCheck.MatchString(segs[next].trimmed())
 }
+
+var blockCloser = regexp.MustCompile(`^(?:fi|esac|\}|;;)?$`)
 
 var (
 	missingBinaryTest = regexp.MustCompile(`\[\[?\s*!\s+-[xfe]\s+"?([^\s"\]]+)"?\s*\]\]?`)
