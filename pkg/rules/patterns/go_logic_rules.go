@@ -1076,8 +1076,15 @@ func (r *ConstFamilyDuplicateValueRule) AnalyzeGoProject(ctx *core.GoProjectCont
 			}
 			collectFamilyConsts(file, pkg.Package.TypesInfo, families)
 		}
+		reported := map[string]bool{}
 		for _, family := range slices.Sorted(mapsKeys(families)) {
-			violations = append(violations, r.duplicates(families[family])...)
+			for _, v := range r.duplicates(families[family]) {
+				// A constant can be in its block and in its name family.
+				if key := fmt.Sprintf("%s:%d", v.File, v.Line); !reported[key] {
+					reported[key] = true
+					violations = append(violations, v)
+				}
+			}
 		}
 	}
 	return violations, nil
@@ -1116,6 +1123,11 @@ func collectFamilyConsts(file *core.FileContext, info *types.Info, families map[
 				if !ok || tv.Value == nil {
 					continue
 				}
+				member := familyConst{file, name, constant.StringVal(tv.Value)}
+				// One const block of one type is a family too: rule numbers
+				// named by what they do share no prefix.
+				block := fmt.Sprintf("block %s:%d %s", file.RelPath, gen.Pos(), tv.Type)
+				families[block] = append(families[block], member)
 				family := familyOf(name.Name)
 				if family == "" || looseFamilies[family] {
 					continue
@@ -1123,7 +1135,7 @@ func collectFamilyConsts(file *core.FileContext, info *types.Info, families map[
 				// Typed constants of different enums share values on purpose:
 				// a family is one name prefix and one type.
 				key := family + " " + tv.Type.String()
-				families[key] = append(families[key], familyConst{file, name, constant.StringVal(tv.Value)})
+				families[key] = append(families[key], member)
 			}
 		}
 	}

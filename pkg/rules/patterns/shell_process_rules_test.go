@@ -81,6 +81,13 @@ docker exec "$c" sh -c 'for p in $(pgrep -f "^C:.*game.exe"); do echo $p; done'
 
 ssh "$host" "pgrep -x sway"
 `)
+	// The pattern names the script itself: the $( ) subshell carries the
+	// script's command line, and pgrep finds it.
+	shellWanted(t, "shell-pgrep-matches-own-wrapper", "stream-watch.sh", `#!/bin/bash
+P=$(pgrep -f stream-watch.sh | head -1) # want
+S=$(pgrep -f other-session.sh | head -1)
+Q=$(pgrep -f '[s]tream-watch.sh' | head -1)
+`)
 	// The script spans lines, or is a heredoc captured and passed to bash -c:
 	// the wrapper's command line still carries the pattern.
 	shellWanted(t, "shell-pgrep-matches-own-wrapper", "multiline.sh", `#!/bin/bash
