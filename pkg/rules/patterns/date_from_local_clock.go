@@ -23,6 +23,7 @@ func init() {
 // the dates the rest of the system takes in UTC:
 //
 //	snap.Date = time.Now().Format("2006-01-02")        // "today" of the host
+//	at := time.Date(d.Year(), d.Month(), d.Day(), now.Hour(), now.Minute(), 0, 0, now.Location())
 //
 // A time normalized with UTC() or In(loc) before the cut is not reported. A
 // date cut from a timestamp scanned from the database is the session zone's
@@ -32,7 +33,7 @@ func NewDateFromLocalClockRule() *DateFromLocalClockRule {
 		BaseRule: rules.NewBaseRule(
 			"date-from-local-clock",
 			"patterns",
-			"Detects a calendar date formatted from time.Now() with no UTC()/In(loc) — around midnight it is another day than in UTC, depending on the host's zone",
+			"Detects a calendar date formatted from time.Now() with no UTC()/In(loc), or a moment built by time.Date in the zone of time.Now() — around midnight it is another day than in UTC, depending on the host's zone",
 			core.SeverityMedium,
 		),
 		suggestion: "Normalize the time first: t.UTC().Format(...) (or In(loc) with the zone the date is defined in)",
@@ -43,6 +44,10 @@ func NewDateFromLocalClockRule() *DateFromLocalClockRule {
 		var findings []funcFinding
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
+			if ok && hostZoneMoment(scope.info, defs, call) {
+				findings = append(findings, funcFinding{node: call, message: "A moment is built in the zone of time.Now() — the day it falls on depends on the host's zone"})
+				return true
+			}
 			if !ok || len(call.Args) != 1 {
 				return true
 			}
@@ -184,6 +189,21 @@ func (r *DateFromLocalClockRule) hostClockToday(ctx *core.FileContext, helper st
 		})
 	}
 	return violations
+}
+
+// hostZoneMoment reports time.Date(..., now.Location()) with now from the
+// host clock: a date the code parsed in UTC put on the host's time of day and
+// zone, so the moment moves with the zone the binary runs in.
+func hostZoneMoment(info *types.Info, defs map[types.Object]ast.Expr, call *ast.CallExpr) bool {
+	if len(call.Args) != 8 || !calleeIn(call, info, "time", "Date") {
+		return false
+	}
+	loc, ok := ast.Unparen(call.Args[7]).(*ast.CallExpr)
+	if !ok || len(loc.Args) != 0 {
+		return false
+	}
+	sel, ok := ast.Unparen(loc.Fun).(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Location" && localClock(info, defs, sel.X, 0)
 }
 
 // isTimeNowCall reports time.Now().
