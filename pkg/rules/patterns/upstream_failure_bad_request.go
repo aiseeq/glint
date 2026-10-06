@@ -31,7 +31,8 @@ func init() {
 // the request's context directly (r.verifier.Verify(req.Context(), token)).
 //
 // A 401 for every error of such a call is the same trap: a token check that
-// fetches the signing keys answers an outage with "log in again".
+// fetches the signing keys answers an outage with "log in again". So is a 404:
+// a read whose database fails answers "no such item".
 type UpstreamFailureAnsweredAsBadRequestRule struct {
 	*rules.BaseRule
 }
@@ -41,7 +42,7 @@ func NewUpstreamFailureAnsweredAsBadRequestRule() *UpstreamFailureAnsweredAsBadR
 	return &UpstreamFailureAnsweredAsBadRequestRule{BaseRule: rules.NewBaseRule(
 		"upstream-failure-answered-as-bad-request",
 		"patterns",
-		"Detects a handler answering 400 or 401 for every error of a call that also fetches with a context — an unavailable source reads as the client's mistake",
+		"Detects a handler answering 400, 401 or 404 for every error of a call that also fetches with a context — an unavailable source reads as the client's mistake",
 		core.SeverityMedium,
 	)}
 }
@@ -93,7 +94,7 @@ func (r *UpstreamFailureAnsweredAsBadRequestRule) AnalyzeFile(ctx *core.FileCont
 			}
 			v := r.CreateViolation(ctx.RelPath, line, "Every error of "+callee+" is answered as "+status+", though it also fails when what it fetches does not answer")
 			v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
-			v.WithSuggestion("Mark the request's own errors (errors.Is on a validation sentinel) and answer the rest as 502 or 500")
+			v.WithSuggestion("Mark the request's own errors (errors.Is on a validation or not-found sentinel) and answer the rest as 502 or 500")
 			violations = append(violations, v)
 		})
 	}
@@ -189,19 +190,24 @@ func clientErrorAnswer(body *ast.BlockStmt) (*ast.CallExpr, string) {
 	status := ""
 	split := false
 	ast.Inspect(body, func(n ast.Node) bool {
+		if cmp, ok := n.(*ast.BinaryExpr); ok && (cmp.Op == token.EQL || cmp.Op == token.NEQ) && comparesErrToValue(cmp) {
+			split = true
+		}
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		if isSelectorCall(call, "errors", "Is") || isSelectorCall(call, "errors", "As") {
+		if classifiesErr(call) {
 			split = true
 		}
 		if answer == nil {
 			switch {
 			case answersBadRequest(call):
 				answer, status = call, "a bad request"
-			case answersUnauthorized(call):
+			case answersStatus(call, "unauthorized", "StatusUnauthorized", "401"):
 				answer, status = call, "unauthorized"
+			case answersStatus(call, "notfound", "StatusNotFound", "404"):
+				answer, status = call, "not found"
 			}
 		}
 		return true
@@ -212,17 +218,45 @@ func clientErrorAnswer(body *ast.BlockStmt) (*ast.CallExpr, string) {
 	return answer, status
 }
 
-// answersUnauthorized reports a call of a 401 helper or one given
-// http.StatusUnauthorized.
-func answersUnauthorized(call *ast.CallExpr) bool {
-	if name := callName(call); answerVerb.MatchString(name) && strings.Contains(strings.ToLower(name), "unauthorized") {
+// errClassifier names a call telling errors apart: errors.Is, errors.As,
+// IsNotFound, IsCodedError.
+var errClassifier = regexp.MustCompile(`^(?:Is|As)(?:[A-Z]\w*)?$|^(?:is|as)[A-Z]\w*$`)
+
+// classifiesErr reports a classifier call handed err.
+func classifiesErr(call *ast.CallExpr) bool {
+	if !errClassifier.MatchString(callName(call)) {
+		return false
+	}
+	for _, arg := range call.Args {
+		if isIdentNamed(arg, "err") {
+			return true
+		}
+	}
+	return false
+}
+
+// comparesErrToValue reports err compared with a value other than nil:
+// err == sql.ErrNoRows.
+func comparesErrToValue(cmp *ast.BinaryExpr) bool {
+	for _, pair := range [][2]ast.Expr{{cmp.X, cmp.Y}, {cmp.Y, cmp.X}} {
+		if isIdentNamed(pair[0], "err") && !isIdentNamed(pair[1], "nil") {
+			return true
+		}
+	}
+	return false
+}
+
+// answersStatus reports a call of an answer helper whose lowercased name
+// holds word (sendNotFoundError), or one given http.<constant> or the code.
+func answersStatus(call *ast.CallExpr, word, constant, code string) bool {
+	if name := callName(call); answerVerb.MatchString(name) && strings.Contains(strings.ToLower(name), word) {
 		return true
 	}
 	for _, arg := range call.Args {
-		if sel, ok := arg.(*ast.SelectorExpr); ok && sel.Sel.Name == "StatusUnauthorized" && isIdentNamed(sel.X, "http") {
+		if sel, ok := arg.(*ast.SelectorExpr); ok && sel.Sel.Name == constant && isIdentNamed(sel.X, "http") {
 			return true
 		}
-		if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.INT && lit.Value == "401" {
+		if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.INT && lit.Value == code {
 			return true
 		}
 	}
