@@ -90,9 +90,18 @@ func (r *MapIterationOrderRule) analyzeBody(fileCtx *core.FileContext, fn *ast.F
 		if !ok || !isMapRange(rangeStmt, info) {
 			return true
 		}
-		var found []*core.Violation
+		var found, elsewhere []*core.Violation
 		for _, name := range orderedTargets(rangeStmt, info) {
-			if !escapesFunction(fn, name, info) || isSortedBefore(fn, name, rangeStmt.End()) {
+			if !escapesFunction(fn, name, info) {
+				continue
+			}
+			if sortCall, ok := tielessSort(fn, rangeStmt, name, info); ok {
+				elsewhere = append(elsewhere, r.reportTie(fileCtx, sortCall, "map_iteration_sort_tie", name,
+					fmt.Sprintf("%q is collected from a map and sorted by a single value that entries can share — equal entries keep the map iteration order, which Go randomizes, a stable sort included", name),
+					"Add a second sort key that tells entries apart (the map key), e.g. cmp.Or(cmp.Compare(a.x, b.x), cmp.Compare(a.key, b.key))"))
+				continue
+			}
+			if isSortedBefore(fn, name, rangeStmt.End()) {
 				continue
 			}
 			found = append(found, r.report(fileCtx, rangeStmt, name))
@@ -103,6 +112,20 @@ func (r *MapIterationOrderRule) analyzeBody(fileCtx *core.FileContext, fn *ast.F
 		if writer, ok := outputInLoop(fn, rangeStmt, info); ok {
 			found = append(found, r.reportOutput(fileCtx, rangeStmt, writer))
 		}
+		if target, ok := floatSum(fn, rangeStmt, info); ok {
+			found = append(found, r.reportFloatSum(fileCtx, rangeStmt, target))
+		}
+		if ifStmt, winner, ok := tieChoice(fn, rangeStmt, info); ok {
+			elsewhere = append(elsewhere, r.reportTie(fileCtx, ifStmt, "map_iteration_tie", winner,
+				fmt.Sprintf("The entry kept in %q is chosen by a comparison with no tie-break inside a map loop — of entries that compare equal, the one Go's randomized walk meets first (or last) wins", winner),
+				"Break ties on the map key (|| d == bestD && k < bestK), or walk the keys in a defined order (slices.Sorted(maps.Keys(m)))"))
+		}
+		if assign, groups, ok := groupedAppend(fn, rangeStmt, info); ok {
+			elsewhere = append(elsewhere, r.reportTie(fileCtx, assign, "map_iteration_grouped", groups,
+				fmt.Sprintf("Groups of %s are filled inside a map loop and never sorted — each group lists its members in map iteration order, which Go randomizes", groups),
+				"Sort each group after the loop (slices.Sort), or walk the keys in a defined order"))
+		}
+		violations = append(violations, elsewhere...)
 		if len(found) == 0 {
 			return true
 		}
@@ -142,6 +165,30 @@ func (r *MapIterationOrderRule) reportSelection(fileCtx *core.FileContext, range
 	v.WithSuggestion("Walk the keys in a defined order (slices.Sorted(maps.Keys(m))), or make the choice by a comparison that has one winner")
 	v.WithContext("pattern", "map_iteration_first_match")
 	v.WithContext("variable", picked)
+	return v
+}
+
+// reportTie reports an order dependence at the statement that carries it - the
+// comparison, the sort or the append - rather than at the loop.
+func (r *MapIterationOrderRule) reportTie(fileCtx *core.FileContext, node ast.Node, pattern, variable, message, suggestion string) *core.Violation {
+	line := fileCtx.LineFor(node)
+	v := r.CreateViolation(fileCtx.RelPath, line, message)
+	v.WithCode(strings.TrimSpace(fileCtx.GetLine(line)))
+	v.WithSuggestion(suggestion)
+	v.WithColumn(fileCtx.PositionFor(node).Column)
+	v.WithContext("pattern", pattern)
+	v.WithContext("variable", variable)
+	return v
+}
+
+func (r *MapIterationOrderRule) reportFloatSum(fileCtx *core.FileContext, rangeStmt *ast.RangeStmt, target string) *core.Violation {
+	line := fileCtx.LineFor(rangeStmt)
+	v := r.CreateViolation(fileCtx.RelPath, line,
+		fmt.Sprintf("Float sum %s is accumulated in map iteration order — float addition is not associative, so the last digits change with Go's randomized walk", target))
+	v.WithCode(strings.TrimSpace(fileCtx.GetLine(line)))
+	v.WithSuggestion("Walk the keys in a defined order (slices.Sorted(maps.Keys(m))) before adding the values")
+	v.WithContext("pattern", "map_iteration_float_sum")
+	v.WithContext("variable", target)
 	return v
 }
 
@@ -233,6 +280,14 @@ func (s *firstMatchScanner) stmt(stmt ast.Stmt, path selectionPath) selectionPat
 	case *ast.AssignStmt:
 		if target := s.outerTarget(node); target != "" {
 			path.assigned = target
+		}
+	case *ast.ExprStmt:
+		// delete(m, k) followed by break consumes the entry the walk met
+		// first: the entry is chosen as surely as one handed to a variable.
+		if call, ok := node.X.(*ast.CallExpr); ok && isIdent(call.Fun, "delete") && len(call.Args) == 2 {
+			if name := s.loopVarIn(call.Args[1]); name != "" {
+				path.assigned = name
+			}
 		}
 	case *ast.BlockStmt:
 		s.block(node.List, path)
