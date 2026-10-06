@@ -54,7 +54,8 @@ graft help      # every task
 # Analyze current directory
 glint check
 
-# Analyze specific paths
+# Analyze specific paths: paths under one .glint.yaml are one project, files
+# are named from its directory and cross-file rules see every path
 glint check ./backend ./frontend/shared
 
 # Show only high+ severity issues

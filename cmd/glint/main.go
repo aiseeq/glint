@@ -242,7 +242,7 @@ func runCheck(_ *cobra.Command, args []string) error {
 		defer stop()
 	}
 
-	projectRoots, err := getProjectRoots(args)
+	roots, err := analysisRoots(args)
 	if err != nil {
 		return err
 	}
@@ -261,7 +261,8 @@ func runCheck(_ *cobra.Command, args []string) error {
 	deadCheckConfigs := make(map[string]*core.Config)
 	var deadRule *deadcode.DeadConfigExceptionRule
 
-	for _, projectRoot := range projectRoots {
+	for _, root := range roots {
+		projectRoot := root.dir
 		cfg, enabledRules, err := loadConfig(projectRoot)
 		if err != nil {
 			return err
@@ -281,7 +282,7 @@ func runCheck(_ *cobra.Command, args []string) error {
 		}
 
 		loadDone := timings.phase("load " + projectRoot)
-		prepared, err := prepareAnalysis(loader, projectRoot, cfg, enabledRules, !flagNoCache)
+		prepared, err := prepareScopedAnalysis(loader, root, cfg, enabledRules, !flagNoCache)
 		loadDone()
 		if err != nil {
 			return err
@@ -447,6 +448,86 @@ func getProjectRoots(args []string) ([]string, error) {
 	return roots, nil
 }
 
+// analysisRoot is a root analyzed as one project: its directory, and the
+// directories under it the run walks — none for the whole root.
+type analysisRoot struct {
+	dir    string
+	scopes []string
+}
+
+// analysisRoots groups the path arguments by the configuration that governs
+// them: the paths under one .glint.yaml are walked as scopes of its directory,
+// so findings name files relative to it, the project rules see the files of
+// every path together, and the run keeps one result cache. A path no
+// configuration governs is a root of its own.
+func analysisRoots(args []string) ([]analysisRoot, error) {
+	dirs, err := getProjectRoots(args)
+	if err != nil {
+		return nil, err
+	}
+	var roots []analysisRoot
+	index := make(map[string]int)
+	for _, dir := range dirs {
+		configPath, err := core.FindConfig(dir)
+		if err != nil {
+			return nil, err
+		}
+		base := dir
+		if configPath != "" {
+			base = filepath.Dir(configPath)
+		}
+		i, ok := index[base]
+		if !ok {
+			i = len(roots)
+			index[base] = i
+			roots = append(roots, analysisRoot{dir: base})
+		}
+		roots[i].addScope(dir, dir == base)
+	}
+	return roots, nil
+}
+
+// addScope adds a directory to the walk of a root; the root itself, or a
+// directory a scope already covers, makes the walk wider instead.
+func (r *analysisRoot) addScope(dir string, whole bool) {
+	if r.wholeRoot() {
+		return
+	}
+	if whole {
+		r.scopes = []string{r.dir}
+		return
+	}
+	kept := r.scopes[:0]
+	for _, scope := range r.scopes {
+		if within(dir, scope) {
+			return
+		}
+		if !within(scope, dir) {
+			kept = append(kept, scope)
+		}
+	}
+	r.scopes = append(kept, dir)
+}
+
+// wholeRoot reports a root walked in full.
+func (r *analysisRoot) wholeRoot() bool {
+	return len(r.scopes) == 1 && r.scopes[0] == r.dir
+}
+
+// walkScopes returns the scopes the walker takes: none for the whole root.
+func (r analysisRoot) walkScopes() []string {
+	if r.wholeRoot() {
+		return nil
+	}
+	return r.scopes
+}
+
+// within reports a path at or below dir.
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // resolveProjectRoot turns a path argument into an absolute directory. A Go
 // package pattern ("./...", "./internal/...") names the directory it starts
 // from: glint always walks a root recursively.
@@ -607,7 +688,15 @@ type preparedRoot struct {
 	cache   *resultCache
 }
 
+// prepareAnalysis prepares a whole root.
 func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core.Config, enabledRules []rules.Rule, useCache bool) (*preparedRoot, error) {
+	return prepareScopedAnalysis(loader, analysisRoot{dir: projectRoot}, cfg, enabledRules, useCache)
+}
+
+// prepareScopedAnalysis walks the scopes of a root and loads what its rules
+// need.
+func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg *core.Config, enabledRules []rules.Rule, useCache bool) (*preparedRoot, error) {
+	projectRoot := root.dir
 	var projectRules []string
 	requireSSA := false
 	for _, rule := range enabledRules {
@@ -621,7 +710,7 @@ func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core
 	slices.Sort(projectRules)
 	projectRuleCount := len(projectRules)
 
-	walker := core.NewWalker(projectRoot, cfg).WithGoParsing(projectRuleCount == 0)
+	walker := core.NewWalker(projectRoot, cfg).WithGoParsing(projectRuleCount == 0).WithScopes(root.walkScopes())
 	contexts, walker, err := walkWithWalker(walker)
 	prepared := &preparedRoot{contexts: contexts, walker: walker}
 	if err != nil {
@@ -631,7 +720,7 @@ func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core
 	// анализировать, а загрузка Go-контекста упала бы с "no packages found".
 	needProject := projectRuleCount > 0 && hasGoFiles(contexts)
 	if useCache {
-		prepared.cache = openRootCache(projectRoot, cfg, needProject)
+		prepared.cache = openRootCache(projectRoot, root.walkScopes(), cfg, needProject)
 	}
 	if !needProject {
 		return prepared, nil

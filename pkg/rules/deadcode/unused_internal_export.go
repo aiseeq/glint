@@ -4,6 +4,7 @@ import (
 	"errors"
 	"go/ast"
 	"go/types"
+	"path/filepath"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -29,8 +30,10 @@ func init() {
 //
 // Символ считается живым, если на него есть хотя бы одна ссылка в
 // production-коде — в своём пакете или в любом другом. Ссылки только из
-// _test.go файлов не спасают: код, нужный лишь тестам, — мёртвый груз
-// production-сборки, и сообщение это называет отдельно.
+// _test.go файлов своего пакета не спасают: код, нужный лишь им, переезжает в
+// _test.go, и сообщение это называет отдельно. Тесты других пакетов чужой
+// _test.go импортировать не могут: экспорт, который они зовут, — единственное
+// место для такого помощника, и он жив.
 //
 // Методы не проверяются: они могут закрывать интерфейсы. Интерфейсные типы —
 // зона orphaned-interface. Пакет, чьи файлы импортируют testing, существует для
@@ -72,6 +75,9 @@ type exportUsage struct {
 	object   types.Object
 	kind     string
 	testUses int
+	// otherTestUses counts the references from the tests of other
+	// directories, which reach the symbol through an import of its package.
+	otherTestUses int
 	// initializer marks a candidate outside internal/: reported only when
 	// tests, and nothing else, call it.
 	initializer bool
@@ -143,7 +149,7 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, usage := range byFile[fileCtx] {
-			if uses[usage.object] > 0 || (usage.initializer && usage.testUses == 0) {
+			if uses[usage.object] > 0 || usage.otherTestUses > 0 || (usage.initializer && usage.testUses == 0) {
 				continue
 			}
 			violations = append(violations, r.violationFor(ctx, usage))
@@ -235,7 +241,18 @@ func countTestIdentUses(ctx *core.GoProjectContext, candidates map[types.Object]
 		if file == nil || !file.IsTestFile() || file.GoAST == nil {
 			continue
 		}
+		imported := importedPackages(file.GoAST)
+		dir := filepath.Dir(file.Path)
 		ast.Inspect(file.GoAST, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok {
+				if pkg, ok := sel.X.(*ast.Ident); ok {
+					for _, usage := range byName[sel.Sel.Name] {
+						if usage.importedAs(imported, pkg.Name) && declaredDir(ctx, usage) != dir {
+							usage.otherTestUses++
+						}
+					}
+				}
+			}
 			ident, ok := n.(*ast.Ident)
 			if !ok {
 				return true
@@ -246,6 +263,40 @@ func countTestIdentUses(ctx *core.GoProjectContext, candidates map[types.Object]
 			return true
 		})
 	}
+}
+
+// importedPackages maps the import paths of a file to the names it refers to
+// them by: the explicit name, or "" for the package's own name.
+func importedPackages(file *ast.File) map[string]string {
+	out := make(map[string]string, len(file.Imports))
+	for _, spec := range file.Imports {
+		// The parser accepted the literal, and import paths hold no escapes.
+		path := strings.Trim(spec.Path.Value, "`\"")
+		name := ""
+		if spec.Name != nil {
+			name = spec.Name.Name
+		}
+		out[path] = name
+	}
+	return out
+}
+
+// importedAs reports a file that imports the symbol's package under a name.
+func (u *exportUsage) importedAs(imported map[string]string, name string) bool {
+	pkg := u.object.Pkg()
+	local, ok := imported[pkg.Path()]
+	if !ok {
+		return false
+	}
+	if local == "" {
+		local = pkg.Name()
+	}
+	return local == name
+}
+
+// declaredDir returns the directory of the file that declares a symbol.
+func declaredDir(ctx *core.GoProjectContext, usage *exportUsage) string {
+	return filepath.Dir(ctx.FileSet.Position(usage.object.Pos()).Filename)
 }
 
 // initializerVerbs lead the names of functions that set a package up.

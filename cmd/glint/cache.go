@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,10 +78,11 @@ type cacheContents struct {
 	Project *projectEntry
 }
 
-// openRootCache opens the result cache of a root. A cache that cannot be used is reported and the root is analyzed
+// openRootCache opens the result cache of a root walked over scopes: a run
+// over other scopes stores other files, so it keeps a cache of its own. A cache that cannot be used is reported and the root is analyzed
 // in full: the cache only saves time, it never decides a finding.
-func openRootCache(root string, cfg *core.Config, goTreesFromLoader bool) *resultCache {
-	cache, err := newRootCache(root, cfg, goTreesFromLoader)
+func openRootCache(root string, scopes []string, cfg *core.Config, goTreesFromLoader bool) *resultCache {
+	cache, err := newRootCache(strings.Join(append([]string{root}, scopes...), "\n"), cfg, goTreesFromLoader)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: result cache off for %s: %v\n", root, err)
 		return nil

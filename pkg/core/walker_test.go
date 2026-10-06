@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -322,4 +324,41 @@ func TestWalkerWithGoParsingDisabledLeavesGoASTForProjectLoader(t *testing.T) {
 	require.Len(t, contexts, 1)
 	assert.Nil(t, contexts[0].GoAST)
 	assert.Nil(t, contexts[0].GoFileSet)
+}
+
+// A walk limited to scopes visits only their files and names them relative to
+// the root, and a .gitignore between the root and a scope still applies.
+func TestWalkerScopesKeepRootRelativePaths(t *testing.T) {
+	root := t.TempDir()
+	for path, content := range map[string]string{
+		".gitignore":       "gen.go\n",
+		"cmd/a/main.go":    "package main\n",
+		"cmd/a/gen.go":     "package main\n",
+		"cmd/b/main.go":    "package main\n",
+		"internal/x/x.go":  "package x\n",
+		"other/skipped.go": "package other\n",
+	} {
+		full := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	walker := NewWalker(root, DefaultConfig()).WithGoParsing(false).
+		WithScopes([]string{filepath.Join(root, "cmd/a"), filepath.Join(root, "cmd/b"), filepath.Join(root, "internal")})
+	contexts, errs := walker.WalkSync()
+	if len(errs) > 0 {
+		t.Fatalf("walk errors: %v", errs)
+	}
+	var got []string
+	for _, ctx := range contexts {
+		got = append(got, ctx.RelPath)
+	}
+	sort.Strings(got)
+	want := []string{"cmd/a/main.go", "cmd/b/main.go", "internal/x/x.go"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v, want %v", got, want)
+	}
 }

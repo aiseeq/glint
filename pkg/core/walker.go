@@ -26,6 +26,10 @@ type Walker struct {
 	// so the same walker can be reused.
 	workers int
 
+	// scopes are the directories under the root a walk visits; empty walks
+	// the whole root. Paths stay relative to the root either way.
+	scopes []string
+
 	// Statistics of the most recent walk
 	stats WalkerStats
 	mu    sync.Mutex
@@ -70,6 +74,14 @@ func (w *Walker) WithWorkers(n int) *Walker {
 	return w
 }
 
+// WithScopes limits the walk to directories under the root: the files keep
+// their paths relative to the root, so the root's configuration and the
+// project rules see them as files of one project.
+func (w *Walker) WithScopes(dirs []string) *Walker {
+	w.scopes = dirs
+	return w
+}
+
 // walk traverses all files and returns FileContexts through a channel. Each
 // call owns its channels and resets the statistics, so a walker can be reused.
 //
@@ -110,10 +122,21 @@ func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 			}
 			w.gitignore = idx
 		}
-		if err := filepath.Walk(w.projectRoot, func(path string, info os.FileInfo, err error) error {
-			return w.visitPath(fileQueue, walkErrors, path, info, err)
-		}); err != nil {
-			walkErrors <- err
+		scopes := w.scopes
+		if len(scopes) == 0 {
+			scopes = []string{w.projectRoot}
+		}
+		loaded := make(map[string]bool)
+		for _, scope := range scopes {
+			if err := w.enterScope(scope, loaded); err != nil {
+				walkErrors <- err
+				continue
+			}
+			if err := filepath.Walk(scope, func(path string, info os.FileInfo, err error) error {
+				return w.visitPath(fileQueue, walkErrors, path, info, err)
+			}); err != nil {
+				walkErrors <- err
+			}
 		}
 	}()
 
@@ -125,6 +148,36 @@ func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 	}()
 
 	return results, walkErrors
+}
+
+// enterScope loads the .gitignore files of the directories between the root
+// and a scope, which a walk from the root would have entered first. The scope
+// itself is not checked: naming it is the user's decision, as for the root.
+func (w *Walker) enterScope(scope string, loaded map[string]bool) error {
+	rel, err := filepath.Rel(w.projectRoot, scope)
+	if err != nil {
+		return fmt.Errorf("make scope %q relative to project root: %w", scope, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("scope %q is outside project root %q", scope, w.projectRoot)
+	}
+	if rel == "." || w.gitignore == nil {
+		return nil
+	}
+	chain, err := ancestorChain(w.projectRoot, filepath.Dir(scope))
+	if err != nil {
+		return err
+	}
+	for _, dir := range chain {
+		if loaded[dir] {
+			continue
+		}
+		loaded[dir] = true
+		if err := w.gitignore.addDir(dir); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // WalkSync walks files synchronously and returns all contexts
