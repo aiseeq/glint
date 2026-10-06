@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -28,8 +29,17 @@ func init() {
 // Test files and end-to-end suites are checked too: tests that register
 // users run against environments that send mail, and a fixture address copied
 // from test to test is how the domain comes back after a clean-up.
+//
+// In SQL migrations, a LIKE or = pattern on an e-mail column is read the same
+// way, and so is a test local part matching any domain ('test-%'): a trigger
+// or a clean-up that takes such addresses for test users takes real people
+// with them. A function body a later migration redefines is dead and is not
+// reported, nor is a down migration.
 type TestEmailRegistrableDomainRule struct {
 	*rules.BaseRule
+	// liveDefinitions are, by function name, the up migration holding the
+	// definition the migrations leave.
+	liveDefinitions map[string]string
 }
 
 // NewTestEmailRegistrableDomainRule creates the rule
@@ -55,8 +65,77 @@ func (r *TestEmailRegistrableDomainRule) AnalyzeFile(ctx *core.FileContext) []*c
 		return r.analyzeGo(ctx)
 	case ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile():
 		return r.analyzeJS(ctx)
+	case isUpMigration(ctx.RelPath):
+		return r.analyzeSQL(ctx)
 	}
 	return nil
+}
+
+var (
+	createFunction = regexp.MustCompile(`(?i)\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:[A-Za-z_][A-Za-z0-9_]*\.)?"?([A-Za-z_][A-Za-z0-9_]*)`)
+	sqlString      = regexp.MustCompile(`'((?:[^']|'')*)'`)
+	emailPattern   = regexp.MustCompile(`(?i)email[^']*(?:\bI?LIKE|=|SIMILAR\s+TO)\s*$`)
+	// testLocalPart is a LIKE pattern of a local part named as a test one
+	// and any domain: 'test-%', 'qa.test%'.
+	testLocalPart = regexp.MustCompile(`(?i)^[a-z0-9._+-]*test[a-z0-9._+-]*%$`)
+)
+
+// UseProjectFiles finds the up migration holding the live definition of
+// each SQL function: the last one, in version order, that creates it.
+func (r *TestEmailRegistrableDomainRule) UseProjectFiles(files []*core.FileContext) {
+	r.liveDefinitions = make(map[string]string)
+	for _, ctx := range files {
+		if !isUpMigration(ctx.RelPath) {
+			continue
+		}
+		for _, m := range createFunction.FindAllSubmatch(ctx.Content, -1) {
+			name := strings.ToLower(string(m[1]))
+			if previous, ok := r.liveDefinitions[name]; !ok || migrationOrder(previous) < migrationOrder(ctx.RelPath) {
+				r.liveDefinitions[name] = ctx.RelPath
+			}
+		}
+	}
+}
+
+// ResetState forgets the previous root's functions.
+func (r *TestEmailRegistrableDomainRule) ResetState() { r.liveDefinitions = nil }
+
+// migrationOrder is the sort key of a migration: its file name, the version
+// first.
+func migrationOrder(path string) string { return filepath.Base(path) }
+
+// analyzeSQL reports the e-mail patterns of a migration that take test
+// users by a registrable domain or by a test local part on any domain.
+func (r *TestEmailRegistrableDomainRule) analyzeSQL(ctx *core.FileContext) []*core.Violation {
+	var violations []*core.Violation
+	live := true
+	for i, line := range ctx.Lines {
+		if m := createFunction.FindStringSubmatch(line); m != nil {
+			owner, known := r.liveDefinitions[strings.ToLower(m[1])]
+			live = !known || owner == ctx.RelPath
+		}
+		code, _, _ := strings.Cut(line, "--")
+		if !live {
+			continue
+		}
+		for _, loc := range sqlString.FindAllStringSubmatchIndex(code, -1) {
+			if !emailPattern.MatchString(code[:loc[0]]) {
+				continue
+			}
+			literal := code[loc[2]:loc[3]]
+			if domain := registrableTestDomain(literal); domain != "" {
+				violations = r.add(violations, ctx, i+1, domain)
+				break
+			}
+			if testLocalPart.MatchString(literal) && !ctx.IsSuppressed(i+1, r.Name()) {
+				violations = append(violations, testReport(r.BaseRule, ctx, i+1,
+					"The pattern '"+literal+"' takes a test local part on any domain — a real user's address that starts the same way passes as a test one",
+					"Recognize test users by a reserved domain the code owns (@example.com, a .test domain), not by the local part"))
+				break
+			}
+		}
+	}
+	return violations
 }
 
 func (r *TestEmailRegistrableDomainRule) analyzeGo(ctx *core.FileContext) []*core.Violation {

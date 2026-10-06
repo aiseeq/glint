@@ -50,7 +50,7 @@ func init() {
 		"Detects a check comparing a variable with the literal it was just assigned — the check cannot fail",
 		core.SeverityHigh, checkOwnLiteral))
 	rules.Register(newShellRule("shell-check-failure-ignored",
-		"Detects a security or quality check (gosec, npm audit, trivy, linters) whose failure is turned into success with || true or || (...; exit 0)",
+		"Detects a security or quality check (gosec, npm audit, trivy, linters) whose failure is turned into success with || true or || (...; exit 0), and a protection switched off or back on (ALTER EVENT TRIGGER ... DISABLE) with its output and failure discarded",
 		core.SeverityHigh, checkIgnoredCheckFailure))
 	rules.Register(newShellRule("psql-script-without-on-error-stop",
 		"Detects psql running a script (-f, a redirect or a pipe) without ON_ERROR_STOP — psql exits 0 when a statement fails",
@@ -448,11 +448,26 @@ func checkOwnLiteral(r *shellRule, src *shellSource) []*core.Violation {
 var (
 	checkTool      = regexp.MustCompile(`\b(?:gosec|govulncheck|nancy|trivy|grype|snyk|semgrep|golangci-lint|staticcheck|shellcheck|hadolint|eslint|(?:npm|yarn|pnpm)\s+audit|go\s+vet)\b`)
 	swallowFailure = regexp.MustCompile(`^(?:true|:|\(.*\bexit\s+0\s*\)?|(?:echo|printf)\b[^;]*)\s*$`)
+	// protectionToggle is a command switching a protection off or on: a
+	// trigger, a firewall.
+	protectionToggle = regexp.MustCompile(`(?i)\bALTER\s+(?:EVENT\s+)?TRIGGER\s+\S+\s+(?:DISABLE|ENABLE)\b|\b(?:DISABLE|ENABLE)\s+TRIGGER\b|\bufw\s+(?:disable|enable)\b`)
+	silencedTail     = regexp.MustCompile(`>\s*/dev/null[^|]*\|\|\s*(?:true|:)(?:\s|['";)]|$)`)
 )
 
+// silencedProtectionToggle returns the offset of a protection toggle whose
+// output goes to /dev/null and whose failure || true turns into success,
+// -1 for none.
+func silencedProtectionToggle(text string) int {
+	at := protectionToggle.FindStringIndex(text)
+	if at == nil || !silencedTail.MatchString(text[at[1]:]) {
+		return -1
+	}
+	return at[0]
+}
+
 // checkIgnoredCheckFailure reports a check whose failure || true, || (...;
-// exit 0) or || echo turns into success, and a make line with the - prefix
-// that runs one.
+// exit 0) or || echo turns into success, a make line with the - prefix that
+// runs one, and a protection toggle silenced with > /dev/null ... || true.
 func checkIgnoredCheckFailure(r *shellRule, src *shellSource) []*core.Violation {
 	var out []*core.Violation
 	for _, l := range src.lines {
@@ -464,6 +479,11 @@ func checkIgnoredCheckFailure(r *shellRule, src *shellSource) []*core.Violation 
 					"Drop the - prefix; let a separate target run the check as advisory if it must not block"))
 				continue
 			}
+		}
+		if at := silencedProtectionToggle(l.text); at >= 0 {
+			out = appendReport(out, src.report(r, l.lineAt(at),
+				"The command switching a protection off or back on discards its output and turns its failure into success — a failed toggle leaves the protection off, or the work it guards blocked, without a word",
+				"Let the toggle fail the script, or check its result and report it; toggle the protection inside the transaction it guards where the tool allows it"))
 		}
 		segs := segments(l.text)
 		for k := 0; k+1 < len(segs); k++ {

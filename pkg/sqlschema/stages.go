@@ -67,6 +67,49 @@ func Updates(sql string) []UpdateWrite {
 	return updates
 }
 
+// UpsertWrites returns the DO UPDATE SET of an INSERT ... VALUES ... ON
+// CONFLICT as UPDATEs of the table. A column set from EXCLUDED.col (as it
+// is, or inside an expression such as COALESCE(t.col, EXCLUDED.col)) counts
+// as set to the parameter the VALUES row binds to col.
+func UpsertWrites(sql string) []UpdateWrite {
+	result, shift, ok := parseCode(sql)
+	if !ok {
+		return nil
+	}
+	var writes []UpdateWrite
+	for _, raw := range result.GetStmts() {
+		insert := raw.GetStmt().GetInsertStmt()
+		conflict := insert.GetOnConflictClause()
+		rows := insert.GetSelectStmt().GetSelectStmt().GetValuesLists()
+		if conflict == nil || conflict.GetAction() != pgquery.OnConflictAction_ONCONFLICT_UPDATE || len(rows) != 1 {
+			continue
+		}
+		values := rows[0].GetList().GetItems()
+		params := make(map[string]int)
+		for i, col := range insert.GetCols() {
+			if i < len(values) {
+				if ref := unCast(values[i]).GetParamRef(); ref != nil {
+					params[strings.ToLower(col.GetResTarget().GetName())] = int(ref.GetNumber())
+				}
+			}
+		}
+		write := UpdateWrite{Table: strings.ToLower(insert.GetRelation().GetRelname())}
+		for _, target := range conflict.GetTargetList() {
+			res := target.GetResTarget()
+			set := ColumnWrite{Column: strings.ToLower(res.GetName()), Offset: int(res.GetLocation()) - shift}
+			set.Literal, set.IsLiteral = stringConst(res.GetVal())
+			walk(res.GetVal().ProtoReflect(), func(m proto.Message) {
+				if ref, ok := m.(*pgquery.ColumnRef); ok && set.Param == 0 && qualifier(ref) == "excluded" {
+					set.Param = params[lastField(ref)]
+				}
+			})
+			write.Sets = append(write.Sets, set)
+		}
+		writes = append(writes, write)
+	}
+	return writes
+}
+
 // StageRead is a SELECT that takes the rows of a status by the time of a
 // column named for that status: status = 'CONFIRMED' AND confirmed_at < $1.
 type StageRead struct {
