@@ -632,7 +632,9 @@ var timestampWords = map[string]bool{"timestamp": true, "time": true, "date": tr
 
 // NewMissingTimestampDefaultedToNowRule creates
 // missing-timestamp-defaulted-to-now: the time of a provider's answer,
-// missing from the response, replaced with the current time. A stale or
+// missing from the response, replaced with the current time (and a stored
+// date a query did not find replaced with the query moment, see
+// notFoundDateFromQueryMoment). A stale or
 // cached value is then presented as fresh:
 //
 //	resp, err := h.client.Convert(from, to, amount)
@@ -645,7 +647,7 @@ func NewMissingTimestampDefaultedToNowRule() *typedFuncRule {
 		BaseRule: rules.NewBaseRule(
 			"missing-timestamp-defaulted-to-now",
 			"patterns",
-			"Detects the missing time of a provider's answer filled with the current time — an old or cached value is presented as fresh",
+			"Detects the missing time of a provider's answer filled with the current time, and a stored date returned as the query moment when no row is found — an old or invented value is presented as real",
 			core.SeverityMedium,
 		),
 		suggestion: "Treat a missing timestamp as an error, or take it from where the value was stored (its fetch time)",
@@ -678,9 +680,167 @@ func NewMissingTimestampDefaultedToNowRule() *typedFuncRule {
 			}
 			return true
 		})
-		return findings
+		return append(findings, notFoundDateFromQueryMoment(scope.info, fn)...)
 	}
 	return r
+}
+
+// notFoundDateFromQueryMoment reports a function that returns a stored date
+// read from a row and, when no row is found, the moment of the query in its
+// place:
+//
+//	if !errors.Is(err, sql.ErrNoRows) { return ..., err }
+//	since := at                     // at: the moment asked about
+//	return group, since, nil        // "member since <the query moment>"
+//
+// The caller cannot tell the invented date from a real one.
+func notFoundDateFromQueryMoment(info *types.Info, fn *ast.FuncDecl) []funcFinding {
+	if fn.Body == nil || fn.Type.Results == nil {
+		return nil
+	}
+	var timeResults []int
+	index := 0
+	for _, field := range fn.Type.Results.List {
+		count := max(len(field.Names), 1)
+		for range count {
+			if isTimeTimeType(info.TypeOf(field.Type)) {
+				timeResults = append(timeResults, index)
+			}
+			index++
+		}
+	}
+	if len(timeResults) == 0 {
+		return nil
+	}
+	moments := queryMoments(info, fn)
+	var findings []funcFinding
+	for _, region := range notFoundRegions(fn.Body) {
+		storedElsewhere := false
+		var invented []*ast.ReturnStmt
+		var names []string
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if _, nested := n.(*ast.FuncLit); nested {
+				return false
+			}
+			ret, ok := n.(*ast.ReturnStmt)
+			if !ok || len(ret.Results) != index {
+				return true
+			}
+			inside := ret.Pos() >= region.Pos() && ret.End() <= region.End()
+			for _, i := range timeResults {
+				result := ast.Unparen(ret.Results[i])
+				moment := moments[momentKey(info, result)]
+				if moment == "" && fromClock(info, result) {
+					moment = "time.Now()"
+				}
+				switch {
+				case inside && moment != "":
+					invented = append(invented, ret)
+					names = append(names, moment)
+				case !inside:
+					if _, isField := result.(*ast.SelectorExpr); isField {
+						storedElsewhere = true
+					}
+				}
+			}
+			return true
+		})
+		if !storedElsewhere {
+			continue
+		}
+		for i, ret := range invented {
+			findings = append(findings, funcFinding{node: ret,
+				message: "When no row is found, the date returned is " + names[i] + " — the moment of the query is presented as the record's date"})
+		}
+	}
+	return findings
+}
+
+// momentKey identifies a returned value: the object of an identifier.
+func momentKey(info *types.Info, expr ast.Expr) types.Object {
+	if ident, ok := expr.(*ast.Ident); ok {
+		return info.ObjectOf(ident)
+	}
+	return nil
+}
+
+// queryMoments returns the time.Time parameters of a function and the locals
+// it assigns from them or from time.Now(), each with the name to report.
+func queryMoments(info *types.Info, fn *ast.FuncDecl) map[types.Object]string {
+	moments := make(map[types.Object]string)
+	for _, field := range fn.Type.Params.List {
+		if !isTimeTimeType(info.TypeOf(field.Type)) {
+			continue
+		}
+		for _, name := range field.Names {
+			moments[info.Defs[name]] = "the parameter " + name.Name
+		}
+	}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != len(assign.Rhs) {
+			return true
+		}
+		for i, rhs := range assign.Rhs {
+			ident, ok := assign.Lhs[i].(*ast.Ident)
+			if !ok {
+				continue
+			}
+			obj := info.ObjectOf(ident)
+			if from := moments[momentKey(info, ast.Unparen(rhs))]; from != "" && obj != nil {
+				moments[obj] = from
+			} else if fromClock(info, rhs) && obj != nil {
+				moments[obj] = "time.Now()"
+			}
+		}
+		return true
+	})
+	return moments
+}
+
+// notFoundRegions returns the parts of a body that run when a query found no
+// row: the body of if errors.Is(err, sql.ErrNoRows) {...}, and the rest of
+// the block after if !errors.Is(err, sql.ErrNoRows) { return ... }.
+func notFoundRegions(body *ast.BlockStmt) []ast.Node {
+	var regions []ast.Node
+	ast.Inspect(body, func(n ast.Node) bool {
+		block, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		for i, stmt := range block.List {
+			check, ok := stmt.(*ast.IfStmt)
+			if !ok {
+				continue
+			}
+			negated, tests := testsFoundNoRow(check.Cond)
+			switch {
+			case tests && !negated:
+				regions = append(regions, check.Body)
+			case tests && negated && endsInReturn(check.Body) && i+1 < len(block.List):
+				regions = append(regions, &ast.BlockStmt{Lbrace: block.List[i+1].Pos(), List: block.List[i+1:], Rbrace: block.Rbrace})
+			}
+		}
+		return true
+	})
+	return regions
+}
+
+// testsFoundNoRow reports a condition that holds when a query found no row,
+// and whether it is the negation (!errors.Is(err, sql.ErrNoRows),
+// err != sql.ErrNoRows) that holds otherwise.
+func testsFoundNoRow(cond ast.Expr) (negated, tests bool) {
+	switch c := ast.Unparen(cond).(type) {
+	case *ast.UnaryExpr:
+		if c.Op == token.NOT {
+			return true, testsNoRows(c.X)
+		}
+	case *ast.BinaryExpr:
+		if c.Op == token.NEQ {
+			return true, namesNoRows(c.X) || namesNoRows(c.Y)
+		}
+	}
+	return false, testsNoRows(cond)
 }
 
 // callAnswers returns the local variables holding the answer of a call that
