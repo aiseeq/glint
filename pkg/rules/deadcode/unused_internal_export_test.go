@@ -249,7 +249,7 @@ func TestHelpers(t *testing.T) {
 
 // A package whose own files import "testing" exists for tests: production code
 // cannot use it, so an export only tests call is its purpose, not dead code.
-// The same export in an ordinary package is still reported.
+// An export that only its own package's tests call is still reported.
 func TestUnusedInternalExportRule_SkipsTestSupportPackage(t *testing.T) {
 	project := rulestest.Project(t, map[string]string{
 		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
@@ -265,8 +265,14 @@ func DSN(t testing.TB) string {
 `,
 		"internal/plain/plain.go": `package plain
 
-// Address is used by tests only.
+// Address is used by its own tests only.
 func Address() string { return "localhost" }
+`,
+		"internal/plain/plain_test.go": `package plain
+
+import "testing"
+
+func TestAddress(t *testing.T) { _ = Address() }
 `,
 		"internal/store/store_test.go": `package store
 
@@ -274,12 +280,10 @@ import (
 	"testing"
 
 	"example.com/rulestest/internal/dbhelp"
-	"example.com/rulestest/internal/plain"
 )
 
 func TestStore(t *testing.T) {
 	_ = dbhelp.DSN(t)
-	_ = plain.Address()
 }
 `,
 		"internal/store/store.go": "package store\n",
@@ -292,4 +296,69 @@ func TestStore(t *testing.T) {
 		symbols = append(symbols, v.Context["symbol"].(string))
 	}
 	assert.Equal(t, []string{"Address"}, symbols)
+}
+
+// Repro from a real project: a scenario harness in an internal package and the
+// writer of a trace format were called only by the tests of other packages.
+// A _test.go file of another package cannot import test code, so the export is
+// the only place such a helper can live: those tests use it.
+func TestUnusedInternalExportRule_OtherPackagesTestsUseExport(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
+		"internal/harness/window.go": `package harness
+
+// RunWindow replays a recorded window for a test.
+func RunWindow(dir string) error { return nil }
+
+// RunUnused is called by nobody.
+func RunUnused(dir string) error { return nil }
+`,
+		"internal/trace/trace.go": `package trace
+
+// Read parses a trace.
+func Read(path string) ([]string, error) { return nil, nil }
+
+// Write stores a trace; production only reads them.
+func Write(path string, lines []string) error { return nil }
+
+// Format is used by the tests of this package only.
+func Format(lines []string) string { return "" }
+`,
+		"internal/trace/trace_test.go": `package trace
+
+import "testing"
+
+func TestFormat(t *testing.T) { _ = Format(nil) }
+`,
+		"internal/agent/agent.go": `package agent
+
+import "example.com/rulestest/internal/trace"
+
+func Load(path string) ([]string, error) { return trace.Read(path) }
+`,
+		"internal/agent/agent_test.go": `package agent
+
+import (
+	"testing"
+
+	h "example.com/rulestest/internal/harness"
+	"example.com/rulestest/internal/trace"
+)
+
+func TestLoad(t *testing.T) {
+	if err := trace.Write("x", nil); err != nil {
+		t.Fatal(err)
+	}
+	_ = h.RunWindow("x")
+}
+`,
+	})
+
+	violations, err := NewUnusedInternalExportRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var symbols []string
+	for _, v := range violations {
+		symbols = append(symbols, v.Context["symbol"].(string))
+	}
+	assert.ElementsMatch(t, []string{"RunUnused", "Format", "Load"}, symbols)
 }
