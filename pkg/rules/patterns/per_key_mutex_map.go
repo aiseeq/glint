@@ -144,7 +144,12 @@ func (r *PerKeyMutexMapRule) structMutexes(ctx *core.FileContext) []*core.Violat
 			violations = append(violations, v)
 		}
 	}
-	sort.Slice(violations, func(i, j int) bool { return violations[i].Line < violations[j].Line })
+	sort.Slice(violations, func(i, j int) bool {
+		if violations[i].Line != violations[j].Line {
+			return violations[i].Line < violations[j].Line
+		}
+		return violations[i].Message < violations[j].Message
+	})
 	return violations
 }
 

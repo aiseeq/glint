@@ -123,12 +123,14 @@ func captureTargets(src *shellSource, funcs map[string]shellFunc) map[string][]c
 // or the whole script for a line outside functions.
 func scopeOf(src *shellSource, funcs map[string]shellFunc, index int) []shellLine {
 	var inner *shellFunc
-	for _, fn := range funcs {
+	innerName := ""
+	for name, fn := range funcs {
 		if fn.first > index || index > fn.last {
 			continue
 		}
-		if inner == nil || fn.first > inner.first {
-			inner = &fn
+		// Two functions defined on one line start together; the name decides.
+		if inner == nil || fn.first > inner.first || fn.first == inner.first && name < innerName {
+			inner, innerName = &fn, name
 		}
 	}
 	if inner == nil {
