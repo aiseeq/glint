@@ -3,6 +3,7 @@ package security
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -107,7 +108,7 @@ func (v *verifier) parseChecked(tokenString, kid string) (*jwtlib.RegisteredClai
 	claims := &jwtlib.RegisteredClaims{}
 	_, err := jwtlib.ParseWithClaims(tokenString, claims, func(token *jwtlib.Token) (any, error) {
 		return v.keys[kid], nil
-	}, jwtlib.WithValidMethods([]string{"ES256"}), jwtlib.WithIssuer(v.issuer), jwtlib.WithAudience("authenticated"))
+	}, jwtlib.WithValidMethods([]string{"ES256"}), jwtlib.WithIssuer(v.issuer), jwtlib.WithAudience("authenticated"), jwtlib.WithExpirationRequired())
 	return claims, err
 }
 
@@ -137,7 +138,7 @@ func (v *verifier) parseThenCompare(tokenString string) (*jwtlib.RegisteredClaim
 	_, err := jwtlib.ParseWithClaims(tokenString, claims, func(token *jwtlib.Token) (any, error) {
 		kid, _ := token.Header["kid"].(string)
 		return v.keys[kid], nil
-	}, jwtlib.WithValidMethods([]string{"ES256"}))
+	}, jwtlib.WithValidMethods([]string{"ES256"}), jwtlib.WithExpirationRequired())
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +173,62 @@ func verifyWithKey(tokenString string, publicKey *ecdsa.PublicKey) (*jwt.Registe
 }
 `
 	assert.Equal(t, []int{14}, ruleLines(t, NewJWTParseValidationRule(), helper))
+}
+
+// The library checks exp only when the token has one: a token of an identity
+// provider without exp verifies forever. jwt.WithExpirationRequired, or a look
+// at the claims' expiry after parsing, closes it.
+func TestJWTParseValidationReportsKeySetWithoutRequiredExpiry(t *testing.T) {
+	code := `package auth
+
+import (
+	"errors"
+
+	"github.com/golang-jwt/jwt/v4"
+)
+
+type verifier struct{ keys map[string]any; issuer string }
+
+func (v *verifier) parse(tokenString, kid string) (*jwt.RegisteredClaims, error) {
+	claims := &jwt.RegisteredClaims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (any, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodECDSA); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return v.keys[kid], nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if claims.Issuer != v.issuer {
+		return nil, errors.New("issuer")
+	}
+	return claims, nil
+}
+`
+	assert.Equal(t, []int{13}, ruleLines(t, NewJWTParseValidationRule(), code))
+
+	checked := strings.Replace(code, "\tif claims.Issuer != v.issuer {", "\tif claims.ExpiresAt == nil {\n\t\treturn nil, errors.New(\"no exp\")\n\t}\n\tif claims.Issuer != v.issuer {", 1)
+	assert.Empty(t, ruleLines(t, NewJWTParseValidationRule(), checked))
+
+	session := `package auth
+
+import (
+	"errors"
+
+	"github.com/golang-jwt/jwt/v4"
+)
+
+func parseSession(tokenString, secret string) (*jwt.Token, error) {
+	return jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return []byte(secret), nil
+	})
+}
+`
+	assert.Empty(t, ruleLines(t, NewJWTParseValidationRule(), session))
 }
 
 func jwtTokenTypePlaces(t *testing.T, files map[string]string) []string {

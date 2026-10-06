@@ -36,7 +36,8 @@ var smallPageFuncName = regexp.MustCompile(`(?i)recent|latest|newest|oldest|top|
 //
 // Limit 0 reads as "no limit" to the caller and as LIMIT 0 to the query: the
 // list comes back empty. A large cap works until the data outgrows it, then
-// rows past it vanish without an error.
+// rows past it vanish without an error. The frontend side is
+// paginated-fetch-first-page-only.
 type PaginatedCallFirstPageOnlyRule struct {
 	*rules.BaseRule
 }

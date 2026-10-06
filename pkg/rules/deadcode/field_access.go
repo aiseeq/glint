@@ -50,6 +50,14 @@ type fieldAccess struct {
 	// decoder (get(path string, out any) { ... Decode(out) }), with the
 	// indexes of those parameters.
 	decoderWrappers map[*types.Func][]int
+	// requestDecoded are the named structs decoded from the body of an
+	// incoming request (json.NewDecoder(r.Body).Decode(&req)): what the
+	// program's own clients send to it. requestWrappers are the decoder
+	// wrappers that decode a request body; requestDecoders the variables
+	// holding a decoder of one.
+	requestDecoded  map[*types.Named]bool
+	requestWrappers map[*types.Func]bool
+	requestDecoders map[types.Object]bool
 }
 
 func newFieldAccess() *fieldAccess {
@@ -65,6 +73,9 @@ func newFieldAccess() *fieldAccess {
 		boxed:        make(map[*types.Named]bool),
 
 		decoderWrappers: make(map[*types.Func][]int),
+		requestDecoded:  make(map[*types.Named]bool),
+		requestWrappers: make(map[*types.Func]bool),
+		requestDecoders: make(map[types.Object]bool),
 	}
 }
 
@@ -130,6 +141,9 @@ func (a *fieldAccess) findDecoderWrappers(file *ast.File, info *types.Info) {
 			continue
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if assign, ok := n.(*ast.AssignStmt); ok {
+				a.recordRequestDecoders(assign, info)
+			}
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
@@ -142,6 +156,9 @@ func (a *fieldAccess) findDecoderWrappers(file *ast.File, info *types.Info) {
 				if id, ok := ast.Unparen(arg).(*ast.Ident); ok {
 					if i, found := untyped[info.Uses[id]]; found && !slices.Contains(a.decoderWrappers[obj], i) {
 						a.decoderWrappers[obj] = append(a.decoderWrappers[obj], i)
+					}
+					if _, found := untyped[info.Uses[id]]; found && a.decodesRequestBody(call, info) {
+						a.requestWrappers[obj] = true
 					}
 				}
 			}
@@ -160,6 +177,7 @@ func (a *fieldAccess) collect(file *ast.File, info *types.Info) {
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.AssignStmt:
+			a.recordRequestDecoders(node, info)
 			for i, lhs := range node.Lhs {
 				a.target(lhs, info, targets)
 				if len(node.Lhs) == len(node.Rhs) && helpers.IsNilValue(node.Rhs[i], info) {
@@ -428,9 +446,17 @@ func (a *fieldAccess) serialization(call *ast.CallExpr, info *types.Info) {
 		for _, i := range params {
 			if i < len(call.Args) {
 				addReachableStructs(a.decoded, info.TypeOf(call.Args[i]))
+				if a.requestWrappers[fn.Origin()] {
+					addReachableStructs(a.requestDecoded, info.TypeOf(call.Args[i]))
+				}
 			}
 		}
 		return
+	}
+	if fn.Name() == "Decode" && a.decodesRequestBody(call, info) {
+		for _, arg := range call.Args {
+			addReachableStructs(a.requestDecoded, info.TypeOf(arg))
+		}
 	}
 	var target map[*types.Named]bool
 	switch {
@@ -450,6 +476,58 @@ func (a *fieldAccess) serialization(call *ast.CallExpr, info *types.Info) {
 			addReachableStructs(target, info.TypeOf(arg))
 		}
 	}
+}
+
+// recordRequestDecoders records the variables an assignment gives a decoder
+// of a request body: dec := json.NewDecoder(r.Body).
+func (a *fieldAccess) recordRequestDecoders(assign *ast.AssignStmt, info *types.Info) {
+	if len(assign.Lhs) != len(assign.Rhs) {
+		return
+	}
+	for i, rhs := range assign.Rhs {
+		if !isRequestBodyDecoder(rhs, info) {
+			continue
+		}
+		if id, ok := assign.Lhs[i].(*ast.Ident); ok {
+			if obj := info.ObjectOf(id); obj != nil {
+				a.requestDecoders[obj] = true
+			}
+		}
+	}
+}
+
+// decodesRequestBody reports a Decode call on a decoder of a request body:
+// json.NewDecoder(r.Body).Decode(...) or dec.Decode(...) of such a decoder.
+func (a *fieldAccess) decodesRequestBody(call *ast.CallExpr, info *types.Info) bool {
+	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Decode" {
+		return false
+	}
+	if id, ok := ast.Unparen(sel.X).(*ast.Ident); ok {
+		return a.requestDecoders[info.ObjectOf(id)]
+	}
+	return isRequestBodyDecoder(sel.X, info)
+}
+
+// isRequestBodyDecoder reports NewDecoder(r.Body) of an *http.Request r.
+func isRequestBodyDecoder(expr ast.Expr, info *types.Info) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return false
+	}
+	if fn := calledFunc(call, info); fn == nil || fn.Name() != "NewDecoder" {
+		return false
+	}
+	body, ok := ast.Unparen(call.Args[0]).(*ast.SelectorExpr)
+	if !ok || body.Sel.Name != "Body" {
+		return false
+	}
+	typ := info.TypeOf(body.X)
+	if ptr, ok := typ.(*types.Pointer); ok {
+		typ = ptr.Elem()
+	}
+	named, ok := types.Unalias(typ).(*types.Named)
+	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "net/http" && named.Obj().Name() == "Request"
 }
 
 // calledFunc resolves the function or method a call invokes.
