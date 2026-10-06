@@ -26,7 +26,7 @@ func init() {
 		"Detects a request body passed whole as one argument (curl --data \"$body\") or as one variable of a remote command line — a large body fails with 'Argument list too long'",
 		core.SeverityMedium, checkPayloadAsArgument))
 	rules.Register(newShellRule("shell-pipe-producer-stderr-discarded",
-		"Detects a service call with 2>/dev/null whose output feeds a pipe — the consumer gets an empty input and the reason of the failure is thrown away",
+		"Detects a service call with 2>/dev/null whose output feeds a pipe, or (without set -e) a file whose status and content nothing checks — the consumer gets an empty input and the reason of the failure is thrown away",
 		core.SeverityMedium, checkPipeProducerStderr))
 	rules.Register(newShellRule("shell-variable-unset-under-nounset",
 		"Detects, under set -u, a variable assigned only in a case arm and read after it while its siblings are initialized first — input without that key stops the script with 'unbound variable'",
@@ -419,6 +419,9 @@ func checkPipeProducerStderr(r *shellRule, src *shellSource) []*core.Violation {
 				"Keep stderr (drop 2>/dev/null), or capture the output, check the status and fail with the error before parsing"))
 		}
 	}
+	if !src.make && !errexitSetting.MatchString(strings.Join(src.ctx.Lines, "\n")) {
+		out = append(out, quietFileProducers(r, src)...)
+	}
 	for name := range piped {
 		for _, l := range src.body(funcs[name]) {
 			for _, seg := range segments(l.text) {
@@ -433,6 +436,58 @@ func checkPipeProducerStderr(r *shellRule, src *shellSource) []*core.Violation {
 		}
 	}
 	return out
+}
+
+var (
+	stdoutFile  = regexp.MustCompile(`(?:^|[^0-9&2])>\s*("[^"]+"|\S+)`)
+	fileChecked = `\[\[?\s+-s\s+"?`
+)
+
+// quietFileProducers reports, in a script without set -e, a service call, a
+// container run or a sibling script with stderr sent to /dev/null and stdout
+// to a file, whose status nothing checks and whose file nothing tests for
+// content: a failure leaves an empty file the next steps read as a result.
+func quietFileProducers(r *shellRule, src *shellSource) []*core.Violation {
+	var out []*core.Violation
+	steps := src.steps()
+	whole := strings.Join(src.ctx.Lines, "\n")
+	for i, s := range steps {
+		text := strings.TrimSpace(s.text)
+		word := commandWord(text)
+		if !remoteCommands[word] && !isSiblingScript(word) && !containerEngine(word, whole) {
+			continue
+		}
+		loc := devNullStderr.FindStringIndex(text)
+		file := stdoutFile.FindStringSubmatch(devNullStderr.ReplaceAllString(text, " "))
+		if loc == nil || insideQuotes(text, loc[0]+1) || file == nil || strings.Contains(text, "|") {
+			continue
+		}
+		if s.sep == "||" || s.sep == "&&" || conditionStart.MatchString(s.text) || (i+1 < len(steps) && strings.Contains(steps[i+1].text, "$?")) {
+			continue
+		}
+		if regexp.MustCompile(fileChecked + regexp.QuoteMeta(strings.Trim(file[1], `"`))).MatchString(whole) {
+			continue
+		}
+		out = appendReport(out, src.report(r, s.line,
+			word+" writes "+file[1]+" with its stderr thrown away and its status unchecked — a failure leaves an empty file the next steps read as a result, and the reason is lost",
+			"Keep stderr, fail on the status (cmd > \"$f\" || exit 1) and on an empty result ([ -s \"$f\" ] || exit 1)"))
+	}
+	return out
+}
+
+var shellName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// containerEngine reports docker or podman, named or held by a variable the
+// script sets to one of them (engine=podman; $engine run ...).
+func containerEngine(word, script string) bool {
+	if word == "docker" || word == "podman" {
+		return true
+	}
+	name := strings.Trim(strings.TrimPrefix(word, "$"), "{}")
+	if name == word || !shellName.MatchString(name) {
+		return false
+	}
+	return regexp.MustCompile(`\b` + name + `=["']?(?:docker|podman)\b`).MatchString(script)
 }
 
 // quietServiceCall reports a call of a service or of make with stderr sent

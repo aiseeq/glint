@@ -669,3 +669,124 @@ func Backup(path string) error {
 }
 `)
 }
+
+// Repro from a real project: a program loaded its result log when a run
+// started and wrote the loaded list plus its own record back when it ended;
+// two runs at once kept only the later writer's record.
+func TestSnapshotAppendedAndRewritten(t *testing.T) {
+	assertWanted(t, NewSnapshotAppendedAndRewrittenRule(), `package app
+
+import (
+	"encoding/json"
+	"os"
+	"syscall"
+)
+
+type Record struct{ Build, Result string }
+
+type Picker struct {
+	path string
+	past []Record
+}
+
+func (s *Picker) load() ([]Record, error) {
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		return nil, err
+	}
+	var past []Record
+	if err := json.Unmarshal(raw, &past); err != nil {
+		return nil, err
+	}
+	return past, nil
+}
+
+func (s *Picker) save(past []Record) error {
+	raw, err := json.Marshal(past)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.path, raw, 0o644)
+}
+
+func (s *Picker) Begin() error {
+	past, err := s.load()
+	if err != nil {
+		return err
+	}
+	s.past = past
+	return nil
+}
+
+func (s *Picker) End(rec Record) error {
+	return s.save(append(s.past, rec)) // want
+}
+
+type ResultLog struct {
+	Results []Record
+}
+
+func ReadLog(path string) (*ResultLog, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var h ResultLog
+	if err := json.Unmarshal(raw, &h); err != nil {
+		return nil, err
+	}
+	return &h, nil
+}
+
+func (h *ResultLog) Save(path string) error {
+	raw, err := json.Marshal(h)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path+".tmp", raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(path+".tmp", path)
+}
+
+func AddResult(past *ResultLog, path string, rec Record) error {
+	past.Results = append(past.Results, rec)
+	return past.Save(path) // want
+}
+
+// AppendResult re-reads the file under a lock: the record of another process
+// written since the start is kept.
+func AppendResult(path string, rec Record) error {
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	h, err := ReadLog(path)
+	if err != nil {
+		return err
+	}
+	h.Results = append(h.Results, rec)
+	return h.Save(path)
+}
+
+func appendLine(path string, line []byte) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(line); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func (s *Picker) Log(line []byte) error {
+	return appendLine(s.path+".log", append(line, '\n'))
+}
+`)
+}

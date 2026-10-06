@@ -53,6 +53,8 @@ stamp=$(date +%H%M%S)-$$
 other="$logs/other-$stamp.log"
 day="$logs/day-$(date +%Y%m%d-%H%M%S).log"
 echo "started at $(date +%H:%M:%S)"
+dst="$replays/${mark}_$(bot_name "$ver")_vs_cpu_$(date +%H%M%S).rep" # want
+log="$logs/cpu-$ver$([ "$build" = random ] || echo "-$build")-$(date +%H%M%S).log" # want
 `)
 }
 
@@ -78,6 +80,43 @@ pids=$(pgrep -f session.sh)
 docker exec "$c" sh -c 'for p in $(pgrep -f "^C:.*game.exe"); do echo $p; done'
 
 ssh "$host" "pgrep -x sway"
+`)
+	// The script spans lines, or is a heredoc captured and passed to bash -c:
+	// the wrapper's command line still carries the pattern.
+	shellWanted(t, "shell-pgrep-matches-own-wrapper", "multiline.sh", `#!/bin/bash
+run_in() {
+    docker exec -d "$1" bash -c '
+        cwd="$1"; shift
+        P=$(pgrep -f session.sh | head -1) # want
+        export $(tr "\0" "\n" < /proc/$P/environ | grep ^DISPLAY=)
+        cd "$cwd" && exec "$@"' _ "$2" "$3"
+}
+inner=$(cat <<INNER
+set -e
+P=\$(pgrep -f session.sh | head -1) # want
+exec ./server -port $port
+INNER
+)
+docker exec -d "$c" bash -c "$inner"
+notes=$(cat <<EOF
+pgrep -f session.sh finds the wrapper when run through bash -c
+EOF
+)
+echo "$notes"
+docker exec "$c" bash -s <<EOF
+P=\$(pgrep -f session.sh | head -1)
+EOF
+probe_in() {
+    docker exec "$1" bash -c '
+        python3 - <<"PY"
+print(open("/tmp/frame.ppm","rb").read()[:2])
+PY' 2>/dev/null || echo "0"
+}
+shot_in() {
+    docker exec "$1" bash -c '
+        P=$(pgrep -f session.sh | head -1) # want
+        grim /tmp/shot.png'
+}
 `)
 }
 
@@ -108,6 +147,27 @@ exec ./client.sh
 ./b.sh > b.log 2>&1 &
 wait
 [ -s a.log ] || exit 1
+`)
+	shellWanted(t, "shell-background-job-without-trap", "fanout.sh", `#!/bin/bash
+(ssh "$a" "echo ok" &>/dev/null && echo OK > "$ta" || echo FAIL > "$ta") &
+pid_a=$!
+scp config.yaml "$host":/srv/ &
+local pid_b=$!
+wait $pid_a $pid_b
+grep -q OK "$ta" || exit 1
+`)
+	// Waiting for the one job at the end of the normal path does not stop it on
+	// Ctrl-C: the containers it brought up keep the ports of the worker.
+	shellWanted(t, "shell-background-job-without-trap", "match.sh", `#!/bin/bash
+docker compose -f "$compose" up --abort-on-container-exit > "$log" 2>&1 & # want
+up=$!
+while kill -0 "$up" 2> /dev/null; do
+    sleep 5
+    [ $(($(date +%s) - started)) -ge "$max" ] && { docker compose -f "$compose" kill; break; }
+done
+wait "$up" 2> /dev/null || true
+docker compose -f "$compose" down --remove-orphans > /dev/null 2>&1 || true
+grep -q '"type"' results.json || exit 1
 `)
 	shellWanted(t, "shell-background-job-without-trap", "detached.sh", `#!/bin/bash
 nohup ./warm.sh > /dev/null 2>&1 &
@@ -300,5 +360,38 @@ for i in $(seq 1 20); do c=$(box_id); [ -n "$c" ] && break; sleep 2; done
 sleep 8 # want
 for i in $(seq 1 15); do gone && break; sleep 2; done
 sleep 4
+`)
+	// Clicks on a timer: act, wait a fixed time, look once — a miss is a silent
+	// wait, and a slow screen reads as a refusal.
+	shellWanted(t, "shell-fixed-sleep-after-start", "clicks.sh", `#!/bin/bash
+probe() {
+    docker exec "$1" bash -c '
+        python3 - <<"PY"
+for y in range(28, 46, 2):
+    print(y)
+PY' 2>/dev/null || echo "0"
+}
+open_menu() {
+    if [ -z "$(game_pid "$c")" ]; then
+        click_at "$c" 'Launcher' 160 1078
+        for i in $(seq 1 20); do [ -n "$(game_pid "$c")" ] && break; sleep 2; done
+        [ -n "$(game_pid "$c")" ] || { echo "game did not start (click Play)"; return 1; }
+        sleep 22 # want
+    fi
+    for try in 1 2 3 4 5; do
+        click_at "$c" 'Game' 810 740
+        sleep 8 # want
+        menu_up "$c" && menu_shown "$c" && return 0
+    done
+    for i in 1 2 3; do
+        click_at "$c" 'Login' 958 714; sleep 6 # want
+        windows "$c" | grep -qx 'Launcher' && break
+    done
+    for try in $(seq 1 12); do sleep 8; menu_shown "$c" && break; done
+    for i in $(seq 1 50); do
+        ready "$a" && break
+        sleep 3
+    done
+}
 `)
 }

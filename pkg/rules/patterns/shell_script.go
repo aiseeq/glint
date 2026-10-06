@@ -329,7 +329,10 @@ func groupChange(text string, i, depth int) int {
 	case '(':
 		return 1
 	case ')':
-		return -1
+		// An unopened ")" ends a case pattern, not a group.
+		if depth > 0 {
+			return -1
+		}
 	case '{':
 		// A brace ending its line - f() { or f() { # comment - leaves the
 		// body's commands at the level of the line, closed by a } in the

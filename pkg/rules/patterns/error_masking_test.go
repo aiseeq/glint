@@ -37,6 +37,18 @@ func TestErrorMaskingRule_GoPatterns(t *testing.T) {
 			pattern:     "fake_data_return",
 		},
 		{
+			name:        "test value",
+			code:        `return "test_user"`,
+			expectMatch: true,
+			pattern:     "fake_data_return",
+		},
+		{
+			// A word that only starts like one: the testdata directory.
+			name:        "testdata directory",
+			code:        `return "testdata/" + name`,
+			expectMatch: false,
+		},
+		{
 			name:        "proper error handling",
 			code:        `if err != nil { return fmt.Errorf("failed: %w", err) }`,
 			expectMatch: false,

@@ -147,3 +147,45 @@ func (g *gitignoreIndex) split(absPath string) ([]string, error) {
 	}
 	return strings.Split(rel, string(filepath.Separator)), nil
 }
+
+// IgnoredFiles обходит каталог dir и возвращает пути (относительно dir)
+// файлов и каталогов, которые git оставляет вне репозитория по .gitignore от
+// корня репозитория вниз. Исключённый каталог называется целиком, без
+// содержимого.
+func IgnoredFiles(dir string) ([]string, error) {
+	idx, err := newGitignoreIndex(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path != dir {
+			ignored, err := idx.ignored(path, d.IsDir())
+			if err != nil {
+				return err
+			}
+			if ignored {
+				rel, err := filepath.Rel(dir, path)
+				if err != nil {
+					return fmt.Errorf("relate %q to %q: %w", path, dir, err)
+				}
+				out = append(out, filepath.ToSlash(rel))
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		if d.IsDir() {
+			return idx.addDir(path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk %s: %w", dir, err)
+	}
+	return out, nil
+}
