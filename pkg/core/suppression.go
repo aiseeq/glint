@@ -57,8 +57,8 @@ var ruleNameShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 // directive that names no rule. Prose that mentions a marker after other words
 // is no marker.
 func ParseSuppressionComment(comment string) (names []string, bare bool) {
-	directive := strings.HasPrefix(comment, "//nolint")
-	text := strings.TrimLeft(strings.TrimLeft(comment, "/*"), " \t")
+	directive := strings.HasPrefix(comment, "//nolint") || strings.HasPrefix(comment, "#nolint")
+	text := strings.TrimLeft(strings.TrimLeft(comment, "/*#"), " \t")
 	switch {
 	case strings.HasPrefix(text, "nolint:"):
 		list, _ := nolintNames(text)
@@ -68,7 +68,7 @@ func ParseSuppressionComment(comment string) (names []string, bare bool) {
 			}
 		}
 	case directive:
-		rest := strings.TrimPrefix(comment, "//nolint")
+		rest := strings.TrimPrefix(strings.TrimPrefix(comment, "//nolint"), "#nolint")
 		bare = rest == "" || rest[0] == ' ' || rest[0] == '\t'
 	default:
 		if match := safeMarker.FindStringSubmatchIndex(text); match != nil && match[0] == 0 {

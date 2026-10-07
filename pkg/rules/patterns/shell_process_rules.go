@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -300,7 +301,7 @@ func capturedHeredocs(lines []string) []heredocCapture {
 			continue
 		}
 		m := capturedScript.FindStringSubmatch(line)
-		start := heredocOpen.FindStringSubmatch(line)
+		start := helpers.ShellHeredocOpen.FindStringSubmatch(line)
 		if m != nil && start != nil {
 			open, terminator = &heredocCapture{name: m[1], first: i + 1}, start[1]
 		}

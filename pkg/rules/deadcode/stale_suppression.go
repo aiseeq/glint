@@ -205,8 +205,9 @@ type suppressionMarker struct {
 
 // suppressionMarkers returns the markers of the file's comments: of the
 // syntax tree for Go, of the lines outside literals for TypeScript and
-// JavaScript. Other files are not read: a marker quoted in documentation is
-// an example.
+// JavaScript, of the '#' comments outside quotes for the files that comment
+// with '#' (core.FileContext.HashComments). Other files are not read: a
+// marker quoted in documentation is an example.
 func suppressionMarkers(ctx *core.FileContext) []suppressionMarker {
 	var markers []suppressionMarker
 	add := func(line int, comment string) {
@@ -235,6 +236,12 @@ func suppressionMarkers(ctx *core.FileContext) []suppressionMarker {
 			// The comment masked away in the text view is a comment, not
 			// a "//" inside a literal.
 			if comment != "" && i < len(text) && start < len(text[i]) && text[i][start] == ' ' {
+				add(i+1, comment)
+			}
+		}
+	case ctx.HashComments():
+		for i, line := range ctx.Lines {
+			if comment := ctx.CommentOf(line); comment != "" {
 				add(i+1, comment)
 			}
 		}

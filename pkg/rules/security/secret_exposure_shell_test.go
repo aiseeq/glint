@@ -78,6 +78,25 @@ printf '%s\n' "${#creds}"
 `
 	marked := strings.Replace(code, "MARKER", "# secret-exposure: safe - the output is captured into creds, not printed", 1)
 	assert.Empty(t, shellSecretLines(t, "creds.sh", marked))
-	unmarked := strings.Replace(code, "MARKER", "# the output is captured into creds", 1)
-	assert.Equal(t, []int{6}, shellSecretLines(t, "creds.sh", unmarked))
+	uncaptured := strings.Replace(strings.Replace(marked, `creds="$(ssh`, "ssh", 1), "REMOTE\n)\"\n", "REMOTE\n", 1)
+	uncaptured = strings.Replace(uncaptured, "# secret-exposure: safe - the output is captured into creds, not printed", "# printed on the terminal", 1)
+	assert.Equal(t, []int{6}, shellSecretLines(t, "creds.sh", uncaptured))
+}
+
+// What a heredoc script prints is captured when $( ) takes the whole command
+// that reads the heredoc: the value lands in the variable, not on the
+// terminal.
+func TestSecretExposureHeredocCapturedBySubstitution(t *testing.T) {
+	code := `#!/usr/bin/env bash
+set -euo pipefail
+creds="$(ssh host 'bash -s' <<'REMOTE'
+set -euo pipefail
+printf 'TOKEN=%s\n' "$BOT_TOKEN"
+REMOTE
+)"
+ssh host 'bash -s' <<'REMOTE'
+printf 'TOKEN=%s\n' "$BOT_TOKEN"
+REMOTE
+`
+	assert.Equal(t, []int{9}, shellSecretLines(t, "creds.sh", code))
 }

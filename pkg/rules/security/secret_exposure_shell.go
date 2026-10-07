@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 var (
@@ -26,9 +27,10 @@ var (
 // the CI log and the recorded session.
 func (r *SecretExposureRule) shellSecretPrints(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
+	captured := capturedHeredocLines(ctx.Lines)
 	for i := 0; i < len(ctx.Lines); i++ {
 		text := strings.TrimSpace(ctx.Lines[i])
-		if strings.HasPrefix(text, "#") {
+		if strings.HasPrefix(text, "#") || captured[i] {
 			continue
 		}
 		// A command continued with \ goes on: its pipe may be on a later line.
@@ -60,6 +62,22 @@ func (r *SecretExposureRule) shellSecretPrints(ctx *core.FileContext) []*core.Vi
 		}
 	}
 	return violations
+}
+
+// capturedHeredocLines returns the 0-based lines of the heredoc bodies whose
+// command a $( ) captures whole (creds="$(ssh host bash <<'EOF'): what the
+// script prints there lands in the variable, not on the terminal.
+func capturedHeredocLines(lines []string) map[int]bool {
+	captured := map[int]bool{}
+	for _, h := range helpers.ShellHeredocs(lines) {
+		if !insideCommandSubstitution(h.Before) {
+			continue
+		}
+		for i := h.Open + 1; i < h.End; i++ {
+			captured[i] = true
+		}
+	}
+	return captured
 }
 
 // insideCommandSubstitution reports a line prefix that leaves a $( ... ) or
