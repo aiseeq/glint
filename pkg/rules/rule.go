@@ -202,6 +202,18 @@ type ProjectFilesRule interface {
 	UseProjectFiles(files []*core.FileContext)
 }
 
+// AccumulatesAcrossFiles reports whether the rule's analysis of one file
+// feeds its findings on others: a stateful rule that is not handed the
+// project's files up front gathers them file by file. Running it on a file a
+// file exception keeps it off would change what it reports elsewhere.
+func AccumulatesAcrossFiles(r Rule) bool {
+	if _, ok := r.(StatefulRule); !ok {
+		return false
+	}
+	_, projectFiles := r.(ProjectFilesRule)
+	return !projectFiles
+}
+
 // FileLocal reports whether a rule's findings on a file depend only on that
 // file — its path and content — and the configuration, so that they can be
 // reused while the file is unchanged. Project rules see the whole module,

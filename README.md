@@ -213,7 +213,7 @@ db := NewRepo(nil)
 
 Always add the reason after the marker. Policy rules may opt out of suppression entirely (implement `rules.SuppressionExempt`; `silent-config-error` does).
 
-A marker or a finding exception that silenced nothing in the run is reported by `stale-suppression`: it would hide the next real finding on that spot unseen. The rule judges only rules the run executed; a bare `//nolint` and a name that is no glint rule are reported unless the project configures golangci-lint (`.golangci.yml` in the root or above), whose linters such names may mean. Exceptions are judged when the run covers the configuration's whole directory.
+A marker or a finding exception that silenced nothing in the run is reported by `stale-suppression`: it would hide the next real finding on that spot unseen. The rule judges only rules the run executed; a bare `//nolint` and a name that is no glint rule are reported unless the project configures golangci-lint (`.golangci.yml` in the root or above), whose linters such names may mean. `//nolint:glint` names the tool, not a rule, and is reported always: glint honors only `nolint:<rule>`, and golangci-lint takes it for an unknown linter. Exceptions are judged when the run covers the configuration's whole directory. A file-only exception (`file`/`files` and nothing else) is judged by running the rule on the files it names and keeping the findings out of the report; rules whose analysis of one file feeds their findings on others (cross-file duplication, for instance) are not run there, so their file exceptions are not judged. An exception whose files do not exist is `dead-config-exception`'s.
 
 ### Known Limitations
 

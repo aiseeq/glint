@@ -200,3 +200,106 @@ func TestOnlyTheRulesOwnMarkerSilencesIgnoredError(t *testing.T) {
 		})
 	}
 }
+
+const fileExceptionConfig = `version: 1
+categories:
+  patterns:
+    rules:
+      error-string:
+        exceptions:
+          - files: "loud*.go"
+            reason: the finding it was written for
+          - files: "**/quiet.go"
+            reason: the file has no such finding
+          - file: missing.go
+            reason: dead-config-exception reports a missing file
+      ignored-error:
+        exceptions:
+          - files: "drop.go"
+            reason: a project rule's finding in the file
+          - files: "quiet.go"
+            reason: the file drops no error
+  duplication:
+    rules:
+      cross-file-duplicate:
+        exceptions:
+          - files: "quiet.go"
+            reason: a rule whose files feed each other is not run on excepted ones
+`
+
+var fileExceptionModule = map[string]string{
+	"go.mod":        "module example.com/check\n\ngo 1.24\n",
+	".golangci.yml": "version: \"2\"\n",
+	".glint.yaml":   fileExceptionConfig,
+	"loud.go": `package check
+
+import "errors"
+
+func Loud() error { return errors.New("Failed loudly") }
+`,
+	"quiet.go": `package check
+
+import "errors"
+
+func Quiet() error { return errors.New("quiet failure") }
+
+//nolint:glint
+func Tool() {}
+
+//nolint:somelinter
+func Other() {}
+`,
+	"drop.go": `package check
+
+func produce() error { return nil }
+
+func Drop() { _ = produce() }
+`,
+}
+
+// A file-only exception is judged like any other: the rule runs on the files
+// it names, and an exception none of whose files has a finding of the rule is
+// stale. Missing files stay dead-config-exception's; rules whose analysis of
+// one file feeds their findings on others are not run on excepted files, so
+// their exceptions are not judged. A marker naming glint itself names no rule
+// — golangci-lint knows no such linter either — so it is stale even where
+// golangci-lint is configured.
+func TestStaleSuppressionJudgesFileExceptionsAndTheToolName(t *testing.T) {
+	root := writeFileExceptionModule(t)
+	findings, stale := analyzeWithRules(t, root, nil, fileExceptionRules...)
+	assert.Empty(t, foundAt(findings))
+	assert.ElementsMatch(t, []string{
+		".glint.yaml:9",  // error-string over quiet.go
+		".glint.yaml:17", // ignored-error over quiet.go
+		"quiet.go:7",     // the marker naming the tool
+	}, foundAt(stale))
+}
+
+var fileExceptionRules = []string{"error-string", "ignored-error", "cross-file-duplicate", "stale-suppression"}
+
+func writeFileExceptionModule(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	for name, content := range fileExceptionModule {
+		require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte(content), 0o644))
+	}
+	return root
+}
+
+// The findings in excepted files reach the verdict through the result cache
+// too: a second run that reuses them judges the file exceptions the same.
+func TestStaleSuppressionSeesFileExceptionsThroughTheResultCache(t *testing.T) {
+	root := writeFileExceptionModule(t)
+	dir := t.TempDir()
+	first, err := openResultCache(dir, root, "build", "stamp")
+	require.NoError(t, err)
+	_, want := analyzeWithRules(t, root, first, fileExceptionRules...)
+	require.NoError(t, first.save())
+
+	second, err := openResultCache(dir, root, "build", "stamp")
+	require.NoError(t, err)
+	_, got := analyzeWithRules(t, root, second, fileExceptionRules...)
+	assert.ElementsMatch(t, foundAt(want), foundAt(got))
+	assert.Len(t, foundAt(got), 3)
+	assert.Positive(t, second.reused)
+}
