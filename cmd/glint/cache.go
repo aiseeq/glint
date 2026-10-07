@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -36,6 +37,7 @@ const cacheFormat = "glint-results-3"
 // tolerance flag. A different stamp discards the whole cache.
 type resultCache struct {
 	path  string
+	build string
 	stamp string
 	// previous is what the last run stored, by path relative to the root.
 	previous map[string]cacheEntry
@@ -99,19 +101,36 @@ func newRootCache(root string, cfg *core.Config, goTreesFromLoader bool) (*resul
 	if err != nil {
 		return nil, err
 	}
-	return openResultCache(dir, root, stamp)
+	build, err := executableHash()
+	if err != nil {
+		return nil, err
+	}
+	return openResultCache(dir, root, buildTag(build), stamp)
 }
 
-// openResultCache reads the cache of root from dir. A cache written under
-// another stamp is discarded, a missing one starts empty.
-func openResultCache(dir, root, stamp string) (*resultCache, error) {
+// buildTag is the part of a glint build's hash that names its caches.
+func buildTag(build string) string {
+	const tagLength = 16
+	return build[:min(len(build), tagLength)]
+}
+
+// openResultCache reads the cache of root from dir, named after the root and
+// the build: a cache of another build can never match its stamp. A cache
+// written under another stamp is discarded, a missing one starts empty. A
+// cache that is read is marked used (its mtime), which the size limit of
+// pruneResultCaches goes by.
+func openResultCache(dir, root, build, stamp string) (*resultCache, error) {
 	name := sha256.Sum256([]byte(root))
 	cache := &resultCache{
-		path:     filepath.Join(dir, hex.EncodeToString(name[:])+".gob"),
+		path:     filepath.Join(dir, hex.EncodeToString(name[:])+"-"+build+".gob"),
+		build:    build,
 		stamp:    stamp,
 		previous: make(map[string]cacheEntry),
 		current:  make(map[string]cacheEntry),
 	}
+	// The file is replaced by rename and removed whole, so a read sees one
+	// complete version or none: a cache another run pruned meanwhile is a
+	// missing one.
 	data, err := os.ReadFile(cache.path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return cache, nil
@@ -126,6 +145,10 @@ func openResultCache(dir, root, stamp string) (*resultCache, error) {
 	if stored.Stamp == stamp {
 		cache.previous = stored.Entries
 		cache.previousProject = stored.Project
+		now := time.Now()
+		if err := os.Chtimes(cache.path, now, now); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("mark result cache used: %w", err)
+		}
 	}
 	return cache, nil
 }
@@ -216,7 +239,7 @@ func (c *resultCache) save() error {
 	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
 		return fmt.Errorf("create result cache directory: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(c.path), ".results-*")
+	tmp, err := os.CreateTemp(filepath.Dir(c.path), tempCachePrefix+"*")
 	if err != nil {
 		return fmt.Errorf("create result cache: %w", err)
 	}
@@ -228,31 +251,94 @@ func (c *resultCache) save() error {
 	if err != nil {
 		return errors.Join(fmt.Errorf("write result cache: %w", err), os.Remove(tmp.Name()))
 	}
-	return pruneResultCaches(filepath.Dir(c.path), time.Now(), resultCacheMaxAge)
+	if !pruned.CompareAndSwap(false, true) {
+		return nil
+	}
+	return pruneResultCaches(filepath.Dir(c.path), time.Now(), c.build, defaultCacheLimits)
 }
 
-// resultCacheMaxAge is how long the cache of a root nobody checks any more
-// stays on disk.
-const resultCacheMaxAge = 30 * 24 * time.Hour
+// pruned is set once a run has pruned the cache directory: once per run is
+// enough, however many roots it saves.
+var pruned atomic.Bool
 
-// pruneResultCaches removes the caches of roots not checked for maxAge.
-func pruneResultCaches(dir string, now time.Time, maxAge time.Duration) error {
+// cacheLimits bound the cache directory.
+type cacheLimits struct {
+	// maxAge is how long a cache nobody reads or writes stays.
+	maxAge time.Duration
+	// grace protects files touched this recently from every rule but maxAge:
+	// another run may be writing or reading them right now.
+	grace time.Duration
+	// maxBytes caps the caches of this build; the least recently used go.
+	maxBytes int64
+}
+
+var defaultCacheLimits = cacheLimits{maxAge: 7 * 24 * time.Hour, grace: 10 * time.Minute, maxBytes: 1 << 30}
+
+// tempCachePrefix starts the temporary file a save writes before renaming it.
+const tempCachePrefix = ".results-"
+
+// pruneResultCaches bounds the cache directory: see pruneCacheEntries.
+func pruneResultCaches(dir string, now time.Time, build string, limits cacheLimits) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("list result caches: %w", err)
 	}
+	return pruneCacheEntries(dir, entries, now, build, limits)
+}
+
+// pruneCacheEntries removes the caches no run of this build can use — those
+// of another build or of the layout without a build in the name — and the
+// temporary files of crashed saves, once they are older than the grace
+// period; any cache unused for maxAge; then the least recently used caches of
+// this build until the rest fit maxBytes. A file another run removed first is
+// no error.
+func pruneCacheEntries(dir string, entries []fs.DirEntry, now time.Time, build string, limits cacheLimits) error {
+	type cacheFile struct {
+		path string
+		info fs.FileInfo
+	}
+	var own []cacheFile
 	var errs []error
+	remove := func(path string) {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".gob" {
+		name := entry.Name()
+		cache := filepath.Ext(name) == ".gob"
+		if entry.IsDir() || (!cache && !strings.HasPrefix(name, tempCachePrefix)) {
 			continue
 		}
 		info, err := entry.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		if now.Sub(info.ModTime()) > maxAge {
-			errs = append(errs, os.Remove(filepath.Join(dir, entry.Name())))
+		path := filepath.Join(dir, name)
+		age := now.Sub(info.ModTime())
+		switch {
+		case age > limits.maxAge:
+			remove(path)
+		case !cache || !strings.HasSuffix(name, "-"+build+".gob"):
+			if age > limits.grace {
+				remove(path)
+			}
+		default:
+			own = append(own, cacheFile{path: path, info: info})
+		}
+	}
+	// Newest first: what is left once the limit is reached is the least
+	// recently used.
+	slices.SortFunc(own, func(a, b cacheFile) int { return b.info.ModTime().Compare(a.info.ModTime()) })
+	var total int64
+	for _, file := range own {
+		total += file.info.Size()
+		if total > limits.maxBytes && now.Sub(file.info.ModTime()) > limits.grace {
+			remove(file.path)
 		}
 	}
 	return errors.Join(errs...)

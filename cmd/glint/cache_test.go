@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,7 +43,7 @@ func (r *countingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 func runCached(t *testing.T, dir, stamp string, contexts []*core.FileContext, list []rules.Rule) (core.ViolationList, *resultCache) {
 	t.Helper()
-	cache, err := openResultCache(dir, "/project", stamp)
+	cache, err := openResultCache(dir, "/project", "build", stamp)
 	require.NoError(t, err)
 	violations, err := analyzeFiles(contexts, list, core.DefaultConfig(), nil, cache)
 	require.NoError(t, err)
@@ -122,24 +123,46 @@ func TestResultCacheRoundTripsEveryRule(t *testing.T) {
 
 func TestOpenResultCacheReportsCorruptFile(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := openResultCache(dir, "/project", "stamp")
+	cache, err := openResultCache(dir, "/project", "build", "stamp")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(cache.path, []byte("not a cache"), 0o600))
 
-	_, err = openResultCache(dir, "/project", "stamp")
+	_, err = openResultCache(dir, "/project", "build", "stamp")
 	require.Error(t, err)
 }
 
-func TestPruneResultCachesRemovesOnlyStaleCaches(t *testing.T) {
+// The cache directory stays bounded: caches of another glint build (their
+// stamp can never match this one) and of an old file layout go once no run can
+// still be writing them, caches unused for maxAge go, then the least recently
+// used ones until the total fits maxBytes. Leftover temporary files of a
+// crashed save go too; files of other kinds stay.
+func TestPruneResultCachesBoundsTheDirectory(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
-	for name, age := range map[string]time.Duration{"fresh.gob": time.Hour, "stale.gob": 40 * 24 * time.Hour, "other.txt": 40 * 24 * time.Hour} {
-		path := filepath.Join(dir, name)
-		require.NoError(t, os.WriteFile(path, nil, 0o600))
-		require.NoError(t, os.Chtimes(path, now.Add(-age), now.Add(-age)))
+	limits := cacheLimits{maxAge: 7 * 24 * time.Hour, grace: 10 * time.Minute, maxBytes: 250}
+	files := []struct {
+		name string
+		age  time.Duration
+		size int
+	}{
+		{"aa-build1.gob", time.Hour, 100},           // own build, recent: kept
+		{"bb-build1.gob", 2 * time.Hour, 100},       // own build: kept within the size limit
+		{"cc-build1.gob", 3 * time.Hour, 100},       // own build, oldest of three: evicted by size
+		{"dd-build1.gob", 8 * 24 * time.Hour, 10},   // own build, unused for 8 days: removed
+		{"ee-build0.gob", time.Hour, 10},            // another build: removed
+		{"ff-build0.gob", time.Minute, 10},          // another build writing right now: kept
+		{"0123456789abcdef.gob", 2 * time.Hour, 10}, // old layout without a build: removed
+		{".results-123", time.Hour, 10},             // a crashed save: removed
+		{".results-456", time.Minute, 10},           // a save in progress: kept
+		{"notes.txt", 40 * 24 * time.Hour, 10},      // not a cache: kept
+	}
+	for _, f := range files {
+		path := filepath.Join(dir, f.name)
+		require.NoError(t, os.WriteFile(path, make([]byte, f.size), 0o600))
+		require.NoError(t, os.Chtimes(path, now.Add(-f.age), now.Add(-f.age)))
 	}
 
-	require.NoError(t, pruneResultCaches(dir, now, resultCacheMaxAge))
+	require.NoError(t, pruneResultCaches(dir, now, "build1", limits))
 
 	left, err := os.ReadDir(dir)
 	require.NoError(t, err)
@@ -147,7 +170,40 @@ func TestPruneResultCachesRemovesOnlyStaleCaches(t *testing.T) {
 	for _, entry := range left {
 		names = append(names, entry.Name())
 	}
-	assert.ElementsMatch(t, []string{"fresh.gob", "other.txt"}, names)
+	assert.ElementsMatch(t, []string{"aa-build1.gob", "bb-build1.gob", "ff-build0.gob", ".results-456", "notes.txt"}, names)
+}
+
+// A cache another process removes between the listing and the removal is no
+// error: two runs may prune the same directory at once.
+func TestPruneResultCachesToleratesConcurrentRemoval(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aa-build0.gob")
+	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
+	old := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(path, old, old))
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(path))
+
+	require.NoError(t, pruneCacheEntries(dir, entries, time.Now(), "build1", defaultCacheLimits))
+}
+
+// A cache is named after its root and the glint build that wrote it, and
+// reading it marks it used, so the size limit evicts what nobody reads.
+func TestResultCacheNamesItsBuildAndMarksUse(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := openResultCache(dir, "/project", "build1", "stamp")
+	require.NoError(t, err)
+	assert.True(t, strings.HasSuffix(cache.path, "-build1.gob"), cache.path)
+	require.NoError(t, cache.save())
+	old := time.Now().Add(-5 * 24 * time.Hour)
+	require.NoError(t, os.Chtimes(cache.path, old, old))
+
+	_, err = openResultCache(dir, "/project", "build1", "stamp")
+	require.NoError(t, err)
+	info, err := os.Stat(cache.path)
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now(), info.ModTime(), time.Minute)
 }
 
 // analyzeCachedRoot runs one root through the check pipeline with the cache,
