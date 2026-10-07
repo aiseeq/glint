@@ -345,6 +345,32 @@ func TestFileContextIsSuppressed(t *testing.T) {
 	}
 }
 
+// Shell scripts, make files, Dockerfiles and YAML comment with '#': a marker
+// there suppresses like one after "//", and a '#' inside quotes or within a
+// word (${#var}) starts no comment.
+func TestFileContextIsSuppressedInHashCommentedFiles(t *testing.T) {
+	tests := []struct {
+		name, path, line string
+		expected         bool
+	}{
+		{"safe marker in a script", "deploy.sh", `printf '%s' "$TOKEN" # my-rule: safe - captured`, true},
+		{"nolint in a script", "deploy.sh", `printf '%s' "$TOKEN" # nolint:my-rule`, true},
+		{"marker line of its own", "deploy.sh", `# my-rule: safe - captured`, true},
+		{"make file", "Makefile", "\t@echo \"$$TOKEN\" # my-rule: safe", true},
+		{"yaml", "ci.yml", `  run: echo "$TOKEN" # nolint:my-rule`, true},
+		{"quoted hash", "deploy.sh", `echo "# my-rule: safe"`, false},
+		{"length expansion", "deploy.sh", `echo "${#my-rule: safe}"`, false},
+		{"another rule", "deploy.sh", `echo x # other-rule: safe`, false},
+		{"slashes are no shell comment", "deploy.sh", `curl https://example.com//my-rule: safe`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := &FileContext{Path: tt.path, RelPath: tt.path, Lines: []string{tt.line}}
+			assert.Equal(t, tt.expected, ctx.IsSuppressed(1, "my-rule"))
+		})
+	}
+}
+
 func TestFileContextIsGenerated(t *testing.T) {
 	tests := []struct {
 		name     string

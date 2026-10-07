@@ -106,3 +106,18 @@ func TestMaskJSCommentsKeepsLiterals(t *testing.T) {
 	require.Equal(t, "await page.waitForLoadState('networkidle')"+strings.Repeat(" ", 14), got[3])
 	require.Equal(t, "const u = `${base}/api`            + x", got[4])
 }
+
+func TestLooksLikeRegexpShape(t *testing.T) {
+	for value, want := range map[string]bool{
+		`[A-Za-z0-9_./+=-]{20,}`:    true,
+		`[^[:space:]]+`:             true,
+		`\S+`:                       true,
+		`.*`:                        true,
+		`abc{8,64}`:                 true,
+		`s3cr3tP4ssw0rdValue123`:    false,
+		`p@ss[w]ord!`:               false,
+		`Tr0ub4dor&3-correct.horse`: false,
+	} {
+		require.Equal(t, want, LooksLikeRegexpShape(value), value)
+	}
+}

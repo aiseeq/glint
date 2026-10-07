@@ -124,12 +124,24 @@ func lineOf(starts []int, offset int) int {
 // quotedSpan is a quoted string of a text: the offsets of its two quotes.
 type quotedSpan struct{ open, close int }
 
-// quotedSpans returns the outermost quoted strings of a text.
+// quotedSpans returns the outermost quoted strings of a text, and the quoted
+// strings of the commands a double-quoted string substitutes ("$(ssh "$h"
+// 'cmd')"): a quote inside $( ... ) starts a word of that command, not the
+// end of the outer string. The spans come in the order they open.
 func quotedSpans(text string) []quotedSpan {
 	var out []quotedSpan
 	var q quoteScanner
 	open := -1
 	for i := 0; i < len(text); {
+		if q.quote == '"' && strings.HasPrefix(text[i:], "$(") {
+			if end := substitutionEnd(text, i+2); end >= 0 {
+				for _, inner := range quotedSpans(text[i+2 : end]) {
+					out = append(out, quotedSpan{open: inner.open + i + 2, close: inner.close + i + 2})
+				}
+				i = end + 1
+				continue
+			}
+		}
 		before := q.quote
 		n := q.step(text, i)
 		if n == 0 {
@@ -144,7 +156,40 @@ func quotedSpans(text string) []quotedSpan {
 		}
 		i += n
 	}
+	slices.SortStableFunc(out, func(a, b quotedSpan) int { return a.open - b.open })
 	return out
+}
+
+// substitutionEnd returns the offset of the parenthesis that closes a $( ... )
+// whose text starts at start, -1 when nothing closes it.
+func substitutionEnd(text string, start int) int {
+	depth := 1
+	var q quoteScanner
+	for j := start; j < len(text); {
+		if q.quote == '"' && strings.HasPrefix(text[j:], "$(") {
+			end := substitutionEnd(text, j+2)
+			if end < 0 {
+				return -1
+			}
+			j = end + 1
+			continue
+		}
+		if n := q.step(text, j); n > 0 {
+			j += n
+			continue
+		}
+		switch text[j] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return j
+			}
+		}
+		j++
+	}
+	return -1
 }
 
 var (

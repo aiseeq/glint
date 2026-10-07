@@ -607,3 +607,14 @@ plain_sudo "systemctl restart app"
 `,
 	}))
 }
+
+// A secret scanner lists the shape of a password as a regular expression:
+// a class, a counted repetition - no password is written there.
+func TestShellDBPasswordLiteralSkipsRegexpPatterns(t *testing.T) {
+	assert.Empty(t, shellFindings(t, "shell-db-password-literal", map[string]string{
+		"scripts/scan.sh": "#!/usr/bin/env bash\nset -euo pipefail\npatterns=(\n    'PGPASS" + "WORD=[A-Za-z0-9_./+=-]{20,}'\n    'host=\\S+ password=[^[:space:]]{12,}'\n)\nprintf '%s\\n' \"${patterns[@]}\"\n",
+	}))
+	assert.Equal(t, []string{"scripts/load.sh:2"}, shellFindings(t, "shell-db-password-literal", map[string]string{
+		"scripts/load.sh": "#!/usr/bin/env bash\nPGPASS" + "WORD=s3cr3tP4ssw0rdValue123 psql -h 127.0.0.1\n",
+	}))
+}

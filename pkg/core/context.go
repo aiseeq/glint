@@ -294,8 +294,9 @@ func (ctx *FileContext) IsGenerated() bool {
 //	//nolint:<rule-name>
 //	// <rule-name>: safe — <reason>
 //
-// The marker must appear inside a comment ("//" or "/*"); string literals
-// containing the same text do not suppress. Rule names match exactly:
+// The marker must appear inside a comment of the file's language: "//" or
+// "/*", or "#" in a shell script, a make file, a Dockerfile, YAML or an env
+// template; string literals containing the same text do not suppress. Rule names match exactly:
 // "nolint:my-rule" does not suppress rule "my-rule-extended" and vice versa.
 //
 // The marker that answers is recorded for the rule (TakeSuppressionHits), so
@@ -305,7 +306,7 @@ func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
 		if checkLine < 1 || checkLine > len(ctx.Lines) {
 			continue
 		}
-		if commentHasSuppressionMarker(ctx.Lines[checkLine-1], ruleName) {
+		if commentHasSuppressionMarker(ctx.commentOf(ctx.Lines[checkLine-1]), ruleName) {
 			ctx.suppression.record(ruleName, checkLine)
 			return true
 		}
@@ -318,25 +319,57 @@ func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
 // that tie a marker to one line — a declaration's — use it instead of
 // IsSuppressed.
 func (ctx *FileContext) LineSuppresses(line int, ruleName string) bool {
-	if line < 1 || line > len(ctx.Lines) || !commentHasSuppressionMarker(ctx.Lines[line-1], ruleName) {
+	if line < 1 || line > len(ctx.Lines) || !commentHasSuppressionMarker(ctx.commentOf(ctx.Lines[line-1]), ruleName) {
 		return false
 	}
 	ctx.suppression.record(ruleName, line)
 	return true
 }
 
-// LineSuppresses reports whether the line's comment part carries a
-// suppression marker for the given rule (nolint:<rule> / <rule>: safe).
-// Single canonical implementation — rules must delegate here instead of
-// matching suppression strings themselves.
-func LineSuppresses(line, ruleName string) bool {
-	return commentHasSuppressionMarker(line, ruleName)
+// commentOf returns the comment part of a line of the file, in the comment
+// syntax of its language; "" when the line has none.
+func (ctx *FileContext) commentOf(line string) string {
+	if ctx.hashComments() {
+		return hashCommentPart(line)
+	}
+	return commentPart(line)
 }
 
-// commentHasSuppressionMarker checks the comment part of a line for
-// suppression markers of the given rule.
-func commentHasSuppressionMarker(line, ruleName string) bool {
-	comment := commentPart(line)
+// hashComments reports a file whose comments start with '#'.
+func (ctx *FileContext) hashComments() bool {
+	lower := strings.ToLower(ctx.Path)
+	return ctx.IsShellFile() || ctx.IsMakefile() || ctx.IsDockerfile() || ctx.IsEnvTemplate() ||
+		strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml")
+}
+
+// hashCommentPart returns the substring of a line starting at its '#'
+// comment, or "" when it has none. A '#' inside quotes, or within a word
+// (${#var}, a#b), starts no comment.
+func hashCommentPart(line string) string {
+	inQuote := byte(0)
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case inQuote != 0:
+			if c == '\\' && inQuote == '"' {
+				i++
+			} else if c == inQuote {
+				inQuote = 0
+			}
+		case c == '\\':
+			i++
+		case c == '"' || c == '\'':
+			inQuote = c
+		case c == '#' && (i == 0 || strings.IndexByte(" \t;&|()", line[i-1]) >= 0):
+			return line[i:]
+		}
+	}
+	return ""
+}
+
+// commentHasSuppressionMarker checks a comment for suppression markers of
+// the given rule.
+func commentHasSuppressionMarker(comment, ruleName string) bool {
 	if comment == "" {
 		return false
 	}

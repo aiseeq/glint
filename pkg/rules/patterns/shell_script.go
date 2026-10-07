@@ -216,16 +216,7 @@ func unwrapBashC(l shellLine) shellLine {
 // suppressed reports a "# nolint:<rule>" or "# <rule>: safe" comment on the
 // line or the one above it.
 func (src *shellSource) suppressed(line int, rule string) bool {
-	for l := line - 1; l <= line; l++ {
-		if l < 1 || l > len(src.ctx.Lines) {
-			continue
-		}
-		text := src.ctx.Lines[l-1]
-		if i := strings.Index(text, "#"); i >= 0 && core.LineSuppresses("//"+text[i+1:], rule) {
-			return true
-		}
-	}
-	return false
+	return src.ctx.IsSuppressed(line, rule)
 }
 
 // quoteScanner walks a command line and tells which bytes stand outside
