@@ -3,6 +3,7 @@ package patterns
 import (
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -25,8 +26,11 @@ func init() {
 //
 // Not flagged: behavior descriptions ("entries are removed after TTL", "if
 // the record was removed"), godoc deprecation markers (owned by the
-// deprecated-comment rule), policy quotes, and Go doc code blocks (//<tab>),
-// which quote an example instead of annotating the code around them.
+// deprecated-comment rule), policy quotes, Go doc code blocks (//<tab>),
+// which quote an example instead of annotating the code around them, and a
+// status word in capitals that a string literal of the file spells too (a
+// note on rows over the query filtering that status): it names the value, not
+// code that went away.
 type TombstoneCommentRule struct {
 	*rules.BaseRule
 	tombstone    *regexp.Regexp
@@ -71,6 +75,7 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	}
 
 	var violations []*core.Violation
+	var literalWords map[string]bool
 
 	for i, line := range ctx.Lines {
 		comment := commentTextOfLine(line)
@@ -94,6 +99,14 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		}
 		if r.behaviorTail.MatchString(comment[loc[1]:]) {
 			continue // "removed from X", "deleted -> *", "удалено или ..." — data-flow/state docs
+		}
+		if word := strings.TrimFunc(comment[loc[0]:loc[1]], isNotLetter); isCapitalWord(word) {
+			if literalWords == nil {
+				literalWords = stringLiteralWords(ctx)
+			}
+			if literalWords[word] {
+				continue // the status value a literal spells, not a tombstone
+			}
 		}
 		v := r.CreateViolation(ctx.RelPath, i+1,
 			"Tombstone comment about deleted code — git history already remembers; delete the note")
@@ -120,4 +133,40 @@ func commentTextOfLine(line string) string {
 		return comment[1:]
 	}
 	return ""
+}
+
+// isCapitalWord reports a word written in capitals only (DELETED, УДАЛЕНО).
+func isCapitalWord(word string) bool {
+	for _, c := range word {
+		if !unicode.IsUpper(c) {
+			return false
+		}
+	}
+	return word != ""
+}
+
+func isNotLetter(c rune) bool { return !unicode.IsLetter(c) }
+
+// stringLiteralWords returns the words spelled inside the file's string
+// literals, multi-line raw strings included: the characters the literal mask
+// blanks and the comment mask keeps.
+func stringLiteralWords(ctx *core.FileContext) map[string]bool {
+	text := helpers.FileJSText(ctx)
+	code := helpers.FileJSCode(ctx)
+	words := map[string]bool{}
+	var literal strings.Builder
+	for i := range text {
+		literal.Reset()
+		for j := 0; j < len(text[i]) && j < len(code[i]); j++ {
+			if text[i][j] != code[i][j] {
+				literal.WriteByte(text[i][j])
+			} else {
+				literal.WriteByte(' ')
+			}
+		}
+		for _, word := range strings.FieldsFunc(literal.String(), isNotLetter) {
+			words[word] = true
+		}
+	}
+	return words
 }

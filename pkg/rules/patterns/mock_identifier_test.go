@@ -132,6 +132,36 @@ func (a *Admin) createMockRegistryQuote() {}`,
 			expectedCount: 2,
 		},
 		{
+			// Go does not share _test.go files between packages: helpers several
+			// packages' tests use live in a test-support package of their own.
+			name: "exported helper in a testutil package NOT flagged",
+			path: "/src/internal/testutil/auth.go",
+			code: `package testutil
+func FakeJWT(subject string) string { return subject }`,
+			expectedCount: 0,
+		},
+		{
+			name: "test-support packages by prefix and suffix NOT flagged",
+			path: "/src/internal/testdb/db.go",
+			code: `package testdb
+type FakeStore struct{}`,
+			expectedCount: 0,
+		},
+		{
+			name: "helpers package with the test suffix NOT flagged",
+			path: "/src/internal/paytest/server.go",
+			code: `package paytest
+func NewFakeServer() {}`,
+			expectedCount: 0,
+		},
+		{
+			name: "package merely holding the word test still checked",
+			path: "/src/backend/attestation/entry.go",
+			code: `package attestation
+func FakeEntry() {}`,
+			expectedCount: 1,
+		},
+		{
 			name: "clean code NOT flagged",
 			path: "/src/backend/quote.go",
 			code: `package quote

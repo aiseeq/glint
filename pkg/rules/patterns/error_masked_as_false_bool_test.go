@@ -402,6 +402,69 @@ func (r *Repo) FindOwner(id string) (string, bool, error) {
 }`,
 			expectedCount: 1,
 		},
+		{
+			// Итератор в духе sql.Rows: Next кладёт ошибку в поле получателя,
+			// а Err() её отдаёт — вызывающий узнаёт о сбое после цикла.
+			name: "iterator stores the error for its Err method NOT flagged",
+			path: "/src/backend/sheet.go",
+			code: `package sheet
+import (
+	"database/sql"
+	"fmt"
+)
+type reader struct {
+	rows  *sql.Rows
+	cells []string
+	err   error
+}
+func (r *reader) Next() bool {
+	if !r.rows.Next() {
+		return false
+	}
+	cells, err := r.rows.Columns()
+	if err != nil {
+		r.err = fmt.Errorf("read: %w", err)
+		return false
+	}
+	r.cells = cells
+	return true
+}
+func (r *reader) Err() error { return r.err }`,
+			expectedCount: 0,
+		},
+		{
+			// Ошибка в поле, но Err() отдаёт другое поле (или его нет): сбой потерян.
+			name: "error stored in a field no Err method returns still flagged",
+			path: "/src/backend/sheet.go",
+			code: `package sheet
+import "database/sql"
+type reader struct {
+	rows    *sql.Rows
+	cells   []string
+	lastErr error
+	err     error
+}
+func (r *reader) Next() bool {
+	cells, err := r.rows.Columns()
+	if err != nil {
+		r.lastErr = err
+		return false
+	}
+	r.cells = cells
+	return true
+}
+func (r *reader) Err() error { return r.err }
+type other struct{ err error }
+func (o *other) Next(rows *sql.Rows) bool {
+	_, err := rows.Columns()
+	if err != nil {
+		o.err = err
+		return false
+	}
+	return true
+}`,
+			expectedCount: 2,
+		},
 	}
 
 	for _, tt := range tests {

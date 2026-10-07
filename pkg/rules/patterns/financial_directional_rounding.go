@@ -35,6 +35,11 @@ var directionalRoundingMethods = map[string]string{
 // (splitting an amount into parts that must not exceed a ceiling, a fee always
 // resolved in the customer's favour); they belong in the config as an exception
 // with a reason, so the choice is visible rather than buried in a call.
+//
+// Not reported: a rounding whose remainder the function takes back — the
+// source minus the rounded parts (total.Sub(base.Mul(n))) kept in a variable
+// the code goes on to use. That is the largest-remainder split: the parts are
+// floored and the dropped cents handed out again, so they add up exactly.
 type FinancialDirectionalRoundingRule struct {
 	*rules.BaseRule
 }
@@ -95,6 +100,7 @@ func (r *FinancialDirectionalRoundingRule) analyze(ctx *core.FileContext, info *
 				return declaredDecimalValue(expr, function, inferred, aliases, decimalFields)
 			}
 		}
+		var parents map[ast.Node]ast.Node
 		ast.Inspect(function.Body, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
 			if !ok {
@@ -115,12 +121,94 @@ func (r *FinancialDirectionalRoundingRule) analyze(ctx *core.FileContext, info *
 			if !isDecimal(selector.X) || isMoneyRatio(selector.X) {
 				return true
 			}
+			if parents == nil {
+				parents = helpers.ParentMap(function.Body)
+			}
+			if remainderTakenBack(function.Body, roundedResultName(call, parents), receiver) {
+				return true
+			}
 			line := ctx.LineFor(call)
 			violations = append(violations, r.violation(ctx, line, selector.Sel.Name, effect))
 			return true
 		})
 	}
 	return violations
+}
+
+// roundedResultName returns the variable the call's result is assigned to
+// (base := total.Div(n).RoundDown(2)), or "".
+func roundedResultName(call *ast.CallExpr, parents map[ast.Node]ast.Node) string {
+	switch parent := parents[call].(type) {
+	case *ast.AssignStmt:
+		for i, rhs := range parent.Rhs {
+			if rhs == call && len(parent.Lhs) == len(parent.Rhs) {
+				return usedName(parent.Lhs[i])
+			}
+		}
+	case *ast.ValueSpec:
+		for i, value := range parent.Values {
+			if value == call && len(parent.Names) == len(parent.Values) {
+				return usedName(parent.Names[i])
+			}
+		}
+	}
+	return ""
+}
+
+// usedName returns the name of an identifier other than the blank one, or "".
+func usedName(expr ast.Expr) string {
+	ident, ok := expr.(*ast.Ident)
+	if !ok || ident.Name == "_" {
+		return ""
+	}
+	return ident.Name
+}
+
+// remainderTakenBack reports whether the function subtracts the rounded value
+// from the source it was rounded from (rem := total.Sub(base.Mul(n))) into a
+// variable it reads again: the remainder the rounding dropped is distributed,
+// not lost.
+func remainderTakenBack(body *ast.BlockStmt, rounded, roundedReceiver string) bool {
+	if rounded == "" {
+		return false
+	}
+	source, _, _ := strings.Cut(roundedReceiver, ".")
+	found := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		assign, ok := node.(*ast.AssignStmt)
+		if found || !ok || len(assign.Lhs) != len(assign.Rhs) {
+			return !found
+		}
+		for i, rhs := range assign.Rhs {
+			remainder := usedName(assign.Lhs[i])
+			call, ok := rhs.(*ast.CallExpr)
+			if remainder == "" || !ok || len(call.Args) != 1 {
+				continue
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "Sub" || !mentionsIdent(call.Args[0], rounded) {
+				continue
+			}
+			subSource, _, _ := strings.Cut(receiverExpression(selector.X), ".")
+			if subSource == source && identReadCount(body, remainder) > 1 {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// identReadCount counts the identifiers named name in the body.
+func identReadCount(body *ast.BlockStmt, name string) int {
+	count := 0
+	ast.Inspect(body, func(node ast.Node) bool {
+		if ident, ok := node.(*ast.Ident); ok && ident.Name == name {
+			count++
+		}
+		return true
+	})
+	return count
 }
 
 // decimalResultMethods are decimal.Decimal methods returning a decimal.Decimal.

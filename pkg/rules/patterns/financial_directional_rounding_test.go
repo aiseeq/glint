@@ -154,6 +154,59 @@ func render(x decimal.Decimal) string {
 			want: 0,
 		},
 		{
+			// Largest remainder: the parts are floored to the cent and the cents
+			// the floor dropped are handed out again, so the parts add up to the
+			// total exactly.
+			name: "floor with the remainder distributed back",
+			path: "split.go",
+			code: `package payout
+import "github.com/shopspring/decimal"
+func split(total decimal.Decimal, n int) []decimal.Decimal {
+	count := decimal.NewFromInt(int64(n))
+	base := total.Div(count).RoundDown(2)
+	rem := total.Sub(base.Mul(count))
+	cent := decimal.New(1, -2)
+	parts := make([]decimal.Decimal, n)
+	for i := range parts {
+		parts[i] = base
+		if rem.GreaterThan(decimal.Zero) {
+			parts[i] = parts[i].Add(cent)
+			rem = rem.Sub(cent)
+		}
+	}
+	return parts
+}`,
+			want: 0,
+		},
+		{
+			// The remainder is computed but never used: the dropped cents are lost.
+			name: "floor with a remainder nobody uses",
+			path: "split.go",
+			code: `package payout
+import "github.com/shopspring/decimal"
+func split(total decimal.Decimal, n int) decimal.Decimal {
+	count := decimal.NewFromInt(int64(n))
+	base := total.Div(count).RoundDown(2)
+	_ = total.Sub(base.Mul(count))
+	return base
+}`,
+			want: 1,
+		},
+		{
+			// A difference of other values beside the floor is no remainder of it.
+			name: "floor beside an unrelated subtraction",
+			path: "split.go",
+			code: `package payout
+import "github.com/shopspring/decimal"
+func split(total, fee decimal.Decimal, n int) (decimal.Decimal, decimal.Decimal) {
+	count := decimal.NewFromInt(int64(n))
+	base := total.Div(count).RoundDown(2)
+	net := total.Sub(fee)
+	return base, net
+}`,
+			want: 1,
+		},
+		{
 			name: "file without the decimal package",
 			path: "report.go",
 			code: `package report

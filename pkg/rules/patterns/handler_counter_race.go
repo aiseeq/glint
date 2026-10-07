@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -79,15 +80,11 @@ func (r *HandlerCounterRaceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 	})
 }
 
-// testDoubleFile reports a file of a test double: a package named …test,
-// …testutil or …testing (the httptest convention), or a file with fake or
-// mock in its name. A double serves the test that starts it, not traffic.
+// testDoubleFile reports a file of a test double: a test-support package
+// (testutil, httptest-style …test), or a file with fake or mock in its name. A double serves the test that starts it, not traffic.
 func testDoubleFile(file *core.FileContext) bool {
-	pkg := file.GoAST.Name.Name
-	for _, suffix := range []string{"test", "testutil", "testing"} {
-		if strings.HasSuffix(pkg, suffix) {
-			return true
-		}
+	if helpers.IsTestSupportPackage(file.GoAST.Name.Name) {
+		return true
 	}
 	base := strings.ToLower(filepath.Base(file.RelPath))
 	return strings.Contains(base, "fake") || strings.Contains(base, "mock")

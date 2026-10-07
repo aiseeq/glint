@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -32,6 +33,9 @@ func init() {
 // Skips:
 //   - Test files (generated files such as MockGen output are dropped by the
 //     core for every rule)
+//   - Test-support packages (testutil, testdb, httptest-style …test): Go does
+//     not share _test.go files between packages, so shared test doubles live
+//     in such a package
 //   - //nolint:mock-identifier opt-outs on the declaration line
 type MockIdentifierRule struct { // mock-identifier: safe — named after the marker this rule detects
 	*rules.BaseRule
@@ -65,7 +69,7 @@ func (r *MockIdentifierRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 		return nil
 	}
 
-	if !ctx.HasGoAST() {
+	if !ctx.HasGoAST() || helpers.IsTestSupportPackage(ctx.GoAST.Name.Name) {
 		return nil
 	}
 
