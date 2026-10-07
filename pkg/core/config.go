@@ -699,20 +699,26 @@ func (c *Config) GetMinSeverity() (Severity, error) {
 // IsFileExcepted checks if a file should be excepted from a specific rule based on YAML exceptions.
 // Supports ** glob patterns by converting to substring match on path segments.
 func (c *Config) IsFileExcepted(category, rule, filePath string) bool {
+	_, ok := c.FileException(category, rule, filePath)
+	return ok
+}
+
+// FileException returns the first file-only exception — a file or a files
+// glob and nothing else — that keeps the rule off the file.
+func (c *Config) FileException(category, rule, filePath string) (Exception, bool) {
 	filePath = c.configPath(filePath)
-	exceptions := c.GetRuleExceptions(category, rule)
-	for _, exc := range exceptions {
-		if !exc.isFileOnly() {
+	for _, exc := range c.GetRuleExceptions(category, rule) {
+		if !exc.IsFileOnly() {
 			continue
 		}
 		if exc.Files != "" && matchGlobPattern(exc.Files, filePath) {
-			return true
+			return exc, true
 		}
 		if exc.File != "" && (exc.File == filePath || exc.File == filepath.Base(filePath)) {
-			return true
+			return exc, true
 		}
 	}
-	return false
+	return Exception{}, false
 }
 
 // IsViolationExcepted checks whether a specific violation matches a rule exception.
@@ -751,26 +757,24 @@ type RuleException struct {
 	Exception      Exception
 }
 
-// FindingExceptions returns the exceptions that silence findings one by one
-// — those with a line, a pattern or a function. A file-only exception keeps
-// the rule off the file altogether, so whether it silences anything is not
-// known.
-func (c *Config) FindingExceptions() []RuleException {
+// Exceptions returns every rule exception of the configuration, by category
+// and rule.
+func (c *Config) Exceptions() []RuleException {
 	var list []RuleException
 	for _, category := range slices.Sorted(maps.Keys(c.Categories)) {
 		cat := c.Categories[category]
 		for _, rule := range slices.Sorted(maps.Keys(cat.Rules)) {
 			for _, exc := range cat.Rules[rule].Exceptions {
-				if !exc.isFileOnly() {
-					list = append(list, RuleException{Category: category, Rule: rule, Exception: exc})
-				}
+				list = append(list, RuleException{Category: category, Rule: rule, Exception: exc})
 			}
 		}
 	}
 	return list
 }
 
-func (e Exception) isFileOnly() bool {
+// IsFileOnly reports whether the exception names files and nothing else, so
+// that it keeps the rule off those files altogether.
+func (e Exception) IsFileOnly() bool {
 	return (e.File != "" || e.Files != "") && e.Line == 0 && e.Pattern == "" && e.Function == ""
 }
 

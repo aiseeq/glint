@@ -21,7 +21,9 @@ func init() {
 //	x := load() //nolint:ignored-error  — the rule reports nothing on this line or the next
 //	//nolint                            — names no rule; glint honors only nolint:<rule>
 //	//nolint:errcheck                   — not a glint rule, and the project has no golangci-lint
+//	//nolint:glint                      — the tool, not a rule: golangci-lint has no such linter either
 //	exceptions: [{file: a.go, function: gone}]  — matched no finding of the run
+//	exceptions: [{files: "**/*_test.go"}]       — the rule finds nothing in those files
 //
 // A marker outlives the finding it was written for: the code moved, the rule
 // was narrowed. It then sits there until a real finding of that rule appears
@@ -31,9 +33,12 @@ func init() {
 //
 // Judged only against rules the run executed: a marker of a rule the
 // configuration or --rule left out, or on a file a file exception keeps the
-// rule off, is not. Names that are not glint rules are taken for
-// golangci-lint's when the project configures golangci-lint. Exceptions are
-// judged only when the run covers the whole directory of their configuration.
+// rule off, is not. Names that are not glint rules, but for glint itself, are
+// taken for golangci-lint's when the project configures golangci-lint.
+// Exceptions are judged only when the run covers the whole directory of their
+// configuration; a file-only exception by running the rule on the files it
+// names, except for a rule whose analysis of one file feeds its findings on
+// others (rules.AccumulatesAcrossFiles), which is not run there.
 type StaleSuppressionRule struct {
 	*rules.BaseRule
 }
@@ -114,6 +119,11 @@ func (r *StaleSuppressionRule) Check(run StaleSuppressionRun) ([]*core.Violation
 // may name), or an executed rule that reported nothing the marker covers.
 func (r *StaleSuppressionRule) judgeName(ctx *core.FileContext, line int, name string, run StaleSuppressionRun, used map[string]bool, golangci bool) *core.Violation {
 	rule, known := rules.Get(name)
+	if name == toolName {
+		return r.markerViolation(ctx, line,
+			fmt.Sprintf("Suppression names %q, the tool rather than a rule — glint honors only nolint:<rule>, and golangci-lint knows no such linter, so it silences nothing", name),
+			"Name the glint rules it is meant for (nolint:<rule>) or delete it")
+	}
 	if !known {
 		if golangci {
 			return nil
@@ -134,9 +144,17 @@ func (r *StaleSuppressionRule) judgeName(ctx *core.FileContext, line int, name s
 		"Delete the marker; if the finding moved, put the marker where the rule reports it now")
 }
 
+// toolName is the name of the tool, which a nolint list may name in the
+// belief that it silences every glint rule.
+const toolName = "glint"
+
 // staleExceptions reports the exceptions of executed rules that matched no
 // finding, leaving to dead-config-exception those whose files do not exist.
 func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map[string]bool) ([]*core.Violation, error) {
+	files, err := run.Config.ConfigFiles()
+	if err != nil {
+		return nil, fmt.Errorf("list the files of the configuration's directory: %w", err)
+	}
 	usedExceptions := map[string]bool{}
 	for key := range used {
 		if _, exception, ok := strings.Cut(key, "\x00"+core.SuppressionExceptionPrefix); ok {
@@ -144,12 +162,17 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 		}
 	}
 	var violations []*core.Violation
-	for _, ruleException := range run.Config.FindingExceptions() {
+	for _, ruleException := range run.Config.Exceptions() {
 		exc := ruleException.Exception
-		if _, ran := run.Executed[ruleException.Rule]; !ran || usedExceptions[exc.Key()] {
+		rule, ran := run.Executed[ruleException.Rule]
+		// Its own findings are filtered after this check, by the run.
+		if !ran || usedExceptions[exc.Key()] || ruleException.Rule == r.Name() {
 			continue
 		}
-		if (exc.File != "" || exc.Files != "") && !slices.ContainsFunc(run.Contexts, func(ctx *core.FileContext) bool { return exc.NamesFile(ctx.RelPath) }) {
+		if exc.IsFileOnly() && rules.AccumulatesAcrossFiles(rule) {
+			continue // not run on the files it names
+		}
+		if (exc.File != "" || exc.Files != "") && !slices.ContainsFunc(files, exc.NamesFile) {
 			continue // the files do not exist: dead-config-exception's finding
 		}
 		source, err := filepath.Rel(filepath.Dir(run.Config.ConfigPath()), exc.Source())
