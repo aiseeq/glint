@@ -82,3 +82,66 @@ func Wait(ch chan string) (Rate, error) {
 `
 	assert.Equal(t, []int{11, 23, 35}, emptyStructReturnLines(t, "p/p.go", source))
 }
+
+// A chain of matchers answers "not a candidate" with the empty match. When the
+// file's functions return that empty value as a regular answer, a matcher that
+// says it only under a nil guard ("the operation has no loan") gives the same
+// answer, not a hidden failure. A nil guard over a type the file never answers
+// empty with, and an error check, stay reported.
+func TestEmptyStructReturn_EmptyAnswerOfSiblingFunctions(t *testing.T) {
+	const source = `package link
+
+import "errors"
+
+type match struct{ id string }
+
+type activity struct{ id string }
+
+type outcome struct{ id string }
+
+func activityOf(s string) (*activity, error) {
+	if s == "" {
+		return nil, errors.New("empty")
+	}
+	return nil, nil
+}
+
+func byPair(pairs []string) (match, error) {
+	if len(pairs) == 0 {
+		return match{}, nil
+	}
+	return match{id: pairs[0]}, nil
+}
+
+func byLoan(s string) (match, error) {
+	a, err := activityOf(s)
+	if err != nil {
+		return match{}, err
+	}
+	if a == nil {
+		return match{}, nil
+	}
+	return match{id: a.id}, nil
+}
+
+func byLoanStrict(s string) (match, error) {
+	a, err := activityOf(s)
+	if err != nil {
+		return match{}, nil
+	}
+	return match{id: a.id}, nil
+}
+
+func settle(s string) (outcome, error) {
+	a, err := activityOf(s)
+	if err != nil {
+		return outcome{}, err
+	}
+	if a == nil {
+		return outcome{}, nil
+	}
+	return outcome{id: a.id}, nil
+}
+`
+	assert.Equal(t, []int{39, 50}, emptyStructReturnLines(t, "link/match.go", source))
+}

@@ -16,12 +16,9 @@ func init() {
 // selectStar ловит `SELECT *` и `SELECT alias.*` — начало выборки всех колонок.
 var selectStar = regexp.MustCompile(`(?is)\bselect\s+(?:[a-z_][a-z0-9_]*\.)?\*`)
 
-// existsOpen — звёздочка сразу за `EXISTS (`: подзапрос только проверяет наличие строки,
-// его колонки никуда не сканируются.
-var existsOpen = regexp.MustCompile(`(?is)\bexists\s*\(\s*$`)
-
-// tableName — имя таблицы сразу после FROM. Скобка означает производную таблицу.
-var tableName = regexp.MustCompile(`(?is)^\s*([a-z_][a-z0-9_]*)`)
+// tableName — имя таблицы сразу после FROM. Скобка означает производную таблицу,
+// скобка после имени — функцию, возвращающую строки (unnest, generate_series).
+var tableName = regexp.MustCompile(`(?is)^\s*([a-z_][a-z0-9_.]*)(\s*\()?`)
 
 // SelectStarStructScanRule detects `SELECT *` against a real table in Go SQL literals.
 //
@@ -30,9 +27,11 @@ var tableName = regexp.MustCompile(`(?is)^\s*([a-z_][a-z0-9_]*)`)
 // миграция, добавляющая колонку, ломает выборку на рантайме с "missing destination name",
 // хотя Go-код не менялся и сборка прошла. Явный список колонок снимает эту связь.
 //
-// Производные таблицы (`SELECT * FROM (...) t`) правилом не считаются нарушением: там
-// звёздочка берёт колонки подзапроса, а их набор задан тут же в коде. Не считается и
-// `EXISTS (SELECT * ...)`: подзапрос проверяет только наличие строки.
+// Производные таблицы (`SELECT * FROM (...) t`) и функции, возвращающие строки
+// (`SELECT * FROM unnest(...) AS t(a, b)`), правилом не считаются нарушением: там
+// звёздочка берёт колонки, набор которых задан тут же в коде. Не считается и звёздочка
+// внутри скобок — подзапроса, CTE, `EXISTS (SELECT * ...)`: её колонки потребляет
+// внешний запрос, а сканируется только его список; внешняя звёздочка проверяется сама.
 type SelectStarStructScanRule struct {
 	*rules.BaseRule
 }
@@ -53,12 +52,31 @@ func NewSelectStarStructScanRule() *SelectStarStructScanRule {
 // Пустая строка — звёздочки нет либо она относится к производной таблице.
 func starredTable(sql string) string {
 	for _, loc := range selectStar.FindAllStringIndex(sql, -1) {
-		if existsOpen.MatchString(sql[:loc[0]]) {
-			continue
+		if sqlParenDepth(sql[:loc[0]]) > 0 {
+			continue // колонки подзапроса или CTE читает внешний запрос, а не Scan
 		}
 		return tableAfterStar(sql[loc[1]:])
 	}
 	return ""
+}
+
+// sqlParenDepth returns how many parentheses are open at the end of the text, not
+// counting those inside quoted literals.
+func sqlParenDepth(text string) int {
+	depth := 0
+	quoted := false
+	for i := 0; i < len(text); i++ {
+		switch {
+		case text[i] == '\'':
+			quoted = !quoted
+		case quoted:
+		case text[i] == '(':
+			depth++
+		case text[i] == ')' && depth > 0:
+			depth--
+		}
+	}
+	return depth
 }
 
 // tableAfterStar возвращает таблицу первого FROM после звёздочки.
@@ -76,8 +94,8 @@ func tableAfterStar(rest string) string {
 			continue
 		}
 		m := tableName.FindStringSubmatch(rest[i+4:])
-		if m == nil {
-			return "" // производная таблица или подставляемый фрагмент
+		if m == nil || m[2] != "" {
+			return "" // производная таблица, функция или подставляемый фрагмент
 		}
 		return m[1]
 	}

@@ -92,24 +92,9 @@ func (r *NonAtomicStatusHistoryRule) Configure(settings map[string]any) error {
 
 // configuredStatusHistoryNames reads a list-of-names setting.
 func configuredStatusHistoryNames(settings map[string]any, key string, defaults []string) (map[string]bool, error) {
-	raw, ok := settings[key]
-	if !ok {
-		return statusHistoryNameSet(defaults), nil
-	}
-	list, ok := raw.([]any)
-	if !ok {
-		return nil, fmt.Errorf("configure non-atomic-status-history: %s must be a list, got %T", key, raw)
-	}
-	names := make(map[string]bool, len(list))
-	for i, item := range list {
-		name, ok := item.(string)
-		if !ok {
-			return nil, fmt.Errorf("configure non-atomic-status-history: %s item %d must be a string, got %T", key, i, item)
-		}
-		if strings.TrimSpace(name) == "" {
-			return nil, fmt.Errorf("configure non-atomic-status-history: %s item %d is empty", key, i)
-		}
-		names[name] = true
+	names, present, err := rules.NameSetSetting(settings, "non-atomic-status-history", key)
+	if err != nil || !present {
+		return statusHistoryNameSet(defaults), err
 	}
 	return names, nil
 }
@@ -224,7 +209,7 @@ func (r *NonAtomicStatusHistoryRule) statusHistoryScopes(function *ast.FuncDecl)
 	transactional := make(map[*ast.FuncLit]bool)
 	ast.Inspect(function.Body, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
-		if !ok || !r.transactions.isTransactionRunner(call) {
+		if !ok || !r.transactions.isTransactionRunner(call, nil, nil) {
 			return true
 		}
 		for _, argument := range call.Args {

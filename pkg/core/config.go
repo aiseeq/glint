@@ -170,7 +170,7 @@ func (c *Config) DeadExceptions(files []string, functions func(path string) ([]s
 				if exc.File == "" && exc.Files == "" {
 					continue
 				}
-				matched := slices.DeleteFunc(slices.Clone(files), func(path string) bool { return !exc.namesFile(path) })
+				matched := slices.DeleteFunc(slices.Clone(files), func(path string) bool { return !exc.NamesFile(path) })
 				noFunction := false
 				if len(matched) > 0 && exc.Function != "" {
 					declared, err := declaresFunction(matched, exc.Function, functions)
@@ -204,8 +204,8 @@ func declaresFunction(files []string, name string, functions func(path string) (
 	return false, nil
 }
 
-// namesFile reports whether the exception's file or files names the path.
-func (e Exception) namesFile(path string) bool {
+// NamesFile reports whether the exception's file or files names the path.
+func (e Exception) NamesFile(path string) bool {
 	if e.Files != "" && !matchGlobPattern(e.Files, path) {
 		return false
 	}
@@ -533,6 +533,13 @@ func configRootPrefix(configPath, projectRoot string) (string, error) {
 	return filepath.ToSlash(rel), nil
 }
 
+// AnalyzesConfigDir reports whether the configuration comes from a file in
+// the directory being analyzed, so that paths of the run are the paths its
+// exceptions name.
+func (c *Config) AnalyzesConfigDir() bool {
+	return c.path != "" && c.rootPrefix == ""
+}
+
 // configPath returns a path relative to the checked directory as the
 // configuration names it: relative to the configuration's own directory.
 func (c *Config) configPath(path string) string {
@@ -710,14 +717,57 @@ func (c *Config) IsFileExcepted(category, rule, filePath string) bool {
 
 // IsViolationExcepted checks whether a specific violation matches a rule exception.
 func (c *Config) IsViolationExcepted(category, rule, filePath string, violation *Violation) bool {
+	_, ok := c.MatchingException(category, rule, filePath, violation)
+	return ok
+}
+
+// MatchingException returns the first rule exception the violation matches.
+func (c *Config) MatchingException(category, rule, filePath string, violation *Violation) (Exception, bool) {
 	filePath = c.configPath(filePath)
-	exceptions := c.GetRuleExceptions(category, rule)
-	for _, exc := range exceptions {
+	for _, exc := range c.GetRuleExceptions(category, rule) {
 		if exc.matchesViolation(filePath, violation) {
-			return true
+			return exc, true
 		}
 	}
-	return false
+	return Exception{}, false
+}
+
+// Key identifies the exception by the configuration file and the line that
+// declare it.
+func (e Exception) Key() string {
+	return fmt.Sprintf("%s:%d", e.source, e.at)
+}
+
+// Source and DeclaredAt are the configuration file and the line that declare
+// the exception.
+func (e Exception) Source() string { return e.source }
+
+// DeclaredAt is the line of the configuration file that declares the exception.
+func (e Exception) DeclaredAt() int { return e.at }
+
+// RuleException is one exception of a rule's configuration.
+type RuleException struct {
+	Category, Rule string
+	Exception      Exception
+}
+
+// FindingExceptions returns the exceptions that silence findings one by one
+// — those with a line, a pattern or a function. A file-only exception keeps
+// the rule off the file altogether, so whether it silences anything is not
+// known.
+func (c *Config) FindingExceptions() []RuleException {
+	var list []RuleException
+	for _, category := range slices.Sorted(maps.Keys(c.Categories)) {
+		cat := c.Categories[category]
+		for _, rule := range slices.Sorted(maps.Keys(cat.Rules)) {
+			for _, exc := range cat.Rules[rule].Exceptions {
+				if !exc.isFileOnly() {
+					list = append(list, RuleException{Category: category, Rule: rule, Exception: exc})
+				}
+			}
+		}
+	}
+	return list
 }
 
 func (e Exception) isFileOnly() bool {

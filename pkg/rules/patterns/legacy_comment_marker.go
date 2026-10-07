@@ -106,7 +106,7 @@ func (r *LegacyCommentMarkerRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 
 // tryMatch decides whether a comment-bearing line is a runtime legacy marker.
 func (r *LegacyCommentMarkerRule) tryMatch(ctx *core.FileContext, lineNum int, line string, isBlock bool) *core.Violation {
-	if core.LineSuppresses(line, "legacy-comment-marker") {
+	if ctx.LineSuppresses(lineNum, "legacy-comment-marker") {
 		return nil
 	}
 
@@ -121,8 +121,8 @@ func (r *LegacyCommentMarkerRule) tryMatch(ctx *core.FileContext, lineNum int, l
 		return nil
 	}
 
-	// Suppression directives name rules (nolint:legacy-identifier,
-	// legacy-identifier: safe); naming a rule admits nothing about the code.
+	// Suppression directives name rules (nolint:legacy-identifier or the
+	// "rule: safe" form); naming a rule admits nothing about the code.
 	lower := suppressionDirectiveRE.ReplaceAllString(strings.ToLower(commentText), " ")
 	// Policy quote — self-reference to the rule being enforced, not a legacy code path.
 	for _, m := range r.policyQuoteMarkers {

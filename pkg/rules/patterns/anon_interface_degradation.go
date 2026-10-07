@@ -90,6 +90,7 @@ func (r *AnonInterfaceDegradationRule) checkFunctionBody(ctx *core.FileContext, 
 					lineContent := ctx.GetLine(pos.Line)
 
 					if strings.Contains(lineContent, "nolint") {
+						ctx.RecordSuppression(r.Name(), pos.Line)
 						continue
 					}
 

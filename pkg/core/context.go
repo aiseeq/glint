@@ -9,6 +9,7 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -35,6 +36,9 @@ type FileContext struct {
 	// shared holds views derived from the content (masked source and the
 	// like), computed once per file for every rule that asks.
 	shared sharedCache
+
+	// suppression records the inline markers that silenced a finding.
+	suppression suppressionLog
 }
 
 // FileShared returns the value build derives from the file, building it once
@@ -293,16 +297,32 @@ func (ctx *FileContext) IsGenerated() bool {
 // The marker must appear inside a comment ("//" or "/*"); string literals
 // containing the same text do not suppress. Rule names match exactly:
 // "nolint:my-rule" does not suppress rule "my-rule-extended" and vice versa.
+//
+// The marker that answers is recorded for the rule (TakeSuppressionHits), so
+// that a marker nothing needs can be told apart.
 func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
 	for checkLine := line - 1; checkLine <= line; checkLine++ {
 		if checkLine < 1 || checkLine > len(ctx.Lines) {
 			continue
 		}
 		if commentHasSuppressionMarker(ctx.Lines[checkLine-1], ruleName) {
+			ctx.suppression.record(ruleName, checkLine)
 			return true
 		}
 	}
 	return false
+}
+
+// LineSuppresses reports whether the given line itself (1-based) carries a
+// suppression marker for the rule, and records the marker when it does. Rules
+// that tie a marker to one line — a declaration's — use it instead of
+// IsSuppressed.
+func (ctx *FileContext) LineSuppresses(line int, ruleName string) bool {
+	if line < 1 || line > len(ctx.Lines) || !commentHasSuppressionMarker(ctx.Lines[line-1], ruleName) {
+		return false
+	}
+	ctx.suppression.record(ruleName, line)
+	return true
 }
 
 // LineSuppresses reports whether the line's comment part carries a
@@ -341,28 +361,33 @@ func commentHasSuppressionMarker(line, ruleName string) bool {
 }
 
 func nolintListContains(comment, ruleName string) bool {
+	names, _ := nolintNames(comment)
+	return slices.Contains(names, ruleName)
+}
+
+// nolintNames returns the rule names of the comment's nolint:<list>, and found
+// reports whether the comment has a nolint list at all. The list is
+// comma-separated and may have spaces after the commas (nolint:a, b). Prose
+// after the last rule name ends the list: in "nolint:a, b justified because"
+// only "a" and "b" are rule names.
+func nolintNames(comment string) (names []string, found bool) {
 	const prefix = "nolint:"
 	idx := strings.Index(comment, prefix)
 	if idx < 0 {
-		return false
+		return nil, false
 	}
 	list := comment[idx+len(prefix):]
-	// The list is comma-separated and may have spaces after the commas
-	// (nolint:a, b). Prose after the last rule name ends the list: in
-	// "nolint:a, b justified because" only "a" and "b" are rule names.
 	for _, segment := range strings.Split(list, ",") {
 		fields := strings.Fields(segment)
 		if len(fields) == 0 {
-			return false
+			break
 		}
-		if fields[0] == ruleName {
-			return true
-		}
+		names = append(names, fields[0])
 		if len(fields) > 1 {
-			return false
+			break
 		}
 	}
-	return false
+	return names, true
 }
 
 // CommentPart returns the substring of a line starting at its comment marker

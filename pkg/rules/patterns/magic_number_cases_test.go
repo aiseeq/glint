@@ -51,3 +51,39 @@ func limit() int { return 4321 }
 `)
 	assert.Len(t, rule.AnalyzeFile(ctx), 1)
 }
+
+// A package-level map or slice literal is a lookup table: its keys and
+// elements are external identifiers (chain IDs, instruction discriminator
+// bytes, provider error codes) that the table itself names. Every number of
+// such a table is skipped alike; numbers inside functions stay reported, each
+// one of them.
+func TestMagicNumberPackageLevelLookupTables(t *testing.T) {
+	ctx := rulestest.GoFile(t, "bridge/tables.go", `package bridge
+
+var supportedChains = map[int]string{1: "ethereum", 56: "bnb", 8453: "base"}
+
+var ownChainIDs = map[int64]string{224235520: "ton"}
+
+var discriminator = []byte{217, 106, 208, 99, 116, 151, 42, 135}
+
+var unreachableCodes = []int{2, 3, 35, 45, 49}
+
+var weights = map[string]int{"a": 4321}
+
+type limit struct {
+	Name string
+	Max  int
+}
+
+var limits = []limit{{"daily", 7777}}
+
+func pick() []int {
+	return []int{4321, 4322}
+}
+`)
+	var codes []string
+	for _, v := range NewMagicNumberRule().AnalyzeFile(ctx) {
+		codes = append(codes, v.Code)
+	}
+	assert.Equal(t, []string{"7777", "4321", "4322"}, codes)
+}

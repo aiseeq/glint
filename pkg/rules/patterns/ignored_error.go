@@ -73,12 +73,23 @@ func (r *IgnoredErrorRule) analyzeFile(fileCtx *core.FileContext, file *ast.File
 }
 
 func (r *IgnoredErrorRule) checkAssign(fileCtx *core.FileContext, assign *ast.AssignStmt, info *types.Info) *core.Violation {
-	pos := fileCtx.PositionFor(assign)
-	line := fileCtx.GetLine(pos.Line)
-	// nolint пишут и на самой строке, и комментарием над ней — принимаем оба места.
-	if hasSuppression(line) || hasSuppression(fileCtx.GetLine(pos.Line-1)) {
+	v := r.ignoredAssign(fileCtx, assign, info)
+	if v == nil {
 		return nil
 	}
+	// nolint пишут и на самой строке, и комментарием над ней — принимаем оба места.
+	for _, at := range []int{v.Line, v.Line - 1} {
+		if hasSuppression(fileCtx.GetLine(at)) {
+			fileCtx.RecordSuppression(r.Name(), at)
+			return nil
+		}
+	}
+	return v
+}
+
+func (r *IgnoredErrorRule) ignoredAssign(fileCtx *core.FileContext, assign *ast.AssignStmt, info *types.Info) *core.Violation {
+	pos := fileCtx.PositionFor(assign)
+	line := fileCtx.GetLine(pos.Line)
 
 	for i, lhs := range assign.Lhs {
 		ident, ok := lhs.(*ast.Ident)

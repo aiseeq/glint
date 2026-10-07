@@ -82,7 +82,7 @@ func (r *TestWithoutAssertionRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 			continue
 		}
 		pos := ctx.PositionFor(fn)
-		if core.LineSuppresses(ctx.GetLine(pos.Line), r.Name()) {
+		if ctx.LineSuppresses(pos.Line, r.Name()) {
 			continue
 		}
 		v := r.CreateViolation(ctx.RelPath, pos.Line,

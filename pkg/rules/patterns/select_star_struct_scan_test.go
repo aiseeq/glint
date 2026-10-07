@@ -55,6 +55,25 @@ func TestSelectStarStructScanRule_Detection(t *testing.T) {
 			expectTable: "orders",
 		},
 		{
+			// Звёздочка внутри CTE берёт колонки unnest с именами из алиаса, а наружу
+			// уходит явный список колонок: ни таблицы, ни сканируемой звёздочки.
+			name: "star over unnest inside a CTE under an explicit outer list",
+			code: "package main\nfunc ex(db *D) {\n\tdb.Select(&x, `WITH requested AS (SELECT * FROM unnest($1::text[], $2::bigint[]) AS t(wallet, leg)) SELECT a.id, a.wallet FROM annotations a JOIN requested r USING (wallet)`)\n}",
+		},
+		{
+			name: "top-level star over a set-returning function",
+			code: "package main\nfunc ex(db *D) {\n\tdb.Select(&x, `SELECT * FROM generate_series(1, 10) AS g(n)`)\n}",
+		},
+		{
+			name: "star over a table inside a CTE under an explicit outer list",
+			code: "package main\nfunc ex(db *D) {\n\tdb.Select(&x, `WITH recent AS (SELECT * FROM orders WHERE created_at > $1) SELECT id, total FROM recent`)\n}",
+		},
+		{
+			name:        "outer star over a CTE is still a star",
+			code:        "package main\nfunc ex(db *D) {\n\tdb.Select(&x, `WITH recent AS (SELECT id FROM orders) SELECT * FROM recent`)\n}",
+			expectTable: "recent",
+		},
+		{
 			name: "explicit columns",
 			code: "package main\nfunc ex(db *D) {\n\tdb.Select(&x, `SELECT id, name FROM users`)\n}",
 		},

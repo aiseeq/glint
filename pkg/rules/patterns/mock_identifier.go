@@ -117,7 +117,7 @@ func (r *MockIdentifierRule) violation(ctx *core.FileContext, pos token.Pos, nam
 	line := ctx.GoFileSet.Position(pos).Line
 	lineContent := ctx.GetLine(line)
 
-	if core.LineSuppresses(lineContent, "mock-identifier") {
+	if ctx.LineSuppresses(line, "mock-identifier") {
 		return nil
 	}
 

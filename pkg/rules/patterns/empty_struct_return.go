@@ -17,8 +17,8 @@ func init() {
 // instead of returning explicit error. This violates "Fail explicitly, never degrade silently"
 // Catches: return Money{}, nil (in error context)
 // Catches: return Config{} (without error, in error context)
-// Not flagged: an empty value under a nil or comma-ok guard when the function
-// also returns that empty value as a regular answer outside such guards.
+// Not flagged: an empty value under a nil or comma-ok guard when a function of
+// the file returns that empty value as a regular answer outside such guards.
 type EmptyStructReturnRule struct {
 	*rules.BaseRule
 }
@@ -35,33 +35,53 @@ func NewEmptyStructReturnRule() *EmptyStructReturnRule {
 	}
 }
 
+// guardedReturn is a return directly inside an error or nil check.
+type guardedReturn struct {
+	ret        *ast.ReturnStmt
+	errorGuard bool
+}
+
+// guardedReturns lists the returns directly inside error and nil checks of
+// the body — loops, switch and select cases included; a closure returns
+// through its own signature.
+func (r *EmptyStructReturnRule) guardedReturns(body *ast.BlockStmt) ([]guardedReturn, map[*ast.ReturnStmt]bool) {
+	var guarded []guardedReturn
+	inGuard := map[*ast.ReturnStmt]bool{}
+	forEachOwnStatement(body, func(stmt ast.Stmt) {
+		ifStmt, ok := stmt.(*ast.IfStmt)
+		if !ok || !r.isErrorOrNilCheck(ifStmt.Cond) {
+			return
+		}
+		for _, bodyStmt := range ifStmt.Body.List {
+			if ret, ok := bodyStmt.(*ast.ReturnStmt); ok {
+				guarded = append(guarded, guardedReturn{ret: ret, errorGuard: r.isErrorValueCheck(ifStmt.Cond)})
+				inGuard[ret] = true
+			}
+		}
+	})
+	return guarded, inGuard
+}
+
 // AnalyzeFile checks for empty struct returns in error contexts
 func (r *EmptyStructReturnRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	// The empty values the file's functions hand out as regular answers ("no
+	// match", "nothing linked"): the meaning belongs to the type, so a sibling
+	// function giving the same answer under a nil guard gives that answer too.
+	regular := map[string]bool{}
+	analyzeGoFunctions(ctx, func(funcDecl *ast.FuncDecl) []*core.Violation {
+		if r.hasErrorReturn(funcDecl) {
+			_, inGuard := r.guardedReturns(funcDecl.Body)
+			for name := range r.regularEmptyAnswers(funcDecl.Body, inGuard) {
+				regular[name] = true
+			}
+		}
+		return nil
+	})
 	return analyzeGoFunctions(ctx, func(funcDecl *ast.FuncDecl) []*core.Violation {
 		if !r.hasErrorReturn(funcDecl) {
 			return nil
 		}
-		// Error branches anywhere in the body — loops, switch and select cases
-		// included; a closure returns through its own signature.
-		type guardedReturn struct {
-			ret        *ast.ReturnStmt
-			errorGuard bool
-		}
-		var guarded []guardedReturn
-		inGuard := map[*ast.ReturnStmt]bool{}
-		forEachOwnStatement(funcDecl.Body, func(stmt ast.Stmt) {
-			ifStmt, ok := stmt.(*ast.IfStmt)
-			if !ok || !r.isErrorOrNilCheck(ifStmt.Cond) {
-				return
-			}
-			for _, bodyStmt := range ifStmt.Body.List {
-				if ret, ok := bodyStmt.(*ast.ReturnStmt); ok {
-					guarded = append(guarded, guardedReturn{ret: ret, errorGuard: r.isErrorValueCheck(ifStmt.Cond)})
-					inGuard[ret] = true
-				}
-			}
-		})
-		regular := r.regularEmptyAnswers(funcDecl.Body, inGuard)
+		guarded, _ := r.guardedReturns(funcDecl.Body)
 
 		var violations []*core.Violation
 		if ret := cacheMissZeroAnswer(funcDecl.Body); ret != nil {
@@ -74,7 +94,7 @@ func (r *EmptyStructReturnRule) AnalyzeFile(ctx *core.FileContext) []*core.Viola
 		}
 		for _, g := range guarded {
 			// Under a nil or comma-ok guard the empty value means "absent". When
-			// the function hands out the same empty value as a regular answer
+			// the file hands out the same empty value as a regular answer
 			// elsewhere ("no match", "nothing linked"), absent is that answer
 			// too; under an error check it never is.
 			if !g.errorGuard && regular[r.emptyStructTypeName(g.ret)] {
@@ -197,6 +217,7 @@ func (r *EmptyStructReturnRule) checkReturnForEmptyStructWithNilError(ctx *core.
 
 					// Skip if has nolint
 					if strings.Contains(lineContent, "nolint") {
+						ctx.RecordSuppression(r.Name(), pos.Line)
 						return nil
 					}
 

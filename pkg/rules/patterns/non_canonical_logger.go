@@ -253,7 +253,7 @@ func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext, underSlog boo
 		lineContent := ctx.GetLine(pos.Line)
 
 		// Respect suppression opt-outs on the same line (canonical core check).
-		if core.LineSuppresses(lineContent, "non-canonical-logger") {
+		if ctx.LineSuppresses(pos.Line, "non-canonical-logger") {
 			return true
 		}
 

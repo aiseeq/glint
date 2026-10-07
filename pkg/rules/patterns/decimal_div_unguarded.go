@@ -26,7 +26,8 @@ func init() {
 // — IsZero, Sign, Equal, GreaterThan, a comparison of the integer it was
 // built from — or when it cannot be zero: a decimal built from non-zero
 // constants or a power of ten, a variable, a field or a function result that
-// only ever holds one, a package-level value.
+// only ever holds one, a package-level value. A field holds a non-zero value
+// too when every function storing it compared the stored value first.
 //
 // The check is lexical, not path-sensitive: a comparison anywhere before the
 // division counts, whichever branch it guards. The rule would rather miss a
@@ -235,7 +236,10 @@ func (s divisorSite) nonZero(expr ast.Expr, depth int) bool {
 		}
 		values := s.index.fields[v]
 		for _, value := range values {
-			if !value.site.nonZero(value.value, depth-1) {
+			// A value the storing function compared before storing it is
+			// guarded where it goes in: if !price.IsPositive() { continue }
+			// ahead of seen[k] = last{price: price}.
+			if !value.site.nonZero(value.value, depth-1) && !divisorChecked(value.site.fn, value.site.info, value.value, value.value) {
 				return false
 			}
 		}

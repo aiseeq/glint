@@ -80,7 +80,7 @@ func (r *OrphanedInterfaceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 
 // report builds the violation for an orphaned interface unless it is exempt.
 func (r *OrphanedInterfaceRule) report(ctx *core.FileContext, iface *interfaceInfo, scope string) *core.Violation {
-	if r.hasExemptComment(iface) {
+	if r.hasExemptComment(ctx, iface) {
 		return nil
 	}
 	v := r.CreateViolation(ctx.RelPath, iface.pos.Line,
@@ -106,14 +106,16 @@ func (r *OrphanedInterfaceRule) shouldSkipFile(ctx *core.FileContext) bool {
 // ("Used by:"). The check flow already honours a marker on the declaration
 // line or right above it; a doc comment is often longer than that. Comments
 // of neighbouring declarations do not count.
-func (r *OrphanedInterfaceRule) hasExemptComment(iface *interfaceInfo) bool {
+func (r *OrphanedInterfaceRule) hasExemptComment(ctx *core.FileContext, iface *interfaceInfo) bool {
 	for _, doc := range iface.docs {
 		if doc == nil {
 			continue
 		}
 		for _, comment := range doc.List {
-			if core.LineSuppresses(comment.Text, r.Name()) {
-				return true
+			for line := ctx.LineForPos(comment.Pos()); line <= ctx.LineForPos(comment.End()); line++ {
+				if ctx.LineSuppresses(line, r.Name()) {
+					return true
+				}
 			}
 			if strings.Contains(comment.Text, "Used by:") || strings.Contains(comment.Text, "USED BY:") {
 				return true

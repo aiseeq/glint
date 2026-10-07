@@ -124,6 +124,7 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 
 		// Skip if has nolint
 		if strings.Contains(lineContent, "nolint") {
+			ctx.RecordSuppression(r.Name(), pos.Line)
 			return true
 		}
 

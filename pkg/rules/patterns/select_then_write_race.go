@@ -538,7 +538,6 @@ func constantString(expr ast.Expr, info *types.Info) (string, bool) {
 	}
 	// A string literal the parser accepted always unquotes; one that does not
 	// is not a query, so skipping it is the success path, not a masked failure.
-	// error-masking: safe — a literal that does not unquote is not SQL
 	query, err := strconv.Unquote(lit.Value)
 	return query, err == nil
 }

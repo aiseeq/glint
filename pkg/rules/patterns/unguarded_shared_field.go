@@ -38,7 +38,10 @@ var lockedNameSuffixes = []string{"locked", "nolock", "unsafe", "unlocked"}
 // Not flagged: fields no lock ever covers (they may be set once and only read
 // afterwards), helpers called from inside a critical section, methods whose name
 // promises the caller holds the lock (…Locked, …NoLock, …Unsafe), and plain
-// functions such as constructors, where the value is not shared yet.
+// functions such as constructors, where the value is not shared yet. A slice or
+// map read under a lock is not shared state by that alone when nothing changes
+// it after construction: no method writes it or its elements or hands it to a
+// call, and no function but a New… constructor assigns it.
 //
 // A field no lock covers is reported when a method started with `go` writes
 // it and a request handler reads it: a background goroutine publishing a
@@ -76,6 +79,9 @@ type fieldAccess struct {
 	mutex    string
 	guarded  bool
 	mutating bool
+	// escapes: the field is handed to a call (other than len and cap) that
+	// may write into its contents.
+	escapes bool
 }
 
 // AnalyzeGoProject compares, for every field a lock covers somewhere, the places
@@ -126,10 +132,11 @@ func (r *UnguardedSharedFieldRule) analyzePackage(pkg *core.GoPackageContext) []
 	}
 
 	goStarted, servesRequests := concurrentMethods(pkg, info)
+	writtenOutside := fieldsWrittenOutsideMethods(pkg, info)
 	var violations []*core.Violation
 	for _, field := range fieldOrder {
 		list := accesses[field]
-		if !guardedByMutex(field, list) {
+		if !guardedByMutex(field, list, writtenOutside[field]) {
 			violations = append(violations, r.publishedByGoroutine(field, list, goStarted, servesRequests)...)
 			continue
 		}
@@ -240,8 +247,8 @@ func (r *UnguardedSharedFieldRule) report(field *types.Var, access fieldAccess, 
 // receiving from it under a lock says nothing about the other uses. A plain value merely read inside a critical section proves nothing:
 // a setting configured once before any goroutine starts is often read there by
 // accident.
-func guardedByMutex(field *types.Var, list []fieldAccess) bool {
-	contents := hasSharedContents(field.Type())
+func guardedByMutex(field *types.Var, list []fieldAccess, writtenOutside bool) bool {
+	contents := hasSharedContents(field.Type()) && (writtenOutside || contentsChange(list))
 	reads, guardedReads := 0, 0
 
 	for _, access := range list {
@@ -271,6 +278,72 @@ func guardingMutex(list []fieldAccess) string {
 		}
 	}
 	return "a mutex"
+}
+
+// contentsChange reports whether a method writes the field or its elements or
+// hands it to a call that may.
+func contentsChange(list []fieldAccess) bool {
+	for _, access := range list {
+		if access.mutating || access.escapes {
+			return true
+		}
+	}
+	return false
+}
+
+// fieldsWrittenOutsideMethods returns the fields a plain function other than a
+// New… constructor assigns or writes elements of.
+func fieldsWrittenOutsideMethods(pkg *core.GoPackageContext, info *types.Info) map[*types.Var]bool {
+	written := make(map[*types.Var]bool)
+	for _, fileCtx := range pkg.Files {
+		if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
+			continue
+		}
+		for _, decl := range fileCtx.GoAST.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Recv != nil || strings.HasPrefix(strings.ToLower(fn.Name.Name), "new") {
+				continue
+			}
+			mutated, _ := mutatedSelectors(fn, info)
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok || !mutated[sel.Pos()] {
+					return true
+				}
+				if selection, ok := info.Selections[sel]; ok && selection.Kind() == types.FieldVal {
+					if field, ok := selection.Obj().(*types.Var); ok {
+						written[field] = true
+					}
+				}
+				return true
+			})
+		}
+	}
+	return written
+}
+
+// escapingSelectors returns the positions of the selectors the body hands to
+// a call as an argument, other than len and cap.
+func escapingSelectors(fn *ast.FuncDecl, info *types.Info) map[token.Pos]bool {
+	escaping := make(map[token.Pos]bool)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if ident, ok := call.Fun.(*ast.Ident); ok {
+			if builtin, ok := info.Uses[ident].(*types.Builtin); ok && (builtin.Name() == "len" || builtin.Name() == "cap") {
+				return true
+			}
+		}
+		for _, arg := range call.Args {
+			if sel, ok := ast.Unparen(arg).(*ast.SelectorExpr); ok {
+				escaping[sel.Pos()] = true
+			}
+		}
+		return true
+	})
+	return escaping
 }
 
 // hasSharedContents reports whether the value behind the field is mutated
@@ -308,6 +381,7 @@ func collectFieldAccesses(
 ) {
 	sections := criticalSections(fn, info)
 	mutations, atomicAccesses := mutatedSelectors(fn, info)
+	escaping := escapingSelectors(fn, info)
 	methodFn, _ := info.Defs[fn.Name].(*types.Func)
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -347,6 +421,7 @@ func collectFieldAccesses(
 				mutex:    mutex,
 				guarded:  inSection,
 				mutating: mutations[sel.Pos()],
+				escapes:  escaping[sel.Pos()],
 			})
 			// The path stops here: `s.metrics.total` is an access to total, not
 			// to metrics.
