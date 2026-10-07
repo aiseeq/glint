@@ -271,3 +271,50 @@ func pin() {}
 		t.Fatalf("want only the tombstone on line 10, got: %+v", violations)
 	}
 }
+
+// A status word in capitals that the file also spells inside a string literal
+// (an SQL filter, a status constant) names that value, not deleted code.
+func TestTombstoneComment_StatusWordSpelledInLiteral(t *testing.T) {
+	code := `package store
+
+// DELETED rows are excluded everywhere.
+const where = "WHERE status <> 'DELETED'"
+
+const listQuery = ` + "`" + `
+SELECT id FROM items
+WHERE state <> 'REMOVED'` + "`" + `
+
+// REMOVED and DELETED states are terminal.
+func terminal() {}
+
+const label = "УДАЛЕНО"
+
+// УДАЛЕНО: метка статуса в выгрузке.
+func exportLabel() {}
+`
+	ctx := core.NewFileContext("store/items.go", ".", []byte(code), nil)
+	violations := NewTombstoneCommentRule().AnalyzeFile(ctx)
+	if len(violations) != 0 {
+		t.Fatalf("status words spelled in literals must not be flagged, got: %+v", violations)
+	}
+}
+
+// A capitalised tombstone with no literal spelling the word stays a tombstone,
+// and so does a lower-case note even when a literal holds the word.
+func TestTombstoneComment_StatusWordWithoutLiteralStillFlagged(t *testing.T) {
+	code := `package store
+
+const msg = "item deleted"
+
+// DELETED: old sync worker (moved to the queue)
+func sync() {}
+
+// legacy importer deleted
+func importer() {}
+`
+	ctx := core.NewFileContext("store/sync.go", ".", []byte(code), nil)
+	violations := NewTombstoneCommentRule().AnalyzeFile(ctx)
+	if len(violations) != 2 {
+		t.Fatalf("want both tombstones, got: %+v", violations)
+	}
+}

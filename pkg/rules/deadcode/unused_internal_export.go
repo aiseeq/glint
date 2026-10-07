@@ -317,10 +317,8 @@ func isInitializerName(name string) bool {
 // tests (SetupTestConfig, RegisterMocks).
 func isTestSupport(pkgName, name string) bool {
 	lowerPkg := strings.ToLower(pkgName)
-	for _, suffix := range []string{"test", "testing", "testutil", "testutils", "testhelpers", "mocks", "fixtures"} {
-		if strings.HasSuffix(lowerPkg, suffix) {
-			return true
-		}
+	if helpers.IsTestSupportPackage(pkgName) || strings.HasSuffix(lowerPkg, "mocks") || strings.HasSuffix(lowerPkg, "fixtures") {
+		return true
 	}
 	for _, word := range []string{"Test", "Mock", "Fake", "Fixture", "Stub"} {
 		if strings.Contains(name, word) {

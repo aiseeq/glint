@@ -45,6 +45,8 @@ func init() {
 //   - Blocks that log the error before returning false
 //   - Returns under a classification of the error (errors.Is(err, ErrNoRows))
 //   - Branches that answer the client through the http.ResponseWriter
+//   - Iterators in the manner of sql.Rows: the branch stores the error in a
+//     field of the receiver that the type's Err() error method returns
 type ErrorMaskedAsFalseBoolRule struct {
 	*rules.BaseRule
 }
@@ -68,6 +70,7 @@ func (r *ErrorMaskedAsFalseBoolRule) AnalyzeFile(ctx *core.FileContext) []*core.
 	}
 
 	var violations []*core.Violation
+	errFields := errMethodFields(ctx.GoAST)
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
@@ -82,11 +85,83 @@ func (r *ErrorMaskedAsFalseBoolRule) AnalyzeFile(ctx *core.FileContext) []*core.
 			return true
 		}
 
-		violations = append(violations, r.findViolations(ctx, fn)...)
+		violations = append(violations, r.findViolations(ctx, fn, errFields)...)
 		return true
 	})
 
 	return violations
+}
+
+// errMethodFields maps a type name to the fields its Err() error method
+// returns: func (r *reader) Err() error { return r.err }.
+func errMethodFields(file *ast.File) map[string]map[string]bool {
+	fields := map[string]map[string]bool{}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "Err" || fn.Body == nil || len(fn.Body.List) != 1 {
+			continue
+		}
+		recvName, typeName := receiverNames(fn)
+		if recvName == "" || fn.Type.Params.NumFields() != 0 || !returnsOnlyError(fn.Type) {
+			continue
+		}
+		ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+		if !ok || len(ret.Results) != 1 {
+			continue
+		}
+		if field := receiverField(ret.Results[0], recvName); field != "" {
+			if fields[typeName] == nil {
+				fields[typeName] = map[string]bool{}
+			}
+			fields[typeName][field] = true
+		}
+	}
+	return fields
+}
+
+// receiverNames returns the receiver's variable and type names, or "" for a
+// function or an unnamed receiver.
+func receiverNames(fn *ast.FuncDecl) (recvName, typeName string) {
+	if fn.Recv == nil {
+		return "", ""
+	}
+	name, ok := receiverName(fn)
+	if !ok {
+		return "", ""
+	}
+	return name, helpers.ReceiverTypeName(fn.Recv.List[0].Type)
+}
+
+func returnsOnlyError(ftype *ast.FuncType) bool {
+	if ftype.Results == nil || ftype.Results.NumFields() != 1 {
+		return false
+	}
+	return isIdentNamed(ftype.Results.List[0].Type, "error")
+}
+
+// storesErrorForErrMethod reports whether the branch assigns the error (or a
+// wrap of it) to a receiver field the type's Err method returns: the failure
+// stays observable, as with sql.Rows.Next and Rows.Err.
+func storesErrorForErrMethod(fn *ast.FuncDecl, body *ast.BlockStmt, errName string, errFields map[string]map[string]bool) bool {
+	recvName, typeName := receiverNames(fn)
+	fields := errFields[typeName]
+	if recvName == "" || len(fields) == 0 {
+		return false
+	}
+	stored := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if stored || !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != len(assign.Rhs) {
+			return !stored
+		}
+		for i, lhs := range assign.Lhs {
+			if fields[receiverField(lhs, recvName)] && mentionsIdent(assign.Rhs[i], errName) {
+				stored = true
+			}
+		}
+		return !stored
+	})
+	return stored
 }
 
 // returnsBool checks if any of the function's return values is bool.
@@ -104,7 +179,7 @@ func (r *ErrorMaskedAsFalseBoolRule) returnsBool(fn *ast.FuncDecl) bool {
 
 // findViolations scans a function body for `if err != nil { return false }`
 // patterns without logging.
-func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {
+func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *ast.FuncDecl, errFields map[string]map[string]bool) []*core.Violation {
 	var violations []*core.Violation
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -125,6 +200,9 @@ func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *a
 			return true
 		}
 		if answersClient(fn, ifStmt.Body) {
+			return true
+		}
+		if storesErrorForErrMethod(fn, ifStmt.Body, errName, errFields) {
 			return true
 		}
 
