@@ -46,7 +46,7 @@ func init() {
 //   - Returns under a classification of the error (errors.Is(err, ErrNoRows))
 //   - Branches that answer the client through the http.ResponseWriter
 //   - Iterators in the manner of sql.Rows: the branch stores the error in a
-//     field of the receiver that the type's Err() error method returns
+//     field of the receiver that the type's Err() error method reads
 type ErrorMaskedAsFalseBoolRule struct {
 	*rules.BaseRule
 }
@@ -92,29 +92,33 @@ func (r *ErrorMaskedAsFalseBoolRule) AnalyzeFile(ctx *core.FileContext) []*core.
 	return violations
 }
 
-// errMethodFields maps a type name to the fields its Err() error method
-// returns: func (r *reader) Err() error { return r.err }.
+// errMethodFields maps a type name to the receiver fields its Err() error
+// method reads: return r.err, if r.err != nil { return r.err },
+// strings.Join(r.errs, "; ") — whatever the method makes its answer from.
 func errMethodFields(file *ast.File) map[string]map[string]bool {
 	fields := map[string]map[string]bool{}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "Err" || fn.Body == nil || len(fn.Body.List) != 1 {
+		if !ok || fn.Name.Name != "Err" || fn.Body == nil {
 			continue
 		}
 		recvName, typeName := receiverNames(fn)
 		if recvName == "" || fn.Type.Params.NumFields() != 0 || !returnsOnlyError(fn.Type) {
 			continue
 		}
-		ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
-		if !ok || len(ret.Results) != 1 {
-			continue
-		}
-		if field := receiverField(ret.Results[0], recvName); field != "" {
-			if fields[typeName] == nil {
-				fields[typeName] = map[string]bool{}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			expr, ok := n.(ast.Expr)
+			if !ok {
+				return true
 			}
-			fields[typeName][field] = true
-		}
+			if field := receiverField(expr, recvName); field != "" {
+				if fields[typeName] == nil {
+					fields[typeName] = map[string]bool{}
+				}
+				fields[typeName][field] = true
+			}
+			return true
+		})
 	}
 	return fields
 }
@@ -139,9 +143,10 @@ func returnsOnlyError(ftype *ast.FuncType) bool {
 	return isIdentNamed(ftype.Results.List[0].Type, "error")
 }
 
-// storesErrorForErrMethod reports whether the branch assigns the error (or a
-// wrap of it) to a receiver field the type's Err method returns: the failure
-// stays observable, as with sql.Rows.Next and Rows.Err.
+// storesErrorForErrMethod reports whether the branch assigns the error (a
+// wrap of it, its text appended to a list) to a receiver field the type's Err
+// method reads: the failure stays observable, as with sql.Rows.Next and
+// Rows.Err.
 func storesErrorForErrMethod(fn *ast.FuncDecl, body *ast.BlockStmt, errName string, errFields map[string]map[string]bool) bool {
 	recvName, typeName := receiverNames(fn)
 	fields := errFields[typeName]
