@@ -142,12 +142,12 @@ func TestStaleSuppressionLeavesGolangciNamesToGolangci(t *testing.T) {
 func TestStaleSuppressionSeesMarkersThroughTheResultCache(t *testing.T) {
 	root := writeStaleModule(t, false)
 	dir := t.TempDir()
-	first, err := openResultCache(dir, root, "stamp")
+	first, err := openResultCache(dir, root, "build", "stamp")
 	require.NoError(t, err)
 	want := staleFindings(t, root, first)
 	require.NoError(t, first.save())
 
-	second, err := openResultCache(dir, root, "stamp")
+	second, err := openResultCache(dir, root, "build", "stamp")
 	require.NoError(t, err)
 	assert.ElementsMatch(t, want, staleFindings(t, root, second))
 	assert.Positive(t, second.reused)

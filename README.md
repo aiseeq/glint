@@ -323,8 +323,16 @@ Findings of rules that look at one file only are kept per project root in the
 user cache directory (`~/.cache/glint/results` on Linux). A file whose content
 is unchanged gets them back instead of being analyzed again. Another glint
 build, another configuration or another loading mode discards the cache; rules
-that read other files or the disk always run. A root not checked for 30 days
-loses its cache.
+that read other files or the disk always run.
+
+The directory stays bounded. A cache file is named after its root and the
+glint build that wrote it; once per run glint removes the caches of other
+builds (and of older layouts) and leftover temporary files, any cache not read
+or written for 7 days, and then the least recently used caches of its own
+build until they fit 1 GB. Files touched in the last 10 minutes are kept by
+all but the age rule, so a run in another session never loses the cache it is
+writing. A save replaces the file by rename and a removed file reads as an
+empty cache, so concurrent runs only ever lose time, never findings.
 
 The findings of the rules that see the whole module are kept too, for the
 inputs of the typed load: the Go and cgo sources and module files of the
