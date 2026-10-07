@@ -389,6 +389,20 @@ func (d *Dispatcher) Timeout() time.Duration {
 			wantCount: 0,
 		},
 		{
+			name:     "another rule's nolint does not suppress",
+			filename: "dispatcher.go",
+			code: `package dispatch
+
+func (d *Dispatcher) Timeout() time.Duration {
+	if v, ok := d.inner.(interface{ Timeout() time.Duration }); ok {
+		return v.Timeout()
+	}
+	return 0 //nolint:errcheck // zero means "no limit" by contract
+}
+`,
+			wantCount: 1,
+		},
+		{
 			name:     "test file is skipped",
 			filename: "dispatcher_test.go",
 			code: `package dispatch

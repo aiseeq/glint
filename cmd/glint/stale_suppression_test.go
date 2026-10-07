@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -67,27 +69,34 @@ func NotRun() {}
 // stale-suppression findings by file and line.
 func staleFindings(t *testing.T, root string, cache *resultCache) []string {
 	t.Helper()
+	_, stale := analyzeWithRules(t, root, cache, "error-string", "magic-number", "stale-suppression")
+	return foundAt(stale)
+}
+
+// analyzeWithRules analyzes a module with the named rules enabled and returns
+// their findings apart from the stale-suppression ones.
+func analyzeWithRules(t *testing.T, root string, cache *resultCache, names ...string) (findings, stale core.ViolationList) {
+	t.Helper()
 	cfg, all, err := loadConfig(root)
 	require.NoError(t, err)
 	var enabled []rules.Rule
 	for _, rule := range all {
-		switch rule.Name() {
-		case "error-string", "magic-number", "stale-suppression":
+		if slices.Contains(names, rule.Name()) {
 			enabled = append(enabled, rule)
 		}
 	}
-	require.Len(t, enabled, 3)
+	require.Len(t, enabled, len(names))
 	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, cfg, enabled, false)
 	require.NoError(t, err)
 	rules.ResetState(enabled)
 	violations, err := analyzeProject(prepared.contexts, enabled, cfg, prepared.project, cache)
 	require.NoError(t, err)
-	_, suppressions := core.SplitSuppressions(violations)
-	stale, err := staleSuppressions(enabled, deadcode.StaleSuppressionRun{
+	findings, suppressions := core.SplitSuppressions(violations)
+	stale, err = staleSuppressions(enabled, deadcode.StaleSuppressionRun{
 		Contexts: prepared.contexts, Suppressions: suppressions, Config: cfg, WholeRoot: true,
 	})
 	require.NoError(t, err)
-	return foundAt(stale)
+	return findings, stale
 }
 
 func foundAt(violations core.ViolationList) []string {
@@ -151,4 +160,43 @@ func TestStaleSuppressionSeesMarkersThroughTheResultCache(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, want, staleFindings(t, root, second))
 	assert.Positive(t, second.reused)
+}
+
+const atoiSource = `package check
+
+import "strconv"
+
+func Width(wl string) int {
+	w, _ := strconv.Atoi(wl) MARKER
+	return w
+}
+`
+
+// Only a marker naming the rule silences it: a nolint for another linter
+// leaves the finding in place and is itself reported as silencing nothing.
+func TestOnlyTheRulesOwnMarkerSilencesIgnoredError(t *testing.T) {
+	for _, tc := range []struct {
+		marker        string
+		ignored, dead int
+	}{
+		{marker: "//nolint:errcheck // not a number is zero", ignored: 1, dead: 1},
+		{marker: "//nolint:ignored-error // not a number is zero", ignored: 0, dead: 0},
+	} {
+		t.Run(tc.marker, func(t *testing.T) {
+			root := t.TempDir()
+			for name, content := range map[string]string{
+				"go.mod":  "module example.com/check\n\ngo 1.24\n",
+				"atoi.go": strings.Replace(atoiSource, "MARKER", tc.marker, 1),
+			} {
+				require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte(content), 0o644))
+			}
+			findings, stale := analyzeWithRules(t, root, nil, "ignored-error", "stale-suppression")
+			assert.Len(t, findings, tc.ignored)
+			require.Len(t, stale, tc.dead)
+			if tc.dead > 0 {
+				assert.Equal(t, "atoi.go:6", stale[0].Location())
+				assert.Contains(t, stale[0].Message, "errcheck")
+			}
+		})
+	}
 }

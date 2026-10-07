@@ -3,7 +3,6 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
-	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -89,8 +88,7 @@ func (r *AnonInterfaceDegradationRule) checkFunctionBody(ctx *core.FileContext, 
 					pos := ctx.PositionFor(ret)
 					lineContent := ctx.GetLine(pos.Line)
 
-					if strings.Contains(lineContent, "nolint") {
-						ctx.RecordSuppression(r.Name(), pos.Line)
+					if ctx.IsSuppressed(pos.Line, r.Name()) {
 						continue
 					}
 
