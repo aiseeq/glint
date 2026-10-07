@@ -433,6 +433,58 @@ func (r *reader) Err() error { return r.err }`,
 			expectedCount: 0,
 		},
 		{
+			// Err() читает поля под условием и склеивает накопленные тексты ошибок:
+			// и обёртка в поле-ошибку, и текст в поле-срез доходят до вызывающего.
+			name: "iterator Err reads the fields under ifs and joins collected texts NOT flagged",
+			path: "/src/backend/sheet.go",
+			code: `package sheet
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+type source interface {
+	Next() bool
+	Columns() ([]string, error)
+}
+type reader struct {
+	rows source
+	err  error
+	errs []string
+}
+func parse(c []string) (string, error) {
+	if len(c) == 0 {
+		return "", errors.New("empty")
+	}
+	return c[0], nil
+}
+func (r *reader) Next() bool {
+	for r.rows.Next() {
+		cells, err := r.rows.Columns()
+		if err != nil {
+			r.err = fmt.Errorf("read row: %w", err)
+			return false
+		}
+		if _, err := parse(cells); err != nil {
+			r.errs = append(r.errs, err.Error())
+			return false
+		}
+		return true
+	}
+	return false
+}
+func (r *reader) Err() error {
+	if r.err != nil {
+		return r.err
+	}
+	if len(r.errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(r.errs, "; "))
+	}
+	return nil
+}`,
+			expectedCount: 0,
+		},
+		{
 			// Ошибка в поле, но Err() отдаёт другое поле (или его нет): сбой потерян.
 			name: "error stored in a field no Err method returns still flagged",
 			path: "/src/backend/sheet.go",
