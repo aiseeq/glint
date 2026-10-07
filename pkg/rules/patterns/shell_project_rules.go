@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // shellProjectRule is a shell rule that needs to know which files of the
@@ -97,6 +98,16 @@ var (
 	libpqKeyword      = regexp.MustCompile(`(?i)\b(?:dbname|host|user)=`)
 )
 
+// passwordValue returns the password a dbPasswordLiteral match captured.
+func passwordValue(text string, m []int) string {
+	for g := 1; 2*g+1 < len(m); g++ {
+		if m[2*g] >= 0 {
+			return text[m[2*g]:m[2*g+1]]
+		}
+	}
+	return ""
+}
+
 // checkDBPasswordLiteral reports a database password written as a literal;
 // a test script's DSN is a fixture.
 func checkDBPasswordLiteral(r *shellRule, src *shellSource) []*core.Violation {
@@ -108,6 +119,9 @@ func checkDBPasswordLiteral(r *shellRule, src *shellSource) []*core.Violation {
 		for _, m := range dbPasswordLiteral.FindAllStringSubmatchIndex(l.text, -1) {
 			if m[4] >= 0 && !libpqKeyword.MatchString(l.text) {
 				continue // password= outside a libpq connection string
+			}
+			if helpers.LooksLikeRegexpShape(passwordValue(l.text, m)) {
+				continue // the shape a secret scanner searches for
 			}
 			out = appendReport(out, src.report(r, l.lineAt(m[0]),
 				"A database password is written into the script — it is in the repository and in the process list of the host",

@@ -1,6 +1,7 @@
 package security
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -60,4 +61,23 @@ TOKEN=` + "`echo $API_TOKEN`" + `
 VALUE=$(get_value) ; echo "$API_TOKEN"
 `
 	assert.Equal(t, []int{3, 4}, shellSecretLines(t, "load.sh", script))
+}
+
+// The rule's own marker in a script is a '#' comment: it silences the print
+// below it, inside a heredoc fed to a remote shell too.
+func TestSecretExposureShellMarker(t *testing.T) {
+	code := `#!/usr/bin/env bash
+set -euo pipefail
+creds="$(ssh host 'bash -s' <<'REMOTE'
+set -euo pipefail
+MARKER
+printf 'TOKEN=%s\n' "$BOT_TOKEN"
+REMOTE
+)"
+printf '%s\n' "${#creds}"
+`
+	marked := strings.Replace(code, "MARKER", "# secret-exposure: safe - the output is captured into creds, not printed", 1)
+	assert.Empty(t, shellSecretLines(t, "creds.sh", marked))
+	unmarked := strings.Replace(code, "MARKER", "# the output is captured into creds", 1)
+	assert.Equal(t, []int{6}, shellSecretLines(t, "creds.sh", unmarked))
 }

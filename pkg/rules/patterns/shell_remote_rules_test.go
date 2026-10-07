@@ -369,3 +369,30 @@ ssh "$HOST" "tag=$TAG; "'docker pull "app:$tag" # want
     docker tag "app:$tag" app:current'
 `)
 }
+
+// A heredoc fed to ssh inside "$( ... )": the quotes within the substitution
+// are words of the command it runs, not the end of the outer string, so the
+// heredoc is no quoted multi-line argument. Outside the substitution the same
+// call is not reported either.
+func TestRemoteScriptErrexitHeredocInQuotedSubstitution(t *testing.T) {
+	assert.Empty(t, shellFindings(t, "remote-multiline-script-without-errexit", map[string]string{
+		"creds.sh": `#!/usr/bin/env bash
+set -euo pipefail
+creds="$(ssh "$HOST" 'bash -s' <<'REMOTE'
+set -euo pipefail
+set -a; . /opt/app/.env; set +a
+if [ -z "${TOKEN:-}" ]; then
+    echo "MISSING TOKEN" >&2; exit 1
+fi
+printf 'T=%s\n' "${#TOKEN}"
+REMOTE
+)"
+printf '%s\n' "$creds"
+`,
+	}))
+	// A multi-line script quoted inside the substitution is still one.
+	shellWanted(t, "remote-multiline-script-without-errexit", "status.sh", `#!/bin/bash
+out="$(ssh "$HOST" 'systemctl restart app # want
+    systemctl is-active app')"
+`)
+}

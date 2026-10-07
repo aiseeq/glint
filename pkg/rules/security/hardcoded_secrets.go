@@ -167,7 +167,7 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			if !pattern.highConfidence {
 				notSecret = isNotSecretValue
 			}
-			if hasLiteralSecret(pattern.regex, line, lineNum+1, patternLiterals, contentAt, notSecret) {
+			if hasLiteralSecret(pattern.regex, line, lineNum+1, secretContext{patternLiterals, contentAt, !ctx.IsGoFile()}, notSecret) {
 				if ctx.IsSuppressed(lineNum+1, r.Name()) {
 					break
 				}
@@ -218,16 +218,29 @@ func (r *HardcodedSecretsRule) defaultTagSecrets(ctx *core.FileContext) []*core.
 	return violations
 }
 
+// secretContext is what the file tells about the strings of a line.
+type secretContext struct {
+	patternLiterals []regexpPatternLiteral
+	contentAt       stringContentAt
+	// regexpShapes is set for a file whose regexp patterns are not known
+	// (regexpPatternLiterals reads Go only): there a value written as a
+	// regular expression is the shape a scanner searches for, no secret.
+	regexpShapes bool
+}
+
 // hasLiteralSecret reports whether a line carries a literal value of the
 // secret pattern. A match inside a regexp pattern counts only when the pattern's
 // fixed text holds the secret by itself: the rest describes a shape. A match
 // whose "quoted value" is code between two literals holds no value at all.
 // notSecret, when set, judges the matched value and the text before it (the
 // key): a placeholder, an environment variable name or a sentence is no secret.
-func hasLiteralSecret(secret *regexp.Regexp, line string, lineNum int, patternLiterals []regexpPatternLiteral, contentAt stringContentAt, notSecret func(key, value string) bool) bool {
+func hasLiteralSecret(secret *regexp.Regexp, line string, lineNum int, file secretContext, notSecret func(key, value string) bool) bool {
 	for _, loc := range secret.FindAllStringIndex(line, -1) {
 		match := line[loc[0]:loc[1]]
-		if isDynamicSecretMatch(match) || quotedValueIsCode(match, loc[0], lineNum, contentAt) {
+		if isDynamicSecretMatch(match) || quotedValueIsCode(match, loc[0], lineNum, file.contentAt) {
+			continue
+		}
+		if file.regexpShapes && helpers.LooksLikeRegexpShape(match) {
 			continue
 		}
 		if notSecret != nil {
@@ -236,7 +249,7 @@ func hasLiteralSecret(secret *regexp.Regexp, line string, lineNum int, patternLi
 				continue
 			}
 		}
-		if literal, ok := regexpPatternAt(patternLiterals, lineNum, loc[0]+1); ok && literal.exempts(secret) {
+		if literal, ok := regexpPatternAt(file.patternLiterals, lineNum, loc[0]+1); ok && literal.exempts(secret) {
 			continue
 		}
 		return true
