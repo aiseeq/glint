@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -160,4 +161,78 @@ func (s *Stats) Bump() {
 	require.Len(t, violations, 1)
 	assert.Equal(t, "cache.go", violations[0].File)
 	assert.Equal(t, 21, violations[0].Line)
+}
+
+// A slice set only by the constructor's literal and never written afterwards
+// is immutable: a method that happens to read it under the lock does not make
+// it shared state, and a read without the lock is no race.
+func TestUnguardedSharedFieldAcceptsFieldSetOnlyByConstructor(t *testing.T) {
+	violations := analyzeGuardedFields(t, `package cache
+
+import "sync"
+
+type S struct {
+	mu      sync.Mutex
+	n       int
+	wallets []string
+}
+
+func New(w []string) *S { return &S{wallets: w} }
+
+func (s *S) A() {
+	s.mu.Lock()
+	s.n = len(s.wallets)
+	s.mu.Unlock()
+}
+
+func (s *S) B() bool { return len(s.wallets) > 0 }
+`)
+	assert.Empty(t, violations)
+}
+
+// The same read pattern stays reported when anything changes the slice after
+// construction: an element write in a method, a plain function replacing it,
+// or the slice handed to a function that may write into it.
+func TestUnguardedSharedFieldReportsSliceChangedAfterConstructor(t *testing.T) {
+	base := `package cache
+
+import (
+	"sort"
+	"sync"
+)
+
+type S struct {
+	mu      sync.Mutex
+	wallets []string
+}
+
+func New(w []string) *S { return &S{wallets: w} }
+
+func (s *S) A() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.wallets)
+}
+
+func (s *S) B() bool { return len(s.wallets) > 0 }
+`
+	for name, extra := range map[string]string{
+		"element write":    "\nfunc (s *S) C() { s.mu.Lock(); s.wallets[0] = \"\"; s.mu.Unlock() }\n",
+		"plain function":   "\nfunc reload(s *S, w []string) { s.wallets = w }\n",
+		"handed to a call": "\nfunc (s *S) C() { s.mu.Lock(); sort.Strings(s.wallets); s.mu.Unlock() }\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			source := base + extra
+			line := 21 // B's read
+			if name != "handed to a call" {
+				source = strings.Replace(source, "\t\"sort\"\n", "", 1)
+				line--
+			}
+			var lines []int
+			for _, v := range analyzeGuardedFields(t, source) {
+				lines = append(lines, v.Line)
+			}
+			assert.Contains(t, lines, line)
+		})
+	}
 }

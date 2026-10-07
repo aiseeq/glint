@@ -454,3 +454,56 @@ func shares(total, count *big.Int) decimal.Decimal {
 `)
 	assert.Equal(t, []int{11}, violationLines(NewMoneyIntegerDivisionTruncatesRule().AnalyzeFile(file)))
 }
+
+// A divisor read from a struct the function stores only after checking the
+// value it holds: every price in the map passed IsPositive before it went in,
+// so the previous price a later row divides by is not zero. A field also set
+// from an unchecked value elsewhere stays reported.
+func TestDecimalDivUnguardedFieldStoredAfterCheck(t *testing.T) {
+	project := decimalProject(t, map[string]string{
+		"moves/moves.go": `package moves
+
+import "github.com/shopspring/decimal"
+
+type last struct{ price decimal.Decimal }
+
+type row struct {
+	key   string
+	price decimal.Decimal
+}
+
+func Moves(rows []row) []decimal.Decimal {
+	seen := map[string]last{}
+	var moves []decimal.Decimal
+	for _, r := range rows {
+		price := r.price
+		if !price.IsPositive() {
+			continue
+		}
+		if prev, ok := seen[r.key]; ok {
+			moves = append(moves, price.Div(prev.price))
+		}
+		seen[r.key] = last{price: price}
+	}
+	return moves
+}
+
+type mark struct{ value decimal.Decimal }
+
+func Ratios(rows []row) []decimal.Decimal {
+	seen := map[string]mark{}
+	var out []decimal.Decimal
+	for _, r := range rows {
+		if prev, ok := seen[r.key]; ok {
+			out = append(out, r.price.Div(prev.value))
+		}
+		seen[r.key] = mark{value: r.price}
+	}
+	return out
+}
+`,
+	})
+	violations, err := NewDecimalDivUnguardedRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Equal(t, []int{35}, violationLines(violations))
+}

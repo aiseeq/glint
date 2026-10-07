@@ -143,9 +143,13 @@ func Export() (any, error) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := goContext(t, "service.go", tt.code)
-			violations := mustAnalyzeFiles(t, []*core.FileContext{ctx}, []rules.Rule{tt.rule}, cfg, nil)
+			violations, suppressions := mustAnalyzeFilesWithSuppressions(t, []*core.FileContext{ctx}, []rules.Rule{tt.rule}, cfg, nil)
 			if len(violations) != tt.wantCount {
 				t.Errorf("got %d violations, want %d: %+v", len(violations), tt.wantCount, violations)
+			}
+			// Every silenced finding leaves an entry naming its marker.
+			if len(suppressions) != 1-tt.wantCount {
+				t.Errorf("got suppression entries %+v, want %d", suppressions, 1-tt.wantCount)
 			}
 		})
 	}
@@ -408,8 +412,8 @@ func TestAnalyzeProjectFiltersPackageFindings(t *testing.T) {
 			if err != nil {
 				t.Fatalf("analyze project: %v", err)
 			}
-			if len(violations) != 0 {
-				t.Fatalf("got findings %+v, want filtered", violations)
+			if findings, _ := core.SplitSuppressions(violations); len(findings) != 0 {
+				t.Fatalf("got findings %+v, want filtered", findings)
 			}
 		})
 	}
@@ -517,13 +521,21 @@ func TestFindingSetDropsFindingOfOverlappingRoot(t *testing.T) {
 	}
 }
 
+// mustAnalyzeFiles returns the findings of the files; the entries of the
+// suppressions they met are left out.
 func mustAnalyzeFiles(t *testing.T, contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides) core.ViolationList {
+	t.Helper()
+	findings, _ := mustAnalyzeFilesWithSuppressions(t, contexts, enabledRules, cfg, overrides)
+	return findings
+}
+
+func mustAnalyzeFilesWithSuppressions(t *testing.T, contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides) (findings, suppressions core.ViolationList) {
 	t.Helper()
 	violations, err := analyzeFiles(contexts, enabledRules, cfg, overrides, nil)
 	if err != nil {
 		t.Fatalf("analyze files: %v", err)
 	}
-	return violations
+	return core.SplitSuppressions(violations)
 }
 
 type panickingRule struct{ *rules.BaseRule }

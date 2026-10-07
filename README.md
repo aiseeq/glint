@@ -213,6 +213,8 @@ db := NewRepo(nil)
 
 Always add the reason after the marker. Policy rules may opt out of suppression entirely (implement `rules.SuppressionExempt`; `silent-config-error` does).
 
+A marker or a finding exception that silenced nothing in the run is reported by `stale-suppression`: it would hide the next real finding on that spot unseen. The rule judges only rules the run executed; a bare `//nolint` and a name that is no glint rule are reported unless the project configures golangci-lint (`.golangci.yml` in the root or above), whose linters such names may mean. Exceptions are judged when the run covers the configuration's whole directory.
+
 ### Known Limitations
 
 - **doc-links**: May flag `localhost` or `example.com` in code comments used as format examples.

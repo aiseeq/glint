@@ -28,6 +28,33 @@ type Violation struct {
 	// no single schema to declare.
 	// any-in-public-contract: safe
 	Context map[string]any
+
+	// Suppression is set on an entry that is no finding: it records that an
+	// inline marker (SuppressionInline, at the marker's line) or a configured
+	// exception (SuppressionExceptionPrefix + key) silenced one. Such entries
+	// travel with the findings, through the result cache too, only so that a
+	// suppression nothing needs can be told apart; they never reach the
+	// output.
+	Suppression string
+}
+
+// NewSuppressionEntry makes the entry of a silenced finding of the rule: at
+// the marker's line for SuppressionInline, at the finding's line for an
+// exception.
+func NewSuppressionEntry(rule, category, file string, line int, suppression string) *Violation {
+	return &Violation{Rule: rule, Category: category, File: file, Line: line, Suppression: suppression}
+}
+
+// SplitSuppressions separates the suppression entries from the findings.
+func SplitSuppressions(list ViolationList) (findings, suppressions ViolationList) {
+	for _, v := range list {
+		if v.Suppression != "" {
+			suppressions = append(suppressions, v)
+			continue
+		}
+		findings = append(findings, v)
+	}
+	return findings, suppressions
 }
 
 // NewViolation creates a new violation with required fields

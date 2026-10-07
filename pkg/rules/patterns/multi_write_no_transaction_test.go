@@ -767,3 +767,144 @@ func (s *Service) Sync(ctx context.Context) error {
 		})
 	}
 }
+
+// Проектный раннер транзакции, построенный поверх другого: функция открывает
+// транзакцию (BeginTx) и вызывает переданный колбэк, а обёртка над ней передаёт
+// свой колбэк внутрь. Обе — раннеры; хелпер, достижимый только из их колбэков,
+// пишет уже атомарно.
+func TestMultiWriteNoTransactionRule_DerivedRunnersCoverHelpers(t *testing.T) {
+	violations := analyzeStoreModuleImports(t, NewMultiWriteNoTransactionRule(), `"database/sql"`, `
+type LedgerRepo struct{ db *sql.DB }
+
+func (r *LedgerRepo) CreateEntry(ctx context.Context) error   { return nil }
+func (r *LedgerRepo) CreatePosting(ctx context.Context) error { return nil }
+
+func runInDBTx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return tx.Rollback()
+	}
+	return tx.Commit()
+}
+
+func withLedger(ctx context.Context, repo *LedgerRepo, fn func(*LedgerRepo) error) error {
+	return runInDBTx(ctx, repo.db, func(tx *sql.Tx) error {
+		return fn(&LedgerRepo{})
+	})
+}
+
+func (s *Service) record(ctx context.Context, repo *LedgerRepo) error {
+	if err := repo.CreateEntry(ctx); err != nil {
+		return err
+	}
+	return repo.CreatePosting(ctx)
+}
+
+func (s *Service) Subscribe(ctx context.Context, repo *LedgerRepo) error {
+	return withLedger(ctx, repo, func(r *LedgerRepo) error {
+		return s.record(ctx, r)
+	})
+}
+
+func (s *Service) recordBare(ctx context.Context, repo *LedgerRepo) error {
+	if err := repo.CreateEntry(ctx); err != nil {
+		return err
+	}
+	return repo.CreatePosting(ctx)
+}
+
+func (s *Service) Direct(ctx context.Context, repo *LedgerRepo) error {
+	return s.recordBare(ctx, repo)
+}
+`)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "recordBare")
+}
+
+// Ветки, каждая из которых пишет и возвращает, взаимоисключающие: за проход
+// выполняется одна запись.
+func TestMultiWriteNoTransactionRule_ExclusiveReturningBranches(t *testing.T) {
+	violations := analyzeStoreModule(t, `
+func (s *Service) Settle(ctx context.Context, a, b bool) error {
+	if a {
+		if err := s.repo.UpdateThing(ctx); err != nil {
+			return err
+		}
+		return nil
+	}
+	if b {
+		if err := s.repo.CreateThing(ctx); err != nil {
+			return err
+		}
+		return nil
+	}
+	return nil
+}
+`)
+	assert.Empty(t, violations)
+}
+
+// Цепочка правил-обработчиков: каждый пишет только когда берёт объект на себя и
+// тогда возвращает handled=true, а вызывающий на handled уходит. Записи двух
+// обработчиков в один проход не попадают.
+func TestMultiWriteNoTransactionRule_HandledFlagEndsTheChain(t *testing.T) {
+	violations := analyzeStoreModule(t, `
+func (s *Service) settleA(ctx context.Context, a bool) (string, bool, error) {
+	if !a {
+		return "", false, nil
+	}
+	if err := s.repo.UpdateThing(ctx); err != nil {
+		return "", true, err
+	}
+	return "a", true, nil
+}
+
+func (s *Service) settleB(ctx context.Context, b bool) (bool, error) {
+	if b {
+		return true, s.repo.CreateThing(ctx)
+	}
+	return false, nil
+}
+
+func (s *Service) Settle(ctx context.Context, a, b bool) (string, bool, error) {
+	if rule, handled, err := s.settleA(ctx, a); handled || err != nil {
+		return rule, handled, err
+	}
+	handled, err := s.settleB(ctx, b)
+	if err != nil {
+		return "", true, err
+	}
+	if handled {
+		return "b", true, nil
+	}
+	return "", false, s.repo.DeleteThing(ctx)
+}
+`)
+	assert.Empty(t, violations)
+}
+
+// Флаг, который обработчик возвращает и после записи, и без неё, ничего не
+// разделяет: записи двух обработчиков складываются.
+func TestMultiWriteNoTransactionRule_FlagNotTiedToWriteStillReported(t *testing.T) {
+	violations := analyzeStoreModule(t, `
+func (s *Service) stepA(ctx context.Context, a bool) (bool, error) {
+	if a {
+		if err := s.repo.UpdateThing(ctx); err != nil {
+			return true, err
+		}
+	}
+	return a, nil
+}
+
+func (s *Service) Run(ctx context.Context, a bool) error {
+	if done, err := s.stepA(ctx, a); done && err != nil {
+		return err
+	}
+	return s.repo.CreateThing(ctx)
+}
+`)
+	require.Len(t, violations, 1)
+}

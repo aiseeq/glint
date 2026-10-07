@@ -47,6 +47,10 @@ func init() {
 //     panic) before the other one. Helpers are summarised per path too, so a helper
 //     that writes one thing or the other contributes one write per path.
 //   - A retry of the same call: the same method name twice is one write attempted twice.
+//   - Writes of handlers chained on a flag: a helper that returns true in its first bool
+//     result on every path that wrote (handled, applied), with a caller that leaves on
+//     that flag (`if handled || err != nil { return }`), never meets the next handler's
+//     write on the same path.
 //   - A write whose error sends the path away: a write that failed did not happen, and a
 //     helper that wrote and then returned an error leaves a caller that returns on that
 //     error without meeting the caller's next write.
@@ -61,6 +65,10 @@ func init() {
 //   - Writes already inside a transaction runner's callback, and functions that are only
 //     ever reached from inside one — the wrapper does not have to sit in the same function
 //     as the writes, and requiring that would push every helper back into one long method.
+//     A runner is a function named in transaction_functions, or a project function that
+//     opens a transaction (BeginTx) and calls its callback parameter, or hands that
+//     callback on into another runner's callback (withLedgerTx over
+//     runInDBTx).
 //
 // Deliberately separate steps do exist: crediting a deposit and auto-investing it are two
 // operations, and rolling back the credit because the investment failed would be worse than
@@ -139,40 +147,18 @@ func (r *MultiWriteNoTransactionRule) Configure(settings map[string]any) error {
 		}
 		r.storeType = compiled
 	}
-	if raw, ok := settings["transaction_functions"]; ok {
-		list, ok := raw.([]any)
-		if !ok {
-			return fmt.Errorf("configure multi-write-no-transaction: transaction_functions must be a list, got %T", raw)
-		}
-		runners := make(map[string]bool, len(list))
-		for i, item := range list {
-			name, ok := item.(string)
-			if !ok {
-				return fmt.Errorf("configure multi-write-no-transaction: transaction_functions item %d must be a string, got %T", i, item)
-			}
-			if strings.TrimSpace(name) == "" {
-				return fmt.Errorf("configure multi-write-no-transaction: transaction_functions item %d is empty", i)
-			}
-			runners[name] = true
-		}
-		r.txRunners = runners
+	txRunners, present, err := rules.NameSetSetting(settings, r.Name(), "transaction_functions")
+	if err != nil {
+		return err
 	}
-	if raw, ok := settings["independent_calls"]; ok {
-		list, ok := raw.([]any)
-		if !ok {
-			return fmt.Errorf("configure multi-write-no-transaction: independent_calls must be a list, got %T", raw)
-		}
-		independent := make(map[string]bool, len(list))
-		for i, item := range list {
-			name, ok := item.(string)
-			if !ok {
-				return fmt.Errorf("configure multi-write-no-transaction: independent_calls item %d must be a string, got %T", i, item)
-			}
-			if strings.TrimSpace(name) == "" {
-				return fmt.Errorf("configure multi-write-no-transaction: independent_calls item %d is empty", i)
-			}
-			independent[name] = true
-		}
+	if present {
+		r.txRunners = txRunners
+	}
+	independent, present, err := rules.NameSetSetting(settings, r.Name(), "independent_calls")
+	if err != nil {
+		return err
+	}
+	if present {
 		r.independent = independent
 	}
 	return nil
@@ -193,8 +179,10 @@ func (r *MultiWriteNoTransactionRule) AnalyzeGoProject(ctx *core.GoProjectContex
 		return nil, errors.New("multi write no transaction: nil Go project context")
 	}
 
-	covered := r.functionsUnderTransaction(ctx)
+	runners := r.derivedTransactionRunners(ctx)
+	covered := r.functionsUnderTransaction(ctx, runners)
 	graph := r.buildGraph(ctx)
+	graph.runners = runners
 
 	var violations []*core.Violation
 	// Sorted, so that summaries cut at a recursive call come out the same on every run.
@@ -256,6 +244,15 @@ const (
 	outcomeNonNil
 )
 
+// flagOutcome is what a path knows about a bool flag: nothing, false or true.
+type flagOutcome int
+
+const (
+	flagUnknown flagOutcome = iota
+	flagFalse
+	flagTrue
+)
+
 // writePath is the flow state of one control-flow path: the write it has
 // performed so far, if any. A path never carries two distinct writes — the
 // second one is the finding, recorded in the function summary, and the path
@@ -280,6 +277,14 @@ type writePath struct {
 	// error result on this path; the statement that holds the call binds it.
 	resultCall *ast.CallExpr
 	result     errOutcome
+	// flagVar is the bool variable bound to the first bool result of a
+	// project call (handled, applied), flagState what the path knows about
+	// it; at a function exit flagVar is nil and flagState is the value the
+	// function returns in its first bool result. resultFlag is that value
+	// for the call just evaluated.
+	flagVar    types.Object
+	flagState  flagOutcome
+	resultFlag flagOutcome
 }
 
 func writePathKey(path writePath) string {
@@ -297,7 +302,12 @@ func writePathKey(path writePath) string {
 	if path.resultCall != nil {
 		resultCall = flowPosKey(path.resultCall.Pos())
 	}
-	return flowPathKey(method, strconv.FormatBool(path.failing), errVar, strconv.Itoa(int(path.errState)), resultCall, strconv.Itoa(int(path.result)))
+	flagVar := ""
+	if path.flagVar != nil {
+		flagVar = flowPosKey(path.flagVar.Pos())
+	}
+	return flowPathKey(method, strconv.FormatBool(path.failing), errVar, strconv.Itoa(int(path.errState)), resultCall, strconv.Itoa(int(path.result)),
+		flagVar, strconv.Itoa(int(path.flagState)), strconv.Itoa(int(path.resultFlag)))
 }
 
 func joinWritePaths(left, right []writePath) []writePath {
@@ -353,7 +363,9 @@ func (s *writeSummary) offend(first, second writeCall) {
 // callGraph holds every project function and the summaries computed so far.
 // Each function is summarised once; its callers reuse the summary.
 type callGraph struct {
-	rule      *MultiWriteNoTransactionRule
+	rule *MultiWriteNoTransactionRule
+	// runners are the project functions that run a callback in a transaction.
+	runners   map[string]bool
 	funcs     map[string]*funcNode
 	summaries map[string]*writeSummary
 	visiting  map[string]bool
@@ -439,19 +451,13 @@ func (r *MultiWriteNoTransactionRule) violation(ctx *core.GoProjectContext, node
 			node.display, pair[1].where(),
 		)
 	}
-	return &core.Violation{
-		Rule:       r.Name(),
-		File:       node.file,
-		Line:       pos.Line,
-		Column:     pos.Column,
-		Message:    message,
-		Severity:   r.DefaultSeverity(),
-		Category:   r.Category(),
-		Suggestion: "Wrap the writes in one transaction so the operation either applies fully or leaves no trace",
-		// Имя функции в контексте — то, по чему `function:` в конфиге исключает
-		// одну осознанно разделённую пару, не глуша правило на весь файл.
-		Context: map[string]any{"function": node.display},
-	}
+	v := r.CreateViolation(node.file, pos.Line, message)
+	v.Column = pos.Column
+	v.WithSuggestion("Wrap the writes in one transaction so the operation either applies fully or leaves no trace")
+	// Имя функции в контексте — то, по чему `function:` в конфиге исключает
+	// одну осознанно разделённую пару, не глуша правило на весь файл.
+	v.WithContext("function", node.display)
+	return v
 }
 
 // writeFlowAnalyzer walks one function body with the shared flow walker. The
@@ -507,8 +513,10 @@ func (a *writeFlowAnalyzer) simpleStmt(stmt ast.Stmt, paths []writePath, _ struc
 		exits := make([]writePath, 0, len(paths))
 		for _, path := range paths {
 			outcome := a.returnOutcome(node, path)
+			flag := a.returnFlag(node, path)
 			path.errVar, path.errState = nil, outcome
-			path.resultCall, path.result = nil, outcomeUnknown
+			path.flagVar, path.flagState = nil, flag
+			path.resultCall, path.result, path.resultFlag = nil, outcomeUnknown, flagUnknown
 			exits = append(exits, path)
 		}
 		a.exits = joinWritePaths(a.exits, exits)
@@ -542,7 +550,7 @@ func (a *writeFlowAnalyzer) simpleStmt(stmt ast.Stmt, paths []writePath, _ struc
 // holding it is done.
 func settleWritePaths(paths []writePath) []writePath {
 	for i := range paths {
-		paths[i].resultCall, paths[i].result = nil, outcomeUnknown
+		paths[i].resultCall, paths[i].result, paths[i].resultFlag = nil, outcomeUnknown, flagUnknown
 	}
 	return joinWritePaths(paths, nil)
 }
@@ -603,6 +611,7 @@ func (a *writeFlowAnalyzer) scan(node ast.Node, paths []writePath) []writePath {
 		closed := a.walkBody(current.Body, signature, slices.Clone(paths))
 		for i := range closed {
 			closed[i].errVar, closed[i].errState = nil, outcomeUnknown
+			closed[i].flagVar, closed[i].flagState = nil, flagUnknown
 		}
 		return joinWritePaths(paths, closed)
 	case *ast.CallExpr:
@@ -618,7 +627,7 @@ func (a *writeFlowAnalyzer) scan(node ast.Node, paths []writePath) []writePath {
 // of a project function splices in that function's summary.
 func (a *writeFlowAnalyzer) call(call *ast.CallExpr, paths []writePath) []writePath {
 	rule := a.graph.rule
-	if rule.isTransactionRunner(call) {
+	if rule.isTransactionRunner(call, a.info, a.graph.runners) {
 		// Записи внутри колбэка транзакции уже защищены — вглубь не идём.
 		return withResult(paths, call, outcomeUnknown)
 	}
@@ -651,7 +660,7 @@ func (a *writeFlowAnalyzer) call(call *ast.CallExpr, paths []writePath) []writeP
 // outcome of its error result.
 func withResult(paths []writePath, call *ast.CallExpr, outcome errOutcome) []writePath {
 	for i := range paths {
-		paths[i].resultCall, paths[i].result = call, outcome
+		paths[i].resultCall, paths[i].result, paths[i].resultFlag = call, outcome, flagUnknown
 	}
 	return joinWritePaths(paths, nil)
 }
@@ -718,7 +727,7 @@ func (a *writeFlowAnalyzer) through(paths []writePath, callee *writeSummary, hel
 	for _, path := range paths {
 		for _, exit := range callee.exits {
 			continued := path
-			continued.resultCall, continued.result = call, exit.errState
+			continued.resultCall, continued.result, continued.resultFlag = call, exit.errState, exit.flagState
 			if path.write == nil && exit.write != nil {
 				written := exit.write.through(helper)
 				written.failing = written.failing || path.failing
@@ -798,7 +807,91 @@ func (a *writeFlowAnalyzer) bindErrors(assign *ast.AssignStmt, paths []writePath
 			paths[j].errVar, paths[j].errState = obj, outcome
 		}
 	}
+	a.bindFlag(assign, paths)
 	return settleWritePaths(paths)
+}
+
+// firstBoolResult returns the index of the signature's first bool result, or -1.
+func firstBoolResult(signature *types.Signature) int {
+	if signature == nil {
+		return -1
+	}
+	for i := 0; i < signature.Results().Len(); i++ {
+		if isBoolType(signature.Results().At(i).Type()) {
+			return i
+		}
+	}
+	return -1
+}
+
+// bindFlag binds the first bool result of the call just evaluated, when the
+// path knows its value, to the variable the assignment stores it in; a later
+// assignment to the tracked variable replaces what the path knows.
+func (a *writeFlowAnalyzer) bindFlag(assign *ast.AssignStmt, paths []writePath) {
+	var call *ast.CallExpr
+	index := -1
+	if len(assign.Rhs) == 1 {
+		if c, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr); ok {
+			signature, _ := a.info.TypeOf(c.Fun).(*types.Signature)
+			if signature != nil && signature.Results().Len() == len(assign.Lhs) {
+				call, index = c, firstBoolResult(signature)
+			}
+		}
+	}
+	for i, lhs := range assign.Lhs {
+		ident, ok := lhs.(*ast.Ident)
+		if !ok || ident.Name == "_" {
+			continue
+		}
+		obj := a.info.Defs[ident]
+		if obj == nil {
+			obj = a.info.Uses[ident]
+		}
+		if obj == nil {
+			continue
+		}
+		for j := range paths {
+			switch {
+			case i == index && call == paths[j].resultCall && paths[j].resultFlag != flagUnknown:
+				paths[j].flagVar, paths[j].flagState = obj, paths[j].resultFlag
+			case obj == paths[j].flagVar:
+				state := flagUnknown
+				if len(assign.Rhs) == len(assign.Lhs) {
+					state = boolLiteralFlag(assign.Rhs[i])
+				}
+				paths[j].flagState = state
+			}
+		}
+	}
+}
+
+// boolLiteralFlag judges true and false literals.
+func boolLiteralFlag(expr ast.Expr) flagOutcome {
+	ident, ok := ast.Unparen(expr).(*ast.Ident)
+	if !ok {
+		return flagUnknown
+	}
+	switch ident.Name {
+	case "true":
+		return flagTrue
+	case "false":
+		return flagFalse
+	}
+	return flagUnknown
+}
+
+// returnFlag judges the value a return statement hands back in the
+// function's first bool result on the path.
+func (a *writeFlowAnalyzer) returnFlag(ret *ast.ReturnStmt, path writePath) flagOutcome {
+	index := firstBoolResult(a.signature)
+	if index < 0 || len(ret.Results) != a.signature.Results().Len() {
+		return flagUnknown
+	}
+	expr := ast.Unparen(ret.Results[index])
+	if ident, ok := expr.(*ast.Ident); ok && path.flagVar != nil && a.info.Uses[ident] == path.flagVar {
+		return path.flagState
+	}
+	return boolLiteralFlag(expr)
 }
 
 // returnOutcome judges the error a return statement hands back on the path.
@@ -864,12 +957,27 @@ func isPackageLevelVar(obj *types.Var) bool {
 type errorFact struct {
 	variable types.Object
 	nonNil   bool
+	// flag: the fact is about a bool flag, nonNil meaning it is true.
+	flag bool
 }
 
 // errorFacts returns what the condition says about error variables in the
 // branch it holds in and in the one it does not: `err != nil` in the then
 // branch, and through && and || what every conjunct or disjunct says.
 func (a *writeFlowAnalyzer) errorFacts(cond ast.Expr) (thenFacts, elseFacts []errorFact) {
+	switch node := ast.Unparen(cond).(type) {
+	case *ast.Ident:
+		if obj := a.info.Uses[node]; obj != nil && isBoolType(obj.Type()) {
+			return []errorFact{{variable: obj, nonNil: true, flag: true}}, []errorFact{{variable: obj, flag: true}}
+		}
+		return nil, nil
+	case *ast.UnaryExpr:
+		if node.Op == token.NOT {
+			thenFacts, elseFacts = a.errorFacts(node.X)
+			return elseFacts, thenFacts
+		}
+		return nil, nil
+	}
 	binary, ok := ast.Unparen(cond).(*ast.BinaryExpr)
 	if !ok {
 		return nil, nil
@@ -913,6 +1021,13 @@ func assumeErrors(paths []writePath, facts []errorFact) []writePath {
 	for _, path := range paths {
 		possible := true
 		for _, fact := range facts {
+			if fact.flag {
+				if !assumeFlag(&path, fact) {
+					possible = false
+					break
+				}
+				continue
+			}
 			if path.errVar == nil || path.errVar != fact.variable {
 				continue
 			}
@@ -933,10 +1048,27 @@ func assumeErrors(paths []writePath, facts []errorFact) []writePath {
 	return joinWritePaths(kept, nil)
 }
 
+// assumeFlag refines what the path knows about its flag by the fact, and
+// reports false when the path cannot take the branch.
+func assumeFlag(path *writePath, fact errorFact) bool {
+	if path.flagVar == nil || path.flagVar != fact.variable {
+		return true
+	}
+	known := flagFalse
+	if fact.nonNil {
+		known = flagTrue
+	}
+	if path.flagState != flagUnknown && path.flagState != known {
+		return false
+	}
+	path.flagState = known
+	return true
+}
+
 // failureFact reports whether the facts say that an error is set.
 func failureFact(facts []errorFact) bool {
 	for _, fact := range facts {
-		if fact.nonNil {
+		if fact.nonNil && !fact.flag {
 			return true
 		}
 	}
@@ -990,10 +1122,122 @@ func directChildren(n ast.Node) []ast.Node {
 	return children
 }
 
-// isTransactionRunner reports whether the call hands a callback to a transaction runner.
-func (r *MultiWriteNoTransactionRule) isTransactionRunner(call *ast.CallExpr) bool {
+// isTransactionRunner reports whether the call hands a callback to a transaction runner:
+// one named in transaction_functions or a project function derived as one.
+func (r *MultiWriteNoTransactionRule) isTransactionRunner(call *ast.CallExpr, info *types.Info, derived map[string]bool) bool {
 	name := mutationCalleeName(call.Fun)
-	return name != "" && r.txRunners[name]
+	if name != "" && r.txRunners[name] {
+		return true
+	}
+	return len(derived) > 0 && derived[resolvedCalleeName(call, info)]
+}
+
+// derivedTransactionRunners lists the project functions that run a callback parameter in
+// a transaction: they open one (BeginTx) and call the callback, or hand the callback on
+// into the callback of another runner. Computed to a fixed point, so a wrapper over a
+// wrapper is a runner too.
+func (r *MultiWriteNoTransactionRule) derivedTransactionRunners(ctx *core.GoProjectContext) map[string]bool {
+	type candidate struct {
+		body      *ast.BlockStmt
+		info      *types.Info
+		callbacks map[types.Object]bool
+	}
+	candidates := map[string]candidate{}
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil {
+			continue
+		}
+		info := pkg.Package.TypesInfo
+		for _, file := range pkg.Files {
+			if file == nil || file.GoAST == nil {
+				continue
+			}
+			for _, decl := range file.GoAST.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+				obj, ok := info.Defs[fn.Name].(*types.Func)
+				if !ok {
+					continue
+				}
+				callbacks := callbackParams(fn.Type, info)
+				if len(callbacks) > 0 {
+					candidates[obj.FullName()] = candidate{body: fn.Body, info: info, callbacks: callbacks}
+				}
+			}
+		}
+	}
+	runners := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		for name, c := range candidates {
+			if runners[name] {
+				continue
+			}
+			if r.runsCallbackInTransaction(c.body, c.info, c.callbacks, runners) {
+				runners[name] = true
+				changed = true
+			}
+		}
+	}
+	return runners
+}
+
+// callbackParams returns the parameters of function type.
+func callbackParams(ftype *ast.FuncType, info *types.Info) map[types.Object]bool {
+	callbacks := map[types.Object]bool{}
+	for _, field := range ftype.Params.List {
+		for _, name := range field.Names {
+			obj := info.Defs[name]
+			if obj == nil {
+				continue
+			}
+			if _, ok := obj.Type().Underlying().(*types.Signature); ok {
+				callbacks[obj] = true
+			}
+		}
+	}
+	return callbacks
+}
+
+// runsCallbackInTransaction reports whether the body opens a transaction and calls one of
+// the callbacks, or passes one of them (directly or called from a closure) to a runner.
+func (r *MultiWriteNoTransactionRule) runsCallbackInTransaction(body *ast.BlockStmt, info *types.Info, callbacks map[types.Object]bool, runners map[string]bool) bool {
+	opens, calls, handsOn := false, false, false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if r.txOpeners[mutationCalleeName(call.Fun)] {
+			opens = true
+		}
+		if ident, ok := call.Fun.(*ast.Ident); ok && callbacks[info.Uses[ident]] {
+			calls = true
+		}
+		if r.isTransactionRunner(call, info, runners) {
+			for _, arg := range call.Args {
+				if usesCallback(arg, info, callbacks) {
+					handsOn = true
+				}
+			}
+		}
+		return true
+	})
+	return handsOn || (opens && calls)
+}
+
+// usesCallback reports whether the expression names one of the callbacks.
+func usesCallback(expr ast.Expr, info *types.Info, callbacks map[types.Object]bool) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok && callbacks[info.Uses[ident]] {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // isIndependent reports whether the call's writes belong to another unit of work.
@@ -1057,7 +1301,7 @@ type txCallSite struct {
 // and calls a helper that performs them. Without this pass every such helper would be reported
 // even though its writes are atomic. A helper with even one bare call site is not covered:
 // that call executes the writes without a transaction.
-func (r *MultiWriteNoTransactionRule) functionsUnderTransaction(ctx *core.GoProjectContext) map[string]bool {
+func (r *MultiWriteNoTransactionRule) functionsUnderTransaction(ctx *core.GoProjectContext, runners map[string]bool) map[string]bool {
 	covered := make(map[string]bool)
 	callers := make(map[string][]txCallSite)
 
@@ -1091,7 +1335,7 @@ func (r *MultiWriteNoTransactionRule) functionsUnderTransaction(ctx *core.GoProj
 						opensTx = true
 						return true
 					}
-					if r.isTransactionRunner(call) {
+					if r.isTransactionRunner(call, info, runners) {
 						for _, name := range calledFunctions(call, info) {
 							callers[name] = append(callers[name], txCallSite{underTx: true})
 						}

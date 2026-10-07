@@ -93,26 +93,13 @@ func (r *TestExternalServiceRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
-	raw, ok := settings["guard_functions"]
-	if !ok {
-		return nil
+	guards, present, err := rules.NameSetSetting(settings, r.Name(), "guard_functions")
+	if err != nil {
+		return err
 	}
-	list, ok := raw.([]any)
-	if !ok {
-		return fmt.Errorf("configure test-external-service: guard_functions must be a list, got %T", raw)
+	if present {
+		r.guardFunctions = guards
 	}
-	guards := make(map[string]bool, len(list))
-	for i, item := range list {
-		name, ok := item.(string)
-		if !ok {
-			return fmt.Errorf("configure test-external-service: guard_functions item %d must be a string, got %T", i, item)
-		}
-		if strings.TrimSpace(name) == "" {
-			return fmt.Errorf("configure test-external-service: guard_functions item %d is empty", i)
-		}
-		guards[name] = true
-	}
-	r.guardFunctions = guards
 	return nil
 }
 

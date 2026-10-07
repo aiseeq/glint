@@ -127,6 +127,9 @@ func (r *MagicNumberRule) checkLiteral(ctx *core.FileContext, n ast.Node, contex
 
 	pos := ctx.PositionFor(lit)
 	v := r.CreateViolation(ctx.RelPath, pos.Line, "Consider using a named constant instead of magic number")
+	// The column keeps two numbers of one line two findings: without it the
+	// report keeps only the first of them.
+	v.Column = pos.Column
 	v.WithCode(lit.Value)
 	v.WithSuggestion("Define a const with a descriptive name")
 	return v
@@ -243,10 +246,13 @@ func namesChainID(expr ast.Expr) bool {
 	return strings.Contains(strings.ToLower(name), "chainid")
 }
 
-// collectTableFields marks numbers written as keyed struct fields inside
-// package-level var declarations: registry tables where the field key names the
-// value (ChainID: 8453). Positional values and keyed fields inside functions,
-// including function literals assigned to a package var, stay reportable.
+// collectTableFields marks the numbers of lookup tables in package-level var
+// declarations: keyed struct fields, where the field key names the value
+// (ChainID: 8453), and the keys, values and elements of map, slice and array
+// literals, which are external identifiers the table names (chain IDs,
+// discriminator bytes, provider error codes). Positional struct values and
+// every literal inside functions, including function literals assigned to a
+// package var, stay reportable.
 func (lc *litContexts) collectTableFields(file *ast.File) {
 	for _, decl := range file.Decls {
 		gen, ok := decl.(*ast.GenDecl)
@@ -262,9 +268,28 @@ func (lc *litContexts) collectTableFields(file *ast.File) {
 					markLit(lc.tableField, kv.Value)
 				}
 			}
+			if table, ok := n.(*ast.CompositeLit); ok && isMapOrListType(table.Type) {
+				for _, elt := range table.Elts {
+					if kv, ok := elt.(*ast.KeyValueExpr); ok {
+						markLit(lc.tableField, kv.Key)
+						markLit(lc.tableField, kv.Value)
+						continue
+					}
+					markLit(lc.tableField, elt)
+				}
+			}
 			return true
 		})
 	}
+}
+
+// isMapOrListType reports a map, slice or array type expression.
+func isMapOrListType(expr ast.Expr) bool {
+	switch expr.(type) {
+	case *ast.MapType, *ast.ArrayType:
+		return true
+	}
+	return false
 }
 
 func (lc *litContexts) collectBinaryExpr(expr *ast.BinaryExpr) {
