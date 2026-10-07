@@ -298,3 +298,22 @@ func find() {}
 	require.Len(t, violations, 1, "%v", violations)
 	assert.Contains(t, violations[0].Message, "build.Gone")
 }
+
+// Repro from a real project: a comment quoted frontend code in backticks,
+// `planner.queue?.id` and `planner.queue["id"]`, while a Go package planner
+// existed and another package declared queue. Code in backticks is a quote:
+// it refers to a Go name only as pkg.Exported. A missing exported name in
+// backticks is still reported.
+func TestDocStaleReferenceQuotedCodeNeedsExportedName(t *testing.T) {
+	files := withFile("catalog/a.go", "package catalog\n\n"+
+		"// run warns on `planner.queue?.id` and `planner.queue[\"id\"]` in the frontend,\n"+
+		"// and hands the result to `planner.Order`.\n"+
+		"func run() {}\n")
+	files["build/queue.go"] = "package build\n\nfunc queue() {}\n"
+
+	violations := analyzeStaleReference(t, files)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 4, violations[0].Line)
+	assert.Contains(t, violations[0].Message, "planner.Order")
+}

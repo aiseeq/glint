@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -46,71 +47,43 @@ func init() {
 	rules.Register(unitEnv)
 }
 
-// heredocOpen is the start of a heredoc (<<EOF, <<-'EOF'), not of a here
-// string (<<<).
-var heredocOpen = regexp.MustCompile(`(?:^|[^<])<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?`)
-
 // blankedScript returns the lines of a script as one text in which comment
 // lines, heredoc bodies and heredoc terminators are blanked with spaces, so
 // that offsets keep their place and apostrophes in prose open no quote; and
 // the offset where each line starts.
 func blankedScript(lines []string) (string, []int) {
+	heredocs := helpers.ShellHeredocs(lines)
+	terminators := make(map[int]string, len(heredocs))
+	for _, h := range heredocs {
+		terminators[h.End] = h.Terminator
+	}
+	body := heredocBodies(lines)
 	var b strings.Builder
 	starts := make([]int, 0, len(lines))
-	terminator := ""
 	for i, line := range lines {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
 		starts = append(starts, b.Len())
-		trimmed := strings.TrimSpace(line)
+		terminator, ends := terminators[i]
 		switch {
-		case terminator != "":
-			if endsHeredoc(trimmed, terminator) {
-				line = strings.Replace(line, terminator, strings.Repeat(" ", len(terminator)), 1)
-				terminator = ""
-			} else {
-				line = strings.Repeat(" ", len(line))
-			}
-		case strings.HasPrefix(trimmed, "#"):
+		case body[i+1], !ends && strings.HasPrefix(strings.TrimSpace(line), "#"):
 			line = strings.Repeat(" ", len(line))
-		default:
-			if m := heredocOpen.FindStringSubmatch(line); m != nil {
-				terminator = m[1]
-			}
+		case ends:
+			line = strings.Replace(line, terminator, strings.Repeat(" ", len(terminator)), 1)
 		}
 		b.WriteString(line)
 	}
 	return b.String(), starts
 }
 
-// endsHeredoc reports the terminator line of a heredoc. A heredoc inside a
-// quoted bash -c script ends on a line the closing quote shares:
-// PY' 2>/dev/null.
-func endsHeredoc(trimmed, terminator string) bool {
-	rest, ok := strings.CutPrefix(trimmed, terminator)
-	return ok && (rest == "" || strings.ContainsRune(`"')`, rune(rest[0])))
-}
-
 // heredocBodies returns the 1-based numbers of the lines of heredoc bodies:
 // text fed to a command, not shell of the script.
 func heredocBodies(lines []string) map[int]bool {
 	body := map[int]bool{}
-	terminator := ""
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		switch {
-		case terminator != "":
-			if endsHeredoc(trimmed, terminator) {
-				terminator = ""
-			} else {
-				body[i+1] = true
-			}
-		case strings.HasPrefix(trimmed, "#"):
-		default:
-			if m := heredocOpen.FindStringSubmatch(line); m != nil {
-				terminator = m[1]
-			}
+	for _, h := range helpers.ShellHeredocs(lines) {
+		for i := h.Open + 1; i < h.End; i++ {
+			body[i+1] = true
 		}
 	}
 	return body

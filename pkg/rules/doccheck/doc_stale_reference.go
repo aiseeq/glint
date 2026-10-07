@@ -41,7 +41,9 @@ func init() {
 // only module package with that name. A name two module packages share and the
 // file does not import is left alone, so is anything outside the module
 // (fmt.Sprintf), a file name (planner.go) and a path (dir/planner.Order).
-// Test files keep fixtures and quotes of old output and are not checked.
+// Code in backticks (`data.data?.id`) quotes source of any language and
+// refers to a Go name only as pkg.Exported. Test files keep fixtures and
+// quotes of old output and are not checked.
 type DocStaleReferenceRule struct {
 	*rules.BaseRule
 }
@@ -277,6 +279,11 @@ func (r *DocStaleReferenceRule) analyzeFile(fileCtx *core.FileContext, ownPath s
 					name, ident := text[at[2]:at[3]], text[at[4]:at[5]]
 					lead, _ := utf8.DecodeRuneInString(ident)
 					if fileExtensions[ident] || at[6] >= 0 && unicode.IsLower(lead) {
+						continue
+					}
+					// Code in backticks quotes source, of any language: it
+					// means a Go name only as pkg.Exported.
+					if unicode.IsLower(lead) && strings.Count(text[:at[2]], "`")%2 == 1 {
 						continue
 					}
 					path, ok := resolvePackage(name, own, ownPath, imports, mod)

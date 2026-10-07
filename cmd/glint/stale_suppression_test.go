@@ -303,3 +303,35 @@ func TestStaleSuppressionSeesFileExceptionsThroughTheResultCache(t *testing.T) {
 	assert.Len(t, foundAt(got), 3)
 	assert.Positive(t, second.reused)
 }
+
+var hashCommentModule = map[string]string{
+	"go.mod": "module example.com/check\n\ngo 1.24\n",
+	"deploy.sh": `#!/usr/bin/env bash
+set -euo pipefail
+# secret-exposure: safe - nothing below prints a secret
+echo "start"
+echo "$API_TOKEN" # secret-exposure: safe - the operator asked for it
+echo "# secret-exposure: safe"
+echo "${#API_TOKEN}"
+#nolint
+echo done
+`,
+	".github/workflows/ci.yml": `steps:
+  # nolint:secret-exposure - nothing here prints a secret
+  - run: make test
+`,
+}
+
+// Scripts, YAML and the other files that comment with '#' have their markers
+// judged like Go's: a marker that silences nothing is stale, one that
+// silences a finding is not, and a '#' inside quotes or ${#var} is no marker.
+func TestStaleSuppressionJudgesHashCommentMarkers(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range hashCommentModule {
+		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte(content), 0o644))
+	}
+	findings, stale := analyzeWithRules(t, root, nil, "secret-exposure", "stale-suppression")
+	assert.Empty(t, foundAt(findings))
+	assert.ElementsMatch(t, []string{"deploy.sh:3", "deploy.sh:8", ".github/workflows/ci.yml:2"}, foundAt(stale))
+}
