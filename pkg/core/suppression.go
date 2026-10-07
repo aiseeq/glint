@@ -33,13 +33,6 @@ func (l *suppressionLog) record(rule string, line int) {
 	}
 }
 
-// RecordSuppression records that a marker on the line silenced a finding of
-// the rule, for a rule that recognizes its markers by a matcher of its own
-// instead of IsSuppressed.
-func (ctx *FileContext) RecordSuppression(rule string, line int) {
-	ctx.suppression.record(rule, line)
-}
-
 // TakeSuppressionHits returns the lines of the markers that silenced findings
 // of the rule since the last call, and forgets them.
 func (ctx *FileContext) TakeSuppressionHits(rule string) []int {

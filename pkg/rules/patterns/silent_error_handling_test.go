@@ -343,3 +343,24 @@ func collectChecked(slug string) ([]string, error) {
 	require.Len(t, violations, 1)
 	require.Equal(t, 20, violations[0].Line)
 }
+
+// Only the rule's own marker silences it; another rule's nolint does not.
+func TestSilentErrorHandlingRule_OnlyItsOwnMarkerSuppresses(t *testing.T) {
+	code := func(marker string) string {
+		return `package main
+
+func parse() (int, error) { return 0, nil }
+
+func example() int {
+	n, err := parse()
+	if err != nil { ` + marker + `
+		return 0
+	}
+	return n
+}
+`
+	}
+	rule := NewSilentErrorHandlingRule()
+	require.Len(t, rule.AnalyzeFile(createSilentErrorContext(t, "service.go", code("//nolint:errcheck"))), 1)
+	require.Empty(t, rule.AnalyzeFile(createSilentErrorContext(t, "service.go", code("//nolint:silent-error-handling"))))
+}

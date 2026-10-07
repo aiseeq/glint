@@ -215,9 +215,7 @@ func (r *EmptyStructReturnRule) checkReturnForEmptyStructWithNilError(ctx *core.
 					pos := ctx.PositionFor(ret)
 					lineContent := ctx.GetLine(pos.Line)
 
-					// Skip if has nolint
-					if strings.Contains(lineContent, "nolint") {
-						ctx.RecordSuppression(r.Name(), pos.Line)
+					if ctx.IsSuppressed(pos.Line, r.Name()) {
 						return nil
 					}
 

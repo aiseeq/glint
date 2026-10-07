@@ -160,21 +160,26 @@ func announce() int {
 	assert.Empty(t, found, "печать — признанное исключение: %v", found)
 }
 
-// Явная пометка nolint комментарием над строкой — тоже пометка.
-func TestIgnoredError_NolintAboveLineIsRespected(t *testing.T) {
-	found := ignoredErrorMessages(t, map[string]string{"storage/storage.go": `package storage
+// Пометка — только маркер самого правила, над строкой или на ней. Чужое имя
+// (nolint:errcheck — линтер golangci) и слово nolint в тексте не глушат.
+func TestIgnoredError_OnlyItsOwnMarkerSuppresses(t *testing.T) {
+	source := func(marker string) map[string]string {
+		return map[string]string{"storage/storage.go": `package storage
 
 type Repo struct{}
 
 func (r *Repo) List(userID string) ([]int, error) { return nil, nil }
 
 func Collect(r *Repo, userID string) []int {
-	//nolint:errcheck // ответ уже отправлен, сообщать об ошибке некому
+	` + marker + `
 	items, _ := r.List(userID)
 	return items
 }
-`})
-	assert.Empty(t, found, "пометка над строкой должна учитываться: %v", found)
+`}
+	}
+	assert.Empty(t, ignoredErrorMessages(t, source("//nolint:ignored-error // ответ уже отправлен")))
+	assert.Len(t, ignoredErrorMessages(t, source("//nolint:errcheck // ответ уже отправлен")), 1)
+	assert.Len(t, ignoredErrorMessages(t, source("// nolint-free: ответ уже отправлен")), 1)
 }
 
 // Откат транзакции: ошибка отката идёт поверх уже случившейся ошибки.

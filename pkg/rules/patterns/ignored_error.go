@@ -77,12 +77,9 @@ func (r *IgnoredErrorRule) checkAssign(fileCtx *core.FileContext, assign *ast.As
 	if v == nil {
 		return nil
 	}
-	// nolint пишут и на самой строке, и комментарием над ней — принимаем оба места.
-	for _, at := range []int{v.Line, v.Line - 1} {
-		if hasSuppression(fileCtx.GetLine(at)) {
-			fileCtx.RecordSuppression(r.Name(), at)
-			return nil
-		}
+	// Маркер правила — на самой строке или комментарием над ней.
+	if fileCtx.IsSuppressed(v.Line, r.Name()) {
+		return nil
 	}
 	return v
 }
@@ -146,11 +143,6 @@ func isErrorType(t types.Type) bool {
 	}
 	obj := named.Obj()
 	return obj != nil && obj.Pkg() == nil && obj.Name() == "error"
-}
-
-// hasSuppression распознаёт явное «проверено, выброшено осознанно».
-func hasSuppression(line string) bool {
-	return strings.Contains(line, "nolint") || strings.Contains(line, "errcheck")
 }
 
 func isKnownSafeToIgnore(funcName string) bool {

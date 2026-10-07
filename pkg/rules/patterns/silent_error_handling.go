@@ -122,9 +122,7 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 		pos := ctx.PositionFor(ifStmt)
 		lineContent := ctx.GetLine(pos.Line)
 
-		// Skip if has nolint
-		if strings.Contains(lineContent, "nolint") {
-			ctx.RecordSuppression(r.Name(), pos.Line)
+		if ctx.IsSuppressed(pos.Line, r.Name()) {
 			return true
 		}
 

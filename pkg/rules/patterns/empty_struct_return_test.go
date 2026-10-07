@@ -390,6 +390,20 @@ func (l *Loader) Load() (Config, error) {
 			wantCount: 0,
 		},
 		{
+			name:     "another rule's nolint does not suppress",
+			filename: "config/loader.go",
+			code: `package config
+
+func (l *Loader) Load() (Config, error) {
+	if l.source == nil {
+		return Config{}, nil //nolint:errcheck // no source means documented empty config
+	}
+	return l.source.Read()
+}
+`,
+			wantCount: 1,
+		},
+		{
 			name:     "test file is skipped",
 			filename: "config/loader_test.go",
 			code: `package config
