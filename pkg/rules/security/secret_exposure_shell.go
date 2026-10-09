@@ -80,18 +80,18 @@ func capturedHeredocLines(lines []string) map[int]bool {
 	return captured
 }
 
-// insideCommandSubstitution reports a line prefix that leaves a $( ... ) or
-// a backquote open: what the command prints there is captured into a value,
-// not shown on the terminal.
+// insideCommandSubstitution reports a line prefix that leaves a $( ... ), a
+// <( ... ) or a backquote open: what the command prints there is captured into
+// a value or read by another command as a file, not shown on the terminal.
 func insideCommandSubstitution(prefix string) bool {
-	var open []bool // true for $(, false for a plain (
+	var open []bool // true for $( and <(, false for a plain (
 	backquote := false
 	for i := 0; i < len(prefix); i++ {
 		switch prefix[i] {
 		case '`':
 			backquote = !backquote
 		case '(':
-			open = append(open, i > 0 && prefix[i-1] == '$')
+			open = append(open, i > 0 && (prefix[i-1] == '$' || prefix[i-1] == '<'))
 		case ')':
 			if len(open) > 0 {
 				open = open[:len(open)-1]

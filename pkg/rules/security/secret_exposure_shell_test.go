@@ -100,3 +100,15 @@ REMOTE
 `
 	assert.Equal(t, []int{9}, shellSecretLines(t, "creds.sh", code))
 }
+
+// A print inside a process substitution <( ) feeds the command a file to
+// read (curl -H @<(printf ...)), the terminal never sees it; a print inside
+// >( ) still writes to the script's own output.
+func TestSecretExposureProcessSubstitution(t *testing.T) {
+	code := `#!/bin/bash
+curl -fsS -H @<(printf 'Authorization: Bearer %s' "$API_TOKEN") \
+	"$URL/dump" -o out.dump
+tee >(echo "$API_TOKEN") </dev/null
+`
+	assert.Equal(t, []int{4}, shellSecretLines(t, "fetch.sh", code))
+}
