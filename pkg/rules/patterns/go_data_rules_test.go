@@ -277,7 +277,10 @@ func body(email string) string {
 }
 
 // Quotes doubled by hand in place of bind parameters: other metacharacters
-// pass, and the SQL built around the value escapes the injection checks.
+// pass, and the SQL built around the value escapes the injection checks. The
+// escaped value is reported where it reaches SQL text: a concatenation or a
+// format with SQL in it, a query builder, a database call, through variables,
+// helpers that return it and the callers of those helpers.
 func TestSQLQuoteEscapedByHand(t *testing.T) {
 	found := projectRuleLines(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
 		"helpers/where.go": `package helpers
@@ -297,15 +300,79 @@ func legacy(s string) string {
 func other(s string) string {
 	return strings.ReplaceAll(s, "\"", "'")
 }
+
+func unused(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
 `,
 		"helpers/db.go": `package helpers
 
-import "database/sql"
+import (
+	"database/sql"
+	"fmt"
+	"strings"
+)
 
 var DB *sql.DB
+
+func ByName(name string) (*sql.Rows, error) {
+	return DB.Query("SELECT id FROM users WHERE name = '" + escapeSQLLiteral(name) + "'")
+}
+
+func ByCity(city string) string {
+	return fmt.Sprintf("SELECT id FROM users WHERE city = '%s'", quoter.Replace(city))
+}
+
+func ByTags(tags []string) (*sql.Rows, error) {
+	var conds []string
+	for _, t := range tags {
+		conds = append(conds, "'"+legacy(t)+"'")
+	}
+	query := "SELECT id FROM items WHERE tag IN (" + strings.Join(conds, ", ") + ")"
+	return DB.Query(query)
+}
+
+func ByBuilder(name string) (*sql.Rows, error) {
+	var b strings.Builder
+	b.WriteString("SELECT id FROM users WHERE name = ")
+	b.WriteString("'" + strings.ReplaceAll(name, "'", "''") + "'")
+	return DB.Query(b.String())
+}
+
+func Raw(stmt string) error {
+	_, err := DB.Exec(strings.ReplaceAll(stmt, "'", "''"))
+	return err
+}
+
+func label(s string) string { return other(s) + unused("") }
+`,
+		"helpers/owner.go": `package helpers
+
+import (
+	"database/sql"
+	"strings"
+)
+
+func ByOwner(owner string) (*sql.Rows, error) {
+	query := "SELECT id FROM items WHERE owner = "
+	query += "'" + strings.ReplaceAll(owner, "'", "''") + "'"
+	return DB.Query(query)
+}
+
+func ByRegion(region string) (*sql.Rows, error) {
+	return filtered("'" + strings.ReplaceAll(region, "'", "''") + "'")
+}
+
+func filtered(value string) (*sql.Rows, error) {
+	return DB.Query("SELECT id FROM items WHERE region = " + value)
+}
+
+func ByParam(name string) (*sql.Rows, error) {
+	return DB.Query("SELECT id FROM users WHERE name = $1", strings.ReplaceAll(name, "'", "''"))
+}
 `,
 	})
-	assert.Equal(t, []string{"helpers/where.go:12", "helpers/where.go:6", "helpers/where.go:9"}, found)
+	assert.Equal(t, []string{"helpers/db.go:31", "helpers/db.go:36", "helpers/owner.go:10", "helpers/owner.go:15", "helpers/where.go:12", "helpers/where.go:6", "helpers/where.go:9"}, found)
 
 	// A tool that hands SQL text to the psql command has no bind parameters.
 	cli := projectRuleLines(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
@@ -317,6 +384,51 @@ func literal(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + 
 `,
 	})
 	assert.Empty(t, cli)
+}
+
+// A spreadsheet range quotes a sheet name in apostrophes and doubles the
+// apostrophes inside it: that text goes to the spreadsheet API, not to SQL, even in a project that
+// runs queries, and even in a function that runs one.
+func TestSQLQuoteEscapedByHandOutsideSQL(t *testing.T) {
+	found := projectRuleLines(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
+		"export/sheet.go": `package export
+
+import (
+	"database/sql"
+	"strings"
+)
+
+var DB *sql.DB
+
+type valuesService struct{}
+
+type valuesCall struct{}
+
+func (valuesService) Get(sheetID, rng string) valuesCall { return valuesCall{} }
+
+func (valuesCall) Do() (string, error) { return "", nil }
+
+func readTab(svc valuesService, sheetID, tab string) (string, error) {
+	rng := "'" + strings.ReplaceAll(tab, "'", "''") + "'!A1:Z200"
+	return svc.Get(sheetID, rng).Do()
+}
+
+func exportTab(svc valuesService, sheetID, tab string) error {
+	rows, err := DB.Query("SELECT name FROM tabs WHERE title = $1", tab)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	_, err = svc.Get(sheetID, a1Range(tab, "A1:B2")).Do()
+	return err
+}
+
+func a1Range(tab, cells string) string {
+	return "'" + strings.ReplaceAll(tab, "'", "''") + "'!" + cells
+}
+`,
+	})
+	assert.Empty(t, found)
 }
 
 // A metric answered by a literal zero: the API reports no return instead of

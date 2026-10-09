@@ -841,7 +841,9 @@ func (r *JSONBuiltByFormatRule) analyze(ctx *core.FileContext, info *types.Info)
 // The value is pasted into the SQL text: backslashes and LIKE wildcards pass,
 // and the query built around it is invisible to the injection checks. Pass
 // the value as a bind parameter; where a literal is unavoidable, use the
-// driver's quoting (pq.QuoteLiteral).
+// driver's quoting (pq.QuoteLiteral). Doubling a quote is the escape of other
+// texts too (a sheet name in a spreadsheet range), so only an escaped value
+// that reaches SQL text is reported (see escapedSQLFlow).
 type SQLQuoteEscapedByHandRule struct {
 	*rules.BaseRule
 }
@@ -871,12 +873,32 @@ func (r *SQLQuoteEscapedByHandRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	if !usesSQLDriver(ctx) {
 		return nil, nil
 	}
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	decls, err := funcDeclsByObject(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", r.Name(), err)
+	}
+	callers, err := funcCallSites(ctx, decls)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", r.Name(), err)
+	}
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyze(file, info, decls, callers)
+	})
 }
 
 // sqlDriverImports are the packages through which Go code runs queries with
 // bind parameters.
 var sqlDriverImports = []string{"database/sql", "github.com/jmoiron/sqlx", "github.com/jackc/pgx", "gorm.io/gorm"}
+
+// sqlDriverPackage reports a package path of sqlDriverImports or below one.
+func sqlDriverPackage(path string) bool {
+	for _, driver := range sqlDriverImports {
+		if path == driver || strings.HasPrefix(path, driver+"/") {
+			return true
+		}
+	}
+	return false
+}
 
 // usesSQLDriver reports a project importing a SQL driver or database/sql.
 func usesSQLDriver(ctx *core.GoProjectContext) bool {
@@ -885,17 +907,15 @@ func usesSQLDriver(ctx *core.GoProjectContext) bool {
 			continue
 		}
 		for path := range pkg.Package.Imports {
-			for _, driver := range sqlDriverImports {
-				if path == driver || strings.HasPrefix(path, driver+"/") {
-					return true
-				}
+			if sqlDriverPackage(path) {
+				return true
 			}
 		}
 	}
 	return false
 }
 
-func (r *SQLQuoteEscapedByHandRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+func (r *SQLQuoteEscapedByHandRule) analyze(ctx *core.FileContext, info *types.Info, decls map[*types.Func]typedFuncDecl, callers map[*types.Func][]funcCallSite) []*core.Violation {
 	if !productionGoFile(ctx) {
 		return nil
 	}
@@ -907,28 +927,56 @@ func (r *SQLQuoteEscapedByHandRule) analyze(ctx *core.FileContext, info *types.I
 		replacement, ok := goConstantString(to, info)
 		return ok && replacement == "''"
 	}
-	var violations []*core.Violation
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		escapes := false
+	escapes := func(call *ast.CallExpr) bool {
 		switch {
 		case isPackageFuncCall(ctx.GoAST, info, call, "strings", "ReplaceAll", "Replace"):
-			escapes = len(call.Args) >= 3 && quotePair(call.Args[1], call.Args[2])
+			return len(call.Args) >= 3 && quotePair(call.Args[1], call.Args[2])
 		case isPackageFuncCall(ctx.GoAST, info, call, "strings", "NewReplacer"):
 			for i := 0; i+1 < len(call.Args); i += 2 {
-				escapes = escapes || quotePair(call.Args[i], call.Args[i+1])
+				if quotePair(call.Args[i], call.Args[i+1]) {
+					return true
+				}
 			}
 		}
-		if escapes {
-			violations = jsReport(violations, r.BaseRule, ctx, ctx.LineFor(call),
-				"SQL quotes doubled by hand — the value is pasted into the query text, other metacharacters pass and the injection checks do not see it",
-				"Pass the value as a bind parameter ($1); where a literal is unavoidable use the driver's quoting (pq.QuoteLiteral)")
+		return false
+	}
+	flow := newEscapedSQLFlow(decls, callers)
+	var violations []*core.Violation
+	report := func(call *ast.CallExpr) {
+		violations = jsReport(violations, r.BaseRule, ctx, ctx.LineFor(call),
+			"SQL quotes doubled by hand — the value is pasted into the query text, other metacharacters pass and the injection checks do not see it",
+			"Pass the value as a bind parameter ($1); where a literal is unavoidable use the driver's quoting (pq.QuoteLiteral)")
+	}
+	for _, decl := range ctx.GoAST.Decls {
+		switch decl := decl.(type) {
+		case *ast.FuncDecl:
+			if decl.Body == nil {
+				continue
+			}
+			fn := typedFuncDecl{decl: decl, info: info}
+			ast.Inspect(decl.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok && escapes(call) && flow.valueReaches(fn, call) {
+					report(call)
+				}
+				return true
+			})
+		case *ast.GenDecl:
+			for _, spec := range decl.Specs {
+				value, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, expr := range value.Values {
+					ast.Inspect(expr, func(n ast.Node) bool {
+						if call, ok := n.(*ast.CallExpr); ok && escapes(call) && i < len(value.Names) && flow.variableReaches(info, info.Defs[value.Names[i]]) {
+							report(call)
+						}
+						return true
+					})
+				}
+			}
 		}
-		return true
-	})
+	}
 	return violations
 }
 
