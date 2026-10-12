@@ -404,12 +404,13 @@ func checkTrapRemovesResults(r *shellRule, src *shellSource) []*core.Violation {
 		if dir == nil {
 			continue
 		}
-		// A copy out takes its source from the directory; a copy into it
-		// (cp "$bin" "$work/") does not count.
-		copyOut := regexp.MustCompile(`\b(?:cp|mv)\s+(?:-\S+\s+)*"?\$\{?` + dir[1] + `\}?/`)
+		// A copy out takes its source from the directory and puts it outside;
+		// a copy into it (cp "$bin" "$work/") or within it does not count.
+		copyOut := regexp.MustCompile(`\b(?:cp|mv)\s+(?:-\S+\s+)*"?\$\{?` + dir[1] + `\}?/[^;&|]*`)
+		inDir := regexp.MustCompile(`^"?\$\{?` + dir[1] + `\}?(?:/|"|$)`)
 		failed := errexit
 		for _, later := range src.lines[i+1:] {
-			if copyOut.MatchString(later.text) {
+			if c := copyOut.FindString(later.text); c != "" && !inDir.MatchString(copyDestination(c)) {
 				if failed {
 					out = appendReport(out, src.report(r, l.lineAt(0),
 						"The trap removes $"+dir[1]+" on exit, and a failed run exits before the results are copied out of it — the log of the failure is removed with the directory",
@@ -421,6 +422,27 @@ func checkTrapRemovesResults(r *shellRule, src *shellSource) []*core.Violation {
 		}
 	}
 	return out
+}
+
+var (
+	redirection   = regexp.MustCompile(`^\d*[<>]`)
+	redirectAlone = regexp.MustCompile(`^\d*[<>]+&?$`)
+)
+
+// copyDestination returns the last argument of a cp or mv command, skipping
+// redirections (2>/dev/null, > "$log").
+func copyDestination(command string) string {
+	fields := strings.Fields(command)
+	for i := len(fields) - 1; i > 0; i-- {
+		switch {
+		case redirection.MatchString(fields[i]):
+		case redirectAlone.MatchString(fields[i-1]):
+			i--
+		default:
+			return fields[i]
+		}
+	}
+	return ""
 }
 
 var (

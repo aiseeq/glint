@@ -225,6 +225,26 @@ trap 'rm -rf "$work"' EXIT
 fetch "$work" || exit 1
 build "$work"
 `)
+	// A copy whose source and destination are both inside the directory
+	// does not take anything out of it.
+	shellWanted(t, "shell-trap-removes-results", "inside.sh", `#!/usr/bin/env bash
+set -euo pipefail
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
+printf 'a\n' > "$tmp_dir/in.txt"
+cp "$tmp_dir/in.txt" "$tmp_dir/copy.txt"
+mv -f "${tmp_dir}/copy.txt" "$tmp_dir/out.txt" 2>/dev/null
+cp "$tmp_dir/out.txt" "$tmp_dir/last.txt" > "$log"
+cat "$tmp_dir/out.txt"
+`)
+	shellWanted(t, "shell-trap-removes-results", "out.sh", `#!/usr/bin/env bash
+set -euo pipefail
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT # want
+cp "$tmp_dir/in.txt" "$tmp_dir/copy.txt"
+build "$tmp_dir"
+cp "$tmp_dir/out.txt" "$dest/out.txt"
+`)
 }
 
 // Repro from a real project: flock held the lock for the script, and a
