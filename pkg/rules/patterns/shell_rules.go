@@ -349,8 +349,10 @@ var (
 
 // stderrCapturesComparedExactly returns the lines that capture a command
 // with its stderr merged into a variable that a later case or [ x = y ]
-// compares with a literal.
+// compares with a literal. The value lives until the variable is assigned
+// again, and a local one to the end of its function.
 func stderrCapturesComparedExactly(src *shellSource) []int {
+	funcs := src.functions()
 	var lines []int
 	for i, l := range src.lines {
 		m := stderrCapture.FindStringSubmatch(l.text)
@@ -358,14 +360,44 @@ func stderrCapturesComparedExactly(src *shellSource) []int {
 			continue
 		}
 		exact := regexp.MustCompile(`case\s+"?\$\{?` + m[1] + `\}?"?\s+in\b|\[\[?\s+"?\$\{?` + m[1] + `\}?"?\s+==?\s+['"]?\w`)
-		for _, later := range src.lines[i+1:] {
+		assigned := regexp.MustCompile(`(?:^|[\s;&|(])(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)*)?` + m[1] + `=`)
+		end := len(src.lines)
+		if fn, ok := localScope(src, funcs, i, m[1]); ok {
+			end = fn.last + 1
+		}
+		for _, later := range src.lines[i+1 : end] {
 			if exact.MatchString(later.text) {
 				lines = append(lines, l.lineAt(0))
+				break
+			}
+			if assigned.MatchString(later.text) {
 				break
 			}
 		}
 	}
 	return lines
+}
+
+// localScope returns the innermost function holding a line that declares
+// the variable local (local, declare or typeset inside a function).
+func localScope(src *shellSource, funcs map[string]shellFunc, line int, name string) (shellFunc, bool) {
+	var inner shellFunc
+	found := false
+	for _, fn := range funcs {
+		if fn.first <= line && line <= fn.last && (!found || fn.first > inner.first || fn.first == inner.first && fn.name < inner.name) {
+			inner, found = fn, true
+		}
+	}
+	if !found {
+		return shellFunc{}, false
+	}
+	declared := regexp.MustCompile(`(?:^|[\s;&|(])(?:local|declare|typeset)\s+(?:-[A-Za-fh-z]+\s+)*(?:[A-Za-z_][A-Za-z0-9_]*(?:=\S*)?\s+)*` + name + `\b`)
+	for _, l := range src.body(inner) {
+		if declared.MatchString(l.text) {
+			return inner, true
+		}
+	}
+	return shellFunc{}, false
 }
 
 // writesToStdout reports a command whose output is not redirected.

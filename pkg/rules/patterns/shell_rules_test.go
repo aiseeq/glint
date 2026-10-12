@@ -384,6 +384,48 @@ check() {
 	}))
 }
 
+// A local variable of one function is not the variable another function
+// compares, and a value assigned again is not the captured one.
+func TestShellCapturedStderrComparedInItsScope(t *testing.T) {
+	assert.Empty(t, shellFindings(t, "shell-captured-function-writes-logs", map[string]string{
+		"scoped.sh": `#!/bin/bash
+run_build() {
+    local output
+    output=$(make build 2>&1)
+    printf '%s\n' "$output"
+}
+read_mode() {
+    local output
+    output=$(cat mode.txt)
+    case "$output" in
+        on) return 0 ;;
+    esac
+}
+`,
+		"reassigned.sh": `#!/bin/bash
+out=$(make build 2>&1)
+printf '%s\n' "$out"
+out=$(cat mode.txt)
+case "$out" in
+    on) exit 0 ;;
+esac
+`,
+	}))
+	// A global set in one function is the value another one compares.
+	assert.Equal(t, []string{"global.sh:3"}, shellFindings(t, "shell-captured-function-writes-logs", map[string]string{
+		"global.sh": `#!/bin/bash
+fetch_state() {
+    state=$(remote_state 2>&1)
+}
+check_state() {
+    case "$state" in
+        ready) return 0 ;;
+    esac
+}
+`,
+	}))
+}
+
 // A function whose opening brace is followed only by a comment reads like
 // one whose brace ends the line: the loop inside it is seen like any other,
 // and so is a loop after it, which a brace taken for an unclosed group hid.
