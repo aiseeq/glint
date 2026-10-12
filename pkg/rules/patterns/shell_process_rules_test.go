@@ -245,6 +245,36 @@ cp "$tmp_dir/in.txt" "$tmp_dir/copy.txt"
 build "$tmp_dir"
 cp "$tmp_dir/out.txt" "$dest/out.txt"
 `)
+	// A quoted path with blanks is one argument, and a ; inside quotes ends
+	// no command.
+	shellWanted(t, "shell-trap-removes-results", "blanks.sh", `#!/usr/bin/env bash
+set -euo pipefail
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
+cp "$tmp_dir/in.txt" "$tmp_dir/my copy.txt"
+mv "$tmp_dir/a;b.txt" "$tmp_dir/c d.txt" && cat "$tmp_dir/c d.txt"
+`)
+	// -t and --target-directory name the destination; every other argument
+	// is a source.
+	shellWanted(t, "shell-trap-removes-results", "target.sh", `#!/usr/bin/env bash
+set -euo pipefail
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT # want
+cp -t "$dest" "$tmp_dir/out.txt"
+`)
+	shellWanted(t, "shell-trap-removes-results", "target_long.sh", `#!/usr/bin/env bash
+set -euo pipefail
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT # want
+mv -f --target-directory="$dest" "$tmp_dir/a.txt" "$tmp_dir/b.txt"
+`)
+	shellWanted(t, "shell-trap-removes-results", "target_inside.sh", `#!/usr/bin/env bash
+set -euo pipefail
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
+cp -at "$tmp_dir/keep" "$tmp_dir/a.txt"
+mv --target-directory "${tmp_dir}/keep" "$tmp_dir/b.txt" 2>&1 | tee -a "$log"
+`)
 }
 
 // Repro from a real project: flock held the lock for the script, and a

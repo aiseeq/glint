@@ -3,6 +3,7 @@ package patterns
 import (
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -404,13 +405,11 @@ func checkTrapRemovesResults(r *shellRule, src *shellSource) []*core.Violation {
 		if dir == nil {
 			continue
 		}
-		// A copy out takes its source from the directory and puts it outside;
-		// a copy into it (cp "$bin" "$work/") or within it does not count.
-		copyOut := regexp.MustCompile(`\b(?:cp|mv)\s+(?:-\S+\s+)*"?\$\{?` + dir[1] + `\}?/[^;&|]*`)
+		fromDir := regexp.MustCompile(`^"?\$\{?` + dir[1] + `\}?/`)
 		inDir := regexp.MustCompile(`^"?\$\{?` + dir[1] + `\}?(?:/|"|$)`)
 		failed := errexit
 		for _, later := range src.lines[i+1:] {
-			if c := copyOut.FindString(later.text); c != "" && !inDir.MatchString(copyDestination(c)) {
+			if copiesOut(later.text, fromDir, inDir) {
 				if failed {
 					out = appendReport(out, src.report(r, l.lineAt(0),
 						"The trap removes $"+dir[1]+" on exit, and a failed run exits before the results are copied out of it — the log of the failure is removed with the directory",
@@ -424,25 +423,103 @@ func checkTrapRemovesResults(r *shellRule, src *shellSource) []*core.Violation {
 	return out
 }
 
-var (
-	redirection   = regexp.MustCompile(`^\d*[<>]`)
-	redirectAlone = regexp.MustCompile(`^\d*[<>]+&?$`)
-)
-
-// copyDestination returns the last argument of a cp or mv command, skipping
-// redirections (2>/dev/null, > "$log").
-func copyDestination(command string) string {
-	fields := strings.Fields(command)
-	for i := len(fields) - 1; i > 0; i-- {
-		switch {
-		case redirection.MatchString(fields[i]):
-		case redirectAlone.MatchString(fields[i-1]):
-			i--
-		default:
-			return fields[i]
+// copiesOut reports a cp or mv in the line that takes a source from the
+// directory and puts it outside; a copy into it (cp "$bin" "$work/") or
+// within it does not count.
+func copiesOut(line string, fromDir, inDir *regexp.Regexp) bool {
+	for _, seg := range flatSegments(line) {
+		words := commandWords(seg.text)
+		for k, w := range words {
+			if w != "cp" && w != "mv" {
+				continue
+			}
+			sources, dest := copyArgs(words[k+1:])
+			if dest != "" && !inDir.MatchString(dest) && slices.ContainsFunc(sources, fromDir.MatchString) {
+				return true
+			}
+			break
 		}
 	}
-	return ""
+	return false
+}
+
+var redirectOp = regexp.MustCompile(`^(?:\d*[<>]+&?|&>>?)`)
+
+// commandWords splits a command into its words, quoted parts kept with
+// their quotes, redirections (2>/dev/null, > "$log", 2>&1) left out. It
+// stops at a pipe, a list operator or the end of a group.
+func commandWords(text string) []string {
+	var words []string
+	for i := 0; i < len(text); {
+		c := text[i]
+		if c == ' ' || c == '\t' || c == '\n' {
+			i++
+			continue
+		}
+		if op := redirectOp.FindString(text[i:]); op != "" {
+			i += len(op)
+			for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+				i++
+			}
+			i, _ = shellWordEnd(text, i)
+			continue
+		}
+		end, _ := shellWordEnd(text, i)
+		word := text[i:end]
+		if end == i || word == ")" || word == "}" {
+			return words
+		}
+		words = append(words, word)
+		i = end
+	}
+	return words
+}
+
+// copyArgs returns the sources and the destination of cp or mv arguments:
+// the directory of -t or --target-directory, else the last operand.
+func copyArgs(args []string) (sources []string, dest string) {
+	target, options := "", true
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		next := func() string {
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			return ""
+		}
+		switch {
+		case !options || a == "-" || !strings.HasPrefix(a, "-"):
+			sources = append(sources, a)
+		case a == "--":
+			options = false
+		case strings.HasPrefix(a, "--target-directory="):
+			target = strings.TrimPrefix(a, "--target-directory=")
+		case a == "--target-directory":
+			target = next()
+		case a == "--suffix":
+			next()
+		case !strings.HasPrefix(a, "--"):
+			// A short cluster ends at -t or -S: the rest of it, or the next
+			// word, is their value.
+			if at := strings.IndexAny(a, "tS"); at > 0 {
+				value := a[at+1:]
+				if value == "" {
+					value = next()
+				}
+				if a[at] == 't' {
+					target = value
+				}
+			}
+		}
+	}
+	if target != "" {
+		return sources, target
+	}
+	if len(sources) == 0 {
+		return nil, ""
+	}
+	return sources[:len(sources)-1], sources[len(sources)-1]
 }
 
 var (
