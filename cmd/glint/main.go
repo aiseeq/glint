@@ -476,6 +476,12 @@ func (s *findingSet) add(root string, violations core.ViolationList) {
 }
 
 func getProjectRoots(args []string) ([]string, error) {
+	return resolvePaths(args, false)
+}
+
+// resolvePaths turns the path arguments into absolute clean paths, each once;
+// files are accepted only when allowFiles is set.
+func resolvePaths(args []string, allowFiles bool) ([]string, error) {
 	paths := args
 	if len(paths) == 0 {
 		paths = []string{"."}
@@ -484,7 +490,7 @@ func getProjectRoots(args []string) ([]string, error) {
 	roots := make([]string, 0, len(paths))
 	seen := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
-		root, err := resolveProjectRoot(path)
+		root, err := resolvePath(path, allowFiles)
 		if err != nil {
 			return nil, err
 		}
@@ -507,16 +513,23 @@ type analysisRoot struct {
 // analysisRoots groups the path arguments by the configuration that governs
 // them: the paths under one .glint.yaml are walked as scopes of its directory,
 // so findings name files relative to it, the project rules see the files of
-// every path together, and the run keeps one result cache. A path no
-// configuration governs is a root of its own.
+// every path together, and the run keeps one result cache. A directory no
+// configuration governs is a root of its own; a file is a scope of the
+// directory that holds it.
 func analysisRoots(args []string) ([]analysisRoot, error) {
-	dirs, err := getProjectRoots(args)
+	paths, err := resolvePaths(args, true)
 	if err != nil {
 		return nil, err
 	}
 	var roots []analysisRoot
 	index := make(map[string]int)
-	for _, dir := range dirs {
+	for _, path := range paths {
+		dir := path
+		if info, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("stat %q: %w", path, err)
+		} else if !info.IsDir() {
+			dir = filepath.Dir(path)
+		}
 		configPath, err := core.FindConfig(dir)
 		if err != nil {
 			return nil, err
@@ -531,7 +544,7 @@ func analysisRoots(args []string) ([]analysisRoot, error) {
 			index[base] = i
 			roots = append(roots, analysisRoot{dir: base})
 		}
-		roots[i].addScope(dir, dir == base)
+		roots[i].addScope(path, path == base)
 	}
 	return roots, nil
 }
@@ -577,10 +590,10 @@ func within(path, dir string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// resolveProjectRoot turns a path argument into an absolute directory. A Go
-// package pattern ("./...", "./internal/...") names the directory it starts
-// from: glint always walks a root recursively.
-func resolveProjectRoot(path string) (string, error) {
+// resolvePath turns a path argument into an absolute directory, or a file
+// when allowFiles is set. A Go package pattern ("./...", "./internal/...")
+// names the directory it starts from: glint always walks a root recursively.
+func resolvePath(path string, allowFiles bool) (string, error) {
 	projectRoot := path
 	if projectRoot == "..." {
 		projectRoot = "."
@@ -595,7 +608,7 @@ func resolveProjectRoot(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid project root %q: %w", projectRoot, err)
 	}
-	if !info.IsDir() {
+	if !info.IsDir() && !allowFiles {
 		return "", fmt.Errorf("invalid project root %q: not a directory", projectRoot)
 	}
 	return projectRoot, nil

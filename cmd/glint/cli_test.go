@@ -247,7 +247,7 @@ func TestResolveProjectRootAcceptsPackagePattern(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := resolveProjectRoot(filepath.Join(dir, "internal") + "/...")
+	got, err := resolvePath(filepath.Join(dir, "internal")+"/...", false)
 	if err != nil {
 		t.Fatal(err)
 	}

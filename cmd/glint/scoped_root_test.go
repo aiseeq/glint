@@ -113,3 +113,66 @@ func TestRun(t *testing.T) {
 		t.Fatalf("got %v, want %v", found, want)
 	}
 }
+
+// instructionSizeFiles runs instruction-size on the paths as glint check
+// would and returns the files it reports.
+func instructionSizeFiles(t *testing.T, paths ...string) []string {
+	t.Helper()
+	withFlags(t, "", "instruction-size")
+	roots, err := analysisRoots(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	for _, root := range roots {
+		cfg, enabledRules, err := loadConfig(root.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := prepareScopedAnalysis(core.NewGoProjectLoader(), root, cfg, enabledRules, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rules.ResetState(enabledRules)
+		violations, err := analyzeProject(prepared.contexts, enabledRules, cfg, prepared.project, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range violations {
+			found = append(found, v.File)
+		}
+	}
+	sort.Strings(found)
+	return found
+}
+
+// The instruction files of a home directory are no project: glint check
+// walks a directory with no .glint.yaml and no git into its hidden .claude,
+// and takes a single file as the one file to judge, even one .gitignore
+// leaves out.
+func TestCheckTakesInstructionFilesOutsideAProject(t *testing.T) {
+	big := strings.Repeat("a", 20000)
+	home := t.TempDir()
+	writeModuleFile(t, home, ".claude/CLAUDE.md", big)
+	writeModuleFile(t, home, ".claude/rules/api/db.md", big)
+	writeModuleFile(t, home, ".claude/skills/deploy/SKILL.md", big)
+	writeModuleFile(t, home, ".claude/notes.md", big)
+	if got, want := instructionSizeFiles(t, filepath.Join(home, ".claude")), []string{"CLAUDE.md", "rules/api/db.md", "skills/deploy/SKILL.md"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+
+	work := t.TempDir()
+	writeModuleFile(t, work, "CLAUDE.md", big)
+	writeModuleFile(t, work, "other/CLAUDE.md", big)
+	if got := instructionSizeFiles(t, filepath.Join(work, "CLAUDE.md")); strings.Join(got, ",") != "CLAUDE.md" {
+		t.Fatalf("a named file must be the only file judged, got %v", got)
+	}
+
+	repo := t.TempDir()
+	writeModuleFile(t, repo, ".git/HEAD", "ref: refs/heads/main\n")
+	writeModuleFile(t, repo, ".gitignore", "CLAUDE.local.md\n")
+	writeModuleFile(t, repo, "CLAUDE.local.md", big)
+	if got := instructionSizeFiles(t, filepath.Join(repo, "CLAUDE.local.md")); strings.Join(got, ",") != "CLAUDE.local.md" {
+		t.Fatalf("a named file is judged even when .gitignore leaves it out, got %v", got)
+	}
+}

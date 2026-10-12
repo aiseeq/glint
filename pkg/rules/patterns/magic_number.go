@@ -1,10 +1,8 @@
 package patterns
 
 import (
-	"fmt"
 	"go/ast"
 	"go/token"
-	"math"
 	"strconv"
 	"strings"
 
@@ -37,24 +35,16 @@ func NewMagicNumberRule() *MagicNumberRule {
 
 // Configure allows setting rule options
 func (r *MagicNumberRule) Configure(settings map[string]any) error {
-	if v, ok := settings["min_value"]; ok {
-		// YAML/JSON decoders deliver integers as float64; anything else (or a
-		// fractional value) is ambiguous input and must be an error, not a
-		// silent fallback to the default.
-		switch val := v.(type) {
-		case int:
-		case float64:
-			if val != math.Trunc(val) {
-				return fmt.Errorf("magic-number: min_value must be an integer, got %v", val)
-			}
-		default:
-			return fmt.Errorf("magic-number: min_value must be an integer, got %T (%v)", v, v)
-		}
+	minValue, present, err := rules.IntSetting(settings, r.Name(), "min_value")
+	if err != nil {
+		return err
 	}
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
-	r.minValue = r.GetIntSetting("min_value", r.minValue)
+	if present {
+		r.minValue = minValue
+	}
 	return nil
 }
 

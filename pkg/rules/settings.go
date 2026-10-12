@@ -2,6 +2,7 @@ package rules
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -29,4 +30,24 @@ func NameSetSetting(settings map[string]any, ruleName, key string) (names map[st
 		names[name] = true
 	}
 	return names, true, nil
+}
+
+// IntSetting reads an integer setting of a rule's configuration: present
+// reports whether the key is set at all. YAML and JSON decoders deliver
+// integers as int or float64; a fraction or any other type is an error
+// naming the rule and the key, not a fallback to the default.
+func IntSetting(settings map[string]any, ruleName, key string) (value int, present bool, err error) {
+	raw, ok := settings[key]
+	if !ok {
+		return 0, false, nil
+	}
+	switch v := raw.(type) {
+	case int:
+		return v, true, nil
+	case float64:
+		if v == math.Trunc(v) {
+			return int(v), true, nil
+		}
+	}
+	return 0, true, fmt.Errorf("configure %s: %s must be an integer, got %T (%v)", ruleName, key, raw, raw)
 }

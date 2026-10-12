@@ -74,7 +74,7 @@ func (w *Walker) WithWorkers(n int) *Walker {
 	return w
 }
 
-// WithScopes limits the walk to directories under the root: the files keep
+// WithScopes limits the walk to directories or files under the root: the files keep
 // their paths relative to the root, so the root's configuration and the
 // project rules see them as files of one project.
 func (w *Walker) WithScopes(dirs []string) *Walker {
@@ -242,8 +242,9 @@ func (w *Walker) visitPath(fileQueue chan<- string, walkErrors chan<- error, pat
 		return nil
 	}
 
-	// Skip files the project itself excluded from git
-	if w.gitignore != nil {
+	// Skip files the project itself excluded from git; a file named as a
+	// scope is the user's decision, as a named directory is.
+	if w.gitignore != nil && !slices.Contains(w.scopes, path) {
 		skip, ignErr := w.gitignore.ignored(path, false)
 		if ignErr != nil {
 			walkErrors <- ignErr
