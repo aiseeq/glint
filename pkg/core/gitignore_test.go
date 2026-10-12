@@ -67,3 +67,68 @@ func TestWalkerGitignoreCanBeDisabled(t *testing.T) {
 	paths := sortedWalkPaths(t, root, cfg)
 	require.Equal(t, []string{"main.go", "skipped.go"}, paths)
 }
+
+// Локальные исключения клона живут в .git/info/exclude, а не в .gitignore:
+// так прячут, например, git worktree агентов внутри репозитория. Без учёта
+// exclude glint анализирует каждую копию репы и находит тысячи дублей между
+// ними. Исключённый каталог отрезается целиком, а не пофайлово; отрицание из
+// .gitignore сильнее exclude, как в git.
+func TestWalkerRespectsGitInfoExclude(t *testing.T) {
+	repo := t.TempDir()
+	writeTree(t, repo, map[string]string{
+		".git/info/exclude":            "# local\n.agents/worktrees/\n*.log.go\n",
+		".gitignore":                   "!keep.log.go\n",
+		"main.go":                      "package main\n",
+		"debug.log.go":                 "package main\n",
+		"keep.log.go":                  "package main\n",
+		".agents/worktrees/a/main.go":  "package main\n",
+		".agents/worktrees/a/lib.ts":   "export {}\n",
+		".agents/settings/settings.go": "package settings\n",
+	})
+
+	w := NewWalker(repo, &Config{})
+	contexts, errs := w.WalkSync()
+	require.Empty(t, errs)
+	paths := make([]string, 0, len(contexts))
+	for _, ctx := range contexts {
+		paths = append(paths, filepath.ToSlash(ctx.RelPath))
+	}
+	sort.Strings(paths)
+	require.Equal(t, []string{".agents/settings/settings.go", "keep.log.go", "main.go"}, paths)
+	// Только debug.log.go отсеян пофайлово; каталог worktree отрезан целиком.
+	require.Equal(t, 1, w.Stats().SkippedFiles)
+}
+
+// В самом worktree .git — файл со ссылкой на свой git-dir, а info/exclude
+// общий для всех worktree и лежит в основном git-dir (commondir).
+func TestWalkerRespectsGitInfoExcludeFromWorktree(t *testing.T) {
+	base := t.TempDir()
+	writeTree(t, base, map[string]string{
+		"main/.git/info/exclude":           "generated/\n",
+		"main/.git/worktrees/wt/commondir": "../..\n",
+		"main/.git/worktrees/wt/HEAD":      "ref: refs/heads/wt\n",
+		"wt/.git":                          "gitdir: " + filepath.Join(base, "main/.git/worktrees/wt") + "\n",
+		"wt/app.go":                        "package app\n",
+		"wt/generated/out.go":              "package generated\n",
+		"rel/.git":                         "gitdir: ../main/.git/worktrees/wt\n",
+		"rel/app.go":                       "package app\n",
+		"rel/generated/out.go":             "package generated\n",
+	})
+
+	require.Equal(t, []string{"app.go"}, sortedWalkPaths(t, filepath.Join(base, "wt"), &Config{}))
+	require.Equal(t, []string{"app.go"}, sortedWalkPaths(t, filepath.Join(base, "rel"), &Config{}))
+}
+
+// .git-файл без строки gitdir — повреждённый репозиторий: ошибка, а не
+// молчаливый анализ того, что git, возможно, исключает.
+func TestWalkerReportsMalformedGitFile(t *testing.T) {
+	repo := t.TempDir()
+	writeTree(t, repo, map[string]string{
+		".git":    "garbage\n",
+		"main.go": "package main\n",
+	})
+
+	_, errs := NewWalker(repo, &Config{}).WalkSync()
+	require.Len(t, errs, 1)
+	require.Contains(t, errs[0].Error(), "gitdir")
+}

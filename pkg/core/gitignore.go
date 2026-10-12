@@ -16,8 +16,8 @@ import (
 // Паттерны применяются относительно корня git-репозитория, а не projectRoot:
 // glint часто запускают на подкаталоге (glint check backend frontend), а
 // паттерн вида /frontend/report/ лежит в корневом .gitignore. Поэтому при
-// создании индекс поднимается до каталога с .git и загружает .gitignore всех
-// предков projectRoot; .gitignore посещаемых каталогов добавляет walker через
+// создании индекс поднимается до каталога с .git и загружает info/exclude
+// репозитория и .gitignore всех предков projectRoot; .gitignore посещаемых каталогов добавляет walker через
 // addDir. Паттерн несёт домен своего каталога, так что накопление паттернов
 // из уже пройденных веток не влияет на соседние.
 type gitignoreIndex struct {
@@ -34,6 +34,9 @@ func newGitignoreIndex(projectRoot string) (*gitignoreIndex, error) {
 		return nil, fmt.Errorf("resolve project root %q: %w", projectRoot, err)
 	}
 	idx := &gitignoreIndex{root: findGitRepoRoot(absProject)}
+	if err := idx.addGitExclude(); err != nil {
+		return nil, err
+	}
 
 	chain, err := ancestorChain(idx.root, filepath.Dir(absProject))
 	if err != nil {
@@ -86,6 +89,85 @@ func ancestorChain(root, last string) ([]string, error) {
 	return chain, nil
 }
 
+// addGitExclude загружает info/exclude репозитория — локальные исключения
+// клона, которые не попадают в .gitignore (например, git worktree внутри
+// репы). Их паттерны действуют от корня репозитория и слабее любого
+// .gitignore, поэтому загружаются первыми: в go-git побеждает последний
+// подходящий паттерн. В worktree .git — файл со ссылкой на свой git-dir, а
+// exclude общий и лежит в основном git-dir (commondir).
+func (g *gitignoreIndex) addGitExclude() error {
+	gitDir, err := resolveGitDir(g.root)
+	if err != nil || gitDir == "" {
+		return err
+	}
+	commonDir, err := resolveCommonDir(gitDir)
+	if err != nil {
+		return err
+	}
+	excludePath := filepath.Join(commonDir, "info", "exclude")
+	content, err := os.ReadFile(excludePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", excludePath, err)
+	}
+	g.addPatterns(string(content), []string{})
+	return nil
+}
+
+// resolveGitDir возвращает git-dir репозитория с корнем root: сам .git, если
+// это каталог, или путь из строки gitdir:, если .git — файл (worktree,
+// submodule). Пустая строка без ошибки — .git нет, корень взят без репо.
+func resolveGitDir(root string) (string, error) {
+	dotGit := filepath.Join(root, ".git")
+	info, err := os.Stat(dotGit)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("stat %s: %w", dotGit, err)
+	}
+	if info.IsDir() {
+		return dotGit, nil
+	}
+	content, err := os.ReadFile(dotGit)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", dotGit, err)
+	}
+	line, _, _ := strings.Cut(string(content), "\n")
+	target, ok := strings.CutPrefix(strings.TrimSpace(line), "gitdir:")
+	target = strings.TrimSpace(target)
+	if !ok || target == "" {
+		return "", fmt.Errorf("%s is a file without a gitdir: line", dotGit)
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(root, target)
+	}
+	return target, nil
+}
+
+// resolveCommonDir возвращает общий git-dir: путь из файла commondir
+// (относительно gitDir), если он есть, иначе сам gitDir.
+func resolveCommonDir(gitDir string) (string, error) {
+	path := filepath.Join(gitDir, "commondir")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return gitDir, nil
+		}
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	common := strings.TrimSpace(string(content))
+	if common == "" {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(gitDir, common)
+	}
+	return common, nil
+}
+
 // addDir загружает .gitignore каталога, если он там есть. Каталог задаёт
 // домен паттернов: они действуют только внутри него.
 func (g *gitignoreIndex) addDir(dir string) error {
@@ -105,14 +187,20 @@ func (g *gitignoreIndex) addDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	for _, line := range strings.Split(string(content), "\n") {
+	g.addPatterns(string(content), domain)
+	return nil
+}
+
+// addPatterns разбирает содержимое ignore-файла с доменом domain (сегменты
+// каталога от корня индекса).
+func (g *gitignoreIndex) addPatterns(content string, domain []string) {
+	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		g.patterns = append(g.patterns, gitignore.ParsePattern(line, domain))
 	}
-	return nil
 }
 
 // ignored сообщает, исключает ли git этот путь. Сам корень не проверяется:
@@ -149,8 +237,8 @@ func (g *gitignoreIndex) split(absPath string) ([]string, error) {
 }
 
 // IgnoredFiles обходит каталог dir и возвращает пути (относительно dir)
-// файлов и каталогов, которые git оставляет вне репозитория по .gitignore от
-// корня репозитория вниз. Исключённый каталог называется целиком, без
+// файлов и каталогов, которые git оставляет вне репозитория по info/exclude
+// и .gitignore от корня репозитория вниз. Исключённый каталог называется целиком, без
 // содержимого.
 func IgnoredFiles(dir string) ([]string, error) {
 	idx, err := newGitignoreIndex(dir)
