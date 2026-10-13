@@ -146,7 +146,8 @@ func collectConstructions(ctx *core.FileContext, info *types.Info, constructions
 		if len(lit.Elts) < 3 {
 			return true
 		}
-		if _, isKV := lit.Elts[0].(*ast.KeyValueExpr); !isKV {
+		kv, isKV := lit.Elts[0].(*ast.KeyValueExpr)
+		if !isKV || !structLiteral(info, lit, kv) {
 			return true
 		}
 
@@ -160,6 +161,20 @@ func collectConstructions(ctx *core.FileContext, info *types.Info, constructions
 
 		return true
 	})
+}
+
+// structLiteral reports a literal of a struct: a map has no field to miss.
+// Without type information a literal whose key is a value, not a field name,
+// is a map.
+func structLiteral(info *types.Info, lit *ast.CompositeLit, first *ast.KeyValueExpr) bool {
+	if info != nil {
+		if t := info.TypeOf(lit); t != nil {
+			_, isStruct := t.Underlying().(*types.Struct)
+			return isStruct
+		}
+	}
+	_, isField := first.Key.(*ast.Ident)
+	return isField
 }
 
 func (r *ScatteredConstructionRule) reportViolations(constructions map[string][]constructionSite) []*core.Violation {
