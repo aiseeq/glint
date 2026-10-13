@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -334,7 +335,31 @@ func isNotSecretValue(key, value string) bool {
 			return true
 		}
 	}
-	return envVarName.MatchString(value) || urlPath.MatchString(value) || strings.ContainsAny(strings.TrimSpace(value), " \t")
+	return envVarName.MatchString(value) || urlPath.MatchString(value) || strings.ContainsAny(strings.TrimSpace(value), " \t") ||
+		spellsNameEnding(key, value)
+}
+
+var (
+	// codeWords is a value written as lower-case words: bad_password.
+	codeWords = regexp.MustCompile(`^[a-z]+(?:[_-][a-z]+)+$`)
+	// trailingIdentifier is the name a key ends with, before = or :.
+	trailingIdentifier = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)["'\x60]?\s*(?::=|[:=])\s*["'\x60]?$`)
+)
+
+// spellsNameEnding reports a value that spells the last words of the name it
+// is assigned to, and not the whole name: LoginResultBadPassword =
+// "bad_password" is an enumeration code, the words after the family prefix.
+func spellsNameEnding(key, value string) bool {
+	if !codeWords.MatchString(value) {
+		return false
+	}
+	m := trailingIdentifier.FindStringSubmatch(key)
+	if m == nil {
+		return false
+	}
+	name := helpers.IdentifierWords(m[1])
+	words := strings.FieldsFunc(value, func(r rune) bool { return r == '_' || r == '-' })
+	return len(name) > len(words) && slices.Equal(name[len(name)-len(words):], words)
 }
 
 func (r *HardcodedSecretsRule) maskSecretMatches(line string) string {
