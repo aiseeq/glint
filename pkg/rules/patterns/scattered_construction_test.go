@@ -155,3 +155,40 @@ func ` + name + `(w, c, k *string, n int) any {
 		assert.Len(t, violations, 3)
 	})
 }
+
+// A map literal has no fields to miss: each of these builds its own keys, so
+// a named map type built in many functions is no scattered construction.
+func TestScatteredConstructionSkipsMapLiterals(t *testing.T) {
+	files := map[string]string{
+		"wire/wire.go": `package wire
+
+// Object is a protocol object as a map.
+type Object map[string]any
+`,
+		"use/use.go": `package use
+
+import "example.com/rulestest/wire"
+
+func Login() wire.Object {
+	return wire.Object{"_": "auth.login", "userKey": "x", "layer": 1, "device": "d"}
+}
+
+func Resume() wire.Object {
+	return wire.Object{"_": "auth.resume", "userId": 1, "sessionKey": 2, "layer": 1}
+}
+
+func Frame() wire.Object {
+	return wire.Object{"_": "container", "messageId": 1, "data": nil}
+}
+
+func History() wire.Object {
+	return wire.Object{"_": "chat.history", "chatId": 1, "count": 50, "filter": nil}
+}
+`,
+	}
+	assert.Empty(t, runRuleOnFiles(t, NewScatteredConstructionRule(), files))
+
+	// Without type information a literal keyed by values is still a map.
+	files["use/broken.go"] = "package use\n\nfunc broken() { undefinedCall() }\n"
+	assert.Empty(t, runRuleOnBrokenFiles(t, NewScatteredConstructionRule(), files))
+}
