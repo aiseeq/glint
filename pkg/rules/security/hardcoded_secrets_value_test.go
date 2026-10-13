@@ -68,3 +68,32 @@ func TestHardcodedSecretsStubPEMInTest(t *testing.T) {
 		"PEM='"+begin+"\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n"+end+"'\n")
 	assert.Len(t, NewHardcodedSecretsRule().AnalyzeFile(full), 1)
 }
+
+// An enumeration constant whose value spells the last words of its own name
+// (LoginResultBadPassword = "bad_password") is a code stored in a column, not
+// a password. A value that is not the name's words, or that is the whole
+// name, stays a secret.
+func TestHardcodedSecretsIgnoresEnumValueSpellingItsName(t *testing.T) {
+	code := `package app
+
+const (
+	LoginResultOK          = "ok"
+	LoginResultBadPassword = "bad_password"
+	LoginResultWrongSecret = "wrong-secret"
+)
+`
+	assert.Empty(t, NewHardcodedSecretsRule().AnalyzeFile(rulestest.GoFile(t, "app/app.go", code)))
+
+	random := strings.Join([]string{"kq9Zr3xL", "w8TbV2mN", "7pQs"}, "")
+	for _, line := range []string{
+		`var adminPassword = "hunter2"`,
+		`var dbPassword = "P@ssw0rd123"`,
+		`const ServicePassword = "` + random + `"`,
+		`const PostgresPassword = "postgres_password"`,
+		`const LoginResultBadPassword = "bad_secret_pass"`,
+		`const DefaultPassword = "password"`,
+	} {
+		ctx := rulestest.GoFile(t, "app/app.go", "package app\n\n"+line+"\n")
+		assert.Len(t, NewHardcodedSecretsRule().AnalyzeFile(ctx), 1, line)
+	}
+}
