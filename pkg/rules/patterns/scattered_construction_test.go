@@ -192,3 +192,32 @@ func History() wire.Object {
 	files["use/broken.go"] = "package use\n\nfunc broken() { undefinedCall() }\n"
 	assert.Empty(t, runRuleOnBrokenFiles(t, NewScatteredConstructionRule(), files))
 }
+
+// A site marked safe (a deliberate partial construction, not a conversion) is
+// not counted against the others: two unmarked sites stay below the threshold,
+// and only the marked site is reported, for its marker to silence.
+func TestScatteredConstructionMarkedSiteNotCounted(t *testing.T) {
+	marked := strings.Replace(scatteredServerFile("serverC"), "\treturn &http.Server",
+		"\t// scattered-construction: safe — partial server for a probe, the rest is set later\n\treturn &http.Server", 1)
+	violations := runRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+		"srv/a.go": scatteredServerFile("serverA"),
+		"srv/b.go": scatteredServerFile("serverB"),
+		"srv/c.go": marked,
+	})
+	require.Len(t, violations, 1)
+	assert.Equal(t, "srv/c.go", violations[0].File)
+}
+
+// With enough unmarked sites the type is scattered still: every site is
+// reported, the marked one too.
+func TestScatteredConstructionMarkedSiteAboveThreshold(t *testing.T) {
+	marked := strings.Replace(scatteredServerFile("serverD"), "\treturn &http.Server",
+		"\t// scattered-construction: safe — partial server for a probe, the rest is set later\n\treturn &http.Server", 1)
+	violations := runRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+		"srv/a.go": scatteredServerFile("serverA"),
+		"srv/b.go": scatteredServerFile("serverB"),
+		"srv/c.go": scatteredServerFile("serverC"),
+		"srv/d.go": marked,
+	})
+	assert.Len(t, violations, 4)
+}

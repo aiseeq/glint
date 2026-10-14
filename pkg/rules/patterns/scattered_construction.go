@@ -183,8 +183,12 @@ func (r *ScatteredConstructionRule) reportViolations(constructions map[string][]
 	for _, typeName := range slices.Sorted(maps.Keys(constructions)) {
 		sites := constructions[typeName]
 		uniqueFuncs := make(map[string]bool)
+		counted := make(map[string]bool) // functions of sites not marked safe
 		for _, s := range sites {
 			uniqueFuncs[s.fileCtx.RelPath+":"+s.funcN] = true
+			if !s.fileCtx.IsSuppressed(s.line, r.Name()) {
+				counted[s.fileCtx.RelPath+":"+s.funcN] = true
+			}
 		}
 
 		if len(uniqueFuncs) <= r.maxSites || perCallFilter(typeName, sites) {
@@ -192,6 +196,13 @@ func (r *ScatteredConstructionRule) reportViolations(constructions map[string][]
 		}
 
 		for _, site := range sites {
+			// A site marked safe is a deliberate partial construction, not a
+			// conversion: it does not count against the others. Below the
+			// threshold without it, only the marked site is reported, for its
+			// marker to silence.
+			if len(counted) <= r.maxSites && !site.fileCtx.IsSuppressed(site.line, r.Name()) {
+				continue
+			}
 			locations := formatOtherLocations(sites, site)
 
 			violations = append(violations, r.CreateViolation(
