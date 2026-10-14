@@ -56,7 +56,8 @@ func (r *DeadConfigExceptionRule) CheckConfig(cfg *core.Config, files []string, 
 	if err != nil {
 		return nil, err
 	}
-	for _, dead := range deadExceptions {
+	for i := range deadExceptions {
+		dead := &deadExceptions[i]
 		source, err := filepath.Rel(base, dead.Source)
 		if err != nil {
 			return nil, fmt.Errorf("name configuration %q relative to %q: %w", dead.Source, base, err)

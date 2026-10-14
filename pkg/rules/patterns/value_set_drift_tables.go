@@ -81,12 +81,13 @@ func newTableIndex(files []*core.FileContext) *tableIndex {
 	// A field is followed by its name alone: only a name one struct of the
 	// project declares says which struct an assignment fills.
 	owners := make(map[string][]valueset.JSONField)
-	for _, t := range tables {
-		for _, f := range t.Fields {
+	for i := range tables {
+		for _, f := range tables[i].Fields {
 			owners[f.Field] = append(owners[f.Field], f)
 		}
 	}
-	for _, t := range tables {
+	for i := range tables {
+		t := &tables[i]
 		for _, s := range t.Sets {
 			idx.addSet(s)
 		}

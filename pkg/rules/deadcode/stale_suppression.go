@@ -162,7 +162,9 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 		}
 	}
 	var violations []*core.Violation
-	for _, ruleException := range run.Config.Exceptions() {
+	exceptions := run.Config.Exceptions()
+	for i := range exceptions {
+		ruleException := &exceptions[i]
 		exc := ruleException.Exception
 		rule, ran := run.Executed[ruleException.Rule]
 		// Its own findings are filtered after this check, by the run.

@@ -160,7 +160,9 @@ func (r *NonAtomicStatusHistoryRule) isMutationMethod(name string) bool {
 func (r *NonAtomicStatusHistoryRule) analyzeStatusHistoryScope(ctx *core.FileContext, function string, scope statusHistoryFunctionScope, env statusHistoryEnv) []*core.Violation {
 	var violations []*core.Violation
 	reported := make(map[*ast.CallExpr]bool)
-	for _, pair := range statusHistoryPairs(scope, env) {
+	pairs := statusHistoryPairs(scope, env)
+	for i := range pairs {
+		pair := &pairs[i]
 		mutation := pair.mutation
 		history := pair.history
 		if reported[mutation.call] {
@@ -340,8 +342,8 @@ func (a *statusHistoryFlowAnalyzer) joinStates(left, right []statusHistoryPath) 
 // rule looks at nothing else, so two paths with the same mutations are one.
 func statusHistoryPathKey(path statusHistoryPath) string {
 	parts := make([]string, 0, len(path.mutations))
-	for _, mutation := range path.mutations {
-		parts = append(parts, flowPosKey(mutation.call.Pos()))
+	for i := range path.mutations {
+		parts = append(parts, flowPosKey(path.mutations[i].call.Pos()))
 	}
 	return flowPathKey(parts...)
 }
@@ -474,13 +476,14 @@ func (a *statusHistoryFlowAnalyzer) applyCalls(paths []statusHistoryPath, scope 
 			return true
 		}
 		for _, path := range paths {
-			for _, mutation := range path.mutations {
+			for i := range path.mutations {
+				mutation := &path.mutations[i]
 				key := [2]*ast.CallExpr{mutation.call, statusCall.call}
 				if a.seen[key] {
 					continue
 				}
 				a.seen[key] = true
-				a.pairs = append(a.pairs, statusHistoryPair{mutation: mutation, history: statusCall})
+				a.pairs = append(a.pairs, statusHistoryPair{mutation: *mutation, history: statusCall})
 			}
 		}
 		return true
@@ -529,13 +532,14 @@ func invalidateStatusHistoryAssignments(paths []statusHistoryPath, scope *status
 
 	for index := range paths {
 		kept := make([]statusHistoryCall, 0, len(paths[index].mutations))
-		for _, mutation := range paths[index].mutations {
+		for i := range paths[index].mutations {
+			mutation := &paths[index].mutations[i]
 			_, receiverChanged := reassigned[mutation.receiver.root]
 			_, entityChanged := reassigned[mutation.entity.root]
 			if receiverChanged || mutation.hasEntity && entityChanged {
 				continue
 			}
-			kept = append(kept, mutation)
+			kept = append(kept, *mutation)
 		}
 		paths[index].mutations = kept
 	}
