@@ -50,8 +50,19 @@ func init() {
 //     and were documented as manual; they ran every single time. An opt-in must be a switch
 //     nobody sets by accident, not a secret everybody has.
 //
-// A test that genuinely needs the live service stays possible: name its opt-in helper in the
-// guard_functions setting, and calls guarded by it are not reported.
+// A test aimed at a fake server is told by its own body: it uses httptest, or a helper or a
+// variable of the test files that does. The httptest import of the file vouches for nothing
+// more: a file of fake-feed tests held one more test that built the rates client with New -
+// the production address built in - and, skipped only in -short mode, called the live feed on
+// every full run.
+//
+// A test that genuinely needs the live service stays possible. A test that skips at once unless
+// a dedicated env flag is set - `if os.Getenv("RATES_LIVE_TEST") == "" { t.Skip(...) }`, a
+// comparison with a value, os.LookupEnv, or a helper of the test files doing the same - does not
+// run in an ordinary go test, and the calls after the skip are not reported. The flag must be
+// one no env file of the project sets, and the skip must come before the call. testing.Short()
+// is no flag: a full run opens it. A project-specific opt-in helper can also be named in the
+// guard_functions setting, and tests calling it are not reported.
 type TestExternalServiceRule struct {
 	*rules.BaseRule
 
@@ -131,12 +142,13 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 	if err != nil {
 		return nil, fmt.Errorf("test external service: %w", err)
 	}
+	dirFacts := r.collectTestDirFacts(ctx.Files, envKeys)
 	var violations []*core.Violation
 	for _, file := range ctx.Files {
 		if file == nil || !file.IsTestFile() || file.GoAST == nil {
 			continue
 		}
-		violations = append(violations, r.analyzeTestFile(file, outbound, outboundDirs, envKeys)...)
+		violations = append(violations, r.analyzeTestFile(file, outbound, outboundDirs, envKeys, dirFacts[filepath.Dir(file.Path)])...)
 	}
 
 	sort.Slice(violations, func(i, j int) bool {
@@ -490,16 +502,11 @@ func (r *TestExternalServiceRule) externalHost(lit *ast.BasicLit) string {
 // analyzeTestFile reports live calls and credential gates inside one test file.
 func (r *TestExternalServiceRule) analyzeTestFile(
 	file *core.FileContext, outbound map[string]outboundPackage, outboundDirs map[string]outboundPackage, envKeys map[string]bool,
+	facts *testDirFacts,
 ) []*core.Violation {
 	imports := importAliases(file.GoAST, outbound)
-	// Тест, поднявший свой httptest-сервер, никуда наружу не идёт.
-	usesHTTPTest := false
-	for _, imp := range file.GoImports {
-		if imp == "net/http/httptest" {
-			usesHTTPTest = true
-			break
-		}
-	}
+	httptestPkgs := helpers.PackageAliases(file.GoAST, `"net/http/httptest"`, "httptest")
+	osPkgs := helpers.PackageAliases(file.GoAST, `"os"`, "os")
 
 	// Файл, называющий локальный адрес, гоняет наш собственный сервер, и «секрет» в нём —
 	// наш же JWT: reference-тест, который гейтится токеном администратора и ходит
@@ -520,12 +527,18 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 		if !drivesOwnServer {
 			violations = append(violations, r.credentialGates(file, fn, envKeys)...)
 		}
-		if usesHTTPTest {
+		// Тест, поднявший свой httptest-сервер (сам или через helper), никуда наружу не идёт.
+		if referencesTestServer(fn.Body, httptestPkgs, facts.servedLocally) {
 			continue
 		}
-		violations = append(violations, r.outboundCalls(file, imports, fn, outbound)...)
+		// Вызовы после пропуска «без отдельного env-флага» — явный опт-ин.
+		liveEnd := fn.Body.End()
+		if start := r.optInStart(fn, envKeys, osPkgs, facts.optInHelpers); start.IsValid() {
+			liveEnd = start
+		}
+		violations = append(violations, r.outboundCalls(file, imports, fn, outbound, liveEnd)...)
 		if own, ok := outboundDirs[filepath.Dir(file.Path)]; ok {
-			violations = append(violations, r.inPackageCalls(file, fn, own)...)
+			violations = append(violations, r.inPackageCalls(file, fn, own, liveEnd)...)
 		}
 	}
 	return violations
@@ -562,7 +575,7 @@ func calleeName(call *ast.CallExpr) string {
 
 // outboundCalls reports calls into packages that talk to a third party.
 func (r *TestExternalServiceRule) outboundCalls(
-	file *core.FileContext, imports map[string]string, fn *ast.FuncDecl, outbound map[string]outboundPackage,
+	file *core.FileContext, imports map[string]string, fn *ast.FuncDecl, outbound map[string]outboundPackage, liveEnd token.Pos,
 ) []*core.Violation {
 	var violations []*core.Violation
 	reported := map[string]bool{}
@@ -571,6 +584,9 @@ func (r *TestExternalServiceRule) outboundCalls(
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
+		}
+		if call.Pos() >= liveEnd {
+			return false
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok {
@@ -626,7 +642,7 @@ func (r *TestExternalServiceRule) outboundCalls(
 // `cryptoprov.NewClient(cfg)`, so the import-based lookup above never sees it. That is exactly
 // how ProjectA's cryptoprov integration test stayed invisible to the rule.
 func (r *TestExternalServiceRule) inPackageCalls(
-	file *core.FileContext, fn *ast.FuncDecl, own outboundPackage,
+	file *core.FileContext, fn *ast.FuncDecl, own outboundPackage, liveEnd token.Pos,
 ) []*core.Violation {
 	var violations []*core.Violation
 	reported := map[string]bool{}
@@ -635,6 +651,9 @@ func (r *TestExternalServiceRule) inPackageCalls(
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
+		}
+		if call.Pos() >= liveEnd {
+			return false
 		}
 		ident, ok := call.Fun.(*ast.Ident)
 		if !ok {

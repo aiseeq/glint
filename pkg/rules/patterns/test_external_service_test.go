@@ -743,3 +743,177 @@ func TestLiveVault(t *testing.T) {
 	require.Len(t, violations, 1, "%v", messages(violations))
 	assert.Equal(t, "LIVE_VAULT_TOKEN", violations[0].Context["env"])
 }
+
+// ratesClient is a client with its production address built in: New takes
+// no address, so a test that builds it with New reaches the live feed.
+const ratesClient = `package rates
+
+import (
+	"context"
+	"net/http"
+)
+
+const defaultURL = "https://feed.ratesbank.io/daily.xml"
+
+type Client struct {
+	url  string
+	http *http.Client
+}
+
+func New() *Client { return NewAt(defaultURL) }
+
+func NewAt(url string) *Client { return &Client{url: url, http: &http.Client{}} }
+
+func (c *Client) Rate(ctx context.Context, code string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url+"?code="+code, nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.http.Do(req)
+}
+`
+
+// A file whose other tests serve a fake feed through httptest still holds a
+// test that builds the client with its production address: the httptest
+// import vouches for the tests that use the server, not for the whole file.
+// The live test skipped only in -short mode reached the real feed on every
+// full run.
+func TestTestExternalServiceRule_LiveTestNextToHTTPTestIsReported(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"rates/client.go": ratesClient,
+		"rates/server_test.go": `package rates
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+var feed = httptest.NewUnstartedServer(http.NotFoundHandler())
+
+func feedURL(t *testing.T) string {
+	t.Helper()
+	return sharedFeed().URL
+}
+
+func sharedFeed() *httptest.Server { return feed }
+`,
+		"rates/client_test.go": `package rates
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func fakeFeed(t *testing.T) *Client {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	t.Cleanup(srv.Close)
+	return NewAt(srv.URL)
+}
+
+func TestRateFromFakeFeed(t *testing.T) {
+	_, _ = fakeFeed(t).Rate(context.Background(), "USD")
+}
+
+func TestRateFromInlineServer(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+	_, _ = NewAt(srv.URL).Rate(context.Background(), "USD")
+}
+
+func TestRateFromSharedServer(t *testing.T) {
+	_, _ = NewAt(feedURL(t)).Rate(context.Background(), "USD")
+}
+
+func TestRate_LiveFeed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping live feed in short mode")
+	}
+	_, _ = New().Rate(context.Background(), "USD")
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1, "%v", messages(violations))
+	assert.Contains(t, violations[0].Message, "TestRate_LiveFeed")
+}
+
+// A test that skips at once unless a dedicated env flag is set does not run
+// in an ordinary go test: the live call behind it is an explicit opt-in and
+// is not reported. The flag must be one no env file of the project sets and
+// the skip must come before the call; a gate on testing.Short() is no flag -
+// a full run opens it.
+func TestTestExternalServiceRule_EnvFlagSkipIsAnOptIn(t *testing.T) {
+	liveTest := func(gate string) map[string]string {
+		return map[string]string{
+			"rates/client.go": ratesClient,
+			"rates/helpers_test.go": `package rates
+
+import (
+	"os"
+	"testing"
+)
+
+func requireLiveFeed(t *testing.T) {
+	t.Helper()
+	if os.Getenv("RATES_LIVE_TEST") != "1" {
+		t.Skip("set RATES_LIVE_TEST=1 to call the live feed")
+	}
+}
+`,
+			"rates/live_test.go": `package rates
+
+import (
+	"context"
+	"os"
+	"testing"
+)
+
+var _ = os.Getenv
+
+func TestRate_Live(t *testing.T) {
+` + gate + `
+}
+`,
+		}
+	}
+	const call = "\t_, _ = New().Rate(context.Background(), \"USD\")"
+	optIns := map[string]string{
+		"flag compared to empty":   "\tif os.Getenv(\"RATES_LIVE_TEST\") == \"\" {\n\t\tt.Skip(\"opt-in\")\n\t}\n" + call,
+		"flag compared to a value": "\tif os.Getenv(\"RATES_LIVE_TEST\") != \"1\" {\n\t\tt.Skip(\"opt-in\")\n\t}\n" + call,
+		"flag through a variable":  "\tlive := os.Getenv(\"RATES_LIVE_TEST\")\n\tif live == \"\" {\n\t\tt.Skip(\"opt-in\")\n\t}\n" + call,
+		"flag looked up":           "\tif _, ok := os.LookupEnv(\"RATES_LIVE_TEST\"); !ok {\n\t\tt.SkipNow()\n\t}\n" + call,
+		"flag or short mode":       "\tif testing.Short() || os.Getenv(\"RATES_LIVE_TEST\") == \"\" {\n\t\tt.Skip(\"opt-in\")\n\t}\n" + call,
+		"flag checked by a helper": "\trequireLiveFeed(t)\n" + call,
+	}
+	for name, body := range optIns {
+		t.Run(name, func(t *testing.T) {
+			violations, err := NewTestExternalServiceRule().AnalyzeGoProject(rulestest.Project(t, liveTest(body)))
+			require.NoError(t, err)
+			assert.Empty(t, violations, "%v", messages(violations))
+		})
+	}
+
+	reported := map[string]map[string]string{
+		"short mode only":           liveTest("\tif testing.Short() {\n\t\tt.Skip(\"short\")\n\t}\n" + call),
+		"no gate":                   liveTest(call),
+		"skip after the call":       liveTest(call + "\n\tif os.Getenv(\"RATES_LIVE_TEST\") == \"\" {\n\t\tt.Skip(\"too late\")\n\t}"),
+		"gate does not skip":        liveTest("\tif os.Getenv(\"RATES_LIVE_TEST\") == \"\" {\n\t\tt.Log(\"no flag\")\n\t}\n" + call),
+		"flag skips when it is set": liveTest("\tif os.Getenv(\"RATES_LIVE_TEST\") != \"\" {\n\t\tt.Skip(\"inverted\")\n\t}\n" + call),
+	}
+	withEnv := liveTest("\trequireLiveFeed(t)\n" + call)
+	withEnv[".env"] = "RATES_LIVE_TEST=1\n"
+	reported["flag set by an env file"] = withEnv
+	for name, files := range reported {
+		t.Run(name, func(t *testing.T) {
+			violations, err := NewTestExternalServiceRule().AnalyzeGoProject(rulestest.Project(t, files))
+			require.NoError(t, err)
+			require.Len(t, violations, 1, "%v", messages(violations))
+			assert.Equal(t, "outbound_client", violations[0].Context["kind"])
+		})
+	}
+}
