@@ -337,15 +337,13 @@ func (w *Walker) shouldSkipDir(name string) bool {
 func (w *Walker) isAnalyzableFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 
-	analyzableExtensions := []string{
+	analyzableExtensions := slices.Concat([]string{
 		".go",
-		".ts", ".tsx",
-		".js", ".jsx",
 		".md",
 		".sql",  // migration hygiene rules (rules must guard by extension)
 		".conf", // server configuration rules (rules must guard by extension)
 		".sh",   // duplication rules (rules must guard by extension)
-	}
+	}, TypeScriptExtensions, JavaScriptExtensions)
 
 	if IsTemplateName(path) {
 		return true // template rules (rules must guard with IsTemplate)

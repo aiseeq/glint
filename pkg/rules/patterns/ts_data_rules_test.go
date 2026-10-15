@@ -108,6 +108,29 @@ func TestJSFileShadowsTSModule(t *testing.T) {
 	assert.Equal(t, []string{"e2e/utils/helpers.js:1", "src/widget.js:1"}, foundLines(violations))
 }
 
+// A bundler resolves an import without an extension to .mjs and .mts as well
+// (Vite tries .mjs, .js, .mts, .ts in that order); .cjs and .cts are reached
+// only by an explicit extension, so they shadow nothing.
+func TestJSFileShadowsTSModuleModuleExtensions(t *testing.T) {
+	rule := NewJSFileShadowsTSModuleRule()
+	files := []*core.FileContext{
+		rulestest.TextFile(t, "src/esm.mjs", "export const a = 1\n"),
+		rulestest.TextFile(t, "src/esm.ts", "export const a = 1\n"),
+		rulestest.TextFile(t, "src/mod.js", "export const b = 1\n"),
+		rulestest.TextFile(t, "src/mod.mts", "export const b = 1\n"),
+		rulestest.TextFile(t, "src/cfg.cjs", "module.exports = {}\n"),
+		rulestest.TextFile(t, "src/cfg.ts", "export {}\n"),
+		rulestest.TextFile(t, "src/lib.js", "export const c = 1\n"),
+		rulestest.TextFile(t, "src/lib.cts", "export const c = 1\n"),
+	}
+	rule.UseProjectFiles(files)
+	var violations []*core.Violation
+	for _, f := range files {
+		violations = append(violations, rule.AnalyzeFile(f)...)
+	}
+	assert.Equal(t, []string{"src/esm.mjs:1", "src/mod.js:1"}, foundLines(violations))
+}
+
 // toISOString is the UTC date: a range built from local calendar days
 // ("yesterday") lands on the day before for every zone east of UTC.
 func TestISODateAsLocalDate(t *testing.T) {
