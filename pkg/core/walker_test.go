@@ -108,6 +108,23 @@ func TestWalkerAnalyzesNginxConfig(t *testing.T) {
 	assert.Equal(t, "nginx.conf", contexts[0].RelPath)
 }
 
+func TestWalkerAnalyzesModuleScriptExtensions(t *testing.T) {
+	tmpDir := t.TempDir()
+	names := []string{"sum.test.mjs", "sum.test.cjs", "sum.test.mts", "sum.test.cts"}
+	for _, name := range names {
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, name), []byte("export const x = 1"), 0644))
+	}
+
+	contexts, errs := NewWalker(tmpDir, DefaultConfig()).WalkSync()
+	require.Empty(t, errs)
+
+	var paths []string
+	for _, ctx := range contexts {
+		paths = append(paths, ctx.RelPath)
+	}
+	assert.ElementsMatch(t, names, paths)
+}
+
 func TestWalkerWalkSync(t *testing.T) {
 	// Create temp directory structure
 	tmpDir := t.TempDir()

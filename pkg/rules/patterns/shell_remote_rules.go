@@ -1,7 +1,6 @@
 package patterns
 
 import (
-	"path"
 	"regexp"
 	"slices"
 	"sort"
@@ -680,17 +679,20 @@ type shellSourceTextRule struct {
 	sources []string
 }
 
-// appSourceExt are the extensions of files an application renders text from.
-var appSourceExt = map[string]bool{".go": true, ".html": true, ".tmpl": true, ".gohtml": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true}
-
 // UseProjectFiles records the text of the root's non-test source files.
 func (r *shellSourceTextRule) UseProjectFiles(files []*core.FileContext) {
 	r.ResetState()
 	for _, ctx := range files {
-		if appSourceExt[path.Ext(ctx.RelPath)] && !ctx.IsTestFile() {
+		if appSource(ctx) && !ctx.IsTestFile() {
 			r.sources = append(r.sources, string(ctx.Content))
 		}
 	}
+}
+
+// appSource reports a file an application renders text from: templates, Go
+// and front-end code.
+func appSource(ctx *core.FileContext) bool {
+	return ctx.IsGoFile() || ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile() || core.IsTemplateName(ctx.RelPath)
 }
 
 // ResetState drops the sources.

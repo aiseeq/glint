@@ -21,7 +21,8 @@ func init() {
 // An import without an extension resolves to one of them by the resolver's
 // order: the tests or the page run the stale copy, and a fix in the .ts has
 // no effect. A .d.ts beside a .js describes it and is left out; so is build
-// output.
+// output, and so are .cjs and .cts: no resolver tries them for an import
+// without an extension.
 type JSFileShadowsTSModuleRule struct {
 	*rules.BaseRule
 	// modules holds the extensionless paths of the root's TS modules.
@@ -43,7 +44,7 @@ func (r *JSFileShadowsTSModuleRule) UseProjectFiles(files []*core.FileContext) {
 	r.modules = map[string]bool{}
 	for _, ctx := range files {
 		path := filepath.ToSlash(ctx.RelPath)
-		if !ctx.IsTypeScriptFile() || strings.HasSuffix(path, ".d.ts") || jsBuildPath(path) {
+		if !ctx.IsTypeScriptFile() || strings.HasSuffix(path, ".d.ts") || jsBuildPath(path) || !resolvedWithoutExtension(path) {
 			continue
 		}
 		r.modules[strings.TrimSuffix(path, filepath.Ext(path))] = true
@@ -56,12 +57,19 @@ func (r *JSFileShadowsTSModuleRule) ResetState() { r.modules = nil }
 // AnalyzeFile reports a JS file that shadows a TS module.
 func (r *JSFileShadowsTSModuleRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	path := filepath.ToSlash(ctx.RelPath)
-	if !ctx.IsJavaScriptFile() || jsBuildPath(path) || !r.modules[strings.TrimSuffix(path, filepath.Ext(path))] {
+	if !ctx.IsJavaScriptFile() || jsBuildPath(path) || !resolvedWithoutExtension(path) || !r.modules[strings.TrimSuffix(path, filepath.Ext(path))] {
 		return nil
 	}
 	return jsReport(nil, r.BaseRule, ctx, 1,
 		"JS file shadows the TS module of the same name — an import without an extension may load this copy",
 		"Delete the copy, or rename it if it is a different module")
+}
+
+// resolvedWithoutExtension reports a module an import without an extension
+// can reach: every TS and JS extension but the CommonJS .cjs and .cts.
+func resolvedWithoutExtension(path string) bool {
+	ext := filepath.Ext(path)
+	return ext != ".cjs" && ext != ".cts"
 }
 
 // jsBuildPath reports a path in installed dependencies or build output.

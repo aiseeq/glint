@@ -89,14 +89,22 @@ func (ctx *FileContext) IsGoFile() bool {
 	return strings.HasSuffix(ctx.Path, ".go")
 }
 
+// TypeScriptExtensions are the extensions of TypeScript sources, ES and
+// CommonJS module variants included.
+var TypeScriptExtensions = []string{".ts", ".tsx", ".mts", ".cts"}
+
+// JavaScriptExtensions are the extensions of JavaScript sources, ES and
+// CommonJS module variants included.
+var JavaScriptExtensions = []string{".js", ".jsx", ".mjs", ".cjs"}
+
 // IsTypeScriptFile returns true if this is a TypeScript file
 func (ctx *FileContext) IsTypeScriptFile() bool {
-	return strings.HasSuffix(ctx.Path, ".ts") || strings.HasSuffix(ctx.Path, ".tsx")
+	return slices.Contains(TypeScriptExtensions, filepath.Ext(ctx.Path))
 }
 
 // IsJavaScriptFile returns true if this is a JavaScript file
 func (ctx *FileContext) IsJavaScriptFile() bool {
-	return strings.HasSuffix(ctx.Path, ".js") || strings.HasSuffix(ctx.Path, ".jsx")
+	return slices.Contains(JavaScriptExtensions, filepath.Ext(ctx.Path))
 }
 
 // IsShellFile returns true if this is a shell script

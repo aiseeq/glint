@@ -60,6 +60,8 @@ func TestFileContextIsTypeScriptFile(t *testing.T) {
 	}{
 		{"/project/app.ts", true},
 		{"/project/component.tsx", true},
+		{"/project/module.mts", true},
+		{"/project/common.cts", true},
 		{"/project/main.go", false},
 		{"/project/style.css", false},
 	}
@@ -79,8 +81,11 @@ func TestFileContextIsJavaScriptFile(t *testing.T) {
 	}{
 		{"/project/app.js", true},
 		{"/project/component.jsx", true},
+		{"/project/module.mjs", true},
+		{"/project/common.cjs", true},
 		{"/project/main.go", false},
 		{"/project/app.ts", false},
+		{"/project/module.mts", false},
 	}
 
 	for _, tt := range tests {
