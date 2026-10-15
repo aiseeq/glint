@@ -354,19 +354,17 @@ func NewStaleBatchRowActedWithoutStatusRecheckRule() *typedFuncRule {
 		var findings []funcFinding
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			loop, ok := n.(*ast.RangeStmt)
-			if !ok || loop.Value == nil {
+			if !ok {
 				return true
 			}
 			rows, ok := ast.Unparen(loop.X).(*ast.Ident)
 			if !ok || !pickedByStatus(scope.info, fn.Body, scope.info.ObjectOf(rows)) {
 				return true
 			}
-			value, ok := loop.Value.(*ast.Ident)
-			if !ok {
-				return true
-			}
-			for _, call := range changesByIDOnly(scope, loop.Body, scope.info.ObjectOf(value), 2) {
-				findings = append(findings, funcFinding{node: call, message: callName(call) + " changes a row picked by its status by id alone — a row that moved on since the pick is changed anyway; pass the picked status or the row's version"})
+			for _, row := range rangeElementVars(scope.info, loop) {
+				for _, call := range changesByIDOnly(scope, loop.Body, row, 2) {
+					findings = append(findings, funcFinding{node: call, message: callName(call) + " changes a row picked by its status by id alone — a row that moved on since the pick is changed anyway; pass the picked status or the row's version"})
+				}
 			}
 			return true
 		})

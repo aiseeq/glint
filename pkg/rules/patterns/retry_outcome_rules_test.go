@@ -191,7 +191,7 @@ func ConvertMinted(rows []Row) []Result {
 // a row that moved on since the pick: a payout completed meanwhile is
 // cancelled.
 func TestStaleBatchRowActedWithoutStatusRecheck(t *testing.T) {
-	assert.Equal(t, []string{"jobs/timeout.go:46"}, typedFuncFindings(t, NewStaleBatchRowActedWithoutStatusRecheckRule(), map[string]string{
+	assert.Equal(t, []string{"jobs/indexed.go:15", "jobs/timeout.go:46"}, typedFuncFindings(t, NewStaleBatchRowActedWithoutStatusRecheckRule(), map[string]string{
 		"jobs/timeout.go": `package jobs
 
 import (
@@ -248,6 +248,25 @@ func (j *Job) RunChecked(ctx context.Context) {
 	for _, tx := range txs {
 		_ = j.canceller.CancelIfStatus(ctx, tx.ID, StatusSent)
 		_ = j.canceller.CancelVersion(ctx, tx.ID, tx.Version)
+	}
+}
+`,
+		// A loop by index names the row through a local bound to it.
+		"jobs/indexed.go": `package jobs
+
+import (
+	"context"
+	"time"
+)
+
+func (j *Job) RunIndexed(ctx context.Context) {
+	txs, err := j.repo.GetTimedOutSent(ctx, time.Hour)
+	if err != nil {
+		return
+	}
+	for i := range txs {
+		tx := txs[i]
+		_ = j.canceller.CancelExpired(ctx, tx.ID)
 	}
 }
 `,

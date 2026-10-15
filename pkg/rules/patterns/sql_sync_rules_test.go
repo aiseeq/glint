@@ -555,8 +555,37 @@ func (s *Syncer) LoadPaged(ctx context.Context, after string) error {
 	}
 	return nil
 }
+
+// A loop by index hands the item through a local bound to it.
+func (s *Syncer) LoadIndexed(ctx context.Context) error {
+	ids, err := s.repo.ListPaidWithoutDetails(ctx, 50)
+	if err != nil {
+		return err
+	}
+	for i := range ids {
+		id := ids[i]
+		if _, err := s.read(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Syncer) LoadIndexedMarked(ctx context.Context) error {
+	ids, err := s.repo.ListPaidWithoutDetails(ctx, 50)
+	if err != nil {
+		return err
+	}
+	for i := range ids {
+		id := ids[i]
+		if _, err := s.read(ctx, ids[i]); err != nil {
+			return errors.Join(err, s.repo.MarkFailed(ctx, id, err))
+		}
+	}
+	return nil
+}
 `)
-	assert.Equal(t, []int{23, 41, 67}, sqlRuleLines(t, NewPendingPageSkipsStayAtHeadRule(), ctx))
+	assert.Equal(t, []int{23, 41, 67, 99}, sqlRuleLines(t, NewPendingPageSkipsStayAtHeadRule(), ctx))
 }
 
 // A pass that goes on past an item whose call fails, counting or collecting

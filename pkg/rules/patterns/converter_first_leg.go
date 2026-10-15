@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -73,24 +74,25 @@ func returnsOneRecord(info *types.Info, fn *ast.FuncDecl) bool {
 	return results.NumFields() == 1 || implementsError(info.TypeOf(results.List[len(results.List)-1].Type))
 }
 
-// takesFirstLeg reports a range over a parameter's list whose body is one if
-// comparing the element with a parameter, assigning two or more variables of
+// takesFirstLeg reports a range over a parameter's list whose body, past the
+// binding of the element by index, is one if comparing the element with a
+// parameter, assigning two or more variables of
 // the function (one an amount) and breaking.
 func takesFirstLeg(info *types.Info, loop *ast.RangeStmt, params map[types.Object]bool) bool {
-	value, ok := loop.Value.(*ast.Ident)
-	if !ok || !rootedInParam(info, loop.X, params) || len(loop.Body.List) != 1 {
+	elem := rangeElementOf(loop)
+	body := elem.statements(loop.Body)
+	if !rootedInParam(info, loop.X, params) || len(body) != 1 {
 		return false
 	}
-	element, ok := info.ObjectOf(value).(*types.Var)
-	if !ok {
-		return false
-	}
-	check, ok := loop.Body.List[0].(*ast.IfStmt)
+	check, ok := body[0].(*ast.IfStmt)
 	if !ok || check.Else != nil || len(check.Body.List) == 0 {
 		return false
 	}
 	cond, ok := check.Cond.(*ast.BinaryExpr)
-	if !ok || cond.Op != token.EQL || !comparesWithParam(info, cond, element, params) {
+	if !ok || cond.Op != token.EQL || !slices.ContainsFunc(elem.idents, func(ident *ast.Ident) bool {
+		element, ok := info.ObjectOf(ident).(*types.Var)
+		return ok && comparesWithParam(info, cond, element, params)
+	}) {
 		return false
 	}
 	if last, isBranch := check.Body.List[len(check.Body.List)-1].(*ast.BranchStmt); !isBranch || last.Tok != token.BREAK {

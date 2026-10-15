@@ -57,7 +57,7 @@ func (s *Service) Sync(ctx context.Context, wallet string) ([]*WalletBalance, er
 // Two optional sources feed one total: a failed one is logged and its share
 // is simply missing from the total the function returns as complete.
 func TestAggregateSkipsFailedPart_SequentialSourcesLoggedAndSkipped(t *testing.T) {
-	assert.Equal(t, []string{"positions/total.go:6"}, aggregateSkipFindings(t, map[string]string{
+	assert.Equal(t, []string{"positions/indexed.go:6", "positions/total.go:6"}, aggregateSkipFindings(t, map[string]string{
 		"positions/total.go": `package positions
 
 func (s *Service) total(ctx context.Context, address string) (decimal.Decimal, error) {
@@ -76,6 +76,23 @@ func (s *Service) total(ctx context.Context, address string) (decimal.Decimal, e
 	}
 	for _, p := range vaults {
 		total = total.Add(p.Value)
+	}
+	return total, nil
+}
+`,
+		// A loop by index adds the part through a local bound to it.
+		"positions/indexed.go": `package positions
+
+func (s *Service) totalIndexed(ctx context.Context, address string) (decimal.Decimal, error) {
+	total := decimal.Zero
+	lending, lendingErr := s.fetchLending(ctx, address)
+	if lendingErr != nil {
+		s.logger.Warn("lending positions fetch failed", "error", lendingErr)
+	} else {
+		for i := range lending {
+			p := &lending[i]
+			total = total.Add(p.Value)
+		}
 	}
 	return total, nil
 }

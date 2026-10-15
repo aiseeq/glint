@@ -180,7 +180,7 @@ func (a *Admin) perCountry(seen map[key]bool) map[string][]string {
 // A containment match on the option's name returns the first option that
 // fits; an exact match and a match that refuses a second fit are fine.
 func TestFuzzyMatchReturnsFirstCandidate(t *testing.T) {
-	assert.Equal(t, []string{"banks/resolve.go:18", "banks/resolve.go:36"}, typedFuncFindings(t, NewFuzzyMatchReturnsFirstCandidateRule(), map[string]string{
+	assert.Equal(t, []string{"banks/indexed.go:10", "banks/resolve.go:18", "banks/resolve.go:36"}, typedFuncFindings(t, NewFuzzyMatchReturnsFirstCandidateRule(), map[string]string{
 		"banks/resolve.go": `package banks
 
 import "strings"
@@ -230,6 +230,23 @@ func Allowed(path string, prefixes []string) bool {
 		}
 	}
 	return false
+}
+`,
+		// A loop by index reads the option through a local bound to it.
+		"banks/indexed.go": `package banks
+
+import "strings"
+
+func ResolveIndexed(name string, opts []Option) (string, bool) {
+	target := normalize(name)
+	for i := range opts {
+		o := &opts[i]
+		n := normalize(o.Name)
+		if strings.Contains(n, target) {
+			return o.ID, true
+		}
+	}
+	return "", false
 }
 `,
 	}))

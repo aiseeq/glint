@@ -371,11 +371,13 @@ func keyedPerRow(info *types.Info, body *ast.BlockStmt, rows *types.Var) bool {
 			return !found
 		}
 		x, ok := ast.Unparen(loop.X).(*ast.Ident)
-		value, isIdent := loop.Value.(*ast.Ident)
-		if !ok || !isIdent || info.ObjectOf(x) != rows {
+		if !ok || info.ObjectOf(x) != rows {
 			return true
 		}
-		row := info.ObjectOf(value)
+		row := map[types.Object]bool{}
+		for _, obj := range rangeElementVars(info, loop) {
+			row[obj] = true
+		}
 		ast.Inspect(loop.Body, func(n ast.Node) bool {
 			index, ok := n.(*ast.IndexExpr)
 			if !ok {
@@ -385,7 +387,7 @@ func keyedPerRow(info *types.Info, body *ast.BlockStmt, rows *types.Var) bool {
 			if typ == nil {
 				return true
 			}
-			if _, isMap := typ.Underlying().(*types.Map); isMap && mentionsObject(info, index.Index, row) {
+			if _, isMap := typ.Underlying().(*types.Map); isMap && mentionsAnyObject(info, index.Index, row) {
 				found = true
 			}
 			return !found

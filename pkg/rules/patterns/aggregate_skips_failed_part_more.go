@@ -252,10 +252,8 @@ func loggedSourceSkipped(first, second ast.Stmt) *ast.IfStmt {
 	found := false
 	ast.Inspect(elseBlock, func(n ast.Node) bool {
 		if loop, ok := n.(*ast.RangeStmt); ok && readsAnyOf(loop.X, values) {
-			for _, v := range []ast.Expr{loop.Key, loop.Value} {
-				if id, ok := v.(*ast.Ident); ok && id.Name != "_" {
-					values[id.Name] = true
-				}
+			for _, name := range rangeLoopNames(loop) {
+				values[name] = true
 			}
 		}
 		if stmt, ok := n.(ast.Stmt); ok && accumulates(stmt, values, check.Pos()) {
