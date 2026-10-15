@@ -73,8 +73,10 @@ func (r *TechDebtRule) initPatterns() {
 		"temporary_solution": {
 			// "temporary" alone is an ordinary adjective (temporary credentials,
 			// a temporary file); it marks debt only next to what is temporary
-			// about the code, or as a label ("Temporary:").
-			regex:       regexp.MustCompile(`(?i)//\s*(temporary\s+(?:fix|hack|workaround|solution|patch|code|measure|kludge|hotfix)\b|temporary\s*(?:[:!(\-—]|$)|временн\S*\s+(?:решени|костыл|фикс|заплатк|обход|хак)|temp\s+fix|quick\s+fix|hotfix|workaround)`),
+			// about the code, or as a label ("Temporary:"). "hotfix" is a
+			// release path where hotfixes ship (hotfix branches, a hotfix
+			// label): only a label on the code ("HOTFIX:", "hotfix for") counts.
+			regex:       regexp.MustCompile(`(?i)//\s*(temporary\s+(?:fix|hack|workaround|solution|patch|code|measure|kludge|hotfix)\b|temporary\s*(?:[:!(\-—]|$)|временн\S*\s+(?:решени|костыл|фикс|заплатк|обход|хак)|temp\s+fix|quick\s+fix|hotfix\s*(?:[:!(\-—]|$)|hotfix\s+for\b|workaround)`),
 			severity:    core.SeverityMedium,
 			description: "Temporary solution marker",
 			suggestion:  "Replace with proper implementation",

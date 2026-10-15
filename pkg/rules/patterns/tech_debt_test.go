@@ -239,6 +239,26 @@ func TestTechDebtRule_BrokenAsOrdinaryWord(t *testing.T) {
 }
 
 // Markdown prose and fenced examples are documentation, not code comments.
+// A hotfix is a release path in projects that ship them (hotfix/* branches,
+// a hotfix label): a comment about hotfixes describes that path, not the code.
+// Only a label on the code itself ("HOTFIX:", "hotfix for ...") is a marker.
+func TestTechDebtRule_HotfixAsDomainWord(t *testing.T) {
+	rule := NewTechDebtRule()
+	for _, code := range []string{
+		"// hotfixes already out keep the version they were built with",
+		"// hotfix branches start from the commit production runs",
+		"// Hotfix lets a branch from the commit production runs go out past the freeze",
+		"// hotfixBase reads the commit the hotfix base target runs",
+	} {
+		ctx := createTechDebtContext(t, "backend/service.go", code)
+		assert.Empty(t, rule.AnalyzeFile(ctx), "not a marker: %s", code)
+	}
+	for _, code := range []string{"// HOTFIX", "// hotfix: skip the check until the vendor fixes it", "// Hotfix (prod outage)"} {
+		ctx := createTechDebtContext(t, "backend/service.go", code)
+		assert.NotEmpty(t, rule.AnalyzeFile(ctx), "marker: %s", code)
+	}
+}
+
 func TestTechDebtRule_OnlyCodeFiles(t *testing.T) {
 	rule := NewTechDebtRule()
 	code := "# Docs\n\n```go\n// temporary workaround for the vendor bug\nx := 1\n```\n"
