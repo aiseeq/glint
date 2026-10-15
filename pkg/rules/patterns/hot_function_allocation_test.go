@@ -78,9 +78,249 @@ func (s *State) Cold(in []int) []int {
 }
 `
 
+// hotGuardedSource allocates only when a check of the same target says the
+// old value is missing or too small: a get-or-create keeps the new value for
+// the next tick, a buffer grows once and is refilled in place after that.
+// Neither leaves garbage every tick. An allocation under a check of something
+// else, or into a local the function starts empty, still does.
+const hotGuardedSource = `package physics
+
+type Walker struct{ path []int }
+
+type World struct {
+	walkers map[uint64]*Walker
+	verts   []int
+	orders  []int
+	cur     *Walker
+}
+
+//glint:hot
+func (w *World) Tick(tag uint64, n int, buf *[]int) {
+	wk := w.walkers[tag]
+	if wk == nil {
+		wk = &Walker{}
+		w.walkers[tag] = wk
+	}
+	if cap(w.verts) < n {
+		w.verts = make([]int, 0, n)
+	}
+	if len(w.orders) == cap(w.orders) {
+		w.orders = make([]int, 0, 256)
+	}
+	if cap(*buf)-len(*buf) < n {
+		*buf = make([]int, 0, n)
+	}
+	if w.cur == nil || len(w.cur.path) != n {
+		w.cur = &Walker{path: make([]int, n)}
+	}
+	if n > 4 {
+		w.verts = make([]int, n) // want allocation-in-hot-function
+	}
+	var local []int
+	if local == nil {
+		local = make([]int, n) // want allocation-in-hot-function
+	}
+	fresh := &Walker{} // want allocation-in-hot-function
+	if fresh == nil {
+		fresh = &Walker{} // want allocation-in-hot-function
+	}
+	_, _ = local, fresh
+}
+`
+
 func TestAllocationInHotFunction(t *testing.T) {
-	files := map[string]string{"physics/world.go": hotAllocationSource}
+	files := map[string]string{"physics/world.go": hotAllocationSource, "physics/guarded.go": hotGuardedSource}
 	violations, err := NewAllocationInHotFunctionRule().AnalyzeGoProject(rulestest.Project(t, files))
 	require.NoError(t, err)
 	assert.Equal(t, wantedLines(files, "allocation-in-hot-function"), foundLines(violations))
+}
+
+// hotTransitiveSource marks only the root of the tick; the garbage is made by
+// what it calls. A call through an interface or a func value is not
+// followed, nor a call on a cold branch that carries the rule's suppression.
+const hotTransitiveSource = `package stage
+
+import "fmt"
+
+type Unit struct{ X, Y int }
+
+type Frame struct{ Units []Unit }
+
+type Sink interface{ Put(u Unit) }
+
+type Stage struct {
+	nearBuf []Unit
+	sink    Sink
+	hook    func(Unit)
+}
+
+//glint:hot
+func (s *Stage) Step(f *Frame) {
+	for i := range f.Units {
+		_ = s.near(f, i)
+		_ = s.nearInPlace(f, i)
+		s.sink.Put(f.Units[i])
+		s.hook(f.Units[i])
+	}
+	if len(f.Units) == 0 {
+		s.reset() // allocation-in-hot-function: safe — the first frame only
+	}
+}
+
+func (s *Stage) near(f *Frame, i int) []Unit {
+	var out []Unit
+	for _, u := range f.Units {
+		if u.X == f.Units[i].X {
+			out = append(out, u) // want allocation-in-hot-function
+		}
+	}
+	return contour(out)
+}
+
+func contour(us []Unit) []Unit {
+	return append([]Unit(nil), us...) // want allocation-in-hot-function
+}
+
+func (s *Stage) nearInPlace(f *Frame, i int) []Unit {
+	s.nearBuf = append(s.nearBuf[:0], f.Units[i])
+	return s.nearBuf
+}
+
+func (s *Stage) reset() { s.nearBuf = make([]Unit, 0, 64) }
+
+type logSink struct{}
+
+func (logSink) Put(u Unit) { _ = []Unit{u} }
+
+func cold() []Unit { return make([]Unit, 8) }
+
+// Check fails once per bad frame: the branch that returns the error or
+// panics is not run every tick, nor is what it calls.
+//
+//glint:hot
+func (s *Stage) Check(f *Frame) error {
+	if len(f.Units) > 1000 {
+		return tooMany(len(f.Units))
+	}
+	if f.Units == nil {
+		panic(fmt.Sprint("no units", []int{len(f.Units)}))
+	}
+	if len(f.Units) == 1 {
+		_ = []int{1} // want allocation-in-hot-function
+	}
+	return nil
+}
+
+func tooMany(n int) error { return fmt.Errorf("%d units: %v", n, []int{n}) }
+`
+
+func TestAllocationInHotFunctionTransitive(t *testing.T) {
+	files := map[string]string{"stage/stage.go": hotTransitiveSource}
+	project := rulestest.Project(t, files)
+
+	direct, err := NewAllocationInHotFunctionRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"stage/stage.go:69"}, foundLines(direct), "without transitive only the marked bodies are checked")
+
+	rule := NewAllocationInHotFunctionRule()
+	require.NoError(t, rule.Configure(map[string]any{"transitive": true}))
+	violations, err := rule.AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Equal(t, wantedLines(files, "allocation-in-hot-function"), foundLines(violations))
+	require.NotEmpty(t, violations)
+	assert.Contains(t, violations[0].Message, "Stage.Step → Stage.near")
+
+	require.Error(t, NewAllocationInHotFunctionRule().Configure(map[string]any{"transitive": "yes"}))
+}
+
+// hotEscapeSource allocates where the syntax does not show it: a variable
+// whose address is kept moves to the heap, a value boxed into an interface
+// for a log call is allocated on every call, a closure kept on the receiver
+// escapes. A small make that never leaves the function stays on the stack;
+// a constant or a zero-size value in an interface costs nothing; what the
+// inlined slog.Debug does inside is not a line of this function.
+const hotEscapeSource = `package emu
+
+import (
+	"fmt"
+	"log/slog"
+)
+
+type Snap struct{ A [64]int }
+
+type Empty struct{}
+
+type Emulator struct {
+	keep *Snap
+	hook func() int
+	sink any
+}
+
+func (e *Emulator) keepPresence(s *Snap) { e.keep = s }
+
+func (e *Emulator) snapshot() Snap { return Snap{} }
+
+//glint:hot
+func (e *Emulator) Inject(loop int) int {
+	before := e.snapshot() // want allocation-in-hot-function
+	e.keepPresence(&before)
+	slog.Debug("inject", "loop", loop) // want allocation-in-hot-function
+	tmp := make([]int, 8)
+	tmp[0] = loop
+	if loop < 0 {
+		panic(fmt.Sprintf("loop %d", loop))
+	}
+	e.hook = func() int { return loop } // want allocation-in-hot-function
+	e.sink = Empty{}
+	e.sink = "const"
+	grown := make([]int, loop) // want allocation-in-hot-function
+	return tmp[0] + len(grown)
+}
+`
+
+func TestAllocationInHotFunctionEscape(t *testing.T) {
+	files := map[string]string{"emu/emu.go": hotEscapeSource}
+	project := rulestest.Project(t, files)
+
+	syntax, err := NewAllocationInHotFunctionRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"emu/emu.go:27", "emu/emu.go:35"}, foundLines(syntax), "the syntax sees both makes and nothing else")
+
+	rule := NewAllocationInHotFunctionRule()
+	require.NoError(t, rule.Configure(map[string]any{"escape": true}))
+	violations, err := rule.AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Equal(t, wantedLines(files, "allocation-in-hot-function"), foundLines(violations))
+
+	require.Error(t, NewReflectInHotFunctionRule().Configure(map[string]any{"escape": true}))
+}
+
+func TestParseEscapeLine(t *testing.T) {
+	file, note, ok, err := parseEscapeLine("p/p.go:20:2: moved to heap: before")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "p/p.go", file)
+	assert.Equal(t, escapeNote{line: 20, col: 2, expr: "before", heap: true, moved: true}, note)
+
+	file, _, ok, err = parseEscapeLine(`C:\src\p\p.go:20:2: moved to heap: before`)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, `C:\src\p\p.go`, file)
+
+	_, note, ok, _ = parseEscapeLine("p/p.go:23:13: make([]int, 8) does not escape")
+	require.True(t, ok)
+	assert.Equal(t, escapeNote{line: 23, col: 13, expr: "make([]int, 8)"}, note)
+
+	_, note, ok, _ = parseEscapeLine(`p/q.go:10:42: []int{...} escapes to heap`)
+	require.True(t, ok)
+	assert.Equal(t, escapeNote{line: 10, col: 42, expr: "[]int{...}", heap: true}, note)
+
+	_, _, _, err = parseEscapeLine("p/p.go:99999999999999999999:1: moved to heap: x")
+	require.Error(t, err)
+
+	for _, skipped := range []string{"# example.com/esc/p", "p/p.go:16:6: can inline (*E).keepPresence", "p/p.go:16:26: leaking param: s", "p/p.go:21:16: inlining call to (*E).keepPresence"} {
+		_, _, ok, err = parseEscapeLine(skipped)
+		require.NoError(t, err)
+		assert.False(t, ok, skipped)
+	}
 }
