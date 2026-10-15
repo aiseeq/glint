@@ -1,3 +1,11 @@
+// The check below loads every rule package with its dependencies from source
+// and builds SSA and a call graph over the whole program: a single-threaded
+// static analysis of glint's own code, with nothing for the race detector to
+// find, that takes several gigabytes under it. It runs in the plain test task;
+// the race build leaves it out.
+
+//go:build !race
+
 package main
 
 import (

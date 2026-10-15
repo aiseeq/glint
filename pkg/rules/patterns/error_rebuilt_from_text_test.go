@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 // rebuiltErrorProject builds a typed project out of one file plus the shared
@@ -72,7 +73,7 @@ func record(message string)     {}
 		contexts = append(contexts, ctx)
 	}
 
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 	return project
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func decisionProject(t *testing.T, files map[string]string) *core.GoProjectContext {
@@ -26,7 +27,7 @@ func decisionProject(t *testing.T, files map[string]string) *core.GoProjectConte
 		contexts = append(contexts, ctx)
 	}
 
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 	return project
 }

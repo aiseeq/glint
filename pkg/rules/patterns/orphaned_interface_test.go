@@ -206,7 +206,7 @@ type Engine struct{ notifier Notifier }
 func Broken() int { return "not an int" }
 `,
 	})
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{TolerateBrokenPackages: true})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{TolerateBrokenPackages: true, ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 	require.NotEmpty(t, project.SkippedPackages)
 

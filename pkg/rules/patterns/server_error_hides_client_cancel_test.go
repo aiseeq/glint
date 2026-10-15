@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestServerErrorHidesClientCancelRule_Metadata(t *testing.T) {
@@ -596,7 +597,7 @@ func cancelResponderProject(t *testing.T, files map[string]string) *core.GoProje
 		contexts = append(contexts, ctx)
 	}
 
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 	return project
 }

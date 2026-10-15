@@ -382,7 +382,7 @@ func Shared() {
 			analyzed = append(analyzed, file)
 		}
 	}
-	project, err := core.LoadGoProject(root, analyzed, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, analyzed, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 	violations, err := NewCloserNeverClosedRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
