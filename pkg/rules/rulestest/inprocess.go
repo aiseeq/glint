@@ -536,7 +536,9 @@ func (l *inProcessLoad) readExport(exportFile, importPath string) (typed *types.
 			err = closeErr
 		}
 	}()
-	reader, err := gcexportdata.NewReader(bufio.NewReader(f))
+	// go/packages reads the files of go list -export the same way: until their
+	// format leaves the compiler's archive there is no other reader for them.
+	reader, err := gcexportdata.NewReader(bufio.NewReader(f)) //nolint:staticcheck // SA1019: no replacement for go list -export files yet
 	if err != nil {
 		return nil, fmt.Errorf("read export data of %q: %w", importPath, err)
 	}
