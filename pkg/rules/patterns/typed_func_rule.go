@@ -46,6 +46,10 @@ type typedFuncRule struct {
 	// of the whole project: what the check compares a function with is
 	// collected once per run, not kept on the shared rule.
 	forProject func(decls map[*types.Func]typedFuncDecl) func(scope funcScope, fn *ast.FuncDecl) []funcFinding
+	// severityOf, when set, gives the severity of the findings of one
+	// function, raising the default where the cost matters more (a hot
+	// function); it never lowers it.
+	severityOf func(fn *ast.FuncDecl) core.Severity
 }
 
 // AnalyzeFile is a no-op: the check needs types.
@@ -81,6 +85,9 @@ func (r *typedFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Vi
 					continue
 				}
 				v := r.CreateViolation(file.RelPath, line, f.message)
+				if r.severityOf != nil {
+					v.Severity = max(v.Severity, r.severityOf(fn))
+				}
 				v.WithCode(strings.TrimSpace(file.GetLine(line)))
 				v.WithSuggestion(r.suggestion)
 				violations = append(violations, v)

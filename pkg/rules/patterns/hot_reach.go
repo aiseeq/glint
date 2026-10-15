@@ -138,6 +138,10 @@ type hotFuncRule struct {
 	*rules.BaseRule
 	suggestion string
 	check      func(scope hotScope, fn *ast.FuncDecl) []funcFinding
+	// forProject, when set, builds the check of one run from the whole
+	// project: what the check needs from other files is collected once per
+	// run, not kept on the shared rule.
+	forProject func(ctx *core.GoProjectContext) (func(scope hotScope, fn *ast.FuncDecl) []funcFinding, error)
 	transitive bool
 	// takesEscape reports a rule whose check reads the compiler's escape
 	// analysis; escape is the escape: true setting of such a rule.
@@ -181,6 +185,12 @@ func (r *hotFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Viol
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
+	check := r.check
+	if r.forProject != nil {
+		if check, err = r.forProject(ctx); err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Name(), err)
+		}
+	}
 	var escapes *escapeNotes
 	if r.escape {
 		if escapes, err = compilerEscapes(ctx, hot, r.transitive); err != nil {
@@ -196,7 +206,7 @@ func (r *hotFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Viol
 			var violations []*core.Violation
 			scope := hotScope{file: file.GoAST, info: info, in: h.in(), escapes: escapes}
 			cold := coldBlocks(info, fn)
-			for _, f := range r.check(scope, fn) {
+			for _, f := range check(scope, fn) {
 				if insideNodes(cold, f.node) {
 					continue
 				}
@@ -271,4 +281,14 @@ func insideNodes(nodes []ast.Node, node ast.Node) bool {
 		}
 	}
 	return false
+}
+
+// hotRaisesSeverity is the severity of a finding whose cost is small in
+// ordinary code and matters in a function marked //glint:hot: medium there,
+// low elsewhere.
+func hotRaisesSeverity(fn *ast.FuncDecl) core.Severity {
+	if hasDirective(fn.Doc, hotFunctionDirective) {
+		return core.SeverityMedium
+	}
+	return core.SeverityLow
 }
