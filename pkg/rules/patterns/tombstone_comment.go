@@ -25,7 +25,8 @@ func init() {
 // comments. A tombstone is noise the moment the commit lands.
 //
 // Not flagged: behavior descriptions ("entries are removed after TTL", "if
-// the record was removed"), godoc deprecation markers (owned by the
+// the record was removed"), a change counted both ways ("lines added and
+// removed"), godoc deprecation markers (owned by the
 // deprecated-comment rule), policy quotes, Go doc code blocks (//<tab>),
 // which quote an example instead of annotating the code around them, and a
 // status word in capitals that a string literal of the file spells too (a
@@ -36,6 +37,8 @@ type TombstoneCommentRule struct {
 	tombstone    *regexp.Regexp
 	behaviorAux  *regexp.Regexp
 	behaviorTail *regexp.Regexp
+	addedBefore  *regexp.Regexp
+	addedAfter   *regexp.Regexp
 	policyLine   *regexp.Regexp
 }
 
@@ -56,6 +59,8 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 			`(?i)(?:\b(?:is|are|was|were|be|being|been|get|gets|got|to|soft)\s+(?:\w+ly\s+)?|будут\s+|будет\s+|был[аио]?\s+|должн\w*\s+быть\s+|могут\s+быть\s+|не\s+|что\s+|сколько\s+)$`),
 		behaviorTail: regexp.MustCompile(
 			`(?i)^(?:\s+from\b|\s*(?:->|→)|\s*(?:или|либо|or)\s)`),
+		addedBefore: regexp.MustCompile(`(?i)\badded\s*(?:and|or|&|/)\s*$`),
+		addedAfter:  regexp.MustCompile(`(?i)^\s*(?:and|or|&|/)\s*added\b`),
 		policyLine: regexp.MustCompile(
 			`(?i)CLAUDE\.md|принцип|запрещ|policy|deprecated:`),
 	}
@@ -99,6 +104,9 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		}
 		if r.behaviorTail.MatchString(comment[loc[1]:]) {
 			continue // "removed from X", "deleted -> *", "удалено или ..." — data-flow/state docs
+		}
+		if r.addedBefore.MatchString(comment[:loc[0]]) || r.addedAfter.MatchString(comment[loc[1]:]) {
+			continue // "lines added and removed" — a change counted both ways
 		}
 		if word := strings.TrimFunc(comment[loc[0]:loc[1]], isNotLetter); isCapitalWord(word) {
 			if literalWords == nil {
