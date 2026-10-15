@@ -32,58 +32,37 @@ var allocatingPackageFuncs = []struct {
 	{"strings", []string{"Clone"}},
 }
 
-// AllocationInHotFunctionRule detects heap allocations in the body of a
-// function its author marked hot with //glint:hot: make, new, a slice or map
-// literal, &T{...}, slices.Clone and its kin, and append to a slice that
-// starts empty in the function. A function run every tick that allocates
-// leaves garbage every tick, and the collector's work grows with it; the hot
-// form keeps its buffers on the receiver or takes them as parameters and
-// refills them with append(buf[:0], ...).
-type AllocationInHotFunctionRule struct {
-	*rules.BaseRule
-}
-
-// NewAllocationInHotFunctionRule creates the rule.
-func NewAllocationInHotFunctionRule() *AllocationInHotFunctionRule {
-	return &AllocationInHotFunctionRule{
+// NewAllocationInHotFunctionRule creates allocation-in-hot-function: a heap
+// allocation in the body of a function its author marked hot with
+// //glint:hot - make, new, a slice or map literal, &T{...}, slices.Clone and
+// its kin, and append to a slice that starts empty in the function. A
+// function run every tick that allocates leaves garbage every tick, and the
+// collector's work grows with it; the hot form keeps its buffers on the
+// receiver or takes them as parameters and refills them with
+// append(buf[:0], ...). An allocation under a check of its own lasting target
+// (get-or-create, a buffer that grows) is kept for the next call and is not
+// reported.
+//
+// With escape: true the rule also reads the compiler's escape analysis (go
+// build -gcflags=-m over the packages with hot functions): it reports what
+// the syntax does not show - a value boxed into an interface, a variable
+// moved to the heap, a closure that escapes - and drops a fixed-size make or
+// literal the compiler keeps on the stack. The build is replayed from the go
+// build cache for unchanged packages, and the compiler's wording is not a
+// stable interface: a toolchain that words it differently reports less, not
+// more.
+func NewAllocationInHotFunctionRule() *hotFuncRule {
+	return &hotFuncRule{
 		BaseRule: rules.NewBaseRule(
 			"allocation-in-hot-function",
 			"patterns",
 			"Detects an allocation in a function marked //glint:hot: make, new, a slice or map literal, &T{...}, slices.Clone and the like, append to a slice that starts empty in the function — the hot path leaves garbage on every call; reuse a buffer with append(buf[:0], ...)",
 			core.SeverityMedium,
 		),
+		suggestion:  "Keep the buffer on the receiver or take it as a parameter and refill it with append(buf[:0], ...); a deliberate allocation outside the loop takes // allocation-in-hot-function: safe — <reason>",
+		check:       hotAllocations,
+		takesEscape: true,
 	}
-}
-
-// AnalyzeFile is a no-op: whether a literal is a slice needs its type.
-func (r *AllocationInHotFunctionRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
-	return nil
-}
-
-// RequiresSSA reports that typed syntax is enough.
-func (r *AllocationInHotFunctionRule) RequiresSSA() bool { return false }
-
-// AnalyzeGoProject checks every function marked hot.
-func (r *AllocationInHotFunctionRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
-		return analyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {
-			if !hasDirective(fn.Doc, hotFunctionDirective) {
-				return nil
-			}
-			var violations []*core.Violation
-			for _, f := range hotAllocations(file.GoAST, info, fn) {
-				line := file.LineFor(f.node)
-				if file.IsSuppressed(line, r.Name()) {
-					continue
-				}
-				v := r.CreateViolation(file.RelPath, line, f.message)
-				v.WithCode(strings.TrimSpace(file.GetLine(line)))
-				v.WithSuggestion("Keep the buffer on the receiver or take it as a parameter and refill it with append(buf[:0], ...); a deliberate allocation outside the loop takes // " + r.Name() + ": safe — <reason>")
-				violations = append(violations, v)
-			}
-			return violations
-		})
-	})
 }
 
 // hasDirective reports whether a line of the comment group is the directive.
@@ -100,12 +79,28 @@ func hasDirective(doc *ast.CommentGroup, directive string) bool {
 }
 
 // hotAllocations returns the allocations of the function body, closures
-// included.
-func hotAllocations(file *ast.File, info *types.Info, fn *ast.FuncDecl) []funcFinding {
+// included. With the compiler's escape analysis, a make, new or literal the
+// compiler keeps on the stack is not reported, and what it puts on the heap
+// beyond the syntax - boxing into an interface, a variable moved to the
+// heap, a closure - is.
+func hotAllocations(scope hotScope, fn *ast.FuncDecl) []funcFinding {
+	file, info, in := scope.file, scope.info, scope.in
 	fresh := freshSlices(info, fn)
-	in := " in hot function " + fn.Name.Name
+	guarded := guardedAllocations(info, fn)
+	var escapes *funcEscapes
+	if scope.escapes != nil {
+		escapes = scope.escapes.forFunc(fn)
+	}
 	var findings []funcFinding
+	reported := map[ast.Node]bool{}
 	report := func(node ast.Node, what string) {
+		reported[node] = true
+		if insideNodes(guarded, node) {
+			return
+		}
+		if escapes != nil && escapes.stays(info, node) {
+			return
+		}
 		findings = append(findings, funcFinding{node: node, message: what + " allocates" + in})
 	}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -128,7 +123,97 @@ func hotAllocations(file *ast.File, info *types.Info, fn *ast.FuncDecl) []funcFi
 		}
 		return true
 	})
+	if escapes != nil {
+		for _, f := range escapes.heapFindings(info, reported, in) {
+			if !insideNodes(guarded, f.node) {
+				findings = append(findings, f)
+			}
+		}
+	}
 	return findings
+}
+
+// guardedAllocations returns the values the function assigns to a lasting
+// target - a field, *p, m[k], or a local loaded from one - in the body of an
+// if whose condition reads the same target:
+//
+//	w := s.walkers[tag]
+//	if w == nil { w = &Walker{}; s.walkers[tag] = w } // get-or-create
+//	if cap(t.verts) < n { t.verts = make([]V, 0, n) } // a buffer that grows
+//
+// The allocation runs when the old value is missing or too small and is kept
+// for the next call, so it is not garbage of every call.
+func guardedAllocations(info *types.Info, fn *ast.FuncDecl) []ast.Node {
+	loaded := loadedLocals(info, fn)
+	var guarded []ast.Node
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		stmt, ok := n.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		for _, s := range stmt.Body.List {
+			assign, ok := s.(*ast.AssignStmt)
+			if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != len(assign.Rhs) {
+				continue
+			}
+			for i, lhs := range assign.Lhs {
+				if lastingTarget(info, lhs, loaded) && readsExpr(stmt.Cond, lhs) {
+					guarded = append(guarded, assign.Rhs[i])
+				}
+			}
+		}
+		return true
+	})
+	return guarded
+}
+
+// lastingTarget reports a target whose value outlives the call: a field, a
+// dereference, an index, or a local loaded from one of those.
+func lastingTarget(info *types.Info, target ast.Expr, loaded map[types.Object]bool) bool {
+	switch t := ast.Unparen(target).(type) {
+	case *ast.SelectorExpr, *ast.StarExpr, *ast.IndexExpr:
+		return true
+	case *ast.Ident:
+		return loaded[info.Uses[t]]
+	}
+	return false
+}
+
+// loadedLocals returns the locals the function defines from a field, a
+// dereference or an index: w := s.walkers[tag].
+func loadedLocals(info *types.Info, fn *ast.FuncDecl) map[types.Object]bool {
+	loaded := map[types.Object]bool{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != len(assign.Rhs) {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			ident, isIdent := lhs.(*ast.Ident)
+			if !isIdent || info.Defs[ident] == nil {
+				continue
+			}
+			switch ast.Unparen(assign.Rhs[i]).(type) {
+			case *ast.SelectorExpr, *ast.StarExpr, *ast.IndexExpr:
+				loaded[info.Defs[ident]] = true
+			}
+		}
+		return true
+	})
+	return loaded
+}
+
+// readsExpr reports whether expr appears in cond.
+func readsExpr(cond, expr ast.Expr) bool {
+	want := types.ExprString(ast.Unparen(expr))
+	found := false
+	ast.Inspect(cond, func(n ast.Node) bool {
+		if e, ok := n.(ast.Expr); ok && !found && types.ExprString(e) == want {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // allocatingCall describes a call that allocates: make, new, a library clone,

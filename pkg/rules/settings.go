@@ -51,3 +51,17 @@ func IntSetting(settings map[string]any, ruleName, key string) (value int, prese
 	}
 	return 0, true, fmt.Errorf("configure %s: %s must be an integer, got %T (%v)", ruleName, key, raw, raw)
 }
+
+// BoolSetting reads a boolean setting of a rule's configuration: present
+// reports whether the key is set at all; any other type is an error naming the
+// rule and the key, not a fallback to the default.
+func BoolSetting(settings map[string]any, ruleName, key string) (value, present bool, err error) {
+	raw, ok := settings[key]
+	if !ok {
+		return false, false, nil
+	}
+	if b, isBool := raw.(bool); isBool {
+		return b, true, nil
+	}
+	return false, true, fmt.Errorf("configure %s: %s must be true or false, got %T (%v)", ruleName, key, raw, raw)
+}
