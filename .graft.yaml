@@ -1,5 +1,5 @@
 schema: 1
-graft: '>=2.5.0'
+graft: '>=2.9.0'
 
 # Versions are annotated tags vX.Y.Z (graft release); the build stamps
 # graft version --describe into the binary.
@@ -47,9 +47,10 @@ tasks:
   test:
     desc: all tests
     heavy: true
+    tests: go
     usage: <go test flags, e.g. -run TestX>
     env: {GOFLAGS: -tags=pgquery_cgo}
-    run: ['go test -p {threads} -v {args} ./...']
+    run: ['go test -json -p {threads} -v {args} ./...']
   test-short:
     desc: tests without the long-running ones
     heavy: true
@@ -58,8 +59,9 @@ tasks:
   test-race:
     desc: tests with the race detector (analysis runs rules in parallel)
     heavy: true
+    tests: go
     env: {GOFLAGS: -tags=pgquery_cgo}
-    run: ['go test -p {threads} -race ./...']
+    run: ['go test -json -p {threads} -race ./...']
   test-coverage:
     desc: tests with a coverage report in coverage.html
     heavy: true
