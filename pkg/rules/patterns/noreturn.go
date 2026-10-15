@@ -3,8 +3,6 @@ package patterns
 import (
 	"go/ast"
 	"go/types"
-	"path"
-	"strings"
 )
 
 // noReturnKind says whether a call returns to its caller and, if not, whether
@@ -140,17 +138,11 @@ func fileImportPath(file *ast.File, qualifier string) (string, bool) {
 	if file == nil {
 		return "", false
 	}
-	for _, spec := range file.Imports {
-		// The parser only accepts string literals here, quoted or raw.
-		importPath := strings.Trim(spec.Path.Value, "\"`")
-		// Only the std packages above are looked up, and their package name
-		// is the last path element.
-		name := path.Base(importPath)
-		if spec.Name != nil {
-			name = spec.Name.Name
-		}
-		if name == qualifier {
-			return importPath, true
+	// Only the std packages above are looked up, and their package name is
+	// the last path element.
+	for _, imp := range fileImports(file) {
+		if imp.name == qualifier {
+			return imp.path, true
 		}
 	}
 	return "", false
