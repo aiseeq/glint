@@ -58,9 +58,36 @@ func NewTestSchemaMutationWithoutCleanupRule() *TestSchemaMutationWithoutCleanup
 // не разбирается: его правильность проверяет прогон.
 var createDatabase = regexp.MustCompile(`(?i)\bCREATE\s+DATABASE\b`)
 
+// disposableDatabaseLibraries are libraries outside the project whose
+// functions give each test a database of its own and drop it on cleanup:
+// graft's testdb copies a template per test (CREATE DATABASE ... TEMPLATE)
+// and drops the copy in t.Cleanup; Connect opens a pool on such a copy.
+var disposableDatabaseLibraries = []struct {
+	path  *regexp.Regexp
+	funcs []string
+}{
+	{regexp.MustCompile(`^github\.com/aiseeq/graft(/v\d+)?/testdb$`), []string{"Connect", "NewDSN"}},
+}
+
+// addDisposableLibraries marks the functions of disposableDatabaseLibraries
+// under the name the file imports them by.
+func (r *TestSchemaMutationWithoutCleanupRule) addDisposableLibraries(file *ast.File) {
+	for _, imp := range fileImports(file) {
+		for _, lib := range disposableDatabaseLibraries {
+			if !lib.path.MatchString(imp.path) {
+				continue
+			}
+			for _, fn := range lib.funcs {
+				r.disposable[imp.name+"."+fn] = true
+			}
+		}
+	}
+}
+
 // UseProjectFiles finds the helpers that give each test a database of its
-// own: a function that runs CREATE DATABASE and registers t.Cleanup, and the
-// functions that reach one through calls by name.
+// own: a function that runs CREATE DATABASE and registers t.Cleanup, a
+// function of a known library that does (disposableDatabaseLibraries), and
+// the functions that reach one through calls by name.
 func (r *TestSchemaMutationWithoutCleanupRule) UseProjectFiles(files []*core.FileContext) {
 	r.ResetState()
 	calls := make(map[string][]string)
@@ -69,6 +96,7 @@ func (r *TestSchemaMutationWithoutCleanupRule) UseProjectFiles(files []*core.Fil
 			continue
 		}
 		pkg := ctx.GoAST.Name.Name
+		r.addDisposableLibraries(ctx.GoAST)
 		for _, decl := range ctx.GoAST.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil || fn.Recv != nil {

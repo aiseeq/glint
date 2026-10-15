@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"path"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -77,4 +79,25 @@ func loopBodies(node ast.Node) []ast.Node {
 		return true
 	})
 	return parts
+}
+
+// fileImport is one import of a file: its path and the name the file uses
+// for it - the explicit name, or the last element of the path.
+type fileImport struct {
+	path, name string
+}
+
+// fileImports returns the imports of a file.
+func fileImports(file *ast.File) []fileImport {
+	imports := make([]fileImport, 0, len(file.Imports))
+	for _, spec := range file.Imports {
+		// The parser only accepts string literals here, quoted or raw.
+		importPath := strings.Trim(spec.Path.Value, "\"`")
+		name := path.Base(importPath)
+		if spec.Name != nil {
+			name = spec.Name.Name
+		}
+		imports = append(imports, fileImport{path: importPath, name: name})
+	}
+	return imports
 }

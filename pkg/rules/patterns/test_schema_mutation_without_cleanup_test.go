@@ -280,3 +280,65 @@ func TestPooled(t *testing.T) {
 	}
 	assert.Equal(t, []string{"tests/pool_test.go"}, found)
 }
+
+// A database from graft's testdb (Connect, NewDSN) is a copy of a template
+// made for the test and dropped on cleanup, though the package lives outside
+// the project. It is told by its import path, not by its name: the project's
+// own testdb package with a Connect that hands out a shared pool does not
+// make a test's database disposable.
+func TestSchemaMutationWithoutCleanupRule_GraftTestDatabase(t *testing.T) {
+	files := map[string]string{
+		"internal/admin/env_test.go": `package admin
+
+import (
+	"testing"
+
+	graftdb "github.com/aiseeq/graft/v2/testdb"
+)
+
+func setupEnv(t *testing.T) *Env { return &Env{Pool: graftdb.Connect(t)} }
+
+func rawDSN(t *testing.T) string { return graftdb.NewDSN(t) }
+`,
+		"internal/admin/admin_test.go": `package admin
+
+import "testing"
+
+func TestBrokenTable(t *testing.T) {
+	env := setupEnv(t)
+	env.Pool.Exec(ctx, "ALTER TABLE projects RENAME TO projects_unreadable")
+}
+
+func TestBrokenDSN(t *testing.T) {
+	db := open(rawDSN(t))
+	db.Exec("DROP TABLE projects")
+}
+`,
+		"internal/shared/shared_test.go": `package shared
+
+import (
+	"testing"
+
+	"example.com/app/internal/testdb"
+)
+
+func TestSharedPool(t *testing.T) {
+	pool := testdb.Connect(t)
+	pool.Exec(ctx, "ALTER TABLE projects ADD COLUMN probe TEXT")
+}
+`,
+	}
+	rule := NewTestSchemaMutationWithoutCleanupRule()
+	var contexts []*core.FileContext
+	for path, code := range files {
+		contexts = append(contexts, createPatternContext(t, path, code))
+	}
+	rule.UseProjectFiles(contexts)
+	var found []string
+	for _, ctx := range contexts {
+		for _, v := range rule.AnalyzeFile(ctx) {
+			found = append(found, v.File)
+		}
+	}
+	assert.Equal(t, []string{"internal/shared/shared_test.go"}, found)
+}

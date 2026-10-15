@@ -541,14 +541,9 @@ func (x *constructorIndex) resolveSyntax(ctx *core.FileContext, call *ast.CallEx
 // importPathOf returns the path of the import the file names name: by its
 // explicit name, or by the last element of the path.
 func importPathOf(file *ast.File, name string) string {
-	for _, spec := range file.Imports {
-		path := strings.Trim(spec.Path.Value, "\"`")
-		local := path[strings.LastIndex(path, "/")+1:]
-		if spec.Name != nil {
-			local = spec.Name.Name
-		}
-		if local == name {
-			return path
+	for _, imp := range fileImports(file) {
+		if imp.name == name {
+			return imp.path
 		}
 	}
 	return ""
