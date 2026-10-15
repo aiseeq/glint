@@ -181,7 +181,7 @@ glint rules
 - **any-in-public-contract** (MEDIUM) — bare any/interface{} in exported results and map[string]any fields
 - **tombstone-comment** (LOW) — comments describing deleted code ("removed", "УДАЛЕНО") — git history already remembers
 - **migration-duplicate-version** (CRITICAL) — two different migrations sharing one version number; also missing up/down pairs
-- **test-external-service** (HIGH) — a test builds a live vendor client, or gates itself with "skip unless the API key is set" — a gate that is open in exactly the environment the test runs in, since the key comes from `.env`. Declare the real opt-in helper in `guard_functions` to allow deliberate live runs
+- **test-external-service** (HIGH) — a test builds a live vendor client, or gates itself with "skip unless the API key is set" — a gate that is open in exactly the environment the test runs in, since the key comes from `.env`. A test aimed at a fake server is told by its own body (httptest, or a test helper that uses it), not by the file's httptest import. A test that skips at once unless a dedicated env flag is set (`if os.Getenv("X_LIVE_TEST") == "" { t.Skip() }`, os.LookupEnv, or a helper doing that) is an explicit opt-in and is not reported; the flag must be absent from the project's env files and the skip must come before the live call — `testing.Short()` is no flag. A project-specific opt-in helper can also be declared in `guard_functions`
 - **layer-violation** (CRITICAL) — Detects violations of Handler→Service→Repository architecture
 - **import-direction** (HIGH) — Detects imports that violate layered architecture direction
 - **hardcoded-secret** (CRITICAL) — Detects passwords, API keys, tokens in code
