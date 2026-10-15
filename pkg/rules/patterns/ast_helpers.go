@@ -55,3 +55,26 @@ func forEachTypedFuncDecl(ctx *core.GoProjectContext, visit func(info *types.Inf
 	}
 	return nil
 }
+
+// loopBodies returns the parts of the loops under node that run on every
+// iteration: the body, and a for loop's condition and post statement.
+// Closures defined inside a loop count as inside it.
+func loopBodies(node ast.Node) []ast.Node {
+	var parts []ast.Node
+	ast.Inspect(node, func(n ast.Node) bool {
+		switch loop := n.(type) {
+		case *ast.ForStmt:
+			parts = append(parts, loop.Body)
+			if loop.Cond != nil {
+				parts = append(parts, loop.Cond)
+			}
+			if loop.Post != nil {
+				parts = append(parts, loop.Post)
+			}
+		case *ast.RangeStmt:
+			parts = append(parts, loop.Body)
+		}
+		return true
+	})
+	return parts
+}

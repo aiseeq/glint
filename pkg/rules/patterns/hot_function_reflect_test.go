@@ -14,7 +14,7 @@ import (
 // assignment do it without reflection. Looking a type up once with
 // reflect.TypeFor costs nothing per value, and the same work in an unmarked
 // function is ordinary code.
-const hotReflectSource = `package inject
+const hotReflectSource = `package copier
 
 import "reflect"
 
@@ -23,7 +23,7 @@ type Unit struct{ X, Y int }
 const MaskX = 1
 
 //glint:hot
-func Inject(dst, src *Unit, name string, m int) bool {
+func Copy(dst, src *Unit, name string, m int) bool {
 	reflect.ValueOf(dst).Elem().FieldByName(name).Set(reflect.ValueOf(src).Elem().FieldByName(name)) // want reflect-in-hot-function
 	if m&MaskX != 0 {
 		dst.X = src.X
@@ -43,7 +43,7 @@ func Cold(dst, src *Unit) bool { return reflect.DeepEqual(dst, src) }
 `
 
 func TestReflectInHotFunction(t *testing.T) {
-	files := map[string]string{"inject/inject.go": hotReflectSource}
+	files := map[string]string{"copier/copier.go": hotReflectSource}
 	project := rulestest.Project(t, files)
 
 	violations, err := NewReflectInHotFunctionRule().AnalyzeGoProject(project)
@@ -54,5 +54,5 @@ func TestReflectInHotFunction(t *testing.T) {
 	require.NoError(t, rule.Configure(map[string]any{"transitive": true}))
 	violations, err = rule.AnalyzeGoProject(project)
 	require.NoError(t, err)
-	assert.Equal(t, append(wantedLines(files, "reflect-in-hot-function"), "inject/inject.go:22"), foundLines(violations))
+	assert.Equal(t, append(wantedLines(files, "reflect-in-hot-function"), "copier/copier.go:22"), foundLines(violations))
 }

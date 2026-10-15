@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -122,17 +123,19 @@ func (r *PrintfWrapVerbRule) wraps(file *ast.File, call *ast.CallExpr, name stri
 
 // calledName is the name of the called function or method.
 func calledName(call *ast.CallExpr) string {
-	switch fun := call.Fun.(type) {
-	case *ast.Ident:
-		return fun.Name
-	case *ast.SelectorExpr:
-		return fun.Sel.Name
-	}
-	return ""
+	return funcExprName(call.Fun)
 }
 
 // hasWrapVerb reports a %w verb (flags and width allowed), %% excluded.
 func hasWrapVerb(format string) bool {
+	return slices.ContainsFunc(formatDirectives(format), func(d string) bool { return strings.HasSuffix(d, "w") })
+}
+
+// formatDirectives returns the directives of a printf format without their
+// %: the flags, width, precision and argument index, then the verb ("w",
+// ".2f", "[1]d"). %% is not a directive.
+func formatDirectives(format string) []string {
+	var directives []string
 	for i := 0; i < len(format); i++ {
 		if format[i] != '%' {
 			continue
@@ -141,12 +144,12 @@ func hasWrapVerb(format string) bool {
 		for j < len(format) && strings.IndexByte("+-# 0123456789.*[]", format[j]) >= 0 {
 			j++
 		}
-		if j < len(format) && format[j] == 'w' {
-			return true
+		if j < len(format) && format[j] != '%' {
+			directives = append(directives, format[i+1:j+1])
 		}
 		i = j // skips the verb, and the second % of %%
 	}
-	return false
+	return directives
 }
 
 // forwardsFormat reports a function whose string parameter is passed as the
