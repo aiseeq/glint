@@ -917,3 +917,189 @@ func TestRate_Live(t *testing.T) {
 		})
 	}
 }
+
+// vendorClient takes its address from the caller and also offers the
+// production one as a constant and through NewDefault.
+const vendorClient = `package vendorapi
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+)
+
+const DefaultBaseURL = "https://api.vendorapi.io/core"
+
+type Client struct {
+	base, key string
+	http      *http.Client
+}
+
+func NewClient(base, key string) (*Client, error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, errors.New("api key is required")
+	}
+	return &Client{base: base, key: key, http: &http.Client{}}, nil
+}
+
+func NewDefault(key string) (*Client, error) { return NewClient(DefaultBaseURL, key) }
+
+func (c *Client) Prices(ctx context.Context, ids []string) (*http.Response, error) {
+	if len(ids) == 0 {
+		return nil, errors.New("no ids")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/prices?ids="+strings.Join(ids, ","), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Key", c.key)
+	return c.http.Do(req)
+}
+`
+
+// The unit tests of a client - in a file that serves a test server - build it
+// to check the key validation, the shared limiter or an empty input that fails
+// before any request. None of them sends: building a client is no live call. A
+// test of that file is reported when it calls a sending method on a client
+// aimed at production - the constructor's own address, or the production URL
+// or constant passed in.
+func TestTestExternalServiceRule_ClientUnitTestsWithoutRequestAreNotReported(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"vendorapi/client.go": vendorClient,
+		"vendorapi/client_test.go": `package vendorapi
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestNewClientRequiresKey(t *testing.T) {
+	if _, err := NewClient("https://api.vendorapi.io/core", "  "); err == nil {
+		t.Fatal("a blank key must be rejected")
+	}
+}
+
+func TestClientsShareOneBase(t *testing.T) {
+	c, err := NewClient(DefaultBaseURL, "k")
+	if err != nil || c.base != DefaultBaseURL {
+		t.Fatal("the base address is kept")
+	}
+}
+
+func TestPricesEmptyInput(t *testing.T) {
+	c, _ := NewClient("http://stub", "k")
+	if _, err := c.Prices(context.Background(), nil); err == nil {
+		t.Fatal("empty ids must fail before the request")
+	}
+}
+
+func TestPricesFromTestServer(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+	c, _ := NewClient(srv.URL, "k")
+	_, _ = c.Prices(context.Background(), []string{"a"})
+}
+
+func TestPricesLiveDefault(t *testing.T) {
+	c, _ := NewDefault("k")
+	_, _ = c.Prices(context.Background(), []string{"a"})
+}
+
+func TestPricesLiveConstant(t *testing.T) {
+	c, _ := NewClient(DefaultBaseURL, "k")
+	_, _ = c.Prices(context.Background(), []string{"a"})
+}
+`,
+		"pricing/pricing_test.go": `package pricing
+
+import (
+	"context"
+	"net/http/httptest"
+	"testing"
+
+	"example.com/rulestest/vendorapi"
+)
+
+var _ = httptest.NewServer
+
+func TestKeyCheckedAcrossPackages(t *testing.T) {
+	if _, err := vendorapi.NewClient(vendorapi.DefaultBaseURL, ""); err == nil {
+		t.Fatal("blank key")
+	}
+}
+
+func TestPricesLiveAcrossPackages(t *testing.T) {
+	c, _ := vendorapi.NewClient(vendorapi.DefaultBaseURL, "k")
+	_, _ = c.Prices(context.Background(), []string{"a"})
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	got := messages(violations)
+	require.Len(t, violations, 3, "%v", got)
+	assert.Contains(t, got[0], "TestPricesLiveAcrossPackages")
+	assert.Contains(t, got[1], "TestPricesLiveDefault")
+	assert.Contains(t, got[2], "TestPricesLiveConstant")
+	for _, msg := range got {
+		assert.Contains(t, msg, "https://api.vendorapi.io/core")
+	}
+}
+
+// A package of two clients holds two addresses: the finding names the one the
+// called constructor reaches, not the first literal of the package.
+func TestTestExternalServiceRule_FindingNamesTheEntrysOwnAddress(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"feeds/a.go": `package feeds
+
+import "net/http"
+
+const quotesURL = "https://quotes.avendor.io"
+
+type Quotes struct{ http *http.Client }
+
+func NewQuotes() *Quotes { return &Quotes{http: &http.Client{}} }
+
+func (q *Quotes) Get() (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, quotesURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	return q.http.Do(req)
+}
+`,
+		"feeds/b.go": `package feeds
+
+import "net/http"
+
+type Chain struct{ http *http.Client }
+
+func NewChain() *Chain { return &Chain{http: &http.Client{}} }
+
+func (c *Chain) Head() (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodHead, "https://rpc.bvendor.io", nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.http.Do(req)
+}
+`,
+		"feeds/chain_test.go": `package feeds
+
+import "testing"
+
+func TestChainHead(t *testing.T) {
+	_, _ = NewChain().Head()
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1, "%v", messages(violations))
+	assert.Contains(t, violations[0].Message, "https://rpc.bvendor.io")
+}
