@@ -50,11 +50,18 @@ func init() {
 //     and were documented as manual; they ran every single time. An opt-in must be a switch
 //     nobody sets by accident, not a secret everybody has.
 //
-// A test aimed at a fake server is told by its own body: it uses httptest, or a helper or a
-// variable of the test files that does. The httptest import of the file vouches for nothing
-// more: a file of fake-feed tests held one more test that built the rates client with New -
-// the production address built in - and, skipped only in -short mode, called the live feed on
-// every full run.
+// A test aimed at a test server is told by its own body: it uses httptest, or a helper or a
+// variable of the test files that does. A file that serves a test server holds the unit tests
+// of a client, and building the client there - to check the key validation, the signature, a
+// shared limiter, an input rejected before the request - is no live call. Such a test is
+// reported only when it sends on production: it calls a sending method of a client whose
+// address is production (built into the constructor, or a URL literal or URL constant of the
+// package passed in), or a function that sends itself. A file of fake-feed tests held one more
+// test that built the rates client with New - the production address built in - and, skipped
+// only in -short mode, called the live feed on every full run. Outside such files every call
+// of a live entry is reported, constructors included: the client has no offline mode and is
+// routinely handed to another package that calls it. The finding names the address the called
+// entry reaches, not the first one its package holds.
 //
 // A test that genuinely needs the live service stays possible. A test that skips at once unless
 // a dedicated env flag is set - `if os.Getenv("RATES_LIVE_TEST") == "" { t.Skip(...) }`, a
@@ -232,6 +239,9 @@ type outboundPackage struct {
 	evidence string
 	// name is the package's own name — what an unaliased import is called at the call site.
 	name string
+	// urlNames maps the package-level constants and variables holding a third-party URL to
+	// it: a test passing DefaultBaseURL to the constructor aims the client at production.
+	urlNames map[string]string
 	// entries are the exported functions that actually hand a test the wire: either they
 	// reach an HTTP call themselves, or they return a client whose methods do. Everything
 	// else the package exports — config readers, decoders, constructors of inert types —
@@ -289,11 +299,15 @@ func (r *TestExternalServiceRule) outboundPackages(ctx *core.GoProjectContext) m
 			continue
 		}
 
-		entries := liveEntryPoints(pkg)
+		entries := liveEntryPoints(pkg, r.externalHost)
 		if len(entries) == 0 {
 			continue
 		}
-		outbound[pkg.Package.PkgPath] = outboundPackage{evidence: evidence, name: pkg.Package.Name, entries: entries}
+		urlNames := map[string]string{}
+		for obj, host := range packageURLs(pkg, r.externalHost) {
+			urlNames[obj.Name()] = host
+		}
+		outbound[pkg.Package.PkgPath] = outboundPackage{evidence: evidence, name: pkg.Package.Name, entries: entries, urlNames: urlNames}
 	}
 	return outbound
 }
@@ -312,6 +326,18 @@ func fileIssuesHTTPRequest(file *ast.File, info *types.Info) bool {
 // nodeIssuesHTTPRequest is the same check narrowed to one subtree — a function body, when the
 // question is which of the package's functions actually reach the wire.
 func nodeIssuesHTTPRequest(root ast.Node, info *types.Info) bool {
+	return httpRequestIn(root, info, true)
+}
+
+// nodeSendsHTTPRequest reports a request sent in the subtree: building an http.Client
+// prepares a connection, it sends nothing.
+func nodeSendsHTTPRequest(root ast.Node, info *types.Info) bool {
+	return httpRequestIn(root, info, false)
+}
+
+// httpRequestIn finds an HTTP call in the subtree; clientLiteral counts building an
+// http.Client as one.
+func httpRequestIn(root ast.Node, info *types.Info, clientLiteral bool) bool {
 	if info == nil || root == nil {
 		return false
 	}
@@ -342,7 +368,7 @@ func nodeIssuesHTTPRequest(root ast.Node, info *types.Info) bool {
 				return false
 			}
 		case *ast.CompositeLit:
-			if isNetHTTPType(info, node.Type, "Client") {
+			if clientLiteral && isNetHTTPType(info, node.Type, "Client") {
 				found = true
 				return false
 			}
@@ -506,6 +532,9 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 ) []*core.Violation {
 	imports := importAliases(file.GoAST, outbound)
 	httptestPkgs := helpers.PackageAliases(file.GoAST, `"net/http/httptest"`, "httptest")
+	// Файл с httptest - юнит-тесты клиента: конструктор там собирают ради проверки
+	// валидации и подписи, и находка - только живой запрос на боевой адрес.
+	unitTests := len(httptestPkgs) > 0
 	osPkgs := helpers.PackageAliases(file.GoAST, `"os"`, "os")
 
 	// Файл, называющий локальный адрес, гоняет наш собственный сервер, и «секрет» в нём —
@@ -536,9 +565,10 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 		if start := r.optInStart(fn, envKeys, osPkgs, facts.optInHelpers); start.IsValid() {
 			liveEnd = start
 		}
-		violations = append(violations, r.outboundCalls(file, imports, fn, outbound, liveEnd)...)
+		scope := liveCallScope{liveEnd: liveEnd, unitTests: unitTests, hostOf: r.externalHost}
+		violations = append(violations, r.outboundCalls(file, imports, fn, outbound, scope)...)
 		if own, ok := outboundDirs[filepath.Dir(file.Path)]; ok {
-			violations = append(violations, r.inPackageCalls(file, fn, own, liveEnd)...)
+			violations = append(violations, r.inPackageCalls(file, fn, own, scope)...)
 		}
 	}
 	return violations
@@ -575,7 +605,7 @@ func calleeName(call *ast.CallExpr) string {
 
 // outboundCalls reports calls into packages that talk to a third party.
 func (r *TestExternalServiceRule) outboundCalls(
-	file *core.FileContext, imports map[string]string, fn *ast.FuncDecl, outbound map[string]outboundPackage, liveEnd token.Pos,
+	file *core.FileContext, imports map[string]string, fn *ast.FuncDecl, outbound map[string]outboundPackage, scope liveCallScope,
 ) []*core.Violation {
 	var violations []*core.Violation
 	reported := map[string]bool{}
@@ -585,7 +615,7 @@ func (r *TestExternalServiceRule) outboundCalls(
 		if !ok {
 			return true
 		}
-		if call.Pos() >= liveEnd {
+		if call.Pos() >= scope.liveEnd {
 			return false
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -615,6 +645,13 @@ func (r *TestExternalServiceRule) outboundCalls(
 		if entry.nilTransport(call) {
 			return true
 		}
+		host, live := scope.reaches(fn.Body, call, entry, evidence, func(e ast.Expr) bool {
+			q, isIdent := e.(*ast.Ident)
+			return isIdent && q.Name == ident.Name
+		})
+		if !live {
+			return true
+		}
 		key := path + "." + sel.Sel.Name
 		if reported[key] {
 			return true
@@ -624,7 +661,7 @@ func (r *TestExternalServiceRule) outboundCalls(
 		pos := file.PositionFor(call)
 		v := r.CreateViolation(file.RelPath, pos.Line, fmt.Sprintf(
 			"Тест %s вызывает %s.%s — пакет %s. Тест не проверяет чужой код и не должен менять внешний мир",
-			fn.Name.Name, ident.Name, sel.Sel.Name, evidence.evidence))
+			fn.Name.Name, ident.Name, sel.Sel.Name, host))
 		v.WithCode(file.GetLine(pos.Line))
 		v.WithSuggestion("Подставьте провайдера на HTTP-границе (httptest) или засейте данные напрямую; живой вызов оставьте за явным опт-ином из guard_functions")
 		v.WithContext("pattern", "test_external_service")
@@ -642,7 +679,7 @@ func (r *TestExternalServiceRule) outboundCalls(
 // `cryptoprov.NewClient(cfg)`, so the import-based lookup above never sees it. That is exactly
 // how ProjectA's cryptoprov integration test stayed invisible to the rule.
 func (r *TestExternalServiceRule) inPackageCalls(
-	file *core.FileContext, fn *ast.FuncDecl, own outboundPackage, liveEnd token.Pos,
+	file *core.FileContext, fn *ast.FuncDecl, own outboundPackage, scope liveCallScope,
 ) []*core.Violation {
 	var violations []*core.Violation
 	reported := map[string]bool{}
@@ -652,7 +689,7 @@ func (r *TestExternalServiceRule) inPackageCalls(
 		if !ok {
 			return true
 		}
-		if call.Pos() >= liveEnd {
+		if call.Pos() >= scope.liveEnd {
 			return false
 		}
 		ident, ok := call.Fun.(*ast.Ident)
@@ -663,6 +700,10 @@ func (r *TestExternalServiceRule) inPackageCalls(
 		if !ok || entry.nilTransport(call) {
 			return true
 		}
+		host, live := scope.reaches(fn.Body, call, entry, own, nil)
+		if !live {
+			return true
+		}
 		if reported[ident.Name] {
 			return true
 		}
@@ -671,7 +712,7 @@ func (r *TestExternalServiceRule) inPackageCalls(
 		pos := file.PositionFor(call)
 		v := r.CreateViolation(file.RelPath, pos.Line, fmt.Sprintf(
 			"Тест %s вызывает %s из своего же пакета — пакет %s. Тест не проверяет чужой код и не должен менять внешний мир",
-			fn.Name.Name, ident.Name, own.evidence))
+			fn.Name.Name, ident.Name, host))
 		v.WithCode(file.GetLine(pos.Line))
 		v.WithSuggestion("Подставьте провайдера на HTTP-границе (httptest) или засейте данные напрямую; живой вызов оставьте за явным опт-ином из guard_functions")
 		v.WithContext("pattern", "test_external_service")

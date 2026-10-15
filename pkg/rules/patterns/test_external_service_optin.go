@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"path/filepath"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/helpers"
@@ -97,6 +98,9 @@ func packageVars(d *ast.GenDecl, httptestPkgs map[string]bool) []namedTestDecl {
 			continue
 		}
 		for _, ident := range value.Names {
+			if ident.Name == "_" {
+				continue
+			}
 			vars = append(vars, namedTestDecl{ident.Name, value, httptestPkgs})
 		}
 	}
@@ -265,4 +269,105 @@ func envRead(expr ast.Expr, osPkgs map[string]bool, fn string) string {
 		return ""
 	}
 	return name
+}
+
+// liveCallScope is what decides whether a call of a test reaches the wire.
+type liveCallScope struct {
+	// liveEnd is where the explicit opt-in of the test starts: calls after it are not live.
+	liveEnd token.Pos
+	// unitTests marks a file that serves a test server: its tests build clients to check
+	// validation, signing and limits, and only a request on a production address counts.
+	unitTests bool
+	// hostOf names the third-party URL of a literal.
+	hostOf func(*ast.BasicLit) string
+}
+
+// reaches returns the evidence of a live call and whether the call is one. Outside a file of
+// unit tests every call of an entry is, as the client it builds has no offline mode. In such a
+// file the call must aim at production - the entry's own address, a URL literal or a URL
+// constant of the package among the arguments - and reach the wire: a function that sends
+// itself, or a client whose sending method the test calls.
+func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry liveEntry, pkg outboundPackage, isQualifier func(ast.Expr) bool) (string, bool) {
+	evidence := pkg.evidence
+	if entry.address != "" {
+		evidence = "ходит в " + entry.address
+	}
+	if !s.unitTests {
+		return evidence, true
+	}
+	host := entry.address
+	for _, arg := range call.Args {
+		if host != "" {
+			break
+		}
+		host = productionArgument(arg, pkg.urlNames, isQualifier, s.hostOf)
+	}
+	if host == "" || (!entry.direct && !callsLiveMethod(body, call, entry.liveMethods)) {
+		return "", false
+	}
+	return "ходит в " + host, true
+}
+
+// productionArgument returns the third-party URL an argument names: a literal, or a URL
+// constant of the package, unqualified in its own tests (isQualifier nil) or qualified by the
+// package's import.
+func productionArgument(arg ast.Expr, urlNames map[string]string, isQualifier func(ast.Expr) bool, hostOf func(*ast.BasicLit) string) string {
+	switch a := ast.Unparen(arg).(type) {
+	case *ast.BasicLit:
+		// Хост без точки ("http://stub", имя сервиса в compose) - заглушка, не боевой адрес.
+		if host := hostOf(a); strings.Contains(hostName(host), ".") {
+			return host
+		}
+	case *ast.Ident:
+		if isQualifier == nil {
+			return urlNames[a.Name]
+		}
+	case *ast.SelectorExpr:
+		if isQualifier != nil && isQualifier(a.X) {
+			return urlNames[a.Sel.Name]
+		}
+	}
+	return ""
+}
+
+// callsLiveMethod reports a sending method called on the result of the constructor call:
+// chained (New().Rate()) or through the variable it is assigned to.
+func callsLiveMethod(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool) bool {
+	holders := map[string]bool{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		if assign, ok := n.(*ast.AssignStmt); ok && len(assign.Rhs) == 1 && assign.Rhs[0] == ast.Expr(ctor) && len(assign.Lhs) > 0 {
+			if ident, isIdent := assign.Lhs[0].(*ast.Ident); isIdent {
+				holders[ident.Name] = true
+			}
+		}
+		return true
+	})
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || found {
+			return !found
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || !methods[sel.Sel.Name] {
+			return true
+		}
+		switch x := ast.Unparen(sel.X).(type) {
+		case *ast.CallExpr:
+			found = x == ctor
+		case *ast.Ident:
+			found = holders[x.Name]
+		}
+		return !found
+	})
+	return found
+}
+
+// hostName returns the host of a URL the externalURL pattern matched, without the scheme,
+// the port and the path.
+func hostName(rawURL string) string {
+	_, rest, _ := strings.Cut(rawURL, "://")
+	host, _, _ := strings.Cut(rest, "/")
+	host, _, _ = strings.Cut(host, ":")
+	return host
 }

@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 	"maps"
 	"slices"
@@ -32,7 +33,12 @@ import (
 // package, and DeFiPositionService — ten repository-backed methods, one of which eventually
 // asks DefiLlama for a price — was reported in 24 tests that only exercise linking logic
 // against a local database.
-func liveEntryPoints(pkg *core.GoPackageContext) map[string]liveEntry {
+//
+// hostOf names the third-party URL of a literal, "" for any other: an entry records the address
+// it reaches on its own - a literal in its body or in a function it calls, or a package-level
+// constant such as defaultURL - so a finding names that address, not the first one the package
+// holds.
+func liveEntryPoints(pkg *core.GoPackageContext, hostOf func(*ast.BasicLit) string) map[string]liveEntry {
 	info := pkg.Package.TypesInfo
 	if info == nil || pkg.Package.Types == nil {
 		return nil
@@ -44,6 +50,7 @@ func liveEntryPoints(pkg *core.GoPackageContext) map[string]liveEntry {
 	}
 
 	live := make(map[string]bool, len(decls))
+	sends := make(map[string]bool, len(decls))
 	callees := make(map[string][]string, len(decls))
 	for key, fn := range decls {
 		if fn.Body == nil {
@@ -52,35 +59,39 @@ func liveEntryPoints(pkg *core.GoPackageContext) map[string]liveEntry {
 		if nodeIssuesHTTPRequest(fn.Body, info) {
 			live[key] = true
 		}
+		if nodeSendsHTTPRequest(fn.Body, info) {
+			sends[key] = true
+		}
 		callees[key] = intraPackageCallees(fn.Body, info, pkg.Package.Types)
 	}
 
 	// Транзитивное замыкание: метод, который сам не шлёт запрос, но зовёт того, кто шлёт,
 	// для теста ничем не отличается от прямого вызова.
-	for changed := true; changed; {
-		changed = false
-		for key, targets := range callees {
-			if live[key] {
-				continue
-			}
-			for _, target := range targets {
-				if live[target] {
-					live[key] = true
-					changed = true
-					break
-				}
-			}
-		}
-	}
+	closeOverCallees(live, callees)
+	closeOverCallees(sends, callees)
 
 	liveTypes := liveTypesOf(pkg.Package.Types, live)
+	addresses := entryAddresses(decls, callees, info, packageURLs(pkg, hostOf), hostOf)
 	entries := map[string]liveEntry{}
 	for key, fn := range decls {
 		if fn.Recv != nil || !fn.Name.IsExported() {
 			continue
 		}
 		if live[key] || returnsLiveType(fn, info, pkg.Package.Types, live) {
-			entries[fn.Name.Name] = newLiveEntry(fn, info, liveTypes)
+			entry := newLiveEntry(fn, info, liveTypes)
+			methodKeys := returnedLiveMethods(fn, info, pkg.Package.Types, live)
+			// Конструктор, собравший &http.Client{}, сам ничего не шлёт: шлют методы клиента.
+			entry.direct = sends[key] && len(methodKeys) == 0
+			entry.liveMethods = map[string]bool{}
+			entry.address = addresses[key]
+			for _, methodKey := range methodKeys {
+				_, method, _ := strings.Cut(methodKey, ".")
+				entry.liveMethods[method] = true
+				if entry.address == "" {
+					entry.address = addresses[methodKey]
+				}
+			}
+			entries[fn.Name.Name] = entry
 		}
 	}
 	if len(entries) == 0 {
@@ -98,6 +109,13 @@ type liveEntry struct {
 	// logic. A nil anywhere else (options, a callback, a context) sends all the same.
 	transport []bool
 	variadic  bool
+	// direct marks a function that reaches an HTTP call itself; otherwise the entry is a
+	// constructor of a client whose liveMethods do.
+	direct      bool
+	liveMethods map[string]bool
+	// address is the third-party URL the entry reaches on its own, "" when the address
+	// comes from the caller.
+	address string
 }
 
 // nilTransport reports whether the call passes nil in place of a transport parameter.
@@ -315,4 +333,134 @@ func namedOf(typ types.Type) *types.Named {
 		return nil
 	}
 	return named
+}
+
+// packageURLs maps the package-level constants and variables holding a third-party URL to it:
+// const defaultURL = "https://feed.vendor.io".
+func packageURLs(pkg *core.GoPackageContext, hostOf func(*ast.BasicLit) string) map[types.Object]string {
+	urls := map[types.Object]string{}
+	for _, file := range pkg.Files {
+		if file == nil || file.GoAST == nil || file.IsTestFile() {
+			continue
+		}
+		for _, decl := range file.GoAST.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || (gen.Tok != token.CONST && gen.Tok != token.VAR) {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				value, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, name := range value.Names {
+					if i >= len(value.Values) {
+						break
+					}
+					if host := literalHost(value.Values[i], hostOf); host != "" && pkg.Package.TypesInfo.Defs[name] != nil {
+						urls[pkg.Package.TypesInfo.Defs[name]] = host
+					}
+				}
+			}
+		}
+	}
+	return urls
+}
+
+// literalHost returns the first third-party URL among the literals of an expression.
+func literalHost(node ast.Node, hostOf func(*ast.BasicLit) string) string {
+	var host string
+	ast.Inspect(node, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.BasicLit); ok && host == "" {
+			host = hostOf(lit)
+		}
+		return host == ""
+	})
+	return host
+}
+
+// entryAddresses returns the third-party URL each function reaches on its own: a literal in its
+// body, a package-level URL it reads, or the address of a package function it calls.
+func entryAddresses(
+	decls map[string]*ast.FuncDecl, callees map[string][]string, info *types.Info,
+	urls map[types.Object]string, hostOf func(*ast.BasicLit) string,
+) map[string]string {
+	addresses := map[string]string{}
+	for key, fn := range decls {
+		if fn.Body == nil {
+			continue
+		}
+		host := literalHost(fn.Body, hostOf)
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if ident, ok := n.(*ast.Ident); ok && host == "" {
+				host = urls[info.Uses[ident]]
+			}
+			return host == ""
+		})
+		if host != "" {
+			addresses[key] = host
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, key := range slices.Sorted(maps.Keys(callees)) {
+			if addresses[key] != "" {
+				continue
+			}
+			for _, target := range callees[key] {
+				if addresses[target] != "" {
+					addresses[key] = addresses[target]
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return addresses
+}
+
+// returnedLiveMethods returns the methods reaching the network ("Type.Method", sorted) of the
+// package's types the function returns.
+func returnedLiveMethods(fn *ast.FuncDecl, info *types.Info, self *types.Package, live map[string]bool) []string {
+	obj, ok := info.Defs[fn.Name].(*types.Func)
+	if !ok {
+		return nil
+	}
+	signature, ok := obj.Type().(*types.Signature)
+	if !ok || signature.Results() == nil {
+		return nil
+	}
+	var methods []string
+	for i := 0; i < signature.Results().Len(); i++ {
+		named := namedOf(signature.Results().At(i).Type())
+		if named == nil || named.Obj().Pkg() != self {
+			continue
+		}
+		for j := 0; j < named.NumMethods(); j++ {
+			if key := named.Obj().Name() + "." + named.Method(j).Name(); live[key] {
+				methods = append(methods, key)
+			}
+		}
+	}
+	slices.Sort(methods)
+	return methods
+}
+
+// closeOverCallees marks every function that calls a marked one, transitively.
+func closeOverCallees(marked map[string]bool, callees map[string][]string) {
+	for changed := true; changed; {
+		changed = false
+		for key, targets := range callees {
+			if marked[key] {
+				continue
+			}
+			for _, target := range targets {
+				if marked[target] {
+					marked[key] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
 }
