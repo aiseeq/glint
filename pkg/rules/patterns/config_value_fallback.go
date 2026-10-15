@@ -366,9 +366,11 @@ func isZeroValue(info *types.Info, expr ast.Expr) bool {
 	return true
 }
 
-// implementsError reports whether a result slot carries an error.
+// implementsError reports whether a result slot carries an error. An
+// expression go/types records no type for - the blank identifier on the left
+// of a plain = - carries nothing.
 func implementsError(t types.Type) bool {
-	return types.AssignableTo(t, types.Universe.Lookup("error").Type())
+	return t != nil && types.AssignableTo(t, types.Universe.Lookup("error").Type())
 }
 
 func (r *ConfigValueFallbackRule) recordDerived(info *types.Info, derived map[types.Object]configSource, lhs, rhs ast.Expr) {

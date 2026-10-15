@@ -107,3 +107,29 @@ func TestCacheStoresCancelledErrorRule_Metadata(t *testing.T) {
 	assert.Equal(t, "cache-stores-cancelled-error", rule.Name())
 	assert.Equal(t, core.SeverityMedium, rule.DefaultSeverity())
 }
+
+// A blank identifier on the left of a plain = has no type in go/types: the
+// rule skips it instead of asking whether nil is an error.
+func TestCacheStoresCancelledErrorBlankAssignment(t *testing.T) {
+	assert.Empty(t, cacheCancelledFindings(t, `package usage
+
+import "context"
+
+type row struct{ ID int }
+
+var lastID int
+
+func exec(ctx context.Context) (int, error) { return 0, nil }
+
+func run(ctx context.Context, r *row) (int, error) {
+	var err error
+	_, err = exec(ctx)
+	return r.ID, err
+}
+
+func constant(ctx context.Context) (int, error) {
+	_ = 1
+	return lastID, nil
+}
+`))
+}
