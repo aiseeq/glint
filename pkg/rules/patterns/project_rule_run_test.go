@@ -41,7 +41,7 @@ func runRuleOnFiles(t *testing.T, rule rules.Rule, files map[string]string) []*c
 func runRuleOnBrokenFiles(t *testing.T, rule rules.Rule, files map[string]string) []*core.Violation {
 	t.Helper()
 	root, contexts := rulestest.Module(t, files)
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{TolerateBrokenPackages: true})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{TolerateBrokenPackages: true, ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 	require.NotEmpty(t, project.SkippedPackages, "the fixture must break a package to reach the untyped path")
 	return runRuleOnProject(t, rule, project)

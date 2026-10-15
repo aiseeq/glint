@@ -42,7 +42,7 @@ func (r *Repo) Get(id string) (string, error) {
 `,
 	}
 	root, contexts := rulestest.Module(t, files)
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{TolerateBrokenPackages: true})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{TolerateBrokenPackages: true, ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 	require.NotEmpty(t, project.SkippedPackages)
 

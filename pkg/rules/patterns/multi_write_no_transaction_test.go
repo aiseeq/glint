@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -326,7 +327,7 @@ func analyzeStoreModuleWithRule(t *testing.T, rule *MultiWriteNoTransactionRule,
 	source := "package sample\n\nimport \"context\"\n" + storeDefinition + body
 	root, contexts := writeStoreModule(t, map[string]string{"sample.go": source})
 
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 
 	violations, err := rule.AnalyzeGoProject(project)
@@ -558,7 +559,7 @@ func analyzeStoreModuleImports(t *testing.T, rule *MultiWriteNoTransactionRule, 
 	t.Helper()
 	source := "package sample\n\nimport (\n\t\"context\"\n\t" + imports + "\n)\n" + storeDefinition + body
 	root, contexts := writeStoreModule(t, map[string]string{"sample.go": source})
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 	violations, err := rule.AnalyzeGoProject(project)
 	require.NoError(t, err)

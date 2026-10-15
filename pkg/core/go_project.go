@@ -29,6 +29,10 @@ type GoProjectOptions struct {
 	// tree that does not compile as a whole - historical commits, generated or
 	// git-ignored sources, work in progress.
 	TolerateBrokenPackages bool
+	// ListPackages loads the packages of a module the way packages.Load does,
+	// with the same contract; nil means packages.Load. Tests swap in a loader
+	// that type-checks small throwaway modules in process.
+	ListPackages func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error)
 }
 
 // SkippedPackage describes a package excluded from typed analysis.
@@ -295,7 +299,7 @@ func newModuleLoad(root string, moduleDirs []string, overlay map[string][]byte, 
 		parsed:  make(map[string]parsedProjectFile),
 		onParse: onParse,
 	}
-	loaded, err := loader.loadPackages(moduleDirs, overlay)
+	loaded, err := loader.loadPackages(moduleDirs, overlay, opts.ListPackages)
 	if err != nil {
 		return nil, err
 	}
@@ -394,10 +398,13 @@ func nearestGoModule(start string) (string, bool, error) {
 	}
 }
 
-func (loader *goProjectLoader) loadPackages(moduleDirs []string, overlay map[string][]byte) ([]*packages.Package, error) {
+func (loader *goProjectLoader) loadPackages(moduleDirs []string, overlay map[string][]byte, list func(*packages.Config, ...string) ([]*packages.Package, error)) ([]*packages.Package, error) {
+	if list == nil {
+		list = packages.Load
+	}
 	var loaded []*packages.Package
 	for _, moduleDir := range moduleDirs {
-		modulePackages, err := packages.Load(&packages.Config{
+		modulePackages, err := list(&packages.Config{
 			Mode:      packages.LoadSyntax | packages.NeedModule,
 			Dir:       moduleDir,
 			Fset:      loader.fset,

@@ -36,7 +36,7 @@ func fixOnce(t *testing.T, root string, ruleNames []string) ([]fix.Result, []*fi
 	t.Helper()
 
 	contexts := moduleContexts(t, root)
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 
 	contextMap := make(map[string]*core.FileContext)

@@ -236,7 +236,7 @@ func run(*planner.Ctx) {}
 			checked = append(checked, fileCtx)
 		}
 	}
-	project, err := core.LoadGoProject(root, checked, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, checked, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 
 	violations, err := NewDocStaleReferenceRule().AnalyzeGoProject(project)

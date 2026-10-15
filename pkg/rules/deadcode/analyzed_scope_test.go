@@ -59,7 +59,7 @@ func loadSubset(t *testing.T, files map[string]string, analyzed ...string) *core
 		}
 	}
 	require.Len(t, subset, len(analyzed))
-	project, err := core.LoadGoProject(root, subset, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, subset, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 	return project
 }

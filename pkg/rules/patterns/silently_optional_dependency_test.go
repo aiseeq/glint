@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestSilentlyOptionalDependencyRule_Metadata(t *testing.T) {
@@ -332,7 +333,7 @@ func optDepProject(t *testing.T, files map[string]string) *core.GoProjectContext
 		contexts = append(contexts, ctx)
 	}
 
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 	return project
 }
@@ -388,7 +389,7 @@ func optDepProjectSubset(t *testing.T, files map[string]string, analyzed ...stri
 		require.NoError(t, err)
 		contexts = append(contexts, ctx)
 	}
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 	return project
 }

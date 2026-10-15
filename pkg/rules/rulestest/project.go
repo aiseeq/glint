@@ -70,7 +70,13 @@ func ProjectWithSSA(t *testing.T, files map[string]string) *core.GoProjectContex
 func load(t *testing.T, files map[string]string, withSSA bool) *core.GoProjectContext {
 	t.Helper()
 	root, contexts := Module(t, files)
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{RequireSSA: withSSA})
+	opts := core.GoProjectOptions{RequireSSA: withSSA}
+	// SSA walks the import graph of the dependencies, which the in-process
+	// load leaves out: an SSA test loads through packages.Load.
+	if !withSSA {
+		opts.ListPackages = ListPackages
+	}
+	project, err := core.LoadGoProject(root, contexts, opts)
 	require.NoError(t, err)
 	return project
 }

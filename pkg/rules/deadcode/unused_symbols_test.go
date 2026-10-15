@@ -255,7 +255,7 @@ func TestUnusedSymbolsIgnoresExcludedTemplateSibling(t *testing.T) {
 	})
 	template := "//go:build ignore\n\npackage main\n\nfunc main() {\n\t{{range .Items}}\n}\n"
 	require.NoError(t, os.WriteFile(filepath.Join(root, "q", "gen.go"), []byte(template), 0o644))
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 
 	violations, err := NewUnusedSymbolsRule().AnalyzeGoProject(project)
@@ -283,7 +283,7 @@ func TestUnusedSymbolsCountsTestFileExcludedFromAnalysis(t *testing.T) {
 		}
 	}
 	require.Len(t, analyzed, 1)
-	project, err := core.LoadGoProject(root, analyzed, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, analyzed, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 
 	violations, err := NewUnusedSymbolsRule().AnalyzeGoProject(project)

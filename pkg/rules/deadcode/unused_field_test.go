@@ -625,7 +625,7 @@ func TestUnusedFieldCountsTestFileExcludedFromAnalysis(t *testing.T) {
 			analyzed = append(analyzed, fileCtx)
 		}
 	}
-	project, err := core.LoadGoProject(root, analyzed, core.GoProjectOptions{})
+	project, err := core.LoadGoProject(root, analyzed, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
 
 	violations, err := NewUnusedFieldRule().AnalyzeGoProject(project)
