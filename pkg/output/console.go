@@ -113,14 +113,32 @@ func (c *ConsoleOutput) printHeader(out *ReportWriter, stats Stats) {
 	if stats.FilesSkipped > 0 {
 		out.Printf("Files skipped: %d\n", stats.FilesSkipped)
 	}
+	c.printPanicked(out, stats)
 	out.Line()
 }
 
 func (c *ConsoleOutput) printSuccess(out *ReportWriter, stats Stats) {
 	out.Line()
-	out.colored(color.New(color.FgGreen, color.Bold), "No issues found!\n")
+	if len(stats.RulesPanicked) > 0 {
+		out.Line("No issues found by the rules that finished.")
+		c.printPanicked(out, stats)
+	} else {
+		out.colored(color.New(color.FgGreen, color.Bold), "No issues found!\n")
+	}
 	out.Printf("Files analyzed: %d\n", stats.FilesAnalyzed)
 	out.Line()
+}
+
+// printPanicked names the rules whose findings are missing.
+func (c *ConsoleOutput) printPanicked(out *ReportWriter, stats Stats) {
+	if len(stats.RulesPanicked) > 0 {
+		out.colored(color.New(color.FgRed, color.Bold), "%s\n", panickedLine(stats))
+	}
+}
+
+// panickedLine names the rules that panicked for the text formats.
+func panickedLine(stats Stats) string {
+	return "Rules that panicked, their findings are missing (see the error output): " + strings.Join(stats.RulesPanicked, ", ")
 }
 
 func (c *ConsoleOutput) printViolations(out *ReportWriter, violations core.ViolationList) {
@@ -218,6 +236,9 @@ type Stats struct {
 	PackagesSkipped int
 	RulesRun        int
 	Duration        float64
+	// RulesPanicked names the rules that panicked: their findings are missing
+	// from the report, which holds the findings of the other rules.
+	RulesPanicked []string
 }
 
 // SummaryOutput writes a compact summary for AI agents
@@ -247,6 +268,9 @@ func (s *SummaryOutput) Write(violations core.ViolationList, stats Stats) error 
 		s.printTopIssues(out, violations)
 	}
 	out.Printf("Files analyzed: %d | Duration: %.2fs\n", stats.FilesAnalyzed, stats.Duration)
+	if len(stats.RulesPanicked) > 0 {
+		out.Line(panickedLine(stats))
+	}
 
 	return out.Err()
 }

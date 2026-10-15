@@ -232,6 +232,9 @@ A marker or a finding exception that silenced nothing in the run is reported by 
 glint rules
 
 # Exit status is non-zero when HIGH or CRITICAL findings are present.
+# A rule that panics is a bug in glint: check still prints the findings of the
+# other rules, names the panicked rule (rulesPanicked in JSON), writes its stack
+# to stderr and exits non-zero; such a run is not cached.
 
 # Explain specific rule
 glint explain error-masking
