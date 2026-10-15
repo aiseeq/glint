@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -214,27 +215,29 @@ func (r *MapIterationOrderRule) reportOutput(fileCtx *core.FileContext, rangeStm
 // decides the winner, and a walk over a map the function already proved to hold
 // a single entry.
 func firstMatchSelection(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt) (string, bool) {
-	key, value := rangeTargetNames(rangeStmt)
-	if key == "" && value == "" {
+	key, values := rangeTargetNames(rangeStmt)
+	if key == "" && len(values) == 0 {
 		return "", false
 	}
 	if holdsSingleEntry(fn, types.ExprString(rangeStmt.X)) {
 		return "", false
 	}
-	scanner := &firstMatchScanner{key: key, value: value}
+	scanner := &firstMatchScanner{key: key, values: values}
 	scanner.block(rangeStmt.Body.List, selectionPath{breakBinds: true})
 	return scanner.picked, scanner.picked != ""
 }
 
-// rangeTargetNames returns the loop's key and value names, blanks excluded.
-func rangeTargetNames(rangeStmt *ast.RangeStmt) (key, value string) {
+// rangeTargetNames returns the loop's key name and the names of its entry:
+// the value variable and the locals bound to the entry by key (v := m[k]),
+// blanks excluded.
+func rangeTargetNames(rangeStmt *ast.RangeStmt) (key string, values []string) {
 	if ident, ok := rangeStmt.Key.(*ast.Ident); ok && ident.Name != "_" {
 		key = ident.Name
 	}
-	if ident, ok := rangeStmt.Value.(*ast.Ident); ok && ident.Name != "_" {
-		value = ident.Name
+	for _, ident := range rangeElementOf(rangeStmt).idents {
+		values = append(values, ident.Name)
 	}
-	return key, value
+	return key, values
 }
 
 // selectionPath is what the walk knows about the branch it is in.
@@ -252,8 +255,9 @@ type selectionPath struct {
 // firstMatchScanner walks the loop body remembering what the current branch
 // already decided.
 type firstMatchScanner struct {
-	key, value string
-	picked     string
+	key    string
+	values []string
+	picked string
 }
 
 func (s *firstMatchScanner) block(stmts []ast.Stmt, path selectionPath) {
@@ -350,7 +354,7 @@ func (s *firstMatchScanner) outerTarget(assign *ast.AssignStmt) string {
 	}
 	for i, lhs := range assign.Lhs {
 		ident, ok := lhs.(*ast.Ident)
-		if !ok || ident.Name == "_" || ident.Name == s.key || ident.Name == s.value {
+		if !ok || ident.Name == "_" || ident.Name == s.key || slices.Contains(s.values, ident.Name) {
 			continue
 		}
 		if s.loopVarIn(assign.Rhs[i]) != "" {
@@ -362,8 +366,10 @@ func (s *firstMatchScanner) outerTarget(assign *ast.AssignStmt) string {
 
 // loopVarIn returns the loop variable the expression carries out, if any.
 func (s *firstMatchScanner) loopVarIn(expr ast.Expr) string {
-	if s.value != "" && carriesLoopVar(expr, s.value) {
-		return s.value
+	for _, value := range s.values {
+		if carriesLoopVar(expr, value) {
+			return value
+		}
 	}
 	if s.key != "" && carriesLoopVar(expr, s.key) {
 		return s.key
@@ -452,12 +458,9 @@ func (s *firstMatchScanner) identityOperand(expr ast.Expr) bool {
 	if isIdent(expr, s.key) {
 		return true
 	}
-	if s.value == "" {
-		return false
-	}
 	if selector, ok := ast.Unparen(expr).(*ast.SelectorExpr); ok {
 		root := rootIdent(selector)
-		return root != nil && root.Name == s.value
+		return root != nil && slices.Contains(s.values, root.Name)
 	}
 	return false
 }
@@ -717,8 +720,8 @@ func isMapType(t types.Type) bool {
 // is visible outside the function. The entries then appear in walk order.
 // It returns how the destination is spelled.
 func outputInLoop(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt, info *types.Info) (string, bool) {
-	key, value := rangeTargetNames(rangeStmt)
-	if key == "" && value == "" {
+	key, values := rangeTargetNames(rangeStmt)
+	if key == "" && len(values) == 0 {
 		return "", false
 	}
 
@@ -735,7 +738,7 @@ func outputInLoop(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt, info *types.Info) 
 			return true
 		}
 		writer, args, ok := outputCall(call, info)
-		if !ok || !argsCarryEntry(args, key, value) {
+		if !ok || !argsCarryEntry(args, key, values) {
 			return true
 		}
 		if writer == nil {
@@ -783,9 +786,9 @@ func outputCall(call *ast.CallExpr, info *types.Info) (writer ast.Expr, args []a
 
 // argsCarryEntry reports whether the written arguments depend on the entry
 // the loop is at: writing the same text on every iteration has no order.
-func argsCarryEntry(args []ast.Expr, key, value string) bool {
+func argsCarryEntry(args []ast.Expr, key string, values []string) bool {
 	for _, arg := range args {
-		if (key != "" && mentions(arg, key)) || (value != "" && mentions(arg, value)) {
+		if (key != "" && mentions(arg, key)) || slices.ContainsFunc(values, func(value string) bool { return mentions(arg, value) }) {
 			return true
 		}
 	}

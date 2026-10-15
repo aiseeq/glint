@@ -199,7 +199,7 @@ func NoProgress(ctx context.Context, c client, ids []string) (int, error) {
 // match) treats its items as independent too: a write failure of one item's
 // part, returned with the progress, stops every later item.
 func TestBatchAbortsOnItemErrorAfterReportedSkip(t *testing.T) {
-	assert.Equal(t, []string{"link/run.go:36", "link/run.go:67"}, typedFuncFindings(t, NewBatchAbortsOnItemErrorRule(), map[string]string{
+	assert.Equal(t, []string{"link/indexed.go:18", "link/run.go:36", "link/run.go:67"}, typedFuncFindings(t, NewBatchAbortsOnItemErrorRule(), map[string]string{
 		"link/run.go": `package link
 
 import (
@@ -307,6 +307,34 @@ func (s *Service) OtherList(ctx context.Context, groups map[string][]*Row, extra
 	for _, row := range extra {
 		if _, err := s.store.Link(ctx, row, "p"); err != nil {
 			return linked, err
+		}
+	}
+	return linked, nil
+}
+`,
+		// A loop by index reaches the parts through a local bound to the item.
+		"link/indexed.go": `package link
+
+import "context"
+
+type Group struct{ Rows []*Row }
+
+func (s *Service) LinkIndexed(ctx context.Context, groups []Group) (int, error) {
+	var linked int
+	for i := range groups {
+		g := &groups[i]
+		if len(g.Rows) == 0 {
+			s.logger.Warn("empty group")
+			continue
+		}
+		for _, row := range g.Rows {
+			changed, err := s.store.Link(ctx, row, "p")
+			if err != nil {
+				return linked, err
+			}
+			if changed {
+				linked++
+			}
 		}
 	}
 	return linked, nil

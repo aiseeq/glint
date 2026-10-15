@@ -122,12 +122,8 @@ func reportsItem(body *ast.BlockStmt) bool {
 // the group the iteration took), not other nested loops or function literals.
 func inspectItemBody(info *types.Info, loop *ast.RangeStmt, visit func(*ast.IfStmt)) {
 	item := make(map[types.Object]bool)
-	for _, v := range []ast.Expr{loop.Key, loop.Value} {
-		if id, ok := v.(*ast.Ident); ok && id.Name != "_" {
-			if obj := info.ObjectOf(id); obj != nil {
-				item[obj] = true
-			}
-		}
+	for _, obj := range rangeItemVars(info, loop) {
+		item[obj] = true
 	}
 	ast.Inspect(loop.Body, func(n ast.Node) bool {
 		switch node := n.(type) {
