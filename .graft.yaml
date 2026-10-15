@@ -1,5 +1,5 @@
 schema: 1
-graft: '>=0.5.0'
+graft: '>=2.5.0'
 
 # Versions are annotated tags vX.Y.Z (graft release); the build stamps
 # graft version --describe into the binary.
@@ -15,6 +15,7 @@ tasks:
   # --- build ---
   build:
     desc: build the binary into bin/
+    heavy: true
     env: {GOFLAGS: -tags=pgquery_cgo}
     run:
       - [go, build, -ldflags, '-X main.version=${GRAFT_VERSION}', -o, bin/glint, ./cmd/glint]
@@ -32,6 +33,7 @@ tasks:
           echo "Installed to $HOME/bin/glint"
   install-gopath:
     desc: install to GOPATH/bin with go install
+    heavy: true
     env: {GOFLAGS: -tags=pgquery_cgo}
     run:
       - [go, install, -ldflags, '-X main.version=${GRAFT_VERSION}', ./cmd/glint]
@@ -44,22 +46,26 @@ tasks:
   # --- tests ---
   test:
     desc: all tests
+    heavy: true
     usage: <go test flags, e.g. -run TestX>
     env: {GOFLAGS: -tags=pgquery_cgo}
-    run: ['go test -p 4 -v {args} ./...']
+    run: ['go test -p {threads} -v {args} ./...']
   test-short:
     desc: tests without the long-running ones
+    heavy: true
     env: {GOFLAGS: -tags=pgquery_cgo}
-    run: [go test -p 4 -short -v ./...]
+    run: ['go test -p {threads} -short -v ./...']
   test-race:
     desc: tests with the race detector (analysis runs rules in parallel)
+    heavy: true
     env: {GOFLAGS: -tags=pgquery_cgo}
-    run: [go test -p 4 -race ./...]
+    run: ['go test -p {threads} -race ./...']
   test-coverage:
     desc: tests with a coverage report in coverage.html
+    heavy: true
     env: {GOFLAGS: -tags=pgquery_cgo}
     run:
-      - go test -p 4 -coverprofile=coverage.out ./...
+      - go test -p {threads} -coverprofile=coverage.out ./...
       - go tool cover -html=coverage.out -o coverage.html
       - ['echo', 'Coverage report: coverage.html']
   smoke:
@@ -69,6 +75,7 @@ tasks:
   # --- quality ---
   lint:
     desc: golangci-lint (installed on first use)
+    heavy: true
     run:
       - sh: |
           set -eu
@@ -76,7 +83,7 @@ tasks:
             echo "Installing golangci-lint..."
             go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
           fi
-          golangci-lint run --concurrency 4
+          golangci-lint run --concurrency {threads}
   fmt:
     desc: format the code
     run:
@@ -97,9 +104,10 @@ tasks:
     run: [{task: fmt-check}, {task: vet}, {task: lint}, {task: test}, {task: test-race}]
   self-check:
     desc: glint on itself, built from this tree
+    heavy: true
     usage: <glint check flags, e.g. --verbose>
     deps: [build]
-    run: ['bin/glint check ./... {args}']
+    run: ['bin/glint check -j {threads} ./... {args}']
 
   # --- dependencies ---
   deps:
