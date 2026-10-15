@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -256,6 +257,9 @@ func runCheck(_ *cobra.Command, args []string) error {
 	// Different roots can enable different rule sets; the reported count is
 	// how many distinct rules ran overall.
 	rulesRun := make(map[string]struct{})
+	// panics are the rule panics of every root: the run reports the other
+	// findings, names them and fails.
+	var panics rulePanics
 	// The configurations of the roots whose rules include the dead
 	// exception check, by file: each is checked once.
 	deadCheckConfigs := make(map[string]*core.Config)
@@ -294,11 +298,12 @@ func runCheck(_ *cobra.Command, args []string) error {
 		rules.ResetState(enabledRules)
 
 		analyzeDone := timings.phase("analyze " + projectRoot)
-		violations, err := analyzeProject(contexts, enabledRules, cfg, prepared.project, cache)
+		violations, rootPanics, err := analyzeProjectContained(contexts, enabledRules, cfg, prepared.project, cache)
 		analyzeDone()
 		if err != nil {
 			return err
 		}
+		panics = append(panics, rootPanics...)
 		if cache != nil {
 			if err := cache.save(); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: result cache of %s not saved: %v\n", projectRoot, err)
@@ -335,6 +340,7 @@ func runCheck(_ *cobra.Command, args []string) error {
 		return err
 	}
 	stats.RulesRun = len(rulesRun)
+	stats.RulesPanicked = panics.rules()
 	// Overlapping roots (./backend and ./backend/auth) walk the same file twice.
 	stats.FilesAnalyzed = len(analyzedFiles)
 	allViolations := findings.list
@@ -343,8 +349,14 @@ func runCheck(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("write timing report: %w", err)
 	}
 
-	if err := outputResults(outputFormat, allViolations, stats); err != nil {
+	if err := writeResults(os.Stdout, outputFormat, allViolations, stats); err != nil {
 		return fmt.Errorf("output error: %w", err)
+	}
+	if len(panics) > 0 {
+		if err := panics.writeStacks(os.Stderr); err != nil {
+			return err
+		}
+		return panics
 	}
 
 	if shouldFailAnalysis(allViolations) {
@@ -891,8 +903,21 @@ func (o severityOverrides) apply(violation *core.Violation) {
 // stored findings of its file-local rules back, and every file's findings are
 // stored for the next run.
 func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides, cache *resultCache) (core.ViolationList, error) {
+	violations, panics, err := analyzeFilesContained(contexts, enabledRules, cfg, overrides, cache)
+	if err != nil {
+		return nil, err
+	}
+	if len(panics) > 0 {
+		return nil, panics
+	}
+	return violations, nil
+}
+
+// analyzeFilesContained runs the file rules; a rule panic is returned apart
+// from the findings of the other rules, and a file with one is not cached.
+func analyzeFilesContained(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides, cache *resultCache) (core.ViolationList, rulePanics, error) {
 	if len(contexts) == 0 || len(enabledRules) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	stateful := make([]bool, len(enabledRules))
@@ -909,6 +934,7 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 		found[i] = make([]core.ViolationList, len(enabledRules))
 	}
 	failures := make([]error, len(contexts))
+	panicked := make([]rulePanics, len(contexts))
 
 	local := fileLocalRules(enabledRules)
 	var contents [][sha256.Size]byte
@@ -924,7 +950,7 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 
 	if statefulCount < len(enabledRules) {
 		run := statelessRun{rules: enabledRules, stateful: stateful, local: local, reuse: reuse, cfg: cfg, overrides: overrides}
-		run.execute(contexts, found, failures)
+		run.execute(contexts, found, failures, panicked)
 	}
 	if statefulCount > 0 {
 		for fileIndex, ctx := range contexts {
@@ -934,16 +960,22 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 				}
 				violations, err := runRule(ctx, rule, cfg, overrides)
 				found[fileIndex][ruleIndex] = violations
-				failures[fileIndex] = errors.Join(failures[fileIndex], err)
+				recordRuleFailure(fileIndex, err, failures, panicked)
 			}
 		}
 	}
 	if err := errors.Join(failures...); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	var panics rulePanics
+	for _, filePanics := range panicked {
+		panics = append(panics, filePanics...)
 	}
 	if cache != nil {
 		for fileIndex, ctx := range contexts {
-			cache.storeFile(ctx.RelPath, contents[fileIndex], enabledRules, local, found[fileIndex], reuse[fileIndex])
+			if len(panicked[fileIndex]) == 0 {
+				cache.storeFile(ctx.RelPath, contents[fileIndex], enabledRules, local, found[fileIndex], reuse[fileIndex])
+			}
 		}
 	}
 
@@ -953,7 +985,17 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 			allViolations = append(allViolations, violations...)
 		}
 	}
-	return allViolations, nil
+	return allViolations, panics, nil
+}
+
+// recordRuleFailure files the error of one rule on one file: a panic apart,
+// any other failure into the run's failures.
+func recordRuleFailure(fileIndex int, err error, failures []error, panicked []rulePanics) {
+	p, other := splitRulePanic(err)
+	if p != nil {
+		panicked[fileIndex] = append(panicked[fileIndex], p)
+	}
+	failures[fileIndex] = errors.Join(failures[fileIndex], other)
 }
 
 // statelessRun is one pass of the stateless file rules. reuse, when set,
@@ -971,7 +1013,7 @@ type statelessRun struct {
 // execute spreads the files over a worker per thread the run may use. Each worker owns its own
 // row of the result matrix, so no synchronization is needed beyond the wait
 // group.
-func (s statelessRun) execute(contexts []*core.FileContext, found [][]core.ViolationList, failures []error) {
+func (s statelessRun) execute(contexts []*core.FileContext, found [][]core.ViolationList, failures []error, panicked []rulePanics) {
 	workers := runtime.GOMAXPROCS(0)
 	if workers > len(contexts) {
 		workers = len(contexts)
@@ -1003,7 +1045,7 @@ func (s statelessRun) execute(contexts []*core.FileContext, found [][]core.Viola
 					}
 					violations, err := runRule(contexts[fileIndex], rule, s.cfg, s.overrides)
 					found[fileIndex][ruleIndex] = violations
-					failures[fileIndex] = errors.Join(failures[fileIndex], err)
+					recordRuleFailure(fileIndex, err, failures, panicked)
 				}
 			}
 		}()
@@ -1028,7 +1070,7 @@ func runRule(ctx *core.FileContext, rule rules.Rule, cfg *core.Config, overrides
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			kept = nil
-			err = fmt.Errorf("rule %q panicked on %s: %v\n%s", rule.Name(), ctx.RelPath, recovered, debug.Stack())
+			err = &rulePanic{rule: rule.Name(), file: ctx.RelPath, value: recovered, stack: debug.Stack()}
 		}
 	}()
 	violations := rule.AnalyzeFile(ctx)
@@ -1100,10 +1142,24 @@ func hasGoFiles(contexts []*core.FileContext) bool {
 }
 
 func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext, cache *resultCache) (core.ViolationList, error) {
-	overrides, err := buildSeverityOverrides(cfg, enabledRules)
+	violations, panics, err := analyzeProjectContained(contexts, enabledRules, cfg, project, cache)
 	if err != nil {
 		return nil, err
 	}
+	if len(panics) > 0 {
+		return nil, panics
+	}
+	return violations, nil
+}
+
+// analyzeProjectContained runs the project and the file rules; a rule panic
+// is returned apart from the findings of the other rules and is not cached.
+func analyzeProjectContained(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext, cache *resultCache) (core.ViolationList, rulePanics, error) {
+	overrides, err := buildSeverityOverrides(cfg, enabledRules)
+	if err != nil {
+		return nil, nil, err
+	}
+	var panics rulePanics
 
 	var allViolations core.ViolationList
 	fileRules := make([]rules.Rule, 0, len(enabledRules))
@@ -1125,19 +1181,24 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 				// Дерево без Go-файлов: Go-project правилам нечего анализировать.
 				continue
 			}
-			return nil, fmt.Errorf("analyze Go project with rule %q: project context is nil", rule.Name())
+			return nil, nil, fmt.Errorf("analyze Go project with rule %q: project context is nil", rule.Name())
 		}
 		violations, err := runProjectRule(projectRule, project)
+		p, err := splitRulePanic(err)
+		if p != nil {
+			panics = append(panics, p)
+			continue
+		}
 		if err != nil {
-			return nil, fmt.Errorf("analyze Go project with rule %q: %w", rule.Name(), err)
+			return nil, nil, fmt.Errorf("analyze Go project with rule %q: %w", rule.Name(), err)
 		}
 		for _, violation := range violations {
 			if violation == nil {
-				return nil, fmt.Errorf("analyze Go project with rule %q: nil violation", rule.Name())
+				return nil, nil, fmt.Errorf("analyze Go project with rule %q: nil violation", rule.Name())
 			}
 			fileCtx, err := project.File(violation.File)
 			if err != nil {
-				return nil, fmt.Errorf("map finding from Go project rule %q: %w", rule.Name(), err)
+				return nil, nil, fmt.Errorf("map finding from Go project rule %q: %w", rule.Name(), err)
 			}
 			fileCtx.AnnotateFunction(violation)
 			if fileCtx.IsGenerated() {
@@ -1162,7 +1223,9 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 			allViolations = append(allViolations, inlineSuppressions(fileCtx, rule)...)
 		}
 	}
-	if cache != nil && project != nil {
+	// A panicked project rule left no findings: caching them would read as
+	// "nothing found" on the next run.
+	if cache != nil && project != nil && len(panics) == 0 {
 		cache.storeProject(allViolations, project.SkippedPackages)
 	}
 	for _, rule := range fileRules {
@@ -1170,11 +1233,11 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 			projectFiles.UseProjectFiles(contexts)
 		}
 	}
-	fileViolations, err := analyzeFiles(contexts, fileRules, cfg, overrides, cache)
+	fileViolations, filePanics, err := analyzeFilesContained(contexts, fileRules, cfg, overrides, cache)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return append(allViolations, fileViolations...), nil
+	return append(allViolations, fileViolations...), append(filePanics, panics...), nil
 }
 
 // runProjectRule runs one Go project rule; a panic becomes an error that names
@@ -1184,23 +1247,23 @@ func runProjectRule(rule rules.GoProjectRule, project *core.GoProjectContext) (v
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			violations = nil
-			err = fmt.Errorf("panic: %v\n%s", recovered, debug.Stack())
+			err = &rulePanic{rule: rule.Name(), file: "(go project)", value: recovered, stack: debug.Stack()}
 		}
 	}()
 	return rule.AnalyzeGoProject(project)
 }
 
-func outputResults(format string, violations core.ViolationList, stats output.Stats) error {
+func writeResults(w io.Writer, format string, violations core.ViolationList, stats output.Stats) error {
 	switch format {
 	case "json":
-		out := output.NewJSONOutput().WithWriter(os.Stdout)
+		out := output.NewJSONOutput().WithWriter(w)
 		return out.Write(violations, stats)
 	case "summary":
-		out := output.NewSummaryOutput().WithWriter(os.Stdout)
+		out := output.NewSummaryOutput().WithWriter(w)
 		return out.Write(violations, stats)
 	case "console", "":
 		out := output.NewConsoleOutput().
-			WithWriter(os.Stdout).
+			WithWriter(w).
 			WithNoColor(flagNoColor)
 		return out.Write(violations, stats)
 	default:
