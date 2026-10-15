@@ -539,6 +539,23 @@ const (
 	Defend  = "A4"
 	Probe   = "A2" // want
 )
+
+// A D-Bus service is commonly named after its interface: the bus name and
+// the interface name are two roles of one value.
+const (
+	notifyService    = "org.freedesktop.Notifications"
+	notifyPath       = "/org/freedesktop/Notifications"
+	notifyIface      = "org.freedesktop.Notifications"
+	defaultActionKey = "default"
+)
+
+// Another object's bus name is no role of this one.
+const (
+	screenService = "org.example.Screen"
+	screenPath    = "/org/example/Screen"
+	screenIface   = "org.example.Screen"
+	lockService   = "org.example.Screen" // want
+)
 `)
 }
 

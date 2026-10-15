@@ -14,6 +14,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -1087,6 +1088,12 @@ func (r *ConstFamilyDuplicateValueRule) AnalyzeGoProject(ctx *core.GoProjectCont
 			}
 		}
 	}
+	sort.SliceStable(violations, func(i, j int) bool {
+		if violations[i].File != violations[j].File {
+			return violations[i].File < violations[j].File
+		}
+		return violations[i].Line < violations[j].Line
+	})
 	return violations, nil
 }
 
@@ -1175,7 +1182,9 @@ func (r *ConstFamilyDuplicateValueRule) duplicates(members []familyConst) []*cor
 			continue
 		}
 		if earlier, ok := first[member.value]; ok {
-			pairs = append(pairs, [2]familyConst{earlier, member})
+			if !busNameOfInterface(earlier.name.Name, member.name.Name) {
+				pairs = append(pairs, [2]familyConst{earlier, member})
+			}
 			continue
 		}
 		first[member.value] = member
@@ -1198,6 +1207,35 @@ func (r *ConstFamilyDuplicateValueRule) duplicates(members []familyConst) []*cor
 		violations = append(violations, v)
 	}
 	return violations
+}
+
+// busRoles and interfaceRoles are the last words of the names of a D-Bus
+// object's bus name and interface name.
+var (
+	busRoles       = map[string]bool{"service": true, "bus": true, "busname": true, "dest": true, "destination": true}
+	interfaceRoles = map[string]bool{"iface": true, "interface": true, "intf": true}
+)
+
+// busNameOfInterface reports the bus name and the interface name of one D-Bus
+// object (notifyService, notifyIface): a service is commonly named after its
+// interface (org.freedesktop.Notifications is both), so the two roles share
+// one value by design.
+func busNameOfInterface(a, b string) bool {
+	stemA, roleA := nameRole(a)
+	stemB, roleB := nameRole(b)
+	if stemA != stemB {
+		return false
+	}
+	return (busRoles[roleA] && interfaceRoles[roleB]) || (interfaceRoles[roleA] && busRoles[roleB])
+}
+
+// nameRole splits a name into its leading words and its last word, lower-cased.
+func nameRole(name string) (stem, role string) {
+	words := helpers.IdentifierWords(name)
+	if len(words) < 2 {
+		return "", ""
+	}
+	return strings.ToLower(strings.Join(words[:len(words)-1], "")), strings.ToLower(words[len(words)-1])
 }
 
 // ThrottleStateSharedByMessagesRule reports a log throttle whose state - the
