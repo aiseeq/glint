@@ -318,3 +318,30 @@ func importer() {}
 		t.Fatalf("want both tombstones, got: %+v", violations)
 	}
 }
+
+// "Added and removed" counts a change both ways (the lines of a diff, the
+// members of a set): it describes what the code reports, not deleted code.
+func TestTombstoneComment_AddedAndRemovedIsCount(t *testing.T) {
+	code := `// Command stats collects the size of the files over time and how much each
+// night added and removed. It reads the logs in the runs directory.
+package main
+
+// nightLines sums lines added and removed in the files by the
+// commits of one night.
+func nightLines() {}
+
+// diff reports the keys removed or added between two snapshots.
+func diff() {}
+
+// Added/removed members are logged once per sync.
+func sync() {}
+
+// Old sync handler removed.
+func legacy() {}
+`
+	ctx := core.NewFileContext("stats/main.go", ".", []byte(code), nil)
+	violations := NewTombstoneCommentRule().AnalyzeFile(ctx)
+	if len(violations) != 1 || violations[0].Line != 15 {
+		t.Fatalf("want only the tombstone on line 15, got: %+v", violations)
+	}
+}
