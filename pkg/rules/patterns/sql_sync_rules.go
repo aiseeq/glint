@@ -802,10 +802,8 @@ func skippedPendingReads(body *ast.BlockStmt, funcs map[string]*ast.FuncDecl) []
 // marking call's own failure is checked there.
 func leavesFailedItem(loop *ast.RangeStmt) (failedItemOutcome, bool) {
 	item := make(map[string]bool)
-	for _, v := range []ast.Expr{loop.Key, loop.Value} {
-		if id, ok := v.(*ast.Ident); ok && id.Name != "_" {
-			item[id.Name] = true
-		}
+	for _, name := range rangeLoopNames(loop) {
+		item[name] = true
 	}
 	if len(item) == 0 {
 		return 0, false

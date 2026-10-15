@@ -273,6 +273,35 @@ func (a *Admin) hooksPage(w http.ResponseWriter, r *http.Request) {
 	page.Rows, page.Tenants, page.Currencies = len(rows), len(tenants), len(currencies)
 }
 `,
+		// A loop by index checks the element through a pointer or a copy
+		// bound in its body: the check covers the list as a range value does.
+		"web/indexed.go": `package web
+
+import "net/http"
+
+func (a *Admin) tenantsByPointer(w http.ResponseWriter, r *http.Request) {
+	v := viewerOf(r)
+	all, _ := a.tenants.GetAll(r.Context())
+	for i := range all {
+		t := &all[i]
+		if !allowed(v, t.ID) {
+			continue
+		}
+		_ = t
+	}
+}
+
+func (a *Admin) tenantsByCopy(w http.ResponseWriter, r *http.Request) {
+	v := viewerOf(r)
+	all, _ := a.tenants.GetAll(r.Context())
+	for i := range all {
+		t := all[i]
+		if allowed(v, t.ID) {
+			_ = t
+		}
+	}
+}
+`,
 	}))
 }
 

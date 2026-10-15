@@ -150,6 +150,20 @@ func (s *Store) UpsertChecked(ctx context.Context, rows []*Row) error {
 }
 
 func dedupe(rows []*Row) []*Row { return rows }
+
+// A loop by index checks the key through a local bound to the row.
+func (s *Store) UpsertCheckedByIndex(ctx context.Context, rows []Row) error {
+	seen := make(map[string]bool, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		if seen[row.Key] {
+			return errors.New("duplicate key")
+		}
+		seen[row.Key] = true
+	}
+	_, err := s.db.NamedExecContext(ctx, "INSERT INTO rows (key, value) VALUES (:key, :value) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", rows)
+	return err
+}
 `,
 	}))
 }

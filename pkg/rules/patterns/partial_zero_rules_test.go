@@ -729,7 +729,7 @@ func rowKey(index int, name string) string {
 // A converter that takes the first movement of the wallet and breaks keeps one
 // leg of a transaction that moved several coins.
 func TestConverterKeepsFirstLeg(t *testing.T) {
-	assert.Equal(t, []string{"chain/convert.go:25", "chain/convert.go:38"}, typedFuncFindings(t, NewConverterKeepsFirstLegRule(), map[string]string{
+	assert.Equal(t, []string{"chain/convert.go:25", "chain/convert.go:38", "chain/indexed.go:8"}, typedFuncFindings(t, NewConverterKeepsFirstLegRule(), map[string]string{
 		"chain/convert.go": `package chain
 
 import "github.com/shopspring/decimal"
@@ -798,6 +798,25 @@ func Owner(wallet string, b *Block) *Change {
 		}
 	}
 	return found
+}
+`,
+		// A loop by index compares the leg through a local bound to it.
+		"chain/indexed.go": `package chain
+
+import "github.com/shopspring/decimal"
+
+func ConvertIndexed(wallet string, b *Block) *Tx {
+	var amount decimal.Decimal
+	var coin string
+	for i := range b.Changes {
+		c := &b.Changes[i]
+		if c.Owner == wallet {
+			amount = c.Amount
+			coin = c.Coin
+			break
+		}
+	}
+	return &Tx{Hash: b.Digest, Coin: coin, Amount: amount}
 }
 `,
 	}))

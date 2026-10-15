@@ -453,18 +453,15 @@ func NewFuzzyMatchReturnsFirstCandidateRule() *typedFuncRule {
 			if !ok {
 				return true
 			}
-			value, ok := loop.Value.(*ast.Ident)
-			if !ok || value.Name == "_" {
-				return true
-			}
-			option := scope.info.ObjectOf(value)
-			names := optionNames(scope.info, loop.Body, option)
-			for _, stmt := range loop.Body.List {
-				check, ok := stmt.(*ast.IfStmt)
-				if !ok || !fuzzyOnName(scope.info, check.Cond, names) || !returnsOption(scope.info, check.Body, option) {
-					continue
+			for _, option := range rangeElementVars(scope.info, loop) {
+				names := optionNames(scope.info, loop.Body, option)
+				for _, stmt := range loop.Body.List {
+					check, ok := stmt.(*ast.IfStmt)
+					if !ok || !fuzzyOnName(scope.info, check.Cond, names) || !returnsOption(scope.info, check.Body, option) {
+						continue
+					}
+					findings = append(findings, funcFinding{node: check, message: "The first option whose name contains the wanted one is returned — when two options fit, the order of the list picks the answer"})
 				}
-				findings = append(findings, funcFinding{node: check, message: "The first option whose name contains the wanted one is returned — when two options fit, the order of the list picks the answer"})
 			}
 			return true
 		})

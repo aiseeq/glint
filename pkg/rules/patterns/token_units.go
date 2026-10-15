@@ -81,13 +81,13 @@ func NewTokenAmountFixedDecimalsRule() *typedFuncRule {
 			if !ok {
 				return true
 			}
-			item, ok := loop.Value.(*ast.Ident)
-			if !ok {
-				return true
+			var identity *ast.SelectorExpr
+			for _, obj := range rangeElementVars(scope.info, loop) {
+				if identity = readsIdentityOf(scope.info, loop.Body, obj); identity != nil {
+					break
+				}
 			}
-			obj := scope.info.ObjectOf(item)
-			identity := readsIdentityOf(scope.info, loop.Body, obj)
-			if obj == nil || identity == nil || readsDecimals(scope.info, loop.Body) {
+			if identity == nil || readsDecimals(scope.info, loop.Body) {
 				return true
 			}
 			for _, stmt := range loop.Body.List {

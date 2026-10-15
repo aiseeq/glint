@@ -10,7 +10,7 @@ import (
 // the native coin's power of ten, while a stablecoin of the same chain has 6
 // decimals.
 func TestTokenAmountFixedDecimals(t *testing.T) {
-	assert.Equal(t, []string{"chain/balances.go:24", "chain/balances.go:44"}, typedFuncFindings(t, NewTokenAmountFixedDecimalsRule(), map[string]string{
+	assert.Equal(t, []string{"chain/balances.go:24", "chain/balances.go:44", "chain/indexed.go:10"}, typedFuncFindings(t, NewTokenAmountFixedDecimalsRule(), map[string]string{
 		"chain/balances.go": `package chain
 
 import "github.com/shopspring/decimal"
@@ -85,6 +85,22 @@ func percents(list []Change) []decimal.Decimal {
 	for _, c := range list {
 		amount, _ := decimal.NewFromString(c.Amount)
 		out = append(out, amount.Div(decimal.NewFromInt(100)))
+	}
+	return out
+}
+`,
+		// A loop by index reads the token through a local bound to the record.
+		"chain/indexed.go": `package chain
+
+import "github.com/shopspring/decimal"
+
+func changesIndexed(list []Change) map[string]decimal.Decimal {
+	out := map[string]decimal.Decimal{}
+	for i := range list {
+		c := &list[i]
+		amount, _ := decimal.NewFromString(c.Amount)
+		amount = amount.Div(decimal.NewFromInt(nativeDivisor))
+		out[c.CoinType] = amount
 	}
 	return out
 }
