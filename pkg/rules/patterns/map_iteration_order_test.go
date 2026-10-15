@@ -625,3 +625,40 @@ func Local(m map[string]int) int {
 	assert.Contains(t, violations[0].Message, "keys")
 	assert.Equal(t, 11, violations[0].Line)
 }
+
+// A loop over the keys reads the entry through a local bound to it: the
+// choice and the output still follow the walk.
+func TestMapIterationOrderFollowsEntryBoundByKey(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"fmt"
+	"io"
+)
+
+func Pick(profiles map[string]int, limit int) int {
+	chosen := 0
+	for k := range profiles {
+		p := profiles[k]
+		if p < limit {
+			chosen = p
+			break
+		}
+	}
+	return chosen
+}
+
+func Dump(w io.Writer, counts map[string]int) {
+	for k := range counts {
+		v := counts[k]
+		fmt.Fprintln(w, v)
+	}
+}
+`)
+
+	var lines []int
+	for _, v := range violations {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{10, 21}, lines)
+}

@@ -80,6 +80,59 @@ func contains(items []string, target string) bool {
 	assert.Contains(t, violations[0].Message, "slices.Contains")
 }
 
+// A loop by index compares the element through a local bound to it, the
+// form a slice of large values takes.
+func TestReimplementedStdlibReportsLinearSearchByIndex(t *testing.T) {
+	for _, source := range []string{`package helpers
+
+type Key struct{ A, B, C, D string }
+
+func contains(items []Key, target Key) bool {
+	for i := range items {
+		item := &items[i]
+		if *item == target {
+			return true
+		}
+	}
+	return false
+}
+`, `package helpers
+
+type Key struct{ A, B, C, D string }
+
+func contains(items []Key, target Key) bool {
+	for i := range items {
+		item := items[i]
+		if target == item {
+			return true
+		}
+	}
+	return false
+}
+`} {
+		violations := analyzeStdlibCopies(t, source)
+		require.Len(t, violations, 1, source)
+		assert.Contains(t, violations[0].Message, "slices.Contains")
+	}
+
+	// Over a slice of pointers *item is the pointee, not the element:
+	// slices.Contains would compare the pointers.
+	assert.Empty(t, analyzeStdlibCopies(t, `package helpers
+
+type Key struct{ A, B, C, D string }
+
+func contains(items []*Key, target Key) bool {
+	for i := range items {
+		item := items[i]
+		if *item == target {
+			return true
+		}
+	}
+	return false
+}
+`))
+}
+
 // Go has no built-in abs: for ints the advice is one shared helper instead of
 // copies, and the message must not claim a built-in that does not exist.
 func TestReimplementedStdlibReportsIntAbs(t *testing.T) {

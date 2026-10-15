@@ -373,7 +373,7 @@ func searchesLinearly(fn *ast.FuncDecl, operands stdlibOperands) bool {
 	}
 
 	rangeStmt, ok := fn.Body.List[0].(*ast.RangeStmt)
-	if !ok || rangeStmt.Value == nil {
+	if !ok {
 		return false
 	}
 	// Ranging over a map or a string looks identical to ranging over a
@@ -382,17 +382,19 @@ func searchesLinearly(fn *ast.FuncDecl, operands stdlibOperands) bool {
 	if !operands.rangesOverSlice(fn, rangeStmt.X) {
 		return false
 	}
-	element, ok := rangeStmt.Value.(*ast.Ident)
-	if !ok || !returnsLiteral(fn.Body.List[len(fn.Body.List)-1], "false") {
+	element := rangeElementOf(rangeStmt)
+	if len(element.idents) == 0 || !returnsLiteral(fn.Body.List[len(fn.Body.List)-1], "false") {
 		return false
 	}
 
-	// The loop must do nothing but compare the element itself: a body that also
-	// unpacks or converts is asking a question slices.Contains cannot answer.
-	if len(rangeStmt.Body.List) != 1 {
+	// The loop must do nothing but compare the element itself (past its
+	// binding by index): a body that also unpacks or converts is asking a
+	// question slices.Contains cannot answer.
+	body := element.statements(rangeStmt.Body)
+	if len(body) != 1 {
 		return false
 	}
-	ifStmt, ok := rangeStmt.Body.List[0].(*ast.IfStmt)
+	ifStmt, ok := body[0].(*ast.IfStmt)
 	if !ok || ifStmt.Else != nil || len(ifStmt.Body.List) != 1 {
 		return false
 	}
@@ -400,7 +402,7 @@ func searchesLinearly(fn *ast.FuncDecl, operands stdlibOperands) bool {
 	if !ok || comparison.Op != token.EQL {
 		return false
 	}
-	if !isIdent(comparison.X, element.Name) && !isIdent(comparison.Y, element.Name) {
+	if !element.isElement(comparison.X) && !element.isElement(comparison.Y) {
 		return false
 	}
 	return returnsLiteral(ifStmt.Body.List[0], "true")

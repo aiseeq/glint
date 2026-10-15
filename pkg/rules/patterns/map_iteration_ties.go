@@ -15,9 +15,9 @@ import (
 // declares from them: t := catalog[unit] carries the entry as much as unit
 // does.
 func loopTaint(rangeStmt *ast.RangeStmt) map[string]bool {
-	key, value := rangeTargetNames(rangeStmt)
+	key, values := rangeTargetNames(rangeStmt)
 	tainted := map[string]bool{}
-	for _, name := range []string{key, value} {
+	for _, name := range append([]string{key}, values...) {
 		if name != "" {
 			tainted[name] = true
 		}

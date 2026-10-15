@@ -545,12 +545,7 @@ func readerRelated(info *types.Info, fn *ast.FuncDecl, call *ast.CallExpr) map[t
 		if !ok || !mentionsAnyObject(info, loop.X, related) {
 			return true
 		}
-		if ident, ok := loop.Key.(*ast.Ident); ok && ident.Name != "_" {
-			if obj := info.ObjectOf(ident); obj != nil {
-				related[obj] = true
-			}
-		}
-		for _, obj := range rangeElementVars(info, loop) {
+		for _, obj := range rangeItemVars(info, loop) {
 			related[obj] = true
 		}
 		return true

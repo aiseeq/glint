@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 )
 
 // rangeElement is what stands for the element of a range loop: the value
@@ -15,13 +16,16 @@ type rangeElement struct {
 	idents []*ast.Ident
 	// bindings are the statements that bind a local to the element.
 	bindings map[ast.Stmt]bool
+	// pointers names the locals bound to the element's address (&items[i]):
+	// *c is the element.
+	pointers map[string]bool
 }
 
 // rangeElementOf collects the names of a range loop's element. The index
 // binding is matched by the key's name and the collection's spelling, so it
 // needs no type information.
 func rangeElementOf(loop *ast.RangeStmt) rangeElement {
-	elem := rangeElement{bindings: map[ast.Stmt]bool{}}
+	elem := rangeElement{bindings: map[ast.Stmt]bool{}, pointers: map[string]bool{}}
 	if ident, ok := loop.Value.(*ast.Ident); ok && ident.Name != "_" {
 		elem.idents = append(elem.idents, ident)
 	}
@@ -36,7 +40,9 @@ func rangeElementOf(loop *ast.RangeStmt) rangeElement {
 			continue
 		}
 		rhs := ast.Unparen(assign.Rhs[0])
-		if addr, ok := rhs.(*ast.UnaryExpr); ok && addr.Op == token.AND {
+		addr, addressed := rhs.(*ast.UnaryExpr)
+		addressed = addressed && addr.Op == token.AND
+		if addressed {
 			rhs = ast.Unparen(addr.X)
 		}
 		index, ok := rhs.(*ast.IndexExpr)
@@ -49,6 +55,7 @@ func rangeElementOf(loop *ast.RangeStmt) rangeElement {
 		if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
 			elem.idents = append(elem.idents, ident)
 			elem.bindings[stmt] = true
+			elem.pointers[ident.Name] = addressed
 		}
 	}
 	return elem
@@ -65,6 +72,18 @@ func rangeLoopNames(loop *ast.RangeStmt) []string {
 		names = append(names, ident.Name)
 	}
 	return names
+}
+
+// isElement reports an expression that is the element itself: an element
+// variable, or the dereference of a local bound to its address.
+func (e rangeElement) isElement(expr ast.Expr) bool {
+	expr = ast.Unparen(expr)
+	if star, ok := expr.(*ast.StarExpr); ok {
+		ident, isIdent := ast.Unparen(star.X).(*ast.Ident)
+		return isIdent && e.pointers[ident.Name]
+	}
+	ident, ok := expr.(*ast.Ident)
+	return ok && !e.pointers[ident.Name] && slices.ContainsFunc(e.idents, func(elem *ast.Ident) bool { return elem.Name == ident.Name })
 }
 
 // statements returns the body's statements past the element bindings.
@@ -87,4 +106,16 @@ func rangeElementVars(info *types.Info, loop *ast.RangeStmt) []types.Object {
 		}
 	}
 	return vars
+}
+
+// rangeItemVars returns the objects a range loop gives each item: its key and
+// its element variables.
+func rangeItemVars(info *types.Info, loop *ast.RangeStmt) []types.Object {
+	var vars []types.Object
+	if ident, ok := loop.Key.(*ast.Ident); ok && ident.Name != "_" {
+		if obj := info.ObjectOf(ident); obj != nil {
+			vars = append(vars, obj)
+		}
+	}
+	return append(vars, rangeElementVars(info, loop)...)
 }
