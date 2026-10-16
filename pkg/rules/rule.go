@@ -202,6 +202,22 @@ type ProjectFilesRule interface {
 	UseProjectFiles(files []*core.FileContext)
 }
 
+// ExcludedInstructionReader is a file rule that measures the Claude Code
+// instruction files even where the configuration's exclude patterns leave
+// them out: an exclusion of *.md meant for documentation must not hide a
+// CLAUDE.md over its limit. No other rule sees those files.
+type ExcludedInstructionReader interface {
+	Rule
+	ReadsExcludedInstructions()
+}
+
+// ReadsExcludedInstructions reports whether the rule measures the
+// instruction files the exclude patterns leave out.
+func ReadsExcludedInstructions(r Rule) bool {
+	_, ok := r.(ExcludedInstructionReader)
+	return ok
+}
+
 // AccumulatesAcrossFiles reports whether the rule's analysis of one file
 // feeds its findings on others: a stateful rule that is not handed the
 // project's files up front gathers them file by file. Running it on a file a

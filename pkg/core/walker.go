@@ -30,6 +30,12 @@ type Walker struct {
 	// the whole root. Paths stay relative to the root either way.
 	scopes []string
 
+	// keepInstructions walks the Claude Code instruction files the exclude
+	// patterns leave out; excludedInstructions holds their paths in the
+	// most recent walk.
+	keepInstructions     bool
+	excludedInstructions map[string]bool
+
 	// Statistics of the most recent walk
 	stats WalkerStats
 	mu    sync.Mutex
@@ -58,6 +64,23 @@ func NewWalker(projectRoot string, config *Config) *Walker {
 		parseGo:     true,
 		workers:     workers,
 	}
+}
+
+// WithExcludedInstructions makes the walk keep the Claude Code instruction
+// files (InstructionKindOf) that an exclude pattern by file name (*.md)
+// leaves out, for the rules that measure them; a directory excluded as a
+// whole (vendor/*) keeps its files out. ExcludedInstruction tells them apart.
+func (w *Walker) WithExcludedInstructions(enabled bool) *Walker {
+	w.keepInstructions = enabled
+	return w
+}
+
+// ExcludedInstruction reports an instruction file the most recent walk kept
+// although an exclude pattern matches it.
+func (w *Walker) ExcludedInstruction(path string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.excludedInstructions[path]
 }
 
 // WithGoParsing controls whether the walker parses Go files into ASTs.
@@ -97,6 +120,7 @@ func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 
 	w.mu.Lock()
 	w.stats = WalkerStats{}
+	w.excludedInstructions = map[string]bool{}
 	w.mu.Unlock()
 
 	var wg sync.WaitGroup
@@ -262,9 +286,21 @@ func (w *Walker) visitPath(fileQueue chan<- string, walkErrors chan<- error, pat
 		return fmt.Errorf("make %q relative to project root: %w", path, err)
 	}
 	if w.config.ShouldExclude(relPath) {
+		// Только исключение по виду файла (*.md): каталог, исключённый
+		// целиком (vendor/*), чужой, и его инструкции не наши.
+		keep := w.keepInstructions && InstructionKindOf(relPath) != NotInstruction && !w.config.ExcludesDirectoryOf(relPath)
 		w.mu.Lock()
-		w.stats.SkippedFiles++
+		if keep {
+			w.excludedInstructions[path] = true
+			w.stats.TotalFiles++
+		} else {
+			w.stats.SkippedFiles++
+		}
 		w.mu.Unlock()
+		if keep {
+			// Отправка без лока: воркеры берут тот же лок на каждом файле.
+			fileQueue <- path
+		}
 		return nil
 	}
 

@@ -34,7 +34,7 @@ func TestInstructionSize(t *testing.T) {
 		require.Len(t, got, 1, path)
 		require.Contains(t, got[0].Message, "101 bytes without comments")
 		require.Equal(t, 1, got[0].Line)
-		require.Empty(t, instructionSizeFindings(t, map[string]any{"max_bytes": 101}, path, big), path)
+		require.Empty(t, instructionSizeFindings(t, map[string]any{"max_bytes": 127}, path, big), path)
 	}
 	for _, path := range []string{"docs/guide.md", "README.md", ".claude/notes.md", "rules/api.md", "SKILL.md", "docs/x/SKILL.md"} {
 		require.Empty(t, instructionSizeFindings(t, map[string]any{"max_bytes": 1, "max_chars": 1}, path, big), path)
@@ -43,7 +43,7 @@ func TestInstructionSize(t *testing.T) {
 	// Characters, not bytes: 60 Cyrillic letters are 120 bytes.
 	cyrillic := strings.Repeat("я", 60)
 	for _, path := range []string{".claude/skills/deploy/SKILL.md", "skills/deploy/SKILL.md"} {
-		require.Empty(t, instructionSizeFindings(t, map[string]any{"max_chars": 60, "max_bytes": 1}, path, cyrillic), path)
+		require.Empty(t, instructionSizeFindings(t, map[string]any{"max_chars": 71, "max_bytes": 1}, path, cyrillic), path)
 		got := instructionSizeFindings(t, map[string]any{"max_chars": 59}, path, cyrillic)
 		require.Len(t, got, 1, path)
 		require.Contains(t, got[0].Message, "60 characters without comments")
@@ -51,10 +51,32 @@ func TestInstructionSize(t *testing.T) {
 }
 
 func TestInstructionSizeDefaults(t *testing.T) {
-	require.Empty(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 16384)))
+	require.Empty(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 13107)))
+	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 13108)), 1)
 	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 16385)), 1)
-	require.Empty(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 12000)))
+	require.Empty(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 10199)))
+	require.Len(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 10200)), 1)
 	require.Len(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 12001)), 1)
+}
+
+// A file near its limit is reported before it is over: a CLAUDE.md from 80%
+// of max_bytes, a skill from 85% of max_chars. The next rule added to a file
+// at 99% puts it over, and moving rules out takes longer than adding one.
+func TestInstructionSizeWarnsNearTheLimit(t *testing.T) {
+	limit := map[string]any{"max_bytes": 100, "max_chars": 100}
+	require.Empty(t, instructionSizeFindings(t, limit, "CLAUDE.md", strings.Repeat("a", 79)))
+	for _, size := range []int{80, 100} {
+		got := instructionSizeFindings(t, limit, "CLAUDE.md", strings.Repeat("a", size))
+		require.Len(t, got, 1, size)
+		require.Contains(t, got[0].Message, fmt.Sprintf("%d bytes without comments, %d%% of the limit of 100", size, size))
+		require.Equal(t, core.SeverityMedium, got[0].Severity)
+	}
+	require.Contains(t, instructionSizeFindings(t, limit, "CLAUDE.md", strings.Repeat("a", 101))[0].Message, "over the limit of 100")
+
+	require.Empty(t, instructionSizeFindings(t, limit, ".claude/skills/x/SKILL.md", strings.Repeat("я", 84)))
+	got := instructionSizeFindings(t, limit, ".claude/skills/x/SKILL.md", strings.Repeat("я", 85))
+	require.Len(t, got, 1)
+	require.Contains(t, got[0].Message, "85 characters without comments, 85% of the limit of 100")
 }
 
 // Claude Code strips block-level HTML comments from CLAUDE.md before the
@@ -66,7 +88,9 @@ func TestInstructionSizeSkipsBlockComments(t *testing.T) {
 	got := instructionSizeFindings(t, settings, "CLAUDE.md", text)
 	require.Len(t, got, 1)
 	require.Contains(t, got[0].Message, fmt.Sprintf(" %d bytes without comments", kept))
-	require.Empty(t, instructionSizeFindings(t, map[string]any{"max_bytes": kept}, "CLAUDE.md", text))
+	// Below 80% without the comment, over the limit with it.
+	require.Empty(t, instructionSizeFindings(t, map[string]any{"max_bytes": 28}, "CLAUDE.md", text))
+	require.Greater(t, len(text), 28)
 
 	fenced := "```\n<!-- shown -->\n```\n"
 	require.Len(t, instructionSizeFindings(t, map[string]any{"max_bytes": len(fenced) - 1}, "CLAUDE.md", fenced), 1)
@@ -75,7 +99,8 @@ func TestInstructionSizeSkipsBlockComments(t *testing.T) {
 
 	skill := "шаг один\n<!-- причина -->\nшаг два\n"
 	chars := utf8.RuneCountInString("шаг один\nшаг два\n")
-	require.Empty(t, instructionSizeFindings(t, map[string]any{"max_chars": chars}, ".claude/skills/x/SKILL.md", skill))
+	require.Empty(t, instructionSizeFindings(t, map[string]any{"max_chars": 21}, ".claude/skills/x/SKILL.md", skill))
+	require.Greater(t, utf8.RuneCountInString(skill), 21)
 	got = instructionSizeFindings(t, map[string]any{"max_chars": chars - 1}, ".claude/skills/x/SKILL.md", skill)
 	require.Len(t, got, 1)
 	require.Contains(t, got[0].Message, fmt.Sprintf(" %d characters without comments", chars))
