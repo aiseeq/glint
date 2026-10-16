@@ -55,19 +55,29 @@ func TestGetProjectRootsReturnsAbsoluteCleanPath(t *testing.T) {
 	}
 }
 
-func TestShouldFailAnalysisAtHighSeverity(t *testing.T) {
+func TestShouldFailAnalysisAtThreshold(t *testing.T) {
+	low := core.ViolationList{core.NewViolation("low", "test", "test.go", 1, core.SeverityLow, "low")}
 	medium := core.ViolationList{core.NewViolation("medium", "test", "test.go", 1, core.SeverityMedium, "medium")}
 	high := core.ViolationList{core.NewViolation("high", "test", "test.go", 1, core.SeverityHigh, "high")}
 	critical := core.ViolationList{core.NewViolation("critical", "test", "test.go", 1, core.SeverityCritical, "critical")}
 
-	if shouldFailAnalysis(medium) {
-		t.Fatal("medium findings must not fail analysis")
+	if shouldFailAnalysis(medium, core.SeverityHigh) {
+		t.Fatal("medium findings must not fail analysis at the default high threshold")
 	}
-	if !shouldFailAnalysis(high) {
-		t.Fatal("high findings must fail analysis")
+	if !shouldFailAnalysis(high, core.SeverityHigh) {
+		t.Fatal("high findings must fail analysis at the high threshold")
 	}
-	if !shouldFailAnalysis(critical) {
-		t.Fatal("critical findings must fail analysis")
+	if !shouldFailAnalysis(critical, core.SeverityHigh) {
+		t.Fatal("critical findings must fail analysis at the high threshold")
+	}
+	if !shouldFailAnalysis(medium, core.SeverityMedium) {
+		t.Fatal("medium findings must fail analysis at the medium threshold")
+	}
+	if shouldFailAnalysis(low, core.SeverityMedium) {
+		t.Fatal("low findings must not fail analysis at the medium threshold")
+	}
+	if shouldFailAnalysis(high, core.SeverityCritical) {
+		t.Fatal("high findings must not fail analysis at the critical threshold")
 	}
 }
 

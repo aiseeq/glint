@@ -114,6 +114,7 @@ settings:
     - node_modules/**
     - "**/*_test.go"
   min_severity: medium
+  fail_on: medium              # exit non-zero from medium findings up (default high)
   output: console
 
 categories:
@@ -142,6 +143,7 @@ Reference:
 | `settings.skip_dirs` | Directory names never descended into. Defaults to `.git .svn .hg .idea .vscode node_modules vendor .next out dist build bin` — set it if one of those is a real package of yours. |
 | `settings.respect_gitignore` | Honour `.gitignore` files (default `true`): whatever the project excludes from git — generated bundles, test-runner reports, local scratch files — is not analyzed. Patterns are applied with git semantics from the repository root down, so running glint on a subdirectory still sees the root `.gitignore`. Set to `false` to analyze everything. |
 | `settings.min_severity` | `low` / `medium` / `high` / `critical`. |
+| `settings.fail_on` | Lowest severity of a reported finding that makes `glint check` exit non-zero: `low` / `medium` / `high` / `critical`, default `high`. Findings below `min_severity` are not reported and never fail the run. An unknown value is a config error. |
 | `settings.output` | `console` / `json` / `summary`. |
 | `categories.<name>.enabled` | Defaults to `true` — naming a category to configure its rules does not switch it off. |
 | `categories.<name>.severity_override` | Reported severity for every rule of the category. |
@@ -232,7 +234,8 @@ A marker or a finding exception that silenced nothing in the run is reported by 
 # List all rules
 glint rules
 
-# Exit status is non-zero when HIGH or CRITICAL findings are present.
+# Exit status is non-zero when a finding at or above settings.fail_on is
+# reported (default high: HIGH or CRITICAL findings).
 # A rule that panics is a bug in glint: check still prints the findings of the
 # other rules, names the panicked rule (rulesPanicked in JSON), writes its stack
 # to stderr and exits non-zero; such a run is not cached.

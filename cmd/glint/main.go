@@ -260,6 +260,8 @@ func runCheck(_ *cobra.Command, args []string) error {
 	// panics are the rule panics of every root: the run reports the other
 	// findings, names them and fails.
 	var panics rulePanics
+	// failed is set when a root reports a finding at or above its fail_on.
+	failed := false
 	// The configurations of the roots whose rules include the dead
 	// exception check, by file: each is checked once.
 	deadCheckConfigs := make(map[string]*core.Config)
@@ -325,7 +327,14 @@ func runCheck(_ *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		findings.add(projectRoot, violations.BySeverity(minSeverity))
+		shown := violations.BySeverity(minSeverity)
+		findings.add(projectRoot, shown)
+		failOn, err := cfg.GetFailOn()
+		if err != nil {
+			return err
+		}
+		// Each root fails by its own threshold: roots can carry different configs.
+		failed = failed || shouldFailAnalysis(shown, failOn)
 
 		for _, ctx := range append(slices.Clone(contexts), prepared.excludedInstructions...) {
 			analyzedFiles[ctx.Path] = struct{}{}
@@ -359,7 +368,7 @@ func runCheck(_ *cobra.Command, args []string) error {
 		return panics
 	}
 
-	if shouldFailAnalysis(allViolations) {
+	if failed {
 		return errFindingsReported
 	}
 
@@ -439,7 +448,7 @@ func addDeadExceptions(findings *findingSet, rule *deadcode.DeadConfigExceptionR
 // errFindingsReported signals that the analysis itself succeeded but reported
 // findings severe enough to fail the run. Returning it instead of calling
 // os.Exit keeps the exit path in one place and lets cobra unwind normally.
-var errFindingsReported = errors.New("findings at or above high severity")
+var errFindingsReported = errors.New("findings at or above the fail_on severity")
 
 // findingSet collects the findings of every analyzed root and drops the ones
 // that overlapping roots (./backend and ./backend/auth) report twice. A
@@ -873,9 +882,10 @@ func reportSkippedPackages(skipped []core.SkippedPackage, outputFormat string) {
 	}
 }
 
-func shouldFailAnalysis(violations core.ViolationList) bool {
+// shouldFailAnalysis reports a finding at or above the threshold.
+func shouldFailAnalysis(violations core.ViolationList, failOn core.Severity) bool {
 	for _, violation := range violations {
-		if violation.Severity >= core.SeverityHigh {
+		if violation.Severity >= failOn {
 			return true
 		}
 	}

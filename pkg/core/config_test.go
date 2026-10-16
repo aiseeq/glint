@@ -14,6 +14,7 @@ func TestDefaultConfig(t *testing.T) {
 
 	assert.Equal(t, 1, cfg.Version)
 	assert.Equal(t, "low", cfg.Settings.MinSeverity)
+	assert.Equal(t, "high", cfg.Settings.FailOn)
 	assert.Equal(t, "console", cfg.Settings.Output)
 	assert.Contains(t, cfg.Settings.Exclude, "vendor/**")
 	assert.Contains(t, cfg.Settings.Exclude, "node_modules/**")
@@ -41,6 +42,56 @@ func TestConfigGetMinSeverity(t *testing.T) {
 			assert.Equal(t, tt.wantErr, err != nil)
 		})
 	}
+}
+
+// fail_on is the lowest severity that fails the run; without it a run fails
+// on high findings as before.
+func TestConfigGetFailOn(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected Severity
+		wantErr  bool
+	}{
+		{"low", SeverityLow, false},
+		{"medium", SeverityMedium, false},
+		{"high", SeverityHigh, false},
+		{"critical", SeverityCritical, false},
+		{"warning", SeverityHigh, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Settings.FailOn = tt.input
+			severity, err := cfg.GetFailOn()
+			assert.Equal(t, tt.wantErr, err != nil)
+			if !tt.wantErr {
+				assert.Equal(t, tt.expected, severity)
+			}
+		})
+	}
+}
+
+func TestLoadConfigFailOn(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".glint.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("version: 1\nsettings:\n  fail_on: medium\n"), 0o644))
+
+	cfg, err := LoadConfigWithDefaults(dir)
+	require.NoError(t, err)
+	severity, err := cfg.GetFailOn()
+	require.NoError(t, err)
+	assert.Equal(t, SeverityMedium, severity)
+}
+
+func TestValidateRejectsUnknownFailOn(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".glint.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("version: 1\nsettings:\n  fail_on: warning\n"), 0o644))
+
+	_, err := LoadConfig(path)
+	require.Error(t, err, "an unknown fail_on must not fall back to the default threshold")
+	assert.Contains(t, err.Error(), "settings.fail_on")
 }
 
 func TestConfigIsCategoryEnabled(t *testing.T) {
