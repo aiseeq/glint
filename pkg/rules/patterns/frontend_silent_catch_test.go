@@ -367,3 +367,23 @@ function CallbackPage() {
 		t.Fatalf("want one finding on line 13, got %v", lines)
 	}
 }
+
+// A command-line script fails the process on an error: a non-zero exit code
+// is the failure its caller sees, as a rethrow is for a UI caller. Exiting 0
+// after the log still hides it.
+func TestFrontendSilentCatchProcessExit(t *testing.T) {
+	code := `try { result = evaluate(JSON.parse(input)) } catch (error) { console.error(` + "`x: ${error.message}`" + `); process.exit(2) }
+try { run() } catch (error) { console.error('run', error); process.exitCode = 1 }
+try { run() } catch (error) { console.error('run', error); process.exit(code) }
+try { run() } catch (error) { console.error('run', error); process.exit(0) }
+try { run() } catch (error) { console.error('run', error); process.exitCode = 0 }
+`
+	ctx := core.NewFileContext("frontend/scripts/x.mjs", ".", []byte(code), nil)
+	var lines []int
+	for _, v := range NewFrontendSilentCatchRule().AnalyzeFile(ctx) {
+		lines = append(lines, v.Line)
+	}
+	if len(lines) != 2 || lines[0] != 4 || lines[1] != 5 {
+		t.Fatalf("want findings on lines 4 and 5 only, got %v", lines)
+	}
+}
