@@ -231,7 +231,7 @@ func isStoredText(expr ast.Expr, info *types.Info, stored map[any]bool) bool {
 		return stored[localKey(e, info)]
 	case *ast.CallExpr:
 		sel, ok := e.Fun.(*ast.SelectorExpr)
-		if !ok || len(e.Args) == 0 || !isIdentNamed(sel.X, "strings") || !errorTextNormalizers[sel.Sel.Name] {
+		if !ok || len(e.Args) == 0 || !helpers.IsIdentNamed(sel.X, "strings") || !errorTextNormalizers[sel.Sel.Name] {
 			return false
 		}
 		return isStoredText(e.Args[0], info, stored)

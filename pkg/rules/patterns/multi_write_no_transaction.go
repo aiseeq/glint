@@ -15,6 +15,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"golang.org/x/tools/go/types/typeutil"
 )
 
@@ -993,9 +994,9 @@ func (a *writeFlowAnalyzer) errorFacts(cond ast.Expr) (thenFacts, elseFacts []er
 		return nil, append(leftElse, rightElse...)
 	case token.NEQ, token.EQL:
 		operand := binary.X
-		if isNilIdent(ast.Unparen(operand)) {
+		if helpers.IsNilIdent(ast.Unparen(operand)) {
 			operand = binary.Y
-		} else if !isNilIdent(ast.Unparen(binary.Y)) {
+		} else if !helpers.IsNilIdent(ast.Unparen(binary.Y)) {
 			return nil, nil
 		}
 		ident, ok := ast.Unparen(operand).(*ast.Ident)

@@ -5,6 +5,8 @@ import (
 	"go/token"
 	"go/types"
 	"strings"
+
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // The shapes below are order dependences that survive a comparison or a sort:
@@ -315,7 +317,7 @@ func isTieSentinel(expr ast.Expr) bool {
 	case *ast.BasicLit:
 		return true
 	}
-	return isNilIdent(expr)
+	return helpers.IsNilIdent(expr)
 }
 
 func isNumericOrString(t types.Type) bool {

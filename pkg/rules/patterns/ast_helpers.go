@@ -29,12 +29,6 @@ func analyzeGoFunctions(ctx *core.FileContext, check func(*ast.FuncDecl) []*core
 	return violations
 }
 
-// isNilIdent reports whether the expression is the nil identifier.
-func isNilIdent(expr ast.Expr) bool {
-	ident, ok := expr.(*ast.Ident)
-	return ok && ident.Name == "nil"
-}
-
 // forEachTypedFuncDecl visits every function with a body in the typed syntax
 // of the project's packages, test files included, with its package's types;
 // obj is nil for a declaration the type checker did not define.

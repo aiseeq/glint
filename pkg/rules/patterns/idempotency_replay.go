@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // idempotencyKeyName names an idempotency key, in a lookup's name or in its
@@ -94,7 +95,7 @@ func idempotencyLookup(stmt ast.Stmt) (record, errName string, ok bool) {
 	if !recOK || !errOK || !callOK || rec.Name == "_" || errIdent.Name == "_" {
 		return "", "", false
 	}
-	named := idempotencyKeyName.MatchString(callName(call))
+	named := idempotencyKeyName.MatchString(helpers.CalleeName(call))
 	for _, arg := range call.Args {
 		switch a := ast.Unparen(arg).(type) {
 		case *ast.Ident:
@@ -171,12 +172,12 @@ func comparesRecord(stmt ast.Stmt, record string) bool {
 	ast.Inspect(stmt, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.BinaryExpr:
-			if (node.Op == token.EQL || node.Op == token.NEQ) && !isNilIdent(node.X) && !isNilIdent(node.Y) &&
+			if (node.Op == token.EQL || node.Op == token.NEQ) && !helpers.IsNilIdent(node.X) && !helpers.IsNilIdent(node.Y) &&
 				(mentions(node.X, record) || mentions(node.Y, record)) {
 				found = true
 			}
 		case *ast.CallExpr:
-			if requestComparisonName.MatchString(callName(node)) && mentions(node, record) {
+			if requestComparisonName.MatchString(helpers.CalleeName(node)) && mentions(node, record) {
 				found = true
 			}
 		}
@@ -189,7 +190,7 @@ func comparesRecord(stmt ast.Stmt, record string) bool {
 func createsAfter(fn *ast.FuncDecl, pos token.Pos) bool {
 	found := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && call.Pos() > pos && createCallName.MatchString(callName(call)) {
+		if call, ok := n.(*ast.CallExpr); ok && call.Pos() > pos && createCallName.MatchString(helpers.CalleeName(call)) {
 			found = true
 		}
 		return !found

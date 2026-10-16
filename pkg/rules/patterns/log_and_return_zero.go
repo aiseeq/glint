@@ -258,7 +258,7 @@ func unparsedInputReturned(fn *ast.FuncDecl, inputs map[string]bool) *ast.Return
 				continue
 			}
 			source := errSourceExpr(fn.Body, ifStmt, errName)
-			if !isParseCall(source) || !slices.ContainsFunc(source.Args, func(arg ast.Expr) bool { return isIdentNamed(arg, input.Name) }) {
+			if !isParseCall(source) || !slices.ContainsFunc(source.Args, func(arg ast.Expr) bool { return helpers.IsIdentNamed(arg, input.Name) }) {
 				continue
 			}
 			success, ok := ifStmt.Body.List[0].(*ast.ReturnStmt)

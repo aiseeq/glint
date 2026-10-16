@@ -14,6 +14,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -509,7 +510,7 @@ func guardedByEncodeFailure(info *types.Info, stack []ast.Node, encodeErrors map
 			continue
 		}
 		cond, ok := branch.Cond.(*ast.BinaryExpr)
-		if ok && cond.Op == token.NEQ && isNilIdent(cond.Y) && encodeErrors[variableOf(info, cond.X)] {
+		if ok && cond.Op == token.NEQ && helpers.IsNilIdent(cond.Y) && encodeErrors[variableOf(info, cond.X)] {
 			return true
 		}
 	}

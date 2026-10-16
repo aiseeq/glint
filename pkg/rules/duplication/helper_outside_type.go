@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -207,7 +208,7 @@ func speaksVocabulary(body *ast.BlockStmt) bool {
 	messages := make(map[*ast.BasicLit]bool)
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || !messageCall.MatchString(calleeName(call)) {
+		if !ok || !messageCall.MatchString(helpers.CalleeName(call)) {
 			return true
 		}
 		for _, arg := range call.Args {
@@ -230,17 +231,6 @@ func speaksVocabulary(body *ast.BlockStmt) bool {
 
 // messageCall names the calls whose string arguments are messages.
 var messageCall = regexp.MustCompile(`^(?:Errorf|New|Wrap\w*|Sprint\w*|Print\w*|Fatal\w*|Panic\w*|Debug\w*|Info\w*|Warn\w*|Error\w*|Log\w*)$`)
-
-// calleeName returns the name of the called function or method.
-func calleeName(call *ast.CallExpr) string {
-	switch fun := call.Fun.(type) {
-	case *ast.Ident:
-		return fun.Name
-	case *ast.SelectorExpr:
-		return fun.Sel.Name
-	}
-	return ""
-}
 
 // unwrapIndex returns the expression an index assignment writes into: p.F
 // for p.F[k] = v.

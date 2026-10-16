@@ -94,7 +94,7 @@ func unescapedLikePattern(expr ast.Expr) bool {
 		if e.Op != token.ADD {
 			return false
 		}
-		operands := concatOperands(e)
+		operands := helpers.ConcatOperands(e)
 		wildcard, value := false, false
 		for i, operand := range operands {
 			if text, ok := stringLiteral(operand); ok {
@@ -138,7 +138,7 @@ func escapedValue(expr ast.Expr) bool {
 	if !ok {
 		return false
 	}
-	words := helpers.IdentifierWords(callName(call))
+	words := helpers.IdentifierWords(helpers.CalleeName(call))
 	for _, word := range words {
 		switch strings.ToLower(word) {
 		case "escape", "escaped", "replace", "quote", "sanitize":

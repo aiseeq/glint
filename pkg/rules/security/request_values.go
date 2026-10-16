@@ -77,8 +77,8 @@ func insideLogCall(node ast.Node, parents map[ast.Node]ast.Node) bool {
 		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && helpers.IsStderrPrint(sel, call) {
 			return true
 		}
-		if pkg, ok := callPackage(call); ok && pkg == "fmt" && !strings.HasPrefix(callName(call), "S") &&
-			!strings.HasPrefix(callName(call), "Errorf") {
+		if pkg, ok := callPackage(call); ok && pkg == "fmt" && !strings.HasPrefix(helpers.CalleeName(call), "S") &&
+			!strings.HasPrefix(helpers.CalleeName(call), "Errorf") {
 			return true
 		}
 	}
@@ -98,17 +98,6 @@ func callPackage(call *ast.CallExpr) (string, bool) {
 	return ident.Name, true
 }
 
-// callName returns the name a call is made by: Func for pkg.Func and x.Func.
-func callName(call *ast.CallExpr) string {
-	switch fn := call.Fun.(type) {
-	case *ast.Ident:
-		return fn.Name
-	case *ast.SelectorExpr:
-		return fn.Sel.Name
-	}
-	return ""
-}
-
 // isStringsCall reports strings.<name>(...).
 func isStringsCall(expr ast.Expr, names ...string) (*ast.CallExpr, bool) {
 	call, ok := ast.Unparen(expr).(*ast.CallExpr)
@@ -119,7 +108,7 @@ func isStringsCall(expr ast.Expr, names ...string) (*ast.CallExpr, bool) {
 		return nil, false
 	}
 	for _, name := range names {
-		if callName(call) == name {
+		if helpers.CalleeName(call) == name {
 			return call, true
 		}
 	}

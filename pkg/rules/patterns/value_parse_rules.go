@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -879,7 +880,7 @@ func emptyFieldTested(cond ast.Expr) *ast.SelectorExpr {
 		if !ok {
 			return nil
 		}
-		if text, ok := stringLiteral(c.Y); (ok && text == "") || isNilIdent(c.Y) {
+		if text, ok := stringLiteral(c.Y); (ok && text == "") || helpers.IsNilIdent(c.Y) {
 			return sel
 		}
 	case *ast.CallExpr:
@@ -1003,7 +1004,7 @@ func configLiteral(arg ast.Expr) *ast.CompositeLit {
 // literalSets reports a keyed literal naming the field.
 func literalSets(lit *ast.CompositeLit, field string) bool {
 	for _, elt := range lit.Elts {
-		if kv, ok := elt.(*ast.KeyValueExpr); ok && isIdentNamed(kv.Key, field) {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok && helpers.IsIdentNamed(kv.Key, field) {
 			return true
 		}
 	}
@@ -1105,7 +1106,7 @@ func zeroRefused(info *types.Info, check *ast.IfStmt) *ast.SelectorExpr {
 		return nil
 	}
 	ret, ok := check.Body.List[len(check.Body.List)-1].(*ast.ReturnStmt)
-	if !ok || len(ret.Results) == 0 || isNilIdent(ret.Results[len(ret.Results)-1]) {
+	if !ok || len(ret.Results) == 0 || helpers.IsNilIdent(ret.Results[len(ret.Results)-1]) {
 		return nil
 	}
 	if t := info.TypeOf(ret.Results[len(ret.Results)-1]); t == nil || !types.Identical(t, types.Universe.Lookup("error").Type()) {

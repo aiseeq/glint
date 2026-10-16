@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -342,9 +343,9 @@ func isErrEqNilCheck(cond ast.Expr, assign *ast.AssignStmt) bool {
 	}
 	var checked *ast.Ident
 	switch {
-	case isNilIdent(bin.Y):
+	case helpers.IsNilIdent(bin.Y):
 		checked, ok = bin.X.(*ast.Ident)
-	case isNilIdent(bin.X):
+	case helpers.IsNilIdent(bin.X):
 		checked, ok = bin.Y.(*ast.Ident)
 	default:
 		return false

@@ -372,11 +372,11 @@ func NewPostSideEffectWriteUsesRequestContextRule() *typedFuncRule {
 				after = append(after, block.List[i+1:]...)
 				if write := successRecord(scope.info, after, cancellable); write != nil && !reported[write] {
 					reported[write] = true
-					findings = append(findings, funcFinding{node: write, message: callName(write) + " records the outcome of " + send + " with the caller's cancellable context — when the caller goes away after the send the record is lost and the command is sent again"})
+					findings = append(findings, funcFinding{node: write, message: helpers.CalleeName(write) + " records the outcome of " + send + " with the caller's cancellable context — when the caller goes away after the send the record is lost and the command is sent again"})
 				}
 				if undo := failureUndo(scope.info, stmt, block.List[i+1:], cancellable); undo != nil && !reported[undo] {
 					reported[undo] = true
-					findings = append(findings, funcFinding{node: undo, message: callName(undo) + " takes the mark back on the failure of " + send + " with the caller's cancellable context — when the send failed because the caller went away, the removal fails too, the mark stays, and the retry is dropped as a duplicate"})
+					findings = append(findings, funcFinding{node: undo, message: helpers.CalleeName(undo) + " takes the mark back on the failure of " + send + " with the caller's cancellable context — when the send failed because the caller went away, the removal fails too, the mark stays, and the retry is dropped as a duplicate"})
 				}
 			}
 			return true
@@ -441,7 +441,7 @@ func outboundSend(info *types.Info, stmt ast.Stmt) string {
 			return false
 		case *ast.CallExpr:
 			if commandSent(info, node) {
-				found = callName(node)
+				found = helpers.CalleeName(node)
 			}
 		}
 		return found == ""
@@ -457,7 +457,7 @@ var noticeWords = []string{"alert", "notif", "email", "mail", "message", "telegr
 // verb, failing with an error, not a call of a storage driver and not a
 // notification.
 func commandSent(info *types.Info, call *ast.CallExpr) bool {
-	name := callName(call)
+	name := helpers.CalleeName(call)
 	if !slices.ContainsFunc(sendVerbs, func(verb string) bool { return helpers.HasLeadingWord(name, verb) }) {
 		return false
 	}
@@ -541,7 +541,7 @@ func failureUndo(info *types.Info, send ast.Stmt, after []ast.Stmt, cancellable 
 		case *ast.FuncLit:
 			return false
 		case *ast.CallExpr:
-			name := callName(node)
+			name := helpers.CalleeName(node)
 			if slices.ContainsFunc(markerRelease, func(verb string) bool { return helpers.HasLeadingWord(name, verb) }) && handedAny(info, node, cancellable) {
 				found = node
 			}
@@ -563,7 +563,7 @@ func handedAny(info *types.Info, call *ast.CallExpr, objs map[types.Object]bool)
 
 // recordsOn reports a write call handed one of the cancellable contexts.
 func recordsOn(info *types.Info, call *ast.CallExpr, cancellable map[types.Object]bool) bool {
-	name := callName(call)
+	name := helpers.CalleeName(call)
 	if !helpers.IsWriteName(name) && !slices.ContainsFunc(recordVerbs, func(verb string) bool { return helpers.HasLeadingWord(name, verb) }) {
 		return false
 	}

@@ -5,6 +5,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -61,7 +62,7 @@ func (r *ConstructorNilReturnRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 
 		forEachOwnStatement(fn.Body, func(stmt ast.Stmt) {
 			ret, ok := stmt.(*ast.ReturnStmt)
-			if !ok || len(ret.Results) != 1 || !isNilIdent(ret.Results[0]) {
+			if !ok || len(ret.Results) != 1 || !helpers.IsNilIdent(ret.Results[0]) {
 				return
 			}
 			pos := ctx.PositionFor(ret)

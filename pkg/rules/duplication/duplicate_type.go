@@ -196,9 +196,15 @@ func sortedKeys(m map[string][]*types.Named) []string {
 	return keys
 }
 
-// testDoublePackage reports a package of test doubles.
+// testDoublePackage reports a package of test doubles: a mock, fake or stub
+// anywhere in the path, or a stand-in package for tests named after what it
+// stands in for (httptest, settingstest).
 func testDoublePackage(path string) bool {
-	for _, part := range strings.Split(path, "/") {
+	parts := strings.Split(path, "/")
+	if last := parts[len(parts)-1]; len(last) > len("test") && strings.HasSuffix(last, "test") {
+		return true
+	}
+	for _, part := range parts {
 		lower := strings.ToLower(part)
 		if strings.Contains(lower, "mock") || strings.Contains(lower, "fake") || strings.Contains(lower, "stub") {
 			return true

@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -55,7 +56,7 @@ func NewReadMethodSkipsAccessFilterRule() *typedFuncRule {
 		return func(scope funcScope, fn *ast.FuncDecl) []funcFinding {
 			findings := r.check(scope, fn)
 			for _, call := range viewer.handlerReadsOutsideScope(scope.info, fn) {
-				name := callName(call)
+				name := helpers.CalleeName(call)
 				findings = append(findings, funcFinding{node: call, message: name +
 					" is called with neither the viewer's scope that the package's other readers take nor a check of what it reads or returns — the viewer gets records of every scope"})
 			}

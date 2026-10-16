@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -145,7 +146,7 @@ func sqlDenylistCheck(body *ast.BlockStmt, lists map[string][]string) *ast.CallE
 		if !ok || len(call.Args) != 2 {
 			return true
 		}
-		if pkg, ok := callPackage(call); !ok || pkg != "strings" || callName(call) != "Contains" {
+		if pkg, ok := callPackage(call); !ok || pkg != "strings" || helpers.CalleeName(call) != "Contains" {
 			return true
 		}
 		var checked []string

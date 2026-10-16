@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -393,7 +394,7 @@ var durationUnits = map[string]float64{
 func constantMillis(expr ast.Expr) (float64, bool) {
 	switch e := ast.Unparen(expr).(type) {
 	case *ast.SelectorExpr:
-		if isIdentNamed(e.X, "time") {
+		if helpers.IsIdentNamed(e.X, "time") {
 			unit, ok := durationUnits[e.Sel.Name]
 			return unit, ok
 		}
@@ -424,7 +425,7 @@ func constantNumber(expr ast.Expr) (float64, bool) {
 		return value, err == nil
 	case *ast.CallExpr:
 		if len(e.Args) == 1 {
-			if sel, ok := e.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Duration" && isIdentNamed(sel.X, "time") {
+			if sel, ok := e.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Duration" && helpers.IsIdentNamed(sel.X, "time") {
 				return constantNumber(e.Args[0])
 			}
 		}
@@ -493,7 +494,7 @@ func (r *TestAcceptsServerErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.
 // assertsUpToServerError reports an assertion admitting a status of 500 or above:
 // a status <= 503 inside it, or assert.Less(t, status, 600).
 func assertsUpToServerError(call *ast.CallExpr) bool {
-	if name := callName(call); (name == "Less" || name == "LessOrEqual") && len(call.Args) >= 3 {
+	if name := helpers.CalleeName(call); (name == "Less" || name == "LessOrEqual") && len(call.Args) >= 3 {
 		bound, ok := statusBound(call.Args[2])
 		return ok && responseStatusExpr(call.Args[1]) && (bound > firstServerError || name == "LessOrEqual" && bound >= firstServerError)
 	}
@@ -547,7 +548,7 @@ func statusBound(expr ast.Expr) (int, bool) {
 		value, err := strconv.Atoi(e.Value)
 		return value, err == nil
 	case *ast.SelectorExpr:
-		if isIdentNamed(e.X, "http") {
+		if helpers.IsIdentNamed(e.X, "http") {
 			code, ok := httpServerErrors[e.Sel.Name]
 			return code, ok
 		}
@@ -628,7 +629,7 @@ func (r *TestCleanupRegisteredLateRule) AnalyzeFile(ctx *core.FileContext) []*co
 func cleanupRegistration(stmt ast.Stmt, handles map[string]bool) bool {
 	switch s := stmt.(type) {
 	case *ast.DeferStmt:
-		name := callName(s.Call)
+		name := helpers.CalleeName(s.Call)
 		return name != "Unlock" && name != "RUnlock"
 	case *ast.ExprStmt:
 		call, ok := s.X.(*ast.CallExpr)
@@ -713,7 +714,7 @@ func statementCalls(stmt ast.Stmt) []*ast.CallExpr {
 		return nil
 	}
 	calls := []*ast.CallExpr{call}
-	if sel, ok := call.Fun.(*ast.SelectorExpr); ok && (isIdentNamed(sel.X, "require") || isIdentNamed(sel.X, "assert")) {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok && (helpers.IsIdentNamed(sel.X, "require") || helpers.IsIdentNamed(sel.X, "assert")) {
 		for _, arg := range call.Args {
 			if inner, ok := arg.(*ast.CallExpr); ok {
 				calls = append(calls, inner)
@@ -874,7 +875,7 @@ func rowSelectingArgs(call *ast.CallExpr) []ast.Expr {
 func makesIsolatedDatabase(file *ast.File) bool {
 	found := false
 	ast.Inspect(file, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && strings.Contains(strings.ToLower(callName(call)), "isolated") {
+		if call, ok := n.(*ast.CallExpr); ok && strings.Contains(strings.ToLower(helpers.CalleeName(call)), "isolated") {
 			found = true
 		}
 		return !found
@@ -1010,7 +1011,7 @@ func countedChannels(body *ast.BlockStmt) map[string]token.Pos {
 	counted := make(map[string]token.Pos)
 	ownNodes(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || !isIdentNamed(call.Fun, "len") || len(call.Args) != 1 {
+		if !ok || !helpers.IsIdentNamed(call.Fun, "len") || len(call.Args) != 1 {
 			return true
 		}
 		label := exprLabel(call.Args[0])
@@ -1030,7 +1031,7 @@ func foreignChannel(expr ast.Expr) bool {
 	case *ast.SelectorExpr:
 		return e.Sel.Name != "C"
 	case *ast.CallExpr:
-		switch callName(e) {
+		switch helpers.CalleeName(e) {
 		case "Done", "After", "Tick", "Err":
 			return false
 		}

@@ -156,7 +156,7 @@ func decidesOnlyHSTS(call *ast.CallExpr, parents map[ast.Node]ast.Node) bool {
 					return false
 				}
 				set, ok := expr.X.(*ast.CallExpr)
-				if !ok || callName(set) != "Set" || len(set.Args) != 2 ||
+				if !ok || helpers.CalleeName(set) != "Set" || len(set.Args) != 2 ||
 					!strings.EqualFold(stringLiteral(set.Args[0]), "Strict-Transport-Security") {
 					return false
 				}
@@ -197,7 +197,7 @@ func assignedTo(call *ast.CallExpr, parents map[ast.Node]ast.Node) *ast.Ident {
 // isEmptinessTest reports x == "", x != "" and len(x) used in a comparison.
 func isEmptinessTest(ident *ast.Ident, parents map[ast.Node]ast.Node) bool {
 	parent := parents[ident]
-	if call, ok := parent.(*ast.CallExpr); ok && callName(call) == "len" {
+	if call, ok := parent.(*ast.CallExpr); ok && helpers.CalleeName(call) == "len" {
 		parent = parents[call]
 	}
 	bin, ok := parent.(*ast.BinaryExpr)
@@ -323,7 +323,7 @@ func terminates(block *ast.BlockStmt) bool {
 		return true
 	case *ast.ExprStmt:
 		call, ok := last.X.(*ast.CallExpr)
-		return ok && (callName(call) == "panic" || strings.HasPrefix(callName(call), "Fatal"))
+		return ok && (helpers.CalleeName(call) == "panic" || strings.HasPrefix(helpers.CalleeName(call), "Fatal"))
 	}
 	return false
 }

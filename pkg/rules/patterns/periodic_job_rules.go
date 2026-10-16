@@ -59,7 +59,7 @@ func NewPeriodicJobDoneCheckByAnyRowRule() *typedFuncRule {
 			if guard < 0 || !writesKeysInLoop(scope, fn.Body.List[guard+1:], periodicWorkDepth) {
 				continue
 			}
-			findings = append(findings, funcFinding{node: check, message: "The periodic job skips its whole run when " + callName(check) + " finds any row of the period, but the run writes many keys — after a partial run (or a lazy write of one key) the missing keys are never written that period"})
+			findings = append(findings, funcFinding{node: check, message: "The periodic job skips its whole run when " + helpers.CalleeName(check) + " finds any row of the period, but the run writes many keys — after a partial run (or a lazy write of one key) the missing keys are never written that period"})
 		}
 		return findings
 	}
@@ -95,7 +95,7 @@ func NewPeriodAttemptMarkerIgnoresWorkSetRule() *typedFuncRule {
 				if mentionsObject(scope.info, marker, work) || !mentionsObjectIn(scope.info, fn.Body.List[at+1:], work) {
 					continue
 				}
-				findings = append(findings, funcFinding{node: marker, message: "The once-per-period marker " + callName(marker) + " is keyed without " + work.Name() + ", the work list computed at run time — an item added to the list later in the period finds the period attempted and is skipped until the next one"})
+				findings = append(findings, funcFinding{node: marker, message: "The once-per-period marker " + helpers.CalleeName(marker) + " is keyed without " + work.Name() + ", the work list computed at run time — an item added to the list later in the period finds the period attempted and is skipped until the next one"})
 				return
 			}
 		})
@@ -140,10 +140,10 @@ func NewAttemptMarkerWrittenBeforeWorkRule() *typedFuncRule {
 			if !doesWork(fn.Body.List[at+1:]) {
 				return
 			}
-			findings = append(findings, funcFinding{node: marker, message: "The once-per-period marker " + callName(marker) + " is written before the work it guards and never removed when the work fails — one transient failure skips the rest of the period"})
+			findings = append(findings, funcFinding{node: marker, message: "The once-per-period marker " + helpers.CalleeName(marker) + " is written before the work it guards and never removed when the work fails — one transient failure skips the rest of the period"})
 		})
 		for _, marker := range dedupMarkersBeforeWork(scope, fn) {
-			findings = append(findings, funcFinding{node: marker, message: "The event is marked by " + callName(marker) + " right after its duplicate check, before it is processed, and nothing removes the mark when the processing fails — the redelivery of a failed event is dropped as a duplicate"})
+			findings = append(findings, funcFinding{node: marker, message: "The event is marked by " + helpers.CalleeName(marker) + " right after its duplicate check, before it is processed, and nothing removes the mark when the processing fails — the redelivery of a failed event is dropped as a duplicate"})
 		}
 		return findings
 	}
@@ -224,7 +224,7 @@ func dedupGuardKeys(info *types.Info, stmts []ast.Stmt, at int) map[types.Object
 		ast.Inspect(operand, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.CallExpr:
-				if isDedupCheck(callName(node)) {
+				if isDedupCheck(helpers.CalleeName(node)) {
 					addIdentArgs(info, node, keys)
 				}
 			case *ast.Ident:
@@ -250,7 +250,7 @@ func dedupCheckSetting(info *types.Info, stmts []ast.Stmt, v types.Object) *ast.
 			continue
 		}
 		call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
-		if !ok || !isDedupCheck(callName(call)) {
+		if !ok || !isDedupCheck(helpers.CalleeName(call)) {
 			continue
 		}
 		if id, ok := assign.Lhs[0].(*ast.Ident); ok && info.ObjectOf(id) == v {
@@ -286,7 +286,7 @@ func dedupMarkerIn(info *types.Info, stmt ast.Stmt, keys map[types.Object]bool) 
 		return dedupMarkerIn(info, node.Init, keys)
 	}
 	call, ok := ast.Unparen(expr).(*ast.CallExpr)
-	if !ok || !isDedupMarker(callName(call)) {
+	if !ok || !isDedupMarker(helpers.CalleeName(call)) {
 		return nil
 	}
 	for _, arg := range call.Args {
@@ -328,7 +328,7 @@ func periodCheck(info *types.Info, stmt ast.Stmt, kind checkKind) (*ast.CallExpr
 	if !ok || ident.Name == "_" {
 		return nil, nil
 	}
-	name := callName(call)
+	name := helpers.CalleeName(call)
 	words := helpers.IdentifierWords(name)
 	marks := slices.ContainsFunc(words, func(w string) bool { return slices.Contains(runMarkerWords, w) })
 	switch kind {
@@ -499,7 +499,7 @@ func writesKeysInLoop(scope funcScope, stmts []ast.Stmt, depth int) bool {
 func loopWrites(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && helpers.IsWriteName(callName(call)) {
+		if call, ok := n.(*ast.CallExpr); ok && helpers.IsWriteName(helpers.CalleeName(call)) {
 			found = true
 		}
 		return !found
@@ -573,7 +573,7 @@ func takesBackMarker(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
-			name := callName(call)
+			name := helpers.CalleeName(call)
 			found = slices.ContainsFunc(markerRelease, func(verb string) bool { return helpers.HasLeadingWord(name, verb) })
 		}
 		return !found

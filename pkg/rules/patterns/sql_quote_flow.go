@@ -343,7 +343,7 @@ func sqlTextIn(info *types.Info, expr ast.Expr) bool {
 		expr = ast.Unparen(call.Args[0])
 	}
 	var texts []string
-	for _, operand := range concatOperands(expr) {
+	for _, operand := range helpers.ConcatOperands(expr) {
 		if text, ok := goConstantString(operand, info); ok {
 			texts = append(texts, text)
 		}

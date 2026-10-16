@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"golang.org/x/tools/go/types/typeutil"
 )
 
@@ -531,7 +532,7 @@ func returnsSomeError(fn *ast.FuncDecl) bool {
 		if !ok || len(ret.Results) == 0 {
 			return !found
 		}
-		if last := ret.Results[len(ret.Results)-1]; !isNilIdent(last) {
+		if last := ret.Results[len(ret.Results)-1]; !helpers.IsNilIdent(last) {
 			found = true
 		}
 		return !found
@@ -542,7 +543,7 @@ func returnsSomeError(fn *ast.FuncDecl) bool {
 // errorNotNilObj returns the error variable of a condition err != nil.
 func errorNotNilObj(cond ast.Expr, info *types.Info) types.Object {
 	binary, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	if !ok || binary.Op != token.NEQ || !isNilIdent(binary.Y) {
+	if !ok || binary.Op != token.NEQ || !helpers.IsNilIdent(binary.Y) {
 		return nil
 	}
 	ident, ok := ast.Unparen(binary.X).(*ast.Ident)

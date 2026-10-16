@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -129,7 +130,7 @@ func decodedStrings(body *ast.BlockStmt, data string) []string {
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.CallExpr:
-			if isSelectorCall(node, "json", "Unmarshal") && len(node.Args) == 2 && isIdentNamed(node.Args[0], data) {
+			if isSelectorCall(node, "json", "Unmarshal") && len(node.Args) == 2 && helpers.IsIdentNamed(node.Args[0], data) {
 				if unary, ok := node.Args[1].(*ast.UnaryExpr); ok && unary.Op == token.AND {
 					if id, ok := unary.X.(*ast.Ident); ok && stringVars[id.Name] {
 						names = append(names, id.Name)
@@ -159,14 +160,14 @@ func emptyAcceptance(body *ast.BlockStmt, raw string) *ast.IfStmt {
 			continue
 		}
 		bin, ok := ast.Unparen(ifStmt.Cond).(*ast.BinaryExpr)
-		if !ok || bin.Op != token.EQL || !isIdentNamed(bin.X, raw) {
+		if !ok || bin.Op != token.EQL || !helpers.IsIdentNamed(bin.X, raw) {
 			continue
 		}
 		if lit, ok := bin.Y.(*ast.BasicLit); !ok || lit.Value != `""` {
 			continue
 		}
 		ret, ok := ifStmt.Body.List[0].(*ast.ReturnStmt)
-		if ok && len(ret.Results) == 1 && isIdentNamed(ret.Results[0], "nil") {
+		if ok && len(ret.Results) == 1 && helpers.IsIdentNamed(ret.Results[0], "nil") {
 			return ifStmt
 		}
 	}

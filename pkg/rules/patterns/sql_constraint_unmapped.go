@@ -10,6 +10,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/sqlschema"
 )
 
@@ -247,7 +248,7 @@ func checksConstraints(ctx *core.FileContext, fn *ast.FuncDecl, checkers map[str
 		if !ok || found {
 			return !found
 		}
-		name := callName(call)
+		name := helpers.CalleeName(call)
 		if checkers[name] || constraintMapper.MatchString(name) {
 			found = true
 		}

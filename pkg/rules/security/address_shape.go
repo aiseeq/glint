@@ -83,7 +83,7 @@ func negatedCalls(file *ast.File) map[string]bool {
 	ast.Inspect(file, func(n ast.Node) bool {
 		if not, ok := n.(*ast.UnaryExpr); ok && not.Op.String() == "!" {
 			if call, ok := ast.Unparen(not.X).(*ast.CallExpr); ok {
-				negated[callName(call)] = true
+				negated[helpers.CalleeName(call)] = true
 			}
 		}
 		return true
@@ -105,7 +105,7 @@ func prefixOnly(body *ast.BlockStmt) bool {
 		case *ast.ForStmt, *ast.RangeStmt:
 			other = true
 		case *ast.CallExpr:
-			name := callName(node)
+			name := helpers.CalleeName(node)
 			if !shapeOnlyCalls[name] {
 				other = true
 			}

@@ -88,7 +88,7 @@ func unreadErrorResults(body *ast.BlockStmt, structs map[string]bool) *ast.Retur
 		return nil
 	}
 	ret, ok := body.List[len(body.List)-1].(*ast.ReturnStmt)
-	if !ok || len(ret.Results) < 2 || !isNilIdent(ret.Results[len(ret.Results)-1]) {
+	if !ok || len(ret.Results) < 2 || !helpers.IsNilIdent(ret.Results[len(ret.Results)-1]) {
 		return nil
 	}
 	slices := make(map[string]bool)
@@ -155,7 +155,7 @@ func inspectsItems(body *ast.BlockStmt, slices map[string]bool) bool {
 				items[value.Name] = true
 			}
 		}
-		if call, ok := assign.Rhs[0].(*ast.CallExpr); ok && isIdentNamed(call.Fun, "append") && len(call.Args) > 1 && readsAnyOf(call.Args[0], slices) {
+		if call, ok := assign.Rhs[0].(*ast.CallExpr); ok && helpers.IsIdentNamed(call.Fun, "append") && len(call.Args) > 1 && readsAnyOf(call.Args[0], slices) {
 			for _, arg := range call.Args[1:] {
 				if value, ok := arg.(*ast.Ident); ok {
 					items[value.Name] = true
@@ -193,7 +193,7 @@ func inspectsItems(body *ast.BlockStmt, slices map[string]bool) bool {
 func sliceOfErrorStruct(expr ast.Expr, structs map[string]bool) bool {
 	switch e := ast.Unparen(expr).(type) {
 	case *ast.CallExpr:
-		return isIdentNamed(e.Fun, "make") && len(e.Args) > 0 && sliceTypeOfErrorStruct(e.Args[0], structs)
+		return helpers.IsIdentNamed(e.Fun, "make") && len(e.Args) > 0 && sliceTypeOfErrorStruct(e.Args[0], structs)
 	case *ast.CompositeLit:
 		return sliceTypeOfErrorStruct(e.Type, structs)
 	}
@@ -306,7 +306,7 @@ func allFailedOnly(check *ast.IfStmt) bool {
 		return false
 	}
 	for _, stmt := range check.Body.List {
-		if ret, ok := stmt.(*ast.ReturnStmt); ok && len(ret.Results) > 0 && !isNilIdent(ret.Results[len(ret.Results)-1]) {
+		if ret, ok := stmt.(*ast.ReturnStmt); ok && len(ret.Results) > 0 && !helpers.IsNilIdent(ret.Results[len(ret.Results)-1]) {
 			return true
 		}
 	}
@@ -320,7 +320,7 @@ func isLenCall(expr ast.Expr) bool {
 // lenArgument returns x of len(x), or nil.
 func lenArgument(expr ast.Expr) ast.Expr {
 	call, ok := ast.Unparen(expr).(*ast.CallExpr)
-	if !ok || !isIdentNamed(call.Fun, "len") || len(call.Args) != 1 {
+	if !ok || !helpers.IsIdentNamed(call.Fun, "len") || len(call.Args) != 1 {
 		return nil
 	}
 	return call.Args[0]

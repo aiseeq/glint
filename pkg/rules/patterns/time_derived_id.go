@@ -190,7 +190,7 @@ func clockNumber(expr ast.Expr, clock map[string]bool) bool {
 	case *ast.UnaryExpr:
 		return clockNumber(e.X, clock)
 	case *ast.BinaryExpr:
-		if isStringLit(e.X) || isStringLit(e.Y) {
+		if helpers.IsStringLit(e.X) || helpers.IsStringLit(e.Y) {
 			return false
 		}
 		return clockNumber(e.X, clock) || clockNumber(e.Y, clock)
@@ -204,11 +204,6 @@ func clockNumber(expr ast.Expr, clock map[string]bool) bool {
 		}
 	}
 	return false
-}
-
-func isStringLit(expr ast.Expr) bool {
-	lit, ok := ast.Unparen(expr).(*ast.BasicLit)
-	return ok && lit.Kind == token.STRING
 }
 
 // clockFormatted reports a value that is the clock, or the clock formatted

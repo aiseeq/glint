@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -202,7 +203,7 @@ func pageUse(path []ast.Node, info *types.Info) (pageUseKind, ast.Node) {
 			switch {
 			case parent.Fun == expr:
 				return pageUseApplied, nil
-			case pageLogName.MatchString(callName(parent)):
+			case pageLogName.MatchString(helpers.CalleeName(parent)):
 				return pageUseNeutral, nil
 			case field && isPageResponseType(info.TypeOf(parent)):
 				return pageUseResponse, parent

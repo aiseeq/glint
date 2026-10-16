@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -111,7 +112,7 @@ func (r *ValidationErrorAnsweredAsServerErrorRule) AnalyzeGoProject(ctx *core.Go
 			if fn.file.IsSuppressed(line, r.Name()) {
 				return true
 			}
-			v := r.CreateViolation(fn.file.RelPath, line, callName(call)+" can fail an input check with a plain error (\""+rejected.text+"\"), and "+callName(mapper)+" tells errors apart only by errors.Is and answers the rest with a 5xx — the client's invalid input is reported as a server failure")
+			v := r.CreateViolation(fn.file.RelPath, line, helpers.CalleeName(call)+" can fail an input check with a plain error (\""+rejected.text+"\"), and "+helpers.CalleeName(mapper)+" tells errors apart only by errors.Is and answers the rest with a 5xx — the client's invalid input is reported as a server failure")
 			v.WithCode(strings.TrimSpace(fn.file.GetLine(line)))
 			v.WithSuggestion("Wrap the input check's error in a validation sentinel (fmt.Errorf(\"%w: ...\", ErrInvalid)) and answer it with 400 in the mapper")
 			violations = append(violations, v)
@@ -246,9 +247,9 @@ func readsErrorText(body *ast.BlockStmt) bool {
 		if !ok {
 			return !found
 		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && isIdentNamed(sel.X, "strings") {
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && helpers.IsIdentNamed(sel.X, "strings") {
 			for _, arg := range call.Args {
-				if inner, ok := ast.Unparen(arg).(*ast.CallExpr); ok && callName(inner) == "Error" && len(inner.Args) == 0 {
+				if inner, ok := ast.Unparen(arg).(*ast.CallExpr); ok && helpers.CalleeName(inner) == "Error" && len(inner.Args) == 0 {
 					found = true
 				}
 			}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -128,7 +129,7 @@ func presetIndex(stmt, next ast.Stmt) *ast.AssignStmt {
 		return nil
 	}
 	set, ok := check.Body.List[0].(*ast.AssignStmt)
-	if !ok || set.Tok != token.ASSIGN || len(set.Lhs) != 1 || !isIdentNamed(set.Lhs[0], name.Name) || !mentions(set.Rhs[0], index) {
+	if !ok || set.Tok != token.ASSIGN || len(set.Lhs) != 1 || !helpers.IsIdentNamed(set.Lhs[0], name.Name) || !mentions(set.Rhs[0], index) {
 		return nil
 	}
 	return assign
@@ -160,7 +161,7 @@ func slicesIndexResult(stmt ast.Stmt) string {
 		return ""
 	}
 	fun, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || !isIdentNamed(fun.X, "slices") || (fun.Sel.Name != "Index" && fun.Sel.Name != "IndexFunc") {
+	if !ok || !helpers.IsIdentNamed(fun.X, "slices") || (fun.Sel.Name != "Index" && fun.Sel.Name != "IndexFunc") {
 		return ""
 	}
 	return ident.Name
@@ -169,7 +170,7 @@ func slicesIndexResult(stmt ast.Stmt) string {
 // foundTest reports x >= 0, x != -1 or x > -1.
 func foundTest(cond ast.Expr, name string) bool {
 	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	if !ok || !isIdentNamed(bin.X, name) {
+	if !ok || !helpers.IsIdentNamed(bin.X, name) {
 		return false
 	}
 	minusOne := func(expr ast.Expr) bool {
@@ -219,7 +220,7 @@ func lookupResult(stmt ast.Stmt) string {
 // notFoundTest reports x == -1 or x < 0.
 func notFoundTest(cond ast.Expr, name string) bool {
 	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	if !ok || !isIdentNamed(bin.X, name) {
+	if !ok || !helpers.IsIdentNamed(bin.X, name) {
 		return false
 	}
 	switch bin.Op {
@@ -239,7 +240,7 @@ func literalDefault(body *ast.BlockStmt, name string) *ast.AssignStmt {
 		return nil
 	}
 	assign, ok := body.List[0].(*ast.AssignStmt)
-	if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !isIdentNamed(assign.Lhs[0], name) {
+	if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !helpers.IsIdentNamed(assign.Lhs[0], name) {
 		return nil
 	}
 	if lit, ok := ast.Unparen(assign.Rhs[0]).(*ast.BasicLit); !ok || lit.Kind != token.INT {

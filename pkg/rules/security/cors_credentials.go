@@ -125,7 +125,7 @@ func (r *CORSCredentialsRule) checkAllowOrigin(body *ast.BlockStmt, report func(
 
 // headerSet returns the header name and value of X.Set, X.Add or c.Header.
 func headerSet(call *ast.CallExpr) (string, ast.Expr) {
-	switch callName(call) {
+	switch helpers.CalleeName(call) {
 	case "Set", "Add", "Header":
 	default:
 		return "", nil
@@ -177,7 +177,7 @@ func originChecked(node ast.Node, parents map[ast.Node]ast.Node, isOrigin func(a
 						if !isOrigin(e.X) {
 							other = e.X
 						}
-						checked = checked || stringLiteral(other) != "" || !isStringLit(other)
+						checked = checked || stringLiteral(other) != "" || !helpers.IsStringLit(other)
 					}
 				}
 				return !checked
@@ -192,11 +192,6 @@ func originChecked(node ast.Node, parents map[ast.Node]ast.Node, isOrigin func(a
 		}
 	}
 	return false
-}
-
-func isStringLit(expr ast.Expr) bool {
-	lit, ok := ast.Unparen(expr).(*ast.BasicLit)
-	return ok && lit.Kind == token.STRING
 }
 
 // wildcardEntries returns the comparisons of an allowlist entry with "*".

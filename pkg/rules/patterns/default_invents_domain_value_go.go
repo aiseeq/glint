@@ -107,7 +107,7 @@ func lookupResults(stmt ast.Stmt) map[string]bool {
 // a decimal constructor: 100, decimal.NewFromFloat(1.0), decimal.NewFromInt(1).
 func nonZeroNumber(expr ast.Expr) bool {
 	if call, ok := expr.(*ast.CallExpr); ok {
-		switch callName(call) {
+		switch helpers.CalleeName(call) {
 		case "NewFromFloat", "NewFromInt", "NewFromInt32", "NewFromString", "RequireFromString":
 		default:
 			return false
@@ -156,7 +156,7 @@ func (r *DefaultInventsDomainValueRule) checkGoCoalesceDefaults(ctx *core.FileCo
 	var violations []*core.Violation
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || !coalesceHelpers[callName(call)] || len(call.Args) < 2 || !recordField(call.Args[0]) {
+		if !ok || !coalesceHelpers[helpers.CalleeName(call)] || len(call.Args) < 2 || !recordField(call.Args[0]) {
 			return true
 		}
 		message := ""

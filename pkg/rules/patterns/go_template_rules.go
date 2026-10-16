@@ -480,7 +480,7 @@ func NewGoTemplateDefineCollisionInSharedSetRule() *templateProjectRule {
 					return failure == nil
 				}
 				fn := staticFunc(info, call)
-				at, isParse := parseCalls[callName(call)]
+				at, isParse := parseCalls[helpers.CalleeName(call)]
 				if fn == nil || fn.Pkg() == nil || !isParse || (fn.Pkg().Path() != "html/template" && fn.Pkg().Path() != "text/template") {
 					return true
 				}
@@ -842,7 +842,7 @@ func NewI18nKeyUsedButNotDefinedRule() *templateProjectRule {
 		for _, src := range runGoFiles(ctx) {
 			ast.Inspect(src.file, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
-				if !ok || !translateFuncs[callName(call)] {
+				if !ok || !translateFuncs[helpers.CalleeName(call)] {
 					return true
 				}
 				for _, arg := range call.Args {

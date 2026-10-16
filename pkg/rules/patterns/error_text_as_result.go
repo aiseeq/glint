@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -122,7 +123,7 @@ func returnedNilErrorHolders(body *ast.BlockStmt) map[string]bool {
 		return holders
 	}
 	ret, ok := body.List[len(body.List)-1].(*ast.ReturnStmt)
-	if !ok || len(ret.Results) < 2 || !isNilIdent(ret.Results[len(ret.Results)-1]) {
+	if !ok || len(ret.Results) < 2 || !helpers.IsNilIdent(ret.Results[len(ret.Results)-1]) {
 		return holders
 	}
 	for _, value := range ret.Results[:len(ret.Results)-1] {
@@ -211,7 +212,7 @@ func foldsErrorText(ret *ast.ReturnStmt, errName string, returnsError bool) bool
 	if !returnsError {
 		return len(values) == 1 && carriesErrorText(values[0], errName)
 	}
-	if len(values) < 2 || !isNilIdent(values[len(values)-1]) {
+	if len(values) < 2 || !helpers.IsNilIdent(values[len(values)-1]) {
 		return false
 	}
 	for _, value := range values[:len(values)-1] {
@@ -235,7 +236,7 @@ func marksFailure(expr ast.Expr) bool {
 		return false
 	}
 	for _, elt := range lit.Elts {
-		if kv, ok := elt.(*ast.KeyValueExpr); ok && isIdentNamed(kv.Value, "false") {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok && helpers.IsIdentNamed(kv.Value, "false") {
 			return true
 		}
 	}
@@ -254,13 +255,13 @@ func carriesErrorText(expr ast.Expr, errName string) bool {
 		if !ok {
 			return true
 		}
-		if sel.Sel.Name == "Error" && len(call.Args) == 0 && isIdentNamed(sel.X, errName) {
+		if sel.Sel.Name == "Error" && len(call.Args) == 0 && helpers.IsIdentNamed(sel.X, errName) {
 			found = true
 			return false
 		}
-		if isIdentNamed(sel.X, "fmt") && strings.HasPrefix(sel.Sel.Name, "Sprint") {
+		if helpers.IsIdentNamed(sel.X, "fmt") && strings.HasPrefix(sel.Sel.Name, "Sprint") {
 			for _, arg := range call.Args {
-				if isIdentNamed(arg, errName) {
+				if helpers.IsIdentNamed(arg, errName) {
 					found = true
 					return false
 				}

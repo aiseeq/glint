@@ -37,7 +37,7 @@ func paramDeps(fn *ast.FuncDecl, info *types.Info) map[types.Object]map[types.Ob
 	g := &depGraph{info: info, deps: map[types.Object]map[types.Object]bool{}}
 	for _, field := range fn.Type.Params.List {
 		for _, name := range field.Names {
-			if obj := info.ObjectOf(name); obj != nil && !isContextType(obj.Type()) {
+			if obj := info.ObjectOf(name); obj != nil && !helpers.IsContextType(obj.Type()) {
 				g.deps[obj] = map[types.Object]bool{obj: true}
 			}
 		}
@@ -174,11 +174,6 @@ func unionDeps(a, b map[types.Object]bool) map[types.Object]bool {
 		out[k] = true
 	}
 	return out
-}
-
-func isContextType(t types.Type) bool {
-	named, ok := t.(*types.Named)
-	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "context" && named.Obj().Name() == "Context"
 }
 
 // depsOf returns the parameters an expression reads, directly or through
@@ -410,7 +405,7 @@ func memoFills(body *ast.BlockStmt, cache string, after token.Pos) []memoFill {
 					fills = append(fills, memoFill{target.Index, assign.Rhs[i]})
 				}
 			case *ast.SelectorExpr:
-				if types.ExprString(target) == cache && !isNilIdent(assign.Rhs[i]) {
+				if types.ExprString(target) == cache && !helpers.IsNilIdent(assign.Rhs[i]) {
 					fills = append(fills, memoFill{nil, assign.Rhs[i]})
 				}
 			}
@@ -989,7 +984,7 @@ func emptyTestOf(cond ast.Expr, name string) bool {
 	if lit, ok := ast.Unparen(binary.Y).(*ast.BasicLit); ok {
 		return lit.Value == `""` || lit.Value == "0"
 	}
-	return isNilIdent(binary.Y)
+	return helpers.IsNilIdent(binary.Y)
 }
 
 func bodyAssignsName(body *ast.BlockStmt, name string) bool {

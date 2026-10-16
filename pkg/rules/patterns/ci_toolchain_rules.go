@@ -96,7 +96,7 @@ func olderToolchain(image, module string) bool {
 func nearestGoMod(ctx *core.FileContext) (string, error) {
 	root := filepath.Clean(ctx.ProjectRoot)
 	for dir := filepath.Dir(ctx.Path); strings.HasPrefix(dir, root); dir = filepath.Dir(dir) {
-		if candidate := filepath.Join(dir, "go.mod"); fileExists(candidate) {
+		if candidate := filepath.Join(dir, "go.mod"); regularFileExists(candidate) {
 			return candidate, nil
 		}
 		if dir == root || filepath.Dir(dir) == dir {
@@ -112,7 +112,7 @@ func nearestGoMod(ctx *core.FileContext) (string, error) {
 	}
 	var nested []string
 	for _, entry := range entries {
-		if candidate := filepath.Join(root, entry.Name(), "go.mod"); entry.IsDir() && fileExists(candidate) {
+		if candidate := filepath.Join(root, entry.Name(), "go.mod"); entry.IsDir() && regularFileExists(candidate) {
 			nested = append(nested, candidate)
 		}
 	}
@@ -122,8 +122,8 @@ func nearestGoMod(ctx *core.FileContext) (string, error) {
 	return nested[0], nil
 }
 
-// fileExists reports a regular file at the path.
-func fileExists(path string) bool {
+// regularFileExists reports a regular file at the path.
+func regularFileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular()
 }

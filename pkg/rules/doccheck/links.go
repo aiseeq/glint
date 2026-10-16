@@ -235,7 +235,7 @@ func (r *DocLinksRule) checkFileRef(ctx *core.FileContext, line int, fileRef str
 	projectPath := filepath.Join(ctx.ProjectRoot, fileRef)
 
 	// Check if file exists
-	if !fileExists(fullPath) && !fileExists(projectPath) {
+	if !pathExists(fullPath) && !pathExists(projectPath) {
 		v := r.CreateViolation(ctx.RelPath, line,
 			"Documentation references non-existent file: "+fileRef)
 		v.WithCode(ctx.GetLine(line))
@@ -247,8 +247,8 @@ func (r *DocLinksRule) checkFileRef(ctx *core.FileContext, line int, fileRef str
 	return nil
 }
 
-// fileExists checks if a file exists
-func fileExists(path string) bool {
+// pathExists reports a file or a directory at the path.
+func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }

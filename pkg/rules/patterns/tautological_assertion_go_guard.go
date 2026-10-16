@@ -221,7 +221,7 @@ func flattenAnd(expr ast.Expr) []ast.Expr {
 // isNilLogOnlyBranch reports if x == nil { t.Log(...) } else { ... }.
 func isNilLogOnlyBranch(ifStmt *ast.IfStmt) bool {
 	bin, ok := ast.Unparen(ifStmt.Cond).(*ast.BinaryExpr)
-	if !ok || bin.Op != token.EQL || !isNilIdent(bin.Y) || ifStmt.Else == nil || len(ifStmt.Body.List) == 0 {
+	if !ok || bin.Op != token.EQL || !helpers.IsNilIdent(bin.Y) || ifStmt.Else == nil || len(ifStmt.Body.List) == 0 {
 		return false
 	}
 	for _, stmt := range ifStmt.Body.List {
@@ -356,12 +356,12 @@ func isFailureCondition(ifStmt *ast.IfStmt, before ast.Stmt) bool {
 		if !ok {
 			continue
 		}
-		if bin.Op == token.NEQ && isNilIdent(bin.Y) {
+		if bin.Op == token.NEQ && helpers.IsNilIdent(bin.Y) {
 			if ident, ok := bin.X.(*ast.Ident); ok && isErrorVarName(ident.Name) && !fromEnvironmentProbe(ident.Name, ifStmt.Init, before) {
 				return true
 			}
 		}
-		if bin.Op == token.EQL && isNilIdent(bin.Y) {
+		if bin.Op == token.EQL && helpers.IsNilIdent(bin.Y) {
 			// err == nil is the call that worked.
 			if ident, ok := bin.X.(*ast.Ident); ok && !isErrorVarName(ident.Name) {
 				return true

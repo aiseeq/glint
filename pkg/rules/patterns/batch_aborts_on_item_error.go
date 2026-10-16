@@ -109,7 +109,7 @@ func reportsItem(body *ast.BlockStmt) bool {
 		case *ast.FuncLit:
 			return false
 		case *ast.CallExpr:
-			name := callName(node)
+			name := helpers.CalleeName(node)
 			found = helpers.IsLoggerCall(node) || slices.ContainsFunc(itemReport, func(verb string) bool { return helpers.HasLeadingWord(name, verb) })
 		}
 		return !found
@@ -201,7 +201,7 @@ func loopAccumulators(info *types.Info, loop *ast.RangeStmt) map[types.Object]bo
 			if node.Tok == token.ADD_ASSIGN {
 				accumulated[obj] = true
 			}
-			if call, ok := node.Rhs[0].(*ast.CallExpr); ok && node.Tok == token.ASSIGN && isIdentNamed(call.Fun, "append") &&
+			if call, ok := node.Rhs[0].(*ast.CallExpr); ok && node.Tok == token.ASSIGN && helpers.IsIdentNamed(call.Fun, "append") &&
 				len(call.Args) > 0 && outer(call.Args[0]) == obj {
 				accumulated[obj] = true
 			}
@@ -221,7 +221,7 @@ func returnsJoined(info *types.Info, ret *ast.ReturnStmt) bool {
 
 // returnsProgress reports a return of an accumulated value with an error.
 func returnsProgress(info *types.Info, ret *ast.ReturnStmt, accumulated map[types.Object]bool) bool {
-	if len(ret.Results) < 2 || isNilIdent(ret.Results[len(ret.Results)-1]) {
+	if len(ret.Results) < 2 || helpers.IsNilIdent(ret.Results[len(ret.Results)-1]) {
 		return false
 	}
 	first, ok := ast.Unparen(ret.Results[0]).(*ast.Ident)

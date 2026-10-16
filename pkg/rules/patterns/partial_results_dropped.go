@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -137,7 +138,7 @@ func returnsPartialSuccess(scope funcScope, fn typedFuncDecl, depth int) bool {
 		if !ok || len(ret.Results) != 2 {
 			return true
 		}
-		if _, isVar := ast.Unparen(ret.Results[0]).(*ast.Ident); !isVar || isNilIdent(ret.Results[0]) {
+		if _, isVar := ast.Unparen(ret.Results[0]).(*ast.Ident); !isVar || helpers.IsNilIdent(ret.Results[0]) {
 			return true
 		}
 		found = isJoinedError(scope, fn.info, ret.Results[1], joined, depth)

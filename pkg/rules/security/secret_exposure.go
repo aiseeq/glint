@@ -132,7 +132,7 @@ func secretIn(expr ast.Expr) string {
 	switch e := ast.Unparen(expr).(type) {
 	case *ast.Ident, *ast.SelectorExpr:
 		// ErrNoAPIKey is the error that says the key is missing.
-		name := lastName(e)
+		name := helpers.ExprName(e)
 		if !helpers.HasLeadingWord(name, "Err") && (secretFieldName.MatchString(name) || connectionStringName.MatchString(name)) {
 			return name
 		}
@@ -152,17 +152,6 @@ func secretIn(expr ast.Expr) string {
 				return exposedSecret(e)
 			}
 		}
-	}
-	return ""
-}
-
-// lastName returns the identifier an expression ends with: c.Password is Password.
-func lastName(expr ast.Expr) string {
-	switch e := expr.(type) {
-	case *ast.Ident:
-		return e.Name
-	case *ast.SelectorExpr:
-		return e.Sel.Name
 	}
 	return ""
 }

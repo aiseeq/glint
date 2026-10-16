@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -62,7 +63,7 @@ func NewLazyGlobalInitWithoutSyncRule() *typedFuncRule {
 // nilCheckedGlobal returns the package-level variable of `v == nil`.
 func nilCheckedGlobal(info *types.Info, cond ast.Expr) *types.Var {
 	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	if !ok || bin.Op != token.EQL || !isNilIdent(bin.Y) {
+	if !ok || bin.Op != token.EQL || !helpers.IsNilIdent(bin.Y) {
 		return nil
 	}
 	ident, ok := ast.Unparen(bin.X).(*ast.Ident)

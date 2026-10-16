@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -223,7 +224,7 @@ func calleeKey(call *ast.CallExpr, pkg string) string {
 
 func passesIdent(call *ast.CallExpr, name string) bool {
 	for _, arg := range call.Args {
-		if isIdentNamed(arg, name) {
+		if helpers.IsIdentNamed(arg, name) {
 			return true
 		}
 	}

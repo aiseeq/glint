@@ -122,7 +122,7 @@ func returnsFailure(fn *ast.FuncDecl) bool {
 		if _, ok := n.(*ast.FuncLit); ok {
 			return false
 		}
-		if ret, ok := n.(*ast.ReturnStmt); ok && len(ret.Results) > 1 && !isIdentNamed(ret.Results[len(ret.Results)-1], "nil") {
+		if ret, ok := n.(*ast.ReturnStmt); ok && len(ret.Results) > 1 && !helpers.IsIdentNamed(ret.Results[len(ret.Results)-1], "nil") {
 			found = true
 		}
 		return !found

@@ -172,7 +172,7 @@ func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.Func
 			if r.isSecretPathFormat(node) {
 				secretInPath = true
 			}
-			if callNameContainsSanitize(node) || unwrappers[callName(node)] || callsUnwrapper(transport.info, node, pkgUnwrappers) {
+			if callNameContainsSanitize(node) || unwrappers[helpers.CalleeName(node)] || callsUnwrapper(transport.info, node, pkgUnwrappers) {
 				sanitized = true
 			}
 			if transport.matches(node) {
@@ -228,14 +228,14 @@ func (r *SecretInQueryURLRule) isSecretQuerySet(call *ast.CallExpr) bool {
 	if err != nil || !r.secretParam.MatchString(name) {
 		return false
 	}
-	return !strings.Contains(strings.ToLower(receiverChain(sel.X)), "header")
+	return !strings.Contains(strings.ToLower(selectorText(sel.X)), "header")
 }
 
 // isSecretPathFormat recognizes fmt.Sprintf putting a secret-named value
 // into the path of a URL: a verb after a "/" of the format that is not the
 // "//" of the scheme, and before any "?".
 func (r *SecretInQueryURLRule) isSecretPathFormat(call *ast.CallExpr) bool {
-	if pkg, ok := callPackage(call); !ok || pkg != "fmt" || callName(call) != "Sprintf" || len(call.Args) < 2 {
+	if pkg, ok := callPackage(call); !ok || pkg != "fmt" || helpers.CalleeName(call) != "Sprintf" || len(call.Args) < 2 {
 		return false
 	}
 	lit, ok := call.Args[0].(*ast.BasicLit)
@@ -336,7 +336,7 @@ func isNamedType(t types.Type, path, name string) bool {
 // callNameContainsSanitize reports a callee named as a sanitizer, in any
 // case: SanitizeTransportError and redactTransportError alike.
 func callNameContainsSanitize(call *ast.CallExpr) bool {
-	name := strings.ToLower(callName(call))
+	name := strings.ToLower(helpers.CalleeName(call))
 	return strings.Contains(name, "sanitize") || strings.Contains(name, "redact")
 }
 
@@ -350,21 +350,21 @@ func callsUnwrapper(info *types.Info, call *ast.CallExpr, pkgUnwrappers map[*typ
 	return callee != nil && pkgUnwrappers[callee]
 }
 
-// receiverChain flattens a selector chain (req.Header) into a dotted string
+// selectorText flattens a selector chain (req.Header) into a dotted string
 // for coarse receiver classification.
-func receiverChain(expr ast.Expr) string {
+func selectorText(expr ast.Expr) string {
 	switch node := expr.(type) {
 	case *ast.Ident:
 		return node.Name
 	case *ast.SelectorExpr:
-		return receiverChain(node.X) + "." + node.Sel.Name
+		return selectorText(node.X) + "." + node.Sel.Name
 	case *ast.CallExpr:
 		if sel, ok := node.Fun.(*ast.SelectorExpr); ok {
-			return receiverChain(sel.X) + "." + sel.Sel.Name + "()"
+			return selectorText(sel.X) + "." + sel.Sel.Name + "()"
 		}
 		return ""
 	case *ast.ParenExpr:
-		return receiverChain(node.X)
+		return selectorText(node.X)
 	default:
 		return ""
 	}

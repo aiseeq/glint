@@ -80,7 +80,7 @@ func detachedGoroutine(n ast.Node) (ast.Node, ast.Node) {
 		}
 		return node.Call, node
 	case *ast.CallExpr:
-		if callName(node) != "Go" || len(node.Args) == 0 {
+		if helpers.CalleeName(node) != "Go" || len(node.Args) == 0 {
 			return nil, nil
 		}
 		if lit, ok := node.Args[len(node.Args)-1].(*ast.FuncLit); ok {
@@ -151,7 +151,7 @@ func sendIn(init ast.Stmt) string {
 	if !ok {
 		return ""
 	}
-	name := callName(call)
+	name := helpers.CalleeName(call)
 	if !helpers.HasLeadingWord(name, "Send") || strings.Contains(strings.ToLower(name), "alert") {
 		return ""
 	}

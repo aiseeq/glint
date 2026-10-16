@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -105,21 +106,16 @@ func upperBound(cond ast.Expr, name string) ast.Expr {
 			}
 			return upperBound(e.Y, name)
 		case token.GTR, token.GEQ:
-			if isIdentNamed(e.X, name) && !lowBound(e.Y) {
+			if helpers.IsIdentNamed(e.X, name) && !lowBound(e.Y) {
 				return e.Y
 			}
 		case token.LSS, token.LEQ:
-			if isIdentNamed(e.Y, name) && !lowBound(e.X) {
+			if helpers.IsIdentNamed(e.Y, name) && !lowBound(e.X) {
 				return e.X
 			}
 		}
 	}
 	return nil
-}
-
-func isIdentNamed(expr ast.Expr, name string) bool {
-	id, ok := ast.Unparen(expr).(*ast.Ident)
-	return ok && id.Name == name
 }
 
 // constantLike reports a number or a named constant: a value someone wrote.
@@ -182,7 +178,7 @@ func pageSizeQuery(expr ast.Expr) bool {
 	if !ok || len(call.Args) != 1 {
 		return false
 	}
-	name := callName(call)
+	name := helpers.CalleeName(call)
 	return (name == "Get" || name == "FormValue" || name == "PostFormValue") && pageSizeParam.MatchString(stringLiteral(call.Args[0]))
 }
 
@@ -199,7 +195,7 @@ func pageSizeSource(body *ast.BlockStmt, arg ast.Expr) bool {
 // isIntParse reports strconv.Atoi, ParseInt or ParseUint.
 func isIntParse(call *ast.CallExpr) bool {
 	pkg, ok := callPackage(call)
-	name := callName(call)
+	name := helpers.CalleeName(call)
 	return ok && pkg == "strconv" && (name == "Atoi" || name == "ParseInt" || name == "ParseUint")
 }
 
@@ -241,7 +237,7 @@ func bounded(body *ast.BlockStmt, names map[string]bool) bool {
 				}
 			}
 		case *ast.CallExpr:
-			if name := callName(node); (name == "min" || name == "Min") && mentionsAny(node, names) {
+			if name := helpers.CalleeName(node); (name == "min" || name == "Min") && mentionsAny(node, names) {
 				found = true
 			}
 		}

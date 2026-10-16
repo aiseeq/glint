@@ -61,7 +61,7 @@ func NewSignatureOverDifferentBytesThanSentRule() *typedFuncRule {
 				}
 				for _, data := range slices.SortedFunc(maps.Keys(marshals), func(a, b types.Object) int { return cmp.Compare(a.Pos(), b.Pos()) }) {
 					if sent[data] && mentionsObject(scope.info, marshals[data], v) {
-						findings = append(findings, funcFinding{node: call, message: callName(call) + " signs " + v.Name() + " marshaled on its own, while the request sends " + data.Name() + " from a separate json.Marshal — the provider checks the signature against other bytes"})
+						findings = append(findings, funcFinding{node: call, message: helpers.CalleeName(call) + " signs " + v.Name() + " marshaled on its own, while the request sends " + data.Name() + " from a separate json.Marshal — the provider checks the signature against other bytes"})
 						return true
 					}
 				}
@@ -75,7 +75,7 @@ func NewSignatureOverDifferentBytesThanSentRule() *typedFuncRule {
 
 // signsValue matches a call named Sign...: SignBody, signPayload.
 func signsValue(call *ast.CallExpr) bool {
-	name := callName(call)
+	name := helpers.CalleeName(call)
 	if !helpers.HasLeadingWord(name, "Sign") {
 		return false
 	}
@@ -356,7 +356,7 @@ func spreadCarriers(info *types.Info, body *ast.BlockStmt, carriers map[types.Ob
 func readsCarrier(info *types.Info, expr ast.Expr, objects map[types.Object]bool) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && isIdentNamed(call.Fun, "len") {
+		if call, ok := n.(*ast.CallExpr); ok && helpers.IsIdentNamed(call.Fun, "len") {
 			return false
 		}
 		if id, ok := n.(*ast.Ident); ok && objects[info.ObjectOf(id)] {
@@ -554,7 +554,7 @@ func testsEmpty(info *types.Info, body *ast.BlockStmt, match func(ast.Expr) bool
 			if lit, ok := other.(*ast.BasicLit); ok && lit.Value == `""` && match(side) {
 				found = true
 			}
-			if call, ok := side.(*ast.CallExpr); ok && isIdentNamed(call.Fun, "len") && len(call.Args) == 1 && match(call.Args[0]) {
+			if call, ok := side.(*ast.CallExpr); ok && helpers.IsIdentNamed(call.Fun, "len") && len(call.Args) == 1 && match(call.Args[0]) {
 				found = true
 			}
 		}

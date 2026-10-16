@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -109,7 +110,7 @@ func assertMismatchZeroReturns(fn *ast.FuncDecl, info *types.Info) []*ast.Return
 			return zeros[obj] && !assignedOutside(fn.Body, success, obj, info)
 		case *ast.StarExpr:
 			call, ok := e.X.(*ast.CallExpr)
-			return ok && isIdentNamed(call.Fun, "new")
+			return ok && helpers.IsIdentNamed(call.Fun, "new")
 		}
 		return false
 	}
@@ -125,7 +126,7 @@ func assertMismatchZeroReturns(fn *ast.FuncDecl, info *types.Info) []*ast.Return
 			case *ast.IfStmt:
 				// if v, ok := x.(T); ok { return v } - what follows is the failure.
 				okName, hit := matches(s.Init)
-				if !hit || s.Else != nil || !isIdentNamed(s.Cond, okName) {
+				if !hit || s.Else != nil || !helpers.IsIdentNamed(s.Cond, okName) {
 					continue
 				}
 				if ret := firstReturnAfterDecls(stmts[i+1:]); ret != nil && isZero(ret, s.Body) {
@@ -172,7 +173,7 @@ func commaOkAssertion(stmt ast.Stmt) (string, *ast.TypeAssertExpr) {
 
 func negates(cond ast.Expr, name string) bool {
 	unary, ok := ast.Unparen(cond).(*ast.UnaryExpr)
-	return ok && unary.Op == token.NOT && isIdentNamed(unary.X, name)
+	return ok && unary.Op == token.NOT && helpers.IsIdentNamed(unary.X, name)
 }
 
 // firstReturnAfterDecls returns the return that follows only declarations

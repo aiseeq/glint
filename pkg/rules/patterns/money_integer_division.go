@@ -182,7 +182,7 @@ func (d *bigDivisionCheck) bigInt(expr ast.Expr) bool {
 			if !ok {
 				return false
 			}
-			pkg := identOf(sel.X)
+			pkg := helpers.IdentOf(sel.X)
 			return pkg != nil && d.bigAliases[pkg.Name] && sel.Sel.Name == "Int"
 		}
 		return d.packageCall(e, true, "NewInt")

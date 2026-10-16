@@ -141,7 +141,7 @@ func requestDecodedVars(body *ast.BlockStmt, request string) map[string]bool {
 					}
 				}
 			case *ast.CallExpr:
-				name := callName(node)
+				name := helpers.CalleeName(node)
 				if (name == "Unmarshal" || name == "Decode") && len(node.Args) > 0 && decodesFromRequest(node, fromRequest) {
 					if target, ok := ast.Unparen(node.Args[len(node.Args)-1]).(*ast.UnaryExpr); ok && target.Op == token.AND {
 						if id, ok := target.X.(*ast.Ident); ok {
@@ -159,7 +159,7 @@ func requestDecodedVars(body *ast.BlockStmt, request string) map[string]bool {
 // decodesFromRequest reports json.Unmarshal(body, ...) of a request body, or
 // Decode on a decoder of one.
 func decodesFromRequest(call *ast.CallExpr, fromRequest func(ast.Expr) bool) bool {
-	if callName(call) == "Unmarshal" {
+	if helpers.CalleeName(call) == "Unmarshal" {
 		return fromRequest(call.Args[0])
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -176,7 +176,7 @@ func loggedClientURL(arg ast.Expr, decoded map[string]bool, request string) ast.
 			return e
 		}
 	case *ast.CallExpr:
-		name := callName(e)
+		name := helpers.CalleeName(e)
 		if name == "Referer" && len(e.Args) == 0 {
 			if sel, ok := e.Fun.(*ast.SelectorExpr); ok && helpers.ExprText(sel.X) == request {
 				return e

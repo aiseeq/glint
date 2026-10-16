@@ -57,7 +57,7 @@ func NewDeliveryRecordedBeforeAttemptRule() *typedFuncRule {
 					continue
 				}
 				if caller := callerAttempts(scope, fn, channel); caller != "" {
-					findings = append(findings, funcFinding{node: record, message: callName(record) + " records \"" + channel + "\" as the delivery before " + caller + " attempts it — when that send fails, the record still says the message was delivered"})
+					findings = append(findings, funcFinding{node: record, message: helpers.CalleeName(record) + " records \"" + channel + "\" as the delivery before " + caller + " attempts it — when that send fails, the record still says the message was delivered"})
 				}
 			}
 			return true
@@ -92,7 +92,7 @@ func deliveryRecord(info *types.Info, stmt ast.Stmt) (*ast.CallExpr, string) {
 	if !ok {
 		return nil, ""
 	}
-	words := helpers.IdentifierWords(callName(call))
+	words := helpers.IdentifierWords(helpers.CalleeName(call))
 	if !slices.ContainsFunc(words, func(w string) bool { return slices.Contains(deliveryWords, w) }) {
 		return nil, ""
 	}
@@ -114,7 +114,7 @@ func returnsFalseAfter(stmts []ast.Stmt, channel string) bool {
 			return false
 		}
 		if ret, ok := stmt.(*ast.ReturnStmt); ok {
-			return len(ret.Results) == 1 && isIdentNamed(ast.Unparen(ret.Results[0]), "false")
+			return len(ret.Results) == 1 && helpers.IsIdentNamed(ast.Unparen(ret.Results[0]), "false")
 		}
 	}
 	return false
@@ -125,7 +125,7 @@ func returnsFalseAfter(stmts []ast.Stmt, channel string) bool {
 func namesChannel(node ast.Node, channel string) bool {
 	found := false
 	ast.Inspect(node, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && strings.Contains(strings.ToLower(callName(call)), strings.ToLower(channel)) {
+		if call, ok := n.(*ast.CallExpr); ok && strings.Contains(strings.ToLower(helpers.CalleeName(call)), strings.ToLower(channel)) {
 			found = true
 		}
 		return !found

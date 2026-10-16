@@ -191,7 +191,7 @@ func hasOption(options []ast.Expr, names ...string) bool {
 		var name string
 		switch o := ast.Unparen(option).(type) {
 		case *ast.CallExpr:
-			name = callName(o)
+			name = helpers.CalleeName(o)
 		case *ast.KeyValueExpr:
 			if key, ok := o.Key.(*ast.Ident); ok {
 				name = key.Name
@@ -232,7 +232,7 @@ func keyfuncBodies(keyfunc ast.Expr, funcs map[string]*ast.FuncDecl) ([]ast.Node
 	bodies := []ast.Node{root}
 	ast.Inspect(root, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
-			if fn, ok := funcs[callName(call)]; ok {
+			if fn, ok := funcs[helpers.CalleeName(call)]; ok {
 				bodies = append(bodies, fn.Body)
 			}
 		}
@@ -281,7 +281,7 @@ func keyfuncReturnsSecret(keyfunc ast.Expr, funcs map[string]*ast.FuncDecl) bool
 		case *ast.FuncLit:
 			return false
 		case *ast.ReturnStmt:
-			if len(node.Results) == 0 || isNilIdent(node.Results[0]) {
+			if len(node.Results) == 0 || helpers.IsNilIdent(node.Results[0]) {
 				return true
 			}
 			if conv, ok := node.Results[0].(*ast.CallExpr); ok && isByteSlice(conv.Fun) {
@@ -311,11 +311,6 @@ func isByteSlice(expr ast.Expr) bool {
 	}
 	elt, ok := arr.Elt.(*ast.Ident)
 	return ok && elt.Name == "byte"
-}
-
-func isNilIdent(expr ast.Expr) bool {
-	ident, ok := ast.Unparen(expr).(*ast.Ident)
-	return ok && ident.Name == "nil"
 }
 
 // usesKeySet reports a file that picks keys from a key set: it names a kid
@@ -373,7 +368,7 @@ func comparesIssuerOrAudience(file *ast.File) bool {
 		case *ast.RangeStmt:
 			found = found || isClaim(node.X)
 		case *ast.CallExpr:
-			switch callName(node) {
+			switch helpers.CalleeName(node) {
 			case "VerifyIssuer", "VerifyAudience":
 				found = true
 			case "Contains":

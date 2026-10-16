@@ -137,7 +137,7 @@ func writesDatedEntry(info *types.Info, defs map[types.Object]ast.Expr, body *as
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || found || !helpers.IsWriteName(callName(call)) {
+		if !ok || found || !helpers.IsWriteName(helpers.CalleeName(call)) {
 			return !found
 		}
 		for _, arg := range call.Args {

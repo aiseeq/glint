@@ -367,7 +367,7 @@ func failingChecks(info *types.Info, body *ast.BlockStmt) map[*ast.BinaryExpr]bo
 			return true
 		}
 		last := ret.Results[len(ret.Results)-1]
-		if t := info.TypeOf(last); isNilIdent(last) || t == nil || !implementsError(t) {
+		if t := info.TypeOf(last); helpers.IsNilIdent(last) || t == nil || !implementsError(t) {
 			return true
 		}
 		ast.Inspect(check.Cond, func(inner ast.Node) bool {
@@ -681,7 +681,7 @@ func firstAddressUse(info *types.Info, body *ast.BlockStmt, param types.Object) 
 				use = node
 			}
 		case *ast.CallExpr:
-			if isIdentNamed(node.Fun, "len") {
+			if helpers.IsIdentNamed(node.Fun, "len") {
 				return false
 			}
 			for _, arg := range node.Args {

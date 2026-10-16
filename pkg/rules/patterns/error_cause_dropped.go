@@ -108,7 +108,7 @@ func errNilCheckName(cond ast.Expr) string {
 		return ""
 	}
 	ident, ok := bin.X.(*ast.Ident)
-	if !ok || !isNilIdent(bin.Y) || !isErrorVarName(ident.Name) {
+	if !ok || !helpers.IsNilIdent(bin.Y) || !isErrorVarName(ident.Name) {
 		return ""
 	}
 	return ident.Name

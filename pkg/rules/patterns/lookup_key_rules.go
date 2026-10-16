@@ -118,7 +118,7 @@ func keylessBranch(info *types.Info, body *ast.BlockStmt, get, set *ast.CallExpr
 		case *ast.SwitchStmt:
 			subject = stmt.Tag
 		case *ast.IfStmt:
-			if cmp, ok := ast.Unparen(stmt.Cond).(*ast.BinaryExpr); ok && (cmp.Op == token.EQL || cmp.Op == token.NEQ) && !isNilIdent(cmp.X) && !isNilIdent(cmp.Y) {
+			if cmp, ok := ast.Unparen(stmt.Cond).(*ast.BinaryExpr); ok && (cmp.Op == token.EQL || cmp.Op == token.NEQ) && !helpers.IsNilIdent(cmp.X) && !helpers.IsNilIdent(cmp.Y) {
 				subject = cmp.X
 			}
 		default:
@@ -587,11 +587,11 @@ func NewLookupValidatesBeforeMatchFilterRule() *typedFuncRule {
 				continue
 			}
 			foundSlot, errSlot := ifReturnSlots(check.Body)
-			if failure == nil && foundSlot != nil && isFalseIdent(ast.Unparen(foundSlot)) && errSlot != nil && !isNilIdent(errSlot) {
+			if failure == nil && foundSlot != nil && isFalseIdent(ast.Unparen(foundSlot)) && errSlot != nil && !helpers.IsNilIdent(errSlot) {
 				failure = check
 				continue
 			}
-			if failure == nil || !isTrueIdent(foundSlot) || errSlot == nil || !isNilIdent(errSlot) {
+			if failure == nil || !isTrueIdent(foundSlot) || errSlot == nil || !helpers.IsNilIdent(errSlot) {
 				continue
 			}
 			if matchesSoughtParam(scope.info, check.Cond, params) {
@@ -659,7 +659,7 @@ func ifReturnSlots(body *ast.BlockStmt) (found, err ast.Expr) {
 
 // isTrueIdent reports the identifier true.
 func isTrueIdent(expr ast.Expr) bool {
-	return expr != nil && isIdentNamed(ast.Unparen(expr), "true")
+	return expr != nil && helpers.IsIdentNamed(ast.Unparen(expr), "true")
 }
 
 // matchesSoughtParam reports a condition comparing a parameter: x == p,

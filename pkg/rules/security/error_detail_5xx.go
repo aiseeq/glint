@@ -10,6 +10,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -129,7 +130,7 @@ func (r *ErrorDetailResponseRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 			if !ok || !writesResponse(call) || !r.statusCall(call) {
 				return true
 			}
-			leaks, known := r.leaks[callName(call)]
+			leaks, known := r.leaks[helpers.CalleeName(call)]
 			for i, arg := range call.Args {
 				if known && (i >= len(leaks) || !leaks[i]) {
 					continue
@@ -166,7 +167,7 @@ func errorOrigins(body *ast.BlockStmt) []errorOrigin {
 		}
 		for _, lhs := range assign.Lhs {
 			if ident, ok := lhs.(*ast.Ident); ok {
-				origins = append(origins, errorOrigin{pos: assign.Pos(), name: ident.Name, callee: callName(call)})
+				origins = append(origins, errorOrigin{pos: assign.Pos(), name: ident.Name, callee: helpers.CalleeName(call)})
 			}
 		}
 		return true
@@ -212,7 +213,7 @@ func errorTextValues(arg ast.Expr) []string {
 				names = append(names, ident.Name)
 			}
 		}
-		if pkg, ok := callPackage(call); ok && pkg == "fmt" && strings.HasPrefix(callName(call), "Sprint") && len(call.Args) > 0 {
+		if pkg, ok := callPackage(call); ok && pkg == "fmt" && strings.HasPrefix(helpers.CalleeName(call), "Sprint") && len(call.Args) > 0 {
 			for _, a := range call.Args[1:] {
 				if ident, ok := a.(*ast.Ident); ok && errorValueName.MatchString(ident.Name) {
 					names = append(names, ident.Name)
@@ -262,9 +263,9 @@ func fixedErrorValue(expr ast.Expr) bool {
 			return false
 		}
 		switch {
-		case pkg == "errors" && callName(e) == "New":
+		case pkg == "errors" && helpers.CalleeName(e) == "New":
 			return true
-		case pkg == "fmt" && callName(e) == "Errorf":
+		case pkg == "fmt" && helpers.CalleeName(e) == "Errorf":
 			if strings.Contains(stringLiteral(e.Args[0]), "%w") {
 				return false
 			}
@@ -398,7 +399,7 @@ func (r *ErrorDetailResponseRule) parameterLeaks(body *ast.BlockStmt, name, writ
 				return true
 			}
 			for i, lhs := range assign.Lhs {
-				root := rootIdent(lhs)
+				root := accessRoot(lhs)
 				if root != nil && !tainted[root.Name] && carries(assign.Rhs[i]) {
 					tainted[root.Name] = true
 					changed = true
@@ -413,7 +414,7 @@ func (r *ErrorDetailResponseRule) parameterLeaks(body *ast.BlockStmt, name, writ
 		if !ok || leaks || !mentions(call, writer) {
 			return !leaks
 		}
-		calleeLeaks, known := r.leaks[callName(call)]
+		calleeLeaks, known := r.leaks[helpers.CalleeName(call)]
 		for i, arg := range call.Args {
 			if carries(arg) && (!known || (i < len(calleeLeaks) && calleeLeaks[i])) {
 				leaks = true
@@ -454,8 +455,8 @@ func conjuncts(expr ast.Expr) []ast.Expr {
 	return append(conjuncts(and.X), conjuncts(and.Y)...)
 }
 
-// rootIdent returns x for x, x.f and x[i].
-func rootIdent(expr ast.Expr) *ast.Ident {
+// accessRoot returns x for x, x.f and x[i].
+func accessRoot(expr ast.Expr) *ast.Ident {
 	for {
 		switch e := expr.(type) {
 		case *ast.Ident:
@@ -499,7 +500,7 @@ func writesResponse(call *ast.CallExpr) bool {
 // status argument of it: a net/http constant in statuses or a literal code
 // inClass accepts.
 func statusCall(call *ast.CallExpr, callee *regexp.Regexp, inClass func(code int) bool, statuses map[string]bool) bool {
-	if callee.MatchString(callName(call)) {
+	if callee.MatchString(helpers.CalleeName(call)) {
 		return true
 	}
 	for _, arg := range call.Args {
@@ -533,7 +534,7 @@ func carriesErrorText(arg ast.Expr) bool {
 				found = true
 			}
 		}
-		if pkg, ok := callPackage(call); ok && pkg == "fmt" && strings.HasPrefix(callName(call), "Sprint") && len(call.Args) > 0 {
+		if pkg, ok := callPackage(call); ok && pkg == "fmt" && strings.HasPrefix(helpers.CalleeName(call), "Sprint") && len(call.Args) > 0 {
 			for _, a := range call.Args[1:] {
 				if ident, ok := a.(*ast.Ident); ok && errorValueName.MatchString(ident.Name) {
 					found = true

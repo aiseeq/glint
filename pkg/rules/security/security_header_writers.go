@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -111,7 +112,7 @@ func headerWrites(ctx *core.FileContext) []headerWrite {
 			if !ok || len(call.Args) != 2 {
 				return true
 			}
-			if name := callName(call); name != "Set" && name != "Add" {
+			if name := helpers.CalleeName(call); name != "Set" && name != "Add" {
 				return true
 			}
 			header := stringLiteral(call.Args[0])

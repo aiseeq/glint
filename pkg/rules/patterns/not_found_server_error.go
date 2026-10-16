@@ -386,7 +386,7 @@ func writtenBefore(fn typedFunc, call *ast.CallExpr) map[types.Object]bool {
 // errNotNilIdent returns err of a condition `err != nil`.
 func errNotNilIdent(info *types.Info, cond ast.Expr) *ast.Ident {
 	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	if !ok || bin.Op != token.NEQ || !isNilIdent(ast.Unparen(bin.Y)) {
+	if !ok || bin.Op != token.NEQ || !helpers.IsNilIdent(ast.Unparen(bin.Y)) {
 		return nil
 	}
 	ident, ok := ast.Unparen(bin.X).(*ast.Ident)
@@ -414,7 +414,7 @@ func serverErrorAnswer(info *types.Info, body *ast.BlockStmt) *ast.CallExpr {
 		if !ok {
 			return true
 		}
-		if serverErrorResponder.MatchString(callName(call)) {
+		if serverErrorResponder.MatchString(helpers.CalleeName(call)) {
 			answer = call
 			return false
 		}
@@ -449,7 +449,7 @@ func comparesError(body *ast.BlockStmt) bool {
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.CallExpr:
-			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && isIdentNamed(sel.X, "errors") && (sel.Sel.Name == "Is" || sel.Sel.Name == "As") {
+			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && helpers.IsIdentNamed(sel.X, "errors") && (sel.Sel.Name == "Is" || sel.Sel.Name == "As") {
 				found = true
 			}
 		case *ast.BinaryExpr:
@@ -517,12 +517,12 @@ func comparesParam(fn typedFunc, index int) bool {
 	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.CallExpr:
-			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && isIdentNamed(sel.X, "errors") && (sel.Sel.Name == "Is" || sel.Sel.Name == "As") &&
+			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && helpers.IsIdentNamed(sel.X, "errors") && (sel.Sel.Name == "Is" || sel.Sel.Name == "As") &&
 				len(node.Args) > 0 && isParam(node.Args[0]) {
 				found = true
 			}
 		case *ast.BinaryExpr:
-			if (node.Op == token.EQL || node.Op == token.NEQ) && isParam(node.X) && !isNilIdent(ast.Unparen(node.Y)) {
+			if (node.Op == token.EQL || node.Op == token.NEQ) && isParam(node.X) && !helpers.IsNilIdent(ast.Unparen(node.Y)) {
 				found = true
 			}
 		case *ast.SwitchStmt:

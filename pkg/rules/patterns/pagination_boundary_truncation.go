@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -429,7 +430,7 @@ func endsWalkQuietly(block *ast.BlockStmt) bool {
 				}
 				continue
 			}
-			if call, ok := ast.Unparen(result).(*ast.CallExpr); ok && strings.Contains(strings.ToLower(callName(call)), "err") {
+			if call, ok := ast.Unparen(result).(*ast.CallExpr); ok && strings.Contains(strings.ToLower(helpers.CalleeName(call)), "err") {
 				return false
 			}
 		}

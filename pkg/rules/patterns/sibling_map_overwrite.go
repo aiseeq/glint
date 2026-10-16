@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -118,7 +119,7 @@ func mergedLookup(info *types.Info, check *ast.IfStmt) (types.Object, types.Type
 	}
 	adds := false
 	ast.Inspect(check.Body, func(n ast.Node) bool {
-		if call, isCall := n.(*ast.CallExpr); isCall && callName(call) == "Add" {
+		if call, isCall := n.(*ast.CallExpr); isCall && helpers.CalleeName(call) == "Add" {
 			adds = true
 		}
 		return !adds

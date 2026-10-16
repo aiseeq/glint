@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -172,7 +173,7 @@ func logsCause(body *ast.BlockStmt, errName string) bool {
 // successReturn returns the block's own return with a nil error.
 func successReturn(body *ast.BlockStmt) *ast.ReturnStmt {
 	for _, stmt := range body.List {
-		if ret, ok := stmt.(*ast.ReturnStmt); ok && len(ret.Results) > 0 && isNilIdent(ret.Results[len(ret.Results)-1]) {
+		if ret, ok := stmt.(*ast.ReturnStmt); ok && len(ret.Results) > 0 && helpers.IsNilIdent(ret.Results[len(ret.Results)-1]) {
 			return ret
 		}
 	}

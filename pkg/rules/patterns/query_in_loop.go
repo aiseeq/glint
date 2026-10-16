@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -187,16 +188,7 @@ type queryHelper struct {
 // calledFunc returns the function or method a call names, nil for a call
 // through a value (a func variable, an interface).
 func calledFunc(call *ast.CallExpr, info *types.Info) *types.Func {
-	var id *ast.Ident
-	switch fun := ast.Unparen(call.Fun).(type) {
-	case *ast.Ident:
-		id = fun
-	case *ast.SelectorExpr:
-		id = fun.Sel
-	default:
-		return nil
-	}
-	fn, _ := info.Uses[id].(*types.Func)
+	fn := helpers.CalledFunc(call, info)
 	if fn == nil {
 		return nil
 	}
@@ -411,7 +403,7 @@ func pureRepositoryFunc(sel *ast.SelectorExpr, info *types.Info) bool {
 	if info == nil {
 		return false
 	}
-	if _, isPkg := info.Uses[identOf(sel.X)].(*types.PkgName); !isPkg {
+	if _, isPkg := info.Uses[helpers.IdentOf(sel.X)].(*types.PkgName); !isPkg {
 		return false
 	}
 	fn, ok := info.Uses[sel.Sel].(*types.Func)
@@ -434,12 +426,6 @@ func pureRepositoryFunc(sel *ast.SelectorExpr, info *types.Info) bool {
 		}
 	}
 	return true
-}
-
-// identOf returns the identifier an expression is, nil otherwise.
-func identOf(expr ast.Expr) *ast.Ident {
-	id, _ := expr.(*ast.Ident)
-	return id
 }
 
 // concreteReceiverPackage returns the package whose code runs for a call on

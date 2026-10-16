@@ -58,7 +58,7 @@ func NewPerUserSubscriptionsUnboundedRule() *typedFuncRule {
 				return true
 			}
 			call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
-			if !ok || !isIdentNamed(call.Fun, "append") || len(call.Args) != 2 || !holdsChannel(scope.info.TypeOf(call.Args[1])) {
+			if !ok || !helpers.IsIdentNamed(call.Fun, "append") || len(call.Args) != 2 || !holdsChannel(scope.info.TypeOf(call.Args[1])) {
 				return true
 			}
 			if !countsList(fn.Body, index) {
@@ -115,7 +115,7 @@ func countsList(body *ast.BlockStmt, list *ast.IndexExpr) bool {
 	want := types.ExprString(list)
 	isLen := func(expr ast.Expr) bool {
 		call, ok := ast.Unparen(expr).(*ast.CallExpr)
-		return ok && isIdentNamed(call.Fun, "len") && len(call.Args) == 1 && types.ExprString(call.Args[0]) == want
+		return ok && helpers.IsIdentNamed(call.Fun, "len") && len(call.Args) == 1 && types.ExprString(call.Args[0]) == want
 	}
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {

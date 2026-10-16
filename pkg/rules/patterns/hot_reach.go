@@ -10,6 +10,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // hotFunction is a function a hot-path rule checks: one marked //glint:hot,
@@ -261,7 +262,7 @@ func failsHere(info *types.Info, stmt ast.Stmt) bool {
 			return false
 		}
 		last := ast.Unparen(s.Results[len(s.Results)-1])
-		if isNilIdent(last) {
+		if helpers.IsNilIdent(last) {
 			return false
 		}
 		t := info.TypeOf(last)

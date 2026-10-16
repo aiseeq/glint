@@ -13,6 +13,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/sqlschema"
 )
 
@@ -460,7 +461,7 @@ func sqlTexts(root ast.Node, accept func(string) bool) []sqlLiteral {
 		var builder strings.Builder
 		var gaps []int
 		hasLiteral := false
-		for _, operand := range concatOperands(expr) {
+		for _, operand := range helpers.ConcatOperands(expr) {
 			piece, isLit := operand.(*ast.BasicLit)
 			text, ok := "", false
 			if isLit {
@@ -502,12 +503,4 @@ func isStringOrConcat(expr ast.Expr) bool {
 		return x.Kind == token.STRING
 	}
 	return false
-}
-
-// concatOperands flattens a + b + c into its operands.
-func concatOperands(expr ast.Expr) []ast.Expr {
-	if bin, ok := ast.Unparen(expr).(*ast.BinaryExpr); ok && bin.Op == token.ADD {
-		return append(concatOperands(bin.X), concatOperands(bin.Y)...)
-	}
-	return []ast.Expr{ast.Unparen(expr)}
 }

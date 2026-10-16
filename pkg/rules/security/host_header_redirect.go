@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -141,9 +142,9 @@ func hostRedirects(body *ast.BlockStmt) []ast.Node {
 		}
 		var target []ast.Expr
 		switch {
-		case callName(call) == "Redirect":
+		case helpers.CalleeName(call) == "Redirect":
 			target = call.Args
-		case (callName(call) == "Set" || callName(call) == "Add") && len(call.Args) == 2 &&
+		case (helpers.CalleeName(call) == "Set" || helpers.CalleeName(call) == "Add") && len(call.Args) == 2 &&
 			strings.EqualFold(stringLiteral(call.Args[0]), "Location"):
 			target = call.Args[1:]
 		}

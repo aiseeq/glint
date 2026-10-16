@@ -115,7 +115,7 @@ func idPrefixUses(ctx *core.FileContext) []idPrefixUse {
 func builtPrefix(expr ast.Expr) (string, bool) {
 	switch e := ast.Unparen(expr).(type) {
 	case *ast.CallExpr:
-		if pkg, ok := callPackage(e); !ok || pkg != "fmt" || callName(e) != "Sprintf" || len(e.Args) < 2 {
+		if pkg, ok := callPackage(e); !ok || pkg != "fmt" || helpers.CalleeName(e) != "Sprintf" || len(e.Args) < 2 {
 			return "", false
 		}
 		format := stringLiteral(e.Args[0])

@@ -110,7 +110,7 @@ func refusedWhenNil(body *ast.BlockStmt) map[string]bool {
 		}
 		ast.Inspect(ifStmt.Cond, func(n ast.Node) bool {
 			bin, ok := n.(*ast.BinaryExpr)
-			if ok && bin.Op == token.EQL && isNilIdent(bin.Y) {
+			if ok && bin.Op == token.EQL && helpers.IsNilIdent(bin.Y) {
 				if id, ok := bin.X.(*ast.Ident); ok {
 					refused[id.Name] = true
 				}
@@ -124,7 +124,7 @@ func refusedWhenNil(body *ast.BlockStmt) map[string]bool {
 // nonNilTest returns the name tested in `dep != nil`, or "".
 func nonNilTest(expr ast.Expr) string {
 	bin, ok := ast.Unparen(expr).(*ast.BinaryExpr)
-	if !ok || bin.Op != token.NEQ || !isNilIdent(bin.Y) {
+	if !ok || bin.Op != token.NEQ || !helpers.IsNilIdent(bin.Y) {
 		return ""
 	}
 	switch x := bin.X.(type) {
@@ -172,7 +172,7 @@ func callsStandIn(body *ast.BlockStmt) bool {
 		if !ok || found {
 			return !found
 		}
-		for _, word := range helpers.IdentifierWords(callName(call)) {
+		for _, word := range helpers.IdentifierWords(helpers.CalleeName(call)) {
 			switch strings.ToLower(word) {
 			case "mock", "fake", "stub":
 				found = true

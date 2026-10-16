@@ -89,7 +89,7 @@ func filtersSpecialUse(body *ast.BlockStmt) bool {
 				found = true
 			}
 		case *ast.CallExpr:
-			if slices.ContainsFunc(helpers.IdentifierWords(callName(node)), func(w string) bool {
+			if slices.ContainsFunc(helpers.IdentifierWords(helpers.CalleeName(node)), func(w string) bool {
 				return w == "special" || w == "reserved"
 			}) {
 				found = true
@@ -162,13 +162,13 @@ func cachesName(block *ast.BlockStmt, name string) bool {
 		switch node := n.(type) {
 		case *ast.AssignStmt:
 			for _, lhs := range node.Lhs {
-				if index, ok := lhs.(*ast.IndexExpr); ok && isIdentNamed(index.Index, name) {
+				if index, ok := lhs.(*ast.IndexExpr); ok && helpers.IsIdentNamed(index.Index, name) {
 					found = true
 				}
 			}
 		case *ast.CallExpr:
-			named := slices.ContainsFunc(helpers.IdentifierWords(callName(node)), func(w string) bool { return cacheWords[w] })
-			if named && slices.ContainsFunc(node.Args, func(arg ast.Expr) bool { return isIdentNamed(arg, name) }) {
+			named := slices.ContainsFunc(helpers.IdentifierWords(helpers.CalleeName(node)), func(w string) bool { return cacheWords[w] })
+			if named && slices.ContainsFunc(node.Args, func(arg ast.Expr) bool { return helpers.IsIdentNamed(arg, name) }) {
 				found = true
 			}
 		}

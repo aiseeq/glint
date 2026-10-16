@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -55,7 +56,7 @@ func (r *HTMLAttributeUnescapedRule) AnalyzeFile(ctx *core.FileContext) []*core.
 			if !ok || sum.Op != token.ADD {
 				return true
 			}
-			operands := concatOperands(sum)
+			operands := helpers.ConcatOperands(sum)
 			if !markup(operands) {
 				return true
 			}
@@ -70,15 +71,6 @@ func (r *HTMLAttributeUnescapedRule) AnalyzeFile(ctx *core.FileContext) []*core.
 		})
 	}
 	return lr.violations
-}
-
-// concatOperands flattens a + b + c into its operands.
-func concatOperands(expr ast.Expr) []ast.Expr {
-	sum, ok := ast.Unparen(expr).(*ast.BinaryExpr)
-	if !ok || sum.Op != token.ADD {
-		return []ast.Expr{expr}
-	}
-	return append(concatOperands(sum.X), concatOperands(sum.Y)...)
 }
 
 // markup reports operands with a string literal holding a tag.
@@ -137,7 +129,7 @@ func escapingCall(expr ast.Expr) bool {
 		return false
 	}
 	// The project's own escaper (escapeHTML, attrEscape) is trusted by name.
-	if strings.Contains(strings.ToLower(callName(call)), "escape") {
+	if strings.Contains(strings.ToLower(helpers.CalleeName(call)), "escape") {
 		return true
 	}
 	pkg, ok := callPackage(call)
@@ -146,7 +138,7 @@ func escapingCall(expr ast.Expr) bool {
 	}
 	switch pkg {
 	case "strconv":
-		return strings.HasPrefix(callName(call), "Format") || callName(call) == "Itoa"
+		return strings.HasPrefix(helpers.CalleeName(call), "Format") || helpers.CalleeName(call) == "Itoa"
 	}
 	return false
 }

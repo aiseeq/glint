@@ -15,6 +15,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -108,7 +109,7 @@ type sentinelCheck struct {
 func sentinelChecks(fn typedFunc) []sentinelCheck {
 	var checks []sentinelCheck
 	add := func(node ast.Node, checked, target ast.Expr) {
-		if isNilIdent(ast.Unparen(checked)) {
+		if helpers.IsNilIdent(ast.Unparen(checked)) {
 			return
 		}
 		if sentinel := sentinelVar(fn.info, target); sentinel != nil && implementsError(fn.info.TypeOf(checked)) {
@@ -829,7 +830,7 @@ func testedParameter(fn typedFunc, cond ast.Expr) (string, bool) {
 	ast.Inspect(cond, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.BinaryExpr:
-			if isNilIdent(ast.Unparen(node.X)) || isNilIdent(ast.Unparen(node.Y)) {
+			if helpers.IsNilIdent(ast.Unparen(node.X)) || helpers.IsNilIdent(ast.Unparen(node.Y)) {
 				return false
 			}
 		case *ast.SelectorExpr:

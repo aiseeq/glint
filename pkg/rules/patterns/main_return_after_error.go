@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -115,9 +116,9 @@ func errCondOp(cond ast.Expr) token.Token {
 	if !ok || (binary.Op != token.NEQ && binary.Op != token.EQL) {
 		return token.ILLEGAL
 	}
-	value, isNilCompare := binary.X, isNilIdent(binary.Y)
+	value, isNilCompare := binary.X, helpers.IsNilIdent(binary.Y)
 	if !isNilCompare {
-		value, isNilCompare = binary.Y, isNilIdent(binary.X)
+		value, isNilCompare = binary.Y, helpers.IsNilIdent(binary.X)
 	}
 	ident, isIdent := value.(*ast.Ident)
 	if !isNilCompare || !isIdent || !isErrorVarName(ident.Name) {

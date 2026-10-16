@@ -12,6 +12,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -235,7 +236,7 @@ func collectSkippers(files []*ast.File, info *types.Info, skippers map[*types.Fu
 					return false
 				}
 				if ret, ok := n.(*ast.ReturnStmt); ok && len(ret.Results) == 2 &&
-					isIdentNamed(ret.Results[0], "false") && isNilIdent(ret.Results[1]) {
+					helpers.IsIdentNamed(ret.Results[0], "false") && helpers.IsNilIdent(ret.Results[1]) {
 					skippers[obj] = true
 				}
 				return !skippers[obj]
@@ -267,7 +268,7 @@ func (r *IgnoredDecisionResultRule) checkFlagsReadByLogs(fileCtx *core.FileConte
 			continue
 		}
 		ifStmt, ok := block.List[i+1].(*ast.IfStmt)
-		if !ok || ifStmt.Init != nil || ifStmt.Else != nil || !isIdentNamed(ifStmt.Cond, flag) || !allStmtsAreLogs(ifStmt.Body.List) {
+		if !ok || ifStmt.Init != nil || ifStmt.Else != nil || !helpers.IsIdentNamed(ifStmt.Cond, flag) || !allStmtsAreLogs(ifStmt.Body.List) {
 			continue
 		}
 		if readsAfter(block.List[i+2:], flag) {

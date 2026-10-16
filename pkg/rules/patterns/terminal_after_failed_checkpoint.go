@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 var terminalAfterCheckpointMethods = map[string]struct{}{
@@ -594,7 +595,7 @@ func nilComparisonTruthForCheckpoint(
 	for _, pair := range [][2]ast.Expr{{expr.X, expr.Y}, {expr.Y, expr.X}} {
 		ident, ok := pair[0].(*ast.Ident)
 		binding, resolved := checkpointIdentifierBinding(ident, scope)
-		if !ok || !resolved || binding != errBinding || !isNilIdent(pair[1]) {
+		if !ok || !resolved || binding != errBinding || !helpers.IsNilIdent(pair[1]) {
 			continue
 		}
 		if expr.Op == token.NEQ && failed || expr.Op == token.EQL && !failed {
@@ -677,7 +678,7 @@ func nilComparedBindings(expr ast.Expr, scope *checkpointLexicalScope) []checkpo
 	for _, pair := range [][2]ast.Expr{{binary.X, binary.Y}, {binary.Y, binary.X}} {
 		ident, ok := pair[0].(*ast.Ident)
 		binding, resolved := checkpointIdentifierBinding(ident, scope)
-		if ok && resolved && isNilIdent(pair[1]) {
+		if ok && resolved && helpers.IsNilIdent(pair[1]) {
 			return []checkpointBindingID{binding}
 		}
 	}

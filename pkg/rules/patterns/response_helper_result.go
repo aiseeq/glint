@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -66,7 +67,7 @@ func (r *ResponseHelperResultIgnoredRule) AnalyzeGoProject(ctx *core.GoProjectCo
 			case *ast.ExprStmt:
 				call, _ = ast.Unparen(stmt.X).(*ast.CallExpr)
 			case *ast.AssignStmt:
-				if len(stmt.Lhs) == 1 && len(stmt.Rhs) == 1 && isIdentNamed(stmt.Lhs[0], "_") {
+				if len(stmt.Lhs) == 1 && len(stmt.Rhs) == 1 && helpers.IsIdentNamed(stmt.Lhs[0], "_") {
 					call, _ = ast.Unparen(stmt.Rhs[0]).(*ast.CallExpr)
 				}
 			}

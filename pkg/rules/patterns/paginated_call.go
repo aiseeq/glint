@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -81,7 +82,7 @@ func (r *PaginatedCallFirstPageOnlyRule) AnalyzeGoProject(ctx *core.GoProjectCon
 			}
 			if takesPage(fn, info) {
 				if call := firstPageWrapped(fn, info); call != nil {
-					report(call, fn.Name.Name+" hands out the first page of "+callName(call)+" and drops its total — a caller asking for more rows than the page cap gets fewer without a sign",
+					report(call, fn.Name.Name+" hands out the first page of "+helpers.CalleeName(call)+" and drops its total — a caller asking for more rows than the page cap gets fewer without a sign",
 						"Return the total with the rows, or read the rows without the pager's cap")
 				}
 				continue
@@ -440,7 +441,7 @@ var pageListName = regexp.MustCompile(`(?i)^(list|get|find|fetch|load|query|sele
 // listsRows reports a call reading rows: named as a read, its first result
 // a slice of something other than bytes.
 func listsRows(call *ast.CallExpr, info *types.Info) bool {
-	if !pageListName.MatchString(callName(call)) {
+	if !pageListName.MatchString(helpers.CalleeName(call)) {
 		return false
 	}
 	t := info.TypeOf(call)
@@ -503,7 +504,7 @@ func pageCapWatched(body *ast.BlockStmt, call *ast.CallExpr, info *types.Info) b
 			return !watched
 		}
 		for _, side := range []ast.Expr{cmp.X, cmp.Y} {
-			if lenOf, ok := ast.Unparen(side).(*ast.CallExpr); ok && callName(lenOf) == "len" && len(lenOf.Args) == 1 {
+			if lenOf, ok := ast.Unparen(side).(*ast.CallExpr); ok && helpers.CalleeName(lenOf) == "len" && len(lenOf.Args) == 1 {
 				if id, ok := ast.Unparen(lenOf.Args[0]).(*ast.Ident); ok && info.Uses[id] == rows {
 					watched = true
 				}
@@ -591,7 +592,7 @@ func (r *PaginatedTotalRecountedRule) AnalyzeGoProject(ctx *core.GoProjectContex
 			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
-				if !ok || call.Pos() < dropped.End() || !countCallName.MatchString(callName(call)) || !returnsPageCount(call, info) {
+				if !ok || call.Pos() < dropped.End() || !countCallName.MatchString(helpers.CalleeName(call)) || !returnsPageCount(call, info) {
 					return true
 				}
 				line := file.LineFor(call)

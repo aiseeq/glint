@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // analyzeGoMissingAmounts reports the Go forms of a missing amount turned
@@ -29,7 +30,7 @@ func (r *MissingAmountCoercedToZeroRule) analyzeGoMissingAmounts(ctx *core.FileC
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.CallExpr:
-			name := callName(node)
+			name := helpers.CalleeName(node)
 			if !parsers[name] || len(node.Args) != 1 {
 				return true
 			}
@@ -85,17 +86,17 @@ func zeroAnsweringDecimalParsers(file *ast.File) map[string]bool {
 
 func isDecimalType(expr ast.Expr) bool {
 	sel, ok := expr.(*ast.SelectorExpr)
-	return ok && sel.Sel.Name == "Decimal" && isIdentNamed(sel.X, "decimal")
+	return ok && sel.Sel.Name == "Decimal" && helpers.IsIdentNamed(sel.X, "decimal")
 }
 
 func isDecimalZeroSyntax(expr ast.Expr) bool {
 	sel, ok := expr.(*ast.SelectorExpr)
-	return ok && sel.Sel.Name == "Zero" && isIdentNamed(sel.X, "decimal")
+	return ok && sel.Sel.Name == "Zero" && helpers.IsIdentNamed(sel.X, "decimal")
 }
 
 func hasStringParam(fn *ast.FuncDecl) bool {
 	for _, field := range fn.Type.Params.List {
-		if isIdentNamed(field.Type, "string") {
+		if helpers.IsIdentNamed(field.Type, "string") {
 			return true
 		}
 	}
@@ -119,7 +120,7 @@ func returnsZeroDecimalWithoutError(ret *ast.ReturnStmt) bool {
 	case 1:
 		return isDecimalZeroSyntax(ret.Results[0])
 	case 2:
-		return isDecimalZeroSyntax(ret.Results[0]) && isNilIdent(ret.Results[1])
+		return isDecimalZeroSyntax(ret.Results[0]) && helpers.IsNilIdent(ret.Results[1])
 	}
 	return false
 }
@@ -136,7 +137,7 @@ func zeroReturnForNilAmount(first, next ast.Stmt) (*ast.ReturnStmt, string) {
 		return nil, ""
 	}
 	cond, ok := check.Cond.(*ast.BinaryExpr)
-	if !ok || cond.Op != token.EQL || !isNilIdent(cond.Y) || check.Init != nil || len(check.Body.List) != 1 {
+	if !ok || cond.Op != token.EQL || !helpers.IsNilIdent(cond.Y) || check.Init != nil || len(check.Body.List) != 1 {
 		return nil, ""
 	}
 	ret, ok := check.Body.List[0].(*ast.ReturnStmt)
@@ -179,11 +180,11 @@ func zeroPresetOverNilAmount(first, second ast.Stmt) string {
 		return ""
 	}
 	cond, ok := ifStmt.Cond.(*ast.BinaryExpr)
-	if !ok || cond.Op != token.NEQ || !isNilIdent(cond.Y) {
+	if !ok || cond.Op != token.NEQ || !helpers.IsNilIdent(cond.Y) {
 		return ""
 	}
 	assign, ok := ifStmt.Body.List[0].(*ast.AssignStmt)
-	if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !isIdentNamed(assign.Lhs[0], target.Name) {
+	if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !helpers.IsIdentNamed(assign.Lhs[0], target.Name) {
 		return ""
 	}
 	star, ok := assign.Rhs[0].(*ast.StarExpr)
