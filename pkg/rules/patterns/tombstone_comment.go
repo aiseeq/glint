@@ -25,7 +25,7 @@ func init() {
 // comments. A tombstone is noise the moment the commit lands.
 //
 // Not flagged: behavior descriptions ("entries are removed after TTL", "if
-// the record was removed"), a change counted both ways ("lines added and
+// the record was removed", "a channel deleted since"), a change counted both ways ("lines added and
 // removed"), godoc deprecation markers (owned by the
 // deprecated-comment rule), policy quotes, Go doc code blocks (//<tab>),
 // which quote an example instead of annotating the code around them, and a
@@ -57,8 +57,10 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 			`(?i)\b(?:removed|deleted)\b|удал[её]н[оаы]?(?:[^а-яё]|$)|больше не использ|no longer (?:used|needed|exists|supported)`),
 		behaviorAux: regexp.MustCompile(
 			`(?i)(?:\b(?:is|are|was|were|be|being|been|get|gets|got|to|soft)\s+(?:\w+ly\s+)?|будут\s+|будет\s+|был[аио]?\s+|должн\w*\s+быть\s+|могут\s+быть\s+|не\s+|что\s+|сколько\s+)$`),
+		// "deleted since," and "removed in the meantime" date a state of the
+		// data; "removed since v2" dates code and stays a tombstone.
 		behaviorTail: regexp.MustCompile(
-			`(?i)^(?:\s+from\b|\s*(?:->|→)|\s*(?:или|либо|or)\s)`),
+			`(?i)^(?:\s+from\b|\s*(?:->|→)|\s*(?:или|либо|or)\s|\s+since(?:\s*[,.;:)]|\s*$|\s+(?:then|it|they|the|opening|loading)\b)|\s+(?:meanwhile|in the meantime|concurrently|in between)\b)`),
 		addedBefore: regexp.MustCompile(`(?i)\badded\s*(?:and|or|&|/)\s*$`),
 		addedAfter:  regexp.MustCompile(`(?i)^\s*(?:and|or|&|/)\s*added\b`),
 		policyLine: regexp.MustCompile(

@@ -345,3 +345,32 @@ func legacy() {}
 		t.Fatalf("want only the tombstone on line 15, got: %+v", violations)
 	}
 }
+
+// A record deleted since some moment ("a channel deleted since", "removed in
+// the meantime") is a state of the data the code handles, not code that went
+// away; "removed since v2" still dates a removal of code.
+func TestTombstoneComment_DeletedSinceIsState(t *testing.T) {
+	code := `package tomb
+
+// channelToEdit finds the channel named by the edit link among the existing
+// ones. A link to a channel deleted since, or a malformed one, is an error the
+// page shows instead of an empty form.
+func channelToEdit() {}
+
+// A row removed in the meantime is skipped; one removed concurrently too.
+func skip() {}
+
+// legacyHandler removed since v2.
+var x = 1
+
+// GetDB removed since 1.4 — use the pool.
+var y = 2
+`
+	var lines []int
+	for _, v := range NewTombstoneCommentRule().AnalyzeFile(core.NewFileContext("a.go", ".", []byte(code), nil)) {
+		lines = append(lines, v.Line)
+	}
+	if len(lines) != 2 || lines[0] != 11 || lines[1] != 14 {
+		t.Fatalf("want findings on lines 11 and 14 only, got %v", lines)
+	}
+}
