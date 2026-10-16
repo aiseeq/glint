@@ -515,11 +515,14 @@ func (r *TestExternalServiceRule) externalHost(lit *ast.BasicLit) string {
 	if !ok {
 		return ""
 	}
+	return r.externalURLOf(value)
+}
+
+// externalURLOf returns the value when it is a URL on a third-party host, ""
+// for a local or reserved one and for anything else.
+func (r *TestExternalServiceRule) externalURLOf(value string) string {
 	match := r.externalURL.FindStringSubmatch(value)
-	if match == nil {
-		return ""
-	}
-	if r.localHost.MatchString(match[1]) {
+	if match == nil || r.localHost.MatchString(match[1]) {
 		return ""
 	}
 	return value
