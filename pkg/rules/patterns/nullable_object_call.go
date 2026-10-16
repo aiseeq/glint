@@ -15,7 +15,8 @@ func init() {
 
 // NullableObjectCallRule detects Object.* calls on nested values that may be
 // null/undefined in API responses. These calls throw at runtime when the target
-// is not an object.
+// is not an object. A property the file itself fills with an object only
+// (objectFilledProperties) is not reported.
 type NullableObjectCallRule struct {
 	*rules.BaseRule
 	// objectCall matches the opening of a call whose first argument must be an
@@ -54,11 +55,12 @@ func (r *NullableObjectCallRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	}
 
 	src := newJSSource(ctx)
+	filled := objectFilledProperties(src.code)
 	var violations []*core.Violation
 	for i, code := range src.code {
 		for _, loc := range r.objectCall.FindAllStringIndex(code, -1) {
 			arg, ok := jsFirstArgument(src, i, loc[1]-1, nullableArgMaxLines)
-			if !ok || !isUnsafeNullableObjectArg(src.text[i][:loc[0]], arg) {
+			if !ok || !isUnsafeNullableObjectArg(src.text[i][:loc[0]], arg) || filled[jsCompact(arg)] {
 				continue
 			}
 			if r.guardedAbove(src, i, arg) {
@@ -70,6 +72,44 @@ func (r *NullableObjectCallRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	}
 
 	return violations
+}
+
+var (
+	// propertyAssignment is `a.b = value`, anywhere on the line; the value
+	// runs to the end of the statement.
+	propertyAssignment = regexp.MustCompile(`(?:^|[^\w$.])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*=\s*([^=;}][^;}]*)`)
+	// objectDeclaration is a local declared as an object: const m = {…}.
+	objectDeclaration = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\{|\[|new\s)`)
+)
+
+// objectFilledProperties returns the properties the file itself fills with an
+// object and with nothing else: a literal object or array, a new, or a local
+// declared as one (req.m = modules after const modules = {…}). Such a
+// property is the code's own table, no response field; one also filled from
+// a call, an await or null may be missing.
+func objectFilledProperties(code []string) map[string]bool {
+	objects := map[string]bool{}
+	for _, line := range code {
+		for _, m := range objectDeclaration.FindAllStringSubmatch(line, -1) {
+			objects[m[1]] = true
+		}
+	}
+	filled := map[string]bool{}
+	other := map[string]bool{}
+	for _, line := range code {
+		for _, m := range propertyAssignment.FindAllStringSubmatch(line, -1) {
+			value := strings.TrimSpace(m[2])
+			if strings.HasPrefix(value, "{") || strings.HasPrefix(value, "[") || strings.HasPrefix(value, "new ") || objects[value] {
+				filled[m[1]] = true
+			} else {
+				other[m[1]] = true
+			}
+		}
+	}
+	for path := range other {
+		delete(filled, path)
+	}
+	return filled
 }
 
 func isUnsafeNullableObjectArg(prefix string, arg string) bool {

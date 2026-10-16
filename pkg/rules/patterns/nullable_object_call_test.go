@@ -146,3 +146,50 @@ export function b(data: Resp) {
 		})
 	}
 }
+
+// A property the file itself fills with an object is no response field: the
+// loader stores its module table on the require function and reads it back.
+// A property filled from a call or an await may still be null.
+func TestNullableObjectCallPropertyFilledByTheFile(t *testing.T) {
+	code := `function load() {
+  const modules = { ...chunk[0][1], ...ctx.appModules };
+  const table = [];
+  function req(id) { return modules[id] }
+  req.m = modules;
+  req.t = table;
+  req.c = new Map();
+  req.d = { a: 1 };
+  req.r = await fetchRegistry();
+  req.s = buildState();
+  return req;
+}
+function findModule(req, marker) {
+  const ids = Object.keys(req.m).filter((id) => req.m[id].toString().includes(marker));
+  const n = Object.keys(req.t).length + Object.keys(req.d).length;
+  const c = Object.entries(req.c);
+  const r = Object.keys(req.r);
+  const s = Object.keys(req.s);
+  return ids[0];
+}
+`
+	ctx := core.NewFileContext("scripts/bundle.mjs", ".", []byte(code), nil)
+	var lines []int
+	for _, v := range NewNullableObjectCallRule().AnalyzeFile(ctx) {
+		lines = append(lines, v.Line)
+	}
+	if len(lines) != 2 || lines[0] != 17 || lines[1] != 18 {
+		t.Fatalf("want findings on lines 17 (await) and 18 (call) only, got %v", lines)
+	}
+}
+
+// A property the file also clears or fills from elsewhere may be missing.
+func TestNullableObjectCallPropertyAlsoCleared(t *testing.T) {
+	code := `const modules = {};
+req.m = modules;
+function reset() { req.m = null; }
+const ids = Object.keys(req.m);
+`
+	if got := NewNullableObjectCallRule().AnalyzeFile(core.NewFileContext("scripts/bundle.mjs", ".", []byte(code), nil)); len(got) != 1 {
+		t.Fatalf("a property also set to null is still reported, got %d findings", len(got))
+	}
+}
