@@ -5,6 +5,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -74,7 +75,7 @@ func constantTimeMatch(cond ast.Expr) bool {
 			return true
 		}
 		pkg, ok := callPackage(call)
-		name := callName(call)
+		name := helpers.CalleeName(call)
 		if ok && ((pkg == "hmac" && name == "Equal") || (pkg == "subtle" && name == "ConstantTimeCompare")) {
 			found = true
 		}

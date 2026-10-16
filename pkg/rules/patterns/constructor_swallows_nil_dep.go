@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -123,7 +124,7 @@ func (r *ConstructorSwallowsNilDepRule) useSiteDefaults(ctx *core.FileContext, f
 				return
 			}
 			ident, isIdent := assign.Lhs[0].(*ast.Ident)
-			if sel, ok := assign.Rhs[0].(*ast.SelectorExpr); ok && isIdent && isIdentNamed(sel.X, recv) {
+			if sel, ok := assign.Rhs[0].(*ast.SelectorExpr); ok && isIdent && helpers.IsIdentNamed(sel.X, recv) {
 				names[ident.Name] = true
 			}
 		})
@@ -155,11 +156,11 @@ func (r *ConstructorSwallowsNilDepRule) useSiteDefaults(ctx *core.FileContext, f
 // on the receiver and returns the field and the value.
 func silentFieldDefault(ifStmt *ast.IfStmt, recv string) (string, string) {
 	cond, ok := ast.Unparen(ifStmt.Cond).(*ast.BinaryExpr)
-	if !ok || cond.Op != token.EQL || !isNilIdent(cond.Y) || len(ifStmt.Body.List) != 1 {
+	if !ok || cond.Op != token.EQL || !helpers.IsNilIdent(cond.Y) || len(ifStmt.Body.List) != 1 {
 		return "", ""
 	}
 	field, ok := cond.X.(*ast.SelectorExpr)
-	if !ok || !isIdentNamed(field.X, recv) || !isDependencyName(field.Sel.Name) {
+	if !ok || !helpers.IsIdentNamed(field.X, recv) || !isDependencyName(field.Sel.Name) {
 		return "", ""
 	}
 	assign, ok := ifStmt.Body.List[0].(*ast.AssignStmt)
@@ -167,7 +168,7 @@ func silentFieldDefault(ifStmt *ast.IfStmt, recv string) (string, string) {
 		return "", ""
 	}
 	target, ok := assign.Lhs[0].(*ast.SelectorExpr)
-	if !ok || !isIdentNamed(target.X, recv) || target.Sel.Name != field.Sel.Name || !isPackageDefault(assign.Rhs[0]) {
+	if !ok || !helpers.IsIdentNamed(target.X, recv) || target.Sel.Name != field.Sel.Name || !isPackageDefault(assign.Rhs[0]) {
 		return "", ""
 	}
 	return field.Sel.Name, types.ExprString(assign.Rhs[0])
@@ -320,7 +321,7 @@ func nilCheckedParams(cond ast.Expr, params map[string]bool) []string {
 			continue
 		}
 		for _, pair := range [][2]ast.Expr{{be.X, be.Y}, {be.Y, be.X}} {
-			if !isNilIdent(pair[1]) {
+			if !helpers.IsNilIdent(pair[1]) {
 				continue
 			}
 			if ident, ok := pair[0].(*ast.Ident); ok && params[ident.Name] {

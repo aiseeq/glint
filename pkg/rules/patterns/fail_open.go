@@ -160,7 +160,7 @@ func isMissingDependencyCheck(cond ast.Expr, receiver string) bool {
 	}
 	for _, operand := range flattenOr(cond) {
 		bin, ok := ast.Unparen(operand).(*ast.BinaryExpr)
-		if !ok || bin.Op != token.EQL || !isNilIdent(bin.Y) {
+		if !ok || bin.Op != token.EQL || !helpers.IsNilIdent(bin.Y) {
 			continue
 		}
 		sel, ok := ast.Unparen(bin.X).(*ast.SelectorExpr)

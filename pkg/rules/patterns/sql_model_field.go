@@ -12,6 +12,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/sqlschema"
 )
 
@@ -381,7 +382,7 @@ func (c *modelFieldCheck) columnLists(fn *ast.FuncDecl) {
 // stringElements returns the elements of a []string literal.
 func stringElements(lit *ast.CompositeLit) ([]string, bool) {
 	arr, ok := lit.Type.(*ast.ArrayType)
-	if !ok || !isIdentNamed(arr.Elt, "string") {
+	if !ok || !helpers.IsIdentNamed(arr.Elt, "string") {
 		return nil, false
 	}
 	names := make([]string, 0, len(lit.Elts))

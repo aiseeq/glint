@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -104,7 +105,7 @@ func uncheckedClaimsRead(body *ast.BlockStmt, info *types.Info) ast.Expr {
 				checked = true
 			}
 		case *ast.CallExpr:
-			name := strings.ToLower(callName(node))
+			name := strings.ToLower(helpers.CalleeName(node))
 			if strings.Contains(name, "type") || strings.Contains(name, "kind") {
 				for _, arg := range node.Args {
 					checked = checked || claimsKindField(info.TypeOf(arg)) != nil
@@ -145,7 +146,7 @@ func claimsKindField(t types.Type) *types.Var {
 	for i := range st.NumFields() {
 		field := st.Field(i)
 		if field.Embedded() {
-			if embedded, ok := types.Unalias(derefType(field.Type())).(*types.Named); ok {
+			if embedded, ok := types.Unalias(helpers.DerefType(field.Type())).(*types.Named); ok {
 				name := embedded.Obj().Name()
 				claims = claims || name == "RegisteredClaims" || name == "StandardClaims"
 			}
@@ -159,11 +160,4 @@ func claimsKindField(t types.Type) *types.Var {
 		return nil
 	}
 	return kind
-}
-
-func derefType(t types.Type) types.Type {
-	if p, ok := types.Unalias(t).(*types.Pointer); ok {
-		return p.Elem()
-	}
-	return t
 }

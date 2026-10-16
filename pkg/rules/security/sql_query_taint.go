@@ -6,6 +6,8 @@ import (
 	"go/token"
 	"go/types"
 	"strings"
+
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // sqlTaint is what the rule knows about the text of an expression: whether it
@@ -175,7 +177,7 @@ func (c *sqlTaintCheck) rootVar(expr ast.Expr) *types.Var {
 		case *ast.IndexExpr:
 			expr = node.X
 		case *ast.SelectorExpr:
-			if _, isPkg := c.info.Uses[identOf(node.X)].(*types.PkgName); isPkg {
+			if _, isPkg := c.info.Uses[helpers.IdentOf(node.X)].(*types.PkgName); isPkg {
 				expr = node.Sel
 				continue
 			}
@@ -186,11 +188,6 @@ func (c *sqlTaintCheck) rootVar(expr ast.Expr) *types.Var {
 			return nil
 		}
 	}
-}
-
-func identOf(expr ast.Expr) *ast.Ident {
-	ident, _ := ast.Unparen(expr).(*ast.Ident)
-	return ident
 }
 
 // recordSwitchWhitelist marks the tag of a switch whose cases are constants
@@ -300,7 +297,7 @@ func (c *sqlTaintCheck) markValidated(expr ast.Expr) {
 }
 
 func (c *sqlTaintCheck) varOf(expr ast.Expr) *types.Var {
-	ident := identOf(expr)
+	ident := helpers.IdentOf(expr)
 	if ident == nil {
 		return nil
 	}
@@ -351,7 +348,7 @@ func (c *sqlTaintCheck) taint(expr ast.Expr) sqlTaint {
 	case *ast.CallExpr:
 		return c.callTaint(node)
 	case *ast.SelectorExpr:
-		if _, isPkg := c.info.Uses[identOf(node.X)].(*types.PkgName); isPkg {
+		if _, isPkg := c.info.Uses[helpers.IdentOf(node.X)].(*types.PkgName); isPkg {
 			return c.varTaint(c.varOf(node.Sel))
 		}
 		if sel := c.info.Selections[node]; sel == nil || sel.Kind() != types.FieldVal {

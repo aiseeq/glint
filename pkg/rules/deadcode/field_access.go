@@ -148,7 +148,7 @@ func (a *fieldAccess) findDecoderWrappers(file *ast.File, info *types.Info) {
 			if !ok {
 				return true
 			}
-			callee := calledFunc(call, info)
+			callee := helpers.CalledFunc(call, info)
 			if callee == nil || !slices.Contains(decodeFuncs, callee.Name()) {
 				return true
 			}
@@ -438,7 +438,7 @@ var decodeFuncs = []string{
 // reflection-driven codec shares. A function merely named Decode that takes a
 // concrete type does not fill it from outside.
 func (a *fieldAccess) serialization(call *ast.CallExpr, info *types.Info) {
-	fn := calledFunc(call, info)
+	fn := helpers.CalledFunc(call, info)
 	if fn == nil {
 		return
 	}
@@ -515,7 +515,7 @@ func isRequestBodyDecoder(expr ast.Expr, info *types.Info) bool {
 	if !ok || len(call.Args) != 1 {
 		return false
 	}
-	if fn := calledFunc(call, info); fn == nil || fn.Name() != "NewDecoder" {
+	if fn := helpers.CalledFunc(call, info); fn == nil || fn.Name() != "NewDecoder" {
 		return false
 	}
 	body, ok := ast.Unparen(call.Args[0]).(*ast.SelectorExpr)
@@ -528,28 +528,6 @@ func isRequestBodyDecoder(expr ast.Expr, info *types.Info) bool {
 	}
 	named, ok := types.Unalias(typ).(*types.Named)
 	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "net/http" && named.Obj().Name() == "Request"
-}
-
-// calledFunc resolves the function or method a call invokes.
-func calledFunc(call *ast.CallExpr, info *types.Info) *types.Func {
-	var ident *ast.Ident
-	switch fun := ast.Unparen(call.Fun).(type) {
-	case *ast.Ident:
-		ident = fun
-	case *ast.SelectorExpr:
-		ident = fun.Sel
-	case *ast.IndexExpr:
-		return calledFunc(&ast.CallExpr{Fun: fun.X}, info)
-	case *ast.IndexListExpr:
-		return calledFunc(&ast.CallExpr{Fun: fun.X}, info)
-	default:
-		return nil
-	}
-	fn, ok := info.Uses[ident].(*types.Func)
-	if !ok {
-		return nil
-	}
-	return fn
 }
 
 // isUntypedParam reports whether argument i of a call lands in a parameter of

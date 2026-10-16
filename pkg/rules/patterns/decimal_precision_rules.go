@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -89,7 +90,7 @@ func unitScale(info *types.Info, defs map[types.Object]ast.Expr, expr ast.Expr, 
 				return true
 			}
 		}
-		return hasWordFrom(callName(e), map[string]bool{"pow": true, "pow10": true})
+		return hasWordFrom(helpers.CalleeName(e), map[string]bool{"pow": true, "pow10": true})
 	case *ast.Ident:
 		if def, ok := defs[info.ObjectOf(e)]; ok {
 			return unitScale(info, defs, def, depth+1)
@@ -253,7 +254,7 @@ func countsTrimmedZeros(info *types.Info, body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || found || len(call.Args) != 1 || !isIdentNamed(call.Fun, "len") {
+		if !ok || found || len(call.Args) != 1 || !helpers.IsIdentNamed(call.Fun, "len") {
 			return !found
 		}
 		trim, ok := ast.Unparen(call.Args[0]).(*ast.CallExpr)
@@ -283,7 +284,7 @@ func lengthCheckedTexts(body *ast.BlockStmt) map[string]bool {
 			return true
 		}
 		for _, side := range []ast.Expr{bin.X, bin.Y} {
-			if call, ok := ast.Unparen(side).(*ast.CallExpr); ok && len(call.Args) == 1 && isIdentNamed(call.Fun, "len") {
+			if call, ok := ast.Unparen(side).(*ast.CallExpr); ok && len(call.Args) == 1 && helpers.IsIdentNamed(call.Fun, "len") {
 				checked[types.ExprString(call.Args[0])] = true
 			}
 		}

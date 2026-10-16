@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -183,10 +184,10 @@ func (r *NilSliceRule) analyze(ctx *core.FileContext, info *types.Info, project 
 		var other ast.Expr
 		isNilComparison := false
 
-		if isNilIdent(binary.Y) {
+		if helpers.IsNilIdent(binary.Y) {
 			other = binary.X
 			isNilComparison = true
-		} else if isNilIdent(binary.X) {
+		} else if helpers.IsNilIdent(binary.X) {
 			other = binary.Y
 			isNilComparison = true
 		}

@@ -291,7 +291,7 @@ func (s fillSources) call(call *ast.CallExpr, info *types.Info) {
 	// The declared signature, not the instantiated one: a parameter *T of a
 	// generic decoder is filled by reflection whatever T becomes.
 	signature, ok := types.Unalias(info.TypeOf(call.Fun)).(*types.Signature)
-	if fn := calledFunc(call, info); fn != nil {
+	if fn := helpers.CalledFunc(call, info); fn != nil {
 		if slices.Contains(helpers.EncodeFuncs, fn.Name()) {
 			return // an encoder reads the fields
 		}

@@ -5,6 +5,8 @@ import (
 	"go/token"
 	"go/types"
 	"regexp"
+
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // allowlistName names a list of who or what is let through.
@@ -93,7 +95,7 @@ func emptinessSubject(cond ast.Expr) ast.Expr {
 		return bin.X
 	}
 	if lit, ok := bin.Y.(*ast.BasicLit); ok && lit.Value == "0" {
-		if call, ok := bin.X.(*ast.CallExpr); ok && len(call.Args) == 1 && isIdentNamed(call.Fun, "len") {
+		if call, ok := bin.X.(*ast.CallExpr); ok && len(call.Args) == 1 && helpers.IsIdentNamed(call.Fun, "len") {
 			return call.Args[0]
 		}
 	}

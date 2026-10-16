@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -238,5 +239,5 @@ func (r *ReturnNilErrorRule) hasErrorReturn(fn *ast.FuncDecl) bool {
 
 // isNilNilReturn checks if return statement returns (nil, nil)
 func (r *ReturnNilErrorRule) isNilNilReturn(ret *ast.ReturnStmt) bool {
-	return len(ret.Results) == 2 && isNilIdent(ret.Results[0]) && isNilIdent(ret.Results[1])
+	return len(ret.Results) == 2 && helpers.IsNilIdent(ret.Results[0]) && helpers.IsNilIdent(ret.Results[1])
 }

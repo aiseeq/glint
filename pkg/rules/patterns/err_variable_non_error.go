@@ -217,7 +217,7 @@ func nilCheckAfter(body *ast.BlockStmt, variable *ast.Ident, pos token.Pos) *ast
 			return true
 		}
 		id, ok := ast.Unparen(bin.X).(*ast.Ident)
-		if ok && id.Name == variable.Name && (id.Obj == nil || variable.Obj == nil || id.Obj == variable.Obj) && isNilIdent(bin.Y) {
+		if ok && id.Name == variable.Name && (id.Obj == nil || variable.Obj == nil || id.Obj == variable.Obj) && helpers.IsNilIdent(bin.Y) {
 			found = bin
 		}
 		return true

@@ -363,7 +363,7 @@ func NewStaleBatchRowActedWithoutStatusRecheckRule() *typedFuncRule {
 			}
 			for _, row := range rangeElementVars(scope.info, loop) {
 				for _, call := range changesByIDOnly(scope, loop.Body, row, 2) {
-					findings = append(findings, funcFinding{node: call, message: callName(call) + " changes a row picked by its status by id alone — a row that moved on since the pick is changed anyway; pass the picked status or the row's version"})
+					findings = append(findings, funcFinding{node: call, message: helpers.CalleeName(call) + " changes a row picked by its status by id alone — a row that moved on since the pick is changed anyway; pass the picked status or the row's version"})
 				}
 			}
 			return true
@@ -391,7 +391,7 @@ func pickedByStatus(info *types.Info, body *ast.BlockStmt, rows types.Object) bo
 		if !ok {
 			return true
 		}
-		words := helpers.IdentifierWords(callName(call))
+		words := helpers.IdentifierWords(helpers.CalleeName(call))
 		has := func(set []string) bool {
 			return slices.ContainsFunc(words, func(w string) bool { return slices.Contains(set, w) })
 		}
@@ -412,7 +412,7 @@ func changesByIDOnly(scope funcScope, body *ast.BlockStmt, row types.Object, dep
 		if !ok {
 			return true
 		}
-		name := callName(call)
+		name := helpers.CalleeName(call)
 		if slices.ContainsFunc(stateChangeVerbs, func(verb string) bool { return helpers.HasLeadingWord(name, verb) }) {
 			if passesRowID(scope.info, call, row) && !pinsRowState(scope.info, call, row) {
 				calls = append(calls, call)
@@ -564,7 +564,7 @@ func namesIdempotencyKey(name string) bool {
 func builtKey(value ast.Expr) bool {
 	switch v := ast.Unparen(value).(type) {
 	case *ast.CallExpr:
-		name := callName(v)
+		name := helpers.CalleeName(v)
 		return name == "Sprintf" || name == "Join" || name == "Sprint"
 	case *ast.BinaryExpr:
 		return v.Op == token.ADD
@@ -596,7 +596,7 @@ func principalLocals(info *types.Info, body *ast.BlockStmt) []types.Object {
 			return true
 		}
 		call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
-		if !ok || !resolvesPrincipal(callName(call)) {
+		if !ok || !resolvesPrincipal(helpers.CalleeName(call)) {
 			return true
 		}
 		if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
@@ -737,7 +737,7 @@ var statusClassWords = []string{"permanent", "retryable", "retriable", "retry", 
 // classifiesStatus reports a call handed a response's StatusCode whose name
 // speaks of a class of failure: isPermanentRejection(resp.StatusCode).
 func classifiesStatus(info *types.Info, call *ast.CallExpr) bool {
-	words := helpers.IdentifierWords(callName(call))
+	words := helpers.IdentifierWords(helpers.CalleeName(call))
 	if !slices.ContainsFunc(words, func(w string) bool { return slices.Contains(statusClassWords, w) }) {
 		return false
 	}
@@ -823,7 +823,7 @@ func schedulesRetry(scope funcScope, body ast.Node, depth int) bool {
 		if !ok || found {
 			return !found
 		}
-		if slices.ContainsFunc(helpers.IdentifierWords(callName(call)), func(w string) bool { return slices.Contains(retryWords, w) }) {
+		if slices.ContainsFunc(helpers.IdentifierWords(helpers.CalleeName(call)), func(w string) bool { return slices.Contains(retryWords, w) }) {
 			found = true
 			return false
 		}
@@ -899,7 +899,7 @@ func NewValidationAfterCommittedInsertRule() *typedFuncRule {
 func runsInTransaction(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && slices.Contains(transactionCalls, callName(call)) {
+		if call, ok := n.(*ast.CallExpr); ok && slices.Contains(transactionCalls, helpers.CalleeName(call)) {
 			found = true
 		}
 		return !found
@@ -916,7 +916,7 @@ func insertedEntity(info *types.Info, stmt ast.Stmt) types.Object {
 		case *ast.FuncLit, *ast.BlockStmt:
 			return false
 		case *ast.CallExpr:
-			name := callName(node)
+			name := helpers.CalleeName(node)
 			if !helpers.HasLeadingWord(name, "Create") && !helpers.HasLeadingWord(name, "Insert") {
 				return true
 			}
@@ -948,7 +948,7 @@ func validatesEntity(info *types.Info, node ast.Node, entity types.Object) strin
 		if !ok || found != "" {
 			return found == ""
 		}
-		name := callName(call)
+		name := helpers.CalleeName(call)
 		lower := strings.ToLower(name)
 		if !slices.ContainsFunc(checkVerbs, func(verb string) bool { return strings.HasPrefix(lower, verb) && helpers.WordEndsAt(name, len(verb)) }) {
 			return true
@@ -968,7 +968,7 @@ func compensates(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
-			name := callName(call)
+			name := helpers.CalleeName(call)
 			if slices.ContainsFunc(compensationVerbs, func(verb string) bool { return helpers.HasLeadingWord(name, verb) }) {
 				found = true
 			}

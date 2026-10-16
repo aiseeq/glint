@@ -233,7 +233,7 @@ func requestHasNoBody(file *ast.File, info *types.Info, call *ast.CallExpr, buil
 		if tv, ok := info.Types[body]; ok && tv.IsNil() {
 			return true
 		}
-	} else if isNilIdent(body) {
+	} else if helpers.IsNilIdent(body) {
 		return true
 	}
 	sel, ok := body.(*ast.SelectorExpr)

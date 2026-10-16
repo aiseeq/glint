@@ -84,7 +84,7 @@ func (r *MuxAPIDefaultNotFoundRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 	lr := newLineReporter(ctx, r.BaseRule)
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if ok && callName(call) == "NewRouter" {
+		if ok && helpers.CalleeName(call) == "NewRouter" {
 			if pkg, ok := callPackage(call); ok && aliases[pkg] {
 				lr.report(call, "Router serves /api/ routes with mux's default NotFoundHandler — an unknown API path is answered in text/plain, not the JSON envelope",
 					"Set router.NotFoundHandler (and MethodNotAllowedHandler) to answer /api/ paths in the API's error envelope", "mux_api_default_not_found")
@@ -98,7 +98,7 @@ func (r *MuxAPIDefaultNotFoundRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 // apiCatchAll reports router.PathPrefix("/api/").Handler(...): a handler of
 // its own for every /api/ path no other route takes.
 func apiCatchAll(call *ast.CallExpr) bool {
-	if name := callName(call); name != "Handler" && name != "HandlerFunc" {
+	if name := helpers.CalleeName(call); name != "Handler" && name != "HandlerFunc" {
 		return false
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -106,7 +106,7 @@ func apiCatchAll(call *ast.CallExpr) bool {
 		return false
 	}
 	prefix, ok := sel.X.(*ast.CallExpr)
-	if !ok || callName(prefix) != "PathPrefix" || len(prefix.Args) != 1 {
+	if !ok || helpers.CalleeName(prefix) != "PathPrefix" || len(prefix.Args) != 1 {
 		return false
 	}
 	path := stringLiteral(prefix.Args[0])
@@ -121,7 +121,7 @@ func registersAPIRoute(file *ast.File) bool {
 		if !ok || len(call.Args) == 0 {
 			return !found
 		}
-		switch callName(call) {
+		switch helpers.CalleeName(call) {
 		case "HandleFunc", "Handle", "Path", "PathPrefix":
 			if strings.HasPrefix(stringLiteral(call.Args[0]), "/api") {
 				found = true

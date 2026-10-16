@@ -87,7 +87,7 @@ func nilDestination(info *types.Info, call *ast.CallExpr) (int, string, bool) {
 		name = fn.Name()
 	}
 	for i, arg := range call.Args {
-		if !isNilIdent(ast.Unparen(arg)) || i >= sig.Params().Len() || (sig.Variadic() && i == sig.Params().Len()-1) {
+		if !helpers.IsNilIdent(ast.Unparen(arg)) || i >= sig.Params().Len() || (sig.Variadic() && i == sig.Params().Len()-1) {
 			continue
 		}
 		param := sig.Params().At(i)

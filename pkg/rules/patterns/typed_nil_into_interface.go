@@ -302,7 +302,7 @@ func rejectsBranch(pkg *packages.Package, block *ast.BlockStmt) bool {
 			return false
 		}
 		result := ast.Unparen(last.Results[len(last.Results)-1])
-		return !isNilIdent(result) && isErrorValue(result, pkg.TypesInfo)
+		return !helpers.IsNilIdent(result) && isErrorValue(result, pkg.TypesInfo)
 	case *ast.ExprStmt:
 		return stmtNoReturn(last, pkg.TypesInfo, nil) != callReturns
 	}

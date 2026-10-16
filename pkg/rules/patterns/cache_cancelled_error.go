@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -137,7 +138,7 @@ func looksAtContextError(info *types.Info, body *ast.BlockStmt) bool {
 		case "Err":
 			found = types.TypeString(info.TypeOf(sel.X), nil) == "context.Context"
 		case "Canceled", "DeadlineExceeded":
-			found = isIdentNamed(sel.X, "context")
+			found = helpers.IsIdentNamed(sel.X, "context")
 		}
 		return !found
 	})

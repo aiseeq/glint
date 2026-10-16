@@ -2,9 +2,10 @@ package duplication
 
 import (
 	"fmt"
-	"github.com/aiseeq/glint/pkg/core"
 	"strings"
 	"testing"
+
+	"github.com/aiseeq/glint/pkg/core"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

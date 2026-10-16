@@ -926,7 +926,7 @@ func isCommaOkMapHit(stmt ast.Stmt) bool {
 	flag, ok2 := assign.Lhs[1].(*ast.Ident)
 	cond, ok3 := ifStmt.Cond.(*ast.Ident)
 	ret, ok4 := ifStmt.Body.List[0].(*ast.ReturnStmt)
-	return ok1 && ok2 && ok3 && ok4 && cond.Name == flag.Name && len(ret.Results) == 1 && isIdentNamed(ret.Results[0], value.Name)
+	return ok1 && ok2 && ok3 && ok4 && cond.Name == flag.Name && len(ret.Results) == 1 && helpers.IsIdentNamed(ret.Results[0], value.Name)
 }
 
 // siblingSourceReturn returns the name of the call a return in the branch of

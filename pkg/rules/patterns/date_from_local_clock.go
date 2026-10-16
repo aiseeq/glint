@@ -173,7 +173,7 @@ func (r *DateFromLocalClockRule) hostClockToday(ctx *core.FileContext, helper st
 					}
 				}
 			case *ast.CallExpr:
-				if !helpers.IsWriteName(callName(node)) || len(nouns) == 0 {
+				if !helpers.IsWriteName(helpers.CalleeName(node)) || len(nouns) == 0 {
 					return true
 				}
 				if !mentionsNoun(fn.Name.Name, nouns) && !mentionsNoun(types.ExprString(node.Fun), nouns) {
@@ -213,13 +213,13 @@ func isTimeNowCall(expr ast.Expr) bool {
 		return false
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	return ok && sel.Sel.Name == "Now" && isIdentNamed(sel.X, "time")
+	return ok && sel.Sel.Name == "Now" && helpers.IsIdentNamed(sel.X, "time")
 }
 
 // isTimeTimeExpr reports the type expression time.Time.
 func isTimeTimeExpr(expr ast.Expr) bool {
 	sel, ok := expr.(*ast.SelectorExpr)
-	return ok && sel.Sel.Name == "Time" && isIdentNamed(sel.X, "time")
+	return ok && sel.Sel.Name == "Time" && helpers.IsIdentNamed(sel.X, "time")
 }
 
 // dateOnlyLayout reports a constant layout with a year and no time of day:
@@ -240,7 +240,7 @@ func dateOnlyLayoutSyntax(expr ast.Expr) bool {
 		layout, err := strconv.Unquote(e.Value)
 		return err == nil && isDateOnlyLayout(layout)
 	case *ast.SelectorExpr:
-		return e.Sel.Name == "DateOnly" && isIdentNamed(e.X, "time")
+		return e.Sel.Name == "DateOnly" && helpers.IsIdentNamed(e.X, "time")
 	}
 	return false
 }

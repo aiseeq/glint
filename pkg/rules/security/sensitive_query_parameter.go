@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -160,7 +161,7 @@ func (r *SensitiveQueryParameterRule) valuesIntoRedirects(ctx *core.FileContext)
 		})
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
-			if !ok || !strings.Contains(strings.ToLower(calleeName(call)), "redirect") {
+			if !ok || !strings.Contains(strings.ToLower(helpers.CalleeName(call)), "redirect") {
 				return true
 			}
 			for _, arg := range call.Args {
@@ -242,7 +243,7 @@ func secretsInRedirects(ctx *core.FileContext) map[int]bool {
 	}
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || !strings.Contains(strings.ToLower(calleeName(call)), "redirect") {
+		if !ok || !strings.Contains(strings.ToLower(helpers.CalleeName(call)), "redirect") {
 			return true
 		}
 		for _, arg := range call.Args {
@@ -254,17 +255,6 @@ func secretsInRedirects(ctx *core.FileContext) map[int]bool {
 		return true
 	})
 	return lines
-}
-
-// calleeName returns the name of the called function or method.
-func calleeName(call *ast.CallExpr) string {
-	switch fun := ast.Unparen(call.Fun).(type) {
-	case *ast.Ident:
-		return fun.Name
-	case *ast.SelectorExpr:
-		return fun.Sel.Name
-	}
-	return ""
 }
 
 // mentionsSecretVariable reports an identifier with a secret's name in the

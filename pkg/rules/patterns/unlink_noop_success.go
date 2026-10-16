@@ -142,7 +142,7 @@ func writesState(stmt ast.Stmt) bool {
 	found := false
 	ast.Inspect(stmt, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
-			words := helpers.IdentifierWords(callName(call))
+			words := helpers.IdentifierWords(helpers.CalleeName(call))
 			found = found || (len(words) > 0 && writeVerbs[words[0]])
 		}
 		return !found
@@ -174,11 +174,11 @@ func noopReturn(info *types.Info, stmt ast.Stmt, entity *types.Var) *ast.ReturnS
 		return nil
 	}
 	cond, ok := check.Cond.(*ast.BinaryExpr)
-	if !ok || cond.Op != token.EQL || !isNilIdent(cond.Y) || mentionsVar(info, cond.X, entity) {
+	if !ok || cond.Op != token.EQL || !helpers.IsNilIdent(cond.Y) || mentionsVar(info, cond.X, entity) {
 		return nil
 	}
 	ret, ok := check.Body.List[0].(*ast.ReturnStmt)
-	if !ok || len(ret.Results) != 2 || !isNilIdent(ret.Results[1]) {
+	if !ok || len(ret.Results) != 2 || !helpers.IsNilIdent(ret.Results[1]) {
 		return nil
 	}
 	if ident, isIdent := ast.Unparen(ret.Results[0]).(*ast.Ident); isIdent && info.ObjectOf(ident) == entity {

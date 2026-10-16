@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -131,7 +132,7 @@ func readsOnlyStatus(body *ast.BlockStmt) bool {
 	if !ok {
 		return false
 	}
-	if sel, ok := as.Fun.(*ast.SelectorExpr); !ok || sel.Sel.Name != "As" || !isIdentNamed(sel.X, "errors") {
+	if sel, ok := as.Fun.(*ast.SelectorExpr); !ok || sel.Sel.Name != "As" || !helpers.IsIdentNamed(sel.X, "errors") {
 		return false
 	}
 	for _, part := range parts[1:] {

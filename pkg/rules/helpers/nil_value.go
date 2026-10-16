@@ -10,11 +10,11 @@ import (
 // recognized: F(nil) may be a call.
 func IsNilValue(expr ast.Expr, info *types.Info) bool {
 	expr = ast.Unparen(expr)
-	if isNil(expr) {
+	if IsNilIdent(expr) {
 		return true
 	}
 	call, ok := expr.(*ast.CallExpr)
-	if !ok || len(call.Args) != 1 || !isNil(ast.Unparen(call.Args[0])) {
+	if !ok || len(call.Args) != 1 || !IsNilIdent(ast.Unparen(call.Args[0])) {
 		return false
 	}
 	if info != nil {
@@ -27,9 +27,4 @@ func IsNilValue(expr ast.Expr, info *types.Info) bool {
 	}
 	_, ok = paren.X.(*ast.StarExpr)
 	return ok
-}
-
-func isNil(expr ast.Expr) bool {
-	ident, ok := expr.(*ast.Ident)
-	return ok && ident.Name == "nil"
 }

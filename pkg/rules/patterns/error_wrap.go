@@ -12,6 +12,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -97,7 +98,7 @@ func (r *ErrorWrapRule) checkErrorBranch(ctx *core.FileContext, info *types.Info
 	// through, not a lost context: the caller of this method adds the
 	// context, and wrapping here would duplicate it.
 	call := errorSourceCall(info, fn, ifStmt, before, errName)
-	if callee := callName(call); callee != "" && callee == fn.Name.Name {
+	if callee := helpers.CalleeName(call); callee != "" && callee == fn.Name.Name {
 		return nil
 	}
 	// Closure-runners (RunInTx-style calls taking a func literal) and
@@ -376,20 +377,6 @@ func untypedForeignCall(ctx *core.FileContext, own projectCode, call *ast.CallEx
 		return qualifier.Name + "." + sel.Sel.Name, true
 	}
 	return "", false
-}
-
-// callName returns the (selector) name of the called function, "" if unknown.
-func callName(call *ast.CallExpr) string {
-	if call == nil {
-		return ""
-	}
-	switch fun := call.Fun.(type) {
-	case *ast.Ident:
-		return fun.Name
-	case *ast.SelectorExpr:
-		return fun.Sel.Name
-	}
-	return ""
 }
 
 // isClosureRunnerCall reports whether the call takes a func literal argument

@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -79,7 +80,7 @@ func (r *AnyInPublicContractRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.FuncDecl:
-			if node.Recv != nil && !receiverTypeExported(node.Recv) {
+			if node.Recv != nil && !helpers.ReceiverTypeExported(node.Recv) {
 				return true
 			}
 			violations = append(violations, r.checkFuncSignature(ctx, node.Name, node.Type)...)
@@ -159,31 +160,6 @@ func (r *AnyInPublicContractRule) checkStructFields(
 		violations = append(violations, v)
 	}
 	return violations
-}
-
-// receiverTypeExported reports whether a method's receiver base type is
-// exported: a method of an unexported type is not part of the public API.
-func receiverTypeExported(recv *ast.FieldList) bool {
-	if len(recv.List) == 0 {
-		return false
-	}
-	expr := recv.List[0].Type
-	for {
-		switch t := expr.(type) {
-		case *ast.StarExpr:
-			expr = t.X
-		case *ast.ParenExpr:
-			expr = t.X
-		case *ast.IndexExpr:
-			expr = t.X
-		case *ast.IndexListExpr:
-			expr = t.X
-		case *ast.Ident:
-			return t.IsExported()
-		default:
-			return false
-		}
-	}
 }
 
 // checkInterfaceMethods reports interface methods whose results contain any.

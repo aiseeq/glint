@@ -12,6 +12,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -120,7 +121,7 @@ func outageAnswer(info *types.Info, body *ast.BlockStmt) *ast.CallExpr {
 		if !ok || answer != nil {
 			return answer == nil
 		}
-		if outageResponder.MatchString(callName(call)) {
+		if outageResponder.MatchString(helpers.CalleeName(call)) {
 			answer = call
 			return false
 		}

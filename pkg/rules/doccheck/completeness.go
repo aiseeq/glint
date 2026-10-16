@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -85,31 +86,6 @@ func isInternalPackagePath(relPath string) bool {
 		}
 	}
 	return false
-}
-
-// receiverTypeExported reports whether a method's receiver base type is
-// exported.
-func receiverTypeExported(recv *ast.FieldList) bool {
-	if len(recv.List) == 0 {
-		return false
-	}
-	expr := recv.List[0].Type
-	for {
-		switch t := expr.(type) {
-		case *ast.StarExpr:
-			expr = t.X
-		case *ast.ParenExpr:
-			expr = t.X
-		case *ast.IndexExpr:
-			expr = t.X
-		case *ast.IndexListExpr:
-			expr = t.X
-		case *ast.Ident:
-			return t.IsExported()
-		default:
-			return false
-		}
-	}
 }
 
 // checkGenDecl checks type and const/var declarations
@@ -196,7 +172,7 @@ func (r *DocCompletenessRule) checkFuncDecl(ctx *core.FileContext, fn *ast.FuncD
 
 	// Skip unexported functions and methods of unexported types: neither is
 	// part of the package API
-	if !ast.IsExported(fn.Name.Name) || (fn.Recv != nil && !receiverTypeExported(fn.Recv)) {
+	if !ast.IsExported(fn.Name.Name) || (fn.Recv != nil && !helpers.ReceiverTypeExported(fn.Recv)) {
 		return nil
 	}
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -212,7 +213,7 @@ func (r *UnusedParamRule) analyze(ctx *core.FileContext, info *types.Info, fixed
 		used := usedObjects(fn.Body, info)
 		for _, field := range fn.Type.Params.List {
 			for _, name := range field.Names {
-				if name.Name == "_" && isContextType(info.TypeOf(field.Type)) {
+				if name.Name == "_" && helpers.IsContextType(info.TypeOf(field.Type)) {
 					violations = append(violations, r.blankContext(ctx, name))
 					continue
 				}
@@ -242,12 +243,6 @@ func (r *UnusedParamRule) blankContext(ctx *core.FileContext, name *ast.Ident) *
 	v.WithSuggestion("Remove the parameter, or pass the context on to what the function calls")
 	v.WithContext("param", "_")
 	return v
-}
-
-// isContextType reports context.Context.
-func isContextType(t types.Type) bool {
-	named, ok := types.Unalias(t).(*types.Named)
-	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "context" && named.Obj().Name() == "Context"
 }
 
 // usedObjects returns the objects the identifiers of a body refer to.

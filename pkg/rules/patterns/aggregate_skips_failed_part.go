@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -258,7 +259,7 @@ func remoteFetchSkippedBlindly(call *ast.CallExpr, check *ast.IfStmt, errName st
 		case *ast.TypeSwitchStmt, *ast.SwitchStmt:
 			classified = true
 		case *ast.CallExpr:
-			if name := callName(node); name == "As" || name == "Is" {
+			if name := helpers.CalleeName(node); name == "As" || name == "Is" {
 				classified = true
 			}
 		}
@@ -286,7 +287,7 @@ func namesClient(expr ast.Expr) bool {
 // errNotNil reports the condition err != nil.
 func errNotNil(cond ast.Expr, name string) bool {
 	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	if !ok || bin.Op != token.NEQ || !isNilIdent(bin.Y) {
+	if !ok || bin.Op != token.NEQ || !helpers.IsNilIdent(bin.Y) {
 		return false
 	}
 	id, ok := bin.X.(*ast.Ident)

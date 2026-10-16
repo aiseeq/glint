@@ -248,7 +248,7 @@ func NewErrorPathSkipsFailureRecordingRule() *typedFuncRule {
 			}
 			// The recorder's own failure, and a claim another worker won, are
 			// not failures of the entity.
-			if source := sources[branch.stmt]; source != nil && hasTokenIn(callName(source), recorderWords, claimWords) {
+			if source := sources[branch.stmt]; source != nil && hasTokenIn(helpers.CalleeName(source), recorderWords, claimWords) {
 				continue
 			}
 			if !anyDeclaredBefore(entities, branch.stmt.Pos()) {
@@ -275,7 +275,7 @@ func errReturnBranches(info *types.Info, body *ast.BlockStmt) []errBranch {
 			return true
 		}
 		ret, ok := stmt.Body.List[len(stmt.Body.List)-1].(*ast.ReturnStmt)
-		if !ok || len(ret.Results) == 0 || isNilIdent(ret.Results[len(ret.Results)-1]) {
+		if !ok || len(ret.Results) == 0 || helpers.IsNilIdent(ret.Results[len(ret.Results)-1]) {
 			return true
 		}
 		branches = append(branches, errBranch{stmt: stmt, ret: ret, entities: recordedEntities(info, stmt.Body, info.Uses[errIdent])})
@@ -293,7 +293,7 @@ func recordedEntities(info *types.Info, block *ast.BlockStmt, errObj types.Objec
 	var entities []types.Object
 	inspectFuncBody(block, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || helpers.IsLoggerCall(call) || !hasTokenIn(callName(call), recorderWords) {
+		if !ok || helpers.IsLoggerCall(call) || !hasTokenIn(helpers.CalleeName(call), recorderWords) {
 			return true
 		}
 		passesErr := false

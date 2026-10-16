@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -92,7 +93,7 @@ func returnsErrorLast(fn *ast.FuncDecl) bool {
 	if results == nil || len(results.List) == 0 {
 		return false
 	}
-	return isIdentNamed(results.List[len(results.List)-1].Type, "error")
+	return helpers.IsIdentNamed(results.List[len(results.List)-1].Type, "error")
 }
 
 // flattenedClassification returns the fresh-text return of a classified case

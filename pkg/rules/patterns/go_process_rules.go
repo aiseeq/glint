@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -521,7 +522,7 @@ func returnsNonNilError(body *ast.BlockStmt) bool {
 		case *ast.FuncLit:
 			return false
 		case *ast.ReturnStmt:
-			if len(node.Results) > 0 && !isNilIdent(node.Results[len(node.Results)-1]) {
+			if len(node.Results) > 0 && !helpers.IsNilIdent(node.Results[len(node.Results)-1]) {
 				found = true
 			}
 		case *ast.CallExpr:

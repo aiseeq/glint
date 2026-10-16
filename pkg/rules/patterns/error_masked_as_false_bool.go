@@ -140,7 +140,7 @@ func returnsOnlyError(ftype *ast.FuncType) bool {
 	if ftype.Results == nil || ftype.Results.NumFields() != 1 {
 		return false
 	}
-	return isIdentNamed(ftype.Results.List[0].Type, "error")
+	return helpers.IsIdentNamed(ftype.Results.List[0].Type, "error")
 }
 
 // storesErrorForErrMethod reports whether the branch assigns the error (a
@@ -297,22 +297,17 @@ func classifiesError(cond ast.Expr, errName string) bool {
 		case token.LOR:
 			return classifiesError(c.X, errName) && classifiesError(c.Y, errName)
 		case token.EQL:
-			return (isIdentNamed(c.X, errName) && !isNilIdent(c.Y)) ||
-				(isIdentNamed(c.Y, errName) && !isNilIdent(c.X))
+			return (helpers.IsIdentNamed(c.X, errName) && !helpers.IsNilIdent(c.Y)) ||
+				(helpers.IsIdentNamed(c.Y, errName) && !helpers.IsNilIdent(c.X))
 		}
 	case *ast.CallExpr:
 		for _, arg := range c.Args {
-			if isIdentNamed(arg, errName) {
+			if helpers.IsIdentNamed(arg, errName) {
 				return true
 			}
 		}
 	}
 	return false
-}
-
-func isIdentNamed(expr ast.Expr, name string) bool {
-	ident, ok := expr.(*ast.Ident)
-	return ok && ident.Name == name
 }
 
 // hasLoggingCall returns true if any statement in the block calls a logger

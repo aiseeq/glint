@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -271,7 +272,7 @@ func (t *closerTracker) mention(ident *ast.Ident, stack []ast.Node) {
 // other than the SQL row cursors sql-rows-close follows and reflect.Value,
 // whose Close closes the channel it holds.
 func isCloserType(t types.Type) bool {
-	if isRowsType(t) || isNamedFrom(derefType(t), "reflect") {
+	if isRowsType(t) || isNamedFrom(helpers.DerefType(t), "reflect") {
 		return false
 	}
 	obj, _, _ := types.LookupFieldOrMethod(t, true, nil, "Close")
@@ -462,7 +463,7 @@ func (c *closerCallees) notCallersToClose(fn *types.Func) bool {
 		return false
 	}
 	fn = fn.Origin()
-	if sig, ok := fn.Type().(*types.Signature); ok && sig.Recv() != nil && isNamedFrom(derefType(sig.Recv().Type()), "os/exec") {
+	if sig, ok := fn.Type().(*types.Signature); ok && sig.Recv() != nil && isNamedFrom(helpers.DerefType(sig.Recv().Type()), "os/exec") {
 		return true
 	}
 	d, ok := c.decls[fn]
@@ -490,13 +491,6 @@ func createsResource(name string) bool {
 		}
 	}
 	return false
-}
-
-func derefType(t types.Type) types.Type {
-	if ptr, ok := types.Unalias(t).(*types.Pointer); ok {
-		return ptr.Elem()
-	}
-	return t
 }
 
 // registersCleanup reports a body that calls a Cleanup method — a test

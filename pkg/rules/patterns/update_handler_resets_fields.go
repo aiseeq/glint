@@ -81,7 +81,7 @@ func decodedValueBody(info *types.Info, body *ast.BlockStmt) types.Object {
 		if !ok || found != nil {
 			return found == nil
 		}
-		name := strings.ToLower(callName(call))
+		name := strings.ToLower(helpers.CalleeName(call))
 		if !strings.Contains(name, "decode") && !strings.Contains(name, "unmarshal") && !strings.Contains(name, "bind") {
 			return true
 		}
@@ -153,7 +153,7 @@ func freshFromBody(info *types.Info, expr ast.Expr, decoded types.Object) bool {
 	}
 	switch e := expr.(type) {
 	case *ast.CallExpr:
-		if !helpers.HasLeadingWord(callName(e), "New") {
+		if !helpers.HasLeadingWord(helpers.CalleeName(e), "New") {
 			return false
 		}
 	case *ast.CompositeLit:
@@ -179,7 +179,7 @@ func readsStoredBefore(body *ast.BlockStmt, update *ast.CallExpr) bool {
 		if !ok || found || call.Pos() >= update.Pos() {
 			return !found
 		}
-		name := callName(call)
+		name := helpers.CalleeName(call)
 		for _, verb := range []string{"Get", "Find", "Load", "Fetch"} {
 			if helpers.HasLeadingWord(name, verb) {
 				found = true

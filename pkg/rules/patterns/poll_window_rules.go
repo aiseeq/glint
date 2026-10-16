@@ -88,7 +88,7 @@ func NewPollWindowAdvancedPastLoggedFailureRule() *typedFuncRule {
 					return true
 				}
 				if decl, ok := scope.callee(call); ok && !returnsErrorResult(decl.info, decl.decl) && logsFailedWrite(scope, decl, pollWindowDepth) {
-					findings = append(findings, funcFinding{node: call, message: callName(call) + " gets the fetched records and only logs a failed write, and the poll then moves " + window.field.Name() + " on — the failed record is behind the window and never fetched again"})
+					findings = append(findings, funcFinding{node: call, message: helpers.CalleeName(call) + " gets the fetched records and only logs a failed write, and the poll then moves " + window.field.Name() + " on — the failed record is behind the window and never fetched again"})
 				}
 				return true
 			})
@@ -290,7 +290,7 @@ func noteWriteErrs(info *types.Info, assign *ast.AssignStmt, writeErrs map[types
 		return
 	}
 	call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
-	if !ok || !helpers.IsWriteName(callName(call)) {
+	if !ok || !helpers.IsWriteName(helpers.CalleeName(call)) {
 		return
 	}
 	for _, lhs := range assign.Lhs {

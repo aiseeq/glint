@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -156,7 +157,7 @@ func (r *EmptyStructReturnRule) regularEmptyAnswers(body *ast.BlockStmt, inGuard
 // emptyStructTypeName returns the type of the first empty composite literal
 // of a return whose last value is nil, or "".
 func (r *EmptyStructReturnRule) emptyStructTypeName(ret *ast.ReturnStmt) string {
-	if len(ret.Results) < 2 || !isNilIdent(ret.Results[len(ret.Results)-1]) {
+	if len(ret.Results) < 2 || !helpers.IsNilIdent(ret.Results[len(ret.Results)-1]) {
 		return ""
 	}
 	for _, result := range ret.Results[:len(ret.Results)-1] {
@@ -173,10 +174,10 @@ func (r *EmptyStructReturnRule) isErrorOrNilCheck(cond ast.Expr) bool {
 	case *ast.BinaryExpr:
 		// err != nil, x == nil, etc.
 		if c.Op == token.NEQ || c.Op == token.EQL {
-			if isNilIdent(c.Y) {
+			if helpers.IsNilIdent(c.Y) {
 				return true
 			}
-			if isNilIdent(c.X) {
+			if helpers.IsNilIdent(c.X) {
 				return true
 			}
 			// Check for err variable
@@ -201,7 +202,7 @@ func (r *EmptyStructReturnRule) checkReturnForEmptyStructWithNilError(ctx *core.
 
 	// Check last result is nil (the error)
 	lastResult := ret.Results[len(ret.Results)-1]
-	if !isNilIdent(lastResult) {
+	if !helpers.IsNilIdent(lastResult) {
 		return nil
 	}
 
@@ -260,7 +261,7 @@ func cacheMissZeroAnswer(body *ast.BlockStmt) *ast.ReturnStmt {
 		return nil
 	}
 	ret, ok := list[len(list)-1].(*ast.ReturnStmt)
-	if !ok || len(ret.Results) != 2 || !isNilIdent(ret.Results[1]) || !isAllZeroLiteral(ret.Results[0]) {
+	if !ok || len(ret.Results) != 2 || !helpers.IsNilIdent(ret.Results[1]) || !isAllZeroLiteral(ret.Results[0]) {
 		return nil
 	}
 	check, ok := list[len(list)-2].(*ast.IfStmt)
@@ -277,7 +278,7 @@ func cacheMissZeroAnswer(body *ast.BlockStmt) *ast.ReturnStmt {
 	}
 	for _, stmt := range list[:len(list)-2] {
 		assign, ok := stmt.(*ast.AssignStmt)
-		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !isIdentNamed(assign.Lhs[0], cached.Name) {
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !helpers.IsIdentNamed(assign.Lhs[0], cached.Name) {
 			continue
 		}
 		if sel, ok := assign.Rhs[0].(*ast.SelectorExpr); ok && strings.Contains(strings.ToLower(sel.Sel.Name), "cache") {
@@ -302,7 +303,7 @@ func isAllZeroLiteral(expr ast.Expr) bool {
 		if kv, ok := elt.(*ast.KeyValueExpr); ok {
 			value = kv.Value
 		}
-		if !isZeroValueExpr(value) && !isIdentNamed(value, "false") {
+		if !isZeroValueExpr(value) && !helpers.IsIdentNamed(value, "false") {
 			return false
 		}
 	}

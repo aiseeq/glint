@@ -5,6 +5,8 @@ import (
 	"go/types"
 	"sort"
 	"strings"
+
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // viewerScope is what the handlers of a project know about the viewer's
@@ -50,7 +52,7 @@ func collectViewerScope(decls map[*types.Func]typedFuncDecl) viewerScope {
 			}
 		}
 		ast.Inspect(d.decl.Body, func(n ast.Node) bool {
-			if bin, ok := n.(*ast.BinaryExpr); ok && (isNilIdent(bin.Y) || isNilIdent(bin.X)) {
+			if bin, ok := n.(*ast.BinaryExpr); ok && (helpers.IsNilIdent(bin.Y) || helpers.IsNilIdent(bin.X)) {
 				for field := range sliceFieldsIn(d.info, bin, nil) {
 					readByBool[field] = true // nil means every scope: a scope check
 				}

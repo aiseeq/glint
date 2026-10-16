@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -107,7 +108,7 @@ func rejectsNull(body *ast.BlockStmt, data string) bool {
 		switch {
 		case isSelectorCall(call, "strconv", "Unquote") && len(call.Args) == 1 && convertsIdent(call.Args[0], data):
 			decodes = true
-		case isSelectorCall(call, "json", "Unmarshal") && len(call.Args) == 2 && isIdentNamed(call.Args[0], data):
+		case isSelectorCall(call, "json", "Unmarshal") && len(call.Args) == 2 && helpers.IsIdentNamed(call.Args[0], data):
 			if unary, ok := call.Args[1].(*ast.UnaryExpr); ok && unary.Op == token.AND {
 				if id, ok := unary.X.(*ast.Ident); ok && stringVars[id.Name] {
 					decodes = failsOutsideErrCheck(body)
@@ -160,7 +161,7 @@ func failsOutsideErrCheck(body *ast.BlockStmt) bool {
 				return false
 			}
 		case *ast.ReturnStmt:
-			if len(node.Results) == 1 && !isIdentNamed(node.Results[0], "nil") {
+			if len(node.Results) == 1 && !helpers.IsIdentNamed(node.Results[0], "nil") {
 				found = true
 			}
 		}
@@ -173,7 +174,7 @@ func failsOutsideErrCheck(body *ast.BlockStmt) bool {
 // isErrNotNil reports a condition err != nil.
 func isErrNotNil(cond ast.Expr) bool {
 	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	if !ok || bin.Op != token.NEQ || !isIdentNamed(bin.Y, "nil") {
+	if !ok || bin.Op != token.NEQ || !helpers.IsIdentNamed(bin.Y, "nil") {
 		return false
 	}
 	id, ok := bin.X.(*ast.Ident)
@@ -183,11 +184,11 @@ func isErrNotNil(cond ast.Expr) bool {
 // isSelectorCall reports pkg.name(...) by the spelling of the call.
 func isSelectorCall(call *ast.CallExpr, pkg, name string) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	return ok && sel.Sel.Name == name && isIdentNamed(sel.X, pkg)
+	return ok && sel.Sel.Name == name && helpers.IsIdentNamed(sel.X, pkg)
 }
 
 // convertsIdent reports string(name).
 func convertsIdent(expr ast.Expr, name string) bool {
 	call, ok := expr.(*ast.CallExpr)
-	return ok && len(call.Args) == 1 && isIdentNamed(call.Fun, "string") && isIdentNamed(call.Args[0], name)
+	return ok && len(call.Args) == 1 && helpers.IsIdentNamed(call.Fun, "string") && helpers.IsIdentNamed(call.Args[0], name)
 }

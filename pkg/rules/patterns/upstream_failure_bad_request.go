@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -80,7 +81,7 @@ func (r *UpstreamFailureAnsweredAsBadRequestRule) AnalyzeFile(ctx *core.FileCont
 			if call == nil || !ok || ifStmt.Init != nil || !isErrNotNil(ifStmt.Cond) {
 				return
 			}
-			callee := callName(call)
+			callee := helpers.CalleeName(call)
 			if !fetches(call, funcs[callee]) {
 				return
 			}
@@ -104,7 +105,7 @@ func (r *UpstreamFailureAnsweredAsBadRequestRule) AnalyzeFile(ctx *core.FileCont
 // isHTTPHandlerDecl reports a function taking an http.ResponseWriter.
 func isHTTPHandlerDecl(fn *ast.FuncDecl) bool {
 	for _, field := range fn.Type.Params.List {
-		if sel, ok := field.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "ResponseWriter" && isIdentNamed(sel.X, "http") {
+		if sel, ok := field.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "ResponseWriter" && helpers.IsIdentNamed(sel.X, "http") {
 			return true
 		}
 	}
@@ -130,7 +131,7 @@ func forEachStmtPair(body *ast.BlockStmt, visit func(first, second ast.Stmt)) {
 // err: x, err := r.build(req).
 func errAssignedCall(stmt ast.Stmt) *ast.CallExpr {
 	assign, ok := stmt.(*ast.AssignStmt)
-	if !ok || len(assign.Rhs) != 1 || !isIdentNamed(assign.Lhs[len(assign.Lhs)-1], "err") {
+	if !ok || len(assign.Rhs) != 1 || !helpers.IsIdentNamed(assign.Lhs[len(assign.Lhs)-1], "err") {
 		return nil
 	}
 	call, _ := assign.Rhs[0].(*ast.CallExpr)
@@ -142,14 +143,14 @@ func errAssignedCall(stmt ast.Stmt) *ast.CallExpr {
 // context (req.Context()) or ctx itself. A read of a context value
 // (UserIDFromContext) fetches nothing.
 func fetches(call *ast.CallExpr, target *ast.FuncDecl) bool {
-	if contextValueRead.MatchString(callName(call)) {
+	if contextValueRead.MatchString(helpers.CalleeName(call)) {
 		return false
 	}
 	if target != nil {
 		return !isHTTPHandlerDecl(target) && handsContextOn(target.Body)
 	}
 	for _, arg := range call.Args {
-		if isIdentNamed(arg, "ctx") {
+		if helpers.IsIdentNamed(arg, "ctx") {
 			return true
 		}
 		if inner, ok := ast.Unparen(arg).(*ast.CallExpr); ok && len(inner.Args) == 0 {
@@ -174,7 +175,7 @@ func handsContextOn(body *ast.BlockStmt) bool {
 			return true
 		}
 		for _, arg := range call.Args {
-			if isIdentNamed(arg, "ctx") {
+			if helpers.IsIdentNamed(arg, "ctx") {
 				found = true
 			}
 		}
@@ -224,11 +225,11 @@ var errClassifier = regexp.MustCompile(`^(?:Is|As)(?:[A-Z]\w*)?$|^(?:is|as)[A-Z]
 
 // classifiesErr reports a classifier call handed err.
 func classifiesErr(call *ast.CallExpr) bool {
-	if !errClassifier.MatchString(callName(call)) {
+	if !errClassifier.MatchString(helpers.CalleeName(call)) {
 		return false
 	}
 	for _, arg := range call.Args {
-		if isIdentNamed(arg, "err") {
+		if helpers.IsIdentNamed(arg, "err") {
 			return true
 		}
 	}
@@ -239,7 +240,7 @@ func classifiesErr(call *ast.CallExpr) bool {
 // err == sql.ErrNoRows.
 func comparesErrToValue(cmp *ast.BinaryExpr) bool {
 	for _, pair := range [][2]ast.Expr{{cmp.X, cmp.Y}, {cmp.Y, cmp.X}} {
-		if isIdentNamed(pair[0], "err") && !isIdentNamed(pair[1], "nil") {
+		if helpers.IsIdentNamed(pair[0], "err") && !helpers.IsIdentNamed(pair[1], "nil") {
 			return true
 		}
 	}
@@ -249,11 +250,11 @@ func comparesErrToValue(cmp *ast.BinaryExpr) bool {
 // answersStatus reports a call of an answer helper whose lowercased name
 // holds word (sendNotFoundError), or one given http.<constant> or the code.
 func answersStatus(call *ast.CallExpr, word, constant, code string) bool {
-	if name := callName(call); answerVerb.MatchString(name) && strings.Contains(strings.ToLower(name), word) {
+	if name := helpers.CalleeName(call); answerVerb.MatchString(name) && strings.Contains(strings.ToLower(name), word) {
 		return true
 	}
 	for _, arg := range call.Args {
-		if sel, ok := arg.(*ast.SelectorExpr); ok && sel.Sel.Name == constant && isIdentNamed(sel.X, "http") {
+		if sel, ok := arg.(*ast.SelectorExpr); ok && sel.Sel.Name == constant && helpers.IsIdentNamed(sel.X, "http") {
 			return true
 		}
 		if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.INT && lit.Value == code {
@@ -277,7 +278,7 @@ func answersBadRequest(call *ast.CallExpr) bool {
 		return true
 	}
 	for _, arg := range call.Args {
-		if sel, ok := arg.(*ast.SelectorExpr); ok && sel.Sel.Name == "StatusBadRequest" && isIdentNamed(sel.X, "http") {
+		if sel, ok := arg.(*ast.SelectorExpr); ok && sel.Sel.Name == "StatusBadRequest" && helpers.IsIdentNamed(sel.X, "http") {
 			return true
 		}
 		if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.INT && lit.Value == "400" {

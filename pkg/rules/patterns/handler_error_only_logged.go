@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -144,7 +145,7 @@ func onlyLoggedFailure(info *types.Info, list []ast.Stmt, i int) *ast.IfStmt {
 // testsNotNil reports a condition `v != nil`.
 func testsNotNil(info *types.Info, cond ast.Expr, v *types.Var) bool {
 	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	return ok && bin.Op == token.NEQ && isNilIdent(ast.Unparen(bin.Y)) && isObjectIdent(info, bin.X, v)
+	return ok && bin.Op == token.NEQ && helpers.IsNilIdent(ast.Unparen(bin.Y)) && isObjectIdent(info, bin.X, v)
 }
 
 // errorLogMethods are the logger methods that record a failure.

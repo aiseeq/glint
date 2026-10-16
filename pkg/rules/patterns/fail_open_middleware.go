@@ -5,6 +5,7 @@ import (
 	"go/token"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // middlewareChecks reports the fail-open shapes of a function that passes the
@@ -96,7 +97,7 @@ func contextValue(expr ast.Expr, values map[string]bool) bool {
 // nilSubject returns x of x == nil.
 func nilSubject(cond ast.Expr) ast.Expr {
 	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	if !ok || bin.Op != token.EQL || !isNilIdent(bin.Y) {
+	if !ok || bin.Op != token.EQL || !helpers.IsNilIdent(bin.Y) {
 		return nil
 	}
 	return bin.X
@@ -111,7 +112,7 @@ func successGuard(cond ast.Expr) bool {
 		case token.LAND:
 			return successGuard(expr.X) || successGuard(expr.Y)
 		case token.EQL:
-			if !isNilIdent(expr.Y) {
+			if !helpers.IsNilIdent(expr.Y) {
 				return false
 			}
 			switch x := ast.Unparen(expr.X).(type) {
@@ -134,7 +135,7 @@ func rejectsInside(block *ast.BlockStmt) bool {
 		case *ast.FuncLit:
 			return false
 		case *ast.CallExpr:
-			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "WriteHeader" || (sel.Sel.Name == "Error" && isIdentNamed(sel.X, "http"))) {
+			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "WriteHeader" || (sel.Sel.Name == "Error" && helpers.IsIdentNamed(sel.X, "http"))) {
 				found = true
 			}
 		}

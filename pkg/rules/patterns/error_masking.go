@@ -366,7 +366,7 @@ func stripStar(expr ast.Expr) ast.Expr {
 // The preset is not a default of this code but a domain choice made up for
 // the failure: a broken read takes the money path the record never chose.
 func keepsDomainPresetOnRead(fn *ast.FuncDecl, stmt *ast.IfStmt, source *ast.CallExpr) bool {
-	if source == nil || len(source.Args) == 0 || !isIdentNamed(source.Args[0], "ctx") {
+	if source == nil || len(source.Args) == 0 || !helpers.IsIdentNamed(source.Args[0], "ctx") {
 		return false
 	}
 	for name := range guardAssignTargets(stmt.Body) {
@@ -386,7 +386,7 @@ func presetToPackageConstant(body *ast.BlockStmt, stmt *ast.IfStmt, name string)
 		if !ok || assign.Pos() >= stmt.Pos() || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
 			return true
 		}
-		if !isIdentNamed(assign.Lhs[0], name) {
+		if !helpers.IsIdentNamed(assign.Lhs[0], name) {
 			return true
 		}
 		sel, ok := assign.Rhs[0].(*ast.SelectorExpr)
@@ -598,7 +598,7 @@ func successGuardErrName(cond ast.Expr) (string, bool) {
 	if !ok || !isErrorVarName(ident.Name) {
 		return "", false
 	}
-	if !isNilIdent(bin.Y) {
+	if !helpers.IsNilIdent(bin.Y) {
 		return "", false
 	}
 	return ident.Name, true
@@ -777,7 +777,7 @@ func isParseCall(call *ast.CallExpr) bool {
 	case *ast.Ident:
 		name = fun.Name
 	case *ast.SelectorExpr:
-		if isIdentNamed(fun.X, "strconv") {
+		if helpers.IsIdentNamed(fun.X, "strconv") {
 			return true
 		}
 		name = fun.Sel.Name
@@ -848,7 +848,7 @@ func localValue(body *ast.BlockStmt, name string) ast.Expr {
 			return true
 		}
 		for i, lhs := range assign.Lhs {
-			if isIdentNamed(lhs, name) {
+			if helpers.IsIdentNamed(lhs, name) {
 				value = assign.Rhs[i]
 				count++
 			}
@@ -966,7 +966,7 @@ func (r *ErrorMaskingRule) findProblematicReturn(ctx *core.FileContext, results 
 			// other statements (fail(...) collecting the problem) the branch
 			// has reported it.
 			if _, zeroStruct := result.(*ast.CompositeLit); zeroStruct && (len(stmt.Body.List) > 1 ||
-				len(retStmt.Results) > 1 && !isNilIdent(retStmt.Results[len(retStmt.Results)-1])) {
+				len(retStmt.Results) > 1 && !helpers.IsNilIdent(retStmt.Results[len(retStmt.Results)-1])) {
 				continue
 			}
 			if r.isProblematicReturn(result) {
@@ -1012,7 +1012,7 @@ func returnHandsOverError(results *ast.FieldList, ret *ast.ReturnStmt) bool {
 	}
 	last := ret.Results[len(ret.Results)-1]
 	if lastResultIsErrorType(results) {
-		return !isNilIdent(last)
+		return !helpers.IsNilIdent(last)
 	}
 	return exprCarriesError(last)
 }

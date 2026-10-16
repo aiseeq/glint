@@ -226,7 +226,7 @@ func budgetContexts(info *types.Info, body *ast.BlockStmt) map[types.Object]bool
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || !isIdentNamed(sel.X, "context") || (sel.Sel.Name != "WithTimeout" && sel.Sel.Name != "WithDeadline") {
+		if !ok || !helpers.IsIdentNamed(sel.X, "context") || (sel.Sel.Name != "WithTimeout" && sel.Sel.Name != "WithDeadline") {
 			return true
 		}
 		if ident, ok := assign.Lhs[0].(*ast.Ident); ok {
@@ -258,7 +258,7 @@ func assignedError(info *types.Info, assign *ast.AssignStmt) types.Object {
 func errorBranchAfter(info *types.Info, body *ast.BlockStmt, assign *ast.AssignStmt, errObj types.Object) ast.Node {
 	isErrCheck := func(cond ast.Expr) bool {
 		bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-		if !ok || bin.Op != token.NEQ || !isNilIdent(ast.Unparen(bin.Y)) {
+		if !ok || bin.Op != token.NEQ || !helpers.IsNilIdent(ast.Unparen(bin.Y)) {
 			return false
 		}
 		ident, ok := ast.Unparen(bin.X).(*ast.Ident)

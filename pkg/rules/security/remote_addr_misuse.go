@@ -106,7 +106,7 @@ func splitsHostPort(body *ast.BlockStmt, carriesAddr func(ast.Expr) bool) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if ok && callName(call) == "SplitHostPort" && len(call.Args) == 1 && carriesAddr(call.Args[0]) {
+		if ok && helpers.CalleeName(call) == "SplitHostPort" && len(call.Args) == 1 && carriesAddr(call.Args[0]) {
 			found = true
 		}
 		return !found
@@ -139,7 +139,7 @@ func addrAsIP(fn *ast.FuncDecl, parents map[ast.Node]ast.Node) []ast.Node {
 				places = append(places, node.Index)
 			}
 		case *ast.CallExpr:
-			if !keyedCalls[callName(node)] {
+			if !keyedCalls[helpers.CalleeName(node)] {
 				return true
 			}
 			for _, arg := range node.Args {

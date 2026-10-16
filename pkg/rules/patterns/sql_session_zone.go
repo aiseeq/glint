@@ -156,7 +156,7 @@ func storedTimeFields(files []*core.FileContext) map[string]bool {
 			if star, ok := typ.(*ast.StarExpr); ok {
 				typ = star.X
 			}
-			if sel, ok := typ.(*ast.SelectorExpr); ok && sel.Sel.Name == "Time" && isIdentNamed(sel.X, "time") {
+			if sel, ok := typ.(*ast.SelectorExpr); ok && sel.Sel.Name == "Time" && helpers.IsIdentNamed(sel.X, "time") {
 				for _, name := range field.Names {
 					names[name.Name] = true
 				}
@@ -204,7 +204,7 @@ func textOperand(parents map[ast.Node]ast.Node, expr ast.Expr) bool {
 		}
 		// fmt's formatting, a slog attribute (slog.String("day", d)).
 		sel, ok := parent.Fun.(*ast.SelectorExpr)
-		return ok && (isIdentNamed(sel.X, "fmt") || isIdentNamed(sel.X, "slog"))
+		return ok && (helpers.IsIdentNamed(sel.X, "fmt") || helpers.IsIdentNamed(sel.X, "slog"))
 	}
 	return false
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -137,7 +138,7 @@ func closesReturnedBody(fn *ast.FuncDecl, info *types.Info) bool {
 	}
 	closesAny := false
 	for _, expr := range returned {
-		if isNilIdent(ast.Unparen(expr)) {
+		if helpers.IsNilIdent(ast.Unparen(expr)) {
 			continue
 		}
 		variable := variableOf(info, ast.Unparen(expr))

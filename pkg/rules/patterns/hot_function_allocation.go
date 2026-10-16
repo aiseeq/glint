@@ -10,6 +10,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -257,7 +258,7 @@ func appendToFresh(info *types.Info, call *ast.CallExpr, fresh map[types.Object]
 
 // isNilConversion reports []T(nil).
 func isNilConversion(info *types.Info, call *ast.CallExpr) bool {
-	if len(call.Args) != 1 || !isNilIdent(ast.Unparen(call.Args[0])) {
+	if len(call.Args) != 1 || !helpers.IsNilIdent(ast.Unparen(call.Args[0])) {
 		return false
 	}
 	tv, ok := info.Types[call.Fun]
@@ -375,7 +376,7 @@ func (s freshSliceScan) visit(n ast.Node) bool {
 func emptySliceValue(info *types.Info, expr ast.Expr) bool {
 	switch e := ast.Unparen(expr).(type) {
 	case *ast.Ident:
-		return isNilIdent(e)
+		return helpers.IsNilIdent(e)
 	case *ast.CallExpr:
 		return isNilConversion(info, e)
 	case *ast.CompositeLit:

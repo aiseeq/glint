@@ -161,7 +161,7 @@ func unknownStatusAccepted(body *ast.BlockStmt) []funcFinding {
 			return
 		}
 		ret, ok := stmts[len(stmts)-1].(*ast.ReturnStmt)
-		if !ok || len(ret.Results) == 0 || !isNilIdent(ret.Results[len(ret.Results)-1]) {
+		if !ok || len(ret.Results) == 0 || !helpers.IsNilIdent(ret.Results[len(ret.Results)-1]) {
 			return
 		}
 		for _, stmt := range stmts[:len(stmts)-1] {

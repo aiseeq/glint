@@ -67,7 +67,7 @@ func NewAlternateSyncPathDropsFieldsRule() *typedFuncRule {
 				}
 				findings = append(findings, funcFinding{node: w.call, message: fmt.Sprintf(
 					"%s stores only what %s derives from %s, while %s applies the same mapping and also stores the raw fields — a record this path moved keeps them stale",
-					callName(w.call), w.mapper.Name(), w.source, other.decl.Name.Name)})
+					helpers.CalleeName(w.call), w.mapper.Name(), w.source, other.decl.Name.Name)})
 			}
 			return findings
 		}
@@ -559,7 +559,7 @@ func (pf *packageForms) collect(decl typedFuncDecl) {
 			}
 			for _, elt := range e.Elts {
 				kv, ok := elt.(*ast.KeyValueExpr)
-				if !ok || !isIdentNamed(kv.Key, "Name") {
+				if !ok || !helpers.IsIdentNamed(kv.Key, "Name") {
 					continue
 				}
 				if lit, ok := kv.Value.(*ast.BasicLit); ok && lit.Kind == token.STRING {
@@ -681,7 +681,7 @@ func NewZeroPlaceholdersPassedForPersistedFieldsRule() *typedFuncRule {
 // errorPresent matches x != nil of an error x.
 func errorPresent(info *types.Info, cond ast.Expr) bool {
 	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	return ok && bin.Op == token.NEQ && isNilIdent(bin.Y) && isErrorType(info.TypeOf(bin.X))
+	return ok && bin.Op == token.NEQ && helpers.IsNilIdent(bin.Y) && isErrorType(info.TypeOf(bin.X))
 }
 
 // zeroPlaceholders reports a persistence call passing zero placeholders that
@@ -740,7 +740,7 @@ func filledElsewhere(call *ast.CallExpr, fn *ast.FuncDecl, sites []funcCallSite)
 				continue
 			}
 			positions = append(positions, i)
-			nonNil = nonNil || !isNilIdent(arg)
+			nonNil = nonNil || !helpers.IsNilIdent(arg)
 			if other == "" || site.caller.decl.Name.Name < other {
 				other = site.caller.decl.Name.Name
 			}

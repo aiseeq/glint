@@ -240,7 +240,7 @@ func reaches(scope funcScope, decl typedFuncDecl, depth int, match func(info *ty
 // reachesStorage matches a call of a database handle's method: a query, an
 // exec or a ping.
 func reachesStorage(_ *types.Info, call *ast.CallExpr) bool {
-	name := callName(call)
+	name := helpers.CalleeName(call)
 	return slices.Contains(helpers.SQLMethods, name) || slices.Contains(helpers.SQLPingMethods, name)
 }
 
@@ -376,7 +376,7 @@ func importsPath(pkg *types.Package, path string) bool {
 
 // writesCacheControl matches header.Set("Cache-Control", ...) or Add.
 func writesCacheControl(_ *types.Info, call *ast.CallExpr) bool {
-	name := callName(call)
+	name := helpers.CalleeName(call)
 	if (name != "Set" && name != "Add") || len(call.Args) != 2 {
 		return false
 	}
@@ -468,7 +468,7 @@ func NewPrivilegedSurfaceEnabledByDefaultRule() *typedFuncRule {
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.AssignStmt:
-				if node.Tok != token.DEFINE || len(node.Lhs) != 1 || len(node.Rhs) != 1 || !isIdentNamed(node.Rhs[0], "true") {
+				if node.Tok != token.DEFINE || len(node.Lhs) != 1 || len(node.Rhs) != 1 || !helpers.IsIdentNamed(node.Rhs[0], "true") {
 					return true
 				}
 				v := identObject(scope.info, node.Lhs[0])
@@ -550,7 +550,7 @@ func privilegedEnvDefaultTrue(call *ast.CallExpr) (string, bool) {
 		return "", false
 	}
 	for _, arg := range call.Args[1:] {
-		if isIdentNamed(arg, "true") {
+		if helpers.IsIdentNamed(arg, "true") {
 			return key, true
 		}
 		if s, ok := stringLiteral(arg); ok && (s == "true" || s == "1") {
@@ -589,7 +589,7 @@ func NewTestDataPathUngatedInProductionRule() *typedFuncRule {
 		var findings []funcFinding
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
-			if !ok || !namesTestData(callName(call)) {
+			if !ok || !namesTestData(helpers.CalleeName(call)) {
 				return true
 			}
 			if _, loaded := scope.callee(call); !loaded {
@@ -597,7 +597,7 @@ func NewTestDataPathUngatedInProductionRule() *typedFuncRule {
 			}
 			entity := testDataEntity(scope.info, fn.Body, call)
 			if entity != nil && storedIn(scope, fn.Body, entity) {
-				findings = append(findings, funcFinding{node: call, message: callName(call) + " fills " + entity.Name() + " with test data and the handler stores it with no configuration check — production gets real records made of test data"})
+				findings = append(findings, funcFinding{node: call, message: helpers.CalleeName(call) + " fills " + entity.Name() + " with test data and the handler stores it with no configuration check — production gets real records made of test data"})
 			}
 			return true
 		})
@@ -675,9 +675,9 @@ func storedIn(scope funcScope, body *ast.BlockStmt, entity *types.Var) bool {
 		if !passes {
 			return true
 		}
-		if helpers.IsWriteName(callName(call)) {
+		if helpers.IsWriteName(helpers.CalleeName(call)) {
 			found = true
-		} else if decl, ok := scope.callee(call); ok && reaches(scope, decl, 1, func(_ *types.Info, inner *ast.CallExpr) bool { return helpers.IsWriteName(callName(inner)) }) {
+		} else if decl, ok := scope.callee(call); ok && reaches(scope, decl, 1, func(_ *types.Info, inner *ast.CallExpr) bool { return helpers.IsWriteName(helpers.CalleeName(inner)) }) {
 			found = true
 		}
 		return !found
@@ -730,7 +730,7 @@ func NewNilSliceAsUnrestrictedScopeRule() *typedFuncRule {
 					return true
 				}
 				if loader, ok := scope.callee(call); ok && returnsAppendedNil(loader) {
-					findings = append(findings, funcFinding{node: assign, message: field.Name() + " is read as unrestricted when nil, and " + callName(call) + " returns nil for zero rows — an account with nothing assigned gets everything"})
+					findings = append(findings, funcFinding{node: assign, message: field.Name() + " is read as unrestricted when nil, and " + helpers.CalleeName(call) + " returns nil for zero rows — an account with nothing assigned gets everything"})
 				}
 				return true
 			})
@@ -751,7 +751,7 @@ func nilComparedSliceFields(decls map[*types.Func]typedFuncDecl) map[*types.Var]
 				return true
 			}
 			for _, pair := range [][2]ast.Expr{{bin.X, bin.Y}, {bin.Y, bin.X}} {
-				if !isNilIdent(pair[1]) {
+				if !helpers.IsNilIdent(pair[1]) {
 					continue
 				}
 				if _, field, ok := fieldSelection(decl.info, pair[0]); ok {
@@ -816,7 +816,7 @@ func returnsAppendedNil(fn typedFuncDecl) bool {
 			if v == nil || !declared[v] || i >= len(assign.Rhs) {
 				continue
 			}
-			if call, ok := ast.Unparen(assign.Rhs[i]).(*ast.CallExpr); !ok || !isIdentNamed(call.Fun, "append") {
+			if call, ok := ast.Unparen(assign.Rhs[i]).(*ast.CallExpr); !ok || !helpers.IsIdentNamed(call.Fun, "append") {
 				delete(declared, v)
 			}
 		}

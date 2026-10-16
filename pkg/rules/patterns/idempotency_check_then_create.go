@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -179,7 +180,7 @@ func (r *IdempotencyCheckThenCreateRule) periodGuards(ctx *core.FileContext, fn 
 				continue
 			}
 			call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
-			if !ok || !periodLookupName.MatchString(callName(call)) {
+			if !ok || !periodLookupName.MatchString(helpers.CalleeName(call)) {
 				continue
 			}
 			guard, ok := block.List[i+1].(*ast.IfStmt)

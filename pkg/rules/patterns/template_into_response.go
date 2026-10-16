@@ -10,6 +10,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -120,7 +121,7 @@ func stmtCall(stmt ast.Stmt) *ast.CallExpr {
 // checksErrNotNil reports a condition `<ident> != nil`.
 func checksErrNotNil(cond ast.Expr) bool {
 	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	if !ok || bin.Op != token.NEQ || !isNilIdent(ast.Unparen(bin.Y)) {
+	if !ok || bin.Op != token.NEQ || !helpers.IsNilIdent(ast.Unparen(bin.Y)) {
 		return false
 	}
 	_, ok = ast.Unparen(bin.X).(*ast.Ident)

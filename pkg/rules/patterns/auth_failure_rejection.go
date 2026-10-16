@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -155,7 +156,7 @@ func lastReturnsLiteral(body *ast.BlockStmt, name string) bool {
 		return false
 	}
 	ret, ok := body.List[len(body.List)-1].(*ast.ReturnStmt)
-	return ok && len(ret.Results) > 0 && isIdentNamed(ret.Results[len(ret.Results)-1], name)
+	return ok && len(ret.Results) > 0 && helpers.IsIdentNamed(ret.Results[len(ret.Results)-1], name)
 }
 
 // clientRange returns the status a condition tests against the 4xx range,

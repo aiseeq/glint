@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -106,7 +107,7 @@ func checkedUnmarshal(file *ast.File, info *types.Info, list []ast.Stmt, i int, 
 		return nil, nil
 	}
 	bin, ok := ast.Unparen(check.Cond).(*ast.BinaryExpr)
-	if !ok || !isNilIdent(ast.Unparen(bin.Y)) {
+	if !ok || !helpers.IsNilIdent(ast.Unparen(bin.Y)) {
 		return nil, nil
 	}
 	if _, isIdent := ast.Unparen(bin.X).(*ast.Ident); !isIdent {

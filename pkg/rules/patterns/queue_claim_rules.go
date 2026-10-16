@@ -183,7 +183,7 @@ func NewForUpdateOutsideTransactionRule() *typedFuncRule {
 		var findings []funcFinding
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
-			if !ok || !queryMethods[callName(call)] || !onPool(scope.info, call) {
+			if !ok || !queryMethods[helpers.CalleeName(call)] || !onPool(scope.info, call) {
 				return true
 			}
 			text := queryText(scope.info, defs, call)
@@ -238,7 +238,7 @@ var finalizeVerbs = []string{"Finalize", "Release", "Fail", "Retry", "Requeue", 
 
 // settlesItem reports a call that writes or settles a claimed item.
 func settlesItem(call *ast.CallExpr) bool {
-	name := callName(call)
+	name := helpers.CalleeName(call)
 	return helpers.IsWriteName(name) || leadsWithAny(name, finalizeVerbs)
 }
 
@@ -269,7 +269,7 @@ func NewPoisonRowLeftClaimedRule() *typedFuncRule {
 			return nil
 		}
 		claim, own := queueClaim(scope.info, fn.Body)
-		if claim == nil || !callsAny(fn.Body, func(call *ast.CallExpr) bool { return leadsWithAny(callName(call), finalizeVerbs) }) {
+		if claim == nil || !callsAny(fn.Body, func(call *ast.CallExpr) bool { return leadsWithAny(helpers.CalleeName(call), finalizeVerbs) }) {
 			return nil
 		}
 		var findings []funcFinding
@@ -281,7 +281,7 @@ func NewPoisonRowLeftClaimedRule() *typedFuncRule {
 			if check.Init != nil && callsAny(check.Init, settlesItem) || callsAny(check.Body, settlesItem) {
 				return true
 			}
-			findings = append(findings, funcFinding{node: check, message: "This error branch leaves the item claimed by " + callName(claim) + " without settling it — the lease expires, the row is claimed again and fails the same way, forever"})
+			findings = append(findings, funcFinding{node: check, message: "This error branch leaves the item claimed by " + helpers.CalleeName(claim) + " without settling it — the lease expires, the row is claimed again and fails the same way, forever"})
 			return true
 		})
 		return findings
@@ -309,7 +309,7 @@ func queueClaim(info *types.Info, body *ast.BlockStmt) (*ast.CallExpr, *ast.IfSt
 				continue
 			}
 			call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
-			if !ok || !leadsWithAny(callName(call), leaseVerbs) {
+			if !ok || !leadsWithAny(helpers.CalleeName(call), leaseVerbs) {
 				continue
 			}
 			if _, isSel := call.Fun.(*ast.SelectorExpr); !isSel {
@@ -384,7 +384,7 @@ func NewRemoteCancelFailureIgnoredRule() *typedFuncRule {
 				return true
 			}
 			if writesAfter(fn.Body, check.End()) {
-				findings = append(findings, funcFinding{node: check, message: "A failed " + callName(cancel) + " is only logged and the local record is written after it — the record says stopped while the provider may still execute"})
+				findings = append(findings, funcFinding{node: check, message: "A failed " + helpers.CalleeName(cancel) + " is only logged and the local record is written after it — the record says stopped while the provider may still execute"})
 			}
 			return true
 		})
@@ -402,7 +402,7 @@ func remoteCancelCall(init ast.Stmt) *ast.CallExpr {
 		if !ok || found != nil {
 			return found == nil
 		}
-		if _, isSel := call.Fun.(*ast.SelectorExpr); isSel && leadsWithAny(callName(call), remoteCancelVerbs) {
+		if _, isSel := call.Fun.(*ast.SelectorExpr); isSel && leadsWithAny(helpers.CalleeName(call), remoteCancelVerbs) {
 			found = call
 		}
 		return found == nil
@@ -421,7 +421,7 @@ func leavesAnywhere(block *ast.BlockStmt) bool {
 		case *ast.ReturnStmt, *ast.BranchStmt:
 			found = true
 		case *ast.CallExpr:
-			if isIdentNamed(node.Fun, "panic") {
+			if helpers.IsIdentNamed(node.Fun, "panic") {
 				found = true
 			}
 		}
@@ -434,7 +434,7 @@ func leavesAnywhere(block *ast.BlockStmt) bool {
 func writesAfter(body *ast.BlockStmt, pos token.Pos) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && call.Pos() > pos && (helpers.IsWriteName(callName(call)) || helpers.HasLeadingWord(callName(call), "Set")) {
+		if call, ok := n.(*ast.CallExpr); ok && call.Pos() > pos && (helpers.IsWriteName(helpers.CalleeName(call)) || helpers.HasLeadingWord(helpers.CalleeName(call), "Set")) {
 			found = true
 		}
 		return !found
@@ -447,7 +447,7 @@ func writesAfter(body *ast.BlockStmt, pos token.Pos) bool {
 // words of a completed operation: a completed payout is answered as
 // "already cancelled".
 func completedTakenAsCancelled(fn *ast.FuncDecl) []funcFinding {
-	if fn.Type.Results == nil || len(fn.Type.Results.List) != 1 || !isIdentNamed(fn.Type.Results.List[0].Type, "bool") {
+	if fn.Type.Results == nil || len(fn.Type.Results.List) != 1 || !helpers.IsIdentNamed(fn.Type.Results.List[0].Type, "bool") {
 		return nil
 	}
 	var findings []funcFinding

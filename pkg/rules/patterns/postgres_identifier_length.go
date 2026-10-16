@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -109,7 +110,7 @@ func createdName(info *types.Info, expr ast.Expr) ast.Expr {
 		if e.Op != token.ADD {
 			return nil
 		}
-		operands := concatOperands(e)
+		operands := helpers.ConcatOperands(e)
 		for i := 0; i+1 < len(operands); i++ {
 			text, ok := stringConstant(info, operands[i])
 			if ok && ddlName.MatchString(strings.TrimRight(text, " ")) && strings.HasSuffix(text, " ") {

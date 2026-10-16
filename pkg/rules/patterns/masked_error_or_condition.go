@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -320,7 +321,7 @@ func errNotNilName(expr ast.Expr) (string, bool) {
 		return "", false
 	}
 	for _, pair := range [][2]ast.Expr{{be.X, be.Y}, {be.Y, be.X}} {
-		if !isNilIdent(pair[1]) {
+		if !helpers.IsNilIdent(pair[1]) {
 			continue
 		}
 		if name, ok := errLikeName(pair[0]); ok {
@@ -354,7 +355,7 @@ func returnsNilError(ret *ast.ReturnStmt) bool {
 	if len(ret.Results) == 0 {
 		return false
 	}
-	return isNilIdent(ret.Results[len(ret.Results)-1])
+	return helpers.IsNilIdent(ret.Results[len(ret.Results)-1])
 }
 
 // returnMentionsAnyName reports whether any of the given names appears in the

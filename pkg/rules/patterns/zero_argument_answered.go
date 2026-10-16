@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -89,7 +90,7 @@ func isZeroPlaceholder(info *types.Info, expr ast.Expr) bool {
 	}
 	switch e := ast.Unparen(expr).(type) {
 	case *ast.CallExpr:
-		return len(e.Args) == 0 && strings.Contains(callName(e), "Zero")
+		return len(e.Args) == 0 && strings.Contains(helpers.CalleeName(e), "Zero")
 	case *ast.BasicLit:
 		return (e.Kind == token.INT || e.Kind == token.FLOAT) && strings.Trim(e.Value, "0.") == ""
 	}

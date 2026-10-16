@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -116,9 +117,9 @@ func nilCheckedPointer(info *types.Info, cond ast.Expr) *types.Var {
 // comparedPointer returns the local pointer variable compared with nil.
 func comparedPointer(info *types.Info, bin *ast.BinaryExpr) *types.Var {
 	operand := bin.X
-	if isNilIdent(operand) {
+	if helpers.IsNilIdent(operand) {
 		operand = bin.Y
-	} else if !isNilIdent(bin.Y) {
+	} else if !helpers.IsNilIdent(bin.Y) {
 		return nil
 	}
 	ident, ok := ast.Unparen(operand).(*ast.Ident)

@@ -236,7 +236,7 @@ func blockAssignsName(block *ast.BlockStmt, name string) bool {
 	found := false
 	ast.Inspect(block, func(n ast.Node) bool {
 		if assign, ok := n.(*ast.AssignStmt); ok && assign.Tok == token.ASSIGN {
-			found = found || slices.ContainsFunc(assign.Lhs, func(lhs ast.Expr) bool { return isIdentNamed(lhs, name) })
+			found = found || slices.ContainsFunc(assign.Lhs, func(lhs ast.Expr) bool { return helpers.IsIdentNamed(lhs, name) })
 		}
 		return !found
 	})
@@ -341,7 +341,7 @@ func boundUpdates(decl typedFuncDecl) []stageWrite {
 // runsQuery reports a call that runs the SQL it is handed: a query method,
 // or a function named for running one (exec, query).
 func runsQuery(call *ast.CallExpr) bool {
-	name := callName(call)
+	name := helpers.CalleeName(call)
 	return queryMethods[name] || slices.ContainsFunc(helpers.IdentifierWords(name), func(w string) bool { return w == "exec" || w == "query" })
 }
 

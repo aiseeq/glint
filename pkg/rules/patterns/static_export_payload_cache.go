@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -106,7 +107,7 @@ func setsRevalidation(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || len(call.Args) != 2 || callName(call) != "Set" {
+		if !ok || len(call.Args) != 2 || helpers.CalleeName(call) != "Set" {
 			return !found
 		}
 		header, ok1 := call.Args[0].(*ast.BasicLit)

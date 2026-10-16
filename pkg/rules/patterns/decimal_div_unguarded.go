@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -279,7 +280,7 @@ func (s divisorSite) nonZeroResult(call *ast.CallExpr, index, depth int) bool {
 		callee, _ = s.info.Uses[fun].(*types.Func)
 	case *ast.SelectorExpr:
 		callee, _ = s.info.Uses[fun.Sel].(*types.Func)
-		if _, qualified := s.info.Uses[identOf(fun.X)].(*types.PkgName); !qualified {
+		if _, qualified := s.info.Uses[helpers.IdentOf(fun.X)].(*types.PkgName); !qualified {
 			receiver = fun.X
 		}
 	}
@@ -345,7 +346,7 @@ func (s divisorSite) returnsNonZero(index, depth int) bool {
 		case s.failureReturn(ret, index):
 		default:
 			value := ret.Results[index]
-			nonZero = s.nonZero(value, depth) || (identOf(value) != nil && divisorChecked(s.fn, s.info, value, ret))
+			nonZero = s.nonZero(value, depth) || (helpers.IdentOf(value) != nil && divisorChecked(s.fn, s.info, value, ret))
 		}
 		return nonZero
 	})

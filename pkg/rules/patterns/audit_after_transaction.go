@@ -64,7 +64,7 @@ func NewAuditWrittenAfterTransactionRule() *typedFuncRule {
 				}
 				for _, later := range block.List[i+1:] {
 					for _, audit := range uncheckedAudits(scope, later) {
-						findings = append(findings, funcFinding{node: audit, message: callName(audit) + " writes the audit record after " + callName(runner) + " has committed the action, and its failure only reaches the log — the action stays done without its audit entry"})
+						findings = append(findings, funcFinding{node: audit, message: helpers.CalleeName(audit) + " writes the audit record after " + helpers.CalleeName(runner) + " has committed the action, and its failure only reaches the log — the action stays done without its audit entry"})
 					}
 				}
 			}
@@ -92,7 +92,7 @@ func txRunnerCall(stmt ast.Stmt) *ast.CallExpr {
 		}
 	}
 	call, ok := ast.Unparen(expr).(*ast.CallExpr)
-	if !ok || len(call.Args) == 0 || !txRunner.MatchString(callName(call)) {
+	if !ok || len(call.Args) == 0 || !txRunner.MatchString(helpers.CalleeName(call)) {
 		return nil
 	}
 	if _, closure := call.Args[len(call.Args)-1].(*ast.FuncLit); !closure {
@@ -116,7 +116,7 @@ func callsAudit(node ast.Node) bool {
 // isAuditCall reports a call named for an audit (recordLedgerAudit) or made
 // on a receiver named for one (s.audit.Record, auditLog.Write).
 func isAuditCall(call *ast.CallExpr) bool {
-	if namesAudit(callName(call)) {
+	if namesAudit(helpers.CalleeName(call)) {
 		return true
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -165,7 +165,7 @@ func uncheckedAudit(scope funcScope, stmt ast.Stmt) *ast.CallExpr {
 	case *ast.ExprStmt:
 		call, _ = ast.Unparen(node.X).(*ast.CallExpr)
 	case *ast.AssignStmt:
-		if len(node.Rhs) == 1 && slices.ContainsFunc(node.Lhs, func(lhs ast.Expr) bool { return isIdentNamed(lhs, "_") }) && len(node.Lhs) == 1 {
+		if len(node.Rhs) == 1 && slices.ContainsFunc(node.Lhs, func(lhs ast.Expr) bool { return helpers.IsIdentNamed(lhs, "_") }) && len(node.Lhs) == 1 {
 			call, _ = ast.Unparen(node.Rhs[0]).(*ast.CallExpr)
 		}
 	case *ast.IfStmt:
