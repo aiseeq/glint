@@ -36,7 +36,7 @@ func NewInstructionSizeRule() *InstructionSizeRule {
 		BaseRule: rules.NewBaseRule(
 			"instruction-size",
 			"documentation",
-			"Detects a Claude Code instruction file over its size limit: CLAUDE.md, CLAUDE.local.md and .claude/rules/*.md over max_bytes (16384), skills/*/SKILL.md over max_chars (12000 characters); block-level HTML comments are not counted, Claude Code strips them",
+			"Detects a Claude Code instruction file near or over its size limit: CLAUDE.md, CLAUDE.local.md and .claude/rules/*.md from 80% of max_bytes (16384), skills/*/SKILL.md from 85% of max_chars (12000 characters); block-level HTML comments are not counted, Claude Code strips them",
 			core.SeverityMedium,
 		),
 		maxBytes: defaultInstructionMaxBytes,
@@ -68,31 +68,44 @@ func (r *InstructionSizeRule) Configure(settings map[string]any) error {
 	return nil
 }
 
-// AnalyzeFile measures an instruction file against its limit.
+// AnalyzeFile measures an instruction file against its limit. A file is
+// reported from a share of the limit on (warnAlwaysLoaded, warnSkill
+// percent), before the next rule puts it over.
 func (r *InstructionSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	path := filepath.ToSlash(ctx.Path)
-	base := filepath.Base(path)
 	var message string
-	switch {
-	case base == "CLAUDE.md" || base == "CLAUDE.local.md" ||
-		strings.Contains(path, "/.claude/rules/") && strings.HasSuffix(path, ".md"):
+	switch core.InstructionKindOf(ctx.Path) {
+	case core.AlwaysLoaded:
+		base := filepath.Base(ctx.Path)
 		size := len(withoutBlockComments(ctx.Lines))
-		if size <= r.maxBytes {
-			return nil
-		}
-		message = fmt.Sprintf("%s is %d bytes without comments, over the limit of %d: it is loaded into every session", base, size, r.maxBytes)
-	case base == "SKILL.md" && filepath.Base(filepath.Dir(filepath.Dir(path))) == "skills":
+		message = sizeMessage(base, size, r.maxBytes, warnAlwaysLoaded, "bytes", "it is loaded into every session")
+	case core.Skill:
 		size := utf8.RuneCountInString(withoutBlockComments(ctx.Lines))
-		if size <= r.maxChars {
-			return nil
-		}
-		message = fmt.Sprintf("SKILL.md is %d characters without comments, over the limit of %d: after compacting the context Claude Code keeps only the first 5000 tokens of a skill", size, r.maxChars)
-	default:
+		message = sizeMessage("SKILL.md", size, r.maxChars, warnSkill, "characters", "after compacting the context Claude Code keeps only the first 5000 tokens of a skill")
+	}
+	if message == "" {
 		return nil
 	}
 	v := r.CreateViolation(ctx.RelPath, 1, message)
 	v.WithSuggestion("Move the rule into a mechanism (a check, a hook), a skill step or .claude/rules with paths, or drop it; do not add it to the always-loaded set")
 	return []*core.Violation{v}
+}
+
+// The share of the limit, in percent, from which a file is reported.
+const (
+	warnAlwaysLoaded = 80
+	warnSkill        = 85
+)
+
+// sizeMessage describes a size at or above warn percent of the limit, ""
+// below it.
+func sizeMessage(name string, size, limit, warn int, unit, why string) string {
+	switch {
+	case size > limit:
+		return fmt.Sprintf("%s is %d %s without comments, over the limit of %d: %s", name, size, unit, limit, why)
+	case size*100 >= limit*warn:
+		return fmt.Sprintf("%s is %d %s without comments, %d%% of the limit of %d: %s, and the next rules put it over", name, size, unit, size*100/limit, limit, why)
+	}
+	return ""
 }
 
 // withoutBlockComments returns the text of a Markdown document without its
@@ -124,3 +137,7 @@ func withoutBlockComments(lines []string) string {
 // SuppressionExempt reports that no marker in the file silences the rule:
 // only the threshold in the configuration moves the limit.
 func (r *InstructionSizeRule) SuppressionExempt() bool { return true }
+
+// ReadsExcludedInstructions marks the rule as one that measures the
+// instruction files the exclude patterns leave out.
+func (r *InstructionSizeRule) ReadsExcludedInstructions() {}

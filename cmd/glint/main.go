@@ -298,7 +298,7 @@ func runCheck(_ *cobra.Command, args []string) error {
 		rules.ResetState(enabledRules)
 
 		analyzeDone := timings.phase("analyze " + projectRoot)
-		violations, rootPanics, err := analyzeProjectContained(contexts, enabledRules, cfg, prepared.project, cache)
+		violations, rootPanics, err := analyzePrepared(prepared, enabledRules, cfg)
 		analyzeDone()
 		if err != nil {
 			return err
@@ -327,7 +327,7 @@ func runCheck(_ *cobra.Command, args []string) error {
 		}
 		findings.add(projectRoot, violations.BySeverity(minSeverity))
 
-		for _, ctx := range contexts {
+		for _, ctx := range append(slices.Clone(contexts), prepared.excludedInstructions...) {
 			analyzedFiles[ctx.Path] = struct{}{}
 		}
 		stats.FilesSkipped += prepared.walker.Stats().SkippedFiles
@@ -751,7 +751,11 @@ func walkWithWalker(walker *core.Walker) ([]*core.FileContext, *core.Walker, err
 // preparedRoot is a walked project root ready for analysis.
 type preparedRoot struct {
 	contexts []*core.FileContext
-	walker   *core.Walker
+	// excludedInstructions are the Claude Code instruction files an exclude
+	// pattern leaves out, kept for the rules that measure them; no other rule
+	// sees them.
+	excludedInstructions []*core.FileContext
+	walker               *core.Walker
 	// project is the typed load, nil when no project rule runs, the root has
 	// no Go files, or the cache holds the project findings for unchanged
 	// inputs; the Go files have their syntax trees in every case.
@@ -784,12 +788,21 @@ func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg 
 	slices.Sort(projectRules)
 	projectRuleCount := len(projectRules)
 
-	walker := core.NewWalker(projectRoot, cfg).WithGoParsing(projectRuleCount == 0).WithScopes(root.walkScopes())
-	contexts, walker, err := walkWithWalker(walker)
-	prepared := &preparedRoot{contexts: contexts, walker: walker}
+	walker := core.NewWalker(projectRoot, cfg).WithGoParsing(projectRuleCount == 0).WithScopes(root.walkScopes()).
+		WithExcludedInstructions(slices.ContainsFunc(enabledRules, rules.ReadsExcludedInstructions))
+	walked, walker, err := walkWithWalker(walker)
+	prepared := &preparedRoot{walker: walker}
 	if err != nil {
 		return prepared, err
 	}
+	for _, ctx := range walked {
+		if walker.ExcludedInstruction(ctx.Path) {
+			prepared.excludedInstructions = append(prepared.excludedInstructions, ctx)
+		} else {
+			prepared.contexts = append(prepared.contexts, ctx)
+		}
+	}
+	contexts := prepared.contexts
 	// Дерево без Go-файлов (например, frontend): Go-project правилам нечего
 	// анализировать, а загрузка Go-контекста упала бы с "no packages found".
 	needProject := projectRuleCount > 0 && hasGoFiles(contexts)
@@ -1150,6 +1163,26 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 		return nil, panics
 	}
 	return violations, nil
+}
+
+// analyzePrepared analyzes a prepared root: every rule on its files, and the
+// rules that measure instruction files on the ones an exclude pattern leaves
+// out.
+func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *core.Config) (core.ViolationList, rulePanics, error) {
+	violations, panics, err := analyzeProjectContained(prepared.contexts, enabledRules, cfg, prepared.project, prepared.cache)
+	if err != nil || len(prepared.excludedInstructions) == 0 {
+		return violations, panics, err
+	}
+	readers := slices.DeleteFunc(slices.Clone(enabledRules), func(rule rules.Rule) bool { return !rules.ReadsExcludedInstructions(rule) })
+	overrides, err := buildSeverityOverrides(cfg, readers)
+	if err != nil {
+		return nil, nil, err
+	}
+	kept, keptPanics, err := analyzeFilesContained(prepared.excludedInstructions, readers, cfg, overrides, prepared.cache)
+	if err != nil {
+		return nil, nil, err
+	}
+	return append(violations, kept...), append(panics, keptPanics...), nil
 }
 
 // analyzeProjectContained runs the project and the file rules; a rule panic

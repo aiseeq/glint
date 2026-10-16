@@ -845,6 +845,19 @@ func globMatches(pattern, path string) bool {
 	return err == nil && matched
 }
 
+// ExcludesDirectoryOf reports whether a pattern with a separator excludes the
+// path: one that names where the file lives (vendor/*, docs/**), unlike one
+// that names what it is (*.md).
+func (c *Config) ExcludesDirectoryOf(path string) bool {
+	path = c.configPath(path)
+	for _, pattern := range c.Settings.Exclude {
+		if strings.Contains(pattern, "/") && matchGlobPattern(pattern, path) {
+			return true
+		}
+	}
+	return false
+}
+
 // ShouldExclude checks if a path should be excluded based on glob patterns
 func (c *Config) ShouldExclude(path string) bool {
 	path = c.configPath(path)
