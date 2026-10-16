@@ -34,7 +34,10 @@ type SettingsConfig struct {
 	Exclude     []string `yaml:"exclude"`
 	SkipDirs    []string `yaml:"skip_dirs,omitempty"`
 	MinSeverity string   `yaml:"min_severity"`
-	Output      string   `yaml:"output"`
+	// FailOn is the lowest severity of a reported finding that makes the run
+	// exit non-zero (default high).
+	FailOn string `yaml:"fail_on,omitempty"`
+	Output string `yaml:"output"`
 	// RespectGitignore — учитывать ли .gitignore при обходе (по умолчанию да):
 	// сгенерированные и локальные файлы, которые проект сам исключил из git,
 	// не анализируются. Указатель, потому что zero-value bool не отличим от
@@ -287,6 +290,7 @@ func DefaultConfig() *Config {
 				"**/*.pb.go",
 			},
 			MinSeverity: "low",
+			FailOn:      "high",
 			Output:      "console",
 		},
 		// Must stay in sync with the registered rule categories; a test in
@@ -396,6 +400,11 @@ func (c *Config) Validate() error {
 	if c.Settings.MinSeverity != "" {
 		if _, err := ParseSeverity(c.Settings.MinSeverity); err != nil {
 			return fmt.Errorf("settings.min_severity: %w", err)
+		}
+	}
+	if c.Settings.FailOn != "" {
+		if _, err := ParseSeverity(c.Settings.FailOn); err != nil {
+			return fmt.Errorf("settings.fail_on: %w", err)
 		}
 	}
 	if c.Settings.Output != "" && !slices.Contains(OutputFormats, c.Settings.Output) {
@@ -571,6 +580,9 @@ func MergeConfigs(base, override *Config) *Config {
 	if override.Settings.MinSeverity != "" {
 		result.Settings.MinSeverity = override.Settings.MinSeverity
 	}
+	if override.Settings.FailOn != "" {
+		result.Settings.FailOn = override.Settings.FailOn
+	}
 	if override.Settings.Output != "" {
 		result.Settings.Output = override.Settings.Output
 	}
@@ -692,6 +704,15 @@ func (c *Config) GetMinSeverity() (Severity, error) {
 	sev, err := ParseSeverity(c.Settings.MinSeverity)
 	if err != nil {
 		return SeverityLow, fmt.Errorf("parse minimum severity %q: %w", c.Settings.MinSeverity, err)
+	}
+	return sev, nil
+}
+
+// GetFailOn returns the lowest severity that fails the run.
+func (c *Config) GetFailOn() (Severity, error) {
+	sev, err := ParseSeverity(c.Settings.FailOn)
+	if err != nil {
+		return SeverityHigh, fmt.Errorf("parse fail_on severity %q: %w", c.Settings.FailOn, err)
 	}
 	return sev, nil
 }
