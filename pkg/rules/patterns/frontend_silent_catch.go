@@ -21,7 +21,9 @@ func init() {
 // getLogger (const log = createLogger('page')). Handing the error back as a
 // value (return errorText(err)), calling the caller's handler (onUnknown())
 // or reloading counts as handling, and so does a try that only guards a
-// best-effort side channel: storage, analytics, consent.
+// best-effort side channel: storage, analytics, consent. A command-line
+// script handles the error by failing the process: process.exit or
+// process.exitCode with a code other than 0.
 type FrontendSilentCatchRule struct {
 	*rules.BaseRule
 	catchStart       *regexp.Regexp
@@ -38,7 +40,7 @@ func NewFrontendSilentCatchRule() *FrontendSilentCatchRule {
 			core.SeverityHigh,
 		),
 		catchStart:       regexp.MustCompile(`\bcatch\b(?:\s*\([^)]*\))?\s*\{`),
-		userFeedbackCall: regexp.MustCompile(`\b(?:set[A-Za-z0-9_]*(?:Error|Errors|Err|Failed|Failure|Message|Notice|Alert|Toast|Status)|setShow[A-Z]|(?:say|notify|show[A-Z][A-Za-z0-9_]*|display[A-Z][A-Za-z0-9_]*)\s*\(|toast\.|showToast\s*\(|alert\s*\(|throw\b|Promise\.reject\s*\(|\bon[A-Z][A-Za-z0-9_]*\s*\(|(?:reload|retry|refetch|redirect|navigate)[A-Za-z0-9_]*\s*\(|router\.(?:push|replace)\s*\()`),
+		userFeedbackCall: regexp.MustCompile(`\b(?:set[A-Za-z0-9_]*(?:Error|Errors|Err|Failed|Failure|Message|Notice|Alert|Toast|Status)|setShow[A-Z]|(?:say|notify|show[A-Z][A-Za-z0-9_]*|display[A-Z][A-Za-z0-9_]*)\s*\(|toast\.|showToast\s*\(|alert\s*\(|throw\b|Promise\.reject\s*\(|\bon[A-Z][A-Za-z0-9_]*\s*\(|(?:reload|retry|refetch|redirect|navigate)[A-Za-z0-9_]*\s*\(|router\.(?:push|replace)\s*\(|process\.exit\s*\(\s*(?:[1-9]|[A-Za-z_$])|process\.exitCode\s*=\s*(?:[1-9]|[A-Za-z_$]))`),
 	}
 }
 
