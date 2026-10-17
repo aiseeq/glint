@@ -9,10 +9,16 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
-// errorFieldStructs returns the names of the file's struct types with an
-// Error string field: a result that carries its own failure.
-func errorFieldStructs(file *ast.File) []string {
-	var names []string
+// errorStruct is a struct type with an Error string field: a result that
+// carries its own failure. status is its Status or State string field, empty
+// when it has none.
+type errorStruct struct {
+	name, status string
+}
+
+// errorFieldStructs returns the file's struct types with an Error string field.
+func errorFieldStructs(file *ast.File) []errorStruct {
+	var structs []errorStruct
 	ast.Inspect(file, func(n ast.Node) bool {
 		spec, ok := n.(*ast.TypeSpec)
 		if !ok {
@@ -22,20 +28,79 @@ func errorFieldStructs(file *ast.File) []string {
 		if !ok {
 			return true
 		}
+		hasError, status := false, ""
 		for _, field := range st.Fields.List {
 			typ, ok := field.Type.(*ast.Ident)
 			if !ok || typ.Name != "string" {
 				continue
 			}
 			for _, name := range field.Names {
-				if name.Name == "Error" {
-					names = append(names, spec.Name.Name)
+				switch name.Name {
+				case "Error":
+					hasError = true
+				case "Status", "State":
+					status = name.Name
 				}
+			}
+		}
+		if hasError {
+			structs = append(structs, errorStruct{name: spec.Name.Name, status: status})
+		}
+		return true
+	})
+	return structs
+}
+
+// failureStatusFields returns the Status and State fields the file sets to a
+// failure value (r.Status = "error", Result{State: StatusFailed}): the item
+// is marked failed for whoever reads it, next to its Error text.
+func failureStatusFields(file *ast.File) map[string]bool {
+	fields := make(map[string]bool)
+	mark := func(field string, value ast.Expr) {
+		if (field == "Status" || field == "State") && failureValue(value) {
+			fields[field] = true
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			if len(node.Lhs) != len(node.Rhs) {
+				return true
+			}
+			for i, lhs := range node.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok {
+					mark(sel.Sel.Name, node.Rhs[i])
+				}
+			}
+		case *ast.KeyValueExpr:
+			if key, ok := node.Key.(*ast.Ident); ok {
+				mark(key.Name, node.Value)
 			}
 		}
 		return true
 	})
-	return names
+	return fields
+}
+
+// failureValue reports a string literal or a constant named for a failure:
+// "error", "failed", StatusFailed, StateError.
+func failureValue(expr ast.Expr) bool {
+	text := ""
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.BasicLit:
+		if e.Kind != token.STRING {
+			return false
+		}
+		text = e.Value
+	case *ast.Ident:
+		text = e.Name
+	case *ast.SelectorExpr:
+		text = e.Sel.Name
+	default:
+		return false
+	}
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "error") || strings.Contains(lower, "fail")
 }
 
 // partialChecks are the shapes of a partial result returned as complete

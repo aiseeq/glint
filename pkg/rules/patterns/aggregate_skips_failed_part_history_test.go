@@ -223,3 +223,99 @@ func (s *Service) Run(accounts []string) ([]*RunResult, error) {
 `,
 	}))
 }
+
+// A record of a run that classifies its own failure: next to the failure text
+// the reader sets an explicit status to a failure value, and the caller sees
+// the failed run as failed, not as a valid one.
+func TestAggregateSkipsFailedPart_ErrorNextToExplicitFailureStatus(t *testing.T) {
+	assert.Empty(t, aggregateSkipFindings(t, map[string]string{
+		"report/row.go": `package report
+
+type runRow struct {
+	Name   string
+	Status string ` + "`json:\"status\"`" + `
+	Error  string ` + "`json:\"error,omitempty\"`" + `
+}
+
+func readRun(dir string) (*runRow, error) {
+	res, err := parse(dir)
+	if err != nil {
+		return nil, err
+	}
+	r := &runRow{Name: dir, Error: strings.Join(res.errs, "; ")}
+	if len(res.errs) > 0 {
+		r.Status = "error"
+	} else {
+		r.Status = "done"
+	}
+	return r, nil
+}
+
+func readRuns(dirs []string) ([]*runRow, error) {
+	var rows []*runRow
+	for _, d := range dirs {
+		r, err := readRun(d)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	return rows, nil
+}
+`,
+		// The failure status set through a keyed literal of a named constant.
+		"jobs/job.go": `package jobs
+
+const StatusFailed = "failed"
+
+type JobResult struct {
+	ID     string
+	State  string
+	Error  string
+}
+
+func (s *Service) run(id string) *JobResult {
+	if err := s.exec(id); err != nil {
+		return &JobResult{ID: id, State: StatusFailed, Error: err.Error()}
+	}
+	return &JobResult{ID: id, State: "ok"}
+}
+
+func (s *Service) RunAll(ids []string) ([]*JobResult, error) {
+	var results []*JobResult
+	for _, id := range ids {
+		results = append(results, s.run(id))
+	}
+	return results, nil
+}
+`,
+	}))
+}
+
+// A status field that never takes a failure value does not classify the
+// failure: the failed item still looks like a valid one.
+func TestAggregateSkipsFailedPart_ErrorNextToStatusWithoutFailureValue(t *testing.T) {
+	assert.Equal(t, []string{"quotes/sync.go:10"}, aggregateSkipFindings(t, map[string]string{
+		"quotes/model.go": `package quotes
+
+type Quote struct {
+	Symbol  string
+	Status  string
+	Error   string
+}
+`,
+		"quotes/sync.go": `package quotes
+
+func (s *Service) Sync(ctx context.Context, symbols []string) ([]*Quote, error) {
+	var results []*Quote
+	for _, w := range symbols {
+		q := s.fetch(ctx, w)
+		q.Status = "synced"
+		results = append(results, q)
+	}
+	return results, nil
+}
+`,
+	}))
+}
