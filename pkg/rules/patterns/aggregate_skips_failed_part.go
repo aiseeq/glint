@@ -41,7 +41,8 @@ func init() {
 // (if err != nil { log } else { total = total.Add(...) }), a failed item
 // counted as skipped, errors returned only when every item failed, and a
 // slice of results carrying an Error field handed out with a nil error by a
-// function that never reads the field. A function returning through a
+// function that never reads the field (a result whose package also sets its
+// Status or State to a failure value is marked failed and left alone). A function returning through a
 // success constructor is reported for a loop that keeps an item only when its
 // result object says success (if res.IsSuccess() { acc[id] = res.Data }, no
 // else): the failed items are left out without a trace.
@@ -49,7 +50,8 @@ type AggregateSkipsFailedPartRule struct {
 	*rules.BaseRule
 	// lists maps a directory to its package variables holding a literal list.
 	lists map[string]map[string]bool
-	// errorStructs are the project's struct types with an Error string field.
+	// errorStructs are the project's struct types with an Error string field
+	// and no explicit failure status next to it.
 	errorStructs map[string]bool
 }
 
@@ -63,23 +65,45 @@ func NewAggregateSkipsFailedPartRule() *AggregateSkipsFailedPartRule {
 	)}
 }
 
-// UseProjectFiles collects the package variables holding literal lists.
+// UseProjectFiles collects the package variables holding literal lists and
+// the result types carrying an Error field.
 func (r *AggregateSkipsFailedPartRule) UseProjectFiles(files []*core.FileContext) {
 	r.lists = make(map[string]map[string]bool)
 	r.errorStructs = make(map[string]bool)
+	type located struct {
+		errorStruct
+		dir string
+	}
+	var structs []located
+	failureStatus := make(map[string]map[string]bool) // dir -> status fields set to a failure value
 	for _, ctx := range files {
 		if !ctx.IsGoFile() || !ctx.HasGoAST() {
 			continue
 		}
-		for _, name := range errorFieldStructs(ctx.GoAST) {
-			r.errorStructs[name] = true
-		}
 		dir := filepath.Dir(ctx.Path)
+		for _, s := range errorFieldStructs(ctx.GoAST) {
+			structs = append(structs, located{s, dir})
+		}
+		if !ctx.IsTestFile() {
+			for field := range failureStatusFields(ctx.GoAST) {
+				if failureStatus[dir] == nil {
+					failureStatus[dir] = make(map[string]bool)
+				}
+				failureStatus[dir][field] = true
+			}
+		}
 		for _, name := range literalListVars(ctx.GoAST) {
 			if r.lists[dir] == nil {
 				r.lists[dir] = make(map[string]bool)
 			}
 			r.lists[dir][name] = true
+		}
+	}
+	// A result whose package sets its status to a failure value classifies
+	// its own failure: the caller sees the failed item as failed.
+	for _, s := range structs {
+		if s.status == "" || !failureStatus[s.dir][s.status] {
+			r.errorStructs[s.name] = true
 		}
 	}
 }
