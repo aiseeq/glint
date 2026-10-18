@@ -195,6 +195,37 @@ export const RETRY_METHODS = ['GET', 'HEAD', 'OPTIONS']
 	assert.Empty(t, foundLines(valueSetDriftFindings(t, files)))
 }
 
+// Consecutive labels with their own numbering are ordinals, not a shared value domain.
+func TestValueSetDriftOrdinalLabels(t *testing.T) {
+	files := map[string]string{
+		"tools/first/main.go": `package main
+
+var hypotheses = []string{"H1", "H2", "H3", "H4", "H5"}
+`,
+		"tools/second/main.go": `package main
+
+func run() {
+	for _, h := range []string{"H1", "H2", "H3", "H4", "H5", "H6"} {
+		_ = h
+	}
+}
+`,
+		"api/statuses.go": `package api
+
+var statuses = []string{"pending", "approved", "failed", "expired"}
+`,
+		"web/statuses.ts": `export const statuses = ['pending', 'approved', 'failed', 'expired', 'cancelled']
+`,
+		"jobs/steps.go": `package jobs
+
+var steps = []string{"step1", "step3", "step4", "step5"}
+`,
+		"web/steps.ts": `export const steps = ['step1', 'step3', 'step4', 'step5', 'step6']
+`,
+	}
+	assert.Equal(t, []string{"api/statuses.go:3", "jobs/steps.go:3", "web/statuses.ts:1", "web/steps.ts:1"}, foundLines(valueSetDriftFindings(t, files)))
+}
+
 // A switch the compiler holds to its union is not a copy kept by hand: with no
 // default in a function that cannot return undefined, or with a default that
 // assigns the value to never, a member added to the list breaks the build.
