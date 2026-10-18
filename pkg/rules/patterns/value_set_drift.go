@@ -140,10 +140,16 @@ func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 
 // bestMatch finds the set this one copies, if any.
 func bestMatch(idx *valueset.Index, set valueset.Set) (setMatch, bool) {
+	if valueset.Ordinal(set) {
+		return setMatch{}, false
+	}
 	var best setMatch
 	found := false
 	for i, shared := range idx.Overlapping(set, 1) {
 		other := idx.Sets[i]
+		if valueset.Ordinal(other) {
+			continue
+		}
 		m := setMatch{other: other, shared: shared}
 		same := slices.Equal(set.Members, other.Members)
 		switch {

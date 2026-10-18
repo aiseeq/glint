@@ -61,6 +61,41 @@ type Set struct {
 // values match by chance too often.
 const MinMembers = 3
 
+// Ordinal reports a set whose members share a prefix and number every value
+// consecutively from 1 through the set's size.
+func Ordinal(set Set) bool {
+	if len(set.Members) < MinMembers {
+		return false
+	}
+	var prefix string
+	seen := make([]bool, len(set.Members)+1)
+	for _, value := range set.Members {
+		i := len(value)
+		for i > 0 && value[i-1] >= '0' && value[i-1] <= '9' {
+			i--
+		}
+		if i == len(value) || i == 0 {
+			return false
+		}
+		if prefix == "" {
+			prefix = value[:i]
+		} else if value[:i] != prefix {
+			return false
+		}
+		n, err := strconv.Atoi(value[i:])
+		if err != nil || strconv.Itoa(n) != value[i:] || n < 1 || n >= len(seen) || seen[n] {
+			return false
+		}
+		seen[n] = true
+	}
+	for n := 1; n < len(seen); n++ {
+		if !seen[n] {
+			return false
+		}
+	}
+	return true
+}
+
 // member is a value that names something (a status, a network, a currency):
 // a word, not a sentence, a path or a format.
 var member = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,39}$`)
