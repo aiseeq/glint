@@ -63,12 +63,17 @@ tasks:
     heavy: true
     env: {GOFLAGS: -tags=pgquery_cgo}
     run: ['go test -p {threads} -short -v ./...']
+  # Only the packages whose own code runs goroutines or takes locks: a rule
+  # test runs one rule in one goroutine, and the race detector finds nothing
+  # there. Rules run in parallel in cmd/glint (TestAnalyzeFilesIsDeterministicAndRaceFree
+  # analyzes with every rule). A package that starts goroutines or guards
+  # state with a lock joins this list.
   test-race:
-    desc: tests with the race detector (analysis runs rules in parallel)
+    desc: tests with the race detector, packages with concurrent code (analysis runs rules in parallel)
     heavy: true
     tests: go
     env: {GOFLAGS: -tags=pgquery_cgo}
-    run: ['go test -json -p {threads} -race ./...']
+    run: ['go test -json -p {threads} -race ./cmd/glint ./pkg/core ./pkg/rules ./pkg/sqlschema ./pkg/valueset ./pkg/rules/rulestest ./pkg/rules/duplication']
   test-coverage:
     desc: tests with a coverage report in coverage.html
     heavy: true
