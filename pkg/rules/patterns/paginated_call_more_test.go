@@ -214,3 +214,69 @@ func TestPaginatedCallFirstPageOnlyShapes(t *testing.T) {
 		"ledger/ledger.go:99",
 	}, foundLines(violations))
 }
+
+const paginatedCallCalleeCheckSource = `package ledger
+
+import (
+	"context"
+	"fmt"
+)
+
+type Entry struct{ ID string }
+
+type EntryRepo struct{}
+
+// Reads one row past the limit and fails when it arrives: a capped read
+// that cannot lose rows silently.
+func (r *EntryRepo) GetByBook(ctx context.Context, id string, limit int) ([]Entry, error) {
+	rows := r.query(ctx, id, limit+1)
+	if len(rows) > limit {
+		return nil, fmt.Errorf("entries of %s exceed limit %d", id, limit)
+	}
+	return rows, nil
+}
+
+// The same comparison, but the overflow is cut, not reported.
+func (r *EntryRepo) GetByOwner(ctx context.Context, id string, limit int) ([]Entry, error) {
+	rows := r.query(ctx, id, limit+1)
+	if len(rows) > limit {
+		return rows[:limit], nil
+	}
+	return rows, nil
+}
+
+// No check at all.
+func (r *EntryRepo) GetByShelf(ctx context.Context, id string, limit int) ([]Entry, error) {
+	return r.query(ctx, id, limit), nil
+}
+
+func (r *EntryRepo) query(ctx context.Context, id string, n int) []Entry { return nil }
+
+type Service struct{ repo *EntryRepo }
+
+func (s *Service) Book(ctx context.Context, id string) ([]Entry, error) {
+	return s.repo.GetByBook(ctx, id, 5000)
+}
+
+func (s *Service) Owner(ctx context.Context, id string) ([]Entry, error) {
+	return s.repo.GetByOwner(ctx, id, 5000)
+}
+
+func (s *Service) Shelf(ctx context.Context, id string) ([]Entry, error) {
+	return s.repo.GetByShelf(ctx, id, 5000)
+}
+`
+
+// A callee that compares the rows it read with the size it was given and
+// returns an error on overflow fails loudly at the cap: its caller loses no
+// rows. A callee that trims the overflow, or does not look, still drops them.
+func TestPaginatedCallFirstPageOnlyCalleeFailsAtCap(t *testing.T) {
+	violations, err := NewPaginatedCallFirstPageOnlyRule().AnalyzeGoProject(rulestest.Project(t, map[string]string{
+		"ledger/ledger.go": paginatedCallCalleeCheckSource,
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"ledger/ledger.go:45",
+		"ledger/ledger.go:49",
+	}, foundLines(violations))
+}
