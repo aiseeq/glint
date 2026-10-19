@@ -280,17 +280,22 @@ type liveCallScope struct {
 	unitTests bool
 	// hostOf names the third-party URL of a literal.
 	hostOf func(*ast.BasicLit) string
+	// isLocalURL reports a literal URL on a loopback or reserved host.
+	isLocalURL func(*ast.BasicLit) bool
 }
 
 // reaches returns the evidence of a live call and whether the call is one. Outside a file of
 // unit tests every call of an entry is, as the client it builds has no offline mode. In such a
 // file the call must aim at production - the entry's own address, a URL literal or a URL
 // constant of the package among the arguments - and reach the wire: a function that sends
-// itself, or a client whose sending method the test calls.
+// itself, or a client whose sending method the test calls. In any file an entry that takes its
+// address from the caller and gets a loopback or reserved URL literal reaches nothing outside.
 func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry liveEntry, pkg outboundPackage, isQualifier func(ast.Expr) bool) (string, bool) {
 	evidence := pkg.evidence
 	if entry.address != "" {
 		evidence = "ходит в " + entry.address
+	} else if s.aimsLocally(call) {
+		return "", false
 	}
 	if !s.unitTests {
 		return evidence, true
@@ -306,6 +311,16 @@ func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry li
 		return "", false
 	}
 	return "ходит в " + host, true
+}
+
+// aimsLocally reports a loopback or reserved URL literal among the arguments of the call.
+func (s liveCallScope) aimsLocally(call *ast.CallExpr) bool {
+	for _, arg := range call.Args {
+		if lit, ok := ast.Unparen(arg).(*ast.BasicLit); ok && s.isLocalURL(lit) {
+			return true
+		}
+	}
+	return false
 }
 
 // productionArgument returns the third-party URL an argument names: a literal, or a URL
