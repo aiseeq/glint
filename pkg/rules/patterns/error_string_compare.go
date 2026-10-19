@@ -108,21 +108,75 @@ func (r *ErrorStringCompareRule) inspect(ctx *core.FileContext, decl ast.Decl, i
 				}
 			}
 
+			// Check strings.Index(err.Error(), "...") >= 0
+			if isComparisonOp(node.Op) {
+				for _, pair := range [][2]ast.Expr{{node.X, node.Y}, {node.Y, node.X}} {
+					call, ok := ast.Unparen(pair[0]).(*ast.CallExpr)
+					if ok && isSignedIntLiteral(pair[1]) && stringsSearchOf(call, errorTextIndexers, isErrorString) != "" && !ownMarker(call) {
+						violations = append(violations, r.searchViolation(ctx, call, helpers.CalleeName(call)))
+					}
+				}
+			}
+
 		case *ast.CallExpr:
 			// Check strings.Contains(err.Error(), "...")
-			if r.isStringsContainsErrorCall(node, isErrorString) && !ownMarker(node) {
-				pos := ctx.PositionFor(node)
-				v := r.CreateViolation(ctx.RelPath, pos.Line,
-					"Using strings.Contains on error message; fragile and may break")
-				v.WithCode(ctx.GetLine(pos.Line))
-				v.WithSuggestion("Define sentinel errors or use errors.Is/errors.As")
-				violations = append(violations, v)
+			if name := stringsSearchOf(node, errorTextMatchers, isErrorString); name != "" && !ownMarker(node) {
+				violations = append(violations, r.searchViolation(ctx, node, name))
 			}
 		}
 
 		return true
 	})
 	return violations
+}
+
+// searchViolation reports a search for a phrase in the text of an error.
+func (r *ErrorStringCompareRule) searchViolation(ctx *core.FileContext, call *ast.CallExpr, name string) *core.Violation {
+	pos := ctx.PositionFor(call)
+	v := r.CreateViolation(ctx.RelPath, pos.Line,
+		"Using strings."+name+" on error message; fragile and may break")
+	v.WithCode(ctx.GetLine(pos.Line))
+	v.WithSuggestion("Define sentinel errors or use errors.Is/errors.As")
+	return v
+}
+
+// errorTextMatchers test a text for a phrase; the index of the argument that
+// may be the error's text, -1 for either.
+var errorTextMatchers = map[string]int{
+	"Contains": 0, "ContainsAny": 0, "HasPrefix": 0, "HasSuffix": 0, "EqualFold": -1,
+}
+
+// errorTextIndexers find a phrase in a text: compared with a number, they
+// test for it.
+var errorTextIndexers = map[string]int{
+	"Index": 0, "IndexAny": 0, "LastIndex": 0, "LastIndexAny": 0,
+}
+
+// stringsSearchOf returns the name of a strings function of the set called
+// on the text of an error, or "".
+func stringsSearchOf(call *ast.CallExpr, set map[string]int, isErrorString func(ast.Expr) bool) string {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !helpers.IsIdentNamed(sel.X, "strings") || len(call.Args) != 2 {
+		return ""
+	}
+	arg, ok := set[sel.Sel.Name]
+	if !ok {
+		return ""
+	}
+	if (arg <= 0 && isErrorString(call.Args[0])) || (arg < 0 && isErrorString(call.Args[1])) {
+		return sel.Sel.Name
+	}
+	return ""
+}
+
+// isSignedIntLiteral reports an integer literal, negated or not: -1, 0.
+func isSignedIntLiteral(expr ast.Expr) bool {
+	expr = ast.Unparen(expr)
+	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.SUB {
+		expr = ast.Unparen(unary.X)
+	}
+	lit, ok := expr.(*ast.BasicLit)
+	return ok && lit.Kind == token.INT
 }
 
 // isErrorStringCallExpr reports a call x.Error(): compared with anything, it
@@ -359,29 +413,4 @@ func (r *ErrorStringCompareRule) isErrorMessageVarComparison(varExpr, strExpr as
 	// compares nothing against an error's wording.
 	lit, isString := strExpr.(*ast.BasicLit)
 	return isString && lit.Kind == token.STRING && lit.Value != `""` && lit.Value != "``"
-}
-
-// isStringsContainsErrorCall checks for strings.Contains(err.Error(), "...")
-func (r *ErrorStringCompareRule) isStringsContainsErrorCall(call *ast.CallExpr, isErrorString func(ast.Expr) bool) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-
-	// Check for strings.Contains
-	ident, ok := sel.X.(*ast.Ident)
-	if !ok || ident.Name != "strings" {
-		return false
-	}
-
-	if sel.Sel.Name != "Contains" && sel.Sel.Name != "HasPrefix" && sel.Sel.Name != "HasSuffix" && sel.Sel.Name != "EqualFold" {
-		return false
-	}
-
-	// Check if first argument is err.Error()
-	if len(call.Args) < 1 {
-		return false
-	}
-
-	return isErrorString(call.Args[0])
 }
