@@ -1,8 +1,8 @@
-// The check below loads every rule package with its dependencies from source
-// and builds SSA and a call graph over the whole program: a single-threaded
-// static analysis of glint's own code, with nothing for the race detector to
-// find, that takes several gigabytes under it. It runs in the plain test task;
-// the race build leaves it out.
+// The check below loads the module's packages from source, their
+// dependencies from export data, and builds SSA and a call graph over them: a
+// single-threaded static analysis of glint's own code, with nothing for the
+// race detector to find. It runs in the plain test task; the race build
+// leaves it out.
 
 //go:build !race
 
@@ -54,17 +54,19 @@ func TestFileLocalRulesReachNothingOutsideTheirFile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("loads and builds SSA for every rule package")
 	}
+	// The walk enters only the module's own code; a dependency is judged by
+	// the name of the function called, so its types from export data do.
 	loaded, err := packages.Load(&packages.Config{
-		Mode: packages.LoadAllSyntax,
+		Mode: packages.LoadSyntax,
 		Dir:  "../..",
-	}, "./pkg/rules/...")
+	}, "./pkg/...")
 	if err != nil {
 		t.Fatalf("load rule packages: %v", err)
 	}
 	if packages.PrintErrors(loaded) > 0 {
 		t.Fatal("rule packages do not type-check")
 	}
-	program, _ := ssautil.AllPackages(loaded, ssa.InstantiateGenerics)
+	program, _ := ssautil.Packages(loaded, ssa.InstantiateGenerics)
 	program.Build()
 	// CHA resolves a call of a function value to every function of the same
 	// signature; VTA refines it to the values that can flow there.
