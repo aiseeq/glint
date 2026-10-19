@@ -63,6 +63,10 @@ func (r *PaginatedCallFirstPageOnlyRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports the single first-page reads of paged calls.
 func (r *PaginatedCallFirstPageOnlyRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	decls, err := funcDeclsByObject(ctx)
+	if err != nil {
+		return nil, err
+	}
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		report := func(node ast.Node, message, suggestion string) {
@@ -96,7 +100,7 @@ func (r *PaginatedCallFirstPageOnlyRule) AnalyzeGoProject(ctx *core.GoProjectCon
 					}
 					size, ok, inFilter := firstPageSize(node, fn.Body, info)
 					if !ok || (size != 0 && size < pageCapMin) || pageCapWatched(fn.Body, node, info) ||
-						inFilter && !dropsTotal(node, fn.Body, info) {
+						calleeFailsAtCap(node, info, decls) || inFilter && !dropsTotal(node, fn.Body, info) {
 						return true
 					}
 					message := fmt.Sprintf("One page of %d read as the whole list — rows past it are dropped without a trace", size)
@@ -513,6 +517,63 @@ func pageCapWatched(body *ast.BlockStmt, call *ast.CallExpr, info *types.Info) b
 		return !watched
 	})
 	return watched
+}
+
+// calleeFailsAtCap reports a call whose callee compares the length of rows
+// with its page size parameter and returns an error on that branch: it reads
+// past the cap and fails loudly instead of dropping rows.
+func calleeFailsAtCap(call *ast.CallExpr, info *types.Info, decls map[*types.Func]typedFuncDecl) bool {
+	callee := staticFunc(info, call)
+	if callee == nil {
+		return false
+	}
+	fn, ok := decls[callee.Origin()]
+	if !ok {
+		return false
+	}
+	results := fn.decl.Type.Results
+	if results == nil || len(results.List) == 0 || !isErrorInterface(fn.info.TypeOf(results.List[len(results.List)-1].Type)) {
+		return false
+	}
+	var sizes []types.Object
+	for _, field := range fn.decl.Type.Params.List {
+		for _, name := range field.Names {
+			if obj := fn.info.Defs[name]; obj != nil && pageSizeName.MatchString(name.Name) {
+				sizes = append(sizes, obj)
+			}
+		}
+	}
+	fails := false
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		if stmt, ok := n.(*ast.IfStmt); ok && comparesLenWith(stmt.Cond, sizes, fn.info) && returnsNonNilError(stmt.Body) {
+			fails = true
+		}
+		return !fails
+	})
+	return fails
+}
+
+// comparesLenWith reports a condition comparing len of something with an
+// expression of one of the given objects: len(rows) > limit.
+func comparesLenWith(cond ast.Expr, objs []types.Object, info *types.Info) bool {
+	found := false
+	ast.Inspect(cond, func(n ast.Node) bool {
+		cmp, ok := n.(*ast.BinaryExpr)
+		if !ok || !isComparisonOp(cmp.Op) {
+			return !found
+		}
+		for _, pair := range [][2]ast.Expr{{cmp.X, cmp.Y}, {cmp.Y, cmp.X}} {
+			lenOf, ok := ast.Unparen(pair[0]).(*ast.CallExpr)
+			if !ok || helpers.CalleeName(lenOf) != "len" || len(lenOf.Args) != 1 {
+				continue
+			}
+			for _, obj := range objs {
+				found = found || mentionsObject(info, pair[1], obj)
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 func pageIntConstant(expr ast.Expr, info *types.Info) (int64, bool) {
