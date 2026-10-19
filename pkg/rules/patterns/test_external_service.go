@@ -60,7 +60,10 @@ func init() {
 // test that built the rates client with New - the production address built in - and, skipped
 // only in -short mode, called the live feed on every full run. Outside such files every call
 // of a live entry is reported, constructors included: the client has no offline mode and is
-// routinely handed to another package that calls it. The finding names the address the called
+// routinely handed to another package that calls it. In either file an entry that takes its
+// address from the caller and is given a loopback or reserved URL literal (http://127.0.0.1:1
+// for a test of the pace of the production constructor) reaches nothing outside and is left
+// out; an entry with the production address built in is not. The finding names the address the called
 // entry reaches, not the first one its package holds.
 //
 // A test that genuinely needs the live service stays possible. A test that skips at once unless
@@ -470,8 +473,7 @@ func (r *TestExternalServiceRule) hasLocalURLLiteral(file *ast.File) bool {
 		if !ok {
 			return true
 		}
-		match := r.externalURL.FindStringSubmatch(value)
-		if (match != nil && r.localHost.MatchString(match[1])) || r.localAddress.MatchString(value) {
+		if r.localURL(lit) || r.localAddress.MatchString(value) {
 			found = true
 			return false
 		}
@@ -516,6 +518,16 @@ func (r *TestExternalServiceRule) externalHost(lit *ast.BasicLit) string {
 		return ""
 	}
 	return r.externalURLOf(value)
+}
+
+// localURL reports whether the literal is a URL on a loopback or reserved host.
+func (r *TestExternalServiceRule) localURL(lit *ast.BasicLit) bool {
+	value, ok := goStringLiteral(lit)
+	if !ok {
+		return false
+	}
+	match := r.externalURL.FindStringSubmatch(value)
+	return match != nil && r.localHost.MatchString(match[1])
 }
 
 // externalURLOf returns the value when it is a URL on a third-party host, ""
@@ -568,7 +580,7 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 		if start := r.optInStart(fn, envKeys, osPkgs, facts.optInHelpers); start.IsValid() {
 			liveEnd = start
 		}
-		scope := liveCallScope{liveEnd: liveEnd, unitTests: unitTests, hostOf: r.externalHost}
+		scope := liveCallScope{liveEnd: liveEnd, unitTests: unitTests, hostOf: r.externalHost, isLocalURL: r.localURL}
 		violations = append(violations, r.outboundCalls(file, imports, fn, outbound, scope)...)
 		if own, ok := outboundDirs[filepath.Dir(file.Path)]; ok {
 			violations = append(violations, r.inPackageCalls(file, fn, own, scope)...)

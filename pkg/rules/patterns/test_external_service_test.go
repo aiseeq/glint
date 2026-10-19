@@ -1103,3 +1103,52 @@ func TestChainHead(t *testing.T) {
 	require.Len(t, violations, 1, "%v", messages(violations))
 	assert.Contains(t, violations[0].Message, "https://rpc.bvendor.io")
 }
+
+// A client whose address comes from the caller and is built on a loopback or
+// reserved literal reaches nothing outside, whether the file serves a test
+// server or not: a test checking the pace of the production constructor builds
+// it on http://127.0.0.1:1 and never sends. A client built on an address the
+// test does not spell, or an entry with the production address built in, is
+// still reported.
+func TestTestExternalServiceRule_ClientOnLoopbackLiteralIsNotReported(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"vendorapi/client.go": vendorClient,
+		"vendorapi/pace_test.go": `package vendorapi
+
+import (
+	"context"
+	"os"
+	"testing"
+)
+
+func TestPaceOnLoopback(t *testing.T) {
+	c, err := NewClient("http://127.0.0.1:1", "k")
+	if err != nil || c.base == "" {
+		t.Fatal("built")
+	}
+}
+
+func TestPricesOnLocalhost(t *testing.T) {
+	c, _ := NewClient("http://localhost:8090", "k")
+	_, _ = c.Prices(context.Background(), []string{"a"})
+}
+
+func TestPricesFromConfiguredBase(t *testing.T) {
+	c, _ := NewClient(os.Getenv("VENDOR_BASE"), "k")
+	_, _ = c.Prices(context.Background(), []string{"a"})
+}
+
+func TestPricesOnDefault(t *testing.T) {
+	c, _ := NewDefault("http://127.0.0.1:1")
+	_, _ = c.Prices(context.Background(), []string{"a"})
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	reported := messages(violations)
+	require.Len(t, violations, 2, "%v", reported)
+	assert.Contains(t, reported[0]+reported[1], "TestPricesFromConfiguredBase")
+	assert.Contains(t, reported[0]+reported[1], "TestPricesOnDefault")
+}
