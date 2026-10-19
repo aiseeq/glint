@@ -294,7 +294,7 @@ func DefaultConfig() *Config {
 			Output:      "console",
 		},
 		// Must stay in sync with the registered rule categories; a test in
-		// pkg/rules asserts the two sets match (core cannot import rules).
+		// cmd/glint asserts the two sets match (core cannot import rules).
 		Categories: map[string]CategoryConfig{
 			"architecture": {Enabled: true},
 			"patterns": {Enabled: true, Rules: map[string]RuleConfig{
