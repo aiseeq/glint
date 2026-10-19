@@ -1,5 +1,5 @@
 schema: 1
-graft: '>=2.9.0'
+graft: '>=2.23.0'
 
 # Versions are annotated tags vX.Y.Z (graft release); the build stamps
 # graft version --describe into the binary.
@@ -9,12 +9,10 @@ version:
 gate:
   - task: smoke
 
-# smoke vets with the pgquery_cgo tag the tests build with; graft's own vet
-# runs untagged, a separate build configuration the cache does not share, and
-# repeated the whole analysis of the same single module (about 60 CPU-s).
+# graft's own vet runs with the tag the tests build with, so it shares their
+# build cache; smoke does not vet again.
 go_vet:
-  enabled: false
-  reason: smoke runs go vet ./... with the build tags of the tests; the untagged vet repeated it
+  env: {GOFLAGS: -tags=pgquery_cgo}
 
 # Go tasks build the SQL parser natively (cgo): the WebAssembly one a plain
 # go install gets costs a second and hundreds of MB on every run that parses SQL.
@@ -83,8 +81,8 @@ tasks:
       - go tool cover -html=coverage.out -o coverage.html
       - ['echo', 'Coverage report: coverage.html']
   smoke:
-    desc: the commit gate - fmt-check, vet, short tests
-    run: [{task: fmt-check}, {task: vet}, {task: test-short}]
+    desc: the commit gate after graft's own vet - fmt-check, short tests
+    run: [{task: fmt-check}, {task: test-short}]
 
   # --- quality ---
   lint:
