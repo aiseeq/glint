@@ -9,6 +9,13 @@ version:
 gate:
   - task: smoke
 
+# smoke vets with the pgquery_cgo tag the tests build with; graft's own vet
+# runs untagged, a separate build configuration the cache does not share, and
+# repeated the whole analysis of the same single module (about 60 CPU-s).
+go_vet:
+  enabled: false
+  reason: smoke runs go vet ./... with the build tags of the tests; the untagged vet repeated it
+
 # Go tasks build the SQL parser natively (cgo): the WebAssembly one a plain
 # go install gets costs a second and hundreds of MB on every run that parses SQL.
 tasks:
