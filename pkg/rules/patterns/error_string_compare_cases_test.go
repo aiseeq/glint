@@ -205,3 +205,52 @@ func isErrorVarName(name string) bool {
 `
 	assert.Empty(t, violationLines(runRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})))
 }
+
+// A search for a phrase in the text of an error branches on its wording as
+// strings.Contains does: strings.Index compared with -1 or 0, ContainsAny,
+// EqualFold with the text on either side. An index that cuts the message for
+// display chooses no branch, nor does a search in a text that is no error.
+func TestErrorStringCompare_SearchFunctions(t *testing.T) {
+	const source = `package cmp
+
+import (
+	"errors"
+	"strings"
+)
+
+func push() error { return errors.New("session limit reached") }
+
+func Throttled() bool {
+	text := strings.ToLower(push().Error())
+	return strings.Index(text, "session limit") >= 0 || strings.Index(text, "rate limit") >= 0
+}
+
+func Retry(err error) bool {
+	if strings.LastIndex(err.Error(), "timeout") != -1 {
+		return true
+	}
+	if -1 == strings.IndexAny(err.Error(), "#!") {
+		return false
+	}
+	return strings.ContainsAny(err.Error(), "?*")
+}
+
+func Exact(err error) bool {
+	return strings.EqualFold("deadline exceeded", err.Error())
+}
+
+func Head(err error) string {
+	msg := err.Error()
+	if i := strings.Index(msg, "\n"); i > 0 {
+		return msg[:i]
+	}
+	return msg
+}
+
+func Named(s string) bool {
+	return strings.Index(s, "limit") >= 0
+}
+`
+	violations := runRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})
+	assert.Equal(t, []int{12, 12, 16, 19, 22, 26}, violationLines(violations))
+}
