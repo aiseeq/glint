@@ -31,7 +31,7 @@ repository: commits come from `git log`/`git show`, trees from `git archive`.
    the commits, and writes `all-candidates.jsonl`. Agents name one class in
    different words: group the names into families by hand before ranking.
 
-5. **Replay.** `verify.py REPO OUT/all-candidates.jsonl WORK OUT/verify.jsonl`
+5. **Replay.** `go run ./tools/history/mine/verify REPO OUT/all-candidates.jsonl WORK OUT/verify.jsonl`
    extracts, for each record, the tree the record is about (the parent for a
    defect, the commit itself for an antipattern the fix introduced), runs
    today's glint with every rule and no project configuration on the Go module
@@ -44,8 +44,9 @@ repository: commits come from `git log`/`git show`, trees from `git archive`.
    repository needs `--sibling NAME=REPO`: the sibling is extracted, as it was
    at the date of the tree, to where the replace points; when packages still
    do not type-check, the sibling as of the fix's date is tried as well.
+   `--glint PATH` names the glint binary (by default the one on PATH).
 
-   The same script accepts new rules: given a manifest (`.tsv`, one
+   The same command accepts new rules: given a manifest (`.tsv`, one
    `commit kind rule[,rule...] [@path:line] [whole-tree]` per line — the
    commits a rule must catch), it runs only those rules, checks every line
    afresh and on its own, and prints the lines where none of its rules fired;

@@ -27,9 +27,9 @@ func (j *JSONOutput) WithWriter(w io.Writer) *JSONOutput {
 
 // Write outputs violations and aggregate counters as JSON.
 func (j *JSONOutput) Write(violations core.ViolationList, stats Stats) error {
-	result := jsonResult{
+	result := JSONReport{
 		Summary:    buildJSONSummary(violations),
-		Stats:      jsonStats(stats),
+		Stats:      JSONStats(stats),
 		Issues:     buildJSONIssues(violations),
 		BySeverity: buildSeverityCounts(violations),
 		ByRule:     violations.CountByRule(),
@@ -41,16 +41,19 @@ func (j *JSONOutput) Write(violations core.ViolationList, stats Stats) error {
 	return encoder.Encode(result)
 }
 
-type jsonResult struct {
-	Summary    jsonSummary    `json:"summary"`
-	Stats      jsonStats      `json:"stats"`
-	Issues     []jsonIssue    `json:"issues"`
+// JSONReport is the report glint check -o json writes; a tool reading it
+// decodes into this type.
+type JSONReport struct {
+	Summary    JSONSummary    `json:"summary"`
+	Stats      JSONStats      `json:"stats"`
+	Issues     []JSONIssue    `json:"issues"`
 	BySeverity map[string]int `json:"bySeverity"`
 	ByRule     map[string]int `json:"byRule"`
 	ByCategory map[string]int `json:"byCategory"`
 }
 
-type jsonSummary struct {
+// JSONSummary counts the findings of a report by severity.
+type JSONSummary struct {
 	Total    int `json:"total"`
 	Critical int `json:"critical"`
 	High     int `json:"high"`
@@ -58,7 +61,8 @@ type jsonSummary struct {
 	Low      int `json:"low"`
 }
 
-type jsonStats struct {
+// JSONStats are the counters of a run.
+type JSONStats struct {
 	FilesAnalyzed   int      `json:"filesAnalyzed"`
 	FilesSkipped    int      `json:"filesSkipped"`
 	PackagesSkipped int      `json:"packagesSkipped,omitempty"`
@@ -67,7 +71,8 @@ type jsonStats struct {
 	RulesPanicked   []string `json:"rulesPanicked,omitempty"`
 }
 
-type jsonIssue struct {
+// JSONIssue is one finding of a report.
+type JSONIssue struct {
 	Rule       string         `json:"rule"`
 	Category   string         `json:"category"`
 	Severity   string         `json:"severity"`
@@ -81,9 +86,9 @@ type jsonIssue struct {
 	Context    map[string]any `json:"context,omitempty"`
 }
 
-func buildJSONSummary(violations core.ViolationList) jsonSummary {
+func buildJSONSummary(violations core.ViolationList) JSONSummary {
 	counts := violations.CountBySeverity()
-	return jsonSummary{
+	return JSONSummary{
 		Total:    len(violations),
 		Critical: counts[core.SeverityCritical],
 		High:     counts[core.SeverityHigh],
@@ -92,7 +97,7 @@ func buildJSONSummary(violations core.ViolationList) jsonSummary {
 	}
 }
 
-func buildJSONIssues(violations core.ViolationList) []jsonIssue {
+func buildJSONIssues(violations core.ViolationList) []JSONIssue {
 	items := make([]*core.Violation, len(violations))
 	copy(items, violations)
 	sort.Slice(items, func(i, k int) bool {
@@ -108,9 +113,9 @@ func buildJSONIssues(violations core.ViolationList) []jsonIssue {
 		return items[i].Rule < items[k].Rule
 	})
 
-	issues := make([]jsonIssue, 0, len(items))
+	issues := make([]JSONIssue, 0, len(items))
 	for _, v := range items {
-		issues = append(issues, jsonIssue{
+		issues = append(issues, JSONIssue{
 			Rule:       v.Rule,
 			Category:   v.Category,
 			Severity:   v.Severity.String(),
