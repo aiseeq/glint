@@ -58,7 +58,7 @@ func TestJSONOutputWritesEmptyResult(t *testing.T) {
 		Summary struct {
 			Total int `json:"total"`
 		} `json:"summary"`
-		Issues []jsonIssue `json:"issues"`
+		Issues []JSONIssue `json:"issues"`
 	}
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &payload))
 	require.Equal(t, 0, payload.Summary.Total)
@@ -138,7 +138,7 @@ func TestJSONOutputSortsIssuesByFileLineColumnRule(t *testing.T) {
 	require.NoError(t, NewJSONOutput().WithWriter(&buf).Write(violations, Stats{}))
 
 	var payload struct {
-		Issues []jsonIssue `json:"issues"`
+		Issues []JSONIssue `json:"issues"`
 	}
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &payload))
 	require.Len(t, payload.Issues, 5)
