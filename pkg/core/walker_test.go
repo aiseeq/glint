@@ -125,6 +125,34 @@ func TestWalkerAnalyzesModuleScriptExtensions(t *testing.T) {
 	assert.ElementsMatch(t, names, paths)
 }
 
+// A script without an extension is a shell script when its shebang runs a
+// shell shellcheck reads; other extensionless files are not analyzed.
+func TestWalkerAnalyzesShellScriptsByShebang(t *testing.T) {
+	tmpDir := t.TempDir()
+	files := map[string]string{
+		"deploy":     "#!/bin/bash\necho deploy\n",
+		"hook":       "#!/usr/bin/env sh\nexit 0\n",
+		"runner":     "#! /usr/bin/env -S bash -eu\ntrue\n",
+		"lib.bash":   "f() { :; }\n",
+		"zshrc-tool": "#!/bin/zsh\necho z\n",
+		"tool":       "#!/usr/bin/env node\nconsole.log(1)\n",
+		"LICENSE":    "MIT\n",
+		"bashful":    "#!/usr/bin/bashful\n",
+	}
+	for name, content := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, name), []byte(content), 0o755))
+	}
+
+	contexts, errs := NewWalker(tmpDir, DefaultConfig()).WalkSync()
+	require.Empty(t, errs)
+	var shell []string
+	for _, ctx := range contexts {
+		assert.True(t, ctx.IsShellFile(), ctx.RelPath)
+		shell = append(shell, ctx.RelPath)
+	}
+	assert.ElementsMatch(t, []string{"deploy", "hook", "runner", "lib.bash"}, shell)
+}
+
 func TestWalkerWalkSync(t *testing.T) {
 	// Create temp directory structure
 	tmpDir := t.TempDir()

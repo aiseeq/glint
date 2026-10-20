@@ -107,9 +107,24 @@ func (ctx *FileContext) IsJavaScriptFile() bool {
 	return slices.Contains(JavaScriptExtensions, filepath.Ext(ctx.Path))
 }
 
-// IsShellFile returns true if this is a shell script
+// IsShellFile reports a shell script: a .sh or .bash file, or a file
+// without an extension whose shebang runs sh, bash, dash or ksh.
 func (ctx *FileContext) IsShellFile() bool {
-	return strings.HasSuffix(ctx.Path, ".sh")
+	return IsShellScriptName(ctx.Path) || filepath.Ext(ctx.Path) == "" && HasShellShebang(ctx.Content)
+}
+
+// IsShellScriptName reports a name that marks a shell script by itself.
+func IsShellScriptName(path string) bool {
+	return strings.HasSuffix(path, ".sh") || strings.HasSuffix(path, ".bash")
+}
+
+// shellShebang matches the first line of a script run by a shell shellcheck
+// reads (zsh it does not).
+var shellShebang = regexp.MustCompile(`^#!\s*(?:/usr/bin/env\s+(?:-S\s+)?)?(?:\S*/)?(?:ba|da|k)?sh(?:\s|$)`)
+
+// HasShellShebang reports content that starts with the shebang of a shell.
+func HasShellShebang(content []byte) bool {
+	return shellShebang.Match(content)
 }
 
 // IsMakefile reports a make file: Makefile, GNUmakefile, makefile or *.mk.

@@ -202,6 +202,16 @@ type ProjectFilesRule interface {
 	UseProjectFiles(files []*core.FileContext)
 }
 
+// ExternalToolRule is a rule that runs a program glint does not ship
+// (shellcheck, tsc). Before a root's files are analyzed, the check flow
+// hands it the files: it returns an error when they need the program and
+// the machine does not have it, and the run fails with that error instead
+// of passing the files unchecked.
+type ExternalToolRule interface {
+	Rule
+	CheckTools(files []*core.FileContext) error
+}
+
 // ExcludedInstructionReader is a file rule that measures the Claude Code
 // instruction files even where the configuration's exclude patterns leave
 // them out: an exclusion of *.md meant for documentation must not hide a

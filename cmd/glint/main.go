@@ -23,6 +23,7 @@ import (
 	"github.com/aiseeq/glint/pkg/fix"
 	"github.com/aiseeq/glint/pkg/output"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/toolcache"
 
 	// Rule packages - imported for init() registration
 	_ "github.com/aiseeq/glint/pkg/rules/architecture"
@@ -287,6 +288,8 @@ func runCheck(_ *cobra.Command, args []string) error {
 			outputFormat = cfg.Settings.Output
 		}
 
+		// --no-cache asks shellcheck and tsc again too.
+		toolcache.Disabled = flagNoCache
 		loadDone := timings.phase("load " + projectRoot)
 		prepared, err := prepareScopedAnalysis(loader, root, cfg, enabledRules, !flagNoCache)
 		loadDone()
@@ -939,6 +942,13 @@ func analyzeFiles(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *
 // analyzeFilesContained runs the file rules; a rule panic is returned apart
 // from the findings of the other rules, and a file with one is not cached.
 func analyzeFilesContained(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, overrides severityOverrides, cache *resultCache) (core.ViolationList, rulePanics, error) {
+	for _, rule := range enabledRules {
+		if tool, ok := rule.(rules.ExternalToolRule); ok {
+			if err := tool.CheckTools(contexts); err != nil {
+				return nil, nil, fmt.Errorf("rule %s: %w", rule.Name(), err)
+			}
+		}
+	}
 	if len(contexts) == 0 || len(enabledRules) == 0 {
 		return nil, nil, nil
 	}

@@ -24,7 +24,8 @@ func TestPythonFileRule(t *testing.T) {
 	}
 }
 
-// The rule ships switched off: a project turns it on in its configuration.
-func TestPythonFileRuleIsOptIn(t *testing.T) {
-	assert.False(t, core.DefaultConfig().IsRuleEnabled("architecture", "python-file"))
+// The rule is on by default, and its finding fails the run.
+func TestPythonFileRuleIsOnAndHigh(t *testing.T) {
+	assert.True(t, core.DefaultConfig().IsRuleEnabled("architecture", "python-file"))
+	assert.Equal(t, core.SeverityHigh, NewPythonFileRule().DefaultSeverity())
 }
