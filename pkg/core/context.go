@@ -178,6 +178,17 @@ func (ctx *FileContext) IsComposeFile() bool {
 	return IsComposeFileName(filepath.Base(ctx.Path))
 }
 
+// IsTSConfig reports a TypeScript project file: tsconfig.json or a variant
+// such as tsconfig.test.json.
+func (ctx *FileContext) IsTSConfig() bool {
+	return IsTSConfigName(filepath.Base(ctx.Path))
+}
+
+// IsTSConfigName reports the base name of a TypeScript project file.
+func IsTSConfigName(name string) bool {
+	return strings.HasPrefix(name, "tsconfig") && strings.HasSuffix(name, ".json")
+}
+
 // IsComposeFileName reports the base name of a Compose file.
 func IsComposeFileName(name string) bool {
 	lower := strings.ToLower(name)

@@ -396,6 +396,9 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 	if isDockerfileName(filepath.Base(path)) {
 		return true // image build rules (rules must guard with IsDockerfile)
 	}
+	if IsTSConfigName(filepath.Base(path)) {
+		return true // the tsc rule (rules must guard with IsTSConfig)
+	}
 	if IsComposeFileName(filepath.Base(path)) {
 		return true // deploy rules (rules must guard with IsComposeFile)
 	}

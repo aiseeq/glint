@@ -125,6 +125,23 @@ func TestWalkerAnalyzesModuleScriptExtensions(t *testing.T) {
 	assert.ElementsMatch(t, names, paths)
 }
 
+// tsconfig.json and its variants reach the rules; other JSON does not.
+func TestWalkerAnalyzesTSConfigs(t *testing.T) {
+	tmpDir := t.TempDir()
+	for _, name := range []string{"tsconfig.json", "tsconfig.test.json", "package.json", "data.json"} {
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, name), []byte("{}\n"), 0o644))
+	}
+
+	contexts, errs := NewWalker(tmpDir, DefaultConfig()).WalkSync()
+	require.Empty(t, errs)
+	var paths []string
+	for _, ctx := range contexts {
+		assert.True(t, ctx.IsTSConfig(), ctx.RelPath)
+		paths = append(paths, ctx.RelPath)
+	}
+	assert.ElementsMatch(t, []string{"tsconfig.json", "tsconfig.test.json"}, paths)
+}
+
 // A script without an extension is a shell script when its shebang runs a
 // shell shellcheck reads; other extensionless files are not analyzed.
 func TestWalkerAnalyzesShellScriptsByShebang(t *testing.T) {
