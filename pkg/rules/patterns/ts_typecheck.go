@@ -303,20 +303,27 @@ type tsCheckResult struct {
 	err    error
 }
 
-// tsFileTypeChecked reports a TS file that a type-checked tsconfig of the
-// project compiles. The configs are read once per project root.
-func tsFileTypeChecked(root, file string) (bool, error) {
+// projectCheckedTSConfigs returns the type-checked tsconfigs of the project
+// at root, read once per root.
+func projectCheckedTSConfigs(root string) ([]tsconfigScope, error) {
 	checkedTSConfigsMu.Lock()
+	defer checkedTSConfigsMu.Unlock()
 	result, ok := checkedTSConfigsCache[root]
 	if !ok {
 		result.scopes, result.err = checkedTSConfigs(root)
 		checkedTSConfigsCache[root] = result
 	}
-	checkedTSConfigsMu.Unlock()
-	if result.err != nil {
-		return false, result.err
+	return result.scopes, result.err
+}
+
+// tsFileTypeChecked reports a TS file that a type-checked tsconfig of the
+// project compiles.
+func tsFileTypeChecked(root, file string) (bool, error) {
+	scopes, err := projectCheckedTSConfigs(root)
+	if err != nil {
+		return false, err
 	}
-	for _, scope := range result.scopes {
+	for _, scope := range scopes {
 		covered, err := scope.covers(file)
 		if err != nil {
 			return false, err

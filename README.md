@@ -35,6 +35,21 @@ go install -tags pgquery_cgo github.com/aiseeq/glint/cmd/glint@latest
 Without cgo that build stops with `undefined: pganalyze.FingerprintToHexStr`:
 drop the tag, or install a C compiler.
 
+Two rules run programs glint does not ship, and a project that has the files
+they check needs them; a missing one fails the run instead of leaving the
+files unchecked:
+
+- **shellcheck** — shell scripts (`.sh`, `.bash`, files whose shebang runs a
+  shell): `dnf install ShellCheck` or `apt install shellcheck`.
+- **tsc** — TypeScript: a file a tsconfig compiles is checked with the
+  project's own tsc (`node_modules/.bin/tsc`, so install the project's
+  packages first), and also with the global tsc 7 to tell whether the project
+  can move to it; a file no tsconfig compiles is checked strictly by the
+  global tsc 7 alone, with the types of node: `npm i -g typescript@7 @types/node`.
+
+Their answers are cached under the user cache directory (`glint/tools`), keyed
+by everything the program read; `--no-cache` asks them again.
+
 Or build from source (graft builds the native parser, so it needs a C compiler). Development commands run through
 [graft](https://github.com/aiseeq/graft) (tasks in `.graft.yaml`):
 
