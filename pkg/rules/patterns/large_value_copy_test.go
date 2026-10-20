@@ -169,3 +169,86 @@ func TestLargeValueCopiedPerElementMessage(t *testing.T) {
 	require.NotEmpty(t, violations)
 	assert.Contains(t, violations[0].Message, "physics.Body (256 bytes)")
 }
+
+// Repro from a real project: the advice to range over the index and take
+// &xs[i] was followed in a loop that changed its copy, and the loop began to
+// change the caller's records. A body that writes the copy, takes its
+// address, calls a pointer method on it or captures it in a closure gets the
+// advice to keep the copy.
+func TestLargeValueCopiedPerElementAdviceKeepsACopyTheBodyChanges(t *testing.T) {
+	files := map[string]string{"physics/step.go": `package physics
+
+// Body is 256 bytes on a 64-bit platform.
+type Body struct {
+	ID    uint64
+	Pos   [2]float64
+	Mass  float64
+	Trail [28]float64
+}
+
+func (b *Body) Damp() { b.Mass /= 2 }
+
+func total(bodies []Body) float64 {
+	sum := 0.0
+	for _, b := range bodies {
+		sum += b.Mass
+	}
+	return sum
+}
+
+func doubled(bodies []Body) float64 {
+	sum := 0.0
+	for _, b := range bodies {
+		b.Mass *= 2
+		sum += b.Mass
+	}
+	return sum
+}
+
+func trailed(bodies []Body) float64 {
+	sum := 0.0
+	for _, b := range bodies {
+		b.Trail[0]++
+		sum += b.Trail[0]
+	}
+	return sum
+}
+
+func damped(bodies []Body) float64 {
+	sum := 0.0
+	for _, b := range bodies {
+		b.Damp()
+		sum += b.Mass
+	}
+	return sum
+}
+
+func pointed(bodies []Body) []*Body {
+	var out []*Body
+	for _, b := range bodies {
+		out = append(out, &b)
+	}
+	return out
+}
+
+func deferred(bodies []Body) []func() uint64 {
+	var out []func() uint64
+	for _, b := range bodies {
+		out = append(out, func() uint64 { return b.ID })
+	}
+	return out
+}
+`}
+	violations, err := NewLargeValueCopiedPerElementRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	advice := map[int]string{}
+	for _, v := range violations {
+		advice[v.Line] = v.Suggestion
+	}
+	require.Len(t, advice, 6)
+	assert.Contains(t, advice[15], "&xs[i]", "a body that only reads the copy")
+	for _, line := range []int{23, 32, 41, 50, 58} {
+		assert.Contains(t, advice[line], "The loop body changes its copy", "line %d", line)
+		assert.NotContains(t, advice[line], "use &xs[i]", "line %d", line)
+	}
+}
