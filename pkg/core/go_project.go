@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -373,6 +374,42 @@ func goModuleDirs(root string, goFiles []*FileContext, tolerate bool) ([]string,
 	}
 	sort.Strings(moduleDirs)
 	return moduleDirs, outside, nil
+}
+
+// FilesOfRunModules returns the files of the root a run over some of them
+// loads: all of them but the Go files of modules the run's Go files are not
+// in. A module of the root the run does not touch cannot change its typed
+// findings, and need not even build.
+func FilesOfRunModules(root string, run, all []*FileContext, tolerate bool) ([]*FileContext, error) {
+	var runGo []*FileContext
+	for _, fileCtx := range run {
+		if fileCtx.IsGoFile() {
+			runGo = append(runGo, fileCtx)
+		}
+	}
+	moduleDirs, _, err := goModuleDirs(root, runGo, tolerate)
+	if err != nil {
+		return nil, err
+	}
+	kept := make([]*FileContext, 0, len(all))
+	for _, fileCtx := range all {
+		if !fileCtx.IsGoFile() {
+			kept = append(kept, fileCtx)
+			continue
+		}
+		path, err := absoluteContextPath(root, fileCtx)
+		if err != nil {
+			return nil, err
+		}
+		moduleDir, found, err := nearestGoModule(filepath.Dir(path))
+		if err != nil {
+			return nil, err
+		}
+		if found && slices.Contains(moduleDirs, moduleDir) {
+			kept = append(kept, fileCtx)
+		}
+	}
+	return kept, nil
 }
 
 // nearestGoModule walks up from a file's directory until it finds the go.mod

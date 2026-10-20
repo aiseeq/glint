@@ -69,7 +69,6 @@ func tscFindings(t *testing.T, root string) []string {
 	t.Helper()
 	contexts := tscContexts(t, root)
 	rule := NewTscRule()
-	rule.UseProjectFiles(contexts)
 	require.NoError(t, rule.CheckTools(contexts))
 	var found []string
 	for _, ctx := range contexts {
@@ -189,7 +188,6 @@ func TestTscCheckToolsNeedsTheTscOfEachProgram(t *testing.T) {
 	tsc := globalTsc7(t)
 	check := func(rule *TscRule, root string) error {
 		contexts := tscContexts(t, root)
-		rule.UseProjectFiles(contexts)
 		return rule.CheckTools(contexts)
 	}
 

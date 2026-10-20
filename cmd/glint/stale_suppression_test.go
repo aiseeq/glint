@@ -224,7 +224,7 @@ categories:
       cross-file-duplicate:
         exceptions:
           - files: "quiet.go"
-            reason: a rule whose files feed each other is not run on excepted ones
+            reason: the file copies nothing
 `
 
 var fileExceptionModule = map[string]string{
@@ -259,9 +259,9 @@ func Drop() { _ = produce() }
 
 // A file-only exception is judged like any other: the rule runs on the files
 // it names, and an exception none of whose files has a finding of the rule is
-// stale. Missing files stay dead-config-exception's; rules whose analysis of
-// one file feeds their findings on others are not run on excepted files, so
-// their exceptions are not judged. A marker naming glint itself names no rule
+// stale. Missing files stay dead-config-exception's; a rule comparing files
+// learns the root before it runs, so it runs on an excepted file without
+// changing what it finds elsewhere. A marker naming glint itself names no rule
 // — golangci-lint knows no such linter either — so it is stale even where
 // golangci-lint is configured.
 func TestStaleSuppressionJudgesFileExceptionsAndTheToolName(t *testing.T) {
@@ -271,6 +271,7 @@ func TestStaleSuppressionJudgesFileExceptionsAndTheToolName(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		".glint.yaml:9",  // error-string over quiet.go
 		".glint.yaml:17", // ignored-error over quiet.go
+		".glint.yaml:23", // cross-file-duplicate over quiet.go
 		"quiet.go:7",     // the marker naming the tool
 	}, foundAt(stale))
 }
@@ -300,7 +301,7 @@ func TestStaleSuppressionSeesFileExceptionsThroughTheResultCache(t *testing.T) {
 	require.NoError(t, err)
 	_, got := analyzeWithRules(t, root, second, fileExceptionRules...)
 	assert.ElementsMatch(t, foundAt(want), foundAt(got))
-	assert.Len(t, foundAt(got), 3)
+	assert.Len(t, foundAt(got), 4)
 	assert.Positive(t, second.reused)
 }
 

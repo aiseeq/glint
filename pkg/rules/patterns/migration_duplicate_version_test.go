@@ -166,3 +166,26 @@ func TestMigrationDuplicateVersionRule_PairingCanBeTurnedOff(t *testing.T) {
 		t.Fatal("a non-boolean require_pairs must be a configuration error")
 	}
 }
+
+// Repro from a real project: a commit gate ran glint on the new migration
+// only, and the older one with its version was not among the files. The rule
+// learns the root's migrations first: the newcomer is reported alone.
+func TestMigrationDuplicateVersionSeesMigrationsOutsideTheRun(t *testing.T) {
+	paths := writeMigrations(t, t.TempDir(),
+		"000041_accounts.up.sql", "000041_accounts.down.sql",
+		"000041_ledger.up.sql", "000041_ledger.down.sql",
+	)
+	var files []*core.FileContext
+	for _, path := range paths {
+		files = append(files, core.NewFileContext(path, filepath.Dir(path), []byte("-- sql"), nil))
+	}
+	rule := NewMigrationDuplicateVersionRule()
+	rule.UseProjectFiles(files)
+	if found := rule.AnalyzeFile(files[2]); len(found) != 1 {
+		t.Fatalf("the newcomer duplicates a migration outside the run: want 1 violation, got %+v", found)
+	}
+	rule.UseProjectFiles(files)
+	if found := rule.AnalyzeFile(files[0]); len(found) != 0 {
+		t.Fatalf("the first migration of the version is the original: want nothing, got %+v", found)
+	}
+}

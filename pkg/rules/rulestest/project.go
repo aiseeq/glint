@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -65,6 +66,24 @@ func Project(t *testing.T, files map[string]string) *core.GoProjectContext {
 func ProjectWithSSA(t *testing.T, files map[string]string) *core.GoProjectContext {
 	t.Helper()
 	return load(t, files, true)
+}
+
+// ProjectRunning loads the module with only the named files in the run, as
+// glint check given those paths loads it: every package of the module is
+// typed, and the rules report on the named files alone.
+func ProjectRunning(t *testing.T, files map[string]string, run ...string) *core.GoProjectContext {
+	t.Helper()
+	root, contexts := Module(t, files)
+	var running []*core.FileContext
+	for _, ctx := range contexts {
+		if slices.Contains(run, ctx.RelPath) {
+			running = append(running, ctx)
+		}
+	}
+	require.Len(t, running, len(run), "every file of the run is a Go file of the module")
+	project, err := core.LoadGoProject(root, running, core.GoProjectOptions{ListPackages: ListPackages})
+	require.NoError(t, err)
+	return project
 }
 
 func load(t *testing.T, files map[string]string, withSSA bool) *core.GoProjectContext {

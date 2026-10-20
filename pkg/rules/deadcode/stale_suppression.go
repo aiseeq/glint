@@ -37,8 +37,7 @@ func init() {
 // taken for golangci-lint's when the project configures golangci-lint.
 // Exceptions are judged only when the run covers the whole directory of their
 // configuration; a file-only exception by running the rule on the files it
-// names, except for a rule whose analysis of one file feeds its findings on
-// others (rules.AccumulatesAcrossFiles), which is not run there.
+// names.
 type StaleSuppressionRule struct {
 	*rules.BaseRule
 }
@@ -166,13 +165,10 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 	for i := range exceptions {
 		ruleException := &exceptions[i]
 		exc := ruleException.Exception
-		rule, ran := run.Executed[ruleException.Rule]
+		_, ran := run.Executed[ruleException.Rule]
 		// Its own findings are filtered after this check, by the run.
 		if !ran || usedExceptions[exc.Key()] || ruleException.Rule == r.Name() {
 			continue
-		}
-		if exc.IsFileOnly() && rules.AccumulatesAcrossFiles(rule) {
-			continue // not run on the files it names
 		}
 		if (exc.File != "" || exc.Files != "") && !slices.ContainsFunc(files, exc.NamesFile) {
 			continue // the files do not exist: dead-config-exception's finding

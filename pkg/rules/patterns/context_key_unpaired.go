@@ -57,7 +57,7 @@ func (r *ContextKeyUnpairedRule) RequiresSSA() bool { return false }
 
 // contextKeySite is one WithValue or Value call with a key of the project.
 type contextKeySite struct {
-	file    *core.FileContext
+	file    *core.FileContext // nil outside the run: the site counts, it is not reported
 	line    int
 	typedID string // the key by type and value, "" without type information
 	name    string
@@ -131,18 +131,25 @@ func gatherContextKeys(ctx *core.GoProjectContext) *contextKeyUse {
 		}
 		own[pkg.Package.PkgPath] = true
 	}
+	// The typed syntax holds every package of the module, the files of
+	// the run among them: a key the run stores may be read anywhere.
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
 			continue
 		}
 		for _, file := range pkg.Files {
 			typed[file] = true
-			use.gatherFile(file, pkg.Package.TypesInfo, own)
+		}
+		for _, syntax := range pkg.Package.Syntax {
+			path := ctx.FileSet.Position(syntax.Pos()).Filename
+			fileCtx, _ := ctx.RunFile(path)
+			lineOf := func(n ast.Node) int { return ctx.FileSet.Position(n.Pos()).Line }
+			use.gatherFile(syntax, path, fileCtx, lineOf, pkg.Package.TypesInfo, own)
 		}
 	}
 	for _, file := range ctx.Files {
-		if file != nil && !typed[file] {
-			use.gatherFile(file, nil, own)
+		if file != nil && !typed[file] && file.GoAST != nil {
+			use.gatherFile(file.GoAST, file.Path, file, func(n ast.Node) int { return file.LineFor(n) }, nil, own)
 		}
 	}
 	for _, site := range use.sites {
@@ -161,29 +168,31 @@ func gatherContextKeys(ctx *core.GoProjectContext) *contextKeyUse {
 	return use
 }
 
-func (u *contextKeyUse) gatherFile(file *core.FileContext, info *types.Info, own map[string]bool) {
-	if file.GoAST == nil || file.IsTestFile() || !file.IsGoFile() {
+// gatherFile records the key sites of one file; fileCtx is the file's
+// context when the run analyzes it, nil otherwise.
+func (u *contextKeyUse) gatherFile(syntax *ast.File, path string, fileCtx *core.FileContext, lineOf func(ast.Node) int, info *types.Info, own map[string]bool) {
+	if strings.HasSuffix(path, "_test.go") || !strings.HasSuffix(path, ".go") {
 		return
 	}
-	for _, decl := range file.GoAST.Decls {
+	for _, decl := range syntax.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			continue
 		}
-		middleware := fieldOfType(file.GoAST, info, fn.Type.Params, "net/http", "Handler", "HandlerFunc") ||
-			fieldOfType(file.GoAST, info, fn.Type.Results, "net/http", "Handler", "HandlerFunc")
-		enricher := fieldOfType(file.GoAST, info, fn.Type.Params, "context", "Context") &&
-			fieldOfType(file.GoAST, info, fn.Type.Results, "context", "Context")
+		middleware := fieldOfType(syntax, info, fn.Type.Params, "net/http", "Handler", "HandlerFunc") ||
+			fieldOfType(syntax, info, fn.Type.Results, "net/http", "Handler", "HandlerFunc")
+		enricher := fieldOfType(syntax, info, fn.Type.Params, "context", "Context") &&
+			fieldOfType(syntax, info, fn.Type.Results, "context", "Context")
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-			key, write, ok := contextKeyCall(file.GoAST, info, call)
+			key, write, ok := contextKeyCall(syntax, info, call)
 			if !ok {
 				return true
 			}
-			site := contextKeySite{file: file, line: file.LineFor(key), write: write, fn: fn, middleware: middleware, enricher: enricher}
+			site := contextKeySite{file: fileCtx, line: lineOf(key), write: write, fn: fn, middleware: middleware, enricher: enricher}
 			if info == nil {
 				if site.name = keyName(key); site.name != "" {
 					u.sites = append(u.sites, site)

@@ -195,8 +195,9 @@ type ReadsOtherFiles interface {
 
 // ProjectFilesRule is an optional interface for file rules that compare a
 // file with the rest of the project: before it analyzes a root, the check
-// flow hands them every file of the root, the same contexts the analysis
-// then passes one by one. They are stateful: ResetState drops the files.
+// flow hands them every file of the root, also when the run covers only some
+// of them; the files of the run are the same contexts the analysis then
+// passes one by one. They are stateful: ResetState drops the files.
 type ProjectFilesRule interface {
 	StatefulRule
 	UseProjectFiles(files []*core.FileContext)
@@ -226,18 +227,6 @@ type ExcludedInstructionReader interface {
 func ReadsExcludedInstructions(r Rule) bool {
 	_, ok := r.(ExcludedInstructionReader)
 	return ok
-}
-
-// AccumulatesAcrossFiles reports whether the rule's analysis of one file
-// feeds its findings on others: a stateful rule that is not handed the
-// project's files up front gathers them file by file. Running it on a file a
-// file exception keeps it off would change what it reports elsewhere.
-func AccumulatesAcrossFiles(r Rule) bool {
-	if _, ok := r.(StatefulRule); !ok {
-		return false
-	}
-	_, projectFiles := r.(ProjectFilesRule)
-	return !projectFiles
 }
 
 // FileLocal reports whether a rule's findings on a file depend only on that

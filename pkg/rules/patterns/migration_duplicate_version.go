@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -105,16 +106,54 @@ func numericVersion(version string) string {
 	return trimmed
 }
 
-// AnalyzeFile registers migration files and reports duplicate versions
-func (r *MigrationDuplicateVersionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+// UseProjectFiles records the first migration of each version of the root,
+// in the order the files are analyzed, so that a run over some of the
+// migrations reports a duplicate against the same migration as a run over
+// all of them.
+func (r *MigrationDuplicateVersionRule) UseProjectFiles(files []*core.FileContext) {
+	r.ResetState()
+	sorted := slices.SortedFunc(slices.Values(files), func(a, b *core.FileContext) int { return strings.Compare(a.Path, b.Path) })
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, ctx := range sorted {
+		if m := migrationFile(ctx); m != nil {
+			r.firstOfVersion(filepath.Dir(ctx.Path), migrationID{version: m[1], name: m[2]})
+		}
+	}
+}
+
+// migrationFile returns the version, name and direction of a migration
+// file, or nil for another file.
+func migrationFile(ctx *core.FileContext) []string {
 	if !strings.HasSuffix(ctx.Path, ".sql") {
 		return nil
 	}
-	m := migrationFileRe.FindStringSubmatch(filepath.Base(ctx.Path))
+	return migrationFileRe.FindStringSubmatch(filepath.Base(ctx.Path))
+}
+
+// firstOfVersion returns the first migration of the directory with the
+// version of id, recording id when it is the first. The caller holds mu.
+func (r *MigrationDuplicateVersionRule) firstOfVersion(dir string, id migrationID) migrationID {
+	byVersion, ok := r.seen[dir]
+	if !ok {
+		byVersion = make(map[string]migrationID)
+		r.seen[dir] = byVersion
+	}
+	key := numericVersion(id.version)
+	existing, ok := byVersion[key]
+	if !ok {
+		byVersion[key] = id
+		return id
+	}
+	return existing
+}
+
+// AnalyzeFile registers migration files and reports duplicate versions
+func (r *MigrationDuplicateVersionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	m := migrationFile(ctx)
 	if m == nil {
 		return nil
 	}
-	dir := filepath.Dir(ctx.Path)
 	id := migrationID{version: m[1], name: m[2]}
 
 	var violations []*core.Violation
@@ -127,17 +166,8 @@ func (r *MigrationDuplicateVersionRule) AnalyzeFile(ctx *core.FileContext) []*co
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	byVersion, ok := r.seen[dir]
-	if !ok {
-		byVersion = make(map[string]migrationID)
-		r.seen[dir] = byVersion
-	}
 	key := numericVersion(id.version)
-	existing, ok := byVersion[key]
-	if !ok {
-		byVersion[key] = id
-		return violations
-	}
+	existing := r.firstOfVersion(filepath.Dir(ctx.Path), id)
 	if existing == id {
 		return violations // the up/down pair of the same migration
 	}

@@ -3,6 +3,7 @@ package duplication
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,18 +80,34 @@ func (r *CrossFileDuplicateRule) ResetState() {
 	r.firstSeen = make(map[windowHash]blockOrigin)
 }
 
+// UseProjectFiles records where each window of the root is seen first, in
+// the order the files are analyzed, so that a run over some of the files
+// reports a copy against the same original as a run over all of them.
+func (r *CrossFileDuplicateRule) UseProjectFiles(files []*core.FileContext) {
+	r.ResetState()
+	sorted := slices.SortedFunc(slices.Values(files), func(a, b *core.FileContext) int { return strings.Compare(a.Path, b.Path) })
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, ctx := range sorted {
+		for _, block := range r.blocksOf(ctx) {
+			if _, seen := r.firstSeen[block.hash]; !seen {
+				r.firstSeen[block.hash] = blockOrigin{file: ctx.RelPath, start: block.start, check: block.check}
+			}
+		}
+	}
+}
+
 // AnalyzeFile collects blocks and detects cross-file duplicates
 func (r *CrossFileDuplicateRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if !isDuplicationCandidate(ctx) {
+	return r.processFile(ctx, r.blocksOf(ctx))
+}
+
+// blocksOf returns the candidate windows of a file the rule compares.
+func (r *CrossFileDuplicateRule) blocksOf(ctx *core.FileContext) []hashedBlock {
+	if !isDuplicationCandidate(ctx) || len(ctx.Lines) < r.minBlockSize {
 		return nil
 	}
-
-	if len(ctx.Lines) < r.minBlockSize {
-		return nil
-	}
-
-	// Collect blocks from this file and check for duplicates
-	return r.processFile(ctx, normalizeFileLines(ownNameMasked(ctx)))
+	return r.collectBlocks(normalizeFileLines(ownNameMasked(ctx)))
 }
 
 // minMaskedNameLen keeps short script names such as "a.sh" unmasked: replacing
@@ -117,11 +134,9 @@ func ownNameMasked(ctx *core.FileContext) []string {
 }
 
 // processFile compares the file's windows with the first occurrence of each
-// window in the files analyzed before it, records the windows seen for the
-// first time, and reports each copied region once.
-func (r *CrossFileDuplicateRule) processFile(ctx *core.FileContext, normalized []string) []*core.Violation {
-	blocks := r.collectBlocks(normalized)
-
+// window in the files before it, records the windows seen for the first
+// time, and reports each copied region once.
+func (r *CrossFileDuplicateRule) processFile(ctx *core.FileContext, blocks []hashedBlock) []*core.Violation {
 	r.mu.Lock()
 	var matches []windowMatch
 	for _, block := range blocks {
@@ -130,9 +145,8 @@ func (r *CrossFileDuplicateRule) processFile(ctx *core.FileContext, normalized [
 			r.firstSeen[block.hash] = blockOrigin{file: ctx.RelPath, start: block.start, check: block.check}
 			continue
 		}
-		// A file is analyzed once, so a stored window of the same hash always
-		// comes from another file.
-		if origin.check != block.check {
+		// The window is first seen in this very file: the original.
+		if origin.file == ctx.RelPath || origin.check != block.check {
 			continue
 		}
 		matches = append(matches, windowMatch{start: block.start, origFile: origin.file, origStart: origin.start})
