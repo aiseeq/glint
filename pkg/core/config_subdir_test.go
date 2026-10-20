@@ -57,17 +57,13 @@ categories:
     rules:
       frontend-money-arithmetic:
         exceptions:
-          - files: "frontend/e2e/utils/**"
-          - files: "services/billing/**"
-          - file: "total.ts"
-            line: 3
-          - pattern: "legacy"
-          - file: "backend/services/billing/invoice.go"
-            function: renamedAway
-          - file: "backend/services/billing/invoice.go"
-            function: Issue
-          - files: "frontend/**"
-            function: anyTS
+          - {files: "frontend/e2e/utils/**", reason: fixtures}
+          - {files: "services/billing/**", reason: moved}
+          - {file: "total.ts", line: 3, reason: display}
+          - {pattern: "legacy", reason: legacy}
+          - {file: "backend/services/billing/invoice.go", function: renamedAway, reason: renamed}
+          - {file: "backend/services/billing/invoice.go", function: Issue, reason: issuing}
+          - {files: "frontend/**", function: anyTS, reason: any}
 `
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".glint.yaml"), []byte(config), 0o644))
 	for _, dir := range []string{"frontend/e2e/utils", "backend/services/billing", "frontend/app", "node_modules/x/services/billing"} {

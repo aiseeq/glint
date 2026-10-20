@@ -296,7 +296,9 @@ func DefaultConfig() *Config {
 		// Must stay in sync with the registered rule categories; a test in
 		// cmd/glint asserts the two sets match (core cannot import rules).
 		Categories: map[string]CategoryConfig{
-			"architecture": {Enabled: true},
+			"architecture": {Enabled: true, Rules: map[string]RuleConfig{
+				"python-file": {Enabled: false},
+			}},
 			"patterns": {Enabled: true, Rules: map[string]RuleConfig{
 				"deprecated-nginx-http2-listen": {Enabled: false},
 			}},
@@ -431,6 +433,10 @@ func (c *Config) Validate() error {
 			for i, exc := range ruleCfg.Exceptions {
 				if exc.File == "" && exc.Files == "" && exc.Line == 0 && exc.Pattern == "" && exc.Function == "" {
 					return fmt.Errorf("categories.%s.rules.%s.exceptions[%d]: names no file, files, line, pattern or function, so it matches nothing",
+						name, ruleName, i)
+				}
+				if strings.TrimSpace(exc.Reason) == "" {
+					return fmt.Errorf("categories.%s.rules.%s.exceptions[%d]: no reason - say why the finding does not apply there, so it can be checked later",
 						name, ruleName, i)
 				}
 				if exc.Files != "" && !doublestar.ValidatePattern(exc.Files) {

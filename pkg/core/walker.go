@@ -379,6 +379,7 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 		".sql",  // migration hygiene rules (rules must guard by extension)
 		".conf", // server configuration rules (rules must guard by extension)
 		".sh",   // duplication rules (rules must guard by extension)
+		".py",   // the python-file rule (rules must guard by extension)
 	}, TypeScriptExtensions, JavaScriptExtensions)
 
 	if IsTemplateName(path) {
