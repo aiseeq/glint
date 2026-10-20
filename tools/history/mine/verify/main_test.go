@@ -161,7 +161,7 @@ func readLines(t *testing.T, path string) []map[string]any {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	var recs []map[string]any
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {

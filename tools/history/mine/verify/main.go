@@ -78,7 +78,7 @@ func main() {
 	fs.Var(siblings, "sibling", "NAME=REPO: a sibling repository a local replace or go.work use points to (repeatable)")
 	glint := fs.String("glint", "glint", "glint binary")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: verify REPO CANDIDATES.jsonl|MANIFEST.tsv WORKDIR OUT.jsonl [--sibling NAME=REPO ...] [--glint PATH]")
+		fmt.Fprintln(os.Stderr, "usage: verify REPO CANDIDATES.jsonl|MANIFEST.tsv WORKDIR OUT.jsonl [--sibling NAME=REPO ...] [--glint PATH]")
 		fs.PrintDefaults()
 	}
 	args, err := hist.Parse(fs, os.Args[1:])
@@ -176,7 +176,9 @@ func (r *replay) verify(input, outPath string, progress io.Writer) (int, error) 
 	if err != nil {
 		return 0, err
 	}
-	defer out.Close()
+	// The Close at the end reports a failed write; this one only frees
+	// the file of a run that failed earlier.
+	defer func() { _ = out.Close() }()
 	var misses []string
 	lines := 0
 	for i, j := range jobs {
@@ -223,15 +225,21 @@ func (r *replay) verify(input, outPath string, progress io.Writer) (int, error) 
 		if err := hist.WriteLine(out, res); err != nil {
 			return 0, err
 		}
-		fmt.Fprintf(progress, "%d/%d %s %s %s%s\n", i+1, len(jobs), j.commit, j.kind, res.Status, verdict)
+		if _, err := fmt.Fprintf(progress, "%d/%d %s %s %s%s\n", i+1, len(jobs), j.commit, j.kind, res.Status, verdict); err != nil {
+			return 0, err
+		}
 	}
 	if err := out.Close(); err != nil {
 		return 0, err
 	}
 	if m != nil {
-		fmt.Fprintf(progress, "misses: %d of %d\n", len(misses), lines)
+		var report strings.Builder
+		fmt.Fprintf(&report, "misses: %d of %d\n", len(misses), lines)
 		for _, miss := range misses {
-			fmt.Fprintln(progress, "  "+miss)
+			report.WriteString("  " + miss + "\n")
+		}
+		if _, err := io.WriteString(progress, report.String()); err != nil {
+			return 0, err
 		}
 	}
 	return len(misses), nil
@@ -258,7 +266,7 @@ func readManifest(input string) (*manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	m := &manifest{checks: map[[2]string][]check{}, whole: map[[2]string]bool{}}
 	scanner := bufio.NewScanner(f)
 	for n := 1; scanner.Scan(); n++ {
@@ -326,7 +334,7 @@ func readCandidates(input string) ([]job, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	seen := map[job]bool{}
 	var jobs []job
 	scanner := bufio.NewScanner(f)
@@ -409,12 +417,12 @@ func (r *replay) changedLines(commit, side string) (map[string]map[int]bool, err
 
 func parseDiff(diff, side string) (map[string]map[int]bool, error) {
 	lines := map[string]map[int]bool{}
-	var oldPath, newPath, file string
+	var oldPath, file string
 	inHunk := false
 	for _, line := range strings.Split(diff, "\n") {
 		switch {
 		case strings.HasPrefix(line, "diff "):
-			inHunk, oldPath, newPath, file = false, "", "", ""
+			inHunk, oldPath, file = false, "", ""
 		case inHunk:
 			// Hunk lines start with -, + or \; a removed "-- comment"
 			// is not a header.
@@ -433,8 +441,7 @@ func parseDiff(diff, side string) (map[string]map[int]bool, error) {
 			if err != nil {
 				return nil, err
 			}
-			newPath = p
-			file = newPath
+			file = p
 			if side == "old" {
 				file = oldPath
 			}

@@ -45,7 +45,7 @@ func main() {
 	metric := fs.String("metric", "per_kloc_crit_high", "record field to plot")
 	title := fs.String("title", "", "chart title")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: plot FILE.jsonl... [-o curve.svg] [--metric per_kloc_crit_high] [--title TEXT]")
+		fmt.Fprintln(os.Stderr, "usage: plot FILE.jsonl... [-o curve.svg] [--metric per_kloc_crit_high] [--title TEXT]")
 		fs.PrintDefaults()
 	}
 	files, err := hist.Parse(fs, os.Args[1:])
@@ -107,7 +107,7 @@ func load(path, metric string) (series, error) {
 	if err != nil {
 		return series{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	var records []map[string]json.RawMessage
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(nil, 16<<20)
