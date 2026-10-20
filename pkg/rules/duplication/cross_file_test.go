@@ -278,3 +278,39 @@ func TestCrossFileDuplicateRule_ResetState(t *testing.T) {
 		t.Error("Expected firstSeen to be empty after ResetState")
 	}
 }
+
+// Repro from a real project: a commit gate ran glint on the changed files,
+// and a copy whose original was not among them went unreported. The rule
+// learns the root's originals first: the copy is reported alone, the
+// original stays clean.
+func TestCrossFileDuplicateReportsACopyWhoseOriginalIsOutsideTheRun(t *testing.T) {
+	body := `func Redact(err error) error {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return err
+	}
+	clean := *urlErr
+	clean.URL = stripPath(urlErr.URL)
+	return fmt.Errorf("request %s: %w", clean.Op, clean.Err)
+}
+
+func stripPath(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "<unparsable url>"
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+`
+	original := createTestContext(t, "backend/http/redact.go", "package http\n"+body)
+	copied := createTestContext(t, "tools/monitor/redact.go", "package monitor\n"+body)
+
+	rule := NewCrossFileDuplicateRule()
+	rule.UseProjectFiles([]*core.FileContext{copied, original})
+	violations := rule.AnalyzeFile(copied)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "backend/http/redact.go")
+
+	rule.UseProjectFiles([]*core.FileContext{copied, original})
+	assert.Empty(t, rule.AnalyzeFile(original))
+}

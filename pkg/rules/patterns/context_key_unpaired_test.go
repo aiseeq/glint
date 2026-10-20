@@ -103,3 +103,50 @@ func Whoami(ctx context.Context) (any, any, any, any, any) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"api/handlers.go:10", "auth/middleware.go:26", "auth/middleware.go:46"}, foundLines(violations))
 }
+
+// Repro from a real project: glint run on the changed files of a commit (a
+// middleware) reported its keys as never read, while handlers in packages
+// outside the run read them. Reads and writes count across the module; a key
+// nothing in the module reads is still reported.
+func TestContextKeyUnpairedSeesTheModuleOutsideTheRun(t *testing.T) {
+	files := map[string]string{
+		"keys/keys.go": `package keys
+
+type ctxKey string
+
+const (
+	UserIDKey ctxKey = "userID"
+	DeadKey   ctxKey = "dead"
+)
+`,
+		"mw/auth.go": `package mw
+
+import (
+	"context"
+
+	"example.com/rulestest/keys"
+)
+
+func WithUser(ctx context.Context, id string) context.Context {
+	ctx = context.WithValue(ctx, keys.DeadKey, id)
+	return context.WithValue(ctx, keys.UserIDKey, id)
+}
+`,
+		"handlers/me.go": `package handlers
+
+import (
+	"context"
+
+	"example.com/rulestest/keys"
+)
+
+func Me(ctx context.Context) any { return ctx.Value(keys.UserIDKey) }
+`,
+	}
+
+	violations, err := NewContextKeyUnpairedRule().AnalyzeGoProject(rulestest.ProjectRunning(t, files, "mw/auth.go"))
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "mw/auth.go", violations[0].File)
+	assert.Contains(t, violations[0].Message, "Context key DeadKey is stored here, but nothing reads it")
+}

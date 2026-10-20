@@ -74,7 +74,7 @@ func NewTscRule() *TscRule {
 			core.SeverityHigh),
 		global: "tsc",
 	}
-	r.ResetState()
+	r.reset()
 	return r
 }
 
@@ -82,8 +82,8 @@ func NewTscRule() *TscRule {
 // imports and on its tsconfig.
 func (r *TscRule) ReadsOtherFiles() bool { return true }
 
-// ResetState forgets the previous root's plan and answers.
-func (r *TscRule) ResetState() {
+// reset forgets the previous run's plan and answers.
+func (r *TscRule) reset() {
 	r.files, r.plan, r.planErr = nil, nil, nil
 	r.results = sync.OnceValue(r.check)
 }
@@ -107,16 +107,6 @@ func (p *tscProgram) name() string {
 type tscPlan struct {
 	programs   []*tscProgram
 	standalone int
-}
-
-// UseProjectFiles decides which programs check the TypeScript of the root:
-// every type-checked tsconfig (one a package.json script runs) that
-// compiles a file of it, else the nearest tsconfig.json above the file that
-// compiles it, else the file alone.
-func (r *TscRule) UseProjectFiles(files []*core.FileContext) {
-	r.ResetState()
-	r.files = files
-	r.plan, r.planErr = planTscPrograms(files)
 }
 
 func planTscPrograms(files []*core.FileContext) (*tscPlan, error) {
@@ -234,19 +224,22 @@ func projectTsc(dir string) string {
 	}
 }
 
-// CheckTools fails when the root holds TypeScript and a tsc it needs is
-// missing: the project's own for a tsconfig, the global tsc 7 (and its
-// @types/node for a file outside tsconfigs).
+// CheckTools decides which programs check the TypeScript of the run: every
+// type-checked tsconfig (one a package.json script runs) that compiles a
+// file of it, else the nearest tsconfig.json above the file that compiles
+// it, else the file alone. It fails when a tsc a program needs is missing:
+// the project's own for a tsconfig, the global tsc 7 (and its @types/node
+// for a file outside tsconfigs).
 func (r *TscRule) CheckTools(files []*core.FileContext) error {
+	r.reset()
+	r.files = files
+	r.plan, r.planErr = planTscPrograms(files)
 	hasTS := false
 	for _, ctx := range files {
 		hasTS = hasTS || ctx.IsTypeScriptFile()
 	}
 	if !hasTS {
 		return nil
-	}
-	if r.plan == nil && r.planErr == nil {
-		return errors.New("the TypeScript files were not planned: the rule was not given the project files")
 	}
 	if r.planErr != nil {
 		return nil // reported on the files

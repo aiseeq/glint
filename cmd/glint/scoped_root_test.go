@@ -176,3 +176,192 @@ func TestCheckTakesInstructionFilesOutsideAProject(t *testing.T) {
 		t.Fatalf("a named file is judged even when .gitignore leaves it out, got %v", got)
 	}
 }
+
+// Repro from a real project: a commit gate passed glint the changed files
+// only, and a rule comparing a file with the rest of the project saw just
+// them — the middleware reading the bearer token was not among them, so a
+// test sending one was reported against a cookie-only server. The rules
+// see every file of the root; only the run's files are reported.
+func TestScopedRunComparesWithTheWholeRoot(t *testing.T) {
+	project := t.TempDir()
+	writeModuleFile(t, project, "go.mod", "module example.com/scoped\n\ngo 1.22\n")
+	writeModuleFile(t, project, ".glint.yaml", "version: 1\n")
+	writeModuleFile(t, project, "mw/auth.go", `package mw
+
+import "net/http"
+
+// Session reads the session cookie.
+func Session(r *http.Request) (string, error) {
+	cookie, err := r.Cookie("session")
+	if err != nil {
+		return "", err
+	}
+	return cookie.Value, nil
+}
+`)
+	writeModuleFile(t, project, "mw/auth_test.go", `package mw
+
+import (
+	"net/http/httptest"
+	"testing"
+)
+
+func TestSession(t *testing.T) {
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	if _, err := Session(req); err == nil {
+		t.Fatal("no cookie")
+	}
+}
+`)
+	bearer := `package mw
+
+import "net/http"
+
+// Bearer reads the token of the Authorization header.
+func Bearer(r *http.Request) string { return r.Header.Get("Authorization") }
+`
+	withFlags(t, "", "test-auth-scheme-drift")
+	run := func() []string {
+		roots, err := analysisRoots([]string{filepath.Join(project, "mw/auth.go"), filepath.Join(project, "mw/auth_test.go")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, enabledRules, err := loadConfig(roots[0].dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := prepareScopedAnalysis(core.NewGoProjectLoader(), roots[0], cfg, enabledRules, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rules.ResetState(enabledRules)
+		violations, _, err := analyzePrepared(prepared, enabledRules, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found []string
+		for _, v := range violations {
+			found = append(found, fmt.Sprintf("%s:%d", v.File, v.Line))
+		}
+		return found
+	}
+
+	if found := run(); strings.Join(found, ",") != "mw/auth_test.go:10" {
+		t.Fatalf("a cookie-only server: got %v, want mw/auth_test.go:10", found)
+	}
+	writeModuleFile(t, project, "mw/bearer.go", bearer)
+	if found := run(); len(found) != 0 {
+		t.Fatalf("the server reads the header outside the run: got %v, want nothing", found)
+	}
+}
+
+// Repro from a real project: glint run on one package reported its exports
+// as unused, and the tests of another package using them were not in the run.
+// The project rules analyze the whole root; only the run's files are
+// reported.
+func TestScopedRunAnalyzesTheProjectAsAWhole(t *testing.T) {
+	project := t.TempDir()
+	writeModuleFile(t, project, "go.mod", "module example.com/scoped\n\ngo 1.22\n")
+	writeModuleFile(t, project, ".glint.yaml", "version: 1\n")
+	writeModuleFile(t, project, "internal/money/money.go", `package money
+
+// Cents converts an amount to cents.
+func Cents(amount int64) int64 { return amount * 100 }
+
+// Dead is called by nobody.
+func Dead() int64 { return 0 }
+`)
+	writeModuleFile(t, project, "internal/billing/billing.go", `package billing
+
+// Dead is called by nobody either.
+func Dead() int64 { return 1 }
+`)
+	writeModuleFile(t, project, "internal/billing/billing_test.go", `package billing
+
+import (
+	"testing"
+
+	"example.com/scoped/internal/money"
+)
+
+func TestCents(t *testing.T) {
+	if money.Cents(3) != 300 {
+		t.Fatal("cents")
+	}
+}
+`)
+	withFlags(t, "", "unused-internal-export")
+	roots, err := analysisRoots([]string{filepath.Join(project, "internal/money")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, enabledRules, err := loadConfig(roots[0].dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := prepareScopedAnalysis(core.NewGoProjectLoader(), roots[0], cfg, enabledRules, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules.ResetState(enabledRules)
+	violations, _, err := analyzePrepared(prepared, enabledRules, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	for _, v := range violations {
+		found = append(found, fmt.Sprintf("%s:%d", v.File, v.Line))
+	}
+	if want := "internal/money/money.go:7"; strings.Join(found, ",") != want {
+		t.Fatalf("got %v, want %s", found, want)
+	}
+}
+
+// A rule that gathered the root file by file would see only the run's files
+// when glint runs on some of them: every rule that keeps state across files
+// learns the root up front.
+func TestStatefulRulesLearnTheRootUpFront(t *testing.T) {
+	for _, rule := range rules.All() {
+		if _, stateful := rule.(rules.StatefulRule); !stateful {
+			continue
+		}
+		if _, projectFiles := rule.(rules.ProjectFilesRule); !projectFiles {
+			t.Errorf("rule %s keeps state across files without UseProjectFiles", rule.Name())
+		}
+	}
+}
+
+// Repro from a real project: the root keeps snapshots of old programs as a
+// module of their own that no longer builds, and a run over the packages of
+// the main module failed loading it. A run loads only the modules its Go
+// files are in.
+func TestScopedRunLoadsOnlyTheModulesOfTheRun(t *testing.T) {
+	project := t.TempDir()
+	writeModuleFile(t, project, "go.mod", "module example.com/scoped\n\ngo 1.22\n")
+	writeModuleFile(t, project, ".glint.yaml", "version: 1\n")
+	writeModuleFile(t, project, "internal/money/money.go", "package money\n\n// Dead is called by nobody.\nfunc Dead() int64 { return 0 }\n")
+	writeModuleFile(t, project, "old/go.mod", "module old.invalid\n\ngo 1.22\n")
+	writeModuleFile(t, project, "old/bot/bot.go", "package bot\n\nimport \"example.org/gone/lib\"\n\nfunc Run() { lib.Start() }\n")
+	withFlags(t, "", "unused-internal-export")
+	roots, err := analysisRoots([]string{filepath.Join(project, "internal/money")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, enabledRules, err := loadConfig(roots[0].dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := prepareScopedAnalysis(core.NewGoProjectLoader(), roots[0], cfg, enabledRules, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules.ResetState(enabledRules)
+	violations, _, err := analyzePrepared(prepared, enabledRules, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) != 1 || violations[0].File != "internal/money/money.go" {
+		t.Fatalf("got %v, want the unused export of the run", violations)
+	}
+}
