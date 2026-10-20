@@ -373,3 +373,101 @@ func createQueryContext(t *testing.T, path, code string) *core.FileContext {
 	ctx.SetGoAST(fset, astFile)
 	return ctx
 }
+
+// A loop over database files opens each one and queries it once: every
+// iteration reaches a different database, there is nothing to batch. A
+// helper or a loop body opening the same database on every iteration, or a
+// handle shared from outside the loop, still makes one round-trip per item.
+func TestQueryInLoopRule_DatabasePerIteration(t *testing.T) {
+	const source = `package stats
+
+import "database/sql"
+
+func countIn(path string) (int, error) {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	rows, err := db.Query("select 1")
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	return 1, nil
+}
+
+func countByID(id string) (int, error) {
+	db, err := sql.Open("sqlite", "file:main.db")
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	rows, err := db.Query("select 1 where id = ?", id)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	return 1, nil
+}
+
+func Files(paths []string) (int, error) {
+	total := 0
+	for _, path := range paths {
+		n, err := countIn(path)
+		if err != nil {
+			return 0, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+func Inline(paths []string) error {
+	for _, path := range paths {
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			return err
+		}
+		rows, err := db.Query("select 1")
+		if err != nil {
+			return err
+		}
+		rows.Close()
+		db.Close()
+	}
+	return nil
+}
+
+func SameFile(paths []string) error {
+	for range paths {
+		if _, err := countIn("main.db"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func IDs(ids []string) error {
+	for _, id := range ids {
+		if _, err := countByID(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func Shared(db *sql.DB, ids []string) error {
+	for _, id := range ids {
+		rows, err := db.Query("select 1 where id = ?", id)
+		if err != nil {
+			return err
+		}
+		rows.Close()
+	}
+	return nil
+}
+`
+	violations := runRuleOnFiles(t, NewQueryInLoopRule(), map[string]string{"stats/stats.go": source})
+	assert.Equal(t, []int{63, 72, 81}, violationLines(violations))
+}

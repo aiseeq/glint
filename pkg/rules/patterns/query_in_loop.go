@@ -166,7 +166,8 @@ func queryHelpers(ctx *core.GoProjectContext, reach storageReach) map[*types.Fun
 					}
 					if call, ok := n.(*ast.CallExpr); ok {
 						if recv, method, ok := dataAccessCall(call, info, reach); ok && readMethod.MatchString(method) {
-							helpers[obj] = queryHelper{call: recv + "." + method, dir: filepath.Dir(file.Path)}
+							helpers[obj] = queryHelper{call: recv + "." + method, dir: filepath.Dir(file.Path),
+								sources: openParams(fn, openedFrom(call, fn.Body, info, reach), info)}
 						}
 					}
 					return true
@@ -179,10 +180,105 @@ func queryHelpers(ctx *core.GoProjectContext, reach storageReach) map[*types.Fun
 
 var readMethod = regexp.MustCompile(`^(?:Get|Find|List|Load|Select|Query|Count|Read|Lookup|Search|Exists|Sum)`)
 
-// queryHelper is a function making a data-access call: the call, and the
-// directory of the file declaring the function.
+// queryHelper is a function making a data-access call: the call, the
+// directory of the file declaring the function, and the parameters naming
+// the database it opens for the call, when it opens one from them.
 type queryHelper struct {
 	call, dir string
+	sources   []int
+}
+
+// openName names a function opening a database or a connection to it.
+var openName = regexp.MustCompile(`^(?:Open|Connect|Dial|New)`)
+
+// openedFrom returns the call opening the handle a data-access call goes
+// through, when body assigns the handle from a function of a storage package
+// such as sql.Open; nil for a handle that comes from elsewhere.
+func openedFrom(call *ast.CallExpr, body *ast.BlockStmt, info *types.Info, reach storageReach) *ast.CallExpr {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || info == nil || body == nil {
+		return nil
+	}
+	ident, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	handle := info.Uses[ident]
+	if handle == nil {
+		return nil
+	}
+	var open *ast.CallExpr
+	ast.Inspect(body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || open != nil || len(assign.Rhs) != 1 {
+			return open == nil
+		}
+		rhs, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		fn := helpers.CalledFunc(rhs, info)
+		if fn == nil || fn.Pkg() == nil || fn.Signature().Recv() != nil || !openName.MatchString(fn.Name()) || !reach.reaches(fn.Pkg()) {
+			return true
+		}
+		for _, lhs := range assign.Lhs {
+			if id, ok := lhs.(*ast.Ident); ok && info.ObjectOf(id) == handle {
+				open = rhs
+			}
+		}
+		return open == nil
+	})
+	return open
+}
+
+// openParams returns the indices of the parameters of fn that the open call
+// takes its database from.
+func openParams(fn *ast.FuncDecl, open *ast.CallExpr, info *types.Info) []int {
+	if open == nil {
+		return nil
+	}
+	var sources []int
+	index := 0
+	for _, field := range fn.Type.Params.List {
+		for _, name := range field.Names {
+			obj := info.Defs[name]
+			for _, arg := range open.Args {
+				if obj != nil && mentionsObject(info, arg, obj) {
+					sources = append(sources, index)
+					break
+				}
+			}
+			index++
+		}
+		if len(field.Names) == 0 {
+			index++
+		}
+	}
+	return sources
+}
+
+// usesObjectMatching reports an expression of exprs using an object that
+// match accepts.
+func usesObjectMatching(info *types.Info, exprs []ast.Expr, match func(types.Object) bool) bool {
+	found := false
+	for _, expr := range exprs {
+		ast.Inspect(expr, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && match(info.ObjectOf(id)) {
+				found = true
+			}
+			return !found
+		})
+	}
+	return found
+}
+
+// declaredIn reports an object declared inside a loop statement: a range
+// variable, a counter, a local of the body. An expression using one differs
+// from iteration to iteration.
+func declaredIn(loop ast.Node) func(types.Object) bool {
+	return func(obj types.Object) bool {
+		return obj != nil && obj.Pos() >= loop.Pos() && obj.Pos() < loop.End()
+	}
 }
 
 // calledFunc returns the function or method a call names, nil for a call
@@ -203,19 +299,26 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 	var violations []*core.Violation
 	loopDepth := 0
 	currentFunc := ""
+	var currentBody *ast.BlockStmt
+	var loops []ast.Node
+	// perIteration reports a database opened from what the innermost loop
+	// iterates over: each iteration queries another database.
+	perIteration := func(args []ast.Expr) bool {
+		return info != nil && len(loops) > 0 && usesObjectMatching(info, args, declaredIn(loops[len(loops)-1]))
+	}
 
 	var inspect func(n ast.Node) bool
 	inspect = func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.FuncDecl:
-			prevFunc := currentFunc
-			currentFunc = node.Name.Name
+			prevFunc, prevBody := currentFunc, currentBody
+			currentFunc, currentBody = node.Name.Name, node.Body
 			if node.Body != nil {
 				ast.Inspect(node.Body, func(child ast.Node) bool {
 					return inspect(child)
 				})
 			}
-			currentFunc = prevFunc
+			currentFunc, currentBody = prevFunc, prevBody
 			return false
 
 		case *ast.ForStmt:
@@ -229,9 +332,11 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 				return false
 			}
 			loopDepth++
+			loops = append(loops, node)
 			for _, part := range []ast.Node{node.Cond, node.Post, node.Body} {
 				visitLoopPart(part, inspect)
 			}
+			loops = loops[:len(loops)-1]
 			loopDepth--
 			return false
 
@@ -244,13 +349,18 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 				return false
 			}
 			loopDepth++
+			loops = append(loops, node)
 			visitLoopPart(node.Body, inspect)
+			loops = loops[:len(loops)-1]
 			loopDepth--
 			return false
 
 		case *ast.CallExpr:
 			if loopDepth > 0 {
 				if recv, method, ok := dataAccessCall(node, info, reach); ok {
+					if open := openedFrom(node, currentBody, info, reach); open != nil && perIteration(open.Args) {
+						return true
+					}
 					line := lineFromNode(ctx, node)
 					v := r.CreateViolation(ctx.RelPath, line,
 						"data-access call '"+recv+"."+method+"' inside loop — likely N+1 (one DB round-trip per iteration)")
@@ -261,7 +371,7 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 						v.WithContext("function", currentFunc)
 					}
 					violations = append(violations, v)
-				} else if fn := calledFunc(node, info); fn != nil && helpers[fn].dir == filepath.Dir(ctx.Path) {
+				} else if fn := calledFunc(node, info); fn != nil && helpers[fn].dir == filepath.Dir(ctx.Path) && !perIteration(sourceArgs(node, helpers[fn].sources)) {
 					line := lineFromNode(ctx, node)
 					v := r.CreateViolation(ctx.RelPath, line,
 						"call to '"+fn.Name()+"' inside loop — it queries through '"+helpers[fn].call+"' on every iteration (N+1)")
@@ -297,6 +407,17 @@ func (r *QueryInLoopRule) analyzeFile(ctx *core.FileContext, info *types.Info, r
 
 	ast.Inspect(ctx.GoAST, inspect)
 	return violations
+}
+
+// sourceArgs returns the arguments of a call at the given indices.
+func sourceArgs(call *ast.CallExpr, indices []int) []ast.Expr {
+	var args []ast.Expr
+	for _, i := range indices {
+		if i < len(call.Args) {
+			args = append(args, call.Args[i])
+		}
+	}
+	return args
 }
 
 // endsInReturn reports a block whose last statement returns.
