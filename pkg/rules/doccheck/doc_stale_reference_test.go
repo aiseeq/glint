@@ -317,3 +317,27 @@ func TestDocStaleReferenceQuotedCodeNeedsExportedName(t *testing.T) {
 	assert.Equal(t, 4, violations[0].Line)
 	assert.Contains(t, violations[0].Message, "planner.Order")
 }
+
+// Repro from a real project: a tool's internal package got the name a
+// comment elsewhere gives a local variable (rec in rec.Matches = ...). The
+// file cannot import that package, so the comment does not mean it; a file
+// under the internal package's parent can, and its comment is checked.
+func TestDocStaleReferenceIgnoresPackagesTheFileCannotImport(t *testing.T) {
+	files := withFile("catalog/a.go", `package catalog
+
+// keep appends in place: rec in rec.Matches = append(rec.Matches, m).
+func keep() {}
+`)
+	files["tools/report/internal/rec/rec.go"] = "package rec\n\nfunc Write() {}\n"
+	files["tools/report/main.go"] = `package report
+
+// run calls rec.Missing.
+func run() {}
+`
+
+	violations := analyzeStaleReference(t, files)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, "tools/report/main.go", violations[0].File)
+	assert.Contains(t, violations[0].Message, "rec.Missing")
+}

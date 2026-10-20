@@ -310,7 +310,8 @@ func (r *DocStaleReferenceRule) analyzeFile(fileCtx *core.FileContext, ownPath s
 // the file under that name (package http importing net/http means net/http
 // by http.Cookie), else nothing when a package outside the module that the
 // project imports has the name (the comment may mean it, under an alias too),
-// else the file's own package or the only module package with the name.
+// else the file's own package or the only module package with the name
+// the file could import.
 func resolvePackage(name, own, ownPath string, imports map[string]string, mod *modulePackages) (string, bool) {
 	if path, ok := imports[name]; ok {
 		_, inModule := mod.byPath[path]
@@ -323,14 +324,26 @@ func resolvePackage(name, own, ownPath string, imports map[string]string, mod *m
 		_, checked := mod.byPath[ownPath] // a main package is not checked
 		return ownPath, checked
 	}
-	paths := mod.byName[name]
-	if len(paths) != 1 {
-		return "", false
+	found, visible := "", 0
+	for path := range mod.byName[name] {
+		if importable(ownPath, path) {
+			found = path
+			visible++
+		}
 	}
-	for path := range paths {
-		return path, true
+	return found, visible == 1
+}
+
+// importable reports whether the package at from may import the package at
+// path: a package under an internal directory is visible only to the tree
+// rooted at that directory's parent.
+func importable(from, path string) bool {
+	at := strings.LastIndex("/"+path+"/", "/internal/")
+	if at < 0 {
+		return true
 	}
-	return "", false
+	parent := strings.TrimSuffix(path[:at], "/")
+	return parent == "" || from == parent || strings.HasPrefix(from, parent+"/")
 }
 
 // fileImports — local name → import path of the file's imports.

@@ -296,9 +296,7 @@ func DefaultConfig() *Config {
 		// Must stay in sync with the registered rule categories; a test in
 		// cmd/glint asserts the two sets match (core cannot import rules).
 		Categories: map[string]CategoryConfig{
-			"architecture": {Enabled: true, Rules: map[string]RuleConfig{
-				"python-file": {Enabled: false},
-			}},
+			"architecture": {Enabled: true},
 			"patterns": {Enabled: true, Rules: map[string]RuleConfig{
 				"deprecated-nginx-http2-listen": {Enabled: false},
 			}},

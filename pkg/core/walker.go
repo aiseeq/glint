@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -378,12 +379,16 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 		".md",
 		".sql",  // migration hygiene rules (rules must guard by extension)
 		".conf", // server configuration rules (rules must guard by extension)
-		".sh",   // duplication rules (rules must guard by extension)
+		".sh",   // shell rules (rules must guard with IsShellFile)
+		".bash", // shell rules (rules must guard with IsShellFile)
 		".py",   // the python-file rule (rules must guard by extension)
 	}, TypeScriptExtensions, JavaScriptExtensions)
 
 	if IsTemplateName(path) {
 		return true // template rules (rules must guard with IsTemplate)
+	}
+	if ext == "" && hasShellShebangFile(path) {
+		return true // shell rules (rules must guard with IsShellFile)
 	}
 	if isMakefileName(filepath.Base(path)) {
 		return true // recipe rules (rules must guard with IsMakefile)
@@ -410,6 +415,28 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 	}
 
 	return false
+}
+
+// hasShellShebangFile reports a regular file whose first line is a shell
+// shebang. An extensionless file that cannot be read stays unanalyzed, as
+// every extensionless file did before scripts were recognized; a FIFO is
+// never opened, it would block the walk.
+func hasShellShebangFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = file.Close() }() // read only
+	head := make([]byte, 128)
+	n, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return false
+	}
+	return HasShellShebang(head[:n])
 }
 
 // Stats returns the current walker statistics

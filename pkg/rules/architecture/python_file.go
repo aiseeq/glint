@@ -16,9 +16,9 @@ func init() {
 // where glint can analyze it: Go, TypeScript, shell. The rest of glint does
 // not read Python, so a script written in it goes unchecked.
 //
-// The rule is off by default; a project turns it on and lists the Python it
-// keeps on purpose as exceptions with a reason - a neural network, someone
-// else's code, data.
+// A project lists the Python it keeps on purpose as exceptions with a
+// reason - a neural network, someone else's code, data. The finding is high:
+// an unchecked script fails the run instead of passing as a line of output.
 type PythonFileRule struct {
 	*rules.BaseRule
 }
@@ -29,7 +29,7 @@ func NewPythonFileRule() *PythonFileRule {
 		"python-file",
 		"architecture",
 		"Reports Python sources, which glint does not analyze - scripts are written in Go, TypeScript or shell",
-		core.SeverityMedium,
+		core.SeverityHigh,
 	)}
 }
 

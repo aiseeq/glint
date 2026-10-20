@@ -51,7 +51,6 @@ categories:
   architecture:
     rules:
       python-file:
-        enabled: true
         exceptions:
           - files: "ml/**"
             reason: speech recognition model

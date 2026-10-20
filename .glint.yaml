@@ -12,9 +12,6 @@ categories:
   architecture:
     enabled: true
     rules:
-      # Python is not analyzed by glint: the repository keeps none.
-      python-file:
-        enabled: true
       # Increased thresholds for complex rule implementations
       cyclomatic-complexity:
         enabled: true
