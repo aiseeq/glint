@@ -58,7 +58,7 @@ func main() {
 	interval := fs.Int("interval", 14, "days between slices")
 	glint := fs.String("glint", "glint", "glint binary")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: measure REPO OUT.jsonl [--interval 14] [--glint PATH]")
+		fmt.Fprintln(os.Stderr, "usage: measure REPO OUT.jsonl [--interval 14] [--glint PATH]")
 		fs.PrintDefaults()
 	}
 	args, err := hist.Parse(fs, os.Args[1:])
@@ -81,12 +81,16 @@ func measure(repo, outPath string, interval int, glint string, progress io.Write
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(progress, "%d slices\n", len(slices))
+	if _, err := fmt.Fprintf(progress, "%d slices\n", len(slices)); err != nil {
+		return err
+	}
 	out, err := os.Create(outPath)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	// The Close at the end reports a failed write; this one only frees
+	// the file of a run that failed earlier.
+	defer func() { _ = out.Close() }()
 	for n, s := range slices {
 		rec, err := analyzeSlice(repo, s.hash, glint)
 		if err != nil {
@@ -103,7 +107,9 @@ func measure(repo, outPath string, interval int, glint string, progress io.Write
 				critHigh = strconv.FormatFloat(*rec.PerKlocCritHigh, 'f', -1, 64)
 			}
 		}
-		fmt.Fprintf(progress, "[%d/%d] %s sloc=%d total=%s c+h/kloc=%s\n", n+1, len(slices), rec.Date, rec.Sloc, total, critHigh)
+		if _, err := fmt.Fprintf(progress, "[%d/%d] %s sloc=%d total=%s c+h/kloc=%s\n", n+1, len(slices), rec.Date, rec.Sloc, total, critHigh); err != nil {
+			return err
+		}
 	}
 	return out.Close()
 }
@@ -191,7 +197,11 @@ func analyzeSlice(repo, hash, glint string) (*record, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() {
+		if err := os.RemoveAll(tmp); err != nil {
+			fmt.Fprintln(os.Stderr, "measure: warning:", err)
+		}
+	}()
 	wt := filepath.Join(tmp, "wt")
 	if _, err := hist.Git(repo, "worktree", "add", "--detach", wt, hash); err != nil {
 		return nil, err
