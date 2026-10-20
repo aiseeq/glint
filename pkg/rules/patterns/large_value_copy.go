@@ -3,6 +3,7 @@ package patterns
 import (
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"runtime"
 	"strings"
@@ -68,7 +69,7 @@ func (r *LargeValueCopiedPerElementRule) AnalyzeGoProject(ctx *core.GoProjectCon
 		check := largeCopyCheck{info: info, sizes: sizes, maxBytes: r.maxBytes}
 		var violations []*core.Violation
 		ast.Inspect(file.GoAST, func(n ast.Node) bool {
-			var findings []funcFinding
+			var findings []copyFinding
 			switch node := n.(type) {
 			case *ast.RangeStmt:
 				findings = check.rangeValue(node)
@@ -82,7 +83,7 @@ func (r *LargeValueCopiedPerElementRule) AnalyzeGoProject(ctx *core.GoProjectCon
 				}
 				v := r.CreateViolation(file.RelPath, line, f.message)
 				v.WithCode(strings.TrimSpace(file.GetLine(line)))
-				v.WithSuggestion("Range over the index and use &xs[i], keep pointers in the collection, or use an index form (sort.Search, sort.Slice, a loop over i) instead of the by-value callback")
+				v.WithSuggestion(f.suggestion)
 				violations = append(violations, v)
 			}
 			return true
@@ -101,6 +102,18 @@ func projectSizes(ctx *core.GoProjectContext) types.Sizes {
 	}
 	return types.SizesFor("gc", runtime.GOARCH)
 }
+
+// copyFinding is a per-element copy and the way to avoid it.
+type copyFinding struct {
+	funcFinding
+	suggestion string
+}
+
+const (
+	adviceRangeRead    = "Range over the index and use &xs[i], or keep pointers in the collection"
+	adviceRangeChanged = "The loop body changes its copy: with &xs[i] it would change the collection itself. Keep the copy and make it explicit (v := xs[i] in a loop over the index), or add an exception with the reason"
+	adviceCallback     = "Use an index form (sort.Search, sort.Slice, a loop over i) instead of the by-value callback, or keep pointers in the collection"
+)
 
 // largeCopyCheck finds the per-element copies of one file.
 type largeCopyCheck struct {
@@ -129,7 +142,7 @@ func qualifiedTypeName(t types.Type) string {
 }
 
 // rangeValue reports the value variable of a range over large elements.
-func (c largeCopyCheck) rangeValue(stmt *ast.RangeStmt) []funcFinding {
+func (c largeCopyCheck) rangeValue(stmt *ast.RangeStmt) []copyFinding {
 	if stmt.Value == nil {
 		return nil
 	}
@@ -141,22 +154,102 @@ func (c largeCopyCheck) rangeValue(stmt *ast.RangeStmt) []funcFinding {
 	if !ok {
 		return nil
 	}
-	return []funcFinding{{
-		node: stmt.Value,
-		message: fmt.Sprintf("range value %s copies %s (%d bytes) on every iteration",
-			types.ExprString(stmt.Value), qualifiedTypeName(elem), size),
+	advice := adviceRangeRead
+	if ident, ok := stmt.Value.(*ast.Ident); ok && c.changesCopy(stmt.Body, c.info.ObjectOf(ident)) {
+		advice = adviceRangeChanged
+	}
+	return []copyFinding{{
+		funcFinding: funcFinding{
+			node: stmt.Value,
+			message: fmt.Sprintf("range value %s copies %s (%d bytes) on every iteration",
+				types.ExprString(stmt.Value), qualifiedTypeName(elem), size),
+		},
+		suggestion: advice,
 	}}
+}
+
+// changesCopy reports a body that changes the range value v or lets it
+// out: a write to v or to a field or array element of it, its address, a
+// pointer method called on it, a closure capturing it. Taking &xs[i] instead
+// would make each of them act on the collection.
+func (c largeCopyCheck) changesCopy(body *ast.BlockStmt, v types.Object) bool {
+	if v == nil {
+		return false
+	}
+	changed := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range node.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok && c.info.Defs[ident] != nil {
+					continue // a new variable of :=
+				}
+				changed = changed || c.inCopy(lhs, v)
+			}
+		case *ast.IncDecStmt:
+			changed = changed || c.inCopy(node.X, v)
+		case *ast.UnaryExpr:
+			changed = changed || node.Op == token.AND && c.inCopy(node.X, v)
+		case *ast.SelectorExpr:
+			changed = changed || c.pointerMethodOfValue(node) && c.inCopy(node.X, v)
+		case *ast.FuncLit:
+			changed = changed || len(usesOf(c.info, node.Body, []types.Object{v})) > 0
+		}
+		return !changed
+	})
+	return changed
+}
+
+// inCopy reports an expression that is v or part of its memory: a field or
+// an array element reached without a pointer or a slice in between.
+func (c largeCopyCheck) inCopy(expr ast.Expr, v types.Object) bool {
+	for {
+		switch e := expr.(type) {
+		case *ast.Ident:
+			return c.info.ObjectOf(e) == v
+		case *ast.ParenExpr:
+			expr = e.X
+		case *ast.SelectorExpr:
+			if _, pointer := c.info.TypeOf(e.X).Underlying().(*types.Pointer); pointer {
+				return false
+			}
+			expr = e.X
+		case *ast.IndexExpr:
+			if _, array := c.info.TypeOf(e.X).Underlying().(*types.Array); !array {
+				return false
+			}
+			expr = e.X
+		default:
+			return false
+		}
+	}
+}
+
+// pointerMethodOfValue reports a method with a pointer receiver selected on
+// a value: the call takes the value's address.
+func (c largeCopyCheck) pointerMethodOfValue(sel *ast.SelectorExpr) bool {
+	selection, ok := c.info.Selections[sel]
+	if !ok || selection.Kind() != types.MethodVal {
+		return false
+	}
+	sig, ok := selection.Obj().Type().(*types.Signature)
+	if !ok || sig.Recv() == nil {
+		return false
+	}
+	_, pointerRecv := sig.Recv().Type().(*types.Pointer)
+	_, pointerValue := selection.Recv().Underlying().(*types.Pointer)
+	return pointerRecv && !pointerValue
 }
 
 // callbacks reports a function argument of the call that takes, by value, a
 // large element of a collection passed in the same call (an argument or the
 // receiver): the callee calls it once per element.
-func (c largeCopyCheck) callbacks(call *ast.CallExpr) []funcFinding {
+func (c largeCopyCheck) callbacks(call *ast.CallExpr) []copyFinding {
 	elems := c.collectionElements(call)
 	if len(elems) == 0 {
 		return nil
 	}
-	var findings []funcFinding
+	var findings []copyFinding
 	for _, arg := range call.Args {
 		sig, what := c.funcArgument(arg)
 		if sig == nil {
@@ -168,10 +261,13 @@ func (c largeCopyCheck) callbacks(call *ast.CallExpr) []funcFinding {
 			if !ok || !containsIdentical(elems, param) {
 				continue
 			}
-			findings = append(findings, funcFinding{
-				node: arg,
-				message: fmt.Sprintf("%s passed to %s takes %s (%d bytes) by value — the element is copied on every call",
-					what, core.ExtractFullFunctionName(call), qualifiedTypeName(param), size),
+			findings = append(findings, copyFinding{
+				funcFinding: funcFinding{
+					node: arg,
+					message: fmt.Sprintf("%s passed to %s takes %s (%d bytes) by value — the element is copied on every call",
+						what, core.ExtractFullFunctionName(call), qualifiedTypeName(param), size),
+				},
+				suggestion: adviceCallback,
 			})
 			break
 		}

@@ -149,7 +149,14 @@ const modalSizes = { sm: 'w-64', md: 'w-96', lg: 'w-128' }
 		"web/src/components/Badge.test.tsx": `const statuses = ['pending', 'processing', 'completed', 'rejected', 'approved', 'unknown']
 `,
 	}
-	assert.Equal(t, wantedLines(files, "value-set-drift"), foundLines(valueSetDriftFindings(t, files)))
+	found := valueSetDriftFindings(t, files)
+	assert.Equal(t, wantedLines(files, "value-set-drift"), foundLines(found))
+	// Repro from a real project: sets that differed on purpose were merged
+	// on the advice to keep one source, and a model changed. The advice
+	// names the other way out.
+	for _, v := range found {
+		assert.Contains(t, v.Suggestion, "differ on purpose", "%s:%d", v.File, v.Line)
+	}
 }
 
 // Not copies kept by hand: a constant whose last word is two words

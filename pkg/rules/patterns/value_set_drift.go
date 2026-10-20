@@ -123,7 +123,7 @@ func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 		}
 		v := r.CreateViolation(ctx.RelPath, set.Line, valueSetMessage(set, match))
 		v.WithCode(strings.TrimSpace(ctx.GetLine(set.Line)))
-		v.WithSuggestion("Keep one source of the set - the declared type, a shared constant list, a generated contract - and derive the others from it")
+		v.WithSuggestion("Keep one source of the set - the declared type, a shared constant list, a generated contract - and derive the others from it. If the sets differ on purpose, keep them apart and add an exception with the reason: merging them changes what each place accepts")
 		violations = append(violations, v)
 	}
 	for _, f := range r.tables.tableFindings(ctx.RelPath) {
@@ -132,7 +132,7 @@ func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 		}
 		v := r.CreateViolation(ctx.RelPath, f.line, f.message)
 		v.WithCode(strings.TrimSpace(ctx.GetLine(f.line)))
-		v.WithSuggestion("Keep one source of the set or table - a shared list, map or function the other places call - and derive the others from it")
+		v.WithSuggestion("Keep one source of the set or table - a shared list, map or function the other places call - and derive the others from it. If they differ on purpose, keep them apart and add an exception with the reason: merging them changes what each place does")
 		violations = append(violations, v)
 	}
 	return violations
