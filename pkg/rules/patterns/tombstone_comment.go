@@ -39,7 +39,8 @@ func init() {
 // the queue"). A removal word that a sentence goes on from ("removed
 // afterwards", "deleted in the work tree", "a deleted file") is about what the
 // program does to files and records; a sentence wrapped onto the next comment
-// line goes on there.
+// line goes on there. A pronoun before the removal word ("one it removed",
+// "the rows they deleted") is the one that removes: the program, not a note.
 type TombstoneCommentRule struct {
 	*rules.BaseRule
 	tombstone    *regexp.Regexp
@@ -50,6 +51,7 @@ type TombstoneCommentRule struct {
 	policyLine   *regexp.Regexp
 	noteStart    *regexp.Regexp
 	noteEnd      *regexp.Regexp
+	remover      *regexp.Regexp
 }
 
 // NewTombstoneCommentRule creates the rule
@@ -81,6 +83,10 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 		// What follows a removal word that closes a note: the end of the
 		// sentence or clause, a dash, a date of the removal.
 		noteEnd: regexp.MustCompile(`(?i)^(?:\s*$|\s*[.,;:!?)]|\s+[—–-]|\s+since\b)`),
+		// A pronoun right before the removal word is its subject, the one that
+		// removes ("one it removed", "the rows they deleted"): the word is a
+		// verb of the program, not a note on code.
+		remover: regexp.MustCompile(`(?i)\b(?:i|it|they|we|you|he|she)\s+(?:(?:has|have|had|\w+ly)\s+)?$`),
 	}
 }
 
@@ -114,7 +120,7 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if loc == nil {
 			continue
 		}
-		if r.behaviorAux.MatchString(comment[:loc[0]]) {
+		if r.behaviorAux.MatchString(comment[:loc[0]]) || r.remover.MatchString(comment[:loc[0]]) {
 			continue // "are removed", "будут удалены" — behavior, not a tombstone
 		}
 		if loc[0] > 0 && strings.IndexByte("='\"`.>/-_", comment[loc[0]-1]) >= 0 {
@@ -147,12 +153,10 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	return violations
 }
 
-// commentTextOfLine returns the comment text of the line (without the //
-// marker), or "" when the line has no comment. Comment markers inside string
-// literals are ignored; block-comment continuation lines ("* text") count.
-// commentTextOfLine returns the text of a line's comment without its marker.
-// The marker itself is located by the canonical core.CommentPart, so that a
-// "//" inside a string literal never starts a comment.
+// commentTextOfLine returns the text of a line's comment without its marker,
+// or "" when the line has no comment. The marker is located by the canonical
+// core.CommentPart, so that a "//" inside a string literal never starts a
+// comment; block-comment continuation lines ("* text") count.
 func commentTextOfLine(line string) string {
 	comment := core.CommentPart(line)
 	switch {
