@@ -113,6 +113,13 @@ func TestSessionDates(t *testing.T) {
 	}
 }
 
+// A WITH query named as a table hides the table: its columns are the
+// query's, not the table's timestamptz.
+func TestSessionDatesCTEHidesTable(t *testing.T) {
+	sql := `WITH positions AS (SELECT $1::timestamp AS opened_at) SELECT opened_at::date FROM positions`
+	assert.Empty(t, testSchema(t).SessionDates(sql))
+}
+
 func TestRowWrite(t *testing.T) {
 	schema := uniqueSchema(t)
 	for _, sql := range []string{

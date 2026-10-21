@@ -695,12 +695,19 @@ func (s *Schema) SessionDates(sql string) []int {
 	return offsets
 }
 
-// referencedTables returns the tables of the schema a statement names.
+// referencedTables returns the tables of the schema a statement names; a
+// WITH query named as a table hides it.
 func (s *Schema) referencedTables(stmt *pgquery.Node) []*Table {
+	ctes := make(map[string]bool)
+	walk(stmt.ProtoReflect(), func(m proto.Message) {
+		if cte, ok := m.(*pgquery.CommonTableExpr); ok {
+			ctes[strings.ToLower(cte.GetCtename())] = true
+		}
+	})
 	var tables []*Table
 	walk(stmt.ProtoReflect(), func(m proto.Message) {
 		if rv, ok := m.(*pgquery.RangeVar); ok {
-			if table := s.relation(rv, nil); table != nil && !table.View {
+			if table := s.relation(rv, ctes); table != nil && !table.View {
 				tables = append(tables, table)
 			}
 		}

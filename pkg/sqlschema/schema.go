@@ -163,14 +163,21 @@ type Column struct {
 	Check *ValueCheck
 }
 
-// Table returns the table or view named name, or nil.
+// Table returns the table or view named name, or nil. A nil schema (a
+// project without migrations) has no tables.
 func (s *Schema) Table(name string) *Table {
+	if s == nil {
+		return nil
+	}
 	return s.tables[strings.ToLower(name)]
 }
 
 // TablesWith returns the tables, not views, that have every one of the
 // columns, in name order.
 func (s *Schema) TablesWith(columns []string) []*Table {
+	if s == nil {
+		return nil
+	}
 	var tables []*Table
 	for _, table := range s.tables {
 		if table.View {
@@ -356,7 +363,10 @@ func (s *Schema) applyFile(path string) error {
 // tables the code itself creates, a temporary one for instance. Text that is
 // not a CREATE TABLE adds nothing; the schema itself is left as it is.
 func (s *Schema) With(statements []string) *Schema {
-	clone := &Schema{tables: maps.Clone(s.tables)}
+	clone := &Schema{tables: make(map[string]*Table)}
+	if s != nil {
+		maps.Copy(clone.tables, s.tables)
+	}
 	for _, sql := range statements {
 		result, ok := parse(sql)
 		if !ok {
