@@ -137,7 +137,8 @@ func parsesDotenv(body *ast.BlockStmt) bool {
 }
 
 var (
-	dotenvPath   = regexp.MustCompile(`(?:^|[\s/"'])\.env(?:["'\s;)]|$)`)
+	// dotenvPath is .env or a .env.<stage> file.
+	dotenvPath   = regexp.MustCompile(`(?:^|[\s/"'])\.env(?:\.[\w-]+)*(?:["'\s;)]|$)`)
 	textFilter   = regexp.MustCompile(`(?:^|[\s|;(])(?:sed|awk|gawk)\s`)
 	inPlaceEdit  = regexp.MustCompile(`\bsed\s+(?:-[a-zA-Z]*i|--in-place)`)
 	dotenvSyntax = regexp.MustCompile(`\^#|="|\\"|'\\''|"'"'"'`)

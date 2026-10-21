@@ -109,7 +109,8 @@ func passwordValue(text string, m []int) string {
 }
 
 // checkDBPasswordLiteral reports a database password written as a literal;
-// a test script's DSN is a fixture.
+// a test script's DSN is a fixture, a printf verb (%s) and a regular
+// expression stand where a password goes.
 func checkDBPasswordLiteral(r *shellRule, src *shellSource) []*core.Violation {
 	if src.ctx.IsTestFile() {
 		return nil
@@ -120,8 +121,12 @@ func checkDBPasswordLiteral(r *shellRule, src *shellSource) []*core.Violation {
 			if m[4] >= 0 && !libpqKeyword.MatchString(l.text) {
 				continue // password= outside a libpq connection string
 			}
-			if helpers.LooksLikeRegexpShape(passwordValue(l.text, m)) {
-				continue // the shape a secret scanner searches for
+			value := passwordValue(l.text, m)
+			if helpers.LooksLikeRegexpShape(value) {
+				continue // a pattern: the shape a scanner searches for, a sed extracting the password
+			}
+			if printfVerb.ReplaceAllString(value, "") == "" {
+				continue // a printf format: the password is an argument
 			}
 			out = appendReport(out, src.report(r, l.lineAt(m[0]),
 				"A database password is written into the script — it is in the repository and in the process list of the host",

@@ -437,7 +437,11 @@ func extractJS(ctx *core.FileContext) []Set {
 		}
 		name := code[m[2]:m[3]]
 		add(m[0], name, Keyed, keys)
-		add(m[0], name, Keyed, values)
+		if !repeats(values) {
+			// Two keys mapped onto one value project a scale onto another:
+			// the values are its image, not a copy of a set.
+			add(m[0], name, Keyed, values)
+		}
 	}
 	for _, m := range jsSwitch.FindAllStringIndex(code, -1) {
 		open := strings.IndexByte(code[m[1]:], '{')
@@ -524,6 +528,18 @@ func jsMatches(re *regexp.Regexp, text string, present bool) [][]int {
 		return nil
 	}
 	return re.FindAllStringSubmatchIndex(text, -1)
+}
+
+// repeats reports a value that occurs twice.
+func repeats(values []string) bool {
+	seen := make(map[string]bool, len(values))
+	for _, v := range values {
+		if seen[v] {
+			return true
+		}
+		seen[v] = true
+	}
+	return false
 }
 
 // objectEntries returns the keys and, when every value is a string literal,

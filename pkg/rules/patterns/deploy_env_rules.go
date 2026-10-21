@@ -38,7 +38,11 @@ func init() {
 // REQUIRED is reported too when the server template leaves it empty and the
 // deploy that carries other keys does not carry it. Keys with a default in
 // the code (getEnv("KEY", "x"), envDefault) and keys only tests read are not
-// needed. A project whose deploy writes no env file is left alone.
+// needed. A project whose deploy writes no env file is left alone, and so is
+// one whose deploy copies the whole local env file to the server (scp .env
+// host:...): the copy carries every key. A test of the deploy (deploy_test.sh,
+// a script under tests/) writes fixtures into a temporary directory and is
+// no writer.
 type EnvKeyMissingFromDeployEnvRule struct {
 	*rules.BaseRule
 	// findings holds, per file path, the lines and keys to report.
@@ -111,6 +115,12 @@ func (r *EnvKeyMissingFromDeployEnvRule) UseProjectFiles(files []*core.FileConte
 	example := make(map[string]envExampleKey)
 	carried := false // a loader carries keys from a secret store
 	for _, ctx := range files {
+		if (ctx.IsShellFile() || ctx.IsMakefile()) && ctx.IsTestFile() {
+			continue // a test of the deploy: its env files are fixtures
+		}
+		if copiesEnvFile(ctx) {
+			return // the whole local env file reaches the server
+		}
 		switch {
 		case ctx.IsEnvTemplate():
 			readEnvExample(ctx.Lines, example)
@@ -589,6 +599,40 @@ func shellEnvWriters(ctx *core.FileContext) []envWriter {
 		}
 	}
 	return out
+}
+
+// copiesEnvFile reports a script that copies an env file by its name to
+// another host: scp or rsync with a source named like an env file (.env,
+// .env.production) and a host:path destination.
+func copiesEnvFile(ctx *core.FileContext) bool {
+	src, ok := readShell(ctx)
+	if !ok {
+		return false
+	}
+	for _, l := range src.lines {
+		for _, seg := range flatSegments(l.text) {
+			words := commandWords(seg.trimmed())
+			if len(words) < 3 || (words[0] != "scp" && words[0] != "rsync") {
+				continue
+			}
+			source, remote := false, false
+			for _, w := range words[1:] {
+				w = strings.Trim(w, `"'`)
+				if strings.HasPrefix(w, "-") {
+					continue
+				}
+				if !source && envFileName(w) && !strings.Contains(w, ":") {
+					source = true
+				} else if source && strings.Contains(w, ":") {
+					remote = true
+				}
+			}
+			if source && remote {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // writesEnvFile reports a command redirected to a file named like an env
