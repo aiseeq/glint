@@ -52,6 +52,37 @@ func TestNullableObjectCallRule(t *testing.T) {
 			wantCount: 0,
 		},
 		{
+			// The right side of || runs only when the left one is false.
+			name:      "same-line null check before || is valid",
+			code:      `return entry.stats == null || !Object.hasOwn(entry.stats, "skipped") ? 0 : entry.stats.skipped`,
+			filename:  "src/lib/report.ts",
+			wantCount: 0,
+		},
+		{
+			name:      "same-line negation before || is valid",
+			code:      `if (!entry.details || Object.keys(entry.details).length === 0) return`,
+			filename:  "src/lib/report.ts",
+			wantCount: 0,
+		},
+		{
+			name:      "same-line not-null check before && is valid",
+			code:      `return entry.details !== undefined && entry.details !== null && Object.keys(entry.details).length > 0`,
+			filename:  "src/lib/report.ts",
+			wantCount: 0,
+		},
+		{
+			name:      "same-line null check before && does not guard",
+			code:      `return entry.details == null && Object.keys(entry.details).length > 0`,
+			filename:  "src/lib/report.ts",
+			wantCount: 1,
+		},
+		{
+			name:      "same-line check of another value does not guard",
+			code:      `return entry.stats == null || Object.keys(entry.details).length > 0`,
+			filename:  "src/lib/report.ts",
+			wantCount: 1,
+		},
+		{
 			name:      "test files are skipped",
 			code:      `expect(Object.entries(entry.details)).toHaveLength(1)`,
 			filename:  "frontend/admin-app/src/app/employees/page.test.tsx",
