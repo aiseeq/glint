@@ -51,32 +51,37 @@ func TestInstructionSize(t *testing.T) {
 }
 
 func TestInstructionSizeDefaults(t *testing.T) {
-	require.Empty(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 13107)))
-	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 13108)), 1)
+	require.Empty(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 16383)))
+	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 16384)), 1)
 	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 16385)), 1)
 	require.Empty(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 10199)))
 	require.Len(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 10200)), 1)
 	require.Len(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 12001)), 1)
 }
 
-// A file near its limit is reported before it is over: a CLAUDE.md from 80%
-// of max_bytes, a skill from 85% of max_chars. The next rule added to a file
-// at 99% puts it over, and moving rules out takes longer than adding one.
+// A CLAUDE.md is kept under its limit: it is reported from 100% of
+// max_bytes, and the finding names 80% as the size to aim for. A skill is
+// reported from 85% of max_chars: the next step added to a skill at 99% puts
+// it over, and moving steps out takes longer than adding one.
 func TestInstructionSizeWarnsNearTheLimit(t *testing.T) {
 	limit := map[string]any{"max_bytes": 100, "max_chars": 100}
-	require.Empty(t, instructionSizeFindings(t, limit, "CLAUDE.md", strings.Repeat("a", 79)))
-	for _, size := range []int{80, 100} {
-		got := instructionSizeFindings(t, limit, "CLAUDE.md", strings.Repeat("a", size))
-		require.Len(t, got, 1, size)
-		require.Contains(t, got[0].Message, fmt.Sprintf("%d bytes without comments, %d%% of the limit of 100", size, size))
-		require.Equal(t, core.SeverityMedium, got[0].Severity)
+	for _, size := range []int{80, 99} {
+		require.Empty(t, instructionSizeFindings(t, limit, "CLAUDE.md", strings.Repeat("a", size)), size)
 	}
-	require.Contains(t, instructionSizeFindings(t, limit, "CLAUDE.md", strings.Repeat("a", 101))[0].Message, "over the limit of 100")
+	got := instructionSizeFindings(t, limit, "CLAUDE.md", strings.Repeat("a", 100))
+	require.Len(t, got, 1)
+	require.Contains(t, got[0].Message, "100 bytes without comments, 100% of the limit of 100")
+	require.Contains(t, got[0].Message, "the reference is 80% (80 bytes)")
+	require.Equal(t, core.SeverityMedium, got[0].Severity)
+	over := instructionSizeFindings(t, limit, "CLAUDE.md", strings.Repeat("a", 101))[0].Message
+	require.Contains(t, over, "over the limit of 100")
+	require.Contains(t, over, "the reference is 80% (80 bytes)")
 
 	require.Empty(t, instructionSizeFindings(t, limit, ".claude/skills/x/SKILL.md", strings.Repeat("я", 84)))
-	got := instructionSizeFindings(t, limit, ".claude/skills/x/SKILL.md", strings.Repeat("я", 85))
+	got = instructionSizeFindings(t, limit, ".claude/skills/x/SKILL.md", strings.Repeat("я", 85))
 	require.Len(t, got, 1)
 	require.Contains(t, got[0].Message, "85 characters without comments, 85% of the limit of 100")
+	require.NotContains(t, got[0].Message, "reference")
 }
 
 // Claude Code strips block-level HTML comments from CLAUDE.md before the

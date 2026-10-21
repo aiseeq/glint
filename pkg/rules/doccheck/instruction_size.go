@@ -36,7 +36,7 @@ func NewInstructionSizeRule() *InstructionSizeRule {
 		BaseRule: rules.NewBaseRule(
 			"instruction-size",
 			"documentation",
-			"Detects a Claude Code instruction file near or over its size limit: CLAUDE.md, CLAUDE.local.md and .claude/rules/*.md from 80% of max_bytes (16384), skills/*/SKILL.md from 85% of max_chars (12000 characters); block-level HTML comments are not counted, Claude Code strips them",
+			"Detects a Claude Code instruction file near or over its size limit: CLAUDE.md, CLAUDE.local.md and .claude/rules/*.md from max_bytes (16384) on, with 80% named as the reference to aim for, skills/*/SKILL.md from 85% of max_chars (12000 characters); block-level HTML comments are not counted, Claude Code strips them",
 			core.SeverityMedium,
 		),
 		maxBytes: defaultInstructionMaxBytes,
@@ -70,17 +70,18 @@ func (r *InstructionSizeRule) Configure(settings map[string]any) error {
 
 // AnalyzeFile measures an instruction file against its limit. A file is
 // reported from a share of the limit on (warnAlwaysLoaded, warnSkill
-// percent), before the next rule puts it over.
+// percent); an always-loaded file is kept under its limit, and the finding
+// names the reference share it is aimed at.
 func (r *InstructionSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	var message string
 	switch core.InstructionKindOf(ctx.Path) {
 	case core.AlwaysLoaded:
 		base := filepath.Base(ctx.Path)
 		size := len(withoutBlockComments(ctx.Lines))
-		message = sizeMessage(base, size, r.maxBytes, warnAlwaysLoaded, "bytes", "it is loaded into every session")
+		message = sizeMessage(base, size, r.maxBytes, warnAlwaysLoaded, referenceAlwaysLoaded, "bytes", "it is loaded into every session")
 	case core.Skill:
 		size := utf8.RuneCountInString(withoutBlockComments(ctx.Lines))
-		message = sizeMessage("SKILL.md", size, r.maxChars, warnSkill, "characters", "after compacting the context Claude Code keeps only the first 5000 tokens of a skill")
+		message = sizeMessage("SKILL.md", size, r.maxChars, warnSkill, 0, "characters", "after compacting the context Claude Code keeps only the first 5000 tokens of a skill")
 	}
 	if message == "" {
 		return nil
@@ -90,20 +91,27 @@ func (r *InstructionSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	return []*core.Violation{v}
 }
 
-// The share of the limit, in percent, from which a file is reported.
+// The share of the limit, in percent, from which a file is reported, and the
+// share an always-loaded file is aimed at: a file at 100% is kept under the
+// limit, 80% is the size to come back to.
 const (
-	warnAlwaysLoaded = 80
-	warnSkill        = 85
+	warnAlwaysLoaded      = 100
+	referenceAlwaysLoaded = 80
+	warnSkill             = 85
 )
 
 // sizeMessage describes a size at or above warn percent of the limit, ""
-// below it.
-func sizeMessage(name string, size, limit, warn int, unit, why string) string {
+// below it; a reference share, when there is one, is named in the message.
+func sizeMessage(name string, size, limit, warn, reference int, unit, why string) string {
+	aim := ""
+	if reference > 0 {
+		aim = fmt.Sprintf(", the reference is %d%% (%d %s)", reference, limit*reference/100, unit)
+	}
 	switch {
 	case size > limit:
-		return fmt.Sprintf("%s is %d %s without comments, over the limit of %d: %s", name, size, unit, limit, why)
+		return fmt.Sprintf("%s is %d %s without comments, over the limit of %d%s: %s", name, size, unit, limit, aim, why)
 	case size*100 >= limit*warn:
-		return fmt.Sprintf("%s is %d %s without comments, %d%% of the limit of %d: %s, and the next rules put it over", name, size, unit, size*100/limit, limit, why)
+		return fmt.Sprintf("%s is %d %s without comments, %d%% of the limit of %d%s: %s, and the next rules put it over", name, size, unit, size*100/limit, limit, aim, why)
 	}
 	return ""
 }
