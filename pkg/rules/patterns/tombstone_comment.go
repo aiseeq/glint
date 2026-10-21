@@ -25,10 +25,11 @@ func init() {
 // comments. A tombstone is noise the moment the commit lands.
 //
 // Not flagged: behavior descriptions ("entries are removed after TTL", "if
-// the record was removed", "a channel deleted since"), a change counted both ways ("lines added and
-// removed"), godoc deprecation markers (owned by the
-// deprecated-comment rule), policy quotes, Go doc code blocks (//<tab>),
-// which quote an example instead of annotating the code around them, and a
+// the record was removed", "a channel deleted since"), a series of changes
+// ("lines added and removed", "rows inserted, updated or deleted"), godoc
+// deprecation markers (owned by the deprecated-comment rule), policy quotes,
+// Go doc code blocks (//<tab>), which quote an example instead of annotating
+// the code around them, and a
 // status word in capitals that a string literal of the file spells too (a
 // note on rows over the query filtering that status): it names the value, not
 // code that went away.
@@ -73,7 +74,9 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 		// data; "removed since v2" dates code and stays a tombstone.
 		behaviorTail: regexp.MustCompile(
 			`(?i)^(?:\s+from\b|\s*(?:->|→)|\s*(?:или|либо|or)\s|\s+since(?:\s*[,.;:)]|\s*$|\s+(?:then|it|they|the|opening|loading)\b)|\s+(?:meanwhile|in the meantime|concurrently|in between)\b)`),
-		addedBefore: regexp.MustCompile(`(?i)\badded\s*(?:and|or|&|/)\s*$`),
+		// A series of changes to data ends in the removal word: "added and
+		// removed", "inserted, updated or deleted".
+		addedBefore: regexp.MustCompile(`(?i)\b(?:added|inserted|updated|created|changed|modified|written|moved|renamed)\s*(?:,|and|or|&|/)\s*$`),
 		addedAfter:  regexp.MustCompile(`(?i)^\s*(?:and|or|&|/)\s*added\b`),
 		policyLine: regexp.MustCompile(
 			`(?i)CLAUDE\.md|принцип|запрещ|policy|deprecated:`),
@@ -130,7 +133,7 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			continue // "removed from X", "deleted -> *", "удалено или ..." — data-flow/state docs
 		}
 		if r.addedBefore.MatchString(comment[:loc[0]]) || r.addedAfter.MatchString(comment[loc[1]:]) {
-			continue // "lines added and removed" — a change counted both ways
+			continue // "lines added and removed", "rows inserted, updated or deleted" — changes to data
 		}
 		if !r.noteStart.MatchString(comment[:loc[0]]) && !r.noteEnd.MatchString(sentenceAfter(comment[loc[1]:], ctx.Lines, i)) {
 			continue // "removed afterwards", "a deleted file" — a sentence about what the program does
