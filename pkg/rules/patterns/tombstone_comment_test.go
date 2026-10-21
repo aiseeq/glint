@@ -442,3 +442,27 @@ func g() {}
 		t.Fatalf("want a finding on line 8 only, got %v", lines)
 	}
 }
+
+// A removal word at the end of a series of changes ("rows inserted, updated
+// or deleted") names what the program does to the data, as "added and
+// removed" does. A note on code that went away stays one.
+func TestTombstoneComment_SeriesOfChangesIsBehaviour(t *testing.T) {
+	code := `package store
+
+// The statistics list the tables with rows inserted, updated or deleted,
+// and the files created and removed by the job.
+// A key written or deleted since the snapshot is read again.
+func f() {}
+
+// Old parser deprecated and removed.
+// GetDB removed, replaced by Open.
+func g() {}
+`
+	var lines []int
+	for _, v := range NewTombstoneCommentRule().AnalyzeFile(core.NewFileContext("store/a.go", ".", []byte(code), nil)) {
+		lines = append(lines, v.Line)
+	}
+	if fmt.Sprint(lines) != "[8 9]" {
+		t.Fatalf("want findings on lines 8 and 9 only, got %v", lines)
+	}
+}
