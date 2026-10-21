@@ -418,3 +418,27 @@ func g() {}
 		t.Fatalf("want findings on lines 20-25 only, got %v", lines)
 	}
 }
+
+// A pronoun before the removal word is the one that removes: "a line the
+// commit added or one it removed" is the object of a clause about what the
+// code does. "X removed." names the code that went away.
+func TestTombstoneComment_RemovalByAPronounIsBehaviour(t *testing.T) {
+	code := `package store
+
+// undo reports a staged diff that removes a line the commit added or adds one it removed; blank lines do not count.
+// restore brings back the rows they deleted.
+// keep the entries we have removed, the rest are rebuilt.
+func f() {}
+
+// Old cache warmer removed.
+// It removed.
+func g() {}
+`
+	var lines []int
+	for _, v := range NewTombstoneCommentRule().AnalyzeFile(core.NewFileContext("store/a.go", ".", []byte(code), nil)) {
+		lines = append(lines, v.Line)
+	}
+	if fmt.Sprint(lines) != "[8]" {
+		t.Fatalf("want a finding on line 8 only, got %v", lines)
+	}
+}
