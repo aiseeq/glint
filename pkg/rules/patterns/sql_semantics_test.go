@@ -132,6 +132,33 @@ func Params(config *pgx.ConnConfig) { config.RuntimeParams["timezone"] = "UTC" }
 	assert.Empty(t, sessionTimeZoneLines(t, files, "storage/repo.go"), "the connection string comes from the environment")
 }
 
+// A project without migrations has no schema: the rule still reports what
+// needs none (CURRENT_DATE) and reads a named table as unknown.
+func TestSQLSessionTimeZoneWithoutMigrations(t *testing.T) {
+	files := map[string]string{
+		"store/db.go": `package store
+
+import "database/sql"
+
+const DSN = "host=/run/pg dbname=app sslmode=disable"
+
+func Names(db *sql.DB) error {
+	rows, err := db.Query(` + "`SELECT id FROM users`" + `)
+	if err != nil {
+		return err
+	}
+	return rows.Close()
+}
+
+func Today(db *sql.DB) error {
+	_, err := db.Exec(` + "`DELETE FROM users WHERE seen_on < CURRENT_DATE`" + `)
+	return err
+}
+`,
+	}
+	assert.Equal(t, []int{5, 16}, sessionTimeZoneLines(t, files, "store/db.go"))
+}
+
 // sessionTimeZoneLines loads files as a module, hands every file to the session
 // time zone rule and returns the lines it reports in the file at path.
 func sessionTimeZoneLines(t *testing.T, files map[string]string, path string) []int {
