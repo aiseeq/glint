@@ -128,9 +128,20 @@ func hasObjectFallback(arg string) bool {
 }
 
 // hasSameLineObjectGuard reports a guard written before the call on its own
-// line: `x.y && Object.keys(x.y)`, `typeof x.y === 'object' && …`.
+// line: `x.y && Object.keys(x.y)`, `x.y != null && …`, `typeof x.y ===
+// 'object' && …`, and a check of the missing value the call sits right of:
+// `x.y == null || Object.hasOwn(x.y, k)`, `!x.y || …` - the right side of
+// || runs only when the left one is false. A strict check rules out a
+// missing value only when it tests both null and undefined.
 func hasSameLineObjectGuard(prefix string, arg string) bool {
-	return strings.Contains(prefix, arg+" &&") || strings.Contains(prefix, "typeof "+arg+" === 'object'") || strings.Contains(prefix, "typeof "+arg+" === \"object\"")
+	p, a := jsCompact(prefix), jsCompact(arg)
+	present := []string{a + "&&", a + "!=null&&", a + "!=undefined&&", "typeof" + a + "==='object'", "typeof" + a + `==="object"`}
+	missing := []string{a + "==null||", a + "==undefined||", "!" + a + "||"}
+	if helpers.ContainsAny(p, present) || helpers.ContainsAny(p, missing) {
+		return true
+	}
+	return strings.Contains(p, a+"!==null&&") && strings.Contains(p, a+"!==undefined&&") ||
+		strings.Contains(p, a+"===null||") && strings.Contains(p, a+"===undefined||")
 }
 
 // guardedAbove reports whether a line above the call, in the same block or an
