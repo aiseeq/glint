@@ -591,6 +591,20 @@ func TestShellDBPasswordLiteralSkipsTestScripts(t *testing.T) {
 	}))
 }
 
+// A printf format writes the DSN from its arguments: %s is the place of the
+// password. A sed that extracts the password from a DSN matches it with a
+// pattern. Neither writes a password.
+func TestShellDBPasswordLiteralSkipsFormatsAndExtractions(t *testing.T) {
+	assert.Equal(t, []string{"scripts/viewer.sh:5"}, shellFindings(t, "shell-db-password-literal", map[string]string{
+		"scripts/viewer.sh": `#!/bin/bash
+printf 'VIEWER_DATABASE_URL=postgres://%s:%s@127.0.0.1:5432/%s?sslmode=disable\n' "$ROLE" "$db_pass" "$DB" > "$ENV_FILE"
+db_pass=$(sed -n "s#^VIEWER_DATABASE_URL=postgres://$ROLE:\([^@]*\)@.*#\1#p" "$ENV_FILE")
+old=$(sed -n 's#.*postgres://app:\(.\+\)@.*#\1#p' "$ENV_FILE")
+printf 'VIEWER_DATABASE_URL=postgres://%s:hunter2@127.0.0.1/%s\n' "$ROLE" "$DB"
+`,
+	}))
+}
+
 // A wrapper pastes its arguments into '...' of a remote bash -c: a caller
 // whose command holds a single quote closes the script early. A wrapper that
 // quotes with printf %q, and one whose callers pass no quote, are left alone.

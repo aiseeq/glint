@@ -399,3 +399,44 @@ PY
 `,
 	}))
 }
+
+// A test of the deploy writes its fixtures into a temporary directory, not
+// into the server's env file; a deploy that copies the whole local env file
+// to the server carries every key in it.
+func TestEnvKeyMissingFromDeployEnvTestFixtureAndCopiedFile(t *testing.T) {
+	config := `package main
+
+import "os"
+
+func main() { println(os.Getenv("MAIL_SMTP_HOST"), os.Getenv("ANALYTICS_API_KEY")) }
+`
+	example := "MAIL_SMTP_HOST=smtp.example.com\nANALYTICS_API_KEY=\n"
+	fixture := `#!/usr/bin/env bash
+set -euo pipefail
+WORK=$(mktemp -d)
+echo "IMAGE_TAG=1.2.3" > "$WORK/blue/.env"
+`
+	assert.Empty(t, deployFindings(t, "env-key-missing-from-deploy-env", map[string]string{
+		"cmd/app/main.go":       config,
+		".env.example":          example,
+		"deploy/deploy_test.sh": fixture,
+		"tests/deploy/slots.sh": fixture,
+		"deploy/deploy.sh":      "#!/usr/bin/env bash\nscp .env \"$HOST:/opt/app/shared/.env.new\"\n",
+	}))
+	// The whole env file copied next to a template the deploy fills: the
+	// copy carries the keys the template lacks.
+	assert.Empty(t, deployFindings(t, "env-key-missing-from-deploy-env", map[string]string{
+		"cmd/app/main.go": config,
+		".env.example":    example,
+		"deploy/deploy.sh": `#!/usr/bin/env bash
+printf "IMAGE_TAG=%s\n" "$TAG" > "$ENV_FILE"
+rsync -a .env.production "$HOST:/opt/app/shared/.env.new"
+`,
+	}))
+	// Without the copy the template's deploy is the one that misses them.
+	assert.Equal(t, []string{"deploy/deploy.sh:2", "deploy/deploy.sh:2"}, deployFindings(t, "env-key-missing-from-deploy-env", map[string]string{
+		"cmd/app/main.go":  config,
+		".env.example":     example,
+		"deploy/deploy.sh": "#!/usr/bin/env bash\nprintf \"IMAGE_TAG=%s\\n\" \"$TAG\" > \"$ENV_FILE\"\n",
+	}))
+}

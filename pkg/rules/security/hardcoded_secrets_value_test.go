@@ -97,3 +97,23 @@ const (
 		assert.Len(t, NewHardcodedSecretsRule().AnalyzeFile(ctx), 1, line)
 	}
 }
+
+// psql interpolates a variable as a literal with :'name': PASSWORD :'pass'
+// passes the value the script set with -v, no password is written there.
+// The same key with a literal value is a password.
+func TestHardcodedSecretsIgnoresPsqlVariable(t *testing.T) {
+	value := strings.Join([]string{"Sup3r", "S3cret", "Value"}, "")
+	script := `#!/bin/bash
+psql -v role="$ROLE" -v pass="$PASS" <<'SQL'
+ALTER ROLE :"role" WITH LOGIN NOSUPERUSER PASSWORD :'pass';
+ALTER ROLE :"role" PASSWORD :"pass";
+SQL
+db_password='` + value + `'
+`
+	found := NewHardcodedSecretsRule().AnalyzeFile(rulestest.TextFile(t, "scripts/grant.sh", script))
+	lines := make([]int, 0, len(found))
+	for _, v := range found {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{6}, lines)
+}

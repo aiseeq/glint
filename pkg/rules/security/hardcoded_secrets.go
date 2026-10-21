@@ -317,9 +317,18 @@ var envVarName = regexp.MustCompile(`^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$`)
 // urlPath is the shape of a route: /auth/reset-password.
 var urlPath = regexp.MustCompile(`^/[A-Za-z0-9._~:{}/-]*$`)
 
+var (
+	// psqlInterpolation is the end of a key before a psql variable: PASSWORD
+	// :'pass' (a space, then the colon right before the quote).
+	psqlInterpolation = regexp.MustCompile(`\s:["']$`)
+	// psqlVariableName is the name psql interpolates.
+	psqlVariableName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+)
+
 // isNotSecretValue reports whether a matched value holds no secret: a
 // placeholder, the name of an environment variable, a URL path, a phrase with
-// spaces, or a value under an explicit testing-configuration key. Markers
+// spaces, a psql variable (:'pass') or a value under an explicit
+// testing-configuration key. Markers
 // count only in the value (and the key for test configuration), never in a
 // trailing comment.
 func isNotSecretValue(key, value string) bool {
@@ -334,6 +343,9 @@ func isNotSecretValue(key, value string) bool {
 		if strings.Contains(lowerKey, marker) {
 			return true
 		}
+	}
+	if psqlInterpolation.MatchString(key) && psqlVariableName.MatchString(value) {
+		return true
 	}
 	return envVarName.MatchString(value) || urlPath.MatchString(value) || strings.ContainsAny(strings.TrimSpace(value), " \t") ||
 		spellsNameEnding(key, value)

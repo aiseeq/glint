@@ -315,3 +315,29 @@ func payoutMethodDesc(pm int) string {
 	}))
 	assert.Equal(t, []string{"admin/pricing.go:6"}, found)
 }
+
+// An object that maps two keys onto one value projects one scale onto
+// another: its values are what the scale is mapped to, not a copy of the
+// set. An object whose values are one each is still compared.
+func TestValueSetDriftManyToOneMapping(t *testing.T) {
+	severity := `package core
+
+type Severity string
+
+const (
+	SeverityCritical Severity = "CRITICAL"
+	SeverityHigh     Severity = "HIGH"
+	SeverityMedium   Severity = "MEDIUM"
+	SeverityLow      Severity = "LOW"
+	SeverityInfo     Severity = "INFO"
+)
+`
+	assert.Empty(t, foundLines(valueSetDriftFindings(t, map[string]string{
+		"tools/lint/core/types.go": severity,
+		"scripts/lib/audit.mjs":    "const SEVERITIES = { critical: 'CRITICAL', high: 'HIGH', moderate: 'MEDIUM', low: 'LOW', info: 'LOW' }\n",
+	})))
+	assert.Equal(t, []string{"scripts/lib/audit.mjs:1"}, foundLines(valueSetDriftFindings(t, map[string]string{
+		"tools/lint/core/types.go": severity,
+		"scripts/lib/audit.mjs":    "const SEVERITIES = { critical: 'CRITICAL', high: 'HIGH', moderate: 'MEDIUM', low: 'LOW' }\n",
+	})))
+}
