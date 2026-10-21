@@ -272,8 +272,8 @@ var changeTimeField = regexp.MustCompile(`^(?:Updated|Modified|Changed)At$`)
 // contentComparison is a call that compares two rows by content.
 var contentComparison = regexp.MustCompile(`(?i)same|equal|identical|unchanged|differ|diff`)
 
-// SyncNewerWinsOnStampedTableRule detects an import that keeps the newer of
-// two rows by their change time and writes it into a table whose trigger
+// NewSyncNewerWinsOnStampedTableRule creates sync-newer-wins-on-stamped-table:
+// an import that keeps the newer of two rows by their change time and writes it into a table whose trigger
 // stamps every UPDATE with the time of the write:
 //
 //	case incoming.UpdatedAt.After(existing.UpdatedAt):

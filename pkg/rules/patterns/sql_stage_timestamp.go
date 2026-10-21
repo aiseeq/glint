@@ -569,21 +569,13 @@ func updateNode(literals []sqlLiteral, update sqlschema.UpdateWrite, set sqlsche
 				continue
 			}
 			for _, candidate := range sqlschema.Updates(text) {
-				if candidate.Table == update.Table && slices.Equal(columnsOf(candidate), columnsOf(update)) {
+				if candidate.Table == update.Table && slices.Equal(candidate.Columns(), update.Columns()) {
 					return sqlPosNode(literal.posAt(set.Offset))
 				}
 			}
 		}
 	}
 	return sqlPosNode(token.NoPos)
-}
-
-func columnsOf(update sqlschema.UpdateWrite) []string {
-	columns := make([]string, len(update.Sets))
-	for i, set := range update.Sets {
-		columns[i] = set.Column
-	}
-	return columns
 }
 
 // sortedKeys returns the keys of a string-keyed map in order.

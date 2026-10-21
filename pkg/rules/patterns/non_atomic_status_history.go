@@ -424,21 +424,24 @@ func (a *statusHistoryFlowAnalyzer) typeSwitchGuard(
 	paths []statusHistoryPath,
 	scope *statusHistoryLexicalScope,
 ) []statusHistoryPath {
-	// The legacy engine only scanned the guard for calls without declaring
-	// the guard variable, so shadowed outer identifiers keep resolving to
-	// their outer declarations inside the clauses.
+	// The guard variable is declared per clause, in caseClause.
 	return a.applyCalls(paths, scope, statement)
 }
 
 func (a *statusHistoryFlowAnalyzer) caseClause(
-	_ ast.Stmt,
+	sw ast.Stmt,
 	clause *ast.CaseClause,
 	paths []statusHistoryPath,
 	parent *statusHistoryLexicalScope,
 ) ([]statusHistoryPath, *statusHistoryLexicalScope) {
 	scope := newStatusHistoryLexicalScope(parent)
+	if typeSwitch, ok := sw.(*ast.TypeSwitchStmt); ok {
+		for _, identifier := range typeSwitchIdentifiers(typeSwitch.Assign) {
+			scope.declare(identifier)
+		}
+	}
 	for _, expression := range clause.List {
-		paths = a.applyCalls(paths, scope, expression)
+		paths = a.applyCalls(paths, parent, expression)
 	}
 	return paths, scope
 }

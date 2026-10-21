@@ -337,7 +337,7 @@ func runCheck(_ *cobra.Command, args []string) error {
 			return err
 		}
 		// Each root fails by its own threshold: roots can carry different configs.
-		failed = failed || shouldFailAnalysis(shown, failOn)
+		failed = failed || shown.AnyAtLeast(failOn)
 
 		for _, ctx := range append(slices.Clone(contexts), prepared.excludedInstructions...) {
 			analyzedFiles[ctx.Path] = struct{}{}
@@ -966,16 +966,6 @@ func reportSkippedPackages(skipped []core.SkippedPackage, outputFormat string) {
 	}
 }
 
-// shouldFailAnalysis reports a finding at or above the threshold.
-func shouldFailAnalysis(violations core.ViolationList, failOn core.Severity) bool {
-	for _, violation := range violations {
-		if violation.Severity >= failOn {
-			return true
-		}
-	}
-	return false
-}
-
 // severityOverrides maps a rule name to the severity configured for it. It is
 // resolved once per project root so that analysis never has to parse — and
 // never has to silently ignore — a severity string.
@@ -1153,7 +1143,7 @@ func (s statelessRun) execute(contexts []*core.FileContext, found [][]core.Viola
 					}
 					if s.local[ruleIndex] && s.reuse != nil {
 						if stored, ok := s.reuse[fileIndex][rule.Name()]; ok {
-							found[fileIndex][ruleIndex] = cachedViolations(stored)
+							found[fileIndex][ruleIndex] = core.ViolationListOf(stored)
 							continue
 						}
 					}
@@ -1298,7 +1288,7 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 	fileRules := make([]rules.Rule, 0, len(enabledRules))
 	cachedProject := cache != nil && cache.projectHit != nil
 	if cachedProject {
-		allViolations = cachedViolations(cache.projectHit.Violations)
+		allViolations = core.ViolationListOf(cache.projectHit.Violations)
 	}
 	for _, rule := range enabledRules {
 		projectRule, ok := rule.(rules.GoProjectRule)
@@ -1513,7 +1503,7 @@ categories:
 func runConfigShow(_ *cobra.Command, _ []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return err
+		return fmt.Errorf("find the directory whose configuration to show: %w", err)
 	}
 
 	cfg, err := core.LoadConfigWithDefaults(cwd)
@@ -1551,7 +1541,7 @@ func runConfigShow(_ *cobra.Command, _ []string) error {
 func runConfigValidate(_ *cobra.Command, _ []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return err
+		return fmt.Errorf("find the directory whose configuration to validate: %w", err)
 	}
 
 	configPath, err := core.FindConfig(cwd)

@@ -174,11 +174,11 @@ func (r *EnumComparedToForeignLiteralRule) templateForeignLiterals(ctx *core.GoP
 	for _, path := range files {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read a template: %w", err)
 		}
 		rel, err := filepath.Rel(ctx.ProjectRoot, path)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("place template %s in the project: %w", path, err)
 		}
 		for i, line := range strings.Split(string(data), "\n") {
 			for _, m := range call.FindAllStringSubmatch(line, -1) {

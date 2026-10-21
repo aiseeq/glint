@@ -170,6 +170,10 @@ func (tc *timingCollector) report(w io.Writer) error {
 	return rw.Err()
 }
 
+// exitInterrupted is the status of a process stopped by SIGINT, as a shell
+// reports it: 128 + the signal number.
+const exitInterrupted = 130
+
 // reportTimingsOnInterrupt dumps the timings collected so far when the run is
 // interrupted — the report a user sends the author when glint hangs on their
 // project: completed rules plus the in-flight (rule, file) it was stuck on.
@@ -184,7 +188,7 @@ func reportTimingsOnInterrupt(tc *timingCollector) func() {
 		fmt.Fprintln(os.Stderr, "\ninterrupted — timings collected so far:")
 		_ = tc.report(os.Stderr) // ignored-error: safe — exiting; a stderr write failure has nowhere left to be reported
 
-		os.Exit(130)
+		os.Exit(exitInterrupted)
 	}()
 	return func() {
 		signal.Stop(sigCh)

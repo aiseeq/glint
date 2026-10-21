@@ -57,6 +57,12 @@ type Set struct {
 	Members    []string // sorted, unique
 }
 
+// Before reports a set written earlier in the project than other: by path,
+// then by line.
+func (s Set) Before(other Set) bool {
+	return cmp.Or(cmp.Compare(s.Path, other.Path), cmp.Compare(s.Line, other.Line)) < 0
+}
+
 // MinMembers is the least number of members a set needs to be collected: two
 // values match by chance too often.
 const MinMembers = 3

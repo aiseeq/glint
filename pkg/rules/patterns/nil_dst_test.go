@@ -63,6 +63,21 @@ func (r *Reader) Read(index [][]byte, w io.Writer) ([][]byte, error) {
 func Format(n int, w io.Writer) {
 	_, _ = w.Write(strconv.AppendInt(nil, int64(n), 10)) // want nil-dst-in-loop
 }
+
+// result hands out back to the caller: nothing is appended to it.
+func result(runErr error, out []byte) (bool, []byte) { return runErr == nil, out }
+
+// appendLen appends to out through a call that appends to its destination.
+func appendLen(out []byte, n int) []byte { return strconv.AppendInt(out[:0], int64(n), 10) }
+
+func Retry(run func() error, w io.Writer) {
+	for i := 0; ; i++ {
+		_, _ = w.Write(appendLen(nil, i)) // want nil-dst-in-loop
+		if ok, _ := result(run(), nil); ok {
+			return
+		}
+	}
+}
 `
 
 func TestNilDstInLoop(t *testing.T) {

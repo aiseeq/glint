@@ -80,7 +80,7 @@ func (r *MdListAfterLabelRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 
 		// A list item ending with a colon introduces a nested list; that is
 		// valid Markdown and needs no blank line
-		if r.listPattern.MatchString(line) {
+		if r.listPattern.MatchString(line) || r.inListItem(lines, i) {
 			continue
 		}
 
@@ -102,4 +102,20 @@ func (r *MdListAfterLabelRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	}
 
 	return violations
+}
+
+// inListItem reports a line that continues the text of a list item: the
+// lines from it up to a list item have no blank line between them. A list
+// right after it nests in that item.
+func (r *MdListAfterLabelRule) inListItem(lines []string, i int) bool {
+	for j := i - 1; j >= 0; j-- {
+		line := strings.TrimSpace(lines[j])
+		if line == "" {
+			return false
+		}
+		if r.listPattern.MatchString(line) {
+			return true
+		}
+	}
+	return false
 }

@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -372,5 +373,48 @@ var y = 2
 	}
 	if len(lines) != 2 || lines[0] != 11 || lines[1] != 14 {
 		t.Fatalf("want findings on lines 11 and 14 only, got %v", lines)
+	}
+}
+
+// A note about deleted code names what went away and stops there ("GetDB
+// removed.", "Removed the fallback"); a removal word inside a sentence about
+// what the program does to files, rows and records goes on to say when, by
+// whom or with what ("removed afterwards", "deleted in the work tree"), or
+// names the thing as removed ("a deleted file"). A sentence wrapped onto the
+// next comment line goes on there.
+func TestTombstoneComment_RemovalInsideABehaviourSentence(t *testing.T) {
+	code := `package store
+
+// gate writes the message to a temporary file, removed afterwards.
+// changed lists the paths, removed files left out.
+// The first entry is the main one: never removed.
+// status reports a path tracked, but deleted in the work tree.
+// weight counts a deleted file as much as changed lines.
+// net is a bridge for the container, created and removed with it.
+// The file is replaced by rename and removed whole, so a read sees one.
+// A file another run removed first is skipped.
+// Reports a file removed before its replacement is written.
+// A role removed in the admin screen comes back with the next request.
+// The removed row leaves no trace the transfer could see.
+// sweep finds the cookie set and deleted in different files.
+// The rule reports the lines the commit removed (defect) or added.
+// normalize reports a comma or a dot removed
+// from a number before it is parsed.
+func f() {}
+
+// Old cache warmer removed.
+// Removed the retry fallback (was unused)
+// SIMPLIFIED: removed 3 wrappers
+// sync: watcher deleted, use the queue
+// Cleanup — removed the second handler.
+// importer deleted
+func g() {}
+`
+	var lines []int
+	for _, v := range NewTombstoneCommentRule().AnalyzeFile(core.NewFileContext("store/a.go", ".", []byte(code), nil)) {
+		lines = append(lines, v.Line)
+	}
+	if fmt.Sprint(lines) != "[20 21 22 23 24 25]" {
+		t.Fatalf("want findings on lines 20-25 only, got %v", lines)
 	}
 }

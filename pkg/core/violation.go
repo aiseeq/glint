@@ -1,6 +1,9 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"maps"
+)
 
 // Violation represents a single issue found by a rule
 type Violation struct {
@@ -128,6 +131,42 @@ func (vl ViolationList) BySeverity(minSeverity Severity) ViolationList {
 		}
 	}
 	return result
+}
+
+// AnyAtLeast reports a violation at or above the severity.
+func (vl ViolationList) AnyAtLeast(minSeverity Severity) bool {
+	for _, v := range vl {
+		if v.Severity.IsAtLeast(minSeverity) {
+			return true
+		}
+	}
+	return false
+}
+
+// Values copies the violations by value, each with its own context: a copy
+// to keep (a cache entry) that later changes of the list do not reach.
+func (vl ViolationList) Values() []Violation {
+	values := make([]Violation, len(vl))
+	for i, v := range vl {
+		values[i] = *v
+		values[i].Context = maps.Clone(v.Context)
+	}
+	return values
+}
+
+// ViolationListOf returns fresh copies of kept violations: the caller may
+// change what it gets.
+func ViolationListOf(values []Violation) ViolationList {
+	if len(values) == 0 {
+		return nil
+	}
+	list := make(ViolationList, len(values))
+	for i := range values {
+		v := values[i]
+		v.Context = maps.Clone(values[i].Context)
+		list[i] = &v
+	}
+	return list
 }
 
 // CountBySeverity returns a map of severity to count

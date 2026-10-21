@@ -152,11 +152,6 @@ func analyzeProviderCommandFlow(body *ast.BlockStmt, contexts contextClassifier)
 	analyzer := providerFlowAnalyzer{seen: make(map[*ast.CallExpr]bool), contexts: contexts}
 	walker := &flowWalker[[]providerFlowState, struct{}]{
 		rule: &analyzer,
-		// The legacy engine stopped a statement list at any branch statement
-		// while keeping the states flowing, and let every loop exit with the
-		// pre-iteration states even without a condition.
-		branchTruncates: true,
-		loopAlwaysExits: true,
 	}
 	walker.walk(body, []providerFlowState{{}}, struct{}{})
 	return analyzer.detected
@@ -259,12 +254,11 @@ func (a *providerFlowAnalyzer) typeSwitchGuard(stmt ast.Stmt, states []providerF
 
 func (a *providerFlowAnalyzer) caseClause(
 	_ ast.Stmt,
-	_ *ast.CaseClause,
+	clause *ast.CaseClause,
 	states []providerFlowState,
 	parent struct{},
 ) ([]providerFlowState, struct{}) {
-	// The legacy engine never evaluated clause guard expressions.
-	return states, parent
+	return a.expressions(clause.List, states), parent
 }
 
 func (a *providerFlowAnalyzer) commClause(

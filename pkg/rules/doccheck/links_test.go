@@ -25,6 +25,21 @@ func GetUser() {}`,
 			wantViolations: 0, // example.org is fine, example.com is suspicious
 		},
 		{
+			// A doc code block (//<tab>) quotes code: a shell variable or a
+			// template in a URL there is the code's own, not a link to fix.
+			name: "URL with a variable in a doc code block",
+			code: `package main
+
+// Healthcheck probes the port the application listens on:
+//
+//	HEALTHCHECK CMD curl -f "http://localhost:${SERVER_PORT}/api/health" || exit 1
+//	<a href="https://{{.Host}}/login">
+//
+// Prose that reads https://${HOST}/api still holds a placeholder.
+func Healthcheck() {}`,
+			wantViolations: 1,
+		},
+		{
 			name: "placeholder URL with example.com",
 			code: `package main
 

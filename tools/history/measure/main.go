@@ -82,11 +82,11 @@ func measure(repo, outPath string, interval int, glint string, progress io.Write
 		return err
 	}
 	if _, err := fmt.Fprintf(progress, "%d slices\n", len(slices)); err != nil {
-		return err
+		return fmt.Errorf("report progress: %w", err)
 	}
 	out, err := os.Create(outPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("create the output: %w", err)
 	}
 	// The Close at the end reports a failed write; this one only frees
 	// the file of a run that failed earlier.
@@ -108,7 +108,7 @@ func measure(repo, outPath string, interval int, glint string, progress io.Write
 			}
 		}
 		if _, err := fmt.Fprintf(progress, "[%d/%d] %s sloc=%d total=%s c+h/kloc=%s\n", n+1, len(slices), rec.Date, rec.Sloc, total, critHigh); err != nil {
-			return err
+			return fmt.Errorf("report progress: %w", err)
 		}
 	}
 	return out.Close()
@@ -195,7 +195,7 @@ type metrics struct {
 func analyzeSlice(repo, hash, glint string) (*record, error) {
 	tmp, err := os.MkdirTemp("", "glint-slice-")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create a directory for the slice: %w", err)
 	}
 	defer func() {
 		if err := os.RemoveAll(tmp); err != nil {

@@ -64,7 +64,7 @@ func (s siblingFlag) Set(value string) error {
 	if strings.HasPrefix(repo, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return err
+			return fmt.Errorf("expand the repository path: %w", err)
 		}
 		repo = filepath.Join(home, repo[2:])
 	}
@@ -174,7 +174,7 @@ func (r *replay) verify(input, outPath string, progress io.Writer) (int, error) 
 	}
 	out, err := os.OpenFile(outPath, flags, 0o644)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("open the output: %w", err)
 	}
 	// The Close at the end reports a failed write; this one only frees
 	// the file of a run that failed earlier.
@@ -226,11 +226,11 @@ func (r *replay) verify(input, outPath string, progress io.Writer) (int, error) 
 			return 0, err
 		}
 		if _, err := fmt.Fprintf(progress, "%d/%d %s %s %s%s\n", i+1, len(jobs), j.commit, j.kind, res.Status, verdict); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("report progress: %w", err)
 		}
 	}
 	if err := out.Close(); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("write the output: %w", err)
 	}
 	if m != nil {
 		var report strings.Builder
@@ -239,7 +239,7 @@ func (r *replay) verify(input, outPath string, progress io.Writer) (int, error) 
 			report.WriteString("  " + miss + "\n")
 		}
 		if _, err := io.WriteString(progress, report.String()); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("report the misses: %w", err)
 		}
 	}
 	return len(misses), nil
@@ -264,7 +264,7 @@ func (res *result) hit(c check) bool {
 func readManifest(input string) (*manifest, error) {
 	f, err := os.Open(input)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read the manifest: %w", err)
 	}
 	defer func() { _ = f.Close() }() // read only
 	m := &manifest{checks: map[[2]string][]check{}, whole: map[[2]string]bool{}}
@@ -332,7 +332,7 @@ func (r *replay) manifestJobs(m *manifest) ([]job, error) {
 func readCandidates(input string) ([]job, error) {
 	f, err := os.Open(input)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read the candidates: %w", err)
 	}
 	defer func() { _ = f.Close() }() // read only
 	seen := map[job]bool{}
@@ -385,7 +385,7 @@ func readDone(outPath string) (map[[2]string]bool, error) {
 		return done, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read the earlier output: %w", err)
 	}
 	for n, line := range bytes.Split(data, []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -464,12 +464,12 @@ func parseDiff(diff, side string) (map[string]map[int]bool, error) {
 		}
 		first, err := strconv.Atoi(start)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read a hunk header: %w", err)
 		}
 		n := 1
 		if count != "" {
 			if n, err = strconv.Atoi(count); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("read a hunk header: %w", err)
 			}
 		}
 		for l := first; l < first+n; l++ {
@@ -558,7 +558,7 @@ func localSiblingPaths(target string) ([]string, error) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read the local siblings of %s: %w", target, err)
 		}
 		for _, m := range f.pattern.FindAllStringSubmatch(string(data), -1) {
 			rels = append(rels, m[1])
@@ -614,11 +614,11 @@ func (r *replay) provideSiblings(target, at string) (bool, error) {
 			continue
 		}
 		if err := os.RemoveAll(dest); err != nil {
-			return false, err
+			return false, fmt.Errorf("clear sibling %s: %w", dest, err)
 		}
 		top := strings.TrimSuffix(strings.TrimSuffix(dest, sub), "/")
 		if err := os.MkdirAll(top, 0o755); err != nil {
-			return false, err
+			return false, fmt.Errorf("create the sibling directory: %w", err)
 		}
 		args := []string{"archive", rev}
 		if sub != "" {
@@ -628,7 +628,7 @@ func (r *replay) provideSiblings(target, at string) (bool, error) {
 			return false, err
 		}
 		if err := os.WriteFile(marker, []byte(rev), 0o644); err != nil {
-			return false, err
+			return false, fmt.Errorf("mark sibling %s: %w", dest, err)
 		}
 	}
 	return provided, nil
@@ -786,10 +786,10 @@ func (r *replay) checkRoot(commit, tree, root string, files, rules []string, who
 	}
 	dest := filepath.Join(r.work, dir)
 	if err := os.RemoveAll(dest); err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("clear tree %s: %w", dest, err)
 	}
 	if err := os.MkdirAll(dest, 0o755); err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("create tree %s: %w", dest, err)
 	}
 	// Files at the top of the repository come alone, not with the whole
 	// tree - unless the top is a Go module, which is the whole tree.
@@ -813,7 +813,7 @@ func (r *replay) checkRoot(commit, tree, root string, files, rules []string, who
 		}
 	}
 	glintArgs := []string{"check", "--tolerate-broken-packages", "--output=json", "--min-severity=low"}
-	if rules != nil {
+	if len(rules) > 0 {
 		glintArgs = append(glintArgs, "--rule="+strings.Join(rules, ","))
 	}
 	// The tree before a fix was often built against sibling changes

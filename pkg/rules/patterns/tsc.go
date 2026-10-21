@@ -345,8 +345,15 @@ type tscDiagnostic struct {
 	Message string `json:"message"`
 }
 
-func (d tscDiagnostic) place() string {
-	return fmt.Sprintf("%s:%d:%s", d.File, d.Line, d.Code)
+func (d tscDiagnostic) place() tscPlace {
+	return tscPlace{file: d.File, line: d.Line, code: d.Code}
+}
+
+// tscPlace is the code of a diagnostic at its place.
+type tscPlace struct {
+	file string
+	line int
+	code string
 }
 
 func (d tscDiagnostic) String() string {
@@ -512,7 +519,7 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 	}
 	// tsc 7 words some messages differently: the same error is the same
 	// code at the same place.
-	known := map[string]bool{}
+	known := map[tscPlace]bool{}
 	for _, d := range answer.Errors {
 		known[d.place()] = true
 	}
@@ -579,7 +586,7 @@ func programKey(settings []string, listed []byte) (string, error) {
 		parts = append(parts, []byte(path), content)
 	}
 	if err := scanner.Err(); err != nil {
-		return "", err
+		return "", fmt.Errorf("read the file list of tsc: %w", err)
 	}
 	return toolcache.Key(parts...), nil
 }
@@ -665,7 +672,7 @@ func strictGaps(shown []byte) ([]string, error) {
 		CompilerOptions map[string]any `json:"compilerOptions"`
 	}
 	if err := json.Unmarshal(shown, &config); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read the configuration tsc shows: %w", err)
 	}
 	var gaps []string
 	if strict, _ := config.CompilerOptions["strict"].(bool); !strict {

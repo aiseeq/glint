@@ -192,7 +192,7 @@ func (c *resultCache) storeProject(found core.ViolationList, skipped []core.Skip
 	c.currentProject = &projectEntry{
 		Inputs:     c.projectInputs,
 		Rules:      c.projectRules,
-		Violations: storedViolations(found),
+		Violations: found.Values(),
 		Skipped:    append([]core.SkippedPackage(nil), skipped...),
 	}
 }
@@ -218,7 +218,7 @@ func (c *resultCache) storeFile(relPath string, content [sha256.Size]byte, list 
 		if !local[i] {
 			continue
 		}
-		stored[rule.Name()] = storedViolations(found[i])
+		stored[rule.Name()] = found[i].Values()
 		if _, ok := reused[rule.Name()]; !ok {
 			allReused = false
 		}
@@ -387,39 +387,14 @@ var executableHash = sync.OnceValues(func() (string, error) {
 func fileHash(path string) (sum string, err error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("hash a file of the run: %w", err)
 	}
 	defer func() { err = errors.Join(err, file.Close()) }()
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
+		return "", fmt.Errorf("hash %s: %w", path, err)
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-// cachedViolations returns fresh copies of stored findings: callers change
-// the violations they get.
-func cachedViolations(stored []core.Violation) core.ViolationList {
-	if len(stored) == 0 {
-		return nil
-	}
-	list := make(core.ViolationList, len(stored))
-	for i := range stored {
-		violation := stored[i]
-		violation.Context = maps.Clone(stored[i].Context)
-		list[i] = &violation
-	}
-	return list
-}
-
-// storedViolations copies findings for the cache.
-func storedViolations(list core.ViolationList) []core.Violation {
-	stored := make([]core.Violation, len(list))
-	for i, violation := range list {
-		stored[i] = *violation
-		stored[i].Context = maps.Clone(violation.Context)
-	}
-	return stored
 }
 
 // fileLocalRules marks the rules whose findings the cache may keep.

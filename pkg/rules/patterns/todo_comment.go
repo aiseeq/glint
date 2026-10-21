@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -48,6 +49,12 @@ func (r *TodoCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 		// Must be a comment line
 		if !strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "/*") && !strings.HasPrefix(trimmed, "*") {
+			continue
+		}
+		// A line of a multi-line string reads like a comment: the comment
+		// mask blanks only real comments.
+		start := strings.Index(line, trimmed)
+		if text := helpers.FileJSText(ctx); lineNum < len(text) && start < len(text[lineNum]) && text[lineNum][start] == trimmed[0] {
 			continue
 		}
 

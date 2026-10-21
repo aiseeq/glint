@@ -53,7 +53,7 @@ func NewNilDstInLoopRule() *typedFuncRule {
 			if !ok || (!hot && !insideNodes(loops, call)) {
 				return true
 			}
-			result, name, ok := nilDestination(scope.info, call)
+			result, name, ok := nilDestination(scope, call)
 			if !ok {
 				return true
 			}
@@ -72,9 +72,11 @@ func NewNilDstInLoopRule() *typedFuncRule {
 
 // nilDestination reports an append-style call with nil as its destination:
 // a slice parameter whose type a result shares, named like a destination or
-// of a function named Append*. It returns the index of that result and the
-// callee's name.
-func nilDestination(info *types.Info, call *ast.CallExpr) (int, string, bool) {
+// of a function named Append*. A callee whose body is loaded has to append
+// to it too: a slice it only hands back is no buffer. It returns the index
+// of that result and the callee's name.
+func nilDestination(scope funcScope, call *ast.CallExpr) (int, string, bool) {
+	info := scope.info
 	if builtinCallName(info, call) != "" {
 		return 0, "", false
 	}
@@ -97,6 +99,9 @@ func nilDestination(info *types.Info, call *ast.CallExpr) (int, string, bool) {
 		if !slices.Contains(appendStyleParams, param.Name()) && !strings.HasPrefix(name, "Append") {
 			continue
 		}
+		if decl, loaded := scope.callee(call); loaded && !appendsToParam(decl, i) {
+			continue
+		}
 		for j := range sig.Results().Len() {
 			if types.Identical(sig.Results().At(j).Type(), param.Type()) {
 				return j, types.ExprString(call.Fun), true
@@ -104,6 +109,46 @@ func nilDestination(info *types.Info, call *ast.CallExpr) (int, string, bool) {
 		}
 	}
 	return 0, "", false
+}
+
+// appendsToParam reports a function whose parameter i is a destination its body
+// appends to: the first argument of append, or a nil-able destination of an
+// append-style call (strconv.AppendInt(dst, ...), enc.AppendEncode(dst[:0], ...)).
+func appendsToParam(fn typedFuncDecl, i int) bool {
+	param := paramObject(fn, i)
+	if param == nil || fn.decl.Body == nil {
+		return false
+	}
+	isParam := func(arg ast.Expr) bool {
+		if s, ok := ast.Unparen(arg).(*ast.SliceExpr); ok {
+			arg = s.X
+		}
+		ident, ok := ast.Unparen(arg).(*ast.Ident)
+		return ok && fn.info.Uses[ident] == param
+	}
+	found := false
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || found {
+			return !found
+		}
+		if builtinCallName(fn.info, call) == "append" {
+			found = len(call.Args) > 0 && isParam(call.Args[0])
+			return !found
+		}
+		sig, ok := fn.info.TypeOf(call.Fun).(*types.Signature)
+		if !ok {
+			return true
+		}
+		for j, arg := range call.Args {
+			if j < sig.Params().Len() && isParam(arg) &&
+				(slices.Contains(appendStyleParams, sig.Params().At(j).Name()) || strings.HasPrefix(types.ExprString(call.Fun), "strconv.Append")) {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // resultOutlives reports whether the call's result at index result is kept

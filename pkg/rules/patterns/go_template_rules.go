@@ -650,7 +650,7 @@ func runTemplatesAll(ctx *core.GoProjectContext) ([]string, error) {
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read a template: %w", err)
 		}
 		out = append(out, string(data))
 	}

@@ -275,12 +275,12 @@ func (a *checkpointFlowAnalyzer) leaveScope(
 	switch kind {
 	case flowScopeBlock, flowScopeIfBody, flowScopeForBody, flowScopeRangeBody,
 		flowScopeCaseClause, flowScopeCommClause:
-		// Legacy block epilogue: drop the scope's bindings, then compact.
+		// A block: drop the scope's bindings, then compact.
 		removeCheckpointAssignments(edges, scope.declaredBindings())
 		compactCheckpointEdges(edges)
 	default:
-		// Legacy construct epilogue: edges were compacted by normalize before
-		// the header scope's bindings are dropped.
+		// A construct's header scope: normalize compacted the edges before
+		// its bindings are dropped.
 		removeCheckpointAssignments(edges, scope.declaredBindings())
 	}
 }
@@ -365,8 +365,8 @@ func (a *checkpointFlowAnalyzer) typeSwitchGuard(
 	paths []checkpointFlow,
 	scope *checkpointLexicalScope,
 ) []checkpointFlow {
-	// The legacy engine only scanned the guard for terminal calls; the guard
-	// variable is declared per clause in caseClause instead.
+	// The guard is scanned for terminal calls; its variable is declared per
+	// clause, in caseClause.
 	a.findTerminalsOnPaths(stmt, paths, scope)
 	return paths
 }

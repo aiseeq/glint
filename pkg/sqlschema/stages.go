@@ -25,6 +25,15 @@ type UpdateWrite struct {
 	Sets  []ColumnWrite
 }
 
+// Columns returns the columns the UPDATE sets, in its order.
+func (u UpdateWrite) Columns() []string {
+	columns := make([]string, len(u.Sets))
+	for i, set := range u.Sets {
+		columns[i] = set.Column
+	}
+	return columns
+}
+
 // Assignment returns the write of a column, ok false when the UPDATE leaves
 // it.
 func (u UpdateWrite) Assignment(column string) (ColumnWrite, bool) {

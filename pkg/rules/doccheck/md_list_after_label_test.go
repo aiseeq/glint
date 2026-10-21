@@ -96,6 +96,34 @@ Some text.`,
    - REDIS_URL`,
 			expectViolations: 0,
 		},
+		{
+			// The item's text wraps; its last line introduces the nested list.
+			name: "wrapped list item ending with colon followed by nested list",
+			path: "/test/doc.md",
+			content: `# Test
+
+- **Leaks**: a commit is checked for names. The lists live in the user
+  config, never in the repository:
+  - **names**: functions and types.
+  - **words**: plain words.
+1. Prepare the environment
+   variables:
+   - DATABASE_URL`,
+			expectViolations: 0,
+		},
+		{
+			// A paragraph after a list is not the item's text: the list after
+			// it is a new top-level list.
+			name: "label after a list followed by a list",
+			path: "/test/doc.md",
+			content: `# Test
+
+- first item
+
+The settings that follow:
+- timeout`,
+			expectViolations: 1,
+		},
 	}
 
 	for _, tt := range tests {

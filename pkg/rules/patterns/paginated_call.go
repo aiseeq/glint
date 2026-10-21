@@ -103,9 +103,9 @@ func (r *PaginatedCallFirstPageOnlyRule) AnalyzeGoProject(ctx *core.GoProjectCon
 						calleeFailsAtCap(node, info, decls) || inFilter && !dropsTotal(node, fn.Body, info) {
 						return true
 					}
-					message := fmt.Sprintf("One page of %d read as the whole list — rows past it are dropped without a trace", size)
-					if size == 0 {
-						message = "Page size 0 asked for the whole list — a query reads it as LIMIT 0 and returns no rows"
+					message := "Page size 0 asked for the whole list — a query reads it as LIMIT 0 and returns no rows"
+					if size != 0 {
+						message = fmt.Sprintf("One page of %d read as the whole list — rows past it are dropped without a trace", size)
 					}
 					report(node, message, "Page through until the reported total or an empty page, or fail loudly when a cap is reached")
 				case *ast.CompositeLit:
