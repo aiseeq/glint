@@ -258,7 +258,7 @@ func readIfExists(path string) ([]byte, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("look up a file shellcheck reads: %w", err)
 	}
 	if !info.Mode().IsRegular() {
 		return nil, nil

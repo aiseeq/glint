@@ -26,11 +26,12 @@ type ReportWriter struct {
 	err error
 }
 
+// NewReportWriter returns a writer of a report to w.
 func NewReportWriter(w io.Writer) *ReportWriter {
 	return &ReportWriter{w: w}
 }
 
-// line writes its arguments followed by a newline.
+// Line writes its arguments followed by a newline.
 func (rw *ReportWriter) Line(args ...any) {
 	if rw.err != nil {
 		return
@@ -38,7 +39,7 @@ func (rw *ReportWriter) Line(args ...any) {
 	_, rw.err = fmt.Fprintln(rw.w, args...)
 }
 
-// printf writes formatted text.
+// Printf writes formatted text.
 func (rw *ReportWriter) Printf(format string, args ...any) {
 	if rw.err != nil {
 		return

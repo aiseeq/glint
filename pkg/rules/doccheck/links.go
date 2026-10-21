@@ -92,6 +92,12 @@ func (r *DocLinksRule) checkComment(ctx *core.FileContext, comment *ast.Comment)
 	text := comment.Text
 	pos := ctx.PositionFor(comment)
 
+	// A doc code block (//<tab>) quotes code: a variable or a template in a
+	// URL there belongs to that code.
+	if strings.HasPrefix(text, "//\t") {
+		return nil
+	}
+
 	// Check URLs. Sentence punctuation after a URL ends the sentence, not
 	// the URL.
 	for _, found := range r.urlPattern.FindAllString(text, -1) {

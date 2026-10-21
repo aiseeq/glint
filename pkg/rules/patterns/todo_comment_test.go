@@ -119,3 +119,17 @@ func TestTodoCommentOnlyCodeFiles(t *testing.T) {
 		assert.Len(t, rule.AnalyzeFile(ctx), 1, "code file must be checked: %s", path)
 	}
 }
+
+// A line of a multi-line string is text, not a comment: the source of a
+// fixture that holds a TODO comment.
+func TestTodoCommentInsideStringLiteral(t *testing.T) {
+	code := "package svc\n\nconst fixture = `\n// TODO: revisit this fallback\nfunc f() {}\n`\n\n/*\n * TODO: real one\n */\n// TODO: also real\n"
+	for _, path := range []string{"/test/fixture.go", "/test/fixture.ts"} {
+		ctx := core.NewFileContext(path, "/test", []byte(code), core.DefaultConfig())
+		var lines []int
+		for _, v := range NewTodoCommentRule().AnalyzeFile(ctx) {
+			lines = append(lines, v.Line)
+		}
+		assert.Equal(t, []int{9, 11}, lines, path)
+	}
+}

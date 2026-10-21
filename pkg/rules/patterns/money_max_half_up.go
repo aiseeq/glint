@@ -102,6 +102,10 @@ func moneyLimit(receiver string) bool {
 	return limit && money
 }
 
+// floorLookbackLines is how far above a use the assignment of the value is
+// looked for.
+const floorLookbackLines = 40
+
 // flooredAtAssignment reports whether the variable the receiver names was
 // assigned a rounded-down value in the lines before line.
 func flooredAtAssignment(code []string, line int, receiver string) bool {
@@ -113,7 +117,7 @@ func flooredAtAssignment(code []string, line int, receiver string) bool {
 		return false
 	}
 	assignment := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*=[^=]`)
-	for j := line - 1; j >= 0 && j >= line-40; j-- {
+	for j := line - 1; j >= 0 && j >= line-floorLookbackLines; j-- {
 		if loc := assignment.FindStringIndex(code[j]); loc != nil {
 			return roundedDown.MatchString(code[j][loc[1]:])
 		}

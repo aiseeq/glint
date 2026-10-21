@@ -382,7 +382,7 @@ func hasConstraint(dir string, files []string) (bool, error) {
 	for _, name := range files {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("read build constraints: %w", err)
 		}
 		if bytes.Contains(data, []byte("//go:build")) || bytes.Contains(data, []byte("// +build")) {
 			return true, nil
@@ -443,7 +443,7 @@ func (l *inProcessLoad) check(local *localPackage) error {
 		filename := filepath.Join(local.dir, name)
 		src, err := os.ReadFile(filename)
 		if err != nil {
-			return err
+			return fmt.Errorf("read a file of package %s: %w", local.build.ImportPath, err)
 		}
 		file, parseErr := l.cfg.ParseFile(l.cfg.Fset, filename, src)
 		if parseErr != nil {
@@ -529,7 +529,7 @@ func (l *inProcessLoad) standard(importPath string) (*packages.Package, error) {
 func (l *inProcessLoad) readExport(exportFile, importPath string) (typed *types.Package, err error) {
 	f, err := os.Open(exportFile)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read export data of %s: %w", importPath, err)
 	}
 	defer func() {
 		if closeErr := f.Close(); closeErr != nil && err == nil {

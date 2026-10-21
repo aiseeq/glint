@@ -5,7 +5,7 @@ settings:
   exclude:
     - "vendor/*"
     - "node_modules/*"
-  min_severity: medium
+  min_severity: low
   output: console
 
 categories:
@@ -49,6 +49,19 @@ categories:
             reason: >-
               These rules detect stub methods: "Stub" in their names is the
               subject they report on, not a fake implementation in production.
+      legacy-comment-marker:
+        exceptions:
+          - files: "pkg/rules/{patterns/legacy_comment_marker,patterns/legacy_identifier,deadcode/deprecated_comment}.go"
+            reason: >-
+              These rules detect the word legacy in comments and names: their
+              documentation spells the markers they report, it admits no
+              legacy code path.
+      tombstone-comment:
+        exceptions:
+          - file: "pkg/rules/patterns/tombstone_comment.go"
+            reason: >-
+              The rule detects notes about deleted code: its documentation
+              spells the words it reports, it annotates no deleted code.
       error-wrap:
         exceptions:
           - files: "pkg/core/**"
@@ -73,6 +86,14 @@ categories:
 
   typesafety:
     enabled: true
+    rules:
+      any-in-public-contract:
+        exceptions:
+          - file: "pkg/output/json.go"
+            reason: >-
+              Context carries the details of one finding as its rule records
+              them: each rule has its own keys and values, so the report has
+              no single schema for them.
 
   duplication:
     enabled: true

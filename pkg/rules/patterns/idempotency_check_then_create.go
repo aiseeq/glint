@@ -296,16 +296,11 @@ func (a *idempotencyFunctionAnalyzer) liveState(paths []idempotencyPath) bool { 
 func (a *idempotencyFunctionAnalyzer) deadState() []idempotencyPath { return nil }
 
 func (a *idempotencyFunctionAnalyzer) enterScope(
-	kind flowScopeKind,
+	_ flowScopeKind,
 	_ ast.Node,
 	parent *idempotencyScope,
 	paths []idempotencyPath,
 ) (*idempotencyScope, []idempotencyPath) {
-	if kind == flowScopeRangeBody {
-		// The legacy engine analyzed range bodies directly inside the
-		// key/value scope without an extra lexical level.
-		return parent, paths
-	}
 	return newIdempotencyScope(parent), paths
 }
 

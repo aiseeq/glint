@@ -70,8 +70,8 @@ func CalledFunc(call *ast.CallExpr, info *types.Info) *types.Func {
 	return fn
 }
 
-// ConcatOperands flattens a chain of + into its operands, each with
-// parentheses removed: a + (b + c) gives a, b, c.
+// ConcatOperands flattens a chain of + into its operands, each without its
+// parentheses: a + (b + c) gives a, b, c.
 func ConcatOperands(expr ast.Expr) []ast.Expr {
 	sum, ok := ast.Unparen(expr).(*ast.BinaryExpr)
 	if !ok || sum.Op != token.ADD {

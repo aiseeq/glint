@@ -12,10 +12,10 @@ import (
 )
 
 func init() {
-	rules.Register(NewSecurityHeaderMultipleWritersRule())
+	rules.Register(NewHeaderMultipleWritersRule())
 }
 
-// SecurityHeaderMultipleWritersRule detects a security header that two files
+// HeaderMultipleWritersRule detects a security header that two files
 // of a project set:
 //
 //	// https_middleware.go
@@ -27,15 +27,15 @@ func init() {
 // one the reader of either file sees: a strict CSP is replaced by a weak one,
 // a configured HSTS by a hardcoded one. One file owns each header; functions
 // of that file that refine it for one kind of response (HTML) are its owner.
-type SecurityHeaderMultipleWritersRule struct {
+type HeaderMultipleWritersRule struct {
 	*rules.BaseRule
 	// writers maps a header to the files that set it.
 	writers map[string][]string
 }
 
-// NewSecurityHeaderMultipleWritersRule creates the rule
-func NewSecurityHeaderMultipleWritersRule() *SecurityHeaderMultipleWritersRule {
-	return &SecurityHeaderMultipleWritersRule{BaseRule: rules.NewBaseRule(
+// NewHeaderMultipleWritersRule creates the rule
+func NewHeaderMultipleWritersRule() *HeaderMultipleWritersRule {
+	return &HeaderMultipleWritersRule{BaseRule: rules.NewBaseRule(
 		"security-header-multiple-writers",
 		"security",
 		"Detects a security header (CSP, HSTS, X-Frame-Options, ...) set in more than one file — the last middleware to run decides the policy",
@@ -57,7 +57,7 @@ type headerWrite struct {
 }
 
 // UseProjectFiles indexes the functions that set each security header.
-func (r *SecurityHeaderMultipleWritersRule) UseProjectFiles(files []*core.FileContext) {
+func (r *HeaderMultipleWritersRule) UseProjectFiles(files []*core.FileContext) {
 	r.writers = make(map[string][]string)
 	for _, ctx := range files {
 		for _, write := range headerWrites(ctx) {
@@ -70,11 +70,11 @@ func (r *SecurityHeaderMultipleWritersRule) UseProjectFiles(files []*core.FileCo
 }
 
 // ResetState drops the writers of the previous root.
-func (r *SecurityHeaderMultipleWritersRule) ResetState() { r.writers = nil }
+func (r *HeaderMultipleWritersRule) ResetState() { r.writers = nil }
 
 // AnalyzeFile reports the first write of a header in the file when another
 // file sets it too.
-func (r *SecurityHeaderMultipleWritersRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+func (r *HeaderMultipleWritersRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	lr := newLineReporter(ctx, r.BaseRule)
 	seen := make(map[string]bool)
 	for _, write := range headerWrites(ctx) {

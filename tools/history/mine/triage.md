@@ -101,6 +101,7 @@ the fix introduced and an existing rule catches is COVERED too.
 
 ## OUT format (JSONL, one line per record)
 A record has one of two kinds (field kind):
+
 - "defect" — a defect in the code BEFORE the fix that the fix removed;
 - "introduced" — the fix itself added an antipattern (turned an error into a
   zero, a fallback to a default, context.Background, error classification by

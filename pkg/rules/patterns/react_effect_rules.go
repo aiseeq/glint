@@ -492,13 +492,16 @@ func setOnlyAfterLoad(f jsFlat, scope int, setter string) bool {
 // an await in its function, or inside a .then callback. A call made directly
 // in the block at scope is not.
 func calledAfterLoad(f jsFlat, scope, pos int) bool {
+	// How far before a function its .then( is looked for, and before the
+	// call a .then( that the call is chained in.
+	const thenBeforeFunc, thenBeforeCall = 40, 80
 	fn, found := f.enclosingFunction(pos)
 	if !found || fn.brace <= scope {
 		return false
 	}
 	return strings.Contains(f.code[fn.brace:pos], "await") ||
-		jsThenCallback.MatchString(f.code[max(scope, fn.start-40):fn.brace]) ||
-		strings.Contains(f.code[max(scope, pos-80):pos], ".then(")
+		jsThenCallback.MatchString(f.code[max(scope, fn.start-thenBeforeFunc):fn.brace]) ||
+		strings.Contains(f.code[max(scope, pos-thenBeforeCall):pos], ".then(")
 }
 
 var (

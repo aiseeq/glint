@@ -61,22 +61,22 @@ func TestShouldFailAnalysisAtThreshold(t *testing.T) {
 	high := core.ViolationList{core.NewViolation("high", "test", "test.go", 1, core.SeverityHigh, "high")}
 	critical := core.ViolationList{core.NewViolation("critical", "test", "test.go", 1, core.SeverityCritical, "critical")}
 
-	if shouldFailAnalysis(medium, core.SeverityHigh) {
+	if medium.AnyAtLeast(core.SeverityHigh) {
 		t.Fatal("medium findings must not fail analysis at the default high threshold")
 	}
-	if !shouldFailAnalysis(high, core.SeverityHigh) {
+	if !high.AnyAtLeast(core.SeverityHigh) {
 		t.Fatal("high findings must fail analysis at the high threshold")
 	}
-	if !shouldFailAnalysis(critical, core.SeverityHigh) {
+	if !critical.AnyAtLeast(core.SeverityHigh) {
 		t.Fatal("critical findings must fail analysis at the high threshold")
 	}
-	if !shouldFailAnalysis(medium, core.SeverityMedium) {
+	if !medium.AnyAtLeast(core.SeverityMedium) {
 		t.Fatal("medium findings must fail analysis at the medium threshold")
 	}
-	if shouldFailAnalysis(low, core.SeverityMedium) {
+	if low.AnyAtLeast(core.SeverityMedium) {
 		t.Fatal("low findings must not fail analysis at the medium threshold")
 	}
-	if shouldFailAnalysis(high, core.SeverityCritical) {
+	if high.AnyAtLeast(core.SeverityCritical) {
 		t.Fatal("high findings must not fail analysis at the critical threshold")
 	}
 }

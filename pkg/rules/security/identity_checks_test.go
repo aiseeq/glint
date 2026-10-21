@@ -91,7 +91,7 @@ func projectFileLines(t *testing.T, rule interface {
 // The same security header set by two middlewares: the one that runs last
 // wins, and the policy in force is not the one the reader of either file sees.
 func TestSecurityHeaderMultipleWriters(t *testing.T) {
-	found := projectFileLines(t, NewSecurityHeaderMultipleWritersRule(), map[string]string{
+	found := projectFileLines(t, NewHeaderMultipleWritersRule(), map[string]string{
 		"middleware/https.go": `package middleware
 
 import "net/http"

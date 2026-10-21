@@ -23,7 +23,8 @@ func init() {
 //	}
 //
 // With no such row the statement succeeds having changed nothing, and the
-// caller goes on as if it had: a stale id, a row another request deleted.
+// caller goes on as if it had: a stale id, a row that another request has
+// deleted in the meantime.
 // Reported: the result dropped, RowsAffected never read, or its zero only
 // logged, in a function whose only statement to the database is the write.
 // Not reported: RETURNING (the scan finds no rows), a function without an

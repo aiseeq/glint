@@ -32,6 +32,14 @@ func init() {
 // status word in capitals that a string literal of the file spells too (a
 // note on rows over the query filtering that status): it names the value, not
 // code that went away.
+//
+// A note about deleted code names what went away and stops there: the
+// removal word opens it ("Removed the fallback", "SIMPLIFIED: removed 3
+// wrappers") or closes its clause ("GetDB removed.", "importer deleted — use
+// the queue"). A removal word that a sentence goes on from ("removed
+// afterwards", "deleted in the work tree", "a deleted file") is about what the
+// program does to files and records; a sentence wrapped onto the next comment
+// line goes on there.
 type TombstoneCommentRule struct {
 	*rules.BaseRule
 	tombstone    *regexp.Regexp
@@ -40,6 +48,8 @@ type TombstoneCommentRule struct {
 	addedBefore  *regexp.Regexp
 	addedAfter   *regexp.Regexp
 	policyLine   *regexp.Regexp
+	noteStart    *regexp.Regexp
+	noteEnd      *regexp.Regexp
 }
 
 // NewTombstoneCommentRule creates the rule
@@ -56,7 +66,7 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 		tombstone: regexp.MustCompile(
 			`(?i)\b(?:removed|deleted)\b|удал[её]н[оаы]?(?:[^а-яё]|$)|больше не использ|no longer (?:used|needed|exists|supported)`),
 		behaviorAux: regexp.MustCompile(
-			`(?i)(?:\b(?:is|are|was|were|be|being|been|get|gets|got|to|soft)\s+(?:\w+ly\s+)?|будут\s+|будет\s+|был[аио]?\s+|должн\w*\s+быть\s+|могут\s+быть\s+|не\s+|что\s+|сколько\s+)$`),
+			`(?i)(?:\b(?:is|are|was|were|be|being|been|get|gets|got|to|soft|never|not)\s+(?:\w+ly\s+)?|будут\s+|будет\s+|был[аио]?\s+|должн\w*\s+быть\s+|могут\s+быть\s+|не\s+|что\s+|сколько\s+)$`),
 		// "deleted since," and "removed in the meantime" date a state of the
 		// data; "removed since v2" dates code and stays a tombstone.
 		behaviorTail: regexp.MustCompile(
@@ -65,14 +75,20 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 		addedAfter:  regexp.MustCompile(`(?i)^\s*(?:and|or|&|/)\s*added\b`),
 		policyLine: regexp.MustCompile(
 			`(?i)CLAUDE\.md|принцип|запрещ|policy|deprecated:`),
+		// What precedes a removal word that opens a note: nothing, a label
+		// ("SIMPLIFIED:", "networks:") or the end of a sentence.
+		noteStart: regexp.MustCompile(`(?:^|[.;!?—–]\s|\()\s*(?:[\p{L}\d_.-]+:\s*)?$`),
+		// What follows a removal word that closes a note: the end of the
+		// sentence or clause, a dash, a date of the removal.
+		noteEnd: regexp.MustCompile(`(?i)^(?:\s*$|\s*[.,;:!?)]|\s+[—–-]|\s+since\b)`),
 	}
 }
 
-// AnalyzeFile checks comment lines for tombstones
 // tombstoneNeedles are lower-case texts one of which every match of the
 // tombstone pattern contains.
 var tombstoneNeedles = []string{"removed", "deleted", "удал", "больше не использ", "no longer"}
 
+// AnalyzeFile checks comment lines for tombstones.
 func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() && !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
 		return nil
@@ -110,6 +126,9 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if r.addedBefore.MatchString(comment[:loc[0]]) || r.addedAfter.MatchString(comment[loc[1]:]) {
 			continue // "lines added and removed" — a change counted both ways
 		}
+		if !r.noteStart.MatchString(comment[:loc[0]]) && !r.noteEnd.MatchString(sentenceAfter(comment[loc[1]:], ctx.Lines, i)) {
+			continue // "removed afterwards", "a deleted file" — a sentence about what the program does
+		}
 		if word := strings.TrimFunc(comment[loc[0]:loc[1]], isNotLetter); isCapitalWord(word) {
 			if literalWords == nil {
 				literalWords = stringLiteralWords(ctx)
@@ -143,6 +162,20 @@ func commentTextOfLine(line string) string {
 		return comment[1:]
 	}
 	return ""
+}
+
+// sentenceAfter returns the text after a match on line i: the rest of the
+// line, or, when the line ends there, the next comment line the sentence is
+// wrapped onto.
+func sentenceAfter(rest string, lines []string, i int) string {
+	if strings.TrimSpace(rest) != "" || i+1 >= len(lines) {
+		return rest
+	}
+	next := commentTextOfLine(lines[i+1])
+	if strings.TrimSpace(next) == "" || strings.HasPrefix(next, "\t") {
+		return rest
+	}
+	return " " + next
 }
 
 // isCapitalWord reports a word written in capitals only (DELETED, УДАЛЕНО).

@@ -105,7 +105,7 @@ type series struct {
 func load(path, metric string) (series, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return series{}, err
+		return series{}, fmt.Errorf("open the records: %w", err)
 	}
 	defer func() { _ = f.Close() }() // read only
 	var records []map[string]json.RawMessage
@@ -123,7 +123,7 @@ func load(path, metric string) (series, error) {
 		records = append(records, rec)
 	}
 	if err := scanner.Err(); err != nil {
-		return series{}, err
+		return series{}, fmt.Errorf("read the records: %w", err)
 	}
 	if len(records) == 0 {
 		return series{}, errEmpty
@@ -164,6 +164,9 @@ func load(path, metric string) (series, error) {
 const (
 	width, height              = 1000, 500
 	left, right, top, bottomPx = 80, 50, 40, 60
+	// A legend entry: a sample of the line, then the label after a gap, the
+	// entry legendPx wide at the right of the plot.
+	legendPx, legendSamplePx, legendGapPx = 160, 24, 6
 )
 
 func draw(w io.Writer, lines []series, metric, title string, legend bool) error {
@@ -228,8 +231,8 @@ func draw(w io.Writer, lines []series, metric, title string, legend bool) error 
 		b.WriteString("</g>\n")
 		if legend {
 			ly := top + 4 + i*18
-			fmt.Fprintf(b, `<line x1="%d" x2="%d" y1="%d" y2="%d" stroke="%s" stroke-width="2"/>`, width-right-160, width-right-136, ly, ly, color)
-			fmt.Fprintf(b, `<text x="%d" y="%d" dominant-baseline="middle">%s</text>`+"\n", width-right-130, ly, html.EscapeString(s.label))
+			fmt.Fprintf(b, `<line x1="%d" x2="%d" y1="%d" y2="%d" stroke="%s" stroke-width="2"/>`, width-right-legendPx, width-right-legendPx+legendSamplePx, ly, ly, color)
+			fmt.Fprintf(b, `<text x="%d" y="%d" dominant-baseline="middle">%s</text>`+"\n", width-right-legendPx+legendSamplePx+legendGapPx, ly, html.EscapeString(s.label))
 		}
 	}
 	b.WriteString("</svg>\n")

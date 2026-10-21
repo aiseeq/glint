@@ -66,7 +66,7 @@ func (c *Cache) Load(key string, into any) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("read a cache entry: %w", err)
 	}
 	if err := json.Unmarshal(data, into); err != nil {
 		return false, fmt.Errorf("cache entry %s: %w", path, err)
@@ -74,7 +74,7 @@ func (c *Cache) Load(key string, into any) (bool, error) {
 	// A read keeps the entry: the pruning goes by the time of the last use.
 	now := time.Now()
 	if err := os.Chtimes(path, now, now); err != nil {
-		return false, err
+		return false, fmt.Errorf("mark a cache entry used: %w", err)
 	}
 	return true, nil
 }
@@ -88,11 +88,11 @@ func (c *Cache) Store(key string, v any) error {
 	}
 	data, err := json.Marshal(v)
 	if err != nil {
-		return err
+		return fmt.Errorf("encode a cache entry: %w", err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".entry-*")
 	if err != nil {
-		return err
+		return fmt.Errorf("store a cache entry: %w", err)
 	}
 	_, werr := tmp.Write(data)
 	if err := errors.Join(werr, tmp.Close()); err != nil {
@@ -112,7 +112,7 @@ func prune(tool string) error {
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("list the cache to prune: %w", err)
 	}
 	var errs []error
 	for _, entry := range entries {
@@ -149,7 +149,7 @@ func toolDir(tool string) (string, error) {
 	}
 	dir := filepath.Join(base, tool)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return "", fmt.Errorf("create the cache directory: %w", err)
 	}
 	return dir, nil
 }

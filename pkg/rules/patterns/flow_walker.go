@@ -34,8 +34,8 @@ import (
 //     switch/select (clause exits in clause order; for switches without a
 //     default clause a clone of the pre-clause state is appended last).
 //     Loop exits include the zero-iteration and post-iteration states only
-//     when the loop has a condition (or loopAlwaysExits is set); a `for {}`
-//     loop otherwise exits through breaks alone. Clause break states fold
+//     when the loop has a condition; a `for {}` loop exits through breaks
+//     alone. Clause break states fold
 //     into next; continues propagate outward.
 //   - At every fork each branch receives an independent state: the walker
 //     clones via cloneState, except that exactly one continuation may receive
@@ -50,17 +50,6 @@ import (
 //     construct's header scope.
 type flowWalker[S, C any] struct {
 	rule flowRule[S, C]
-
-	// branchTruncates reproduces the provider engine's legacy behaviour: any
-	// branch statement (break/continue/goto/fallthrough, labeled or not) that
-	// appears directly in a statement list terminates the list while keeping
-	// the current state flowing out as next, instead of producing break or
-	// continue edges.
-	branchTruncates bool
-
-	// loopAlwaysExits makes loop exits carry the zero-iteration and
-	// post-iteration states even for loops without a condition.
-	loopAlwaysExits bool
 
 	// labels holds the pending labeled-branch states of the callable body
 	// being walked; walk saves and restores it around every body.
@@ -247,20 +236,11 @@ func (w *flowWalker[S, C]) stmtList(stmts []ast.Stmt, state S, scope C) flowEdge
 	edges := w.deadEdges()
 	edges.next = state
 	for _, stmt := range stmts {
-		if w.branchTruncates {
-			if !w.rule.liveState(edges.next) {
-				break
-			}
-			if _, branch := stmt.(*ast.BranchStmt); branch {
-				break
-			}
-		} else {
-			// A forward goto revives the list at its label, so the list is
-			// scanned past a terminated statement for labels.
-			edges.next = w.reachLabels(stmt, edges.next)
-			if !w.rule.liveState(edges.next) {
-				continue
-			}
+		// A forward goto revives the list at its label, so the list is
+		// scanned past a terminated statement for labels.
+		edges.next = w.reachLabels(stmt, edges.next)
+		if !w.rule.liveState(edges.next) {
+			continue
 		}
 		stmtEdges := w.stmt(stmt, edges.next, scope)
 		edges.breaks = w.join(edges.breaks, stmtEdges.breaks)
@@ -301,9 +281,6 @@ func (w *flowWalker[S, C]) stmt(stmt ast.Stmt, state S, scope C) flowEdges[S] {
 }
 
 func (w *flowWalker[S, C]) labeledStmt(stmt *ast.LabeledStmt, state S, scope C) flowEdges[S] {
-	if w.branchTruncates {
-		return w.stmt(stmt.Stmt, state, scope)
-	}
 	name := stmt.Label.Name
 	labels := w.pendingLabels()
 	switch stmt.Stmt.(type) {
@@ -321,12 +298,6 @@ func (w *flowWalker[S, C]) labeledStmt(stmt *ast.LabeledStmt, state S, scope C) 
 
 func (w *flowWalker[S, C]) branchStmt(stmt *ast.BranchStmt, state S) flowEdges[S] {
 	edges := w.deadEdges()
-	if w.branchTruncates {
-		// Reached only through a labeled statement: the legacy provider
-		// engine kept the state flowing without any break/continue edge.
-		edges.next = state
-		return edges
-	}
 	labels := w.pendingLabels()
 	if stmt.Label != nil {
 		name := stmt.Label.Name
@@ -414,7 +385,7 @@ func (w *flowWalker[S, C]) forStmt(stmt *ast.ForStmt, state S, parent C) flowEdg
 	if stmt.Cond != nil {
 		entered = w.rule.flowExpr(stmt.Cond, entered, scope)
 	}
-	exits := stmt.Cond != nil || w.loopAlwaysExits
+	exits := stmt.Cond != nil
 	zero := w.rule.deadState()
 	if exits {
 		zero = w.rule.cloneState(entered)

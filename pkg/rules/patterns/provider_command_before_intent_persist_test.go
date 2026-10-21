@@ -622,3 +622,17 @@ func (s *Service) send(req Request) error {
 		})
 	}
 }
+
+// A provider command in a case expression runs before the clause it guards.
+func TestProviderCommandBeforeIntentPersistRule_CommandInCaseExpression(t *testing.T) {
+	code := `package service
+func send(s *Service, req Request) error {
+	switch {
+	case s.provider.SendTransaction(req) != nil:
+		s.log.Warn("send failed")
+	}
+	return s.repo.UpdateState(req.ID)
+}`
+	ctx := createQueryContext(t, "service.go", code)
+	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
+}

@@ -119,7 +119,7 @@ var (
 func readJSONC(path string, into any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("read a TypeScript configuration: %w", err)
 	}
 	text := jsoncComment.ReplaceAllStringFunc(string(data), func(m string) string {
 		if strings.HasPrefix(m, `"`) {

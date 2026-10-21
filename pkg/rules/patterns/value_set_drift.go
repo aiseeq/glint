@@ -1,7 +1,6 @@
 package patterns
 
 import (
-	"cmp"
 	"fmt"
 	"slices"
 	"strings"
@@ -163,7 +162,7 @@ func bestMatch(idx *valueset.Index, set valueset.Set) (setMatch, bool) {
 			switch {
 			case !set.Go && other.Go && !same:
 				m.rank = 3
-			case set.Go == other.Go && same && before(other, set):
+			case set.Go == other.Go && same && other.Before(set):
 				m.rank = 1
 			default:
 				continue
@@ -184,7 +183,7 @@ func bestMatch(idx *valueset.Index, set valueset.Set) (setMatch, bool) {
 			if set.Kind == valueset.Keyed && other.Kind == valueset.Keyed {
 				continue
 			}
-			if !before(other, set) {
+			if !other.Before(set) {
 				continue // the first copy is the one kept
 			}
 			m.rank = 1
@@ -206,10 +205,6 @@ func bestMatch(idx *valueset.Index, set valueset.Set) (setMatch, bool) {
 	return best, found
 }
 
-func before(a, b valueset.Set) bool {
-	return cmp.Or(cmp.Compare(a.Path, b.Path), cmp.Compare(a.Line, b.Line)) < 0
-}
-
 func better(a, b setMatch) bool {
 	if a.rank != b.rank {
 		return a.rank > b.rank
@@ -220,7 +215,7 @@ func better(a, b setMatch) bool {
 	if (a.other.Kind == valueset.Enum) != (b.other.Kind == valueset.Enum) {
 		return a.other.Kind == valueset.Enum
 	}
-	return before(a.other, b.other)
+	return a.other.Before(b.other)
 }
 
 func valueSetMessage(set valueset.Set, m setMatch) string {

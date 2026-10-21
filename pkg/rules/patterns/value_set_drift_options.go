@@ -41,11 +41,11 @@ func templateOptionSets(root string) ([]optionSet, error) {
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read an options file: %w", err)
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("place options file %s in the project: %w", path, err)
 		}
 		text := string(data)
 		for _, m := range selectBlock.FindAllStringSubmatchIndex(text, -1) {

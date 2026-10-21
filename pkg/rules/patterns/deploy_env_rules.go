@@ -744,7 +744,9 @@ func dockerInstructions(lines []string) []dockerInstruction {
 // The application listens on $SERVER_PORT; a deploy or a local run that
 // sets another port leaves the check knocking on the old one, and the
 // container stays unhealthy while it serves. The shell form of CMD expands
-// the variable at run time: curl -f "http://localhost:${SERVER_PORT}/...".
+// the variable at run time:
+//
+//	HEALTHCHECK CMD curl -f "http://localhost:${SERVER_PORT}/api/health" || exit 1
 type DockerfileHealthcheckLiteralPortRule struct {
 	*rules.BaseRule
 }

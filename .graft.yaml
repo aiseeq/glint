@@ -112,8 +112,8 @@ tasks:
     env: {GOFLAGS: -tags=pgquery_cgo}
     run: [go vet ./...]
   all:
-    desc: every check - fmt-check, vet, lint, tests, race; before install
-    run: [{task: fmt-check}, {task: vet}, {task: lint}, {task: test}, {task: test-race}]
+    desc: every check - fmt-check, vet, lint, tests, race, glint on itself; before install
+    run: [{task: fmt-check}, {task: vet}, {task: lint}, {task: test}, {task: test-race}, {task: self-check}]
   self-check:
     desc: glint on itself, built from this tree
     heavy: true
