@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"go/types"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -42,7 +44,10 @@ func init() {
 // file does not import is left alone, so is anything outside the module
 // (fmt.Sprintf), a file name (planner.go) and a path (dir/planner.Order).
 // Code in backticks (`data.data?.id`) quotes source of any language and
-// refers to a Go name only as pkg.Exported. Test files keep fixtures and
+// refers to a Go name only as pkg.Exported. A lower-case path the struct tags
+// of the module spell out (lock.scope for a field tagged yaml:"lock" whose
+// struct tags a field yaml:"scope") is a key of a config file or a payload,
+// not a package. Test files keep fixtures and
 // quotes of old output and are not checked.
 type DocStaleReferenceRule struct {
 	*rules.BaseRule
@@ -88,10 +93,17 @@ type modulePackages struct {
 	// external are the names of the packages outside the module that the
 	// module imports (sql, http, decimal): a comment may mean either.
 	external map[string]bool
+	// keyPaths are the key paths the struct tags spell out: key → the keys
+	// of the struct of the field tagged key.
+	keyPaths map[string]map[string]bool
 }
 
+// keyPathTags are the tags naming the keys of a decoded document: a config
+// file or a payload.
+var keyPathTags = append([]string{"json", "xml"}, helpers.ConfigTags...)
+
 func collectModulePackages(ctx *core.GoProjectContext) (*modulePackages, error) {
-	m := &modulePackages{byPath: map[string]map[string]bool{}, byName: map[string]map[string]bool{}, any: map[string]bool{}, external: map[string]bool{}}
+	m := &modulePackages{byPath: map[string]map[string]bool{}, byName: map[string]map[string]bool{}, any: map[string]bool{}, external: map[string]bool{}, keyPaths: map[string]map[string]bool{}}
 	imported := map[string]string{} // import path → package name
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil {
@@ -113,6 +125,7 @@ func collectModulePackages(ctx *core.GoProjectContext) (*modulePackages, error) 
 			m.byPath[p.PkgPath] = names
 		}
 		addScopeNames(names, p.Types.Scope())
+		m.addKeyPaths(p.Types.Scope())
 		if len(p.GoFiles) > 0 {
 			if err := addTestNames(names, filepath.Dir(p.GoFiles[0]), p.Name); err != nil {
 				return nil, err
@@ -152,6 +165,64 @@ func addScopeNames(names map[string]bool, scope *types.Scope) {
 			for field := range st.Fields() {
 				names[field.Name()] = true
 			}
+		}
+	}
+}
+
+// addKeyPaths records the key paths of the structs of the package scope: a
+// field tagged key whose struct, behind pointers, slices and maps, tags its
+// fields sub gives the path key.sub.
+func (m *modulePackages) addKeyPaths(scope *types.Scope) {
+	for _, name := range scope.Names() {
+		tn, ok := scope.Lookup(name).(*types.TypeName)
+		if !ok {
+			continue
+		}
+		st, ok := tn.Type().Underlying().(*types.Struct)
+		if !ok {
+			continue
+		}
+		for i := range st.NumFields() {
+			keys := helpers.TagKeys(reflect.StructTag(st.Tag(i)), keyPathTags)
+			inner, ok := elemStruct(st.Field(i).Type())
+			if len(keys) == 0 || !ok {
+				continue
+			}
+			for j := range inner.NumFields() {
+				for _, key := range keys {
+					m.addKeyPath(key, helpers.TagKeys(reflect.StructTag(inner.Tag(j)), keyPathTags))
+				}
+			}
+		}
+	}
+}
+
+func (m *modulePackages) addKeyPath(key string, subs []string) {
+	for _, sub := range subs {
+		if m.keyPaths[key] == nil {
+			m.keyPaths[key] = map[string]bool{}
+		}
+		m.keyPaths[key][sub] = true
+	}
+}
+
+// elemStruct returns the struct a field of type t holds, behind pointers,
+// slices, arrays and map values.
+func elemStruct(t types.Type) (*types.Struct, bool) {
+	for {
+		switch u := t.Underlying().(type) {
+		case *types.Pointer:
+			t = u.Elem()
+		case *types.Slice:
+			t = u.Elem()
+		case *types.Array:
+			t = u.Elem()
+		case *types.Map:
+			t = u.Elem()
+		case *types.Struct:
+			return u, true
+		default:
+			return nil, false
 		}
 	}
 }
@@ -285,6 +356,9 @@ func (r *DocStaleReferenceRule) analyzeFile(fileCtx *core.FileContext, ownPath s
 					// means a Go name only as pkg.Exported.
 					if unicode.IsLower(lead) && strings.Count(text[:at[2]], "`")%2 == 1 {
 						continue
+					}
+					if unicode.IsLower(lead) && mod.keyPaths[name][ident] {
+						continue // a key path of a config file or a payload
 					}
 					path, ok := resolvePackage(name, own, ownPath, imports, mod)
 					if !ok {

@@ -11,17 +11,12 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
 	rules.Register(NewUnusedConfigFieldRule())
 }
-
-// configTags are the tags of a configuration file: a value written by whoever
-// runs the program, expecting it to take effect. Payload tags (json) are left
-// out on purpose — a client of a third-party API legitimately declares the whole
-// response and reads a part of it.
-var configTags = []string{"yaml", "toml", "mapstructure", "env", "ini"}
 
 // UnusedConfigFieldRule detects struct fields that are parsed from configuration
 // or from a payload but never read anywhere in the code:
@@ -244,7 +239,7 @@ func configTag(raw string) (key, value string, ok bool) {
 	unquoted := strings.Trim(raw, "`")
 	tag := reflect.StructTag(unquoted)
 
-	for _, name := range configTags {
+	for _, name := range helpers.ConfigTags {
 		content, found := tag.Lookup(name)
 		if !found {
 			continue
