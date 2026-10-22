@@ -115,3 +115,31 @@ func TestModelNotApprovedBadList(t *testing.T) {
 	require.NoError(t, modelRule(t, approvedModelList).CheckTools(files))
 	require.NoError(t, missing.CheckTools([]*core.FileContext{rulestest.TextFile(t, "README.md", "--model sonnet\n")}))
 }
+
+// A Go or TypeScript test calls no model: the models in its data are what
+// a parser under test reads from journals and launch scripts. Only a
+// command the test starts names a model it runs; a shell test script runs
+// its lines.
+func TestModelNotApprovedTestData(t *testing.T) {
+	ctx := rulestest.GoFile(t, "stats/tasks_test.go", `package stats
+
+func TestCollect(t *testing.T) {
+	calls := []call{
+		{model: "claude-haiku-5-5", task: "claude/agent-a"},
+		{model: "glm-5.3", task: "opencode/g"},
+	}
+	write(t, "launch.sh", "opencode run -m openai/gpt-6 --format json\n")
+	exec.Command("claude", "-p", "--model", "sonnet")
+}
+`)
+	assert.Equal(t, []int{9}, violationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
+
+	script := rulestest.TextFile(t, "scripts/review_test.sh", "MODEL=sonnet\nclaude -p --model haiku \"$prompt\"\n")
+	assert.Equal(t, []int{1, 2}, violationLines(modelRule(t, approvedModelList).AnalyzeFile(script)))
+}
+
+// A provider prefix names where the model runs, not another model.
+func TestModelNotApprovedProviderPrefix(t *testing.T) {
+	ctx := rulestest.TextFile(t, "launch.sh", "opencode run -m openai/gpt-6.1-sol --format json\nopencode run -m openai/gpt-6 --format json\n")
+	assert.Equal(t, []int{2}, violationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
+}

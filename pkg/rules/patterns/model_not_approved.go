@@ -31,9 +31,11 @@ const defaultApprovedModels = "~/.config/models/approved"
 //	codex exec -m gpt-5 "$prompt"
 //
 // A default left at an older or unreviewed model keeps running it after the
-// list moved on. The value has to look like a model (claude-*, gpt-*,
-// sonnet, ...), so a commit message after -m or a car model in a Model
-// field is not taken for one.
+// list moved on. A Go, TypeScript or JavaScript test calls no model: there
+// only a --model or -m of a process the test starts counts, the models in
+// the rest of it are the data of the code under test. The value has to look
+// like a model (claude-*, gpt-*, sonnet, ...), so a commit message after -m
+// or a car model in a Model field is not taken for one.
 type ModelNotApprovedRule struct {
 	*rules.BaseRule
 	path     string
@@ -104,9 +106,17 @@ func (r *ModelNotApprovedRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		v := r.CreateViolation(ctx.RelPath, 1, "the approved models could not be read, so no model in this file was checked: "+err.Error())
 		return []*core.Violation{v.WithSuggestion("Fix the approved list or approved_file")}
 	}
+	patterns := []*regexp.Regexp{modelFlag, modelKey}
+	testData := ctx.IsTestFile() && !ctx.IsShellFile()
+	if testData {
+		patterns = patterns[:1]
+	}
 	var violations []*core.Violation
 	for i, code := range modelCodeLines(ctx) {
-		model := unapprovedModel(code, approved.accepted)
+		if testData && !processLaunch.MatchString(code) {
+			continue
+		}
+		model := unapprovedModel(code, patterns, approved.accepted)
 		if model == "" || ctx.IsSuppressed(i+1, r.Name()) {
 			continue
 		}
@@ -143,14 +153,18 @@ var (
 	modelFlag = regexp.MustCompile(`(?:^|[\s"'` + "`" + `(\[,])(?:--model|-m)(?:=|\s+|["']\s*,\s*["'])` + modelToken)
 	// Model: "sonnet", model: 'sonnet', MODEL=sonnet, model := "sonnet".
 	modelKey = regexp.MustCompile(`(?i)\w*model\w*["']?\s*(?::=|:|=)\s*` + modelToken)
+	// A process a Go, TypeScript or JavaScript test starts: the only line
+	// of a test that runs a model, the rest is the data of the code under
+	// test.
+	processLaunch = regexp.MustCompile(`\b(?:exec\.Command(?:Context)?|spawn(?:Sync)?|execFile(?:Sync)?|execSync|execa)\s*\(`)
 	// The families of the language models, after an optional provider/.
 	modelFamily = regexp.MustCompile(`(?i)^(?:[\w.-]+/)*(?:claude|anthropic|sonnet|haiku|opus|fable|gpt|chatgpt|o[1-9]|codex|gemini|gemma|llama|mistral|mixtral|codestral|qwen|deepseek|grok|kimi|glm|sol|luna)(?:$|[-.:_\d\[])`)
 )
 
-// unapprovedModel returns the first model the code names off the approved
-// list, "" when there is none.
-func unapprovedModel(code string, approved map[string]bool) string {
-	for _, pattern := range []*regexp.Regexp{modelFlag, modelKey} {
+// unapprovedModel returns the first model the patterns find in the code off
+// the approved list, "" when there is none.
+func unapprovedModel(code string, patterns []*regexp.Regexp, approved map[string]bool) string {
+	for _, pattern := range patterns {
 		for _, m := range pattern.FindAllStringSubmatch(code, -1) {
 			model := m[1]
 			if modelFamily.MatchString(model) && !approved[modelKeyOf(model)] {
@@ -161,8 +175,10 @@ func unapprovedModel(code string, approved map[string]bool) string {
 	return ""
 }
 
-// modelKeyOf drops the context window suffix ([1m]) and the case.
+// modelKeyOf drops the provider (openai/), the context window suffix ([1m])
+// and the case.
 func modelKeyOf(model string) string {
+	model = model[strings.LastIndexByte(model, '/')+1:]
 	if i := strings.IndexByte(model, '['); i > 0 {
 		model = model[:i]
 	}
