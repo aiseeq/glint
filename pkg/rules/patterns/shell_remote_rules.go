@@ -562,12 +562,7 @@ func fileTested(lines []string, target string) bool {
 		ref = `\$\{?` + ref + `\b`
 	}
 	test := regexp.MustCompile(`-[efs]\s+["']?` + ref)
-	for _, line := range lines {
-		if test.MatchString(line) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(lines, test.MatchString)
 }
 
 var (
@@ -623,12 +618,7 @@ func failsOnAnswer(command string, pipefail bool) bool {
 	if !pipefail {
 		elements = elements[len(elements)-1:]
 	}
-	for _, e := range elements {
-		if failingAnswer.MatchString(e) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(elements, failingAnswer.MatchString)
 }
 
 // testedNext reports a test of $name among the three logical lines after i.
@@ -872,10 +862,8 @@ func (r *unitEnvRule) mentions(context string, paths []string) bool {
 	for _, m := range variableRef.FindAllStringSubmatch(context, -1) {
 		for _, value := range r.values[m[1]] {
 			for _, v := range r.resolve(value, 0) {
-				for _, p := range paths {
-					if v == p {
-						return true
-					}
+				if slices.Contains(paths, v) {
+					return true
 				}
 			}
 		}

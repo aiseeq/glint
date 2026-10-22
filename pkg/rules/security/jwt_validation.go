@@ -197,10 +197,8 @@ func hasOption(options []ast.Expr, names ...string) bool {
 				name = key.Name
 			}
 		}
-		for _, want := range names {
-			if name == want {
-				return true
-			}
+		if slices.Contains(names, name) {
+			return true
 		}
 	}
 	return false

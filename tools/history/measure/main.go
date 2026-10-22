@@ -127,7 +127,7 @@ func sliceCommits(repo string, interval int) ([]commit, error) {
 		return nil, err
 	}
 	var commits []commit
-	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(log), "\n") {
 		if line == "" {
 			continue
 		}

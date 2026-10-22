@@ -48,8 +48,8 @@ func isPaginationType(t types.Type) bool {
 		return false
 	}
 	size, position := false, false
-	for i := 0; i < st.NumFields(); i++ {
-		name := st.Field(i).Name()
+	for field := range st.Fields() {
+		name := field.Name()
 		size = size || pageSizeName.MatchString(name)
 		position = position || pagePositionName.MatchString(name)
 	}

@@ -52,7 +52,7 @@ func firstShellWord(text string) string {
 // message.
 func textWords(text string) int {
 	words := 0
-	for _, token := range strings.Fields(text) {
+	for token := range strings.FieldsSeq(text) {
 		if shellWord.MatchString(token) {
 			words++
 		}

@@ -189,8 +189,8 @@ func returnsToCallingPackage(info *types.Info, fn *ast.FuncDecl, call *ast.CallE
 
 // declaresMethod reports whether the interface has a method of that name.
 func declaresMethod(iface *types.Interface, name string) bool {
-	for i := range iface.NumMethods() {
-		if iface.Method(i).Name() == name {
+	for method := range iface.Methods() {
+		if method.Name() == name {
 			return true
 		}
 	}

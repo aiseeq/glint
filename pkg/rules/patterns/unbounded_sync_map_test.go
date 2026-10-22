@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -225,9 +226,7 @@ func Expose() *sync.Map { return &shared }
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			files := map[string]string{"go.mod": "module example.com/rulestest\n\ngo 1.24\n"}
-			for name, source := range tt.files {
-				files[name] = source
-			}
+			maps.Copy(files, tt.files)
 			violations, err := NewUnboundedSyncMapRule().AnalyzeGoProject(rulestest.Project(t, files))
 			require.NoError(t, err)
 

@@ -255,8 +255,8 @@ func (c largeCopyCheck) callbacks(call *ast.CallExpr) []copyFinding {
 		if sig == nil {
 			continue
 		}
-		for i := 0; i < sig.Params().Len(); i++ {
-			param := sig.Params().At(i).Type()
+		for v := range sig.Params().Variables() {
+			param := v.Type()
 			size, ok := c.large(param)
 			if !ok || !containsIdentical(elems, param) {
 				continue

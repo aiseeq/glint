@@ -113,8 +113,7 @@ func (f *fixedSignatures) addInterfaces(pkg *types.Package, seen map[*types.Pack
 		if !ok {
 			continue
 		}
-		for i := range iface.NumMethods() {
-			method := iface.Method(i)
+		for method := range iface.Methods() {
 			f.interfaceMethods[method.Name()] = append(f.interfaceMethods[method.Name()], method)
 		}
 	}

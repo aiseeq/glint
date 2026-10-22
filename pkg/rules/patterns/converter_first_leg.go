@@ -136,18 +136,13 @@ func isAmountVar(obj types.Object) bool {
 		return true
 	}
 	if st := structUnder(obj.Type()); st != nil {
-		for i := 0; i < st.NumFields(); i++ {
-			if st.Field(i).Embedded() && isShopspringDecimalType(st.Field(i).Type()) {
+		for field := range st.Fields() {
+			if field.Embedded() && isShopspringDecimalType(field.Type()) {
 				return true
 			}
 		}
 	}
-	for _, word := range helpers.IdentifierWords(obj.Name()) {
-		if word == "amount" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(helpers.IdentifierWords(obj.Name()), "amount")
 }
 
 // rootedInParam reports an expression reading a parameter (b.Changes, wallet).

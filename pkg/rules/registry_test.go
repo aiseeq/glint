@@ -143,7 +143,7 @@ func TestRegistryConfigureAll(t *testing.T) {
 	cfg := core.DefaultConfig()
 	cfg.Categories["mock"] = core.CategoryConfig{
 		Enabled: true,
-		Settings: map[string]interface{}{
+		Settings: map[string]any{
 			"threshold": 100,
 		},
 	}

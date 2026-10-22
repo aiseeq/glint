@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -30,9 +31,7 @@ func keyedFindings(t *testing.T, rule rules.GoProjectRule, files map[string]stri
 		"third_party/uuid/go.mod":  "module github.com/google/uuid\n\ngo 1.24\n",
 		"third_party/uuid/uuid.go": uuidStub,
 	}
-	for name, content := range files {
-		all[name] = content
-	}
+	maps.Copy(all, files)
 	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, all))
 	require.NoError(t, err)
 	return foundLines(violations)

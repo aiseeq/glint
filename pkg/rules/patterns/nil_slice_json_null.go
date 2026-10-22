@@ -507,8 +507,8 @@ func implementedMethods(method *types.Func, interfaces []*types.TypeName) []*typ
 		if !ok || !types.Implements(recv, iface) {
 			continue
 		}
-		for i := range iface.NumMethods() {
-			if m := iface.Method(i); m.Name() == method.Name() {
+		for m := range iface.Methods() {
+			if m.Name() == method.Name() {
 				found = append(found, m)
 			}
 		}

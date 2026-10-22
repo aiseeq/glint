@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"math"
 	"strings"
 
@@ -159,12 +160,8 @@ func (a *lenDivisionAnalyzer) cloneState(state *lenState) *lenState {
 		nonEmpty: make(map[string]bool, len(state.nonEmpty)),
 		lengthOf: make(map[string]string, len(state.lengthOf)),
 	}
-	for key, value := range state.nonEmpty {
-		clone.nonEmpty[key] = value
-	}
-	for key, value := range state.lengthOf {
-		clone.lengthOf[key] = value
-	}
+	maps.Copy(clone.nonEmpty, state.nonEmpty)
+	maps.Copy(clone.lengthOf, state.lengthOf)
 	return clone
 }
 

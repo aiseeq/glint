@@ -111,7 +111,7 @@ func boundColumn(schema *sqlschema.Schema, queries map[string]ast.Expr, call *as
 	if !ok || !queryMethods[sel.Sel.Name] {
 		return nil, ""
 	}
-	for q := 0; q < index; q++ {
+	for q := range index {
 		arg := call.Args[q]
 		if ident, ok := arg.(*ast.Ident); ok && queries[ident.Name] != nil {
 			arg = queries[ident.Name]

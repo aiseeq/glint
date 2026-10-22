@@ -153,8 +153,8 @@ func structHasContextField(t types.Type) bool {
 	if !ok {
 		return false
 	}
-	for i := 0; i < structType.NumFields(); i++ {
-		if isNamedType(structType.Field(i).Type(), "context", "Context") {
+	for field := range structType.Fields() {
+		if isNamedType(field.Type(), "context", "Context") {
 			return true
 		}
 	}

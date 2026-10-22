@@ -215,8 +215,7 @@ type closeWaits struct {
 // Stop waits on.
 func closeWaitedGroups(named *types.Named, decls map[*types.Func]*ast.FuncDecl, info *types.Info) closeWaits {
 	waits := closeWaits{fields: make(map[*types.Var]string)}
-	for i := range named.NumMethods() {
-		method := named.Method(i)
+	for method := range named.Methods() {
 		if !closeMethods[method.Name()] {
 			continue
 		}

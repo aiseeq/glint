@@ -14,7 +14,7 @@ import (
 func sampleContexts(t *testing.T, count int) []*core.FileContext {
 	t.Helper()
 	contexts := make([]*core.FileContext, 0, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		code := fmt.Sprintf(`package svc
 
 import "fmt"
@@ -76,7 +76,7 @@ func TestAnalyzeFilesIsDeterministicAndRaceFree(t *testing.T) {
 		t.Fatal("sample files produced no findings — the test would not prove anything")
 	}
 
-	for run := 0; run < 8; run++ {
+	for run := range 8 {
 		rules.ResetState(allRules)
 		got := fingerprint(mustAnalyzeFiles(t, contexts, allRules, cfg, nil))
 		if got != want {
@@ -104,7 +104,7 @@ func TestStatefulRulesSeeFilesInOrder(t *testing.T) {
 		t.Fatal("the sample files are near-copies; cross-file-duplicate must report them")
 	}
 
-	for run := 0; run < 5; run++ {
+	for range 5 {
 		rules.ResetState([]rules.Rule{crossFile})
 		if got := fingerprint(mustAnalyzeFiles(t, contexts, []rules.Rule{crossFile}, cfg, nil)); got != want {
 			t.Fatalf("cross-file findings changed between runs:\nwant:\n%s\ngot:\n%s", want, got)

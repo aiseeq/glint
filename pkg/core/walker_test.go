@@ -87,7 +87,7 @@ func TestWalkSyncHandlesMoreErrorsThanChannelBuffer(t *testing.T) {
 	// concurrently and return every error.
 	tmpDir := t.TempDir()
 	const files = 150
-	for i := 0; i < files; i++ {
+	for i := range files {
 		path := filepath.Join(tmpDir, fmt.Sprintf("broken%03d.go", i))
 		require.NoError(t, os.WriteFile(path, []byte("package broken\nfunc {"), 0644))
 	}

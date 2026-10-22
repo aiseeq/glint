@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -186,9 +187,7 @@ func (t *retrying) RoundTrip(req *http.Request) (*http.Response, error) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			files := map[string]string{"go.mod": "module example.com/rulestest\n\ngo 1.24\n"}
-			for name, source := range tt.files {
-				files[name] = source
-			}
+			maps.Copy(files, tt.files)
 			violations, err := NewUnboundedRequestBodyReadRule().AnalyzeGoProject(rulestest.Project(t, files))
 			require.NoError(t, err)
 			assert.Equal(t, tt.expects, foundLines(violations))

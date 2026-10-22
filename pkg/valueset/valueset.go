@@ -715,13 +715,11 @@ func IndexFiles(files []*core.FileContext) *Index {
 	var wg sync.WaitGroup
 	next := make(chan int)
 	for range runtime.NumCPU() {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range next {
 				perFile[i] = FileSets(kept[i])
 			}
-		}()
+		})
 	}
 	for i := range kept {
 		next <- i

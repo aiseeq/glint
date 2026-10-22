@@ -162,7 +162,7 @@ func isGoIdentifier(word string) bool {
 
 // mentionsWord reports whether the text contains the name as a whole word.
 func mentionsWord(text, name string) bool {
-	for _, field := range strings.Fields(text) {
+	for field := range strings.FieldsSeq(text) {
 		if strings.Trim(field, "().,:;\"`'—-") == name {
 			return true
 		}

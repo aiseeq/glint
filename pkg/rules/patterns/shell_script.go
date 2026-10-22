@@ -21,10 +21,7 @@ type shellLine struct {
 
 // lineAt returns the physical line of an offset in the text.
 func (l shellLine) lineAt(offset int) int {
-	i := sort.Search(len(l.starts), func(i int) bool { return l.starts[i] > offset }) - 1
-	if i < 0 {
-		i = 0
-	}
+	i := max(sort.Search(len(l.starts), func(i int) bool { return l.starts[i] > offset })-1, 0)
 	return l.nums[i]
 }
 

@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -419,7 +420,7 @@ func parseDiff(diff, side string) (map[string]map[int]bool, error) {
 	lines := map[string]map[int]bool{}
 	var oldPath, file string
 	inHunk := false
-	for _, line := range strings.Split(diff, "\n") {
+	for line := range strings.SplitSeq(diff, "\n") {
 		switch {
 		case strings.HasPrefix(line, "diff "):
 			inHunk, oldPath, file = false, "", ""
@@ -586,7 +587,7 @@ func (r *replay) provideSiblings(target, at string) (bool, error) {
 	provided := false
 	for _, rel := range rels {
 		var parts []string
-		for _, p := range strings.Split(rel, "/") {
+		for p := range strings.SplitSeq(rel, "/") {
 			if p != "." && p != ".." {
 				parts = append(parts, p)
 			}
@@ -663,9 +664,7 @@ func (r *replay) run(commit, tree, side string, rules, anchorTexts []string, who
 		return nil, err
 	}
 	changed := map[string]map[int]bool{}
-	for f, set := range lines {
-		changed[f] = set
-	}
+	maps.Copy(changed, lines)
 	anchors := make([]anchor, 0, len(anchorTexts))
 	for _, text := range anchorTexts {
 		a, err := parseAnchor(text)
@@ -687,7 +686,7 @@ func (r *replay) run(commit, tree, side string, rules, anchorTexts []string, who
 		return nil, err
 	}
 	treeFiles := map[string]bool{}
-	for _, f := range strings.Split(listing, "\x00") {
+	for f := range strings.SplitSeq(listing, "\x00") {
 		treeFiles[f] = true
 	}
 	byRoot := map[string][]string{}

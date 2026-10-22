@@ -98,8 +98,8 @@ func isHandlerSignature(fn *types.Func) bool {
 	if !ok {
 		return false
 	}
-	for i := range sig.Params().Len() {
-		if types.TypeString(sig.Params().At(i).Type(), nil) == "net/http.ResponseWriter" {
+	for v := range sig.Params().Variables() {
+		if types.TypeString(v.Type(), nil) == "net/http.ResponseWriter" {
 			return true
 		}
 	}
@@ -112,8 +112,8 @@ func returnsBool(fn *types.Func) bool {
 	if !ok {
 		return false
 	}
-	for i := range sig.Results().Len() {
-		if basic, ok := sig.Results().At(i).Type().Underlying().(*types.Basic); ok && basic.Kind() == types.Bool {
+	for v := range sig.Results().Variables() {
+		if basic, ok := v.Type().Underlying().(*types.Basic); ok && basic.Kind() == types.Bool {
 			return true
 		}
 	}
@@ -379,8 +379,8 @@ func (s viewerScope) ownsScope(named *types.Named, depth int) bool {
 	if depth == 0 || st == nil {
 		return false
 	}
-	for i := range st.NumFields() {
-		name := st.Field(i).Name()
+	for field := range st.Fields() {
+		name := field.Name()
 		target, found := strings.CutSuffix(name, "ID")
 		if !found {
 			target, found = strings.CutSuffix(name, "Id")
@@ -417,9 +417,9 @@ func (s viewerScope) takesScopeType(fn *types.Func) bool {
 	if !ok {
 		return false
 	}
-	for i := range sig.Params().Len() {
+	for v := range sig.Params().Variables() {
 		for field := range s.fields {
-			if types.Identical(sig.Params().At(i).Type(), field.Type()) {
+			if types.Identical(v.Type(), field.Type()) {
 				return true
 			}
 		}

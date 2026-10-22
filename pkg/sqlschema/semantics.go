@@ -501,7 +501,7 @@ var (
 // into it counts too. A temporary table is work space, and a migration
 // tool's own table is the migrator's, not schema.
 func DefinesSchema(sql string) bool {
-	for _, statement := range strings.Split(sql, ";") {
+	for statement := range strings.SplitSeq(sql, ";") {
 		if !schemaStatement.MatchString(statement) || tempTable.MatchString(statement) {
 			continue
 		}

@@ -5,6 +5,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/rules/helpers"
@@ -474,10 +475,8 @@ func (c *sqlTaintCheck) mentionsSQL(expr ast.Expr) bool {
 	case *ast.BinaryExpr:
 		return node.Op == token.ADD && (c.mentionsSQL(node.X) || c.mentionsSQL(node.Y))
 	case *ast.CallExpr:
-		for _, arg := range node.Args {
-			if c.mentionsSQL(arg) {
-				return true
-			}
+		if slices.ContainsFunc(node.Args, c.mentionsSQL) {
+			return true
 		}
 	case *ast.Ident:
 		v := c.varOf(node)
@@ -488,13 +487,7 @@ func (c *sqlTaintCheck) mentionsSQL(expr ast.Expr) bool {
 			return seen != nil && *seen
 		}
 		c.mentions[v] = nil
-		found := false
-		for _, value := range c.assigned[v] {
-			if c.mentionsSQL(value) {
-				found = true
-				break
-			}
-		}
+		found := slices.ContainsFunc(c.assigned[v], c.mentionsSQL)
 		c.mentions[v] = &found
 		return found
 	}

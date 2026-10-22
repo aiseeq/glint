@@ -928,10 +928,8 @@ func isPlainOperand(expr ast.Expr) bool {
 // the name, which the inserted `v := m[k]` would then clash with.
 func redeclaresInBody(body *ast.BlockStmt, name string) bool {
 	for _, stmt := range body.List {
-		for _, declared := range declaredNames(stmt) {
-			if declared == name {
-				return true
-			}
+		if slices.Contains(declaredNames(stmt), name) {
+			return true
 		}
 	}
 	return false

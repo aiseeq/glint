@@ -39,7 +39,7 @@ func determineLayerFromPath(path string) LayerType {
 // It matches whole path segments, not substrings: "internal/reports/" must
 // not be classified as a repository just because "reports" contains "repo".
 func isRepositoryPath(lowerPath string) bool {
-	for _, segment := range strings.Split(lowerPath, "/") {
+	for segment := range strings.SplitSeq(lowerPath, "/") {
 		if isRepositorySegment(strings.TrimSuffix(segment, ".go")) {
 			return true
 		}

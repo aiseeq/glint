@@ -218,7 +218,7 @@ func registrableTestDomain(text string) string {
 // namedAsTest reports a domain label made of a test word: test, tests,
 // testing, testmail, app-test — not latest or contest.
 func namedAsTest(label string) bool {
-	for _, word := range strings.Split(label, "-") {
+	for word := range strings.SplitSeq(label, "-") {
 		if strings.HasPrefix(word, "test") {
 			return true
 		}

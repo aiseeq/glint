@@ -210,8 +210,8 @@ func returnsType(fn *types.Func, t types.Type) bool {
 	if !ok {
 		return false
 	}
-	for i := range sig.Results().Len() {
-		if types.Identical(sig.Results().At(i).Type(), t) {
+	for v := range sig.Results().Variables() {
+		if types.Identical(v.Type(), t) {
 			return true
 		}
 	}

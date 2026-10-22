@@ -1100,10 +1100,7 @@ func (r *FallbackReturnRule) analyzeTSFile(ctx *core.FileContext) []*core.Violat
 // isInTSContext checks if line is within error handling context for TypeScript
 func (r *FallbackReturnRule) isInTSContext(lines []string, lineNum int) bool {
 	// Check previous 5 lines for error context
-	start := lineNum - 5
-	if start < 0 {
-		start = 0
-	}
+	start := max(lineNum-5, 0)
 
 	for i := start; i <= lineNum; i++ {
 		for _, pattern := range tsContextPatterns {
@@ -1246,10 +1243,8 @@ func (r *FallbackReturnRule) looksLikeFallbackAssignment(expr ast.Expr) bool {
 			if ident, ok := e.Fun.(*ast.Ident); ok {
 				// string(...), []byte(...), int(...) etc - type casts as fallbacks
 				typeCasts := []string{"string", "int", "int32", "int64", "float32", "float64", "bool"}
-				for _, cast := range typeCasts {
-					if ident.Name == cast {
-						return true
-					}
+				if slices.Contains(typeCasts, ident.Name) {
+					return true
 				}
 			}
 		}

@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"testing"
 
@@ -51,9 +52,7 @@ func (s *Store) Move(ctx context.Context, entryID, accountID string) error {
 }
 `,
 	}
-	for name, content := range files {
-		base[name] = content
-	}
+	maps.Copy(base, files)
 	violations, err := NewRequestIDUnparsedForUUIDColumnRule().AnalyzeGoProject(rulestest.Project(t, base))
 	require.NoError(t, err)
 	var out []string

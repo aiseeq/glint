@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,9 +36,7 @@ type Pool struct{}
 func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (Result, error) { return Result{}, nil }
 `,
 	}
-	for name, content := range files {
-		base[name] = content
-	}
+	maps.Copy(base, files)
 	violations, err := NewStringLiteralExceedsColumnWidthRule().AnalyzeGoProject(rulestest.Project(t, base))
 	require.NoError(t, err)
 	var out []string

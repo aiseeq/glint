@@ -385,13 +385,11 @@ func (r *TscRule) check() map[string][]*core.Violation {
 			failures[i] = globalErr
 			continue
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			slots <- struct{}{}
 			defer func() { <-slots }()
 			answers[i], failures[i] = runTscProgram(program, global)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -623,7 +621,7 @@ func tscDiagnostics(tsc, dir string, args ...string) ([]tscDiagnostic, error) {
 	}
 	diagnostics := []tscDiagnostic{}
 	continued := map[int][]string{} // diagnostic → the lines continuing its message
-	for _, line := range strings.Split(stdout.String(), "\n") {
+	for line := range strings.SplitSeq(stdout.String(), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if m := tscFileDiagnostic.FindStringSubmatch(line); m != nil {
 			file := m[1]

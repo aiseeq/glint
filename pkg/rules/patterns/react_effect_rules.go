@@ -414,10 +414,7 @@ func parenthesizedText(text string, open, limit int) string {
 			}
 		}
 	}
-	end := open + limit
-	if end > len(text) {
-		end = len(text)
-	}
+	end := min(open+limit, len(text))
 	return text[open+1 : end]
 }
 
@@ -582,7 +579,7 @@ func loaderReadsDeps(f jsFlat, args []jsSpanRange) bool {
 	body := f.text[fn.start:fn.end]
 	var sources []string
 	if m := jsLoaderParams.FindStringSubmatch(body); m != nil {
-		for _, param := range strings.Split(m[1]+m[2], ",") {
+		for param := range strings.SplitSeq(m[1]+m[2], ",") {
 			sources = append(sources, jsIdentifierAny.FindAllString(strings.SplitN(strings.SplitN(param, ":", 2)[0], "=", 2)[0], -1)...)
 		}
 	}

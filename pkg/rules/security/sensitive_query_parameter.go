@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -246,11 +247,8 @@ func secretsInRedirects(ctx *core.FileContext) map[int]bool {
 		if !ok || !strings.Contains(strings.ToLower(helpers.CalleeName(call)), "redirect") {
 			return true
 		}
-		for _, arg := range call.Args {
-			if mentionsSecretVariable(arg) {
-				lines[ctx.LineFor(call)] = true
-				break
-			}
+		if slices.ContainsFunc(call.Args, mentionsSecretVariable) {
+			lines[ctx.LineFor(call)] = true
 		}
 		return true
 	})

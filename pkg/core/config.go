@@ -366,7 +366,7 @@ func loadConfigChain(path string, visiting map[string]bool) (*Config, error) {
 	if err := yaml.Unmarshal(data, &document); err != nil {
 		return nil, fmt.Errorf("failed to parse config file %q: %w", absPath, err)
 	}
-	if err := checkKnownKeys(&document, reflect.TypeOf(cfg), ""); err != nil {
+	if err := checkKnownKeys(&document, reflect.TypeFor[Config](), ""); err != nil {
 		return nil, fmt.Errorf("config file %q: %w", absPath, err)
 	}
 
@@ -592,9 +592,7 @@ func MergeConfigs(base, override *Config) *Config {
 	}
 
 	// Copy base categories
-	for name, cat := range base.Categories {
-		result.Categories[name] = cat
-	}
+	maps.Copy(result.Categories, base.Categories)
 
 	// Merge override categories
 	for name, cat := range override.Categories {
@@ -611,9 +609,7 @@ func MergeConfigs(base, override *Config) *Config {
 				// Clone before writing: the map header was copied from base,
 				// so writing through it would mutate the base config.
 				merged := make(map[string]RuleConfig, len(existing.Rules)+len(cat.Rules))
-				for ruleName, ruleCfg := range existing.Rules {
-					merged[ruleName] = ruleCfg
-				}
+				maps.Copy(merged, existing.Rules)
 				for ruleName, ruleCfg := range cat.Rules {
 					merged[ruleName] = mergeRuleConfig(merged[ruleName], ruleCfg)
 				}

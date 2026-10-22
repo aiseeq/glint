@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -83,11 +84,8 @@ func (r *ContentTypeExactCompareRule) AnalyzeFile(ctx *core.FileContext) []*core
 					if !ok {
 						continue
 					}
-					for _, value := range clause.List {
-						if mediaTypeLiteral(value) {
-							report(clause)
-							break
-						}
+					if slices.ContainsFunc(clause.List, mediaTypeLiteral) {
+						report(clause)
 					}
 				}
 			}

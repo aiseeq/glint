@@ -1118,20 +1118,12 @@ type statelessRun struct {
 // row of the result matrix, so no synchronization is needed beyond the wait
 // group.
 func (s statelessRun) execute(contexts []*core.FileContext, found [][]core.ViolationList, failures []error, panicked []rulePanics) {
-	workers := runtime.GOMAXPROCS(0)
-	if workers > len(contexts) {
-		workers = len(contexts)
-	}
-	if workers < 1 {
-		workers = 1
-	}
+	workers := max(min(runtime.GOMAXPROCS(0), len(contexts)), 1)
 
 	var next atomic.Int64
 	var wg sync.WaitGroup
-	for worker := 0; worker < workers; worker++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			for {
 				fileIndex := int(next.Add(1)) - 1
 				if fileIndex >= len(contexts) {
@@ -1152,7 +1144,7 @@ func (s statelessRun) execute(contexts []*core.FileContext, found [][]core.Viola
 					recordRuleFailure(fileIndex, err, failures, panicked)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

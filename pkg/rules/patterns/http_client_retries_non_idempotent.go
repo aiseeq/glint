@@ -230,8 +230,8 @@ func unbracedIf(f jsFlat, pos int) (jsSpanRange, bool) {
 	if !ok || span.end >= pos {
 		return jsSpanRange{}, false
 	}
-	between := strings.Fields(f.code[span.end+1 : pos])
-	for _, word := range between {
+	between := strings.FieldsSeq(f.code[span.end+1 : pos])
+	for word := range between {
 		if word != "return" && word != "await" && !strings.HasPrefix(word, "this.") && !jsIdentifier.MatchString(strings.TrimSuffix(word, "(")) {
 			return jsSpanRange{}, false
 		}

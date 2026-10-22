@@ -143,8 +143,7 @@ func claimsKindField(t types.Type) *types.Var {
 	}
 	claims := strings.HasSuffix(named.Obj().Name(), "Claims")
 	var kind *types.Var
-	for i := range st.NumFields() {
-		field := st.Field(i)
+	for field := range st.Fields() {
 		if field.Embedded() {
 			if embedded, ok := types.Unalias(helpers.DerefType(field.Type())).(*types.Named); ok {
 				name := embedded.Obj().Name()

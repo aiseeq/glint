@@ -487,7 +487,7 @@ func createNonAtomicStatusHistoryContext(t *testing.T, path, code string) *core.
 func TestNonAtomicStatusHistoryRule_BranchExplosion(t *testing.T) {
 	var body strings.Builder
 	body.WriteString("package service; import \"context\"\n\nfunc step(ctx context.Context, repo Repository, n int) {\n")
-	for i := 0; i < 24; i++ {
+	for i := range 24 {
 		body.WriteString("\tif n > ")
 		body.WriteString(strconv.Itoa(i))
 		body.WriteString(" {\n\t\tn++\n\t} else {\n\t\tn--\n\t}\n")

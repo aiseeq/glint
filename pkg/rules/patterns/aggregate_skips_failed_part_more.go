@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -445,12 +446,7 @@ func returnsSuccessResult(body *ast.BlockStmt) bool {
 	case *ast.SelectorExpr:
 		name = f.Sel.Name
 	}
-	for _, word := range helpers.IdentifierWords(name) {
-		if word == "success" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(helpers.IdentifierWords(name), "success")
 }
 
 // keptOnlyOnSuccess returns the if of loop's body that collects a result

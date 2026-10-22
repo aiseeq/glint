@@ -742,8 +742,8 @@ func arrowOrBlockBody(f jsFlat, pos int) string {
 			return f.code[open : end+1]
 		}
 	}
-	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
-		return rest[:nl]
+	if before, _, ok := strings.Cut(rest, "\n"); ok {
+		return before
 	}
 	return rest
 }

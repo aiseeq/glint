@@ -134,12 +134,12 @@ func handlerRequestParam(fn typedFunc) *types.Var {
 	}
 	writer := false
 	var request *types.Var
-	for i := range sig.Params().Len() {
-		switch types.TypeString(sig.Params().At(i).Type(), nil) {
+	for v := range sig.Params().Variables() {
+		switch types.TypeString(v.Type(), nil) {
 		case "net/http.ResponseWriter":
 			writer = true
 		case "*net/http.Request":
-			request = sig.Params().At(i)
+			request = v
 		}
 	}
 	if !writer {
@@ -240,8 +240,7 @@ func requestValues(flow *errorFlow, fn typedFunc, request *types.Var) map[types.
 	values := map[types.Object]bool{}
 	if sig := funcSignature(fn); sig != nil {
 		params := sig.Params()
-		for i := range params.Len() {
-			param := params.At(i)
+		for param := range params.Variables() {
 			switch t := param.Type().(type) {
 			case *types.Named:
 				if _, isStruct := t.Underlying().(*types.Struct); isStruct && t.Obj().Pkg() != nil && t.Obj().Pkg().Path() != "net/http" {
@@ -340,8 +339,8 @@ func takesClientValueDirectly(flow *errorFlow, fn typedFunc, call *ast.CallExpr,
 		if root == nil {
 			continue
 		}
-		for i := range params.Len() {
-			if fn.info.ObjectOf(root) == params.At(i) && params.At(i) != request {
+		for v := range params.Variables() {
+			if fn.info.ObjectOf(root) == v && v != request {
 				return true
 			}
 		}

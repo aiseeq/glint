@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/types"
 	"path"
+	"slices"
 	"strconv"
 
 	"github.com/aiseeq/glint/pkg/rules/helpers"
@@ -19,12 +20,7 @@ func isPackageFuncCall(file *ast.File, info *types.Info, call *ast.CallExpr, pkg
 	if !ok {
 		return false
 	}
-	for _, want := range names {
-		if name == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(names, name)
 }
 
 // packageFuncName returns the name of the package-level function of pkgPath

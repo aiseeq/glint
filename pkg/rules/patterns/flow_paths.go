@@ -16,10 +16,7 @@ const maxFlowPaths = 512
 // the rule, so only the first of each survives: without that a function with N
 // branches ends up with 2^N paths (24 branches cost 4 GB before the cap).
 func joinFlowPaths[T any](left, right []T, key func(T) string) []T {
-	capacity := len(left) + len(right)
-	if capacity > maxFlowPaths {
-		capacity = maxFlowPaths
-	}
+	capacity := min(len(left)+len(right), maxFlowPaths)
 	joined := make([]T, 0, capacity)
 	seen := make(map[string]struct{}, capacity)
 	for _, side := range [2][]T{left, right} {

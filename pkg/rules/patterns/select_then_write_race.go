@@ -684,7 +684,7 @@ func (r *SelectThenWriteRaceRule) parseUpdate(query string) (string, map[string]
 		setClause = setClause[:loc[0]]
 	}
 	columns := make(map[string]bool)
-	for _, assignment := range strings.Split(setClause, ",") {
+	for assignment := range strings.SplitSeq(setClause, ",") {
 		name, _, found := strings.Cut(assignment, "=")
 		if !found {
 			continue
@@ -704,7 +704,7 @@ func (r *SelectThenWriteRaceRule) parseUpdate(query string) (string, map[string]
 // later UPDATE rewrites what was read.
 func (r *SelectThenWriteRaceRule) columnSet(selectList string) map[string]bool {
 	columns := make(map[string]bool)
-	for _, item := range strings.Split(selectList, ",") {
+	for item := range strings.SplitSeq(selectList, ",") {
 		if column, ok := r.columnName(item); ok {
 			columns[column] = true
 		}

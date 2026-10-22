@@ -114,8 +114,7 @@ func receiverType(fn *types.Func) *types.Named {
 // methods of recv take.
 func siblingAccessType(recv *types.Named, self *types.Func) *types.Named {
 	counts := map[*types.Named]int{}
-	for i := range recv.NumMethods() {
-		method := recv.Method(i)
+	for method := range recv.Methods() {
 		if method == self || !method.Exported() {
 			continue
 		}
@@ -142,8 +141,8 @@ func paramNamedTypes(fn *types.Func) []*types.Named {
 		return nil
 	}
 	var named []*types.Named
-	for i := range sig.Params().Len() {
-		typ := sig.Params().At(i).Type()
+	for v := range sig.Params().Variables() {
+		typ := v.Type()
 		if ptr, ok := typ.(*types.Pointer); ok {
 			typ = ptr.Elem()
 		}
@@ -162,8 +161,7 @@ func takesType(fn *types.Func, typ *types.Named) bool {
 // hasFilteredTwin reports a sibling named after the reader that takes the
 // access: List and ListFor.
 func hasFilteredTwin(recv *types.Named, fn *types.Func, access *types.Named) bool {
-	for i := range recv.NumMethods() {
-		method := recv.Method(i)
+	for method := range recv.Methods() {
 		if method != fn && strings.HasPrefix(method.Name(), fn.Name()) && takesType(method, access) {
 			return true
 		}
@@ -338,8 +336,8 @@ func globalRecordList(info *types.Info, call *ast.CallExpr) bool {
 	if !ok {
 		return false
 	}
-	for i := range st.NumFields() {
-		if strings.HasSuffix(st.Field(i).Name(), "ID") {
+	for field := range st.Fields() {
+		if strings.HasSuffix(field.Name(), "ID") {
 			return true
 		}
 	}

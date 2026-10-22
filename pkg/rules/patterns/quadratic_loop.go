@@ -355,7 +355,7 @@ func frontendNestedScan(block string, collection string) (int, bool) {
 // frontendReplacesInBlock reports whether the block assigns a replacement of the
 // subject back to it.
 func frontendReplacesInBlock(block string, subject string) bool {
-	for _, line := range strings.Split(block, "\n") {
+	for line := range strings.SplitSeq(block, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, subject+" =") && !strings.Contains(trimmed, subject+" = ") {
 			continue

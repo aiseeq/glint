@@ -53,7 +53,7 @@ func (r *MdLineBreakRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	groupStart := -1
 	groupEnd := -1
 
-	for i := 0; i < len(scanned); i++ {
+	for i := range scanned {
 		// Lines of code blocks are literal examples, not prose
 		if !scanned[i].code && r.boldLabelPattern.MatchString(scanned[i].prose) {
 			if groupStart == -1 {

@@ -99,8 +99,8 @@ func writesResponseAndAnswersBool(info *types.Info, call *ast.CallExpr) bool {
 	if !ok || result.Kind() != types.Bool {
 		return false
 	}
-	for i := 0; i < sig.Params().Len(); i++ {
-		if isNamedType(sig.Params().At(i).Type(), "net/http", "ResponseWriter") {
+	for v := range sig.Params().Variables() {
+		if isNamedType(v.Type(), "net/http", "ResponseWriter") {
 			return true
 		}
 	}

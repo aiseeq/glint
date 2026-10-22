@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -466,12 +467,7 @@ func (r *SilentErrorHandlingRule) isExplicitErrorAcknowledge(stmt *ast.AssignStm
 // rhsUsesError checks if any RHS expression uses an error (e.g., err.Error())
 // Pattern: response["details"] = err.Error() or similar
 func (r *SilentErrorHandlingRule) rhsUsesError(stmt *ast.AssignStmt) bool {
-	for _, rhs := range stmt.Rhs {
-		if r.exprUsesErrorValue(rhs) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(stmt.Rhs, r.exprUsesErrorValue)
 }
 
 // exprUsesErrorValue checks if expression uses an error value (e.g., err.Error(), err.String())
@@ -487,18 +483,14 @@ func (r *SilentErrorHandlingRule) exprUsesErrorValue(expr ast.Expr) bool {
 			// Check for fmt.Errorf(..., err).Error() pattern
 			// The X is a CallExpr (fmt.Errorf) and its args contain error
 			if innerCall, ok := sel.X.(*ast.CallExpr); ok {
-				for _, arg := range innerCall.Args {
-					if r.exprReferencesError(arg) {
-						return true
-					}
+				if slices.ContainsFunc(innerCall.Args, r.exprReferencesError) {
+					return true
 				}
 			}
 		}
 		// Also check function arguments for error references
-		for _, arg := range e.Args {
-			if r.exprUsesErrorValue(arg) {
-				return true
-			}
+		if slices.ContainsFunc(e.Args, r.exprUsesErrorValue) {
+			return true
 		}
 	case *ast.SelectorExpr:
 		// err.someField
@@ -595,12 +587,7 @@ func (r *SilentErrorHandlingRule) findIfStmtsInDefers(file *ast.File) map[*ast.I
 // shapes count, so a call that merely mentions "error" in its name does not
 // silence the rule.
 func callTakesErrorArgument(call *ast.CallExpr) bool {
-	for _, arg := range call.Args {
-		if argumentIsError(arg) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(call.Args, argumentIsError)
 }
 
 func argumentIsError(arg ast.Expr) bool {

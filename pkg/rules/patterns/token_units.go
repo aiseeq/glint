@@ -360,8 +360,8 @@ func identityField(t types.Type) string {
 	if !ok {
 		return ""
 	}
-	for i := range st.NumFields() {
-		if field := st.Field(i); isTokenIdentityName(field.Name()) {
+	for field := range st.Fields() {
+		if isTokenIdentityName(field.Name()) {
 			return field.Name()
 		}
 	}

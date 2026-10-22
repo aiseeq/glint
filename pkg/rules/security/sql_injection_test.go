@@ -1,6 +1,7 @@
 package security
 
 import (
+	"maps"
 	"path/filepath"
 	"testing"
 
@@ -251,9 +252,7 @@ func (db *DB) NamedExec(query string, arg interface{}) (interface{}, error)     
 func analyzeSQLInjection(t *testing.T, code string) []*core.Violation {
 	t.Helper()
 	files := map[string]string{"db/db.go": code + "\n\ntype User struct{}\n"}
-	for name, content := range fakeSQLXModule {
-		files[name] = content
-	}
+	maps.Copy(files, fakeSQLXModule)
 	project := rulestest.Project(t, files)
 	violations, err := NewSQLInjectionRule().AnalyzeGoProject(project)
 	require.NoError(t, err)

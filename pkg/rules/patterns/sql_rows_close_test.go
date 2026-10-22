@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -302,9 +303,7 @@ func example(db *sql.DB) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			files := map[string]string{"service.go": tt.code}
-			for name, source := range tt.extra {
-				files[name] = source
-			}
+			maps.Copy(files, tt.extra)
 			violations := runRuleOnFiles(t, rule, files)
 
 			if tt.expectMatch {

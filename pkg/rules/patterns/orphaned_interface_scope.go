@@ -131,11 +131,11 @@ func isUninstantiatedGeneric(typ types.Type) bool {
 func hasMethodNames(typ types.Type, iface *types.Interface) bool {
 	methodSet := types.NewMethodSet(types.NewPointer(typ))
 	have := make(map[string]bool, methodSet.Len())
-	for i := range methodSet.Len() {
-		have[methodSet.At(i).Obj().Name()] = true
+	for method := range methodSet.Methods() {
+		have[method.Obj().Name()] = true
 	}
-	for i := range iface.NumMethods() {
-		if !have[iface.Method(i).Name()] {
+	for method := range iface.Methods() {
+		if !have[method.Name()] {
 			return false
 		}
 	}

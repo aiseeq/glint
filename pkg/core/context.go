@@ -440,12 +440,12 @@ func nolintListContains(comment, ruleName string) bool {
 // only "a" and "b" are rule names.
 func nolintNames(comment string) (names []string, found bool) {
 	const prefix = "nolint:"
-	idx := strings.Index(comment, prefix)
-	if idx < 0 {
+	_, after, ok := strings.Cut(comment, prefix)
+	if !ok {
 		return nil, false
 	}
-	list := comment[idx+len(prefix):]
-	for _, segment := range strings.Split(list, ",") {
+	list := after
+	for segment := range strings.SplitSeq(list, ",") {
 		fields := strings.Fields(segment)
 		if len(fields) == 0 {
 			break

@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -192,9 +193,7 @@ func refundKey(txHash string) string {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			files := map[string]string{"ids/ids.go": tt.code}
-			for name, source := range uuidModuleFiles {
-				files[name] = source
-			}
+			maps.Copy(files, uuidModuleFiles)
 			violations := runRuleOnFiles(t, rule, files)
 			var own int
 			for _, v := range violations {

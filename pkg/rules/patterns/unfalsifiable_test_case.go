@@ -83,7 +83,7 @@ func httpStatusSet(arg string) bool {
 		return false
 	}
 	var hasOK, hasFail bool
-	for _, part := range strings.Split(trimmed[1:len(trimmed)-1], ",") {
+	for part := range strings.SplitSeq(trimmed[1:len(trimmed)-1], ",") {
 		part = strings.TrimSpace(part)
 		// Нечисловой элемент означает, что это не набор кодов ответа, а какой-то другой
 		// список: классификация, а не ошибка разбора, поэтому Atoi сюда не зовётся.

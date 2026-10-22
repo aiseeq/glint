@@ -274,8 +274,8 @@ func allFieldsOptional(t types.Type) bool {
 	if !ok || structure.NumFields() == 0 {
 		return false
 	}
-	for i := 0; i < structure.NumFields(); i++ {
-		switch structure.Field(i).Type().Underlying().(type) {
+	for field := range structure.Fields() {
+		switch field.Type().Underlying().(type) {
 		case *types.Pointer, *types.Slice, *types.Map:
 		default:
 			return false

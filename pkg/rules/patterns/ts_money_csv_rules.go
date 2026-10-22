@@ -213,7 +213,7 @@ func checkFormulaGuardNumbers(r *tsRule, ctx *core.FileContext, f jsFlat) []*cor
 // number pattern used by the guard is defined.
 func fileConstants(text string) string {
 	var b strings.Builder
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		if strings.HasPrefix(line, "const ") || strings.HasPrefix(line, "export const ") {
 			b.WriteString(line + "\n")
 		}

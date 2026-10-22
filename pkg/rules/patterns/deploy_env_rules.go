@@ -6,6 +6,7 @@ import (
 	"path"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -917,11 +918,9 @@ func (r *HostNetworkServiceBindsAllInterfacesRule) UseProjectFiles(files []*core
 		if !strings.HasSuffix(ctx.Path, ".conf") && !ctx.IsShellFile() {
 			continue
 		}
-		for _, line := range ctx.Lines {
-			if loopbackProxyPass.MatchString(line) {
-				r.proxied = true
-				return
-			}
+		if slices.ContainsFunc(ctx.Lines, loopbackProxyPass.MatchString) {
+			r.proxied = true
+			return
 		}
 	}
 }

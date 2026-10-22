@@ -294,8 +294,8 @@ func structHasField(named *types.Named, field *types.Var) bool {
 	if !ok {
 		return false
 	}
-	for i := range st.NumFields() {
-		if st.Field(i).Origin() == field {
+	for field0 := range st.Fields() {
+		if field0.Origin() == field {
 			return true
 		}
 	}

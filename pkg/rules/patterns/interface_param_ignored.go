@@ -160,8 +160,7 @@ func namingInterface(method *types.Func, index int, interfaces []*types.TypeName
 		if !ok || (!types.Implements(recv, iface) && !types.Implements(types.NewPointer(recv), iface)) {
 			continue
 		}
-		for i := range iface.NumMethods() {
-			m := iface.Method(i)
+		for m := range iface.Methods() {
 			if m.Name() != method.Name() {
 				continue
 			}
