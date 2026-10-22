@@ -495,3 +495,31 @@ func Retry() {}
 		t.Fatalf("want tombstones on lines 3, 4, 5, got %v", lines)
 	}
 }
+
+// A doc comment opens with the name it documents: a field or a function
+// named Removed or Deleted is described, not buried. The same word opening a
+// comment over code that does not declare it is still a tombstone.
+func TestTombstoneComment_DocOfIdentifierNamedRemoved(t *testing.T) {
+	rule := NewTombstoneCommentRule()
+	code := `package notice
+
+type Notice struct {
+	// Removed — titles of the sections the agent has and the file no longer does
+	Removed []string
+}
+
+// Deleted reports a record gone from the store.
+func (n Notice) Deleted() bool { return len(n.Removed) > 0 }
+
+// Removed the fallback to the old parser.
+func Parse() {}
+`
+	ctx := core.NewFileContext("notice/notice.go", ".", []byte(code), nil)
+	var lines []int
+	for _, v := range rule.AnalyzeFile(ctx) {
+		lines = append(lines, v.Line)
+	}
+	if !slices.Equal(lines, []int{11}) {
+		t.Fatalf("want the tombstone on line 11 alone, got %v", lines)
+	}
+}

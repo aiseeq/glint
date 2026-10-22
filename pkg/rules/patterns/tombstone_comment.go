@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -136,6 +137,9 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if loc[0] > 0 && strings.IndexByte("='\"`.>/-_", comment[loc[0]-1]) >= 0 {
 			continue // Status=deleted, 'deleted', soft-deleted — a value, not a tombstone
 		}
+		if strings.TrimSpace(comment[:loc[0]]) == "" && documentsName(ctx.Lines, i, comment[loc[0]:loc[1]]) {
+			continue // "// Removed — titles ..." over the field Removed: a doc of the name
+		}
 		if r.behaviorTail.MatchString(comment[loc[1]:]) {
 			continue // "removed from X", "deleted -> *", "удалено или ..." — data-flow/state docs
 		}
@@ -180,6 +184,21 @@ func commentTextOfLine(line string) string {
 		return comment[1:]
 	}
 	return ""
+}
+
+// documentsName reports a comment on line i over code that spells name as
+// an identifier: a doc comment opens with the name it documents.
+func documentsName(lines []string, i int, name string) bool {
+	for _, line := range lines[i+1:] {
+		text := strings.TrimSpace(line)
+		if text == "" || commentTextOfLine(line) != "" && strings.HasPrefix(text, core.CommentPart(line)) {
+			continue
+		}
+		return slices.Contains(strings.FieldsFunc(text, func(c rune) bool {
+			return c != '_' && !unicode.IsLetter(c) && !unicode.IsDigit(c)
+		}), name)
+	}
+	return false
 }
 
 // sentenceAfter returns the text after a match on line i: the rest of the
