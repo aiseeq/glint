@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/build"
 	"go/types"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -525,6 +526,9 @@ func (l *inProcessLoad) standard(importPath string) (*packages.Package, error) {
 	return dep, nil
 }
 
+// archiveMagic opens the archive file the compiler writes.
+const archiveMagic = "!<arch>\n"
+
 // readExport reads the types of a package from its export data file.
 func (l *inProcessLoad) readExport(exportFile, importPath string) (typed *types.Package, err error) {
 	f, err := os.Open(exportFile)
@@ -536,11 +540,22 @@ func (l *inProcessLoad) readExport(exportFile, importPath string) (typed *types.
 			err = closeErr
 		}
 	}()
-	// go/packages reads the files of go list -export the same way: until their
-	// format leaves the compiler's archive there is no other reader for them.
-	reader, err := gcexportdata.NewReader(bufio.NewReader(f)) //nolint:staticcheck // SA1019: no replacement for go list -export files yet
-	if err != nil {
+	// From Go 1.28 go list -export writes cmd/export files, which Read takes
+	// as they are. A toolchain before it writes the compiler's archive, and
+	// only NewReader finds the export data in one: the branch goes when the
+	// go directive reaches 1.28.
+	buffered := bufio.NewReader(f)
+	var reader io.Reader = buffered
+	// A file shorter than the magic is no archive: Read says what it is.
+	head, err := buffered.Peek(len(archiveMagic))
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("read export data of %q: %w", importPath, err)
+	}
+	if string(head) == archiveMagic {
+		reader, err = gcexportdata.NewReader(reader) //nolint:staticcheck // SA1019: the archive of a toolchain before Go 1.28 has no other reader
+		if err != nil {
+			return nil, fmt.Errorf("read export data of %q: %w", importPath, err)
+		}
 	}
 	typed, err = gcexportdata.Read(reader, l.cfg.Fset, l.imports, importPath)
 	if err != nil {
