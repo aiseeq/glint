@@ -201,7 +201,7 @@ func (r *HardcodedSecretsRule) defaultTagSecrets(ctx *core.FileContext) []*core.
 		if !ok || field.Tag == nil || len(field.Names) != 1 || !secretFieldName.MatchString(field.Names[0].Name) {
 			return true
 		}
-		value, ok := fieldTag(field).Lookup("default")
+		value, ok := helpers.FieldTag(field).Lookup("default")
 		if !ok || value == "" || isNotSecretValue(field.Names[0].Name, value) {
 			return true
 		}

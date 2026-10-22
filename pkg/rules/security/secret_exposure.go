@@ -3,9 +3,7 @@ package security
 import (
 	"go/ast"
 	"go/token"
-	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -191,21 +189,11 @@ func serializableSecret(field *ast.Field) bool {
 	if field.Tag == nil || len(field.Names) != 1 || !secretFieldName.MatchString(field.Names[0].Name) {
 		return false
 	}
-	tag := fieldTag(field)
+	tag := helpers.FieldTag(field)
 	if _, fromEnv := tag.Lookup("env"); !fromEnv {
 		return false
 	}
 	jsonTag, named := tag.Lookup("json")
 	name, _, _ := strings.Cut(jsonTag, ",")
 	return named && name != "-"
-}
-
-// fieldTag returns the parsed tag of a struct field; a tag the compiler
-// would reject reads as empty.
-func fieldTag(field *ast.Field) reflect.StructTag {
-	raw, err := strconv.Unquote(field.Tag.Value)
-	if err == nil {
-		return reflect.StructTag(raw)
-	}
-	return ""
 }
