@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -464,5 +465,33 @@ func g() {}
 	}
 	if fmt.Sprint(lines) != "[8 9]" {
 		t.Fatalf("want findings on lines 8 and 9 only, got %v", lines)
+	}
+}
+
+// «Устранён» says removed as often as «удалён»: a note that a wrapper or a
+// duplicate was eliminated names code that went away. Eliminating a defect
+// the code does now ("устранение дублей" as a noun, "будет устранена") is
+// behavior.
+func TestTombstoneComment_EliminatedIsRemoved(t *testing.T) {
+	rule := NewTombstoneCommentRule()
+	code := `package auth
+
+// RefreshToken DELEGATION WRAPPER ФИЗИЧЕСКИ УСТРАНЕН
+// loadKeyDeprecated - дубликат устранен
+// CreateOrder и CreateRefund физически устранены - используйте orders.Service напрямую.
+
+// Merge объединяет записи для устранения дублей.
+func Merge() {}
+
+// Ошибка будет устранена повторной попыткой.
+func Retry() {}
+`
+	ctx := core.NewFileContext("auth/service.go", ".", []byte(code), nil)
+	var lines []int
+	for _, v := range rule.AnalyzeFile(ctx) {
+		lines = append(lines, v.Line)
+	}
+	if !slices.Equal(lines, []int{3, 4, 5}) {
+		t.Fatalf("want tombstones on lines 3, 4, 5, got %v", lines)
 	}
 }
