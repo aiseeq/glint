@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,7 +46,8 @@ type moduleInputs struct {
 // and template files under root, which project rules check code against: the
 // analyzed Go, SQL and template files, every Go and cgo source and module
 // file of the modules that own them and of their workspace, and the Go
-// toolchain and build environment.
+// toolchain and build environment, and the names hand-written TypeScript
+// imports from generated TypeScript (GeneratedTSImports).
 // Modules come from the module cache by the versions go.sum pins, so they are
 // covered by go.sum. cacheable is false when the load reads what the hash
 // cannot cover: a replace directive pointing at a local directory.
@@ -96,6 +98,8 @@ func (l *GoProjectLoader) GoInputs(root string, contexts []*FileContext, tolerat
 		content := sha256.Sum256(byPath[relPath].Content)
 		writeHashLine(sum, "analyzed %s %x\n", relPath, content)
 	}
+	imports := slices.Sorted(maps.Keys(GeneratedTSImports(contexts)))
+	writeHashLine(sum, "generated TS imports %q\n", imports)
 	return hex.EncodeToString(sum.Sum(nil)), true, nil
 }
 

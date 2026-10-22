@@ -53,6 +53,9 @@ type GoProjectContext struct {
 	// SkippedPackages lists packages excluded from typed analysis; always empty
 	// unless GoProjectOptions.TolerateBrokenPackages is set.
 	SkippedPackages []SkippedPackage
+	// GeneratedTSImports holds the names hand-written TypeScript imports from
+	// TypeScript generated from Go types (GeneratedTSImports).
+	GeneratedTSImports map[string]bool
 
 	filesByPath map[string]*FileContext
 
@@ -242,12 +245,13 @@ func (l *GoProjectLoader) Load(root string, contexts []*FileContext, opts GoProj
 	}
 
 	project := &GoProjectContext{
-		ProjectRoot:     absRoot,
-		FileSet:         load.loader.fset,
-		Files:           append([]*FileContext(nil), goFiles...),
-		SkippedPackages: append(append([]SkippedPackage(nil), load.skipped...), outsideModule...),
-		filesByPath:     filesByPath,
-		loadShared:      &load.shared,
+		ProjectRoot:        absRoot,
+		FileSet:            load.loader.fset,
+		Files:              append([]*FileContext(nil), goFiles...),
+		SkippedPackages:    append(append([]SkippedPackage(nil), load.skipped...), outsideModule...),
+		GeneratedTSImports: GeneratedTSImports(contexts),
+		filesByPath:        filesByPath,
+		loadShared:         &load.shared,
 	}
 	compiled, err := attachLoadedGoPackages(project, load.loaded, load.loader.parsed)
 	if err != nil {

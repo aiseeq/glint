@@ -45,6 +45,11 @@ func init() {
 // A module the project names in closed_modules is imported by no other
 // module: every package of it is judged like an internal one.
 //
+// A name hand-written TypeScript imports from TypeScript generated from Go
+// types (a file with the "Code generated ... DO NOT EDIT." marker) is in use:
+// removing the Go type drops it from the next generation and breaks the
+// frontend that imports it.
+//
 // Outside internal/ an export may serve another module, so only an
 // initializer (Init*, Setup*, Configure*, Register*) that tests call and
 // production code does not is reported: production runs without it, and what
@@ -170,7 +175,7 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, usage := range byFile[fileCtx] {
-			if uses[usage.object] > 0 || usage.otherTestUses > 0 || (usage.initializer && usage.testUses == 0) {
+			if uses[usage.object] > 0 || usage.otherTestUses > 0 || (usage.initializer && usage.testUses == 0) || ctx.GeneratedTSImports[usage.object.Name()] {
 				continue
 			}
 			violations = append(violations, r.violationFor(ctx, usage))
