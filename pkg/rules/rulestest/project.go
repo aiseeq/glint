@@ -45,7 +45,9 @@ func Module(t *testing.T, files map[string]string) (string, []*core.FileContext)
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 
-		if !strings.HasSuffix(name, ".go") && !core.IsTemplateName(name) {
+		ext := filepath.Ext(name)
+		script := slices.Contains(core.TypeScriptExtensions, ext) || slices.Contains(core.JavaScriptExtensions, ext)
+		if !strings.HasSuffix(name, ".go") && !core.IsTemplateName(name) && !script {
 			continue
 		}
 		ctx, err := core.NewFileContextChecked(path, root, []byte(content), core.DefaultConfig())
