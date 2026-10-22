@@ -341,3 +341,83 @@ const (
 		"scripts/lib/audit.mjs":    "const SEVERITIES = { critical: 'CRITICAL', high: 'HIGH', moderate: 'MEDIUM', low: 'LOW' }\n",
 	})))
 }
+
+// A set the schema declares - a CHECK (status IN (...)) of a migration - is
+// a declared set like a Go type: a label map equal to it mirrors that
+// column, not a near set of the code with other values.
+func TestValueSetDriftMirrorsCheckConstraint(t *testing.T) {
+	files := map[string]string{
+		"backend/models/transaction.go": `package models
+
+type TransactionStatus string
+
+const (
+	TransactionStatusPending    TransactionStatus = "pending"
+	TransactionStatusProcessing TransactionStatus = "processing"
+	TransactionStatusCompleted  TransactionStatus = "completed"
+	TransactionStatusFailed     TransactionStatus = "failed"
+	TransactionStatusCancelled  TransactionStatus = "cancelled"
+)
+`,
+		"frontend/src/payout.ts": `const PAYOUT_STATUS_LABELS: Record<string, string> = {
+  completed: 'Done',
+  pending: 'Waiting',
+  in_progress: 'Running',
+  failed: 'Error',
+  cancelled: 'Cancelled',
+}
+
+export const payoutStatusName = (status: string): string => PAYOUT_STATUS_LABELS[status] ?? status
+`,
+	}
+	require.Len(t, valueSetDriftFindings(t, files), 1, "without the schema the label map reads as a drifted copy of the Go type")
+
+	files["backend/migrations/000019_status_checks.up.sql"] = `ALTER TABLE payouts
+    ADD CONSTRAINT payouts_status_check
+        CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'cancelled'));
+`
+	files["backend/migrations/000019_status_checks.down.sql"] = `ALTER TABLE payouts DROP CONSTRAINT payouts_status_check;
+`
+	assert.Empty(t, valueSetDriftFindings(t, files))
+
+	delete(files, "backend/migrations/000019_status_checks.up.sql")
+	files["backend/migrations/000001_initial.up.sql"] = `CREATE TABLE payouts (
+    id     UUID PRIMARY KEY,
+    status character varying(20) NOT NULL,
+    CONSTRAINT chk_status CHECK (((status)::text = ANY (ARRAY[('pending'::character varying)::text, ('in_progress'::character varying)::text, ('completed'::character varying)::text, ('failed'::character varying)::text, ('cancelled'::character varying)::text])))
+);
+`
+	assert.Empty(t, valueSetDriftFindings(t, files))
+}
+
+// Migrations are the history of the schema: a later one declaring a CHECK
+// again is not a copy kept by hand. A file keeping one list in step with a
+// set and another near it maps the set to another vocabulary on purpose.
+func TestValueSetDriftCheckConstraintHistoryAndMapping(t *testing.T) {
+	files := map[string]string{
+		"migrations/000011_categories.up.sql": `ALTER TABLE requests ADD CONSTRAINT requests_category_check
+    CHECK (category IN ('billing', 'technical', 'account', 'other'));
+`,
+		"migrations/000014_requests.up.sql": `ALTER TABLE requests DROP CONSTRAINT requests_category_check;
+ALTER TABLE requests ADD CONSTRAINT requests_category_check
+    CHECK (category IN ('billing', 'technical', 'account', 'other'));
+`,
+		"migrations/000001_init.up.sql": `CREATE TABLE goal_rules (
+    metric text NOT NULL CHECK (metric IN ('turnover', 'revenue', 'cost', 'grossProfit', 'transactions'))
+);
+`,
+		"internal/report/columns.go": `package metrics
+
+type column int
+
+func (c column) goalKey() string {
+	return [...]string{"turnover", "revenue", "cost", "grossProfit", "transactions"}[c]
+}
+
+func (c column) reportKey() string {
+	return [...]string{"turnover", "revenue", "cost", "gross_profit", "transactions"}[c]
+}
+`,
+	}
+	assert.Empty(t, valueSetDriftFindings(t, files))
+}

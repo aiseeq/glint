@@ -33,7 +33,11 @@ func init() {
 // again under the same name; and a TS union or enum that differs from the Go
 // type of the same name. The constants of a Go type are a declared set, and
 // so are untyped constants of one declaration sharing a name prefix
-// (WithdrawalStatusPending, WithdrawalStatusFailed). Keyed sets are not
+// (WithdrawalStatusPending, WithdrawalStatusFailed), and so is the value
+// list of a CHECK constraint of an up migration: a list equal to it mirrors
+// that column, and migrations declaring it again are the schema's history,
+// not copies. A file that keeps one list in step with a set and another
+// near it maps the set to another vocabulary on purpose. Keyed sets are not
 // compared with each other - two label maps overlap on common words as often
 // as they share a domain - and an object typed Record<Union, V> is kept to
 // the union by the compiler. A switch counts only as an exact copy: it
@@ -139,7 +143,7 @@ func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 
 // bestMatch finds the set this one copies, if any.
 func bestMatch(idx *valueset.Index, set valueset.Set) (setMatch, bool) {
-	if valueset.Ordinal(set) {
+	if valueset.Ordinal(set) || set.Schema {
 		return setMatch{}, false
 	}
 	var best setMatch
@@ -193,7 +197,7 @@ func bestMatch(idx *valueset.Index, set valueset.Set) (setMatch, bool) {
 			continue // a switch leaves values to its default on purpose
 		case set.Path == other.Path:
 			continue // variants declared side by side differ on purpose
-		case shared > valueset.MinMembers && 4*shared >= 3*max(len(set.Members), len(other.Members)):
+		case driftedCopy(idx, set, other, shared):
 			m.rank = 2
 		default:
 			continue
@@ -203,6 +207,18 @@ func bestMatch(idx *valueset.Index, set valueset.Set) (setMatch, bool) {
 		}
 	}
 	return best, found
+}
+
+// driftedCopy reports a set that shares most of other's values, in a file
+// that does not also keep a copy of other in step: next to such a copy the
+// set maps other to another vocabulary.
+func driftedCopy(idx *valueset.Index, set, other valueset.Set, shared int) bool {
+	if shared <= valueset.MinMembers || 4*shared < 3*max(len(set.Members), len(other.Members)) {
+		return false
+	}
+	return !slices.ContainsFunc(idx.Sets, func(s valueset.Set) bool {
+		return s.Path == set.Path && slices.Equal(s.Members, other.Members)
+	})
 }
 
 func better(a, b setMatch) bool {
