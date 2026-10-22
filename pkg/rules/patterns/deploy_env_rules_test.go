@@ -440,3 +440,76 @@ rsync -a .env.production "$HOST:/opt/app/shared/.env.new"
 		"deploy/deploy.sh": "#!/usr/bin/env bash\nprintf \"IMAGE_TAG=%s\\n\" \"$TAG\" > \"$ENV_FILE\"\n",
 	}))
 }
+
+// The comment opening a block of keys speaks for every key of the block,
+// also when each key has a comment of its own; a feature switch names the
+// feature in the plural (ALERTS_ENABLED) and its keys in the singular
+// (ALERT_FROM).
+func TestEnvKeyMissingFromDeployEnvGroupComment(t *testing.T) {
+	assert.Equal(t, []string{"scripts/deploy-lib.sh:4", "scripts/deploy-lib.sh:4"}, deployFindings(t, "env-key-missing-from-deploy-env", map[string]string{
+		"internal/config/config.go": `package config
+
+import "os"
+
+func Load() []string {
+	return []string{
+		os.Getenv("SERVER_HOST"),
+		os.Getenv("FEED_URL"), os.Getenv("FEED_TOKEN"), os.Getenv("FEED_ACCOUNT"),
+		os.Getenv("NOTIFY_URL"), os.Getenv("NOTIFY_TOKEN"),
+		os.Getenv("ALERT_SMTP_USER"), os.Getenv("ALERT_FROM"),
+	}
+}
+`,
+		".env.example": `SERVER_HOST=127.0.0.1:8080
+
+# Feed import. All empty = off; partially set = startup fails.
+# URL of the feed.
+FEED_URL=
+# Token of the feed.
+FEED_TOKEN=
+# Account of the feed.
+FEED_ACCOUNT=
+
+# Notification service.
+# URL of the service.
+NOTIFY_URL=
+# Token of the service.
+NOTIFY_TOKEN=
+
+# Mail alerts.
+ALERTS_ENABLED=false
+
+# SMTP of the alerts.
+# User of the SMTP server.
+ALERT_SMTP_USER=
+# Sender address.
+ALERT_FROM=
+`,
+		"scripts/deploy-lib.sh": `#!/bin/bash
+generate_env() {
+    env_tmp=$(mktemp)
+    cat > "$env_tmp" <<EOF
+SERVER_HOST=127.0.0.1:8080
+EOF
+    scp "$env_tmp" "$HOST:/tmp/app-env"
+}
+`,
+	}))
+}
+
+// The last lines of the comment opening a block may be the first key's own:
+// a REQUIRED there does not spread to the keys below it.
+func TestReadEnvExampleGroupRequiredStaysWithFirstKey(t *testing.T) {
+	keys := map[string]envExampleKey{}
+	readEnvExample(strings.Split(`# === Data providers ===
+# REQUIRED [prod] - the main source
+MAIN_KEY=
+# Fallback source of balances
+FALLBACK_KEY=
+# Tron
+TRON_KEY=
+`, "\n"), keys)
+	assert.Equal(t, envExampleKey{required: true}, keys["MAIN_KEY"])
+	assert.Equal(t, envExampleKey{}, keys["FALLBACK_KEY"])
+	assert.Equal(t, envExampleKey{}, keys["TRON_KEY"])
+}
