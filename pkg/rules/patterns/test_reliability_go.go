@@ -310,10 +310,12 @@ func NewTestFixedSleepBeforeAssertRule() *TestFixedSleepBeforeAssertRule {
 }
 
 // minAwaitSleep is the shortest pause taken for waiting on asynchronous work;
-// a shorter one only separates timestamps.
+// a shorter one only separates timestamps, unless it comes right after a go
+// statement and waits for the goroutine just started.
 const minAwaitSleep = 100 // milliseconds
 
-// sleepLookahead is how many statements after the pause may hold the check.
+// sleepLookahead is how many statements after the pause may hold the check;
+// locking and unlocking a mutex around the read of the result does not count.
 const sleepLookahead = 4
 
 // AnalyzeFile reports the fixed pauses followed by an assertion.
@@ -326,10 +328,10 @@ func (r *TestFixedSleepBeforeAssertRule) AnalyzeFile(ctx *core.FileContext) []*c
 		inLoop := loopStatements(tb.body)
 		forEachOwnStatementList(tb.body, func(list []ast.Stmt) {
 			for i, stmt := range list {
-				if inLoop[stmt] || !longSleep(stmt) {
+				if inLoop[stmt] || !awaitingSleep(list, i) {
 					continue
 				}
-				end := min(len(list), i+1+sleepLookahead)
+				end := lookaheadEnd(list, i)
 				if waitsForExpiry(list[max(0, i-1):end]) {
 					continue
 				}
@@ -372,9 +374,10 @@ func waitsForExpiry(stmts []ast.Stmt) bool {
 	return false
 }
 
-// longSleep reports time.Sleep(d) with a constant d of at least minAwaitSleep.
-func longSleep(stmt ast.Stmt) bool {
-	expr, ok := stmt.(*ast.ExprStmt)
+// awaitingSleep reports list[i] as time.Sleep(d) with a constant d of at
+// least minAwaitSleep, or of any length right after a go statement.
+func awaitingSleep(list []ast.Stmt, i int) bool {
+	expr, ok := list[i].(*ast.ExprStmt)
 	if !ok {
 		return false
 	}
@@ -383,7 +386,42 @@ func longSleep(stmt ast.Stmt) bool {
 		return false
 	}
 	ms, ok := constantMillis(call.Args[0])
-	return ok && ms >= minAwaitSleep
+	if !ok {
+		return false
+	}
+	if ms >= minAwaitSleep {
+		return true
+	}
+	_, afterGo := list[max(0, i-1)].(*ast.GoStmt)
+	return i > 0 && afterGo
+}
+
+// lookaheadEnd returns the end of the statements after list[i] that may hold
+// the check: sleepLookahead of them, not counting mutex locks and unlocks.
+func lookaheadEnd(list []ast.Stmt, i int) int {
+	end, counted := i+1, 0
+	for ; end < len(list) && counted < sleepLookahead; end++ {
+		if !mutexStmt(list[end]) {
+			counted++
+		}
+	}
+	return end
+}
+
+// mutexStmt reports x.Lock(), x.Unlock(), x.RLock(), x.RUnlock() and their defer.
+func mutexStmt(stmt ast.Stmt) bool {
+	var call *ast.CallExpr
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		call, _ = s.X.(*ast.CallExpr)
+	case *ast.DeferStmt:
+		call = s.Call
+	}
+	if call == nil || len(call.Args) != 0 {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && (lockMethodNames[sel.Sel.Name] || unlockMethods[sel.Sel.Name])
 }
 
 var durationUnits = map[string]float64{
