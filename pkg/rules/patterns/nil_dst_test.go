@@ -13,7 +13,8 @@ import (
 // return it extended - with nil on every iteration, so every call allocates
 // a fresh buffer the API was built to reuse. A result that outlives the
 // iteration (kept in a field, appended as an element, returned) needs its
-// own buffer, and a call outside a loop runs once.
+// own buffer, and a call outside a loop runs once, as does a call in a loop
+// that every path after it leaves.
 const nilDstSource = `package codec
 
 import (
@@ -76,6 +77,59 @@ func Retry(run func() error, w io.Writer) {
 		if ok, _ := result(run(), nil); ok {
 			return
 		}
+	}
+}
+
+func busy(path string) bool { return path == "" }
+
+// Claim writes the slot it takes once: every path after the call leaves the
+// loop, so the call runs at most once per call of Claim.
+func Claim(paths []string, w io.Writer) error {
+	for i := range paths {
+		if busy(paths[i]) {
+			continue
+		}
+		if _, err := w.Write(strconv.AppendInt(nil, int64(i), 10)); err != nil {
+			return err
+		}
+		return nil
+	}
+	for i := range paths {
+		if busy(paths[i]) {
+			_, _ = w.Write(strconv.AppendInt(nil, int64(i), 10))
+			break
+		}
+	}
+	return nil
+}
+
+func Scan(paths []string, w io.Writer) {
+	for i := range paths {
+		_, _ = w.Write(strconv.AppendInt(nil, int64(i), 10)) // want nil-dst-in-loop
+		if busy(paths[i]) {
+			continue
+		}
+		return
+	}
+	for i := range paths {
+		for range paths {
+			_, _ = w.Write(strconv.AppendInt(nil, int64(i), 10)) // want nil-dst-in-loop
+			break
+		}
+	}
+	for i := range paths {
+		switch {
+		case busy(paths[i]):
+			_, _ = w.Write(strconv.AppendInt(nil, int64(i), 10)) // want nil-dst-in-loop
+			break
+		}
+	}
+	for i := range paths {
+		run := func() {
+			_, _ = w.Write(strconv.AppendInt(nil, int64(i), 10)) // want nil-dst-in-loop
+			return
+		}
+		run()
 	}
 }
 `
