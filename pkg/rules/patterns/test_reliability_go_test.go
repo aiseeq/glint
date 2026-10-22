@@ -218,8 +218,52 @@ func TestTokenExpiry(t *testing.T) {
 	expiredClient := clientWith(token)
 	require.Error(t, expiredClient.Ping())
 }
+
+func TestProgressDuringSync(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		svc.Sync(ctx)
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	p := svc.Progress()
+	if !p.Running {
+		t.Error("expected running")
+	}
+	<-done
+}
+
+func TestTicker(t *testing.T) {
+	svc.Start(100 * time.Millisecond)
+	time.Sleep(250 * time.Millisecond)
+	svc.Stop()
+	mu.Lock()
+	count := ticks
+	mu.Unlock()
+	if count < 2 {
+		t.Errorf("expected 2 ticks, got %d", count)
+	}
+}
+
+func TestShortPauseBetweenGoroutines(t *testing.T) {
+	go serve()
+	first := create()
+	time.Sleep(10 * time.Millisecond)
+	second := create()
+	require.True(t, second.After(first))
+}
+
+func TestCheckFarAfterPause(t *testing.T) {
+	start()
+	time.Sleep(time.Second)
+	stop()
+	flush()
+	drain()
+	reset()
+	require.True(t, idle())
+}
 `)
-	assert.Equal(t, []int{12, 43}, violationLines(NewTestFixedSleepBeforeAssertRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{12, 43, 63, 73}, violationLines(NewTestFixedSleepBeforeAssertRule().AnalyzeFile(ctx)))
 }
 
 // An accepted status range reaching 5xx passes when the server fails.

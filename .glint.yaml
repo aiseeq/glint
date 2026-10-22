@@ -43,6 +43,12 @@ categories:
             reason: >-
               The SQL patterns on registrable domains are the inputs of the
               rule's own test: the test checks that the rule reports them.
+      model-not-approved:
+        exceptions:
+          - file: "pkg/rules/patterns/model_not_approved_test.go"
+            reason: >-
+              The models off the list are the inputs of the rule's own test:
+              the test checks that the rule reports them, nothing runs them.
       mock-identifier:
         exceptions:
           - files: "pkg/rules/deadcode/{stub_method,nil_return_stub}.go"
