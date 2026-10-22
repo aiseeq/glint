@@ -21,6 +21,12 @@ go_fix:
 
 # Go tasks build the SQL parser natively (cgo): the WebAssembly one a plain
 # go install gets costs a second and hundreds of MB on every run that parses SQL.
+#
+# The checks skip a tree they already passed (cache): none of them changes
+# anything outside the tree or reads a service. What decides their result
+# besides the tree: the Go toolchain; for the tests and glint on itself also
+# tsc and shellcheck, which rules run, and the approved models list
+# model-not-approved reads; for lint the golangci-lint version.
 tasks:
   # --- build ---
   build:
@@ -57,6 +63,9 @@ tasks:
   test:
     desc: all tests
     heavy: true
+    cache: &tools_cache
+      commands: [[go, version], [tsc, --version], [shellcheck, --version]]
+      files: ['~/.config/models/approved']
     tests: go
     usage: <go test flags, e.g. -run TestX>
     env: {GOFLAGS: -tags=pgquery_cgo}
@@ -64,6 +73,7 @@ tasks:
   test-short:
     desc: tests without the long-running ones
     heavy: true
+    cache: *tools_cache
     env: {GOFLAGS: -tags=pgquery_cgo}
     run: ['go test -p {threads} -short -v ./...']
   # Only the packages whose own code runs goroutines or takes locks: a rule
@@ -74,6 +84,7 @@ tasks:
   test-race:
     desc: tests with the race detector, packages with concurrent code (analysis runs rules in parallel)
     heavy: true
+    cache: *tools_cache
     tests: go
     env: {GOFLAGS: -tags=pgquery_cgo}
     run: ['go test -json -p {threads} -race ./cmd/glint ./pkg/core ./pkg/rules ./pkg/sqlschema ./pkg/valueset ./pkg/rules/rulestest ./pkg/rules/duplication']
@@ -87,12 +98,15 @@ tasks:
       - ['echo', 'Coverage report: coverage.html']
   smoke:
     desc: the commit gate after graft's own vet - fmt-check, short tests
+    cache: *tools_cache
     run: [{task: fmt-check}, {task: test-short}]
 
   # --- quality ---
   lint:
     desc: golangci-lint (installed on first use)
     heavy: true
+    cache:
+      commands: [[go, version], [golangci-lint, --version]]
     run:
       - sh: |
           set -eu
@@ -108,12 +122,16 @@ tasks:
       - echo "Code formatted"
   fmt-check:
     desc: fail on unformatted code
+    cache:
+      commands: [[go, version]]
     run:
       # Only the repository's files: ignored trees (agent worktrees, tmp) are
       # someone else's work in progress.
       - sh: 'test -z "$(git ls-files -co --exclude-standard -- "*.go" | xargs -r gofmt -l)" || { echo "Code is not formatted. Run graft fmt"; exit 1; }'
   vet:
     desc: go vet
+    cache:
+      commands: [[go, version]]
     env: {GOFLAGS: -tags=pgquery_cgo}
     run: [go vet ./...]
   all:
@@ -122,6 +140,7 @@ tasks:
   self-check:
     desc: glint on itself, built from this tree
     heavy: true
+    cache: *tools_cache
     usage: <glint check flags, e.g. --verbose>
     deps: [build]
     run: ['bin/glint check -j {threads} ./... {args}']
