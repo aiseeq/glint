@@ -2,7 +2,7 @@
 # Installed by graft init. The hook logic lives in graft itself.
 if ! command -v graft >/dev/null 2>&1; then
 	echo "graft: not found in PATH, the post-merge hook cannot run." >&2
-	echo "Install it: go install github.com/aiseeq/graft/v2@latest" >&2
+	echo "Install it, in a checkout of github.com/aiseeq/graft: git pull && go run . install" >&2
 	exit 1
 fi
 exec graft hook post-merge "$@"
