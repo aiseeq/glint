@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/gcexportdata"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -191,4 +193,25 @@ func TestInProcessLoadLeavesUnusualModulesToPackagesLoad(t *testing.T) {
 			require.ErrorIs(t, err, errNotMirrored)
 		})
 	}
+}
+
+// From Go 1.28 go list -export writes the export data of cmd/export, with no
+// compiler archive around it: the loader reads such a file directly, as
+// well as the archives of the toolchains before.
+func TestInProcessLoadReadsExportDataWithoutArchive(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "p.go", "package p\n\nfunc Answer() int { return 42 }\n", 0)
+	require.NoError(t, err)
+	pkg, err := new(types.Config).Check("example.com/p", fset, []*ast.File{file}, nil)
+	require.NoError(t, err)
+	exportFile := filepath.Join(t.TempDir(), "p.export")
+	out, err := os.Create(exportFile)
+	require.NoError(t, err)
+	require.NoError(t, gcexportdata.Write(out, fset, pkg))
+	require.NoError(t, out.Close())
+
+	l := &inProcessLoad{cfg: &packages.Config{Fset: token.NewFileSet()}, imports: map[string]*types.Package{}}
+	typed, err := l.readExport(exportFile, "example.com/p")
+	require.NoError(t, err)
+	assert.NotNil(t, typed.Scope().Lookup("Answer"))
 }
