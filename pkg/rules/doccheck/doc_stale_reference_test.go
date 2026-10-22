@@ -340,3 +340,36 @@ func run() {}
 	assert.Equal(t, "tools/report/main.go", violations[0].File)
 	assert.Contains(t, violations[0].Message, "rec.Missing")
 }
+
+// A config key path names the keys of a config file, not a package: the
+// config struct tags a field planner (yaml:"planner") whose struct tags a
+// field queue, so planner.queue is the key planner: {queue: ...} though a
+// package planner exists and another package declares queue. A path the
+// tags do not spell out is still a reference.
+func TestDocStaleReferenceAcceptsConfigKeyPath(t *testing.T) {
+	files := withFile("catalog/a.go", `package catalog
+
+// run waits for the lock; with planner.queue shared it waits for every worktree,
+// and planner.retry is gone.
+func run() {}
+`)
+	files["build/queue.go"] = `package build
+
+var queue, retry struct{}
+`
+	files["config/config.go"] = `package config
+
+type Config struct {
+	Planner *Planner ` + "`yaml:\"planner,omitempty\"`" + `
+}
+
+type Planner struct {
+	Queue string ` + "`yaml:\"queue\"`" + `
+}
+`
+
+	violations := analyzeStaleReference(t, files)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "planner.retry")
+}

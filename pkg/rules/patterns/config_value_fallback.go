@@ -11,16 +11,12 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
 	rules.Register(NewConfigValueFallbackRule())
 }
-
-// configFieldTags mark a struct field as a configuration value: whoever runs
-// the program writes it and expects it to take effect. json is left out, it
-// marks payloads as often as configuration.
-var configFieldTags = []string{"yaml", "toml", "mapstructure", "env", "ini", "koanf", "envconfig"}
 
 // ConfigValueFallbackRule detects a configuration value quietly replaced by a
 // literal when it is unset:
@@ -427,7 +423,7 @@ func configField(info *types.Info, sel *ast.SelectorExpr) (configSource, bool) {
 		}
 	}
 	tag := reflect.StructTag(st.Tag(indices[len(indices)-1]))
-	for _, name := range configFieldTags {
+	for _, name := range helpers.ConfigTags {
 		if _, found := tag.Lookup(name); found {
 			return configSource{field: field, tag: tag, path: types.ExprString(sel)}, true
 		}
