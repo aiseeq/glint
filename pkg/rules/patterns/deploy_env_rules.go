@@ -254,40 +254,55 @@ func (r *EnvKeyMissingFromDeployEnvRule) AnalyzeFile(ctx *core.FileContext) []*c
 }
 
 // readEnvExample records the keys of an env template with their comments:
-// the one after the value and the comment above the key's block (keys on
-// consecutive lines share it). A feature switched off in the template
-// (PAYOUT_ENABLED=false) makes the keys of its prefix optional.
+// the one after the value and the comment above the key (keys on consecutive
+// lines share it). The comment opening a block of keys, up to the next blank
+// line, also makes the later keys of the block optional ("All empty = off"
+// above keys with comments of their own); it does not make them required,
+// since its last lines may be the first key's own. A feature switched
+// off in the template (PAYOUT_ENABLED=false, ALERTS_ENABLED=false) makes the
+// keys of its prefix optional, in the singular too (ALERT_).
 func readEnvExample(lines []string, into map[string]envExampleKey) {
-	var above []string
+	var group, above []string
+	keyed := false   // the block has had a key
 	inBlock := false // the previous line was a key
 	var disabled []string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
-			if inBlock {
-				above, inBlock = nil, false
+			switch {
+			case !keyed:
+				group = append(group, trimmed)
+			case inBlock:
+				above, inBlock = []string{trimmed}, false
+			default:
+				above = append(above, trimmed)
 			}
-			above = append(above, trimmed)
 			continue
 		}
 		m := envAssignmentLine.FindStringSubmatch(line)
 		if m == nil {
-			above, inBlock = nil, false
+			group, above, keyed, inBlock = nil, nil, false, false
 			continue
 		}
-		inBlock = true
+		if !keyed {
+			above = group
+		}
+		keyed, inBlock = true, true
 		comment := strings.Join(above, " ")
 		value := m[2]
 		if i := strings.Index(value, "#"); i >= 0 {
 			comment += " " + value[i:]
 			value = value[:i]
 		}
-		if strings.HasSuffix(m[1], "_ENABLED") && strings.TrimSpace(value) == "false" {
-			disabled = append(disabled, strings.TrimSuffix(m[1], "ENABLED"))
+		if feature, ok := strings.CutSuffix(m[1], "ENABLED"); ok && strings.HasSuffix(feature, "_") && strings.TrimSpace(value) == "false" {
+			disabled = append(disabled, feature)
+			if singular, ok := strings.CutSuffix(feature, "S_"); ok && singular != "" {
+				disabled = append(disabled, singular+"_")
+			}
 		}
 		into[m[1]] = envExampleKey{
 			required: envExampleRequired.MatchString(comment),
-			optional: envExampleOptional.MatchString(comment),
+			optional: envExampleOptional.MatchString(comment) || envExampleOptional.MatchString(strings.Join(group, " ")),
 		}
 	}
 	for key, ex := range into {
