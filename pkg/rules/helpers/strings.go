@@ -7,51 +7,6 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 )
 
-// IsInsideString checks if a substring appears inside a double-quoted string literal.
-// It counts quotes before the substring - odd count means inside a string.
-func IsInsideString(line, substr string) bool {
-	before, _, ok := strings.Cut(line, substr)
-	if !ok {
-		return false
-	}
-
-	beforeSubstr := before
-	quoteCount := strings.Count(beforeSubstr, `"`)
-	return quoteCount%2 == 1
-}
-
-// IsInsideBackticks checks if a substring appears inside a backtick (raw) string literal.
-func IsInsideBackticks(line, substr string) bool {
-	before, _, ok := strings.Cut(line, substr)
-	if !ok {
-		return false
-	}
-
-	beforeSubstr := before
-	backtickCount := strings.Count(beforeSubstr, "`")
-	return backtickCount%2 == 1
-}
-
-// IsInComment checks if a substring appears inside a comment.
-func IsInComment(line, substr string) bool {
-	commentIdx := strings.Index(line, "//")
-	if commentIdx < 0 {
-		return false
-	}
-
-	substrIdx := strings.Index(line, substr)
-	if substrIdx < 0 {
-		return false
-	}
-
-	return substrIdx > commentIdx
-}
-
-// IsInStringOrComment checks if a substring is inside a string literal or comment.
-func IsInStringOrComment(line, substr string) bool {
-	return IsInsideString(line, substr) || IsInsideBackticks(line, substr) || IsInComment(line, substr)
-}
-
 // MaskJSCommentsAndStrings returns a copy of TypeScript/JavaScript source lines
 // in which every comment (//, /* */ spanning lines, JSDoc) and the contents of
 // every literal — '…', "…", template text between ${…} holes, /regex/ — are
