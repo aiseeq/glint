@@ -1,5 +1,5 @@
 schema: 1
-graft: '>=2.23.0'
+graft: '>=2.37.0'
 
 # Versions are annotated tags vX.Y.Z (graft release); the build stamps
 # graft version --describe into the binary.
@@ -13,6 +13,11 @@ gate:
 # build cache; smoke does not vet again.
 go_vet:
   env: {GOFLAGS: -tags=pgquery_cgo}
+
+# go fix -diff ./... runs after go vet with its env: the modernizers of the
+# toolchain leave no edits behind.
+go_fix:
+  enabled: true
 
 # Go tasks build the SQL parser natively (cgo): the WebAssembly one a plain
 # go install gets costs a second and hundreds of MB on every run that parses SQL.
