@@ -362,3 +362,37 @@ func TestLoad(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"RunUnused", "Format", "Load"}, symbols)
 }
+
+// A module the project declares closed (closed_modules: no other module
+// imports it) has the internal/ boundary around every package: an exported
+// type nothing references is dead there too.
+func TestUnusedInternalExportRule_ClosedModule(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
+		"config/config.go": `package config
+
+type Config struct{ Server ServerConfig }
+
+type ServerConfig struct{ Port int }
+
+type FrontendConfig struct{ Theme string }
+`,
+		"cmd/app/main.go": `package main
+
+import "example.com/rulestest/config"
+
+func main() { _ = config.Config{} }
+`,
+	}
+	rule := NewUnusedInternalExportRule()
+	require.NoError(t, rule.Configure(map[string]any{"closed_modules": []any{"example.com/rulestest"}}))
+	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "FrontendConfig", violations[0].Context["symbol"])
+	assert.Contains(t, violations[0].Message, "closed module")
+
+	violations, err = NewUnusedInternalExportRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+}
