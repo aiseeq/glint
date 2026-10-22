@@ -33,6 +33,8 @@ var appendStyleParams = []string{"dst", "buf", "b", "p", "out"}
 //
 // A result kept past the iteration - stored, appended as an element,
 // returned, sent, captured - needs its own memory, and nil is right there.
+// A call that every path after it takes out of the loop runs once, like a
+// call outside a loop.
 func NewNilDstInLoopRule() *typedFuncRule {
 	r := &typedFuncRule{
 		BaseRule: rules.NewBaseRule(
@@ -59,6 +61,9 @@ func NewNilDstInLoopRule() *typedFuncRule {
 			}
 			if parents == nil {
 				parents = helpers.ParentMap(fn.Body)
+			}
+			if !hot && onceInLoops(scope.info, parents, loops, call) {
+				return true
 			}
 			if !resultOutlives(scope.info, fn, parents, call, result) {
 				findings = append(findings, funcFinding{node: call, message: name + " gets nil as its destination and allocates a new buffer on every call — pass a reused buffer as buf[:0]"})
@@ -208,4 +213,106 @@ func localKept(info *types.Info, fn *ast.FuncDecl, parents map[ast.Node]ast.Node
 		return !kept
 	})
 	return kept
+}
+
+// onceInLoops reports a call that the loops around it run at most once: in
+// each of them every path from the call leaves the loop. A closure in a loop
+// may be called on every iteration.
+func onceInLoops(info *types.Info, parents map[ast.Node]ast.Node, loops []ast.Node, call *ast.CallExpr) bool {
+	for child, node := ast.Node(call), parents[call]; node != nil; child, node = node, parents[node] {
+		switch n := node.(type) {
+		case *ast.FuncLit:
+			return !insideNodes(loops, n)
+		case *ast.ForStmt:
+			if child == n.Cond || child == n.Post || (child == n.Body && !leavesLoopAfter(info, parents, n, call)) {
+				return false
+			}
+		case *ast.RangeStmt:
+			if child == n.Body && !leavesLoopAfter(info, parents, n, call) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// leavesLoopAfter reports a call in the body of loop after which every path
+// leaves it: at some statement list between the call and the loop, the rest
+// of the list from the call ends in a return, a break of the loop or a call
+// that never returns, with no continue of the loop and no goto or labeled
+// branch on the way.
+func leavesLoopAfter(info *types.Info, parents map[ast.Node]ast.Node, loop ast.Stmt, call *ast.CallExpr) bool {
+	for child, node := ast.Node(call), parents[call]; node != nil && node != loop; child, node = node, parents[node] {
+		var list []ast.Stmt
+		switch n := node.(type) {
+		case *ast.BlockStmt:
+			list = n.List
+		case *ast.CaseClause:
+			list = n.Body
+		case *ast.CommClause:
+			list = n.Body
+		default:
+			continue
+		}
+		k := slices.IndexFunc(list, func(stmt ast.Stmt) bool { return stmt == child })
+		if k < 0 {
+			continue
+		}
+		rest := list[k:]
+		if repeatsLoop(parents, loop, rest) {
+			return false
+		}
+		if leavesLoopBy(info, parents, loop, rest[len(rest)-1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// repeatsLoop reports a continue of loop, a goto or a labeled branch in the
+// statements.
+func repeatsLoop(parents map[ast.Node]ast.Node, loop ast.Stmt, stmts []ast.Stmt) bool {
+	found := false
+	for _, stmt := range stmts {
+		ast.Inspect(stmt, func(n ast.Node) bool {
+			switch b := n.(type) {
+			case *ast.FuncLit:
+				return false
+			case *ast.BranchStmt:
+				found = found || b.Tok == token.GOTO || b.Label != nil || (b.Tok == token.CONTINUE && branchTarget(parents, b) == loop)
+			}
+			return !found
+		})
+	}
+	return found
+}
+
+// leavesLoopBy reports a statement that leaves loop: a return, a break of the
+// loop, a call that never returns.
+func leavesLoopBy(info *types.Info, parents map[ast.Node]ast.Node, loop, stmt ast.Stmt) bool {
+	switch s := stmt.(type) {
+	case *ast.ReturnStmt:
+		return true
+	case *ast.BranchStmt:
+		return s.Tok == token.BREAK && s.Label == nil && branchTarget(parents, s) == loop
+	}
+	return stmtNoReturn(stmt, info, nil) != callReturns
+}
+
+// branchTarget returns the statement an unlabeled break or continue applies
+// to: the innermost loop, or for a break also a switch or a select.
+func branchTarget(parents map[ast.Node]ast.Node, branch *ast.BranchStmt) ast.Node {
+	for node := parents[branch]; node != nil; node = parents[node] {
+		switch node.(type) {
+		case *ast.ForStmt, *ast.RangeStmt:
+			return node
+		case *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+			if branch.Tok == token.BREAK {
+				return node
+			}
+		case *ast.FuncLit:
+			return nil
+		}
+	}
+	return nil
 }
