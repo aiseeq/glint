@@ -600,8 +600,7 @@ func isFieldDefinition(t types.Type) bool {
 		return false
 	}
 	found := 0
-	for i := range st.NumFields() {
-		f := st.Field(i)
+	for f := range st.Fields() {
 		if basic, ok := f.Type().Underlying().(*types.Basic); ok && basic.Kind() == types.String && (f.Name() == "Label" || f.Name() == "Name") {
 			found++
 		}

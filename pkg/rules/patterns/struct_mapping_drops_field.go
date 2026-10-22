@@ -450,8 +450,8 @@ func outerKeys(file *ast.File) map[*ast.CompositeLit]map[string]bool {
 // collects reports a target holding a list of sources: a group built from
 // its first member, whose other fields come from the whole list.
 func collects(target structTarget, source types.Type) bool {
-	for i := range target.fields.NumFields() {
-		slice, ok := target.fields.Field(i).Type().Underlying().(*types.Slice)
+	for field := range target.fields.Fields() {
+		slice, ok := field.Type().Underlying().(*types.Slice)
 		if !ok {
 			continue
 		}

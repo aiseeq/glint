@@ -200,7 +200,7 @@ func envFileKeys(root string) (map[string]bool, error) {
 		if err != nil {
 			return fmt.Errorf("read env file %s: %w", rel, err)
 		}
-		for _, line := range strings.Split(string(content), "\n") {
+		for line := range strings.SplitSeq(string(content), "\n") {
 			if m := envAssignmentLine.FindStringSubmatch(line); m != nil {
 				keys[m[1]] = true
 			}

@@ -64,7 +64,7 @@ func (r *AnyInPublicContractRule) Configure(settings map[string]any) error {
 
 func (r *AnyInPublicContractRule) setExcludedMethods(csv string) {
 	r.excludedMethods = make(map[string]bool)
-	for _, name := range strings.Split(csv, ",") {
+	for name := range strings.SplitSeq(csv, ",") {
 		r.excludedMethods[strings.TrimSpace(name)] = true
 	}
 }

@@ -391,10 +391,7 @@ func (r *RedundantCompatibilityRule) isLegitimateCompatibilityContext(ctx *core.
 	}
 
 	// Check surrounding code for external API indicators
-	start := lineNum - 10
-	if start < 0 {
-		start = 0
-	}
+	start := max(lineNum-10, 0)
 	end := lineNum + 5
 	if end >= len(ctx.Lines) {
 		end = len(ctx.Lines) - 1

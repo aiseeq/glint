@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -91,19 +92,14 @@ func (r *OneTimeCodeStoredPlaintextRule) AnalyzeFile(ctx *core.FileContext) []*c
 // splitSQLList splits a column or value list on commas, trimmed and unquoted.
 func splitSQLList(list string) []string {
 	var items []string
-	for _, item := range strings.Split(list, ",") {
+	for item := range strings.SplitSeq(list, ",") {
 		items = append(items, strings.Trim(strings.TrimSpace(item), `"`))
 	}
 	return items
 }
 
 func hasColumn(columns []string, name *regexp.Regexp) bool {
-	for _, column := range columns {
-		if name.MatchString(column) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(columns, name.MatchString)
 }
 
 // parameterArgument returns the call argument a $n value binds, or nil.

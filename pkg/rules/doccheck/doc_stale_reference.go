@@ -144,13 +144,13 @@ func addScopeNames(names map[string]bool, scope *types.Scope) {
 			continue
 		}
 		if named, ok := tn.Type().(*types.Named); ok {
-			for i := 0; i < named.NumMethods(); i++ {
-				names[named.Method(i).Name()] = true
+			for method := range named.Methods() {
+				names[method.Name()] = true
 			}
 		}
 		if st, ok := tn.Type().Underlying().(*types.Struct); ok {
-			for i := 0; i < st.NumFields(); i++ {
-				names[st.Field(i).Name()] = true
+			for field := range st.Fields() {
+				names[field.Name()] = true
 			}
 		}
 	}

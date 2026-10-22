@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"go/types"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -230,7 +231,7 @@ func (bits auditTaintBits) any() bool {
 }
 
 func (bits auditTaintBits) anyBefore(limit int) bool {
-	for index := 0; index < limit; index++ {
+	for index := range limit {
 		if bits.has(index) {
 			return true
 		}
@@ -378,10 +379,8 @@ func buildAuditCallIndex(program *ssa.Program, fset *token.FileSet) *auditCallIn
 }
 
 func (index *auditCallIndex) addTarget(call ssa.CallInstruction, target *ssa.Function) {
-	for _, existing := range index.targets[call] {
-		if existing == target {
-			return
-		}
+	if slices.Contains(index.targets[call], target) {
+		return
 	}
 	index.targets[call] = append(index.targets[call], target)
 }

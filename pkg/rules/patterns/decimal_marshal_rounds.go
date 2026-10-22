@@ -128,8 +128,7 @@ func decimalWrapper(named *types.Named) bool {
 		return false
 	}
 	decimals := 0
-	for i := range st.NumFields() {
-		field := st.Field(i)
+	for field := range st.Fields() {
 		if isShopspringDecimalType(field.Type()) {
 			if field.Embedded() {
 				return true

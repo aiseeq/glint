@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -44,10 +45,8 @@ func exprCarriesError(expr ast.Expr) bool {
 		if callCreatesError(e) {
 			return true
 		}
-		for _, arg := range e.Args {
-			if exprCarriesError(arg) {
-				return true
-			}
+		if slices.ContainsFunc(e.Args, exprCarriesError) {
+			return true
 		}
 	}
 	return false
@@ -55,12 +54,7 @@ func exprCarriesError(expr ast.Expr) bool {
 
 // returnCarriesError reports whether any value of the return hands an error on.
 func returnCarriesError(ret *ast.ReturnStmt) bool {
-	for _, result := range ret.Results {
-		if exprCarriesError(result) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(ret.Results, exprCarriesError)
 }
 
 // errorLevelVerbs are the logging verbs that report a failure: Error, Warn and

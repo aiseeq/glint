@@ -300,11 +300,8 @@ func (s *SummaryOutput) printTopIssues(out *ReportWriter, violations core.Violat
 	ruleCounts := s.buildRuleCounts(violations)
 
 	out.Line("TOP ISSUES:")
-	limit := topIssuesLimit
-	if len(ruleCounts) < limit {
-		limit = len(ruleCounts)
-	}
-	for i := 0; i < limit; i++ {
+	limit := min(len(ruleCounts), topIssuesLimit)
+	for i := range limit {
 		rc := ruleCounts[i]
 		out.Printf("%d. [%s] %s: %d violations\n", i+1, rc.sev.Label(), rc.rule, rc.count)
 	}

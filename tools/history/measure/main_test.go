@@ -93,7 +93,7 @@ func TestSummarizeCountsNonTestGoFindings(t *testing.T) {
 
 func TestTopRulesKeepsFifteen(t *testing.T) {
 	var r rankedCounts
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		r = r.add(string(rune('a' + i)))
 	}
 	r = r.add("t")

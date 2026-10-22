@@ -99,8 +99,8 @@ func holdsChannel(t types.Type) bool {
 	case *types.Chan:
 		return true
 	case *types.Struct:
-		for i := range u.NumFields() {
-			if _, ok := u.Field(i).Type().Underlying().(*types.Chan); ok {
+		for field := range u.Fields() {
+			if _, ok := field.Type().Underlying().(*types.Chan); ok {
 				return true
 			}
 		}

@@ -21,7 +21,7 @@ func TestNewBaseRule(t *testing.T) {
 func TestBaseRuleConfigure(t *testing.T) {
 	rule := NewBaseRule("test", "cat", "desc", core.SeverityMedium)
 
-	settings := map[string]interface{}{
+	settings := map[string]any{
 		"threshold": 10,
 		"enabled":   true,
 	}
@@ -36,7 +36,7 @@ func TestBaseRuleConfigure(t *testing.T) {
 
 func TestBaseRuleGetStringSetting(t *testing.T) {
 	rule := NewBaseRule("test", "cat", "desc", core.SeverityMedium)
-	require.NoError(t, rule.Configure(map[string]interface{}{
+	require.NoError(t, rule.Configure(map[string]any{
 		"name": "value",
 	}))
 
@@ -46,7 +46,7 @@ func TestBaseRuleGetStringSetting(t *testing.T) {
 
 func TestBaseRuleGetIntSetting(t *testing.T) {
 	rule := NewBaseRule("test", "cat", "desc", core.SeverityMedium)
-	require.NoError(t, rule.Configure(map[string]interface{}{
+	require.NoError(t, rule.Configure(map[string]any{
 		"count":   42,
 		"float":   3.14,
 		"invalid": "not a number",
@@ -60,7 +60,7 @@ func TestBaseRuleGetIntSetting(t *testing.T) {
 
 func TestBaseRuleGetBoolSetting(t *testing.T) {
 	rule := NewBaseRule("test", "cat", "desc", core.SeverityMedium)
-	require.NoError(t, rule.Configure(map[string]interface{}{
+	require.NoError(t, rule.Configure(map[string]any{
 		"enabled":  true,
 		"disabled": false,
 		"invalid":  "yes",
@@ -74,7 +74,7 @@ func TestBaseRuleGetBoolSetting(t *testing.T) {
 
 func TestBaseRuleGetFloat64Setting(t *testing.T) {
 	rule := NewBaseRule("test", "cat", "desc", core.SeverityMedium)
-	require.NoError(t, rule.Configure(map[string]interface{}{
+	require.NoError(t, rule.Configure(map[string]any{
 		"ratio":   0.75,
 		"integer": 10,
 	}))

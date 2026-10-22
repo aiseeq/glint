@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -96,9 +97,7 @@ func (p idempotencyPath) clone() idempotencyPath {
 	for receiver, calls := range p.lookups {
 		clone.lookups[receiver] = append([]idempotencyRepositoryCall(nil), calls...)
 	}
-	for binding, truth := range p.truths {
-		clone.truths[binding] = truth
-	}
+	maps.Copy(clone.truths, p.truths)
 	return clone
 }
 
@@ -777,8 +776,8 @@ func isIdempotencyLookupMethod(method string) bool {
 	if strings.Contains(lower, "idempotency") {
 		return true
 	}
-	by := strings.Index(lower, "by")
-	return by >= 0 && strings.Contains(lower[by+2:], "reference")
+	_, after, ok := strings.Cut(lower, "by")
+	return ok && strings.Contains(after, "reference")
 }
 
 func isNonAtomicCreateMethod(method string) bool {

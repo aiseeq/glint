@@ -504,8 +504,8 @@ func scannable(typ types.Type) bool {
 	if !ok {
 		return true
 	}
-	for i := range st.NumFields() {
-		if st.Field(i).Exported() {
+	for field := range st.Fields() {
+		if field.Exported() {
 			return false
 		}
 	}

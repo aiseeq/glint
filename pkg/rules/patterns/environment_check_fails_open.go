@@ -141,12 +141,7 @@ func allMatch(values []string, re *regexp.Regexp) bool {
 }
 
 func anyMatch(values []string, re *regexp.Regexp) bool {
-	for _, value := range values {
-		if re.MatchString(value) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(values, re.MatchString)
 }
 
 // skipsWithoutError reports a branch that returns and reports no failure: a

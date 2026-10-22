@@ -207,13 +207,13 @@ func implementsHash(t types.Type) bool {
 	if iface, ok := t.Underlying().(*types.Interface); ok {
 		// fnv.New64a and friends hand back hash.Hash64, so the value's static
 		// type is the interface itself; a pointer to it has no method set.
-		for i := 0; i < iface.NumMethods(); i++ {
-			mark(iface.Method(i).Name())
+		for method := range iface.Methods() {
+			mark(method.Name())
 		}
 	} else {
 		methods := types.NewMethodSet(types.NewPointer(t))
-		for i := 0; i < methods.Len(); i++ {
-			mark(methods.At(i).Obj().Name())
+		for method := range methods.Methods() {
+			mark(method.Obj().Name())
 		}
 	}
 	for _, found := range required {

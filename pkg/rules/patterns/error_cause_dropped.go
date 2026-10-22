@@ -331,7 +331,7 @@ func (r *ErrorCauseDroppedRule) tsDropsCause(block, binding string) bool {
 		return !strings.HasPrefix(strings.TrimSpace(binding), "{")
 	}
 	var rest []string
-	for _, l := range strings.Split(block, "\n") {
+	for l := range strings.SplitSeq(block, "\n") {
 		if r.tsLogging.MatchString(l) {
 			continue
 		}
@@ -349,7 +349,7 @@ func (r *ErrorCauseDroppedRule) tsDropsCause(block, binding string) bool {
 // fields of a log record ({ error: String(err) }) are not an answer.
 func (r *ErrorCauseDroppedRule) withoutLogging(block string) string {
 	var rest []string
-	for _, l := range strings.Split(block, "\n") {
+	for l := range strings.SplitSeq(block, "\n") {
 		if !r.tsLogging.MatchString(l) {
 			rest = append(rest, l)
 		}

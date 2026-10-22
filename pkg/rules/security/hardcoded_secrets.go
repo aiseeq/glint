@@ -259,11 +259,11 @@ func hasLiteralSecret(secret *regexp.Regexp, line string, lineNum int, file secr
 }
 
 func isDynamicSecretMatch(match string) bool {
-	separator := strings.IndexByte(match, '=')
-	if separator < 0 {
+	_, after, ok := strings.Cut(match, "=")
+	if !ok {
 		return false
 	}
-	value := strings.TrimSpace(match[separator+1:])
+	value := strings.TrimSpace(after)
 	// Кавычка перед $ не делает значение литералом: PGPASSWORD="$DB_PASSWORD"
 	// — та же подстановка переменной, что и без кавычек.
 	value = strings.TrimLeft(value, "\"'`")

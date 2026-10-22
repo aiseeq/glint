@@ -82,7 +82,7 @@ func ancestorChain(root, last string) ([]string, error) {
 		return chain, nil
 	}
 	dir := root
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+	for part := range strings.SplitSeq(rel, string(filepath.Separator)) {
 		dir = filepath.Join(dir, part)
 		chain = append(chain, dir)
 	}
@@ -194,7 +194,7 @@ func (g *gitignoreIndex) addDir(dir string) error {
 // addPatterns разбирает содержимое ignore-файла с доменом domain (сегменты
 // каталога от корня индекса).
 func (g *gitignoreIndex) addPatterns(content string, domain []string) {
-	for _, line := range strings.Split(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
 			continue

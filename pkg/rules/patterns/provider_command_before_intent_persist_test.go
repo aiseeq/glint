@@ -468,7 +468,7 @@ func (s *Svc) Send(req Request) error {
 // shared path cap, so a long chain of them stays linear.
 func TestProviderCommandBeforeIntentPersistRule_ShortCircuitChainIsBounded(t *testing.T) {
 	var body strings.Builder
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		fmt.Fprintf(&body, "\tok = ok && s.provider.SendPayout(req%d) == nil\n", i)
 	}
 	code := "package service\nfunc send(s *Service, ok bool) error {\n" + body.String() + "\treturn s.repo.UpdateState(1)\n}"

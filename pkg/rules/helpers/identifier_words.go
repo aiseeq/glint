@@ -17,7 +17,7 @@ func IdentifierWords(name string) []string {
 		}
 		start = end
 	}
-	for i := 0; i < len(runes); i++ {
+	for i := range runes {
 		switch {
 		case runes[i] == '_':
 			flush(i)

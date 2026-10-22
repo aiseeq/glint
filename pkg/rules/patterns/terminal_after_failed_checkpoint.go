@@ -691,9 +691,7 @@ func copyCheckpointFlow(flow checkpointFlow) checkpointFlow {
 		failures:    append([]failedCheckpoint(nil), flow.failures...),
 		deferred:    append([]terminalCall(nil), flow.deferred...),
 	}
-	for object, assignment := range flow.assignments {
-		copyFlow.assignments[object] = assignment
-	}
+	maps.Copy(copyFlow.assignments, flow.assignments)
 	return copyFlow
 }
 

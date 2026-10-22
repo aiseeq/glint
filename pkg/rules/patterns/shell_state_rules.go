@@ -32,7 +32,7 @@ func jqRawOutput(command string) bool {
 		return false
 	}
 	raw, exit := false, false
-	for _, opt := range strings.Fields(m[1]) {
+	for opt := range strings.FieldsSeq(m[1]) {
 		switch {
 		case opt == "--raw-output":
 			raw = true
@@ -273,7 +273,7 @@ func checkGetterDefault(r *shellRule, src *shellSource) []*core.Violation {
 // the file: a predicate (has_file && echo yes || echo no) reads nothing.
 func missingFileLiterals(body []shellLine) []int {
 	var lines []int
-	for i := 0; i < len(body); i++ {
+	for i := range body {
 		segs := segments(body[i].text)
 		head := strings.TrimSpace(segs[0].text)
 		m := fileTest.FindStringSubmatch(head)

@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -505,9 +506,7 @@ func writeAuditModule(t *testing.T, files map[string]string) (string, []*core.Fi
 	root := t.TempDir()
 	moduleFiles := make(map[string]string, len(files)+1)
 	moduleFiles["go.mod"] = "module example.com/audit\n\ngo 1.24\n"
-	for name, content := range files {
-		moduleFiles[name] = content
-	}
+	maps.Copy(moduleFiles, files)
 	for name, content := range moduleFiles {
 		path := filepath.Join(root, name)
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))

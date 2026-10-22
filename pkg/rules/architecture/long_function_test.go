@@ -64,7 +64,7 @@ func generateLongFunction(lines int) string {
 	var sb strings.Builder
 	sb.WriteString("package main\n")
 	sb.WriteString("func longFunc() {\n")
-	for i := 0; i < lines; i++ {
+	for i := range lines {
 		sb.WriteString("\t_ = ")
 		sb.WriteString(strconv.Itoa(i))
 		sb.WriteString("\n")

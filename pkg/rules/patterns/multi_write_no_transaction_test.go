@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -340,9 +341,7 @@ func writeStoreModule(t *testing.T, files map[string]string) (string, []*core.Fi
 	t.Helper()
 	root := t.TempDir()
 	all := map[string]string{"go.mod": "module example.com/store\n\ngo 1.24\n"}
-	for name, content := range files {
-		all[name] = content
-	}
+	maps.Copy(all, files)
 	for name, content := range all {
 		path := filepath.Join(root, name)
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))

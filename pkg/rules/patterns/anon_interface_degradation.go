@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/token"
+	"slices"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -250,10 +251,8 @@ func (r *AnonInterfaceDegradationRule) hasAnonymousInterfaceAssertion(ifStmt *as
 	// Check init statement: if _, ok := x.(interface{...}); ok
 	if ifStmt.Init != nil {
 		if assign, ok := ifStmt.Init.(*ast.AssignStmt); ok {
-			for _, rhs := range assign.Rhs {
-				if r.isAnonymousInterfaceAssertion(rhs) {
-					return true
-				}
+			if slices.ContainsFunc(assign.Rhs, r.isAnonymousInterfaceAssertion) {
+				return true
 			}
 		}
 	}
@@ -292,19 +291,11 @@ func (r *AnonInterfaceDegradationRule) isDegradationReturn(ret *ast.ReturnStmt) 
 
 	// Check if any result is an explicit error (fmt.Errorf, errors.New)
 	// This is NOT a degradation - it's proper error handling
-	for _, result := range ret.Results {
-		if exprCarriesError(result) {
-			return false
-		}
+	if slices.ContainsFunc(ret.Results, exprCarriesError) {
+		return false
 	}
 
-	for _, result := range ret.Results {
-		if r.isMagicValue(result) {
-			return true
-		}
-	}
-
-	return false
+	return slices.ContainsFunc(ret.Results, r.isMagicValue)
 }
 
 // isMagicValue checks if expression is a magic/zero value (constant, empty struct, nil)

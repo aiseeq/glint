@@ -274,8 +274,8 @@ func fieldOwner(v *types.Var) *types.TypeName {
 		if !ok {
 			continue
 		}
-		for i := range st.NumFields() {
-			if st.Field(i) == v {
+		for field := range st.Fields() {
+			if field == v {
 				return tn
 			}
 		}

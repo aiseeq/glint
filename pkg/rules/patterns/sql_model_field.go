@@ -324,8 +324,8 @@ func (c *modelFieldCheck) returns(fn *ast.FuncDecl, model *types.Named) bool {
 	if !ok {
 		return false
 	}
-	for i := range sig.Results().Len() {
-		typ := sig.Results().At(i).Type()
+	for v := range sig.Results().Variables() {
+		typ := v.Type()
 		if slice, isSlice := typ.Underlying().(*types.Slice); isSlice {
 			typ = slice.Elem()
 		}

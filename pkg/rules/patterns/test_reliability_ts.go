@@ -120,7 +120,7 @@ func (r *BrowserWaitAfterActionRule) AnalyzeFile(ctx *core.FileContext) []*core.
 	}
 	code := newJSSource(ctx).code
 	var violations []*core.Violation
-	for i := 0; i < len(code); i++ {
+	for i := range code {
 		if !r.awaited.MatchString(code[i]) || r.wait.MatchString(code[i]) {
 			continue
 		}

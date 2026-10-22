@@ -311,8 +311,8 @@ func (a *fieldAccess) literal(lit *ast.CompositeLit, info *types.Info) {
 	for _, elt := range lit.Elts {
 		kv, ok := elt.(*ast.KeyValueExpr)
 		if !ok {
-			for i := range structType.NumFields() {
-				a.markWritten(structType.Field(i).Origin().Pos(), true)
+			for field := range structType.Fields() {
+				a.markWritten(field.Origin().Pos(), true)
 			}
 			return
 		}
@@ -345,8 +345,7 @@ func (a *fieldAccess) markHashed(t types.Type) {
 	}
 	switch typ := t.Underlying().(type) {
 	case *types.Struct:
-		for i := range typ.NumFields() {
-			field := typ.Field(i)
+		for field := range typ.Fields() {
 			pos := field.Origin().Pos()
 			if a.hashed[pos] {
 				continue
@@ -575,12 +574,12 @@ func addReachableStructs(set map[*types.Named]bool, t types.Type) {
 			return
 		}
 		set[typ] = true
-		for i := range structType.NumFields() {
-			addReachableStructs(set, structType.Field(i).Type())
+		for field := range structType.Fields() {
+			addReachableStructs(set, field.Type())
 		}
 	case *types.Struct:
-		for i := range typ.NumFields() {
-			addReachableStructs(set, typ.Field(i).Type())
+		for field := range typ.Fields() {
+			addReachableStructs(set, field.Type())
 		}
 	}
 }

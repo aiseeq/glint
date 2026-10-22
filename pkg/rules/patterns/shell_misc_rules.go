@@ -124,10 +124,10 @@ func caseArms(text string) []caseArmText {
 	}
 	var arms []caseArmText
 	offset := start[1]
-	for _, piece := range strings.Split(body, ";;") {
+	for piece := range strings.SplitSeq(body, ";;") {
 		if m := caseArm.FindStringSubmatchIndex(piece); m != nil {
 			var patterns []string
-			for _, p := range strings.Split(piece[m[2]:m[3]], "|") {
+			for p := range strings.SplitSeq(piece[m[2]:m[3]], "|") {
 				patterns = append(patterns, strings.Trim(strings.TrimSpace(p), `"'`))
 			}
 			arms = append(arms, caseArmText{patterns: patterns, body: strings.TrimSpace(piece[m[4]:m[5]]), offset: offset + m[2]})
@@ -236,7 +236,7 @@ func argumentVars(src *shellSource, validated map[string]bool) map[string]bool {
 		return false
 	}
 	tainted := make(map[string]bool)
-	for pass := 0; pass < 2; pass++ {
+	for range 2 {
 		for i, l := range src.lines {
 			if inFunc[i] {
 				continue
@@ -360,7 +360,7 @@ func checkRmRfArgument(r *shellRule, src *shellSource) []*core.Violation {
 		if !rmRecursive.MatchString(command) {
 			continue
 		}
-		for _, arg := range strings.Fields(rmRecursive.ReplaceAllString(command, "")) {
+		for arg := range strings.FieldsSeq(rmRecursive.ReplaceAllString(command, "")) {
 			arg = strings.Trim(arg, `"'`)
 			candidates := []string{arg}
 			if m := regexp.MustCompile(`^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$`).FindStringSubmatch(arg); m != nil {
@@ -703,7 +703,7 @@ func checkPrefixClearsEnv(r *shellRule, src *shellSource) []*core.Violation {
 		if prefix == "" || strings.TrimSpace(prefix) == strings.TrimSpace(s.text) {
 			continue
 		}
-		for _, word := range strings.Fields(prefix) {
+		for word := range strings.FieldsSeq(prefix) {
 			m := alternatePrefix.FindStringSubmatch(strings.Trim(word, `"`))
 			if m == nil || m[1] == m[2] || assigned[m[1]] {
 				continue
@@ -863,7 +863,7 @@ func checkCopyListSourced(r *shellCopyListRule, src *shellSource) []*core.Violat
 // and the list leaves out.
 func missingSourced(r *shellCopyListRule, dir, command string) []string {
 	listed := make(map[string]bool)
-	for _, arg := range strings.Fields(command) {
+	for arg := range strings.FieldsSeq(command) {
 		arg = strings.Trim(arg, `"'()`)
 		if strings.HasSuffix(arg, ".sh") && !strings.ContainsAny(arg, "/$*") {
 			listed[arg] = true

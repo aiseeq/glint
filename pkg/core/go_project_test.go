@@ -159,11 +159,11 @@ func TestLoadGoProjectTolerateBrokenPackagesReportsUnparsableFiles(t *testing.T)
 	project, err := LoadGoProject(root, contexts, GoProjectOptions{TolerateBrokenPackages: true})
 	require.NoError(t, err)
 	require.NotEmpty(t, project.SkippedPackages)
-	joined := ""
+	var joined strings.Builder
 	for _, pkg := range project.SkippedPackages {
-		joined += pkg.Reason
+		joined.WriteString(pkg.Reason)
 	}
-	assert.Contains(t, joined, "scratch.go")
+	assert.Contains(t, joined.String(), "scratch.go")
 
 	fileCtx, err := project.File(filepath.Join(root, "scratch.go"))
 	require.NoError(t, err)

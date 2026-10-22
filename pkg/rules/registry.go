@@ -2,6 +2,7 @@ package rules
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -200,13 +201,9 @@ func effectiveSettings(cfg *core.Config, rule Rule) map[string]any {
 	if !ok {
 		return settings
 	}
-	for key, value := range cat.Settings {
-		settings[key] = value
-	}
+	maps.Copy(settings, cat.Settings)
 	if ruleCfg, ok := cat.Rules[rule.Name()]; ok {
-		for key, value := range ruleCfg.Settings {
-			settings[key] = value
-		}
+		maps.Copy(settings, ruleCfg.Settings)
 	}
 	return settings
 }

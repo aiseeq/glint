@@ -334,7 +334,7 @@ func analyzeSQLAgainstSchema(ctx *core.FileContext, rule *rules.BaseRule, messag
 // migrationDirs reads the migrations setting.
 func migrationDirs(rule *rules.BaseRule) []string {
 	var dirs []string
-	for _, dir := range strings.Split(rule.GetStringSetting("migrations", ""), ",") {
+	for dir := range strings.SplitSeq(rule.GetStringSetting("migrations", ""), ",") {
 		if dir = strings.TrimSpace(dir); dir != "" {
 			dirs = append(dirs, dir)
 		}

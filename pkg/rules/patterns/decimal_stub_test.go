@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -73,8 +74,6 @@ func decimalProject(t *testing.T, files map[string]string) *core.GoProjectContex
 		"third_party/decimal/go.mod":     "module github.com/shopspring/decimal\n\ngo 1.24\n",
 		"third_party/decimal/decimal.go": decimalStub,
 	}
-	for name, content := range files {
-		all[name] = content
-	}
+	maps.Copy(all, files)
 	return rulestest.Project(t, all)
 }

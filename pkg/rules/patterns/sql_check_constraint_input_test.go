@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"testing"
 
@@ -55,9 +56,7 @@ func (r *Repo) Create(ctx context.Context, p *Protocol) error {
 }
 `,
 	}
-	for name, content := range files {
-		base[name] = content
-	}
+	maps.Copy(base, files)
 	violations, err := NewSQLCheckConstraintInputUnvalidatedRule().AnalyzeGoProject(rulestest.Project(t, base))
 	require.NoError(t, err)
 	var out []string

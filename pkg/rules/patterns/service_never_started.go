@@ -154,8 +154,8 @@ func collectServiceUsage(ctx *core.GoProjectContext) (*serviceUsage, error) {
 			return
 		}
 		seen[iface] = true
-		for i := range iface.NumMethods() {
-			if serviceEntryPoints[iface.Method(i).Name()] {
+		for method := range iface.Methods() {
+			if serviceEntryPoints[method.Name()] {
 				usage.entryInterfaces = append(usage.entryInterfaces, iface)
 				return
 			}
@@ -171,8 +171,8 @@ func collectServiceUsage(ctx *core.GoProjectContext) (*serviceUsage, error) {
 			case *types.Func:
 				usage.called[o.Origin()] = true
 				if sig, ok := o.Type().(*types.Signature); ok {
-					for i := range sig.Params().Len() {
-						addInterface(variadicElem(sig.Params().At(i).Type()))
+					for v := range sig.Params().Variables() {
+						addInterface(variadicElem(v.Type()))
 					}
 				}
 			case *types.TypeName:
@@ -237,8 +237,8 @@ func (u *serviceUsage) reachableThroughInterface(named *types.Named, method stri
 }
 
 func interfaceHasMethod(iface *types.Interface, name string) bool {
-	for i := range iface.NumMethods() {
-		if iface.Method(i).Name() == name {
+	for method := range iface.Methods() {
+		if method.Name() == name {
 			return true
 		}
 	}

@@ -122,8 +122,8 @@ func frontendSource(ctx *core.FileContext) bool {
 // topDirectory is the first directory of a relative path, "" for a file at
 // the root.
 func topDirectory(relPath string) string {
-	if slash := strings.IndexByte(relPath, '/'); slash >= 0 {
-		return relPath[:slash]
+	if before, _, ok := strings.Cut(relPath, "/"); ok {
+		return before
 	}
 	return ""
 }

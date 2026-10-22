@@ -1,6 +1,7 @@
 package doccheck
 
 import (
+	"maps"
 	"strings"
 	"testing"
 
@@ -35,9 +36,7 @@ type Order struct{}
 
 func withFile(path, src string) map[string]string {
 	files := map[string]string{path: src}
-	for k, v := range staleModule {
-		files[k] = v
-	}
+	maps.Copy(files, staleModule)
 	return files
 }
 

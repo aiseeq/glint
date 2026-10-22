@@ -412,7 +412,7 @@ func TestIdempotencyCheckThenCreateRule_IndependentFlagsDoNotMultiplyPaths(t *te
 	var code strings.Builder
 	code.WriteString("package payments\nfunc save(repo PaymentRepository, key string, payment *Payment, flags []bool) error {\n")
 	code.WriteString("\t_, _ = repo.GetByIdempotencyKey(key)\n")
-	for i := 0; i < 80; i++ {
+	for i := range 80 {
 		fmt.Fprintf(&code, "\tb%d := flags[%d]\n\tif b%d {\n\t\tcount++\n\t}\n", i, i, i)
 	}
 	code.WriteString("\treturn repo.Create(payment)\n}")
@@ -427,7 +427,7 @@ func TestIdempotencyCheckThenCreateRule_PathCountStaysFlat(t *testing.T) {
 	var code strings.Builder
 	code.WriteString("package payments\nfunc save(repo PaymentRepository, key string, payment *Payment, enabled bool, flags []bool) {\n")
 	code.WriteString("\tif enabled {\n\t\t_, _ = repo.GetByIdempotencyKey(key)\n\t}\n")
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		fmt.Fprintf(&code, "\tb%d := flags[%d]\n\tif b%d {\n\t\tcount++\n\t}\n", i, i, i)
 	}
 	code.WriteString("\tif enabled {\n\t\treturn\n\t}\n\t_ = repo.Create(payment)\n}")

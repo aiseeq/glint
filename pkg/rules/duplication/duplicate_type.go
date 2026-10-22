@@ -172,8 +172,7 @@ func structsWithMethods(scope *types.Scope) []*types.Named {
 // parameter imported under two names gives one key.
 func methodKeys(named *types.Named) []string {
 	var keys []string
-	for i := range named.NumMethods() {
-		method := named.Method(i)
+	for method := range named.Methods() {
 		if conventionalMethods[method.Name()] {
 			continue
 		}

@@ -53,10 +53,7 @@ type WalkerStats struct {
 // NewWalker creates a new file walker
 func NewWalker(projectRoot string, config *Config) *Walker {
 	// The run's thread limit (glint --jobs sets GOMAXPROCS), not the CPU count.
-	workers := runtime.GOMAXPROCS(0)
-	if workers < 1 {
-		workers = 1
-	}
+	workers := max(runtime.GOMAXPROCS(0), 1)
 
 	return &Walker{
 		projectRoot: projectRoot,
@@ -126,11 +123,9 @@ func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 
 	var wg sync.WaitGroup
 	for i := 0; i < w.workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			w.work(fileQueue, results, walkErrors)
-		}()
+		})
 	}
 
 	// Start file discovery
@@ -409,15 +404,7 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 		return true // CI pipeline rules (rules must guard with IsCIConfig)
 	}
 
-	for _, e := range analyzableExtensions {
-		if ext == e {
-			// Debug: uncomment to see which files are considered
-			// fmt.Printf("DEBUG isAnalyzable: %s -> true (ext=%s)\n", path, ext)
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(analyzableExtensions, ext)
 }
 
 // hasShellShebangFile reports a regular file whose first line is a shell

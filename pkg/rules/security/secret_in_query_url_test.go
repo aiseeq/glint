@@ -1,6 +1,7 @@
 package security
 
 import (
+	"maps"
 	"path/filepath"
 	"testing"
 
@@ -350,9 +351,7 @@ func DoGet(ctx context.Context, c *http.Client, url string) ([]byte, error) { re
 func analyzeSecretInQueryURL(t *testing.T, rule *SecretInQueryURLRule, code string) []*core.Violation {
 	t.Helper()
 	files := map[string]string{"api/case.go": code}
-	for name, content := range secretInQueryURLSupport {
-		files[name] = content
-	}
+	maps.Copy(files, secretInQueryURLSupport)
 	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
 	require.NoError(t, err)
 	var inCase []*core.Violation

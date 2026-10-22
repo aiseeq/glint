@@ -300,14 +300,13 @@ func returnsLiveType(fn *ast.FuncDecl, info *types.Info, self *types.Package, li
 	if !ok || signature.Results() == nil {
 		return false
 	}
-	for i := 0; i < signature.Results().Len(); i++ {
-		named := namedOf(signature.Results().At(i).Type())
+	for v := range signature.Results().Variables() {
+		named := namedOf(v.Type())
 		if named == nil || named.Obj().Pkg() != self {
 			continue
 		}
 		var exported, liveCount int
-		for i := 0; i < named.NumMethods(); i++ {
-			method := named.Method(i)
+		for method := range named.Methods() {
 			if !method.Exported() {
 				continue
 			}
@@ -431,13 +430,13 @@ func returnedLiveMethods(fn *ast.FuncDecl, info *types.Info, self *types.Package
 		return nil
 	}
 	var methods []string
-	for i := 0; i < signature.Results().Len(); i++ {
-		named := namedOf(signature.Results().At(i).Type())
+	for v := range signature.Results().Variables() {
+		named := namedOf(v.Type())
 		if named == nil || named.Obj().Pkg() != self {
 			continue
 		}
-		for j := 0; j < named.NumMethods(); j++ {
-			if key := named.Obj().Name() + "." + named.Method(j).Name(); live[key] {
+		for method := range named.Methods() {
+			if key := named.Obj().Name() + "." + method.Name(); live[key] {
 				methods = append(methods, key)
 			}
 		}

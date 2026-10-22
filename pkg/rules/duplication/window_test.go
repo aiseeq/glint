@@ -51,7 +51,7 @@ func TestDuplicateBlockScalesLinearly(t *testing.T) {
 
 	var b strings.Builder
 	b.WriteString("package main\n")
-	for i := 0; i < 400; i++ {
+	for range 400 {
 		b.WriteString("func settlementHandler(ctx context.Context, id int) (*Result, error) {\n")
 		b.WriteString("\tconnection := database.GetConnectionFromPool(ctx)\n")
 		b.WriteString("\tvalidator := NewIncomingPayloadValidator(connection)\n")
@@ -115,7 +115,7 @@ func TestCrossFileDuplicateOrderIsDeterministic(t *testing.T) {
 	}
 
 	first := ""
-	for run := 0; run < 12; run++ {
+	for run := range 12 {
 		rule := NewCrossFileDuplicateRule()
 		rule.minBlockSize = 8
 		rule.ResetState()

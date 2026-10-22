@@ -118,8 +118,7 @@ func loadedEntity(info *types.Info, stmt ast.Stmt, target string) (*types.Var, *
 	if st == nil {
 		return nil, nil
 	}
-	for i := 0; i < st.NumFields(); i++ {
-		f := st.Field(i)
+	for f := range st.Fields() {
 		if f.Name() == target+"ID" || f.Name() == target+"Id" || f.Name() == target {
 			return v, f
 		}

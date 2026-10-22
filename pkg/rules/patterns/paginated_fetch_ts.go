@@ -82,10 +82,7 @@ func checkPaginatedFetchFirstPageOnly(r *tsRule, ctx *core.FileContext, f jsFlat
 // jsURLAround returns the string literal around pos: from the quote or
 // backtick before it to the one after it.
 func jsURLAround(text string, pos int) string {
-	start := strings.LastIndexAny(text[:pos], "`'\"\n")
-	if start < 0 {
-		start = 0
-	}
+	start := max(strings.LastIndexAny(text[:pos], "`'\"\n"), 0)
 	end := strings.IndexAny(text[pos:], "`'\"\n")
 	if end < 0 {
 		return text[start:]

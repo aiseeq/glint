@@ -120,12 +120,12 @@ func signatureHome(sig *types.Signature, own *types.Package, local map[string]bo
 			ok = false
 		}
 	}
-	for i := range sig.Params().Len() {
-		note(sig.Params().At(i).Type())
+	for v := range sig.Params().Variables() {
+		note(v.Type())
 	}
 	inParams := home != nil
-	for i := range sig.Results().Len() {
-		note(sig.Results().At(i).Type())
+	for v := range sig.Results().Variables() {
+		note(v.Type())
 	}
 	if !ok || !inParams || home == own || !local[home.Path()] {
 		return nil

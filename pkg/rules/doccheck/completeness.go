@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -79,13 +80,7 @@ func (r *DocCompletenessRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 // isInternalPackagePath reports whether a file lies in an internal/ directory
 // at any depth: pkg/x/internal/y is as private to its parent as internal/y.
 func isInternalPackagePath(relPath string) bool {
-	dirs := strings.Split(filepath.ToSlash(filepath.Dir(relPath)), "/")
-	for _, dir := range dirs {
-		if dir == "internal" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(filepath.ToSlash(filepath.Dir(relPath)), "/"), "internal")
 }
 
 // checkGenDecl checks type and const/var declarations

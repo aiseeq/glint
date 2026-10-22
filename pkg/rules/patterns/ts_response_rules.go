@@ -321,10 +321,7 @@ func checksAllowedValues(f jsFlat, name string, cache map[string]bool) bool {
 	def := regexp.MustCompile(`\b(?:const|let|function)\s+` + regexp.QuoteMeta(name) + `\b`).FindStringIndex(f.code)
 	found := false
 	if def != nil {
-		end := def[1] + 400
-		if end > len(f.code) {
-			end = len(f.code)
-		}
+		end := min(def[1]+400, len(f.code))
 		found = allowedValuesCheck.MatchString(f.code[def[1]:end])
 	}
 	cache[name] = found
@@ -458,7 +455,7 @@ func (r *TSNumberFieldForDecimalJSONRule) AnalyzeFile(ctx *core.FileContext) []*
 		if !ok {
 			continue
 		}
-		for _, line := range strings.Split(f.code[m[1]:end], "\n") {
+		for line := range strings.SplitSeq(f.code[m[1]:end], "\n") {
 			fm := tsNumberField.FindStringSubmatch(line)
 			if fm == nil || !fields[fm[1]] {
 				continue

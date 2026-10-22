@@ -93,7 +93,7 @@ func checkAndListFailurePasses(r *shellRule, src *shellSource) []*core.Violation
 	}
 	var out []*core.Violation
 	steps := src.steps()
-	for start := 0; start < len(steps); start++ {
+	for start := range steps {
 		if start > 0 && steps[start-1].sep != "\n" && steps[start-1].sep != ";" {
 			continue
 		}
@@ -271,7 +271,7 @@ var shownOnly = regexp.MustCompile(`^(?:log\w*|info|warn\w*|error)\b|^(?:echo|pr
 // valueUsed reports a read of NAME in the text other than inside a message.
 func valueUsed(text, name string) bool {
 	read := regexp.MustCompile(`\$\{?` + name + `\b`)
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		if read.MatchString(line) && !shownOnly.MatchString(strings.TrimSpace(line)) {
 			return true
 		}

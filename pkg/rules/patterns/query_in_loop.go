@@ -536,8 +536,8 @@ func pureRepositoryFunc(sel *ast.SelectorExpr, info *types.Info) bool {
 		return false
 	}
 	params := sig.Params()
-	for i := range params.Len() {
-		switch t := types.Unalias(params.At(i).Type()).(type) {
+	for v := range params.Variables() {
+		switch t := types.Unalias(v.Type()).(type) {
 		case *types.Named:
 			if name := t.Obj().Name(); name == "Context" || strings.HasSuffix(name, "DB") || strings.HasSuffix(name, "Tx") || name == "Conn" || name == "Pool" {
 				return false

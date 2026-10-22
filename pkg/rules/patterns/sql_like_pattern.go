@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -121,12 +122,7 @@ func unescapedLikePattern(expr ast.Expr) bool {
 		if !ok || !wraps || len(format) > 12 {
 			return false
 		}
-		for _, arg := range e.Args[1:] {
-			if escapedValue(arg) {
-				return false
-			}
-		}
-		return true
+		return !slices.ContainsFunc(e.Args[1:], escapedValue)
 	}
 	return false
 }
@@ -145,10 +141,5 @@ func escapedValue(expr ast.Expr) bool {
 			return true
 		}
 	}
-	for _, arg := range call.Args {
-		if escapedValue(arg) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(call.Args, escapedValue)
 }

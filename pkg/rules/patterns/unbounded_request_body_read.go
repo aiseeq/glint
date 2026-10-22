@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -200,9 +201,7 @@ type bodyReadCheck struct {
 func (c *bodyReadCheck) scope(ftype *ast.FuncType, body *ast.BlockStmt, handler bool, replaced map[string]token.Pos) {
 	handler = handler || servesIncomingRequest(c.info, ftype)
 	own := map[string]token.Pos{}
-	for request, pos := range replaced {
-		own[request] = pos
-	}
+	maps.Copy(own, replaced)
 	ast.Inspect(body, func(n ast.Node) bool {
 		if assign, ok := n.(*ast.AssignStmt); ok {
 			for _, lhs := range assign.Lhs {

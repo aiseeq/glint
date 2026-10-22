@@ -76,8 +76,7 @@ func checkKnownKeys(node *yaml.Node, typ reflect.Type, path string) error {
 // yamlFields maps the YAML key of every exported struct field to its type.
 func yamlFields(typ reflect.Type) map[string]reflect.Type {
 	fields := make(map[string]reflect.Type, typ.NumField())
-	for i := 0; i < typ.NumField(); i++ {
-		field := typ.Field(i)
+	for field := range typ.Fields() {
 		if !field.IsExported() {
 			continue
 		}

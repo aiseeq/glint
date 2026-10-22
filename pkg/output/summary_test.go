@@ -49,7 +49,7 @@ func TestSummaryOutputEmptyList(t *testing.T) {
 
 func TestSummaryOutputTopIssuesLimitedToFive(t *testing.T) {
 	var violations core.ViolationList
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		rule := fmt.Sprintf("rule-%d", i)
 		violations = append(violations, core.NewViolation(rule, "patterns", "a.go", i+1, core.SeverityMedium, "m"))
 	}

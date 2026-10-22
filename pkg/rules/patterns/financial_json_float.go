@@ -308,7 +308,7 @@ func strongFinancialName(name string) bool {
 }
 
 func compoundMarketFinancialName(name string) bool {
-	for _, identifier := range strings.Fields(name) {
+	for identifier := range strings.FieldsSeq(name) {
 		tokens := identifierTokens(identifier)
 		if len(tokens) == 2 && tokens[0] == "exchange" && (tokens[1] == "rate" || tokens[1] == "rates") {
 			return true
@@ -321,7 +321,7 @@ func compoundMarketFinancialName(name string) bool {
 }
 
 func contextualMarketFinancialName(name string) bool {
-	for _, identifier := range strings.Fields(name) {
+	for identifier := range strings.FieldsSeq(name) {
 		tokens := identifierTokens(identifier)
 		if len(tokens) != 1 {
 			continue

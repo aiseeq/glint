@@ -60,12 +60,12 @@ func (r *TodoCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 		// Extract comment text
 		commentText := trimmed
-		if strings.HasPrefix(commentText, "//") {
-			commentText = strings.TrimPrefix(commentText, "//")
-		} else if strings.HasPrefix(commentText, "/*") {
-			commentText = strings.TrimPrefix(commentText, "/*")
-		} else if strings.HasPrefix(commentText, "*") {
-			commentText = strings.TrimPrefix(commentText, "*")
+		if after, ok := strings.CutPrefix(commentText, "//"); ok {
+			commentText = after
+		} else if after, ok := strings.CutPrefix(commentText, "/*"); ok {
+			commentText = after
+		} else if after, ok := strings.CutPrefix(commentText, "*"); ok {
+			commentText = after
 		}
 		commentText = strings.TrimSpace(commentText)
 

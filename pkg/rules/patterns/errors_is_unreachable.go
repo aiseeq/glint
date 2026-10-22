@@ -645,8 +645,8 @@ func (f *errorFlow) collectCallbacks(t types.Type, seen map[types.Type]bool, dep
 			set.unknown = true
 		}
 	case *types.Struct:
-		for i := range u.NumFields() {
-			f.collectCallbacks(u.Field(i).Type(), seen, depth+1, set)
+		for field := range u.Fields() {
+			f.collectCallbacks(field.Type(), seen, depth+1, set)
 		}
 	}
 }
@@ -658,8 +658,7 @@ func hooksProjectCode(named *types.Named) bool {
 	if !ok {
 		return false
 	}
-	for i := range st.NumFields() {
-		field := st.Field(i)
+	for field := range st.Fields() {
 		if !field.Exported() {
 			continue
 		}
@@ -679,14 +678,14 @@ func hooksProjectCode(named *types.Named) bool {
 func errorMethods(t types.Type) []*types.Func {
 	var methods []*types.Func
 	set := types.NewMethodSet(t)
-	for i := range set.Len() {
-		method, ok := set.At(i).Obj().(*types.Func)
+	for method := range set.Methods() {
+		method, ok := method.Obj().(*types.Func)
 		if !ok {
 			continue
 		}
 		sig := method.Signature()
-		for j := range sig.Results().Len() {
-			if isErrorType(sig.Results().At(j).Type()) {
+		for v := range sig.Results().Variables() {
+			if isErrorType(v.Type()) {
 				methods = append(methods, method)
 				break
 			}
@@ -823,8 +822,8 @@ func testedParameter(fn typedFunc, cond ast.Expr) (string, bool) {
 		return "", false
 	}
 	params := map[types.Object]bool{}
-	for i := range sig.Params().Len() {
-		params[sig.Params().At(i)] = true
+	for v := range sig.Params().Variables() {
+		params[v] = true
 	}
 	found, field := false, ""
 	ast.Inspect(cond, func(n ast.Node) bool {

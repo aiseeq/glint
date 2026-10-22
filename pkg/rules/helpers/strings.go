@@ -10,24 +10,24 @@ import (
 // IsInsideString checks if a substring appears inside a double-quoted string literal.
 // It counts quotes before the substring - odd count means inside a string.
 func IsInsideString(line, substr string) bool {
-	idx := strings.Index(line, substr)
-	if idx < 0 {
+	before, _, ok := strings.Cut(line, substr)
+	if !ok {
 		return false
 	}
 
-	beforeSubstr := line[:idx]
+	beforeSubstr := before
 	quoteCount := strings.Count(beforeSubstr, `"`)
 	return quoteCount%2 == 1
 }
 
 // IsInsideBackticks checks if a substring appears inside a backtick (raw) string literal.
 func IsInsideBackticks(line, substr string) bool {
-	idx := strings.Index(line, substr)
-	if idx < 0 {
+	before, _, ok := strings.Cut(line, substr)
+	if !ok {
 		return false
 	}
 
-	beforeSubstr := line[:idx]
+	beforeSubstr := before
 	backtickCount := strings.Count(beforeSubstr, "`")
 	return backtickCount%2 == 1
 }

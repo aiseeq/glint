@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -187,9 +188,7 @@ func (s *responseState) clone() *responseState {
 	clone := &responseState{scopes: make([]map[string]bool, len(s.scopes))}
 	for i, scope := range s.scopes {
 		clone.scopes[i] = make(map[string]bool, len(scope))
-		for name, tracked := range scope {
-			clone.scopes[i][name] = tracked
-		}
+		maps.Copy(clone.scopes[i], scope)
 	}
 	return clone
 }

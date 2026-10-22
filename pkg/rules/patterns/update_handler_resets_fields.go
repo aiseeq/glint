@@ -111,8 +111,8 @@ func valueFields(t types.Type) int {
 		return 0
 	}
 	count := 0
-	for i := range st.NumFields() {
-		switch st.Field(i).Type().Underlying().(type) {
+	for field := range st.Fields() {
+		switch field.Type().Underlying().(type) {
 		case *types.Pointer, *types.Slice, *types.Map, *types.Interface:
 		default:
 			count++

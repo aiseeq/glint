@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"regexp"
 	"regexp/syntax"
+	"slices"
 	"strconv"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -118,12 +119,7 @@ func (l regexpPatternLiteral) exempts(secret *regexp.Regexp) bool {
 	if l.invalid != nil {
 		return false
 	}
-	for _, run := range l.fixed {
-		if secret.MatchString(run) {
-			return false
-		}
-	}
-	return true
+	return !slices.ContainsFunc(l.fixed, secret.MatchString)
 }
 
 // regexpPatternAt returns the pattern literal a one-based position falls in.
