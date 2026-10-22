@@ -1,8 +1,8 @@
 // Package valueset collects the sets of string values a project spells out
 // by hand — the constants of a Go string type, a TypeScript union or enum,
-// the members of a list literal, the keys of a map or object literal, the
-// labels of a switch — so that rules can find two copies of one set that
-// drifted apart.
+// the value list of a CHECK constraint of a migration, the members of a list
+// literal, the keys of a map or object literal, the labels of a switch — so
+// that rules can find two copies of one set that drifted apart.
 package valueset
 
 import (
@@ -54,7 +54,10 @@ type Set struct {
 	// in a function that cannot return undefined, or a default assigning the
 	// value to never. A member added to the union breaks the build there.
 	Exhaustive bool
-	Members    []string // sorted, unique
+	// Schema is a set a migration declares: the history of the schema, a
+	// later migration declares it again without keeping a copy by hand.
+	Schema  bool
+	Members []string // sorted, unique
 }
 
 // Before reports a set written earlier in the project than other: by path,
@@ -139,8 +142,60 @@ func Extract(ctx *core.FileContext) []Set {
 		return extractGo(ctx)
 	case ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile():
 		return extractJS(ctx)
+	case strings.EqualFold(filepath.Ext(ctx.RelPath), ".sql"):
+		return extractSQL(ctx)
 	}
 	return nil
+}
+
+var (
+	// sqlCheck opens a CHECK constraint.
+	sqlCheck = regexp.MustCompile(`(?i)\bCHECK\s*\(`)
+	// sqlList opens the value list of a CHECK: col IN ( or = ANY (ARRAY[.
+	sqlList = regexp.MustCompile(`(?i)\bIN\s*\(|=\s*ANY\s*\(\s*ARRAY\s*\[`)
+	// sqlTable names the table a statement creates or alters.
+	sqlTable = regexp.MustCompile(`(?i)\b(?:CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|ALTER\s+TABLE(?:\s+IF\s+EXISTS)?(?:\s+ONLY)?)\s+"?([\w.]+)"?`)
+	// sqlColumn is the first column a CHECK names.
+	sqlColumn = regexp.MustCompile(`[A-Za-z_]\w*`)
+	// sqlLiteral is a quoted value of the list.
+	sqlLiteral = regexp.MustCompile(`'([^']*)'`)
+)
+
+// extractSQL returns the sets a migration declares in the schema: the value
+// list of a CHECK (status IN ('a', 'b')), also in the = ANY (ARRAY[...])
+// form pg_dump writes, named table.column. A down migration restores the
+// sets it replaced and is left out.
+func extractSQL(ctx *core.FileContext) []Set {
+	if strings.HasSuffix(strings.ToLower(ctx.RelPath), ".down.sql") {
+		return nil
+	}
+	text := strings.Join(ctx.Lines, "\n")
+	lineOf := lineIndex(text)
+	var sets []Set
+	for _, loc := range sqlCheck.FindAllStringIndex(text, -1) {
+		end := matchingClose(text, loc[1]-1)
+		if end < 0 {
+			continue
+		}
+		body := text[loc[1]:end]
+		list := sqlList.FindStringIndex(body)
+		if list == nil {
+			continue
+		}
+		name := sqlColumn.FindString(strings.NewReplacer("(", " ", ")", " ", `"`, " ").Replace(body[:list[0]]))
+		if tables := sqlTable.FindAllStringSubmatch(text[:loc[0]], -1); len(tables) > 0 {
+			name = tables[len(tables)-1][1] + "." + name
+		}
+		var values []string
+		for _, m := range sqlLiteral.FindAllStringSubmatch(body[list[1]:], -1) {
+			values = append(values, m[1])
+		}
+		if set, ok := newSet(ctx.RelPath, lineOf(loc[0]), name, Enum, false, values); ok {
+			set.Schema = true
+			sets = append(sets, set)
+		}
+	}
+	return sets
 }
 
 func extractGo(ctx *core.FileContext) []Set {
@@ -424,7 +479,7 @@ func extractJS(ctx *core.FileContext) []Set {
 	}
 	for _, m := range jsObject.FindAllStringSubmatchIndex(code, -1) {
 		open := m[1] - 1
-		end := matchingBrace(code, open)
+		end := matchingClose(code, open)
 		if end < 0 {
 			continue
 		}
@@ -449,7 +504,7 @@ func extractJS(ctx *core.FileContext) []Set {
 			continue
 		}
 		open += m[1]
-		end := matchingBrace(code, open)
+		end := matchingClose(code, open)
 		if end < 0 {
 			continue
 		}
@@ -595,13 +650,20 @@ func objectEntries(code, text string) ([]string, []string, bool) {
 	return keys, values, true
 }
 
-func matchingBrace(code string, open int) int {
+// matchingClose returns the index of the brace or parenthesis closing the
+// one at open, -1 when the code ends first.
+func matchingClose(code string, open int) int {
+	opener := code[open]
+	closer := byte('}')
+	if opener == '(' {
+		closer = ')'
+	}
 	depth := 0
 	for i := open; i < len(code); i++ {
 		switch code[i] {
-		case '{':
+		case opener:
 			depth++
-		case '}':
+		case closer:
 			depth--
 			if depth == 0 {
 				return i
