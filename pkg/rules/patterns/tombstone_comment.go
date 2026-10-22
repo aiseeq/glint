@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -19,6 +20,7 @@ func init() {
 //
 //	// GetDB removed — architectural boundary violation eliminated
 //	// УДАЛЕНО: processed статус (дубликат approved)
+//	// RefreshToken wrapper физически устранён
 //	_ = disableFixes // CryptoProv fixes removed
 //
 // CLAUDE.md: "Delete cleanly, git remembers" — history lives in git, not in
@@ -67,7 +69,7 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 		// NOTE: RE2 \b is ASCII-only, so the Cyrillic branch uses an explicit
 		// non-letter boundary; it also rejects "удалённый" (remote).
 		tombstone: regexp.MustCompile(
-			`(?i)\b(?:removed|deleted)\b|удал[её]н[оаы]?(?:[^а-яё]|$)|больше не использ|no longer (?:used|needed|exists|supported)`),
+			`(?i)\b(?:removed|deleted)\b|(?:удал|устран)[её]н[оаы]?(?:[^а-яё]|$)|больше не использ|no longer (?:used|needed|exists|supported)`),
 		behaviorAux: regexp.MustCompile(
 			`(?i)(?:\b(?:is|are|was|were|be|being|been|get|gets|got|to|soft|never|not)\s+(?:\w+ly\s+)?|будут\s+|будет\s+|был[аио]?\s+|должн\w*\s+быть\s+|могут\s+быть\s+|не\s+|что\s+|сколько\s+)$`),
 		// "deleted since," and "removed in the meantime" date a state of the
@@ -95,7 +97,7 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 
 // tombstoneNeedles are lower-case texts one of which every match of the
 // tombstone pattern contains.
-var tombstoneNeedles = []string{"removed", "deleted", "удал", "больше не использ", "no longer"}
+var tombstoneNeedles = []string{"removed", "deleted", "удал", "устран", "больше не использ", "no longer"}
 
 // AnalyzeFile checks comment lines for tombstones.
 func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
@@ -123,6 +125,11 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if loc == nil {
 			continue
 		}
+		// The Cyrillic branch ends on the character after the word: the
+		// text after the note starts there.
+		if last, size := utf8.DecodeLastRuneInString(comment[loc[0]:loc[1]]); !unicode.IsLetter(last) {
+			loc[1] -= size
+		}
 		if r.behaviorAux.MatchString(comment[:loc[0]]) || r.remover.MatchString(comment[:loc[0]]) {
 			continue // "are removed", "будут удалены" — behavior, not a tombstone
 		}
@@ -135,7 +142,11 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if r.addedBefore.MatchString(comment[:loc[0]]) || r.addedAfter.MatchString(comment[loc[1]:]) {
 			continue // "lines added and removed", "rows inserted, updated or deleted" — changes to data
 		}
-		if !r.noteStart.MatchString(comment[:loc[0]]) && !r.noteEnd.MatchString(sentenceAfter(comment[loc[1]:], ctx.Lines, i)) {
+		after := comment[loc[1]:]
+		if strings.TrimSpace(after) != "" || !isCapitalWord(strings.TrimFunc(comment[loc[0]:loc[1]], isNotLetter)) {
+			after = sentenceAfter(after, ctx.Lines, i)
+		}
+		if !r.noteStart.MatchString(comment[:loc[0]]) && !r.noteEnd.MatchString(after) {
 			continue // "removed afterwards", "a deleted file" — a sentence about what the program does
 		}
 		if word := strings.TrimFunc(comment[loc[0]:loc[1]], isNotLetter); isCapitalWord(word) {
@@ -173,14 +184,16 @@ func commentTextOfLine(line string) string {
 
 // sentenceAfter returns the text after a match on line i: the rest of the
 // line, or, when the line ends there, the next comment line the sentence is
-// wrapped onto.
+// wrapped onto - one that does not open with a capital, and not after a
+// removal word in capitals, which labels a note.
 func sentenceAfter(rest string, lines []string, i int) string {
 	if strings.TrimSpace(rest) != "" || i+1 >= len(lines) {
 		return rest
 	}
 	next := commentTextOfLine(lines[i+1])
-	if strings.TrimSpace(next) == "" || strings.HasPrefix(next, "\t") {
-		return rest
+	first, _ := utf8.DecodeRuneInString(strings.TrimSpace(next))
+	if strings.TrimSpace(next) == "" || strings.HasPrefix(next, "\t") || unicode.IsUpper(first) {
+		return rest // a capital opens a sentence of its own
 	}
 	return " " + next
 }
