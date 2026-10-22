@@ -42,12 +42,16 @@ func init() {
 // A main package cannot be imported either, and its exports are judged the
 // same way.
 //
+// A module the project names in closed_modules is imported by no other
+// module: every package of it is judged like an internal one.
+//
 // Outside internal/ an export may serve another module, so only an
 // initializer (Init*, Setup*, Configure*, Register*) that tests call and
 // production code does not is reported: production runs without it, and what
 // it would have set up answers as if it had.
 type UnusedInternalExportRule struct {
 	*rules.BaseRule
+	closed map[string]bool
 }
 
 // NewUnusedInternalExportRule creates the rule.
@@ -56,10 +60,23 @@ func NewUnusedInternalExportRule() *UnusedInternalExportRule {
 		BaseRule: rules.NewBaseRule(
 			"unused-internal-export",
 			"deadcode",
-			"Detects exported symbols in internal/ packages that nothing in the module uses — the module boundary makes them dead code",
+			"Detects exported symbols in internal/ packages, main packages and the packages of closed_modules that nothing in the module uses — the module boundary makes them dead code",
 			core.SeverityMedium,
 		),
 	}
+}
+
+// Configure reads closed_modules, the module paths no other module imports.
+func (r *UnusedInternalExportRule) Configure(settings map[string]any) error {
+	if err := r.BaseRule.Configure(settings); err != nil {
+		return err
+	}
+	closed, _, err := rules.NameSetSetting(settings, r.Name(), "closed_modules")
+	if err != nil {
+		return err
+	}
+	r.closed = closed
+	return nil
 }
 
 // RequiresSSA reports that typed packages are enough — no SSA program needed.
@@ -83,6 +100,8 @@ type exportUsage struct {
 	initializer bool
 	// mainPackage marks a candidate of a main package.
 	mainPackage bool
+	// closedModule marks a candidate of a package of a closed module.
+	closedModule bool
 }
 
 // AnalyzeGoProject collects the exported symbols the analyzed files of
@@ -109,7 +128,8 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 		// Nothing imports a main package either: its exports serve the
 		// package alone, like those of an internal one.
 		mainPackage := pkgCtx.Package.Name == "main"
-		internal := isInternalPackage(pkgCtx.Package.PkgPath) || mainPackage
+		closedModule := pkgCtx.Package.Module != nil && r.closed[pkgCtx.Package.Module.Path] && !isInternalPackage(pkgCtx.Package.PkgPath)
+		internal := isInternalPackage(pkgCtx.Package.PkgPath) || mainPackage || closedModule
 		for _, fileCtx := range pkgCtx.Files {
 			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
 				continue
@@ -123,6 +143,7 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 					usage.initializer = true
 				}
 				usage.mainPackage = mainPackage
+				usage.closedModule = closedModule && !mainPackage
 				candidates[usage.object] = usage
 				byFile[fileCtx] = append(byFile[fileCtx], usage)
 			}
@@ -206,10 +227,17 @@ func (r *UnusedInternalExportRule) violationFor(ctx *core.GoProjectContext, usag
 		message = "Exported " + usage.kind + " '" + name + "' in a main package is never used — nothing can import a main package"
 		suggestion = "Remove the " + usage.kind + ", or use it where it was meant to take effect"
 	}
+	if usage.closedModule {
+		message = "Exported " + usage.kind + " '" + name + "' of a closed module is never used — no other module imports it (closed_modules)"
+		suggestion = "Remove the " + usage.kind + "; if another module does import this one, drop the module from closed_modules"
+	}
 	if usage.testUses > 0 {
 		where := "internal package"
-		if usage.mainPackage {
+		switch {
+		case usage.mainPackage:
 			where = "main package"
+		case usage.closedModule:
+			where = "closed module"
 		}
 		message = "Exported " + usage.kind + " '" + name + "' in " + where + " is used only by tests — production code never touches it"
 		suggestion = "Remove the " + usage.kind + " together with its tests, or use it from production code"
