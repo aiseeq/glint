@@ -32,6 +32,10 @@ func init() {
 // …Params or …Query, or with only optional (pointer, slice, map) fields — whose
 // literals set different fields: each call states what it asks for and leaves
 // the rest unset on purpose, so a new field is missing nowhere by accident.
+// So is a type of another module whose literals set different fields: a
+// table of a library's declarative type (a CLI framework's commands, a
+// server's options) states on each entry what it needs; the type is not ours
+// to add a field to, and a field the library adds works unset.
 type ScatteredConstructionRule struct {
 	*rules.BaseRule
 	maxSites int
@@ -45,6 +49,8 @@ type constructionSite struct {
 	fields string
 	// optional: the type checker sees a struct whose fields are all optional.
 	optional bool
+	// foreign: the type checker sees a type declared outside the module.
+	foreign bool
 }
 
 // NewScatteredConstructionRule creates the rule
@@ -106,22 +112,24 @@ func (r *ScatteredConstructionRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	sort.Slice(files, func(i, j int) bool { return files[i].RelPath < files[j].RelPath })
 
 	infos := map[*core.FileContext]*types.Info{}
+	module := map[string]bool{} // import paths of the module's packages
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil {
 			continue
 		}
+		module[pkg.Package.PkgPath] = true
 		for _, fileCtx := range pkg.Files {
 			infos[fileCtx] = pkg.Package.TypesInfo
 		}
 	}
 	constructions := make(map[string][]constructionSite)
 	for _, fileCtx := range files {
-		collectConstructions(fileCtx, infos[fileCtx], constructions)
+		collectConstructions(fileCtx, infos[fileCtx], module, constructions)
 	}
 	return r.reportViolations(constructions), nil
 }
 
-func collectConstructions(ctx *core.FileContext, info *types.Info, constructions map[string][]constructionSite) {
+func collectConstructions(ctx *core.FileContext, info *types.Info, module map[string]bool, constructions map[string][]constructionSite) {
 	currentFunc := ""
 
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
@@ -157,6 +165,7 @@ func collectConstructions(ctx *core.FileContext, info *types.Info, constructions
 			funcN:    currentFunc,
 			fields:   literalKeys(lit),
 			optional: info != nil && allFieldsOptional(info.TypeOf(lit)),
+			foreign:  info != nil && declaredOutside(info.TypeOf(lit), module),
 		})
 
 		return true
@@ -229,8 +238,8 @@ func (r *ScatteredConstructionRule) reportViolations(constructions map[string][]
 // select or how to run, each field set only by the calls that need it.
 var filterTypeSuffixes = []string{"Filter", "Options", "Opts", "Params", "Query"}
 
-// perCallFilter reports a filter or options type whose literals set different
-// fields from one site to another.
+// perCallFilter reports a filter or options type, or a type of another
+// module, whose literals set different fields from one site to another.
 func perCallFilter(typeName string, sites []constructionSite) bool {
 	filter := false
 	for _, suffix := range filterTypeSuffixes {
@@ -239,12 +248,23 @@ func perCallFilter(typeName string, sites []constructionSite) bool {
 		}
 	}
 	fieldSets := map[string]bool{}
-	optional := true
+	optional, foreign := true, true
 	for _, site := range sites {
 		fieldSets[site.fields] = true
 		optional = optional && site.optional
+		foreign = foreign && site.foreign
 	}
-	return (filter || optional) && len(fieldSets) > 1
+	return (filter || optional || foreign) && len(fieldSets) > 1
+}
+
+// declaredOutside reports a named type (or a pointer to one) of a package
+// that is not one of the module's.
+func declaredOutside(t types.Type, module map[string]bool) bool {
+	if pointer, ok := types.Unalias(t).(*types.Pointer); ok {
+		t = pointer.Elem()
+	}
+	named, ok := types.Unalias(t).(*types.Named)
+	return ok && named.Obj().Pkg() != nil && !module[named.Obj().Pkg().Path()]
 }
 
 // literalKeys returns the keys a keyed literal sets, sorted and joined.
