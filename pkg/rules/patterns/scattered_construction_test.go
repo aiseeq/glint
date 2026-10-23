@@ -145,6 +145,32 @@ func ` + name + `(w, c, k *string, n int) any {
 		})
 		assert.Len(t, violations, 3)
 	})
+	// A table of a library's declarative type - a CLI framework's commands,
+	// a server's options - sets on each literal what that entry needs: the
+	// type is not ours to add a field to, and a field the library adds works
+	// unset. The same fields on every literal are a conversion kept in many
+	// places and stay reported (TestScatteredConstructionReportsEverySite).
+	t.Run("type of another module with different fields per call", func(t *testing.T) {
+		server := func(name, fields string) string {
+			return `package svc
+
+import (
+	"net/http"
+	"time"
+)
+
+func ` + name + `(h http.Handler) *http.Server {
+	return &http.Server{` + fields + `}
+}
+`
+		}
+		violations := runRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+			"svc/a.go": server("a", `Addr: ":80", Handler: h, ReadTimeout: time.Second`),
+			"svc/b.go": server("b", `Addr: ":81", Handler: h, WriteTimeout: time.Second`),
+			"svc/c.go": server("c", `Addr: ":82", Handler: h, ReadTimeout: time.Second`),
+		})
+		assert.Empty(t, violations)
+	})
 	t.Run("ordinary struct with different fields per call", func(t *testing.T) {
 		violations := runRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 			"model/model.go": scatteredFilterModel,
