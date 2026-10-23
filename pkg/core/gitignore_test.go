@@ -132,3 +132,32 @@ func TestWalkerReportsMalformedGitFile(t *testing.T) {
 	require.Len(t, errs, 1)
 	require.Contains(t, errs[0].Error(), "gitdir")
 }
+
+// A path in a linked worktree stands for the same path under the main
+// worktree's top; the main worktree, a submodule and a tree outside git have
+// none.
+func TestMainWorktreePath(t *testing.T) {
+	base := t.TempDir()
+	writeTree(t, base, map[string]string{
+		"main/.git/HEAD":                   "ref: refs/heads/main\n",
+		"main/.git/worktrees/wt/commondir": "../..\n",
+		"main/.git/modules/sub/HEAD":       "ref: refs/heads/main\n",
+		"main/sub/.git":                    "gitdir: ../.git/modules/sub\n",
+		"wt/.git":                          "gitdir: " + filepath.Join(base, "main/.git/worktrees/wt") + "\n",
+		"wt/cmd/tool/main.go":              "package main\n",
+		"plain/app.go":                     "package app\n",
+	})
+
+	for path, want := range map[string]string{
+		"wt":          filepath.Join(base, "main"),
+		"wt/cmd/tool": filepath.Join(base, "main/cmd/tool"),
+		"main":        "",
+		"main/sub":    "",
+		"plain":       "",
+	} {
+		got, ok, err := MainWorktreePath(filepath.Join(base, path))
+		require.NoError(t, err, path)
+		require.Equal(t, want != "", ok, path)
+		require.Equal(t, want, got, path)
+	}
+}
