@@ -168,6 +168,39 @@ func resolveCommonDir(gitDir string) (string, error) {
 	return common, nil
 }
 
+// MainWorktreePath returns the path in the main worktree of a repository
+// that path in a linked worktree stands for: the same path relative to the
+// worktree's top. ok is false for a path outside a linked worktree, in the
+// main worktree itself and in a repository without a main worktree (bare,
+// or a submodule's git directory).
+func MainWorktreePath(path string) (mainPath string, ok bool, err error) {
+	for top := path; ; {
+		gitDir, err := resolveGitDir(top)
+		if err != nil {
+			return "", false, err
+		}
+		if gitDir != "" {
+			if gitDir == filepath.Join(top, ".git") {
+				return "", false, nil
+			}
+			common, err := resolveCommonDir(gitDir)
+			if err != nil || filepath.Base(common) != ".git" {
+				return "", false, err
+			}
+			rel, err := filepath.Rel(top, path)
+			if err != nil {
+				return "", false, fmt.Errorf("path %s in worktree %s: %w", path, top, err)
+			}
+			return filepath.Join(filepath.Dir(common), rel), true, nil
+		}
+		parent := filepath.Dir(top)
+		if parent == top {
+			return "", false, nil
+		}
+		top = parent
+	}
+}
+
 // addDir загружает .gitignore каталога, если он там есть. Каталог задаёт
 // домен паттернов: они действуют только внутри него.
 func (g *gitignoreIndex) addDir(dir string) error {

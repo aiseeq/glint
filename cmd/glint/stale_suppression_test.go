@@ -151,12 +151,12 @@ func TestStaleSuppressionLeavesGolangciNamesToGolangci(t *testing.T) {
 func TestStaleSuppressionSeesMarkersThroughTheResultCache(t *testing.T) {
 	root := writeStaleModule(t, false)
 	dir := t.TempDir()
-	first, err := openResultCache(dir, root, "build", "stamp")
+	first, err := openResultCache(dir, root, "", "build", "stamp")
 	require.NoError(t, err)
 	want := staleFindings(t, root, first)
 	require.NoError(t, first.save())
 
-	second, err := openResultCache(dir, root, "build", "stamp")
+	second, err := openResultCache(dir, root, "", "build", "stamp")
 	require.NoError(t, err)
 	assert.ElementsMatch(t, want, staleFindings(t, root, second))
 	assert.Positive(t, second.reused)
@@ -292,12 +292,12 @@ func writeFileExceptionModule(t *testing.T) string {
 func TestStaleSuppressionSeesFileExceptionsThroughTheResultCache(t *testing.T) {
 	root := writeFileExceptionModule(t)
 	dir := t.TempDir()
-	first, err := openResultCache(dir, root, "build", "stamp")
+	first, err := openResultCache(dir, root, "", "build", "stamp")
 	require.NoError(t, err)
 	_, want := analyzeWithRules(t, root, first, fileExceptionRules...)
 	require.NoError(t, first.save())
 
-	second, err := openResultCache(dir, root, "build", "stamp")
+	second, err := openResultCache(dir, root, "", "build", "stamp")
 	require.NoError(t, err)
 	_, got := analyzeWithRules(t, root, second, fileExceptionRules...)
 	assert.ElementsMatch(t, foundAt(want), foundAt(got))

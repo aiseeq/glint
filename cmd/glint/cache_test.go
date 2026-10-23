@@ -43,7 +43,7 @@ func (r *countingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 func runCached(t *testing.T, dir, stamp string, contexts []*core.FileContext, list []rules.Rule) (core.ViolationList, *resultCache) {
 	t.Helper()
-	cache, err := openResultCache(dir, "/project", "build", stamp)
+	cache, err := openResultCache(dir, "/project", "", "build", stamp)
 	require.NoError(t, err)
 	violations, err := analyzeFiles(contexts, list, core.DefaultConfig(), nil, cache)
 	require.NoError(t, err)
@@ -123,11 +123,11 @@ func TestResultCacheRoundTripsEveryRule(t *testing.T) {
 
 func TestOpenResultCacheReportsCorruptFile(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := openResultCache(dir, "/project", "build", "stamp")
+	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(cache.path, []byte("not a cache"), 0o600))
 
-	_, err = openResultCache(dir, "/project", "build", "stamp")
+	_, err = openResultCache(dir, "/project", "", "build", "stamp")
 	require.Error(t, err)
 }
 
@@ -192,14 +192,14 @@ func TestPruneResultCachesToleratesConcurrentRemoval(t *testing.T) {
 // reading it marks it used, so the size limit evicts what nobody reads.
 func TestResultCacheNamesItsBuildAndMarksUse(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := openResultCache(dir, "/project", "build1", "stamp")
+	cache, err := openResultCache(dir, "/project", "", "build1", "stamp")
 	require.NoError(t, err)
 	assert.True(t, strings.HasSuffix(cache.path, "-build1.gob"), cache.path)
 	require.NoError(t, cache.save())
 	old := time.Now().Add(-5 * 24 * time.Hour)
 	require.NoError(t, os.Chtimes(cache.path, old, old))
 
-	_, err = openResultCache(dir, "/project", "build1", "stamp")
+	_, err = openResultCache(dir, "/project", "", "build1", "stamp")
 	require.NoError(t, err)
 	info, err := os.Stat(cache.path)
 	require.NoError(t, err)
@@ -283,4 +283,35 @@ func TestProjectCacheKeysOnTheProjectRulesThatRan(t *testing.T) {
 
 	analyzeCachedRoot(t, root, []rules.Rule{second})
 	assert.Equal(t, 1, second.projectCalls, "the same selection reuses its findings")
+}
+
+// A root without a cache of its own, a fresh worktree, starts from the cache
+// of the same root in the main worktree: its unchanged files are not analyzed
+// again. It then keeps a cache of its own and leaves the main one as it was.
+func TestResultCacheStartsFromTheMainWorktree(t *testing.T) {
+	dir := t.TempDir()
+	rule := newCountingRule("counting-local", false)
+	contexts := []*core.FileContext{goContext(t, "a.go", "package a\n"), goContext(t, "b.go", "package b\n")}
+	run := func(root, seed, stamp string, contexts []*core.FileContext) *resultCache {
+		cache, err := openResultCache(dir, root, seed, "build", stamp)
+		require.NoError(t, err)
+		_, err = analyzeFiles(contexts, []rules.Rule{rule}, core.DefaultConfig(), nil, cache)
+		require.NoError(t, err)
+		require.NoError(t, cache.save())
+		return cache
+	}
+
+	run("/main", "", "stamp", contexts)
+	require.Equal(t, int32(2), rule.calls.Load())
+
+	edited := []*core.FileContext{contexts[0], goContext(t, "b.go", "package b // edited\n")}
+	cache := run("/wt", "/main", "stamp", edited)
+	assert.Equal(t, int32(3), rule.calls.Load(), "only the file the worktree changed is analyzed")
+	assert.Equal(t, 1, cache.reused)
+
+	run("/main", "", "stamp", contexts)
+	assert.Equal(t, int32(3), rule.calls.Load(), "the main worktree keeps its cache")
+
+	run("/other", "/main", "stamp-2", contexts)
+	assert.Equal(t, int32(5), rule.calls.Load(), "a cache of another stamp is no start")
 }

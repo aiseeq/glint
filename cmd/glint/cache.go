@@ -84,7 +84,11 @@ type cacheContents struct {
 // over other scopes stores other files, so it keeps a cache of its own. A cache that cannot be used is reported and the root is analyzed
 // in full: the cache only saves time, it never decides a finding.
 func openRootCache(root string, scopes []string, cfg *core.Config, goTreesFromLoader bool) *resultCache {
-	cache, err := newRootCache(strings.Join(append([]string{root}, scopes...), "\n"), cfg, goTreesFromLoader)
+	seed, err := mainWorktreeKey(root, scopes)
+	var cache *resultCache
+	if err == nil {
+		cache, err = newRootCache(strings.Join(append([]string{root}, scopes...), "\n"), seed, cfg, goTreesFromLoader)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: result cache off for %s: %v\n", root, err)
 		return nil
@@ -92,7 +96,21 @@ func openRootCache(root string, scopes []string, cfg *core.Config, goTreesFromLo
 	return cache
 }
 
-func newRootCache(root string, cfg *core.Config, goTreesFromLoader bool) (*resultCache, error) {
+// mainWorktreeKey returns the cache key of the root and scopes in the main
+// worktree when the root is in a linked worktree, else "".
+func mainWorktreeKey(root string, scopes []string) (string, error) {
+	paths := append([]string{root}, scopes...)
+	for i, path := range paths {
+		mainPath, ok, err := core.MainWorktreePath(path)
+		if err != nil || !ok {
+			return "", err
+		}
+		paths[i] = mainPath
+	}
+	return strings.Join(paths, "\n"), nil
+}
+
+func newRootCache(root, seed string, cfg *core.Config, goTreesFromLoader bool) (*resultCache, error) {
 	dir, err := resultCacheDir()
 	if err != nil {
 		return nil, err
@@ -105,7 +123,7 @@ func newRootCache(root string, cfg *core.Config, goTreesFromLoader bool) (*resul
 	if err != nil {
 		return nil, err
 	}
-	return openResultCache(dir, root, buildTag(build), stamp)
+	return openResultCache(dir, root, seed, buildTag(build), stamp)
 }
 
 // buildTag is the part of a glint build's hash that names its caches.
@@ -116,41 +134,64 @@ func buildTag(build string) string {
 
 // openResultCache reads the cache of root from dir, named after the root and
 // the build: a cache of another build can never match its stamp. A cache
-// written under another stamp is discarded, a missing one starts empty. A
-// cache that is read is marked used (its mtime), which the size limit of
-// pruneResultCaches goes by.
-func openResultCache(dir, root, build, stamp string) (*resultCache, error) {
-	name := sha256.Sum256([]byte(root))
+// written under another stamp is discarded, a missing one starts from the
+// file entries of the cache of seed - the root in the main worktree, for a
+// root in a fresh worktree of the same repository: they are keyed by
+// relative path and content, so the files the worktree did not change are
+// reused - or empty. A cache that is read is marked used (its mtime), which the size
+// limit of pruneResultCaches goes by.
+func openResultCache(dir, root, seed, build, stamp string) (*resultCache, error) {
 	cache := &resultCache{
-		path:     filepath.Join(dir, hex.EncodeToString(name[:])+"-"+build+".gob"),
+		path:     resultCachePath(dir, root, build),
 		build:    build,
 		stamp:    stamp,
 		previous: make(map[string]cacheEntry),
 		current:  make(map[string]cacheEntry),
 	}
+	found, err := cache.read(cache.path)
+	if !found && err == nil && seed != "" {
+		_, err = cache.read(resultCachePath(dir, seed, build))
+		// The project findings of the main worktree went by its files
+		// outside git too, which a fresh worktree lacks.
+		cache.previousProject = nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return cache, nil
+}
+
+func resultCachePath(dir, root, build string) string {
+	name := sha256.Sum256([]byte(root))
+	return filepath.Join(dir, hex.EncodeToString(name[:])+"-"+build+".gob")
+}
+
+// read takes the entries of the cache file at path when its stamp matches;
+// found is false when there is no such file.
+func (c *resultCache) read(path string) (found bool, err error) {
 	// The file is replaced by rename and removed whole, so a read sees one
 	// complete version or none: a cache another run pruned meanwhile is a
 	// missing one.
-	data, err := os.ReadFile(cache.path)
+	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return cache, nil
+		return false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read result cache: %w", err)
+		return false, fmt.Errorf("read result cache: %w", err)
 	}
 	var stored cacheContents
 	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&stored); err != nil {
-		return nil, fmt.Errorf("decode result cache %s: %w", cache.path, err)
+		return false, fmt.Errorf("decode result cache %s: %w", path, err)
 	}
-	if stored.Stamp == stamp {
-		cache.previous = stored.Entries
-		cache.previousProject = stored.Project
+	if stored.Stamp == c.stamp {
+		c.previous = stored.Entries
+		c.previousProject = stored.Project
 		now := time.Now()
-		if err := os.Chtimes(cache.path, now, now); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("mark result cache used: %w", err)
+		if err := os.Chtimes(path, now, now); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return false, fmt.Errorf("mark result cache used: %w", err)
 		}
 	}
-	return cache, nil
+	return true, nil
 }
 
 // lookup returns the stored findings of an unchanged file, by rule name.
