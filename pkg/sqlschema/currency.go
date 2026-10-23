@@ -1,6 +1,7 @@
 package sqlschema
 
 import (
+	"maps"
 	"regexp"
 	"strings"
 
@@ -85,8 +86,12 @@ func (s *Schema) mixedSums(sel *pgquery.SelectStmt, shift int) []CurrencySum {
 		if funcName(call) != "sum" {
 			continue
 		}
+		callFixed, ok := filterFixed(call, fixed)
+		if !ok {
+			continue
+		}
 		for _, arg := range call.GetArgs() {
-			sum, ok := amountSum(tables, arg, fixed)
+			sum, ok := amountSum(tables, arg, callFixed)
 			if ok {
 				sum.Offset = int(call.GetLocation()) - shift
 				sums = append(sums, sum)
@@ -95,6 +100,24 @@ func (s *Schema) mixedSums(sel *pgquery.SelectStmt, shift int) []CurrencySum {
 		}
 	}
 	return sums
+}
+
+// filterFixed adds the columns the FILTER (WHERE ...) of an aggregate pins to
+// those the SELECT fixes: the filter fixes them for the rows of that
+// aggregate. ok is false when it pins an id, a sum over one parent's rows.
+func filterFixed(call *pgquery.FuncCall, fixed map[string]bool) (map[string]bool, bool) {
+	refs := pinnedColumns(call.GetAggFilter())
+	if len(refs) == 0 {
+		return fixed, true
+	}
+	own := maps.Clone(fixed)
+	for _, ref := range refs {
+		if ref.name == "id" || strings.HasSuffix(ref.name, "_id") {
+			return nil, false
+		}
+		own[ref.name] = true
+	}
+	return own, true
 }
 
 // ownAggregates returns the function calls of a SELECT's columns, leaving
