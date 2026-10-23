@@ -26,4 +26,13 @@ func TestMixedCurrencySums(t *testing.T) {
 	assert.Empty(t, schema.MixedCurrencySums("SELECT sender_currency, SUM(transfer_amount) FROM transfers GROUP BY 1"))
 	assert.Empty(t, schema.MixedCurrencySums("SELECT SUM(transfer_amount) FROM transfers WHERE batch_id = $1"))
 	assert.Empty(t, schema.MixedCurrencySums("SELECT SUM(attempts) FROM transfers"))
+	// The FILTER of an aggregate fixes the currency of its rows as a WHERE
+	// does, for that aggregate only.
+	assert.Empty(t, schema.MixedCurrencySums(
+		"SELECT count(*), coalesce(sum(transfer_amount) FILTER (WHERE kind IN ('a','b') AND sender_currency = 'EUR'), 0) FROM transfers WHERE created_at > $1"))
+	sums = schema.MixedCurrencySums(
+		"SELECT sum(transfer_amount) FILTER (WHERE sender_currency = 'EUR'), sum(transfer_amount) FILTER (WHERE kind = 'a') FROM transfers")
+	if assert.Len(t, sums, 1) {
+		assert.Equal(t, 68, sums[0].Offset)
+	}
 }
