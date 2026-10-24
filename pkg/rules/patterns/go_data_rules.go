@@ -541,12 +541,7 @@ func (e enumIndex) lookup(expr ast.Expr, info *types.Info) (*types.Named, map[st
 	if tv, ok := info.Types[expr]; !ok || tv.Value != nil {
 		return nil, nil
 	}
-	if call, ok := expr.(*ast.CallExpr); ok && len(call.Args) == 1 {
-		if tv, ok := info.Types[call.Fun]; ok && tv.IsType() {
-			expr = ast.Unparen(call.Args[0])
-		}
-	}
-	named, ok := types.Unalias(info.TypeOf(expr)).(*types.Named)
+	named, ok := types.Unalias(info.TypeOf(withoutConversion(info, expr))).(*types.Named)
 	if !ok {
 		return nil, nil
 	}

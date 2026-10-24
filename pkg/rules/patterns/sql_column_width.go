@@ -188,13 +188,7 @@ func paramColumn(info *types.Info, decls map[*types.Func]typedFuncDecl, schema *
 // passesParam reports an argument that is the parameter as it is, or
 // converted to another string type: string(code).
 func passesParam(info *types.Info, arg ast.Expr, param *types.Var) bool {
-	arg = ast.Unparen(arg)
-	if conv, ok := arg.(*ast.CallExpr); ok && len(conv.Args) == 1 {
-		if tv, ok := info.Types[conv.Fun]; ok && tv.IsType() {
-			arg = ast.Unparen(conv.Args[0])
-		}
-	}
-	ident, ok := arg.(*ast.Ident)
+	ident, ok := withoutConversion(info, arg).(*ast.Ident)
 	return ok && info.Uses[ident] == param
 }
 

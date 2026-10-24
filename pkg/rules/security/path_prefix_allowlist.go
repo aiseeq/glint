@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -84,19 +85,7 @@ func rootPathLists(file *ast.File) map[string]bool {
 			}
 		}
 	}
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.AssignStmt:
-			bind(node.Lhs, node.Rhs)
-		case *ast.ValueSpec:
-			names := make([]ast.Expr, len(node.Names))
-			for i, name := range node.Names {
-				names[i] = name
-			}
-			bind(names, node.Values)
-		}
-		return true
-	})
+	helpers.ForEachBinding(file, bind)
 	return lists
 }
 

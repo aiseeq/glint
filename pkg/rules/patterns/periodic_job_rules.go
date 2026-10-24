@@ -549,19 +549,7 @@ func takesContext(info *types.Info, call *ast.CallExpr) bool {
 
 // mentionsObjectIn reports a use of obj in any of stmts.
 func mentionsObjectIn(info *types.Info, stmts []ast.Stmt, obj types.Object) bool {
-	for _, stmt := range stmts {
-		found := false
-		ast.Inspect(stmt, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok && info.ObjectOf(id) == obj {
-				found = true
-			}
-			return !found
-		})
-		if found {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(stmts, func(stmt ast.Stmt) bool { return mentionsObject(info, stmt, obj) })
 }
 
 // markerRelease lead the names of calls that take a marker back.

@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"golang.org/x/tools/go/types/typeutil"
 )
 
@@ -126,19 +127,7 @@ func (r *UnboundedResponseReadRule) decompressedReads(ctx *core.FileContext, inf
 			}
 		}
 	}
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.AssignStmt:
-			recordValues(node.Lhs, node.Rhs)
-		case *ast.ValueSpec:
-			names := make([]ast.Expr, len(node.Names))
-			for i, name := range node.Names {
-				names[i] = name
-			}
-			recordValues(names, node.Values)
-		}
-		return true
-	})
+	helpers.ForEachBinding(ctx.GoAST, recordValues)
 
 	var violations []*core.Violation
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {

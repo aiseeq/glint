@@ -246,15 +246,22 @@ func (r *NilSliceRule) isStatedSlice(ctx *core.FileContext, info *types.Info, pr
 	if _, isSlice := obj.Type().Underlying().(*types.Slice); !isSlice {
 		return false
 	}
+	file := declarationFile(ctx, project, obj.Pos())
+	return file != nil && declarationStatesSlice(file, obj.Pos())
+}
+
+// declarationFile returns the syntax of the file that holds pos: the analyzed
+// file or another file of the project; nil when pos lies outside the analyzed
+// files, where the declaration is unknown.
+func declarationFile(ctx *core.FileContext, project *core.GoProjectContext, pos token.Pos) *ast.File {
 	file := ctx.GoAST
-	if pos := obj.Pos(); pos < file.FileStart || pos >= file.FileEnd {
-		declCtx, err := project.FileForPosition(pos)
-		if err != nil || declCtx.GoAST == nil {
-			return false // declared outside the analyzed files
-		}
-		file = declCtx.GoAST
+	if pos >= file.FileStart && pos < file.FileEnd {
+		return file
 	}
-	return declarationStatesSlice(file, obj.Pos())
+	if declCtx, err := project.FileForPosition(pos); err == nil {
+		return declCtx.GoAST
+	}
+	return nil
 }
 
 // nilMeansUnset reports a variable declared without a value and set, on some
@@ -266,13 +273,9 @@ func (r *NilSliceRule) nilMeansUnset(ctx *core.FileContext, info *types.Info, pr
 	if obj == nil {
 		return false
 	}
-	file := ctx.GoAST
-	if pos := obj.Pos(); pos < file.FileStart || pos >= file.FileEnd {
-		declCtx, err := project.FileForPosition(pos)
-		if err != nil || declCtx.GoAST == nil {
-			return false
-		}
-		file = declCtx.GoAST
+	file := declarationFile(ctx, project, obj.Pos())
+	if file == nil {
+		return false
 	}
 	path, _ := astutil.PathEnclosingInterval(file, obj.Pos(), obj.Pos())
 	if len(path) < 2 {
