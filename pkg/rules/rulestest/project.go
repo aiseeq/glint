@@ -24,8 +24,15 @@ const defaultGoMod = "module example.com/rulestest\n\ngo 1.24\n"
 // together with the file contexts of its Go files in path order.
 func Module(t *testing.T, files map[string]string) (string, []*core.FileContext) {
 	t.Helper()
-
 	root := t.TempDir()
+	return root, ModuleIn(t, root, files)
+}
+
+// ModuleIn is Module in the given directory, for a test of a module root
+// whose path matters (a name with glob metacharacters).
+func ModuleIn(t *testing.T, root string, files map[string]string) []*core.FileContext {
+	t.Helper()
+
 	names := make([]string, 0, len(files)+1)
 	for name := range files {
 		names = append(names, name)
@@ -55,7 +62,7 @@ func Module(t *testing.T, files map[string]string) (string, []*core.FileContext)
 		contexts = append(contexts, ctx)
 	}
 
-	return root, contexts
+	return contexts
 }
 
 // Project loads the module written by Module as a typed Go project.
