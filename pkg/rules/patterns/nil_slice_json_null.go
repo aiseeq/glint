@@ -35,7 +35,9 @@ func init() {
 // slice is followed from the function that declares it - through functions
 // returning it unchanged and through interface methods some implementation
 // of which returns it - to a JSON field without omitempty, a key of a map
-// written by an HTTP handler, or json.Marshal.
+// written by an HTTP handler, json.Marshal, or a response helper that wraps
+// its parameter into an envelope (a struct or map literal, inline or in a
+// local) and encodes it.
 type NilSliceJSONNullRule struct {
 	*rules.BaseRule
 }
@@ -71,9 +73,13 @@ type typedFunc struct {
 
 // AnalyzeGoProject reports the nil slice declarations whose value reaches JSON.
 func (r *NilSliceJSONNullRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	decls, err := funcDeclsByObject(ctx)
+	if err != nil {
+		return nil, err
+	}
 	funcs := projectFuncDecls(ctx)
 	sources := nilSliceFuncs(funcs, projectInterfaces(ctx))
-	responders := jsonResponders(funcs)
+	responders := jsonResponders(funcs, decls)
 
 	reported := make(map[*ast.Ident]bool)
 	var violations []*core.Violation
@@ -112,13 +118,16 @@ func (r *NilSliceJSONNullRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*
 	return violations, nil
 }
 
-// jsonResponders returns the functions that write one of their parameters
-// to an http.ResponseWriter as JSON, with the index of that parameter:
+// jsonResponders returns the functions that write some of their parameters
+// to an http.ResponseWriter as JSON, with the indexes of those parameters:
 // respondJSON(w, status, payload). A function that passes its parameter on
 // to a responder - as it is or wrapped into the response envelope
-// (Response[T]{Data: dataPtr(data)}) - is a responder too.
-func jsonResponders(funcs []typedFunc) map[*types.Func]int {
-	responders := make(map[*types.Func]int)
+// (Response[T]{Data: dataPtr(data)}) - is a responder too. Every parameter
+// that may hold a list and reaches the JSON on some path counts: a helper
+// encoding the message on its error path and the data on success, or two
+// lists of one envelope, keeps each of them.
+func jsonResponders(funcs []typedFunc, decls map[*types.Func]typedFuncDecl) map[*types.Func][]int {
+	responders := make(map[*types.Func][]int)
 	for changed := true; changed; {
 		changed = false
 		for _, fn := range funcs {
@@ -129,8 +138,8 @@ func jsonResponders(funcs []typedFunc) map[*types.Func]int {
 			if _, done := responders[obj]; done {
 				continue
 			}
-			if i, ok := respondedParam(fn, obj, responders); ok {
-				responders[obj] = i
+			if indexes := respondedParams(fn, obj, decls, responders); len(indexes) > 0 {
+				responders[obj] = indexes
 				changed = true
 			}
 		}
@@ -138,122 +147,242 @@ func jsonResponders(funcs []typedFunc) map[*types.Func]int {
 	return responders
 }
 
-// respondedParam returns the parameter a function encodes as JSON itself or
+// respondedParams returns the parameters a function encodes as JSON itself or
 // hands, carried by the payload, to a responder.
-func respondedParam(fn typedFunc, obj *types.Func, responders map[*types.Func]int) (int, bool) {
+func respondedParams(fn typedFunc, obj *types.Func, decls map[*types.Func]typedFuncDecl, responders map[*types.Func][]int) []int {
 	params := obj.Signature().Params()
-	index, found := 0, false
+	responded := make([]bool, params.Len())
 	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || found {
-			return !found
-		}
-		var payload ast.Expr
-		switch {
-		case jsonEncodeCall(call, fn.info) && len(call.Args) > 0:
-			payload = call.Args[0]
-		default:
-			payload = responderPayload(call, fn.info, responders)
-		}
-		if payload == nil {
+		if !ok {
 			return true
 		}
-		// The envelope a writer encodes is a struct; beside the list in an
-		// envelope a message string is carried too, and the list wins.
-		carried := -1
-		for i := range params.Len() {
-			if !carriesParam(payload, params.At(i), fn.info) {
-				continue
-			}
-			if carried < 0 || mayHoldList(params.At(i).Type()) && !mayHoldList(params.At(carried).Type()) {
-				carried = i
+		payloads := responderPayloads(call, fn.info, responders)
+		if jsonEncodeCall(call, fn.info) && len(call.Args) > 0 {
+			payloads = call.Args[:1]
+		}
+		for _, payload := range payloads {
+			for i := range params.Len() {
+				// A message string or a status code beside the list is
+				// not where a nil slice reaches the client.
+				if !responded[i] && !isBasicType(params.At(i).Type()) && carriesParam(payload, params.At(i), fn, decls) {
+					responded[i] = true
+				}
 			}
 		}
-		if carried >= 0 {
-			index, found = carried, true
-		}
-		return !found
+		return true
 	})
-	return index, found
+	var indexes []int
+	for i, ok := range responded {
+		if ok {
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
 }
 
-// mayHoldList reports a parameter type a list can be passed as: a slice, a
-// type parameter or an interface; a message string beside it in the
-// envelope is not the payload.
+func isBasicType(t types.Type) bool {
+	_, ok := t.Underlying().(*types.Basic)
+	return ok
+}
+
+// mayHoldList reports a field type a list can be stored as: a slice, a type
+// parameter, an interface, or a pointer (dataPtr(data) into Data *T).
 func mayHoldList(t types.Type) bool {
 	if _, ok := t.(*types.TypeParam); ok {
 		return true
 	}
 	switch t.Underlying().(type) {
-	case *types.Slice, *types.Interface:
+	case *types.Slice, *types.Interface, *types.Pointer:
 		return true
 	}
 	return false
 }
 
+// paramCarrier follows a parameter of a function into an expression of its
+// body, through the locals the body assigns.
+type paramCarrier struct {
+	fn    typedFunc
+	decls map[*types.Func]typedFuncDecl
+	param *types.Var
+	seen  map[types.Object]bool
+}
+
 // carriesParam reports a payload that encodes the parameter's value as it
-// is: the parameter, its address, a call returning it or a pointer to it
-// (dataPtr(data)), or a field of a struct literal holding one of these. A
-// slice field tagged omitempty is left out when nil, so it carries no null;
-// a pointer to the slice in an omitempty field still does.
-func carriesParam(expr ast.Expr, param *types.Var, info *types.Info) bool {
+// is: the parameter, its address, a call of a loaded helper that returns
+// its argument or the argument's address (dataPtr(data)), a local assigned
+// one of these, a value of a map literal, or a field of a struct literal -
+// keyed or positional - holding one of these. A helper that returns
+// anything else may replace nil (nonNil(data) returns []T{} for nil) and is
+// a value of its own. A field tagged json:"-" is not encoded, and a slice
+// or type parameter field tagged omitempty is left out when nil, so neither
+// carries a null; a pointer or an interface holding the slice is not empty,
+// so an omitempty field of that type still does.
+func carriesParam(expr ast.Expr, param *types.Var, fn typedFunc, decls map[*types.Func]typedFuncDecl) bool {
+	c := paramCarrier{fn: fn, decls: decls, param: param, seen: make(map[types.Object]bool)}
+	return c.carries(expr)
+}
+
+func (c paramCarrier) carries(expr ast.Expr) bool {
 	switch e := ast.Unparen(expr).(type) {
 	case *ast.Ident:
-		return info.Uses[e] == param
+		return c.carriesLocal(e)
 	case *ast.UnaryExpr:
-		return e.Op == token.AND && carriesParam(e.X, param, info)
+		return e.Op == token.AND && c.carries(e.X)
 	case *ast.CallExpr:
-		result := info.TypeOf(e)
-		if result == nil {
+		return c.carriesThroughCall(e)
+	case *ast.CompositeLit:
+		return c.carriesLiteral(e)
+	}
+	return false
+}
+
+// carriesLocal reports the parameter itself or a local of the function some
+// assignment of which carries it: response := Response[T]{Data: &data}.
+func (c paramCarrier) carriesLocal(id *ast.Ident) bool {
+	obj := c.fn.info.Uses[id]
+	if obj == c.param {
+		return true
+	}
+	v, ok := obj.(*types.Var)
+	if !ok || v.IsField() || c.seen[obj] || v.Pos() < c.fn.decl.Body.Pos() || v.Pos() >= c.fn.decl.Body.End() {
+		return false
+	}
+	c.seen[obj] = true
+	carried := false
+	ast.Inspect(c.fn.decl.Body, func(n ast.Node) bool {
+		if carried {
 			return false
 		}
-		if ptr, ok := result.Underlying().(*types.Pointer); ok {
-			result = ptr.Elem()
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			if len(node.Lhs) != len(node.Rhs) {
+				return true
+			}
+			for i, lhs := range node.Lhs {
+				if name, ok := lhs.(*ast.Ident); ok && c.names(name, obj) && c.carries(node.Rhs[i]) {
+					carried = true
+				}
+			}
+		case *ast.ValueSpec:
+			for i, name := range node.Names {
+				if i < len(node.Values) && c.fn.info.Defs[name] == obj && c.carries(node.Values[i]) {
+					carried = true
+				}
+			}
 		}
-		if !types.Identical(result, param.Type()) {
-			return false // len(data), a conversion: a value of its own
+		return true
+	})
+	return carried
+}
+
+func (c paramCarrier) names(id *ast.Ident, obj types.Object) bool {
+	return c.fn.info.Defs[id] == obj || c.fn.info.Uses[id] == obj
+}
+
+// carriesThroughCall reports a call of a loaded helper whose every return
+// is its parameter or that parameter's address, called with the carried
+// value: dataPtr(data).
+func (c paramCarrier) carriesThroughCall(call *ast.CallExpr) bool {
+	fn, ok := typeutil.Callee(c.fn.info, call).(*types.Func)
+	if !ok {
+		return false
+	}
+	callee, ok := c.decls[fn.Origin()]
+	if !ok {
+		return false
+	}
+	params := fn.Origin().Signature().Params()
+	for i, arg := range call.Args {
+		if i < params.Len() && c.carries(arg) {
+			return returnsOnlyParam(callee, params.At(i))
 		}
-		for _, arg := range e.Args {
-			if carriesParam(arg, param, info) {
+	}
+	return false
+}
+
+// returnsOnlyParam reports a function every return of which is the
+// parameter or its address: the value comes out nil when it goes in nil.
+func returnsOnlyParam(fn typedFuncDecl, param *types.Var) bool {
+	returns := 0
+	only := true
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			if len(node.Results) != 1 {
+				only = false
+				return false
+			}
+			returns++
+			result := ast.Unparen(node.Results[0])
+			if unary, ok := result.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+				result = ast.Unparen(unary.X)
+			}
+			if id, ok := result.(*ast.Ident); !ok || fn.info.Uses[id] != param {
+				only = false
+			}
+		}
+		return only
+	})
+	return only && returns > 0
+}
+
+// carriesLiteral reports a map literal with a value carrying the parameter,
+// or a struct literal with a JSON list field carrying it.
+func (c paramCarrier) carriesLiteral(lit *ast.CompositeLit) bool {
+	typ := c.fn.info.TypeOf(lit)
+	if typ == nil {
+		return false
+	}
+	if _, ok := typ.Underlying().(*types.Map); ok {
+		for _, elt := range lit.Elts {
+			if kv, ok := elt.(*ast.KeyValueExpr); ok && c.carries(kv.Value) {
 				return true
 			}
 		}
-	case *ast.CompositeLit:
-		st, ok := pointedStruct(info.TypeOf(e))
-		if !ok {
-			return false
-		}
-		for _, elt := range e.Elts {
-			kv, ok := elt.(*ast.KeyValueExpr)
-			if !ok || !carriesParam(kv.Value, param, info) {
-				continue
-			}
+		return false
+	}
+	st, ok := pointedStruct(typ)
+	if !ok {
+		return false
+	}
+	for i, elt := range lit.Elts {
+		field, value := "", elt
+		if kv, keyed := elt.(*ast.KeyValueExpr); keyed {
 			key, ok := kv.Key.(*ast.Ident)
 			if !ok {
 				continue
 			}
-			if isSliceType(info.TypeOf(kv.Value)) {
-				if _, listed := listJSONField(st, key.Name); !listed {
-					continue
-				}
-			}
+			field, value = key.Name, kv.Value
+		} else if i < st.NumFields() {
+			// Response[T]{true, dataPtr(data)} sets the fields in order.
+			field = st.Field(i).Name()
+		} else {
+			continue
+		}
+		if _, listed := listJSONField(st, field); listed && c.carries(value) {
 			return true
 		}
 	}
 	return false
 }
 
-// responderPayload returns the argument a call passes as the JSON payload
+// responderPayloads returns the arguments a call passes as the JSON payload
 // of a responder, nil for any other call.
-func responderPayload(call *ast.CallExpr, info *types.Info, responders map[*types.Func]int) ast.Expr {
+func responderPayloads(call *ast.CallExpr, info *types.Info, responders map[*types.Func][]int) []ast.Expr {
 	fn, ok := typeutil.Callee(info, call).(*types.Func)
 	if !ok {
 		return nil
 	}
-	if i, ok := responders[fn.Origin()]; ok && i < len(call.Args) {
-		return call.Args[i]
+	var payloads []ast.Expr
+	for _, i := range responders[fn.Origin()] {
+		if i < len(call.Args) {
+			payloads = append(payloads, call.Args[i])
+		}
 	}
-	return nil
+	return payloads
 }
 
 // appendOnlyField is a JSON list field of a local response value that only
@@ -277,7 +406,7 @@ type responseLocal struct {
 // appendOnlyFields returns the locals of a function built as a JSON struct
 // without a list field, that field then only appended to inside a loop, and
 // the local encoded or passed to a JSON responder.
-func appendOnlyFields(fn typedFunc, responders map[*types.Func]int) []appendOnlyField {
+func appendOnlyFields(fn typedFunc, responders map[*types.Func][]int) []appendOnlyField {
 	locals := responseLocals(fn)
 	if len(locals) == 0 {
 		return nil
@@ -337,7 +466,7 @@ func responseLocals(fn typedFunc) map[types.Object]*responseLocal {
 // value encoded.
 type responseLocalWalker struct {
 	fn         typedFunc
-	responders map[*types.Func]int
+	responders map[*types.Func][]int
 	locals     map[types.Object]*responseLocal
 }
 
@@ -374,8 +503,10 @@ func (w responseLocalWalker) visit(root ast.Node, inLoop bool) {
 				local.escaped = true
 			}
 		case *ast.CallExpr:
-			if local, _ := w.local(w.payload(x)); local != nil {
-				local.reaches = true
+			for _, payload := range w.payloads(x) {
+				if local, _ := w.local(payload); local != nil {
+					local.reaches = true
+				}
 			}
 		}
 		return true
@@ -401,16 +532,13 @@ func (w responseLocalWalker) assign(stmt *ast.AssignStmt, inLoop bool) {
 	}
 }
 
-// payload returns what a call writes to the client as JSON: the payload of
-// a responder, or the value a handler encodes; nil for any other call.
-func (w responseLocalWalker) payload(call *ast.CallExpr) ast.Expr {
-	if payload := responderPayload(call, w.fn.info, w.responders); payload != nil {
-		return payload
-	}
+// payloads returns what a call writes to the client as JSON: the payloads
+// of a responder, or the value a handler encodes; nil for any other call.
+func (w responseLocalWalker) payloads(call *ast.CallExpr) []ast.Expr {
 	if jsonEncodeCall(call, w.fn.info) && len(call.Args) > 0 && hasResponseWriterParam(w.fn.decl.Type.Params) {
-		return call.Args[0]
+		return call.Args[:1]
 	}
-	return nil
+	return responderPayloads(call, w.fn.info, w.responders)
 }
 
 // appendsToField reports v.F = append(v.F, ...).
@@ -782,7 +910,7 @@ type nilSliceSink struct {
 // nilSliceSinks returns the places a function puts a possibly nil slice into
 // JSON: a tagged field without omitempty, a key of a map an HTTP handler
 // builds, or the argument of json.Marshal or Encode.
-func nilSliceSinks(fn typedFunc, sources map[*types.Func]nilSliceSource, responders map[*types.Func]int) []nilSliceSink {
+func nilSliceSinks(fn typedFunc, sources map[*types.Func]nilSliceSource, responders map[*types.Func][]int) []nilSliceSink {
 	locals := nilSliceLocals(fn, sources)
 	handler := hasResponseWriterParam(fn.decl.Type.Params)
 	var sinks []nilSliceSink
@@ -846,7 +974,7 @@ func nilSliceSinks(fn typedFunc, sources map[*types.Func]nilSliceSource, respond
 			if handler && jsonEncodeCall(node, fn.info) && len(node.Args) > 0 {
 				add(node.Args[0], node, "json encoding")
 			}
-			if payload := responderPayload(node, fn.info, responders); payload != nil {
+			for _, payload := range responderPayloads(node, fn.info, responders) {
 				add(payload, node, "the JSON response")
 			}
 		}
@@ -866,12 +994,13 @@ func pointedStruct(t types.Type) (*types.Struct, bool) {
 	return st, ok
 }
 
-// listJSONField returns the JSON name of a slice field tagged without
-// omitempty.
+// listJSONField returns the JSON name of a field a list can be stored in
+// that is written when the list is nil: tagged without omitempty, or a
+// pointer or interface holding the list, which omitempty does not drop.
 func listJSONField(st *types.Struct, field string) (string, bool) {
 	for i := range st.NumFields() {
 		f := st.Field(i)
-		if f.Name() != field || !isSliceType(f.Type()) {
+		if f.Name() != field || !mayHoldList(f.Type()) {
 			continue
 		}
 		tag, ok := reflect.StructTag(st.Tag(i)).Lookup("json")
@@ -888,7 +1017,7 @@ func listJSONField(st *types.Struct, field string) (string, bool) {
 			return "", false
 		}
 		for _, opt := range parts[1:] {
-			if opt == "omitempty" || opt == "omitzero" {
+			if (opt == "omitempty" || opt == "omitzero") && !holdsListBeyondOmitEmpty(f.Type()) {
 				return "", false
 			}
 		}
@@ -899,6 +1028,20 @@ func listJSONField(st *types.Struct, field string) (string, bool) {
 		return name, true
 	}
 	return "", false
+}
+
+// holdsListBeyondOmitEmpty reports a field type omitempty and omitzero keep
+// when it holds a nil list: a non-nil pointer or interface around it is not
+// empty. A type parameter field is the list itself and is dropped.
+func holdsListBeyondOmitEmpty(t types.Type) bool {
+	if _, ok := t.(*types.TypeParam); ok {
+		return false
+	}
+	switch t.Underlying().(type) {
+	case *types.Interface, *types.Pointer:
+		return true
+	}
+	return false
 }
 
 // jsonEncodeCall reports json.Marshal, json.MarshalIndent or
