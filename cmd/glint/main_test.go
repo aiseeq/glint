@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"go/ast"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +15,82 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/patterns"
 	"github.com/aiseeq/glint/pkg/rules/typesafety"
 )
+
+func TestMainE2EHelper(t *testing.T) {
+	if os.Getenv("GLINT_MAIN_E2E") != "1" {
+		return
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(os.Getenv("GLINT_MAIN_ARGS")), &args); err != nil {
+		t.Fatal(err)
+	}
+	os.Args = append([]string{"glint"}, args...)
+	main()
+}
+
+func TestMainChangesDirectoryBeforeLoadingConfigAndPaths(t *testing.T) {
+	base := t.TempDir()
+	first := filepath.Join(base, "first")
+	project := filepath.Join(first, "project")
+	if err := os.MkdirAll(project, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("settings:\n  fail_on: medium\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "go.mod"), []byte("module projectA\n\ngo 1.24\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "sample.go"), []byte("package projectA\n\nfunc Example(value interface{}) {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(base)
+
+	// The medium finding fails the run only under the fail_on of the -C
+	// project's config: the default fail_on (high) would exit 0.
+	output, err := mainSubprocess(t, []string{"-C", "first", "-C", "project", "check", "-r", "interface-any", "-s", "low", "sample.go"}).CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("got exit error %v, want 1 from fail_on: medium of the -C project (output: %s)", err, output)
+	}
+	if !strings.Contains(string(output), "interface-any") || !strings.Contains(string(output), "sample.go") {
+		t.Fatalf("expected finding from -C project, got:\n%s", output)
+	}
+}
+
+func TestMainMissingDirectoryIsUsageError(t *testing.T) {
+	base := t.TempDir()
+	t.Chdir(base)
+	cmd := mainSubprocess(t, []string{"-C", "missing", "rules"})
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("missing -C directory succeeded: %s", output)
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != exitUsage {
+		t.Fatalf("got exit error %v, want usage exit code 2 (output: %s)", err, output)
+	}
+	if !strings.Contains(string(output), `-C "missing"`) {
+		t.Fatalf("error does not name missing -C directory: %s", output)
+	}
+}
+
+// mainSubprocess runs main with args in a child of the test binary, so the
+// os.Exit and os.Chdir of main do not touch the test process.
+func mainSubprocess(t *testing.T, args []string) *exec.Cmd {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(executable, "-test.run=^TestMainE2EHelper$")
+	cmd.Env = append(os.Environ(), "GLINT_MAIN_E2E=1", "GLINT_MAIN_ARGS="+string(encoded))
+	return cmd
+}
 
 func TestGetProjectRootsExpandsRecursiveCurrentDirectory(t *testing.T) {
 	want, err := os.Getwd()
