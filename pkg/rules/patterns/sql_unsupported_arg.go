@@ -5,6 +5,8 @@ import (
 	"go/types"
 	"strings"
 
+	"golang.org/x/tools/go/types/typeutil"
+
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 )
@@ -13,15 +15,17 @@ func init() {
 	rules.Register(NewSQLUnsupportedArgRule())
 }
 
-// SQLUnsupportedArgRule detects a slice or a map passed as a query argument
-// through database/sql (or sqlx) when the project's driver is lib/pq:
+// SQLUnsupportedArgRule detects a slice, an array or a map passed as a query
+// argument through database/sql (or sqlx) when the project's driver is lib/pq:
 //
 //	db.ExecContext(ctx, `UPDATE sessions SET permissions = $1 WHERE id = $2`, session.Permissions, id)
 //
-// lib/pq encodes no Go slice but []byte: the call fails at run time with
-// "sql: converting argument $1 type: unsupported type []string". Wrap it
-// (pq.Array(v)) or encode it (json.Marshal). pgx accepts slices, so a
-// project on pgx's database/sql driver is not checked.
+// lib/pq encodes no Go slice but []byte, and no array or map: the call fails
+// at run time with "sql: converting argument $1 type: unsupported type
+// []string". A pointer to one fails the same way, as database/sql
+// dereferences it; a driver.Valuer encodes itself. Wrap it (pq.Array(v)) or
+// encode it (json.Marshal). pgx accepts slices, so a project on pgx's
+// database/sql driver is not checked.
 type SQLUnsupportedArgRule struct {
 	*rules.BaseRule
 }
@@ -31,7 +35,7 @@ func NewSQLUnsupportedArgRule() *SQLUnsupportedArgRule {
 	return &SQLUnsupportedArgRule{BaseRule: rules.NewBaseRule(
 		"sql-unsupported-arg",
 		"patterns",
-		"Detects a slice or a map passed as a query argument to lib/pq, which cannot encode it — the query fails at run time",
+		"Detects a slice other than []byte, an array or a map (or a pointer to one) passed without a driver.Valuer as a query argument to lib/pq, which cannot encode it — the query fails at run time",
 		core.SeverityHigh,
 	)}
 }
@@ -48,8 +52,8 @@ var queryMethods = map[string]bool{
 	"Get": true, "GetContext": true, "Select": true, "SelectContext": true, "MustExec": true, "MustExecContext": true,
 }
 
-// AnalyzeGoProject reports the slice and map arguments of queries in a
-// project on lib/pq.
+// AnalyzeGoProject reports the slice, array and map arguments of queries in
+// a project on lib/pq.
 func (r *SQLUnsupportedArgRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	if !onLibPQ(ctx) {
 		return nil, nil
@@ -61,11 +65,10 @@ func (r *SQLUnsupportedArgRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 			if !ok {
 				return true
 			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || !queryMethods[sel.Sel.Name] || !sqlHandle(info.TypeOf(sel.X)) {
+			args, isQuery := sqlQueryArgs(call, info)
+			if !isQuery {
 				return true
 			}
-			args := call.Args
 			if call.Ellipsis.IsValid() {
 				args = args[:len(args)-1] // the spread argument list itself
 			}
@@ -77,7 +80,7 @@ func (r *SQLUnsupportedArgRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 				if file.IsSuppressed(line, r.Name()) {
 					continue
 				}
-				v := r.CreateViolation(file.RelPath, line, "Query argument of type "+types.TypeString(info.TypeOf(arg), types.RelativeTo(nil))+" — lib/pq cannot encode a slice or a map, and the query fails at run time")
+				v := r.CreateViolation(file.RelPath, line, "Query argument of type "+types.TypeString(info.TypeOf(arg), types.RelativeTo(nil))+" — lib/pq cannot encode a slice, an array or a map, and the query fails at run time")
 				v.WithCode(strings.TrimSpace(file.GetLine(line)))
 				v.WithSuggestion("Wrap the slice in pq.Array(...), or encode the value (json.Marshal) for a json column")
 				violations = append(violations, v)
@@ -86,6 +89,34 @@ func (r *SQLUnsupportedArgRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 		})
 		return violations
 	})
+}
+
+// sqlQueryArgs returns the query arguments of a call to a database/sql or
+// sqlx query method, or to an sqlx package-level helper that passes them on
+// (sqlx.Get, sqlx.Select): the variadic tail of the callee. A destination,
+// the query string, and the single argument of a named query (NamedStmt.Exec,
+// sqlx.NamedExec: a map or a struct bound by parameter names) are not.
+func sqlQueryArgs(call *ast.CallExpr, info *types.Info) ([]ast.Expr, bool) {
+	fn, ok := typeutil.Callee(info, call).(*types.Func)
+	if !ok || !queryMethods[fn.Name()] {
+		return nil, false
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || !sig.Variadic() {
+		return nil, false
+	}
+	if recv := sig.Recv(); recv != nil {
+		if !sqlHandle(recv.Type()) {
+			return nil, false
+		}
+	} else if fn.Pkg() == nil || fn.Pkg().Path() != sqlxPath {
+		return nil, false
+	}
+	fixed := sig.Params().Len() - 1
+	if len(call.Args) < fixed {
+		return nil, false
+	}
+	return call.Args[fixed:], true
 }
 
 // onLibPQ reports a project importing lib/pq and not pgx's database/sql
@@ -108,9 +139,12 @@ func onLibPQ(ctx *core.GoProjectContext) bool {
 	return pq
 }
 
-// sqlHandle reports a database/sql or sqlx handle: DB, Tx, Conn, Stmt.
+// sqlHandle reports a receiver of a database/sql or sqlx type: DB, Tx, Conn,
+// Stmt, and the sqlx interfaces over them (Queryer, Ext). A method promoted
+// from an embedded handle, or called through an alias of the pointer type,
+// has the handle as its receiver.
 func sqlHandle(t types.Type) bool {
-	if ptr, ok := t.(*types.Pointer); ok {
+	if ptr, ok := types.Unalias(t).(*types.Pointer); ok {
 		t = ptr.Elem()
 	}
 	named, ok := types.Unalias(t).(*types.Named)
@@ -118,27 +152,39 @@ func sqlHandle(t types.Type) bool {
 		return false
 	}
 	path := named.Obj().Pkg().Path()
-	return path == "database/sql" || path == "github.com/jmoiron/sqlx"
+	return path == "database/sql" || path == sqlxPath
 }
 
-// unencodable reports a slice other than []byte, or a map, that does not
-// encode itself (no Value method).
+// unencodable reports what database/sql's default converter rejects, as
+// lib/pq leaves it the conversion: a slice other than []byte, an array (of
+// bytes too), a map, or a pointer to one of them, unless the type is a
+// driver.Valuer.
 func unencodable(t types.Type) bool {
-	if t == nil {
-		return false
-	}
-	if ms := types.NewMethodSet(t); ms.Lookup(nil, "Value") != nil {
-		return false
-	}
-	if ms := types.NewMethodSet(types.NewPointer(t)); ms.Lookup(nil, "Value") != nil {
+	if t == nil || driverValuer(t) {
 		return false
 	}
 	switch u := t.Underlying().(type) {
+	case *types.Pointer:
+		return unencodable(u.Elem())
 	case *types.Slice:
 		basic, ok := u.Elem().Underlying().(*types.Basic)
 		return !ok || basic.Kind() != types.Byte
-	case *types.Map:
+	case *types.Map, *types.Array:
 		return true
 	}
 	return false
+}
+
+// driverValuer reports a method set with Value() (driver.Value, error), the
+// one database/sql calls. A Value method of another signature is not called,
+// and one on *T does not serve a T passed by value: database/sql does not
+// take the argument's address.
+func driverValuer(t types.Type) bool {
+	method := types.NewMethodSet(t).Lookup(nil, "Value")
+	if method == nil {
+		return false
+	}
+	sig, ok := method.Type().(*types.Signature)
+	return ok && sig.Params().Len() == 0 && sig.Results().Len() == 2 &&
+		isNamedType(sig.Results().At(0).Type(), "database/sql/driver", "Value") && isErrorType(sig.Results().At(1).Type())
 }
