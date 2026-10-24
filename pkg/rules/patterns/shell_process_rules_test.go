@@ -82,11 +82,12 @@ docker exec "$c" sh -c 'for p in $(pgrep -f "^C:.*game.exe"); do echo $p; done'
 ssh "$host" "pgrep -x sway"
 `)
 	// The pattern names the script itself: the $( ) subshell carries the
-	// script's command line, and pgrep finds it.
+	// script's command line, and pgrep finds it. A class does not help: the
+	// command line holds the name, and the class matches it.
 	shellWanted(t, "shell-pgrep-matches-own-wrapper", "stream-watch.sh", `#!/bin/bash
 P=$(pgrep -f stream-watch.sh | head -1) # want
 S=$(pgrep -f other-session.sh | head -1)
-Q=$(pgrep -f '[s]tream-watch.sh' | head -1)
+Q=$(pgrep -f '[s]tream-watch.sh' | head -1) # want
 `)
 	// The script spans lines, or is a heredoc captured and passed to bash -c:
 	// the wrapper's command line still carries the pattern.
@@ -451,4 +452,46 @@ open_menu() {
     done
 }
 `)
+}
+
+func TestShellPgrepMatchesOwnScript(t *testing.T) {
+	shellWanted(t, "shell-pgrep-matches-own-wrapper", "stream-watch.sh", `#!/bin/bash
+P=$(pgrep -f stream-watch.sh) # want
+Q=$(pgrep -f 'stream-watch.*' | head -1) # want
+S=$(pgrep -f "bash stream-watch.sh" | head -1) # want
+T=$(pgrep -f stream.watch | head -1) # want
+U=$(pgrep -f "watch --child" | head -1)
+V=$(pgrep -Af stream-watch.sh | head -1)
+W=$(pgrep -vf stream-watch.sh | head -1)
+X=$(pgrep -f '[s]tream-watch.sh' | head -1) # want
+Y=$(pgrep -f stream-watch.sh|head -1) # want
+Z=$(pgrep -f "stream-watch.sh") # want
+B=$(pgrep -f stream-watch.sh	| head -1) # want
+C=$(pgrep -f stream\.watch | head -1) # want
+D=$(pgrep -f "stream\.watch" | head -1)
+E=$(pgrep -f '^stream-watch' | head -1)
+F=$(pgrep -f 'stream(watch' | head -1)
+G=$(pgrep -lf stream-watch.sh | head -1) # want
+`)
+	// The path the script is started by is the one relative to the root,
+	// not where the checkout lies: the root of a test is a temporary
+	// directory named after the test.
+	shellWanted(t, "shell-pgrep-matches-own-wrapper", "scripts/stream-watch.sh", `#!/bin/bash
+P=$(pgrep -f scripts/stream-watch.sh | head -1) # want
+Q=$(pgrep -f TestShellPgrepMatchesOwnScript | head -1)
+`)
+}
+
+func TestPgrepExcludesSelf(t *testing.T) {
+	for options, want := range map[string]bool{
+		"pgrep -Af ":      true,
+		"pgrep -v -f ":    true,
+		"pgrep -lf ":      false,
+		"pgrep -n -f ":    false,
+		"pgrep --env -f ": false,
+	} {
+		if got := pgrepExcludesSelf(options); got != want {
+			t.Errorf("pgrepExcludesSelf(%q) = %v, want %v", options, got, want)
+		}
+	}
 }

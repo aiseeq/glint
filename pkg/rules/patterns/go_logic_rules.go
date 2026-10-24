@@ -1114,7 +1114,8 @@ func collectFamilyConsts(file *core.FileContext, info *types.Info, families map[
 				continue
 			}
 			for i, name := range value.Names {
-				if i >= len(value.Values) {
+				// The blank identifier names no constant a caller could mix up.
+				if name.Name == "_" || i >= len(value.Values) {
 					continue
 				}
 				lit, ok := ast.Unparen(value.Values[i]).(*ast.BasicLit)
@@ -1126,12 +1127,17 @@ func collectFamilyConsts(file *core.FileContext, info *types.Info, families map[
 					continue
 				}
 				member := familyConst{file, name, constant.StringVal(tv.Value)}
+				// Defaults and limits repeat one another on purpose, in a
+				// block of their own as well as across the package.
+				family := familyOf(name.Name)
+				if looseFamilies[family] {
+					continue
+				}
 				// One const block of one type is a family too: rule numbers
 				// named by what they do share no prefix.
 				block := fmt.Sprintf("block %s:%d %s", file.RelPath, gen.Pos(), tv.Type)
 				families[block] = append(families[block], member)
-				family := familyOf(name.Name)
-				if family == "" || looseFamilies[family] {
+				if family == "" {
 					continue
 				}
 				// Typed constants of different enums share values on purpose:

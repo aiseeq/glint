@@ -17,7 +17,7 @@ func init() {
 		"Detects a file name built from $(date) with the time of day only (%H%M%S, no date, no $$), or a name stamp taken twice for files that belong together — parallel runs collide, and two stamps of one run differ by a second",
 		core.SeverityMedium, checkTimeOfDayNames))
 	rules.Register(newShellRule("shell-pgrep-matches-own-wrapper",
-		"Detects pgrep -f PATTERN inside a script passed to bash -c, sh -c or ssh — the wrapper carries the pattern on its own command line, and pgrep finds it",
+		"Detects pgrep -f PATTERN inside a script passed to bash -c, sh -c or ssh — the wrapper carries the pattern on its own command line, and pgrep finds it; or a pattern that matches the command line of the script running pgrep (bash stream-watch.sh) — pgrep finds the script and its $( ) subshell, and a [s] class does not help",
 		core.SeverityMedium, checkPgrepOwnWrapper))
 	rules.Register(newShellRule("shell-background-job-without-trap",
 		"Detects a background job the script kills only at the end of its normal path, with no trap — an error, a timeout or Ctrl-C leaves the job running",
@@ -207,24 +207,39 @@ var (
 func checkPgrepOwnWrapper(r *shellRule, src *shellSource) []*core.Violation {
 	var out []*core.Violation
 	reported := map[int]bool{}
-	report := func(line int) {
+	// A make recipe runs under make, not as a script of its own.
+	script := ""
+	if !src.make {
+		script = src.ctx.RelPath
+	}
+	report := func(line int, self bool) {
 		if reported[line] {
 			return
 		}
 		reported[line] = true
-		out = appendReport(out, src.report(r, line,
-			"pgrep -f runs inside a script passed to another shell, whose command line carries the same pattern — pgrep finds the wrapper",
-			"Write one character of the pattern as a class (pgrep -f '[s]ession.sh'), or match the process name exactly (pgrep -x)"))
-	}
-	script := ""
-	if !src.make {
-		script = filepath.Base(src.ctx.Path)
+		message := "pgrep -f runs inside a script passed to another shell, whose command line carries the same pattern — pgrep finds the wrapper"
+		suggestion := "Write one character of the pattern as a class (pgrep -f '[s]ession.sh'), or match the process name exactly (pgrep -x)"
+		if self {
+			// A class does not help here: the script's command line holds
+			// the name itself, not the pattern, and the class matches it.
+			message = "pgrep -f pattern matches the command line of this script (bash " + filepath.Base(script) + ") — pgrep finds the script and its $( ) subshell"
+			suggestion = "Leave out the ancestors of pgrep (pgrep -Af), or match the process name exactly (pgrep -x)"
+		}
+		out = appendReport(out, src.report(r, line, message, suggestion))
 	}
 	for _, l := range src.lines {
 		for _, loc := range pgrepPattern.FindAllStringIndex(l.text, -1) {
 			rest := l.text[loc[1]:]
-			if (insideQuotes(l.text, loc[0]) || namesScript(rest, script)) && findsWrapper(rest) {
-				report(l.lineAt(loc[0]))
+			options := l.text[loc[0]:loc[1]]
+			if pgrepExcludesSelf(options) {
+				continue
+			}
+			// The script's own command line comes first: inside bash -c the
+			// script still matches, and a class would cure only the wrapper.
+			if namesScript(rest, script) {
+				report(l.lineAt(loc[0]), true)
+			} else if insideQuotes(l.text, loc[0]) && findsWrapper(rest) {
+				report(l.lineAt(loc[0]), false)
 			}
 		}
 	}
@@ -238,8 +253,9 @@ func checkPgrepOwnWrapper(r *shellRule, src *shellSource) []*core.Violation {
 			continue
 		}
 		for _, loc := range pgrepPattern.FindAllStringIndex(body, -1) {
-			if findsWrapper(body[loc[1]:]) {
-				report(lineOf(starts, sp.open+loc[0]))
+			options := body[loc[0]:loc[1]]
+			if !pgrepExcludesSelf(options) && findsWrapper(body[loc[1]:]) {
+				report(lineOf(starts, sp.open+loc[0]), false)
 			}
 		}
 	}
@@ -248,8 +264,8 @@ func checkPgrepOwnWrapper(r *shellRule, src *shellSource) []*core.Violation {
 			continue
 		}
 		for i := h.first; i < h.last; i++ {
-			if loc := pgrepPattern.FindStringIndex(src.ctx.Lines[i]); loc != nil && findsWrapper(src.ctx.Lines[i][loc[1]:]) {
-				report(i + 1)
+			if loc := pgrepPattern.FindStringIndex(src.ctx.Lines[i]); loc != nil && !pgrepExcludesSelf(src.ctx.Lines[i][loc[0]:loc[1]]) && findsWrapper(src.ctx.Lines[i][loc[1]:]) {
+				report(i+1, false)
 			}
 		}
 	}
@@ -259,19 +275,80 @@ func checkPgrepOwnWrapper(r *shellRule, src *shellSource) []*core.Violation {
 // findsWrapper reports a pgrep -f pattern (the text after -f) that matches
 // the command line of a wrapper carrying it: no [x] class and no ^ anchor.
 func findsWrapper(rest string) bool {
-	if end := strings.IndexAny(rest, "|);"); end >= 0 {
-		rest = rest[:end]
-	}
-	return !strings.Contains(rest, "[") && !strings.HasPrefix(strings.TrimLeft(rest, `"'\`), "^")
+	pattern := pgrepArgument(rest)
+	return pattern != "" && !strings.Contains(pattern, "[") && !strings.HasPrefix(pattern, "^")
 }
 
-// namesScript reports a pgrep -f pattern (the text after -f) that the
-// script's own name contains: the $( ) subshell running pgrep carries the
-// script's command line.
-func namesScript(rest, script string) bool {
-	word, _, _ := strings.Cut(strings.TrimSpace(rest), " ")
-	word = strings.ReplaceAll(strings.Trim(word, `"'`), `\`, "")
-	return script != "" && len(word) >= 3 && strings.Contains(script, word)
+// namesScript reports a pgrep -f pattern (the text after -f) that matches
+// a command line the script at rel runs with: the interpreter of its
+// shebang or of the caller followed by the path it is started by. pgrep
+// takes an extended POSIX regular expression; a pattern RE2 does not compile
+// (a back reference, or one pgrep rejects as well) matches nothing here, and
+// the rule says nothing about a pattern it cannot read.
+func namesScript(rest, rel string) bool {
+	pattern := pgrepArgument(rest)
+	if pattern == "" || rel == "" {
+		return false
+	}
+	base := filepath.Base(rel)
+	var lines []string
+	for _, shell := range []string{"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/bash"} {
+		for _, path := range []string{base, "./" + base, rel} {
+			lines = append(lines, shell+" "+path)
+		}
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil || !slices.ContainsFunc(lines, re.MatchString) {
+		return false
+	}
+	return true
+}
+
+// pgrepArgument returns the pattern word of pgrep -f (the text after -f)
+// as the shell passes it to pgrep, unquoted: it ends at an unquoted blank, pipe,
+// list operator or the ) of $( ).
+func pgrepArgument(rest string) string {
+	rest = strings.TrimSpace(rest)
+	quote := byte(0)
+	var word strings.Builder
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+				continue
+			}
+		} else {
+			switch c {
+			case '\'', '"':
+				quote = c
+				continue
+			case ' ', '\t', '\n', '|', ')', ';', '&':
+				return word.String()
+			}
+		}
+		// A backslash quotes the next character outside quotes, and inside
+		// double quotes only before $, `, " and \ (bash QUOTING).
+		if c == '\\' && i+1 < len(rest) && (quote == 0 || quote == '"' && strings.IndexByte("$`\"\\", rest[i+1]) >= 0) {
+			i++
+			c = rest[i]
+		}
+		word.WriteByte(c)
+	}
+	return word.String()
+}
+
+// pgrepExcludesSelf reports pgrep options (the text up to -f) that keep the
+// running script out of the result: -A leaves out the ancestors of pgrep,
+// and -v returns the processes the pattern does not match. Only clusters of
+// short options count; pgrepPattern takes no long options before -f.
+func pgrepExcludesSelf(options string) bool {
+	for field := range strings.FieldsSeq(options) {
+		if len(field) > 1 && field[0] == '-' && field[1] != '-' && strings.ContainsAny(field[1:], "Av") {
+			return true
+		}
+	}
+	return false
 }
 
 // runsScript reports a quoted string at open that is the script of bash -c,

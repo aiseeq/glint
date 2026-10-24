@@ -16,6 +16,19 @@ import (
 // requires.
 func recipe(source string) string { return strings.ReplaceAll(source, "\n  ", "\n\t") }
 
+// A pattern naming the script itself, with no wrapper shell: the message
+// names the script, and the advice is not the class that cures a wrapper.
+func TestShellPgrepOwnScriptMessage(t *testing.T) {
+	rule, ok := rules.Get("shell-pgrep-matches-own-wrapper")
+	require.True(t, ok)
+	ctx := rulestest.TextFile(t, "stream-watch.sh", "#!/bin/bash\nP=$(pgrep -f stream-watch.sh)\n")
+	violations := rule.AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "command line of this script (bash stream-watch.sh)")
+	assert.NotContains(t, violations[0].Message, "another shell")
+	assert.NotContains(t, violations[0].Suggestion, "[s]")
+}
+
 // shellFindings runs a registered rule over the files of a root, the make
 // files given with recipe indents.
 func shellFindings(t *testing.T, name string, files map[string]string) []string {
