@@ -559,6 +559,26 @@ const (
 `)
 }
 
+func TestConstFamilyDuplicateValueBlockExceptions(t *testing.T) {
+	assertWanted(t, NewConstFamilyDuplicateValueRule(), `package app
+
+const (
+	DefaultHost   = "localhost"
+	DefaultDBHost = "localhost"
+	DefaultScheme = "https"
+	DefaultPort   = "8080"
+	DefaultCache  = "redis"
+)
+
+const (
+	Gather  = "A1"
+	Attack  = "A2"
+	Retreat = "A3"
+	_       = "A2"
+)
+`)
+}
+
 // Repro from a real project: three diagnostics shared one throttle map, and
 // the first line about money silenced the placement diagnostic for a window.
 func TestThrottleStateSharedByMessages(t *testing.T) {
