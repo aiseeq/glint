@@ -184,10 +184,6 @@ func calledMethod(info *types.Info, call *ast.CallExpr) (*ast.SelectorExpr, *typ
 	return sel, fn, true
 }
 
-// sqlQueryParams are the names database/sql, sqlx and pgx give the query
-// parameter.
-var sqlQueryParams = []string{"query", "sql"}
-
 // constantQuery returns the text of the query a SQL method is called with,
 // when that argument is a compile-time constant string.
 func constantQuery(info *types.Info, fn *types.Func, call *ast.CallExpr) (string, bool) {
@@ -200,7 +196,7 @@ func constantQuery(info *types.Info, fn *types.Func, call *ast.CallExpr) (string
 		if sig.Variadic() && i == params.Len()-1 {
 			break
 		}
-		if !slices.Contains(sqlQueryParams, params.At(i).Name()) {
+		if !slices.Contains(helpers.SQLQueryParamNames, params.At(i).Name()) {
 			continue
 		}
 		value := info.Types[call.Args[i]].Value

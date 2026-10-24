@@ -4,10 +4,12 @@ import (
 	"go/ast"
 	"go/types"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -62,9 +64,6 @@ var sqlQueryMethods = map[string]bool{
 	"Preparex": true, "PreparexContext": true, "PrepareNamed": true, "PrepareNamedContext": true,
 	"Queue": true,
 }
-
-// sqlQueryParamNames are the parameter names database APIs give the query.
-var sqlQueryParamNames = map[string]bool{"query": true, "sql": true}
 
 // sqlKeyword finds an SQL keyword as a whole word: "lastUpdated:" holds no
 // UPDATE.
@@ -151,7 +150,7 @@ func sqlQueryArgument(call *ast.CallExpr, info *types.Info) ast.Expr {
 		if sig.Variadic() && i == params.Len()-1 {
 			break
 		}
-		if !sqlQueryParamNames[param.Name()] {
+		if !slices.Contains(helpers.SQLQueryParamNames, param.Name()) {
 			continue
 		}
 		if basic, ok := param.Type().Underlying().(*types.Basic); ok && basic.Info()&types.IsString != 0 {

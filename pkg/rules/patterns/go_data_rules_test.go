@@ -431,6 +431,256 @@ func a1Range(tab, cells string) string {
 	assert.Empty(t, found)
 }
 
+// A driver call is seen by the package of the method (also one promoted from
+// an embedded *sql.DB) or by an interface that answers a driver type, and the
+// query is the parameter the driver names query or sql: a destination before
+// it (sqlx Get, Select), a gorm model or a value to scan is bound, not SQL
+// text, and so is the statement name of pgx Prepare.
+func TestSQLQuoteEscapedByHandDriverCalls(t *testing.T) {
+	found := projectRuleLines(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n\nrequire (\n\tgithub.com/jmoiron/sqlx v1.0.0\n\tgithub.com/jackc/pgx/v5 v5.0.0\n\tgorm.io/gorm v1.0.0\n)\n\n" +
+			"replace github.com/jmoiron/sqlx => ./third_party/sqlx\n\nreplace github.com/jackc/pgx/v5 => ./third_party/pgx\n\nreplace gorm.io/gorm => ./third_party/gorm\n",
+		"third_party/sqlx/go.mod": "module github.com/jmoiron/sqlx\n\ngo 1.24\n",
+		"third_party/sqlx/sqlx.go": `package sqlx
+
+import "database/sql"
+
+type DB struct{ *sql.DB }
+
+func (db *DB) Get(dest interface{}, query string, args ...interface{}) error    { return nil }
+func (db *DB) Select(dest interface{}, query string, args ...interface{}) error { return nil }
+`,
+		"third_party/pgx/go.mod": "module github.com/jackc/pgx/v5\n\ngo 1.24\n",
+		"third_party/pgx/pgx.go": `package pgx
+
+import "context"
+
+type Conn struct{}
+
+type StatementDescription struct{}
+
+func (c *Conn) Prepare(ctx context.Context, name, sql string) (*StatementDescription, error) {
+	return nil, nil
+}
+`,
+		"third_party/gorm/go.mod": "module gorm.io/gorm\n\ngo 1.24\n",
+		"third_party/gorm/gorm.go": `package gorm
+
+type DB struct{}
+
+func (db *DB) Create(value interface{}) *DB                     { return db }
+func (db *DB) Find(dest interface{}, conds ...interface{}) *DB { return db }
+`,
+		"store/drivers.go": `package store
+
+import (
+	"context"
+	"database/sql"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jmoiron/sqlx"
+	"gorm.io/gorm"
+)
+
+var DB *sqlx.DB
+
+func Load(stmt string) ([]int, error) {
+	var ids []int
+	err := DB.Select(&ids, strings.ReplaceAll(stmt, "'", "''"))
+	return ids, err
+}
+
+func One(stmt string) (int, error) {
+	var id int
+	err := DB.Get(&id, strings.ReplaceAll(stmt, "'", "''"))
+	return id, err
+}
+
+func Prepare(ctx context.Context, conn *pgx.Conn, name, stmt string) error {
+	if _, err := conn.Prepare(ctx, strings.ReplaceAll(name, "'", "''"), "SELECT 1"); err != nil {
+		return err
+	}
+	_, err := conn.Prepare(ctx, name, strings.ReplaceAll(stmt, "'", "''"))
+	return err
+}
+
+func Scan(s string) error {
+	var ns sql.NullString
+	return ns.Scan(strings.ReplaceAll(s, "'", "''"))
+}
+
+type User struct{ Name string }
+
+func Add(db *gorm.DB, n string) {
+	db.Create(&User{Name: strings.ReplaceAll(n, "'", "''")})
+	db.Find(&User{Name: strings.ReplaceAll(n, "'", "''")})
+}
+`,
+		"store/wrapped.go": `package store
+
+import (
+	"context"
+	"database/sql"
+	"strings"
+)
+
+type Store struct{ *sql.DB }
+
+func (s Store) Raw(stmt string) error {
+	_, err := s.Exec(strings.ReplaceAll(stmt, "'", "''"))
+	return err
+}
+
+type DBTX interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}
+
+func Run(ctx context.Context, db DBTX, stmt string) error {
+	_, err := db.ExecContext(ctx, strings.ReplaceAll(stmt, "'", "''"))
+	return err
+}
+
+type runner interface {
+	Exec(command string) error
+}
+
+func Shell(r runner, arg string) error {
+	return r.Exec(strings.ReplaceAll(arg, "'", "''"))
+}
+`,
+	})
+	assert.Equal(t, []string{"store/drivers.go:17", "store/drivers.go:23", "store/drivers.go:31", "store/wrapped.go:12", "store/wrapped.go:21"}, found)
+}
+
+// The escaped value is followed through closures, struct fields and the
+// results of helpers. A field is followed by itself, a result keeps its
+// position, and a helper returns the value to the call it was handed to
+// only: a sheet name escaped through a helper the queries share, or held in
+// the field next to the query, never reaches SQL.
+func TestSQLQuoteEscapedByHandFlow(t *testing.T) {
+	found := projectRuleLines(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
+		"repo/reach.go": `package repo
+
+import (
+	"database/sql"
+	"strings"
+)
+
+var DB *sql.DB
+
+func Called(name string) (*sql.Rows, error) {
+	q := func() string { return strings.ReplaceAll(name, "'", "''") }()
+	return DB.Query("SELECT id FROM users WHERE name = '" + q + "'")
+}
+
+func Closure(x string) (*sql.Rows, error) {
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	return DB.Query("SELECT id FROM t WHERE a = " + quote(x))
+}
+
+type filter struct {
+	Value string
+	sb    strings.Builder
+}
+
+func Field(name string) (*sql.Rows, error) {
+	var f filter
+	f.Value = "'" + strings.ReplaceAll(name, "'", "''") + "'"
+	return DB.Query("SELECT id FROM users WHERE name = " + f.Value)
+}
+
+func BuilderField(name string) (*sql.Rows, error) {
+	var f filter
+	f.sb.WriteString("SELECT id FROM users WHERE name = ")
+	f.sb.WriteString("'" + strings.ReplaceAll(name, "'", "''") + "'")
+	return DB.Query(f.sb.String())
+}
+
+func identity(s string) string { return s }
+
+func Nested(name string) (*sql.Rows, error) {
+	return DB.Query("SELECT id FROM users WHERE name = '" + identity(identity(strings.ReplaceAll(name, "'", "''"))) + "'")
+}
+
+func Lookup(names []string) (*sql.Rows, error) {
+	m := map[string]string{"a": strings.ReplaceAll(names[0], "'", "''")}
+	v, ok := m["a"]
+	if !ok {
+		return nil, nil
+	}
+	return DB.Query("SELECT id FROM users WHERE name = '" + v + "'")
+}
+
+func build(name string) (string, error) {
+	return "SELECT id FROM users WHERE name = '" + strings.ReplaceAll(name, "'", "''") + "'", nil
+}
+
+func Built(name string) (*sql.Rows, error) {
+	q, err := build(name)
+	if err != nil {
+		return nil, err
+	}
+	return DB.Query(q)
+}
+`,
+		"repo/apart.go": `package repo
+
+import (
+	"database/sql"
+	"strings"
+)
+
+func split(name string) (string, string) {
+	return "SELECT id FROM users WHERE name = $1", strings.ReplaceAll(name, "'", "''")
+}
+
+func forward(name string) (string, string) { return split(name) }
+
+func ByParam(name string) (*sql.Rows, error) {
+	q, arg := split(name)
+	return DB.Query(q, arg)
+}
+
+func ByForwarded(name string) (*sql.Rows, error) {
+	q, arg := forward(name)
+	return DB.Query(q, arg)
+}
+
+func Sheet(tab string) string {
+	return identity("'" + strings.ReplaceAll(tab, "'", "''") + "'!A1:B2")
+}
+
+func Run(stmt string) (*sql.Rows, error) {
+	return DB.Query(identity(stmt))
+}
+
+func wrap(s string) string { return "'" + s + "'" }
+
+func SheetRange(tab string) string {
+	return wrap(strings.ReplaceAll(tab, "'", "''")) + "!A1"
+}
+
+func ByWrapped(v string) (*sql.Rows, error) {
+	return DB.Query("SELECT id FROM t WHERE a = " + wrap(v))
+}
+
+type request struct {
+	Sheet string
+	SQL   string
+}
+
+func Fields(tab string) (*sql.Rows, error) {
+	var v request
+	v.Sheet = "'" + strings.ReplaceAll(tab, "'", "''") + "'!A1:B2"
+	v.SQL = "SELECT 1"
+	return DB.Query(v.SQL)
+}
+`,
+	})
+	assert.Equal(t, []string{"repo/reach.go:11", "repo/reach.go:16", "repo/reach.go:27", "repo/reach.go:34", "repo/reach.go:41", "repo/reach.go:45", "repo/reach.go:54"}, found)
+}
+
 // A metric answered by a literal zero: the API reports no return instead of
 // failing or leaving the field out.
 func TestSQLMetricLiteralZero(t *testing.T) {
