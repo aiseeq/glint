@@ -50,6 +50,7 @@ type TombstoneCommentRule struct {
 	tombstone    *regexp.Regexp
 	behaviorAux  *regexp.Regexp
 	behaviorTail *regexp.Regexp
+	runtimeState *regexp.Regexp
 	addedBefore  *regexp.Regexp
 	addedAfter   *regexp.Regexp
 	policyLine   *regexp.Regexp
@@ -77,6 +78,10 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 		// data; "removed since v2" dates code and stays a tombstone.
 		behaviorTail: regexp.MustCompile(
 			`(?i)^(?:\s+from\b|\s*(?:->|→)|\s*(?:или|либо|or)\s|\s+since(?:\s*[,.;:)]|\s*$|\s+(?:then|it|they|the|opening|loading)\b)|\s+(?:meanwhile|in the meantime|concurrently|in between)\b)`),
+		// A filesystem object directly before the removal word usually names
+		// runtime state rather than deleted code.
+		runtimeState: regexp.MustCompile(
+			`(?i)(?:\b(?:file|files|dir|directory|folder|worktree|repository)\s+(?:(?:is|was|were|has been)\s+)?$|(?:^|[^\p{L}\p{N}_])(?:каталог|директори[яи]|папк[аи]|файл[аы]?|дерев[оа])\s*$)`),
 		// A series of changes to data ends in the removal word: "added and
 		// removed", "inserted, updated or deleted".
 		addedBefore: regexp.MustCompile(`(?i)\b(?:added|inserted|updated|created|changed|modified|written|moved|renamed)\s*(?:,|and|or|&|/)\s*$`),
@@ -131,7 +136,7 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if last, size := utf8.DecodeLastRuneInString(comment[loc[0]:loc[1]]); !unicode.IsLetter(last) {
 			loc[1] -= size
 		}
-		if r.behaviorAux.MatchString(comment[:loc[0]]) || r.remover.MatchString(comment[:loc[0]]) {
+		if r.behaviorAux.MatchString(comment[:loc[0]]) || r.remover.MatchString(comment[:loc[0]]) || r.runtimeState.MatchString(comment[:loc[0]]) {
 			continue // "are removed", "будут удалены" — behavior, not a tombstone
 		}
 		if loc[0] > 0 && strings.IndexByte("='\"`.>/-_", comment[loc[0]-1]) >= 0 {

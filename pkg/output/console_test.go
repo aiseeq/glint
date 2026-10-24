@@ -18,6 +18,7 @@ import (
 // color assertions would otherwise depend on the environment.
 func withColorState(t *testing.T, noColor bool) {
 	t.Helper()
+	t.Setenv("NO_COLOR", "")
 	saved := color.NoColor
 	color.NoColor = noColor
 	t.Cleanup(func() { color.NoColor = saved })
