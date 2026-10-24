@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"go/types"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -120,7 +121,10 @@ func (r *DuplicateConstAcrossPackagesRule) AnalyzeGoProject(ctx *core.GoProjectC
 				return true
 			}
 			for _, spec := range decl.Specs {
-				vs := spec.(*ast.ValueSpec)
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
 				for _, name := range vs.Names {
 					c, ok := info.Defs[name].(*types.Const)
 					if !ok {
@@ -177,7 +181,10 @@ func packageConsts(file *ast.File, info *types.Info) []packageConst {
 			continue
 		}
 		for _, spec := range gd.Specs {
-			vs := spec.(*ast.ValueSpec)
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
 			literal := literalValues(vs)
 			for i, name := range vs.Names {
 				c, ok := info.Defs[name].(*types.Const)
@@ -298,10 +305,16 @@ func constTwins(byKey map[string][]*types.Const, imports *importReach) map[*type
 	sort.Strings(keys)
 	for _, key := range keys {
 		copies := byKey[key]
+		var holders []*types.Package
 		for _, c := range copies {
-			for _, other := range copies {
-				if other.Pkg() != c.Pkg() && imports.related(c.Pkg(), other.Pkg()) {
-					twins[c] = other.Pkg().Path()
+			if !slices.Contains(holders, c.Pkg()) {
+				holders = append(holders, c.Pkg())
+			}
+		}
+		for _, c := range copies {
+			for _, other := range holders {
+				if other != c.Pkg() && imports.related(c.Pkg(), other) {
+					twins[c] = other.Path()
 					break
 				}
 			}
