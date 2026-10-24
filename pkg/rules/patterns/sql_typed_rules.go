@@ -247,10 +247,10 @@ func countedAsInserted(info *types.Info, fn *ast.FuncDecl, affected types.Object
 	return found
 }
 
-// mentionsObject reports an expression reading the object.
-func mentionsObject(info *types.Info, expr ast.Expr, obj types.Object) bool {
+// mentionsObject reports an expression or a statement using the object.
+func mentionsObject(info *types.Info, node ast.Node, obj types.Object) bool {
 	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
+	ast.Inspect(node, func(n ast.Node) bool {
 		if id, ok := n.(*ast.Ident); ok && info.ObjectOf(id) == obj {
 			found = true
 		}

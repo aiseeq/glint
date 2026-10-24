@@ -106,7 +106,7 @@ func newStageIndex(decls map[*types.Func]typedFuncDecl) *stageIndex {
 		statuses: make(map[string]bool),
 		stamps:   make(map[string]map[string]string),
 		writes:   make(map[string][]stageWrite),
-		calls:    make(map[*types.Func][]funcCallSite),
+		calls:    collectCallSites(decls),
 	}
 	packages := make(map[*types.Package]bool)
 	for fn, decl := range decls {
@@ -114,14 +114,6 @@ func newStageIndex(decls map[*types.Func]typedFuncDecl) *stageIndex {
 			packages[fn.Pkg()] = true
 			index.addConstants(fn.Pkg())
 		}
-		ast.Inspect(decl.decl.Body, func(n ast.Node) bool {
-			if call, ok := n.(*ast.CallExpr); ok {
-				if callee := staticFunc(decl.info, call); callee != nil {
-					index.calls[callee.Origin()] = append(index.calls[callee.Origin()], funcCallSite{call: call, caller: decl})
-				}
-			}
-			return true
-		})
 		for _, bound := range boundUpdates(decl) {
 			if _, ok := bound.update.Assignment("status"); ok {
 				index.writes[bound.update.Table] = append(index.writes[bound.update.Table], bound)
@@ -432,12 +424,7 @@ const maxStatusDepth = 3
 // itself, or what every caller passes for the parameter it is; known false
 // when any of them is not a constant.
 func (index *stageIndex) boundValues(fn typedFuncDecl, value ast.Expr, depth int) ([]string, bool) {
-	value = ast.Unparen(value)
-	if conv, ok := value.(*ast.CallExpr); ok && len(conv.Args) == 1 {
-		if tv, ok := fn.info.Types[conv.Fun]; ok && tv.IsType() {
-			value = ast.Unparen(conv.Args[0])
-		}
-	}
+	value = withoutConversion(fn.info, value)
 	if text, ok := stringConstant(fn.info, value); ok {
 		return []string{text}, true
 	}

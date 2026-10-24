@@ -69,41 +69,16 @@ func (r *LegacyIdentifierRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 
 	var violations []*core.Violation
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		switch decl := n.(type) {
-		case *ast.FuncDecl:
-			if r.legacyPattern.MatchString(decl.Name.Name) {
-				if v := r.violation(ctx, decl.Name.Pos(), decl.Name.Name, r.funcKind(decl)); v != nil {
-					violations = append(violations, v)
-				}
-			}
-		case *ast.TypeSpec:
-			if r.legacyPattern.MatchString(decl.Name.Name) {
-				if v := r.violation(ctx, decl.Name.Pos(), decl.Name.Name, "type"); v != nil {
-					violations = append(violations, v)
-				}
-			}
-		case *ast.ValueSpec:
-			for _, name := range decl.Names {
-				if r.legacyPattern.MatchString(name.Name) {
-					if v := r.violation(ctx, name.Pos(), name.Name, "var/const"); v != nil {
-						violations = append(violations, v)
-					}
-				}
-			}
+	forEachDeclaredName(ctx.GoAST, func(name *ast.Ident, kind string) {
+		if !r.legacyPattern.MatchString(name.Name) {
+			return
 		}
-		return true
+		if v := r.violation(ctx, name.Pos(), name.Name, kind); v != nil {
+			violations = append(violations, v)
+		}
 	})
 
 	return violations
-}
-
-// funcKind returns "method" for receiver-bound funcs, "function" otherwise.
-func (r *LegacyIdentifierRule) funcKind(fn *ast.FuncDecl) string {
-	if fn.Recv != nil && len(fn.Recv.List) > 0 {
-		return "method"
-	}
-	return "function"
 }
 
 // violation builds a violation (or nil if opt-out is present on the line).

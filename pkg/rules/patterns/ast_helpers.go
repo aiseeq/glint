@@ -75,6 +75,41 @@ func loopBodies(node ast.Node) []ast.Node {
 	return parts
 }
 
+// withoutConversion returns x of a type conversion T(x), or expr itself,
+// unparenthesized.
+func withoutConversion(info *types.Info, expr ast.Expr) ast.Expr {
+	expr = ast.Unparen(expr)
+	if call, ok := expr.(*ast.CallExpr); ok && len(call.Args) == 1 {
+		if tv, ok := info.Types[call.Fun]; ok && tv.IsType() {
+			return ast.Unparen(call.Args[0])
+		}
+	}
+	return expr
+}
+
+// forEachDeclaredName visits the name of every function, method, type,
+// variable and constant the file declares, with the kind a finding calls it:
+// "function", "method", "type" or "var/const".
+func forEachDeclaredName(file *ast.File, visit func(name *ast.Ident, kind string)) {
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch decl := n.(type) {
+		case *ast.FuncDecl:
+			kind := "function"
+			if decl.Recv != nil && len(decl.Recv.List) > 0 {
+				kind = "method"
+			}
+			visit(decl.Name, kind)
+		case *ast.TypeSpec:
+			visit(decl.Name, "type")
+		case *ast.ValueSpec:
+			for _, name := range decl.Names {
+				visit(name, "var/const")
+			}
+		}
+		return true
+	})
+}
+
 // fileImport is one import of a file: its path and the name the file uses
 // for it - the explicit name, or the last element of the path.
 type fileImport struct {

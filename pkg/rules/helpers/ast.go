@@ -109,3 +109,22 @@ func ParentMap(root ast.Node) map[ast.Node]ast.Node {
 	})
 	return parents
 }
+
+// ForEachBinding visits every assignment and every var or const spec under
+// root with the names it binds and the values it binds them to; the values
+// may be fewer than the names (a, b := f(); var x T).
+func ForEachBinding(root ast.Node, visit func(names, values []ast.Expr)) {
+	ast.Inspect(root, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			visit(node.Lhs, node.Rhs)
+		case *ast.ValueSpec:
+			names := make([]ast.Expr, len(node.Names))
+			for i, name := range node.Names {
+				names[i] = name
+			}
+			visit(names, node.Values)
+		}
+		return true
+	})
+}

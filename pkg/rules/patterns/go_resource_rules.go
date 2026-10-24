@@ -5,6 +5,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -574,19 +575,7 @@ func isInfoLogOf(stmt ast.Stmt, errObj types.Object, info *types.Info) bool {
 	default:
 		return false
 	}
-	for _, arg := range call.Args {
-		used := false
-		ast.Inspect(arg, func(n ast.Node) bool {
-			if ident, ok := n.(*ast.Ident); ok && info.ObjectOf(ident) == errObj {
-				used = true
-			}
-			return !used
-		})
-		if used {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(call.Args, func(arg ast.Expr) bool { return mentionsObject(info, arg, errObj) })
 }
 
 // NewBatchStatusResultsDroppedRule reports a batch call whose per-item
