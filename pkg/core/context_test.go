@@ -153,6 +153,39 @@ func TestIsTestHelperDir(t *testing.T) {
 	assert.False(t, NewFileContext(fixture, root, nil, nil).IsTestFile(), "IsTestFile is a property of the file alone")
 }
 
+func TestIsTestHelperDirUsesBuildableGoFilesAndPackageImports(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, src string) {
+		path := filepath.Join(root, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(src), 0o644))
+	}
+	write("internal/helpers/helper.go", "package srvtest\n\nimport `testing`\n\nvar _ = testing.Short\n")
+	write("internal/helpers/ignored.go", "//go:build ignore\n\npackage {{ .Package }}\n\nimport \"testing\"\n")
+	write("internal/helpers/broken.go", "//go:build ignore\n\npackage {{ .Package }}\n")
+	write("internal/helpers/partial.go", "package {{ .Package }}\n")
+	write("internal/ordinary/ordinary.go", "package ordinary\n")
+	write("internal/ordinary/generator.go", "//go:build ignore\n\npackage ordinary\n\nimport \"testing\"\n")
+
+	got, err := IsTestHelperDir(filepath.Join(root, "internal/helpers"))
+	require.NoError(t, err)
+	assert.True(t, got, "the declared package name and interpreted import should identify the helper")
+	got, err = IsTestHelperDir(filepath.Join(root, "internal/ordinary"))
+	require.NoError(t, err)
+	assert.False(t, got, "an excluded generator must not affect the package")
+}
+
+func TestIsTestHelperDirUnquotesRawStringImport(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "internal", "srvtest")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "helper.go"), []byte("package srvtest\n\nimport `testing`\n\nvar _ = testing.Short\n"), 0o644))
+
+	got, err := IsTestHelperDir(dir)
+	require.NoError(t, err)
+	assert.True(t, got)
+}
+
 func TestFileContextGetLine(t *testing.T) {
 	ctx := &FileContext{
 		Lines: []string{"line1", "line2", "line3"},

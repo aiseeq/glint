@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -261,13 +263,18 @@ func (ctx *FileContext) IsTestFile() bool {
 // one of its files imports testing. Such a package is compiled like any other
 // so that tests of several packages can share it, but its code is test code:
 // fixtures built there are not the program's construction sites. The name
-// alone is not enough — a package latest is not a test helper. It reads the
-// other files of dir, so only project-wide rules may ask it; IsTestFile stays
-// a property of the file alone.
+// alone is not enough — a package latest is not a test helper. It is the name
+// of the package that counts, not of the directory: internal/helpers may hold
+// package srvtest. Only the files the build compiles on this platform decide,
+// as in the project load: a //go:build ignore generator that imports testing,
+// or a template whose package clause does not parse, is no part of the
+// package. A compiled file that does not parse cannot tell its package name or
+// imports either; without --tolerate-broken-packages the load has already
+// failed on it, with the flag it is reported as a package that does not
+// type-check, so here it is left out rather than failing the rule a second
+// time. It reads the other files of dir, so only project-wide rules may ask
+// it; IsTestFile stays a property of the file alone.
 func IsTestHelperDir(dir string) (bool, error) {
-	if !strings.HasSuffix(filepath.Base(dir), "test") {
-		return false, nil
-	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false, fmt.Errorf("test helper dir %s: %w", dir, err)
@@ -279,13 +286,25 @@ func IsTestHelperDir(dir string) (bool, error) {
 		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, n), nil, parser.ImportsOnly)
+		compiled, err := build.Default.MatchFile(dir, n)
 		if err != nil {
-			return false, fmt.Errorf("test helper dir %s: %w", dir, err)
+			return false, fmt.Errorf("test helper dir %s: evaluate build constraints of %s: %w", dir, n, err)
+		}
+		if !compiled {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, n), nil, parser.ImportsOnly)
+		//nolint:silent-error-handling -- the project load fails on or reports a compiled file that does not parse
+		if err != nil {
+			continue
 		}
 		named = named || strings.HasSuffix(f.Name.Name, "test")
 		for _, im := range f.Imports {
-			imports = imports || im.Path.Value == `"testing"`
+			path, err := strconv.Unquote(im.Path.Value) // `testing` is the same import as "testing"
+			if err != nil {
+				return false, fmt.Errorf("test helper dir %s: import path %s of %s: %w", dir, im.Path.Value, n, err)
+			}
+			imports = imports || path == "testing"
 		}
 	}
 	return named && imports, nil

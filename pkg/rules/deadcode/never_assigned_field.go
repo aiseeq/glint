@@ -122,13 +122,25 @@ func (r *NeverAssignedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 		return nil, fmt.Errorf("never assigned field: %w", err)
 	}
 
-	ctors, err := collectConstructorFields(ctx)
+	testHelpers, err := testHelperPackages(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("never assigned field: %w", err)
 	}
+	ctors := collectConstructorFields(ctx, testHelpers)
+	fixtures := make(map[*core.FileContext]bool)
+	for pkg := range testHelpers {
+		for _, fileCtx := range pkg.Files {
+			fixtures[fileCtx] = true
+		}
+	}
 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
-		violations := r.bypassingLiterals(fileCtx, info, ctors)
+		var violations []*core.Violation
+		// a fixture of a test-helper package fills only what its test needs,
+		// as a literal in a _test.go file does
+		if !fixtures[fileCtx] {
+			violations = r.bypassingLiterals(fileCtx, info, ctors)
+		}
 		for _, field := range collectNilableFields(fileCtx, info) {
 			pos := field.obj.Pos()
 			if access.valueWritten[pos] || !crashingUse(field.use, access, pos) {
