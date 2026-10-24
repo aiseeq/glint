@@ -420,6 +420,36 @@ func g() {}
 	}
 }
 
+func TestTombstoneComment_RuntimeRemovalConditionsAreBehavior(t *testing.T) {
+	code := `package runtime
+
+// resolve reads the project metadata; if it cannot be read (worktree removed, not a repo) — empty.
+func resolve() string { return "" }
+
+// If the file was deleted, returns an empty result.
+func readFile() string { return "" }
+
+// Use the cache when the worktree is removed during execution.
+func readWorktree() {}
+
+// Если каталог удалён во время работы, возвращаем пустое значение.
+func readDir() string { return "" }
+
+// Старый обработчик удалён.
+func oldHandler() {}
+
+// УДАЛЕНО: старая функция повторной отправки.
+func oldRetry() {}
+`
+	var lines []int
+	for _, v := range NewTombstoneCommentRule().AnalyzeFile(core.NewFileContext("runtime/state.go", ".", []byte(code), nil)) {
+		lines = append(lines, v.Line)
+	}
+	if fmt.Sprint(lines) != "[15 18]" {
+		t.Fatalf("want only the two tombstones on lines 15 and 18, got %v", lines)
+	}
+}
+
 // A pronoun before the removal word is the one that removes: "a line the
 // commit added or one it removed" is the object of a clause about what the
 // code does. "X removed." names the code that went away.
