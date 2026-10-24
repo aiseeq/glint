@@ -2,6 +2,8 @@ package doccheck
 
 import (
 	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -241,6 +243,148 @@ func run(*planner.Ctx) {}
 	violations, err := NewDocStaleReferenceRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
 	assert.Empty(t, violations)
+}
+
+// staleCatalogRef is a file of package catalog whose comment names ref of
+// package planner.
+func staleCatalogRef(ref string) string {
+	return "package catalog\n\nimport \"example.com/rulestest/planner\"\n\n// run is held by " + ref + ".\nfunc run(*planner.Ctx) {}\n"
+}
+
+// analyzeChecking loads the module at root with only the contexts under
+// catalog/ checked, as glint check of that directory does, and runs the rule.
+func analyzeChecking(t *testing.T, root string, contexts []*core.FileContext, opts core.GoProjectOptions) ([]*core.Violation, error) {
+	t.Helper()
+	var checked []*core.FileContext
+	for _, fileCtx := range contexts {
+		if strings.HasPrefix(fileCtx.RelPath, "catalog/") {
+			checked = append(checked, fileCtx)
+		}
+	}
+	opts.ListPackages = rulestest.ListPackages
+	project, err := core.LoadGoProject(root, checked, opts)
+	require.NoError(t, err)
+	return NewDocStaleReferenceRule().AnalyzeGoProject(project)
+}
+
+// An import path may spell a letter as an escape ("\x70lanner" is planner):
+// the reference resolves through the unquoted path, under an alias too, and
+// when two module packages share the name.
+func TestDocStaleReferenceUnquotesEscapedImportPath(t *testing.T) {
+	aliased := analyzeStaleReference(t, withFile("catalog/a.go", `package catalog
+
+import p "example.com/rulestest/\x70lanner"
+
+// run hands the request to p.Missing first.
+func run(*p.Ctx) {}
+`))
+	require.Len(t, aliased, 1)
+	assert.Contains(t, aliased[0].Message, "p.Missing")
+
+	files := withFile("catalog/a.go", `package catalog
+
+import "example.com/rulestest/\x70lanner"
+
+// run hands the request to planner.Missing first.
+func run(*planner.Ctx) {}
+`)
+	files["other/planner/x.go"] = "package planner\n\n// X is x.\ntype X struct{}\n"
+	shared := analyzeStaleReference(t, files)
+	require.Len(t, shared, 1)
+	assert.Contains(t, shared[0].Message, "planner.Missing")
+}
+
+// The tests of a package outside the checked files are read from its
+// directory, whose path may hold glob metacharacters: a checkout in
+// checkout[1] or checkout[ is an ordinary directory.
+func TestDocStaleReferenceReadsTestsUnderGlobMetacharacters(t *testing.T) {
+	for _, dir := range []string{"checkout[1]", "checkout["} {
+		t.Run(dir, func(t *testing.T) {
+			files := withFile("catalog/a.go", staleCatalogRef("planner.TestRun"))
+			files["planner/run_test.go"] = "package planner\n\nimport \"testing\"\n\nfunc TestRun(t *testing.T) {}\n"
+			root := filepath.Join(t.TempDir(), dir)
+			violations, err := analyzeChecking(t, root, rulestest.ModuleIn(t, root, files), core.GoProjectOptions{})
+			require.NoError(t, err)
+			assert.Empty(t, violations)
+		})
+	}
+}
+
+// A test file that does not parse is left out the way the load leaves it
+// out: one the build excludes (a //go:build ignore template) always, a broken
+// one when the load tolerates broken packages. Otherwise it is an error, not
+// a silent gap in the names of the package.
+func TestDocStaleReferenceLeavesOutTestFilesTheLoadLeavesOut(t *testing.T) {
+	template := "//go:build ignore\n\npackage planner\n\nfunc TestGen() { {{.X}} }\n"
+	broken := "package planner\n\nfunc broken( {\n"
+	for _, tc := range []struct {
+		name, file, src string
+		tolerate, fails bool
+	}{
+		{name: "excluded by build", file: "planner/gen_test.go", src: template},
+		{name: "excluded by build, checked", file: "catalog/gen_test.go", src: strings.ReplaceAll(template, "planner", "catalog")},
+		{name: "broken, tolerated", file: "planner/bad_test.go", src: broken, tolerate: true},
+		{name: "broken", file: "planner/bad_test.go", src: broken, fails: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := withFile("catalog/a.go", staleCatalogRef("planner.Ctx"))
+			files[tc.file] = tc.src
+			root, contexts := rulestest.Module(t, files)
+			violations, err := analyzeChecking(t, root, contexts, core.GoProjectOptions{TolerateBrokenPackages: tc.tolerate})
+			if tc.fails {
+				require.ErrorContains(t, err, "bad_test.go")
+				return
+			}
+			require.NoError(t, err)
+			assert.Empty(t, violations)
+		})
+	}
+}
+
+// An analyzed test file counts with the content of its context, as the load
+// type-checks it: a version that differs from the disk, or a file that
+// exists only in memory.
+func TestDocStaleReferenceReadsAnalyzedTestsFromTheirContext(t *testing.T) {
+	files := withFile("catalog/a.go", `package catalog
+
+import "example.com/rulestest/planner"
+
+// run is held by planner.TestNew and planner.TestMem, not planner.TestRun.
+func run(*planner.Ctx) {}
+`)
+	files["planner/run_test.go"] = "package planner\n\nimport \"testing\"\n\nfunc TestRun(t *testing.T) {}\n"
+	files["planner/mem_test.go"] = "package planner\n\nimport \"testing\"\n\nfunc TestMem(t *testing.T) {}\n"
+	root, contexts := rulestest.Module(t, files)
+	require.NoError(t, os.Remove(filepath.Join(root, "planner", "mem_test.go")))
+	for i, fileCtx := range contexts {
+		if fileCtx.RelPath == "planner/run_test.go" {
+			edited, err := core.NewFileContextChecked(fileCtx.Path, root, []byte("package planner\n\nimport \"testing\"\n\nfunc TestNew(t *testing.T) {}\n"), core.DefaultConfig())
+			require.NoError(t, err)
+			contexts[i] = edited
+		}
+	}
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+	require.NoError(t, err)
+
+	violations, err := NewDocStaleReferenceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "planner.TestRun")
+}
+
+// Files go ignores (a leading '.' or '_') declare no tests: a disabled
+// _old_test.go does not keep a removed test alive, and an editor lock file
+// (a dangling symlink .#ctx_test.go) is not read.
+func TestDocStaleReferenceIgnoresFilesGoIgnores(t *testing.T) {
+	files := withFile("catalog/a.go", staleCatalogRef("planner.TestGone"))
+	files["planner/_old_test.go"] = "package planner\n\nimport \"testing\"\n\nfunc TestGone(t *testing.T) {}\n"
+	root, contexts := rulestest.Module(t, files)
+	require.NoError(t, os.Symlink("user@host.12345:1700000000", filepath.Join(root, "planner", ".#ctx_test.go")))
+
+	violations, err := analyzeChecking(t, root, contexts, core.GoProjectOptions{})
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "planner.TestGone")
 }
 
 // Repro from a real project: a comment names a family of constants by its

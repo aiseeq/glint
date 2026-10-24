@@ -350,8 +350,8 @@ func (w *Walker) processFile(path string) (*FileContext, error) {
 		ctx.SetGoAST(fset, astFile)
 		return ctx, nil
 	}
-	err = classifyParseError(path, err)
-	if errors.Is(err, errExcludedByBuild) {
+	err = ClassifyParseError(path, err)
+	if errors.Is(err, ErrExcludedByBuild) {
 		// Line rules still read the file; syntax rules have no tree to see.
 		return ctx, nil
 	}

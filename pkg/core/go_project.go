@@ -53,6 +53,10 @@ type GoProjectContext struct {
 	// SkippedPackages lists packages excluded from typed analysis; always empty
 	// unless GoProjectOptions.TolerateBrokenPackages is set.
 	SkippedPackages []SkippedPackage
+	// TolerateBrokenPackages is GoProjectOptions.TolerateBrokenPackages of the
+	// load: a rule that reads sources the load did not, such as test files of
+	// the module outside the analyzed files, skips a broken one the same way.
+	TolerateBrokenPackages bool
 	// GeneratedTSImports holds the names hand-written TypeScript imports from
 	// TypeScript generated from Go types (GeneratedTSImports).
 	GeneratedTSImports map[string]bool
@@ -245,13 +249,14 @@ func (l *GoProjectLoader) Load(root string, contexts []*FileContext, opts GoProj
 	}
 
 	project := &GoProjectContext{
-		ProjectRoot:        absRoot,
-		FileSet:            load.loader.fset,
-		Files:              append([]*FileContext(nil), goFiles...),
-		SkippedPackages:    append(append([]SkippedPackage(nil), load.skipped...), outsideModule...),
-		GeneratedTSImports: GeneratedTSImports(contexts),
-		filesByPath:        filesByPath,
-		loadShared:         &load.shared,
+		ProjectRoot:            absRoot,
+		FileSet:                load.loader.fset,
+		Files:                  append([]*FileContext(nil), goFiles...),
+		SkippedPackages:        append(append([]SkippedPackage(nil), load.skipped...), outsideModule...),
+		TolerateBrokenPackages: opts.TolerateBrokenPackages,
+		GeneratedTSImports:     GeneratedTSImports(contexts),
+		filesByPath:            filesByPath,
+		loadShared:             &load.shared,
 	}
 	compiled, err := attachLoadedGoPackages(project, load.loaded, load.loader.parsed)
 	if err != nil {
@@ -551,8 +556,8 @@ func ParseGoFiles(root string, contexts []*FileContext, tolerate bool) error {
 		}
 		file, err := parseGoSource(fset, path, fileCtx.Content)
 		if err != nil {
-			err = classifyParseError(path, fmt.Errorf("parse Go file %q: %w", path, err))
-			if errors.Is(err, errExcludedByBuild) || tolerate {
+			err = ClassifyParseError(path, fmt.Errorf("parse Go file %q: %w", path, err))
+			if errors.Is(err, ErrExcludedByBuild) || tolerate {
 				continue
 			}
 			return err
@@ -615,8 +620,8 @@ func attachUncompiledGoFiles(project *GoProjectContext, loader *goProjectLoader,
 		}
 		file, err := loader.parseFile(project.FileSet, path, fileCtx.Content)
 		if err != nil {
-			err = classifyParseError(path, err)
-			if errors.Is(err, errExcludedByBuild) {
+			err = ClassifyParseError(path, err)
+			if errors.Is(err, ErrExcludedByBuild) {
 				// Not part of any build, so not a package that failed to
 				// type-check either; line rules still read the file.
 				continue

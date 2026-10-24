@@ -7,10 +7,13 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -105,6 +108,7 @@ var keyPathTags = append([]string{"json", "xml"}, helpers.ConfigTags...)
 func collectModulePackages(ctx *core.GoProjectContext) (*modulePackages, error) {
 	m := &modulePackages{byPath: map[string]map[string]bool{}, byName: map[string]map[string]bool{}, any: map[string]bool{}, external: map[string]bool{}, keyPaths: map[string]map[string]bool{}}
 	imported := map[string]string{} // import path → package name
+	analyzed := analyzedTestFiles(ctx)
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil {
 			return nil, errors.New("doc stale reference: package has no syntax")
@@ -127,7 +131,8 @@ func collectModulePackages(ctx *core.GoProjectContext) (*modulePackages, error) 
 		addScopeNames(names, p.Types.Scope())
 		m.addKeyPaths(p.Types.Scope())
 		if len(p.GoFiles) > 0 {
-			if err := addTestNames(names, filepath.Dir(p.GoFiles[0]), p.Name); err != nil {
+			dir := filepath.Dir(p.GoFiles[0])
+			if err := addTestNames(names, ctx, analyzed[dir], dir, p.Name); err != nil {
 				return nil, err
 			}
 		}
@@ -230,16 +235,44 @@ func elemStruct(t types.Type) (*types.Struct, bool) {
 // addTestNames — top-level names of the package's _test.go files. The typed
 // packages carry no test files, and the project files hold only those under
 // the checked root, while a comment names a test of any module package: the
-// files are read from the package directory.
-func addTestNames(names map[string]bool, dir, pkg string) error {
-	paths, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
+// files are read from the package directory. An analyzed file counts with the
+// content of its context, which may differ from the disk or exist only in
+// memory, and with the tree the load gave it (none: the load left it out).
+// A file of the directory go ignores (a leading '.' or '_': an editor lock
+// file, a disabled test) declares nothing; one that does not parse is an
+// error, unless the build excludes it or the load tolerates broken packages.
+func addTestNames(names map[string]bool, ctx *core.GoProjectContext, analyzed []*core.FileContext, dir, pkg string) error {
+	seen := map[string]bool{}
+	for _, fileCtx := range analyzed {
+		seen[filepath.Base(fileCtx.Path)] = true
+		if fileCtx.GoAST != nil && (fileCtx.GoAST.Name.Name == pkg || fileCtx.GoAST.Name.Name == pkg+"_test") {
+			addDeclNames(names, fileCtx.GoAST)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil // a package only in memory: its files are the analyzed ones
+	}
 	if err != nil {
 		return fmt.Errorf("doc stale reference: %w", err)
 	}
 	fset := token.NewFileSet()
-	for _, path := range paths {
-		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !goTestFileName(name) || seen[name] {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		src, err := os.ReadFile(path)
 		if err != nil {
+			return fmt.Errorf("doc stale reference: %w", err)
+		}
+		file, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
+		if err != nil {
+			err = core.ClassifyParseError(path, err)
+			if errors.Is(err, core.ErrExcludedByBuild) || ctx.TolerateBrokenPackages {
+				continue // left out the way the load leaves out such a file
+			}
 			return fmt.Errorf("doc stale reference: %w", err)
 		}
 		if file.Name.Name == pkg || file.Name.Name == pkg+"_test" {
@@ -247,6 +280,24 @@ func addTestNames(names map[string]bool, dir, pkg string) error {
 		}
 	}
 	return nil
+}
+
+// analyzedTestFiles — the analyzed _test.go files the go command reads, by directory.
+func analyzedTestFiles(ctx *core.GoProjectContext) map[string][]*core.FileContext {
+	out := map[string][]*core.FileContext{}
+	for _, fileCtx := range ctx.Files {
+		if fileCtx != nil && goTestFileName(filepath.Base(fileCtx.Path)) {
+			dir := filepath.Dir(fileCtx.Path)
+			out[dir] = append(out[dir], fileCtx)
+		}
+	}
+	return out
+}
+
+// goTestFileName reports whether the go command reads a file of this name as
+// a test: it ignores names with a leading '.' or '_'.
+func goTestFileName(name string) bool {
+	return strings.HasSuffix(name, "_test.go") && !strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "_")
 }
 
 // addDeclNames — top-level names of one _test.go file of the package, internal or external.
@@ -325,7 +376,11 @@ func (r *DocStaleReferenceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 				continue
 			}
 			seen[fileCtx.RelPath] = true
-			violations = append(violations, r.analyzeFile(fileCtx, pkg.Package.PkgPath, mod)...)
+			found, err := r.analyzeFile(fileCtx, pkg.Package.PkgPath, mod)
+			if err != nil {
+				return nil, err
+			}
+			violations = append(violations, found...)
 		}
 	}
 
@@ -338,8 +393,11 @@ func (r *DocStaleReferenceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 	return violations, nil
 }
 
-func (r *DocStaleReferenceRule) analyzeFile(fileCtx *core.FileContext, ownPath string, mod *modulePackages) []*core.Violation {
-	imports := fileImports(fileCtx.GoAST)
+func (r *DocStaleReferenceRule) analyzeFile(fileCtx *core.FileContext, ownPath string, mod *modulePackages) ([]*core.Violation, error) {
+	imports, err := fileImports(fileCtx.GoAST)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", fileCtx.RelPath, err)
+	}
 	own := fileCtx.GoAST.Name.Name
 	var violations []*core.Violation
 	for _, group := range fileCtx.GoAST.Comments {
@@ -377,7 +435,7 @@ func (r *DocStaleReferenceRule) analyzeFile(fileCtx *core.FileContext, ownPath s
 			}
 		}
 	}
-	return violations
+	return violations, nil
 }
 
 // resolvePackage — the module package a comment means by name: an import of
@@ -420,18 +478,22 @@ func importable(from, path string) bool {
 	return parent == "" || from == parent || strings.HasPrefix(from, parent+"/")
 }
 
-// fileImports — local name → import path of the file's imports.
-func fileImports(file *ast.File) map[string]string {
+// fileImports — local name → import path of the file's imports. The parser
+// accepts only a valid literal, so a path that does not unquote is an error.
+func fileImports(file *ast.File) (map[string]string, error) {
 	out := map[string]string{}
 	for _, spec := range file.Imports {
-		path := strings.Trim(spec.Path.Value, "\"`") // the parser keeps the literal quoted
+		path, err := strconv.Unquote(spec.Path.Value) // "\x70lanner" is planner
+		if err != nil {
+			return nil, fmt.Errorf("doc stale reference: import path %s: %w", spec.Path.Value, err)
+		}
 		name := path[strings.LastIndex(path, "/")+1:]
 		if spec.Name != nil {
 			name = spec.Name.Name
 		}
 		out[name] = path
 	}
-	return out
+	return out, nil
 }
 
 func (r *DocStaleReferenceRule) report(fileCtx *core.FileContext, line int, pkg, ident string) *core.Violation {
