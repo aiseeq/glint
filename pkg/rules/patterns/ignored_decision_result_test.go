@@ -106,6 +106,74 @@ func Read(s *Store) int {
 	assert.Contains(t, violations[0].Message, "TryGet")
 }
 
+// Repro from a real project: the doc of a field lookup said what ok=false means,
+// the doc phrase made its comma-ok a decision, and every `value, _ := Get(key)`
+// with a zero default was reported.
+func TestIgnoredDecisionResultAcceptsCommaOkLookup(t *testing.T) {
+	violations := analyzeDecision(t, `package budget
+
+type Line struct{}
+
+// Get returns a field; ok=false — the field is absent.
+func (l Line) Get(key string) (string, bool) { return "", false }
+
+func Read(l Line) string {
+	value, ok := l.Get("building")
+	if !ok {
+		return ""
+	}
+	return value
+}
+
+func ReadDefault(l Line) string {
+	value, _ := l.Get("building")
+	return value
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// The comma-ok shape does not excuse an acquisition: Take still decides whether
+// a slot was free, however its result is named and its doc worded.
+func TestIgnoredDecisionResultReportsDroppedOkOfAcquisition(t *testing.T) {
+	violations := analyzeDecision(t, `package budget
+
+type Pool struct{}
+
+// Take hands out a free slot; ok=false — no slot is free.
+func (p *Pool) Take() (slot int, ok bool) { return 0, false }
+
+func Serve(p *Pool) int {
+	slot, _ := p.Take()
+	return slot
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Take")
+}
+
+// A lone bool keeps its doc promise: the comma-ok exemption is for a value
+// beside the bool, not for an answer that is the whole result.
+func TestIgnoredDecisionResultReportsDroppedLoneBoolPromisedByDoc(t *testing.T) {
+	violations := analyzeDecision(t, `package budget
+
+type Ledger struct{}
+
+// Settle books the transfer; false — the balance is short and nothing moved.
+func (l *Ledger) Settle(amount int) bool { return false }
+
+func Close(l *Ledger) string {
+	l.Settle(10)
+	return "closed"
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Settle")
+}
+
 // Using the result — in a condition, in an assignment, as an argument — is the
 // normal case and must stay quiet.
 func TestIgnoredDecisionResultAcceptsUsedResult(t *testing.T) {

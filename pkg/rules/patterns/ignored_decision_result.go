@@ -49,9 +49,10 @@ var decisionDocPhrases = []string{
 //
 // Only functions whose result is a decision are considered — the name starts
 // with a verb of permission or acquisition (Buy, Reserve, Acquire, Try…, Can…),
-// or the doc comment states what a false answer means. A predicate that merely
-// describes the world is out of scope, and so is a result the caller uses in a
-// condition, an assignment or an argument.
+// or the doc comment of a lone bool result states what a false answer means.
+// A predicate that merely describes the world is out of scope, and so is the
+// comma-ok of a lookup (Get(key) (string, bool)) whatever its doc says, and a
+// result the caller uses in a condition, an assignment or an argument.
 type IgnoredDecisionResultRule struct {
 	*rules.BaseRule
 }
@@ -62,7 +63,7 @@ func NewIgnoredDecisionResultRule() *IgnoredDecisionResultRule {
 		BaseRule: rules.NewBaseRule(
 			"ignored-decision-result",
 			"patterns",
-			"Detects a dropped bool result of a function that decides whether the action may happen — the action then happens anyway — and a failure flag result (invalid, failed) whose only reader is a branch that logs and goes on with the fallback",
+			"Detects a dropped bool result of a function that decides whether the action may happen (a name of permission or acquisition, or a lone bool whose doc says what false means; the comma-ok of a lookup is not a decision) — the action then happens anyway — and a failure flag result (invalid, failed) whose only reader is a branch that logs and goes on with the fallback",
 			core.SeverityHigh,
 		),
 	}
@@ -351,10 +352,18 @@ func (r *IgnoredDecisionResultRule) decisionCallee(
 	if _, isDecision := decisionResultIndex(signature); !isDecision {
 		return nil, false
 	}
-	if !isDecisionName(fn.Name()) && !docPromisesFalse(docs[fn]) {
-		return nil, false
+	if isDecisionName(fn.Name()) {
+		return fn, true
 	}
-	return fn, true
+	// The doc alone makes a decision only of a lone bool. Beside a value the
+	// bool is the comma-ok of a lookup, and its doc saying what false means
+	// ("ok=false — the field is absent") describes the idiom, not a
+	// permission: `value, _ := line.Get(key)` is the ordinary read with a zero
+	// default. A pair that acquires (Take, TryGet, Claim) is caught by its name.
+	if signature.Results().Len() == 1 && docPromisesFalse(docs[fn]) {
+		return fn, true
+	}
+	return nil, false
 }
 
 func (r *IgnoredDecisionResultRule) report(fileCtx *core.FileContext, call *ast.CallExpr, fn *types.Func) *core.Violation {
