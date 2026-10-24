@@ -24,26 +24,38 @@ type constructorFields struct {
 	optional map[*types.Named]map[*types.Var]bool
 }
 
-// collectConstructorFields reads every type-checked file of the project.
-func collectConstructorFields(ctx *core.GoProjectContext) (constructorFields, error) {
+// testHelperPackages returns the type-checked packages of the project that are
+// Go test-helper packages (core.IsTestHelperDir): their code is test code, so
+// a fixture built there is neither the constructor of a type nor a program
+// literal that bypasses one.
+func testHelperPackages(ctx *core.GoProjectContext) (map[*core.GoPackageContext]bool, error) {
+	helpers := make(map[*core.GoPackageContext]bool)
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil || len(pkg.Package.GoFiles) == 0 {
+			continue
+		}
+		helper, err := core.IsTestHelperDir(filepath.Dir(pkg.Package.GoFiles[0]))
+		if err != nil {
+			return nil, err
+		}
+		if helper {
+			helpers[pkg] = true
+		}
+	}
+	return helpers, nil
+}
+
+// collectConstructorFields reads every type-checked file of the project
+// outside the test-helper packages.
+func collectConstructorFields(ctx *core.GoProjectContext, testHelpers map[*core.GoPackageContext]bool) constructorFields {
 	fields := constructorFields{
 		set:      make(map[*types.Named]map[*types.Var]bool),
 		used:     make(map[*types.Named]map[*types.Var]bool),
 		optional: make(map[*types.Named]map[*types.Var]bool),
 	}
 	for _, pkg := range ctx.Packages {
-		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
+		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil || testHelpers[pkg] {
 			continue
-		}
-		// a fixture of a test-helper package is not the type's constructor
-		if len(pkg.Package.GoFiles) > 0 {
-			helper, err := core.IsTestHelperDir(filepath.Dir(pkg.Package.GoFiles[0]))
-			if err != nil {
-				return fields, err
-			}
-			if helper {
-				continue
-			}
 		}
 		info := pkg.Package.TypesInfo
 		for _, file := range pkg.Package.Syntax {
@@ -85,7 +97,7 @@ func collectConstructorFields(ctx *core.GoProjectContext) (constructorFields, er
 			}
 		}
 	}
-	return fields, nil
+	return fields
 }
 
 // collectMethodUses records the fields of the receiver a method goes through

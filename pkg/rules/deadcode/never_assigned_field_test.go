@@ -70,6 +70,36 @@ func (c *Composer) Apply() { c.logger.Info("applied") }
 	assert.Empty(t, violations)
 }
 
+func TestNeverAssignedFieldSkipsProgramFixturesInTestHelperPackages(t *testing.T) {
+	violations := analyzeNeverAssigned(t, map[string]string{
+		"pipe/job.go": `package pipe
+
+type Job struct {
+	Watch func()
+	Line  string
+}
+
+func NewJob(line string) *Job { return &Job{Watch: func() {}, Line: line} }
+
+func (j *Job) Run() { j.Watch() }
+`,
+		"pipe/jobtest/scene.go": `package jobtest
+
+import (
+	"testing"
+	"example.com/rulestest/pipe"
+)
+
+func Line(t *testing.T) string {
+	t.Helper()
+	j := &pipe.Job{Line: "scene"}
+	return j.Line
+}
+`,
+	})
+	assert.Empty(t, violations, "a fixture in a test-helper package is not a program literal")
+}
+
 // Позиционный литерал не называет полей и заполняет все — из него нельзя
 // заключить, что какое-то поле осталось пустым.
 func TestNeverAssignedFieldAcceptsPositionalLiteral(t *testing.T) {

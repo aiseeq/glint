@@ -79,6 +79,29 @@ func TestScatteredConstructionSkipsTestHelperPackage(t *testing.T) {
 	assert.Empty(t, violations)
 }
 
+func TestScatteredConstructionSkipsHelperByPackageNameAndIgnoresExcludedFiles(t *testing.T) {
+	server := strings.Replace(scatteredServerFile("Server"), "package projecta", "package srvtest", 1)
+	violations := runRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+		"srv/a.go":                 scatteredServerFile("serverA"),
+		"srv/b.go":                 scatteredServerFile("serverB"),
+		"srv/c.go":                 scatteredServerFile("serverC"),
+		"srv/helpers/server.go":    server,
+		"srv/helpers/testing.go":   "package srvtest\n\nimport `testing`\n\nvar _ = testing.Short\n",
+		"srv/helpers/generator.go": "//go:build ignore\n\npackage {{ .Package }}\n\nimport \"testing\"\n",
+	})
+	assert.Len(t, violations, 3, "a helper fixture and excluded generator are not program construction sites")
+}
+
+func TestScatteredConstructionIgnoresExcludedHelperImport(t *testing.T) {
+	violations := runRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+		"api/latest/a.go":         strings.Replace(scatteredServerFile("HandleA"), "package projecta", "package latest", 1),
+		"api/latest/b.go":         strings.Replace(scatteredServerFile("HandleB"), "package projecta", "package latest", 1),
+		"api/latest/c.go":         strings.Replace(scatteredServerFile("HandleC"), "package projecta", "package latest", 1),
+		"api/latest/generator.go": "//go:build ignore\n\npackage latest\n\nimport \"testing\"\n",
+	})
+	assert.Len(t, violations, 3, "an excluded import must not hide the program construction sites")
+}
+
 const scatteredFilterModel = `package model
 
 type PaymentFilter struct {
