@@ -60,6 +60,7 @@ const (
 
 // CLI flags
 var (
+	flagChdir       []string
 	flagCategory    string
 	flagRules       []string
 	flagMinSeverity string
@@ -91,21 +92,51 @@ func main() {
 		if !errors.Is(err, errFindingsReported) {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
+		var usageErr usageError
+		if errors.As(err, &usageErr) {
+			os.Exit(exitUsage)
+		}
 		os.Exit(1)
 	}
 }
+
+// exitUsage is the status of a command line that cannot run at all, like a
+// -C directory that does not exist, as opposed to 1 for a failed analysis.
+const exitUsage = 2
+
+// usageError marks an error of the command line itself, so main exits with
+// exitUsage instead of the status of a failed analysis.
+type usageError struct {
+	err error
+}
+
+func (e usageError) Error() string { return e.err.Error() }
+func (e usageError) Unwrap() error { return e.err }
 
 var rootCmd = &cobra.Command{
 	Use:   "glint",
 	Short: "Glint - Unified Code Analyzer",
 	Long: `Glint is a fast, configurable static analyzer for Go and TypeScript projects.
-Originally built to help AI agents understand codebases.`,
+Originally built to help AI agents understand codebases.
+
+Use -C <path> to change directory before running a command; it may be repeated.`,
 	Version: resolveVersion(),
 	// A failed analysis is not a usage mistake: printing the full help text
 	// after every error buries the message that explains what went wrong.
 	// main reports the error itself, so cobra must not print it a second time.
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	// -C runs before every subcommand reads .glint.yaml, resolves its path
+	// arguments or opens the cache; each value is relative to the previous
+	// one, as with git -C.
+	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+		for _, dir := range flagChdir {
+			if err := os.Chdir(dir); err != nil {
+				return usageError{err: fmt.Errorf("-C %q: %w", dir, err)}
+			}
+		}
+		return nil
+	},
 }
 
 var checkCmd = &cobra.Command{
@@ -170,6 +201,8 @@ Available fixers:
 }
 
 func init() {
+	rootCmd.PersistentFlags().StringArrayVarP(&flagChdir, "directory", "C", nil, "Run as if glint was started in this directory (may be repeated)")
+
 	// Check command flags
 	checkCmd.Flags().StringVarP(&flagCategory, "category", "c", "", "Run only specified category")
 	checkCmd.Flags().StringSliceVarP(&flagRules, "rule", "r", nil, "Run only the specified rules (repeat the flag or separate names with commas)")

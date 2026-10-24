@@ -35,6 +35,27 @@ func TestGetEnabledRulesRejectsUnknownRule(t *testing.T) {
 	}
 }
 
+func TestRootDirectoryFlagAcceptsRepeatedValues(t *testing.T) {
+	flags := rootCmd.PersistentFlags()
+	prev := flagChdir
+	t.Cleanup(func() {
+		flagChdir = prev
+		if err := flags.Lookup("directory").Value.(interface{ Replace([]string) error }).Replace(prev); err != nil {
+			t.Error(err)
+		}
+	})
+	flagChdir = nil
+	if err := flags.Lookup("directory").Value.(interface{ Replace([]string) error }).Replace(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := flags.Parse([]string{"-C", "first", "-C", "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(flagChdir, ",") != "first,second" {
+		t.Fatalf("got -C values %q, want [first second]", flagChdir)
+	}
+}
+
 func TestGetEnabledRulesRejectsUnknownCategory(t *testing.T) {
 	withFlags(t, "no-such-category")
 

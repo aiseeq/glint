@@ -66,6 +66,11 @@ graft help      # every task
 ## Quick Start
 
 ```bash
+# Run a command from another project directory; repeated -C values are
+# resolved one after another, like git -C. A missing directory exits 2.
+# -C is a global flag: it is also accepted after the subcommand.
+glint -C ../project check -s low .
+
 # Analyze current directory
 glint check
 
