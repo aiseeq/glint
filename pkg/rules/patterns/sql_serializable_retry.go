@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"bytes"
 	"go/ast"
 	"go/token"
 	"path/filepath"
@@ -55,7 +56,10 @@ var (
 func (r *SQLSerializableNoRetryRule) UseProjectFiles(files []*core.FileContext) {
 	r.retrying = make(map[string]bool)
 	for _, ctx := range files {
-		if ctx.IsGoFile() && serializationFailure.Match(ctx.Content) {
+		// Each alternative of the pattern holds "40001" or, in any case,
+		// "serializ": a file without them is not matched.
+		mayMatch := bytes.Contains(ctx.Content, []byte("40001")) || containsAnyFold(string(ctx.Content), []string{"serializ"})
+		if ctx.IsGoFile() && mayMatch && serializationFailure.Match(ctx.Content) {
 			r.retrying[filepath.Dir(ctx.RelPath)] = true
 		}
 	}

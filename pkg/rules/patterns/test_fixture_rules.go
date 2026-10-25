@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -587,6 +588,9 @@ var (
 	corsHeaderList       = regexp.MustCompile(`(?i)allow-?headers|allowedheaders|expose-?headers`)
 	testAuthHeaderTS     = regexp.MustCompile(`['"]?\bAuthorization['"]?\s*:\s*[` + "`" + `'"]Bearer\b`)
 	testAuthHeaderGo     = regexp.MustCompile(`\.Header\.(?:Set|Add)\(\s*"Authorization"`)
+	// authHeaderWords are in every line readsAuthHeader takes, in any case:
+	// a file without one is not matched line by line.
+	authHeaderWords = []string{"auth", "jwt", `"bearer `}
 )
 
 // UseProjectFiles learns how the project's Go server reads authentication.
@@ -596,18 +600,25 @@ func (r *TestAuthSchemeDriftRule) UseProjectFiles(files []*core.FileContext) {
 		if !ctx.IsGoFile() || ctx.IsTestFile() {
 			continue
 		}
+		cookie := bytes.Contains(ctx.Content, []byte(".Cookie("))
+		header := containsAnyFold(string(ctx.Content), authHeaderWords)
+		if !cookie && !header {
+			continue
+		}
 		var headerNames []string
-		for _, line := range ctx.Lines {
-			if m := authHeaderConstant.FindStringSubmatch(line); m != nil {
-				headerNames = append(headerNames, m[1])
+		if header {
+			for _, line := range ctx.Lines {
+				if m := authHeaderConstant.FindStringSubmatch(line); m != nil {
+					headerNames = append(headerNames, m[1])
+				}
 			}
 		}
 		for _, line := range ctx.Lines {
-			r.cookieAuth = r.cookieAuth || requestCookieRead.MatchString(line)
-			if corsHeaderList.MatchString(line) {
+			r.cookieAuth = r.cookieAuth || cookie && requestCookieRead.MatchString(line)
+			if !header || r.headerAuth || corsHeaderList.MatchString(line) {
 				continue
 			}
-			r.headerAuth = r.headerAuth || readsAuthHeader(line, headerNames)
+			r.headerAuth = readsAuthHeader(line, headerNames)
 		}
 	}
 }

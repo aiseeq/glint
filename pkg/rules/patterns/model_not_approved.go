@@ -116,6 +116,10 @@ func (r *ModelNotApprovedRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if testData && !processLaunch.MatchString(code) {
 			continue
 		}
+		// modelFlag needs "-m", modelKey "model" in any case.
+		if !strings.Contains(code, "-m") && !containsAnyFold(code, []string{"model"}) {
+			continue
+		}
 		model := unapprovedModel(code, patterns, approved.accepted)
 		if model == "" || ctx.IsSuppressed(i+1, r.Name()) {
 			continue
