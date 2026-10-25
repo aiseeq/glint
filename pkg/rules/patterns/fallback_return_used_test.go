@@ -183,3 +183,37 @@ func (s *Svc) Collected(raw []string) []int {
 `
 	assert.Empty(t, fallbackReturnLines(t, source))
 }
+
+// Repro from a real project: the reason of a suppression on the if line
+// holds a word the rule takes as an explanation ("без ", "still"). The rule
+// must not read the suppression as one, or it falls silent and the
+// suppression is stale with no right place left for it. A plain comment with
+// the same words still explains the branch.
+func TestFallbackReturn_SuppressionReasonIsNoExplanation(t *testing.T) {
+	const source = `package svc
+
+type Logger interface{ Warn(msg string, args ...any) }
+
+type Svc struct {
+	logger Logger
+	read   func() (float64, error)
+}
+
+func (s *Svc) Factor() float64 {
+	p, err := s.read()
+	if err != nil { //nolint:fallback-return // zero pressure, threshold still without correction
+		s.logger.Warn("pressure unread", "err", err)
+	}
+	return p * 2
+}
+
+func (s *Svc) Plain() float64 {
+	p, err := s.read()
+	if err != nil { // zero pressure, threshold still without correction
+		s.logger.Warn("pressure unread", "err", err)
+	}
+	return p * 2
+}
+`
+	assert.Equal(t, []int{12}, fallbackReturnLines(t, source))
+}

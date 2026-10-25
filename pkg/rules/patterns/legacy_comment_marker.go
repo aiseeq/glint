@@ -191,3 +191,15 @@ func isURLAdjacentLegacyDescriptor(rawLine, lowerComment string) bool { // legac
 	}
 	return urlAdjacentLegacyParenRE.MatchString(lowerComment)
 }
+
+// explanationComment returns the lowercased comment of a line up to its first
+// suppression directive. A directive and the reason after it belong to the
+// suppression: a rule that took them as an explanation of the code would fall
+// silent and leave the suppression stale, with no line left to put it on.
+func explanationComment(line string) string {
+	comment := strings.ToLower(core.CommentPart(line))
+	if loc := suppressionDirectiveRE.FindStringIndex(comment); loc != nil {
+		comment = comment[:loc[0]]
+	}
+	return comment
+}

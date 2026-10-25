@@ -382,7 +382,8 @@ var y = 2
 // what the program does to files, rows and records goes on to say when, by
 // whom or with what ("removed afterwards", "deleted in the work tree"), or
 // names the thing as removed ("a deleted file"). A sentence wrapped onto the
-// next comment line goes on there.
+// next comment line goes on there, and one wrapped from the line above
+// started there ("was / deleted").
 func TestTombstoneComment_RemovalInsideABehaviourSentence(t *testing.T) {
 	code := `package store
 
@@ -401,6 +402,8 @@ func TestTombstoneComment_RemovalInsideABehaviourSentence(t *testing.T) {
 // The rule reports the lines the commit removed (defect) or added.
 // normalize reports a comma or a dot removed
 // from a number before it is parsed.
+// A comment there documents no entry: the entry it described was
+// deleted, or the declaration it documented went away.
 func f() {}
 
 // Old cache warmer removed.
@@ -415,8 +418,8 @@ func g() {}
 	for _, v := range NewTombstoneCommentRule().AnalyzeFile(core.NewFileContext("store/a.go", ".", []byte(code), nil)) {
 		lines = append(lines, v.Line)
 	}
-	if fmt.Sprint(lines) != "[20 21 22 23 24 25]" {
-		t.Fatalf("want findings on lines 20-25 only, got %v", lines)
+	if fmt.Sprint(lines) != "[22 23 24 25 26 27]" {
+		t.Fatalf("want findings on lines 22-27 only, got %v", lines)
 	}
 }
 

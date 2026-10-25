@@ -228,3 +228,91 @@ func Join(parts []string) string {
 `})
 	assert.Empty(t, found, "запись в хеш и в буфер не может провалиться: %v", found)
 }
+
+// Repro from a real project: a call standing alone as a statement drops its
+// error as surely as the blank does, and the drop is not even written down.
+// The exemptions of the blank hold for it too: printing, closing, a rollback,
+// a write that cannot fail, and crypto/rand.Read, which never returns an error.
+func TestIgnoredError_BareCallStatement(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{"relay/relay.go": `package relay
+
+import (
+	"crypto/rand"
+	"database/sql"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"strings"
+)
+
+func Drain(conn net.Conn, tx *sql.Tx, path string) [8]byte {
+	io.Copy(io.Discard, conn)
+	os.Remove(path)
+	var b [8]byte
+	rand.Read(b[:])
+	fmt.Println("drained")
+	fmt.Fprintf(os.Stderr, "drained %s\n", path)
+	var sb strings.Builder
+	sb.WriteString("x")
+	tx.Rollback()
+	conn.Close()
+	defer conn.Close()
+	go io.Copy(io.Discard, conn)
+	if _, err := io.Copy(io.Discard, conn); err != nil {
+		return b
+	}
+	return b
+}
+`})
+	violations, err := NewIgnoredErrorRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var lines []int
+	for _, v := range violations {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{14, 15}, lines)
+}
+
+// A temporary file removed on the way out of a failure is cleanup like a
+// rollback: the error that made the path fail goes to the caller, and the
+// failure of the cleanup has no one to report to. The same removal on the
+// path that succeeds drops a real error.
+func TestIgnoredError_RemovalOnFailurePath(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{"store/store.go": `package store
+
+import (
+	"fmt"
+	"os"
+)
+
+func Save(path string, data []byte) error {
+	tmp, err := os.CreateTemp("", "save")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.RemoveAll(tmp.Name())
+		return nil
+	}
+	os.Remove(path + ".old")
+	return nil
+}
+`})
+	violations, err := NewIgnoredErrorRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var lines []int
+	for _, v := range violations {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{23, 26}, lines)
+}

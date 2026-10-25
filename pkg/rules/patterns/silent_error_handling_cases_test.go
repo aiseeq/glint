@@ -140,3 +140,34 @@ func quietLimit(s string) int {
 	ctx := rulestest.GoFile(t, "payprov/handlers.go", source)
 	assert.Equal(t, []int{63}, violationLines(NewSilentErrorHandlingRule().AnalyzeFile(ctx)))
 }
+
+// A suppression answers before the explanation is looked for: with an
+// "optional" in its reason the rule would otherwise fall silent and the
+// suppression look stale. The same words in a plain comment still explain
+// the branch.
+func TestSilentErrorHandling_SuppressionReasonIsNoExplanation(t *testing.T) {
+	const source = `package p
+
+import "strconv"
+
+func Parse(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil { //nolint:silent-error-handling // the value is optional here
+		return 0, nil
+	}
+	return n, nil
+}
+
+func Plain(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil { // the value is optional here
+		return 0, nil
+	}
+	return n, nil
+}
+`
+	rule := NewSilentErrorHandlingRule()
+	ctx := rulestest.GoFile(t, "p/p.go", source)
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+	assert.Equal(t, []int{7}, ctx.TakeSuppressionHits(rule.Name()), "the suppression silences the finding")
+}

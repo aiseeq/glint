@@ -1296,26 +1296,14 @@ func (r *FallbackReturnRule) hasLegitimateComment(lines []string, lineIdx int) b
 	}
 
 	// Check current line for inline comment
-	currentLine := lines[lineIdx]
-	if commentIdx := strings.Index(currentLine, "//"); commentIdx >= 0 {
-		commentLower := strings.ToLower(currentLine[commentIdx:])
-		for _, pattern := range legitimatePatterns {
-			if strings.Contains(commentLower, pattern) {
-				return true
-			}
-		}
+	if helpers.ContainsAny(explanationComment(lines[lineIdx]), legitimatePatterns) {
+		return true
 	}
 
 	// Check up to 3 lines before for standalone comments
 	for i := lineIdx - 1; i >= 0 && i > lineIdx-4; i-- {
-		line := strings.TrimSpace(lines[i])
-		if strings.HasPrefix(line, "//") {
-			lineLower := strings.ToLower(line)
-			for _, pattern := range legitimatePatterns {
-				if strings.Contains(lineLower, pattern) {
-					return true
-				}
-			}
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "//") && helpers.ContainsAny(explanationComment(lines[i]), legitimatePatterns) {
+			return true
 		}
 	}
 	return false

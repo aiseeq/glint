@@ -57,13 +57,21 @@ func (r *IgnoredErrorRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core
 
 func (r *IgnoredErrorRule) analyzeFile(fileCtx *core.FileContext, file *ast.File, info *types.Info) []*core.Violation {
 	var violations []*core.Violation
+	cleanup := failurePathCleanup(file, info)
 
 	ast.Inspect(file, func(n ast.Node) bool {
-		assign, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
+		var v *core.Violation
+		switch stmt := n.(type) {
+		case *ast.AssignStmt:
+			if !cleanup[stmt] {
+				v = r.checkAssign(fileCtx, stmt, info)
+			}
+		case *ast.ExprStmt:
+			if !cleanup[stmt] {
+				v = r.checkBareCall(fileCtx, stmt, info)
+			}
 		}
-		if v := r.checkAssign(fileCtx, assign, info); v != nil {
+		if v != nil {
 			violations = append(violations, v)
 		}
 		return true
@@ -84,6 +92,131 @@ func (r *IgnoredErrorRule) checkAssign(fileCtx *core.FileContext, assign *ast.As
 	return v
 }
 
+// checkBareCall reports a call standing alone as a statement whose results
+// hold an error: nothing reads the error, and unlike the blank the drop is not
+// written down.
+func (r *IgnoredErrorRule) checkBareCall(fileCtx *core.FileContext, stmt *ast.ExprStmt, info *types.Info) *core.Violation {
+	call, ok := ast.Unparen(stmt.X).(*ast.CallExpr)
+	if !ok || !returnsError(call, info) {
+		return nil
+	}
+	funcName := core.ExtractFullFunctionName(call)
+	if isKnownSafeToIgnore(funcName) || writeCannotFail(call, info) || randReadCannotFail(call, info) {
+		return nil
+	}
+	pos := fileCtx.PositionFor(stmt)
+	if fileCtx.IsSuppressed(pos.Line, r.Name()) {
+		return nil
+	}
+	v := r.CreateViolation(fileCtx.RelPath, pos.Line, "Error from "+funcName+" is dropped: the call stands alone and nothing reads its error")
+	v.WithCode(strings.TrimSpace(fileCtx.GetLine(pos.Line)))
+	v.WithSuggestion("Handle the error, or return it to the caller; a deliberate drop is written as _ = with the reason")
+	return v
+}
+
+// failurePathCleanup returns the removals of a file or a directory
+// (os.Remove, os.RemoveAll) that a return of a non-nil error follows in the
+// same block, past other such statements and Close calls: cleanup on the way
+// out of a failure, like a rollback. The error that made the path fail goes
+// to the caller, and the failure of the cleanup has no one to report to.
+func failurePathCleanup(file *ast.File, info *types.Info) map[ast.Stmt]bool {
+	cleanup := make(map[ast.Stmt]bool)
+	mark := func(list []ast.Stmt) {
+		for i, stmt := range list {
+			if isRemovalStmt(stmt, info) && returnsFailureAfterCleanup(list[i+1:], info) {
+				cleanup[stmt] = true
+			}
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch block := n.(type) {
+		case *ast.BlockStmt:
+			mark(block.List)
+		case *ast.CaseClause:
+			mark(block.Body)
+		case *ast.CommClause:
+			mark(block.Body)
+		}
+		return true
+	})
+	return cleanup
+}
+
+// isRemovalStmt reports os.Remove or os.RemoveAll as a statement of its own
+// or assigned to the blank.
+func isRemovalStmt(stmt ast.Stmt, info *types.Info) bool {
+	var expr ast.Expr
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		expr = s.X
+	case *ast.AssignStmt:
+		if len(s.Rhs) != 1 {
+			return false
+		}
+		expr = s.Rhs[0]
+	default:
+		return false
+	}
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	fn, ok := info.Uses[selector.Sel].(*types.Func)
+	return ok && fn.Pkg() != nil && fn.Pkg().Path() == "os" && (fn.Name() == "Remove" || fn.Name() == "RemoveAll")
+}
+
+// returnsFailureAfterCleanup reports statements that, past more removals and
+// Close calls, return an error result other than nil.
+func returnsFailureAfterCleanup(rest []ast.Stmt, info *types.Info) bool {
+	for _, stmt := range rest {
+		if ret, ok := stmt.(*ast.ReturnStmt); ok {
+			if len(ret.Results) == 0 {
+				return false
+			}
+			last := ret.Results[len(ret.Results)-1]
+			if id, ok := ast.Unparen(last).(*ast.Ident); ok && id.Name == "nil" {
+				return false
+			}
+			t := info.TypeOf(last)
+			return t != nil && isErrorType(t)
+		}
+		if isRemovalStmt(stmt, info) || isCloseStmt(stmt) {
+			continue
+		}
+		return false
+	}
+	return false
+}
+
+// isCloseStmt reports a bare x.Close() statement.
+func isCloseStmt(stmt ast.Stmt) bool {
+	expr, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := ast.Unparen(expr.X).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && selector.Sel.Name == "Close"
+}
+
+// randReadCannotFail reports crypto/rand.Read, whose documentation promises
+// it never returns an error and crashes the program instead.
+func randReadCannotFail(call *ast.CallExpr, info *types.Info) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	fn, ok := info.Uses[selector.Sel].(*types.Func)
+	return ok && fn.Pkg() != nil && fn.Pkg().Path() == "crypto/rand" && fn.Name() == "Read"
+}
+
 func (r *IgnoredErrorRule) ignoredAssign(fileCtx *core.FileContext, assign *ast.AssignStmt, info *types.Info) *core.Violation {
 	pos := fileCtx.PositionFor(assign)
 	line := fileCtx.GetLine(pos.Line)
@@ -98,7 +231,7 @@ func (r *IgnoredErrorRule) ignoredAssign(fileCtx *core.FileContext, assign *ast.
 			continue
 		}
 		funcName := core.ExtractFullFunctionName(call)
-		if isKnownSafeToIgnore(funcName) || writeCannotFail(call, info) {
+		if isKnownSafeToIgnore(funcName) || writeCannotFail(call, info) || randReadCannotFail(call, info) {
 			continue
 		}
 

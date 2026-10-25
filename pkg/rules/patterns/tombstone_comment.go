@@ -136,7 +136,8 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if last, size := utf8.DecodeLastRuneInString(comment[loc[0]:loc[1]]); !unicode.IsLetter(last) {
 			loc[1] -= size
 		}
-		if r.behaviorAux.MatchString(comment[:loc[0]]) || r.remover.MatchString(comment[:loc[0]]) || r.runtimeState.MatchString(comment[:loc[0]]) {
+		before := sentenceBefore(comment[:loc[0]], ctx.Lines, i)
+		if r.behaviorAux.MatchString(before) || r.remover.MatchString(before) || r.runtimeState.MatchString(before) {
 			continue // "are removed", "будут удалены" — behavior, not a tombstone
 		}
 		if loc[0] > 0 && strings.IndexByte("='\"`.>/-_", comment[loc[0]-1]) >= 0 {
@@ -148,14 +149,14 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if r.behaviorTail.MatchString(comment[loc[1]:]) {
 			continue // "removed from X", "deleted -> *", "удалено или ..." — data-flow/state docs
 		}
-		if r.addedBefore.MatchString(comment[:loc[0]]) || r.addedAfter.MatchString(comment[loc[1]:]) {
+		if r.addedBefore.MatchString(before) || r.addedAfter.MatchString(comment[loc[1]:]) {
 			continue // "lines added and removed", "rows inserted, updated or deleted" — changes to data
 		}
 		after := comment[loc[1]:]
 		if strings.TrimSpace(after) != "" || !isCapitalWord(strings.TrimFunc(comment[loc[0]:loc[1]], isNotLetter)) {
 			after = sentenceAfter(after, ctx.Lines, i)
 		}
-		if !r.noteStart.MatchString(comment[:loc[0]]) && !r.noteEnd.MatchString(after) {
+		if !r.noteStart.MatchString(before) && !r.noteEnd.MatchString(after) {
 			continue // "removed afterwards", "a deleted file" — a sentence about what the program does
 		}
 		if word := strings.TrimFunc(comment[loc[0]:loc[1]], isNotLetter); isCapitalWord(word) {
@@ -174,6 +175,26 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	}
 
 	return violations
+}
+
+// sentenceBefore returns the text of a comment line before a word: when the
+// word opens the line and the comment line above ends mid-sentence, the
+// sentence started there ("the entry it described was / deleted, or ...").
+func sentenceBefore(before string, lines []string, i int) string {
+	if strings.TrimSpace(before) != "" || i == 0 {
+		return before
+	}
+	above := strings.TrimRight(commentTextOfLine(lines[i-1]), " \t")
+	if above == "" || strings.HasPrefix(above, "\t") || strings.ContainsRune(".!?:;—–", lastRune(above)) {
+		return before
+	}
+	return above + " " + strings.TrimLeft(before, " \t")
+}
+
+// lastRune returns the last character of a non-empty string.
+func lastRune(s string) rune {
+	r, _ := utf8.DecodeLastRuneInString(s)
+	return r
 }
 
 // commentTextOfLine returns the text of a line's comment without its marker,
