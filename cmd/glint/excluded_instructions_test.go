@@ -56,3 +56,29 @@ func TestExcludedInstructionFilesReachOnlyInstructionSize(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, prepared.excludedInstructions)
 }
+
+// The cache report counts the excluded instruction files among the analyzed
+// ones: they are analyzed and cached too, and a report of more unchanged
+// files than analyzed ones reads as a counting bug.
+func TestCacheReportCountsExcludedInstructionFiles(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	module := t.TempDir()
+	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
+	writeModuleFile(t, module, "main.go", "package main\n\nfunc main() {}\n")
+	writeModuleFile(t, module, "CLAUDE.md", "# Rules\n")
+	cfg := core.DefaultConfig()
+	cfg.Settings.Exclude = []string{"*.md"}
+	list := []rules.Rule{doccheck.NewInstructionSizeRule()}
+
+	for run := 1; run <= 2; run++ {
+		prepared, err := prepareAnalysis(core.NewGoProjectLoader(), module, cfg, list, true)
+		require.NoError(t, err)
+		require.NotEmpty(t, prepared.excludedInstructions)
+		_, _, err = analyzePrepared(prepared, list, cfg)
+		require.NoError(t, err)
+		require.NoError(t, prepared.cache.save())
+		if run == 2 {
+			assert.Equal(t, prepared.cache.reused, prepared.analyzedFiles(), "every file is unchanged on the second run")
+		}
+	}
+}

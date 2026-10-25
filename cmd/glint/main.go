@@ -348,7 +348,7 @@ func runCheck(_ *cobra.Command, args []string) error {
 			}
 			if flagTiming {
 				fmt.Fprintf(os.Stderr, "result cache %s: %d of %d files unchanged, project rules %s\n",
-					projectRoot, cache.reused, len(contexts), cache.projectState())
+					projectRoot, cache.reused, prepared.analyzedFiles(), cache.projectState())
 			}
 		}
 		violations, suppressions := core.SplitSuppressions(violations)
@@ -791,6 +791,12 @@ func walkWithWalker(walker *core.Walker) ([]*core.FileContext, *core.Walker, err
 	}
 
 	return contexts, walker, nil
+}
+
+// analyzedFiles counts the files the analysis of the root reads: its
+// contexts and the instruction files kept for the rules that measure them.
+func (p *preparedRoot) analyzedFiles() int {
+	return len(p.contexts) + len(p.excludedInstructions)
 }
 
 // preparedRoot is a walked project root ready for analysis.
