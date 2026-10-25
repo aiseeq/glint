@@ -1315,9 +1315,12 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 	if cachedProject {
 		allViolations = core.ViolationListOf(cache.projectHit.Violations)
 	}
-	for _, rule := range enabledRules {
-		projectRule, ok := rule.(rules.GoProjectRule)
-		if !ok {
+	var results []projectRuleResult
+	if !cachedProject && project != nil {
+		results = runProjectRules(enabledRules, project)
+	}
+	for i, rule := range enabledRules {
+		if _, ok := rule.(rules.GoProjectRule); !ok {
 			fileRules = append(fileRules, rule)
 			continue
 		}
@@ -1331,7 +1334,7 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 			}
 			return nil, nil, fmt.Errorf("analyze Go project with rule %q: project context is nil", rule.Name())
 		}
-		violations, err := runProjectRule(projectRule, project)
+		violations, err := results[i].violations, results[i].err
 		p, err := splitRulePanic(err)
 		if p != nil {
 			panics = append(panics, p)
@@ -1389,6 +1392,37 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 		return nil, nil, err
 	}
 	return append(allViolations, fileViolations...), append(filePanics, panics...), nil
+}
+
+// projectRuleResult is what one Go project rule returned.
+type projectRuleResult struct {
+	violations []*core.Violation
+	err        error
+}
+
+// runProjectRules runs the Go project rules of list on a worker per thread
+// the run may use: each rule reads the whole project, so one at a time they
+// leave the other threads idle. The result of list[i] is at index i, empty
+// for a rule that is not a project rule.
+func runProjectRules(list []rules.Rule, project *core.GoProjectContext) []projectRuleResult {
+	results := make([]projectRuleResult, len(list))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range max(min(runtime.GOMAXPROCS(0), len(list)), 1) {
+		wg.Go(func() {
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(list) {
+					return
+				}
+				if projectRule, ok := list[i].(rules.GoProjectRule); ok {
+					results[i].violations, results[i].err = runProjectRule(projectRule, project)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	return results
 }
 
 // runProjectRule runs one Go project rule; a panic becomes an error that names

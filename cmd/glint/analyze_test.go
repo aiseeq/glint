@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -108,6 +109,66 @@ func TestStatefulRulesSeeFilesInOrder(t *testing.T) {
 		rules.ResetState([]rules.Rule{crossFile})
 		if got := fingerprint(mustAnalyzeFiles(t, contexts, []rules.Rule{crossFile}, cfg, nil)); got != want {
 			t.Fatalf("cross-file findings changed between runs:\nwant:\n%s\ngot:\n%s", want, got)
+		}
+	}
+}
+
+// The Go project rules run concurrently too; their findings and order must
+// not depend on scheduling. Run with -race to also catch state two project
+// rules share.
+func TestProjectRulesAreDeterministicAndRaceFree(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
+	module := t.TempDir()
+	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
+	writeModuleFile(t, module, "svc/shared.go", "package svc\n\n// Shared is built everywhere.\ntype Shared struct {\n\tName    string\n\tTimeout int\n\tRetries int\n}\n")
+	for i := range 4 {
+		writeModuleFile(t, module, fmt.Sprintf("svc/file%d.go", i), fmt.Sprintf(`package svc
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Build%d builds a value from a name.
+func Build%d(name string, unused int) (Shared, error) {
+	if name == "" {
+		return Shared{}, errors.New("empty")
+	}
+	fmt.Println(Shared{Name: name, Timeout: 60, Retries: %d})
+	if err := run%d(); err != nil && err.Error() == "boom" {
+		return Shared{}, nil
+	}
+	return Shared{Name: name, Timeout: 30, Retries: 3}, nil
+}
+
+func run%d() error { return nil }
+`, i, i, i, i, i))
+	}
+	cfg := core.DefaultConfig()
+	allRules := rules.All()
+	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), module, cfg, allRules, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectFindings := func() string {
+		t.Helper()
+		rules.ResetState(allRules)
+		violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, allRules, cfg, prepared.project, nil)
+		if err != nil || len(panics) > 0 {
+			t.Fatalf("analyze: %v %v", err, panics)
+		}
+		return fingerprint(violations)
+	}
+
+	want := projectFindings()
+	for _, rule := range []string{"unused-param", "error-string-compare"} {
+		if !strings.Contains(want, rule+"|") {
+			t.Fatalf("the sample module must trip the project rule %s — the test would not prove anything:\n%s", rule, want)
+		}
+	}
+	for run := range 4 {
+		if got := projectFindings(); got != want {
+			t.Fatalf("run %d produced different findings:\nwant:\n%s\ngot:\n%s", run, want, got)
 		}
 	}
 }
