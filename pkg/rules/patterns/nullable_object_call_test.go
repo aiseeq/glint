@@ -224,3 +224,35 @@ const ids = Object.keys(req.m);
 		t.Fatalf("a property also set to null is still reported, got %d findings", len(got))
 	}
 }
+
+// A row of the file's own constant table is no response: every row is a
+// literal of the file, and a field its type does not let be missing is there.
+// A field declared optional or nullable may still be missing in a row.
+func TestNullableObjectCallRowOfTheFileTable(t *testing.T) {
+	code := `const sets: { id: string; re: Record<string, RegExp> }[] = [
+  { id: "a", re: { x: /-x$/, y: /-y$/ } },
+  { id: "b", re: { x: /-x2$/ } },
+];
+const conf = { limits: { a: 1 } };
+for (const set of sets) {
+  for (const [name, re] of Object.entries(set.re)) {
+    console.log(name, re);
+  }
+}
+const n = Object.keys(conf.limits).length;
+const opts: { id: string; extra?: Record<string, string> }[] = [{ id: "a" }];
+for (const o of opts) {
+  console.log(Object.keys(o.extra));
+}
+for (const row of await loadRows()) {
+  console.log(Object.keys(row.re));
+}
+`
+	var lines []int
+	for _, v := range NewNullableObjectCallRule().AnalyzeFile(core.NewFileContext("tools/report.ts", ".", []byte(code), nil)) {
+		lines = append(lines, v.Line)
+	}
+	if len(lines) != 2 || lines[0] != 14 || lines[1] != 17 {
+		t.Fatalf("want findings on lines 14 (optional field) and 17 (rows from a call) only, got %v", lines)
+	}
+}

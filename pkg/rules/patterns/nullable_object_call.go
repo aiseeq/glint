@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"maps"
 	"regexp"
 	"strings"
 
@@ -16,7 +17,8 @@ func init() {
 // NullableObjectCallRule detects Object.* calls on nested values that may be
 // null/undefined in API responses. These calls throw at runtime when the target
 // is not an object. A property the file itself fills with an object only
-// (objectFilledProperties) is not reported.
+// (objectFilledProperties) is not reported, nor a field of the file's own
+// constant table (fileTableRoots).
 type NullableObjectCallRule struct {
 	*rules.BaseRule
 	// objectCall matches the opening of a call whose first argument must be an
@@ -56,11 +58,12 @@ func (r *NullableObjectCallRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 
 	src := newJSSource(ctx)
 	filled := objectFilledProperties(src.code)
+	table := fileTable{roots: fileTableRoots(src.code), loose: looseProperties(src.code)}
 	var violations []*core.Violation
 	for i, code := range src.code {
 		for _, loc := range r.objectCall.FindAllStringIndex(code, -1) {
 			arg, ok := jsFirstArgument(src, i, loc[1]-1, nullableArgMaxLines)
-			if !ok || !isUnsafeNullableObjectArg(src.text[i][:loc[0]], arg) || filled[jsCompact(arg)] {
+			if !ok || !isUnsafeNullableObjectArg(src.text[i][:loc[0]], arg) || filled[jsCompact(arg)] || table.holds(arg) {
 				continue
 			}
 			if r.guardedAbove(src, i, arg) {
@@ -110,6 +113,87 @@ func objectFilledProperties(code []string) map[string]bool {
 		delete(filled, path)
 	}
 	return filled
+}
+
+var (
+	// tableConst is a constant declared, with or without its type, as a
+	// literal object or array the file writes itself — not spread from
+	// another value.
+	tableConst = regexp.MustCompile(`\bconst\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*[\[{](?:\s*\.\.\.)?`)
+	// tableRow is the variable of a loop over a named array: for (const row of rows).
+	tableRow = regexp.MustCompile(`\bfor\s*\(\s*const\s+([A-Za-z_$][\w$]*)\s+of\s+([A-Za-z_$][\w$]*)\s*\)`)
+	// looseField is a field its type lets be missing: name?: T, or a type
+	// naming null or undefined.
+	looseField = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*(?:\?\s*:|:[^;,{}=]*\b(?:null|undefined)\b)`)
+	// fieldPath is a chain of plain property reads from one name.
+	fieldPath = regexp.MustCompile(`^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$`)
+)
+
+// fileTable is the file's own constant table: the constants it writes as
+// literals and the rows of loops over them, and the fields a type of the
+// file lets be missing or the file assigns something other than an object.
+type fileTable struct {
+	roots map[string]bool
+	loose map[string]bool
+}
+
+// holds reports a field path read from the table whose every field is there:
+// set.re of for (const set of sets) over const sets = [{ re: {…} }, …].
+func (t fileTable) holds(arg string) bool {
+	path := jsCompact(arg)
+	if !fieldPath.MatchString(path) || t.loose[path] {
+		return false
+	}
+	names := strings.Split(path, ".")
+	if !t.roots[names[0]] {
+		return false
+	}
+	for _, field := range names[1:] {
+		if t.loose[field] {
+			return false
+		}
+	}
+	return true
+}
+
+// fileTableRoots returns the constants the file declares as literals, not
+// spread from another value, and the variables of for-of loops over them.
+func fileTableRoots(code []string) map[string]bool {
+	consts := map[string]bool{}
+	for _, line := range code {
+		for _, m := range tableConst.FindAllStringSubmatch(line, -1) {
+			if !strings.HasSuffix(m[0], "...") {
+				consts[m[1]] = true
+			}
+		}
+	}
+	roots := maps.Clone(consts)
+	for _, line := range code {
+		for _, m := range tableRow.FindAllStringSubmatch(line, -1) {
+			if consts[m[2]] {
+				roots[m[1]] = true
+			}
+		}
+	}
+	return roots
+}
+
+// looseProperties returns the fields a type of the file declares optional or
+// nullable, and the property paths the file assigns a value that is not a
+// literal object or array.
+func looseProperties(code []string) map[string]bool {
+	loose := map[string]bool{}
+	for _, line := range code {
+		for _, m := range looseField.FindAllStringSubmatch(line, -1) {
+			loose[m[1]] = true
+		}
+		for _, m := range propertyAssignment.FindAllStringSubmatch(line, -1) {
+			if value := strings.TrimSpace(m[2]); !strings.HasPrefix(value, "{") && !strings.HasPrefix(value, "[") {
+				loose[m[1]] = true
+			}
+		}
+	}
+	return loose
 }
 
 func isUnsafeNullableObjectArg(prefix string, arg string) bool {
