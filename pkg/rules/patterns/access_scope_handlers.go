@@ -3,6 +3,7 @@ package patterns
 import (
 	"go/ast"
 	"go/types"
+	"maps"
 	"sort"
 	"strings"
 
@@ -221,8 +222,10 @@ func (s viewerScope) callsChecker(info *types.Info, node ast.Node) bool {
 // checker's result), the reader takes no parameter of the scope's type, and
 // no expression of the handler puts the scope or a checker next to the
 // reader's arguments or results (checkOrder(v, o), allowed(v, t.ID) in a
-// loop over the result, v.TenantIDs = ids).
-func (s viewerScope) handlerReadsOutsideScope(info *types.Info, fn *ast.FuncDecl) []*ast.CallExpr {
+// loop over the result, v.TenantIDs = ids). A reader keyed by the viewer's own
+// id, or by a parameter every caller checked, is in scope too.
+func (s viewerScope) handlerReadsOutsideScope(scope funcScope, fn *ast.FuncDecl) []*ast.CallExpr {
+	info := scope.info
 	if len(s.fields) == 0 || fn.Body == nil || handlerRequestParam(typedFunc{info: info, decl: fn}) == nil {
 		return nil
 	}
@@ -232,6 +235,7 @@ func (s viewerScope) handlerReadsOutsideScope(info *types.Info, fn *ast.FuncDecl
 	}
 	scoped := s.scopedLocals(info, fn.Body)
 	looked := dependencyResults(info, fn)
+	maps.Copy(looked, s.checkedByCallers(scope, self, fn, 2))
 	var calls []*ast.CallExpr
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -242,7 +246,7 @@ func (s viewerScope) handlerReadsOutsideScope(info *types.Info, fn *ast.FuncDecl
 			// A key that another lookup of the handler returned (the
 			// transaction's project, the transaction a redeemed link names)
 			// inherits that lookup's scope: the check belongs there.
-			if s.scopeIn(info, arg, scoped) || mentionsAnyObject(info, arg, looked) {
+			if s.scopeIn(info, arg, scoped) || mentionsAnyObject(info, arg, looked) || s.viewerIdentity(info, arg) {
 				return true
 			}
 		}
@@ -256,6 +260,129 @@ func (s viewerScope) handlerReadsOutsideScope(info *types.Info, fn *ast.FuncDecl
 	})
 	sort.Slice(calls, func(i, j int) bool { return calls[i].Pos() < calls[j].Pos() })
 	return calls
+}
+
+// viewerIdentity reports an argument that is the viewer or the viewer's own
+// id (viewerOf(r).ID): a reader handed it answers the records of the viewer
+// (the requests the user wrote), not those of every scope.
+func (s viewerScope) viewerIdentity(info *types.Info, arg ast.Expr) bool {
+	arg = ast.Unparen(arg)
+	if sel, ok := arg.(*ast.SelectorExpr); ok {
+		name := sel.Sel.Name
+		if !strings.HasSuffix(name, "ID") && !strings.HasSuffix(name, "Id") {
+			return false
+		}
+		if _, ok := info.TypeOf(sel).Underlying().(*types.Basic); !ok {
+			return false
+		}
+		arg = sel.X
+	}
+	typ := info.TypeOf(arg)
+	if typ == nil {
+		return false
+	}
+	if ptr, ok := typ.Underlying().(*types.Pointer); ok {
+		typ = ptr.Elem()
+	}
+	st, ok := typ.Underlying().(*types.Struct)
+	if !ok {
+		return false
+	}
+	for field := range st.Fields() {
+		if s.fields[field] {
+			return true
+		}
+	}
+	return false
+}
+
+// checkedByCallers returns the parameters of a helper that every caller
+// hands a checked value: the scope itself, or a variable the caller checks
+// against the scope (checkOrder(r, id) before cancelOrder(w, r, id)), or a
+// parameter of its own that its callers checked, depth callers up.
+func (s viewerScope) checkedByCallers(scope funcScope, self *types.Func, fn *ast.FuncDecl, depth int) map[types.Object]bool {
+	checked := map[types.Object]bool{}
+	sites := scope.callers[self.Origin()]
+	if len(sites) == 0 {
+		return checked
+	}
+	var params []*ast.Ident
+	for _, field := range fn.Type.Params.List {
+		params = append(params, field.Names...)
+	}
+	for i, param := range params {
+		obj := scope.info.Defs[param]
+		if obj == nil || ambientType(obj.Type()) {
+			continue
+		}
+		all := true
+		for _, site := range sites {
+			if i >= len(site.call.Args) || site.caller.decl.Body == nil || !s.checkedIn(scope, site, site.call.Args[i], depth) {
+				all = false
+				break
+			}
+		}
+		if all {
+			checked[obj] = true
+		}
+	}
+	return checked
+}
+
+// checkedIn reports an argument of a call site that the caller checked.
+func (s viewerScope) checkedIn(scope funcScope, site funcCallSite, arg ast.Expr, depth int) bool {
+	info, body := site.caller.info, site.caller.decl.Body
+	scoped := s.scopedLocals(info, body)
+	if s.scopeIn(info, arg, scoped) || s.viewerIdentity(info, arg) {
+		return true
+	}
+	vars := map[types.Object]bool{}
+	ast.Inspect(arg, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok {
+			if v, ok := info.Uses[ident].(*types.Var); ok && !v.IsField() && !ambientType(v.Type()) {
+				vars[v] = true
+			}
+		}
+		return true
+	})
+	// The call site itself mentions the variables and nothing of the scope:
+	// leave it out of the search.
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if n == site.call {
+			return false
+		}
+		switch n.(type) {
+		case *ast.CallExpr, *ast.BinaryExpr, *ast.IndexExpr, *ast.AssignStmt:
+			if mentionsAnyObject(info, n, vars) && s.scopeIn(info, n, scoped) {
+				found = true
+			}
+		}
+		return !found
+	})
+	if found || depth == 0 {
+		return found
+	}
+	caller, ok := info.Defs[site.caller.decl.Name].(*types.Func)
+	if !ok {
+		return false
+	}
+	callerScope := funcScope{info: info, decls: scope.decls, callers: scope.callers}
+	return len(vars) > 0 && mentionsOnly(info, arg, s.checkedByCallers(callerScope, caller, site.caller.decl, depth-1))
+}
+
+// mentionsOnly reports an expression whose variables are all among objects.
+func mentionsOnly(info *types.Info, node ast.Node, objects map[types.Object]bool) bool {
+	all := true
+	ast.Inspect(node, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok {
+			if v, ok := info.Uses[ident].(*types.Var); ok && !v.IsField() && !ambientType(v.Type()) && !objects[v] {
+				all = false
+			}
+		}
+		return all
+	})
+	return all
 }
 
 // dependencyResults returns the local variables assigned from a call of a

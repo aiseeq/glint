@@ -109,7 +109,7 @@ func Tick(ctx context.Context, s *board.Service) { _ = s.List(ctx) }
 // neither the scope nor a check of what it returns serves every tenant's
 // records to every viewer.
 func TestReadMethodSkipsAccessFilterHandlerScope(t *testing.T) {
-	assert.Equal(t, []string{"web/batches.go:13", "web/batches.go:28", "web/hooks.go:11", "web/hooks.go:12"}, typedRuleFindings(t, NewReadMethodSkipsAccessFilterRule(), map[string]string{
+	assert.Equal(t, []string{"web/batches.go:13", "web/batches.go:28", "web/cancel.go:45", "web/cancel.go:59", "web/hooks.go:11", "web/hooks.go:12"}, typedRuleFindings(t, NewReadMethodSkipsAccessFilterRule(), map[string]string{
 		"store/store.go": `package store
 
 import "context"
@@ -154,6 +154,13 @@ func (Tenants) ListCurrencies(ctx context.Context) ([]Currency, error) { return 
 type Users struct{}
 
 func (Users) TenantIDsFor(ctx context.Context, name string) ([]int, error) { return nil, nil }
+
+type Request struct{ ID, AuthorID, TenantID int }
+
+type Requests struct{}
+
+func (Requests) GetByID(ctx context.Context, id int) (*Request, error)                   { return nil, nil }
+func (Requests) GetForAuthor(ctx context.Context, id, authorID int) (*Request, error) { return nil, nil }
 `,
 		"web/web.go": `package web
 
@@ -165,16 +172,18 @@ import (
 )
 
 type Viewer struct {
+	ID        int
 	Name      string
 	TenantIDs []int // nil = every tenant
 }
 
 type Admin struct {
-	orders  store.Orders
-	batches store.Batches
-	hooks   store.Hooks
-	tenants store.Tenants
-	users   store.Users
+	orders   store.Orders
+	batches  store.Batches
+	hooks    store.Hooks
+	tenants  store.Tenants
+	users    store.Users
+	requests store.Requests
 }
 
 func viewerOf(r *http.Request) *Viewer { return &Viewer{} }
@@ -255,6 +264,72 @@ func (a *Admin) process(w http.ResponseWriter, r *http.Request) error {
 	}
 	_ = o.ID
 	return nil
+}
+`,
+		// A reader keyed by the viewer's own id answers the viewer's own
+		// records; a helper reads by a key its callers checked first. Repro
+		// from an admin whose cabinet read a request by its author and whose
+		// cancel handler checked the transaction before its helpers read it.
+		"web/cancel.go": `package web
+
+import (
+	"errors"
+	"net/http"
+)
+
+func (a *Admin) myRequest(w http.ResponseWriter, r *http.Request) {
+	v := viewerOf(r)
+	_, _ = a.requests.GetForAuthor(r.Context(), 1, v.ID)
+	_, _ = a.requests.GetForAuthor(r.Context(), 2, viewerOf(r).ID)
+}
+
+func (a *Admin) checkRequest(r *http.Request, id int) error {
+	req, err := a.requests.GetByID(r.Context(), id)
+	if err != nil {
+		return err
+	}
+	if !allowed(viewerOf(r), req.TenantID) {
+		return errors.New("forbidden")
+	}
+	return nil
+}
+
+func (a *Admin) cancel(w http.ResponseWriter, r *http.Request) {
+	id := 3
+	if err := a.checkRequest(r, id); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	a.cancelRequest(w, r, id)
+}
+
+func (a *Admin) cancelRequest(w http.ResponseWriter, r *http.Request, id int) {
+	req, err := a.requests.GetByID(r.Context(), id)
+	if err != nil {
+		return
+	}
+	_ = req.ID
+}
+
+func (a *Admin) drop(w http.ResponseWriter, r *http.Request) { a.dropRequest(w, r, 4) }
+
+func (a *Admin) dropRequest(w http.ResponseWriter, r *http.Request, id int) {
+	req, _ := a.requests.GetByID(r.Context(), id)
+	_ = req
+}
+
+func (a *Admin) archive(w http.ResponseWriter, r *http.Request) {
+	if err := a.checkRequest(r, 5); err != nil {
+		return
+	}
+	a.archiveRequest(w, r, 5)
+}
+
+func (a *Admin) restore(w http.ResponseWriter, r *http.Request) { a.archiveRequest(w, r, 6) }
+
+func (a *Admin) archiveRequest(w http.ResponseWriter, r *http.Request, id int) {
+	req, _ := a.requests.GetByID(r.Context(), id)
+	_ = req
 }
 `,
 		"web/hooks.go": `package web
