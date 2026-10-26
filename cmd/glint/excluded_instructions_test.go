@@ -26,10 +26,10 @@ func TestExcludedInstructionFilesReachOnlyInstructionSize(t *testing.T) {
 	module := t.TempDir()
 	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
 	writeModuleFile(t, module, "main.go", "package main\n\nfunc main() {}\n")
-	writeModuleFile(t, module, "CLAUDE.md", strings.Repeat("a", 20000))
+	writeModuleFile(t, module, "CLAUDE.md", strings.Repeat("a", 30000))
 	writeModuleFile(t, module, ".claude/skills/deploy/SKILL.md", strings.Repeat("я", 13000))
-	writeModuleFile(t, module, "docs/guide.md", strings.Repeat("a", 20000))
-	writeModuleFile(t, module, "third_party/app/CLAUDE.md", strings.Repeat("a", 20000))
+	writeModuleFile(t, module, "docs/guide.md", strings.Repeat("a", 30000))
+	writeModuleFile(t, module, "third_party/app/CLAUDE.md", strings.Repeat("a", 30000))
 	cfg := core.DefaultConfig()
 	// A directory excluded as a whole is not ours, its instructions neither.
 	cfg.Settings.Exclude = []string{"*.md", "third_party/**"}

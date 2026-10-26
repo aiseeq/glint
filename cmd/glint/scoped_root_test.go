@@ -151,7 +151,7 @@ func instructionSizeFiles(t *testing.T, paths ...string) []string {
 // and takes a single file as the one file to judge, even one .gitignore
 // leaves out.
 func TestCheckTakesInstructionFilesOutsideAProject(t *testing.T) {
-	big := strings.Repeat("a", 20000)
+	big := strings.Repeat("a", 30000)
 	home := t.TempDir()
 	writeModuleFile(t, home, ".claude/CLAUDE.md", big)
 	writeModuleFile(t, home, ".claude/rules/api/db.md", big)

@@ -15,7 +15,7 @@ func init() {
 }
 
 const (
-	defaultInstructionMaxBytes = 16384
+	defaultInstructionMaxBytes = 24576
 	// Claude Code keeps the first 5000 tokens of a skill after compacting
 	// the context.
 	defaultSkillMaxChars = 12000
@@ -36,7 +36,7 @@ func NewInstructionSizeRule() *InstructionSizeRule {
 		BaseRule: rules.NewBaseRule(
 			"instruction-size",
 			"documentation",
-			"Detects a Claude Code instruction file near or over its size limit: CLAUDE.md, CLAUDE.local.md and .claude/rules/*.md from max_bytes (16384) on, skills/*/SKILL.md from max_chars (12000 characters) on, with 80% named as the reference to shrink to; block-level HTML comments are not counted, Claude Code strips them",
+			"Detects a Claude Code instruction file near or over its size limit: CLAUDE.md, CLAUDE.local.md and .claude/rules/*.md from max_bytes (24576) on, skills/*/SKILL.md from max_chars (12000 characters) on, with 80% named as the reference to shrink to; block-level HTML comments are not counted, Claude Code strips them",
 			core.SeverityMedium,
 		),
 		maxBytes: defaultInstructionMaxBytes,

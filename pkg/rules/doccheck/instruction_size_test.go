@@ -51,9 +51,9 @@ func TestInstructionSize(t *testing.T) {
 }
 
 func TestInstructionSizeDefaults(t *testing.T) {
-	require.Empty(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 16383)))
-	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 16384)), 1)
-	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 16385)), 1)
+	require.Empty(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 24575)))
+	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 24576)), 1)
+	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 24577)), 1)
 	require.Empty(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 11999)))
 	require.Len(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 12000)), 1)
 	require.Len(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 12001)), 1)
