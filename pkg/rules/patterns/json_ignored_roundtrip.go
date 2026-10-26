@@ -81,17 +81,54 @@ func (r *JSONIgnoredFieldLostInRoundTripRule) AnalyzeGoProject(ctx *core.GoProje
 		written: map[*types.Var]bool{}, read: map[*types.Var]bool{}, refilled: map[*types.Var]bool{},
 		owners: map[*types.Var]*types.TypeName{},
 	}
+	eachProductionGoFile(ctx, trip.collect)
+	return trip.analyzeStructs(ctx, r.Name(), func(file *core.FileContext, info *types.Info, name *types.TypeName, st *ast.StructType) []*core.Violation {
+		var violations []*core.Violation
+		for _, field := range st.Fields.List {
+			if field.Tag == nil || len(field.Names) == 0 || !jsonIgnored(strings.Trim(field.Tag.Value, "`")) {
+				continue
+			}
+			for _, ident := range field.Names {
+				v, ok := info.Defs[ident].(*types.Var)
+				if !ok || !trip.written[v] || !trip.read[v] || trip.refilled[v] {
+					continue
+				}
+				line := file.LineFor(ident)
+				if file.IsSuppressed(line, r.Name()) {
+					continue
+				}
+				violation := r.CreateViolation(file.RelPath, line, ident.Name+" is set and read, but json:\"-\" leaves it out of the JSON "+name.Name()+
+					" is stored as and read back from — code reading the stored copy always sees the zero value")
+				violation.WithCode(strings.TrimSpace(file.GetLine(line)))
+				violation.WithSuggestion("Give the field a JSON name (omitempty if it may be empty), or recompute it where the stored copy is read")
+				violations = append(violations, violation)
+			}
+		}
+		return violations
+	})
+}
+
+// eachProductionGoFile calls visit with every typed file of the project that
+// is not a test.
+func eachProductionGoFile(ctx *core.GoProjectContext, visit func(info *types.Info, file *ast.File)) {
 	for _, pkgCtx := range ctx.Packages {
 		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
 			continue
 		}
 		for _, file := range pkgCtx.Package.Syntax {
 			if !strings.HasSuffix(pkgCtx.Package.Fset.Position(file.Pos()).Filename, "_test.go") {
-				trip.collect(pkgCtx.Package.TypesInfo, file)
+				visit(pkgCtx.Package.TypesInfo, file)
 			}
 		}
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+}
+
+// analyzeStructs calls check with each struct type declared outside tests
+// that the code both marshals and unmarshals as JSON.
+func (t *jsonRoundTrip) analyzeStructs(ctx *core.GoProjectContext, rule string,
+	check func(file *core.FileContext, info *types.Info, name *types.TypeName, st *ast.StructType) []*core.Violation,
+) ([]*core.Violation, error) {
+	return rules.AnalyzeTypedFiles(ctx, rule, func(file *core.FileContext, info *types.Info) []*core.Violation {
 		if !file.HasGoAST() || file.IsTestFile() {
 			return nil
 		}
@@ -102,29 +139,8 @@ func (r *JSONIgnoredFieldLostInRoundTripRule) AnalyzeGoProject(ctx *core.GoProje
 				return true
 			}
 			name, ok := info.Defs[spec.Name].(*types.TypeName)
-			st, isStruct := spec.Type.(*ast.StructType)
-			if !ok || !isStruct || !trip.marshalled[name] || !trip.unmarshalled[name] {
-				return true
-			}
-			for _, field := range st.Fields.List {
-				if field.Tag == nil || len(field.Names) == 0 || !jsonIgnored(strings.Trim(field.Tag.Value, "`")) {
-					continue
-				}
-				for _, ident := range field.Names {
-					v, ok := info.Defs[ident].(*types.Var)
-					if !ok || !trip.written[v] || !trip.read[v] || trip.refilled[v] {
-						continue
-					}
-					line := file.LineFor(ident)
-					if file.IsSuppressed(line, r.Name()) {
-						continue
-					}
-					violation := r.CreateViolation(file.RelPath, line, ident.Name+" is set and read, but json:\"-\" leaves it out of the JSON "+name.Name()+
-						" is stored as and read back from — code reading the stored copy always sees the zero value")
-					violation.WithCode(strings.TrimSpace(file.GetLine(line)))
-					violation.WithSuggestion("Give the field a JSON name (omitempty if it may be empty), or recompute it where the stored copy is read")
-					violations = append(violations, violation)
-				}
+			if st, isStruct := spec.Type.(*ast.StructType); ok && isStruct && t.marshalled[name] && t.unmarshalled[name] {
+				violations = append(violations, check(file, info, name, st)...)
 			}
 			return true
 		})
