@@ -420,3 +420,70 @@ func amounts(fields []string) []int {
 	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
 	require.Len(t, violations, 1)
 }
+
+// A switch over the kind of the error that logs and answers in each case
+// handles it. Repro from an admin handler answering not found, a refusal and
+// a failure apart.
+func TestSilentErrorHandlingRule_SwitchOverErrorKind(t *testing.T) {
+	code := `package main
+
+func update(w http.ResponseWriter, r *http.Request) {
+	if err := repo.Update(r.Context()); err != nil {
+		switch {
+		case isNotFound(err):
+			logger.Warn("gone", "error", err)
+			http.Error(w, "not found", 404)
+		default:
+			logger.Error("failed", "error", err)
+			http.Error(w, "failed", 500)
+		}
+		return
+	}
+}
+`
+
+	ctx := createSilentErrorContext(t, "update.go", code)
+	require.Empty(t, NewSilentErrorHandlingRule().AnalyzeFile(ctx))
+}
+
+// A malformed id answered with the same not-found error a missing record
+// gets: the failure goes on to the caller as an error of the domain.
+func TestSilentErrorHandlingRule_ErrorConstructorReturned(t *testing.T) {
+	code := `package main
+
+func own(raw string) (*Request, error) {
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return nil, domain.ErrNotFound("request", raw)
+	}
+	return load(id)
+}
+`
+
+	ctx := createSilentErrorContext(t, "own.go", code)
+	require.Empty(t, NewSilentErrorHandlingRule().AnalyzeFile(ctx))
+}
+
+// A function that answers its failures as an error text or key (errKey) of
+// its own result reports the error there: the form shows the alert it names.
+// The same result left empty says nothing failed.
+func TestSilentErrorHandlingRule_ErrorKeyResult(t *testing.T) {
+	code := `package main
+
+func period(from, to string) (start, end *time.Time, errKey string) {
+	if _, err := parseDay(from); err != nil {
+		return nil, nil, "bad_date"
+	}
+	start, end, err := parseRange(from, to)
+	if err != nil {
+		return nil, nil, ""
+	}
+	return start, end, ""
+}
+`
+
+	ctx := createSilentErrorContext(t, "period.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+	require.Equal(t, 8, violations[0].Line)
+}

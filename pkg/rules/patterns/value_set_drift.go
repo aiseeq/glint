@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/valueset"
 )
 
@@ -104,7 +105,7 @@ type setMatch struct {
 
 // AnalyzeFile reports the sets of a file that copy another set.
 func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if ctx.ProjectRoot == "" || ctx.IsTestFile() || ctx.IsGenerated() || isE2EPath(ctx.RelPath) {
+	if ctx.ProjectRoot == "" || ctx.IsTestFile() || ctx.IsGenerated() || isE2EPath(ctx.RelPath) || helpers.IsStandInDataPath(ctx.RelPath) {
 		return nil
 	}
 	if r.index == nil || r.tables == nil {

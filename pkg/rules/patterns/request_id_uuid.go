@@ -380,7 +380,7 @@ func anyUseReachesCall(scope funcScope, parents map[ast.Node]ast.Node, uses []as
 			}
 			continue
 		}
-		if callee.Pkg() == nil || isStandardLibraryPath(callee.Pkg().Path()) || responderName.MatchString(callee.Name()) {
+		if callee.Pkg() == nil || helpers.IsStandardLibraryPath(callee.Pkg().Path()) || responderName.MatchString(callee.Name()) {
 			continue
 		}
 		return true

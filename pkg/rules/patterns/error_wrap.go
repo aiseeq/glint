@@ -479,14 +479,7 @@ func (own projectCode) isForeign(pkgPath string) bool {
 		}
 	}
 	if len(own.packages) == 0 {
-		return isStandardLibraryPath(pkgPath)
+		return helpers.IsStandardLibraryPath(pkgPath)
 	}
 	return true
-}
-
-// isStandardLibraryPath reports whether an import path names a standard
-// library package: its first element has no dot, unlike a module host.
-func isStandardLibraryPath(pkgPath string) bool {
-	first, _, _ := strings.Cut(pkgPath, "/")
-	return !strings.Contains(first, ".")
 }

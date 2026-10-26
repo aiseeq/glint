@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/valueset"
 )
 
@@ -68,7 +69,7 @@ func newTableIndex(files []*core.FileContext) *tableIndex {
 	files = slices.SortedFunc(slices.Values(files), func(a, b *core.FileContext) int { return cmp.Compare(a.RelPath, b.RelPath) })
 	var tables []valueset.Tables
 	for _, file := range files {
-		if file.IsTestFile() || isE2EPath(file.RelPath) || file.IsGenerated() {
+		if file.IsTestFile() || isE2EPath(file.RelPath) || file.IsGenerated() || helpers.IsStandInDataPath(file.RelPath) {
 			continue
 		}
 		t := valueset.FileTables(file)

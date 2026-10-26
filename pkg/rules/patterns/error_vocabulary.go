@@ -42,7 +42,8 @@ func exprCarriesError(expr ast.Expr) bool {
 	case *ast.SelectorExpr:
 		return isSentinelErrorName(e.Sel.Name)
 	case *ast.CallExpr:
-		if callCreatesError(e) {
+		// A constructor named as a sentinel: domain.ErrNotFound("order", id).
+		if callCreatesError(e) || isSentinelErrorName(helpers.CalleeName(e)) {
 			return true
 		}
 		if slices.ContainsFunc(e.Args, exprCarriesError) {

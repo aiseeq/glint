@@ -2,6 +2,7 @@
 package helpers
 
 import (
+	"path/filepath"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -269,4 +270,24 @@ func regexLiteralEnd(buf []byte, start int) int {
 func isJSWordChar(c byte) bool {
 	return c == '_' || c == '$' || c >= 0x80 ||
 		(c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// IsStandardLibraryPath reports whether an import path names a standard
+// library package: its first element has no dot, unlike a module host.
+func IsStandardLibraryPath(pkgPath string) bool {
+	first, _, _ := strings.Cut(pkgPath, "/")
+	return !strings.Contains(first, ".")
+}
+
+// IsStandInDataPath reports a file of stand-in data nobody keeps in step with the
+// program: a mock (__mocks__/, mocks/), a stub, a storybook story or a static
+// design prototype (prototype/, prototypes/).
+func IsStandInDataPath(relPath string) bool {
+	path := "/" + strings.ToLower(filepath.ToSlash(relPath))
+	for _, dir := range []string{"/__mocks__/", "/mocks/", "/stubs/", "/prototype/", "/prototypes/"} {
+		if strings.Contains(path, dir) {
+			return true
+		}
+	}
+	return strings.Contains(path, ".stories.")
 }

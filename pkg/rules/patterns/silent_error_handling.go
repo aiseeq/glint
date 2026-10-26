@@ -136,6 +136,10 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 			return true
 		}
 
+		if bodyReturnsErrorText(ifStmt.Body, errorTextResult(ftype)) {
+			return true
+		}
+
 		// Skip if body has comment indicating error is handled elsewhere
 		// Common patterns: "error already sent", "error handled", "response sent"
 		if r.bodyHasErrorHandledComment(ctx, ifStmt.Body) {
@@ -335,6 +339,14 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[st
 		// Nested if might handle error
 		if r.bodyHandlesError(s.Body, writers) {
 			return true
+		}
+
+	case *ast.SwitchStmt:
+		// A switch over the kind of the error, as a nested if.
+		for _, clause := range s.Body.List {
+			if cc, ok := clause.(*ast.CaseClause); ok && slices.ContainsFunc(cc.Body, func(inner ast.Stmt) bool { return r.stmtHandlesError(inner, writers) }) {
+				return true
+			}
 		}
 
 	case *ast.BlockStmt:
@@ -652,6 +664,46 @@ func debugOnlyLostValue(body *ast.BlockStmt, ifStmt *ast.IfStmt) bool {
 	}
 	for _, lhs := range source.Lhs {
 		if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" && id.Name != errName {
+			return true
+		}
+	}
+	return false
+}
+
+// errorTextResult returns the index of a string result named as an error
+// (errKey, errMsg): the function answers its failures there, -1 for none.
+func errorTextResult(ftype *ast.FuncType) int {
+	if ftype == nil || ftype.Results == nil {
+		return -1
+	}
+	i := 0
+	for _, field := range ftype.Results.List {
+		if len(field.Names) == 0 {
+			i++
+			continue
+		}
+		for _, name := range field.Names {
+			if helpers.IsIdentNamed(field.Type, "string") && helpers.HasLeadingWord(name.Name, "err") {
+				return i
+			}
+			i++
+		}
+	}
+	return -1
+}
+
+// bodyReturnsErrorText reports a branch returning a non-empty error text in
+// that result.
+func bodyReturnsErrorText(body *ast.BlockStmt, result int) bool {
+	if result < 0 {
+		return false
+	}
+	for _, stmt := range body.List {
+		ret, ok := stmt.(*ast.ReturnStmt)
+		if !ok || result >= len(ret.Results) {
+			continue
+		}
+		if lit, ok := ret.Results[result].(*ast.BasicLit); !ok || lit.Value != `""` {
 			return true
 		}
 	}

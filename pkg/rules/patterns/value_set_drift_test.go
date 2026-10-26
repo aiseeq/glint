@@ -421,3 +421,21 @@ func (c column) reportKey() string {
 	}
 	assert.Empty(t, valueSetDriftFindings(t, files))
 }
+
+// The mock data of a static design prototype is a snapshot drawn once, like a
+// test's expected values: nobody keeps it in step with the program. Repro
+// from a project whose prototype listed the transfer types of a report.
+func TestValueSetDriftLeavesOutPrototypeData(t *testing.T) {
+	files := map[string]string{
+		"cmd/report/kinds.go": `package main
+
+var transferKinds = []string{"bank", "card", "cash", "crypto", "wallet"}
+`,
+		"docs/console/prototype/assets/data.js": `export const kinds = [
+  { id: 'bank' }, { id: 'card' }, { id: 'cash' }, { id: 'crypto' }, { id: 'wallet' },
+]
+const list = ['bank', 'card', 'cash', 'crypto', 'wallet']
+`,
+	}
+	assert.Empty(t, valueSetDriftFindings(t, files))
+}

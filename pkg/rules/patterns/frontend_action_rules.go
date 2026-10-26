@@ -1,12 +1,12 @@
 package patterns
 
 import (
-	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -125,9 +125,7 @@ func productionFrontendFile(ctx *core.FileContext) bool {
 	if (!ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile()) || skipFrontendPath(ctx) {
 		return false
 	}
-	path := "/" + strings.ToLower(filepath.ToSlash(ctx.RelPath))
-	return !strings.Contains(path, "/__mocks__/") && !strings.Contains(path, "/mocks/") &&
-		!strings.Contains(path, "/stubs/") && !strings.Contains(path, ".stories.")
+	return !helpers.IsStandInDataPath(ctx.RelPath)
 }
 
 // FrontendInflightGuardFabricatesResultRule detects a guard against a

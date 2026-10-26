@@ -764,12 +764,12 @@ func FileSets(ctx *core.FileContext) []Set {
 var toolConfig = regexp.MustCompile(`^(?:[\w-]+\.config|\.\w+rc)\.[cm]?[jt]s$`)
 
 // IndexFiles indexes the sets of a project's files. Test files, browser
-// tests and tools' configuration are left out: they spell out the values
-// they expect, and a copy there is not one anyone keeps in step.
+// tests, mock data and tools' configuration are left out: they spell out the
+// values they expect, and a copy there is not one anyone keeps in step.
 func IndexFiles(files []*core.FileContext) *Index {
 	var kept []*core.FileContext
 	for _, file := range files {
-		if !file.IsTestFile() && !strings.Contains("/"+filepath.ToSlash(file.RelPath), "/e2e/") && !toolConfig.MatchString(filepath.Base(file.RelPath)) {
+		if !file.IsTestFile() && !strings.Contains("/"+filepath.ToSlash(file.RelPath), "/e2e/") && !helpers.IsStandInDataPath(file.RelPath) && !toolConfig.MatchString(filepath.Base(file.RelPath)) {
 			kept = append(kept, file)
 		}
 	}

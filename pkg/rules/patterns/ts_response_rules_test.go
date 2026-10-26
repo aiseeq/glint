@@ -48,6 +48,9 @@ const label = typeof user.email === 'string' ? user.email : ''
 `,
 		"frontend/e2e/api.spec.ts": `const rows = Array.isArray(body.rows) ? body.rows : []
 `,
+		// A design prototype's mock overlay: no server answered it.
+		"docs/console/prototype/assets/data.js": `const created = Array.isArray(overlay.created) ? overlay.created : []
+`,
 	}))
 }
 

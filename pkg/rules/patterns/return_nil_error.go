@@ -35,24 +35,195 @@ func NewReturnNilErrorRule() *ReturnNilErrorRule {
 // AnalyzeFile checks one file without type information: the fallback the
 // project analysis uses for files no type-checked package covers.
 func (r *ReturnNilErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	return r.analyze(ctx, nil)
+	return r.analyze(ctx, nil, nil)
 }
 
 // RequiresSSA reports that typed syntax is enough for this rule.
 func (r *ReturnNilErrorRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject checks every file; a first result declared through a named
-// type is judged by its underlying type.
+// type is judged by its underlying type, and a function every caller of which
+// tests the record for nil is left out.
 func (r *ReturnNilErrorRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	decls, err := funcDeclsByObject(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sites, err := funcCallSites(ctx, decls)
+	if err != nil {
+		return nil, err
+	}
+	checked := nilCheckedByCallers(decls, sites)
+	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyze(fileCtx, info, checked)
+	})
+}
+
+// nilCheckedByCallers returns the functions called in the module, and only
+// called, whose every caller assigns the first result to a variable it tests
+// for nil (b, err := briefOf(id); if b == nil): (nil, nil) there is the answer
+// "there is none", and no caller counts the missing record as zero.
+func nilCheckedByCallers(decls map[*types.Func]typedFuncDecl, sites map[*types.Func][]funcCallSite) map[*types.Func]bool {
+	// A function used as a value is called where the module cannot see.
+	asValue := map[*types.Func]bool{}
+	for _, d := range decls {
+		called := map[*ast.Ident]bool{}
+		ast.Inspect(d.decl.Body, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.CallExpr:
+				switch fun := ast.Unparen(node.Fun).(type) {
+				case *ast.Ident:
+					called[fun] = true
+				case *ast.SelectorExpr:
+					called[fun.Sel] = true
+				}
+			case *ast.Ident:
+				if fn, ok := d.info.Uses[node].(*types.Func); ok && !called[node] {
+					asValue[fn.Origin()] = true
+				}
+			}
+			return true
+		})
+	}
+	checked := map[*types.Func]bool{}
+	for fn, calls := range sites {
+		if asValue[fn] {
+			continue
+		}
+		all := len(calls) > 0
+		for _, site := range calls {
+			all = all && resultTestedForNil(decls, site)
+		}
+		if all {
+			checked[fn] = true
+		}
+	}
+	return checked
+}
+
+// resultTestedForNil reports a call site whose first result is assigned to a
+// variable that the caller tests for nil (see nilHandled).
+func resultTestedForNil(decls map[*types.Func]typedFuncDecl, site funcCallSite) bool {
+	info, body := site.caller.info, site.caller.decl.Body
+	var record types.Object
+	ast.Inspect(body, func(n ast.Node) bool {
+		if assign, ok := n.(*ast.AssignStmt); ok && len(assign.Rhs) == 1 && ast.Unparen(assign.Rhs[0]) == site.call && len(assign.Lhs) > 0 {
+			if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
+				record = info.ObjectOf(ident)
+			}
+		}
+		return record == nil
+	})
+	return record != nil && nilHandled(decls, typedFuncDecl{decl: site.caller.decl, info: info}, record, 2)
+}
+
+// nilHandled reports a pointer variable of a function whose nil is handled
+// there: compared with nil (if b == nil), handed to a function of the module
+// that does so with its parameter, depth calls down, or only stored in fields
+// (req.TemplateID = id), where nil stays the absence it says.
+func nilHandled(decls map[*types.Func]typedFuncDecl, fn typedFuncDecl, record types.Object, depth int) bool {
+	info := fn.info
+	handled := false
+	storedOnly := true
+	stored := map[*ast.Ident]bool{}
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.BinaryExpr:
+			if node.Op == token.EQL || node.Op == token.NEQ {
+				handled = handled || helpers.IsNilIdent(node.Y) && isObject(info, node.X, record) || helpers.IsNilIdent(node.X) && isObject(info, node.Y, record)
+			}
+		case *ast.AssignStmt:
+			for i, rhs := range node.Rhs {
+				if _, field := node.Lhs[min(i, len(node.Lhs)-1)].(*ast.SelectorExpr); field {
+					if ident := objectIdent(info, rhs, record); ident != nil {
+						stored[ident] = true
+					}
+				}
+			}
+		case *ast.KeyValueExpr:
+			if ident := objectIdent(info, node.Value, record); ident != nil {
+				stored[ident] = true
+			}
+		case *ast.CallExpr:
+			if depth > 0 {
+				handled = handled || argNilHandled(decls, info, node, record, depth)
+			}
+		case *ast.Ident:
+			// The declaration and the assignment of the call's result name
+			// the variable too; a use is a read of it.
+			if info.Uses[node] == record && !stored[node] && !onAssignLeft(fn.decl.Body, node) {
+				storedOnly = false
+			}
+		}
+		return !handled
+	})
+	return handled || storedOnly
+}
+
+// argNilHandled reports a call handing the variable to a parameter of a
+// function of the module that handles its nil.
+func argNilHandled(decls map[*types.Func]typedFuncDecl, info *types.Info, call *ast.CallExpr, record types.Object, depth int) bool {
+	callee := staticFunc(info, call)
+	if callee == nil {
+		return false
+	}
+	decl, ok := decls[callee.Origin()]
+	if !ok {
+		return false
+	}
+	var params []*ast.Ident
+	for _, field := range decl.decl.Type.Params.List {
+		params = append(params, field.Names...)
+	}
+	for i, arg := range call.Args {
+		if i < len(params) && isObject(info, arg, record) {
+			if param := decl.info.Defs[params[i]]; param != nil && nilHandled(decls, decl, param, depth-1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// onAssignLeft reports an identifier on the left of an assignment.
+func onAssignLeft(body *ast.BlockStmt, ident *ast.Ident) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if assign, ok := n.(*ast.AssignStmt); ok {
+			for _, lhs := range assign.Lhs {
+				found = found || lhs == ident
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// isObject reports an identifier of the object.
+func isObject(info *types.Info, expr ast.Expr, obj types.Object) bool {
+	return objectIdent(info, expr, obj) != nil
+}
+
+// objectIdent returns expr as the identifier of obj, or nil for any other
+// expression.
+func objectIdent(info *types.Info, expr ast.Expr, obj types.Object) *ast.Ident {
+	if ident, ok := ast.Unparen(expr).(*ast.Ident); ok && info.ObjectOf(ident) == obj {
+		return ident
+	}
+	return nil
 }
 
 // analyze checks for (nil, nil) returns. info is nil for a file without type
-// information.
-func (r *ReturnNilErrorRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+// information, checked the functions whose callers all test for nil.
+func (r *ReturnNilErrorRule) analyze(ctx *core.FileContext, info *types.Info, checked map[*types.Func]bool) []*core.Violation {
 	return analyzeGoFunctions(ctx, func(fn *ast.FuncDecl) []*core.Violation {
 		if !r.hasErrorReturn(fn) || nilIsEmptyFirstResult(fn, info) {
 			return nil
+		}
+		if info != nil {
+			if obj, ok := info.Defs[fn.Name].(*types.Func); ok && checked[obj] {
+				return nil
+			}
 		}
 		notFound := noRowsReturns(fn)
 		conventional := r.isValidNilNilPattern(fn)

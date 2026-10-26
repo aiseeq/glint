@@ -243,7 +243,7 @@ func (a *fieldAccess) emptyInterfaceArguments(call *ast.CallExpr, info *types.In
 	}
 	for i, arg := range call.Args {
 		if isUntypedParam(signature, i) && call.Ellipsis == token.NoPos {
-			addReachableStructs(a.boxed, info.TypeOf(arg))
+			addReflectedStructs(a.boxed, info.TypeOf(arg))
 		}
 		if i >= fixed {
 			continue
@@ -275,7 +275,7 @@ func (a *fieldAccess) boxedElements(lit *ast.CompositeLit, info *types.Info) {
 		if kv, ok := elt.(*ast.KeyValueExpr); ok {
 			elt = kv.Value
 		}
-		addReachableStructs(a.boxed, info.TypeOf(elt))
+		addReflectedStructs(a.boxed, info.TypeOf(elt))
 	}
 }
 
@@ -551,6 +551,55 @@ func isUntypedParam(sig *types.Signature, i int) bool {
 	}
 	iface, ok := t.Underlying().(*types.Interface)
 	return ok && iface.Empty()
+}
+
+// addReflectedStructs records what a value read by reflection reaches: the
+// structs addReachableStructs finds, and the results of what a template calls
+// on the way - an exported method of a reached type ({{.FormFor $row}}) and a
+// function value (a FuncMap entry). Methods of standard library types are
+// left out: their results are not the program's structs.
+func addReflectedStructs(set map[*types.Named]bool, t types.Type) {
+	seen := map[types.Type]bool{}
+	var walk func(types.Type)
+	walk = func(t types.Type) {
+		t = types.Unalias(t)
+		if seen[t] {
+			return
+		}
+		seen[t] = true
+		switch typ := t.(type) {
+		case *types.Signature:
+			for result := range typ.Results().Variables() {
+				walk(result.Type())
+			}
+		case *types.Named:
+			if pkg := typ.Obj().Pkg(); pkg != nil && !helpers.IsStandardLibraryPath(pkg.Path()) {
+				methods := types.NewMethodSet(types.NewPointer(typ))
+				for method := range methods.Methods() {
+					if method := method.Obj(); method.Exported() {
+						walk(method.Type())
+					}
+				}
+			}
+			if _, ok := typ.Underlying().(*types.Struct); ok {
+				set[typ] = true
+			}
+			walk(typ.Underlying())
+		case *types.Pointer:
+			walk(typ.Elem())
+		case *types.Slice:
+			walk(typ.Elem())
+		case *types.Array:
+			walk(typ.Elem())
+		case *types.Map:
+			walk(typ.Elem())
+		case *types.Struct:
+			for field := range typ.Fields() {
+				walk(field.Type())
+			}
+		}
+	}
+	walk(t)
 }
 
 // addReachableStructs walks a type and records every named struct it can reach

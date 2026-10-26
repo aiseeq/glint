@@ -133,6 +133,52 @@ func Page(w io.Writer) {
 	assert.Empty(t, violations)
 }
 
+// A template also reads what reaches it through a call: the result of a
+// FuncMap function ({{template "dialog" (dialog .Lang)}}) and of a method of
+// the page data ({{template "form" .FormFor $row}}). Repro from an admin whose
+// dialog and form structs were read by partials only.
+func TestUnusedFieldApplicationKeepsFieldsReturnedToTemplate(t *testing.T) {
+	violations := analyzeFieldsApp(t, map[string]string{
+		"web/web.go": `package web
+
+import (
+	"html/template"
+	"io"
+)
+
+type DialogData struct {
+	Lang   string
+	MaxLen int
+}
+
+func newDialogData(lang string) DialogData { return DialogData{Lang: lang, MaxLen: 500} }
+
+type FormView struct {
+	Lang  string
+	Kinds []string
+}
+
+type PageData struct{ Lang string }
+
+func (d PageData) FormFor(row int) FormView { return FormView{Lang: d.Lang, Kinds: []string{"a"}} }
+
+// Unboxed is built but never handed to a template.
+type Unboxed struct{ Note string }
+
+func helper() Unboxed { return Unboxed{Note: "n"} }
+
+var page = template.Must(template.New("p").Funcs(template.FuncMap{"dialog": newDialogData}).Parse("{{.Lang}}"))
+
+func Page(w io.Writer) {
+	_ = page.Execute(w, PageData{Lang: "en"})
+	_ = helper()
+}
+`,
+	})
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Unboxed.Note")
+}
+
 // A fake's counter is asserted by the tests of the package it stands in for,
 // not by its own: a read in any test of the module keeps an exported field.
 func TestUnusedFieldApplicationKeepsFieldReadByOtherPackageTest(t *testing.T) {
