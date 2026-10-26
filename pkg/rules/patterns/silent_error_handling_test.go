@@ -364,3 +364,59 @@ func example() int {
 	require.Len(t, rule.AnalyzeFile(createSilentErrorContext(t, "service.go", code("//nolint:errcheck"))), 1)
 	require.Empty(t, rule.AnalyzeFile(createSilentErrorContext(t, "service.go", code("//nolint:silent-error-handling"))))
 }
+
+// Parsing the name of a directory entry and skipping the entry on failure picks
+// the numbered entries out of a listing: in /proc only the processes have
+// numeric names, the others (self, sys, net) are not failures. Repro from an
+// inventory of running processes.
+func TestSilentErrorHandlingRule_NumericEntryNameFilter(t *testing.T) {
+	code := `package main
+
+import (
+	"os"
+	"strconv"
+)
+
+func pids() []int {
+	entries, _ := os.ReadDir("/proc")
+	var out []int
+	for _, d := range entries {
+		pid, err := strconv.Atoi(d.Name())
+		if err != nil {
+			continue
+		}
+		out = append(out, pid)
+	}
+	return out
+}
+`
+
+	ctx := createSilentErrorContext(t, "procs.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Empty(t, violations)
+}
+
+// The same skip over the contents of a record drops a malformed value without
+// a word.
+func TestSilentErrorHandlingRule_NumericFieldSkipStillReported(t *testing.T) {
+	code := `package main
+
+import "strconv"
+
+func amounts(fields []string) []int {
+	var out []int
+	for _, f := range fields {
+		n, err := strconv.Atoi(f)
+		if err != nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+`
+
+	ctx := createSilentErrorContext(t, "amounts.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+}

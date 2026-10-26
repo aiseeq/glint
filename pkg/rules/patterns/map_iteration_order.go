@@ -530,7 +530,9 @@ func isMapRange(rangeStmt *ast.RangeStmt, info *types.Info) bool {
 // orderedTargets returns the names of the variables the loop body builds in
 // iteration order: slices grown with append and strings grown by concatenation.
 // Order-independent updates (sums, counters, writes into another map) are not
-// reported, because their result does not depend on the walk order.
+// reported, because their result does not depend on the walk order. Nor is a
+// variable declared in the loop body: it lives one iteration, and an inner
+// walk over a map that fills it is a loop of its own.
 func orderedTargets(rangeStmt *ast.RangeStmt, info *types.Info) []string {
 	seen := make(map[string]bool)
 	var names []string
@@ -550,6 +552,9 @@ func orderedTargets(rangeStmt *ast.RangeStmt, info *types.Info) []string {
 		}
 		target, ok := assign.Lhs[0].(*ast.Ident)
 		if !ok {
+			return true
+		}
+		if obj := info.ObjectOf(target); obj != nil && obj.Pos() >= rangeStmt.Body.Pos() && obj.Pos() < rangeStmt.Body.End() {
 			return true
 		}
 

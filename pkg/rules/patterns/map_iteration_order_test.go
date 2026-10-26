@@ -662,3 +662,66 @@ func Dump(w io.Writer, counts map[string]int) {
 	}
 	assert.Equal(t, []int{10, 21}, lines)
 }
+
+// A slice declared inside the map loop lives one iteration: it holds the
+// entries of one map value, which the walk order does not touch. Repro from an
+// inventory that joined the commands of each hook event, sorted in the loop
+// body.
+func TestMapIterationOrderIgnoresSliceOfOneIteration(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"sort"
+	"strings"
+)
+
+type entry struct{ Extra string }
+
+type group struct{ Commands []string }
+
+func Describe(hooks map[string][]group, out map[string]*entry) {
+	for event, groups := range hooks {
+		var cmds []string
+		for _, g := range groups {
+			cmds = append(cmds, g.Commands...)
+		}
+		sort.Strings(cmds)
+		out[event].Extra = strings.Join(cmds, "; ")
+	}
+	for event, groups := range hooks {
+		var first []string
+		for _, g := range groups {
+			first = append(first, g.Commands[0])
+		}
+		out[event].Extra = strings.Join(first, "; ")
+	}
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// The same slice filled by an inner walk over a map still takes that walk's
+// order.
+func TestMapIterationOrderReportsSliceOfOneIterationFilledFromInnerMap(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "strings"
+
+type entry struct{ Extra string }
+
+func Describe(hooks map[string]map[string]bool, out map[string]*entry) {
+	for event, commands := range hooks {
+		var cmds []string
+		for cmd := range commands {
+			cmds = append(cmds, cmd)
+		}
+		out[event].Extra = strings.Join(cmds, "; ")
+	}
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 10, violations[0].Line)
+	assert.Contains(t, violations[0].Message, "cmds")
+}

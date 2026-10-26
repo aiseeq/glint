@@ -191,15 +191,19 @@ func checkCaseDefaultInvents(r *shellCaptureRule, src *shellSource) []*core.Viol
 	return out
 }
 
-var grepLabelVar = regexp.MustCompile(`\bgrep\s+((?:-[A-Za-z]+\s+)*)"([^"$]*\p{L}[:=] ?)\$\{?[A-Za-z_][A-Za-z0-9_]*(?:[:]?[-+=?][^}"]*)?\}?"`)
+var grepLabelVar = regexp.MustCompile(`\bgrep\s+((?:-[A-Za-z]+\s+)*)"([^"$]*\p{L}[:=] ?)\$\{?([A-Za-z_][A-Za-z0-9_]*)(?:[:]?[-+=?][^}"]*)?\}?"`)
 
 // checkGrepLabelPrefix reports grep "label: $name" with no word or line
-// match.
+// match. A full commit hash is never the prefix of another one.
 func checkGrepLabelPrefix(r *shellRule, src *shellSource) []*core.Violation {
 	var out []*core.Violation
+	fullHashes := fullRevisionVars(src)
 	for _, l := range src.lines {
 		for _, m := range grepLabelVar.FindAllStringSubmatchIndex(l.text, -1) {
 			if insideSingleQuotes(l.text, m[0]) || strings.ContainsAny(l.text[m[2]:m[3]], "xwF") && strings.ContainsAny(l.text[m[2]:m[3]], "xw") {
+				continue
+			}
+			if fullHashes[l.text[m[6]:m[7]]] {
 				continue
 			}
 			out = appendReport(out, src.report(r, l.lineAt(m[0]),
@@ -208,6 +212,47 @@ func checkGrepLabelPrefix(r *shellRule, src *shellSource) []*core.Violation {
 		}
 	}
 	return out
+}
+
+var revParseValue = regexp.MustCompile(`^"?\$\(git\s+(?:-C\s+\S+\s+)?rev-parse\s+([^)]*)\)"?$`)
+
+// fullRevisionVars returns the variables every assignment of which is
+// $(git rev-parse REF): a full commit hash, unless --short or another option
+// than --verify and --quiet makes it something else.
+func fullRevisionVars(src *shellSource) map[string]bool {
+	full := make(map[string]bool)
+	other := make(map[string]bool)
+	for _, l := range src.lines {
+		for _, m := range assignStart.FindAllStringSubmatchIndex(l.text, -1) {
+			if insideQuotes(l.text, m[2]) {
+				continue
+			}
+			name := l.text[m[2]:m[3]]
+			if revisionHash(shellValueAt(l.text, m[1])) {
+				full[name] = true
+			} else {
+				other[name] = true
+			}
+		}
+	}
+	for name := range other {
+		delete(full, name)
+	}
+	return full
+}
+
+// revisionHash reports a value $(git rev-parse REF) that prints a full hash.
+func revisionHash(value string) bool {
+	m := revParseValue.FindStringSubmatch(value)
+	if m == nil {
+		return false
+	}
+	for arg := range strings.FieldsSeq(m[1]) {
+		if strings.HasPrefix(arg, "-") && arg != "--verify" && arg != "-q" && arg != "--quiet" {
+			return false
+		}
+	}
+	return true
 }
 
 var positionalRef = regexp.MustCompile(`\$[1-9@*]|\$\{[1-9@*][}:#%/-]`)

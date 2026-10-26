@@ -72,6 +72,20 @@ z=$(echo "$out" | grep -c "WINNER: $name\$") || z=0
 grep -q "$pattern" "$f"
 grep -q "proxy_pass http://127.0.0.1:$port" "$conf"
 `)
+	// A full commit hash is never the prefix of another revision of the same
+	// length: an install script compared the revision a binary was built from
+	// with git rev-parse HEAD. A short one is.
+	shellWanted(t, "shell-grep-label-prefix-match", "install.sh", `#!/bin/bash
+head=$(git -C "$repo" rev-parse HEAD)
+short=$(git rev-parse --short HEAD)
+base=$(git rev-parse --verify origin/main)
+rev=$(git rev-parse HEAD)
+rev=$1
+go version -m "$dst" | grep -q "vcs.revision=$head"
+go version -m "$dst" | grep -q "vcs.revision=${base}"
+go version -m "$dst" | grep -q "vcs.revision=$short" # want
+go version -m "$dst" | grep -q "vcs.revision=$rev" # want
+`)
 }
 
 // Repro from a real project: ssh host "open \"$rep\"" with a file name from

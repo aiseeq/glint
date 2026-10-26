@@ -142,6 +142,10 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 			return true
 		}
 
+		if numericNameFilter(body, ifStmt) {
+			return true
+		}
+
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
 			"Error check without logging or error propagation")
 		v.WithCode(lineContent)
@@ -642,6 +646,21 @@ func debugOnlyLostValue(body *ast.BlockStmt, ifStmt *ast.IfStmt) bool {
 		return false
 	}
 	errName := errNilCheckName(ifStmt.Cond)
+	source := errSource(body, ifStmt, errName)
+	if source == nil {
+		return false
+	}
+	for _, lhs := range source.Lhs {
+		if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" && id.Name != errName {
+			return true
+		}
+	}
+	return false
+}
+
+// errSource returns the single-call assignment of the error the if tests: its
+// init statement, or the last assignment of the name before it.
+func errSource(body *ast.BlockStmt, ifStmt *ast.IfStmt, errName string) *ast.AssignStmt {
 	var source *ast.AssignStmt
 	if assign, ok := ifStmt.Init.(*ast.AssignStmt); ok {
 		source = assign
@@ -654,14 +673,39 @@ func debugOnlyLostValue(body *ast.BlockStmt, ifStmt *ast.IfStmt) bool {
 		})
 	}
 	if source == nil || len(source.Rhs) != 1 || !assignsName(source, errName) {
+		return nil
+	}
+	return source
+}
+
+// numericNameFilter reports a branch that skips an entry whose name is not a
+// number (pid, err := strconv.Atoi(d.Name()); if err != nil { continue }): it
+// picks the numbered entries out of a listing, like the processes of /proc, and
+// the error says only that this entry is not one of them.
+func numericNameFilter(body *ast.BlockStmt, ifStmt *ast.IfStmt) bool {
+	if len(ifStmt.Body.List) != 1 {
 		return false
 	}
-	for _, lhs := range source.Lhs {
-		if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" && id.Name != errName {
-			return true
-		}
+	if branch, ok := ifStmt.Body.List[0].(*ast.BranchStmt); !ok || branch.Tok != token.CONTINUE || branch.Label != nil {
+		return false
 	}
-	return false
+	source := errSource(body, ifStmt, errNilCheckName(ifStmt.Cond))
+	if source == nil {
+		return false
+	}
+	call, ok := source.Rhs[0].(*ast.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return false
+	}
+	if !isSelectorCall(call, "strconv", "Atoi") && !isSelectorCall(call, "strconv", "ParseInt") && !isSelectorCall(call, "strconv", "ParseUint") {
+		return false
+	}
+	name, ok := call.Args[0].(*ast.CallExpr)
+	if !ok || len(name.Args) != 0 {
+		return false
+	}
+	sel, ok := name.Fun.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Name"
 }
 
 func onlyDebugLogs(list []ast.Stmt) bool {
