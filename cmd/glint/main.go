@@ -126,6 +126,11 @@ Use -C <path> to change directory before running a command; it may be repeated.`
 	// main reports the error itself, so cobra must not print it a second time.
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	// Args turns down a word that names no command, and RunE makes glint
+	// alone print the help, as it does without Args.
+	Args:                       rootArgs,
+	RunE:                       func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
+	SuggestionsMinimumDistance: 2,
 	// -C runs before every subcommand reads .glint.yaml, resolves its path
 	// arguments or opens the cache; each value is relative to the previous
 	// one, as with git -C.
@@ -201,6 +206,7 @@ Available fixers:
 }
 
 func init() {
+	rootCmd.SetFlagErrorFunc(rootFlagError)
 	rootCmd.PersistentFlags().StringArrayVarP(&flagChdir, "directory", "C", nil, "Run as if glint was started in this directory (may be repeated)")
 
 	// Check command flags
@@ -241,6 +247,62 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(fixCmd)
+}
+
+// rootArgs rejects the arguments of glint itself, which name no command. A
+// path there, as in go vet ./..., is a call of check without its name, so the
+// error spells that call out.
+func rootArgs(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	if looksLikePath(args[0]) {
+		return checkHint(cmd, args[0])
+	}
+	msg := fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())
+	if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
+		msg += "\n\nDid you mean this?\n\t" + strings.Join(suggestions, "\n\t")
+	}
+	return usageError{err: errors.New(msg)}
+}
+
+// rootFlagError gives the path hint of rootArgs to glint ./... -r name: the
+// flags of check are unknown to glint itself, and cobra parses them before it
+// looks at the arguments.
+func rootFlagError(cmd *cobra.Command, err error) error {
+	if cmd.HasParent() {
+		return err
+	}
+	if args := cmd.Flags().Args(); len(args) > 0 && looksLikePath(args[0]) {
+		return checkHint(cmd, args[0])
+	}
+	return err
+}
+
+// checkHint is the error of a path given to glint without a command: it
+// repeats the command line with check in front, flags included.
+func checkHint(cmd *cobra.Command, path string) error {
+	return usageError{err: fmt.Errorf("unknown command %q for %q; to analyze a path, run: glint check %s",
+		path, cmd.CommandPath(), strings.Join(os.Args[1:], " "))}
+}
+
+// looksLikePath reports whether arg is a path rather than a mistyped command:
+// it has a slash or starts with a dot, or names an existing file. Args are
+// checked before -C changes the directory, so the file is looked up under it.
+func looksLikePath(arg string) bool {
+	if strings.HasPrefix(arg, ".") || strings.Contains(arg, "/") {
+		return true
+	}
+	dir := "."
+	for _, chdir := range flagChdir {
+		if filepath.IsAbs(chdir) {
+			dir = chdir
+		} else {
+			dir = filepath.Join(dir, chdir)
+		}
+	}
+	_, err := os.Stat(filepath.Join(dir, arg))
+	return err == nil
 }
 
 // defaultJobs is how many threads a run takes unless --jobs says otherwise:

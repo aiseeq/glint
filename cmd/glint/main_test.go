@@ -75,6 +75,49 @@ func TestMainMissingDirectoryIsUsageError(t *testing.T) {
 	}
 }
 
+// A path where the command goes, as in go vet ./..., is a call of check
+// without its name: the error says how to write it.
+func TestMainPathWithoutCommandSuggestsCheck(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("internal", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"./..."}, {"."}, {"internal"}, {"/nowhere/..."}, {"-C", ".", "./...", "internal"}, {"./...", "-r", "ignored-error"}} {
+		output, err := mainSubprocess(t, args).CombinedOutput()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != exitUsage {
+			t.Fatalf("glint %v: got exit error %v, want usage exit code 2 (output: %s)", args, err, output)
+		}
+		want := "glint check " + strings.Join(args, " ")
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("glint %v: error does not suggest %q: %s", args, want, output)
+		}
+	}
+}
+
+func TestMainUnknownCommandSuggestsSimilarOne(t *testing.T) {
+	output, err := mainSubprocess(t, []string{"chek"}).CombinedOutput()
+	if err == nil {
+		t.Fatalf("unknown command succeeded: %s", output)
+	}
+	if !strings.Contains(string(output), `unknown command "chek"`) || !strings.Contains(string(output), "\tcheck") {
+		t.Fatalf("error does not name the command and suggest check: %s", output)
+	}
+	if strings.Contains(string(output), "glint check chek") {
+		t.Fatalf("a word that is not a path got the path hint: %s", output)
+	}
+}
+
+func TestMainWithoutArgumentsPrintsHelp(t *testing.T) {
+	output, err := mainSubprocess(t, nil).CombinedOutput()
+	if err != nil {
+		t.Fatalf("glint without arguments failed: %v (output: %s)", err, output)
+	}
+	if !strings.Contains(string(output), "Available Commands:") {
+		t.Fatalf("glint without arguments does not print help: %s", output)
+	}
+}
+
 // mainSubprocess runs main with args in a child of the test binary, so the
 // os.Exit and os.Chdir of main do not touch the test process.
 func mainSubprocess(t *testing.T, args []string) *exec.Cmd {
