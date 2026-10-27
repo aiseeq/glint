@@ -146,6 +146,67 @@ func TestEnvKeyMissingFromDeployEnvTemplateOnly(t *testing.T) {
 		}))
 }
 
+// A deploy that pipes the local env file, or the names of its keys, over ssh
+// into a command on the server's env file checks or copies every key: a
+// missing key stops the rollout, so the template it fills by hand at
+// bootstrap needs no key of its own.
+func TestEnvKeyMissingFromDeployEnvServerKeysChecked(t *testing.T) {
+	for name, deploy := range map[string]string{
+		"names checked": `#!/bin/bash
+bash scripts/env-keys.sh names .env |
+    ssh "$USER@$HOST" "cd /opt/app/shared && bash env-keys.sh check .env; rc=\$?; rm -f env-keys.sh; exit \$rc" || exit 1
+`,
+		"file copied": `#!/bin/bash
+cat .env.production | ssh "$HOST" 'cat > /opt/app/shared/.env'
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Empty(t, deployFindings(t, "env-key-missing-from-deploy-env", map[string]string{
+				"internal/config/config.go": deployEnvConfig,
+				".env.example":              deployEnvExample,
+				"deploy/bootstrap.sh":       deployEnvBootstrap,
+				"deploy/deploy.sh":          deploy,
+			}))
+		})
+	}
+	// Another file piped to the server checks no key.
+	assert.Len(t, deployFindings(t, "env-key-missing-from-deploy-env", map[string]string{
+		"internal/config/config.go": deployEnvConfig,
+		".env.example":              deployEnvExample,
+		"deploy/bootstrap.sh":       deployEnvBootstrap,
+		"deploy/deploy.sh":          "#!/bin/bash\ncat VERSION | ssh \"$HOST\" 'cat > /opt/app/shared/VERSION'\n",
+	}), 3)
+}
+
+// A setup script that writes the env file of another program on the server
+// (a database console with its own /etc/<tool>/<tool>.env) writes no key the
+// code reads, the template lists or that sits next to one: it is no writer of
+// the application's env, and a deploy that writes none manages it elsewhere.
+func TestEnvKeyMissingFromDeployEnvOtherProgramEnvFile(t *testing.T) {
+	assert.Empty(t, deployFindings(t, "env-key-missing-from-deploy-env", map[string]string{
+		"internal/config/config.go": deployEnvConfig,
+		".env.example":              deployEnvExample,
+		"deploy/console/setup.sh": `#!/bin/bash
+set -euo pipefail
+ENV_FILE=/etc/dbconsole/dbconsole.env
+if [ ! -s "$ENV_FILE" ]; then
+    printf 'DBCONSOLE_DATABASE_URL=postgres://%s:%s@/%s\n' "$role" "$pass" "$db" > "$ENV_FILE"
+fi
+`,
+	}))
+	// The application's own env file under /etc carries its keys: still a
+	// writer, and the keys it lacks are missing.
+	assert.Equal(t, []string{"deploy/setup.sh:3", "deploy/setup.sh:3", "deploy/setup.sh:3"},
+		deployFindings(t, "env-key-missing-from-deploy-env", map[string]string{
+			"internal/config/config.go": deployEnvConfig,
+			".env.example":              deployEnvExample,
+			"deploy/setup.sh": `#!/bin/bash
+ENV_FILE=/etc/app/app.env
+printf 'APP_DB_HOST=%s\n' "$host" > "$ENV_FILE"
+`,
+		}))
+}
+
 // Docker runs the health check inside the container with its environment:
 // a port the image declares as configurable but the check spells as a
 // literal makes the container unhealthy when the port is changed.

@@ -41,7 +41,11 @@ func init() {
 // the code (getEnv("KEY", "x"), envDefault) and keys only tests read are not
 // needed. A project whose deploy writes no env file is left alone, and so is
 // one whose deploy copies the whole local env file to the server (scp .env
-// host:...): the copy carries every key. A test of the deploy (deploy_test.sh,
+// host:...): the copy carries every key; so is one that pipes the local env
+// file or its key names over ssh into a command on the server's env file,
+// which copies them or stops the rollout on a missing key. A script writing
+// the env file of another program under /etc, with no key of the
+// application, is no writer. A test of the deploy (deploy_test.sh,
 // a script under tests/) writes fixtures into a temporary directory and is
 // no writer.
 type EnvKeyMissingFromDeployEnvRule struct {
@@ -99,6 +103,9 @@ type envWriter struct {
 	// template is a heredoc filled in by hand on the server; a deploy writer
 	// (printf, echo) carries values from the deploying machine.
 	template bool
+	// target is the file written, its variable resolved when the script
+	// assigns it a literal path.
+	target string
 }
 
 // envExampleKey is a key of the env template with its comment.
@@ -119,8 +126,8 @@ func (r *EnvKeyMissingFromDeployEnvRule) UseProjectFiles(files []*core.FileConte
 		if (ctx.IsShellFile() || ctx.IsMakefile()) && ctx.IsTestFile() {
 			continue // a test of the deploy: its env files are fixtures
 		}
-		if copiesEnvFile(ctx) {
-			return // the whole local env file reaches the server
+		if copiesEnvFile(ctx) || pipesEnvFileToServer(ctx) {
+			return // the server's env file gets or is checked against every local key
 		}
 		switch {
 		case ctx.IsEnvTemplate():
@@ -150,6 +157,7 @@ func (r *EnvKeyMissingFromDeployEnvRule) UseProjectFiles(files []*core.FileConte
 			}
 		}
 	}
+	writers = slices.DeleteFunc(writers, func(w envWriter) bool { return !w.writesApplicationEnv(reads, example) })
 	if len(writers) == 0 {
 		return
 	}
@@ -177,6 +185,28 @@ func (r *EnvKeyMissingFromDeployEnvRule) UseProjectFiles(files []*core.FileConte
 		}
 		r.findings[report.file] = append(r.findings[report.file], envKeyFinding{line: report.line, key: key, reason: reason})
 	}
+}
+
+// writesApplicationEnv reports a writer of the application's env file. A
+// writer into the system configuration (/etc/<tool>/<tool>.env) whose keys
+// the code does not read, the env template does not list and that sit next
+// to no key the code reads fills the env file of another program on the
+// server — a database console set up next to the application.
+func (w envWriter) writesApplicationEnv(reads map[string]bool, example map[string]envExampleKey) bool {
+	if !strings.HasPrefix(w.target, "/etc/") {
+		return true
+	}
+	for key := range w.keys {
+		if _, listed := example[key]; listed || reads[key] {
+			return true
+		}
+	}
+	for key := range reads {
+		if envKeySibling(key, w.keys) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // missingEnvKeyReason tells why a key the code reads is needed on the server
@@ -573,11 +603,13 @@ func envStructTag(field *ast.Field) (string, bool) {
 // redirected to a file named like an env file.
 func shellEnvWriters(ctx *core.FileContext) []envWriter {
 	var out []envWriter
+	paths := scriptLiteralPaths(ctx.Lines)
 	for _, doc := range heredocs(ctx.Lines) {
 		if !envFileName(doc.target) && !envWordInName.MatchString(path.Base(doc.target)) {
 			continue // the file of the server, or a temp file the deploy copies there
 		}
-		w := envWriter{file: ctx.RelPath, line: doc.line, keys: make(map[string]bool), template: true}
+		w := envWriter{file: ctx.RelPath, line: doc.line, keys: make(map[string]bool), template: true,
+			target: resolveScriptPath(doc.target, paths)}
 		for _, line := range doc.body {
 			if m := envAssignmentLine.FindStringSubmatch(line); m != nil {
 				value := strings.TrimSpace(m[2])
@@ -598,10 +630,12 @@ func shellEnvWriters(ctx *core.FileContext) []envWriter {
 	for _, l := range src.lines {
 		for _, seg := range flatSegments(l.text) {
 			text := seg.trimmed()
-			if !writesEnvFile(text) {
+			target, ok := envFileWrite(text)
+			if !ok {
 				continue
 			}
-			w := envWriter{file: ctx.RelPath, line: l.lineAt(seg.offset), keys: make(map[string]bool)}
+			w := envWriter{file: ctx.RelPath, line: l.lineAt(seg.offset), keys: make(map[string]bool),
+				target: resolveScriptPath(target, paths)}
 			if m := printfFormat.FindStringSubmatch(text); m != nil {
 				for _, k := range formatKey.FindAllStringSubmatch(m[1]+m[2], -1) {
 					w.keys[k[1]] = false
@@ -651,20 +685,122 @@ func copiesEnvFile(ctx *core.FileContext) bool {
 	return false
 }
 
-// writesEnvFile reports a command redirected to a file named like an env
-// file: > "$deploy_env", >> .env.prod, > "$ENV_FILE"; the variables CI
-// runners read back ($GITHUB_ENV) are not files of the server.
-func writesEnvFile(command string) bool {
+// pipesEnvFileToServer reports a script that pipes a local env file, or what
+// it reads from one, over ssh into a command on the server's env file:
+// cat .env | ssh host 'cat > shared/.env', or the key names of .env checked
+// there (keys.sh names .env | ssh host "keys.sh check .env"), where a missing
+// key stops the rollout.
+func pipesEnvFileToServer(ctx *core.FileContext) bool {
+	src, ok := readShell(ctx)
+	if !ok {
+		return false
+	}
+	for _, l := range src.lines {
+		for _, seg := range flatSegments(l.text) {
+			stages := pipeStages(seg.trimmed())
+			if len(stages) < 2 {
+				continue
+			}
+			remote := stages[len(stages)-1]
+			if words := commandWords(remote); len(words) == 0 || words[0] != "ssh" || !mentionsEnvFile(remote) {
+				continue
+			}
+			if slices.ContainsFunc(stages[:len(stages)-1], mentionsEnvFile) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mentionsEnvFile reports a command that names an env file of the machine it
+// runs on, quoted or inside a quoted remote command; host:path is a remote
+// one.
+func mentionsEnvFile(command string) bool {
+	for _, word := range strings.FieldsFunc(command, func(r rune) bool { return strings.ContainsRune(" \t\n\"';&|()", r) }) {
+		if envFileName(word) && !strings.Contains(word, ":") {
+			return true
+		}
+	}
+	return false
+}
+
+// pipeStages splits a command at the pipes outside quotes: a | b | c.
+func pipeStages(text string) []string {
+	var stages []string
+	var q quoteScanner
+	start := 0
+	for i := 0; i < len(text); {
+		if n := q.step(text, i); n > 0 {
+			i += n
+			continue
+		}
+		switch {
+		case text[i] != '|':
+		case i+1 < len(text) && text[i+1] == '|':
+			i++ // ||
+		case i > 0 && text[i-1] == '>':
+			// >| redirection
+		default:
+			stages = append(stages, strings.TrimSpace(text[start:i]))
+			start = i + 1
+		}
+		i++
+	}
+	return append(stages, strings.TrimSpace(text[start:]))
+}
+
+// envFileWrite returns the file named like an env file a command is
+// redirected to: > "$deploy_env", >> .env.prod, > "$ENV_FILE"; the variables
+// CI runners read back ($GITHUB_ENV) are not files of the server.
+func envFileWrite(command string) (string, bool) {
 	for _, m := range envFileWriteTarget.FindAllStringSubmatch(command, -1) {
 		target := m[1]
 		if strings.Contains(target, "GITHUB_") {
 			continue
 		}
 		if envWordInName.MatchString(path.Base(target)) {
-			return true
+			return target, true
 		}
 	}
-	return false
+	return "", false
+}
+
+// scriptLiteralPath is an assignment of a literal absolute path:
+// ENV_FILE=/etc/tool/tool.env, readonly CONF="/etc/tool.conf".
+var scriptLiteralPath = regexp.MustCompile(`^\s*(?:readonly\s+|export\s+|local\s+)?([A-Za-z_][A-Za-z0-9_]*)=["']?(/[^\s"'$;&|]*)["']?\s*(?:#.*)?$`)
+
+// scriptLiteralPaths returns the variables a script assigns one literal
+// absolute path; a variable assigned twice is left out.
+func scriptLiteralPaths(lines []string) map[string]string {
+	paths := make(map[string]string)
+	seen := make(map[string]int)
+	for _, line := range lines {
+		if m := scriptLiteralPath.FindStringSubmatch(line); m != nil {
+			paths[m[1]] = m[2]
+			seen[m[1]]++
+		}
+	}
+	for name, n := range seen {
+		if n > 1 {
+			delete(paths, name)
+		}
+	}
+	return paths
+}
+
+// resolveScriptPath returns the literal path a target that is one variable
+// ($ENV_FILE, ${ENV_FILE}) holds, and the target itself otherwise.
+func resolveScriptPath(target string, paths map[string]string) string {
+	name := strings.TrimPrefix(target, "$")
+	if name == target {
+		return target
+	}
+	name = strings.TrimSuffix(strings.TrimPrefix(name, "{"), "}")
+	if value, ok := paths[name]; ok {
+		return value
+	}
+	return target
 }
 
 // envFileName reports a path of an env file: .env, .env.<stage>, <name>.env
