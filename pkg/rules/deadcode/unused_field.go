@@ -98,6 +98,7 @@ type declaredField struct {
 	fieldName string
 	setting   bool
 	filter    bool // an exported field of a filter: reported only when set
+	request   bool // an exported field of a request DTO: reported only when set
 	exported  bool // an exported field judged because no reader lives outside the tree
 }
 
@@ -124,6 +125,9 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 		var violations []*core.Violation
 		for _, field := range collectCheckedFields(fileCtx, info, r.application) {
 			pos := field.obj.Pos()
+			if field.request && !access.written[pos] {
+				continue
+			}
 			if access.read[pos] || access.hashed[pos] {
 				continue
 			}
@@ -226,12 +230,13 @@ func collectCheckedFields(fileCtx *core.FileContext, info *types.Info, applicati
 		setting := isSettingType(spec.Name.Name)
 		filter := isFilterType(spec.Name.Name)
 		closed := application || (named != nil && internalPackage(named.Obj().Pkg()))
+		request := strings.HasSuffix(spec.Name.Name, "Request")
 		for _, field := range structType.Fields.List {
-			if (field.Tag != nil && !filter) || len(field.Names) == 0 {
-				continue // tagged fields and embedded ones are other rules' business
+			if (field.Tag != nil && !filter && !request) || len(field.Names) == 0 {
+				continue // tagged fields outside request DTOs and embedded fields are other rules' business
 			}
 			for _, name := range field.Names {
-				if name.Name == "_" || (name.IsExported() && !setting && !closed) {
+				if name.Name == "_" || (name.IsExported() && !setting && !closed && !request) {
 					continue
 				}
 				obj, ok := info.Defs[name].(*types.Var)
@@ -247,6 +252,7 @@ func collectCheckedFields(fileCtx *core.FileContext, info *types.Info, applicati
 					fieldName: name.Name,
 					setting:   setting && name.IsExported(),
 					filter:    filter && name.IsExported(),
+					request:   request && name.IsExported(),
 					exported:  closed && name.IsExported() && !setting,
 				})
 			}

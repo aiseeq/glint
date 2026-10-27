@@ -385,6 +385,50 @@ func Show() string { return show(user{name: "a", cache: "b"}) }
 	assert.Contains(t, violations[0].Message, "cache")
 }
 
+func TestUnusedFieldReportsWrittenUnreadRequestField(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"api/request.go": `package api
+
+type CompleteRequest struct {
+	ID string ` + "`json:\"id\"`" + `
+	Note string ` + "`json:\"note\"`" + `
+}
+
+func handle() {
+	req := &CompleteRequest{ID: "x", Note: "operator note"}
+	complete(req)
+}
+
+func complete(req *CompleteRequest) { _ = req.ID }
+`,
+	})
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "CompleteRequest.Note")
+}
+
+func TestUnusedFieldAcceptsLiveAndUnfilledRequestAndOtherTaggedType(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"api/request.go": `package api
+
+type CompleteRequest struct {
+	Note string ` + "`json:\"note\"`" + `
+	Other string ` + "`json:\"other\"`" + `
+}
+
+type Record struct { Note string ` + "`json:\"note\"`" + ` }
+
+func handle(req *CompleteRequest) {
+	complete(req)
+	_ = &CompleteRequest{}
+	_ = &Record{Note: "stored elsewhere"}
+}
+
+func complete(req *CompleteRequest) { _ = req.Note }
+`,
+	})
+	assert.Empty(t, violations)
+}
+
 func TestUnusedFieldMetadata(t *testing.T) {
 	rule := NewUnusedFieldRule()
 	assert.Equal(t, "unused-field", rule.Name())
