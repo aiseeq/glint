@@ -3,9 +3,11 @@ package patterns
 import (
 	"errors"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -16,6 +18,64 @@ import (
 
 func init() {
 	rules.Register(NewSQLConstraintViolationUnmappedRule())
+	rules.Register(NewTruncatedRandomIDAsUniqueNumberRule())
+}
+
+// TruncatedRandomIDAsUniqueNumberRule reports short random values used as
+// unique database keys when a collision is neither retried nor mapped.
+type TruncatedRandomIDAsUniqueNumberRule struct {
+	*rules.BaseRule
+}
+
+// NewTruncatedRandomIDAsUniqueNumberRule creates the rule.
+func NewTruncatedRandomIDAsUniqueNumberRule() *TruncatedRandomIDAsUniqueNumberRule {
+	return &TruncatedRandomIDAsUniqueNumberRule{BaseRule: rules.NewBaseRule(
+		"truncated-random-id-as-unique-number",
+		"patterns",
+		"Detects a truncated random identifier stored in a unique database key without retrying a collision",
+		core.SeverityMedium,
+	)}
+}
+
+// AnalyzeFile is a no-op because the rule follows data across callers.
+func (r *TruncatedRandomIDAsUniqueNumberRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
+	return nil
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *TruncatedRandomIDAsUniqueNumberRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject reports the truncated random origin of an unhandled unique
+// key conflict.
+func (r *TruncatedRandomIDAsUniqueNumberRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	if ctx == nil {
+		return nil, errors.New("truncated random identifier as unique number: nil Go project context")
+	}
+	callers, err := newCallerIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+	conflicts, err := unhandledUniqueConflicts(ctx, callers, r.BaseRule)
+	if err != nil {
+		return nil, err
+	}
+	var violations []*core.Violation
+	for _, conflict := range conflicts {
+		origin := truncatedRandomUniqueOrigin(conflict.callers, conflict.target)
+		if origin == nil {
+			continue
+		}
+		line := origin.fn.file.LineFor(origin.node)
+		if origin.fn.file.IsSuppressed(line, r.Name()) {
+			continue
+		}
+		v := r.CreateViolation(origin.fn.file.RelPath, line,
+			"A truncated random identifier is stored in a unique key without retrying a collision")
+		v.WithCode(strings.TrimSpace(origin.fn.file.GetLine(line)))
+		v.WithSuggestion("Use the full random value, or retry after a unique-key collision")
+		violations = append(violations, v)
+	}
+	return violations, nil
 }
 
 // SQLConstraintViolationUnmappedRule detects a statement the migrations'
@@ -115,16 +175,235 @@ func (r *SQLConstraintViolationUnmappedRule) AnalyzeGoProject(ctx *core.GoProjec
 				violations = r.report(fn.file, violations, literal.lineAt(fn.file, del.Offset),
 					"Rows of "+del.Table+" are deleted while "+strings.Join(names, ", ")+" point at them with a foreign key that refuses the delete, and nothing between here and the handler checks the database error — a row still in use comes back to the user as a server error")
 			}
+
+		}
+	}
+	conflicts, err := unhandledUniqueConflicts(ctx, callers, r.BaseRule)
+	if err != nil {
+		return nil, err
+	}
+	for _, conflict := range conflicts {
+		violations = r.report(conflict.file, violations, conflict.line,
+			"The INSERT writes the whole unique key ("+strings.Join(conflict.key, ", ")+") of "+conflict.table+" with no ON CONFLICT, and nothing between here and the handler checks the database error — a duplicate comes back to the user as a server error")
+	}
+	return violations, nil
+}
+
+type unhandledUniqueConflict struct {
+	file    *core.FileContext
+	line    int
+	table   string
+	key     []string
+	callers *callerIndex
+	target  *types.Func
+}
+
+// unhandledUniqueConflicts finds unique-key INSERTs whose errors reach an
+// HTTP handler without a conflict check, retry, or earlier write ruling them out.
+func unhandledUniqueConflicts(ctx *core.GoProjectContext, callers *callerIndex, rule *rules.BaseRule) ([]unhandledUniqueConflict, error) {
+	if ctx == nil {
+		return nil, errors.New("sql constraint violation unmapped: nil Go project context")
+	}
+	checkersByFile := make(map[*core.FileContext]map[string]bool)
+	var conflicts []unhandledUniqueConflict
+	for _, fn := range callers.funcs {
+		literals := sqlLiterals(fn.decl.Body)
+		if len(literals) == 0 {
+			continue
+		}
+		schema, ok := fileSchema(fn.file, rule)
+		if !ok || schema == nil {
+			continue
+		}
+		checkers, ok := checkersByFile[fn.file]
+		if !ok {
+			checkers = constraintCheckingFuncs(fn.file)
+			checkersByFile[fn.file] = checkers
+		}
+		target, ok := fn.info.Defs[fn.decl.Name].(*types.Func)
+		if !ok || checksConstraints(fn.file, fn.decl, checkers) || !callers.reachesHandlerUnmapped(target, 0, map[*types.Func]bool{}) {
+			continue
+		}
+		for i, literal := range literals {
+			earlier := earlierStatements(literals[:i])
 			for _, conflict := range schema.UniqueConflicts(literal.text) {
 				if earlier.rulesOut(schema, conflict) {
 					continue
 				}
-				violations = r.report(fn.file, violations, literal.lineAt(fn.file, conflict.Offset),
-					"The INSERT writes the whole unique key ("+strings.Join(conflict.Key, ", ")+") of "+conflict.Table+" with no ON CONFLICT, and nothing between here and the handler checks the database error — a duplicate comes back to the user as a server error")
+				conflicts = append(conflicts, unhandledUniqueConflict{
+					file: fn.file, line: literal.lineAt(fn.file, conflict.Offset),
+					table: conflict.Table, key: conflict.Key, callers: callers, target: target,
+				})
 			}
 		}
 	}
-	return violations, nil
+	return conflicts, nil
+}
+
+// truncatedRandomUniqueOrigin finds a short random identifier passed by an
+// HTTP handler to the function that writes a unique key. The database error
+// already has a finding at the INSERT; this points at the lossy construction
+// that made retries necessary.
+type truncatedRandomOrigin struct {
+	fn   typedFunc
+	node ast.Node
+}
+
+func truncatedRandomUniqueOrigin(callers *callerIndex, target *types.Func) *truncatedRandomOrigin {
+	return truncatedRandomUniqueOriginAt(callers, target.Origin(), 0, make(map[*types.Func]bool))
+}
+
+func truncatedRandomUniqueOriginAt(callers *callerIndex, target *types.Func, depth int, seen map[*types.Func]bool) *truncatedRandomOrigin {
+	if seen[target] || depth >= maxRefusalHops {
+		return nil
+	}
+	seen[target] = true
+	sites := callers.sites[target]
+	for _, method := range implementedMethods(target, callers.interfaces) {
+		sites = append(sites, callers.sites[method]...)
+	}
+	for _, site := range sites {
+		if conflictHandledAt(site) || retriesConflictAt(site) {
+			continue
+		}
+		if takesResponseWriter(site.caller.info, site.caller.decl.Type) {
+			caller, ok := typedCaller(callers.funcs, site.caller.decl)
+			if ok {
+				if node := shortRandomUniqueCallArgument(site, caller); node != nil {
+					return &truncatedRandomOrigin{fn: caller, node: node}
+				}
+			}
+			continue
+		}
+		if caller, ok := site.caller.info.Defs[site.caller.decl.Name].(*types.Func); ok {
+			if node := truncatedRandomUniqueOriginAt(callers, caller.Origin(), depth+1, seen); node != nil {
+				return node
+			}
+		}
+	}
+	return nil
+}
+
+func typedCaller(funcs []typedFunc, decl *ast.FuncDecl) (typedFunc, bool) {
+	for _, fn := range funcs {
+		if fn.decl == decl {
+			return fn, true
+		}
+	}
+	return typedFunc{}, false
+}
+
+// shortRandomUniqueCallArgument finds a truncated random value passed to the
+// function that writes the unique key.
+func shortRandomUniqueCallArgument(site funcCallSite, fn typedFunc) ast.Node {
+	randomVars := randomIdentifierVars(fn)
+	for _, arg := range site.call.Args {
+		if node := truncatedRandomValue(arg, fn, randomVars, make(map[types.Object]bool)); node != nil {
+			return node
+		}
+	}
+	return nil
+}
+
+func truncatedRandomValue(expr ast.Expr, fn typedFunc, randomVars map[types.Object]bool, seen map[types.Object]bool) ast.Node {
+	var found ast.Node
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if found != nil {
+			return false
+		}
+		if slice, ok := n.(*ast.SliceExpr); ok {
+			if id, ok := ast.Unparen(slice.X).(*ast.Ident); ok && randomVars[fn.info.Uses[id]] {
+				if high, ok := ast.Unparen(slice.High).(*ast.BasicLit); ok && high.Kind == token.INT {
+					if size, err := strconv.Atoi(high.Value); err == nil && size > 0 && size < 16 {
+						found = slice
+						return false
+					}
+				}
+			}
+		}
+		if id, ok := n.(*ast.Ident); ok {
+			obj := fn.info.Uses[id]
+			if obj != nil && !seen[obj] {
+				seen[obj] = true
+				if value := localObjectValue(fn, obj); value != nil {
+					found = truncatedRandomValue(value, fn, randomVars, seen)
+				}
+			}
+		}
+		return found == nil
+	})
+	return found
+}
+
+func localObjectValue(fn typedFunc, object types.Object) ast.Expr {
+	var value ast.Expr
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.ValueSpec:
+			for i, name := range node.Names {
+				if fn.info.Defs[name] == object && i < len(node.Values) {
+					value = node.Values[i]
+					return false
+				}
+			}
+		case *ast.AssignStmt:
+			for i, lhs := range node.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok || i >= len(node.Rhs) {
+					continue
+				}
+				if fn.info.Defs[id] == object || fn.info.Uses[id] == object {
+					value = node.Rhs[i]
+					return false
+				}
+			}
+		}
+		return value == nil
+	})
+	return value
+}
+
+// randomIdentifierVars records UUID values and buffers filled by crypto/rand.
+func randomIdentifierVars(fn typedFunc) map[types.Object]bool {
+	vars := make(map[types.Object]bool)
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range node.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				obj := fn.info.Defs[id]
+				if obj == nil {
+					obj = fn.info.Uses[id]
+				}
+				if obj == nil {
+					continue
+				}
+				if i < len(node.Rhs) {
+					if call, ok := ast.Unparen(node.Rhs[i]).(*ast.CallExpr); ok && isPackageFuncCall(fn.file.GoAST, fn.info, call, "github.com/google/uuid", "New") {
+						vars[obj] = true
+					}
+				}
+			}
+		case *ast.CallExpr:
+			if !isPackageFuncCall(fn.file.GoAST, fn.info, node, "crypto/rand", "Read") || len(node.Args) != 1 {
+				break
+			}
+			slice, ok := ast.Unparen(node.Args[0]).(*ast.SliceExpr)
+			if !ok {
+				break
+			}
+			if id, ok := ast.Unparen(slice.X).(*ast.Ident); ok {
+				if obj := fn.info.Uses[id]; obj != nil {
+					vars[obj] = true
+				}
+			}
+		}
+		return true
+	})
+	return vars
 }
 
 // callerIndex tells, for a project function, where it is called: directly
@@ -171,6 +450,63 @@ func (c *callerIndex) reachesHandlerUnmapped(fn *types.Func, depth int, seen map
 		}
 	}
 	return false
+}
+
+func retriesConflictAt(site funcCallSite) bool {
+	var errorObject types.Object
+	ast.Inspect(site.caller.decl.Body, func(n ast.Node) bool {
+		if assignment, ok := n.(*ast.AssignStmt); ok && containsNode(assignment, site.call) {
+			for _, lhs := range assignment.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					errorObject = site.caller.info.Defs[id]
+					if errorObject == nil {
+						errorObject = site.caller.info.Uses[id]
+					}
+					if errorObject != nil {
+						return false
+					}
+				}
+			}
+		}
+		return errorObject == nil
+	})
+	if errorObject == nil {
+		return false
+	}
+	handled := false
+	ast.Inspect(site.caller.decl.Body, func(n ast.Node) bool {
+		if handled {
+			return false
+		}
+		branch, ok := n.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		matches := false
+		ast.Inspect(branch.Cond, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || !conflictWords.MatchString(types.ExprString(call.Fun)) {
+				return true
+			}
+			for _, arg := range call.Args {
+				if id, ok := ast.Unparen(arg).(*ast.Ident); ok && site.caller.info.Uses[id] == errorObject {
+					matches = true
+				}
+			}
+			return !matches
+		})
+		if matches {
+			ast.Inspect(branch.Body, func(n ast.Node) bool {
+				if _, ok := n.(*ast.BranchStmt); ok {
+					handled = true
+					return false
+				}
+				return true
+			})
+		}
+		return !handled
+	})
+	return handled
 }
 
 // conflictWords are how a caller's error branch names a refusal it tells

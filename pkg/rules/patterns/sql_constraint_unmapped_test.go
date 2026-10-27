@@ -1,6 +1,8 @@
 package patterns
 
 import (
+	"maps"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -186,6 +188,192 @@ CREATE TABLE staff_roles (
 CREATE TABLE fee_schedules (id SERIAL PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE fee_links (fee_schedule_id INT NOT NULL REFERENCES fee_schedules(id), tx TEXT NOT NULL);
 `
+
+func TestSQLConstraintViolationUnmappedStillReportsAtInsert(t *testing.T) {
+	files := map[string]string{
+		"storage/migrations/001_init.up.sql": `CREATE TABLE entries (id UUID PRIMARY KEY, document_number TEXT NOT NULL UNIQUE);`,
+		"storage/entries.go": `package storage
+
+import (
+	"context"
+	"database/sql"
+)
+
+type Entry struct { DocumentNumber string }
+type Repo struct { db *sql.DB }
+
+func (r *Repo) Add(ctx context.Context, entry Entry) error {
+	_, err := r.db.ExecContext(ctx, ` + "`INSERT INTO entries (document_number) VALUES ($1)`" + `, entry.DocumentNumber) // want sql-constraint-violation-unmapped
+	return err
+}
+`,
+		"web/handler.go": `package web
+
+import (
+	"crypto/rand"
+	"fmt"
+	"net/http"
+
+	"example.com/rulestest/storage"
+)
+
+type Server struct { repo *storage.Repo }
+
+func (s *Server) create(w http.ResponseWriter, r *http.Request) {
+	var id [16]byte
+	_, _ = rand.Read(id[:])
+	number := fmt.Sprintf("REC-%08X", id[:4])
+	if err := s.repo.Add(r.Context(), storage.Entry{DocumentNumber: number}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+`,
+	}
+	violations, err := NewSQLConstraintViolationUnmappedRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, wantedLines(files, "sql-constraint-violation-unmapped"), foundLines(violations))
+}
+
+func TestTruncatedRandomIDAsUniqueNumber(t *testing.T) {
+	files := map[string]string{
+		"storage/migrations/001_init.up.sql": `CREATE TABLE entries (id UUID PRIMARY KEY, document_number TEXT NOT NULL UNIQUE);`,
+		"storage/entries.go": `package storage
+import ("context"; "database/sql")
+type Entry struct { DocumentNumber string }
+type Repo struct { db *sql.DB }
+func (r *Repo) Add(ctx context.Context, entry Entry) error {
+	_, err := r.db.ExecContext(ctx, ` + "`INSERT INTO entries (document_number) VALUES ($1)`" + `, entry.DocumentNumber) // want sql-constraint-violation-unmapped
+	return err
+}`,
+		"web/handler.go": `package web
+import ("crypto/rand"; "fmt"; "net/http"; "example.com/rulestest/storage")
+type Server struct { repo *storage.Repo }
+func (s *Server) create(w http.ResponseWriter, r *http.Request) {
+	var id [16]byte
+	_, _ = rand.Read(id[:])
+	number := fmt.Sprintf("REC-%08X", id[:4]) // want truncated-random-id-as-unique-number
+	if err := s.repo.Add(r.Context(), storage.Entry{DocumentNumber: number}); err != nil { http.Error(w, err.Error(), 500) }
+}`,
+	}
+	rule := NewTruncatedRandomIDAsUniqueNumberRule()
+	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, wantedLines(files, rule.Name()), foundLines(violations))
+}
+
+func TestSQLConstraintViolationUnmappedIgnoresSafeUniqueIdentifiers(t *testing.T) {
+	base := map[string]string{
+		"storage/migrations/001_init.up.sql": `CREATE TABLE entries (id UUID PRIMARY KEY, document_number TEXT NOT NULL UNIQUE);`,
+		"storage/entries.go": `package storage
+
+import (
+	"context"
+	"database/sql"
+)
+
+type Entry struct { DocumentNumber string }
+type Repo struct { db *sql.DB }
+
+func (r *Repo) Add(ctx context.Context, entry Entry) error {
+	_, err := r.db.ExecContext(ctx, ` + "`INSERT INTO entries (document_number) VALUES ($1)`" + `, entry.DocumentNumber) // want sql-constraint-violation-unmapped
+	return err
+}
+`,
+		"web/handler.go": `package web
+
+import (
+	"crypto/rand"
+	"fmt"
+	"net/http"
+
+	"example.com/rulestest/storage"
+)
+
+type Server struct { repo *storage.Repo }
+
+func (s *Server) create(w http.ResponseWriter, r *http.Request) {
+	var id [16]byte
+	_, _ = rand.Read(id[:])
+	number := fmt.Sprintf("REC-%08X", id[:4])
+	if err := s.repo.Add(r.Context(), storage.Entry{DocumentNumber: number}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+`,
+	}
+	cases := map[string]string{
+		"retries unique conflicts": `for attempt := 0; attempt < 3; attempt++ {
+		var id [16]byte
+		_, _ = rand.Read(id[:])
+		number := fmt.Sprintf("REC-%08X", id[:4])
+		err := s.repo.Add(r.Context(), storage.Entry{DocumentNumber: number})
+		if err == nil { return }
+		if isUniqueConflict(err) { continue }
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+`,
+		"keeps the full random value": `var id [16]byte
+	_, _ = rand.Read(id[:])
+	number := fmt.Sprintf("%x", id[:])
+	if err := s.repo.Add(r.Context(), storage.Entry{DocumentNumber: number}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+`,
+		"ignores an unrelated truncated random value": `var id [16]byte
+	_, _ = rand.Read(id[:])
+	_ = id[:4]
+	number := fmt.Sprintf("%x", id[:])
+	if err := s.repo.Add(r.Context(), storage.Entry{DocumentNumber: number}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+`,
+		"allows database conflict handling": `var id [16]byte
+	_, _ = rand.Read(id[:])
+	number := fmt.Sprintf("REC-%08X", id[:4])
+	if err := s.repo.Add(r.Context(), storage.Entry{DocumentNumber: number}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+`,
+		"does not truncate a nonrandom value": `id := []byte("fixed-value")
+	number := fmt.Sprintf("REC-%08X", id[:4])
+	if err := s.repo.Add(r.Context(), storage.Entry{DocumentNumber: number}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			files := make(map[string]string, len(base))
+			maps.Copy(files, base)
+			files["web/handler.go"] = strings.Replace(files["web/handler.go"], `	var id [16]byte
+	_, _ = rand.Read(id[:])
+	number := fmt.Sprintf("REC-%08X", id[:4])
+	if err := s.repo.Add(r.Context(), storage.Entry{DocumentNumber: number}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+`, body, 1)
+			if name == "retries unique conflicts" {
+				files["web/handler.go"] = strings.Replace(files["web/handler.go"], "func (s *Server) create", "func isUniqueConflict(error) bool { return false }\n\nfunc (s *Server) create", 1)
+			}
+			if name == "allows database conflict handling" {
+				files["storage/entries.go"] = strings.Replace(files["storage/entries.go"], "VALUES ($1)`", "VALUES ($1) ON CONFLICT DO NOTHING`", 1)
+			}
+			if name == "does not truncate a nonrandom value" {
+				files["web/handler.go"] = strings.Replace(files["web/handler.go"], "\t\"crypto/rand\"\n", "", 1)
+			}
+			project := rulestest.Project(t, files)
+			violations, err := NewSQLConstraintViolationUnmappedRule().AnalyzeGoProject(project)
+			require.NoError(t, err)
+			for _, finding := range foundLines(violations) {
+				assert.False(t, strings.HasPrefix(finding, "web/handler.go:"), finding)
+			}
+			truncated, err := NewTruncatedRandomIDAsUniqueNumberRule().AnalyzeGoProject(project)
+			require.NoError(t, err)
+			assert.Empty(t, truncated)
+		})
+	}
+}
 
 // A child row keyed by a parent the function has just inserted, a set of
 // rows replaced after a DELETE of the same table, a parent deleted after the
