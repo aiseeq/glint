@@ -19,9 +19,9 @@ func init() {
 		"Detects an *-api.spec file that answers every request with route.fulfill and sends none to the server — the API it is named after is never called",
 		checkAPISpecAllFulfilled))
 	rules.Register(NewTSTestOutsideTypecheckRule())
-	rules.Register(newTSTestRule("test-retries-mask-flakiness",
-		"Detects a test runner set to retry failed tests unconditionally (retries: 1) — a flaky test passes on the second try and the race behind it stays",
-		checkTestRetries))
+	rules.Register(&testRetriesRule{newTSTestRule("test-retries-mask-flakiness",
+		"Detects test retries enabled unconditionally in runner settings or shell orchestration — a flaky test passes on a later attempt and the failure stays hidden",
+		checkTestRetries)})
 }
 
 // frontendTestFile reports a TS/JS test or e2e file, or a test runner config.
@@ -142,6 +142,47 @@ func checkAPISpecAllFulfilled(r *tsRule, ctx *core.FileContext, f jsFlat) []*cor
 	return jsReport(nil, r.BaseRule, ctx, f.line(m[0]),
 		"The API spec answers every request with route.fulfill and sends none to the server — the endpoints it is named after are never called, and a broken API passes",
 		"Call the API with the request fixture against the test server, and keep the mocked page checks in a UI spec")
+}
+
+type testRetriesRule struct{ *tsRule }
+
+func (r *testRetriesRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if ctx.IsShellFile() {
+		return checkShellTestRetries(r.BaseRule, ctx)
+	}
+	return r.tsRule.AnalyzeFile(ctx)
+}
+
+var shellRetryDefault = regexp.MustCompile(`(?i)^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"?\$\{[A-Za-z_][A-Za-z0-9_]*(?:RETRY|RERUN)[A-Za-z0-9_]*:-[1-9][0-9]*\}"?`)
+
+func checkShellTestRetries(r *rules.BaseRule, ctx *core.FileContext) []*core.Violation {
+	src, ok := readShell(ctx)
+	if !ok {
+		return nil
+	}
+	var out []*core.Violation
+	for _, line := range src.lines {
+		if m := shellRetryDefault.FindStringSubmatchIndex(line.text); m != nil && testRetrySwitchName(line.text[m[2]:m[3]]) {
+			v := r.CreateViolation(ctx.RelPath, line.lineAt(m[0]),
+				"Failed test stages are retried by default — a flaky test can pass on a later attempt while its original failure stays hidden")
+			v.WithSuggestion("Default the retry switch to 0 and enable retries explicitly only when the run is being investigated")
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func testRetrySwitchName(name string) bool {
+	name = strings.ToUpper(name)
+	if !strings.Contains(name, "RETRY") && !strings.Contains(name, "RERUN") {
+		return false
+	}
+	for _, marker := range []string{"TEST", "E2E", "STAGE", "PARALLEL", "FAIL"} {
+		if strings.Contains(name, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 var (

@@ -394,6 +394,31 @@ func TestE2EAPISpecMocksEndpointUnderTest(t *testing.T) {
 // Unconditional retries hide flaky tests; retries enabled for the CI only
 // are left out.
 func TestTestRetriesMaskFlakiness(t *testing.T) {
+	assert.Equal(t, []string{"run-test-all.sh:2"}, shellFindings(t, "test-retries-mask-flakiness", map[string]string{
+		"run-test-all.sh": `#!/usr/bin/env bash
+PARALLEL_RERUN=${TEST_ALL_PARALLEL_RERUN:-1}
+`,
+	}))
+	assert.Empty(t, shellFindings(t, "test-retries-mask-flakiness", map[string]string{
+		"run-test-all.sh": `#!/usr/bin/env bash
+PARALLEL_RERUN=${TEST_ALL_PARALLEL_RERUN:-0}
+`,
+	}))
+	assert.Empty(t, shellFindings(t, "test-retries-mask-flakiness", map[string]string{
+		"run-test-all.sh": `#!/usr/bin/env bash
+PARALLEL_RERUN=${TEST_ALL_PARALLEL_RERUN:-$DEFAULT_RERUN}
+`,
+	}))
+	assert.Equal(t, []string{"run-test-all.sh:2"}, shellFindings(t, "test-retries-mask-flakiness", map[string]string{
+		"run-test-all.sh": `#!/usr/bin/env bash
+RETRY_ON_FAIL=${TEST_ALL_RETRY:-1}
+`,
+	}))
+	assert.Empty(t, shellFindings(t, "test-retries-mask-flakiness", map[string]string{
+		"client.sh": `#!/usr/bin/env bash
+CLIENT_RETRIES=${CLIENT_RETRIES:-3}
+`,
+	}))
 	assert.Equal(t, []string{"frontend/e2e/tests/slow.spec.ts:1", "frontend/playwright.config.ts:3"}, deployFindings(t, "test-retries-mask-flakiness", map[string]string{
 		"frontend/playwright.config.ts": `export default defineConfig({
   testDir: './e2e',
