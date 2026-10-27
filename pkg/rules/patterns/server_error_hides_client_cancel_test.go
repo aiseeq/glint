@@ -577,6 +577,175 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func TestServerErrorHidesClientCancelRule_TransportClassifier(t *testing.T) {
+	project := cancelResponderProject(t, map[string]string{
+		"classifier.go": `package storage
+
+import (
+	"errors"
+	"net"
+)
+
+func isTransportError(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) { return true }
+	return false
+}
+`,
+	})
+	violations, err := NewServerErrorHidesClientCancelRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "isTransportError", violations[0].Context["classifier"])
+}
+
+func TestServerErrorHidesClientCancelRule_TransportClassifierCallerChecksCancellation(t *testing.T) {
+	project := cancelResponderProject(t, map[string]string{
+		"classifier.go": `package storage
+
+import (
+	"context"
+	"errors"
+	"net"
+)
+
+func transportFailure(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() { return true }
+	var opErr *net.OpError
+	if errors.As(err, &opErr) { return true }
+	return false
+}
+
+func Retriable(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil { return false }
+	return transportFailure(err)
+}
+`,
+	})
+	violations, err := NewServerErrorHidesClientCancelRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+}
+
+func TestServerErrorHidesClientCancelRule_TransportClassifierCancellationGuardForms(t *testing.T) {
+	tests := []struct {
+		name   string
+		guard  string
+		helper string
+	}{
+		{
+			name:  "errors.Is guard",
+			guard: "if errors.Is(err, context.Canceled) { return false }",
+		},
+		{
+			name:   "cancellation helper guard",
+			guard:  "if isCanceled(err) { return false }",
+			helper: "func isCanceled(err error) bool { return errors.Is(err, context.Canceled) }",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := `package storage
+
+import (
+	"context"
+	"errors"
+	"net"
+)
+
+` + tt.helper + `
+
+func transportFailure(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+func Retriable(err error) bool {
+	` + tt.guard + `
+	return transportFailure(err)
+}
+`
+			project := cancelResponderProject(t, map[string]string{"classifier.go": source})
+			violations, err := NewServerErrorHidesClientCancelRule().AnalyzeGoProject(project)
+			require.NoError(t, err)
+			assert.Empty(t, violations)
+		})
+	}
+}
+
+func TestServerErrorHidesClientCancelRule_TransportClassifierNegatives(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "classifier excludes caller cancellation",
+			source: `package storage
+
+import (
+	"context"
+	"errors"
+	"net"
+)
+
+func isTransportError(err error) bool {
+	if errors.Is(err, context.Canceled) { return false }
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+`,
+		},
+		{
+			name: "classifier checks context error",
+			source: `package storage
+
+import (
+	"context"
+	"errors"
+	"net"
+)
+
+func isTransportError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil { return false }
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+`,
+		},
+		{
+			name: "ordinary error classifier",
+			source: `package storage
+
+import "errors"
+
+var ErrMissing = errors.New("missing")
+func isExpectedError(err error) bool { return errors.Is(err, ErrMissing) }
+`,
+		},
+		{
+			name: "net error is only logged",
+			source: `package storage
+
+import (
+	"log"
+	"net"
+)
+
+func logNetworkError(err net.Error) { log.Print(err) }
+`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project := cancelResponderProject(t, map[string]string{"classifier.go": tt.source})
+			violations, err := NewServerErrorHidesClientCancelRule().AnalyzeGoProject(project)
+			require.NoError(t, err)
+			assert.Empty(t, violations)
+		})
+	}
+}
+
 func TestServerErrorHidesClientCancelRule_NilProject(t *testing.T) {
 	_, err := NewServerErrorHidesClientCancelRule().AnalyzeGoProject(nil)
 	require.Error(t, err)

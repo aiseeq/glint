@@ -168,6 +168,17 @@ func (r *ServerErrorHidesClientCancelRule) AnalyzeGoProject(ctx *core.GoProjectC
 			if !ok {
 				continue
 			}
+			if outageErrorClassifier(info, fn) && !classifierCallsGuardCancellation(info, fn, funcs) {
+				line := fileCtx.LineFor(fn)
+				if !fileCtx.IsSuppressed(line, r.Name()) {
+					v := r.CreateViolation(fileCtx.RelPath, line,
+						fn.Name.Name+" classifies transport or database errors as failures without excluding context.Canceled — a caller's cancellation can be reported as an outage")
+					v.WithSuggestion("Return false when errors.Is(err, context.Canceled) before classifying transport or database failures")
+					v.WithContext("pattern", "server_error_hides_client_cancel")
+					v.WithContext("classifier", fn.Name.Name)
+					violations = append(violations, v)
+				}
+			}
 			if notify := outboundCancelAsFailure(info, fn); notify != nil {
 				line := fileCtx.LineFor(notify)
 				if !fileCtx.IsSuppressed(line, r.Name()) {
@@ -548,6 +559,248 @@ func referencesCancellation(info *types.Info, file *ast.File) bool {
 		return true
 	})
 	return found
+}
+
+// outageErrorClassifier reports a bool classifier that accepts an error,
+// treats net.Error or pgconn timeout/retry errors as outages, and does not
+// exclude the caller's cancellation.
+func outageErrorClassifier(info *types.Info, fn *ast.FuncDecl) bool {
+	if fn.Body == nil || fn.Type.Results == nil || len(fn.Type.Results.List) != 1 ||
+		!isBoolType(info.TypeOf(fn.Type.Results.List[0].Type)) || asksAboutCancellation(info, fn.Body) {
+		return false
+	}
+	params := errorParameters(info, fn)
+	if len(params) == 0 {
+		return false
+	}
+	return hasPositiveOutageClassification(info, fn.Body, params)
+}
+
+func classifierCallsGuardCancellation(info *types.Info, classifier *ast.FuncDecl, funcs map[types.Object]*declaredFunc) bool {
+	obj := info.Defs[classifier.Name]
+	classifierObj, ok := obj.(*types.Func)
+	if !ok || classifier.Name.IsExported() {
+		return false
+	}
+	callCount := 0
+	cancellationMemo, visiting := map[types.Object]bool{}, map[types.Object]bool{}
+	for callerObj, caller := range funcs {
+		if callerObj.Pkg() == nil || obj.Pkg() == nil || callerObj.Pkg().Path() != obj.Pkg().Path() {
+			continue
+		}
+		guarded := true
+		ast.Inspect(caller.decl.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			callee, isFunc := typeutil.Callee(caller.info, call).(*types.Func)
+			if !isFunc || !sameFunction(callee.Origin(), classifierObj) {
+				return true
+			}
+			callCount++
+			if !cancellationGuardBeforeCall(caller, call, funcs, cancellationMemo, visiting) {
+				guarded = false
+				return false
+			}
+			return true
+		})
+		if !guarded {
+			return false
+		}
+	}
+	return callCount > 0
+}
+
+func sameFunction(left, right *types.Func) bool {
+	if left == nil || right == nil || left.Name() != right.Name() || left.Pos() != right.Pos() ||
+		left.Pkg() == nil || right.Pkg() == nil {
+		return false
+	}
+	return left.Pkg().Path() == right.Pkg().Path()
+}
+
+func cancellationGuardBeforeCall(caller *declaredFunc, call *ast.CallExpr, funcs map[types.Object]*declaredFunc,
+	memo, visiting map[types.Object]bool) bool {
+	guarded := false
+	ast.Inspect(caller.decl.Body, func(n ast.Node) bool {
+		block, ok := n.(*ast.BlockStmt)
+		if !ok || !(block.Pos() < call.Pos() && call.End() < block.End()) {
+			return true
+		}
+		for _, stmt := range block.List {
+			if stmt.End() >= call.Pos() {
+				break
+			}
+			if guard, ok := stmt.(*ast.IfStmt); ok && blockEndsWithReturn(guard.Body) &&
+				cancellationGuardCondition(caller.info, guard.Cond, funcs, memo, visiting) {
+				guarded = true
+				return false
+			}
+		}
+		return !guarded
+	})
+	return guarded
+}
+
+func blockEndsWithReturn(body *ast.BlockStmt) bool {
+	if body == nil || len(body.List) == 0 {
+		return false
+	}
+	_, ok := body.List[len(body.List)-1].(*ast.ReturnStmt)
+	return ok
+}
+
+func cancellationGuardCondition(info *types.Info, cond ast.Expr, funcs map[types.Object]*declaredFunc,
+	memo, visiting map[types.Object]bool) bool {
+	found := false
+	ast.Inspect(cond, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.BinaryExpr:
+			found = found || contextErrComparedWithNil(info, node)
+		case *ast.CallExpr:
+			found = found || cancellationCheckCall(info, node, funcs, memo, visiting)
+		}
+		return !found
+	})
+	return found
+}
+
+func contextErrComparedWithNil(info *types.Info, expr *ast.BinaryExpr) bool {
+	if expr.Op != token.NEQ {
+		return false
+	}
+	call, nilExpr := expr.X, expr.Y
+	if !helpers.IsNilValue(nilExpr, info) && helpers.IsNilValue(call, info) {
+		call, nilExpr = expr.Y, expr.X
+	}
+	if !helpers.IsNilValue(nilExpr, info) {
+		return false
+	}
+	callExpr, ok := call.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	selector, ok := callExpr.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	typ := info.TypeOf(selector.X)
+	return selector.Sel.Name == "Err" && len(callExpr.Args) == 0 && helpers.IsContextType(typ)
+}
+
+func cancellationCheckCall(info *types.Info, call *ast.CallExpr, funcs map[types.Object]*declaredFunc,
+	memo, visiting map[types.Object]bool) bool {
+	callee, ok := typeutil.Callee(info, call).(*types.Func)
+	if !ok {
+		return false
+	}
+	if callee.Pkg() != nil && callee.Pkg().Path() == "errors" && callee.Name() == "Is" && len(call.Args) == 2 {
+		if selector, ok := call.Args[1].(*ast.SelectorExpr); ok {
+			if obj := info.Uses[selector.Sel]; obj != nil && obj.Pkg() != nil &&
+				obj.Pkg().Path() == "context" && selector.Sel.Name == "Canceled" {
+				return true
+			}
+		}
+	}
+	return consultsCancellation(callee.Origin(), funcs, memo, visiting)
+}
+
+func errorParameters(info *types.Info, fn *ast.FuncDecl) map[types.Object]bool {
+	params := map[types.Object]bool{}
+	for _, field := range fn.Type.Params.List {
+		if !isErrorType(info.TypeOf(field.Type)) {
+			continue
+		}
+		for _, name := range field.Names {
+			if obj := info.Defs[name]; obj != nil {
+				params[obj] = true
+			}
+		}
+	}
+	return params
+}
+
+func hasPositiveOutageClassification(info *types.Info, body *ast.BlockStmt, params map[types.Object]bool) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.ReturnStmt:
+			found = found || returnsOutageCheck(info, node, params)
+		case *ast.IfStmt:
+			found = found || ifClassifiesOutage(info, node, params)
+		}
+		return !found
+	})
+	return found
+}
+
+func returnsOutageCheck(info *types.Info, stmt *ast.ReturnStmt, params map[types.Object]bool) bool {
+	for _, result := range stmt.Results {
+		call, ok := result.(*ast.CallExpr)
+		if ok && isOutageErrorCheck(info, call, params) {
+			return true
+		}
+	}
+	return false
+}
+
+func ifClassifiesOutage(info *types.Info, stmt *ast.IfStmt, params map[types.Object]bool) bool {
+	checksOutage := false
+	ast.Inspect(stmt.Cond, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		checksOutage = checksOutage || (ok && isOutageErrorCheck(info, call, params))
+		return !checksOutage
+	})
+	return checksOutage && blockReturnsTrue(info, stmt.Body)
+}
+
+func blockReturnsTrue(info *types.Info, body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		stmt, ok := n.(*ast.ReturnStmt)
+		found = found || (ok && returnIsTrue(info, stmt))
+		return !found
+	})
+	return found
+}
+
+func returnIsTrue(info *types.Info, stmt *ast.ReturnStmt) bool {
+	for _, result := range stmt.Results {
+		tv, ok := info.Types[result]
+		if ok && tv.Value != nil && tv.Value.Kind() == constant.Bool && constant.BoolVal(tv.Value) {
+			return true
+		}
+	}
+	return false
+}
+
+func isOutageErrorCheck(info *types.Info, call *ast.CallExpr, params map[types.Object]bool) bool {
+	callee, ok := typeutil.Callee(info, call).(*types.Func)
+	if !ok || len(call.Args) == 0 || !isErrorParameter(info, call.Args[0], params) {
+		return false
+	}
+	if callee.Pkg() == nil {
+		return false
+	}
+	if callee.Pkg().Name() == "pgconn" && (callee.Name() == "Timeout" || callee.Name() == "SafeToRetry") {
+		return true
+	}
+	return callee.Pkg().Path() == "errors" && callee.Name() == "As" && len(call.Args) == 2 &&
+		isNetErrorTarget(info, call.Args[1])
+}
+
+func isErrorParameter(info *types.Info, expr ast.Expr, params map[types.Object]bool) bool {
+	id, ok := expr.(*ast.Ident)
+	return ok && params[info.Uses[id]]
+}
+
+func isNetErrorTarget(info *types.Info, expr ast.Expr) bool {
+	unary, ok := expr.(*ast.UnaryExpr)
+	if !ok || unary.Op != token.AND {
+		return false
+	}
+	return isNamedType(info.TypeOf(unary.X), "net", "Error")
 }
 
 // outboundCancelAsFailure returns the call reporting a provider failure in
