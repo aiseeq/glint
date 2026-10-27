@@ -203,3 +203,85 @@ func (r *Router) handlePeriod(w http.ResponseWriter, req *http.Request) {
 }
 `)
 }
+
+func TestUpstreamFailureAnsweredAsBadRequest_NestedHandlerReportedOnce(t *testing.T) {
+	assertWanted(t, NewUpstreamFailureAnsweredAsBadRequestRule(), `package routing
+
+import (
+	"context"
+	"net/http"
+)
+
+type Repo interface { Load(context.Context) (string, error) }
+type Router struct { repo Repo }
+func (r *Router) load(ctx context.Context) (string, error) { return r.repo.Load(ctx) }
+
+func (r *Router) handle(w http.ResponseWriter, req *http.Request) {
+	_ = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		value, err := r.load(req.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized) // want
+			return
+		}
+		_ = value
+	})
+}
+`)
+}
+
+func TestUpstreamFailureAnsweredAsBadRequest_MiddlewareClosure(t *testing.T) {
+	assertWanted(t, NewUpstreamFailureAnsweredAsBadRequestRule(), `package routing
+
+import (
+	"context"
+	"net/http"
+)
+
+type Repo interface { Load(context.Context) (string, error) }
+type Router struct { repo Repo }
+func (r *Router) load(ctx context.Context) (string, error) { return r.repo.Load(ctx) }
+
+func (r *Router) middleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			value, err := r.load(req.Context())
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnauthorized) // want
+				return
+			}
+			_ = value
+		})
+	}
+}
+
+func (r *Router) fixed() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			value, err := r.load(req.Context())
+			if err != nil {
+				http.Error(w, "unavailable", http.StatusInternalServerError)
+				return
+			}
+			_ = value
+		})
+	}
+}
+
+func (r *Router) badInput(w http.ResponseWriter, req *http.Request) {
+	if _, err := http.NewRequestWithContext(req.Context(), "!", ""); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+}
+
+func ordinary(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "" {
+			http.Error(w, "invalid path", http.StatusBadRequest)
+			return
+		}
+		next.ServeHTTP(w, req)
+	})
+}
+`)
+}

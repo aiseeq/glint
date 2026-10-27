@@ -70,12 +70,8 @@ func (r *UpstreamFailureAnsweredAsBadRequestRule) AnalyzeFile(ctx *core.FileCont
 		}
 	}
 	var violations []*core.Violation
-	for _, decl := range ctx.GoAST.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil || !isHTTPHandlerDecl(fn) {
-			continue
-		}
-		forEachStmtPair(fn.Body, func(first, second ast.Stmt) {
+	analyze := func(body *ast.BlockStmt) {
+		forEachStmtPair(body, func(first, second ast.Stmt) {
 			call := errAssignedCall(first)
 			ifStmt, ok := second.(*ast.IfStmt)
 			if call == nil || !ok || ifStmt.Init != nil || !isErrNotNil(ifStmt.Cond) {
@@ -99,12 +95,32 @@ func (r *UpstreamFailureAnsweredAsBadRequestRule) AnalyzeFile(ctx *core.FileCont
 			violations = append(violations, v)
 		})
 	}
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		switch fn := n.(type) {
+		case *ast.FuncDecl:
+			if fn.Body != nil && isHTTPHandlerDecl(fn) {
+				analyze(fn.Body)
+			}
+		case *ast.FuncLit:
+			if fn.Body != nil && isUpstreamFailureHTTPHandlerType(fn.Type) {
+				analyze(fn.Body)
+			}
+		}
+		return true
+	})
 	return violations
 }
 
 // isHTTPHandlerDecl reports a function taking an http.ResponseWriter.
 func isHTTPHandlerDecl(fn *ast.FuncDecl) bool {
-	for _, field := range fn.Type.Params.List {
+	return isUpstreamFailureHTTPHandlerType(fn.Type)
+}
+
+func isUpstreamFailureHTTPHandlerType(fn *ast.FuncType) bool {
+	if fn == nil || fn.Params == nil {
+		return false
+	}
+	for _, field := range fn.Params.List {
 		if sel, ok := field.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "ResponseWriter" && helpers.IsIdentNamed(sel.X, "http") {
 			return true
 		}
@@ -116,6 +132,9 @@ func isHTTPHandlerDecl(fn *ast.FuncDecl) bool {
 // block under body.
 func forEachStmtPair(body *ast.BlockStmt, visit func(first, second ast.Stmt)) {
 	ast.Inspect(body, func(n ast.Node) bool {
+		if fn, ok := n.(*ast.FuncLit); ok && isUpstreamFailureHTTPHandlerType(fn.Type) {
+			return false
+		}
 		block, ok := n.(*ast.BlockStmt)
 		if !ok {
 			return true
