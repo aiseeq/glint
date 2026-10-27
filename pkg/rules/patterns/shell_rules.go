@@ -70,6 +70,9 @@ func init() {
 	rules.Register(newShellRule("shell-local-env-copied-to-remote",
 		"Detects scp or rsync of the local .env to a remote host — the deploy overwrites the server's own configuration and secrets with a developer's",
 		core.SeverityHigh, checkEnvToRemote))
+	rules.Register(newShellRule("secret-file-backup-left-beside-original",
+		"Detects a copy of a secret file left beside the original under a backup name — the copy retains live credentials without a cleanup path",
+		core.SeverityHigh, checkSecretFileBackup))
 }
 
 var (
@@ -803,6 +806,16 @@ func checkBinaryInPlace(r *shellRule, src *shellSource) []*core.Violation {
 // a copy under another name (.env.new) is merged on the server.
 var envCopy = regexp.MustCompile(`\b(?:scp|rsync)\b[^;&|]*\s"?(?:\./)?\.env(?:\.(?:prod|production|local))?"?\s+"?[^\s:"]+:(?:[^\s"]*/(?:\.env)?)?"?(?:\s|$)`)
 
+var (
+	secretBackupPathName   = regexp.MustCompile(`(?i)(?:^|/)(?:\.env(?:[._-][\w.-]+)?|[^/]*(?:credentials?|secrets?)(?:[._-][\w.-]+)?|[^/]+\.(?:pem|key)|authorized_keys)$`)
+	secretBackupSuffix     = regexp.MustCompile(`(?i)(?:\.bak(?:[-._][\w-]+)?|\.orig(?:[-._][\w-]+)?|~)$|(?i:\.(?:bak|orig)[-_])`)
+	secretBackupCopy       = regexp.MustCompile(`\b(?:sudo\s+)?cp\s+(?:-[a-zA-Z]+\s+)*([^\s]+)\s+("[^"]+"|[^\s;&|]+)`)
+	secretBackupAssignment = regexp.MustCompile(`(?:^|[;\s])([A-Za-z_][A-Za-z0-9_]*)=["']?([^\s"']+)["']?`)
+	secretBackupVarRef     = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)`)
+	secretBackupCleanup    = regexp.MustCompile(`(?i)\b(?:rm|shred)\b(?:\s+-[a-zA-Z]+\b)*\s+([^;&|]+)`)
+	secretBackupTrap       = regexp.MustCompile(`(?i)^\s*trap\b`)
+)
+
 // checkEnvToRemote reports scp or rsync of the local .env to a remote host.
 func checkEnvToRemote(r *shellRule, src *shellSource) []*core.Violation {
 	var out []*core.Violation
@@ -812,6 +825,63 @@ func checkEnvToRemote(r *shellRule, src *shellSource) []*core.Violation {
 				out = appendReport(out, src.report(r, l.lineAt(seg.offset),
 					"The local .env is copied to a remote host — the deploy overwrites the server's configuration and secrets with the developer's",
 					"Keep the server's .env on the server and change it on purpose; deploy only code and versioned config"))
+			}
+		}
+	}
+	return out
+}
+
+func checkSecretFileBackup(r *shellRule, src *shellSource) []*core.Violation {
+	knownSecrets := make(map[string]bool)
+	for _, line := range src.lines {
+		for _, m := range secretBackupAssignment.FindAllStringSubmatch(line.text, -1) {
+			if secretBackupPathName.MatchString(strings.Trim(m[2], `"'`)) {
+				knownSecrets[m[1]] = true
+			}
+		}
+	}
+	var out []*core.Violation
+	for _, unit := range src.units() {
+		segs := segments(unit.text)
+		cleanedPaths := make(map[string]bool)
+		addCleanupPaths := func(text string) {
+			if match := secretBackupCleanup.FindStringSubmatch(text); match != nil {
+				for path := range strings.FieldsSeq(match[1]) {
+					cleanedPaths[strings.Trim(path, `"'`)] = true
+				}
+			}
+		}
+		for _, candidate := range segs {
+			addCleanupPaths(candidate.text)
+		}
+		for _, line := range src.lines {
+			if secretBackupTrap.MatchString(line.text) {
+				addCleanupPaths(line.text)
+			}
+		}
+		for _, seg := range segs {
+			m := secretBackupCopy.FindStringSubmatch(seg.text)
+			loc := secretBackupCopy.FindStringIndex(seg.text)
+			if m == nil || loc == nil {
+				continue
+			}
+			source, dest := strings.Trim(m[1], `"'`), strings.Trim(m[2], `"'`)
+			sv, dv := secretBackupVarRef.FindStringSubmatch(source), secretBackupVarRef.FindStringSubmatch(dest)
+			secret := secretBackupPathName.MatchString(source) && !strings.HasSuffix(strings.ToLower(source), ".example")
+			if !secret && sv != nil {
+				secret = knownSecrets[sv[1]]
+			}
+			if !secret || !secretBackupSuffix.MatchString(dest) {
+				continue
+			}
+			if sv != nil && (dv == nil || sv[1] != dv[1]) {
+				continue
+			}
+			cleaned := cleanedPaths[dest]
+			if !cleaned {
+				out = appendReport(out, src.report(r, unit.lineAt(seg.offset+loc[0]),
+					"A copy of a secret file is left beside the original under a backup name — it keeps live credentials after the script finishes",
+					"Keep rollback copies in a private temporary directory and remove them after the operation"))
 			}
 		}
 	}

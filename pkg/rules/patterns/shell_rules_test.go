@@ -180,6 +180,37 @@ sync:
 	}))
 }
 
+func TestSecretFileBackupLeftBesideOriginal(t *testing.T) {
+	assert.Equal(t, []string{"copy.sh:1", "remote.sh:3", "rotate.sh:3"}, shellFindings(t, "secret-file-backup-left-beside-original", map[string]string{
+		"rotate.sh": `#!/bin/sh
+ENV_FILE=/srv/app/.env
+cp -p "$ENV_FILE" "$ENV_FILE.bak-$(date +%Y%m%d)"
+`,
+		"copy.sh": `cp .env .env.orig
+`,
+		"remote.sh": `SECRET_PATH="/srv/app/.env.monitor"
+ssh "$HOST" "set -e
+sudo cp -p $SECRET_PATH $SECRET_PATH.bak-\\$(date +%Y%m%d-%H%M%S)
+sudo sed -i '/^EMAIL_/d' $SECRET_PATH"
+`,
+	}))
+	assert.Empty(t, shellFindings(t, "secret-file-backup-left-beside-original", map[string]string{
+		"fixed.sh": `ENV_FILE=/srv/app/.env
+backup_dir=$(mktemp -d)
+cp "$ENV_FILE" "$backup_dir/env"
+rm -f "$backup_dir/env"
+`,
+		"trap-cleanup.sh": `ENV_FILE=/srv/app/.env
+trap 'rm -f "$ENV_FILE.bak"' EXIT
+cp "$ENV_FILE" "$ENV_FILE.bak"
+`,
+		"ordinary.sh": `cp app.conf app.conf.bak
+cp report.txt report.txt.bak
+cp .env.example .env.example.bak
+`,
+	}))
+}
+
 // The check compares the version with the literal the script itself set.
 func TestShellCheckAgainstOwnLiteral(t *testing.T) {
 	assert.Equal(t, []string{"verify.sh:4"}, shellFindings(t, "shell-check-against-own-literal", map[string]string{
