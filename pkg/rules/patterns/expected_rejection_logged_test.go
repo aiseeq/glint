@@ -98,3 +98,82 @@ func (a *Admin) handleRename(w http.ResponseWriter, r *http.Request) {
 	require.NoError(t, err)
 	assert.Equal(t, wantedLines(files, "expected-rejection-logged-as-error"), foundLines(violations))
 }
+
+func TestExpectedRejectionLoggedAsErrorSwitchForms(t *testing.T) {
+	files := map[string]string{
+		"handler.go": `package handler
+
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+)
+
+var errRateMissing = errors.New("missing")
+var errOther = errors.New("other")
+
+type Handler struct { logger *slog.Logger }
+
+func answerWithStatus(http.ResponseWriter, int, string) {}
+func newRequestRefusedError(int, string) error { return nil }
+
+func (h *Handler) read(w http.ResponseWriter, err error) {
+	if err != nil {
+		h.logger.Error("read failed", "error", err) // want expected-rejection-logged-as-error
+		switch {
+		case errors.Is(err, errRateMissing):
+			answerWithStatus(w, http.StatusNotFound, err.Error())
+		default:
+			answerWithStatus(w, http.StatusInternalServerError, "failed")
+		}
+	}
+}
+
+func (h *Handler) readWithoutClientAnswer(w http.ResponseWriter, err error) {
+	if err != nil {
+		h.logger.Error("read failed", "error", err)
+		switch {
+		case errors.Is(err, errRateMissing):
+			answerWithStatus(w, http.StatusInternalServerError, "failed")
+		default:
+			answerWithStatus(w, http.StatusInternalServerError, "failed")
+		}
+	}
+}
+
+func (h *Handler) retry(state int) error {
+	switch state {
+	case 1:
+		h.logger.Error("request cannot be retried")
+		return newRequestRefusedError(http.StatusConflict, "retry manually")
+	default:
+		h.logger.Error("unexpected state")
+		return errors.New("failed")
+	}
+}
+
+func (h *Handler) retryWithServerError(state int) error {
+	switch state {
+	case 1:
+		h.logger.Error("unexpected failure")
+		return newRequestRefusedError(http.StatusInternalServerError, "failed")
+	default:
+		return nil
+	}
+}
+
+func (h *Handler) retryWithUnderlyingError(state int, err error) error {
+	switch state {
+	case 1:
+		h.logger.Error("unexpected failure", "error", err)
+		return newRequestRefusedError(http.StatusConflict, err.Error())
+	default:
+		return nil
+	}
+}
+`,
+	}
+	violations, err := NewExpectedRejectionLoggedAsErrorRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, wantedLines(files, "expected-rejection-logged-as-error"), foundLines(violations))
+}

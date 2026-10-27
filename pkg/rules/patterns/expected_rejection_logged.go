@@ -3,6 +3,7 @@ package patterns
 import (
 	"errors"
 	"go/ast"
+	"go/constant"
 	"go/types"
 	"regexp"
 	"strings"
@@ -62,6 +63,20 @@ func (r *ExpectedRejectionLoggedAsErrorRule) AnalyzeGoProject(ctx *core.GoProjec
 	}
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
+		addViolation := func(logged *ast.CallExpr) {
+			if logged == nil {
+				return
+			}
+			line := file.LineFor(logged)
+			if file.IsSuppressed(line, r.Name()) {
+				return
+			}
+			v := r.CreateViolation(file.RelPath, line,
+				"The error is logged at ERROR before the branch that answers it as an expected refusal — every conflict or invalid input raises the alerts of a real failure")
+			v.WithCode(strings.TrimSpace(file.GetLine(line)))
+			v.WithSuggestion("Move the ERROR log below the branches for expected outcomes, and log those at WARN or INFO inside them")
+			violations = append(violations, v)
+		}
 		ast.Inspect(file.GoAST, func(n ast.Node) bool {
 			check, ok := n.(*ast.IfStmt)
 			if !ok {
@@ -75,19 +90,7 @@ func (r *ExpectedRejectionLoggedAsErrorRule) AnalyzeGoProject(ctx *core.GoProjec
 			if !ok {
 				return true
 			}
-			logged := loggedBeforeExpectedBranch(info, check.Body.List, errVar)
-			if logged == nil {
-				return true
-			}
-			line := file.LineFor(logged)
-			if file.IsSuppressed(line, r.Name()) {
-				return true
-			}
-			v := r.CreateViolation(file.RelPath, line,
-				"The error is logged at ERROR before the branch that answers it as an expected refusal — every conflict or invalid input raises the alerts of a real failure")
-			v.WithCode(strings.TrimSpace(file.GetLine(line)))
-			v.WithSuggestion("Move the ERROR log below the branches for expected outcomes, and log those at WARN or INFO inside them")
-			violations = append(violations, v)
+			addViolation(loggedBeforeExpectedBranch(info, check.Body.List, errVar))
 			return true
 		})
 		return violations
@@ -96,7 +99,7 @@ func (r *ExpectedRejectionLoggedAsErrorRule) AnalyzeGoProject(ctx *core.GoProjec
 
 // expectedOutcome is how a check of an error names an outcome the caller
 // answers in its stride.
-var expectedOutcome = regexp.MustCompile(`(?i)conflict|duplicate|exists|notfound|not_found|norows|invalid|validation|forbidden|unauthori[sz]ed|denied|inuse|in_use|limit|expired`)
+var expectedOutcome = regexp.MustCompile(`(?i)conflict|duplicate|exists|missing|notfound|not_found|norows|invalid|validation|forbidden|unauthori[sz]ed|denied|inuse|in_use|limit|expired`)
 
 // loggedBeforeExpectedBranch returns an ERROR log of the error followed in
 // the same branch by a check of the error for an expected outcome that
@@ -108,16 +111,64 @@ func loggedBeforeExpectedBranch(info *types.Info, stmts []ast.Stmt, errVar *type
 			continue
 		}
 		for _, later := range stmts[i+1:] {
-			branch, ok := later.(*ast.IfStmt)
-			if !ok || !mentionsVar(info, branch.Cond, errVar) || !expectedOutcome.MatchString(types.ExprString(branch.Cond)) {
-				continue
-			}
-			if lastIsReturn(branch.Body) && !logsAtError(branch.Body) {
-				return logged
+			switch branch := later.(type) {
+			case *ast.IfStmt:
+				if mentionsVar(info, branch.Cond, errVar) && expectedOutcome.MatchString(types.ExprString(branch.Cond)) && lastIsReturn(branch.Body) && !logsAtError(branch.Body) {
+					return logged
+				}
+			case *ast.SwitchStmt:
+				for _, clause := range switchClauses(branch) {
+					if mentionsVar(info, clause, errVar) && caseMatchesExpectedOutcome(clause) && hasClientStatus(info, clause) {
+						return logged
+					}
+				}
 			}
 		}
 	}
 	return nil
+}
+
+// switchClauses returns the clauses of a switch statement.
+func switchClauses(stmt *ast.SwitchStmt) []*ast.CaseClause {
+	if stmt == nil || stmt.Body == nil {
+		return nil
+	}
+	clauses := make([]*ast.CaseClause, 0, len(stmt.Body.List))
+	for _, item := range stmt.Body.List {
+		if clause, ok := item.(*ast.CaseClause); ok {
+			clauses = append(clauses, clause)
+		}
+	}
+	return clauses
+}
+
+func caseMatchesExpectedOutcome(clause *ast.CaseClause) bool {
+	for _, expr := range clause.List {
+		if expectedOutcome.MatchString(types.ExprString(expr)) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasClientStatus(info *types.Info, node ast.Node) bool {
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		for _, arg := range call.Args {
+			if tv, ok := info.Types[arg]; ok && tv.Value != nil && tv.Value.Kind() == constant.Int {
+				if status, exact := constant.Int64Val(tv.Value); exact && status >= 400 && status < 500 {
+					found = true
+					return false
+				}
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // errorLogOf returns the call of a statement logging the error at ERROR.
