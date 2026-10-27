@@ -100,6 +100,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	for _, p := range targets {
 		name := filepath.Base(p)
 		oldIssues, oldErr := check(oldAbs, p, *rules, *jobs)
+		if errors.Is(oldErr, errUnknownRule) {
+			// A rule the new build adds: the installed glint has no findings of it.
+			oldIssues, oldErr = nil, nil
+		}
 		if oldErr != nil {
 			fmt.Fprintf(stderr, "%s: %s\n", name, oldErr)
 			errs++
@@ -238,6 +242,10 @@ func skipUnreadable(path, root string, err error) error {
 	return filepath.SkipDir
 }
 
+// errUnknownRule is a run refused because the binary does not know a rule
+// given with -r.
+var errUnknownRule = errors.New("unknown rule")
+
 func check(bin, dir, rules, jobs string) ([]output.JSONIssue, error) {
 	args := []string{"check", "-o", "json", "--no-color"}
 	if rules != "" {
@@ -255,6 +263,9 @@ func check(bin, dir, rules, jobs string) ([]output.JSONIssue, error) {
 	err := cmd.Run()
 	var report output.JSONReport
 	if e := json.Unmarshal(out.Bytes(), &report); e != nil {
+		if strings.Contains(stderr.String(), `unknown rule "`) {
+			return nil, fmt.Errorf("%w: %s", errUnknownRule, strings.TrimSpace(stderr.String()))
+		}
 		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
 		if len(lines) > 3 {
 			lines = lines[:3]

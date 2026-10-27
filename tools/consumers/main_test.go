@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/output"
@@ -58,5 +59,34 @@ func TestDifferenceTreatsFindingsAsMultisetAndIgnoresOtherFields(t *testing.T) {
 	added, removed := difference(old, newIssues)
 	if len(added) != 1 || added[0].Rule != "x" || len(removed) != 1 || removed[0].Rule != "r" {
 		t.Fatalf("difference = +%v -%v", added, removed)
+	}
+}
+
+func TestOldBinaryWithoutTheNewRuleCountsAsNoFindings(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "alpha")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(root, "old")
+	oldScript := "#!/bin/sh\necho 'Error: unknown rule \"fresh-rule\"' >&2\nexit 1\n"
+	newer := filepath.Join(root, "new")
+	newScript := "#!/bin/sh\necho '{\"issues\":[{\"rule\":\"fresh-rule\",\"file\":\"a.go\",\"line\":3,\"message\":\"m\"}]}'\nexit 1\n"
+	for path, script := range map[string]string{old: oldScript, newer: newScript} {
+		if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // an executable test double
+			t.Fatal(err)
+		}
+	}
+	cfg := filepath.Join(root, "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root "+root+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	code := run([]string{"-config", cfg, "-old", old, "-new", newer, "-r", "fresh-rule"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stdout.String(), "+ a.go:3 fresh-rule") {
+		t.Fatalf("code %d, stdout %q, stderr %q: want the new rule's finding as added", code, stdout.String(), stderr.String())
 	}
 }
