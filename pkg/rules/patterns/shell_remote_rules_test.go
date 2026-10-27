@@ -396,3 +396,27 @@ out="$(ssh "$HOST" 'systemctl restart app # want
     systemctl is-active app')"
 `)
 }
+
+// Webroot and standalone certificates need a renewal hook so the TLS server
+// reloads the renewed certificate.
+func TestCertbotCertWithoutReloadHook(t *testing.T) {
+	assert.Equal(t, []string{"setup.sh:2", "setup.sh:3"}, shellFindings(t, "certbot-cert-without-reload-hook", map[string]string{
+		"setup.sh": `#!/bin/bash
+ssh "$HOST" "sudo certbot certonly --standalone --non-interactive -d app.example"
+ssh "$HOST" "sudo certbot certonly --webroot -w /srv/acme -d api.example"
+`,
+	}))
+	assert.Empty(t, shellFindings(t, "certbot-cert-without-reload-hook", map[string]string{
+		"setup.sh": `certbot certonly --webroot -w /srv/acme --deploy-hook 'nginx -t && systemctl reload nginx' -d app.example
+certbot certonly --standalone --post-hook 'systemctl reload nginx' -d api.example
+certbot certonly --webroot -w /srv/acme --renew-hook 'systemctl reload nginx' -d secure.example
+certbot certonly --nginx -d proxy.example
+`,
+	}))
+	assert.Empty(t, shellFindings(t, "certbot-cert-without-reload-hook", map[string]string{
+		"setup.sh": `certbot certonly --webroot -w /srv/acme -d app.example
+`,
+		"hook.sh": `install -m 0755 reload-certificate /etc/letsencrypt/renewal-hooks/deploy/reload-nginx
+`,
+	}))
+}

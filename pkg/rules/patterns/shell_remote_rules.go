@@ -27,6 +27,13 @@ func init() {
 	rules.Register(newShellRule("deploy-overwrites-config-edited-by-certbot",
 		"Detects a script that rewrites an nginx site file on every run and also runs certbot --nginx, which edits that file in place — the next deploy drops the TLS server block",
 		core.SeverityHigh, checkCertbotConfigOverwrite))
+	certbotHook := &certbotReloadHookRule{}
+	certbotHook.shellRule = newShellRule("certbot-cert-without-reload-hook",
+		"Detects certbot certonly with the webroot or standalone authenticator and no hook to reload the TLS server after renewal",
+		core.SeverityHigh, func(_ *shellRule, src *shellSource) []*core.Violation {
+			return checkCertbotReloadHook(certbotHook, src)
+		})
+	rules.Register(certbotHook)
 	rules.Register(newShellRule("shell-set-e-exits-before-failure-handler",
 		"Detects, under set -e, VAR=$(cmd) followed by a test of VAR where cmd exits non-zero for the very value tested (systemctl is-active, grep, curl -f) — the script stops before the handler runs",
 		core.SeverityHigh, checkSetEBeforeHandler))
@@ -499,13 +506,65 @@ func checkPgHbaAppend(r *shellRule, src *shellSource) []*core.Violation {
 	return out
 }
 
+type certbotReloadHookRule struct {
+	*shellRule
+	projectHook bool
+}
+
+func (r *certbotReloadHookRule) ResetState() { r.projectHook = false }
+
+func (r *certbotReloadHookRule) UseProjectFiles(files []*core.FileContext) {
+	r.projectHook = false
+	for _, ctx := range files {
+		src, ok := readShell(ctx)
+		if !ok {
+			continue
+		}
+		for _, line := range src.lines {
+			for _, seg := range segments(line.text) {
+				command := commandPrefix.ReplaceAllString(seg.trimmed(), "")
+				if certbotHookPath.MatchString(command) && certbotHookWriter.MatchString(command) {
+					r.projectHook = true
+					return
+				}
+			}
+		}
+	}
+}
+
 var (
-	certbotNginx = regexp.MustCompile(`\bcertbot\b[^\n]*\s--nginx\b`)
-	certbotOnly  = regexp.MustCompile(`\bcertbot\s+(?:-\S+\s+)*(?:certonly|renew)\b`)
-	ownTLS       = regexp.MustCompile(`\bssl_certificate\s`)
-	nginxPath    = regexp.MustCompile(`^/etc/nginx/\S+`)
-	nginxWrite   = regexp.MustCompile(`\b(?:cat\s*>|tee\s+(?:-[b-z]\w*\s+)*)\s*["']?(\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?|/etc/nginx/[^\s"';|&]+)`)
+	certbotHookPath   = regexp.MustCompile(`/etc/letsencrypt/renewal-hooks/\w+`)
+	certbotHookWriter = regexp.MustCompile(`(?i)\b(?:install|cp|mv|tee|cat|printf|echo)\b`)
+	certbotHookCall   = regexp.MustCompile(`\bcertbot\b[^\n]*\bcertonly\b`)
+	certbotHookMode   = regexp.MustCompile(`(?:^|\s)--(?:webroot|standalone)(?:\s|$)`)
+	certbotHookOption = regexp.MustCompile(`(?:^|\s)--(?:deploy|post|renew)-hook(?:=|\s|$)`)
+	certbotNginx      = regexp.MustCompile(`\bcertbot\b[^\n]*\s--nginx\b`)
+	certbotOnly       = regexp.MustCompile(`\bcertbot\s+(?:-\S+\s+)*(?:certonly|renew)\b`)
+	ownTLS            = regexp.MustCompile(`\bssl_certificate\s`)
+	nginxPath         = regexp.MustCompile(`^/etc/nginx/\S+`)
+	nginxWrite        = regexp.MustCompile(`\b(?:cat\s*>|tee\s+(?:-[b-z]\w*\s+)*)\s*["']?(\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?|/etc/nginx/[^\s"';|&]+)`)
 )
+
+func checkCertbotReloadHook(r *certbotReloadHookRule, src *shellSource) []*core.Violation {
+	if src.make || r.projectHook {
+		return nil
+	}
+	var out []*core.Violation
+	for _, line := range src.lines {
+		for _, seg := range segments(line.text) {
+			command := commandPrefix.ReplaceAllString(seg.trimmed(), "")
+			if !certbotHookCall.MatchString(command) ||
+				!certbotHookMode.MatchString(command) ||
+				certbotHookOption.MatchString(command) {
+				continue
+			}
+			out = appendReport(out, src.report(r, line.lineAt(seg.offset),
+				"certbot certonly uses webroot or standalone without a renewal hook — the TLS server keeps serving the old certificate after renewal",
+				"Pass --deploy-hook 'nginx -t && systemctl reload nginx', or install a renewal hook under /etc/letsencrypt/renewal-hooks/"))
+		}
+	}
+	return out
+}
 
 // checkCertbotConfigOverwrite reports cat > (or tee) of an nginx file in a
 // script that runs certbot --nginx in its installing mode, never tests
