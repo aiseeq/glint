@@ -34,7 +34,9 @@ type fieldAccess struct {
 	// ++/-- (x.f[k] = v) — the one use of a nil map that panics.
 	storedInto map[token.Pos]bool
 	// hashed: the field of a struct used as a whole — compared with == or !=,
-	// or used as a map key — which the runtime reads field by field.
+	// used as a map key, or handed out as raw memory (unsafe.Pointer,
+	// encoding/binary) — which the runtime or the receiver of that memory
+	// reads field by field.
 	hashed map[token.Pos]bool
 
 	// decoded and encoded are the named structs that reach a decoder or an
@@ -210,6 +212,7 @@ func (a *fieldAccess) collect(file *ast.File, info *types.Info) {
 		case *ast.CallExpr:
 			a.serialization(node, info)
 			a.emptyInterfaceArguments(node, info)
+			a.rawMemory(node, info)
 		case *ast.IndexExpr:
 			// m[k] of a map[any]: the key is hashed as the interface's
 			// dynamic value.
@@ -224,6 +227,46 @@ func (a *fieldAccess) collect(file *ast.File, info *types.Info) {
 		}
 		return true
 	})
+}
+
+// binaryLayoutFuncs are the encoding/binary functions that read or fill their
+// last argument by its memory layout.
+var binaryLayoutFuncs = []string{"Read", "Write", "Size", "Append", "Encode", "Decode"}
+
+// rawMemory marks the fields of a value handed out as raw memory: converted
+// to unsafe.Pointer — the kernel behind an ioctl, C code — or passed to
+// encoding/binary. That memory is read by its layout, so every field of the
+// struct, and of the structs and arrays nested in it, is read.
+func (a *fieldAccess) rawMemory(call *ast.CallExpr, info *types.Info) {
+	if len(call.Args) == 0 {
+		return
+	}
+	if tv, ok := info.Types[call.Fun]; ok && tv.IsType() {
+		if basic, ok := tv.Type.Underlying().(*types.Basic); ok && basic.Kind() == types.UnsafePointer {
+			a.markHashed(layoutElem(info.TypeOf(call.Args[0])))
+		}
+		return
+	}
+	fn := helpers.CalledFunc(call, info)
+	if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != "encoding/binary" || !slices.Contains(binaryLayoutFuncs, fn.Name()) {
+		return
+	}
+	a.markHashed(layoutElem(info.TypeOf(call.Args[len(call.Args)-1])))
+}
+
+// layoutElem returns the type whose memory a pointer or a slice exposes, and
+// any other type as is.
+func layoutElem(t types.Type) types.Type {
+	if t == nil {
+		return nil
+	}
+	switch typ := t.Underlying().(type) {
+	case *types.Pointer:
+		return typ.Elem()
+	case *types.Slice:
+		return typ.Elem()
+	}
+	return t
 }
 
 // emptyInterfaceArguments marks the struct values a call hands over as an
