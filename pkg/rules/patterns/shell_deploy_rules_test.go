@@ -48,6 +48,68 @@ echo "switched"
 	}))
 }
 
+// docker ps includes restarting containers, and its name filter matches
+// substrings, so grepping its output is not a running-state check.
+func TestDockerPSNameFilterAsRunningCheck(t *testing.T) {
+	assert.Equal(t, []string{"format.sh:1", "legacy.sh:1", "rollback.sh:1", "run.sh:1"}, shellFindings(t, "docker-ps-name-filter-as-running-check", map[string]string{
+		"rollback.sh": `if ! docker ps --filter "name=$container_name" | grep -q "$container_name"; then
+    docker start "$container_name"
+fi
+`,
+		"legacy.sh": `if docker ps | grep -q "$name"; then echo up; fi
+`,
+		"format.sh": `if docker ps --format "{{.Names}}" | grep -q "$NAME"; then echo "Container $NAME is running"; fi
+`,
+		"run.sh": `if ! docker ps --filter "name=$c" | grep -q "$c"; then docker run --name "$c" image; fi
+`,
+	}))
+	assert.Empty(t, shellFindings(t, "docker-ps-name-filter-as-running-check", map[string]string{
+		"inspect.sh": `status=$(docker container inspect -f '{{.State.Status}}' "$name")
+if [[ "$status" == running ]]; then echo up; fi
+`,
+		"ids.sh": `docker ps -q --filter "name=$name" > "$ids"
+`,
+		"other.sh": `docker ps | grep -q healthy
+`,
+	}))
+}
+
+func TestDockerPSNameFilterAsRunningCheckIgnoresStatusFilter(t *testing.T) {
+	assert.Empty(t, shellFindings(t, "docker-ps-name-filter-as-running-check", map[string]string{
+		"long.sh": `docker ps --filter "name=$c" --filter "status=running" | grep -q "$c"
+`,
+		"short.sh": `docker ps -f name="$c" -f status=running | grep -q "$c"
+`,
+		"equals.sh": `docker ps --filter=name="$c" --filter=status=running | grep -q "$c"
+`,
+	}))
+}
+
+func TestDockerPSNameFilterAsRunningCheckBeforeTeardown(t *testing.T) {
+	assert.Empty(t, shellFindings(t, "docker-ps-name-filter-as-running-check", map[string]string{
+		"stop.sh": `if docker ps -q --filter "name=$c" | grep -q .; then
+    echo "stopping"
+    docker stop "$c"
+fi
+`,
+		"rm.sh": `if docker ps -q --filter "name=$c" | grep -q .; then log_info "removing"; docker rm -f "$c"; fi
+`,
+		"kill.sh": `if docker ps -q --filter "name=$c" | grep -q .; then docker kill "$c"; fi
+`,
+		"compose.sh": `if docker ps -q --filter "name=$c" | grep -q .; then log_info "down"; docker compose down; fi
+`,
+		"legacy-compose.sh": `if docker ps -q --filter "name=$c" | grep -q .; then docker-compose down; fi
+`,
+		"compose-var.sh": `if docker ps -q --filter "name=$c" | grep -q .; then echo down; "$DOCKER_COMPOSE" down; fi
+`,
+		"compose-dir.sh": `if docker ps -q --filter name=app-stage | grep -q .; then
+    cd "$STAGE_DIR"
+    $DOCKER_COMPOSE down
+fi
+`,
+	}))
+}
+
 // A single health request right after starting a container fails on a cold
 // start and aborts the operation that needed the container.
 func TestShellHealthCheckWithoutWait(t *testing.T) {

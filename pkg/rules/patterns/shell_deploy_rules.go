@@ -13,6 +13,9 @@ func init() {
 	rules.Register(newShellRule("shell-and-list-failure-passes",
 		"Detects a && list followed by a success message in a script under set -e — a failure before the last && does not stop the script, and the success is printed anyway",
 		core.SeverityMedium, checkAndListFailurePasses))
+	rules.Register(newShellRule("docker-ps-name-filter-as-running-check",
+		"Detects docker ps output grepped as proof that a container is running — ps also lists restarting containers and name filters match substrings",
+		core.SeverityMedium, checkDockerPSNameFilterAsRunningCheck))
 	rules.Register(newShellRule("shell-health-check-without-wait",
 		"Detects a single health request right after a container or service is started — a cold start fails it and aborts the operation that needed the service",
 		core.SeverityMedium, checkHealthWithoutWait))
@@ -40,6 +43,81 @@ func init() {
 	rules.Register(newShellRuleIn("security", "generated-secret-used-before-saved",
 		"Detects a generated secret applied to a database or a service before the script writes it anywhere — a run that stops in between loses it, and a rerun makes another",
 		core.SeverityMedium, checkSecretUsedBeforeSaved))
+}
+
+var (
+	dockerPSCommand    = regexp.MustCompile(`^docker\s+ps\b`)
+	quietDockerGrep    = regexp.MustCompile(`(?:^|\s)(?:-q|--quiet)(?:\s|$)`)
+	grepNamePattern    = regexp.MustCompile(`(?:^|\s)(?:"\$[A-Za-z_{][^" ]*"|'\$[A-Za-z_{][^']*'|\$[A-Za-z_{][^\s]*|\.)`)
+	dockerStatusRun    = regexp.MustCompile(`(?:--filter|-f)(?:=|\s+)['"]?status=running(?:['"]|\s|$)`)
+	shellIfPrefix      = regexp.MustCompile(`^if\b`)
+	dockerTeardownLine = regexp.MustCompile(`^(?:docker\s+(?:container\s+)?(?:stop|rm|kill)\b|docker\s+compose\s+down\b|docker-compose\s+down\b|["']?\$DOCKER_COMPOSE["']?\s+down\b)`)
+)
+
+// checkDockerPSNameFilterAsRunningCheck reports a container-name grep over
+// docker ps output used as a running-state check. ps also includes restarting
+// containers, and a name filter can match another container's longer name.
+func checkDockerPSNameFilterAsRunningCheck(r *shellRule, src *shellSource) []*core.Violation {
+	var out []*core.Violation
+	for _, unit := range src.units() {
+		for _, seg := range segments(unit.text) {
+			elements := pipeElements(seg.trimmed())
+			if len(elements) < 2 {
+				continue
+			}
+			producer := strings.TrimSpace(elements[0])
+			producer = commandPrefix.ReplaceAllString(producer, "")
+			producer = envPrefix.ReplaceAllString(producer, "")
+			producer = sudoPrefix.ReplaceAllString(producer, "")
+			if !dockerPSCommand.MatchString(producer) || dockerStatusRun.MatchString(producer) {
+				continue
+			}
+			for _, element := range elements[1:] {
+				if commandWord(element) != "grep" || !quietDockerGrep.MatchString(element) || !grepNamePattern.MatchString(element) || dockerTeardownInThenBranch(segments(unit.text), seg) {
+					continue
+				}
+				out = appendReport(out, src.report(r, unit.lineAt(seg.offset),
+					"docker ps plus grep does not prove the container is running: ps includes restarting containers and name filters can match a longer name",
+					"Check docker container inspect -f '{{.State.Status}}' and require status=running"))
+				break
+			}
+		}
+	}
+	return out
+}
+
+// dockerTeardownInThenBranch reports a stop or removal as the first substantive
+// command of the then branch, after optional log, message and cd commands.
+func dockerTeardownInThenBranch(segs []shellSegment, condition shellSegment) bool {
+	if !shellIfPrefix.MatchString(strings.TrimSpace(condition.text)) {
+		return false
+	}
+	for i := range segs {
+		if segs[i].offset != condition.offset {
+			continue
+		}
+		for _, branch := range segs[i+1:] {
+			command := strings.TrimSpace(branch.text)
+			if after, ok := strings.CutPrefix(command, "then"); ok {
+				command = strings.TrimSpace(after)
+			}
+			if command == "" {
+				continue
+			}
+			if strings.HasPrefix(command, "fi") || strings.HasPrefix(command, "else") || strings.HasPrefix(command, "elif") {
+				return false
+			}
+			word := commandWord(command)
+			if strings.HasPrefix(word, "log_") || word == "log" || word == "echo" || word == "printf" || word == "cd" {
+				continue
+			}
+			command = commandPrefix.ReplaceAllString(command, "")
+			command = envPrefix.ReplaceAllString(command, "")
+			command = sudoPrefix.ReplaceAllString(command, "")
+			return dockerTeardownLine.MatchString(command)
+		}
+	}
+	return false
 }
 
 // newShellRuleIn is newShellRule for a rule of another category.
