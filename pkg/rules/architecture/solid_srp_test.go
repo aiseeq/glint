@@ -144,3 +144,27 @@ func TestSolidSRPRule_SplitsAcronymsIntoWords(t *testing.T) {
 	assert.Equal(t, []string{"send", "sms", "v2"}, camelWords("SendSMS_v2"))
 	assert.Equal(t, []string{"database", "http"}, detectResponsibilityAreas([]string{"GetUser", "HandleHTTPRequest"}))
 }
+
+// A domain noun in method names is no responsibility: Transaction of a ledger
+// without Begin, Commit or Rollback is the entity the service classifies, and
+// Endpoint of a swap without Handle, Serve or Route is no HTTP layer.
+func TestSolidSRPRule_DomainNounsAloneAreNoArea(t *testing.T) {
+	rule := NewSolidSRPRule()
+	require.NoError(t, rule.Configure(map[string]any{}))
+
+	ctx := createTestContext(t, "internal/ledger/classifier.go", `package ledger
+
+type Classifier struct{}
+
+func (c *Classifier) LabelTransaction() error            { return nil }
+func (c *Classifier) labelSwapTransaction() error      { return nil }
+func (c *Classifier) swapEndpointMatchesWallet() bool { return false }
+func (c *Classifier) SaveLeg() error                        { return nil }
+func (c *Classifier) importSwapLeg() error                 { return nil }
+`)
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+
+	assert.Equal(t, []string{"database", "export"}, detectResponsibilityAreas([]string{"LabelTransaction", "SwapEndpoint", "SaveLeg", "importSwapLeg"}))
+	assert.Equal(t, []string{"http", "transaction"}, detectResponsibilityAreas([]string{"BeginTransaction", "HandleRequest"}))
+	assert.Equal(t, []string{"transaction"}, detectResponsibilityAreas([]string{"CommitWork", "TransactionStatus"}))
+}

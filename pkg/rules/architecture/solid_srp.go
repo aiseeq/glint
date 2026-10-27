@@ -300,6 +300,15 @@ var areaPatterns = map[string][]string{
 	"notification": {"Notify", "Alert", "Email", "SMS", "Push"},
 }
 
+// areaNouns are keywords of an area that also name domain entities: a ledger
+// classifies a Transaction and a bridge has an Endpoint. Alone they establish
+// no area; it takes an action of the area (Begin, Commit, Handle, Serve) in
+// some method of the type.
+var areaNouns = map[string]map[string]bool{
+	"transaction": {"transaction": true},
+	"http":        {"endpoint": true, "request": true, "response": true},
+}
+
 // detectResponsibilityAreas analyzes method names to detect different
 // responsibility areas. A keyword counts only as a whole camelCase word of
 // the name: "Get" is in GetUser, not in Budget.
@@ -313,7 +322,8 @@ func detectResponsibilityAreas(methods []string) []string {
 		}
 		for area, patterns := range areaPatterns {
 			for _, pattern := range patterns {
-				if words[strings.ToLower(pattern)] {
+				keyword := strings.ToLower(pattern)
+				if words[keyword] && !areaNouns[area][keyword] {
 					detectedAreas[area] = true
 					break
 				}
