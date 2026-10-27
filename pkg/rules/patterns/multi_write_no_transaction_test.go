@@ -282,8 +282,13 @@ func TestMultiWriteNoTransactionRule_IndependentCallsAreNotCounted(t *testing.T)
 	rule := NewMultiWriteNoTransactionRule()
 	require.NoError(t, rule.Configure(map[string]any{"independent_calls": []any{"Spawn"}}))
 
+	// Горутина спрятана в пуле, тела которого правило не видит.
 	source := `
-func Spawn(fn func()) { go fn() }
+type pool interface{ Submit(fn func()) }
+
+var workers pool
+
+func Spawn(fn func()) { workers.Submit(fn) }
 
 func (s *Service) refresh(ctx context.Context) { _ = s.repo.UpdateThing(ctx) }
 
@@ -907,4 +912,106 @@ func (s *Service) Run(ctx context.Context, a bool) error {
 }
 `)
 	require.Len(t, violations, 1)
+}
+
+// Замыкание, которое вызываемая функция только сохраняет (в поле структуры, в
+// возвращаемое значение) или запускает в своей горутине, здесь не выполняется: его
+// запустит планировщик через часы, и с записями вызывающего у него нет общей операции.
+// Реальный случай: задача по расписанию собиралась при старте сервера, а её запись
+// склеивалась с записью при остановке процесса.
+func TestMultiWriteNoTransactionRule_StoredClosureIsSeparateUnit(t *testing.T) {
+	const scheduler = `
+type Scheduler struct{ Run func(context.Context) error }
+
+func (s *Scheduler) Start(ctx context.Context) { _ = s.Run(ctx) }
+
+func newScheduler(name string, run func(context.Context) error) *Scheduler {
+	return &Scheduler{Run: run}
+}
+`
+	cases := map[string]string{
+		"constructor stores the closure": `
+func (s *Service) setup() *Scheduler {
+	return newScheduler("announce", func(ctx context.Context) error { return s.repo.UpdateThing(ctx) })
+}
+
+func (s *Service) Serve(ctx context.Context) error {
+	sched := s.setup()
+	go sched.Start(ctx)
+	return s.repo.CreateThing(ctx)
+}
+`,
+		"closure in a composite literal": `
+func (s *Service) Serve(ctx context.Context) error {
+	sched := &Scheduler{Run: func(ctx context.Context) error { return s.repo.UpdateThing(ctx) }}
+	go sched.Start(ctx)
+	return s.repo.CreateThing(ctx)
+}
+`,
+		"spawner runs the closure in its goroutine": `
+func spawn(name string, fn func()) {
+	go func() {
+		defer func() { _ = recover() }()
+		fn()
+	}()
+}
+
+func (s *Service) Serve(ctx context.Context) error {
+	spawn("refresh", func() { _ = s.repo.UpdateThing(ctx) })
+	return s.repo.CreateThing(ctx)
+}
+`,
+	}
+	for name, source := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Empty(t, analyzeStoreModule(t, scheduler+source))
+		})
+	}
+}
+
+// Хелпер, который вызывает переданное замыкание сам, выполняет его записи в том же
+// проходе — пара остаётся находкой.
+func TestMultiWriteNoTransactionRule_ClosureCalledByHelperStillReported(t *testing.T) {
+	cases := map[string]string{
+		"direct call": `
+func each(fn func() error) error { return fn() }
+
+func (s *Service) Save(ctx context.Context) error {
+	if err := each(func() error { return s.repo.UpdateThing(ctx) }); err != nil {
+		return err
+	}
+	return s.repo.CreateThing(ctx)
+}
+`,
+		"call through a local": `
+func each(fn func() error) error {
+	run := fn
+	return run()
+}
+
+func (s *Service) Save(ctx context.Context) error {
+	if err := each(func() error { return s.repo.UpdateThing(ctx) }); err != nil {
+		return err
+	}
+	return s.repo.CreateThing(ctx)
+}
+`,
+		"argument of a goroutine evaluated now": `
+func consume(err error) {}
+
+func each(fn func() error) {
+	go consume(fn())
+}
+
+func (s *Service) Save(ctx context.Context) error {
+	each(func() error { return s.repo.UpdateThing(ctx) })
+	return s.repo.CreateThing(ctx)
+}
+`,
+	}
+	for name, source := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Len(t, analyzeStoreModule(t, source), 1)
+		})
+	}
 }

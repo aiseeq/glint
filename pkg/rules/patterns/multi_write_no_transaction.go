@@ -60,9 +60,12 @@ func init() {
 //     back exactly when it is needed. The pair to fix, if any, is the writes of the
 //     operation itself.
 //   - Writes inside a goroutine body: that work outlives the function and cannot share its
-//     transaction. Project spawners that hide the `go` inside a helper, and telemetry that
-//     must survive precisely when the business operation fails, are listed in
-//     independent_calls.
+//     transaction. The same holds for a closure stored for later — put into a composite
+//     literal, or passed to a project function that only stores it (a field, a result) or
+//     runs it under its own `go` — a scheduled job is wired at startup and runs hours
+//     later. Spawners whose goroutine the rule cannot see (a pool, another module), and
+//     telemetry that must survive precisely when the business operation fails, are listed
+//     in independent_calls.
 //   - Writes already inside a transaction runner's callback, and functions that are only
 //     ever reached from inside one — the wrapper does not have to sit in the same function
 //     as the writes, and requiring that would push every helper back into one long method.
@@ -370,6 +373,9 @@ type callGraph struct {
 	funcs     map[string]*funcNode
 	summaries map[string]*writeSummary
 	visiting  map[string]bool
+	// deferred — параметры-функции, которые хелпер только сохраняет или запускает в
+	// своей горутине: переданное в них замыкание в проходе вызывающего не выполняется.
+	deferred map[types.Object]bool
 }
 
 // summary returns the write summary of a project function, or nil for a
@@ -407,6 +413,7 @@ func (r *MultiWriteNoTransactionRule) buildGraph(ctx *core.GoProjectContext) *ca
 		funcs:     make(map[string]*funcNode),
 		summaries: make(map[string]*writeSummary),
 		visiting:  make(map[string]bool),
+		deferred:  make(map[types.Object]bool),
 	}
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil {
@@ -617,6 +624,20 @@ func (a *writeFlowAnalyzer) scan(node ast.Node, paths []writePath) []writePath {
 		return joinWritePaths(paths, closed)
 	case *ast.CallExpr:
 		return a.call(current, paths)
+	case *ast.CompositeLit:
+		// Замыкание, положенное в поле или элемент, здесь не выполняется: его
+		// вызовет тот, кто получит значение, — планировщик, роутер, очередь.
+		for _, elt := range current.Elts {
+			value := elt
+			if kv, ok := elt.(*ast.KeyValueExpr); ok {
+				paths = a.scan(kv.Key, paths)
+				value = kv.Value
+			}
+			if _, ok := ast.Unparen(value).(*ast.FuncLit); !ok {
+				paths = a.scan(value, paths)
+			}
+		}
+		return paths
 	}
 	for _, child := range directChildren(node) {
 		paths = a.scan(child, paths)
@@ -638,7 +659,10 @@ func (a *writeFlowAnalyzer) call(call *ast.CallExpr, paths []writePath) []writeP
 		return withResult(paths, call, outcomeUnknown)
 	}
 	paths = a.scan(call.Fun, paths)
-	for _, arg := range call.Args {
+	for i, arg := range call.Args {
+		if _, ok := ast.Unparen(arg).(*ast.FuncLit); ok && a.graph.closureDeferred(call, i, a.info) {
+			continue
+		}
 		paths = a.scan(arg, paths)
 	}
 	// Вызов, сам являющийся записью, дальше не разворачиваем: делегирующая
@@ -655,6 +679,113 @@ func (a *writeFlowAnalyzer) call(call *ast.CallExpr, paths []writePath) []writeP
 		return withResult(paths, call, outcomeUnknown)
 	}
 	return a.through(paths, callee, a.graph.funcs[name].display, call)
+}
+
+// closureDeferred reports whether the project function called here only stores the
+// closure passed as argument i, or runs it in a goroutine of its own: then the
+// closure's writes are not part of the caller's pass.
+func (g *callGraph) closureDeferred(call *ast.CallExpr, i int, info *types.Info) bool {
+	node := g.funcs[resolvedCalleeName(call, info)]
+	if node == nil || call.Ellipsis.IsValid() {
+		return false
+	}
+	var params []*ast.Ident
+	for _, field := range node.decl.Type.Params.List {
+		if _, variadic := field.Type.(*ast.Ellipsis); variadic {
+			return false
+		}
+		if len(field.Names) == 0 {
+			params = append(params, nil)
+		}
+		params = append(params, field.Names...)
+	}
+	if i >= len(params) {
+		return false
+	}
+	if params[i] == nil {
+		// Безымянный параметр не вызвать.
+		return true
+	}
+	obj := node.info.Defs[params[i]]
+	if obj == nil {
+		return true
+	}
+	deferred, ok := g.deferred[obj]
+	if !ok {
+		deferred = paramDeferred(node.decl.Body, obj, node.info)
+		g.deferred[obj] = deferred
+	}
+	return deferred
+}
+
+// paramDeferred reports whether every use of the function parameter stores it — as a
+// field or element of a composite literal, into a field or element, as a result — or
+// hands it to a goroutine: started by `go`, passed to the started function, or called
+// inside its body.
+func paramDeferred(body *ast.BlockStmt, param types.Object, info *types.Info) bool {
+	deferred := true
+	var stack []ast.Node
+	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		if ident, ok := n.(*ast.Ident); ok && info.Uses[ident] == param && !useDeferred(ident, stack) {
+			deferred = false
+		}
+		stack = append(stack, n)
+		return deferred
+	})
+	return deferred
+}
+
+// useDeferred classifies one use of a function parameter; stack holds its ancestors,
+// innermost last.
+func useDeferred(ident *ast.Ident, stack []ast.Node) bool {
+	for k, ancestor := range stack {
+		g, ok := ancestor.(*ast.GoStmt)
+		if !ok {
+			continue
+		}
+		// Под `go` вызов функции (и тело замыкания) выполняется в новой горутине, а
+		// аргументы вычисляются сейчас: отложено то, что в них передано значением.
+		var inner ast.Node = ident
+		if k+2 < len(stack) {
+			inner = stack[k+2]
+		}
+		if inner == g.Call.Fun {
+			return true
+		}
+		switch inner.(type) {
+		case *ast.Ident, *ast.FuncLit:
+			return true
+		}
+	}
+	if len(stack) == 0 {
+		return false
+	}
+	switch parent := stack[len(stack)-1].(type) {
+	case *ast.KeyValueExpr:
+		return parent.Value == ident && len(stack) > 1 && isCompositeLit(stack[len(stack)-2])
+	case *ast.CompositeLit, *ast.ReturnStmt:
+		return true
+	case *ast.AssignStmt:
+		for j, rhs := range parent.Rhs {
+			if rhs != ident || j >= len(parent.Lhs) {
+				continue
+			}
+			switch parent.Lhs[j].(type) {
+			case *ast.SelectorExpr, *ast.IndexExpr:
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isCompositeLit(n ast.Node) bool {
+	_, ok := n.(*ast.CompositeLit)
+	return ok
 }
 
 // withResult records the call as the one just evaluated, with the given
