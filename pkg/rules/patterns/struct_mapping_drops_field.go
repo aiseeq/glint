@@ -2,6 +2,7 @@ package patterns
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"reflect"
@@ -17,8 +18,8 @@ func init() {
 	rules.Register(NewStructMappingDropsFieldRule())
 }
 
-// StructMappingDropsFieldRule detects a struct literal mapping one struct
-// into another that leaves out fields both types have:
+// StructMappingDropsFieldRule detects a struct literal or constructor mapping
+// one struct into another that leaves out fields both types have:
 //
 //	return models.Withdrawal{
 //		ID:        r.ID,
@@ -51,7 +52,7 @@ func NewStructMappingDropsFieldRule() *StructMappingDropsFieldRule {
 	return &StructMappingDropsFieldRule{BaseRule: rules.NewBaseRule(
 		"struct-mapping-drops-field",
 		"patterns",
-		"Detects a struct literal mapping one struct into another that leaves out fields both have — the value never reaches the target",
+		"Detects a struct literal or constructor mapping one struct into another that leaves out fields both have — the value never reaches the target",
 		core.SeverityMedium,
 	)}
 }
@@ -103,9 +104,175 @@ func (r *StructMappingDropsFieldRule) AnalyzeGoProject(ctx *core.GoProjectContex
 				violations = append(violations, v)
 				return true
 			})
+			ast.Inspect(body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				dropped := constructorDroppedFields(call, body, info)
+				if len(dropped) > 0 {
+					line := file.LineFor(call)
+					if !file.IsSuppressed(line, r.Name()) {
+						v := r.CreateViolation(file.RelPath, line, "Constructor maps fields from a source struct but supplies literals for "+strings.Join(dropped, ", ")+" instead — the source values never reach the target")
+						v.WithCode(strings.TrimSpace(file.GetLine(line)))
+						v.WithSuggestion("Pass the matching source fields to the constructor, or suppress the intentional defaults with a reason")
+						violations = append(violations, v)
+					}
+				}
+				return true
+			})
 		}
 		return violations
 	})
+}
+
+// constructorDroppedFields finds constructor arguments that replace source
+// fields with literals while other same-named fields from that source are
+// mapped through parameters whose names match the target fields.
+func constructorDroppedFields(call *ast.CallExpr, body *ast.BlockStmt, info *types.Info) []string {
+	signature, ok := info.TypeOf(call.Fun).(*types.Signature)
+	if !ok || signature.Params() == nil || signature.Results() == nil || signature.Results().Len() == 0 {
+		return nil
+	}
+	target, ok := structOf(signature.Results().At(0).Type())
+	if !ok {
+		return nil
+	}
+	type sourceRef struct {
+		object types.Object
+		typeOf types.Type
+		copied map[string]bool
+	}
+	sources := make(map[types.Object]*sourceRef)
+	for i, arg := range call.Args {
+		if i >= signature.Params().Len() {
+			break
+		}
+		selector, ok := ast.Unparen(arg).(*ast.SelectorExpr)
+		if !ok || info.Selections[selector] == nil || info.Selections[selector].Kind() != types.FieldVal {
+			continue
+		}
+		base, ok := ast.Unparen(selector.X).(*ast.Ident)
+		if !ok {
+			continue
+		}
+		object := info.ObjectOf(base)
+		if object == nil {
+			continue
+		}
+		ref := sources[object]
+		if ref == nil {
+			ref = &sourceRef{object: object, typeOf: info.TypeOf(base), copied: make(map[string]bool)}
+			sources[object] = ref
+		}
+		param := signature.Params().At(i)
+		if strings.EqualFold(param.Name(), selector.Sel.Name) {
+			ref.copied[selector.Sel.Name] = true
+		}
+	}
+	var dropped []string
+	for _, ref := range sources {
+		if len(ref.copied) == 0 {
+			continue
+		}
+		srcType := ref.typeOf
+		var sourceDropped []string
+		if ptr, ok := srcType.(*types.Pointer); ok {
+			srcType = ptr.Elem()
+		}
+		for field := range target.fields.Fields() {
+			name := field.Name()
+			if ref.copied[name] || field.Embedded() {
+				continue
+			}
+			obj, _, _ := types.LookupFieldOrMethod(srcType, true, target.pkg, name)
+			srcField, ok := obj.(*types.Var)
+			if !ok || !srcField.IsField() || !types.AssignableTo(srcField.Type(), field.Type()) {
+				continue
+			}
+			if sourceFieldRead(body, info, ref.object, name) {
+				continue
+			}
+			for i := 0; i < signature.Params().Len() && i < len(call.Args); i++ {
+				param := signature.Params().At(i)
+				if !strings.EqualFold(param.Name(), name) || !literalArgument(call.Args[i], info) {
+					continue
+				}
+				sourceDropped = append(sourceDropped, name)
+				break
+			}
+		}
+		if len(sourceDropped) >= 2 {
+			dropped = append(dropped, sourceDropped...)
+		}
+	}
+	sort.Strings(dropped)
+	return dropped
+}
+
+func sourceFieldRead(body *ast.BlockStmt, info *types.Info, source types.Object, field string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		selector, ok := n.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != field || info.Selections[selector] == nil || info.Selections[selector].Kind() != types.FieldVal {
+			return true
+		}
+		base, ok := ast.Unparen(selector.X).(*ast.Ident)
+		if ok && info.ObjectOf(base) == source {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func literalArgument(expr ast.Expr, info *types.Info) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.BasicLit:
+		return nonzeroConstant(info.Types[e].Value)
+	case *ast.CompositeLit:
+		if len(e.Elts) == 0 {
+			return false
+		}
+		for _, elt := range e.Elts {
+			if pair, ok := elt.(*ast.KeyValueExpr); ok {
+				if !constantExpression(pair.Key, info) || !constantExpression(pair.Value, info) {
+					return false
+				}
+				continue
+			}
+			if !constantExpression(elt, info) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func constantExpression(expr ast.Expr, info *types.Info) bool {
+	tv, ok := info.Types[ast.Unparen(expr)]
+	return ok && tv.Value != nil
+}
+
+func nonzeroConstant(value constant.Value) bool {
+	if value == nil {
+		return false
+	}
+	switch value.Kind() {
+	case constant.Bool:
+		return constant.BoolVal(value)
+	case constant.String:
+		return constant.StringVal(value) != ""
+	case constant.Int, constant.Float:
+		return constant.Sign(value) != 0
+	case constant.Complex:
+		return constant.Sign(constant.Real(value)) != 0 || constant.Sign(constant.Imag(value)) != 0
+	default:
+		return false
+	}
 }
 
 // droppedFields returns the literal's mapping source and the fields of the

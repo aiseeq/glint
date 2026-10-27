@@ -12,6 +12,153 @@ import (
 // A mapping from one struct to another copies some fields by name and
 // silently leaves out others both types have: the response shows the hash
 // empty, the created date as zero, though the source had them.
+func TestStructMappingDropsFieldConstructor(t *testing.T) {
+	files := map[string]string{
+		"models/models.go": `package models
+
+type Claims struct {
+	AdminID string
+	Email string
+	Roles []string
+	Permissions []string
+	ExpiresAt int64
+}
+
+type TokenData struct {
+	AdminID string
+	Email string
+	Roles []string
+	Permissions []string
+	ExpiresAt int64
+}
+
+type Identity struct {
+	Email string
+}
+
+type Investment struct {
+	Name string
+	Owner string
+	Strategy string
+	Amount int64
+	Note string
+	CreatedAt string
+}
+
+type Order struct {
+	Ability string
+	Count int
+	Point Point
+	Sequence int
+}
+
+type Point struct {
+	X int
+	Y int
+}
+
+type Decimal struct {
+	Decimal int64
+}
+
+type Token struct {
+	Symbol string
+	Address string
+	Chain string
+	Amount Decimal
+	Expires Decimal
+	USDValue Decimal
+}
+
+func NewDeposit(name, owner, strategy string, amount int64, note, createdAt string) *Investment {
+	return &Investment{}
+}
+
+func NewOrder(ability string, count int, point Point, sequence int) *Order {
+	return &Order{}
+}
+
+func NewToken(symbol, address, chain string, amount, expires, usdValue Decimal) *Token {
+	return &Token{}
+}
+
+type SettingsSource struct {
+	ID string
+	Name string
+	Amount int
+	Rate int
+	Limit int
+}
+
+type Settings struct {
+	ID string
+	Name string
+	Amount int
+	Rate int
+	Limit int
+}
+
+func NewSettings(id, name string, amount, rate, limit int) *Settings {
+	return &Settings{}
+}
+
+func NewSessionClaims(adminID, email string, roles, permissions []string) *TokenData {
+	return &TokenData{AdminID: adminID, Email: email, Roles: roles, Permissions: permissions}
+}
+`,
+		"service/convert.go": `package service
+
+import "example.com/rulestest/models"
+
+func Broken(c *models.Claims) *models.TokenData {
+	return models.NewSessionClaims(c.AdminID, c.Email, []string{"staff"}, []string{"all"}) // want struct-mapping-drops-field
+}
+
+func Fixed(c *models.Claims) *models.TokenData {
+	return models.NewSessionClaims(c.AdminID, c.Email, c.Roles, c.Permissions)
+}
+
+func Independent(id, email string) *models.TokenData {
+	return models.NewSessionClaims(id, email, []string{"staff"}, []string{"read"})
+}
+
+func NewFromIdentity(c *models.Identity) *models.TokenData {
+	return models.NewSessionClaims("id", c.Email, []string{"staff"}, []string{"read"})
+}
+
+func DefaultInvestment(inv *models.Investment) *models.Investment {
+	return models.NewDeposit("", "", inv.Strategy, inv.Amount, "", inv.CreatedAt)
+}
+
+func DefaultOrder(a *models.Order) *models.Order {
+	return models.NewOrder(a.Ability, 0, models.Point{}, 0)
+}
+
+func ComputedToken(t *models.Token) *models.Token {
+	return models.NewToken(t.Symbol, t.Address, t.Chain, models.Decimal{Decimal: t.Amount.Decimal - 1}, models.Decimal{}, models.Decimal{Decimal: t.USDValue.Decimal - 1})
+}
+
+func ReadThenDefault(c *models.Claims) *models.TokenData {
+	_ = c.Roles
+	_ = c.Permissions
+	return models.NewSessionClaims(c.AdminID, c.Email, []string{"staff"}, []string{"read"})
+}
+
+func ReadOneField(src *models.SettingsSource) *models.Settings {
+	_ = src.Amount
+	return models.NewSettings(src.ID, src.Name, 1, 2, 3) // want struct-mapping-drops-field
+}
+`,
+	}
+	violations, err := NewStructMappingDropsFieldRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, wantedLines(files, "struct-mapping-drops-field"), foundLines(violations))
+	require.Len(t, violations, 2)
+	assert.Contains(t, violations[0].Message, "Permissions, Roles")
+	assert.Contains(t, violations[1].Message, "Limit, Rate")
+	assert.NotContains(t, violations[1].Message, "Amount")
+}
+
 func TestStructMappingDropsField(t *testing.T) {
 	files := map[string]string{
 		"models/models.go": `package models
