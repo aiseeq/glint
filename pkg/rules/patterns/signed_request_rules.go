@@ -51,7 +51,7 @@ func NewSignatureOverDifferentBytesThanSentRule() *typedFuncRule {
 		var findings []funcFinding
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
-			if !ok || !signsValue(call) {
+			if !ok || !signsValue(call) || !signerMayMarshal(scope, call, 0, make(map[*ast.FuncDecl]bool)) {
 				return true
 			}
 			for _, arg := range call.Args {
@@ -82,6 +82,48 @@ func signsValue(call *ast.CallExpr) bool {
 	words := helpers.IdentifierWords(name)
 	return len(words) < 2 || (words[1] != "in" && words[1] != "up" && words[1] != "out" && words[1] != "on")
 }
+
+// valueEncoders serialize a value into the bytes a signer would hash.
+var valueEncoders = map[string]map[string]bool{
+	"encoding/json": {"Marshal": true, "MarshalIndent": true, "NewEncoder": true},
+	"encoding/xml":  {"Marshal": true, "MarshalIndent": true, "NewEncoder": true},
+}
+
+// signerMayMarshal tells whether the signer serializes the value it is given:
+// it or a project function it calls encodes with encoding/json or
+// encoding/xml. A signer that builds a canonical key=value text of a map
+// signs no serialized bytes, and the provider rebuilds that text from the
+// parsed body. A signer whose body is not loaded (a library, an interface
+// method) may marshal.
+func signerMayMarshal(scope funcScope, call *ast.CallExpr, depth int, seen map[*ast.FuncDecl]bool) bool {
+	decl, ok := scope.callee(call)
+	if !ok {
+		return depth == 0
+	}
+	if seen[decl.decl] || decl.decl.Body == nil {
+		return false
+	}
+	seen[decl.decl] = true
+	found := false
+	ast.Inspect(decl.decl.Body, func(n ast.Node) bool {
+		inner, ok := n.(*ast.CallExpr)
+		if found || !ok {
+			return !found
+		}
+		if fn := staticFunc(decl.info, inner); fn != nil && fn.Pkg() != nil && valueEncoders[fn.Pkg().Path()][fn.Name()] {
+			found = true
+			return false
+		}
+		if depth < maxSignerHops && signerMayMarshal(funcScope{info: decl.info, decls: scope.decls}, inner, depth+1, seen) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// maxSignerHops bounds how deep signerMayMarshal follows project calls.
+const maxSignerHops = 4
 
 // jsonMarshals returns the variables assigned from json.Marshal and what
 // each marshals.

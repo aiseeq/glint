@@ -454,3 +454,70 @@ func (s *Signer) SignParams(m map[string]string) (string, error) {
 `,
 	}))
 }
+
+// A signer that builds a canonical key=value text of the map and never
+// serializes it signs no bytes at all: the provider rebuilds the same text
+// from the parsed JSON, so the body's own marshal is no other bytes.
+func TestSignatureOverDifferentBytesThanSentCanonicalTextSigner(t *testing.T) {
+	assert.Empty(t, typedFuncFindings(t, NewSignatureOverDifferentBytesThanSentRule(), map[string]string{
+		"payprov/sign.go": `package payprov
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"sort"
+	"strings"
+)
+
+func Sign(param map[string]any, key string) (string, error) {
+	sum := sha256.Sum256([]byte(canonicalText(param) + "&key=" + key))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func canonicalText(param map[string]any) string {
+	keys := make([]string, 0, len(param))
+	for k := range param {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, param[k]))
+	}
+	return strings.Join(parts, "&")
+}
+`,
+		"payprov/client.go": `package payprov
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+)
+
+type Client struct {
+	key  string
+	base string
+	http *http.Client
+}
+
+func (c *Client) call(param map[string]any) error {
+	sign, err := Sign(param, c.key)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(map[string]any{"param": param, "sign": sign})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.base, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	_, err = c.http.Do(req)
+	return err
+}
+`,
+	}))
+}
