@@ -340,7 +340,7 @@ func NewPostSideEffectWriteUsesRequestContextRule() *typedFuncRule {
 		BaseRule: rules.NewBaseRule(
 			"post-side-effect-write-uses-request-context",
 			"patterns",
-			"Detects the write recording an outbound command's success made with the caller's cancellable context — when the caller goes away after the send the record is lost and the command is sent again",
+			"Detects an audit write after an HTTP handler, or a write recording an outbound command's success made with the caller's cancellable context — when the caller goes away after the send the record is lost and the command is sent again",
 			core.SeverityMedium,
 		),
 		suggestion: "Record the outcome on a detached context with its own timeout: context.WithTimeout(context.WithoutCancel(ctx), d)",
@@ -350,11 +350,20 @@ func NewPostSideEffectWriteUsesRequestContextRule() *typedFuncRule {
 			return nil
 		}
 		cancellable := cancellableContexts(scope.info, fn)
-		if len(cancellable) == 0 || mentionsNotice(fn.Name.Name) || mentionsNotice(receiverTypeName(fn.Recv)) || mentionsNotice(packagePath(scope.info, fn)) {
+		if mentionsNotice(fn.Name.Name) || mentionsNotice(receiverTypeName(fn.Recv)) || mentionsNotice(packagePath(scope.info, fn)) {
 			return nil
 		}
 		var findings []funcFinding
 		reported := make(map[*ast.CallExpr]bool)
+		// Middleware commonly runs the handler (which commits the mutation)
+		// before calling a separate audit helper. Follow that helper so its
+		// request context is checked at the point where the write is made.
+		if audit := auditAfterHandler(scope, fn); audit != nil {
+			findings = append(findings, funcFinding{node: audit, message: "audit write after the handler uses the request context — if the client disconnects after the mutation commits, the audit record is lost"})
+		}
+		if len(cancellable) == 0 {
+			return findings
+		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			block, ok := n.(*ast.BlockStmt)
 			if !ok {
@@ -384,6 +393,142 @@ func NewPostSideEffectWriteUsesRequestContextRule() *typedFuncRule {
 		return findings
 	}
 	return r
+}
+
+// auditAfterHandler finds an audit helper called after an HTTP handler has
+// completed, when that helper writes with the request's cancellable context.
+func auditAfterHandler(scope funcScope, fn *ast.FuncDecl) *ast.CallExpr {
+	if fn.Body == nil {
+		return nil
+	}
+	var found *ast.CallExpr
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		block, ok := n.(*ast.BlockStmt)
+		if !ok || found != nil {
+			return found == nil
+		}
+		for i, stmt := range block.List {
+			if !servesHTTPRequest(scope.info, stmt) {
+				continue
+			}
+			for _, later := range block.List[i+1:] {
+				ast.Inspect(later, func(node ast.Node) bool {
+					call, ok := node.(*ast.CallExpr)
+					if !ok || found != nil {
+						return found == nil
+					}
+					callee, ok := scope.callee(call)
+					if !ok || !strings.Contains(strings.ToLower(callee.decl.Name.Name), "audit") || callee.decl.Body == nil {
+						return true
+					}
+					if auditHelperUsesRequestContext(scope, callee) {
+						found = call
+					}
+					return found == nil
+				})
+				if found != nil {
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func servesHTTPRequest(info *types.Info, stmt ast.Stmt) bool {
+	found := false
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || helpers.CalleeName(call) != "ServeHTTP" || len(call.Args) < 2 {
+			return true
+		}
+		requestType := info.TypeOf(call.Args[1])
+		if isNamedPointerType(requestType, "net/http", "Request") {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+func auditHelperUsesRequestContext(scope funcScope, fn typedFuncDecl) bool {
+	info, decl := fn.info, fn.decl
+	if decl.Body == nil {
+		return false
+	}
+	requests := make(map[types.Object]bool)
+	for _, field := range decl.Type.Params.List {
+		for _, name := range field.Names {
+			obj := info.ObjectOf(name)
+			if obj != nil && isNamedPointerType(obj.Type(), "net/http", "Request") {
+				requests[obj] = true
+			}
+		}
+	}
+	if len(requests) == 0 {
+		return false
+	}
+	unsafeWrite := false
+	ast.Inspect(decl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || unsafeWrite || (!strings.Contains(strings.ToLower(helpers.CalleeName(call)), "audit") && helpers.CalleeName(call) != "Record") {
+			return !unsafeWrite
+		}
+		for _, arg := range call.Args {
+			ctxCall, ok := ast.Unparen(arg).(*ast.CallExpr)
+			if !ok || len(ctxCall.Args) != 0 {
+				continue
+			}
+			sel, ok := ast.Unparen(ctxCall.Fun).(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Context" {
+				continue
+			}
+			request, ok := ast.Unparen(sel.X).(*ast.Ident)
+			if !ok || !requests[info.ObjectOf(request)] {
+				continue
+			}
+			if writer, ok := scope.callee(call); ok && auditWriterDetachesContext(writer) {
+				continue
+			}
+			unsafeWrite = true
+		}
+		return !unsafeWrite
+	})
+	return unsafeWrite
+}
+
+func auditWriterDetachesContext(fn typedFuncDecl) bool {
+	if fn.decl.Body == nil {
+		return false
+	}
+	detached := false
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if isSelectorCall(call, "context", "WithTimeout") {
+			ast.Inspect(call, func(node ast.Node) bool {
+				inner, ok := node.(*ast.CallExpr)
+				if ok && isSelectorCall(inner, "context", "WithoutCancel") {
+					detached = true
+				}
+				return !detached
+			})
+		}
+		return !detached
+	})
+	return detached
+}
+
+func isNamedPointerType(typ types.Type, pkgPath, name string) bool {
+	ptr, ok := types.Unalias(typ).(*types.Pointer)
+	if !ok {
+		return false
+	}
+	named, ok := types.Unalias(ptr.Elem()).(*types.Named)
+	return ok && named.Obj().Name() == name && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == pkgPath
 }
 
 // cancellableDerivations are the context functions whose result is

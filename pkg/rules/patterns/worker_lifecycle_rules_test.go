@@ -587,3 +587,58 @@ func confirmOffer(createdAt time.Time) bool {
 `,
 	}))
 }
+
+func TestPostSideEffectAuditWriteUsesRequestContext(t *testing.T) {
+	assert.Equal(t, []string{"web/middleware.go:33"}, typedFuncFindings(t, NewPostSideEffectWriteUsesRequestContextRule(), map[string]string{
+		"web/middleware.go": `package web
+
+import (
+	"context"
+	"net/http"
+	"time"
+)
+
+type AuditRepo struct{}
+func (a *AuditRepo) Record(ctx context.Context, entry string) error { return nil }
+type DetachedAuditRepo struct{}
+func (a *DetachedAuditRepo) Record(ctx context.Context, entry string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancel()
+	return StoreChangeRecord(ctx, entry)
+}
+func StoreChangeRecord(ctx context.Context, entry string) error { return nil }
+type Router struct {
+	audit *AuditRepo
+	detached *DetachedAuditRepo
+}
+
+func (r *Router) auditRecord(req *http.Request) {
+	_ = r.audit.Record(req.Context(), "changed")
+}
+
+func (r *Router) detachedAuditRecord(req *http.Request) {
+	_ = r.detached.Record(req.Context(), "changed")
+}
+
+func (r *Router) Serve(next http.Handler, w http.ResponseWriter, req *http.Request) {
+	next.ServeHTTP(w, req)
+	r.auditRecord(req)
+}
+
+func (r *Router) ServeDetached(next http.Handler, w http.ResponseWriter, req *http.Request) {
+	next.ServeHTTP(w, req)
+	r.detachedAuditRecord(req)
+}
+
+func (r *Router) ServeWithOrdinaryLog(next http.Handler, w http.ResponseWriter, req *http.Request) {
+	next.ServeHTTP(w, req)
+	_ = req.Context().Err()
+}
+
+func (r *Router) AuditBeforeHandler(next http.Handler, w http.ResponseWriter, req *http.Request) {
+	r.auditRecord(req)
+	next.ServeHTTP(w, req)
+}
+`,
+	}))
+}
