@@ -109,6 +109,24 @@ changed=$(git diff --name-only | grep '\.go$') || true
 	}))
 }
 
+// A function that selects an env key by its argument and removes the key
+// prefix is a hand-written env parser just like one with a literal key.
+func TestShellDotenvKeyFromFunctionParameter(t *testing.T) {
+	assert.Equal(t, []string{"env.sh:2", "env.sh:3", "env.sh:4"}, shellFindings(t, "hand-rolled-dotenv-parser", map[string]string{
+		"env.sh": `#!/bin/sh
+val() { grep -h "^$1=" .env /run/app/secrets.env | cut -d= -f2-; }
+other() { grep "^$1=" .env | sed 's/^.*=//'; }
+read_key() { grep -h "^$1=" .env | cut -d '=' -f 2-; }
+`,
+	}))
+	assert.Empty(t, shellFindings(t, "hand-rolled-dotenv-parser", map[string]string{
+		"fixed.sh": `source_env() { . ./.env; }
+grep "^$1=" config.txt | cut -d= -f2-
+grep "^$1=" .env
+`,
+	}))
+}
+
 // A sed program rewrites .env for docker: it strips quotes and comments its
 // own way, and a value with quotes, $ or an inline comment changes on the way.
 func TestShellDotenvRewrittenBySed(t *testing.T) {

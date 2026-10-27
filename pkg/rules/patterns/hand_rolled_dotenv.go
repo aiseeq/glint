@@ -152,7 +152,7 @@ func (r *HandRolledDotenvParserRule) shellRewrites(src *shellSource) []*core.Vio
 	var out []*core.Violation
 	for _, l := range src.lines {
 		for _, seg := range segments(l.text) {
-			if !textFilter.MatchString(seg.text) || inPlaceEdit.MatchString(seg.text) || !dotenvPath.MatchString(seg.text) || !dotenvSyntax.MatchString(seg.text) {
+			if !textFilter.MatchString(seg.text) || inPlaceEdit.MatchString(seg.text) || !dotenvPath.MatchString(seg.text) || !dotenvSyntax.MatchString(seg.text) || dotenvKeyGrep.MatchString(seg.text) || dotenvParamKeyGrep.MatchString(seg.text) {
 				continue
 			}
 			out = appendReport(out, src.report(r, l.lineAt(seg.offset),
@@ -165,9 +165,11 @@ func (r *HandRolledDotenvParserRule) shellRewrites(src *shellSource) []*core.Vio
 
 var (
 	// dotenvKeyGrep is a grep for the line of one key: grep '^KEY='.
-	dotenvKeyGrep  = regexp.MustCompile(`\bgrep\b[^|]*\^([A-Za-z_][A-Za-z0-9_]*)=`)
-	cutAfterEquals = regexp.MustCompile(`\bcut\s+-d\s*['"]?=['"]?\s+-f\s*2`)
-	captureVar     = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)=\$\(`)
+	dotenvKeyGrep      = regexp.MustCompile(`\bgrep\b[^|]*\^([A-Za-z_][A-Za-z0-9_]*)=`)
+	dotenvParamKeyGrep = regexp.MustCompile(`\bgrep\b[^|]*\^"?\$[1-9]=`)
+	cutAfterEquals     = regexp.MustCompile(`\bcut\s+-d\s*['"]?=['"]?\s+-f\s*2`)
+	sedAfterEquals     = regexp.MustCompile(`\bsed\b[^|]*s/[^/]*=[^/]*/`)
+	captureVar         = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)=\$\(`)
 )
 
 // shellKeyReads reports a key read out of .env with grep and its name cut
@@ -178,12 +180,19 @@ func (r *HandRolledDotenvParserRule) shellKeyReads(src *shellSource) []*core.Vio
 	var out []*core.Violation
 	for i, l := range src.lines {
 		m := dotenvKeyGrep.FindStringSubmatch(l.text)
-		if m == nil || !dotenvPath.MatchString(l.text) || strings.Contains(l.text, "grep -q") {
+		paramKey := dotenvParamKeyGrep.MatchString(l.text)
+		if (m == nil && !paramKey) || !dotenvPath.MatchString(l.text) || strings.Contains(l.text, "grep -q") {
 			continue
 		}
-		key := m[1]
-		stripped := cutAfterEquals.MatchString(l.text) || strings.Contains(l.text, "s/^"+key+"=//")
-		if !stripped {
+		key := ""
+		if m != nil {
+			key = m[1]
+		}
+		stripped := cutAfterEquals.MatchString(l.text) || sedAfterEquals.MatchString(l.text)
+		if !stripped && key != "" {
+			stripped = strings.Contains(l.text, "s/^"+key+"=//")
+		}
+		if !stripped && key != "" {
 			if c := captureVar.FindStringSubmatch(l.text); c != nil {
 				for _, later := range src.lines[i+1:] {
 					if strings.Contains(later.text, "${"+c[1]+"#"+key+"=}") {
