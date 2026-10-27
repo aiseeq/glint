@@ -137,6 +137,12 @@ tasks:
   all:
     desc: every check - fmt-check, vet, lint, tests, race, glint on itself; before install
     run: [{task: fmt-check}, {task: vet}, {task: lint}, {task: test}, {task: test-race}, {task: self-check}]
+  consumers:
+    desc: compare old and new glint across configured consumers
+    heavy: true
+    deps: [build]
+    usage: -config PATH, -old PATH, -new PATH, -r rules, -j N, -only a,b
+    run: ['go build -o bin/consumers ./tools/consumers', 'bin/consumers -new bin/glint -j {threads} {args}']
   self-check:
     desc: glint on itself, built from this tree
     heavy: true

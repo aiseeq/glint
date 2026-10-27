@@ -61,6 +61,7 @@ graft init      # git hooks
 graft build     # bin/glint
 graft install   # ~/bin/glint
 graft help      # every task
+graft consumers # compare installed and new glint on configured projects
 ```
 
 ## Quick Start
