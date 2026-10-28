@@ -74,7 +74,7 @@ func (r *SpreadsheetGetRowsTruncatesOnCellErrorRule) AnalyzeGoProject(project *c
 				v := r.CreateViolation(ctx.RelPath, line,
 					"GetRows result is trusted as a complete sheet without checking individual cell reads")
 				v.WithCode(ctx.GetLine(line))
-				v.WithSuggestion("Check cell reads across the sheet dimensions, or read rows through an iterator and handle its row and column errors")
+				v.WithSuggestion("Check cell reads across the sheet dimensions, or read rows through an iterator and handle its row and column errors; the iterator still drops a sheet XML decoding error, so compare the rows read with GetSheetDimension when a cut-off file matters")
 				violations = append(violations, v)
 				return true
 			})
