@@ -133,14 +133,14 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 			}
 			// An encoder reads every exported field on the program's behalf,
 			// so a setting of a type that is marshalled is not dead.
-			if (field.setting || field.exported) && field.named != nil && access.encoded[field.named] {
+			if (field.setting || field.exported || field.request) && field.named != nil && access.encoded[field.named] {
 				continue
 			}
 			// A value boxed into any may be read by reflection behind it.
-			if field.exported && field.named != nil && access.boxed[field.named] {
+			if (field.exported || field.request) && field.named != nil && access.boxed[field.named] {
 				continue
 			}
-			if mentions.mentioned(field.fileCtx, field.fieldName) || (field.exported && mentions.mentionedAnywhere(field.fieldName)) {
+			if (!field.request && mentions.mentioned(field.fileCtx, field.fieldName)) || (field.exported && !field.request && mentions.mentionedAnywhere(field.fieldName)) {
 				continue
 			}
 			// A filter field nobody sets is unused surface; one callers set

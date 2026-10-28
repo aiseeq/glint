@@ -406,6 +406,94 @@ func complete(req *CompleteRequest) { _ = req.ID }
 	assert.Contains(t, violations[0].Message, "CompleteRequest.Note")
 }
 
+func TestUnusedFieldAcceptsRequestSerializedThroughInterface(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"api/request.go": `package api
+
+type CreateRequest struct {
+	Payload string ` + "`json:\"payload\"`" + `
+}
+
+func postJSONCall(body any) {}
+
+func send(req *CreateRequest) { postJSONCall(req) }
+
+func handle() { send(&CreateRequest{Payload: "value"}) }
+`,
+	})
+	assert.Empty(t, violations)
+}
+
+func TestUnusedFieldAcceptsMarshalledRequest(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"api/request.go": `package api
+
+import "encoding/json"
+
+type CreateRequest struct {
+	Payload string ` + "`json:\"payload\"`" + `
+}
+
+func encode() ([]byte, error) {
+	return json.Marshal(&CreateRequest{Payload: "value"})
+}
+`,
+	})
+	assert.Empty(t, violations)
+}
+
+func TestUnusedFieldReportsCollectedFieldDespiteTestFormatting(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"data/rows.go": `package data
+
+type Row struct { label string }
+
+func collect() []Row { return []Row{{label: "x"}} }
+`,
+		"data/rows_test.go": `package data
+
+import "testing"
+
+func TestCollect(t *testing.T) { t.Logf("rows: %+v", collect()) }
+`,
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+	require.NoError(t, err)
+
+	violations, err := NewUnusedFieldRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Row.label")
+}
+
+func TestUnusedFieldReportsRequestFieldDespiteSameNameOnOtherTypeInTest(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"api/request.go": `package api
+
+type CreateRequest struct {
+	Payload string ` + "`json:\"payload\"`" + `
+}
+
+func build() *CreateRequest { return &CreateRequest{Payload: ""} }
+
+type Event struct { Payload string }
+`,
+		"api/request_test.go": `package api
+
+import "testing"
+
+func TestEvent(t *testing.T) { _ = Event{Payload: "x"}.Payload }
+`,
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+	require.NoError(t, err)
+
+	violations, err := NewUnusedFieldRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "CreateRequest.Payload")
+}
+
 func TestUnusedFieldAcceptsLiveAndUnfilledRequestAndOtherTaggedType(t *testing.T) {
 	violations := analyzeFields(t, map[string]string{
 		"api/request.go": `package api
