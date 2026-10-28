@@ -33,6 +33,28 @@ var maxDateExpr = regexp.MustCompile(`(?is)\bMAX\s*\(\s*(\w+)\s*\)\s+AS\s+(\w+)`
 var multiKeyOrder = regexp.MustCompile(`(?is)\bORDER\s+BY\s+\w+\s*\.\s*\w+\s*,\s*\w+\s*\.\s*\w+|\bORDER\s+BY\s+\w+\s*,\s*\w+`)
 var globalMaxSubquery = regexp.MustCompile(`(?is)\bWHERE\s+(\w+)\s*=\s*\(\s*SELECT\s+MAX\s*\(\s*(\w+)\s*\)\s+FROM\s+(\S+)(?:\s+WHERE\s+([^)]*))?\)`)
 var qualifiedColumn = regexp.MustCompile(`\b\w+\s*\.\s*\w+\b`)
+var comparedColumn = regexp.MustCompile(`(?i)\b([a-z_]\w*)\s*(?:=|<>|!=|\bIN\b)`)
+
+// maxFiltersKeys reports a WHERE of the MAX(date) query that compares a column
+// other than the date: the maximum is then taken over a chosen set of keys, and
+// a key of that set missing on the date drops out. A MAX over the whole table,
+// or bounded by the date only, is the date of the latest complete publication.
+func maxFiltersKeys(where, dateColumn string) bool {
+	for _, match := range comparedColumn.FindAllStringSubmatch(where, -1) {
+		if !strings.EqualFold(match[1], dateColumn) {
+			return true
+		}
+	}
+	return false
+}
+
+func cteWhere(body string) string {
+	at := strings.Index(strings.ToLower(body), "where")
+	if at < 0 {
+		return ""
+	}
+	return body[at+len("where"):]
+}
 
 // AnalyzeFile reports global date maxima used to filter rows for multiple keys.
 func (r *SQLGlobalMaxUsedAsPerGroupLatestRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
@@ -46,14 +68,14 @@ func (r *SQLGlobalMaxUsedAsPerGroupLatestRule) AnalyzeFile(ctx *core.FileContext
 		if len(match) > 0 {
 			cteName, cteBody, outerProjection, table, beforeWhere, filterDate, selectedColumn, selectedCTE := match[1], match[2], match[3], match[4], match[5], match[6], match[7], match[8]
 			max := maxDateExpr.FindStringSubmatch(cteBody)
-			if len(max) == 0 || !strings.EqualFold(cteName, selectedCTE) || !strings.EqualFold(max[2], selectedColumn) || !strings.EqualFold(max[1], filterDate) || !strings.Contains(strings.ToLower(cteBody), "from "+strings.ToLower(table)) || !strings.Contains(strings.ToLower(outerProjection), strings.ToLower(filterDate)) {
+			if len(max) == 0 || !maxFiltersKeys(cteWhere(cteBody), max[1]) || !strings.EqualFold(cteName, selectedCTE) || !strings.EqualFold(max[2], selectedColumn) || !strings.EqualFold(max[1], filterDate) || !strings.Contains(strings.ToLower(cteBody), "from "+strings.ToLower(table)) || !strings.Contains(strings.ToLower(outerProjection), strings.ToLower(filterDate)) {
 				continue
 			}
 			dateColumn, suffix = filterDate, beforeWhere+match[9]
 			offset = strings.Index(strings.ToLower(literal.text), "where "+strings.ToLower(dateColumn))
 		} else {
 			subquery := globalMaxSubquery.FindStringSubmatch(literal.text)
-			if len(subquery) == 0 || !strings.EqualFold(subquery[1], subquery[2]) || qualifiedColumn.MatchString(subquery[4]) || !multiKeyOrder.MatchString(literal.text) {
+			if len(subquery) == 0 || !strings.EqualFold(subquery[1], subquery[2]) || qualifiedColumn.MatchString(subquery[4]) || !maxFiltersKeys(subquery[4], subquery[2]) || !multiKeyOrder.MatchString(literal.text) {
 				continue
 			}
 			dateColumn, suffix = subquery[1], literal.text
