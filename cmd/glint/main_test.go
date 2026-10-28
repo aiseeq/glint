@@ -17,6 +17,35 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/typesafety"
 )
 
+// TestMain points model-not-approved at a list of its own, so that no test
+// reads the approved list of the machine it runs on.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "glint-cmd-test")
+	if err != nil {
+		panic(err)
+	}
+	code := runWithApprovedModels(m, dir)
+	if err := os.RemoveAll(dir); err != nil {
+		panic(err)
+	}
+	os.Exit(code)
+}
+
+func runWithApprovedModels(m *testing.M, dir string) int {
+	path := filepath.Join(dir, "approved")
+	if err := os.WriteFile(path, []byte("opus claude-opus-5-5\n"), 0o644); err != nil {
+		panic(err)
+	}
+	rule, ok := rules.Get("model-not-approved")
+	if !ok {
+		panic("model-not-approved is not registered")
+	}
+	if err := rule.Configure(map[string]any{"approved_file": path}); err != nil {
+		panic(err)
+	}
+	return m.Run()
+}
+
 func TestMainE2EHelper(t *testing.T) {
 	if os.Getenv("GLINT_MAIN_E2E") != "1" {
 		return

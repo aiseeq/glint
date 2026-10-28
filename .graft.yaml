@@ -58,7 +58,6 @@ tasks:
     heavy: true
     cache: &tools_cache
       commands: [[go, version], [tsc, --version], [shellcheck, --version]]
-      files: ['~/.config/models/approved']
     tests: go
     usage: <go test flags, e.g. -run TestX>
     env: {GOFLAGS: -tags=pgquery_cgo}
