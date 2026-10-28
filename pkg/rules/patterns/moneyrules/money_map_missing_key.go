@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -148,43 +149,27 @@ func moneyMapValueFeedsField(info *types.Info, body *ast.BlockStmt, lookup *ast.
 }
 
 func expressionContainsNode(expr ast.Expr, target ast.Node) bool {
-	found := false
-	ast.Inspect(expr, func(node ast.Node) bool {
-		if node == target {
-			found = true
-			return false
-		}
-		return !found
+	return helpers.ContainsNode[ast.Node](expr, func(node ast.Node) bool {
+		return node == target
 	})
-	return found
 }
 
 func expressionContainsIdentifier(info *types.Info, expr ast.Expr, target types.Object) bool {
-	found := false
-	ast.Inspect(expr, func(node ast.Node) bool {
-		if id, ok := node.(*ast.Ident); ok && info.ObjectOf(id) == target {
-			found = true
-			return false
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](expr, func(id *ast.Ident) bool {
+		return info.ObjectOf(id) == target
 	})
-	return found
 }
 
 func moneyMapLookupHasCommaOK(body *ast.BlockStmt, lookup *ast.IndexExpr) bool {
-	found := false
-	ast.Inspect(body, func(node ast.Node) bool {
-		assign, ok := node.(*ast.AssignStmt)
-		if !ok || len(assign.Lhs) != 2 {
-			return true
+	return helpers.ContainsNode[*ast.AssignStmt](body, func(assign *ast.AssignStmt) bool {
+		if len(assign.Lhs) != 2 {
+			return false
 		}
 		for _, rhs := range assign.Rhs {
 			if index, ok := rhs.(*ast.IndexExpr); ok && index == lookup {
-				found = true
-				return false
+				return true
 			}
 		}
-		return !found
+		return false
 	})
-	return found
 }

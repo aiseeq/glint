@@ -281,14 +281,9 @@ func (c *sqlTaintCheck) usesAny(expr ast.Expr, targets []ast.Expr) bool {
 			vars[v] = true
 		}
 	}
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && vars[c.varOf(ident)] {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](expr, func(ident *ast.Ident) bool {
+		return vars[c.varOf(ident)]
 	})
-	return found
 }
 
 func (c *sqlTaintCheck) markValidated(expr ast.Expr) {

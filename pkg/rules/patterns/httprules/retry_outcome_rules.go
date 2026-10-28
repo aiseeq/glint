@@ -898,14 +898,9 @@ func NewValidationAfterCommittedInsertRule() *patternkit.TypedFuncRule {
 
 // runsInTransaction reports a body that opens or runs in a transaction.
 func runsInTransaction(body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && slices.Contains(transactionCalls, helpers.CalleeName(call)) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		return slices.Contains(transactionCalls, helpers.CalleeName(call))
 	})
-	return found
 }
 
 // insertedEntity returns the variable a statement hands to a Create or

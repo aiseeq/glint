@@ -770,14 +770,9 @@ func creatingReceiver(call *ast.CallExpr, handles map[string]bool) string {
 
 // nodeMentions reports a node reading one of the names.
 func nodeMentions(node ast.Node, names map[string]bool) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && names[ident.Name] {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](node, func(ident *ast.Ident) bool {
+		return names[ident.Name]
 	})
-	return found
 }
 
 // --- test-deletes-shared-data ----------------------------------------------
@@ -899,14 +894,9 @@ func rowSelectingArgs(call *ast.CallExpr) []ast.Expr {
 // makesIsolatedDatabase reports a file that creates an isolated database for
 // its tests (CreateIsolatedTestDB): its rows are not the application's.
 func makesIsolatedDatabase(file *ast.File) bool {
-	found := false
-	ast.Inspect(file, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && strings.Contains(strings.ToLower(helpers.CalleeName(call)), "isolated") {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](file, func(call *ast.CallExpr) bool {
+		return strings.Contains(strings.ToLower(helpers.CalleeName(call)), "isolated")
 	})
-	return found
 }
 
 // productionImports returns the names of the imported packages of the

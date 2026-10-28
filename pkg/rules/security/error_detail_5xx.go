@@ -381,14 +381,9 @@ func writerParameter(fn *ast.FuncDecl) string {
 func (r *ErrorDetailResponseRule) parameterLeaks(body *ast.BlockStmt, name, writer string) bool {
 	tainted := map[string]bool{name: true}
 	carries := func(expr ast.Expr) bool {
-		found := false
-		ast.Inspect(expr, func(n ast.Node) bool {
-			if ident, ok := n.(*ast.Ident); ok && tainted[ident.Name] {
-				found = true
-			}
-			return !found
+		return helpers.ContainsNode[*ast.Ident](expr, func(ident *ast.Ident) bool {
+			return tainted[ident.Name]
 		})
-		return found
 	}
 	guarded := guardedAssignments(body, name)
 	for changed := true; changed; {
@@ -476,14 +471,9 @@ func accessRoot(expr ast.Expr) *ast.Ident {
 // mentions reports a node naming the identifier: a call in its function or
 // arguments, a condition anywhere.
 func mentions(node ast.Node, name string) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && ident.Name == name {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](node, func(ident *ast.Ident) bool {
+		return ident.Name == name
 	})
-	return found
 }
 
 // writesResponse reports a call handed the response writer: its first

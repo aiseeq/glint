@@ -374,14 +374,9 @@ func derivedFrom(value, tag ast.Expr) bool {
 		}
 		return true
 	})
-	found := false
-	ast.Inspect(value, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && vars[id.Name] {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](value, func(id *ast.Ident) bool {
+		return vars[id.Name]
 	})
-	return found
 }
 
 // refName is the name an identifier or a package selector refers to.

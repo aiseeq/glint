@@ -92,6 +92,26 @@ func PackageAliases(file *ast.File, path, defaultName string) map[string]bool {
 	return aliases
 }
 
+// ContainsNode reports whether any node of type T under root satisfies match.
+// It stops walking as soon as the first matching node is found.
+func ContainsNode[T ast.Node](root ast.Node, match func(T) bool) bool {
+	if root == nil {
+		return false
+	}
+
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if node, ok := n.(T); ok && match(node) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
 // ParentMap maps every node under root to its parent.
 func ParentMap(root ast.Node) map[ast.Node]ast.Node {
 	parents := make(map[ast.Node]ast.Node)

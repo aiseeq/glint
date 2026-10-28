@@ -1340,14 +1340,9 @@ func (r *MultiWriteNoTransactionRule) runsCallbackInTransaction(body *ast.BlockS
 
 // usesCallback reports whether the expression names one of the callbacks.
 func usesCallback(expr ast.Expr, info *types.Info, callbacks map[types.Object]bool) bool {
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && callbacks[info.Uses[ident]] {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](expr, func(ident *ast.Ident) bool {
+		return callbacks[info.Uses[ident]]
 	})
-	return found
 }
 
 // isIndependent reports whether the call's writes belong to another unit of work.

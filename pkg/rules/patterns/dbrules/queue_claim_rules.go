@@ -421,14 +421,9 @@ func leavesAnywhere(block *ast.BlockStmt) bool {
 
 // writesAfter reports a write call in body after pos.
 func writesAfter(body *ast.BlockStmt, pos token.Pos) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && call.Pos() > pos && (helpers.IsWriteName(helpers.CalleeName(call)) || helpers.HasLeadingWord(helpers.CalleeName(call), "Set")) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		return call.Pos() > pos && (helpers.IsWriteName(helpers.CalleeName(call)) || helpers.HasLeadingWord(helpers.CalleeName(call), "Set"))
 	})
-	return found
 }
 
 // completedTakenAsCancelled reports, in a function returning a bool, the

@@ -241,14 +241,9 @@ func clockModulo(expr ast.Expr, clock map[string]bool) bool {
 // disambiguated reports a value that also carries a random part, a UUID or a
 // counter.
 func disambiguated(expr ast.Expr) bool {
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && disambiguator.MatchString(ident.Name) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](expr, func(ident *ast.Ident) bool {
+		return disambiguator.MatchString(ident.Name)
 	})
-	return found
 }
 
 // namesUniqueValue reports a name for a value meant to tell records apart:

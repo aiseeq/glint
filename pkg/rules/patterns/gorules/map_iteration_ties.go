@@ -43,14 +43,9 @@ func loopTaint(rangeStmt *ast.RangeStmt) map[string]bool {
 
 // readsAnyName reports whether the expression reads one of the names.
 func readsAnyName(expr ast.Expr, names map[string]bool) bool {
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && names[ident.Name] {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](expr, func(ident *ast.Ident) bool {
+		return names[ident.Name]
 	})
-	return found
 }
 
 // inspectLoopBody walks the body of a map loop, leaving out function literals

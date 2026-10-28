@@ -298,14 +298,9 @@ func selectReads(info *types.Info, sel *ast.SelectStmt, queue *types.Var) (reads
 
 // timerReceive reports a select case receiving from time.After or a timer's C.
 func timerReceive(comm ast.Stmt) bool {
-	found := false
-	ast.Inspect(comm, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && patternkit.IsSelectorCall(call, "time", "After") {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](comm, func(call *ast.CallExpr) bool {
+		return patternkit.IsSelectorCall(call, "time", "After")
 	})
-	return found
 }
 
 // isQueueField reports an expression that is the queue field.

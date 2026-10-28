@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -123,14 +124,9 @@ func measuredNames(files []*core.FileContext) map[string]bool {
 
 // callsName reports whether a body calls something of the name.
 func callsName(body ast.Node, name string) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && patternkit.CalledName(call) == name {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		return patternkit.CalledName(call) == name
 	})
-	return found
 }
 
 // measuredFunctions returns the loaded functions an allocation measurement

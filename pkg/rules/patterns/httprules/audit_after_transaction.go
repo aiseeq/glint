@@ -104,14 +104,7 @@ func txRunnerCall(stmt ast.Stmt) *ast.CallExpr {
 
 // callsAudit reports a node calling something named for an audit.
 func callsAudit(node ast.Node) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && isAuditCall(call) {
-			found = true
-		}
-		return !found
-	})
-	return found
+	return helpers.ContainsNode[*ast.CallExpr](node, isAuditCall)
 }
 
 // isAuditCall reports a call named for an audit (recordLedgerAudit) or made

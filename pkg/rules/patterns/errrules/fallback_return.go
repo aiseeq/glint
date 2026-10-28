@@ -248,6 +248,10 @@ type failedCall struct {
 
 // okCallResults returns the result variables of `v, ok := call()`.
 func okCallResults(stmt ast.Stmt) (map[string]bool, string) {
+	return callResults(stmt, func(name string) bool { return name == "ok" })
+}
+
+func callResults(stmt ast.Stmt, validResultName func(string) bool) (map[string]bool, string) {
 	assign, ok := stmt.(*ast.AssignStmt)
 	if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) < 2 {
 		return nil, ""
@@ -256,7 +260,7 @@ func okCallResults(stmt ast.Stmt) (map[string]bool, string) {
 		return nil, ""
 	}
 	okIdent, ok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
-	if !ok || okIdent.Name != "ok" {
+	if !ok || !validResultName(okIdent.Name) {
 		return nil, ""
 	}
 	results := make(map[string]bool)
@@ -585,27 +589,7 @@ func readsAnyOf(expr ast.Expr, names map[string]bool) bool {
 // failedCallResults returns the result variables and the error variable of
 // `v1, v2, err := call()` (or =).
 func failedCallResults(stmt ast.Stmt) (map[string]bool, string) {
-	assign, ok := stmt.(*ast.AssignStmt)
-	if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) < 2 {
-		return nil, ""
-	}
-	if _, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr); !ok {
-		return nil, ""
-	}
-	errIdent, ok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
-	if !ok || !patternkit.IsErrorVarName(errIdent.Name) {
-		return nil, ""
-	}
-	results := make(map[string]bool)
-	for _, lhs := range assign.Lhs[:len(assign.Lhs)-1] {
-		if ident, ok := lhs.(*ast.Ident); ok && ident.Name != "_" {
-			results[ident.Name] = true
-		}
-	}
-	if len(results) == 0 {
-		return nil, ""
-	}
-	return results, errIdent.Name
+	return callResults(stmt, patternkit.IsErrorVarName)
 }
 
 // detectReplacedResult reports, in the `if err != nil` that follows a call,

@@ -447,14 +447,9 @@ var sqlLowerFold = regexp.MustCompile(`(?i)\blower\s*\(`)
 
 // foldsInSQL reports a body with a string literal that folds a column in SQL.
 func foldsInSQL(body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && sqlLowerFold.MatchString(lit.Value) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.BasicLit](body, func(lit *ast.BasicLit) bool {
+		return lit.Kind == token.STRING && sqlLowerFold.MatchString(lit.Value)
 	})
-	return found
 }
 
 // foldsNotKeys returns the folds of a body that read an address's form
@@ -580,26 +575,14 @@ func methodReceiver(info *types.Info, fn *ast.FuncDecl) *types.Named {
 
 // callsCanonicalizer reports a body calling an address canonicalizer.
 func callsCanonicalizer(body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && canonicalCall(call) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		return canonicalCall(call)
 	})
-	return found
 }
 
 // callsWrite reports a body calling a method whose name leads with a write verb.
 func callsWrite(body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && patternkit.IsWriteCall(call) {
-			found = true
-		}
-		return !found
-	})
-	return found
+	return helpers.ContainsNode[*ast.CallExpr](body, patternkit.IsWriteCall)
 }
 
 // canonicalizingMethods returns, by receiver type, the exported methods

@@ -78,14 +78,9 @@ func (r *SQLLikePatternUnescapedRule) AnalyzeFile(ctx *core.FileContext) []*core
 // runsLike reports a body with a string literal holding a LIKE on a bound
 // parameter.
 func runsLike(body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && likeOperator.MatchString(lit.Value) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.BasicLit](body, func(lit *ast.BasicLit) bool {
+		return lit.Kind == token.STRING && likeOperator.MatchString(lit.Value)
 	})
-	return found
 }
 
 // unescapedLikePattern reports "%" + v + "%", "%" + v, v + "%" and

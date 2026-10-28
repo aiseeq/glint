@@ -874,14 +874,9 @@ func callTakesNames(expr ast.Expr, names map[string]bool) bool {
 
 // mentionsNames reports an expression reading an identifier of names.
 func mentionsNames(expr ast.Expr, names map[string]bool) bool {
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && names[id.Name] {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](expr, func(id *ast.Ident) bool {
+		return names[id.Name]
 	})
-	return found
 }
 
 // marksItem reports a block that hands the item to a call other than a

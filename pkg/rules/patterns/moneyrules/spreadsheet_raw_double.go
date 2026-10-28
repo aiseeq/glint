@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -518,16 +519,9 @@ func objectPackage(info *types.Info, fn *ast.FuncDecl) *types.Package {
 }
 
 func hasExactDecimalParse(info *types.Info, body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if ok && isExactDecimalStringParse(info, call) {
-			found = true
-			return false
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		return isExactDecimalStringParse(info, call)
 	})
-	return found
 }
 
 func isExactDecimalStringParse(info *types.Info, call *ast.CallExpr) bool {
@@ -537,27 +531,15 @@ func isExactDecimalStringParse(info *types.Info, call *ast.CallExpr) bool {
 }
 
 func hasSpreadsheetNormalization(info *types.Info, body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if ok && (isSpreadsheetCellTypeCall(info, call) || isSpreadsheetPrecisionFormat(info, call)) {
-			found = true
-			return false
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		return isSpreadsheetCellTypeCall(info, call) || isSpreadsheetPrecisionFormat(info, call)
 	})
-	return found
 }
 
 func hasSpreadsheetPrecisionFormat(info *types.Info, body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && isSpreadsheetPrecisionFormat(info, call) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		return isSpreadsheetPrecisionFormat(info, call)
 	})
-	return found
 }
 
 func reachesNormalizer(decl patternkit.TypedFuncDecl, direct map[*types.Func]bool, functions map[*types.Func]patternkit.TypedFuncDecl, depth int, seen map[*types.Func]bool) bool {

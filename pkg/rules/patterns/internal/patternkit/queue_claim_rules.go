@@ -2,19 +2,14 @@ package patternkit
 
 import (
 	"go/ast"
+
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"go/types"
 )
 
 // CallsAny reports a call under node that pass accepts, outside func literals.
 func CallsAny(node ast.Node, pass func(*ast.CallExpr) bool) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && pass(call) {
-			found = true
-		}
-		return !found
-	})
-	return found
+	return helpers.ContainsNode[*ast.CallExpr](node, pass)
 }
 
 // TypeUnderlying returns the underlying type of t, nil for none.

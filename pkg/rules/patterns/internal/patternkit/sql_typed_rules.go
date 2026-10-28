@@ -3,16 +3,13 @@ package patternkit
 import (
 	"go/ast"
 	"go/types"
+
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // MentionsObject reports an expression or a statement using the object.
 func MentionsObject(info *types.Info, node ast.Node, obj types.Object) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && info.ObjectOf(id) == obj {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](node, func(id *ast.Ident) bool {
+		return info.ObjectOf(id) == obj
 	})
-	return found
 }

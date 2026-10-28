@@ -124,14 +124,9 @@ func returnsFalseAfter(stmts []ast.Stmt, channel string) bool {
 // namesChannel reports a node calling something whose name holds the
 // channel (sendEmail for "email").
 func namesChannel(node ast.Node, channel string) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && strings.Contains(strings.ToLower(helpers.CalleeName(call)), strings.ToLower(channel)) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](node, func(call *ast.CallExpr) bool {
+		return strings.Contains(strings.ToLower(helpers.CalleeName(call)), strings.ToLower(channel))
 	})
-	return found
 }
 
 // callerAttempts returns the name of a caller of fn that, on fn's false,

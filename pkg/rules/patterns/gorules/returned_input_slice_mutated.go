@@ -1,6 +1,7 @@
 package gorules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -181,12 +182,7 @@ func elementFieldOf(info *types.Info, expr ast.Expr, result *types.Var) bool {
 }
 
 func sliceReadAfter(info *types.Info, body *ast.BlockStmt, original types.Object, pos token.Pos) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && id.Pos() > pos && info.Uses[id] == original {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](body, func(id *ast.Ident) bool {
+		return id.Pos() > pos && info.Uses[id] == original
 	})
-	return found
 }

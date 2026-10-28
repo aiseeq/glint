@@ -457,14 +457,9 @@ func NewHMACVerifiedWithEmptySecretRule() *patternkit.TypedFuncRule {
 // verifiesMAC reports a body comparing a MAC: hmac.Equal or a constant-time
 // compare.
 func verifiesMAC(info *types.Info, body ast.Node) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && (patternkit.IsPkgFunc(info, call, "crypto/hmac", "Equal") || patternkit.IsPkgFunc(info, call, "crypto/subtle", "ConstantTimeCompare")) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		return patternkit.IsPkgFunc(info, call, "crypto/hmac", "Equal") || patternkit.IsPkgFunc(info, call, "crypto/subtle", "ConstantTimeCompare")
 	})
-	return found
 }
 
 // unconverted strips a []byte(x) conversion.

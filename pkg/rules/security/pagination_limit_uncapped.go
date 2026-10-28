@@ -254,12 +254,7 @@ func lowBound(expr ast.Expr) bool {
 
 // mentionsAny reports an expression naming one of the identifiers.
 func mentionsAny(expr ast.Node, names map[string]bool) bool {
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && names[ident.Name] {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](expr, func(ident *ast.Ident) bool {
+		return names[ident.Name]
 	})
-	return found
 }

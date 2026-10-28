@@ -209,14 +209,9 @@ func (r *SensitiveQueryParameterRule) queryValuesKeys(expr ast.Expr, found func(
 // endsInFragment reports a concatenation operand that holds a string literal
 // with '#': what is appended after it is the fragment.
 func endsInFragment(expr ast.Expr) bool {
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && strings.Contains(lit.Value, "#") {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.BasicLit](expr, func(lit *ast.BasicLit) bool {
+		return lit.Kind == token.STRING && strings.Contains(lit.Value, "#")
 	})
-	return found
 }
 
 // isURLValues reports the type url.Values.
@@ -258,12 +253,7 @@ func secretsInRedirects(ctx *core.FileContext) map[int]bool {
 // mentionsSecretVariable reports an identifier with a secret's name in the
 // expression; a field of another value (user.Password) counts too.
 func mentionsSecretVariable(expr ast.Expr) bool {
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && secretVariableName.MatchString(ident.Name) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](expr, func(ident *ast.Ident) bool {
+		return secretVariableName.MatchString(ident.Name)
 	})
-	return found
 }

@@ -498,14 +498,9 @@ func writesKeysInLoop(scope patternkit.FuncScope, stmts []ast.Stmt, depth int) b
 
 // loopWrites reports a write call in a loop body.
 func loopWrites(body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && helpers.IsWriteName(helpers.CalleeName(call)) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		return helpers.IsWriteName(helpers.CalleeName(call))
 	})
-	return found
 }
 
 // runTimeWorkSets returns the slices and maps that stmts take from a call

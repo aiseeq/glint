@@ -656,14 +656,9 @@ func isForeignSendCommand(info *types.Info, fn *ast.FuncDecl, call *ast.CallExpr
 }
 
 func mentionsAmbiguity(body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && patternkit.HasTokenIn(ident.Name, ambiguityWords) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](body, func(ident *ast.Ident) bool {
+		return patternkit.HasTokenIn(ident.Name, ambiguityWords)
 	})
-	return found
 }
 
 // failureRecording returns the call of a block that stores a failure status:

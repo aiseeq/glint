@@ -477,14 +477,9 @@ func NewFuzzyMatchReturnsFirstCandidateRule() *patternkit.TypedFuncRule {
 func optionNames(info *types.Info, body *ast.BlockStmt, option types.Object) map[types.Object]bool {
 	names := make(map[types.Object]bool)
 	readsName := func(expr ast.Expr) bool {
-		found := false
-		ast.Inspect(expr, func(n ast.Node) bool {
-			if sel, ok := n.(*ast.SelectorExpr); ok && patternkit.IsIdentOf(info, sel.X, option) && patternkit.HasWordFrom(sel.Sel.Name, nameWords) {
-				found = true
-			}
-			return !found
+		return helpers.ContainsNode[*ast.SelectorExpr](expr, func(sel *ast.SelectorExpr) bool {
+			return patternkit.IsIdentOf(info, sel.X, option) && patternkit.HasWordFrom(sel.Sel.Name, nameWords)
 		})
-		return found
 	}
 	names[option] = false
 	for _, stmt := range body.List {

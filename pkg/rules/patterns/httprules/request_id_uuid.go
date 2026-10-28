@@ -138,14 +138,9 @@ func (src *requestSources) isRequest(e ast.Expr) bool {
 
 // fromRequest reports an expression rooted at the request: req.URL.Query().
 func (src *requestSources) fromRequest(e ast.Node) bool {
-	found := false
-	ast.Inspect(e, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && src.info.Uses[ident] == src.request {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](e, func(ident *ast.Ident) bool {
+		return src.info.Uses[ident] == src.request
 	})
-	return found
 }
 
 // noteAssign records query := req.URL.Query() and vars := mux.Vars(req).

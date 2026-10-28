@@ -189,12 +189,7 @@ func comparesRecord(stmt ast.Stmt, record string) bool {
 
 // createsAfter reports a create call in fn after pos.
 func createsAfter(fn *ast.FuncDecl, pos token.Pos) bool {
-	found := false
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && call.Pos() > pos && createCallName.MatchString(helpers.CalleeName(call)) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](fn.Body, func(call *ast.CallExpr) bool {
+		return call.Pos() > pos && createCallName.MatchString(helpers.CalleeName(call))
 	})
-	return found
 }

@@ -500,17 +500,10 @@ func isScanCall(call *ast.CallExpr) bool {
 }
 
 func assertsIn(body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok &&
-				(strings.HasPrefix(selector.Sel.Name, "Error") || strings.HasPrefix(selector.Sel.Name, "Fatal") || selector.Sel.Name == "Fail") {
-				found = true
-			}
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+		return ok && (strings.HasPrefix(selector.Sel.Name, "Error") || strings.HasPrefix(selector.Sel.Name, "Fatal") || selector.Sel.Name == "Fail")
 	})
-	return found
 }
 
 // countedAfter reports a loop whose result is checked: len of the scanned
@@ -790,14 +783,9 @@ func gridIndexNames(file *ast.File, widths map[string]bool) map[string]bool {
 }
 
 func guardsColumn(body *ast.BlockStmt, pos string, widths map[string]bool) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if binary, ok := n.(*ast.BinaryExpr); ok && binary.Op == token.REM && patternkit.IsIdent(binary.X, pos) && widths[types.ExprString(binary.Y)] {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.BinaryExpr](body, func(binary *ast.BinaryExpr) bool {
+		return binary.Op == token.REM && patternkit.IsIdent(binary.X, pos) && widths[types.ExprString(binary.Y)]
 	})
-	return found
 }
 
 func neighborOf(expr ast.Expr, pos string) bool {

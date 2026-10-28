@@ -260,11 +260,15 @@ func perCallFilter(typeName string, sites []constructionSite) bool {
 // declaredOutside reports a named type (or a pointer to one) of a package
 // that is not one of the module's.
 func declaredOutside(t types.Type, module map[string]bool) bool {
+	return namedTypeFrom(t, func(path string) bool { return !module[path] })
+}
+
+func namedTypeFrom(t types.Type, packageMatches func(string) bool) bool {
 	if pointer, ok := types.Unalias(t).(*types.Pointer); ok {
 		t = pointer.Elem()
 	}
 	named, ok := types.Unalias(t).(*types.Named)
-	return ok && named.Obj().Pkg() != nil && !module[named.Obj().Pkg().Path()]
+	return ok && named.Obj().Pkg() != nil && packageMatches(named.Obj().Pkg().Path())
 }
 
 // literalKeys returns the keys a keyed literal sets, sorted and joined.

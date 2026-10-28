@@ -496,16 +496,10 @@ func createsResource(name string) bool {
 // registersCleanup reports a body that calls a Cleanup method — a test
 // helper that closes what it returns when the test ends.
 func registersCleanup(body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok && sel.Sel.Name == "Cleanup" {
-				found = true
-			}
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+		return ok && sel.Sel.Name == "Cleanup"
 	})
-	return found
 }
 
 // returnsSharedValue reports a body whose every return of a value hands out

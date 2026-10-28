@@ -234,14 +234,9 @@ func headOfSeparator(info *types.Info, assigned map[types.Object][]ast.Expr, bod
 // readsTailAt reports a slice of the body starting at the index: s[i:],
 // s[i+1:].
 func readsTailAt(info *types.Info, body *ast.BlockStmt, index types.Object) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if slice, ok := n.(*ast.SliceExpr); ok && slice.Low != nil && patternkit.MentionsObject(info, slice.Low, index) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.SliceExpr](body, func(slice *ast.SliceExpr) bool {
+		return slice.Low != nil && patternkit.MentionsObject(info, slice.Low, index)
 	})
-	return found
 }
 
 // NewExternalRateAcceptedWithoutPositivityCheckRule creates
@@ -546,14 +541,9 @@ func NewAmbiguousDateLayoutsFirstMatchRule() *patternkit.TypedFuncRule {
 
 // parsesDateWithin reports a body calling time.Parse or ParseInLocation.
 func parsesDateWithin(info *types.Info, body *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && (patternkit.IsPkgFunc(info, call, "time", "Parse") || patternkit.IsPkgFunc(info, call, "time", "ParseInLocation")) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+		return patternkit.IsPkgFunc(info, call, "time", "Parse") || patternkit.IsPkgFunc(info, call, "time", "ParseInLocation")
 	})
-	return found
 }
 
 // rangedStringList returns the []string literal a loop ranges over: written
@@ -1050,11 +1040,7 @@ func isStructParam(t types.Type) bool {
 
 // isPoolConfig reports a pgxpool configuration.
 func isPoolConfig(t types.Type) bool {
-	if ptr, ok := types.Unalias(t).(*types.Pointer); ok {
-		t = ptr.Elem()
-	}
-	named, ok := types.Unalias(t).(*types.Named)
-	return ok && named.Obj().Pkg() != nil && strings.HasSuffix(named.Obj().Pkg().Path(), "/pgxpool")
+	return namedTypeFrom(t, func(path string) bool { return strings.HasSuffix(path, "/pgxpool") })
 }
 
 // convertedSelector returns x.F of x.F or of a conversion int32(x.F).

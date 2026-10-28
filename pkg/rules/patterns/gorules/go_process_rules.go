@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -270,14 +271,9 @@ func isExecCmd(t types.Type) bool {
 
 // killsProcess reports whether the node calls cmd.Process.Kill().
 func killsProcess(node ast.Node, cmd types.Object, info *types.Info) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && isProcessKill(call, cmd, info) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](node, func(call *ast.CallExpr) bool {
+		return isProcessKill(call, cmd, info)
 	})
-	return found
 }
 
 func isProcessKill(call *ast.CallExpr, cmd types.Object, info *types.Info) bool {
@@ -295,14 +291,9 @@ func isProcessKill(call *ast.CallExpr, cmd types.Object, info *types.Info) bool 
 
 // waitsFor reports whether the node calls cmd.Wait().
 func waitsFor(node ast.Node, cmd types.Object, info *types.Info) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && isMethodOn(call, cmd, info, "Wait") {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](node, func(call *ast.CallExpr) bool {
+		return isMethodOn(call, cmd, info, "Wait")
 	})
-	return found
 }
 
 // killedWithoutWait reports a kill in a block that ends in a return with no
@@ -381,14 +372,9 @@ func returnsObject(ret *ast.ReturnStmt, obj types.Object, info *types.Info) bool
 }
 
 func defersWait(body *ast.BlockStmt, cmd types.Object, info *types.Info) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if stmt, ok := n.(*ast.DeferStmt); ok && waitsFor(stmt, cmd, info) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.DeferStmt](body, func(stmt *ast.DeferStmt) bool {
+		return waitsFor(stmt, cmd, info)
 	})
-	return found
 }
 
 // NewRemoveBeforeFailedReplacementRule reports a file removed before its

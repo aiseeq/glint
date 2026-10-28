@@ -223,12 +223,7 @@ func responseWriterParams(file *ast.File, info *types.Info) map[string]bool {
 
 // hasStringLiteral reports whether some string literal of the file matches.
 func hasStringLiteral(file *ast.File, match func(string) bool) bool {
-	found := false
-	ast.Inspect(file, func(n ast.Node) bool {
-		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && match(lit.Value) {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.BasicLit](file, func(lit *ast.BasicLit) bool {
+		return lit.Kind == token.STRING && match(lit.Value)
 	})
-	return found
 }

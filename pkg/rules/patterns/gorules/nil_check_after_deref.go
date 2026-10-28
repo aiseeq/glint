@@ -186,14 +186,9 @@ func (d *derefScan) assigned(pos token.Pos) {
 
 // tests reports whether expr compares the pointer with nil by op.
 func (d *derefScan) tests(expr ast.Expr, op token.Token) bool {
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if bin, ok := n.(*ast.BinaryExpr); ok && bin.Op == op && comparedPointer(d.info, bin) == d.pointer {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.BinaryExpr](expr, func(bin *ast.BinaryExpr) bool {
+		return bin.Op == op && comparedPointer(d.info, bin) == d.pointer
 	})
-	return found
 }
 
 func (d *derefScan) visit(n ast.Node) bool {

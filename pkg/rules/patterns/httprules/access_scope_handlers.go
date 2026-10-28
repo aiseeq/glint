@@ -605,14 +605,9 @@ func (s viewerScope) scopeIn(info *types.Info, node ast.Node, scoped map[types.O
 	if s.mentionsField(info, node) || s.callsChecker(info, node) {
 		return true
 	}
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && scoped[info.ObjectOf(ident)] {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](node, func(ident *ast.Ident) bool {
+		return scoped[info.ObjectOf(ident)]
 	})
-	return found
 }
 
 // readerRelated returns the local variables a reader call takes and the ones

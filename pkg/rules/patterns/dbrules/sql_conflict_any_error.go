@@ -1,6 +1,7 @@
 package dbrules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"go/ast"
 	"strings"
 
@@ -114,14 +115,9 @@ func conflictErrorBranch(list []ast.Stmt, index int, stmt ast.Stmt, reads map[*a
 }
 
 func containsRead(node ast.Node, reads map[*ast.CallExpr]bool) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && reads[call] {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.CallExpr](node, func(call *ast.CallExpr) bool {
+		return reads[call]
 	})
-	return found
 }
 
 // tellsConflict reports a branch that tells the conflict from a failure: it

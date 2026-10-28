@@ -4,6 +4,8 @@ import (
 	"go/ast"
 	"go/types"
 	"strings"
+
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 const SqlxPath = "github.com/jmoiron/sqlx"
@@ -21,14 +23,9 @@ func SentinelName(name string) bool {
 
 // MentionsVar reports a node that defines or uses the variable.
 func MentionsVar(info *types.Info, node ast.Node, v *types.Var) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok && info.ObjectOf(ident) == v {
-			found = true
-		}
-		return !found
+	return helpers.ContainsNode[*ast.Ident](node, func(ident *ast.Ident) bool {
+		return info.ObjectOf(ident) == v
 	})
-	return found
 }
 
 // ParamIndex returns the position of a parameter of the function.
