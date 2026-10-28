@@ -262,9 +262,12 @@ var (
 	// "Result counts", "Merge объединяет".
 	presentVerb = regexp.MustCompile(`(?i)^\p{L}+(?:s|[еиё]т|[юяу]т)$`)
 	// clauseSubject matches the subject of a clause the removal word is the
-	// verb of: "the entries a trim removed". A plural noun after the name
-	// ("Client options removed") has none.
-	clauseSubject = regexp.MustCompile(`(?i)\b(?:a|an|the|each|every|this|that|its|their|one)\s+[\p{L}\d_-]+\s+$`)
+	// verb of, right after the word it qualifies: "the entries a trim
+	// removed", "what a dry run would have deleted". A plural noun after the
+	// name ("Client options removed") has none, and a possessive after a
+	// comma ("wraps the API, its retry removed") names a part, not a doer.
+	clauseSubject = regexp.MustCompile(
+		`(?i)[\p{L}\d_]\s+(?:a|an|the|each|every|this|that)\s+(?:[\p{L}\d_-]+\s+){1,2}(?:(?:would|will|could|may|might|can|should|has|have|had)\s+)*$`)
 )
 
 // godocFirstSentence reports a match on comment line i, with before the text
