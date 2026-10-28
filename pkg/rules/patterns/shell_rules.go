@@ -802,9 +802,10 @@ func checkBinaryInPlace(r *shellRule, src *shellSource) []*core.Violation {
 	return append(out, scriptsOverRunning(r, src)...)
 }
 
-// envCopy is a copy of the local .env onto the server's .env or into its directory;
-// a copy under another name (.env.new) is merged on the server.
-var envCopy = regexp.MustCompile(`\b(?:scp|rsync)\b[^;&|]*\s"?(?:\./)?\.env(?:\.(?:prod|production|local))?"?\s+"?[^\s:"]+:(?:[^\s"]*/(?:\.env)?)?"?(?:\s|$)`)
+// envCopy is a copy of the local .env onto the server's .env, into its
+// directory, or beside it as .env.new for a merge on the server: the merge
+// carries the local values of the keys the server lacks.
+var envCopy = regexp.MustCompile(`\b(?:scp|rsync)\b[^;&|]*\s"?(?:\./)?\.env(?:\.(?:prod|production|local))?"?\s+"?[^\s:"]+:(?:[^\s"]*/(?:\.env(?:\.new)?)?)?"?(?:\s|$)`)
 
 var (
 	secretBackupPathName   = regexp.MustCompile(`(?i)(?:^|/)(?:\.env(?:[._-][\w.-]+)?|[^/]*(?:credentials?|secrets?)(?:[._-][\w.-]+)?|[^/]+\.(?:pem|key)|authorized_keys)$`)

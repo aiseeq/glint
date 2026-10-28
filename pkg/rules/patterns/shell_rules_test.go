@@ -339,9 +339,9 @@ func TestShellBinaryCopiedOverInPlace(t *testing.T) {
 	}))
 }
 
-// The developer's .env replaces the server's own on every deploy.
+// The local env file reaches the remote host, including when staged for merging.
 func TestShellLocalEnvCopiedToRemote(t *testing.T) {
-	assert.Equal(t, []string{"deploy.sh:1", "deploy.sh:2"}, shellFindings(t, "shell-local-env-copied-to-remote", map[string]string{
+	assert.Equal(t, []string{"deploy.sh:1", "deploy.sh:2", "deploy.sh:5"}, shellFindings(t, "shell-local-env-copied-to-remote", map[string]string{
 		"deploy.sh": "scp .env \"$HOST:/opt/app/.env\"\nrsync -az ./.env.prod $HOST:/opt/app/\nscp .env.example $HOST:/opt/app/\nscp $HOST:/opt/app/.env ./backup.env\nscp .env $HOST:/opt/app/shared/.env.new &\n",
 	}))
 }
