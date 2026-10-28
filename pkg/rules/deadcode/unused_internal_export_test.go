@@ -577,3 +577,44 @@ export const name = (s: T.Strategy): string => s.name
 	require.NoError(t, err)
 	assert.Len(t, violations, 4, "without the standard marker the file is hand-written TypeScript")
 }
+
+func TestUnusedInternalExportRule_MethodPromotedIntoInterface(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
+		"internal/core/hook.go": `package core
+
+type Checker interface {
+	Kinds() []string
+	Check(string) error
+}
+
+func Run(checks []Checker) {
+	for _, c := range checks { _, _ = c.Kinds(), c.Check("x") }
+}
+`,
+		"internal/plugins/base.go": `package plugins
+
+type Base struct{ kinds []string }
+
+func (b *Base) Kinds() []string { return b.kinds }
+func (b *Base) Stale() {}
+`,
+		"internal/plugins/guard.go": `package plugins
+
+import "example.com/rulestest/internal/core"
+
+type Guard struct{ *Base }
+
+func (g *Guard) Check(string) error { return nil }
+
+func init() { core.Run([]core.Checker{&Guard{Base: &Base{}}}) }
+`,
+	})
+	violations, err := NewUnusedInternalExportRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var symbols []string
+	for _, v := range violations {
+		symbols = append(symbols, v.Context["symbol"].(string))
+	}
+	assert.Equal(t, []string{"Stale"}, symbols)
+}

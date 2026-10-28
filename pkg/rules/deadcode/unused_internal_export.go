@@ -130,7 +130,7 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	if err != nil {
 		return nil, err
 	}
-	byFile, candidates, err := r.collectGoCandidates(ctx, interfaces, templateTypes, templateNames)
+	byFile, candidates, err := r.collectGoCandidates(ctx, interfaces, promotedMethodOwners(ctx), templateTypes, templateNames)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +164,7 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	})
 }
 
-func (r *UnusedInternalExportRule) collectGoCandidates(ctx *core.GoProjectContext, interfaces []interfaceType, templateTypes map[types.Object]bool, templateNames map[string]bool) (map[*core.FileContext][]*exportUsage, map[types.Object]*exportUsage, error) {
+func (r *UnusedInternalExportRule) collectGoCandidates(ctx *core.GoProjectContext, interfaces []interfaceType, owners map[*types.Func][]types.Type, templateTypes map[types.Object]bool, templateNames map[string]bool) (map[*core.FileContext][]*exportUsage, map[types.Object]*exportUsage, error) {
 	byFile := make(map[*core.FileContext][]*exportUsage)
 	candidates := make(map[types.Object]*exportUsage)
 	for _, pkgCtx := range ctx.Packages {
@@ -186,7 +186,7 @@ func (r *UnusedInternalExportRule) collectGoCandidates(ctx *core.GoProjectContex
 				continue
 			}
 			for _, usage := range exportedDeclarations(fileCtx.GoAST, pkgCtx.Package.TypesInfo) {
-				include, err := r.includeGoCandidate(usage, pkgCtx, internal, closedModule, interfaces, templateTypes, templateNames)
+				include, err := r.includeGoCandidate(usage, pkgCtx, internal, closedModule, interfaces, owners, templateTypes, templateNames)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -206,7 +206,7 @@ func (r *UnusedInternalExportRule) collectGoCandidates(ctx *core.GoProjectContex
 	return byFile, candidates, nil
 }
 
-func (r *UnusedInternalExportRule) includeGoCandidate(usage *exportUsage, pkgCtx *core.GoPackageContext, internal, closedModule bool, interfaces []interfaceType, templateTypes map[types.Object]bool, templateNames map[string]bool) (bool, error) {
+func (r *UnusedInternalExportRule) includeGoCandidate(usage *exportUsage, pkgCtx *core.GoPackageContext, internal, closedModule bool, interfaces []interfaceType, owners map[*types.Func][]types.Type, templateTypes map[types.Object]bool, templateNames map[string]bool) (bool, error) {
 	include, err := includeExportCandidate(usage, pkgCtx, internal, closedModule, interfaces)
 	if err != nil || !include {
 		return include, err
@@ -214,6 +214,9 @@ func (r *UnusedInternalExportRule) includeGoCandidate(usage *exportUsage, pkgCtx
 	if usage.kind == "method" {
 		method, ok := usage.object.(*types.Func)
 		if !ok || templateTypes[receiverTypeObject(method)] || templateNames[method.Name()] {
+			return false, nil
+		}
+		if promotedIntoInterface(method, owners[method.Origin()], interfaces) {
 			return false, nil
 		}
 	}
@@ -490,6 +493,62 @@ func methodRequiredByInterface(method *types.Func, interfaces []interfaceType) (
 		}
 	}
 	return false, nil
+}
+
+// promotedMethodOwners maps a method to the module types that get it by
+// embedding: such a type can satisfy an interface its embedded type alone
+// does not, and the method is called through that interface.
+func promotedMethodOwners(ctx *core.GoProjectContext) map[*types.Func][]types.Type {
+	owners := make(map[*types.Func][]types.Type)
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.Types == nil {
+			continue
+		}
+		scope := pkgCtx.Package.Types.Scope()
+		for _, name := range scope.Names() {
+			typeName, ok := scope.Lookup(name).(*types.TypeName)
+			if !ok || typeName.IsAlias() {
+				continue
+			}
+			named, ok := typeName.Type().(*types.Named)
+			if !ok || named.TypeParams().Len() > 0 || types.IsInterface(named) {
+				continue
+			}
+			for _, owner := range []types.Type{named, types.NewPointer(named)} {
+				for selection := range types.NewMethodSet(owner).Methods() {
+					if fn, ok := selection.Obj().(*types.Func); ok && len(selection.Index()) > 1 {
+						owners[fn.Origin()] = append(owners[fn.Origin()], owner)
+					}
+				}
+			}
+		}
+	}
+	return owners
+}
+
+// promotedIntoInterface reports a method promoted into a type that
+// implements an interface naming it.
+func promotedIntoInterface(method *types.Func, owners []types.Type, interfaces []interfaceType) bool {
+	for _, candidate := range interfaces {
+		if candidate.named.TypeParams().Len() > 0 || !declaresMethod(candidate.iface, method.Name()) {
+			continue
+		}
+		for _, owner := range owners {
+			if types.Implements(owner, candidate.iface) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func declaresMethod(iface *types.Interface, name string) bool {
+	for method := range iface.Methods() {
+		if method.Name() == name {
+			return true
+		}
+	}
+	return false
 }
 
 func instantiateTypeParams(named *types.Named, params *types.TypeParamList) (types.Type, error) {

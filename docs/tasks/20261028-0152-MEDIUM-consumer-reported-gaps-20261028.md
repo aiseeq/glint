@@ -34,3 +34,4 @@
 - 2026-10-28 02:55 note — glint-master: installed v1.83.7-47-g8943942 with g1-g4; waiting: g5 worker, consumer-A 155 removals
 - 2026-10-28 02:57 note — glint-master: g5 cmp: consumer-C 5 new, exactly the sites with noisy data (constant and rounded sites silent); sent to its agent; merging + install
 - 2026-10-28 03:02 note — glint-master: consumer-C FP after its fix: rounding moved to a shared helper of another package; rule now counts a package calling a 15-digit rounding function as rounding; verify t22 0/1, g5 0/2; consumers: only that FP gone; consumer-A 155 (+22) removed b62f8df12, 0 FP
+- 2026-10-28 03:05 note — glint-master: consumer chooks FP on unused-internal-export: method of an embedded type reaches an interface only through the embedding type; fixed (promoted method owners checked against interfaces); chooks clean, consumers 0 diffs
