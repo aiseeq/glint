@@ -102,3 +102,44 @@ func Read(book *excelize.File, name string) ([][]string, error) {
 
 	assert.Empty(t, violations)
 }
+
+func TestSpreadsheetGetRowsTruncatesOnCellErrorAllowsCellCheckInCallee(t *testing.T) {
+	violations := runRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
+
+import "github.com/xuri/excelize/v2"
+
+func Read(book *excelize.File, name string) ([][]string, error) {
+	rows, err := book.GetRows(name, excelize.Options{})
+	if err != nil { return nil, err }
+	if err := checkCells(book, name, rows); err != nil { return nil, err }
+	return rows, nil
+}
+
+func checkCells(book *excelize.File, name string, rows [][]string) error {
+	for range rows {
+		if _, err := book.GetCellValue(name, "A1", excelize.Options{}); err != nil { return err }
+	}
+	return nil
+}
+`))
+
+	assert.Empty(t, violations)
+}
+
+func TestSpreadsheetGetRowsTruncatesOnCellErrorReportsCalleeWithoutCellRead(t *testing.T) {
+	violations := runRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
+
+import "github.com/xuri/excelize/v2"
+
+func Read(book *excelize.File, name string) ([][]string, error) {
+	rows, err := book.GetRows(name, excelize.Options{})
+	if err != nil { return nil, err }
+	trimRows(rows)
+	return rows, nil
+}
+
+func trimRows(rows [][]string) {}
+`))
+
+	require.Len(t, violations, 1)
+}

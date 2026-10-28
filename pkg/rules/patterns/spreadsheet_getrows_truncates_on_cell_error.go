@@ -1,6 +1,7 @@
 package patterns
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -43,13 +44,17 @@ func (r *SpreadsheetGetRowsTruncatesOnCellErrorRule) AnalyzeGoProject(project *c
 	if project == nil {
 		return nil, nil
 	}
+	decls, err := funcDeclsByObject(project)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", r.Name(), err)
+	}
 	return rules.AnalyzeGoFiles(project, r.Name(), func(ctx *core.FileContext, info *types.Info) []*core.Violation {
-		if ctx.IsTestFile() {
+		if ctx.IsTestFile() || info == nil {
 			return nil
 		}
 		var violations []*core.Violation
 		analyze := func(node ast.Node) {
-			if functionChecksSheetReads(info, node) {
+			if functionChecksSheetReads(info, node, decls, maxSheetCheckHops, make(map[*types.Func]bool)) {
 				return
 			}
 			ast.Inspect(node, func(child ast.Node) bool {
@@ -90,10 +95,16 @@ func (r *SpreadsheetGetRowsTruncatesOnCellErrorRule) AnalyzeGoProject(project *c
 	})
 }
 
+// maxSheetCheckHops bounds how deep the cell check may sit below the function
+// that reads the rows: a helper, or a helper of a helper.
+const maxSheetCheckHops = 2
+
 // functionChecksSheetReads reports a cell read or a Rows iterator whose
-// column and terminal errors are checked in the same function.
-func functionChecksSheetReads(info *types.Info, function ast.Node) bool {
+// column and terminal errors are checked in the function or in a module
+// function it calls, up to hops calls deep.
+func functionChecksSheetReads(info *types.Info, function ast.Node, decls map[*types.Func]typedFuncDecl, hops int, seen map[*types.Func]bool) bool {
 	calls := make(map[string]bool)
+	var callees []typedFuncDecl
 	ast.Inspect(function, func(node ast.Node) bool {
 		if node != function {
 			if _, ok := node.(*ast.FuncLit); ok {
@@ -109,12 +120,29 @@ func functionChecksSheetReads(info *types.Info, function ast.Node) bool {
 				calls[name] = true
 			}
 		}
+		if callee := staticFunc(info, call); callee != nil && !seen[callee.Origin()] {
+			if decl, ok := decls[callee.Origin()]; ok && decl.decl.Body != nil {
+				seen[callee.Origin()] = true
+				callees = append(callees, decl)
+			}
+		}
 		return true
 	})
 	if calls["GetCellValue"] {
 		return true
 	}
-	return calls["Rows"] && checkedExcelizeErrorCall(info, function, "Error") && checkedExcelizeErrorCall(info, function, "Columns")
+	if calls["Rows"] && checkedExcelizeErrorCall(info, function, "Error") && checkedExcelizeErrorCall(info, function, "Columns") {
+		return true
+	}
+	if hops == 0 {
+		return false
+	}
+	for _, callee := range callees {
+		if functionChecksSheetReads(callee.info, callee.decl.Body, decls, hops-1, seen) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkedExcelizeErrorCall reports an error-returning method used to initialize
