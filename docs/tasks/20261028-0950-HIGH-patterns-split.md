@@ -1,6 +1,6 @@
 # Разбить pkg/rules/patterns на подпакеты (кэш go-build, время сборки)
 
-Статус: в работе
+Статус: на проверке
 Исполнитель: glint-master
 
 ## Вход
@@ -36,3 +36,5 @@
 - 2026-10-28 13:08 note — glint-master: 13:12 раунд 5 Luna провален: дерево сломано (не собирается, комментариев 14,7 тыс. из 21,1), незакоммиченный зелёный заход 4 потерян (мастер не закоммитил до раунда 5 — урок: коммитить зелёное перед доводкой). worker done отклонено. По маршруту — Opus Agent на свежем дереве patterns-split2 от bad83f1, бриф brief-opus.md, мера accept2.sh (база — merge-base).
 - 2026-10-28 13:33 note — glint-master: 13:40 Opus: accept2 OK (комментарии целы, сирот 23), дерево patterns-split2 в индексе, не закоммичено — graft commit отказывает leaks на 621 перенесённой строке фикстур (scan.go --no-renames); graft-master попрошен учитывать переносы, обход не делаю. Идёт graft consumers всех правил ~/bin/glint (bad83f1) против bin/glint. После коммита в ветке: переименовать testrules (helpers.IsTestSupportPackage считает test*-пакеты тестовыми → снять исключение stale-suppression), удалить мёртвый TypeInferrer.IsDeclared (снять исключение unused-internal-export), CLAUDE.md: patternkit.FlowWalker, JoinFlowPaths в internal/patternkit (скилл instructions).
 - 2026-10-28 13:37 note — glint-master: 13:37 graft consumers (все правила, ~/bin/glint bad83f1 против bin/glint ветки): 22 проекта, 0 с разницей, 0 ошибок. Ждёт только фикса leaks в graft.
+- 2026-10-28 13:50 note — glint-master: 13:50 влито: 9b5ff2e (разбиение, Opus) + a094825 (testrules→qarules, удалён IsDeclared, сняты 2 исключения), ff в main, установлено v1.83.7-59-gf018547. Замер правки тела правила: errrules 3,6 с / 0,5 ГБ RSS / +11 МБ кэша; gorules 3,9 с / +17 МБ (было 39 с, 1,4 ГБ, 80–97 МБ). graft-master сообщено. Осталось: CLAUDE.md путь FlowWalker/JoinFlowPaths (скилл instructions); убрать сломанное дерево patterns-split Luna; проверка — graft-master.
+- 2026-10-28 13:50 на проверке — glint-master — влито a094825, установлено; проверка — graft-master по замеру кэша
