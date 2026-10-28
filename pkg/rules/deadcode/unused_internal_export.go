@@ -530,22 +530,13 @@ func promotedMethodOwners(ctx *core.GoProjectContext) map[*types.Func][]types.Ty
 // implements an interface naming it.
 func promotedIntoInterface(method *types.Func, owners []types.Type, interfaces []interfaceType) bool {
 	for _, candidate := range interfaces {
-		if candidate.named.TypeParams().Len() > 0 || !declaresMethod(candidate.iface, method.Name()) {
+		if candidate.named.TypeParams().Len() > 0 || !helpers.InterfaceDeclaresMethod(candidate.iface, method.Name()) {
 			continue
 		}
 		for _, owner := range owners {
 			if types.Implements(owner, candidate.iface) {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-func declaresMethod(iface *types.Interface, name string) bool {
-	for method := range iface.Methods() {
-		if method.Name() == name {
-			return true
 		}
 	}
 	return false

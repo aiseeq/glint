@@ -177,20 +177,10 @@ func returnsToCallingPackage(info *types.Info, fn *ast.FuncDecl, call *ast.CallE
 			continue
 		}
 		iface, ok := typeName.Type().Underlying().(*types.Interface)
-		if !ok || !declaresMethod(iface, method.Name()) {
+		if !ok || !helpers.InterfaceDeclaresMethod(iface, method.Name()) {
 			continue
 		}
 		if types.Implements(recv, iface) {
-			return true
-		}
-	}
-	return false
-}
-
-// declaresMethod reports whether the interface has a method of that name.
-func declaresMethod(iface *types.Interface, name string) bool {
-	for method := range iface.Methods() {
-		if method.Name() == name {
 			return true
 		}
 	}
