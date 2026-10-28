@@ -69,6 +69,7 @@ func (r *NotFoundAnsweredAsServerErrorRule) AnalyzeGoProject(ctx *core.GoProject
 	flow := newErrorFlow(ctx)
 	var violations []*core.Violation
 	for _, fn := range flow.order {
+		violations = append(violations, serviceNotFoundReturn(flow, fn, r)...)
 		request := handlerRequestParam(fn)
 		if request == nil {
 			continue
@@ -119,6 +120,276 @@ func (r *NotFoundAnsweredAsServerErrorRule) AnalyzeGoProject(ctx *core.GoProject
 		})
 	}
 	return violations, nil
+}
+
+// serviceNotFoundReturn detects a context-aware operation whose every error
+// is replaced by a not-found sentinel inside a non-HTTP service function.
+func serviceNotFoundReturn(flow *errorFlow, fn typedFunc, rule *NotFoundAnsweredAsServerErrorRule) []*core.Violation {
+	if fn.decl.Body == nil || handlerRequestParam(fn) != nil {
+		return nil
+	}
+	found := []*core.Violation{}
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		if _, nested := n.(*ast.FuncLit); nested {
+			return false
+		}
+		check, ok := n.(*ast.IfStmt)
+		if !ok || len(check.Body.List) == 0 {
+			return true
+		}
+		errIdent := errNotNilIdent(fn.info, check.Cond)
+		call := (*ast.CallExpr)(nil)
+		if errIdent != nil {
+			call = flow.originCall(fn, errIdent, check.Body.List[0])
+		} else {
+			call = resultFailureOrigin(fn, check)
+		}
+		if call == nil || !callUsesContext(fn, call) {
+			return true
+		}
+		if comparesError(check.Body) {
+			return true
+		}
+		var sentinel *types.Var
+		plainNotFound := false
+		var reported ast.Node
+		ast.Inspect(check.Body, func(child ast.Node) bool {
+			if _, nested := child.(*ast.FuncLit); nested {
+				return false
+			}
+			ret, ok := child.(*ast.ReturnStmt)
+			if !ok {
+				return true
+			}
+			for i, result := range ret.Results {
+				if !isErrorReturn(fn, ret, i) || returnCarriesCheckedError(fn, check, ret, result, errIdent) {
+					continue
+				}
+				candidate, freshNotFound := strictNotFoundReturn(flow, fn, result, ret)
+				if candidate != nil {
+					sentinel, reported = candidate, check
+					return false
+				}
+				if freshNotFound {
+					plainNotFound, reported = true, check
+					return false
+				}
+			}
+			return true
+		})
+		if sentinel == nil && !plainNotFound {
+			return true
+		}
+		line := fn.file.LineFor(reported)
+		if fn.file.IsSuppressed(line, rule.Name()) {
+			return true
+		}
+		answer := "a not-found error"
+		if sentinel != nil {
+			answer = sentinel.Name()
+		}
+		v := rule.CreateViolation(fn.file.RelPath, line,
+			"Every error of this context-aware call is returned as "+answer+" — storage failures are reported as missing data")
+		v.WithCode(strings.TrimSpace(fn.file.GetLine(line)))
+		v.WithSuggestion("Return the not-found sentinel only when errors.Is identifies the storage not-found error; wrap other failures as storage errors")
+		found = append(found, v)
+		return true
+	})
+	return found
+}
+
+// isErrorReturn reports whether a return expression occupies an error result.
+func isErrorReturn(fn typedFunc, ret *ast.ReturnStmt, index int) bool {
+	obj, ok := fn.info.Defs[fn.decl.Name].(*types.Func)
+	if !ok {
+		return false
+	}
+	sig, ok := obj.Type().(*types.Signature)
+	if !ok || ret.Results == nil || index >= sig.Results().Len() {
+		return false
+	}
+	errorType := types.Universe.Lookup("error").Type()
+	return types.AssignableTo(sig.Results().At(index).Type(), errorType)
+}
+
+// returnCarriesCheckedError recognizes direct propagation and values returned
+// from calls that received the checked error earlier in the function.
+func returnCarriesCheckedError(fn typedFunc, check *ast.IfStmt, ret *ast.ReturnStmt, result ast.Expr, errIdent *ast.Ident) bool {
+	tainted := map[types.Object]bool{}
+	if errIdent != nil && fn.info.Uses[errIdent] != nil {
+		tainted[fn.info.Uses[errIdent]] = true
+	}
+	// For IsSuccess results, the result value is the checked failure carrier.
+	if errIdent == nil {
+		if unary, ok := ast.Unparen(check.Cond).(*ast.UnaryExpr); ok {
+			if call, ok := ast.Unparen(unary.X).(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if id, ok := ast.Unparen(sel.X).(*ast.Ident); ok && fn.info.Uses[id] != nil {
+						tainted[fn.info.Uses[id]] = true
+					}
+				}
+			}
+		}
+	}
+	containsTainted := func(expr ast.Expr) bool {
+		found := false
+		ast.Inspect(expr, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if ok && tainted[fn.info.Uses[id]] {
+				found = true
+				return false
+			}
+			return !found
+		})
+		return found
+	}
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.Pos() >= ret.Pos() {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			if i >= len(assign.Rhs) || !containsTainted(assign.Rhs[i]) {
+				continue
+			}
+			if id, ok := ast.Unparen(lhs).(*ast.Ident); ok && fn.info.ObjectOf(id) != nil {
+				tainted[fn.info.ObjectOf(id)] = true
+			}
+		}
+		return true
+	})
+	return containsTainted(result)
+}
+
+// strictNotFoundReturn accepts only an explicit sentinel or a fresh not-found
+// error. Flow-derived provenance on an arbitrary local error is insufficient.
+func strictNotFoundReturn(flow *errorFlow, fn typedFunc, result ast.Expr, ret *ast.ReturnStmt) (*types.Var, bool) {
+	set := flow.exprErrors(fn, result, ret, 0)
+	switch ast.Unparen(result).(type) {
+	case *ast.Ident, *ast.SelectorExpr:
+		var obj types.Object
+		switch expr := ast.Unparen(result).(type) {
+		case *ast.Ident:
+			obj = fn.info.Uses[expr]
+		case *ast.SelectorExpr:
+			obj = fn.info.Uses[expr.Sel]
+		}
+		if v, ok := obj.(*types.Var); ok && v.Pkg() != nil && v.Parent() == v.Pkg().Scope() {
+			return notFoundSentinel(set), false
+		}
+		return nil, false
+	case *ast.CallExpr:
+		call, ok := ast.Unparen(result).(*ast.CallExpr)
+		if !ok {
+			return nil, false
+		}
+		name := ""
+		switch fun := ast.Unparen(call.Fun).(type) {
+		case *ast.Ident:
+			name = fun.Name
+		case *ast.SelectorExpr:
+			name = fun.Sel.Name
+		}
+		if name != "Errorf" && name != "New" {
+			return nil, false
+		}
+		if candidate := notFoundSentinel(set); candidate != nil {
+			if containsWrapVerb(call) && trustedWrappedNotFound(fn, call) {
+				return candidate, false
+			}
+		}
+		if set.notFoundText && !containsWrapVerb(call) {
+			return nil, true
+		}
+	}
+	return nil, false
+}
+
+func trustedWrappedNotFound(fn typedFunc, call *ast.CallExpr) bool {
+	if len(call.Args) < 2 {
+		return false
+	}
+	for _, arg := range call.Args[1:] {
+		if !trustedSentinelExpr(fn, arg) {
+			return false
+		}
+	}
+	return true
+}
+
+func trustedSentinelExpr(fn typedFunc, expr ast.Expr) bool {
+	var obj types.Object
+	switch value := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		obj = fn.info.Uses[value]
+	case *ast.SelectorExpr:
+		obj = fn.info.Uses[value.Sel]
+	default:
+		return false
+	}
+	v, ok := obj.(*types.Var)
+	return ok && v.Pkg() != nil && v.Parent() == v.Pkg().Scope() && strings.Contains(strings.ToLower(v.Name()), "notfound")
+}
+
+func containsWrapVerb(call *ast.CallExpr) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	lit, ok := ast.Unparen(call.Args[0]).(*ast.BasicLit)
+	return ok && strings.Contains(lit.Value, "%w")
+}
+
+// resultFailureOrigin finds a context-aware call assigned to a result whose
+// IsSuccess method is negated by the checked condition.
+func resultFailureOrigin(fn typedFunc, check *ast.IfStmt) *ast.CallExpr {
+	unary, ok := ast.Unparen(check.Cond).(*ast.UnaryExpr)
+	if !ok || unary.Op != token.NOT {
+		return nil
+	}
+	call, ok := ast.Unparen(unary.X).(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 {
+		return nil
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "IsSuccess" {
+		return nil
+	}
+	result, ok := ast.Unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	obj := fn.info.Uses[result]
+	var origin *ast.CallExpr
+	ast.Inspect(fn.decl.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.End() > check.Pos() {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			ident, ok := lhs.(*ast.Ident)
+			if !ok || fn.info.ObjectOf(ident) != obj {
+				continue
+			}
+			if len(assign.Rhs) == len(assign.Lhs) {
+				origin, _ = ast.Unparen(assign.Rhs[i]).(*ast.CallExpr)
+			} else if len(assign.Rhs) == 1 {
+				origin, _ = ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+			}
+		}
+		return true
+	})
+	return origin
+}
+
+// callUsesContext limits the service variant to calls that explicitly receive
+// a context, a common signature for storage operations that may fail broadly.
+func callUsesContext(fn typedFunc, call *ast.CallExpr) bool {
+	for _, arg := range call.Args {
+		if types.TypeString(fn.info.TypeOf(arg), nil) == "context.Context" {
+			return true
+		}
+	}
+	return false
 }
 
 // handlerRequestParam returns the *http.Request parameter of a function that
@@ -459,11 +730,41 @@ func comparesError(body *ast.BlockStmt) bool {
 				if sel, ok := ast.Unparen(node.Y).(*ast.SelectorExpr); ok && sentinelName(sel.Sel.Name) {
 					found = true
 				}
+				if fieldComparison(node.X, node.Y) || fieldComparison(node.Y, node.X) {
+					found = true
+				}
+			}
+		case *ast.SwitchStmt:
+			if isClassificationField(node.Tag) {
+				found = true
 			}
 		}
 		return !found
 	})
 	return found
+}
+
+func fieldComparison(left, right ast.Expr) bool {
+	if !isClassificationField(left) {
+		return false
+	}
+	switch ast.Unparen(right).(type) {
+	case *ast.BasicLit, *ast.Ident, *ast.SelectorExpr:
+		return true
+	}
+	return false
+}
+
+func isClassificationField(expr ast.Expr) bool {
+	selector, ok := ast.Unparen(expr).(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	switch selector.Sel.Name {
+	case "Code", "Status", "StatusCode", "Kind":
+		return true
+	}
+	return false
 }
 
 // mapsError reports a branch handing the error to a project function that

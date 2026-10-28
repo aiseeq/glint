@@ -142,6 +142,218 @@ func TestNotFoundAnsweredAsServerError(t *testing.T) {
 	}))
 }
 
+func TestNotFoundAnsweredAsServerErrorInService(t *testing.T) {
+	assert.Equal(t, []string{"service/service.go:10"}, notFoundServerErrorFindings(t, map[string]string{
+		"store/store.go": `package store
+import "context"
+import "errors"
+var ErrItemNotFound = errors.New("missing")
+type Store struct{}
+func (*Store) Read(ctx context.Context, key string) (string, error) { return "", errors.New("database unavailable") }
+`,
+		"service/service.go": `package service
+import (
+ "context"
+ "fmt"
+ "example.com/rulestest/store"
+)
+type Service struct { store *store.Store }
+func (s *Service) Load(ctx context.Context, key string) (string, error) {
+ value, err := s.store.Read(ctx, key)
+ if err != nil {
+  return "", fmt.Errorf("%w", store.ErrItemNotFound)
+ }
+ return value, nil
+}
+`,
+	}))
+}
+
+func TestNotFoundAnsweredAsServerErrorResultWrapperInService(t *testing.T) {
+	assert.Equal(t, []string{"service/service.go:10"}, notFoundServerErrorFindings(t, map[string]string{
+		"store/store.go": `package store
+import ("context"; "errors")
+var ErrRecordNotFound = errors.New("record not found")
+type Result struct { Error error }
+func (r Result) IsSuccess() bool { return r.Error == nil }
+type Store struct{}
+func (*Store) Read(context.Context, string) Result { return Result{Error: errors.New("database unavailable")} }
+`,
+		"service/service.go": `package service
+import (
+ "context"
+ "fmt"
+ "example.com/rulestest/store"
+)
+type Service struct { store *store.Store }
+func (s *Service) Load(ctx context.Context, key string) (string, error) {
+ result := s.store.Read(ctx, key)
+ if !result.IsSuccess() {
+  return "", fmt.Errorf("%w", store.ErrRecordNotFound)
+ }
+ return "value", nil
+}
+`,
+	}))
+}
+
+func TestNotFoundAnsweredAsServerErrorResultWrapperPlainNotFound(t *testing.T) {
+	assert.Equal(t, []string{"service/service.go:10"}, notFoundServerErrorFindings(t, map[string]string{
+		"store/store.go": `package store
+import ("context"; "errors")
+type Result struct { Error error }
+func (r Result) IsSuccess() bool { return r.Error == nil }
+type Store struct{}
+func (*Store) Read(context.Context, string) Result { return Result{Error: errors.New("database unavailable")} }
+`,
+		"service/service.go": `package service
+import (
+ "context"
+ "fmt"
+ "example.com/rulestest/store"
+)
+type Service struct { store *store.Store }
+func (s *Service) Load(ctx context.Context, key string) (string, error) {
+ result := s.store.Read(ctx, key)
+ if !result.IsSuccess() { return "", fmt.Errorf("user not found") }
+ return "value", nil
+}
+`,
+	}))
+}
+
+func TestNotFoundAnsweredAsServerErrorResultWrapperIgnoresHandledError(t *testing.T) {
+	assert.Empty(t, notFoundServerErrorFindings(t, map[string]string{
+		"store/store.go": `package store
+import ("context"; "errors")
+var ErrRecordNotFound = errors.New("record not found")
+type Result struct { Error error }
+func (r Result) IsSuccess() bool { return r.Error == nil }
+type Store struct{}
+func (*Store) Read(context.Context, string) Result { return Result{Error: errors.New("database unavailable")} }
+`,
+		"service/service.go": `package service
+import (
+ "context"
+ "errors"
+ "fmt"
+ "example.com/rulestest/store"
+)
+type Service struct { store *store.Store }
+func (s *Service) Load(ctx context.Context, key string) (string, error) {
+ result := s.store.Read(ctx, key)
+ if !result.IsSuccess() {
+  if errors.Is(result.Error, store.ErrRecordNotFound) { return "", store.ErrRecordNotFound }
+  return "", fmt.Errorf("read failed: %w", result.Error)
+ }
+ return "value", nil
+}
+`,
+	}))
+}
+
+func TestNotFoundAnsweredAsServerErrorInServiceIgnoresHandledErrors(t *testing.T) {
+	assert.Empty(t, notFoundServerErrorFindings(t, map[string]string{
+		"store/store.go": `package store
+import ("context"; "errors")
+var ErrRecordNotFound = errors.New("record not found")
+type Store struct{}
+func (*Store) Read(context.Context, string) (string, error) { return "", errors.New("database unavailable") }
+`,
+		"service/service.go": `package service
+import (
+ "context"
+ "errors"
+ "fmt"
+ "example.com/rulestest/store"
+)
+type Service struct { store *store.Store }
+func (s *Service) Load(ctx context.Context, key string) (string, error) {
+ value, err := s.store.Read(ctx, key)
+ if err != nil {
+  if errors.Is(err, store.ErrRecordNotFound) { return "", store.ErrRecordNotFound }
+  return "", fmt.Errorf("read failed: %w", err)
+ }
+ return value, nil
+}
+func (s *Service) KeepCause(ctx context.Context, key string) (string, error) {
+ value, err := s.store.Read(ctx, key)
+ if err != nil { return "", fmt.Errorf("read failed: %w", err) }
+ return value, nil
+}
+func readBare(key string) (string, error) { return "", errors.New(key) }
+func missingWithoutContext(key string) error {
+ if _, err := readBare(key); err != nil { return store.ErrRecordNotFound }
+ return nil
+}
+`,
+	}))
+}
+
+func TestNotFoundAnsweredAsServerErrorServiceFalsePositives(t *testing.T) {
+	assert.Empty(t, notFoundServerErrorFindings(t, map[string]string{
+		"store/store.go": `package store
+import ("context"; "errors")
+var ErrRecordNotFound = errors.New("record not found")
+type Record struct { ID string }
+type Store struct{}
+func (*Store) Collect(context.Context) (*Record, error) { return nil, ErrRecordNotFound }
+func (*Store) Finish(context.Context, *Record, error) error { return ErrRecordNotFound }
+func (*Store) Wait(context.Context) (*Record, error) { return nil, ErrRecordNotFound }
+func (*Store) Read(context.Context) (string, error) { return "", ErrRecordNotFound }
+func (*Store) Fallback(context.Context, error) (*Record, int, error) { return nil, 0, ErrRecordNotFound }
+type Result struct { Error *Problem }
+type Problem struct { Code string }
+func (*Store) Lookup(context.Context) Result { return Result{} }
+func (Result) IsSuccess() bool { return false }
+`,
+		"service/service.go": `package service
+import (
+ "context"
+ "errors"
+ "fmt"
+ "example.com/rulestest/store"
+)
+type Service struct { store *store.Store }
+func (s *Service) Combine(ctx context.Context, id string) (*store.Record, error) {
+ res, runErr := s.store.Collect(ctx)
+ if err := s.store.Finish(ctx, res, runErr); err != nil {
+  return res, errors.Join(runErr, err)
+ }
+ return res, nil
+}
+func (s *Service) Wait(ctx context.Context) (*store.Record, error) {
+ wb, err := s.store.Wait(ctx)
+ if _, sleepErr := s.store.Read(ctx); sleepErr != nil {
+  return wb, errors.Join(err, sleepErr)
+ }
+ return wb, nil
+}
+func (s *Service) Classify(ctx context.Context) (*store.Record, error) {
+ result := s.store.Lookup(ctx)
+ if !result.IsSuccess() {
+  if result.Error != nil && result.Error.Code == "USER_NOT_FOUND" { return nil, store.ErrRecordNotFound }
+  return nil, fmt.Errorf("lookup: %w", errors.New("database unavailable"))
+ }
+ return nil, nil
+}
+func (s *Service) Fallback(ctx context.Context) (*store.Record, int, error) {
+ _, err := s.store.Read(ctx)
+ if err != nil {
+  value, detail, storedErr := s.store.Fallback(ctx, fmt.Errorf("live value: %w", err))
+  return value, detail, storedErr
+ }
+ return nil, 0, nil
+}
+func (s *Service) PriorError(ctx context.Context) (*store.Record, error) {
+ _, err := s.store.Collect(ctx)
+ if _, inverseErr := s.store.Read(ctx); inverseErr != nil { return nil, err }
+ return nil, nil
+}
+`,
+	}))
+}
+
 func TestNotFoundAnsweredAsServerErrorRule_Metadata(t *testing.T) {
 	rule := NewNotFoundAnsweredAsServerErrorRule()
 	assert.Equal(t, "not-found-answered-as-server-error", rule.Name())
