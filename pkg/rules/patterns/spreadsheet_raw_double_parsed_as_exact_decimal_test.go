@@ -258,3 +258,52 @@ const significantDigits = 15
 `,
 	}))
 }
+
+func TestSpreadsheetRawDoubleParsedAsExactDecimalDetectsGridAssertions(t *testing.T) {
+	assert.Equal(t, []string{"sheet/read.go:10", "sheet/read.go:17"}, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import "github.com/shopspring/decimal"
+type Grid interface { Values() ([][]any, error) }
+func read(g Grid) {
+	rows, _ := g.Values()
+	for _, row := range rows {
+		for _, v := range row {
+			switch x := v.(type) {
+			case float64:
+				_ = decimal.NewFromFloat(x)
+			}
+		}
+	}
+}
+func direct(v any) {
+	x, ok := v.(float64)
+	if ok { _ = decimal.NewFromFloat(x) }
+}
+func rounded(v any) {
+	x := v.(float64)
+	d := decimal.NewFromFloat(x).Round(2)
+	_ = d
+}
+func roundedVariable(v any) {
+	x := v.(float64)
+	d := decimal.NewFromFloat(x)
+	d = d.Round(2)
+	_ = d
+}
+func typedField(v struct{ Amount float64 }) { _ = decimal.NewFromFloat(v.Amount) }
+func constant() { _ = decimal.NewFromFloat(2.5) }
+`,
+	}))
+}
+
+func TestSpreadsheetRawDoubleParsedAsExactDecimalIgnoresAnyWithoutGridAPI(t *testing.T) {
+	assert.Empty(t, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import "github.com/shopspring/decimal"
+func parse(v any) {
+	x := v.(float64)
+	_ = decimal.NewFromFloat(x)
+}
+`,
+	}))
+}

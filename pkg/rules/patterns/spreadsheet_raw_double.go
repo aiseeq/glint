@@ -34,12 +34,16 @@ func NewSpreadsheetRawDoubleParsedAsExactDecimalRule() *typedFuncRule {
 		// normalizes its amounts on the parse path: the raw read and the
 		// rounding often sit in different functions of a streaming reader.
 		roundingPackages := make(map[*types.Package]bool)
+		gridPackages := make(map[*types.Package]bool)
 		functions := make(map[*types.Func]typedFuncDecl)
 		for obj, decl := range decls {
 			if decl.decl == nil || decl.decl.Body == nil || obj.Pkg() == nil {
 				continue
 			}
 			functions[obj.Origin()] = decl
+			if declaresSpreadsheetGrid(decl.info, decl.decl) {
+				gridPackages[obj.Pkg()] = true
+			}
 			if hasExactDecimalParse(decl.info, decl.decl.Body) {
 				decimalPackages[obj.Pkg()] = true
 				directDecimal[obj.Origin()] = true
@@ -71,19 +75,255 @@ func NewSpreadsheetRawDoubleParsedAsExactDecimalRule() *typedFuncRule {
 				return nil
 			}
 			current, _ := scope.info.Defs[fn.Name].(*types.Func)
-			if current == nil || current.Pkg() == nil || !decimalPackages[current.Pkg()] || roundingPackages[current.Pkg()] {
+			if current == nil || current.Pkg() == nil {
 				return nil
 			}
 			decl := typedFuncDecl{decl: fn, info: scope.info}
-			if reachesNormalizer(decl, directNormalizers, functions, 2, map[*types.Func]bool{}) {
-				return nil
+			var findings []funcFinding
+			if decimalPackages[current.Pkg()] && !roundingPackages[current.Pkg()] {
+				if !reachesNormalizer(decl, directNormalizers, functions, 2, map[*types.Func]bool{}) {
+					findings = spreadsheetRiskFindings(decl, decimalConsumers)
+				}
 			}
-			return spreadsheetRiskFindings(decl, decimalConsumers)
+			if gridPackages[current.Pkg()] && !roundingPackages[current.Pkg()] {
+				findings = append(findings, spreadsheetGridDoubleFindings(decl)...)
+			}
+			return findings
 		}
 	}
 	return r
 }
 
+func declaresSpreadsheetGrid(info *types.Info, fn *ast.FuncDecl) bool {
+	obj, _ := info.Defs[fn.Name].(*types.Func)
+	if obj != nil {
+		if sig, ok := obj.Type().(*types.Signature); ok && signatureReturnsSpreadsheetGrid(sig) {
+			return true
+		}
+	}
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if ok {
+			if signatureReturnsSpreadsheetGrid(info.TypeOf(call)) || signatureReturnsSpreadsheetGrid(info.TypeOf(call.Fun)) {
+				found = true
+				return false
+			}
+			if callee := staticFunc(info, call); callee != nil && signatureReturnsSpreadsheetGrid(callee.Type()) {
+				found = true
+				return false
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+func signatureReturnsSpreadsheetGrid(typ types.Type) bool {
+	if tuple, ok := typ.(*types.Tuple); ok {
+		for v := range tuple.Variables() {
+			if isAnyGridType(v.Type(), 2) || isAnyGridType(v.Type(), 3) {
+				return true
+			}
+		}
+		return false
+	}
+	sig, ok := typ.(*types.Signature)
+	if !ok || sig.Results() == nil {
+		return false
+	}
+	for v := range sig.Results().Variables() {
+		if isAnyGridType(v.Type(), 2) || isAnyGridType(v.Type(), 3) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAnyGridType(typ types.Type, dimensions int) bool {
+	for range dimensions {
+		slice, ok := typ.Underlying().(*types.Slice)
+		if !ok {
+			return false
+		}
+		typ = slice.Elem()
+	}
+	if slice, ok := typ.Underlying().(*types.Slice); ok { // dimensions are exact
+		_ = slice
+		return false
+	}
+	if basic, ok := typ.Underlying().(*types.Interface); ok && basic.Empty() {
+		return true
+	}
+	return false
+}
+
+func spreadsheetGridDoubleFindings(decl typedFuncDecl) []funcFinding {
+	info, body := decl.info, decl.decl.Body
+	asserted := spreadsheetAnyFloatAssertions(info, body)
+	if len(asserted) == 0 {
+		return nil
+	}
+	calls, targets, rounded := spreadsheetFloatConstructors(info, body, asserted)
+	var findings []funcFinding
+	for _, call := range calls {
+		if isConstructorRounded(body, call) || rounded[targets[call]] {
+			continue
+		}
+		findings = append(findings, funcFinding{node: call, message: "NewFromFloat preserves the binary double returned for formula cells; use strconv.FormatFloat(x, 'g', 15, 64) with NewFromString, or round to the column precision"})
+	}
+	return findings
+}
+
+func spreadsheetAnyFloatAssertions(info *types.Info, body *ast.BlockStmt) map[types.Object]bool {
+	asserted := make(map[types.Object]bool)
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, rhs := range node.Rhs {
+				assertion, ok := ast.Unparen(rhs).(*ast.TypeAssertExpr)
+				if !ok || !isFloat64Type(typeExprType(info, assertion.Type)) || !isAnyType(info.TypeOf(assertion.X)) || i >= len(node.Lhs) {
+					continue
+				}
+				if id, ok := ast.Unparen(node.Lhs[i]).(*ast.Ident); ok {
+					asserted[info.Defs[id]] = true
+					asserted[info.Uses[id]] = true
+				}
+			}
+		case *ast.ValueSpec:
+			for i, rhs := range node.Values {
+				assertion, ok := ast.Unparen(rhs).(*ast.TypeAssertExpr)
+				if !ok || !isFloat64Type(typeExprType(info, assertion.Type)) || !isAnyType(info.TypeOf(assertion.X)) || i >= len(node.Names) {
+					continue
+				}
+				asserted[info.Defs[node.Names[i]]] = true
+			}
+		case *ast.TypeSwitchStmt:
+			if node.Assign == nil {
+				break
+			}
+			as, ok := node.Assign.(*ast.AssignStmt)
+			if !ok || len(as.Lhs) != 1 {
+				break
+			}
+			id, ok := as.Lhs[0].(*ast.Ident)
+			if !ok {
+				break
+			}
+			for _, stmt := range node.Body.List {
+				clause, ok := stmt.(*ast.CaseClause)
+				if !ok {
+					continue
+				}
+				for _, expr := range clause.List {
+					if isFloat64Type(typeExprType(info, expr)) {
+						if obj := info.Implicits[clause]; obj != nil {
+							asserted[obj] = true
+						}
+						asserted[info.Defs[id]] = true
+						asserted[info.Uses[id]] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+	return asserted
+}
+
+func spreadsheetFloatConstructors(info *types.Info, body *ast.BlockStmt, asserted map[types.Object]bool) ([]*ast.CallExpr, map[*ast.CallExpr]types.Object, map[types.Object]bool) {
+	targets := make(map[*ast.CallExpr]types.Object)
+	rounded := make(map[types.Object]bool)
+	var calls []*ast.CallExpr
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if isDecimalNewFromFloat(info, call) && len(call.Args) == 1 {
+			if id, ok := ast.Unparen(call.Args[0]).(*ast.Ident); ok && asserted[info.Uses[id]] {
+				calls = append(calls, call)
+			}
+		}
+		if sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok && isDecimalRoundingMethod(sel.Sel.Name) {
+			if id, ok := ast.Unparen(sel.X).(*ast.Ident); ok {
+				rounded[info.Uses[id]] = true
+			}
+		}
+		return true
+	})
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, rhs := range node.Rhs {
+				if call, ok := ast.Unparen(rhs).(*ast.CallExpr); ok && isDecimalNewFromFloat(info, call) && i < len(node.Lhs) {
+					if id, ok := node.Lhs[i].(*ast.Ident); ok {
+						targets[call] = info.Defs[id]
+						if targets[call] == nil {
+							targets[call] = info.Uses[id]
+						}
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for i, rhs := range node.Values {
+				if call, ok := ast.Unparen(rhs).(*ast.CallExpr); ok && isDecimalNewFromFloat(info, call) && i < len(node.Names) {
+					targets[call] = info.Defs[node.Names[i]]
+				}
+			}
+		}
+		return true
+	})
+	return calls, targets, rounded
+}
+
+func isFloat64Type(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	b, ok := typ.Underlying().(*types.Basic)
+	return ok && b.Kind() == types.Float64
+}
+func typeExprType(info *types.Info, expr ast.Expr) types.Type {
+	if typ := info.TypeOf(expr); typ != nil {
+		return typ
+	}
+	if id, ok := expr.(*ast.Ident); ok {
+		if obj, ok := info.Uses[id].(*types.TypeName); ok {
+			return obj.Type()
+		}
+	}
+	return nil
+}
+func isAnyType(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	i, ok := typ.Underlying().(*types.Interface)
+	return ok && i.Empty()
+}
+func isDecimalNewFromFloat(info *types.Info, call *ast.CallExpr) bool {
+	fn := staticFunc(info, call)
+	return fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == shopspringDecimalPath && fn.Name() == "NewFromFloat"
+}
+func isDecimalRoundingMethod(name string) bool {
+	switch name {
+	case "Round", "RoundBank", "RoundCeil", "RoundFloor", "Truncate", "StringFixed":
+		return true
+	}
+	return false
+}
+func isConstructorRounded(body *ast.BlockStmt, constructor *ast.CallExpr) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok && sel.X == constructor && isDecimalRoundingMethod(sel.Sel.Name) {
+			found = true
+			return false
+		}
+		return !found
+	})
+	return found
+}
 func spreadsheetRiskFindings(decl typedFuncDecl, decimalConsumers map[*types.Func]bool) []funcFinding {
 	fn := decl.decl
 	info := decl.info
