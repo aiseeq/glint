@@ -79,7 +79,7 @@ func moneyMapMissingKeyReadAsZero(scope funcScope, fn *ast.FuncDecl) []funcFindi
 		if !ok {
 			return true
 		}
-		typ := typeOrNil(info, index.X)
+		typ := info.TypeOf(index.X)
 		if typ == nil {
 			return true
 		}

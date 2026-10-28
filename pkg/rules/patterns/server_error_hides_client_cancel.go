@@ -625,7 +625,7 @@ func cancellationGuardBeforeCall(caller *declaredFunc, call *ast.CallExpr, funcs
 	guarded := false
 	ast.Inspect(caller.decl.Body, func(n ast.Node) bool {
 		block, ok := n.(*ast.BlockStmt)
-		if !ok || !(block.Pos() < call.Pos() && call.End() < block.End()) {
+		if !ok || block.Pos() >= call.Pos() || call.End() >= block.End() {
 			return true
 		}
 		for _, stmt := range block.List {

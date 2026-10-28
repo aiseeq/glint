@@ -32,7 +32,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	home, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Fprintf(stderr, "consumers: find home directory: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "consumers: find home directory: %v\n", err)
 		return 2
 	}
 	cfgPath := fs.String("config", filepath.Join(home, ".config", "glint", "consumers.txt"), "consumer roots config")
@@ -42,35 +42,35 @@ func run(args []string, stdout, stderr io.Writer) int {
 	jobs := fs.String("j", "", "glint parallelism")
 	only := fs.String("only", "", "comma-separated project names")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: consumers [-config PATH] [-old PATH] [-new PATH] [-r rules] [-j N] [-only a,b]")
+		_, _ = fmt.Fprintln(stderr, "usage: consumers [-config PATH] [-old PATH] [-new PATH] [-r rules] [-j N] [-only a,b]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(stderr, "consumers: parse flags: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "consumers: parse flags: %v\n", err)
 		return 2
 	}
 	if fs.NArg() != 0 {
-		fmt.Fprintln(stderr, "consumers: unexpected arguments")
+		_, _ = fmt.Fprintln(stderr, "consumers: unexpected arguments")
 		return 2
 	}
 	oldAbs, err := filepath.Abs(*oldPath)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
 	newAbs, err := filepath.Abs(*newPath)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
 	cfg, err := readConfig(*cfgPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "consumers:", err)
+		_, _ = fmt.Fprintln(stderr, "consumers:", err)
 		return 2
 	}
 	projects, err := findProjects(cfg)
 	if err != nil {
-		fmt.Fprintln(stderr, "consumers:", err)
+		_, _ = fmt.Fprintln(stderr, "consumers:", err)
 		return 2
 	}
 	selected := map[string]bool{}
@@ -88,11 +88,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	sort.Strings(targets)
 	if _, err := os.Stat(oldAbs); err != nil {
-		fmt.Fprintf(stderr, "consumers: old binary %s: %v\n", oldAbs, err)
+		_, _ = fmt.Fprintf(stderr, "consumers: old binary %s: %v\n", oldAbs, err)
 		return 2
 	}
 	if _, err := os.Stat(newAbs); err != nil {
-		fmt.Fprintf(stderr, "consumers: new binary %s: %v\n", newAbs, err)
+		_, _ = fmt.Fprintf(stderr, "consumers: new binary %s: %v\n", newAbs, err)
 		return 2
 	}
 
@@ -105,13 +105,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 			oldIssues, oldErr = nil, nil
 		}
 		if oldErr != nil {
-			fmt.Fprintf(stderr, "%s: %s\n", name, oldErr)
+			_, _ = fmt.Fprintf(stderr, "%s: %s\n", name, oldErr)
 			errs++
 			continue
 		}
 		newIssues, newErr := check(newAbs, p, *rules, *jobs)
 		if newErr != nil {
-			fmt.Fprintf(stderr, "%s: %s\n", name, newErr)
+			_, _ = fmt.Fprintf(stderr, "%s: %s\n", name, newErr)
 			errs++
 			continue
 		}
@@ -120,7 +120,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			continue
 		}
 		diffs++
-		fmt.Fprintf(stdout, "== %s: +%d -%d\n", p, len(added), len(removed))
+		_, _ = fmt.Fprintf(stdout, "== %s: +%d -%d\n", p, len(added), len(removed))
 		for i := range added {
 			printIssue(stdout, "+", added[i])
 		}
@@ -133,7 +133,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		skipped = append(skipped, name)
 	}
 	sort.Strings(skipped)
-	fmt.Fprintf(stdout, "%d projects, %d with differences, %d errors, skipped: %s\n", len(targets), diffs, errs, strings.Join(skipped, ", "))
+	_, _ = fmt.Fprintf(stdout, "%d projects, %d with differences, %d errors, skipped: %s\n", len(targets), diffs, errs, strings.Join(skipped, ", "))
 	if errs > 0 {
 		return 2
 	}
@@ -148,7 +148,7 @@ func readConfig(path string) (config, error) {
 	if err != nil {
 		return config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	c := config{skips: map[string]bool{}}
 	b, err := io.ReadAll(f)
 	if err != nil {
@@ -238,7 +238,7 @@ func skipUnreadable(path, root string, err error) error {
 	if path == root {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "consumers: skip %s: %v\n", path, err)
+	_, _ = fmt.Fprintf(os.Stderr, "consumers: skip %s: %v\n", path, err)
 	return filepath.SkipDir
 }
 
@@ -323,5 +323,5 @@ func printIssue(w io.Writer, sign string, i output.JSONIssue) {
 	if len(s) > 220 {
 		s = append(s[:217], '.', '.', '.')
 	}
-	fmt.Fprintln(w, string(s))
+	_, _ = fmt.Fprintln(w, string(s))
 }
