@@ -6,7 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,7 +28,7 @@ func (c *Client) signedPOST(path string, body any, retry bool) (Response, error)
 func (c *Client) CancelTransaction(request Request) (Response, error) {
 	return c.signedPOST("/cancel", request, true)
 }`
-	ctx := patterntest.CreateQueryContext(t, "client.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "client.go", code)
 
 	violations := NewProviderCommandRetryRule().AnalyzeFile(ctx)
 
@@ -85,7 +85,7 @@ func (c *Client) withRetry(fn func() error) error {
 	}
 	return err
 }`
-	violations := NewProviderCommandRetryRule().AnalyzeFile(patterntest.CreateQueryContext(t, "client.go", code))
+	violations := NewProviderCommandRetryRule().AnalyzeFile(rulestest.InMemoryFileContext(t, "client.go", code))
 	require.Len(t, violations, 1)
 	assert.Equal(t, 14, violations[0].Line)
 	assert.Equal(t, "SendTransaction", violations[0].Context["command"])
@@ -114,7 +114,7 @@ func (s *Service) ReconcileConfirmed(id string) error {
 func (s *Service) sendTransaction(tx Tx) error {
 	return s.client.SendTransaction(tx.Request)
 }`
-	violations := NewProviderCommandRetryRule().AnalyzeFile(patterntest.CreateQueryContext(t, "service.go", code))
+	violations := NewProviderCommandRetryRule().AnalyzeFile(rulestest.InMemoryFileContext(t, "service.go", code))
 	require.Len(t, violations, 1)
 	assert.Equal(t, 8, violations[0].Line)
 	assert.Equal(t, "SendTransaction", violations[0].Context["command"])
@@ -142,7 +142,7 @@ func execute(s *Service, req Request) error {
 		return s.provider.%s(req)
 	})
 }`, method)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 			assert.Len(t, NewProviderCommandRetryRule().AnalyzeFile(ctx), 1)
 		})
@@ -158,7 +158,7 @@ func cancel(s *Service, ref string) error {
 		return s.provider.CancelTransaction(ref)
 	})
 }`, retry)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 			violations := NewProviderCommandRetryRule().AnalyzeFile(ctx)
 			require.Len(t, violations, 1)
@@ -210,7 +210,7 @@ func execute(s *Service, ref string, payouts []Payout) error {
 	%s
 	return nil
 }`, tt.body)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 			violations := NewProviderCommandRetryRule().AnalyzeFile(ctx)
 			assert.Len(t, violations, tt.want)
@@ -230,7 +230,7 @@ func execute(s *Service, payouts []Payout) error {
 	}
 	return nil
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Empty(t, NewProviderCommandRetryRule().AnalyzeFile(ctx))
 }
@@ -245,7 +245,7 @@ func execute(s *Service, payouts []Payout) error {
 	}
 	return nil
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	violations := NewProviderCommandRetryRule().AnalyzeFile(ctx)
 	require.Len(t, violations, 1)
@@ -262,7 +262,7 @@ func execute(s *Service, groups [][]Payout) error {
 	}
 	return nil
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Empty(t, NewProviderCommandRetryRule().AnalyzeFile(ctx))
 }
@@ -274,7 +274,7 @@ func (a *Auditor) signedPOST(path string, body any, audit bool) error { return n
 func (c *Client) CancelTransaction(request Request) error {
 	return c.signedPOST("/cancel", request, true)
 }`
-	ctx := patterntest.CreateQueryContext(t, "client.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "client.go", code)
 
 	assert.Empty(t, NewProviderCommandRetryRule().AnalyzeFile(ctx))
 }
@@ -354,7 +354,7 @@ func statuses(s *Service, refs []string) error {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := patterntest.CreateQueryContext(t, "service.go", tt.code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", tt.code)
 			assert.Empty(t, NewProviderCommandRetryRule().AnalyzeFile(ctx))
 		})
 	}
@@ -429,7 +429,7 @@ func TestProviderCommandRetryRule_LoopsThatAreNotRetries(t *testing.T) {
 func run(ctx Context, s *Service, banks []*Bank, amount int, ch chan Payout, items []Item, req Payout) {
 	%s
 }`, tt.body)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 			assert.Empty(t, NewProviderCommandRetryRule().AnalyzeFile(ctx))
 		})
 	}
@@ -488,7 +488,7 @@ func TestProviderCommandRetryRule_RetryEvidenceInOpenLoops(t *testing.T) {
 func run(ctx Context, s *Service, req Payout, ref string, attempts, maxAttempts int, done bool) {
 	%s
 }`, tt.body)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 			violations := NewProviderCommandRetryRule().AnalyzeFile(ctx)
 			require.Len(t, violations, 1)
 			assert.Equal(t, "loop", violations[0].Context["retry_evidence"])
@@ -506,6 +506,6 @@ func cancel(s *Service, ref string) error {
 }`
 	rule := NewProviderCommandRetryRule()
 
-	assert.Empty(t, rule.AnalyzeFile(patterntest.CreateQueryContext(t, "service.go", code)))
-	assert.Empty(t, rule.AnalyzeFile(patterntest.CreateQueryContext(t, "service_test.go", code)))
+	assert.Empty(t, rule.AnalyzeFile(rulestest.InMemoryFileContext(t, "service.go", code)))
+	assert.Empty(t, rule.AnalyzeFile(rulestest.InMemoryFileContext(t, "service_test.go", code)))
 }

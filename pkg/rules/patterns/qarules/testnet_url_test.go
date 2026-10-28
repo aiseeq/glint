@@ -3,14 +3,14 @@ package qarules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
 // A chain's explorer left on its test network among the production explorers
 // of the other chains.
 func TestTestnetURLAmongMainnet(t *testing.T) {
-	ctx := patterntest.CreateAppendContext(t, "chains/explorers.go", `package chains
+	ctx := rulestest.InMemoryFileContext(t, "chains/explorers.go", `package chains
 
 const (
 	ChainA       = "a"
@@ -35,7 +35,7 @@ var testNodes = map[string]string{
 var pair = []string{"https://api.a.io", "https://api.testnet.a.io"}
 
 var contestHosts = []string{"https://contest.example.com", "https://a.io", "https://b.io"}
-`)
+`, false)
 	var lines []int
 	for _, v := range NewTestnetURLAmongMainnetRule().AnalyzeFile(ctx) {
 		lines = append(lines, v.Line)

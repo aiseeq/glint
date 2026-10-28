@@ -260,7 +260,7 @@ func TestHeavy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			file := parseForRule(t, tt.code)
-			ctx := patterntest.CreatePatternContext(t, "live_test.go", tt.code)
+			ctx := rulestest.InMemoryFileContext(t, "live_test.go", tt.code)
 
 			var found []*core.Violation
 			for _, decl := range file.Decls {

@@ -8,7 +8,6 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,7 +51,7 @@ func send(s *Service, req Request) error {
 	if err != nil { return err }
 	return s.%s.%s(resp.ID)
 }`, tt.commandReceiver, tt.commandMethod, tt.stateReceiver, tt.stateMethod)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 			assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 		})
 	}
@@ -75,7 +74,7 @@ func send(s *Service, req Request) error {
 	if err != nil { return err }
 	return s.repo.UpdateState(resp.ID)
 }`, method)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 			assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
 		})
 	}
@@ -89,7 +88,7 @@ func send(s *Service, req Request) error {
 	if err != nil { return err }
 	return s.repo.UpdateState(resp.ID)
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
@@ -100,7 +99,7 @@ func cancel(s *Service, tx Transaction) error {
 	if err := s.repo.ClaimCancellationIntent(tx.ID); err != nil { return err }
 	return s.provider.CancelTransaction(tx.Reference)
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
 }
@@ -111,7 +110,7 @@ func cancel(s *Service, txA, txB Transaction) error {
 	if err := s.repo.ClaimCancellationIntent(txA.ID); err != nil { return err }
 	return s.provider.CancelTransaction(txB.Reference)
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
@@ -122,7 +121,7 @@ func refund(s *Service, tx Transaction) error {
 	if err := s.repo.ClaimCancellationIntent(tx.ID); err != nil { return err }
 	return s.provider.RefundPayment(tx.Reference)
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
@@ -134,7 +133,7 @@ func cancel(s *Service, txA, txB Transaction) error {
 	if err := s.repo.ClaimRefundIntent(txB.ID); err != nil { return err }
 	return s.provider.CancelTransaction(txB.Reference)
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
@@ -157,7 +156,7 @@ func cancel(s *Service, tx Transaction, req Request) error {
 	if err := s.repo.ClaimCancellationIntent(%s); err != nil { return err }
 	return s.provider.CancelTransaction(%s)
 }`, tt.persistArg, tt.commandArg)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 			assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), tt.want)
 		})
@@ -174,7 +173,7 @@ func send(s *Service, req Request) error {
 	if err != nil { return err }
 	return s.repo.UpdateState(resp.ID)
 }`, receiver)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 			assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 		})
@@ -186,7 +185,7 @@ func TestProviderCommandBeforeIntentPersistRule_EnclosingPersistenceRunsAfterCom
 func send(s *Service, req Request) error {
 	return s.repo.UpdateState(s.provider.SendTransaction(req))
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
@@ -197,7 +196,7 @@ func send(s *Service, req Request) error {
 	go s.provider.SendTransaction(req)
 	return s.repo.UpdateState(req.ID)
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
@@ -210,7 +209,7 @@ func send(s *Service, req Request) error {
 	if err != nil { return err }
 	return s.repo.UpdateState(resp.ID)
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
@@ -225,7 +224,7 @@ func send(s *Service, req Request, enabled bool) error {
 	_, err := s.provider.SendTransaction(req)
 	return err
 }`, operator)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 			assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 		})
@@ -241,7 +240,7 @@ func send(s *Service, req Request, enabled bool) error {
 	}
 	return nil
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
 }
@@ -253,7 +252,7 @@ func send(s *Service, reqA, reqB Request) error {
 	_, err := s.provider.SendTransaction(reqB)
 	return err
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
@@ -266,7 +265,7 @@ func send(s *Service, requestCtx context.Context, reqA, reqB Request) error {
 	_, err := s.provider.SendTransaction(requestCtx, reqB)
 	return err
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
@@ -278,7 +277,7 @@ func send(s *Service, ctx Context, req Request) error {
 	_, err := s.provider.SendTransaction(ctx, req)
 	return err
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
 }
@@ -301,7 +300,7 @@ func send(s *Service, ctx Context, req Request) error {
 	_, err := s.provider.SendTransaction(ctx, %s)
 	return err
 }`, tt.persistArg, tt.commandArg)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 			assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
 		})
@@ -333,7 +332,7 @@ func (s *confirmationService) sendPayprovTransaction(ctx context.Context, tx *do
 	resp, err := s.payprov.SendTransaction(payprovReq)
 	return tx, err
 }`
-	ctx := patterntest.CreateQueryContext(t, "internal/orchestrator/orchestrator.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "internal/orchestrator/orchestrator.go", code)
 
 	assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
 }
@@ -345,7 +344,7 @@ func send(s *Service, ctx Context, tx Transaction, req Request) error {
 	_, err := s.bank.SendTransaction(req)
 	return err
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
@@ -360,7 +359,7 @@ func send(s *Service, req Request, execute bool) error {
 		return s.repo.UpdateState(req.ID)
 	}
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
 }
@@ -430,7 +429,7 @@ func send(s *Service, c context.Context, reqA, reqB Request) error {
 	_, err := s.provider.SendTransaction(c, reqB)
 	return err
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
 
@@ -446,7 +445,7 @@ func (s *Svc) Create(ctx Context, p *Payout) error {
 	}
 	return s.%s.UpdateStatus(ctx, p.ID, "pending")
 }`, receiver, receiver)
-			ctx := patterntest.CreateQueryContext(t, "service.go", code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 			assert.Empty(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx))
 		})
 	}
@@ -461,7 +460,7 @@ func (s *Svc) Send(req Request) error {
 	if err != nil { return err }
 	return s.repo.UpdateState(resp.ID)
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
 
@@ -473,7 +472,7 @@ func TestProviderCommandBeforeIntentPersistRule_ShortCircuitChainIsBounded(t *te
 		fmt.Fprintf(&body, "\tok = ok && s.provider.SendPayout(req%d) == nil\n", i)
 	}
 	code := "package service\nfunc send(s *Service, ok bool) error {\n" + body.String() + "\treturn s.repo.UpdateState(1)\n}"
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	done := make(chan []*core.Violation, 1)
 	go func() { done <- NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx) }()
@@ -494,7 +493,7 @@ func handler(s *Service) func(Request) error {
 		return s.repo.UpdateState(resp.ID)
 	}
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }
@@ -610,7 +609,7 @@ func (s *Service) send(req Request) error {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := patterntest.CreateQueryContext(t, tt.path, tt.code)
+			ctx := rulestest.InMemoryFileContext(t, tt.path, tt.code)
 			violations := NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx)
 			assert.Len(t, violations, tt.want)
 			if tt.want == 0 {
@@ -634,6 +633,6 @@ func send(s *Service, req Request) error {
 	}
 	return s.repo.UpdateState(req.ID)
 }`
-	ctx := patterntest.CreateQueryContext(t, "service.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
 	assert.Len(t, NewProviderCommandBeforeIntentPersistRule().AnalyzeFile(ctx), 1)
 }

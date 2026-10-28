@@ -6,6 +6,7 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -252,7 +253,7 @@ func convert(rate decimal.Decimal) float64 {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := patterntest.CreateQueryContext(t, tt.path, tt.code)
+			ctx := rulestest.InMemoryFileContext(t, tt.path, tt.code)
 			assert.Len(t, NewFinancialDecimalFloatRule().AnalyzeFile(ctx), tt.want)
 		})
 	}

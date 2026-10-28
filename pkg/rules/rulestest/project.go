@@ -173,6 +173,18 @@ func InMemoryGoFile(t *testing.T, path, projectRoot, source string, cfg *core.Co
 	return ctx
 }
 
+// InMemoryFileContext builds a file context at a root-relative path and parses
+// Go files. By default, Lines retains a trailing empty line, matching strings.Split.
+func InMemoryFileContext(t *testing.T, path, source string, keepTrailingEmpty ...bool) *core.FileContext {
+	t.Helper()
+	ctx := InMemoryGoFile(t, "/"+path, "/", source, nil)
+	ctx.ProjectRoot = ""
+	if len(keepTrailingEmpty) > 0 && !keepTrailingEmpty[0] {
+		ctx.Lines = SplitLines(source)
+	}
+	return ctx
+}
+
 // RunRuleOnProject runs a project rule once or a file rule on every file in
 // the loaded Go project.
 func RunRuleOnProject(t *testing.T, rule rules.Rule, project *core.GoProjectContext) []*core.Violation {

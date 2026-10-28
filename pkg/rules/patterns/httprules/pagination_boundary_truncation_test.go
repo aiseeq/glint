@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -229,7 +229,7 @@ func fetch(minMinedAt *time.Time) error {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := patterntest.CreateQueryContext(t, "sync.go", tt.code)
+			ctx := rulestest.InMemoryFileContext(t, "sync.go", tt.code)
 			assert.Len(t, NewPaginationBoundaryTruncationRule().AnalyzeFile(ctx), tt.want)
 		})
 	}

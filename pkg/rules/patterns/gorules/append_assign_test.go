@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -108,7 +108,7 @@ var _ = append(base, 2)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := patterntest.CreateAppendContext(t, "service.go", tt.code)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", tt.code, false)
 			violations := rule.AnalyzeFile(ctx)
 
 			if tt.expectMatch {

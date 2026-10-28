@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -127,7 +126,7 @@ func sendDashboard(w http.ResponseWriter, req *http.Request) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := patterntest.CreatePatternContext(t, "handler.go", tt.code)
+			ctx := rulestest.InMemoryFileContext(t, "handler.go", tt.code)
 			violations := rule.AnalyzeFile(ctx)
 
 			if tt.expectMatch {
@@ -257,6 +256,6 @@ func TestSomething(t *testing.T) {
 	check(Response{ID: "x"})
 }
 `
-	ctx := patterntest.CreatePatternContext(t, "handler_test.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "handler_test.go", code)
 	assert.Empty(t, rule.AnalyzeFile(ctx))
 }

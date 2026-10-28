@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -269,7 +269,7 @@ func TestPooled(t *testing.T) {
 	rule := NewTestSchemaMutationWithoutCleanupRule()
 	var contexts []*core.FileContext
 	for path, code := range files {
-		contexts = append(contexts, patterntest.CreatePatternContext(t, path, code))
+		contexts = append(contexts, rulestest.InMemoryFileContext(t, path, code))
 	}
 	rule.UseProjectFiles(contexts)
 	var found []string
@@ -331,7 +331,7 @@ func TestSharedPool(t *testing.T) {
 	rule := NewTestSchemaMutationWithoutCleanupRule()
 	var contexts []*core.FileContext
 	for path, code := range files {
-		contexts = append(contexts, patterntest.CreatePatternContext(t, path, code))
+		contexts = append(contexts, rulestest.InMemoryFileContext(t, path, code))
 	}
 	rule.UseProjectFiles(contexts)
 	var found []string

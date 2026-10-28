@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -212,7 +212,7 @@ func TestAliased(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := patterntest.CreatePatternContext(t, "service_test.go", tt.code)
+			ctx := rulestest.InMemoryFileContext(t, "service_test.go", tt.code)
 			violations := rule.AnalyzeFile(ctx)
 
 			if tt.expectMatch {

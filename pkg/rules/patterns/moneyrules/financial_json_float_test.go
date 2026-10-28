@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -184,14 +184,14 @@ type Response struct {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := patterntest.CreateQueryContext(t, "client.go", tt.code)
+			ctx := rulestest.InMemoryFileContext(t, "client.go", tt.code)
 			assert.Len(t, NewFinancialJSONFloatRule().AnalyzeFile(ctx), tt.want)
 		})
 	}
 }
 
 func TestFinancialJSONFloatRule_SkipsTests(t *testing.T) {
-	ctx := patterntest.CreateQueryContext(t, "client_test.go", `package api
+	ctx := rulestest.InMemoryFileContext(t, "client_test.go", `package api
 type fixture struct { Price float64 `+"`json:\"price\"`"+` }`)
 	assert.Empty(t, NewFinancialJSONFloatRule().AnalyzeFile(ctx))
 }

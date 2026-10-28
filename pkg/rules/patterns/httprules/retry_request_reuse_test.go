@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -288,7 +287,7 @@ func TestSend(t *testing.T) {
 	}
 }
 `
-	ctx := patterntest.CreateDeferContext(t, "client_test.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "client_test.go", code, false)
 	assert.Empty(t, rule.AnalyzeFile(ctx))
 }
 
@@ -311,6 +310,6 @@ func send(c *nethttp.Client, payload []byte) {
 	}
 }
 `
-	ctx := patterntest.CreateDeferContext(t, "client.go", code)
+	ctx := rulestest.InMemoryFileContext(t, "client.go", code, false)
 	assert.Len(t, NewRetryRequestReuseRule().AnalyzeFile(ctx), 1)
 }

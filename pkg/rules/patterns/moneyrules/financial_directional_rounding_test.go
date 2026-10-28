@@ -6,6 +6,7 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -222,7 +223,7 @@ func (m money) rounded() float64 {
 	rule := NewFinancialDirectionalRoundingRule()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := patterntest.CreateQueryContext(t, tt.path, tt.code)
+			ctx := rulestest.InMemoryFileContext(t, tt.path, tt.code)
 			assert.Len(t, rule.AnalyzeFile(ctx), tt.want)
 		})
 	}
@@ -282,7 +283,7 @@ func units(consumedUnits decimal.Decimal) decimal.Decimal { return consumedUnits
 
 func TestFinancialDirectionalRoundingRule_SkipsTestFiles(t *testing.T) {
 	rule := NewFinancialDirectionalRoundingRule()
-	ctx := patterntest.CreateQueryContext(t, "format_test.go", `package ui
+	ctx := rulestest.InMemoryFileContext(t, "format_test.go", `package ui
 import "github.com/shopspring/decimal"
 func formatAmount(amount decimal.Decimal) string {
 	return amount.RoundCeil(2).StringFixed(2)
