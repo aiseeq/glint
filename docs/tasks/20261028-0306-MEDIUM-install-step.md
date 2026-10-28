@@ -1,6 +1,7 @@
 # install через шаг graft {install: bin/glint} вместо mktemp+mv
 
-Статус: открыт
+Статус: на проверке
+Исполнитель: glint-master
 
 ## Вход
 Задание git-admin (лид 27.10, пункт D; спецификация ~/git/docs/install-step.md, пилот akit ad1c782): задача install в .graft.yaml — шаг `{install: bin/glint}` вместо связки mktemp+install+mv. Шаг ставит только закоммиченное (уходит -dirty).
@@ -17,3 +18,4 @@
 ## Журнал
 - 2026-10-28 03:06 открыт — git-admin
 - 2026-10-28 03:06 note — glint-master: edited .graft.yaml install → {install: bin/glint}; committing then graft install
+- 2026-10-28 03:07 на проверке — glint-master — graft install: 'graft: install: glint a839d21 -> ~/bin/glint'; vcs.revision=a839d21, vcs.modified=false
