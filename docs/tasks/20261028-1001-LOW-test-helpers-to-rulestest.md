@@ -1,6 +1,7 @@
 # Свести хелперы тестов правил в rulestest
 
-Статус: открыт
+Статус: на проверке
+Исполнитель: glint-master
 
 ## Вход
 - Проблема:
@@ -25,3 +26,5 @@
 - 2026-10-28 14:20 note — glint-master: 14:22 бриф и мера готовы (~/.local/share/glint-history/test-helpers/: brief.md, accept.sh, count.sh — 55 хелперов, тестов 2116), worktree test-helpers. Бойца не запускаю: graft gate в glint падает, когда test-short уходит на PC (нет ~/.config/models/approved, $GOROOT not set в /.worker-pc-stage) — сообщено graft-master.
 - 2026-10-28 14:52 note — glint-master: боец: ACCEPT OK, 55→12 копий, -379 строк; закоммичено 804c614 в ветку. Ревью: в patterntest остались копии rulestest (Split*Lines x3, ViolationLines, FileRuleLines, AppRuleLines, обёртки RunRuleOn*), rulestest.RunGoProjectRule дублирует RunRuleOnFiles → раунд 2 (round2.md, accept2.sh)
 - 2026-10-28 15:07 note — glint-master: раунд 2 принят, закоммичен 15d9f03 (−11 копий, patterntest 820→699 строк). Ревью: 4 копии Create*Context → раунд 3 (round3.md, accept3.sh)
+- 2026-10-28 15:27 note — glint-master: раунд 3 принят; мастер: InMemoryFileContext без флага строк и обнуления ProjectRoot (тесты зелёные без них), удалены 4 пустых файла и устаревшее исключение doc-links; graft all зелёный, 2116 тестов; ff в main b60eac3
+- 2026-10-28 15:27 на проверке — glint-master — проверка: git-admin/lead — count.sh: локальные хелперы только из allowed.txt; go test -list . ./pkg/rules/... = 2116; graft all
