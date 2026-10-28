@@ -579,13 +579,42 @@ func Prune() {}
 
 // Cleaner counts the rows a sweep deleted.
 func other() {}
+
+// Load reads the config.
+//
+// Load legacy env fallback removed
+func Load(c Stats) {}
+
+// Store legacy env fallback removed
+func Store() {}
+
+func body() {
+	// Retry loop removed, call once
+	err := call(Retry)
+	// Stats field Timeout removed
+	var c Stats
+}
 `
 	ctx := core.NewFileContext("sweep/sweep.go", ".", []byte(code), nil)
 	var lines []int
 	for _, v := range rule.AnalyzeFile(ctx) {
 		lines = append(lines, v.Line)
 	}
-	if !slices.Equal(lines, []int{12, 15}) {
-		t.Fatalf("want tombstones on lines 12 and 15 only, got %v", lines)
+	if !slices.Equal(lines, []int{12, 15, 20, 23, 27, 29}) {
+		t.Fatalf("want tombstones on lines 12, 15, 20, 23, 27, 29 only, got %v", lines)
+	}
+
+	ts := `/** Fetcher counts the rows a sweep deleted. */
+export class Fetcher {}
+
+// Loader legacy env fallback removed
+export function Loader() {}
+`
+	lines = nil
+	for _, v := range rule.AnalyzeFile(core.NewFileContext("sweep/fetch.ts", ".", []byte(ts), nil)) {
+		lines = append(lines, v.Line)
+	}
+	if !slices.Equal(lines, []int{4}) {
+		t.Fatalf("want the TypeScript tombstone on line 4 alone, got %v", lines)
 	}
 }

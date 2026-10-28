@@ -46,8 +46,9 @@ func init() {
 // line goes on there. A pronoun before the removal word ("one it removed",
 // "the rows they deleted") is the one that removes: the program, not a note.
 // So is the first sentence of a godoc comment that opens with the name
-// declared below ("Result counts the entries a trim removed"): it describes
-// the declaration; a later sentence of the doc can still be a note.
+// declared below and a verb ("Result counts the entries a trim removed"): it
+// describes the declaration; a later sentence or paragraph of the doc can
+// still be a note.
 type TombstoneCommentRule struct {
 	*rules.BaseRule
 	tombstone    *regexp.Regexp
@@ -239,18 +240,31 @@ func describesDeclaration(lines []string, i int, before, word string) bool {
 	return godocFirstSentence(lines, i, before)
 }
 
-// isCommentLine reports a line that holds a comment and nothing else.
+// isCommentLine reports a line that holds a comment, blank ones too, and
+// nothing else.
 func isCommentLine(line string) bool {
-	return commentTextOfLine(line) != "" && strings.HasPrefix(strings.TrimSpace(line), core.CommentPart(line))
+	comment := core.CommentPart(line)
+	return comment != "" && strings.HasPrefix(strings.TrimSpace(line), comment)
 }
 
-// sentenceEnd matches the end of a sentence inside a comment.
-var sentenceEnd = regexp.MustCompile(`[.!?;](?:\s|$)`)
+var (
+	// sentenceEnd matches the end of a sentence inside a comment: the marks
+	// sentenceBefore ends a line's sentence on.
+	sentenceEnd = regexp.MustCompile(`[.!?:;—–](?:\s|$)`)
+	// declaration captures the name a code line declares: after a keyword,
+	// or a Go struct field.
+	declaration = regexp.MustCompile(
+		`^\s*(?:(?:export|default|declare|async|abstract)\s+)*(?:func(?:\s*\([^)]*\))?|type|var|const|let|class|interface|function\*?|enum)\s+([\p{L}_$][\p{L}\p{N}_$]*)` +
+			`|^\s*(\p{Lu}[\p{L}\p{N}_]*)(?:\s*,\s*[\p{L}_][\p{L}\p{N}_]*)*\s+[^\s=:(.,]`)
+	// presentVerb matches the verb a godoc sentence puts after the name:
+	// "Result counts", "Merge объединяет".
+	presentVerb = regexp.MustCompile(`(?i)^\p{L}+(?:s|[еиё]т|[юяу]т)$`)
+)
 
 // godocFirstSentence reports a match on comment line i, with before the text
 // of the line ahead of it, inside the first sentence of a doc comment that
-// opens with the name the code below declares, and goes on past it: godoc's
-// "Result counts the entries ..." describes the declaration.
+// opens with the name the code below declares and a verb: godoc's "Result
+// counts the entries ..." describes the declaration.
 func godocFirstSentence(lines []string, i int, before string) bool {
 	if !isCommentLine(lines[i]) {
 		return false
@@ -262,8 +276,8 @@ func godocFirstSentence(lines []string, i int, before string) bool {
 	var text strings.Builder
 	for _, line := range lines[start:i] {
 		comment := commentTextOfLine(line)
-		if strings.HasPrefix(comment, "\t") {
-			return false
+		if strings.HasPrefix(comment, "\t") || strings.Trim(comment, " */") == "" && text.Len() > 0 {
+			return false // a code block, or a paragraph after the first
 		}
 		text.WriteString(comment + " ")
 	}
@@ -272,7 +286,22 @@ func godocFirstSentence(lines []string, i int, before string) bool {
 		return false
 	}
 	words := strings.FieldsFunc(text.String(), isNotIdentChar)
-	return len(words) > 1 && documentsName(lines, i, words[0])
+	return len(words) > 1 && words[0] == nameDeclaredBelow(lines, i) && presentVerb.MatchString(words[1])
+}
+
+// nameDeclaredBelow returns the name the first code line after line i declares,
+// or "" when that line declares none.
+func nameDeclaredBelow(lines []string, i int) string {
+	for _, line := range lines[i+1:] {
+		if strings.TrimSpace(line) == "" || isCommentLine(line) {
+			continue
+		}
+		if m := declaration.FindStringSubmatch(line); m != nil {
+			return m[1] + m[2]
+		}
+		return ""
+	}
+	return ""
 }
 
 func isNotIdentChar(c rune) bool { return c != '_' && !unicode.IsLetter(c) && !unicode.IsDigit(c) }
