@@ -3,7 +3,7 @@ package httprules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -13,7 +13,7 @@ import (
 func TestJSONTextCodecOneSided(t *testing.T) {
 	tag := func(s string) string { return "`" + s + "`" }
 	assert.Equal(t, []string{"state/state.go:12", "state/state.go:13", "state/state.go:14", "state/state.go:15"},
-		patterntest.ProjectRuleLines(t, NewJSONTextCodecOneSidedRule(), map[string]string{
+		rulestest.ProjectRulePlaces(t, NewJSONTextCodecOneSidedRule(), map[string]string{
 			"policy/policy.go": `package policy
 
 import (

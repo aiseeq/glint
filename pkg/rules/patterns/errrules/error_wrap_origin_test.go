@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,7 +15,7 @@ import (
 func errorWrapFindings(t *testing.T, files map[string]string) []string {
 	t.Helper()
 	var got []string
-	for _, v := range patterntest.RunRuleOnFiles(t, NewErrorWrapRule(), files) {
+	for _, v := range rulestest.RunRuleOnFiles(t, NewErrorWrapRule(), files) {
 		got = append(got, fmt.Sprintf("%s:%d %s", v.File, v.Line, v.Message))
 	}
 	return got

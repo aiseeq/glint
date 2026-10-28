@@ -11,5 +11,5 @@ func SqlFileRuleLines(t *testing.T, rule interface {
 	AnalyzeFile(*core.FileContext) []*core.Violation
 }, path, source string) []int {
 	t.Helper()
-	return ViolationLines(rule.AnalyzeFile(rulestest.GoFile(t, path, source)))
+	return rulestest.ViolationLines(rule.AnalyzeFile(rulestest.GoFile(t, path, source)))
 }

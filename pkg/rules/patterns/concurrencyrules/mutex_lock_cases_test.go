@@ -1,9 +1,9 @@
 package concurrencyrules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,12 +27,12 @@ func (s *Store) Do() {
 // Returning the Unlock method value hands the release to the caller: the
 // `defer s.lock()()` idiom.
 func TestMutexLockAcceptsReturnedUnlockMethodValue(t *testing.T) {
-	assert.Empty(t, patterntest.RunRuleOnFiles(t, NewMutexLockRule(), map[string]string{"store.go": mutexLockReturnsUnlock}))
+	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewMutexLockRule(), map[string]string{"store.go": mutexLockReturnsUnlock}))
 	assert.Empty(t, NewMutexLockRule().AnalyzeFile(createMutexContext(t, "store.go", mutexLockReturnsUnlock)))
 }
 
 func TestMutexLockTypedReportsSyncMutexWithoutUnlock(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewMutexLockRule(), map[string]string{"store.go": `package projecta
+	violations := rulestest.RunRuleOnFiles(t, NewMutexLockRule(), map[string]string{"store.go": `package projecta
 
 import "sync"
 
@@ -54,7 +54,7 @@ func (s *Store) Get() int {
 // With types a Lock method of something that is not a sync mutex is not a
 // critical section: a file lock released by Close, a lease renewed elsewhere.
 func TestMutexLockTypedIgnoresNonMutexLock(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewMutexLockRule(), map[string]string{"lease.go": `package projecta
+	violations := rulestest.RunRuleOnFiles(t, NewMutexLockRule(), map[string]string{"lease.go": `package projecta
 
 type Lease struct{ held bool }
 

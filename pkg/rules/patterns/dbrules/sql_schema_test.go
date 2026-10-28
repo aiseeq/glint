@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,7 +40,7 @@ func sqlRuleLines(t *testing.T, rule interface {
 	AnalyzeFile(*core.FileContext) []*core.Violation
 }, ctx *core.FileContext) []int {
 	t.Helper()
-	lines := patterntest.ViolationLines(rule.AnalyzeFile(ctx))
+	lines := rulestest.ViolationLines(rule.AnalyzeFile(ctx))
 	slices.Sort(lines)
 	return lines
 }

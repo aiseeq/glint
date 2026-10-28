@@ -4,7 +4,8 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/patterns/httprules"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -27,7 +28,7 @@ func Named(query string, arg any) (string, []any, error) { return query, nil, ni
 // a known row counts as a new one. The conflict clause comes from the
 // callers.
 func TestUpsertAffectedCountedAsInserted(t *testing.T) {
-	assert.Equal(t, []string{"store/store.go:29", "store/store.go:40"}, patterntest.ProjectRuleLines(t, NewUpsertAffectedCountedAsInsertedRule(), map[string]string{
+	assert.Equal(t, []string{"store/store.go:29", "store/store.go:40"}, rulestest.ProjectRulePlaces(t, NewUpsertAffectedCountedAsInsertedRule(), map[string]string{
 		"db/db.go": dbStubSource,
 		"store/store.go": `package store
 
@@ -95,7 +96,7 @@ func (s *Store) Add(ctx context.Context, key string) (int64, error) {
 
 // Two rows with one conflict key fail the multi-row upsert as a whole.
 func TestBatchUpsertDuplicateConflictKeys(t *testing.T) {
-	assert.Equal(t, []string{"store/store.go:23"}, patterntest.ProjectRuleLines(t, NewBatchUpsertDuplicateConflictKeysRule(), map[string]string{
+	assert.Equal(t, []string{"store/store.go:23"}, rulestest.ProjectRulePlaces(t, NewBatchUpsertDuplicateConflictKeysRule(), map[string]string{
 		"db/db.go": dbStubSource,
 		"store/store.go": `package store
 
@@ -173,7 +174,7 @@ func (s *Store) UpsertCheckedByIndex(ctx context.Context, rows []Row) error {
 // A DATE column scanned into a string arrives as RFC 3339: the date-only
 // parse fails on every row.
 func TestSQLDateStringParsedAsDate(t *testing.T) {
-	assert.Equal(t, []string{"store/vesting.go:16"}, patterntest.ProjectRuleLines(t, NewSQLDateStringParsedAsDateRule(), map[string]string{
+	assert.Equal(t, []string{"store/vesting.go:16"}, rulestest.ProjectRulePlaces(t, NewSQLDateStringParsedAsDateRule(), map[string]string{
 		"store/migrations/001_init.up.sql": `CREATE TABLE rounds (id UUID PRIMARY KEY, close_date DATE, label TEXT, note_day TEXT);`,
 		"store/vesting.go": `package store
 
@@ -215,7 +216,7 @@ func Noted(r *Round) (time.Time, error) { return time.Parse("2006-01-02", r.Note
 // The legacy key the builder sets never reaches the snapshot the
 // materializer reads back: there it is always empty.
 func TestJSONIgnoredFieldLostInRoundTrip(t *testing.T) {
-	assert.Equal(t, []string{"holdings/holdings.go:7"}, patterntest.ProjectRuleLines(t, httprules.NewJSONIgnoredFieldLostInRoundTripRule(), map[string]string{
+	assert.Equal(t, []string{"holdings/holdings.go:7"}, rulestest.ProjectRulePlaces(t, httprules.NewJSONIgnoredFieldLostInRoundTripRule(), map[string]string{
 		"holdings/holdings.go": `package holdings
 
 import "encoding/json"

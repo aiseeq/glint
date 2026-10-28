@@ -3,7 +3,6 @@ package frontendrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -52,7 +51,7 @@ func apply(payload Payload) error {
 }
 `
 	violations := NewMissingAmountCoercedToZeroRule().AnalyzeFile(rulestest.GoFile(t, "hook/apply.go", source))
-	assert.Equal(t, []int{26, 30}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{26, 30}, rulestest.ViolationLines(violations))
 }
 
 // A nullable amount replaced with zero before it goes out: the partner reads
@@ -73,7 +72,7 @@ func observe(desired Desired) ([]byte, error) {
 }
 `
 	violations := NewMissingAmountCoercedToZeroRule().AnalyzeFile(rulestest.GoFile(t, "hook/observe.go", source))
-	assert.Equal(t, []int{4}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{4}, rulestest.ViolationLines(violations))
 }
 
 // The same substitution through an early return: a nil amount answered with
@@ -110,5 +109,5 @@ func required(amount *decimal.Decimal) (decimal.Decimal, error) {
 }
 `
 	violations := NewMissingAmountCoercedToZeroRule().AnalyzeFile(rulestest.GoFile(t, "hook/payout.go", source))
-	assert.Equal(t, []int{5, 12}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{5, 12}, rulestest.ViolationLines(violations))
 }

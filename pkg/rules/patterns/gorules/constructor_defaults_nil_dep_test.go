@@ -3,7 +3,6 @@ package gorules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -57,7 +56,7 @@ func NewPoller(opts *Options, logger *slog.Logger) *Calculator {
 }
 `
 	ctx := rulestest.GoFile(t, "svc/svc.go", source)
-	assert.Equal(t, []int{17, 26}, patterntest.ViolationLines(NewConstructorSwallowsNilDepRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{17, 26}, rulestest.ViolationLines(NewConstructorSwallowsNilDepRule().AnalyzeFile(ctx)))
 }
 
 // A method that swaps a nil dependency for a package default at the point of
@@ -107,5 +106,5 @@ func report(logger *slog.Logger, msg string) {
 }
 `
 	ctx := rulestest.GoFile(t, "svc/client.go", source)
-	assert.Equal(t, []int{16, 23, 38}, patterntest.ViolationLines(NewConstructorSwallowsNilDepRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{16, 23, 38}, rulestest.ViolationLines(NewConstructorSwallowsNilDepRule().AnalyzeFile(ctx)))
 }

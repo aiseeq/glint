@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -150,7 +150,7 @@ func (s *Importer) importRows(ctx context.Context, rows []Row) error {
 	rule := NewAggregateSkipsFailedPartRule()
 	ctx := rulestest.GoFile(t, "sched/refresh.go", source)
 	rule.UseProjectFiles([]*core.FileContext{ctx})
-	assert.Equal(t, []int{7}, patterntest.ViolationLines(rule.AnalyzeFile(ctx)))
+	assert.Equal(t, []int{7}, rulestest.ViolationLines(rule.AnalyzeFile(ctx)))
 }
 
 // A batch that keeps only the items whose result object says success, with

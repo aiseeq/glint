@@ -1,9 +1,9 @@
 package gorules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +16,7 @@ func containsFixMarks(t *testing.T, gomod, source string) [][2]any {
 	if gomod != "" {
 		files["go.mod"] = gomod
 	}
-	violations := patterntest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), files)
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), files)
 	marks := make([][2]any, 0, len(violations))
 	for _, v := range violations {
 		marks = append(marks, [2]any{v.Context["fix_collection"], v.Context["fix_target"]})
@@ -82,7 +82,7 @@ func TestReimplementedStdlibDoesNotMarkBeforeGo121(t *testing.T) {
 
 // The column pins the helper for the fixer.
 func TestReimplementedStdlibReportsColumn(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewReimplementedStdlibRule(),
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(),
 		map[string]string{"helpers/helpers.go": linearSearch("has(xs []string, s string)", "x == s")})
 	require.Len(t, violations, 1)
 	assert.Equal(t, 1, violations[0].Column)

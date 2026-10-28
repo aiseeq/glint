@@ -8,7 +8,6 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -136,7 +135,7 @@ func charColumnLines(t *testing.T, migrations map[string]string, analyzed string
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 	}
-	return patterntest.ViolationLines(NewSQLCharColumnPadsValueRule().AnalyzeFile(ctx))
+	return rulestest.ViolationLines(NewSQLCharColumnPadsValueRule().AnalyzeFile(ctx))
 }
 
 // A CHAR(3) column pads a two-letter code with a space; the line reported is

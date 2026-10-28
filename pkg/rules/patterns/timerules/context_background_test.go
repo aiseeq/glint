@@ -73,7 +73,7 @@ func doSomething(ctx context.Context) {}`,
 // fresh context — the cancelled ctx would abort Shutdown at once. Advising
 // "use ctx" there breaks the shutdown.
 func TestContextBackgroundRuleShutdownAfterDone(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewContextBackgroundRule(), map[string]string{"server/run.go": `package server
+	violations := rulestest.RunRuleOnFiles(t, NewContextBackgroundRule(), map[string]string{"server/run.go": `package server
 
 import (
 	"context"
@@ -103,7 +103,7 @@ func RunSelect(ctx context.Context, srv *http.Server, errs <-chan error) error {
 }
 
 func TestContextBackgroundRuleTypedParams(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewContextBackgroundRule(), map[string]string{"svc/svc.go": `package svc
+	violations := rulestest.RunRuleOnFiles(t, NewContextBackgroundRule(), map[string]string{"svc/svc.go": `package svc
 
 import stdctx "context"
 
@@ -151,7 +151,7 @@ func TestContextBackgroundRuleNoAST(t *testing.T) {
 // handed to a goroutine and a context handed back to the caller is the
 // function's purpose and stays silent.
 func TestContextBackgroundRuleWithoutCancel(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewContextBackgroundRule(), map[string]string{"svc/balance.go": `package svc
+	violations := rulestest.RunRuleOnFiles(t, NewContextBackgroundRule(), map[string]string{"svc/balance.go": `package svc
 
 import (
 	"context"

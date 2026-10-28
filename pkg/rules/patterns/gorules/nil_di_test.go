@@ -124,7 +124,7 @@ func TestNilDIRule_Detection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			violations := patterntest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
+			violations := rulestest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
 				"svc/types.go":       nilDITypes,
 				"svc/constructor.go": "package svc\n\n" + tt.constructor + "\n",
 				"svc/wire.go":        "package svc\n\nfunc wire() {\n\t" + tt.call + "\n}\n",
@@ -136,7 +136,7 @@ func TestNilDIRule_Detection(t *testing.T) {
 
 // A constructor of another package is resolved the same way.
 func TestNilDIRule_DetectsAcrossPackages(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
 		"svc/types.go": nilDITypes,
 		"svc/metrics.go": `package svc
 
@@ -288,7 +288,7 @@ func wire() {
 // called the nil limit of NewReportService a logger ("last argument of a
 // service") and asked for a dependency the constructor does not take.
 func TestNilDIResolvesConstructorFromSiblingFile(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
 		"report/service.go": `package report
 
 type Config struct{}
@@ -313,7 +313,7 @@ func wire() *ReportService {
 // The same resolution finds the nil dependency the position guess missed, in
 // the same package and across packages, and names the real parameter.
 func TestNilDIReportsResolvedDependencyAcrossFiles(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
 		"users/service.go": `package users
 
 type Repo interface{ Find(id string) error }

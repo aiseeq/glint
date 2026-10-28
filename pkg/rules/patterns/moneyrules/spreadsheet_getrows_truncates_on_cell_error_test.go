@@ -1,14 +1,14 @@
 package moneyrules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestSpreadsheetGetRowsTruncatesOnCellErrorIgnoresProjectWrapper(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), map[string]string{
 		"sheet/sheet.go": `package sheet
 
 type Workbook struct{}
@@ -23,7 +23,7 @@ func Read(book *Workbook, name string) ([][]string, error) {
 }
 
 func TestSpreadsheetGetRowsTruncatesOnCellErrorAllowsCheckedRead(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), map[string]string{
 		"sheet/sheet.go": `package sheet
 
 type Workbook struct{}
@@ -50,7 +50,7 @@ func checkCells(book *Workbook, name string, rows [][]string) error {
 }
 
 func TestSpreadsheetGetRowsTruncatesOnCellErrorIgnoresUntypedIterator(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), map[string]string{
 		"sheet/sheet.go": `package sheet
 
 type Workbook struct{}
@@ -82,7 +82,7 @@ func (*RowIterator) Close() error { return nil }
 }
 
 func TestSpreadsheetGetRowsTruncatesOnCellErrorIgnoresOtherMethod(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), map[string]string{
 		"sheet/sheet.go": `package sheet
 
 type Workbook struct{}

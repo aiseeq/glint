@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -123,5 +122,5 @@ func field(resp *Response) {
 	}
 }
 `)
-	assert.Equal(t, []int{15, 23, 88}, patterntest.ViolationLines(NewErrorCheckedOnlyForSuccessRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{15, 23, 88}, rulestest.ViolationLines(NewErrorCheckedOnlyForSuccessRule().AnalyzeFile(ctx)))
 }

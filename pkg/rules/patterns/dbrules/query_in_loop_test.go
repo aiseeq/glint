@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -451,6 +451,6 @@ func Shared(db *sql.DB, ids []string) error {
 	return nil
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewQueryInLoopRule(), map[string]string{"stats/stats.go": source})
-	assert.Equal(t, []int{63, 72, 81}, patterntest.ViolationLines(violations))
+	violations := rulestest.RunRuleOnFiles(t, NewQueryInLoopRule(), map[string]string{"stats/stats.go": source})
+	assert.Equal(t, []int{63, 72, 81}, rulestest.ViolationLines(violations))
 }

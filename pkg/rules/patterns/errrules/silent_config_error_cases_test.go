@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -51,5 +50,5 @@ func Port() int {
 }
 `
 	ctx := rulestest.GoFile(t, "env/e.go", source)
-	assert.Equal(t, []int{31, 34}, patterntest.ViolationLines(NewSilentConfigErrorRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{31, 34}, rulestest.ViolationLines(NewSilentConfigErrorRule().AnalyzeFile(ctx)))
 }

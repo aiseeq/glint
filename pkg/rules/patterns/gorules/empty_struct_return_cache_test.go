@@ -3,7 +3,6 @@ package gorules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -38,5 +37,5 @@ func (s *Service) List(ctx context.Context) ([]*Wallet, error) {
 }
 `
 	violations := NewEmptyStructReturnRule().AnalyzeFile(rulestest.GoFile(t, "balances/summary.go", source))
-	assert.Equal(t, []int{12}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{12}, rulestest.ViolationLines(violations))
 }

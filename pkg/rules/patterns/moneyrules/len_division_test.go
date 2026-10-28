@@ -3,7 +3,7 @@ package moneyrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -79,7 +79,7 @@ func avg(extra []float64, sum float64) float64 {
 
 // The length of an array is a constant: it cannot be zero by surprise.
 func TestUncheckedLenDivisionAcceptsArrayLength(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewUncheckedLenDivisionRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewUncheckedLenDivisionRule(), map[string]string{
 		"weights.go": `package geometry
 
 var weights = [3]float64{0.2, 0.3, 0.5}
@@ -94,7 +94,7 @@ func wavg(total float64) float64 {
 
 // The typed path still reports a slice.
 func TestUncheckedLenDivisionTypedReportsSlice(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewUncheckedLenDivisionRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewUncheckedLenDivisionRule(), map[string]string{
 		"weights.go": `package geometry
 
 var weights = []float64{0.2, 0.3, 0.5}
@@ -111,7 +111,7 @@ func wavg(total float64) float64 {
 // A guard that stops the process — log.Fatal, os.Exit — ends the empty path
 // just as a return does.
 func TestUncheckedLenDivisionTypedAcceptsNoReturnGuard(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewUncheckedLenDivisionRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewUncheckedLenDivisionRule(), map[string]string{
 		"avg.go": `package geometry
 
 import (

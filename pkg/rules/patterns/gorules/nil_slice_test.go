@@ -199,7 +199,7 @@ func example() {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := createNilSliceContext(t, "service.go", tt.code)
 			untyped := rule.AnalyzeFile(ctx)
-			typed := patterntest.RunRuleOnFiles(t, rule, map[string]string{"svc/service.go": tt.code})
+			typed := rulestest.RunRuleOnFiles(t, rule, map[string]string{"svc/service.go": tt.code})
 
 			for mode, violations := range map[string][]*core.Violation{"untyped": untyped, "typed": typed} {
 				expectMatch := tt.expectMatch
@@ -302,7 +302,7 @@ func find(pattern *regexp.Regexp, content string) string {
 			}
 			// With types the pointers are pointers, and the submatch slice
 			// comes from a call whose nil contract the rule respects.
-			typed := patterntest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{"svc/svc.go": tc.code})
+			typed := rulestest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{"svc/svc.go": tc.code})
 			require.Empty(t, typed)
 		})
 	}
@@ -325,7 +325,7 @@ func process() int {
 	if len(violations) != 1 {
 		t.Fatalf("got %d findings, want 1", len(violations))
 	}
-	typed := patterntest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{"svc/svc.go": string(ctx.Content)})
+	typed := rulestest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{"svc/svc.go": string(ctx.Content)})
 	require.Len(t, typed, 1)
 }
 
@@ -333,7 +333,7 @@ func process() int {
 // name fallback took the pointer `results` for a slice and suggested len(),
 // which does not compile on a pointer.
 func TestNilSliceUsesDeclaredTypeFromSiblingFile(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
 		"search/state.go": `package search
 
 type Result struct{}
@@ -352,7 +352,7 @@ func missing() bool {
 
 // A slice declared in a sibling file is reported whatever its name.
 func TestNilSliceReportsSliceFromSiblingFile(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
 		"search/state.go": `package search
 
 var queue []int

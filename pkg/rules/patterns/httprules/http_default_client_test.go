@@ -3,7 +3,6 @@ package httprules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -12,7 +11,7 @@ import (
 // and never answers holds the caller forever.
 func TestHTTPDefaultClient(t *testing.T) {
 	rule := NewHTTPDefaultClientRule()
-	lines := patterntest.ViolationLines(rule.AnalyzeFile(rulestest.GoFile(t, "chain/rpc.go", `package chain
+	lines := rulestest.ViolationLines(rule.AnalyzeFile(rulestest.GoFile(t, "chain/rpc.go", `package chain
 
 import (
 	"bytes"

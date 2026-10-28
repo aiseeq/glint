@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -32,5 +31,5 @@ func (a *Admin) archiveProject(w http.ResponseWriter, r *http.Request, id int64)
 }
 `
 	violations := NewErrorCauseDroppedRule().AnalyzeFile(rulestest.GoFile(t, "admin/projects.go", source))
-	assert.Equal(t, []int{6}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{6}, rulestest.ViolationLines(violations))
 }

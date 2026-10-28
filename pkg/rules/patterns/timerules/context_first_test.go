@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -278,7 +278,7 @@ func TestContextFirstMetadata(t *testing.T) {
 // means the function accepts one (what it does with it is context-background's
 // business).
 func TestContextFirstTypedContextParams(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewContextFirstRule(), map[string]string{"service/service.go": `package service
+	violations := rulestest.RunRuleOnFiles(t, NewContextFirstRule(), map[string]string{"service/service.go": `package service
 
 import stdctx "context"
 

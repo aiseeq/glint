@@ -3,7 +3,7 @@ package httprules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -42,6 +42,6 @@ func providerFailureAware(method, rawURL string, status int, detail string, err 
 	return fmt.Errorf("%s %s: %w", method, parsed.Host, err)
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewServerErrorHidesClientCancelRule(), map[string]string{"client/client.go": code})
-	assert.Equal(t, []int{18}, patterntest.ViolationLines(violations))
+	violations := rulestest.RunRuleOnFiles(t, NewServerErrorHidesClientCancelRule(), map[string]string{"client/client.go": code})
+	assert.Equal(t, []int{18}, rulestest.ViolationLines(violations))
 }

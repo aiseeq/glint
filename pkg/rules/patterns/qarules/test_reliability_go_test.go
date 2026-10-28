@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -69,7 +69,7 @@ func TestLoginSameSubtest(t *testing.T) {
 `)
 	rule := NewSubtestFixtureCleanedEarlyRule()
 	rule.UseProjectFiles([]*core.FileContext{helper, test})
-	assert.Equal(t, []int{13}, patterntest.ViolationLines(rule.AnalyzeFile(test)))
+	assert.Equal(t, []int{13}, rulestest.ViolationLines(rule.AnalyzeFile(test)))
 }
 
 // A wait helper that returns once its attempts run out lets the test go on
@@ -158,7 +158,7 @@ func waitTwoWays(t *testing.T, client *Client) {
 	}
 }
 `)
-	assert.Equal(t, []int{16, 25, 72, 78}, patterntest.ViolationLines(NewTestWaitPassesOnExhaustionRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{16, 25, 72, 78}, rulestest.ViolationLines(NewTestWaitPassesOnExhaustionRule().AnalyzeFile(ctx)))
 }
 
 // A fixed pause before a single check guesses how long the work takes.
@@ -263,7 +263,7 @@ func TestCheckFarAfterPause(t *testing.T) {
 	require.True(t, idle())
 }
 `)
-	assert.Equal(t, []int{12, 43, 63, 73}, patterntest.ViolationLines(NewTestFixedSleepBeforeAssertRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{12, 43, 63, 73}, rulestest.ViolationLines(NewTestFixedSleepBeforeAssertRule().AnalyzeFile(ctx)))
 }
 
 // An accepted status range reaching 5xx passes when the server fails.
@@ -292,7 +292,7 @@ func TestSmoke(t *testing.T) {
 	assert.True(t, len(body) <= 600)
 }
 `)
-	assert.Equal(t, []int{12, 13, 14}, patterntest.ViolationLines(NewTestAcceptsServerErrorRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{12, 13, 14}, rulestest.ViolationLines(NewTestAcceptsServerErrorRule().AnalyzeFile(ctx)))
 }
 
 // A step that can stop the test between a creation and its cleanup leaves
@@ -376,7 +376,7 @@ func TestNestedAdd(t *testing.T) {
 	t.Cleanup(func() { remove(item) })
 }
 `)
-	assert.Equal(t, []int{11}, patterntest.ViolationLines(NewTestCleanupRegisteredLateRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{11}, rulestest.ViolationLines(NewTestCleanupRegisteredLateRule().AnalyzeFile(ctx)))
 }
 
 // Rows picked by a production constant are the application's own.
@@ -409,7 +409,7 @@ func TestStatusUpdate(t *testing.T) {
 	_, _ = db.ExecContext(ctx, "UPDATE requests SET status = ? WHERE owner = ?", models.StatusPending, models.SystemUserID)
 }
 `)
-	assert.Equal(t, []int{12, 13, 26}, patterntest.ViolationLines(NewTestDeletesSharedDataRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{12, 13, 26}, rulestest.ViolationLines(NewTestDeletesSharedDataRule().AnalyzeFile(ctx)))
 
 	isolated := rulestest.GoFile(t, "tests/integration/gift_test.go", `package integration
 
@@ -470,5 +470,5 @@ func TestQueued(t *testing.T) {
 	_ = queued
 }
 `)
-	assert.Equal(t, []int{10, 11}, patterntest.ViolationLines(NewTestChannelReceiveWithoutTimeoutRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{10, 11}, rulestest.ViolationLines(NewTestChannelReceiveWithoutTimeoutRule().AnalyzeFile(ctx)))
 }

@@ -65,7 +65,7 @@ function pnlColor(value: unknown): string {
 // enters a calculation and the result: a placeholder for an amount nobody
 // computes, stored as a real zero.
 func TestSQLMetricLiteralZero_GoZeroPlaceholder(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, gorules.NewSQLMetricLiteralZeroRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, gorules.NewSQLMetricLiteralZeroRule(), map[string]string{
 		"nav/nav.go": `package nav
 
 type Money struct{ v int64 }

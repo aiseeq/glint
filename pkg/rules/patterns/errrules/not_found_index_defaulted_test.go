@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -50,5 +49,5 @@ func Prefix(s string) string {
 	return s[:end]
 }
 `)
-	assert.Equal(t, []int{15, 19}, patterntest.ViolationLines(NewNotFoundIndexDefaultedRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{15, 19}, rulestest.ViolationLines(NewNotFoundIndexDefaultedRule().AnalyzeFile(ctx)))
 }

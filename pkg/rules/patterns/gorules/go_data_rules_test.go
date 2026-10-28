@@ -3,14 +3,14 @@ package gorules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
 // A prefix cut from a value of unknown length panics on a short one: a short
 // e-mail turns the handler into a 500, a short secret fails the test helper.
 func TestStringPrefixSliceUnguarded(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, NewStringPrefixSliceUnguardedRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewStringPrefixSliceUnguardedRule(), map[string]string{
 		"admin/label.go": `package admin
 
 import (
@@ -111,7 +111,7 @@ func restore(t *testing.T, cfg *config) {
 // a details type that adds a placeholder under the base type's JSON name
 // sends the placeholder and loses the real value.
 func TestJSONTagShadowsEmbeddedField(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, NewJSONTagShadowsEmbeddedFieldRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewJSONTagShadowsEmbeddedFieldRule(), map[string]string{
 		"models/investment.go": `package models
 
 type Investment struct {
@@ -151,7 +151,7 @@ type Named struct {
 // A state compared with a string that none of its constants holds: the value
 // comes from another status set, and the compiler cannot see the drift.
 func TestEnumComparedToForeignLiteral(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, NewEnumComparedToForeignLiteralRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewEnumComparedToForeignLiteralRule(), map[string]string{
 		"domain/state.go": `package domain
 
 type State string
@@ -200,7 +200,7 @@ func Cancel(raw string, free domain.Free) error {
 // A host matched by suffix without the dot: evilexample.com passes a check
 // for example.com.
 func TestHostSuffixWithoutDot(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, NewHostSuffixWithoutDotRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewHostSuffixWithoutDotRule(), map[string]string{
 		"middleware/https.go": `package middleware
 
 import "strings"
@@ -249,7 +249,7 @@ func IsTestDomain(domainPart string) bool {
 // JSON written with a format verb inside quotes: a quote or a newline in the
 // value breaks the frame or adds fields.
 func TestJSONBuiltByFormat(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, NewJSONBuiltByFormatRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewJSONBuiltByFormatRule(), map[string]string{
 		"sse/handler.go": `package sse
 
 import (
@@ -283,7 +283,7 @@ func body(email string) string {
 // format with SQL in it, a query builder, a database call, through variables,
 // helpers that return it and the callers of those helpers.
 func TestSQLQuoteEscapedByHand(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
 		"helpers/where.go": `package helpers
 
 import "strings"
@@ -376,7 +376,7 @@ func ByParam(name string) (*sql.Rows, error) {
 	assert.Equal(t, []string{"helpers/db.go:31", "helpers/db.go:36", "helpers/owner.go:10", "helpers/owner.go:15", "helpers/where.go:12", "helpers/where.go:6", "helpers/where.go:9"}, found)
 
 	// A tool that hands SQL text to the psql command has no bind parameters.
-	cli := patterntest.ProjectRuleLines(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
+	cli := rulestest.ProjectRulePlaces(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
 		"flags/sql.go": `package flags
 
 import "strings"
@@ -391,7 +391,7 @@ func literal(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + 
 // apostrophes inside it: that text goes to the spreadsheet API, not to SQL, even in a project that
 // runs queries, and even in a function that runs one.
 func TestSQLQuoteEscapedByHandOutsideSQL(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
 		"export/sheet.go": `package export
 
 import (
@@ -438,7 +438,7 @@ func a1Range(tab, cells string) string {
 // it (sqlx Get, Select), a gorm model or a value to scan is bound, not SQL
 // text, and so is the statement name of pgx Prepare.
 func TestSQLQuoteEscapedByHandDriverCalls(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
 		"go.mod": "module example.com/rulestest\n\ngo 1.24\n\nrequire (\n\tgithub.com/jmoiron/sqlx v1.0.0\n\tgithub.com/jackc/pgx/v5 v5.0.0\n\tgorm.io/gorm v1.0.0\n)\n\n" +
 			"replace github.com/jmoiron/sqlx => ./third_party/sqlx\n\nreplace github.com/jackc/pgx/v5 => ./third_party/pgx\n\nreplace gorm.io/gorm => ./third_party/gorm\n",
 		"third_party/sqlx/go.mod": "module github.com/jmoiron/sqlx\n\ngo 1.24\n",
@@ -560,7 +560,7 @@ func Shell(r runner, arg string) error {
 // only: a sheet name escaped through a helper the queries share, or held in
 // the field next to the query, never reaches SQL.
 func TestSQLQuoteEscapedByHandFlow(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewSQLQuoteEscapedByHandRule(), map[string]string{
 		"repo/reach.go": `package repo
 
 import (
@@ -685,7 +685,7 @@ func Fields(tab string) (*sql.Rows, error) {
 // A metric answered by a literal zero: the API reports no return instead of
 // failing or leaving the field out.
 func TestSQLMetricLiteralZero(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, NewSQLMetricLiteralZeroRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewSQLMetricLiteralZeroRule(), map[string]string{
 		"repo/portfolio.go": `package repo
 
 const summaryQuery = ` + "`" + `
@@ -713,7 +713,7 @@ func Query() string { return summaryQuery + unionQuery + flagQuery }
 // to the permission type: a name no constant holds (a permission of an
 // older set) hides the button for everyone, and nothing compiles it.
 func TestEnumComparedToForeignLiteralInTemplate(t *testing.T) {
-	found := patterntest.ProjectRuleLines(t, NewEnumComparedToForeignLiteralRule(), map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewEnumComparedToForeignLiteralRule(), map[string]string{
 		"domain/perm.go": `package domain
 
 type Permission string

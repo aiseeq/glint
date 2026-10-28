@@ -4,14 +4,14 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/require"
 )
 
 func orphanedInterfaceProject(t *testing.T, files map[string]string) []*core.Violation {
 	t.Helper()
-	return patterntest.RunRuleOnFiles(t, NewOrphanedInterfaceRule(), files)
+	return rulestest.RunRuleOnFiles(t, NewOrphanedInterfaceRule(), files)
 }
 
 // A capability interface probed with a type assertion is used; the typed
@@ -210,7 +210,7 @@ func Broken() int { return "not an int" }
 	require.NoError(t, err)
 	require.NotEmpty(t, project.SkippedPackages)
 
-	violations := patterntest.RunRuleOnProject(t, NewOrphanedInterfaceRule(), project)
+	violations := rulestest.RunRuleOnProject(t, NewOrphanedInterfaceRule(), project)
 	require.Len(t, violations, 1)
 	require.Contains(t, violations[0].Message, "'Lonely'")
 	require.Equal(t, "broken/types.go", violations[0].File)

@@ -4,7 +4,8 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -58,8 +59,8 @@ func E(p string) error {
 	return nil
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewErrorRebuiltFromTextRule(), map[string]string{"p/p.go": source})
-	assert.Equal(t, []int{11, 19, 27}, patterntest.ViolationLines(violations))
+	violations := rulestest.RunRuleOnFiles(t, NewErrorRebuiltFromTextRule(), map[string]string{"p/p.go": source})
+	assert.Equal(t, []int{11, 19, 27}, rulestest.ViolationLines(violations))
 }
 
 func TestFormatVerbs_ArgumentPositions(t *testing.T) {

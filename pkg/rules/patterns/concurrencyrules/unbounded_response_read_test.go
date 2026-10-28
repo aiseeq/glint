@@ -6,7 +6,8 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -585,7 +586,7 @@ func fetch() {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			violations := patterntest.RunRuleOnFiles(t, rule, map[string]string{tt.path: tt.code})
+			violations := rulestest.RunRuleOnFiles(t, rule, map[string]string{tt.path: tt.code})
 			require.Len(t, violations, tt.wantCount)
 			if tt.wantCount == 0 {
 				return
@@ -601,7 +602,7 @@ func fetch() {
 
 // ioutil.ReadAll is io.ReadAll under its old name: the same unbounded read.
 func TestUnboundedResponseReadRule_DeprecatedIoutil(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"legacy.go": `package fetch
+	violations := rulestest.RunRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"legacy.go": `package fetch
 
 import (
 	"io"
@@ -649,7 +650,7 @@ func TestUnboundedResponseAnalyzer_UnexpectedClausesDoNotPanic(t *testing.T) {
 // output: reading it whole without a limit is a decompression bomb, wherever
 // the compressed bytes came from.
 func TestUnboundedResponseReadRule_DecompressedStream(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"inflate.go": `package fetch
+	violations := rulestest.RunRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"inflate.go": `package fetch
 
 import (
 	"bytes"

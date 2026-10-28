@@ -1,9 +1,9 @@
 package gorules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -92,7 +92,7 @@ func join(names []Label) Label {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			violations := patterntest.RunRuleOnFiles(t, NewStringConcatRule(), map[string]string{"service.go": tt.code})
+			violations := rulestest.RunRuleOnFiles(t, NewStringConcatRule(), map[string]string{"service.go": tt.code})
 			if tt.expectMatch {
 				require.Len(t, violations, 1)
 				assert.Equal(t, "string_concat_loop", violations[0].Context["pattern"])
@@ -110,7 +110,7 @@ func join(names []Label) Label {
 // the package reassigns or appends to has no fixed size, and a loop over the
 // characters of its input still grows with the input.
 func TestStringConcatFixedSmallLoops(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewStringConcatRule(), map[string]string{"service.go": `package main
+	violations := rulestest.RunRuleOnFiles(t, NewStringConcatRule(), map[string]string{"service.go": `package main
 
 import "fmt"
 

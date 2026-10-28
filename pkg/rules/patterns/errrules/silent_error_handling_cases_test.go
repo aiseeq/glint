@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -29,7 +28,7 @@ func TestSilentErrorHandling_ProductionFilesWithTestLikeNames(t *testing.T) {
 	for _, path := range []string{"rates/latest_rates.go", "web/testimonials/rates.go", "rates/test.go"} {
 		t.Run(path, func(t *testing.T) {
 			ctx := rulestest.GoFile(t, path, silentRatesSource)
-			assert.Equal(t, []int{9}, patterntest.ViolationLines(NewSilentErrorHandlingRule().AnalyzeFile(ctx)))
+			assert.Equal(t, []int{9}, rulestest.ViolationLines(NewSilentErrorHandlingRule().AnalyzeFile(ctx)))
 		})
 	}
 }
@@ -138,7 +137,7 @@ func quietLimit(s string) int {
 }
 `
 	ctx := rulestest.GoFile(t, "payprov/handlers.go", source)
-	assert.Equal(t, []int{63}, patterntest.ViolationLines(NewSilentErrorHandlingRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{63}, rulestest.ViolationLines(NewSilentErrorHandlingRule().AnalyzeFile(ctx)))
 }
 
 // A suppression answers before the explanation is looked for: with an

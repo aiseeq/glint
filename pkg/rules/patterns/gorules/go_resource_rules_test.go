@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/dbrules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/patterns/shellrules"
@@ -12,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func appRuleMessages(t *testing.T, rule patterntest.GoProjectRule, source string) []string {
+func appRuleMessages(t *testing.T, rule rules.GoProjectRule, source string) []string {
 	t.Helper()
 	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, map[string]string{"app.go": source}))
 	require.NoError(t, err)
@@ -27,7 +28,7 @@ func appRuleMessages(t *testing.T, rule patterntest.GoProjectRule, source string
 // defer; the error of the final flush on Close was lost and the function
 // reported success for a truncated image.
 func TestDeferredCloseOfWrittenFile(t *testing.T) {
-	assert.Equal(t, []int{15, 24}, patterntest.AppRuleLines(t, NewDeferredCloseOfWrittenFileRule(), `package app
+	assert.Equal(t, []int{15, 24}, rulestest.GoProjectRuleLines(t, NewDeferredCloseOfWrittenFileRule(), "app.go", `package app
 
 import (
 	"fmt"
@@ -64,7 +65,7 @@ func Append(path string, line []byte) error {
 // result is returned, or that is closed and checked at the end besides the
 // deferred close, reports the failure.
 func TestDeferredCloseOfWrittenFileAccepts(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, NewDeferredCloseOfWrittenFileRule(), `package app
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewDeferredCloseOfWrittenFileRule(), "app.go", `package app
 
 import (
 	"io"
@@ -123,7 +124,7 @@ func Sync(path string, data []byte) error {
 // Repro from a real project: the candidates left after a filter could be
 // none, and rand.Intn(0) panicked at the start of a game.
 func TestRandIndexOfFilteredSlice(t *testing.T) {
-	assert.Equal(t, []int{16}, patterntest.AppRuleLines(t, NewRandIndexOfFilteredSliceRule(), `package app
+	assert.Equal(t, []int{16}, rulestest.GoProjectRuleLines(t, NewRandIndexOfFilteredSliceRule(), "app.go", `package app
 
 import "math/rand"
 
@@ -146,7 +147,7 @@ func Pick(pool []string, banned string, rnd *rand.Rand) string {
 // A length check before the draw, or a slice that is never filtered, leaves
 // nothing to report.
 func TestRandIndexOfFilteredSliceAccepts(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, NewRandIndexOfFilteredSliceRule(), `package app
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewRandIndexOfFilteredSliceRule(), "app.go", `package app
 
 import "math/rand/v2"
 
@@ -177,7 +178,7 @@ func All(pool []string) string {
 // Repro from a real project: a seal file was written read-only, and the next
 // run could not write it again.
 func TestWriteFileWithoutOwnerWrite(t *testing.T) {
-	assert.Equal(t, []int{6, 10}, patterntest.AppRuleLines(t, NewWriteFileWithoutOwnerWriteRule(), `package app
+	assert.Equal(t, []int{6, 10}, rulestest.GoProjectRuleLines(t, NewWriteFileWithoutOwnerWriteRule(), "app.go", `package app
 
 import "os"
 
@@ -194,7 +195,7 @@ func Lock(path string) (*os.File, error) {
 // Removing the old copy first lets the write create a fresh file; a
 // writable mode needs nothing.
 func TestWriteFileWithoutOwnerWriteAccepts(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, NewWriteFileWithoutOwnerWriteRule(), `package app
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewWriteFileWithoutOwnerWriteRule(), "app.go", `package app
 
 import (
 	"errors"
@@ -219,7 +220,7 @@ func Plain(path string, data []byte) error {
 // fmt.Sprint became the text "<nil>" when the key was missing, and that text
 // was passed on as the id of a session.
 func TestSprintOfAnyMapEntry(t *testing.T) {
-	assert.Equal(t, []int{14, 15}, patterntest.AppRuleLines(t, NewSprintOfAnyMapEntryRule(), `package app
+	assert.Equal(t, []int{14, 15}, rulestest.GoProjectRuleLines(t, NewSprintOfAnyMapEntryRule(), "app.go", `package app
 
 import (
 	"encoding/json"
@@ -245,7 +246,7 @@ func Hook() error {
 
 // A comma-ok check first, or a typed map, keeps "<nil>" out.
 func TestSprintOfAnyMapEntryAccepts(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, NewSprintOfAnyMapEntryRule(), `package app
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewSprintOfAnyMapEntryRule(), "app.go", `package app
 
 import "fmt"
 
@@ -264,7 +265,7 @@ func Hook(ev map[string]any, names map[string]string) {
 // error went to an Info line, while the function went on to report the run
 // as a success.
 func TestErrorLoggedAtInfo(t *testing.T) {
-	assert.Equal(t, []int{14}, patterntest.AppRuleLines(t, NewErrorLoggedAtInfoRule(), `package app
+	assert.Equal(t, []int{14}, rulestest.GoProjectRuleLines(t, NewErrorLoggedAtInfoRule(), "app.go", `package app
 
 import (
 	"errors"
@@ -289,7 +290,7 @@ func Run(ok bool) error {
 // A warning or an error level is visible; a debug line marks an optional step
 // on purpose; a function without an error result has no one to tell.
 func TestErrorLoggedAtInfoAccepts(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, NewErrorLoggedAtInfoRule(), `package app
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewErrorLoggedAtInfoRule(), "app.go", `package app
 
 import (
 	"errors"
@@ -363,7 +364,7 @@ func film(o opts, frames []int) []int {
 // A flag compared with a constant after parsing is checked; a flag used only
 // for text needs no check.
 func TestCLINumberFlagUncheckedAccepts(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, shellrules.NewCLINumberFlagUncheckedRule(), `package main
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, shellrules.NewCLINumberFlagUncheckedRule(), "app.go", `package main
 
 import (
 	"flag"
@@ -401,7 +402,7 @@ func main() {
 // looked up in a map without ok, and the zero value silently turned the
 // computer opponent into a second bot slot.
 func TestCLIFlagMapLookupWithoutOK(t *testing.T) {
-	assert.Equal(t, []int{15}, patterntest.AppRuleLines(t, shellrules.NewCLIFlagMapLookupWithoutOKRule(), `package main
+	assert.Equal(t, []int{15}, rulestest.GoProjectRuleLines(t, shellrules.NewCLIFlagMapLookupWithoutOKRule(), "app.go", `package main
 
 import (
 	"flag"
@@ -421,7 +422,7 @@ func main() {
 }
 
 func TestCLIFlagMapLookupWithoutOKAccepts(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, shellrules.NewCLIFlagMapLookupWithoutOKRule(), `package main
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, shellrules.NewCLIFlagMapLookupWithoutOKRule(), "app.go", `package main
 
 import (
 	"flag"
@@ -450,7 +451,7 @@ func main() {
 // Repro from a real project: a batch of orders was sent and the per-order
 // results were dropped; orders the server refused were taken as given.
 func TestBatchStatusResultsDropped(t *testing.T) {
-	assert.Equal(t, []int{21}, patterntest.AppRuleLines(t, NewBatchStatusResultsDroppedRule(), `package app
+	assert.Equal(t, []int{21}, rulestest.GoProjectRuleLines(t, NewBatchStatusResultsDroppedRule(), "app.go", `package app
 
 import "context"
 
@@ -480,7 +481,7 @@ func Send(ctx context.Context, c *Client, acts []*Action) error {
 
 // Statuses that are read, or a dropped slice of plain values, are fine.
 func TestBatchStatusResultsDroppedAccepts(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, NewBatchStatusResultsDroppedRule(), `package app
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewBatchStatusResultsDroppedRule(), "app.go", `package app
 
 type Status int
 
@@ -513,7 +514,7 @@ func Send(list []int) (int, error) {
 // lookup of the same map elsewhere, or the looked-up value is tested for nil
 // right away.
 func TestCLIFlagMapLookupValidatedElsewhere(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, shellrules.NewCLIFlagMapLookupWithoutOKRule(), `package main
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, shellrules.NewCLIFlagMapLookupWithoutOKRule(), "app.go", `package main
 
 import (
 	"flag"
@@ -552,7 +553,7 @@ func main() {
 // A failed teardown after the work is done - leaving a game, closing a
 // connection - is logged at Info on purpose.
 func TestErrorLoggedAtInfoAcceptsTeardown(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, NewErrorLoggedAtInfoRule(), `package app
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewErrorLoggedAtInfoRule(), "app.go", `package app
 
 import (
 	"errors"

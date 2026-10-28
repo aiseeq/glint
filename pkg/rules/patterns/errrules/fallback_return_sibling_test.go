@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -46,7 +45,7 @@ func (s *Service) retry(ctx context.Context, address string, out *Balance) error
 }
 `
 	violations := NewFallbackReturnRule().AnalyzeFile(rulestest.GoFile(t, "svc/balance.go", source))
-	assert.Equal(t, []int{7}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{7}, rulestest.ViolationLines(violations))
 }
 
 // An identifier mapper answers a key it does not know with the key itself:
@@ -83,5 +82,5 @@ func tickerToCoinIDChecked(ticker string) (string, error) {
 }
 `
 	violations := NewFallbackReturnRule().AnalyzeFile(rulestest.GoFile(t, "prices/ids.go", source))
-	assert.Equal(t, []int{12}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{12}, rulestest.ViolationLines(violations))
 }

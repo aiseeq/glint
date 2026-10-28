@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -38,7 +37,7 @@ func main() {
 }
 `
 	ctx := rulestest.GoFile(t, "cmd/tool/main.go", source)
-	assert.Equal(t, []int{22}, patterntest.ViolationLines(NewMainReturnAfterErrorRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{22}, rulestest.ViolationLines(NewMainReturnAfterErrorRule().AnalyzeFile(ctx)))
 }
 
 // stderr is a writer, not an error: a nil check on it is not an error branch.

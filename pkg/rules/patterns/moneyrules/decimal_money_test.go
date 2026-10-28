@@ -77,7 +77,7 @@ func notDatabase(s scanner) float64 {
 	})
 	violations, err := NewMoneyScannedIntoFloatRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
-	assert.Equal(t, []int{20, 21, 38, 50}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{20, 21, 38, 50}, rulestest.ViolationLines(violations))
 }
 
 func TestDecimalMarshalRounds(t *testing.T) {
@@ -143,7 +143,7 @@ func (r Report) Summary() string { return r.Total.StringFixed(2) }
 	})
 	violations, err := NewDecimalMarshalRoundsRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
-	assert.Equal(t, []int{19, 23, 33}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{19, 23, 33}, rulestest.ViolationLines(violations))
 }
 
 func TestDecimalDivUnguarded(t *testing.T) {
@@ -239,7 +239,7 @@ func (t tally) rate() decimal.Decimal {
 	})
 	violations, err := NewDecimalDivUnguardedRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
-	assert.Equal(t, []int{18, 48, 68}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{18, 48, 68}, rulestest.ViolationLines(violations))
 }
 
 // Divisors that cannot be zero by construction are not reported; a sum
@@ -318,7 +318,7 @@ func even(parts []string) map[string]decimal.Decimal {
 	})
 	violations, err := NewDecimalDivUnguardedRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
-	assert.Equal(t, []int{16, 39, 42}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{16, 39, 42}, rulestest.ViolationLines(violations))
 }
 
 // A divisor returned by a parser that rejects zero is not zero: the function
@@ -387,7 +387,7 @@ func LooseCross(base, target string) (decimal.Decimal, error) {
 	})
 	violations, err := NewDecimalDivUnguardedRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
-	assert.Equal(t, []int{55}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{55}, rulestest.ViolationLines(violations))
 }
 
 func TestMoneyIntegerDivisionTruncates(t *testing.T) {
@@ -426,7 +426,7 @@ func shares(total, count *big.Int) decimal.Decimal {
 	})
 	violations, err := NewMoneyIntegerDivisionTruncatesRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
-	assert.Equal(t, []int{11, 17}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{11, 17}, rulestest.ViolationLines(violations))
 }
 
 // A package that does not type-check is read from its syntax.
@@ -453,7 +453,7 @@ func shares(total, count *big.Int) decimal.Decimal {
 	return decimal.NewFromBigInt(new(big.Int).Div(total, count), 0)
 }
 `)
-	assert.Equal(t, []int{11}, patterntest.ViolationLines(NewMoneyIntegerDivisionTruncatesRule().AnalyzeFile(file)))
+	assert.Equal(t, []int{11}, rulestest.ViolationLines(NewMoneyIntegerDivisionTruncatesRule().AnalyzeFile(file)))
 }
 
 // A divisor read from a struct the function stores only after checking the
@@ -506,5 +506,5 @@ func Ratios(rows []row) []decimal.Decimal {
 	})
 	violations, err := NewDecimalDivUnguardedRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
-	assert.Equal(t, []int{35}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{35}, rulestest.ViolationLines(violations))
 }

@@ -352,7 +352,7 @@ func Totals(db DB) {
 	rule.UseProjectFiles(contexts)
 	var lines []int
 	for _, ctx := range contexts {
-		lines = append(lines, patterntest.ViolationLines(rule.AnalyzeFile(ctx))...)
+		lines = append(lines, rulestest.ViolationLines(rule.AnalyzeFile(ctx))...)
 	}
 	assert.Equal(t, []int{6, 6}, lines)
 }

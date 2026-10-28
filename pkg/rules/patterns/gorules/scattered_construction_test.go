@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +32,7 @@ func TestScatteredConstructionReportsEverySite(t *testing.T) {
 	_, isProjectRule := any(rule).(rules.GoProjectRule)
 	require.True(t, isProjectRule, "sites are collected over the whole project before reporting")
 
-	violations := patterntest.RunRuleOnFiles(t, rule, map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, rule, map[string]string{
 		"srv/a.go": scatteredServerFile("serverA"),
 		"srv/b.go": scatteredServerFile("serverB"),
 		"srv/c.go": scatteredServerFile("serverC"),
@@ -48,7 +49,7 @@ func TestScatteredConstructionReportsEverySite(t *testing.T) {
 }
 
 func TestScatteredConstructionBelowThreshold(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 		"srv/a.go": scatteredServerFile("serverA"),
 		"srv/b.go": scatteredServerFile("serverB"),
 	})
@@ -62,15 +63,15 @@ func TestScatteredConstructionRunsAreIndependent(t *testing.T) {
 		"srv/a.go": scatteredServerFile("serverA"),
 		"srv/b.go": scatteredServerFile("serverB"),
 	}
-	assert.Empty(t, patterntest.RunRuleOnFiles(t, rule, files))
-	assert.Empty(t, patterntest.RunRuleOnFiles(t, rule, files))
+	assert.Empty(t, rulestest.RunRuleOnFiles(t, rule, files))
+	assert.Empty(t, rulestest.RunRuleOnFiles(t, rule, files))
 }
 
 // Fixtures of a test-helper package (srvtest: the name ends in test, it imports
 // testing) are test code like _test.go files: their literals are not
 // construction sites of the program.
 func TestScatteredConstructionSkipsTestHelperPackage(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 		"srv/a.go":              scatteredServerFile("serverA"),
 		"srv/b.go":              scatteredServerFile("serverB"),
 		"srv/srvtest/server.go": strings.Replace(scatteredServerFile("Server"), "package projecta", "package srvtest", 1),
@@ -81,7 +82,7 @@ func TestScatteredConstructionSkipsTestHelperPackage(t *testing.T) {
 
 func TestScatteredConstructionSkipsHelperByPackageNameAndIgnoresExcludedFiles(t *testing.T) {
 	server := strings.Replace(scatteredServerFile("Server"), "package projecta", "package srvtest", 1)
-	violations := patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 		"srv/a.go":                 scatteredServerFile("serverA"),
 		"srv/b.go":                 scatteredServerFile("serverB"),
 		"srv/c.go":                 scatteredServerFile("serverC"),
@@ -93,7 +94,7 @@ func TestScatteredConstructionSkipsHelperByPackageNameAndIgnoresExcludedFiles(t 
 }
 
 func TestScatteredConstructionIgnoresExcludedHelperImport(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 		"api/latest/a.go":         strings.Replace(scatteredServerFile("HandleA"), "package projecta", "package latest", 1),
 		"api/latest/b.go":         strings.Replace(scatteredServerFile("HandleB"), "package projecta", "package latest", 1),
 		"api/latest/c.go":         strings.Replace(scatteredServerFile("HandleC"), "package projecta", "package latest", 1),
@@ -142,7 +143,7 @@ func ` + name + `(w, c, k *string, n int) any {
 `
 	}
 	t.Run("filter with different fields per call", func(t *testing.T) {
-		violations := patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+		violations := rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 			"model/model.go": scatteredFilterModel,
 			"svc/a.go":       use("a", `&model.PaymentFilter{WalletAddress: w, Category: c, Limit: n}`),
 			"svc/b.go":       use("b", `&model.PaymentFilter{WalletAddress: w, TxType: k, Limit: n}`),
@@ -151,7 +152,7 @@ func ` + name + `(w, c, k *string, n int) any {
 		assert.Empty(t, violations)
 	})
 	t.Run("all-optional struct with different fields per call", func(t *testing.T) {
-		violations := patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+		violations := rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 			"model/model.go": scatteredFilterModel,
 			"svc/a.go":       use("a", `&model.Lookup{Wallet: w, Category: c, Kind: k}`),
 			"svc/b.go":       use("b", `&model.Lookup{Wallet: w, Kind: k, Chain: c}`),
@@ -160,7 +161,7 @@ func ` + name + `(w, c, k *string, n int) any {
 		assert.Empty(t, violations)
 	})
 	t.Run("filter built with the same fields everywhere", func(t *testing.T) {
-		violations := patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+		violations := rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 			"model/model.go": scatteredFilterModel,
 			"svc/a.go":       use("a", `&model.PaymentFilter{WalletAddress: w, Category: c, Limit: n}`),
 			"svc/b.go":       use("b", `&model.PaymentFilter{WalletAddress: w, Category: c, Limit: n}`),
@@ -187,7 +188,7 @@ func ` + name + `(h http.Handler) *http.Server {
 }
 `
 		}
-		violations := patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+		violations := rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 			"svc/a.go": server("a", `Addr: ":80", Handler: h, ReadTimeout: time.Second`),
 			"svc/b.go": server("b", `Addr: ":81", Handler: h, WriteTimeout: time.Second`),
 			"svc/c.go": server("c", `Addr: ":82", Handler: h, ReadTimeout: time.Second`),
@@ -195,7 +196,7 @@ func ` + name + `(h http.Handler) *http.Server {
 		assert.Empty(t, violations)
 	})
 	t.Run("ordinary struct with different fields per call", func(t *testing.T) {
-		violations := patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+		violations := rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 			"model/model.go": scatteredFilterModel,
 			"svc/a.go":       use("a", `model.Settlement{Wallet: *w, Category: *c, Kind: "x"}`),
 			"svc/b.go":       use("b", `model.Settlement{Wallet: *w, Kind: *k, Category: "y"}`),
@@ -235,7 +236,7 @@ func History() wire.Object {
 }
 `,
 	}
-	assert.Empty(t, patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), files))
+	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), files))
 
 	// Without type information a literal keyed by values is still a map.
 	files["use/broken.go"] = "package use\n\nfunc broken() { undefinedCall() }\n"
@@ -248,7 +249,7 @@ func History() wire.Object {
 func TestScatteredConstructionMarkedSiteNotCounted(t *testing.T) {
 	marked := strings.Replace(scatteredServerFile("serverC"), "\treturn &http.Server",
 		"\t// scattered-construction: safe — partial server for a probe, the rest is set later\n\treturn &http.Server", 1)
-	violations := patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 		"srv/a.go": scatteredServerFile("serverA"),
 		"srv/b.go": scatteredServerFile("serverB"),
 		"srv/c.go": marked,
@@ -262,7 +263,7 @@ func TestScatteredConstructionMarkedSiteNotCounted(t *testing.T) {
 func TestScatteredConstructionMarkedSiteAboveThreshold(t *testing.T) {
 	marked := strings.Replace(scatteredServerFile("serverD"), "\treturn &http.Server",
 		"\t// scattered-construction: safe — partial server for a probe, the rest is set later\n\treturn &http.Server", 1)
-	violations := patterntest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewScatteredConstructionRule(), map[string]string{
 		"srv/a.go": scatteredServerFile("serverA"),
 		"srv/b.go": scatteredServerFile("serverB"),
 		"srv/c.go": scatteredServerFile("serverC"),

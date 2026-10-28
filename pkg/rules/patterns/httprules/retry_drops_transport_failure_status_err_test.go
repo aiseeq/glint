@@ -3,7 +3,7 @@ package httprules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -89,9 +89,9 @@ func getTransient(ctx context.Context, url string) ([]byte, error) {
 	return nil, lastErr
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewRetryDropsTransportFailureRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewRetryDropsTransportFailureRule(), map[string]string{
 		"client/prelude.go": statusErrorPrelude,
 		"client/client.go":  code,
 	})
-	assert.Equal(t, []int{16}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{16}, rulestest.ViolationLines(violations))
 }

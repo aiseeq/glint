@@ -5,6 +5,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/rules/patterns/errrules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -159,7 +160,7 @@ func known(src string, name string, cache map[string]bool) bool {
 // but its pattern no longer matched how flags were created - zero matches,
 // zero checks, a green test.
 func TestAssertionsOnlyInScanLoop(t *testing.T) {
-	violations := patterntest.FileRuleLines(t, NewAssertionsOnlyInScanLoopRule(), "app_test.go", `package app
+	violations := rulestest.GoFileRuleLines(t, NewAssertionsOnlyInScanLoopRule(), "app_test.go", `package app
 
 import (
 	"os"
@@ -245,7 +246,7 @@ func TestNoBadLines(t *testing.T) {
 // replaced only when the name was found, so an unknown name analysed the
 // wrong player.
 func TestNotFoundIndexDefaultedPreassigned(t *testing.T) {
-	violations := patterntest.AnalyzeFileRule(t, errrules.NewNotFoundIndexDefaultedRule(), `package app
+	violations := rulestest.GoFileRuleLines(t, errrules.NewNotFoundIndexDefaultedRule(), "app.go", `package app
 
 import "slices"
 

@@ -156,7 +156,7 @@ func example() {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := createBoolCompareContext(t, "service.go", tt.code)
 			untyped := rule.AnalyzeFile(ctx)
-			typed := patterntest.RunRuleOnFiles(t, rule, map[string]string{"svc/service.go": tt.code})
+			typed := rulestest.RunRuleOnFiles(t, rule, map[string]string{"svc/service.go": tt.code})
 
 			for mode, violations := range map[string][]*core.Violation{"untyped": untyped, "typed": typed} {
 				if tt.expectMatch {
@@ -238,7 +238,7 @@ func check(enabled bool) bool {
 // undeclared name used to count as a bool, and the autofix turned
 // `mode == true` on an any into `mode`, which does not compile.
 func TestBoolCompareUsesDeclaredTypeFromSiblingFile(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewBoolCompareRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewBoolCompareRule(), map[string]string{
 		"flags/state.go": `package flags
 
 var mode any = true
@@ -262,7 +262,7 @@ func debug() bool {
 // A bool declared in a sibling file, a bool field and a bool call result are
 // still redundant comparisons.
 func TestBoolCompareReportsBoolFromSiblingFile(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewBoolCompareRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewBoolCompareRule(), map[string]string{
 		"flags/state.go": `package flags
 
 var verbose bool
@@ -307,7 +307,7 @@ func example(a, b bool) bool {
 	return a == true && b == false
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewBoolCompareRule(), map[string]string{"svc/service.go": code})
+	violations := rulestest.RunRuleOnFiles(t, NewBoolCompareRule(), map[string]string{"svc/service.go": code})
 	require.Len(t, violations, 2)
 	assert.Equal(t, 9, violations[0].Column)
 	assert.Equal(t, 22, violations[1].Column)
@@ -322,5 +322,5 @@ func example(a bool) bool {
 	return a == true
 }
 `
-	assert.Empty(t, patterntest.RunRuleOnFiles(t, NewBoolCompareRule(), map[string]string{"svc/service.go": code}))
+	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewBoolCompareRule(), map[string]string{"svc/service.go": code}))
 }

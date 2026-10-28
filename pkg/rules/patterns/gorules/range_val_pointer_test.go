@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -215,7 +215,7 @@ func example(items []int) int {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			violations := patterntest.RunRuleOnFiles(t, NewRangeValPointerRule(), map[string]string{
+			violations := rulestest.RunRuleOnFiles(t, NewRangeValPointerRule(), map[string]string{
 				"go.mod":     rangeGoMod121,
 				"service.go": tt.code,
 			})
@@ -246,7 +246,7 @@ func Ptrs(items []Item) []*Item {
 // TestRangeValPointerRule_Go122LoopVariables: since Go 1.22 every iteration
 // has its own variable, so the same code is correct in a newer module.
 func TestRangeValPointerRule_Go122LoopVariables(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewRangeValPointerRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewRangeValPointerRule(), map[string]string{
 		"go.mod":     rangeGoMod123,
 		"service.go": rangeAppendSource,
 	})
@@ -256,7 +256,7 @@ func TestRangeValPointerRule_Go122LoopVariables(t *testing.T) {
 // TestRangeValPointerRule_FileBuildVersion: a //go:build go1.22 constraint
 // raises the language version of that one file in an older module.
 func TestRangeValPointerRule_FileBuildVersion(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewRangeValPointerRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewRangeValPointerRule(), map[string]string{
 		"go.mod":     rangeGoMod121,
 		"service.go": "//go:build go1.22\n\n" + rangeAppendSource,
 	})
@@ -271,7 +271,7 @@ func TestRangeValPointerRule_UnknownVersion(t *testing.T) {
 }
 
 func TestRangeValPointerRule_OldModuleReportsLine(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewRangeValPointerRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewRangeValPointerRule(), map[string]string{
 		"go.mod":     rangeGoMod121,
 		"service.go": rangeAppendSource,
 	})

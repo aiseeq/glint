@@ -9,5 +9,5 @@ import (
 
 func LinesOf(t *testing.T, rule rules.Rule, path, source string) []string {
 	t.Helper()
-	return FoundLines(rule.AnalyzeFile(rulestest.TextFile(t, path, source)))
+	return rulestest.TextFileRulePlaces(t, rule, path, source)
 }

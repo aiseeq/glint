@@ -5,6 +5,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -253,7 +254,7 @@ func (c *Client) executeWithRetry(req *http.Request) (*http.Response, error) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			violations := patterntest.RunRuleOnFiles(t, rule, map[string]string{
+			violations := rulestest.RunRuleOnFiles(t, rule, map[string]string{
 				"client/prelude.go": requestClientPrelude,
 				"client/client.go":  tt.code,
 			})

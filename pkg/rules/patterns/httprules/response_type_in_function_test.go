@@ -5,6 +5,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -232,7 +233,7 @@ func parse(req *http.Request) (string, error) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			violations := patterntest.RunRuleOnFiles(t, NewResponseTypeInFunctionRule(), map[string]string{"handlers/handler.go": tt.code})
+			violations := rulestest.RunRuleOnFiles(t, NewResponseTypeInFunctionRule(), map[string]string{"handlers/handler.go": tt.code})
 			var got []string
 			for _, v := range violations {
 				name, ok := v.Context["type"].(string)

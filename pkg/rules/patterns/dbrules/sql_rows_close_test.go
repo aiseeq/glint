@@ -5,7 +5,8 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -305,7 +306,7 @@ func example(db *sql.DB) {
 		t.Run(tt.name, func(t *testing.T) {
 			files := map[string]string{"service.go": tt.code}
 			maps.Copy(files, tt.extra)
-			violations := patterntest.RunRuleOnFiles(t, rule, files)
+			violations := rulestest.RunRuleOnFiles(t, rule, files)
 
 			if tt.expectMatch {
 				require.NotEmpty(t, violations, "Expected violation for: %s", tt.name)

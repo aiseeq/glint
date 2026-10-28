@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -158,7 +158,7 @@ func (s *Stats) Bump() {
 }
 `,
 	}
-	violations := patterntest.RunRuleOnFiles(t, NewUnguardedSharedFieldRule(), project)
+	violations := rulestest.RunRuleOnFiles(t, NewUnguardedSharedFieldRule(), project)
 	require.Len(t, violations, 1)
 	assert.Equal(t, "cache.go", violations[0].File)
 	assert.Equal(t, 21, violations[0].Line)

@@ -1,10 +1,11 @@
 package gorules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -255,7 +256,7 @@ func TestShadowVariableUntypedScopes(t *testing.T) {
 func TestShadowVariableTypedScopes(t *testing.T) {
 	for _, tt := range shadowCases {
 		t.Run(tt.name, func(t *testing.T) {
-			violations := patterntest.RunRuleOnFiles(t, NewShadowVariableRule(), map[string]string{"service.go": tt.code})
+			violations := rulestest.RunRuleOnFiles(t, NewShadowVariableRule(), map[string]string{"service.go": tt.code})
 			assert.Equal(t, tt.wantLines, shadowViolationLines(violations))
 			for _, v := range violations {
 				require.Equal(t, "service.go", v.File)

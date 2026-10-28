@@ -214,13 +214,13 @@ func ProjectFilesRulePlaces(t *testing.T, rule rules.ProjectFilesRule, files map
 // locations for its findings.
 func ProjectRulePlaces(t *testing.T, rule rules.GoProjectRule, files map[string]string) []string {
 	t.Helper()
-	return ViolationPlaces(RunGoProjectRule(t, rule, files))
+	return ViolationPlaces(RunRuleOnFiles(t, rule, files))
 }
 
 // GoProjectRuleLines runs a project rule on one Go source file and returns its finding lines.
 func GoProjectRuleLines(t *testing.T, rule rules.GoProjectRule, path, source string) []int {
 	t.Helper()
-	return ViolationLines(RunGoProjectRule(t, rule, map[string]string{path: source}))
+	return ViolationLines(RunRuleOnFiles(t, rule, map[string]string{path: source}))
 }
 
 // GoFileRuleLines runs a file rule on Go source and returns its finding lines.
@@ -235,10 +235,10 @@ func TextFileRuleLines(t *testing.T, rule rules.Rule, path, source string) []int
 	return ViolationLines(RunFileRuleOnTextFile(t, rule, path, source))
 }
 
-// RunGoProjectRule runs a project rule on a typed Go project built from files.
-func RunGoProjectRule(t *testing.T, rule rules.GoProjectRule, files map[string]string) []*core.Violation {
+// TextFileRulePlaces runs a file rule on text source and returns sorted file:line locations.
+func TextFileRulePlaces(t *testing.T, rule rules.Rule, path, source string) []string {
 	t.Helper()
-	return RunRuleOnFiles(t, rule, files)
+	return ViolationPlaces(RunFileRuleOnTextFile(t, rule, path, source))
 }
 
 // RunFileRuleOnGoFile runs a file rule on a parsed Go source file.
@@ -255,7 +255,7 @@ func RunFileRuleOnTextFile(t *testing.T, rule rules.Rule, path, source string) [
 
 // ViolationLines returns the source line of each finding in its original order.
 func ViolationLines(violations []*core.Violation) []int {
-	lines := make([]int, 0, len(violations))
+	var lines []int
 	for _, violation := range violations {
 		lines = append(lines, violation.Line)
 	}
@@ -264,7 +264,7 @@ func ViolationLines(violations []*core.Violation) []int {
 
 // ViolationPlaces returns file:line for each finding in sorted order.
 func ViolationPlaces(violations []*core.Violation) []string {
-	places := make([]string, 0, len(violations))
+	var places []string
 	for _, violation := range violations {
 		places = append(places, fmt.Sprintf("%s:%d", violation.File, violation.Line))
 	}

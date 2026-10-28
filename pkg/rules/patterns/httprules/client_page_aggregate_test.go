@@ -3,7 +3,6 @@ package httprules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -12,7 +11,7 @@ import (
 // only, and the pager walks the server's order.
 func TestClientPageAggregateSort(t *testing.T) {
 	rule := NewClientPageAggregateRule()
-	lines := patterntest.ViolationLines(rule.AnalyzeFile(rulestest.TextFile(t, "app/users/page.tsx", `export default function UsersPage() {
+	lines := rulestest.ViolationLines(rule.AnalyzeFile(rulestest.TextFile(t, "app/users/page.tsx", `export default function UsersPage() {
   const load = async () => {
     const usersData = await api.listUsers({ page, limit: 20 })
     const sorted = [...usersData.users].sort((a, b) => b.priority - a.priority)
@@ -30,7 +29,7 @@ func TestClientPageAggregateSort(t *testing.T) {
 // stops growing.
 func TestClientPageAggregateTotal(t *testing.T) {
 	rule := NewClientPageAggregateRule()
-	lines := patterntest.ViolationLines(rule.AnalyzeFile(rulestest.TextFile(t, "components/Dashboard.tsx", `export default function Dashboard() {
+	lines := rulestest.ViolationLines(rule.AnalyzeFile(rulestest.TextFile(t, "components/Dashboard.tsx", `export default function Dashboard() {
   const load = async () => {
     const [wdrResponse] = await Promise.allSettled([adminApi.getWithdrawals()])
     if (wdrResponse.status === 'fulfilled' && wdrResponse.value) {

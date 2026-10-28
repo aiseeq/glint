@@ -3,7 +3,6 @@ package qarules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -26,7 +25,7 @@ func TestTestGateCountThreshold(t *testing.T) {
   })
 })
 `)
-	assert.Equal(t, []int{4, 5}, patterntest.ViolationLines(NewTestGateCountThresholdRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{4, 5}, rulestest.ViolationLines(NewTestGateCountThresholdRule().AnalyzeFile(ctx)))
 
 	production := rulestest.TextFile(t, "src/report.ts", "expect(highIssues).toBeLessThanOrEqual(7)\n")
 	assert.Empty(t, NewTestGateCountThresholdRule().AnalyzeFile(production))

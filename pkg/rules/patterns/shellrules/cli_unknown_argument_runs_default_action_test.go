@@ -3,13 +3,12 @@ package shellrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestCLIUnknownArgumentRunsDefaultAction(t *testing.T) {
-	assert.Equal(t, []int{8}, patterntest.AppRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), `package main
+	assert.Equal(t, []int{8}, rulestest.GoProjectRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), "app.go", `package main
 
 import "os"
 
@@ -54,7 +53,7 @@ const rebuildCommand = "rebuild"
 }
 
 func TestCLIUnknownArgumentRunsDefaultActionSwitch(t *testing.T) {
-	assert.Equal(t, []int{6}, patterntest.AppRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), `package main
+	assert.Equal(t, []int{6}, rulestest.GoProjectRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), "app.go", `package main
 
 import "os"
 
@@ -127,7 +126,7 @@ func banes() {}
 func load(string) {}
 `,
 	} {
-		assert.Empty(t, patterntest.AppRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), source))
+		assert.Empty(t, rulestest.GoProjectRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), "app.go", source))
 	}
 }
 
@@ -172,12 +171,12 @@ func recut() {}
 func run() {}
 `,
 	} {
-		assert.Empty(t, patterntest.AppRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), source))
+		assert.Empty(t, rulestest.GoProjectRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), "app.go", source))
 	}
 }
 
 func TestCLIUnknownArgumentRunsDefaultActionParseOnlyStillReports(t *testing.T) {
-	lines := patterntest.AppRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), `package main
+	lines := rulestest.GoProjectRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), "app.go", `package main
 
 import (
 	"flag"
@@ -199,7 +198,7 @@ func serve() {}
 }
 
 func TestCLIUnknownArgumentRunsDefaultActionReportsOnce(t *testing.T) {
-	lines := patterntest.AppRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), `package main
+	lines := rulestest.GoProjectRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), "app.go", `package main
 
 import "os"
 
@@ -290,6 +289,6 @@ func main() {
 func serve() {}
 `,
 	} {
-		assert.Empty(t, patterntest.AppRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), source))
+		assert.Empty(t, rulestest.GoProjectRuleLines(t, NewCLIUnknownArgumentRunsDefaultActionRule(), "app.go", source))
 	}
 }

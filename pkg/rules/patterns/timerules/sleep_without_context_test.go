@@ -4,7 +4,8 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -239,7 +240,7 @@ func helper(ctx context.Context) {
 // With types the carrier struct can live in another file, and the imports can
 // be aliased: the context is still in hand, and the pause still ignores it.
 func TestSleepWithoutContextRuleTyped(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewSleepWithoutContextRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewSleepWithoutContextRule(), map[string]string{
 		"client/types.go": `package client
 
 import "context"

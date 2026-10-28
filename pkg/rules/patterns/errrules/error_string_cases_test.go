@@ -46,7 +46,7 @@ var (
 `
 	ctx := rulestest.GoFile(t, "p/e.go", source)
 	assert.Equal(t, []int{9, 10, 11, 12, 13, 14, 15, 16, 17},
-		patterntest.ViolationLines(NewErrorStringRule().AnalyzeFile(ctx)))
+		rulestest.ViolationLines(NewErrorStringRule().AnalyzeFile(ctx)))
 }
 
 // Go Code Review Comments allow a proper noun at the start of an error

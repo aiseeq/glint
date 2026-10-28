@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -271,7 +271,7 @@ func TestWithdrawalFee(t *testing.T) {
 // raised it, the page kept offering 10.
 func TestFinancialConstantsTypeScript(t *testing.T) {
 	lines := func(path, source string) []int {
-		return patterntest.ViolationLines(NewFinancialConstantsRule().AnalyzeFile(rulestest.TextFile(t, path, source)))
+		return rulestest.ViolationLines(NewFinancialConstantsRule().AnalyzeFile(rulestest.TextFile(t, path, source)))
 	}
 	assert.Equal(t, []int{2, 3}, lines("web/src/app/invest/page.tsx", `const strategies = useMemo(() => [
   { id: 'starter', minAmount: 10, title: 'Starter' },

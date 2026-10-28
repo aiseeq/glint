@@ -3,7 +3,7 @@ package gorules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -26,7 +26,7 @@ func AddressKey(address string) string {
 // Two addresses compared as spelled, in a module that compares addresses
 // through its own canonical form elsewhere.
 func TestAddressComparedAsSpelled(t *testing.T) {
-	assert.Equal(t, []string{"ledger/ledger.go:18", "ledger/ledger.go:28"}, patterntest.ProjectRuleLines(t, NewAddressComparedAsSpelledRule(), map[string]string{
+	assert.Equal(t, []string{"ledger/ledger.go:18", "ledger/ledger.go:28"}, rulestest.ProjectRulePlaces(t, NewAddressComparedAsSpelledRule(), map[string]string{
 		"keys/keys.go": addressKeySource,
 		"ledger/ledger.go": `package ledger
 
@@ -135,7 +135,7 @@ func known(address string, contractAddresses []string) bool {
 // A module with no canonical address form compares addresses as it stores
 // them: nothing to check against.
 func TestAddressComparedAsSpelledNeedsCanonicalForm(t *testing.T) {
-	assert.Empty(t, patterntest.ProjectRuleLines(t, NewAddressComparedAsSpelledRule(), map[string]string{
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewAddressComparedAsSpelledRule(), map[string]string{
 		"ledger/ledger.go": `package ledger
 
 func own(ownerAddress, walletAddress string) bool {
@@ -148,7 +148,7 @@ func own(ownerAddress, walletAddress string) bool {
 // Lower-casing an address by hand where the module has a canonical address
 // key: the hand-made key misses the forms the canonical one knows.
 func TestAddressFoldedPastCanonicalKey(t *testing.T) {
-	assert.Equal(t, []string{"sync/sync.go:12", "sync/sync.go:18", "sync/sync.go:29", "sync/sync.go:63", "sync/sync.go:79"}, patterntest.ProjectRuleLines(t, NewAddressFoldedPastCanonicalKeyRule(), map[string]string{
+	assert.Equal(t, []string{"sync/sync.go:12", "sync/sync.go:18", "sync/sync.go:29", "sync/sync.go:63", "sync/sync.go:79"}, rulestest.ProjectRulePlaces(t, NewAddressFoldedPastCanonicalKeyRule(), map[string]string{
 		"keys/keys.go": addressKeySource,
 		"sync/sync.go": `package sync
 
@@ -240,7 +240,7 @@ func hexKey(walletAddress string) string {
 // parser of one chain's addresses that fails on the others is not a key of
 // every address.
 func TestAddressFoldedPastCanonicalKeyNeedsKey(t *testing.T) {
-	assert.Empty(t, patterntest.ProjectRuleLines(t, NewAddressFoldedPastCanonicalKeyRule(), map[string]string{
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewAddressFoldedPastCanonicalKeyRule(), map[string]string{
 		"chainx/address.go": `package chainx
 
 import (
@@ -271,7 +271,7 @@ func coverageKey(walletAddress string) string {
 // with them, while a sibling entry point of the same service first brings its
 // address to the canonical spelling.
 func TestAddressEntrySkipsCanonicalSpelling(t *testing.T) {
-	assert.Equal(t, []string{"svc/svc.go:31", "svc/svc.go:40"}, patterntest.ProjectRuleLines(t, NewAddressEntrySkipsCanonicalSpellingRule(), map[string]string{
+	assert.Equal(t, []string{"svc/svc.go:31", "svc/svc.go:40"}, rulestest.ProjectRulePlaces(t, NewAddressEntrySkipsCanonicalSpellingRule(), map[string]string{
 		"svc/svc.go": `package svc
 
 import (
@@ -329,7 +329,7 @@ func (s *Service) Resync(ctx context.Context, walletAddress string) error {
 // the database: the argument for LOWER(address) IN (...) and the key of the
 // rows it selects must be spelled as the database spells them.
 func TestAddressFoldedPastCanonicalKeyMirrorsSQLFold(t *testing.T) {
-	assert.Equal(t, []string{"repo/repo.go:14"}, patterntest.ProjectRuleLines(t, NewAddressFoldedPastCanonicalKeyRule(), map[string]string{
+	assert.Equal(t, []string{"repo/repo.go:14"}, rulestest.ProjectRulePlaces(t, NewAddressFoldedPastCanonicalKeyRule(), map[string]string{
 		"keys/keys.go": addressKeySource,
 		"repo/repo.go": `package repo
 

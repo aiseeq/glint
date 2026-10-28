@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -125,5 +124,5 @@ func Edit(ctx context.Context, repo Repo, w *Wallet) error {
 	return nil
 }
 `)
-	assert.Equal(t, []int{35}, patterntest.ViolationLines(NewErrorSuccessByStateRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{35}, rulestest.ViolationLines(NewErrorSuccessByStateRule().AnalyzeFile(ctx)))
 }

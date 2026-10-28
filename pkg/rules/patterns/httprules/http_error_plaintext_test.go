@@ -3,7 +3,6 @@ package httprules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -238,7 +237,7 @@ func Reset(w nethttp.ResponseWriter, r *nethttp.Request) {
 			if tt.withJSON {
 				files["api/json.go"] = jsonAPIHelper
 			}
-			violations := patterntest.RunRuleOnFiles(t, rule, files)
+			violations := rulestest.RunRuleOnFiles(t, rule, files)
 			assert.Len(t, violations, tt.expectedCount, "Code: %s", tt.code)
 		})
 	}

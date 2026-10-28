@@ -5,7 +5,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/gorules"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -53,7 +53,7 @@ func main()
 			ctx := rulestest.GoFile(t, "lib/asm.go", source)
 			assert.NotPanics(t, func() { rule.AnalyzeFile(ctx) })
 			assert.NotPanics(t, func() {
-				patterntest.RunRuleOnFiles(t, rule, map[string]string{
+				rulestest.RunRuleOnFiles(t, rule, map[string]string{
 					"lib/asm.go":        source,
 					"lib/asm_amd64.s":   "",
 					"lib/asm_arm64.s":   "",

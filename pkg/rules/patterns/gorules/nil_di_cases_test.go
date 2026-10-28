@@ -1,6 +1,7 @@
 package gorules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
@@ -31,7 +32,7 @@ func TestNilDIRule_HighRiskParamWords(t *testing.T) {
 // A nil slice is an empty collection, not a missing dependency: with types
 // only pointer and interface parameters can be a dependency left unset.
 func TestNilDITypedRequiresPointerOrInterfaceParam(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
 		"index/index.go": `package index
 
 type Logger interface{ Print(string) }

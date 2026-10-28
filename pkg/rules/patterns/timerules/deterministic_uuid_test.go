@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -194,7 +194,7 @@ func refundKey(txHash string) string {
 		t.Run(tt.name, func(t *testing.T) {
 			files := map[string]string{"ids/ids.go": tt.code}
 			maps.Copy(files, uuidModuleFiles)
-			violations := patterntest.RunRuleOnFiles(t, rule, files)
+			violations := rulestest.RunRuleOnFiles(t, rule, files)
 			var own int
 			for _, v := range violations {
 				if v.File == "ids/ids.go" {

@@ -1,9 +1,9 @@
 package httprules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -49,5 +49,5 @@ func (s *Service) Show(ctx context.Context, id string) string {
 `
 	ctx := createIdempotencyCheckThenCreateContext(t, "fees.go", code)
 	violations := NewIdempotencyCheckThenCreateRule().AnalyzeFile(ctx)
-	assert.Equal(t, []int{6}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{6}, rulestest.ViolationLines(violations))
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 // WantedLines returns file:line of the lines marked "want <rule>"; a marker
@@ -29,10 +30,5 @@ func WantedLines(files map[string]string, rule string) []string {
 }
 
 func FoundLines(violations []*core.Violation) []string {
-	var places []string
-	for _, v := range violations {
-		places = append(places, fmt.Sprintf("%s:%d", v.File, v.Line))
-	}
-	slices.Sort(places)
-	return places
+	return rulestest.ViolationPlaces(violations)
 }

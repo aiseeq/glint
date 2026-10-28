@@ -3,7 +3,6 @@ package gorules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -45,5 +44,5 @@ func Price(v any) int {
 }
 `
 	ctx := rulestest.GoFile(t, "opt/o.go", source)
-	assert.Equal(t, []int{30}, patterntest.ViolationLines(NewAnonInterfaceDegradationRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{30}, rulestest.ViolationLines(NewAnonInterfaceDegradationRule().AnalyzeFile(ctx)))
 }

@@ -1,6 +1,7 @@
 package httprules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
@@ -49,5 +50,5 @@ func walkStrict(ctx context.Context, c *Client) error {
 }
 `
 	ctx := patterntest.CreateQueryContext(t, "sync.go", code)
-	assert.Equal(t, []int{10}, patterntest.ViolationLines(NewPaginationBoundaryTruncationRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{10}, rulestest.ViolationLines(NewPaginationBoundaryTruncationRule().AnalyzeFile(ctx)))
 }

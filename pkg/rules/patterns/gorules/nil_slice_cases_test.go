@@ -1,9 +1,9 @@
 package gorules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -12,7 +12,7 @@ import (
 // a slice parameter called userIDs compared with nil is reported like any
 // other.
 func TestNilSliceTypedIDsNameIsNoExemption(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
 		"svc/svc.go": `package svc
 
 func unset(userIDs []string) bool {
@@ -27,7 +27,7 @@ func unset(userIDs []string) bool {
 // Code that tests both nil and empty on the same slice tells them apart on
 // purpose: nil means "no filter", empty means "match nothing".
 func TestNilSliceTypedNilAndEmptyDistinguished(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
 		"svc/svc.go": `package svc
 
 func matches(filter []string, id string) bool {
@@ -54,7 +54,7 @@ func matches(filter []string, id string) bool {
 // part it got may be empty. A variable grown by append is nil exactly when it
 // is empty, and its nil check is still reported.
 func TestNilSliceTypedNilMeansNotAssigned(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
 		"cli/cli.go": `package cli
 
 import "slices"
@@ -86,7 +86,7 @@ func collect(names []string) bool {
 // optional request body, a filter that is not there. Checking it with nil is
 // the function's contract, not a mix-up of nil and empty.
 func TestNilSliceTypedParameterCallersPassNil(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
 		"client/client.go": `package client
 
 type Client struct{ contentType string }
@@ -121,7 +121,7 @@ func Count() int { return count([]int{1}) }
 // Variadic options are not a declared slice; the typed path leaves them alone
 // without looking at the name.
 func TestNilSliceTypedVariadicOptions(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilSliceRule(), map[string]string{
 		"svc/svc.go": `package svc
 
 func configured(options ...string) bool {

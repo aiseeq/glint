@@ -1,9 +1,9 @@
 package httprules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -101,5 +101,5 @@ func (s *Service) approve(ctx context.Context, key string) error {
 	ctx := createIdempotencyCheckThenCreateContext(t, "orders.go", code)
 	violations := NewIdempotencyCheckThenCreateRule().AnalyzeFile(ctx)
 	// 28 is the plain race of the lookup and the create.
-	assert.ElementsMatch(t, []int{4, 16, 25, 28}, patterntest.ViolationLines(violations))
+	assert.ElementsMatch(t, []int{4, 16, 25, 28}, rulestest.ViolationLines(violations))
 }

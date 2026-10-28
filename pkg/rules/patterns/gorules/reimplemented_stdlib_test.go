@@ -15,7 +15,7 @@ import (
 func analyzeStdlibCopies(t *testing.T, source string) []*core.Violation {
 	t.Helper()
 	untyped := NewReimplementedStdlibRule().AnalyzeFile(rulestest.GoFile(t, "helpers.go", source))
-	typed := patterntest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{"helpers/helpers.go": source})
+	typed := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{"helpers/helpers.go": source})
 	require.Len(t, typed, len(untyped), "typed %v, untyped %v", typed, untyped)
 	for i := range typed {
 		require.Equal(t, untyped[i].Line, typed[i].Line)
@@ -396,7 +396,7 @@ func join(parts []string) string {
 // is no linear search slices.Contains could replace. Neither is ranging over
 // a package-level map or over a string.
 func TestReimplementedStdlibResolvesRangeTargetFromSiblingFile(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
 		"acl/types.go": `package acl
 
 type Roles map[string]string
@@ -439,7 +439,7 @@ func hasRune(s string, want rune) bool {
 // A named slice type and a package-level slice declared in a sibling file
 // are still linear searches.
 func TestReimplementedStdlibReportsSliceSearchAcrossFiles(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
 		"acl/types.go": `package acl
 
 type Names []string
@@ -498,7 +498,7 @@ func broken() int { return "not an int" }
 // A float named in a sibling file is still a float: its abs is math.Abs, not
 // the integer helper Go lacks.
 func TestReimplementedStdlibResolvesFloatResultFromSiblingFile(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
 		"money/amount.go": "package money\n\ntype Amount float64\n",
 		"money/abs.go": `package money
 

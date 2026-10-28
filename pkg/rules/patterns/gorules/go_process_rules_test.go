@@ -3,7 +3,7 @@ package gorules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -11,7 +11,7 @@ import (
 // page, a URL the server put in its answer, through a method that always set
 // the Authorization header - the token went to any host the server named.
 func TestAuthHeaderSentToResponseURL(t *testing.T) {
-	assert.Equal(t, []int{46}, patterntest.AppRuleLines(t, NewAuthHeaderSentToResponseURLRule(), `package app
+	assert.Equal(t, []int{46}, rulestest.GoProjectRuleLines(t, NewAuthHeaderSentToResponseURLRule(), "app.go", `package app
 
 import (
 	"encoding/json"
@@ -70,7 +70,7 @@ func List(c *Client, path string) ([]string, error) {
 // A header set only for the API's own host, or a pager that follows a
 // counter rather than a URL from the answer, keeps the token home.
 func TestAuthHeaderSentToResponseURLAccepts(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, NewAuthHeaderSentToResponseURLRule(), `package app
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewAuthHeaderSentToResponseURLRule(), "app.go", `package app
 
 import (
 	"encoding/json"
@@ -157,7 +157,7 @@ func Pages(s *Signed) ([]string, error) {
 // and the function returned without Wait - the process stayed a zombie and
 // its pipes open until the program ended.
 func TestProcessKilledWithoutWait(t *testing.T) {
-	assert.Equal(t, []int{22, 31}, patterntest.AppRuleLines(t, NewProcessKilledWithoutWaitRule(), `package app
+	assert.Equal(t, []int{22, 31}, rulestest.GoProjectRuleLines(t, NewProcessKilledWithoutWaitRule(), "app.go", `package app
 
 import (
 	"errors"
@@ -198,7 +198,7 @@ func Direct(cmd *exec.Cmd) error {
 // Kill followed by Wait, a deferred Wait, or a process handed back to the
 // caller leaves no zombie.
 func TestProcessKilledWithoutWaitAccepts(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, NewProcessKilledWithoutWaitRule(), `package app
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewProcessKilledWithoutWaitRule(), "app.go", `package app
 
 import (
 	"errors"
@@ -235,7 +235,7 @@ func Handed(cmd *exec.Cmd) (*exec.Cmd, error) {
 // was downloaded, and a failed download was only logged - the run ended
 // with no archive at all and a success status.
 func TestRemoveBeforeFailedReplacement(t *testing.T) {
-	assert.Equal(t, []int{13}, patterntest.AppRuleLines(t, NewRemoveBeforeFailedReplacementRule(), `package app
+	assert.Equal(t, []int{13}, rulestest.GoProjectRuleLines(t, NewRemoveBeforeFailedReplacementRule(), "app.go", `package app
 
 import (
 	"errors"
@@ -264,7 +264,7 @@ func Pull(u, dst string) error {
 // A failed replacement that is returned, or a write into a temporary file
 // renamed into place, does not hide the loss.
 func TestRemoveBeforeFailedReplacementAccepts(t *testing.T) {
-	assert.Empty(t, patterntest.AppRuleLines(t, NewRemoveBeforeFailedReplacementRule(), `package app
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewRemoveBeforeFailedReplacementRule(), "app.go", `package app
 
 import (
 	"errors"

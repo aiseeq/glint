@@ -253,7 +253,7 @@ func errorWrapContext(t *testing.T, code string) *core.FileContext {
 // A callback parameter whose func type is named in a sibling file is the same
 // pass-through as a func(...) literal type.
 func TestErrorWrapIgnoresNamedCallbackTypeFromSiblingFile(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewErrorWrapRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewErrorWrapRule(), map[string]string{
 		"store/tx.go": `package store
 
 import "context"
@@ -277,7 +277,7 @@ func RunInTx(ctx context.Context, fn TxFunc) error {
 
 // A foreign call in a typed package is still reported.
 func TestErrorWrapReportsForeignCallInTypedPackage(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewErrorWrapRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewErrorWrapRule(), map[string]string{
 		"store/load.go": `package store
 
 import "os"

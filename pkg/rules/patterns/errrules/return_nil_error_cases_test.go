@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,7 +63,7 @@ func Build(ids []int) (*Report, error) {
 `
 
 func TestReturnNilErrorRule_NilCollectionIsEmptyValueTyped(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewReturnNilErrorRule(), map[string]string{"svc/svc.go": nilCollectionSource})
+	violations := rulestest.RunRuleOnFiles(t, NewReturnNilErrorRule(), map[string]string{"svc/svc.go": nilCollectionSource})
 	require.Len(t, violations, 1)
 	assert.Equal(t, 46, violations[0].Line, "only the pointer result is reported")
 }
@@ -72,7 +71,7 @@ func TestReturnNilErrorRule_NilCollectionIsEmptyValueTyped(t *testing.T) {
 func TestReturnNilErrorRule_NilCollectionIsEmptyValueUntyped(t *testing.T) {
 	ctx := rulestest.GoFile(t, "svc/svc.go", nilCollectionSource)
 	// Without types the named slice type is unknown and stays reported.
-	assert.Equal(t, []int{25, 46}, patterntest.ViolationLines(NewReturnNilErrorRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{25, 46}, rulestest.ViolationLines(NewReturnNilErrorRule().AnalyzeFile(ctx)))
 }
 
 // (nil, nil) is the answer "there is none" when every caller tests the record

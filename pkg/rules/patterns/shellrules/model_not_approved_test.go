@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,7 +59,7 @@ func run(model string) {
 	}
 }
 `)
-	assert.Equal(t, []int{9, 17, 19, 20}, patterntest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
+	assert.Equal(t, []int{9, 17, 19, 20}, rulestest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
 }
 
 func TestModelNotApprovedTypeScript(t *testing.T) {
@@ -73,7 +73,7 @@ const args = ['--model', 'gpt-4o', '--model', model];
 const cmd = `+"`claude --model ${model}`"+`;
 const other = `+"`claude --model sonnet -p`"+`;
 `)
-	assert.Equal(t, []int{2, 7, 9}, patterntest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
+	assert.Equal(t, []int{2, 7, 9}, rulestest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
 }
 
 func TestModelNotApprovedShell(t *testing.T) {
@@ -87,7 +87,7 @@ git commit -m "bump model"
 # claude --model sonnet was too slow
 claude --model opus[1m] -p "$prompt"
 `)
-	assert.Equal(t, []int{2, 4, 6}, patterntest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
+	assert.Equal(t, []int{2, 4, 6}, rulestest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
 }
 
 func TestModelNotApprovedMessageNamesTheList(t *testing.T) {
@@ -132,14 +132,14 @@ func TestCollect(t *testing.T) {
 	exec.Command("claude", "-p", "--model", "sonnet")
 }
 `)
-	assert.Equal(t, []int{9}, patterntest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
+	assert.Equal(t, []int{9}, rulestest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
 
 	script := rulestest.TextFile(t, "scripts/review_test.sh", "MODEL=sonnet\nclaude -p --model haiku \"$prompt\"\n")
-	assert.Equal(t, []int{1, 2}, patterntest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(script)))
+	assert.Equal(t, []int{1, 2}, rulestest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(script)))
 }
 
 // A provider prefix names where the model runs, not another model.
 func TestModelNotApprovedProviderPrefix(t *testing.T) {
 	ctx := rulestest.TextFile(t, "launch.sh", "opencode run -m openai/gpt-6.1-sol --format json\nopencode run -m openai/gpt-6 --format json\n")
-	assert.Equal(t, []int{2}, patterntest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
+	assert.Equal(t, []int{2}, rulestest.ViolationLines(modelRule(t, approvedModelList).AnalyzeFile(ctx)))
 }

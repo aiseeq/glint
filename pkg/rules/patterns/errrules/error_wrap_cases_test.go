@@ -2,9 +2,9 @@ package errrules
 
 import (
 	"fmt"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -35,7 +35,7 @@ func ReadAll(ps []string) ([][]byte, error) {
 	return out, nil
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewErrorWrapRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewErrorWrapRule(), map[string]string{
 		"store/s.go":          source,
 		"internal/store/s.go": source,
 		"cmd/tool/store.go":   "package main\n\n" + source[len("package store\n\n"):] + "\nfunc main() {}\n",

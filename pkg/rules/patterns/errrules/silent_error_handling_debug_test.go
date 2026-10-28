@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -30,7 +29,7 @@ func (s *Service) positions(ctx context.Context, address string) ([]Position, []
 }
 `
 	violations := NewSilentErrorHandlingRule().AnalyzeFile(rulestest.GoFile(t, "svc/positions.go", source))
-	assert.Equal(t, []int{9}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{9}, rulestest.ViolationLines(violations))
 }
 
 // A failed Close or drain produces no data to lose: a Debug line there is the
@@ -47,5 +46,5 @@ func drainAndClose(body io.ReadCloser) {
 	}
 }
 `
-	assert.Empty(t, patterntest.ViolationLines(NewSilentErrorHandlingRule().AnalyzeFile(rulestest.GoFile(t, "svc/drain.go", source))))
+	assert.Empty(t, rulestest.ViolationLines(NewSilentErrorHandlingRule().AnalyzeFile(rulestest.GoFile(t, "svc/drain.go", source))))
 }

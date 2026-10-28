@@ -3,7 +3,6 @@ package qarules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -28,7 +27,7 @@ func TestTestAssertsWallClock(t *testing.T) {
   });
 });
 `)
-	assert.Equal(t, []int{9, 10}, patterntest.ViolationLines(NewTestAssertsWallClockRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{9, 10}, rulestest.ViolationLines(NewTestAssertsWallClockRule().AnalyzeFile(ctx)))
 }
 
 // A wait started after its action misses a fast response.
@@ -50,7 +49,7 @@ func TestBrowserWaitRegisteredAfterAction(t *testing.T) {
   await expect(page.locator('#total')).toHaveText('10')
 })
 `)
-	assert.Equal(t, []int{3, 13}, patterntest.ViolationLines(NewBrowserWaitAfterActionRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{3, 13}, rulestest.ViolationLines(NewBrowserWaitAfterActionRule().AnalyzeFile(ctx)))
 }
 
 // A ** glued to a word does not cross '/'.
@@ -82,7 +81,7 @@ func TestBrowserRouteGlobGlued(t *testing.T) {
   })
 })
 `)
-	assert.Equal(t, []int{2, 10, 13}, patterntest.ViolationLines(NewBrowserRouteGlobGluedRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{2, 10, 13}, rulestest.ViolationLines(NewBrowserRouteGlobGluedRule().AnalyzeFile(ctx)))
 }
 
 // Test addresses on registrable domains reach their owners.
@@ -99,7 +98,7 @@ func isTestUser(email string) bool {
 
 var safe = []string{"user@example.com", "user@shop.test", "admin@app.local", "news@latest.com", "a@testing.example"}
 `)
-	assert.Equal(t, []int{5, 8}, patterntest.ViolationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(goCtx)))
+	assert.Equal(t, []int{5, 8}, rulestest.ViolationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(goCtx)))
 
 	tsCtx := rulestest.TextFile(t, "e2e/fixtures/users.ts", `// owner: dev@test.com
 export const email = 'e2e-user@app-test.com'
@@ -107,7 +106,7 @@ export const other = 'user@example.com'
 const at = user@testmail.com
 export const cleanup = ['%@app-test.com']
 `)
-	assert.Equal(t, []int{2, 5}, patterntest.ViolationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(tsCtx)))
+	assert.Equal(t, []int{2, 5}, rulestest.ViolationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(tsCtx)))
 
 	// A fixture address in a test is reported too: tests that register users
 	// run against environments that send mail, and a fixture copied from one
@@ -121,12 +120,12 @@ var markers = []string{
 	"%@shop-test.com",
 }
 `)
-	assert.Equal(t, []int{3, 6, 7}, patterntest.ViolationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(testCtx)))
+	assert.Equal(t, []int{3, 6, 7}, rulestest.ViolationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(testCtx)))
 
 	// A domain assembled around a substitution is still the registrable
 	// domain it names.
 	templated := rulestest.TextFile(t, "e2e/helpers/users.ts", "export const user = (pid: number) => `test-${Date.now()}@shop-test-w${pid}.com`\nexport const safe = (pid: number) => `test-${pid}@w${pid}.example.com`\n")
-	assert.Equal(t, []int{1}, patterntest.ViolationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(templated)))
+	assert.Equal(t, []int{1}, rulestest.ViolationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(templated)))
 
 	formatted := rulestest.GoFile(t, "tests/users_test.go", `package tests
 
@@ -134,5 +133,5 @@ import "fmt"
 
 func email(worker int) string { return fmt.Sprintf("user@shop-test-w%d.com", worker) }
 `)
-	assert.Equal(t, []int{5}, patterntest.ViolationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(formatted)))
+	assert.Equal(t, []int{5}, rulestest.ViolationLines(NewTestEmailRegistrableDomainRule().AnalyzeFile(formatted)))
 }

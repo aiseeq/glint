@@ -1,9 +1,9 @@
 package gorules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -38,7 +38,7 @@ func readOnly(items []item) string {
 	return items[0].label
 }
 `}
-	violations := patterntest.RunRuleOnFiles(t, NewReturnedInputSliceMutatedRule(), files)
+	violations := rulestest.RunRuleOnFiles(t, NewReturnedInputSliceMutatedRule(), files)
 	require.Len(t, violations, 1)
 	assert.Equal(t, "returned-input-slice-mutated-while-original-kept", violations[0].Rule)
 }

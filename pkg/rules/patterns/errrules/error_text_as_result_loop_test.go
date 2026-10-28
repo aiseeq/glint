@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -43,7 +42,7 @@ func (s *Service) importJoined(ctx context.Context, ids []string) (*Result, erro
 }
 `
 	violations := NewErrorTextAsResultRule().AnalyzeFile(rulestest.GoFile(t, "imports/all.go", source))
-	assert.Equal(t, []int{8}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{8}, rulestest.ViolationLines(violations))
 }
 
 // The error kept for the return next to its text, and a list of skip
@@ -82,5 +81,5 @@ func (s *Service) importEntries(ctx context.Context, entries []Entry) (*Result, 
 	return result, nil
 }
 `
-	assert.Empty(t, patterntest.ViolationLines(NewErrorTextAsResultRule().AnalyzeFile(rulestest.GoFile(t, "imports/all.go", source))))
+	assert.Empty(t, rulestest.ViolationLines(NewErrorTextAsResultRule().AnalyzeFile(rulestest.GoFile(t, "imports/all.go", source))))
 }

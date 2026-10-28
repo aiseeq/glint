@@ -5,6 +5,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -250,7 +251,7 @@ func example() bool {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := createTimeEqualContext(t, "service.go", tt.code)
 			untyped := rule.AnalyzeFile(ctx)
-			typed := patterntest.RunRuleOnFiles(t, rule, map[string]string{"svc/service.go": tt.code})
+			typed := rulestest.RunRuleOnFiles(t, rule, map[string]string{"svc/service.go": tt.code})
 
 			for mode, violations := range map[string][]*core.Violation{"untyped": untyped, "typed": typed} {
 				if tt.expectMatch {
@@ -270,7 +271,7 @@ func createTimeEqualContext(t *testing.T, path, code string) *core.FileContext {
 	ctx := &core.FileContext{
 		Path:    "/" + path,
 		RelPath: path,
-		Lines:   patterntest.SplitTimeEqualLines(code),
+		Lines:   rulestest.SplitLines(code),
 		Content: []byte(code),
 	}
 
@@ -290,7 +291,7 @@ func createTimeEqualContext(t *testing.T, path, code string) *core.FileContext {
 // type. The name fallback called an int64 CreatedAt a time.Time, and the
 // suggested .Equal() does not compile on an int64.
 func TestTimeEqualUsesDeclaredTypeFromSiblingFile(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewTimeEqualRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewTimeEqualRule(), map[string]string{
 		"events/model.go": `package events
 
 type Event struct {
@@ -319,7 +320,7 @@ func expired() bool {
 // A time.Time declared in a sibling file is still a time.Time, whatever the
 // name of the field and whether or not the comparing file imports time.
 func TestTimeEqualReportsTimeFieldFromSiblingFile(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewTimeEqualRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewTimeEqualRule(), map[string]string{
 		"events/model.go": `package events
 
 import "time"

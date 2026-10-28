@@ -1,9 +1,9 @@
 package moneyrules
 
 import (
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,7 +37,7 @@ func (*Rows) Close() error { return nil }
 }
 
 func TestSpreadsheetGetRowsTruncatesOnCellErrorReportsAssignedResult(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
+	violations := rulestest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
 
 import "github.com/xuri/excelize/v2"
 
@@ -53,7 +53,7 @@ func Read(book *excelize.File, name string) ([][]string, error) {
 }
 
 func TestSpreadsheetGetRowsTruncatesOnCellErrorReportsDirectResult(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
+	violations := rulestest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
 
 import "github.com/xuri/excelize/v2"
 
@@ -66,7 +66,7 @@ func Read(book *excelize.File, name string) ([][]string, error) {
 }
 
 func TestSpreadsheetGetRowsTruncatesOnCellErrorAllowsCellReadCheck(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
+	violations := rulestest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
 
 import "github.com/xuri/excelize/v2"
 
@@ -82,7 +82,7 @@ func Read(book *excelize.File, name string) ([][]string, error) {
 }
 
 func TestSpreadsheetGetRowsTruncatesOnCellErrorAllowsCheckedIterator(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
+	violations := rulestest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
 
 import "github.com/xuri/excelize/v2"
 
@@ -105,7 +105,7 @@ func Read(book *excelize.File, name string) ([][]string, error) {
 }
 
 func TestSpreadsheetGetRowsTruncatesOnCellErrorAllowsCellCheckInCallee(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
+	violations := rulestest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
 
 import "github.com/xuri/excelize/v2"
 
@@ -128,7 +128,7 @@ func checkCells(book *excelize.File, name string, rows [][]string) error {
 }
 
 func TestSpreadsheetGetRowsTruncatesOnCellErrorReportsCalleeWithoutCellRead(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
+	violations := rulestest.RunRuleOnFiles(t, NewSpreadsheetGetRowsTruncatesOnCellErrorRule(), excelizeRuleFiles(`package sheet
 
 import "github.com/xuri/excelize/v2"
 

@@ -3,8 +3,8 @@ package concurrencyrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/patterns/timerules"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -88,7 +88,7 @@ func main() {
 }
 `,
 	}
-	assert.Equal(t, []string{"worker/sync.go:12"}, patterntest.ProjectRuleLines(t, NewServiceNeverStartedRule(), files))
+	assert.Equal(t, []string{"worker/sync.go:12"}, rulestest.ProjectRulePlaces(t, NewServiceNeverStartedRule(), files))
 }
 
 const slogLoggerNoDefault = `package logging
@@ -117,7 +117,7 @@ func Send(to string) {
 }
 `,
 	}
-	assert.Equal(t, []string{"logging/logger.go:9"}, patterntest.ProjectRuleLines(t, timerules.NewSlogDefaultNotSetRule(), files))
+	assert.Equal(t, []string{"logging/logger.go:9"}, rulestest.ProjectRulePlaces(t, timerules.NewSlogDefaultNotSetRule(), files))
 
 	files["logging/logger.go"] = `package logging
 
@@ -132,11 +132,11 @@ func New(w io.Writer) *slog.Logger {
 	return logger
 }
 `
-	assert.Empty(t, patterntest.ProjectRuleLines(t, timerules.NewSlogDefaultNotSetRule(), files))
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, timerules.NewSlogDefaultNotSetRule(), files))
 
 	delete(files, "mail/send.go")
 	files["logging/logger.go"] = slogLoggerNoDefault
-	assert.Empty(t, patterntest.ProjectRuleLines(t, timerules.NewSlogDefaultNotSetRule(), files), "nothing logs through the default")
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, timerules.NewSlogDefaultNotSetRule(), files), "nothing logs through the default")
 }
 
 // Close waits for the goroutines the WaitGroup counts; a flush started
@@ -202,7 +202,7 @@ type Fanout struct{ wg sync.WaitGroup }
 func (f *Fanout) Go(work func()) { go work() }
 `,
 	}
-	assert.Equal(t, []string{"events/service.go:30"}, patterntest.ProjectRuleLines(t, NewGoroutineUntrackedOnCloseRule(), files))
+	assert.Equal(t, []string{"events/service.go:30"}, rulestest.ProjectRulePlaces(t, NewGoroutineUntrackedOnCloseRule(), files))
 }
 
 // main starts the workers on a cancellable context and returns after the
@@ -261,7 +261,7 @@ func main() {
 	wg.Wait()
 }
 `
-	assert.Equal(t, []string{"cmd/server/main.go:21"}, patterntest.ProjectRuleLines(t, NewGoroutineUntrackedOnCloseRule(), map[string]string{
+	assert.Equal(t, []string{"cmd/server/main.go:21"}, rulestest.ProjectRulePlaces(t, NewGoroutineUntrackedOnCloseRule(), map[string]string{
 		"worker/poller.go":    worker,
 		"cmd/server/main.go":  untracked,
 		"cmd/tracked/main.go": tracked,
@@ -310,5 +310,5 @@ func SetDefault(l Limits) { defaultLimits = l }
 var defaultLimits Limits
 `,
 	}
-	assert.Equal(t, []string{"limits/check.go:11", "limits/check.go:20"}, patterntest.ProjectRuleLines(t, NewGlobalSwapRestoreRule(), files))
+	assert.Equal(t, []string{"limits/check.go:11", "limits/check.go:20"}, rulestest.ProjectRulePlaces(t, NewGlobalSwapRestoreRule(), files))
 }

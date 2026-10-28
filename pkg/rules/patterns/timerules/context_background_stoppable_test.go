@@ -3,7 +3,6 @@ package timerules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -60,5 +59,5 @@ func (s *Service) StartWithRoot(root context.Context, interval time.Duration) {
 }
 `
 	violations := NewContextBackgroundRule().AnalyzeFile(rulestest.GoFile(t, "poll/poll.go", source))
-	assert.Equal(t, []int{18}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{18}, rulestest.ViolationLines(violations))
 }

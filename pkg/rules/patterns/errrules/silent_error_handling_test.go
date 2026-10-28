@@ -4,7 +4,8 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -71,7 +72,7 @@ func createSilentErrorContext(t *testing.T, path, code string) *core.FileContext
 	ctx := &core.FileContext{
 		Path:    "/" + path,
 		RelPath: path,
-		Lines:   patterntest.SplitTimeEqualLines(code),
+		Lines:   rulestest.SplitLines(code),
 		Content: []byte(code),
 	}
 	parser := core.NewParser()

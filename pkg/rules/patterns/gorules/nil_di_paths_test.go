@@ -6,6 +6,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -56,7 +57,7 @@ func (f *Factory) CreateAdminAuthService(deps *AuthServiceDependencies) *Service
 // A nil reaches the dependency through a local variable that holds nothing
 // else: declared as nil, declared without a value, or a typed nil conversion.
 func TestNilDIRule_NilThroughLocalVariable(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
 		"svc/types.go": nilDIWiring,
 		"svc/wire.go": `package svc
 
@@ -98,7 +99,7 @@ func wireName() Services {
 
 // A nil written straight into the dependency field of a struct literal.
 func TestNilDIRule_NilDependencyFieldInLiteral(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
 		"svc/types.go": nilDIWiring,
 		"svc/wire.go": `package svc
 
@@ -126,7 +127,7 @@ func lookup() map[string]Logger {
 // A manager, a getter and a dependencies struct are dependencies too, and a
 // Create factory is a constructor.
 func TestNilDIRule_ManagerGetterAndFactoryDeps(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
 		"svc/types.go": nilDIWiring,
 		"svc/wire.go": `package svc
 
@@ -149,7 +150,7 @@ func wireAuth() *Service {
 // Test files stay out: a nil that crashes a test fails it, and a nil for a
 // dependency the test does not reach is how tests are written.
 func TestNilDIRule_TestFilesStaySilent(t *testing.T) {
-	violations := patterntest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
+	violations := rulestest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
 		"middleware/auth.go": `package middleware
 
 import "errors"

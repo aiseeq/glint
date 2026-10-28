@@ -3,7 +3,6 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -25,7 +24,7 @@ func Known(errMsg string) bool {
 }
 `
 	ctx := rulestest.GoFile(t, "cmp/c.go", source)
-	assert.Equal(t, []int{11}, patterntest.ViolationLines(NewErrorStringCompareRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{11}, rulestest.ViolationLines(NewErrorStringCompareRule().AnalyzeFile(ctx)))
 }
 
 // The receiver of .Error() is an error by its type, whatever it is called: a
@@ -50,8 +49,8 @@ func Labeled(e Entry) bool {
 	return e.Error(1) == "boom"
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})
-	assert.Equal(t, []int{13}, patterntest.ViolationLines(violations))
+	violations := rulestest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})
+	assert.Equal(t, []int{13}, rulestest.ViolationLines(violations))
 }
 
 // The text of an error kept in a variable, or lowered first, is matched the
@@ -94,8 +93,8 @@ func Logged() string {
 	return strings.TrimSpace(errStr)
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})
-	assert.Equal(t, []int{16, 20, 23}, patterntest.ViolationLines(violations))
+	violations := rulestest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})
+	assert.Equal(t, []int{16, 20, 23}, rulestest.ViolationLines(violations))
 }
 
 // Without type information an error the file never types — the result of a
@@ -119,7 +118,7 @@ func (s *Svc) Status() int {
 }
 `
 	ctx := rulestest.GoFile(t, "cmp/c.go", source)
-	assert.Equal(t, []int{11}, patterntest.ViolationLines(NewErrorStringCompareRule().AnalyzeFile(ctx)))
+	assert.Equal(t, []int{11}, rulestest.ViolationLines(NewErrorStringCompareRule().AnalyzeFile(ctx)))
 }
 
 // An error message kept as data - a status row's Error column, the message
@@ -159,10 +158,10 @@ func hasPrefixWord(message string) bool {
 `
 	for name, run := range map[string]func() []int{
 		"typed": func() []int {
-			return patterntest.ViolationLines(patterntest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source}))
+			return rulestest.ViolationLines(rulestest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source}))
 		},
 		"untyped": func() []int {
-			return patterntest.ViolationLines(NewErrorStringCompareRule().AnalyzeFile(rulestest.GoFile(t, "cmp/c.go", source)))
+			return rulestest.ViolationLines(NewErrorStringCompareRule().AnalyzeFile(rulestest.GoFile(t, "cmp/c.go", source)))
 		},
 	} {
 		assert.Equal(t, []int{15, 15, 19}, run(), name)
@@ -190,7 +189,7 @@ func Split(rec *Record) (string, string) {
 	return *rec.Error, ""
 }
 `
-	assert.Empty(t, patterntest.ViolationLines(patterntest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})))
+	assert.Empty(t, rulestest.ViolationLines(rulestest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})))
 }
 
 // A predicate about an error's name, not an error's text.
@@ -203,7 +202,7 @@ func isErrorVarName(name string) bool {
 	return name == "err" || strings.HasSuffix(name, "Err")
 }
 `
-	assert.Empty(t, patterntest.ViolationLines(patterntest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})))
+	assert.Empty(t, rulestest.ViolationLines(rulestest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})))
 }
 
 // A search for a phrase in the text of an error branches on its wording as
@@ -251,6 +250,6 @@ func Named(s string) bool {
 	return strings.Index(s, "limit") >= 0
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})
-	assert.Equal(t, []int{12, 12, 16, 19, 22, 26}, patterntest.ViolationLines(violations))
+	violations := rulestest.RunRuleOnFiles(t, NewErrorStringCompareRule(), map[string]string{"cmp/c.go": source})
+	assert.Equal(t, []int{12, 12, 16, 19, 22, 26}, rulestest.ViolationLines(violations))
 }

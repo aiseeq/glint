@@ -4,7 +4,8 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -314,7 +315,7 @@ func example() {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			violations := patterntest.RunRuleOnFiles(t, rule, map[string]string{"service.go": tt.code})
+			violations := rulestest.RunRuleOnFiles(t, rule, map[string]string{"service.go": tt.code})
 
 			if tt.expectMatch {
 				require.NotEmpty(t, violations, "Expected violation for: %s", tt.name)
@@ -366,7 +367,7 @@ func (w worker) example(client *nethttp.Client, req *nethttp.Request) {
 	_ = workerResp
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewHTTPBodyCloseRule(), map[string]string{"service.go": code})
+	violations := rulestest.RunRuleOnFiles(t, NewHTTPBodyCloseRule(), map[string]string{"service.go": code})
 	require.Len(t, violations, 3)
 	variables := make([]string, 0, len(violations))
 	for _, violation := range violations {
@@ -427,7 +428,7 @@ func (a *API) Handler() http.HandlerFunc {
 	}
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewHTTPBodyCloseRule(), map[string]string{"api.go": code})
+	violations := rulestest.RunRuleOnFiles(t, NewHTTPBodyCloseRule(), map[string]string{"api.go": code})
 	variables := make([]string, 0, len(violations))
 	for _, violation := range violations {
 		variable, ok := violation.Context["variable"].(string)
@@ -472,7 +473,7 @@ func closes() error {
 	return nil
 }
 `
-	violations := patterntest.RunRuleOnFiles(t, NewHTTPBodyCloseRule(), map[string]string{"api.go": code})
+	violations := rulestest.RunRuleOnFiles(t, NewHTTPBodyCloseRule(), map[string]string{"api.go": code})
 	require.Len(t, violations, 1)
 	assert.Equal(t, "leakedResp", violations[0].Context["variable"])
 }
@@ -529,7 +530,7 @@ func (c *Client) Ping(req *http.Request) (int, error) {
 }
 `,
 	}
-	violations := patterntest.RunRuleOnFiles(t, NewHTTPBodyCloseRule(), files)
+	violations := rulestest.RunRuleOnFiles(t, NewHTTPBodyCloseRule(), files)
 	require.Len(t, violations, 1)
 	assert.Equal(t, "openResp", violations[0].Context["variable"])
 }

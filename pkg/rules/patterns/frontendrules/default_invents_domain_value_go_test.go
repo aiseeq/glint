@@ -3,7 +3,6 @@ package frontendrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
@@ -51,7 +50,7 @@ func skip(action Action) (Tx, bool) {
 }
 `
 	violations := NewDefaultInventsDomainValueRule().AnalyzeFile(rulestest.GoFile(t, "parse/convert.go", source))
-	assert.Equal(t, []int{12}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{12}, rulestest.ViolationLines(violations))
 }
 
 // A rate lookup miss or an amount parse failure answered with a made-up
@@ -120,7 +119,7 @@ func zeroed(rates map[string]decimal.Decimal, pair string) decimal.Decimal {
 }
 `
 	violations := NewDefaultInventsDomainValueRule().AnalyzeFile(rulestest.GoFile(t, "quote/rate.go", source))
-	assert.Equal(t, []int{7, 16, 24}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{7, 16, 24}, rulestest.ViolationLines(violations))
 }
 
 // A first-non-empty helper in a request builder that ends in a literal, or
@@ -155,5 +154,5 @@ func load(cfg Config) Settings {
 }
 `
 	violations := NewDefaultInventsDomainValueRule().AnalyzeFile(rulestest.GoFile(t, "provider/request.go", source))
-	assert.Equal(t, []int{4, 5, 13, 14}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{4, 5, 13, 14}, rulestest.ViolationLines(violations))
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -49,5 +50,5 @@ func unrelated(count int) int {
 	ctx := patterntest.DecimalProject(t, map[string]string{"sample/calculate.go": source})
 	violations, err := NewNegativeMoneyClampedToZeroRule().AnalyzeGoProject(ctx)
 	assert.NoError(t, err)
-	assert.Equal(t, []int{17}, patterntest.ViolationLines(violations))
+	assert.Equal(t, []int{17}, rulestest.ViolationLines(violations))
 }
