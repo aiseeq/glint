@@ -1,0 +1,711 @@
+package httprules
+
+import (
+	"go/ast"
+	"go/token"
+	"go/types"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
+)
+
+var durableIntentActions = []string{"persist", "save", "record", "create", "enqueue", "claim"}
+var durableIntentSubjects = []string{"request", "intent", "attempt", "outbox", "command"}
+var providerReceiverMarkers = []string{"payprov", "provider", "payment", "payout", "bank", "remit"}
+var stateReceiverMarkers = []string{"repo", "store", "db", "outbox", "ledger"}
+var statePersistencePrefixes = []string{"update", "save", "persist", "record", "create"}
+
+func init() {
+	rules.Register(NewProviderCommandBeforeIntentPersistRule())
+}
+
+// ProviderCommandBeforeIntentPersistRule detects financial provider commands
+// executed before their durable request or intent is recorded.
+type ProviderCommandBeforeIntentPersistRule struct {
+	*rules.BaseRule
+}
+
+// NewProviderCommandBeforeIntentPersistRule creates the rule.
+func NewProviderCommandBeforeIntentPersistRule() *ProviderCommandBeforeIntentPersistRule {
+	return &ProviderCommandBeforeIntentPersistRule{BaseRule: rules.NewBaseRule(
+		"provider-command-before-intent-persist",
+		"patterns",
+		"Detects financial provider commands executed before durable intent persistence",
+		core.SeverityCritical,
+	)}
+}
+
+// AnalyzeFile checks command and persistence ordering within each function,
+// recognising context arguments by what the file declares.
+func (r *ProviderCommandBeforeIntentPersistRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, nil)
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *ProviderCommandBeforeIntentPersistRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject checks every file; with type information a context
+// argument is recognised by its type.
+func (r *ProviderCommandBeforeIntentPersistRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+}
+
+// analyze checks command and persistence ordering within each function. The
+// entity a call is about is its first argument that is not a context.Context;
+// info is nil for a file without type information, and then an argument is a
+// context only when the file declares it as one.
+func (r *ProviderCommandBeforeIntentPersistRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	if !ctx.IsGoFile() || ctx.IsTestFile() || ctx.GoAST == nil {
+		return nil
+	}
+
+	var violations []*core.Violation
+	for _, root := range providerAnalysisRoots(ctx.GoAST) {
+		contexts := patternkit.NewContextClassifier(ctx.GoAST, root.scope, info)
+		for _, command := range analyzeProviderCommandFlow(root.body, contexts) {
+			line := ctx.GoFileSet.Position(command.call.Pos()).Line
+			if ctx.IsSuppressed(line, r.Name()) {
+				continue
+			}
+			v := r.CreateViolation(ctx.RelPath, line,
+				"financial provider command '"+command.method+"' executes before durable request/intent persistence")
+			v.WithCode(ctx.GetLine(line))
+			v.WithSuggestion("Persist a request, intent, attempt, outbox entry, or command before invoking the provider")
+			v.WithContext("pattern", "provider_command_before_intent_persist")
+			v.WithContext("function", root.name)
+			violations = append(violations, v)
+		}
+	}
+	return violations
+}
+
+type providerAnalysisRoot struct {
+	body *ast.BlockStmt
+	name string
+	// scope is the top-level declaration holding the body: its declarations
+	// are the ones visible in the body.
+	scope ast.Decl
+}
+
+func providerAnalysisRoots(file *ast.File) []providerAnalysisRoot {
+	var roots []providerAnalysisRoot
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		roots = append(roots, providerAnalysisRoot{body: fn.Body, name: fn.Name.Name, scope: fn})
+	}
+	for _, decl := range file.Decls {
+		ast.Inspect(decl, func(node ast.Node) bool {
+			literal, ok := node.(*ast.FuncLit)
+			if ok && literal.Body != nil {
+				roots = append(roots, providerAnalysisRoot{body: literal.Body, name: "(anonymous)", scope: decl})
+			}
+			return true
+		})
+	}
+	return roots
+}
+
+type providerCommandCall struct {
+	call   *ast.CallExpr
+	method string
+}
+
+type durableIntentEvidence struct {
+	method string
+	entity string
+	owner  string
+}
+
+type providerFlowState struct {
+	durableObserved bool
+	durableEvidence []durableIntentEvidence
+	pending         []providerCommandCall
+}
+
+type providerFlowAnalyzer struct {
+	detected []providerCommandCall
+	seen     map[*ast.CallExpr]bool
+	contexts patternkit.ContextClassifier
+}
+
+func analyzeProviderCommandFlow(body *ast.BlockStmt, contexts patternkit.ContextClassifier) []providerCommandCall {
+	analyzer := providerFlowAnalyzer{seen: make(map[*ast.CallExpr]bool), contexts: contexts}
+	walker := &patternkit.FlowWalker[[]providerFlowState, struct{}]{
+		Rule: &analyzer,
+	}
+	walker.Walk(body, []providerFlowState{{}}, struct{}{})
+	return analyzer.detected
+}
+
+func (a *providerFlowAnalyzer) CloneState(states []providerFlowState) []providerFlowState {
+	return cloneProviderFlowStates(states)
+}
+
+func (a *providerFlowAnalyzer) JoinStates(left, right []providerFlowState) []providerFlowState {
+	return joinProviderFlowStates(left, right)
+}
+
+// providerFlowStateKey identifies a path by the durable evidence and the
+// provider commands still pending on it.
+func providerFlowStateKey(state providerFlowState) string {
+	parts := make([]string, 0, 1+len(state.durableEvidence)+len(state.pending))
+	parts = append(parts, strconv.FormatBool(state.durableObserved))
+	for _, evidence := range state.durableEvidence {
+		parts = append(parts, evidence.method+"."+evidence.entity+"."+evidence.owner)
+	}
+	for _, command := range state.pending {
+		parts = append(parts, patternkit.FlowPosKey(command.call.Pos()))
+	}
+	return patternkit.FlowPathKey(parts...)
+}
+
+func (a *providerFlowAnalyzer) LiveState(states []providerFlowState) bool { return len(states) > 0 }
+
+func (a *providerFlowAnalyzer) DeadState() []providerFlowState { return nil }
+
+func (a *providerFlowAnalyzer) EnterScope(
+	_ patternkit.FlowScopeKind,
+	_ ast.Node,
+	parent struct{},
+	states []providerFlowState,
+) (struct{}, []providerFlowState) {
+	return parent, states
+}
+
+func (a *providerFlowAnalyzer) LeaveScope(_ patternkit.FlowScopeKind, _ struct{}, edges *patternkit.FlowEdges[[]providerFlowState]) {
+	edges.Next = compactProviderFlowStates(edges.Next)
+}
+
+func (a *providerFlowAnalyzer) SimpleStmt(
+	stmt ast.Stmt,
+	states []providerFlowState,
+	_ struct{},
+) ([]providerFlowState, bool) {
+	switch node := stmt.(type) {
+	case *ast.ExprStmt:
+		return a.expression(node.X, states), false
+	case *ast.AssignStmt:
+		return a.expressions(node.Rhs, states), false
+	case *ast.DeclStmt:
+		return a.declaration(node.Decl, states), false
+	case *ast.SendStmt:
+		states = a.expression(node.Chan, states)
+		return a.expression(node.Value, states), false
+	case *ast.IncDecStmt:
+		return a.expression(node.X, states), false
+	case *ast.ReturnStmt:
+		a.expressions(node.Results, states)
+		return nil, true
+	case *ast.GoStmt:
+		states = a.callOperands(node.Call, states)
+		method, command := providerCommandMethod(node.Call)
+		if !command {
+			return states, false
+		}
+		recorded := a.recordProviderCommand(node.Call, method, a.callEntity(node.Call), a.callEntityOwner(node.Call), states)
+		return compactProviderFlowStates(recorded), false
+	case *ast.DeferStmt:
+		return a.callOperands(node.Call, states), false
+	default:
+		return states, false
+	}
+}
+
+func (a *providerFlowAnalyzer) IfCondition(
+	stmt *ast.IfStmt,
+	states []providerFlowState,
+	_ struct{},
+) ([]providerFlowState, []providerFlowState) {
+	return a.condition(stmt.Cond, states)
+}
+
+func (a *providerFlowAnalyzer) FlowExpr(expr ast.Expr, states []providerFlowState, _ struct{}) []providerFlowState {
+	return a.expression(expr, states)
+}
+
+func (a *providerFlowAnalyzer) RangeVars(_ *ast.RangeStmt, states []providerFlowState, _ struct{}) []providerFlowState {
+	return states
+}
+
+func (a *providerFlowAnalyzer) TypeSwitchGuard(stmt ast.Stmt, states []providerFlowState, scope struct{}) []providerFlowState {
+	next, _ := a.SimpleStmt(stmt, states, scope)
+	return next
+}
+
+func (a *providerFlowAnalyzer) CaseClause(
+	_ ast.Stmt,
+	clause *ast.CaseClause,
+	states []providerFlowState,
+	parent struct{},
+) ([]providerFlowState, struct{}) {
+	return a.expressions(clause.List, states), parent
+}
+
+func (a *providerFlowAnalyzer) CommClause(
+	_ *ast.CommClause,
+	states []providerFlowState,
+	parent struct{},
+) ([]providerFlowState, struct{}) {
+	return states, parent
+}
+
+func (a *providerFlowAnalyzer) Normalize(edges *patternkit.FlowEdges[[]providerFlowState]) {
+	edges.Next = compactProviderFlowStates(edges.Next)
+	edges.Breaks = compactProviderFlowStates(edges.Breaks)
+	edges.Continues = compactProviderFlowStates(edges.Continues)
+}
+
+func (a *providerFlowAnalyzer) declaration(decl ast.Decl, states []providerFlowState) []providerFlowState {
+	gen, ok := decl.(*ast.GenDecl)
+	if !ok {
+		return states
+	}
+	for _, spec := range gen.Specs {
+		value, ok := spec.(*ast.ValueSpec)
+		if ok {
+			states = a.expressions(value.Values, states)
+		}
+	}
+	return states
+}
+
+func (a *providerFlowAnalyzer) condition(
+	expr ast.Expr,
+	states []providerFlowState,
+) (trueStates, falseStates []providerFlowState) {
+	switch node := expr.(type) {
+	case *ast.ParenExpr:
+		return a.condition(node.X, states)
+	case *ast.UnaryExpr:
+		if node.Op == token.NOT {
+			falseStates, trueStates = a.condition(node.X, states)
+			return trueStates, falseStates
+		}
+	case *ast.BinaryExpr:
+		switch node.Op {
+		case token.LAND:
+			leftTrue, leftFalse := a.condition(node.X, states)
+			rightTrue, rightFalse := a.condition(node.Y, leftTrue)
+			return rightTrue, joinProviderFlowStates(leftFalse, rightFalse)
+		case token.LOR:
+			leftTrue, leftFalse := a.condition(node.X, states)
+			rightTrue, rightFalse := a.condition(node.Y, leftFalse)
+			return joinProviderFlowStates(leftTrue, rightTrue), rightFalse
+		}
+	}
+
+	evaluated := a.expression(expr, states)
+	return cloneProviderFlowStates(evaluated), cloneProviderFlowStates(evaluated)
+}
+
+func (a *providerFlowAnalyzer) expressions(expressions []ast.Expr, states []providerFlowState) []providerFlowState {
+	for _, expr := range expressions {
+		states = a.expression(expr, states)
+	}
+	return states
+}
+
+func (a *providerFlowAnalyzer) expression(expr ast.Expr, states []providerFlowState) []providerFlowState {
+	switch node := expr.(type) {
+	case nil, *ast.Ident, *ast.BasicLit, *ast.FuncLit:
+		return states
+	case *ast.CallExpr:
+		states = a.callOperands(node, states)
+		return a.call(node, states)
+	case *ast.SelectorExpr:
+		return a.expression(node.X, states)
+	case *ast.IndexExpr:
+		states = a.expression(node.X, states)
+		return a.expression(node.Index, states)
+	case *ast.IndexListExpr:
+		states = a.expression(node.X, states)
+		return a.expressions(node.Indices, states)
+	case *ast.SliceExpr:
+		states = a.expression(node.X, states)
+		states = a.expression(node.Low, states)
+		states = a.expression(node.High, states)
+		return a.expression(node.Max, states)
+	case *ast.ParenExpr:
+		return a.expression(node.X, states)
+	case *ast.StarExpr:
+		return a.expression(node.X, states)
+	case *ast.UnaryExpr:
+		return a.expression(node.X, states)
+	case *ast.BinaryExpr:
+		states = a.expression(node.X, states)
+		if node.Op == token.LAND || node.Op == token.LOR {
+			skipped := cloneProviderFlowStates(states)
+			evaluated := a.expression(node.Y, cloneProviderFlowStates(states))
+			return joinProviderFlowStates(skipped, evaluated)
+		}
+		return a.expression(node.Y, states)
+	case *ast.KeyValueExpr:
+		states = a.expression(node.Key, states)
+		return a.expression(node.Value, states)
+	case *ast.CompositeLit:
+		return a.expressions(node.Elts, states)
+	case *ast.TypeAssertExpr:
+		return a.expression(node.X, states)
+	default:
+		return states
+	}
+}
+
+func (a *providerFlowAnalyzer) callOperands(call *ast.CallExpr, states []providerFlowState) []providerFlowState {
+	states = a.expression(call.Fun, states)
+	return a.expressions(call.Args, states)
+}
+
+func (a *providerFlowAnalyzer) call(call *ast.CallExpr, states []providerFlowState) []providerFlowState {
+	method, command := providerCommandMethod(call)
+	persistsState := matchesSelectorCallPrefix(call, statePersistencePrefixes, stateReceiverMarkers)
+	durable := isDurableIntentCall(call)
+	entity := a.callEntity(call)
+	entityOwner := a.callEntityOwner(call)
+	if command {
+		states = a.recordProviderCommand(call, method, entity, entityOwner, states)
+	}
+
+	for i := range states {
+		if persistsState {
+			for _, pending := range states[i].pending {
+				a.detect(pending)
+			}
+			states[i].pending = nil
+		}
+		if durable {
+			states[i].durableObserved = true
+			evidence := durableIntentEvidence{method: selectorCallMethod(call), entity: entity, owner: entityOwner}
+			if !containsDurableIntentEvidence(states[i].durableEvidence, evidence) {
+				states[i].durableEvidence = append(append([]durableIntentEvidence(nil), states[i].durableEvidence...), evidence)
+			}
+		}
+	}
+	return compactProviderFlowStates(states)
+}
+
+func (a *providerFlowAnalyzer) recordProviderCommand(
+	call *ast.CallExpr,
+	method string,
+	entity string,
+	entityOwner string,
+	states []providerFlowState,
+) []providerFlowState {
+	anyDurableObserved := false
+	for _, state := range states {
+		anyDurableObserved = anyDurableObserved || state.durableObserved
+	}
+
+	for i := range states {
+		if !durableEvidenceMatchesProvider(states[i].durableEvidence, call, entity, entityOwner) {
+			pending := providerCommandCall{
+				call: call, method: method,
+			}
+			states[i].pending = append(append([]providerCommandCall(nil), states[i].pending...), pending)
+			if anyDurableObserved {
+				a.detect(pending)
+			}
+		}
+	}
+	return states
+}
+
+func (a *providerFlowAnalyzer) detect(command providerCommandCall) {
+	if a.seen[command.call] {
+		return
+	}
+	a.seen[command.call] = true
+	a.detected = append(a.detected, command)
+}
+
+func isDurableIntentCall(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !receiverContainsAny(sel.X, stateReceiverMarkers) {
+		return false
+	}
+	return patternkit.ContainsAnyFold(sel.Sel.Name, durableIntentActions) &&
+		patternkit.ContainsAnyFold(sel.Sel.Name, durableIntentSubjects)
+}
+
+func cloneProviderFlowStates(states []providerFlowState) []providerFlowState {
+	cloned := make([]providerFlowState, len(states))
+	for i, state := range states {
+		cloned[i] = state
+		cloned[i].durableEvidence = append([]durableIntentEvidence(nil), state.durableEvidence...)
+		cloned[i].pending = append([]providerCommandCall(nil), state.pending...)
+	}
+	return cloned
+}
+
+// joinProviderFlowStates merges the states meeting at a control-flow join.
+func joinProviderFlowStates(left, right []providerFlowState) []providerFlowState {
+	return compactProviderFlowStates(patternkit.JoinFlowPaths(left, right, providerFlowStateKey))
+}
+
+// compactProviderFlowStates folds states with the same durable evidence into
+// one whose pending commands are the union of theirs. The fold loses nothing
+// the rule reads: whether a command stays pending depends only on a state's
+// evidence, and a later persistence reports every pending command of every
+// state it reaches. Without it each optional command doubles the states (40
+// guarded sends are 2^40 paths), and the path cap would then drop the paths
+// that carry the later commands.
+func compactProviderFlowStates(states []providerFlowState) []providerFlowState {
+	compacted := make([]providerFlowState, 0, len(states))
+	byEvidence := make(map[string]int, len(states))
+	pendingSeen := make([]map[*ast.CallExpr]bool, 0, len(states))
+	for _, state := range states {
+		key := providerEvidenceKey(state)
+		index, merged := byEvidence[key]
+		if !merged {
+			byEvidence[key] = len(compacted)
+			seen := make(map[*ast.CallExpr]bool, len(state.pending))
+			for _, command := range state.pending {
+				seen[command.call] = true
+			}
+			compacted = append(compacted, state)
+			pendingSeen = append(pendingSeen, seen)
+			continue
+		}
+		for _, command := range state.pending {
+			if pendingSeen[index][command.call] {
+				continue
+			}
+			pendingSeen[index][command.call] = true
+			// Copy on write: the pending slice may be shared with other states.
+			compacted[index].pending = append(slices.Clip(compacted[index].pending), command)
+		}
+	}
+	return compacted
+}
+
+// providerEvidenceKey identifies the durable evidence of a state, the part of
+// the state that decides what a later command or persistence means.
+func providerEvidenceKey(state providerFlowState) string {
+	parts := make([]string, 0, 1+len(state.durableEvidence))
+	parts = append(parts, strconv.FormatBool(state.durableObserved))
+	for _, evidence := range state.durableEvidence {
+		parts = append(parts, evidence.method+"."+evidence.entity+"."+evidence.owner)
+	}
+	return patternkit.FlowPathKey(parts...)
+}
+
+// entityArgument returns the argument a call is about: the first one that is
+// not a context.Context. An argument not known to be a context is the entity:
+// taking it keeps the rule quiet when both calls pass it, rather than
+// guessing from its name that it should be skipped.
+func (a *providerFlowAnalyzer) entityArgument(call *ast.CallExpr) (ast.Expr, bool) {
+	for _, arg := range call.Args {
+		if isContext, known := a.contexts.Classify(arg); known && isContext {
+			continue
+		}
+		return arg, true
+	}
+	return nil, false
+}
+
+func (a *providerFlowAnalyzer) callEntity(call *ast.CallExpr) string {
+	arg, ok := a.entityArgument(call)
+	if !ok {
+		return ""
+	}
+	return normalizedProviderEntity(arg)
+}
+
+func (a *providerFlowAnalyzer) callEntityOwner(call *ast.CallExpr) string {
+	arg, ok := a.entityArgument(call)
+	if !ok {
+		return ""
+	}
+	return providerEntityOwner(arg)
+}
+
+func providerEntityOwner(expr ast.Expr) string {
+	switch node := expr.(type) {
+	case *ast.ParenExpr:
+		return providerEntityOwner(node.X)
+	case *ast.StarExpr:
+		return providerEntityOwner(node.X)
+	case *ast.UnaryExpr:
+		if node.Op == token.AND {
+			return providerEntityOwner(node.X)
+		}
+	case *ast.Ident:
+		return normalizedProviderEntity(node)
+	case *ast.SelectorExpr:
+		return normalizedProviderEntity(node.X)
+	case *ast.IndexExpr:
+		return normalizedProviderEntity(node)
+	}
+	return ""
+}
+
+func normalizedProviderEntity(expr ast.Expr) string {
+	switch node := expr.(type) {
+	case *ast.ParenExpr:
+		return normalizedProviderEntity(node.X)
+	case *ast.StarExpr:
+		return normalizedProviderEntity(node.X)
+	case *ast.UnaryExpr:
+		if node.Op == token.AND {
+			return normalizedProviderEntity(node.X)
+		}
+		return ""
+	case *ast.Ident:
+		return "ident(" + node.Name + ")"
+	case *ast.SelectorExpr:
+		base := normalizedProviderEntity(node.X)
+		if base == "" {
+			return ""
+		}
+		return "selector(" + base + "," + node.Sel.Name + ")"
+	case *ast.IndexExpr:
+		base := normalizedProviderEntity(node.X)
+		index := normalizedProviderEntity(node.Index)
+		if base == "" || index == "" {
+			return ""
+		}
+		return "index(" + base + "," + index + ")"
+	case *ast.BasicLit:
+		return "literal(" + node.Kind.String() + "," + node.Value + ")"
+	default:
+		return ""
+	}
+}
+
+func selectorCallMethod(call *ast.CallExpr) string {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	return sel.Sel.Name
+}
+
+func durableEvidenceMatchesProvider(evidence []durableIntentEvidence, call *ast.CallExpr, entity, owner string) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	receiver := providerReceiverName(sel.X)
+	providerOperation := canonicalProviderOperation(sel.Sel.Name)
+	for _, durable := range evidence {
+		durableOperation := canonicalProviderOperation(durable.method)
+		if durable.entity == entity && entity != "" &&
+			(providerOperation == "" || durableOperation == "" || durableOperation == providerOperation) {
+			return true
+		}
+		if owner != "" && durable.owner == owner && providerOperation != "" && durableOperation == providerOperation {
+			return true
+		}
+		if receiver != "" && !isGenericProviderReceiver(receiver) &&
+			strings.Contains(strings.ToLower(durable.method), receiver) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsDurableIntentEvidence(items []durableIntentEvidence, evidence durableIntentEvidence) bool {
+	return slices.Contains(items, evidence)
+}
+
+func canonicalProviderOperation(method string) string {
+	lower := strings.ToLower(method)
+	switch {
+	case strings.Contains(lower, "cancel"):
+		return "cancel"
+	case strings.Contains(lower, "refund"):
+		return "refund"
+	default:
+		return ""
+	}
+}
+
+func providerReceiverName(expr ast.Expr) string {
+	return strings.ToLower(nearestReceiverName(expr))
+}
+
+// nearestReceiverName returns the name closest to the method: "payoutRepo"
+// for s.payoutRepo.CreatePayout.
+func nearestReceiverName(expr ast.Expr) string {
+	switch node := expr.(type) {
+	case *ast.Ident:
+		return node.Name
+	case *ast.SelectorExpr:
+		return node.Sel.Name
+	case *ast.IndexExpr:
+		return nearestReceiverName(node.X)
+	case *ast.IndexListExpr:
+		return nearestReceiverName(node.X)
+	case *ast.ParenExpr:
+		return nearestReceiverName(node.X)
+	case *ast.StarExpr:
+		return nearestReceiverName(node.X)
+	default:
+		return ""
+	}
+}
+
+func isGenericProviderReceiver(receiver string) bool {
+	return slices.Contains([]string{"provider", "payment", "payout", "bank", "remit"}, receiver)
+}
+
+// stateReceiverWords are the words of a receiver name that make it the
+// service's own persistence rather than a provider.
+var stateReceiverWords = patternkit.WordSet("repo", "repository", "store", "storage", "db", "dao", "outbox", "ledger")
+
+// providerCommandMethod returns the command name when the call sends a
+// destructive command to a provider: a command method on a receiver named
+// like a provider. A receiver whose own name is a repository or store
+// (payoutRepo, paymentStore) is the service's persistence even when the
+// method reads like a command (CreatePayout inserts a row). Names are read
+// word by word, so a provider called sandboxBank is not a "db".
+func providerCommandMethod(call *ast.CallExpr) (string, bool) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !patternkit.ProviderCommandMethods[sel.Sel.Name] || !receiverContainsAny(sel.X, providerReceiverMarkers) {
+		return "", false
+	}
+	if patternkit.HasTokenIn(nearestReceiverName(sel.X), stateReceiverWords) {
+		return "", false
+	}
+	return sel.Sel.Name, true
+}
+
+func matchesSelectorCallPrefix(call *ast.CallExpr, prefixes, receiverMarkers []string) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !receiverContainsAny(sel.X, receiverMarkers) {
+		return false
+	}
+	lowerMethod := strings.ToLower(sel.Sel.Name)
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(lowerMethod, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func receiverContainsAny(receiver ast.Expr, markers []string) bool {
+	switch expr := receiver.(type) {
+	case *ast.Ident:
+		return patternkit.ContainsAnyFold(expr.Name, markers)
+	case *ast.SelectorExpr:
+		return patternkit.ContainsAnyFold(expr.Sel.Name, markers) || receiverContainsAny(expr.X, markers)
+	case *ast.IndexExpr:
+		return receiverContainsAny(expr.X, markers)
+	case *ast.IndexListExpr:
+		return receiverContainsAny(expr.X, markers)
+	case *ast.ParenExpr:
+		return receiverContainsAny(expr.X, markers)
+	case *ast.StarExpr:
+		return receiverContainsAny(expr.X, markers)
+	default:
+		return false
+	}
+}

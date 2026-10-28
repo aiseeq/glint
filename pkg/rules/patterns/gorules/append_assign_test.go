@@ -1,0 +1,122 @@
+package gorules
+
+import (
+	"testing"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestAppendAssignRule_Metadata(t *testing.T) {
+	rule := NewAppendAssignRule()
+
+	assert.Equal(t, "append-assign", rule.Name())
+	assert.Equal(t, "patterns", rule.Category())
+	assert.Equal(t, core.SeverityHigh, rule.DefaultSeverity())
+}
+
+func TestAppendAssignRule_Detection(t *testing.T) {
+	rule := NewAppendAssignRule()
+
+	tests := []struct {
+		name        string
+		code        string
+		expectMatch bool
+	}{
+		{
+			name: "append without assignment",
+			code: `package main
+
+func example() {
+	slice := []int{1, 2, 3}
+	append(slice, 4)
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "append with assignment",
+			code: `package main
+
+func example() {
+	slice := []int{1, 2, 3}
+	slice = append(slice, 4)
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "append with short assignment",
+			code: `package main
+
+func example() {
+	slice := append([]int{}, 1, 2, 3)
+	_ = slice
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "append in return",
+			code: `package main
+
+func example() []int {
+	slice := []int{1, 2, 3}
+	return append(slice, 4)
+}
+`,
+			expectMatch: false,
+		},
+		{
+			// The compilable form of a discarded append: a bare append
+			// statement does not compile, `_ =` silences the compiler.
+			name: "append assigned to blank",
+			code: `package main
+
+func example(slice []int) []int {
+	_ = append(slice, 4)
+	return slice
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "append beside a blank in a tuple assignment",
+			code: `package main
+
+func example(slice []int) ([]int, int) {
+	var n int
+	_, slice = n, append(slice, 4)
+	return slice, n
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "append in a blank var declaration",
+			code: `package main
+
+var base = []int{1}
+
+var _ = append(base, 2)
+`,
+			expectMatch: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := patterntest.CreateAppendContext(t, "service.go", tt.code)
+			violations := rule.AnalyzeFile(ctx)
+
+			if tt.expectMatch {
+				require.NotEmpty(t, violations, "Expected violation for: %s", tt.name)
+				assert.Equal(t, "append_no_assign", violations[0].Context["pattern"])
+			} else {
+				assert.Empty(t, violations, "Expected no violations for: %s", tt.name)
+			}
+		})
+	}
+}

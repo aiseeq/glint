@@ -35,20 +35,27 @@ categories:
     rules:
       test-email-registrable-domain:
         exceptions:
-          - file: "pkg/rules/patterns/test_reliability_ts_test.go"
+          - file: "pkg/rules/patterns/testrules/test_reliability_ts_test.go"
             reason: >-
               The addresses on registrable domains are the inputs of the
               rule's own test: the test checks that the rule reports them.
-          - file: "pkg/rules/patterns/test_email_domain_sql_test.go"
+          - file: "pkg/rules/patterns/testrules/test_email_domain_sql_test.go"
             reason: >-
               The SQL patterns on registrable domains are the inputs of the
               rule's own test: the test checks that the rule reports them.
       model-not-approved:
         exceptions:
-          - file: "pkg/rules/patterns/model_not_approved_test.go"
+          - file: "pkg/rules/patterns/shellrules/model_not_approved_test.go"
             reason: >-
               The models off the list are the inputs of the rule's own test:
               the test checks that the rule reports them, nothing runs them.
+      sql-runtime-ddl:
+        exceptions:
+          - file: "pkg/rules/patterns/internal/patterntest/sql_sync_rules.go"
+            reason: >-
+              The statements are fixtures of the shared test helpers: tests of
+              several rule groups load them as the schema of the code under
+              test, nothing runs them.
       mock-identifier:
         exceptions:
           - files: "pkg/rules/deadcode/{stub_method,nil_return_stub}.go"
@@ -57,14 +64,14 @@ categories:
               subject they report on, not a fake implementation in production.
       legacy-comment-marker:
         exceptions:
-          - files: "pkg/rules/{patterns/legacy_comment_marker,patterns/legacy_identifier,deadcode/deprecated_comment}.go"
+          - files: "pkg/rules/{patterns/gorules/legacy_comment_marker,patterns/gorules/legacy_identifier,deadcode/deprecated_comment}.go"
             reason: >-
               These rules detect the word legacy in comments and names: their
               documentation spells the markers they report, it admits no
               legacy code path.
       tombstone-comment:
         exceptions:
-          - file: "pkg/rules/patterns/tombstone_comment.go"
+          - file: "pkg/rules/patterns/gorules/tombstone_comment.go"
             reason: >-
               The rule detects notes about deleted code: its documentation
               spells the words it reports, it annotates no deleted code.
@@ -89,6 +96,31 @@ categories:
 
   deadcode:
     enabled: true
+    rules:
+      unused-internal-export:
+        exceptions:
+          - file: "pkg/rules/patterns/internal/patternkit/type_inference.go"
+            reason: >-
+              TypeInferrer.IsDeclared had no caller before the patterns package
+              was split either; moving it into the internal kit made the rule
+              see it. Removing it is a change of its own, not part of the move.
+      stale-suppression:
+        exceptions:
+          - file: "pkg/rules/patterns/testrules/mock_identifier.go"
+            reason: >-
+              mock-identifier skips packages whose name starts with "test", and
+              the rule group package is testrules; the markers stay for the day
+              the rule tells a test-support package from testrules.
+
+  documentation:
+    enabled: true
+    rules:
+      doc-links:
+        exceptions:
+          - file: "pkg/rules/patterns/internal/patterntest/go_resource_rules.go"
+            reason: >-
+              app.go is the file of the fixture module the helper writes, not a
+              file of this repository.
 
   typesafety:
     enabled: true

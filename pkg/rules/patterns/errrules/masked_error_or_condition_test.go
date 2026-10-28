@@ -1,0 +1,468 @@
+package errrules
+
+import (
+	"testing"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
+)
+
+func TestMaskedErrorOrConditionRule(t *testing.T) {
+	rule := NewMaskedErrorOrConditionRule()
+
+	tests := []struct {
+		name      string
+		code      string
+		wantCount int
+	}{
+		{
+			name: "db error conflated with no-data returns zero and nil",
+			code: `package svc
+
+func GetEffectiveAPY(ctx context.Context, strategy string) (Money, error) {
+	latest, err := repo.GetLatestSnapshot(ctx, strategy)
+	if err != nil || latest == nil {
+		logger.Warn("no latest snapshot", "error", err)
+		return Money{Decimal: decimal.Zero}, nil
+	}
+	return compute(latest), nil
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "or of two error checks masks both",
+			code: `package svc
+
+func Load() (*Data, error) {
+	a, err := loadA()
+	b, err2 := loadB()
+	if err != nil || err2 != nil {
+		return nil, nil
+	}
+	return merge(a, b), nil
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "proper split of error and no-data branches",
+			code: `package svc
+
+func GetEffectiveAPY(ctx context.Context, strategy string) (Money, error) {
+	latest, err := repo.GetLatestSnapshot(ctx, strategy)
+	if err != nil {
+		return Money{}, fmt.Errorf("get snapshot: %w", err)
+	}
+	if latest == nil {
+		return Money{Decimal: decimal.Zero}, nil
+	}
+	return compute(latest), nil
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "branch propagates the error",
+			code: `package svc
+
+func Get() (*Data, error) {
+	d, err := load()
+	if err != nil || d == nil {
+		return nil, err
+	}
+	return d, nil
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "err equals nil in or-condition is fine",
+			code: `package svc
+
+func Get() (*Data, error) {
+	d, err := load()
+	if err == nil || d.Cached {
+		return d, nil
+	}
+	return nil, err
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "and-condition narrowing is not flagged",
+			code: `package svc
+
+func Get() (*Data, error) {
+	d, err := load()
+	if err != nil && errors.Is(err, ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+`,
+			wantCount: 0,
+		},
+		{
+			// Раньше здесь ожидался 0: случай считался зоной log-and-return-zero.
+			// Но то правило требует Error/Warn-лог в ветке, а без лога ошибка
+			// исчезала вовсе и не ловилась никем (ревью projectA).
+			name: "function without error result masks the failure entirely",
+			code: `package svc
+
+func Count() int {
+	n, err := load()
+	if err != nil || n == nil {
+		return 0
+	}
+	return n.Value
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "nested handling of err inside branch is not masking",
+			code: `package svc
+
+func Get() (*Data, error) {
+	d, err := load()
+	if err != nil || d == nil {
+		if err != nil {
+			return nil, fmt.Errorf("load: %w", err)
+		}
+		return nil, nil
+	}
+	return d, nil
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "named error variable with Err suffix",
+			code: `package svc
+
+func Get() (*Data, error) {
+	d, dbErr := load()
+	if dbErr != nil || d == nil {
+		return nil, nil
+	}
+	return d, nil
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "closure with error result is analyzed",
+			code: `package svc
+
+func Wrap() {
+	fn := func() (int, error) {
+		v, err := load()
+		if err != nil || v == 0 {
+			return 0, nil
+		}
+		return v, nil
+	}
+	_ = fn
+}
+`,
+			wantCount: 1,
+		},
+		{
+			// Возврат принадлежит замыканию, а не внешней функции: внешняя
+			// корректно отдаёт err. Само замыкание при этом глотает ошибку и
+			// теперь считается находкой — но ровно одной, за счёт closure.
+			name: "return inside nested closure is attributed to the closure",
+			code: `package svc
+
+func Get() (*Data, error) {
+	d, err := load()
+	cb := func() int {
+		if err != nil || d == nil {
+			return 0
+		}
+		return 1
+	}
+	_ = cb
+	return d, err
+}
+`,
+			wantCount: 1,
+		},
+		{
+			// A failed query and a busy database both skip the item: the
+			// cleanup report says "nothing to drop" while the check never ran.
+			name: "loop skips the item on error or condition and drops the error",
+			code: `package cleanup
+
+func orphaned(names []string) ([]string, error) {
+	var out []string
+	for _, name := range names {
+		var active int
+		err := db.QueryRow(activeQuery, name).Scan(&active)
+		if err != nil || active > 0 {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out, nil
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "loop skip that logs the error keeps it on record",
+			code: `package cleanup
+
+func orphaned(names []string) ([]string, error) {
+	var out []string
+	for _, name := range names {
+		var active int
+		err := db.QueryRow(activeQuery, name).Scan(&active)
+		if err != nil || active > 0 {
+			logger.Warn("skip", "name", name, "error", err)
+			continue
+		}
+		out = append(out, name)
+	}
+	return out, nil
+}
+`,
+			wantCount: 0,
+		},
+		{
+			// An item that does not parse is not one of those looked for:
+			// the skip is the filter, no failure is lost.
+			name: "loop skips the item that does not parse",
+			code: `package scan
+
+func paths(lits []string) ([]string, error) {
+	var out []string
+	for _, lit := range lits {
+		path, err := strconv.Unquote(lit)
+		if err != nil || path != "io/ioutil" {
+			continue
+		}
+		out = append(out, path)
+	}
+	return out, nil
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "loop skips the line its own parser rejects",
+			code: `package scan
+
+func entries(lines []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, line := range lines {
+		key, value, err := parseLine(line)
+		if err != nil || key == "" {
+			continue
+		}
+		out[key] = value
+	}
+	return out, nil
+}
+`,
+			wantCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := rulestest.InMemoryGoFile(t, "service.go", ".", tt.code, nil)
+
+			violations := rule.AnalyzeFile(ctx)
+			if len(violations) != tt.wantCount {
+				t.Errorf("got %d violations, want %d; violations: %+v",
+					len(violations), tt.wantCount, violations)
+			}
+		})
+	}
+}
+
+// Дыра между правилами, вскрытая ревью projectA: функция БЕЗ error в
+// сигнатуре схлопывает err с «нет данных» через || и молча возвращает значение.
+// masked-error-in-or-condition требовал error в результатах, log-and-return-zero —
+// наличия лога; случай «без error и без лога» не ловил никто, хотя он опаснее
+// обоих: ошибку невозможно ни вернуть, ни увидеть в логе.
+func TestMaskedErrorOrCondition_FunctionWithoutErrorResult(t *testing.T) {
+	rule := NewMaskedErrorOrConditionRule()
+
+	tests := []struct {
+		name      string
+		code      string
+		wantCount int
+	}{
+		{
+			name: "no error result: err swallowed via || and value returned",
+			code: `package svc
+
+func (s *S) calculateDayYield(userID string, cumulative Decimal) Decimal {
+	userShare, err := s.calculateUserShare(userID)
+	if err != nil || userShare.LessThanOrEqual(zero) {
+		return cumulative
+	}
+	return cumulative.Add(userShare)
+}
+`,
+			wantCount: 1,
+		},
+		{
+			// Единственный bool-результат — зона error-masked-as-false-bool,
+			// которое само отличает предикат от маскировки. Репро: собственный
+			// self-check glint на isSecretQuerySet, где false означает
+			// «литерал не разобрался, значит это не тот вызов».
+			name: "bool predicate is out of scope: false means not-matched",
+			code: `package svc
+
+func (r *Rule) isSecretQuerySet(call *CallExpr) bool {
+	name, err := strconv.Unquote(lit.Value)
+	if err != nil || !r.secretParam.MatchString(name) {
+		return false
+	}
+	return true
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "no error result: panic on error is explicit, not masking",
+			code: `package svc
+
+func mustLoad(name string) Config {
+	cfg, err := load(name)
+	if err != nil || cfg == nil {
+		panic("config unavailable: " + name)
+	}
+	return *cfg
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "no error result: nested check on err distinguishes the failure",
+			code: `package svc
+
+func (s *S) value() Decimal {
+	v, err := s.load()
+	if err != nil || v.IsZero() {
+		if err != nil {
+			s.report(err)
+		}
+		return zero
+	}
+	return v
+}
+`,
+			wantCount: 0,
+		},
+		{
+			// Голый return из void-функции — ранний выход после обработки
+			// (401 отправлен, запрос отклонён и залогирован), а не подмена
+			// значения. Репро: middleware projectA (auth, loopback, analytics).
+			name: "bare return from a void function is an early exit, not masking",
+			code: `package svc
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	token, err := extract(r)
+	if err != nil || token == "" {
+		sendUnauthorized(w, err)
+		return
+	}
+	serve(w, token)
+}
+`,
+			wantCount: 0,
+		},
+		{
+			// Ошибка ушла логгеру вместе с err — канал без error-результата
+			// использован, это зона log-and-return-zero. Репро: decodeSUICursorState
+			// projectB (Warn с err + возврат чистого состояния курсора).
+			name: "value return after logging the error variable is handled, not masked",
+			code: `package svc
+
+func (s *S) decodeState(raw string) State {
+	state := State{Version: 2}
+	if err := json.Unmarshal([]byte(raw), &state); err != nil || state.Version != 2 {
+		s.logger.Warn("resetting incompatible state", slog.Any("error", err))
+		return State{Version: 2}
+	}
+	return state
+}
+`,
+			wantCount: 0,
+		},
+		{
+			// Error-лог без самого err тоже объявляет сбой — недостаёт деталей,
+			// но потерей ошибку не назвать. Репро: newAlertNotifier projectB
+			// (битый EMAIL_SMTP_PORT → Error-лог + явное отключение алармов).
+			name: "value return after an error-level log call is handled, not masked",
+			code: `package svc
+
+func build(v string, logger *slog.Logger) *Notifier {
+	p, err := strconv.Atoi(v)
+	if err != nil || p <= 0 {
+		logger.Error("invalid port, alerts disabled", "value", v)
+		return NewNotifier(nil, logger)
+	}
+	return NewNotifier(&p, logger)
+}
+`,
+			wantCount: 0,
+		},
+		{
+			// С error в сигнатуре лог не оправдание: caller получил nil и не
+			// отличит сбой от честного нуля (исходный projectA-кейс остаётся красным).
+			name: "logging does not excuse returning nil error when the signature has one",
+			code: `package svc
+
+func load(id string) (Value, error) {
+	v, err := fetch(id)
+	if err != nil || v == nil {
+		logger.Error("fetch failed", "error", err)
+		return Value{}, nil
+	}
+	return *v, nil
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "no error result and no return in branch: nothing masked",
+			code: `package svc
+
+func (s *S) refresh() {
+	v, err := s.load()
+	if err != nil || v.IsZero() {
+		s.cache = zero
+	}
+}
+`,
+			wantCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := core.NewFileContext("service.go", ".", []byte(tt.code), nil)
+			fset, astFile, err := core.NewParser().ParseGoFile("service.go", []byte(tt.code))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			ctx.SetGoAST(fset, astFile)
+
+			violations := rule.AnalyzeFile(ctx)
+			if len(violations) != tt.wantCount {
+				t.Errorf("got %d violations, want %d; violations: %+v",
+					len(violations), tt.wantCount, violations)
+			}
+		})
+	}
+}

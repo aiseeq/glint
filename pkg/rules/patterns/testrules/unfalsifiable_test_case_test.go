@@ -1,0 +1,282 @@
+package testrules
+
+import (
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestUnfalsifiableTestCaseRule_Metadata(t *testing.T) {
+	rule := NewUnfalsifiableTestCaseRule()
+	assert.Equal(t, "unfalsifiable-test-case", rule.Name())
+	assert.Equal(t, "patterns", rule.Category())
+	assert.Equal(t, core.SeverityHigh, rule.DefaultSeverity())
+}
+
+func TestUnfalsifiableTestCaseRule_Detection(t *testing.T) {
+	rule := NewUnfalsifiableTestCaseRule()
+	tests := []struct {
+		name       string
+		code       string
+		expectTest string
+	}{
+		{
+			// Форма balance-split-e2e.spec.ts: страницы такой нет, тест зелёный.
+			name: "generic page checks only",
+			code: `test('shows both balances', async ({ page }) => {
+  await page.goto('/deposits');
+  await expect(page).toHaveURL(/deposits/);
+  await expect(page.locator('body')).toBeVisible();
+});`,
+			expectTest: "shows both balances",
+		},
+		{
+			// Форма dashboard-metrics.spec.ts: удалённый эндпоинт засчитывается как рабочий.
+			name: "status set accepts both success and failure",
+			code: `test('pending withdrawals endpoint answers', async ({ request }) => {
+  const resp = await request.get('/api/admin/withdrawals/pending');
+  expect([200, 404]).toContain(resp.status());
+});`,
+			expectTest: "pending withdrawals endpoint answers",
+		},
+		{
+			// «Элементов больше нуля» на отрисованной странице верно всегда.
+			name: "count of a generic locator is above zero",
+			code: `test('renders something', async ({ page }) => {
+  const count = await page.locator('div').count();
+  expect(count).toBeGreaterThan(0);
+});`,
+			expectTest: "renders something",
+		},
+		{
+			// Условие ложно ровно тогда, когда фича сломана.
+			name: "every assertion sits behind an optional guard",
+			code: `test('withdrawal list loads', async ({ request }) => {
+  const resp = await request.get('/api/admin/withdrawals');
+  if (resp.ok()) {
+    const body = await resp.json();
+    expect(body.items.length).toBe(3);
+  }
+});`,
+			expectTest: "withdrawal list loads",
+		},
+		{
+			// Есть хотя бы одна безусловная проверка по существу.
+			name: "concrete assertion alongside generic ones",
+			code: `test('shows the balance', async ({ page }) => {
+  await expect(page.locator('body')).toBeVisible();
+  await expect(page.getByTestId('total-balance')).toHaveText('$1 200.00');
+});`,
+		},
+		{
+			// Конкретный статус — тест упадёт, если эндпоинт удалят.
+			name: "exact status is falsifiable",
+			code: `test('endpoint answers', async ({ request }) => {
+  const resp = await request.get('/api/admin/withdrawals');
+  expect(resp.status()).toBe(200);
+});`,
+		},
+		{
+			// Заголовок вкладки ставит приложение: другой заголовок роняет тест.
+			name: "page title is produced by the app",
+			code: `test('keeps the title', async ({ page }) => {
+  await page.goto('/analytics/');
+  await expect(page).toHaveTitle("Account — dashboard");
+});`,
+		},
+		{
+			// Набор без провальных кодов проверяет реальное поведение.
+			name: "status set without failure codes",
+			code: `test('either page is fine', async ({ request }) => {
+  const resp = await request.get('/api/admin/withdrawals');
+  expect([200, 204]).toContain(resp.status());
+});`,
+		},
+		{
+			// Проверка после guard, но снаружи его тела.
+			name: "assertion after the guard block",
+			code: `test('withdrawal list loads', async ({ request }) => {
+  const resp = await request.get('/api/admin/withdrawals');
+  if (resp.ok()) {
+    await resp.json();
+  }
+  expect(resp.status()).toBe(200);
+});`,
+		},
+		{
+			// Группа describe сама утверждений не содержит и тестом не считается.
+			name: "describe group is not a test",
+			code: `test.describe('balances', () => {
+  test('shows the balance', async ({ page }) => {
+    await expect(page.getByTestId('total')).toHaveText('$1.00');
+  });
+});`,
+		},
+	}
+
+	tests = append(tests, []struct {
+		name       string
+		code       string
+		expectTest string
+	}{
+		{
+			// expect.soft — та же проверка, только не останавливает тест.
+			name: "soft assertion on a specific element is an assertion",
+			code: `test('soft assertions only', async ({ page }) => {
+  await page.goto('/orders')
+  await expect.soft(page.getByText('Order #1')).toBeVisible()
+})`,
+		},
+		{
+			name: "polled assertion is an assertion",
+			code: `test('poll assertion', async ({ page }) => {
+  await page.goto('/orders')
+  await expect.poll(async () => (await page.request.get('/api/orders')).status()).toBe(200)
+})`,
+		},
+		{
+			// Однострочный тест закрывается на своей строке и не поглощает следующий.
+			name: "one-line test does not swallow the next one",
+			code: `test('real', async ({ page }) => { expect(await page.title()).toBe('Orders') })
+test('empty page', async ({ page }) => { await expect(page.locator('body')).toBeVisible() })`,
+			expectTest: "empty page",
+		},
+		{
+			// if (row) ложно ровно тогда, когда строки нет — проверка до дела не доходит.
+			name: "truthiness guard hides the only assertion",
+			code: `test('guarded by truthy value', async ({ page }) => {
+  const row = await page.$('tr')
+  if (row) {
+    expect(await row.textContent()).toBe('x')
+  }
+})`,
+			expectTest: "guarded by truthy value",
+		},
+		{
+			name: "comparison is not a truthiness guard",
+			code: `test('threshold', async ({ page }) => {
+  const count = await readCount(page)
+  if (count > limit) {
+    expect(count).toBe(3)
+  }
+})`,
+		},
+	}...)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := createUnfalsifiableContext("balance.spec.ts", tt.code)
+			violations := rule.AnalyzeFile(ctx)
+			if tt.expectTest == "" {
+				assert.Empty(t, violations, "ожидалось отсутствие находок: %s", tt.name)
+				return
+			}
+			require.Len(t, violations, 1, "ожидалась одна находка: %s", tt.name)
+			assert.Equal(t, "unfalsifiable_test_case", violations[0].Context["pattern"])
+			assert.Contains(t, violations[0].Message, tt.expectTest)
+		})
+	}
+}
+
+func TestUnfalsifiableTestCaseRule_NonTestFilesExcluded(t *testing.T) {
+	rule := NewUnfalsifiableTestCaseRule()
+	code := `test('shows both balances', async ({ page }) => {
+  await expect(page.locator('body')).toBeVisible();
+});`
+	assert.Empty(t, rule.AnalyzeFile(createUnfalsifiableContext("helpers.ts", code)))
+	// Go-тесты закрывает tautological-assertion, здесь их разбирать нечем.
+	assert.Empty(t, rule.AnalyzeFile(createUnfalsifiableContext("balance_test.go", code)))
+}
+
+func createUnfalsifiableContext(path, code string) *core.FileContext {
+	return &core.FileContext{
+		Path:    "/" + path,
+		RelPath: path,
+		Lines:   strings.Split(code, "\n"),
+		Content: []byte(code),
+	}
+}
+
+// Спек без единого expect: HTTP-запрос сам по себе не падает на 4xx, поэтому такой
+// тест сообщает только о том, что код не бросил исключение.
+func TestUnfalsifiableTestCase_NoAssertionsAtAll(t *testing.T) {
+	violations := NewUnfalsifiableTestCaseRule().AnalyzeFile(createUnfalsifiableContext("api.spec.ts", `import { test } from '@playwright/test'
+
+test('reads health', async ({ request }) => {
+  const response = await request.get('/api/health')
+  console.log(response.status())
+})
+`))
+
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "no assertions at all")
+	assert.Equal(t, "0", violations[0].Context["assertions"])
+}
+
+// Клик по несуществующему элементу роняет тест сам — такой спек находкой быть не должен.
+func TestUnfalsifiableTestCase_InteractionCanFail(t *testing.T) {
+	violations := NewUnfalsifiableTestCaseRule().AnalyzeFile(createUnfalsifiableContext("menu.spec.ts", `import { test } from '@playwright/test'
+
+test('opens menu', async ({ page }) => {
+  await page.goto('/dashboard')
+  await page.locator('[data-testid="menu"]').click()
+})
+`))
+
+	assert.Empty(t, violations)
+}
+
+// A handler test asserts the page holds a CSS class that the shared layout's
+// stylesheet names on every page: the check passes whether the error block
+// is rendered or not. A marker only the page itself renders is left alone.
+func TestUnfalsifiableTestCase_GoAssertsUbiquitousMarker(t *testing.T) {
+	sources := map[string]string{
+		"admin/templates/layout.html": `<html><head><style>
+    .callout-error { border-left-color: #ff4136; }
+</style></head><body><nav>Transactions</nav>{{template "content" .}}</body></html>
+`,
+		"admin/templates/channels.html": `{{define "content"}}<article class="callout callout-error">{{.Error}}</article>{{end}}
+`,
+		"admin/channels_test.go": `package admin
+
+func TestChannelsRejectsCountry(t *testing.T) {
+	body := render(t)
+	if !strings.Contains(body, "callout-error") {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(body, "<article class=\"callout callout-error\">") {
+		t.Fatal("expected the error block")
+	}
+	assert.Contains(t, body, "Transactions")
+}
+`,
+	}
+	root, _ := rulestest.Module(t, sources)
+	var files []*core.FileContext
+	for _, name := range []string{"admin/channels_test.go", "admin/templates/channels.html", "admin/templates/layout.html"} {
+		file, err := core.NewFileContextChecked(filepath.Join(root, name), root, []byte(sources[name]), core.DefaultConfig())
+		require.NoError(t, err)
+		if strings.HasSuffix(name, ".go") {
+			fset := token.NewFileSet()
+			syntax, err := parser.ParseFile(fset, file.Path, sources[name], parser.ParseComments)
+			require.NoError(t, err)
+			file.SetGoAST(fset, syntax)
+		}
+		files = append(files, file)
+	}
+	rule := NewUnfalsifiableTestCaseRule()
+	rule.UseProjectFiles(files)
+	var found []string
+	for _, file := range files {
+		found = append(found, patterntest.FoundLines(rule.AnalyzeFile(file))...)
+	}
+	assert.ElementsMatch(t, []string{"admin/channels_test.go:5", "admin/channels_test.go:11"}, found)
+}

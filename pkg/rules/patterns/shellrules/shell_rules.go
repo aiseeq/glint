@@ -1,0 +1,864 @@
+package shellrules
+
+import (
+	"path"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
+)
+
+// shellRule is a rule over shell scripts and make recipes: check gets the
+// file read as shell.
+type shellRule struct {
+	*rules.BaseRule
+	check func(r *shellRule, src *patternkit.ShellSource) []*core.Violation
+}
+
+func newShellRule(name, description string, severity core.Severity, check func(*shellRule, *patternkit.ShellSource) []*core.Violation) *shellRule {
+	return &shellRule{BaseRule: rules.NewBaseRule(name, "patterns", description, severity), check: check}
+}
+
+// AnalyzeFile reads a script or a make file as shell and checks it.
+func (r *shellRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	src, ok := patternkit.ReadShell(ctx)
+	if !ok {
+		return nil
+	}
+	return r.check(r, src)
+}
+
+func init() {
+	rules.Register(newShellRule("shell-status-of-pipe-tail",
+		"Detects $? read after a pipeline that ends in tee, cat or another filter without pipefail — the status is the filter's, and a failed command passes",
+		core.SeverityHigh, checkPipeTailStatus))
+	rules.Register(newShellRule("shell-redirect-glued-to-word",
+		"Detects a 2> or 1> redirection written right after a word (name-2>/dev/null) — the digit becomes part of the argument and stdout is redirected instead of stderr",
+		core.SeverityMedium, checkGluedRedirect))
+	rules.Register(newShellRule("make-variable-read-before-assignment",
+		"Detects a recipe line that reads a shell variable before the same line assigns it — the test sees an empty value",
+		core.SeverityHigh, checkReadBeforeAssignment))
+	rules.Register(newShellRule("shell-captured-function-writes-logs",
+		"Detects log output on stdout of a function whose stdout is captured with $(...) — the log lines end up in the captured value",
+		core.SeverityHigh, checkCapturedFunctionOutput))
+	rules.Register(newShellRule("shell-wait-ignores-job-status",
+		"Detects a bare wait after background jobs — it returns 0 whatever the jobs returned, and a failed job is not seen",
+		core.SeverityMedium, checkWaitStatus))
+	rules.Register(newShellRule("shell-check-against-own-literal",
+		"Detects a check comparing a variable with the literal it was just assigned — the check cannot fail",
+		core.SeverityHigh, checkOwnLiteral))
+	rules.Register(newShellRule("shell-check-failure-ignored",
+		"Detects a security or quality check (gosec, npm audit, trivy, linters) whose failure is turned into success with || true or || (...; exit 0), and a protection switched off or back on (ALTER EVENT TRIGGER ... DISABLE) with its output and failure discarded",
+		core.SeverityHigh, checkIgnoredCheckFailure))
+	rules.Register(newShellRule("psql-script-without-on-error-stop",
+		"Detects psql running a script (-f, a redirect or a pipe) without ON_ERROR_STOP — psql exits 0 when a statement fails",
+		core.SeverityHigh, checkPsqlOnErrorStop))
+	rules.Register(newShellRule("shell-failure-fallback-value",
+		"Detects $(cmd || echo \"$other\") — a failed command is replaced by another value and the failure is not seen",
+		core.SeverityMedium, checkFallbackValue))
+	rules.Register(newShellRule("shell-poll-loop-falls-through",
+		"Detects a bounded polling loop that breaks on success and is followed by no check — on timeout the script goes on as if the wait succeeded",
+		core.SeverityHigh, checkPollFallsThrough))
+	rules.Register(newShellRule("shell-build-skipped-when-binary-exists",
+		"Detects go build guarded by a test that the binary is missing — a stale binary is used after the sources change",
+		core.SeverityMedium, checkBuildIfMissing))
+	rules.Register(newShellRule("shell-binary-copied-over-in-place",
+		"Detects scp of a binary straight onto its installed path — a running binary or a reader sees a half-written file",
+		core.SeverityMedium, checkBinaryInPlace))
+	rules.Register(newShellRule("shell-local-env-copied-to-remote",
+		"Detects scp or rsync of the local .env to a remote host — the deploy overwrites the server's own configuration and secrets with a developer's",
+		core.SeverityHigh, checkEnvToRemote))
+	rules.Register(newShellRule("secret-file-backup-left-beside-original",
+		"Detects a copy of a secret file left beside the original under a backup name — the copy retains live credentials without a cleanup path",
+		core.SeverityHigh, checkSecretFileBackup))
+}
+
+var (
+	statusRead       = regexp.MustCompile(`\$\{?\?`)
+	pipeFilters      = map[string]bool{"tee": true, "cat": true, "sed": true, "awk": true, "head": true, "tail": true, "sort": true, "uniq": true, "tr": true, "cut": true, "ts": true, "column": true, "fold": true, "nl": true}
+	pipefailSetting  = regexp.MustCompile(`pipefail`)
+	pipeStatusMarker = regexp.MustCompile(`PIPESTATUS`)
+)
+
+// checkPipeTailStatus reports $? read right after a pipeline whose last
+// command is a filter, with no pipefail in effect.
+func checkPipeTailStatus(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	if src.Make && (pipefailSetting.MatchString(src.MakeFlags) || pipefailSetting.MatchString(src.MakeShell)) {
+		return nil
+	}
+	var out []*core.Violation
+	for _, unit := range src.Units() {
+		segs := patternkit.Segments(unit.Text)
+		for k := 1; k < len(segs); k++ {
+			loc := statusRead.FindStringIndex(segs[k].Text)
+			if loc == nil {
+				continue
+			}
+			prev := segs[k-1]
+			if !pipeFilters[lastPipeCommand(prev.Text)] || pipeStatusMarker.MatchString(prev.Text) ||
+				pipefailSetting.MatchString(unit.Text[:prev.Offset]) {
+				continue
+			}
+			line := unit.LineAt(segs[k].Offset + loc[0])
+			out = appendReport(out, src.Report(r, line,
+				"$? read after a pipeline ending in "+lastPipeCommand(prev.Text)+" — without pipefail it is the status of the filter, and a failed command passes",
+				"Run the recipe or script with set -o pipefail (SHELL := bash, .SHELLFLAGS := -eo pipefail -c), or read ${PIPESTATUS[0]} under bash"))
+		}
+	}
+	out = append(out, recipeCheckPiped(r, src)...)
+	return append(out, capturedPipeTails(r, src)...)
+}
+
+var pipeTailFilter = map[string]bool{"grep": true}
+
+// recipeCheckPiped reports a recipe line ending in a test or build run piped
+// into a filter: make reads the filter's status, and a failed run passes the
+// target.
+func recipeCheckPiped(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	if !src.Make {
+		return nil
+	}
+	var out []*core.Violation
+	for _, unit := range src.Units() {
+		segs := patternkit.Segments(unit.Text)
+		last := segs[len(segs)-1]
+		elements := pipeElements(last.Trimmed())
+		if len(elements) < 2 || pipeStatusMarker.MatchString(unit.Text) {
+			continue
+		}
+		head := envPrefix.ReplaceAllString(patternkit.CommandPrefix.ReplaceAllString(elements[0], ""), "")
+		tail := commandWord(elements[len(elements)-1])
+		if !checkRun.MatchString(head) || (!pipeFilters[tail] && !pipeTailFilter[tail]) {
+			continue
+		}
+		out = appendReport(out, src.Report(r, unit.LineAt(last.Offset),
+			"The recipe line ends in "+tail+", and make reads its status — a failed "+strings.Join(strings.Fields(head)[:2], " ")+" passes the target",
+			"Set SHELL := /bin/bash and .SHELLFLAGS := -eo pipefail -c, or end the line with ; exit $${PIPESTATUS[0]}"))
+	}
+	return out
+}
+
+// failingProducers are commands that fail with a status of their own (an
+// unreadable file, a refused connection) besides finding nothing.
+var failingProducers = map[string]bool{
+	"grep": true, "psql": true, "curl": true, "ssh": true, "jq": true, "git": true,
+	"docker": true, "kubectl": true, "mysql": true, "aws": true, "gcloud": true,
+}
+
+// capturedPipeTails reports a function captured with $(...) whose last
+// command is a pipeline from a command that can fail into a filter, with no
+// pipefail in the script: the function returns the filter's 0 and an empty
+// value, and the caller takes a failure for an absent result.
+func capturedPipeTails(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	if src.Make || scriptSetsPipefail(src) {
+		return nil
+	}
+	funcs := src.Functions()
+	captured := capturedFunctions(src, funcs)
+	names := make([]string, 0, len(captured))
+	for name := range captured {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []*core.Violation
+	for _, name := range names {
+		body := src.Body(funcs[name])
+		if len(body) == 0 {
+			continue
+		}
+		last := body[len(body)-1]
+		if strings.TrimSpace(last.Text) == "}" && len(body) > 1 {
+			last = body[len(body)-2]
+		}
+		segs := patternkit.Segments(last.Text)
+		if len(segs) == 0 {
+			continue
+		}
+		tail := segs[len(segs)-1]
+		filter := lastPipeCommand(tail.Text)
+		producer, _, _ := strings.Cut(patternkit.CommandPrefix.ReplaceAllString(tail.Trimmed(), ""), " ")
+		if !pipeFilters[filter] || !failingProducers[producer] || pipeStatusMarker.MatchString(tail.Text) {
+			continue
+		}
+		out = appendReport(out, src.Report(r, last.LineAt(tail.Offset),
+			name+" is captured with $(...) and ends in "+producer+" | ... | "+filter+" — without pipefail a failed "+producer+" returns the filter's 0 and an empty value",
+			"Set -o pipefail in the function or the script, or capture "+producer+" alone and check its status"))
+	}
+	return out
+}
+
+// scriptSetsPipefail reports pipefail set in the script itself, outside the
+// heredocs it sends to other shells.
+func scriptSetsPipefail(src *patternkit.ShellSource) bool {
+	terminator := ""
+	for _, line := range src.Ctx.Lines {
+		if terminator != "" {
+			if strings.TrimSpace(line) == terminator {
+				terminator = ""
+			}
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue // a usage comment may show a heredoc
+		}
+		if m := heredocStart.FindStringSubmatch(line); m != nil {
+			terminator = m[1]
+		}
+		if pipefailSetting.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+var gluedRedirect = regexp.MustCompile(`[A-Za-z_.-]([12])>(?:&[0-9]|/dev/null|\s|$)`)
+
+// checkGluedRedirect reports name-2>/dev/null: the 2 belongs to the word.
+func checkGluedRedirect(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	var out []*core.Violation
+	for _, l := range src.Lines {
+		for _, seg := range patternkit.Segments(l.Text) {
+			loc := gluedRedirect.FindStringSubmatchIndex(seg.Text)
+			if loc == nil || insideQuotes(seg.Text, loc[2]) {
+				continue
+			}
+			out = appendReport(out, src.Report(r, l.LineAt(seg.Offset+loc[2]),
+				"A "+seg.Text[loc[2]:loc[3]]+"> redirection is glued to the word before it — the digit becomes part of the argument and stdout, not stderr, is redirected",
+				"Put a space before the redirection: name 2>/dev/null"))
+		}
+	}
+	return out
+}
+
+var (
+	shellAssignment = regexp.MustCompile(`(?:^|[\s;&|(])(?:local\s+|export\s+)?([a-z_][a-z0-9_]*)=`)
+	shellLoopVar    = regexp.MustCompile(`\b(?:for|read)\s+([a-z_][a-z0-9_]*)\b`)
+	shellVarRead    = regexp.MustCompile(`\$\{?([a-z_][a-z0-9_]*)`)
+)
+
+// checkReadBeforeAssignment reports, in a make recipe, a variable a line
+// reads before the same line first assigns it.
+func checkReadBeforeAssignment(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	if !src.Make {
+		return nil
+	}
+	var out []*core.Violation
+	for _, l := range src.Lines {
+		assigned := make(map[string]int)
+		for _, re := range []*regexp.Regexp{shellAssignment, shellLoopVar} {
+			for _, m := range re.FindAllStringSubmatchIndex(l.Text, -1) {
+				name := l.Text[m[2]:m[3]]
+				if at, ok := assigned[name]; !ok || m[2] < at {
+					assigned[name] = m[2]
+				}
+			}
+		}
+		reported := make(map[string]bool)
+		for _, m := range shellVarRead.FindAllStringSubmatchIndex(l.Text, -1) {
+			name := l.Text[m[2]:m[3]]
+			at, ok := assigned[name]
+			if !ok || m[0] > at || reported[name] || insideSingleQuotes(l.Text, m[0]) {
+				continue
+			}
+			reported[name] = true
+			out = appendReport(out, src.Report(r, l.LineAt(m[0]),
+				"$"+name+" is read before this recipe line assigns it — the shell sees an empty value there",
+				"Move the read after the command that sets "+name+", or give it a value first"))
+		}
+	}
+	return out
+}
+
+// capturedFunctions returns the functions of a script whose stdout some
+// $(...) captures, with the capture segments of each.
+func capturedFunctions(src *patternkit.ShellSource, funcs map[string]patternkit.ShellFunc) map[string][]patternkit.ShellSegment {
+	captured := make(map[string][]patternkit.ShellSegment)
+	for _, l := range src.Lines {
+		for _, seg := range patternkit.Segments(l.Text) {
+			for _, m := range patternkit.CaptureCall.FindAllStringSubmatch(seg.Text, -1) {
+				if _, ok := funcs[m[1]]; ok {
+					captured[m[1]] = append(captured[m[1]], seg)
+				}
+			}
+		}
+	}
+	return captured
+}
+
+// checkCapturedFunctionOutput reports log functions writing to stdout that
+// a captured function calls, and commands of a captured function that merge
+// their stderr into its stdout.
+func checkCapturedFunctionOutput(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	funcs := src.Functions()
+	captured := capturedFunctions(src, funcs)
+	reported := make(map[int]bool)
+	var out []*core.Violation
+	add := func(line int, message, suggestion string) {
+		if reported[line] {
+			return
+		}
+		reported[line] = true
+		out = appendReport(out, src.Report(r, line, message, suggestion))
+	}
+	for name := range captured {
+		for _, l := range src.Body(funcs[name]) {
+			for _, seg := range patternkit.Segments(l.Text) {
+				text := patternkit.CommandPrefix.ReplaceAllString(seg.Trimmed(), "")
+				callee, _, _ := strings.Cut(text, " ")
+				logger, ok := funcs[callee]
+				if ok && patternkit.WritesToStdout(text) && callee != name && patternkit.LogFunctionName.MatchString(callee) && len(captured[callee]) == 0 {
+					for _, line := range src.StdoutWrites(logger) {
+						add(line, callee+" writes to stdout, and "+name+" calls it while a caller captures $("+name+") — the log lines become part of the captured value",
+							"Write log output to stderr: echo ... >&2")
+					}
+				}
+				if strings.Contains(text, "2>&1") && !patternkit.FileRedirect.MatchString(strings.ReplaceAll(text, "2>&1", "")) && !strings.Contains(text, "$(") {
+					add(l.LineAt(seg.Offset), "A command of "+name+" merges its stderr into stdout while a caller captures $("+name+") — its output becomes part of the captured value",
+						"Send the command's output to stderr (>&2) or to a log file")
+				}
+			}
+		}
+		if src.Ctx.IsTestFile() {
+			continue // a test stub prints the output it imitates
+		}
+		for _, line := range src.OwnMessages(funcs[name]) {
+			add(line, name+" prints a message on the stdout that carries its data while a caller captures $("+name+") — the message becomes part of the captured value",
+				"Write the message to stderr: printf '...' >&2")
+		}
+	}
+	for _, line := range stderrCapturesComparedExactly(src) {
+		add(line, "The command's stderr is merged into a captured value that is then compared exactly — a warning the command prints makes the value match nothing",
+			"Capture stdout only and keep stderr for the error message (2>err.log), or compare after taking the last line")
+	}
+	return out
+}
+
+var (
+	// stderrCapture is NAME=$(... 2>&1) with the merge at the end of the
+	// substitution.
+	stderrCapture = regexp.MustCompile(`(?:^|[\s;&(])([A-Za-z_][A-Za-z0-9_]*)=\$\(.*2>&1\s*\)`)
+)
+
+// stderrCapturesComparedExactly returns the lines that capture a command
+// with its stderr merged into a variable that a later case or [ x = y ]
+// compares with a literal. The value lives until the variable is assigned
+// again, and a local one to the end of its function.
+func stderrCapturesComparedExactly(src *patternkit.ShellSource) []int {
+	funcs := src.Functions()
+	var lines []int
+	for i, l := range src.Lines {
+		m := stderrCapture.FindStringSubmatch(l.Text)
+		if m == nil {
+			continue
+		}
+		exact := regexp.MustCompile(`case\s+"?\$\{?` + m[1] + `\}?"?\s+in\b|\[\[?\s+"?\$\{?` + m[1] + `\}?"?\s+==?\s+['"]?\w`)
+		assigned := regexp.MustCompile(`(?:^|[\s;&|(])(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)*)?` + m[1] + `=`)
+		end := len(src.Lines)
+		if fn, ok := localScope(src, funcs, i, m[1]); ok {
+			end = fn.Last + 1
+		}
+		for _, later := range src.Lines[i+1 : end] {
+			if exact.MatchString(later.Text) {
+				lines = append(lines, l.LineAt(0))
+				break
+			}
+			if assigned.MatchString(later.Text) {
+				break
+			}
+		}
+	}
+	return lines
+}
+
+// localScope returns the innermost function holding a line that declares
+// the variable local (local, declare or typeset inside a function).
+func localScope(src *patternkit.ShellSource, funcs map[string]patternkit.ShellFunc, line int, name string) (patternkit.ShellFunc, bool) {
+	var inner patternkit.ShellFunc
+	found := false
+	for _, fn := range funcs {
+		if fn.First <= line && line <= fn.Last && (!found || fn.First > inner.First || fn.First == inner.First && fn.Name < inner.Name) {
+			inner, found = fn, true
+		}
+	}
+	if !found {
+		return patternkit.ShellFunc{}, false
+	}
+	declared := regexp.MustCompile(`(?:^|[\s;&|(])(?:local|declare|typeset)\s+(?:-[A-Za-fh-z]+\s+)*(?:[A-Za-z_][A-Za-z0-9_]*(?:=\S*)?\s+)*` + name + `\b`)
+	for _, l := range src.Body(inner) {
+		if declared.MatchString(l.Text) {
+			return inner, true
+		}
+	}
+	return patternkit.ShellFunc{}, false
+}
+
+var bareWait = regexp.MustCompile(`^wait\s*$`)
+
+// checkWaitStatus reports a bare wait after background jobs. A wait for
+// named PIDs whose failure is discarded is not reported: the jobs may pass
+// their outcome through files.
+func checkWaitStatus(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	var out []*core.Violation
+	for _, unit := range src.Units() {
+		background := false
+		for _, seg := range flatSegments(unit.Text) {
+			if bareWait.MatchString(strings.Trim(seg.Trimmed(), "(){} \t")) && background {
+				out = appendReport(out, src.Report(r, unit.LineAt(seg.Offset),
+					"A bare wait after background jobs returns 0 whatever the jobs returned — a failed job is not seen",
+					"Keep each job's PID ($!) and wait for each: wait \"$pid\" || failed=1"))
+			}
+			if seg.Sep == "&" {
+				background = true
+			}
+		}
+	}
+	return out
+}
+
+var (
+	literalAssignment = regexp.MustCompile(`^\s*(?:local\s+|readonly\s+)?([A-Za-z_][A-Za-z0-9_]*)=(["']?)([A-Za-z0-9_.:/-]+)["']?\s*(?:#.*)?$`)
+	literalCheck      = regexp.MustCompile(`\[\[?\s*"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"?\s*(!=|-ne)\s*["']?([A-Za-z0-9_.:/-]+)["']?\s*\]\]?`)
+	anyAssignment     = regexp.MustCompile(`(?:^|[\s;&|(])(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)=|\b(?:read|for|getopts\s+\S+)\s+(?:-\w+\s+)*([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*):?=`)
+)
+
+// checkOwnLiteral reports a test of a variable against the literal that is
+// the only value the script ever gives it.
+func checkOwnLiteral(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	assignments := make(map[string]int)
+	for _, l := range src.Lines {
+		for _, m := range anyAssignment.FindAllStringSubmatch(l.Text, -1) {
+			assignments[m[1]+m[2]+m[3]]++
+		}
+	}
+	var out []*core.Violation
+	values := make(map[string]string)
+	for _, l := range src.Lines {
+		if m := literalAssignment.FindStringSubmatch(l.Text); m != nil {
+			if assignments[m[1]] == 1 {
+				values[m[1]] = m[3]
+			}
+			continue
+		}
+		for _, m := range literalCheck.FindAllStringSubmatchIndex(l.Text, -1) {
+			name, literal := l.Text[m[2]:m[3]], l.Text[m[6]:m[7]]
+			if value, ok := values[name]; ok && value == literal {
+				out = appendReport(out, src.Report(r, l.LineAt(m[0]),
+					"$"+name+" is compared with "+literal+", the literal it is assigned above and nowhere else — the check cannot fail",
+					"Read the value from the system being checked, or delete the check"))
+			}
+		}
+	}
+	return out
+}
+
+var (
+	checkTool      = regexp.MustCompile(`\b(?:gosec|govulncheck|nancy|trivy|grype|snyk|semgrep|golangci-lint|staticcheck|shellcheck|hadolint|eslint|(?:npm|yarn|pnpm)\s+audit|go\s+vet)\b`)
+	swallowFailure = regexp.MustCompile(`^(?:true|:|\(.*\bexit\s+0\s*\)?|(?:echo|printf)\b[^;]*)\s*$`)
+	// protectionToggle is a command switching a protection off or on: a
+	// trigger, a firewall.
+	protectionToggle = regexp.MustCompile(`(?i)\bALTER\s+(?:EVENT\s+)?TRIGGER\s+\S+\s+(?:DISABLE|ENABLE)\b|\b(?:DISABLE|ENABLE)\s+TRIGGER\b|\bufw\s+(?:disable|enable)\b`)
+	silencedTail     = regexp.MustCompile(`>\s*/dev/null[^|]*\|\|\s*(?:true|:)(?:\s|['";)]|$)`)
+)
+
+// silencedProtectionToggle returns the offset of a protection toggle whose
+// output goes to /dev/null and whose failure || true turns into success,
+// -1 for none.
+func silencedProtectionToggle(text string) int {
+	at := protectionToggle.FindStringIndex(text)
+	if at == nil || !silencedTail.MatchString(text[at[1]:]) {
+		return -1
+	}
+	return at[0]
+}
+
+// checkIgnoredCheckFailure reports a check whose failure || true, || (...;
+// exit 0) or || echo turns into success, a make line with the - prefix that
+// runs one, and a protection toggle silenced with > /dev/null ... || true.
+func checkIgnoredCheckFailure(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	var out []*core.Violation
+	for _, l := range src.Lines {
+		if src.Make {
+			raw := strings.TrimLeft(src.Ctx.Lines[l.Nums[0]-1], "\t @+")
+			if strings.HasPrefix(raw, "-") && checkTool.MatchString(l.Text) {
+				out = appendReport(out, src.Report(r, l.Nums[0],
+					"The - prefix makes make ignore the failure of this check — the target passes when the check finds problems",
+					"Drop the - prefix; let a separate target run the check as advisory if it must not block"))
+				continue
+			}
+		}
+		if at := silencedProtectionToggle(l.Text); at >= 0 {
+			out = appendReport(out, src.Report(r, l.LineAt(at),
+				"The command switching a protection off or back on discards its output and turns its failure into success — a failed toggle leaves the protection off, or the work it guards blocked, without a word",
+				"Let the toggle fail the script, or check its result and report it; toggle the protection inside the transaction it guards where the tool allows it"))
+		}
+		segs := patternkit.Segments(l.Text)
+		for k := 0; k+1 < len(segs); k++ {
+			if segs[k].Sep != "||" || !checkTool.MatchString(segs[k].Text) {
+				continue
+			}
+			fallback := segs[k+1].Trimmed()
+			if !swallowFailure.MatchString(fallback) || regexp.MustCompile(`\bexit\s+[1-9]`).MatchString(fallback) {
+				continue
+			}
+			out = appendReport(out, src.Report(r, l.LineAt(segs[k].Offset),
+				"The failure of "+checkTool.FindString(segs[k].Text)+" is turned into success — the target passes when the check finds problems",
+				"Let the check fail the target; run it separately if it must only warn"))
+		}
+	}
+	return out
+}
+
+var (
+	psqlScriptInput   = regexp.MustCompile(`\s(?:-f|--file)[\s=]|\s<{1,2}\s*\S`)
+	psqlCommand       = regexp.MustCompile(`(?:^|[\s|;&("'])psql(?:\s|$)`)
+	psqlArgsExpansion = regexp.MustCompile(`^[\s|;&("']?psql\s+"?\$\{?[A-Za-z_]`)
+)
+
+// checkPsqlOnErrorStop reports psql reading a script without ON_ERROR_STOP.
+func checkPsqlOnErrorStop(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	setsOnErrorStop := strings.Contains(strings.Join(src.Ctx.Lines, "\n"), "ON_ERROR_STOP")
+	commandVars := psqlCommandVariables(src)
+	reportedVars := make(map[string]bool)
+	var out []*core.Violation
+	for _, l := range src.Lines {
+		if strings.Contains(l.Text, "ON_ERROR_STOP") {
+			continue
+		}
+		for _, seg := range patternkit.Segments(l.Text) {
+			if name := expandedCommand(seg.Trimmed()); commandVars[name] > 0 && psqlScriptInput.MatchString(seg.Text) {
+				if !reportedVars[name] {
+					reportedVars[name] = true
+					out = appendReport(out, src.Report(r, commandVars[name],
+						name+" holds a psql command without ON_ERROR_STOP, and $"+name+" runs a script — it goes on after a failed statement and exits 0",
+						"Add -v ON_ERROR_STOP=1 to the command in "+name))
+				}
+				continue
+			}
+			at := psqlCommand.FindStringIndex(seg.Text)
+			if at == nil {
+				continue
+			}
+			rest := seg.Text[at[0]:]
+			if setsOnErrorStop && psqlArgsExpansion.MatchString(rest) {
+				continue // the arguments come from a variable the script fills with ON_ERROR_STOP
+			}
+			piped := strings.Contains(strings.ReplaceAll(seg.Text[:at[0]], "||", ""), "|")
+			if !piped && !psqlScriptInput.MatchString(rest) {
+				continue
+			}
+			out = appendReport(out, src.Report(r, l.LineAt(seg.Offset+at[0]),
+				"psql runs a script without ON_ERROR_STOP — it goes on after a failed statement and exits 0",
+				"Pass -v ON_ERROR_STOP=1 (and --single-transaction to apply all or nothing)"))
+		}
+	}
+	return out
+}
+
+var fallbackValue = regexp.MustCompile(`\$\((?:[^()]|\([^()]*\))*\|\|\s*echo\s+"?\$\{?[A-Za-z_]`)
+
+// checkFallbackValue reports $(cmd || echo "$other").
+func checkFallbackValue(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	var out []*core.Violation
+	funcs := src.Functions()
+	defaultsZero := zeroDefault.MatchString(strings.Join(src.Ctx.Lines, "\n"))
+	for _, l := range src.Lines {
+		segs := patternkit.Segments(l.Text)
+		for k := 0; k+1 < len(segs); k++ {
+			if segs[k].Sep != "||" {
+				continue
+			}
+			switch {
+			case droppedStatus(segs[k].Trimmed(), segs[k+1].Trimmed(), funcs):
+				out = appendReport(out, src.Report(r, l.LineAt(segs[k].Offset),
+					"The status of the captured command is dropped with || true — a failed call goes on as an empty value",
+					"Fail when the command fails: x=$(cmd) || { echo 'cmd failed' >&2; exit 1; }"))
+			case defaultsZero && droppedRunLog(segs[k].Trimmed(), segs[k+1].Trimmed()):
+				out = appendReport(out, src.Report(r, l.LineAt(segs[k].Offset),
+					"The run writes its log with || true, and the figures read from logs default to 0 — a failed run is counted as a result with zeros",
+					"Keep the status of each run (cmd > \"$log\" 2>&1; echo $? > \"$log.rc\") and leave failed runs out of the totals"))
+			}
+		}
+		for _, loc := range fallbackValue.FindAllStringIndex(l.Text, -1) {
+			out = appendReport(out, src.Report(r, l.LineAt(loc[0]),
+				"A failed command is replaced by another variable's value — the failure is not seen and the old value passes for the new",
+				"Fail when the command fails: x=$(cmd) || { echo 'cmd failed' >&2; exit 1; }"))
+		}
+	}
+	return append(out, fallbackInSubstitution(r, src, funcs)...)
+}
+
+var (
+	zeroDefault = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*:-0\}`)
+	siblingRun  = regexp.MustCompile(`^(?:[A-Za-z_][A-Za-z0-9_]*=[^|]*?\s+)?"?[^\s"()]*\.sh"?\s[^|]*?(?:^|[^0-9&])>\s*"?([^\s&"]+)"?`)
+)
+
+// droppedRunLog reports a sibling script run with its output sent to a file
+// and its status dropped with || true.
+func droppedRunLog(command, fallback string) bool {
+	if word := patternkit.FirstShellWord(fallback); word != "true" && word != ":" {
+		return false
+	}
+	command = patternkit.CommandPrefix.ReplaceAllString(command, "")
+	m := siblingRun.FindStringSubmatch(command)
+	return m != nil && m[1] != "/dev/null"
+}
+
+var (
+	boundedLoop = regexp.MustCompile(`^(?:for\s+\w+\s+in\s+(?:\$\(seq\b|\{\d+\.\.\d+\})|for\s*\(\(|while\s+\[\[?\s*"?\$\{?\w+\}?"?\s+-l[te]\b)`)
+	loopStart   = regexp.MustCompile(`^(?:for|while|until)\b`)
+	loopEnd     = regexp.MustCompile(`^done\b`)
+	breakCmd    = regexp.MustCompile(`(?:^|\s)break\b`)
+	// timeoutBranch is the loop's own handling of the last attempt: it
+	// fails, or tests the counter against the bound.
+	// A forced kill settles the outcome a wait-for-exit loop polls for.
+	timeoutBranch = regexp.MustCompile(`(?:^|[\s;])(?:exit|return)\b|\bkill\s+-(?:9|KILL|s\s+KILL)\b`)
+	counterTest   = regexp.MustCompile(`\s-(?:eq|ge|gt)\s+"?\$?\{?([A-Za-z0-9_]+)`)
+	// loopBound reads the last value of seq, of {1..N} or of a -lt/-le bound.
+	loopBound  = regexp.MustCompile(`\$\(seq\s+(?:\S+\s+)*?"?\$?\{?([A-Za-z0-9_]+)\}?"?\s*\)|\{\d+\.\.(\d+)\}|\s-l[te]\s+"?\$?\{?([A-Za-z0-9_]+)`)
+	afterCheck = regexp.MustCompile(`^(?:if\b|\[|test\b|!|exit\b|return\b|case\b)`)
+)
+
+// checkPollFallsThrough reports a bounded loop with sleep that breaks on
+// success and whose end is not followed by a check.
+func checkPollFallsThrough(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	var out []*core.Violation
+	for _, unit := range src.Units() {
+		segs := patternkit.Segments(unit.Text)
+		var open []pollLoop
+		for j, seg := range segs {
+			t := strings.TrimSpace(strings.TrimPrefix(seg.Trimmed(), "do "))
+			switch {
+			case loopStart.MatchString(t):
+				open = append(open, pollLoop{start: j, bounded: boundedLoop.MatchString(t), bound: boundOf(t)})
+				continue
+			case len(open) == 0:
+				continue
+			}
+			top := &open[len(open)-1]
+			top.hasBreak = top.hasBreak || breakCmd.MatchString(t)
+			top.handled = top.handled || timeoutBranch.MatchString(t) || top.testsBound(t)
+			top.hasSleep = top.hasSleep || strings.HasPrefix(t, "sleep") || strings.Contains(t, " sleep ")
+			if !loopEnd.MatchString(t) {
+				continue
+			}
+			loop := *top
+			open = open[:len(open)-1]
+			if len(open) > 0 { // an inner loop's sleep and failure count for the outer one
+				open[len(open)-1].hasSleep = open[len(open)-1].hasSleep || loop.hasSleep
+				open[len(open)-1].handled = open[len(open)-1].handled || loop.handled
+			}
+			if !loop.fallsThrough(segs, j) {
+				continue
+			}
+			out = appendReport(out, src.Report(r, unit.LineAt(segs[loop.start].Offset),
+				"The polling loop breaks on success but nothing checks the outcome after it — on timeout the script goes on as if the wait had succeeded",
+				"Fail after the loop when the condition still does not hold: if ! <check>; then exit 1; fi"))
+		}
+	}
+	return out
+}
+
+// pollLoop is a loop of checkPollFallsThrough while its body is read.
+type pollLoop struct {
+	start                       int // index of its header segment
+	bounded                     bool
+	bound                       string // the last counter value, "" when unknown
+	hasBreak, hasSleep, handled bool
+}
+
+// boundOf returns the bound a loop header counts to.
+func boundOf(header string) string {
+	m := loopBound.FindStringSubmatch(header)
+	if m == nil {
+		return ""
+	}
+	return m[1] + m[2] + m[3]
+}
+
+// testsBound reports a comparison of the counter with the loop's bound (any
+// comparison when the bound is unknown): the loop handles its last attempt.
+// A comparison with a step of a retry ladder leaves the timeout open.
+func (l pollLoop) testsBound(text string) bool {
+	for _, m := range counterTest.FindAllStringSubmatch(text, -1) {
+		if l.bound == "" || m[1] == l.bound {
+			return true
+		}
+	}
+	return false
+}
+
+// fallsThrough reports a bounded polling loop, ending at segment end, that
+// breaks on success and leaves the timeout to no check.
+func (l pollLoop) fallsThrough(segs []patternkit.ShellSegment, end int) bool {
+	if !l.bounded || !l.hasBreak || !l.hasSleep || l.handled {
+		return false
+	}
+	if segs[end].Sep == "||" || segs[end].Sep == "&&" {
+		return false
+	}
+	// The check may stand after the blocks that close around the loop.
+	next := end + 1
+	for next < len(segs) && blockCloser.MatchString(segs[next].Trimmed()) {
+		next++
+	}
+	if next >= len(segs) {
+		return true
+	}
+	// A command with a failure branch is a check: probe || { ...; exit 1; }.
+	return segs[next].Sep != "||" && !afterCheck.MatchString(segs[next].Trimmed())
+}
+
+var blockCloser = regexp.MustCompile(`^(?:fi|esac|\}|;;)?$`)
+
+var (
+	missingBinaryTest = regexp.MustCompile(`\[\[?\s*!\s+-[xfe]\s+"?([^\s"\]]+)"?\s*\]\]?`)
+	staleCheck        = regexp.MustCompile(`\s-nt\s|-newer|(?i)hash|sum\b|\s!=\s`)
+	goBuildOutput     = regexp.MustCompile(`\bgo\s+build\b[^;&|]*?\s-o\s+"?([^\s";]+)`)
+)
+
+// checkBuildIfMissing reports go build guarded by a test that the output
+// binary does not exist.
+func checkBuildIfMissing(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	var out []*core.Violation
+	for _, unit := range src.Units() {
+		if staleCheck.MatchString(unit.Text) {
+			continue // the build also runs when the sources are newer or their hash changed
+		}
+		builds := make(map[string]bool)
+		for _, m := range goBuildOutput.FindAllStringSubmatch(unit.Text, -1) {
+			builds[path.Base(m[1])] = true
+		}
+		for _, m := range missingBinaryTest.FindAllStringSubmatchIndex(unit.Text, -1) {
+			if !builds[path.Base(unit.Text[m[2]:m[3]])] {
+				continue
+			}
+			out = appendReport(out, src.Report(r, unit.LineAt(m[0]),
+				"go build runs only when the binary is missing — after the sources change the stale binary keeps being used",
+				"Build every time (go build is incremental), or compare the binary's age with the sources"))
+		}
+	}
+	return out
+}
+
+var (
+	binaryCopy   = regexp.MustCompile(`\b(?:scp|rsync)\b[^;&|]*\s(\S*(?:BIN\b|BIN\)|_BIN\}|bin/)\S*)\s+(\S+):(\S+)`)
+	stagingPath  = regexp.MustCompile(`(?i)(?:\.new|\.tmp|\.part|\.next|-new|tmp|/tmp/|\.\$\$)`)
+	remoteRename = regexp.MustCompile(`\bmv\b|\binstall\b`)
+)
+
+// checkBinaryInPlace reports scp of a binary straight onto its remote path,
+// with no rename after it in the same unit.
+func checkBinaryInPlace(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	var out []*core.Violation
+	for _, unit := range src.Units() {
+		segs := patternkit.Segments(unit.Text)
+		for k, seg := range segs {
+			m := binaryCopy.FindStringSubmatchIndex(seg.Text)
+			if m == nil || stagingPath.MatchString(seg.Text[m[6]:m[7]]) || strings.HasSuffix(seg.Text[m[6]:m[7]], "/") {
+				continue
+			}
+			renamed := false
+			for _, later := range segs[k+1:] {
+				renamed = renamed || remoteRename.MatchString(later.Text)
+			}
+			if renamed {
+				continue
+			}
+			out = appendReport(out, src.Report(r, unit.LineAt(seg.Offset),
+				"The binary is copied straight onto its installed path — a running process or a reader sees a half-written file, and a failed copy leaves it broken",
+				"Copy to a temporary name next to it and rename it into place (mv is atomic on one filesystem)"))
+		}
+	}
+	out = append(out, builtByWorkers(r, src)...)
+	return append(out, scriptsOverRunning(r, src)...)
+}
+
+// envCopy is a copy of the local .env onto the server's .env, into its
+// directory, or beside it as .env.new for a merge on the server: the merge
+// carries the local values of the keys the server lacks.
+var envCopy = regexp.MustCompile(`\b(?:scp|rsync)\b[^;&|]*\s"?(?:\./)?\.env(?:\.(?:prod|production|local))?"?\s+"?[^\s:"]+:(?:[^\s"]*/(?:\.env(?:\.new)?)?)?"?(?:\s|$)`)
+
+var (
+	secretBackupPathName   = regexp.MustCompile(`(?i)(?:^|/)(?:\.env(?:[._-][\w.-]+)?|[^/]*(?:credentials?|secrets?)(?:[._-][\w.-]+)?|[^/]+\.(?:pem|key)|authorized_keys)$`)
+	secretBackupSuffix     = regexp.MustCompile(`(?i)(?:\.bak(?:[-._][\w-]+)?|\.orig(?:[-._][\w-]+)?|~)$|(?i:\.(?:bak|orig)[-_])`)
+	secretBackupCopy       = regexp.MustCompile(`\b(?:sudo\s+)?cp\s+(?:-[a-zA-Z]+\s+)*([^\s]+)\s+("[^"]+"|[^\s;&|]+)`)
+	secretBackupAssignment = regexp.MustCompile(`(?:^|[;\s])([A-Za-z_][A-Za-z0-9_]*)=["']?([^\s"']+)["']?`)
+	secretBackupVarRef     = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)`)
+	secretBackupCleanup    = regexp.MustCompile(`(?i)\b(?:rm|shred)\b(?:\s+-[a-zA-Z]+\b)*\s+([^;&|]+)`)
+	secretBackupTrap       = regexp.MustCompile(`(?i)^\s*trap\b`)
+)
+
+// checkEnvToRemote reports scp or rsync of the local .env to a remote host.
+func checkEnvToRemote(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	var out []*core.Violation
+	for _, l := range src.Lines {
+		for _, seg := range patternkit.Segments(l.Text) {
+			if envCopy.MatchString(seg.Text) {
+				out = appendReport(out, src.Report(r, l.LineAt(seg.Offset),
+					"The local .env is copied to a remote host — the deploy overwrites the server's configuration and secrets with the developer's",
+					"Keep the server's .env on the server and change it on purpose; deploy only code and versioned config"))
+			}
+		}
+	}
+	return out
+}
+
+func checkSecretFileBackup(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	knownSecrets := make(map[string]bool)
+	for _, line := range src.Lines {
+		for _, m := range secretBackupAssignment.FindAllStringSubmatch(line.Text, -1) {
+			if secretBackupPathName.MatchString(strings.Trim(m[2], `"'`)) {
+				knownSecrets[m[1]] = true
+			}
+		}
+	}
+	var out []*core.Violation
+	for _, unit := range src.Units() {
+		segs := patternkit.Segments(unit.Text)
+		cleanedPaths := make(map[string]bool)
+		addCleanupPaths := func(text string) {
+			if match := secretBackupCleanup.FindStringSubmatch(text); match != nil {
+				for path := range strings.FieldsSeq(match[1]) {
+					cleanedPaths[strings.Trim(path, `"'`)] = true
+				}
+			}
+		}
+		for _, candidate := range segs {
+			addCleanupPaths(candidate.Text)
+		}
+		for _, line := range src.Lines {
+			if secretBackupTrap.MatchString(line.Text) {
+				addCleanupPaths(line.Text)
+			}
+		}
+		for _, seg := range segs {
+			m := secretBackupCopy.FindStringSubmatch(seg.Text)
+			loc := secretBackupCopy.FindStringIndex(seg.Text)
+			if m == nil || loc == nil {
+				continue
+			}
+			source, dest := strings.Trim(m[1], `"'`), strings.Trim(m[2], `"'`)
+			sv, dv := secretBackupVarRef.FindStringSubmatch(source), secretBackupVarRef.FindStringSubmatch(dest)
+			secret := secretBackupPathName.MatchString(source) && !strings.HasSuffix(strings.ToLower(source), ".example")
+			if !secret && sv != nil {
+				secret = knownSecrets[sv[1]]
+			}
+			if !secret || !secretBackupSuffix.MatchString(dest) {
+				continue
+			}
+			if sv != nil && (dv == nil || sv[1] != dv[1]) {
+				continue
+			}
+			cleaned := cleanedPaths[dest]
+			if !cleaned {
+				out = appendReport(out, src.Report(r, unit.LineAt(seg.Offset+loc[0]),
+					"A copy of a secret file is left beside the original under a backup name — it keeps live credentials after the script finishes",
+					"Keep rollback copies in a private temporary directory and remove them after the operation"))
+			}
+		}
+	}
+	return out
+}

@@ -1,0 +1,338 @@
+package errrules
+
+import (
+	"testing"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestErrorMaskingRule_Metadata(t *testing.T) {
+	rule := NewErrorMaskingRule()
+
+	assert.Equal(t, "error-masking", rule.Name())
+	assert.Equal(t, "patterns", rule.Category())
+	assert.Equal(t, core.SeverityCritical, rule.DefaultSeverity())
+	assert.NotEmpty(t, rule.Description())
+}
+
+func TestErrorMaskingRule_GoPatterns(t *testing.T) {
+	rule := NewErrorMaskingRule()
+
+	tests := []struct {
+		name        string
+		code        string
+		expectMatch bool
+		pattern     string
+	}{
+		// NOTE: `if err != nil { ... return ... }` детектится только через AST:
+		// однострочные regex были мертвы на gofmt-коде (см. TestErrorMaskingRule_ASTErrorReturn).
+		// NOTE: switch default is now only detected via AST in specific function contexts
+		// to avoid false positives on display/label functions
+		{
+			name:        "fake data return",
+			code:        `return "fake-user-id-123"`,
+			expectMatch: true,
+			pattern:     "fake_data_return",
+		},
+		{
+			name:        "test value",
+			code:        `return "test_user"`,
+			expectMatch: true,
+			pattern:     "fake_data_return",
+		},
+		{
+			// A word that only starts like one: the testdata directory.
+			name:        "testdata directory",
+			code:        `return "testdata/" + name`,
+			expectMatch: false,
+		},
+		{
+			name:        "proper error handling",
+			code:        `if err != nil { return fmt.Errorf("failed: %w", err) }`,
+			expectMatch: false,
+		},
+		{
+			name:        "normal return",
+			code:        `return result, nil`,
+			expectMatch: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := &core.FileContext{
+				Path:    "/project/backend/service.go",
+				RelPath: "backend/service.go",
+				Lines:   []string{tt.code},
+			}
+
+			violations := rule.AnalyzeFile(ctx)
+
+			if tt.expectMatch {
+				require.NotEmpty(t, violations, "Expected violation for: %s", tt.code)
+				assert.Contains(t, violations[0].Context["pattern"], tt.pattern)
+			} else {
+				assert.Empty(t, violations, "Expected no violation for: %s", tt.code)
+			}
+		})
+	}
+}
+
+func TestErrorMaskingRule_TSPatterns(t *testing.T) {
+	rule := NewErrorMaskingRule()
+
+	tests := []struct {
+		name        string
+		code        string
+		expectMatch bool
+		pattern     string
+	}{
+		{
+			name:        "env default",
+			code:        `const port = process.env.PORT || "3000"`,
+			expectMatch: true,
+			pattern:     "env_default",
+		},
+		{
+			name:        "config default",
+			code:        `const url = config.apiUrl || "http://localhost"`,
+			expectMatch: true,
+			pattern:     "config_default",
+		},
+		{
+			name:        "catch return null",
+			code:        `catch (e) { console.error(e); return null }`,
+			expectMatch: true,
+			pattern:     "catch_hardcoded_return",
+		},
+		{
+			name:        "proper error handling",
+			code:        `catch (e) { throw new Error("Operation failed", { cause: e }) }`,
+			expectMatch: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := &core.FileContext{
+				Path:    "/project/frontend/src/api/client.ts",
+				RelPath: "frontend/src/api/client.ts",
+				Lines:   []string{tt.code},
+			}
+
+			violations := rule.AnalyzeFile(ctx)
+
+			if tt.expectMatch {
+				require.NotEmpty(t, violations, "Expected violation for: %s", tt.code)
+			} else {
+				assert.Empty(t, violations, "Expected no violation for: %s", tt.code)
+			}
+		})
+	}
+}
+
+func TestErrorMaskingRule_Exceptions(t *testing.T) {
+	rule := NewErrorMaskingRule()
+
+	tests := []struct {
+		name        string
+		path        string
+		code        string
+		expectMatch bool
+	}{
+		{
+			name:        "test file excluded",
+			path:        "backend/service_test.go",
+			code:        `return "fake-user-id"`,
+			expectMatch: false,
+		},
+		{
+			name:        "vendor excluded",
+			path:        "vendor/lib/file.go",
+			code:        `return "fake-user-id"`,
+			expectMatch: false,
+		},
+		{
+			name:        "generated file excluded",
+			path:        "backend/generated/types.go",
+			code:        `default: return nil`,
+			expectMatch: false,
+		},
+		{
+			name:        "next.config excluded",
+			path:        "frontend/next.config.js",
+			code:        `process.env.NODE_ENV || "development"`,
+			expectMatch: false,
+		},
+		{
+			name:        "e2e excluded",
+			path:        "frontend/e2e/tests/login.ts",
+			code:        `catch (e) { return null }`,
+			expectMatch: false,
+		},
+		{
+			name:        "production code detected",
+			path:        "backend/services/user_service.go",
+			code:        `return "fake-user-id"`,
+			expectMatch: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := &core.FileContext{
+				Path:    tt.path,
+				RelPath: tt.path,
+				Lines:   []string{tt.code},
+			}
+
+			violations := rule.AnalyzeFile(ctx)
+
+			if tt.expectMatch {
+				require.NotEmpty(t, violations, "Expected violation for: %s in %s", tt.code, tt.path)
+			} else {
+				assert.Empty(t, violations, "Expected no violation for: %s in %s", tt.code, tt.path)
+			}
+		})
+	}
+}
+
+func TestErrorMaskingRule_CommentSkip(t *testing.T) {
+	rule := NewErrorMaskingRule()
+
+	ctx := &core.FileContext{
+		Path:    "backend/service.go",
+		RelPath: "backend/service.go",
+		Lines: []string{
+			"// if err != nil { return true }",
+			"/* default: return nil */",
+			"",
+			"   // Comment with default: return false",
+		},
+	}
+
+	violations := rule.AnalyzeFile(ctx)
+	assert.Empty(t, violations, "Comments should be skipped")
+}
+
+// Однострочные regex для `if err != nil { ... return ... }` удалены: на
+// gofmt-коде условие и return всегда на разных строках, эти случаи покрывает
+// AST-путь. Тест фиксирует, что AST ловит gofmt-форму.
+func TestErrorMaskingRule_ASTErrorReturn(t *testing.T) {
+	rule := NewErrorMaskingRule()
+
+	tests := []struct {
+		name           string
+		code           string
+		wantViolations int
+	}{
+		{
+			name: "gofmt: err != nil returns true",
+			code: `package main
+
+func GetUser() bool {
+	err := doSomething()
+	if err != nil {
+		return true
+	}
+	return false
+}`,
+			wantViolations: 1,
+		},
+		{
+			name: "gofmt: err != nil returns zero",
+			code: `package main
+
+func GetCount() int {
+	count, err := load()
+	if err != nil {
+		return 0
+	}
+	return count
+}`,
+			wantViolations: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Свежий парсер на подтест: кэш парсера ключуется по пути, общий
+			// парсер отдал бы AST первого подтеста всем остальным.
+			parser := core.NewParser()
+			ctx := core.NewFileContext("/src/service.go", "/src", []byte(tt.code), core.DefaultConfig())
+			fset, astFile, err := parser.ParseGoFile("/src/service.go", []byte(tt.code))
+			require.NoError(t, err)
+			ctx.SetGoAST(fset, astFile)
+
+			violations := rule.AnalyzeFile(ctx)
+			require.Len(t, violations, tt.wantViolations, "Code:\n%s", tt.code)
+			assert.Equal(t, "error_return_value", violations[0].Context["pattern"])
+		})
+	}
+}
+
+func TestErrorMaskingRule_ErrEqualNil(t *testing.T) {
+	rule := NewErrorMaskingRule()
+
+	tests := []struct {
+		name           string
+		code           string
+		wantViolations int
+	}{
+		{
+			name: "err == nil return false - valid pattern",
+			code: `package main
+
+func IsNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return true
+}`,
+			wantViolations: 0, // This is valid pattern for error type checking
+		},
+		{
+			name: "err != nil return true - masking",
+			code: `package main
+
+func GetUser() bool {
+	err := doSomething()
+	if err != nil { return true }
+	return false
+}`,
+			wantViolations: 1, // This masks the error (detected by AST, error_return_value)
+		},
+		{
+			name: "err != nil return error - proper handling",
+			code: `package main
+
+import "fmt"
+
+func GetUser() error {
+	err := doSomething()
+	if err != nil {
+		return fmt.Errorf("failed: %w", err)
+	}
+	return nil
+}`,
+			wantViolations: 0, // Proper error handling
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Свежий парсер на подтест: кэш парсера ключуется по пути, общий
+			// парсер отдал бы AST первого подтеста всем остальным.
+			parser := core.NewParser()
+			ctx := core.NewFileContext("/src/service.go", "/src", []byte(tt.code), core.DefaultConfig())
+			fset, astFile, err := parser.ParseGoFile("/src/service.go", []byte(tt.code))
+			require.NoError(t, err)
+			ctx.SetGoAST(fset, astFile)
+
+			violations := rule.AnalyzeFile(ctx)
+			assert.Len(t, violations, tt.wantViolations, "Code:\n%s", tt.code)
+		})
+	}
+}

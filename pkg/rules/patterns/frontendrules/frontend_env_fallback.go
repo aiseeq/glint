@@ -1,0 +1,85 @@
+package frontendrules
+
+import (
+	"regexp"
+	"strings"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
+)
+
+func init() {
+	rules.Register(NewFrontendEnvFallbackRule())
+}
+
+// FrontendEnvFallbackRule detects frontend public-env patterns that silently
+// degrade at build/runtime instead of failing explicitly.
+type FrontendEnvFallbackRule struct {
+	*rules.BaseRule
+	bracketNextPublicEnv *regexp.Regexp
+	requiredSupabaseEnv  *regexp.Regexp
+}
+
+// NewFrontendEnvFallbackRule creates the rule
+func NewFrontendEnvFallbackRule() *FrontendEnvFallbackRule {
+	return &FrontendEnvFallbackRule{
+		BaseRule: rules.NewBaseRule(
+			"frontend-env-fallback",
+			"patterns",
+			"Detects placeholder and fallback public environment configuration in frontend code",
+			core.SeverityCritical,
+		),
+		bracketNextPublicEnv: regexp.MustCompile(`process\.env\[['"]NEXT_PUBLIC_[A-Z0-9_]+['"]\]`),
+		requiredSupabaseEnv:  regexp.MustCompile(`process\.env(?:\[['"]NEXT_PUBLIC_SUPABASE_(?:URL|ANON_KEY)['"]\]|\.NEXT_PUBLIC_SUPABASE_(?:URL|ANON_KEY))\s*(?:\|\||\?\?)`),
+	}
+}
+
+// AnalyzeFile checks for placeholder and fallback public environment configuration
+func (r *FrontendEnvFallbackRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if !ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile() {
+		return nil
+	}
+	if patternkit.SkipFrontendPath(ctx) {
+		return nil
+	}
+
+	// Comments are blanked, literals kept: the env names and placeholder hosts
+	// the rule looks for live inside strings, and a JSDoc that warns against
+	// bracket access is not bracket access.
+	text := helpers.FileJSText(ctx)
+
+	var violations []*core.Violation
+	for i, line := range text {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		switch {
+		case strings.Contains(line, "placeholder.supabase.co") || strings.Contains(line, "placeholder-key"):
+			violations = append(violations, r.violation(ctx, i+1, ctx.Lines[i],
+				"Supabase placeholder configuration detected in frontend code",
+				"Remove placeholder credentials. Required public config must fail explicitly when missing."))
+		case r.bracketNextPublicEnv.MatchString(line):
+			violations = append(violations, r.violation(ctx, i+1, ctx.Lines[i],
+				"Bracket access for NEXT_PUBLIC env prevents reliable Next.js build-time inlining",
+				"Use dot access like process.env.NEXT_PUBLIC_SUPABASE_URL, then validate required values explicitly."))
+		case r.requiredSupabaseEnv.MatchString(line):
+			violations = append(violations, r.violation(ctx, i+1, ctx.Lines[i],
+				"Required Supabase public env uses a fallback operator",
+				"Remove ||/?? fallback and throw an explicit error when Supabase public config is missing."))
+		}
+	}
+
+	return violations
+}
+
+func (r *FrontendEnvFallbackRule) violation(ctx *core.FileContext, lineNum int, line string, msg string, suggestion string) *core.Violation {
+	v := r.CreateViolation(ctx.RelPath, lineNum, msg)
+	v.WithCode(strings.TrimSpace(line))
+	v.WithSuggestion(suggestion)
+	v.WithContext("pattern", "frontend-env-fallback")
+	v.WithContext("language", "typescript")
+	return v
+}

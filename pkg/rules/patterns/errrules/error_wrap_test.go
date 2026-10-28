@@ -1,0 +1,317 @@
+package errrules
+
+import (
+	"testing"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestErrorWrapRule(t *testing.T) {
+	tests := []struct {
+		name           string
+		code           string
+		wantViolations int
+	}{
+		{
+			name: "properly wrapped error",
+			code: `package main
+
+import "fmt"
+
+func doSomething() error {
+	err := operation()
+	if err != nil {
+		return fmt.Errorf("doSomething failed: %w", err)
+	}
+	return nil
+}
+
+func operation() error { return nil }`,
+			wantViolations: 0,
+		},
+		{
+			name: "bare error return from the standard library",
+			code: `package main
+
+import "os"
+
+func doSomething() error {
+	err := os.Remove("state.lock")
+	if err != nil {
+		return err
+	}
+	return nil
+}`,
+			wantViolations: 1,
+		},
+		{
+			name: "bare error return from a function of the same package - ok",
+			code: `package main
+
+func doSomething() error {
+	err := operation()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func operation() error { return nil }`,
+			wantViolations: 0,
+		},
+		{
+			name: "multiple bare returns",
+			code: `package main
+
+import "os"
+
+func doSomething() error {
+	err := os.Mkdir("cache", 0o755)
+	if err != nil {
+		return err
+	}
+
+	err = os.Chdir("cache")
+	if err != nil {
+		return err
+	}
+
+	return nil
+}`,
+			wantViolations: 2,
+		},
+		{
+			name: "function with multiple returns including error",
+			code: `package main
+
+import "os"
+
+func getData() (string, error) {
+	_, err := os.Stat("data")
+	if err != nil {
+		return "", err
+	}
+	return "data", nil
+}`,
+			wantViolations: 1,
+		},
+		{
+			name: "function without error return - ok",
+			code: `package main
+
+func doSomething() string {
+	return "hello"
+}`,
+			wantViolations: 0,
+		},
+		{
+			name: "returning new error - ok",
+			code: `package main
+
+import "errors"
+
+func doSomething() error {
+	if condition {
+		return errors.New("something failed")
+	}
+	return nil
+}
+
+var condition bool`,
+			wantViolations: 0,
+		},
+		{
+			name: "returning nil error - ok",
+			code: `package main
+
+func doSomething() error {
+	return nil
+}`,
+			wantViolations: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rule := NewErrorWrapRule()
+
+			ctx := rulestest.InMemoryGoFile(t, "/src/test.go", "/src", tt.code, core.DefaultConfig())
+
+			violations := rule.AnalyzeFile(ctx)
+
+			assert.Len(t, violations, tt.wantViolations, "Code:\n%s", tt.code)
+		})
+	}
+}
+
+// Delegating to the same method on an embedded type is a pass-through: the
+// caller adds the context, so wrapping here would only duplicate it. Every
+// rule's Configure looked like a finding because of this.
+func TestErrorWrapIgnoresEmbeddedDelegation(t *testing.T) {
+	code := `package svc
+
+type Base struct{}
+
+func (b *Base) Configure(settings map[string]any) error { return nil }
+
+type Rule struct {
+	*Base
+}
+
+func (r *Rule) Configure(settings map[string]any) error {
+	if err := r.Base.Configure(settings); err != nil {
+		return err
+	}
+	return nil
+}
+`
+	ctx := errorWrapContext(t, code)
+	if violations := NewErrorWrapRule().AnalyzeFile(ctx); len(violations) != 0 {
+		t.Fatalf("expected no findings, got %d", len(violations))
+	}
+}
+
+// A closure-runner call (RunInTx-style: the error comes from a call taking a
+// func literal) is a transparent pass-through: context is added inside the
+// closure, and wrapping outside would also break sentinel-error comparison for
+// callers that unwrap with errors.Is.
+func TestErrorWrapIgnoresClosureRunner(t *testing.T) {
+	code := `package svc
+
+import "fmt"
+
+func (s *Service) Apply(ctx Context, userID string) error {
+	if err := s.repo.RunInTx(ctx, func(ctx Context) error {
+		if err := s.repo.Save(ctx, userID); err != nil {
+			return fmt.Errorf("save: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+`
+	ctx := errorWrapContext(t, code)
+	if violations := NewErrorWrapRule().AnalyzeFile(ctx); len(violations) != 0 {
+		t.Fatalf("expected no findings, got %d", len(violations))
+	}
+}
+
+// Invoking a caller-supplied callback parameter is the same pass-through: the
+// callback owns its context (RunInTx itself returns fn's error verbatim so
+// domain sentinels survive).
+func TestErrorWrapIgnoresCallbackParameter(t *testing.T) {
+	code := `package svc
+
+func RunInTx(ctx Context, fn func(ctx Context) error) error {
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+`
+	ctx := errorWrapContext(t, code)
+	if violations := NewErrorWrapRule().AnalyzeFile(ctx); len(violations) != 0 {
+		t.Fatalf("expected no findings, got %d", len(violations))
+	}
+}
+
+// A different callee still loses its context and must be reported.
+func TestErrorWrapStillReportsForeignCall(t *testing.T) {
+	code := `package svc
+
+import "os"
+
+func Load(path string) error {
+	if _, err := os.ReadFile(path); err != nil {
+		return err
+	}
+	return nil
+}
+`
+	ctx := errorWrapContext(t, code)
+	if violations := NewErrorWrapRule().AnalyzeFile(ctx); len(violations) != 1 {
+		t.Fatalf("got %d findings, want 1", len(violations))
+	}
+}
+
+func errorWrapContext(t *testing.T, code string) *core.FileContext {
+	t.Helper()
+	ctx := core.NewFileContext("/src/svc.go", "/src", []byte(code), core.DefaultConfig())
+	fset, astFile, err := core.NewParser().ParseGoFile("/src/svc.go", []byte(code))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ctx.SetGoAST(fset, astFile)
+	return ctx
+}
+
+// A callback parameter whose func type is named in a sibling file is the same
+// pass-through as a func(...) literal type.
+func TestErrorWrapIgnoresNamedCallbackTypeFromSiblingFile(t *testing.T) {
+	violations := patterntest.RunRuleOnFiles(t, NewErrorWrapRule(), map[string]string{
+		"store/tx.go": `package store
+
+import "context"
+
+type TxFunc func(ctx context.Context) error
+`,
+		"store/run.go": `package store
+
+import "context"
+
+func RunInTx(ctx context.Context, fn TxFunc) error {
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+`,
+	})
+	assert.Empty(t, violations)
+}
+
+// A foreign call in a typed package is still reported.
+func TestErrorWrapReportsForeignCallInTypedPackage(t *testing.T) {
+	violations := patterntest.RunRuleOnFiles(t, NewErrorWrapRule(), map[string]string{
+		"store/load.go": `package store
+
+import "os"
+
+func Load(path string) error {
+	if _, err := os.ReadFile(path); err != nil {
+		return err
+	}
+	return nil
+}
+`,
+	})
+	assert.Len(t, violations, 1)
+}
+
+// Without type information the named func type of a sibling file is not
+// visible, and it does not need to be: a parameter the function calls is a
+// callback whatever its type is named.
+func TestErrorWrapUntypedNamedCallbackTypeIsPassThrough(t *testing.T) {
+	violations := patterntest.RunRuleOnBrokenFiles(t, NewErrorWrapRule(), map[string]string{
+		"store/tx.go": "package store\n\nimport \"context\"\n\ntype TxFunc func(ctx context.Context) error\n",
+		"store/run.go": `package store
+
+import "context"
+
+func RunInTx(ctx context.Context, fn TxFunc) error {
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func broken() int { return "not an int" }
+`,
+	})
+	assert.Empty(t, violations)
+}

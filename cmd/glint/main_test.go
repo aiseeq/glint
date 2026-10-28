@@ -12,7 +12,8 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
-	"github.com/aiseeq/glint/pkg/rules/patterns"
+	"github.com/aiseeq/glint/pkg/rules/patterns/dbrules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/errrules"
 	"github.com/aiseeq/glint/pkg/rules/typesafety"
 )
 
@@ -228,7 +229,7 @@ func TestAnalyzeFilesHonorsSuppression(t *testing.T) {
 	}{
 		{
 			name: "patterns rule suppressed by rule-colon-safe",
-			rule: patterns.NewMaskedErrorOrConditionRule(),
+			rule: errrules.NewMaskedErrorOrConditionRule(),
 			code: `package svc
 
 func Get() (*Data, error) {
@@ -244,7 +245,7 @@ func Get() (*Data, error) {
 		},
 		{
 			name: "patterns rule not suppressed by another rule's marker",
-			rule: patterns.NewMaskedErrorOrConditionRule(),
+			rule: errrules.NewMaskedErrorOrConditionRule(),
 			code: `package svc
 
 func Get() (*Data, error) {
@@ -304,7 +305,7 @@ func (s *Store) LeakyToo(db *sql.DB) {
 	_, _ = db.Query("SELECT * FROM orders")
 }
 `
-	rule := patterns.NewSelectStarStructScanRule()
+	rule := dbrules.NewSelectStarStructScanRule()
 	cfg := core.DefaultConfig()
 	cfg.Categories["patterns"] = core.CategoryConfig{Rules: map[string]core.RuleConfig{
 		"select-star-struct-scan": {Exceptions: []core.Exception{{Function: "LeakyToo", Reason: "test"}}},

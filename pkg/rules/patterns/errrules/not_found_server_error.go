@@ -1,0 +1,744 @@
+package errrules
+
+import (
+	"errors"
+	"go/ast"
+	"go/constant"
+	"go/token"
+	"go/types"
+	"regexp"
+	"strings"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
+	"golang.org/x/tools/go/types/typeutil"
+)
+
+func init() {
+	rules.Register(NewNotFoundAnsweredAsServerErrorRule())
+}
+
+// NotFoundAnsweredAsServerErrorRule detects an HTTP handler that answers every
+// error of a call with a 5xx while the call can return the project's
+// not-found sentinel:
+//
+//	report, err := r.service.Report(req.Context(), id) // wraps ErrRecordNotFound for an unknown id
+//	if err != nil {
+//	    sendInternalServerError(w, "report failed")
+//	    return
+//	}
+//
+// A client's unknown id is answered as a server failure: the client cannot
+// tell its own mistake from an outage, and the server's error log and alerts
+// fill with requests nothing on the server can fix.
+//
+// What the call can return is followed through the project's code as
+// errors-is-target-unreachable follows it. The branch counts as answering
+// every error when it sends a 5xx (a responder named for a server error, or a
+// 5xx status) and neither compares the error nor hands it to a function that
+// does (a mapper with errors.Is inside).
+type NotFoundAnsweredAsServerErrorRule struct {
+	*rules.BaseRule
+}
+
+// NewNotFoundAnsweredAsServerErrorRule creates the rule
+func NewNotFoundAnsweredAsServerErrorRule() *NotFoundAnsweredAsServerErrorRule {
+	return &NotFoundAnsweredAsServerErrorRule{BaseRule: rules.NewBaseRule(
+		"not-found-answered-as-server-error",
+		"patterns",
+		"Detects an HTTP handler answering every error of a call with a 5xx while the call can return a not-found sentinel — a client's unknown id is reported as a server failure",
+		core.SeverityMedium,
+	)}
+}
+
+// AnalyzeFile is a no-op: what a call returns is found in other files.
+func (r *NotFoundAnsweredAsServerErrorRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
+	return nil
+}
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *NotFoundAnsweredAsServerErrorRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject reports the 5xx answers to errors that can be a not-found.
+func (r *NotFoundAnsweredAsServerErrorRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	if ctx == nil {
+		return nil, errors.New("not found answered as server error: nil Go project context")
+	}
+	flow := newErrorFlow(ctx)
+	var violations []*core.Violation
+	for _, fn := range flow.order {
+		violations = append(violations, serviceNotFoundReturn(flow, fn, r)...)
+		request := patternkit.HandlerRequestParam(fn)
+		if request == nil {
+			continue
+		}
+		fromRequest := requestValues(flow, fn, request)
+		ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
+			if _, nested := n.(*ast.FuncLit); nested {
+				return false
+			}
+			check, ok := n.(*ast.IfStmt)
+			if !ok || len(check.Body.List) == 0 {
+				return true
+			}
+			errIdent := patternkit.ErrNotNilIdent(fn.Info, check.Cond)
+			if errIdent == nil {
+				return true
+			}
+			answer := serverErrorAnswer(fn.Info, check.Body)
+			if answer == nil || patternkit.ComparesError(check.Body) || r.mapsError(flow, fn, check.Body, errIdent) {
+				return true
+			}
+			call := flow.originCall(fn, errIdent, check.Body.List[0])
+			if call == nil || !takesRequestValue(flow, fn, call, request, fromRequest) {
+				return true
+			}
+			set := flow.exprErrors(fn, errIdent, check.Body.List[0], 0)
+			sentinel := notFoundSentinel(set)
+			if sentinel == nil && (!set.notFoundText || !takesClientValueDirectly(flow, fn, call, request)) {
+				return true
+			}
+			line := fn.File.LineFor(answer)
+			if fn.File.IsSuppressed(line, r.Name()) {
+				return true
+			}
+			var message, suggestion string
+			if sentinel != nil {
+				message = "Every error of this call is answered with a 5xx, and the call can return " + sentinel.Name() + " — a client's unknown id is reported as a server failure"
+				suggestion = "Answer " + sentinel.Name() + " with 404 (errors.Is) before the generic 5xx, or pass the error to the package's not-found-aware responder"
+			} else {
+				message = "Every error of this call is answered with a 5xx, and the call fails with a plain \"not found\" error no caller can tell apart — a client's unknown value is reported as a server failure"
+				suggestion = "Return a not-found sentinel or error type from the callee and answer it with 4xx (errors.Is/As) before the generic 5xx"
+			}
+			v := r.CreateViolation(fn.File.RelPath, line, message)
+			v.WithCode(strings.TrimSpace(fn.File.GetLine(line)))
+			v.WithSuggestion(suggestion)
+			violations = append(violations, v)
+			return true
+		})
+	}
+	return violations, nil
+}
+
+// serviceNotFoundReturn detects a context-aware operation whose every error
+// is replaced by a not-found sentinel inside a non-HTTP service function.
+func serviceNotFoundReturn(flow *errorFlow, fn patternkit.TypedFunc, rule *NotFoundAnsweredAsServerErrorRule) []*core.Violation {
+	if fn.Decl.Body == nil || patternkit.HandlerRequestParam(fn) != nil {
+		return nil
+	}
+	found := []*core.Violation{}
+	ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
+		if _, nested := n.(*ast.FuncLit); nested {
+			return false
+		}
+		check, ok := n.(*ast.IfStmt)
+		if !ok || len(check.Body.List) == 0 {
+			return true
+		}
+		errIdent := patternkit.ErrNotNilIdent(fn.Info, check.Cond)
+		call := (*ast.CallExpr)(nil)
+		if errIdent != nil {
+			call = flow.originCall(fn, errIdent, check.Body.List[0])
+		} else {
+			call = resultFailureOrigin(fn, check)
+		}
+		if call == nil || !callUsesContext(fn, call) {
+			return true
+		}
+		if patternkit.ComparesError(check.Body) {
+			return true
+		}
+		var sentinel *types.Var
+		plainNotFound := false
+		var reported ast.Node
+		ast.Inspect(check.Body, func(child ast.Node) bool {
+			if _, nested := child.(*ast.FuncLit); nested {
+				return false
+			}
+			ret, ok := child.(*ast.ReturnStmt)
+			if !ok {
+				return true
+			}
+			for i, result := range ret.Results {
+				if !isErrorReturn(fn, ret, i) || returnCarriesCheckedError(fn, check, ret, result, errIdent) {
+					continue
+				}
+				candidate, freshNotFound := strictNotFoundReturn(flow, fn, result, ret)
+				if candidate != nil {
+					sentinel, reported = candidate, check
+					return false
+				}
+				if freshNotFound {
+					plainNotFound, reported = true, check
+					return false
+				}
+			}
+			return true
+		})
+		if sentinel == nil && !plainNotFound {
+			return true
+		}
+		line := fn.File.LineFor(reported)
+		if fn.File.IsSuppressed(line, rule.Name()) {
+			return true
+		}
+		answer := "a not-found error"
+		if sentinel != nil {
+			answer = sentinel.Name()
+		}
+		v := rule.CreateViolation(fn.File.RelPath, line,
+			"Every error of this context-aware call is returned as "+answer+" — storage failures are reported as missing data")
+		v.WithCode(strings.TrimSpace(fn.File.GetLine(line)))
+		v.WithSuggestion("Return the not-found sentinel only when errors.Is identifies the storage not-found error; wrap other failures as storage errors")
+		found = append(found, v)
+		return true
+	})
+	return found
+}
+
+// isErrorReturn reports whether a return expression occupies an error result.
+func isErrorReturn(fn patternkit.TypedFunc, ret *ast.ReturnStmt, index int) bool {
+	obj, ok := fn.Info.Defs[fn.Decl.Name].(*types.Func)
+	if !ok {
+		return false
+	}
+	sig, ok := obj.Type().(*types.Signature)
+	if !ok || ret.Results == nil || index >= sig.Results().Len() {
+		return false
+	}
+	errorType := types.Universe.Lookup("error").Type()
+	return types.AssignableTo(sig.Results().At(index).Type(), errorType)
+}
+
+// returnCarriesCheckedError recognizes direct propagation and values returned
+// from calls that received the checked error earlier in the function.
+func returnCarriesCheckedError(fn patternkit.TypedFunc, check *ast.IfStmt, ret *ast.ReturnStmt, result ast.Expr, errIdent *ast.Ident) bool {
+	tainted := map[types.Object]bool{}
+	if errIdent != nil && fn.Info.Uses[errIdent] != nil {
+		tainted[fn.Info.Uses[errIdent]] = true
+	}
+	// For IsSuccess results, the result value is the checked failure carrier.
+	if errIdent == nil {
+		if unary, ok := ast.Unparen(check.Cond).(*ast.UnaryExpr); ok {
+			if call, ok := ast.Unparen(unary.X).(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if id, ok := ast.Unparen(sel.X).(*ast.Ident); ok && fn.Info.Uses[id] != nil {
+						tainted[fn.Info.Uses[id]] = true
+					}
+				}
+			}
+		}
+	}
+	containsTainted := func(expr ast.Expr) bool {
+		found := false
+		ast.Inspect(expr, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if ok && tainted[fn.Info.Uses[id]] {
+				found = true
+				return false
+			}
+			return !found
+		})
+		return found
+	}
+	ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.Pos() >= ret.Pos() {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			if i >= len(assign.Rhs) || !containsTainted(assign.Rhs[i]) {
+				continue
+			}
+			if id, ok := ast.Unparen(lhs).(*ast.Ident); ok && fn.Info.ObjectOf(id) != nil {
+				tainted[fn.Info.ObjectOf(id)] = true
+			}
+		}
+		return true
+	})
+	return containsTainted(result)
+}
+
+// strictNotFoundReturn accepts only an explicit sentinel or a fresh not-found
+// error. Flow-derived provenance on an arbitrary local error is insufficient.
+func strictNotFoundReturn(flow *errorFlow, fn patternkit.TypedFunc, result ast.Expr, ret *ast.ReturnStmt) (*types.Var, bool) {
+	set := flow.exprErrors(fn, result, ret, 0)
+	switch ast.Unparen(result).(type) {
+	case *ast.Ident, *ast.SelectorExpr:
+		var obj types.Object
+		switch expr := ast.Unparen(result).(type) {
+		case *ast.Ident:
+			obj = fn.Info.Uses[expr]
+		case *ast.SelectorExpr:
+			obj = fn.Info.Uses[expr.Sel]
+		}
+		if v, ok := obj.(*types.Var); ok && v.Pkg() != nil && v.Parent() == v.Pkg().Scope() {
+			return notFoundSentinel(set), false
+		}
+		return nil, false
+	case *ast.CallExpr:
+		call, ok := ast.Unparen(result).(*ast.CallExpr)
+		if !ok {
+			return nil, false
+		}
+		name := ""
+		switch fun := ast.Unparen(call.Fun).(type) {
+		case *ast.Ident:
+			name = fun.Name
+		case *ast.SelectorExpr:
+			name = fun.Sel.Name
+		}
+		if name != "Errorf" && name != "New" {
+			return nil, false
+		}
+		if candidate := notFoundSentinel(set); candidate != nil {
+			if containsWrapVerb(call) && trustedWrappedNotFound(fn, call) {
+				return candidate, false
+			}
+		}
+		if set.notFoundText && !containsWrapVerb(call) {
+			return nil, true
+		}
+	}
+	return nil, false
+}
+
+func trustedWrappedNotFound(fn patternkit.TypedFunc, call *ast.CallExpr) bool {
+	if len(call.Args) < 2 {
+		return false
+	}
+	for _, arg := range call.Args[1:] {
+		if !trustedSentinelExpr(fn, arg) {
+			return false
+		}
+	}
+	return true
+}
+
+func trustedSentinelExpr(fn patternkit.TypedFunc, expr ast.Expr) bool {
+	var obj types.Object
+	switch value := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		obj = fn.Info.Uses[value]
+	case *ast.SelectorExpr:
+		obj = fn.Info.Uses[value.Sel]
+	default:
+		return false
+	}
+	v, ok := obj.(*types.Var)
+	return ok && v.Pkg() != nil && v.Parent() == v.Pkg().Scope() && strings.Contains(strings.ToLower(v.Name()), "notfound")
+}
+
+func containsWrapVerb(call *ast.CallExpr) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	lit, ok := ast.Unparen(call.Args[0]).(*ast.BasicLit)
+	return ok && strings.Contains(lit.Value, "%w")
+}
+
+// resultFailureOrigin finds a context-aware call assigned to a result whose
+// IsSuccess method is negated by the checked condition.
+func resultFailureOrigin(fn patternkit.TypedFunc, check *ast.IfStmt) *ast.CallExpr {
+	unary, ok := ast.Unparen(check.Cond).(*ast.UnaryExpr)
+	if !ok || unary.Op != token.NOT {
+		return nil
+	}
+	call, ok := ast.Unparen(unary.X).(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 {
+		return nil
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "IsSuccess" {
+		return nil
+	}
+	result, ok := ast.Unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	obj := fn.Info.Uses[result]
+	var origin *ast.CallExpr
+	ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.End() > check.Pos() {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			ident, ok := lhs.(*ast.Ident)
+			if !ok || fn.Info.ObjectOf(ident) != obj {
+				continue
+			}
+			if len(assign.Rhs) == len(assign.Lhs) {
+				origin, _ = ast.Unparen(assign.Rhs[i]).(*ast.CallExpr)
+			} else if len(assign.Rhs) == 1 {
+				origin, _ = ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+			}
+		}
+		return true
+	})
+	return origin
+}
+
+// callUsesContext limits the service variant to calls that explicitly receive
+// a context, a common signature for storage operations that may fail broadly.
+func callUsesContext(fn patternkit.TypedFunc, call *ast.CallExpr) bool {
+	for _, arg := range call.Args {
+		if types.TypeString(fn.Info.TypeOf(arg), nil) == "context.Context" {
+			return true
+		}
+	}
+	return false
+}
+
+// requestDataField is what an *http.Request carries from the client.
+var requestDataField = map[string]bool{
+	"URL": true, "Body": true, "Form": true, "PostForm": true, "MultipartForm": true, "Header": true,
+	"PathValue": true, "FormValue": true, "PostFormValue": true, "FormFile": true, "Cookie": true, "Cookies": true,
+	"ParseForm": true, "ParseMultipartForm": true, "MultipartReader": true,
+}
+
+// mentionsRequestData reports an expression reading what the client sent: a
+// path, query, form or body read off the request, a library helper handed
+// the request to read it (mux.Vars), a project helper that reads it, or a
+// variable holding such a value. The request's context carries what
+// middleware put there, not the client's data.
+func mentionsRequestData(flow *errorFlow, fn patternkit.TypedFunc, expr ast.Node, request *types.Var, values map[types.Object]bool, depth int) bool {
+	info := fn.Info
+	isRequest := func(e ast.Expr) bool {
+		ident, ok := ast.Unparen(e).(*ast.Ident)
+		return ok && info.Uses[ident] == request
+	}
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.SelectorExpr:
+			if isRequest(node.X) && requestDataField[node.Sel.Name] {
+				found = true
+			}
+		case *ast.CallExpr:
+			handed := false
+			for _, arg := range node.Args {
+				handed = handed || isRequest(arg)
+			}
+			if handed {
+				found = depth < maxRequestHelperDepth && helperReadsRequest(flow, fn, node, request, depth+1)
+			}
+		case *ast.Ident:
+			if obj := info.Uses[node]; obj != nil && values[obj] {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// maxRequestHelperDepth bounds how deep helpers handed the request are read.
+const maxRequestHelperDepth = 3
+
+// helperReadsRequest reports a call handed the request that reads what the
+// client sent: a project function reading it (queryUUID(w, req, "id")), or a
+// library function (mux.Vars(req)). A responder (sendError(w, req, ...)) and
+// a helper reading only the request's context (currentStaff(w, req)) do not.
+func helperReadsRequest(flow *errorFlow, fn patternkit.TypedFunc, call *ast.CallExpr, request *types.Var, depth int) bool {
+	callee, ok := typeutil.Callee(fn.Info, call).(*types.Func)
+	if !ok {
+		return false
+	}
+	// A responder reads the request's path for its trace, not as input.
+	if patternkit.ResponderName.MatchString(callee.Name()) {
+		return false
+	}
+	target, ok := flow.funcs[callee.Origin()]
+	if !ok {
+		return true
+	}
+	for i, arg := range call.Args {
+		ident, ok := ast.Unparen(arg).(*ast.Ident)
+		if !ok || fn.Info.Uses[ident] != request {
+			continue
+		}
+		param, ok := target.Info.Defs[patternkit.ParamIdentAt(target.Decl.Type, i)].(*types.Var)
+		if ok && mentionsRequestData(flow, target, target.Decl.Body, param, map[types.Object]bool{}, depth) {
+			return true
+		}
+	}
+	return false
+}
+
+// requestValues returns the variables of a handler holding what the client
+// sent: a path or query value, a decoded body, and what is computed from them.
+//
+// A handler helper's own parameters next to the writer and the request
+// (convertFrom(w, r, params convertFromParams), show(w, r, id string)) hold
+// what its caller parsed from the request: strings and value structs count.
+func requestValues(flow *errorFlow, fn patternkit.TypedFunc, request *types.Var) map[types.Object]bool {
+	values := map[types.Object]bool{}
+	if sig := funcSignature(fn); sig != nil {
+		params := sig.Params()
+		for param := range params.Variables() {
+			switch t := param.Type().(type) {
+			case *types.Named:
+				if _, isStruct := t.Underlying().(*types.Struct); isStruct && t.Obj().Pkg() != nil && t.Obj().Pkg().Path() != "net/http" {
+					values[param] = true
+				}
+			case *types.Basic:
+				if t.Info()&types.IsString != 0 {
+					values[param] = true
+				}
+			}
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		mark := func(expr ast.Expr) {
+			if ident, ok := ast.Unparen(expr).(*ast.Ident); ok {
+				if obj := fn.Info.ObjectOf(ident); obj != nil && !values[obj] {
+					values[obj] = true
+					changed = true
+				}
+			}
+		}
+		ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.AssignStmt:
+				for _, rhs := range node.Rhs {
+					if mentionsRequestData(flow, fn, rhs, request, values, 0) {
+						for _, lhs := range node.Lhs {
+							mark(lhs)
+						}
+					}
+				}
+			case *ast.CallExpr:
+				// json.NewDecoder(req.Body).Decode(&body) fills body.
+				if mentionsRequestData(flow, fn, node.Fun, request, values, 0) {
+					for _, arg := range node.Args {
+						if unary, ok := ast.Unparen(arg).(*ast.UnaryExpr); ok && unary.Op == token.AND {
+							mark(unary.X)
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	return values
+}
+
+// takesRequestValue reports a call handed what the client sent, other than
+// a number.
+func takesRequestValue(flow *errorFlow, fn patternkit.TypedFunc, call *ast.CallExpr, request *types.Var, values map[types.Object]bool) bool {
+	written := writtenBefore(fn, call)
+	for _, arg := range call.Args {
+		// A number the client sent (a page size, a limit) names no record.
+		if basic, ok := fn.Info.TypeOf(arg).Underlying().(*types.Basic); ok && basic.Info()&(types.IsNumeric|types.IsBoolean) != 0 {
+			continue
+		}
+		// The id of a record the handler has just written was given by the
+		// server: a miss reading it back is the server's inconsistency.
+		if root := patternkit.RootIdent(arg); root != nil && written[fn.Info.ObjectOf(root)] {
+			continue
+		}
+		if mentionsRequestData(flow, fn, arg, request, values, 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// funcSignature returns the signature of the declared function, nil when
+// the declaration has no type.
+func funcSignature(fn patternkit.TypedFunc) *types.Signature {
+	obj, ok := fn.Info.Defs[fn.Decl.Name].(*types.Func)
+	if !ok {
+		return nil
+	}
+	sig, _ := obj.Type().(*types.Signature)
+	return sig
+}
+
+// takesClientValueDirectly reports a call handed request data itself or a
+// field of the handler helper's own parameter: a plain "not found" text is
+// weak evidence, so a value the server fetched with the client's input in
+// hand (a token a refresh call returned) does not count.
+func takesClientValueDirectly(flow *errorFlow, fn patternkit.TypedFunc, call *ast.CallExpr, request *types.Var) bool {
+	sig := funcSignature(fn)
+	if sig == nil {
+		return false
+	}
+	params := sig.Params()
+	for _, arg := range call.Args {
+		if mentionsRequestData(flow, fn, arg, request, map[types.Object]bool{}, 0) {
+			return true
+		}
+		root := patternkit.RootIdent(arg)
+		if root == nil {
+			continue
+		}
+		for v := range params.Variables() {
+			if fn.Info.ObjectOf(root) == v && v != request {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// writtenBefore returns the variables a handler hands to a write call
+// (RecordEntry(ctx, entry), Create(&row)) before call.
+func writtenBefore(fn patternkit.TypedFunc, call *ast.CallExpr) map[types.Object]bool {
+	written := map[types.Object]bool{}
+	ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
+		write, ok := n.(*ast.CallExpr)
+		if !ok || write.Pos() >= call.Pos() {
+			return true
+		}
+		name := ""
+		switch fun := write.Fun.(type) {
+		case *ast.SelectorExpr:
+			name = fun.Sel.Name
+		case *ast.Ident:
+			name = fun.Name
+		}
+		if !helpers.IsWriteName(name) {
+			return true
+		}
+		for _, arg := range write.Args {
+			if unary, ok := ast.Unparen(arg).(*ast.UnaryExpr); ok && unary.Op == token.AND {
+				arg = unary.X
+			}
+			if ident, ok := ast.Unparen(arg).(*ast.Ident); ok {
+				if obj := fn.Info.ObjectOf(ident); obj != nil {
+					written[obj] = true
+				}
+			}
+		}
+		return true
+	})
+	return written
+}
+
+// serverErrorResponder is the name of a function answering a server error.
+var serverErrorResponder = regexp.MustCompile(`(?i)internal_?server_?error|internalerror|servererror|serviceunavailable|badgateway`)
+
+// serverErrorAnswer returns the call of a branch that answers with a 5xx: a
+// responder named for a server error, or a call handed a 5xx status.
+func serverErrorAnswer(info *types.Info, body *ast.BlockStmt) *ast.CallExpr {
+	var answer *ast.CallExpr
+	ast.Inspect(body, func(n ast.Node) bool {
+		if answer != nil {
+			return false
+		}
+		if _, nested := n.(*ast.FuncLit); nested {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if serverErrorResponder.MatchString(helpers.CalleeName(call)) {
+			answer = call
+			return false
+		}
+		for _, arg := range call.Args {
+			if tv, ok := info.Types[arg]; ok && tv.Value != nil && tv.Value.Kind() == constant.Int {
+				if status, exact := constant.Int64Val(tv.Value); exact && status >= 500 && status <= 599 && patternkit.IsStatusExpr(arg) {
+					answer = call
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return answer
+}
+
+// mapsError reports a branch handing the error to a project function that
+// tells it apart: a mapper choosing the status by errors.Is on the parameter
+// the error arrives in. A logger that only checks the request's context does
+// not count.
+func (r *NotFoundAnsweredAsServerErrorRule) mapsError(flow *errorFlow, fn patternkit.TypedFunc, body *ast.BlockStmt, errIdent *ast.Ident) bool {
+	errVar := fn.Info.Uses[errIdent]
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || found {
+			return !found
+		}
+		callee, ok := typeutil.Callee(fn.Info, call).(*types.Func)
+		if !ok {
+			return true
+		}
+		target, ok := flow.funcs[callee.Origin()]
+		if !ok {
+			return true
+		}
+		for i, arg := range call.Args {
+			if ident, ok := ast.Unparen(arg).(*ast.Ident); ok && fn.Info.Uses[ident] == errVar && comparesParam(target, i) {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// comparesParam reports a function that tells its parameter at index apart:
+// errors.Is or errors.As on it, or a comparison of it with a sentinel.
+func comparesParam(fn patternkit.TypedFunc, index int) bool {
+	obj, ok := fn.Info.Defs[fn.Decl.Name].(*types.Func)
+	if !ok {
+		return false
+	}
+	sig, ok := obj.Type().(*types.Signature)
+	if !ok || index >= sig.Params().Len() {
+		return false
+	}
+	param := sig.Params().At(index)
+	isParam := func(expr ast.Expr) bool {
+		ident, ok := ast.Unparen(expr).(*ast.Ident)
+		return ok && fn.Info.Uses[ident] == param
+	}
+	found := false
+	ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && helpers.IsIdentNamed(sel.X, "errors") && (sel.Sel.Name == "Is" || sel.Sel.Name == "As") &&
+				len(node.Args) > 0 && isParam(node.Args[0]) {
+				found = true
+			}
+		case *ast.BinaryExpr:
+			if (node.Op == token.EQL || node.Op == token.NEQ) && isParam(node.X) && !helpers.IsNilIdent(ast.Unparen(node.Y)) {
+				found = true
+			}
+		case *ast.SwitchStmt:
+			if node.Tag != nil && isParam(node.Tag) {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// notFoundSentinel returns the project's not-found sentinel among the errors
+// a value may hold: ErrNotFound, ErrRecordNotFound. sql.ErrNoRows is left
+// out: the model of the driver gives it to every single-row read, an
+// aggregate or an INSERT ... RETURNING included, which always has its row.
+func notFoundSentinel(set *errorSet) *types.Var {
+	var found *types.Var
+	for v := range set.sentinels {
+		if isNoRows(v) || !strings.Contains(strings.ToLower(v.Name()), "notfound") {
+			continue
+		}
+		if found == nil || v.Name() < found.Name() {
+			found = v
+		}
+	}
+	return found
+}

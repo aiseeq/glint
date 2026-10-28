@@ -1,0 +1,172 @@
+package patternkit
+
+import (
+	"go/ast"
+	"go/token"
+	"go/types"
+	"strings"
+
+	"github.com/aiseeq/glint/pkg/rules/helpers"
+)
+
+// ZeroAnsweringDecimalParsers returns the functions of the file that take a
+// string and answer an empty or unreadable one with decimal.Zero and no
+// error.
+func ZeroAnsweringDecimalParsers(file *ast.File) map[string]bool {
+	parsers := make(map[string]bool)
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || fn.Recv != nil || fn.Type.Results == nil || len(fn.Type.Results.List) == 0 {
+			continue
+		}
+		if !isDecimalType(fn.Type.Results.List[0].Type) || !hasStringParam(fn) {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			ifStmt, ok := n.(*ast.IfStmt)
+			if !ok || ErrNilCheckName(ifStmt.Cond) == "" && !comparesToEmptyString(ifStmt.Cond) {
+				return true
+			}
+			for _, stmt := range ifStmt.Body.List {
+				if ret, ok := stmt.(*ast.ReturnStmt); ok && returnsZeroDecimalWithoutError(ret) {
+					parsers[fn.Name.Name] = true
+				}
+			}
+			return true
+		})
+	}
+	return parsers
+}
+
+func isDecimalType(expr ast.Expr) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Decimal" && helpers.IsIdentNamed(sel.X, "decimal")
+}
+
+func isDecimalZeroSyntax(expr ast.Expr) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Zero" && helpers.IsIdentNamed(sel.X, "decimal")
+}
+
+func hasStringParam(fn *ast.FuncDecl) bool {
+	for _, field := range fn.Type.Params.List {
+		if helpers.IsIdentNamed(field.Type, "string") {
+			return true
+		}
+	}
+	return false
+}
+
+// comparesToEmptyString reports `s == ""`.
+func comparesToEmptyString(cond ast.Expr) bool {
+	bin, ok := cond.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.EQL {
+		return false
+	}
+	lit, ok := bin.Y.(*ast.BasicLit)
+	return ok && lit.Kind == token.STRING && lit.Value == `""`
+}
+
+// returnsZeroDecimalWithoutError reports `return decimal.Zero` and
+// `return decimal.Zero, nil`.
+func returnsZeroDecimalWithoutError(ret *ast.ReturnStmt) bool {
+	switch len(ret.Results) {
+	case 1:
+		return isDecimalZeroSyntax(ret.Results[0])
+	case 2:
+		return isDecimalZeroSyntax(ret.Results[0]) && helpers.IsNilIdent(ret.Results[1])
+	}
+	return false
+}
+
+// ZeroReturnForNilAmount returns the return of `if amount == nil { return
+// ...decimal.Zero... }` and the pointer's name, when the pointer is named for
+// money or the next statement returns its value (*amount) - decimal.Zero
+// stands in for it: the early-return form of zeroPresetOverNilAmount. A
+// return that also hands back an error refuses the missing amount and is not
+// reported.
+func ZeroReturnForNilAmount(first, next ast.Stmt) (*ast.ReturnStmt, string) {
+	check, ok := first.(*ast.IfStmt)
+	if !ok {
+		return nil, ""
+	}
+	cond, ok := check.Cond.(*ast.BinaryExpr)
+	if !ok || cond.Op != token.EQL || !helpers.IsNilIdent(cond.Y) || check.Init != nil || len(check.Body.List) != 1 {
+		return nil, ""
+	}
+	ret, ok := check.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return nil, ""
+	}
+	source := types.ExprString(cond.X)
+	last := source[strings.LastIndex(source, ".")+1:]
+	if !HasWordFrom(last, MoneyWords) && !returnsDeref(next, source) {
+		return nil, ""
+	}
+	zero := false
+	ast.Inspect(ret.Results[0], func(n ast.Node) bool {
+		if expr, ok := n.(ast.Expr); ok && isDecimalZeroSyntax(expr) {
+			zero = true
+		}
+		return !zero
+	})
+	if !zero {
+		return nil, ""
+	}
+	return ret, last
+}
+
+// ZeroPresetOverNilAmount returns the money variable of
+//
+//	payout := decimal.Zero
+//	if desired.payoutAmount != nil { payout = *desired.payoutAmount }
+func ZeroPresetOverNilAmount(first, second ast.Stmt) string {
+	preset, ok := first.(*ast.AssignStmt)
+	if !ok || preset.Tok != token.DEFINE || len(preset.Lhs) != 1 || len(preset.Rhs) != 1 || !isDecimalZeroSyntax(preset.Rhs[0]) {
+		return ""
+	}
+	target, ok := preset.Lhs[0].(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	ifStmt, ok := second.(*ast.IfStmt)
+	if !ok || ifStmt.Else != nil || len(ifStmt.Body.List) != 1 {
+		return ""
+	}
+	cond, ok := ifStmt.Cond.(*ast.BinaryExpr)
+	if !ok || cond.Op != token.NEQ || !helpers.IsNilIdent(cond.Y) {
+		return ""
+	}
+	assign, ok := ifStmt.Body.List[0].(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !helpers.IsIdentNamed(assign.Lhs[0], target.Name) {
+		return ""
+	}
+	star, ok := assign.Rhs[0].(*ast.StarExpr)
+	source := types.ExprString(cond.X)
+	if !ok || types.ExprString(star.X) != source {
+		return ""
+	}
+	last := source[strings.LastIndex(source, ".")+1:]
+	if !HasWordFrom(target.Name, MoneyWords) && !HasWordFrom(last, MoneyWords) {
+		return ""
+	}
+	return target.Name
+}
+
+// returnsDeref reports a return statement that reads *source.
+func returnsDeref(stmt ast.Stmt, source string) bool {
+	ret, ok := stmt.(*ast.ReturnStmt)
+	if !ok {
+		return false
+	}
+	found := false
+	for _, result := range ret.Results {
+		ast.Inspect(result, func(n ast.Node) bool {
+			if star, ok := n.(*ast.StarExpr); ok && types.ExprString(star.X) == source {
+				found = true
+			}
+			return !found
+		})
+	}
+	return found
+}

@@ -1,0 +1,595 @@
+package gorules
+
+import (
+	"go/ast"
+	"go/constant"
+	"go/token"
+	"go/types"
+	"reflect"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
+)
+
+func init() {
+	rules.Register(NewStructMappingDropsFieldRule())
+}
+
+// StructMappingDropsFieldRule detects a struct literal or constructor mapping
+// one struct into another that leaves out fields both types have:
+//
+//	return models.Withdrawal{
+//		ID:        r.ID,
+//		Amount:    r.Amount,
+//		UserEmail: r.UserEmail,
+//	} // r has TxHash and CreatedAt too, Withdrawal has them: left zero
+//
+// The literal copies fields from a source value by name, at least two of
+// them, and the target type has further fields the source holds under the
+// same name and an assignable type. The value the source had never reaches
+// the target: the response shows it empty, the next step reads a zero.
+// Not reported: fields the function sets afterwards (w.TxHash = ...,
+// &w.TxHash) or a literal handed to a call that may fill it (a repository
+// write stores it as it is), fields an
+// outer literal sets, fields tagged json:"-", credentials (password,
+// secret, tokens), a copy into the source's own type, a group holding a
+// list of sources, and the ID and timestamps of a new record (a literal
+// that does not copy the source's ID).
+//
+// A literal that flattens a nested value under its parent's name
+// (SenderFirstName: req.Sender.FirstName) is checked the same way: a field
+// of the nested value whose prefixed name the target has and the literal
+// skips is reported.
+type StructMappingDropsFieldRule struct {
+	*rules.BaseRule
+}
+
+// NewStructMappingDropsFieldRule creates the rule
+func NewStructMappingDropsFieldRule() *StructMappingDropsFieldRule {
+	return &StructMappingDropsFieldRule{BaseRule: rules.NewBaseRule(
+		"struct-mapping-drops-field",
+		"patterns",
+		"Detects a struct literal or constructor mapping one struct into another that leaves out fields both have — the value never reaches the target",
+		core.SeverityMedium,
+	)}
+}
+
+// AnalyzeFile is a no-op: the fields of both types decide.
+func (r *StructMappingDropsFieldRule) AnalyzeFile(_ *core.FileContext) []*core.Violation { return nil }
+
+// RequiresSSA reports that typed syntax is enough for this rule.
+func (r *StructMappingDropsFieldRule) RequiresSSA() bool { return false }
+
+var credentialField = regexp.MustCompile(`(?i)password|secret|salt|privatekey|token$`)
+
+// recordLifecycle are the fields a new record gets on its own: a literal
+// that does not copy the source's ID makes another record, not a view of
+// the source.
+var recordLifecycle = map[string]bool{"ID": true, "CreatedAt": true, "UpdatedAt": true, "DeletedAt": true, "Version": true}
+
+// AnalyzeGoProject reports the mapping literals that drop fields.
+func (r *StructMappingDropsFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+		var violations []*core.Violation
+		outer := outerKeys(file.GoAST)
+		for _, body := range patternkit.FunctionBodies(file.GoAST) {
+			ast.Inspect(body, func(n ast.Node) bool {
+				if _, nested := n.(*ast.FuncLit); nested {
+					return false // its own body is walked on its own
+				}
+				lit, ok := n.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				src, dropped := droppedFields(lit, body, info, outer[lit])
+				line := file.LineFor(lit)
+				if file.IsSuppressed(line, r.Name()) {
+					return true
+				}
+				if prefixed := prefixedDrops(lit, body, info, outer[lit]); len(prefixed) > 0 {
+					v := r.CreateViolation(file.RelPath, line, "Struct literal flattens nested fields under their parent's name (SenderFirstName: req.Sender.FirstName) but leaves out "+strings.Join(prefixed, ", ")+" — the nested source has them, and the target gets zero values")
+					v.WithCode(strings.TrimSpace(file.GetLine(line)))
+					v.WithSuggestion("Copy the fields too; a nested field added to the request needs its flat counterpart mapped")
+					violations = append(violations, v)
+				}
+				if len(dropped) == 0 {
+					return true
+				}
+				v := r.CreateViolation(file.RelPath, line, "Struct literal copies fields from "+types.ExprString(src)+" by name but leaves out "+strings.Join(dropped, ", ")+" — the source has them, and the target gets zero values")
+				v.WithCode(strings.TrimSpace(file.GetLine(line)))
+				v.WithSuggestion("Copy the fields too, or set them after the literal; a field left out on purpose is worth a suppression with the reason")
+				violations = append(violations, v)
+				return true
+			})
+			ast.Inspect(body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				dropped := constructorDroppedFields(call, body, info)
+				if len(dropped) > 0 {
+					line := file.LineFor(call)
+					if !file.IsSuppressed(line, r.Name()) {
+						v := r.CreateViolation(file.RelPath, line, "Constructor maps fields from a source struct but supplies literals for "+strings.Join(dropped, ", ")+" instead — the source values never reach the target")
+						v.WithCode(strings.TrimSpace(file.GetLine(line)))
+						v.WithSuggestion("Pass the matching source fields to the constructor, or suppress the intentional defaults with a reason")
+						violations = append(violations, v)
+					}
+				}
+				return true
+			})
+		}
+		return violations
+	})
+}
+
+// constructorDroppedFields finds constructor arguments that replace source
+// fields with literals while other same-named fields from that source are
+// mapped through parameters whose names match the target fields.
+func constructorDroppedFields(call *ast.CallExpr, body *ast.BlockStmt, info *types.Info) []string {
+	signature, ok := info.TypeOf(call.Fun).(*types.Signature)
+	if !ok || signature.Params() == nil || signature.Results() == nil || signature.Results().Len() == 0 {
+		return nil
+	}
+	target, ok := patternkit.StructOf(signature.Results().At(0).Type())
+	if !ok {
+		return nil
+	}
+	type sourceRef struct {
+		object types.Object
+		typeOf types.Type
+		copied map[string]bool
+	}
+	sources := make(map[types.Object]*sourceRef)
+	for i, arg := range call.Args {
+		if i >= signature.Params().Len() {
+			break
+		}
+		selector, ok := ast.Unparen(arg).(*ast.SelectorExpr)
+		if !ok || info.Selections[selector] == nil || info.Selections[selector].Kind() != types.FieldVal {
+			continue
+		}
+		base, ok := ast.Unparen(selector.X).(*ast.Ident)
+		if !ok {
+			continue
+		}
+		object := info.ObjectOf(base)
+		if object == nil {
+			continue
+		}
+		ref := sources[object]
+		if ref == nil {
+			ref = &sourceRef{object: object, typeOf: info.TypeOf(base), copied: make(map[string]bool)}
+			sources[object] = ref
+		}
+		param := signature.Params().At(i)
+		if strings.EqualFold(param.Name(), selector.Sel.Name) {
+			ref.copied[selector.Sel.Name] = true
+		}
+	}
+	var dropped []string
+	for _, ref := range sources {
+		if len(ref.copied) == 0 {
+			continue
+		}
+		srcType := ref.typeOf
+		var sourceDropped []string
+		if ptr, ok := srcType.(*types.Pointer); ok {
+			srcType = ptr.Elem()
+		}
+		for field := range target.Fields.Fields() {
+			name := field.Name()
+			if ref.copied[name] || field.Embedded() {
+				continue
+			}
+			obj, _, _ := types.LookupFieldOrMethod(srcType, true, target.Pkg, name)
+			srcField, ok := obj.(*types.Var)
+			if !ok || !srcField.IsField() || !types.AssignableTo(srcField.Type(), field.Type()) {
+				continue
+			}
+			if sourceFieldRead(body, info, ref.object, name) {
+				continue
+			}
+			for i := 0; i < signature.Params().Len() && i < len(call.Args); i++ {
+				param := signature.Params().At(i)
+				if !strings.EqualFold(param.Name(), name) || !literalArgument(call.Args[i], info) {
+					continue
+				}
+				sourceDropped = append(sourceDropped, name)
+				break
+			}
+		}
+		if len(sourceDropped) >= 2 {
+			dropped = append(dropped, sourceDropped...)
+		}
+	}
+	sort.Strings(dropped)
+	return dropped
+}
+
+func sourceFieldRead(body *ast.BlockStmt, info *types.Info, source types.Object, field string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		selector, ok := n.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != field || info.Selections[selector] == nil || info.Selections[selector].Kind() != types.FieldVal {
+			return true
+		}
+		base, ok := ast.Unparen(selector.X).(*ast.Ident)
+		if ok && info.ObjectOf(base) == source {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func literalArgument(expr ast.Expr, info *types.Info) bool {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.BasicLit:
+		return nonzeroConstant(info.Types[e].Value)
+	case *ast.CompositeLit:
+		if len(e.Elts) == 0 {
+			return false
+		}
+		for _, elt := range e.Elts {
+			if pair, ok := elt.(*ast.KeyValueExpr); ok {
+				if !constantExpression(pair.Key, info) || !constantExpression(pair.Value, info) {
+					return false
+				}
+				continue
+			}
+			if !constantExpression(elt, info) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func constantExpression(expr ast.Expr, info *types.Info) bool {
+	tv, ok := info.Types[ast.Unparen(expr)]
+	return ok && tv.Value != nil
+}
+
+func nonzeroConstant(value constant.Value) bool {
+	if value == nil {
+		return false
+	}
+	switch value.Kind() {
+	case constant.Bool:
+		return constant.BoolVal(value)
+	case constant.String:
+		return constant.StringVal(value) != ""
+	case constant.Int, constant.Float:
+		return constant.Sign(value) != 0
+	case constant.Complex:
+		return constant.Sign(constant.Real(value)) != 0 || constant.Sign(constant.Imag(value)) != 0
+	default:
+		return false
+	}
+}
+
+// droppedFields returns the literal's mapping source and the fields of the
+// literal's struct type that the source has under the same name and an
+// assignable type, and that nothing in the function sets.
+func droppedFields(lit *ast.CompositeLit, body *ast.BlockStmt, info *types.Info, outerSet map[string]bool) (ast.Expr, []string) {
+	target, ok := patternkit.StructOf(info.TypeOf(lit))
+	if !ok {
+		return nil, nil
+	}
+	src := mappingSource(lit, info)
+	if src == nil {
+		return nil, nil
+	}
+	srcType := info.TypeOf(src)
+	if ptr, isPtr := srcType.(*types.Pointer); isPtr {
+		srcType = ptr.Elem()
+	}
+	if types.Identical(srcType, info.TypeOf(lit)) || collects(target, srcType) {
+		return nil, nil // a narrowed view of the same type, or a group of sources
+	}
+	after, filled := setAfter(lit, body, info)
+	if filled {
+		return nil, nil
+	}
+	set := make(map[string]bool)
+	for name := range outerSet {
+		set[name] = true
+	}
+	for name := range after {
+		set[name] = true
+	}
+	for _, elt := range lit.Elts {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			if key, ok := kv.Key.(*ast.Ident); ok {
+				set[key.Name] = true
+			}
+		}
+	}
+	newRecord := !copiesField(lit, info, "ID")
+	var dropped []string
+	for i := range target.Fields.NumFields() {
+		field := target.Fields.Field(i)
+		name := field.Name()
+		if set[name] || field.Embedded() || !field.Exported() && field.Pkg() != target.Pkg ||
+			credentialField.MatchString(name) || jsonOmitted(target.Fields.Tag(i)) || newRecord && recordLifecycle[name] {
+			continue
+		}
+		obj, _, _ := types.LookupFieldOrMethod(srcType, true, target.Pkg, name)
+		srcField, ok := obj.(*types.Var)
+		if !ok || !srcField.IsField() || !types.AssignableTo(srcField.Type(), field.Type()) {
+			continue
+		}
+		dropped = append(dropped, name)
+	}
+	return src, dropped
+}
+
+// prefixedDrops returns the fields of a literal that flattens nested values
+// under their parent field's name (SenderFirstName: req.Sender.FirstName, at
+// least two such copies from one nested value) which the nested value has
+// and the literal leaves out: SenderGender while req.Sender.Gender exists.
+// A call the literal is handed to gets the target alone and cannot fill a
+// field from the nested source, so only fields set afterwards are left out.
+func prefixedDrops(lit *ast.CompositeLit, body *ast.BlockStmt, info *types.Info, outerSet map[string]bool) []string {
+	target, ok := patternkit.StructOf(info.TypeOf(lit))
+	if !ok {
+		return nil
+	}
+	set := make(map[string]bool)
+	for name := range outerSet {
+		set[name] = true
+	}
+	after, _ := setAfter(lit, body, info)
+	for name := range after {
+		set[name] = true
+	}
+	counts := make(map[string]int)
+	sources := make(map[string]*ast.SelectorExpr)
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		set[key.Name] = true
+		sel, ok := patternkit.CopiedField(kv.Value, info)
+		if !ok {
+			continue
+		}
+		parent, ok := ast.Unparen(sel.X).(*ast.SelectorExpr)
+		if !ok || key.Name != parent.Sel.Name+sel.Sel.Name {
+			continue
+		}
+		text := types.ExprString(parent)
+		counts[text]++
+		sources[text] = parent
+	}
+	var dropped []string
+	for text, parent := range sources {
+		if counts[text] < 2 {
+			continue
+		}
+		srcType := info.TypeOf(parent)
+		for i := range target.Fields.NumFields() {
+			field := target.Fields.Field(i)
+			name := field.Name()
+			rest, isPrefixed := strings.CutPrefix(name, parent.Sel.Name)
+			if !isPrefixed || rest == "" || set[name] || credentialField.MatchString(name) || jsonOmitted(target.Fields.Tag(i)) {
+				continue
+			}
+			obj, _, _ := types.LookupFieldOrMethod(srcType, true, target.Pkg, rest)
+			srcField, ok := obj.(*types.Var)
+			if ok && srcField.IsField() && types.AssignableTo(srcField.Type(), field.Type()) {
+				dropped = append(dropped, name)
+			}
+		}
+	}
+	sort.Strings(dropped)
+	return dropped
+}
+
+// mappingSource returns the value a keyed literal copies at least two
+// fields from under their own names (ID: r.ID), nil when there is none.
+func mappingSource(lit *ast.CompositeLit, info *types.Info) ast.Expr {
+	counts := make(map[string]int)
+	sources := make(map[string]ast.Expr)
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		sel, ok := patternkit.CopiedField(kv.Value, info)
+		if !ok || sel.Sel.Name != key.Name {
+			continue
+		}
+		text := types.ExprString(sel.X)
+		counts[text]++
+		sources[text] = sel.X
+	}
+	var best ast.Expr
+	bestText := ""
+	most := 1
+	for text, n := range counts {
+		if n > most || n == most && best != nil && text < bestText {
+			best, bestText, most = sources[text], text, n
+		}
+	}
+	return best
+}
+
+// copiesField reports a literal setting the named field from its mapping
+// source's field of the same name.
+func copiesField(lit *ast.CompositeLit, info *types.Info, name string) bool {
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if key, ok := kv.Key.(*ast.Ident); ok && key.Name == name {
+			sel, copied := patternkit.CopiedField(kv.Value, info)
+			return copied && sel.Sel.Name == name
+		}
+	}
+	return false
+}
+
+// setAfter returns the fields the function sets on the variable the literal
+// is stored in: w.CreatedAt = ..., or through &w.TxHash. filled reports the
+// variable handed to a call (fill(&w, r)): the call may set any field.
+func setAfter(lit *ast.CompositeLit, body *ast.BlockStmt, info *types.Info) (set map[string]bool, filled bool) {
+	set = make(map[string]bool)
+	holder := literalHolder(lit, body, info)
+	if holder == nil {
+		return set, false
+	}
+	isHolder := func(expr ast.Expr) bool {
+		id, ok := ast.Unparen(expr).(*ast.Ident)
+		return ok && info.ObjectOf(id) == holder
+	}
+	_, pointer := holder.Type().(*types.Pointer)
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range node.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && isHolder(sel.X) {
+					set[sel.Sel.Name] = true
+				}
+			}
+		case *ast.UnaryExpr:
+			if sel, ok := ast.Unparen(node.X).(*ast.SelectorExpr); ok && node.Op == token.AND && isHolder(sel.X) {
+				set[sel.Sel.Name] = true
+			}
+		case *ast.CallExpr:
+			if persistsValue(node, info) {
+				// A repository write stores the value as it is.
+				return true
+			}
+			for _, arg := range node.Args {
+				unary, isAddr := ast.Unparen(arg).(*ast.UnaryExpr)
+				if isAddr && unary.Op == token.AND && isHolder(unary.X) || pointer && isHolder(arg) {
+					filled = true
+				}
+			}
+		}
+		return true
+	})
+	return set, filled
+}
+
+// persistWrite names a repository method that stores the value it is given.
+var persistWrite = regexp.MustCompile(`^(Create|Insert|Save|Upsert|Store|Add|Put|Persist|Record)`)
+
+// persistsValue reports a call of a store's write method: it stores the
+// value, it does not fill it.
+func persistsValue(call *ast.CallExpr, info *types.Info) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !persistWrite.MatchString(sel.Sel.Name) {
+		return false
+	}
+	recv := info.TypeOf(sel.X)
+	return recv != nil && patternkit.MultiWriteStoreType.MatchString(patternkit.TypeBaseName(recv))
+}
+
+// literalHolder returns the variable a literal is assigned to: w := T{...},
+// w = &T{...}; nil for a literal returned or passed on right away.
+func literalHolder(lit *ast.CompositeLit, body *ast.BlockStmt, info *types.Info) types.Object {
+	var holder types.Object
+	ast.Inspect(body, func(n ast.Node) bool {
+		if holder != nil {
+			return false
+		}
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, rhs := range assign.Rhs {
+			value := ast.Unparen(rhs)
+			if unary, ok := value.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+				value = ast.Unparen(unary.X)
+			}
+			if value != lit || i >= len(assign.Lhs) {
+				continue
+			}
+			if id, ok := assign.Lhs[i].(*ast.Ident); ok {
+				holder = info.ObjectOf(id)
+			}
+		}
+		return true
+	})
+	return holder
+}
+
+// outerKeys maps a literal written as a field of another literal to the
+// fields the outer one sets: Result: Result{...}, SessionID: c.SessionID
+// sets SessionID over the embedded Result's own.
+func outerKeys(file *ast.File) map[*ast.CompositeLit]map[string]bool {
+	outer := make(map[*ast.CompositeLit]map[string]bool)
+	ast.Inspect(file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		keys := make(map[string]bool)
+		var inner []*ast.CompositeLit
+		for _, elt := range lit.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			if key, ok := kv.Key.(*ast.Ident); ok {
+				keys[key.Name] = true
+			}
+			value := ast.Unparen(kv.Value)
+			if unary, ok := value.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+				value = ast.Unparen(unary.X)
+			}
+			if child, ok := value.(*ast.CompositeLit); ok {
+				inner = append(inner, child)
+			}
+		}
+		for _, child := range inner {
+			outer[child] = keys
+		}
+		return true
+	})
+	return outer
+}
+
+// collects reports a target holding a list of sources: a group built from
+// its first member, whose other fields come from the whole list.
+func collects(target patternkit.StructTarget, source types.Type) bool {
+	for field := range target.Fields.Fields() {
+		slice, ok := field.Type().Underlying().(*types.Slice)
+		if !ok {
+			continue
+		}
+		elem := slice.Elem()
+		if ptr, ok := elem.(*types.Pointer); ok {
+			elem = ptr.Elem()
+		}
+		if types.Identical(elem, source) {
+			return true
+		}
+	}
+	return false
+}
+
+// jsonOmitted reports a field tagged json:"-".
+func jsonOmitted(tag string) bool {
+	return reflect.StructTag(tag).Get("json") == "-"
+}

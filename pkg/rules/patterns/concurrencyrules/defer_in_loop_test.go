@@ -1,0 +1,179 @@
+package concurrencyrules
+
+import (
+	"testing"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestDeferInLoopRule_Metadata(t *testing.T) {
+	rule := NewDeferInLoopRule()
+
+	assert.Equal(t, "defer-in-loop", rule.Name())
+	assert.Equal(t, "patterns", rule.Category())
+	assert.Equal(t, core.SeverityHigh, rule.DefaultSeverity())
+}
+
+func TestDeferInLoopRule_Detection(t *testing.T) {
+	rule := NewDeferInLoopRule()
+
+	tests := []struct {
+		name        string
+		code        string
+		expectMatch bool
+	}{
+		{
+			name: "defer in for loop",
+			code: `package main
+
+func example() {
+	for i := 0; i < 10; i++ {
+		f, _ := os.Open("file")
+		defer f.Close()
+	}
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "defer in range loop",
+			code: `package main
+
+func example() {
+	files := []string{"a", "b", "c"}
+	for _, name := range files {
+		f, _ := os.Open(name)
+		defer f.Close()
+	}
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "defer outside loop",
+			code: `package main
+
+func example() {
+	f, _ := os.Open("file")
+	defer f.Close()
+	for i := 0; i < 10; i++ {
+		// do something
+	}
+}
+`,
+			expectMatch: false,
+		},
+		{
+			name: "defer in anonymous function inside loop",
+			code: `package main
+
+func example() {
+	for i := 0; i < 10; i++ {
+		func() {
+			f, _ := os.Open("file")
+			defer f.Close()
+		}()
+	}
+}
+`,
+			expectMatch: false, // OK - defer is in its own function scope
+		},
+		{
+			name: "nested loops with defer",
+			code: `package main
+
+func example() {
+	for i := 0; i < 10; i++ {
+		for j := 0; j < 10; j++ {
+			f, _ := os.Open("file")
+			defer f.Close()
+		}
+	}
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "defer in loop inside goroutine closure",
+			code: `package main
+
+func example(names []string) {
+	go func() {
+		for _, n := range names {
+			f, _ := os.Open(n)
+			defer f.Close()
+		}
+	}()
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "defer in loop inside per-iteration closure",
+			code: `package main
+
+func example(groups [][]string) {
+	for _, names := range groups {
+		func() {
+			for _, n := range names {
+				f, _ := os.Open(n)
+				defer f.Close()
+			}
+		}()
+	}
+}
+`,
+			expectMatch: true,
+		},
+		{
+			name: "defer in closure launched from loop header",
+			code: `package main
+
+func example(load func(func()) []string) {
+	for _, n := range load(func() {
+		defer cleanup()
+	}) {
+		_ = n
+	}
+}
+
+func cleanup() {}
+`,
+			expectMatch: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := patterntest.CreateDeferContext(t, "service.go", tt.code)
+			violations := rule.AnalyzeFile(ctx)
+
+			if tt.expectMatch {
+				require.NotEmpty(t, violations, "Expected violation for: %s", tt.name)
+				assert.Equal(t, "defer_in_loop", violations[0].Context["pattern"])
+			} else {
+				assert.Empty(t, violations, "Expected no violations for: %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestDeferInLoopRule_TestFilesExcluded(t *testing.T) {
+	rule := NewDeferInLoopRule()
+
+	code := `package main
+
+func example() {
+	for i := 0; i < 10; i++ {
+		defer func() {}()
+	}
+}
+`
+	ctx := patterntest.CreateDeferContext(t, "service_test.go", code)
+	violations := rule.AnalyzeFile(ctx)
+
+	assert.Empty(t, violations, "Test files should be excluded")
+}
