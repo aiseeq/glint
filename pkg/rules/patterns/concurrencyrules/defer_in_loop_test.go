@@ -148,7 +148,7 @@ func cleanup() {}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := rulestest.InMemoryFileContext(t, "service.go", tt.code, false)
+			ctx := rulestest.InMemoryFileContext(t, "service.go", tt.code)
 			violations := rule.AnalyzeFile(ctx)
 
 			if tt.expectMatch {
@@ -172,7 +172,7 @@ func example() {
 	}
 }
 `
-	ctx := rulestest.InMemoryFileContext(t, "service_test.go", code, false)
+	ctx := rulestest.InMemoryFileContext(t, "service_test.go", code)
 	violations := rule.AnalyzeFile(ctx)
 
 	assert.Empty(t, violations, "Test files should be excluded")

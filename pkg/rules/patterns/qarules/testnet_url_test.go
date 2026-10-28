@@ -35,7 +35,7 @@ var testNodes = map[string]string{
 var pair = []string{"https://api.a.io", "https://api.testnet.a.io"}
 
 var contestHosts = []string{"https://contest.example.com", "https://a.io", "https://b.io"}
-`, false)
+`)
 	var lines []int
 	for _, v := range NewTestnetURLAmongMainnetRule().AnalyzeFile(ctx) {
 		lines = append(lines, v.Line)

@@ -287,7 +287,7 @@ func TestSend(t *testing.T) {
 	}
 }
 `
-	ctx := rulestest.InMemoryFileContext(t, "client_test.go", code, false)
+	ctx := rulestest.InMemoryFileContext(t, "client_test.go", code)
 	assert.Empty(t, rule.AnalyzeFile(ctx))
 }
 
@@ -310,6 +310,6 @@ func send(c *nethttp.Client, payload []byte) {
 	}
 }
 `
-	ctx := rulestest.InMemoryFileContext(t, "client.go", code, false)
+	ctx := rulestest.InMemoryFileContext(t, "client.go", code)
 	assert.Len(t, NewRetryRequestReuseRule().AnalyzeFile(ctx), 1)
 }
