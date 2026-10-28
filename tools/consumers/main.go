@@ -192,7 +192,9 @@ func readConfig(path string) (config, error) {
 
 // findProjects returns the directories holding a .glint.yaml up to three
 // levels below each root. A directory it cannot read is passed over: one
-// unreadable folder must not hide every other consumer.
+// unreadable folder must not hide every other consumer. A linked worktree
+// (its .git is a file) is a checkout of another repository's branch and
+// would repeat that repository's findings, so it is no consumer.
 func findProjects(c config) ([]string, error) {
 	found := map[string]bool{}
 	for _, root := range c.roots {
@@ -209,6 +211,9 @@ func findProjects(c config) ([]string, error) {
 			}
 			name := d.Name()
 			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "testdata" {
+				return filepath.SkipDir
+			}
+			if linkedWorktree(path) {
 				return filepath.SkipDir
 			}
 			if _, e := os.Stat(filepath.Join(path, ".glint.yaml")); e == nil {
@@ -229,6 +234,13 @@ func findProjects(c config) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// linkedWorktree reports whether dir is a linked git worktree: git writes its
+// .git as a file pointing at the main repository.
+func linkedWorktree(dir string) bool {
+	info, err := os.Lstat(filepath.Join(dir, ".git"))
+	return err == nil && info.Mode().IsRegular()
 }
 
 // skipUnreadable passes over a directory below the root that cannot be read,

@@ -53,6 +53,36 @@ func TestFindProjectsHonorsDepthAndIgnoredDirectories(t *testing.T) {
 	}
 }
 
+func TestFindProjectsSkipsLinkedWorktrees(t *testing.T) {
+	root := t.TempDir()
+	for dir, gitEntry := range map[string]string{"main": "dir", "main-old": "file"} {
+		path := filepath.Join(root, dir)
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if gitEntry == "dir" {
+			if err := os.Mkdir(filepath.Join(path, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		link := []byte("gitdir: " + filepath.Join(root, "main/.git/worktrees/main-old") + "\n")
+		if err := os.WriteFile(filepath.Join(path, ".git"), link, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := findProjects(config{roots: []string{root}, skips: map[string]bool{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{filepath.Join(root, "main")}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("projects = %v, want %v: a linked worktree repeats its repository's findings", got, want)
+	}
+}
+
 func TestDifferenceTreatsFindingsAsMultisetAndIgnoresOtherFields(t *testing.T) {
 	old := []output.JSONIssue{{Rule: "r", File: "a.go", Line: 1, Message: "same", Severity: "low"}, {Rule: "r", File: "a.go", Line: 1, Message: "same"}}
 	newIssues := []output.JSONIssue{{Rule: "r", File: "a.go", Line: 1, Message: "same", Severity: "high"}, {Rule: "x", File: "b.go", Line: 2, Message: "new"}}

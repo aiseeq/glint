@@ -22,3 +22,4 @@
 
 ## Журнал
 - 2026-10-28 10:01 открыт — glint-master
+- 2026-10-28 14:20 note — glint-master: 14:22 бриф и мера готовы (~/.local/share/glint-history/test-helpers/: brief.md, accept.sh, count.sh — 55 хелперов, тестов 2116), worktree test-helpers. Бойца не запускаю: graft gate в glint падает, когда test-short уходит на PC (нет ~/.config/models/approved, $GOROOT not set в /.worker-pc-stage) — сообщено graft-master.

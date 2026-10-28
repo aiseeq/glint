@@ -1,6 +1,6 @@
 # Правило: функция-копия, отличающаяся одним выражением
 
-Статус: в работе
+Статус: на проверке
 Исполнитель: glint-master
 
 ## Вход
@@ -35,3 +35,9 @@
 - 2026-10-28 13:51 note — glint-master: 13:58 ветка near-dup-func синхронизирована на main (30f9e7f). После разбиения находок на glint 17 (сравнение внутри пакета). Боец Luna: общий хелпер в helpers/ast.go и замена всех функций формы found+ast.Inspect по репо; бриф helper-brief.md, мера helper-accept.sh (0 находок, правила те же, graft all). Влитие в main — после, чтобы self-check/tk done glint не встал.
 - 2026-10-28 14:04 note — glint-master: 14:08 боец хелпера раунд 1: helpers.ContainsNode[T] + 24 замены, приёмка OK. Ревью: мастер поправил отсечение обхода, откатил вне-задачную правку main.go (SIGPIPE — из-за моей меры grep -q под pipefail, мера исправлена); осталось 28 функций простой формы (simple-form.awk) — раунд 2 (round2.md), мера дополнена. Раунд 1 не закоммичен перед раундом 2 — повтор промаха patterns-split, дальше коммитить зелёное до доводки.
 - 2026-10-28 14:13 note — glint-master: 14:20 раунд 2 хелпера принят: 52 замены на helpers.ContainsNode, −256 строк. graft consumers всех правил: расхождения только near-duplicate-func (glint 17 на старом дереве, потребители 25), остальные правила совпали. Влито fc7c730, self-check glint чист. Дальше install и письма агентам потребителей.
+- 2026-10-28 14:15 note — glint-master: 14:24 установлено v1.83.7-62-g1987b92; находки разосланы: агент consumer-A 11, consumer-B-, consumer-C-, consumer-D-, graft-master по 1, git-admin — consumer-E 2, consumer-F 4, consumer-G 2, consumer-G-worktree 2; агент-заказчик ответ отправлен. Проверка — агент-заказчик (пример пойман) и агенты потребителей (ложных нет).
+- 2026-10-28 14:15 на проверке — glint-master — влито fc7c730, установлено; ждёт подтверждения от агент-заказчик и разбора находок у потребителей
+- 2026-10-28 14:22 note — glint-master: 14:24 graft-master: находка в graft верная, исправлено (общий gitTest). git-admin взял consumer-E, consumer-F, consumer-G бойцам; consumer-G-worktree — связанный worktree consumer-G: tools/consumers теперь пропускает связанные worktree (.git — файл), тест TestFindProjectsSkipsLinkedWorktrees; коммит ждёт починки гейта на PC.
+- 2026-10-28 14:22 note — glint-master: агент consumer-B: находка верная, исправлено у них; ложных нет.
+- 2026-10-28 14:28 note — glint-master: агент consumer-C: находка верная, исправлено (общая функция через Shift, заодно ушла ошибка округления Div); ложных нет.
+- 2026-10-28 14:28 note — glint-master: агент consumer-D: находка верная, исправлено; ложных нет.
