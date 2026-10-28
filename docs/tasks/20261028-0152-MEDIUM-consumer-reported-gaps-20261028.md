@@ -31,3 +31,6 @@
 - 2026-10-28 02:37 note — glint-master: g4 r3 cmp: consumer-B 5 (all true, grep), consumer-A 155 (sample 11 true); test type renamed (leak); merging; findings to both agents before install
 - 2026-10-28 02:39 note — glint-master: g5 opened: consumer-C data evidence (259 noisy values, formula cells via NewFromFloat); manifest introduced a808d32 collector.go:349, totals.go:497 — red on main (misses 2/2); launching Luna
 - 2026-10-28 02:41 note — glint-master: g2 r2 cmp: 0 diffs; historical defect hit; merging
+- 2026-10-28 02:55 note — glint-master: installed v1.83.7-47-g8943942 with g1-g4; waiting: g5 worker, consumer-A 155 removals
+- 2026-10-28 02:57 note — glint-master: g5 cmp: consumer-C 5 new, exactly the sites with noisy data (constant and rounded sites silent); sent to its agent; merging + install
+- 2026-10-28 03:02 note — glint-master: consumer-C FP after its fix: rounding moved to a shared helper of another package; rule now counts a package calling a 15-digit rounding function as rounding; verify t22 0/1, g5 0/2; consumers: only that FP gone; consumer-A 155 (+22) removed b62f8df12, 0 FP

@@ -34,6 +34,7 @@ func NewSpreadsheetRawDoubleParsedAsExactDecimalRule() *typedFuncRule {
 		// normalizes its amounts on the parse path: the raw read and the
 		// rounding often sit in different functions of a streaming reader.
 		roundingPackages := make(map[*types.Package]bool)
+		roundingFuncs := make(map[*types.Func]bool)
 		gridPackages := make(map[*types.Package]bool)
 		functions := make(map[*types.Func]typedFuncDecl)
 		for obj, decl := range decls {
@@ -52,6 +53,20 @@ func NewSpreadsheetRawDoubleParsedAsExactDecimalRule() *typedFuncRule {
 				directNormalizers[obj.Origin()] = true
 			}
 			if hasSpreadsheetPrecisionFormat(decl.info, decl.decl.Body) {
+				roundingPackages[obj.Pkg()] = true
+				roundingFuncs[obj.Origin()] = true
+			}
+		}
+		// A shared rounding helper of another package rounds for its callers.
+		for obj, decl := range decls {
+			if decl.decl == nil || decl.decl.Body == nil || obj.Pkg() == nil {
+				continue
+			}
+			info := decl.info
+			if callsAny(decl.decl.Body, func(call *ast.CallExpr) bool {
+				fn := staticFunc(info, call)
+				return fn != nil && roundingFuncs[fn.Origin()]
+			}) {
 				roundingPackages[obj.Pkg()] = true
 			}
 		}

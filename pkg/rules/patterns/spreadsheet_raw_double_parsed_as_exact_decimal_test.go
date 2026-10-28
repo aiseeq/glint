@@ -307,3 +307,36 @@ func parse(v any) {
 `,
 	}))
 }
+
+func TestSpreadsheetRawDoubleParsedAsExactDecimalAcceptsRoundingHelperOfAnotherPackage(t *testing.T) {
+	assert.Empty(t, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import (
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+	"example.com/rulestest/numfmt"
+)
+func readRow(rows *excelize.Rows) []string {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	return cells
+}
+func amount(value string) (decimal.Decimal, error) {
+	return numfmt.Number(value)
+}
+func label(value string) (decimal.Decimal, error) {
+	return decimal.NewFromString(value)
+}
+`,
+		"numfmt/number.go": `package numfmt
+import (
+	"strconv"
+	"github.com/shopspring/decimal"
+)
+func Number(value string) (decimal.Decimal, error) {
+	f, err := strconv.ParseFloat(value, 64)
+	if err != nil { return decimal.Decimal{}, err }
+	return decimal.NewFromString(strconv.FormatFloat(f, 'g', 15, 64))
+}
+`,
+	}))
+}

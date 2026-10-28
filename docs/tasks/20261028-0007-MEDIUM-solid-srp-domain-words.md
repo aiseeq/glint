@@ -1,6 +1,6 @@
 # solid-srp: слова предметной области в именах методов считаются областями ответственности
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Постановка
@@ -21,3 +21,4 @@
 - 2026-10-28 00:12 TDD: тест TestSolidSRPRule_DomainNounsAloneAreNoArea красный без фикса (4 области), зелёный с areaNouns; прогон по потребителям
 - 2026-10-28 00:14 потребители: +0 −1 (у самого glint: помощник анализатора, область http только из-за слова Request — была ложной); у агента потребителя находка стоит под подавлением, разница не видна
 - 2026-10-28 00:32 влито в main; агенту потребителя сообщено; ждёт graft install в конце раунда, затем — ответ о снятии подавления и done
+- 2026-10-28 02:55 готово — consumer-D-agent: consumer D agent: suppression removed (d9dd1da8), glint check exit 0; consumer B exception removed (73d9b22); master reruns: B No issues, D solid-srp+stale-suppression No issues
