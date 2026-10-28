@@ -153,7 +153,7 @@ func second(x int) string {
 	for _, tc := range []struct {
 		name, source string
 	}{
-		{"two differences", `package sample
+		{"three differences", `package sample
 func first(x int) int { if x < 0 { return 0 }; y := x + 1; z := use(y, "a"); return done(z) }
 func second(x int) int { if x < 1 { return 0 }; y := x + 2; z := use(y, "b"); return done(z) }
 func use(int, string) int { return 0 }; func done(int) int { return 0 }
@@ -230,3 +230,60 @@ func second(x int) int { if x < 0 { return 0 }; y := x + 2; z := y + 2; return z
 		})
 	}
 }
+
+// A package constant that differs between the two functions is a difference
+// of its own, whether it is named directly or through its package.
+func TestNearDuplicateFuncCountsPackageNames(t *testing.T) {
+	files := map[string]string{
+		"clause/clause.go": `package clause
+const OnlyInternal = " AND u.internal"
+const NoInternal = " AND NOT u.internal"
+`,
+		"sample/sample.go": sampleWithoutStaff + `func staff() (int, error) {
+	query := other + clause.NoInternal
+	count, err := run(query)
+	if err != nil { return 0, errors.New("failed to get external count") }
+	return count, nil
+}
+`}
+	strictRule := NewNearDuplicateFuncRule()
+	require.NoError(t, strictRule.Configure(map[string]any{"max_differences": 1}))
+	strict, err := strictRule.AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	var found []string
+	for _, v := range strict {
+		found = append(found, v.Message)
+	}
+	require.Len(t, found, 1, "only staff differs from external in one expression")
+	require.Contains(t, found[0], "staff is a near-duplicate")
+	require.Contains(t, found[0], `"base" vs "other"`)
+
+	files["sample/sample.go"] = sampleWithoutStaff
+	violations, err := NewNearDuplicateFuncRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	require.Contains(t, violations[0].Message, `"clause.NoInternal" vs "clause.OnlyInternal"`)
+	require.Contains(t, violations[0].Message, `"\"failed to get external count\"" vs "\"failed to get internal count\""`)
+}
+
+const sampleWithoutStaff = `package sample
+import (
+	"errors"
+	"example.com/rulestest/clause"
+)
+const base = "SELECT COUNT(*) FROM users u"
+const other = "SELECT COUNT(*) FROM staff u"
+func run(string) (int, error) { return 0, nil }
+func external() (int, error) {
+	query := base + clause.NoInternal
+	count, err := run(query)
+	if err != nil { return 0, errors.New("failed to get external count") }
+	return count, nil
+}
+func internal() (int, error) {
+	query := base + clause.OnlyInternal
+	count, err := run(query)
+	if err != nil { return 0, errors.New("failed to get internal count") }
+	return count, nil
+}
+`

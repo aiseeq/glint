@@ -2,6 +2,7 @@ package duplication
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 
@@ -98,7 +99,7 @@ func (r *DuplicateBlockRule) findDuplicateWindows(ctx *core.FileContext, normali
 			if repeat < first+r.minBlockSize {
 				continue
 			}
-			if !windowsMatch(window, normalized[repeat:repeat+r.minBlockSize]) {
+			if !slices.Equal(window, normalized[repeat:repeat+r.minBlockSize]) {
 				continue
 			}
 			matches = append(matches, windowMatch{start: repeat, origFile: ctx.RelPath, origStart: first})

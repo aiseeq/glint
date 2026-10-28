@@ -20,7 +20,7 @@ import (
 func init() { rules.Register(NewNearDuplicateFuncRule()) }
 
 const (
-	defaultNearDuplicateMaxDifferences = 1
+	defaultNearDuplicateMaxDifferences = 2
 	minNearDuplicateFuncStatements     = 5
 )
 
@@ -35,7 +35,7 @@ type NearDuplicateFuncRule struct {
 func NewNearDuplicateFuncRule() *NearDuplicateFuncRule {
 	return &NearDuplicateFuncRule{
 		BaseRule: rules.NewBaseRule("near-duplicate-func", "duplication",
-			"Detects functions in one package whose bodies differ in up to max_differences expressions (one by default) — a shared function parameter prevents the copies from drifting apart",
+			"Detects functions in one package whose bodies differ in up to max_differences expressions (two by default) — a shared function parameter prevents the copies from drifting apart",
 			core.SeverityMedium),
 		maxDifferences: defaultNearDuplicateMaxDifferences,
 	}
@@ -270,12 +270,45 @@ func nearExpressionCompatible(left, right ast.Node, a, b *nearFunc) bool {
 	}
 	if ls, ok := left.(*ast.SelectorExpr); ok {
 		rs, ok := right.(*ast.SelectorExpr)
-		if !ok || ls.Sel.Name != rs.Sel.Name {
+		if !ok {
+			return false
+		}
+		// Two names of another package are two values, whatever they are called.
+		if ls.Sel.Name != rs.Sel.Name && (!qualifiedIdent(ls, a.info) || !qualifiedIdent(rs, b.info)) {
 			return false
 		}
 	}
-
+	// Two calls that differ only in the function called become one call of a
+	// function parameter, which needs the two functions to have one type.
+	if lc, ok := left.(*ast.CallExpr); ok {
+		if rc, ok := right.(*ast.CallExpr); ok && sameCallArgs(lc, rc, a, b) {
+			leftFun, rightFun := a.info.TypeOf(lc.Fun), b.info.TypeOf(rc.Fun)
+			return leftFun != nil && rightFun != nil && types.Identical(leftFun, rightFun)
+		}
+	}
 	return true
+}
+
+func sameCallArgs(left, right *ast.CallExpr, a, b *nearFunc) bool {
+	if len(left.Args) != len(right.Args) {
+		return false
+	}
+	for i := range left.Args {
+		if normalizedNode(left.Args[i], a) != normalizedNode(right.Args[i], b) {
+			return false
+		}
+	}
+	return true
+}
+
+// qualifiedIdent reports pkg.Name, a name another package declares.
+func qualifiedIdent(sel *ast.SelectorExpr, info *types.Info) bool {
+	id, ok := ast.Unparen(sel.X).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	_, isPkg := info.ObjectOf(id).(*types.PkgName)
+	return isPkg
 }
 
 func newNearFunc(path string, fd *ast.FuncDecl, info *types.Info, fset *token.FileSet) *nearFunc {
@@ -334,7 +367,12 @@ func nearFuncDifferences(a, b *nearFunc, limit int) ([]nearExprDifference, bool)
 				return false
 			}
 		}
-		return len(differences) != start || !leftExpr || nearDifferenceAllowed(parent, childIndex, left, right)
+		if len(differences) != start || !leftExpr {
+			return true
+		}
+		// The children differ only where no parameter can go, as the name
+		// after a package selector: the whole expression is the difference.
+		return appendNearDifference(&differences, left, right, parent, childIndex, limit)
 	}
 	if !walk(a.fd.Body, b.fd.Body, nil, -1) {
 		return nil, false
@@ -366,7 +404,7 @@ func nearDifferenceAllowed(parent ast.Node, childIndex int, left, right ast.Node
 }
 
 func normalizedNode(node ast.Node, fn *nearFunc) string {
-	n := &blockNormalizer{info: fn.info, lo: fn.fd.Body.Pos(), hi: fn.fd.Body.End(), locals: make(map[types.Object]int)}
+	n := &blockNormalizer{info: fn.info, lo: fn.fd.Body.Pos(), hi: fn.fd.Body.End(), locals: make(map[types.Object]int), packageNames: true}
 	maps.Copy(n.locals, fn.normalizer.locals)
 	n.walk(node)
 	return n.b.String()

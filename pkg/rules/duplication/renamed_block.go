@@ -277,9 +277,12 @@ type blockNormalizer struct {
 	info   *types.Info
 	lo, hi token.Pos
 	locals map[types.Object]int
-	b      strings.Builder
-	nodes  int
-	stmts  int
+	// packageNames keeps the name of a package-level variable or constant
+	// instead of the placeholder, so two of them do not compare equal.
+	packageNames bool
+	b            strings.Builder
+	nodes        int
+	stmts        int
 }
 
 func newBlockNormalizer(info *types.Info, stmt ast.Stmt) *blockNormalizer {
@@ -376,12 +379,12 @@ func (n *blockNormalizer) ident(id *ast.Ident) string {
 			}
 			return "$L" + strconv.Itoa(num)
 		}
-		return freeValue
+		return n.freeName(obj)
 	case *types.Const:
 		if obj.Pkg() == nil {
 			return id.Name // true, false, iota
 		}
-		return freeValue
+		return n.freeName(obj)
 	case *types.TypeName:
 		return "T." + id.Name
 	case *types.Label:
@@ -413,11 +416,22 @@ func (n *blockNormalizer) packageMember(sel *ast.SelectorExpr) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	switch n.info.ObjectOf(sel.Sel).(type) {
-	case *types.Var, *types.Const:
-		return freeValue, true
+	switch obj := n.info.ObjectOf(sel.Sel).(type) {
+	case *types.Var:
+		return n.freeName(obj), true
+	case *types.Const:
+		return n.freeName(obj), true
 	}
 	return pkg.Imported().Path() + "." + sel.Sel.Name, true
+}
+
+// freeName is the placeholder of a value from outside the statement, or the
+// package path and name of a package-level one when packageNames is set.
+func (n *blockNormalizer) freeName(obj types.Object) string {
+	if n.packageNames && obj.Pkg() != nil && obj.Parent() == obj.Pkg().Scope() {
+		return obj.Pkg().Path() + "." + obj.Name()
+	}
+	return freeValue
 }
 
 // freeRoot reports an expression that is a value from outside the statement

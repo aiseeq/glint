@@ -1,6 +1,7 @@
 # Тесты не читают ~/.config/models/approved
 
-Статус: открыт
+Статус: на проверке
+Исполнитель: glint-master
 
 ## Вход
 - Проблема:
@@ -25,3 +26,4 @@
 ## Журнал
 - 2026-10-28 14:32 открыт — glint-master
 - 2026-10-28 14:47 note — glint-master: TestMain в cmd/glint настраивает model-not-approved на свой список; go test ./... зелёный с пустым HOME (32 пакета); строка ~/.config/models/approved убрана из cache.files
+- 2026-10-28 14:53 на проверке — glint-master — коммит 0b639ed; проверка: graft test на PC (без ~/.config/models/approved) зелёный, задача test без cache.files

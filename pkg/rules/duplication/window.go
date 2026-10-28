@@ -150,19 +150,6 @@ func mergeWindowMatches(matches []windowMatch, size int) []duplicateRegion {
 	return regions
 }
 
-// windowsMatch reports whether two windows are identical line by line.
-func windowsMatch(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // normalizeLine trims a line and collapses every run of whitespace to a single
 // space, so that indentation and alignment differences do not hide duplicates.
 func normalizeLine(line string) string {
