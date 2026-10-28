@@ -4,7 +4,7 @@
 Исполнитель: glint-master
 
 ## Вход
-Задание git-admin (лид 27.10, пункт D; спецификация ~/git/docs/install-step.md, пилот akit ad1c782): задача install в .graft.yaml — шаг `{install: bin/glint}` вместо связки mktemp+install+mv. Шаг ставит только закоммиченное (уходит -dirty).
+Задание git-admin (лид 27.10, пункт D; спецификация ~/git/docs/install-step.md, пилот у одного потребителя): задача install в .graft.yaml — шаг `{install: bin/glint}` вместо связки mktemp+install+mv. Шаг ставит только закоммиченное (уходит -dirty).
 
 ## Что сделать
 - /bin/ в .gitignore — есть.
