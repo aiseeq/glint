@@ -3,6 +3,7 @@ package errrules
 import (
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -65,7 +66,7 @@ func (s *Svc) Stats(inv Investment) (int, Decimal, Decimal, Decimal, bool) {
 	return count, total, value, transfers, active
 }
 `
-	assert.Equal(t, []int{31, 36, 41, 46, 51}, fallbackReturnLines(t, source))
+	assert.Equal(t, []int{31, 36, 41, 46, 51}, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }
 
 // A chain of fallbacks: the results of other calls are a failover, the no-op
@@ -102,7 +103,7 @@ func Logger() *Log {
 	return log
 }
 `
-	assert.Equal(t, []int{23}, fallbackReturnLines(t, source))
+	assert.Equal(t, []int{23}, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }
 
 // What a failed call may legitimately turn into: the result of another call,
@@ -155,7 +156,7 @@ func (s *Svc) Retry() int {
 	return v
 }
 `
-	assert.Empty(t, fallbackReturnLines(t, source))
+	assert.Empty(t, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }
 
 // A comment that explains the fallback counts anywhere in the branch, above
@@ -189,7 +190,7 @@ func (s *Svc) Payouts() []byte {
 	return payouts
 }
 `
-	assert.Empty(t, fallbackReturnLines(t, source))
+	assert.Empty(t, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }
 
 // A comment right above the call that explains the degradation counts like
@@ -232,5 +233,5 @@ func (s *Svc) Count(load func() (int, error)) int {
 	return count
 }
 `
-	assert.Equal(t, []int{32}, fallbackReturnLines(t, source))
+	assert.Equal(t, []int{32}, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }

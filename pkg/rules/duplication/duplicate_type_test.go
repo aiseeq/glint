@@ -1,25 +1,12 @@
 package duplication
 
 import (
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
-
-func duplicateTypeLines(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewDuplicateTypeAcrossPackagesRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var lines []string
-	for _, v := range violations {
-		lines = append(lines, v.File+":"+strconv.Itoa(v.Line))
-	}
-	return lines
-}
 
 // Two live copies of one handler: a fix (a new column in the insert) lands in
 // one of them, and the other keeps writing rows without it.
@@ -60,7 +47,7 @@ func (h *DepositHandler) ProcessDeposit(ctx context.Context, d *m.Deposit) (bool
 }
 `,
 	}
-	assert.Equal(t, []string{"cmd/app/main.go:9", "routing/router.go:9"}, duplicateTypeLines(t, files))
+	assert.Equal(t, []string{"cmd/app/main.go:9", "routing/router.go:9"}, rulestest.ProjectRulePlaces(t, NewDuplicateTypeAcrossPackagesRule(), files))
 }
 
 // The same name with other methods, a shared conventional method (String,
@@ -111,5 +98,5 @@ type Service struct{}
 func (s *Service) Run(n int) error { return nil }
 `,
 	}
-	assert.Empty(t, duplicateTypeLines(t, files))
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewDuplicateTypeAcrossPackagesRule(), files))
 }

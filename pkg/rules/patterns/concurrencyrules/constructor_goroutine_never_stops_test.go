@@ -3,31 +3,14 @@ package concurrencyrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-func constructorGoroutineFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	root, _ := rulestest.Module(t, files)
-	contexts, errs := core.NewWalker(root, core.DefaultConfig()).WalkSync()
-	require.Empty(t, errs)
-	rule := NewConstructorGoroutineNeverStopsRule()
-	rule.UseProjectFiles(contexts)
-	var violations []*core.Violation
-	for _, ctx := range contexts {
-		violations = append(violations, rule.AnalyzeFile(ctx)...)
-	}
-	return patterntest.FoundLines(violations)
-}
 
 // Every constructed middleware starts a cleanup loop that nothing can end:
 // tests and re-created routers pile the goroutines up.
 func TestConstructorGoroutineNeverStops(t *testing.T) {
-	assert.Equal(t, []string{"mw/mw.go:12", "mw/mw.go:21"}, constructorGoroutineFindings(t, map[string]string{
+	assert.Equal(t, []string{"mw/mw.go:12", "mw/mw.go:21"}, rulestest.ProjectFilesRulePlaces(t, NewConstructorGoroutineNeverStopsRule(), map[string]string{
 		"mw/mw.go": `package mw
 
 import "time"
@@ -75,7 +58,7 @@ func (t *Tracker) cleanupLoop() {
 // A loop with a way out, a goroutine draining a channel someone can close,
 // and a loop outside a constructor are left alone.
 func TestConstructorGoroutineNeverStopsAllowed(t *testing.T) {
-	assert.Empty(t, constructorGoroutineFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewConstructorGoroutineNeverStopsRule(), map[string]string{
 		"svc/svc.go": `package svc
 
 import (

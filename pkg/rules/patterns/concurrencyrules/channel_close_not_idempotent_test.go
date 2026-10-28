@@ -3,20 +3,14 @@ package concurrencyrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
-func channelCloseLines(t *testing.T, source string) []int {
-	t.Helper()
-	return patterntest.ViolationLines(NewChannelCloseNotIdempotentRule().AnalyzeFile(rulestest.GoFile(t, "limiter/limiter.go", source)))
-}
-
 // A second Stop - the shutdown path and a deferred cleanup, or two owners -
 // closes the channel again and panics.
 func TestChannelCloseNotIdempotent(t *testing.T) {
-	assert.Equal(t, []int{4, 10}, channelCloseLines(t, `package limiter
+	assert.Equal(t, []int{4, 10}, rulestest.GoFileRuleLines(t, NewChannelCloseNotIdempotentRule(), "limiter/limiter.go", `package limiter
 
 func (l *Limiter) Stop() {
 	close(l.stopCleanup)
@@ -34,7 +28,7 @@ func (s *Sessions) Close() {
 // sync.Once, a closed flag the method sets, a field reset to nil, and a
 // non-blocking receive that sees the channel already closed all guard it.
 func TestChannelCloseNotIdempotentGuarded(t *testing.T) {
-	assert.Empty(t, channelCloseLines(t, `package limiter
+	assert.Empty(t, rulestest.GoFileRuleLines(t, NewChannelCloseNotIdempotentRule(), "limiter/limiter.go", `package limiter
 
 func (l *Limiter) Stop() {
 	l.once.Do(func() { close(l.stop) })

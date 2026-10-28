@@ -1,29 +1,16 @@
 package moneyrules
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-func bigSetStringFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewBigSetStringUncheckedRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var out []string
-	for _, v := range violations {
-		out = append(out, fmt.Sprintf("%s:%d", v.File, v.Line))
-	}
-	return out
-}
 
 // A hex amount that does not parse leaves the value at zero: the transfer
 // is recorded as zero instead of failing.
 func TestBigSetStringUnchecked(t *testing.T) {
-	found := bigSetStringFindings(t, map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewBigSetStringUncheckedRule(), map[string]string{
 		"chain/amount.go": `package chain
 
 import (

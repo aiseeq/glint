@@ -5,6 +5,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -222,7 +223,7 @@ func createNilSliceContext(t *testing.T, path, code string) *core.FileContext {
 	ctx := &core.FileContext{
 		Path:    "/" + path,
 		RelPath: path,
-		Lines:   splitNilSliceLines(code),
+		Lines:   rulestest.SplitLines(code),
 		Content: []byte(code),
 	}
 
@@ -236,21 +237,6 @@ func createNilSliceContext(t *testing.T, path, code string) *core.FileContext {
 	}
 
 	return ctx
-}
-
-func splitNilSliceLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
 }
 
 // Real repros from glint's own sources: a name from the "looks like a slice"

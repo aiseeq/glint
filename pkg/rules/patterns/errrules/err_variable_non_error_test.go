@@ -3,33 +3,17 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // errVariableFindings runs the rule over a module the way the check flow
 // does: every file first, then each one.
-func errVariableFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	root, _ := rulestest.Module(t, files)
-	contexts, errs := core.NewWalker(root, core.DefaultConfig()).WalkSync()
-	require.Empty(t, errs)
-	rule := NewErrVariableHoldsNonErrorRule()
-	rule.UseProjectFiles(contexts)
-	var violations []*core.Violation
-	for _, ctx := range contexts {
-		violations = append(violations, rule.AnalyzeFile(ctx)...)
-	}
-	return patterntest.FoundLines(violations)
-}
 
 // The helper's second result became a login response; the caller still names
 // it err, and the nil check holds on every success.
 func TestErrVariableHoldsNonError(t *testing.T) {
-	assert.Equal(t, []string{"integration/search_test.go:5"}, errVariableFindings(t, map[string]string{
+	assert.Equal(t, []string{"integration/search_test.go:5"}, rulestest.ProjectFilesRulePlaces(t, NewErrVariableHoldsNonErrorRule(), map[string]string{
 		"integration/helpers.go": `package integration
 
 type Client struct{}
@@ -77,7 +61,7 @@ func TestSearch(t *testing.T) {
 
 // A variable of the same name declared in an inner scope is another one.
 func TestErrVariableHoldsNonErrorShadowed(t *testing.T) {
-	assert.Empty(t, errVariableFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewErrVariableHoldsNonErrorRule(), map[string]string{
 		"svc/svc.go": `package svc
 
 type Row struct{}

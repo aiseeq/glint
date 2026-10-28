@@ -3,15 +3,9 @@ package qarules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
-
-func tautologicalGoLines(t *testing.T, code string) []int {
-	t.Helper()
-	ctx := patterntest.CreatePatternContext(t, "service_test.go", code)
-	return patterntest.ViolationLines(NewTautologicalAssertionRule().AnalyzeFile(ctx))
-}
 
 // An assertion that runs only when the value is there: when it is not, the
 // test passes without checking anything.
@@ -65,7 +59,7 @@ func TestWithdrawal(t *testing.T) {
 	}
 }
 `
-	assert.Equal(t, []int{14, 15, 43}, tautologicalGoLines(t, code))
+	assert.Equal(t, []int{14, 15, 43}, rulestest.GoFileRuleLines(t, NewTautologicalAssertionRule(), "service_test.go", code))
 }
 
 // A test that skips when the code under test fails reports the failure as a
@@ -115,7 +109,7 @@ func TestTool(t *testing.T) {
 	}
 }
 `
-	assert.Equal(t, []int{18, 22, 25}, tautologicalGoLines(t, code))
+	assert.Equal(t, []int{18, 22, 25}, rulestest.GoFileRuleLines(t, NewTautologicalAssertionRule(), "service_test.go", code))
 }
 
 // A test helper that skips a fixture it failed to read or decode: the broken
@@ -164,7 +158,7 @@ func loadArticles(dir string) ([]Article, error) {
 	return articles, nil
 }
 `
-	assert.Equal(t, []int{22, 26}, tautologicalGoLines(t, code))
+	assert.Equal(t, []int{22, 26}, rulestest.GoFileRuleLines(t, NewTautologicalAssertionRule(), "service_test.go", code))
 }
 
 // A guard anywhere inside a loop filters the items the test is about; the
@@ -217,7 +211,7 @@ func TestShape(t *testing.T) {
 	}
 }
 `
-	assert.Equal(t, []int{42}, tautologicalGoLines(t, code))
+	assert.Equal(t, []int{42}, rulestest.GoFileRuleLines(t, NewTautologicalAssertionRule(), "service_test.go", code))
 }
 
 // A guard in a callback that visits many items (ast.Inspect, a walk) filters
@@ -261,5 +255,5 @@ func TestRuleKind(t *testing.T) {
 	}
 }
 `
-	assert.Equal(t, []int{32}, tautologicalGoLines(t, code))
+	assert.Equal(t, []int{32}, rulestest.GoFileRuleLines(t, NewTautologicalAssertionRule(), "service_test.go", code))
 }

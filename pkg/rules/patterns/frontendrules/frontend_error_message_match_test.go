@@ -3,16 +3,9 @@ package frontendrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
-
-func frontendErrorMessageLines(t *testing.T, path, source string) []int {
-	t.Helper()
-	ctx := core.NewFileContext(path, ".", []byte(source), nil)
-	return patterntest.ViolationLines(NewFrontendErrorMessageMatchRule().AnalyzeFile(ctx))
-}
 
 // The wording of a caught error decides the branch: directly, through a
 // variable, or in a helper the message is handed to.
@@ -57,7 +50,7 @@ function show(err: Error) {
   track(trim(err.message))
 }
 `
-	assert.Equal(t, []int{6, 9, 18, 19}, frontendErrorMessageLines(t, "frontend/src/refresh.ts", source))
+	assert.Equal(t, []int{6, 9, 18, 19}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "frontend/src/refresh.ts", source))
 }
 
 // Test files and a message that is only shown or logged stay out.
@@ -68,7 +61,7 @@ func TestFrontendErrorMessageMatch_SkipsTestsAndDisplay(t *testing.T) {
   }
 })
 `
-	assert.Empty(t, frontendErrorMessageLines(t, "frontend/src/run.test.ts", source))
+	assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "frontend/src/run.test.ts", source))
 }
 
 // isErrorName keeps the names the former ^(?:e|err|error|\w*Err|\w*Error)$
@@ -115,5 +108,5 @@ export function show(err: Error, code: string) {
   return describe(err.message) + appendCode('x', code)
 }
 `
-	assert.Equal(t, []int{20}, frontendErrorMessageLines(t, "web/src/lib/body.ts", source))
+	assert.Equal(t, []int{20}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/lib/body.ts", source))
 }

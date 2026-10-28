@@ -3,6 +3,7 @@ package errrules
 import (
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -46,7 +47,7 @@ func enrich(next http.Handler) http.Handler {
 	})
 }
 `
-	assert.Equal(t, []int{13}, failOpenLines(t, source))
+	assert.Equal(t, []int{13}, rulestest.GoFileRuleLines(t, NewFailOpenRule(), "svc/svc.go", source))
 }
 
 // The body check runs only when the body was read and parsed: a read or
@@ -91,5 +92,5 @@ func strict(next http.Handler, allowed func(string) bool) http.Handler {
 	})
 }
 `
-	assert.Equal(t, []int{12}, failOpenLines(t, source))
+	assert.Equal(t, []int{12}, rulestest.GoFileRuleLines(t, NewFailOpenRule(), "svc/svc.go", source))
 }

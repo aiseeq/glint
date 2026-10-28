@@ -7,27 +7,12 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-func aggregateSkipFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	root, _ := rulestest.Module(t, files)
-	contexts, errs := core.NewWalker(root, core.DefaultConfig()).WalkSync()
-	require.Empty(t, errs)
-	rule := NewAggregateSkipsFailedPartRule()
-	rule.UseProjectFiles(contexts)
-	var violations []*core.Violation
-	for _, ctx := range contexts {
-		violations = append(violations, rule.AnalyzeFile(ctx)...)
-	}
-	return patterntest.FoundLines(violations)
-}
 
 // The balance is built from every stablecoin; a failed load of one is logged
 // and skipped, and the user sees a balance computed from part of the money.
 func TestAggregateSkipsFailedPart(t *testing.T) {
-	assert.Equal(t, []string{"balance/calc.go:21", "balance/calc.go:7"}, aggregateSkipFindings(t, map[string]string{
+	assert.Equal(t, []string{"balance/calc.go:21", "balance/calc.go:7"}, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"balance/currencies.go": `package balance
 
 var stablecoins = []string{"USDC", "USDT"}
@@ -68,7 +53,7 @@ func (c *Calc) total(ctx context.Context) (decimal.Decimal, error) {
 // A loop that returns the error, and a function with no error to return, are
 // left alone.
 func TestAggregateSkipsFailedPartAllowed(t *testing.T) {
-	assert.Empty(t, aggregateSkipFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"balance/calc.go": `package balance
 
 var stablecoins = []string{"USDC", "USDT"}
@@ -172,7 +157,7 @@ func (s *Importer) importRows(ctx context.Context, rows []Row) error {
 // no else, and returns the set as a success hands the caller a silently
 // incomplete set: a sum over it misses the failed items.
 func TestAggregateSkipsFailedPart_ResultObjectKeptOnlyOnSuccess(t *testing.T) {
-	assert.Equal(t, []string{"wallet/batch.go:18"}, aggregateSkipFindings(t, map[string]string{
+	assert.Equal(t, []string{"wallet/batch.go:18"}, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"wallet/batch.go": `package wallet
 
 type Result[T any] struct {

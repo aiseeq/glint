@@ -3,6 +3,7 @@ package errrules
 import (
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -10,7 +11,7 @@ import (
 // and returned with a nil error by a function that never looks at the field:
 // a failed wallet is served as a zero balance.
 func TestAggregateSkipsFailedPart_ResultsWithErrorFieldNeverRead(t *testing.T) {
-	assert.Equal(t, []string{"wallets/refresh.go:13", "wallets/refresh.go:30"}, aggregateSkipFindings(t, map[string]string{
+	assert.Equal(t, []string{"wallets/refresh.go:13", "wallets/refresh.go:30"}, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"wallets/model.go": `package wallets
 
 type WalletBalance struct {
@@ -57,7 +58,7 @@ func (s *Service) Sync(ctx context.Context, wallet string) ([]*WalletBalance, er
 // Two optional sources feed one total: a failed one is logged and its share
 // is simply missing from the total the function returns as complete.
 func TestAggregateSkipsFailedPart_SequentialSourcesLoggedAndSkipped(t *testing.T) {
-	assert.Equal(t, []string{"positions/indexed.go:6", "positions/total.go:6"}, aggregateSkipFindings(t, map[string]string{
+	assert.Equal(t, []string{"positions/indexed.go:6", "positions/total.go:6"}, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"positions/total.go": `package positions
 
 func (s *Service) total(ctx context.Context, address string) (decimal.Decimal, error) {
@@ -103,7 +104,7 @@ func (s *Service) totalIndexed(ctx context.Context, address string) (decimal.Dec
 // A failed item counted together with the deliberately skipped ones: the
 // function reports a clean run with some "skipped" items.
 func TestAggregateSkipsFailedPart_FailureCountedAsSkipped(t *testing.T) {
-	assert.Equal(t, []string{"linking/link.go:7"}, aggregateSkipFindings(t, map[string]string{
+	assert.Equal(t, []string{"linking/link.go:7"}, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"linking/link.go": `package linking
 
 func (s *Service) autoLink(ctx context.Context, txs []*Tx) (int, int, error) {
@@ -130,7 +131,7 @@ func (s *Service) autoLink(ctx context.Context, txs []*Tx) (int, int, error) {
 // Errors are collected and logged, and the function reports success unless
 // every item failed.
 func TestAggregateSkipsFailedPart_SuccessUnlessAllFailed(t *testing.T) {
-	assert.Equal(t, []string{"alerts/check.go:16"}, aggregateSkipFindings(t, map[string]string{
+	assert.Equal(t, []string{"alerts/check.go:16"}, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"alerts/check.go": `package alerts
 
 func (s *Service) check(ctx context.Context, positions []*Position) ([]Alert, error) {
@@ -158,7 +159,7 @@ func (s *Service) check(ctx context.Context, positions []*Position) ([]Alert, er
 
 // Each result handed to a helper that reads its failure is inspected.
 func TestAggregateSkipsFailedPart_ResultsInspectedByHelper(t *testing.T) {
-	assert.Empty(t, aggregateSkipFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"wallets/model.go": `package wallets
 
 type WalletBalance struct {
@@ -187,7 +188,7 @@ func (s *Service) gate(fresh []*WalletBalance) ([]*WalletBalance, error) {
 // A result appended to the slice and handed to a helper that records the
 // failure in its Error field is not a failure lost.
 func TestAggregateSkipsFailedPart_AppendedResultFailureRecordedByHelper(t *testing.T) {
-	assert.Empty(t, aggregateSkipFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"sync/model.go": `package sync
 
 type RunResult struct {
@@ -228,7 +229,7 @@ func (s *Service) Run(accounts []string) ([]*RunResult, error) {
 // the reader sets an explicit status to a failure value, and the caller sees
 // the failed run as failed, not as a valid one.
 func TestAggregateSkipsFailedPart_ErrorNextToExplicitFailureStatus(t *testing.T) {
-	assert.Empty(t, aggregateSkipFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"report/row.go": `package report
 
 type runRow struct {
@@ -296,7 +297,7 @@ func (s *Service) RunAll(ids []string) ([]*JobResult, error) {
 // A status field that never takes a failure value does not classify the
 // failure: the failed item still looks like a valid one.
 func TestAggregateSkipsFailedPart_ErrorNextToStatusWithoutFailureValue(t *testing.T) {
-	assert.Equal(t, []string{"quotes/sync.go:10"}, aggregateSkipFindings(t, map[string]string{
+	assert.Equal(t, []string{"quotes/sync.go:10"}, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"quotes/model.go": `package quotes
 
 type Quote struct {

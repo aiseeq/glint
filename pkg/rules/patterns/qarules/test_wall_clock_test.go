@@ -3,26 +3,9 @@ package qarules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-func testWallClockFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	root, _ := rulestest.Module(t, files)
-	contexts, errs := core.NewWalker(root, core.DefaultConfig()).WalkSync()
-	require.Empty(t, errs)
-	rule := NewTestDependsOnWallClockRule()
-	rule.UseProjectFiles(contexts)
-	var violations []*core.Violation
-	for _, ctx := range contexts {
-		violations = append(violations, rule.AnalyzeFile(ctx)...)
-	}
-	return patterntest.FoundLines(violations)
-}
 
 const wallClockService = `package bot
 
@@ -96,7 +79,7 @@ func elapsed(start time.Time) bool {
 // time.Now(): they pass on a weekday at noon and fail at night or on a
 // weekend, and nothing in the test can move the clock.
 func TestTestDependsOnWallClock(t *testing.T) {
-	assert.Equal(t, []string{"bot/bot_test.go:20", "bot/bot_test.go:26", "bot/bot_test.go:9"}, testWallClockFindings(t, map[string]string{
+	assert.Equal(t, []string{"bot/bot_test.go:20", "bot/bot_test.go:26", "bot/bot_test.go:9"}, rulestest.ProjectFilesRulePlaces(t, NewTestDependsOnWallClockRule(), map[string]string{
 		"bot/bot.go": wallClockService,
 		"bot/bot_test.go": `package bot
 
@@ -135,7 +118,7 @@ func TestGreeting(t *testing.T) {
 // calendar decision, or a test whose clock is faked or whose expectation is
 // computed from the same clock is left alone.
 func TestTestDependsOnWallClockNegatives(t *testing.T) {
-	assert.Empty(t, testWallClockFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewTestDependsOnWallClockRule(), map[string]string{
 		"bot/bot.go": wallClockService,
 		"bot/bot_test.go": `package bot
 
@@ -208,7 +191,7 @@ func main() {
 // An external test package calls the exported clock-dependent code through
 // the package name.
 func TestTestDependsOnWallClockExternalPackage(t *testing.T) {
-	assert.Equal(t, []string{"bot/bot_ext_test.go:10"}, testWallClockFindings(t, map[string]string{
+	assert.Equal(t, []string{"bot/bot_ext_test.go:10"}, rulestest.ProjectFilesRulePlaces(t, NewTestDependsOnWallClockRule(), map[string]string{
 		"bot/bot.go": wallClockService + `
 func Greeting() string { return greeting() }
 `,

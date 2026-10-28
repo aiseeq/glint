@@ -3,16 +3,9 @@ package gorules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
-
-func emptyStructReturnLines(t *testing.T, path, source string) []int {
-	t.Helper()
-	ctx := rulestest.GoFile(t, path, source)
-	return patterntest.ViolationLines(NewEmptyStructReturnRule().AnalyzeFile(ctx))
-}
 
 // Only test files are skipped: latest_rates.go contains "test_" and a
 // testimonials directory starts with "/test", yet both are production code.
@@ -33,7 +26,7 @@ func Latest(s string) (Rate, error) {
 `
 	for _, path := range []string{"rates/latest_rates.go", "web/testimonials/rates.go", "rates/testing.go"} {
 		t.Run(path, func(t *testing.T) {
-			assert.Equal(t, []int{10}, emptyStructReturnLines(t, path, source))
+			assert.Equal(t, []int{10}, rulestest.GoFileRuleLines(t, NewEmptyStructReturnRule(), path, source))
 		})
 	}
 }
@@ -80,7 +73,7 @@ func Wait(ch chan string) (Rate, error) {
 	}
 }
 `
-	assert.Equal(t, []int{11, 23, 35}, emptyStructReturnLines(t, "p/p.go", source))
+	assert.Equal(t, []int{11, 23, 35}, rulestest.GoFileRuleLines(t, NewEmptyStructReturnRule(), "p/p.go", source))
 }
 
 // A chain of matchers answers "not a candidate" with the empty match. When the
@@ -143,5 +136,5 @@ func settle(s string) (outcome, error) {
 	return outcome{id: a.id}, nil
 }
 `
-	assert.Equal(t, []int{39, 50}, emptyStructReturnLines(t, "link/match.go", source))
+	assert.Equal(t, []int{39, 50}, rulestest.GoFileRuleLines(t, NewEmptyStructReturnRule(), "link/match.go", source))
 }

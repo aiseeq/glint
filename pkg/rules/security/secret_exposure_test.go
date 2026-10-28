@@ -8,15 +8,6 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
-func secretExposureLines(t *testing.T, path, code string) []int {
-	t.Helper()
-	var lines []int
-	for _, v := range NewSecretExposureRule().AnalyzeFile(rulestest.GoFile(t, path, code)) {
-		lines = append(lines, v.Line)
-	}
-	return lines
-}
-
 // A secret or a connection string handed to a log line or an error message
 // is written wherever logs and errors go.
 func TestSecretExposureInLogsAndErrors(t *testing.T) {
@@ -39,7 +30,7 @@ func TestSecretExposureInLogsAndErrors(t *testing.T) {
 		"\t_ = dsn\n" +
 		"\treturn nil\n" +
 		"}\n"
-	assert.Equal(t, []int{15, 18}, secretExposureLines(t, "svc/svc.go", code))
+	assert.Equal(t, []int{15, 18}, rulestest.GoFileRuleLines(t, NewSecretExposureRule(), "svc/svc.go", code))
 }
 
 // A failed comparison of a credential that prints the expected value hands
@@ -55,7 +46,7 @@ func TestSecretExposureExpectedCredentialInError(t *testing.T) {
 		"\t}\n" +
 		"\treturn nil\n" +
 		"}\n"
-	assert.Equal(t, []int{11}, secretExposureLines(t, "svc/svc.go", code))
+	assert.Equal(t, []int{11}, rulestest.GoFileRuleLines(t, NewSecretExposureRule(), "svc/svc.go", code))
 }
 
 // A secret field of a configuration read from the environment, without
@@ -73,7 +64,7 @@ func TestSecretExposureSerializableConfigSecret(t *testing.T) {
 		"type LoginRequest struct {\n" +
 		"\tPassword string `json:\"password\"`\n" +
 		"}\n"
-	assert.Equal(t, []int{5}, secretExposureLines(t, "config/config.go", code))
+	assert.Equal(t, []int{5}, rulestest.GoFileRuleLines(t, NewSecretExposureRule(), "config/config.go", code))
 }
 
 // A prefix of a secret is the secret's first characters: logged, it shortens
@@ -86,5 +77,5 @@ func TestSecretExposureSecretPrefix(t *testing.T) {
 		"\tlogger.Info(\"secret length\", \"length\", len(jwtSecret[:8]))\n" +
 		"\tlogger.Info(\"secret masked\", \"masked\", strings.Repeat(\"*\", len(jwtSecret)))\n" +
 		"}\n"
-	assert.Equal(t, []int{9}, secretExposureLines(t, "cli/main.go", code))
+	assert.Equal(t, []int{9}, rulestest.GoFileRuleLines(t, NewSecretExposureRule(), "cli/main.go", code))
 }

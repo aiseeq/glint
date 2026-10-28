@@ -1,8 +1,6 @@
 package gorules
 
 import (
-	"fmt"
-	"sort"
 	"strings"
 	"testing"
 
@@ -12,18 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func closerNeverClosedFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewCloserNeverClosedRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var out []string
-	for _, v := range violations {
-		out = append(out, fmt.Sprintf("%s:%d", v.File, v.Line))
-	}
-	sort.Strings(out)
-	return out
-}
 
 const closerStoreSource = `package store
 
@@ -114,7 +100,7 @@ func CloseTakesArgs() {
 // a reflect.Value whose Close closes a channel, or a field of it closed
 // through another variable.
 func TestCloserNeverClosedNotTheCallersToClose(t *testing.T) {
-	found := closerNeverClosedFindings(t, map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewCloserNeverClosedRule(), map[string]string{
 		"store/store.go": `package store
 
 import (
@@ -225,7 +211,7 @@ func main() {
 // caller must not close. A project function is judged by its body, whatever
 // its name.
 func TestCloserNeverClosedExternalCallee(t *testing.T) {
-	found := closerNeverClosedFindings(t, map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewCloserNeverClosedRule(), map[string]string{
 		"store/store.go": `package store
 
 import (
@@ -285,7 +271,7 @@ func time0() time.Time { return time.Time{} }
 // keeps its connections open: nothing closes it, and nothing it was handed
 // to can.
 func TestCloserNeverClosed(t *testing.T) {
-	found := closerNeverClosedFindings(t, map[string]string{
+	found := rulestest.ProjectRulePlaces(t, NewCloserNeverClosedRule(), map[string]string{
 		"store/store.go": closerStoreSource,
 		"store/store_test.go": `package store
 

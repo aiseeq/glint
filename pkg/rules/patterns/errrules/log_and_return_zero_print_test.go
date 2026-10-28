@@ -3,16 +3,9 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
-
-func logAndReturnZeroLines(t *testing.T, source string) []int {
-	t.Helper()
-	ctx := rulestest.GoFile(t, "svc/svc.go", source)
-	return patterntest.ViolationLines(NewLogAndReturnZeroRule().AnalyzeFile(ctx))
-}
 
 // An unleveled print that says it reports an error is an error log: the zero
 // returned after it is as silent as after logger.Error.
@@ -53,7 +46,7 @@ func Describe(name string) string {
 	return name
 }
 `
-	assert.Equal(t, []int{17, 24}, logAndReturnZeroLines(t, source))
+	assert.Equal(t, []int{17, 24}, rulestest.GoFileRuleLines(t, NewLogAndReturnZeroRule(), "svc/svc.go", source))
 }
 
 // A command function without an error result that logs the failure of its
@@ -119,5 +112,5 @@ func (s *Svc) sweep(ctx context.Context, items []any) {
 	}
 }
 `
-	assert.Equal(t, []int{23, 32}, logAndReturnZeroLines(t, source))
+	assert.Equal(t, []int{23, 32}, rulestest.GoFileRuleLines(t, NewLogAndReturnZeroRule(), "svc/svc.go", source))
 }

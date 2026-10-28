@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -157,7 +158,7 @@ func createConcatContext(t *testing.T, path, code string) *core.FileContext {
 	ctx := &core.FileContext{
 		Path:    "/" + path,
 		RelPath: path,
-		Lines:   splitConcatLines(code),
+		Lines:   rulestest.SplitLines(code),
 		Content: []byte(code),
 	}
 
@@ -171,19 +172,4 @@ func createConcatContext(t *testing.T, path, code string) *core.FileContext {
 	}
 
 	return ctx
-}
-
-func splitConcatLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
 }

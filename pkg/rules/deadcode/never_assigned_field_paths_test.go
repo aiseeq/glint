@@ -1,25 +1,16 @@
 package deadcode
 
 import (
-	"fmt"
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
-
-func neverAssignedPlaces(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	var places []string
-	for _, v := range analyzeNeverAssigned(t, files) {
-		places = append(places, fmt.Sprintf("%s:%d", v.File, v.Line))
-	}
-	return places
-}
 
 // A field that only ever receives nil is never given a value: the typed nil
 // written to make the code compile is still nil on the first call.
 func TestNeverAssignedFieldCountsNilWriteAsNoWrite(t *testing.T) {
-	places := neverAssignedPlaces(t, map[string]string{
+	places := rulestest.ViolationPlaces(analyzeNeverAssigned(t, map[string]string{
 		"handler.go": `package handler
 
 type SessionManager struct{ ttl int }
@@ -45,14 +36,14 @@ func (h *Handler) Close() error {
 	return err
 }
 `,
-	})
+	}))
 	assert.Equal(t, []string{"handler.go:10"}, places)
 }
 
 // A literal of a type written outside its constructor leaves nil the
 // dependencies the constructor fills and the methods use.
 func TestNeverAssignedFieldReportsLiteralBypassingConstructor(t *testing.T) {
-	places := neverAssignedPlaces(t, map[string]string{
+	places := rulestest.ViolationPlaces(analyzeNeverAssigned(t, map[string]string{
 		"base.go": `package routing
 
 type Logger interface{ Info(msg string) }
@@ -100,7 +91,7 @@ func cloneBase(h *BaseHandler) *BaseHandler {
 	return &BaseHandler{logger: h.logger, errorHandler: h.errorHandler}
 }
 `,
-	})
+	}))
 	assert.Equal(t, []string{"vault.go:7"}, places)
 }
 
@@ -108,7 +99,7 @@ func cloneBase(h *BaseHandler) *BaseHandler {
 // optional value of a data struct, the cause an error type returns, a field
 // of a library type.
 func TestNeverAssignedFieldLiteralLeavesUnusedFieldsAlone(t *testing.T) {
-	places := neverAssignedPlaces(t, map[string]string{
+	places := rulestest.ViolationPlaces(analyzeNeverAssigned(t, map[string]string{
 		"filter.go": `package store
 
 import (
@@ -164,7 +155,7 @@ func query() (*Filter, error) {
 	return &Filter{}, &failure{code: "empty"}
 }
 `,
-	})
+	}))
 	assert.Empty(t, places)
 }
 
@@ -173,7 +164,7 @@ func query() (*Filter, error) {
 // the constructor of the type: the program's literal that a wiring function
 // completes is not a bypass.
 func TestNeverAssignedFieldIgnoresTestHelperConstructor(t *testing.T) {
-	places := neverAssignedPlaces(t, map[string]string{
+	places := rulestest.ViolationPlaces(analyzeNeverAssigned(t, map[string]string{
 		"pipeline/job.go": `package pipeline
 
 type Job struct {
@@ -203,6 +194,6 @@ func Scene(t *testing.T) *pipeline.Job {
 	return &pipeline.Job{Watch: func() {}, Line: "scene"}
 }
 `,
-	})
+	}))
 	assert.Empty(t, places)
 }

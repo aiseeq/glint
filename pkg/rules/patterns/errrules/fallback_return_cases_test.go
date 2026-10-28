@@ -3,16 +3,9 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
-
-func fallbackReturnLines(t *testing.T, source string) []int {
-	t.Helper()
-	ctx := rulestest.GoFile(t, "svc/svc.go", source)
-	return patterntest.ViolationLines(NewFallbackReturnRule().AnalyzeFile(ctx))
-}
 
 // A lazily built singleton returns the value it has just stored, and a comment
 // that happens to say "use" or "return" is not an error context.
@@ -42,7 +35,7 @@ func Provider() *PaymentProvider {
 	return cachedProvider
 }
 `
-	assert.Empty(t, fallbackReturnLines(t, source))
+	assert.Empty(t, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }
 
 // A branch that records the failure in the result reads the error: that is
@@ -75,7 +68,7 @@ func Parse(s string) int {
 	return n
 }
 `
-	assert.Equal(t, []int{23}, fallbackReturnLines(t, source))
+	assert.Equal(t, []int{23}, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }
 
 // The middleware exception names whole words: GetRealIP and GetClientKey are
@@ -109,5 +102,5 @@ func GetRealIP() (string, error) {
 	return ip, nil
 }
 `
-	assert.Equal(t, []int{16}, fallbackReturnLines(t, source))
+	assert.Equal(t, []int{16}, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }

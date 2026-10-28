@@ -3,16 +3,9 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
-
-func failOpenLines(t *testing.T, source string) []int {
-	t.Helper()
-	ctx := rulestest.GoFile(t, "svc/svc.go", source)
-	return patterntest.ViolationLines(NewFailOpenRule().AnalyzeFile(ctx))
-}
 
 // A check that cannot be made answers yes: the deployment is active, the user
 // exists. The gate it guards opens exactly when the check is broken.
@@ -68,7 +61,7 @@ func (s *Svc) shouldRetry() bool {
 	return false
 }
 `
-	assert.Equal(t, []int{17, 24}, failOpenLines(t, source))
+	assert.Equal(t, []int{17, 24}, rulestest.GoFileRuleLines(t, NewFailOpenRule(), "svc/svc.go", source))
 }
 
 // A middleware whose check failed lets the request through; an error branch
@@ -127,5 +120,5 @@ func (s *Svc) AuthStatus(w http.ResponseWriter, r *http.Request) {
 	SendSuccess(w, AuthStatus{Authenticated: true}, "authenticated")
 }
 `
-	assert.Equal(t, []int{21, 36}, failOpenLines(t, source))
+	assert.Equal(t, []int{21, 36}, rulestest.GoFileRuleLines(t, NewFailOpenRule(), "svc/svc.go", source))
 }

@@ -3,16 +3,9 @@ package qarules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
-
-func tautologicalTSLines(t *testing.T, path, source string) []int {
-	t.Helper()
-	ctx := core.NewFileContext(path, ".", []byte(source), nil)
-	return patterntest.ViolationLines(NewTautologicalAssertionRule().AnalyzeFile(ctx))
-}
 
 // A browser-test helper that returns before its assertions when the server
 // answers with an unexpected status: the page check passes having checked
@@ -43,6 +36,6 @@ export async function expectListed(page: Page, path: string): Promise<void> {
   expect(page.url()).toContain(path)
 }
 `
-	assert.Equal(t, []int{5}, tautologicalTSLines(t, "frontend/e2e/utils/navigation.ts", source))
-	assert.Equal(t, []int{5}, tautologicalTSLines(t, "frontend/e2e/tests/navigation.spec.ts", source))
+	assert.Equal(t, []int{5}, rulestest.TextFileRuleLines(t, NewTautologicalAssertionRule(), "frontend/e2e/utils/navigation.ts", source))
+	assert.Equal(t, []int{5}, rulestest.TextFileRuleLines(t, NewTautologicalAssertionRule(), "frontend/e2e/tests/navigation.spec.ts", source))
 }

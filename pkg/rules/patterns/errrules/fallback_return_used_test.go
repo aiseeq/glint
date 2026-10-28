@@ -3,6 +3,7 @@ package errrules
 import (
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -39,7 +40,7 @@ func (s *Svc) Actor() string {
 	return adminID
 }
 `
-	assert.Equal(t, []int{14, 25}, fallbackReturnLines(t, source))
+	assert.Equal(t, []int{14, 25}, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }
 
 // A default declared before the call and replaced only in the else branch:
@@ -69,7 +70,7 @@ func (s *Svc) Total(amounts []float64) float64 {
 	return total
 }
 `
-	assert.Equal(t, []int{13}, fallbackReturnLines(t, source))
+	assert.Equal(t, []int{13}, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }
 
 // A loop that skips the items whose call failed and sums the rest returns a
@@ -96,7 +97,7 @@ func (s *Svc) Total() int {
 	return total
 }
 `
-	assert.Equal(t, []int{13}, fallbackReturnLines(t, source))
+	assert.Equal(t, []int{13}, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }
 
 // What stays out: a branch that leaves, a result not read below, a result
@@ -181,7 +182,7 @@ func (s *Svc) Collected(raw []string) []int {
 	return out
 }
 `
-	assert.Empty(t, fallbackReturnLines(t, source))
+	assert.Empty(t, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }
 
 // Repro from a real project: the reason of a suppression on the if line
@@ -215,5 +216,5 @@ func (s *Svc) Plain() float64 {
 	return p * 2
 }
 `
-	assert.Equal(t, []int{12}, fallbackReturnLines(t, source))
+	assert.Equal(t, []int{12}, rulestest.GoFileRuleLines(t, NewFallbackReturnRule(), "svc/svc.go", source))
 }

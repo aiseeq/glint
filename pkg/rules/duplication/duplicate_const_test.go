@@ -1,25 +1,12 @@
 package duplication
 
 import (
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
-
-func duplicateConstFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewDuplicateConstAcrossPackagesRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var lines []string
-	for _, v := range violations {
-		lines = append(lines, v.File+":"+strconv.Itoa(v.Line))
-	}
-	return lines
-}
 
 // Repro from a real project: a threshold moved into a lower package, and the
 // upper one kept its own copy under the same name — a change of one leaves
@@ -45,7 +32,7 @@ const foeNearBaseR = 15
 func Near(d float64) bool { return d <= foeNearBaseR }
 `,
 	}
-	assert.Equal(t, []string{"plan/situation/situation.go:3", "plan/threat.go:6"}, duplicateConstFindings(t, files))
+	assert.Equal(t, []string{"plan/situation/situation.go:3", "plan/threat.go:6"}, rulestest.ProjectRulePlaces(t, NewDuplicateConstAcrossPackagesRule(), files))
 }
 
 // Packages that do not import one another give one role name a setting of
@@ -65,7 +52,7 @@ const maxBatchSize = 100
 func full(n int) bool { return n >= maxBatchSize }
 `,
 	}
-	assert.Empty(t, duplicateConstFindings(t, files))
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewDuplicateConstAcrossPackagesRule(), files))
 }
 
 // A copy written as a literal with a comment naming the constant it copies:
@@ -88,7 +75,7 @@ func local(d float64) bool {
 }
 `,
 	}
-	assert.Equal(t, []string{"plan/situation/situation.go:4"}, duplicateConstFindings(t, files))
+	assert.Equal(t, []string{"plan/situation/situation.go:4"}, rulestest.ProjectRulePlaces(t, NewDuplicateConstAcrossPackagesRule(), files))
 }
 
 // Different values, one-word names, iota enumerations and a comment naming a
@@ -129,7 +116,7 @@ const wideR = 24 // twice a.LocalR rounded up
 func use() int { return maxRetries + limit + stateIdle + stateBusy + wideR }
 `,
 	}
-	assert.Empty(t, duplicateConstFindings(t, files))
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewDuplicateConstAcrossPackagesRule(), files))
 }
 
 // A constant defined through the one it names shares it already, and a
@@ -153,5 +140,5 @@ const LocalR = frame.LocalR
 func local(d float64) bool { return d < localR }
 `,
 	}
-	assert.Empty(t, duplicateConstFindings(t, files))
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewDuplicateConstAcrossPackagesRule(), files))
 }

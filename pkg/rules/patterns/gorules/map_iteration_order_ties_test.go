@@ -3,18 +3,10 @@ package gorules
 import (
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func mapOrderLines(t *testing.T, source string) []int {
-	t.Helper()
-	var got []int
-	for _, v := range analyzeMapOrder(t, source) {
-		got = append(got, v.Line)
-	}
-	return got
-}
 
 // Repro from a real project: the nearest worker was picked by walking a map
 // with a strict comparison of distances. Two workers at the same distance won
@@ -53,7 +45,7 @@ func Nearest(free map[uint64]*Worker, target Point) *Worker {
 // Repro from a real project: the cheapest unit of each producer was kept in a
 // map, and two units of equal price swapped places from run to run.
 func TestMapIterationOrderReportsArgminStoredInMap(t *testing.T) {
-	assert.Equal(t, []int{19}, mapOrderLines(t, `package order
+	assert.Equal(t, []int{19}, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 type Kind struct {
 	ID     uint32
@@ -82,7 +74,7 @@ func (c *Catalog) Build() {
 // A second comparison on equal keys decides every tie, so the walk no longer
 // does.
 func TestMapIterationOrderAcceptsArgminWithTieBreak(t *testing.T) {
-	assert.Empty(t, mapOrderLines(t, `package order
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 type Worker struct {
 	Tag  uint64
@@ -103,7 +95,7 @@ func Nearest(free map[uint64]*Worker) *Worker {
 
 // Comparing the key itself cannot tie: a map holds each key once.
 func TestMapIterationOrderAcceptsArgminOverKey(t *testing.T) {
-	assert.Empty(t, mapOrderLines(t, `package order
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 func First(names map[string]int) (string, int) {
 	bestName, bestCount := "", 0
@@ -120,7 +112,7 @@ func First(names map[string]int) (string, int) {
 // Each entry of the result is written once per key of the walked map: there is
 // no choice between entries.
 func TestMapIterationOrderAcceptsPerKeyMinimum(t *testing.T) {
-	assert.Empty(t, mapOrderLines(t, `package order
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 func Lowest(prices map[string][]int) map[string]int {
 	out := map[string]int{}
@@ -158,7 +150,7 @@ func SumOf(m map[string]float64) float64 {
 // Repro from a real project: a meter added a float damage into a field while
 // walking the units of a window.
 func TestMapIterationOrderReportsFloatSumIntoField(t *testing.T) {
-	assert.Equal(t, []int{14}, mapOrderLines(t, `package order
+	assert.Equal(t, []int{14}, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 type hit struct{ start, low float64 }
 
@@ -181,7 +173,7 @@ func (m *Meter) Close() {
 
 // Integer sums do not depend on the order of the terms.
 func TestMapIterationOrderAcceptsIntSum(t *testing.T) {
-	assert.Empty(t, mapOrderLines(t, `package order
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 func Total(m map[string]int) int {
 	n := 0
@@ -196,7 +188,7 @@ func Total(m map[string]int) int {
 // A float sum that stays inside the function and is only compared does not
 // reach any output.
 func TestMapIterationOrderAcceptsFloatSumThatStays(t *testing.T) {
-	assert.Empty(t, mapOrderLines(t, `package order
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 func Heavy(m map[string]float64) bool {
 	n := 0.0
@@ -246,7 +238,7 @@ func Report(m map[string]float64) string {
 // Repro from a real project: values of a map sorted by a method result; a
 // stable sort keeps the walk order of the equal ones just the same.
 func TestMapIterationOrderReportsStableSortOfValues(t *testing.T) {
-	assert.Equal(t, []int{17}, mapOrderLines(t, `package order
+	assert.Equal(t, []int{17}, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 import "sort"
 
@@ -270,7 +262,7 @@ func Worst(all map[uint64]*seen, loop uint32) []*seen {
 
 // The second key decides every tie, or the key of the map is the sort key.
 func TestMapIterationOrderAcceptsSortWithTieBreak(t *testing.T) {
-	assert.Empty(t, mapOrderLines(t, `package order
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 import (
 	"cmp"
@@ -370,7 +362,7 @@ func (t *Tracker) Death(pos Point) {
 
 // Deleting every matching entry without stopping is a cleanup, not a choice.
 func TestMapIterationOrderAcceptsDeleteWithoutBreak(t *testing.T) {
-	assert.Empty(t, mapOrderLines(t, `package order
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 func Expire(seen map[string]int, now int) {
 	for k, at := range seen {
@@ -415,7 +407,7 @@ func (s *Stats) Init(units map[uint32]*Kind) {
 
 // The groups are sorted after the walk, or they never leave the function.
 func TestMapIterationOrderAcceptsSortedGroups(t *testing.T) {
-	assert.Empty(t, mapOrderLines(t, `package order
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 import "slices"
 
@@ -452,7 +444,7 @@ func Count(units map[uint32]*Kind) int {
 // entry above it, which is no choice between entries; a sort by a field of the
 // map key's type sorts by the key itself, copied into the element.
 func TestMapIterationOrderAcceptsFilterAndKeyTypedSort(t *testing.T) {
-	assert.Empty(t, mapOrderLines(t, `package order
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 import (
 	"cmp"
@@ -500,7 +492,7 @@ func Known(buildings map[uint64]*building) []*building {
 // defined order; a float added into the row of the loop's own key gets one
 // term per walk; groups returned to a caller are not stored state.
 func TestMapIterationOrderAcceptsUniqueKeys(t *testing.T) {
-	assert.Empty(t, mapOrderLines(t, `package order
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 import (
 	"slices"
@@ -614,7 +606,7 @@ func Loose(existing map[string]int) map[string][]cand {
 // directory; a Name() method tells entries apart; source positions of
 // distinct nodes do not repeat.
 func TestMapIterationOrderAcceptsSuffixNameAndPosition(t *testing.T) {
-	assert.Empty(t, mapOrderLines(t, `package order
+	assert.Empty(t, rulestest.GoProjectRuleLines(t, NewMapIterationOrderRule(), "svc/svc.go", `package order
 
 import (
 	"cmp"

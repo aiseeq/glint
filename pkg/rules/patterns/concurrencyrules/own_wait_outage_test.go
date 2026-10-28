@@ -1,27 +1,12 @@
 package concurrencyrules
 
 import (
-	"fmt"
-	"sort"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-func ownWaitOutageFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewOwnWaitReportedAsOutageRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var out []string
-	for _, v := range violations {
-		out = append(out, fmt.Sprintf("%s:%d", v.File, v.Line))
-	}
-	sort.Strings(out)
-	return out
-}
 
 const ownWaitClientSource = `package enrich
 
@@ -69,7 +54,7 @@ func (c *Client) Lookup(ctx context.Context, wallet string) ([]string, error) {
 // with our deadline; marking that as the provider's outage blames a service
 // that was never asked.
 func TestOwnWaitReportedAsOutage(t *testing.T) {
-	assert.Equal(t, []string{"enrich/service.go:24"}, ownWaitOutageFindings(t, map[string]string{
+	assert.Equal(t, []string{"enrich/service.go:24"}, rulestest.ProjectRulePlaces(t, NewOwnWaitReportedAsOutageRule(), map[string]string{
 		"enrich/client.go": ownWaitClientSource,
 		"enrich/service.go": `package enrich
 

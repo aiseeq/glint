@@ -1,27 +1,12 @@
 package errrules
 
 import (
-	"fmt"
-	"sort"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-func notFoundServerErrorFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewNotFoundAnsweredAsServerErrorRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var out []string
-	for _, v := range violations {
-		out = append(out, fmt.Sprintf("%s:%d", v.File, v.Line))
-	}
-	sort.Strings(out)
-	return out
-}
 
 const notFoundStoreSource = `package store
 
@@ -135,14 +120,14 @@ func (r *Router) totals(w http.ResponseWriter, req *http.Request) {
 // every error with a 5xx tells a client's wrong id apart from nothing: the
 // missing record is a server failure.
 func TestNotFoundAnsweredAsServerError(t *testing.T) {
-	assert.Equal(t, []string{"api/api.go:28", "api/api.go:36"}, notFoundServerErrorFindings(t, map[string]string{
+	assert.Equal(t, []string{"api/api.go:28", "api/api.go:36"}, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": notFoundStoreSource,
 		"api/api.go":     notFoundAPISource,
 	}))
 }
 
 func TestNotFoundAnsweredAsServerErrorInService(t *testing.T) {
-	assert.Equal(t, []string{"service/service.go:10"}, notFoundServerErrorFindings(t, map[string]string{
+	assert.Equal(t, []string{"service/service.go:10"}, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": `package store
 import "context"
 import "errors"
@@ -169,7 +154,7 @@ func (s *Service) Load(ctx context.Context, key string) (string, error) {
 }
 
 func TestNotFoundAnsweredAsServerErrorResultWrapperInService(t *testing.T) {
-	assert.Equal(t, []string{"service/service.go:10"}, notFoundServerErrorFindings(t, map[string]string{
+	assert.Equal(t, []string{"service/service.go:10"}, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": `package store
 import ("context"; "errors")
 var ErrRecordNotFound = errors.New("record not found")
@@ -197,7 +182,7 @@ func (s *Service) Load(ctx context.Context, key string) (string, error) {
 }
 
 func TestNotFoundAnsweredAsServerErrorResultWrapperPlainNotFound(t *testing.T) {
-	assert.Equal(t, []string{"service/service.go:10"}, notFoundServerErrorFindings(t, map[string]string{
+	assert.Equal(t, []string{"service/service.go:10"}, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": `package store
 import ("context"; "errors")
 type Result struct { Error error }
@@ -222,7 +207,7 @@ func (s *Service) Load(ctx context.Context, key string) (string, error) {
 }
 
 func TestNotFoundAnsweredAsServerErrorResultWrapperIgnoresHandledError(t *testing.T) {
-	assert.Empty(t, notFoundServerErrorFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": `package store
 import ("context"; "errors")
 var ErrRecordNotFound = errors.New("record not found")
@@ -252,7 +237,7 @@ func (s *Service) Load(ctx context.Context, key string) (string, error) {
 }
 
 func TestNotFoundAnsweredAsServerErrorInServiceIgnoresHandledErrors(t *testing.T) {
-	assert.Empty(t, notFoundServerErrorFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": `package store
 import ("context"; "errors")
 var ErrRecordNotFound = errors.New("record not found")
@@ -290,7 +275,7 @@ func missingWithoutContext(key string) error {
 }
 
 func TestNotFoundAnsweredAsServerErrorServiceFalsePositives(t *testing.T) {
-	assert.Empty(t, notFoundServerErrorFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": `package store
 import ("context"; "errors")
 var ErrRecordNotFound = errors.New("record not found")
@@ -362,7 +347,7 @@ func TestNotFoundAnsweredAsServerErrorRule_Metadata(t *testing.T) {
 // A helper that receives the error only to log it, checking the request's
 // context, does not choose the status: the 5xx after it is still the answer.
 func TestNotFoundAnsweredAsServerErrorAfterLogger(t *testing.T) {
-	assert.Equal(t, []string{"api/api.go:25"}, notFoundServerErrorFindings(t, map[string]string{
+	assert.Equal(t, []string{"api/api.go:25"}, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": notFoundStoreSource,
 		"api/api.go": `package api
 
@@ -400,7 +385,7 @@ func (r *Router) report(w http.ResponseWriter, req *http.Request) {
 // A call handed nothing the client sent - an email the auth middleware put
 // into the context, no arguments at all - cannot miss on the client's id.
 func TestNotFoundAnsweredAsServerErrorNeedsClientValue(t *testing.T) {
-	assert.Equal(t, []string{"api/api.go:35"}, notFoundServerErrorFindings(t, map[string]string{
+	assert.Equal(t, []string{"api/api.go:35"}, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": notFoundStoreSource,
 		"api/api.go": `package api
 
@@ -447,7 +432,7 @@ func (r *Router) update(w http.ResponseWriter, req *http.Request) {
 // A helper handed the request that reads only its context (the staff the
 // auth middleware resolved) gives the call a server-side value.
 func TestNotFoundAnsweredAsServerErrorContextHelper(t *testing.T) {
-	assert.Empty(t, notFoundServerErrorFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": notFoundStoreSource,
 		"api/api.go": `package api
 
@@ -490,7 +475,7 @@ func (r *Router) status(w http.ResponseWriter, req *http.Request) {
 // A limit the client sent names no record: a not-found from inside the call
 // is not about the client's input.
 func TestNotFoundAnsweredAsServerErrorNumberArgument(t *testing.T) {
-	assert.Empty(t, notFoundServerErrorFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": notFoundStoreSource + `
 func (s *Store) Classify(ctx context.Context, limit int) (int, error) {
 	if _, err := s.Position(ctx, "settings"); err != nil {
@@ -525,7 +510,7 @@ func (r *Router) classify(w http.ResponseWriter, req *http.Request) {
 // gave it: a miss there is a server inconsistency, not the client's unknown
 // id, and 404 would make the client repeat the write.
 func TestNotFoundAnsweredAsServerErrorReadBackOfWrittenRecord(t *testing.T) {
-	assert.Empty(t, notFoundServerErrorFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": notFoundStoreSource,
 		"ledger/ledger.go": `package ledger
 
@@ -584,7 +569,7 @@ func (r *Router) create(w http.ResponseWriter, req *http.Request) {
 // The callee says "not found" only in the text of a plain error: the handler
 // cannot tell a currency the client mistyped from an outage and answers 502.
 func TestNotFoundAnsweredAsServerErrorUntypedText(t *testing.T) {
-	assert.Equal(t, []string{"api/api.go:25"}, notFoundServerErrorFindings(t, map[string]string{
+	assert.Equal(t, []string{"api/api.go:25"}, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"rates/rates.go": `package rates
 
 import "fmt"
@@ -639,7 +624,7 @@ func rate(w http.ResponseWriter, req *http.Request) {
 // A handler helper takes what its caller parsed from the request as a value
 // struct: a currency the client named still reaches the lookup.
 func TestNotFoundAnsweredAsServerErrorHelperParams(t *testing.T) {
-	assert.Equal(t, []string{"api/api.go:17"}, notFoundServerErrorFindings(t, map[string]string{
+	assert.Equal(t, []string{"api/api.go:17"}, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), map[string]string{
 		"rates/rates.go": `package rates
 
 import "fmt"

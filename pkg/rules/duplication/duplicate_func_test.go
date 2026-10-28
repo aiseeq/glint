@@ -1,25 +1,12 @@
 package duplication
 
 import (
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
-
-func duplicateFuncLines(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewDuplicateFuncAcrossPackagesRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var lines []string
-	for _, v := range violations {
-		lines = append(lines, v.File+":"+strconv.Itoa(v.Line))
-	}
-	return lines
-}
 
 // Two packages keep their own copy of one small helper: the bodies differ in
 // details, so cross-file-duplicate does not see them, and a fix of one (the
@@ -56,7 +43,7 @@ func withContextCause(ctx context.Context, err error) error {
 }
 `,
 	}
-	assert.Equal(t, []string{"poller/poller.go:8", "sender/sender.go:9"}, duplicateFuncLines(t, files))
+	assert.Equal(t, []string{"poller/poller.go:8", "sender/sender.go:9"}, rulestest.ProjectRulePlaces(t, NewDuplicateFuncAcrossPackagesRule(), files))
 }
 
 // One name with another signature, a one-word name every package has its own
@@ -167,5 +154,5 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 `,
 	}
-	assert.Empty(t, duplicateFuncLines(t, files))
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewDuplicateFuncAcrossPackagesRule(), files))
 }

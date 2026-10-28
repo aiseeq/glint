@@ -3,16 +3,9 @@ package errrules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
-
-func errorMaskingLines(t *testing.T, source string) []int {
-	t.Helper()
-	ctx := rulestest.GoFile(t, "svc/svc.go", source)
-	return patterntest.ViolationLines(NewErrorMaskingRule().AnalyzeFile(ctx))
-}
 
 // The error slot of the signature decides whether a return hands an error
 // over: a sentinel, a wrap helper and any other non-nil value in that slot is
@@ -62,7 +55,7 @@ func Handler() func(string) (int, error) {
 	}
 }
 `
-	assert.Equal(t, []int{29}, errorMaskingLines(t, source))
+	assert.Equal(t, []int{29}, rulestest.GoFileRuleLines(t, NewErrorMaskingRule(), "svc/svc.go", source))
 }
 
 // In a function whose only result is error, nil in the default branch is
@@ -81,7 +74,7 @@ func ValidateKind(kind string) error {
 	}
 }
 `
-	assert.Empty(t, errorMaskingLines(t, source))
+	assert.Empty(t, rulestest.GoFileRuleLines(t, NewErrorMaskingRule(), "svc/svc.go", source))
 }
 
 // Predicate names end at a word boundary: HashPassword is not Has+Password's
@@ -124,12 +117,12 @@ func isStale(s string) bool {
 	return false
 }
 `
-	assert.Equal(t, []int{7, 15}, errorMaskingLines(t, source))
+	assert.Equal(t, []int{7, 15}, rulestest.GoFileRuleLines(t, NewErrorMaskingRule(), "svc/svc.go", source))
 }
 
 // A function implemented elsewhere has no body to inspect.
 func TestErrorMasking_FunctionWithoutBody(t *testing.T) {
-	assert.Empty(t, errorMaskingLines(t, "package svc\n\nfunc ReadCounter() (int, error)\n"))
+	assert.Empty(t, rulestest.GoFileRuleLines(t, NewErrorMaskingRule(), "svc/svc.go", "package svc\n\nfunc ReadCounter() (int, error)\n"))
 }
 
 // A function whose last result is a typed error of its own (*RequestError)
@@ -197,5 +190,5 @@ func (s *streamer) readCount(raw string) int {
 	return n
 }
 `
-	assert.Equal(t, []int{35, 43, 52}, errorMaskingLines(t, source))
+	assert.Equal(t, []int{35, 43, 52}, rulestest.GoFileRuleLines(t, NewErrorMaskingRule(), "svc/svc.go", source))
 }

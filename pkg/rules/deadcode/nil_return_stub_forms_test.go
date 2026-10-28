@@ -3,17 +3,9 @@ package deadcode
 import (
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
-
-func nilReturnStubLines(t *testing.T, code string) []int {
-	t.Helper()
-	var lines []int
-	for _, v := range NewNilReturnStubRule().AnalyzeFile(parseGoContext(t, "svc.go", code)) {
-		lines = append(lines, v.Line)
-	}
-	return lines
-}
 
 // A body that answers with fixed values and says in a comment that it is a
 // stub: zeros, an empty list, a validation that always passes.
@@ -51,7 +43,7 @@ func (r *Repo) ProviderType() string {
 	return "PROVIDER"
 }
 `
-	assert.Equal(t, []int{11, 16, 21}, nilReturnStubLines(t, code))
+	assert.Equal(t, []int{11, 16, 21}, rulestest.GoFileRuleLines(t, NewNilReturnStubRule(), "svc/svc.go", code))
 }
 
 // A write method whose whole body is return nil loses the write; a null
@@ -78,7 +70,7 @@ func (a *Adapter) Close() error {
 	return nil
 }
 `
-	assert.Equal(t, []int{5, 9}, nilReturnStubLines(t, code))
+	assert.Equal(t, []int{5, 9}, rulestest.GoFileRuleLines(t, NewNilReturnStubRule(), "svc/svc.go", code))
 }
 
 // The real call left in a comment next to the value that replaced it.
@@ -100,7 +92,7 @@ func (m *Manager) Name() string {
 	return "" // empty until configured
 }
 `
-	assert.Equal(t, []int{9}, nilReturnStubLines(t, code))
+	assert.Equal(t, []int{9}, rulestest.GoFileRuleLines(t, NewNilReturnStubRule(), "svc/svc.go", code))
 }
 
 // A handler that answers with a success it did not produce and says so.
@@ -123,5 +115,5 @@ func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 	SendSuccess(w, map[string]any{"status": "ok"}, "healthy")
 }
 `
-	assert.Equal(t, []int{12}, nilReturnStubLines(t, code))
+	assert.Equal(t, []int{12}, rulestest.GoFileRuleLines(t, NewNilReturnStubRule(), "svc/svc.go", code))
 }

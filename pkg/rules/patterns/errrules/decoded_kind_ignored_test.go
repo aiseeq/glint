@@ -1,27 +1,12 @@
 package errrules
 
 import (
-	"fmt"
-	"sort"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-func decodedKindFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewDecodedKindFieldIgnoredRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var out []string
-	for _, v := range violations {
-		out = append(out, fmt.Sprintf("%s:%d", v.File, v.Line))
-	}
-	sort.Strings(out)
-	return out
-}
 
 const decodedKindProviderSource = `package provider
 
@@ -37,7 +22,7 @@ type TokenEvent struct {
 // A converter from a decoded event that never reads the event's type and
 // writes one kind for every event stores approvals as transfers.
 func TestDecodedKindFieldIgnored(t *testing.T) {
-	assert.Equal(t, []string{"ledger/convert.go:17", "ledger/convert.go:32"}, decodedKindFindings(t, map[string]string{
+	assert.Equal(t, []string{"ledger/convert.go:17", "ledger/convert.go:32"}, rulestest.ProjectRulePlaces(t, NewDecodedKindFieldIgnoredRule(), map[string]string{
 		"provider/types.go": decodedKindProviderSource,
 		"ledger/convert.go": `package ledger
 
@@ -90,7 +75,7 @@ func TestDecodedKindFieldIgnoredRule_Metadata(t *testing.T) {
 // The kind read by a helper handed the record, or by the dispatcher that
 // picked this converter for one kind, is not ignored.
 func TestDecodedKindFieldReadElsewhere(t *testing.T) {
-	assert.Empty(t, decodedKindFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewDecodedKindFieldIgnoredRule(), map[string]string{
 		"provider/types.go": decodedKindProviderSource,
 		"ledger/convert.go": `package ledger
 

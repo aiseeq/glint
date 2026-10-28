@@ -3,15 +3,12 @@ package gorules
 import (
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestEmbeddedTemplatesParsedPerConstructionOnceDoAllowed(t *testing.T) {
-	assert.Empty(t, embeddedTemplateFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewEmbeddedTemplatesParsedPerConstructionRule(), map[string]string{
 		"view/view.go": `package view
 
 import (
@@ -33,22 +30,8 @@ func NewView() {
 	}))
 }
 
-func embeddedTemplateFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	root, _ := rulestest.Module(t, files)
-	contexts, errs := core.NewWalker(root, core.DefaultConfig()).WalkSync()
-	require.Empty(t, errs)
-	rule := NewEmbeddedTemplatesParsedPerConstructionRule()
-	rule.UseProjectFiles(contexts)
-	var violations []*core.Violation
-	for _, ctx := range contexts {
-		violations = append(violations, rule.AnalyzeFile(ctx)...)
-	}
-	return patterntest.FoundLines(violations)
-}
-
 func TestEmbeddedTemplatesParsedPerConstruction(t *testing.T) {
-	assert.Equal(t, []string{"view/view.go:12"}, embeddedTemplateFindings(t, map[string]string{
+	assert.Equal(t, []string{"view/view.go:12"}, rulestest.ProjectFilesRulePlaces(t, NewEmbeddedTemplatesParsedPerConstructionRule(), map[string]string{
 		"view/view.go": `package view
 
 import (
@@ -75,7 +58,7 @@ type View struct { templates *template.Template }
 }
 
 func TestEmbeddedTemplatesParsedPerConstructionAllowed(t *testing.T) {
-	assert.Empty(t, embeddedTemplateFindings(t, map[string]string{
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewEmbeddedTemplatesParsedPerConstructionRule(), map[string]string{
 		"view/view.go": `package view
 
 import (

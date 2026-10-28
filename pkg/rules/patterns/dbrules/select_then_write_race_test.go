@@ -408,25 +408,13 @@ func (r *Repo) CloseLocked(ctx context.Context, id int) error {
 
 // selectThenWriteLines runs the rule on one file without type information and
 // returns the reported lines.
-func selectThenWriteLines(t *testing.T, code string) []int {
-	t.Helper()
-	ctx := core.NewFileContext("/src/file.go", "/src", []byte(code), core.DefaultConfig())
-	fset, astFile, err := core.NewParser().ParseGoFile("/src/file.go", []byte(code))
-	require.NoError(t, err)
-	ctx.SetGoAST(fset, astFile)
-	var lines []int
-	for _, v := range NewSelectThenWriteRaceRule().AnalyzeFile(ctx) {
-		lines = append(lines, v.Line)
-	}
-	return lines
-}
 
 // A worker lists unfinished jobs and flips each to running by its id alone:
 // two instances (a deploy overlap) both "claim" the same job and both run it.
 // A claim that names the expected status, or reads RowsAffected, is the fix;
 // a status that is not a claim (done) is an ordinary transition.
 func TestSelectThenWriteRaceRule_ClaimByKeyOnly(t *testing.T) {
-	assert.Equal(t, []int{12, 17}, selectThenWriteLines(t, `package repo
+	assert.Equal(t, []int{12, 17}, rulestest.GoFileRuleLines(t, NewSelectThenWriteRaceRule(), "db/db.go", `package repo
 
 import "context"
 
@@ -470,7 +458,7 @@ func (r *Repo) MarkDone(ctx context.Context, id string) error {
 // a double click passes the check twice and pays twice. A claim on the version
 // (or a Claim call) between the check and the send serializes the approvals.
 func TestSelectThenWriteRaceRule_SendAfterStatusCheck(t *testing.T) {
-	assert.Equal(t, []int{25}, selectThenWriteLines(t, `package svc
+	assert.Equal(t, []int{25}, rulestest.GoFileRuleLines(t, NewSelectThenWriteRaceRule(), "db/db.go", `package svc
 
 import (
 	"context"

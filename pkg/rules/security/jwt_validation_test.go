@@ -1,13 +1,10 @@
 package security
 
 import (
-	"fmt"
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
@@ -231,23 +228,11 @@ func parseSession(tokenString, secret string) (*jwt.Token, error) {
 	assert.Empty(t, ruleLines(t, NewJWTParseValidationRule(), session))
 }
 
-func jwtTokenTypePlaces(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewJWTTokenTypeRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var places []string
-	for _, v := range violations {
-		places = append(places, fmt.Sprintf("%s:%d", v.File, v.Line))
-	}
-	slices.Sort(places)
-	return places
-}
-
 // Claims that say which kind of token they are — access or refresh — are
 // read by a refresh without looking at the kind: an access token refreshes
 // the session.
 func TestJWTTokenTypeUnchecked(t *testing.T) {
-	places := jwtTokenTypePlaces(t, map[string]string{
+	places := rulestest.ProjectRulePlaces(t, NewJWTTokenTypeRule(), map[string]string{
 		"claims.go": `package auth
 
 type RegisteredClaims struct{ Subject string }

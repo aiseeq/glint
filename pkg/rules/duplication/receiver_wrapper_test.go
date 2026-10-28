@@ -1,25 +1,12 @@
 package duplication
 
 import (
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
-
-func receiverWrapperFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewReceiverWrapperDuplicatesCallRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var lines []string
-	for _, v := range violations {
-		lines = append(lines, v.File+":"+strconv.Itoa(v.Line))
-	}
-	return lines
-}
 
 // Repro from a real project: a method that only passes a field of its
 // receiver to a function of the package, while the package calls that
@@ -50,7 +37,7 @@ func (l *Line) arena() *Part { return l.arenaNamedPart("arena") }
 func defense(l *Line) *Part { return partNamed(l.Parts, "defense") }
 `,
 	}
-	assert.Equal(t, []string{"lines/line.go:16"}, receiverWrapperFindings(t, files))
+	assert.Equal(t, []string{"lines/line.go:16"}, rulestest.ProjectRulePlaces(t, NewReceiverWrapperDuplicatesCallRule(), files))
 }
 
 // The wrapper is the only way the package takes the field to the function:
@@ -103,5 +90,5 @@ func countWhere(parts []*Part, match func(*Part) bool) int {
 }
 `,
 	}
-	assert.Empty(t, receiverWrapperFindings(t, files))
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewReceiverWrapperDuplicatesCallRule(), files))
 }

@@ -1,27 +1,11 @@
 package timerules
 
 import (
-	"slices"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
-
-func timeDerivedIDLines(t *testing.T, path, source string) []int {
-	t.Helper()
-	var ctx *core.FileContext
-	if path[len(path)-3:] == ".go" {
-		ctx = rulestest.GoFile(t, path, source)
-	} else {
-		ctx = core.NewFileContext(path, ".", []byte(source), nil)
-	}
-	lines := patterntest.ViolationLines(NewTimeDerivedIDRule().AnalyzeFile(ctx))
-	slices.Sort(lines)
-	return lines
-}
 
 // An identifier formatted from the clock repeats for two calls in the same
 // tick and is guessed by anyone who knows roughly when it was made.
@@ -60,7 +44,7 @@ func mixedID() string {
 	return id
 }
 `
-	assert.Equal(t, []int{15, 17, 18, 22}, timeDerivedIDLines(t, "svc.go", source))
+	assert.Equal(t, []int{15, 17, 18, 22}, rulestest.SourceFileRuleLines(t, NewTimeDerivedIDRule(), "svc.go", source))
 }
 
 // The clock reduced modulo a small number picks one of a few values: two
@@ -94,8 +78,8 @@ func spinner(frames []string) string {
 	return frames[frame]
 }
 `
-	assert.Equal(t, []int{10, 20}, timeDerivedIDLines(t, "helpers.go", source))
-	assert.Equal(t, []int{10, 20}, timeDerivedIDLines(t, "tests/helpers/accounts.go", source))
+	assert.Equal(t, []int{10, 20}, rulestest.SourceFileRuleLines(t, NewTimeDerivedIDRule(), "helpers.go", source))
+	assert.Equal(t, []int{10, 20}, rulestest.SourceFileRuleLines(t, NewTimeDerivedIDRule(), "tests/helpers/accounts.go", source))
 }
 
 // Test code names its records after the clock all the time; only a clock
@@ -119,7 +103,7 @@ func walletAddress() string {
 	return fmt.Sprintf("0x%040d", time.Now().UnixNano()%1000000000000000000)
 }
 `
-	assert.Equal(t, []int{10, 11}, timeDerivedIDLines(t, "tests/helpers/users.go", source))
+	assert.Equal(t, []int{10, 11}, rulestest.SourceFileRuleLines(t, NewTimeDerivedIDRule(), "tests/helpers/users.go", source))
 }
 
 func TestTimeDerivedIDModuloInTypeScript(t *testing.T) {
@@ -132,5 +116,5 @@ func TestTimeDerivedIDModuloInTypeScript(t *testing.T) {
   return insert(userId, clientNumber, accountNumber, frame);
 }
 `
-	assert.Equal(t, []int{4, 5}, timeDerivedIDLines(t, "e2e/utils/users.ts", source))
+	assert.Equal(t, []int{4, 5}, rulestest.SourceFileRuleLines(t, NewTimeDerivedIDRule(), "e2e/utils/users.ts", source))
 }

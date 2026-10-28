@@ -1,25 +1,12 @@
 package duplication
 
 import (
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
-
-func helperOutsideLines(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewHelperOutsideTypePackageRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var lines []string
-	for _, v := range violations {
-		lines = append(lines, v.File+":"+strconv.Itoa(v.Line))
-	}
-	return lines
-}
 
 const geomPackage = `package geom
 
@@ -84,7 +71,7 @@ func circleIntersection(a, b geom.Point, r float64) (geom.Point, geom.Point, err
 }
 `,
 	}
-	assert.Equal(t, []string{"plan/mining.go:9", "terrain/ramp.go:10", "terrain/ramp.go:19"}, helperOutsideLines(t, files))
+	assert.Equal(t, []string{"plan/mining.go:9", "terrain/ramp.go:10", "terrain/ramp.go:19"}, rulestest.ProjectRulePlaces(t, NewHelperOutsideTypePackageRule(), files))
 }
 
 // Code that only calls the type's API, that leans on its own package, that
@@ -131,7 +118,7 @@ func flatCost(geom.Point) float64 { return 0 }
 func (c *Ctx) shift(p geom.Point) geom.Point { return geom.Point{X: p.X + 1, Y: p.Y} }
 `,
 	}
-	assert.Empty(t, helperOutsideLines(t, files))
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewHelperOutsideTypePackageRule(), files))
 }
 
 // A setter of a parameter table and rows of data built as literals of the
@@ -159,7 +146,7 @@ func start(p geom.Point) []geom.Point { return []geom.Point{p, {X: 0, Y: 0}} }
 func main() {}
 `,
 	}
-	assert.Empty(t, helperOutsideLines(t, files))
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewHelperOutsideTypePackageRule(), files))
 }
 
 // A rule over an entity passed by pointer belongs to the service that changes
@@ -189,7 +176,7 @@ func validateApprovable(tx *domain.Transaction) error {
 }
 `,
 	}
-	assert.Empty(t, helperOutsideLines(t, files))
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewHelperOutsideTypePackageRule(), files))
 }
 
 // A wrapper of one embedded number (Amount{big.Int}) is a scalar: reading the
@@ -249,5 +236,5 @@ func total(issues []models.Issue) int {
 }
 `,
 	}
-	assert.Equal(t, []string{"routes/consistency.go:21"}, helperOutsideLines(t, files))
+	assert.Equal(t, []string{"routes/consistency.go:21"}, rulestest.ProjectRulePlaces(t, NewHelperOutsideTypePackageRule(), files))
 }

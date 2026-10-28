@@ -1,32 +1,17 @@
 package errrules
 
 import (
-	"fmt"
-	"sort"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-func validationServerErrorFindings(t *testing.T, files map[string]string) []string {
-	t.Helper()
-	violations, err := NewValidationErrorAnsweredAsServerErrorRule().AnalyzeGoProject(rulestest.Project(t, files))
-	require.NoError(t, err)
-	var out []string
-	for _, v := range violations {
-		out = append(out, fmt.Sprintf("%s:%d", v.File, v.Line))
-	}
-	sort.Strings(out)
-	return out
-}
 
 // A service that refuses an input with a plain error, behind a handler
 // whose mapper knows only the not-found and conflict sentinels and answers
 // the rest with 500: the client's invalid input is a server failure.
 func TestValidationErrorAnsweredAsServerError(t *testing.T) {
-	assert.Equal(t, []string{"api/api.go:44", "api/api.go:68"}, validationServerErrorFindings(t, map[string]string{
+	assert.Equal(t, []string{"api/api.go:44", "api/api.go:68"}, rulestest.ProjectRulePlaces(t, NewValidationErrorAnsweredAsServerErrorRule(), map[string]string{
 		"store/store.go": `package store
 
 import (

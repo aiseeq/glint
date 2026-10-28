@@ -15,23 +15,14 @@ import (
 // through here, so they stay meaningful whichever kind of rule it is.
 func RunRuleOnProject(t *testing.T, rule rules.Rule, project *core.GoProjectContext) []*core.Violation {
 	t.Helper()
-	if projectRule, ok := rule.(rules.GoProjectRule); ok {
-		violations, err := projectRule.AnalyzeGoProject(project)
-		require.NoError(t, err)
-		return violations
-	}
-	var violations []*core.Violation
-	for _, fileCtx := range project.Files {
-		violations = append(violations, rule.AnalyzeFile(fileCtx)...)
-	}
-	return violations
+	return rulestest.RunRuleOnProject(t, rule, project)
 }
 
 // RunRuleOnFiles writes files into a fresh module, loads it as a typed
 // project and runs rule over it.
 func RunRuleOnFiles(t *testing.T, rule rules.Rule, files map[string]string) []*core.Violation {
 	t.Helper()
-	return RunRuleOnProject(t, rule, rulestest.Project(t, files))
+	return rulestest.RunRuleOnFiles(t, rule, files)
 }
 
 // RunRuleOnBrokenFiles loads files the way --tolerant does, so packages that
