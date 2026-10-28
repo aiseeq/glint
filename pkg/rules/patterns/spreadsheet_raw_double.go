@@ -2,7 +2,6 @@ package patterns
 
 import (
 	"go/ast"
-	"go/token"
 	"go/types"
 	"sort"
 
@@ -31,6 +30,10 @@ func NewSpreadsheetRawDoubleParsedAsExactDecimalRule() *typedFuncRule {
 		decimalPackages := make(map[*types.Package]bool)
 		directDecimal := make(map[*types.Func]bool)
 		directNormalizers := make(map[*types.Func]bool)
+		// A package that rounds numbers to 15 significant digits somewhere
+		// normalizes its amounts on the parse path: the raw read and the
+		// rounding often sit in different functions of a streaming reader.
+		roundingPackages := make(map[*types.Package]bool)
 		functions := make(map[*types.Func]typedFuncDecl)
 		for obj, decl := range decls {
 			if decl.decl == nil || decl.decl.Body == nil || obj.Pkg() == nil {
@@ -43,6 +46,9 @@ func NewSpreadsheetRawDoubleParsedAsExactDecimalRule() *typedFuncRule {
 			}
 			if hasSpreadsheetNormalization(decl.info, decl.decl.Body) {
 				directNormalizers[obj.Origin()] = true
+			}
+			if hasSpreadsheetPrecisionFormat(decl.info, decl.decl.Body) {
+				roundingPackages[obj.Pkg()] = true
 			}
 		}
 		decimalConsumers := make(map[*types.Func]bool)
@@ -65,7 +71,7 @@ func NewSpreadsheetRawDoubleParsedAsExactDecimalRule() *typedFuncRule {
 				return nil
 			}
 			current, _ := scope.info.Defs[fn.Name].(*types.Func)
-			if current == nil || current.Pkg() == nil || !decimalPackages[current.Pkg()] {
+			if current == nil || current.Pkg() == nil || !decimalPackages[current.Pkg()] || roundingPackages[current.Pkg()] {
 				return nil
 			}
 			decl := typedFuncDecl{decl: fn, info: scope.info}
@@ -287,6 +293,17 @@ func hasSpreadsheetNormalization(info *types.Info, body *ast.BlockStmt) bool {
 	return found
 }
 
+func hasSpreadsheetPrecisionFormat(info *types.Info, body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && isSpreadsheetPrecisionFormat(info, call) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
 func reachesNormalizer(decl typedFuncDecl, direct map[*types.Func]bool, functions map[*types.Func]typedFuncDecl, depth int, seen map[*types.Func]bool) bool {
 	obj, _ := decl.info.Defs[decl.decl.Name].(*types.Func)
 	if obj == nil || seen[obj.Origin()] {
@@ -352,10 +369,9 @@ func isSpreadsheetPrecisionFormat(info *types.Info, call *ast.CallExpr) bool {
 	if !isPkgFunc(info, call, "strconv", "FormatFloat") || len(call.Args) < 3 {
 		return false
 	}
-	format, formatOK := ast.Unparen(call.Args[1]).(*ast.BasicLit)
-	precision, precisionOK := ast.Unparen(call.Args[2]).(*ast.BasicLit)
-	return formatOK && format.Kind == token.CHAR && (format.Value == "'G'" || format.Value == "'g'") &&
-		precisionOK && precision.Kind == token.INT && precision.Value == "15"
+	format, formatOK := constantInt(info, call.Args[1])
+	precision, precisionOK := constantInt(info, call.Args[2])
+	return formatOK && (format == 'G' || format == 'g') && precisionOK && precision == 15
 }
 
 func isExplicitRawSpreadsheetRead(info *types.Info, call *ast.CallExpr) bool {

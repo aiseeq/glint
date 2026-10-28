@@ -231,3 +231,30 @@ func OpenFile(string, ...Options) (*File, error) { return nil, nil }
 	require.NoError(t, err)
 	return foundLines(violations)
 }
+
+func TestSpreadsheetRawDoubleParsedAsExactDecimalAcceptsPackageNormalizer(t *testing.T) {
+	assert.Empty(t, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import "github.com/xuri/excelize/v2"
+func readRow(rows *excelize.Rows) []string {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	return cells
+}
+`,
+		"sheet/amount.go": `package sheet
+import (
+	"strconv"
+	"github.com/shopspring/decimal"
+)
+func amount(value string) (decimal.Decimal, error) {
+	return decimal.NewFromString(roundedNumber(value))
+}
+func roundedNumber(value string) string {
+	f, err := strconv.ParseFloat(value, 64)
+	if err != nil { return value }
+	return strconv.FormatFloat(f, 'G', significantDigits, 64)
+}
+const significantDigits = 15
+`,
+	}))
+}
