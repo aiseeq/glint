@@ -617,4 +617,29 @@ export function Loader() {}
 	if !slices.Equal(lines, []int{4}) {
 		t.Fatalf("want the TypeScript tombstone on line 4 alone, got %v", lines)
 	}
+
+	// A plural noun after the name is no verb: these stay notes on code.
+	notes := `package sweep
+
+// Client options removed, pass a Config instead
+type Client struct{}
+
+// Rows status column deleted
+var Rows int
+
+// Sync пакет старый удалён
+func Sync() {}
+
+type Config struct {
+	// Name settings removed
+	Name string
+}
+`
+	lines = nil
+	for _, v := range rule.AnalyzeFile(core.NewFileContext("sweep/notes.go", ".", []byte(notes), nil)) {
+		lines = append(lines, v.Line)
+	}
+	if !slices.Equal(lines, []int{3, 6, 9, 13}) {
+		t.Fatalf("want tombstones on lines 3, 6, 9, 13, got %v", lines)
+	}
 }

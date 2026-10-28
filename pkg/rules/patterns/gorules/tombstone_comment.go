@@ -46,9 +46,9 @@ func init() {
 // line goes on there. A pronoun before the removal word ("one it removed",
 // "the rows they deleted") is the one that removes: the program, not a note.
 // So is the first sentence of a godoc comment that opens with the name
-// declared below and a verb ("Result counts the entries a trim removed"): it
-// describes the declaration; a later sentence or paragraph of the doc can
-// still be a note.
+// declared below and a verb, with a subject of the removal word ("Result
+// counts the entries a trim removed"): it describes the declaration; a later
+// sentence or paragraph of the doc can still be a note.
 type TombstoneCommentRule struct {
 	*rules.BaseRule
 	tombstone    *regexp.Regexp
@@ -189,7 +189,7 @@ func sentenceBefore(before string, lines []string, i int) string {
 		return before
 	}
 	above := strings.TrimRight(commentTextOfLine(lines[i-1]), " \t")
-	if above == "" || strings.HasPrefix(above, "\t") || strings.ContainsRune(".!?:;—–", lastRune(above)) {
+	if above == "" || strings.HasPrefix(above, "\t") || strings.ContainsRune(sentenceMarks, lastRune(above)) {
 		return before
 	}
 	return above + " " + strings.TrimLeft(before, " \t")
@@ -247,10 +247,12 @@ func isCommentLine(line string) bool {
 	return comment != "" && strings.HasPrefix(strings.TrimSpace(line), comment)
 }
 
+// sentenceMarks end a sentence or a clause of a comment.
+const sentenceMarks = ".!?:;—–"
+
 var (
-	// sentenceEnd matches the end of a sentence inside a comment: the marks
-	// sentenceBefore ends a line's sentence on.
-	sentenceEnd = regexp.MustCompile(`[.!?:;—–](?:\s|$)`)
+	// sentenceEnd matches the end of a sentence inside a comment.
+	sentenceEnd = regexp.MustCompile(`[` + sentenceMarks + `](?:\s|$)`)
 	// declaration captures the name a code line declares: after a keyword,
 	// or a Go struct field.
 	declaration = regexp.MustCompile(
@@ -259,12 +261,17 @@ var (
 	// presentVerb matches the verb a godoc sentence puts after the name:
 	// "Result counts", "Merge объединяет".
 	presentVerb = regexp.MustCompile(`(?i)^\p{L}+(?:s|[еиё]т|[юяу]т)$`)
+	// clauseSubject matches the subject of a clause the removal word is the
+	// verb of: "the entries a trim removed". A plural noun after the name
+	// ("Client options removed") has none.
+	clauseSubject = regexp.MustCompile(`(?i)\b(?:a|an|the|each|every|this|that|its|their|one)\s+[\p{L}\d_-]+\s+$`)
 )
 
 // godocFirstSentence reports a match on comment line i, with before the text
 // of the line ahead of it, inside the first sentence of a doc comment that
-// opens with the name the code below declares and a verb: godoc's "Result
-// counts the entries ..." describes the declaration.
+// opens with the name the code below declares and a verb, with the removal
+// word the verb of a clause of its own: godoc's "Result counts the entries a
+// trim removed" describes the declaration.
 func godocFirstSentence(lines []string, i int, before string) bool {
 	if !isCommentLine(lines[i]) {
 		return false
@@ -286,7 +293,8 @@ func godocFirstSentence(lines []string, i int, before string) bool {
 		return false
 	}
 	words := strings.FieldsFunc(text.String(), isNotIdentChar)
-	return len(words) > 1 && words[0] == nameDeclaredBelow(lines, i) && presentVerb.MatchString(words[1])
+	return len(words) > 1 && words[0] == nameDeclaredBelow(lines, i) && presentVerb.MatchString(words[1]) &&
+		clauseSubject.MatchString(text.String())
 }
 
 // nameDeclaredBelow returns the name the first code line after line i declares,
