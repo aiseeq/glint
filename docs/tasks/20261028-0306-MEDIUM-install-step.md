@@ -19,3 +19,4 @@
 - 2026-10-28 03:06 открыт — git-admin
 - 2026-10-28 03:06 note — glint-master: edited .graft.yaml install → {install: bin/glint}; committing then graft install
 - 2026-10-28 03:07 на проверке — glint-master — graft install: 'graft: install: glint a839d21 -> ~/bin/glint'; vcs.revision=a839d21, vcs.modified=false
+- 2026-10-28 03:08 note — git-admin: проверка git-admin: принято (install: bin/glint, ~/bin/glint a839d21 modified=false); tk done отказал на 2 medium glint duplicate-func-across-packages (unused_internal_export.go:545, error_wrap.go:191) — для glint-master
