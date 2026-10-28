@@ -57,12 +57,6 @@ func NewTypeInferrerFromNode(node ast.Node) *TypeInferrer {
 	return ti
 }
 
-// IsDeclared reports whether the analyzed scope introduces this name at all,
-// regardless of whether its type could be inferred.
-func (ti *TypeInferrer) IsDeclared(name string) bool {
-	return ti.Declared[name]
-}
-
 // IsAmbiguous reports whether the file binds this name to more than one type.
 func (ti *TypeInferrer) IsAmbiguous(name string) bool {
 	return ti.ambiguous[name]

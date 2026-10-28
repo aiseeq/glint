@@ -35,11 +35,11 @@ categories:
     rules:
       test-email-registrable-domain:
         exceptions:
-          - file: "pkg/rules/patterns/testrules/test_reliability_ts_test.go"
+          - file: "pkg/rules/patterns/qarules/test_reliability_ts_test.go"
             reason: >-
               The addresses on registrable domains are the inputs of the
               rule's own test: the test checks that the rule reports them.
-          - file: "pkg/rules/patterns/testrules/test_email_domain_sql_test.go"
+          - file: "pkg/rules/patterns/qarules/test_email_domain_sql_test.go"
             reason: >-
               The SQL patterns on registrable domains are the inputs of the
               rule's own test: the test checks that the rule reports them.
@@ -96,21 +96,6 @@ categories:
 
   deadcode:
     enabled: true
-    rules:
-      unused-internal-export:
-        exceptions:
-          - file: "pkg/rules/patterns/internal/patternkit/type_inference.go"
-            reason: >-
-              TypeInferrer.IsDeclared had no caller before the patterns package
-              was split either; moving it into the internal kit made the rule
-              see it. Removing it is a change of its own, not part of the move.
-      stale-suppression:
-        exceptions:
-          - file: "pkg/rules/patterns/testrules/mock_identifier.go"
-            reason: >-
-              mock-identifier skips packages whose name starts with "test", and
-              the rule group package is testrules; the markers stay for the day
-              the rule tells a test-support package from testrules.
 
   documentation:
     enabled: true

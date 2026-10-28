@@ -1,0 +1,890 @@
+package qarules
+
+import (
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/types"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
+)
+
+func init() {
+	rules.Register(NewTestExternalServiceRule())
+}
+
+// TestExternalServiceRule detects tests that reach a live third-party service.
+//
+// A test exists to check our own code. Calling someone else's API from a test buys nothing —
+// the vendor is not under our control and their behaviour is not our contract — and it costs
+// three things: the suite starts failing on their outages and quotas, the vendor's rate limits
+// turn into flaky red builds, and, worst, the test changes the outside world.
+//
+// Real case (ProjectA, 2026-07-30). Four tests talked to production APIs on every `make test-all`:
+// two of them took real deposit requisites from the payment provider cryptoprov, two burned paid
+// ExtVault Pro credits. Over one week the suite consumed 537 provider addresses. The failures
+// looked like flaky parallelism — the provider starts answering 451 after roughly ten
+// allocations per window, so the more workers, the more red.
+//
+// Two shapes are reported.
+//
+//   - outbound_client: a test calls into a package that both talks HTTP and carries a literal
+//     third-party URL. Packages that merely hold configuration, or clients aimed at localhost,
+//     do not qualify — the package must actually make outbound requests.
+//
+//   - credential_gate: a test guards itself with "skip unless the credential is present",
+//     and the credential is a key of an env file of the project (.env, .env.example and the
+//     like). That is not a guard at all: test runners export the env file
+//     (`set -a && source .env`), so the gate is open in exactly the environment where the test
+//     runs. A variable no env file of the project names is a dedicated opt-in and is left out. Both ProjectA vault tests carried `if os.Getenv("EXTVAULT_ACCESS_KEY") == "" { t.Skip() }`
+//     and were documented as manual; they ran every single time. An opt-in must be a switch
+//     nobody sets by accident, not a secret everybody has.
+//
+// A test aimed at a test server is told by its own body: it uses httptest, or a helper or a
+// variable of the test files that does. A file that serves a test server holds the unit tests
+// of a client, and building the client there - to check the key validation, the signature, a
+// shared limiter, an input rejected before the request - is no live call. Such a test is
+// reported only when it sends on production: it calls a sending method of a client whose
+// address is production (built into the constructor, or a URL literal or URL constant of the
+// package passed in), or a function that sends itself. A file of fake-feed tests held one more
+// test that built the rates client with New - the production address built in - and, skipped
+// only in -short mode, called the live feed on every full run. Outside such files every call
+// of a live entry is reported, constructors included: the client has no offline mode and is
+// routinely handed to another package that calls it. In either file an entry that takes its
+// address from the caller and is given a loopback or reserved URL literal (http://127.0.0.1:1
+// for a test of the pace of the production constructor) reaches nothing outside and is left
+// out; an entry with the production address built in is not. The finding names the address the called
+// entry reaches, not the first one its package holds.
+//
+// A test that genuinely needs the live service stays possible. A test that skips at once unless
+// a dedicated env flag is set - `if os.Getenv("RATES_LIVE_TEST") == "" { t.Skip(...) }`, a
+// comparison with a value, os.LookupEnv, or a helper of the test files doing the same - does not
+// run in an ordinary go test, and the calls after the skip are not reported. The flag must be
+// one no env file of the project sets, and the skip must come before the call. testing.Short()
+// is no flag: a full run opens it. A project-specific opt-in helper can also be named in the
+// guard_functions setting, and tests calling it are not reported.
+type TestExternalServiceRule struct {
+	*rules.BaseRule
+
+	guardFunctions  map[string]bool
+	credentialName  *regexp.Regexp
+	credentialField *regexp.Regexp
+	localHost       *regexp.Regexp
+	localAddress    *regexp.Regexp
+	externalURL     *regexp.Regexp
+}
+
+// NewTestExternalServiceRule creates the rule
+func NewTestExternalServiceRule() *TestExternalServiceRule {
+	return &TestExternalServiceRule{
+		BaseRule: rules.NewBaseRule(
+			"test-external-service",
+			"patterns",
+			"Detects tests that call live third-party services, including gates that only check whether a credential is present",
+			core.SeverityHigh,
+		),
+		guardFunctions: map[string]bool{},
+		// Имя переменной окружения, которое означает секрет, а не переключатель. Слово
+		// секрета — целый сегмент между подчёркиваниями: KEY в KEYBOARD секретом не делает.
+		credentialName: regexp.MustCompile(`(?i)(?:^|_)(?:API_?KEYS?|ACCESS_?KEYS?|PRIVATE_?KEYS?|SECRET_?KEYS?|KEYS?|TOKENS?|SECRETS?|PASSWORDS?|PASSWD|CREDENTIALS?|API_?ID)(?:_|$)`),
+		// Имена объявлений строже имён переменных окружения: подстрока «key» есть и в
+		// «monkey», а здесь ошибка выводит целый пакет во внешние.
+		credentialField: regexp.MustCompile(`(?i)^[a-z0-9_]*(api_?key|access_?key|private_?key|public_?key|secret_?key|apisecret|api_secret|clientsecret|client_secret|signature)[a-z0-9_]*$`),
+		// Локальные адреса и зарезервированные для примеров домены внешними не считаются.
+		localHost:   regexp.MustCompile(`(?i)^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal|[a-z0-9.-]+\.(local|localhost|test|invalid|internal)|example\.(com|org|net))(:\d+)?$`),
+		externalURL: regexp.MustCompile(`^https?://([^/\s]+)`),
+		// A local host embedded in a non-URL literal: the tail of a DSN glued
+		// around a password ("@127.0.0.1:5432/app"), a bare "localhost:8090".
+		localAddress: regexp.MustCompile(`(?i)(?:^|[^a-z0-9.-])(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal)(?::\d+)?(?:[^a-z0-9.-]|$)`),
+	}
+}
+
+// Configure accepts the list of opt-in helpers that legitimise a live call.
+func (r *TestExternalServiceRule) Configure(settings map[string]any) error {
+	if err := r.BaseRule.Configure(settings); err != nil {
+		return err
+	}
+	guards, present, err := rules.NameSetSetting(settings, r.Name(), "guard_functions")
+	if err != nil {
+		return err
+	}
+	if present {
+		r.guardFunctions = guards
+	}
+	return nil
+}
+
+// AnalyzeFile is a no-op: deciding whether a called package talks to the outside world
+// needs the whole project, not one file.
+func (r *TestExternalServiceRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
+	return nil
+}
+
+// RequiresSSA reports that plain typed packages are enough — no SSA program needed.
+func (r *TestExternalServiceRule) RequiresSSA() bool { return false }
+
+// AnalyzeGoProject marks packages that make outbound calls, then looks for tests reaching them.
+func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	if ctx == nil {
+		return nil, errors.New("test external service: nil Go project context")
+	}
+
+	outbound := r.outboundPackages(ctx)
+	// Тест может лежать в самом вендорском пакете (package cryptoprov) и звать клиента
+	// без квалификатора. Такой вызов по секции import не находится, поэтому запоминаем,
+	// какому каталогу принадлежит внешний пакет.
+	outboundDirs := outboundDirectories(ctx, outbound)
+	// Тест-файлы разбираются по AST, а не по типам: пакеты грузятся без Tests:true,
+	// поэтому у *_test.go типовой информации нет, и они висят только в ctx.Files.
+	// Имя пакета в вызове разрешается по секции import самого файла — этого хватает
+	// и заодно корректно обрабатывает алиасы импорта.
+	envKeys, err := envFileKeys(ctx.ProjectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("test external service: %w", err)
+	}
+	dirFacts := r.collectTestDirFacts(ctx.Files, envKeys)
+	var violations []*core.Violation
+	for _, file := range ctx.Files {
+		if file == nil || !file.IsTestFile() || file.GoAST == nil {
+			continue
+		}
+		violations = append(violations, r.analyzeTestFile(file, outbound, outboundDirs, envKeys, dirFacts[filepath.Dir(file.Path)])...)
+	}
+
+	sort.Slice(violations, func(i, j int) bool {
+		if violations[i].File != violations[j].File {
+			return violations[i].File < violations[j].File
+		}
+		return violations[i].Line < violations[j].Line
+	})
+	return violations, nil
+}
+
+// envFileKeys returns the keys of the env files of the project (.env,
+// .env.example, .env.test) up to three directories deep: the variables a
+// developer's environment holds when the runner exports the file. Only the
+// key names are kept.
+func envFileKeys(root string) (map[string]bool, error) {
+	keys := make(map[string]bool)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != root && (patternkit.EnvFileSkipDirs[d.Name()] || strings.Count(rel, string(filepath.Separator)) >= 3) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != ".env" && !strings.HasPrefix(d.Name(), ".env.") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read env file %s: %w", rel, err)
+		}
+		for line := range strings.SplitSeq(string(content), "\n") {
+			if m := patternkit.EnvAssignmentLine.FindStringSubmatch(line); m != nil {
+				keys[m[1]] = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list env files under %s: %w", root, err)
+	}
+	return keys, nil
+}
+
+// outboundDirectories maps a package directory to its outbound description, so an in-package
+// test (same directory, unqualified calls) is checked as well.
+func outboundDirectories(ctx *core.GoProjectContext, outbound map[string]outboundPackage) map[string]outboundPackage {
+	dirs := make(map[string]outboundPackage, len(outbound))
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil {
+			continue
+		}
+		entry, ok := outbound[pkg.Package.PkgPath]
+		if !ok {
+			continue
+		}
+		for _, file := range pkg.Files {
+			if file == nil {
+				continue
+			}
+			dirs[filepath.Dir(file.Path)] = entry
+		}
+	}
+	return dirs
+}
+
+// outboundPackage records why a package counts as talking to a third party.
+type outboundPackage struct {
+	// evidence renders inside the message: either the vendor URL or the credential the
+	// package signs its requests with.
+	evidence string
+	// name is the package's own name — what an unaliased import is called at the call site.
+	name string
+	// urlNames maps the package-level constants and variables holding a third-party URL to
+	// it: a test passing DefaultBaseURL to the constructor aims the client at production.
+	urlNames map[string]string
+	// entries are the exported functions that actually hand a test the wire: either they
+	// reach an HTTP call themselves, or they return a client whose methods do. Everything
+	// else the package exports — config readers, decoders, constructors of inert types —
+	// is left alone, otherwise a test that never sends anything gets reported.
+	entries map[string]liveEntry
+}
+
+// outboundPackages finds packages that issue HTTP requests to somebody else's server.
+//
+// Issuing requests is never enough on its own: a helper that drives the project's own server
+// does exactly that without leaving the machine. One of two additional signs is required.
+//
+//   - A third-party URL literal. Direct, but it only covers clients with the address baked in;
+//     a configuration package holding a vendor URL it never dials is excluded separately.
+//
+//   - Credentials plus no local address anywhere in the package. A client whose base URL comes
+//     from configuration carries no literal at all — ProjectA's cryptoprov client is exactly that —
+//     but it still signs every request with an API key. Nobody signs requests to their own
+//     localhost, so "authenticates and is not aimed at localhost" means the same thing.
+func (r *TestExternalServiceRule) outboundPackages(ctx *core.GoProjectContext) map[string]outboundPackage {
+	outbound := make(map[string]outboundPackage)
+
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil {
+			continue
+		}
+		var doesHTTP, hasLocalURL bool
+		var url, credential string
+
+		for _, file := range pkg.Files {
+			if file == nil || file.GoAST == nil || file.IsTestFile() {
+				continue
+			}
+			if !doesHTTP && fileIssuesHTTPRequest(file.GoAST, pkg.Package.TypesInfo) {
+				doesHTTP = true
+			}
+			if url == "" {
+				url = r.externalURLLiteral(file.GoAST)
+			}
+			if !hasLocalURL {
+				hasLocalURL = r.hasLocalURLLiteral(file.GoAST)
+			}
+			if credential == "" {
+				credential = r.credentialIdentifier(file.GoAST)
+			}
+		}
+
+		var evidence string
+		switch {
+		case doesHTTP && url != "":
+			evidence = "ходит в " + url
+		case doesHTTP && credential != "" && !hasLocalURL:
+			evidence = "подписывает запросы секретом (" + credential + "), адрес приходит из конфигурации"
+		default:
+			continue
+		}
+
+		entries := liveEntryPoints(pkg, r.externalHost)
+		if len(entries) == 0 {
+			continue
+		}
+		urlNames := map[string]string{}
+		for obj, host := range packageURLs(pkg, r.externalHost) {
+			urlNames[obj.Name()] = host
+		}
+		outbound[pkg.Package.PkgPath] = outboundPackage{evidence: evidence, name: pkg.Package.Name, entries: entries, urlNames: urlNames}
+	}
+	return outbound
+}
+
+const netHTTPPath = "net/http"
+
+// fileIssuesHTTPRequest reports whether the file builds or sends an HTTP request.
+//
+// The check is resolved through types, not names. Matching a bare `.Do(` marked ProjectA's config
+// package as an HTTP client because of `bootstrapOnce.Do(...)`, and every test touching config
+// was reported.
+func fileIssuesHTTPRequest(file *ast.File, info *types.Info) bool {
+	return nodeIssuesHTTPRequest(file, info)
+}
+
+// nodeIssuesHTTPRequest is the same check narrowed to one subtree — a function body, when the
+// question is which of the package's functions actually reach the wire.
+func nodeIssuesHTTPRequest(root ast.Node, info *types.Info) bool {
+	return httpRequestIn(root, info, true)
+}
+
+// nodeSendsHTTPRequest reports a request sent in the subtree: building an http.Client
+// prepares a connection, it sends nothing.
+func nodeSendsHTTPRequest(root ast.Node, info *types.Info) bool {
+	return httpRequestIn(root, info, false)
+}
+
+// httpRequestIn finds an HTTP call in the subtree; clientLiteral counts building an
+// http.Client as one.
+func httpRequestIn(root ast.Node, info *types.Info, clientLiteral bool) bool {
+	if info == nil || root == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			sel, ok := node.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			// http.Get / http.NewRequest и прочие пакетные функции.
+			if ident, ok := sel.X.(*ast.Ident); ok {
+				if pkgName, ok := info.Uses[ident].(*types.PkgName); ok {
+					if pkgName.Imported().Path() == netHTTPPath && helpers.NetHTTPRequestFuncs[sel.Sel.Name] {
+						found = true
+						return false
+					}
+					return true
+				}
+			}
+			// client.Do(req) — только если получатель действительно *http.Client.
+			if sel.Sel.Name == "Do" && isNetHTTPClientMethod(info, sel) {
+				found = true
+				return false
+			}
+		case *ast.CompositeLit:
+			if clientLiteral && isNetHTTPType(info, node.Type, "Client") {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// isNetHTTPClientMethod reports whether the selector resolves to a method on net/http.Client.
+func isNetHTTPClientMethod(info *types.Info, sel *ast.SelectorExpr) bool {
+	selection, ok := info.Selections[sel]
+	if !ok {
+		return false
+	}
+	recv := selection.Recv()
+	if ptr, ok := recv.(*types.Pointer); ok {
+		recv = ptr.Elem()
+	}
+	named, ok := recv.(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Pkg().Path() == netHTTPPath && named.Obj().Name() == "Client"
+}
+
+// isNetHTTPType reports whether the expression names the given net/http type.
+func isNetHTTPType(info *types.Info, expr ast.Expr, name string) bool {
+	if expr == nil {
+		return false
+	}
+	typ := info.TypeOf(expr)
+	if typ == nil {
+		return false
+	}
+	if ptr, ok := typ.(*types.Pointer); ok {
+		typ = ptr.Elem()
+	}
+	named, ok := typ.(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Pkg().Path() == netHTTPPath && named.Obj().Name() == name
+}
+
+// externalURLLiteral returns the first third-party URL literal in the file, if any.
+//
+// Struct tags are skipped on purpose: `default:"https://api.vendor.com"` describes a value the
+// package never dials itself, and counting tags marked ProjectA's whole config package as outbound.
+func (r *TestExternalServiceRule) externalURLLiteral(file *ast.File) string {
+	var found string
+	ast.Inspect(file, func(n ast.Node) bool {
+		if found != "" {
+			return false
+		}
+		if field, ok := n.(*ast.Field); ok {
+			// Обходим тип поля без его тега; в именах литералов не бывает.
+			if field.Type != nil {
+				ast.Inspect(field.Type, func(inner ast.Node) bool {
+					if lit, ok := inner.(*ast.BasicLit); ok {
+						if host := r.externalHost(lit); host != "" && found == "" {
+							found = host
+						}
+					}
+					return true
+				})
+			}
+			return false
+		}
+		lit, ok := n.(*ast.BasicLit)
+		if !ok {
+			return true
+		}
+		if host := r.externalHost(lit); host != "" {
+			found = host
+		}
+		return true
+	})
+	return found
+}
+
+// hasLocalURLLiteral reports whether the package names a local address anywhere: a URL
+// on a local host, or a local host inside any other literal (a database DSN, a bare
+// host:port).
+//
+// Such a package drives our own server or database, so credentials in it are our own JWTs
+// and passwords rather than a vendor's API key, and it must not be treated as outbound.
+func (r *TestExternalServiceRule) hasLocalURLLiteral(file *ast.File) bool {
+	found := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		lit, ok := n.(*ast.BasicLit)
+		if !ok {
+			return true
+		}
+		value, ok := patternkit.GoStringLiteral(lit)
+		if !ok {
+			return true
+		}
+		if r.localURL(lit) || r.localAddress.MatchString(value) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// credentialIdentifier returns the first vendor-credential name declared in the file.
+//
+// Only declarations count — struct fields, constants, variables and parameters. Matching every
+// identifier would catch the local variable that merely passes a value along, and the point is
+// that the package itself owns a secret.
+func (r *TestExternalServiceRule) credentialIdentifier(file *ast.File) string {
+	var found string
+	record := func(names []*ast.Ident) {
+		for _, name := range names {
+			if found == "" && r.credentialField.MatchString(name.Name) {
+				found = name.Name
+			}
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		if found != "" {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.Field:
+			record(node.Names)
+		case *ast.ValueSpec:
+			record(node.Names)
+		}
+		return true
+	})
+	return found
+}
+
+// externalHost returns the literal's URL when it points at a third-party host.
+func (r *TestExternalServiceRule) externalHost(lit *ast.BasicLit) string {
+	value, ok := patternkit.GoStringLiteral(lit)
+	if !ok {
+		return ""
+	}
+	return r.externalURLOf(value)
+}
+
+// localURL reports whether the literal is a URL on a loopback or reserved host.
+func (r *TestExternalServiceRule) localURL(lit *ast.BasicLit) bool {
+	value, ok := patternkit.GoStringLiteral(lit)
+	if !ok {
+		return false
+	}
+	match := r.externalURL.FindStringSubmatch(value)
+	return match != nil && r.localHost.MatchString(match[1])
+}
+
+// externalURLOf returns the value when it is a URL on a third-party host, ""
+// for a local or reserved one and for anything else.
+func (r *TestExternalServiceRule) externalURLOf(value string) string {
+	match := r.externalURL.FindStringSubmatch(value)
+	if match == nil || r.localHost.MatchString(match[1]) {
+		return ""
+	}
+	return value
+}
+
+// analyzeTestFile reports live calls and credential gates inside one test file.
+func (r *TestExternalServiceRule) analyzeTestFile(
+	file *core.FileContext, outbound map[string]outboundPackage, outboundDirs map[string]outboundPackage, envKeys map[string]bool,
+	facts *testDirFacts,
+) []*core.Violation {
+	imports := importAliases(file.GoAST, outbound)
+	httptestPkgs := helpers.PackageAliases(file.GoAST, `"net/http/httptest"`, "httptest")
+	// Файл с httptest - юнит-тесты клиента: конструктор там собирают ради проверки
+	// валидации и подписи, и находка - только живой запрос на боевой адрес.
+	unitTests := len(httptestPkgs) > 0
+	osPkgs := helpers.PackageAliases(file.GoAST, `"os"`, "os")
+
+	// Файл, называющий локальный адрес, гоняет наш собственный сервер, и «секрет» в нём —
+	// наш же JWT: reference-тест, который гейтится токеном администратора и ходит
+	// в http://localhost:8090.
+	drivesOwnServer := r.hasLocalURLLiteral(file.GoAST)
+
+	testingPkgs := testingImportNames(file.GoAST)
+
+	var violations []*core.Violation
+	for _, decl := range file.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || goTestFuncKind(fn, testingPkgs) == goNotTest {
+			continue
+		}
+		if r.hasGuard(fn) {
+			continue
+		}
+		if !drivesOwnServer {
+			violations = append(violations, r.credentialGates(file, fn, envKeys)...)
+		}
+		// Тест, поднявший свой httptest-сервер (сам или через helper), никуда наружу не идёт.
+		if referencesTestServer(fn.Body, httptestPkgs, facts.servedLocally) {
+			continue
+		}
+		// Вызовы после пропуска «без отдельного env-флага» — явный опт-ин.
+		liveEnd := fn.Body.End()
+		if start := r.optInStart(fn, envKeys, osPkgs, facts.optInHelpers); start.IsValid() {
+			liveEnd = start
+		}
+		scope := liveCallScope{liveEnd: liveEnd, unitTests: unitTests, hostOf: r.externalHost, isLocalURL: r.localURL}
+		violations = append(violations, r.outboundCalls(file, imports, fn, outbound, scope)...)
+		if own, ok := outboundDirs[filepath.Dir(file.Path)]; ok {
+			violations = append(violations, r.inPackageCalls(file, fn, own, scope)...)
+		}
+	}
+	return violations
+}
+
+// hasGuard reports whether the test opens with a project-declared live-call opt-in.
+func (r *TestExternalServiceRule) hasGuard(fn *ast.FuncDecl) bool {
+	if len(r.guardFunctions) == 0 {
+		return false
+	}
+	guarded := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if guarded {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if name := core.ExtractFullFunctionName(call); name != "" && r.guardFunctions[name] {
+			guarded = true
+			return false
+		}
+		return true
+	})
+	return guarded
+}
+
+// outboundCalls reports calls into packages that talk to a third party.
+func (r *TestExternalServiceRule) outboundCalls(
+	file *core.FileContext, imports map[string]string, fn *ast.FuncDecl, outbound map[string]outboundPackage, scope liveCallScope,
+) []*core.Violation {
+	var violations []*core.Violation
+	reported := map[string]bool{}
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if call.Pos() >= scope.liveEnd {
+			return false
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		path, ok := imports[ident.Name]
+		if !ok {
+			return true
+		}
+		evidence, ok := outbound[path]
+		if !ok {
+			return true
+		}
+		entry, ok := evidence.entries[sel.Sel.Name]
+		if !ok {
+			return true
+		}
+		// Конструктор, которому транспорт передали как nil, никуда не пойдёт: так тесты
+		// собирают настоящий сервис ради его работы с БД. ProjectA-шный тест на пыль
+		// (cryptoprov.NewDepositService(nil, …)) именно такой. nil на месте опций или
+		// контекста запрос не отменяет.
+		if entry.nilTransport(call) {
+			return true
+		}
+		host, live := scope.reaches(fn.Body, call, entry, evidence, func(e ast.Expr) bool {
+			q, isIdent := e.(*ast.Ident)
+			return isIdent && q.Name == ident.Name
+		})
+		if !live {
+			return true
+		}
+		key := path + "." + sel.Sel.Name
+		if reported[key] {
+			return true
+		}
+		reported[key] = true
+
+		pos := file.PositionFor(call)
+		v := r.CreateViolation(file.RelPath, pos.Line, fmt.Sprintf(
+			"Тест %s вызывает %s.%s — пакет %s. Тест не проверяет чужой код и не должен менять внешний мир",
+			fn.Name.Name, ident.Name, sel.Sel.Name, host))
+		v.WithCode(file.GetLine(pos.Line))
+		v.WithSuggestion("Подставьте провайдера на HTTP-границе (httptest) или засейте данные напрямую; живой вызов оставьте за явным опт-ином из guard_functions")
+		v.WithContext("pattern", "test_external_service")
+		v.WithContext("kind", "outbound_client")
+		v.WithContext("package", path)
+		violations = append(violations, v)
+		return true
+	})
+	return violations
+}
+
+// inPackageCalls reports unqualified calls to the vendor package's own entry points.
+//
+// A test living inside the vendor client's package writes `NewClient(cfg)`, not
+// `cryptoprov.NewClient(cfg)`, so the import-based lookup above never sees it. That is exactly
+// how ProjectA's cryptoprov integration test stayed invisible to the rule.
+func (r *TestExternalServiceRule) inPackageCalls(
+	file *core.FileContext, fn *ast.FuncDecl, own outboundPackage, scope liveCallScope,
+) []*core.Violation {
+	var violations []*core.Violation
+	reported := map[string]bool{}
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if call.Pos() >= scope.liveEnd {
+			return false
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		entry, ok := own.entries[ident.Name]
+		if !ok || entry.nilTransport(call) {
+			return true
+		}
+		host, live := scope.reaches(fn.Body, call, entry, own, nil)
+		if !live {
+			return true
+		}
+		if reported[ident.Name] {
+			return true
+		}
+		reported[ident.Name] = true
+
+		pos := file.PositionFor(call)
+		v := r.CreateViolation(file.RelPath, pos.Line, fmt.Sprintf(
+			"Тест %s вызывает %s из своего же пакета — пакет %s. Тест не проверяет чужой код и не должен менять внешний мир",
+			fn.Name.Name, ident.Name, host))
+		v.WithCode(file.GetLine(pos.Line))
+		v.WithSuggestion("Подставьте провайдера на HTTP-границе (httptest) или засейте данные напрямую; живой вызов оставьте за явным опт-ином из guard_functions")
+		v.WithContext("pattern", "test_external_service")
+		v.WithContext("kind", "outbound_client")
+		violations = append(violations, v)
+		return true
+	})
+	return violations
+}
+
+// credentialGates reports skips that only check whether a secret is configured,
+// when the secret is a key of an env file of the project.
+func (r *TestExternalServiceRule) credentialGates(file *core.FileContext, fn *ast.FuncDecl, envKeys map[string]bool) []*core.Violation {
+	// Переменные, которым присвоен os.Getenv("NAME") с секретоподобным именем.
+	fromCredential := map[string]string{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			return true
+		}
+		name := r.credentialEnvName(assign.Rhs[0])
+		if name == "" {
+			return true
+		}
+		if ident, ok := assign.Lhs[0].(*ast.Ident); ok {
+			fromCredential[ident.Name] = name
+		}
+		return true
+	})
+
+	var violations []*core.Violation
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok || !bodySkips(ifStmt.Body) {
+			return true
+		}
+		envName := r.emptyCredentialCheck(ifStmt.Cond, fromCredential)
+		if envName == "" || !envKeys[envName] {
+			return true
+		}
+		pos := file.PositionFor(ifStmt)
+		v := r.CreateViolation(file.RelPath, pos.Line, fmt.Sprintf(
+			"Тест %s пропускается только когда %s не задана, а секреты лежат в .env и экспортируются раннером — гейт открыт всегда",
+			fn.Name.Name, envName))
+		v.WithCode(file.GetLine(pos.Line))
+		v.WithSuggestion("Гейтить живой вызов отдельным переключателем, которого нет в .env, а не наличием секрета")
+		v.WithContext("pattern", "test_external_service")
+		v.WithContext("kind", "credential_gate")
+		v.WithContext("env", envName)
+		violations = append(violations, v)
+		return true
+	})
+	return violations
+}
+
+// credentialEnvName returns the variable name when the expression reads a secret from the env.
+func (r *TestExternalServiceRule) credentialEnvName(expr ast.Expr) string {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return ""
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Getenv" {
+		return ""
+	}
+	if ident, ok := sel.X.(*ast.Ident); !ok || ident.Name != "os" {
+		return ""
+	}
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	if !ok {
+		return ""
+	}
+	name, ok := patternkit.GoStringLiteral(lit)
+	if !ok || !r.credentialName.MatchString(name) {
+		return ""
+	}
+	return name
+}
+
+// emptyCredentialCheck returns the env name compared against "" in the condition.
+func (r *TestExternalServiceRule) emptyCredentialCheck(cond ast.Expr, fromCredential map[string]string) string {
+	switch expr := cond.(type) {
+	case *ast.ParenExpr:
+		return r.emptyCredentialCheck(expr.X, fromCredential)
+	case *ast.BinaryExpr:
+		// Гейт часто перечисляет несколько секретов: `PUB == "" || PRIV == ""`.
+		// Раньше разбирался только одиночный `==`, и составное условие проходило мимо
+		// правила — так в ProjectA остался незамеченным живой тест cryptoprov.
+		if expr.Op.String() == "||" || expr.Op.String() == "&&" {
+			if name := r.emptyCredentialCheck(expr.X, fromCredential); name != "" {
+				return name
+			}
+			return r.emptyCredentialCheck(expr.Y, fromCredential)
+		}
+		if expr.Op.String() != "==" || !isEmptyStringLiteral(expr.Y) {
+			return ""
+		}
+		switch left := expr.X.(type) {
+		case *ast.Ident:
+			return fromCredential[left.Name]
+		case *ast.CallExpr:
+			return r.credentialEnvName(left)
+		}
+	}
+	return ""
+}
+
+func isEmptyStringLiteral(expr ast.Expr) bool {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok {
+		return false
+	}
+	value, ok := patternkit.GoStringLiteral(lit)
+	return ok && value == ""
+}
+
+// bodySkips reports whether the block calls t.Skip / t.Skipf / t.SkipNow.
+func bodySkips(body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+	skips := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if skips {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if strings.HasPrefix(sel.Sel.Name, "Skip") {
+			skips = true
+			return false
+		}
+		return true
+	})
+	return skips
+}
+
+// importAliases maps the identifier a test file uses at the call site to the imported
+// path of an outbound package. An unaliased import is called by the package's own
+// name, which the loaded package states — the last path segment is not it for
+// ".../v2" or "gopkg.in/x.v1". Imports of other packages cannot reach an outbound
+// client and are left out.
+func importAliases(file *ast.File, outbound map[string]outboundPackage) map[string]string {
+	aliases := make(map[string]string, len(file.Imports))
+	for _, imp := range file.Imports {
+		path, ok := patternkit.GoStringLiteral(imp.Path)
+		if !ok {
+			continue
+		}
+		pkg, ok := outbound[path]
+		if !ok {
+			continue
+		}
+		name := pkg.name
+		if imp.Name != nil {
+			if imp.Name.Name == "_" || imp.Name.Name == "." {
+				continue
+			}
+			name = imp.Name.Name
+		}
+		aliases[name] = path
+	}
+	return aliases
+}
