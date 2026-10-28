@@ -556,3 +556,36 @@ func Parse() {}
 		t.Fatalf("want the tombstone on line 11 alone, got %v", lines)
 	}
 }
+
+// A godoc first sentence opens with the name declared below and describes
+// it: "Stats counts the rows a sweep deleted" says what the type records.
+// A later sentence of the same doc, or a name the code below does not
+// declare, can still be a note on code that went away.
+func TestTombstoneComment_GodocSentenceDescribesTheName(t *testing.T) {
+	rule := NewTombstoneCommentRule()
+	code := `package sweep
+
+// Stats counts the rows a sweep deleted, or would delete, and kept.
+type Stats struct {
+	Deleted, Kept int
+}
+
+// Run sweeps the store and returns
+// the rows it kept and the ones a pass removed.
+func Run() Stats { return Stats{} }
+
+// Prune drops stale rows. Legacy fallback removed.
+func Prune() {}
+
+// Cleaner counts the rows a sweep deleted.
+func other() {}
+`
+	ctx := core.NewFileContext("sweep/sweep.go", ".", []byte(code), nil)
+	var lines []int
+	for _, v := range rule.AnalyzeFile(ctx) {
+		lines = append(lines, v.Line)
+	}
+	if !slices.Equal(lines, []int{12, 15}) {
+		t.Fatalf("want tombstones on lines 12 and 15 only, got %v", lines)
+	}
+}

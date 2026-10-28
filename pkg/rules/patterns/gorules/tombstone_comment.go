@@ -45,6 +45,9 @@ func init() {
 // program does to files and records; a sentence wrapped onto the next comment
 // line goes on there. A pronoun before the removal word ("one it removed",
 // "the rows they deleted") is the one that removes: the program, not a note.
+// So is the first sentence of a godoc comment that opens with the name
+// declared below ("Result counts the entries a trim removed"): it describes
+// the declaration; a later sentence of the doc can still be a note.
 type TombstoneCommentRule struct {
 	*rules.BaseRule
 	tombstone    *regexp.Regexp
@@ -143,8 +146,8 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if loc[0] > 0 && strings.IndexByte("='\"`.>/-_", comment[loc[0]-1]) >= 0 {
 			continue // Status=deleted, 'deleted', soft-deleted — a value, not a tombstone
 		}
-		if strings.TrimSpace(comment[:loc[0]]) == "" && documentsName(ctx.Lines, i, comment[loc[0]:loc[1]]) {
-			continue // "// Removed — titles ..." over the field Removed: a doc of the name
+		if describesDeclaration(ctx.Lines, i, comment[:loc[0]], comment[loc[0]:loc[1]]) {
+			continue // a doc of the name declared below, not a note on deleted code
 		}
 		if r.behaviorTail.MatchString(comment[loc[1]:]) {
 			continue // "removed from X", "deleted -> *", "удалено или ..." — data-flow/state docs
@@ -217,15 +220,62 @@ func commentTextOfLine(line string) string {
 func documentsName(lines []string, i int, name string) bool {
 	for _, line := range lines[i+1:] {
 		text := strings.TrimSpace(line)
-		if text == "" || commentTextOfLine(line) != "" && strings.HasPrefix(text, core.CommentPart(line)) {
+		if text == "" || isCommentLine(line) {
 			continue
 		}
-		return slices.Contains(strings.FieldsFunc(text, func(c rune) bool {
-			return c != '_' && !unicode.IsLetter(c) && !unicode.IsDigit(c)
-		}), name)
+		return slices.Contains(strings.FieldsFunc(text, isNotIdentChar), name)
 	}
 	return false
 }
+
+// describesDeclaration reports a removal word on comment line i, with before
+// the text ahead of it, inside a doc of the declaration below: "// Removed —
+// titles ..." over the field Removed, or "Result counts the entries a trim
+// removed" over type Result.
+func describesDeclaration(lines []string, i int, before, word string) bool {
+	if strings.TrimSpace(before) == "" && documentsName(lines, i, word) {
+		return true
+	}
+	return godocFirstSentence(lines, i, before)
+}
+
+// isCommentLine reports a line that holds a comment and nothing else.
+func isCommentLine(line string) bool {
+	return commentTextOfLine(line) != "" && strings.HasPrefix(strings.TrimSpace(line), core.CommentPart(line))
+}
+
+// sentenceEnd matches the end of a sentence inside a comment.
+var sentenceEnd = regexp.MustCompile(`[.!?;](?:\s|$)`)
+
+// godocFirstSentence reports a match on comment line i, with before the text
+// of the line ahead of it, inside the first sentence of a doc comment that
+// opens with the name the code below declares, and goes on past it: godoc's
+// "Result counts the entries ..." describes the declaration.
+func godocFirstSentence(lines []string, i int, before string) bool {
+	if !isCommentLine(lines[i]) {
+		return false
+	}
+	start := i
+	for start > 0 && isCommentLine(lines[start-1]) {
+		start--
+	}
+	var text strings.Builder
+	for _, line := range lines[start:i] {
+		comment := commentTextOfLine(line)
+		if strings.HasPrefix(comment, "\t") {
+			return false
+		}
+		text.WriteString(comment + " ")
+	}
+	text.WriteString(before)
+	if sentenceEnd.MatchString(text.String()) {
+		return false
+	}
+	words := strings.FieldsFunc(text.String(), isNotIdentChar)
+	return len(words) > 1 && documentsName(lines, i, words[0])
+}
+
+func isNotIdentChar(c rune) bool { return c != '_' && !unicode.IsLetter(c) && !unicode.IsDigit(c) }
 
 // sentenceAfter returns the text after a match on line i: the rest of the
 // line, or, when the line ends there, the next comment line the sentence is
