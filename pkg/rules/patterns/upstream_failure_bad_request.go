@@ -81,7 +81,7 @@ func (r *UpstreamFailureAnsweredAsBadRequestRule) AnalyzeFile(ctx *core.FileCont
 			if !fetches(call, funcs[callee]) {
 				return
 			}
-			answer, status := clientErrorAnswer(ifStmt.Body)
+			answer, status := clientErrorAnswer(ifStmt.Body, funcs)
 			if answer == nil {
 				return
 			}
@@ -205,37 +205,183 @@ func handsContextOn(body *ast.BlockStmt) bool {
 
 // clientErrorAnswer returns the call of an error branch that answers 400 or
 // 401, and how it answers, when the branch does not tell errors apart.
-func clientErrorAnswer(body *ast.BlockStmt) (*ast.CallExpr, string) {
+func clientErrorAnswer(body *ast.BlockStmt, funcs map[string]*ast.FuncDecl) (*ast.CallExpr, string) {
+	if hasServerErrorAnswer(body, funcs) || hasClassifiedSwitchWithSafeDefault(body) {
+		return nil, ""
+	}
 	var answer *ast.CallExpr
 	status := ""
-	split := false
 	ast.Inspect(body, func(n ast.Node) bool {
-		if cmp, ok := n.(*ast.BinaryExpr); ok && (cmp.Op == token.EQL || cmp.Op == token.NEQ) && comparesErrToValue(cmp) {
-			split = true
-		}
 		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+		if !ok || answer != nil {
+			return answer == nil
 		}
-		if classifiesErr(call) {
-			split = true
-		}
-		if answer == nil {
-			switch {
-			case answersBadRequest(call):
-				answer, status = call, "a bad request"
-			case answersStatus(call, "unauthorized", "StatusUnauthorized", "401"):
-				answer, status = call, "unauthorized"
-			case answersStatus(call, "notfound", "StatusNotFound", "404"):
-				answer, status = call, "not found"
-			}
+		switch {
+		case answersBadRequest(call):
+			answer, status = call, "a bad request"
+		case answersStatus(call, "unauthorized", "StatusUnauthorized", "401"):
+			answer, status = call, "unauthorized"
+		case answersStatus(call, "notfound", "StatusNotFound", "404"):
+			answer, status = call, "not found"
 		}
 		return true
 	})
-	if split {
-		return nil, ""
-	}
 	return answer, status
+}
+
+// hasServerErrorAnswer recognizes a 5xx status or a helper whose name clearly
+// says that it reports an upstream or server failure.
+func hasServerErrorAnswer(body *ast.BlockStmt, funcs map[string]*ast.FuncDecl) bool {
+	return hasServerErrorAnswerSeen(body, funcs, make(map[string]bool))
+}
+
+func hasServerErrorAnswerSeen(body *ast.BlockStmt, funcs map[string]*ast.FuncDecl, seen map[string]bool) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return !found
+		}
+		name := strings.ToLower(helpers.CalleeName(call))
+		for _, word := range []string{"unavailable", "internalserver", "servererror", "badgateway", "gatewaytimeout", "timeout", "operationerror", "recorderror"} {
+			if strings.Contains(name, word) {
+				found = true
+				return false
+			}
+		}
+		if name == "fail" {
+			found = true
+			return false
+		}
+		for _, arg := range call.Args {
+			if sel, ok := arg.(*ast.SelectorExpr); ok && helpers.IsIdentNamed(sel.X, "http") && strings.HasPrefix(sel.Sel.Name, "Status") {
+				if strings.Contains(sel.Sel.Name, "InternalServerError") || strings.Contains(sel.Sel.Name, "BadGateway") || strings.Contains(sel.Sel.Name, "ServiceUnavailable") || strings.Contains(sel.Sel.Name, "GatewayTimeout") {
+					found = true
+					return false
+				}
+			}
+			if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.INT && len(lit.Value) == 3 && lit.Value[0] == '5' {
+				found = true
+				return false
+			}
+		}
+		if strings.HasSuffix(name, "error") && len(call.Args) >= 3 && hasErrArgument(call) && !hasClientErrorAnswer(&ast.BlockStmt{List: []ast.Stmt{&ast.ExprStmt{X: call}}}) {
+			found = true
+			return false
+		}
+		callee := helpers.CalleeName(call)
+		if target := funcs[callee]; target != nil && !seen[callee] {
+			seen[callee] = true
+			if hasServerErrorAnswerSeen(target.Body, funcs, seen) {
+				found = true
+				return false
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// hasClassifiedSwitchWithSafeDefault accepts status handling selected by
+// error classifiers in switch cases when its default does not answer 400, 401
+// or 404. An explicit client-error default remains reportable.
+func hasClassifiedSwitchWithSafeDefault(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		var clauses []*ast.CaseClause
+		classified := false
+		switchStmt, ok := n.(*ast.SwitchStmt)
+		if ok {
+			classified = switchClassifiesErr(switchStmt)
+			for _, stmt := range switchStmt.Body.List {
+				if clause, ok := stmt.(*ast.CaseClause); ok {
+					clauses = append(clauses, clause)
+				}
+			}
+		} else if typeSwitch, ok := n.(*ast.TypeSwitchStmt); ok {
+			classified = typeSwitchClassifiesErr(typeSwitch)
+			for _, stmt := range typeSwitch.Body.List {
+				if clause, ok := stmt.(*ast.CaseClause); ok {
+					clauses = append(clauses, clause)
+				}
+			}
+		}
+		if !classified {
+			return !found
+		}
+		for _, clause := range clauses {
+			if len(clause.List) != 0 {
+				continue
+			}
+			defaultBody := &ast.BlockStmt{List: clause.Body}
+			if !hasClientErrorAnswer(defaultBody) {
+				found = true
+				return false
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+func typeSwitchClassifiesErr(switchStmt *ast.TypeSwitchStmt) bool {
+	assign, ok := switchStmt.Assign.(*ast.AssignStmt)
+	if !ok {
+		return false
+	}
+	for _, rhs := range assign.Rhs {
+		if typeAssert, ok := rhs.(*ast.TypeAssertExpr); ok && helpers.IsIdentNamed(typeAssert.X, "err") && typeAssert.Type == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func switchClassifiesErr(switchStmt *ast.SwitchStmt) bool {
+	if helpers.IsIdentNamed(switchStmt.Tag, "err") {
+		return true
+	}
+	classified := false
+	for _, stmt := range switchStmt.Body.List {
+		clause, ok := stmt.(*ast.CaseClause)
+		if !ok {
+			continue
+		}
+		for _, expr := range clause.List {
+			ast.Inspect(expr, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok && classifiesErr(call) {
+					classified = true
+				}
+				if cmp, ok := n.(*ast.BinaryExpr); ok && (cmp.Op == token.EQL || cmp.Op == token.NEQ) && comparesErrToValue(cmp) {
+					classified = true
+				}
+				return true
+			})
+		}
+	}
+	return classified
+}
+
+func hasErrArgument(call *ast.CallExpr) bool {
+	for _, arg := range call.Args {
+		if helpers.IsIdentNamed(arg, "err") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasClientErrorAnswer(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if ok && (answersBadRequest(call) || answersStatus(call, "unauthorized", "StatusUnauthorized", "401") || answersStatus(call, "notfound", "StatusNotFound", "404")) {
+			found = true
+			return false
+		}
+		return !found
+	})
+	return found
 }
 
 // errClassifier names a call telling errors apart: errors.Is, errors.As,

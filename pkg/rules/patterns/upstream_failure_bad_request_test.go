@@ -30,7 +30,7 @@ type Router struct{ source Source }
 
 var ErrInvalidInput = errors.New("invalid input")
 
-func sendValidationError(w http.ResponseWriter, r *http.Request, message, detail string) {
+func writeValidationProblem(w http.ResponseWriter, r *http.Request, message, detail string) {
 	http.Error(w, message+": "+detail, http.StatusBadRequest)
 }
 
@@ -54,7 +54,7 @@ func (r *Router) assembleSummary(req *http.Request) (*Report, error) {
 func (r *Router) handleReport(w http.ResponseWriter, req *http.Request) {
 	report, err := r.assembleSummary(req)
 	if err != nil {
-		sendValidationError(w, req, "report failed", err.Error()) // want
+		writeValidationProblem(w, req, "report failed", err.Error()) // want
 		return
 	}
 	_ = report
@@ -64,7 +64,7 @@ func (r *Router) handleReportSplit(w http.ResponseWriter, req *http.Request) {
 	report, err := r.assembleSummary(req)
 	if err != nil {
 		if errors.Is(err, ErrInvalidInput) {
-			sendValidationError(w, req, "bad input", err.Error())
+			writeValidationProblem(w, req, "bad input", err.Error())
 			return
 		}
 		http.Error(w, "source unavailable", http.StatusBadGateway)
@@ -282,6 +282,165 @@ func ordinary(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, req)
 	})
+}
+`)
+}
+
+func TestUpstreamFailureAnsweredAsBadRequest_ClassifiedSubsetStillAnswersUnauthorized(t *testing.T) {
+	assertWanted(t, NewUpstreamFailureAnsweredAsBadRequestRule(), `package routing
+
+import (
+	"context"
+	"errors"
+	"net/http"
+)
+
+type TokenValidator interface {
+	Validate(context.Context, string) (string, error)
+}
+type RefreshService interface {
+	Refresh(context.Context, string) error
+}
+type Router struct {
+	validator TokenValidator
+	refresh RefreshService
+}
+var ErrStepUp = errors.New("step-up required")
+var ErrRevoked = errors.New("session revoked")
+var ErrStorageDown = errors.New("storage unavailable")
+
+func (r *Router) tokenCheck(w http.ResponseWriter, req *http.Request, token string) {
+	_, err := r.validator.Validate(req.Context(), token)
+	if err != nil {
+		if errors.Is(err, ErrStepUp) {
+			http.Error(w, "step-up required", 428)
+			return
+		}
+		http.Error(w, "invalid token", http.StatusUnauthorized) // want
+		return
+	}
+}
+
+func (r *Router) refreshTokens(w http.ResponseWriter, req *http.Request, token string) {
+	err := r.refresh.Refresh(req.Context(), token)
+	if err != nil {
+		if errors.Is(err, ErrRevoked) {
+			http.Error(w, "invalid session", http.StatusUnauthorized) // want
+			return
+		}
+		http.Error(w, "invalid session", http.StatusUnauthorized)
+		return
+	}
+}
+
+func writeStatusError(w http.ResponseWriter, status int, err error) {
+	http.Error(w, err.Error(), status)
+}
+
+func (r *Router) helperAnswer(w http.ResponseWriter, req *http.Request, token string) {
+	err := r.refresh.Refresh(req.Context(), token)
+	if err != nil {
+		writeStatusError(w, http.StatusBadRequest, err) // want
+		return
+	}
+}
+
+func (r *Router) fixed(w http.ResponseWriter, req *http.Request, token string) {
+	_, err := r.validator.Validate(req.Context(), token)
+	if err != nil {
+		if errors.Is(err, ErrStorageDown) {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return
+	}
+}
+`)
+}
+
+func TestUpstreamFailureAnsweredAsBadRequest_ClassifiedSwitchesAndServerAnswers(t *testing.T) {
+	assertWanted(t, NewUpstreamFailureAnsweredAsBadRequestRule(), `package routing
+
+import (
+	"context"
+	"errors"
+	"net/http"
+)
+
+type Repo interface { Load(context.Context) error }
+type Router struct { repo Repo }
+var ErrDisabled = errors.New("disabled")
+var ErrLimited = errors.New("limited")
+var ErrMissing = errors.New("missing")
+func writeValidationProblem(http.ResponseWriter, *http.Request, string) {}
+func answerFault(http.ResponseWriter, int, string) {}
+func writeInternalServerFault(http.ResponseWriter, *http.Request, error) {}
+func respondJSONFault(http.ResponseWriter, int, string) {}
+func writeAuthUnavailable(http.ResponseWriter) {}
+
+func (r *Router) byConditions(w http.ResponseWriter, req *http.Request) {
+	err := r.repo.Load(req.Context())
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrDisabled): writeValidationProblem(w, req, "disabled")
+		case errors.Is(err, ErrLimited): answerFault(w, http.StatusTooManyRequests, "limited")
+		default: writeInternalServerFault(w, req, err)
+		}
+		return
+	}
+}
+
+func (r *Router) byErrorValue(w http.ResponseWriter, req *http.Request) {
+	err := r.repo.Load(req.Context())
+	if err != nil {
+		switch err {
+		case ErrMissing: writeValidationProblem(w, req, "missing")
+		default: respondJSONFault(w, http.StatusBadGateway, "failed")
+		}
+		return
+	}
+}
+
+func (r *Router) withUnavailableHelper(w http.ResponseWriter, req *http.Request) {
+	err := r.repo.Load(req.Context())
+	if err != nil {
+		if errors.Is(err, ErrDisabled) { writeValidationProblem(w, req, "disabled"); return }
+		if errors.Is(err, ErrMissing) { writeAuthUnavailable(w); return }
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+}
+
+func (r *Router) fallbackServerHelper(w http.ResponseWriter, req *http.Request) {
+	err := r.repo.Load(req.Context())
+	if err != nil {
+		if errors.Is(err, ErrDisabled) { http.Error(w, "disabled", http.StatusUnauthorized); return }
+		writeInternalServerFault(w, req, err)
+		return
+	}
+}
+
+func routeError(w http.ResponseWriter, req *http.Request, logger any, err error, message string) {}
+
+func (r *Router) delegatedError(w http.ResponseWriter, req *http.Request) {
+	err := r.repo.Load(req.Context())
+	if err != nil {
+		if errors.Is(err, ErrDisabled) { writeValidationProblem(w, req, "disabled"); return }
+		routeError(w, req, nil, err, "operation failed")
+		return
+	}
+}
+
+func (r *Router) byErrorType(w http.ResponseWriter, req *http.Request) {
+	err := r.repo.Load(req.Context())
+	if err != nil {
+		switch err.(type) {
+		case error: writeValidationProblem(w, req, "invalid")
+		default: writeInternalServerFault(w, req, err)
+		}
+		return
+	}
 }
 `)
 }
