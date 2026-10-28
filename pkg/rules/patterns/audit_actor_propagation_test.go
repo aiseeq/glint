@@ -48,6 +48,191 @@ func update(repo *Repo, actorUserID int) {
 	assert.Empty(t, violations)
 }
 
+func TestAuditActorPropagationRule_DetectsStatusChangeMissingSiblingAudit(t *testing.T) {
+	violations := analyzeAuditModule(t, map[string]string{
+		"service.go": `package audit
+type Repo struct{}
+func (*Repo) UpdateRecordStatus(id string, status int) error { return nil }
+type Service struct { repo *Repo }
+func (s *Service) approve(id string, adminID int) error {
+	return s.repo.UpdateRecordStatus(id, 1)
+}
+func (s *Service) complete(id string, actorUserID int) error {
+	return runInTx(func() error {
+		bindStatusActor(actorUserID)
+		if err := s.writeStatus(id, 2); err != nil { return err }
+		return writeAuditEntry(actorUserID, id)
+	})
+}
+func (s *Service) writeStatus(id string, status int) error { return s.repo.UpdateRecordStatus(id, status) }
+func runInTx(fn func() error) error { return fn() }
+func bindStatusActor(int) {}
+func writeAuditEntry(int, string) error { return nil }
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 6, violations[0].Line)
+	assert.Equal(t, "status_without_sibling_audit", violations[0].Context["pattern"])
+}
+
+func TestAuditActorPropagationRule_SiblingAuditPatternsAreScoped(t *testing.T) {
+	tests := []struct {
+		name           string
+		code           string
+		includeSibling bool
+		count          int
+	}{
+		{
+			name:           "status change includes audit",
+			includeSibling: true,
+			code: `func (s *Service) approve(id string, actorUserID int) error {
+	return runInTx(func() error {
+		bindStatusActor(actorUserID)
+		if err := s.repo.UpdateRecordStatus(id, 1); err != nil { return err }
+		return writeAuditEntry(actorUserID, id)
+	})
+}`,
+		},
+		{
+			name: "no audited sibling",
+			code: `func (s *Service) approve(id string) error { return s.repo.UpdateRecordStatus(id, 1) }`,
+		},
+		{
+			name:           "different receiver type",
+			code:           `func (s *OtherService) approve(id string) error { return s.repo.UpdateRecordStatus(id, 1) }`,
+			includeSibling: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sibling := ""
+			if tc.includeSibling {
+				sibling = `
+func (s *Service) complete(id string, actorUserID int) error {
+	return runInTx(func() error {
+		bindStatusActor(actorUserID)
+		if err := s.repo.UpdateRecordStatus(id, 2); err != nil { return err }
+		return writeAuditEntry(actorUserID, id)
+	})
+}`
+			}
+			violations := analyzeAuditModule(t, map[string]string{
+				"service.go": `package audit
+type Repo struct{}
+func (*Repo) UpdateRecordStatus(id string, status int) error { return nil }
+type Service struct { repo *Repo }
+type OtherService struct { repo *Repo }
+func runInTx(fn func() error) error { return fn() }
+func bindStatusActor(int) {}
+func writeAuditEntry(int, string) error { return nil }
+` + tc.code + sibling + `
+`,
+			})
+			assert.Len(t, violations, tc.count)
+		})
+	}
+}
+
+func TestAuditActorPropagationRule_IgnoresNonWritesAndActorlessMethods(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "self status method",
+			source: `package audit
+type Repo struct{}
+func (*Repo) UpdateRecordStatus(id string, status int) error { return nil }
+type Service struct { repo *Repo; status int }
+func (s *Service) retreat(id string, adminID int) error { s.setStatus(1); return nil }
+func (s *Service) setStatus(status int) { s.status = status }
+func (s *Service) complete(id string, adminID int) error {
+	if err := s.repo.UpdateRecordStatus(id, 2); err != nil { return err }
+	return writeAuditEntry(adminID, id)
+}
+func writeAuditEntry(int, string) error { return nil }
+`,
+		},
+		{
+			name: "background service has no actor",
+			source: `package audit
+type Repo struct{}
+func (*Repo) UpdateRecordStatus(id string, status int) error { return nil }
+type Service struct { repo *Repo }
+func (s *Service) recordSuccess(id string) error { return s.repo.UpdateRecordStatus(id, 1) }
+func (s *Service) complete(id string, adminID int) error {
+	if err := s.repo.UpdateRecordStatus(id, 2); err != nil { return err }
+	return writeAuditEntry(adminID, id)
+}
+func writeAuditEntry(int, string) error { return nil }
+`,
+		},
+		{
+			name: "status validator is not a write",
+			source: `package audit
+type Repo struct{}
+func (*Repo) UpdateRecordStatus(id string, status int) error { return nil }
+type Service struct { repo *Repo }
+func (s *Service) validate(id string, adminID int) error { return VerifyStatusTransition(1, 2) }
+func (s *Service) complete(id string, adminID int) error {
+	if err := s.repo.UpdateRecordStatus(id, 2); err != nil { return err }
+	return writeAuditEntry(adminID, id)
+}
+func VerifyStatusTransition(cur, next int) error { return nil }
+func writeAuditEntry(int, string) error { return nil }
+`,
+		},
+		{
+			name: "history read is not an audit write",
+			source: `package audit
+type Repo struct{}
+func (*Repo) UpdateRecordStatus(id string, status int) error { return nil }
+func (*Repo) GetHistory(id string) ([]int, error) { return nil, nil }
+type Service struct { repo *Repo }
+func (s *Service) approve(id string, adminID int) error { return s.repo.UpdateRecordStatus(id, 1) }
+func (s *Service) complete(id string, adminID int) error {
+	if err := s.repo.UpdateRecordStatus(id, 2); err != nil { return err }
+	_, err := s.repo.GetHistory(id)
+	return err
+}
+`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			violations := analyzeAuditModule(t, map[string]string{"service.go": tc.source})
+			assert.Empty(t, violations)
+		})
+	}
+}
+
+func TestAuditActorPropagationRule_UsesHumanRootAndTransactionSibling(t *testing.T) {
+	violations := analyzeAuditModule(t, map[string]string{
+		"service.go": `package audit
+type Repo struct{}
+func (*Repo) UpdateRecordStatus(id string, status int) error { return nil }
+type Request struct { AdminID int }
+type Service struct { repo *Repo }
+type Handler struct { service *Service }
+func (s *Service) begin(id string) error { return s.repo.UpdateRecordStatus(id, 1) }
+func (s *Service) finish(id string, req *Request) error {
+	return runInTx(func() error {
+		if err := s.writeStatus(id, 2); err != nil { return err }
+		return writeAuditEntry(req.AdminID, id)
+	})
+}
+func (s *Service) writeStatus(id string, status int) error { return s.repo.UpdateRecordStatus(id, status) }
+func (h *Handler) action(id string, adminID int) error { return h.service.begin(id) }
+func runInTx(fn func() error) error { return fn() }
+func writeAuditEntry(int, string) error { return nil }
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, "status_without_sibling_audit", violations[0].Context["pattern"])
+}
+
 func TestAuditActorPropagationRule_DetectsReplacedSourceParameter(t *testing.T) {
 	violations := analyzeAuditModule(t, map[string]string{
 		"audit.go": `package audit

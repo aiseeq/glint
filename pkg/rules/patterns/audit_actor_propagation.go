@@ -271,17 +271,18 @@ type auditFindingKey struct {
 }
 
 type auditActorAnalyzer struct {
-	rule           *AuditActorPropagationRule
-	project        *core.GoProjectContext
-	targets        map[ssa.CallInstruction][]*ssa.Function
-	sourcePackages map[*ssa.Package]bool
-	sourceFiles    map[string]bool
-	sources        map[*ssa.Function]bool
-	humanRoots     map[*ssa.Function]bool
-	worklist       []auditState
-	seen           map[auditStateKey]bool
-	reported       map[auditFindingKey]bool
-	violations     []*core.Violation
+	rule                      *AuditActorPropagationRule
+	project                   *core.GoProjectContext
+	targets                   map[ssa.CallInstruction][]*ssa.Function
+	sourcePackages            map[*ssa.Package]bool
+	sourceFiles               map[string]bool
+	sources                   map[*ssa.Function]bool
+	humanRoots                map[*ssa.Function]bool
+	worklist                  []auditState
+	seen                      map[auditStateKey]bool
+	reported                  map[auditFindingKey]bool
+	violations                []*core.Violation
+	statusWithoutSiblingAudit map[ssa.CallInstruction]bool
 }
 
 // auditCallIndexKey caches the call index once per module load: the SSA
@@ -399,6 +400,7 @@ func (a *auditActorAnalyzer) initialize() error {
 			a.sources[function] = true
 		}
 	}
+	a.statusWithoutSiblingAudit = auditStatusCallsWithoutSiblingAudit(index, a.sources)
 	sourceIncoming := make(map[*ssa.Function]bool)
 	for _, edge := range index.edges {
 		if a.isSourceFunction(edge.caller) && a.isSourceFunction(edge.callee) {
@@ -418,6 +420,238 @@ func (a *auditActorAnalyzer) initialize() error {
 		}
 	}
 	return a.validateSourceSinkCalls(index)
+}
+
+// auditStatusCallsWithoutSiblingAudit finds status writes that share a
+// repository operation and receiver type with a method that also writes an
+// audit or history record. It reports only the sibling method that omits that
+// write. Nested transaction callbacks are attributed to their enclosing method.
+func auditStatusCallsWithoutSiblingAudit(index *auditCallIndex, sourceFunctions map[*ssa.Function]bool) map[ssa.CallInstruction]bool {
+	transactionHelpers := make(map[*ssa.Function]bool)
+	for _, function := range index.functions {
+		root := auditFunctionRoot(function)
+		if function == root || !auditTransactionClosure(function, index) || root.Signature == nil || root.Signature.Recv() == nil {
+			continue
+		}
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok {
+					continue
+				}
+				for _, target := range index.targets[call] {
+					if target != nil && target.Signature != nil && target.Signature.Recv() != nil &&
+						types.Identical(target.Signature.Recv().Type(), root.Signature.Recv().Type()) {
+						transactionHelpers[target] = true
+					}
+				}
+			}
+		}
+	}
+	methods := make(map[*ssa.Function]*auditMethodCalls)
+	for _, function := range index.functions {
+		root := auditFunctionRoot(function)
+		if !sourceFunctions[root] || transactionHelpers[root] || root.Signature == nil || root.Signature.Recv() == nil {
+			continue
+		}
+		if methods[root] == nil {
+			methods[root] = &auditMethodCalls{
+				function: root,
+				status:   make(map[string][]ssa.CallInstruction),
+				actor:    auditMethodHasActor(root, index),
+			}
+		}
+		collectAuditMethodCalls(methods[root], function, root, index)
+	}
+
+	auditedOperations := make(map[string]bool)
+	for _, method := range methods {
+		if !method.actor || !method.audits {
+			continue
+		}
+		for key := range method.status {
+			auditedOperations[key] = true
+		}
+	}
+	missing := make(map[ssa.CallInstruction]bool)
+	for _, method := range methods {
+		if method.audits || len(method.status) == 0 {
+			continue
+		}
+		for key, calls := range method.status {
+			if !auditedOperations[key] {
+				continue
+			}
+			for _, call := range calls {
+				missing[call] = true
+			}
+		}
+	}
+	return missing
+}
+
+func auditMethodHasActor(root *ssa.Function, index *auditCallIndex) bool {
+	if auditFunctionHasActor(root) {
+		return true
+	}
+	for _, function := range index.functions {
+		if function != root && auditFunctionRoot(function) == root && auditFunctionHasHumanRoot(function) {
+			return true
+		}
+	}
+	return false
+}
+
+type auditMethodCalls struct {
+	function *ssa.Function
+	status   map[string][]ssa.CallInstruction
+	audits   bool
+	actor    bool
+}
+
+func auditFunctionRoot(function *ssa.Function) *ssa.Function {
+	for function.Parent() != nil {
+		function = function.Parent()
+	}
+	return function
+}
+
+func collectAuditMethodCalls(calls *auditMethodCalls, function, root *ssa.Function, index *auditCallIndex) {
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			for _, target := range index.targets[call] {
+				collectAuditCallTarget(calls, call, target, root)
+				if function != root && auditTransactionClosure(function, index) && target.Signature != nil && target.Signature.Recv() != nil &&
+					types.Identical(target.Signature.Recv().Type(), root.Signature.Recv().Type()) {
+					collectAuditHelperStatusCalls(calls, target, root, index)
+				}
+			}
+		}
+	}
+}
+
+func auditTransactionClosure(function *ssa.Function, index *auditCallIndex) bool {
+	root := auditFunctionRoot(function)
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok || !auditCallPassesClosure(call.Common(), function) {
+				continue
+			}
+			for _, target := range index.targets[call] {
+				name := strings.ToLower(target.Name())
+				if strings.Contains(name, "tx") || strings.Contains(name, "transaction") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func auditCallPassesClosure(common *ssa.CallCommon, function *ssa.Function) bool {
+	if len(auditClosureBindings(common.Value, function, make(map[ssa.Value]bool))) != 0 {
+		return true
+	}
+	for _, argument := range common.Args {
+		if len(auditClosureBindings(argument, function, make(map[ssa.Value]bool))) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// collectAuditHelperStatusCalls attributes a receiver method's direct status
+// writes to the enclosing method when that helper is called by its transaction
+// closure. Audit evidence remains scoped to the enclosing method and closure.
+func collectAuditHelperStatusCalls(calls *auditMethodCalls, helper, root *ssa.Function, index *auditCallIndex) {
+	for _, block := range helper.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			for _, target := range index.targets[call] {
+				if auditStatusWriteCall(call, target, root) {
+					collectAuditCallTarget(calls, call, target, root)
+				}
+			}
+		}
+	}
+}
+
+func collectAuditCallTarget(calls *auditMethodCalls, call ssa.CallInstruction, target, root *ssa.Function) {
+	funcName := strings.ToLower(target.Name())
+	if auditWriteCall(funcName) {
+		calls.audits = true
+	}
+	if !auditStatusWriteCall(call, target, root) {
+		return
+	}
+	key := types.TypeString(calls.function.Signature.Recv().Type(), nil) + ":" + auditStatusCallKey(target)
+	calls.status[key] = append(calls.status[key], call)
+}
+
+func auditStatusWriteCall(call ssa.CallInstruction, target, root *ssa.Function) bool {
+	if target == nil || target.Signature == nil || target.Signature.Recv() == nil {
+		return false
+	}
+	name := strings.ToLower(target.Name())
+	verbs := []string{"update", "set", "transition", "change", "move"}
+	if !strings.Contains(name, "status") || !slices.ContainsFunc(verbs, func(verb string) bool { return strings.HasPrefix(name, verb) }) {
+		return false
+	}
+	if root == nil || root.Signature == nil || root.Signature.Recv() == nil {
+		return false
+	}
+	return !types.Identical(target.Signature.Recv().Type(), root.Signature.Recv().Type())
+}
+
+func auditWriteCall(name string) bool {
+	if !strings.Contains(name, "audit") && !strings.Contains(name, "history") {
+		return false
+	}
+	verbs := []string{"record", "insert", "create", "add", "write", "save", "log", "append"}
+	return slices.ContainsFunc(verbs, func(verb string) bool { return strings.HasPrefix(name, verb) })
+}
+
+func auditFunctionHasActor(function *ssa.Function) bool {
+	for _, parameter := range function.Params {
+		if auditActorParameterName(parameter.Name()) {
+			return true
+		}
+	}
+	return auditFunctionHasHumanRoot(function)
+}
+
+func auditActorParameterName(name string) bool {
+	if auditActorParameterNames[name] {
+		return true
+	}
+	name = strings.ToLower(strings.ReplaceAll(name, "_", ""))
+	if !strings.HasSuffix(name, "id") {
+		return false
+	}
+	name = strings.TrimSuffix(name, "id")
+	return strings.HasPrefix(name, "admin") || strings.HasPrefix(name, "actor") ||
+		strings.HasPrefix(name, "operator") || strings.HasPrefix(name, "staff") || strings.HasPrefix(name, "user")
+}
+
+func auditStatusCallKey(function *ssa.Function) string {
+	name := strings.ToLower(function.Name())
+	// Strip execution modifiers so equivalent writes share an operation key.
+	for _, modifier := range []string{"protected", "conditional", "locked", "withtx", "unsafe", "tx"} {
+		name = strings.TrimSuffix(name, modifier)
+	}
+	receiver := ""
+	if function.Signature != nil && function.Signature.Recv() != nil {
+		receiver = types.TypeString(function.Signature.Recv().Type(), nil)
+	}
+	return receiver + "." + name
 }
 
 // sortFunctionsByName orders functions by their full name for a stable walk.
@@ -477,7 +711,7 @@ func (a *auditActorAnalyzer) rootState(function *ssa.Function) auditState {
 		source:   newAuditTaintBits(size),
 	}
 	for index, parameter := range function.Params {
-		if auditActorParameterNames[parameter.Name()] {
+		if auditActorParameterName(parameter.Name()) {
 			state.actor.set(index)
 			state.human = true
 		}
@@ -526,6 +760,12 @@ func (a *auditActorAnalyzer) analyzeFunction(state auditState) error {
 				continue
 			}
 			for _, target := range a.targets[call] {
+				actorAvailable := localHuman || auditFunctionHasActor(auditFunctionRoot(state.function))
+				if a.statusWithoutSiblingAudit[call] && a.isSourceFunction(state.function) && actorAvailable && !a.statusCallPassesActor(state, call) {
+					if err := a.report(state, localHuman, call, target, "status_without_sibling_audit", "status change omits the audit write present in a sibling method"); err != nil {
+						return err
+					}
+				}
 				if a.rule.sinks[target.Name()] && a.isSourceFunction(target) {
 					if err := a.inspectSink(state, localHuman, call, target); err != nil {
 						return err
@@ -542,6 +782,18 @@ func (a *auditActorAnalyzer) analyzeFunction(state auditState) error {
 		}
 	}
 	return nil
+}
+
+func (a *auditActorAnalyzer) statusCallPassesActor(state auditState, call ssa.CallInstruction) bool {
+	actuals := auditCallActuals(call.Common())
+	rootActor := a.rootState(state.function).actor
+	for _, actual := range actuals {
+		if auditValueDepends(actual, state.function, state.actor, auditTaintActor, make(map[ssa.Value]bool)) ||
+			auditValueDepends(actual, state.function, rootActor, auditTaintActor, make(map[ssa.Value]bool)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *auditActorAnalyzer) childStates(
@@ -667,7 +919,7 @@ func auditRoles(target *ssa.Function) (auditSinkRoles, bool) {
 	actorCount := 0
 	sourceCount := 0
 	for index, parameter := range target.Params {
-		if auditActorParameterNames[parameter.Name()] {
+		if auditActorParameterName(parameter.Name()) {
 			roles.actor = index
 			actorCount++
 		}
@@ -962,7 +1214,7 @@ func auditIntrinsicHumanValue(value ssa.Value, visited map[ssa.Value]bool) bool 
 }
 
 func auditActorFieldName(name string) bool {
-	return auditActorFieldNames[name] || auditActorParameterNames[name]
+	return auditActorFieldNames[name] || auditActorParameterName(name)
 }
 
 func auditCalledName(common *ssa.CallCommon) string {
