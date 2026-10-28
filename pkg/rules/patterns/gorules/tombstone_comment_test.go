@@ -640,12 +640,15 @@ type Gateway struct{}
 
 // Plan describes what a dry run would have deleted.
 type Plan struct{}
+
+// Pool wraps the API and the retry loop removed
+type Pool struct{}
 `
 	lines = nil
 	for _, v := range rule.AnalyzeFile(core.NewFileContext("sweep/notes.go", ".", []byte(notes), nil)) {
 		lines = append(lines, v.Line)
 	}
-	if !slices.Equal(lines, []int{3, 6, 9, 13, 17}) {
-		t.Fatalf("want tombstones on lines 3, 6, 9, 13, 17, got %v", lines)
+	if !slices.Equal(lines, []int{3, 6, 9, 13, 17, 23}) {
+		t.Fatalf("want tombstones on lines 3, 6, 9, 13, 17, 23, got %v", lines)
 	}
 }

@@ -265,9 +265,11 @@ var (
 	// verb of, right after the word it qualifies: "the entries a trim
 	// removed", "what a dry run would have deleted". A plural noun after the
 	// name ("Client options removed") has none, and a possessive after a
-	// comma ("wraps the API, its retry removed") names a part, not a doer.
+	// comma or a conjunction ("wraps the API, its retry removed", "and the
+	// retry loop removed") names a part, not a doer.
 	clauseSubject = regexp.MustCompile(
-		`(?i)[\p{L}\d_]\s+(?:a|an|the|each|every|this|that)\s+(?:[\p{L}\d_-]+\s+){1,2}(?:(?:would|will|could|may|might|can|should|has|have|had)\s+)*$`)
+		`(?i)([\p{L}\d_]+)\s+(?:a|an|the|each|every|this|that)\s+(?:[\p{L}\d_-]+\s+){1,2}(?:(?:would|will|could|may|might|can|should|has|have|had)\s+)*$`)
+	conjunctions = []string{"and", "or", "but", "nor", "so", "then"}
 )
 
 // godocFirstSentence reports a match on comment line i, with before the text
@@ -296,8 +298,11 @@ func godocFirstSentence(lines []string, i int, before string) bool {
 		return false
 	}
 	words := strings.FieldsFunc(text.String(), isNotIdentChar)
-	return len(words) > 1 && words[0] == nameDeclaredBelow(lines, i) && presentVerb.MatchString(words[1]) &&
-		clauseSubject.MatchString(text.String())
+	if len(words) < 2 || words[0] != nameDeclaredBelow(lines, i) || !presentVerb.MatchString(words[1]) {
+		return false
+	}
+	m := clauseSubject.FindStringSubmatch(text.String())
+	return m != nil && !slices.Contains(conjunctions, strings.ToLower(m[1]))
 }
 
 // nameDeclaredBelow returns the name the first code line after line i declares,
