@@ -19,6 +19,128 @@ func TestUnusedInternalExportRule_Metadata(t *testing.T) {
 	assert.False(t, rule.RequiresSSA())
 }
 
+func TestUnusedInternalExportRule_Methods(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
+		"internal/storage/store.go": `package storage
+
+type Store struct{}
+
+func (s *Store) Unused() {}
+func (s *Store) Used() {}
+func (s *Store) Required() {}
+
+type Reader interface { Required() }
+
+func Use(s *Store) { s.Used() }
+func Take(r Reader) {}
+func KeepInterfaceUse(s *Store) { Take(s) }
+func init() { Use(nil); KeepInterfaceUse(&Store{}) }
+`,
+	})
+	violations, err := NewUnusedInternalExportRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var symbols []string
+	for _, v := range violations {
+		symbols = append(symbols, v.Context["symbol"].(string))
+	}
+	assert.Equal(t, []string{"Unused"}, symbols)
+}
+
+func TestUnusedInternalExportRule_MethodUseExceptions(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
+		"internal/model/model.go": `package model
+
+type Record struct{}
+func (Record) Error() string { return "" }
+func (Record) String() string { return "" }
+func (Record) MarshalJSON() ([]byte, error) { return nil, nil }
+func (Record) Read(p []byte) (int, error) { return 0, nil }
+func (Record) Reset() {}
+func (Record) IsBoolFlag() bool { return true }
+func (Record) TestOnly() {}
+func (Record) Bound() {}
+func (Record) Orphan() {}
+
+type View struct{}
+func (View) Title() string { return "title" }
+func (View) Stale(any) bool { return false }
+
+type InlineModel struct{}
+func (InlineModel) InlineText() string { return "inline" }
+
+type Row struct{}
+func (Row) Locked() bool { return false }
+
+type Nested struct{}
+func (Nested) DeepText() string { return "nested" }
+type Outer struct { A Nested }
+
+type Box[T any] struct{}
+func (Box[T]) Match(T) string { return "" }
+
+func KeepBound() func() { return Record{}.Bound }
+func init() { _ = KeepBound() }
+`,
+		"internal/contracts/contracts.go": `package contracts
+
+import (
+	"io"
+	"example.com/rulestest/internal/model"
+)
+
+var _ io.Reader = model.Record{}
+var _ Resettable = model.Record{}
+var _ Matcher[int] = model.Box[int]{}
+
+type Resettable interface { Reset() }
+type Matcher[T any] interface { Match(T) string }
+`,
+		"internal/web/render.go": `package web
+
+import (
+	"io"
+	"text/template"
+	"example.com/rulestest/internal/model"
+)
+
+func Render(view model.View) {
+	template.Must(template.New("page").Parse("{{.Title}}" )).Execute(io.Discard, view)
+}
+
+func RenderInline(view model.View) {
+	template.Must(template.New("inline").Parse("{{if $.Stale .StartedAt}}{{.InlineText}}{{end}}" )).Execute(io.Discard, map[string]any{})
+}
+`,
+		"internal/model/views.go": `package model
+
+type Grid struct { Rows []Row }
+type DeltaPanel struct { Change Nested }
+`,
+		"templates/rows.html":  `{{range .Rows}}<td>{{if .Locked}}locked{{end}}</td>{{end}}`,
+		"templates/nested.tpl": `{{.A.DeepText}} {{.Change.DeepText}}`,
+		"internal/web/render_test.go": `package web
+
+import (
+	"testing"
+	"example.com/rulestest/internal/model"
+)
+
+func TestRecord(t *testing.T) { (model.Record{}).TestOnly() }
+`,
+	})
+	violations, err := NewUnusedInternalExportRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var methods []string
+	for _, violation := range violations {
+		if violation.Context["kind"] == "method" {
+			methods = append(methods, violation.Context["symbol"].(string))
+		}
+	}
+	assert.Equal(t, []string{"Orphan"}, methods)
+}
+
 // Репро с ревью projectD 2026-08: в internal/config жила 51 экспортированная
 // константа и кластер экспортированных функций, на которые не ссылался никто,
 // кроме их собственных тестов. internal/-пакеты не импортируются извне модуля,
@@ -110,8 +232,8 @@ const PublicUnused = 1
 	assert.Empty(t, violations)
 }
 
-// Методы не проверяются: они могут реализовывать интерфейсы.
-func TestUnusedInternalExportRule_SkipsMethods(t *testing.T) {
+// An exported method without callers is dead when no module interface needs it.
+func TestUnusedInternalExportRule_ReportsUnusedMethods(t *testing.T) {
 	project := rulestest.Project(t, map[string]string{
 		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
 		"internal/svc/svc.go": `package svc
@@ -131,7 +253,8 @@ func init() { _ = Use() }
 
 	violations, err := NewUnusedInternalExportRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
-	assert.Empty(t, violations)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "UnusedMethod", violations[0].Context["symbol"])
 }
 
 // A type that only its own methods mention, and a function that only calls
@@ -164,7 +287,7 @@ const Lonely = 1
 	for _, v := range violations {
 		symbols = append(symbols, v.Context["symbol"].(string))
 	}
-	assert.ElementsMatch(t, []string{"Widget", "Countdown", "Lonely"}, symbols)
+	assert.ElementsMatch(t, []string{"Widget", "Size", "Countdown", "Lonely"}, symbols)
 }
 
 // Several constants declared on one line share file and line; their findings

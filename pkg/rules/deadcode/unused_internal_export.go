@@ -3,8 +3,13 @@ package deadcode
 import (
 	"errors"
 	"go/ast"
+	"go/token"
 	"go/types"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -35,8 +40,8 @@ func init() {
 // _test.go импортировать не могут: экспорт, который они зовут, — единственное
 // место для такого помощника, и он жив.
 //
-// Методы не проверяются: они могут закрывать интерфейсы. Интерфейсные типы —
-// зона orphaned-interface. Пакет, чьи файлы импортируют testing, существует для
+// Методы учитываются, если на них нет ссылок в модуле, и не нужны
+// интерфейсам, соглашениям Go или вызовам из шаблонов. Пакет, чьи файлы импортируют testing, существует для
 // тестов, и его экспорт, нужный только тестам, — его назначение.
 //
 // A main package cannot be imported either, and its exports are judged the
@@ -119,40 +124,15 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 		return nil, errors.New("unused internal export: nil Go project context")
 	}
 
-	byFile := make(map[*core.FileContext][]*exportUsage)
-	candidates := make(map[types.Object]*exportUsage)
-	for _, pkgCtx := range ctx.Packages {
-		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
-			return nil, errors.New("unused internal export: package has no typed syntax")
-		}
-		// A package whose own files import "testing" exists for tests:
-		// production code cannot use it, so tests are its intended callers.
-		if _, testSupport := pkgCtx.Package.Imports["testing"]; testSupport {
-			continue
-		}
-		// Nothing imports a main package either: its exports serve the
-		// package alone, like those of an internal one.
-		mainPackage := pkgCtx.Package.Name == "main"
-		closedModule := pkgCtx.Package.Module != nil && r.closed[pkgCtx.Package.Module.Path] && !isInternalPackage(pkgCtx.Package.PkgPath)
-		internal := isInternalPackage(pkgCtx.Package.PkgPath) || mainPackage || closedModule
-		for _, fileCtx := range pkgCtx.Files {
-			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
-				continue
-			}
-			for _, usage := range exportedDeclarations(fileCtx.GoAST, pkgCtx.Package.TypesInfo) {
-				if !internal {
-					if usage.kind != "function" || !isInitializerName(usage.object.Name()) ||
-						isTestSupport(pkgCtx.Package.Name, usage.object.Name()) {
-						continue
-					}
-					usage.initializer = true
-				}
-				usage.mainPackage = mainPackage
-				usage.closedModule = closedModule && !mainPackage
-				candidates[usage.object] = usage
-				byFile[fileCtx] = append(byFile[fileCtx], usage)
-			}
-		}
+	interfaces := moduleInterfaces(ctx)
+	templateTypes := templateMethodTypes(ctx)
+	templateNames, err := templateSelectorNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byFile, candidates, err := r.collectGoCandidates(ctx, interfaces, templateTypes, templateNames)
+	if err != nil {
+		return nil, err
 	}
 
 	own := make(ownDeclarations)
@@ -175,13 +155,160 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, usage := range byFile[fileCtx] {
-			if uses[usage.object] > 0 || usage.otherTestUses > 0 || (usage.initializer && usage.testUses == 0) || ctx.GeneratedTSImports[usage.object.Name()] {
+			if uses[usage.object] > 0 || usage.otherTestUses > 0 || (usage.kind == "method" && usage.testUses > 0) || (usage.initializer && usage.testUses == 0) || ctx.GeneratedTSImports[usage.object.Name()] {
 				continue
 			}
 			violations = append(violations, r.violationFor(ctx, usage))
 		}
 		return violations
 	})
+}
+
+func (r *UnusedInternalExportRule) collectGoCandidates(ctx *core.GoProjectContext, interfaces []interfaceType, templateTypes map[types.Object]bool, templateNames map[string]bool) (map[*core.FileContext][]*exportUsage, map[types.Object]*exportUsage, error) {
+	byFile := make(map[*core.FileContext][]*exportUsage)
+	candidates := make(map[types.Object]*exportUsage)
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
+			return nil, nil, errors.New("unused internal export: package has no typed syntax")
+		}
+		// A package whose own files import "testing" exists for tests:
+		// production code cannot use it, so tests are its intended callers.
+		if _, testSupport := pkgCtx.Package.Imports["testing"]; testSupport {
+			continue
+		}
+		// Nothing imports a main package either: its exports serve the
+		// package alone, like those of an internal one.
+		mainPackage := pkgCtx.Package.Name == "main"
+		closedModule := pkgCtx.Package.Module != nil && r.closed[pkgCtx.Package.Module.Path] && !isInternalPackage(pkgCtx.Package.PkgPath)
+		internal := isInternalPackage(pkgCtx.Package.PkgPath) || mainPackage || closedModule
+		for _, fileCtx := range pkgCtx.Files {
+			if fileCtx.GoAST == nil || fileCtx.IsTestFile() {
+				continue
+			}
+			for _, usage := range exportedDeclarations(fileCtx.GoAST, pkgCtx.Package.TypesInfo) {
+				include, err := r.includeGoCandidate(usage, pkgCtx, internal, closedModule, interfaces, templateTypes, templateNames)
+				if err != nil {
+					return nil, nil, err
+				}
+				if !include {
+					continue
+				}
+				if !internal {
+					usage.initializer = true
+				}
+				usage.mainPackage = mainPackage
+				usage.closedModule = closedModule && !mainPackage
+				candidates[usage.object] = usage
+				byFile[fileCtx] = append(byFile[fileCtx], usage)
+			}
+		}
+	}
+	return byFile, candidates, nil
+}
+
+func (r *UnusedInternalExportRule) includeGoCandidate(usage *exportUsage, pkgCtx *core.GoPackageContext, internal, closedModule bool, interfaces []interfaceType, templateTypes map[types.Object]bool, templateNames map[string]bool) (bool, error) {
+	include, err := includeExportCandidate(usage, pkgCtx, internal, closedModule, interfaces)
+	if err != nil || !include {
+		return include, err
+	}
+	if usage.kind == "method" {
+		method, ok := usage.object.(*types.Func)
+		if !ok || templateTypes[receiverTypeObject(method)] || templateNames[method.Name()] {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+var templateFieldSelector = regexp.MustCompile(`\.([A-Za-z_][A-Za-z0-9_]*)`)
+
+// templateSelectorNames collects field and method selectors used inside Go
+// template actions in module template files and Go string literals.
+func templateSelectorNames(ctx *core.GoProjectContext) (map[string]bool, error) {
+	names := make(map[string]bool)
+	addActions := func(source string) {
+		for rest := source; ; {
+			start := strings.Index(rest, "{{")
+			if start < 0 {
+				return
+			}
+			rest = rest[start+2:]
+			end := strings.Index(rest, "}}")
+			if end < 0 {
+				return
+			}
+			for _, match := range templateFieldSelector.FindAllStringSubmatch(rest[:end], -1) {
+				names[match[1]] = true
+			}
+			rest = rest[end+2:]
+		}
+	}
+	for _, file := range ctx.Files {
+		if file == nil || file.GoAST == nil {
+			continue
+		}
+		ast.Inspect(file.GoAST, func(node ast.Node) bool {
+			literal, ok := node.(*ast.BasicLit)
+			if !ok || literal.Kind != token.STRING {
+				return true
+			}
+			value, err := strconv.Unquote(literal.Value)
+			if err == nil && strings.Contains(value, "{{") {
+				addActions(value)
+			}
+			return true
+		})
+	}
+	if ctx.ProjectRoot == "" {
+		return names, nil
+	}
+	err := filepath.WalkDir(ctx.ProjectRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != ctx.ProjectRoot {
+				switch entry.Name() {
+				case ".git", "node_modules", "vendor":
+					return filepath.SkipDir
+				}
+				if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".html", ".tmpl", ".tpl", ".gohtml", ".gotmpl", ".txt":
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			addActions(string(content))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
+func includeExportCandidate(usage *exportUsage, pkgCtx *core.GoPackageContext, internal, closedModule bool, interfaces []interfaceType) (bool, error) {
+	if fn, ok := usage.object.(*types.Func); ok {
+		if sig, ok := fn.Type().(*types.Signature); ok && sig.Recv() != nil {
+			if !isInternalPackage(pkgCtx.Package.PkgPath) && !closedModule || methodHasConventionalUse(fn) {
+				return false, nil
+			}
+			required, err := methodRequiredByInterface(fn, interfaces)
+			return !required, err
+		}
+	}
+	if internal {
+		return true, nil
+	}
+	return usage.kind == "function" && isInitializerName(usage.object.Name()) &&
+		!isTestSupport(pkgCtx.Package.Name, usage.object.Name()), nil
 }
 
 // exportedDeclarations returns the exported package-level objects a file
@@ -202,6 +329,8 @@ func exportedDeclarations(file *ast.File, info *types.Info) []*exportUsage {
 		case *ast.FuncDecl:
 			if d.Recv == nil {
 				add(d.Name)
+			} else if obj := info.Defs[d.Name]; obj != nil && obj.Exported() {
+				declared = append(declared, &exportUsage{object: obj, kind: "method"})
 			}
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
@@ -217,6 +346,158 @@ func exportedDeclarations(file *ast.File, info *types.Info) []*exportUsage {
 		}
 	}
 	return declared
+}
+
+type interfaceType struct {
+	named *types.Named
+	iface *types.Interface
+}
+
+func collectInterfaces(pkg *types.Package, seen map[*types.Package]bool) []interfaceType {
+	if pkg == nil || seen[pkg] {
+		return nil
+	}
+	seen[pkg] = true
+	var interfaces []interfaceType
+	for _, name := range pkg.Scope().Names() {
+		if typeName, ok := pkg.Scope().Lookup(name).(*types.TypeName); ok {
+			if named, ok := typeName.Type().(*types.Named); ok {
+				if iface, ok := named.Underlying().(*types.Interface); ok {
+					interfaces = append(interfaces, interfaceType{named: named, iface: iface.Complete()})
+				}
+			}
+		}
+	}
+	for _, imported := range pkg.Imports() {
+		interfaces = append(interfaces, collectInterfaces(imported, seen)...)
+	}
+	return interfaces
+}
+
+func moduleInterfaces(ctx *core.GoProjectContext) []interfaceType {
+	seen := make(map[*types.Package]bool)
+	var interfaces []interfaceType
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx != nil && pkgCtx.Package != nil && pkgCtx.Package.Types != nil {
+			interfaces = append(interfaces, collectInterfaces(pkgCtx.Package.Types, seen)...)
+		}
+	}
+	return interfaces
+}
+
+func methodHasConventionalUse(method *types.Func) bool {
+	switch method.Name() {
+	case "String", "Error", "GoString", "Format", "MarshalJSON", "UnmarshalJSON",
+		"MarshalText", "UnmarshalText", "MarshalYAML", "UnmarshalYAML", "Scan", "Value",
+		"ServeHTTP", "Unwrap", "Is", "As", "Len", "Less", "Swap", "IsBoolFlag":
+		return true
+	default:
+		return false
+	}
+}
+
+func templateMethodTypes(ctx *core.GoProjectContext) map[types.Object]bool {
+	typesInTemplates := make(map[types.Object]bool)
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil {
+			continue
+		}
+		info := pkgCtx.Package.TypesInfo
+		for _, file := range pkgCtx.Package.Syntax {
+			ast.Inspect(file, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || (selector.Sel.Name != "Execute" && selector.Sel.Name != "ExecuteTemplate") {
+					return true
+				}
+				var fn *types.Func
+				if selection := info.Selections[selector]; selection != nil {
+					fn, _ = selection.Obj().(*types.Func)
+				}
+				if fn == nil {
+					fn, _ = info.Uses[selector.Sel].(*types.Func)
+				}
+				if fn == nil {
+					return true
+				}
+				if fn.Pkg() == nil || (fn.Pkg().Path() != "html/template" && fn.Pkg().Path() != "text/template") {
+					return true
+				}
+				dataIndex := 1
+				if selector.Sel.Name == "ExecuteTemplate" {
+					dataIndex = 2
+				}
+				if dataIndex >= len(call.Args) {
+					return true
+				}
+				t := types.Unalias(info.TypeOf(call.Args[dataIndex]))
+				if pointer, ok := t.(*types.Pointer); ok {
+					t = types.Unalias(pointer.Elem())
+				}
+				if named, ok := t.(*types.Named); ok {
+					typesInTemplates[named.Origin().Obj()] = true
+				}
+				return true
+			})
+		}
+	}
+	return typesInTemplates
+}
+
+func methodRequiredByInterface(method *types.Func, interfaces []interfaceType) (bool, error) {
+	typeName, ok := receiverTypeObject(method).(*types.TypeName)
+	if !ok {
+		return false, nil
+	}
+	named, ok := typeName.Type().(*types.Named)
+	if !ok {
+		return false, nil
+	}
+	concrete := types.Type(named)
+	if params := named.TypeParams(); params != nil && params.Len() > 0 {
+		instantiated, err := instantiateTypeParams(named, params)
+		if err != nil {
+			return false, err
+		}
+		concrete = instantiated
+	}
+	for _, candidate := range interfaces {
+		iface := candidate.iface
+		if params := candidate.named.TypeParams(); params != nil && params.Len() > 0 {
+			receiverParams := named.TypeParams()
+			if receiverParams == nil || receiverParams.Len() != params.Len() {
+				continue
+			}
+			instantiated, err := instantiateTypeParams(candidate.named, receiverParams)
+			if err != nil {
+				return false, err
+			}
+			iface, _ = instantiated.Underlying().(*types.Interface)
+			if iface == nil {
+				continue
+			}
+		}
+		for ifaceMethod := range iface.Methods() {
+			if ifaceMethod.Name() != method.Name() {
+				continue
+			}
+			if types.Implements(concrete, iface) || types.Implements(types.NewPointer(concrete), iface) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func instantiateTypeParams(named *types.Named, params *types.TypeParamList) (types.Type, error) {
+	args := make([]types.Type, params.Len())
+	for i := range args {
+		args[i] = params.At(i)
+	}
+	return types.Instantiate(types.NewContext(), named, args, false)
 }
 
 // violationFor renders the finding at the symbol declaration.
@@ -278,6 +559,11 @@ func countTestIdentUses(ctx *core.GoProjectContext, candidates map[types.Object]
 		dir := filepath.Dir(file.Path)
 		ast.Inspect(file.GoAST, func(n ast.Node) bool {
 			if sel, ok := n.(*ast.SelectorExpr); ok {
+				for _, usage := range byName[sel.Sel.Name] {
+					if usage.kind == "method" {
+						usage.testUses++
+					}
+				}
 				if pkg, ok := sel.X.(*ast.Ident); ok {
 					for _, usage := range byName[sel.Sel.Name] {
 						if usage.importedAs(imported, pkg.Name) && declaredDir(ctx, usage) != dir {
