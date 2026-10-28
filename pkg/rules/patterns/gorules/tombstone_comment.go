@@ -269,7 +269,7 @@ var (
 	// retry loop removed") names a part, not a doer.
 	clauseSubject = regexp.MustCompile(
 		`(?i)([\p{L}\d_]+)\s+(?:a|an|the|each|every|this|that)\s+(?:[\p{L}\d_-]+\s+){1,2}(?:(?:would|will|could|may|might|can|should|has|have|had)\s+)*$`)
-	conjunctions = []string{"and", "or", "but", "nor", "so", "then"}
+	conjunctions = []string{"and", "or", "but", "nor", "so", "then", "plus", "yet", "also"}
 )
 
 // godocFirstSentence reports a match on comment line i, with before the text
