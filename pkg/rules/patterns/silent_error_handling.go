@@ -150,6 +150,10 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 			return true
 		}
 
+		if countsIntoResult(ftype, body, ifStmt.Body) {
+			return true
+		}
+
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
 			"Error check without logging or error propagation")
 		v.WithCode(lineContent)
@@ -758,6 +762,52 @@ func numericNameFilter(body *ast.BlockStmt, ifStmt *ast.IfStmt) bool {
 	}
 	sel, ok := name.Fun.(*ast.SelectorExpr)
 	return ok && sel.Sel.Name == "Name"
+}
+
+// countsIntoResult reports a branch that counts the failure in a tally the
+// function returns: bad++ where the function ends with return items, bad, nil
+// or declares bad as a named result. The caller gets the number of failures.
+func countsIntoResult(ftype *ast.FuncType, body, branch *ast.BlockStmt) bool {
+	for _, stmt := range branch.List {
+		name := incrementedName(stmt)
+		if name != "" && (namedResults(ftype)[name] || returnedByFunc(body, name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// incrementedName is the variable of x++ or x += n, or "".
+func incrementedName(stmt ast.Stmt) string {
+	switch s := stmt.(type) {
+	case *ast.IncDecStmt:
+		if id, ok := s.X.(*ast.Ident); ok && s.Tok == token.INC {
+			return id.Name
+		}
+	case *ast.AssignStmt:
+		if s.Tok == token.ADD_ASSIGN && len(s.Lhs) == 1 {
+			if id, ok := s.Lhs[0].(*ast.Ident); ok {
+				return id.Name
+			}
+		}
+	}
+	return ""
+}
+
+// returnedByFunc reports a return of the function (not of a closure in it)
+// that hands name to the caller.
+func returnedByFunc(body *ast.BlockStmt, name string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			found = returnsIdent(n, name)
+		}
+		return !found
+	})
+	return found
 }
 
 func onlyDebugLogs(list []ast.Stmt) bool {

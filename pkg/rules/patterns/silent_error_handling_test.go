@@ -487,3 +487,69 @@ func period(from, to string) (start, end *time.Time, errKey string) {
 	require.Len(t, violations, 1)
 	require.Equal(t, 8, violations[0].Line)
 }
+
+// A parser that skips a malformed record and counts it in a result the caller
+// gets: the failure reaches the caller as the number of bad records.
+func TestSilentErrorHandlingRule_ErrorCountedInReturnedTally(t *testing.T) {
+	code := `package main
+
+import "strconv"
+
+func parseIDs(fields []string) ([]int, int, error) {
+	var ids []int
+	bad := 0
+	for _, f := range fields {
+		id, err := strconv.Atoi(f)
+		if err != nil {
+			bad++
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, bad, nil
+}
+
+func parseSizes(fields []string) (sizes []int, skipped int) {
+	for _, f := range fields {
+		n, err := strconv.Atoi(f)
+		if err != nil {
+			skipped += 1
+			continue
+		}
+		sizes = append(sizes, n)
+	}
+	return
+}
+`
+
+	ctx := createSilentErrorContext(t, "records.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Empty(t, violations)
+}
+
+// A count that stays inside the function tells nobody about the failure.
+func TestSilentErrorHandlingRule_ErrorCountedInLocalTally(t *testing.T) {
+	code := `package main
+
+import "strconv"
+
+func parseIDs(fields []string) []int {
+	var ids []int
+	bad := 0
+	for _, f := range fields {
+		id, err := strconv.Atoi(f)
+		if err != nil {
+			bad++
+			continue
+		}
+		ids = append(ids, id)
+	}
+	_ = bad
+	return ids
+}
+`
+
+	ctx := createSilentErrorContext(t, "records.go", code)
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+}
