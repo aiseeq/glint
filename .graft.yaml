@@ -36,17 +36,10 @@ tasks:
     run:
       - [go, build, -ldflags, '-X main.version=${GRAFT_VERSION}', -o, bin/glint, ./cmd/glint]
   install:
-    desc: install to ~/bin atomically (a running glint keeps its file)
+    desc: install the committed build to ~/bin atomically (a running glint keeps its file)
     deps: [build]
     run:
-      - sh: |
-          set -eu
-          mkdir -p "$HOME/bin"
-          tmp=$(mktemp "$HOME/bin/.glint.XXXXXX")
-          trap 'rm -f "$tmp"' EXIT
-          install -m 0755 bin/glint "$tmp"
-          mv -f "$tmp" "$HOME/bin/glint"
-          echo "Installed to $HOME/bin/glint"
+      - install: bin/glint
   install-gopath:
     desc: install to GOPATH/bin with go install
     heavy: true

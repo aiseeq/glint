@@ -1,1 +1,5 @@
 version: "2"
+
+run:
+  # a golangci-lint of another project holding the shared lock makes this run wait, not exit 3
+  allow-serial-runners: true
