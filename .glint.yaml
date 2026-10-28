@@ -99,13 +99,6 @@ categories:
 
   documentation:
     enabled: true
-    rules:
-      doc-links:
-        exceptions:
-          - file: "pkg/rules/patterns/internal/patterntest/go_resource_rules.go"
-            reason: >-
-              app.go is the file of the fixture module the helper writes, not a
-              file of this repository.
 
   typesafety:
     enabled: true
