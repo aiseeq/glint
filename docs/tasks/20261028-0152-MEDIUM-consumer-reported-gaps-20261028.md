@@ -1,7 +1,7 @@
 # Пропуски правил, найденные потребителями при починке находок раунда истории
 
-Статус: в работе
-Исполнитель: glint-master
+Статус: готово
+Исполнитель: luna-fighters
 
 ## Вход
 Пропуски правил, о которых сообщили агенты двух потребителей после починки находок раунда истории (28.10). Конкретные места — в их сообщениях glint-master (транскрипт сессии 28.10 01:4x); в тикет только синтетика.
@@ -35,3 +35,4 @@
 - 2026-10-28 02:57 note — glint-master: g5 cmp: consumer-C 5 new, exactly the sites with noisy data (constant and rounded sites silent); sent to its agent; merging + install
 - 2026-10-28 03:02 note — glint-master: consumer-C FP after its fix: rounding moved to a shared helper of another package; rule now counts a package calling a 15-digit rounding function as rounding; verify t22 0/1, g5 0/2; consumers: only that FP gone; consumer-A 155 (+22) removed b62f8df12, 0 FP
 - 2026-10-28 03:05 note — glint-master: consumer chooks FP on unused-internal-export: method of an embedded type reaches an interface only through the embedding type; fixed (promoted method owners checked against interfaces); chooks clean, consumers 0 diffs
+- 2026-10-28 03:11 готово — glint-master: g1-g5 merged (dbb6c73, 9c1db99, 0e0898f, 038c16b, e5e7bca) + FP fixes 1d75bc7, 37bb4d9, dup helper 9e7c17d; installed 9e7c17d modified=false; each: verify on mined code 0 misses + master's own consumers run; consumer findings closed by their agents (D 7ce17b6e, B 177987a, A b62f8df12, C dd897d1); consumer E fields kept by design, tracked in its ticket; reported FPs fixed, reruns clean

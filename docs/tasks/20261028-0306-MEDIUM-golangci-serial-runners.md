@@ -1,6 +1,6 @@
 # golangci-lint: allow-serial-runners, второй запуск ждёт блокировку
 
-Статус: на проверке
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -16,3 +16,4 @@
 - 2026-10-28 03:06 note — glint-master: added run.allow-serial-runners: true; config verify ok; graft lint run
 - 2026-10-28 03:07 на проверке — glint-master — allow-serial-runners in a839d21; config verify ok; graft lint 0 issues
 - 2026-10-28 03:08 note — git-admin: проверка git-admin: принято (allow-serial-runners: true); tk done — те же 2 medium duplicate-func-across-packages
+- 2026-10-28 03:11 готово — git-admin: git-admin checked .golangci.yml allow-serial-runners; graft lint 0 issues
