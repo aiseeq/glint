@@ -24,6 +24,7 @@ func init() {
 	rules.Register(NewRelativeFetchURLResolvesAgainstPagePathRule())
 	rules.Register(NewI18nKeyUsedButNotDefinedRule())
 	rules.Register(NewHtmxSwapTargetExcludesDependentFragmentRule())
+	rules.Register(NewHtmxSelectInheritedByDescendantRequestRule())
 }
 
 // templateProjectRule is a rule that checks the templates of a project
@@ -1025,6 +1026,155 @@ func (r *HtmxSwapTargetRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 // {{template}} of the rows.
 func rendersList(element string) bool {
 	return strings.Contains(element, "{{range") || strings.Contains(element, "{{template")
+}
+
+// HtmxSelectInheritedByDescendantRequestRule detects inherited hx-select
+// filtering the response of a nested request that swaps into its own target.
+type HtmxSelectInheritedByDescendantRequestRule struct {
+	*rules.BaseRule
+}
+
+// NewHtmxSelectInheritedByDescendantRequestRule creates
+// htmx-select-inherited-by-descendant-request.
+func NewHtmxSelectInheritedByDescendantRequestRule() *HtmxSelectInheritedByDescendantRequestRule {
+	return &HtmxSelectInheritedByDescendantRequestRule{BaseRule: rules.NewBaseRule(
+		"htmx-select-inherited-by-descendant-request",
+		"patterns",
+		"Detects a container whose inherited hx-select filters responses from descendant requests with their own targets",
+		core.SeverityMedium,
+	)}
+}
+
+type htmxHTMLTag struct {
+	name       string
+	attrs      string
+	start, end int
+	parent     int
+}
+
+var (
+	htmxHTMLTagPattern = regexp.MustCompile(`<(/?)([a-zA-Z][\w:-]*)\b[^>]*>`)
+	htmxAttribute      = regexp.MustCompile(`(?i)^\s*([a-z_:][\w:.-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?`)
+)
+
+// AnalyzeFile reports containers whose hx-select is inherited by a nested
+// request that has its own swap target.
+func (r *HtmxSelectInheritedByDescendantRequestRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if !ctx.IsTemplate() {
+		return nil
+	}
+	tags := parseHtmxHTMLTags(string(ctx.Content))
+	var violations []*core.Violation
+	reported := make(map[int]bool)
+	text := string(ctx.Content)
+	for _, child := range tags {
+		if !htmxRequest.MatchString(child.attrs) ||
+			!hasHtmxAttribute(child.attrs, "hx-target") || hasHtmxAttribute(child.attrs, "hx-select") ||
+			disinheritsHtmxSelect(child.attrs) {
+			continue
+		}
+		for parentIndex := child.parent; parentIndex >= 0; parentIndex = tags[parentIndex].parent {
+			parent := tags[parentIndex]
+			if disinheritsHtmxSelect(parent.attrs) || hasHtmxAttribute(parent.attrs, "hx-select") {
+				if hasHtmxAttribute(parent.attrs, "hx-select") &&
+					(hasHtmxAttribute(parent.attrs, "hx-get") || hasHtmxAttribute(parent.attrs, "hx-trigger")) &&
+					!disinheritsHtmxSelect(parent.attrs) && !reported[parentIndex] {
+					line := strings.Count(text[:parent.start], "\n") + 1
+					reported[parentIndex] = true
+					if ctx.IsSuppressed(line, r.Name()) {
+						break
+					}
+					v := r.CreateViolation(ctx.RelPath, line,
+						"This container's hx-select is inherited by a descendant request, so its response may be filtered before swapping into the descendant's target")
+					v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+					v.WithSuggestion("Add hx-disinherit=\"hx-select\" to this container, or set an appropriate hx-select on the descendant request")
+					violations = append(violations, v)
+				}
+				break
+			}
+		}
+	}
+	return violations
+}
+
+func parseHtmxHTMLTags(text string) []htmxHTMLTag {
+	var tags []htmxHTMLTag
+	var stack []int
+	void := map[string]bool{"area": true, "base": true, "br": true, "col": true, "embed": true, "hr": true, "img": true, "input": true, "link": true, "meta": true, "param": true, "source": true, "track": true, "wbr": true}
+	for _, match := range htmxHTMLTagPattern.FindAllStringSubmatchIndex(text, -1) {
+		closing := match[2] < match[3]
+		name := strings.ToLower(text[match[4]:match[5]])
+		if closing {
+			for pos := len(stack) - 1; pos >= 0; pos-- {
+				idx := stack[pos]
+				if tags[idx].name == name {
+					tags[idx].end = match[1]
+					stack = stack[:pos]
+					break
+				}
+			}
+			continue
+		}
+		parent := -1
+		if len(stack) > 0 {
+			parent = stack[len(stack)-1]
+		}
+		attrs := text[match[0]:match[1]]
+		idx := len(tags)
+		tags = append(tags, htmxHTMLTag{name: name, attrs: attrs, start: match[0], end: match[1], parent: parent})
+		if !void[name] && !strings.HasSuffix(strings.TrimSpace(attrs[:len(attrs)-1]), "/") {
+			stack = append(stack, idx)
+		}
+	}
+	return tags
+}
+
+func hasHtmxAttribute(tag, name string) bool {
+	for _, attribute := range parseHtmxAttributes(tag) {
+		if strings.EqualFold(attribute.name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func disinheritsHtmxSelect(tag string) bool {
+	for _, attribute := range parseHtmxAttributes(tag) {
+		if !strings.EqualFold(attribute.name, "hx-disinherit") {
+			continue
+		}
+		for inherited := range strings.FieldsSeq(attribute.value) {
+			if inherited == "*" || inherited == "hx-select" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type htmxHTMLAttribute struct {
+	name  string
+	value string
+}
+
+func parseHtmxAttributes(tag string) []htmxHTMLAttribute {
+	var attributes []htmxHTMLAttribute
+	for len(tag) > 0 {
+		match := htmxAttribute.FindStringSubmatchIndex(tag)
+		if match == nil {
+			tag = tag[1:]
+			continue
+		}
+		attribute := htmxHTMLAttribute{name: tag[match[2]:match[3]]}
+		for _, group := range [][2]int{{match[4], match[5]}, {match[6], match[7]}, {match[8], match[9]}} {
+			if group[0] >= 0 {
+				attribute.value = tag[group[0]:group[1]]
+			}
+		}
+		attributes = append(attributes, attribute)
+		tag = tag[match[1]:]
+	}
+	return attributes
 }
 
 // elementByID returns the byte range of the element with the id, from its

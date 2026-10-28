@@ -221,3 +221,26 @@ func TestHtmxSwapTargetExcludesDependentFragment(t *testing.T) {
 `)
 	assert.Equal(t, []string{"web/templates/orders.html:15", "web/templates/orders.html:2"}, foundLines(NewHtmxSwapTargetExcludesDependentFragmentRule().AnalyzeFile(ctx)))
 }
+
+func TestHtmxSelectInheritedByDescendantRequest(t *testing.T) {
+	ctx := rulestest.TextFile(t, "web/templates/actions.html", `<div hx-get="/items" hx-select="#items" hx-target="this">
+  <button hx-post="/items/approve" hx-target="#result">Approve</button>
+  <button hx-get="/items/status" hx-target="#status">Refresh</button>
+</div>
+<div hx-get="/items" hx-select="#items" hx-disinherit="*" hx-target="this">
+  <button hx-post="/items/archive" hx-target="#result">Archive</button>
+</div>
+<div hx-get="/items" hx-select="#items" hx-target="this">
+  <button hx-post="/items/cancel" hx-select="#message" hx-target="#result">Cancel</button>
+</div>
+<div hx-get="/items" hx-select="#items" hx-target="this">
+  <button hx-post="/items/submit">Submit</button>
+</div>
+<section hx-get="/orders" hx-select="#orders" hx-target="this">
+  <button hx-delete="/orders/1" hx-target="#result">Delete</button>
+</section>
+<button hx-post="/outside" hx-target="#result">Outside</button>
+<div data-note="hx-select='#fake' hx-post='/fake' hx-target='#result'">Text</div>
+`)
+	assert.Equal(t, []string{"web/templates/actions.html:1", "web/templates/actions.html:14"}, foundLines(NewHtmxSelectInheritedByDescendantRequestRule().AnalyzeFile(ctx)))
+}
