@@ -1,11 +1,14 @@
 package errrules
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/aiseeq/glint/pkg/rules/security"
 )
 
 func analyzeGoSnippet(t *testing.T, rule *ErrorCauseDroppedRule, code string) []*core.Violation {
@@ -27,9 +30,8 @@ func TestErrorCauseDropped_Go(t *testing.T) {
 		expected int
 	}{
 		{
-			// The incident shape: the service knows why (duplicate key from the store),
-			// the API client reads "operation failed" and calls support.
-			name: "logged then fixed message to the HTTP client — flagged",
+			// The cause is in the server log and the client receives a fixed 5xx text.
+			name: "logged cause then fixed 5xx response — ok",
 			code: `package h
 import ("net/http"; "log")
 func complete(w http.ResponseWriter, r *http.Request) {
@@ -39,7 +41,7 @@ func complete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 }`,
-			expected: 1,
+			expected: 0,
 		},
 		{
 			name: "fresh errors.New replaces the cause in the chain — flagged",
@@ -67,7 +69,7 @@ func (s *Svc) Load() error {
 			expected: 1,
 		},
 		{
-			name: "project helper with a literal and no cause — flagged",
+			name: "project helper with logged cause and fixed 5xx text — ok",
 			code: `package h
 func handle(w http.ResponseWriter, req *http.Request) {
 	if err := do(); err != nil {
@@ -76,7 +78,7 @@ func handle(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 }`,
-			expected: 1,
+			expected: 0,
 		},
 		{
 			name: "cause wrapped with %w — ok",
@@ -253,6 +255,44 @@ func (s *Svc) Load() error {
 			assert.Len(t, violations, tt.expected, "code:\n%s", tt.code)
 		})
 	}
+}
+
+func TestErrorCauseDropped5xxLogged(t *testing.T) {
+	code := `package h
+import (
+	"log/slog"
+	"net/http"
+	"os"
+)
+type Handler struct{ path string }
+func (h *Handler) page(w http.ResponseWriter, r *http.Request) {
+	data, err := os.ReadFile(h.path)
+	if err != nil {
+		slog.Error("read page", "err", err)
+		http.Error(w, "could not render the page", http.StatusInternalServerError)
+		return
+	}
+	w.Write(data)
+}`
+
+	rule := NewErrorCauseDroppedRule()
+	assert.Empty(t, analyzeGoSnippet(t, rule, code))
+	assert.Empty(t, analyzeSecurityRule(t, security.NewErrorDetailIn5xxResponseRule(), code))
+
+	withoutLog := strings.Replace(code, "\t\tslog.Error(\"read page\", \"err\", err)\n", "", 1)
+	assert.Len(t, analyzeGoSnippet(t, rule, withoutLog), 1)
+}
+
+func analyzeSecurityRule(t *testing.T, rule interface {
+	AnalyzeFile(*core.FileContext) []*core.Violation
+}, code string) []*core.Violation {
+	t.Helper()
+	ctx := core.NewFileContext("/src/handler.go", "/src", []byte(code), core.DefaultConfig())
+	parser := core.NewParser()
+	fset, astFile, err := parser.ParseGoFile("/src/handler.go", []byte(code))
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, astFile)
+	return rule.AnalyzeFile(ctx)
 }
 
 func TestErrorCauseDropped_GoSkipsTests(t *testing.T) {

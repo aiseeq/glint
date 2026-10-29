@@ -31,8 +31,9 @@ func init() {
 // TS:  catch (e) { console.error(e); toast.error('Не удалось сохранить') }
 //
 // Not flagged: the cause is wrapped or passed on (%w, err.Error(), `${e}`, rethrow,
-// return err), classified before the text is chosen (errors.Is/As, instanceof), or the
-// process stops with it (panic, os.Exit, log.Fatal).
+// return err), classified before the text is chosen (errors.Is/As, instanceof), a 5xx
+// response logs the cause as required by error-detail-in-5xx-response, or the process
+// stops with it (panic, os.Exit, log.Fatal).
 type ErrorCauseDroppedRule struct {
 	*rules.BaseRule
 	catchStart    *regexp.Regexp
@@ -110,6 +111,7 @@ func (r *ErrorCauseDroppedRule) droppedCauseEmission(body *ast.BlockStmt, errNam
 	}
 	var emission *ast.CallExpr
 	causeUsed := false
+	causeLogged := false
 	terminates := false
 
 	// A nested `if errors.Is(err, …)` chain classifies the cause: the walk below sees
@@ -121,7 +123,10 @@ func (r *ErrorCauseDroppedRule) droppedCauseEmission(body *ast.BlockStmt, errNam
 				terminates = true
 				return false
 			}
-			if helpers.IsLoggerCall(node) {
+			if isCauseLogCall(node) {
+				if nodeReadsIdent(node, errName) {
+					causeLogged = true
+				}
 				// The cause may be logged — that is not the caller seeing it.
 				return false
 			}
@@ -139,7 +144,55 @@ func (r *ErrorCauseDroppedRule) droppedCauseEmission(body *ast.BlockStmt, errNam
 	if emission == nil || causeUsed || terminates {
 		return nil
 	}
+	if causeLogged && emitsFixedMessage(emission) && isServerErrorResponse(emission) {
+		return nil
+	}
 	return emission
+}
+
+// isCauseLogCall also accepts With-style logger calls, which attach the error to
+// the logger context before the response is written.
+func isCauseLogCall(call *ast.CallExpr) bool {
+	if helpers.IsLoggerCall(call) {
+		return true
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !helpers.IsLoggerReceiver(sel.X) {
+		return false
+	}
+	return strings.HasPrefix(strings.ToLower(sel.Sel.Name), "with")
+}
+
+// isServerErrorResponse recognizes the fixed-text response forms handled by this
+// rule, restricted to explicit 5xx statuses or server-error responder names.
+func isServerErrorResponse(call *ast.CallExpr) bool {
+	if !isErrorResponder(call) {
+		return false
+	}
+	name := strings.ToLower(core.ExtractFullFunctionName(call))
+	if strings.Contains(name, "servererror") || strings.Contains(name, "internalservererror") {
+		return true
+	}
+	for _, arg := range call.Args {
+		switch a := arg.(type) {
+		case *ast.BasicLit:
+			if a.Kind == token.INT && len(a.Value) == 3 && a.Value[0] == '5' {
+				return true
+			}
+		case *ast.SelectorExpr:
+			if x, ok := a.X.(*ast.Ident); ok && x.Name == "http" && serverErrorStatus[a.Sel.Name] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var serverErrorStatus = map[string]bool{
+	"StatusInternalServerError": true, "StatusNotImplemented": true, "StatusBadGateway": true,
+	"StatusServiceUnavailable": true, "StatusGatewayTimeout": true, "StatusHTTPVersionNotSupported": true,
+	"StatusVariantAlsoNegotiates": true, "StatusInsufficientStorage": true, "StatusLoopDetected": true,
+	"StatusNotExtended": true, "StatusNetworkAuthenticationRequired": true,
 }
 
 // emitsFixedMessage reports whether the call produces an error or an error response
