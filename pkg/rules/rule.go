@@ -28,6 +28,14 @@ type GoProjectRule interface {
 	RequiresSSA() bool
 }
 
+// TypedGoProjectRule is a file rule that needs Go type information from the
+// shared project load while still analyzing files individually.
+type TypedGoProjectRule interface {
+	Rule
+	NeedsTypedGoProject(files []*core.FileContext) bool
+	TypedGoProjectImports() []string
+}
+
 // BaseRule provides common functionality for rules
 type BaseRule struct {
 	name            string
@@ -201,6 +209,14 @@ type ReadsOtherFiles interface {
 type ProjectFilesRule interface {
 	StatefulRule
 	UseProjectFiles(files []*core.FileContext)
+}
+
+// CachedProjectFilesRule lets a project-files rule persist its root index with
+// the cached project findings.
+type CachedProjectFilesRule interface {
+	ProjectFilesRule
+	CacheProjectFiles() ([]byte, error)
+	RestoreProjectFiles(data []byte) error
 }
 
 // ExternalToolRule is a rule that runs a program glint does not ship

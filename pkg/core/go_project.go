@@ -596,6 +596,7 @@ func attachLoadedGoPackages(project *GoProjectContext, loaded []*packages.Packag
 			compiled[path] = true
 			if fileCtx, analyzed := project.filesByPath[path]; analyzed {
 				fileCtx.SetGoAST(project.FileSet, result.file)
+				fileCtx.GoTypesInfo = pkg.TypesInfo
 				pkgCtx.Files = append(pkgCtx.Files, fileCtx)
 			}
 		}

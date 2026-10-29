@@ -25,7 +25,7 @@ import (
 )
 
 // cacheFormat changes whenever the stored layout does.
-const cacheFormat = "glint-results-3"
+const cacheFormat = "glint-results-4"
 
 // resultCache keeps the findings of file-local rules (rules.FileLocal) per
 // file of one project root between runs. A file whose content is unchanged
@@ -65,6 +65,7 @@ type projectEntry struct {
 	Rules      []string
 	Violations []core.Violation
 	Skipped    []core.SkippedPackage
+	RuleState  map[string][]byte
 }
 
 type cacheEntry struct {
@@ -226,7 +227,7 @@ func (c *resultCache) keyProject(inputs string, projectRules []string) *projectE
 }
 
 // storeProject records the project findings of this run's load.
-func (c *resultCache) storeProject(found core.ViolationList, skipped []core.SkippedPackage) {
+func (c *resultCache) storeProject(found core.ViolationList, skipped []core.SkippedPackage, ruleState map[string][]byte) {
 	if !c.projectKeyed {
 		return
 	}
@@ -235,6 +236,7 @@ func (c *resultCache) storeProject(found core.ViolationList, skipped []core.Skip
 		Rules:      c.projectRules,
 		Violations: found.Values(),
 		Skipped:    append([]core.SkippedPackage(nil), skipped...),
+		RuleState:  ruleState,
 	}
 }
 

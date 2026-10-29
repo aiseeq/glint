@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/frontendrules"
 )
 
 // countingRule reports one finding per file and counts how often it runs.
@@ -259,6 +261,111 @@ func TestProjectCacheSkipsTheLoadWhileGoInputsAreUnchanged(t *testing.T) {
 	assert.NotNil(t, third.project)
 	assert.Equal(t, 2, rule.projectCalls, "a Go edit outside the analyzed files still reloads")
 }
+
+func TestTypedProjectLoadIsRequiredOnlyForAnalyzedFrontendFiles(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	goRoot := t.TempDir()
+	writeModuleFile(t, goRoot, "go.mod", "module example.com/check\n\ngo 1.24\n")
+	writeModuleFile(t, goRoot, "check.go", "package svc\n\nfunc Value() int { return 1 }\n")
+	typedRule := &typedProjectStubRule{BaseRule: rules.NewBaseRule("typed-project-stub", "patterns", "test typed project rule", core.SeverityMedium)}
+	list := []rules.Rule{typedRule}
+
+	first, _ := analyzeCachedRoot(t, goRoot, list)
+	assert.Nil(t, first.project)
+	assert.Empty(t, first.enabledRules, "a Go-only root omits the typed file rule")
+	second, _ := analyzeCachedRoot(t, goRoot, list)
+	assert.Nil(t, second.project, "a Go-only root does not load a typed project")
+	assert.Equal(t, []bool{false, false}, typedRule.requirements)
+
+	frontendOnlyRoot := t.TempDir()
+	writeModuleFile(t, frontendOnlyRoot, "go.mod", "module example.com/frontendonly\n\ngo 1.24\n")
+	writeModuleFile(t, frontendOnlyRoot, "check.go", "package frontendonly\n\nfunc Value() int { return 1 }\n")
+	writeModuleFile(t, frontendOnlyRoot, "app.ts", "export const value = 1\n")
+	frontendOnlyRule := &typedProjectStubRule{BaseRule: rules.NewBaseRule("typed-project-stub", "patterns", "test typed project rule", core.SeverityMedium)}
+	firstFrontendOnly, _ := analyzeCachedRoot(t, frontendOnlyRoot, []rules.Rule{frontendOnlyRule})
+	assert.Nil(t, firstFrontendOnly.project)
+	assert.Empty(t, firstFrontendOnly.enabledRules, "TypeScript without mux omits the typed file rule")
+	secondFrontendOnly, _ := analyzeCachedRoot(t, frontendOnlyRoot, []rules.Rule{frontendOnlyRule})
+	assert.Nil(t, secondFrontendOnly.project, "TypeScript without mux does not force a typed load")
+	assert.Equal(t, []bool{false, false}, frontendOnlyRule.requirements)
+
+	tsRoot := t.TempDir()
+	writeModuleFile(t, tsRoot, "go.mod", "module example.com/typed\n\ngo 1.24\n\nrequire github.com/gorilla/mux v1.8.1\n")
+	writeModuleFile(t, tsRoot, "vendor/modules.txt", "# github.com/gorilla/mux v1.8.1\n## explicit; go 1.24\ngithub.com/gorilla/mux\n")
+	writeModuleFile(t, tsRoot, "vendor/github.com/gorilla/mux/mux.go", "package mux\ntype Router struct{}\nfunc (*Router) HandleFunc(string, any) {}\n")
+	writeModuleFile(t, tsRoot, "router.go", "package typed\nimport \"github.com/gorilla/mux\"\nvar router *mux.Router\nfunc init() { router.HandleFunc(\"/api/known\", nil) }\n")
+	writeModuleFile(t, tsRoot, "app.ts", "fetch('/api/missing')\n")
+	tsRule := &typedProjectStubRule{BaseRule: rules.NewBaseRule("typed-project-stub", "patterns", "test typed project rule", core.SeverityMedium)}
+	tsList := []rules.Rule{tsRule}
+	tsFirst, _ := analyzeCachedRoot(t, tsRoot, tsList)
+	require.NotNil(t, tsFirst.project)
+	assert.Equal(t, []rules.Rule{tsRule}, tsFirst.enabledRules)
+	tsSecond, _ := analyzeCachedRoot(t, tsRoot, tsList)
+	assert.Nil(t, tsSecond.project, "a root with analyzed TypeScript reuses its typed findings")
+	assert.Equal(t, []bool{true, true}, tsRule.requirements)
+	assert.Equal(t, "reused", tsSecond.cache.projectState())
+}
+
+func TestTSPathRoutesAreCachedAndInvalidatedByGoInputs(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	writeModuleFile(t, root, "go.mod", "module example.com/routes\n\ngo 1.24\n\nrequire github.com/gorilla/mux v1.8.1\n")
+	writeModuleFile(t, root, "vendor/modules.txt", "# github.com/gorilla/mux v1.8.1\n## explicit; go 1.24\ngithub.com/gorilla/mux\n")
+	writeModuleFile(t, root, "vendor/github.com/gorilla/mux/mux.go", "package mux\ntype Router struct{}\nfunc (*Router) HandleFunc(string, any) {}\n")
+	writeModuleFile(t, root, "backend/routes.go", "package backend\nimport \"github.com/gorilla/mux\"\nfunc Register(router *mux.Router) { router.HandleFunc(\"/api/known\", nil) }\n")
+	writeModuleFile(t, root, "frontend/api.ts", "fetch('/api/known')\nfetch('/api/missing')\n")
+	rule := frontendrules.NewTSPathNotRoutedRule()
+	list := []rules.Rule{rule}
+
+	first, firstFindings := analyzeCachedRoot(t, root, list)
+	require.NotNil(t, first.project)
+	assert.Len(t, firstFindings, 1)
+	assert.Equal(t, "No backend route for /api/missing", firstFindings[0].Message)
+	state, err := rule.CacheProjectFiles()
+	require.NoError(t, err)
+	assert.Contains(t, string(state), "/api/known", "cached route paths survive serialization")
+
+	second, secondFindings := analyzeCachedRoot(t, root, list)
+	assert.Nil(t, second.project, "cached routes avoid a typed load")
+	assert.Equal(t, fingerprint(firstFindings), fingerprint(secondFindings))
+	assert.Equal(t, "reused", second.cache.projectState())
+
+	writeModuleFile(t, root, "backend/routes.go", "package backend\nimport \"github.com/gorilla/mux\"\nfunc Register(router *mux.Router) { router.HandleFunc(\"/api/known\", nil); router.HandleFunc(\"/api/missing\", nil) }\n")
+	third, thirdFindings := analyzeCachedRoot(t, root, list)
+	assert.NotNil(t, third.project, "a Go route edit invalidates the route cache")
+	assert.Empty(t, thirdFindings)
+}
+
+type typedProjectStubRule struct {
+	*rules.BaseRule
+	requirements []bool
+}
+
+func (r *typedProjectStubRule) NeedsTypedGoProject(files []*core.FileContext) bool {
+	needed := false
+	for _, file := range files {
+		if file.IsGoFile() && slices.Contains(file.GoImports, "github.com/gorilla/mux") {
+			needed = needed || frontendFilesPresent(files)
+		}
+	}
+	r.requirements = append(r.requirements, needed)
+	return needed
+}
+
+func (r *typedProjectStubRule) TypedGoProjectImports() []string {
+	return []string{"github.com/gorilla/mux"}
+}
+
+func frontendFilesPresent(files []*core.FileContext) bool {
+	for _, file := range files {
+		if file.IsTypeScriptFile() || file.IsJavaScriptFile() {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *typedProjectStubRule) AnalyzeFile(*core.FileContext) []*core.Violation { return nil }
 
 // The project findings are those of the project rules that ran: a run with
 // another rule selection (--rule) loads the project and runs its own rules

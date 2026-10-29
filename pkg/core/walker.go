@@ -1,23 +1,29 @@
 package core
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
 
 // Walker traverses files in a project
 type Walker struct {
-	projectRoot string
-	config      *Config
-	parser      *Parser
-	parseGo     bool
+	projectRoot    string
+	config         *Config
+	parser         *Parser
+	parseGo        bool
+	parseGoImports bool
+	goImportPaths  []string
 	// gitignore строится в начале каждого обхода (settings.respect_gitignore);
 	// nil — учёт .gitignore выключен. Заполняется и читается только в
 	// goroutine обнаружения файлов, лока не требует.
@@ -84,6 +90,19 @@ func (w *Walker) ExcludedInstruction(path string) bool {
 // WithGoParsing controls whether the walker parses Go files into ASTs.
 func (w *Walker) WithGoParsing(enabled bool) *Walker {
 	w.parseGo = enabled
+	return w
+}
+
+// WithGoImports collects import paths without parsing Go syntax trees.
+func (w *Walker) WithGoImports(enabled bool) *Walker {
+	w.parseGoImports = enabled
+	return w
+}
+
+// WithGoImportPaths parses only Go imports whose paths are listed here.
+func (w *Walker) WithGoImportPaths(paths []string) *Walker {
+	w.goImportPaths = slices.Clone(paths)
+	w.parseGoImports = len(paths) > 0
 	return w
 }
 
@@ -342,7 +361,28 @@ func (w *Walker) processFile(path string) (*FileContext, error) {
 		return nil, err
 	}
 
-	if !ctx.IsGoFile() || !w.parseGo {
+	if !ctx.IsGoFile() {
+		return ctx, nil
+	}
+	if !w.parseGo {
+		if w.parseGoImports {
+			if len(w.goImportPaths) > 0 && !containsAny(content, w.goImportPaths) {
+				return ctx, nil
+			}
+			file, err := parser.ParseFile(token.NewFileSet(), path, content, parser.ImportsOnly)
+			if err != nil {
+				return nil, fmt.Errorf("parse Go imports in %s: %w", path, err)
+			}
+			for _, imp := range file.Imports {
+				importPath, err := strconv.Unquote(imp.Path.Value)
+				if err != nil {
+					return nil, fmt.Errorf("parse Go import path in %s: %w", path, err)
+				}
+				if len(w.goImportPaths) == 0 || slices.Contains(w.goImportPaths, importPath) {
+					ctx.GoImports = append(ctx.GoImports, importPath)
+				}
+			}
+		}
 		return ctx, nil
 	}
 	fset, astFile, err := w.parser.ParseGoFile(path, content)
@@ -356,6 +396,15 @@ func (w *Walker) processFile(path string) (*FileContext, error) {
 		return ctx, nil
 	}
 	return ctx, fmt.Errorf("parse Go file %q: %w", path, err)
+}
+
+func containsAny(content []byte, paths []string) bool {
+	for _, path := range paths {
+		if bytes.Contains(content, []byte(path)) {
+			return true
+		}
+	}
+	return false
 }
 
 // shouldSkipDir reports whether a directory is not descended into at all. The

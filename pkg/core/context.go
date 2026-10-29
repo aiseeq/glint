@@ -6,6 +6,7 @@ import (
 	"go/build"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	pathpkg "path"
 	"path/filepath"
@@ -27,10 +28,11 @@ type FileContext struct {
 	Lines   []string // Lines for positional access
 
 	// Go-specific (nil for non-Go files)
-	GoAST     *ast.File
-	GoFileSet *token.FileSet
-	GoPackage string
-	GoImports []string
+	GoAST       *ast.File
+	GoFileSet   *token.FileSet
+	GoPackage   string
+	GoTypesInfo *types.Info
+	GoImports   []string
 
 	// Configuration
 	Config *Config
