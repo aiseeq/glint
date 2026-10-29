@@ -26,5 +26,5 @@
 ## Журнал
 - 2026-10-28 12:02 открыт — glint-master
 - 2026-10-28 12:02 в работе — glint-master
-- 2026-10-28 12:11 note — glint-master: bad83f1: допущение countsIntoResult на namedResults/returnsIdent; тесты красный→зелёный (+отрицательный с локальным счётчиком). graft consumers -r silent-error-handling: 22 проекта, снята 1 находка (та самая), прочих разниц нет. graft all зелёный, установлено v1.83.7-56-gbad83f1, агенту потребителя сообщено.
+- 2026-10-28 12:11 note — glint-master: d02b12d: допущение countsIntoResult на namedResults/returnsIdent; тесты красный→зелёный (+отрицательный с локальным счётчиком). graft consumers -r silent-error-handling: 22 проекта, снята 1 находка (та самая), прочих разниц нет. graft all зелёный, установлено v1.83.7-56-gbad83f1, агенту потребителя сообщено.
 - 2026-10-28 12:11 на проверке — glint-master — проверка: агент потребителя закрывает свой тикет через tk done (glint на файле — 0)
