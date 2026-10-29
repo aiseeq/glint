@@ -56,3 +56,18 @@ const endpoint = '/rates'`
 export const VALUES = []`
 	assert.Empty(t, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/view.test.ts", test))
 }
+
+// A copy of a data file made at run time names the file, not a declaration
+// whose source of truth lives elsewhere.
+func TestMirrorCommentCopyDataFileCopy(t *testing.T) {
+	source := `// workerEnv builds the environment: the agent signs in by a copy of its key,
+// the other one — по копии auth.json в своём каталоге данных.
+func workerEnv() {}
+
+// Pick — копия auth.json без refresh_token.
+func Pick(b []byte) []byte { return b }`
+	assert.Empty(t, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/worker.go", source))
+	code := `// Limits — копия limits.Values из бэкенда.
+func Limits() []int { return nil }`
+	assert.Equal(t, []string{"src/limits.go:2"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/limits.go", code))
+}

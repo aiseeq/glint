@@ -24,6 +24,10 @@ func NewMirrorCommentCopyRule() *MirrorCommentCopyRule {
 var mirrorPhrase = regexp.MustCompile(`(?i:\bmirrors?\s+(?:of\s+)?(?:(?:the|a|an)\s+)?(?:backend|back-end|server)\b|\bmirrors?\s+(?:of\s+)?[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bkeep\s+in\s+sync\s+with\s+(?:(?:the|a|an)\s+)?(?:backend|back-end|server)\b|\bkeep\s+in\s+sync\s+with\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bmust\s+match\s+(?:(?:the|a|an)\s+)?(?:backend|back-end|server)\b|\bmust\s+match\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bsame\s+as\s+(?:(?:the|a|an)\s+)?(?:backend|back-end|server)\b|\bsame\s+as\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bcopy\s+of\s+(?:(?:the|a|an)\s+)?(?:backend|back-end|server)\b|\bcopy\s+of\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bcopy\s+of\s+Go\s+(?:code|function|constant|type|value)\b|держать\s+в\s+синхроне\s+(?:backend|server|бэкенд|сервер)|зеркал[\pL]*\s+(?:backend|back-end|server|Go|бэкенд|сервер)|зеркал[\pL]*\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|копи[яиюей]\s+(?:backend|server|бэкенд|сервер)|копи[яиюей]\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|дублиру[\pL]*\s+(?:backend|back-end|server|Go|бэкенд|сервер)|дублиру[\pL]*\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)`)
 var mirrorCodeSource = regexp.MustCompile(`(?i:\b(?:backend|back-end|server|сервер|бэкенд|бэкэнд|go)\b|\b[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\b|\b(?:src|pkg|internal|models|constants)/[\w./-]+)`)
 var mirrorLiteralInitializer = regexp.MustCompile(`(?s)^\s*(?:['"\x60][^'"\x60]*['"\x60]|-?\d+(?:\.\d+)?|true|false|null|\[[\s\w$:'"\x60,.-]*\]|\{[\s\w$:'"\x60,.-]*\})\s*;?\s*$`)
+
+// mirrorDataFile is a data file name (auth.json, config.yaml): a copy of it
+// is made at run time and names no declaration of another source.
+var mirrorDataFile = regexp.MustCompile(`(?i)\b[\w$-]+\.(?:json|jsonl|ya?ml|toml|env|txt|csv|ini|conf|cfg|log|pem|key|crt|xml|lock|db|sqlite)\b`)
 var mirrorExplanatory = regexp.MustCompile(`(?i)returns?\s+(?:a\s+)?copy\s+of\b|backup\s+mirrors?\b|mirror\s+of\s+what\b|reported\s+as\s+(?:a\s+)?copy\s+of\b`)
 
 var mirrorVariableDecl = regexp.MustCompile(`^(?:(?:export|default|declare)\s+)*(?:const|let|var)\b|^(?:var|const)\s+[A-Za-z_][A-Za-z0-9_]*\b`)
@@ -65,7 +69,7 @@ func (r *MirrorCommentCopyRule) AnalyzeFile(c *core.FileContext) []*core.Violati
 			}
 			start--
 		}
-		comment := strings.Join(c.Lines[start:i], " ")
+		comment := mirrorDataFile.ReplaceAllString(strings.Join(c.Lines[start:i], " "), "file")
 		if mirrorExplanatory.MatchString(comment) || !mirrorPhrase.MatchString(comment) {
 			continue
 		}
