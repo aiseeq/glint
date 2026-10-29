@@ -32,12 +32,14 @@ func init() { rules.Register(NewFieldNilCheckInconsistentRule()) }
 // checked.
 type FieldNilCheckInconsistentRule struct{ *rules.BaseRule }
 
-// NewFieldNilCheckInconsistentRule creates the field nil check rule.
+// NewFieldNilCheckInconsistentRule creates the field nil check rule. Medium:
+// a field set by construction on every path that reaches the dereference is
+// an invariant the rule does not see, so a finding asks for a look, not a stop.
 func NewFieldNilCheckInconsistentRule() *FieldNilCheckInconsistentRule {
 	return &FieldNilCheckInconsistentRule{BaseRule: rules.NewBaseRule(
 		"field-nil-check-inconsistent", "patterns",
 		"Detects a receiver field checked for nil in one method and dereferenced without a nil check in another",
-		core.SeverityHigh,
+		core.SeverityMedium,
 	)}
 }
 
