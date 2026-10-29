@@ -64,8 +64,8 @@ func TestMatchGlobPatternDoubleStar(t *testing.T) {
 		{"docs/**", "documentation/a.md", false},
 	}
 	for _, tc := range cases {
-		assert.Equal(t, tc.want, matchGlobPattern(tc.pattern, tc.path),
-			"matchGlobPattern(%q, %q)", tc.pattern, tc.path)
+		assert.Equal(t, tc.want, MatchGlob(tc.pattern, tc.path),
+			"MatchGlob(%q, %q)", tc.pattern, tc.path)
 	}
 }
 

@@ -1,6 +1,7 @@
 # SQL: таблица понятия читается вне владельца (R2)
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Вход
 - Проблема:
@@ -19,3 +20,7 @@
 
 ## Журнал
 - 2026-10-29 11:28 открыт — glint-master
+- 2026-10-29 14:24 в работе — glint-master
+- 2026-10-29 14:24 note — glint-master: Боец 1029-1424-sql-concept-owner (luna, escalate terra), бриф brief-sql-concept-owner.md, приёмка accept-sql-concept-owner.sh (гейт, 6 обязательных тестов, go test, self-check 0).
+- 2026-10-29 14:42 note — glint-master: Боец сдал (приёмка ok). Проба на копии потребителя с двумя понятиями: 1 находка в dev-утилите cmd/ — ожидаемая (исключить cmd/** настройкой), LEFT JOIN ради колонки — не находка. Раунд 1: glob ядра (filepath.Match не понимает **), where по всему запросу через Conjuncts (убрать whereConjuncts и фолбек-строку), формат настройки categories.patterns.rules. review-sql-concept-owner-1.md.
+- 2026-10-29 15:44 note — glint-master: Раунд 1 принят: проба на копии потребителя с владельцем cmd/** — 0 находок. Влито ab43475; мастер убрал алиас matchGlobPattern (единая core.MatchGlob).

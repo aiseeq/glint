@@ -209,7 +209,7 @@ func declaresFunction(files []string, name string, functions func(path string) (
 
 // NamesFile reports whether the exception's file or files names the path.
 func (e Exception) NamesFile(path string) bool {
-	if e.Files != "" && !matchGlobPattern(e.Files, path) {
+	if e.Files != "" && !MatchGlob(e.Files, path) {
 		return false
 	}
 	return e.File == "" || e.File == path || e.File == filepath.Base(path)
@@ -732,7 +732,7 @@ func (c *Config) FileException(category, rule, filePath string) (Exception, bool
 		if !exc.IsFileOnly() {
 			continue
 		}
-		if exc.Files != "" && matchGlobPattern(exc.Files, filePath) {
+		if exc.Files != "" && MatchGlob(exc.Files, filePath) {
 			return exc, true
 		}
 		if exc.File != "" && (exc.File == filePath || exc.File == filepath.Base(filePath)) {
@@ -809,7 +809,7 @@ func (e Exception) matchesViolation(filePath string, violation *Violation) bool 
 	if e.File != "" && e.File != filePath && e.File != filepath.Base(filePath) {
 		return false
 	}
-	if e.Files != "" && !matchGlobPattern(e.Files, filePath) {
+	if e.Files != "" && !MatchGlob(e.Files, filePath) {
 		return false
 	}
 	if e.Line > 0 && e.Line != violation.Line {
@@ -863,10 +863,6 @@ func ValidateGlobPattern(pattern string) bool {
 	return doublestar.ValidatePattern(pattern)
 }
 
-func matchGlobPattern(pattern, path string) bool {
-	return MatchGlob(pattern, path)
-}
-
 // globMatches reports whether a well-formed pattern matches. Malformed
 // patterns never reach here: Config.Validate rejects the configuration that
 // declares them.
@@ -881,7 +877,7 @@ func globMatches(pattern, path string) bool {
 func (c *Config) ExcludesDirectoryOf(path string) bool {
 	path = c.configPath(path)
 	for _, pattern := range c.Settings.Exclude {
-		if strings.Contains(pattern, "/") && matchGlobPattern(pattern, path) {
+		if strings.Contains(pattern, "/") && MatchGlob(pattern, path) {
 			return true
 		}
 	}
@@ -892,7 +888,7 @@ func (c *Config) ExcludesDirectoryOf(path string) bool {
 func (c *Config) ShouldExclude(path string) bool {
 	path = c.configPath(path)
 	for _, pattern := range c.Settings.Exclude {
-		if matchGlobPattern(pattern, path) {
+		if MatchGlob(pattern, path) {
 			return true
 		}
 	}
