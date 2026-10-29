@@ -23,3 +23,5 @@
 - 2026-10-29 14:24 в работе — glint-master
 - 2026-10-29 14:24 note — glint-master: Боец 1029-1424-sql-value-sets (luna, escalate terra), бриф brief-sql-value-sets.md, приёмка accept-sql-value-sets.sh (гейт, 5 обязательных тестов, go test, self-check 0).
 - 2026-10-29 14:41 note — glint-master: Боец сдал (приёмка ok). Прогон по потребителям: потребитель В 2 (верные), потребитель Г 2 (1 верная; объединение отдельно обработанных случаев — ложная); потребитель А 0 — пропуск: наборы в CASE/FILTER не собираются. Плюс баг oneValueDifference без вложенности. Раунд 1: review-sql-value-sets-1.md.
+- 2026-10-29 15:48 note — glint-master: Раунды 1-2 приняты, влито 4f7c0f2: по потребителям 5 находок, все верные (В 2, Г 1, А 2).
+- 2026-10-29 15:51 note — glint-master: graft all rc=0, self-check 0. Прогон трёх правил по потребителям бинарём main: 10 находок у 4 потребителей, все верные (scratchpad consumer-findings.tsv); R2 без настройки — 0. Дальше install и письма агентам.

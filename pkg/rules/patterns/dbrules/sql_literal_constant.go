@@ -231,7 +231,7 @@ func predicateEquivalentNorms(norm string) []string {
 		return []string{norm}
 	}
 	list := lists[0]
-	if !list.Negated && !(list.Operator == "IN" && len(list.Values) == 1) {
+	if !list.Negated && (list.Operator != "IN" || len(list.Values) != 1) {
 		return []string{norm}
 	}
 	operator := "="
