@@ -205,8 +205,10 @@ func (s *Schema) check(refs *queryRefs) []Problem {
 	return problems
 }
 
-// checkColumn looks a column reference up: a qualified one in the source it
-// names, a bare one in every source when all of them are known.
+// checkColumn looks a column reference up: a qualified one in every source
+// bound under its qualifier (scopes are flattened, so one alias can name a
+// table in a CTE and the CTE outside it), a bare one in every source when all
+// of them are known.
 func (refs *queryRefs) checkColumn(ref *pgquery.ColumnRef) (Problem, bool) {
 	var names []string
 	for _, field := range ref.GetFields() {
@@ -229,6 +231,7 @@ func (refs *queryRefs) checkColumn(ref *pgquery.ColumnRef) (Problem, bool) {
 		return Problem{Kind: "unknown_column", Name: name, Table: refs.sources[0].table.Name, Offset: int(ref.GetLocation())}, true
 	case 2, 3:
 		qualifier, name := names[len(names)-2], names[len(names)-1]
+		var missing *Table
 		for _, src := range refs.sources {
 			if src.name != qualifier {
 				continue
@@ -236,7 +239,12 @@ func (refs *queryRefs) checkColumn(ref *pgquery.ColumnRef) (Problem, bool) {
 			if src.table == nil || src.table.Column(name) != nil {
 				return Problem{}, false
 			}
-			return Problem{Kind: "unknown_column", Name: name, Table: src.table.Name, Offset: int(ref.GetLocation())}, true
+			if missing == nil {
+				missing = src.table
+			}
+		}
+		if missing != nil {
+			return Problem{Kind: "unknown_column", Name: name, Table: missing.Name, Offset: int(ref.GetLocation())}, true
 		}
 	}
 	return Problem{}, false

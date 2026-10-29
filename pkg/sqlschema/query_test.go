@@ -62,6 +62,9 @@ func TestCheckQueryUnknownColumnsAndTables(t *testing.T) {
 		{"SELECT id FROM pg_catalog.pg_tables", nil},
 		{"SELECT table_name FROM information_schema.columns WHERE table_name = $1", nil},
 		{"SELECT id FROM accounts WHERE id IN (SELECT account_id FROM positions WHERE amount > 0)", nil},
+		// One alias bound in two scopes: a table inside a CTE, the CTE outside it.
+		{"WITH marks AS (SELECT a.id AS position_id, o.status FROM accounts o JOIN accounts a ON a.id = o.id), joined AS (SELECT p.id, o.status FROM positions p LEFT JOIN marks o ON o.position_id = p.id) SELECT id, status FROM joined", nil},
+		{"WITH marks AS (SELECT o.id FROM accounts o) SELECT o.plan_id FROM accounts o JOIN marks m ON m.id = o.id", []string{"unknown_column:plan_id"}},
 		// FOR UPDATE OF names an alias; migration tools keep their own table.
 		{"SELECT b.id FROM accounts b JOIN positions p ON p.account_id = b.id WHERE b.id = $1 FOR UPDATE OF b, p", nil},
 		{"SELECT version, dirty FROM schema_migrations LIMIT 1", nil},
