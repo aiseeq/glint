@@ -243,7 +243,9 @@ func fieldNilStartsWithNilReceiverExit(method fieldNilMethod, recvName string) b
 	}
 	left, leftOK := ast.Unparen(bin.X).(*ast.Ident)
 	right, rightOK := ast.Unparen(bin.Y).(*ast.Ident)
-	if !(leftOK && left.Name == recvName && rightOK && right.Name == "nil" || rightOK && right.Name == recvName && leftOK && left.Name == "nil") {
+	recvIsNil := leftOK && rightOK &&
+		(left.Name == recvName && right.Name == "nil" || right.Name == recvName && left.Name == "nil")
+	if !recvIsNil {
 		return false
 	}
 	if stmt.Else != nil || !fieldNilBranchTerminates(stmt.Body) {
@@ -302,7 +304,7 @@ func fieldNilBoolGuardMethods(methods []fieldNilMethod, field *types.Var) map[*t
 			if fieldNilIsFalse(ret.Results[0]) {
 				return true
 			}
-			if !fieldNilBoolExprEnsuresNonNil(method, ret.Results[0], field) && !(falseGuard && !fieldNilIsFalse(ret.Results[0])) {
+			if !falseGuard && !fieldNilBoolExprEnsuresNonNil(method, ret.Results[0], field) {
 				valid = false
 				return false
 			}
