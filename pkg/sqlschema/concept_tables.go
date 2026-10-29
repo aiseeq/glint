@@ -15,6 +15,7 @@ type TableRead struct {
 	Table       string
 	Alias       string
 	Offset      int
+	ScopeOffset int
 	OuterJoin   bool
 	NullChecked bool
 }
@@ -31,6 +32,7 @@ func ReadTables(sql string) []TableRead {
 	var visitSelect func(*pgquery.SelectStmt, map[string]bool)
 	var visitNested func(protoreflect.Message, map[string]bool)
 	visitSelect = func(sel *pgquery.SelectStmt, inherited map[string]bool) {
+		scopeOffset := selectScopeOffset(sel.GetFromClause(), shift)
 		ctes := make(map[string]bool, len(inherited))
 		for name := range inherited {
 			ctes[name] = true
@@ -65,7 +67,7 @@ func ReadTables(sql string) []TableRead {
 					alias = strings.ToLower(rv.GetAlias().GetAliasname())
 				}
 				reads = append(reads, TableRead{
-					Table: tableName(rv), Alias: alias, Offset: max(0, int(rv.GetLocation())-shift),
+					Table: tableName(rv), Alias: alias, Offset: max(0, int(rv.GetLocation())-shift), ScopeOffset: scopeOffset,
 					OuterJoin: nullable, NullChecked: whereNullChecks(sel.GetWhereClause(), alias),
 				})
 			case node.GetJoinExpr() != nil:

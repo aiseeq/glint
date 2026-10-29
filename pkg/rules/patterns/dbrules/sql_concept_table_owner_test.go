@@ -183,3 +183,116 @@ func run() {
 }`)
 	assert.Len(t, rule.AnalyzeFile(ctx), 2)
 }
+
+func fragmentConceptOwner(t *testing.T) *SQLConceptTableOwnerRule {
+	t.Helper()
+	rule := NewSQLConceptTableOwnerRule()
+	require.NoError(t, rule.Configure(map[string]any{"concepts": []any{
+		map[string]any{"name": "transaction", "table": "transactions", "where": "type = 'deposit'", "files": []any{"owner.go"}},
+	}}))
+	return rule
+}
+
+func TestSQLConceptTableOwner_ConcatenatedConstant(t *testing.T) {
+	rule := fragmentConceptOwner(t)
+	ctx := rulestest.GoFile(t, "reader.go", `package sample
+const clause = " AND x"
+const Q3 = `+"`"+`SELECT (SELECT t.id FROM transactions t WHERE t.user_id = gc.claimed_by AND t.type = 'deposit'`+"`"+` + clause + `+"`"+` ) FROM gift_codes gc`+"`"+`
+`)
+	assert.Len(t, rule.AnalyzeFile(ctx), 1)
+}
+
+func TestSQLConceptTableOwner_CallArgument(t *testing.T) {
+	rule := fragmentConceptOwner(t)
+	ctx := rulestest.GoFile(t, "reader.go", `package sample
+import "context"
+const clause = " AND x"
+var Q7 = f(`+"`"+`SELECT t.id FROM transactions t WHERE t.user_id = $1 AND t.type = 'deposit'`+"`"+` + clause)
+func run(ctx context.Context) {
+ db.QueryContext(ctx, "SELECT id FROM transactions WHERE type = 'deposit'" + clause)
+}
+`)
+	assert.Len(t, rule.AnalyzeFile(ctx), 2)
+}
+
+func TestSQLConceptTableOwner_InList(t *testing.T) {
+	rule := fragmentConceptOwner(t)
+	ctx := rulestest.GoFile(t, "reader.go", `package sample
+const Q5 = `+"`"+`SELECT SUM(amount) FROM transactions WHERE type IN ('deposit') AND status = 'completed'`+"`"+`
+const Q6 = `+"`"+`SELECT SUM(amount) FROM transactions WHERE type NOT IN ('deposit')`+"`"+`
+`)
+	assert.Len(t, rule.AnalyzeFile(ctx), 1)
+}
+
+func TestSQLConceptTableOwner_AggregateFilter(t *testing.T) {
+	rule := fragmentConceptOwner(t)
+	ctx := rulestest.GoFile(t, "reader.go", `package sample
+const Q6 = `+"`"+`SELECT SUM(amount) FILTER (WHERE type = 'deposit') FROM transactions`+"`"+`
+`)
+	assert.Len(t, rule.AnalyzeFile(ctx), 1)
+}
+
+func TestSQLConceptTableOwner_PredicateScope(t *testing.T) {
+	rule := fragmentConceptOwner(t)
+	ctx := rulestest.GoFile(t, "reader.go", `package sample
+const query = `+"`"+`WITH deposited AS (SELECT user_id FROM transactions WHERE type IN ('deposit')) SELECT id FROM transactions t WHERE t.user_id = `+"`"+` + membershipClause()
+`)
+	assert.Len(t, rule.AnalyzeFile(ctx), 1)
+}
+
+func TestSQLConceptTableOwner_FragmentsNegatives(t *testing.T) {
+	rule := fragmentConceptOwner(t)
+	ctx := rulestest.GoFile(t, "owner.go", `package sample
+const clause = " AND x"
+const Q3 = `+"`"+`SELECT (SELECT t.id FROM transactions t WHERE t.user_id = gc.claimed_by AND t.type = 'deposit'`+"`"+` + clause + `+"`"+` ) FROM gift_codes gc`+"`"+`
+const Q5 = `+"`"+`SELECT SUM(amount) FROM transactions WHERE type IN ('deposit') AND status = 'completed'`+"`"+`
+const Q6 = `+"`"+`SELECT SUM(amount) FILTER (WHERE type = 'deposit') FROM transactions`+"`"+`
+var Q9 = f(`+"`"+`SELECT id FROM transactions WHERE type = 'deposit'`+"`"+` + clause)
+func run() {
+ db.QueryContext(nil, "SELECT id FROM transactions WHERE type = 'deposit'" + clause)
+}
+const Q7 = `+"`"+`SELECT id FROM transactions WHERE type = 'bonus'`+"`"+`
+const Q8 = `+"`"+`SELECT id FROM transactions`+"`"+`
+`)
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+
+	outside := rulestest.GoFile(t, "reader.go", `package sample
+const Q7 = `+"`"+`SELECT id FROM transactions WHERE type = 'bonus'`+"`"+`
+const Q8 = `+"`"+`SELECT id FROM transactions`+"`"+`
+`)
+	assert.Empty(t, rule.AnalyzeFile(outside))
+}
+
+func TestSQLConceptTableOwner_RepositorySelect(t *testing.T) {
+	rule := fragmentConceptOwner(t)
+	ctx := rulestest.GoFile(t, "reader.go", `package sample
+import "context"
+type Repo struct{}
+func (r *Repo) q(context.Context) queryer { return nil }
+func (r *Repo) Links(ctx context.Context, userID string) {
+	_ = r.q(ctx).SelectContext(ctx, &userID, `+"`"+`
+		SELECT gc.id,
+			(SELECT t.id FROM transactions t
+			 WHERE t.user_id = gc.claimed_by AND t.type = 'deposit'`+"`"+`+clauses.Claim("t")+`+"`"+`
+			   AND t.created_at BETWEEN gc.claimed_at - $2::interval AND gc.claimed_at
+			 ORDER BY t.created_at LIMIT 1) AS claim_tx_id,
+			ARRAY(SELECT d.id::text FROM transactions h
+			      JOIN transactions d ON d.user_id = gc.claimed_by AND d.type = 'deposit'`+"`"+`+clauses.Claim("d")+`+"`"+`
+			      WHERE h.user_id = $3 AND h.type = 'transfer'
+			      ORDER BY d.created_at) AS top_up_ids
+		FROM gift_codes gc
+		WHERE gc.claimed_by = $1`+"`"+`, userID)
+}
+type queryer interface { SelectContext(context.Context, any, string, ...any) error }
+var clauses struct { Claim func(string) string }
+`)
+	assert.Len(t, rule.AnalyzeFile(ctx), 2)
+}
+
+func TestSQLConceptTableOwner_JoinOnCondition(t *testing.T) {
+	rule := fragmentConceptOwner(t)
+	ctx := rulestest.GoFile(t, "reader.go", `package sample
+const query = `+"`"+`SELECT d.id FROM transactions h JOIN transactions d ON d.type = 'deposit'`+"`"+`
+`)
+	assert.Len(t, rule.AnalyzeFile(ctx), 1)
+}

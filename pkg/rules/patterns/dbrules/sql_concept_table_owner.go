@@ -3,6 +3,7 @@ package dbrules
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -159,16 +160,32 @@ func (r *SQLConceptTableOwnerRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 	var violations []*core.Violation
 	reported := make(map[string]bool)
 	for _, literal := range patternkit.SqlLiterals(ctx.GoAST) {
-		conjuncts := sqlschema.Conjuncts(literal.Text)
-		for _, read := range sqlschema.ReadTables(literal.Text) {
-			for _, concept := range r.concepts {
+		sql := literal.Text
+		reads := sqlschema.ReadTables(sql)
+		if len(reads) == 0 && literal.Bare != "" {
+			sql = literal.Bare
+			reads = sqlschema.ReadTables(sql)
+		}
+		conjuncts := sqlschema.Conjuncts(sql)
+		inLists := sqlschema.InLists(sql)
+		for _, concept := range r.concepts {
+			conceptAliases := make(map[int]map[string]bool)
+			for _, sibling := range reads {
+				if conceptTableMatches(concept.table, sibling.Table) {
+					if conceptAliases[sibling.ScopeOffset] == nil {
+						conceptAliases[sibling.ScopeOffset] = make(map[string]bool)
+					}
+					conceptAliases[sibling.ScopeOffset][sibling.Alias] = true
+				}
+			}
+			for _, read := range reads {
 				if !conceptTableMatches(concept.table, read.Table) || isConceptOwner(ctx.RelPath, concept.files) {
 					continue
 				}
 				if read.OuterJoin && !read.NullChecked {
 					continue
 				}
-				if concept.where != "" && !hasConceptPredicate(conjuncts, concept.whereNorms) {
+				if concept.where != "" && !hasConceptPredicate(conjuncts, inLists, concept.whereNorms, read.ScopeOffset, read.Alias, conceptAliases[read.ScopeOffset]) {
 					continue
 				}
 				line := literal.LineAt(ctx, read.Offset)
@@ -204,11 +221,37 @@ func isConceptOwner(file string, globs []string) bool {
 	return false
 }
 
-func hasConceptPredicate(where []sqlschema.Conjunct, expected map[string]bool) bool {
+func hasConceptPredicate(where []sqlschema.Conjunct, inLists []sqlschema.InList, expected map[string]bool, scopeOffset int, readAlias string, conceptAliases map[string]bool) bool {
 	for _, conjunct := range where {
-		if expected[conjunct.Norm] {
+		if expected[conjunct.Norm] && (len(conceptAliases) <= 1 || conjunct.Alias == "" || strings.EqualFold(conjunct.Alias, readAlias)) {
 			return true
 		}
 	}
+	for norm := range expected {
+		column, value, ok := equalityPredicate(norm)
+		if !ok {
+			continue
+		}
+		for _, list := range inLists {
+			if list.ScopeOffset != scopeOffset || list.Negated || !strings.EqualFold(list.Column, column) {
+				continue
+			}
+			if slices.Contains(list.Values, value) {
+				return true
+			}
+		}
+	}
 	return false
+}
+
+func equalityPredicate(norm string) (string, string, bool) {
+	left, right, ok := strings.Cut(norm, " = ")
+	if !ok || !strings.HasPrefix(right, "'") || !strings.HasSuffix(right, "'") || len(right) < 2 {
+		return "", "", false
+	}
+	if dot := strings.LastIndex(left, "."); dot >= 0 {
+		left = left[dot+1:]
+	}
+	left = strings.Trim(left, `"`)
+	return left, strings.ReplaceAll(right[1:len(right)-1], "''", "'"), left != ""
 }
