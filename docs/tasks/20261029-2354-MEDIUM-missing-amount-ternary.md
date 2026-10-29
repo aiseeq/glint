@@ -11,7 +11,7 @@
 - Если не делать:
 
 ## Что сделать
-- missing-amount-coerced-to-zero пропускает ноль метрики через тернарник (`r ? r.redCount : 0`) и после парсера (`(num(x.unlockedPct) ?? 0)`, `parse(x.pct) ?? '0'`). Источник — потребитель (сообщение 29.10 23:53), формы до исправления.
+- missing-amount-coerced-to-zero пропускает ноль метрики через тернарник (`r ? r.failedCount : 0`) и после парсера (`(num(x.sharePct) ?? 0)`, `parse(x.pct) ?? '0'`). Источник — потребитель (сообщение 29.10 23:53), формы до исправления.
 - Бриф: /home/aisee/.cache/claude-tmp/claude-1000/-home-aisee-git-glint/24c34360-b66d-4f12-b9dd-7328b412e44a/scratchpad/brief-missing-amount-ternary.md
 
 ## Приёмка

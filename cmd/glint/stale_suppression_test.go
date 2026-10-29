@@ -336,3 +336,41 @@ func TestStaleSuppressionJudgesHashCommentMarkers(t *testing.T) {
 	assert.Empty(t, foundAt(findings))
 	assert.ElementsMatch(t, []string{"deploy.sh:3", "deploy.sh:8", ".github/workflows/ci.yml:2"}, foundAt(stale))
 }
+
+// A fresh worktree starts from the cache of the main worktree, whose entries
+// name the exceptions they used: the same exception of the worktree's own
+// configuration file is in use there too, though that file has another path.
+func TestStaleSuppressionSeesExceptionsThroughASeededCache(t *testing.T) {
+	module := func() string {
+		root := t.TempDir()
+		for name, content := range map[string]string{
+			"go.mod":  "module example.com/check\n\ngo 1.24\n",
+			"stub.go": "package check\n\n// MockClient answers fixed values.\ntype MockClient struct{}\n",
+			".glint.yaml": `version: 1
+categories:
+  patterns:
+    rules:
+      mock-identifier:
+        exceptions:
+          - files: "stub.go"
+            reason: the rule's own subject
+`,
+		} {
+			require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte(content), 0o644))
+		}
+		return root
+	}
+	main, worktree := module(), module()
+	dir := t.TempDir()
+	first, err := openResultCache(dir, main, "", "build", "stamp")
+	require.NoError(t, err)
+	_, want := analyzeWithRules(t, main, first, "mock-identifier", "stale-suppression")
+	require.NoError(t, first.save())
+	require.Empty(t, foundAt(want))
+
+	seeded, err := openResultCache(dir, worktree, main, "build", "stamp")
+	require.NoError(t, err)
+	_, got := analyzeWithRules(t, worktree, seeded, "mock-identifier", "stale-suppression")
+	assert.Empty(t, foundAt(got))
+	assert.Positive(t, seeded.reused)
+}

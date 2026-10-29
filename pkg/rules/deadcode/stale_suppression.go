@@ -167,7 +167,7 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 		exc := ruleException.Exception
 		_, ran := run.Executed[ruleException.Rule]
 		// Its own findings are filtered after this check, by the run.
-		if !ran || usedExceptions[exc.Key()] || ruleException.Rule == r.Name() {
+		if !ran || usedExceptions[run.Config.ExceptionKey(exc)] || ruleException.Rule == r.Name() {
 			continue
 		}
 		if (exc.File != "" || exc.Files != "") && !slices.ContainsFunc(files, exc.NamesFile) {

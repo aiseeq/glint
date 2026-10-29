@@ -759,10 +759,18 @@ func (c *Config) MatchingException(category, rule, filePath string, violation *V
 	return Exception{}, false
 }
 
-// Key identifies the exception by the configuration file and the line that
-// declare it.
-func (e Exception) Key() string {
-	return fmt.Sprintf("%s:%d", e.source, e.at)
+// ExceptionKey identifies an exception by the configuration file and the line
+// that declare it. A file under the directory of the configuration is named
+// relative to it: a worktree's copy of the file declares the same exception,
+// and the result cache it starts from names the main worktree's copy.
+func (c *Config) ExceptionKey(e Exception) string {
+	source := e.source
+	if c.path != "" {
+		if rel, err := filepath.Rel(filepath.Dir(c.path), source); err == nil && filepath.IsLocal(rel) {
+			source = rel
+		}
+	}
+	return fmt.Sprintf("%s:%d", source, e.at)
 }
 
 // Source and DeclaredAt are the configuration file and the line that declare

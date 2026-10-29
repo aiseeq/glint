@@ -1339,7 +1339,7 @@ func runRule(ctx *core.FileContext, rule rules.Rule, cfg *core.Config, overrides
 	if excepted {
 		// Markers in the file are not judged: drop the ones the rule consulted.
 		ctx.TakeSuppressionHits(rule.Name())
-		return fileExceptionSuppression(ctx.RelPath, rule, fileException, violations), nil
+		return fileExceptionSuppression(cfg, ctx.RelPath, rule, fileException, violations), nil
 	}
 
 	honorsSuppression := rules.HonorsSuppression(rule)
@@ -1370,18 +1370,18 @@ func exceptionSuppression(cfg *core.Config, rule rules.Rule, relPath string, vio
 	if !ok {
 		return nil
 	}
-	return core.NewSuppressionEntry(rule.Name(), rule.Category(), relPath, violation.Line, core.SuppressionExceptionPrefix+exc.Key())
+	return core.NewSuppressionEntry(rule.Name(), rule.Category(), relPath, violation.Line, core.SuppressionExceptionPrefix+cfg.ExceptionKey(exc))
 }
 
 // fileExceptionSuppression returns the suppression entry of a file a file-only
 // exception keeps the rule off, when the rule found anything there: the rule
 // runs on such a file only for stale-suppression to know whether the
 // exception silences something.
-func fileExceptionSuppression(relPath string, rule rules.Rule, exc core.Exception, violations []*core.Violation) core.ViolationList {
+func fileExceptionSuppression(cfg *core.Config, relPath string, rule rules.Rule, exc core.Exception, violations []*core.Violation) core.ViolationList {
 	if len(violations) == 0 {
 		return nil
 	}
-	return core.ViolationList{core.NewSuppressionEntry(rule.Name(), rule.Category(), relPath, violations[0].Line, core.SuppressionExceptionPrefix+exc.Key())}
+	return core.ViolationList{core.NewSuppressionEntry(rule.Name(), rule.Category(), relPath, violations[0].Line, core.SuppressionExceptionPrefix+cfg.ExceptionKey(exc))}
 }
 
 // inlineSuppressions turns the markers that silenced the rule's findings in
@@ -1531,7 +1531,7 @@ func analyzeGoProjectRules(contexts, rootFiles []*core.FileContext, enabledRules
 				continue
 			}
 			if exc, ok := cfg.FileException(rule.Category(), rule.Name(), fileCtx.RelPath); ok {
-				allViolations = append(allViolations, fileExceptionSuppression(fileCtx.RelPath, rule, exc, []*core.Violation{violation})...)
+				allViolations = append(allViolations, fileExceptionSuppression(cfg, fileCtx.RelPath, rule, exc, []*core.Violation{violation})...)
 				continue
 			}
 			if suppression := exceptionSuppression(cfg, rule, fileCtx.RelPath, violation); suppression != nil {
