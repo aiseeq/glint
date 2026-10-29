@@ -840,12 +840,12 @@ func exceptionFunctionMatches(name string, violation *Violation) bool {
 	return false
 }
 
-// matchGlobPattern matches a project-relative path against a glob pattern.
+// MatchGlob matches a project-relative path against a glob pattern.
 // `*` matches within one path segment, `**` spans segments; a pattern without
 // a separator also matches the file's base name, so that "*_test.go" keeps
 // covering nested test files. This is the single glob implementation — path
 // exclusion and rule exceptions must both go through it.
-func matchGlobPattern(pattern, path string) bool {
+func MatchGlob(pattern, path string) bool {
 	path = filepath.ToSlash(path)
 	if globMatches(pattern, path) {
 		return true
@@ -856,6 +856,15 @@ func matchGlobPattern(pattern, path string) bool {
 		return true
 	}
 	return globMatches(pattern, filepath.Base(path))
+}
+
+// ValidateGlobPattern reports whether pattern is a valid project path glob.
+func ValidateGlobPattern(pattern string) bool {
+	return doublestar.ValidatePattern(pattern)
+}
+
+func matchGlobPattern(pattern, path string) bool {
+	return MatchGlob(pattern, path)
 }
 
 // globMatches reports whether a well-formed pattern matches. Malformed
