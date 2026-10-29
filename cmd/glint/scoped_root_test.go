@@ -256,6 +256,48 @@ func Bearer(r *http.Request) string { return r.Header.Get("Authorization") }
 	}
 }
 
+func TestScopedTSPathNotRoutedUsesRoutesFromWholeRoot(t *testing.T) {
+	project := t.TempDir()
+	writeModuleFile(t, project, "go.mod", `module example.com/scoped
+go 1.24
+
+require github.com/gorilla/mux v1.8.1
+`)
+	writeModuleFile(t, project, ".glint.yaml", `version: 1
+`)
+	writeModuleFile(t, project, "vendor/modules.txt", "# github.com/gorilla/mux v1.8.1\n## explicit; go 1.24\ngithub.com/gorilla/mux\n")
+	writeModuleFile(t, project, "vendor/github.com/gorilla/mux/mux.go", "package mux\ntype Router struct{}\nfunc (*Router) HandleFunc(string, any) {}\n")
+	writeModuleFile(t, project, "backend/routes.go", `package backend
+
+import "github.com/gorilla/mux"
+
+func Routes(r *mux.Router) { r.HandleFunc("/api/exists", nil) }
+`)
+	writeModuleFile(t, project, "frontend/api.ts", `fetch('/api/missing')
+`)
+	withFlags(t, "", "ts-path-not-routed")
+	roots, err := analysisRoots([]string{filepath.Join(project, "frontend/api.ts")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, enabledRules, err := loadConfig(roots[0].dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := prepareScopedAnalysis(core.NewGoProjectLoader(), roots[0], cfg, enabledRules, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules.ResetState(enabledRules)
+	violations, _, err := analyzePrepared(prepared, enabledRules, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) != 1 || violations[0].File != "frontend/api.ts" {
+		t.Fatalf("got %v, want one finding in frontend/api.ts", violations)
+	}
+}
+
 // Repro from a real project: glint run on one package reported its exports
 // as unused, and the tests of another package using them were not in the run.
 // The project rules analyze the whole root; only the run's files are

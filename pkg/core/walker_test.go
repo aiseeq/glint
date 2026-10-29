@@ -55,6 +55,23 @@ func TestWalkerReportsGoParseError(t *testing.T) {
 	require.Len(t, errs, 1)
 }
 
+func TestWalkerIgnoresMalformedImportsOnlyFile(t *testing.T) {
+	root := t.TempDir()
+	source := `//go:build ignore
+
+package ignored
+
+import "github.com/gorilla/mux
+`
+	require.NoError(t, os.WriteFile(filepath.Join(root, "broken.go"), []byte(source), 0644))
+
+	contexts, errs := NewWalker(root, DefaultConfig()).WithGoParsing(false).
+		WithGoImportPaths([]string{"github.com/gorilla/mux"}).WalkSync()
+	require.Empty(t, errs)
+	require.Len(t, contexts, 1)
+	assert.Empty(t, contexts[0].GoImports)
+}
+
 func TestWalkerSkipsParseErrorOfFileExcludedByBuild(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := "//go:build ignore\n\npackage main\n\nfunc main() { {{ .Body }} }\n"

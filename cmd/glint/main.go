@@ -955,7 +955,7 @@ func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg 
 	}
 	// Дерево без Go-файлов (например, frontend): Go-project правилам нечего
 	// анализировать, а загрузка Go-контекста упала бы с "no packages found".
-	needProject := projectRuleCount > 0 && hasGoFiles(contexts)
+	needProject := projectRuleCount > 0 && hasGoFiles(prepared.rootFiles)
 	if useCache {
 		prepared.cache = openRootCache(projectRoot, root.walkScopes(), cfg, needProject)
 	}
@@ -970,7 +970,7 @@ func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg 
 		return prepared, nil
 	}
 	loaded := prepared.rootFiles
-	if len(prepared.rootFiles) > len(contexts) {
+	if len(prepared.rootFiles) > len(contexts) && hasGoFiles(contexts) {
 		if loaded, err = core.FilesOfRunModules(projectRoot, contexts, prepared.rootFiles, flagTolerant); err != nil {
 			return prepared, fmt.Errorf("find the Go modules of the run: %w", err)
 		}

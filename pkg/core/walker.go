@@ -370,13 +370,13 @@ func (w *Walker) processFile(path string) (*FileContext, error) {
 				return ctx, nil
 			}
 			file, err := parser.ParseFile(token.NewFileSet(), path, content, parser.ImportsOnly)
-			if err != nil {
-				return nil, fmt.Errorf("parse Go imports in %s: %w", path, err)
+			if err != nil { //nolint:silent-error-handling // Import parsing only gates typed loading; syntax rules still analyze the file.
+				return ctx, nil
 			}
 			for _, imp := range file.Imports {
 				importPath, err := strconv.Unquote(imp.Path.Value)
-				if err != nil {
-					return nil, fmt.Errorf("parse Go import path in %s: %w", path, err)
+				if err != nil { //nolint:silent-error-handling // An invalid import literal cannot be a loading hint.
+					continue
 				}
 				if len(w.goImportPaths) == 0 || slices.Contains(w.goImportPaths, importPath) {
 					ctx.GoImports = append(ctx.GoImports, importPath)
