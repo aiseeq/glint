@@ -200,6 +200,24 @@ func (f JsFlat) EnclosingFunction(pos int) (JsFunc, bool) {
 	return JsFunc{}, false
 }
 
+// InsideNamedFunction reports whether pos is inside the named enclosing function.
+func (f JsFlat) InsideNamedFunction(pos int, name string) bool {
+	for pos >= 0 {
+		fn, ok := f.EnclosingFunction(pos)
+		if !ok {
+			return false
+		}
+		if fn.Name == name {
+			return true
+		}
+		if fn.Start >= pos {
+			return false
+		}
+		pos = fn.Start
+	}
+	return false
+}
+
 // IfCondition returns the span of the condition of the "if (...)" header that
 // opens the block at brace.
 func (f JsFlat) IfCondition(brace int) (JsSpanRange, bool) {

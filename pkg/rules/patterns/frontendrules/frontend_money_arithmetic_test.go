@@ -190,7 +190,7 @@ func TestFrontendMoneyArithmetic_MathRounding(t *testing.T) {
 func TestFrontendMoneyArithmetic_MoneyVariableNotArithmetic(t *testing.T) {
 	files := map[string]string{
 		"frontend/types.ts": `interface Totals { valueUsd: MoneyDecimal; count: number }`,
-		"frontend/calc.ts":  "const amount = toNumber(t.valueUsd)\namount !== null\nformatAmount(amount)\nformatAmount(Math.round(amount))\nf.money0(Math.ceil(amount))\n'$' + amount\nconst n = toNumber(t.count)\nn - 1\n",
+		"frontend/calc.ts":  "const amount = toNumber(t.valueUsd)\namount !== null\nformatAmount(amount)\nf.money0(amount)\n'$' + amount\nconst n = toNumber(t.count)\nn - 1\n",
 	}
 	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
 }
@@ -247,7 +247,7 @@ func TestFrontendMoneyArithmetic_ComparisonScalingNotArithmetic(t *testing.T) {
 		"frontend/types.ts": `interface Totals { valueUsd: MoneyDecimal }`,
 		"frontend/calc.ts":  "if (Math.round(toNumber(t.valueUsd) * 100) !== Math.round(other * 100)) continue\n",
 	}
-	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+	assert.Equal(t, []string{"frontend/calc.ts:1"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
 }
 
 func TestFrontendMoneyArithmetic_PercentageRatios(t *testing.T) {
@@ -258,6 +258,127 @@ const balance = toNumber(t.balanceUsd)
 const target = toNumber(t.valueUsd)
 const fill = (balance / target) * 100
 const width = (value / target * 100).toFixed(2) + '%'
+`,
+	}
+	assert.Equal(t, []string{"frontend/calc.ts:4", "frontend/calc.ts:5"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_RoundingMoneyName(t *testing.T) {
+	files := map[string]string{
+		"frontend/types.ts": `interface Totals { totalUsd: MoneyDecimal }`,
+		"frontend/calc.ts": `f.money0(Math.floor(balance))
+Math.floor(count)
+Math.round(width)
+Math.trunc(t.totalUsd)
+`,
+	}
+	assert.Equal(t, []string{"frontend/calc.ts:1", "frontend/calc.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_MoneyShare(t *testing.T) {
+	files := map[string]string{
+		"frontend/calc.ts": `export const a3 = Math.min(100, (balance / MIN) * 100)
+const ratio = (done / total) * 100
+`,
+	}
+	assert.Equal(t, []string{"frontend/calc.ts:1"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_CentRoundingShape(t *testing.T) {
+	files := map[string]string{
+		"frontend/calc.ts": `export function floorToCent(value: number): number {
+  return Math.floor(value * 100 + 1e-9) / 100
+}
+const ratio = Math.round(ratioValue * 1000) / 1000
+const legacy = Math.floor(balance * 100) / 100
+`,
+	}
+	assert.Equal(t, []string{"frontend/calc.ts:2"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+
+	rule := NewFrontendMoneyArithmeticRule()
+	assert.NoError(t, rule.Configure(map[string]any{"money_formatter": "renderCents"}))
+	formatter := map[string]string{
+		"frontend/format.ts": `function renderCents(value: number): number {
+  return Math.floor(value * 100) / 100
+}
+`,
+	}
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, rule, formatter))
+}
+
+func TestFrontendMoneyArithmetic_CompoundAssignMoneyVariable(t *testing.T) {
+	files := map[string]string{
+		"frontend/types.ts": `interface Totals { netUsd: MoneyDecimal }`,
+		"frontend/calc.ts":  "const v = Number(r.netUsd)\nv += 2\n",
+	}
+	assert.Equal(t, []string{"frontend/calc.ts:2"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_FallbackAfterDecimalField(t *testing.T) {
+	files := map[string]string{
+		"frontend/types.ts": `interface Totals { netUsd: MoneyDecimal }`,
+		"frontend/calc.ts": `Number(r?.netUsd ?? fallback) + 2
+Number(count ?? r.netUsd) + 2
+Number(r.count ?? 0) + 2
+`,
+	}
+	assert.Equal(t, []string{"frontend/calc.ts:1", "frontend/calc.ts:2"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_ArithmeticInsideComparison(t *testing.T) {
+	files := map[string]string{
+		"frontend/types.ts": `interface Totals { netUsd: MoneyDecimal }`,
+		"frontend/calc.ts": `const v = Number(r.netUsd)
+if (v + 10 > 100) {}
+if (v > 100) {}
+`,
+	}
+	assert.Equal(t, []string{"frontend/calc.ts:2"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_FormatterArithmeticNotMoney(t *testing.T) {
+	files := map[string]string{
+		"frontend/calc.ts": `export function formatCompactAmount(value: string): string {
+  return value.replace(/\\$(\\d+)/, (_match, amount: string) => {
+    const numeric = Number(amount)
+    const compact = numeric % 1000 === 0 ? String(numeric / 1000) : (numeric / 1000).toFixed(1)
+    return '$' + compact + 'k'
+  })
+}
+`,
+	}
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_E2EHelpersAreTests(t *testing.T) {
+	files := map[string]string{
+		"frontend/e2e/helpers/calc.ts": "const halfAmount = Math.max(1, Math.floor(availableBalance / 2))\n",
+	}
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_JSXTagSyntaxNotArithmetic(t *testing.T) {
+	files := map[string]string{
+		"frontend/types.ts": `interface Totals { balance: MoneyDecimal }`,
+		"frontend/view.tsx": `const v = toNumber(row.balance)
+const col = <col className={period ? 'w-[13%]' : 'w-[15%]'} />{
+<nav></nav>
+<div data-locked={locked ? '' : undefined}></div>
+<span className="gc-amtwrap"><b data-gc-amount="">{giftCardAmountText(amount)}</b></span>
+`,
+	}
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_NonMoneyNameSubstrings(t *testing.T) {
+	files := map[string]string{
+		"frontend/calc.tsx": `const version = txn ? 2 + feed.filter((item) => item.kind === 'txn').length : 0
+const requested = 3 + (canReadBalances ? 1 : 0)
+const cutoff = now - PENDING_DEPOSIT_WINDOW_MS
+const label = network.charAt(0).toUpperCase() + network.slice(1)
+const pricesApplied = 0
+pricesApplied += result.appliedRows
+<nav></nav>
 `,
 	}
 	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
@@ -274,4 +395,28 @@ requestRef.current++
 `,
 	}
 	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_MoneyWordLastPart(t *testing.T) {
+	files := map[string]string{
+		"frontend/calc.ts": `const usedPct = quota.monthlyLimit > 0 ? (quota.creditsUsedMonth / quota.monthlyLimit) * 100 : 0
+const sentPct = (sentAmount / limit) * 100
+const yieldPct = (yieldIncome / limit) * 100
+const investmentPct = (MIN_BALANCE_FOR_INVESTMENT / limit) * 100
+`,
+	}
+	assert.Equal(t, []string{"frontend/calc.ts:2", "frontend/calc.ts:3", "frontend/calc.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_CounterParameterDefault(t *testing.T) {
+	files := map[string]string{
+		"frontend/calc.ts": `function increment(counter: Map<string, number>, key: string, amount = 1): void {
+  counter.set(key, (counter.get(key) ?? 0) + amount)
+}
+function f(amount: number) {
+  return amount + fee
+}
+`,
+	}
+	assert.Equal(t, []string{"frontend/calc.ts:5"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
 }

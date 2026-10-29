@@ -17,7 +17,7 @@ func init() {
 }
 
 // defaultMoneyFields are field-name fragments treated as money values.
-const defaultMoneyFields = "amount|balance|fee|fees|price|profit|yield|deposit|withdrawal|invested|debit|credit"
+const defaultMoneyFields = "amount|balance|fee|fees|price|profit|yield|income|investment|deposit|withdrawal|invested|debit|credit"
 
 // FrontendMoneyArithmeticRule detects client-side arithmetic over money
 // values in TS/JS:
@@ -30,16 +30,19 @@ const defaultMoneyFields = "amount|balance|fee|fees|price|profit|yield|deposit|w
 // precision, and duplicated client math diverges from the server.
 //
 // Not flagged: pure formatting (formatAmount(parseFloat(x))), comparisons,
-// non-money numerics, tests.
+// non-money numerics, tests, and percentage-change helpers with generic
+// parameters that have no money names.
 type FrontendMoneyArithmeticRule struct {
 	*rules.BaseRule
-	parseCall     *regexp.Regexp
-	moneyField    *regexp.Regexp
-	reduceRawSum  *regexp.Regexp
-	accumulate    *regexp.Regexp
-	reduceMarker  string
-	numberParsers string
-	decimalFields map[string]bool
+	parseCall       *regexp.Regexp
+	moneyField      *regexp.Regexp
+	moneyFieldToken *regexp.Regexp
+	reduceRawSum    *regexp.Regexp
+	accumulate      *regexp.Regexp
+	reduceMarker    string
+	numberParsers   string
+	decimalFields   map[string]bool
+	moneyFormatter  string
 }
 
 // NewFrontendMoneyArithmeticRule creates the rule
@@ -69,6 +72,7 @@ func (r *FrontendMoneyArithmeticRule) Configure(settings map[string]any) error {
 	}
 	r.setMoneyFields(r.GetStringSetting("money_fields", defaultMoneyFields))
 	r.setNumberParsers(r.GetStringSetting("number_parsers", `parseFloat|Number|toNumber\w*`))
+	r.moneyFormatter = r.GetStringSetting("money_formatter", "")
 	return nil
 }
 
@@ -118,9 +122,15 @@ var (
 	tsDecimalProperty   = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*\??\s*:\s*[\w$]*Decimal\b`)
 	moneyVariableDecl   = regexp.MustCompile(`\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=`)
 	moneyMathCall       = regexp.MustCompile(`\bMath\s*\.\s*(?:round|floor|ceil|trunc)\s*\(`)
+	moneyMathCallName   = regexp.MustCompile(`\bMath\s*\.\s*(round|floor|ceil|trunc)\s*\(`)
+	centScaledArgument  = regexp.MustCompile(`(?is)^\s*(.+?)\s*\*\s*100\s*(?:[+\-]\s*(?:\d+(?:\.\d*)?|\.\d+)(?:e[+\-]?\d+)?)?\s*$`)
+	divideByCents       = regexp.MustCompile(`(?is)^\s*/\s*100\b`)
+	centEpsilon         = regexp.MustCompile(`(?i)(?:\+\s*1e-?\d+|\+\s*0\.0{4,}\d+|EPSILON)`)
+	simpleMemberName    = regexp.MustCompile(`^[A-Za-z_$][\w$]*(?:(?:\?\.|\.)[A-Za-z_$][\w$]*)*$`)
 	stringWrapperPrefix = regexp.MustCompile(`(?s)^\s*(?:String\s*\(\s*)*`)
 	identifierWords     = regexp.MustCompile(`[A-Za-z_$][\w$]*`)
 	formattingCall      = regexp.MustCompile(`\b(?:formatAmount|money\d*)\s*\(`)
+	parameterName       = regexp.MustCompile(`^\s*([A-Za-z_$][\w$]*)\b`)
 )
 
 func (r *FrontendMoneyArithmeticRule) setNumberParsers(parsers string) {
@@ -129,26 +139,63 @@ func (r *FrontendMoneyArithmeticRule) setNumberParsers(parsers string) {
 
 func (r *FrontendMoneyArithmeticRule) setMoneyFields(fields string) {
 	r.moneyField = regexp.MustCompile(`(?i)\b\w*(?:` + fields + `)\w*\b`)
+	r.moneyFieldToken = regexp.MustCompile(`(?i)^(?:` + fields + `)s?$`)
 	r.reduceRawSum = regexp.MustCompile(`[+]\s*[\w$]+\.\w*(?i:` + fields + `)\w*\b`)
 }
 
 // AnalyzeFile checks TS/JS code for arithmetic over parsed money values.
 func (r *FrontendMoneyArithmeticRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if (!ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile()) || ctx.IsTestFile() || strings.Contains(ctx.RelPath, "generated") {
+	if (!ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile()) || ctx.IsTestFile() || strings.Contains(ctx.RelPath, "generated") || strings.Contains("/"+ctx.RelPath, "/e2e/") {
 		return nil
 	}
 	return r.analyzeFlat(ctx, patternkit.NewJSFlat(ctx))
 }
 
 func (r *FrontendMoneyArithmeticRule) isMoneyFieldName(name string) bool {
-	return r.moneyField.MatchString(name) || r.decimalFields[name]
+	if r.decimalFields[name] {
+		return true
+	}
+	if name == "" || strings.HasSuffix(strings.ToLower(name), "applied") {
+		return false
+	}
+	field := name
+	if dot := strings.LastIndex(field, "."); dot >= 0 {
+		field = strings.TrimPrefix(field[dot+1:], "?")
+	}
+	parts := splitMoneyName(field)
+	if len(parts) == 0 || slices.Contains([]string{"can", "has", "is", "should", "allow", "show", "enable"}, strings.ToLower(parts[0])) {
+		return false
+	}
+	return r.moneyFieldToken.MatchString(parts[len(parts)-1])
+}
+
+func splitMoneyName(name string) []string {
+	var parts []string
+	start := 0
+	for i := 1; i < len(name); i++ {
+		current, previous := name[i], name[i-1]
+		if current >= 'A' && current <= 'Z' && (previous >= 'a' && previous <= 'z' || previous >= '0' && previous <= '9' || previous >= 'A' && previous <= 'Z' && i+1 < len(name) && name[i+1] >= 'a' && name[i+1] <= 'z') {
+			parts = append(parts, name[start:i])
+			start = i
+		} else if !(current >= 'A' && current <= 'Z' || current >= 'a' && current <= 'z' || current >= '0' && current <= '9') {
+			if start < i {
+				parts = append(parts, name[start:i])
+			}
+			start = i + 1
+		}
+	}
+	if start < len(name) {
+		parts = append(parts, name[start:])
+	}
+	return parts
 }
 
 func (r *FrontendMoneyArithmeticRule) analyzeFlat(ctx *core.FileContext, f patternkit.JsFlat) []*core.Violation {
 	parsed := r.moneyParseSpans(f)
 	vars := r.moneyVariables(f, parsed)
 	found := r.arithmeticFindings(ctx, f, parsed, vars)
-	roundingFindings(ctx, f, parsed, vars, found)
+	roundingFindings(r, ctx, f, parsed, vars, found)
+	centRoundingFindings(r, ctx, f, found)
 	existingPatternFindings(r, ctx, found)
 	lines := make([]int, 0, len(found))
 	for line := range found {
@@ -215,12 +262,31 @@ func (r *FrontendMoneyArithmeticRule) moneyVariables(f patternkit.JsFlat, parsed
 func (r *FrontendMoneyArithmeticRule) arithmeticFindings(ctx *core.FileContext, f patternkit.JsFlat, parsed []moneySpan, vars map[string][]int) map[int]bool {
 	found := make(map[int]bool)
 	for _, op := range arithmeticOperators(f.Code) {
-		leftMoney := r.isMoneyVariable(f, vars, identifierBefore(f.Code, op.pos), op.pos)
-		rightMoney := r.isMoneyVariable(f, vars, identifierAfter(f.Code, op.pos+len(op.op)), op.pos)
-		if comparisonFollows(f.Code, op.pos) || stringConcatAt(f.Code, op.pos) ||
-			op.op == "/" && leftMoney && rightMoney ||
-			op.op == "/" && percentageRatio(f.Code, op.pos) ||
-			op.op == "*" && ratioScale(f.Code, op.pos) {
+		if jsxTagOperator(f.Code, op.pos) || insideFormattingFunction(f, op.pos) {
+			continue
+		}
+		if financialFPRoundingDuplicateAt(f, op.pos) {
+			continue
+		}
+		leftName := moneyNameBefore(f.Code, op.pos)
+		rightName := moneyNameAfter(f.Code, op.pos+len(op.op))
+		leftMoney := r.isMoneyVariable(f, vars, identifierBefore(f.Code, op.pos), op.pos) || r.isMoneyFieldName(leftName) && !counterParameterAt(f, leftName, op.pos)
+		rightMoney := r.isMoneyVariable(f, vars, identifierAfter(f.Code, op.pos+len(op.op)), op.pos) || r.isMoneyFieldName(rightName) && !counterParameterAt(f, rightName, op.pos)
+		if strings.HasSuffix(op.op, "=") {
+			if leftMoney {
+				addMoneyFinding(r, ctx, f, found, op.pos)
+				continue
+			}
+			rhs := op.pos + len(op.op)
+			for _, p := range parsed {
+				if p.start >= rhs && strings.TrimSpace(f.Code[rhs:p.start]) == "" {
+					addMoneyFinding(r, ctx, f, found, op.pos)
+					break
+				}
+			}
+			continue
+		}
+		if stringConcatAt(f.Code, op.pos) {
 			continue
 		}
 		for _, p := range parsed {
@@ -236,9 +302,9 @@ func (r *FrontendMoneyArithmeticRule) arithmeticFindings(ctx *core.FileContext, 
 	return found
 }
 
-func roundingFindings(ctx *core.FileContext, f patternkit.JsFlat, parsed []moneySpan, vars map[string][]int, found map[int]bool) {
+func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f patternkit.JsFlat, parsed []moneySpan, vars map[string][]int, found map[int]bool) {
 	for _, m := range moneyMathCall.FindAllStringIndex(f.Code, -1) {
-		if comparisonFollows(f.Code, m[0]) || insideFormattingCall(f, m[0]) {
+		if insideFormattingFunction(f, m[0]) || financialFPRoundingDuplicateAt(f, m[0]) {
 			continue
 		}
 		open := strings.LastIndex(f.Code[m[0]:m[1]], "(")
@@ -250,61 +316,137 @@ func roundingFindings(ctx *core.FileContext, f patternkit.JsFlat, parsed []money
 			continue
 		}
 		arg := strings.TrimSpace(f.Code[args[0].Start:args[0].End])
+		id := strings.Trim(arg, "() \t\n")
+		moneyName := r.moneyNameExpression(id) && !counterParameterAt(f, id, m[0])
+		if insideFormattingCall(f, m[0]) && !moneyName {
+			continue
+		}
+		if moneyName {
+			addMoneyFinding(r, ctx, f, found, m[0])
+		}
 		for _, p := range parsed {
 			if p.start >= args[0].Start && p.end <= args[0].End {
 				addMoneyFinding(nil, ctx, f, found, m[0])
 				break
 			}
 		}
-		id := strings.Trim(arg, "() \t\n")
 		if patternkit.JsIdentifier.MatchString(id) && moneyVariableAt(f, vars, id, m[0]) {
 			addMoneyFinding(nil, ctx, f, found, m[0])
 		}
 	}
 }
 
-func ratioScale(code string, pos int) bool {
-	start, end := pos, pos
-	for start > 0 && code[start-1] != '\n' && code[start-1] != ';' {
+func centRoundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f patternkit.JsFlat, found map[int]bool) {
+	for _, m := range moneyMathCallName.FindAllStringSubmatchIndex(f.Code, -1) {
+		open := strings.LastIndex(f.Code[m[0]:m[1]], "(") + m[0]
+		close, ok := f.Closing(open)
+		if !ok {
+			continue
+		}
+		args := f.CallArgs(open)
+		if len(args) == 0 {
+			continue
+		}
+		arg := strings.TrimSpace(f.Code[args[0].Start:args[0].End])
+		scaled := centScaledArgument.FindStringSubmatch(arg)
+		if scaled == nil || !divideByCents.MatchString(f.Code[close+1:]) || insideMoneyFormatter(r, f, m[0]) {
+			continue
+		}
+		if financialFPRoundingDuplicate(f.Code[m[2]:m[3]], arg) {
+			continue
+		}
+		addMoneyFinding(r, ctx, f, found, m[0])
+	}
+}
+
+func financialFPRoundingDuplicate(method, arg string) bool {
+	if method == "round" || centEpsilon.MatchString(arg) {
+		return false
+	}
+	for _, token := range patternkit.IdentifierTokens(arg) {
+		switch token {
+		case "amount", "balance", "cost", "fee", "price", "profit", "usd", "total", "subtotal", "sum", "payout", "payment", "deposit", "withdraw", "withdrawal", "principal", "usdc", "usdt":
+			return true
+		}
+	}
+	return false
+}
+
+func financialFPRoundingDuplicateAt(f patternkit.JsFlat, pos int) bool {
+	for _, m := range moneyMathCallName.FindAllStringSubmatchIndex(f.Code, -1) {
+		if pos < m[0] {
+			continue
+		}
+		open := strings.LastIndex(f.Code[m[0]:m[1]], "(") + m[0]
+		close, ok := f.Closing(open)
+		if !ok {
+			continue
+		}
+		div := divideByCents.FindStringIndex(f.Code[close+1:])
+		if div == nil || pos > close+1+div[1] {
+			continue
+		}
+		args := f.CallArgs(open)
+		if len(args) == 0 {
+			continue
+		}
+		arg := strings.TrimSpace(f.Code[args[0].Start:args[0].End])
+		if centScaledArgument.MatchString(arg) && financialFPRoundingDuplicate(f.Code[m[2]:m[3]], arg) {
+			return true
+		}
+	}
+	return false
+}
+
+func insideMoneyFormatter(r *FrontendMoneyArithmeticRule, f patternkit.JsFlat, pos int) bool {
+	return r.moneyFormatter != "" && f.InsideNamedFunction(pos, r.moneyFormatter)
+}
+
+func (r *FrontendMoneyArithmeticRule) moneyNameExpression(expr string) bool {
+	if !simpleMemberName.MatchString(expr) {
+		return false
+	}
+	words := identifierWords.FindAllString(expr, -1)
+	return len(words) > 0 && r.isMoneyFieldName(words[len(words)-1])
+}
+
+func moneyNameBefore(code string, pos int) string {
+	end := pos
+	for end > 0 && (code[end-1] == ' ' || code[end-1] == '\t' || code[end-1] == ')' || code[end-1] == ']') {
+		end--
+	}
+	start := end
+	for start > 0 && (code[start-1] == '_' || code[start-1] == '$' || code[start-1] >= 'a' && code[start-1] <= 'z' || code[start-1] >= 'A' && code[start-1] <= 'Z' || code[start-1] >= '0' && code[start-1] <= '9' || code[start-1] == '.') {
 		start--
 	}
-	for end < len(code) && code[end] != '\n' && code[end] != ';' {
-		end++
-	}
-	return strings.Contains(code[start:end], "/") && strings.HasPrefix(strings.TrimSpace(code[pos+1:end]), "100")
+	return code[start:end]
 }
 
-func percentageRatio(code string, pos int) bool {
-	end := pos
-	for end < len(code) && code[end] != '\n' && code[end] != ';' {
-		end++
+func moneyNameAfter(code string, pos int) string {
+	for pos < len(code) && (code[pos] == ' ' || code[pos] == '\t' || code[pos] == '(') {
+		pos++
 	}
-	line := code[pos:end]
-	return strings.Contains(line, "* 100")
+	start := pos
+	for pos < len(code) && (code[pos] == '_' || code[pos] == '$' || code[pos] >= 'a' && code[pos] <= 'z' || code[pos] >= 'A' && code[pos] <= 'Z' || code[pos] >= '0' && code[pos] <= '9' || code[pos] == '.') {
+		pos++
+	}
+	return code[start:pos]
 }
 
-func comparisonFollows(code string, pos int) bool {
-	end := pos
-	for end < len(code) && code[end] != '\n' && code[end] != ';' {
-		end++
-	}
-	for i := pos; i < end; i++ {
-		if i+2 < end && (code[i:i+3] == "===" || code[i:i+3] == "!==") {
+func insideFormattingFunction(f patternkit.JsFlat, pos int) bool {
+	for pos >= 0 {
+		fn, ok := f.EnclosingFunction(pos)
+		if !ok {
+			return false
+		}
+		name := strings.ToLower(fn.Name)
+		if strings.HasPrefix(name, "format") || strings.HasPrefix(name, "money") {
 			return true
 		}
-		if i+1 < end && (code[i:i+2] == ">=" || code[i:i+2] == "<=") {
-			return true
+		if fn.Start >= pos {
+			return false
 		}
-		if code[i] != '<' && code[i] != '>' {
-			continue
-		}
-		if i > pos && code[i-1] == '=' || i+1 < end && (code[i+1] == '=' || code[i+1] == '/' || code[i+1] == '{') {
-			continue
-		}
-		if (i > pos && (code[i-1] == ' ' || code[i-1] == '\t')) ||
-			(i+1 < end && (code[i+1] == ' ' || code[i+1] == '\t')) {
-			return true
-		}
+		pos = fn.Start
 	}
 	return false
 }
@@ -348,6 +490,45 @@ func (r *FrontendMoneyArithmeticRule) isMoneyVariable(f patternkit.JsFlat, vars 
 	return name != "" && moneyVariableAt(f, vars, name, pos)
 }
 
+func counterParameterAt(f patternkit.JsFlat, name string, pos int) bool {
+	fn, ok := f.EnclosingFunction(pos)
+	if !ok {
+		return false
+	}
+	header := f.Code[fn.Start:fn.Brace]
+	openOffset := strings.Index(header, "(")
+	if openOffset < 0 {
+		return false
+	}
+	args := f.CallArgs(fn.Start + openOffset)
+	for _, arg := range args {
+		text := strings.TrimSpace(f.Code[arg.Start:arg.End])
+		before, after, ok := strings.Cut(text, "=")
+		if !ok {
+			continue
+		}
+		parameter := parameterName.FindStringSubmatch(before)
+		if len(parameter) != 2 || parameter[1] != name {
+			continue
+		}
+		defaultValue := strings.TrimSpace(after)
+		if defaultValue == "" {
+			continue
+		}
+		allDigits := true
+		for _, char := range defaultValue {
+			if char < '0' || char > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits && strings.TrimLeft(defaultValue, "0") != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func moneyVariableAt(f patternkit.JsFlat, vars map[string][]int, name string, pos int) bool {
 	fn, ok := f.EnclosingFunction(pos)
 	scope := -1
@@ -360,10 +541,7 @@ func moneyVariableAt(f patternkit.JsFlat, vars map[string][]int, name string, po
 func (r *FrontendMoneyArithmeticRule) moneyArgument(arg string) bool {
 	arg = stringWrapperPrefix.ReplaceAllString(arg, "")
 	words := identifierWords.FindAllString(arg, -1)
-	if len(words) == 0 {
-		return false
-	}
-	return r.isMoneyFieldName(words[len(words)-1])
+	return slices.ContainsFunc(words, r.isMoneyFieldName)
 }
 
 type arithmeticOperator struct {
@@ -371,15 +549,58 @@ type arithmeticOperator struct {
 	op  string
 }
 
+func jsxTagOperator(code string, pos int) bool {
+	start := strings.LastIndex(code[:pos], "<")
+	if start < 0 || strings.Contains(code[start:pos], ">") {
+		return false
+	}
+	i := start + 1
+	if i < pos && code[i] == '/' {
+		i++
+	}
+	if i >= pos || !(code[i] >= 'A' && code[i] <= 'Z' || code[i] >= 'a' && code[i] <= 'z') {
+		return false
+	}
+	depth := 0
+	var quote byte
+	for i = start + 1; i < pos; i++ {
+		c := code[i]
+		if quote != 0 {
+			if c == quote && (i == 0 || code[i-1] != '\\') {
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' {
+			quote = c
+			continue
+		}
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return quote != 0 || depth == 0
+}
+
 func arithmeticOperators(code string) []arithmeticOperator {
 	var out []arithmeticOperator
 	for i := 0; i < len(code); i++ {
-		if !strings.ContainsRune("+-*/", rune(code[i])) {
+		if !strings.ContainsRune("+-*/", rune(code[i])) || code[i] == '/' && i > 0 && code[i-1] == '<' {
 			continue
 		}
 		op := string(code[i])
 		if i+1 < len(code) && code[i+1] == '=' {
 			op += "="
+		}
+		if len(op) == 2 {
+			out = append(out, arithmeticOperator{i, op})
+			i++
+			continue
 		}
 		if i > 0 && code[i-1] == '=' || i+1 < len(code) && (code[i+1] == '>' || code[i+1] == '=') {
 			continue
