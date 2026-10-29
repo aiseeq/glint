@@ -112,6 +112,7 @@ func (r *FrontendMoneyArithmeticRule) UseProjectFiles(files []*core.FileContext)
 		for _, m := range tsDecimalProperty.FindAllStringSubmatch(f.Code, -1) {
 			r.decimalFields[m[1]] = true
 		}
+
 	}
 	for name := range conflicts {
 		delete(r.decimalFields, name)
@@ -119,7 +120,9 @@ func (r *FrontendMoneyArithmeticRule) UseProjectFiles(files []*core.FileContext)
 }
 
 var (
-	tsDecimalProperty   = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*\??\s*:\s*[\w$]*Decimal\b`)
+	tsDecimalProperty = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*\??\s*:\s*[\w$]*Decimal\b`)
+
+	memberChain         = regexp.MustCompile(`[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*`)
 	moneyVariableDecl   = regexp.MustCompile(`\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=`)
 	moneyMathCall       = regexp.MustCompile(`\bMath\s*\.\s*(?:round|floor|ceil|trunc)\s*\(`)
 	moneyMathCallName   = regexp.MustCompile(`\bMath\s*\.\s*(round|floor|ceil|trunc)\s*\(`)
@@ -151,10 +154,15 @@ func (r *FrontendMoneyArithmeticRule) AnalyzeFile(ctx *core.FileContext) []*core
 	return r.analyzeFlat(ctx, patternkit.NewJSFlat(ctx))
 }
 
+// decimalMember tells whether a member access reads a decimal field of the
+// project. The field names a field of a value the code receives, so a bare
+// local of that name, such as the min of a chart axis, is not that field.
+func (r *FrontendMoneyArithmeticRule) decimalMember(name string) bool {
+	dot := strings.LastIndex(name, ".")
+	return dot >= 0 && r.decimalFields[strings.TrimPrefix(name[dot+1:], "?")]
+}
+
 func (r *FrontendMoneyArithmeticRule) isMoneyFieldName(name string) bool {
-	if r.decimalFields[name] {
-		return true
-	}
 	if name == "" || strings.HasSuffix(strings.ToLower(name), "applied") {
 		return false
 	}
@@ -406,8 +414,7 @@ func (r *FrontendMoneyArithmeticRule) moneyNameExpression(expr string) bool {
 	if !simpleMemberName.MatchString(expr) {
 		return false
 	}
-	words := identifierWords.FindAllString(expr, -1)
-	return len(words) > 0 && r.isMoneyFieldName(words[len(words)-1])
+	return r.decimalMember(expr) || r.isMoneyFieldName(expr)
 }
 
 func moneyNameBefore(code string, pos int) string {
@@ -541,7 +548,7 @@ func moneyVariableAt(f patternkit.JsFlat, vars map[string][]int, name string, po
 func (r *FrontendMoneyArithmeticRule) moneyArgument(arg string) bool {
 	arg = stringWrapperPrefix.ReplaceAllString(arg, "")
 	words := identifierWords.FindAllString(arg, -1)
-	return slices.ContainsFunc(words, r.isMoneyFieldName)
+	return slices.ContainsFunc(words, r.isMoneyFieldName) || slices.ContainsFunc(memberChain.FindAllString(arg, -1), r.decimalMember)
 }
 
 type arithmeticOperator struct {

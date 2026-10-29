@@ -420,3 +420,22 @@ function f(amount: number) {
 	}
 	assert.Equal(t, []string{"frontend/calc.ts:5"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
 }
+
+// A decimal field of the API names a field of a response, not every local of
+// that name: a chart scales its axis by its own min and max.
+func TestFrontendMoneyArithmetic_ChartScaleNotMoney(t *testing.T) {
+	files := map[string]string{
+		"api/types.go": "package api\ntype MoneyDecimal string\ntype Limits struct { Min MoneyDecimal " + "`json:\"min\"`" + " }\ntype Quote struct { Value MoneyDecimal " + "`json:\"value\"`" + " }\n",
+		"frontend/chart.tsx": `type LineDatum = { label: string; value: number }
+export function LineChart({ data, top, chartHeight }: { data: LineDatum[]; top: number; chartHeight: number }) {
+  const min = Math.min(...data.map((item) => item.value))
+  const max = Math.max(...data.map((item) => item.value))
+  const range = max - min || 1
+  return data.map((item) => top + (1 - (item.value - min) / range) * chartHeight)
+}
+`,
+		"frontend/limits.ts": `export const span = (limits: Limits) => Number(limits.min) * 2
+`,
+	}
+	assert.Equal(t, []string{"frontend/limits.ts:1"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
