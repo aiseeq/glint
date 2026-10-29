@@ -92,6 +92,55 @@ func vault() int { b := load(); return b.VaultUsd }
 	}))
 }
 
+func TestPartialFlagUnreadBudgetNotSet(t *testing.T) {
+	assert.Equal(t, []string{"history/limited.go:3", "history/unconditional.go:3"}, rulestest.ProjectRulePlaces(t, NewPartialFlagUnreadRule(), map[string]string{
+		"go.mod": "module example.com/budgetflag\n\ngo 1.24\n",
+		"history/types.go": `package history
+
+import (
+	"context"
+	"time"
+)
+
+type Range struct { Since time.Time; Pages int }
+type Message struct{}
+type Chunk struct { Messages []Message; Partial bool }
+type Service struct{}
+
+func (s *Service) Fetch(ctx context.Context, r Range) (Chunk, error) {
+	var c Chunk
+	for page := 0; ; page++ {
+		if r.Pages > 0 && page == r.Pages { c.Partial = true; break }
+		if page == 100 { return Chunk{}, nil }
+	}
+	return c, nil
+}
+func (s *Service) FetchUnconditional(ctx context.Context, r Range) (Chunk, error) {
+	var c Chunk
+	c.Partial = true
+	return c, nil
+}
+`,
+		"history/omitted.go": `package history
+import ("context"; "time")
+func omitted(s *Service, ctx context.Context, since time.Time) ([]Message, error) { c, err := s.Fetch(ctx, Range{Since: since}); if err != nil { return nil, err }; return c.Messages, err }
+`,
+		"history/limited.go": `package history
+import ("context"; "time")
+func limited(s *Service, ctx context.Context, since time.Time, n int) ([]Message, error) { c, err := s.Fetch(ctx, Range{Since: since, Pages: n}); if err != nil { return nil, err }; return c.Messages, err }
+`,
+		"history/unconditional.go": `package history
+import ("context"; "time")
+func unconditional(s *Service, ctx context.Context, since time.Time) ([]Message, error) { c, err := s.FetchUnconditional(ctx, Range{Since: since}); if err != nil { return nil, err }; return c.Messages, err }
+`,
+		// The literal of a caller in another package is typed by its own package.
+		"client/client.go": `package client
+import ("context"; "time"; "example.com/budgetflag/history")
+func Recent(s *history.Service, ctx context.Context, since time.Time) ([]history.Message, error) { c, err := s.Fetch(ctx, history.Range{Since: since}); if err != nil { return nil, err }; return c.Messages, err }
+`,
+	}))
+}
+
 func TestPartialFlagUnreadNegatives(t *testing.T) {
 	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewPartialFlagUnreadRule(), map[string]string{
 		"balance/types.go": `package balance

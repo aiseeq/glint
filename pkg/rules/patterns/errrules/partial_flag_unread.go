@@ -3,6 +3,8 @@ package errrules
 import (
 	"fmt"
 	"go/ast"
+	"go/constant"
+	"go/token"
 	"go/types"
 	"sort"
 	"strings"
@@ -46,16 +48,17 @@ func (r *PartialFlagUnreadRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 	if ctx == nil {
 		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
+	functions := indexPartialFunctions(ctx)
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		return patternkit.AnalyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {
-			return r.checkFunction(file, info, fn)
+			return r.checkFunction(file, info, fn, functions)
 		})
 	})
 }
 
 var partialFlagParts = []string{"incomplete", "partial", "truncated", "stale", "approximate", "degraded"}
 
-func (r *PartialFlagUnreadRule) checkFunction(file *core.FileContext, info *types.Info, fn *ast.FuncDecl) []*core.Violation {
+func (r *PartialFlagUnreadRule) checkFunction(file *core.FileContext, info *types.Info, fn *ast.FuncDecl, functions map[*types.Func]partialTypedFunction) []*core.Violation {
 	if fn.Body == nil || isPartialStructMethodOrConstructor(info, fn) {
 		return nil
 	}
@@ -64,7 +67,33 @@ func (r *PartialFlagUnreadRule) checkFunction(file *core.FileContext, info *type
 		return nil
 	}
 	usage := inspectPartialUsage(info, fn, candidates)
-	return r.firstUnreadFlagFinding(file, info, candidates, usage)
+	return r.firstUnreadFlagFinding(file, info, fn, candidates, usage, functions)
+}
+
+type partialTypedFunction struct {
+	decl *ast.FuncDecl
+	info *types.Info
+}
+
+func indexPartialFunctions(ctx *core.GoProjectContext) map[*types.Func]partialTypedFunction {
+	functions := make(map[*types.Func]partialTypedFunction)
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
+			continue
+		}
+		for _, file := range pkg.Package.Syntax {
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Name == nil || fn.Body == nil {
+					continue
+				}
+				if obj, ok := pkg.Package.TypesInfo.Defs[fn.Name].(*types.Func); ok {
+					functions[obj] = partialTypedFunction{decl: fn, info: pkg.Package.TypesInfo}
+				}
+			}
+		}
+	}
+	return functions
 }
 
 type partialFlag struct {
@@ -141,6 +170,254 @@ func callResultType(info *types.Info, call *ast.CallExpr, index int) types.Type 
 	return nil
 }
 
+func candidateCall(info *types.Info, fn *ast.FuncDecl, target types.Object) *ast.CallExpr {
+	var found *ast.CallExpr
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if found != nil {
+			return false
+		}
+		switch stmt := n.(type) {
+		case *ast.AssignStmt:
+			if call, ok := callExpression(stmt.Rhs); ok {
+				for i, lhs := range stmt.Lhs {
+					id, ok := lhs.(*ast.Ident)
+					if ok && info.ObjectOf(id) == target && callResultType(info, call, i) != nil {
+						found = call
+						return false
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			if call, ok := callExpression(stmt.Values); ok {
+				for i, id := range stmt.Names {
+					if info.ObjectOf(id) == target && callResultType(info, call, i) != nil {
+						found = call
+						return false
+					}
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+type budgetGuard struct {
+	parameter int
+	field     string
+}
+
+func budgetDisabledAtCall(info *types.Info, call *ast.CallExpr, flags []partialFlag, functions map[*types.Func]partialTypedFunction) bool {
+	if call == nil {
+		return false
+	}
+	fn := calledPartialFunction(info, call)
+	typed, ok := functions[fn]
+	if !ok {
+		return false
+	}
+	guards, unsafe := partialFlagBudgetWrites(typed)
+	for _, flag := range flags {
+		writes := guards[flag.field]
+		if unsafe[flag.field] || len(writes) == 0 {
+			return false
+		}
+		for _, guard := range writes {
+			if guard.parameter >= len(call.Args) || !literalFieldIsZero(info, call.Args[guard.parameter], guard.field) {
+				return false
+			}
+		}
+	}
+	return len(flags) > 0
+}
+
+func calledPartialFunction(info *types.Info, call *ast.CallExpr) *types.Func {
+	switch fun := ast.Unparen(call.Fun).(type) {
+	case *ast.Ident:
+		obj, _ := info.Uses[fun].(*types.Func)
+		return obj
+	case *ast.SelectorExpr:
+		if selection := info.Selections[fun]; selection != nil {
+			obj, _ := selection.Obj().(*types.Func)
+			return obj
+		}
+		obj, _ := info.Uses[fun.Sel].(*types.Func)
+		return obj
+	}
+	return nil
+}
+
+func partialFlagBudgetWrites(typed partialTypedFunction) (map[*types.Var][]budgetGuard, map[*types.Var]bool) {
+	guards := make(map[*types.Var][]budgetGuard)
+	unsafe := make(map[*types.Var]bool)
+	if typed.decl.Type.Params == nil {
+		return guards, unsafe
+	}
+	params := make(map[types.Object]int)
+	index := 0
+	for _, field := range typed.decl.Type.Params.List {
+		for _, name := range field.Names {
+			params[typed.info.ObjectOf(name)] = index
+			index++
+		}
+	}
+	ast.Inspect(typed.decl.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			sel, ok := ast.Unparen(lhs).(*ast.SelectorExpr)
+			if !ok {
+				continue
+			}
+			root, path := selectorPath(typed.info, sel)
+			id, ok := root.(*types.Var)
+			if !ok || id.IsField() || len(path) == 0 {
+				continue
+			}
+			flag := path[len(path)-1]
+			if !partialFlagPath(partialFlagFields(id.Type()), path) {
+				continue
+			}
+			if i >= len(assign.Rhs) || !isTrueBoolean(typed.info, assign.Rhs[i]) {
+				unsafe[flag] = true
+				continue
+			}
+			guard, ok := enclosingBudgetGuard(typed, assign, params)
+			if !ok {
+				unsafe[flag] = true
+				continue
+			}
+			guards[flag] = append(guards[flag], guard)
+		}
+		return true
+	})
+	return guards, unsafe
+}
+
+func enclosingBudgetGuard(typed partialTypedFunction, node ast.Node, params map[types.Object]int) (budgetGuard, bool) {
+	var guard budgetGuard
+	found := false
+	var parents []ast.Node
+	ast.Inspect(typed.decl.Body, func(n ast.Node) bool {
+		if n == nil {
+			if len(parents) > 0 {
+				parents = parents[:len(parents)-1]
+			}
+			return false
+		}
+		if n == node {
+			for i := len(parents) - 1; i >= 0; i-- {
+				if conditional, ok := parents[i].(*ast.IfStmt); ok && nodeWithin(conditional.Body, node) {
+					if candidate, ok := positiveBudgetGuard(typed.info, conditional.Cond, params); ok {
+						guard, found = candidate, true
+						return false
+					}
+				}
+			}
+			return false
+		}
+		parents = append(parents, n)
+		return true
+	})
+	return guard, found
+}
+
+func nodeWithin(root ast.Node, target ast.Node) bool {
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		if n == target {
+			found = true
+			return false
+		}
+		return !found
+	})
+	return found
+}
+
+func positiveBudgetGuard(info *types.Info, expr ast.Expr, params map[types.Object]int) (budgetGuard, bool) {
+	if binary, ok := ast.Unparen(expr).(*ast.BinaryExpr); ok && binary.Op == token.LAND {
+		if guard, ok := positiveBudgetGuard(info, binary.X, params); ok {
+			return guard, true
+		}
+		return positiveBudgetGuard(info, binary.Y, params)
+	}
+	binary, ok := ast.Unparen(expr).(*ast.BinaryExpr)
+	if !ok || (binary.Op != token.GTR && binary.Op != token.NEQ) || !isZeroBudgetConstant(info, binary.Y) {
+		return budgetGuard{}, false
+	}
+	root, fields := selectorPath(info, selectorExpr(binary.X))
+	parameter, ok := params[root]
+	if !ok || len(fields) == 0 {
+		return budgetGuard{}, false
+	}
+	return budgetGuard{parameter: parameter, field: fields[len(fields)-1].Name()}, true
+}
+
+func selectorExpr(expr ast.Expr) *ast.SelectorExpr {
+	sel, _ := ast.Unparen(expr).(*ast.SelectorExpr)
+	return sel
+}
+
+func isZeroBudgetConstant(info *types.Info, expr ast.Expr) bool {
+	if expr == nil {
+		return false
+	}
+	value := info.Types[expr].Value
+	return value != nil && constant.Sign(value) == 0
+}
+
+func isTrueBoolean(info *types.Info, expr ast.Expr) bool {
+	value := info.Types[expr].Value
+	return value != nil && value.Kind() == constant.Bool && constant.BoolVal(value)
+}
+
+func literalFieldIsZero(info *types.Info, expr ast.Expr, fieldName string) bool {
+	expr = ast.Unparen(expr)
+	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+		expr = ast.Unparen(unary.X)
+	}
+	literal, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	t := types.Unalias(info.TypeOf(literal))
+	if pointer, ok := t.(*types.Pointer); ok {
+		t = types.Unalias(pointer.Elem())
+	}
+	if named, ok := t.(*types.Named); ok {
+		t = named.Underlying()
+	}
+	structure, ok := t.Underlying().(*types.Struct)
+	if !ok {
+		return false
+	}
+	fieldIndex := -1
+	for i := 0; i < structure.NumFields(); i++ {
+		if structure.Field(i).Name() == fieldName {
+			fieldIndex = i
+			break
+		}
+	}
+	if fieldIndex < 0 {
+		return false
+	}
+	for i, elt := range literal.Elts {
+		if keyed, ok := elt.(*ast.KeyValueExpr); ok {
+			key, ok := keyed.Key.(*ast.Ident)
+			if ok && key.Name == fieldName {
+				return isZeroBudgetConstant(info, keyed.Value)
+			}
+			continue
+		}
+		if i == fieldIndex {
+			return isZeroBudgetConstant(info, elt)
+		}
+	}
+	return true
+}
+
 type partialUsage struct {
 	flagRead    map[types.Object]bool
 	written     map[types.Object]bool
@@ -210,9 +487,13 @@ func (u *partialUsage) markFieldRead(info *types.Info, body *ast.BlockStmt, sel 
 	}
 }
 
-func (r *PartialFlagUnreadRule) firstUnreadFlagFinding(file *core.FileContext, info *types.Info, candidates map[types.Object][]partialFlag, usage *partialUsage) []*core.Violation {
+func (r *PartialFlagUnreadRule) firstUnreadFlagFinding(file *core.FileContext, info *types.Info, fn *ast.FuncDecl, candidates map[types.Object][]partialFlag, usage *partialUsage, functions map[*types.Func]partialTypedFunction) []*core.Violation {
 	for _, obj := range usage.readOrder {
 		if usage.written[obj] || usage.flagRead[obj] || usage.passedWhole[obj] {
+			continue
+		}
+		call := candidateCall(info, fn, obj)
+		if budgetDisabledAtCall(info, call, candidates[obj], functions) {
 			continue
 		}
 		flags := make([]string, 0, len(candidates[obj]))
