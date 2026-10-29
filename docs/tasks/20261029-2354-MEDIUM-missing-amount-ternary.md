@@ -1,6 +1,7 @@
 # missing-amount-coerced-to-zero: тернарник и парсер с нулём
 
-Статус: открыт
+Статус: готово
+Исполнитель: luna
 
 ## Вход
 - Проблема:
@@ -21,3 +22,5 @@
 ## Журнал
 - 2026-10-29 23:54 открыт — glint-master
 - 2026-10-29 23:54 note — glint-master: боец 1029-2354-missing-amount-ternary (luna, --escalate terra), дерево /home/aisee/.cache/worktrees/glint/missing-amount-ternary
+- 2026-10-30 00:19 note — glint-master: влито e56dfc0, установлено v1.83.7-129-g0cd35a2; consumers.sh 04c86a8 против установленного: +1 у потребителя-заказчика (vault-report page.tsx:462 тернарник присутствия — та же форма, что ?? 0), отдано его мастеру
+- 2026-10-30 00:19 готово — glint-master: мастер: TestMetricFallbackZeroTernary/AfterParser зелёные, graft all 0 на 0cd35a2; consumers diff разобран (1 верная по контракту правила)
