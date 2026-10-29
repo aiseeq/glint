@@ -604,7 +604,10 @@ func NewMissingAmountCoercedToZeroRule() *MissingAmountCoercedToZeroRule {
 var (
 	jsUntypedNumberParser    = regexp.MustCompile(`(?:\bfunction\s+([A-Za-z_$][\w$]*)|\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*)\s*\(\s*[A-Za-z_$][\w$]*\s*\??\s*:\s*(?:unknown|any)\s*\)\s*:\s*number\s*(?:=>\s*)?`)
 	jsZeroResult             = regexp.MustCompile(`(?:[?:]|\breturn|\|\||\?\?)\s*0\s*(?:[;})\n]|$)|,\s*0\s*\)`)
+	jsMetricPath             = `(?:[A-Za-z_$][\w$]*\s*(?:\?\.|\.)\s*)*[A-Za-z_$][\w$]*`
 	jsMetricFallback         = regexp.MustCompile(`((?:[A-Za-z_$][\w$]*\s*(?:\?\.|\.)\s*)+[A-Za-z_$][\w$]*)\s*(?:\?\?|\|\|)\s*(?:0\b|'0'|"0")`)
+	jsMetricTernary          = regexp.MustCompile(`(` + jsMetricPath + `)\s*\?\s*(` + jsMetricPath + `)\s*:\s*(?:0\b|'0'|"0")`)
+	jsMetricParserFallback   = regexp.MustCompile(`[A-Za-z_$][\w$]*\s*\(\s*(` + jsMetricPath + `)\s*\)\s*(?:\?\?|\|\|)\s*(?:0\b|'0'|"0")`)
 	jsMetricWords            = regexp.MustCompile(`^[A-Za-z_$][\w$]*$`)
 	jsConditionComparePrefix = regexp.MustCompile(`^(?:===?|!==?|<=|>=|<|>)`)
 	jsConditionCompareSuffix = regexp.MustCompile(`(?:===?|!==?|<=|>=|<|>)$`)
@@ -701,16 +704,29 @@ func isGroupingParen(code string, open int) bool {
 func (r *MissingAmountCoercedToZeroRule) metricFallbackViolations(ctx *core.FileContext, f patternkit.JsFlat) []*core.Violation {
 	var violations []*core.Violation
 	words := r.metricWords()
-	for _, match := range jsMetricFallback.FindAllStringSubmatchIndex(f.Text, -1) {
-		property := f.Code[match[2]:match[3]]
+	addMetric := func(start, end int, property string) {
 		last := property[strings.LastIndexAny(property, ".")+1:]
 		last = strings.TrimPrefix(last, "?")
-		if !isMetricProperty(last, words) || metricFallbackIsCompared(f, match[0], match[1]) {
-			continue
+		if !isMetricProperty(last, words) || metricFallbackIsCompared(f, start, end) {
+			return
 		}
-		violations = patternkit.JsReport(violations, r.BaseRule, ctx, f.Line(match[0]),
+		violations = patternkit.JsReport(violations, r.BaseRule, ctx, f.Line(start),
 			"Missing metric "+last+" shown as 0 — the result presents an unknown value as a measured zero",
 			"Keep the metric missing, or show an explicit unavailable value")
+	}
+	for _, match := range jsMetricFallback.FindAllStringSubmatchIndex(f.Text, -1) {
+		addMetric(match[0], match[1], f.Code[match[2]:match[3]])
+	}
+	for _, match := range jsMetricTernary.FindAllStringSubmatchIndex(f.Text, -1) {
+		condition := strings.ReplaceAll(strings.TrimSpace(f.Code[match[2]:match[3]]), "?.", ".")
+		value := strings.ReplaceAll(strings.TrimSpace(f.Code[match[4]:match[5]]), "?.", ".")
+		if value != condition && !strings.HasPrefix(value, condition+".") {
+			continue
+		}
+		addMetric(match[0], match[1], f.Code[match[4]:match[5]])
+	}
+	for _, match := range jsMetricParserFallback.FindAllStringSubmatchIndex(f.Text, -1) {
+		addMetric(match[0], match[1], f.Code[match[2]:match[3]])
 	}
 	return violations
 }

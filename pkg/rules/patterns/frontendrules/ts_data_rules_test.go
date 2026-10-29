@@ -281,6 +281,36 @@ func TestMetricFallbackZero(t *testing.T) {
 	assert.Empty(t, patterntest.LinesOf(t, customRule, "src/lib/metrics.ts", "const users = response.totalUsers ?? 0\n"))
 }
 
+func TestMetricFallbackZeroTernary(t *testing.T) {
+	rule := NewMissingAmountCoercedToZeroRule()
+	assert.Equal(t, []string{"src/lib/metrics.ts:2", "src/lib/metrics.ts:3", "src/lib/metrics.ts:4"}, patterntest.LinesOf(t, rule, "src/lib/metrics.ts", `export function metrics(report: Report, coverage: Coverage, a?: A, items: Item[], response: Response) {
+  const alertCount = report ? report.alertCount : 0
+  const wallet = coverage ? coverage.chainCount : '0'
+  const failed = a?.b ? a.b.failedCount : "0"
+  const length = items.length ? items.length : 0
+  const unavailable = report ? report.alertCount : '—'
+  const missing = report ? report.alertCount : undefined
+  const unrelated = response ? report.failedCount : 0
+  const compared = (report ? report.alertCount : 0) > 0
+  return { alertCount, wallet, failed, length, unavailable, missing, unrelated, compared }
+}
+`))
+}
+
+func TestMetricFallbackZeroAfterParser(t *testing.T) {
+	rule := NewMissingAmountCoercedToZeroRule()
+	assert.Equal(t, []string{"src/lib/metrics.ts:2", "src/lib/metrics.ts:3", "src/lib/metrics.ts:4"}, patterntest.LinesOf(t, rule, "src/lib/metrics.ts", `export function metrics(inv: Inv, form: Form, row: Row, a: A) {
+  const share = (num(inv.sharePct) ?? 0).toFixed(0)
+  const optional = parseOptional(form.sharePct) ?? '0'
+  const success = Number(row.successRate) || 0
+  const max = Math.max(a.totalCount, 0)
+  const multi = parseMetric(row.successRate, row.totalCount) ?? 0
+  const compared = Number(row.successRate) || 0 > 0
+  return { share, optional, success, max, multi, compared }
+}
+`))
+}
+
 func TestMetricFallbackZeroComparisonAnywhere(t *testing.T) {
 	rule := NewMissingAmountCoercedToZeroRule()
 	assert.Empty(t, patterntest.LinesOf(t, rule, "src/components/Flows.tsx", `const rendered = [
