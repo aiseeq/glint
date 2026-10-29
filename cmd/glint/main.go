@@ -1470,26 +1470,29 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 			}
 		}
 	}
+	indexed := fileRules[:0:0]
 	for _, rule := range fileRules {
-		if projectFiles, ok := rule.(rules.ProjectFilesRule); ok {
-			if cachedProject {
-				if cached, ok := rule.(rules.CachedProjectFilesRule); ok {
-					data := cache.projectHit.RuleState[rule.Name()]
-					if err := cached.RestoreProjectFiles(data); err != nil {
-						return nil, nil, fmt.Errorf("restore cached project files for rule %q: %w", rule.Name(), err)
-					}
-					continue
-				}
-			}
-			projectFiles.UseProjectFiles(rootFiles)
+		indexPanic, err := indexProjectFiles(rule, rootFiles, cache, cachedProject)
+		if err != nil {
+			return nil, nil, err
 		}
+		if indexPanic != nil {
+			panics = append(panics, indexPanic)
+			continue
+		}
+		indexed = append(indexed, rule)
 	}
+	fileRules = indexed
 	if cache != nil && project != nil && len(panics) == 0 {
-		state, err := cachedProjectFilesState(fileRules)
+		state, statePanic, err := cachedProjectFilesState(fileRules)
 		if err != nil {
 			return nil, panics, err
 		}
-		cache.storeProject(allViolations, project.SkippedPackages, state)
+		if statePanic != nil {
+			panics = append(panics, statePanic)
+		} else {
+			cache.storeProject(allViolations, project.SkippedPackages, state)
+		}
 	}
 	fileViolations, filePanics, err := analyzeFilesContained(contexts, fileRules, cfg, overrides, cache)
 	if err != nil {
@@ -1552,18 +1555,55 @@ func analyzeGoProjectRules(contexts, rootFiles []*core.FileContext, enabledRules
 	return allViolations, panics, nil
 }
 
-func cachedProjectFilesState(list []rules.Rule) (map[string][]byte, error) {
-	state := make(map[string][]byte)
-	for _, rule := range list {
-		if cached, ok := rule.(rules.CachedProjectFilesRule); ok {
-			data, err := cached.CacheProjectFiles()
-			if err != nil {
-				return nil, fmt.Errorf("cache project files for rule %q: %w", rule.Name(), err)
-			}
-			state[rule.Name()] = data
-		}
+// indexProjectFiles gives a project-files rule the root files, or the index a
+// cached run kept. A panic becomes a rule panic: without its index the rule
+// would judge the files against nothing.
+func indexProjectFiles(rule rules.Rule, rootFiles []*core.FileContext, cache *resultCache, cachedProject bool) (indexPanic *rulePanic, err error) {
+	projectFiles, ok := rule.(rules.ProjectFilesRule)
+	if !ok {
+		return nil, nil
 	}
-	return state, nil
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			indexPanic = &rulePanic{rule: rule.Name(), file: "(project files)", value: recovered, stack: debug.Stack()}
+		}
+	}()
+	if cached, ok := rule.(rules.CachedProjectFilesRule); ok && cachedProject {
+		if err := cached.RestoreProjectFiles(cache.projectHit.RuleState[rule.Name()]); err != nil {
+			return nil, fmt.Errorf("restore cached project files for rule %q: %w", rule.Name(), err)
+		}
+		return nil, nil
+	}
+	projectFiles.UseProjectFiles(rootFiles)
+	return nil, nil
+}
+
+// cachedProjectFilesState collects the indexes the project entry keeps; a
+// panic of one rule leaves the entry unstored, as a panic always does.
+func cachedProjectFilesState(list []rules.Rule) (state map[string][]byte, statePanic *rulePanic, err error) {
+	state = make(map[string][]byte)
+	for _, rule := range list {
+		cached, ok := rule.(rules.CachedProjectFilesRule)
+		if !ok {
+			continue
+		}
+		data, err := func() (data []byte, err error) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					statePanic = &rulePanic{rule: rule.Name(), file: "(project files cache)", value: recovered, stack: debug.Stack()}
+				}
+			}()
+			return cached.CacheProjectFiles()
+		}()
+		if statePanic != nil {
+			return nil, statePanic, nil
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("cache project files for rule %q: %w", rule.Name(), err)
+		}
+		state[rule.Name()] = data
+	}
+	return state, nil, nil
 }
 
 // projectRuleResult is what one Go project rule returned.

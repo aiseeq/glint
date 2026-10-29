@@ -88,3 +88,56 @@ func TestOutputNamesThePanickedRules(t *testing.T) {
 		assert.NotContains(t, buf.String(), "No issues found!", format)
 	}
 }
+
+type panickingIndexRule struct{ *findingFileRule }
+
+func (r *panickingIndexRule) UseProjectFiles([]*core.FileContext) { panic("index boom") }
+func (r *panickingIndexRule) ResetState()                         {}
+
+// A rule that panics while it indexes the project files is a rule panic too:
+// the run names it, skips its file analysis and keeps the other findings.
+func TestAnalyzeKeepsTheOtherFindingsWhenIndexingPanics(t *testing.T) {
+	root := writeAnalysisModule(t, "package check\n")
+	indexBoom := &panickingIndexRule{&findingFileRule{rules.NewBaseRule("index-boom", "patterns", "panics", core.SeverityLow)}}
+	fileRule := &findingFileRule{rules.NewBaseRule("finding-rule", "patterns", "finds", core.SeverityLow)}
+	list := []rules.Rule{indexBoom, fileRule}
+	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), list, false)
+	require.NoError(t, err)
+
+	violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, core.DefaultConfig(), prepared.project, nil)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "finding-rule", violations[0].Rule)
+	assert.Equal(t, []string{"index-boom"}, panics.rules())
+	assert.Contains(t, panics.Error(), "index boom")
+}
+
+type panickingCacheRule struct{ *findingFileRule }
+
+func (r *panickingCacheRule) UseProjectFiles([]*core.FileContext) {}
+func (r *panickingCacheRule) ResetState()                         {}
+func (r *panickingCacheRule) CacheProjectFiles() ([]byte, error)  { panic("cache boom") }
+func (r *panickingCacheRule) RestoreProjectFiles([]byte) error    { return nil }
+
+// A panic while the index is saved leaves the project entry unstored: the
+// next run loads the project again instead of reusing a partial entry.
+func TestProjectFilesCachePanicIsNotCached(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	module := t.TempDir()
+	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
+	writeModuleFile(t, module, "svc/check.go", "package svc\n\nfunc Value() int { return 1 }\n")
+	root := filepath.Join(module, "svc")
+	cacheBoom := &panickingCacheRule{&findingFileRule{rules.NewBaseRule("cache-boom", "patterns", "panics", core.SeverityLow)}}
+	list := []rules.Rule{newProjectStubRule(), cacheBoom}
+
+	for run := 1; run <= 2; run++ {
+		cfg := core.DefaultConfig()
+		prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, cfg, list, true)
+		require.NoError(t, err)
+		require.NotNil(t, prepared.project, "run %d loads the project: nothing was cached", run)
+		_, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, cfg, prepared.project, prepared.cache)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"cache-boom"}, panics.rules(), "run %d", run)
+		require.NoError(t, prepared.cache.save())
+	}
+}
