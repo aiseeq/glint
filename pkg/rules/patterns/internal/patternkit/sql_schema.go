@@ -212,7 +212,6 @@ func SqlTexts(root ast.Node, accept func(string) bool) []SqlLiteral {
 	return literals
 }
 
-
 // IsStringOrConcat reports a string literal or a + expression, which may
 // join string literals.
 func IsStringOrConcat(expr ast.Expr) bool {
