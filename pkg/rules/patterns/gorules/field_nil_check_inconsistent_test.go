@@ -395,3 +395,94 @@ func (p *Progress) LastN(name string) int { BODY }
 		})
 	}
 }
+
+func TestFieldNilCheckInconsistentNilSafeMethod(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
+		"recorder.go": `package example
+
+	import "log/slog"
+type Recorder struct { count int }
+func (r *Recorder) Add(n int) { if r == nil { return }; r.count += n }
+func (r *Recorder) Count() int { return r.count }
+type App struct { rec *Recorder }
+func (a *App) Optional() { if a.rec == nil { slog.Warn("recorder unavailable"); return } }
+func (a *App) Use() { a.rec.Add(1) }
+func (a *App) Read() int { return a.rec.Count() }
+`,
+	}
+	violations, err := NewFieldNilCheckInconsistentRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "recorder.go:10", patterntest.FoundLines(violations)[0])
+}
+
+func TestFieldNilCheckInconsistentAssignedBeforeUse(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		want       int
+	}{
+		{name: "literal assignment", body: "s.mesh = &mesh{}; use(&s.mesh.tri)", want: 0},
+		{name: "constructor after error check", body: "var err error; s.mesh, err = NewMesh(); if err != nil { return }; use(&s.mesh.tri)", want: 0},
+		{name: "assignment in one branch", body: "if ready { s.mesh = &mesh{} }; use(&s.mesh.tri)", want: 1},
+		{name: "nil assignment", body: "s.mesh = nil; use(&s.mesh.tri)", want: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			files := map[string]string{
+				"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
+				"mesh.go": `package example
+
+import "log/slog"
+type mesh struct { tri int }
+func NewMesh() (*mesh, error) { return &mesh{}, nil }
+type Scene struct { mesh *mesh }
+func use(*int) {}
+func (s *Scene) optional() { if s.mesh == nil { slog.Warn("mesh unavailable"); return } }
+func (s *Scene) Build(ready bool) { BODY }
+`,
+			}
+			files["mesh.go"] = strings.Replace(files["mesh.go"], "BODY", tt.body, 1)
+			violations, err := NewFieldNilCheckInconsistentRule().AnalyzeGoProject(rulestest.Project(t, files))
+			require.NoError(t, err)
+			assert.Len(t, violations, tt.want)
+		})
+	}
+}
+
+func TestFieldNilCheckInconsistentGuardPredicate(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
+		"catalog.go": `package example
+
+import "log/slog"
+type Cat struct { name string }
+func (c *Cat) Name() string { return c.name }
+type Store struct { cat *Cat }
+func (s *Store) optional() { if s.cat == nil { slog.Warn("cat unavailable"); return } }
+func (s *Store) gate() bool { if s.cat == nil || s.cat.Name() == "" { return false }; return true }
+func (s *Store) helper() string { return s.cat.Name() }
+func (s *Store) guarded() string { if !s.gate() { return "" }; return s.helper() }
+func (s *Store) unguarded() string { value := s.helper(); if !s.gate() { return "" }; return value }
+`,
+	}
+	violations, err := NewFieldNilCheckInconsistentRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "catalog.go:9", patterntest.FoundLines(violations)[0])
+}
+
+func TestFieldNilCheckInconsistentDerefBeforeCheck(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
+		"service.go": `package example
+
+type Service struct { cache *int }
+func (s *Service) Optional() int { if s.cache == nil { return 0 }; return *s.cache }
+func (s *Service) Broken() int { n := *s.cache; if s.cache == nil { return 0 }; return n }
+`,
+	}
+	violations, err := NewFieldNilCheckInconsistentRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "service.go:5", patterntest.FoundLines(violations)[0])
+}

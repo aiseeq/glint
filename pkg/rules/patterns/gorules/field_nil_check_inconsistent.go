@@ -6,6 +6,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"slices"
 	"sort"
 	"strings"
 
@@ -99,7 +100,7 @@ func collectFieldNilMethods(file *core.FileContext, info *types.Info) []fieldNil
 }
 
 func (r *FieldNilCheckInconsistentRule) analyzeMethods(methods []fieldNilMethod) []*core.Violation {
-	optional, softMethods, checkedMethods := fieldNilOptionalFields(methods)
+	optional, softMethods := fieldNilOptionalFields(methods)
 	var violations []*core.Violation
 	fields := make([]*types.Var, 0, len(optional))
 	for field := range optional {
@@ -107,7 +108,7 @@ func (r *FieldNilCheckInconsistentRule) analyzeMethods(methods []fieldNilMethod)
 	}
 	sort.Slice(fields, func(i, j int) bool { return fields[i].Pos() < fields[j].Pos() })
 	for _, field := range fields {
-		violations = append(violations, r.analyzeField(methods, field, optional[field], softMethods[field], checkedMethods[field])...)
+		violations = append(violations, r.analyzeField(methods, field, optional[field], softMethods[field])...)
 	}
 	sort.SliceStable(violations, func(i, j int) bool {
 		if violations[i].File != violations[j].File {
@@ -118,10 +119,9 @@ func (r *FieldNilCheckInconsistentRule) analyzeMethods(methods []fieldNilMethod)
 	return violations
 }
 
-func fieldNilOptionalFields(methods []fieldNilMethod) (map[*types.Var]fieldNilMethod, map[*types.Var]map[*ast.FuncDecl]bool, map[*types.Var]map[*ast.FuncDecl]bool) {
+func fieldNilOptionalFields(methods []fieldNilMethod) (map[*types.Var]fieldNilMethod, map[*types.Var]map[*ast.FuncDecl]bool) {
 	optional := make(map[*types.Var]fieldNilMethod)
 	softMethods := make(map[*types.Var]map[*ast.FuncDecl]bool)
-	checkedMethods := make(map[*types.Var]map[*ast.FuncDecl]bool)
 	setupManaged := make(map[*types.TypeName]bool)
 	for _, method := range methods {
 		if method.decl.Name.Name == "CheckTools" {
@@ -156,33 +156,34 @@ func fieldNilOptionalFields(methods []fieldNilMethod) (map[*types.Var]fieldNilMe
 				}
 				softMethods[field][method.decl] = true
 			}
-			if checkedMethods[field] == nil {
-				checkedMethods[field] = make(map[*ast.FuncDecl]bool)
-			}
-			checkedMethods[field][method.decl] = true
 			return true
 		})
 	}
-	return optional, softMethods, checkedMethods
+	return optional, softMethods
 }
 
-func (r *FieldNilCheckInconsistentRule) analyzeField(methods []fieldNilMethod, field *types.Var, checkedIn fieldNilMethod, softMethods, checkedMethods map[*ast.FuncDecl]bool) []*core.Violation {
+func (r *FieldNilCheckInconsistentRule) analyzeField(methods []fieldNilMethod, field *types.Var, checkedIn fieldNilMethod, softMethods map[*ast.FuncDecl]bool) []*core.Violation {
 	unguarded := make(map[*ast.FuncDecl]ast.Node)
 	methodCalls := make(map[*ast.FuncDecl][]fieldNilCall)
 	boolGuards := fieldNilBoolGuardMethods(methods, field)
+	nilSafeMethods := fieldNilNilSafeMethods(methods)
 	for _, method := range methods {
 		if method.recv.Obj() != checkedIn.recv.Obj() {
 			continue
 		}
 		flow := &fieldNilFlow{
 			info: method.info, recv: method.recv, field: field,
-			decl:        method.decl,
-			guardErrors: fieldNilGuardErrors(method, methods, field),
-			boolGuards:  boolGuards,
+			decl:           method.decl,
+			guardErrors:    fieldNilGuardErrors(method, methods, field),
+			boolGuards:     boolGuards,
+			nilSafeMethods: nilSafeMethods,
+		}
+		for obj := range fieldNilConstructorErrors(method, field) {
+			flow.guardErrors[obj] = true
 		}
 		(&patternkit.FlowWalker[fieldNilState, struct{}]{Rule: flow}).Walk(method.decl.Body, fieldNilState{live: true}, struct{}{})
 		methodCalls[method.decl] = flow.calls
-		if !checkedMethods[method.decl] && flow.deref != nil && !fieldNilInDeferredFunc(method.decl.Body, flow.deref) {
+		if flow.deref != nil && !fieldNilInDeferredFunc(method.decl.Body, flow.deref) && !fieldNilCheckPrecedes(method, field, flow.deref) {
 			unguarded[method.decl] = flow.deref
 		}
 	}
@@ -211,6 +212,58 @@ func (r *FieldNilCheckInconsistentRule) analyzeField(methods []fieldNilMethod, f
 	return violations
 }
 
+func fieldNilNilSafeMethods(methods []fieldNilMethod) map[*types.Func]bool {
+	safe := make(map[*types.Func]bool)
+	for _, method := range methods {
+		if method.decl.Recv == nil || len(method.decl.Recv.List) == 0 || len(method.decl.Recv.List[0].Names) == 0 || method.decl.Body == nil {
+			continue
+		}
+		recvName := method.decl.Recv.List[0].Names[0].Name
+		if !fieldNilStartsWithNilReceiverExit(method, recvName) {
+			continue
+		}
+		if obj, ok := method.info.Defs[method.decl.Name].(*types.Func); ok {
+			safe[obj] = true
+		}
+	}
+	return safe
+}
+
+func fieldNilStartsWithNilReceiverExit(method fieldNilMethod, recvName string) bool {
+	if len(method.decl.Body.List) == 0 {
+		return false
+	}
+	stmt, ok := method.decl.Body.List[0].(*ast.IfStmt)
+	if !ok {
+		return false
+	}
+	bin, ok := ast.Unparen(stmt.Cond).(*ast.BinaryExpr)
+	if !ok || bin.Op != token.EQL {
+		return false
+	}
+	left, leftOK := ast.Unparen(bin.X).(*ast.Ident)
+	right, rightOK := ast.Unparen(bin.Y).(*ast.Ident)
+	if !(leftOK && left.Name == recvName && rightOK && right.Name == "nil" || rightOK && right.Name == recvName && leftOK && left.Name == "nil") {
+		return false
+	}
+	if stmt.Else != nil || !fieldNilBranchTerminates(stmt.Body) {
+		return false
+	}
+	return true
+}
+
+func fieldNilBranchTerminates(stmt ast.Stmt) bool {
+	switch stmt := stmt.(type) {
+	case *ast.ReturnStmt:
+		return true
+	case *ast.BlockStmt:
+		if slices.ContainsFunc(stmt.List, fieldNilBranchTerminates) {
+			return true
+		}
+	}
+	return false
+}
+
 func fieldNilBoolGuardMethods(methods []fieldNilMethod, field *types.Var) map[*types.Func]bool {
 	guards := make(map[*types.Func]bool)
 	owner := fieldNilFieldOwner(methods, field)
@@ -227,6 +280,15 @@ func fieldNilBoolGuardMethods(methods []fieldNilMethod, field *types.Var) map[*t
 			continue
 		}
 		seen := false
+		falseGuard := false
+		ast.Inspect(method.decl.Body, func(node ast.Node) bool {
+			stmt, ok := node.(*ast.IfStmt)
+			if !ok || !fieldNilExprEnsuresNil(method, stmt.Cond, field) || !fieldNilBranchReturnsFalse(method, stmt.Body) {
+				return true
+			}
+			falseGuard = true
+			return true
+		})
 		valid := true
 		ast.Inspect(method.decl.Body, func(node ast.Node) bool {
 			ret, ok := node.(*ast.ReturnStmt)
@@ -240,7 +302,7 @@ func fieldNilBoolGuardMethods(methods []fieldNilMethod, field *types.Var) map[*t
 			if fieldNilIsFalse(ret.Results[0]) {
 				return true
 			}
-			if !fieldNilBoolExprEnsuresNonNil(method, ret.Results[0], field) {
+			if !fieldNilBoolExprEnsuresNonNil(method, ret.Results[0], field) && !(falseGuard && !fieldNilIsFalse(ret.Results[0])) {
 				valid = false
 				return false
 			}
@@ -252,6 +314,52 @@ func fieldNilBoolGuardMethods(methods []fieldNilMethod, field *types.Var) map[*t
 		}
 	}
 	return guards
+}
+
+func fieldNilCheckPrecedes(method fieldNilMethod, field *types.Var, use ast.Node) bool {
+	found := false
+	ast.Inspect(method.decl.Body, func(node ast.Node) bool {
+		comparison, ok := node.(*ast.BinaryExpr)
+		if !ok {
+			return true
+		}
+		if fieldNilCompared(method.info, method.recv, comparison) == field && comparison.Pos() < use.Pos() {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func fieldNilBranchReturnsFalse(method fieldNilMethod, stmt ast.Stmt) bool {
+	block, ok := stmt.(*ast.BlockStmt)
+	if !ok {
+		block = &ast.BlockStmt{List: []ast.Stmt{stmt}}
+	}
+	for _, child := range block.List {
+		if ret, ok := child.(*ast.ReturnStmt); ok {
+			if len(ret.Results) == 1 && fieldNilIsFalse(ret.Results[0]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func fieldNilExprEnsuresNil(method fieldNilMethod, expr ast.Expr, field *types.Var) bool {
+	expr = ast.Unparen(expr)
+	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
+		return fieldNilBoolExprEnsuresNonNil(method, unary.X, field)
+	}
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok {
+		return false
+	}
+	if bin.Op == token.LOR {
+		return fieldNilExprEnsuresNil(method, bin.X, field) || fieldNilExprEnsuresNil(method, bin.Y, field)
+	}
+	return bin.Op == token.EQL && fieldNilCompared(method.info, method.recv, bin) == field
 }
 
 func fieldNilBoolExprEnsuresNonNil(method fieldNilMethod, expr ast.Expr, field *types.Var) bool {
@@ -469,7 +577,7 @@ func fieldNilBranchInitializes(method fieldNilMethod, branch ast.Stmt, field *ty
 				continue
 			}
 			rhsIndex := min(i, len(assign.Rhs)-1)
-			if rhsIndex >= 0 && fieldNilKnownNonNil(assign.Rhs[rhsIndex]) {
+			if rhsIndex >= 0 && fieldNilKnownNonNil(method.info, assign.Rhs[rhsIndex]) {
 				return true
 			}
 		}
@@ -493,18 +601,44 @@ func fieldNilAssignedField(info *types.Info, recv *types.Named, expr ast.Expr) *
 	return fieldNilReceiverField(recv, field)
 }
 
-func fieldNilKnownNonNil(expr ast.Expr) bool {
+func fieldNilKnownNonNil(info *types.Info, expr ast.Expr) bool {
 	switch value := ast.Unparen(expr).(type) {
 	case *ast.UnaryExpr:
 		return value.Op == token.AND
 	case *ast.CompositeLit:
 		return true
 	case *ast.CallExpr:
-		id, ok := ast.Unparen(value.Fun).(*ast.Ident)
-		return ok && (id.Name == "make" || id.Name == "new")
+		id, isIdent := ast.Unparen(value.Fun).(*ast.Ident)
+		if isIdent && (id.Name == "make" || id.Name == "new") {
+			return true
+		}
+		return fieldNilConstructorCall(info, value)
 	default:
 		return false
 	}
+}
+
+func fieldNilConstructorCall(info *types.Info, call *ast.CallExpr) bool {
+	selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	name := ""
+	if ok {
+		name = selector.Sel.Name
+	} else if id, ok := ast.Unparen(call.Fun).(*ast.Ident); ok {
+		name = id.Name
+	}
+	if !strings.HasPrefix(name, "New") {
+		return false
+	}
+	fn := fieldNilCalledFunction(info, call.Fun)
+	if fn == nil {
+		return false
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig.Results() == nil || sig.Results().Len() != 1 {
+		return false
+	}
+	_, ok = sig.Results().At(0).Type().Underlying().(*types.Pointer)
+	return ok
 }
 
 func fieldNilFollowingBranchRefuses(method fieldNilMethod, target *ast.IfStmt) bool {
@@ -851,6 +985,92 @@ func fieldNilGuardErrors(method fieldNilMethod, methods []fieldNilMethod, field 
 	return guards
 }
 
+func fieldNilConstructorErrors(method fieldNilMethod, field *types.Var) map[types.Object]bool {
+	guards := make(map[types.Object]bool)
+	ast.Inspect(method.decl.Body, func(node ast.Node) bool {
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for rhsIndex, rhs := range assign.Rhs {
+			call, ok := ast.Unparen(rhs).(*ast.CallExpr)
+			if !ok || !fieldNilConstructorReturnsError(method.info, call) {
+				continue
+			}
+			fieldAssigned := false
+			for _, lhs := range assign.Lhs {
+				fieldAssigned = fieldAssigned || fieldNilAssignedField(method.info, method.recv, lhs) == field
+			}
+			if !fieldAssigned {
+				continue
+			}
+			fn := fieldNilCalledFunction(method.info, call.Fun)
+			if fn == nil {
+				continue
+			}
+			sig, ok := fn.Type().(*types.Signature)
+			if !ok {
+				continue
+			}
+			errIndex := -1
+			for i := 0; i < sig.Results().Len(); i++ {
+				if types.AssignableTo(sig.Results().At(i).Type(), types.Universe.Lookup("error").Type()) {
+					errIndex = i
+					break
+				}
+			}
+			lhsIndex := rhsIndex + errIndex
+			if errIndex < 0 || lhsIndex >= len(assign.Lhs) {
+				continue
+			}
+			id, ok := ast.Unparen(assign.Lhs[lhsIndex]).(*ast.Ident)
+			if ok {
+				if obj := method.info.ObjectOf(id); obj != nil {
+					guards[obj] = true
+				}
+			}
+		}
+		return true
+	})
+	return guards
+}
+
+func fieldNilConstructorReturnsError(info *types.Info, call *ast.CallExpr) bool {
+	fn := fieldNilCalledFunction(info, call.Fun)
+	if fn == nil {
+		return false
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig.Results() == nil || sig.Results().Len() < 2 {
+		return false
+	}
+	hasPointer, hasError := false, false
+	for v := range sig.Results().Variables() {
+		typ := v.Type()
+		if _, ok := typ.Underlying().(*types.Pointer); ok {
+			hasPointer = true
+		}
+		hasError = hasError || types.AssignableTo(typ, types.Universe.Lookup("error").Type())
+	}
+	return hasPointer && hasError
+}
+
+func fieldNilCalledFunction(info *types.Info, expr ast.Expr) *types.Func {
+	switch fun := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		obj, _ := info.ObjectOf(fun).(*types.Func)
+		return obj
+	case *ast.SelectorExpr:
+		if selection := info.Selections[fun]; selection != nil {
+			obj, _ := selection.Obj().(*types.Func)
+			return obj
+		}
+		obj, _ := info.Uses[fun.Sel].(*types.Func)
+		return obj
+	}
+	return nil
+}
+
 func fieldNilReceiverName(method *ast.FuncDecl) string {
 	if method.Recv == nil || len(method.Recv.List) == 0 || len(method.Recv.List[0].Names) == 0 {
 		return ""
@@ -877,14 +1097,15 @@ type fieldNilState struct {
 }
 
 type fieldNilFlow struct {
-	info        *types.Info
-	recv        *types.Named
-	field       *types.Var
-	decl        *ast.FuncDecl
-	deref       ast.Node
-	calls       []fieldNilCall
-	guardErrors map[types.Object]bool
-	boolGuards  map[*types.Func]bool
+	info           *types.Info
+	recv           *types.Named
+	field          *types.Var
+	decl           *ast.FuncDecl
+	deref          ast.Node
+	calls          []fieldNilCall
+	guardErrors    map[types.Object]bool
+	boolGuards     map[*types.Func]bool
+	nilSafeMethods map[*types.Func]bool
 }
 
 func (*fieldNilFlow) CloneState(s fieldNilState) fieldNilState { return s }
@@ -900,15 +1121,39 @@ func (*fieldNilFlow) LeaveScope(patternkit.FlowScopeKind, struct{}, *patternkit.
 }
 func (a *fieldNilFlow) SimpleStmt(stmt ast.Stmt, state fieldNilState, _ struct{}) (fieldNilState, bool) {
 	a.inspectUses(stmt, state.checked)
+	if assign, ok := stmt.(*ast.AssignStmt); ok {
+		for i, lhs := range assign.Lhs {
+			if fieldNilAssignedField(a.info, a.recv, lhs) != a.field {
+				continue
+			}
+			rhs := assign.Rhs[min(i, len(assign.Rhs)-1)]
+			state.checked = fieldNilKnownNonNil(a.info, rhs)
+		}
+	}
 	_, ret := stmt.(*ast.ReturnStmt)
 	return state, ret
 }
 func (a *fieldNilFlow) IfCondition(stmt *ast.IfStmt, state fieldNilState, _ struct{}) (fieldNilState, fieldNilState) {
-	a.inspectUses(stmt.Cond, state.checked)
+	a.inspectConditionUses(stmt.Cond, state.checked)
 	thenState, elseState := state, state
 	thenState.checked = a.when(stmt.Cond, true, state.checked)
 	elseState.checked = a.when(stmt.Cond, false, state.checked)
 	return thenState, elseState
+}
+
+func (a *fieldNilFlow) inspectConditionUses(expr ast.Expr, checked bool) {
+	expr = ast.Unparen(expr)
+	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
+		a.inspectConditionUses(unary.X, checked)
+		return
+	}
+	if bin, ok := expr.(*ast.BinaryExpr); ok && (bin.Op == token.LAND || bin.Op == token.LOR) {
+		a.inspectConditionUses(bin.X, checked)
+		truth := bin.Op == token.LAND
+		a.inspectConditionUses(bin.Y, a.when(bin.X, truth, checked))
+		return
+	}
+	a.inspectUses(expr, checked)
 }
 func (a *fieldNilFlow) FlowExpr(expr ast.Expr, state fieldNilState, _ struct{}) fieldNilState {
 	a.inspectUses(expr, state.checked)
@@ -989,7 +1234,7 @@ func (a *fieldNilFlow) inspectUses(node ast.Node, checked bool) {
 		}
 		if sel, ok := n.(*ast.SelectorExpr); ok && len(stack) > 0 {
 			s := a.info.Selections[sel]
-			if !checked && a.deref == nil && s != nil && s.Kind() == types.FieldVal && s.Obj() == a.field && fieldNilDereference(sel, stack) {
+			if !checked && !fieldNilSafeMethodReceiver(sel, stack, a.info, a.nilSafeMethods) && a.deref == nil && s != nil && s.Kind() == types.FieldVal && s.Obj() == a.field && fieldNilDereference(sel, stack) {
 				a.deref = sel
 			}
 			if call, ok := stack[len(stack)-1].(*ast.CallExpr); ok && call.Fun == sel && s != nil && s.Kind() == types.MethodVal {
@@ -1003,6 +1248,26 @@ func (a *fieldNilFlow) inspectUses(node ast.Node, checked bool) {
 		stack = append(stack, n)
 		return true
 	})
+}
+
+func fieldNilSafeMethodReceiver(sel *ast.SelectorExpr, stack []ast.Node, info *types.Info, methods map[*types.Func]bool) bool {
+	if len(stack) < 2 {
+		return false
+	}
+	outer, ok := stack[len(stack)-1].(*ast.SelectorExpr)
+	if !ok || outer.X != sel {
+		return false
+	}
+	call, ok := stack[len(stack)-2].(*ast.CallExpr)
+	if !ok || call.Fun != outer {
+		return false
+	}
+	selection := info.Selections[outer]
+	if selection == nil {
+		return false
+	}
+	target, ok := selection.Obj().(*types.Func)
+	return ok && methods[target]
 }
 
 func fieldNilReceiverObject(info *types.Info, decl *ast.FuncDecl) types.Object {
