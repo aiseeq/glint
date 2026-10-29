@@ -232,7 +232,7 @@ func (s *Service) optional() {
 }
 `)
 			for i := 0; i < tt.users; i++ {
-				source.WriteString(fmt.Sprintf("func (s *Service) use%d() int { return s.dep.Value() }\n", i))
+				fmt.Fprintf(&source, "func (s *Service) use%d() int { return s.dep.Value() }\n", i)
 			}
 			files := map[string]string{
 				"go.mod":     "module example.com/rulestest\n\ngo 1.24\n",
