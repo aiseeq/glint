@@ -9,6 +9,7 @@ import (
 
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Conjunct is one top-level term of a SQL condition.
@@ -23,13 +24,14 @@ type Conjunct struct {
 
 // InList describes a literal membership condition.
 type InList struct {
-	Column       string
-	Table        string
-	Values       []string
-	Negated      bool
-	Offset       int
-	Operator     string
-	GuardedByKey bool
+	Column              string
+	Table               string
+	Values              []string
+	Negated             bool
+	Offset              int
+	Operator            string
+	GuardedByKey        bool
+	UnionOfHandledCases bool
 }
 
 // ConditionConjuncts parses a condition fragment or SQL statement and returns
@@ -318,9 +320,26 @@ func InLists(sql string) []InList {
 			switch stmt := m.(type) {
 			case *pgquery.SelectStmt:
 				tables := levelTables(stmt.GetFromClause())
+				start := len(out)
+				equalities := selectLiteralEqualities(stmt, tables)
 				collectInLists(&out, stmt.GetWhereClause(), tables, shift)
 				collectInLists(&out, stmt.GetHavingClause(), tables, shift)
 				collectJoinInLists(&out, stmt.GetFromClause(), tables, shift)
+				collectTargetInLists(&out, stmt.GetTargetList(), tables, shift)
+				for i := start; i < len(out); i++ {
+					in := &out[i]
+					handled := equalities[in.Table+"\x00"+in.Column]
+					if len(handled) == 0 {
+						continue
+					}
+					in.UnionOfHandledCases = true
+					for _, value := range in.Values {
+						if !handled[value] {
+							in.UnionOfHandledCases = false
+							break
+						}
+					}
+				}
 			case *pgquery.UpdateStmt:
 				collectInLists(&out, stmt.GetWhereClause(), relationTables(stmt.GetRelation()), shift)
 			case *pgquery.DeleteStmt:
@@ -329,6 +348,86 @@ func InLists(sql string) []InList {
 		})
 	}
 	return out
+}
+
+func collectTargetInLists(out *[]InList, targets []*pgquery.Node, tables map[string]string, shift int) {
+	for _, target := range targets {
+		if value := target.GetResTarget().GetVal(); value != nil {
+			walkTargetExpressions(value.ProtoReflect(), func(expr *pgquery.A_Expr) {
+				appendInList(out, expr, tables, shift, false)
+			})
+		}
+	}
+}
+
+func selectLiteralEqualities(stmt *pgquery.SelectStmt, tables map[string]string) map[string]map[string]bool {
+	equalities := make(map[string]map[string]bool)
+	collect := func(node *pgquery.Node) {
+		walkTargetExpressions(node.ProtoReflect(), func(expr *pgquery.A_Expr) {
+			if expr.GetKind() != pgquery.A_Expr_Kind_AEXPR_OP || len(expr.GetName()) != 1 || expr.GetName()[0].GetString_().GetSval() != "=" {
+				return
+			}
+			for _, pair := range [][2]*pgquery.Node{{expr.GetLexpr(), expr.GetRexpr()}, {expr.GetRexpr(), expr.GetLexpr()}} {
+				column, ok := columnOf(pair[0])
+				value, literal := literalText(pair[1])
+				if !ok || !literal {
+					continue
+				}
+				table := tables[column.qualifier]
+				key := table + "\x00" + column.name
+				if equalities[key] == nil {
+					equalities[key] = make(map[string]bool)
+				}
+				equalities[key][value] = true
+			}
+		})
+	}
+	for _, target := range stmt.GetTargetList() {
+		if value := target.GetResTarget().GetVal(); value != nil {
+			collect(value)
+		}
+	}
+	collect(stmt.GetWhereClause())
+	collect(stmt.GetHavingClause())
+	var collectJoins func([]*pgquery.Node)
+	collectJoins = func(from []*pgquery.Node) {
+		for _, node := range from {
+			if join := node.GetJoinExpr(); join != nil {
+				collect(join.GetQuals())
+				collectJoins([]*pgquery.Node{join.GetLarg(), join.GetRarg()})
+			}
+		}
+	}
+	collectJoins(stmt.GetFromClause())
+	return equalities
+}
+
+func walkTargetExpressions(message protoreflect.Message, visit func(*pgquery.A_Expr)) {
+	if !message.IsValid() {
+		return
+	}
+	switch message.Interface().(type) {
+	case *pgquery.SubLink, *pgquery.RangeSubselect:
+		return
+	case *pgquery.A_Expr:
+		if expr, ok := message.Interface().(*pgquery.A_Expr); ok {
+			visit(expr)
+		}
+	}
+	message.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		if field.Message() == nil || field.IsMap() {
+			return true
+		}
+		if field.IsList() {
+			list := value.List()
+			for i := range list.Len() {
+				walkTargetExpressions(list.Get(i).Message(), visit)
+			}
+			return true
+		}
+		walkTargetExpressions(value.Message(), visit)
+		return true
+	})
 }
 
 func relationTables(relation *pgquery.RangeVar) map[string]string {
@@ -370,29 +469,33 @@ func collectInLists(out *[]InList, condition *pgquery.Node, tables map[string]st
 	splitAnd(condition)
 	guarded := hasKeyGuard(terms)
 	levelExpressions(condition, func(expr *pgquery.A_Expr) {
-		op := ""
-		negated := false
-		if expr.GetKind() == pgquery.A_Expr_Kind_AEXPR_IN {
-			op = "IN"
-			if len(expr.GetName()) > 0 {
-				negated = expr.GetName()[0].GetString_().GetSval() == "<>"
-			}
-		} else if expr.GetKind() == pgquery.A_Expr_Kind_AEXPR_OP_ANY && len(expr.GetName()) == 1 && expr.GetName()[0].GetString_().GetSval() == "=" {
-			op = "ANY"
-		} else {
-			return
-		}
-		column, ok := columnOf(expr.GetLexpr())
-		if !ok {
-			return
-		}
-		values := literalList(expr.GetRexpr())
-		if len(values) == 0 {
-			return
-		}
-		slices.Sort(values)
-		*out = append(*out, InList{Column: column.name, Table: tables[column.qualifier], Values: values, Negated: negated, Offset: max(0, int(expr.GetLocation())-shift), Operator: op, GuardedByKey: guarded})
+		appendInList(out, expr, tables, shift, guarded)
 	})
+}
+
+func appendInList(out *[]InList, expr *pgquery.A_Expr, tables map[string]string, shift int, guarded bool) {
+	op := ""
+	negated := false
+	if expr.GetKind() == pgquery.A_Expr_Kind_AEXPR_IN {
+		op = "IN"
+		if len(expr.GetName()) > 0 {
+			negated = expr.GetName()[0].GetString_().GetSval() == "<>"
+		}
+	} else if expr.GetKind() == pgquery.A_Expr_Kind_AEXPR_OP_ANY && len(expr.GetName()) == 1 && expr.GetName()[0].GetString_().GetSval() == "=" {
+		op = "ANY"
+	} else {
+		return
+	}
+	column, ok := columnOf(expr.GetLexpr())
+	if !ok {
+		return
+	}
+	values := literalList(expr.GetRexpr())
+	if len(values) == 0 {
+		return
+	}
+	slices.Sort(values)
+	*out = append(*out, InList{Column: column.name, Table: tables[column.qualifier], Values: values, Negated: negated, Offset: max(0, int(expr.GetLocation())-shift), Operator: op, GuardedByKey: guarded})
 }
 func literalList(n *pgquery.Node) []string {
 	var vals []string

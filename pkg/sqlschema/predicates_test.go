@@ -34,6 +34,15 @@ func TestPredicatesInLists(t *testing.T) {
 	require.Empty(t, ambiguous[0].Table)
 }
 
+func TestPredicatesInListsTargetList(t *testing.T) {
+	got := InLists(`SELECT CASE WHEN o.status IN ('paid','overpaid') THEN 1 ELSE 0 END, COUNT(o.id) FILTER (WHERE o.status IN ('paid','overpaid')) FROM orders o`)
+	require.Len(t, got, 2)
+	require.Equal(t, []string{"orders", "orders"}, []string{got[0].Table, got[1].Table})
+	require.Equal(t, []string{"status", "status"}, []string{got[0].Column, got[1].Column})
+	require.False(t, got[0].GuardedByKey)
+	require.False(t, got[1].GuardedByKey)
+}
+
 func TestPredicatesInListsLevels(t *testing.T) {
 	got := InLists(`WITH recent AS (SELECT * FROM users u WHERE u.status IN ('a','b')) SELECT * FROM orders o WHERE o.user_id IN (SELECT x.id FROM withdrawals x WHERE x.state IN ('c','d')) UNION SELECT * FROM staff s WHERE s.kind IN ('e','f')`)
 	require.Len(t, got, 3)

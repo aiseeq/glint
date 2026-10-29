@@ -59,7 +59,9 @@ func init() {
 // twice. A switch over some constants of a set whose default makes the value
 // up from its input invents a value for every constant added later. A TS
 // union of a property lacks a value the backend assigns to the field of the
-// struct of the same name sent under that JSON name.
+// struct of the same name sent under that JSON name. Literal SQL IN lists in
+// production Go files are compared by table and column: repeated lists and
+// lists one value apart can drift as the queries change.
 type ValueSetDriftRule struct {
 	*rules.BaseRule
 	// index holds the sets of the root under analysis; the check flow sets it
@@ -71,6 +73,9 @@ type ValueSetDriftRule struct {
 	// which the analysis does not list; optionsErr is why they are missing.
 	options    []optionSet
 	optionsErr error
+	sqlSets    []sqlValueSet
+	sqlExact   map[string][]sqlValueSet
+	sqlColumns map[string][]sqlValueSet
 }
 
 // NewValueSetDriftRule creates the rule
@@ -87,6 +92,8 @@ func NewValueSetDriftRule() *ValueSetDriftRule {
 func (r *ValueSetDriftRule) UseProjectFiles(files []*core.FileContext) {
 	r.index = valueset.IndexFiles(files)
 	r.tables = newTableIndex(files)
+	r.sqlSets = indexSQLValueSets(files)
+	r.sqlExact, r.sqlColumns = indexSQLValueSetGroups(r.sqlSets)
 	r.options, r.optionsErr = nil, nil
 	if len(files) > 0 && files[0].ProjectRoot != "" {
 		r.options, r.optionsErr = templateOptionSets(files[0].ProjectRoot)
@@ -95,7 +102,7 @@ func (r *ValueSetDriftRule) UseProjectFiles(files []*core.FileContext) {
 
 // ResetState drops the sets of the previous root.
 func (r *ValueSetDriftRule) ResetState() {
-	r.index, r.tables, r.options, r.optionsErr = nil, nil, nil, nil
+	r.index, r.tables, r.options, r.optionsErr, r.sqlSets, r.sqlExact, r.sqlColumns = nil, nil, nil, nil, nil, nil, nil
 }
 
 type setMatch struct {
@@ -121,6 +128,7 @@ func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	}
 	sets := valueset.FileSets(ctx)
 	violations := r.optionLabelDrift(ctx)
+	violations = append(violations, r.sqlValueSetFindings(ctx)...)
 	for _, set := range sets {
 		match, ok := bestMatch(r.index, set)
 		if !ok || ctx.IsSuppressed(set.Line, r.Name()) {
