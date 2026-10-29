@@ -213,3 +213,27 @@ func TestIsPowerOfTen(t *testing.T) {
 		assert.Equal(t, expected, isPowerOfTen(constant.MakeFromLiteral(literal, kind, 0)), literal)
 	}
 }
+
+// Months in a quarter and quarters in a year are calendar units too, but 3
+// and 4 are also ordinary amounts: the constant's name says which.
+func TestBusinessConstantInCode_QuarterUnits(t *testing.T) {
+	violations := runBusinessConstantRule(t, map[string]string{
+		"check/check.go": `package check
+
+import "github.com/shopspring/decimal"
+
+const monthsPerQuarter = 3
+
+const quartersInYear = 4
+
+const minDepositUSD = 3
+
+func Units() (decimal.Decimal, decimal.Decimal, decimal.Decimal) {
+	return decimal.NewFromInt(monthsPerQuarter), decimal.NewFromInt(quartersInYear), decimal.NewFromInt(minDepositUSD)
+}
+`,
+	})
+
+	require.Len(t, violations, 1, "a quarter's months and a year's quarters convert units")
+	assert.Contains(t, violations[0].Message, "minDepositUSD = 3")
+}

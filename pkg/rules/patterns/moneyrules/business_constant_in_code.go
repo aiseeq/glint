@@ -292,7 +292,7 @@ func (r *BusinessConstantInCodeRule) businessArgs(info *types.Info, call *ast.Ca
 			}
 		}
 	case fn.Pkg().Path() == patternkit.ShopspringDecimalPath && decimalConstructors[fn.Name()] && len(call.Args) > 0:
-		if obj := packageConstant(info, call.Args[0]); obj != nil && !isPowerOfTen(obj.Val()) && !isCalendarUnit(obj.Val()) {
+		if obj := packageConstant(info, call.Args[0]); obj != nil && !isPowerOfTen(obj.Val()) && !isCalendarUnit(obj.Val()) && !isQuarterUnit(obj) {
 			uses = append(uses, constUse{obj: obj, pos: call.Args[0].Pos(), kind: "a decimal amount (money or a rate)"})
 		}
 	}
@@ -362,6 +362,13 @@ const weeksPerYear = 52
 func isCalendarUnit(v constant.Value) bool {
 	n, exact := constant.Int64Val(constant.ToInt(v))
 	return exact && constant.ToInt(v).Kind() == constant.Int && slices.Contains(calendarUnits, n)
+}
+
+// isQuarterUnit reports the months of a quarter or the quarters of a year: 3
+// and 4 are ordinary amounts too, so the constant's name has to say quarter.
+func isQuarterUnit(obj *types.Const) bool {
+	n, exact := constant.Int64Val(constant.ToInt(obj.Val()))
+	return exact && (n == 3 || n == 4) && strings.Contains(strings.ToLower(obj.Name()), "quarter")
 }
 
 // isPowerOfTen reports whether |v| is 1, 10, 100, ... or 0.1, 0.01, ...:
