@@ -165,6 +165,30 @@ func levelTables(from []*pgquery.Node) map[string]string {
 	return tables
 }
 
+func selectScopeOffset(from []*pgquery.Node, shift int) int {
+	location := -1
+	var visit func(*pgquery.Node)
+	visit = func(node *pgquery.Node) {
+		if node == nil {
+			return
+		}
+		switch {
+		case node.GetRangeVar() != nil:
+			candidate := int(node.GetRangeVar().GetLocation())
+			if candidate >= 0 && (location < 0 || candidate < location) {
+				location = candidate
+			}
+		case node.GetJoinExpr() != nil:
+			visit(node.GetJoinExpr().GetLarg())
+			visit(node.GetJoinExpr().GetRarg())
+		}
+	}
+	for _, node := range from {
+		visit(node)
+	}
+	return max(0, location-shift)
+}
+
 // joinQuals returns the ON conditions of the joins of a FROM item.
 func joinQuals(node *pgquery.Node) []*pgquery.Node {
 	join := node.GetJoinExpr()

@@ -100,8 +100,15 @@ func SqlTexts(root ast.Node, accept func(string) bool) []SqlLiteral {
 		for _, operand := range helpers.ConcatOperands(expr) {
 			piece, isLit := operand.(*ast.BasicLit)
 			text, ok := "", false
+			pos := operand.Pos()
+			raw := false
 			if isLit {
 				text, ok = GoStringLiteral(piece)
+				raw = piece.Value[0] == '`'
+			} else if ident, isIdent := operand.(*ast.Ident); isIdent {
+				if declared := declaredStringLiteral(ident); declared != nil {
+					text, ok = GoStringLiteral(declared)
+				}
 			}
 			if !ok {
 				gaps = append(gaps, builder.Len())
@@ -111,7 +118,7 @@ func SqlTexts(root ast.Node, accept func(string) bool) []SqlLiteral {
 			hasLiteral = true
 			start := builder.Len()
 			builder.WriteString(fmtVerb.ReplaceAllString(text, "$$9"))
-			literal.pieces = append(literal.pieces, sqlPiece{start: start, end: builder.Len(), pos: piece.Pos(), raw: piece.Value[0] == '`'})
+			literal.pieces = append(literal.pieces, sqlPiece{start: start, end: builder.Len(), pos: pos, raw: raw})
 		}
 		literal.Text = builder.String()
 		if len(gaps) > 0 {
@@ -127,6 +134,20 @@ func SqlTexts(root ast.Node, accept func(string) bool) []SqlLiteral {
 		return false
 	})
 	return literals
+}
+
+func declaredStringLiteral(ident *ast.Ident) *ast.BasicLit {
+	if ident == nil || ident.Obj == nil {
+		return nil
+	}
+	if _, ok := ident.Obj.Decl.(*ast.ValueSpec); !ok {
+		return nil
+	}
+	literal, ok := DeclaredValue(ident).(*ast.BasicLit)
+	if !ok || literal.Kind != token.STRING {
+		return nil
+	}
+	return literal
 }
 
 // IsStringOrConcat reports a string literal or a + expression, which may
