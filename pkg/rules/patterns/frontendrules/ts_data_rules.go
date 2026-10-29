@@ -582,10 +582,14 @@ func namesMissingValue(name string) bool {
 //	amount: parseSafe(txn.amount)
 //
 // A payload without the amount shows as a zero-amount operation, and the sum
-// over the list is wrong without a sign of it.
+// over the list is wrong without a sign of it. Metric properties defaulted to
+// zero are also reported: stats?.requestCount ?? 0 presents missing data as a
+// measured count. A local value and a comparison against zero are left out.
 type MissingAmountCoercedToZeroRule struct {
 	*rules.BaseRule
 }
+
+const defaultMetricWords = "Count|Total|Sum|Avg|Average|Rate|Ratio|Pct|Percent|Usd"
 
 // NewMissingAmountCoercedToZeroRule creates the rule
 func NewMissingAmountCoercedToZeroRule() *MissingAmountCoercedToZeroRule {
@@ -598,9 +602,118 @@ func NewMissingAmountCoercedToZeroRule() *MissingAmountCoercedToZeroRule {
 }
 
 var (
-	jsUntypedNumberParser = regexp.MustCompile(`(?:\bfunction\s+([A-Za-z_$][\w$]*)|\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*)\s*\(\s*[A-Za-z_$][\w$]*\s*\??\s*:\s*(?:unknown|any)\s*\)\s*:\s*number\s*(?:=>\s*)?`)
-	jsZeroResult          = regexp.MustCompile(`(?:[?:]|\breturn|\|\||\?\?)\s*0\s*(?:[;})\n]|$)|,\s*0\s*\)`)
+	jsUntypedNumberParser    = regexp.MustCompile(`(?:\bfunction\s+([A-Za-z_$][\w$]*)|\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*)\s*\(\s*[A-Za-z_$][\w$]*\s*\??\s*:\s*(?:unknown|any)\s*\)\s*:\s*number\s*(?:=>\s*)?`)
+	jsZeroResult             = regexp.MustCompile(`(?:[?:]|\breturn|\|\||\?\?)\s*0\s*(?:[;})\n]|$)|,\s*0\s*\)`)
+	jsMetricFallback         = regexp.MustCompile(`((?:[A-Za-z_$][\w$]*\s*(?:\?\.|\.)\s*)+[A-Za-z_$][\w$]*)\s*(?:\?\?|\|\|)\s*(?:0\b|'0'|"0")`)
+	jsMetricWords            = regexp.MustCompile(`^[A-Za-z_$][\w$]*$`)
+	jsConditionComparePrefix = regexp.MustCompile(`^(?:===?|!==?|<=|>=|<|>)`)
+	jsConditionCompareSuffix = regexp.MustCompile(`(?:===?|!==?|<=|>=|<|>)$`)
 )
+
+// Configure reads the optional metric_words setting (pipe-separated).
+func (r *MissingAmountCoercedToZeroRule) Configure(settings map[string]any) error {
+	return r.BaseRule.Configure(settings)
+}
+
+func (r *MissingAmountCoercedToZeroRule) metricWords() map[string]bool {
+	words := make(map[string]bool)
+	for word := range strings.SplitSeq(r.GetStringSetting("metric_words", defaultMetricWords), "|") {
+		word = strings.ToLower(strings.TrimSpace(word))
+		if word != "" {
+			words[word] = true
+		}
+	}
+	return words
+}
+
+func isMetricProperty(name string, words map[string]bool) bool {
+	if !jsMetricWords.MatchString(name) {
+		return false
+	}
+	parts := helpers.IdentifierWords(name)
+	if len(parts) == 0 {
+		return false
+	}
+	if words[strings.ToLower(parts[len(parts)-1])] {
+		return true
+	}
+	return words["total"] && strings.EqualFold(parts[0], "total")
+}
+
+func metricFallbackIsCompared(f patternkit.JsFlat, start, end int) bool {
+	code := f.Code
+	cursor := end
+	for {
+		for cursor < len(code) && (code[cursor] == ' ' || code[cursor] == '\t' || code[cursor] == '\r' || code[cursor] == '\n') {
+			cursor++
+		}
+		if cursor >= len(code) || code[cursor] != ')' {
+			break
+		}
+		open := matchingParenOpen(code, cursor)
+		if open < 0 || !isGroupingParen(code, open) {
+			break
+		}
+		cursor++
+	}
+	if jsConditionComparePrefix.MatchString(strings.TrimLeft(code[cursor:], " \t\r\n")) {
+		return true
+	}
+
+	cursor = start
+	for {
+		for cursor > 0 && (code[cursor-1] == ' ' || code[cursor-1] == '\t' || code[cursor-1] == '\r' || code[cursor-1] == '\n') {
+			cursor--
+		}
+		if cursor == 0 || code[cursor-1] != '(' || !isGroupingParen(code, cursor-1) {
+			break
+		}
+		cursor--
+	}
+	return jsConditionCompareSuffix.MatchString(strings.TrimRight(code[:cursor], " \t\r\n"))
+}
+
+func matchingParenOpen(code string, close int) int {
+	depth := 0
+	for i := close; i >= 0; i-- {
+		switch code[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func isGroupingParen(code string, open int) bool {
+	before := strings.TrimRight(code[:open], " \t\r\n")
+	if before == "" {
+		return true
+	}
+	last := before[len(before)-1]
+	return !((last >= 'a' && last <= 'z') || (last >= 'A' && last <= 'Z') || (last >= '0' && last <= '9') || last == '_' || last == '$' || last == ')' || last == ']')
+}
+
+func (r *MissingAmountCoercedToZeroRule) metricFallbackViolations(ctx *core.FileContext, f patternkit.JsFlat) []*core.Violation {
+	var violations []*core.Violation
+	words := r.metricWords()
+	for _, match := range jsMetricFallback.FindAllStringSubmatchIndex(f.Text, -1) {
+		property := f.Code[match[2]:match[3]]
+		last := property[strings.LastIndexAny(property, ".")+1:]
+		last = strings.TrimPrefix(last, "?")
+		if !isMetricProperty(last, words) || metricFallbackIsCompared(f, match[0], match[1]) {
+			continue
+		}
+		violations = patternkit.JsReport(violations, r.BaseRule, ctx, f.Line(match[0]),
+			"Missing metric "+last+" shown as 0 — the result presents an unknown value as a measured zero",
+			"Keep the metric missing, or show an explicit unavailable value")
+	}
+	return violations
+}
 
 // jsMoneyArgument is a call argument that reads a money field.
 const jsMoneyArgument = `\s*\(\s*[\w$.?\[\]]*\.\s*\w*(?:[Aa]mount|[Ff]ee|[Bb]alance|[Pp]rice|[Tt]otal|[Yy]ield)\b`
@@ -610,11 +723,12 @@ func (r *MissingAmountCoercedToZeroRule) AnalyzeFile(ctx *core.FileContext) []*c
 	if ctx.HasGoAST() {
 		return r.analyzeGoMissingAmounts(ctx)
 	}
-	if !productionFrontendFile(ctx) {
+	if !productionFrontendFile(ctx) || ctx.IsGenerated() || patternkit.IsVendoredOrGeneratedPath(filepath.ToSlash(ctx.RelPath)) {
 		return nil
 	}
 	f := patternkit.NewJSFlat(ctx)
 	var violations []*core.Violation
+	violations = append(violations, r.metricFallbackViolations(ctx, f)...)
 	for _, m := range jsUntypedNumberParser.FindAllStringSubmatchIndex(f.Code, -1) {
 		name := ""
 		for _, g := range []int{2, 4} {
