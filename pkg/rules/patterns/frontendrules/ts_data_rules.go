@@ -695,7 +695,7 @@ func isGroupingParen(code string, open int) bool {
 		return true
 	}
 	last := before[len(before)-1]
-	return !((last >= 'a' && last <= 'z') || (last >= 'A' && last <= 'Z') || (last >= '0' && last <= '9') || last == '_' || last == '$' || last == ')' || last == ']')
+	return (last < 'a' || last > 'z') && (last < 'A' || last > 'Z') && (last < '0' || last > '9') && last != '_' && last != '$' && last != ')' && last != ']'
 }
 
 func (r *MissingAmountCoercedToZeroRule) metricFallbackViolations(ctx *core.FileContext, f patternkit.JsFlat) []*core.Violation {

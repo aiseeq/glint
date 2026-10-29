@@ -177,7 +177,7 @@ func splitMoneyName(name string) []string {
 		if current >= 'A' && current <= 'Z' && (previous >= 'a' && previous <= 'z' || previous >= '0' && previous <= '9' || previous >= 'A' && previous <= 'Z' && i+1 < len(name) && name[i+1] >= 'a' && name[i+1] <= 'z') {
 			parts = append(parts, name[start:i])
 			start = i
-		} else if !(current >= 'A' && current <= 'Z' || current >= 'a' && current <= 'z' || current >= '0' && current <= '9') {
+		} else if (current < 'A' || current > 'Z') && (current < 'a' || current > 'z') && (current < '0' || current > '9') {
 			if start < i {
 				parts = append(parts, name[start:i])
 			}
@@ -558,7 +558,7 @@ func jsxTagOperator(code string, pos int) bool {
 	if i < pos && code[i] == '/' {
 		i++
 	}
-	if i >= pos || !(code[i] >= 'A' && code[i] <= 'Z' || code[i] >= 'a' && code[i] <= 'z') {
+	if i >= pos || (code[i] < 'A' || code[i] > 'Z') && (code[i] < 'a' || code[i] > 'z') {
 		return false
 	}
 	depth := 0

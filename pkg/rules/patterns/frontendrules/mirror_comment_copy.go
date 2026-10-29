@@ -60,7 +60,7 @@ func (r *MirrorCommentCopyRule) AnalyzeFile(c *core.FileContext) []*core.Violati
 		start := i
 		for start > 0 {
 			commentLine := strings.TrimSpace(c.Lines[start-1])
-			if !(strings.HasPrefix(commentLine, "//") || strings.HasPrefix(commentLine, "/*") || strings.HasPrefix(commentLine, "*")) {
+			if !strings.HasPrefix(commentLine, "//") && !strings.HasPrefix(commentLine, "/*") && !strings.HasPrefix(commentLine, "*") {
 				break
 			}
 			start--
