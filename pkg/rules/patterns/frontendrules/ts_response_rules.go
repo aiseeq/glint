@@ -370,15 +370,20 @@ var decimalTypeName = regexp.MustCompile(`Decimal$`)
 
 // UseProjectFiles collects the decimal json fields of the Go structs.
 func (r *TSNumberFieldForDecimalJSONRule) UseProjectFiles(files []*core.FileContext) {
-	r.ResetState()
+	r.decimals = decimalJSONStructFields(files)
+}
+
+// decimalJSONStructFields collects decimal and non-decimal JSON field names
+// from production Go structs, then removes fields with conflicting types.
+func decimalJSONStructFields(files []*core.FileContext) map[string]map[string]bool {
+	decimals := make(map[string]map[string]bool)
 	conflicts := make(map[string]map[string]bool)
 	for _, ctx := range files {
 		if !patternkit.ProductionGoFile(ctx) {
 			continue
 		}
 		if strings.Contains(string(ctx.Content), "MarshalJSONWithoutQuotes = true") {
-			r.ResetState()
-			return
+			return make(map[string]map[string]bool)
 		}
 		ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 			spec, ok := n.(*ast.TypeSpec)
@@ -394,9 +399,8 @@ func (r *TSNumberFieldForDecimalJSONRule) UseProjectFiles(files []*core.FileCont
 				if !ok || len(field.Names) != 1 || name == "" || name == "-" {
 					continue
 				}
-				decimal := decimalTypeName.MatchString(typeIdentName(field.Type))
-				set := r.decimals
-				if !decimal {
+				set := decimals
+				if !decimalTypeName.MatchString(typeIdentName(field.Type)) {
 					set = conflicts
 				}
 				if set[spec.Name.Name] == nil {
@@ -409,9 +413,10 @@ func (r *TSNumberFieldForDecimalJSONRule) UseProjectFiles(files []*core.FileCont
 	}
 	for structName, fields := range conflicts {
 		for name := range fields {
-			delete(r.decimals[structName], name)
+			delete(decimals[structName], name)
 		}
 	}
+	return decimals
 }
 
 // typeIdentName returns the last identifier of a field type: SafeDecimal
