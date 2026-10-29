@@ -61,7 +61,9 @@ func init() {
 // union of a property lacks a value the backend assigns to the field of the
 // struct of the same name sent under that JSON name. Literal SQL IN lists in
 // production Go files are compared by table and column: repeated lists and
-// lists one value apart can drift as the queries change.
+// lists one value apart can drift as the queries change. A TypeScript list
+// that exactly repeats a Go constant group, list variable or case clause is
+// reported as a copy of the backend group.
 type ValueSetDriftRule struct {
 	*rules.BaseRule
 	// index holds the sets of the root under analysis; the check flow sets it
@@ -127,6 +129,7 @@ func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 		return []*core.Violation{v}
 	}
 	sets := valueset.FileSets(ctx)
+	tsLists := valueset.FileTSLists(ctx)
 	violations := r.optionLabelDrift(ctx)
 	violations = append(violations, r.sqlValueSetFindings(ctx)...)
 	for _, set := range sets {
@@ -148,7 +151,36 @@ func (r *ValueSetDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 		v.WithSuggestion("Keep one source of the set or table - a shared list, map or function the other places call - and derive the others from it. If they differ on purpose, keep them apart and add an exception with the reason: merging them changes what each place does")
 		violations = append(violations, v)
 	}
+	violations = append(violations, r.goGroupFindings(ctx, tsLists, violations)...)
 	return violations
+}
+
+func (r *ValueSetDriftRule) goGroupFindings(ctx *core.FileContext, lists []valueset.TSList, existing []*core.Violation) []*core.Violation {
+	var findings []*core.Violation
+	for _, list := range lists {
+		if ctx.IsSuppressed(list.Line, r.Name()) || slices.ContainsFunc(existing, func(v *core.Violation) bool { return v.Line == list.Line }) {
+			continue
+		}
+		var closest *goValueGroup
+		for i := range r.tables.valueGroups {
+			group := &r.tables.valueGroups[i]
+			if !slices.Equal(group.members, list.Members) {
+				continue
+			}
+			if closest == nil || (valueset.Set{Path: closest.path, Line: closest.line, Members: nil}).Before(valueset.Set{Path: group.path, Line: group.line, Members: nil}) {
+				closest = group
+			}
+		}
+		if closest == nil {
+			continue
+		}
+		message := fmt.Sprintf("Go group %s is already declared at %s:%d; use the backend value (a response field or generated constant) instead of keeping a copy", closest.name, closest.path, closest.line)
+		v := r.CreateViolation(ctx.RelPath, list.Line, message)
+		v.WithCode(strings.TrimSpace(ctx.GetLine(list.Line)))
+		v.WithSuggestion("Read the status group from the backend response or a generated contract instead of maintaining a second list")
+		findings = append(findings, v)
+	}
+	return findings
 }
 
 // bestMatch finds the set this one copies, if any.

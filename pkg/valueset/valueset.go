@@ -709,6 +709,178 @@ func lineIndex(text string) func(int) int {
 	}
 }
 
+// TSList is a literal TypeScript list, with same-file literal spreads expanded.
+type TSList struct {
+	Path    string
+	Line    int
+	Members []string
+}
+
+type tsListPart struct {
+	value  string
+	spread string
+}
+
+type tsListCandidate struct {
+	line  int
+	name  string
+	parts []tsListPart
+}
+
+// FileTSLists extracts literal TypeScript lists, expanding spreads that name
+// another literal list in the same file.
+func FileTSLists(ctx *core.FileContext) []TSList {
+	if !ctx.IsTypeScriptFile() || ctx.IsTestFile() || ctx.IsGenerated() {
+		return nil
+	}
+	text := strings.Join(helpers.FileJSText(ctx), "\n")
+	code := strings.Join(helpers.FileJSCode(ctx), "\n")
+	lineAt := lineIndex(text)
+	var candidates []tsListCandidate
+	for i := 0; i < len(code); i++ {
+		if code[i] != '[' {
+			continue
+		}
+		end := matchingTSBracket(code, i)
+		if end < 0 {
+			continue
+		}
+		parts, ok := tsListParts(text[i+1 : end])
+		if !ok {
+			continue
+		}
+		name := ""
+		if a := jsAssigned.FindStringSubmatch(text[max(0, i-maxDeclaration):i]); a != nil {
+			name = a[1]
+		}
+		candidates = append(candidates, tsListCandidate{line: lineAt(i), name: name, parts: parts})
+		i = end
+	}
+	byName := make(map[string]tsListCandidate)
+	for _, candidate := range candidates {
+		if candidate.name != "" {
+			byName[candidate.name] = candidate
+		}
+	}
+	var expand func(tsListCandidate, map[string]bool) ([]string, bool)
+	expand = func(candidate tsListCandidate, active map[string]bool) ([]string, bool) {
+		var values []string
+		for _, part := range candidate.parts {
+			if part.spread == "" {
+				values = append(values, part.value)
+				continue
+			}
+			next, ok := byName[part.spread]
+			if !ok || active[part.spread] {
+				return nil, false
+			}
+			active[part.spread] = true
+			members, ok := expand(next, active)
+			delete(active, part.spread)
+			if !ok {
+				return nil, false
+			}
+			values = append(values, members...)
+		}
+		return values, true
+	}
+	var lists []TSList
+	for _, candidate := range candidates {
+		members, ok := expand(candidate, map[string]bool{})
+		if !ok || len(members) < 2 {
+			continue
+		}
+		unique := slices.Clone(members)
+		slices.Sort(unique)
+		if len(slices.Compact(unique)) != len(unique) {
+			continue
+		}
+		lists = append(lists, TSList{Path: ctx.RelPath, Line: candidate.line, Members: unique})
+	}
+	return lists
+}
+
+func tsListParts(body string) ([]tsListPart, bool) {
+	var parts []tsListPart
+	start, depth := 0, 0
+	var quote byte
+	escaped := false
+	appendPart := func(raw string) bool {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return true
+		}
+		if strings.HasPrefix(raw, "...") {
+			name := strings.TrimSpace(raw[3:])
+			if !regexp.MustCompile(`^[A-Za-z_$][\w$]*$`).MatchString(name) {
+				return false
+			}
+			parts = append(parts, tsListPart{spread: name})
+			return true
+		}
+		if len(raw) < 2 || (raw[0] != '\'' && raw[0] != '"') || raw[len(raw)-1] != raw[0] {
+			return false
+		}
+		value := raw[1 : len(raw)-1]
+		if !member.MatchString(value) {
+			return false
+		}
+		parts = append(parts, tsListPart{value: value})
+		return true
+	}
+	for i := 0; i < len(body); i++ {
+		ch := body[i]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch ch {
+		case '\'', '"':
+			quote = ch
+		case '[', '(', '{':
+			depth++
+		case ']', ')', '}':
+			depth--
+			if depth < 0 {
+				return nil, false
+			}
+		case ',':
+			if depth == 0 {
+				if !appendPart(body[start:i]) {
+					return nil, false
+				}
+				start = i + 1
+			}
+		}
+	}
+	if quote != 0 || depth != 0 || !appendPart(body[start:]) {
+		return nil, false
+	}
+	return parts, len(parts) > 0
+}
+
+func matchingTSBracket(code string, open int) int {
+	depth := 0
+	for i := open; i < len(code); i++ {
+		switch code[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 // Index is every set of a project, with the sets each value is a member of.
 type Index struct {
 	Sets     []Set

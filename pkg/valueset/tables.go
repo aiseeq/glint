@@ -51,10 +51,13 @@ type Ref struct {
 type RefSet struct {
 	Path string
 	Line int
+	Name string
 	Refs []Ref
 	// Args is a run of call arguments: only its constants of one set are a
 	// set, the other arguments (an alias, an id list) are not members.
 	Args bool
+	// Case marks labels written in one Go case clause.
+	Case bool
 }
 
 // Pair is a literal translated to a constant, or a constant to a literal.
@@ -124,6 +127,7 @@ func FileTables(ctx *core.FileContext) Tables {
 func goTables(ctx *core.FileContext) Tables {
 	var t Tables
 	dir := path.Dir(ctxSlash(ctx))
+	names := goLiteralNames(ctx.GoAST)
 	for _, decl := range ctx.GoAST.Decls {
 		gen, ok := decl.(*ast.GenDecl)
 		if !ok || gen.Tok != token.CONST {
@@ -151,7 +155,7 @@ func goTables(ctx *core.FileContext) Tables {
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.CompositeLit:
-			t.compositeLit(ctx, node)
+			t.compositeLit(ctx, node, names[node])
 		case *ast.CallExpr:
 			var run []Ref
 			flush := func() {
@@ -204,6 +208,32 @@ func goTables(ctx *core.FileContext) Tables {
 	return t
 }
 
+func goLiteralNames(file *ast.File) map[*ast.CompositeLit]string {
+	names := make(map[*ast.CompositeLit]string)
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.ValueSpec:
+			if len(node.Names) == len(node.Values) {
+				for i, value := range node.Values {
+					if lit, ok := ast.Unparen(value).(*ast.CompositeLit); ok {
+						names[lit] = node.Names[i].Name
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			if len(node.Lhs) == len(node.Rhs) {
+				for i, value := range node.Rhs {
+					if lit, ok := ast.Unparen(value).(*ast.CompositeLit); ok {
+						names[lit] = goExprName(node.Lhs[i])
+					}
+				}
+			}
+		}
+		return true
+	})
+	return names
+}
+
 func ctxSlash(ctx *core.FileContext) string {
 	return strings.ReplaceAll(ctx.RelPath, "\\", "/")
 }
@@ -239,19 +269,19 @@ func (t *Tables) assign(ctx *core.FileContext, field string, value ast.Expr) {
 	t.Assigns = append(t.Assigns, a)
 }
 
-func (t *Tables) compositeLit(ctx *core.FileContext, lit *ast.CompositeLit) {
+func (t *Tables) compositeLit(ctx *core.FileContext, lit *ast.CompositeLit, name string) {
 	switch typ := lit.Type.(type) {
 	case *ast.ArrayType:
 		var refs []Ref
 		for _, elt := range lit.Elts {
-			name, ok := refName(elt)
+			ref, ok := refName(elt)
 			if !ok {
 				return
 			}
-			refs = append(refs, Ref{Name: name, Line: ctx.LineFor(elt)})
+			refs = append(refs, Ref{Name: ref, Line: ctx.LineFor(elt)})
 		}
 		if len(refs) > 1 {
-			t.Sets = append(t.Sets, RefSet{Path: ctx.RelPath, Line: ctx.LineFor(lit), Refs: refs})
+			t.Sets = append(t.Sets, RefSet{Path: ctx.RelPath, Line: ctx.LineFor(lit), Name: name, Refs: refs})
 		}
 	case *ast.MapType:
 		var pairs []Pair
@@ -322,7 +352,7 @@ func (t *Tables) switchStmt(ctx *core.FileContext, sw *ast.SwitchStmt) {
 			labels = append(labels, name)
 		}
 		if len(refs) > 1 && len(refs) == len(clause.List) {
-			t.Sets = append(t.Sets, RefSet{Path: ctx.RelPath, Line: ctx.LineFor(clause), Refs: refs})
+			t.Sets = append(t.Sets, RefSet{Path: ctx.RelPath, Line: ctx.LineFor(clause), Refs: refs, Case: true})
 		}
 		if result := singleReturn(clause.Body); result != nil {
 			for _, expr := range clause.List {

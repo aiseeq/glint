@@ -31,6 +31,14 @@ type tableIndex struct {
 	// (Struct.json), with where.
 	fieldValues map[string]map[string]string
 	unions      []valueset.PropUnion
+	valueGroups []goValueGroup
+}
+
+type goValueGroup struct {
+	path    string
+	line    int
+	name    string
+	members []string
 }
 
 type constSet struct {
@@ -92,6 +100,7 @@ func newTableIndex(files []*core.FileContext) *tableIndex {
 		t := &tables[i]
 		for _, s := range t.Sets {
 			idx.addSet(s)
+			idx.addValueGroup(s)
 		}
 		for _, m := range t.Mappings {
 			pairs := make(map[valueset.Pair]bool)
@@ -132,6 +141,72 @@ func newTableIndex(files []*core.FileContext) *tableIndex {
 		}
 	}
 	return idx
+}
+
+func (idx *tableIndex) addValueGroup(s valueset.RefSet) {
+	if s.Args {
+		var run []valueset.ConstDecl
+		flush := func() {
+			if len(run) >= 3 {
+				var members []string
+				for _, decl := range run {
+					members = append(members, decl.Value)
+				}
+				idx.keepValueGroup(s.Path, run[0].Line, run[0].Group, "", members)
+			}
+			run = nil
+		}
+		for _, ref := range s.Refs {
+			decl, ok := idx.constDecl(ref.Name)
+			if !ok {
+				flush()
+				continue
+			}
+			if len(run) > 0 && run[0].Group != decl.Group {
+				flush()
+			}
+			value, ok := idx.constValue(ref.Name)
+			if !ok {
+				flush()
+				continue
+			}
+			decl.Value = value
+			decl.Line = ref.Line
+			run = append(run, decl)
+		}
+		flush()
+		return
+	}
+	if (s.Case && len(s.Refs) < 3) || (!s.Case && s.Name == "") {
+		return
+	}
+	var group string
+	members := make([]string, 0, len(s.Refs))
+	for _, ref := range s.Refs {
+		decl, ok := idx.constDecl(ref.Name)
+		if !ok || (group != "" && decl.Group != group) {
+			return
+		}
+		group = decl.Group
+		value, ok := idx.constValue(ref.Name)
+		if !ok {
+			return
+		}
+		members = append(members, value)
+	}
+	idx.keepValueGroup(s.Path, s.Line, group, s.Name, members)
+}
+
+func (idx *tableIndex) keepValueGroup(path string, line int, group, name string, members []string) {
+	if len(members) < 2 || len(slices.Compact(slices.Sorted(slices.Values(members)))) != len(members) {
+		return
+	}
+	if name == "" {
+		_, name, _ = strings.Cut(group, "\x00")
+		name = strings.TrimPrefix(name, "type ")
+	}
+	members = slices.Sorted(slices.Values(members))
+	idx.valueGroups = append(idx.valueGroups, goValueGroup{path: path, line: line, name: name, members: members})
 }
 
 // constValue is the value of a constant declared once under that name.
