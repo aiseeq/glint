@@ -16,6 +16,18 @@ func TestPredicatesConjunctsNormalize(t *testing.T) {
 	or := ConditionConjuncts(`status = 'active' OR status = 'pending'`)
 	require.Len(t, or, 1)
 }
+func TestPredicatesNormalizeKeepsLiteralCase(t *testing.T) {
+	open := ConditionConjuncts(`status = 'Open'`)
+	lower := ConditionConjuncts(`status = 'open'`)
+	doubleSpace := ConditionConjuncts(`status = 'a  b'`)
+	singleSpace := ConditionConjuncts(`status = 'a b'`)
+	upperColumn := ConditionConjuncts(`STATUS = 'x'`)
+	lowerColumn := ConditionConjuncts(`status = 'x'`)
+	require.NotEqual(t, open[0].Norm, lower[0].Norm)
+	require.NotEqual(t, doubleSpace[0].Norm, singleSpace[0].Norm)
+	require.Equal(t, upperColumn[0].Norm, lowerColumn[0].Norm)
+}
+
 func TestPredicatesNestedLevels(t *testing.T) {
 	got := Conjuncts(`WITH recent AS (SELECT id FROM users WHERE status = 'active') SELECT 1 FROM recent r WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = r.id AND o.state = 'open')`)
 	require.GreaterOrEqual(t, len(got), 3)
@@ -55,6 +67,17 @@ func TestPredicatesInListsLevels(t *testing.T) {
 	require.Len(t, deleted, 1)
 	require.Equal(t, "orders", deleted[0].Table)
 }
+func TestPredicatesInListsSchema(t *testing.T) {
+	got := InLists(`SELECT * FROM public.jobs WHERE status IN ('a','b')`)
+	require.Len(t, got, 1)
+	require.Equal(t, "public.jobs", got[0].Table)
+}
+
+func TestPredicatesInListsWithParam(t *testing.T) {
+	got := InLists(`SELECT * FROM jobs WHERE status IN ('a','b',$1)`)
+	require.Empty(t, got)
+}
+
 func TestPredicatesUpdateGuard(t *testing.T) {
 	transition := Conjuncts(`UPDATE users SET status = 'deleted' WHERE id = $1 AND status != 'deleted'`)
 	require.Len(t, transition, 2)

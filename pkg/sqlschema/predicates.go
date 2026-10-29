@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
 
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 	"google.golang.org/protobuf/proto"
@@ -160,18 +161,7 @@ func collectCondition(out *[]Conjunct, n *pgquery.Node, op string, tables map[st
 	if n == nil {
 		return ""
 	}
-	var terms []*pgquery.Node
-	var split func(*pgquery.Node)
-	split = func(x *pgquery.Node) {
-		if b := x.GetBoolExpr(); b != nil && b.GetBoolop() == pgquery.BoolExprType_AND_EXPR {
-			for _, a := range b.GetArgs() {
-				split(a)
-			}
-		} else {
-			terms = append(terms, x)
-		}
-	}
-	split(n)
+	terms := splitAndTerms(n)
 	guarded := hasKeyGuard(terms)
 	for _, term := range terms {
 		norm, err := deparseExpr(term)
@@ -183,6 +173,58 @@ func collectCondition(out *[]Conjunct, n *pgquery.Node, op string, tables map[st
 	}
 	return ""
 }
+func normalizeDeparsedSQL(text string) string {
+	var normalized strings.Builder
+	quoted, space := false, false
+	runes := []rune(strings.TrimSpace(text))
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if quoted {
+			normalized.WriteRune(r)
+			if r == '\'' {
+				if i+1 < len(runes) && runes[i+1] == '\'' {
+					i++
+					normalized.WriteRune(runes[i])
+				} else {
+					quoted = false
+				}
+			}
+			continue
+		}
+		if unicode.IsSpace(r) {
+			space = true
+			continue
+		}
+		if space && normalized.Len() > 0 {
+			normalized.WriteByte(' ')
+		}
+		space = false
+		if r == '\'' {
+			quoted = true
+			normalized.WriteRune(r)
+		} else {
+			normalized.WriteString(strings.ToLower(string(r)))
+		}
+	}
+	return normalized.String()
+}
+
+func splitAndTerms(node *pgquery.Node) []*pgquery.Node {
+	var terms []*pgquery.Node
+	var split func(*pgquery.Node)
+	split = func(current *pgquery.Node) {
+		if boolean := current.GetBoolExpr(); boolean != nil && boolean.GetBoolop() == pgquery.BoolExprType_AND_EXPR {
+			for _, arg := range boolean.GetArgs() {
+				split(arg)
+			}
+			return
+		}
+		terms = append(terms, current)
+	}
+	split(node)
+	return terms
+}
+
 func hasKeyGuard(terms []*pgquery.Node) bool {
 	for _, t := range terms {
 		a := t.GetAExpr()
@@ -305,7 +347,7 @@ func deparseTreeText(expression *pgquery.Node) (string, error) {
 		return "", fmt.Errorf("deparse SQL expression: %w", err)
 	}
 	text = strings.TrimSpace(strings.TrimPrefix(text, "SELECT 1 WHERE "))
-	return strings.ToLower(strings.Join(strings.Fields(text), " ")), nil
+	return normalizeDeparsedSQL(text), nil
 }
 
 // InLists returns literal IN and ANY membership lists found in SQL.
@@ -455,18 +497,7 @@ func collectInLists(out *[]InList, condition *pgquery.Node, tables map[string]st
 	if condition == nil {
 		return
 	}
-	var terms []*pgquery.Node
-	var splitAnd func(*pgquery.Node)
-	splitAnd = func(node *pgquery.Node) {
-		if boolean := node.GetBoolExpr(); boolean != nil && boolean.GetBoolop() == pgquery.BoolExprType_AND_EXPR {
-			for _, arg := range boolean.GetArgs() {
-				splitAnd(arg)
-			}
-			return
-		}
-		terms = append(terms, node)
-	}
-	splitAnd(condition)
+	terms := splitAndTerms(condition)
 	guarded := hasKeyGuard(terms)
 	levelExpressions(condition, func(expr *pgquery.A_Expr) {
 		appendInList(out, expr, tables, shift, guarded)
@@ -501,21 +532,27 @@ func literalList(n *pgquery.Node) []string {
 	var vals []string
 	if l := n.GetList(); l != nil {
 		for _, item := range l.GetItems() {
-			if s, ok := literalText(item); ok {
-				vals = append(vals, s)
+			s, ok := literalText(item)
+			if !ok {
+				return nil
 			}
+			vals = append(vals, s)
 		}
 	} else if ar := n.GetArrayExpr(); ar != nil {
 		for _, item := range ar.GetElements() {
-			if s, ok := literalText(item); ok {
-				vals = append(vals, s)
+			s, ok := literalText(item)
+			if !ok {
+				return nil
 			}
+			vals = append(vals, s)
 		}
 	} else if ar := n.GetAArrayExpr(); ar != nil {
 		for _, item := range ar.GetElements() {
-			if s, ok := literalText(item); ok {
-				vals = append(vals, s)
+			s, ok := literalText(item)
+			if !ok {
+				return nil
 			}
+			vals = append(vals, s)
 		}
 	} else if c := n.GetAConst(); c != nil {
 		if s, ok := literalText(n); ok {

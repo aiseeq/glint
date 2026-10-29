@@ -117,6 +117,17 @@ func levelAliases(from []*pgquery.Node) map[string]bool {
 	return aliases
 }
 
+func tableName(relation *pgquery.RangeVar) string {
+	if relation == nil {
+		return ""
+	}
+	name := strings.ToLower(relation.GetRelname())
+	if schema := strings.ToLower(relation.GetSchemaname()); schema != "" {
+		return schema + "." + name
+	}
+	return name
+}
+
 // levelTables returns the tables of a FROM list by the names its own level
 // knows them by - the alias, or the table name - not those inside
 // subqueries; "" names the only relation of a list that has one, which an
@@ -130,7 +141,7 @@ func levelTables(from []*pgquery.Node) map[string]string {
 		case node.GetRangeVar() != nil:
 			relations++
 			rv := node.GetRangeVar()
-			name := strings.ToLower(rv.GetRelname())
+			name := tableName(rv)
 			if rv.GetAlias() != nil {
 				tables[strings.ToLower(rv.GetAlias().GetAliasname())] = name
 			} else {
@@ -440,7 +451,7 @@ func Deletes(sql string) []Delete {
 		walk(raw.GetStmt().ProtoReflect(), func(m proto.Message) {
 			if del, ok := m.(*pgquery.DeleteStmt); ok {
 				rv := del.GetRelation()
-				deletes = append(deletes, Delete{Table: strings.ToLower(rv.GetRelname()), Offset: int(rv.GetLocation()) - shift})
+				deletes = append(deletes, Delete{Table: tableName(rv), Offset: int(rv.GetLocation()) - shift})
 			}
 		})
 	}

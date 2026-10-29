@@ -23,6 +23,25 @@ func TestValueSetDriftSQL_RepeatedSet(t *testing.T) {
 	assert.Empty(t, valueSetDriftFindings(t, files))
 }
 
+func TestValueSetDriftSQL_Schema(t *testing.T) {
+	files := map[string]string{
+		"a.go": "package data\nconst a = `SELECT * FROM public.jobs WHERE status IN ('a','b')`\n",
+		"b.go": "package data\nconst b = `SELECT * FROM public.jobs WHERE status IN ('a','b')`\n",
+		"c.go": "package data\nconst c = `SELECT * FROM private.jobs WHERE status IN ('a','c')`\n",
+		"d.go": "package data\nconst d = `SELECT * FROM private.jobs WHERE status IN ('a','c')`\n",
+	}
+	assert.Empty(t, valueSetDriftFindings(t, files))
+}
+
+func TestValueSetDriftSQL_ListWithParam(t *testing.T) {
+	files := map[string]string{
+		"a.go": "package data\nconst a = `SELECT * FROM jobs WHERE status IN ('a','b',$1)`\n",
+		"b.go": "package data\nconst b = `SELECT * FROM jobs WHERE status IN ('a','b')`\n",
+		"c.go": "package data\nconst c = `SELECT * FROM jobs WHERE status IN ('a','b')`\n",
+	}
+	assert.Empty(t, valueSetDriftFindings(t, files))
+}
+
 func TestValueSetDriftSQL_NotNested(t *testing.T) {
 	files := map[string]string{
 		"a.go": "package data\nconst a = `SELECT * FROM transactions WHERE status IN ('a','b','c')`\n",

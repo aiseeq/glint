@@ -36,6 +36,37 @@ func run() { db.Query("SELECT user_id FROM staff") }
 	assert.Empty(t, rule.AnalyzeFile(owner))
 }
 
+func TestSQLConceptTableOwner_CTENameShadows(t *testing.T) {
+	rule := configuredConceptOwner(t, "")
+	ctx := rulestest.GoFile(t, "alerts/bot.go", `package alerts
+func run() {
+ db.Query("WITH staff AS (SELECT id FROM users) SELECT id FROM staff")
+}
+`)
+	assert.Empty(t, rule.AnalyzeFile(ctx))
+}
+
+func TestSQLConceptTableOwner_Schema(t *testing.T) {
+	rule := NewSQLConceptTableOwnerRule()
+	require.NoError(t, rule.Configure(map[string]any{"concepts": []any{
+		map[string]any{"name": "staff", "table": "public.staff", "files": []any{"consts/staff.go"}},
+	}}))
+	ctx := rulestest.GoFile(t, "alerts/bot.go", `package alerts
+func run() {
+ db.Query("SELECT id FROM public.staff")
+ db.Query("SELECT id FROM private.staff")
+ db.Query("SELECT id FROM staff")
+}
+`)
+	assert.Len(t, rule.AnalyzeFile(ctx), 1)
+
+	unqualified := configuredConceptOwner(t, "")
+	qualified := rulestest.GoFile(t, "alerts/qualified.go", `package alerts
+func run() { db.Query("SELECT id FROM private.staff") }
+`)
+	assert.Len(t, unqualified.AnalyzeFile(qualified), 1)
+}
+
 func TestSQLConceptTableOwner_Exists(t *testing.T) {
 	rule := configuredConceptOwner(t, "")
 	ctx := rulestest.GoFile(t, "alerts/bot.go", `package alerts

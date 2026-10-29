@@ -35,6 +35,20 @@ func count(db interface{ Query(string, ...any) }) {
 	require.Len(t, findings, 1)
 	require.Equal(t, 3, findings[0].Line)
 }
+func TestSQLLiteralCopiesConstant_PredicateLiteralCase(t *testing.T) {
+	findings := predicateCopyFindings(t, map[string]string{
+		"consts/status.go": `package consts
+const OpenStatus = "status = 'Open'"
+`,
+		"store/status.go": `package store
+func read(db interface{ Query(string, ...any) }) {
+ db.Query("SELECT id FROM users WHERE status = 'open'")
+}
+`,
+	})
+	require.Empty(t, findings)
+}
+
 func TestSQLLiteralCopiesConstant_PredicateParamConstant(t *testing.T) {
 	findings := predicateCopyFindings(t, map[string]string{
 		"consts/network.go": `package consts

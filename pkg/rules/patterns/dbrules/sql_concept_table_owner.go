@@ -162,7 +162,7 @@ func (r *SQLConceptTableOwnerRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 		conjuncts := sqlschema.Conjuncts(literal.Text)
 		for _, read := range sqlschema.ReadTables(literal.Text) {
 			for _, concept := range r.concepts {
-				if read.Table != concept.table || isConceptOwner(ctx.RelPath, concept.files) {
+				if !conceptTableMatches(concept.table, read.Table) || isConceptOwner(ctx.RelPath, concept.files) {
 					continue
 				}
 				if read.OuterJoin && !read.NullChecked {
@@ -185,6 +185,13 @@ func (r *SQLConceptTableOwnerRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 		}
 	}
 	return violations
+}
+
+func conceptTableMatches(configured, actual string) bool {
+	if strings.Contains(configured, ".") {
+		return actual == configured
+	}
+	return actual == configured || strings.HasSuffix(actual, "."+configured)
 }
 
 func isConceptOwner(file string, globs []string) bool {
