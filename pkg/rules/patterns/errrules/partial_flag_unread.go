@@ -102,7 +102,7 @@ type partialFlag struct {
 	prefix string
 }
 
-func partialFlagCandidates(info *types.Info, fn *ast.FuncDecl) map[types.Object][]partialFlag {
+func partialFlagCandidates(info *types.Info, fn *ast.FuncDecl) map[types.Object]types.Type {
 	params := make(map[types.Object]bool)
 	if fn.Type.Params != nil {
 		for _, field := range fn.Type.Params.List {
@@ -113,7 +113,8 @@ func partialFlagCandidates(info *types.Info, fn *ast.FuncDecl) map[types.Object]
 			}
 		}
 	}
-	candidates := make(map[types.Object][]partialFlag)
+	candidates := make(map[types.Object]types.Type)
+	cache := make(map[types.Type]bool)
 	add := func(id *ast.Ident, resultType types.Type) {
 		obj := info.ObjectOf(id)
 		if obj == nil || params[obj] {
@@ -122,8 +123,8 @@ func partialFlagCandidates(info *types.Info, fn *ast.FuncDecl) map[types.Object]
 		if resultType == nil {
 			resultType = obj.Type()
 		}
-		if flags := partialFlagFields(resultType); len(flags) > 0 {
-			candidates[obj] = flags
+		if containsPartialFlag(resultType, cache, make(map[types.Type]bool)) {
+			candidates[obj] = resultType
 		}
 	}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -277,7 +278,7 @@ func partialFlagBudgetWrites(typed partialTypedFunction) (map[*types.Var][]budge
 				continue
 			}
 			flag := path[len(path)-1]
-			if !partialFlagPath(partialFlagFields(id.Type()), path) {
+			if !isPartialFlag(flag) {
 				continue
 			}
 			if i >= len(assign.Rhs) || !isTrueBoolean(typed.info, assign.Rhs[i]) {
@@ -419,23 +420,38 @@ func literalFieldIsZero(info *types.Info, expr ast.Expr, fieldName string) bool 
 }
 
 type partialUsage struct {
-	flagRead    map[types.Object]bool
-	written     map[types.Object]bool
+	flagRead    map[types.Object]map[string]bool
+	written     map[types.Object]map[string]bool
 	passedWhole map[types.Object]bool
-	fieldReads  map[types.Object]*ast.SelectorExpr
-	readOrder   []types.Object
+	fieldReads  map[types.Object]map[string]partialFieldRead
+	readOrder   []partialReadEvent
 }
 
-func inspectPartialUsage(info *types.Info, fn *ast.FuncDecl, candidates map[types.Object][]partialFlag) *partialUsage {
+type partialFieldRead struct {
+	selector *ast.SelectorExpr
+	flag     partialFlag
+}
+
+type partialReadEvent struct {
+	root types.Object
+	key  string
+}
+
+type partialReadGroup struct {
+	root     types.Object
+	selector *ast.SelectorExpr
+}
+
+func inspectPartialUsage(info *types.Info, fn *ast.FuncDecl, candidates map[types.Object]types.Type) *partialUsage {
 	u := &partialUsage{
-		flagRead: make(map[types.Object]bool), written: make(map[types.Object]bool),
-		passedWhole: make(map[types.Object]bool), fieldReads: make(map[types.Object]*ast.SelectorExpr),
+		flagRead: make(map[types.Object]map[string]bool), written: make(map[types.Object]map[string]bool),
+		passedWhole: make(map[types.Object]bool), fieldReads: make(map[types.Object]map[string]partialFieldRead),
 	}
 	ast.Inspect(fn.Body, func(n ast.Node) bool { return u.visit(info, fn.Body, n, candidates) })
 	return u
 }
 
-func (u *partialUsage) visit(info *types.Info, body *ast.BlockStmt, n ast.Node, candidates map[types.Object][]partialFlag) bool {
+func (u *partialUsage) visit(info *types.Info, body *ast.BlockStmt, n ast.Node, candidates map[types.Object]types.Type) bool {
 	switch node := n.(type) {
 	case *ast.AssignStmt:
 		for _, lhs := range node.Lhs {
@@ -453,7 +469,7 @@ func (u *partialUsage) visit(info *types.Info, body *ast.BlockStmt, n ast.Node, 
 	return true
 }
 
-func (u *partialUsage) markWholeValues(info *types.Info, exprs []ast.Expr, candidates map[types.Object][]partialFlag) {
+func (u *partialUsage) markWholeValues(info *types.Info, exprs []ast.Expr, candidates map[types.Object]types.Type) {
 	for _, expr := range exprs {
 		id, ok := ast.Unparen(expr).(*ast.Ident)
 		if ok {
@@ -464,7 +480,7 @@ func (u *partialUsage) markWholeValues(info *types.Info, exprs []ast.Expr, candi
 	}
 }
 
-func (u *partialUsage) markFieldRead(info *types.Info, body *ast.BlockStmt, sel *ast.SelectorExpr, candidates map[types.Object][]partialFlag) {
+func (u *partialUsage) markFieldRead(info *types.Info, body *ast.BlockStmt, sel *ast.SelectorExpr, candidates map[types.Object]types.Type) {
 	selection := info.Selections[sel]
 	if selection == nil {
 		return
@@ -473,37 +489,95 @@ func (u *partialUsage) markFieldRead(info *types.Info, body *ast.BlockStmt, sel 
 		return
 	}
 	root, fields := selectorPath(info, sel)
-	flags := candidates[root]
-	if len(flags) == 0 {
+	resultType, ok := candidates[root]
+	if !ok || len(fields) == 0 {
 		return
 	}
-	if partialFlagPath(flags, fields) || partialIndicatorPath(flags, fields) {
-		u.flagRead[root] = true
+	flags := partialFlagsAlongPath(resultType, fields[:len(fields)-1])
+	readFlag := fields[len(fields)-1]
+	if isPartialFlag(readFlag) {
+		for _, flag := range flags {
+			if flag.field == readFlag {
+				u.markFlagRead(root, flag)
+			}
+		}
 		return
 	}
-	if partialFieldPath(flags, fields) && u.fieldReads[root] == nil && !selectorIsAssignmentLHS(body, sel) {
-		u.fieldReads[root] = sel
-		u.readOrder = append(u.readOrder, root)
+	if isPartialIndicatorList(readFlag) {
+		for _, flag := range flags {
+			if samePartialPath(flag.scope, fields[:len(fields)-1]) {
+				u.markFlagRead(root, flag)
+			}
+		}
+		return
+	}
+	applicable := make([]partialFlag, 0, len(flags))
+	for _, flag := range flags {
+		if partialFieldMatchesPrefix(readFlag.Name(), flag.prefix) {
+			applicable = append(applicable, flag)
+		}
+	}
+	if len(applicable) > 0 && !selectorIsAssignmentLHS(body, sel) && !selectorIsNestedReceiver(body, sel) {
+		if u.fieldReads[root] == nil {
+			u.fieldReads[root] = make(map[string]partialFieldRead)
+		}
+		for _, flag := range applicable {
+			key := partialFlagKey(flag)
+			if _, exists := u.fieldReads[root][key]; exists {
+				continue
+			}
+			u.fieldReads[root][key] = partialFieldRead{selector: sel, flag: flag}
+			u.readOrder = append(u.readOrder, partialReadEvent{root: root, key: key})
+		}
 	}
 }
 
-func (r *PartialFlagUnreadRule) firstUnreadFlagFinding(file *core.FileContext, info *types.Info, fn *ast.FuncDecl, candidates map[types.Object][]partialFlag, usage *partialUsage, functions map[*types.Func]partialTypedFunction) []*core.Violation {
-	for _, obj := range usage.readOrder {
-		if usage.written[obj] || usage.flagRead[obj] || usage.passedWhole[obj] {
+func (u *partialUsage) markFlagRead(root types.Object, flag partialFlag) {
+	if u.flagRead[root] == nil {
+		u.flagRead[root] = make(map[string]bool)
+	}
+	u.flagRead[root][partialFlagKey(flag)] = true
+}
+
+func (r *PartialFlagUnreadRule) firstUnreadFlagFinding(file *core.FileContext, info *types.Info, fn *ast.FuncDecl, candidates map[types.Object]types.Type, usage *partialUsage, functions map[*types.Func]partialTypedFunction) []*core.Violation {
+	var findings []*core.Violation
+	groups := make(map[partialReadGroup][]partialFlag)
+	var groupOrder []partialReadGroup
+	for _, event := range usage.readOrder {
+		read := usage.fieldReads[event.root][event.key]
+		group := partialReadGroup{root: event.root, selector: read.selector}
+		if _, exists := groups[group]; !exists {
+			groupOrder = append(groupOrder, group)
+		}
+		groups[group] = append(groups[group], read.flag)
+	}
+	for _, group := range groupOrder {
+		obj := group.root
+		if usage.passedWhole[obj] {
+			continue
+		}
+		var unread []partialFlag
+		for _, flag := range groups[group] {
+			key := partialFlagKey(flag)
+			if !usage.written[obj][key] && !usage.flagRead[obj][key] {
+				unread = append(unread, flag)
+			}
+		}
+		if len(unread) == 0 {
 			continue
 		}
 		call := candidateCall(info, fn, obj)
-		if budgetDisabledAtCall(info, call, candidates[obj], functions) {
+		if budgetDisabledAtCall(info, call, unread, functions) {
 			continue
 		}
-		flags := make([]string, 0, len(candidates[obj]))
-		for _, flag := range candidates[obj] {
+		flags := make([]string, 0, len(unread))
+		for _, flag := range unread {
 			flags = append(flags, flag.field.Name())
 		}
 		sort.Strings(flags)
-		return r.finding(file, info, usage.fieldReads[obj], flags[0])
+		findings = append(findings, r.finding(file, info, group.selector, flags[0])...)
 	}
-	return nil
+	return findings
 }
 
 func (r *PartialFlagUnreadRule) finding(file *core.FileContext, info *types.Info, fieldRead *ast.SelectorExpr, flagName string) []*core.Violation {
@@ -517,77 +591,107 @@ func (r *PartialFlagUnreadRule) finding(file *core.FileContext, info *types.Info
 	return []*core.Violation{v}
 }
 
-func partialFlagFields(t types.Type) []partialFlag {
-	var out []partialFlag
-	active := make(map[types.Type]bool)
-	var walk func(types.Type, []*types.Var)
-	walk = func(t types.Type, path []*types.Var) {
-		t = types.Unalias(t)
-		if p, ok := t.(*types.Pointer); ok {
-			t = p.Elem()
+func isPartialFlag(field *types.Var) bool {
+	return field != nil && types.Unalias(field.Type()).Underlying() == types.Typ[types.Bool] && containsPartialFlagPart(field.Name())
+}
+
+func structType(t types.Type) *types.Struct {
+	t = types.Unalias(t)
+	for {
+		switch value := t.(type) {
+		case *types.Pointer:
+			t = types.Unalias(value.Elem())
+		case *types.Named:
+			t = types.Unalias(value.Underlying())
+		default:
+			structure, _ := t.(*types.Struct)
+			return structure
 		}
-		if named, ok := t.(*types.Named); ok {
-			t = named.Underlying()
-		}
-		st, ok := t.(*types.Struct)
-		if !ok || active[st] {
-			return
-		}
-		active[st] = true
-		defer delete(active, st)
-		for field := range st.Fields() {
-			if field.Type().Underlying() == types.Typ[types.Bool] && containsPartialFlagPart(field.Name()) {
-				out = append(out, partialFlag{
-					field: field, scope: append([]*types.Var(nil), path...),
-					prefix: partialFlagPrefix(field.Name()),
-				})
-				continue
+	}
+}
+
+func containsPartialFlag(t types.Type, cache, active map[types.Type]bool) bool {
+	result, _ := containsPartialFlagVisit(t, cache, active)
+	return result
+}
+
+func containsPartialFlagVisit(t types.Type, cache, active map[types.Type]bool) (bool, bool) {
+	t = types.Unalias(t)
+	if result, ok := cache[t]; ok {
+		return result, false
+	}
+	if active[t] {
+		return false, true
+	}
+	active[t] = true
+	defer delete(active, t)
+	cycleCut := false
+	if structure := structType(t); structure != nil {
+		for field := range structure.Fields() {
+			if isPartialFlag(field) {
+				cache[t] = true
+				cache[structure] = true
+				return true, cycleCut
 			}
-			walk(field.Type(), append(path, field))
+			found, cut := containsPartialFlagVisit(field.Type(), cache, active)
+			cycleCut = cycleCut || cut
+			if found {
+				cache[t] = true
+				cache[structure] = true
+				return true, cycleCut
+			}
 		}
 	}
-	walk(t, nil)
-	return out
+	if !cycleCut {
+		cache[t] = false
+	}
+	return false, cycleCut
 }
 
-func partialFlagPath(flags []partialFlag, fields []*types.Var) bool {
-	if len(fields) == 0 {
-		return false
+// partialFlagsAlongPath visits only structures selected by the expression.
+func partialFlagsAlongPath(t types.Type, path []*types.Var) []partialFlag {
+	if t == nil {
+		return nil
 	}
-	for _, flag := range flags {
-		if fields[len(fields)-1] == flag.field && samePartialPath(fields[:len(fields)-1], flag.scope) {
-			return true
+	var flags []partialFlag
+	scope := make([]*types.Var, 0, len(path))
+	for depth := 0; ; depth++ {
+		structure := structType(t)
+		if structure == nil {
+			break
 		}
+		for field := range structure.Fields() {
+			if isPartialFlag(field) {
+				flags = append(flags, partialFlag{field: field, scope: append([]*types.Var(nil), scope...), prefix: partialFlagPrefix(field.Name())})
+			}
+		}
+		if depth == len(path) {
+			break
+		}
+		selected := path[depth]
+		var next types.Type
+		for field := range structure.Fields() {
+			if field == selected || field.Name() == selected.Name() {
+				next = field.Type()
+				break
+			}
+		}
+		if next == nil {
+			break
+		}
+		scope = append(scope, selected)
+		t = next
 	}
-	return false
+	return flags
 }
 
-func partialFieldPath(flags []partialFlag, fields []*types.Var) bool {
-	if len(fields) == 0 {
-		return false
+func partialFlagKey(flag partialFlag) string {
+	var key strings.Builder
+	for _, field := range flag.scope {
+		fmt.Fprintf(&key, "%p/", field)
 	}
-	parent := fields[:len(fields)-1]
-	for _, flag := range flags {
-		if len(parent) >= len(flag.scope) &&
-			samePartialPath(parent[:len(flag.scope)], flag.scope) &&
-			partialFieldMatchesPrefix(fields[len(fields)-1].Name(), flag.prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func partialIndicatorPath(flags []partialFlag, fields []*types.Var) bool {
-	if len(fields) == 0 || !isPartialIndicatorList(fields[len(fields)-1]) {
-		return false
-	}
-	parent := fields[:len(fields)-1]
-	for _, flag := range flags {
-		if samePartialPath(parent, flag.scope) {
-			return true
-		}
-	}
-	return false
+	fmt.Fprintf(&key, "%p", flag.field)
+	return key.String()
 }
 
 func isPartialIndicatorList(field *types.Var) bool {
@@ -686,14 +790,22 @@ func selectorPath(info *types.Info, sel *ast.SelectorExpr) (types.Object, []*typ
 	return walk(sel), fields
 }
 
-func markFlagWrite(info *types.Info, expr ast.Expr, candidates map[types.Object][]partialFlag, written map[types.Object]bool) {
+func markFlagWrite(info *types.Info, expr ast.Expr, candidates map[types.Object]types.Type, written map[types.Object]map[string]bool) {
 	sel, ok := ast.Unparen(expr).(*ast.SelectorExpr)
 	if !ok {
 		return
 	}
 	root, fields := selectorPath(info, sel)
-	if partialFlagPath(candidates[root], fields) {
-		written[root] = true
+	if len(fields) == 0 {
+		return
+	}
+	for _, flag := range partialFlagsAlongPath(candidates[root], fields[:len(fields)-1]) {
+		if flag.field == fields[len(fields)-1] {
+			if written[root] == nil {
+				written[root] = make(map[string]bool)
+			}
+			written[root][partialFlagKey(flag)] = true
+		}
 	}
 }
 
@@ -711,6 +823,19 @@ func selectorIsAssignmentLHS(body *ast.BlockStmt, selector *ast.SelectorExpr) bo
 			if stmt.X == selector {
 				found = true
 			}
+		}
+		return !found
+	})
+	return found
+}
+
+func selectorIsNestedReceiver(body *ast.BlockStmt, selector *ast.SelectorExpr) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		parent, ok := n.(*ast.SelectorExpr)
+		if ok && parent.X == selector {
+			found = true
+			return false
 		}
 		return !found
 	})
@@ -741,21 +866,20 @@ func isPartialStructMethodOrConstructor(info *types.Info, fn *ast.FuncDecl) bool
 }
 
 func hasPartialFlagInValueStruct(t types.Type) bool {
+	if pointer, ok := types.Unalias(t).(*types.Pointer); ok {
+		t = pointer.Elem()
+	}
 	active := make(map[*types.Struct]bool)
 	var walk func(types.Type) bool
 	walk = func(t types.Type) bool {
-		t = types.Unalias(t)
-		if named, ok := t.(*types.Named); ok {
-			t = named.Underlying()
-		}
-		st, ok := t.(*types.Struct)
-		if !ok || active[st] {
+		structure := structType(t)
+		if structure == nil || active[structure] {
 			return false
 		}
-		active[st] = true
-		defer delete(active, st)
-		for field := range st.Fields() {
-			if field.Type().Underlying() == types.Typ[types.Bool] && containsPartialFlagPart(field.Name()) {
+		active[structure] = true
+		defer delete(active, structure)
+		for field := range structure.Fields() {
+			if isPartialFlag(field) {
 				return true
 			}
 			if _, pointer := types.Unalias(field.Type()).(*types.Pointer); !pointer && walk(field.Type()) {
@@ -763,9 +887,6 @@ func hasPartialFlagInValueStruct(t types.Type) bool {
 			}
 		}
 		return false
-	}
-	if pointer, ok := types.Unalias(t).(*types.Pointer); ok {
-		t = pointer.Elem()
 	}
 	return walk(t)
 }

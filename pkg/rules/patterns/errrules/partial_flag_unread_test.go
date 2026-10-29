@@ -1,7 +1,11 @@
 package errrules
 
 import (
+	"fmt"
+	"go/token"
+	"go/types"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
@@ -139,6 +143,126 @@ import ("context"; "time"; "example.com/budgetflag/history")
 func Recent(s *history.Service, ctx context.Context, since time.Time) ([]history.Message, error) { c, err := s.Fetch(ctx, history.Range{Since: since}); if err != nil { return nil, err }; return c.Messages, err }
 `,
 	}))
+}
+
+func TestPartialFlagUnreadSeveralResults(t *testing.T) {
+	assert.Equal(t, []string{"result/use.go:5", "result/use.go:6"}, rulestest.ProjectRulePlaces(t, NewPartialFlagUnreadRule(), map[string]string{
+		"result/types.go": `package result
+type Result struct { Total int; Incomplete bool }
+func load() Result { return Result{} }
+`,
+		"result/use.go": `package result
+func totals() int {
+	a := load()
+	b := load()
+	_ = a.Total
+	_ = b.Total
+	return 0
+}
+`,
+	}))
+}
+
+func TestPartialFlagUnreadPerFlag(t *testing.T) {
+	assert.Equal(t, []string{"result/use.go:2"}, rulestest.ProjectRulePlaces(t, NewPartialFlagUnreadRule(), map[string]string{
+		"result/types.go": `package result
+type Mixed struct { FirstIncomplete bool; FirstTotal int; SecondIncomplete bool; SecondTotal int }
+func loadMixed() Mixed { return Mixed{} }
+`,
+		"result/use.go": `package result
+func incomplete() int { x := loadMixed(); _ = x.FirstIncomplete; return x.SecondTotal }
+func firstComplete() int { x := loadMixed(); _ = x.FirstIncomplete; return x.FirstTotal }
+`,
+	}))
+}
+
+func TestPartialFlagUnreadPerFlagLaterRead(t *testing.T) {
+	assert.Equal(t, []string{"result/use.go:5"}, rulestest.ProjectRulePlaces(t, NewPartialFlagUnreadRule(), map[string]string{
+		"result/types.go": `package result
+type Mixed struct { FirstIncomplete bool; FirstTotal int; SecondIncomplete bool; SecondTotal int }
+func loadMixed() Mixed { return Mixed{} }
+`,
+		"result/use.go": `package result
+func both() int {
+	x := loadMixed()
+	_ = x.FirstIncomplete
+	return x.FirstTotal + x.SecondTotal
+}
+`,
+	}))
+}
+
+func TestPartialFlagUnreadCyclicTypeCache(t *testing.T) {
+	assert.Equal(t, []string{"cycle/use.go:5", "cycle/use.go:6"}, rulestest.ProjectRulePlaces(t, NewPartialFlagUnreadRule(), map[string]string{
+		"cycle/types.go": `package cycle
+type A struct { Next *B; Total int; Incomplete bool }
+type B struct { Back *A; Count int }
+func loadA() *A { return &A{} }
+func loadB() *B { return &B{} }
+`,
+		"cycle/use.go": `package cycle
+func use() int {
+	a := loadA()
+	b := loadB()
+	_ = a.Total
+	return b.Back.Total
+}
+`,
+	}))
+	pkg := types.NewPackage("example.com/cycle", "cycle")
+	a := types.NewNamed(types.NewTypeName(token.NoPos, pkg, "A", nil), types.NewStruct(nil, nil), nil)
+	b := types.NewNamed(types.NewTypeName(token.NoPos, pkg, "B", nil), types.NewStruct(nil, nil), nil)
+	aPointer, bPointer := types.NewPointer(a), types.NewPointer(b)
+	a.SetUnderlying(types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, pkg, "Next", bPointer, false),
+		types.NewField(token.NoPos, pkg, "Total", types.Typ[types.Int], false),
+		types.NewField(token.NoPos, pkg, "Incomplete", types.Typ[types.Bool], false),
+	}, nil))
+	b.SetUnderlying(types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, pkg, "Back", aPointer, false),
+		types.NewField(token.NoPos, pkg, "Count", types.Typ[types.Int], false),
+	}, nil))
+	cache := make(map[types.Type]bool)
+	assert.True(t, containsPartialFlag(aPointer, cache, make(map[types.Type]bool)))
+	assert.True(t, containsPartialFlag(bPointer, cache, make(map[types.Type]bool)))
+}
+
+func TestPartialFlagUnreadDeepNestedType(t *testing.T) {
+	pkg := types.NewPackage("example.com/result", "result")
+	typeAtDepth := make([]types.Type, 26)
+	base := types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, pkg, "Incomplete", types.Typ[types.Bool], false),
+		types.NewField(token.NoPos, pkg, "Total", types.Typ[types.Int], false),
+	}, nil)
+	typeAtDepth[0] = types.NewNamed(types.NewTypeName(token.NoPos, pkg, "T0", nil), base, nil)
+	for depth := 1; depth <= 25; depth++ {
+		fields := []*types.Var{
+			types.NewField(token.NoPos, pkg, "A", typeAtDepth[depth-1], false),
+			types.NewField(token.NoPos, pkg, "B", typeAtDepth[depth-1], false),
+		}
+		structure := types.NewStruct(fields, nil)
+		name := fmt.Sprintf("T%d", depth)
+		typeAtDepth[depth] = types.NewNamed(types.NewTypeName(token.NoPos, pkg, name, nil), structure, nil)
+	}
+
+	root := typeAtDepth[25]
+	var path []*types.Var
+	current := root
+	for range 25 {
+		field := structType(current).Field(0)
+		path = append(path, field)
+		current = field.Type()
+	}
+
+	started := time.Now()
+	if !containsPartialFlag(root, make(map[types.Type]bool), make(map[types.Type]bool)) {
+		t.Fatal("deep type should contain a partial flag")
+	}
+	flags := partialFlagsAlongPath(root, path)
+	if len(flags) != 1 || flags[0].field.Name() != "Incomplete" || !partialFieldMatchesPrefix("Total", flags[0].prefix) {
+		t.Fatalf("deep selector path did not resolve its flag: %#v", flags)
+	}
+	assert.Less(t, time.Since(started), time.Second)
 }
 
 func TestPartialFlagUnreadNegatives(t *testing.T) {
