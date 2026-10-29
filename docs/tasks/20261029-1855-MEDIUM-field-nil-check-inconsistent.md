@@ -19,3 +19,6 @@
 - 2026-10-29 18:55 открыт — glint-master
 - 2026-10-29 18:58 в работе — glint-master
 - 2026-10-29 18:58 note — glint-master: Запрос мастера потребителя А 29.10 (класс из независимого ревью потребителя А). Боец Luna, worktree field-nil-check, бриф scratchpad brief-field-nil-check.md, приёмка accept-field-nil-check.sh, мера — consumers.sh.
+- 2026-10-29 19:45 note — glint-master: Сдача 1: 744 находки без разбора; выборка — сторожа с ошибкой «not initialized» и метод-сторож. Боец правил чужие правила ради самопроверки. Раунд 1: review-field-nil-check-1.md (мягкая ветка nil как признак, метод-сторож, ≤80 с вердиктами).
+- 2026-10-29 20:55 note — glint-master: Раунд 1 сдан: 43 находки — все от одной мягкой проверки у потребителя Б; пропущен случай запроса (soft-сторож принят за сторожа); правил md-list-after-label. Раунд 2: review-field-nil-check-2.md, accept-field-nil-check-3.sh.
+- 2026-10-29 21:32 note — glint-master: Раунд 2 сдан: обязательная находка есть, 75 находок; выборка мастера 4 — 2 ложные: ветка nil — отказ без error (ok=false, ответ клиенту 500). Раунд 3: review-field-nil-check-3.md, accept-field-nil-check-4.sh (≤40, вердикт по чтению).

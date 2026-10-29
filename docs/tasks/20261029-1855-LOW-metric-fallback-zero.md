@@ -19,3 +19,5 @@
 - 2026-10-29 18:55 открыт — glint-master
 - 2026-10-29 18:58 в работе — glint-master
 - 2026-10-29 18:58 note — glint-master: Запрос мастера потребителя А 29.10 (класс из независимого ревью потребителя А). Боец Luna, worktree metric-fallback, бриф scratchpad brief-metric-fallback.md, приёмка accept-metric-fallback.sh, мера — consumers.sh.
+- 2026-10-29 20:04 note — glint-master: Сдача 1: 46 новых находок, обязательная (счётчик депозитов) есть; ложные — сравнение `(x ?? 0) > 0` вне if. Раунд 1: review-metric-fallback-1.md, accept-metric-fallback-2.sh.
+- 2026-10-29 20:21 note — glint-master: Раунд 1 принят: сравнения вне if сняты, 46 находок у потребителей (544/890 — несравниваемые операнды). Влито в main.

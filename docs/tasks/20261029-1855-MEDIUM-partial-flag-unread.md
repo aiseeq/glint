@@ -19,3 +19,6 @@
 - 2026-10-29 18:55 открыт — glint-master
 - 2026-10-29 18:58 в работе — glint-master
 - 2026-10-29 18:58 note — glint-master: Запрос мастера потребителя А 29.10 (класс из независимого ревью потребителя А). Боец Luna, worktree partial-flag, бриф scratchpad brief-partial-flag.md, приёмка accept-partial-flag.sh, мера — consumers.sh.
+- 2026-10-29 20:00 note — glint-master: Сдача 1: пропущен случай потребителя — результат из generic-кэша (T). Раунд 1: review-partial-flag-1.md, приёмка accept-partial-flag-2.sh с обязательной находкой на копии.
+- 2026-10-29 20:23 note — glint-master: Раунд 1 сдан: generic пойман; ложные — чтение перечень недоступных источников (перечень неполноты) и сумма стейблкоинов при VaultIncomplete. Раунд 2: review-partial-flag-2.md, accept-partial-flag-3.sh.
+- 2026-10-29 20:45 note — glint-master: Раунд 2 принят: у потребителей 2 находки, обе верные (обязательная хендлер капитала админки есть). Влито в main.

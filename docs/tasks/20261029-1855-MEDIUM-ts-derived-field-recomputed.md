@@ -19,3 +19,5 @@
 - 2026-10-29 18:55 открыт — glint-master
 - 2026-10-29 18:58 в работе — glint-master
 - 2026-10-29 18:58 note — glint-master: Запрос мастера потребителя А 29.10 (класс из независимого ревью потребителя А). Боец Luna, worktree ts-derived-field, бриф scratchpad brief-ts-derived-field.md, приёмка accept-ts-derived-field.sh, мера — consumers.sh.
+- 2026-10-29 20:32 note — glint-master: Сдача 1: derived — 0 находок везде (реальный код без аннотации типом: литерал типа/имена параметров); mirror — пропуск «Зеркалит» в блоке, ложные: значение из источника, «копия» в рантайме. Раунд 1: review-ts-derived-field-1.md, accept-ts-derived-field-2.sh.
+- 2026-10-29 21:09 note — glint-master: Раунд 1 принят: derived — 1 верная (ключ статуса вывода); функция статуса вывода для показа сравнивает status с одним литералом — не ловится. mirror — 8 находок, все — самоописанные копии. Влито в main.
