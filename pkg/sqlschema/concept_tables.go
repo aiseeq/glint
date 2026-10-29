@@ -36,10 +36,20 @@ func ReadTables(sql string) []TableRead {
 			ctes[name] = true
 		}
 		if clause := sel.GetWithClause(); clause != nil {
-			for _, item := range clause.GetCtes() {
-				if cte := item.GetCommonTableExpr(); cte != nil {
-					ctes[strings.ToLower(cte.GetCtename())] = true
+			if clause.GetRecursive() {
+				for _, item := range clause.GetCtes() {
+					if cte := item.GetCommonTableExpr(); cte != nil {
+						ctes[strings.ToLower(cte.GetCtename())] = true
+					}
 				}
+			}
+			for _, item := range clause.GetCtes() {
+				cte := item.GetCommonTableExpr()
+				if cte == nil {
+					continue
+				}
+				visitNested(cte.GetCtequery().ProtoReflect(), ctes)
+				ctes[strings.ToLower(cte.GetCtename())] = true
 			}
 		}
 		var visitFrom func(*pgquery.Node, bool)
@@ -50,7 +60,7 @@ func ReadTables(sql string) []TableRead {
 				if rv.GetSchemaname() == "" && ctes[strings.ToLower(rv.GetRelname())] {
 					return
 				}
-				alias := tableName(rv)
+				alias := strings.ToLower(rv.GetRelname())
 				if rv.GetAlias() != nil {
 					alias = strings.ToLower(rv.GetAlias().GetAliasname())
 				}
@@ -80,7 +90,7 @@ func ReadTables(sql string) []TableRead {
 			visitFrom(from, false)
 		}
 		sel.ProtoReflect().Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
-			if field.Message() == nil || field.IsMap() {
+			if field.Name() == "withClause" || field.Message() == nil || field.IsMap() {
 				return true
 			}
 			if field.IsList() {

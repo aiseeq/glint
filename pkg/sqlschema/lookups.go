@@ -146,6 +146,7 @@ func levelTables(from []*pgquery.Node) map[string]string {
 				tables[strings.ToLower(rv.GetAlias().GetAliasname())] = name
 			} else {
 				tables[name] = name
+				tables[strings.ToLower(rv.GetRelname())] = name
 			}
 			tables[""] = name
 		case node.GetJoinExpr() != nil:

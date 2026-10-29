@@ -46,6 +46,16 @@ func run() {
 	assert.Empty(t, rule.AnalyzeFile(ctx))
 }
 
+func TestSQLConceptTableOwner_CTEReadsSameTable(t *testing.T) {
+	rule := configuredConceptOwner(t, "")
+	ctx := rulestest.GoFile(t, "alerts/bot.go", `package alerts
+func run() {
+ db.Query("WITH staff AS (SELECT id FROM staff) SELECT id FROM staff")
+}
+`)
+	assert.Len(t, rule.AnalyzeFile(ctx), 1)
+}
+
 func TestSQLConceptTableOwner_Schema(t *testing.T) {
 	rule := NewSQLConceptTableOwnerRule()
 	require.NoError(t, rule.Configure(map[string]any{"concepts": []any{
@@ -84,6 +94,16 @@ func run() {
  db.Query("SELECT u.id, s.created_by FROM users u LEFT JOIN staff s ON s.user_id = u.id WHERE u.active")
  db.Query("SELECT u.id FROM users u LEFT JOIN staff s ON s.user_id = u.id WHERE s.id IS NULL")
 }`)
+	assert.Len(t, rule.AnalyzeFile(ctx), 1)
+}
+
+func TestSQLConceptTableOwner_AntiJoinSchemaNoAlias(t *testing.T) {
+	rule := configuredConceptOwner(t, "")
+	ctx := rulestest.GoFile(t, "alerts/bot.go", `package alerts
+func run() {
+ db.Query("SELECT u.id FROM users u LEFT JOIN public.staff ON staff.user_id = u.id WHERE staff.id IS NULL")
+}
+`)
 	assert.Len(t, rule.AnalyzeFile(ctx), 1)
 }
 

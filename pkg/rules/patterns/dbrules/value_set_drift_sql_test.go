@@ -42,6 +42,17 @@ func TestValueSetDriftSQL_ListWithParam(t *testing.T) {
 	assert.Empty(t, valueSetDriftFindings(t, files))
 }
 
+func TestValueSetDriftSQL_SchemaRelnameQualifier(t *testing.T) {
+	files := map[string]string{
+		"a.go": "package data\nconst a = `SELECT * FROM public.jobs WHERE jobs.status IN ('a','b')`\n",
+		"b.go": "package data\nconst b = `SELECT * FROM public.jobs WHERE jobs.status IN ('a','b')`\n",
+		"c.go": "package data\nconst c = `SELECT * FROM public.jobs WHERE jobs.status IN ('a','b')`\n",
+	}
+	found := valueSetDriftFindings(t, files)
+	require.Len(t, found, 1)
+	assert.Equal(t, "c.go", found[0].File)
+}
+
 func TestValueSetDriftSQL_NotNested(t *testing.T) {
 	files := map[string]string{
 		"a.go": "package data\nconst a = `SELECT * FROM transactions WHERE status IN ('a','b','c')`\n",
