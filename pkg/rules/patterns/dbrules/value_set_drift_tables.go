@@ -177,8 +177,13 @@ func (idx *tableIndex) addValueGroup(s valueset.RefSet) {
 		flush()
 		return
 	}
-	if (s.Case && len(s.Refs) < 3) || (!s.Case && s.Name == "") {
+	if (s.Case && len(s.Refs) < 3 && !s.ClassifierCase) || (!s.Case && s.Name == "") {
 		return
+	}
+	if s.ClassifierCase && s.ClassifierReturn != "" {
+		if _, ok := idx.constValue(s.ClassifierReturn); !ok {
+			return
+		}
 	}
 	var group string
 	members := make([]string, 0, len(s.Refs))

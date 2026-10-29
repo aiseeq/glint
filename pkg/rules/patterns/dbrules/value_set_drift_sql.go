@@ -60,7 +60,7 @@ func indexSQLValueSets(files []*core.FileContext) []sqlValueSet {
 					continue
 				}
 				set := sqlValueSet{
-					path: ctx.RelPath, line: literal.LineAt(ctx, in.Offset), literalPos: int(literal.Expr.Pos()),
+					path: ctx.RelPath, line: literal.LineAt(ctx, in.Offset), literalPos: int(literal.PiecePosAt(in.Offset)),
 					table: in.Table, column: in.Column, values: values,
 				}
 				key := fmt.Sprintf("%s\x00%d\x00%s", set.path, set.literalPos, sqlValuesKey(set))
@@ -91,6 +91,14 @@ func (r *ValueSetDriftRule) sqlValueSetFindings(ctx *core.FileContext) []*core.V
 			continue
 		}
 		set.order = index
+		if group := r.sqlGoGroup(set); group != nil {
+			message := fmt.Sprintf("Go group %s is already declared at %s:%d; use the backend value (a response field or generated constant) instead of keeping a copy", group.name, group.path, group.line)
+			v := r.CreateViolation(set.path, set.line, message)
+			v.WithCode(strings.TrimSpace(ctx.GetLine(set.line)))
+			v.WithSuggestion("Build the SQL list from the Go group and pass it as a parameter (for example, ANY($1))")
+			findings = append(findings, v)
+			continue
+		}
 		message := r.sqlSetMessage(set)
 		if message == "" {
 			continue
@@ -101,6 +109,16 @@ func (r *ValueSetDriftRule) sqlValueSetFindings(ctx *core.FileContext) []*core.V
 		findings = append(findings, v)
 	}
 	return findings
+}
+
+func (r *ValueSetDriftRule) sqlGoGroup(set sqlValueSet) *goValueGroup {
+	for i := range r.tables.valueGroups {
+		group := &r.tables.valueGroups[i]
+		if group.path != set.path && slices.Equal(group.members, set.values) {
+			return group
+		}
+	}
+	return nil
 }
 
 func (r *ValueSetDriftRule) sqlSetMessage(set sqlValueSet) string {

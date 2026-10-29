@@ -7,6 +7,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestValueSetDriftSQLConstantPredicateReused(t *testing.T) {
+	files := map[string]string{
+		"repo.go": `package data
+
+const openState = "IN ('PENDING', 'PROCESSING')"
+
+func a() { _, _ = db.Exec("UPDATE jobs SET x = 1 WHERE state " + openState) }
+func b() { _, _ = db.Exec("DELETE FROM jobs WHERE state " + openState) }
+func c() { _, _ = db.Exec("SELECT 1 FROM jobs WHERE state " + openState) }
+`,
+	}
+	for _, finding := range valueSetDriftFindings(t, files) {
+		assert.NotContains(t, finding.Message, "written by hand")
+	}
+}
+
 func TestValueSetDriftSQL_RepeatedSet(t *testing.T) {
 	files := map[string]string{
 		"a.go": "package data\nconst a = `SELECT * FROM withdrawals w WHERE w.status IN ('pending','approved','processing')`\n",
@@ -122,6 +138,19 @@ func TestValueSetDriftSQL_UnionOfHandledCases(t *testing.T) {
 
 	files["c.go"] = "package data\nconst c = `SELECT COUNT(*) FROM transactions WHERE status IN ('WAITING', 'UNKNOWN', 'COOLING')`\n"
 	require.Len(t, valueSetDriftFindings(t, files), 1)
+}
+
+func TestValueSetDriftSQL_RepeatedRawListCountsOnce(t *testing.T) {
+	query := `SELECT
+		SUM(v) FILTER (WHERE t.kind IN ('swap','trade','bridge')),
+		COUNT(*) FILTER (WHERE t.kind IN ('swap','trade','bridge')),
+		BOOL_OR(t.kind IN ('swap','trade','bridge')),
+		MAX(v) FILTER (WHERE t.kind IN ('swap','trade','bridge'))
+		FROM transactions t`
+	files := map[string]string{"repo.go": "package data\nconst q = `" + query + "`\n"}
+	for _, finding := range valueSetDriftFindings(t, files) {
+		assert.NotContains(t, finding.Message, "written by hand")
+	}
 }
 
 func TestValueSetDriftSQL_SameLiteralCountsOnce(t *testing.T) {

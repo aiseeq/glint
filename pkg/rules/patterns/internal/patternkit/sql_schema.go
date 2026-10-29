@@ -51,6 +51,25 @@ type sqlPiece struct {
 	raw   bool // a raw string: lines of the text are lines of the source
 }
 
+type sqlStringPiece struct {
+	text string
+	pos  token.Pos
+	raw  bool
+}
+
+// PiecePosAt returns the source position of the string literal containing offset.
+func (l SqlLiteral) PiecePosAt(offset int) token.Pos {
+	for _, piece := range l.pieces {
+		if offset >= piece.start && offset < piece.end {
+			return piece.pos
+		}
+	}
+	if len(l.pieces) == 0 {
+		return token.NoPos
+	}
+	return l.pieces[0].pos
+}
+
 // LineAt returns the source line of an offset in the text.
 func (l SqlLiteral) LineAt(ctx *core.FileContext, offset int) int {
 	for _, piece := range l.pieces {
@@ -73,18 +92,84 @@ var sqlStart = regexp.MustCompile(`(?i)^\s*\(?\s*(?:select|insert|update|delete|
 // parameter so that offsets stay put.
 var fmtVerb = regexp.MustCompile(`%[sdvq]`)
 
-// SqlLiterals returns the string literals and concatenations of literals
-// under a node that begin like a SQL statement. An operand that is not a
-// literal becomes a parameter; where it stood for a name the text does not
-// parse.
+// SqlLiterals returns SQL strings and concatenations under a node that begin
+// like a SQL statement. String constants are expanded; other operands become
+// parameters so names do not break SQL parsing.
 func SqlLiterals(root ast.Node) []SqlLiteral {
 	return SqlTexts(root, sqlStart.MatchString)
+}
+
+func sqlStringConsts(root ast.Node) map[string]ast.Expr {
+	consts := make(map[string]ast.Expr)
+	addDecl := func(decl *ast.GenDecl) {
+		if decl.Tok != token.CONST {
+			return
+		}
+		for _, spec := range decl.Specs {
+			values, ok := spec.(*ast.ValueSpec)
+			if !ok || len(values.Values) != len(values.Names) {
+				continue
+			}
+			for i, name := range values.Names {
+				consts[name.Name] = values.Values[i]
+			}
+		}
+	}
+	if file, ok := root.(*ast.File); ok {
+		for _, decl := range file.Decls {
+			if gen, ok := decl.(*ast.GenDecl); ok {
+				addDecl(gen)
+			}
+		}
+		return consts
+	}
+	ast.Inspect(root, func(n ast.Node) bool {
+		if decl, ok := n.(*ast.GenDecl); ok {
+			addDecl(decl)
+			return false
+		}
+		return true
+	})
+	return consts
+}
+
+func constSQLStringPieces(expr ast.Expr, consts map[string]ast.Expr, depth int) ([]sqlStringPiece, bool) {
+	if depth > 20 {
+		return nil, false
+	}
+	switch value := ast.Unparen(expr).(type) {
+	case *ast.BasicLit:
+		text, ok := GoStringLiteral(value)
+		if !ok {
+			return nil, false
+		}
+		return []sqlStringPiece{{text: text, pos: value.Pos(), raw: value.Value[0] == '`'}}, true
+	case *ast.BinaryExpr:
+		if value.Op != token.ADD {
+			return nil, false
+		}
+		left, ok := constSQLStringPieces(value.X, consts, depth+1)
+		if !ok {
+			return nil, false
+		}
+		right, ok := constSQLStringPieces(value.Y, consts, depth+1)
+		if !ok {
+			return nil, false
+		}
+		return append(left, right...), true
+	case *ast.Ident:
+		if value, ok := consts[value.Name]; ok {
+			return constSQLStringPieces(value, consts, depth+1)
+		}
+	}
+	return nil, false
 }
 
 // SqlTexts returns the string literals and concatenations of literals under
 // a node whose text accept takes.
 func SqlTexts(root ast.Node, accept func(string) bool) []SqlLiteral {
 	var literals []SqlLiteral
+	consts := sqlStringConsts(root)
 	ast.Inspect(root, func(n ast.Node) bool {
 		expr, ok := n.(ast.Expr)
 		if !ok {
@@ -98,20 +183,18 @@ func SqlTexts(root ast.Node, accept func(string) bool) []SqlLiteral {
 		var gaps []int
 		hasLiteral := false
 		for _, operand := range helpers.ConcatOperands(expr) {
-			piece, isLit := operand.(*ast.BasicLit)
-			text, ok := "", false
-			if isLit {
-				text, ok = GoStringLiteral(piece)
-			}
-			if !ok {
+			pieces, isConst := constSQLStringPieces(operand, consts, 0)
+			if !isConst {
 				gaps = append(gaps, builder.Len())
 				builder.WriteString(" $9 ")
 				continue
 			}
-			hasLiteral = true
-			start := builder.Len()
-			builder.WriteString(fmtVerb.ReplaceAllString(text, "$$9"))
-			literal.pieces = append(literal.pieces, sqlPiece{start: start, end: builder.Len(), pos: piece.Pos(), raw: piece.Value[0] == '`'})
+			for _, piece := range pieces {
+				hasLiteral = true
+				start := builder.Len()
+				builder.WriteString(fmtVerb.ReplaceAllString(piece.text, "$$9"))
+				literal.pieces = append(literal.pieces, sqlPiece{start: start, end: builder.Len(), pos: piece.pos, raw: piece.raw})
+			}
 		}
 		literal.Text = builder.String()
 		if len(gaps) > 0 {

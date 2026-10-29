@@ -182,6 +182,168 @@ var WorkflowStatuses = []string{StatusPending, StatusApproved, StatusProcessing,
 	assert.NotContains(t, found[0].Message, "Go group")
 }
 
+func TestValueSetDriftSQLListCopiesGoClassifierCase(t *testing.T) {
+	files := map[string]string{
+		"models/funding.go": `package models
+
+type FundingStatus string
+
+const (
+	FundingStatusAwaitingPayment FundingStatus = "awaiting_payment"
+	FundingStatusUnderpaid FundingStatus = "underpaid"
+	FundingStatusPaid FundingStatus = "paid"
+	FundingStatusFailed FundingStatus = "failed"
+	GroupPending = "pending"
+)
+
+func FundingStatusGroup(s FundingStatus) string {
+	switch s {
+	case FundingStatusAwaitingPayment, FundingStatusUnderpaid:
+		return GroupPending
+	case FundingStatusFailed:
+		return "failed"
+	}
+	return "unknown"
+}
+`,
+		"repository/funding.go": "package repository\nconst q = `SELECT COUNT(*) FROM funding_orders WHERE status IN ('awaiting_payment', 'underpaid')`\n",
+	}
+	found := valueSetDriftFindings(t, files)
+	assert.Equal(t, []string{"repository/funding.go:2"}, patterntest.FoundLines(found))
+	assert.Contains(t, found[0].Message, "Go group FundingStatus")
+	assert.Contains(t, found[0].Message, "models/funding.go:")
+	assert.Contains(t, found[0].Suggestion, "ANY($1)")
+}
+
+func TestValueSetDriftSQLListCopiesGoListVar(t *testing.T) {
+	files := map[string]string{
+		"models/statuses.go": `package models
+
+const (
+	StatusOpen = "a"
+	StatusQueued = "b"
+	StatusRetrying = "c"
+)
+
+var OpenStatuses = []string{StatusOpen, StatusQueued, StatusRetrying}
+`,
+		"repository/statuses.go": "package repository\nconst q = `SELECT * FROM jobs WHERE status IN ('a','b','c')`\n",
+	}
+	found := valueSetDriftFindings(t, files)
+	assert.Equal(t, []string{"repository/statuses.go:2"}, patterntest.FoundLines(found))
+	assert.Contains(t, found[0].Message, "Go group OpenStatuses")
+}
+
+func TestValueSetDriftSQLListConcatenated(t *testing.T) {
+	files := map[string]string{
+		"models/funding.go": `package models
+
+type FundingStatus string
+
+const (
+	FundingStatusAwaitingPayment FundingStatus = "awaiting_payment"
+	FundingStatusUnderpaid FundingStatus = "underpaid"
+	FundingStatusPaid FundingStatus = "paid"
+	FundingStatusFailed FundingStatus = "failed"
+	GroupPending = "pending"
+)
+
+func FundingStatusGroup(s FundingStatus) string {
+	switch s {
+	case FundingStatusAwaitingPayment, FundingStatusUnderpaid:
+		return GroupPending
+	case FundingStatusFailed:
+		return "failed"
+	}
+	return "unknown"
+}
+`,
+		"repository/funding.go": `package repository
+
+const batchClause = "kind = 'campaign'"
+
+func stats() {
+	query := "WITH codes AS (SELECT c.status FROM gift_codes c WHERE c." + batchClause + ") " +
+		"SELECT (SELECT COUNT(*) FROM codes) AS total, " +
+		"(SELECT COUNT(*) FROM funding_orders WHERE status IN ('awaiting_payment', 'underpaid')) AS pending_funding"
+	_ = query
+}
+`,
+	}
+	found := valueSetDriftFindings(t, files)
+	assert.Equal(t, []string{"repository/funding.go:8"}, patterntest.FoundLines(found))
+	assert.Contains(t, found[0].Message, "Go group FundingStatus")
+}
+
+func TestValueSetDriftSQLConstantPredicateCopiesGoGroup(t *testing.T) {
+	files := map[string]string{
+		"models/funding.go": `package models
+
+type FundingStatus string
+
+const (
+	FundingStatusAwaitingPayment FundingStatus = "awaiting_payment"
+	FundingStatusUnderpaid FundingStatus = "underpaid"
+	FundingStatusPaid FundingStatus = "paid"
+	FundingStatusFailed FundingStatus = "failed"
+)
+
+func FundingStatusGroup(s FundingStatus) string {
+	switch s {
+	case FundingStatusAwaitingPayment, FundingStatusUnderpaid:
+		return "pending"
+	case FundingStatusFailed:
+		return "failed"
+	}
+	return "unknown"
+}
+`,
+		"repository/funding.go": `package repository
+
+const pendingPredicate = "IN ('awaiting_payment', 'underpaid')"
+
+func count() {
+	query := "SELECT COUNT(*) FROM funding_orders WHERE status " + pendingPredicate
+	_ = query
+}
+`,
+	}
+	found := valueSetDriftFindings(t, files)
+	assert.Equal(t, []string{"repository/funding.go:3"}, patterntest.FoundLines(found))
+	assert.Contains(t, found[0].Message, "Go group FundingStatus")
+	assert.NotContains(t, found[0].Message, "written by hand")
+}
+
+func TestValueSetDriftSQLListNotGroupCopy(t *testing.T) {
+	files := map[string]string{
+		"models/statuses.go": `package models
+
+const (
+	StatusA = "a"
+	StatusB = "b"
+	StatusC = "c"
+)
+
+var Statuses = []string{StatusA, StatusB, StatusC}
+
+func classify(status string) string {
+	switch status {
+	case StatusA, StatusB:
+		return status
+	}
+	return "unknown"
+}
+`,
+		"repository/subset.go":        "package repository\nconst q = `SELECT * FROM jobs WHERE status IN ('a','b')`\n",
+		"repository/wide.go":          "package repository\nconst q = `SELECT * FROM jobs WHERE status IN ('a','b','c','d')`\n",
+		"repository/statuses_test.go": "package repository\nconst q = `SELECT * FROM jobs WHERE status IN ('a','b','c')`\n",
+		"migrations/001_statuses.sql": "SELECT * FROM jobs WHERE status IN ('a','b','c');\n",
+	}
+	for _, finding := range valueSetDriftFindings(t, files) {
+		assert.NotContains(t, finding.Message, "Go group")
+	}
+}
+
 func TestValueSetDriftTSListGoLaterPath(t *testing.T) {
 	files := map[string]string{
 		"server/models/statuses.go": `package models

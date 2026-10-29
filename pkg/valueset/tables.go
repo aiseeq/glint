@@ -58,6 +58,9 @@ type RefSet struct {
 	Args bool
 	// Case marks labels written in one Go case clause.
 	Case bool
+	// ClassifierCase marks a case clause that returns one literal or constant.
+	ClassifierCase   bool
+	ClassifierReturn string
 }
 
 // Pair is a literal translated to a constant, or a constant to a literal.
@@ -352,7 +355,14 @@ func (t *Tables) switchStmt(ctx *core.FileContext, sw *ast.SwitchStmt) {
 			labels = append(labels, name)
 		}
 		if len(refs) > 1 && len(refs) == len(clause.List) {
-			t.Sets = append(t.Sets, RefSet{Path: ctx.RelPath, Line: ctx.LineFor(clause), Refs: refs, Case: true})
+			result := singleReturn(clause.Body)
+			classifierReturn, constantReturn := "", false
+			if result != nil {
+				classifierReturn, constantReturn = refName(result)
+			}
+			_, stringReturn := goString(result)
+			classifier := result != nil && (stringReturn || constantReturn)
+			t.Sets = append(t.Sets, RefSet{Path: ctx.RelPath, Line: ctx.LineFor(clause), Refs: refs, Case: true, ClassifierCase: classifier, ClassifierReturn: classifierReturn})
 		}
 		if result := singleReturn(clause.Body); result != nil {
 			for _, expr := range clause.List {
