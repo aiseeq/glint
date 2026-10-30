@@ -142,6 +142,7 @@ func Now() time.Time { return time.Now() }
 	for _, violation := range violations {
 		assert.Contains(t, violation.Message, "database clock")
 		assert.Contains(t, violation.Message, "parameter")
+		assert.Contains(t, violation.Suggestion, "$N::timestamptz")
 	}
 }
 

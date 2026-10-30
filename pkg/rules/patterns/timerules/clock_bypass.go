@@ -142,7 +142,7 @@ func (r *ClockBypassRule) reportSQLClockReads(file *core.FileContext) []*core.Vi
 			line := literal.LineAt(file, match[0])
 			violation := r.CreateViolation(file.RelPath, line, "This query takes its time from the database clock instead of the project clock; pass the moment as a parameter")
 			violation.WithCode(file.GetLine(line))
-			violation.WithSuggestion("Pass the current moment from the project clock as a query parameter")
+			violation.WithSuggestion("Pass the current moment from the project clock as a query parameter; cast it in INTERVAL arithmetic as $N::timestamptz")
 			violations = append(violations, violation)
 		}
 	}
