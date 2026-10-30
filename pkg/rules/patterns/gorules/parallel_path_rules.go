@@ -742,8 +742,8 @@ var (
 // onlyReads reports a method body of receiver type recv that shows a SELECT
 // (a literal or a string constant, a package one too) and writes nothing:
 // no call led by a write verb (Updates too), no call of another method of
-// recv, no SQL that changes rows. SQL out of sight (a package variable)
-// proves no read.
+// recv or of a store's method that is not a read, no SQL that changes rows.
+// SQL out of sight (a package variable) proves no read.
 func onlyReads(decl patternkit.TypedFuncDecl, recv string) bool {
 	var texts []string
 	for _, literal := range patternkit.SqlTexts(decl.Decl.Body, func(string) bool { return true }) {
@@ -779,14 +779,23 @@ func onlyReads(decl patternkit.TypedFuncDecl, recv string) bool {
 	return reads
 }
 
-// callsMethodOf reports a call of a method of the named struct recv.
+// callsMethodOf reports a call of another method of the named struct recv,
+// or of a store's method whose name is not a read (Query, Get, Sum, ...).
 func callsMethodOf(info *types.Info, call *ast.CallExpr, recv string) bool {
 	callee := helpers.CalledFunc(call, info)
 	if callee == nil {
 		return false
 	}
 	sig, ok := callee.Type().(*types.Signature)
-	return ok && sig.Recv() != nil && namedStruct(sig.Recv().Type()) == recv
+	if !ok || sig.Recv() == nil {
+		return false
+	}
+	owner := namedStruct(sig.Recv().Type())
+	if owner == recv {
+		return true
+	}
+	name := callee.Name()
+	return patternkit.IsDataAccessReceiver(shortType(owner)) && !patternkit.ReadMethod.MatchString(strings.ToUpper(name[:1])+name[1:])
 }
 
 // filledElsewhere returns the positions where call passes a zero placeholder

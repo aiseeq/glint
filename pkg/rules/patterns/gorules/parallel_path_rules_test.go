@@ -345,10 +345,11 @@ func (a *Admin) Save(tx *Tx) error {
 func TestZeroPlaceholdersPassedForPersistedFieldsSkipsReads(t *testing.T) {
 	assert.Equal(t, []string{
 		"store/deposits.go:41", "store/hidden.go:26", "store/hidden.go:41", "store/hidden.go:56",
-		"store/mixed.go:30", "store/mixed.go:43",
+		"store/mixed.go:30", "store/mixed.go:43", "store/mixed.go:86",
 	}, patterntest.TypedFuncFindings(t, NewZeroPlaceholdersPassedForPersistedFieldsRule(), map[string]string{
 		// A write followed by a read in one expression is still a write; so is
-		// an ORM Updates. A quoted 'DELETE', an error text and a leading SQL
+		// an ORM Updates and a call of another store's method that is not a
+		// read. A quoted 'DELETE', an error text and a leading SQL
 		// comment do not make a reader write.
 		"store/mixed.go": `package store
 
@@ -409,6 +410,33 @@ func (r *AuditRepo) CountLivePeriod(ctx context.Context, from, to time.Time) (in
 }
 
 func (r *AuditRepo) CountLiveAll(ctx context.Context) (int64, error) { return r.countLive(ctx, "", nil) }
+
+type TotalsRepo struct{ db *sql.DB }
+
+func (t *TotalsRepo) Add(ctx context.Context, total int64) error {
+	_, err := t.db.ExecContext(ctx, "INSERT INTO totals (v) VALUES ($1)", total)
+	return err
+}
+
+type ReportRepo struct {
+	db     *sql.DB
+	totals *TotalsRepo
+}
+
+func (r *ReportRepo) sumAndKeep(ctx context.Context, window string, args []any) (int64, error) {
+	var total int64
+	if err := r.db.QueryRowContext(ctx, "SELECT SUM(v) FROM audit WHERE true"+window, args...).Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, r.totals.Add(ctx, total)
+}
+
+func (r *ReportRepo) KeepPeriod(ctx context.Context, from, to time.Time) (int64, error) {
+	window, args := periodWindow(from, to)
+	return r.sumAndKeep(ctx, window, args)
+}
+
+func (r *ReportRepo) KeepAll(ctx context.Context) (int64, error) { return r.sumAndKeep(ctx, "", nil) }
 `,
 		"store/hidden.go": `package store
 
