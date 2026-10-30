@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"maps"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -34,27 +36,38 @@ func init() { rules.Register(NewSQLLiteralCopiesConstantRule()) }
 // Conditions compare after normalization (no aliases, != is <>, IN values
 // sorted, NOT IN is a set of <>, $N bound to a constant argument). A
 // condition the query already gets from a concatenated predicate constant is
-// reported as redundant. Not findings: the file of the constant, full queries
+// reported as redundant. String vars built from constants and SQL fragments
+// returned by predicate functions are sources too; function prefixes are
+// evaluated with an empty alias. Arithmetic column expressions from named SQL
+// functions and numeric literals compared with columns named in a constant
+// are also reported when copied. Not findings: the source file, full queries
 // as the source of conditions, a guard of a single-row UPDATE or DELETE
-// (WHERE id = $N), test files. When the constant changes, the copy stays
-// behind: pass the constant as a parameter or use the predicate constant.
+// (WHERE id = $N), test files, and SQL that calls the source to build itself.
+// When a source changes, the copy stays behind: use that source or pass values
+// as query parameters.
 type SQLLiteralCopiesConstantRule struct {
 	*rules.BaseRule
-	constants  map[string]string
-	predicates map[string][]predicateConstant
-	values     map[string]string
+	constants   map[string]string
+	predicates  map[string][]predicateConstant
+	values      map[string]string
+	expressions map[string]predicateConstant
+	thresholds  []thresholdConstant
 }
 type predicateConstant struct {
 	name, location, path string
 	line                 int
 	expansionCount       int
 }
+type thresholdConstant struct {
+	name, value, path string
+	line              int
+}
 
 // NewSQLLiteralCopiesConstantRule creates the rule.
 func NewSQLLiteralCopiesConstantRule() *SQLLiteralCopiesConstantRule {
 	return &SQLLiteralCopiesConstantRule{BaseRule: rules.NewBaseRule(
 		"sql-literal-copies-constant", "patterns",
-		"Detects UUIDs or conditions repeated in SQL when a Go constant already holds them",
+		"Detects UUIDs, conditions, SQL expressions or named thresholds repeated in SQL when Go declarations already hold them",
 		core.SeverityMedium,
 	)}
 }
@@ -71,9 +84,40 @@ var trailingBooleanOperator = regexp.MustCompile(`(?i)\b(?:AND|OR)\s*$`)
 func (r *SQLLiteralCopiesConstantRule) UseProjectFiles(files []*core.FileContext) {
 	r.constants = make(map[string]string)
 	r.predicates = make(map[string][]predicateConstant)
+	r.expressions = make(map[string]predicateConstant)
+	r.thresholds = nil
 	r.values = collectGoConstantValues(files)
+	collectGoStringValues(r.values, files)
 	indexPredicateFunctions(r, files)
 	indexPredicateConstants(r, files)
+}
+
+func collectGoStringValues(values map[string]string, files []*core.FileContext) {
+	for _, ctx := range files {
+		if !patternkit.ProductionGoFile(ctx) {
+			continue
+		}
+		for _, decl := range ctx.GoAST.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.VAR {
+				continue
+			}
+			for _, raw := range gen.Specs {
+				spec, ok := raw.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, name := range spec.Names {
+					if i >= len(spec.Values) {
+						continue
+					}
+					if value, ok := constString(spec.Values[i], values); ok {
+						values[name.Name] = value
+					}
+				}
+			}
+		}
+	}
 }
 
 func collectGoConstantValues(files []*core.FileContext) map[string]string {
@@ -120,36 +164,211 @@ func indexPredicateFunctions(r *SQLLiteralCopiesConstantRule, files []*core.File
 			if !ok || !predicateName.MatchString(fn.Name.Name) || fn.Body == nil {
 				continue
 			}
-			for _, call := range returnedSprintfCalls(fn.Body) {
-				format, ok := constString(call.Args[0], r.values)
-				if !ok {
+			for _, returned := range returnedSQLStrings(fn, r.values) {
+				if returned.node == nil || returned.expression == "" {
 					continue
 				}
-				format = formatVerb.ReplaceAllLiteralString(format, "$9")
-				addPredicateAtoms(r, fn.Name.Name, ctx, call, format)
+				value := returned.expression
+				if isSQLArithmeticExpression(value) {
+					r.expressions[normalizeSQLExpression(value)] = predicateConstant{
+						name: fn.Name.Name, path: ctx.RelPath, line: ctx.LineFor(returned.node),
+						location: fmt.Sprintf("%s (%s:%d)", fn.Name.Name, ctx.RelPath, ctx.LineFor(returned.node)),
+					}
+				}
+				if returned.predicateSource {
+					format := formatVerb.ReplaceAllLiteralString(value, "$9")
+					addPredicateAtoms(r, fn.Name.Name, ctx, returned.node, format)
+				}
 			}
 		}
 	}
 }
 
-func returnedSprintfCalls(body *ast.BlockStmt) []*ast.CallExpr {
-	var calls []*ast.CallExpr
-	ast.Inspect(body, func(node ast.Node) bool {
-		ret, ok := node.(*ast.ReturnStmt)
-		if !ok || len(ret.Results) != 1 {
-			return true
+type returnedSQLString struct {
+	node            ast.Node
+	expression      string
+	predicateSource bool
+}
+
+func returnedSQLStrings(fn *ast.FuncDecl, values map[string]string) []returnedSQLString {
+	locals := make(map[string]string)
+	var results []returnedSQLString
+	for _, stmt := range fn.Body.List {
+		inspectSQLStringStatement(stmt, locals, values, &results)
+	}
+	return results
+}
+
+func inspectSQLStringStatement(stmt ast.Stmt, locals, values map[string]string, results *[]returnedSQLString) {
+	switch x := stmt.(type) {
+	case *ast.DeclStmt:
+		decl, ok := x.Decl.(*ast.GenDecl)
+		if ok {
+			for _, raw := range decl.Specs {
+				if spec, ok := raw.(*ast.ValueSpec); ok {
+					assignSQLStringValues(spec.Names, spec.Values, locals, values)
+				}
+			}
 		}
-		call, ok := ast.Unparen(ret.Results[0]).(*ast.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			return true
+	case *ast.AssignStmt:
+		for i, lhs := range x.Lhs {
+			id, ok := lhs.(*ast.Ident)
+			if ok && i < len(x.Rhs) {
+				if value, ok := staticString(x.Rhs[i], locals, values); ok {
+					locals[id.Name] = value
+				}
+			}
 		}
-		selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-		if ok && selector.Sel.Name == "Sprintf" {
-			calls = append(calls, call)
+	case *ast.ReturnStmt:
+		collectSQLStringReturn(x, locals, values, results)
+	default:
+		inspectSQLStringControl(stmt, locals, values, results)
+	}
+}
+
+func assignSQLStringValues(names []*ast.Ident, exprs []ast.Expr, locals, values map[string]string) {
+	for i, name := range names {
+		if i < len(exprs) {
+			if value, ok := staticString(exprs[i], locals, values); ok {
+				locals[name.Name] = value
+			}
 		}
+	}
+}
+
+func inspectSQLStringControl(stmt ast.Stmt, locals, values map[string]string, results *[]returnedSQLString) {
+	inspectInit := func(init ast.Stmt) {
+		if init != nil {
+			inspectSQLStringStatement(init, locals, values, results)
+		}
+	}
+	inspectChildren := func(children []ast.Stmt) {
+		for _, child := range children {
+			inspectSQLStringStatement(child, locals, values, results)
+		}
+	}
+	switch x := stmt.(type) {
+	case *ast.IfStmt:
+		// Alias prefixes are indexed with the empty alias; return branches are
+		// still visited so boolean options can contribute each SQL expression.
+		inspectInit(x.Init)
+		inspectSQLStringStatement(x.Body, locals, values, results)
+		if x.Else != nil {
+			inspectSQLStringStatement(x.Else, locals, values, results)
+		}
+	case *ast.ForStmt:
+		inspectInit(x.Init)
+		inspectSQLStringStatement(x.Body, locals, values, results)
+	case *ast.RangeStmt:
+		inspectSQLStringStatement(x.Body, locals, values, results)
+	case *ast.SwitchStmt:
+		inspectInit(x.Init)
+		inspectSQLStringStatement(x.Body, locals, values, results)
+	case *ast.TypeSwitchStmt:
+		inspectInit(x.Init)
+		inspectSQLStringStatement(x.Body, locals, values, results)
+	case *ast.SelectStmt:
+		inspectSQLStringStatement(x.Body, locals, values, results)
+	case *ast.CaseClause:
+		inspectChildren(x.Body)
+	case *ast.CommClause:
+		inspectChildren(x.Body)
+	case *ast.BlockStmt:
+		inspectChildren(x.List)
+	}
+}
+
+func collectSQLStringReturn(ret *ast.ReturnStmt, locals, values map[string]string, results *[]returnedSQLString) {
+	if len(ret.Results) == 0 || !returnHasNilError(ret) {
+		return
+	}
+	expr := ret.Results[0]
+	if tuple, ok := ast.Unparen(expr).(*ast.CallExpr); ok && isSprintf(tuple) {
+		if value, ok := staticString(tuple, locals, values); ok {
+			*results = append(*results, returnedSQLString{node: tuple, expression: value, predicateSource: true})
+		} else if len(tuple.Args) > 0 {
+			if format, ok := staticString(tuple.Args[0], locals, values); ok {
+				*results = append(*results, returnedSQLString{node: tuple, expression: formatVerb.ReplaceAllLiteralString(format, "$9"), predicateSource: true})
+			}
+		}
+		return
+	}
+	if value, ok := staticString(expr, locals, values); ok {
+		*results = append(*results, returnedSQLString{node: expr, expression: value})
+	}
+}
+
+func returnHasNilError(ret *ast.ReturnStmt) bool {
+	if len(ret.Results) < 2 {
 		return true
-	})
-	return calls
+	}
+	ident, ok := ast.Unparen(ret.Results[1]).(*ast.Ident)
+	return ok && ident.Name == "nil"
+}
+
+func isSprintf(call *ast.CallExpr) bool {
+	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Sprintf"
+}
+
+func staticString(expr ast.Expr, locals, values map[string]string) (string, bool) {
+	switch x := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		if value, ok := locals[x.Name]; ok {
+			return value, true
+		}
+		return constString(x, values)
+	case *ast.SelectorExpr:
+		return constString(x, values)
+	case *ast.BasicLit:
+		return constString(x, values)
+	case *ast.BinaryExpr:
+		if x.Op != token.ADD {
+			return "", false
+		}
+		a, ok := staticString(x.X, locals, values)
+		if !ok {
+			return "", false
+		}
+		b, ok := staticString(x.Y, locals, values)
+		return a + b, ok
+	case *ast.CallExpr:
+		if isSprintf(x) && len(x.Args) > 0 {
+			format, ok := staticString(x.Args[0], locals, values)
+			if !ok {
+				return "", false
+			}
+			args := make([]any, 0, len(x.Args)-1)
+			verbs := formatVerb.FindAllString(format, -1)
+			for i, arg := range x.Args[1:] {
+				value, ok := staticString(arg, locals, values)
+				if !ok {
+					return "", false
+				}
+				if i < len(verbs) && strings.HasSuffix(verbs[i], "d") {
+					format = strings.Replace(format, verbs[i], value, 1)
+					continue
+				}
+				args = append(args, value)
+			}
+			return fmt.Sprintf(format, args...), true
+		}
+	}
+	return "", false
+}
+
+func isSQLArithmeticExpression(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.ContainsAny(value, "+-*/") || strings.Contains(lower, "coalesce(")
+}
+
+var sqlAliasPrefix = regexp.MustCompile(`\b[a-z_][a-z0-9_]*\.`)
+var sqlExpressionSpace = regexp.MustCompile(`\s+`)
+
+func normalizeSQLExpression(value string) string {
+	value = strings.ToLower(value)
+	value = sqlAliasPrefix.ReplaceAllString(value, "")
+	return sqlExpressionSpace.ReplaceAllString(value, "")
 }
 
 func indexPredicateConstants(r *SQLLiteralCopiesConstantRule, files []*core.FileContext) {
@@ -159,17 +378,17 @@ func indexPredicateConstants(r *SQLLiteralCopiesConstantRule, files []*core.File
 		}
 		for _, decl := range ctx.GoAST.Decls {
 			gen, ok := decl.(*ast.GenDecl)
-			if !ok || gen.Tok != token.CONST {
+			if !ok || gen.Tok != token.CONST && gen.Tok != token.VAR {
 				continue
 			}
 			for _, raw := range gen.Specs {
-				indexValueSpec(r, ctx, raw)
+				indexValueSpec(r, ctx, raw, gen.Tok == token.CONST)
 			}
 		}
 	}
 }
 
-func indexValueSpec(r *SQLLiteralCopiesConstantRule, ctx *core.FileContext, raw ast.Spec) {
+func indexValueSpec(r *SQLLiteralCopiesConstantRule, ctx *core.FileContext, raw ast.Spec, isConst bool) {
 	spec, ok := raw.(*ast.ValueSpec)
 	if !ok {
 		return
@@ -184,9 +403,16 @@ func indexValueSpec(r *SQLLiteralCopiesConstantRule, ctx *core.FileContext, raw 
 		}
 		if predicateName.MatchString(name.Name) {
 			addPredicateAtoms(r, name.Name, ctx, spec.Values[i], value)
-			continue
+		} else {
+			indexUUIDConstant(r, ctx, name.Name, spec.Values[i], value)
 		}
-		indexUUIDConstant(r, ctx, name.Name, spec.Values[i], value)
+		if isConst {
+			value = strings.TrimSpace(value)
+			if !thresholdInteger.MatchString(value) {
+				continue
+			}
+			r.thresholds = append(r.thresholds, thresholdConstant{name: name.Name, value: value, path: ctx.RelPath, line: ctx.LineFor(spec.Values[i])})
+		}
 	}
 }
 
@@ -301,6 +527,8 @@ func (r *SQLLiteralCopiesConstantRule) ResetState() {
 	r.constants = nil
 	r.predicates = nil
 	r.values = nil
+	r.expressions = nil
+	r.thresholds = nil
 }
 
 // AnalyzeFile reports UUID and predicate copies in production SQL text.
@@ -309,91 +537,153 @@ func (r *SQLLiteralCopiesConstantRule) AnalyzeFile(ctx *core.FileContext) []*cor
 		return nil
 	}
 	var violations []*core.Violation
-	for _, literal := range patternkit.SqlLiterals(ctx.GoAST) {
-		for _, loc := range uuidText.FindAllStringIndex(literal.Text, -1) {
-			constant, ok := r.constants[literal.Text[loc[0]:loc[1]]]
-			if !ok {
-				continue
-			}
-			line := literal.LineAt(ctx, loc[0])
-			if ctx.IsSuppressed(line, r.Name()) {
-				continue
-			}
-			violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line, "SQL text copies the value of the constant "+constant+" — the query keeps its own copy, which stays behind when the constant changes", "Pass the constant as a query parameter (user_id <> ALL($1) with the list of constants)"))
-		}
-	}
 	seen := make(map[ast.Expr]bool)
-	check := func(literal patternkit.SqlLiteral, text string, call *ast.CallExpr) {
-		if seen[literal.Expr] {
-			return
-		}
-		seen[literal.Expr] = true
-		guardedOperators := make(map[string]bool)
-		for _, original := range sqlschema.Conjuncts(text) {
-			if original.GuardedByKey && (original.Operator == "UPDATE" || original.Operator == "DELETE") {
-				guardedOperators[original.Operator] = true
-			}
-		}
-		if literal.Bare != "" {
-			text = parseableBareSQL(literal)
-		}
-		if call != nil {
-			text = bindConstArguments(text, call, literal, r.values)
-		}
-		for _, conj := range sqlschema.Conjuncts(text) {
-			if guardedOperators[conj.Operator] || conj.GuardedByKey && (conj.Operator == "UPDATE" || conj.Operator == "DELETE") {
-				continue
-			}
-			keys := predicateEquivalentNorms(conj.Norm)
-			matches := make([]predicateConstant, 0, len(keys))
-			matchedLocations := make(map[string]bool)
-			allMatched := true
-			for _, key := range keys {
-				entry, ok := matchingPredicate(r.predicates[key], literal.Expr, conj.Offset, ctx, r.values, len(keys) > 1)
-				if !ok {
-					allMatched = false
-					break
-				}
-				if !matchedLocations[entry.location] {
-					matches = append(matches, entry)
-					matchedLocations[entry.location] = true
-				}
-			}
-			if !allMatched || len(matches) == 0 {
-				continue
-			}
-			line := literal.LineAt(ctx, conj.Offset)
-			if ctx.IsSuppressed(line, r.Name()) {
-				continue
-			}
-			locations := make([]string, len(matches))
-			for i, entry := range matches {
-				locations[i] = entry.location
-			}
-			location := strings.Join(locations, " and ")
-			message := "SQL text repeats the condition of the constant " + location + " — use the constant"
-			suggestion := "Use the predicate constant in this query"
-			for _, entry := range matches {
-				if containsNamedPredicate(literal.Expr, entry.name) {
-					message = "the condition is already in the constant " + location + " — drop the copy"
-					suggestion = "Remove the repeated condition from the SQL text"
-					break
-				}
-			}
-			violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line, message, suggestion))
-		}
+	for _, literal := range patternkit.SqlLiterals(ctx.GoAST) {
+		violations = append(violations, r.literalSourceFindings(ctx, literal)...)
 	}
 	for _, call := range patternkit.SqlCalls(ctx.GoAST) {
-		check(call.Literal, call.Literal.Text, call.Call)
+		violations = append(violations, r.analyzeSQLLiteral(ctx, call.Literal, call.Literal.Text, call.Call, seen)...)
 	}
 	for _, literal := range patternkit.SqlLiterals(ctx.GoAST) {
 		text, ok := constString(literal.Expr, r.values)
 		if !ok {
 			text = literal.Text
 		}
-		check(literal, text, nil)
+		violations = append(violations, r.analyzeSQLLiteral(ctx, literal, text, nil, seen)...)
 	}
 	return violations
+}
+
+func (r *SQLLiteralCopiesConstantRule) literalSourceFindings(ctx *core.FileContext, literal patternkit.SqlLiteral) []*core.Violation {
+	var violations []*core.Violation
+	queryExpression := normalizeSQLExpression(literal.Text)
+	for _, expression := range slices.Sorted(maps.Keys(r.expressions)) {
+		source := r.expressions[expression]
+		if source.path == ctx.RelPath || expression == "" || !strings.Contains(queryExpression, expression) {
+			continue
+		}
+		line := literal.LineAt(ctx, 0)
+		if !ctx.IsSuppressed(line, r.Name()) {
+			violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line,
+				"SQL text copies the arithmetic expression from "+source.location,
+				"Use the SQL expression source"))
+		}
+	}
+	for _, loc := range uuidText.FindAllStringIndex(literal.Text, -1) {
+		constant, ok := r.constants[literal.Text[loc[0]:loc[1]]]
+		if !ok {
+			continue
+		}
+		line := literal.LineAt(ctx, loc[0])
+		if !ctx.IsSuppressed(line, r.Name()) {
+			violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line, "SQL text copies the value of the constant "+constant+" — the query keeps its own copy, which stays behind when the constant changes", "Pass the constant as a query parameter (user_id <> ALL($1) with the list of constants)"))
+		}
+	}
+	return violations
+}
+
+func (r *SQLLiteralCopiesConstantRule) analyzeSQLLiteral(ctx *core.FileContext, literal patternkit.SqlLiteral, text string, call *ast.CallExpr, seen map[ast.Expr]bool) []*core.Violation {
+	if seen[literal.Expr] {
+		return nil
+	}
+	seen[literal.Expr] = true
+	guardedOperators := make(map[string]bool)
+	for _, original := range sqlschema.Conjuncts(text) {
+		if original.GuardedByKey && (original.Operator == "UPDATE" || original.Operator == "DELETE") {
+			guardedOperators[original.Operator] = true
+		}
+	}
+	if literal.Bare != "" {
+		text = parseableBareSQL(literal)
+	}
+	if call != nil {
+		text = bindConstArguments(text, call, literal, r.values)
+	}
+	var violations []*core.Violation
+	for _, conj := range sqlschema.Conjuncts(text) {
+		violations = append(violations, r.thresholdFindings(ctx, literal, conj)...)
+		if guardedOperators[conj.Operator] || conj.GuardedByKey && (conj.Operator == "UPDATE" || conj.Operator == "DELETE") {
+			continue
+		}
+		violations = append(violations, r.predicateFindings(ctx, literal, conj)...)
+	}
+	return violations
+}
+
+func (r *SQLLiteralCopiesConstantRule) thresholdFindings(ctx *core.FileContext, literal patternkit.SqlLiteral, conj sqlschema.Conjunct) []*core.Violation {
+	threshold, ok := matchingThreshold(r.thresholds, conj.Norm, ctx.RelPath)
+	if !ok {
+		return nil
+	}
+	line := literal.LineAt(ctx, conj.Offset)
+	if ctx.IsSuppressed(line, r.Name()) {
+		return nil
+	}
+	message := "SQL threshold repeats the value of the constant " + threshold.name + " (" + threshold.path + ":" + strconv.Itoa(threshold.line) + ")"
+	return []*core.Violation{patternkit.SqlViolation(r.BaseRule, ctx, line, message, "Pass the threshold as a query parameter")}
+}
+
+func (r *SQLLiteralCopiesConstantRule) predicateFindings(ctx *core.FileContext, literal patternkit.SqlLiteral, conj sqlschema.Conjunct) []*core.Violation {
+	keys := predicateEquivalentNorms(conj.Norm)
+	matches := make([]predicateConstant, 0, len(keys))
+	matchedLocations := make(map[string]bool)
+	for _, key := range keys {
+		entry, ok := matchingPredicate(r.predicates[key], literal.Expr, conj.Offset, ctx, r.values, len(keys) > 1)
+		if !ok {
+			return nil
+		}
+		if !matchedLocations[entry.location] {
+			matches = append(matches, entry)
+			matchedLocations[entry.location] = true
+		}
+	}
+	if len(matches) == 0 {
+		return nil
+	}
+	line := literal.LineAt(ctx, conj.Offset)
+	if ctx.IsSuppressed(line, r.Name()) {
+		return nil
+	}
+	locations := make([]string, len(matches))
+	for i, entry := range matches {
+		locations[i] = entry.location
+	}
+	location := strings.Join(locations, " and ")
+	message := "SQL text repeats the condition of the constant " + location + " — use the constant"
+	suggestion := "Use the predicate constant in this query"
+	for _, entry := range matches {
+		if containsNamedPredicate(literal.Expr, entry.name) {
+			message = "the condition is already in the constant " + location + " — drop the copy"
+			suggestion = "Remove the repeated condition from the SQL text"
+			break
+		}
+	}
+	return []*core.Violation{patternkit.SqlViolation(r.BaseRule, ctx, line, message, suggestion)}
+}
+
+var thresholdInteger = regexp.MustCompile(`^-?[0-9]+$`)
+var thresholdComparison = regexp.MustCompile(`(?i)^([a-z_][a-z0-9_.]*)\s*(?:<=|>=|<>|!=|=|<|>)\s*(-?[0-9]+)$`)
+
+func matchingThreshold(entries []thresholdConstant, condition, queryPath string) (thresholdConstant, bool) {
+	match := thresholdComparison.FindStringSubmatch(strings.TrimSpace(condition))
+	if len(match) != 3 {
+		return thresholdConstant{}, false
+	}
+	column := strings.ToLower(match[1])
+	column = column[strings.LastIndex(column, ".")+1:]
+	for _, entry := range entries {
+		if entry.path != queryPath && entry.value == match[2] && thresholdNameContainsColumn(entry.name, column) {
+			return entry, true
+		}
+	}
+	return thresholdConstant{}, false
+}
+
+func thresholdNameContainsColumn(name, column string) bool {
+	if column == "" {
+		return false
+	}
+	return slices.Contains(patternkit.IdentifierWords(name), strings.ToLower(column))
 }
 
 func matchingPredicate(entries []predicateConstant, expr ast.Expr, offset int, ctx *core.FileContext, values map[string]string, listExpansion bool) (predicateConstant, bool) {

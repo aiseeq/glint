@@ -271,3 +271,118 @@ func remove(db interface{ Exec(string, ...any) }) {
 	})
 	require.Empty(t, findings)
 }
+
+func TestSQLLiteralCopiesAliasPrefixClause(t *testing.T) {
+	findings := predicateCopyFindings(t, map[string]string{
+		"consts/network.go": `package consts
+import "fmt"
+const InternalNetworkID = 0
+func RealDepositClause(alias string) string {
+ prefix := ""
+ if alias != "" { prefix = alias + "." }
+ return fmt.Sprintf(" AND %snetwork_id <> %d", prefix, InternalNetworkID)
+}
+`,
+		"store/network.go": `package store
+func read(db interface{ Query(string, ...any) }) {
+ db.Query("SELECT id FROM users WHERE network_id <> 0 AND active = TRUE")
+ db.Query("SELECT id FROM users t WHERE t.network_id <> 0 AND active = TRUE")
+ db.Query("SELECT id FROM users WHERE network_id != 0 AND active = TRUE")
+ db.Query("SELECT id FROM users WHERE network_id > 0 AND active = TRUE")
+ db.Query("SELECT id FROM users WHERE active = TRUE" + RealDepositClause("t"))
+}
+`,
+	})
+	require.Len(t, findings, 3)
+}
+
+func TestSQLLiteralCopiesVarConcatenation(t *testing.T) {
+	findings := predicateCopyFindings(t, map[string]string{
+		"consts/users.go": `package consts
+const ExcludeStaffClauseU = " AND u.role <> 'staff'"
+var ClientsWhereU = ` + "`u.status <> 'deleted'`" + ` + ExcludeStaffClauseU
+`,
+		"store/users.go": `package store
+func read(db interface{ Query(string, ...any) }) {
+ db.Query("SELECT id FROM users u WHERE u.status <> 'deleted' AND u.role <> 'staff'")
+ db.Query("SELECT id FROM users u WHERE u.status <> 'deleted'")
+}
+`,
+	})
+	require.Len(t, findings, 3)
+}
+
+func TestSQLLiteralCopiesAmountExpression(t *testing.T) {
+	findings := predicateCopyFindings(t, map[string]string{
+		"consts/payout.go": `package consts
+func PayoutDebitSQL(alias string, withFee bool) (string, error) {
+ prefix := ""
+ if alias != "" { prefix = alias + "." }
+ if withFee { return prefix + "amount + COALESCE(" + prefix + "service_fee, 0)", nil }
+ return prefix + "amount", nil
+}
+`,
+		"store/payout.go": `package store
+func read(db interface{ Query(string, ...any) }) {
+ db.Query("SELECT SUM(w.amount + COALESCE(w.service_fee, 0)) FROM payouts w")
+ db.Query("SELECT SUM(amount + COALESCE(service_fee,0)) FROM payouts")
+ db.Query("SELECT SUM(amount) FROM payouts")
+}
+`,
+	})
+	require.Len(t, findings, 2)
+}
+
+func TestSQLLiteralCopiesThresholdLiteral(t *testing.T) {
+	findings := predicateCopyFindings(t, map[string]string{
+		"consts/limits.go": `package consts
+// FullWithdrawalMaxBalanceUSD is the balance threshold.
+const FullWithdrawalMaxBalanceUSD = 100
+`,
+		"store/withdrawals.go": `package store
+func read(db interface{ Query(string, ...any) }) {
+ db.Query("SELECT id FROM accounts WHERE balance < 100")
+ db.Query("SELECT id FROM accounts WHERE balance < 50")
+ db.Query("SELECT id FROM accounts WHERE attempts < 100")
+ db.Query("SELECT id FROM accounts LIMIT 100")
+ db.Query("SELECT id FROM accounts WHERE amount * 100 > 0")
+}
+`,
+	})
+	require.Len(t, findings, 1)
+}
+
+func TestSQLLiteralCopiesAmountExpressionSwitch(t *testing.T) {
+	findings := predicateCopyFindings(t, map[string]string{
+		"consts/payout.go": `package consts
+import "fmt"
+type PayoutBasis string
+const (
+ PayoutAmount PayoutBasis = "payout"
+ BalanceDebit PayoutBasis = "debit"
+)
+func PayoutAmountSQL(alias string, basis PayoutBasis) (string, error) {
+ prefix := ""
+ if alias != "" { prefix = alias + "." }
+ switch basis {
+ case PayoutAmount:
+  return prefix + "amount", nil
+ case BalanceDebit:
+  return prefix + "amount + COALESCE(" + prefix + "service_fee, 0)", nil
+ default:
+  return "", fmt.Errorf("unknown basis %q", basis)
+ }
+}
+func FailedAmountExpr() (string, error) {
+ return "gross + COALESCE(extra_fee, 0)", fmt.Errorf("unavailable")
+}
+`,
+		"store/payout.go": `package store
+func read(db interface{ Query(string, ...any) }) {
+ db.Query("SELECT SUM(w.amount + COALESCE(w.service_fee, 0)) FROM payouts w")
+ db.Query("SELECT SUM(gross + COALESCE(extra_fee, 0)) FROM payouts")
+}
+`,
+	})
+	require.Len(t, findings, 1)
+}
