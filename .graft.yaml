@@ -65,7 +65,7 @@ tasks:
     tests: go
     usage: <go test flags, e.g. -run TestX>
     env: {GOFLAGS: -tags=pgquery_cgo}
-    run: ['go test -json -p {threads} -v {args} ./...']
+    run: ['go test -json -p {threads} {args} ./...']
   test-short:
     desc: tests without the long-running ones
     heavy: true
