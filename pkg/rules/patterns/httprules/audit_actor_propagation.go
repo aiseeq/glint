@@ -89,44 +89,15 @@ func (r *AuditActorPropagationRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
-	configured, ok := settings["sinks"]
-	if !ok {
+	sinks, exists, err := r.BaseRule.GetStringListSetting("sinks")
+	if !exists && err == nil {
 		return nil
 	}
-	sinks, err := auditSinkNames(configured)
 	if err != nil {
 		return err
 	}
 	r.sinks = auditSinkSet(sinks)
 	return nil
-}
-
-// auditSinkNames reads the sinks setting: a list of non-empty function names,
-// as []string from code or []any from a YAML configuration.
-func auditSinkNames(configured any) ([]string, error) {
-	var items []any
-	switch list := configured.(type) {
-	case []string:
-		for _, name := range list {
-			items = append(items, name)
-		}
-	case []any:
-		items = list
-	default:
-		return nil, fmt.Errorf("configure audit-actor-propagation sinks: expected a list of function names, got %T", configured)
-	}
-	sinks := make([]string, 0, len(items))
-	for i, item := range items {
-		name, ok := item.(string)
-		if !ok {
-			return nil, fmt.Errorf("configure audit-actor-propagation sinks: item %d is %T, expected a function name string", i, item)
-		}
-		if strings.TrimSpace(name) == "" {
-			return nil, fmt.Errorf("configure audit-actor-propagation sinks: item %d is empty", i)
-		}
-		sinks = append(sinks, name)
-	}
-	return sinks, nil
 }
 
 func auditSinkSet(names []string) map[string]bool {

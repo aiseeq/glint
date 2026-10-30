@@ -131,6 +131,11 @@ func run() { db.Query("SELECT user_id FROM staff") }
 		err := NewSQLConceptTableOwnerRule().Configure(settings)
 		assert.Error(t, err)
 	}
+	err := NewSQLConceptTableOwnerRule().Configure(map[string]any{"concepts": []any{
+		map[string]any{"name": "staff", "table": "staff", "files": []any{1}},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "concepts[0].files[0]")
 }
 
 func TestSQLConceptTableOwner_Writes(t *testing.T) {

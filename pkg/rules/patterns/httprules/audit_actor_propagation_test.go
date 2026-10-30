@@ -613,7 +613,7 @@ func TestAuditActorPropagationRule_ConfigureSinks(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			err := NewAuditActorPropagationRule().Configure(map[string]any{"sinks": value})
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "audit-actor-propagation sinks")
+			assert.Contains(t, err.Error(), "configure audit-actor-propagation: sinks")
 		})
 	}
 }

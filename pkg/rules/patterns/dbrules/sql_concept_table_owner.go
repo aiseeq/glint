@@ -1,6 +1,7 @@
 package dbrules
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -92,9 +93,24 @@ func (r *SQLConceptTableOwnerRule) Configure(settings map[string]any) error {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("configure %s: concepts[%d].name is required", r.Name(), i)
 		}
-		files, err := conceptOwnerFiles(values["files"])
+		rawFiles, filesSet := values["files"]
+		if !filesSet {
+			return fmt.Errorf("configure %s: concepts[%d].files must be a non-empty list of file globs", r.Name(), i)
+		}
+		files, err := rules.StringList(rawFiles)
 		if err != nil {
-			return fmt.Errorf("configure %s: concepts[%d].files: %w", r.Name(), i, err)
+			prefix := fmt.Sprintf("configure %s: concepts[%d].files", r.Name(), i)
+			var itemErr *rules.StringListItemError
+			if errors.As(err, &itemErr) {
+				return fmt.Errorf("%s[%d]: %w", prefix, itemErr.Index, itemErr.Cause)
+			}
+			return fmt.Errorf("%s: %w", prefix, err)
+		}
+		if len(files) == 0 {
+			return fmt.Errorf("configure %s: concepts[%d].files must be a non-empty list of file globs", r.Name(), i)
+		}
+		for j := range files {
+			files[j] = filepath.ToSlash(files[j])
 		}
 		for _, file := range files {
 			if !core.ValidateGlobPattern(file) {
@@ -124,32 +140,6 @@ func (r *SQLConceptTableOwnerRule) Configure(settings map[string]any) error {
 		r.concepts = append(r.concepts, concept)
 	}
 	return nil
-}
-
-func conceptOwnerFiles(raw any) ([]string, error) {
-	var values []any
-	switch files := raw.(type) {
-	case []any:
-		values = files
-	case []string:
-		for _, file := range files {
-			values = append(values, file)
-		}
-	default:
-		return nil, fmt.Errorf("must be a list of file globs, got %T", raw)
-	}
-	if len(values) == 0 {
-		return nil, fmt.Errorf("must be a non-empty list of file globs")
-	}
-	files := make([]string, 0, len(values))
-	for _, value := range values {
-		file, ok := value.(string)
-		if !ok || strings.TrimSpace(file) == "" {
-			return nil, fmt.Errorf("each file glob must be a non-empty string")
-		}
-		files = append(files, filepath.ToSlash(file))
-	}
-	return files, nil
 }
 
 // AnalyzeFile reports concept table reads in production Go SQL literals.

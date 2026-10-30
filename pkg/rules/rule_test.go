@@ -44,6 +44,39 @@ func TestBaseRuleGetStringSetting(t *testing.T) {
 	assert.Equal(t, "default", rule.GetStringSetting("missing", "default"))
 }
 
+func TestBaseRuleGetStringListSetting(t *testing.T) {
+	rule := NewBaseRule("list-rule", "cat", "desc", core.SeverityMedium)
+	require.NoError(t, rule.Configure(map[string]any{"items": []any{"one", "two"}, "strings": []string{"three"}}))
+	items, exists, err := rule.GetStringListSetting("items")
+	require.NoError(t, err)
+	assert.True(t, exists)
+	assert.Equal(t, []string{"one", "two"}, items)
+	items, exists, err = rule.GetStringListSetting("strings")
+	require.NoError(t, err)
+	assert.True(t, exists)
+	assert.Equal(t, []string{"three"}, items)
+	items, exists, err = rule.GetStringListSetting("missing")
+	require.NoError(t, err)
+	assert.False(t, exists)
+	assert.Nil(t, items)
+
+	for _, value := range []any{"one", []any{"one", 2}, []any{"one", " "}} {
+		require.NoError(t, rule.Configure(map[string]any{"items": value}))
+		_, _, err := rule.GetStringListSetting("items")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "list-rule")
+		assert.Contains(t, err.Error(), "items")
+	}
+	require.NoError(t, rule.Configure(map[string]any{"items": []any{"one", 2}}))
+	_, _, err = rule.GetStringListSetting("items")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "items[1]")
+
+	values, err := StringList([]any{"one", "two"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"one", "two"}, values)
+}
+
 func TestBaseRuleGetIntSetting(t *testing.T) {
 	rule := NewBaseRule("test", "cat", "desc", core.SeverityMedium)
 	require.NoError(t, rule.Configure(map[string]any{

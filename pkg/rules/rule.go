@@ -1,6 +1,10 @@
 package rules
 
 import (
+	"errors"
+	"fmt"
+	"strings"
+
 	"github.com/aiseeq/glint/pkg/core"
 )
 
@@ -96,6 +100,64 @@ func (r *BaseRule) GetStringSetting(key, defaultVal string) string {
 		}
 	}
 	return defaultVal
+}
+
+// GetStringListSetting retrieves a list of non-empty strings. The bool reports
+// whether the setting was present; malformed values return an error.
+func (r *BaseRule) GetStringListSetting(key string) ([]string, bool, error) {
+	value, exists := r.GetSetting(key)
+	if !exists {
+		return nil, false, nil
+	}
+	values, err := StringList(value)
+	if err != nil {
+		setting := fmt.Sprintf("configure %s: %s", r.Name(), key)
+		var itemErr *StringListItemError
+		if errors.As(err, &itemErr) {
+			return nil, true, fmt.Errorf("%s[%d]: %w", setting, itemErr.Index, itemErr.Cause)
+		}
+		return nil, true, fmt.Errorf("%s: %w", setting, err)
+	}
+	return values, true, nil
+}
+
+// StringListItemError reports an invalid list element and its zero-based index.
+type StringListItemError struct {
+	Index int
+	Cause error
+}
+
+func (e *StringListItemError) Error() string {
+	return fmt.Sprintf("item %d: %v", e.Index, e.Cause)
+}
+
+func (e *StringListItemError) Unwrap() error { return e.Cause }
+
+// StringList parses a list containing only non-empty strings.
+func StringList(value any) ([]string, error) {
+	var items []any
+	switch list := value.(type) {
+	case []any:
+		items = list
+	case []string:
+		for _, item := range list {
+			items = append(items, item)
+		}
+	default:
+		return nil, fmt.Errorf("must be a list, got %T", value)
+	}
+	result := make([]string, 0, len(items))
+	for i, item := range items {
+		text, ok := item.(string)
+		if !ok {
+			return nil, &StringListItemError{Index: i, Cause: fmt.Errorf("must be a non-empty string, got %T", item)}
+		}
+		if strings.TrimSpace(text) == "" {
+			return nil, &StringListItemError{Index: i, Cause: fmt.Errorf("must be a non-empty string")}
+		}
+		result = append(result, text)
+	}
+	return result, nil
 }
 
 // GetIntSetting retrieves an int setting
