@@ -1,6 +1,6 @@
 # Прогон по потребителям — graft consumers, не копия в scratchpad
 
-Статус: на проверке
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -17,3 +17,4 @@
 - 2026-10-30 02:48 открыт — glint-master
 - 2026-10-30 03:39 note — glint-master: 03:40 CET действующая приёмка одна — accept-tsc-stat-cache.sh, в ней graft consumers -- -r tsc (прогнан бойцом 1030-0245: 21 проект, 0 различий). consumers.sh в scratchpad отвечает кодом 2 с подсказкой; в приёмках завершённых задач остался как история.
 - 2026-10-30 03:39 на проверке — glint-master
+- 2026-10-30 04:21 готово — git-admin (session glint-master): git-admin 04:16 CET: graft consumers в graft tasks (deps build); consumers.sh отвечает кодом 2; бриф brief-sql-interval-param.md и accept-sql-interval-param.sh зовут graft consumers; consumers.sh — только в приёмках закрытых задач
