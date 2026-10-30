@@ -69,6 +69,9 @@ tasks:
   test-short:
     desc: tests without the long-running ones
     heavy: true
+    # The pc host has the same tsc 7 and @types/node under /usr/local, the only
+    # node prefix its sandbox sees, so the tsc tests run there instead of skipping.
+    remote: true
     cache: *tools_cache
     env: {GOFLAGS: -tags=pgquery_cgo}
     run: ['go test -p {threads} -short -v ./...']
