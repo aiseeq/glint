@@ -106,9 +106,9 @@ func compileTSGlob(pattern string) (tsGlob, error) {
 
 // tsconfigFile is the part of a tsconfig the scope needs.
 type tsconfigFile struct {
-	Extends string   `json:"extends"`
-	Include []string `json:"include"`
-	Exclude []string `json:"exclude"`
+	Extends json.RawMessage `json:"extends"`
+	Include []string        `json:"include"`
+	Exclude []string        `json:"exclude"`
 }
 
 var (
@@ -141,7 +141,11 @@ func readJSONC(path string, into any) error {
 func loadTSConfigScope(path string) (tsconfigScope, error) {
 	scope := tsconfigScope{path: path, base: filepath.Dir(path)}
 	includeSet, excludeSet := false, false
-	for current, depth := path, 0; current != "" && depth < 5; depth++ {
+	chain, err := tsconfigChain(path)
+	if err != nil {
+		return tsconfigScope{}, fmt.Errorf("read tsconfig chain: %w", err)
+	}
+	for _, current := range chain {
 		var file tsconfigFile
 		if err := readJSONC(current, &file); err != nil {
 			return tsconfigScope{}, fmt.Errorf("read tsconfig: %w", err)
@@ -169,15 +173,138 @@ func loadTSConfigScope(path string) (tsconfigScope, error) {
 			}
 			scope.exclude, excludeSet = globs, true
 		}
-		current = ""
-		if strings.HasPrefix(file.Extends, ".") {
-			current = filepath.Join(dir, file.Extends)
-			if filepath.Ext(current) != ".json" {
-				current += ".json"
-			}
-		}
 	}
 	return scope, nil
+}
+
+// tsconfigChain returns the config and its bases in precedence order.
+func tsconfigChain(path string) ([]string, error) {
+	seen := map[string]bool{}
+	visiting := map[string]bool{}
+	var chain []string
+	var visit func(string) error
+	visit = func(config string) error {
+		absolute, err := filepath.Abs(config)
+		if err != nil {
+			return fmt.Errorf("resolve tsconfig path %s: %w", config, err)
+		}
+		absolute = filepath.Clean(absolute)
+		if visiting[absolute] {
+			return fmt.Errorf("tsconfig extends cycle at %s", absolute)
+		}
+		if seen[absolute] {
+			return nil
+		}
+		var file tsconfigFile
+		if err := readJSONC(absolute, &file); err != nil {
+			return err
+		}
+		extends, err := tsconfigExtends(file.Extends)
+		if err != nil {
+			return fmt.Errorf("%s extends: %w", absolute, err)
+		}
+		seen[absolute] = true
+		visiting[absolute] = true
+		chain = append(chain, absolute)
+		for i := len(extends) - 1; i >= 0; i-- {
+			base, err := resolveTSConfigExtends(filepath.Dir(absolute), extends[i])
+			if err != nil {
+				return fmt.Errorf("resolve tsconfig extends %q from %s: %w", extends[i], absolute, err)
+			}
+			if err := visit(base); err != nil {
+				return err
+			}
+		}
+		delete(visiting, absolute)
+		return nil
+	}
+	if err := visit(path); err != nil {
+		return nil, err
+	}
+	return chain, nil
+}
+
+func tsconfigExtends(raw json.RawMessage) ([]string, error) {
+	shape := strings.TrimSpace(string(raw))
+	if shape == "" || shape == "null" {
+		return nil, nil
+	}
+	switch shape[0] {
+	case '"':
+		var single string
+		if err := json.Unmarshal(raw, &single); err != nil {
+			return nil, fmt.Errorf("decode extends path: %w", err)
+		}
+		return []string{single}, nil
+	case '[':
+		var multiple []string
+		if err := json.Unmarshal(raw, &multiple); err != nil {
+			return nil, fmt.Errorf("decode extends paths: %w", err)
+		}
+		return multiple, nil
+	default:
+		return nil, fmt.Errorf("must be a path or an array of paths")
+	}
+}
+
+func resolveTSConfigExtends(dir, target string) (string, error) {
+	if target == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	if filepath.IsAbs(target) || strings.HasPrefix(target, ".") {
+		candidate := filepath.Join(dir, target)
+		resolved, err := resolveTSConfigCandidate(candidate)
+		if err != nil {
+			return "", err
+		}
+		return resolved, nil
+	}
+	for current := dir; ; current = filepath.Dir(current) {
+		candidate := filepath.Join(current, "node_modules", filepath.FromSlash(target))
+		resolved, err := resolveTSConfigCandidate(candidate)
+		if err == nil {
+			return resolved, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		if filepath.Dir(current) == current {
+			break
+		}
+	}
+	return "", fmt.Errorf("configuration %q was not found", target)
+}
+
+func resolveTSConfigCandidate(candidate string) (string, error) {
+	paths := []string{candidate, candidate + ".json", filepath.Join(candidate, "tsconfig.json")}
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			return path, nil
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("stat tsconfig candidate %s: %w", path, err)
+		}
+	}
+	packageJSON := filepath.Join(candidate, "package.json")
+	var metadata struct {
+		TSConfig string `json:"tsconfig"`
+	}
+	if err := readJSONC(packageJSON, &metadata); err == nil && metadata.TSConfig != "" {
+		path := filepath.Join(candidate, metadata.TSConfig)
+		if filepath.Ext(path) == "" {
+			path += ".json"
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", fmt.Errorf("stat package tsconfig %s: %w", path, err)
+		}
+		if info.IsDir() {
+			return "", fmt.Errorf("package tsconfig %s is a directory", path)
+		}
+		return path, nil
+	}
+	return "", fs.ErrNotExist
 }
 
 // compileTSGlobs builds the matchers of a pattern list; an empty list stays

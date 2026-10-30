@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -253,7 +254,7 @@ func (r *TscRule) CheckTools(files []*core.FileContext) error {
 	if len(missing) > 0 {
 		return fmt.Errorf("%d tsconfigs have no tsc of their project (node_modules/.bin/tsc), install the project's packages (npm ci): %s", len(missing), strings.Join(missing, ", "))
 	}
-	global, err := r.globalTsc()
+	global, err := r.globalTscBase()
 	if err != nil {
 		return err
 	}
@@ -273,18 +274,22 @@ type globalTscInfo struct {
 
 var tscVersion = regexp.MustCompile(`Version (\d+)\.`)
 
-// globalTsc finds the global tsc and checks it is tsc 7.
-func (r *TscRule) globalTsc() (globalTscInfo, error) {
-	path, err := exec.LookPath(r.global)
-	if err != nil {
-		return globalTscInfo{}, fmt.Errorf("TypeScript needs the global tsc 7, which is not installed (npm i -g typescript@7): %w", err)
-	}
-	version, err := toolVersion(path)
+func globalTscVersion(info globalTscInfo) (globalTscInfo, error) {
+	version, err := toolVersion(info.path)
 	if err != nil {
 		return globalTscInfo{}, err
 	}
 	if m := tscVersion.FindStringSubmatch(version); m == nil || m[1] != "7" {
-		return globalTscInfo{}, fmt.Errorf("the global tsc %s is %q, the rule needs tsc 7 (npm i -g typescript@7)", path, strings.TrimSpace(version))
+		return globalTscInfo{}, fmt.Errorf("the global tsc %s is %q, the rule needs tsc 7 (npm i -g typescript@7)", info.path, strings.TrimSpace(version))
+	}
+	info.version = version
+	return info, nil
+}
+
+func (r *TscRule) globalTscBase() (globalTscInfo, error) {
+	path, err := exec.LookPath(r.global)
+	if err != nil {
+		return globalTscInfo{}, fmt.Errorf("TypeScript needs the global tsc 7, which is not installed (npm i -g typescript@7): %w", err)
 	}
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -295,7 +300,7 @@ func (r *TscRule) globalTsc() (globalTscInfo, error) {
 	if filepath.Base(modules) != "node_modules" {
 		return globalTscInfo{}, fmt.Errorf("the global tsc %s is not inside a node_modules directory, so its @types cannot be found", real)
 	}
-	return globalTscInfo{path: path, version: version, typeRoots: filepath.Join(modules, "@types")}, nil
+	return globalTscInfo{path: path, typeRoots: filepath.Join(modules, "@types")}, nil
 }
 
 var (
@@ -377,7 +382,7 @@ type tscAnswer struct {
 func (r *TscRule) check() map[string][]*core.Violation {
 	answers := make([]tscAnswer, len(r.plan.programs))
 	failures := make([]error, len(r.plan.programs))
-	global, globalErr := r.globalTsc()
+	global, globalErr := r.globalTscBase()
 	slots := make(chan struct{}, runtime.GOMAXPROCS(0))
 	var wg sync.WaitGroup
 	for i, program := range r.plan.programs {
@@ -475,11 +480,23 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 		return runStandalone(program.file, global)
 	}
 	dir := filepath.Dir(program.config)
+	project := []string{"-p", program.config}
+	run := append(append([]string{}, project...), "--noEmit", "--incremental", "false", "--pretty", "false")
+	identity := append([]string{program.config, program.tsc, global.path}, project...)
+	identity = append(identity, "--showConfig", "--listFilesOnly")
+	identity = append(identity, run...)
+	lookup, err := statCachedAnswer(identity, []string{program.tsc, global.path})
+	if err != nil {
+		return tscAnswer{}, err
+	}
+	if lookup.status == tscStatHit {
+		return lookup.answer, nil
+	}
+	slowStarted := time.Now()
 	version, err := toolVersion(program.tsc)
 	if err != nil {
 		return tscAnswer{}, err
 	}
-	project := []string{"-p", program.config}
 	shown, err := tscOutput(program.tsc, dir, append(project, "--showConfig")...)
 	if err != nil {
 		return tscAnswer{}, err
@@ -489,6 +506,14 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 		return tscAnswer{}, fmt.Errorf("read tsc --showConfig of %s: %w", program.config, err)
 	}
 	listed, err := tscOutput(program.tsc, dir, append(project, "--listFilesOnly")...)
+	if err != nil {
+		return tscAnswer{}, err
+	}
+	global, err = globalTscVersion(global)
+	if err != nil {
+		return tscAnswer{}, err
+	}
+	before, err := makeStatFingerprint([]string{program.tsc, global.path}, program.config, listed, "")
 	if err != nil {
 		return tscAnswer{}, err
 	}
@@ -502,10 +527,12 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 		return tscAnswer{}, err
 	}
 	if hit {
+		if err := storeStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, before, key, slowStarted); err != nil {
+			return tscAnswer{}, err
+		}
 		return answer, nil
 	}
 	// --incremental false: tsc would write a .tsbuildinfo into the project.
-	run := append(project, "--noEmit", "--incremental", "false", "--pretty", "false")
 	answer.Errors, err = tscDiagnostics(program.tsc, dir, run...)
 	if err != nil {
 		return tscAnswer{}, err
@@ -529,6 +556,9 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 	if err := tscCache.Store(key, answer); err != nil {
 		return tscAnswer{}, err
 	}
+	if err := storeStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, before, key, slowStarted); err != nil {
+		return tscAnswer{}, err
+	}
 	return answer, nil
 }
 
@@ -538,7 +568,25 @@ func runStandalone(file string, global globalTscInfo) (tscAnswer, error) {
 	// --ignoreConfig: a tsconfig.json in dir that does not compile the file
 	// is not its configuration.
 	args := append(append([]string{}, standaloneTSOptions...), "--typeRoots", global.typeRoots, "--ignoreConfig")
+	identity := append([]string{file, global.path}, args...)
+	identity = append(identity, "--listFilesOnly", file, "--pretty", "false", file)
+	lookup, err := statCachedAnswer(identity, []string{global.path})
+	if err != nil {
+		return tscAnswer{}, err
+	}
+	if lookup.status == tscStatHit {
+		return lookup.answer, nil
+	}
+	slowStarted := time.Now()
 	listed, err := tscOutput(global.path, dir, append(append([]string{}, args...), "--listFilesOnly", file)...)
+	if err != nil {
+		return tscAnswer{}, err
+	}
+	global, err = globalTscVersion(global)
+	if err != nil {
+		return tscAnswer{}, err
+	}
+	before, err := makeStatFingerprint([]string{global.path}, "", listed, "", global.typeRoots)
 	if err != nil {
 		return tscAnswer{}, err
 	}
@@ -552,6 +600,9 @@ func runStandalone(file string, global globalTscInfo) (tscAnswer, error) {
 		return tscAnswer{}, err
 	}
 	if hit {
+		if err := storeStatFingerprintIfStable(identity, []string{global.path}, "", listed, before, key, slowStarted, global.typeRoots); err != nil {
+			return tscAnswer{}, err
+		}
 		return answer, nil
 	}
 	answer.Errors, err = tscDiagnostics(global.path, dir, append(args, "--pretty", "false", file)...)
@@ -561,7 +612,223 @@ func runStandalone(file string, global globalTscInfo) (tscAnswer, error) {
 	if err := tscCache.Store(key, answer); err != nil {
 		return tscAnswer{}, err
 	}
+	if err := storeStatFingerprintIfStable(identity, []string{global.path}, "", listed, before, key, slowStarted, global.typeRoots); err != nil {
+		return tscAnswer{}, err
+	}
 	return answer, nil
+}
+
+type tscFileStat struct {
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	ModTimeNS int64  `json:"mtimeNs"`
+}
+
+type tscStatFingerprint struct {
+	AnswerKey string        `json:"answerKey"`
+	Files     []tscFileStat `json:"files"`
+	Dirs      []tscFileStat `json:"dirs"`
+}
+
+func statFingerprintKey(identity []string) string {
+	parts := make([][]byte, len(identity))
+	for i, part := range identity {
+		parts[i] = []byte(part)
+	}
+	return "stat-" + toolcache.Key(parts...)
+}
+
+func statPath(path string) (tscFileStat, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return tscFileStat{}, fmt.Errorf("stat %s: %w", path, err)
+	}
+	return tscFileStat{Path: path, Size: info.Size(), ModTimeNS: info.ModTime().UnixNano()}, nil
+}
+
+func makeStatFingerprint(tscPaths []string, config string, listed []byte, answerKey string, watchedDirs ...string) (tscStatFingerprint, error) {
+	fingerprint := tscStatFingerprint{AnswerKey: answerKey}
+	files := map[string]bool{}
+	directories := map[string]bool{}
+	for _, path := range tscPaths {
+		files[path] = true
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(listed))
+	for scanner.Scan() {
+		path := strings.TrimSpace(scanner.Text())
+		if path != "" {
+			files[path] = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return tscStatFingerprint{}, fmt.Errorf("read the file list of tsc: %w", err)
+	}
+	root := ""
+	if config != "" {
+		configs, err := tsconfigChain(config)
+		if err != nil {
+			return tscStatFingerprint{}, err
+		}
+		for _, path := range configs {
+			files[path] = true
+		}
+		root = filepath.Dir(config)
+	}
+	filePaths := make([]string, 0, len(files))
+	for path := range files {
+		filePaths = append(filePaths, path)
+	}
+	sort.Strings(filePaths)
+	for _, path := range filePaths {
+		stamp, err := statPath(path)
+		if err != nil {
+			return tscStatFingerprint{}, fmt.Errorf("stat a tsc input %s: %w", path, err)
+		}
+		fingerprint.Files = append(fingerprint.Files, stamp)
+		addFingerprintDirs(filepath.Dir(path), root, directories)
+	}
+	for _, path := range watchedDirs {
+		addFingerprintDirs(path, "", directories)
+	}
+	dirs := make([]string, 0, len(directories))
+	for path := range directories {
+		dirs = append(dirs, path)
+	}
+	sort.Strings(dirs)
+	for _, path := range dirs {
+		stamp, err := statPath(path)
+		if err != nil {
+			return tscStatFingerprint{}, fmt.Errorf("stat a tsc input directory %s: %w", path, err)
+		}
+		fingerprint.Dirs = append(fingerprint.Dirs, stamp)
+	}
+	return fingerprint, nil
+}
+
+func addFingerprintDirs(dir, root string, directories map[string]bool) {
+	dir = filepath.Clean(dir)
+	bound := dir
+	if root != "" && withinDir(root, dir) {
+		bound = filepath.Clean(root)
+	} else {
+		for current := dir; ; current = filepath.Dir(current) {
+			if filepath.Base(current) == "node_modules" {
+				bound = current
+			}
+			if filepath.Dir(current) == current {
+				break
+			}
+		}
+	}
+	for current := dir; ; current = filepath.Dir(current) {
+		directories[current] = true
+		if current == bound || filepath.Dir(current) == current {
+			break
+		}
+	}
+}
+
+func withinDir(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+type tscStatLookup struct {
+	answer tscAnswer
+	status tscStatStatus
+}
+
+type tscStatStatus uint8
+
+const (
+	tscStatMiss tscStatStatus = iota
+	tscStatStale
+	tscStatHit
+)
+
+func statCachedAnswer(identity, tscPaths []string) (tscStatLookup, error) {
+	var fingerprint tscStatFingerprint
+	found, err := tscCache.Load(statFingerprintKey(identity), &fingerprint)
+	if err != nil {
+		return tscStatLookup{}, err
+	}
+	if !found {
+		return tscStatLookup{status: tscStatMiss}, nil
+	}
+	stale := false
+	for _, saved := range append(append([]tscFileStat{}, fingerprint.Files...), fingerprint.Dirs...) {
+		current, err := statPath(saved.Path)
+		if err != nil { //nolint:silent-error-handling // A stat failure invalidates the fingerprint and the slow path rechecks the input.
+			// A stat failure invalidates the optimization; the slow path reports or rechecks it.
+			stale = true
+			break
+		}
+		if current.Size != saved.Size || current.ModTimeNS != saved.ModTimeNS {
+			stale = true
+			break
+		}
+	}
+	if stale {
+		for _, executable := range tscPaths {
+			for _, saved := range fingerprint.Files {
+				if saved.Path == executable {
+					forgetToolVersion(executable)
+					break
+				}
+			}
+		}
+		return tscStatLookup{status: tscStatStale}, nil
+	}
+	var answer tscAnswer
+	answerFound, err := tscCache.Load(fingerprint.AnswerKey, &answer)
+	if err != nil {
+		return tscStatLookup{}, err
+	}
+	if !answerFound {
+		return tscStatLookup{status: tscStatMiss}, nil
+	}
+	return tscStatLookup{answer: answer, status: tscStatHit}, nil
+}
+
+func forgetToolVersion(program string) {
+	toolVersionsMu.Lock()
+	delete(toolVersions, program)
+	toolVersionsMu.Unlock()
+}
+
+func storeStatFingerprintIfStable(identity, tscPaths []string, config string, listed []byte, before tscStatFingerprint, answerKey string, slowStarted time.Time, watchedDirs ...string) error {
+	after, err := makeStatFingerprint(tscPaths, config, listed, "", watchedDirs...)
+	if err != nil { //nolint:silent-error-handling // An input changed or disappeared during tsc, so the optimization must not be saved.
+		return nil
+	}
+	if !sameStatFingerprint(before, after) {
+		return nil
+	}
+	cutoff := slowStarted.Add(-time.Second).UnixNano()
+	for _, saved := range append(append([]tscFileStat{}, after.Files...), after.Dirs...) {
+		if saved.ModTimeNS >= cutoff {
+			return nil
+		}
+	}
+	before.AnswerKey = answerKey
+	return tscCache.Store(statFingerprintKey(identity), before)
+}
+
+func sameStatFingerprint(left, right tscStatFingerprint) bool {
+	if len(left.Files) != len(right.Files) || len(left.Dirs) != len(right.Dirs) {
+		return false
+	}
+	for i := range left.Files {
+		if left.Files[i] != right.Files[i] {
+			return false
+		}
+	}
+	for i := range left.Dirs {
+		if left.Dirs[i] != right.Dirs[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // programKey names a program's input: the settings, and every file tsc

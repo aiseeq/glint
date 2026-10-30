@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
@@ -53,6 +54,266 @@ func installProjectTsc(t *testing.T, root, tsc string) {
 	link := filepath.Join(bin, "tsc")
 	require.NoError(t, os.RemoveAll(link))
 	require.NoError(t, os.Symlink(tsc, link))
+}
+
+func countedTsc(t *testing.T, real string) (string, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tsc")
+	log := filepath.Join(t.TempDir(), "runs")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexec %q \"$@\"\n", log, real)
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path, log
+}
+
+func editingTsc(t *testing.T, real, target string) (string, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tsc")
+	log := filepath.Join(t.TempDir(), "runs")
+	marker := filepath.Join(t.TempDir(), "edited")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *--version*|*--showConfig*|*--listFilesOnly*) exec %q "$@" ;;
+esac
+%q "$@"
+status=$?
+if [ ! -e %q ]; then
+  printf 'export const n: number = "edited"\n' > %q
+  touch %q
+fi
+exit "$status"
+`, log, real, real, marker, target, marker)
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path, log
+}
+
+func configEditingTsc(t *testing.T, real, target string) (string, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tsc")
+	log := filepath.Join(t.TempDir(), "runs")
+	marker := filepath.Join(t.TempDir(), "edited")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *--listFilesOnly*)
+    %q "$@"
+    status=$?
+    if [ ! -e %q ]; then
+      printf '%%s\n' '{"compilerOptions":{"strict":true,"noEmit":true,"noUnusedLocals":true},"include":["src"]}' > %q
+      touch %q
+    fi
+    exit "$status"
+    ;;
+  *) exec %q "$@" ;;
+esac
+`, log, real, marker, target, marker, real)
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path, log
+}
+
+func tscRunCount(t *testing.T, log string) int {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	require.NoError(t, err)
+	return len(strings.Split(strings.TrimSpace(string(data)), "\n"))
+}
+
+func ageTscInputs(t *testing.T, root string, paths ...string) {
+	t.Helper()
+	old := time.Now().Add(-5 * time.Second)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() && !info.IsDir() {
+			return nil
+		}
+		return os.Chtimes(path, old, old)
+	})
+	require.NoError(t, err)
+	for _, path := range paths {
+		require.NoError(t, os.Chtimes(path, old, old))
+	}
+}
+
+func runCountedTsc(t *testing.T, root string) []string {
+	t.Helper()
+	return tscFindings(t, root)
+}
+
+func countedTscProject(t *testing.T, files map[string]string) (string, string, string) {
+	t.Helper()
+	real := globalTsc7(t)
+	local, log := countedTsc(t, real)
+	root := tscProject(t, local, files)
+	return root, local, log
+}
+
+func TestTscStatCacheSkipsLaunches(t *testing.T) {
+	root, local, log := countedTscProject(t, map[string]string{
+		"tsconfig.json": strictTSConfig,
+		"src/main.ts":   "export const n: number = 1\n",
+	})
+	ageTscInputs(t, root, local)
+	first := runCountedTsc(t, root)
+	before := tscRunCount(t, log)
+	require.Greater(t, before, 0)
+	second := runCountedTsc(t, root)
+	assert.Equal(t, first, second)
+	assert.Equal(t, before, tscRunCount(t, log))
+}
+
+func TestTscStatCacheEditedFile(t *testing.T) {
+	root, _, log := countedTscProject(t, map[string]string{
+		"tsconfig.json": strictTSConfig,
+		"src/main.ts":   "export const n: number = 1\n",
+	})
+	assert.Empty(t, runCountedTsc(t, root))
+	before := tscRunCount(t, log)
+	patterntest.WriteProjectFile(t, root, "src/main.ts", "export const n: number = 'one'\n")
+	found := runCountedTsc(t, root)
+	assert.NotEmpty(t, found)
+	assert.Greater(t, tscRunCount(t, log), before)
+}
+
+func TestTscStatCacheAddedFile(t *testing.T) {
+	root, _, log := countedTscProject(t, map[string]string{
+		"tsconfig.json": strictTSConfig,
+		"src/main.ts":   "export const n: number = 1\n",
+	})
+	assert.Empty(t, runCountedTsc(t, root))
+	before := tscRunCount(t, log)
+	patterntest.WriteProjectFile(t, root, "src/added.ts", "export const n: number = 'one'\n")
+	found := runCountedTsc(t, root)
+	assert.NotEmpty(t, found)
+	assert.Greater(t, tscRunCount(t, log), before)
+}
+
+func TestTscStatCacheTsconfigChange(t *testing.T) {
+	root, _, log := countedTscProject(t, map[string]string{
+		"base.json":     `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"]}`,
+		"tsconfig.json": `{"extends":"./base.json"}`,
+		"src/main.ts":   "export const n: number = 1\n",
+	})
+	assert.Empty(t, runCountedTsc(t, root))
+	before := tscRunCount(t, log)
+	patterntest.WriteProjectFile(t, root, "base.json", `{"compilerOptions":{"noEmit":true},"include":["src"]}`)
+	found := runCountedTsc(t, root)
+	assert.NotEmpty(t, found)
+	assert.Greater(t, tscRunCount(t, log), before)
+}
+
+func TestTsconfigChainExtendsArray(t *testing.T) {
+	root := tscProject(t, "", map[string]string{
+		"tsconfig.json":   `{"extends":["./base-first.json","./base-last.json"]}`,
+		"base-first.json": `{"include":["from-first"]}`,
+		"base-last.json":  `{"include":["src"],"exclude":["src/private"]}`,
+	})
+	chain, err := tsconfigChain(filepath.Join(root, "tsconfig.json"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		filepath.Join(root, "tsconfig.json"),
+		filepath.Join(root, "base-last.json"),
+		filepath.Join(root, "base-first.json"),
+	}, chain)
+	scope, err := loadTSConfigScope(filepath.Join(root, "tsconfig.json"))
+	require.NoError(t, err)
+	covered, err := scope.covers(filepath.Join(root, "src", "main.ts"))
+	require.NoError(t, err)
+	assert.True(t, covered)
+	covered, err = scope.covers(filepath.Join(root, "from-first", "main.ts"))
+	require.NoError(t, err)
+	assert.False(t, covered)
+	covered, err = scope.covers(filepath.Join(root, "src", "private", "main.ts"))
+	require.NoError(t, err)
+	assert.False(t, covered)
+}
+
+func TestTsconfigChainPackageExtends(t *testing.T) {
+	root := tscProject(t, "", map[string]string{
+		"tsconfig.json": `{"extends":"@configs/base"}`,
+		"node_modules/@configs/base/package.json":     `{"tsconfig":"./config/base.json"}`,
+		"node_modules/@configs/base/config/base.json": `{"include":["src"],"exclude":["src/private"]}`,
+	})
+	config := filepath.Join(root, "tsconfig.json")
+	chain, err := tsconfigChain(config)
+	require.NoError(t, err)
+	assert.Equal(t, []string{config, filepath.Join(root, "node_modules/@configs/base/config/base.json")}, chain)
+	scope, err := loadTSConfigScope(config)
+	require.NoError(t, err)
+	baseDir := filepath.Join(root, "node_modules", "@configs", "base", "config")
+	covered, err := scope.covers(filepath.Join(baseDir, "src", "main.ts"))
+	require.NoError(t, err)
+	assert.True(t, covered)
+	covered, err = scope.covers(filepath.Join(baseDir, "src", "private", "main.ts"))
+	require.NoError(t, err)
+	assert.False(t, covered)
+}
+
+func TestTscStatCacheEditDuringRun(t *testing.T) {
+	real := globalTsc7(t)
+	root := tscProject(t, "", map[string]string{
+		"tsconfig.json": strictTSConfig,
+		"src/main.ts":   "export const n: number = 1\n",
+	})
+	target := filepath.Join(root, "src", "main.ts")
+	local, log := editingTsc(t, real, target)
+	installProjectTsc(t, root, local)
+	_ = runCountedTsc(t, root)
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Contains(t, string(data), `"edited"`)
+	before := tscRunCount(t, log)
+	assert.Greater(t, before, 0)
+	found := runCountedTsc(t, root)
+	assert.NotEmpty(t, found)
+	assert.Greater(t, tscRunCount(t, log), before)
+}
+
+func TestTscStatCacheConfigEditDuringListing(t *testing.T) {
+	real := globalTsc7(t)
+	root := tscProject(t, "", map[string]string{
+		"tsconfig.json": strictTSConfig,
+		"src/main.ts":   "export const n: number = 1\n",
+	})
+	config := filepath.Join(root, "tsconfig.json")
+	local, log := configEditingTsc(t, real, config)
+	installProjectTsc(t, root, local)
+	_ = runCountedTsc(t, root)
+	data, err := os.ReadFile(config)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "noUnusedLocals")
+	before := tscRunCount(t, log)
+	_ = runCountedTsc(t, root)
+	assert.Greater(t, tscRunCount(t, log), before)
+}
+
+func TestTscStatCacheAddedTypesPackage(t *testing.T) {
+	real := globalTsc7(t)
+	base := t.TempDir()
+	root := filepath.Join(base, "project")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	patterntest.WriteProjectFile(t, root, "tsconfig.json", strictTSConfig)
+	patterntest.WriteProjectFile(t, root, "src/main.ts", "/// <reference path=\"../../node_modules/@types/existing/index.d.ts\" />\nexport const n: number = typedGlobal\n")
+	patterntest.WriteProjectFile(t, base, "node_modules/@types/existing/package.json", `{"name":"@types/existing","version":"1.0.0","types":"index.d.ts"}`)
+	patterntest.WriteProjectFile(t, base, "node_modules/@types/existing/index.d.ts", "declare const unrelatedGlobal: number\n")
+	local, log := countedTsc(t, real)
+	installProjectTsc(t, root, local)
+	ageTscInputs(t, base, local)
+	first := runCountedTsc(t, root)
+	assert.NotEmpty(t, first)
+	before := tscRunCount(t, log)
+	patterntest.WriteProjectFile(t, base, "node_modules/@types/added/package.json", `{"name":"@types/added","version":"1.0.0","types":"index.d.ts"}`)
+	patterntest.WriteProjectFile(t, base, "node_modules/@types/added/index.d.ts", "declare const typedGlobal: number\n")
+	listed, err := exec.Command(real, "-p", filepath.Join(root, "tsconfig.json"), "--listFilesOnly").CombinedOutput()
+	require.NoError(t, err, string(listed))
+	require.Contains(t, string(listed), filepath.Join(base, "node_modules/@types/existing/index.d.ts"))
+	_ = runCountedTsc(t, root)
+	assert.Greater(t, tscRunCount(t, log), before)
 }
 
 // tscContexts reads the files glint would analyze under root.
@@ -172,12 +433,15 @@ func TestTscCacheFollowsTheFilesOfTheProgram(t *testing.T) {
 	})
 	assert.Empty(t, tscFindings(t, root))
 
-	// A tsc that fails every check: what still passes comes from the cache.
-	installProjectTsc(t, root, stubTsc(t, tsc, 3))
-	assert.Empty(t, tscFindings(t, root))
-
 	patterntest.WriteProjectFile(t, root, "src/lib/two.ts", "export const two = '2'\n")
+	ageTscInputs(t, root)
 	found := tscFindings(t, root)
+	require.Len(t, found, 1)
+	assert.Contains(t, found[0], "high src/main.ts:2 TS2322")
+
+	// Replacing the compiler invalidates its stat fingerprint.
+	installProjectTsc(t, root, stubTsc(t, tsc, 3))
+	found = tscFindings(t, root)
 	require.Len(t, found, 1)
 	assert.Contains(t, found[0], "high tsconfig.json:1 tsc could not check tsconfig.json")
 }
