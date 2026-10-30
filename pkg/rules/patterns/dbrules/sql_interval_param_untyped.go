@@ -1,6 +1,7 @@
 package dbrules
 
 import (
+	"sort"
 	"strings"
 	"unicode"
 
@@ -40,7 +41,8 @@ func (r *SQLIntervalParamUntypedRule) AnalyzeFile(ctx *core.FileContext) []*core
 	for _, literal := range patternkit.SqlLiterals(ctx.GoAST) {
 		tokens := sqlIntervalTokens(literal.Text)
 		first := make(map[string]int)
-		for i, token := range tokens {
+		for _, i := range sqlParamParseOrder(tokens) {
+			token := tokens[i]
 			if !token.parameter {
 				continue
 			}
@@ -195,8 +197,69 @@ func sqlColumnToken(token sqlIntervalToken) bool {
 	return token.word && !strings.EqualFold(token.text, "AND") && !strings.EqualFold(token.text, "OR") && !strings.EqualFold(token.text, "INTERVAL")
 }
 
+func sqlParamParseOrder(tokens []sqlIntervalToken) []int {
+	order := make([]int, len(tokens))
+	for i := range order {
+		order[i] = i
+	}
+	// Only an UPDATE statement: ON CONFLICT DO UPDATE takes its SET list
+	// before its WHERE, and FOR UPDATE is a lock clause.
+	update := -1
+	depth := 0
+	previous := ""
+	for i, token := range tokens {
+		if token.text == "(" {
+			depth++
+		} else if token.text == ")" {
+			depth--
+		} else if depth == 0 && token.word {
+			if strings.EqualFold(token.text, "UPDATE") && !strings.EqualFold(previous, "DO") && !strings.EqualFold(previous, "FOR") {
+				update = i
+				break
+			}
+			previous = token.text
+		}
+	}
+	if update < 0 {
+		return order
+	}
+	clauseOrder := 0
+	priority := map[int]int{}
+	for i := update + 1; i < len(tokens); i++ {
+		token := tokens[i]
+		if token.text == "(" {
+			priority[i] = clauseOrder
+			depth++
+			continue
+		}
+		if token.text == ")" {
+			priority[i] = clauseOrder
+			depth--
+			continue
+		}
+		if depth == 0 && token.word {
+			switch {
+			case strings.EqualFold(token.text, "FROM"):
+				clauseOrder = 0
+			case strings.EqualFold(token.text, "WHERE"):
+				clauseOrder = 1
+			case strings.EqualFold(token.text, "SET"):
+				clauseOrder = 2
+			case strings.EqualFold(token.text, "RETURNING"):
+				clauseOrder = 3
+			}
+		}
+		priority[i] = clauseOrder
+	}
+	sort.SliceStable(order[update+1:], func(a, b int) bool {
+		left, right := order[update+1+a], order[update+1+b]
+		return priority[left] < priority[right]
+	})
+	return order
+}
+
 func sqlParamMeetsInterval(tokens []sqlIntervalToken, i int) bool {
-	if i+2 < len(tokens) && sqlIntervalOperator(tokens[i+1].text) && sqlIntervalLiteral(tokens, i+2) {
+	if i+2 < len(tokens) && sqlIntervalOperator(tokens[i+1].text) && sqlIntervalOperand(tokens, i+2) {
 		return true
 	}
 	return i >= 3 && sqlIntervalOperator(tokens[i-1].text) && sqlIntervalLiteralBefore(tokens, i-2)
@@ -216,4 +279,24 @@ func sqlIntervalLiteral(tokens []sqlIntervalToken, i int) bool {
 		return true
 	}
 	return i+2 < len(tokens) && tokens[i].string && tokens[i+1].text == "::" && strings.EqualFold(tokens[i+2].text, "interval")
+}
+
+func sqlIntervalOperand(tokens []sqlIntervalToken, i int) bool {
+	if sqlIntervalLiteral(tokens, i) {
+		return true
+	}
+	if i >= len(tokens) {
+		return false
+	}
+	if tokens[i].parameter {
+		return i+2 < len(tokens) && tokens[i+1].text == "::" && strings.EqualFold(tokens[i+2].text, "interval")
+	}
+	if i+1 < len(tokens) && strings.EqualFold(tokens[i].text, "CAST") && tokens[i+1].text == "(" {
+		for end := i + 2; end < len(tokens) && tokens[end].text != ")"; end++ {
+			if strings.EqualFold(tokens[end].text, "AS") && end+1 < len(tokens) && strings.EqualFold(tokens[end+1].text, "interval") {
+				return true
+			}
+		}
+	}
+	return false
 }

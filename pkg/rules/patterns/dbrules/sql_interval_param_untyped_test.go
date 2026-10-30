@@ -61,3 +61,32 @@ func query(db DB) {
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "$3 meets INTERVAL arithmetic")
 }
+
+func TestSQLIntervalParamUntypedIntervalParam(t *testing.T) {
+	violations := intervalParamViolations(t, `package store
+func query(db DB) {
+	db.Query("SELECT col < $5 - $4::interval FROM orders")
+	db.Query("SELECT col < $5 - CAST($4 AS interval) FROM orders")
+	db.Query("SELECT col < $5 - CAST('1 day' AS interval) FROM orders")
+	db.Query("SELECT $5::timestamptz - $4::interval FROM orders")
+}
+`)
+	require.Len(t, violations, 3)
+	for _, violation := range violations {
+		assert.Contains(t, violation.Message, "$5 meets INTERVAL arithmetic")
+	}
+}
+
+func TestSQLIntervalParamUntypedUpdateOrder(t *testing.T) {
+	violations := intervalParamViolations(t, `package store
+func query(db DB) {
+	db.Query("UPDATE orders SET closed_at = $1 WHERE x < $1 - INTERVAL '1 day'")
+	db.Query("UPDATE orders SET a = 1 WHERE created_at < $1 AND x < $1 - INTERVAL '1 day'")
+	// ON CONFLICT DO UPDATE takes its SET list before its WHERE, in text order.
+	db.Query("INSERT INTO orders (id) VALUES ($2) ON CONFLICT (id) DO UPDATE SET closed_at = $1 WHERE orders.x < $1 - INTERVAL '1 day'")
+	db.Query("SELECT id FROM orders WHERE created_at < $1 FOR UPDATE")
+}
+`)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "$1 meets INTERVAL arithmetic")
+}
