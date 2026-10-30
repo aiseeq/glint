@@ -18,3 +18,4 @@
 ## Журнал
 - 2026-10-30 06:15 открыт — glint-master
 - 2026-10-30 06:34 в работе — glint-master
+- 2026-10-30 06:47 note — glint-master: 07:0x CET п.1 сделан: 6260894 — fieldNilFieldOwner вынесен из цикла по методам (было O(M²) на поле); потребитель А --no-cache -r field-nil-check-inconsistent 8,4 с → 0,29 с, находки те же, graft consumers 0 различий. Промах кэша в worktree — d8b1f30 (worktree-cache-file-scope). п.2 (tsc инкрементально) — дальше
