@@ -1,6 +1,6 @@
 # glint rules показывает настройки правила с примером YAML
 
-Статус: на проверке
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -24,3 +24,4 @@
 - 2026-10-30 02:22 note — glint-master: ревью 1: таблица настроек в rule.go вместо правил, умолчания выдуманы (long-function 50 против 100), сверка не видит NameSetSetting и хелперы (5 ключей из конфигов потребителей нет в карточках); раунд 2 — review-rule-settings-1.md
 - 2026-10-30 03:10 note — glint-master: раунд 2 принят; doc-missing skip_trivial объявил мастер (запрет на doccheck был шаблонный); примеры без имён потребителей; влито 859ab8b
 - 2026-10-30 03:10 на проверке — glint-master
+- 2026-10-30 03:16 готово — git-admin (session glint-master): git-admin на установленном v1.83.7-146-gaebaba9: карточка ts-period-boundary-by-hand с period_modules и YAML; опечатка в имени — код 1 с подсказкой; 56 строк settings в glint rules. Сверку ключей .glint.yaml всех проектов выполнила приёмка accept-rule-settings-cli.sh (код 0)
