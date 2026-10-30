@@ -729,16 +729,21 @@ func persistenceMethod(scope patternkit.FuncScope, fn *types.Func) bool {
 }
 
 var (
-	// sqlWriteVerb matches SQL that changes rows, once sqlRowLock is cut out.
+	// sqlStatement matches a text that starts an SQL statement, past leading
+	// comments, and captures its verb.
+	sqlStatement = regexp.MustCompile(`(?is)^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*\(?\s*(SELECT|WITH|INSERT|UPDATE|DELETE|MERGE|UPSERT)\b`)
+	// sqlWriteVerb matches SQL that changes rows, once quoted strings and
+	// sqlRowLock are cut out.
 	sqlWriteVerb = regexp.MustCompile(`(?i)\b(?:INSERT|UPDATE|DELETE|MERGE|UPSERT)\b`)
 	sqlRowLock   = regexp.MustCompile(`(?i)\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b`)
-	sqlSelect    = regexp.MustCompile(`(?i)^\s*\(?\s*(?:SELECT|WITH)\b`)
+	sqlQuoted    = regexp.MustCompile(`'(?:[^']|'')*'`)
 )
 
 // onlyReads reports a method body of receiver type recv that shows a SELECT
 // (a literal or a string constant, a package one too) and writes nothing:
-// no call led by a write verb, no call of another method of recv, no SQL
-// that changes rows. SQL out of sight (a package variable) proves no read.
+// no call led by a write verb (Updates too), no call of another method of
+// recv, no SQL that changes rows. SQL out of sight (a package variable)
+// proves no read.
 func onlyReads(decl patternkit.TypedFuncDecl, recv string) bool {
 	var texts []string
 	for _, literal := range patternkit.SqlTexts(decl.Decl.Body, func(string) bool { return true }) {
@@ -748,7 +753,8 @@ func onlyReads(decl patternkit.TypedFuncDecl, recv string) bool {
 	ast.Inspect(decl.Decl.Body, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CallExpr:
-			writes = helpers.IsWriteName(helpers.CalleeName(n)) || callsMethodOf(decl.Info, n, recv)
+			name := strings.TrimSuffix(helpers.CalleeName(n), "s")
+			writes = writes || helpers.IsWriteName(name) || callsMethodOf(decl.Info, n, recv)
 		case *ast.Ident:
 			if c, ok := decl.Info.Uses[n].(*types.Const); ok && c.Val().Kind() == constant.String {
 				texts = append(texts, constant.StringVal(c.Val()))
@@ -761,10 +767,14 @@ func onlyReads(decl patternkit.TypedFuncDecl, recv string) bool {
 	}
 	reads := false
 	for _, text := range texts {
-		if sqlWriteVerb.MatchString(sqlRowLock.ReplaceAllString(text, "")) {
+		statement := sqlStatement.FindStringSubmatch(text)
+		if statement == nil {
+			continue
+		}
+		if sqlWriteVerb.MatchString(sqlRowLock.ReplaceAllString(sqlQuoted.ReplaceAllString(text, "''"), "")) {
 			return false
 		}
-		reads = reads || sqlSelect.MatchString(text)
+		reads = reads || strings.EqualFold(statement[1], "SELECT") || strings.EqualFold(statement[1], "WITH")
 	}
 	return reads
 }

@@ -345,7 +345,71 @@ func (a *Admin) Save(tx *Tx) error {
 func TestZeroPlaceholdersPassedForPersistedFieldsSkipsReads(t *testing.T) {
 	assert.Equal(t, []string{
 		"store/deposits.go:41", "store/hidden.go:26", "store/hidden.go:41", "store/hidden.go:56",
+		"store/mixed.go:30", "store/mixed.go:43",
 	}, patterntest.TypedFuncFindings(t, NewZeroPlaceholdersPassedForPersistedFieldsRule(), map[string]string{
+		// A write followed by a read in one expression is still a write; so is
+		// an ORM Updates. A quoted 'DELETE', an error text and a leading SQL
+		// comment do not make a reader write.
+		"store/mixed.go": `package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"time"
+)
+
+type Updater interface{ Updates(values map[string]any) error }
+
+type AuditRepo struct {
+	db  *sql.DB
+	orm Updater
+}
+
+func (r *AuditRepo) touch(ctx context.Context, q string, args []any) error { return nil }
+
+func (r *AuditRepo) countAndTouch(ctx context.Context, window string, args []any) (int64, error) {
+	var total int64
+	err := r.db.QueryRowContext(ctx, "SELECT count(*) FROM audit WHERE true"+window, args...).Scan(&total)
+	return total, errors.Join(err, r.touch(ctx, window, args), ctx.Err())
+}
+
+func (r *AuditRepo) CountTouchPeriod(ctx context.Context, from, to time.Time) (int64, error) {
+	window, args := periodWindow(from, to)
+	return r.countAndTouch(ctx, window, args)
+}
+
+func (r *AuditRepo) CountTouchAll(ctx context.Context) (int64, error) { return r.countAndTouch(ctx, "", nil) }
+
+func (r *AuditRepo) countAndMark(ctx context.Context, window string, args []any) (int64, error) {
+	var total int64
+	err := r.db.QueryRowContext(ctx, "SELECT count(*) FROM audit WHERE true"+window, args...).Scan(&total)
+	return total, errors.Join(err, r.orm.Updates(map[string]any{"seen": true}))
+}
+
+func (r *AuditRepo) CountMarkPeriod(ctx context.Context, from, to time.Time) (int64, error) {
+	window, args := periodWindow(from, to)
+	return r.countAndMark(ctx, window, args)
+}
+
+func (r *AuditRepo) CountMarkAll(ctx context.Context) (int64, error) { return r.countAndMark(ctx, "", nil) }
+
+func (r *AuditRepo) countLive(ctx context.Context, window string, args []any) (int64, error) {
+	var total int64
+	q := "-- live rows only\nSELECT count(*) FROM audit WHERE op <> 'DELETE'" + window
+	if err := r.db.QueryRowContext(ctx, q, args...).Scan(&total); err != nil {
+		return 0, errors.Join(errors.New("count before update failed"), err)
+	}
+	return total, nil
+}
+
+func (r *AuditRepo) CountLivePeriod(ctx context.Context, from, to time.Time) (int64, error) {
+	window, args := periodWindow(from, to)
+	return r.countLive(ctx, window, args)
+}
+
+func (r *AuditRepo) CountLiveAll(ctx context.Context) (int64, error) { return r.countLive(ctx, "", nil) }
+`,
 		"store/hidden.go": `package store
 
 import (
