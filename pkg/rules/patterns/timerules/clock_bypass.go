@@ -23,7 +23,7 @@ func init() { rules.Register(NewClockBypassRule()) }
 //	func (s *Service) Expired() bool { return time.Now().After(s.deadline) }
 //
 // The clock_package setting enables module-wide checks, including SQL literals.
-// Not flagged: the clock implementation, tests, main packages, or a time.Now()
+// Not flagged: the clock implementation, tests, or a time.Now()
 // used to measure elapsed time with time.Since(start) in the same function.
 type ClockBypassRule struct{ *rules.BaseRule }
 
@@ -50,11 +50,34 @@ type clockPackageUse struct {
 // AnalyzeGoProject reports standard clock reads in packages that use a project clock.
 func (r *ClockBypassRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	projectPaths := projectModulePaths(ctx)
+	clockPackage := r.GetStringSetting("clock_package", "")
+	clockModule := ""
+	if clockPackage != "" {
+		clockModule = moduleForClockPackage(ctx.Packages, clockPackage)
+		projectPaths = map[string]bool{}
+		if clockModule != "" {
+			projectPaths[clockModule] = true
+		}
+	}
 	var violations []*core.Violation
 	for _, pkg := range ctx.Packages {
-		violations = append(violations, r.analyzeClockPackage(pkg, projectPaths)...)
+		violations = append(violations, r.analyzeClockPackage(pkg, projectPaths, clockModule)...)
 	}
 	return violations, nil
+}
+
+func moduleForClockPackage(packages []*core.GoPackageContext, clockPackage string) string {
+	var module string
+	for _, pkg := range packages {
+		if pkg == nil || pkg.Package == nil || pkg.Package.Module == nil {
+			continue
+		}
+		candidate := pkg.Package.Module.Path
+		if candidate != "" && modulePathFor(clockPackage, map[string]bool{candidate: true}) && len(candidate) > len(module) {
+			module = candidate
+		}
+	}
+	return module
 }
 
 func projectModulePaths(ctx *core.GoProjectContext) map[string]bool {
@@ -67,15 +90,21 @@ func projectModulePaths(ctx *core.GoProjectContext) map[string]bool {
 	return projectPaths
 }
 
-func (r *ClockBypassRule) analyzeClockPackage(pkg *core.GoPackageContext, projectPaths map[string]bool) []*core.Violation {
-	if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil || pkg.Package.Types == nil || pkg.Package.Name == "main" {
+func (r *ClockBypassRule) analyzeClockPackage(pkg *core.GoPackageContext, projectPaths map[string]bool, clockModule string) []*core.Violation {
+	clockPackage := r.GetStringSetting("clock_package", "")
+	if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil || pkg.Package.Types == nil {
 		return nil
 	}
-	files := productionClockFiles(pkg)
+	if clockPackage == "" && pkg.Package.Name == "main" {
+		return nil
+	}
+	if clockPackage != "" && (clockModule == "" || pkg.Package.Module == nil || pkg.Package.Module.Path != clockModule) {
+		return nil
+	}
+	files := productionClockFiles(pkg, clockPackage != "")
 	if len(files) == 0 || implementsClockHere(pkg.Package.Types) {
 		return nil
 	}
-	clockPackage := r.GetStringSetting("clock_package", "")
 	if clockPackage != "" && pkg.Package.PkgPath == clockPackage {
 		return nil
 	}
@@ -120,10 +149,14 @@ func (r *ClockBypassRule) reportStandardClockReads(info *types.Info, file *core.
 			measured[call] = true
 		}
 	}
+	var setup map[*ast.CallExpr]bool
+	if file.GoAST.Name.Name == "main" {
+		setup = clockSetupCalls(info, file.GoAST, r.GetStringSetting("clock_package", ""))
+	}
 	var violations []*core.Violation
 	ast.Inspect(file.GoAST, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
-		if !ok || !isStandardClockCall(info, call) || measured[call] {
+		if !ok || !isStandardClockCall(info, call) || measured[call] || setup[call] {
 			return true
 		}
 		line := file.LineFor(call)
@@ -302,14 +335,76 @@ func isDiagnosticCall(obj types.Object) bool {
 	return false
 }
 
-func productionClockFiles(pkg *core.GoPackageContext) []*core.FileContext {
+func productionClockFiles(pkg *core.GoPackageContext, includeMain bool) []*core.FileContext {
 	files := make([]*core.FileContext, 0, len(pkg.Files))
 	for _, file := range pkg.Files {
-		if file != nil && file.HasGoAST() && !file.IsTestFile() && file.GoAST.Name.Name != "main" {
+		if file != nil && file.HasGoAST() && !file.IsTestFile() && (includeMain || file.GoAST.Name.Name != "main") {
 			files = append(files, file)
 		}
 	}
 	return files
+}
+
+func clockSetupCalls(info *types.Info, file *ast.File, clockPackage string) map[*ast.CallExpr]bool {
+	setup := make(map[*ast.CallExpr]bool)
+	if clockPackage == "" {
+		return setup
+	}
+	markCalls := func(node ast.Node) {
+		ast.Inspect(node, func(part ast.Node) bool {
+			if call, ok := part.(*ast.CallExpr); ok && isStandardClockCall(info, call) {
+				setup[call] = true
+			}
+			return true
+		})
+	}
+	markClockPackageArguments(info, file, clockPackage, markCalls)
+	markClockPackageVariableAssignments(info, file, clockPackage, markCalls)
+	return setup
+}
+
+func markClockPackageArguments(info *types.Info, file *ast.File, clockPackage string, markCalls func(ast.Node)) {
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if ok && callsClockPackage(info, call, clockPackage) {
+			for _, arg := range call.Args {
+				markCalls(arg)
+			}
+		}
+		return true
+	})
+}
+
+func markClockPackageVariableAssignments(info *types.Info, file *ast.File, clockPackage string, markCalls func(ast.Node)) {
+	ast.Inspect(file, func(node ast.Node) bool {
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range assign.Lhs {
+			if isClockPackageVariable(info, lhs, clockPackage) {
+				for _, value := range assign.Rhs {
+					markCalls(value)
+				}
+				break
+			}
+		}
+		return true
+	})
+}
+
+func isClockPackageVariable(info *types.Info, expression ast.Expr, clockPackage string) bool {
+	selector, ok := ast.Unparen(expression).(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	variable, ok := info.Uses[selector.Sel].(*types.Var)
+	return ok && variable.Pkg() != nil && variable.Pkg().Path() == clockPackage
+}
+
+func callsClockPackage(info *types.Info, call *ast.CallExpr, clockPackage string) bool {
+	obj := calledObject(info, call)
+	return obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == clockPackage
 }
 
 func countProjectClockUsage(info *types.Info, files []*core.FileContext, projectPaths map[string]bool) clockPackageUse {

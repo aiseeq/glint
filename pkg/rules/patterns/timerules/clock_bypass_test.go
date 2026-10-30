@@ -1,8 +1,10 @@
 package timerules
 
 import (
+	"path/filepath"
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
@@ -117,10 +119,108 @@ func main() { _ = time.Now() }
 	require.NoError(t, rule.Configure(map[string]any{"clock_package": "example.com/app/clock"}))
 	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
 	require.NoError(t, err)
-	assert.Equal(t, []string{"report/report.go:3", "report/report.go:4"}, patterntest.FoundLines(violations))
+	assert.Equal(t, []string{"command/main.go:3", "report/report.go:3", "report/report.go:4"}, patterntest.FoundLines(violations))
 	for _, violation := range violations {
 		assert.Equal(t, "This module takes time from example.com/app/clock; this standard clock read can disagree with it", violation.Message)
 	}
+}
+
+func TestClockBypassModuleMainPackage(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/app\n\ngo 1.24\n",
+		"clock/clock.go": `package clock
+import "time"
+func Now() time.Time { return time.Now() }
+`,
+		"service/service.go": `package service
+import "time"
+func Run(time.Time) {}
+`,
+		"command/main.go": `package main
+import (
+	"time"
+	"example.com/app/service"
+)
+var startedAt = time.Now()
+var now time.Time
+func main() {
+	now = time.Now()
+	service.Run(time.Now().UTC())
+}
+const query = ` + "`SELECT NOW(), NOW()`" + `
+`,
+	}
+	rule := NewClockBypassRule()
+	require.NoError(t, rule.Configure(map[string]any{"clock_package": "example.com/app/clock"}))
+	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"command/main.go:10", "command/main.go:12", "command/main.go:12", "command/main.go:6", "command/main.go:9"}, patterntest.FoundLines(violations))
+}
+
+func TestClockBypassModuleMainClockSetup(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/app\n\ngo 1.24\n",
+		"clock/clock.go": `package clock
+import "time"
+type Func func() time.Time
+var Default Func
+var Started time.Time
+func Set(Func) {}
+func New(location *time.Location) *time.Location { return location }
+func Now() time.Time { return time.Now() }
+`,
+		"command/main.go": `package main
+import (
+	"time"
+	"example.com/app/clock"
+)
+var appClock = clock.New(time.Now().Location())
+func main() {
+	clock.Set(func() time.Time { return time.Now() })
+	clock.Default = clock.Func(time.Now)
+	clock.New(time.Now().Location())
+	clock.Default = clock.Func(func() time.Time { return time.Now() })
+	clock.Started = time.Now()
+}
+`,
+	}
+	rule := NewClockBypassRule()
+	require.NoError(t, rule.Configure(map[string]any{"clock_package": "example.com/app/clock"}))
+	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+}
+
+func TestClockBypassModuleOtherModule(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"go.mod": "module example.com/app\n\ngo 1.24\n",
+		"clock/clock.go": `package clock
+import "time"
+func Now() time.Time { return time.Now() }
+`,
+	})
+	outer, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+	require.NoError(t, err)
+	otherRoot := filepath.Join(root, "tools")
+	otherFiles := rulestest.ModuleIn(t, otherRoot, map[string]string{
+		"go.mod": "module example.com/tools\n\ngo 1.24\n",
+		"cmd/main.go": `package main
+import "time"
+func main() { _ = time.Now() }
+`,
+		"clock/clock.go": `package clock
+import "time"
+func Read() time.Time { return time.Now() }
+`,
+	})
+	other, err := core.LoadGoProject(otherRoot, otherFiles, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+	require.NoError(t, err)
+	project := &core.GoProjectContext{Packages: append(outer.Packages, other.Packages...)}
+	rule := NewClockBypassRule()
+	require.NoError(t, rule.Configure(map[string]any{"clock_package": "example.com/app/clock"}))
+	violations, err := rule.AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations)
 }
 
 func TestClockBypassModuleClockSQL(t *testing.T) {
