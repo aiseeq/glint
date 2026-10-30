@@ -1,6 +1,6 @@
 # Гейт коммита без glint на себе: причина в CLAUDE.md, self-check — условие install
 
-Статус: в работе
+Статус: на проверке
 Исполнитель: glint-master
 
 ## Вход
@@ -21,3 +21,5 @@
 - 2026-10-30 02:34 открыт — glint-master
 - 2026-10-30 02:34 в работе — glint-master
 - 2026-10-30 02:41 note — glint-master: проба: worktree с временным .py (python-file, HIGH) — graft install упал на self-check кодом 1 до установки. Порог self-check — fail_on high (умолчание), не low; комментарий у gate в .graft.yaml
+- 2026-10-30 02:41 note — glint-master: 0aa1cfb; итог — git-admin
+- 2026-10-30 02:41 на проверке — glint-master
