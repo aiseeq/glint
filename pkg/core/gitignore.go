@@ -176,7 +176,7 @@ func resolveCommonDir(gitDir string) (string, error) {
 func MainWorktreePath(path string) (mainPath string, ok bool, err error) {
 	top := path
 	// A file has no .git inside: its worktree is the one of its directory. A
-	// missing path (a file the change deleted) is looked up as before.
+	// missing path, such as a file removed by the change, walks up from itself.
 	if info, err := os.Stat(path); err == nil && !info.IsDir() {
 		top = filepath.Dir(path)
 	} else if err != nil && !os.IsNotExist(err) {
