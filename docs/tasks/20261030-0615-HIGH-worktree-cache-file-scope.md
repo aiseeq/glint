@@ -1,0 +1,19 @@
+# Кэш результатов выключен в linked worktree, если среди scope есть файл: MainWorktreePath ищет .git внутри файла (ENOTDIR)
+
+Статус: в работе
+Исполнитель: glint-master
+
+## Вход
+- Запрос: мастер потребителя А 30.10 ~06:20 CET (разбор тестов Сна): в свежем worktree проектное правило не берёт кэш даже на втором прогоне подряд.
+- Замер: его scratchpad si1556/wt-2.txt, первая строка: «warning: result cache off for <worktree>: stat <worktree>/VERSION/.git: not a directory».
+- Причина: cmd/glint/cache.go mainWorktreeKey → core.MainWorktreePath(scope) с scope-файлом (VERSION); resolveGitDir(<файл>) → stat <файл>/.git → ENOTDIR → ошибка → кэш off целиком.
+
+## Что сделать
+- MainWorktreePath: для пути-файла начинать поиск с каталога файла. TDD-тест в pkg/core.
+
+## Приёмка
+- Тест красный до правки; glint check в linked worktree со scope-файлом — без warning, второй прогон «project rules reused».
+
+## Журнал
+- 2026-10-30 06:15 открыт — glint-master
+- 2026-10-30 06:15 в работе — glint-master

@@ -1,6 +1,7 @@
 # Новое правило: число ? в запросе sqlx.In не равно числу аргументов In — «number of bindVars exceeds arguments» на каждом вызове
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Вход
 - Запрос: мастер потребителя А 30.10 ~04:35 CET; запрос падал на каждом вызове.
@@ -15,3 +16,5 @@
 
 ## Журнал
 - 2026-10-30 06:04 открыт — glint-master
+- 2026-10-30 06:13 в работе — glint-master
+- 2026-10-30 06:14 note — glint-master: 06:14 CET боец 1030-0614-sqlx-in-bindvars (luna), бриф brief-sqlx-in-bindvars.md, приёмка accept-sqlx-in-bindvars.sh, фикстура sqlxin-fixture

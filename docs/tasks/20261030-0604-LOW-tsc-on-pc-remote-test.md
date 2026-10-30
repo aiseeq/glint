@@ -1,6 +1,6 @@
 # test-short remote: true — сначала tsc 7 на PC, тесты tsc идут на PC без t.Skip
 
-Статус: в работе
+Статус: на проверке
 Исполнитель: glint-master
 
 ## Вход
@@ -19,3 +19,5 @@
 - 2026-10-30 06:04 открыт — glint-master
 - 2026-10-30 06:04 в работе — glint-master
 - 2026-10-30 06:07 note — glint-master: 06:0x CET на PC: sudo npm i -g --prefix /usr/local typescript@7.0.2 @types/node@22.20.5 (песочница worker pc видит только /usr, PATH /usr/local/bin; ~/.npm-global там не виден — туда тоже поставлено, лишнее). worker pc -run 'Tsc|Tsconfig' frontendrules: 15 PASS, 0 SKIP; -short ./... на PC: SKIP только short-режима (window_test.go:48, file_local_test.go:55). remote: true у test-short.
+- 2026-10-30 06:10 note — glint-master: 06:10 CET 4d9b240 в main: remote: true у test-short; первый гейт прошёл на ноуте (-p 4), SKIP tsc 0
+- 2026-10-30 06:10 на проверке — glint-master

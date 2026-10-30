@@ -174,7 +174,15 @@ func resolveCommonDir(gitDir string) (string, error) {
 // main worktree itself and in a repository without a main worktree (bare,
 // or a submodule's git directory).
 func MainWorktreePath(path string) (mainPath string, ok bool, err error) {
-	for top := path; ; {
+	top := path
+	// A file has no .git inside: its worktree is the one of its directory. A
+	// missing path (a file the change deleted) is looked up as before.
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		top = filepath.Dir(path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", false, fmt.Errorf("stat %s: %w", path, err)
+	}
+	for {
 		gitDir, err := resolveGitDir(top)
 		if err != nil {
 			return "", false, err

@@ -154,6 +154,10 @@ func TestMainWorktreePath(t *testing.T) {
 		"main":        "",
 		"main/sub":    "",
 		"plain":       "",
+		// A file scope (VERSION, one changed file) resolves from its directory.
+		"wt/cmd/tool/main.go": filepath.Join(base, "main/cmd/tool/main.go"),
+		"plain/app.go":        "",
+		"wt/cmd/tool/gone.go": filepath.Join(base, "main/cmd/tool/gone.go"),
 	} {
 		got, ok, err := MainWorktreePath(filepath.Join(base, path))
 		require.NoError(t, err, path)

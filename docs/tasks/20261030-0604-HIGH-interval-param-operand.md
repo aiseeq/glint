@@ -1,6 +1,7 @@
 # sql-interval-param-untyped: интервал-параметр ($M::interval) и SET в UPDATE не типизирует WHERE
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Вход
 - Запрос: мастер потребителя А 30.10 ~04:35 CET, вторая перепроверка; запрос падал на каждом вызове, починено у потребителя.
@@ -16,3 +17,5 @@
 
 ## Журнал
 - 2026-10-30 06:04 открыт — glint-master
+- 2026-10-30 06:13 в работе — glint-master
+- 2026-10-30 06:14 note — glint-master: 06:14 CET боец 1030-0614-interval-operand (luna), бриф brief-interval-operand.md, приёмка accept-interval-operand.sh, фикстура interval2-fixture (до правки 0 находок)

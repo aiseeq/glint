@@ -1,6 +1,7 @@
 # clock-bypass с clock_package: NOW() во фрагментах SQL, собираемых кодом (Sprintf-шаблон, аргумент функции, append фрагмента)
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Вход
 - Запрос: мастер потребителя А 30.10 ~04:35 CET; у потребителя 4 места, чинит сам.
@@ -15,3 +16,5 @@
 
 ## Журнал
 - 2026-10-30 06:04 открыт — glint-master
+- 2026-10-30 06:13 в работе — glint-master
+- 2026-10-30 06:14 note — glint-master: 06:14 CET боец 1030-0614-clock-composed-sql (luna), бриф brief-clock-composed.md, приёмка accept-clock-composed.sh, фикстура clockfrag-fixture (до правки 0 находок)
