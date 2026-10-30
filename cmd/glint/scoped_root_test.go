@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -370,6 +371,17 @@ func TestStatefulRulesLearnTheRootUpFront(t *testing.T) {
 		}
 		if _, projectFiles := rule.(rules.ProjectFilesRule); !projectFiles {
 			t.Errorf("rule %s keeps state across files without UseProjectFiles", rule.Name())
+		}
+	}
+}
+
+func TestProjectIndexRulesAreProjectFilesRules(t *testing.T) {
+	for _, rule := range rules.All() {
+		if _, ok := reflect.TypeOf(rule).MethodByName("UseProjectFiles"); !ok {
+			continue
+		}
+		if _, ok := rule.(rules.ProjectFilesRule); !ok {
+			t.Errorf("rule %s has UseProjectFiles but does not implement ProjectFilesRule", rule.Name())
 		}
 	}
 }

@@ -57,6 +57,7 @@ type predicateConstant struct {
 	name, location, path string
 	line                 int
 	expansionCount       int
+	legacy               bool
 }
 type thresholdConstant struct {
 	name, value, path string
@@ -88,8 +89,9 @@ func (r *SQLLiteralCopiesConstantRule) UseProjectFiles(files []*core.FileContext
 	r.thresholds = nil
 	r.values = collectGoConstantValues(files)
 	collectGoStringValues(r.values, files)
-	indexPredicateFunctions(r, files)
+	r.predicates = sqlLiteralPredicateIndex(collectSQLPredicateIndex(files, r.values))
 	indexPredicateConstants(r, files)
+	indexPredicateFunctions(r, files)
 }
 
 func collectGoStringValues(values map[string]string, files []*core.FileContext) {
@@ -175,10 +177,6 @@ func indexPredicateFunctions(r *SQLLiteralCopiesConstantRule, files []*core.File
 						location: fmt.Sprintf("%s (%s:%d)", fn.Name.Name, ctx.RelPath, ctx.LineFor(returned.node)),
 					}
 				}
-				if returned.predicateSource {
-					format := formatVerb.ReplaceAllLiteralString(value, "$9")
-					addPredicateAtoms(r, fn.Name.Name, ctx, returned.node, format)
-				}
 			}
 		}
 	}
@@ -190,23 +188,44 @@ type returnedSQLString struct {
 	predicateSource bool
 }
 
+type sqlStringContext struct {
+	functions map[string]*ast.FuncDecl
+	seen      map[string]bool
+}
+
 func returnedSQLStrings(fn *ast.FuncDecl, values map[string]string) []returnedSQLString {
+	return returnedSQLStringsWithContext(fn, values, nil, nil)
+}
+
+func returnedSQLStringsWithContext(fn *ast.FuncDecl, values, args map[string]string, context *sqlStringContext) []returnedSQLString {
 	locals := make(map[string]string)
+	maps.Copy(locals, args)
+	if fn.Type.Params != nil {
+		for _, field := range fn.Type.Params.List {
+			if ident, ok := field.Type.(*ast.Ident); ok && ident.Name == "string" {
+				for _, name := range field.Names {
+					if _, exists := locals[name.Name]; !exists && context != nil {
+						locals[name.Name] = ""
+					}
+				}
+			}
+		}
+	}
 	var results []returnedSQLString
 	for _, stmt := range fn.Body.List {
-		inspectSQLStringStatement(stmt, locals, values, &results)
+		inspectSQLStringStatement(stmt, locals, values, &results, context)
 	}
 	return results
 }
 
-func inspectSQLStringStatement(stmt ast.Stmt, locals, values map[string]string, results *[]returnedSQLString) {
+func inspectSQLStringStatement(stmt ast.Stmt, locals, values map[string]string, results *[]returnedSQLString, context *sqlStringContext) {
 	switch x := stmt.(type) {
 	case *ast.DeclStmt:
 		decl, ok := x.Decl.(*ast.GenDecl)
 		if ok {
 			for _, raw := range decl.Specs {
 				if spec, ok := raw.(*ast.ValueSpec); ok {
-					assignSQLStringValues(spec.Names, spec.Values, locals, values)
+					assignSQLStringValues(spec.Names, spec.Values, locals, values, context)
 				}
 			}
 		}
@@ -214,37 +233,37 @@ func inspectSQLStringStatement(stmt ast.Stmt, locals, values map[string]string, 
 		for i, lhs := range x.Lhs {
 			id, ok := lhs.(*ast.Ident)
 			if ok && i < len(x.Rhs) {
-				if value, ok := staticString(x.Rhs[i], locals, values); ok {
+				if value, ok := staticString(x.Rhs[i], locals, values, context); ok {
 					locals[id.Name] = value
 				}
 			}
 		}
 	case *ast.ReturnStmt:
-		collectSQLStringReturn(x, locals, values, results)
+		collectSQLStringReturn(x, locals, values, results, context)
 	default:
-		inspectSQLStringControl(stmt, locals, values, results)
+		inspectSQLStringControl(stmt, locals, values, results, context)
 	}
 }
 
-func assignSQLStringValues(names []*ast.Ident, exprs []ast.Expr, locals, values map[string]string) {
+func assignSQLStringValues(names []*ast.Ident, exprs []ast.Expr, locals, values map[string]string, context *sqlStringContext) {
 	for i, name := range names {
 		if i < len(exprs) {
-			if value, ok := staticString(exprs[i], locals, values); ok {
+			if value, ok := staticString(exprs[i], locals, values, context); ok {
 				locals[name.Name] = value
 			}
 		}
 	}
 }
 
-func inspectSQLStringControl(stmt ast.Stmt, locals, values map[string]string, results *[]returnedSQLString) {
+func inspectSQLStringControl(stmt ast.Stmt, locals, values map[string]string, results *[]returnedSQLString, context *sqlStringContext) {
 	inspectInit := func(init ast.Stmt) {
 		if init != nil {
-			inspectSQLStringStatement(init, locals, values, results)
+			inspectSQLStringStatement(init, locals, values, results, context)
 		}
 	}
 	inspectChildren := func(children []ast.Stmt) {
 		for _, child := range children {
-			inspectSQLStringStatement(child, locals, values, results)
+			inspectSQLStringStatement(child, locals, values, results, context)
 		}
 	}
 	switch x := stmt.(type) {
@@ -252,23 +271,23 @@ func inspectSQLStringControl(stmt ast.Stmt, locals, values map[string]string, re
 		// Alias prefixes are indexed with the empty alias; return branches are
 		// still visited so boolean options can contribute each SQL expression.
 		inspectInit(x.Init)
-		inspectSQLStringStatement(x.Body, locals, values, results)
+		inspectSQLStringStatement(x.Body, locals, values, results, context)
 		if x.Else != nil {
-			inspectSQLStringStatement(x.Else, locals, values, results)
+			inspectSQLStringStatement(x.Else, locals, values, results, context)
 		}
 	case *ast.ForStmt:
 		inspectInit(x.Init)
-		inspectSQLStringStatement(x.Body, locals, values, results)
+		inspectSQLStringStatement(x.Body, locals, values, results, context)
 	case *ast.RangeStmt:
-		inspectSQLStringStatement(x.Body, locals, values, results)
+		inspectSQLStringStatement(x.Body, locals, values, results, context)
 	case *ast.SwitchStmt:
 		inspectInit(x.Init)
-		inspectSQLStringStatement(x.Body, locals, values, results)
+		inspectSQLStringStatement(x.Body, locals, values, results, context)
 	case *ast.TypeSwitchStmt:
 		inspectInit(x.Init)
-		inspectSQLStringStatement(x.Body, locals, values, results)
+		inspectSQLStringStatement(x.Body, locals, values, results, context)
 	case *ast.SelectStmt:
-		inspectSQLStringStatement(x.Body, locals, values, results)
+		inspectSQLStringStatement(x.Body, locals, values, results, context)
 	case *ast.CaseClause:
 		inspectChildren(x.Body)
 	case *ast.CommClause:
@@ -278,22 +297,22 @@ func inspectSQLStringControl(stmt ast.Stmt, locals, values map[string]string, re
 	}
 }
 
-func collectSQLStringReturn(ret *ast.ReturnStmt, locals, values map[string]string, results *[]returnedSQLString) {
+func collectSQLStringReturn(ret *ast.ReturnStmt, locals, values map[string]string, results *[]returnedSQLString, context *sqlStringContext) {
 	if len(ret.Results) == 0 || !returnHasNilError(ret) {
 		return
 	}
 	expr := ret.Results[0]
 	if tuple, ok := ast.Unparen(expr).(*ast.CallExpr); ok && isSprintf(tuple) {
-		if value, ok := staticString(tuple, locals, values); ok {
+		if value, ok := staticString(tuple, locals, values, context); ok {
 			*results = append(*results, returnedSQLString{node: tuple, expression: value, predicateSource: true})
 		} else if len(tuple.Args) > 0 {
-			if format, ok := staticString(tuple.Args[0], locals, values); ok {
+			if format, ok := staticString(tuple.Args[0], locals, values, context); ok {
 				*results = append(*results, returnedSQLString{node: tuple, expression: formatVerb.ReplaceAllLiteralString(format, "$9"), predicateSource: true})
 			}
 		}
 		return
 	}
-	if value, ok := staticString(expr, locals, values); ok {
+	if value, ok := staticString(expr, locals, values, context); ok {
 		*results = append(*results, returnedSQLString{node: expr, expression: value})
 	}
 }
@@ -311,7 +330,11 @@ func isSprintf(call *ast.CallExpr) bool {
 	return ok && sel.Sel.Name == "Sprintf"
 }
 
-func staticString(expr ast.Expr, locals, values map[string]string) (string, bool) {
+func staticString(expr ast.Expr, locals, values map[string]string, contexts ...*sqlStringContext) (string, bool) {
+	var context *sqlStringContext
+	if len(contexts) > 0 {
+		context = contexts[0]
+	}
 	switch x := ast.Unparen(expr).(type) {
 	case *ast.Ident:
 		if value, ok := locals[x.Name]; ok {
@@ -326,22 +349,22 @@ func staticString(expr ast.Expr, locals, values map[string]string) (string, bool
 		if x.Op != token.ADD {
 			return "", false
 		}
-		a, ok := staticString(x.X, locals, values)
+		a, ok := staticString(x.X, locals, values, context)
 		if !ok {
 			return "", false
 		}
-		b, ok := staticString(x.Y, locals, values)
+		b, ok := staticString(x.Y, locals, values, context)
 		return a + b, ok
 	case *ast.CallExpr:
 		if isSprintf(x) && len(x.Args) > 0 {
-			format, ok := staticString(x.Args[0], locals, values)
+			format, ok := staticString(x.Args[0], locals, values, context)
 			if !ok {
 				return "", false
 			}
 			args := make([]any, 0, len(x.Args)-1)
 			verbs := formatVerb.FindAllString(format, -1)
 			for i, arg := range x.Args[1:] {
-				value, ok := staticString(arg, locals, values)
+				value, ok := staticString(arg, locals, values, context)
 				if !ok {
 					return "", false
 				}
@@ -353,8 +376,55 @@ func staticString(expr ast.Expr, locals, values map[string]string) (string, bool
 			}
 			return fmt.Sprintf(format, args...), true
 		}
+		if context != nil {
+			return staticStringProjectCall(x, locals, values, context)
+		}
 	}
 	return "", false
+}
+
+func staticStringProjectCall(call *ast.CallExpr, locals, values map[string]string, context *sqlStringContext) (string, bool) {
+	callee, ok := ast.Unparen(call.Fun).(*ast.Ident)
+	if !ok || context.functions[callee.Name] == nil || context.seen[callee.Name] {
+		return "", false
+	}
+	fn := context.functions[callee.Name]
+	bindings, ok := bindSQLStringArguments(call, fn, locals, values, context)
+	if !ok {
+		return "", false
+	}
+	context.seen[callee.Name] = true
+	defer delete(context.seen, callee.Name)
+	for _, returned := range returnedSQLStringsWithContext(fn, values, bindings, context) {
+		if returned.expression != "" {
+			return returned.expression, true
+		}
+	}
+	return "", false
+}
+
+func bindSQLStringArguments(call *ast.CallExpr, fn *ast.FuncDecl, locals, values map[string]string, context *sqlStringContext) (map[string]string, bool) {
+	bindings := make(map[string]string)
+	argIndex := 0
+	if fn.Type.Params != nil {
+		for _, field := range fn.Type.Params.List {
+			for _, name := range field.Names {
+				if argIndex >= len(call.Args) {
+					return nil, false
+				}
+				value, ok := staticString(call.Args[argIndex], locals, values, context)
+				if !ok {
+					return nil, false
+				}
+				bindings[name.Name] = value
+				argIndex++
+			}
+		}
+	}
+	if argIndex != len(call.Args) {
+		return nil, false
+	}
+	return bindings, true
 }
 
 func isSQLArithmeticExpression(value string) bool {
@@ -401,9 +471,7 @@ func indexValueSpec(r *SQLLiteralCopiesConstantRule, ctx *core.FileContext, raw 
 		if !ok {
 			continue
 		}
-		if predicateName.MatchString(name.Name) {
-			addPredicateAtoms(r, name.Name, ctx, spec.Values[i], value)
-		} else {
+		if !predicateName.MatchString(name.Name) {
 			indexUUIDConstant(r, ctx, name.Name, spec.Values[i], value)
 		}
 		if isConst {
@@ -426,7 +494,8 @@ func indexUUIDConstant(r *SQLLiteralCopiesConstantRule, ctx *core.FileContext, n
 	r.constants[value] = fmt.Sprintf("%s (%s:%d)", name, ctx.RelPath, ctx.LineFor(expr))
 }
 
-func addPredicateAtoms(r *SQLLiteralCopiesConstantRule, name string, ctx *core.FileContext, at ast.Node, value string) {
+func collectPredicateAtoms(name string, ctx *core.FileContext, at ast.Node, value string) map[string][]predicateConstant {
+	result := make(map[string][]predicateConstant)
 	fragment := strings.TrimSpace(value)
 	for {
 		stripped := predicatePrefix.ReplaceAllString(fragment, "")
@@ -436,7 +505,7 @@ func addPredicateAtoms(r *SQLLiteralCopiesConstantRule, name string, ctx *core.F
 		fragment = strings.TrimSpace(stripped)
 	}
 	if predicateStatement.MatchString(fragment) {
-		return
+		return result
 	}
 	line := ctx.LineFor(at)
 	for _, conj := range sqlschema.ConditionConjuncts(fragment) {
@@ -446,9 +515,10 @@ func addPredicateAtoms(r *SQLLiteralCopiesConstantRule, name string, ctx *core.F
 		norms := predicateEquivalentNorms(conj.Norm)
 		atom := predicateConstant{name: name, path: ctx.RelPath, line: line, location: fmt.Sprintf("%s (%s:%d)", name, ctx.RelPath, line), expansionCount: len(norms)}
 		for _, norm := range norms {
-			r.predicates[norm] = append(r.predicates[norm], atom)
+			result[norm] = append(result[norm], atom)
 		}
 	}
+	return result
 }
 
 func predicateEquivalentNorms(norm string) []string {
