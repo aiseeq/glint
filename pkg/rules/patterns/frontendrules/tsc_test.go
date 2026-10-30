@@ -2,7 +2,6 @@ package frontendrules
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -411,28 +410,12 @@ func TestTscIncrementalFollowsImportedJs(t *testing.T) {
 		"src/a.ts": "import { value } from './b.js'\nexport const n: number = value\n",
 		"src/b.js": "export const value = 1\n",
 	})
-	ageProjectTree(t, root)
+	ageTscInputs(t, root)
 	assert.Empty(t, tscFindings(t, root))
 	patterntest.WriteProjectFile(t, root, "src/b.js", "export const value = 'one'\n")
 	findings := tscFindings(t, root)
 	require.Len(t, findings, 1)
 	assert.Contains(t, findings[0], "high src/a.ts:2 TS2322")
-}
-
-func ageProjectTree(t *testing.T, root string) {
-	t.Helper()
-	old := time.Now().Add(-2 * time.Second)
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		// Chtimes follows a link: node_modules/.bin/tsc would age the global tsc.
-		if entry.Type()&fs.ModeSymlink != 0 {
-			return nil
-		}
-		return os.Chtimes(path, old, old)
-	})
-	require.NoError(t, err)
 }
 
 func incrementalTscAnswer(t *testing.T, root string) []tscDiagnostic {
