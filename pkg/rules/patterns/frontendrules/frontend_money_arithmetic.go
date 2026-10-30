@@ -178,24 +178,7 @@ func (r *FrontendMoneyArithmeticRule) isMoneyFieldName(name string) bool {
 }
 
 func splitMoneyName(name string) []string {
-	var parts []string
-	start := 0
-	for i := 1; i < len(name); i++ {
-		current, previous := name[i], name[i-1]
-		if current >= 'A' && current <= 'Z' && (previous >= 'a' && previous <= 'z' || previous >= '0' && previous <= '9' || previous >= 'A' && previous <= 'Z' && i+1 < len(name) && name[i+1] >= 'a' && name[i+1] <= 'z') {
-			parts = append(parts, name[start:i])
-			start = i
-		} else if (current < 'A' || current > 'Z') && (current < 'a' || current > 'z') && (current < '0' || current > '9') {
-			if start < i {
-				parts = append(parts, name[start:i])
-			}
-			start = i + 1
-		}
-	}
-	if start < len(name) {
-		parts = append(parts, name[start:])
-	}
-	return parts
+	return patternkit.IdentifierWords(name)
 }
 
 func (r *FrontendMoneyArithmeticRule) analyzeFlat(ctx *core.FileContext, f patternkit.JsFlat) []*core.Violation {
