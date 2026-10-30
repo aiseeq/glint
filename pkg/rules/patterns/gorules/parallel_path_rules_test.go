@@ -437,6 +437,28 @@ func (r *ReportRepo) KeepPeriod(ctx context.Context, from, to time.Time) (int64,
 }
 
 func (r *ReportRepo) KeepAll(ctx context.Context) (int64, error) { return r.sumAndKeep(ctx, "", nil) }
+
+func (r *ReportRepo) sumSnapshot(ctx context.Context, window string, args []any) (int64, error) {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, "SELECT SUM(v) FROM audit WHERE true"+window)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	err = stmt.QueryRowContext(ctx, args...).Scan(&total)
+	return total, err
+}
+
+func (r *ReportRepo) SnapshotPeriod(ctx context.Context, from, to time.Time) (int64, error) {
+	window, args := periodWindow(from, to)
+	return r.sumSnapshot(ctx, window, args)
+}
+
+func (r *ReportRepo) SnapshotAll(ctx context.Context) (int64, error) { return r.sumSnapshot(ctx, "", nil) }
 `,
 		"store/hidden.go": `package store
 

@@ -725,7 +725,7 @@ func persistenceMethod(scope patternkit.FuncScope, fn *types.Func) bool {
 		return false
 	}
 	decl, ok := scope.Decls[fn.Origin()]
-	return !ok || decl.Decl.Body == nil || !onlyReads(decl, namedStruct(sig.Recv().Type()))
+	return !ok || decl.Decl.Body == nil || !onlyReads(scope.Decls, decl, namedStruct(sig.Recv().Type()))
 }
 
 var (
@@ -742,9 +742,9 @@ var (
 // onlyReads reports a method body of receiver type recv that shows a SELECT
 // (a literal or a string constant, a package one too) and writes nothing:
 // no call led by a write verb (Updates too), no call of another method of
-// recv or of a store's method that is not a read, no SQL that changes rows.
-// SQL out of sight (a package variable) proves no read.
-func onlyReads(decl patternkit.TypedFuncDecl, recv string) bool {
+// recv or of a loaded store's method that is not a read, no SQL that changes
+// rows. SQL out of sight (a package variable) proves no read.
+func onlyReads(decls map[*types.Func]patternkit.TypedFuncDecl, decl patternkit.TypedFuncDecl, recv string) bool {
 	var texts []string
 	for _, literal := range patternkit.SqlTexts(decl.Decl.Body, func(string) bool { return true }) {
 		texts = append(texts, literal.Text)
@@ -754,7 +754,7 @@ func onlyReads(decl patternkit.TypedFuncDecl, recv string) bool {
 		switch n := n.(type) {
 		case *ast.CallExpr:
 			name := strings.TrimSuffix(helpers.CalleeName(n), "s")
-			writes = writes || helpers.IsWriteName(name) || callsMethodOf(decl.Info, n, recv)
+			writes = writes || helpers.IsWriteName(name) || callsMethodOf(decls, decl.Info, n, recv)
 		case *ast.Ident:
 			if c, ok := decl.Info.Uses[n].(*types.Const); ok && c.Val().Kind() == constant.String {
 				texts = append(texts, constant.StringVal(c.Val()))
@@ -781,7 +781,10 @@ func onlyReads(decl patternkit.TypedFuncDecl, recv string) bool {
 
 // callsMethodOf reports a call of another method of the named struct recv,
 // or of a store's method whose name is not a read (Query, Get, Sum, ...).
-func callsMethodOf(info *types.Info, call *ast.CallExpr, recv string) bool {
+// The store is one of the loaded packages: a driver's DB (database/sql,
+// sqlx, gorm) is reached through BeginTx, PrepareContext, Raw and Rebind to
+// read as well.
+func callsMethodOf(decls map[*types.Func]patternkit.TypedFuncDecl, info *types.Info, call *ast.CallExpr, recv string) bool {
 	callee := helpers.CalledFunc(call, info)
 	if callee == nil {
 		return false
@@ -793,6 +796,9 @@ func callsMethodOf(info *types.Info, call *ast.CallExpr, recv string) bool {
 	owner := namedStruct(sig.Recv().Type())
 	if owner == recv {
 		return true
+	}
+	if _, loaded := decls[callee.Origin()]; !loaded {
+		return false
 	}
 	name := callee.Name()
 	return patternkit.IsDataAccessReceiver(shortType(owner)) && !patternkit.ReadMethod.MatchString(strings.ToUpper(name[:1])+name[1:])
