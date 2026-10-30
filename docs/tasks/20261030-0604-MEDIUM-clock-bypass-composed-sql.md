@@ -19,5 +19,5 @@
 - 2026-10-30 06:13 в работе — glint-master
 - 2026-10-30 06:14 note — glint-master: 06:14 CET боец 1030-0614-clock-composed-sql (luna), бриф brief-clock-composed.md, приёмка accept-clock-composed.sh, фикстура clockfrag-fixture (до правки 0 находок)
 - 2026-10-30 06:34 note — glint-master: 06:5x CET боец сдал: 4 новые находки у потребителя А — ровно названные им места (fund_transfer:349, tariff_group:718/722, vault_snapshot:196); мастер свёл isStringType/expressionContains на patternkit.IsStringType/ContainsNode; повтор приёмки
-- 2026-10-30 06:47 note — glint-master: 07:0x CET e0f14fb в main; приёмка мастера rc=0 (фикстура 16 17 24; потребитель А +4 — названные им места, верные)
+- 2026-10-30 06:47 note — glint-master: e0f14fb в main; приёмка мастера rc=0 (фикстура 16 17 24; потребитель А +4 — названные им места, верные)
 - 2026-10-30 06:47 на проверке — glint-master

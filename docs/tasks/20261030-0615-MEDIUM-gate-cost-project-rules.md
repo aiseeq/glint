@@ -18,4 +18,5 @@
 ## Журнал
 - 2026-10-30 06:15 открыт — glint-master
 - 2026-10-30 06:34 в работе — glint-master
-- 2026-10-30 06:47 note — glint-master: 07:0x CET п.1 сделан: 6260894 — fieldNilFieldOwner вынесен из цикла по методам (было O(M²) на поле); потребитель А --no-cache -r field-nil-check-inconsistent 8,4 с → 0,29 с, находки те же, graft consumers 0 различий. Промах кэша в worktree — d8b1f30 (worktree-cache-file-scope). п.2 (tsc инкрементально) — дальше
+- 2026-10-30 06:47 note — glint-master: п.1 сделан: 6260894 — fieldNilFieldOwner вынесен из цикла по методам (было O(M²) на поле); потребитель А --no-cache -r field-nil-check-inconsistent 8,4 с → 0,29 с, находки те же, graft consumers 0 различий. Промах кэша в worktree — d8b1f30 (worktree-cache-file-scope). п.2 (tsc инкрементально) — дальше
+- 2026-10-30 06:58 note — glint-master: п.2: замер на копии фронтенда потребителя А из корня с его .glint.yaml — tsc TOTAL после правки одного tsx 13,4–18,1 с (listFilesOnly 2,5 с, полный tsc 5.9 11–13 с, tsc 7 1–2 с); tsc 5.9 --incremental после правки 3,6–3,8 с, ошибки те же. Боец Luna 1030-0658-tsc-incremental: бриф scratchpad brief-tsc-incremental.md, приёмка accept-tsc-incremental.sh (медиана трёх правок ≤ 7 с, находки = ~/bin/glint, graft consumers -r tsc 0 различий); сухой прогон приёмки на main — 12,2 с, rc=1, как и ждали
