@@ -6,6 +6,10 @@ graft: '>=2.37.0'
 version:
   mode: git-tag
 
+# glint on itself is not in the commit gate: consumers get glint only through
+# install, and install runs self-check first and stops on a finding of high,
+# as a gate would; the lower ones wait for tk done. In the gate it would add
+# ~30 s to every commit (29.5 s on an idle laptop; the short tests take 31 s).
 gate:
   - task: smoke
 
@@ -36,8 +40,8 @@ tasks:
     run:
       - [go, build, -ldflags, '-X main.version=${GRAFT_VERSION}', -o, bin/glint, ./cmd/glint]
   install:
-    desc: install the committed build to ~/bin atomically (a running glint keeps its file)
-    deps: [build]
+    desc: install the committed build to ~/bin atomically (a running glint keeps its file); glint on itself first
+    deps: [build, self-check]
     run:
       - install: bin/glint
   install-gopath:
