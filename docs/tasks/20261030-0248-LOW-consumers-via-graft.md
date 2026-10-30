@@ -1,6 +1,7 @@
 # Прогон по потребителям — graft consumers, не копия в scratchpad
 
-Статус: открыт
+Статус: на проверке
+Исполнитель: glint-master
 
 ## Вход
 - Проблема: обход software Сна 30.10 (dream-master): scratchpad/consumers.sh — копия tools/consumers, 209 вызовов за сутки, мимо очереди тяжёлого (фриз 29.10 22:56).
@@ -14,3 +15,5 @@
 
 ## Журнал
 - 2026-10-30 02:48 открыт — glint-master
+- 2026-10-30 03:39 note — glint-master: 03:40 CET действующая приёмка одна — accept-tsc-stat-cache.sh, в ней graft consumers -- -r tsc (прогнан бойцом 1030-0245: 21 проект, 0 различий). consumers.sh в scratchpad отвечает кодом 2 с подсказкой; в приёмках завершённых задач остался как история.
+- 2026-10-30 03:39 на проверке — glint-master
