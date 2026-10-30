@@ -1,6 +1,6 @@
 # Кэш результатов выключен в linked worktree, если среди scope есть файл: MainWorktreePath ищет .git внутри файла (ENOTDIR)
 
-Статус: в работе
+Статус: на проверке
 Исполнитель: glint-master
 
 ## Вход
@@ -17,3 +17,5 @@
 ## Журнал
 - 2026-10-30 06:15 открыт — glint-master
 - 2026-10-30 06:15 в работе — glint-master
+- 2026-10-30 06:28 note — glint-master: 06:3x CET d8b1f30: MainWorktreePath с пути-файла ищет от каталога; несуществующий путь — как раньше. Тест TestMainWorktreePath (файл, удалённый файл). Замер в worktree потребителя А с 8 файлами коммита: 1-й прогон без warning, 2-й — «3 of 3 files unchanged, project rules reused», analyze 33,2 → 7,3 с. graft all rc=0, установлен v1.83.7-154-gd8b1f30
+- 2026-10-30 06:28 на проверке — glint-master

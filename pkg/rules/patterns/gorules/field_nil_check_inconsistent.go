@@ -387,8 +387,9 @@ func fieldNilProtectedMethods(methods []fieldNilMethod, field *types.Var, calls 
 		guarded bool
 	})
 	methodByObject := make(map[*types.Func]fieldNilMethod)
+	owner := fieldNilFieldOwner(methods, field)
 	for _, method := range methods {
-		if method.recv.Obj() != fieldNilFieldOwner(methods, field) {
+		if method.recv.Obj() != owner {
 			continue
 		}
 		obj, _ := method.info.Defs[method.decl.Name].(*types.Func)

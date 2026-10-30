@@ -19,3 +19,4 @@
 - 2026-10-30 06:04 открыт — glint-master
 - 2026-10-30 06:13 в работе — glint-master
 - 2026-10-30 06:14 note — glint-master: 06:14 CET боец 1030-0614-interval-operand (luna), бриф brief-interval-operand.md, приёмка accept-interval-operand.sh, фикстура interval2-fixture (до правки 0 находок)
+- 2026-10-30 06:34 note — glint-master: 06:5x CET боец сдал (21 потребитель 0); положительный контроль на backend потребителя А до починки — support_conversation:330 пойман; мастер: UPDATE-порядок только для оператора UPDATE (не DO UPDATE, не FOR UPDATE) тестом; повтор приёмки

@@ -18,3 +18,4 @@
 - 2026-10-30 06:04 открыт — glint-master
 - 2026-10-30 06:13 в работе — glint-master
 - 2026-10-30 06:14 note — glint-master: 06:14 CET боец 1030-0614-clock-composed-sql (luna), бриф brief-clock-composed.md, приёмка accept-clock-composed.sh, фикстура clockfrag-fixture (до правки 0 находок)
+- 2026-10-30 06:34 note — glint-master: 06:5x CET боец сдал: 4 новые находки у потребителя А — ровно названные им места (fund_transfer:349, tariff_group:718/722, vault_snapshot:196); мастер свёл isStringType/expressionContains на patternkit.IsStringType/ContainsNode; повтор приёмки
