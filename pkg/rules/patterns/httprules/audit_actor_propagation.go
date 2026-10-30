@@ -89,7 +89,7 @@ func (r *AuditActorPropagationRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
-	sinks, exists, err := r.BaseRule.GetStringListSetting("sinks")
+	sinks, exists, err := r.GetStringListSetting("sinks")
 	if !exists && err == nil {
 		return nil
 	}

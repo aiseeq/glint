@@ -36,7 +36,7 @@ func (r *TSPeriodBoundaryByHandRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
 	}
-	modules, exists, err := r.BaseRule.GetStringListSetting("period_modules")
+	modules, exists, err := r.GetStringListSetting("period_modules")
 	if err != nil {
 		return err
 	}
