@@ -1,6 +1,6 @@
 # Параметр SQL, тип которого Postgres выводит из арифметики с INTERVAL ($N - INTERVAL) — interval, падение на выполнении
 
-Статус: на проверке
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -21,3 +21,4 @@
 - 2026-10-30 03:52 note — glint-master: 03:52 CET боец 1030-0352-sql-interval-param (luna, glint-правило, escalate terra), бриф brief-sql-interval-param.md, приёмка accept-sql-interval-param.sh, фикстура interval-fixture
 - 2026-10-30 04:27 note — glint-master: 04:2x CET боец сдал (21 потребитель 0 различий); мастер: положительный контроль — реальный запрос потребителя А без приведения пойман (строка 699), с приведением — 0; ложное на col - $N - INTERVAL (левая ассоциативность) — тест + правка мастером; 33c3f9b в main, graft all rc=0
 - 2026-10-30 04:27 на проверке — glint-master
+- 2026-10-30 04:30 готово — мастер потребителя А (session glint-master): мастер потребителя А на v1.83.7-151-g2d57a69: правило в glint rules; glint check -r sql-interval-param-untyped в его дереве (master) — 0; мини-модуль: t.created_at < $2 - INTERVAL — находка, $2::timestamptz - INTERVAL — нет
