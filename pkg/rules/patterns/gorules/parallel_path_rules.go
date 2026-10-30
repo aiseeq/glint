@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"go/types"
 	"maps"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -688,7 +689,7 @@ func errorPresent(info *types.Info, cond ast.Expr) bool {
 // another function's call of the method fills.
 func zeroPlaceholders(scope patternkit.FuncScope, fn *ast.FuncDecl, call *ast.CallExpr) (patternkit.FuncFinding, bool) {
 	callee := patternkit.StaticFunc(scope.Info, call)
-	if callee == nil || !persistenceMethod(callee) || call.Ellipsis.IsValid() {
+	if callee == nil || !persistenceMethod(scope, callee) || call.Ellipsis.IsValid() {
 		return patternkit.FuncFinding{}, false
 	}
 	sig, ok := callee.Type().(*types.Signature)
@@ -709,8 +710,9 @@ func zeroPlaceholders(scope patternkit.FuncScope, fn *ast.FuncDecl, call *ast.Ca
 }
 
 // persistenceMethod reports a method that writes stored state: a write verb
-// leading its name, or a receiver named as a store.
-func persistenceMethod(fn *types.Func) bool {
+// leading its name, or a receiver named as a store whose body, when loaded,
+// does not only read.
+func persistenceMethod(scope patternkit.FuncScope, fn *types.Func) bool {
 	sig, ok := fn.Type().(*types.Signature)
 	if !ok || sig.Recv() == nil {
 		return false
@@ -718,7 +720,32 @@ func persistenceMethod(fn *types.Func) bool {
 	if helpers.IsWriteName(fn.Name()) {
 		return true
 	}
-	return patternkit.IsDataAccessReceiver(shortType(namedStruct(sig.Recv().Type())))
+	if !patternkit.IsDataAccessReceiver(shortType(namedStruct(sig.Recv().Type()))) {
+		return false
+	}
+	decl, ok := scope.Decls[fn.Origin()]
+	return !ok || decl.Decl.Body == nil || !onlyReads(decl.Decl.Body)
+}
+
+// sqlWriteVerb matches SQL that changes rows.
+var sqlWriteVerb = regexp.MustCompile(`(?i)\b(?:INSERT|UPDATE|DELETE|MERGE|UPSERT)\b`)
+
+// onlyReads reports a body that queries and neither calls a write nor holds
+// SQL that changes rows: a sum or lookup helper of a repository.
+func onlyReads(body *ast.BlockStmt) bool {
+	reads, writes := false, false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			name := helpers.CalleeName(call)
+			reads = reads || patternkit.ReadMethod.MatchString(name)
+			writes = writes || helpers.IsWriteName(name)
+		}
+		return !writes
+	})
+	if !reads || writes {
+		return false
+	}
+	return len(patternkit.SqlTexts(body, sqlWriteVerb.MatchString)) == 0
 }
 
 // filledElsewhere returns the positions where call passes a zero placeholder

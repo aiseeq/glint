@@ -335,3 +335,54 @@ func (a *Admin) Save(tx *Tx) error {
 `,
 	}))
 }
+
+// A repository helper that only reads writes no row: "" and nil for the
+// window of a sum "over all time" are a filter left out, not placeholders.
+// The same shape writing through UPDATE is still reported.
+func TestZeroPlaceholdersPassedForPersistedFieldsSkipsReads(t *testing.T) {
+	assert.Equal(t, []string{"store/deposits.go:41"}, patterntest.TypedFuncFindings(t, NewZeroPlaceholdersPassedForPersistedFieldsRule(), map[string]string{
+		"store/deposits.go": `package store
+
+import (
+	"context"
+	"database/sql"
+	"time"
+)
+
+type DepositRepo struct{ db *sql.DB }
+
+func periodWindow(from, to time.Time) (string, []any) {
+	return " AND created_at BETWEEN $1 AND $2", []any{from, to}
+}
+
+func (r *DepositRepo) sumDeposits(ctx context.Context, window string, args []any) (int64, error) {
+	var total int64
+	err := r.db.QueryRowContext(ctx, "SELECT COALESCE(SUM(amount), 0) FROM deposits WHERE status = 'done'"+window, args...).Scan(&total)
+	return total, err
+}
+
+func (r *DepositRepo) PeriodTotal(ctx context.Context, from, to time.Time) (int64, error) {
+	window, args := periodWindow(from, to)
+	return r.sumDeposits(ctx, window, args)
+}
+
+func (r *DepositRepo) Total(ctx context.Context) (int64, error) {
+	return r.sumDeposits(ctx, "", nil)
+}
+
+func (r *DepositRepo) closeDeposits(ctx context.Context, window string, args []any) error {
+	_, err := r.db.ExecContext(ctx, "UPDATE deposits SET status = 'closed' WHERE status = 'done'"+window, args...)
+	return err
+}
+
+func (r *DepositRepo) ClosePeriod(ctx context.Context, from, to time.Time) error {
+	window, args := periodWindow(from, to)
+	return r.closeDeposits(ctx, window, args)
+}
+
+func (r *DepositRepo) CloseAll(ctx context.Context) error {
+	return r.closeDeposits(ctx, "", nil)
+}
+`,
+	}))
+}
