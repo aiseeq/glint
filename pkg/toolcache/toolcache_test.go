@@ -58,3 +58,19 @@ func TestStorePrunesOldEntries(t *testing.T) {
 	assert.NoFileExists(t, old)
 	assert.FileExists(t, filepath.Join(dir, "tsc", Key([]byte("x"))+".json"))
 }
+
+func TestDirPrunesOldFiles(t *testing.T) {
+	dir := useDir(t)
+	cache := New("tsc")
+	toolDir := filepath.Join(dir, "tsc")
+	require.NoError(t, os.MkdirAll(toolDir, 0o755))
+	old := filepath.Join(toolDir, "old.tsbuildinfo")
+	require.NoError(t, os.WriteFile(old, []byte("stale"), 0o600))
+	month := time.Now().Add(-31 * 24 * time.Hour)
+	require.NoError(t, os.Chtimes(old, month, month))
+
+	got, err := cache.Dir()
+	require.NoError(t, err)
+	assert.Equal(t, toolDir, got)
+	assert.NoFileExists(t, old)
+}

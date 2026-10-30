@@ -95,7 +95,7 @@ func configEditingTsc(t *testing.T, real, target string) (string, string) {
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 case "$*" in
-  *--listFilesOnly*)
+  *--listFiles*)
     %q "$@"
     status=$?
     if [ ! -e %q ]; then
@@ -345,6 +345,134 @@ func tscFindings(t *testing.T, root string) []string {
 	return found
 }
 
+func fullTscAnswer(t *testing.T, root string) []tscDiagnostic {
+	t.Helper()
+	tsc := filepath.Join(root, "node_modules", ".bin", "tsc")
+	answer, err := tscDiagnostics(tsc, root, "-p", filepath.Join(root, "tsconfig.json"), "--noEmit", "--incremental", "false", "--pretty", "false")
+	require.NoError(t, err)
+	return answer
+}
+
+func projectFiles(t *testing.T, root string) []string {
+	t.Helper()
+	var files []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			files = append(files, rel)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	sort.Strings(files)
+	return files
+}
+
+func TestTscIncrementalLeavesProjectClean(t *testing.T) {
+	tsc := globalTsc7(t)
+	root := tscProject(t, tsc, map[string]string{
+		"tsconfig.json": strictTSConfig,
+		"src/main.ts":   "export const n: number = 1\n",
+	})
+	before := projectFiles(t, root)
+	assert.Empty(t, tscFindings(t, root))
+	patterntest.WriteProjectFile(t, root, "src/main.ts", "export const n: number = 'one'\n")
+	assert.NotEmpty(t, tscFindings(t, root))
+	assert.Equal(t, before, projectFiles(t, root))
+}
+
+func TestTscIncrementalFollowsEdits(t *testing.T) {
+	tsc := globalTsc7(t)
+	root := tscProject(t, tsc, map[string]string{
+		"tsconfig.json": strictTSConfig,
+		"src/main.ts":   "export const n: number = 1\n",
+	})
+	for _, content := range []string{"export const n: number = 'one'\n", "export const n: number = 2\n"} {
+		patterntest.WriteProjectFile(t, root, "src/main.ts", content)
+		assert.Equal(t, fullTscAnswer(t, root), incrementalTscAnswer(t, root))
+	}
+}
+
+func TestTscIncrementalFollowsImportedJs(t *testing.T) {
+	tsc := globalTsc7(t)
+	root := tscProject(t, tsc, map[string]string{
+		"tsconfig.json": `{
+  "compilerOptions": {"strict": true, "allowJs": true, "module": "esnext", "moduleResolution": "bundler", "noEmit": true},
+  "include": ["src"],
+}
+`,
+		"src/a.ts": "import { value } from './b.js'\nexport const n: number = value\n",
+		"src/b.js": "export const value = 1\n",
+	})
+	ageProjectTree(t, root)
+	assert.Empty(t, tscFindings(t, root))
+	patterntest.WriteProjectFile(t, root, "src/b.js", "export const value = 'one'\n")
+	findings := tscFindings(t, root)
+	require.Len(t, findings, 1)
+	assert.Contains(t, findings[0], "high src/a.ts:2 TS2322")
+}
+
+func ageProjectTree(t *testing.T, root string) {
+	t.Helper()
+	old := time.Now().Add(-2 * time.Second)
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, old, old)
+	})
+	require.NoError(t, err)
+}
+
+func incrementalTscAnswer(t *testing.T, root string) []tscDiagnostic {
+	t.Helper()
+	rule := NewTscRule()
+	global, err := rule.globalTscBase()
+	require.NoError(t, err)
+	answer, err := runTscProgram(&tscProgram{config: filepath.Join(root, "tsconfig.json"), tsc: filepath.Join(root, "node_modules", ".bin", "tsc")}, global)
+	require.NoError(t, err)
+	return answer.Errors
+}
+
+func TestTscIncrementalCorruptBuildInfo(t *testing.T) {
+	tsc := globalTsc7(t)
+	root := tscProject(t, tsc, map[string]string{
+		"tsconfig.json": strictTSConfig,
+		"src/main.ts":   "export const n: number = 1\n",
+	})
+	cache := os.Getenv("XDG_CACHE_HOME")
+	assert.Empty(t, tscFindings(t, root))
+	buildInfo, err := filepath.Glob(filepath.Join(cache, "glint", "tools", "tsc", "*.tsbuildinfo"))
+	require.NoError(t, err)
+	require.NotEmpty(t, buildInfo)
+	require.NoError(t, os.WriteFile(buildInfo[0], []byte("not build info"), 0o600))
+	patterntest.WriteProjectFile(t, root, "src/main.ts", "export const n: number = 'one'\n")
+	assert.Equal(t, fullTscAnswer(t, root), incrementalTscAnswer(t, root))
+}
+
+func TestTscIncrementalWorktreesApart(t *testing.T) {
+	tsc := globalTsc7(t)
+	files := map[string]string{
+		"tsconfig.json": strictTSConfig,
+		"src/main.ts":   "export const n: number = 1\n",
+	}
+	left := tscProject(t, tsc, files)
+	cache := os.Getenv("XDG_CACHE_HOME")
+	right := tscProject(t, tsc, files)
+	t.Setenv("XDG_CACHE_HOME", cache)
+	patterntest.WriteProjectFile(t, left, "src/main.ts", "export const n: number = 'one'\n")
+	assert.NotEmpty(t, tscFindings(t, left))
+	assert.Empty(t, tscFindings(t, right))
+	assert.Equal(t, fullTscAnswer(t, left), incrementalTscAnswer(t, left))
+	assert.Equal(t, fullTscAnswer(t, right), incrementalTscAnswer(t, right))
+}
+
 const strictTSConfig = `{
   // the project's settings
   "compilerOptions": {"strict": true, "module": "esnext", "moduleResolution": "bundler", "noEmit": true},
@@ -402,6 +530,10 @@ case "$*" in
   *--showConfig*|*--listFilesOnly*) exec %q "$@" ;;
   *--version*) echo "Version 5.9.3"; exit 0 ;;
 esac
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--tsBuildInfoFile" ]; then shift; printf '{}\n' > "$1"; fi
+  shift
+done
 exit %d
 `, real, status)
 	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))

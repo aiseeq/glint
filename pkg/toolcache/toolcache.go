@@ -51,6 +51,14 @@ func New(tool string) *Cache {
 	return &Cache{tool: tool, prune: sync.OnceValue(func() error { return prune(tool) })}
 }
 
+// Dir returns the directory holding this tool's cache entries.
+func (c *Cache) Dir() (string, error) {
+	if err := c.prune(); err != nil {
+		return "", err
+	}
+	return toolDir(c.tool)
+}
+
 // Load reads the entry under key into into and reports whether there was
 // one.
 func (c *Cache) Load(key string, into any) (bool, error) {

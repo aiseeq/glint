@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -481,9 +482,9 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 	}
 	dir := filepath.Dir(program.config)
 	project := []string{"-p", program.config}
-	run := append(append([]string{}, project...), "--noEmit", "--incremental", "false", "--pretty", "false")
+	run := append(append([]string{}, project...), "--noEmit", "--incremental", "--pretty", "false", "--listFiles")
 	identity := append([]string{program.config, program.tsc, global.path}, project...)
-	identity = append(identity, "--showConfig", "--listFilesOnly")
+	identity = append(identity, "--showConfig")
 	identity = append(identity, run...)
 	lookup, err := statCachedAnswer(identity, []string{program.tsc, global.path})
 	if err != nil {
@@ -493,10 +494,6 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 		return lookup.answer, nil
 	}
 	slowStarted := time.Now()
-	version, err := toolVersion(program.tsc)
-	if err != nil {
-		return tscAnswer{}, err
-	}
 	shown, err := tscOutput(program.tsc, dir, append(project, "--showConfig")...)
 	if err != nil {
 		return tscAnswer{}, err
@@ -505,40 +502,17 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 	if err != nil {
 		return tscAnswer{}, fmt.Errorf("read tsc --showConfig of %s: %w", program.config, err)
 	}
-	listed, err := tscOutput(program.tsc, dir, append(project, "--listFilesOnly")...)
-	if err != nil {
-		return tscAnswer{}, err
-	}
 	global, err = globalTscVersion(global)
 	if err != nil {
 		return tscAnswer{}, err
 	}
-	before, err := makeStatFingerprint([]string{program.tsc, global.path}, program.config, listed, "")
+	answer := tscAnswer{NotStrict: notStrict}
+	var listed []byte
+	answer.Errors, listed, err = incrementalTscDiagnostics(program.tsc, dir, program.config, run...)
 	if err != nil {
 		return tscAnswer{}, err
 	}
-	key, err := programKey([]string{version, global.version, string(shown)}, listed)
-	if err != nil {
-		return tscAnswer{}, err
-	}
-	var answer tscAnswer
-	hit, err := tscCache.Load(key, &answer)
-	if err != nil {
-		return tscAnswer{}, err
-	}
-	if hit {
-		if err := storeStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, before, key, slowStarted); err != nil {
-			return tscAnswer{}, err
-		}
-		return answer, nil
-	}
-	// --incremental false: tsc would write a .tsbuildinfo into the project.
-	answer.Errors, err = tscDiagnostics(program.tsc, dir, run...)
-	if err != nil {
-		return tscAnswer{}, err
-	}
-	answer.NotStrict = notStrict
-	newer, err := tscDiagnostics(global.path, dir, run...)
+	newer, _, err := incrementalTscDiagnostics(global.path, dir, program.config, run...)
 	if err != nil {
 		return tscAnswer{}, fmt.Errorf("tsc 7: %w", err)
 	}
@@ -553,13 +527,86 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 			answer.TSC7 = append(answer.TSC7, d)
 		}
 	}
-	if err := tscCache.Store(key, answer); err != nil {
-		return tscAnswer{}, err
-	}
-	if err := storeStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, before, key, slowStarted); err != nil {
+	if err := storeProjectStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, answer, slowStarted); err != nil {
 		return tscAnswer{}, err
 	}
 	return answer, nil
+}
+
+func incrementalTscDiagnostics(tsc, dir, config string, args ...string) ([]tscDiagnostic, []byte, error) {
+	cacheDir, err := tscCache.Dir()
+	if err != nil {
+		return nil, nil, fmt.Errorf("locate the tsc build info cache: %w", err)
+	}
+	config, err = filepath.Abs(config)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve tsconfig path: %w", err)
+	}
+	tsc, err = filepath.Abs(tsc)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve tsc path: %w", err)
+	}
+	identity := toolcache.Key([]byte(config), []byte(tsc))
+	buildInfo := filepath.Join(cacheDir, identity+".tsbuildinfo")
+	return runWithBuildInfo(tsc, dir, args, buildInfo)
+}
+
+func runWithBuildInfo(tsc, dir string, args []string, buildInfo string) ([]tscDiagnostic, []byte, error) {
+	data, readErr := os.ReadFile(buildInfo)
+	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+		return nil, nil, fmt.Errorf("read tsc build info %s: %w", buildInfo, readErr)
+	}
+	usePrevious := readErr == nil
+	result, listed, temp, err := runTscWithTempBuildInfo(tsc, dir, args, buildInfo, data, usePrevious)
+	if err != nil && usePrevious {
+		slog.Warn("tsc could not use build info; rerunning from scratch", "path", buildInfo, "error", err)
+		if removeErr := removeTempBuildInfo(temp); removeErr != nil {
+			return nil, nil, errors.Join(err, removeErr)
+		}
+		result, listed, temp, err = runTscWithTempBuildInfo(tsc, dir, args, buildInfo, nil, false)
+	}
+	if err != nil {
+		return nil, nil, errors.Join(err, removeTempBuildInfo(temp))
+	}
+	if err := os.Rename(temp, buildInfo); err != nil {
+		return nil, nil, errors.Join(fmt.Errorf("install tsc build info %s: %w", buildInfo, err), removeTempBuildInfo(temp))
+	}
+	return result, listed, nil
+}
+
+func runTscWithTempBuildInfo(tsc, dir string, args []string, buildInfo string, previous []byte, usePrevious bool) ([]tscDiagnostic, []byte, string, error) {
+	tmp, err := os.CreateTemp(filepath.Dir(buildInfo), ".tsc-build-info-*.tsbuildinfo")
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("create temporary tsc build info: %w", err)
+	}
+	temp := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		return nil, nil, "", errors.Join(fmt.Errorf("close temporary tsc build info: %w", err), removeTempBuildInfo(temp))
+	}
+	if err := removeTempBuildInfo(temp); err != nil {
+		return nil, nil, temp, err
+	}
+	if usePrevious {
+		if err := os.WriteFile(temp, previous, 0o600); err != nil {
+			return nil, nil, temp, fmt.Errorf("copy tsc build info: %w", err)
+		}
+	}
+	args = append(append([]string{}, args...), "--tsBuildInfoFile", temp)
+	diagnostics, listed, err := tscDiagnosticsWithFiles(tsc, dir, args...)
+	if err != nil {
+		return nil, nil, temp, err
+	}
+	return diagnostics, listed, temp, nil
+}
+
+func removeTempBuildInfo(path string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove temporary tsc build info %s: %w", path, err)
+	}
+	return nil
 }
 
 // runStandalone checks a TS file no tsconfig compiles with the global tsc 7.
@@ -626,6 +673,7 @@ type tscFileStat struct {
 
 type tscStatFingerprint struct {
 	AnswerKey string        `json:"answerKey"`
+	Answer    *tscAnswer    `json:"answer,omitempty"`
 	Files     []tscFileStat `json:"files"`
 	Dirs      []tscFileStat `json:"dirs"`
 }
@@ -779,6 +827,9 @@ func statCachedAnswer(identity, tscPaths []string) (tscStatLookup, error) {
 		}
 		return tscStatLookup{status: tscStatStale}, nil
 	}
+	if fingerprint.Answer != nil {
+		return tscStatLookup{answer: *fingerprint.Answer, status: tscStatHit}, nil
+	}
 	var answer tscAnswer
 	answerFound, err := tscCache.Load(fingerprint.AnswerKey, &answer)
 	if err != nil {
@@ -810,8 +861,23 @@ func storeStatFingerprintIfStable(identity, tscPaths []string, config string, li
 			return nil
 		}
 	}
-	before.AnswerKey = answerKey
-	return tscCache.Store(statFingerprintKey(identity), before)
+	after.AnswerKey = answerKey
+	return tscCache.Store(statFingerprintKey(identity), after)
+}
+
+func storeProjectStatFingerprintIfStable(identity, tscPaths []string, config string, listed []byte, answer tscAnswer, slowStarted time.Time) error {
+	after, err := makeStatFingerprint(tscPaths, config, listed, "")
+	if err != nil { //nolint:silent-error-handling // An input changed or disappeared during tsc, so the optimization must not be saved.
+		return nil
+	}
+	cutoff := slowStarted.Add(-time.Second).UnixNano()
+	for _, saved := range append(append([]tscFileStat{}, after.Files...), after.Dirs...) {
+		if saved.ModTimeNS >= cutoff {
+			return nil
+		}
+	}
+	after.Answer = &answer
+	return tscCache.Store(statFingerprintKey(identity), after)
 }
 
 func sameStatFingerprint(left, right tscStatFingerprint) bool {
@@ -877,6 +943,11 @@ var (
 // tscDiagnostics runs a type check and returns its errors; tsc failing
 // without reporting one is an error of the run.
 func tscDiagnostics(tsc, dir string, args ...string) ([]tscDiagnostic, error) {
+	diagnostics, _, err := tscDiagnosticsWithFiles(tsc, dir, args...)
+	return diagnostics, err
+}
+
+func tscDiagnosticsWithFiles(tsc, dir string, args ...string) ([]tscDiagnostic, []byte, error) {
 	cmd := exec.Command(tsc, args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
@@ -884,9 +955,10 @@ func tscDiagnostics(tsc, dir string, args ...string) ([]tscDiagnostic, error) {
 	runErr := cmd.Run()
 	var exit *exec.ExitError
 	if runErr != nil && !errors.As(runErr, &exit) {
-		return nil, fmt.Errorf("run %s: %w", tsc, runErr)
+		return nil, nil, fmt.Errorf("run %s: %w", tsc, runErr)
 	}
 	diagnostics := []tscDiagnostic{}
+	var listed []byte
 	continued := map[int][]string{} // diagnostic → the lines continuing its message
 	for line := range strings.SplitSeq(stdout.String(), "\n") {
 		line = strings.TrimRight(line, "\r")
@@ -898,13 +970,17 @@ func tscDiagnostics(tsc, dir string, args ...string) ([]tscDiagnostic, error) {
 			lineNo, lerr := strconv.Atoi(m[2])
 			column, cerr := strconv.Atoi(m[3])
 			if err := errors.Join(lerr, cerr); err != nil {
-				return nil, fmt.Errorf("read tsc output %q: %w", line, err)
+				return nil, nil, fmt.Errorf("read tsc output %q: %w", line, err)
 			}
 			diagnostics = append(diagnostics, tscDiagnostic{File: file, Line: lineNo, Column: column, Code: m[4], Message: m[5]})
 			continue
 		}
 		if m := tscGlobalDiagnostic.FindStringSubmatch(line); m != nil {
 			diagnostics = append(diagnostics, tscDiagnostic{Code: m[1], Message: m[2]})
+			continue
+		}
+		if line == strings.TrimSpace(line) && filepath.IsAbs(line) {
+			listed = append(listed, line+"\n"...)
 			continue
 		}
 		// An indented line continues the message of the error above it.
@@ -917,9 +993,9 @@ func tscDiagnostics(tsc, dir string, args ...string) ([]tscDiagnostic, error) {
 		diagnostics[i].Message = strings.Join(append([]string{diagnostics[i].Message}, lines...), " ")
 	}
 	if runErr != nil && len(diagnostics) == 0 {
-		return nil, fmt.Errorf("%s failed without reporting an error: %w: %s", tsc, runErr, headOf(stdout.String()+stderr.String()))
+		return nil, nil, fmt.Errorf("%s failed without reporting an error: %w: %s", tsc, runErr, headOf(stdout.String()+stderr.String()))
 	}
-	return diagnostics, nil
+	return diagnostics, listed, nil
 }
 
 func headOf(s string) string {
