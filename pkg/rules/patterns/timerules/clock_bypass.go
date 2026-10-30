@@ -2,6 +2,7 @@ package timerules
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 	"regexp"
 	"sort"
@@ -100,7 +101,7 @@ func (r *ClockBypassRule) analyzeClockPackage(pkg *core.GoPackageContext, projec
 	}
 	if clockPackage != "" {
 		for _, file := range files {
-			violations = append(violations, r.reportSQLClockReads(file)...)
+			violations = append(violations, r.reportSQLClockReads(pkg.Package.TypesInfo, file)...)
 		}
 	}
 	return violations
@@ -135,9 +136,51 @@ func (r *ClockBypassRule) reportStandardClockReads(info *types.Info, file *core.
 	return violations
 }
 
-func (r *ClockBypassRule) reportSQLClockReads(file *core.FileContext) []*core.Violation {
+func (r *ClockBypassRule) reportSQLClockReads(info *types.Info, file *core.FileContext) []*core.Violation {
+	sqlLiterals := patternkit.SqlLiterals(file.GoAST)
+	covered := make(map[token.Pos]bool)
+	for _, literal := range sqlLiterals {
+		ast.Inspect(literal.Expr, func(node ast.Node) bool {
+			if text, ok := node.(*ast.BasicLit); ok && text.Kind == token.STRING {
+				covered[text.Pos()] = true
+			}
+			return true
+		})
+	}
+	parents := make(map[ast.Node]ast.Node)
+	var stack []ast.Node
+	ast.Inspect(file.GoAST, func(node ast.Node) bool {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return false
+		}
+		if len(stack) > 0 {
+			parents[node] = stack[len(stack)-1]
+		}
+		stack = append(stack, node)
+		return true
+	})
+	flowingParams := returnedStringParams(info, file.GoAST)
 	var violations []*core.Violation
-	for _, literal := range patternkit.SqlLiterals(file.GoAST) {
+	ast.Inspect(file.GoAST, func(node ast.Node) bool {
+		text, ok := node.(*ast.BasicLit)
+		if !ok || text.Kind != token.STRING || covered[text.Pos()] {
+			return true
+		}
+		value, ok := patternkit.GoStringLiteral(text)
+		if !ok || !databaseClockRead.MatchString(value) || !isSQLFragment(text, parents, info, flowingParams) {
+			return true
+		}
+		line := file.LineForPos(text.Pos())
+		for range databaseClockRead.FindAllStringIndex(value, -1) {
+			violation := r.CreateViolation(file.RelPath, line, "This query takes its time from the database clock instead of the project clock; pass the moment as a parameter")
+			violation.WithCode(file.GetLine(line))
+			violation.WithSuggestion("Pass the current moment from the project clock as a query parameter; cast it in INTERVAL arithmetic as $N::timestamptz")
+			violations = append(violations, violation)
+		}
+		return true
+	})
+	for _, literal := range sqlLiterals {
 		for _, match := range databaseClockRead.FindAllStringIndex(literal.Text, -1) {
 			line := literal.LineAt(file, match[0])
 			violation := r.CreateViolation(file.RelPath, line, "This query takes its time from the database clock instead of the project clock; pass the moment as a parameter")
@@ -147,6 +190,116 @@ func (r *ClockBypassRule) reportSQLClockReads(file *core.FileContext) []*core.Vi
 		}
 	}
 	return violations
+}
+
+func returnedStringParams(info *types.Info, file *ast.File) map[*types.Func]map[int]bool {
+	flows := make(map[*types.Func]map[int]bool)
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || fn.Name == nil {
+			continue
+		}
+		object, _ := info.Defs[fn.Name].(*types.Func)
+		if object == nil {
+			continue
+		}
+		signature, _ := object.Type().(*types.Signature)
+		if signature == nil || signature.Results().Len() != 1 || !patternkit.IsStringType(signature.Results().At(0).Type()) {
+			continue
+		}
+		params := make(map[*types.Var]int)
+		for i := 0; i < signature.Params().Len(); i++ {
+			if patternkit.IsStringType(signature.Params().At(i).Type()) {
+				params[signature.Params().At(i)] = i
+			}
+		}
+		used := make(map[int]bool)
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			ret, ok := node.(*ast.ReturnStmt)
+			if !ok {
+				return true
+			}
+			for _, result := range ret.Results {
+				ast.Inspect(result, func(part ast.Node) bool {
+					if id, ok := part.(*ast.Ident); ok {
+						if param, ok := info.Uses[id].(*types.Var); ok {
+							if index, found := params[param]; found {
+								used[index] = true
+							}
+						}
+					}
+					return true
+				})
+			}
+			return true
+		})
+		if object != nil && len(used) > 0 {
+			flows[object] = used
+		}
+	}
+	return flows
+}
+
+func isSQLFragment(literal *ast.BasicLit, parents map[ast.Node]ast.Node, info *types.Info, flowingParams map[*types.Func]map[int]bool) bool {
+	for node := ast.Node(literal); node != nil; node = parents[node] {
+		if call, ok := node.(*ast.CallExpr); ok && isDiagnosticCall(calledObject(info, call)) {
+			return false
+		}
+	}
+	for node := ast.Node(literal); node != nil; node = parents[node] {
+		if call, ok := node.(*ast.CallExpr); ok {
+			obj := calledObject(info, call)
+			if obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == "fmt" && obj.Name() == "Sprintf" {
+				return true
+			}
+			if ident, ok := ast.Unparen(call.Fun).(*ast.Ident); ok && ident.Name == "append" {
+				for _, arg := range call.Args[1:] {
+					if patternkit.ContainsNode(arg, literal) {
+						return true
+					}
+				}
+			}
+			function, _ := obj.(*types.Func)
+			if indexes := flowingParams[function]; function != nil && len(indexes) > 0 {
+				for index := range indexes {
+					if index < len(call.Args) && patternkit.ContainsNode(call.Args[index], literal) {
+						return true
+					}
+				}
+			}
+		}
+		if composite, ok := node.(*ast.CompositeLit); ok && isClockBypassStringSlice(info.TypeOf(composite)) && patternkit.ContainsNode(composite, literal) {
+			return true
+		}
+		if binary, ok := node.(*ast.BinaryExpr); ok && binary.Op == token.ADD {
+			return true
+		}
+	}
+	return false
+}
+
+func isClockBypassStringSlice(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	slice, ok := typ.Underlying().(*types.Slice)
+	return ok && patternkit.IsStringType(slice.Elem())
+}
+
+func isDiagnosticCall(obj types.Object) bool {
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+	name, path := obj.Name(), obj.Pkg().Path()
+	switch path {
+	case "errors":
+		return name == "New" || name == "Join"
+	case "fmt":
+		return name == "Errorf"
+	case "log", "log/slog", "testing":
+		return strings.HasPrefix(name, "Print") || strings.HasPrefix(name, "Fatal") || strings.HasPrefix(name, "Panic") || strings.HasPrefix(name, "Log") || name == "Error" || name == "Warn" || name == "Info" || name == "Debug"
+	}
+	return false
 }
 
 func productionClockFiles(pkg *core.GoPackageContext) []*core.FileContext {

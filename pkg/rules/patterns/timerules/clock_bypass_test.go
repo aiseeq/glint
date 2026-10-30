@@ -146,6 +146,71 @@ func Now() time.Time { return time.Now() }
 	}
 }
 
+func TestClockBypassSQLFragments(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/app\n\ngo 1.24\n",
+		"clock/clock.go": `package clock
+import "time"
+func Now() time.Time { return time.Now() }
+`,
+		"store/query.go": `package store
+import (
+	"fmt"
+	"strings"
+)
+func membershipSQL(table, condition string) string { return table + ".id AND " + condition }
+func query() string {
+	base := fmt.Sprintf(` + "`g.effective_from <= NOW() AND %[1]s`" + `, "g.active")
+	part := membershipSQL("g", "NOW()")
+	updates := append([]string{}, "updated_at = NOW()")
+	joined := "created_at < " + "CURRENT_TIMESTAMP"
+	_ = []string{"expires_at = LOCALTIMESTAMP"}
+	return base + part + strings.Join(updates, ",") + joined
+}
+`,
+	}
+	rule := NewClockBypassRule()
+	require.NoError(t, rule.Configure(map[string]any{"clock_package": "example.com/app/clock"}))
+	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"store/query.go:10", "store/query.go:11", "store/query.go:12", "store/query.go:8", "store/query.go:9"}, patterntest.FoundLines(violations))
+	for _, violation := range violations {
+		assert.Contains(t, violation.Message, "database clock")
+		assert.Contains(t, violation.Suggestion, "$N::timestamptz")
+	}
+}
+
+func TestClockBypassSQLFragmentsNegatives(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/app\n\ngo 1.24\n",
+		"clock/clock.go": `package clock
+import "time"
+func Now() time.Time { return time.Now() }
+`,
+		"store/query.go": `package store
+import (
+	"errors"
+	"fmt"
+	"log"
+)
+func report() error {
+	log.Printf("database returned NOW()")
+	return fmt.Errorf("query failed at NOW(): %w", errors.New("NOW()"))
+}
+const query = ` + "`SELECT id FROM users WHERE created_at < NOW()`" + `
+`,
+	}
+	rule := NewClockBypassRule()
+	require.NoError(t, rule.Configure(map[string]any{"clock_package": "example.com/app/clock"}))
+	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"store/query.go:11"}, patterntest.FoundLines(violations))
+
+	withoutSetting, err := NewClockBypassRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Empty(t, withoutSetting)
+}
+
 func TestClockBypassModuleClockUnset(t *testing.T) {
 	files := map[string]string{
 		"go.mod": "module example.com/app\n\ngo 1.24\n",
