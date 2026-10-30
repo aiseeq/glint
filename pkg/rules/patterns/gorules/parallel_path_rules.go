@@ -3,6 +3,7 @@ package gorules
 import (
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"maps"
@@ -724,28 +725,58 @@ func persistenceMethod(scope patternkit.FuncScope, fn *types.Func) bool {
 		return false
 	}
 	decl, ok := scope.Decls[fn.Origin()]
-	return !ok || decl.Decl.Body == nil || !onlyReads(decl.Decl.Body)
+	return !ok || decl.Decl.Body == nil || !onlyReads(decl, namedStruct(sig.Recv().Type()))
 }
 
-// sqlWriteVerb matches SQL that changes rows.
-var sqlWriteVerb = regexp.MustCompile(`(?i)\b(?:INSERT|UPDATE|DELETE|MERGE|UPSERT)\b`)
+var (
+	// sqlWriteVerb matches SQL that changes rows, once sqlRowLock is cut out.
+	sqlWriteVerb = regexp.MustCompile(`(?i)\b(?:INSERT|UPDATE|DELETE|MERGE|UPSERT)\b`)
+	sqlRowLock   = regexp.MustCompile(`(?i)\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b`)
+	sqlSelect    = regexp.MustCompile(`(?i)^\s*\(?\s*(?:SELECT|WITH)\b`)
+)
 
-// onlyReads reports a body that queries and neither calls a write nor holds
-// SQL that changes rows: a sum or lookup helper of a repository.
-func onlyReads(body *ast.BlockStmt) bool {
-	reads, writes := false, false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			name := helpers.CalleeName(call)
-			reads = reads || patternkit.ReadMethod.MatchString(name)
-			writes = writes || helpers.IsWriteName(name)
+// onlyReads reports a method body of receiver type recv that shows a SELECT
+// (a literal or a string constant, a package one too) and writes nothing:
+// no call led by a write verb, no call of another method of recv, no SQL
+// that changes rows. SQL out of sight (a package variable) proves no read.
+func onlyReads(decl patternkit.TypedFuncDecl, recv string) bool {
+	var texts []string
+	for _, literal := range patternkit.SqlTexts(decl.Decl.Body, func(string) bool { return true }) {
+		texts = append(texts, literal.Text)
+	}
+	writes := false
+	ast.Inspect(decl.Decl.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.CallExpr:
+			writes = helpers.IsWriteName(helpers.CalleeName(n)) || callsMethodOf(decl.Info, n, recv)
+		case *ast.Ident:
+			if c, ok := decl.Info.Uses[n].(*types.Const); ok && c.Val().Kind() == constant.String {
+				texts = append(texts, constant.StringVal(c.Val()))
+			}
 		}
 		return !writes
 	})
-	if !reads || writes {
+	if writes {
 		return false
 	}
-	return len(patternkit.SqlTexts(body, sqlWriteVerb.MatchString)) == 0
+	reads := false
+	for _, text := range texts {
+		if sqlWriteVerb.MatchString(sqlRowLock.ReplaceAllString(text, "")) {
+			return false
+		}
+		reads = reads || sqlSelect.MatchString(text)
+	}
+	return reads
+}
+
+// callsMethodOf reports a call of a method of the named struct recv.
+func callsMethodOf(info *types.Info, call *ast.CallExpr, recv string) bool {
+	callee := helpers.CalledFunc(call, info)
+	if callee == nil {
+		return false
+	}
+	sig, ok := callee.Type().(*types.Signature)
+	return ok && sig.Recv() != nil && namedStruct(sig.Recv().Type()) == recv
 }
 
 // filledElsewhere returns the positions where call passes a zero placeholder

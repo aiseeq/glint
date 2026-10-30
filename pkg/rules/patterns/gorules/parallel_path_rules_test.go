@@ -339,8 +339,83 @@ func (a *Admin) Save(tx *Tx) error {
 // A repository helper that only reads writes no row: "" and nil for the
 // window of a sum "over all time" are a filter left out, not placeholders.
 // The same shape writing through UPDATE is still reported.
+// A row lock (SELECT ... FOR UPDATE) still only reads. A helper is not taken
+// for a reader when it writes through its own method or through UPDATE ...
+// RETURNING kept in a package constant or variable.
 func TestZeroPlaceholdersPassedForPersistedFieldsSkipsReads(t *testing.T) {
-	assert.Equal(t, []string{"store/deposits.go:41"}, patterntest.TypedFuncFindings(t, NewZeroPlaceholdersPassedForPersistedFieldsRule(), map[string]string{
+	assert.Equal(t, []string{
+		"store/deposits.go:41", "store/hidden.go:26", "store/hidden.go:41", "store/hidden.go:56",
+	}, patterntest.TypedFuncFindings(t, NewZeroPlaceholdersPassedForPersistedFieldsRule(), map[string]string{
+		"store/hidden.go": `package store
+
+import (
+	"context"
+	"database/sql"
+	"time"
+)
+
+type LedgerRepo struct{ db *sql.DB }
+
+func (r *LedgerRepo) apply(ctx context.Context, id int64) error { return nil }
+
+func (r *LedgerRepo) settle(ctx context.Context, window string, args []any) error {
+	var id int64
+	if err := r.db.QueryRowContext(ctx, "SELECT id FROM ledger WHERE open"+window, args...).Scan(&id); err != nil {
+		return err
+	}
+	return r.apply(ctx, id)
+}
+
+func (r *LedgerRepo) SettlePeriod(ctx context.Context, from, to time.Time) error {
+	window, args := periodWindow(from, to)
+	return r.settle(ctx, window, args)
+}
+
+func (r *LedgerRepo) SettleAll(ctx context.Context) error { return r.settle(ctx, "", nil) }
+
+const closeLedger = "UPDATE ledger SET open = false WHERE open RETURNING id"
+
+func (r *LedgerRepo) closeOpen(ctx context.Context, window string, args []any) (int64, error) {
+	var id int64
+	err := r.db.QueryRowContext(ctx, closeLedger+window, args...).Scan(&id)
+	return id, err
+}
+
+func (r *LedgerRepo) ClosePeriod(ctx context.Context, from, to time.Time) (int64, error) {
+	window, args := periodWindow(from, to)
+	return r.closeOpen(ctx, window, args)
+}
+
+func (r *LedgerRepo) CloseAll(ctx context.Context) (int64, error) { return r.closeOpen(ctx, "", nil) }
+
+var freezeLedger = "UPDATE ledger SET frozen = true WHERE open RETURNING id"
+
+func (r *LedgerRepo) freezeOpen(ctx context.Context, window string, args []any) (int64, error) {
+	var id int64
+	err := r.db.QueryRowContext(ctx, freezeLedger+window, args...).Scan(&id)
+	return id, err
+}
+
+func (r *LedgerRepo) FreezePeriod(ctx context.Context, from, to time.Time) (int64, error) {
+	window, args := periodWindow(from, to)
+	return r.freezeOpen(ctx, window, args)
+}
+
+func (r *LedgerRepo) FreezeAll(ctx context.Context) (int64, error) { return r.freezeOpen(ctx, "", nil) }
+
+func (r *LedgerRepo) lockOpen(ctx context.Context, window string, args []any) (int64, error) {
+	var id int64
+	err := r.db.QueryRowContext(ctx, "SELECT id FROM ledger WHERE open"+window+" FOR UPDATE", args...).Scan(&id)
+	return id, err
+}
+
+func (r *LedgerRepo) LockPeriod(ctx context.Context, from, to time.Time) (int64, error) {
+	window, args := periodWindow(from, to)
+	return r.lockOpen(ctx, window, args)
+}
+
+func (r *LedgerRepo) LockAll(ctx context.Context) (int64, error) { return r.lockOpen(ctx, "", nil) }
+`,
 		"store/deposits.go": `package store
 
 import (
