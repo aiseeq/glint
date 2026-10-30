@@ -1,6 +1,6 @@
 # zero-placeholders-passed-for-persisted-fields: read-only repository helper reported as a write
 
-Статус: на проверке
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -25,3 +25,4 @@
 - 2026-10-30 15:36 note — glint-master: перепроверка 6bca8c8: прежние обходы закрыты; новые — G3 (флаг writes затирался соседним вызовом), E10 (ORM Updates), ложные F1 (литерал DELETE), F2 (update в тексте ошибки), F5 (ведущий SQL-комментарий). Доводка: флаг копится, глагол с окончанием s, в счёт идут только тексты, начинающие SQL-оператор, кавычки вырезаются, ведущие комментарии пропускаются; F3 (свой метод только для чтения) — осознанная цена. Тест — store/mixed.go; пробы проверяющего E8–E10, G1–G4 — находки, F1, F2, F4, F5 — нет; graft all 0, graft consumers 0 различий
 - 2026-10-30 15:48 note — glint-master: третий раунд da763c7 принят; новое H1 — запись через метод другого хранилища без write-глагола (r.ledger.Add) молчала. Доводка: вызов метода типа-хранилища (IsDataAccessReceiver) с именем не по ReadMethod — запись. H2 (SELECT хранимой функции, которая пишет) статически не узнать — принято. Тест — store/mixed.go (ReportRepo); пробы проверяющего — 15 находок (прежние 14 + H1); graft all 0, consumers 0 различий
 - 2026-10-30 15:58 note — glint-master: четвёртый раунд 8da1778 не принят: методы драйверного DB (BeginTx, PrepareContext; у gorm/sqlx Raw, WithContext, Rebind) стали записью — тип DB совпал с IsDataAccessReceiver. Доводка: чужое хранилище — только тип, чей метод объявлен в загруженных пакетах (scope.Decls), драйверы мимо. Тест — ReportRepo.sumSnapshot (BeginTx ReadOnly + PrepareContext) без находки; пробы: R1, R3 ушли, R4, R5 остаются из-за двойников gorm/sqlx внутри модуля пробы (настоящие — зависимости, не загружены); graft all 0, consumers 0 различий
+- 2026-10-30 16:00 готово — суб-агент-проверки (session glint-master): пятый раунд d1335ca (glint v1.83.7-179-gd1335ca), суб-агент сам: go test -run TestZeroPlaceholders -count=1 — PASS обоих; проба scratchpad verify-zp — 17 находок (15 записей + R4, R5 из двойников в том же модуле), читатели AllSum, E2, F1, F2, F4, F5, H2, R1–R3 без находок; двойники gorm/sqlx в отдельном модуле через replace (verify-zp-drivers, verify-zp-readers) — total 0, R1–R5 без находок. Остаётся осознанно: F3 (свой метод только для чтения — находка), H2 (хранимая функция, которая пишет), хранилище из другого модуля без write-глагола — не запись
