@@ -36,7 +36,7 @@ func NewSQLDateStringParsedAsDateRule() *SQLDateStringParsedAsDateRule {
 		"patterns",
 		"Detects a string field scanned from a DATE or TIMESTAMP column parsed with a date-only layout — database/sql renders the value as RFC 3339, and the parse fails on every row",
 		core.SeverityHigh,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // AnalyzeFile is a no-op: the check needs types and the migrations.

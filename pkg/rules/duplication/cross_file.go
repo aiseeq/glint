@@ -53,7 +53,7 @@ func NewCrossFileDuplicateRule() *CrossFileDuplicateRule {
 			"duplication",
 			"Detects duplicate code blocks across different files: every later copy of a block is reported once per copied region against the first file it was seen in",
 			core.SeverityHigh,
-		),
+		).DeclareSettings(rules.NewSettingSpec("min_block_size", "int", defaultCrossFileBlockSize, "Minimum number of consecutive lines required to report a cross-file duplicate.", 8)),
 		minBlockSize: defaultCrossFileBlockSize,
 		firstSeen:    make(map[windowHash]blockOrigin),
 	}

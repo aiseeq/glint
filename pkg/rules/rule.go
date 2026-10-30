@@ -47,17 +47,48 @@ type BaseRule struct {
 	description     string
 	defaultSeverity core.Severity
 	settings        map[string]any
+	settingSpecs    []SettingSpec
+}
+
+// SettingSpec describes a configurable rule setting.
+type SettingSpec struct {
+	Key         string
+	Type        string
+	Default     string
+	Description string
+	Example     any // any-in-public-contract: safe
+}
+
+type settingDefault interface {
+	~string | ~int | ~bool | ~float64 | ~[]string
+}
+
+// NewSettingSpec creates a setting declaration and formats its default value.
+func NewSettingSpec[T settingDefault](key, settingType string, defaultValue T, description string, example any) SettingSpec {
+	return SettingSpec{Key: key, Type: settingType, Default: fmt.Sprint(defaultValue), Description: description, Example: example}
+}
+
+// DeclareSettings records the settings supported by this rule.
+func (r *BaseRule) DeclareSettings(specs ...SettingSpec) *BaseRule {
+	r.settingSpecs = append([]SettingSpec(nil), specs...)
+	return r
+}
+
+// SettingSpecs returns the settings supported by this rule.
+func (r *BaseRule) SettingSpecs() []SettingSpec {
+	return append([]SettingSpec(nil), r.settingSpecs...)
 }
 
 // NewBaseRule creates a new base rule
 func NewBaseRule(name, category, description string, severity core.Severity) *BaseRule {
-	return &BaseRule{
+	r := &BaseRule{
 		name:            name,
 		category:        category,
 		description:     description,
 		defaultSeverity: severity,
 		settings:        make(map[string]any),
 	}
+	return r
 }
 
 // Name returns the rule name
@@ -209,6 +240,7 @@ type RuleInfo struct {
 	Category    string
 	Description string
 	Severity    core.Severity
+	Settings    []SettingSpec
 }
 
 // GetRuleInfo extracts info from a rule
@@ -218,7 +250,15 @@ func GetRuleInfo(r Rule) RuleInfo {
 		Category:    r.Category(),
 		Description: r.Description(),
 		Severity:    r.DefaultSeverity(),
+		Settings:    settingSpecs(r),
 	}
+}
+
+func settingSpecs(r Rule) []SettingSpec {
+	if provider, ok := r.(interface{ SettingSpecs() []SettingSpec }); ok {
+		return provider.SettingSpecs()
+	}
+	return nil
 }
 
 // StatefulRule is an optional interface for rules that accumulate state across

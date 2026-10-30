@@ -52,6 +52,10 @@ func NewNonAtomicStatusHistoryRule() *NonAtomicStatusHistoryRule {
 			"patterns",
 			"Detects status mutations followed by a separate non-atomic status history write",
 			core.SeverityHigh,
+		).DeclareSettings(
+			rules.NewSettingSpec("mutation_methods", "string list", "", "Method names treated as status mutations.", []string{"UpdateStatus"}),
+			rules.NewSettingSpec("history_methods", "string list", "", "Method names treated as status history writes.", []string{"AppendStateLog"}),
+			rules.NewSettingSpec("transaction_functions", "string list", "", "Function names that run their callback inside a transaction.", []string{"WithTransaction"}),
 		),
 		mutationMethods: statusHistoryNameSet(defaultStatusMutationMethods),
 		historyMethods:  statusHistoryNameSet(defaultStatusHistoryMethods),

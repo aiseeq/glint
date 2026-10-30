@@ -72,7 +72,7 @@ func NewUnusedInternalExportRule() *UnusedInternalExportRule {
 			"deadcode",
 			"Detects exported symbols in internal/ packages, main packages and the packages of closed_modules that nothing in the module uses — the module boundary makes them dead code",
 			core.SeverityMedium,
-		),
+		).DeclareSettings(rules.NewSettingSpec("closed_modules", "string list", "", "Module paths that are closed to external imports.", []string{"example.com/project/internalapp"})),
 	}
 }
 

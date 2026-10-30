@@ -62,7 +62,7 @@ func NewMigrationDuplicateVersionRule() *MigrationDuplicateVersionRule {
 			"patterns",
 			"Detects two different migrations sharing one version number, and migrations without an up/down pair (require_pairs, on by default)",
 			core.SeverityCritical,
-		),
+		).DeclareSettings(rules.NewSettingSpec("require_pairs", "bool", true, "Require up and down migration files to be version pairs.", false)),
 		pairsRequired: true,
 		seen:          make(map[string]map[string]migrationID),
 	}

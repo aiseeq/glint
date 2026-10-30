@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/fix"
@@ -161,8 +162,10 @@ var checkCmd = &cobra.Command{
 }
 
 var rulesCmd = &cobra.Command{
-	Use:   "rules",
+	Use:   "rules [name]",
 	Short: "List available rules",
+	Long:  "List available rules or show details and settings for glint rules <name>.",
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runRules,
 }
 
@@ -1668,7 +1671,10 @@ func writeResults(w io.Writer, format string, violations core.ViolationList, sta
 	}
 }
 
-func runRules(_ *cobra.Command, _ []string) error {
+func runRules(_ *cobra.Command, args []string) error {
+	if len(args) == 1 {
+		return showRule(args[0])
+	}
 	allRules := rules.All()
 
 	if flagCategory != "" {
@@ -1705,10 +1711,73 @@ func runRules(_ *cobra.Command, _ []string) error {
 			info.Severity.Label(),
 			autofix,
 		)
+		if len(info.Settings) > 0 {
+			types := make([]string, len(info.Settings))
+			for i, setting := range info.Settings {
+				types[i] = setting.Key + " (" + setting.Type + ")"
+			}
+			fmt.Printf("    settings: %s\n", strings.Join(types, ", "))
+		}
 	}
 
 	fmt.Printf("\nTotal: %d rules\n", len(allRules))
 	return nil
+}
+
+func showRule(name string) error {
+	rule, ok := rules.Get(name)
+	if !ok {
+		all := rules.All()
+		sort.Slice(all, func(i, j int) bool { return ruleDistance(name, all[i].Name()) < ruleDistance(name, all[j].Name()) })
+		if len(all) > 0 && ruleDistance(name, all[0].Name()) <= 4 {
+			return fmt.Errorf("unknown rule %q; did you mean %q", name, all[0].Name())
+		}
+		return fmt.Errorf("unknown rule: %s", name)
+	}
+	info := rules.GetRuleInfo(rule)
+	fmt.Printf("RULE: %s\nCATEGORY: %s\nSEVERITY: %s\nDESCRIPTION: %s\n", info.Name, info.Category, info.Severity.Label(), info.Description)
+	if _, ok := fix.DefaultRegistry.Get(info.Name); ok {
+		fmt.Println("AUTO-FIX: Available")
+	} else {
+		fmt.Println("AUTO-FIX: Unavailable")
+	}
+	if len(info.Settings) == 0 {
+		fmt.Println("\nsettings: none")
+		return nil
+	}
+	values := make(map[string]any, len(info.Settings))
+	for _, setting := range info.Settings {
+		fmt.Printf("\n%s (%s)\n  Default: %s\n  %s\n", setting.Key, setting.Type, fmt.Sprint(setting.Default), setting.Description)
+		values[setting.Key] = setting.Example
+	}
+	block := map[string]any{"categories": map[string]any{info.Category: map[string]any{"rules": map[string]any{info.Name: map[string]any{"settings": values}}}}}
+	data, err := yaml.Marshal(block)
+	if err != nil {
+		return fmt.Errorf("marshal rule settings YAML: %w", err)
+	}
+	fmt.Println("\nYAML (.glint.yaml):")
+	fmt.Print(string(data))
+	return nil
+}
+
+func ruleDistance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i, ar := range a {
+		cur := make([]int, len(b)+1)
+		cur[0] = i + 1
+		for j, br := range b {
+			cost := 1
+			if ar == br {
+				cost = 0
+			}
+			cur[j+1] = min(cur[j]+1, prev[j+1]+1, prev[j]+cost)
+		}
+		prev = cur
+	}
+	return prev[len(b)]
 }
 
 func runExplain(_ *cobra.Command, args []string) error {

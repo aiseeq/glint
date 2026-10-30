@@ -60,7 +60,7 @@ func NewSQLLimitWithoutOrderRule() *SQLLimitWithoutOrderRule {
 		"patterns",
 		"Detects a SELECT whose row order is up to the plan: LIMIT with no ORDER BY, or ORDER BY a date column alone",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // ReadsOtherFiles reports that the findings depend on the migrations' unique keys.
@@ -118,7 +118,7 @@ func NewSQLConstantShadowsColumnRule() *SQLConstantShadowsColumnRule {
 		"patterns",
 		"Detects a SELECT naming a constant as a column of the table it reads ('completed' AS status) — every row shows the constant, not its value",
 		core.SeverityHigh,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // ReadsOtherFiles reports that the findings depend on the migrations' columns.
@@ -169,7 +169,7 @@ func NewSQLTestDDLDuplicatesMigrationRule() *SQLTestDDLDuplicatesMigrationRule {
 		"patterns",
 		"Detects a test creating a table the migrations define — its copy of the schema drifts from the real one",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // ReadsOtherFiles reports that the findings depend on the migrations' tables.
@@ -265,7 +265,7 @@ func NewSQLGroupBySingleRowRule() *SQLGroupBySingleRowRule {
 		"patterns",
 		"Detects a GROUP BY query read by QueryRow or Get — the first group is taken for the whole result",
 		core.SeverityHigh,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 var singleRowCalls = map[string]bool{

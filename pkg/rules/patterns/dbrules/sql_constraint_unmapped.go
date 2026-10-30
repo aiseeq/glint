@@ -35,7 +35,7 @@ func NewTruncatedRandomIDAsUniqueNumberRule() *TruncatedRandomIDAsUniqueNumberRu
 		"patterns",
 		"Detects a truncated random identifier stored in a unique database key without retrying a collision",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // AnalyzeFile is a no-op because the rule follows data across callers.
@@ -110,7 +110,7 @@ func NewSQLConstraintViolationUnmappedRule() *SQLConstraintViolationUnmappedRule
 		"patterns",
 		"Detects a DELETE of rows a foreign key without ON DELETE protects, or an INSERT of a whole unique key without ON CONFLICT, in a function that never checks the database error — the expected refusal reaches the user as a server error",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // constraintCheck is code looking at a constraint violation of the driver.

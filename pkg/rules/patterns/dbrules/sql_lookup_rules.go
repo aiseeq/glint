@@ -85,7 +85,7 @@ func NewSQLLinkUpdateIgnoresParentRule() *SQLLinkUpdateIgnoresParentRule {
 		"patterns",
 		"Detects a link or unlink function whose UPDATE sets a *_id reference with a WHERE that never tests it — an unlink clears another parent's link, a link moves a row another parent holds",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // linkFunction is the name of a function that links a row to a parent or
@@ -152,7 +152,7 @@ func NewSQLPartialKeyReadRule() *SQLPartialKeyReadRule {
 		"patterns",
 		"Detects one row read by the columns of a partial unique index without the index's WHERE — the key repeats outside the predicate, and the read takes any of those rows",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // ReadsOtherFiles reports that the findings depend on the migrations' indexes.
@@ -209,7 +209,7 @@ func NewExternalReferenceLookupWithoutUniqueIndexRule() *ExternalReferenceLookup
 		"patterns",
 		"Detects one row read by another system's id (*_reference, external_id) that no unique index of the migrations covers — two rows can share it, and the read takes either",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // ReadsOtherFiles reports that the findings depend on the migrations' indexes.
@@ -264,7 +264,7 @@ func NewSQLDeleteReferencedWithoutKeyRule() *SQLDeleteReferencedWithoutKeyRule {
 		"patterns",
 		"Detects a DELETE of rows other tables point at by an id column with no foreign key, in a function that never checks them — the references are left dangling",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // ReadsOtherFiles reports that the findings depend on the migrations' columns.

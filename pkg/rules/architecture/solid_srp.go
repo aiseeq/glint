@@ -58,6 +58,10 @@ func NewSolidSRPRule() *SolidSRPRule {
 			"architecture",
 			"Detects structs with too many responsibilities (Single Responsibility Principle)",
 			core.SeverityHigh,
+		).DeclareSettings(
+			rules.NewSettingSpec("max_responsibilities", "int", defaultMaxResponsibilities, "Maximum number of responsibilities allowed in a type.", 5),
+			rules.NewSettingSpec("exclude_infrastructure", "bool", true, "Exclude infrastructure areas from the responsibility count.", false),
+			rules.NewSettingSpec("infrastructure_areas", "string list", defaultInfrastructureAreas, "Infrastructure areas excluded from the responsibility count.", []string{"logging", "config"}),
 		),
 		maxResponsibilities:   defaultMaxResponsibilities,
 		infrastructureAreas:   defaultInfrastructureAreasMap(),

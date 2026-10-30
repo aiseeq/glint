@@ -78,7 +78,7 @@ func NewAuditActorPropagationRule() *AuditActorPropagationRule {
 			"patterns",
 			"Detects human actor or audit source attribution lost before audit writes",
 			core.SeverityHigh,
-		),
+		).DeclareSettings(rules.NewSettingSpec("sinks", "string list", "", "HTTP handler sinks that require actor propagation.", []string{"Create", "Update"})),
 		sinks: auditSinkSet(defaultAuditActorSinks),
 	}
 }

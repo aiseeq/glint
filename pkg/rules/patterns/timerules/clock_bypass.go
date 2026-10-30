@@ -32,7 +32,7 @@ func NewClockBypassRule() *ClockBypassRule {
 		"clock-bypass", "patterns",
 		"Detects standard clock reads alongside the project clock; clock_package enables module-wide Go and SQL checks",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(rules.NewSettingSpec("clock_package", "string", "", "Project clock package import path used for module-wide checks.", "example/clock"))}
 }
 
 // RequiresSSA reports whether this rule requires SSA information.

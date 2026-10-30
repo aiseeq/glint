@@ -41,7 +41,7 @@ func NewErrorStringRule() *ErrorStringRule {
 			"patterns",
 			"Error strings should not be capitalized or end with punctuation (Go convention)",
 			core.SeverityLow,
-		),
+		).DeclareSettings(rules.NewSettingSpec("proper_nouns", "string list", "", "Proper nouns allowed at the start of error strings.", []string{"PostgreSQL", "HTTP"})),
 	}
 }
 

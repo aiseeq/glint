@@ -58,7 +58,7 @@ func NewSQLSessionTimeZoneRule() *SQLSessionTimeZoneRule {
 		"patterns",
 		"Detects SQL taking a date in the session's time zone while the connection string leaves that zone to the server",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 var (

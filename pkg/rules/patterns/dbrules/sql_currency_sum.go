@@ -37,7 +37,7 @@ func NewMoneySummedAcrossCurrenciesRule() *MoneySummedAcrossCurrenciesRule {
 		"patterns",
 		"Detects SUM of an amount of a table with a currency column, in a query that neither groups by the currency nor fixes one — amounts in different currencies add up to a number in none",
 		core.SeverityHigh,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // ReadsOtherFiles reports that the findings depend on the migrations' columns.

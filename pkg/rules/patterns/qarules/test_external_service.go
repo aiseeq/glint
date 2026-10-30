@@ -91,7 +91,7 @@ func NewTestExternalServiceRule() *TestExternalServiceRule {
 			"patterns",
 			"Detects tests that call live third-party services, including gates that only check whether a credential is present",
 			core.SeverityHigh,
-		),
+		).DeclareSettings(rules.NewSettingSpec("guard_functions", "string list", "", "Helper functions that guard tests from making live external service calls.", []string{"requireServiceAvailable"})),
 		guardFunctions: map[string]bool{},
 		// Имя переменной окружения, которое означает секрет, а не переключатель. Слово
 		// секрета — целый сегмент между подчёркиваниями: KEY в KEYBOARD секретом не делает.

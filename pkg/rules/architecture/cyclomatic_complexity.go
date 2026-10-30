@@ -32,7 +32,7 @@ func NewCyclomaticComplexityRule() *CyclomaticComplexityRule {
 			"architecture",
 			"Detects functions with high cyclomatic complexity that are hard to test and maintain",
 			core.SeverityMedium,
-		),
+		).DeclareSettings(rules.NewSettingSpec("max_complexity", "int", defaultMaxComplexity, "Maximum cyclomatic complexity allowed in a function.", 25)),
 		maxComplexity: defaultMaxComplexity,
 	}
 }

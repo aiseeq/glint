@@ -68,7 +68,7 @@ func NewServerErrorHidesClientCancelRule() *ServerErrorHidesClientCancelRule {
 			"patterns",
 			"Detects a shared 5xx responder that takes neither the request nor a context, or takes the request and never looks at its context — a client that walked away is answered as a server failure; and an outbound failure observer that reports the caller's own cancellation as a provider failure",
 			core.SeverityMedium,
-		),
+		).DeclareSettings(rules.NewSettingSpec("min_call_sites", "int", 3, "Minimum call sites required before reporting.", 4)),
 		minCallSites: 3,
 	}
 }

@@ -57,7 +57,7 @@ func NewModelNotApprovedRule() *ModelNotApprovedRule {
 		"patterns",
 		"Detects a language model named in Go, TypeScript, JavaScript or shell code (a *model key, --model, -m) that is not on the approved list (approved_file, "+defaultApprovedModels+": \"<name> <id>\" a line)",
 		core.SeverityHigh,
-	)}
+	).DeclareSettings(rules.NewSettingSpec("approved_file", "string", defaultApprovedModels, "Path to the file listing approved model names and identifiers.", "config/approved-models"))}
 	r.setPath(defaultApprovedModels)
 	return r
 }

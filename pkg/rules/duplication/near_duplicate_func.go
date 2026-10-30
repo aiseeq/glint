@@ -36,7 +36,7 @@ func NewNearDuplicateFuncRule() *NearDuplicateFuncRule {
 	return &NearDuplicateFuncRule{
 		BaseRule: rules.NewBaseRule("near-duplicate-func", "duplication",
 			"Detects functions in one package whose bodies differ in up to max_differences expressions (two by default) — a shared function parameter prevents the copies from drifting apart",
-			core.SeverityMedium),
+			core.SeverityMedium).DeclareSettings(rules.NewSettingSpec("max_differences", "int", defaultNearDuplicateMaxDifferences, "Maximum differences allowed between near duplicate functions.", 3)),
 		maxDifferences: defaultNearDuplicateMaxDifferences,
 	}
 }

@@ -54,7 +54,7 @@ func NewSQLChildRowsIncludeVoidedParentRule() *SQLChildRowsIncludeVoidedParentRu
 		"patterns",
 		"Detects a total of child rows (SUM, AVG) that never joins their parent while the project leaves parents with a void status (reversed, cancelled) out elsewhere — the children of a voided parent still count; also a SUM without the status FILTER its neighbouring aggregates have",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // ReadsOtherFiles reports that the findings depend on the project's other
@@ -161,7 +161,7 @@ func NewDeltaExportMissesUnlinkRule() *DeltaExportMissesUnlinkRule {
 		"patterns",
 		"Detects a child row taken away from a parent that a delta transfer reads by updated_at, without touching the parent's updated_at — the transfer never carries the removal",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // ReadsOtherFiles reports that the findings depend on the migrations.
@@ -290,7 +290,7 @@ func NewSyncNewerWinsOnStampedTableRule() *SyncNewerWinsOnStampedTableRule {
 		"patterns",
 		"Detects an import that writes the row with the newer updated_at into a table whose trigger stamps every UPDATE with NOW() — the copy turns newer than its source, and rows travel back and forth on every transfer",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // SyncNewerWinsOnStampedTableRule is the rule NewSyncNewerWinsOnStampedTableRule creates.

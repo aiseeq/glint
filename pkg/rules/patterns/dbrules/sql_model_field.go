@@ -54,7 +54,7 @@ func NewSQLModelFieldSkippedRule() *SQLModelFieldSkippedRule {
 		"patterns",
 		"Detects SQL writing or reading a model that leaves out a column the model maps with a db tag, or a hand-mapped INSERT of a model leaving out fields the code sets and the repository never stores or reads",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // AnalyzeFile is a no-op: the model is known only with type information.

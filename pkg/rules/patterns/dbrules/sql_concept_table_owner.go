@@ -63,7 +63,7 @@ func NewSQLConceptTableOwnerRule() *SQLConceptTableOwnerRule {
 		"patterns",
 		"Detects SQL that reads a configured concept table outside its owner, duplicating where concept membership is decided",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(rules.NewSettingSpec("concepts", "list of maps", "", "Concept tables, their owner file globs, and optional membership predicates.", []map[string]any{{"name": "status", "table": "statuses", "files": []string{"internal/status/**"}}}))}
 }
 
 // Configure reads concept names, tables, optional membership predicates, and owner globs.

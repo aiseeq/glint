@@ -31,7 +31,7 @@ func NewLongFunctionRule() *LongFunctionRule {
 			"architecture",
 			"Detects functions that exceed the maximum line count",
 			core.SeverityMedium,
-		),
+		).DeclareSettings(rules.NewSettingSpec("max_lines", "int", defaultMaxFunctionLines, "Maximum number of lines allowed in a function.", 120)),
 		maxLines: defaultMaxFunctionLines,
 	}
 }

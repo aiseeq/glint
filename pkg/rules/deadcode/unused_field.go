@@ -76,7 +76,7 @@ func NewUnusedFieldRule() *UnusedFieldRule {
 			"deadcode",
 			"Detects struct fields that are never read — unexported fields, and every field of a settings type (…Opts, …Options, …Config, …Settings) or a filter (…Filter, …Filters, …Criteria): dead state kept up to date for nobody",
 			core.SeverityMedium,
-		),
+		).DeclareSettings(rules.NewSettingSpec("application", "bool", false, "Treat the analyzed module as an application with no importers.", true)),
 	}
 }
 

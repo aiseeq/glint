@@ -48,7 +48,7 @@ func NewSQLMissingRowUncheckedRule() *SQLMissingRowUncheckedRule {
 		"patterns",
 		"Detects an UPDATE or DELETE of one row, or an upsert with DO UPDATE ... WHERE, whose affected count nobody checks — a write that changed nothing passes as success",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // ReadsOtherFiles reports that the findings depend on the migrations' unique keys.

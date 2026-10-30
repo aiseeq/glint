@@ -47,7 +47,7 @@ func NewSQLScanNullableRule() *SQLScanNullableRule {
 		"patterns",
 		"Detects a column that can be NULL scanned into a string, number, bool or time value",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // AnalyzeFile is a no-op: destinations are known only with type information.
@@ -82,7 +82,7 @@ func NewSQLXColumnWithoutFieldRule() *SQLXColumnWithoutFieldRule {
 		"patterns",
 		"Detects a sqlx Get or Select into a struct with no field for a column the query returns",
 		core.SeverityHigh,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // AnalyzeFile is a no-op: destinations are known only with type information.
@@ -119,7 +119,7 @@ func NewSQLScanArgCountRule() *SQLScanArgCountRule {
 		"patterns",
 		"Detects a Scan with a different number of destinations than the columns its SELECT returns — the driver refuses every row",
 		core.SeverityHigh,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // AnalyzeFile is a no-op: destinations are known only with type information.

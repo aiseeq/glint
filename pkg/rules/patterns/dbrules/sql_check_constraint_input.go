@@ -46,7 +46,7 @@ func NewSQLCheckConstraintInputUnvalidatedRule() *SQLCheckConstraintInputUnvalid
 		"patterns",
 		"Detects a request body field written to a column with a CHECK set or range (col IN (...), BETWEEN) that nothing on the way compares with it — a value outside fails in the database and the client gets a 500",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // AnalyzeFile is a no-op: the check needs types and the migrations.

@@ -598,7 +598,7 @@ func NewMissingAmountCoercedToZeroRule() *MissingAmountCoercedToZeroRule {
 		"patterns",
 		"Detects a parser that turns unreadable input into 0, applied to money fields, and in Go a nil amount replaced with decimal.Zero — a missing amount becomes a zero amount",
 		core.SeverityHigh,
-	)}
+	).DeclareSettings(rules.NewSettingSpec("metric_words", "string", defaultMetricWords, "Pipe-separated metric words that identify amount fields.", "Count|Total|Usd"))}
 }
 
 var (

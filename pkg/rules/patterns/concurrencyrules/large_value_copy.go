@@ -41,7 +41,7 @@ func NewLargeValueCopiedPerElementRule() *LargeValueCopiedPerElementRule {
 			"patterns",
 			"Detects a value over max_bytes (128) copied for every element: the value of a range over a slice, array or map of large structs, and a by-value parameter of the element type in a callback passed with the collection (slices.SortFunc, BinarySearchFunc, DeleteFunc, a generic filter) — in a hot loop the copies cost more than the work",
 			core.SeverityMedium,
-		),
+		).DeclareSettings(rules.NewSettingSpec("max_bytes", "int", defaultLargeValueMaxBytes, "Maximum value size in bytes before reporting copies in loops.", 256)),
 		maxBytes: defaultLargeValueMaxBytes,
 	}
 }

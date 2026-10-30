@@ -61,7 +61,7 @@ func NewScatteredConstructionRule() *ScatteredConstructionRule {
 			"patterns",
 			"Detects struct types constructed in too many places — each site risks missing new fields",
 			core.SeverityHigh,
-		),
+		).DeclareSettings(rules.NewSettingSpec("max_sites", "int", 2, "Maximum allowed construction sites for a type.", 3)),
 		maxSites: 2,
 	}
 }

@@ -44,7 +44,7 @@ func NewStringLiteralExceedsColumnWidthRule() *StringLiteralExceedsColumnWidthRu
 		"patterns",
 		"Detects a string constant longer than the VARCHAR(n) or CHAR(n) column it reaches through bind parameters — the database refuses the value, and the write fails every time",
 		core.SeverityHigh,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // AnalyzeFile is a no-op: the check needs types and the migrations.
@@ -213,7 +213,7 @@ func NewSQLCharColumnPadsValueRule() *SQLCharColumnPadsValueRule {
 		"patterns",
 		"Detects a CHAR(n) column (n > 1) in the schema the migrations leave — a shorter value is padded with spaces and read back different from what was written",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(migrationSettingSpec())}
 }
 
 // ReadsOtherFiles reports that the findings depend on the later migrations.

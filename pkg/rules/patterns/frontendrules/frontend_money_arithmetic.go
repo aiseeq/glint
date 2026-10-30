@@ -53,6 +53,10 @@ func NewFrontendMoneyArithmeticRule() *FrontendMoneyArithmeticRule {
 			"patterns",
 			"Detects client-side arithmetic over money values (must come from backend)",
 			core.SeverityHigh,
+		).DeclareSettings(
+			rules.NewSettingSpec("money_fields", "string", defaultMoneyFields, "Regular expression matching money field names.", "amount|balance|price"),
+			rules.NewSettingSpec("number_parsers", "string", `parseFloat|Number|toNumber\w*`, "Regular expression matching number parser functions.", `parseFloat|Number|parseAmount`),
+			rules.NewSettingSpec("money_formatter", "string", "", "Name of the money formatting function.", "renderAmount"),
 		),
 		parseCall:    regexp.MustCompile(`\b(?:parseFloat|Number)\s*\(`),
 		accumulate:   regexp.MustCompile(`\b([\w$]+)\s*[+\-]=\s*(.+)$`),

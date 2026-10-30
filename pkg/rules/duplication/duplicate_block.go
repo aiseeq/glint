@@ -37,7 +37,7 @@ func NewDuplicateBlockRule() *DuplicateBlockRule {
 			"duplication",
 			"Detects duplicate code blocks within the same file (copy-paste detection), one finding per repeated region",
 			core.SeverityMedium,
-		),
+		).DeclareSettings(rules.NewSettingSpec("min_block_size", "int", defaultBlockSize, "Minimum number of consecutive lines required to report a duplicate block.", 24)),
 		minBlockSize: defaultBlockSize,
 	}
 }

@@ -47,7 +47,7 @@ func NewAnyInPublicContractRule() *AnyInPublicContractRule {
 			"typesafety",
 			"Detects bare any/interface{} (or a map of it) in results of exported functions and methods of exported types, and in exported fields of exported structs",
 			core.SeverityMedium,
-		),
+		).DeclareSettings(rules.NewSettingSpec("excluded_methods", "string", defaultExcludedMethods, "Comma-separated method names excluded from public contract checks.", "MarshalJSON,UnmarshalJSON")),
 	}
 	r.setExcludedMethods(defaultExcludedMethods)
 	return r

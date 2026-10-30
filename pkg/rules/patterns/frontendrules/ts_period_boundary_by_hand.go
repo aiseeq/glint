@@ -28,7 +28,7 @@ func NewTSPeriodBoundaryByHandRule() *TSPeriodBoundaryByHandRule {
 		"ts-period-boundary-by-hand", "patterns",
 		"Detects frontend calendar period boundaries calculated outside configured shared period modules",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(rules.NewSettingSpec("period_modules", "string list", "", "Paths of shared period modules excluded from this check.", []string{"src/lib/period.ts"}))}
 }
 
 // Configure sets the glob paths of shared period modules.

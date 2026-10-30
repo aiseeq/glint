@@ -31,7 +31,7 @@ func NewDeepNestingRule() *DeepNestingRule {
 			"architecture",
 			"Detects deeply nested code that is hard to read and maintain",
 			core.SeverityMedium,
-		),
+		).DeclareSettings(rules.NewSettingSpec("max_depth", "int", defaultMaxNestingDepth, "Maximum allowed control flow nesting depth.", 5)),
 		maxDepth: defaultMaxNestingDepth,
 	}
 }

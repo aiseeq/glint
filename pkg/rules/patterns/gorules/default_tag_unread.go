@@ -62,7 +62,7 @@ func NewDefaultTagUnreadRule() *DefaultTagUnreadRule {
 		"patterns",
 		"Detects a struct field with a default:\"...\" tag in a module where no loader reads that key (no defaults library, no reflect on the tag) — the field stays zero unless code sets it",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(rules.NewSettingSpec("readers", "string list", "", "Additional import paths of libraries that read default struct tags.", []string{"example.com/config"}))}
 }
 
 // Configure reads readers, the import paths of further libraries that read

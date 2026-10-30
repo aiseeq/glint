@@ -39,7 +39,7 @@ func NewRequestIDUnparsedForUUIDColumnRule() *RequestIDUnparsedForUUIDColumnRule
 		"security",
 		"Detects an id from the request path, query or body that reaches a call unparsed while its column is uuid — a malformed id fails in the database and the client gets a 500",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(rules.NewSettingSpec("migrations", "string", "", "Comma-separated migration directories used to build the SQL schema.", "db/migrations"))}
 }
 
 // AnalyzeFile is a no-op: the check needs types and the migrations.

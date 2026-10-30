@@ -40,6 +40,10 @@ type SQLUnknownColumnRule struct {
 	*rules.BaseRule
 }
 
+func migrationSettingSpec() rules.SettingSpec {
+	return rules.NewSettingSpec("migrations", "string", "", "Comma-separated migration directories used to build the SQL schema.", "db/migrations")
+}
+
 // NewSQLUnknownColumnRule creates the rule
 func NewSQLUnknownColumnRule() *SQLUnknownColumnRule {
 	return &SQLUnknownColumnRule{BaseRule: rules.NewBaseRule(
@@ -47,7 +51,7 @@ func NewSQLUnknownColumnRule() *SQLUnknownColumnRule {
 		"patterns",
 		"Detects SQL in Go string literals naming a table or a column the migrations never created",
 		core.SeverityHigh,
-	)}
+	).DeclareSettings(rules.NewSettingSpec("migrations", "string", "", "Comma-separated migration directories used to build the SQL schema.", "db/migrations"))}
 }
 
 // ReadsOtherFiles reports that the findings depend on the migrations.
@@ -82,7 +86,7 @@ func NewSQLInsertMissingNotNullRule() *SQLInsertMissingNotNullRule {
 		"patterns",
 		"Detects an INSERT whose column list leaves out a NOT NULL column that has no default, or a NOT NULL column bound through a conversion that makes an empty string NULL",
 		core.SeverityHigh,
-	)}
+	).DeclareSettings(rules.NewSettingSpec("migrations", "string", "", "Comma-separated migration directories used to build the SQL schema.", "db/migrations"))}
 }
 
 // ReadsOtherFiles reports that the findings depend on the migrations.

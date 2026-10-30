@@ -211,7 +211,7 @@ func NewTestFixtureWriteOverriddenByDBTriggerRule() *TestFixtureWriteOverriddenB
 		"patterns",
 		"Detects a test UPDATE that sets the column a BEFORE UPDATE trigger stamps with NOW() — the trigger replaces the value, and the test runs on a fixture it never got",
 		core.SeverityMedium,
-	)}
+	).DeclareSettings(rules.NewSettingSpec("migrations", "string", "", "Comma-separated migration directories used to build the SQL schema.", "db/migrations"))}
 }
 
 // AnalyzeFile reports the stamped-column writes of a Go test file.

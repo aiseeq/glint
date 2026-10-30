@@ -105,6 +105,10 @@ func NewMultiWriteNoTransactionRule() *MultiWriteNoTransactionRule {
 			"patterns",
 			"Detects two or more persistent writes in one function that are not wrapped in a transaction",
 			core.SeverityHigh,
+		).DeclareSettings(
+			rules.NewSettingSpec("store_types", "string", `(?i)(repo|repository|store|dao)(interface|impl)?$`, "Regular expression matching store and repository type names.", "(?i)(repo|store)$"),
+			rules.NewSettingSpec("transaction_functions", "string list", "", "Function names that run their callback inside a transaction.", []string{"WithTx", "RunInTransaction"}),
+			rules.NewSettingSpec("independent_calls", "string list", "", "Write calls allowed to run independently of a transaction.", []string{"WriteAuditEvent"}),
 		),
 	}
 	r.setDefaults()

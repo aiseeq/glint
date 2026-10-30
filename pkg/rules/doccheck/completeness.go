@@ -30,7 +30,7 @@ func NewDocCompletenessRule() *DocCompletenessRule {
 			"documentation",
 			"Detects exported types, functions, and methods of exported types without documentation comments (files under an internal/ directory at any depth are skipped)",
 			core.SeverityLow,
-		),
+		).DeclareSettings(rules.NewSettingSpec("skip_trivial", "bool", true, "Skip symbols whose own code already says everything.", false)),
 		skipTrivial: true,
 	}
 }
