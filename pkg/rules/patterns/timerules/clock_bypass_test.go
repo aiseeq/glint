@@ -93,6 +93,75 @@ func TestNow(t *testing.T) { _ = Now() }
 	assert.Empty(t, violations)
 }
 
+func TestClockBypassModuleClockPackage(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/app\n\ngo 1.24\n",
+		"clock/clock.go": `package clock
+import "time"
+type Clock interface { Now() time.Time }
+func Now() time.Time { return time.Now() }
+`,
+		"report/report.go": `package report
+import "time"
+var moduleStart = time.Now()
+func Since() time.Time { return time.Now().Add(-time.Hour) }
+func Took() time.Duration { start := time.Now(); work(); return time.Since(start) }
+func work() {}
+`,
+		"command/main.go": `package main
+import "time"
+func main() { _ = time.Now() }
+`,
+	}
+	rule := NewClockBypassRule()
+	require.NoError(t, rule.Configure(map[string]any{"clock_package": "example.com/app/clock"}))
+	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"report/report.go:3", "report/report.go:4"}, patterntest.FoundLines(violations))
+	for _, violation := range violations {
+		assert.Equal(t, "This module takes time from example.com/app/clock; this standard clock read can disagree with it", violation.Message)
+	}
+}
+
+func TestClockBypassModuleClockSQL(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/app\n\ngo 1.24\n",
+		"clock/clock.go": `package clock
+import "time"
+func Now() time.Time { return time.Now() }
+`,
+		"store/store.go":     "package store\nconst q = `UPDATE jobs SET processed_at = NOW() WHERE id = $1`\nconst r = `SELECT id FROM jobs WHERE created_at >= now() - interval '1 day'`\nconst t = `SELECT CURRENT_TIMESTAMP, LOCALTIMESTAMP, CURRENT_DATE`\nconst s = \"now is the time\"\nconst n = \"SELECT id FROM t WHERE label = 'now'\"\nconst m = \"SELECT now_at FROM t\"\n",
+		"store/multiline.go": "package store\nconst query = `SELECT id\nFROM jobs\nWHERE created_at > NOW()`\n",
+		"migrations/001.sql": "CREATE TABLE jobs (created_at timestamp DEFAULT now());\n",
+	}
+	rule := NewClockBypassRule()
+	require.NoError(t, rule.Configure(map[string]any{"clock_package": "example.com/app/clock"}))
+	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"store/multiline.go:4", "store/store.go:2", "store/store.go:3", "store/store.go:4", "store/store.go:4", "store/store.go:4"}, patterntest.FoundLines(violations))
+	for _, violation := range violations {
+		assert.Contains(t, violation.Message, "database clock")
+		assert.Contains(t, violation.Message, "parameter")
+	}
+}
+
+func TestClockBypassModuleClockUnset(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/app\n\ngo 1.24\n",
+		"clock/clock.go": `package clock
+import "time"
+func Now() time.Time { return time.Now() }
+`,
+		"report/report.go": `package report
+import "time"
+func Since() time.Time { return time.Now().Add(-time.Hour) }
+`,
+	}
+	violations, err := NewClockBypassRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+}
+
 func TestClockBypassProjectClockMethodAndTimeUntil(t *testing.T) {
 	files := map[string]string{
 		"go.mod": "module example.test/project\n\ngo 1.24\n",

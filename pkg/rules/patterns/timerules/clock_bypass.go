@@ -3,12 +3,14 @@ package timerules
 import (
 	"go/ast"
 	"go/types"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
 func init() { rules.Register(NewClockBypassRule()) }
@@ -19,16 +21,16 @@ func init() { rules.Register(NewClockBypassRule()) }
 //	func (s *Service) Now() time.Time { return s.clock.Now() }
 //	func (s *Service) Expired() bool { return time.Now().After(s.deadline) }
 //
-// Not flagged: the clock implementation, tests, main packages, packages with
-// fewer than two project-clock calls, or a time.Now() used to measure elapsed
-// time with time.Since(start) in the same function.
+// The clock_package setting enables module-wide checks, including SQL literals.
+// Not flagged: the clock implementation, tests, main packages, or a time.Now()
+// used to measure elapsed time with time.Since(start) in the same function.
 type ClockBypassRule struct{ *rules.BaseRule }
 
 // NewClockBypassRule creates the clock-bypass rule.
 func NewClockBypassRule() *ClockBypassRule {
 	return &ClockBypassRule{BaseRule: rules.NewBaseRule(
 		"clock-bypass", "patterns",
-		"Detects standard clock reads in a package that already takes time from a project clock",
+		"Detects standard clock reads alongside the project clock; clock_package enables module-wide Go and SQL checks",
 		core.SeverityMedium,
 	)}
 }
@@ -72,11 +74,79 @@ func (r *ClockBypassRule) analyzeClockPackage(pkg *core.GoPackageContext, projec
 	if len(files) == 0 || implementsClockHere(pkg.Package.Types) {
 		return nil
 	}
-	usage := countProjectClockUsage(pkg.Package.TypesInfo, files, projectPaths)
-	if usage.count < 2 || len(usage.files) == 0 {
+	clockPackage := r.GetStringSetting("clock_package", "")
+	if clockPackage != "" && pkg.Package.PkgPath == clockPackage {
 		return nil
 	}
-	return r.reportClockBypasses(pkg, files, usage)
+	usage := countProjectClockUsage(pkg.Package.TypesInfo, files, projectPaths)
+	if clockPackage == "" && (usage.count < 2 || len(usage.files) == 0) {
+		return nil
+	}
+	places := make([]string, 0, len(usage.files))
+	for name, count := range usage.files {
+		places = append(places, name+" ("+itoa(count)+")")
+	}
+	sort.Strings(places)
+	if len(places) > 3 {
+		places = append(places[:3], "and "+itoa(len(usage.files)-3)+" more files")
+	}
+	message := "This package takes its project clock " + itoa(usage.count) + " times in " + strings.Join(places, ", ") + "; this standard clock read can disagree with it"
+	if clockPackage != "" {
+		message = "This module takes time from " + clockPackage + "; this standard clock read can disagree with it"
+	}
+	var violations []*core.Violation
+	for _, file := range files {
+		violations = append(violations, r.reportStandardClockReads(pkg.Package.TypesInfo, file, message)...)
+	}
+	if clockPackage != "" {
+		for _, file := range files {
+			violations = append(violations, r.reportSQLClockReads(file)...)
+		}
+	}
+	return violations
+}
+
+var databaseClockRead = regexp.MustCompile(`(?i)\bNOW\s*\(\s*\)|\b(?:CURRENT_TIMESTAMP|LOCALTIMESTAMP|CURRENT_DATE)\b`)
+
+func (r *ClockBypassRule) reportStandardClockReads(info *types.Info, file *core.FileContext, message string) []*core.Violation {
+	measured := make(map[*ast.CallExpr]bool)
+	for _, decl := range file.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		for call := range elapsedStartVariables(fn, info) {
+			measured[call] = true
+		}
+	}
+	var violations []*core.Violation
+	ast.Inspect(file.GoAST, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok || !isStandardClockCall(info, call) || measured[call] {
+			return true
+		}
+		line := file.LineFor(call)
+		violation := r.CreateViolation(file.RelPath, line, message)
+		violation.WithCode(file.GetLine(line))
+		violation.WithSuggestion("Use the project's clock for the current time")
+		violations = append(violations, violation)
+		return true
+	})
+	return violations
+}
+
+func (r *ClockBypassRule) reportSQLClockReads(file *core.FileContext) []*core.Violation {
+	var violations []*core.Violation
+	for _, literal := range patternkit.SqlLiterals(file.GoAST) {
+		for _, match := range databaseClockRead.FindAllStringIndex(literal.Text, -1) {
+			line := literal.LineAt(file, match[0])
+			violation := r.CreateViolation(file.RelPath, line, "This query takes its time from the database clock instead of the project clock; pass the moment as a parameter")
+			violation.WithCode(file.GetLine(line))
+			violation.WithSuggestion("Pass the current moment from the project clock as a query parameter")
+			violations = append(violations, violation)
+		}
+	}
+	return violations
 }
 
 func productionClockFiles(pkg *core.GoPackageContext) []*core.FileContext {
@@ -108,48 +178,6 @@ func countProjectClockUsage(info *types.Info, files []*core.FileContext, project
 		}
 	}
 	return usage
-}
-
-func (r *ClockBypassRule) reportClockBypasses(pkg *core.GoPackageContext, files []*core.FileContext, usage clockPackageUse) []*core.Violation {
-	places := make([]string, 0, len(usage.files))
-	for name, count := range usage.files {
-		places = append(places, name+" ("+itoa(count)+")")
-	}
-	sort.Strings(places)
-	if len(places) > 3 {
-		places = append(places[:3], "and "+itoa(len(usage.files)-3)+" more files")
-	}
-	where := strings.Join(places, ", ")
-	var violations []*core.Violation
-	for _, file := range files {
-		violations = append(violations, r.reportFileClockBypasses(pkg.Package.TypesInfo, file, usage, where)...)
-	}
-	return violations
-}
-
-func (r *ClockBypassRule) reportFileClockBypasses(info *types.Info, file *core.FileContext, usage clockPackageUse, where string) []*core.Violation {
-	var violations []*core.Violation
-	for _, decl := range file.GoAST.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
-		}
-		measured := elapsedStartVariables(fn, info)
-		ast.Inspect(fn.Body, func(node ast.Node) bool {
-			call, ok := node.(*ast.CallExpr)
-			if !ok || !isStandardClockCall(info, call) || measured[call] {
-				return true
-			}
-			line := file.LineFor(call)
-			violation := r.CreateViolation(file.RelPath, line,
-				"This package takes its project clock "+itoa(usage.count)+" times in "+where+"; this standard clock read can disagree with it")
-			violation.WithCode(file.GetLine(line))
-			violation.WithSuggestion("Use the project's clock for the current time")
-			violations = append(violations, violation)
-			return true
-		})
-	}
-	return violations
 }
 
 func modulePathFor(importPath string, modules map[string]bool) bool {
