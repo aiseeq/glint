@@ -2,6 +2,7 @@ package frontendrules
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -424,6 +425,10 @@ func ageProjectTree(t *testing.T, root string) {
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		// Chtimes follows a link: node_modules/.bin/tsc would age the global tsc.
+		if entry.Type()&fs.ModeSymlink != 0 {
+			return nil
 		}
 		return os.Chtimes(path, old, old)
 	})
