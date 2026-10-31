@@ -1,6 +1,6 @@
 # sql-injection: whitelist defects after 2da8913
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Что сделать
@@ -32,3 +32,4 @@
 - 2026-10-31 22:45 note — glint-master: Terra 6-й заход: вернуть — 14a86bc дал ложные на синхронных IIFE с записью после вызова (review6.go:28 :35 :42), регресс против 2da8913^. Исправлено 4998f59 (glint-master): syncCalls — closure, вызванная на месте (не go/defer), не теряет проверку от последующих записей; тест TestSQLInjectionCheckInSynchronousClosureKeepsLaterWrite; accept-sql-review3 ok; consumers 0 разниц. Остаток (новый, не регресс — до 2da8913 тоже не ловилось): переменная пакета, проверенная в goroutine и записанная снаружи (review6.go:67)
 - 2026-10-31 22:51 note — glint-master: Terra 7-й заход: вернуть — проверка до closure в скобках ((func(){...})()) не переносилась (review7.go:13 :17), регресс против 2da8913^. Исправлено 00197b4 (glint-master): ParenExpr между литералом и вызовом пропускается; тест TestSQLInjectionParenthesizedClosureCalledInPlaceKeepsCheck; review7 скопирован в security/probe-verify-sql (7 нет, 13 17 нет, 43 48 есть); accept-sql-review3 ok; consumers 0 разниц. Остаток (не регресс): синхронная IIFE внутри go, внешняя запись по каналам (review7.go:34)
 - 2026-10-31 22:59 note — glint-master: Terra 8-й заход (матрица форм closure, security/probe-matrix): вернуть — 18 ложных против 2da8913^ (сохранённая closure не наследовала внешнюю проверку; проверка внутри не-go closure снималась внешней записью). Исправлено 8176dac (glint-master): closure, не вызванная на месте (defer/go/сохранена/передана), наследует внешнюю проверку при отсутствии записей до конца функции; захват опасен только для go-closure (goCalls). Матрица: из 21 расхождения 9 — 6 «сохранённая/снаружи/запись после вызова» (153 343 533 750 976 1221) сознательно консервативны: время вызова сохранённой closure не отслеживается, обратный случай (запись до вызова) ловится тестом TestSQLInjectionStoredClosureLosesOuterCheckOnLaterWrite, база не ловила ни того, ни другого; 3 «IIFE внутри go» (662 888 1124) — остаток. accept-sql-review3 ok, consumers 0 разниц
+- 2026-10-31 23:02 готово — terra-1031-2128-glint (session glint-master): Terra 1031-2128-glint, 9-й заход: ВЕРДИКТ готово (/home/aisee/.cache/worktrees/glint-measure/security/verdict-sql.md): матрица форм closure и пробы verify-sql установленным glint 7c3e594, go test security ok, consumers 0 разниц, без падений; остаток — тикет sql-injection-whitelist-residue
