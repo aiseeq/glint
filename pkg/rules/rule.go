@@ -33,7 +33,8 @@ type GoProjectRule interface {
 }
 
 // TypedGoProjectRule is a file rule that needs Go type information from the
-// shared project load while still analyzing files individually.
+// shared project load while still analyzing files individually. Returning false
+// removes the rule from the entire root, including per-file analysis.
 type TypedGoProjectRule interface {
 	Rule
 	NeedsTypedGoProject(files []*core.FileContext) bool

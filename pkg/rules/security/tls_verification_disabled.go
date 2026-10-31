@@ -2,11 +2,15 @@ package security
 
 import (
 	"go/ast"
+	"go/token"
+	"go/types"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -41,7 +45,20 @@ func NewTLSVerificationDisabledRule() *TLSVerificationDisabledRule {
 	)}
 }
 
-var scriptTLSOff = regexp.MustCompile(`NODE_TLS_REJECT_UNAUTHORIZED['"\]]*\s*=\s*['"]?0|rejectUnauthorized\s*:\s*false|ignoreHTTPSErrors\s*:\s*true`)
+// NeedsTypedGoProject asks the runner to keep this rule active for files it analyzes.
+func (r *TLSVerificationDisabledRule) NeedsTypedGoProject(files []*core.FileContext) bool {
+	return slices.ContainsFunc(files, func(file *core.FileContext) bool {
+		return file.IsGoFile() || file.IsJavaScriptFile() || file.IsTypeScriptFile()
+	})
+}
+
+// TypedGoProjectImports lists the package used by this rule's type checks.
+func (r *TLSVerificationDisabledRule) TypedGoProjectImports() []string {
+	return []string{"crypto/tls"}
+}
+
+var scriptTLSOff = regexp.MustCompile(`NODE_TLS_REJECT_UNAUTHORIZED['"\]]*\s*=\s*['"]?0|ignoreHTTPSErrors\s*:\s*true`)
+var scriptRejectUnauthorized = regexp.MustCompile(`["']?rejectUnauthorized["']?\s*:\s*false\b`)
 
 const tlsSuggestion = "Trust the certificate explicitly (a CA bundle, RootCAs, NODE_EXTRA_CA_CERTS) instead of turning verification off"
 
@@ -55,36 +72,93 @@ func (r *TLSVerificationDisabledRule) AnalyzeFile(ctx *core.FileContext) []*core
 	}
 	lr := newLineReporter(ctx, r.BaseRule)
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		kv, ok := n.(*ast.KeyValueExpr)
-		if !ok {
-			return true
-		}
-		key, ok := kv.Key.(*ast.Ident)
-		value, isIdent := kv.Value.(*ast.Ident)
-		if ok && isIdent && key.Name == "InsecureSkipVerify" && value.Name == "true" {
-			lr.report(kv, "TLS certificate verification is off (InsecureSkipVerify: true) — anyone on the path can read and change the traffic", tlsSuggestion, "tls_verification_disabled")
+		switch node := n.(type) {
+		case *ast.CompositeLit:
+			if isTLSConfigLiteral(ctx, node) {
+				for _, elt := range node.Elts {
+					field, ok := elt.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					key, hasKey := field.Key.(*ast.Ident)
+					value, isTrue := field.Value.(*ast.Ident)
+					if hasKey && isTrue && key.Name == "InsecureSkipVerify" && value.Name == "true" {
+						lr.report(field, "TLS certificate verification is off (InsecureSkipVerify: true) — anyone on the path can read and change the traffic", tlsSuggestion, "tls_verification_disabled")
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			if node.Tok != token.ASSIGN || len(node.Lhs) != len(node.Rhs) {
+				return true
+			}
+			for i, lhs := range node.Lhs {
+				selector, ok := lhs.(*ast.SelectorExpr)
+				value, isTrue := node.Rhs[i].(*ast.Ident)
+				if ok && selector.Sel.Name == "InsecureSkipVerify" && isTrue && value.Name == "true" && isTLSConfigSelector(ctx.GoTypesInfo, selector) {
+					lr.report(node, "TLS certificate verification is off (InsecureSkipVerify = true) — anyone on the path can read and change the traffic", tlsSuggestion, "tls_verification_disabled")
+				}
+			}
 		}
 		return true
 	})
 	return lr.violations
 }
 
+func isTLSConfigSelector(info *types.Info, selector *ast.SelectorExpr) bool {
+	return info != nil && isTLSConfigType(info, info.TypeOf(selector.X))
+}
+
+func isTLSConfigLiteral(ctx *core.FileContext, lit *ast.CompositeLit) bool {
+	if ctx.GoTypesInfo != nil {
+		return isTLSConfigType(ctx.GoTypesInfo, ctx.GoTypesInfo.TypeOf(lit))
+	}
+	selector, ok := lit.Type.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, isPkg := selector.X.(*ast.Ident)
+	return isPkg && pkg.Name == "tls" && selector.Sel.Name == "Config"
+}
+
 // analyzeScript reports TypeScript and JavaScript lines that turn
 // verification off.
 func (r *TLSVerificationDisabledRule) analyzeScript(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
-	for i, line := range strings.Split(string(ctx.Content), "\n") {
-		code := strings.TrimSpace(line)
-		if strings.HasPrefix(code, "//") || strings.HasPrefix(code, "*") || !scriptTLSOff.MatchString(code) {
+	text := helpers.FileJSText(ctx)
+	code := helpers.FileJSCode(ctx)
+	for i, line := range text {
+		if !scriptTLSOff.MatchString(line) && !hasRejectUnauthorizedObjectKey(line, code[i]) {
 			continue
 		}
 		if ctx.IsSuppressed(i+1, r.Name()) {
 			continue
 		}
 		v := r.CreateViolation(ctx.RelPath, i+1, "TLS certificate verification is off — anyone on the path can read and change the traffic, credentials included")
-		v.WithCode(code)
+		v.WithCode(strings.TrimSpace(ctx.Lines[i]))
 		v.WithSuggestion(tlsSuggestion)
 		violations = append(violations, v)
 	}
 	return violations
+}
+
+func hasRejectUnauthorizedObjectKey(text, code string) bool {
+	for _, loc := range scriptRejectUnauthorized.FindAllStringIndex(text, -1) {
+		colon := strings.IndexByte(text[loc[0]:loc[1]], ':') + loc[0]
+		if colon < len(code) && code[colon] == ':' {
+			return true
+		}
+	}
+	return false
+}
+
+func isTLSConfigType(info *types.Info, typ types.Type) bool {
+	if info == nil || typ == nil {
+		return false
+	}
+	typ = types.Unalias(typ)
+	if pointer, ok := typ.(*types.Pointer); ok {
+		typ = types.Unalias(pointer.Elem())
+	}
+	named, ok := typ.(*types.Named)
+	return ok && named.Obj().Name() == "Config" && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "crypto/tls"
 }
