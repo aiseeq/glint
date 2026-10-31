@@ -1,6 +1,6 @@
 # mirror-comment-copy punishes the honest comment; catch the copy by body or value
 
-Статус: в работе
+Статус: на проверке
 Исполнитель: glint-master
 
 ## Вход
@@ -29,3 +29,5 @@
 - 2026-10-31 10:58 note — glint-master: заход 4 принят приёмкой (40 копий сведены, общие в core, helpers, patternkit), но ревью: 42 обёртки-пересылки `return helpers.X(args)` вместо удаления копий (правило пропускает делегирующие — находка ушла, второе имя осталось) и файлы-свалки shared.go. Заход 5: brief-mirror-comment-body-5.md, accept-mirror-comment-body-5.sh
 - 2026-10-31 11:24 note — glint-master: заход 5 принят: обёрток-пересылок 0, shared.go разложены (core/maps.go, core/paths.go, helpers/names.go, helpers/types.go); все правила по 21 потребителю (bin/consumers без -r, /home/aisee/.cache/worktrees/glint-measure/consumers-all-r5.txt) — разница только duplicate-func-across-packages (50 строк, из них 29 в glint на старом main), поведение остальных правил не изменилось. Мастер: синтетическое имя стока в тесте audit-actor (утечка). Влито в main dc30a47, 9bf4837, 52eedbd; graft all 0
 - 2026-10-31 11:28 note — glint-master: установлено v1.83.7-195-g75f06dd (75f06dd). Пилот по git-admin: graft (2 находки) — письмо graft-master 31.10, ждём его итог; остальные потребители (dream 2, sc2demu 11, sc2go 4, потребитель А 2) — после пилота
+- 2026-10-31 11:53 note — glint-master: пилот graft: обе находки верные, исправлены graft 87de64a, гейт зелёный. Замечание пилота: подсказка не говорит, где держать общую реализацию — подсказка дополнена (общий пакет, стандартная библиотека), 0ff7551; форма «ключи map отсортировать» — тикет reimplemented-stdlib-sorted-keys. После пилота находки отправлены dream-master (исправил 03e2a3e, 0 находок), demu-master (11), sc2go-master (4), мастеру потребителя А (2); замороженным не слали. На проверку
+- 2026-10-31 11:53 на проверке — glint-master
