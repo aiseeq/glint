@@ -148,7 +148,7 @@ func goTables(ctx *core.FileContext) Tables {
 					continue
 				}
 				t.Consts = append(t.Consts, ConstDecl{
-					Name: vs.Names[i].Name, Value: s, Group: dir + "\x00" + constFamily(gen, vs, i, families),
+					Name: vs.Names[i].Name, Value: s, Group: dir + "\x00" + constFamily(vs, i, families),
 					Path: ctx.RelPath, Line: ctx.LineFor(vs.Names[i]),
 				})
 			}
@@ -244,7 +244,7 @@ func ctxSlash(ctx *core.FileContext) string {
 // constFamily is the set a constant belongs to: its type, or its name prefix
 // within its declaration. A constant declared alone goes with the others of
 // its package sharing the prefix: RuleSourceAlpha with RuleSourceBeta.
-func constFamily(gen *ast.GenDecl, vs *ast.ValueSpec, i int, families map[string]int) string {
+func constFamily(vs *ast.ValueSpec, i int, families map[string]int) string {
 	if vs.Type != nil {
 		if name := goTypeName(vs.Type); name != "" {
 			return "type " + name

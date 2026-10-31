@@ -306,3 +306,17 @@ func TestUnusedParamSilentWithoutTypes(t *testing.T) {
 	ctx := parseGoContext(t, "svc.go", "package main\n\nfunc greet(name string, unused int) string { return name }\n")
 	assert.Empty(t, NewUnusedParamRule().AnalyzeFile(ctx))
 }
+
+func TestUnusedParamCalledFromAnotherFileOfPackage(t *testing.T) {
+	violations := rulestest.RunRuleOnFiles(t, NewUnusedParamRule(), map[string]string{
+		"calc/calc.go": `package calc
+
+func scale(n int, factor int) int { return n * 2 }
+`,
+		"calc/use.go": `package calc
+
+func Double(n int) int { return scale(n, 2) }
+`,
+	})
+	assert.Equal(t, []string{"calc/calc.go:3"}, rulestest.ViolationPlaces(violations))
+}

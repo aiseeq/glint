@@ -204,7 +204,7 @@ func unboundedSpawn(info *types.Info, fnBody, body *ast.BlockStmt) ast.Node {
 					spawn = node
 				}
 				waited = true
-				bounded = bounded || boundsInside(info, node) || errgroupLimited(info, fnBody, node)
+				bounded = bounded || boundsInside(info, node) || errgroupLimited(fnBody, node)
 				callsOut = callsOut || passesContext(info, node)
 				return false
 			}
@@ -301,7 +301,7 @@ const errgroupPath = "golang.org/x/sync/errgroup"
 
 // errgroupLimited reports a SetLimit call on the group of g.Go(...) in the
 // same function.
-func errgroupLimited(info *types.Info, fnBody *ast.BlockStmt, goCall *ast.CallExpr) bool {
+func errgroupLimited(fnBody *ast.BlockStmt, goCall *ast.CallExpr) bool {
 	sel, ok := ast.Unparen(goCall.Fun).(*ast.SelectorExpr)
 	if !ok {
 		return false

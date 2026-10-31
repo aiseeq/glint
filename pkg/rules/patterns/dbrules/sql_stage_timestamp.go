@@ -492,7 +492,7 @@ func (index *stageIndex) skippedStamps(scope patternkit.FuncScope, fn *ast.FuncD
 			reads = sqlschema.StageReads(literal.Bare)
 		}
 		for _, read := range reads {
-			if writer := index.skippingWriter(read.Table, read.Column, read.Status); writer != "" {
+			if writer := index.skippingWriter(read.Table, read.Status); writer != "" {
 				findings = append(findings, patternkit.FuncFinding{Node: sqlPosNode(literal.PosAt(read.Offset)), Message: fmt.Sprintf(
 					"The read takes %s rows by %s while %s sets %s without stamping it — those rows have NULL there and the comparison never matches them",
 					read.Status, read.Column, writer, read.Status)})
@@ -504,7 +504,7 @@ func (index *stageIndex) skippedStamps(scope patternkit.FuncScope, fn *ast.FuncD
 
 // skippingWriter names a function that can set the stage without its
 // column, "" for none.
-func (index *stageIndex) skippingWriter(table, column, stage string) string {
+func (index *stageIndex) skippingWriter(table, stage string) string {
 	for _, write := range index.writes[table] {
 		if !index.stampsAny(write.update) && index.mayWrite(write, strings.ToUpper(stage)) {
 			return write.fn.Decl.Name.Name

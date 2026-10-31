@@ -479,7 +479,7 @@ const maxSecretHops = 5
 // is read and returns that read when it is a configuration field no code
 // checks for empty, or os.Getenv.
 func unguardedSecret(scope patternkit.FuncScope, fn patternkit.TypedFuncDecl, key *types.Var, checked map[*types.Var]bool, hops int) (string, bool) {
-	if hops > maxSecretHops || testsEmpty(fn.Info, fn.Decl.Body, func(e ast.Expr) bool { return patternkit.MentionsObject(fn.Info, e, key) }) {
+	if hops > maxSecretHops || testsEmpty(fn.Decl.Body, func(e ast.Expr) bool { return patternkit.MentionsObject(fn.Info, e, key) }) {
 		return "", false
 	}
 	index := -1
@@ -531,7 +531,7 @@ func fieldSelection(info *types.Info, expr ast.Expr) (ast.Expr, *types.Var, bool
 func emptyCheckedFields(decls map[*types.Func]patternkit.TypedFuncDecl) map[*types.Var]bool {
 	checked := make(map[*types.Var]bool)
 	for _, decl := range decls {
-		testsEmpty(decl.Info, decl.Decl.Body, func(e ast.Expr) bool {
+		testsEmpty(decl.Decl.Body, func(e ast.Expr) bool {
 			ast.Inspect(e, func(n ast.Node) bool {
 				if expr, ok := n.(ast.Expr); ok {
 					if _, field, ok := fieldSelection(decl.Info, expr); ok {
@@ -575,7 +575,7 @@ func taggedRequired(owner types.Type, field *types.Var) bool {
 
 // testsEmpty reports a comparison with "" or a length test of an
 // expression match accepts.
-func testsEmpty(info *types.Info, body *ast.BlockStmt, match func(ast.Expr) bool) bool {
+func testsEmpty(body *ast.BlockStmt, match func(ast.Expr) bool) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		bin, ok := n.(*ast.BinaryExpr)

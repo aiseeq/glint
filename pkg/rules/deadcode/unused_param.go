@@ -89,10 +89,8 @@ func collectFixedSignatures(ctx *core.GoProjectContext) (*fixedSignatures, error
 			return nil, errors.New("unused param: package has no typed syntax")
 		}
 		fixed.addInterfaces(pkg.Package.Types, seen)
-		for _, file := range pkg.Package.Syntax {
-			for fn := range helpers.FuncValues(file, pkg.Package.TypesInfo) {
-				fixed.funcValues[fn] = true
-			}
+		for fn := range helpers.FuncValues(pkg.Package.Syntax, pkg.Package.TypesInfo) {
+			fixed.funcValues[fn] = true
 		}
 	}
 	return fixed, nil

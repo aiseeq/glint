@@ -285,7 +285,7 @@ func fieldNilBoolGuardMethods(methods []fieldNilMethod, field *types.Var) map[*t
 		falseGuard := false
 		ast.Inspect(method.decl.Body, func(node ast.Node) bool {
 			stmt, ok := node.(*ast.IfStmt)
-			if !ok || !fieldNilExprEnsuresNil(method, stmt.Cond, field) || !fieldNilBranchReturnsFalse(method, stmt.Body) {
+			if !ok || !fieldNilExprEnsuresNil(method, stmt.Cond, field) || !fieldNilBranchReturnsFalse(stmt.Body) {
 				return true
 			}
 			falseGuard = true
@@ -334,7 +334,7 @@ func fieldNilCheckPrecedes(method fieldNilMethod, field *types.Var, use ast.Node
 	return found
 }
 
-func fieldNilBranchReturnsFalse(method fieldNilMethod, stmt ast.Stmt) bool {
+func fieldNilBranchReturnsFalse(stmt ast.Stmt) bool {
 	block, ok := stmt.(*ast.BlockStmt)
 	if !ok {
 		block = &ast.BlockStmt{List: []ast.Stmt{stmt}}

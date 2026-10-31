@@ -94,12 +94,12 @@ func indexForwardingWrappers(ctx *core.GoProjectContext) (*forwardingWrapperInde
 		if pkg.Package.Module == nil || pkg.Package.Module.Path == "" {
 			continue
 		}
+		for fn := range helpers.FuncValues(pkg.Package.Syntax, pkg.Package.TypesInfo) {
+			index.values[fn] = true
+		}
 		for _, file := range pkg.Package.Syntax {
 			if file == nil {
 				continue
-			}
-			for fn := range helpers.FuncValues(file, pkg.Package.TypesInfo) {
-				index.values[fn] = true
 			}
 			if syntaxIsTestFile(pkg.Files, file) {
 				continue

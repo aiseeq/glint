@@ -67,3 +67,24 @@ func testOnly(s string) { shared.Send(s) }
 	}
 	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewForwardingWrapperFuncRule(), files))
 }
+
+func TestForwardingWrapperFuncCalledFromAnotherFileOfPackage(t *testing.T) {
+	files := map[string]string{
+		"shared/words.go": `package shared
+
+func IsNameByte(c byte) bool { return c >= 'a' }
+`,
+		"text/text.go": `package text
+
+import "example.com/rulestest/shared"
+
+func isIdentChar(c byte) bool { return shared.IsNameByte(c) }
+`,
+		"text/scan.go": `package text
+
+func Scan(s string) bool { return isIdentChar(s[0]) }
+`,
+	}
+	violations := rulestest.RunRuleOnFiles(t, NewForwardingWrapperFuncRule(), files)
+	assert.Equal(t, []string{"text/text.go:5"}, rulestest.ViolationPlaces(violations))
+}

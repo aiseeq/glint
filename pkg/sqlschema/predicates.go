@@ -65,15 +65,15 @@ func conjuncts(sql string, outer bool) []Conjunct {
 			s := node.GetSelectStmt()
 			tables := levelTables(s.GetFromClause())
 			scopeOffset := selectScopeOffset(s.GetFromClause(), shift)
-			visitFailure = collectCondition(&out, s.GetWhereClause(), "SELECT", tables, shift, scopeOffset)
+			visitFailure = collectCondition(&out, s.GetWhereClause(), "SELECT", shift, scopeOffset)
 			if visitFailure == "" {
 				visitFailure = collectJoins(&out, s.GetFromClause(), "SELECT", tables, shift, scopeOffset)
 			}
 			if visitFailure == "" {
-				visitFailure = collectCondition(&out, s.GetHavingClause(), "SELECT", tables, shift, scopeOffset)
+				visitFailure = collectCondition(&out, s.GetHavingClause(), "SELECT", shift, scopeOffset)
 			}
 			if visitFailure == "" {
-				visitFailure = collectAggregateFilters(&out, s.GetTargetList(), tables, shift, scopeOffset)
+				visitFailure = collectAggregateFilters(&out, s.GetTargetList(), shift, scopeOffset)
 			}
 			if s.GetLarg() != nil {
 				visitStmt(&pgquery.Node{Node: &pgquery.Node_SelectStmt{SelectStmt: s.GetLarg()}})
@@ -99,15 +99,13 @@ func conjuncts(sql string, outer bool) []Conjunct {
 			})
 		case node.GetUpdateStmt() != nil:
 			s := node.GetUpdateStmt()
-			tables := map[string]string{"": strings.ToLower(s.GetRelation().GetRelname())}
-			visitFailure = collectCondition(&out, s.GetWhereClause(), "UPDATE", tables, shift, 0)
+			visitFailure = collectCondition(&out, s.GetWhereClause(), "UPDATE", shift, 0)
 			if !outer && visitFailure == "" {
 				visitNested(node, visitStmt)
 			}
 		case node.GetDeleteStmt() != nil:
 			s := node.GetDeleteStmt()
-			tables := map[string]string{"": strings.ToLower(s.GetRelation().GetRelname())}
-			visitFailure = collectCondition(&out, s.GetWhereClause(), "DELETE", tables, shift, 0)
+			visitFailure = collectCondition(&out, s.GetWhereClause(), "DELETE", shift, 0)
 			if !outer && visitFailure == "" {
 				visitNested(node, visitStmt)
 			}
@@ -132,12 +130,12 @@ func conjuncts(sql string, outer bool) []Conjunct {
 	return unique
 }
 
-func collectAggregateFilters(out *[]Conjunct, targets []*pgquery.Node, tables map[string]string, shift, scopeOffset int) string {
+func collectAggregateFilters(out *[]Conjunct, targets []*pgquery.Node, shift, scopeOffset int) string {
 	var failure string
 	for _, target := range targets {
 		walk(target.ProtoReflect(), func(m proto.Message) {
 			if call, ok := m.(*pgquery.FuncCall); ok && call.GetAggFilter() != nil && failure == "" {
-				failure = collectCondition(out, call.GetAggFilter(), "SELECT", tables, shift, scopeOffset)
+				failure = collectCondition(out, call.GetAggFilter(), "SELECT", shift, scopeOffset)
 			}
 		})
 		if failure != "" {
@@ -169,7 +167,7 @@ func visitNested(node *pgquery.Node, visit func(*pgquery.Node)) {
 func collectJoins(out *[]Conjunct, from []*pgquery.Node, op string, tables map[string]string, shift, scopeOffset int) string {
 	for _, n := range from {
 		if j := n.GetJoinExpr(); j != nil {
-			if failure := collectCondition(out, j.GetQuals(), op, tables, shift, scopeOffset); failure != "" {
+			if failure := collectCondition(out, j.GetQuals(), op, shift, scopeOffset); failure != "" {
 				return "collect join condition: " + failure
 			}
 			if failure := collectJoins(out, []*pgquery.Node{j.GetLarg(), j.GetRarg()}, op, tables, shift, scopeOffset); failure != "" {
@@ -179,7 +177,7 @@ func collectJoins(out *[]Conjunct, from []*pgquery.Node, op string, tables map[s
 	}
 	return ""
 }
-func collectCondition(out *[]Conjunct, n *pgquery.Node, op string, tables map[string]string, shift, scopeOffset int) string {
+func collectCondition(out *[]Conjunct, n *pgquery.Node, op string, shift, scopeOffset int) string {
 	if n == nil {
 		return ""
 	}

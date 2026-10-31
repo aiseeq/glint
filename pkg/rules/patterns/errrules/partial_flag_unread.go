@@ -67,7 +67,7 @@ func (r *PartialFlagUnreadRule) checkFunction(file *core.FileContext, info *type
 		return nil
 	}
 	usage := inspectPartialUsage(info, fn, candidates)
-	return r.firstUnreadFlagFinding(file, info, fn, candidates, usage, functions)
+	return r.firstUnreadFlagFinding(file, info, fn, usage, functions)
 }
 
 type partialTypedFunction struct {
@@ -539,7 +539,7 @@ func (u *partialUsage) markFlagRead(root types.Object, flag partialFlag) {
 	u.flagRead[root][partialFlagKey(flag)] = true
 }
 
-func (r *PartialFlagUnreadRule) firstUnreadFlagFinding(file *core.FileContext, info *types.Info, fn *ast.FuncDecl, candidates map[types.Object]types.Type, usage *partialUsage, functions map[*types.Func]partialTypedFunction) []*core.Violation {
+func (r *PartialFlagUnreadRule) firstUnreadFlagFinding(file *core.FileContext, info *types.Info, fn *ast.FuncDecl, usage *partialUsage, functions map[*types.Func]partialTypedFunction) []*core.Violation {
 	var findings []*core.Violation
 	groups := make(map[partialReadGroup][]partialFlag)
 	var groupOrder []partialReadGroup

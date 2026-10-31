@@ -336,7 +336,7 @@ func muxEndpointsInFunction(fn *ast.FuncDecl, info *types.Info) []muxEndpoint {
 		if !ok || prefix == "/" {
 			return true
 		}
-		base := receiverBase(prefixCall, info, bases)
+		base := receiverBase(prefixCall, bases)
 		base.path = joinRoute(base.path, prefix)
 		bases[id.Name] = base
 		return true
@@ -364,7 +364,7 @@ func muxEndpointsInFunction(fn *ast.FuncDecl, info *types.Info) []muxEndpoint {
 		if !ok || (method == "PathPrefix" && route == "/") {
 			return true
 		}
-		base := receiverBaseFromType(selector.X, info, bases)
+		base := receiverBaseFromType(selector.X, bases)
 		full := joinRoute(base.path, route)
 		unknown := base.unknown || !strings.HasPrefix(full, "/api/")
 		endpoints = append(endpoints, muxEndpoint{Path: full, Prefix: method == "PathPrefix", Unknown: unknown})
@@ -424,15 +424,15 @@ func constString(info *types.Info, args []ast.Expr) (string, bool) {
 	return constant.StringVal(tv.Value), true
 }
 
-func receiverBase(expr ast.Expr, info *types.Info, bases map[string]routerBase) routerBase {
+func receiverBase(expr ast.Expr, bases map[string]routerBase) routerBase {
 	selector, ok := expr.(*ast.SelectorExpr)
 	if !ok {
-		return receiverBaseFromType(expr, info, bases)
+		return receiverBaseFromType(expr, bases)
 	}
-	return receiverBaseFromType(selector.X, info, bases)
+	return receiverBaseFromType(selector.X, bases)
 }
 
-func receiverBaseFromType(expr ast.Expr, info *types.Info, bases map[string]routerBase) routerBase {
+func receiverBaseFromType(expr ast.Expr, bases map[string]routerBase) routerBase {
 	if id, ok := expr.(*ast.Ident); ok {
 		if base, exists := bases[id.Name]; exists {
 			return base

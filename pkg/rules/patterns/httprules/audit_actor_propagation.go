@@ -540,7 +540,7 @@ func collectAuditHelperStatusCalls(calls *auditMethodCalls, helper, root *ssa.Fu
 				continue
 			}
 			for _, target := range index.targets[call] {
-				if auditStatusWriteCall(call, target, root) {
+				if auditStatusWriteCall(target, root) {
 					collectAuditCallTarget(calls, call, target, root)
 				}
 			}
@@ -553,14 +553,14 @@ func collectAuditCallTarget(calls *auditMethodCalls, call ssa.CallInstruction, t
 	if auditWriteCall(funcName) {
 		calls.audits = true
 	}
-	if !auditStatusWriteCall(call, target, root) {
+	if !auditStatusWriteCall(target, root) {
 		return
 	}
 	key := types.TypeString(calls.function.Signature.Recv().Type(), nil) + ":" + auditStatusCallKey(target)
 	calls.status[key] = append(calls.status[key], call)
 }
 
-func auditStatusWriteCall(call ssa.CallInstruction, target, root *ssa.Function) bool {
+func auditStatusWriteCall(target, root *ssa.Function) bool {
 	if target == nil || target.Signature == nil || target.Signature.Recv() == nil {
 		return false
 	}

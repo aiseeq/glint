@@ -174,15 +174,11 @@ func (r *FrontendMoneyArithmeticRule) isMoneyFieldName(name string) bool {
 	if dot := strings.LastIndex(field, "."); dot >= 0 {
 		field = strings.TrimPrefix(field[dot+1:], "?")
 	}
-	parts := splitMoneyName(field)
+	parts := patternkit.IdentifierWords(field)
 	if len(parts) == 0 || slices.Contains([]string{"can", "has", "is", "should", "allow", "show", "enable"}, strings.ToLower(parts[0])) {
 		return false
 	}
 	return r.moneyFieldToken.MatchString(parts[len(parts)-1])
-}
-
-func splitMoneyName(name string) []string {
-	return patternkit.IdentifierWords(name)
 }
 
 func (r *FrontendMoneyArithmeticRule) analyzeFlat(ctx *core.FileContext, f patternkit.JsFlat) []*core.Violation {
