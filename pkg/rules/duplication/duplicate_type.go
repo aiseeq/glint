@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -90,7 +92,7 @@ func (r *DuplicateTypeAcrossPackagesRule) AnalyzeGoProject(ctx *core.GoProjectCo
 		}
 	}
 	twins := make(map[*types.TypeName]string)
-	for _, key := range core.SortedKeys(byKey) {
+	for _, key := range slices.Sorted(maps.Keys(byKey)) {
 		copies := byKey[key]
 		method := key[strings.Index(key, ".")+1 : strings.Index(key, "|")]
 		// The first copy is the twin of every copy from another package, and

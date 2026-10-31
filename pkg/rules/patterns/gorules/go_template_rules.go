@@ -5,9 +5,11 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	stdmaps "maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"text/template/parse"
@@ -188,7 +190,7 @@ func NewGoTemplateRootFieldInsideRangeRule() *templateProjectRule {
 				continue
 			}
 			trees := parseTemplates(base, tmpl.text)
-			for _, name := range core.SortedKeys(trees) {
+			for _, name := range slices.Sorted(stdmaps.Keys(trees)) {
 				if !invokedWithRootOnly(trees, name) {
 					continue
 				}
@@ -877,7 +879,7 @@ func unevenMessageMaps(maps []messageMap) []projectFinding {
 		byPkg[m.pkg] = append(byPkg[m.pkg], m)
 	}
 	var findings []projectFinding
-	for _, pkg := range core.SortedKeys(byPkg) {
+	for _, pkg := range slices.Sorted(stdmaps.Keys(byPkg)) {
 		group := byPkg[pkg]
 		keys := make(map[string]bool)
 		for _, m := range group {
@@ -885,7 +887,7 @@ func unevenMessageMaps(maps []messageMap) []projectFinding {
 				keys[key] = true
 			}
 		}
-		for _, key := range core.SortedKeys(keys) {
+		for _, key := range slices.Sorted(stdmaps.Keys(keys)) {
 			var having, lacking []messageMap
 			for _, m := range group {
 				if _, ok := m.keys[key]; ok {

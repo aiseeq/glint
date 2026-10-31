@@ -82,6 +82,9 @@ func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Inf
 			continue
 		}
 		replacement, ok := stdlibEquivalent(fn, operands)
+		if !ok && versions != nil && versions.AtLeast(ctx, info, "go1.23") && sortsMapKeys(fn, info) {
+			replacement, ok = "slices.Sorted(maps.Keys(m))", true
+		}
 		if !ok {
 			continue
 		}
@@ -108,6 +111,225 @@ func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Inf
 	}
 
 	return violations
+}
+
+// sortsMapKeys recognizes a function that collects every key from one map,
+// sorts the resulting slice in ascending order, and returns it.
+func sortsMapKeys(fn *ast.FuncDecl, info *types.Info) bool {
+	// Exactly declare, collect, sort and return: any other statement may change the keys.
+	if info == nil || fn.Type.Results == nil || len(fn.Type.Results.List) != 1 || len(fn.Body.List) != 4 {
+		return false
+	}
+	keysName, elemType, ok := returnedSlice(fn)
+	if !ok {
+		return false
+	}
+	loop, ok := mapKeyAppendLoop(fn, info, elemType)
+	if !ok || !initializedKeySlice(fn, keysName, loop.X, elemType) {
+		return false
+	}
+	if !functionReturnsIdent(fn, keysName) {
+		return false
+	}
+	for _, stmt := range fn.Body.List {
+		if exprStmt, ok := stmt.(*ast.ExprStmt); ok && isSortCall(exprStmt.X, keysName, elemType) {
+			return true
+		}
+	}
+	return false
+}
+
+func returnedSlice(fn *ast.FuncDecl) (string, string, bool) {
+	result, ok := fn.Type.Results.List[0].Type.(*ast.ArrayType)
+	if !ok || result.Len != nil {
+		return "", "", false
+	}
+	elem, ok := result.Elt.(*ast.Ident)
+	if !ok || (elem.Name != "string" && elem.Name != "int") {
+		return "", "", false
+	}
+	last, ok := fn.Body.List[len(fn.Body.List)-1].(*ast.ReturnStmt)
+	if !ok || len(last.Results) != 1 {
+		return "", "", false
+	}
+	name, ok := last.Results[0].(*ast.Ident)
+	if !ok {
+		return "", "", false
+	}
+	return name.Name, elem.Name, true
+}
+
+func mapKeyAppendLoop(fn *ast.FuncDecl, info *types.Info, elemType string) (*ast.RangeStmt, bool) {
+	var found *ast.RangeStmt
+	for _, stmt := range fn.Body.List {
+		loop, ok := stmt.(*ast.RangeStmt)
+		if !ok {
+			continue
+		}
+		if found != nil || loop.Tok != token.DEFINE || loop.Value != nil {
+			return nil, false
+		}
+		key, keyOK := loop.Key.(*ast.Ident)
+		targetType := info.TypeOf(loop.X)
+		if targetType == nil {
+			return nil, false
+		}
+		mapType, mapOK := targetType.Underlying().(*types.Map)
+		if !keyOK || !mapOK || len(loop.Body.List) != 1 || basicName(mapType.Key()) != elemType {
+			return nil, false
+		}
+		assign, ok := loop.Body.List[0].(*ast.AssignStmt)
+		if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			return nil, false
+		}
+		lhs, lhsOK := assign.Lhs[0].(*ast.Ident)
+		appendCall, callOK := assign.Rhs[0].(*ast.CallExpr)
+		if !lhsOK || !callOK || !isBuiltinAppend(appendCall) || len(appendCall.Args) != 2 || !sameIdent(appendCall.Args[0], lhs.Name) || !sameIdent(appendCall.Args[1], key.Name) {
+			return nil, false
+		}
+		found = loop
+	}
+	return found, found != nil
+}
+
+func basicName(t types.Type) string {
+	basic, ok := t.Underlying().(*types.Basic)
+	if !ok {
+		return ""
+	}
+	return basic.Name()
+}
+
+func initializedKeySlice(fn *ast.FuncDecl, keys string, mapExpr ast.Expr, elem string) bool {
+	for _, stmt := range fn.Body.List {
+		if decl, ok := stmt.(*ast.DeclStmt); ok {
+			gen, ok := decl.Decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				value, ok := spec.(*ast.ValueSpec)
+				if !ok || len(value.Names) != 1 || value.Names[0].Name != keys {
+					continue
+				}
+				slice, ok := value.Type.(*ast.ArrayType)
+				return ok && slice.Len == nil && basicNameFromExpr(slice.Elt) == elem && len(value.Values) == 0
+			}
+		}
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || !sameIdent(assign.Lhs[0], keys) || len(assign.Rhs) != 1 {
+			continue
+		}
+		if literal, ok := assign.Rhs[0].(*ast.CompositeLit); ok {
+			slice, ok := literal.Type.(*ast.ArrayType)
+			return ok && slice.Len == nil && basicNameFromExpr(slice.Elt) == elem && len(literal.Elts) == 0
+		}
+		call, ok := assign.Rhs[0].(*ast.CallExpr)
+		if !ok || !sameIdent(call.Fun, "make") || len(call.Args) < 1 {
+			return false
+		}
+		slice, ok := call.Args[0].(*ast.ArrayType)
+		if !ok || slice.Len != nil || basicNameFromExpr(slice.Elt) != elem {
+			return false
+		}
+		if len(call.Args) == 1 {
+			return true
+		}
+		return len(call.Args) == 3 && patternkit.IsIntLiteral(call.Args[1], 0) && isLenOf(call.Args[2], mapExpr)
+	}
+	return false
+}
+
+func basicNameFromExpr(expr ast.Expr) string {
+	id, ok := expr.(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	return id.Name
+}
+func isLenOf(expr, target ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	ident, targetOK := target.(*ast.Ident)
+	return ok && targetOK && sameIdent(call.Fun, "len") && len(call.Args) == 1 && sameIdent(call.Args[0], ident.Name)
+}
+
+func isBuiltinAppend(call *ast.CallExpr) bool {
+	id, ok := call.Fun.(*ast.Ident)
+	return ok && id.Name == "append"
+}
+
+func functionReturnsIdent(fn *ast.FuncDecl, name string) bool {
+	last, ok := fn.Body.List[len(fn.Body.List)-1].(*ast.ReturnStmt)
+	if !ok || len(last.Results) != 1 {
+		return false
+	}
+	id, ok := last.Results[0].(*ast.Ident)
+	return ok && id.Name == name
+}
+
+func isSortCall(expr ast.Expr, keys, elem string) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return false
+	}
+	arg, ok := call.Args[0].(*ast.Ident)
+	if !ok || arg.Name != keys {
+		return false
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := selector.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	switch {
+	case selector.Sel.Name == "Strings" && pkg.Name == "sort" && elem == "string":
+		return true
+	case selector.Sel.Name == "Ints" && pkg.Name == "sort" && elem == "int":
+		return true
+	case selector.Sel.Name == "Sort" && pkg.Name == "slices":
+		return true
+	case selector.Sel.Name == "Slice" && pkg.Name == "sort" && len(call.Args) == 2:
+		return ascendingSortSlice(call.Args[1], keys)
+	}
+	return false
+}
+
+func ascendingSortSlice(expr ast.Expr, keys string) bool {
+	lit, ok := expr.(*ast.FuncLit)
+	if !ok || lit.Type.Params == nil || len(lit.Body.List) != 1 {
+		return false
+	}
+	var indices []string
+	for _, field := range lit.Type.Params.List {
+		for _, name := range field.Names {
+			indices = append(indices, name.Name)
+		}
+	}
+	if len(indices) != 2 {
+		return false
+	}
+	ret, ok := lit.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return false
+	}
+	cmp, ok := ret.Results[0].(*ast.BinaryExpr)
+	if !ok || cmp.Op != token.LSS {
+		return false
+	}
+	left, lok := cmp.X.(*ast.IndexExpr)
+	right, rok := cmp.Y.(*ast.IndexExpr)
+	if !lok || !rok || !sameIdent(left.X, keys) || !sameIdent(right.X, keys) {
+		return false
+	}
+	return sameIdent(left.Index, indices[0]) && sameIdent(right.Index, indices[1])
+}
+
+func sameIdent(expr ast.Expr, name string) bool {
+	id, ok := expr.(*ast.Ident)
+	return ok && id.Name == name
 }
 
 // wrapsOwnData reports whether the helper searches a collection of its own

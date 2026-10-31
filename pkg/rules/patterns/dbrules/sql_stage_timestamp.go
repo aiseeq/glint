@@ -6,6 +6,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"maps"
 	"slices"
 	"strings"
 
@@ -468,7 +469,7 @@ func (index *stageIndex) skippedStamps(scope patternkit.FuncScope, fn *ast.FuncD
 		}
 		stamps := index.stamps[write.update.Table]
 		var skipped []string
-		for _, column := range core.SortedKeys(stamps) {
+		for _, column := range slices.Sorted(maps.Keys(stamps)) {
 			if _, ok := write.update.Assignment(column); !ok && index.mayWrite(write, stamps[column]) {
 				skipped = append(skipped, column)
 			}

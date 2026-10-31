@@ -3,9 +3,11 @@ package fix
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -215,7 +217,7 @@ func (e *Engine) ApplyFixes(fixes []*Fix) []Result {
 	}
 
 	results := make([]Result, 0, len(byFile))
-	for _, file := range core.SortedKeys(byFile) {
+	for _, file := range slices.Sorted(maps.Keys(byFile)) {
 		results = append(results, e.applyToFile(file, byFile[file]))
 	}
 
@@ -270,7 +272,7 @@ func (e *Engine) Preview(fixes []*Fix) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "PROPOSED FIXES (%d changes in %d files):\n\n", len(fixes), len(byFile))
 
-	for _, file := range core.SortedKeys(byFile) {
+	for _, file := range slices.Sorted(maps.Keys(byFile)) {
 		fileFixes := byFile[file]
 		relPath := file
 		if cwd, err := os.Getwd(); err == nil {

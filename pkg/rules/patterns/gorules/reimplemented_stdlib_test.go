@@ -1,6 +1,7 @@
 package gorules
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -78,6 +79,96 @@ func contains(items []string, target string) bool {
 
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "slices.Contains")
+}
+
+func TestReimplementedStdlibReportsSortedMapKeys(t *testing.T) {
+	source := `package helpers
+
+import "sort"
+
+func sortedKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+`
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"go.mod":     "module example.com/helpers\n\ngo 1.23\n",
+		"helpers.go": source,
+	})
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "slices.Sorted(maps.Keys(m))")
+
+	for _, variant := range []string{`package helpers
+
+import "sort"
+
+func sortedKeys(m map[int]string) []int {
+	keys := make([]int, 0, len(m))
+	for k := range m { keys = append(keys, k) }
+	sort.Ints(keys)
+	return keys
+}
+`, `package helpers
+
+import "slices"
+
+func sortedKeys(m map[string]int) []string {
+	var keys []string
+	for k := range m { keys = append(keys, k) }
+	slices.Sort(keys)
+	return keys
+}
+`, `package helpers
+
+import "sort"
+
+func sortedKeys(m map[string]int) []string {
+	keys := []string{}
+	for k := range m { keys = append(keys, k) }
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	return keys
+}
+`} {
+		violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+			"go.mod":     "module example.com/helpers\n\ngo 1.23\n",
+			"helpers.go": variant,
+		})
+		require.Len(t, violations, 1, variant)
+	}
+}
+
+func TestReimplementedStdlibIgnoresNonSortedMapKeyCopies(t *testing.T) {
+	source := `package helpers
+
+import "sort"
+
+func sortedKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		if k != "" { keys = append(keys, k) }
+	}
+	sort.Strings(keys)
+	return keys
+}
+`
+	unfiltered := strings.Replace(source, "if k != \"\" { keys = append(keys, k) }", "keys = append(keys, k)", 1)
+	for _, tc := range []struct{ version, body string }{
+		{"1.22", unfiltered},
+		{"1.23", source},
+		{"1.23", strings.Replace(strings.Replace(unfiltered, "map[string]int", "map[string]string", 1), "keys = append(keys, k)", "keys = append(keys, m[k])", 1)},
+		{"1.23", strings.Replace(unfiltered, "sort.Strings(keys)", "sort.Slice(keys, func(i, j int) bool { return keys[i] > keys[j] })", 1)},
+		{"1.23", strings.Replace(unfiltered, "sort.Strings(keys)", "sort.Strings(keys)\n\tkeys = append(keys, \"total\")", 1)},
+	} {
+		violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+			"go.mod":     "module example.com/helpers\n\ngo " + tc.version + "\n",
+			"helpers.go": tc.body,
+		})
+		assert.Empty(t, violations, "go %s", tc.version)
+	}
 }
 
 // A loop by index compares the element through a local bound to it, the

@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"reflect"
 	"slices"
 	"sort"
@@ -411,7 +412,7 @@ func appendOnlyFields(fn patternkit.TypedFunc, responders map[*types.Func][]int)
 		if !local.reaches || local.escaped {
 			continue
 		}
-		for _, name := range core.SortedKeys(local.appended) {
+		for _, name := range slices.Sorted(maps.Keys(local.appended)) {
 			if tag, ok := listJSONField(local.st, name); ok && !local.set[name] {
 				fields = append(fields, appendOnlyField{owner: local.owner, json: tag})
 				break
