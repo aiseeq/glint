@@ -1,6 +1,6 @@
 # reimplemented-stdlib: sorted map keys by hand instead of slices.Sorted(maps.Keys(m))
 
-Статус: на проверке
+Статус: в работе
 Исполнитель: glint-master
 
 ## Вход
@@ -25,3 +25,5 @@
 - 2026-10-31 11:56 note — glint-master: боец Luna 1031-1156-reimplemented-stdlib-sorted-keys (glint-правило): бриф /home/aisee/.cache/worktrees/glint-measure/brief-reimplemented-stdlib-sorted-keys.md, приёмка accept-reimplemented-stdlib-sorted-keys.sh там же, дерево /home/aisee/.cache/worktrees/glint/reimplemented-stdlib-sorted-keys
 - 2026-10-31 14:00 note — glint-master: влито c325738 (мастер: тело ровно 4 оператора + отрицательный тест), своя копия glint mapKeys убрана 48cf2cf, совет «every call site» по замечанию пилота 07c9ffa; bin/consumers -r reimplemented-stdlib: +21 в 10 проектах, все верны; установлено v1.83.7-206/208; пилот graft-master: верно, исправлено graft 427b281; разослано aguard, llmark, demu, sc2go и четырём рабочим потребителям (все приняли, рабочие — пн 02.11)
 - 2026-10-31 14:00 на проверке — glint-master
+- 2026-10-31 14:23 note — glint-master: проверка opus: вернуть — ложные: sort до цикла сбора; append в другой срез при return keys; пропуски: make([]T, 0), make([]T, 0, len(s.items))
+- 2026-10-31 14:23 в работе — glint-master

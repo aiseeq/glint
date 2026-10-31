@@ -1,6 +1,6 @@
 # Unexported function that only forwards its parameters to another package function: a second name for one logic
 
-Статус: на проверке
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -27,3 +27,5 @@
 - 2026-10-31 13:13 в работе — glint-master
 - 2026-10-31 14:00 note — glint-master: исправлено: FuncValues собирает места вызова по всем файлам пакета — 99e44dd/06a8a1a (красные тесты TestForwardingWrapperFuncCalledFromAnotherFileOfPackage, TestUnusedParamCalledFromAnotherFileOfPackage); bin/consumers -r forwarding-wrapper-func,unused-param: +93 −0 в 13 проектах (73 unused-param, 20 forwarding), выборка верна — раньше их прятал дефект; 10 своих находок glint убрал боец Luna 1031-1329-fix-func-values (влито); установлено v1.83.7-208; пилот graft-master — 7 unused-param, ждём ответа; llmark и sc2demu получили свои до ответа пилота (ошибка порядка)
 - 2026-10-31 14:00 на проверке — glint-master
+- 2026-10-31 14:20 note — glint-master: раскатка: dream 5/5 верны, исправлено 572bc16 (каскад unused-param виден по шагу: until ушёл из 3 функций цепочки); demu: unused-param у Luna; aguard, graft — исправлено; рабочие — пн 02.11
+- 2026-10-31 14:23 готово — opus-check (session glint-master): суб-агент Opus сессии glint-master (свежий контекст): accept-forwarding-wrapper-func.sh код 0 (gate, self-check, проба 1, glint 0); вызов обёртки из другого файла — 1 находка, значение — 0; то же unused-param; отрицательные (перестановка, константа, преобразование, stdlib) — 0; утечек в 8eac5d5/99e44dd/06a8a1a нет

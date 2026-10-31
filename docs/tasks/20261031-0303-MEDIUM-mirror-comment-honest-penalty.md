@@ -1,6 +1,6 @@
 # mirror-comment-copy punishes the honest comment; catch the copy by body or value
 
-Статус: на проверке
+Статус: в работе
 Исполнитель: glint-master
 
 ## Вход
@@ -39,3 +39,5 @@
 - 2026-10-31 13:13 в работе — glint-master
 - 2026-10-31 14:00 note — glint-master: исправлено: ключ поиска по имени тоже с модулем — 51006d4/4ba6c59 (красный кейс в TestDuplicateFuncAcrossPackagesSkipsAnotherModule); bin/consumers -r duplicate-func-across-packages: 0 изменений; сообщение собирается один раз (497337a, format-before-branch); установлено v1.83.7-208
 - 2026-10-31 14:00 на проверке — glint-master
+- 2026-10-31 14:23 note — glint-master: проверка opus 4: вернуть — поиск по имени (keyedTwins) не учитывает canCall/неэкспортированность: formatLabel в cmd/a и cmd/b (оба main) → «call it from both packages», невыполнимо; в потребителях таких нет. Модульная граница закрыта
+- 2026-10-31 14:23 в работе — glint-master
