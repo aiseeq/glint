@@ -333,8 +333,8 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[st
 			}
 			// Handing the error to another function is not swallowing it: the
 			// callee is what reports it. Project code routinely funnels a branch
-			// into writePreflightFailure(msg, report, err) or
-			// handleReconcileFailure(ctx, item, err) instead of logging inline.
+			// into writeSetupFailure(msg, report, err) or
+			// handleRefreshFailure(ctx, item, err) instead of logging inline.
 			if callTakesErrorArgument(call) {
 				return true
 			}

@@ -61,7 +61,7 @@ func sendInternalServerError(w http.ResponseWriter, message string) {
 	http.Error(w, message, http.StatusInternalServerError)
 }
 
-func sendRecordError(w http.ResponseWriter, err error) {
+func sendItemError(w http.ResponseWriter, err error) {
 	if errors.Is(err, store.ErrRecordNotFound) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -89,7 +89,7 @@ func (r *Router) reportStatus(w http.ResponseWriter, req *http.Request) {
 func (r *Router) reportMapped(w http.ResponseWriter, req *http.Request) {
 	report, err := r.store.Report(req.Context(), req.PathValue("id"))
 	if err != nil {
-		sendRecordError(w, err)
+		sendItemError(w, err)
 		return
 	}
 	_, _ = w.Write([]byte(report))
@@ -362,7 +362,7 @@ import (
 
 type Router struct{ store *store.Store }
 
-func logFailure(req *http.Request, message string, err error) {
+func logIssue(req *http.Request, message string, err error) {
 	if err == nil || errors.Is(req.Context().Err(), context.Canceled) {
 		return
 	}
@@ -372,7 +372,7 @@ func logFailure(req *http.Request, message string, err error) {
 func (r *Router) report(w http.ResponseWriter, req *http.Request) {
 	report, err := r.store.Report(req.Context(), req.PathValue("id"))
 	if err != nil {
-		logFailure(req, "report failed", err)
+		logIssue(req, "report failed", err)
 		http.Error(w, "report failed", http.StatusInternalServerError)
 		return
 	}
@@ -450,7 +450,7 @@ func sendErrorWithTrace(w http.ResponseWriter, req *http.Request, status int, me
 	http.Error(w, message+" at "+req.URL.Path, status)
 }
 
-func (r *Router) currentStaff(w http.ResponseWriter, req *http.Request) (string, bool) {
+func (r *Router) currentMember(w http.ResponseWriter, req *http.Request) (string, bool) {
 	email, ok := req.Context().Value(ctxKey{}).(string)
 	if !ok {
 		sendErrorWithTrace(w, req, http.StatusUnauthorized, "no staff")
@@ -459,7 +459,7 @@ func (r *Router) currentStaff(w http.ResponseWriter, req *http.Request) (string,
 }
 
 func (r *Router) status(w http.ResponseWriter, req *http.Request) {
-	staff, ok := r.currentStaff(w, req)
+	staff, ok := r.currentMember(w, req)
 	if !ok {
 		return
 	}

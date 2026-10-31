@@ -349,8 +349,8 @@ func (r *SilentlyOptionalDependencyRule) collectCalls(
 			if callee == nil {
 				return true
 			}
-			// Имя поля по имени метода не восстановить (SetEmailService → emailService,
-			// SetUserYieldStateRepo → userYieldStateRepo), поэтому вызовы копятся по
+			// Имя поля по имени метода не восстановить (SetAlertSender → emailService,
+			// SetProgressStore → userYieldStateRepo), поэтому вызовы копятся по
 			// методу, а сопоставление с полем берётся из объявления сеттера.
 			if strings.HasPrefix(callee.Name(), "Set") && callee.Type() != nil {
 				if sig, ok := callee.Type().(*types.Signature); ok && sig.Recv() != nil {

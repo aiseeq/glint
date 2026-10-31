@@ -20,7 +20,7 @@ func init() {
 // LogAndReturnZeroRule detects functions without an error result that log at
 // Error/Warn level and immediately return a zero value:
 //
-//	func (m *TokenManager) getJWTIssuer() string {
+//	func (m *SessionManager) getTokenIssuer() string {
 //	    if m.config == nil {
 //	        m.logger.Error("Configuration not available")
 //	        return "" // empty issuer breaks validation much later
@@ -321,7 +321,7 @@ func (r *LogAndReturnZeroRule) checkConstructorLeftUnset(ctx *core.FileContext, 
 }
 
 // checkWriteMissingFromResultError reports, in a function that reports its
-// failures through result.Error, a write (a save of progress, FinishSync)
+// failures through result.Error, a write (a save of progress, FinishBatch)
 // whose error is only logged: the result goes out with an empty Error and the
 // caller takes the run as complete while its progress was never stored.
 func (r *LogAndReturnZeroRule) checkWriteMissingFromResultError(ctx *core.FileContext, fn *ast.FuncDecl) []*core.Violation {

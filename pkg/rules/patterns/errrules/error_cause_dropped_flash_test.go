@@ -17,15 +17,15 @@ func TestErrorCauseDropped_GoFlashRedirectWithFixedCause(t *testing.T) {
 func (a *Admin) deleteProject(w http.ResponseWriter, r *http.Request, id int64) {
 	if err := a.repo.Delete(r.Context(), id); err != nil {
 		a.logger.Error("delete project", "error", err)
-		a.redirectProjects(w, r, "error", "Cannot delete project with existing pricing configs or transactions")
+		a.redirectItems(w, r, "error", "Cannot delete project with existing pricing configs or transactions")
 		return
 	}
-	a.redirectProjects(w, r, "success", "Project deleted")
+	a.redirectItems(w, r, "success", "Project deleted")
 }
 
 func (a *Admin) archiveProject(w http.ResponseWriter, r *http.Request, id int64) {
 	if err := a.repo.Archive(r.Context(), id); err != nil {
-		a.redirectProjects(w, r, "error", "Failed to archive: "+err.Error())
+		a.redirectItems(w, r, "error", "Failed to archive: "+err.Error())
 		return
 	}
 }

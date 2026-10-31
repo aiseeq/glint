@@ -28,7 +28,7 @@ func init() {
 // Detects in files whose path contains `/config/` OR matches
 // `**/bootstrap_environment_loader.go` / `**/unified_config*.go`:
 //   - `_ = X()` where X is an env/config-loading call (ReadEnv, Load,
-//     loadEnvFileDirectly, godotenv.Load, cleanenv.ReadConfig, etc.)
+//     loadEnvFileSafely, godotenv.Load, cleanenv.ReadConfig, etc.)
 //   - Bare call `X()` whose error return is dropped entirely (no assignment)
 //     for the same set of env/config functions.
 //
@@ -53,7 +53,7 @@ func NewSilentConfigErrorRule() *SilentConfigErrorRule {
 
 // configLoadFuncNames — function-name fragments that indicate an env/config
 // load call. Matched case-insensitively against the fully-qualified callee
-// name (e.g. `cleanenv.ReadEnv`, `godotenv.Load`, `c.loadEnvFileDirectly`) as
+// name (e.g. `cleanenv.ReadEnv`, `godotenv.Load`, `c.loadEnvFileSafely`) as
 // whole camelCase words: parseenv matches parseEnv and mustParseEnv, not
 // parseEnvelope.
 var configLoadFuncNames = []string{
@@ -61,10 +61,10 @@ var configLoadFuncNames = []string{
 	"cleanenv.readconfig",
 	"godotenv.load",
 	"godotenv.overload",
-	"loadenvfile",      // *.loadEnvFile / *.loadEnvFileDirectly
+	"loadenvfile",      // *.loadEnvFile / *.loadEnvFileSafely
 	"loadenvironment",  // *.loadEnvironment / *.loadEnvironmentFile
 	"readenvironment",  // *.readEnvironment
-	"applyenvironment", // applyEnvironmentFixes / applyEnvironment
+	"applyenvironment", // applyEnvironmentSettings / applyEnvironment
 	"parseenv",         // parseEnv
 	"parseenvironment", // parseEnvironment
 	"viper.readinconfig",

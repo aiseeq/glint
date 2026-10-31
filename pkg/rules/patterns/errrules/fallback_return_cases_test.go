@@ -16,7 +16,7 @@ type UserService struct{}
 
 type PaymentProvider struct{}
 
-func NewUserService() *UserService { return &UserService{} }
+func NewMemberService() *UserService { return &UserService{} }
 
 var userService *UserService
 
@@ -25,7 +25,7 @@ var cachedProvider = &PaymentProvider{}
 // Users lazily builds the shared service.
 func Users() *UserService {
 	if userService == nil {
-		userService = NewUserService()
+		userService = NewMemberService()
 	}
 	return userService
 }

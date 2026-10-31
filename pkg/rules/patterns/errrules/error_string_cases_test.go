@@ -12,7 +12,7 @@ import (
 
 // A capital letter is allowed at the start only for a word that carries
 // another capital or a digit inside it: an initialism (HTTP, TLS1.2) or an
-// identifier (GetUser, ValidationService). An English word is not an
+// identifier (GetUser, CheckService). An English word is not an
 // acronym, and a word starting like an identifier prefix (Canceled, Address,
 // Reading) is still an English word.
 func TestErrorString_CapitalizedEnglishWordsAreReported(t *testing.T) {
@@ -37,7 +37,7 @@ var (
 	ok1 = errors.New("HTTP request failed")
 	ok2 = errors.New("TLS1.2 handshake failed")
 	ok3 = errors.New("GetUser failed")
-	ok4 = errors.New("ValidationService: not ready")
+	ok4 = errors.New("CheckService: not ready")
 	ok5 = errors.New("SELECT failed")
 	ok6 = errors.New("CRYPTOPROV_CONFIG_LOAD_FAILED: missing key")
 	ok7 = errors.New("gRPC stream closed")

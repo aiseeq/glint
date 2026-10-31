@@ -22,7 +22,7 @@ func init() {
 //
 //	if err := a.repo.Create(ctx, pc); err != nil {
 //		a.logger.Error("failed to create", "error", err)
-//		if IsDomainError(err, ErrCodeConflict) {
+//		if IsBusinessError(err, ErrCodeConflict) {
 //			a.redirect(w, r, "already exists")
 //			return
 //		}

@@ -29,7 +29,7 @@ type Code string
 
 const CodeConflict Code = "conflict"
 
-func IsDomainError(err error, code Code) bool { return err != nil && code != "" }
+func IsBusinessError(err error, code Code) bool { return err != nil && code != "" }
 
 type store interface {
 	Create(ctx context.Context, name string) error
@@ -44,10 +44,10 @@ type Admin struct {
 
 func (a *Admin) redirect(w http.ResponseWriter, r *http.Request, msg string) {}
 
-func (a *Admin) handleCreate(w http.ResponseWriter, r *http.Request) {
+func (a *Admin) handleAdd(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.Create(r.Context(), "x"); err != nil {
 		a.logger.Error("failed to create tariff", "error", err) // want expected-rejection-logged-as-error
-		if IsDomainError(err, CodeConflict) {
+		if IsBusinessError(err, CodeConflict) {
 			a.redirect(w, r, "a tariff for this corridor exists")
 			return
 		}
@@ -71,7 +71,7 @@ func (a *Admin) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 func (a *Admin) handleCreateFixed(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.Create(r.Context(), "x"); err != nil {
-		if IsDomainError(err, CodeConflict) {
+		if IsBusinessError(err, CodeConflict) {
 			a.logger.Warn("tariff exists", "error", err)
 			a.redirect(w, r, "a tariff for this corridor exists")
 			return

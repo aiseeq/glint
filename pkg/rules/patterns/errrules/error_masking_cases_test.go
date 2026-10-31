@@ -145,7 +145,7 @@ func (e *RequestError) Error() string { return e.Message }
 
 func newRequestError(msg string, cause error) *RequestError { return &RequestError{Message: msg} }
 
-func parseLimit(s string) (int, int, *RequestError) {
+func parsePageSize(s string) (int, int, *RequestError) {
 	n, err := strconv.Atoi(s)
 	if err != nil {
 		return 0, 0, newRequestError(err.Error(), err)

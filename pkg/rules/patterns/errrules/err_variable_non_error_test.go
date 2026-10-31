@@ -18,7 +18,7 @@ func TestErrVariableHoldsNonError(t *testing.T) {
 
 type Client struct{}
 
-func setupAdmin(t *testing.T) (*Client, *auth.LoginResponse) {
+func setupFixture(t *testing.T) (*Client, *auth.LoginResponse) {
 	return &Client{}, nil
 }
 
@@ -37,7 +37,7 @@ func run() (*Client, Outcome) { return nil, nil }
 		"integration/search_test.go": `package integration
 
 func TestSearch(t *testing.T) {
-	client, err := setupAdmin(t)
+	client, err := setupFixture(t)
 	if err != nil || client == nil {
 		t.Skipf("no admin: %v", err)
 	}

@@ -185,7 +185,7 @@ import (
 	"strings"
 )
 
-func normalizeHost(host string) string {
+func normalizeEndpoint(host string) string {
 	host = strings.TrimSpace(host)
 	if parsed, _, err := net.SplitHostPort(host); err == nil {
 		host = parsed

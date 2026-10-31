@@ -19,7 +19,7 @@ func TestErrorLengthCheckRule(t *testing.T) {
 		{
 			name: "len(errMsg) range check - critical violation",
 			code: `package test
-func isDuplicateKeyError(err error) bool {
+func isRepeatedKeyError(err error) bool {
 	errMsg := err.Error()
 	return len(errMsg) >= 30 && len(errMsg) <= 300
 }`,
@@ -41,7 +41,7 @@ func checkError(err error) bool {
 		{
 			name: "complex if with length range",
 			code: `package test
-func isForeignKeyError(err error) bool {
+func isRelatedKeyError(err error) bool {
 	errMsg := err.Error()
 	if len(errMsg) >= 40 && len(errMsg) <= 400 {
 		return true
@@ -55,7 +55,7 @@ func isForeignKeyError(err error) bool {
 			name: "valid - no error length check",
 			code: `package test
 import "errors"
-func isDuplicateKeyError(err error) bool {
+func isRepeatedKeyError(err error) bool {
 	return errors.Is(err, ErrDuplicateKey)
 }`,
 			wantCount: 0,
@@ -72,7 +72,7 @@ func checkString(s string) bool {
 			name: "valid - using pq.Error",
 			code: `package test
 import "github.com/lib/pq"
-func isDuplicateKeyError(err error) bool {
+func isRepeatedKeyError(err error) bool {
 	var pqErr *pq.Error
 	if errors.As(err, &pqErr) {
 		return pqErr.Code == "23505"

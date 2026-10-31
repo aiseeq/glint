@@ -19,9 +19,9 @@ func init() {
 // ErrVariableHoldsNonErrorRule detects a variable named as an error that
 // receives a result of another type, and is then tested against nil:
 //
-//	func setupAdmin(t *testing.T) (*Client, *LoginResponse)
+//	func setupFixture(t *testing.T) (*Client, *LoginResponse)
 //
-//	client, err := setupAdmin(t)
+//	client, err := setupFixture(t)
 //	if err != nil || client == nil {
 //		t.Skipf("no admin: %v", err)   // the response is never nil: always skips
 //	}

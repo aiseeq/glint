@@ -195,7 +195,7 @@ func handle(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if err := parse(req); err != nil {
-		sendUnauthorized(w, req, "Требуется авторизация")
+		sendDenied(w, req, "Требуется авторизация")
 		return
 	}
 }`,

@@ -14,7 +14,7 @@ func TestAggregateSkipsFailedPart_ResultsWithErrorFieldNeverRead(t *testing.T) {
 	assert.Equal(t, []string{"wallets/refresh.go:13", "wallets/refresh.go:30"}, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"wallets/model.go": `package wallets
 
-type WalletBalance struct {
+type AccountBalance struct {
 	Address  string
 	TotalUSD int64
 	Error    string
@@ -26,7 +26,7 @@ func (s *Service) Refresh(ctx context.Context) (*Summary, error) {
 	if len(s.wallets) == 0 {
 		return &Summary{}, nil
 	}
-	results := make([]*WalletBalance, len(s.wallets))
+	results := make([]*AccountBalance, len(s.wallets))
 	for i, addr := range s.wallets {
 		results[i] = s.fetch(ctx, addr)
 	}
@@ -36,7 +36,7 @@ func (s *Service) Refresh(ctx context.Context) (*Summary, error) {
 }
 
 func (s *Service) RefreshChecked(ctx context.Context) (*Summary, error) {
-	results := make([]*WalletBalance, len(s.wallets))
+	results := make([]*AccountBalance, len(s.wallets))
 	for i, addr := range s.wallets {
 		results[i] = s.fetch(ctx, addr)
 		if results[i].Error != "" {
@@ -46,8 +46,8 @@ func (s *Service) RefreshChecked(ctx context.Context) (*Summary, error) {
 	return s.summary(results), nil
 }
 
-func (s *Service) Sync(ctx context.Context, wallet string) ([]*WalletBalance, error) {
-	var results []*WalletBalance
+func (s *Service) Sync(ctx context.Context, wallet string) ([]*AccountBalance, error) {
+	var results []*AccountBalance
 	results = append(results, s.syncBatch(ctx, wallet)...)
 	return results, nil
 }
@@ -162,17 +162,17 @@ func TestAggregateSkipsFailedPart_ResultsInspectedByHelper(t *testing.T) {
 	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewAggregateSkipsFailedPartRule(), map[string]string{
 		"wallets/model.go": `package wallets
 
-type WalletBalance struct {
+type AccountBalance struct {
 	Address string
 	Error   string
 }
 
-func issueOf(wb *WalletBalance) string { return wb.Error }
+func issueOf(wb *AccountBalance) string { return wb.Error }
 `,
 		"wallets/gate.go": `package wallets
 
-func (s *Service) gate(fresh []*WalletBalance) ([]*WalletBalance, error) {
-	out := make([]*WalletBalance, len(fresh))
+func (s *Service) gate(fresh []*AccountBalance) ([]*AccountBalance, error) {
+	out := make([]*AccountBalance, len(fresh))
 	for i, wb := range fresh {
 		out[i] = wb
 		if issueOf(wb) != "" {
@@ -197,7 +197,7 @@ type RunResult struct {
 	Error   string
 }
 
-func recordFailure(result *RunResult, err error) {
+func recordIssue(result *RunResult, err error) {
 	if result.Error != "" {
 		result.Error += "; " + err.Error()
 		return
@@ -214,7 +214,7 @@ func (s *Service) Run(accounts []string) ([]*RunResult, error) {
 		results = append(results, result)
 		n, err := s.read(account)
 		if err != nil {
-			recordFailure(result, err)
+			recordIssue(result, err)
 			continue
 		}
 		result.Count = n
