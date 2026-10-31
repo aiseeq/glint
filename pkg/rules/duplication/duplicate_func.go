@@ -128,7 +128,7 @@ func indexDuplicateFuncs(ctx *core.GoProjectContext) (map[string][]*types.Func, 
 type duplicateFuncTwin struct {
 	original string
 	canCall  bool
-	// unexported marks a body original the copy can call only once exported.
+	// unexported marks an original the copy can call only once exported.
 	unexported bool
 }
 
@@ -154,12 +154,21 @@ func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]duplicateFuncTwi
 		if other == nil {
 			continue
 		}
+		// Named helpers are unexported by selection, so calling across needs
+		// an export, and only a package every copy can import may keep it.
+		canCall := false
+		for _, candidate := range copies {
+			if packageImportedByAll(candidate.Pkg(), copies) {
+				canCall = true
+				break
+			}
+		}
 		for _, c := range copies {
 			twin := first
 			if c.Pkg() == first {
 				twin = other
 			}
-			twins[c] = duplicateFuncTwin{original: twin.Path(), canCall: true}
+			twins[c] = duplicateFuncTwin{original: twin.Path(), canCall: canCall, unexported: true}
 		}
 	}
 	return twins

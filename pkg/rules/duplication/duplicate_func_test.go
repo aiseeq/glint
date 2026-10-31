@@ -288,3 +288,37 @@ func TestDuplicateFuncAcrossPackagesUnexportedOriginalAdvisesExport(t *testing.T
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "export it")
 }
+
+// Same-name helpers in two main packages have no package both can import:
+// the advice moves the implementation instead of calling across.
+func TestDuplicateFuncAcrossPackagesSameNameInMainPackagesAdvisesMove(t *testing.T) {
+	label := func() string {
+		return `package main
+
+import "strings"
+
+func formatLabel(name string) string { return strings.ToUpper(strings.TrimSpace(name)) + ":" }
+
+func main() { _ = formatLabel("x") }
+`
+	}
+	files := map[string]string{"cmd/a/main.go": label(), "cmd/b/main.go": label()}
+	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	require.Len(t, violations, 2)
+	for _, v := range violations {
+		assert.Contains(t, v.Message, "move one implementation into a package both can import")
+	}
+}
+
+// Same-name unexported helpers can be called across only once exported.
+func TestDuplicateFuncAcrossPackagesSameNameHelperAdvisesExport(t *testing.T) {
+	files := map[string]string{
+		"alpha/label.go": "package alpha\n\nimport \"strings\"\n\nfunc formatLabel(name string) string { return strings.ToUpper(name) + \":\" }\n",
+		"beta/label.go":  "package beta\n\nimport \"strings\"\n\nfunc formatLabel(name string) string { return strings.ToUpper(name) + \":\" }\n",
+	}
+	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	require.Len(t, violations, 2)
+	for _, v := range violations {
+		assert.Contains(t, v.Message, "export it")
+	}
+}
