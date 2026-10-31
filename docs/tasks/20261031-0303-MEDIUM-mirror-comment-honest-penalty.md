@@ -1,6 +1,6 @@
 # mirror-comment-copy punishes the honest comment; catch the copy by body or value
 
-Статус: на проверке
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -56,3 +56,4 @@
 - 2026-10-31 19:08 note — glint-master: перепроверка Opus 18:47 — вернуть: F, G закрыты; H — снятие аргументов типа в общем delegates (91efcbe) скрыло от правила по телу копию с логикой в функции-литерале при вызове lib.Map[int,string] (v22). Исправлено a025c2a: вызов с функциональным литералом в аргументах — не делегирование (TDD: TestDuplicateFuncAcrossPackagesLogicInFunctionLiteralArgument красный для обоих вариантов вызова); v22 и v22b теперь находка по телу; v12 (ContainsFunc с литералом) — кандидат правила по телу, mirror его не берёт (как и копию без комментария), тест поправлен с пояснением. consumers 4 правил: единственная новая — копия ownNodes/inspectFuncBody в самом glint, верная, сведена в patternkit.InspectOwn. Тикет tautological-skip-proc-read влит f0a5be7 тем же заходом
 - 2026-10-31 19:27 note — glint-master: перепроверка Opus 19:26 — вернуть: H закрыт (v22, v22b — находка по телу; смена ожидания isAdmin допустима); I — passesFuncLit в delegateCallee лишил mirror-comment-copy вызываемого: честная обёртка «mirrors retry.Do» с литералом в аргументе — находка (v23). Лечение: литерал проверять только в delegates
 - 2026-10-31 19:35 note — glint-master: I исправлен 2e030e7 (TDD: TestMirrorCommentCopyGoWrapperPassingLiteralToNamedSourceNotReported красный до фикса): passesFuncLit только в delegates (правило по телу, forwarding-wrapper-func), DelegateCallee находит вызываемое и при литерале. Пробы: изменилась только v23 (без находки). consumers 4 правил: 0 разниц (glint-measure/consumers-mirror-I.txt)
+- 2026-10-31 19:53 готово — opus-verifier-a4cd0865 (session glint-master): вердикт Opus 19:40 (6-я проверка): пробы v01–v23 по всем пунктам приёмки (копия без комментария — находка по телу; честные обёртки, включая псевдоним, аргументы типа, метод, литерал — без находки; комментарий при копии — только тело; совет двойника; два модуля; метод/без параметров/короткая — mirror; TS/Go константы — находка; копия в аргументах вызова — находка; копия в литерале — тело); go test duplication и frontendrules — код 0; consumers 4 правил — 0 разниц (consumers-mirror-I.txt); установлено 8c2b8d8
