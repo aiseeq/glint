@@ -77,3 +77,4 @@
 - 2026-10-31 17:44 открыт — glint-master
 - 2026-10-31 20:14 в работе — glint-master
 - 2026-10-31 20:14 note — glint-master: боец Luna 1031-2014-sec-sql (вместе F1+F2): бриф glint-measure/security/brief-sql.md, приёмка glint-measure/security/accept-sql.sh (гейт, тесты security, проба: 19, 27, 39 есть, 48 нет), дерево sec-sql
+- 2026-10-31 20:47 note — glint-master: ревью 1031-2014-sec-sql (1-й заход): 3 новых ложных на probe-sql2 (comma-ok map в init if — 14; проверка во внешнем блоке, запрос в for — 22, в if — 31), регексп ^a|.*$ принят якорным (41 не найдена); strconv.Unquote (self-check install), Inspect всего файла на каждый запрос/проверку. Приёмка accept-sql.sh дополнена probe-sql2; боец возвращён
