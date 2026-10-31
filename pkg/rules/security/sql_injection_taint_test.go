@@ -892,3 +892,30 @@ func run(db *sql.DB, deferred, launched string, strict bool) {
 	violations := analyzeSQLInjection(t, code)
 	assert.Len(t, violations, 2, "a check in a branch does not guard a closure launched after the branch")
 }
+
+func TestSQLInjectionCheckInClosureLosesCapturedVariableWrittenOutside(t *testing.T) {
+	code := `package main
+import "database/sql"
+func run(db *sql.DB, deferred, direct, kept, input string, resume chan struct{}) {
+	go func() {
+		if deferred != "column" { return }
+		defer func() { db.Query("SELECT " + deferred) }()
+		<-resume
+	}()
+	go func() {
+		if direct != "column" { return }
+		<-resume
+		db.Query("SELECT " + direct)
+	}()
+	go func() {
+		if kept != "column" { return }
+		<-resume
+		db.Query("SELECT " + kept)
+	}()
+	deferred = input
+	direct = input
+	close(resume)
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 2, "the enclosing function writes the captured variables after the closures check them")
+}

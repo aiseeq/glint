@@ -890,6 +890,16 @@ func (c *sqlTaintCheck) varTaint(v *types.Var) sqlTaint {
 	return t
 }
 
+// capturedByClosure reports a local variable that a function literal checks
+// but does not declare: the enclosing function may write it after the
+// literal starts, while the literal still runs.
+func capturedByClosure(v *types.Var, scope ast.Node) bool {
+	if _, literal := scope.(*ast.FuncLit); !literal || v.Pkg() == nil || v.Parent() == v.Pkg().Scope() {
+		return false
+	}
+	return v.Pos() < scope.Pos() || v.Pos() >= scope.End()
+}
+
 func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
 	for _, validation := range c.validated[v] {
 		deferred := slices.Contains(c.queryContext.deferredScopes, validation.scope)
@@ -912,9 +922,10 @@ func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
 		if deferred {
 			until = validation.scope.End()
 		}
+		captured := capturedByClosure(v, validation.scope)
 		changed := false
 		for _, write := range c.writes[v] {
-			if validation.at < write && write < until {
+			if validation.at < write && write < until || captured && write > validation.scope.End() {
 				changed = true
 				break
 			}
