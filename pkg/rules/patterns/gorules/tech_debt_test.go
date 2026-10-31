@@ -319,7 +319,7 @@ func TestTechDebtRule_WIPRequiresWordBoundary(t *testing.T) {
 }
 
 // A godoc comment opens with the name of the thing it documents. When that
-// name happens to be, or start with, a marker word (temporaryFetchError,
+// name happens to be, or start with, a marker word (temporaryReadError,
 // incomplete), the comment describes an identifier, not a state of the code.
 func TestTechDebtRule_DocCommentNamingIdentifierIsNotMarker(t *testing.T) {
 	rule := NewTechDebtRule()
@@ -333,8 +333,8 @@ func TestTechDebtRule_DocCommentNamingIdentifierIsNotMarker(t *testing.T) {
 			name: "identifier starts with marker word",
 			code: `package p
 
-// temporaryFetchError tells a transient failure from a permanent one.
-func temporaryFetchError(err error) bool { return false }
+// temporaryReadError tells a transient failure from a permanent one.
+func temporaryReadError(err error) bool { return false }
 `,
 			expectMatch: false,
 		},

@@ -14,7 +14,7 @@ import (
 func TestMissingAmountCoercedToZero_GoParserOnMoneyFields(t *testing.T) {
 	const source = `package hook
 
-func parseDecimalOptional(s string) (decimal.Decimal, error) {
+func parseAmountOptional(s string) (decimal.Decimal, error) {
 	if s == "" {
 		return decimal.Zero, nil
 	}
@@ -37,7 +37,7 @@ func parseStrict(s string) (decimal.Decimal, error) {
 }
 
 func apply(payload Payload) error {
-	payout, err := parseDecimalOptional(payload.PayoutAmount)
+	payout, err := parseAmountOptional(payload.PayoutAmount)
 	if err != nil {
 		return err
 	}
@@ -82,9 +82,9 @@ func TestMissingAmountCoercedToZero_GoNilAmountReturnsZero(t *testing.T) {
 
 func payoutText(payout *decimal.Decimal) string {
 	if payout == nil {
-		return MoneyString(decimal.Zero)
+		return AmountText(decimal.Zero)
 	}
-	return MoneyString(*payout)
+	return AmountText(*payout)
 }
 
 func feeOf(q *Quote) decimal.Decimal {

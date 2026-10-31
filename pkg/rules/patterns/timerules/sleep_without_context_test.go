@@ -27,23 +27,23 @@ import (
 	"context"
 	"time"
 )
-func (s *Service) SyncWallet(ctx context.Context, wallet string, chains []string) {
+func (s *Service) SyncChainWallet(ctx context.Context, wallet string, chains []string) {
 	for _, chain := range chains {
-		s.syncSingleChain(ctx, wallet, chain)
+		s.syncChain(ctx, wallet, chain)
 		time.Sleep(200 * time.Millisecond)
 	}
 }`,
 			expectedCount: 1,
 		},
 		{
-			// Repro: provider client doGetWithRetry-style retry pause.
+			// Repro: provider client doFetchWithRetry-style retry pause.
 			name: "sleep between retries with ctx",
 			code: `package main
 import (
 	"context"
 	"time"
 )
-func (c *Client) doGetWithRetry(ctx context.Context, url string) error {
+func (c *Client) doFetchWithRetry(ctx context.Context, url string) error {
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := c.doGet(ctx, url); err == nil {
 			return nil
@@ -170,7 +170,7 @@ type requestContext struct {
 	operation string
 }
 
-func (c *Client) executeWithRetry(req *http.Request, rc *requestContext) (*http.Response, error) {
+func (c *Client) postWithRetry(req *http.Request, rc *requestContext) (*http.Response, error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		resp, err := c.httpClient.Do(req)
 		if err == nil {

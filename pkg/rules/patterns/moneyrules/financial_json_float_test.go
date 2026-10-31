@@ -34,18 +34,18 @@ type Response struct {
 		{
 			name: "market fields in financial type contexts",
 			code: `package api
-type QuoteResponse struct {
+type QuoteEnvelope struct {
 	Mid float64 ` + "`json:\"mid\"`" + `
 	Rate float64 ` + "`json:\"rate\"`" + `
 	Rates map[string]float64 ` + "`json:\"rates\"`" + `
 	FX float64 ` + "`json:\"fx\"`" + `
-	ExchangeRate float64 ` + "`json:\"exchange_rate\"`" + `
+	MarketExchangeRate float64 ` + "`json:\"exchange_rate\"`" + `
 	FXRate float64 ` + "`json:\"fx_rate\"`" + `
 }
 type ExchangeRateResponse struct {
 	Rate float64 ` + "`json:\"rate\"`" + `
 }
-type websiteManifestRates struct {
+type siteOfferRates struct {
 	Mid float64 ` + "`json:\"mid\"`" + `
 }`,
 			want: 8,
@@ -73,7 +73,7 @@ type SliceLevel struct {
 type MapLevel struct {
 	Mid Scalar ` + "`json:\"mid\"`" + `
 }
-type QuoteResponse struct {
+type QuoteEnvelope struct {
 	Levels []SliceLevel ` + "`json:\"levels\"`" + `
 	Points map[string]MapLevel ` + "`json:\"points\"`" + `
 	Rates []Scalar ` + "`json:\"rates\"`" + `

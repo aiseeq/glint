@@ -882,9 +882,9 @@ type requiredField struct {
 // fails at start, or builds a client with a zero where the library had a
 // working default:
 //
-//	db, err := storage.NewPostgres(config.DBConfig{DSN: dsn, MaxOpenConns: 2})
+//	db, err := storage.NewSQLStore(config.DBConfig{DSN: dsn, MaxOpenConns: 2})
 //
-//	func NewPostgres(cfg config.DBConfig) (*Postgres, error) {
+//	func NewSQLStore(cfg config.DBConfig) (*Postgres, error) {
 //		if cfg.ConnMaxLifetime <= 0 {
 //			return nil, fmt.Errorf(...)
 //		}

@@ -133,7 +133,7 @@ func register(spec filterSpec) {
 	growingSpecs = append(growingSpecs, spec)
 }
 
-func applyFilters(query string, values map[string]string, args []any) (string, []any) {
+func applyOptions(query string, values map[string]string, args []any) (string, []any) {
 	for _, f := range filterSpecs {
 		value, ok := values[f.key]
 		if !ok {

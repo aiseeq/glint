@@ -26,7 +26,7 @@ type Calculator struct {
 	logger *slog.Logger
 }
 
-func NewCalculator(repo *Repo, logger *slog.Logger) *Calculator {
+func NewWidgetCalculator(repo *Repo, logger *slog.Logger) *Calculator {
 	if logger == nil {
 		logger = slog.Default()
 	}

@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-func (s *Service) StartPolling(interval time.Duration) {
+func (s *Service) StartTicker(interval time.Duration) {
 	s.stop = make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(interval)

@@ -239,7 +239,7 @@ func TestNilDIResolvedParamName(t *testing.T) {
 
 	code := `package svc
 
-func NewDashboardService(adminRepo Repo, db DB, balanceService BalanceService) *Service {
+func NewDashboardService(adminRepo Repo, db DB, balanceService MemberService) *Service {
 	return &Service{}
 }
 
@@ -285,7 +285,7 @@ func wire() {
 
 // A constructor declared in a sibling file is resolved through type
 // information: its real parameter decides, not a guess by position. Guessing
-// called the nil limit of NewReportService a logger ("last argument of a
+// called the nil limit of NewSummaryService a logger ("last argument of a
 // service") and asked for a dependency the constructor does not take.
 func TestNilDIResolvesConstructorFromSiblingFile(t *testing.T) {
 	violations := rulestest.RunRuleOnFiles(t, NewNilDIRule(), map[string]string{
@@ -295,7 +295,7 @@ type Config struct{}
 
 type ReportService struct{ limit *int }
 
-func NewReportService(cfg *Config, limit *int) *ReportService {
+func NewSummaryService(cfg *Config, limit *int) *ReportService {
 	_ = cfg
 	return &ReportService{limit: limit}
 }
@@ -303,7 +303,7 @@ func NewReportService(cfg *Config, limit *int) *ReportService {
 		"report/wire.go": `package report
 
 func wire() *ReportService {
-	return NewReportService(&Config{}, nil)
+	return NewSummaryService(&Config{}, nil)
 }
 `,
 	})
@@ -325,14 +325,14 @@ type UserService struct {
 	logger Logger
 }
 
-func NewUserService(repo Repo, logger Logger) *UserService {
+func NewMemberService(repo Repo, logger Logger) *UserService {
 	return &UserService{repo: repo, logger: logger}
 }
 `,
 		"users/wire.go": `package users
 
 func wire(logger Logger) *UserService {
-	return NewUserService(nil, logger)
+	return NewMemberService(nil, logger)
 }
 `,
 		"app/main.go": `package app
@@ -340,7 +340,7 @@ func wire(logger Logger) *UserService {
 import "example.com/rulestest/users"
 
 func Build(repo users.Repo) *users.UserService {
-	return users.NewUserService(repo, nil)
+	return users.NewMemberService(repo, nil)
 }
 `,
 	})

@@ -142,7 +142,7 @@ func f() {
 			filename: "capital.go",
 			code: `package svc
 
-// WithdrawalPipelineCapital returns principal removed from user investments.
+// TransferPipelinePrincipal returns principal removed from user investments.
 func capital() {}
 
 // deleted -> * (удаленные пользователи нельзя восстановить)

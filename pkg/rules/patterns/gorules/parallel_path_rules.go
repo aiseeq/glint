@@ -639,7 +639,7 @@ func readsDefinitionName(expr ast.Expr) bool {
 // positions its other call sites fill from computed values - the row written
 // through this call lacks what the other paths store:
 //
-//	repo.StoreQuote(ctx, id, amount, tx.AmountLocal, tx.RateLocal, tx.RateSource, ...) // live path
+//	repo.StoreQuote(ctx, id, amount, tx.AmountLocal, tx.RateLocal, tx.RateOrigin, ...) // live path
 //	repo.StoreQuote(ctx, id, amount, decimal.Decimal{}, decimal.Decimal{}, "", ...) // admin path
 func NewZeroPlaceholdersPassedForPersistedFieldsRule() *patternkit.TypedFuncRule {
 	r := &patternkit.TypedFuncRule{

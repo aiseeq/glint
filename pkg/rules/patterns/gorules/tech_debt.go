@@ -175,7 +175,7 @@ var docFirstWord = regexp.MustCompile(`^\s*//\s*([A-Za-z_][A-Za-z0-9_]*)`)
 // the declaration that follows it: its first word names the function, method,
 // type, variable or constant declared on the first non-comment line after the
 // comment block. Such a comment describes an identifier, not the state of the
-// code, whatever the identifier is called (temporaryFetchError, a method named
+// code, whatever the identifier is called (temporaryReadError, a method named
 // after a marker word).
 func documentsIdentifier(lines []string, i int) bool {
 	m := docFirstWord.FindStringSubmatch(lines[i])

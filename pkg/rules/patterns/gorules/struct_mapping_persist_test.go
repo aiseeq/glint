@@ -107,7 +107,7 @@ type Transaction struct {
 
 type Service struct{}
 
-func (s *Service) CreateQuote(ctx context.Context, tx *Transaction) error { return nil }
+func (s *Service) CreateOffer(ctx context.Context, tx *Transaction) error { return nil }
 
 func handle(ctx context.Context, s *Service, req Request) error {
 	tx := &Transaction{
@@ -118,7 +118,7 @@ func handle(ctx context.Context, s *Service, req Request) error {
 		ReceiverFirstName: req.Receiver.FirstName,
 		ReceiverLastName:  req.Receiver.LastName,
 	}
-	return s.CreateQuote(ctx, tx)
+	return s.CreateOffer(ctx, tx)
 }
 `,
 	}))

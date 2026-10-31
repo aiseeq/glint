@@ -17,9 +17,9 @@ func TestRedundantCompatibilityRule_FalseCompatibilityComments(t *testing.T) {
 			name: "Russian backward compatibility comment",
 			code: `package main
 
-// GetAdminIDFromContext returns admin ID
+// GetMemberIDFromContext returns admin ID
 // Fallback: проверяем constants.UserIDKey для обратной совместимости
-func GetAdminIDFromContext() {}
+func GetMemberIDFromContext() {}
 `,
 			wantCount:  1,
 			wantReason: "False backward compatibility claim",
@@ -142,7 +142,7 @@ func TestRedundantCompatibilityRule_MultipleContextKeyFallbacks(t *testing.T) {
 
 import "context"
 
-func GetAdminIDFromContext(ctx context.Context) (string, bool) {
+func GetMemberIDFromContext(ctx context.Context) (string, bool) {
 	if value := ctx.Value(AdminIDKeyAlt); value != nil {
 		return value.(string), true
 	}

@@ -332,7 +332,7 @@ func checksAllowedValues(f patternkit.JsFlat, name string, cache map[string]bool
 // TSNumberFieldForDecimalJSONRule detects a TypeScript response field typed
 // number whose Go counterpart is a decimal:
 //
-//	type NAVSnapshot struct { UnitPrice SafeDecimal `json:"unitPrice"` }
+//	type NAVSnapshot struct { UnitPrice SafeAmountDecimal `json:"unitPrice"` }
 //	export interface NAVSnapshot { unitPrice: number }
 //
 // A decimal marshals as a JSON string (shopspring's default, kept by the
@@ -419,8 +419,8 @@ func decimalJSONStructFields(files []*core.FileContext) map[string]map[string]bo
 	return decimals
 }
 
-// typeIdentName returns the last identifier of a field type: SafeDecimal
-// for models.SafeDecimal, *SafeDecimal and []SafeDecimal stay out.
+// typeIdentName returns the last identifier of a field type: SafeAmountDecimal
+// for models.SafeAmountDecimal, *SafeAmountDecimal and []SafeAmountDecimal stay out.
 func typeIdentName(expr ast.Expr) string {
 	switch t := expr.(type) {
 	case *ast.Ident:

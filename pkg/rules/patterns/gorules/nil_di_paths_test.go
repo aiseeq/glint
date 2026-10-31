@@ -29,7 +29,7 @@ type SessionManager struct{ ttl int }
 
 type TxGetter interface{ Get(id string) error }
 
-type AuthServiceDependencies struct{ Logger Logger }
+type MemberServiceDependencies struct{ Logger Logger }
 
 type Service struct{}
 
@@ -51,7 +51,7 @@ func NewPollingService(logger Logger, transactionGetter TxGetter) *Service { ret
 
 type Factory struct{}
 
-func (f *Factory) CreateAdminAuthService(deps *AuthServiceDependencies) *Service { return &Service{} }
+func (f *Factory) CreateAdminAuthService(deps *MemberServiceDependencies) *Service { return &Service{} }
 `
 
 // A nil reaches the dependency through a local variable that holds nothing
@@ -206,11 +206,11 @@ func TestNilDIRule_UntypedConstructorInSiblingAndImportedDirectory(t *testing.T)
 	violations := patterntest.RunRuleOnBrokenFiles(t, NewNilDIRule(), map[string]string{
 		"services/staking.go": `package services
 
-type BalanceRepository interface{ Balance() int }
+type MemberRepository interface{ Balance() int }
 
-type StakingService struct{ repo BalanceRepository }
+type StakingService struct{ repo MemberRepository }
 
-func NewStakingService(balanceRepo BalanceRepository) *StakingService {
+func NewStakingService(balanceRepo MemberRepository) *StakingService {
 	return &StakingService{repo: balanceRepo}
 }
 
@@ -219,7 +219,7 @@ var broken int = "not an int"
 		"services/wire.go": `package services
 
 func wireLocal() *StakingService {
-	var balanceRepo BalanceRepository = nil
+	var balanceRepo MemberRepository = nil
 	return NewStakingService(balanceRepo)
 }
 `,
@@ -228,7 +228,7 @@ func wireLocal() *StakingService {
 import admin "example.com/rulestest/services"
 
 func wire() {
-	var repo admin.BalanceRepository = nil
+	var repo admin.MemberRepository = nil
 	_ = admin.NewStakingService(repo)
 }
 

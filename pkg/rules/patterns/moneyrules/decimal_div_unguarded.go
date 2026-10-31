@@ -408,7 +408,7 @@ func localValues(fn *ast.FuncDecl, info *types.Info, v *types.Var) ([]divisorLoc
 }
 
 // divisionHelperParam reports a divisor read from a parameter of a function
-// named for division: floorDiv(a, b), SafeDecimal.Div(other).
+// named for division: floorDiv(a, b), SafeAmountDecimal.Div(other).
 func (s divisorSite) divisionHelperParam(divisor ast.Expr) bool {
 	named := false
 	for _, word := range patternkit.IdentifierTokens(s.fn.Name.Name) {

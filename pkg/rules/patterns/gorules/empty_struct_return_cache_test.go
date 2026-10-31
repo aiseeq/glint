@@ -22,7 +22,7 @@ func (s *Service) Summary(ctx context.Context) (*Summary, error) {
 		return s.build(data, at), nil
 	}
 	return &Summary{
-		WalletCount: 0,
+		MemberCount: 0,
 		Wallets:     []*Wallet{},
 		LastUpdated: time.Time{},
 	}, nil

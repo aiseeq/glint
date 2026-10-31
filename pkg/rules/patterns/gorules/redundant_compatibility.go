@@ -23,7 +23,7 @@ func init() {
 // - "Delete cleanly, git remembers" - no fake compatibility
 // - SRP - one way to do one thing
 // Catches:
-// - Multiple context key fallbacks (GetAdminIDFromContext checking 3 different keys)
+// - Multiple context key fallbacks (GetMemberIDFromContext checking 3 different keys)
 // - False "backward compatibility" comments without external API consumers
 // - Duplicate key definitions (AdminIDKey vs AdminIDKeyAlt)
 type RedundantCompatibilityRule struct {

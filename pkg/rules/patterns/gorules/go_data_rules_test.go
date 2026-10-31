@@ -224,7 +224,7 @@ var testEmailDomains = []string{"@local.test", "@" + localDomain}
 
 const localDomain = "app.test"
 
-func IsTestEmail(email string) bool {
+func IsSampleEmail(email string) bool {
 	for _, domain := range testEmailDomains {
 		if strings.HasSuffix(email, domain) {
 			return true

@@ -255,7 +255,7 @@ type Calculator struct {
 	base    decimal.Decimal
 }
 
-func NewCalculator(base decimal.Decimal) *Calculator {
+func NewWidgetCalculator(base decimal.Decimal) *Calculator {
 	return &Calculator{hundred: decimal.NewFromInt(100), base: base}
 }
 

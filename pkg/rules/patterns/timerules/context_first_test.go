@@ -26,7 +26,7 @@ type Repo interface {
 	Save(ctx context.Context, address string) error
 }
 
-func (s *Service) SyncWallet(address string) error {
+func (s *Service) SyncChainWallet(address string) error {
 	ctx := context.Background()
 	return s.repo.Save(ctx, address)
 }
@@ -34,7 +34,7 @@ func (s *Service) SyncWallet(address string) error {
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, 12, violations[0].Line)
-	assert.Contains(t, violations[0].Message, "Service.SyncWallet")
+	assert.Contains(t, violations[0].Message, "Service.SyncChainWallet")
 }
 
 // A generic receiver (Cache[T]) still names the method as "Cache.Refresh".
@@ -71,7 +71,7 @@ type Repo interface {
 	Save(ctx context.Context, address string) error
 }
 
-func (s *Service) SyncWallet(address string) error {
+func (s *Service) SyncChainWallet(address string) error {
 	return s.repo.Save(context.TODO(), address)
 }
 `)
@@ -95,7 +95,7 @@ type Repo interface {
 	Save(ctx context.Context, address string) error
 }
 
-func (s *Service) SyncWallet(address string) error {
+func (s *Service) SyncChainWallet(address string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	return s.repo.Save(ctx, address)
@@ -103,7 +103,7 @@ func (s *Service) SyncWallet(address string) error {
 `)
 
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "SyncWallet")
+	assert.Contains(t, violations[0].Message, "SyncChainWallet")
 }
 
 // Repro for the false positives that made this rule unusable: a pure function
@@ -113,18 +113,18 @@ func TestContextFirstIgnoresPureFunctions(t *testing.T) {
 
 type Service struct{ wallets []string }
 
-func DetectWalletType(address string) string {
+func DetectChainType(address string) string {
 	if address == "" {
 		return "unknown"
 	}
 	return "evm"
 }
 
-func (s *Service) WalletCount() int {
+func (s *Service) MemberCount() int {
 	return len(s.wallets)
 }
 
-func (s *Service) SyncWallet(address string) error {
+func (s *Service) SyncChainWallet(address string) error {
 	if address == "" {
 		return nil
 	}
@@ -147,7 +147,7 @@ type Repo interface {
 	Save(ctx context.Context, address string) error
 }
 
-func (s *Service) SyncWallet(ctx context.Context, address string) error {
+func (s *Service) SyncChainWallet(ctx context.Context, address string) error {
 	return s.repo.Save(context.Background(), address)
 }
 `)
@@ -256,7 +256,7 @@ type Server interface {
 	Shutdown(ctx context.Context) error
 }
 
-func handleGracefulShutdown(server Server) error {
+func handleServiceShutdown(server Server) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 	return server.Shutdown(shutdownCtx)

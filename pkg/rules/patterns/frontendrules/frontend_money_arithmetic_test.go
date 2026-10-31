@@ -101,8 +101,8 @@ for (const tx of txs) {
 			name:     "parseFloat inside trailing comment is not code",
 			filename: "types.ts",
 			code: `export interface ChartDataPoint {
-  balance: number        // parseFloat(DailyBalanceEntry.totalBalance) - parseFloat(x)
-  deposits: number       // parseFloat(DailyBalanceEntry.deposits) + 1
+  balance: number        // parseFloat(DailyLedgerEntry.totalBalance) - parseFloat(x)
+  deposits: number       // parseFloat(DailyLedgerEntry.deposits) + 1
 }
 `,
 			wantCount: 0,

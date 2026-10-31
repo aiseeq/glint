@@ -19,7 +19,7 @@ import "time"
 
 var BusinessZone = time.UTC
 
-func TodayRateDate() time.Time {
+func TodayLedgerRateDate() time.Time {
 	now := time.Now().In(BusinessZone)
 	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 }

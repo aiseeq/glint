@@ -28,7 +28,7 @@ func init() {
 // three decimals in the viewer's locale. Reported are toFixed and
 // toLocaleString (without a fraction-digits option) on a money value and a
 // currency Intl.NumberFormat, in the files under the same top directory as a
-// formatter (formatAmount, formatMoney, formatCurrency, formatUsd, ...) of a
+// formatter (formatAmount, formatAmount, formatCurrency, formatUsd, ...) of a
 // shared module (shared/, lib/, utils/, common/). The files declaring a
 // formatter, log lines and ratios (balance / goal * 100) are left alone.
 type MoneyFormatBypassesFormatterRule struct {

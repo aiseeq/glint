@@ -255,7 +255,7 @@ async function b() { try { await x() } catch (err) { log.error('b', err); setSho
 async function c() { try { await x() } catch (err) { log.error('c', err); say(errorText(err, 'e.hold')) } }
 async function d() { try { await x() } catch (err) { log.error('d', err); return false } }
 async function e() { try { await x() } catch (err) { log.error('e', err); return 'lo.e.send' } }
-async function f() { try { await x() } catch (error) { log.error('f', error); return ResultFactory.failure(wrap(error)) } }
+async function f() { try { await x() } catch (error) { log.error('f', error); return OutcomeFactory.failure(wrap(error)) } }
 async function g() { try { await x() } catch (err) { log.error('g', err); setCache(prev => ({ ...prev, status: 'error' })) } }
 async function h() { try { await signOut() } catch (err) { log.error('h', err) } }
 async function i() { try { await x() } catch (err) { log.error('i', err); return null } }

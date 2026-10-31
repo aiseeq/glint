@@ -21,7 +21,7 @@ var entryPointFuncs = map[string]bool{"main": true, "init": true, "TestMain": tr
 // ContextFirstRule detects a function that needs a context, does not accept one,
 // and therefore invents its own:
 //
-//	func (s *Service) SyncWallet(address string) error {
+//	func (s *Service) SyncChainWallet(address string) error {
 //	    ctx := context.Background()          // the caller's deadline is gone
 //	    return s.repo.Save(ctx, address)
 //	}

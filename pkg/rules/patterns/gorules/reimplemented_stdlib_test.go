@@ -453,7 +453,7 @@ func TestReimplementedStdlibKeepsQuietOnNumberToWords(t *testing.T) {
 var smallNumbers = []string{"Zero", "One", "Two"}
 var tensNames = []string{"", "Ten", "Twenty"}
 
-func threeDigitWords(n uint64) string {
+func spellGroups(n uint64) string {
 	var parts []string
 	if n >= 100 {
 		parts = append(parts, smallNumbers[n/100], "Hundred")

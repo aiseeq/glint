@@ -159,7 +159,7 @@ import (
 
 type Holding struct{ Contract string }
 
-func coverageKey(walletAddress, chain string) string {
+func chainKey(walletAddress, chain string) string {
 	walletAddress = strings.TrimSpace(walletAddress)
 	return strings.ToLower(walletAddress) + "\x00" + chain
 }
@@ -248,8 +248,8 @@ import (
 	"strings"
 )
 
-// NormalizeAddress brings both spellings of a chainx address to the raw one.
-func NormalizeAddress(address string) (string, error) {
+// NormalizeChainAddress brings both spellings of a chainx address to the raw one.
+func NormalizeChainAddress(address string) (string, error) {
 	if !strings.Contains(address, ":") {
 		return "", fmt.Errorf("not a chainx address: %q", address)
 	}
@@ -260,7 +260,7 @@ func NormalizeAddress(address string) (string, error) {
 
 import "strings"
 
-func coverageKey(walletAddress string) string {
+func chainKey(walletAddress string) string {
 	return strings.ToLower(walletAddress)
 }
 `,
@@ -283,19 +283,19 @@ type Row struct{ Wallet string }
 
 type Repo struct{}
 
-func (Repo) CreateBatch(ctx context.Context, rows []Row) error { return nil }
+func (Repo) CreateRows(ctx context.Context, rows []Row) error { return nil }
 func (Repo) StoredSpelling(ctx context.Context, wallet string) string { return wallet }
 func (Repo) GetRows(ctx context.Context, wallet string) []Row { return nil }
 
 type Service struct{ repo Repo }
 
-func (s *Service) canonicalWalletSpelling(ctx context.Context, walletAddress string) string {
+func (s *Service) canonicalChainWalletSpelling(ctx context.Context, walletAddress string) string {
 	return s.repo.StoredSpelling(ctx, strings.TrimSpace(walletAddress))
 }
 
-func (s *Service) SyncWallet(ctx context.Context, walletAddress string) error {
-	walletAddress = s.canonicalWalletSpelling(ctx, walletAddress)
-	return s.repo.CreateBatch(ctx, []Row{{Wallet: walletAddress}})
+func (s *Service) SyncChainWallet(ctx context.Context, walletAddress string) error {
+	walletAddress = s.canonicalChainWalletSpelling(ctx, walletAddress)
+	return s.repo.CreateRows(ctx, []Row{{Wallet: walletAddress}})
 }
 
 func (s *Service) BackfillGas(ctx context.Context, wallets []string) error {
@@ -303,7 +303,7 @@ func (s *Service) BackfillGas(ctx context.Context, wallets []string) error {
 		return nil
 	}
 	for _, wallet := range wallets {
-		if err := s.repo.CreateBatch(ctx, []Row{{Wallet: wallet}}); err != nil {
+		if err := s.repo.CreateRows(ctx, []Row{{Wallet: wallet}}); err != nil {
 			return err
 		}
 	}
@@ -311,7 +311,7 @@ func (s *Service) BackfillGas(ctx context.Context, wallets []string) error {
 }
 
 func (s *Service) Reimport(ctx context.Context, walletAddress string) error {
-	return s.repo.CreateBatch(ctx, []Row{{Wallet: walletAddress}})
+	return s.repo.CreateRows(ctx, []Row{{Wallet: walletAddress}})
 }
 
 func (s *Service) History(ctx context.Context, walletAddress string) []Row {
@@ -319,7 +319,7 @@ func (s *Service) History(ctx context.Context, walletAddress string) []Row {
 }
 
 func (s *Service) Resync(ctx context.Context, walletAddress string) error {
-	return s.SyncWallet(ctx, walletAddress)
+	return s.SyncChainWallet(ctx, walletAddress)
 }
 `,
 	}))

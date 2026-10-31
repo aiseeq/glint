@@ -36,7 +36,7 @@ func TestFinancialConstantsRule(t *testing.T) {
 
 import "github.com/shopspring/decimal"
 
-func getWithdrawalServiceFee(network string) decimal.Decimal {
+func getTransferServiceFee(network string) decimal.Decimal {
 	switch network {
 	case "tron":
 		return decimal.NewFromInt(10)

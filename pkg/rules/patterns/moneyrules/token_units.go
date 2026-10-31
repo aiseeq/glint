@@ -264,7 +264,7 @@ func NewTokenKeyedBySymbolRule() *patternkit.TypedFuncRule {
 	return r
 }
 
-// isKeyType reports a named struct whose name ends in Key: ledgerTokenKey.
+// isKeyType reports a named struct whose name ends in Key: ledgerItemKey.
 func isKeyType(t types.Type) bool {
 	named, ok := types.Unalias(t).(*types.Named)
 	if !ok {

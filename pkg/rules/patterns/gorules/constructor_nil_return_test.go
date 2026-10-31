@@ -18,8 +18,8 @@ func TestConstructorNilReturnRule(t *testing.T) {
 			name: "constructor returns nil on failed type assertion",
 			code: `package repo
 
-func NewCanonicalWalletRepository(userRepo interface{}) WalletRepository {
-	repo, ok := userRepo.(*CanonicalUserRepository)
+func NewCanonicalChainRepository(userRepo interface{}) WalletRepository {
+	repo, ok := userRepo.(*CanonicalMemberRepository)
 	if !ok {
 		return nil
 	}
@@ -32,8 +32,8 @@ func NewCanonicalWalletRepository(userRepo interface{}) WalletRepository {
 			name: "constructor with error result is explicit",
 			code: `package repo
 
-func NewCanonicalWalletRepository(userRepo interface{}) (WalletRepository, error) {
-	repo, ok := userRepo.(*CanonicalUserRepository)
+func NewCanonicalChainRepository(userRepo interface{}) (WalletRepository, error) {
+	repo, ok := userRepo.(*CanonicalMemberRepository)
 	if !ok {
 		return nil, fmt.Errorf("invalid user repository type: %T", userRepo)
 	}

@@ -183,11 +183,11 @@ const decimalStringGoModels = `package models
 
 import "github.com/shopspring/decimal"
 
-type SafeDecimal struct{ decimal.Decimal }
+type SafeAmountDecimal struct{ decimal.Decimal }
 
 type NAVSnapshot struct {
-	UnitPrice SafeDecimal ` + "`json:\"unitPrice\"`" + `
-	DPI       *SafeDecimal ` + "`json:\"dpi,omitempty\"`" + `
+	UnitPrice SafeAmountDecimal ` + "`json:\"unitPrice\"`" + `
+	DPI       *SafeAmountDecimal ` + "`json:\"dpi,omitempty\"`" + `
 	Units     int64 ` + "`json:\"units\"`" + `
 	Ratio     float64 ` + "`json:\"ratio\"`" + `
 }
