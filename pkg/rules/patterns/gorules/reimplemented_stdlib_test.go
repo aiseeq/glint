@@ -101,6 +101,7 @@ func sortedKeys(m map[string]int) []string {
 	})
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "slices.Sorted(maps.Keys(m))")
+	assert.Contains(t, violations[0].Suggestion, "returns nil")
 
 	for _, variant := range []string{`package helpers
 
@@ -603,4 +604,44 @@ func absAmount(a Amount) Amount {
 	})
 	require.Len(t, violations, 1)
 	assert.Equal(t, "math.Abs", violations[0].Context["replacement"])
+}
+
+func TestReimplementedStdlibSortedMapKeysOrderAndForms(t *testing.T) {
+	run := func(body string) int {
+		source := "package helpers\n\nimport \"sort\"\n\ntype store struct{ items map[string]int }\n\n" + body
+		return len(rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+			"go.mod":     "module example.com/helpers\n\ngo 1.23\n",
+			"helpers.go": source,
+		}))
+	}
+	// Sorting before the keys are collected returns them unsorted.
+	assert.Zero(t, run(`func sortedKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	sort.Strings(keys)
+	for k := range m { keys = append(keys, k) }
+	return keys
+}
+`))
+	// Keys appended to another slice never reach the returned one.
+	assert.Zero(t, run(`func sortedKeys(m map[string]int, other []string) []string {
+	var keys []string
+	for k := range m { other = append(other, k) }
+	sort.Strings(keys)
+	return keys
+}
+`))
+	assert.Equal(t, 1, run(`func sortedKeys(m map[string]int) []string {
+	keys := make([]string, 0)
+	for k := range m { keys = append(keys, k) }
+	sort.Strings(keys)
+	return keys
+}
+`), "make with zero length")
+	assert.Equal(t, 1, run(`func (s *store) sortedKeys() []string {
+	keys := make([]string, 0, len(s.items))
+	for k := range s.items { keys = append(keys, k) }
+	sort.Strings(keys)
+	return keys
+}
+`), "map in a field")
 }

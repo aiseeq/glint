@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -166,8 +167,7 @@ func TestGlobalRegistry(t *testing.T) {
 	all := All()
 	assert.NotNil(t, all)
 
-	cats := Categories()
-	assert.NotNil(t, cats)
+	assert.True(t, slices.IsSorted(Categories()))
 
 	reg := GlobalRegistry()
 	assert.NotNil(t, reg)

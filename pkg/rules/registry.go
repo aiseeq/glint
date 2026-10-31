@@ -3,6 +3,7 @@ package rules
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -89,7 +90,7 @@ func (r *Registry) Categories() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return r.sortedCategories()
+	return slices.Sorted(maps.Keys(r.byCategory))
 }
 
 // Count returns the total number of registered rules
@@ -165,7 +166,7 @@ func (r *Registry) ValidateConfig(cfg *core.Config) error {
 	sort.Strings(categories)
 	for _, category := range categories {
 		if _, ok := r.byCategory[category]; !ok {
-			return fmt.Errorf("categories.%s: unknown category (known: %s)", category, strings.Join(r.sortedCategories(), ", "))
+			return fmt.Errorf("categories.%s: unknown category (known: %s)", category, strings.Join(slices.Sorted(maps.Keys(r.byCategory)), ", "))
 		}
 		ruleNames := make([]string, 0, len(cfg.Categories[category].Rules))
 		for name := range cfg.Categories[category].Rules {
@@ -183,15 +184,6 @@ func (r *Registry) ValidateConfig(cfg *core.Config) error {
 		}
 	}
 	return nil
-}
-
-func (r *Registry) sortedCategories() []string {
-	categories := make([]string, 0, len(r.byCategory))
-	for category := range r.byCategory {
-		categories = append(categories, category)
-	}
-	sort.Strings(categories)
-	return categories
 }
 
 // effectiveSettings merges the category settings of a rule with its own.

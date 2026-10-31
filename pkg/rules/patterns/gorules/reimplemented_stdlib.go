@@ -82,8 +82,10 @@ func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Inf
 			continue
 		}
 		replacement, ok := stdlibEquivalent(fn, operands)
+		caveat := ""
 		if !ok && versions != nil && versions.AtLeast(ctx, info, "go1.23") && sortsMapKeys(fn, info) {
 			replacement, ok = "slices.Sorted(maps.Keys(m))", true
+			caveat = "; for an empty map it returns nil, not an empty slice, so keep a non-nil result where a caller encodes it to JSON or compares it with nil"
 		}
 		if !ok {
 			continue
@@ -95,9 +97,9 @@ func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Inf
 				fn.Name.Name, replacement))
 		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
 		if wrapsOwnData(fn) {
-			v.WithSuggestion(fmt.Sprintf("Replace the body of %s with a call to %s over its own list", fn.Name.Name, replacement))
+			v.WithSuggestion(fmt.Sprintf("Replace the body of %s with a call to %s over its own list%s", fn.Name.Name, replacement, caveat))
 		} else {
-			v.WithSuggestion(fmt.Sprintf("Delete %s and call %s at every one of its call sites, in every file of the package", fn.Name.Name, replacement))
+			v.WithSuggestion(fmt.Sprintf("Delete %s and call %s at every one of its call sites, in every file of the package%s", fn.Name.Name, replacement, caveat))
 		}
 		v.WithColumn(ctx.PositionFor(fn).Column)
 		v.WithContext("pattern", "reimplemented_stdlib")
@@ -124,19 +126,12 @@ func sortsMapKeys(fn *ast.FuncDecl, info *types.Info) bool {
 	if !ok {
 		return false
 	}
-	loop, ok := mapKeyAppendLoop(fn, info, elemType)
-	if !ok || !initializedKeySlice(fn, keysName, loop.X, elemType) {
+	loop, ok := fn.Body.List[1].(*ast.RangeStmt)
+	if !ok || !mapKeyAppendLoop(loop, info, keysName, elemType) || !initializedKeySlice(fn.Body.List[0], keysName, loop.X, elemType) {
 		return false
 	}
-	if !functionReturnsIdent(fn, keysName) {
-		return false
-	}
-	for _, stmt := range fn.Body.List {
-		if exprStmt, ok := stmt.(*ast.ExprStmt); ok && isSortCall(exprStmt.X, keysName, elemType) {
-			return true
-		}
-	}
-	return false
+	sortStmt, ok := fn.Body.List[2].(*ast.ExprStmt)
+	return ok && isSortCall(sortStmt.X, keysName, elemType)
 }
 
 func returnedSlice(fn *ast.FuncDecl) (string, string, bool) {
@@ -159,37 +154,27 @@ func returnedSlice(fn *ast.FuncDecl) (string, string, bool) {
 	return name.Name, elem.Name, true
 }
 
-func mapKeyAppendLoop(fn *ast.FuncDecl, info *types.Info, elemType string) (*ast.RangeStmt, bool) {
-	var found *ast.RangeStmt
-	for _, stmt := range fn.Body.List {
-		loop, ok := stmt.(*ast.RangeStmt)
-		if !ok {
-			continue
-		}
-		if found != nil || loop.Tok != token.DEFINE || loop.Value != nil {
-			return nil, false
-		}
-		key, keyOK := loop.Key.(*ast.Ident)
-		targetType := info.TypeOf(loop.X)
-		if targetType == nil {
-			return nil, false
-		}
-		mapType, mapOK := targetType.Underlying().(*types.Map)
-		if !keyOK || !mapOK || len(loop.Body.List) != 1 || basicName(mapType.Key()) != elemType {
-			return nil, false
-		}
-		assign, ok := loop.Body.List[0].(*ast.AssignStmt)
-		if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
-			return nil, false
-		}
-		lhs, lhsOK := assign.Lhs[0].(*ast.Ident)
-		appendCall, callOK := assign.Rhs[0].(*ast.CallExpr)
-		if !lhsOK || !callOK || !isBuiltinAppend(appendCall) || len(appendCall.Args) != 2 || !sameIdent(appendCall.Args[0], lhs.Name) || !sameIdent(appendCall.Args[1], key.Name) {
-			return nil, false
-		}
-		found = loop
+// mapKeyAppendLoop recognizes `for k := range m { keys = append(keys, k) }`
+// over a map whose key type is elemType.
+func mapKeyAppendLoop(loop *ast.RangeStmt, info *types.Info, keys, elemType string) bool {
+	if loop.Tok != token.DEFINE || loop.Value != nil || len(loop.Body.List) != 1 {
+		return false
 	}
-	return found, found != nil
+	key, keyOK := loop.Key.(*ast.Ident)
+	targetType := info.TypeOf(loop.X)
+	if !keyOK || targetType == nil {
+		return false
+	}
+	mapType, mapOK := targetType.Underlying().(*types.Map)
+	if !mapOK || basicName(mapType.Key()) != elemType {
+		return false
+	}
+	assign, ok := loop.Body.List[0].(*ast.AssignStmt)
+	if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || !sameIdent(assign.Lhs[0], keys) {
+		return false
+	}
+	appendCall, ok := assign.Rhs[0].(*ast.CallExpr)
+	return ok && isBuiltinAppend(appendCall) && len(appendCall.Args) == 2 && sameIdent(appendCall.Args[0], keys) && sameIdent(appendCall.Args[1], key.Name)
 }
 
 func basicName(t types.Type) string {
@@ -200,42 +185,39 @@ func basicName(t types.Type) string {
 	return basic.Name()
 }
 
-func initializedKeySlice(fn *ast.FuncDecl, keys string, mapExpr ast.Expr, elem string) bool {
-	for _, stmt := range fn.Body.List {
-		if decl, ok := stmt.(*ast.DeclStmt); ok {
-			gen, ok := decl.Decl.(*ast.GenDecl)
-			if !ok || gen.Tok != token.VAR {
-				continue
-			}
-			for _, spec := range gen.Specs {
-				value, ok := spec.(*ast.ValueSpec)
-				if !ok || len(value.Names) != 1 || value.Names[0].Name != keys {
-					continue
-				}
-				slice, ok := value.Type.(*ast.ArrayType)
-				return ok && slice.Len == nil && basicNameFromExpr(slice.Elt) == elem && len(value.Values) == 0
-			}
-		}
-		assign, ok := stmt.(*ast.AssignStmt)
-		if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || !sameIdent(assign.Lhs[0], keys) || len(assign.Rhs) != 1 {
-			continue
-		}
-		if literal, ok := assign.Rhs[0].(*ast.CompositeLit); ok {
-			slice, ok := literal.Type.(*ast.ArrayType)
-			return ok && slice.Len == nil && basicNameFromExpr(slice.Elt) == elem && len(literal.Elts) == 0
-		}
-		call, ok := assign.Rhs[0].(*ast.CallExpr)
-		if !ok || !sameIdent(call.Fun, "make") || len(call.Args) < 1 {
+// initializedKeySlice recognizes the first statement declaring an empty keys
+// slice: `var keys []T`, `keys := []T{}` or `keys := make([]T, 0[, len(m)])`.
+func initializedKeySlice(stmt ast.Stmt, keys string, mapExpr ast.Expr, elem string) bool {
+	emptySliceOf := func(expr ast.Expr) bool {
+		slice, ok := expr.(*ast.ArrayType)
+		return ok && slice.Len == nil && basicNameFromExpr(slice.Elt) == elem
+	}
+	if decl, ok := stmt.(*ast.DeclStmt); ok {
+		gen, ok := decl.Decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR || len(gen.Specs) != 1 {
 			return false
 		}
-		slice, ok := call.Args[0].(*ast.ArrayType)
-		if !ok || slice.Len != nil || basicNameFromExpr(slice.Elt) != elem {
-			return false
-		}
-		if len(call.Args) == 1 {
-			return true
-		}
-		return len(call.Args) == 3 && patternkit.IsIntLiteral(call.Args[1], 0) && isLenOf(call.Args[2], mapExpr)
+		value, ok := gen.Specs[0].(*ast.ValueSpec)
+		return ok && len(value.Names) == 1 && value.Names[0].Name == keys && emptySliceOf(value.Type) && len(value.Values) == 0
+	}
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || !sameIdent(assign.Lhs[0], keys) || len(assign.Rhs) != 1 {
+		return false
+	}
+	if literal, ok := assign.Rhs[0].(*ast.CompositeLit); ok {
+		return emptySliceOf(literal.Type) && len(literal.Elts) == 0
+	}
+	call, ok := assign.Rhs[0].(*ast.CallExpr)
+	if !ok || !sameIdent(call.Fun, "make") || len(call.Args) < 1 || !emptySliceOf(call.Args[0]) {
+		return false
+	}
+	switch len(call.Args) {
+	case 1:
+		return true
+	case 2:
+		return patternkit.IsIntLiteral(call.Args[1], 0)
+	case 3:
+		return patternkit.IsIntLiteral(call.Args[1], 0) && isLenOf(call.Args[2], mapExpr)
 	}
 	return false
 }
@@ -247,24 +229,16 @@ func basicNameFromExpr(expr ast.Expr) string {
 	}
 	return id.Name
 }
+
+// isLenOf reports len(target), with target written the same way (m, s.items).
 func isLenOf(expr, target ast.Expr) bool {
 	call, ok := expr.(*ast.CallExpr)
-	ident, targetOK := target.(*ast.Ident)
-	return ok && targetOK && sameIdent(call.Fun, "len") && len(call.Args) == 1 && sameIdent(call.Args[0], ident.Name)
+	return ok && sameIdent(call.Fun, "len") && len(call.Args) == 1 && types.ExprString(call.Args[0]) == types.ExprString(target)
 }
 
 func isBuiltinAppend(call *ast.CallExpr) bool {
 	id, ok := call.Fun.(*ast.Ident)
 	return ok && id.Name == "append"
-}
-
-func functionReturnsIdent(fn *ast.FuncDecl, name string) bool {
-	last, ok := fn.Body.List[len(fn.Body.List)-1].(*ast.ReturnStmt)
-	if !ok || len(last.Results) != 1 {
-		return false
-	}
-	id, ok := last.Results[0].(*ast.Ident)
-	return ok && id.Name == name
 }
 
 func isSortCall(expr ast.Expr, keys, elem string) bool {
