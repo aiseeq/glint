@@ -88,7 +88,7 @@ func (r *DateFromLocalClockRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 }
 
 // dateWords name a calendar day in a helper's name; the other words of the
-// name are what the date is of (TodayRateDate: rates).
+// name are what the date is of (TodayOrderDate: orders).
 var dateWords = map[string]bool{"today": true, "date": true, "day": true, "get": true, "current": true}
 
 // helperNouns returns the words of a helper's name that are not about the day.
@@ -104,7 +104,7 @@ func helperNouns(helper string) []string {
 }
 
 // mentionsNoun reports a name with a word starting with one of the nouns:
-// upsertXERates for rate.
+// upsertOrderRates for rate.
 func mentionsNoun(name string, nouns []string) bool {
 	for _, word := range helpers.IdentifierWords(name) {
 		for _, noun := range nouns {
@@ -117,7 +117,7 @@ func mentionsNoun(name string, nouns []string) bool {
 }
 
 // todayHelpers returns the project's functions named for today that return
-// a time.Time: domain.TodayRateDate.
+// a time.Time: domain.TodayOrderDate.
 func todayHelpers(files []*core.FileContext) []string {
 	var found []string
 	for _, file := range files {
@@ -156,7 +156,7 @@ func (r *DateFromLocalClockRule) hostClockToday(ctx *core.FileContext, helper st
 		violations = append(violations, v)
 	}
 	// A write gets the host's today only where it writes what the helper
-	// dates: upsertRates(...) for TodayRateDate, not a session's created_at.
+	// dates: upsertOrders(...) for TodayOrderDate, not a session's created_at.
 	nouns := helperNouns(helper)
 	for _, decl := range ctx.GoAST.Decls {
 		fn, ok := decl.(*ast.FuncDecl)

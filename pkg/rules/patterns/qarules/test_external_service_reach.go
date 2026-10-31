@@ -31,7 +31,7 @@ import (
 //     ExtVault client into the snapshot scheduler).
 //
 // The majority is what keeps a fat service out. ProjectB keeps its whole domain in one
-// package, and DeFiPositionService — ten repository-backed methods, one of which eventually
+// package, and LedgerService — ten repository-backed methods, one of which eventually
 // asks DefiLlama for a price — was reported in 24 tests that only exercise linking logic
 // against a local database.
 //

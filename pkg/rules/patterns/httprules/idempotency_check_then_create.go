@@ -155,9 +155,9 @@ var periodFieldName = regexp.MustCompile(`(?i)date|day|period|month|week`)
 // periodGuards reports a once-per-period action guarded by the latest
 // record, read with its error dropped:
 //
-//	existing, _ := s.nav.GetLatestNAV(ctx, id)
+//	existing, _ := s.nav.GetLatestRecord(ctx, id)
 //	if existing == nil || existing.Date != today {
-//	    s.fees.AccrueFees(ctx, id)
+//	    s.fees.ApplyAccrual(ctx, id)
 //	}
 //
 // A failed lookup reads as "not done yet" and the action runs again, and two
