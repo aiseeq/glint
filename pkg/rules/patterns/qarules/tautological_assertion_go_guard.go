@@ -3,6 +3,7 @@ package qarules
 import (
 	"go/ast"
 	"go/token"
+	"path/filepath"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -34,7 +35,8 @@ var environmentProbes = map[string]bool{
 // files, ask what the machine allows (/proc/sys/user/max_user_namespaces).
 var systemFileReads = map[string]bool{"os.ReadFile": true, "os.Open": true, "os.ReadDir": true}
 
-var systemFilePrefixes = []string{"/proc/", "/sys/", "/dev/", "/etc/"}
+// /dev/ is left out: a test writes its own files under /dev/shm.
+var systemFilePrefixes = []string{"/proc/", "/sys/", "/etc/"}
 
 // readsSystemFile reports a read of a system file at a literal path.
 func readsSystemFile(call *ast.CallExpr) bool {
@@ -45,7 +47,7 @@ func readsSystemFile(call *ast.CallExpr) bool {
 	if !ok || lit.Kind != token.STRING {
 		return false
 	}
-	path := strings.Trim(lit.Value, "`\"")
+	path := filepath.Clean(strings.Trim(lit.Value, "`\""))
 	for _, prefix := range systemFilePrefixes {
 		if strings.HasPrefix(path, prefix) {
 			return true

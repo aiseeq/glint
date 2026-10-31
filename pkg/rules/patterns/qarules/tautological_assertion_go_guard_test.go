@@ -141,8 +141,20 @@ func TestImport(t *testing.T, path string) {
 		t.Skip("fixture unreadable")
 	}
 }
+
+func TestSharedMemory(t *testing.T) {
+	if err := os.WriteFile("/dev/shm/probe", []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.ReadFile("/dev/shm/probe"); err != nil {
+		t.Skip("written file unreadable")
+	}
+	if _, err := os.ReadFile("/proc/../tmp/probe"); err != nil {
+		t.Skip("written file unreadable")
+	}
+}
 `
-	assert.Equal(t, []int{20, 23}, rulestest.GoFileRuleLines(t, NewTautologicalAssertionRule(), "service_test.go", code))
+	assert.Equal(t, []int{20, 23, 32, 35}, rulestest.GoFileRuleLines(t, NewTautologicalAssertionRule(), "service_test.go", code))
 }
 
 // A test helper that skips a fixture it failed to read or decode: the broken
