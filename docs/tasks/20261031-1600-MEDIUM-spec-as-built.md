@@ -1,6 +1,6 @@
 # As-built spec of glint written by Terra, criticized by a fresh Terra
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Что сделать
@@ -24,3 +24,4 @@
 - 2026-10-31 17:46 note — glint-master: разбор критики (critic.md, 5 находок): F1–F5 подтверждены пробой мастера на critic-probe (sql-injection: только 10,18; tls: client.js:1, client.js:3, main.go:8), все приняты → тикеты 20261031-1744-HIGH-{sql-injection-check-after-use, sql-injection-any-bool-predicate-whitelist, sql-injection-http-request-source, tls-insecure-skip-verify-go-types, tls-reject-unauthorized-js-literals}; отклонённых нет. Ошибка ТЗ про нечитаемые файлы исправлена в ТЗ (условие --tolerate-broken-packages, cmd/glint/main.go:859). Критик 1031-1706-spec-critic-2 закрыт (влито). Проверка разбора — боец Terra 1031-1746-glint (бриф spec/triage-verify-brief.md в каталоге замеров)
 - 2026-10-31 18:26 note — glint-master: проверка разбора Terra 1031-1746-glint — вернуть: F1–F5 и правка ТЗ подтверждены; в 5 тикетах был домашний путь к критике и в приёмке F1/F2/F4 нет контрольных случаев. Тикеты переписаны: код пробы в тексте, контроли — белый список до запроса (main.go:49), литерал tls.Config (main.go:16); F3 — охват источников (FormValue, PathValue, Header.Get, Cookie)
 - 2026-10-31 18:54 note — glint-master: перепроверка Terra 1031-1746-glint — вернуть: номера строк приёмки F1/F2 (запрос :39, белый список :48, не :40/:49) — исправлены
+- 2026-10-31 19:10 готово — terra-verifier-1031-1746 (session glint-master): вердикт Terra 1031-1746-glint (spec/triage-verdict.md в каталоге замеров glint-measure), 3-й заход: F1–F5 воспроизведены на своей пробе установленным glint, принятие и вес обоснованы, 5 тикетов 20261031-1744-HIGH-* с пробой в тексте и контролями, без домашних путей; правка ТЗ :782 верна по cmd/glint/main.go walkWithWalker; неразобранных утверждений нет
