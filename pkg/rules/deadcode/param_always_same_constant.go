@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -33,8 +34,10 @@ func NewParamAlwaysSameConstantRule() *ParamAlwaysSameConstantRule {
 	)}
 }
 
+// AnalyzeFile is a no-op: the rule needs the module-wide call index.
 func (r *ParamAlwaysSameConstantRule) AnalyzeFile(_ *core.FileContext) []*core.Violation { return nil }
 
+// RequiresSSA reports that typed syntax is enough.
 func (r *ParamAlwaysSameConstantRule) RequiresSSA() bool { return false }
 
 type constantParamCallsKey struct{}
@@ -77,11 +80,8 @@ func buildParamCallIndex(ctx *core.GoProjectContext) (*paramCallIndex, error) {
 			return nil, errors.New("param always same constant: package has no typed syntax")
 		}
 		info := pkg.Package.TypesInfo
+		// The typed load runs with Tests: false, so test calls never vote.
 		for _, file := range pkg.Package.Syntax {
-			fileCtx, err := ctx.FileForPosition(file.Pos())
-			if err != nil || fileCtx.IsTestFile() {
-				continue
-			}
 			ast.Inspect(file, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
@@ -246,11 +246,11 @@ func paramWritten(body *ast.BlockStmt, param types.Object, info *types.Info) boo
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.AssignStmt:
-			written = written || slices.ContainsFunc(node.Lhs, func(lhs ast.Expr) bool { return isParamIdent(lhs, param, info) })
+			written = written || slices.ContainsFunc(node.Lhs, func(lhs ast.Expr) bool { return helpers.IsObjectIdent(info, lhs, param) })
 		case *ast.IncDecStmt:
-			written = written || isParamIdent(node.X, param, info)
+			written = written || helpers.IsObjectIdent(info, node.X, param)
 		case *ast.UnaryExpr:
-			written = written || node.Op == token.AND && isParamIdent(node.X, param, info)
+			written = written || node.Op == token.AND && helpers.IsObjectIdent(info, node.X, param)
 		}
 		return !written
 	})
@@ -332,9 +332,9 @@ func evalParamComparison(expr *ast.BinaryExpr, param types.Object, value constan
 	}
 	var other ast.Expr
 	switch {
-	case isParamIdent(expr.X, param, info):
+	case helpers.IsObjectIdent(info, expr.X, param):
 		other = expr.Y
-	case isParamIdent(expr.Y, param, info):
+	case helpers.IsObjectIdent(info, expr.Y, param):
 		other = expr.X
 	default:
 		return false, false
@@ -350,13 +350,8 @@ func evalParamComparison(expr *ast.BinaryExpr, param types.Object, value constan
 	return equal, true
 }
 
-func isParamIdent(expr ast.Expr, param types.Object, info *types.Info) bool {
-	ident, ok := ast.Unparen(expr).(*ast.Ident)
-	return ok && info.Uses[ident] == param
-}
-
 func switchHasDeadArm(stmt *ast.SwitchStmt, param types.Object, value constant.Value, info *types.Info) bool {
-	if !isParamIdent(stmt.Tag, param, info) {
+	if !helpers.IsObjectIdent(info, stmt.Tag, param) {
 		return false
 	}
 	matchedCase := false

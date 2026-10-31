@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -130,7 +131,7 @@ func unguardedStatusStore(info *types.Info, fn *ast.FuncDecl) *ast.AssignStmt {
 			}
 			sel, ok := s.Lhs[0].(*ast.SelectorExpr)
 			value, isIdent := ast.Unparen(s.Rhs[0]).(*ast.Ident)
-			if ok && isIdent && info.Uses[value] == code && patternkit.IsObjectIdent(info, sel.X, recv) {
+			if ok && isIdent && info.Uses[value] == code && helpers.IsObjectIdent(info, sel.X, recv) {
 				store = s
 			}
 		}

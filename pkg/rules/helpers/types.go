@@ -26,3 +26,9 @@ func StructUnder(t types.Type) (*types.Struct, bool) {
 	st, ok := t.Underlying().(*types.Struct)
 	return st, ok
 }
+
+// IsObjectIdent reports an identifier naming obj.
+func IsObjectIdent(info *types.Info, expr ast.Expr, obj types.Object) bool {
+	ident, ok := ast.Unparen(expr).(*ast.Ident)
+	return ok && info.Uses[ident] == obj
+}

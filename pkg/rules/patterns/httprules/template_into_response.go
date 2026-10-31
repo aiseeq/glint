@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -117,13 +118,13 @@ func writesErrorStatus(info *types.Info, body *ast.BlockStmt, writer *types.Var)
 		if !ok || found {
 			return !found
 		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "WriteHeader" && patternkit.IsObjectIdent(info, sel.X, writer) {
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "WriteHeader" && helpers.IsObjectIdent(info, sel.X, writer) {
 			found = true
 			return false
 		}
 		handed := false
 		for _, arg := range call.Args {
-			handed = handed || patternkit.IsObjectIdent(info, arg, writer)
+			handed = handed || helpers.IsObjectIdent(info, arg, writer)
 		}
 		if !handed {
 			return true
