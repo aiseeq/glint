@@ -272,16 +272,38 @@ func bodyFuncs(file *ast.File, info *types.Info) []*types.Func {
 	var out []*types.Func
 	for _, decl := range file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
-		if !ok || fd.Recv != nil || fd.Body == nil || fd.Name == nil {
+		if !ok || !IsDuplicateFuncBodyCandidate(fd, info) {
 			continue
 		}
 		fn, ok := info.Defs[fd.Name].(*types.Func)
-		if !ok || fn.Signature().Params().Len() == 0 || delegates(fd.Body, info, fn.Pkg()) {
+		if !ok || fn.Signature().Params().Len() == 0 {
 			continue
 		}
 		out = append(out, fn)
 	}
 	return out
+}
+
+// IsDuplicateFuncBodyCandidate reports whether a function declaration meets
+// the body rule's receiver, parameter, delegation, and normalized-size filters.
+// It uses the declaration AST directly so file rules can share the same gate.
+func IsDuplicateFuncBodyCandidate(fd *ast.FuncDecl, info *types.Info) bool {
+	if fd == nil || fd.Recv != nil || fd.Body == nil || fd.Name == nil || fd.Type == nil || fd.Type.Params == nil || fd.Type.Params.NumFields() == 0 {
+		return false
+	}
+	if info == nil {
+		return false
+	}
+	var own *types.Package
+	if fn, ok := info.Defs[fd.Name].(*types.Func); ok {
+		own = fn.Pkg()
+	}
+	if delegates(fd.Body, info, own) {
+		return false
+	}
+	normalizer := newFunctionBlockNormalizer(info, fd)
+	normalizer.walk(fd.Body)
+	return normalizer.nodes >= minimumDuplicateBodyNodes
 }
 
 func uniquePackageFuncs(funcs []*types.Func) []*types.Func {

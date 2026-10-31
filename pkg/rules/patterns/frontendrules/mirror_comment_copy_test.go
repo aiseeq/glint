@@ -1,7 +1,12 @@
 package frontendrules
 
 import (
+	"go/ast"
+	"go/types"
+
+	"github.com/aiseeq/glint/pkg/rules/duplication"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"testing"
 )
@@ -72,16 +77,81 @@ const Limit = 5`
 	assert.Equal(t, []string{"src/limits.go:2"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/limits.go", code))
 }
 
-// An honest note on a Go function is no finding: the body rule decides
-// whether the function still copies another package.
-func TestMirrorCommentCopyGoFunctionLeftToBodyRule(t *testing.T) {
-	source := `// isStreamRequest mirrors httpx.IsStreamRequest.
-func isStreamRequest(r *http.Request) bool { return httpx.IsStreamRequest(r) }
+// A method is not considered by the body rule, so its comment remains reportable.
+func TestMirrorCommentCopyGoMethodReported(t *testing.T) {
+	source := `package stream
 
 // isAdmin — копия httpx.IsAdmin.
 func (u *User) isAdmin() bool { return u.Role == "admin" }`
-	assert.Empty(t, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/stream.go", source))
+	assert.Equal(t, []int{4}, rulestest.GoFileRuleLines(t, NewMirrorCommentCopyRule(), "src/stream.go", source))
 	ts := `// Mirrors httpx.IsStreamRequest.
 export function isStreamRequest(r) { return r.stream }`
 	assert.Equal(t, []string{"src/stream.ts:2"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/stream.ts", ts))
+}
+
+func TestMirrorCommentCopyGoMethodNotConsideredByBodyRule(t *testing.T) {
+	source := `package middleware
+
+// Guard handles requests.
+type Guard struct{}
+
+// isStream mirrors httpx.IsStreamRequest.
+func (Guard) isStream(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	if strings.Contains(accept, "text/event-stream") {
+		return true
+	}
+	return r.URL.Query().Get("stream") == "1" && r.Method == http.MethodGet
+}`
+	assert.Equal(t, []int{7}, rulestest.GoFileRuleLines(t, NewMirrorCommentCopyRule(), "src/stream.go", source))
+}
+
+func TestMirrorCommentCopyGoParameterlessFunctionNotConsideredByBodyRule(t *testing.T) {
+	source := `package api
+
+// defaultHeaders mirrors defaults.Headers.
+func defaultHeaders() map[string]string {
+	h := map[string]string{"Accept": "application/json", "X-Client": "probe"}
+	if len(h) > 1 {
+		h["X-Count"] = "2"
+	}
+	for k, v := range h {
+		h[k] = v + ";"
+	}
+	return h
+}`
+	assert.Equal(t, []int{4}, rulestest.GoFileRuleLines(t, NewMirrorCommentCopyRule(), "src/defaults.go", source))
+}
+
+func TestMirrorCommentCopyGoBodyCandidateRemainsWithBodyRule(t *testing.T) {
+	source := `package api
+
+
+// derive mirrors defaults.Derive.
+func derive(n int) bool {
+	if n == 0 {
+		return false
+	}
+	value := n
+	if value > 2 {
+		value--
+	}
+	for i := 0; i < 3; i++ {
+		value += i
+	}
+	return value > 0
+}`
+	ctx := rulestest.GoFile(t, "src/stream.go", source)
+	info := &types.Info{
+		Defs: make(map[*ast.Ident]types.Object),
+		Uses: make(map[*ast.Ident]types.Object),
+	}
+	_, err := (&types.Config{}).Check("example.com/api", ctx.GoFileSet, []*ast.File{ctx.GoAST}, info)
+	assert.NoError(t, err)
+	ctx.GoTypesInfo = info
+	assert.True(t, duplication.IsDuplicateFuncBodyCandidate(ctx.GoAST.Decls[0].(*ast.FuncDecl), info))
+	assert.Empty(t, NewMirrorCommentCopyRule().AnalyzeFile(ctx))
 }
