@@ -97,7 +97,7 @@ func (r *SubtestFixtureCleanedEarlyRule) UseProjectFiles(files []*core.FileConte
 // handleCallees returns the package functions a body passes a handle to.
 func handleCallees(body *ast.BlockStmt, handles map[string]bool, pkg string) []string {
 	var callees []string
-	ownNodes(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || !callForwardsTestingT(call, handles) {
 			return true
@@ -116,7 +116,7 @@ func (r *SubtestFixtureCleanedEarlyRule) ResetState() { r.cleaners = nil }
 // cleansUpOn reports a body calling Cleanup on one of the handles.
 func cleansUpOn(body *ast.BlockStmt, handles map[string]bool) bool {
 	found := false
-	ownNodes(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		if stmt, ok := n.(*ast.ExprStmt); ok && cleanupRegistration(stmt, handles) {
 			found = true
 		}
@@ -192,7 +192,7 @@ func subtestLiteral(stmt ast.Stmt, handles map[string]bool) (*ast.FuncLit, strin
 func (r *SubtestFixtureCleanedEarlyRule) fixtureAssignments(lit *ast.FuncLit, param, pkg string) []*ast.AssignStmt {
 	declared := localNames(lit.Body)
 	var found []*ast.AssignStmt
-	ownNodes(lit.Body, func(n ast.Node) bool {
+	patternkit.InspectOwn(lit.Body, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
 		if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
 			return true
@@ -235,7 +235,7 @@ func passesIdent(call *ast.CallExpr, name string) bool {
 // localNames returns the names a body declares itself.
 func localNames(body *ast.BlockStmt) map[string]bool {
 	names := make(map[string]bool)
-	ownNodes(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.AssignStmt:
 			if node.Tok == token.DEFINE {

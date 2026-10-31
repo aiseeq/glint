@@ -22,6 +22,17 @@ func ForEachOwnStatement(node ast.Node, visit func(ast.Stmt)) {
 	})
 }
 
+// InspectOwn visits the nodes inside node like ast.Inspect, without entering
+// nested function literals: they belong to the closure.
+func InspectOwn(node ast.Node, visit func(ast.Node) bool) {
+	ast.Inspect(node, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		return visit(n)
+	})
+}
+
 // FlattenOr flattens a ||-chain into its operands.
 func FlattenOr(expr ast.Expr) []ast.Expr {
 	if be, ok := expr.(*ast.BinaryExpr); ok && be.Op == token.LOR {

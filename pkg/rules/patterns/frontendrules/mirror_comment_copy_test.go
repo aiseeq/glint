@@ -193,7 +193,9 @@ export const MAX_UPLOAD_BYTES = 10485760;`
 }
 
 // A single call of something other than the named source is no wrapper: the
-// copied logic sits in its arguments, and no other rule sees it.
+// copied logic sits in its arguments, and no other rule sees it. A call given a
+// function literal (isAdmin) holds its logic in the literal: the body rule
+// takes that function, as it takes the same copy without the comment.
 func TestMirrorCommentCopyCallOfOtherThanNamedSourceReported(t *testing.T) {
 	files := map[string]string{
 		"auth/auth.go": `package auth
@@ -226,7 +228,7 @@ func isAdmin(roles []string) bool {
 func orderRef(shop string, n int) string { return fmt.Sprintf("ORD-%s-%06d", shop, n) }
 `,
 	}
-	assert.Equal(t, []int{11, 14, 19}, rulestest.ViolationLines(rulestest.RunRuleOnFiles(t, NewMirrorCommentCopyRule(), files)))
+	assert.Equal(t, []int{11, 19}, rulestest.ViolationLines(rulestest.RunRuleOnFiles(t, NewMirrorCommentCopyRule(), files)))
 }
 
 // A method that only calls the method its note names, through a field of

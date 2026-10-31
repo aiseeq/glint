@@ -339,3 +339,45 @@ func TestDuplicateFuncAcrossPackagesSameNameTwinIsPackageAllCanImport(t *testing
 		assert.Contains(t, v.Message, "duplicates example.com/rulestest/text — keep one implementation, export it")
 	}
 }
+
+// One call of a shared helper is no wrapper when the logic sits in the function
+// literal it is given: the copies are the literal, with or without explicit
+// type arguments on the call.
+func TestDuplicateFuncAcrossPackagesLogicInFunctionLiteralArgument(t *testing.T) {
+	lib := `package lib
+
+// Map applies f to every value.
+func Map[T, U any](xs []T, f func(T) U) []U {
+	out := make([]U, 0, len(xs))
+	for _, x := range xs {
+		out = append(out, f(x))
+	}
+	return out
+}
+`
+	copyOf := func(pkg, call string) string {
+		return `package ` + pkg + `
+
+import (
+	"strconv"
+	"strings"
+
+	"example.com/rulestest/lib"
+)
+
+func labels(xs []int) []string {
+	return ` + call + `(xs, func(x int) string {
+		if x < 0 {
+			return "neg-" + strconv.Itoa(-x)
+		}
+		s := strings.Repeat("*", x%5)
+		return strconv.Itoa(x) + s
+	})
+}
+`
+	}
+	for _, call := range []string{"lib.Map[int, string]", "lib.Map"} {
+		files := map[string]string{"lib/lib.go": lib, "alpha/alpha.go": copyOf("alpha", call), "beta/beta.go": copyOf("beta", call)}
+		assert.Len(t, rulestest.ProjectRulePlaces(t, NewDuplicateFuncAcrossPackagesRule(), files), 1, call)
+	}
+}

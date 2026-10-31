@@ -372,6 +372,17 @@ func helperKey(fn *types.Func) string {
 	return fn.Name() + "|" + types.TypeString(fn.Signature(), nil)
 }
 
+// passesFuncLit reports a call given a function literal: the logic sits in
+// the literal, and the call only runs it.
+func passesFuncLit(call *ast.CallExpr) bool {
+	for _, arg := range call.Args {
+		if _, ok := ast.Unparen(arg).(*ast.FuncLit); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // delegates reports a body of one statement that only calls a function or
 // method of another package: the implementation is already shared.
 func delegates(body *ast.BlockStmt, info *types.Info, own *types.Package) bool {
@@ -392,7 +403,7 @@ func delegateCallee(body *ast.BlockStmt, info *types.Info, own *types.Package) (
 	case *ast.ExprStmt:
 		call, _ = s.X.(*ast.CallExpr)
 	}
-	if call == nil {
+	if call == nil || passesFuncLit(call) {
 		return nil, ""
 	}
 	fun := ast.Unparen(call.Fun)

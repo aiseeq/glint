@@ -159,7 +159,7 @@ func unknownStatusAccepted(body *ast.BlockStmt) []patternkit.FuncFinding {
 		}
 		findings = append(findings, patternkit.FuncFinding{Node: node, Message: "The webhook processing logs a status it does not recognize and returns nil — the sender is told the update was applied and never delivers it again"})
 	}
-	inspectFuncBody(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.IfStmt:
 			if node.Else == nil && comparesToEmptyLiteral(node.Cond) {
@@ -217,7 +217,7 @@ func NewWebhookEvidenceNotPersistedBefore4xxRule() *patternkit.TypedFuncRule {
 			return nil
 		}
 		var findings []patternkit.FuncFinding
-		inspectFuncBody(fn.Body, func(n ast.Node) bool {
+		patternkit.InspectOwn(fn.Body, func(n ast.Node) bool {
 			block, ok := n.(*ast.BlockStmt)
 			if !ok {
 				return true
@@ -243,7 +243,7 @@ func NewWebhookEvidenceNotPersistedBefore4xxRule() *patternkit.TypedFuncRule {
 // io.ReadAll.
 func rawBodies(info *types.Info, body *ast.BlockStmt) []types.Object {
 	var raw []types.Object
-	inspectFuncBody(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
 		if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) == 0 {
 			return true
@@ -331,7 +331,7 @@ func NewCachedTokenNotInvalidatedRule() *patternkit.TypedFuncRule {
 				return nil
 			}
 			var findings []patternkit.FuncFinding
-			inspectFuncBody(fn.Body, func(n ast.Node) bool {
+			patternkit.InspectOwn(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if ok && gets(scope.Info, call, caches) {
 					findings = append(findings, patternkit.FuncFinding{Node: call, Message: "The token comes from a cache with an expiry that nothing can drop — when the server revokes it early, every call fails with 401/403 until the local clock runs out"})
@@ -476,7 +476,7 @@ func gets(info *types.Info, call *ast.CallExpr, caches []tokenCache) bool {
 // readsResponseStatus reports a body reading StatusCode of an *http.Response.
 func readsResponseStatus(info *types.Info, body *ast.BlockStmt) bool {
 	found := false
-	inspectFuncBody(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
 		if ok && sel.Sel.Name == "StatusCode" {
 			t := info.TypeOf(sel.X)

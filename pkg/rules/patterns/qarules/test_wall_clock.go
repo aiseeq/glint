@@ -255,7 +255,7 @@ func (r *TestDependsOnWallClockRule) AnalyzeFile(ctx *core.FileContext) []*core.
 		}
 		for _, tb := range bodiesWithin(bodies, fn) {
 			unused := valuesUnused(tb.body)
-			ownNodes(tb.body, func(n ast.Node) bool {
+			patternkit.InspectOwn(tb.body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok || unused[call] {
 					return true
@@ -308,7 +308,7 @@ func (r *TestDependsOnWallClockRule) clockCallee(pkg *wallClockPackage, call *as
 // error) kept. Such a test checks how the call fails, not what it decided.
 func valuesUnused(body *ast.BlockStmt) map[*ast.CallExpr]bool {
 	unused := make(map[*ast.CallExpr]bool)
-	ownNodes(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.ExprStmt:
 			if call, ok := ast.Unparen(n.X).(*ast.CallExpr); ok {

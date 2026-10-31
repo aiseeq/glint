@@ -94,16 +94,6 @@ func keepsFailureCause(t types.Type) bool {
 	return false
 }
 
-// inspectFuncBody walks a function body without entering function literals.
-func inspectFuncBody(body *ast.BlockStmt, visit func(ast.Node) bool) {
-	ast.Inspect(body, func(n ast.Node) bool {
-		if _, ok := n.(*ast.FuncLit); ok {
-			return false
-		}
-		return visit(n)
-	})
-}
-
 // NewErrorStatusPersistedWithoutCauseRule creates
 // error-status-persisted-without-cause: a function that receives an error and
 // stores a failure status on an entity that has error fields, while the error
@@ -137,7 +127,7 @@ func NewErrorStatusPersistedWithoutCauseRule() *patternkit.TypedFuncRule {
 			return nil
 		}
 		var findings []patternkit.FuncFinding
-		inspectFuncBody(fn.Body, func(n ast.Node) bool {
+		patternkit.InspectOwn(fn.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok || helpers.IsLoggerCall(call) || !storesFailureOfEntity(info, call) {
 				return true
@@ -154,7 +144,7 @@ func NewErrorStatusPersistedWithoutCauseRule() *patternkit.TypedFuncRule {
 // is an argument of a logger call.
 func errorsOnlyLogged(info *types.Info, body *ast.BlockStmt, errParams []types.Object) bool {
 	var logged []*ast.CallExpr
-	inspectFuncBody(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok && helpers.IsLoggerCall(call) {
 			logged = append(logged, call)
 		}
@@ -266,7 +256,7 @@ func NewErrorPathSkipsFailureRecordingRule() *patternkit.TypedFuncRule {
 // a return of a non-nil error, with the entities their failure recorders get.
 func errReturnBranches(info *types.Info, body *ast.BlockStmt) []errBranch {
 	var branches []errBranch
-	inspectFuncBody(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		stmt, ok := n.(*ast.IfStmt)
 		if !ok {
 			return true
@@ -292,7 +282,7 @@ var recorderWords = patternkit.WordSet("record", "fail", "failed", "failure")
 // together with the error: s.recordError(ctx, order, "op", err).
 func recordedEntities(info *types.Info, block *ast.BlockStmt, errObj types.Object) []types.Object {
 	var entities []types.Object
-	inspectFuncBody(block, func(n ast.Node) bool {
+	patternkit.InspectOwn(block, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || helpers.IsLoggerCall(call) || !patternkit.HasTokenIn(helpers.CalleeName(call), recorderWords) {
 			return true
@@ -356,7 +346,7 @@ func isProjectEntity(t types.Type) bool {
 // they check: the call of the if's init, or of the statement before it.
 func errSourceCalls(body *ast.BlockStmt) map[*ast.IfStmt]*ast.CallExpr {
 	sources := make(map[*ast.IfStmt]*ast.CallExpr)
-	inspectFuncBody(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		block, ok := n.(*ast.BlockStmt)
 		if !ok {
 			return true
@@ -544,7 +534,7 @@ func NewProviderSuccessFlagIgnoredRule() *patternkit.TypedFuncRule {
 // declaredBools returns the variables a body declares as `var x bool`.
 func declaredBools(info *types.Info, body *ast.BlockStmt) []types.Object {
 	var flags []types.Object
-	inspectFuncBody(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		decl, ok := n.(*ast.GenDecl)
 		if !ok || decl.Tok != token.VAR {
 			return true
@@ -571,7 +561,7 @@ func declaredBools(info *types.Info, body *ast.BlockStmt) []types.Object {
 func onlyDecodedInto(info *types.Info, body *ast.BlockStmt, obj types.Object) *ast.CallExpr {
 	var target *ast.CallExpr
 	addressed := make(map[*ast.Ident]bool)
-	inspectFuncBody(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -665,7 +655,7 @@ func mentionsAmbiguity(body *ast.BlockStmt) bool {
 // directly, or through a function of the project that does (depth levels).
 func failureRecording(scope patternkit.FuncScope, block *ast.BlockStmt, depth int) *ast.CallExpr {
 	var found *ast.CallExpr
-	inspectFuncBody(block, func(n ast.Node) bool {
+	patternkit.InspectOwn(block, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || found != nil {
 			return found == nil

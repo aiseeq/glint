@@ -63,20 +63,10 @@ func testingBodies(file *ast.File) []testingBody {
 	return bodies
 }
 
-// ownNodes visits the nodes of a body without entering function literals.
-func ownNodes(body ast.Node, visit func(ast.Node) bool) {
-	ast.Inspect(body, func(n ast.Node) bool {
-		if _, ok := n.(*ast.FuncLit); ok {
-			return false
-		}
-		return visit(n)
-	})
-}
-
 // failsTest reports a node holding a call that can fail the test.
 func failsTest(node ast.Node, handles map[string]bool) bool {
 	found := false
-	ownNodes(node, func(n ast.Node) bool {
+	patternkit.InspectOwn(node, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok && (callIsFailing(call, handles) || isSkipCall(call, handles)) {
 			found = true
 		}
@@ -167,7 +157,7 @@ func (r *TestWaitPassesOnExhaustionRule) AnalyzeFile(ctx *core.FileContext) []*c
 // returns on success and nothing after it fails.
 func (r *TestWaitPassesOnExhaustionRule) silentGiveUps(loop *ast.ForStmt, after []ast.Stmt, handles map[string]bool) []ast.Node {
 	var found []ast.Node
-	ownNodes(loop.Body, func(n ast.Node) bool {
+	patternkit.InspectOwn(loop.Body, func(n ast.Node) bool {
 		branch, ok := n.(*ast.IfStmt)
 		if ok && exhausted(branch.Cond) && !failsTest(branch.Body, handles) && endsInBareReturn(branch.Body) {
 			found = append(found, branch)
@@ -257,7 +247,7 @@ func endsInBareReturn(block *ast.BlockStmt) bool {
 
 func returnsInside(block *ast.BlockStmt) bool {
 	found := false
-	ownNodes(block, func(n ast.Node) bool {
+	patternkit.InspectOwn(block, func(n ast.Node) bool {
 		if _, ok := n.(*ast.ReturnStmt); ok {
 			found = true
 		}
@@ -493,7 +483,7 @@ func (r *TestAcceptsServerErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.
 		}
 	}
 	for _, tb := range testingBodies(ctx.GoAST) {
-		ownNodes(tb.body, func(n ast.Node) bool {
+		patternkit.InspectOwn(tb.body, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.CallExpr:
 				if callIsFailing(node, tb.handles) && assertsUpToServerError(node) {
@@ -971,7 +961,7 @@ func (r *TestChannelReceiveWithoutTimeoutRule) AnalyzeFile(ctx *core.FileContext
 	for _, tb := range testingBodies(ctx.GoAST) {
 		guarded := selectReceives(tb.body)
 		counted := countedChannels(tb.body)
-		ownNodes(tb.body, func(n ast.Node) bool {
+		patternkit.InspectOwn(tb.body, func(n ast.Node) bool {
 			recv, ok := n.(*ast.UnaryExpr)
 			if !ok || recv.Op != token.ARROW || guarded[recv] || !foreignChannel(recv.X) {
 				return true
@@ -1015,7 +1005,7 @@ func selectReceives(body *ast.BlockStmt) map[*ast.UnaryExpr]bool {
 // does not block.
 func countedChannels(body *ast.BlockStmt) map[string]token.Pos {
 	counted := make(map[string]token.Pos)
-	ownNodes(body, func(n ast.Node) bool {
+	patternkit.InspectOwn(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || !helpers.IsIdentNamed(call.Fun, "len") || len(call.Args) != 1 {
 			return true
