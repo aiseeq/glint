@@ -1,6 +1,6 @@
 # sql-injection: a value from the HTTP request is not a taint source
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Что сделать
@@ -84,3 +84,4 @@
 - 2026-10-31 22:09 note — glint-master: 2-й круг влит a83e3dd (боец 1031-2158-sql-review2): accept-sql-review2.sh ok (5 проб, self-check чист); тест d785423 «typed values and headers» 2→0 — он закреплял ложные находки; consumers 20 проектов 0 разниц (consumers-sql-review2.txt)
 - 2026-10-31 22:16 note — glint-master: проверка Terra 1031-2128-glint 3-й заход: вернуть — defer/go closure без записи после проверки стала ложной (review3.go:5 :9), len(map) снимает конечность (:15), алиас u := r.URL теряет источник (http review3.go:25 :40). Остаток вне охвата: поля структур (http :15 :20), map в пользовательскую функцию только на чтение (sql :28 :46), ^.*$. 3-й круг: боец Luna, brief-sql-review3.md, accept-sql-review3.sh
 - 2026-10-31 22:25 note — glint-master: 3-й круг влит 58e1d44 (боец 1031-2216-sql-review3 + glint-master: на ревью найдено переполнение стека в isHTTPRequestURL при цикле присваиваний a = b; b = a — проба security/probe-cycle, тест TestSQLInjectionURLAssignmentCycleEnds, защита visiting как в httpRequestContainer). accept-sql-review3.sh ok; consumers 20 проектов 0 разниц (consumers-sql-review3.txt)
+- 2026-10-31 22:34 готово — terra-1031-2128-glint (session glint-master): Terra 1031-2128-glint, 4-й заход: по этому тикету готово (/home/aisee/.cache/worktrees/glint-measure/security/verdict-sql.md: verify-http probe.go и review3.go установленным glint c30105c, циклы присваиваний без падения, go test security ok, consumers 0 разниц). Остаток: поля структур
