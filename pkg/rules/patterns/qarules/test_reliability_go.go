@@ -882,7 +882,7 @@ func rowSelectingArgs(call *ast.CallExpr) []ast.Expr {
 }
 
 // makesIsolatedDatabase reports a file that creates an isolated database for
-// its tests (CreateIsolatedTestDB): its rows are not the application's.
+// its tests (CreateIsolatedTestStore): its rows are not the application's.
 func makesIsolatedDatabase(file *ast.File) bool {
 	return helpers.ContainsNode[*ast.CallExpr](file, func(call *ast.CallExpr) bool {
 		return strings.Contains(strings.ToLower(helpers.CalleeName(call)), "isolated")

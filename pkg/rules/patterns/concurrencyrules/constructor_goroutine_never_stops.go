@@ -20,7 +20,7 @@ func init() {
 //
 //	func NewTracker() *Tracker {
 //		t := &Tracker{}
-//		go t.cleanupLoop()     // for range ticker.C { ... } - forever
+//		go t.sweepLoop()     // for range ticker.C { ... } - forever
 //		return t
 //	}
 //

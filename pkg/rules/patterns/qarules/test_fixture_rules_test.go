@@ -103,7 +103,7 @@ func TestWarm(t *testing.T) {
 	defer server.Close()
 	client := NewClient(server.URL)
 	client.Warm()
-	if !waitForCondition(func() bool { return hits.Load() > 0 }, 5*time.Second) {
+	if !waitForSignal(func() bool { return hits.Load() > 0 }, 5*time.Second) {
 		t.Fatal("no request")
 	}
 	records, err := client.Search()
@@ -133,7 +133,7 @@ func TestDefers(t *testing.T) {
 	server := searchServer(t, &hits)
 	client := NewClient(server.URL)
 	client.Warm()
-	if !waitForCondition(func() bool { return hits.Load() > 0 }, 5*time.Second) {
+	if !waitForSignal(func() bool { return hits.Load() > 0 }, 5*time.Second) {
 		t.Fatal("no request")
 	}
 }
@@ -143,7 +143,7 @@ func TestCached(t *testing.T) {
 	server := searchServer(t, &hits)
 	client := NewClient(server.URL)
 	client.Warm()
-	if !waitForCondition(func() bool { return client.Cached() }, 5*time.Second) {
+	if !waitForSignal(func() bool { return client.Cached() }, 5*time.Second) {
 		t.Fatal("not warmed")
 	}
 	client.Search()
@@ -152,7 +152,7 @@ func TestCached(t *testing.T) {
 func TestLocal(t *testing.T) {
 	var done atomic.Int64
 	go func() { done.Add(1) }()
-	waitForCondition(func() bool { return done.Load() > 0 }, time.Second)
+	waitForSignal(func() bool { return done.Load() > 0 }, time.Second)
 	run()
 }
 `,

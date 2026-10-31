@@ -132,7 +132,7 @@ func TestGo_PanicDoesNotEscapeGoroutine(t *testing.T) {
 import "testing"
 
 func TestAdapter_HasGetUsersByIDs(t *testing.T) {
-	var _ batchUsersByIDsCheck = (*repository.UserDomainRepositoryAdapter)(nil)
+	var _ batchUsersByIDsCheck = (*repository.MemberRepositoryAdapter)(nil)
 }
 `,
 			wantCount: 0,

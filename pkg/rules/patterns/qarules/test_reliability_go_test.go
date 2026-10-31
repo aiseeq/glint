@@ -16,7 +16,7 @@ func TestSubtestFixtureCleanedEarly(t *testing.T) {
 
 import "testing"
 
-func CreateTestUser(t *testing.T, client *Client, email string) *Response {
+func CreateTestMember(t *testing.T, client *Client, email string) *Response {
 	return registerUser(t, client, email)
 }
 
@@ -44,7 +44,7 @@ func TestLogin(t *testing.T) {
 	var registered *auth.Response
 	var found *auth.Response
 	t.Run("prepare", func(t *testing.T) {
-		registered = auth.CreateTestUser(t, client, "a@example.com")
+		registered = auth.CreateTestMember(t, client, "a@example.com")
 		found = auth.FindTestUser(t, client, "a@example.com")
 	})
 	t.Run("login", func(t *testing.T) {
@@ -53,7 +53,7 @@ func TestLogin(t *testing.T) {
 }
 
 func TestLoginParent(t *testing.T) {
-	registered := auth.CreateTestUser(t, client, "a@example.com")
+	registered := auth.CreateTestMember(t, client, "a@example.com")
 	t.Run("login", func(t *testing.T) {
 		login(t, registered)
 	})
@@ -62,7 +62,7 @@ func TestLoginParent(t *testing.T) {
 func TestLoginSameSubtest(t *testing.T) {
 	var registered *auth.Response
 	t.Run("all", func(t *testing.T) {
-		registered = auth.CreateTestUser(t, client, "a@example.com")
+		registered = auth.CreateTestMember(t, client, "a@example.com")
 		login(t, registered)
 	})
 }
@@ -364,7 +364,7 @@ func TestCleanupOfAnotherChange(t *testing.T) {
 }
 
 func TestSeededLock(t *testing.T) {
-	registry.SeedFirstSeen(seen)
+	registry.SeedInitialSeen(seen)
 	require.False(t, fresh)
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
@@ -421,7 +421,7 @@ import (
 )
 
 func TestGift(t *testing.T) {
-	idb := testutil.CreateIsolatedTestDB(t)
+	idb := testutil.CreateIsolatedTestStore(t)
 	_, _ = idb.ExecContext(ctx, "DELETE FROM investments WHERE user_id = $1", models.SystemUserID)
 }
 `)

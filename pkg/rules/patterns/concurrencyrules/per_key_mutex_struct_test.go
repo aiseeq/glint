@@ -21,8 +21,8 @@ type Service struct {
 	every  time.Duration
 }
 
-// SyncWallet stores the wallet's transactions.
-func (s *Service) SyncWallet(ctx context.Context, wallet string) error {
+// SyncAccount stores the wallet's transactions.
+func (s *Service) SyncAccount(ctx context.Context, wallet string) error {
 	s.syncMu.Lock()
 	defer s.syncMu.Unlock()
 	s.logger.Info("sync", wallet)
@@ -30,7 +30,7 @@ func (s *Service) SyncWallet(ctx context.Context, wallet string) error {
 }
 
 func (s *Service) syncChain(ctx context.Context, wallet string) error {
-	return s.txRepo.UpsertBatch(ctx, wallet)
+	return s.txRepo.UpsertItems(ctx, wallet)
 }
 `))
 	assert.Empty(t, patterntest.SqlFileRuleLines(t, NewPerKeyMutexMapRule(), "service/prices.go", `package service

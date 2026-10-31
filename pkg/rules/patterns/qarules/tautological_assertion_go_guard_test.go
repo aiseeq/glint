@@ -127,7 +127,7 @@ import (
 
 type Article struct{ Title string }
 
-func loadArticles(dir string) ([]Article, error) {
+func loadRecords(dir string) ([]Article, error) {
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err

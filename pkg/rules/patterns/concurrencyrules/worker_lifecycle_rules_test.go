@@ -98,7 +98,7 @@ import (
 
 type Repo struct{}
 
-func (r *Repo) ListUnfinished(ctx context.Context) ([]string, error) { return nil, nil }
+func (r *Repo) ListPending(ctx context.Context) ([]string, error) { return nil, nil }
 
 type Worker struct {
 	queue  chan string
@@ -117,7 +117,7 @@ func (w *Worker) Enqueue(id string) {
 }
 
 func (w *Worker) Run(ctx context.Context) {
-	ids, _ := w.repo.ListUnfinished(ctx)
+	ids, _ := w.repo.ListPending(ctx)
 	for _, id := range ids {
 		w.process(ctx, id)
 	}
@@ -170,7 +170,7 @@ func (w *Worker) RunTicked(ctx context.Context) {
 		case id := <-w.ticked:
 			w.process(ctx, id)
 		case <-ticker.C:
-			ids, _ := w.repo.ListUnfinished(ctx)
+			ids, _ := w.repo.ListPending(ctx)
 			for _, id := range ids {
 				w.process(ctx, id)
 			}
@@ -247,7 +247,7 @@ func (a *Alerter) SendStuckAlert(ids []string) error { return nil }
 
 type Store struct{}
 
-func (s *Store) MarkAlerted(ctx context.Context, ids []string) error { return nil }
+func (s *Store) MarkNotified(ctx context.Context, ids []string) error { return nil }
 
 type Batch struct{}
 
@@ -262,7 +262,7 @@ func (t *Tx) Commit(ctx context.Context) error             { return nil }
 
 type Key struct{ ID string }
 
-func TransferKeyOf(id string) Key { return Key{ID: id} }
+func ItemKeyOf(id string) Key { return Key{ID: id} }
 
 type Monitor struct {
 	alerter *Alerter
@@ -275,7 +275,7 @@ func (m *Monitor) Alert(ctx context.Context, ids []string) error {
 	if err := m.alerter.SendStuckAlert(ids); err != nil {
 		return fmt.Errorf("send alert: %w", err)
 	}
-	return m.store.MarkAlerted(ctx, ids)
+	return m.store.MarkNotified(ctx, ids)
 }
 
 // A database batch is not an outbound command.
@@ -289,7 +289,7 @@ func (m *Monitor) StorePage(ctx context.Context, tx *Tx, b *Batch) error {
 
 // A key built from a transfer sends nothing.
 func (m *Monitor) Classify(ctx context.Context, id string) error {
-	key := TransferKeyOf(id)
+	key := ItemKeyOf(id)
 	return m.repo.UpdateSent(ctx, key.ID, "")
 }
 `,
@@ -302,18 +302,18 @@ type Item struct{ ID, Lease string }
 type Worker struct{ repo *Repo }
 
 func (w *Worker) deliver(ctx context.Context, item Item) error { return nil }
-func (w *Worker) finalizeLease(ctx context.Context, id string, mark func(context.Context) error) error {
+func (w *Worker) finalizeTask(ctx context.Context, id string, mark func(context.Context) error) error {
 	return mark(ctx)
 }
 func (w *Worker) markSent(ctx context.Context, id, lease string) error { return nil }
-func (w *Worker) handleFailure(ctx context.Context, item Item, err error) error { return nil }
+func (w *Worker) handleError(ctx context.Context, item Item, err error) error { return nil }
 
 func (w *Worker) Process(ctx context.Context, item Item) {
 	if err := w.deliver(ctx, item); err != nil {
-		if ferr := w.handleFailure(ctx, item, err); ferr != nil {
+		if ferr := w.handleError(ctx, item, err); ferr != nil {
 			return
 		}
-	} else if markErr := w.finalizeLease(ctx, item.ID, func(attemptCtx context.Context) error {
+	} else if markErr := w.finalizeTask(ctx, item.ID, func(attemptCtx context.Context) error {
 		return w.markSent(attemptCtx, item.ID, item.Lease)
 	}); markErr != nil {
 		return
@@ -322,10 +322,10 @@ func (w *Worker) Process(ctx context.Context, item Item) {
 
 func (w *Worker) ProcessDetached(ctx context.Context, item Item) {
 	if err := w.deliver(ctx, item); err != nil {
-		_ = w.handleFailure(ctx, item, err)
+		_ = w.handleError(ctx, item, err)
 		return
 	}
-	_ = w.finalizeLease(context.WithoutCancel(ctx), item.ID, func(attemptCtx context.Context) error {
+	_ = w.finalizeTask(context.WithoutCancel(ctx), item.ID, func(attemptCtx context.Context) error {
 		return w.markSent(attemptCtx, item.ID, item.Lease)
 	})
 }
@@ -405,7 +405,7 @@ import (
 	"time"
 )
 
-func startWorkers(ctx context.Context) {}
+func startItemWorkers(ctx context.Context) {}
 
 func shutdown(server *http.Server) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -416,7 +416,7 @@ func shutdown(server *http.Server) error {
 func Run() error {
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
-	startWorkers(workerCtx)
+	startItemWorkers(workerCtx)
 	server := &http.Server{}
 	_ = server.ListenAndServe()
 
@@ -427,7 +427,7 @@ func Run() error {
 func RunDrained() error {
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
-	startWorkers(workerCtx)
+	startItemWorkers(workerCtx)
 	server := &http.Server{}
 	_ = server.ListenAndServe()
 	if err := shutdown(server); err != nil {
@@ -506,14 +506,14 @@ func (a *Admin) handleParse(w http.ResponseWriter, r *http.Request) {
 
 func (a *Admin) handleOwnDeadline(w http.ResponseWriter, r *http.Request) {
 	var cancel context.CancelFunc
-	r, cancel = a.withUploadDeadline(r)
+	r, cancel = a.withRequestDeadline(r)
 	defer cancel()
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		return
 	}
 }
 
-func (a *Admin) withUploadDeadline(r *http.Request) (*http.Request, context.CancelFunc) {
+func (a *Admin) withRequestDeadline(r *http.Request) (*http.Request, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Minute)
 	return r.WithContext(ctx), cancel
 }
@@ -542,7 +542,7 @@ import (
 	"time"
 )
 
-type QuoteResponse struct {
+type OfferReceipt struct {
 	ID        string ` + "`json:\"id\"`" + `
 	ExpiresAt string ` + "`json:\"expires_at\"`" + `
 }
@@ -555,10 +555,10 @@ type OfferResponse struct {
 // OfferTTL is how long an offer holds; Confirm refuses an older one.
 const OfferTTL = 10 * time.Minute
 
-func createQuote(w http.ResponseWriter, r *http.Request) {
-	// Quote expires in 15 minutes.
+func writeOffer(w http.ResponseWriter, r *http.Request) {
+	// Offer expires in 15 minutes.
 	expiresAt := time.Now().Add(15 * time.Minute)
-	_ = json.NewEncoder(w).Encode(QuoteResponse{ID: "q1", ExpiresAt: expiresAt.Format(time.RFC3339)})
+	_ = json.NewEncoder(w).Encode(OfferReceipt{ID: "q1", ExpiresAt: expiresAt.Format(time.RFC3339)})
 }
 
 func createOffer(w http.ResponseWriter, r *http.Request) {
@@ -579,7 +579,7 @@ func issueLink(w http.ResponseWriter, r *http.Request) {
 	if err := links.Issue("t", expiresAt); err != nil {
 		return
 	}
-	_ = json.NewEncoder(w).Encode(QuoteResponse{ID: "t", ExpiresAt: expiresAt.Format(time.RFC3339)})
+	_ = json.NewEncoder(w).Encode(OfferReceipt{ID: "t", ExpiresAt: expiresAt.Format(time.RFC3339)})
 }
 
 func confirmOffer(createdAt time.Time) bool {

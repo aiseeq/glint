@@ -721,7 +721,7 @@ func recordsOn(info *types.Info, call *ast.CallExpr, cancellable map[types.Objec
 // drains takes the workers away from the requests still being served:
 //
 //	workerCancel()
-//	return shutdownHTTPServer(server)    // server.Shutdown drains requests
+//	return shutdownHTTPHost(server)    // server.Shutdown drains requests
 func NewWorkersCancelledBeforeHTTPDrainRule() *patternkit.TypedFuncRule {
 	r := &patternkit.TypedFuncRule{
 		BaseRule: rules.NewBaseRule(
@@ -982,7 +982,7 @@ var expiryFieldWords = [][]string{{"expires", "at"}, {"expire", "at"}, {"expiry"
 // server accepts what it told the client had expired:
 //
 //	expiresAt := time.Now().Add(15 * time.Minute)
-//	writeJSON(w, QuoteResponse{ExpiresAt: expiresAt.Format(time.RFC3339)})
+//	writeJSON(w, OfferResponse{ExpiresAt: expiresAt.Format(time.RFC3339)})
 func NewExpiryIssuedNeverEnforcedRule() *patternkit.TypedFuncRule {
 	r := &patternkit.TypedFuncRule{
 		BaseRule: rules.NewBaseRule(

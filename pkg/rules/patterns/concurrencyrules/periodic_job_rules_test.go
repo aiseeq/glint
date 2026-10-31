@@ -25,11 +25,11 @@ func (r *Repo) CountPairsForDate(ctx context.Context, date time.Time, pairs []st
 	return 0, nil
 }
 func (r *Repo) HasRate(ctx context.Context, pair string, date time.Time) (bool, error) { return false, nil }
-func (r *Repo) HasRefreshAttempt(ctx context.Context, date time.Time) (bool, error)  { return false, nil }
+func (r *Repo) HasSyncAttempt(ctx context.Context, date time.Time) (bool, error)  { return false, nil }
 func (r *Repo) Upsert(ctx context.Context, pair string, rate float64, date time.Time) error {
 	return nil
 }
-func (r *Repo) TryStartRefreshAttempt(ctx context.Context, date time.Time, source string) (bool, error) {
+func (r *Repo) TryStartSyncAttempt(ctx context.Context, date time.Time, source string) (bool, error) {
 	return true, nil
 }
 func (r *Repo) DeleteRefreshAttempt(ctx context.Context, date time.Time, source string) error {
@@ -197,7 +197,7 @@ type Marked struct {
 
 func (r *Marked) check(ctx context.Context) {
 	date := today()
-	done, err := r.repo.HasRefreshAttempt(ctx, date)
+	done, err := r.repo.HasSyncAttempt(ctx, date)
 	if err != nil || done {
 		return
 	}
@@ -264,7 +264,7 @@ func (r *Dynamic) check(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	started, err := r.repo.TryStartRefreshAttempt(ctx, date, "primary")
+	started, err := r.repo.TryStartSyncAttempt(ctx, date, "primary")
 	if err != nil || !started {
 		return
 	}
@@ -298,7 +298,7 @@ func (r *Keyed) check(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	started, err := r.repo.TryStartRefreshAttempt(ctx, date, fingerprint(pairs))
+	started, err := r.repo.TryStartSyncAttempt(ctx, date, fingerprint(pairs))
 	if err != nil || !started {
 		return
 	}
@@ -316,7 +316,7 @@ type Fixed struct {
 func (r *Fixed) check(ctx context.Context) {
 	date := today()
 	pairs := staticPairs
-	started, err := r.repo.TryStartRefreshAttempt(ctx, date, "primary")
+	started, err := r.repo.TryStartSyncAttempt(ctx, date, "primary")
 	if err != nil || !started {
 		return
 	}
@@ -349,7 +349,7 @@ type Early struct {
 
 func (r *Early) check(ctx context.Context) {
 	date := today()
-	started, err := r.repo.TryStartRefreshAttempt(ctx, date, "primary")
+	started, err := r.repo.TryStartSyncAttempt(ctx, date, "primary")
 	if err != nil {
 		return
 	}
@@ -385,14 +385,14 @@ type Late struct {
 
 func (r *Late) check(ctx context.Context) {
 	date := today()
-	done, err := r.repo.HasRefreshAttempt(ctx, date)
+	done, err := r.repo.HasSyncAttempt(ctx, date)
 	if err != nil || done {
 		return
 	}
 	if err := r.fetch(ctx, date); err != nil {
 		return
 	}
-	_, _ = r.repo.TryStartRefreshAttempt(ctx, date, "primary")
+	_, _ = r.repo.TryStartSyncAttempt(ctx, date, "primary")
 }
 
 func (r *Late) fetch(ctx context.Context, date time.Time) error {
@@ -415,7 +415,7 @@ type Released struct {
 
 func (r *Released) check(ctx context.Context) {
 	date := today()
-	started, err := r.repo.TryStartRefreshAttempt(ctx, date, "primary")
+	started, err := r.repo.TryStartSyncAttempt(ctx, date, "primary")
 	if err != nil || !started {
 		return
 	}

@@ -22,7 +22,7 @@ func init() {
 //
 //	go func() {
 //		for range s.ticker.C {
-//			s.refreshBalances()      // one malformed provider reply kills the server
+//			s.refreshItems()      // one malformed provider reply kills the server
 //		}
 //	}()
 //

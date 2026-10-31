@@ -21,7 +21,7 @@ func init() {
 //
 //	var user *Response
 //	t.Run("prepare", func(t *testing.T) {
-//	    user = CreateTestUser(t, client)   // registers t.Cleanup on the subtest
+//	    user = CreateTestMember(t, client)   // registers t.Cleanup on the subtest
 //	})
 //	t.Run("login", func(t *testing.T) {
 //	    login(t, client, user)             // the user is already deleted

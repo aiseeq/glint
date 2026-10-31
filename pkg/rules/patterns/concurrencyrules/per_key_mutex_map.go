@@ -90,15 +90,15 @@ var storeFieldName = regexp.MustCompile(`(?i)repo|store|dao|\bdb\b|^db|database`
 // structMutexes reports a service's mutex field that guards none of the
 // service's own data, only operations that write to a database:
 //
-//	type TransactionService struct {
-//	    txRepo *repository.TransactionRepository
+//	type RecordService struct {
+//	    txRepo *repository.RecordRepository
 //	    syncMu sync.Mutex
 //	}
 //
-//	func (s *TransactionService) SyncWallet(ctx context.Context, wallet string) error {
+//	func (s *RecordService) SyncAccount(ctx context.Context, wallet string) error {
 //	    s.syncMu.Lock()
 //	    defer s.syncMu.Unlock()
-//	    ... s.txRepo.UpsertBatch(ctx, rows)
+//	    ... s.txRepo.UpsertItems(ctx, rows)
 //
 // It serializes the operation inside one process: a second instance, a
 // worker or an overlapping deploy runs it at the same time against the same

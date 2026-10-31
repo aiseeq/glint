@@ -74,7 +74,7 @@ func NewPeriodicJobDoneCheckByAnyRowRule() *patternkit.TypedFuncRule {
 // period finds the period attempted and waits for the next one:
 //
 //	pairs, _ := r.config.ActivePairs(ctx)
-//	started, _ := r.repo.TryStartRefreshAttempt(ctx, date)   // pairs not in the key
+//	started, _ := r.repo.TryStartSyncAttempt(ctx, date)   // pairs not in the key
 //	if !started {
 //		return
 //	}
@@ -110,11 +110,11 @@ func NewPeriodAttemptMarkerIgnoresWorkSetRule() *patternkit.TypedFuncRule {
 // taken back when the work fails, burns the period on a transient failure -
 // every later run finds it attempted and does nothing until the next period:
 //
-//	started, _ := r.repo.TryStartRefreshAttempt(ctx, date)
+//	started, _ := r.repo.TryStartSyncAttempt(ctx, date)
 //	if !started {
 //		return
 //	}
-//	r.fetchAndStore(ctx, date)    // fails: no retry today
+//	r.fetchAndSave(ctx, date)    // fails: no retry today
 //
 // An event marked processed by its duplicate check, before the processing,
 // is the same trap per event: the sender's redelivery of an event whose
@@ -346,7 +346,7 @@ func periodCheck(info *types.Info, stmt ast.Stmt, kind checkKind) (*ast.CallExpr
 }
 
 // isAttemptMarker reports a call that records the attempt of a run:
-// TryStartRefreshAttempt, RecordAttempt, TryClaimDay.
+// TryStartSyncAttempt, RecordAttempt, TryClaimDay.
 func isAttemptMarker(name string, words []string) bool {
 	if slices.Contains(words, "attempt") {
 		return !helpers.HasLeadingWord(name, "Has") && !helpers.HasLeadingWord(name, "Get") && !helpers.HasLeadingWord(name, "Count") && !helpers.HasLeadingWord(name, "Delete")

@@ -22,7 +22,7 @@ type Tracker struct {
 
 func NewTracker() *Tracker {
 	t := &Tracker{cache: map[string]time.Time{}}
-	go t.cleanupLoop()
+	go t.sweepLoop()
 	return t
 }
 
@@ -44,7 +44,7 @@ func NewPoller(fetch func()) *Poller {
 
 import "time"
 
-func (t *Tracker) cleanupLoop() {
+func (t *Tracker) sweepLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {

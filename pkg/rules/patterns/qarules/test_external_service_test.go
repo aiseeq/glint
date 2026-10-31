@@ -345,13 +345,13 @@ func TestTestExternalServiceRule_ConfigureGuards(t *testing.T) {
 	rule := NewTestExternalServiceRule()
 
 	require.NoError(t, rule.Configure(map[string]any{
-		"guard_functions": []any{"tests.RequireLiveExternal"},
+		"guard_functions": []any{"tests.RequireLiveEndpoint"},
 	}))
 
 	guarded := parseForRule(t, `package integration
 
 func TestCryptoProvAuthentication(t *testing.T) {
-	tests.RequireLiveExternal(t, "cryptoprov TakeChannel")
+	tests.RequireLiveEndpoint(t, "cryptoprov TakeRoute")
 	client := cryptoprov.NewHTTPClient(cfg, logger)
 	_ = client
 }
@@ -398,7 +398,7 @@ func NewHTTPClient(cfg Config) *HTTPClient {
 	return &HTTPClient{config: cfg, http: &http.Client{Timeout: time.Second}}
 }
 
-func (c *HTTPClient) TakeChannel(id string) error {
+func (c *HTTPClient) TakeRoute(id string) error {
 	req, err := http.NewRequest("POST", c.config.BaseURL+"/channel/"+id, nil)
 	if err != nil {
 		return err
@@ -411,20 +411,20 @@ type ConfigService struct {
 	config Config
 }
 
-func NewConfigService(cfg Config) *ConfigService { return &ConfigService{config: cfg} }
+func NewRuntimeService(cfg Config) *ConfigService { return &ConfigService{config: cfg} }
 
 func (s *ConfigService) BaseURL() string { return s.config.BaseURL }
 
-type DepositService struct {
+type OrderService struct {
 	client *HTTPClient
 }
 
-func NewDepositService(client *HTTPClient, cfg *ConfigService) *DepositService {
+func NewOrderService(client *HTTPClient, cfg *ConfigService) *OrderService {
 	_ = cfg
-	return &DepositService{client: client}
+	return &OrderService{client: client}
 }
 
-func (s *DepositService) Allocate(id string) error { return s.client.TakeChannel(id) }
+func (s *OrderService) Allocate(id string) error { return s.client.TakeRoute(id) }
 
 type Repo struct{}
 
@@ -441,7 +441,7 @@ func (s *PositionService) List() []string      { return nil }
 func (s *PositionService) Get(id string) string { return id }
 func (s *PositionService) Save(id string) error { return nil }
 func (s *PositionService) Refresh(id string) error {
-	return NewHTTPClient(s.cfg).TakeChannel(id)
+	return NewHTTPClient(s.cfg).TakeRoute(id)
 }
 `,
 		"integration/provider_test.go": `package integration
@@ -454,16 +454,16 @@ import (
 
 func TestLiveClient(t *testing.T) {
 	client := provider.NewHTTPClient(provider.Config{})
-	_ = client.TakeChannel("42")
+	_ = client.TakeRoute("42")
 }
 
 func TestConfigOnly(t *testing.T) {
-	svc := provider.NewConfigService(provider.Config{})
+	svc := provider.NewRuntimeService(provider.Config{})
 	_ = svc.BaseURL()
 }
 
 func TestDepositWritesToDB(t *testing.T) {
-	svc := provider.NewDepositService(nil, provider.NewConfigService(provider.Config{}))
+	svc := provider.NewOrderService(nil, provider.NewRuntimeService(provider.Config{}))
 	_ = svc
 }
 
@@ -542,7 +542,7 @@ func NewHTTPClient(cfg Config) *HTTPClient {
 	return &HTTPClient{config: cfg, http: &http.Client{Timeout: time.Second}}
 }
 
-func (c *HTTPClient) TakeChannel(id string) error {
+func (c *HTTPClient) TakeRoute(id string) error {
 	req, err := http.NewRequest("POST", c.config.BaseURL+"/channel/"+id, nil)
 	if err != nil {
 		return err
@@ -557,7 +557,7 @@ import "testing"
 
 func TestLiveChannel(t *testing.T) {
 	client := NewHTTPClient(Config{})
-	_ = client.TakeChannel("42")
+	_ = client.TakeRoute("42")
 }
 `,
 	})
@@ -570,7 +570,7 @@ func TestLiveChannel(t *testing.T) {
 }
 
 // nil гасит находку только на месте транспорта: nil вместо необязательных опций
-// запрос не отменяет, и payprov.FetchRates(ctx, nil) уходит к провайдеру.
+// запрос не отменяет, и payprov.FetchItems(ctx, nil) уходит к провайдеру.
 func TestTestExternalServiceRule_NilOptionsStillReachTheWire(t *testing.T) {
 	project := rulestest.Project(t, map[string]string{
 		"payprov/client.go": `package payprov
@@ -584,7 +584,7 @@ const baseURL = "https://api.payprov.io/v1"
 
 type Opts struct{ Verbose bool }
 
-func FetchRates(ctx context.Context, opts *Opts) (*http.Response, error) {
+func FetchItems(ctx context.Context, opts *Opts) (*http.Response, error) {
 	_ = opts
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/rates", nil)
 	if err != nil {
@@ -603,11 +603,11 @@ import (
 )
 
 func TestRatesLive(t *testing.T) {
-	_, _ = payprov.FetchRates(context.Background(), nil)
+	_, _ = payprov.FetchItems(context.Background(), nil)
 }
 
 func TestRatesLive2(t *testing.T) {
-	_, _ = payprov.FetchRates(context.Background(), &payprov.Opts{})
+	_, _ = payprov.FetchItems(context.Background(), &payprov.Opts{})
 }
 `,
 	})

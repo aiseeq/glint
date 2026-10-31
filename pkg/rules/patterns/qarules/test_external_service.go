@@ -645,7 +645,7 @@ func (r *TestExternalServiceRule) outboundCalls(
 		}
 		// Конструктор, которому транспорт передали как nil, никуда не пойдёт: так тесты
 		// собирают настоящий сервис ради его работы с БД. ProjectA-шный тест на пыль
-		// (cryptoprov.NewDepositService(nil, …)) именно такой. nil на месте опций или
+		// (cryptoprov.NewOrderService(nil, …)) именно такой. nil на месте опций или
 		// контекста запрос не отменяет.
 		if entry.nilTransport(call) {
 			return true

@@ -88,7 +88,7 @@ func (s *Service) fresh(deposits []depositAlert) []depositAlert {
 	return out
 }
 
-func (s *Service) markAlerted(deposits []depositAlert) {
+func (s *Service) markNotified(deposits []depositAlert) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, deposit := range deposits {
@@ -190,7 +190,7 @@ type SendRequest struct {
 	UserID int64
 }
 
-type FieldsRequest struct{ TransferType, PayoutCountry string }
+type ItemRequest struct{ TransferType, PayoutCountry string }
 
 type Bot struct {
 	mu       sync.Mutex
@@ -211,7 +211,7 @@ func (b *Bot) limiter(req SendRequest) int {
 	return b.limiters[key]
 }
 
-func (b *Bot) Fields(req FieldsRequest) []string {
+func (b *Bot) Fields(req ItemRequest) []string {
 	cacheKey := req.TransferType + "|" + req.PayoutCountry
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -356,18 +356,18 @@ import (
 	"sync"
 )
 
-type requestCache struct {
+type responseCache struct {
 	mu      sync.Mutex
 	byRange map[string]int
 }
 
 type cacheKey struct{}
 
-func WithRequestCache(ctx context.Context) context.Context {
-	return context.WithValue(ctx, cacheKey{}, &requestCache{byRange: map[string]int{}})
+func WithResponseCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, cacheKey{}, &responseCache{byRange: map[string]int{}})
 }
 
-func (c *requestCache) remember(key string, v int) {
+func (c *responseCache) remember(key string, v int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.byRange[key] = v

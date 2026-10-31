@@ -31,7 +31,7 @@ func TestSchemaMutationWithoutCleanupRule_Detection(t *testing.T) {
 import "testing"
 
 func TestReadSurvivesNewColumn(t *testing.T) {
-	db := CreateIsolatedTestDB(t)
+	db := CreateIsolatedTestStore(t)
 	db.MustExec("ALTER TABLE vault_snapshots ADD COLUMN probe TEXT")
 	require.NotNil(t, db)
 }`,
@@ -44,7 +44,7 @@ func TestReadSurvivesNewColumn(t *testing.T) {
 import "testing"
 
 func TestReadSurvivesNewColumn(t *testing.T) {
-	db := CreateIsolatedTestDB(t)
+	db := CreateIsolatedTestStore(t)
 	db.MustExec("ALTER TABLE vault_snapshots ADD COLUMN probe TEXT")
 	t.Cleanup(func() { db.MustExec("ALTER TABLE vault_snapshots DROP COLUMN probe") })
 }`,
@@ -255,7 +255,7 @@ func TestSchemaBehind(t *testing.T) {
 
 import "testing"
 
-func createDatabaseFromTemplate(t *testing.T) string {
+func createStoreFromSeed(t *testing.T) string {
 	admin.Exec(fmt.Sprintf("CREATE DATABASE %s TEMPLATE tmpl", name(t)))
 	return name(t)
 }

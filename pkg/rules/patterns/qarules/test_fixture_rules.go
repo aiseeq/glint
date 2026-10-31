@@ -308,7 +308,7 @@ func triggersOffBefore(file *ast.File, pos token.Pos) triggersOff {
 //		hits.Add(1)
 //		json.NewEncoder(w).Encode(rows)
 //	}))
-//	waitForCondition(func() bool { return hits.Load() > 0 }, 5*time.Second)
+//	waitForSignal(func() bool { return hits.Load() > 0 }, 5*time.Second)
 //	records, err := client.Search(ctx) // the warmed cache may not be there yet
 //
 // The counter says the request arrived, not that the client got and stored

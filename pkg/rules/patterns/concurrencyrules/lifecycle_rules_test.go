@@ -230,13 +230,13 @@ import (
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	startWorkers(ctx)
+	startItemWorkers(ctx)
 	srv := &http.Server{}
 	go func() { _ = srv.ListenAndServe() }()
 	_ = srv.Shutdown(context.Background())
 }
 
-func startWorkers(ctx context.Context) {
+func startItemWorkers(ctx context.Context) {
 	p := &worker.Poller{}
 	go p.Run(ctx)
 }
