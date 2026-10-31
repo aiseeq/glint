@@ -14,7 +14,7 @@ import (
 func TestSQLConflictAnyErrorTakenAsConflict(t *testing.T) {
 	ctx := rulestest.GoFile(t, "storage/repo.go", `package storage
 
-func (r *Repo) GetOrCreate(ctx context.Context, wallet string) (*Status, error) {
+func (r *Repo) FindOrCreate(ctx context.Context, wallet string) (*Status, error) {
 	status := &Status{Wallet: wallet}
 	query := `+"`"+`INSERT INTO sync_status (id, wallet) VALUES ($1, $2)
 		ON CONFLICT (wallet) DO NOTHING

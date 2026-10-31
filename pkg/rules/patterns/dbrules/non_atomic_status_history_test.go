@@ -73,13 +73,13 @@ func TestNonAtomicStatusHistoryRule_DetectsQuoteHelperBeforeHistory(t *testing.T
 	rule := NewNonAtomicStatusHistoryRule()
 	ctx := createNonAtomicStatusHistoryContext(t, "quote_service.go", `package service; import "context"
 func persist(ctx context.Context, s *Service) error {
-	if err := s.updateQuoteRecord(ctx, tx); err != nil { return err }
+	if err := s.updateOrderQuoteRecord(ctx, tx); err != nil { return err }
 	return s.txnRepo.RecordStatusHistory(ctx, tx.ID)
 }`)
 
 	violations := rule.AnalyzeFile(ctx)
 	require.Len(t, violations, 1)
-	assert.Equal(t, "updateQuoteRecord", violations[0].Context["mutation_method"])
+	assert.Equal(t, "updateOrderQuoteRecord", violations[0].Context["mutation_method"])
 }
 
 func TestNonAtomicStatusHistoryRule_DoesNotLinkMutuallyExclusiveBranches(t *testing.T) {

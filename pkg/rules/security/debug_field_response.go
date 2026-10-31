@@ -16,7 +16,7 @@ func init() {
 
 // DebugFieldInResponseRule detects a debug section in an API response type:
 //
-//	type StrategiesResponse struct {
+//	type ServiceResponse struct {
 //	    Strategies []Strategy `json:"strategies"`
 //	    Debug      DebugInfo  `json:"debug"`
 //	}

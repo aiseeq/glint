@@ -18,7 +18,7 @@ import (
 
 const maxLimit = 100
 
-func parsePagination(req *http.Request, defaultLimit int) int {
+func parsePageBounds(req *http.Request, defaultLimit int) int {
 	limit := defaultLimit
 	if s := req.URL.Query().Get("limit"); s != "" {
 		if v, err := strconv.Atoi(s); err == nil && v > 0 {

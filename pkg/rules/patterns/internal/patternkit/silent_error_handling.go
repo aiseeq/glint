@@ -8,7 +8,7 @@ import (
 )
 
 // CallCreatesError распознаёт вызовы, создающие ошибку: errors.New, fmt.Errorf
-// и функции с суффиксом Error/Errorf (NewError, newValidationError, x.Errorf).
+// и функции с суффиксом Error/Errorf (NewError, newInputError, x.Errorf).
 // Произвольные подстроки ("new", "fail") не считаются: NewClient() в ветке
 // err != nil — это fallback-значение, а не создание ошибки.
 func CallCreatesError(call *ast.CallExpr) bool {

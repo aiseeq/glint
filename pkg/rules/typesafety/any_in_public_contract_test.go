@@ -18,7 +18,7 @@ func TestAnyInPublicContractRule(t *testing.T) {
 			name: "exported method returns bare any with error",
 			code: `package svc
 
-func (s *DBAdminService) BulkApproveInvestments(ctx context.Context, ids []string) (any, error) {
+func (s *AdminService) BulkApproveInvestments(ctx context.Context, ids []string) (any, error) {
 	return nil, nil
 }
 `,
@@ -38,7 +38,7 @@ func GetStrategyPerformance(name string) (map[string]any, error) {
 			name: "typed response is fine",
 			code: `package svc
 
-func (s *DBAdminService) BulkApproveInvestments(ctx context.Context, ids []string) (*BulkApproveResponse, error) {
+func (s *AdminService) BulkApproveInvestments(ctx context.Context, ids []string) (*BulkApproveResponse, error) {
 	return nil, nil
 }
 `,

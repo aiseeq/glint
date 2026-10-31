@@ -17,7 +17,7 @@ func init() {
 // JWTTokenTypeRule detects a refresh that reads token claims carrying their
 // kind without looking at the kind:
 //
-//	type TokenClaims struct { jwt.RegisteredClaims; UserID, TokenType string }
+//	type SessionClaims struct { jwt.RegisteredClaims; UserID, TokenType string }
 //
 //	func (m *Manager) RefreshTokens(token string) (*Pair, error) {
 //	    result, err := m.validator.Validate(token)

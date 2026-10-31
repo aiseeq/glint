@@ -58,7 +58,7 @@ type BaseHandler struct {
 	name         string
 }
 
-func NewBaseHandler(logger Logger) *BaseHandler {
+func NewServiceHandler(logger Logger) *BaseHandler {
 	return &BaseHandler{logger: logger, errorHandler: &ErrorHandler{}, name: "base"}
 }
 
@@ -84,7 +84,7 @@ func NewSSLHandler(logger Logger) *VaultHandler {
 }
 
 func NewNamedHandler(logger Logger) *VaultHandler {
-	return &VaultHandler{BaseHandler: NewBaseHandler(logger)}
+	return &VaultHandler{BaseHandler: NewServiceHandler(logger)}
 }
 
 func cloneBase(h *BaseHandler) *BaseHandler {

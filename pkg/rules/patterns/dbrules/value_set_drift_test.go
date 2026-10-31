@@ -284,7 +284,7 @@ func TestValueSetDriftTemplateOptionsAgainstLabelSwitch(t *testing.T) {
 
 import "fmt"
 
-func payoutMethodDesc(pm int) string {
+func deliveryOptionDescription(pm int) string {
 	switch pm {
 	case 1:
 		return "Bank Transfer"
@@ -300,7 +300,7 @@ func payoutMethodDesc(pm int) string {
 }
 `,
 		"admin/templates/channels.html": `<form>
-<select name="payout_method" required>
+<select name="delivery_option" required>
   <option value="1" selected>1 — Bank Transfer</option>
   <option value="2">2 — Cash Pickup</option>
   <option value="3">3 — Mobile Wallet</option>

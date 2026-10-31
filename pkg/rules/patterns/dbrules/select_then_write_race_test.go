@@ -18,19 +18,19 @@ func TestSelectThenWriteRaceRule(t *testing.T) {
 		expectedCount int
 	}{
 		{
-			// Repro: projectB financial_repository.go UpdateTransactionStatusLocked
+			// Repro: projectB financial_repository.go UpdateItemStatusLocked
 			// — status read, validated, written without a lock.
 			name: "status read then written without lock",
 			code: `package repo
 import "context"
-func (r *Repo) UpdateTransactionStatusLocked(ctx context.Context, id, newStatus string) error {
+func (r *Repo) UpdateItemStatusLocked(ctx context.Context, id, newStatus string) error {
 	var currentStatus string
 	err := r.db.GetContext(ctx, &currentStatus,
 		` + "`SELECT status FROM financial_transactions WHERE id = $1`" + `, id)
 	if err != nil {
 		return err
 	}
-	if err := validator.CanTransition("financial_transaction", currentStatus, newStatus); err != nil {
+	if err := validator.CanChangeStatus("financial_transaction", currentStatus, newStatus); err != nil {
 		return err
 	}
 	_, err = r.db.ExecContext(ctx,
@@ -424,7 +424,7 @@ const (
 	JobDone    = "done"
 )
 
-func (r *Repo) MarkRunning(ctx context.Context, id string) error {
+func (r *Repo) MarkActive(ctx context.Context, id string) error {
 	_, err := r.db.Pool.Exec(ctx, `+"`UPDATE jobs SET status = $1, updated_at = now() WHERE id = $2`"+`, JobRunning, id)
 	return err
 }

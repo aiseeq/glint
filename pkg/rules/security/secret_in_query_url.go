@@ -204,7 +204,7 @@ func (r *SecretInQueryURLRule) checkFunction(ctx *core.FileContext, fn *ast.Func
 		}
 		v := r.CreateViolation(ctx.RelPath, line, message)
 		v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
-		v.WithSuggestion("Sanitize the transport error before wrapping or logging it (a SanitizeTransportError helper that strips the query from *url.Error), or move the secret out of the URL into a header")
+		v.WithSuggestion("Sanitize the transport error before wrapping or logging it (a SanitizeRequestError helper that strips the query from *url.Error), or move the secret out of the URL into a header")
 		v.WithContext("pattern", "secret-in-query-url")
 		v.WithContext("function", fn.Name.Name)
 		violations = append(violations, v)
@@ -322,7 +322,7 @@ func isNamedType(t types.Type, path, name string) bool {
 }
 
 // callNameContainsSanitize reports a callee named as a sanitizer, in any
-// case: SanitizeTransportError and redactTransportError alike.
+// case: SanitizeRequestError and redactRequestError alike.
 func callNameContainsSanitize(call *ast.CallExpr) bool {
 	name := strings.ToLower(helpers.CalleeName(call))
 	return strings.Contains(name, "sanitize") || strings.Contains(name, "redact")

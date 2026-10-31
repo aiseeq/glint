@@ -139,7 +139,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleItemCreate(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.create(r.Context()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}

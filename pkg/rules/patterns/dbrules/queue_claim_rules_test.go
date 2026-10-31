@@ -240,7 +240,7 @@ func (w *Worker) Next(ctx context.Context) {
 			return
 		}
 		if err := w.deliver(ctx, item); err != nil {
-			if ferr := w.handleFailure(ctx, item, err); ferr != nil {
+			if ferr := w.handleJobFailure(ctx, item, err); ferr != nil {
 				w.logger.Error("failed to record failure", "error", ferr)
 				return
 			}
@@ -308,7 +308,7 @@ func (w *Worker) Report(ctx context.Context) error {
 }
 
 func (w *Worker) deliver(ctx context.Context, item Item) error                   { return nil }
-func (w *Worker) handleFailure(ctx context.Context, item Item, err error) error { return nil }
+func (w *Worker) handleJobFailure(ctx context.Context, item Item, err error) error { return nil }
 func (w *Worker) markSent(ctx context.Context, item Item) error                  { return nil }
 func (w *Worker) markFailed(ctx context.Context, item Item, err error) error     { return nil }
 `,

@@ -18,7 +18,7 @@ func init() {
 // id or a unique key, in a function returning an error that never learns
 // whether the row was there:
 //
-//	func (r *Repo) UpdateInvestment(ctx context.Context, inv *Investment) error {
+//	func (r *Repo) UpdateAsset(ctx context.Context, inv *Investment) error {
 //		_, err := r.db.ExecContext(ctx, `UPDATE investments SET amount = $2 WHERE id = $1`, inv.ID, inv.Amount)
 //		return err
 //	}

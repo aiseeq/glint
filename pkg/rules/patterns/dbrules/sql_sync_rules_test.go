@@ -48,7 +48,7 @@ type DB interface{ Select(dest any, query string, args ...any) error }
 
 type Ledger struct{ db DB }
 
-func (l *Ledger) TrialBalance(out any) error {
+func (l *Ledger) LedgerSummary(out any) error {
 	return l.db.Select(out, ` + "`SELECT account, SUM(amount) AS total\n\t\tFROM postings\n\t\tGROUP BY account`" + `)
 }
 
@@ -78,7 +78,7 @@ type DB interface{ Select(dest any, query string, args ...any) error }
 
 type Ledger struct{ db DB }
 
-func (l *Ledger) TrialBalance(out any) error {
+func (l *Ledger) LedgerSummary(out any) error {
 	return l.db.Select(out, "SELECT account, SUM(amount) FROM postings GROUP BY account")
 }
 
@@ -147,7 +147,7 @@ type DB interface{ Exec(query string, args ...any) error }
 
 type Batches struct{ db DB }
 
-func (b *Batches) ExportSince(since string) error {
+func (b *Batches) ExportItemsSince(since string) error {
 	return b.db.Exec("SELECT * FROM batches WHERE updated_at >= $1", since)
 }
 
@@ -186,7 +186,7 @@ type Batches struct{ db DB }
 
 const batchColumns = "id, name, updated_at"
 
-func (b *Batches) ExportSince(since *string) error {
+func (b *Batches) ExportItemsSince(since *string) error {
 	query := "SELECT " + batchColumns + " FROM batches"
 	args := []any{}
 	if since != nil {
@@ -652,7 +652,7 @@ import (
 
 type Repo struct{ db DB }
 
-func (r *Repo) GetPendingTransactions(ctx context.Context, olderThan time.Duration, limit int) error {
+func (r *Repo) GetPendingItems(ctx context.Context, olderThan time.Duration, limit int) error {
 	query := `+"`"+`
 		SELECT id, status
 		FROM transactions

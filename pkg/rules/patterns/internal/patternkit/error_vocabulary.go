@@ -28,7 +28,7 @@ func IsSentinelErrorName(name string) bool {
 
 // ExprCarriesError reports whether the expression hands an error on: an
 // error variable (err, dbErr), a sentinel (ErrNotFound, store.ErrClosed), a
-// call creating an error (errors.New, fmt.Errorf, newValidationError) or a
+// call creating an error (errors.New, fmt.Errorf, newInputError) or a
 // call wrapping one of those (errors.Wrap(err, "..."), withStack(err)).
 func ExprCarriesError(expr ast.Expr) bool {
 	switch e := expr.(type) {

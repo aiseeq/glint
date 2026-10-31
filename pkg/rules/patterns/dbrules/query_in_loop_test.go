@@ -99,7 +99,7 @@ import (
 )
 
 type GroupRepo interface {
-	GetUserGroupAssignment(id string) (string, error)
+	GetMemberGroup(id string) (string, error)
 }
 
 type Service struct {
@@ -122,7 +122,7 @@ func dbFieldInFor(ctx context.Context, s *Service) {
 
 func interfaceRepoInLoop(groupRepo GroupRepo, ids []string) {
 	for _, id := range ids {
-		groupRepo.GetUserGroupAssignment(id)
+		groupRepo.GetMemberGroup(id)
 	}
 }
 

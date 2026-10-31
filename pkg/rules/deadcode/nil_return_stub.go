@@ -23,7 +23,7 @@ func init() {
 //	    return nil, nil
 //	}
 //
-//	func (r *Repo) CountUsers() (int64, error) {
+//	func (r *Repo) CountMembers() (int64, error) {
 //	    // Simplified for the MVP: no users yet
 //	    return 0, nil
 //	}

@@ -683,7 +683,7 @@ func isInitializerName(name string) bool {
 
 // isTestSupport reports a function tests are its only intended callers of:
 // in a test-support package (testing, testutil, mocks, fixtures) or named for
-// tests (SetupTestConfig, RegisterMocks).
+// tests (SetupFixtureConfig, RegisterMocks).
 func isTestSupport(pkgName, name string) bool {
 	lowerPkg := strings.ToLower(pkgName)
 	if helpers.IsTestSupportPackage(pkgName) || strings.HasSuffix(lowerPkg, "mocks") || strings.HasSuffix(lowerPkg, "fixtures") {

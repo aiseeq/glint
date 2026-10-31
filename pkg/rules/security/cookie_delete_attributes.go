@@ -20,7 +20,7 @@ func init() {
 // CookieDeletedWithOtherAttributesRule detects a cookie deleted with another
 // Domain or Path than it was set with:
 //
-//	func SetJWTCookie(w http.ResponseWriter, name, value string) {
+//	func SetWidgetCookie(w http.ResponseWriter, name, value string) {
 //	    c := &http.Cookie{Name: name, Value: value, Path: "/"}
 //	    c.Domain = "." + baseDomain
 //	    http.SetCookie(w, c)

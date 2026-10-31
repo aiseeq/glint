@@ -259,7 +259,7 @@ var namedBulkCalls = map[string][2]int{
 // of its rows share the conflict key ("ON CONFLICT DO UPDATE command cannot
 // affect row a second time"):
 //
-//	func (r *Repo) UpsertBatch(ctx context.Context, rows []*Row) error {
+//	func (r *Repo) UpsertItems(ctx context.Context, rows []*Row) error {
 //		for chunk := range slices.Chunk(rows, 500) {
 //			q, args, err := sqlx.Named(`INSERT ... VALUES (...) ON CONFLICT (key) DO UPDATE SET ...`, chunk)
 //
