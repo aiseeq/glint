@@ -282,7 +282,7 @@ func (s fillSources) call(call *ast.CallExpr, info *types.Info) {
 	}
 	if tv, ok := info.Types[call.Fun]; ok && tv.IsType() {
 		if len(call.Args) == 1 {
-			if _, fromStruct := structUnder(info.TypeOf(call.Args[0])); fromStruct {
+			if _, fromStruct := helpers.StructUnder(info.TypeOf(call.Args[0])); fromStruct {
 				addReachableStructs(s.converted, tv.Type)
 			}
 		}

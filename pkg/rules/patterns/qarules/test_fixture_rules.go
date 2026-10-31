@@ -13,6 +13,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 	"github.com/aiseeq/glint/pkg/sqlschema"
 )
@@ -160,7 +161,7 @@ func (r *TestSharedDBRecreatedWithoutCrossProcessLockRule) AnalyzeFile(ctx *core
 		if !ok || !patternkit.IsSelectorCall(call, "fmt", "Sprintf") || len(call.Args) < 2 {
 			return true
 		}
-		format, ok := patternkit.StringLiteral(call.Args[0])
+		format, ok := helpers.StringLiteral(call.Args[0])
 		name, isConst := call.Args[1].(*ast.Ident)
 		if !ok || !isConst || !consts[name.Name] {
 			return true

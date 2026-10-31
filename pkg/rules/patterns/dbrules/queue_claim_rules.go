@@ -226,7 +226,7 @@ func queryText(info *types.Info, defs map[types.Object]ast.Expr, call *ast.CallE
 				expr = ast.Unparen(def)
 			}
 		}
-		if text, ok := patternkit.StringLiteral(expr); ok {
+		if text, ok := helpers.StringLiteral(expr); ok {
 			return text
 		}
 	}
@@ -471,6 +471,6 @@ func lastStringArg(call *ast.CallExpr) string {
 	if len(call.Args) == 0 {
 		return ""
 	}
-	text, _ := patternkit.StringLiteral(call.Args[len(call.Args)-1])
+	text, _ := helpers.StringLiteral(call.Args[len(call.Args)-1])
 	return strings.ToLower(text)
 }

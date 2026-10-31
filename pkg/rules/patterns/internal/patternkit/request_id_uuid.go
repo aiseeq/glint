@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/token"
-	"strconv"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -39,14 +37,4 @@ func AnalyzeAgainstSchema(ctx *core.GoProjectContext, rule *rules.BaseRule, sugg
 		},
 	}
 	return inner.AnalyzeGoProject(ctx)
-}
-
-// StringLiteral returns the value of a string literal.
-func StringLiteral(expr ast.Expr) (string, bool) {
-	lit, ok := ast.Unparen(expr).(*ast.BasicLit)
-	if !ok || lit.Kind != token.STRING {
-		return "", false
-	}
-	value, err := strconv.Unquote(lit.Value)
-	return value, err == nil
 }

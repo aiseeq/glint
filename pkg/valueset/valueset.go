@@ -242,7 +242,7 @@ func (g *goSets) enums() {
 				continue
 			}
 			for i, value := range vs.Values {
-				s, ok := goString(value)
+				s, ok := helpers.StringLiteral(value)
 				key := constGroup(gen, vs, i, families)
 				if !ok || key == "" {
 					continue
@@ -303,7 +303,7 @@ func (g *goSets) visit(n ast.Node) bool {
 		if len(n.Lhs) == len(n.Rhs) {
 			for i, rhs := range n.Rhs {
 				if lit, ok := ast.Unparen(rhs).(*ast.CompositeLit); ok {
-					g.names[lit] = goExprName(n.Lhs[i])
+					g.names[lit] = helpers.ExprName(n.Lhs[i])
 				}
 			}
 		}
@@ -325,7 +325,7 @@ func (g *goSets) visit(n ast.Node) bool {
 				continue
 			}
 			for _, expr := range clause.List {
-				if s, ok := goString(expr); ok {
+				if s, ok := helpers.StringLiteral(expr); ok {
 					labels = append(labels, s)
 				}
 			}
@@ -362,7 +362,7 @@ func (g *goSets) literal(n *ast.CompositeLit) {
 		if kv, ok := elt.(*ast.KeyValueExpr); ok && isMap {
 			elt = kv.Key
 		}
-		s, ok := goString(elt)
+		s, ok := helpers.StringLiteral(elt)
 		if !ok {
 			return
 		}
@@ -392,31 +392,12 @@ func membershipValue(expr ast.Expr) bool {
 	return false
 }
 
-func goString(expr ast.Expr) (string, bool) {
-	lit, ok := ast.Unparen(expr).(*ast.BasicLit)
-	if !ok || lit.Kind != token.STRING {
-		return "", false
-	}
-	s, err := strconv.Unquote(lit.Value)
-	return s, err == nil
-}
-
 func goTypeName(expr ast.Expr) string {
 	switch e := expr.(type) {
 	case *ast.Ident:
 		if e.Name == "string" {
 			return ""
 		}
-		return e.Name
-	case *ast.SelectorExpr:
-		return e.Sel.Name
-	}
-	return ""
-}
-
-func goExprName(expr ast.Expr) string {
-	switch e := ast.Unparen(expr).(type) {
-	case *ast.Ident:
 		return e.Name
 	case *ast.SelectorExpr:
 		return e.Sel.Name

@@ -2,18 +2,7 @@ package patternkit
 
 import (
 	"go/token"
-	"sort"
 )
-
-// SortedKeys returns the keys of a string-keyed map in order.
-func SortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
 
 // PosAt returns the source position of an offset in the text: exact in a raw
 // string, the literal's own position in an interpreted one.

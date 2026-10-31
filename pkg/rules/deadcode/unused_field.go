@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -222,7 +223,7 @@ func collectCheckedFields(fileCtx *core.FileContext, info *types.Info, applicati
 		if !ok || structType.Fields == nil {
 			return true
 		}
-		if _, ok := declaredStructType(spec, info); !ok {
+		if _, ok := helpers.DeclaredStructType(spec, info); !ok {
 			return true
 		}
 		named, _ := declaredNamedType(spec, info)
@@ -270,14 +271,4 @@ func internalPackage(pkg *types.Package) bool {
 	}
 	path := pkg.Path()
 	return strings.HasPrefix(path, "internal/") || strings.Contains(path, "/internal/") || strings.HasSuffix(path, "/internal")
-}
-
-// declaredStructType returns the checked struct behind a type declaration.
-func declaredStructType(spec *ast.TypeSpec, info *types.Info) (*types.Struct, bool) {
-	obj, ok := info.Defs[spec.Name].(*types.TypeName)
-	if !ok {
-		return nil, false
-	}
-	structType, ok := obj.Type().Underlying().(*types.Struct)
-	return structType, ok
 }

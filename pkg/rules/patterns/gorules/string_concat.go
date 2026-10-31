@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
 func init() {
@@ -269,7 +270,7 @@ func (r *StringConcatRule) isAssignPlusPattern(info *types.Info, assign *ast.Ass
 		return false
 	}
 	if info != nil {
-		return isStringKind(info.TypeOf(assign.Lhs[0]))
+		return patternkit.IsStringType(info.TypeOf(assign.Lhs[0]))
 	}
 	return isStringBasicLit(binary.Y)
 }
@@ -288,7 +289,7 @@ func (r *StringConcatRule) reportConcatViolation(ctx *core.FileContext, assign *
 // literal on the right says the operands are strings.
 func (r *StringConcatRule) isStringAccumulation(info *types.Info, lhs, rhs ast.Expr) bool {
 	if info != nil {
-		return isStringKind(info.TypeOf(lhs))
+		return patternkit.IsStringType(info.TypeOf(lhs))
 	}
 	if isStringBasicLit(rhs) {
 		return true
@@ -300,13 +301,4 @@ func (r *StringConcatRule) isStringAccumulation(info *types.Info, lhs, rhs ast.E
 func isStringBasicLit(expr ast.Expr) bool {
 	lit, ok := expr.(*ast.BasicLit)
 	return ok && lit.Kind == token.STRING
-}
-
-// isStringKind reports a string type, named string types included.
-func isStringKind(t types.Type) bool {
-	if t == nil {
-		return false
-	}
-	basic, ok := t.Underlying().(*types.Basic)
-	return ok && basic.Info()&types.IsString != 0
 }

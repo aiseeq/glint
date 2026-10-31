@@ -241,7 +241,7 @@ func dateOnlyValueSetOnTimestampColumn(scope patternkit.FuncScope, fn *ast.FuncD
 		}
 		column := ""
 		for _, arg := range call.Args {
-			if text, ok := patternkit.StringLiteral(arg); ok && timestampColumn.MatchString(text) {
+			if text, ok := helpers.StringLiteral(arg); ok && timestampColumn.MatchString(text) {
 				column = text
 			}
 		}

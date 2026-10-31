@@ -241,11 +241,11 @@ var errorFlashLevels = map[string]bool{"error": true, "danger": true, "err": tru
 // The level is the argument right before the message.
 func errorFlashText(call *ast.CallExpr) (string, bool) {
 	for i := 0; i+1 < len(call.Args); i++ {
-		level, ok := patternkit.StringLiteral(call.Args[i])
+		level, ok := helpers.StringLiteral(call.Args[i])
 		if !ok || !errorFlashLevels[strings.ToLower(level)] {
 			continue
 		}
-		text, ok := patternkit.StringLiteral(call.Args[i+1])
+		text, ok := helpers.StringLiteral(call.Args[i+1])
 		if !ok || strings.TrimSpace(text) == "" {
 			return "", false
 		}

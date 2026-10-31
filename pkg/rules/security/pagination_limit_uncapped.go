@@ -212,7 +212,7 @@ func receivers(body *ast.BlockStmt, parsed string) map[string]bool {
 			}
 			for i, rhs := range assign.Rhs {
 				lhs, ok := assign.Lhs[i].(*ast.Ident)
-				if ok && !names[lhs.Name] && mentionsAny(rhs, names) {
+				if ok && !names[lhs.Name] && helpers.MentionsAnyName(rhs, names) {
 					names[lhs.Name] = true
 					changed = true
 				}
@@ -232,12 +232,12 @@ func bounded(body *ast.BlockStmt, names map[string]bool) bool {
 		case *ast.BinaryExpr:
 			switch node.Op {
 			case token.GTR, token.GEQ, token.LSS, token.LEQ:
-				if (mentionsAny(node.X, names) && !lowBound(node.Y)) || (mentionsAny(node.Y, names) && !lowBound(node.X)) {
+				if (helpers.MentionsAnyName(node.X, names) && !lowBound(node.Y)) || (helpers.MentionsAnyName(node.Y, names) && !lowBound(node.X)) {
 					found = true
 				}
 			}
 		case *ast.CallExpr:
-			if name := helpers.CalleeName(node); (name == "min" || name == "Min") && mentionsAny(node, names) {
+			if name := helpers.CalleeName(node); (name == "min" || name == "Min") && helpers.MentionsAnyName(node, names) {
 				found = true
 			}
 		}
@@ -250,11 +250,4 @@ func bounded(body *ast.BlockStmt, names map[string]bool) bool {
 func lowBound(expr ast.Expr) bool {
 	lit, ok := ast.Unparen(expr).(*ast.BasicLit)
 	return ok && lit.Kind == token.INT && (lit.Value == "0" || lit.Value == "1")
-}
-
-// mentionsAny reports an expression naming one of the identifiers.
-func mentionsAny(expr ast.Node, names map[string]bool) bool {
-	return helpers.ContainsNode[*ast.Ident](expr, func(ident *ast.Ident) bool {
-		return names[ident.Name]
-	})
 }

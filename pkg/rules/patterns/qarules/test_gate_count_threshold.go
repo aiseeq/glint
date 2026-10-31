@@ -62,7 +62,7 @@ func (r *TestGateCountThresholdRule) AnalyzeFile(ctx *core.FileContext) []*core.
 		if ctx.IsSuppressed(i+1, r.Name()) {
 			continue
 		}
-		violations = append(violations, testReport(r.BaseRule, ctx, i+1,
+		violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, i+1,
 			"The gate lets up to "+strconv.Itoa(boundAllowed(m[2], bound))+" "+m[1]+" through — a new problem passes while the count fits the slack",
 			"Assert zero and list the accepted findings by name (advisory id, rule, file) next to the gate"))
 	}

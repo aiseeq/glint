@@ -188,7 +188,7 @@ func NewGoTemplateRootFieldInsideRangeRule() *templateProjectRule {
 				continue
 			}
 			trees := parseTemplates(base, tmpl.text)
-			for _, name := range sortedTreeNames(trees) {
+			for _, name := range core.SortedKeys(trees) {
 				if !invokedWithRootOnly(trees, name) {
 					continue
 				}
@@ -201,16 +201,6 @@ func NewGoTemplateRootFieldInsideRangeRule() *templateProjectRule {
 		return findings, nil
 	}
 	return r
-}
-
-// sortedTreeNames returns the names of the trees in a stable order.
-func sortedTreeNames(trees map[string]*parse.Tree) []string {
-	names := make([]string, 0, len(trees))
-	for name := range trees {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // invokedWithRootOnly reports a tree no {{template}} of the file calls with
@@ -381,7 +371,7 @@ func templateDataTypes(ctx *core.GoProjectContext) map[string][]types.Type {
 				return true
 			}
 			for i, arg := range call.Args {
-				name, ok := patternkit.StringLiteral(arg)
+				name, ok := helpers.StringLiteral(arg)
 				if !ok || !core.IsTemplateName(name) {
 					continue
 				}
@@ -495,7 +485,7 @@ func NewGoTemplateDefineCollisionInSharedSetRule() *templateProjectRule {
 func matchedTemplateFiles(dir, root string, patterns []ast.Expr) ([]string, error) {
 	var files []string
 	for _, expr := range patterns {
-		pattern, ok := patternkit.StringLiteral(expr)
+		pattern, ok := helpers.StringLiteral(expr)
 		if !ok {
 			continue
 		}
@@ -827,7 +817,7 @@ func NewI18nKeyUsedButNotDefinedRule() *templateProjectRule {
 					return true
 				}
 				for _, arg := range call.Args {
-					if key, ok := patternkit.StringLiteral(arg); ok {
+					if key, ok := helpers.StringLiteral(arg); ok {
 						report(src.path, src.line(arg), key)
 					}
 				}
@@ -865,7 +855,7 @@ func messageMaps(ctx *core.GoProjectContext) []messageMap {
 					if !ok {
 						continue
 					}
-					if key, ok := patternkit.StringLiteral(kv.Key); ok && translationKey.MatchString(key) {
+					if key, ok := helpers.StringLiteral(kv.Key); ok && translationKey.MatchString(key) {
 						m.keys[key] = src.line(kv)
 					}
 				}
@@ -887,7 +877,7 @@ func unevenMessageMaps(maps []messageMap) []projectFinding {
 		byPkg[m.pkg] = append(byPkg[m.pkg], m)
 	}
 	var findings []projectFinding
-	for _, pkg := range patternkit.SortedKeys(byPkg) {
+	for _, pkg := range core.SortedKeys(byPkg) {
 		group := byPkg[pkg]
 		keys := make(map[string]bool)
 		for _, m := range group {
@@ -895,7 +885,7 @@ func unevenMessageMaps(maps []messageMap) []projectFinding {
 				keys[key] = true
 			}
 		}
-		for _, key := range patternkit.SortedKeys(keys) {
+		for _, key := range core.SortedKeys(keys) {
 			var having, lacking []messageMap
 			for _, m := range group {
 				if _, ok := m.keys[key]; ok {

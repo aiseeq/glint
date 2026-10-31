@@ -92,7 +92,7 @@ func (r *CacheStoresCancelledErrorRule) checkFunction(ctx *core.FileContext, inf
 				continue
 			}
 			if ident, ok := lhs.(*ast.Ident); ok {
-				if obj := info.ObjectOf(ident); obj != nil && !isPackageLevelObj(obj) {
+				if obj := info.ObjectOf(ident); obj != nil && !patternkit.IsPackageLevelVar(obj) {
 					fromContext[obj] = true
 					continue
 				}
@@ -154,15 +154,11 @@ func storedObject(info *types.Info, expr ast.Expr) types.Object {
 			return v
 		}
 	case *ast.Ident:
-		if obj := info.ObjectOf(e); obj != nil && isPackageLevelObj(obj) {
+		if obj := info.ObjectOf(e); obj != nil && patternkit.IsPackageLevelVar(obj) {
 			return obj
 		}
 	}
 	return nil
-}
-
-func isPackageLevelObj(obj types.Object) bool {
-	return obj.Pkg() != nil && obj.Parent() == obj.Pkg().Scope()
 }
 
 // errorFromContextCall reports the value assigned at index being the error of

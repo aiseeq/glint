@@ -822,7 +822,7 @@ func (s *paramStores) callKeeps(call *ast.CallExpr, arg ast.Node, info *types.In
 			return builtin.Name() == "append" && len(call.Args) > 0 && arg != call.Args[0]
 		}
 	}
-	callee := calleeFromInfo(info, call)
+	callee := patternkit.StaticFunc(info, call)
 	if callee == nil {
 		return false
 	}
@@ -832,19 +832,6 @@ func (s *paramStores) callKeeps(call *ast.CallExpr, arg ast.Node, info *types.In
 		}
 	}
 	return false
-}
-
-// calleeFromInfo resolves the function or method a call invokes.
-func calleeFromInfo(info *types.Info, call *ast.CallExpr) *types.Func {
-	switch fun := ast.Unparen(call.Fun).(type) {
-	case *ast.Ident:
-		fn, _ := info.Uses[fun].(*types.Func)
-		return fn
-	case *ast.SelectorExpr:
-		fn, _ := info.Uses[fun.Sel].(*types.Func)
-		return fn
-	}
-	return nil
 }
 
 // assignKeeps decides an assignment of the value: into a field, an element,

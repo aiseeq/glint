@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -57,18 +58,10 @@ func NewNonAtomicStatusHistoryRule() *NonAtomicStatusHistoryRule {
 			rules.NewSettingSpec("history_methods", "string list", "", "Method names treated as status history writes.", []string{"AppendStateLog"}),
 			rules.NewSettingSpec("transaction_functions", "string list", "", "Function names that run their callback inside a transaction.", []string{"WithTransaction"}),
 		),
-		mutationMethods: statusHistoryNameSet(defaultStatusMutationMethods),
-		historyMethods:  statusHistoryNameSet(defaultStatusHistoryMethods),
+		mutationMethods: helpers.StringSet(defaultStatusMutationMethods),
+		historyMethods:  helpers.StringSet(defaultStatusHistoryMethods),
 		transactions:    NewMultiWriteNoTransactionRule(),
 	}
-}
-
-func statusHistoryNameSet(names []string) map[string]bool {
-	set := make(map[string]bool, len(names))
-	for _, name := range names {
-		set[name] = true
-	}
-	return set
 }
 
 // Configure reads mutation_methods, history_methods and
@@ -99,7 +92,7 @@ func (r *NonAtomicStatusHistoryRule) Configure(settings map[string]any) error {
 func configuredStatusHistoryNames(settings map[string]any, key string, defaults []string) (map[string]bool, error) {
 	names, present, err := rules.NameSetSetting(settings, "non-atomic-status-history", key)
 	if err != nil || !present {
-		return statusHistoryNameSet(defaults), err
+		return helpers.StringSet(defaults), err
 	}
 	return names, nil
 }

@@ -126,7 +126,7 @@ func addrAsIP(fn *ast.FuncDecl, parents map[ast.Node]ast.Node) []ast.Node {
 				return true
 			}
 			for i, rhs := range node.Rhs {
-				if isRemoteAddr(rhs, parents) && isIPName(targetName(node.Lhs[i])) {
+				if isRemoteAddr(rhs, parents) && isIPName(helpers.ExprName(node.Lhs[i])) {
 					places = append(places, rhs)
 				}
 			}
@@ -155,17 +155,6 @@ func addrAsIP(fn *ast.FuncDecl, parents map[ast.Node]ast.Node) []ast.Node {
 		return true
 	})
 	return places
-}
-
-// targetName returns the name an assignment writes: x or s.X.
-func targetName(expr ast.Expr) string {
-	switch e := ast.Unparen(expr).(type) {
-	case *ast.Ident:
-		return e.Name
-	case *ast.SelectorExpr:
-		return e.Sel.Name
-	}
-	return ""
 }
 
 // isIPName reports a name that holds an IP address: ip, clientIP, ActorIP,

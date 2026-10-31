@@ -381,7 +381,7 @@ func writesCacheControl(_ *types.Info, call *ast.CallExpr) bool {
 	if (name != "Set" && name != "Add") || len(call.Args) != 2 {
 		return false
 	}
-	key, ok := patternkit.StringLiteral(call.Args[0])
+	key, ok := helpers.StringLiteral(call.Args[0])
 	return ok && strings.EqualFold(key, "Cache-Control")
 }
 
@@ -546,7 +546,7 @@ func privilegedEnvDefaultTrue(call *ast.CallExpr) (string, bool) {
 	if len(call.Args) < 2 {
 		return "", false
 	}
-	key, ok := patternkit.StringLiteral(call.Args[0])
+	key, ok := helpers.StringLiteral(call.Args[0])
 	if !ok || !envKey.MatchString(key) || !namesPrivileged(key) {
 		return "", false
 	}
@@ -554,7 +554,7 @@ func privilegedEnvDefaultTrue(call *ast.CallExpr) (string, bool) {
 		if helpers.IsIdentNamed(arg, "true") {
 			return key, true
 		}
-		if s, ok := patternkit.StringLiteral(arg); ok && (s == "true" || s == "1") {
+		if s, ok := helpers.StringLiteral(arg); ok && (s == "true" || s == "1") {
 			return key, true
 		}
 	}

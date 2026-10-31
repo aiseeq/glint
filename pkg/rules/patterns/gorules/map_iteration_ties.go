@@ -32,20 +32,13 @@ func loopTaint(rangeStmt *ast.RangeStmt) map[string]bool {
 		}
 		for i, lhs := range assign.Lhs {
 			ident, ok := lhs.(*ast.Ident)
-			if ok && ident.Name != "_" && readsAnyName(assign.Rhs[i], tainted) {
+			if ok && ident.Name != "_" && helpers.MentionsAnyName(assign.Rhs[i], tainted) {
 				tainted[ident.Name] = true
 			}
 		}
 		return true
 	})
 	return tainted
-}
-
-// readsAnyName reports whether the expression reads one of the names.
-func readsAnyName(expr ast.Expr, names map[string]bool) bool {
-	return helpers.ContainsNode[*ast.Ident](expr, func(ident *ast.Ident) bool {
-		return names[ident.Name]
-	})
 }
 
 // inspectLoopBody walks the body of a map loop, leaving out function literals
@@ -178,7 +171,7 @@ func untiedOrder(cond ast.Expr, tainted map[string]bool, rangeStmt *ast.RangeStm
 			if !isNumericOrString(info.TypeOf(binary.X)) {
 				return true
 			}
-			if readsAnyName(binary.X, tainted) || readsAnyName(binary.Y, tainted) {
+			if helpers.MentionsAnyName(binary.X, tainted) || helpers.MentionsAnyName(binary.Y, tainted) {
 				operands = append(operands, binary.X, binary.Y)
 			}
 		}
@@ -342,7 +335,7 @@ func keptEntry(fn *ast.FuncDecl, body *ast.BlockStmt, operands []ast.Expr, taint
 			}
 			for i, lhs := range node.Lhs {
 				rhs := node.Rhs[i]
-				if compared[types.ExprString(rhs)] || !readsAnyName(rhs, tainted) {
+				if compared[types.ExprString(rhs)] || !helpers.MentionsAnyName(rhs, tainted) {
 					continue
 				}
 				if outerTargetOf(lhs, rangeStmt, info) && usedAfter(fn, lhs, rangeStmt.End()) {
@@ -369,7 +362,7 @@ func floatSum(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt, info *types.Info) (str
 			return
 		}
 		lhs := assign.Lhs[0]
-		if !isFloatType(info.TypeOf(lhs)) || !readsAnyName(assign.Rhs[0], tainted) || !outerTargetOf(lhs, rangeStmt, info) {
+		if !isFloatType(info.TypeOf(lhs)) || !helpers.MentionsAnyName(assign.Rhs[0], tainted) || !outerTargetOf(lhs, rangeStmt, info) {
 			return
 		}
 		if ident, ok := ast.Unparen(lhs).(*ast.Ident); ok && !floatLeaves(fn, ident.Name, info) {
@@ -472,7 +465,7 @@ func groupedAppend(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt, info *types.Info)
 
 func argsMention(args []ast.Expr, names map[string]bool) bool {
 	for _, arg := range args {
-		if readsAnyName(arg, names) {
+		if helpers.MentionsAnyName(arg, names) {
 			return true
 		}
 	}
@@ -657,21 +650,11 @@ func isMeasure(projection string, sortType types.Type) bool {
 	if projection == "@" || strings.Contains(projection, "(@") || strings.Contains(projection, ", @") {
 		return false
 	}
-	if sortType == nil || isSourcePosition(sortType) {
+	if sortType == nil || helpers.IsSourcePosition(sortType) {
 		return false
 	}
 	basic, ok := sortType.Underlying().(*types.Basic)
 	return ok && basic.Info()&types.IsNumeric != 0
-}
-
-// isSourcePosition reports whether the type is go/token.Pos: distinct nodes
-// start at distinct offsets, so a sort by position has nothing to tie.
-func isSourcePosition(t types.Type) bool {
-	named, ok := t.(*types.Named)
-	if !ok || named.Obj().Pkg() == nil {
-		return false
-	}
-	return named.Obj().Pkg().Path() == "go/token" && named.Obj().Name() == "Pos"
 }
 
 // sortsByKeyType reports whether the sort key is a plain field of the map

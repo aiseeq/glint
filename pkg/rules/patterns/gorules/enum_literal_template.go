@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -52,7 +53,7 @@ func templateEnumFuncs(ctx *core.GoProjectContext, enums enumIndex) map[string][
 					if !ok {
 						continue
 					}
-					key, ok := patternkit.StringLiteral(kv.Key)
+					key, ok := helpers.StringLiteral(kv.Key)
 					fn, isLit := kv.Value.(*ast.FuncLit)
 					if !ok || !isLit {
 						continue

@@ -151,7 +151,7 @@ func (r *SubtestFixtureCleanedEarlyRule) AnalyzeFile(ctx *core.FileContext) []*c
 					}
 					line := ctx.LineFor(assign)
 					if !ctx.IsSuppressed(line, r.Name()) {
-						violations = append(violations, testReport(r.BaseRule, ctx, line,
+						violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line,
 							name+" is made in a subtest whose cleanup deletes it when the subtest ends — the sibling at line "+strconv.Itoa(ctx.LineFor(user))+" uses what is already gone",
 							"Make the fixture in the parent test (pass the parent's t), so its cleanup runs after all subtests"))
 					}

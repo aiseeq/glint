@@ -408,7 +408,7 @@ func loadedWithoutPage(fn *ast.FuncDecl, expr ast.Expr, derived map[*types.Var]b
 		if !ok || !pageAssigns(assign, obj, info) {
 			return true
 		}
-		if _, builtin := info.Uses[pageCalleeIdent(call)].(*types.Builtin); builtin || info.Types[call.Fun].IsType() {
+		if _, builtin := info.Uses[patternkit.CalleeIdent(call)].(*types.Builtin); builtin || info.Types[call.Fun].IsType() {
 			return true // made here, not loaded
 		}
 		loaded = true
@@ -438,15 +438,4 @@ func pageParamOf(fn *ast.FuncDecl, obj *types.Var, info *types.Info) bool {
 		}
 	}
 	return false
-}
-
-// pageCalleeIdent returns the identifier naming a call's function.
-func pageCalleeIdent(call *ast.CallExpr) *ast.Ident {
-	switch fun := ast.Unparen(call.Fun).(type) {
-	case *ast.Ident:
-		return fun
-	case *ast.SelectorExpr:
-		return fun.Sel
-	}
-	return nil
 }

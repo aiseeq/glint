@@ -262,7 +262,7 @@ func countsTrimmedZeros(info *types.Info, body *ast.BlockStmt) bool {
 		if !ok || len(trim.Args) != 2 || !patternkit.CalleeIn(trim, info, "strings", "TrimLeft", "TrimRight", "Trim") {
 			return true
 		}
-		if cutset, ok := patternkit.StringLiteral(trim.Args[1]); ok && strings.Contains(cutset, "0") {
+		if cutset, ok := helpers.StringLiteral(trim.Args[1]); ok && strings.Contains(cutset, "0") {
 			found = true
 		}
 		return !found

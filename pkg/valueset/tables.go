@@ -143,7 +143,7 @@ func goTables(ctx *core.FileContext) Tables {
 				continue
 			}
 			for i, value := range vs.Values {
-				s, ok := goString(value)
+				s, ok := helpers.StringLiteral(value)
 				if !ok {
 					continue
 				}
@@ -227,7 +227,7 @@ func goLiteralNames(file *ast.File) map[*ast.CompositeLit]string {
 			if len(node.Lhs) == len(node.Rhs) {
 				for i, value := range node.Rhs {
 					if lit, ok := ast.Unparen(value).(*ast.CompositeLit); ok {
-						names[lit] = goExprName(node.Lhs[i])
+						names[lit] = helpers.ExprName(node.Lhs[i])
 					}
 				}
 			}
@@ -262,7 +262,7 @@ func constFamily(gen *ast.GenDecl, vs *ast.ValueSpec, i int, families map[string
 
 func (t *Tables) assign(ctx *core.FileContext, field string, value ast.Expr) {
 	a := FieldAssign{Field: field, Path: ctx.RelPath, Line: ctx.LineFor(value)}
-	if s, ok := goString(value); ok {
+	if s, ok := helpers.StringLiteral(value); ok {
 		a.Literal = s
 	} else if name, ok := refName(value); ok {
 		a.Ref = name
@@ -317,12 +317,12 @@ func (t *Tables) compositeLit(ctx *core.FileContext, lit *ast.CompositeLit, name
 // literalPair is a translation of a literal to a name or of a name to a
 // literal.
 func literalPair(from, to ast.Expr) (Pair, bool) {
-	if s, ok := goString(from); ok {
+	if s, ok := helpers.StringLiteral(from); ok {
 		if name, ok := refName(to); ok {
 			return Pair{Literal: s, Ref: name}, true
 		}
 	}
-	if s, ok := goString(to); ok {
+	if s, ok := helpers.StringLiteral(to); ok {
 		if name, ok := refName(from); ok {
 			return Pair{Literal: s, Ref: name}, true
 		}
@@ -355,16 +355,16 @@ func (t *Tables) switchStmt(ctx *core.FileContext, sw *ast.SwitchStmt) {
 			labels = append(labels, name)
 		}
 		if len(refs) > 1 && len(refs) == len(clause.List) {
-			result := singleReturn(clause.Body)
+			result := helpers.SingleReturn(clause.Body)
 			classifierReturn, constantReturn := "", false
 			if result != nil {
 				classifierReturn, constantReturn = refName(result)
 			}
-			_, stringReturn := goString(result)
+			_, stringReturn := helpers.StringLiteral(result)
 			classifier := result != nil && (stringReturn || constantReturn)
 			t.Sets = append(t.Sets, RefSet{Path: ctx.RelPath, Line: ctx.LineFor(clause), Refs: refs, Case: true, ClassifierCase: classifier, ClassifierReturn: classifierReturn})
 		}
-		if result := singleReturn(clause.Body); result != nil {
+		if result := helpers.SingleReturn(clause.Body); result != nil {
 			for _, expr := range clause.List {
 				if pair, ok := literalPair(expr, result); ok {
 					pairs = append(pairs, pair)
@@ -375,21 +375,9 @@ func (t *Tables) switchStmt(ctx *core.FileContext, sw *ast.SwitchStmt) {
 	if len(pairs) > 0 {
 		t.Mappings = append(t.Mappings, Mapping{Path: ctx.RelPath, Line: ctx.LineFor(sw), Pairs: pairs})
 	}
-	if sw.Tag != nil && allRefs && len(labels) > 1 && dflt != nil && derivedFrom(singleReturn(dflt.Body), sw.Tag) {
+	if sw.Tag != nil && allRefs && len(labels) > 1 && dflt != nil && derivedFrom(helpers.SingleReturn(dflt.Body), sw.Tag) {
 		t.Switches = append(t.Switches, DerivedDefaultSwitch{Path: ctx.RelPath, Line: ctx.LineFor(sw), Labels: labels})
 	}
-}
-
-// singleReturn is the one value a clause body returns: return x, alone.
-func singleReturn(body []ast.Stmt) ast.Expr {
-	if len(body) != 1 {
-		return nil
-	}
-	ret, ok := body[0].(*ast.ReturnStmt)
-	if !ok || len(ret.Results) != 1 {
-		return nil
-	}
-	return ret.Results[0]
 }
 
 // derivedFrom reports a value made from the variables of the switch's tag:

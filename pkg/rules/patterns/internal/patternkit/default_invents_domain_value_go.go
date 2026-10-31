@@ -71,7 +71,7 @@ func NonZeroNumber(expr ast.Expr) bool {
 	if !ok {
 		return false
 	}
-	text, isString := StringLiteral(lit)
+	text, isString := helpers.StringLiteral(lit)
 	if !isString {
 		if lit.Kind != token.INT && lit.Kind != token.FLOAT {
 			return false
@@ -132,7 +132,7 @@ func ArgName(expr ast.Expr) string {
 // InventedLiteral reports a non-empty string literal that is not a word for a
 // missing value (N/A, unknown).
 func InventedLiteral(lit *ast.BasicLit) bool {
-	value, ok := StringLiteral(lit)
+	value, ok := helpers.StringLiteral(lit)
 	if !ok || strings.TrimSpace(value) == "" {
 		return false
 	}

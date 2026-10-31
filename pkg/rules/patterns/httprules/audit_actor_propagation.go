@@ -14,6 +14,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"golang.org/x/tools/go/callgraph/cha"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
@@ -79,7 +80,7 @@ func NewAuditActorPropagationRule() *AuditActorPropagationRule {
 			"Detects human actor or audit source attribution lost before audit writes",
 			core.SeverityHigh,
 		).DeclareSettings(rules.NewSettingSpec("sinks", "string list", "", "HTTP handler sinks that require actor propagation.", []string{"Create", "Update"})),
-		sinks: auditSinkSet(defaultAuditActorSinks),
+		sinks: helpers.StringSet(defaultAuditActorSinks),
 	}
 }
 
@@ -96,16 +97,8 @@ func (r *AuditActorPropagationRule) Configure(settings map[string]any) error {
 	if err != nil {
 		return err
 	}
-	r.sinks = auditSinkSet(sinks)
+	r.sinks = helpers.StringSet(sinks)
 	return nil
-}
-
-func auditSinkSet(names []string) map[string]bool {
-	sinks := make(map[string]bool, len(names))
-	for _, name := range names {
-		sinks[name] = true
-	}
-	return sinks
 }
 
 // AnalyzeFile is a no-op because this rule requires shared package SSA.

@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -132,7 +133,7 @@ func posAsOffset(expr ast.Expr, info *types.Info) (ast.Node, bool) {
 	if call, ok := intConversionOfPos(expr, info); ok {
 		return call, true
 	}
-	if isTokenPos(info.TypeOf(expr)) {
+	if helpers.IsSourcePosition(info.TypeOf(expr)) {
 		return expr, true
 	}
 	return nil, false
@@ -147,7 +148,7 @@ func isPosRelativeSubtrahend(expr ast.Expr, info *types.Info) bool {
 	if _, ok := intConversionOfPos(expr, info); ok {
 		return true
 	}
-	if isTokenPos(info.TypeOf(expr)) {
+	if helpers.IsSourcePosition(info.TypeOf(expr)) {
 		return true
 	}
 	call, ok := expr.(*ast.CallExpr)
@@ -206,20 +207,11 @@ func isIntConversionOfPos(call *ast.CallExpr, info *types.Info) bool {
 	if _, isConversion := info.Uses[name].(*types.TypeName); !isConversion && info.Uses[name] != nil {
 		return false
 	}
-	return isTokenPos(info.TypeOf(call.Args[0]))
+	return helpers.IsSourcePosition(info.TypeOf(call.Args[0]))
 }
 
 // integerTypeNames are the conversions that turn a position into a number.
 var integerTypeNames = map[string]bool{
 	"int": true, "int32": true, "int64": true,
 	"uint": true, "uint32": true, "uint64": true,
-}
-
-// isTokenPos reports whether the type is go/token.Pos.
-func isTokenPos(t types.Type) bool {
-	named, ok := t.(*types.Named)
-	if !ok || named.Obj().Pkg() == nil {
-		return false
-	}
-	return named.Obj().Pkg().Path() == "go/token" && named.Obj().Name() == "Pos"
 }

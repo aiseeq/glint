@@ -337,7 +337,7 @@ func (c paramCarrier) carriesLiteral(lit *ast.CompositeLit) bool {
 		}
 		return false
 	}
-	st, ok := pointedStruct(typ)
+	st, ok := helpers.StructUnder(typ)
 	if !ok {
 		return false
 	}
@@ -411,7 +411,7 @@ func appendOnlyFields(fn patternkit.TypedFunc, responders map[*types.Func][]int)
 		if !local.reaches || local.escaped {
 			continue
 		}
-		for _, name := range patternkit.SortedKeys(local.appended) {
+		for _, name := range core.SortedKeys(local.appended) {
 			if tag, ok := listJSONField(local.st, name); ok && !local.set[name] {
 				fields = append(fields, appendOnlyField{owner: local.owner, json: tag})
 				break
@@ -908,7 +908,7 @@ func nilSliceSinks(fn patternkit.TypedFunc, sources map[*types.Func]nilSliceSour
 				if !ok {
 					continue
 				}
-				st, ok := pointedStruct(fn.Info.TypeOf(sel.X))
+				st, ok := helpers.StructUnder(fn.Info.TypeOf(sel.X))
 				if !ok {
 					continue
 				}
@@ -929,17 +929,6 @@ func nilSliceSinks(fn patternkit.TypedFunc, sources map[*types.Func]nilSliceSour
 		return true
 	})
 	return sinks
-}
-
-func pointedStruct(t types.Type) (*types.Struct, bool) {
-	if t == nil {
-		return nil, false
-	}
-	if ptr, ok := t.Underlying().(*types.Pointer); ok {
-		t = ptr.Elem()
-	}
-	st, ok := t.Underlying().(*types.Struct)
-	return st, ok
 }
 
 // listJSONField returns the JSON name of a field a list can be stored in

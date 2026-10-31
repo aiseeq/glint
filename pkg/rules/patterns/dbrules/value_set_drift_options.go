@@ -112,7 +112,7 @@ func fileLabelSwitches(ctx *core.FileContext) []labelSwitch {
 				if clause.List == nil {
 					continue
 				}
-				label, ok := patternkit.StringLiteral(singleReturnExpr(clause.Body))
+				label, ok := helpers.StringLiteral(helpers.SingleReturn(clause.Body))
 				if !ok || len(clause.List) != 1 {
 					return true
 				}
@@ -121,7 +121,7 @@ func fileLabelSwitches(ctx *core.FileContext) []labelSwitch {
 					return true
 				}
 				value := code.Value
-				if text, isString := patternkit.StringLiteral(code); isString {
+				if text, isString := helpers.StringLiteral(code); isString {
 					value = text
 				}
 				labels[value] = label
@@ -133,18 +133,6 @@ func fileLabelSwitches(ctx *core.FileContext) []labelSwitch {
 		})
 	}
 	return out
-}
-
-// singleReturnExpr returns the value of a body that is one return of one value.
-func singleReturnExpr(body []ast.Stmt) ast.Expr {
-	if len(body) != 1 {
-		return nil
-	}
-	ret, ok := body[0].(*ast.ReturnStmt)
-	if !ok || len(ret.Results) != 1 {
-		return nil
-	}
-	return ret.Results[0]
 }
 
 // labelText normalizes a label for comparison: no repeated code, lower case,

@@ -127,7 +127,7 @@ func referenceSlot(info *types.Info, stack []ast.Node) (string, *ast.CallExpr) {
 				if rhs != child || j >= len(node.Lhs) {
 					continue
 				}
-				if name := patternkit.AssignedName(node.Lhs[j]); namesReference(name) {
+				if name := helpers.ExprName(node.Lhs[j]); namesReference(name) {
 					return name, nil
 				}
 			}
@@ -524,7 +524,7 @@ func NewIdempotencyKeyNotScopedToCallerRule() *patternkit.TypedFuncRule {
 				}
 			case *ast.AssignStmt:
 				if len(node.Lhs) == 1 && len(node.Rhs) == 1 {
-					name, value = patternkit.AssignedName(node.Lhs[0]), node.Rhs[0]
+					name, value = helpers.ExprName(node.Lhs[0]), node.Rhs[0]
 				}
 			}
 			if value == nil || !namesIdempotencyKey(name) || !builtKey(value) {

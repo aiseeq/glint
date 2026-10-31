@@ -254,7 +254,7 @@ func (r *SecretInQueryURLRule) isSecretPathFormat(call *ast.CallExpr) bool {
 		if i+1 >= len(call.Args) || !inURLPath(format[:verb.start]) {
 			continue
 		}
-		if name := valueName(call.Args[i+1]); name != "" && r.secretParam.MatchString(name) {
+		if name := helpers.ExprName(call.Args[i+1]); name != "" && r.secretParam.MatchString(name) {
 			return true
 		}
 	}
@@ -267,18 +267,6 @@ func inURLPath(prefix string) bool {
 		prefix = prefix[i+len("://"):]
 	}
 	return strings.Contains(prefix, "/") && !strings.Contains(prefix, "?")
-}
-
-// valueName returns the name of a variable or field, or "" for another
-// expression.
-func valueName(expr ast.Expr) string {
-	switch e := ast.Unparen(expr).(type) {
-	case *ast.Ident:
-		return e.Name
-	case *ast.SelectorExpr:
-		return e.Sel.Name
-	}
-	return ""
 }
 
 // isHTTPTransportFunc reports the net/http functions and *http.Client methods

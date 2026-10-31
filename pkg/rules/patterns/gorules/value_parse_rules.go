@@ -143,11 +143,11 @@ func removesSeparator(info *types.Info, call *ast.CallExpr) bool {
 	if len(call.Args) < 3 {
 		return false
 	}
-	old, ok := patternkit.StringLiteral(call.Args[1])
+	old, ok := helpers.StringLiteral(call.Args[1])
 	if !ok || (old != "," && old != ".") {
 		return false
 	}
-	replacement, ok := patternkit.StringLiteral(call.Args[2])
+	replacement, ok := helpers.StringLiteral(call.Args[2])
 	return ok && replacement == ""
 }
 
@@ -450,10 +450,10 @@ func truthLiteralComparison(info *types.Info, n ast.Node) (ast.Expr, bool) {
 	default:
 		return nil, false
 	}
-	if text, ok := patternkit.StringLiteral(right); ok && truthLiterals[strings.ToLower(text)] {
+	if text, ok := helpers.StringLiteral(right); ok && truthLiterals[strings.ToLower(text)] {
 		return left, true
 	}
-	if text, ok := patternkit.StringLiteral(left); ok && truthLiterals[strings.ToLower(text)] {
+	if text, ok := helpers.StringLiteral(left); ok && truthLiterals[strings.ToLower(text)] {
 		return right, true
 	}
 	return nil, false
@@ -569,7 +569,7 @@ func rangedStringList(info *types.Info, body *ast.BlockStmt, x ast.Expr) *ast.Co
 func swappedDayMonth(list *ast.CompositeLit) (string, string, bool) {
 	var layouts []string
 	for _, elt := range list.Elts {
-		if text, ok := patternkit.StringLiteral(elt); ok {
+		if text, ok := helpers.StringLiteral(elt); ok {
 			layouts = append(layouts, text)
 		}
 	}
@@ -839,7 +839,7 @@ func emptyFieldTested(cond ast.Expr) *ast.SelectorExpr {
 		if !ok {
 			return nil
 		}
-		if text, ok := patternkit.StringLiteral(c.Y); (ok && text == "") || helpers.IsNilIdent(c.Y) {
+		if text, ok := helpers.StringLiteral(c.Y); (ok && text == "") || helpers.IsNilIdent(c.Y) {
 			return sel
 		}
 	case *ast.CallExpr:

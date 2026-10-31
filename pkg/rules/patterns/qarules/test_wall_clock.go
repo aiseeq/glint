@@ -272,7 +272,7 @@ func (r *TestDependsOnWallClockRule) AnalyzeFile(ctx *core.FileContext) []*core.
 				if leaf != name {
 					message = "Test calls " + name + ", which through " + leaf + " decides by the hour, weekday or date of time.Now() — the test passes or fails by when it runs"
 				}
-				violations = append(violations, testReport(r.BaseRule, ctx, line, message,
+				violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line, message,
 					"Pass the moment or a clock into "+leaf+" and set it in the test"))
 				return true
 			})

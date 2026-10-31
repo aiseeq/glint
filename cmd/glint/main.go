@@ -705,10 +705,10 @@ func (r *analysisRoot) addScope(dir string, whole bool) {
 	}
 	kept := r.scopes[:0]
 	for _, scope := range r.scopes {
-		if within(dir, scope) {
+		if core.WithinPath(dir, scope) {
 			return
 		}
-		if !within(scope, dir) {
+		if !core.WithinPath(scope, dir) {
 			kept = append(kept, scope)
 		}
 	}
@@ -726,12 +726,6 @@ func (r analysisRoot) walkScopes() []string {
 		return nil
 	}
 	return r.scopes
-}
-
-// within reports a path at or below dir.
-func within(path, dir string) bool {
-	rel, err := filepath.Rel(dir, path)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // resolvePath turns a path argument into an absolute directory, or a file

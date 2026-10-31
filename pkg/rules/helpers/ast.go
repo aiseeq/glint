@@ -112,6 +112,25 @@ func ContainsNode[T ast.Node](root ast.Node, match func(T) bool) bool {
 	return found
 }
 
+// MentionsAnyName reports whether node contains an identifier in names.
+func MentionsAnyName(node ast.Node, names map[string]bool) bool {
+	return ContainsNode[*ast.Ident](node, func(ident *ast.Ident) bool {
+		return names[ident.Name]
+	})
+}
+
+// SingleReturn returns the sole expression of a one-statement return body.
+func SingleReturn(body []ast.Stmt) ast.Expr {
+	if len(body) != 1 {
+		return nil
+	}
+	ret, ok := body[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return nil
+	}
+	return ret.Results[0]
+}
+
 // ParentMap maps every node under root to its parent.
 func ParentMap(root ast.Node) map[ast.Node]ast.Node {
 	parents := make(map[ast.Node]ast.Node)

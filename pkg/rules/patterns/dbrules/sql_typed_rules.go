@@ -303,7 +303,7 @@ func NewBatchUpsertDuplicateConflictKeysRule() *patternkit.TypedFuncRule {
 				return true
 			}
 			rows := rowsSource(scope.Info, fn, call.Args[indexes[1]])
-			if rows == nil || assignedIn(scope.Info, fn.Body, rows) || keyedPerRow(scope.Info, fn.Body, rows) {
+			if rows == nil || patternkit.AssignsVar(scope.Info, fn.Body, rows) || keyedPerRow(scope.Info, fn.Body, rows) {
 				return true
 			}
 			if _, isParam := patternkit.ParamIndex(patternkit.TypedFunc{Info: scope.Info, Decl: fn}, rows); !isParam {
@@ -396,20 +396,4 @@ func selectorName(fun ast.Expr) string {
 		return f.Name
 	}
 	return ""
-}
-
-// assignedIn reports an assignment to the variable in the body.
-func assignedIn(info *types.Info, body *ast.BlockStmt, v *types.Var) bool {
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		if assign, ok := n.(*ast.AssignStmt); ok {
-			for _, lhs := range assign.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok && info.ObjectOf(id) == v {
-					found = true
-				}
-			}
-		}
-		return !found
-	})
-	return found
 }

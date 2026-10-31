@@ -347,7 +347,7 @@ func (a *fieldAccess) selector(sel *ast.SelectorExpr, info *types.Info, targets,
 // literal records the fields a composite literal fills. A literal without
 // keys is positional and fills every field of its struct.
 func (a *fieldAccess) literal(lit *ast.CompositeLit, info *types.Info) {
-	structType, ok := structUnder(info.TypeOf(lit))
+	structType, ok := helpers.StructUnder(info.TypeOf(lit))
 	if !ok {
 		return
 	}
@@ -438,18 +438,6 @@ func selectedField(info *types.Info, expr ast.Expr) (token.Pos, bool) {
 		return token.NoPos, false
 	}
 	return v.Origin().Pos(), true
-}
-
-// structUnder returns the struct behind a (possibly pointer or named) type.
-func structUnder(t types.Type) (*types.Struct, bool) {
-	if t == nil {
-		return nil, false
-	}
-	if p, ok := t.Underlying().(*types.Pointer); ok {
-		t = p.Elem()
-	}
-	st, ok := t.Underlying().(*types.Struct)
-	return st, ok
 }
 
 // underlyingMap returns the map behind a type, seeing through pointers.

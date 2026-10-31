@@ -74,7 +74,7 @@ func (r *TestAssertsWallClockRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 		if ctx.IsSuppressed(i+1, r.Name()) {
 			continue
 		}
-		violations = append(violations, testReport(r.BaseRule, ctx, i+1,
+		violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, i+1,
 			"Test asserts that measured time stays under a bound — the duration follows machine load, and the test fails on a busy runner",
 			"Assert what makes it fast (a cache hit, how many times the slow call ran) instead of the stopwatch"))
 	}
@@ -136,7 +136,7 @@ func (r *BrowserWaitAfterActionRule) AnalyzeFile(ctx *core.FileContext) []*core.
 		if next >= len(code) || !r.wait.MatchString(code[next]) || ctx.IsSuppressed(next+1, r.Name()) {
 			continue
 		}
-		violations = append(violations, testReport(r.BaseRule, ctx, next+1,
+		violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, next+1,
 			"The wait starts after the action that triggers it has completed — a fast response arrives first and the wait times out",
 			"Start the wait before the action: const response = page.waitForResponse(...); await action; await response"))
 	}
@@ -212,7 +212,7 @@ func (r *BrowserRouteGlobGluedRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 					continue
 				}
 			}
-			violations = append(violations, testReport(r.BaseRule, ctx, i+1,
+			violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, i+1,
 				"URL glob '"+m[2]+"' glues ** to a word — Playwright then reads it as * that stops at '/', and sub-paths are not matched",
 				"Keep ** a whole segment ('**/factors/**') or use a regular expression"))
 		}

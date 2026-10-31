@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // testMentions answers "does a Go file outside the typed load in this
@@ -98,7 +99,7 @@ func (m *testMentions) mentionedAnywhere(name string) bool {
 func collectIdentifierWords(content string, into map[string]bool) {
 	start := -1
 	for i := 0; i <= len(content); i++ {
-		isWord := i < len(content) && isIdentifierChar(content[i])
+		isWord := i < len(content) && helpers.IsIdentifierChar(content[i])
 		switch {
 		case isWord && start < 0:
 			start = i
@@ -107,9 +108,4 @@ func collectIdentifierWords(content string, into map[string]bool) {
 			start = -1
 		}
 	}
-}
-
-func isIdentifierChar(c byte) bool {
-	return c == '_' ||
-		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }

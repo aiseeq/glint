@@ -33,13 +33,6 @@ func componentSetters(f patternkit.JsFlat) map[int]map[string]string {
 	return setters
 }
 
-func newFrontendViolation(rule *rules.BaseRule, ctx *core.FileContext, line int, message, suggestion string) *core.Violation {
-	v := rule.CreateViolation(ctx.RelPath, line, message)
-	v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
-	v.WithSuggestion(suggestion)
-	return v
-}
-
 // ReactEffectAsyncWithoutCleanupRule detects an effect that loads data
 // asynchronously and writes it to state with nothing to stop a late answer:
 //
@@ -174,9 +167,7 @@ func (r *ReactEffectAsyncWithoutCleanupRule) AnalyzeFile(ctx *core.FileContext) 
 		if ctx.IsSuppressed(line, r.Name()) {
 			continue
 		}
-		violations = append(violations, newFrontendViolation(r.BaseRule, ctx, line,
-			fmt.Sprintf("%s loads asynchronously and calls %s with no cleanup — an answer that arrives after the dependencies changed or the component unmounted still sets state", f.Code[m[2]:m[3]], setter),
-			"Abort the request in the cleanup (AbortController), or set a flag in the cleanup and skip the state update when it is cleared"))
+		violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line, fmt.Sprintf("%s loads asynchronously and calls %s with no cleanup — an answer that arrives after the dependencies changed or the component unmounted still sets state", f.Code[m[2]:m[3]], setter), "Abort the request in the cleanup (AbortController), or set a flag in the cleanup and skip the state update when it is cleared"))
 	}
 	return violations
 }
@@ -217,9 +208,7 @@ func (r *ReactRenderBranchesOnWindowRule) AnalyzeFile(ctx *core.FileContext) []*
 		if ctx.IsSuppressed(line, r.Name()) {
 			continue
 		}
-		violations = append(violations, newFrontendViolation(r.BaseRule, ctx, line,
-			"JSX branches on typeof window — the server renders one tree and the client's first render another, and hydration fails",
-			"Render the client-only part after mount (a mounted flag set in useEffect) or load it with a dynamic import without SSR"))
+		violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line, "JSX branches on typeof window — the server renders one tree and the client's first render another, and hydration fails", "Render the client-only part after mount (a mounted flag set in useEffect) or load it with a dynamic import without SSR"))
 	}
 	return violations
 }
@@ -275,9 +264,7 @@ func (r *ReactSetStateUpdaterSideEffectRule) AnalyzeFile(ctx *core.FileContext) 
 			if ctx.IsSuppressed(line, r.Name()) {
 				continue
 			}
-			violations = append(violations, newFrontendViolation(r.BaseRule, ctx, line,
-				fmt.Sprintf("The updater passed to %s has side effects — React may call it twice, and the timer, ref write or other state update runs twice", setter),
-				"Compute the next value in the updater only; decide and run the side effects outside it, from the current value"))
+			violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line, fmt.Sprintf("The updater passed to %s has side effects — React may call it twice, and the timer, ref write or other state update runs twice", setter), "Compute the next value in the updater only; decide and run the side effects outside it, from the current value"))
 		}
 	}
 	return violations
@@ -340,9 +327,7 @@ func (r *ServiceWorkerRespondWithMaybeEmptyRule) AnalyzeFile(ctx *core.FileConte
 			if ctx.IsSuppressed(line, r.Name()) {
 				continue
 			}
-			violations = append(violations, newFrontendViolation(r.BaseRule, ctx, line,
-				"respondWith answers with caches.match as is — a request that is not cached resolves undefined and the navigation fails with a network error",
-				"Fall back when the cache has nothing: caches.match(req).then(r => r || offlineResponse())"))
+			violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line, "respondWith answers with caches.match as is — a request that is not cached resolves undefined and the navigation fails with a network error", "Fall back when the cache has nothing: caches.match(req).then(r => r || offlineResponse())"))
 		}
 	}
 	return violations
@@ -390,9 +375,7 @@ func (r *PeriodicPageReloadRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 		if ctx.IsSuppressed(line, r.Name()) {
 			continue
 		}
-		violations = append(violations, newFrontendViolation(r.BaseRule, ctx, line,
-			"The page reloads on a timer — while the failure lasts it reloads forever",
-			"Reload on an event (online, a click), or keep a reload budget in sessionStorage and stop when it is spent"))
+		violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line, "The page reloads on a timer — while the failure lasts it reloads forever", "Reload on an event (online, a click), or keep a reload budget in sessionStorage and stop when it is spent"))
 	}
 	return violations
 }
@@ -462,9 +445,7 @@ func (r *ReactFetchedAmountStartsAtZeroRule) AnalyzeFile(ctx *core.FileContext) 
 		if ctx.IsSuppressed(line, r.Name()) {
 			continue
 		}
-		violations = append(violations, newFrontendViolation(r.BaseRule, ctx, line,
-			fmt.Sprintf("'%s' starts at 0 and only a load sets it — until the request answers the page shows a real zero", name),
-			"Start at null and render a loading state until the value arrives"))
+		violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line, fmt.Sprintf("'%s' starts at 0 and only a load sets it — until the request answers the page shows a real zero", name), "Start at null and render a loading state until the value arrives"))
 	}
 	return violations
 }

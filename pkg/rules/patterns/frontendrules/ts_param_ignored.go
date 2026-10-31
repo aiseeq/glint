@@ -137,17 +137,13 @@ func jsMentions(code, name string) bool {
 			return false
 		}
 		start, end := from+i, from+i+len(name)
-		before := start == 0 || !jsWordByte(code[start-1])
-		after := end == len(code) || !jsWordByte(code[end])
+		before := start == 0 || !core.IsScriptIdentRune(rune(code[start-1]))
+		after := end == len(code) || !core.IsScriptIdentRune(rune(code[end]))
 		if before && after {
 			return true
 		}
 		from = end
 	}
-}
-
-func jsWordByte(c byte) bool {
-	return c == '_' || c == '$' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // methodBodyBrace returns the '{' of a method body after its parameter list:

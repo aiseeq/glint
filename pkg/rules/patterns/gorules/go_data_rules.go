@@ -304,7 +304,7 @@ func (r *JSONTagShadowsEmbeddedFieldRule) analyze(ctx *core.FileContext, info *t
 		if !ok {
 			return true
 		}
-		structType, ok := declaredStructOf(spec, info)
+		structType, ok := helpers.DeclaredStructType(spec, info)
 		if !ok {
 			return true
 		}
@@ -345,16 +345,6 @@ func (r *JSONTagShadowsEmbeddedFieldRule) analyze(ctx *core.FileContext, info *t
 type promotedJSONField struct {
 	owner  string
 	goName string
-}
-
-// declaredStructOf returns the checked struct behind a type declaration.
-func declaredStructOf(spec *ast.TypeSpec, info *types.Info) (*types.Struct, bool) {
-	obj, ok := info.Defs[spec.Name].(*types.TypeName)
-	if !ok {
-		return nil, false
-	}
-	structType, ok := obj.Type().Underlying().(*types.Struct)
-	return structType, ok
 }
 
 // jsonKey returns the JSON name of a field: the tag's name, else the Go name;

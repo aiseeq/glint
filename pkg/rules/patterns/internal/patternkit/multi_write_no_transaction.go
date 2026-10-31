@@ -26,7 +26,7 @@ func LastResultIsError(signature *types.Signature) bool {
 
 // IsPackageLevelVar reports whether the variable is declared at package level:
 // a sentinel error such as ErrNotFound.
-func IsPackageLevelVar(obj *types.Var) bool {
+func IsPackageLevelVar(obj types.Object) bool {
 	return obj.Pkg() != nil && obj.Parent() == obj.Pkg().Scope()
 }
 

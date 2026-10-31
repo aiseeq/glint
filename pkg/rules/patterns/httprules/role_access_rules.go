@@ -660,8 +660,8 @@ func readWrite(lit *ast.CompositeLit) *ast.KeyValueExpr {
 	if read == nil || write == nil {
 		return nil
 	}
-	readValue, ok1 := patternkit.StringLiteral(read.Value)
-	writeValue, ok2 := patternkit.StringLiteral(write.Value)
+	readValue, ok1 := helpers.StringLiteral(read.Value)
+	writeValue, ok2 := helpers.StringLiteral(write.Value)
 	if !ok1 || !ok2 || writeValue == "" {
 		return nil
 	}

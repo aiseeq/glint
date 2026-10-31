@@ -2,11 +2,24 @@
 package helpers
 
 import (
+	"go/ast"
+	"go/token"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
+
+// StringLiteral returns the unquoted value of a string literal.
+func StringLiteral(expr ast.Expr) (string, bool) {
+	lit, ok := ast.Unparen(expr).(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	value, err := strconv.Unquote(lit.Value)
+	return value, err == nil
+}
 
 // MaskJSCommentsAndStrings returns a copy of TypeScript/JavaScript source lines
 // in which every comment (//, /* */ spanning lines, JSDoc) and the contents of

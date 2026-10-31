@@ -93,7 +93,7 @@ func (r *PaginatedCallFirstPageOnlyRule) AnalyzeGoProject(ctx *core.GoProjectCon
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				switch node := n.(type) {
 				case *ast.CallExpr:
-					if insidePageLoop(node, loops) || !listsRows(node, info) {
+					if patternkit.InsideNodes(loops, node) || !listsRows(node, info) {
 						return true
 					}
 					size, ok, inFilter := firstPageSize(node, fn.Body, info)
@@ -107,7 +107,7 @@ func (r *PaginatedCallFirstPageOnlyRule) AnalyzeGoProject(ctx *core.GoProjectCon
 					}
 					report(node, message, "Page through until the reported total or an empty page, or fail loudly when a cap is reached")
 				case *ast.CompositeLit:
-					if insidePageLoop(node, loops) {
+					if patternkit.InsideNodes(loops, node) {
 						return true
 					}
 					if key, size, ok := requestPageSize(node, info); ok && !requestCapWatched(fn.Body, size, info) {
@@ -148,15 +148,6 @@ func pageLoops(body *ast.BlockStmt) []ast.Node {
 		return true
 	})
 	return loops
-}
-
-func insidePageLoop(n ast.Node, outer []ast.Node) bool {
-	for _, o := range outer {
-		if o.Pos() <= n.Pos() && n.End() <= o.End() {
-			return true
-		}
-	}
-	return false
 }
 
 // firstPageSize returns the page size a call to a paged function asks for —

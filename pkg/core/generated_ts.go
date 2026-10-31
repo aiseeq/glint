@@ -128,16 +128,17 @@ func tsMembers(content, ns string) []string {
 			before = rest[i-1]
 		}
 		rest = rest[i+len(ns)+1:]
-		end := strings.IndexFunc(rest, func(r rune) bool { return !isScriptIdentRune(r) })
+		end := strings.IndexFunc(rest, func(r rune) bool { return !IsScriptIdentRune(r) })
 		if end < 0 {
 			end = len(rest)
 		}
-		if end > 0 && !isScriptIdentRune(rune(before)) && before != '.' {
+		if end > 0 && !IsScriptIdentRune(rune(before)) && before != '.' {
 			names = append(names, rest[:end])
 		}
 	}
 }
 
-func isScriptIdentRune(r rune) bool {
+// IsScriptIdentRune reports whether r is an ASCII identifier character used in scripts.
+func IsScriptIdentRune(r rune) bool {
 	return r == '_' || r == '$' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
 }

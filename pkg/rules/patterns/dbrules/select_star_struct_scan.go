@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -88,10 +89,10 @@ func tableAfterStar(rest string) string {
 		if lower[i:i+4] != "from" {
 			continue
 		}
-		if i > 0 && isSQLWordByte(lower[i-1]) {
+		if i > 0 && helpers.IsIdentifierChar(lower[i-1]) {
 			continue
 		}
-		if i+4 < len(lower) && isSQLWordByte(lower[i+4]) {
+		if i+4 < len(lower) && helpers.IsIdentifierChar(lower[i+4]) {
 			continue
 		}
 		m := tableName.FindStringSubmatch(rest[i+4:])
@@ -101,10 +102,6 @@ func tableAfterStar(rest string) string {
 		return m[1]
 	}
 	return ""
-}
-
-func isSQLWordByte(b byte) bool {
-	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 // AnalyzeFile walks string literals looking for SELECT * over a table.

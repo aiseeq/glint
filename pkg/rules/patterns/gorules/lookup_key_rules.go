@@ -263,7 +263,7 @@ func keyConcats(info *types.Info, pkg *types.Package, body *ast.BlockStmt) map[c
 		if !ok || inner.Op != token.ADD {
 			return true
 		}
-		sep, ok := patternkit.StringLiteral(inner.Y)
+		sep, ok := helpers.StringLiteral(inner.Y)
 		left, right := patternkit.SelectedField(inner.X, info), patternkit.SelectedField(outer.Y, info)
 		if !ok || !isSeparator(sep) || left == nil || right == nil {
 			return true
@@ -735,7 +735,7 @@ func (r *DuplicateKeyInDefinitionListRule) AnalyzeFile(ctx *core.FileContext) []
 				if !ok || !keyFieldNames[key.Name] {
 					continue
 				}
-				value, ok := patternkit.StringLiteral(kv.Value)
+				value, ok := helpers.StringLiteral(kv.Value)
 				if !ok || value == "" {
 					continue
 				}

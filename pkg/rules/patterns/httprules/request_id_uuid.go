@@ -188,7 +188,7 @@ func (src *requestSources) idRead(n ast.Node) (requestIDRead, bool) {
 		if !isVarsCall(node.X, src.isRequest) && (!isIdent || !src.vars[src.info.ObjectOf(ident)]) {
 			return requestIDRead{}, false
 		}
-		if key, ok := patternkit.StringLiteral(node.Index); ok && idKey(key) {
+		if key, ok := helpers.StringLiteral(node.Index); ok && idKey(key) {
 			return requestIDRead{node: node, column: patternkit.SnakeCase(key)}, true
 		}
 	case *ast.CallExpr:
@@ -212,7 +212,7 @@ func (src *requestSources) queryRead(call *ast.CallExpr) (requestIDRead, bool) {
 	if !ok || len(call.Args) != 1 {
 		return requestIDRead{}, false
 	}
-	key, ok := patternkit.StringLiteral(call.Args[0])
+	key, ok := helpers.StringLiteral(call.Args[0])
 	if !ok || !idKey(key) {
 		return requestIDRead{}, false
 	}

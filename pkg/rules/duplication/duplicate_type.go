@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
-	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -91,7 +90,7 @@ func (r *DuplicateTypeAcrossPackagesRule) AnalyzeGoProject(ctx *core.GoProjectCo
 		}
 	}
 	twins := make(map[*types.TypeName]string)
-	for _, key := range sortedKeys(byKey) {
+	for _, key := range core.SortedKeys(byKey) {
 		copies := byKey[key]
 		method := key[strings.Index(key, ".")+1 : strings.Index(key, "|")]
 		// The first copy is the twin of every copy from another package, and
@@ -183,15 +182,6 @@ func methodKeys(named *types.Named) []string {
 		bare := types.NewSignatureType(nil, nil, nil, sig.Params(), sig.Results(), sig.Variadic())
 		keys = append(keys, named.Obj().Name()+"."+method.Name()+"|"+types.TypeString(bare, nil))
 	}
-	return keys
-}
-
-func sortedKeys(m map[string][]*types.Named) []string {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
 	return keys
 }
 

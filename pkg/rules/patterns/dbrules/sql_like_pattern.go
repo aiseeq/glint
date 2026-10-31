@@ -94,7 +94,7 @@ func unescapedLikePattern(expr ast.Expr) bool {
 		operands := helpers.ConcatOperands(e)
 		wildcard, value := false, false
 		for i, operand := range operands {
-			if text, ok := patternkit.StringLiteral(operand); ok {
+			if text, ok := helpers.StringLiteral(operand); ok {
 				first, last := i == 0, i == len(operands)-1
 				wildcard = wildcard || (first && strings.HasSuffix(text, "%")) || (last && strings.HasPrefix(text, "%"))
 				continue
@@ -113,7 +113,7 @@ func unescapedLikePattern(expr ast.Expr) bool {
 		if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "fmt" {
 			return false
 		}
-		format, ok := patternkit.StringLiteral(e.Args[0])
+		format, ok := helpers.StringLiteral(e.Args[0])
 		wraps := strings.HasPrefix(format, "%%%") || strings.HasSuffix(format, "%%")
 		if !ok || !wraps || len(format) > 12 {
 			return false

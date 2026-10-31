@@ -84,18 +84,13 @@ func decidesRoot(code []string, line int, negated bool, dir string) bool {
 	if negated {
 		return rootFailure.MatchString(window(3))
 	}
-	words := strings.FieldsFunc(window(2), func(c rune) bool { return !isJSIdentRune(c) })
+	words := strings.FieldsFunc(window(2), func(c rune) bool { return !core.IsScriptIdentRune(c) })
 	for k := 0; k+1 < len(words); k++ {
 		if words[k] == "return" && words[k+1] == dir {
 			return true
 		}
 	}
 	return false
-}
-
-// isJSIdentRune reports a rune of a JavaScript identifier.
-func isJSIdentRune(c rune) bool {
-	return c == '_' || c == '$' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // existsAbove reports a file of the name in dir or any directory above it.

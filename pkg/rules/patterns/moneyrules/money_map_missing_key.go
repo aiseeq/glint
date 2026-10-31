@@ -138,7 +138,7 @@ func moneyMapValueFeedsField(info *types.Info, body *ast.BlockStmt, lookup *ast.
 			return false
 		}
 		for obj := range valueObjects {
-			if expressionContainsIdentifier(info, field.Value, obj) {
+			if patternkit.MentionsObject(info, field.Value, obj) {
 				feedsField = true
 				return false
 			}
@@ -151,12 +151,6 @@ func moneyMapValueFeedsField(info *types.Info, body *ast.BlockStmt, lookup *ast.
 func expressionContainsNode(expr ast.Expr, target ast.Node) bool {
 	return helpers.ContainsNode[ast.Node](expr, func(node ast.Node) bool {
 		return node == target
-	})
-}
-
-func expressionContainsIdentifier(info *types.Info, expr ast.Expr, target types.Object) bool {
-	return helpers.ContainsNode[*ast.Ident](expr, func(id *ast.Ident) bool {
-		return info.ObjectOf(id) == target
 	})
 }
 

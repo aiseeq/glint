@@ -401,7 +401,7 @@ func keyedAccess(info *types.Info, expr ast.Expr) (key string, literal, ok bool)
 	default:
 		return "", false, false
 	}
-	if s, isLit := patternkit.StringLiteral(keyExpr); isLit {
+	if s, isLit := helpers.StringLiteral(keyExpr); isLit {
 		return s, true, true
 	}
 	return "", false, true
@@ -566,7 +566,7 @@ func (pf *packageForms) collect(decl patternkit.TypedFuncDecl) {
 					continue
 				}
 				if lit, ok := kv.Value.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					if name, ok := patternkit.StringLiteral(lit); ok && name != "" {
+					if name, ok := helpers.StringLiteral(lit); ok && name != "" {
 						pf.declared[name] = append(pf.declared[name], declaredName{lit: lit, fn: decl.Decl})
 					}
 				}

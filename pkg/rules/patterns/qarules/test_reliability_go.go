@@ -94,13 +94,6 @@ func isSkipCall(call *ast.CallExpr, handles map[string]bool) bool {
 	return ok && handles[receiver.Name] && strings.HasPrefix(sel.Sel.Name, "Skip")
 }
 
-func testReport(rule *rules.BaseRule, ctx *core.FileContext, line int, message, suggestion string) *core.Violation {
-	v := rule.CreateViolation(ctx.RelPath, line, message)
-	v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
-	v.WithSuggestion(suggestion)
-	return v
-}
-
 // goTestFile reports a Go file of a test tree with its syntax.
 func goTestFile(ctx *core.FileContext) bool {
 	return ctx.IsGoFile() && ctx.HasGoAST() && ctx.IsTestFile()
@@ -158,7 +151,7 @@ func (r *TestWaitPassesOnExhaustionRule) AnalyzeFile(ctx *core.FileContext) []*c
 				for _, node := range r.silentGiveUps(loop, list[i+1:], tb.handles) {
 					line := ctx.LineFor(node)
 					if !ctx.IsSuppressed(line, r.Name()) {
-						violations = append(violations, testReport(r.BaseRule, ctx, line,
+						violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line,
 							"Test wait gives up silently — when the attempts run out it returns as if the awaited state had come, and the test passes whatever happened",
 							"Fail the test on exhaustion (t.Fatalf with what was last seen), or wait with require.Eventually"))
 					}
@@ -329,7 +322,7 @@ func (r *TestFixedSleepBeforeAssertRule) AnalyzeFile(ctx *core.FileContext) []*c
 					}
 					line := ctx.LineFor(stmt)
 					if !ctx.IsSuppressed(line, r.Name()) {
-						violations = append(violations, testReport(r.BaseRule, ctx, line,
+						violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line,
 							"Test sleeps a fixed time and then checks once — the pause guesses how long the work takes: too short on a loaded machine, wasted on a fast one",
 							"Poll for the expected state with a deadline (require.Eventually, or a loop that fails with the last value seen)"))
 					}
@@ -494,7 +487,7 @@ func (r *TestAcceptsServerErrorRule) AnalyzeFile(ctx *core.FileContext) []*core.
 	report := func(node ast.Node) {
 		line := ctx.LineFor(node)
 		if !ctx.IsSuppressed(line, r.Name()) {
-			violations = append(violations, testReport(r.BaseRule, ctx, line,
+			violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line,
 				"Status assertion accepts server errors — the test passes when the endpoint fails with 5xx",
 				"Assert the status the scenario produces (require.Equal(t, http.StatusOK, resp.StatusCode)); a test that tolerates an unavailable dependency should skip, not pass"))
 		}
@@ -630,7 +623,7 @@ func (r *TestCleanupRegisteredLateRule) AnalyzeFile(ctx *core.FileContext) []*co
 				continue
 			}
 			j := c + 1
-			for j < d && nodeMentions(list[j], created.assigned) && failsTest(list[j], tb.handles) {
+			for j < d && helpers.MentionsAnyName(list[j], created.assigned) && failsTest(list[j], tb.handles) {
 				j++ // checks of what the creation returned
 			}
 			for ; j < d; j++ {
@@ -639,7 +632,7 @@ func (r *TestCleanupRegisteredLateRule) AnalyzeFile(ctx *core.FileContext) []*co
 				}
 				line := ctx.LineFor(list[j])
 				if !ctx.IsSuppressed(line, r.Name()) {
-					violations = append(violations, testReport(r.BaseRule, ctx, line,
+					violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line,
 						"Test can stop here before the cleanup of what it created at line "+strconv.Itoa(ctx.LineFor(list[c]))+" is registered — the resource stays behind",
 						"Register the cleanup (defer or t.Cleanup) right after the creation succeeds, before any other step that can fail"))
 				}
@@ -684,10 +677,14 @@ type creation struct {
 // cleanedBy reports a cleanup of this creation: one that reads what it
 // returned or, when it returned only an error, the object it called.
 func (c creation) cleanedBy(cleanup ast.Stmt) bool {
-	if len(c.values) > 0 {
-		return nodeMentions(cleanup, c.values)
+	names := c.values
+	if len(names) == 0 {
+		names = map[string]bool{c.receiver: true}
 	}
-	return nodeMentions(cleanup, map[string]bool{c.receiver: true})
+	if helpers.MentionsAnyName(cleanup, names) {
+		return true
+	}
+	return false
 }
 
 // lastCreation returns the index of the last statement that creates something
@@ -768,13 +765,6 @@ func creatingReceiver(call *ast.CallExpr, handles map[string]bool) string {
 	return root
 }
 
-// nodeMentions reports a node reading one of the names.
-func nodeMentions(node ast.Node, names map[string]bool) bool {
-	return helpers.ContainsNode[*ast.Ident](node, func(ident *ast.Ident) bool {
-		return names[ident.Name]
-	})
-}
-
 // --- test-deletes-shared-data ----------------------------------------------
 
 // TestDeletesSharedDataRule detects a test that deletes or rewrites rows
@@ -827,7 +817,7 @@ func (r *TestDeletesSharedDataRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 				}
 				line := ctx.LineFor(call)
 				if !ctx.IsSuppressed(line, r.Name()) {
-					violations = append(violations, testReport(r.BaseRule, ctx, line,
+					violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line,
 						"Test deletes or rewrites rows chosen by the production value "+exprLabel(arg)+" — on a shared database it wipes the application's own data",
 						"Scope test data by a value the test created (a unique id, a test-only strategy) and clean up only that"))
 				}
@@ -991,7 +981,7 @@ func (r *TestChannelReceiveWithoutTimeoutRule) AnalyzeFile(ctx *core.FileContext
 			}
 			line := ctx.LineFor(recv)
 			if !ctx.IsSuppressed(line, r.Name()) {
-				violations = append(violations, testReport(r.BaseRule, ctx, line,
+				violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line,
 					"Test receives from "+exprLabel(recv.X)+" with no timeout — if the event never comes, the run hangs until the global timeout and names no test",
 					"Receive in a select with a time.After case that fails the test"))
 			}

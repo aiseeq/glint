@@ -10,6 +10,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -74,7 +75,7 @@ func (r *RequestJSONTagCaseRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 	var violations []*core.Violation
 	for _, fn := range patternkit.ProjectFuncDecls(ctx) {
 		for _, target := range patternkit.RequestDecodeTargets(fn) {
-			st, ok := pointedStruct(fn.Info.TypeOf(target))
+			st, ok := helpers.StructUnder(fn.Info.TypeOf(target))
 			if !ok {
 				continue
 			}

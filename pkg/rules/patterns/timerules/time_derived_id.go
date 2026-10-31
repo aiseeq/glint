@@ -125,7 +125,7 @@ func (r *TimeDerivedIDRule) analyzeGo(ctx *core.FileContext) []*core.Violation {
 					return true
 				}
 				for i, rhs := range node.Rhs {
-					check(patternkit.AssignedName(node.Lhs[i]), rhs, node)
+					check(helpers.ExprName(node.Lhs[i]), rhs, node)
 					if ident, ok := node.Lhs[i].(*ast.Ident); ok && clockNumber(rhs, clock) {
 						clock[ident.Name] = true
 					}

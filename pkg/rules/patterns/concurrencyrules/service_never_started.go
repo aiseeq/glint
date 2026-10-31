@@ -8,6 +8,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -210,19 +211,10 @@ func variadicElem(t types.Type) types.Type {
 // interface carrying the entry point.
 func (u *serviceUsage) reachableThroughInterface(named *types.Named, method string) bool {
 	for _, iface := range u.entryInterfaces {
-		if !interfaceHasMethod(iface, method) {
+		if !helpers.InterfaceDeclaresMethod(iface, method) {
 			continue
 		}
 		if types.Implements(named, iface) || types.Implements(types.NewPointer(named), iface) {
-			return true
-		}
-	}
-	return false
-}
-
-func interfaceHasMethod(iface *types.Interface, name string) bool {
-	for method := range iface.Methods() {
-		if method.Name() == name {
 			return true
 		}
 	}

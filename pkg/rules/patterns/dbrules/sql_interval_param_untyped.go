@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -108,9 +109,9 @@ func sqlIntervalTokens(sql string) []sqlIntervalToken {
 			tokens = append(tokens, sqlIntervalToken{text: sql[start:i], start: start, parameter: true})
 			continue
 		}
-		if sqlIntervalWordByte(sql[i]) {
+		if helpers.IsIdentifierChar(sql[i]) {
 			i++
-			for i < len(sql) && sqlIntervalWordByte(sql[i]) {
+			for i < len(sql) && helpers.IsIdentifierChar(sql[i]) {
 				i++
 			}
 			tokens = append(tokens, sqlIntervalToken{text: sql[start:i], start: start, word: true})
@@ -143,10 +144,6 @@ func sqlIntervalQuotedEnd(sql string, i int, quote byte) int {
 		}
 	}
 	return i
-}
-
-func sqlIntervalWordByte(b byte) bool {
-	return b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
 
 func sqlParamTyped(tokens []sqlIntervalToken, i int) bool {

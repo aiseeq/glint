@@ -756,7 +756,7 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 func addFingerprintDirs(dir, root string, directories map[string]bool) {
 	dir = filepath.Clean(dir)
 	bound := dir
-	if root != "" && withinDir(root, dir) {
+	if root != "" && core.WithinPath(dir, root) {
 		bound = filepath.Clean(root)
 	} else {
 		for current := dir; ; current = filepath.Dir(current) {
@@ -774,11 +774,6 @@ func addFingerprintDirs(dir, root string, directories map[string]bool) {
 			break
 		}
 	}
-}
-
-func withinDir(root, path string) bool {
-	rel, err := filepath.Rel(root, path)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 type tscStatLookup struct {

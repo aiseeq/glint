@@ -10,6 +10,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,7 +30,7 @@ func TestAuditActorPropagationRule_Metadata(t *testing.T) {
 	assert.True(t, rule.RequiresSSA())
 	assert.True(t, rules.HonorsSuppression(rule))
 	assert.Empty(t, rule.AnalyzeFile(&core.FileContext{}))
-	assert.Equal(t, auditSinkSet(defaultAuditActorSinks), rule.sinks)
+	assert.Equal(t, helpers.StringSet(defaultAuditActorSinks), rule.sinks)
 	registered, ok := rules.Get("audit-actor-propagation")
 	assert.True(t, ok)
 	assert.IsType(t, rule, registered)
@@ -602,8 +603,8 @@ func update(repo *Repo) {
 // every item is a non-empty string.
 func TestAuditActorPropagationRule_ConfigureSinks(t *testing.T) {
 	rule := NewAuditActorPropagationRule()
-	require.NoError(t, rule.Configure(map[string]any{"sinks": []any{"WriteAudit", "RecordStatusHistory"}}))
-	assert.Equal(t, auditSinkSet([]string{"WriteAudit", "RecordStatusHistory"}), rule.sinks)
+	require.NoError(t, rule.Configure(map[string]any{"sinks": []any{"WriteAudit", "RecordStateChange"}}))
+	assert.Equal(t, helpers.StringSet([]string{"WriteAudit", "RecordStateChange"}), rule.sinks)
 
 	for name, value := range map[string]any{
 		"non-string item": []any{"WriteAudit", 7},

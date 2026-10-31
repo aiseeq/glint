@@ -131,7 +131,7 @@ func loopHasTemporalBreak(loop *ast.ForStmt, boundaryNames map[string]bool, exit
 			return false
 		}
 		ifStmt, ok := node.(*ast.IfStmt)
-		if !ok || !containsIdentifier(ifStmt.Cond, boundaryNames) || !blockEndsWalk(ifStmt.Body, exit) {
+		if !ok || !helpers.MentionsAnyName(ifStmt.Cond, boundaryNames) || !blockEndsWalk(ifStmt.Body, exit) {
 			return true
 		}
 		found = true
@@ -265,18 +265,6 @@ func boundaryAbsentCondition(expr ast.Expr, boundaryNames map[string]bool) bool 
 	return leftOK && rightOK && ((boundaryNames[left.Name] && right.Name == "nil") || (left.Name == "nil" && boundaryNames[right.Name]))
 }
 
-func containsIdentifier(node ast.Node, names map[string]bool) bool {
-	found := false
-	ast.Inspect(node, func(child ast.Node) bool {
-		if ident, ok := child.(*ast.Ident); ok && names[ident.Name] {
-			found = true
-			return false
-		}
-		return !found
-	})
-	return found
-}
-
 func containsPageCapName(node ast.Node) bool {
 	if node == nil {
 		return false
@@ -348,7 +336,7 @@ func (r *PaginationBoundaryTruncationRule) missingCursorExits(ctx *core.FileCont
 	})
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		ifStmt, ok := n.(*ast.IfStmt)
-		if !ok || !insidePageLoop(ifStmt, loops) || !missingCursorCondition(ifStmt.Cond) || !endsWalkQuietly(ifStmt.Body) {
+		if !ok || !patternkit.InsideNodes(loops, ifStmt) || !missingCursorCondition(ifStmt.Cond) || !endsWalkQuietly(ifStmt.Body) {
 			return true
 		}
 		line := ctx.LineFor(ifStmt)

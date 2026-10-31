@@ -1,9 +1,24 @@
 package helpers
 
 import (
+	"go/types"
 	"strings"
 	"unicode"
 )
+
+// IsIdentifierChar reports an ASCII letter, digit, or underscore.
+func IsIdentifierChar(c byte) bool {
+	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}
+
+// IsSourcePosition reports whether t is go/token.Pos.
+func IsSourcePosition(t types.Type) bool {
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Pkg().Path() == "go/token" && named.Obj().Name() == "Pos"
+}
 
 // IdentifierWords splits an identifier into lower-case words at underscores
 // and camelCase boundaries; an acronym is one word (HTTPClient: http, client).

@@ -129,7 +129,7 @@ func (r *TestEmailRegistrableDomainRule) analyzeSQL(ctx *core.FileContext) []*co
 				break
 			}
 			if testLocalPart.MatchString(literal) && !ctx.IsSuppressed(i+1, r.Name()) {
-				violations = append(violations, testReport(r.BaseRule, ctx, i+1,
+				violations = append(violations, patternkit.SqlViolation(r.BaseRule, ctx, i+1,
 					"The pattern '"+literal+"' takes a test local part on any domain — a real user's address that starts the same way passes as a test one",
 					"Recognize test users by a reserved domain the code owns (@example.com, a .test domain), not by the local part"))
 				break
@@ -181,7 +181,7 @@ func (r *TestEmailRegistrableDomainRule) add(violations []*core.Violation, ctx *
 	if ctx.IsSuppressed(line, r.Name()) {
 		return violations
 	}
-	return append(violations, testReport(r.BaseRule, ctx, line,
+	return append(violations, patternkit.SqlViolation(r.BaseRule, ctx, line,
 		"Test address on the registrable domain "+domain+" — mail to it reaches whoever owns the domain, and code trusting it as a test domain trusts them",
 		"Use a reserved name that never resolves: example.com, or a .test / .example / .invalid domain"))
 }

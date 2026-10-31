@@ -130,7 +130,7 @@ func countHelperUses(file *ast.File, info *types.Info, helpers map[*types.Func]*
 			switch node := n.(type) {
 			case *ast.GoStmt:
 				// go helper(): the work outlives the caller on purpose.
-				if id := calleeIdent(node.Call); id != nil {
+				if id := patternkit.CalleeIdent(node.Call); id != nil {
 					if helper := helpers[funcObj(info, id)]; helper != nil {
 						helper.uses++
 					}
@@ -148,7 +148,7 @@ func countHelperUses(file *ast.File, info *types.Info, helpers map[*types.Func]*
 				})
 				return false
 			case *ast.CallExpr:
-				if id := calleeIdent(node); id != nil {
+				if id := patternkit.CalleeIdent(node); id != nil {
 					called[id] = true
 				}
 			case *ast.Ident:
@@ -169,16 +169,4 @@ func countHelperUses(file *ast.File, info *types.Info, helpers map[*types.Func]*
 func funcObj(info *types.Info, id *ast.Ident) *types.Func {
 	fn, _ := info.Uses[id].(*types.Func)
 	return fn
-}
-
-// calleeIdent returns the identifier naming the called function: f in f(),
-// m in x.m().
-func calleeIdent(call *ast.CallExpr) *ast.Ident {
-	switch fun := ast.Unparen(call.Fun).(type) {
-	case *ast.Ident:
-		return fun
-	case *ast.SelectorExpr:
-		return fun.Sel
-	}
-	return nil
 }

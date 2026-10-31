@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -216,22 +215,11 @@ func (e *Engine) ApplyFixes(fixes []*Fix) []Result {
 	}
 
 	results := make([]Result, 0, len(byFile))
-	for _, file := range sortedFileNames(byFile) {
+	for _, file := range core.SortedKeys(byFile) {
 		results = append(results, e.applyToFile(file, byFile[file]))
 	}
 
 	return results
-}
-
-// sortedFileNames keeps the order of reported files stable: map iteration
-// would shuffle both the applied results and the preview between runs.
-func sortedFileNames(byFile map[string][]*Fix) []string {
-	files := make([]string, 0, len(byFile))
-	for file := range byFile {
-		files = append(files, file)
-	}
-	sort.Strings(files)
-	return files
 }
 
 func (e *Engine) applyToFile(file string, fixes []*Fix) Result {
@@ -282,7 +270,7 @@ func (e *Engine) Preview(fixes []*Fix) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "PROPOSED FIXES (%d changes in %d files):\n\n", len(fixes), len(byFile))
 
-	for _, file := range sortedFileNames(byFile) {
+	for _, file := range core.SortedKeys(byFile) {
 		fileFixes := byFile[file]
 		relPath := file
 		if cwd, err := os.Getwd(); err == nil {
