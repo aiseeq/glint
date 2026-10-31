@@ -45,7 +45,7 @@ func withContextCause(ctx context.Context, err error) error {
 }
 `,
 	}
-	assert.Equal(t, []string{"poller/poller.go:8", "sender/sender.go:9"}, rulestest.ProjectRulePlaces(t, NewDuplicateFuncAcrossPackagesRule(), files))
+	assert.Equal(t, []string{"sender/sender.go:9"}, rulestest.ProjectRulePlaces(t, NewDuplicateFuncAcrossPackagesRule(), files))
 }
 
 // One name with another signature, a one-word name every package has its own
@@ -317,8 +317,25 @@ func TestDuplicateFuncAcrossPackagesSameNameHelperAdvisesExport(t *testing.T) {
 		"beta/label.go":  "package beta\n\nimport \"strings\"\n\nfunc formatLabel(name string) string { return strings.ToUpper(name) + \":\" }\n",
 	}
 	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].File, "beta/label.go")
+	assert.Contains(t, violations[0].Message, "duplicates example.com/rulestest/alpha — keep one implementation, export it")
+}
+
+// Two main packages cannot call each other's copy; the library copy is the
+// one both can import, so it is the twin named in the advice and is not
+// reported itself.
+func TestDuplicateFuncAcrossPackagesSameNameTwinIsPackageAllCanImport(t *testing.T) {
+	mainLabel := "package main\n\nimport \"strings\"\n\nfunc formatLabel(s string) string { return strings.TrimSpace(s) + \"%s\" }\n\nfunc main() { _ = formatLabel(\"x\") }\n"
+	files := map[string]string{
+		"cmd/one/main.go": fmt.Sprintf(mainLabel, "1"),
+		"cmd/two/main.go": fmt.Sprintf(mainLabel, "2"),
+		"text/label.go":   "package text\n\nimport \"strings\"\n\nfunc formatLabel(s string) string { return strings.TrimSpace(s) + \"3\" }\n\nfunc Use(s string) string { return formatLabel(s) }\n",
+	}
+	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
 	require.Len(t, violations, 2)
 	for _, v := range violations {
-		assert.Contains(t, v.Message, "export it")
+		assert.Contains(t, v.File, "cmd/")
+		assert.Contains(t, v.Message, "duplicates example.com/rulestest/text — keep one implementation, export it")
 	}
 }

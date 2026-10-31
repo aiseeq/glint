@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/types"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -140,35 +141,32 @@ func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]duplicateFuncTwi
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		// The first copy is the twin of every copy from another package, and
-		// the first copy from another package is the twin of the first one.
-		copies := byKey[key]
-		first := copies[0].Pkg()
-		var other *types.Package
-		for _, c := range copies {
-			if c.Pkg() != first {
-				other = c.Pkg()
-				break
-			}
-		}
-		if other == nil {
+		// One copy per package: the twin is always another package.
+		copies := uniquePackageFuncs(byKey[key])
+		if len(copies) < 2 {
 			continue
 		}
+		sort.Slice(copies, func(i, j int) bool { return originalFuncLess(copies[i], copies[j]) })
 		// Named helpers are unexported by selection, so calling across needs
-		// an export, and only a package every copy can import may keep it.
-		canCall := false
-		for _, candidate := range copies {
-			if packageImportedByAll(candidate.Pkg(), copies) {
-				canCall = true
-				break
+		// an export, and only a package every copy can import may keep it:
+		// that package is the twin of every other copy and is not reported.
+		kept := slices.IndexFunc(copies, func(c *types.Func) bool { return packageImportedByAll(c.Pkg(), copies) })
+		if kept >= 0 {
+			for i, c := range copies {
+				if i != kept {
+					twins[c] = duplicateFuncTwin{original: copies[kept].Pkg().Path(), canCall: true, unexported: true}
+				}
 			}
+			continue
 		}
-		for _, c := range copies {
-			twin := first
-			if c.Pkg() == first {
-				twin = other
+		// No package can keep it: the first copy is the twin of every other
+		// copy, and the second is the twin of the first.
+		for i, c := range copies {
+			twin := copies[0].Pkg()
+			if i == 0 {
+				twin = copies[1].Pkg()
 			}
-			twins[c] = duplicateFuncTwin{original: twin.Path(), canCall: canCall, unexported: true}
+			twins[c] = duplicateFuncTwin{original: twin.Path(), unexported: true}
 		}
 	}
 	return twins
