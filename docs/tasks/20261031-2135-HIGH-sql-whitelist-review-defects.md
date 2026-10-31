@@ -1,6 +1,7 @@
 # sql-injection: whitelist defects after 2da8913
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Что сделать
 - Дефекты коммита 2da8913 (белые списки sql-injection), найденные независимой проверкой (Terra 1031-2128-glint) на синтетической пробе probe-verify-sql/probe.go:
@@ -18,3 +19,5 @@
 
 ## Журнал
 - 2026-10-31 21:35 открыт — glint-master
+- 2026-10-31 21:41 в работе — glint-master
+- 2026-10-31 21:41 note — glint-master: боец Luna: бриф /home/aisee/.cache/worktrees/glint-measure/security/brief-sql-review.md, приёмка accept-sql-review.sh, дерево /home/aisee/.cache/worktrees/glint/sql-review
