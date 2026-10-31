@@ -29,9 +29,10 @@ type sqlValidation struct {
 }
 
 type sqlNodeContext struct {
-	callable   ast.Node
-	blocks     []*ast.BlockStmt
-	iifeScopes []ast.Node
+	callable       ast.Node
+	blocks         []*ast.BlockStmt
+	iifeScopes     []ast.Node
+	deferredScopes []ast.Node
 }
 
 type sqlRegexpOutcome uint8
@@ -175,7 +176,9 @@ func sqlContextFor(stack []ast.Node) sqlNodeContext {
 				if call, ok := stack[i-1].(*ast.CallExpr); ok && call.Fun == node {
 					_, deferred := stack[i-2].(*ast.DeferStmt)
 					_, goroutine := stack[i-2].(*ast.GoStmt)
-					if !deferred && !goroutine {
+					if deferred || goroutine {
+						context.deferredScopes = append(context.deferredScopes, outer)
+					} else {
 						context.iifeScopes = append(context.iifeScopes, outer)
 					}
 				}
@@ -204,8 +207,10 @@ func (c *sqlTaintCheck) collectNode(n ast.Node) {
 	case *ast.BlockStmt:
 		c.recordValidatorResults(node.List)
 	case *ast.CallExpr:
-		for _, arg := range node.Args {
-			c.invalidateLiteralMap(arg)
+		if !c.readOnlyMapBuiltin(node) {
+			for _, arg := range node.Args {
+				c.invalidateLiteralMap(arg)
+			}
 		}
 	case *ast.ReturnStmt:
 		for _, result := range node.Results {
@@ -273,6 +278,15 @@ func (c *sqlTaintCheck) collectAssignment(node *ast.AssignStmt) {
 			c.regexpPatterns[obj] = pattern
 		}
 	}
+}
+
+func (c *sqlTaintCheck) readOnlyMapBuiltin(call *ast.CallExpr) bool {
+	id, ok := ast.Unparen(call.Fun).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	builtin, ok := c.info.Uses[id].(*types.Builtin)
+	return ok && (builtin.Name() == "len" || builtin.Name() == "cap")
 }
 
 func (c *sqlTaintCheck) invalidateLiteralMap(expr ast.Expr) {
@@ -878,7 +892,24 @@ func (c *sqlTaintCheck) varTaint(v *types.Var) sqlTaint {
 
 func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
 	for _, validation := range c.validated[v] {
-		if validation.scope != c.scope && !slices.Contains(c.queryContext.iifeScopes, validation.scope) {
+		deferred := slices.Contains(c.queryContext.deferredScopes, validation.scope)
+		if validation.scope != c.scope && !deferred && !slices.Contains(c.queryContext.iifeScopes, validation.scope) {
+			continue
+		}
+		if deferred {
+			if validation.at >= c.at {
+				continue
+			}
+			changed := false
+			for _, write := range c.writes[v] {
+				if validation.at < write && write < validation.scope.End() {
+					changed = true
+					break
+				}
+			}
+			if !changed {
+				return true
+			}
 			continue
 		}
 		queryStatement := -1
@@ -969,11 +1000,7 @@ func (c *sqlTaintCheck) httpRequestContainer(expr ast.Expr, visiting map[*types.
 		if !ok || sig.Recv() == nil || !isNamedType(sig.Recv().Type(), "net/url", "URL") {
 			return false
 		}
-		urlField, ok := ast.Unparen(selector.X).(*ast.SelectorExpr)
-		if !ok || urlField.Sel.Name != "URL" {
-			return false
-		}
-		return c.isHTTPRequest(urlField.X)
+		return c.isHTTPRequestURL(selector.X, visiting)
 	case *ast.SelectorExpr:
 		if selectorIsRequestField(node, c) {
 			return true
@@ -987,6 +1014,27 @@ func (c *sqlTaintCheck) httpRequestContainer(expr ast.Expr, visiting map[*types.
 		defer delete(visiting, v)
 		for _, assigned := range c.assigned[v] {
 			if c.httpRequestContainer(assigned, visiting) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *sqlTaintCheck) isHTTPRequestURL(expr ast.Expr, visiting map[*types.Var]bool) bool {
+	expr = ast.Unparen(expr)
+	switch node := expr.(type) {
+	case *ast.SelectorExpr:
+		return node.Sel.Name == "URL" && c.isHTTPRequest(node.X)
+	case *ast.Ident:
+		v := c.varOf(node)
+		if v == nil || visiting[v] {
+			return false
+		}
+		visiting[v] = true
+		defer delete(visiting, v)
+		for _, assigned := range c.assigned[v] {
+			if c.isHTTPRequestURL(assigned, visiting) {
 				return true
 			}
 		}

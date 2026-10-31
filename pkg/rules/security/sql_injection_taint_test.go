@@ -811,3 +811,71 @@ func run(db *sql.DB) {
 	violations := analyzeSQLInjection(t, code)
 	assert.Len(t, violations, 0, "local values and parsed constants are not HTTP request data")
 }
+
+func TestSQLInjectionDeferredClosureKeepsEarlierWhitelistWithoutWrites(t *testing.T) {
+	code := `package main
+import "database/sql"
+func run(db *sql.DB, deferred, launched, changed, replacement string) {
+	if deferred != "column" { return }
+	defer func() { db.Query("SELECT " + deferred) }()
+	if launched != "column" { return }
+	go func() { db.Query("SELECT " + launched) }()
+	if changed != "column" { return }
+	defer func() { db.Query("SELECT " + changed) }()
+	changed = replacement
+	if replacement != "column" { return }
+	go func() { db.Query("SELECT " + replacement) }()
+	replacement = changed
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 2, "deferred and launched closures retain validation only when the captured value is never written again")
+}
+
+func TestSQLInjectionReadOnlyMapUsesKeepFiniteWhitelist(t *testing.T) {
+	code := `package main
+import "database/sql"
+func inspect(map[string]bool) int { return 0 }
+func run(db *sql.DB, value string) {
+	allowed := map[string]bool{"column": true}
+	_ = len(allowed)
+	_ = cap([]int{1})
+	for range allowed {}
+	if !allowed[value] { return }
+	db.Query("SELECT " + value)
+}
+func passedToHelper(db *sql.DB, value string) {
+	allowed := map[string]bool{"column": true}
+	inspect(allowed)
+	if !allowed[value] { return }
+	db.Query("SELECT " + value)
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 1, "read-only builtins and ranging preserve a finite map while passing it to a helper does not")
+}
+
+func TestSQLInjectionRequestURLAliasesRemainRequestSources(t *testing.T) {
+	code := `package main
+import ("database/sql"; "net/http")
+func run(db *sql.DB, request *http.Request) {
+	urlValue := request.URL
+	alias := urlValue
+	db.Query("SELECT * FROM users WHERE name='" + alias.Query().Get("name") + "'")
+	other := request.URL
+	values := other.Query()
+	db.Query("SELECT * FROM " + values.Get("table"))
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 2, "URL values copied through local variables still originate from the HTTP request")
+}
+
+func TestSQLInjectionURLAssignmentCycleEnds(t *testing.T) {
+	code := `package main
+import ("database/sql"; "net/url")
+func run(db *sql.DB, left, right *url.URL) {
+	left = right
+	right = left
+	db.Query("SELECT * FROM users WHERE name='" + right.Query().Get("name") + "'")
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 0, "URLs assigned to each other are not request data and must not loop")
+}
