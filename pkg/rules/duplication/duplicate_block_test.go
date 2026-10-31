@@ -54,7 +54,7 @@ func processAdminData(id int) error {
 	assert.Contains(t, violations[0].Message, "Duplicate block")
 }
 
-func TestDuplicateBlockRule_NoDuplicates(t *testing.T) {
+func TestDuplicateBlockRule_DistinctBlocksPass(t *testing.T) {
 	rule := NewDuplicateBlockRule()
 
 	code := `package main

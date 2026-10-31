@@ -185,7 +185,7 @@ func TestTestExternalServiceRule_CredentialGate(t *testing.T) {
 			name: "гейт по наличию ключа через переменную",
 			code: `package integration
 
-func TestVaultSnapshot_CollectLive(t *testing.T) {
+func TestVaultSnapshot_GatherFresh(t *testing.T) {
 	extvaultKey := os.Getenv("EXTVAULT_ACCESS_KEY")
 	if extvaultKey == "" {
 		t.Skip("EXTVAULT_ACCESS_KEY not set")
@@ -210,7 +210,7 @@ func TestPayments(t *testing.T) {
 			name: "явный переключатель, а не секрет",
 			code: `package integration
 
-func TestVaultSnapshot_CollectLive(t *testing.T) {
+func TestVaultSnapshot_GatherFresh(t *testing.T) {
 	if os.Getenv("PROJECTA_LIVE_EXTERNAL") == "" {
 		t.Skip("manual only")
 	}

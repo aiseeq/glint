@@ -111,7 +111,7 @@ func TestGroups(t *testing.T) {
 
 import "testing"
 
-func TestGo_PanicDoesNotEscapeGoroutine(t *testing.T) {
+func TestGo_GoroutinePanicStaysContained(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
