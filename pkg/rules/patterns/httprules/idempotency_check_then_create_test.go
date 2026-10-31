@@ -290,7 +290,7 @@ func TestIdempotencyCheckThenCreateRule_Negatives(t *testing.T) {
 			code: `package payments
 func save(repo PaymentRepository, key string, payment *Payment) error {
 	_, _ = repo.FindByIdempotencyKey(key)
-	_, err := repo.CreateOrGet(payment)
+	_, err := repo.CreateOrGet(payment) // graft:leak-ok общее имя, список по умолчанию правила
 	return err
 }`,
 		},

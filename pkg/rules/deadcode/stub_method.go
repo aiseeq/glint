@@ -206,7 +206,7 @@ func (r *StubMethodRule) extractStubMessage(expr ast.Expr) string {
 		"Error":         true, // custom error constructors
 		"NewError":      true,
 		"ErrNotFound":   false, // Sentinel errors are ok
-		"ErrValidation": false,
+		"ErrValidation": false, // graft:leak-ok общее имя, список по умолчанию правила
 	}
 
 	// Skip known sentinel errors

@@ -854,7 +854,7 @@ var transactionCalls = []string{"Begin", "BeginTx", "WithTx", "InTx", "RunInTx",
 // with nothing taking the row back on refusal - the caller gets a conflict,
 // the table keeps the refused row:
 //
-//	if _, err := repo.CreateOrGet(ctx, tx); err != nil { ... }
+//	if _, err := repo.CreateOrGet(ctx, tx); err != nil { ... } // graft:leak-ok общее имя, список по умолчанию правила
 //	if err := ensureReferenceIsFree(ctx, repo, tx); err != nil {
 //		return err                     // the row stays
 //	}

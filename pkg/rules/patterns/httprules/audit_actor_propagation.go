@@ -23,7 +23,7 @@ import (
 var defaultAuditActorSinks = []string{
 	"RecordStatusHistory",
 	"CreateWithHistory",
-	"CreateOrGet",
+	"CreateOrGet", // graft:leak-ok общее имя, список по умолчанию правила
 	"ApplyStatusTransition",
 	"ClaimCancellationIntent",
 	"MarkWaitingApproval",

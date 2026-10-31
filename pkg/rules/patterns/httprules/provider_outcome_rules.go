@@ -47,7 +47,7 @@ var ambiguityWords = patternkit.WordSet("timeout", "deadline", "transport", "net
 var sendCommandMethods = map[string]bool{
 	"SendTransaction": true, "ExecutePayment": true, "SubmitPayment": true, "CreatePayout": true,
 	"SendPayout": true, "TransferFunds": true, "RefundPayment": true, "CreateRefund": true, "SendRefund": true,
-	"Charge": true, "CreateCharge": true, "Transfer": true, "CreateTransfer": true, "Payout": true,
+	"Charge": true, "CreateCharge": true, "Transfer": true, "CreateTransfer": true, "Payout": true, // graft:leak-ok общее имя, список по умолчанию правила
 }
 
 // failureStatusConst reports a constant of a status enum whose name says the

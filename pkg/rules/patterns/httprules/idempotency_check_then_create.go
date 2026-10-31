@@ -505,7 +505,7 @@ func (a *idempotencyFunctionAnalyzer) report(lookup, create idempotencyRepositor
 	v := a.rule.CreateViolation(a.ctx.RelPath, line,
 		"idempotency lookup '"+lookup.method+"' followed by non-atomic '"+create.method+"' on '"+create.receiver+"' creates a TOCTOU race")
 	v.WithCode(a.ctx.GetLine(line))
-	v.WithSuggestion("Use an atomic repository operation such as CreateOrGet, Upsert, or INSERT ... ON CONFLICT backed by a unique constraint")
+	v.WithSuggestion("Use an atomic repository operation such as CreateOrGet, Upsert, or INSERT ... ON CONFLICT backed by a unique constraint") // graft:leak-ok общее имя, список по умолчанию правила
 	v.WithContext("pattern", "idempotency_check_then_create")
 	v.WithContext("function", a.function)
 	v.WithContext("receiver", create.receiver)

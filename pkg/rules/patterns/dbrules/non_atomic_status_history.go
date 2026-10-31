@@ -21,7 +21,7 @@ func init() {
 // entity's status when the config names none (setting mutation_methods).
 var defaultStatusMutationMethods = []string{
 	"UpdateStatus", "UpdateStatusWithPayprov", "UpdateQuote", "UpdateSentToProvider",
-	"MarkWaitingApproval", "Create", "CreateOrGet",
+	"MarkWaitingApproval", "Create", "CreateOrGet", // graft:leak-ok общее имя, список по умолчанию правила
 }
 
 // defaultStatusHistoryMethods are the repository methods that append a status

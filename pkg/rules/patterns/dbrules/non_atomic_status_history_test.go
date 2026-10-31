@@ -55,7 +55,7 @@ func TestNonAtomicStatusHistoryRule_MutationMethods(t *testing.T) {
 		"UpdateSentToProvider",
 		"MarkWaitingApproval",
 		"Create",
-		"CreateOrGet",
+		"CreateOrGet", // graft:leak-ok общее имя, список по умолчанию правила
 	} {
 		t.Run(method, func(t *testing.T) {
 			code := `package service; import "context"

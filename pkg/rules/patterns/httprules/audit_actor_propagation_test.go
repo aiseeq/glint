@@ -563,8 +563,8 @@ func TestAuditActorPropagationRule_SkipsFunctionsWithoutSinkSignature(t *testing
 			name: "actor without source",
 			source: `package audit
 type UserRepo struct{}
-func (r *UserRepo) CreateOrGet(userID int64, name string) (int64, error) { return userID, nil }
-func use(r *UserRepo) { _, _ = r.CreateOrGet(1, "x") }
+func (r *UserRepo) CreateOrGet(userID int64, name string) (int64, error) { return userID, nil } // graft:leak-ok общее имя, список по умолчанию правила
+func use(r *UserRepo) { _, _ = r.CreateOrGet(1, "x") } // graft:leak-ok общее имя, список по умолчанию правила
 `,
 		},
 		{

@@ -470,7 +470,7 @@ type Transaction struct {
 
 type Repo struct{}
 
-func (r *Repo) CreateOrGet(ctx context.Context, tx *Transaction) (bool, error) { return true, nil }
+func (r *Repo) CreateOrGet(ctx context.Context, tx *Transaction) (bool, error) { return true, nil } // graft:leak-ok общее имя, список по умолчанию правила
 func (r *Repo) Delete(ctx context.Context, id string) error                      { return nil }
 func (r *Repo) ReferenceTaken(ctx context.Context, ref, id string) (bool, error) { return false, nil }
 
@@ -483,7 +483,7 @@ func ensureReferenceIsFree(ctx context.Context, repo *Repo, tx *Transaction) err
 }
 
 func Create(ctx context.Context, repo *Repo, tx *Transaction) error {
-	if _, err := repo.CreateOrGet(ctx, tx); err != nil {
+	if _, err := repo.CreateOrGet(ctx, tx); err != nil { // graft:leak-ok общее имя, список по умолчанию правила
 		return err
 	}
 	if err := ensureReferenceIsFree(ctx, repo, tx); err != nil {
@@ -496,12 +496,12 @@ func CreateChecked(ctx context.Context, repo *Repo, tx *Transaction) error {
 	if err := ensureReferenceIsFree(ctx, repo, tx); err != nil {
 		return err
 	}
-	_, err := repo.CreateOrGet(ctx, tx)
+	_, err := repo.CreateOrGet(ctx, tx) // graft:leak-ok общее имя, список по умолчанию правила
 	return err
 }
 
 func CreateCompensated(ctx context.Context, repo *Repo, tx *Transaction) error {
-	if _, err := repo.CreateOrGet(ctx, tx); err != nil {
+	if _, err := repo.CreateOrGet(ctx, tx); err != nil { // graft:leak-ok общее имя, список по умолчанию правила
 		return err
 	}
 	if err := ensureReferenceIsFree(ctx, repo, tx); err != nil {
