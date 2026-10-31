@@ -1,6 +1,6 @@
 # reimplemented-stdlib: sorted map keys by hand instead of slices.Sorted(maps.Keys(m))
 
-Статус: на проверке
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -30,3 +30,6 @@
 - 2026-10-31 15:03 note — glint-master: исправлено ad9f493: проверка по позициям (сбор, сортировка, возврат), append в возвращаемый срез, make([]T, 0), len(s.items); совет предупреждает о nil на пустой map (тест реестра поймал: Categories стал nil на пустом реестре); bin/consumers: +4 верных (graft 2, aguard 1, glint 1 — убрана в ad9f493)
 - 2026-10-31 15:03 на проверке — glint-master
 - 2026-10-31 15:24 note — glint-master: 56adf3d влит в main ff; graft all зелёный (/home/aisee/.cache/worktrees/glint-measure/all-C.log); дальше push и graft install
+- 2026-10-31 16:10 note — glint-master: установлено e8f001f; пилот graft-master: обе новые находки верны (graft c3561a7), nil-оговорка правок не потребовала; разослано aguard (profile.go:127 + оговорка к 331bc10), llmark/demu/sc2go (оговорка); рабочие — пн 02.11
+- 2026-10-31 16:10 note — glint-master: demu-master: nil-оговорка в 494a682 ничего не задевает (5 замен — range, mergedGameNames → только range); проверка Opus запущена (свежий контекст, бриф из тикета)
+- 2026-10-31 16:20 готово — opus-verifier (session glint-master): Opus свежий контекст 31.10 16:13: glint v1.83.7-215-ge8f001f; пробы /home/aisee/.cache/claude-tmp/claude-1000/-home-aisee-git-glint/verify-sorted/ — go1.23 положительные 8/8, отрицательные 0/18, go1.22 0, пограничные верны; совет с оговоркой nil (тест assert Contains 'returns nil'); своего хелпера в glint нет; go test ReimplementedStdlib|Registry ok; consumers-sorted-r3.txt: 4 новые находки все верны (aguard a4ec664, glint ad9f493, graft c3561a7 ×2). Пропуски форм — тикет sorted-keys-forms-gaps
