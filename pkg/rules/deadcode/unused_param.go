@@ -90,7 +90,9 @@ func collectFixedSignatures(ctx *core.GoProjectContext) (*fixedSignatures, error
 		}
 		fixed.addInterfaces(pkg.Package.Types, seen)
 		for _, file := range pkg.Package.Syntax {
-			fixed.addFuncValues(file, pkg.Package.TypesInfo)
+			for fn := range helpers.FuncValues(file, pkg.Package.TypesInfo) {
+				fixed.funcValues[fn] = true
+			}
 		}
 	}
 	return fixed, nil
@@ -120,44 +122,6 @@ func (f *fixedSignatures) addInterfaces(pkg *types.Package, seen map[*types.Pack
 	for _, imported := range pkg.Imports() {
 		f.addInterfaces(imported, seen)
 	}
-}
-
-// addFuncValues records the functions and methods a file uses other than by
-// calling them: passed as an argument, assigned, stored in a literal.
-func (f *fixedSignatures) addFuncValues(file *ast.File, info *types.Info) {
-	callees := make(map[*ast.Ident]bool)
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if ident := calleeIdent(call.Fun); ident != nil {
-			callees[ident] = true
-		}
-		return true
-	})
-	for ident, obj := range info.Uses {
-		fn, ok := obj.(*types.Func)
-		if !ok || callees[ident] {
-			continue
-		}
-		f.funcValues[fn.Origin()] = true
-	}
-}
-
-// calleeIdent returns the identifier naming the function a call invokes.
-func calleeIdent(fun ast.Expr) *ast.Ident {
-	switch f := ast.Unparen(fun).(type) {
-	case *ast.Ident:
-		return f
-	case *ast.SelectorExpr:
-		return f.Sel
-	case *ast.IndexExpr:
-		return calleeIdent(f.X)
-	case *ast.IndexListExpr:
-		return calleeIdent(f.X)
-	}
-	return nil
 }
 
 // signatureIsFixed reports whether fn must keep its signature regardless of
