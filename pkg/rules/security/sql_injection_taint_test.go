@@ -686,3 +686,71 @@ func lineAnchor(db *sql.DB, column string) {
 	violations := analyzeSQLInjection(t, code)
 	assert.Len(t, violations, 2, "comma-ok maps and outer-block checks should whitelist, while unanchored regexp branches and line anchors should report")
 }
+
+func TestSQLInjectionWhitelistReviewDefects(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		want int
+	}{
+		{
+			name: "rejecting conjunction of finite exclusions",
+			code: `package main
+import "database/sql"
+func run(db *sql.DB, value string) {
+	if value != "first" && value != "second" { return }
+	db.Query("SELECT " + value)
+}`,
+		},
+		{
+			name: "outer validation before immediately called closure",
+			code: `package main
+import "database/sql"
+func run(db *sql.DB, value string) {
+	if value != "column" { return }
+	func() { db.Query("SELECT " + value) }()
+}`,
+		},
+		{
+			name: "literal map mutated with a dynamic key",
+			code: `package main
+import "database/sql"
+func run(db *sql.DB, value, extra string) {
+	allowed := map[string]bool{"fixed": true}
+	allowed[extra] = true
+	if !allowed[value] { return }
+	db.Query("SELECT " + value)
+}`,
+			want: 1,
+		},
+		{
+			name: "literal map with a dynamic key",
+			code: `package main
+import "database/sql"
+func run(db *sql.DB, value, key string) {
+	allowed := map[string]bool{key: true}
+	if !allowed[value] { return }
+	db.Query("SELECT " + value)
+}`,
+			want: 1,
+		},
+		{
+			name: "validator error accepted on nil",
+			code: `package main
+import "database/sql"
+func validate(string) error { return nil }
+func run(db *sql.DB, value string) {
+	if err := validate(value); err == nil { return }
+	db.Query("SELECT " + value)
+}`,
+			want: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			violations := analyzeSQLInjection(t, tt.code)
+			assert.Len(t, violations, tt.want, "Code:\n%s", tt.code)
+		})
+	}
+}
