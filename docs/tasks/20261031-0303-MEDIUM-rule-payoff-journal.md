@@ -1,6 +1,7 @@
 # glint check appends a run line: project, version, findings and time per rule
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Вход
 - Сон, обход design 31.10: отдачу правил никто не считает — след срабатывания за неделю у 80 из 634 правил; из 30 правил с 27.10 в нескольких проектах сработали 3, ни разу после рождения 21. Предложение: `glint check` дописывает строку в журнал (время, проект, версия, находки по правилам, время правил; JSON с --timing их уже считает).
@@ -15,3 +16,5 @@
 
 ## Журнал
 - 2026-10-31 03:03 открыт — glint-master
+- 2026-10-31 04:06 в работе — glint-master
+- 2026-10-31 04:06 note — glint-master: боец Luna 1031-0406-rule-payoff-journal (фича-инструмента): бриф /home/aisee/.cache/worktrees/glint-measure/brief-rule-payoff-journal.md, приёмка /home/aisee/.cache/worktrees/glint-measure/accept-rule-payoff-journal.sh, дерево /home/aisee/.cache/worktrees/glint/rule-payoff-journal
