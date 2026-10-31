@@ -1,6 +1,7 @@
 # tls-verification-disabled (Go): assignment missed, a foreign struct field reported
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Что сделать
 - Находка критика описания glint «как сделано» (тикет 20261031-1600-MEDIUM-spec-as-built): pkg/rules/security/tls_verification_disabled.go:57 смотрит только ключи литералов по имени без типа: присваивание c.InsecureSkipVerify = true (main.go:13) пропущено, Options{InsecureSkipVerify: true} (main.go:15) — ложная HIGH.
@@ -74,3 +75,5 @@
 
 ## Журнал
 - 2026-10-31 17:44 открыт — glint-master
+- 2026-10-31 20:14 в работе — glint-master
+- 2026-10-31 20:14 note — glint-master: боец Luna 1031-2014-sec-tls (F4+F5): бриф glint-measure/security/brief-tls.md, приёмка glint-measure/security/accept-tls.sh, дерево sec-tls

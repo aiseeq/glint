@@ -74,3 +74,4 @@
 
 ## Журнал
 - 2026-10-31 17:44 открыт — glint-master
+- 2026-10-31 20:14 note — glint-master: очередь: после влития sec-sql (тот же sql_query_taint.go)

@@ -1,6 +1,7 @@
 # sql-injection: a check after the query clears the parameter before it
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Что сделать
 - Находка критика описания glint «как сделано» (тикет 20261031-1600-MEDIUM-spec-as-built): проверки параметра собираются по всему файлу (pkg/rules/security/sql_query_taint.go:97,126) без порядка относительно запроса; проверка после db.Query (late, main.go:27–30) снимает находку.
@@ -74,3 +75,5 @@
 
 ## Журнал
 - 2026-10-31 17:44 открыт — glint-master
+- 2026-10-31 20:14 в работе — glint-master
+- 2026-10-31 20:14 note — glint-master: боец Luna 1031-2014-sec-sql (вместе F1+F2): бриф glint-measure/security/brief-sql.md, приёмка glint-measure/security/accept-sql.sh (гейт, тесты security, проба: 19, 27, 39 есть, 48 нет), дерево sec-sql
