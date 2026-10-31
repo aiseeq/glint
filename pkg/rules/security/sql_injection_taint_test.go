@@ -465,6 +465,101 @@ func byTable(db *sql.DB, table string) {
 	}
 }
 
+func TestSQLInjectionHTTPRequestValuesAreSources(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		want int
+	}{
+		{
+			name: "request query value",
+			code: `package main
+import ("database/sql"; "net/http")
+func run(db *sql.DB, request *http.Request) {
+	value := request.URL.Query().Get("name")
+	db.Query("SELECT * FROM users WHERE name='" + value + "'")
+}`,
+			want: 1,
+		},
+		{
+			name: "request form methods",
+			code: `package main
+import ("database/sql"; "net/http")
+func run(db *sql.DB, request *http.Request) {
+	db.Query("SELECT * FROM users WHERE name='" + request.FormValue("name") + "'")
+	value := request.PostFormValue("name")
+	db.Query("SELECT * FROM users WHERE name='" + value + "'")
+}`,
+			want: 2,
+		},
+		{
+			name: "request path and header methods",
+			code: `package main
+import ("database/sql"; "net/http")
+func run(db *sql.DB, request *http.Request) {
+	value := request.PathValue("id")
+	db.Query("SELECT * FROM users WHERE id=" + value)
+	value = request.Header.Get("X-Table")
+	db.Query("SELECT * FROM " + value)
+}`,
+			want: 2,
+		},
+		{
+			name: "request cookie value",
+			code: `package main
+import ("database/sql"; "net/http")
+func run(db *sql.DB, request *http.Request) {
+	cookie, _ := request.Cookie("session")
+	db.Query("SELECT * FROM users WHERE session='" + cookie.Value + "'")
+}`,
+			want: 1,
+		},
+		{
+			name: "typed values and headers",
+			code: `package main
+import ("database/sql"; "net/http"; "net/url")
+func run(db *sql.DB) {
+	var values url.Values
+	var header http.Header
+	db.Query("SELECT * FROM users WHERE name='" + values.Get("name") + "'")
+	db.Query("SELECT * FROM " + header.Get("X-Table"))
+}`,
+			want: 2,
+		},
+		{
+			name: "unrelated method with matching name",
+			code: `package main
+import "database/sql"
+type lookup struct{}
+func (lookup) Get(string) string { return "fixed" }
+func run(db *sql.DB, values lookup) {
+	db.Query("SELECT * FROM users WHERE name='" + values.Get("name") + "'")
+}`,
+		},
+		{
+			name: "placeholder whitelist and numeric conversion stay safe",
+			code: `package main
+import ("database/sql"; "net/http"; "strconv")
+func run(db *sql.DB, request *http.Request) {
+	db.Query("SELECT * FROM users WHERE name=$1", request.FormValue("name"))
+	order := request.URL.Query().Get("order")
+	if order != "name" { return }
+	db.Query("SELECT * FROM users ORDER BY " + order)
+	n, err := strconv.Atoi(request.URL.Query().Get("limit"))
+	if err != nil { return }
+	db.Query("SELECT * FROM users LIMIT " + strconv.Itoa(n))
+}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			violations := analyzeSQLInjection(t, tt.code)
+			assert.Len(t, violations, tt.want, "Code:\n%s", tt.code)
+		})
+	}
+}
+
 func TestSQLInjectionWhitelistMustPrecedeQueryAndRestrictValues(t *testing.T) {
 	code := `package main
 

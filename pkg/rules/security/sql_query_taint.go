@@ -297,6 +297,10 @@ func (c *sqlTaintCheck) recordAssign(node *ast.AssignStmt) {
 		switch ast.Unparen(node.Rhs[0]).(type) {
 		case *ast.IndexExpr, *ast.TypeAssertExpr, *ast.UnaryExpr:
 			c.record(node.Lhs[0], node.Rhs[0])
+		case *ast.CallExpr:
+			if c.httpRequestCookie(node.Rhs[0]) {
+				c.record(node.Lhs[0], node.Rhs[0])
+			}
 		}
 	}
 	// One result of a multi-value call is text the rule does not see into.
@@ -792,10 +796,13 @@ func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
 	return false
 }
 
-// callTaint judges the text a call returns. Calls the rule follows pass their
-// arguments' text on; any other call is a helper whose result the rule does
-// not see into.
+// callTaint judges the text a call returns. HTTP request accessors are outside
+// text sources; calls the rule follows pass their arguments' text on, and any
+// other call is a helper whose result the rule does not see into.
 func (c *sqlTaintCheck) callTaint(call *ast.CallExpr) sqlTaint {
+	if c.httpRequestValue(call) {
+		return sqlTaint{outside: true}
+	}
 	if c.isConversion(call) {
 		if len(call.Args) != 1 {
 			return sqlTaint{}
@@ -811,6 +818,39 @@ func (c *sqlTaintCheck) callTaint(call *ast.CallExpr) sqlTaint {
 		t = t.join(c.taint(arg))
 	}
 	return t.mixed(pattern)
+}
+
+// httpRequestValue reports methods that return text supplied by an HTTP
+// request. Match their declared receiver type so unrelated methods with the
+// same name do not become sources.
+func (c *sqlTaintCheck) httpRequestValue(call *ast.CallExpr) bool {
+	selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	fn, ok := c.info.Uses[selector.Sel].(*types.Func)
+	if !ok {
+		return false
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig.Recv() == nil {
+		return false
+	}
+	name := fn.Name()
+	receiver := sig.Recv().Type()
+	if isNamedType(receiver, "net/http", "Request") {
+		return name == "FormValue" || name == "PostFormValue" || name == "PathValue" || name == "Cookie"
+	}
+	return name == "Get" && (isNamedType(receiver, "net/url", "Values") || isNamedType(receiver, "net/http", "Header"))
+}
+
+func (c *sqlTaintCheck) httpRequestCookie(call ast.Expr) bool {
+	callExpr, ok := ast.Unparen(call).(*ast.CallExpr)
+	if !ok || !c.httpRequestValue(callExpr) {
+		return false
+	}
+	selector, ok := ast.Unparen(callExpr.Fun).(*ast.SelectorExpr)
+	return ok && selector.Sel.Name == "Cookie"
 }
 
 // followedCall reports whether the rule follows text through a call, and the
