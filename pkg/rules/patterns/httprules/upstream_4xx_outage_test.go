@@ -80,7 +80,7 @@ type Admin struct {
 	repo     *store.Repo
 }
 
-func writeJSONError(w http.ResponseWriter, status int, msg string) {
+func writeAPIError(w http.ResponseWriter, status int, msg string) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
@@ -89,7 +89,7 @@ func (a *Admin) handleBanks(w http.ResponseWriter, r *http.Request) {
 	banks, err := a.metadata.Banks(r.Context(), r.URL.Query().Get("country"))
 	if err != nil {
 		a.logger.Error("failed to get banks", "error", err)
-		writeJSONError(w, http.StatusBadGateway, "provider bank list is unavailable") // want upstream-4xx-reported-as-outage
+		writeAPIError(w, http.StatusBadGateway, "provider bank list is unavailable") // want upstream-4xx-reported-as-outage
 		return
 	}
 	_ = json.NewEncoder(w).Encode(banks)
@@ -100,10 +100,10 @@ func (a *Admin) handleBanksClassified(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var apiErr *payprov.APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode < 500 {
-			writeJSONError(w, http.StatusUnprocessableEntity, apiErr.Message)
+			writeAPIError(w, http.StatusUnprocessableEntity, apiErr.Message)
 			return
 		}
-		writeJSONError(w, http.StatusBadGateway, "provider bank list is unavailable")
+		writeAPIError(w, http.StatusBadGateway, "provider bank list is unavailable")
 		return
 	}
 	_ = json.NewEncoder(w).Encode(banks)
@@ -113,7 +113,7 @@ func (a *Admin) handleBanksClassified(w http.ResponseWriter, r *http.Request) {
 func (a *Admin) handleStored(w http.ResponseWriter, r *http.Request) {
 	banks, err := a.repo.Banks(r.Context(), "x")
 	if err != nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "store unavailable")
+		writeAPIError(w, http.StatusServiceUnavailable, "store unavailable")
 		return
 	}
 	_ = json.NewEncoder(w).Encode(banks)

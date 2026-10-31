@@ -309,13 +309,13 @@ func send(s *Service, ctx Context, req Request) error {
 
 func TestProviderCommandBeforeIntentPersistRule_RealProjectCSerializedRequestPersistence(t *testing.T) {
 	code := `package orchestrator
-func (s *confirmationService) sendPayprovTransaction(ctx context.Context, tx *domain.Transaction) (*domain.Transaction, error) {
+func (s *commandService) sendPayprovTransaction(ctx context.Context, tx *domain.Transaction) (*domain.Transaction, error) {
 	payprovReq, err := buildPayprovRequest(tx)
 	if err != nil {
 		s.errors.record(ctx, tx, "build Payprov request", err)
 		return tx, fmt.Errorf("build payprov request: %w", err)
 	}
-	reqJSON, err := payprov.MarshalPOSTBody(payprovReq)
+	reqJSON, err := payprov.EncodePOSTBody(payprovReq)
 	if err != nil {
 		s.errors.record(ctx, tx, "marshal Payprov request", err)
 		return tx, fmt.Errorf("marshal payprov request: %w", err)

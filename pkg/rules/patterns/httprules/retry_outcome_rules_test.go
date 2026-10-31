@@ -231,11 +231,11 @@ func (j *Job) Run(ctx context.Context) {
 		return
 	}
 	for _, tx := range txs {
-		j.processOne(ctx, tx)
+		j.processItem(ctx, tx)
 	}
 }
 
-func (j *Job) processOne(ctx context.Context, tx *Txn) {
+func (j *Job) processItem(ctx context.Context, tx *Txn) {
 	_ = j.canceller.CancelExpired(ctx, tx.ID)
 }
 
@@ -275,8 +275,8 @@ func (j *Job) RunIndexed(ctx context.Context) {
 // An idempotency key built from the request alone collides across callers:
 // two partners sending the same payment id share one transaction, and the
 // second gets the first one's payment back.
-func TestIdempotencyKeyNotScopedToCaller(t *testing.T) {
-	assert.Equal(t, []string{"api/create.go:47"}, patterntest.TypedFuncFindings(t, NewIdempotencyKeyNotScopedToCallerRule(), map[string]string{
+func TestOrderIdempotencyKeyNotScopedToCaller(t *testing.T) {
+	assert.Equal(t, []string{"api/create.go:47"}, patterntest.TypedFuncFindings(t, NewOrderIdempotencyKeyNotScopedToCallerRule(), map[string]string{
 		"api/create.go": `package api
 
 import (
@@ -290,7 +290,7 @@ type Partner struct{ ID string }
 
 type ctxKey struct{}
 
-func authenticatedPartner(ctx context.Context) (*Partner, error) {
+func authenticatedMember(ctx context.Context) (*Partner, error) {
 	p, _ := ctx.Value(ctxKey{}).(*Partner)
 	return p, nil
 }
@@ -301,14 +301,14 @@ type Request struct {
 }
 
 type Transaction struct {
-	IdempotencyKey string
+	OrderIdempotencyKey string
 	PaymentID      string
 }
 
 type Handler struct{}
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-	partner, err := authenticatedPartner(r.Context())
+	partner, err := authenticatedMember(r.Context())
 	if err != nil {
 		return
 	}
@@ -323,13 +323,13 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) toTransaction(req Request) *Transaction {
 	return &Transaction{
-		IdempotencyKey: fmt.Sprintf("ext:%d:%s", req.ProjectID, req.PaymentID),
+		OrderIdempotencyKey: fmt.Sprintf("ext:%d:%s", req.ProjectID, req.PaymentID),
 		PaymentID:      req.PaymentID,
 	}
 }
 
 func (h *Handler) CreateScoped(w http.ResponseWriter, r *http.Request) {
-	partner, err := authenticatedPartner(r.Context())
+	partner, err := authenticatedMember(r.Context())
 	if err != nil {
 		return
 	}
@@ -342,7 +342,7 @@ func (h *Handler) CreateScoped(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) toScopedTransaction(req Request, partnerID string) *Transaction {
-	return &Transaction{IdempotencyKey: fmt.Sprintf("ext:%s:%d:%s", partnerID, req.ProjectID, req.PaymentID)}
+	return &Transaction{OrderIdempotencyKey: fmt.Sprintf("ext:%s:%d:%s", partnerID, req.ProjectID, req.PaymentID)}
 }
 
 // An internal job has no caller to scope by.
@@ -393,13 +393,13 @@ func (w *Worker) deliver(ctx context.Context, item Item) error {
 	return fmt.Errorf("http status %d", resp.StatusCode)
 }
 
-func (w *Worker) handleFailure(ctx context.Context, item Item, err error) error {
+func (w *Worker) handleItemFailure(ctx context.Context, item Item, err error) error {
 	return w.markRetry(ctx, item.ID, time.Now().Add(time.Minute))
 }
 
 func (w *Worker) Process(ctx context.Context, item Item) {
 	if err := w.deliver(ctx, item); err != nil {
-		_ = w.handleFailure(ctx, item, err)
+		_ = w.handleItemFailure(ctx, item, err)
 	}
 }
 
@@ -423,7 +423,7 @@ func (w *Worker) deliverClassified(ctx context.Context, item Item) error {
 
 func (w *Worker) ProcessClassified(ctx context.Context, item Item) {
 	if err := w.deliverClassified(ctx, item); err != nil {
-		_ = w.handleFailure(ctx, item, err)
+		_ = w.handleItemFailure(ctx, item, err)
 	}
 }
 

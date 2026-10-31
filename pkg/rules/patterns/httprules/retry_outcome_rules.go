@@ -16,7 +16,7 @@ import (
 func init() {
 	rules.Register(NewRetryKeyMintedPerAttemptRule())
 	rules.Register(NewStaleBatchRowActedWithoutStatusRecheckRule())
-	rules.Register(NewIdempotencyKeyNotScopedToCallerRule())
+	rules.Register(NewOrderIdempotencyKeyNotScopedToCallerRule())
 	rules.Register(NewOutboundDeliveryRetriesPermanent4xxRule())
 	rules.Register(NewValidationAfterCommittedInsertRule())
 }
@@ -26,7 +26,7 @@ func init() {
 var referenceWords = []string{"ref", "reference", "idempotency", "dedup", "dedupe"}
 
 // namesReference reports an identifier spelled with a reference word:
-// txnRef, PartnerReference, IdempotencyKey.
+// txnRef, PartnerReference, OrderIdempotencyKey.
 func namesReference(name string) bool {
 	return slices.ContainsFunc(helpers.IdentifierWords(name), func(w string) bool { return slices.Contains(referenceWords, w) })
 }
@@ -489,16 +489,16 @@ func pinsRowState(info *types.Info, call *ast.CallExpr, row types.Object) bool {
 // principalNouns name who calls: the authenticated partner, user, account.
 var principalNouns = []string{"partner", "user", "account", "tenant", "merchant", "client", "caller", "principal", "customer", "owner", "member"}
 
-// NewIdempotencyKeyNotScopedToCallerRule creates
+// NewOrderIdempotencyKeyNotScopedToCallerRule creates
 // idempotency-key-not-scoped-to-caller: an idempotency key built from the
 // request alone where an authenticated caller is known - two callers sending
 // the same payment id share one key, and the second gets the first one's
 // result back (or blocks it):
 //
-//	partner, _ := authenticatedPartner(r.Context())
+//	partner, _ := authenticatedMember(r.Context())
 //	...
-//	IdempotencyKey: fmt.Sprintf("ext:%d:%s", req.ProjectID, req.PaymentID),
-func NewIdempotencyKeyNotScopedToCallerRule() *patternkit.TypedFuncRule {
+//	OrderIdempotencyKey: fmt.Sprintf("ext:%d:%s", req.ProjectID, req.PaymentID),
+func NewOrderIdempotencyKeyNotScopedToCallerRule() *patternkit.TypedFuncRule {
 	r := &patternkit.TypedFuncRule{
 		BaseRule: rules.NewBaseRule(
 			"idempotency-key-not-scoped-to-caller",
@@ -527,7 +527,7 @@ func NewIdempotencyKeyNotScopedToCallerRule() *patternkit.TypedFuncRule {
 					name, value = helpers.ExprName(node.Lhs[0]), node.Rhs[0]
 				}
 			}
-			if value == nil || !namesIdempotencyKey(name) || !builtKey(value) {
+			if value == nil || !namesOrderIdempotencyKey(name) || !builtKey(value) {
 				return true
 			}
 			if len(callerParam) > 0 {
@@ -551,8 +551,8 @@ func NewIdempotencyKeyNotScopedToCallerRule() *patternkit.TypedFuncRule {
 	return r
 }
 
-// namesIdempotencyKey reports IdempotencyKey, idemKey, dedupKey.
-func namesIdempotencyKey(name string) bool {
+// namesOrderIdempotencyKey reports OrderIdempotencyKey, idemKey, dedupKey.
+func namesOrderIdempotencyKey(name string) bool {
 	words := helpers.IdentifierWords(name)
 	if len(words) < 2 || words[len(words)-1] != "key" {
 		return false
@@ -588,7 +588,7 @@ func principalParams(info *types.Info, fn *ast.FuncDecl) []types.Object {
 }
 
 // principalLocals returns the variables of body assigned the authenticated
-// caller: partner, err := authenticatedPartner(r.Context()).
+// caller: partner, err := authenticatedMember(r.Context()).
 func principalLocals(info *types.Info, body *ast.BlockStmt) []types.Object {
 	var locals []types.Object
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -609,7 +609,7 @@ func principalLocals(info *types.Info, body *ast.BlockStmt) []types.Object {
 }
 
 // resolvesPrincipal reports a call that names the authenticated caller:
-// authenticatedPartner, currentUser, UserFromContext.
+// authenticatedMember, currentUser, UserFromContext.
 func resolvesPrincipal(name string) bool {
 	words := helpers.IdentifierWords(name)
 	if !slices.ContainsFunc(words, func(w string) bool { return slices.Contains(principalNouns, w) }) {
@@ -736,7 +736,7 @@ func responseStatus(info *types.Info, expr ast.Expr) bool {
 var statusClassWords = []string{"permanent", "retryable", "retriable", "retry", "transient", "temporary", "classify", "rejection", "rejected", "client"}
 
 // classifiesStatus reports a call handed a response's StatusCode whose name
-// speaks of a class of failure: isPermanentRejection(resp.StatusCode).
+// speaks of a class of failure: isPermanentDenial(resp.StatusCode).
 func classifiesStatus(info *types.Info, call *ast.CallExpr) bool {
 	words := helpers.IdentifierWords(helpers.CalleeName(call))
 	if !slices.ContainsFunc(words, func(w string) bool { return slices.Contains(statusClassWords, w) }) {

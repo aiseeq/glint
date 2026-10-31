@@ -268,14 +268,14 @@ func sessionMiddleware(next http.Handler) http.Handler {
 func TestWritePermissionIsRead(t *testing.T) {
 	ctx := rulestest.GoFile(t, "api/perms.go", `package api
 
-type routePermission struct {
+type routeAccessRule struct {
 	prefix     string
 	read       string
 	write      string
 	selfScoped bool
 }
 
-var routePermissions = []routePermission{
+var routeAccessRules = []routeAccessRule{
 	{prefix: "/ledger", read: "ledger:read", write: "ledger:write"},
 	{prefix: "/reports", read: "reports:read"},
 	{prefix: "/units", read: "reports:read", write: "settings:write"},
@@ -312,7 +312,7 @@ type Access struct{ Roles []string }
 type Staff struct{ ID string }
 
 type Store interface {
-	EnsureByEmail(ctx context.Context, email string) (*Staff, error)
+	EnsureMemberByEmail(ctx context.Context, email string) (*Staff, error)
 	EnsureDefaultRole(ctx context.Context, staffID, role string) (bool, error)
 	GetAccess(ctx context.Context, staffID string) (Access, error)
 	CreateSeeded(ctx context.Context, email, role string) (*Staff, bool, error)
@@ -320,8 +320,8 @@ type Store interface {
 
 type Resolver struct{ store Store }
 
-func (c *Resolver) AccessByEmail(ctx context.Context, email string) (Access, error) {
-	staff, err := c.store.EnsureByEmail(ctx, email)
+func (c *Resolver) AccessByMemberEmail(ctx context.Context, email string) (Access, error) {
+	staff, err := c.store.EnsureMemberByEmail(ctx, email)
 	if err != nil {
 		return Access{}, err
 	}
@@ -334,7 +334,7 @@ func (c *Resolver) AccessByEmail(ctx context.Context, email string) (Access, err
 }
 
 func (c *Resolver) Authorized(ctx context.Context, email string) (bool, error) {
-	access, err := c.AccessByEmail(ctx, email)
+	access, err := c.AccessByMemberEmail(ctx, email)
 	if err != nil {
 		return false, err
 	}
@@ -347,7 +347,7 @@ func (c *Resolver) resolveSeed(ctx context.Context, email string) (*Staff, error
 		staff, _, err := c.store.CreateSeeded(ctx, email, "super_admin")
 		return staff, err
 	}
-	return c.store.EnsureByEmail(ctx, email)
+	return c.store.EnsureMemberByEmail(ctx, email)
 }
 `,
 	}))

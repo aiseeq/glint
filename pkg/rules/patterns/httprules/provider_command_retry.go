@@ -97,7 +97,7 @@ func fileFunctions(file *ast.File) map[string]*ast.FuncDecl {
 }
 
 // detectRetryHelperPaths reports a destructive command whose request goes
-// through a same-file retry helper: SendTransaction -> signedPOST ->
+// through a same-file retry helper: SendTransaction -> sendSignedPOST ->
 // withRetry(func() { POST }). The helper repeats the POST on errors that come
 // after the server took the request (a timeout, a decode error after a 2xx),
 // and the command is executed twice. A helper is a function taking a func

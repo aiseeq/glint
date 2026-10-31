@@ -345,7 +345,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(buf)
 }
 
-func reportFailure(w http.ResponseWriter, err error) {
+func writeFailureReport(w http.ResponseWriter, err error) {
 	payload := make([]byte, 0, 512)
 	b, merr := json.Marshal(map[string]string{"error": err.Error()})
 	if merr != nil {
@@ -365,7 +365,7 @@ func work(r *http.Request) error { return nil }
 
 func handleA(w http.ResponseWriter, r *http.Request) {
 	if err := work(r); err != nil {
-		reportFailure(w, err)
+		writeFailureReport(w, err)
 		return
 	}
 	writeJSON(w, 200, 1)
@@ -373,7 +373,7 @@ func handleA(w http.ResponseWriter, r *http.Request) {
 
 func handleB(w http.ResponseWriter, r *http.Request) {
 	if err := work(r); err != nil {
-		reportFailure(w, err)
+		writeFailureReport(w, err)
 		return
 	}
 	writeJSON(w, 200, 2)
@@ -381,7 +381,7 @@ func handleB(w http.ResponseWriter, r *http.Request) {
 
 func handleC(w http.ResponseWriter, r *http.Request) {
 	if err := work(r); err != nil {
-		reportFailure(w, err)
+		writeFailureReport(w, err)
 		return
 	}
 	writeJSON(w, 200, 3)

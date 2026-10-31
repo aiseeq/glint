@@ -22,11 +22,11 @@ func TestProviderCommandRetryRule_Metadata(t *testing.T) {
 
 func TestProviderCommandRetryRule_DetectsProjectCBoolHelper(t *testing.T) {
 	code := `package payprov
-func (c *Client) signedPOST(path string, body any, retry bool) (Response, error) {
+func (c *Client) sendSignedPOST(path string, body any, retry bool) (Response, error) {
 	panic("not implemented")
 }
 func (c *Client) CancelTransaction(request Request) (Response, error) {
-	return c.signedPOST("/cancel", request, true)
+	return c.sendSignedPOST("/cancel", request, true)
 }`
 	ctx := rulestest.InMemoryFileContext(t, "client.go", code)
 
@@ -49,14 +49,14 @@ func TestProviderCommandRetryRule_PostHelperOnRetryLoop(t *testing.T) {
 import "net/http"
 
 func (c *Client) SendTransaction(req Request) error {
-	return c.signedPOST("/send", req)
+	return c.sendSignedPOST("/send", req)
 }
 
 func (c *Client) GetStatus(ref string) error {
 	return c.signedGET("/status")
 }
 
-func (c *Client) signedPOST(path string, body any) error {
+func (c *Client) sendSignedPOST(path string, body any) error {
 	return c.withRetry(func() error {
 		req, err := http.NewRequest(http.MethodPost, c.base+path, nil)
 		if err != nil {
@@ -108,7 +108,7 @@ func (s *Service) ResendConfirmed(id string) error {
 
 func (s *Service) ReconcileConfirmed(id string) error {
 	tx := s.repo.Get(id)
-	return s.client.GetTransactionStatus(tx.Ref)
+	return s.client.GetOrderStatus(tx.Ref)
 }
 
 func (s *Service) sendTransaction(tx Tx) error {
@@ -182,7 +182,7 @@ func TestProviderCommandRetryRule_DetectsCommandsInLoops(t *testing.T) {
 		},
 		{
 			name: "range retries same entity",
-			body: `for range retryDelays {
+			body: `for range retryIntervals {
 		if err := s.provider.CancelTransaction(ref); err == nil { return nil }
 	}`,
 			want: 1,
@@ -269,10 +269,10 @@ func execute(s *Service, groups [][]Payout) error {
 
 func TestProviderCommandRetryRule_SkipsAmbiguousSameNameMethodSignatures(t *testing.T) {
 	code := `package payprov
-func (c *Client) signedPOST(path string, body any, retry bool) error { return nil }
-func (a *Auditor) signedPOST(path string, body any, audit bool) error { return nil }
+func (c *Client) sendSignedPOST(path string, body any, retry bool) error { return nil }
+func (a *Auditor) sendSignedPOST(path string, body any, audit bool) error { return nil }
 func (c *Client) CancelTransaction(request Request) error {
-	return c.signedPOST("/cancel", request, true)
+	return c.sendSignedPOST("/cancel", request, true)
 }`
 	ctx := rulestest.InMemoryFileContext(t, "client.go", code)
 
@@ -287,32 +287,32 @@ func TestProviderCommandRetryRule_DoesNotFlagSafePatterns(t *testing.T) {
 		{
 			name: "bool helper retry false",
 			code: `package payprov
-func (c *Client) signedPOST(path string, retry bool) error { return nil }
+func (c *Client) sendSignedPOST(path string, retry bool) error { return nil }
 func (c *Client) CancelTransaction(ref string) error {
-	return c.signedPOST(ref, false)
+	return c.sendSignedPOST(ref, false)
 }`,
 		},
 		{
 			name: "true does not correspond to retry parameter",
 			code: `package payprov
-func (c *Client) signedPOST(retry bool, audit bool) error { return nil }
+func (c *Client) sendSignedPOST(retry bool, audit bool) error { return nil }
 func (c *Client) CancelTransaction(ref string) error {
-	return c.signedPOST(false, true)
+	return c.sendSignedPOST(false, true)
 }`,
 		},
 		{
 			name: "bool helper parameter is not retry",
 			code: `package payprov
-func (c *Client) signedPOST(path string, cache bool) error { return nil }
+func (c *Client) sendSignedPOST(path string, cache bool) error { return nil }
 func (c *Client) CancelTransaction(ref string) error {
-	return c.signedPOST(ref, true)
+	return c.sendSignedPOST(ref, true)
 }`,
 		},
 		{
 			name: "helper declaration is not in same file",
 			code: `package payprov
 func (c *Client) CancelTransaction(ref string) error {
-	return c.signedPOST(ref, true)
+	return c.sendSignedPOST(ref, true)
 }`,
 		},
 		{
@@ -327,7 +327,7 @@ func cancel(s *Service, ref string) error {
 			code: `package service
 func status(s *Service, ref string) error {
 	return Retry(func() error {
-		return s.provider.GetTransactionStatus(ref)
+		return s.provider.GetOrderStatus(ref)
 	})
 }`,
 		},

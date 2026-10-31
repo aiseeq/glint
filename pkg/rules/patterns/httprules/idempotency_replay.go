@@ -25,7 +25,7 @@ var createCallName = regexp.MustCompile(`^(Create|Insert|Save|Add|Store|Put)`)
 // replayGuards reports a repeat of an idempotency key answered with the
 // stored record without comparing it with the incoming request:
 //
-//	stored, err := s.repo.GetByIdempotencyKey(ctx, order.IdempotencyKey)
+//	stored, err := s.repo.FindByIdempotencyKey(ctx, order.OrderIdempotencyKey)
 //	if err != nil { ... }
 //	*order = *stored
 //	return true, nil

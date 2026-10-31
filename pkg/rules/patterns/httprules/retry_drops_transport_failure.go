@@ -89,7 +89,7 @@ func (r *RetryDropsTransportFailureRule) AnalyzeGoProject(ctx *core.GoProjectCon
 // collectStatusPredicates indexes the functions that answer about an error
 // by the status it carries and nothing else:
 //
-//	func isServerError(err error) bool {
+//	func isUpstreamServerError(err error) bool {
 //	    var statusErr *StatusError
 //	    return errors.As(err, &statusErr) && statusErr.StatusCode >= 500
 //	}
@@ -197,7 +197,7 @@ func (r *RetryDropsTransportFailureRule) statusOnlyExit(file *ast.File, info *ty
 }
 
 // statusPredicateExit returns the switch of a retry loop whose cases ask
-// the send error only for its status (isServerError(err), isTooManyRequests(err))
+// the send error only for its status (isUpstreamServerError(err), isRateLimited(err))
 // and whose default returns the error: a failure without a status falls to
 // the default and ends the loop.
 func statusPredicateExit(file *ast.File, info *types.Info, loop *ast.ForStmt, predicates map[*types.Func]bool) *ast.SwitchStmt {

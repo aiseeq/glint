@@ -72,7 +72,7 @@ import (
 	"net/http"
 )
 
-func createInvestment(w http.ResponseWriter, r *http.Request) {
+func createOrder(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		StrategyID string ` + "`json:\"StrategyID\"`" + `
 		Amount     string ` + "`json:\"Amount\"`" + `

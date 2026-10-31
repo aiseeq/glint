@@ -35,25 +35,25 @@ type LegFilter struct {
 }
 
 type LegRepo interface {
-	GetByFilter(ctx context.Context, f *LegFilter) ([]*Leg, int, error)
+	ListByFilter(ctx context.Context, f *LegFilter) ([]*Leg, int, error)
 }
 
 type SnapRepo struct{}
 
-func (r *SnapRepo) GetHistoryPage(ctx context.Context, id string, limit, offset int) ([]Snap, int, error) {
+func (r *SnapRepo) ListHistoryPage(ctx context.Context, id string, limit, offset int) ([]Snap, int, error) {
 	return nil, 0, nil
 }
 
 // One page handed out as the history, its total dropped: a caller asking
 // for more than the callee's cap gets fewer rows without a sign.
 func (r *SnapRepo) GetHistory(ctx context.Context, id string, limit int) ([]Snap, error) {
-	snaps, _, err := r.GetHistoryPage(ctx, id, limit, 0)
+	snaps, _, err := r.ListHistoryPage(ctx, id, limit, 0)
 	return snaps, err
 }
 
 // The page passed on with its total: no finding.
 func (r *SnapRepo) GetHistoryCounted(ctx context.Context, id string, limit int) ([]Snap, int, error) {
-	return r.GetHistoryPage(ctx, id, limit, 0)
+	return r.ListHistoryPage(ctx, id, limit, 0)
 }
 
 func (r *SnapRepo) GetByPosition(ctx context.Context, id string, limit int) ([]Snap, error) {
@@ -68,19 +68,19 @@ type Service struct {
 // A page size set in the filter literal: legs past it are never seen.
 func (s *Service) Reconcile(ctx context.Context, wallet string) (int, error) {
 	filter := &LegFilter{Wallet: &wallet, Limit: 1000}
-	legs, _, err := s.legs.GetByFilter(ctx, filter)
+	legs, _, err := s.legs.ListByFilter(ctx, filter)
 	return len(legs), err
 }
 
 // The same, inline.
 func (s *Service) ReconcileInline(ctx context.Context, wallet string) (int, error) {
-	legs, _, err := s.legs.GetByFilter(ctx, &LegFilter{Wallet: &wallet, Limit: 1000})
+	legs, _, err := s.legs.ListByFilter(ctx, &LegFilter{Wallet: &wallet, Limit: 1000})
 	return len(legs), err
 }
 
 // The total is kept and compared: no finding.
 func (s *Service) ReconcileChecked(ctx context.Context, wallet string) (int, error) {
-	legs, total, err := s.legs.GetByFilter(ctx, &LegFilter{Wallet: &wallet, Limit: 1000})
+	legs, total, err := s.legs.ListByFilter(ctx, &LegFilter{Wallet: &wallet, Limit: 1000})
 	if total > 1000 {
 		return 0, err
 	}
@@ -91,7 +91,7 @@ func (s *Service) ReconcileChecked(ctx context.Context, wallet string) (int, err
 func (s *Service) ReconcileAll(ctx context.Context, wallet string) (int, error) {
 	n := 0
 	for offset := 0; ; offset += 1000 {
-		legs, _, err := s.legs.GetByFilter(ctx, &LegFilter{Wallet: &wallet, Limit: 1000, Offset: offset})
+		legs, _, err := s.legs.ListByFilter(ctx, &LegFilter{Wallet: &wallet, Limit: 1000, Offset: offset})
 		if err != nil || len(legs) == 0 {
 			return n, err
 		}
@@ -192,7 +192,7 @@ func (s *Service) ReconcileThroughHelper(ctx context.Context, wallet string) (in
 }
 
 func (s *Service) loadLegs(ctx context.Context, filter *LegFilter) ([]*Leg, error) {
-	legs, total, err := s.legs.GetByFilter(ctx, filter)
+	legs, total, err := s.legs.ListByFilter(ctx, filter)
 	if total > filter.Limit {
 		return nil, err
 	}

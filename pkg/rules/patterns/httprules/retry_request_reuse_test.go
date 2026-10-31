@@ -237,7 +237,7 @@ import (
 	"net/http"
 )
 
-func (c *Client) executeWithRetry(req *http.Request) (*http.Response, error) {
+func (c *Client) postWithRetry(req *http.Request) (*http.Response, error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		resp, err := c.httpClient.Do(req)
 		if err == nil {

@@ -48,11 +48,11 @@ func (r *Repo) Save(o *domain.Order) error { return nil }
 
 const providerOutcomeClient = `package payprov
 
-type SendResponse struct{ Reference string }
+type SendEnvelope struct{ Reference string }
 
 type Client struct{}
 
-func (c *Client) SendTransaction(req string) (*SendResponse, error) { return &SendResponse{}, nil }
+func (c *Client) SendTransaction(req string) (*SendEnvelope, error) { return &SendEnvelope{}, nil }
 
 func (c *Client) post(path string, body any, dst any) error { return nil }
 

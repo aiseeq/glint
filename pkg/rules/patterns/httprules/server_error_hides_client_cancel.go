@@ -868,7 +868,7 @@ func testsZeroStatus(cond ast.Expr) bool {
 }
 
 // reportsProviderFailure reports a call named for a failure or an outage
-// report: notifyProviderFailure, reportOutage.
+// report: notifyRemoteFailure, reportOutage.
 func reportsProviderFailure(call *ast.CallExpr) bool {
 	name := ""
 	switch fun := call.Fun.(type) {

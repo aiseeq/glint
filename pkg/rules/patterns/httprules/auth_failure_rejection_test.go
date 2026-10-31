@@ -28,7 +28,7 @@ type APIError struct {
 
 func (e *APIError) Error() string { return e.Message }
 
-func SendRefusal(err error) (string, bool) {
+func SendDenial(err error) (string, bool) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return "", false
@@ -50,7 +50,7 @@ func IsPermanent(status int) bool {
 	return status >= 400 && status < 500 // want auth-failure-classified-as-rejection
 }
 
-func CorridorRefusal(err error) (string, bool) {
+func ChainDenial(err error) (string, bool) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return "", false
@@ -66,9 +66,9 @@ func CorridorRefusal(err error) (string, bool) {
 	return apiErr.Message, true
 }
 
-// isPermanentRejection decides about 401 and 403 on purpose: a revoked
+// isPermanentDenial decides about 401 and 403 on purpose: a revoked
 // credential of the recipient will not change on a resend.
-func isPermanentRejection(status int) bool {
+func isPermanentDenial(status int) bool {
 	switch status {
 	case http.StatusRequestTimeout, http.StatusTooManyRequests:
 		return false

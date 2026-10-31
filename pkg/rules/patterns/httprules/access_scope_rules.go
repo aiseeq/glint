@@ -29,9 +29,9 @@ var readMethodName = regexp.MustCompile(`^(?:Get|List|Find|Search|Load|Fetch)`)
 // a reader an HTTP handler serves with no access argument, while the other
 // methods of its type take the viewer's access and filter by it:
 //
-//	func (s *IssueService) ListFor(ctx, access StaffAccess) []Issue           // filtered
-//	func (s *IssueService) Acknowledge(ctx, key string, access StaffAccess) error
-//	func (s *IssueService) GetHistory(ctx, since time.Time, limit int) []Event // everything
+//	func (s *WorkItemService) ListFor(ctx, access StaffAccess) []Issue           // filtered
+//	func (s *WorkItemService) Acknowledge(ctx, key string, access StaffAccess) error
+//	func (s *WorkItemService) GetHistory(ctx, since time.Time, limit int) []Event // everything
 //
 // The page served by GetHistory shows what the rest of the section hides
 // from the same viewer. A reader with a filtered twin (List and ListFor) is
@@ -185,7 +185,7 @@ func servedByHandler(scope patternkit.FuncScope, fn *types.Func) bool {
 // literal sets PortfolioID: portfolioID) that carries a list of records read
 // from a source not handed that scope:
 //
-//	alerts, _ := s.healthMonitor.GetLastAlerts()      // every portfolio's alerts
+//	alerts, _ := s.healthMonitor.GetLatestAlerts()      // every portfolio's alerts
 //	return &RiskReport{PortfolioID: portfolioID, HealthAlerts: alerts}
 //
 // Each portfolio's page shows the records of all of them. A list read with

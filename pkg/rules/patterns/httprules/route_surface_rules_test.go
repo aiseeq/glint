@@ -268,14 +268,14 @@ func (in quoteInput) newTestOrder() *Tx { return &Tx{Sender: "TEST SENDER"} }
 
 func applyTestCustomer(tx *Tx) { tx.Sender = "TEST SENDER" }
 
-func (a *Admin) createQuote(tx *Tx) error { return a.repo.CreateTx(tx) }
+func (a *Admin) createOrder(tx *Tx) error { return a.repo.CreateTx(tx) }
 
 func parse(r *http.Request) quoteInput { return quoteInput{} }
 
 func (a *Admin) quick(w http.ResponseWriter, r *http.Request) {
 	input := parse(r)
 	tx := input.newTestOrder()
-	_ = a.createQuote(tx)
+	_ = a.createOrder(tx)
 }
 
 func (a *Admin) fill(w http.ResponseWriter, r *http.Request) {
@@ -290,7 +290,7 @@ func (a *Admin) gated(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tx := parse(r).newTestOrder()
-	_ = a.createQuote(tx)
+	_ = a.createOrder(tx)
 }
 
 // preview shows the sample without storing it.

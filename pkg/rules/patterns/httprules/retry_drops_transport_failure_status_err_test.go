@@ -24,12 +24,12 @@ func (e *StatusError) Error() string { return http.StatusText(e.StatusCode) }
 
 func doGet(ctx context.Context, url string) ([]byte, error) { return nil, nil }
 
-func isServerError(err error) bool {
+func isUpstreamServerError(err error) bool {
 	var statusErr *StatusError
 	return errors.As(err, &statusErr) && statusErr.StatusCode >= 500
 }
 
-func isTooManyRequests(err error) bool {
+func isRateLimited(err error) bool {
 	var statusErr *StatusError
 	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusTooManyRequests
 }
@@ -58,8 +58,8 @@ func get(ctx context.Context, url string) ([]byte, error) {
 			return body, nil
 		}
 		switch {
-		case isTooManyRequests(err):
-		case isServerError(err):
+		case isRateLimited(err):
+		case isUpstreamServerError(err):
 		default:
 			return nil, err
 		}
@@ -79,7 +79,7 @@ func getTransient(ctx context.Context, url string) ([]byte, error) {
 			return body, nil
 		}
 		switch {
-		case isServerError(err):
+		case isUpstreamServerError(err):
 		case isTransient(err):
 		default:
 			return nil, err

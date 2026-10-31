@@ -34,11 +34,11 @@ func TestResponseTypeInFunctionRule_Detection(t *testing.T) {
 import "net/http"
 
 func sendDashboard(w http.ResponseWriter, req *http.Request) {
-	type DashboardResponse struct {
+	type SummaryResponse struct {
 		TotalValue       string ` + "`json:\"totalValue\"`" + `
 		AvailableBalance string ` + "`json:\"availableBalance\"`" + `
 	}
-	sendSuccess(w, req, DashboardResponse{TotalValue: "1", AvailableBalance: "1"})
+	sendSuccess(w, req, SummaryResponse{TotalValue: "1", AvailableBalance: "1"})
 }
 `,
 			expectMatch: true,
@@ -112,12 +112,12 @@ func group() int {
 
 import "net/http"
 
-type DashboardResponse struct {
+type SummaryResponse struct {
 	TotalValue string ` + "`json:\"totalValue\"`" + `
 }
 
 func sendDashboard(w http.ResponseWriter, req *http.Request) {
-	sendSuccess(w, req, DashboardResponse{TotalValue: "1"})
+	sendSuccess(w, req, SummaryResponse{TotalValue: "1"})
 }
 `,
 			expectMatch: false,

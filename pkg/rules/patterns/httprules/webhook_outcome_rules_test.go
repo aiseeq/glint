@@ -7,16 +7,16 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-const webhookService = `package hooks
+const webhookFixture = `package hooks
 
 import (
 	"errors"
 	"log/slog"
 )
 
-type UnsupportedStatusError struct{ Status string }
+type UnsupportedEventError struct{ Status string }
 
-func (e *UnsupportedStatusError) Error() string { return "unsupported " + e.Status }
+func (e *UnsupportedEventError) Error() string { return "unsupported " + e.Status }
 
 type Payload struct {
 	Ref    string
@@ -34,7 +34,7 @@ func (s *Service) Observe(p Payload) (string, error) {
 
 func (s *Service) Handle(p Payload, raw []byte) error { return nil }
 
-func (s *Service) RecordFailure(ref string, raw []byte, err error) {}
+func (s *Service) SaveFailureEvidence(ref string, raw []byte, err error) {}
 
 func (s *Service) logUnknownStatus(p Payload) { s.logger.Warn("unknown status", "status", p.Status) }
 
@@ -45,8 +45,8 @@ func mapStatus(status string) string {
 	return ""
 }
 
-// HandleWebhook applies a provider's status update.
-func (s *Service) HandleWebhook(p Payload, raw []byte) error {
+// HandleWebhookEvent applies a provider's status update.
+func (s *Service) HandleWebhookEvent(p Payload, raw []byte) error {
 	newStatus := mapStatus(p.Status)
 	if newStatus == "" {
 		s.logUnknownStatus(p)
@@ -83,7 +83,7 @@ type webhookHandler struct {
 	logger *slog.Logger
 }
 
-func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
+func (h *webhookHandler) handleWebhookEvent(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -96,12 +96,12 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := h.svc.Observe(payload); err != nil {
 		h.logger.Warn("invalid observation", "error", err)
-		var unsupported *hooks.UnsupportedStatusError
+		var unsupported *hooks.UnsupportedEventError
 		if errors.As(err, &unsupported) {
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			return
 		}
-		h.svc.RecordFailure(payload.Ref, body, err)
+		h.svc.SaveFailureEvidence(payload.Ref, body, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -120,8 +120,8 @@ func (h *webhookHandler) handleCallback(w http.ResponseWriter, r *http.Request) 
 	}
 	var payload hooks.Payload
 	if _, err := h.svc.Observe(payload); err != nil {
-		h.svc.RecordFailure(payload.Ref, body, err)
-		var unsupported *hooks.UnsupportedStatusError
+		h.svc.SaveFailureEvidence(payload.Ref, body, err)
+		var unsupported *hooks.UnsupportedEventError
 		if errors.As(err, &unsupported) {
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			return
@@ -146,7 +146,7 @@ func stats(w http.ResponseWriter, svc *hooks.Service, logger *slog.Logger) {
 `
 
 func webhookFiles() map[string]string {
-	return map[string]string{"hooks/service.go": webhookService, "api/webhooks.go": webhookHandlers}
+	return map[string]string{"hooks/service.go": webhookFixture, "api/webhooks.go": webhookHandlers}
 }
 
 // A webhook whose processing failed is answered 200, and a processing step

@@ -26,7 +26,7 @@ func init() {
 //	banks, err := a.provider.GetBanks(ctx, req)
 //	if err != nil {
 //		a.logger.Error("failed to get banks", "error", err)
-//		writeJSONError(w, http.StatusBadGateway, "provider is unavailable")
+//		writeAPIError(w, http.StatusBadGateway, "provider is unavailable")
 //		return
 //	}
 //

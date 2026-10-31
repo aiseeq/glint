@@ -25,8 +25,8 @@ func TestIdempotencyCheckThenCreateRule_DetectsProjectCStyleRace(t *testing.T) {
 	rule := NewIdempotencyCheckThenCreateRule()
 	code := `package payments
 
-func (s *quoteService) CreateQuote(ctx context.Context, tx *Transaction) error {
-	existing, err := s.txnRepo.GetByIdempotencyKey(ctx, tx.IdempotencyKey)
+func (s *orderService) CreateOrder(ctx context.Context, tx *Transaction) error {
+	existing, err := s.txnRepo.FindByIdempotencyKey(ctx, tx.OrderIdempotencyKey)
 	if err == nil {
 		*tx = *existing
 		return nil
@@ -47,15 +47,15 @@ func (s *quoteService) CreateQuote(ctx context.Context, tx *Transaction) error {
 	assert.Contains(t, violations[1].Message, "without comparing it with the incoming request")
 	v := violations[0]
 	assert.Equal(t, 12, v.Line)
-	assert.Contains(t, v.Message, "GetByIdempotencyKey")
+	assert.Contains(t, v.Message, "FindByIdempotencyKey")
 	assert.Contains(t, v.Message, "Create")
 	assert.Contains(t, v.Message, "TOCTOU")
 	assert.Contains(t, v.Code, "s.txnRepo.Create")
 	assert.Contains(t, v.Suggestion, "atomic")
 	assert.Equal(t, "idempotency_check_then_create", v.Context["pattern"])
-	assert.Equal(t, "CreateQuote", v.Context["function"])
+	assert.Equal(t, "CreateOrder", v.Context["function"])
 	assert.Equal(t, "s.txnRepo", v.Context["receiver"])
-	assert.Equal(t, "GetByIdempotencyKey", v.Context["lookup_method"])
+	assert.Equal(t, "FindByIdempotencyKey", v.Context["lookup_method"])
 	assert.Equal(t, "Create", v.Context["create_method"])
 	assert.Equal(t, 4, v.Context["lookup_line"])
 }
@@ -65,7 +65,7 @@ func TestIdempotencyCheckThenCreateRule_DetectsCompleteSequenceInFuncLit(t *test
 	code := `package payments
 func saveLater(repo PaymentRepository, payment *Payment) func() error {
 	return func() error {
-		_, _ = repo.GetByIdempotencyKey(payment.IdempotencyKey)
+		_, _ = repo.FindByIdempotencyKey(payment.OrderIdempotencyKey)
 		return repo.Create(payment)
 	}
 }`
@@ -81,7 +81,7 @@ func TestIdempotencyCheckThenCreateRule_DetectsTypedShortReceiver(t *testing.T) 
 	rule := NewIdempotencyCheckThenCreateRule()
 	code := `package payments
 func save(r PaymentRepository, key string, payment *Payment) error {
-	_, _ = r.GetByIdempotencyKey(key)
+	_, _ = r.FindByIdempotencyKey(key)
 	return r.Create(payment)
 }`
 
@@ -94,7 +94,7 @@ func TestIdempotencyCheckThenCreateRule_DetectsTypedLocalReceiver(t *testing.T) 
 	code := `package payments
 func save(repo PaymentRepository, key string, payment *Payment) error {
 	var r PaymentRepository = repo
-	_, _ = r.GetByIdempotencyKey(key)
+	_, _ = r.FindByIdempotencyKey(key)
 	return r.Create(payment)
 }`
 
@@ -107,7 +107,7 @@ func TestIdempotencyCheckThenCreateRule_DoesNotLinkMutuallyExclusiveBranches(t *
 	code := `package payments
 func save(repo PaymentRepository, checkOnly bool, key string, payment *Payment) error {
 	if checkOnly {
-		_, _ = repo.GetByIdempotencyKey(key)
+		_, _ = repo.FindByIdempotencyKey(key)
 	} else {
 		return repo.Create(payment)
 	}
@@ -122,7 +122,7 @@ func TestIdempotencyCheckThenCreateRule_DoesNotLinkNegatedShortCircuitPath(t *te
 	rule := NewIdempotencyCheckThenCreateRule()
 	code := `package payments
 func save(repo PaymentRepository, enabled bool, key string, payment *Payment) error {
-	if enabled && repo.ExistsByIdempotencyKey(key) {
+	if enabled && repo.ExistsByOrderIdempotencyKey(key) {
 		return nil
 	}
 	if !enabled && repo.Create(payment) == nil {
@@ -140,7 +140,7 @@ func TestIdempotencyCheckThenCreateRule_DoesNotLinkNegatedGuardPath(t *testing.T
 	code := `package payments
 func save(repo PaymentRepository, enabled bool, key string, payment *Payment) error {
 	if enabled {
-		_, _ = repo.GetByIdempotencyKey(key)
+		_, _ = repo.FindByIdempotencyKey(key)
 	}
 	if enabled {
 		return nil
@@ -156,7 +156,7 @@ func TestIdempotencyCheckThenCreateRule_DoesNotLinkShadowedReceiver(t *testing.T
 	rule := NewIdempotencyCheckThenCreateRule()
 	code := `package payments
 func save(repo, otherRepo PaymentRepository, key string, payment *Payment) error {
-	_, _ = repo.GetByIdempotencyKey(key)
+	_, _ = repo.FindByIdempotencyKey(key)
 	{
 		repo := otherRepo
 		return repo.Create(payment)
@@ -171,7 +171,7 @@ func TestIdempotencyCheckThenCreateRule_DoesNotLinkReassignedReceiver(t *testing
 	rule := NewIdempotencyCheckThenCreateRule()
 	code := `package payments
 func save(repo, otherRepo PaymentRepository, key string, payment *Payment) error {
-	_, _ = repo.GetByIdempotencyKey(key)
+	_, _ = repo.FindByIdempotencyKey(key)
 	repo = otherRepo
 	return repo.Create(payment)
 }`
@@ -184,7 +184,7 @@ func TestIdempotencyCheckThenCreateRule_DoesNotLinkDistinctDirectEntities(t *tes
 	rule := NewIdempotencyCheckThenCreateRule()
 	code := `package payments
 func save(repo PaymentRepository, firstPayment, secondPayment *Payment) error {
-	_, _ = repo.GetByIdempotencyKey(firstPayment.IdempotencyKey)
+	_, _ = repo.FindByIdempotencyKey(firstPayment.OrderIdempotencyKey)
 	return repo.Create(secondPayment)
 }`
 
@@ -202,7 +202,7 @@ func TestIdempotencyCheckThenCreateRule_ContextJudgedByDeclaredType(t *testing.T
 import "context"
 
 func save(ctx context.Context, repo PaymentRepository, paymentCtx, other *Payment) error {
-	_, _ = repo.GetByIdempotencyKey(ctx, other.IdempotencyKey)
+	_, _ = repo.FindByIdempotencyKey(ctx, other.OrderIdempotencyKey)
 	return repo.Create(ctx, paymentCtx)
 }`
 
@@ -214,7 +214,7 @@ func TestIdempotencyCheckThenCreateRule_DoesNotLinkReassignedEntity(t *testing.T
 	rule := NewIdempotencyCheckThenCreateRule()
 	code := `package payments
 func save(repo PaymentRepository, payment, otherPayment *Payment) error {
-	_, _ = repo.GetByIdempotencyKey(payment.IdempotencyKey)
+	_, _ = repo.FindByIdempotencyKey(payment.OrderIdempotencyKey)
 	payment = otherPayment
 	return repo.Create(payment)
 }`
@@ -233,7 +233,7 @@ func TestIdempotencyCheckThenCreateRule_PositiveMethods(t *testing.T) {
 			name: "find idempotency then insert",
 			code: `package payments
 func save(store PaymentStore, key string, payment *Payment) error {
-	_, _ = store.FindByIdempotencyKey(key)
+	_, _ = store.FindByOrderIdempotencyKey(key)
 	return store.Insert(payment)
 }`,
 		},
@@ -241,7 +241,7 @@ func save(store PaymentStore, key string, payment *Payment) error {
 			name: "exists idempotency then create",
 			code: `package payments
 func save(db DB, key string, payment *Payment) error {
-	if db.ExistsByIdempotencyKey(key) { return nil }
+	if db.ExistsByOrderIdempotencyKey(key) { return nil }
 	return db.Create(payment)
 }`,
 		},
@@ -264,8 +264,8 @@ func save(repo PaymentRepository, key string, payment *Payment) error {
 		{
 			name: "short receiver on repository method",
 			code: `package payments
-func (r *TransactionRepo) save(key string, payment *Payment) error {
-	_, _ = r.CheckIdempotencyKey(key)
+func (r *OrderRepo) save(key string, payment *Payment) error {
+	_, _ = r.CheckOrderIdempotencyKey(key)
 	return r.Insert(payment)
 }`,
 		},
@@ -289,7 +289,7 @@ func TestIdempotencyCheckThenCreateRule_Negatives(t *testing.T) {
 			name: "atomic create or get",
 			code: `package payments
 func save(repo PaymentRepository, key string, payment *Payment) error {
-	_, _ = repo.GetByIdempotencyKey(key)
+	_, _ = repo.FindByIdempotencyKey(key)
 	_, err := repo.CreateOrGet(payment)
 	return err
 }`,
@@ -298,7 +298,7 @@ func save(repo PaymentRepository, key string, payment *Payment) error {
 			name: "atomic upsert",
 			code: `package payments
 func save(store PaymentStore, key string, payment *Payment) error {
-	_, _ = store.FindByIdempotencyKey(key)
+	_, _ = store.FindByOrderIdempotencyKey(key)
 	return store.Upsert(payment)
 }`,
 		},
@@ -306,7 +306,7 @@ func save(store PaymentStore, key string, payment *Payment) error {
 			name: "atomic insert on conflict",
 			code: `package payments
 func save(db DB, key string, payment *Payment) error {
-	_, _ = db.GetByIdempotencyKey(key)
+	_, _ = db.FindByIdempotencyKey(key)
 	return db.InsertOnConflict(payment)
 }`,
 		},
@@ -314,7 +314,7 @@ func save(db DB, key string, payment *Payment) error {
 			name: "lookup without create",
 			code: `package payments
 func get(repo PaymentRepository, key string) (*Payment, error) {
-	return repo.GetByIdempotencyKey(key)
+	return repo.FindByIdempotencyKey(key)
 }`,
 		},
 		{
@@ -327,14 +327,14 @@ func save(repo PaymentRepository, payment *Payment) error {
 		{
 			name: "different functions",
 			code: `package payments
-func get(repo PaymentRepository, key string) { _, _ = repo.GetByIdempotencyKey(key) }
+func get(repo PaymentRepository, key string) { _, _ = repo.FindByIdempotencyKey(key) }
 func save(repo PaymentRepository, payment *Payment) { _ = repo.Create(payment) }`,
 		},
 		{
 			name: "different receivers",
 			code: `package payments
 func save(sourceRepo, targetRepo PaymentRepository, key string, payment *Payment) error {
-	_, _ = sourceRepo.GetByIdempotencyKey(key)
+	_, _ = sourceRepo.FindByIdempotencyKey(key)
 	return targetRepo.Create(payment)
 }`,
 		},
@@ -342,7 +342,7 @@ func save(sourceRepo, targetRepo PaymentRepository, key string, payment *Payment
 			name: "non data access receiver",
 			code: `package payments
 func save(client APIClient, key string, payment *Payment) error {
-	_, _ = client.GetByIdempotencyKey(key)
+	_, _ = client.FindByIdempotencyKey(key)
 	return client.Create(payment)
 }`,
 		},
@@ -351,7 +351,7 @@ func save(client APIClient, key string, payment *Payment) error {
 			code: `package payments
 func save(repo PaymentRepository, key string, payment *Payment) error {
 	if err := repo.Create(payment); err != nil { return err }
-	_, err := repo.GetByIdempotencyKey(key)
+	_, err := repo.FindByIdempotencyKey(key)
 	return err
 }`,
 		},
@@ -375,7 +375,7 @@ func save(repo PaymentRepository, id string, payment *Payment) error {
 			name: "lookup in nested function",
 			code: `package payments
 func save(repo PaymentRepository, key string, payment *Payment) error {
-	check := func() { _, _ = repo.GetByIdempotencyKey(key) }
+	check := func() { _, _ = repo.FindByIdempotencyKey(key) }
 	_ = check
 	return repo.Create(payment)
 }`,
@@ -394,7 +394,7 @@ func TestIdempotencyCheckThenCreateRule_ExcludesTestsAndHonorsSuppression(t *tes
 	rule := NewIdempotencyCheckThenCreateRule()
 	code := `package payments
 func save(repo PaymentRepository, key string, payment *Payment) error {
-	_, _ = repo.GetByIdempotencyKey(key)
+	_, _ = repo.FindByIdempotencyKey(key)
 	//nolint:idempotency-check-then-create // protected by a serializable transaction
 	return repo.Create(payment)
 }`
@@ -412,7 +412,7 @@ func save(repo PaymentRepository, key string, payment *Payment) error {
 func TestIdempotencyCheckThenCreateRule_IndependentFlagsDoNotMultiplyPaths(t *testing.T) {
 	var code strings.Builder
 	code.WriteString("package payments\nfunc save(repo PaymentRepository, key string, payment *Payment, flags []bool) error {\n")
-	code.WriteString("\t_, _ = repo.GetByIdempotencyKey(key)\n")
+	code.WriteString("\t_, _ = repo.FindByIdempotencyKey(key)\n")
 	for i := range 80 {
 		fmt.Fprintf(&code, "\tb%d := flags[%d]\n\tif b%d {\n\t\tcount++\n\t}\n", i, i, i)
 	}
@@ -427,7 +427,7 @@ func TestIdempotencyCheckThenCreateRule_IndependentFlagsDoNotMultiplyPaths(t *te
 func TestIdempotencyCheckThenCreateRule_PathCountStaysFlat(t *testing.T) {
 	var code strings.Builder
 	code.WriteString("package payments\nfunc save(repo PaymentRepository, key string, payment *Payment, enabled bool, flags []bool) {\n")
-	code.WriteString("\tif enabled {\n\t\t_, _ = repo.GetByIdempotencyKey(key)\n\t}\n")
+	code.WriteString("\tif enabled {\n\t\t_, _ = repo.FindByIdempotencyKey(key)\n\t}\n")
 	for i := range 40 {
 		fmt.Fprintf(&code, "\tb%d := flags[%d]\n\tif b%d {\n\t\tcount++\n\t}\n", i, i, i)
 	}

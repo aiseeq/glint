@@ -14,7 +14,7 @@ func TestIdempotencyCheckThenCreateRule_ReplayWithoutPayloadCheck(t *testing.T) 
 	code := `package orders
 
 func (s *Service) existing(ctx context.Context, order *Order) (bool, error) {
-	stored, err := s.repo.GetByIdempotencyKey(ctx, order.IdempotencyKey)
+	stored, err := s.repo.FindByIdempotencyKey(ctx, order.OrderIdempotencyKey)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return false, nil
@@ -26,7 +26,7 @@ func (s *Service) existing(ctx context.Context, order *Order) (bool, error) {
 }
 
 func (s *Service) replay(ctx context.Context, order *Order) error {
-	stored, err := s.repo.FindByKey(ctx, order.IdempotencyKey)
+	stored, err := s.repo.FindByKey(ctx, order.OrderIdempotencyKey)
 	if err == nil {
 		*order = *stored
 		return nil
@@ -35,7 +35,7 @@ func (s *Service) replay(ctx context.Context, order *Order) error {
 }
 
 func (s *Service) Create(ctx context.Context, req *Request) (*Order, error) {
-	if stored, err := s.repo.GetByIdempotencyKey(ctx, req.IdempotencyKey); err == nil {
+	if stored, err := s.repo.FindByIdempotencyKey(ctx, req.OrderIdempotencyKey); err == nil {
 		return stored, nil
 	}
 	return s.repo.Create(ctx, req)
@@ -43,7 +43,7 @@ func (s *Service) Create(ctx context.Context, req *Request) (*Order, error) {
 
 // A plain reader by key returns what it found: no finding.
 func (s *Service) lookup(ctx context.Context, key string) (*Order, error) {
-	stored, err := s.repo.GetByIdempotencyKey(ctx, key)
+	stored, err := s.repo.FindByIdempotencyKey(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +52,7 @@ func (s *Service) lookup(ctx context.Context, key string) (*Order, error) {
 
 // The fingerprint of the request is compared with the stored one: no finding.
 func (s *Service) checked(ctx context.Context, order *Order) (bool, error) {
-	stored, err := s.repo.GetByIdempotencyKey(ctx, order.IdempotencyKey)
+	stored, err := s.repo.FindByIdempotencyKey(ctx, order.OrderIdempotencyKey)
 	if err != nil {
 		return false, err
 	}
@@ -65,7 +65,7 @@ func (s *Service) checked(ctx context.Context, order *Order) (bool, error) {
 
 // A comparison helper decides: no finding.
 func (s *Service) matched(ctx context.Context, order *Order) (bool, error) {
-	stored, err := s.repo.GetByIdempotencyKey(ctx, order.IdempotencyKey)
+	stored, err := s.repo.FindByIdempotencyKey(ctx, order.OrderIdempotencyKey)
 	if err == nil {
 		if !sameRequest(stored, order) {
 			return false, ErrKeyReused
@@ -78,7 +78,7 @@ func (s *Service) matched(ctx context.Context, order *Order) (bool, error) {
 
 // A replay validator given the stored record and the request: no finding.
 func (s *Service) validated(ctx context.Context, order *Order) (bool, error) {
-	stored, err := s.repo.GetByIdempotencyKey(ctx, order.IdempotencyKey)
+	stored, err := s.repo.FindByIdempotencyKey(ctx, order.OrderIdempotencyKey)
 	if err == nil {
 		if err := s.ValidateReplay(stored, order); err != nil {
 			return false, err
@@ -91,7 +91,7 @@ func (s *Service) validated(ctx context.Context, order *Order) (bool, error) {
 
 // The record is acted on, not handed back as the answer: no finding.
 func (s *Service) approve(ctx context.Context, key string) error {
-	stored, err := s.repo.GetByIdempotencyKey(ctx, key)
+	stored, err := s.repo.FindByIdempotencyKey(ctx, key)
 	if err != nil {
 		return err
 	}

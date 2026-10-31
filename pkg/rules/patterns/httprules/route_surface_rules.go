@@ -146,7 +146,7 @@ func (s *routeScope) chainUses(match func(info *types.Info, expr ast.Expr) bool)
 }
 
 // namesMiddleware reports a middleware expression whose text holds one of the
-// words: limiter.middleware(), a.basicAuth, requirePermission(...).
+// words: limiter.middleware(), a.basicAuth, requireMemberPermission(...).
 func namesMiddleware(expr ast.Expr, words ...string) bool {
 	text := strings.ToLower(middlewareName(expr))
 	for _, word := range words {
