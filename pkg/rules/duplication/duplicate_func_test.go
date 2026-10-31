@@ -1,6 +1,7 @@
 package duplication
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -213,4 +214,50 @@ func testCopy(value int) int { if value > 0 { value++; return value }; return 0 
 `,
 	}
 	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewDuplicateFuncAcrossPackagesRule(), files))
+}
+
+func TestDuplicateFuncAcrossPackagesPrefersImportablePackageToMain(t *testing.T) {
+	files := map[string]string{
+		"cmd/tool/main.go":      streamFunction("main", "IsStreamRequest", "request"),
+		"library/httpx/http.go": streamFunction("httpx", "IsStreamingRequest", "req"),
+	}
+	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	assert.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "example.com/rulestest/library/httpx.IsStreamingRequest")
+	assert.Contains(t, violations[0].Suggestion, "call it from both")
+}
+
+func TestDuplicateFuncAcrossPackagesInternalWithoutSharedImportAdvice(t *testing.T) {
+	files := map[string]string{
+		"a/internal/shared/stream.go": streamFunction("shared", "IsStreamRequest", "request"),
+		"zoutside/main.go":            streamFunction("main", "IsStreamingRequest", "req"),
+	}
+	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	assert.Len(t, violations, 1)
+	assert.Equal(t, "zoutside/main.go", violations[0].File)
+	assert.Contains(t, violations[0].Message, "example.com/rulestest/a/internal/shared.IsStreamRequest")
+	assert.Contains(t, violations[0].Message, "move one implementation into a package both can import")
+	assert.Contains(t, violations[0].Suggestion, "Move the shared implementation into a package both packages can import")
+}
+
+func TestDuplicateFuncAcrossPackagesMainPackagesNeedMoveAdvice(t *testing.T) {
+	files := map[string]string{
+		"cmd/alpha/main.go": streamFunction("main", "IsStreamRequest", "request"),
+		"cmd/beta/main.go":  streamFunction("main", "IsStreamingRequest", "req"),
+	}
+	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	assert.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "move one implementation into a package both can import")
+	assert.Contains(t, violations[0].Suggestion, "Move the shared implementation into a package both packages can import")
+}
+
+func streamFunction(pkg, name, param string) string {
+	return fmt.Sprintf(`package %s
+
+import "net/http"
+
+func %s(%s *http.Request) bool {
+	return %s.Method == "GET" && (%s.Header.Get("Accept") == "text/event-stream" || %s.Header.Get("Accept") == "application/stream")
+}
+`, pkg, name, param, param, param, param)
 }

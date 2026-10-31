@@ -121,8 +121,13 @@ func indexDuplicateFuncs(ctx *core.GoProjectContext) (map[string][]*types.Func, 
 	return byKey, byBody, nil
 }
 
-func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]string {
-	twins := make(map[*types.Func]string)
+type duplicateFuncTwin struct {
+	original string
+	canCall  bool
+}
+
+func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]duplicateFuncTwin {
+	twins := make(map[*types.Func]duplicateFuncTwin)
 	keys := make([]string, 0, len(byKey))
 	for key := range byKey {
 		keys = append(keys, key)
@@ -148,14 +153,14 @@ func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]string {
 			if c.Pkg() == first {
 				twin = other
 			}
-			twins[c] = twin.Path()
+			twins[c] = duplicateFuncTwin{original: twin.Path(), canCall: true}
 		}
 	}
 	return twins
 }
 
-func bodyTwins(byBody map[string][]*types.Func) map[*types.Func]string {
-	twins := make(map[*types.Func]string)
+func bodyTwins(byBody map[string][]*types.Func) map[*types.Func]duplicateFuncTwin {
+	twins := make(map[*types.Func]duplicateFuncTwin)
 	bodyKeys := make([]string, 0, len(byBody))
 	for key := range byBody {
 		bodyKeys = append(bodyKeys, key)
@@ -167,15 +172,48 @@ func bodyTwins(byBody map[string][]*types.Func) map[*types.Func]string {
 			continue
 		}
 		sort.Slice(copies, func(i, j int) bool { return originalFuncLess(copies[i], copies[j]) })
-		original := copies[0]
-		for _, copyFn := range copies[1:] {
-			twins[copyFn] = fmt.Sprintf("%s.%s", original.Pkg().Path(), original.Name())
+		original, canCall := copies[0], false
+		for _, candidate := range copies {
+			if packageImportedByAll(candidate.Pkg(), copies) {
+				original, canCall = candidate, true
+				break
+			}
+		}
+		for _, copyFn := range copies {
+			if copyFn == original {
+				continue
+			}
+			twins[copyFn] = duplicateFuncTwin{
+				original: fmt.Sprintf("%s.%s", original.Pkg().Path(), original.Name()),
+				canCall:  canCall,
+			}
 		}
 	}
 	return twins
 }
 
-func (r *DuplicateFuncAcrossPackagesRule) findings(ctx *core.GoProjectContext, twins map[*types.Func]string) ([]*core.Violation, error) {
+func packageImportedByAll(candidate *types.Package, copies []*types.Func) bool {
+	if candidate == nil || candidate.Name() == "main" {
+		return false
+	}
+	for _, copyFn := range copies {
+		if copyFn.Pkg() != candidate && !packageImportableFrom(copyFn.Pkg().Path(), candidate.Path()) {
+			return false
+		}
+	}
+	return true
+}
+
+func packageImportableFrom(importerPath, importedPath string) bool {
+	internalAt := strings.LastIndex(importedPath+"/", "/internal/")
+	if internalAt < 0 {
+		return true
+	}
+	parent := importedPath[:internalAt]
+	return importerPath == parent || strings.HasPrefix(importerPath, parent+"/")
+}
+
+func (r *DuplicateFuncAcrossPackagesRule) findings(ctx *core.GoProjectContext, twins map[*types.Func]duplicateFuncTwin) ([]*core.Violation, error) {
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range file.GoAST.Decls {
@@ -184,18 +222,23 @@ func (r *DuplicateFuncAcrossPackagesRule) findings(ctx *core.GoProjectContext, t
 				continue
 			}
 			fn, ok := info.Defs[fd.Name].(*types.Func)
-			if !ok || twins[fn] == "" {
+			twin, hasTwin := twins[fn]
+			if !ok || !hasTwin {
 				continue
 			}
 			line := file.LineFor(fd)
 			if file.IsSuppressed(line, r.Name()) {
 				continue
 			}
-			v := r.CreateViolation(file.RelPath, line, fmt.Sprintf(
-				"Function %s duplicates %s — keep one implementation and call it from both packages",
-				fd.Name.Name, twins[fn]))
+			message := fmt.Sprintf("Function %s duplicates %s — keep one implementation and call it from both packages", fd.Name.Name, twin.original)
+			suggestion := "Keep one implementation in a package both import and call it from both places"
+			if !twin.canCall {
+				message = fmt.Sprintf("Function %s duplicates %s — move one implementation into a package both can import", fd.Name.Name, twin.original)
+				suggestion = "Move the shared implementation into a package both packages can import"
+			}
+			v := r.CreateViolation(file.RelPath, line, message)
 			v.WithCode(strings.TrimSpace(file.GetLine(line)))
-			v.WithSuggestion("Keep one implementation in a package both import and call it from both places")
+			v.WithSuggestion(suggestion)
 			violations = append(violations, v)
 		}
 		return violations
