@@ -1,6 +1,7 @@
 # sql-injection: a value from the HTTP request is not a taint source
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Что сделать
 - Находка критика описания glint «как сделано» (тикет 20261031-1600-MEDIUM-spec-as-built): pkg/rules/security/sql_query_taint.go:403,413 — результат вызова не прослеживается; значение из r.URL.Query().Get (handler, main.go:21–24) не источник. Охват: также FormValue, PostFormValue, PathValue, Header.Get, Cookie — тест на каждый.
@@ -75,3 +76,5 @@
 ## Журнал
 - 2026-10-31 17:44 открыт — glint-master
 - 2026-10-31 20:14 note — glint-master: очередь: после влития sec-sql (тот же sql_query_taint.go)
+- 2026-10-31 21:29 в работе — glint-master
+- 2026-10-31 21:29 note — glint-master: боец Luna: бриф /home/aisee/.cache/worktrees/glint-measure/security/brief-http.md, приёмка accept-http.sh, проба probe-http (нужны 11 15 20 25 30, не 34 42 50), дерево /home/aisee/.cache/worktrees/glint/sec-http
