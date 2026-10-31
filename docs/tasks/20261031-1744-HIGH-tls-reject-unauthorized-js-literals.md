@@ -1,6 +1,6 @@
 # tls-verification-disabled (JS/TS): quoted key missed, a string value reported
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Что сделать
@@ -80,3 +80,4 @@
 - 2026-10-31 20:27 note — glint-master: ревью 1031-2014-sec-tls: регресс — якорь [,{] на той же строке теряет многострочный объект (new https.Agent({\n  rejectUnauthorized: false,\n})): установленный glint его находит, правка нет. Проба дополнена agent.js (нужны 3 и 6, не нужны 8 строка-литерал и 9 комментарий), приёмка accept-tls.sh дополнена; боец возвращён classом правка-по-ревью
 - 2026-10-31 20:41 note — glint-master: влито 11c1703 (боец 1031-2014-sec-tls, 3 захода): accept-tls.sh ok (probe: main.go:13 :16 client.js:1 :2 agent.js:3 :6; probe-nogo: agent.js:3 :6 t.ts:2); consumers 20 проектов 0 разниц (/home/aisee/.cache/worktrees/glint-measure/consumers-sec-tls.txt). Остаток: присваивание InsecureSkipVerify без типов не ловится; свойство, разнесённое по строкам (ключ/двоеточие/false), не ловится
 - 2026-10-31 20:59 note — glint-master: проверка Terra 1031-2046-glint: вернуть (verdict-tls.md). (а) ложная на not_rejectUnauthorized: false — исправлено 06c4083 (граница ключа, тест), accept-tls ok, consumers 0 разниц (consumers-tls-key.txt). (б) смешанный корень без go.mod падает явной ошибкой «outside a Go module» — не регресс: установленный glint падает так же с -r sql-injection, -r mirror-comment-copy и полным набором правил (проба verify-tls/mixed-no-module); явная ошибка вместо фолбека — по правилам. Повторная проверка — тот же Terra
+- 2026-10-31 21:09 готово — terra-1031-2046-glint (session glint-master): Terra 1031-2046-glint, 2-й заход: ВЕРДИКТ готово — /home/aisee/.cache/worktrees/glint-measure/security/verdict-tls.md (пробы go-root/scripts-root установленным glint 35c7f6b, go test security+cmd/glint ok, consumers 0 разниц); исполнители — Luna 1031-2014-sec-tls (11c1703), glint-master (06c4083)

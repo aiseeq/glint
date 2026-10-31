@@ -1,6 +1,6 @@
 # tls-verification-disabled (Go): assignment missed, a foreign struct field reported
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Что сделать
@@ -81,3 +81,4 @@
 - 2026-10-31 20:41 note — glint-master: влито 11c1703 (боец 1031-2014-sec-tls, 3 захода): accept-tls.sh ok (probe: main.go:13 :16 client.js:1 :2 agent.js:3 :6; probe-nogo: agent.js:3 :6 t.ts:2); consumers 20 проектов 0 разниц (/home/aisee/.cache/worktrees/glint-measure/consumers-sec-tls.txt). Остаток: присваивание InsecureSkipVerify без типов не ловится; свойство, разнесённое по строкам (ключ/двоеточие/false), не ловится
 - 2026-10-31 20:46 note — glint-master: независимая проверка обоих tls-тикетов: Terra 1031-2046-glint, бриф /home/aisee/.cache/worktrees/glint-measure/security/verify-tls-brief.md, вердикт → verdict-tls.md
 - 2026-10-31 20:59 note — glint-master: проверка Terra: по Go-части вернуть только из-за (б) корня без go.mod — разбор в tls-reject-unauthorized-js-literals, не регресс
+- 2026-10-31 21:09 готово — terra-1031-2046-glint (session glint-master): Terra 1031-2046-glint, 2-й заход: ВЕРДИКТ готово — /home/aisee/.cache/worktrees/glint-measure/security/verdict-tls.md (пробы go-root/scripts-root установленным glint 35c7f6b, go test security+cmd/glint ok, consumers 0 разниц); исполнители — Luna 1031-2014-sec-tls (11c1703), glint-master (06c4083)
