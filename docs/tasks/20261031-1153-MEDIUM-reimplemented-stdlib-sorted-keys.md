@@ -29,3 +29,4 @@
 - 2026-10-31 14:23 в работе — glint-master
 - 2026-10-31 15:03 note — glint-master: исправлено ad9f493: проверка по позициям (сбор, сортировка, возврат), append в возвращаемый срез, make([]T, 0), len(s.items); совет предупреждает о nil на пустой map (тест реестра поймал: Categories стал nil на пустом реестре); bin/consumers: +4 верных (graft 2, aguard 1, glint 1 — убрана в ad9f493)
 - 2026-10-31 15:03 на проверке — glint-master
+- 2026-10-31 15:24 note — glint-master: 56adf3d влит в main ff; graft all зелёный (/home/aisee/.cache/worktrees/glint-measure/all-C.log); дальше push и graft install
