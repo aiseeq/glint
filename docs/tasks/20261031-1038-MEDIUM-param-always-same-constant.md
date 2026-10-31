@@ -22,3 +22,4 @@
 - 2026-10-31 10:38 открыт — glint-master
 - 2026-10-31 10:43 в работе — glint-master
 - 2026-10-31 10:43 note — glint-master: проба /home/aisee/.cache/worktrees/glint-measure/probe-const-param (синтетика фрагмента) — 0 находок на v1.83.7-189. Боец Luna 1031-1043-param-always-same-constant (glint-правило): бриф brief-param-always-same-constant.md, приёмка accept-param-always-same-constant.sh в /home/aisee/.cache/worktrees/glint-measure, дерево /home/aisee/.cache/worktrees/glint/param-always-same-constant
+- 2026-10-31 11:04 note — glint-master: сдача 1 принята приёмкой; ревью: 3 находки у потребителей, верная 1 (sc2go walk eyes=true в обоих вызовах), ложные 2 (glint hist.Head n в len(r)<=n, graft envWith key в EqualFold — параметр в условии, но ветку не решает). Боец лишне правил SIGPIPE в glint rules — дефект был в приёмке мастера (grep -q под pipefail), приёмка поправлена. Ревью 1: brief-param-always-same-constant-2.md
