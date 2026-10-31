@@ -334,7 +334,7 @@ func applyJobs() error {
 
 func runCheck(_ *cobra.Command, args []string) (runErr error) {
 	startTime := time.Now()
-	journal := runJournalEntry{Time: runJournalTime(startTime), Version: resolveVersion(), Findings: map[string]int{}, Suppressed: map[string]int{}, RuleMS: map[string]int64{}}
+	journal := runJournalEntry{Time: runJournalTime(startTime), Version: resolveVersion(), Findings: map[string]int{}, RuleMS: map[string]int64{}}
 	journalCachedFiles := 0
 	defer func() {
 		journal.WallMS = time.Since(startTime).Milliseconds()

@@ -17,16 +17,16 @@ const defaultRunLogLimit int64 = 64 << 20
 var runLogLimit = defaultRunLogLimit
 
 type runJournalEntry struct {
-	Time        string           `json:"time"`
-	Root        string           `json:"root"`
-	Version     string           `json:"version"`
-	WallMS      int64            `json:"wall_ms"`
-	Files       int              `json:"files"`
-	CachedFiles int              `json:"cached_files"`
-	Findings    map[string]int   `json:"findings"`
-	Suppressed  map[string]int   `json:"suppressed,omitempty"`
-	RuleMS      map[string]int64 `json:"rule_ms"`
-	Exit        int              `json:"exit"`
+	Time        string         `json:"time"`
+	Root        string         `json:"root"`
+	Version     string         `json:"version"`
+	WallMS      int64          `json:"wall_ms"`
+	Files       int            `json:"files"`
+	CachedFiles int            `json:"cached_files"`
+	Findings    map[string]int `json:"findings"`
+
+	RuleMS map[string]int64 `json:"rule_ms"`
+	Exit   int              `json:"exit"`
 }
 
 func runLogPath() (string, bool, error) {
@@ -158,6 +158,10 @@ func findingsByRule(list core.ViolationList) map[string]int {
 }
 
 func appendRunJournalWarning(entry runJournalEntry) {
+	// A run that failed before resolving a project root has nothing to attribute.
+	if entry.Root == "" {
+		return
+	}
 	if err := appendRunJournal(entry); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: run journal not written: %v\n", err)
 	}

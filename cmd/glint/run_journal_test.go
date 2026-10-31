@@ -19,7 +19,7 @@ func TestAppendRunJournalWritesJSONLine(t *testing.T) {
 	entry := runJournalEntry{
 		Time: "2026-10-31T04:00:00+01:00", Root: filepath.Dir(path), Version: "v1.2.3",
 		WallMS: 123, Files: 4, CachedFiles: 2, Findings: map[string]int{"rule-a": 3},
-		Suppressed: map[string]int{"rule-b": 1}, RuleMS: map[string]int64{"rule-a": 6}, Exit: 1,
+		RuleMS: map[string]int64{"rule-a": 6}, Exit: 1,
 	}
 	if err := appendRunJournal(entry); err != nil {
 		t.Fatal(err)
@@ -35,7 +35,7 @@ func TestAppendRunJournalWritesJSONLine(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("invalid journal JSON: %v", err)
 	}
-	if got.Time != entry.Time || got.Root != entry.Root || got.Version != entry.Version || got.WallMS != entry.WallMS || got.Files != entry.Files || got.CachedFiles != entry.CachedFiles || got.Exit != entry.Exit || got.Findings["rule-a"] != 3 || got.Suppressed["rule-b"] != 1 || got.RuleMS["rule-a"] != 6 {
+	if got.Time != entry.Time || got.Root != entry.Root || got.Version != entry.Version || got.WallMS != entry.WallMS || got.Files != entry.Files || got.CachedFiles != entry.CachedFiles || got.Exit != entry.Exit || got.Findings["rule-a"] != 3 || got.RuleMS["rule-a"] != 6 {
 		t.Errorf("decoded entry does not preserve fields: %#v", got)
 	}
 	if _, err := time.Parse(time.RFC3339, got.Time); err != nil {
@@ -130,6 +130,9 @@ func TestAppendRunJournalRotates(t *testing.T) {
 	if err := os.WriteFile(path, []byte("previous record\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(path+".1", []byte("older rotation\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	oldLimit := runLogLimit
 	runLogLimit = 1
 	t.Cleanup(func() { runLogLimit = oldLimit })
@@ -150,6 +153,15 @@ func TestAppendRunJournalRotates(t *testing.T) {
 	}
 }
 
+func TestRunJournalSkipsRunWithoutRoot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runs.jsonl")
+	t.Setenv("GLINT_RUN_LOG", path)
+	appendRunJournalWarning(runJournalEntry{Version: "v1.2.3", Exit: 1})
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("run without a root must not be journaled, stat err %v", err)
+	}
+}
+
 func TestRunJournalWriteFailureDoesNotChangeExitCode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
@@ -165,7 +177,7 @@ func TestRunJournalWriteFailureDoesNotChangeExitCode(t *testing.T) {
 	}
 	oldStderr := os.Stderr
 	os.Stderr = write
-	appendRunJournalWarning(runJournalEntry{})
+	appendRunJournalWarning(runJournalEntry{Root: path})
 	_ = write.Close()
 	os.Stderr = oldStderr
 	warning, err := io.ReadAll(read)
