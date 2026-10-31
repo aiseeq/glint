@@ -1,6 +1,7 @@
 package frontendrules
 
 import (
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -177,7 +178,7 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, messageOf *r
 		changed = false
 		var holds *regexp.Regexp
 		if len(texts) > 0 {
-			holds = regexp.MustCompile(`\b(?:` + alternation(mapKeys(texts)) + `)\b`)
+			holds = regexp.MustCompile(`\b(?:` + alternation(slices.Sorted(maps.Keys(texts))) + `)\b`)
 		}
 		carries := func(expr string) bool {
 			return messageOf.MatchString(expr) || (holds != nil && holds.MatchString(expr))
@@ -198,7 +199,7 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, messageOf *r
 			}
 		}
 	}
-	return mapKeys(texts)
+	return slices.Sorted(maps.Keys(texts))
 }
 
 // firstArgument returns the first argument of an argument list: the text up
@@ -240,13 +241,4 @@ func alternation(names []string) string {
 		quoted[i] = regexp.QuoteMeta(name)
 	}
 	return strings.Join(quoted, "|")
-}
-
-func mapKeys(set map[string]bool) []string {
-	keys := make([]string, 0, len(set))
-	for key := range set {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return keys
 }
