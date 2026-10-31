@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
@@ -260,4 +261,26 @@ func %s(%s *http.Request) bool {
 	return %s.Method == "GET" && (%s.Header.Get("Accept") == "text/event-stream" || %s.Header.Get("Accept") == "application/stream")
 }
 `, pkg, name, param, param, param, param)
+}
+
+// A copy in another Go module of the repository cannot call the original
+// without a new module dependency: no finding.
+func TestDuplicateFuncAcrossPackagesSkipsAnotherModule(t *testing.T) {
+	files := map[string]string{
+		"httpx/stream.go":       streamFunction("httpx", "IsStreamRequest", "request"),
+		"tools/monitor/go.mod":  "module example.com/monitor\n\ngo 1.22\n",
+		"tools/monitor/main.go": streamFunction("main", "isStreamRequest", "req"),
+	}
+	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files))
+}
+
+// An unexported original has to be exported before the copy can call it.
+func TestDuplicateFuncAcrossPackagesUnexportedOriginalAdvisesExport(t *testing.T) {
+	files := map[string]string{
+		"alpha/stream.go": streamFunction("alpha", "isStreamRequest", "request"),
+		"beta/stream.go":  streamFunction("beta", "streaming", "req"),
+	}
+	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "export it")
 }

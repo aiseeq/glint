@@ -114,7 +114,10 @@ func indexDuplicateFuncs(ctx *core.GoProjectContext) (map[string][]*types.Func, 
 				if normalizer.nodes < minimumDuplicateBodyNodes {
 					continue
 				}
-				byBody[normalizer.b.String()] = append(byBody[normalizer.b.String()], fn)
+				// Another module of the repository cannot call the original
+				// without a new module dependency: bodies match within a module.
+				key := moduleOf(pkg.Package) + "\x00" + normalizer.b.String()
+				byBody[key] = append(byBody[key], fn)
 			}
 		}
 	}
@@ -124,6 +127,8 @@ func indexDuplicateFuncs(ctx *core.GoProjectContext) (map[string][]*types.Func, 
 type duplicateFuncTwin struct {
 	original string
 	canCall  bool
+	// unexported marks a body original the copy can call only once exported.
+	unexported bool
 }
 
 func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]duplicateFuncTwin {
@@ -184,8 +189,9 @@ func bodyTwins(byBody map[string][]*types.Func) map[*types.Func]duplicateFuncTwi
 				continue
 			}
 			twins[copyFn] = duplicateFuncTwin{
-				original: fmt.Sprintf("%s.%s", original.Pkg().Path(), original.Name()),
-				canCall:  canCall,
+				original:   fmt.Sprintf("%s.%s", original.Pkg().Path(), original.Name()),
+				canCall:    canCall,
+				unexported: !original.Exported(),
 			}
 		}
 	}
@@ -231,6 +237,9 @@ func (r *DuplicateFuncAcrossPackagesRule) findings(ctx *core.GoProjectContext, t
 				continue
 			}
 			message := fmt.Sprintf("Function %s duplicates %s — keep one implementation and call it from both packages", fd.Name.Name, twin.original)
+			if twin.unexported {
+				message = fmt.Sprintf("Function %s duplicates %s — keep one implementation, export it and call it from both packages", fd.Name.Name, twin.original)
+			}
 			suggestion := "Keep one implementation and call it from both places; when neither package should import the other, move it to a shared package, and when the standard library already does it, call that instead"
 			if !twin.canCall {
 				message = fmt.Sprintf("Function %s duplicates %s — move one implementation into a package both can import", fd.Name.Name, twin.original)
