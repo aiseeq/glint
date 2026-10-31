@@ -17,7 +17,7 @@ func init() {
 
 // FailOpenRule detects checks that answer "yes" when they could not be made:
 //
-//	func (m *Monitor) isActiveDeployment() bool {
+//	func (m *Monitor) isActiveInstance() bool {
 //	    data, err := os.ReadFile(statePath)
 //	    if err != nil {
 //	        m.logger.Warn("state unreadable, assuming active")
@@ -219,7 +219,7 @@ func passOnCall(body *ast.BlockStmt) *ast.CallExpr {
 }
 
 // successResponseCall returns a call in the branch that answers with success:
-// a responder named for success (SendSuccess, RespondSuccess, writeSuccess).
+// a responder named for success (ReplySuccess, RespondSuccess, writeSuccess).
 func successResponseCall(body *ast.BlockStmt) *ast.CallExpr {
 	var found *ast.CallExpr
 	patternkit.ForEachOwnStatement(body, func(stmt ast.Stmt) {

@@ -6,7 +6,7 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
-// Репро с projectD (models.NewArticleWithRequestDate): значение под success-only
+// Репро с projectD (models.NewItemWithRequestDate): значение под success-only
 // guard'ом, но сразу после guard'а нулевое состояние проверяется и получает
 // документированный фолбек — провал парсинга отличим от «данных не было»,
 // его судьба решена в коде рядом. Это не потеря ошибки.

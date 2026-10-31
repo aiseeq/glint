@@ -97,7 +97,7 @@ func (s *Svc) warmCache(ctx context.Context, id string) {
 	}
 }
 
-func (s *Svc) recordAudit(ctx context.Context, entry any) {
+func (s *Svc) recordEvent(ctx context.Context, entry any) {
 	if err := s.repo.Create(ctx, entry); err != nil {
 		s.logger.Error("audit write failed", "error", err)
 	}

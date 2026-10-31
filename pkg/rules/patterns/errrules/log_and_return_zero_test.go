@@ -18,12 +18,12 @@ func TestLogAndReturnZeroRule(t *testing.T) {
 			name: "empty issuer returned after error log",
 			code: `package auth
 
-func (m *TokenManager) getJWTIssuer() string {
+func (m *SessionManager) getTokenIssuer() string {
 	if m.config == nil {
 		m.logger.Error("Configuration not available for JWT issuer")
 		return ""
 	}
-	return m.config.GetJWTIssuer()
+	return m.config.GetTokenIssuer()
 }
 `,
 			wantCount: 1,
@@ -32,7 +32,7 @@ func (m *TokenManager) getJWTIssuer() string {
 			name: "zero duration returned after parse warning",
 			code: `package config
 
-func (l *Loader) GetServerReadTimeout() time.Duration {
+func (l *Loader) GetServerTimeout() time.Duration {
 	d, err := time.ParseDuration(l.raw)
 	if err != nil {
 		logger.Warn("invalid read timeout, using default", "error", err)
@@ -47,12 +47,12 @@ func (l *Loader) GetServerReadTimeout() time.Duration {
 			name: "function with error result is out of scope",
 			code: `package auth
 
-func (m *TokenManager) getJWTIssuer() (string, error) {
+func (m *SessionManager) getTokenIssuer() (string, error) {
 	if m.config == nil {
 		m.logger.Error("Configuration not available for JWT issuer")
 		return "", fmt.Errorf("config is nil")
 	}
-	return m.config.GetJWTIssuer(), nil
+	return m.config.GetTokenIssuer(), nil
 }
 `,
 			wantCount: 0,
@@ -168,7 +168,7 @@ func (s *Server) startMetrics() {
 	s.metrics = NewMetrics(s.cfg.MetricsAddr)
 }
 
-func (s *Service) appendRewards(address string, wb *WalletBalance) {
+func (s *Service) appendRewards(address string, wb *AccountBalance) {
 	if s.client == nil {
 		return
 	}
@@ -243,7 +243,7 @@ func (s *Service) canonicalWallet(ctx context.Context, wallet string) string {
 			name: "parser loop that hands back the text none of the layouts read",
 			code: `package bulk
 
-func normalizeDate(value string) string {
+func normalizeInput(value string) string {
 	if value == "" {
 		return ""
 	}
@@ -352,7 +352,7 @@ func (s *Service) syncChain(ctx context.Context, wallet, chain string) *Result {
 		return result
 	}
 	result.NewCount = outcome.count
-	if err := s.repo.FinishSync(ctx, wallet, chain, outcome.cursor); err != nil {
+	if err := s.repo.FinishBatch(ctx, wallet, chain, outcome.cursor); err != nil {
 		s.logger.Warn("failed to finish sync", "error", err)
 	}
 	return result

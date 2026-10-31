@@ -444,7 +444,7 @@ const maxRequestHelperDepth = 3
 // helperReadsRequest reports a call handed the request that reads what the
 // client sent: a project function reading it (queryUUID(w, req, "id")), or a
 // library function (mux.Vars(req)). A responder (sendError(w, req, ...)) and
-// a helper reading only the request's context (currentStaff(w, req)) do not.
+// a helper reading only the request's context (currentMember(w, req)) do not.
 func helperReadsRequest(flow *errorFlow, fn patternkit.TypedFunc, call *ast.CallExpr, request *types.Var, depth int) bool {
 	callee, ok := typeutil.Callee(fn.Info, call).(*types.Func)
 	if !ok {
@@ -475,7 +475,7 @@ func helperReadsRequest(flow *errorFlow, fn patternkit.TypedFunc, call *ast.Call
 // sent: a path or query value, a decoded body, and what is computed from them.
 //
 // A handler helper's own parameters next to the writer and the request
-// (convertFrom(w, r, params convertFromParams), show(w, r, id string)) hold
+// (convertFrom(w, r, params convertFromOptions), show(w, r, id string)) hold
 // what its caller parsed from the request: strings and value structs count.
 func requestValues(flow *errorFlow, fn patternkit.TypedFunc, request *types.Var) map[types.Object]bool {
 	values := map[types.Object]bool{}

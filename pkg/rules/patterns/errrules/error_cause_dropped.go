@@ -237,7 +237,7 @@ func emitsFixedMessage(call *ast.CallExpr) bool {
 var errorFlashLevels = map[string]bool{"error": true, "danger": true, "err": true, "fail": true, "failure": true}
 
 // errorFlashText returns the literal message of a flash or redirect helper
-// called with an error level: redirectProjects(w, r, "error", "Cannot delete").
+// called with an error level: redirectItems(w, r, "error", "Cannot delete").
 // The level is the argument right before the message.
 func errorFlashText(call *ast.CallExpr) (string, bool) {
 	for i := 0; i+1 < len(call.Args); i++ {
@@ -261,7 +261,7 @@ var selfExplanatoryText = regexp.MustCompile(`(?i)\b(invalid|malformed|must\b|ex
 
 // isClientErrorResponse recognises a 4xx answer: an http.Status* 4xx constant or a
 // literal 400–499 among the arguments, or a callee whose name already says so
-// (sendValidationError, sendUnauthorized, respondNotFound).
+// (sendValidationError, sendDenied, respondNotFound).
 func isClientErrorResponse(call *ast.CallExpr) bool {
 	name := strings.ToLower(core.ExtractFullFunctionName(call))
 	for _, marker := range []string{"unauthorized", "forbidden", "notfound", "badrequest", "validation", "invalid", "conflict", "unprocessable", "toomany", "notallowed"} {

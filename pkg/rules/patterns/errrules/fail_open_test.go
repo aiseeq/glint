@@ -22,7 +22,7 @@ type Svc struct {
 	logger *slog.Logger
 }
 
-func (s *Svc) isActiveDeployment() bool {
+func (s *Svc) isActiveInstance() bool {
 	_, err := os.ReadFile("/state")
 	if err != nil {
 		s.logger.Warn("assuming active", "error", err)
@@ -80,7 +80,7 @@ type Svc struct {
 	status func() (string, error)
 }
 
-func SendSuccess(w http.ResponseWriter, v any, msg string) {}
+func ReplySuccess(w http.ResponseWriter, v any, msg string) {}
 
 func (s *Svc) Limit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -102,10 +102,10 @@ func (s *Svc) Complete(w http.ResponseWriter, r *http.Request) {
 	status, err := s.status()
 	if err != nil {
 		s.logger.Error("status check failed", "error", err)
-		SendSuccess(w, map[string]string{"status": "processing"}, "status verification failed")
+		ReplySuccess(w, map[string]string{"status": "processing"}, "status verification failed")
 		return
 	}
-	SendSuccess(w, map[string]string{"status": status}, "done")
+	ReplySuccess(w, map[string]string{"status": status}, "done")
 }
 
 type AuthStatus struct{ Authenticated bool }
@@ -114,10 +114,10 @@ func (s *Svc) AuthStatus(w http.ResponseWriter, r *http.Request) {
 	_, err := s.status()
 	if err != nil {
 		s.logger.Warn("invalid session", "error", err)
-		SendSuccess(w, AuthStatus{Authenticated: false}, "not authenticated")
+		ReplySuccess(w, AuthStatus{Authenticated: false}, "not authenticated")
 		return
 	}
-	SendSuccess(w, AuthStatus{Authenticated: true}, "authenticated")
+	ReplySuccess(w, AuthStatus{Authenticated: true}, "authenticated")
 }
 `
 	assert.Equal(t, []int{21, 36}, rulestest.GoFileRuleLines(t, NewFailOpenRule(), "svc/svc.go", source))
