@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/glint/pkg/output"
+	"github.com/aiseeq/glint/pkg/rules"
 )
 
 // timingCollector accumulates rule durations for the run journal, and keeps
@@ -30,7 +31,12 @@ type timingCollector struct {
 	rules    map[string]*ruleTiming
 	inFlight map[uint64]inFlightRun
 	nextID   uint64
-	quick    sync.Map // map[string]*atomic.Int64, nanoseconds
+	// quick holds the per-rule totals of the lightweight path in nanoseconds.
+	// It is filled with every registered rule before the run and only read
+	// after, so the hot path takes no lock; a name outside the registry is
+	// summed in extra under mu.
+	quick map[string]*atomic.Int64
+	extra map[string]time.Duration
 }
 
 type phaseTiming struct {
@@ -60,7 +66,13 @@ func newTimingCollectorMode(detailed bool) *timingCollector {
 	if detailed {
 		tc.rules = make(map[string]*ruleTiming)
 		tc.inFlight = make(map[uint64]inFlightRun)
+		return tc
 	}
+	tc.quick = make(map[string]*atomic.Int64)
+	for _, rule := range rules.All() {
+		tc.quick[rule.Name()] = new(atomic.Int64)
+	}
+	tc.extra = make(map[string]time.Duration)
 	return tc
 }
 
@@ -75,12 +87,13 @@ func (tc *timingCollector) track(rule, file string) func() {
 		started := tc.now()
 		return func() {
 			elapsed := tc.now().Sub(started)
-			value, ok := tc.quick.Load(rule)
-			if !ok {
-				candidate := new(atomic.Int64)
-				value, _ = tc.quick.LoadOrStore(rule, candidate)
+			if total, ok := tc.quick[rule]; ok {
+				total.Add(int64(elapsed))
+				return
 			}
-			value.(*atomic.Int64).Add(int64(elapsed))
+			tc.mu.Lock()
+			tc.extra[rule] += elapsed
+			tc.mu.Unlock()
 		}
 	}
 	started := tc.now()
@@ -145,10 +158,16 @@ func (tc *timingCollector) ruleDurations() map[string]time.Duration {
 		return durations
 	}
 	durations := make(map[string]time.Duration)
-	tc.quick.Range(func(key, value any) bool {
-		durations[key.(string)] = time.Duration(value.(*atomic.Int64).Load())
-		return true
-	})
+	for name, total := range tc.quick {
+		if ns := total.Load(); ns > 0 {
+			durations[name] = time.Duration(ns)
+		}
+	}
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	for name, d := range tc.extra {
+		durations[name] += d
+	}
 	return durations
 }
 

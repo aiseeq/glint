@@ -76,10 +76,10 @@ func appendRunJournal(entry runJournalEntry) (retErr error) {
 			retErr = fmt.Errorf("close run journal lock: %w", err)
 		}
 	}()
+	// Closing the lock file above releases the lock.
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return fmt.Errorf("lock run journal: %w", err)
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {

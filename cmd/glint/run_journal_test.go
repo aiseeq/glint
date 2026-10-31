@@ -102,7 +102,11 @@ func TestAppendRunJournalConcurrentWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	t.Cleanup(func() {
+		if err := file.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	scanner := bufio.NewScanner(file)
 	lines := 0
 	for scanner.Scan() {
