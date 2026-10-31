@@ -2,9 +2,9 @@ package qarules
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -48,11 +48,12 @@ func readsSystemFile(call *ast.CallExpr) bool {
 	if !ok || lit.Kind != token.STRING {
 		return false
 	}
-	value, err := strconv.Unquote(lit.Value)
-	if err != nil {
+	// The parser checked the literal: its value is the string the code reads.
+	value := constant.MakeFromLiteral(lit.Value, lit.Kind, 0)
+	if value.Kind() != constant.String {
 		return false
 	}
-	path := filepath.Clean(value)
+	path := filepath.Clean(constant.StringVal(value))
 	for _, prefix := range systemFilePrefixes {
 		if strings.HasPrefix(path, prefix) {
 			return true
