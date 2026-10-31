@@ -1,6 +1,6 @@
 # Вычистить имя рабочего проекта из истории glint, второй проход (force-push)
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Что сделать
@@ -16,3 +16,6 @@
 - 2026-10-31 14:03 открыт — glint-master
 - 2026-10-31 14:03 в работе — glint-master
 - 2026-10-31 14:26 note — glint-master: переписано: влитые ветки на origin удалены (13); свежее зеркало d866093 → filter-repo --replace-text (5 замен, replace.txt в glint-measure/purge2) → main 055d221; сверка: 0 вхождений в ветках, тегах и сообщениях, деревья 154 тегов отличаются только чищеными файлами; ls-remote не сдвинулся; push --force heads+tags; свежий клон: 0 вхождений, 154 тега; остаток refs/pull/4/merge — 2 вхождения (служебное слияние закрытого PR, пушем не снять, как в 20261029-0243); локально reset на 055d221; 225 хешей в 54 тикетах пересчитаны по commit-map
+- 2026-10-31 14:36 note — glint-master: после чистки: graft leaks --branches --tags — 0 «project name»; graft all зелёный; установлено v1.83.7-211-gaf3a8dd
+- 2026-10-31 14:36 на проверке — glint-master
+- 2026-10-31 15:03 готово — graft-master (session glint-master): graft-master 31.10 ~15:00 CET, свежий клон: main af3a8dd, 154 тега; graft leaks --branches --tags и --remotes --tags — 0 «project name» (715 коммитов); git log --remotes --tags -p | grep -P '(^|[^-\w])<имя>\b' -i — 0; refs/pull/4/head 0, refs/pull/4/merge 2 (известный остаток закрытого PR)
