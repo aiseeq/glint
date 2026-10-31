@@ -477,7 +477,7 @@ func (r *DefaultInventsDomainValueRule) AnalyzeFile(ctx *core.FileContext) []*co
 // keeps the record with a domain constant made up for it:
 //
 //	switch action.Type {
-//	case "TonTransfer": ...
+//	case "ChainTransfer": ...
 //	default:
 //	    tx.Direction = model.DirectionOut // an unknown event becomes an outgoing transfer
 //	}

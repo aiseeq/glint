@@ -179,7 +179,7 @@ func TestMapIterationOrderMetadata(t *testing.T) {
 }
 
 // Сортировка через собственный хелпер — та же гарантия порядка, что и sort.Strings.
-// Репро из projectC: scheduler/xe_refresher.go собирает пары и зовёт sortXEPairs.
+// Репро из projectC: scheduler/xe_refresher.go собирает пары и зовёт sortOrderPairs.
 func TestMapIterationOrderAcceptsSortHelper(t *testing.T) {
 	violations := analyzeMapOrder(t, `package order
 

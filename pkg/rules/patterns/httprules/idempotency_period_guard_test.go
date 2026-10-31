@@ -15,9 +15,9 @@ func TestIdempotencyCheckThenCreateRule_PeriodGuardOnLatestRecord(t *testing.T) 
 func (s *Service) Run(ctx context.Context, ids []string) {
 	for _, id := range ids {
 		today := time.Now().UTC().Format("2006-01-02")
-		existing, _ := s.nav.GetLatestNAV(ctx, id)
+		existing, _ := s.nav.GetLatestRecord(ctx, id)
 		if existing == nil || existing.Date != today {
-			if err := s.fees.AccrueFees(ctx, id); err != nil {
+			if err := s.fees.ApplyAccrual(ctx, id); err != nil {
 				s.log.Error("accrue", err)
 			}
 		}
@@ -28,19 +28,19 @@ func (s *Service) Run(ctx context.Context, ids []string) {
 // finding here.
 func (s *Service) RunChecked(ctx context.Context, id string) error {
 	today := time.Now().UTC().Format("2006-01-02")
-	existing, err := s.nav.GetLatestNAV(ctx, id)
+	existing, err := s.nav.GetLatestRecord(ctx, id)
 	if err != nil {
 		return err
 	}
 	if existing == nil || existing.Date != today {
-		return s.fees.AccrueFees(ctx, id)
+		return s.fees.ApplyAccrual(ctx, id)
 	}
 	return nil
 }
 
 // No period in the guard: no finding.
 func (s *Service) Show(ctx context.Context, id string) string {
-	latest, _ := s.nav.GetLatestNAV(ctx, id)
+	latest, _ := s.nav.GetLatestRecord(ctx, id)
 	if latest == nil || latest.Status != "ok" {
 		return "stale"
 	}

@@ -1046,7 +1046,7 @@ func isSortedBefore(fn *ast.FuncDecl, name string, loopEnd token.Pos) bool {
 }
 
 // isSortingCall recognizes both the standard sorters and a project's own helper
-// around them. A wrapper named sortXEPairs orders the slice exactly as
+// around them. A wrapper named sortOrderPairs orders the slice exactly as
 // sort.Slice does, and refusing to see it would push callers into inlining the
 // sort just to satisfy the rule.
 func isSortingCall(fun ast.Expr) bool {

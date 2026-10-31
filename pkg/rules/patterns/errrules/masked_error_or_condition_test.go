@@ -20,7 +20,7 @@ func TestMaskedErrorOrConditionRule(t *testing.T) {
 			code: `package svc
 
 func GetEffectiveAPY(ctx context.Context, strategy string) (Money, error) {
-	latest, err := repo.GetLatestSnapshot(ctx, strategy)
+	latest, err := repo.GetLatestRecord(ctx, strategy)
 	if err != nil || latest == nil {
 		logger.Warn("no latest snapshot", "error", err)
 		return Money{Decimal: decimal.Zero}, nil
@@ -50,7 +50,7 @@ func Load() (*Data, error) {
 			code: `package svc
 
 func GetEffectiveAPY(ctx context.Context, strategy string) (Money, error) {
-	latest, err := repo.GetLatestSnapshot(ctx, strategy)
+	latest, err := repo.GetLatestRecord(ctx, strategy)
 	if err != nil {
 		return Money{}, fmt.Errorf("get snapshot: %w", err)
 	}
@@ -304,8 +304,8 @@ func TestMaskedErrorOrCondition_FunctionWithoutErrorResult(t *testing.T) {
 			name: "no error result: err swallowed via || and value returned",
 			code: `package svc
 
-func (s *S) calculateDayYield(userID string, cumulative Decimal) Decimal {
-	userShare, err := s.calculateUserShare(userID)
+func (s *S) calculateItemValue(userID string, cumulative Decimal) Decimal {
+	userShare, err := s.calculateMemberValue(userID)
 	if err != nil || userShare.LessThanOrEqual(zero) {
 		return cumulative
 	}
@@ -373,7 +373,7 @@ func (s *S) value() Decimal {
 func handler(w http.ResponseWriter, r *http.Request) {
 	token, err := extract(r)
 	if err != nil || token == "" {
-		sendUnauthorized(w, err)
+		sendAccessDenied(w, err)
 		return
 	}
 	serve(w, token)
@@ -383,7 +383,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		},
 		{
 			// Ошибка ушла логгеру вместе с err — канал без error-результата
-			// использован, это зона log-and-return-zero. Репро: decodeSUICursorState
+			// использован, это зона log-and-return-zero. Репро: decodeWidgetCursorState
 			// projectB (Warn с err + возврат чистого состояния курсора).
 			name: "value return after logging the error variable is handled, not masked",
 			code: `package svc

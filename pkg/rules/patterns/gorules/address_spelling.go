@@ -38,8 +38,8 @@ func isAddressName(name string) bool {
 }
 
 // isAddressCanonicalizer reports a function that brings an address to the
-// project's one spelling or compares two in it: normalizeTronAddress,
-// canonicalWalletSpelling, AddressKey, syncWalletKey, sameAccountAddress.
+// project's one spelling or compares two in it: normalizeChainAddress,
+// canonicalAccountSpelling, AddressKey, syncAddressKey, sameAccountAddress.
 func isAddressCanonicalizer(name string) bool {
 	words := helpers.IdentifierWords(name)
 	if len(words) == 0 {
@@ -525,8 +525,8 @@ func hexTestedValues(info *types.Info, cond ast.Expr) []string {
 // with the addresses its caller passed, while a sibling method of the same
 // type brings its address to the canonical spelling first:
 //
-//	func (s *Service) SyncWallet(ctx, wallet string) { wallet = s.canonicalWalletSpelling(ctx, wallet); ... }
-//	func (s *Service) BackfillGas(ctx, wallets []string) { for _, w := range wallets { s.repo.CreateBatch(...w...) } }
+//	func (s *Service) SyncAccount(ctx, wallet string) { wallet = s.canonicalAccountSpelling(ctx, wallet); ... }
+//	func (s *Service) BackfillGas(ctx, wallets []string) { for _, w := range wallets { s.repo.CreateMany(...w...) } }
 //
 // A request spelling the address another way writes a second set of rows
 // for the same account instead of updating its own.
