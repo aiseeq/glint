@@ -1,6 +1,6 @@
 # sql-injection: any one-argument bool predicate in a rejecting if counts as a whitelist
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Что сделать
@@ -80,3 +80,4 @@
 - 2026-10-31 21:27 note — glint-master: влито 2da8913 (боец 1031-2014-sec-sql, 3 захода; 2 возврата: comma-ok/вложенные блоки/регексп-альтернатива/квадрат, затем self-check и (?m)-якорь): accept-sql.sh ok (probe 19 27 39, не 48; probe-sql2 41 50, не 14 22 31; self-check pkg/rules/security чист); consumers 20 проектов 0 разниц (consumers-sec-sql-2.txt; первый прогон упал на akit в момент его незакоммиченной правки x/sys/unix, повтор чист). Остаток: якорный регексп с широким классом (^.*$) принимается белым списком
 - 2026-10-31 21:35 note — glint-master: независимая проверка Terra 1031-2128-glint: вернуть (/home/aisee/.cache/worktrees/glint-measure/security/verdict-sql.md): ложные :108 (x != a && x != b), :38 (IIFE); пропуски :114 :119 (map с не-литеральными ключами), :123 (err == nil). Доработка — тикет sql-whitelist-review-defects (после влития sec-http)
 - 2026-10-31 21:51 note — glint-master: повторная независимая проверка: Terra 1031-2128-glint, 2-й заход (все 4 sql-тикета), вердикт → /home/aisee/.cache/worktrees/glint-measure/security/verdict-sql.md
+- 2026-10-31 21:58 готово — terra-1031-2128-glint (session glint-master): Terra 1031-2128-glint, 2-й заход: по этому тикету готово по прямым критериям (/home/aisee/.cache/worktrees/glint-measure/security/verdict-sql.md, раздел 1 и итог; установленный glint f6d117a, пробы verify-sql, go test security ok, consumers 0 разниц). Остаток широкого регекспа ^.*$ — известен; дефекты смежного кода — в sql-whitelist-review-defects
