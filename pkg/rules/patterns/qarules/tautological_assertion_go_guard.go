@@ -30,6 +30,30 @@ var environmentProbes = map[string]bool{
 	"net.Dial": true, "net.DialTimeout": true,
 }
 
+// systemFileReads are the calls that, given a fixed path into the system's own
+// files, ask what the machine allows (/proc/sys/user/max_user_namespaces).
+var systemFileReads = map[string]bool{"os.ReadFile": true, "os.Open": true, "os.ReadDir": true}
+
+var systemFilePrefixes = []string{"/proc/", "/sys/", "/dev/", "/etc/"}
+
+// readsSystemFile reports a read of a system file at a literal path.
+func readsSystemFile(call *ast.CallExpr) bool {
+	if !systemFileReads[helpers.ExprText(call.Fun)] || len(call.Args) == 0 {
+		return false
+	}
+	lit, ok := ast.Unparen(call.Args[0]).(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return false
+	}
+	path := strings.Trim(lit.Value, "`\"")
+	for _, prefix := range systemFilePrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *TautologicalAssertionRule) goGuardsAndSkips(ctx *core.FileContext, testify map[string]bool) []*core.Violation {
 	var violations []*core.Violation
 	visitors := visitorBodies(ctx.GoAST)
@@ -375,7 +399,7 @@ func fromEnvironmentProbe(errName string, stmts ...ast.Stmt) bool {
 		if !ok || len(assign.Rhs) != 1 || !patternkit.AssignsName(assign, errName) {
 			continue
 		}
-		if call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr); ok && environmentProbes[helpers.ExprText(call.Fun)] {
+		if call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr); ok && (environmentProbes[helpers.ExprText(call.Fun)] || readsSystemFile(call)) {
 			return true
 		}
 	}

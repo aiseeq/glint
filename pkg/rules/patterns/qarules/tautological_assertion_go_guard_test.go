@@ -112,6 +112,39 @@ func TestTool(t *testing.T) {
 	assert.Equal(t, []int{18, 22, 25}, rulestest.GoFileRuleLines(t, NewTautologicalAssertionRule(), "service_test.go", code))
 }
 
+// A read of a system file at a fixed path asks what the machine allows, not
+// whether the code under test works; a read of the fixture the test passes in
+// is the code's own input, and skipping on it hides the failure.
+func TestTautologicalAssertion_GoSkipOnSystemFileRead(t *testing.T) {
+	code := `package service
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+func TestBindMount(t *testing.T) {
+	if n, err := os.ReadFile("/proc/sys/user/max_user_namespaces"); err != nil || strings.TrimSpace(string(n)) == "0" {
+		t.Skip("user namespaces are off")
+	}
+	if _, err := os.Open("/sys/fs/cgroup/cgroup.controllers"); err != nil {
+		t.Skip("no cgroup v2")
+	}
+}
+
+func TestImport(t *testing.T, path string) {
+	if _, err := os.ReadFile(path); err != nil {
+		t.Skip("fixture unreadable")
+	}
+	if _, err := os.ReadFile("testdata/input.json"); err != nil {
+		t.Skip("fixture unreadable")
+	}
+}
+`
+	assert.Equal(t, []int{20, 23}, rulestest.GoFileRuleLines(t, NewTautologicalAssertionRule(), "service_test.go", code))
+}
+
 // A test helper that skips a fixture it failed to read or decode: the broken
 // fixture drops out of the check and the test stays green. A missing optional
 // path probed with os.Stat is the environment; a branch with a comment says
