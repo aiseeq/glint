@@ -1,6 +1,7 @@
 # reimplemented-stdlib: sorted map keys by hand instead of slices.Sorted(maps.Keys(m))
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Вход
 - Пилот duplicate-func-across-packages на graft 31.10 (graft-master): копии sortedKeys/sortedNames лучше всего чинятся не одной реализацией, а стандартной `slices.Sorted(maps.Keys(m))` (Go ≥ 1.23) — 12 мест вызова заменены. Та же форма — в dream (исправлено), sc2demu (sortedGameNames, sortedCohorts, sortedKeys) и была в самом glint (core.SortedKeys).
@@ -20,3 +21,5 @@
 
 ## Журнал
 - 2026-10-31 11:53 открыт — glint-master
+- 2026-10-31 11:56 в работе — glint-master
+- 2026-10-31 11:56 note — glint-master: боец Luna 1031-1156-reimplemented-stdlib-sorted-keys (glint-правило): бриф /home/aisee/.cache/worktrees/glint-measure/brief-reimplemented-stdlib-sorted-keys.md, приёмка accept-reimplemented-stdlib-sorted-keys.sh там же, дерево /home/aisee/.cache/worktrees/glint/reimplemented-stdlib-sorted-keys

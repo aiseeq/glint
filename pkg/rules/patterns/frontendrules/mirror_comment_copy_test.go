@@ -67,7 +67,21 @@ func workerEnv() {}
 // Pick — копия auth.json без refresh_token.
 func Pick(b []byte) []byte { return b }`
 	assert.Empty(t, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/worker.go", source))
-	code := `// Limits — копия limits.Values из бэкенда.
-func Limits() []int { return nil }`
+	code := `// Limit — копия limits.Value из бэкенда.
+const Limit = 5`
 	assert.Equal(t, []string{"src/limits.go:2"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/limits.go", code))
+}
+
+// An honest note on a Go function is no finding: the body rule decides
+// whether the function still copies another package.
+func TestMirrorCommentCopyGoFunctionLeftToBodyRule(t *testing.T) {
+	source := `// isStreamRequest mirrors httpx.IsStreamRequest.
+func isStreamRequest(r *http.Request) bool { return httpx.IsStreamRequest(r) }
+
+// isAdmin — копия httpx.IsAdmin.
+func (u *User) isAdmin() bool { return u.Role == "admin" }`
+	assert.Empty(t, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/stream.go", source))
+	ts := `// Mirrors httpx.IsStreamRequest.
+export function isStreamRequest(r) { return r.stream }`
+	assert.Equal(t, []string{"src/stream.ts:2"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/stream.ts", ts))
 }

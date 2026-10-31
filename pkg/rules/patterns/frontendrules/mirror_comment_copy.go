@@ -58,7 +58,10 @@ func (r *MirrorCommentCopyRule) AnalyzeFile(c *core.FileContext) []*core.Violati
 		if !mirrorDecl.MatchString(strings.TrimSpace(line)) {
 			continue
 		}
-		if i == 0 {
+		// A Go function copy is caught by its body (duplicate-func-across-packages):
+		// its comment is no cause for a finding, and reporting it only teaches
+		// to delete the honest note while the copy stays.
+		if i == 0 || c.IsGoFile() && strings.HasPrefix(strings.TrimSpace(line), "func ") {
 			continue
 		}
 		start := i
