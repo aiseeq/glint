@@ -105,7 +105,7 @@ func (r *SQLInjectionRule) analyze(ctx *core.FileContext, info *types.Info) []*c
 		if query == nil {
 			return true
 		}
-		pattern := check.injectedPattern(query)
+		pattern := check.injectedPattern(query, call.Pos())
 		if pattern == "" {
 			return true
 		}

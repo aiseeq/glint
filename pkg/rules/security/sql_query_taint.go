@@ -5,6 +5,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"regexp/syntax"
 	"slices"
 	"strings"
 
@@ -19,6 +20,31 @@ type sqlTaint struct {
 	outside bool
 	pattern string
 }
+
+type sqlValidation struct {
+	at        token.Pos
+	scope     ast.Node
+	block     *ast.BlockStmt
+	statement int
+}
+
+type sqlNodeContext struct {
+	callable ast.Node
+	blocks   []*ast.BlockStmt
+}
+
+type sqlRegexpOutcome uint8
+
+type sqlRegexpResult struct {
+	outcome  sqlRegexpOutcome
+	parseErr error
+}
+
+const (
+	sqlRegexpInvalid sqlRegexpOutcome = iota
+	sqlRegexpNotAnchored
+	sqlRegexpAnchored
+)
 
 func (t sqlTaint) join(other sqlTaint) sqlTaint {
 	if !t.outside {
@@ -63,22 +89,38 @@ var sqlSafeTypePackages = map[string]bool{
 // passes it to a validator or compares it with a non-empty constant and
 // rejects - is clean.
 type sqlTaintCheck struct {
-	info      *types.Info
-	params    map[*types.Var]bool
-	assigned  map[*types.Var][]ast.Expr
-	validated map[*types.Var]bool
-	taints    map[*types.Var]*sqlTaint
-	mentions  map[*types.Var]*bool
+	file           *ast.File
+	info           *types.Info
+	params         map[*types.Var]bool
+	assigned       map[*types.Var][]ast.Expr
+	validated      map[*types.Var][]sqlValidation
+	contexts       map[token.Pos]sqlNodeContext
+	collectContext sqlNodeContext
+	functions      map[*types.Func]*ast.FuncDecl
+	literalMaps    map[types.Object]bool
+	regexpPatterns map[types.Object]string
+	at             token.Pos
+	scope          ast.Node
+	queryContext   sqlNodeContext
+	writes         map[*types.Var][]token.Pos
+	taints         map[*types.Var]*sqlTaint
+	mentions       map[*types.Var]*bool
 }
 
 func newSQLTaintCheck(file *ast.File, info *types.Info) *sqlTaintCheck {
 	c := &sqlTaintCheck{
-		info:      info,
-		params:    make(map[*types.Var]bool),
-		assigned:  make(map[*types.Var][]ast.Expr),
-		validated: make(map[*types.Var]bool),
-		taints:    make(map[*types.Var]*sqlTaint),
-		mentions:  make(map[*types.Var]*bool),
+		info:           info,
+		file:           file,
+		params:         make(map[*types.Var]bool),
+		assigned:       make(map[*types.Var][]ast.Expr),
+		validated:      make(map[*types.Var][]sqlValidation),
+		contexts:       make(map[token.Pos]sqlNodeContext),
+		functions:      make(map[*types.Func]*ast.FuncDecl),
+		literalMaps:    make(map[types.Object]bool),
+		regexpPatterns: make(map[types.Object]string),
+		writes:         make(map[*types.Var][]token.Pos),
+		taints:         make(map[*types.Var]*sqlTaint),
+		mentions:       make(map[*types.Var]*bool),
 	}
 	c.collect(file)
 	return c
@@ -86,7 +128,12 @@ func newSQLTaintCheck(file *ast.File, info *types.Info) *sqlTaintCheck {
 
 // injectedPattern returns the construct that mixed outside text into a query
 // holding SQL text, or "" when the query holds none.
-func (c *sqlTaintCheck) injectedPattern(query ast.Expr) string {
+func (c *sqlTaintCheck) injectedPattern(query ast.Expr, at token.Pos) string {
+	c.at = at
+	c.queryContext = c.contexts[at]
+	c.scope = c.queryContext.callable
+	c.taints = make(map[*types.Var]*sqlTaint)
+	c.mentions = make(map[*types.Var]*bool)
 	t := c.taint(query)
 	if !t.outside || t.pattern == "" || !c.mentionsSQL(query) {
 		return ""
@@ -97,42 +144,142 @@ func (c *sqlTaintCheck) injectedPattern(query ast.Expr) string {
 // collect records the parameters, the assignments and the whitelist checks of
 // the file.
 func (c *sqlTaintCheck) collect(file *ast.File) {
+	var stack []ast.Node
 	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.FuncDecl:
-			if node.Type.Params != nil {
-				for _, field := range node.Type.Params.List {
-					for _, name := range field.Names {
-						if v, ok := c.info.Defs[name].(*types.Var); ok && !sqlPackagePrivateType(v) {
-							c.params[v] = true
-						}
-					}
-				}
-			}
-		case *ast.RangeStmt:
-			for _, target := range []ast.Expr{node.Key, node.Value} {
-				c.record(target, node.X)
-			}
-		case *ast.AssignStmt:
-			c.recordAssign(node)
-		case *ast.ValueSpec:
-			if len(node.Names) == len(node.Values) {
-				for i, name := range node.Names {
-					c.record(name, node.Values[i])
-				}
-			}
-		case *ast.SwitchStmt:
-			c.recordSwitchWhitelist(node)
-		case *ast.IfStmt:
-			if sqlTerminates(node.Body) {
-				c.recordChecked(node.Init)
-				c.recordChecked(node.Cond)
-			}
-		case *ast.BlockStmt:
-			c.recordValidatorResults(node.List)
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return false
 		}
+		stack = append(stack, n)
+		context := sqlContextFor(stack)
+		if old, ok := c.contexts[n.Pos()]; !ok || len(context.blocks) >= len(old.blocks) {
+			c.contexts[n.Pos()] = context
+		}
+		c.collectContext = context
+		c.collectNode(n)
 		return true
 	})
+}
+
+func sqlContextFor(stack []ast.Node) sqlNodeContext {
+	var context sqlNodeContext
+	for _, parent := range stack {
+		switch node := parent.(type) {
+		case *ast.FuncDecl:
+			context.callable = node
+		case *ast.FuncLit:
+			context.callable = node
+		case *ast.BlockStmt:
+			context.blocks = append(context.blocks, node)
+		}
+	}
+	return context
+}
+
+func (c *sqlTaintCheck) collectNode(n ast.Node) {
+	switch node := n.(type) {
+	case *ast.FuncDecl:
+		c.collectFunction(node)
+	case *ast.RangeStmt:
+		c.collectRange(node)
+	case *ast.AssignStmt:
+		c.collectAssignment(node)
+	case *ast.ValueSpec:
+		c.collectValues(node)
+	case *ast.SwitchStmt:
+		c.recordSwitchWhitelist(node)
+	case *ast.IfStmt:
+		c.collectIf(node)
+	case *ast.BlockStmt:
+		c.recordValidatorResults(node.List)
+	}
+}
+
+func (c *sqlTaintCheck) collectFunction(node *ast.FuncDecl) {
+	fn, ok := c.info.Defs[node.Name].(*types.Func)
+	if ok {
+		c.functions[fn] = node
+	}
+	if node.Type.Params == nil {
+		return
+	}
+	for _, field := range node.Type.Params.List {
+		for _, name := range field.Names {
+			v, ok := c.info.Defs[name].(*types.Var)
+			if ok && !sqlPackagePrivateType(v) {
+				c.params[v] = true
+			}
+		}
+	}
+}
+
+func (c *sqlTaintCheck) collectRange(node *ast.RangeStmt) {
+	for _, target := range []ast.Expr{node.Key, node.Value} {
+		c.record(target, node.X)
+	}
+}
+
+func (c *sqlTaintCheck) collectAssignment(node *ast.AssignStmt) {
+	c.recordAssign(node)
+	if len(node.Lhs) != len(node.Rhs) {
+		return
+	}
+	for i, lhs := range node.Lhs {
+		id, ok := ast.Unparen(lhs).(*ast.Ident)
+		if !ok {
+			continue
+		}
+		obj := c.info.ObjectOf(id)
+		if obj == nil {
+			continue
+		}
+		if _, composite := ast.Unparen(node.Rhs[i]).(*ast.CompositeLit); composite {
+			c.literalMaps[obj] = true
+		}
+		if pattern := c.regexpLiteral(node.Rhs[i]); pattern != "" {
+			c.regexpPatterns[obj] = pattern
+		}
+	}
+}
+
+func (c *sqlTaintCheck) collectValues(node *ast.ValueSpec) {
+	if len(node.Names) != len(node.Values) {
+		return
+	}
+	for i, name := range node.Names {
+		value := node.Values[i]
+		c.record(name, value)
+		obj := c.info.Defs[name]
+		if obj == nil {
+			continue
+		}
+		if _, composite := ast.Unparen(value).(*ast.CompositeLit); composite {
+			c.literalMaps[obj] = true
+		}
+		if pattern := c.regexpLiteral(value); pattern != "" {
+			c.regexpPatterns[obj] = pattern
+		}
+	}
+}
+
+func (c *sqlTaintCheck) collectIf(node *ast.IfStmt) {
+	if !sqlTerminates(node.Body) {
+		return
+	}
+	c.recordErrorValidatorInit(node.Init, node.Pos())
+	c.recordRejectingCondition(node.Cond)
+	c.recordCommaOKWhitelist(node)
+}
+
+func (c *sqlTaintCheck) recordErrorValidatorInit(init ast.Stmt, at token.Pos) {
+	assign, ok := init.(*ast.AssignStmt)
+	if !ok || len(assign.Rhs) != 1 {
+		return
+	}
+	call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+	if ok && c.isValidatorCall(call) && c.validatorReturnsError(call) {
+		c.markValidated(c.varOf(call.Args[0]), at)
+	}
 }
 
 func (c *sqlTaintCheck) recordAssign(node *ast.AssignStmt) {
@@ -163,6 +310,7 @@ func (c *sqlTaintCheck) record(target, value ast.Expr) {
 	}
 	if v := c.rootVar(target); v != nil {
 		c.assigned[v] = append(c.assigned[v], value)
+		c.writes[v] = append(c.writes[v], target.Pos())
 	}
 }
 
@@ -216,40 +364,219 @@ func (c *sqlTaintCheck) recordSwitchWhitelist(node *ast.SwitchStmt) {
 		}
 	}
 	if rejects {
-		c.validated[v] = true
+		c.markValidated(v, node.Pos())
 	}
 }
 
-// recordChecked marks every variable a rejecting if checks against a
-// whitelist: the index of a map lookup, the argument of a validator call, the
-// operand of != with a non-empty constant.
-func (c *sqlTaintCheck) recordChecked(node ast.Node) {
-	if node == nil {
+// recordRejectingCondition marks values restricted by a rejecting condition.
+func (c *sqlTaintCheck) recordRejectingCondition(node ast.Node) {
+	condition, ok := node.(ast.Expr)
+	if !ok || condition == nil {
 		return
 	}
-	ast.Inspect(node, func(n ast.Node) bool {
-		switch expr := n.(type) {
-		case *ast.IndexExpr:
-			if _, isMap := c.typeOf(expr.X).Underlying().(*types.Map); isMap {
-				c.markValidated(expr.Index)
+	condition = ast.Unparen(condition)
+	if negated, ok := condition.(*ast.UnaryExpr); ok && negated.Op == token.NOT {
+		c.recordPositiveWhitelist(negated.X, condition.Pos())
+		return
+	}
+	comparison, ok := condition.(*ast.BinaryExpr)
+	if !ok || comparison.Op != token.NEQ {
+		return
+	}
+	if text, ok := c.constantString(comparison.Y); ok && text != "" {
+		c.markValidated(c.varOf(comparison.X), condition.Pos())
+	} else if text, ok := c.constantString(comparison.X); ok && text != "" {
+		c.markValidated(c.varOf(comparison.Y), condition.Pos())
+	}
+}
+
+// recordCommaOKWhitelist handles map membership expressed by an init clause:
+// if _, ok := allowed[value]; !ok { return }.
+func (c *sqlTaintCheck) recordCommaOKWhitelist(node *ast.IfStmt) {
+	assign, ok := node.Init.(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 2 || len(assign.Rhs) != 1 {
+		return
+	}
+	index, ok := ast.Unparen(assign.Rhs[0]).(*ast.IndexExpr)
+	if !ok || c.typeOf(index.X) == nil || !c.isNegatedIdent(node.Cond, c.varOf(assign.Lhs[1])) {
+		return
+	}
+	if _, isMap := c.typeOf(index.X).Underlying().(*types.Map); isMap && c.literalMap(index.X) {
+		c.markValidated(c.varOf(index.Index), node.Cond.Pos())
+	}
+}
+
+func (c *sqlTaintCheck) isNegatedIdent(expr ast.Expr, target *types.Var) bool {
+	negated, ok := ast.Unparen(expr).(*ast.UnaryExpr)
+	if !ok || negated.Op != token.NOT || target == nil {
+		return false
+	}
+	ident, ok := ast.Unparen(negated.X).(*ast.Ident)
+	return ok && target == c.varOf(ident)
+}
+
+// recordPositiveWhitelist accepts only predicates whose true result restricts
+// the argument to a finite set or to a regexp-anchored identifier shape.
+func (c *sqlTaintCheck) recordPositiveWhitelist(expr ast.Expr, at token.Pos) {
+	expr = ast.Unparen(expr)
+	switch node := expr.(type) {
+	case *ast.CallExpr:
+		result := c.anchoredRegexpCall(node)
+		if result.outcome == sqlRegexpAnchored && result.parseErr == nil {
+			arg := 0
+			if _, method := ast.Unparen(node.Fun).(*ast.SelectorExpr); !method {
+				arg = 1
 			}
-		case *ast.CallExpr:
-			if c.isValidatorCall(expr) {
-				c.markValidated(expr.Args[0])
-			}
-		case *ast.BinaryExpr:
-			if expr.Op != token.NEQ {
-				return true
-			}
-			if text, ok := c.constantString(expr.Y); ok && text != "" {
-				c.markValidated(expr.X)
-			}
-			if text, ok := c.constantString(expr.X); ok && text != "" {
-				c.markValidated(expr.Y)
+			c.markValidated(c.varOf(node.Args[arg]), at)
+			return
+		}
+		if len(node.Args) != 1 {
+			return
+		}
+		if c.boolWhitelistFunction(node) {
+			c.markValidated(c.varOf(node.Args[0]), at)
+		}
+	case *ast.IndexExpr:
+		if _, isMap := c.typeOf(node.X).Underlying().(*types.Map); isMap && c.literalMap(node.X) {
+			c.markValidated(c.varOf(node.Index), at)
+		}
+	}
+}
+
+func (c *sqlTaintCheck) boolWhitelistFunction(call *ast.CallExpr) bool {
+	ident := helpers.IdentOf(call.Fun)
+	fn, ok := c.info.Uses[ident].(*types.Func)
+	if !ok || fn.Pkg() == nil {
+		return false
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig.Params().Len() != 1 || sig.Results().Len() != 1 || !types.Identical(sig.Results().At(0).Type(), types.Typ[types.Bool]) {
+		return false
+	}
+	decl := c.functions[fn]
+	if decl == nil || decl.Body == nil || len(decl.Body.List) != 1 || len(decl.Type.Params.List) != 1 {
+		return false
+	}
+	param := decl.Type.Params.List[0].Names
+	if len(param) != 1 {
+		return false
+	}
+	ret, ok := decl.Body.List[0].(*ast.ReturnStmt)
+	return ok && len(ret.Results) == 1 && finiteEqualitySet(ret.Results[0], param[0].Name)
+}
+
+func finiteEqualitySet(expr ast.Expr, name string) bool {
+	expr = ast.Unparen(expr)
+	if binary, ok := expr.(*ast.BinaryExpr); ok && binary.Op == token.LOR {
+		return finiteEqualitySet(binary.X, name) && finiteEqualitySet(binary.Y, name)
+	}
+	binary, ok := expr.(*ast.BinaryExpr)
+	if !ok || binary.Op != token.EQL {
+		return false
+	}
+	ident, left := ast.Unparen(binary.X).(*ast.Ident)
+	if left && ident.Name == name {
+		return isSQLStringLiteral(binary.Y)
+	}
+	ident, right := ast.Unparen(binary.Y).(*ast.Ident)
+	return right && ident.Name == name && isSQLStringLiteral(binary.X)
+}
+
+func isSQLStringLiteral(expr ast.Expr) bool {
+	lit, ok := ast.Unparen(expr).(*ast.BasicLit)
+	return ok && lit.Kind == token.STRING
+}
+
+func (c *sqlTaintCheck) literalMap(expr ast.Expr) bool {
+	if _, ok := ast.Unparen(expr).(*ast.CompositeLit); ok {
+		return true
+	}
+	id := helpers.IdentOf(expr)
+	if id == nil {
+		return false
+	}
+	return c.literalMaps[c.info.Uses[id]]
+}
+
+func (c *sqlTaintCheck) anchoredRegexpCall(call *ast.CallExpr) sqlRegexpResult {
+	pattern := ""
+	if selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok && selector.Sel.Name == "MatchString" {
+		if len(call.Args) != 1 {
+			return sqlRegexpResult{outcome: sqlRegexpNotAnchored}
+		}
+		typ := c.typeOf(selector.X)
+		if pointer, ok := typ.(*types.Pointer); ok {
+			typ = pointer.Elem()
+		}
+		named, ok := typ.(*types.Named)
+		if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != "regexp" || named.Obj().Name() != "Regexp" {
+			return sqlRegexpResult{outcome: sqlRegexpNotAnchored}
+		}
+		if ident := helpers.IdentOf(selector.X); ident != nil {
+			if obj := c.info.Uses[ident]; obj != nil {
+				pattern = c.regexpPatterns[obj]
 			}
 		}
-		return true
-	})
+	} else {
+		if len(call.Args) != 2 || helpers.CalleeName(call) != "MatchString" {
+			return sqlRegexpResult{outcome: sqlRegexpNotAnchored}
+		}
+		selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+		if !ok {
+			return sqlRegexpResult{outcome: sqlRegexpNotAnchored}
+		}
+		pkg, ok := c.info.Uses[helpers.IdentOf(selector.X)].(*types.PkgName)
+		if !ok || pkg.Imported().Path() != "regexp" {
+			return sqlRegexpResult{outcome: sqlRegexpNotAnchored}
+		}
+		pattern = c.constantStringExpr(call.Args[0])
+	}
+	return anchoredRegexp(pattern)
+}
+
+func anchoredRegexp(pattern string) sqlRegexpResult {
+	parsed, err := syntax.Parse(pattern, syntax.Perl)
+	if parsed == nil {
+		return sqlRegexpResult{outcome: sqlRegexpInvalid, parseErr: err}
+	}
+	root := parsed.Simplify()
+	if root.Op != syntax.OpConcat || len(root.Sub) < 2 {
+		return sqlRegexpResult{outcome: sqlRegexpNotAnchored}
+	}
+	first, last := root.Sub[0].Op, root.Sub[len(root.Sub)-1].Op
+	if first == syntax.OpBeginText && last == syntax.OpEndText {
+		return sqlRegexpResult{outcome: sqlRegexpAnchored}
+	}
+	return sqlRegexpResult{outcome: sqlRegexpNotAnchored}
+}
+
+func (c *sqlTaintCheck) constantStringExpr(expr ast.Expr) string {
+	text, _ := c.constantString(expr)
+	return text
+}
+
+func (c *sqlTaintCheck) regexpLiteral(expr ast.Expr) string {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return ""
+	}
+	selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "MustCompile" {
+		return ""
+	}
+	pkg, ok := c.info.Uses[helpers.IdentOf(selector.X)].(*types.PkgName)
+	if !ok || pkg.Imported().Path() != "regexp" {
+		return ""
+	}
+	lit, ok := ast.Unparen(call.Args[0]).(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return ""
+	}
+	value := constant.MakeFromLiteral(lit.Value, lit.Kind, 0)
+	if value.Kind() != constant.String {
+		return ""
+	}
+	return constant.StringVal(value)
 }
 
 // recordValidatorResults handles the two-statement form of a validator check:
@@ -261,15 +588,20 @@ func (c *sqlTaintCheck) recordValidatorResults(list []ast.Stmt) {
 			continue
 		}
 		call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
-		if !ok || !c.isValidatorCall(call) {
+		if !ok || !c.isValidatorCall(call) || !c.validatorReturnsError(call) {
 			continue
 		}
 		check, ok := list[i+1].(*ast.IfStmt)
 		if !ok || check.Init != nil || !sqlTerminates(check.Body) || !c.usesAny(check.Cond, assign.Lhs) {
 			continue
 		}
-		c.markValidated(call.Args[0])
+		c.markValidated(c.varOf(call.Args[0]), check.Pos())
 	}
+}
+
+func (c *sqlTaintCheck) validatorReturnsError(call *ast.CallExpr) bool {
+	sig, ok := c.typeOf(call.Fun).Underlying().(*types.Signature)
+	return ok && sig.Results().Len() == 1 && types.Identical(sig.Results().At(0).Type(), types.Universe.Lookup("error").Type())
 }
 
 // usesAny reports whether expr refers to a variable one of targets declares
@@ -286,10 +618,41 @@ func (c *sqlTaintCheck) usesAny(expr ast.Expr, targets []ast.Expr) bool {
 	})
 }
 
-func (c *sqlTaintCheck) markValidated(expr ast.Expr) {
-	if v := c.varOf(expr); v != nil {
-		c.validated[v] = true
+func (c *sqlTaintCheck) markValidated(v *types.Var, at token.Pos) {
+	if v != nil {
+		context := c.contexts[at]
+		block := lastSQLBlock(context.blocks)
+		statement := statementIndex(block, at)
+		if block == nil {
+			context = c.collectContext
+			block = lastSQLBlock(context.blocks)
+			statement = statementIndex(block, at)
+		}
+		if block != nil && statement >= 0 {
+			c.validated[v] = append(c.validated[v], sqlValidation{
+				at: at, scope: context.callable, block: block, statement: statement,
+			})
+		}
 	}
+}
+
+func lastSQLBlock(blocks []*ast.BlockStmt) *ast.BlockStmt {
+	if len(blocks) == 0 {
+		return nil
+	}
+	return blocks[len(blocks)-1]
+}
+
+func statementIndex(block *ast.BlockStmt, pos token.Pos) int {
+	if block == nil {
+		return -1
+	}
+	for i, statement := range block.List {
+		if statement.Pos() <= pos && pos <= statement.End() {
+			return i
+		}
+	}
+	return -1
 }
 
 func (c *sqlTaintCheck) varOf(expr ast.Expr) *types.Var {
@@ -379,7 +742,7 @@ func (c *sqlTaintCheck) taint(expr ast.Expr) sqlTaint {
 // was assigned to it. A variable met again while its own values are being
 // judged adds nothing beyond them.
 func (c *sqlTaintCheck) varTaint(v *types.Var) sqlTaint {
-	if v == nil || c.validated[v] {
+	if v == nil || c.validatedAt(v) {
 		return sqlTaint{}
 	}
 	if c.params[v] {
@@ -398,6 +761,35 @@ func (c *sqlTaintCheck) varTaint(v *types.Var) sqlTaint {
 	}
 	c.taints[v] = &t
 	return t
+}
+
+func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
+	for _, validation := range c.validated[v] {
+		if validation.scope != c.scope {
+			continue
+		}
+		queryStatement := -1
+		for _, block := range c.queryContext.blocks {
+			if block == validation.block {
+				queryStatement = statementIndex(block, c.at)
+				break
+			}
+		}
+		if queryStatement < 0 || validation.statement >= queryStatement {
+			continue
+		}
+		changed := false
+		for _, write := range c.writes[v] {
+			if validation.at < write && write < c.at {
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return true
+		}
+	}
+	return false
 }
 
 // callTaint judges the text a call returns. Calls the rule follows pass their

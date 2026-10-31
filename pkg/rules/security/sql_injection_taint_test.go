@@ -464,3 +464,130 @@ func byTable(db *sql.DB, table string) {
 		})
 	}
 }
+
+func TestSQLInjectionWhitelistMustPrecedeQueryAndRestrictValues(t *testing.T) {
+	code := `package main
+
+import (
+	"database/sql"
+	"regexp"
+)
+
+var columnPattern = regexp.MustCompile("^(name|email)$")
+var loosePattern = regexp.MustCompile("name|email")
+var sharedColumn string
+
+func isBlocked(value string) bool { return value == "blocked" }
+func isKnownColumn(value string) bool { return value == "name" || value == "email" }
+func looksOkay(value string) bool { return len(value) > 0 }
+
+func late(db *sql.DB, value string) {
+	db.Query("SELECT * FROM users WHERE name='" + value + "'")
+	if value != "admin" { return }
+}
+
+func blacklist(db *sql.DB, value string) {
+	if isBlocked(value) { return }
+	db.Query("SELECT * FROM users WHERE name='" + value + "'")
+}
+
+func arbitrary(db *sql.DB, value string) {
+	if !looksOkay(value) { return }
+	db.Query("SELECT * FROM users WHERE name='" + value + "'")
+}
+
+func whitelist(db *sql.DB, column string) {
+	if !isKnownColumn(column) { return }
+	db.Query("SELECT " + column + " FROM users")
+}
+
+func regexpWhitelist(db *sql.DB, column string) {
+	if !columnPattern.MatchString(column) { return }
+	db.Query("SELECT " + column + " FROM users")
+}
+
+func unanchoredRegexp(db *sql.DB, column string) {
+	if !loosePattern.MatchString(column) { return }
+	db.Query("SELECT " + column + " FROM users")
+}
+
+func validateElsewhere() {
+	if !isKnownColumn(sharedColumn) { return }
+}
+
+func setShared(column string) {
+	sharedColumn = column
+}
+
+func useShared(db *sql.DB) {
+	db.Query("SELECT " + sharedColumn + " FROM users")
+}
+
+func conditionallyValidated(db *sql.DB, column string, enabled bool) {
+	if enabled {
+		if !isKnownColumn(column) { return }
+	}
+	db.Query("SELECT " + column + " FROM users")
+}
+
+func reassignedAfterValidation(db *sql.DB, column, replacement string) {
+	if !isKnownColumn(column) { return }
+	column = replacement
+	db.Query("SELECT " + column + " FROM users")
+}
+
+func localMapWhitelist(db *sql.DB, column string) {
+	allowed := map[string]bool{"name": true, "email": true}
+	if !allowed[column] { return }
+	db.Query("SELECT " + column + " FROM users")
+}
+
+`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 7, "late checks, blacklists, arbitrary predicates, unanchored regexps, off-path checks and reassigned values should report")
+}
+
+func TestSQLInjectionWhitelistInitOuterBlockAndRegexpAnchors(t *testing.T) {
+	code := `package main
+
+import (
+	"database/sql"
+	"regexp"
+)
+
+var allowed = map[string]bool{"name": true, "created": true}
+var misleading = regexp.MustCompile("^a|.*$")
+var multiline = regexp.MustCompile("(?m)^[a-z_]+$")
+
+func commaOK(db *sql.DB, column string) {
+	if _, ok := allowed[column]; !ok { return }
+	db.Query("SELECT " + column + " FROM users")
+}
+
+func inLoop(db *sql.DB, column string, ids []int) {
+	if column != "name" { return }
+	for range ids {
+		db.Query("SELECT " + column + " FROM users")
+	}
+}
+
+func inIf(db *sql.DB, column string, enabled bool) {
+	if column != "name" { return }
+	if enabled {
+		db.Query("SELECT " + column + " FROM users")
+	}
+}
+
+func falseAnchor(db *sql.DB, column string) {
+	if !misleading.MatchString(column) { return }
+	db.Query("SELECT " + column + " FROM users")
+}
+
+func lineAnchor(db *sql.DB, column string) {
+	if !multiline.MatchString(column) { return }
+	db.Query("SELECT " + column + " FROM users")
+}
+`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 2, "comma-ok maps and outer-block checks should whitelist, while unanchored regexp branches and line anchors should report")
+}
