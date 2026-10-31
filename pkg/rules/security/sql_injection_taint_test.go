@@ -879,3 +879,16 @@ func run(db *sql.DB, left, right *url.URL) {
 	violations := analyzeSQLInjection(t, code)
 	assert.Len(t, violations, 0, "URLs assigned to each other are not request data and must not loop")
 }
+
+func TestSQLInjectionDeferredClosureNeedsCheckOnItsPath(t *testing.T) {
+	code := `package main
+import "database/sql"
+func run(db *sql.DB, deferred, launched string, strict bool) {
+	if strict { if deferred != "column" { return } }
+	defer func() { db.Query("SELECT " + deferred) }()
+	if strict { if launched != "column" { return } }
+	go func() { db.Query("SELECT " + launched) }()
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 2, "a check in a branch does not guard a closure launched after the branch")
+}

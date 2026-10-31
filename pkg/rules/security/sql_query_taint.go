@@ -896,22 +896,6 @@ func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
 		if validation.scope != c.scope && !deferred && !slices.Contains(c.queryContext.iifeScopes, validation.scope) {
 			continue
 		}
-		if deferred {
-			if validation.at >= c.at {
-				continue
-			}
-			changed := false
-			for _, write := range c.writes[v] {
-				if validation.at < write && write < validation.scope.End() {
-					changed = true
-					break
-				}
-			}
-			if !changed {
-				return true
-			}
-			continue
-		}
 		queryStatement := -1
 		for _, block := range c.queryContext.blocks {
 			if block == validation.block {
@@ -922,9 +906,15 @@ func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
 		if queryStatement < 0 || validation.statement >= queryStatement {
 			continue
 		}
+		// A deferred or launched closure runs later: a write anywhere after
+		// the check, up to the end of the checking function, may reach it.
+		until := c.at
+		if deferred {
+			until = validation.scope.End()
+		}
 		changed := false
 		for _, write := range c.writes[v] {
-			if validation.at < write && write < c.at {
+			if validation.at < write && write < until {
 				changed = true
 				break
 			}
