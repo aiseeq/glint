@@ -22,3 +22,4 @@
 - 2026-10-31 21:41 в работе — glint-master
 - 2026-10-31 21:41 note — glint-master: боец Luna: бриф /home/aisee/.cache/worktrees/glint-measure/security/brief-sql-review.md, приёмка accept-sql-review.sh, дерево /home/aisee/.cache/worktrees/glint/sql-review
 - 2026-10-31 21:49 note — glint-master: влито 42cafb2 (боец 1031-2142-sql-review, 1 заход): accept-sql-review.sh ok (все 4 пробы, self-check чист); consumers 20 проектов 0 разниц (consumers-sql-review.txt)
+- 2026-10-31 21:51 note — glint-master: повторная независимая проверка: Terra 1031-2128-glint, 2-й заход (все 4 sql-тикета), вердикт → /home/aisee/.cache/worktrees/glint-measure/security/verdict-sql.md

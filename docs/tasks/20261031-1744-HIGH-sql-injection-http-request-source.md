@@ -79,3 +79,4 @@
 - 2026-10-31 21:29 в работе — glint-master
 - 2026-10-31 21:29 note — glint-master: боец Luna: бриф /home/aisee/.cache/worktrees/glint-measure/security/brief-http.md, приёмка accept-http.sh, проба probe-http (нужны 11 15 20 25 30, не 34 42 50), дерево /home/aisee/.cache/worktrees/glint/sec-http
 - 2026-10-31 21:40 note — glint-master: влито d785423 (боец 1031-2129-sec-http, 1 заход): источники по go/types — *http.Request FormValue/PostFormValue/PathValue/Cookie, url.Values.Get, http.Header.Get; accept-http.sh ok (probe 19 23 27 39 не 48; probe-http 11 15 20 25 30 не 34 42 50; probe-sql2 41 50; self-check чист); consumers 20 проектов 0 разниц (consumers-sec-http.txt). Вне охвата: поля r.URL.Path/RawQuery, индексация Query()[k], роутеры сторонних библиотек
+- 2026-10-31 21:51 note — glint-master: повторная независимая проверка: Terra 1031-2128-glint, 2-й заход (все 4 sql-тикета), вердикт → /home/aisee/.cache/worktrees/glint-measure/security/verdict-sql.md
