@@ -20,3 +20,4 @@
 - 2026-10-31 16:00 открыт — glint-master
 - 2026-10-31 16:01 в работе — glint-master
 - 2026-10-31 16:01 note — glint-master: автор: бриф /home/aisee/.cache/worktrees/glint-measure/spec/brief.md, мера accept.sh там же (красная на заготовке — проверено), дерево /home/aisee/.cache/worktrees/glint/spec-as-built; ТЗ параллельно синтетике (файл приватный, строки при переименованиях не сдвигаются); запуск Terra
+- 2026-10-31 17:06 note — glint-master: автор Terra 1031-1601: принято, 12 мин, 0.050% недели OpenAI; spec.md 794 строки, 791 ссылка, 636 правил в 24 разделах; выборка 5 ссылок: 3 точные, 2 на соседнюю строку. Критик: бриф critic-brief.md, приёмка critic-accept.sh (красная без critic.md), дерево spec-critic
