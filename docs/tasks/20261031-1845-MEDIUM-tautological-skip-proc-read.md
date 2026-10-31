@@ -12,3 +12,4 @@
 
 ## Журнал
 - 2026-10-31 18:45 открыт — glint-master
+- 2026-10-31 19:25 note — glint-master: фикс f0a5be7 (TDD: TestTautologicalAssertion_GoSkipOnSystemFileRead красный до фикса): readsSystemFile — os.ReadFile/Open/ReadDir литерального пути /proc/ /sys/ /dev/ /etc/ — проба среды. consumers по правилу: 20 проектов, 0 разниц (glint-measure/consumers-taut-proc.txt). Установлено 0498d18. Проверка — Terra 1031-1925-glint (бриф taut-skip/verify-brief.md)

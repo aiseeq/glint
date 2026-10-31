@@ -13,3 +13,4 @@
 ## Журнал
 - 2026-10-31 18:54 открыт — glint-master
 - 2026-10-31 18:54 ждёт — glint-master — 2026-11-02
+- 2026-10-31 19:25 note — glint-master: приёмка уточнена (git-admin 31.10): скан дерева HEAD — git commit-tree 'HEAD^{tree}' -m x → graft leaks <sha> — 0 находок
