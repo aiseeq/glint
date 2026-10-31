@@ -97,7 +97,7 @@ func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Inf
 		if wrapsOwnData(fn) {
 			v.WithSuggestion(fmt.Sprintf("Replace the body of %s with a call to %s over its own list", fn.Name.Name, replacement))
 		} else {
-			v.WithSuggestion(fmt.Sprintf("Delete %s and call %s at its call sites", fn.Name.Name, replacement))
+			v.WithSuggestion(fmt.Sprintf("Delete %s and call %s at every one of its call sites, in every file of the package", fn.Name.Name, replacement))
 		}
 		v.WithColumn(ctx.PositionFor(fn).Column)
 		v.WithContext("pattern", "reimplemented_stdlib")
