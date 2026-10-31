@@ -156,3 +156,61 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewDuplicateFuncAcrossPackagesRule(), files))
 }
+
+func TestDuplicateFuncAcrossPackagesRenamedBody(t *testing.T) {
+	files := map[string]string{
+		"httpx/request.go": `package httpx
+
+import "net/http"
+
+func IsStreamRequest(request *http.Request) bool {
+	return request.Method == "GET" && (request.Header.Get("Accept") == "text/event-stream" || request.Header.Get("Accept") == "application/stream")
+}
+`,
+		"middleware/stream.go": `package middleware
+
+import "net/http"
+
+func isStreamingRequest(r *http.Request) bool {
+	return r.Method == "GET" && (r.Header.Get("Accept") == "text/event-stream" || r.Header.Get("Accept") == "application/stream")
+}
+`,
+	}
+	assert.Equal(t, []string{"middleware/stream.go:5"}, rulestest.ProjectRulePlaces(t, NewDuplicateFuncAcrossPackagesRule(), files))
+}
+
+func TestDuplicateFuncAcrossPackagesRenamedBodyIgnoresTrivialAndDifferentBodies(t *testing.T) {
+	files := map[string]string{
+		"alpha/helpers.go": `package alpha
+
+type request struct { Header map[string]string }
+
+func getField(x request) string { return x.Header["Accept"] }
+func callField(fn func(string) string, x string) string { return fn(x) }
+func repeated(x int) int { if x > 0 { x++; return x }; return 0 }
+func SameBody(value int) int { if value > 0 { value++; return value }; return 0 }
+func LiteralBody(value int) int { if value > 0 { value++; return value }; return 0 }
+func CallBody(value int) int { if value > 0 { value = transform(value); return value }; return 0 }
+func transform(value int) int { return value }
+`,
+		"beta/helpers.go": `package beta
+
+type request struct { Header map[string]string }
+
+func readField(x request) string { return x.Header["Accept"] }
+func invokeField(fn func(string) string, value string) string { return fn(value) }
+func repeated(value int) int { if value > 0 { value++; return value }; return 0 }
+func OtherBody(value int) int { if value > 0 { value++; return value }; return 1 }
+func OtherLiteral(value int) int { if value > 0 { value++; return value }; return 0 }
+func OtherCall(value int) int { if value > 0 { value = convert(value); return value }; return 0 }
+func convert(value int) int { return value }
+`,
+		"alpha/helpers_test.go": `package alpha
+func testCopy(value int) int { if value > 0 { value++; return value }; return 0 }
+`,
+		"beta/helpers_test.go": `package beta
+func testCopy(value int) int { if value > 0 { value++; return value }; return 0 }
+`,
+	}
+	assert.Empty(t, rulestest.ProjectRulePlaces(t, NewDuplicateFuncAcrossPackagesRule(), files))
+}

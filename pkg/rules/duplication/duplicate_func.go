@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"maps"
 	"sort"
 	"strings"
 
@@ -17,9 +18,9 @@ func init() {
 	rules.Register(NewDuplicateFuncAcrossPackagesRule())
 }
 
-// DuplicateFuncAcrossPackagesRule detects one helper kept as two copies: an
-// unexported function of the same name and signature declared in two
-// packages of the module:
+// DuplicateFuncAcrossPackagesRule detects helpers copied between packages,
+// either under the same name and signature or with an identical normalized
+// body under another name:
 //
 //	// poller/poller.go
 //	func withContextCause(ctx context.Context, err error) error { ... }
@@ -45,7 +46,7 @@ func NewDuplicateFuncAcrossPackagesRule() *DuplicateFuncAcrossPackagesRule {
 	return &DuplicateFuncAcrossPackagesRule{BaseRule: rules.NewBaseRule(
 		"duplicate-func-across-packages",
 		"duplication",
-		"Detects an unexported function declared in two packages under one name and signature — two copies of one helper that drift apart",
+		"Detects helper functions copied between packages — two copies of one implementation that can drift apart",
 		core.SeverityMedium,
 	)}
 }
@@ -63,10 +64,24 @@ func (r *DuplicateFuncAcrossPackagesRule) AnalyzeGoProject(ctx *core.GoProjectCo
 	if ctx == nil {
 		return nil, errors.New("duplicate func across packages: nil Go project context")
 	}
+	byKey, byBody, err := indexDuplicateFuncs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	twins := keyedTwins(byKey)
+	maps.Copy(twins, bodyTwins(byBody))
+	if len(twins) == 0 {
+		return nil, nil
+	}
+	return r.findings(ctx, twins)
+}
+
+func indexDuplicateFuncs(ctx *core.GoProjectContext) (map[string][]*types.Func, map[string][]*types.Func, error) {
 	byKey := make(map[string][]*types.Func)
+	byBody := make(map[string][]*types.Func)
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
-			return nil, errors.New("duplicate func across packages: package has no typed syntax")
+			return nil, nil, errors.New("duplicate func across packages: package has no typed syntax")
 		}
 		if testDoublePackage(pkg.Package.PkgPath) {
 			continue
@@ -75,12 +90,38 @@ func (r *DuplicateFuncAcrossPackagesRule) AnalyzeGoProject(ctx *core.GoProjectCo
 			if file.GoAST == nil || file.IsTestFile() || file.IsGenerated() {
 				continue
 			}
+			decls := make(map[*types.Func]*ast.FuncDecl)
+			for _, decl := range file.GoAST.Decls {
+				fd, ok := decl.(*ast.FuncDecl)
+				if !ok || fd.Name == nil {
+					continue
+				}
+				if fn, ok := pkg.Package.TypesInfo.Defs[fd.Name].(*types.Func); ok {
+					decls[fn] = fd
+				}
+			}
 			for _, fn := range helperFuncs(file.GoAST, pkg.Package.TypesInfo) {
 				key := helperKey(fn)
 				byKey[key] = append(byKey[key], fn)
 			}
+			for _, fn := range bodyFuncs(file.GoAST, pkg.Package.TypesInfo) {
+				fd := decls[fn]
+				if fd == nil {
+					continue
+				}
+				normalizer := newFunctionBlockNormalizer(pkg.Package.TypesInfo, fd)
+				normalizer.walk(fd.Body)
+				if normalizer.nodes < minimumDuplicateBodyNodes {
+					continue
+				}
+				byBody[normalizer.b.String()] = append(byBody[normalizer.b.String()], fn)
+			}
 		}
 	}
+	return byKey, byBody, nil
+}
+
+func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]string {
 	twins := make(map[*types.Func]string)
 	keys := make([]string, 0, len(byKey))
 	for key := range byKey {
@@ -110,9 +151,31 @@ func (r *DuplicateFuncAcrossPackagesRule) AnalyzeGoProject(ctx *core.GoProjectCo
 			twins[c] = twin.Path()
 		}
 	}
-	if len(twins) == 0 {
-		return nil, nil
+	return twins
+}
+
+func bodyTwins(byBody map[string][]*types.Func) map[*types.Func]string {
+	twins := make(map[*types.Func]string)
+	bodyKeys := make([]string, 0, len(byBody))
+	for key := range byBody {
+		bodyKeys = append(bodyKeys, key)
 	}
+	sort.Strings(bodyKeys)
+	for _, key := range bodyKeys {
+		copies := uniquePackageFuncs(byBody[key])
+		if len(copies) < 2 {
+			continue
+		}
+		sort.Slice(copies, func(i, j int) bool { return originalFuncLess(copies[i], copies[j]) })
+		original := copies[0]
+		for _, copyFn := range copies[1:] {
+			twins[copyFn] = fmt.Sprintf("%s.%s", original.Pkg().Path(), original.Name())
+		}
+	}
+	return twins
+}
+
+func (r *DuplicateFuncAcrossPackagesRule) findings(ctx *core.GoProjectContext, twins map[*types.Func]string) ([]*core.Violation, error) {
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range file.GoAST.Decls {
@@ -129,7 +192,7 @@ func (r *DuplicateFuncAcrossPackagesRule) AnalyzeGoProject(ctx *core.GoProjectCo
 				continue
 			}
 			v := r.CreateViolation(file.RelPath, line, fmt.Sprintf(
-				"Function %s has a copy with the same signature in %s — two copies of one helper: a fix lands in one and the other drifts",
+				"Function %s duplicates %s — keep one implementation and call it from both packages",
 				fd.Name.Name, twins[fn]))
 			v.WithCode(strings.TrimSpace(file.GetLine(line)))
 			v.WithSuggestion("Keep one implementation in a package both import and call it from both places")
@@ -139,9 +202,58 @@ func (r *DuplicateFuncAcrossPackagesRule) AnalyzeGoProject(ctx *core.GoProjectCo
 	})
 }
 
-// helperFuncs returns the file's unexported package-level functions with
-// parameters and a name of more than one word that do more than call a
-// function of another package.
+// minimumDuplicateBodyNodes excludes accessors and one-call wrappers, whose
+// matching is common by design; 20 normalized AST nodes retains the request
+// predicate probe while excluding those idioms.
+const minimumDuplicateBodyNodes = 20
+
+func bodyFuncs(file *ast.File, info *types.Info) []*types.Func {
+	var out []*types.Func
+	for _, decl := range file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Recv != nil || fd.Body == nil || fd.Name == nil {
+			continue
+		}
+		fn, ok := info.Defs[fd.Name].(*types.Func)
+		if !ok || fn.Signature().Params().Len() == 0 || delegates(fd.Body, info, fn.Pkg()) {
+			continue
+		}
+		out = append(out, fn)
+	}
+	return out
+}
+
+func uniquePackageFuncs(funcs []*types.Func) []*types.Func {
+	sort.Slice(funcs, func(i, j int) bool {
+		if funcs[i].Pkg().Path() != funcs[j].Pkg().Path() {
+			return funcs[i].Pkg().Path() < funcs[j].Pkg().Path()
+		}
+		return funcs[i].Name() < funcs[j].Name()
+	})
+	seen := make(map[*types.Package]bool)
+	out := funcs[:0]
+	for _, fn := range funcs {
+		if fn == nil || fn.Pkg() == nil || seen[fn.Pkg()] {
+			continue
+		}
+		seen[fn.Pkg()] = true
+		out = append(out, fn)
+	}
+	return out
+}
+
+func originalFuncLess(a, b *types.Func) bool {
+	if ast.IsExported(a.Name()) != ast.IsExported(b.Name()) {
+		return ast.IsExported(a.Name())
+	}
+	if a.Pkg().Path() != b.Pkg().Path() {
+		return a.Pkg().Path() < b.Pkg().Path()
+	}
+	return a.Name() < b.Name()
+}
+
+// helperFuncs returns named unexported package-level helpers used by the
+// signature-based index.
 func helperFuncs(file *ast.File, info *types.Info) []*types.Func {
 	var out []*types.Func
 	for _, decl := range file.Decls {

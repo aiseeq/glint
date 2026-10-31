@@ -289,6 +289,13 @@ func newBlockNormalizer(info *types.Info, stmt ast.Stmt) *blockNormalizer {
 	return &blockNormalizer{info: info, lo: stmt.Pos(), hi: stmt.End(), locals: make(map[types.Object]int)}
 }
 
+func newFunctionBlockNormalizer(info *types.Info, fd *ast.FuncDecl) *blockNormalizer {
+	return &blockNormalizer{
+		info: info, lo: fd.Type.Pos(), hi: fd.Body.End(),
+		locals: make(map[types.Object]int), packageNames: true,
+	}
+}
+
 func (n *blockNormalizer) walk(root ast.Node) {
 	ast.Inspect(root, func(node ast.Node) bool {
 		if node == nil {
