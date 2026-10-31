@@ -1,6 +1,6 @@
 # поле проверено на nil в одном методе типа и разыменовано без проверки в другом
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -14,6 +14,7 @@
 ## Что сделать
 
 ## Приёмка
+- TestFieldNilCheckInconsistent* зелёные; синтетика брифа — 1 находка; обязательная находка на копии потребителя А. Путевая чувствительность — отдельный тикет field-nil-check-path-sensitive.
 
 ## Журнал
 - 2026-10-29 18:55 открыт — glint-master
@@ -26,3 +27,5 @@
 - 2026-10-29 22:06 note — glint-master: Раунд 4 сдан: 20 находок, защита вызывающим работает; ложная — сторож-метод с отрицанием (!x.IsSet() → return). Раунд 5: review-field-nil-check-5.md.
 - 2026-10-29 22:12 note — glint-master: Раунд 5 сдан: 19 находок, выборка мастера 3 — верные. Влито 49eb6b1.
 - 2026-10-29 23:34 note — glint-master: раунд 7 влит 2c3ed01 (+ мой фикс QF1001): nil-safe метод, непустое присваивание до разыменования, сторож с return false, разыменование до проверки. Ушли sc2demu runtimemesh.go:203, crowd.go:103. Новая Medium graft internal/tasks/tasks.go:1274 (инвариант f.load только при Stats != nil) — верная по смыслу правила, Medium гейт не роняет. Слабости: falseGuard ищется по всему телу, не только в начале; fieldNilCheckPrecedes — по тексту, не по потоку. Двухрежимный тип (п.5) — остаётся находкой.
+- 2026-10-31 10:46 note — opus-check: Не всё: слабости из записи 23:34 не вынесены в тикет. fieldNilCheckPrecedes (field_nil_check_inconsistent.go:321) глушит разыменование, если сравнение поля с nil стоит раньше по тексту, на любом пути: проба `if r.portfolio != nil { println() }; v, _ := r.portfolio.Valuation(ctx)` — 0 находок, хотя на пути после if поле не проверено (пропуск, CLAUDE.md: path-sensitive — через FlowWalker); falseGuard ищется по всему телу предиката. Остальное в порядке: main 615802f (49eb6b1, 2c3ed01 в main), 12 тестов TestFieldNilCheckInconsistent* зелёные, синтетика брифа — 1 находка на ReportOf, ветка-481 — обязательная admin_finance_reports_router.go:154 есть, graft all — код 0. Приёмка в тикете пустая — tk done откажет.
+- 2026-10-31 10:48 готово — opus-check (session glint-master): 12 тестов TestFieldNilCheckInconsistent* зелёные, синтетика брифа — 1 находка, обязательная находка на копии потребителя А есть, graft all 0; main 615802f (49eb6b1, 2c3ed01); пропуск по пути вынесен в field-nil-check-path-sensitive

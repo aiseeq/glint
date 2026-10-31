@@ -1,6 +1,6 @@
 # error-cause-dropped и error-detail-in-5xx-response противоречат друг другу на 5xx
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -31,3 +31,4 @@
 - 2026-10-29 21:10 в работе — glint-master
 - 2026-10-29 21:10 note — glint-master: Боец Luna 1029-2110-error-cause-5xx: brief-error-cause-5xx.md, accept-error-cause-5xx.sh.
 - 2026-10-29 21:20 note — glint-master: Сдача 1: боец сверх брифа снял исключение самопоясняющего текста на 5xx (2 новые находки у потребителя А, тест validation перевёрнут 0→1); мастер вернул исключение и тест, текст примера заменён на не самопоясняющий. У потребителей 0 изменений. Влито eafaf46.
+- 2026-10-31 10:47 готово — opus-check (session glint-master): main 615802f: eafaf46 в main; TestErrorCauseDropped5xxLogged проверяет 0 у error-cause-dropped и error-detail-in-5xx-response на варианте Б и 1 без slog; go test ./pkg/rules/patterns/errrules ./pkg/rules/security -count=1 ok; self-check 0; мера по потребителям — у мастера (журнал: 0 изменений).

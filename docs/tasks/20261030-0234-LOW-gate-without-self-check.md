@@ -1,6 +1,6 @@
 # Гейт коммита без glint на себе: причина в CLAUDE.md, self-check — условие install
 
-Статус: на проверке
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -23,3 +23,4 @@
 - 2026-10-30 02:41 note — glint-master: проба: worktree с временным .py (python-file, HIGH) — graft install упал на self-check кодом 1 до установки. Порог self-check — fail_on high (умолчание), не low; комментарий у gate в .graft.yaml
 - 2026-10-30 02:41 note — glint-master: 0aa1cfb; итог — git-admin
 - 2026-10-30 02:41 на проверке — glint-master
+- 2026-10-31 10:43 готово — opus-check (session glint-master): 0aa1cfb в main: .graft.yaml install deps [build, self-check], причина комментарием у gate: (.graft.yaml:9-12; вместо CLAUDE.md — обосновано в письме git-admin c4beb326:460, git-admin передал Сну решение о дубле в CLAUDE.md, d20effec:4254). Проба 31.10: копия HEAD в scratchpad, шаг install заменён на echo, временный probe_tmp.py → graft install: self-check 1 High (python-file), exit 1, шаг install не выполнен

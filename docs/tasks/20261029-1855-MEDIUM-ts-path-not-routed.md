@@ -1,6 +1,6 @@
 # TS-клиент или e2e обращается к /api-пути, которого нет среди маршрутов mux
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -14,6 +14,9 @@
 ## Что сделать
 
 ## Приёмка
+(перенесено проверяющим из приёмки мастера accept-ts-path-routes-3.sh и ревью раунда 6; 29.10)
+- Тесты `TestTSPathNotRouted{,Subrouter,Negatives,CatchAll,FieldReceiverAndConst,UnknownPrefixSubrouter,NotAPath}`, `TestScopedTSPathNotRoutedUsesRoutesFromWholeRoot`, `TestWalkerIgnoresMalformedImportsOnlyFile` есть и зелёные; self-check glint — 0.
+- Копия потребителя А `-r ts-path-not-routed` — находки в конфиге эндпоинтов (строка 154) и e2e аналитики, всего не больше 10.
 
 ## Журнал
 - 2026-10-29 18:55 открыт — glint-master
@@ -24,3 +27,4 @@
 - 2026-10-29 21:50 note — glint-master: раунд 2 обходил кэш проекта (graft 1,3→5,9 с); раунд 3 — загрузка только при TS-файлах, но потребитель Б 9,5→17,5 с; раунд 4 — загрузка только при импорте gorilla/mux + кэш маршрутов по входам Go (review-ts-path-routes-4.md).
 - 2026-10-29 22:27 note — glint-master: Раунд 4 сдан: загрузка типов только при TS + gorilla/mux, маршруты в кэше проекта; тёплый кэш потребитель Б 8,7→9,7 с (работа правила по TS), dream и graft в шуме; копия потребителя А — 8 находок. Влито 039cea9.
 - 2026-10-29 23:34 note — glint-master: раунд 6 влит 79b4810: scoped TS-прогон берёт маршруты всего корня (needProject по rootFiles), битый импорт не роняет обход; тёплый полный прогон крупного потребителя — как у main той же сборки (15.8 с против 17.4 с, шум машины), scoped TS +2 с от загрузки Go. Не сделано: импорт с escape в пути.
+- 2026-10-31 10:47 готово — opus-check (session glint-master): main 615802f: 039cea9 и 79b4810 в main; 7 тестов правила, TestScopedTSPathNotRoutedUsesRoutesFromWholeRoot и TestWalkerIgnoresMalformedImportsOnlyFile зелёные; копия потребителя А -r ts-path-not-routed: api-endpoints.ts:154 и analytics.spec.ts:17/30, всего 8 (<=10); self-check 0. Импорт с escape в пути — «Не делать» по ревью раунда 6 (экзотика).

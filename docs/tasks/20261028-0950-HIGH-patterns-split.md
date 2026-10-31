@@ -1,6 +1,6 @@
 # Разбить pkg/rules/patterns на подпакеты (кэш go-build, время сборки)
 
-Статус: на проверке
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -38,3 +38,4 @@
 - 2026-10-28 13:37 note — glint-master: 13:37 graft consumers (все правила, ~/bin/glint d02b12d против bin/glint ветки): 22 проекта, 0 с разницей, 0 ошибок. Ждёт только фикса leaks в graft.
 - 2026-10-28 13:50 note — glint-master: 13:50 влито: 0c28d48 (разбиение, Opus) + 3c8ebdf (testrules→qarules, удалён IsDeclared, сняты 2 исключения), ff в main, установлено v1.83.7-59-gf018547. Замер правки тела правила: errrules 3,6 с / 0,5 ГБ RSS / +11 МБ кэша; gorules 3,9 с / +17 МБ (было 39 с, 1,4 ГБ, 80–97 МБ). graft-master сообщено. Осталось: CLAUDE.md путь FlowWalker/JoinFlowPaths (скилл instructions); убрать сломанное дерево patterns-split Luna; проверка — graft-master.
 - 2026-10-28 13:50 на проверке — glint-master — влито 3c8ebdf, установлено; проверка — graft-master по замеру кэша
+- 2026-10-31 10:46 готово — opus-check (session glint-master): 0c28d48+3c8ebdf в main; pkg/rules/patterns — 10 групп + internal/{patternkit,patterntest}, в корне 0 .go; graft all на main 615802f 31.10 зелёный (exit 0, self-check No issues); замер 31.10 в копии HEAD: правка errrules/aggregate_skips_failed_part.go → go build пакета 2,15 с / 233 МБ RSS, новые архивы кэша ≤15 МБ (было 39 с / 1,4 ГБ / 80–97 МБ), сборка cmd/glint 4,5 с; consumers 0 разниц на 22 проектах — журнал мастера 13:37; graft gocache-growth закрыт verify-subagent 28.10 13:54; хвосты журнала (CLAUDE.md FlowWalker/JoinFlowPaths в patternkit, дерево Luna убрано) выполнены

@@ -1,6 +1,6 @@
 # silent-error-handling: ошибка в возвращаемом счётчике — не тихая
 
-Статус: на проверке
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -28,3 +28,4 @@
 - 2026-10-28 12:02 в работе — glint-master
 - 2026-10-28 12:11 note — glint-master: d02b12d: допущение countsIntoResult на namedResults/returnsIdent; тесты красный→зелёный (+отрицательный с локальным счётчиком). graft consumers -r silent-error-handling: 22 проекта, снята 1 находка (та самая), прочих разниц нет. graft all зелёный, установлено v1.83.7-56-gbad83f1, агенту потребителя сообщено.
 - 2026-10-28 12:11 на проверке — glint-master — проверка: агент потребителя закрывает свой тикет через tk done (glint на файле — 0)
+- 2026-10-31 10:47 готово — opus-check (session glint-master): main 615802f: d02b12d в main; go test ./pkg/rules/patterns/errrules -run TestSilentErrorHandlingRule_ErrorCounted -count=1 — оба PASS; синтетика: счётчик в return — без находки, локальный счётчик — находка (строка 24); aguard internal/cllog (исходный случай, bad++ в возвращаемом счётчике) — 0 находок; graft all EXIT 0

@@ -1,6 +1,6 @@
 # sql-concept-table-outside-owner: склейка с константой, SQL в аргументе вызова, IN-список, FILTER (WHERE)
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -14,6 +14,9 @@
 ## Что сделать
 
 ## Приёмка
+(перенесено проверяющим из приёмки мастера accept-sql-concept-fragments.sh, -2.sh; 29.10)
+- Тесты `TestSQLConceptTableOwner_{ConcatenatedConstant,CallArgument,InList,AggregateFilter,FragmentsNegatives,RepositorySelect,JoinOnCondition}` есть и зелёные; self-check glint — 0.
+- На копии потребителя А `-r sql-concept-table-outside-owner` — находка в репозитории подарочных карт (строки 410–426).
 
 ## Журнал
 - 2026-10-29 18:55 открыт — glint-master
@@ -22,3 +25,4 @@
 - 2026-10-29 20:02 note — glint-master: Сдача 1: на копии потребителя новая находка одна (IN), пропущен случай запроса — склейка с вызовом в 3-м аргументе SelectContext и JOIN ON. Раунд 1: review-sql-concept-fragments-1.md, accept-sql-concept-fragments-2.sh.
 - 2026-10-29 21:00 note — glint-master: Раунд 1 принят: на копии и у потребителя А 3 находки, все верные (IN, подзапрос со склейкой, JOIN ON). Влито в main.
 - 2026-10-29 23:05 note — glint-master: Независимое ревью Terra: алиас в двух областях теперь может спрятать ошибку внешней ссылки (если внутренний одноимённый источник имеет колонку) — цена сплющенных областей, принято; честное решение — области по SelectStmt.
+- 2026-10-31 10:47 готово — opus-check (session glint-master): main 615802f: ea9a123 в main; 7 тестов брифа и раунда 1 есть, go test ./pkg/sqlschema ./pkg/rules/patterns/dbrules -count=1 ok; glint из main на копии потребителя А -r sql-concept-table-outside-owner: client_gift_card_repository.go:414 и :420 (окно 410-426) плюс admin_repository.go:446; self-check glint 0 находок. Сплющенные области алиасов (журнал 23:05) приняты мастером как цена, не пункт задачи.
