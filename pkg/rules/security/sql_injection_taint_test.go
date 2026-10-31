@@ -938,3 +938,16 @@ func run(db *sql.DB, plain, deferred, input string) {
 	violations := analyzeSQLInjection(t, code)
 	assert.Len(t, violations, 0, "a closure called in place finishes before the enclosing function writes again")
 }
+
+func TestSQLInjectionParenthesizedClosureCalledInPlaceKeepsCheck(t *testing.T) {
+	code := `package main
+import "database/sql"
+func run(db *sql.DB, single, double string) {
+	if single != "column" { return }
+	(func() { db.Query("SELECT " + single) })()
+	if double != "column" { return }
+	((func() { db.Query("SELECT " + double) }))()
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 0, "parentheses around a closure called in place do not change when it runs")
+}

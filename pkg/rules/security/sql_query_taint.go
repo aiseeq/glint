@@ -193,10 +193,18 @@ func sqlContextFor(stack []ast.Node) sqlNodeContext {
 		case *ast.FuncLit:
 			outer := context.callable
 			context.callable = node
-			if i > 1 {
-				if call, ok := stack[i-1].(*ast.CallExpr); ok && call.Fun == node {
-					_, deferred := stack[i-2].(*ast.DeferStmt)
-					_, goroutine := stack[i-2].(*ast.GoStmt)
+			// Parentheses around the literal do not change when it runs.
+			j := i - 1
+			for j > 0 {
+				if _, paren := stack[j].(*ast.ParenExpr); !paren {
+					break
+				}
+				j--
+			}
+			if j > 0 {
+				if call, ok := stack[j].(*ast.CallExpr); ok && ast.Unparen(call.Fun) == node {
+					_, deferred := stack[j-1].(*ast.DeferStmt)
+					_, goroutine := stack[j-1].(*ast.GoStmt)
 					if deferred || goroutine {
 						context.deferredScopes = append(context.deferredScopes, outer)
 					} else {
