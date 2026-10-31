@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -145,9 +146,14 @@ func (r *CodegenCatchAllTypeWithoutReportRule) RequiresSSA() bool { return false
 
 // AnalyzeGoProject checks every Go source file in the project.
 func (r *CodegenCatchAllTypeWithoutReportRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	// Checked words are read only for packages with a generator file: most
+	// packages have none, and reading every literal of the project cost
+	// seconds on large consumers for no finding.
 	checkedByFile := make(map[*core.FileContext]map[string]bool)
 	for _, pkg := range ctx.Packages {
-		if pkg == nil {
+		if pkg == nil || !slices.ContainsFunc(pkg.Files, func(file *core.FileContext) bool {
+			return file != nil && isTypeGeneratorFile(file.GoAST)
+		}) {
 			continue
 		}
 		checked := checkedCatchAllWords(pkg.Files)
@@ -197,18 +203,8 @@ func checkedCatchAllWordsAST(files []*ast.File) map[string]bool {
 			continue
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
-			lit, ok := node.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING || !isCheckedLiteral(file, lit) {
-				return true
-			}
-			value, ok := stringLiteralValue(lit)
-			if !ok {
-				return true
-			}
-			for _, word := range catchAllWords {
-				if hasWholeWord(value, word) {
-					checked[word] = true
-				}
+			for _, expr := range checkedOperands(node) {
+				markCatchAllWords(expr, checked)
 			}
 			return true
 		})
@@ -216,41 +212,46 @@ func checkedCatchAllWordsAST(files []*ast.File) map[string]bool {
 	return checked
 }
 
-func isCheckedLiteral(file *ast.File, lit *ast.BasicLit) bool {
-	found := false
-	ast.Inspect(file, func(node ast.Node) bool {
-		if found {
-			return false
+// checkedOperands returns the operands of node that check a name against a
+// literal: the arguments of a regexp or strings match, both sides of ==.
+func checkedOperands(node ast.Node) []ast.Expr {
+	switch n := node.(type) {
+	case *ast.CallExpr:
+		selector, ok := n.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return nil
 		}
-		switch n := node.(type) {
-		case *ast.CallExpr:
-			selector, ok := n.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			pkg, ok := selector.X.(*ast.Ident)
-			if !ok {
-				return true
-			}
-			valid := (pkg.Name == "regexp" && (selector.Sel.Name == "MustCompile" || selector.Sel.Name == "Compile" || selector.Sel.Name == "MatchString")) ||
-				(pkg.Name == "strings" && (selector.Sel.Name == "Contains" || selector.Sel.Name == "Index"))
-			if valid {
-				for _, arg := range n.Args {
-					if arg == lit {
-						found = true
-						return false
-					}
-				}
-			}
-		case *ast.BinaryExpr:
-			if n.Op == token.EQL && (n.X == lit || n.Y == lit) {
-				found = true
-				return false
-			}
+		pkg, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return nil
 		}
-		return true
-	})
-	return found
+		valid := (pkg.Name == "regexp" && (selector.Sel.Name == "MustCompile" || selector.Sel.Name == "Compile" || selector.Sel.Name == "MatchString")) ||
+			(pkg.Name == "strings" && (selector.Sel.Name == "Contains" || selector.Sel.Name == "Index"))
+		if valid {
+			return n.Args
+		}
+	case *ast.BinaryExpr:
+		if n.Op == token.EQL {
+			return []ast.Expr{n.X, n.Y}
+		}
+	}
+	return nil
+}
+
+func markCatchAllWords(expr ast.Expr, checked map[string]bool) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return
+	}
+	value, ok := stringLiteralValue(lit)
+	if !ok {
+		return
+	}
+	for _, word := range catchAllWords {
+		if hasWholeWord(value, word) {
+			checked[word] = true
+		}
+	}
 }
 
 func checkedCatchAll(expr ast.Expr, checked map[string]bool) bool {
