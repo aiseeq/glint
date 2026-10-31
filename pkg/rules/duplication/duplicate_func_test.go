@@ -272,6 +272,10 @@ func TestDuplicateFuncAcrossPackagesSkipsAnotherModule(t *testing.T) {
 		"tools/monitor/main.go": streamFunction("main", "isStreamRequest", "req"),
 	}
 	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files))
+
+	files["tools/monitor/main.go"] = streamFunction("main", "isStreamRequest", "req")
+	files["httpx/stream.go"] = streamFunction("httpx", "isStreamRequest", "req")
+	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files), "same name in another module")
 }
 
 // An unexported original has to be exported before the copy can call it.

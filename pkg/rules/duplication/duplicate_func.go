@@ -100,8 +100,11 @@ func indexDuplicateFuncs(ctx *core.GoProjectContext) (map[string][]*types.Func, 
 					decls[fn] = fd
 				}
 			}
+			// Another module of the repository cannot call the original
+			// without a new module dependency: copies match within a module.
+			module := moduleOf(pkg.Package) + "\x00"
 			for _, fn := range helperFuncs(file.GoAST, pkg.Package.TypesInfo) {
-				key := helperKey(fn)
+				key := module + helperKey(fn)
 				byKey[key] = append(byKey[key], fn)
 			}
 			for _, fn := range bodyFuncs(file.GoAST, pkg.Package.TypesInfo) {
@@ -114,9 +117,7 @@ func indexDuplicateFuncs(ctx *core.GoProjectContext) (map[string][]*types.Func, 
 				if normalizer.nodes < minimumDuplicateBodyNodes {
 					continue
 				}
-				// Another module of the repository cannot call the original
-				// without a new module dependency: bodies match within a module.
-				key := moduleOf(pkg.Package) + "\x00" + normalizer.b.String()
+				key := module + normalizer.b.String()
 				byBody[key] = append(byBody[key], fn)
 			}
 		}
