@@ -100,6 +100,7 @@ type sqlTaintCheck struct {
 	collectContext sqlNodeContext
 	functions      map[*types.Func]*ast.FuncDecl
 	literalMaps    map[types.Object]bool
+	syncCalls      map[*ast.FuncLit]bool
 	regexpPatterns map[types.Object]string
 	at             token.Pos
 	scope          ast.Node
@@ -119,6 +120,7 @@ func newSQLTaintCheck(file *ast.File, info *types.Info) *sqlTaintCheck {
 		contexts:       make(map[token.Pos]sqlNodeContext),
 		functions:      make(map[*types.Func]*ast.FuncDecl),
 		literalMaps:    make(map[types.Object]bool),
+		syncCalls:      make(map[*ast.FuncLit]bool),
 		regexpPatterns: make(map[types.Object]string),
 		writes:         make(map[*types.Var][]token.Pos),
 		taints:         make(map[*types.Var]*sqlTaint),
@@ -158,9 +160,28 @@ func (c *sqlTaintCheck) collect(file *ast.File) {
 			c.contexts[n.Pos()] = context
 		}
 		c.collectContext = context
+		c.recordSyncCall(stack)
 		c.collectNode(n)
 		return true
 	})
+}
+
+// recordSyncCall marks a function literal called in place, not by go or
+// defer: it returns before the statement after the call runs.
+func (c *sqlTaintCheck) recordSyncCall(stack []ast.Node) {
+	call, ok := stack[len(stack)-1].(*ast.CallExpr)
+	if !ok {
+		return
+	}
+	literal, ok := ast.Unparen(call.Fun).(*ast.FuncLit)
+	if !ok || len(stack) < 2 {
+		return
+	}
+	switch stack[len(stack)-2].(type) {
+	case *ast.GoStmt, *ast.DeferStmt:
+		return
+	}
+	c.syncCalls[literal] = true
 }
 
 func sqlContextFor(stack []ast.Node) sqlNodeContext {
@@ -891,10 +912,11 @@ func (c *sqlTaintCheck) varTaint(v *types.Var) sqlTaint {
 }
 
 // capturedByClosure reports a local variable that a function literal checks
-// but does not declare: the enclosing function may write it after the
-// literal starts, while the literal still runs.
-func capturedByClosure(v *types.Var, scope ast.Node) bool {
-	if _, literal := scope.(*ast.FuncLit); !literal || v.Pkg() == nil || v.Parent() == v.Pkg().Scope() {
+// but does not declare: unless the literal is called in place, the enclosing
+// function may write it after the literal starts, while the literal still runs.
+func (c *sqlTaintCheck) capturedByClosure(v *types.Var, scope ast.Node) bool {
+	literal, ok := scope.(*ast.FuncLit)
+	if !ok || c.syncCalls[literal] || v.Pkg() == nil || v.Parent() == v.Pkg().Scope() {
 		return false
 	}
 	return v.Pos() < scope.Pos() || v.Pos() >= scope.End()
@@ -922,7 +944,7 @@ func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
 		if deferred {
 			until = validation.scope.End()
 		}
-		captured := capturedByClosure(v, validation.scope)
+		captured := c.capturedByClosure(v, validation.scope)
 		changed := false
 		for _, write := range c.writes[v] {
 			if validation.at < write && write < until || captured && write > validation.scope.End() {

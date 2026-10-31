@@ -919,3 +919,22 @@ func run(db *sql.DB, deferred, direct, kept, input string, resume chan struct{})
 	violations := analyzeSQLInjection(t, code)
 	assert.Len(t, violations, 2, "the enclosing function writes the captured variables after the closures check them")
 }
+
+func TestSQLInjectionCheckInSynchronousClosureKeepsLaterWrite(t *testing.T) {
+	code := `package main
+import "database/sql"
+func run(db *sql.DB, plain, deferred, input string) {
+	func() {
+		if plain != "column" { return }
+		db.Query("SELECT " + plain)
+	}()
+	plain = input
+	func() {
+		if deferred != "column" { return }
+		defer func() { db.Query("SELECT " + deferred) }()
+	}()
+	deferred = input
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 0, "a closure called in place finishes before the enclosing function writes again")
+}
