@@ -3,11 +3,73 @@
 Статус: открыт
 
 ## Что сделать
-- Находка F2 критика ТЗ «как сделано» (тикет spec-as-built, /home/aisee/.claude/tools/glint/critic.md, раздел «F2»): pkg/rules/security/sql_query_taint.go:223,544 — любая функция с одним аргументом и bool/error-результатом считается валидатором; чёрный список (isBlocked) освобождает инъекцию.
-- TDD-репро по общей пробе /home/aisee/.cache/worktrees/glint-measure/spec/critic-probe (main.go, client.js); затем фикс правила.
+- Находка критика описания glint «как сделано» (тикет 20261031-1600-MEDIUM-spec-as-built): pkg/rules/security/sql_query_taint.go:223,544 — любая функция с одним аргументом и bool/error-результатом в отклоняющем if считается валидатором; чёрный список isBlocked (main.go:35–40) освобождает инъекцию.
+- TDD-репро по пробе ниже (синтетический код), затем фикс правила.
+
+Проба (модуль `example.com/probe`, go 1.23; строки пронумерованы):
+
+```go
+// main.go
+ 1 package probe
+ 2 
+ 3 import (
+ 4 	"crypto/tls"
+ 5 	"database/sql"
+ 6 	"net/http"
+ 7 )
+ 8 
+ 9 type Options struct{ InsecureSkipVerify bool }
+10 
+11 func config() {
+12 	c := &tls.Config{}
+13 	c.InsecureSkipVerify = true
+14 	_ = c
+15 	_ = Options{InsecureSkipVerify: true}
+16 	_ = &tls.Config{InsecureSkipVerify: true}
+17 }
+18 
+19 func direct(db *sql.DB, user string) { db.Query("SELECT * FROM users WHERE name='" + user + "'") }
+20 
+21 func handler(db *sql.DB, r *http.Request) {
+22 	user := r.URL.Query().Get("name")
+23 	db.Query("SELECT * FROM users WHERE name='" + user + "'")
+24 }
+25 
+26 func late(db *sql.DB, user string) {
+27 	db.Query("SELECT * FROM users WHERE name='" + user + "'")
+28 	if user != "admin" {
+29 		return
+30 	}
+31 }
+32 
+33 func isBlocked(s string) bool { return s == "blocked" }
+34 
+35 func blacklist(db *sql.DB, user string) {
+36 	if isBlocked(user) {
+37 		return
+38 	}
+39 	db.Query("SELECT * FROM users WHERE name='" + user + "'")
+40 }
+41 
+42 func isKnownColumn(s string) bool { return s == "name" || s == "email" }
+43 
+44 func whitelist(db *sql.DB, column string) {
+45 	if !isKnownColumn(column) {
+46 		return
+47 	}
+48 	db.Query("SELECT " + column + " FROM users")
+49 }
+```
+
+```js
+// client.js
+ 1 const a = { rejectUnauthorized: false };
+ 2 const b = { "rejectUnauthorized": false };
+ 3 const c = "rejectUnauthorized: false";
+```
 
 ## Приёмка
-- `glint check -C /home/aisee/.cache/worktrees/glint-measure/spec/critic-probe -r sql-injection --no-cache ./...`: есть main.go:23 (wrongCheck), настоящий белый список по-прежнему освобождает
+- `-r sql-injection`: есть main.go:40; белый список isKnownColumn до запроса (main.go:49) — по-прежнему без находки; main.go:19 остаётся (сейчас `glint check -C <проба> -r sql-injection --no-cache ./...` даёт только main.go:19).
 - Прогон bin/consumers по правилу до установки, каждая новая находка разобрана; graft all зелёный.
 
 ## Журнал

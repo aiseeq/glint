@@ -168,7 +168,7 @@ func (s *Server) startMetrics() {
 	s.metrics = NewMetrics(s.cfg.MetricsAddr)
 }
 
-func (s *Service) appendRewards(address string, wb *AccountBalance) {
+func (s *Service) appendRewards(address string, wb *HoldingBalance) {
 	if s.client == nil {
 		return
 	}
