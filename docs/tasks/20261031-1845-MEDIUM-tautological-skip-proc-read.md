@@ -1,6 +1,7 @@
 # tautological-assertion: t.Skip on a read of /proc or /sys is an environment check, not a failure of the code under test
 
-Статус: открыт
+Статус: готово
+Исполнитель: glint-master
 
 ## Что сделать
 - Заявка akit-master 31.10 ~18:50: ложная HIGH skip_on_failure на `if n, err := os.ReadFile("/proc/sys/user/max_user_namespaces"); err != nil || … { t.Skip(…) }`. Случай с exec.LookPath уже не находка (environmentProbes).
@@ -18,3 +19,4 @@
 - 2026-10-31 19:52 note — glint-master: поправка: ff-влитие da11394 в 19:49 не прошло (незакоммиченная запись тикета в main), а вывод tail -1 это скрыл; установленный d9f31d4 был без сужения. Ветка перенесена graft worktree sync → e81b908, влита, переустановка
 - 2026-10-31 19:57 note — glint-master: перепроверка Terra — вернуть: (2) литерал с Go-экранированием "/proc/\x2e\x2e/tmp" обходит filepath.Clean — нужен strconv.Unquote; (4) consumers сравнивал сужение с уже расширенным f0a5be7 — нужен итог против правила до f0a5be7. /etc/, созданный тестом, — принятое допущение (нужен root)
 - 2026-10-31 20:03 note — glint-master: aeefb31: путь — strconv.Unquote литерала, затем filepath.Clean (тест: "/proc/\x2e\x2e/tmp" — находка, красный до правки); qarules ok. consumers -r tautological-assertion: итоговое дерево против glint на f0a5be7^ (правило до тикета) — 0 разниц, версии и команда в шапке glint-measure/consumers-taut-proc-3.txt
+- 2026-10-31 20:11 готово — terra-verifier-1031-1925 (session glint-master): вердикт Terra 1031-1925-glint (taut-skip/verdict.md в glint-measure), 3-й заход на v1.83.7-255-gc92d5d2: чтения /proc /sys /etc литералом — без находки; переменная, testdata, вызов кода, /dev/shm, /proc/../tmp, экранирования \x2e и \u002e, raw /etc/../tmp — находка; qarules ok; consumers против f0a5be7^ — 0 разниц своей командой
