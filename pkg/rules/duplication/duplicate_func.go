@@ -291,19 +291,25 @@ func IsDuplicateFuncBodyCandidate(fd *ast.FuncDecl, info *types.Info) bool {
 	if fd == nil || fd.Recv != nil || fd.Body == nil || fd.Name == nil || fd.Type == nil || fd.Type.Params == nil || fd.Type.Params.NumFields() == 0 {
 		return false
 	}
-	if info == nil {
+	if info == nil || DelegatesToOtherPackage(fd, info) {
+		return false
+	}
+	normalizer := newFunctionBlockNormalizer(info, fd)
+	normalizer.walk(fd.Body)
+	return normalizer.nodes >= minimumDuplicateBodyNodes
+}
+
+// DelegatesToOtherPackage reports whether the function or method body is a
+// single call of a function from another package: such a body holds no copy.
+func DelegatesToOtherPackage(fd *ast.FuncDecl, info *types.Info) bool {
+	if fd == nil || fd.Body == nil || fd.Name == nil || info == nil {
 		return false
 	}
 	var own *types.Package
 	if fn, ok := info.Defs[fd.Name].(*types.Func); ok {
 		own = fn.Pkg()
 	}
-	if delegates(fd.Body, info, own) {
-		return false
-	}
-	normalizer := newFunctionBlockNormalizer(info, fd)
-	normalizer.walk(fd.Body)
-	return normalizer.nodes >= minimumDuplicateBodyNodes
+	return delegates(fd.Body, info, own)
 }
 
 func uniquePackageFuncs(funcs []*types.Func) []*types.Func {

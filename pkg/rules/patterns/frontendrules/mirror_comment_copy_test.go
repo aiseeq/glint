@@ -155,3 +155,39 @@ func derive(n int) bool {
 	assert.True(t, duplication.IsDuplicateFuncBodyCandidate(ctx.GoAST.Decls[0].(*ast.FuncDecl), info))
 	assert.Empty(t, NewMirrorCommentCopyRule().AnalyzeFile(ctx))
 }
+
+// A Go function that only calls the function its note names holds no copy:
+// the honest note stays without a finding, whatever words it uses.
+func TestMirrorCommentCopyGoWrapperCallingOriginalNotReported(t *testing.T) {
+	files := map[string]string{
+		"lib/score.go": `package lib
+
+// Score sums the values capped at ceiling.
+func Score(xs []int, ceiling int) int {
+	total := 0
+	for _, x := range xs {
+		total += min(x, ceiling)
+	}
+	return total
+}
+`,
+		"app/weigh.go": `package app
+
+import "example.com/rulestest/lib"
+
+// weigh mirrors lib.Score.
+func weigh(xs []int, ceiling int) int { return lib.Score(xs, ceiling) }
+
+// clamp must match lib.Score, so it calls it.
+func clamp(xs []int) int { return lib.Score(xs, 10) }
+`,
+	}
+	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewMirrorCommentCopyRule(), files))
+}
+
+// Saying which part of the source the copy needs does not make it less of a copy.
+func TestMirrorCommentCopyPartialCopyStillReported(t *testing.T) {
+	ts := `// Mirrors backend.MaxUploadBytes; only the upload cap is needed in the form.
+export const MAX_UPLOAD_BYTES = 10485760;`
+	assert.Equal(t, []string{"src/limits.ts:2"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/limits.ts", ts))
+}

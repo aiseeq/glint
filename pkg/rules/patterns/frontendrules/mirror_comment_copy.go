@@ -31,7 +31,7 @@ var mirrorLiteralInitializer = regexp.MustCompile(`(?s)^\s*(?:['"\x60][^'"\x60]*
 // mirrorDataFile is a data file name (auth.json, config.yaml): a copy of it
 // is made at run time and names no declaration of another source.
 var mirrorDataFile = regexp.MustCompile(`(?i)\b[\w$-]+\.(?:json|jsonl|ya?ml|toml|env|txt|csv|ini|conf|cfg|log|pem|key|crt|xml|lock|db|sqlite)\b`)
-var mirrorExplanatory = regexp.MustCompile(`(?i)returns?\s+(?:a\s+)?copy\s+of\b|backup\s+mirrors?\b|mirror\s+of\s+what\b|reported\s+as\s+(?:a\s+)?copy\s+of\b|\bcopy\b.{0,40}\b(?:removed|deleted)\b|\bdelegates?\s+now\b|\bonly\b.{0,80}\b(?:needed|required|relevant)\b`)
+var mirrorExplanatory = regexp.MustCompile(`(?i)returns?\s+(?:a\s+)?copy\s+of\b|backup\s+mirrors?\b|mirror\s+of\s+what\b|reported\s+as\s+(?:a\s+)?copy\s+of\b`)
 
 var mirrorVariableDecl = regexp.MustCompile(`^(?:(?:export|default|declare)\s+)*(?:const|let|var)\b|^(?:var|const)\s+[A-Za-z_][A-Za-z0-9_]*\b`)
 var mirrorDecl = regexp.MustCompile(`^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:const|let|var|function|type|interface|class)\b|^(?:func\s+(?:\([^)]*\)\s*)?[A-Za-z_][A-Za-z0-9_]*\s*\(|(?:var|const|type)\s+[A-Za-z_][A-Za-z0-9_]*\b)`)
@@ -104,7 +104,8 @@ func (r *MirrorCommentCopyRule) AnalyzeFile(c *core.FileContext) []*core.Violati
 		// A Go function copy the body rule takes (duplicate-func-across-packages)
 		// is caught by its body: its comment is no cause for a finding, and
 		// reporting it only teaches to delete the honest note while the copy stays.
-		if fd := funcAt[i+1]; fd != nil && duplication.IsDuplicateFuncBodyCandidate(fd, c.GoTypesInfo) {
+		// A function that only calls another package holds no copy at all.
+		if fd := funcAt[i+1]; fd != nil && (duplication.DelegatesToOtherPackage(fd, c.GoTypesInfo) || duplication.IsDuplicateFuncBodyCandidate(fd, c.GoTypesInfo)) {
 			continue
 		}
 		out = patternkit.JsReport(out, r.BaseRule, c, i+1, "Declaration comment says this code copies another source of truth", "Import or generate the value from its source of truth")
