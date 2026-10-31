@@ -2,6 +2,7 @@ package frontendrules
 
 import (
 	"go/ast"
+	"go/types"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -104,11 +105,38 @@ func (r *MirrorCommentCopyRule) AnalyzeFile(c *core.FileContext) []*core.Violati
 		// A Go function copy the body rule takes (duplicate-func-across-packages)
 		// is caught by its body: its comment is no cause for a finding, and
 		// reporting it only teaches to delete the honest note while the copy stays.
-		// A function that only calls another package holds no copy at all.
-		if fd := funcAt[i+1]; fd != nil && (duplication.DelegatesToOtherPackage(fd, c.GoTypesInfo) || duplication.IsDuplicateFuncBodyCandidate(fd, c.GoTypesInfo)) {
+		// A function that only calls the source its comment names holds no copy;
+		// a call of anything else may carry the copied logic in its arguments.
+		if fd := funcAt[i+1]; fd != nil && (callsNamedSource(fd, c.GoTypesInfo, comment) || duplication.IsDuplicateFuncBodyCandidate(fd, c.GoTypesInfo)) {
 			continue
 		}
 		out = patternkit.JsReport(out, r.BaseRule, c, i+1, "Declaration comment says this code copies another source of truth", "Import or generate the value from its source of truth")
 	}
 	return out
+}
+
+// callsNamedSource reports a Go function whose body only calls the function
+// or method the comment names as its source, as pkg.Name or, for a method,
+// Type.Name.
+func callsNamedSource(fd *ast.FuncDecl, info *types.Info, comment string) bool {
+	callee := duplication.DelegateCallee(fd, info)
+	if callee == nil {
+		return false
+	}
+	owners := []string{callee.Pkg().Name()}
+	if recv := callee.Signature().Recv(); recv != nil {
+		t := recv.Type()
+		if p, ok := t.(*types.Pointer); ok {
+			t = p.Elem()
+		}
+		if named, ok := t.(*types.Named); ok {
+			owners = append(owners, named.Obj().Name())
+		}
+	}
+	for _, owner := range owners {
+		if regexp.MustCompile(`\b` + regexp.QuoteMeta(owner+"."+callee.Name()) + `\b`).MatchString(comment) {
+			return true
+		}
+	}
+	return false
 }

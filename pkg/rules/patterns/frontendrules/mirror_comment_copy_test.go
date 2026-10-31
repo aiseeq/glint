@@ -191,3 +191,72 @@ func TestMirrorCommentCopyPartialCopyStillReported(t *testing.T) {
 export const MAX_UPLOAD_BYTES = 10485760;`
 	assert.Equal(t, []string{"src/limits.ts:2"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/limits.ts", ts))
 }
+
+// A single call of something other than the named source is no wrapper: the
+// copied logic sits in its arguments, and no other rule sees it.
+func TestMirrorCommentCopyCallOfOtherThanNamedSourceReported(t *testing.T) {
+	files := map[string]string{
+		"auth/auth.go": `package auth
+
+import "regexp"
+
+var emailPattern = regexp.MustCompile(` + "`^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$`" + `)
+
+// IsEmail reports whether s looks like a mail address.
+func IsEmail(s string) bool { return emailPattern.MatchString(s) }
+`,
+		"app/a.go": `package app
+
+import (
+	"fmt"
+	"regexp"
+	"slices"
+	"strings"
+)
+
+// isEmail mirrors auth.IsEmail.
+func isEmail(s string) bool { return regexp.MustCompile(` + "`^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$`" + `).MatchString(s) }
+
+// isAdmin mirrors auth.IsAdmin.
+func isAdmin(roles []string) bool {
+	return slices.ContainsFunc(roles, func(r string) bool { return strings.EqualFold(r, "admin") || r == "root" })
+}
+
+// orderRef mirrors ids.Ref.
+func orderRef(shop string, n int) string { return fmt.Sprintf("ORD-%s-%06d", shop, n) }
+`,
+	}
+	assert.Equal(t, []int{11, 14, 19}, rulestest.ViolationLines(rulestest.RunRuleOnFiles(t, NewMirrorCommentCopyRule(), files)))
+}
+
+// A method that only calls the method its note names, through a field of
+// another package's type, holds no copy either.
+func TestMirrorCommentCopyGoMethodCallingNamedMethodNotReported(t *testing.T) {
+	files := map[string]string{
+		"lib/score.go": `package lib
+
+// Scorer sums capped values.
+type Scorer struct{ Ceiling int }
+
+// Score sums the values capped at the ceiling.
+func (s Scorer) Score(xs []int) int {
+	total := 0
+	for _, x := range xs {
+		total += min(x, s.Ceiling)
+	}
+	return total
+}
+`,
+		"app/weigh.go": `package app
+
+import "example.com/rulestest/lib"
+
+// Weigher wraps a scorer.
+type Weigher struct{ s lib.Scorer }
+
+// weigh mirrors Scorer.Score.
+func (w Weigher) weigh(xs []int) int { return w.s.Score(xs) }
+`,
+	}
+	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewMirrorCommentCopyRule(), files))
+}
