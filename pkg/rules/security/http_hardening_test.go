@@ -188,7 +188,7 @@ func SendError(w http.ResponseWriter, status int, msg, code, details string) {
 	_ = json.NewEncoder(w).Encode(envelope{msg, code, details})
 }
 
-func SendInternalServerErrorWithTrace(w http.ResponseWriter, r *http.Request, msg, details string) {
+func SendInternalErrorWithContext(w http.ResponseWriter, r *http.Request, msg, details string) {
 	slog.Error("internal server error", "message", msg, "details", details)
 	SendError(w, http.StatusInternalServerError, msg, "INTERNAL_ERROR", "")
 }
@@ -201,14 +201,14 @@ func SendInternalDev(w http.ResponseWriter, msg, details string, production bool
 	SendError(w, http.StatusInternalServerError, msg, "INTERNAL_ERROR", shown)
 }
 
-func notifyServerError(r *http.Request, status int, msg, details string) {}
+func notifyServiceError(r *http.Request, status int, msg, details string) {}
 
-func SendErrorWithTrace(w http.ResponseWriter, r *http.Request, status int, msg, details string) {
+func SendErrorWithContext(w http.ResponseWriter, r *http.Request, status int, msg, details string) {
 	body := envelope{Message: msg}
 	if details != "" && status < 500 {
 		body.Details = details
 	}
-	notifyServerError(r, status, msg, details)
+	notifyServiceError(r, status, msg, details)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
@@ -226,7 +226,7 @@ func sendResponse(w http.ResponseWriter, status int, msg, details string) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func SendServerError(w http.ResponseWriter, msg, details string) {
+func SendItemServerError(w http.ResponseWriter, msg, details string) {
 	sendInternal(w, msg, details)
 }
 `,
@@ -244,10 +244,10 @@ import (
 
 func handle(w http.ResponseWriter, r *http.Request, err error) {
 	httpx.SendError(w, http.StatusInternalServerError, "failed", "X", err.Error())
-	httpx.SendInternalServerErrorWithTrace(w, r, "failed", err.Error())
+	httpx.SendInternalErrorWithContext(w, r, "failed", err.Error())
 	httpx.SendInternalDev(w, "failed", err.Error(), true)
-	httpx.SendErrorWithTrace(w, r, http.StatusInternalServerError, "failed", err.Error())
-	httpx.SendServerError(w, "failed", err.Error())
+	httpx.SendErrorWithContext(w, r, http.StatusInternalServerError, "failed", err.Error())
+	httpx.SendItemServerError(w, "failed", err.Error())
 }
 `,
 	})
@@ -280,11 +280,11 @@ func strategies(w http.ResponseWriter, r *http.Request, svc any) {
 	type DebugInfo struct {
 		ConfigType string ` + "`json:\"configType\"`" + `
 	}
-	type StrategiesResponse struct {
+	type ServiceResponse struct {
 		Strategies []Strategy ` + "`json:\"strategies\"`" + `
 		Debug      DebugInfo  ` + "`json:\"debug\"`" + `
 	}
-	_ = StrategiesResponse{Debug: DebugInfo{ConfigType: fmt.Sprintf("%T", svc)}}
+	_ = ServiceResponse{Debug: DebugInfo{ConfigType: fmt.Sprintf("%T", svc)}}
 }
 `
 	assert.Equal(t, []int{10, 26}, ruleLines(t, NewDebugFieldInResponseRule(), code))
@@ -299,7 +299,7 @@ type CSPDirectives struct {
 	DefaultSrc, ScriptSrc, StyleSrc []string
 }
 
-func GetProductionCSP() *CSPDirectives {
+func GetProductionPolicy() *CSPDirectives {
 	return &CSPDirectives{
 		DefaultSrc: []string{"'self'"},
 		ScriptSrc: []string{
@@ -311,7 +311,7 @@ func GetProductionCSP() *CSPDirectives {
 	}
 }
 
-func GetDevelopmentCSP() *CSPDirectives {
+func GetDevelopmentPolicy() *CSPDirectives {
 	return &CSPDirectives{ScriptSrc: []string{"'self'", "'unsafe-eval'"}}
 }
 

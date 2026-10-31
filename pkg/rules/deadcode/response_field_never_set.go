@@ -25,8 +25,8 @@ func init() {
 // builds, whose other fields it fills, but that nothing ever sets:
 //
 //	type Dashboard struct {
-//		TotalDeposits    SafeDecimal `json:"totalDeposits"`
-//		TotalWithdrawals SafeDecimal `json:"totalWithdrawals"`   // never assigned
+//		TotalDeposits    SafeAmount `json:"totalDeposits"`
+//		TotalWithdrawals SafeAmount `json:"totalWithdrawals"`   // never assigned
 //	}
 //
 //	return Dashboard{TotalDeposits: deposits}

@@ -308,7 +308,7 @@ func TestIsViolationExceptedMatchesSpecificFields(t *testing.T) {
 		"query-in-loop": {
 			Enabled: true,
 			Exceptions: []Exception{
-				{File: "repo.go", Line: 42, Pattern: "Update", Function: "SyncWallet", Reason: "intentional per-wallet write"},
+				{File: "repo.go", Line: 42, Pattern: "Update", Function: "SyncLedger", Reason: "intentional per-wallet write"},
 			},
 		},
 	}
@@ -316,13 +316,13 @@ func TestIsViolationExceptedMatchesSpecificFields(t *testing.T) {
 
 	matched := NewViolation("query-in-loop", "patterns", "repo.go", 42, SeverityMedium, "query in loop").
 		WithCode("repo.Update(ctx, item)").
-		WithContext("function", "SyncWallet")
+		WithContext("function", "SyncLedger")
 	wrongLine := NewViolation("query-in-loop", "patterns", "repo.go", 41, SeverityMedium, "query in loop").
 		WithCode("repo.Update(ctx, item)").
-		WithContext("function", "SyncWallet")
+		WithContext("function", "SyncLedger")
 	wrongPattern := NewViolation("query-in-loop", "patterns", "repo.go", 42, SeverityMedium, "query in loop").
 		WithCode("repo.Create(ctx, item)").
-		WithContext("function", "SyncWallet")
+		WithContext("function", "SyncLedger")
 
 	assert.True(t, cfg.IsViolationExcepted("patterns", "query-in-loop", "repo.go", matched))
 	assert.False(t, cfg.IsViolationExcepted("patterns", "query-in-loop", "repo.go", wrongLine))

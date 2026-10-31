@@ -83,13 +83,13 @@ func (s *Service) Run(name string) error { return nil }
 
 type Client struct{ key string }
 
-func (c *Client) TotalBalance(address string) (float64, error) { return 1, nil }
+func (c *Client) TotalAssets(address string) (float64, error) { return 1, nil }
 `,
 		"providers/beta/client.go": `package beta
 
 type Client struct{ token string }
 
-func (c *Client) TotalBalance(address string) (float64, error) { return 2, nil }
+func (c *Client) TotalAssets(address string) (float64, error) { return 2, nil }
 `,
 		"a/mocks/service.go": `package mocks
 

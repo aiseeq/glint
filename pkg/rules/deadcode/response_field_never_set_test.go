@@ -141,17 +141,17 @@ func Use() source { return source{Name: "a", Phone: "b"} }
 
 type Claims interface{ Valid() error }
 
-type TokenClaims struct {
+type SessionClaims struct {
 	Subject string ` + "`json:\"sub\"`" + `
 	Issuer  string ` + "`json:\"iss\"`" + `
 }
 
-func (c *TokenClaims) Valid() error { return nil }
+func (c *SessionClaims) Valid() error { return nil }
 
 func ParseWithClaims(token string, claims Claims) error { return nil }
 
-func Verify(token string) (*TokenClaims, error) {
-	claims := &TokenClaims{Subject: "x"}
+func Verify(token string) (*SessionClaims, error) {
+	claims := &SessionClaims{Subject: "x"}
 	err := ParseWithClaims(token, claims)
 	return claims, err
 }

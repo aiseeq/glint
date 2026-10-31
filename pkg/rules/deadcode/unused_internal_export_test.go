@@ -350,7 +350,7 @@ func Run() string { return errors.Message("x") }
 `,
 		"shared/testing/helpers.go": `package testing
 
-func SetupTestConfig() map[string]string { return nil }
+func SetupFixtureConfig() map[string]string { return nil }
 
 func InitStore() {}
 `,
@@ -359,7 +359,7 @@ func InitStore() {}
 import "testing"
 
 func TestHelpers(t *testing.T) {
-	_ = SetupTestConfig()
+	_ = SetupFixtureConfig()
 	InitStore()
 }
 `,

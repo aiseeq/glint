@@ -229,7 +229,7 @@ func isURLValues(expr ast.Expr) bool {
 var secretVariableName = regexp.MustCompile(`(?i)^(?:new|temp|tmp|generated|plain|initial|raw|one_?time)?_?(?:password|passwd|secret|token|api_?key|otp)$`)
 
 // secretsInRedirects returns the lines of calls to http.Redirect or a
-// redirect helper (redirectUsers(w, r, "success", msg)) that are given a
+// redirect helper (redirectMembers(w, r, "success", msg)) that are given a
 // secret variable inside an argument: the helper puts the message into the
 // query of the redirect URL, whatever the parameter is called.
 func secretsInRedirects(ctx *core.FileContext) map[int]bool {

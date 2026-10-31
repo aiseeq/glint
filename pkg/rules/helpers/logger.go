@@ -61,7 +61,7 @@ func isMathPackage(expr ast.Expr) bool {
 }
 
 // LogVerb returns the method name of a logging call in lower case, without
-// the Structured/Context suffix of structured loggers: ErrorStructured and
+// the Structured/Context suffix of structured loggers: ErrorWithFieldMap and
 // WarnContext are error and warn.
 func LogVerb(sel *ast.SelectorExpr) string {
 	verb := strings.ToLower(sel.Sel.Name)

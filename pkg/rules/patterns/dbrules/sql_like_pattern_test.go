@@ -19,7 +19,7 @@ type Filter struct{ Search, Prefix string }
 
 var likeEscaper = strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_")
 
-func escapeLike(s string) string { return likeEscaper.Replace(s) }
+func escapeLikeText(s string) string { return likeEscaper.Replace(s) }
 
 func list(f Filter) (string, []any) {
 	where := " WHERE 1=1"
@@ -40,7 +40,7 @@ func list(f Filter) (string, []any) {
 
 func listEscaped(f Filter) (string, []any) {
 	query := "SELECT id FROM orders WHERE reference ILIKE $1 OR code LIKE $2"
-	return query, []any{"%" + escapeLike(f.Search) + "%", likeEscaper.Replace(f.Prefix) + "%"}
+	return query, []any{"%" + escapeLikeText(f.Search) + "%", likeEscaper.Replace(f.Prefix) + "%"}
 }
 
 func search(term string) (string, []any) {

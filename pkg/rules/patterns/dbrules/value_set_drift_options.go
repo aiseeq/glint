@@ -71,7 +71,7 @@ func templateOptionSets(root string) ([]optionSet, error) {
 }
 
 // lowerWords returns the lower-case words of a name: payout_method,
-// payoutMethodDesc.
+// deliveryOptionDescription.
 func lowerWords(name string) map[string]bool {
 	words := make(map[string]bool)
 	for _, part := range strings.FieldsFunc(name, func(r rune) bool { return r == '_' || r == '-' || r == '.' }) {
@@ -144,7 +144,7 @@ func labelText(label string) string {
 // optionLabelDrift reports a label switch whose codes a template <select>
 // of the same name lists with other labels:
 //
-//	func payoutMethodDesc(pm int) string { switch pm { case 3: return "Cash Pickup" ... } }
+//	func deliveryOptionDescription(pm int) string { switch pm { case 3: return "Cash Pickup" ... } }
 //	<select name="payout_method"><option value="3">3 — Mobile Wallet</option>
 //
 // The screen offers a code under another meaning than the code gives it.

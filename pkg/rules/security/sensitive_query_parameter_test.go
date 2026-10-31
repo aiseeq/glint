@@ -76,16 +76,16 @@ func TestSensitiveQueryParameterSecretInRedirect(t *testing.T) {
 	code := `package admin
 
 func (a *Admin) create(w http.ResponseWriter, r *http.Request) {
-	password, _ := generatePassword()
-	a.redirectUsers(w, r, "success",
+	password, _ := generateCredential()
+	a.redirectMembers(w, r, "success",
 		fmt.Sprintf("created %s with password %s", name, password))
 	http.Redirect(w, r, "/done?msg="+url.QueryEscape(newToken), http.StatusSeeOther)
-	a.redirectUsers(w, r, "error", a.t(r, "msg.password_mismatch"))
-	a.redirectUsers(w, r, "success", "password changed for "+user.Name)
+	a.redirectMembers(w, r, "error", a.t(r, "msg.password_mismatch"))
+	a.redirectMembers(w, r, "success", "password changed for "+user.Name)
 	a.render(w, "created.html", password)
 }
 
-func (a *Admin) redirectUsers(w http.ResponseWriter, r *http.Request, key, msg string) {
+func (a *Admin) redirectMembers(w http.ResponseWriter, r *http.Request, key, msg string) {
 	http.Redirect(w, r, "/users?"+key+"="+url.QueryEscape(msg), http.StatusSeeOther)
 }
 `

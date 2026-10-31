@@ -70,7 +70,7 @@ func (c *Client) GetHoldings(ctx context.Context, address string) error {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("search assets: %w", httpclient.SanitizeTransportError(err))
+		return fmt.Errorf("search assets: %w", httpclient.SanitizeRequestError(err))
 	}
 	defer resp.Body.Close()
 	return nil
@@ -226,16 +226,16 @@ import (
 	"fmt"
 	"net/http"
 )
-func RedactURLError(err error) error { return err }
+func RedactRequestError(err error) error { return err }
 func (c *Client) doGet(ctx context.Context, method string) error {
 	requestURL := fmt.Sprintf("%s/bot%s/%s", c.domain, c.token, method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		return fmt.Errorf("create request: %w", RedactURLError(err))
+		return fmt.Errorf("create request: %w", RedactRequestError(err))
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", RedactURLError(err))
+		return fmt.Errorf("request failed: %w", RedactRequestError(err))
 	}
 	defer resp.Body.Close()
 	return nil
@@ -340,7 +340,7 @@ import (
 	"net/http"
 )
 
-func SanitizeTransportError(err error) error { return err }
+func SanitizeRequestError(err error) error { return err }
 
 func DoGet(ctx context.Context, c *http.Client, url string) ([]byte, error) { return nil, nil }
 `,
@@ -466,8 +466,8 @@ func scrubTransportError(err error) error {
 		{
 			name: "lower-case redact in the name",
 			files: map[string]string{
-				"delivery/send.go":  send("redactTransportError"),
-				"delivery/other.go": "package delivery\n\nfunc redactTransportError(err error) error { return err }\n",
+				"delivery/send.go":  send("redactRequestError"),
+				"delivery/other.go": "package delivery\n\nfunc redactRequestError(err error) error { return err }\n",
 			},
 		},
 		{

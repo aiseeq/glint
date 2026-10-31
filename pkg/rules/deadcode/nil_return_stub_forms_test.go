@@ -18,17 +18,17 @@ type Item struct{}
 
 type Repo struct{}
 
-func (r *Repo) CountUsers(period string) (int64, error) {
+func (r *Repo) CountMembers(period string) (int64, error) {
 	// DEVELOPMENT STAGE: returning 0 for compatibility
 	return 0, nil
 }
 
-func (r *Repo) ListWithdrawals(limit int) ([]Item, int64, error) {
+func (r *Repo) ListWidgetRows(limit int) ([]Item, int64, error) {
 	// Simplified implementation for the MVP
 	return []Item{}, 0, nil
 }
 
-func (r *Repo) ValidateAmount(amount int64) *Result {
+func (r *Repo) ValidateItemAmount(amount int64) *Result {
 	// TEMPORARY IMPLEMENTATION
 	return &Result{IsValid: true}
 }
@@ -53,7 +53,7 @@ func TestNilReturnStubReportsWriteThatDoesNothing(t *testing.T) {
 
 type Adapter struct{}
 
-func (a *Adapter) UpdateTransactionStatus(id, status string) error {
+func (a *Adapter) UpdateItemStatus(id, status string) error {
 	return nil
 }
 
@@ -64,7 +64,7 @@ func (a *Adapter) SaveSnapshot(id string) error {
 
 type NopStore struct{}
 
-func (NopStore) UpdateTransactionStatus(id, status string) error { return nil }
+func (NopStore) UpdateItemStatus(id, status string) error { return nil }
 
 func (a *Adapter) Close() error {
 	return nil
@@ -101,18 +101,18 @@ func TestNilReturnStubReportsStubSuccessResponse(t *testing.T) {
 
 import "net/http"
 
-func SendSuccess(w http.ResponseWriter, data any, msg string) {}
+func SendItemSuccess(w http.ResponseWriter, data any, msg string) {}
 
 type Router struct{}
 
-func (r *Router) handleGetDepositAddress(w http.ResponseWriter, req *http.Request) {
+func (r *Router) handleGetItemAddress(w http.ResponseWriter, req *http.Request) {
 	userID := req.URL.Query().Get("user")
 	_ = userID
-	SendSuccess(w, map[string]any{"depositAddress": "0x0000000000000000000000000000000000000000"}, "Deposit address stub")
+	SendItemSuccess(w, map[string]any{"depositAddress": "0x0000000000000000000000000000000000000000"}, "Deposit address stub")
 }
 
-func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
-	SendSuccess(w, map[string]any{"status": "ok"}, "healthy")
+func (r *Router) handleStatusProbe(w http.ResponseWriter, req *http.Request) {
+	SendItemSuccess(w, map[string]any{"status": "ok"}, "healthy")
 }
 `
 	assert.Equal(t, []int{12}, rulestest.GoFileRuleLines(t, NewNilReturnStubRule(), "svc/svc.go", code))

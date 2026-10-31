@@ -156,7 +156,7 @@ import (
 	"github.com/golang-jwt/jwt/v4"
 )
 
-type jwksResponse struct{ Keys []map[string]string }
+type keySetResponse struct{ Keys []map[string]string }
 
 func verifyWithKey(tokenString string, publicKey *ecdsa.PublicKey) (*jwt.RegisteredClaims, error) {
 	claims := &jwt.RegisteredClaims{}
@@ -237,13 +237,13 @@ func TestJWTTokenTypeUnchecked(t *testing.T) {
 
 type RegisteredClaims struct{ Subject string }
 
-type TokenClaims struct {
+type SessionClaims struct {
 	RegisteredClaims
 	UserID    string
 	TokenType string
 }
 
-type Result struct{ Data *TokenClaims }
+type Result struct{ Data *SessionClaims }
 
 type Validator interface{ Validate(token string) (*Result, error) }
 `,

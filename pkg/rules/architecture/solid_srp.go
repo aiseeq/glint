@@ -152,7 +152,7 @@ func getStructTypeExclusions(structName string) []string {
 }
 
 // filterDomainAreas removes areas that are part of the struct's domain name
-// e.g., TransactionRepository shouldn't count "transaction" as separate area
+// e.g., OrderTransactionRepository shouldn't count "transaction" as separate area
 func filterDomainAreas(structName string, areas []string) []string {
 	structNameLower := strings.ToLower(structName)
 	var filtered []string
@@ -235,7 +235,7 @@ func (r *SolidSRPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 		allAreas := detectResponsibilityAreas(methods)
 
 		// Remove areas that are part of the struct's domain name
-		// e.g., TransactionRepository shouldn't count "transaction" as separate area
+		// e.g., OrderTransactionRepository shouldn't count "transaction" as separate area
 		allAreas = filterDomainAreas(structName, allAreas)
 
 		// Get type-based exclusions (e.g., Router excludes "http")
