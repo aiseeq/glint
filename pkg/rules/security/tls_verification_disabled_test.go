@@ -50,8 +50,10 @@ func TestTLSVerificationDisabledScriptObjectKeys(t *testing.T) {
 	script := `const a = { rejectUnauthorized: false };
 const b = { "rejectUnauthorized": false };
 const c = "rejectUnauthorized: false";
+const d = { not_rejectUnauthorized: false, $rejectUnauthorized: false };
+const e = {a:1,rejectUnauthorized:false};
 `
-	assert.Equal(t, []int{1, 2}, rulestest.SourceFileRuleLines(t, NewTLSVerificationDisabledRule(), "client.js", script))
+	assert.Equal(t, []int{1, 2, 5}, rulestest.SourceFileRuleLines(t, NewTLSVerificationDisabledRule(), "client.js", script))
 }
 
 func TestTLSVerificationDisabledMultilineScriptObjectKeys(t *testing.T) {

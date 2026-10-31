@@ -58,7 +58,10 @@ func (r *TLSVerificationDisabledRule) TypedGoProjectImports() []string {
 }
 
 var scriptTLSOff = regexp.MustCompile(`NODE_TLS_REJECT_UNAUTHORIZED['"\]]*\s*=\s*['"]?0|ignoreHTTPSErrors\s*:\s*true`)
-var scriptRejectUnauthorized = regexp.MustCompile(`["']?rejectUnauthorized["']?\s*:\s*false\b`)
+
+// The key starts where no identifier character precedes it, so a longer key
+// ending in the same name is not it; group 1 is the colon.
+var scriptRejectUnauthorized = regexp.MustCompile(`(?:^|[^\w$])["']?rejectUnauthorized["']?\s*(:)\s*false\b`)
 
 const tlsSuggestion = "Trust the certificate explicitly (a CA bundle, RootCAs, NODE_EXTRA_CA_CERTS) instead of turning verification off"
 
@@ -142,9 +145,8 @@ func (r *TLSVerificationDisabledRule) analyzeScript(ctx *core.FileContext) []*co
 }
 
 func hasRejectUnauthorizedObjectKey(text, code string) bool {
-	for _, loc := range scriptRejectUnauthorized.FindAllStringIndex(text, -1) {
-		colon := strings.IndexByte(text[loc[0]:loc[1]], ':') + loc[0]
-		if colon < len(code) && code[colon] == ':' {
+	for _, loc := range scriptRejectUnauthorized.FindAllStringSubmatchIndex(text, -1) {
+		if colon := loc[2]; colon < len(code) && code[colon] == ':' {
 			return true
 		}
 	}
