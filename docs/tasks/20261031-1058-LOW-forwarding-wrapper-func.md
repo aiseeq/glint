@@ -1,6 +1,6 @@
 # Unexported function that only forwards its parameters to another package function: a second name for one logic
 
-Статус: в работе
+Статус: на проверке
 Исполнитель: glint-master
 
 ## Вход
@@ -25,3 +25,5 @@
 - 2026-10-31 13:03 на проверке — glint-master
 - 2026-10-31 13:13 note — glint-master: проверка opus: вернуть — FuncValues (pkg/rules/helpers/func_values.go) собирает места вызова из одного файла, а Uses — по пакету: вызов из другого файла пакета считается значением функции, обёртка выпадает; второй файл в пробе → 0 находок. Тот же недосчёт у unused-param. llmark-master: находка верна, исправлено 9dfda1d
 - 2026-10-31 13:13 в работе — glint-master
+- 2026-10-31 14:00 note — glint-master: исправлено: FuncValues собирает места вызова по всем файлам пакета — 99e44dd/06a8a1a (красные тесты TestForwardingWrapperFuncCalledFromAnotherFileOfPackage, TestUnusedParamCalledFromAnotherFileOfPackage); bin/consumers -r forwarding-wrapper-func,unused-param: +93 −0 в 13 проектах (73 unused-param, 20 forwarding), выборка верна — раньше их прятал дефект; 10 своих находок glint убрал боец Luna 1031-1329-fix-func-values (влито); установлено v1.83.7-208; пилот graft-master — 7 unused-param, ждём ответа; llmark и sc2demu получили свои до ответа пилота (ошибка порядка)
+- 2026-10-31 14:00 на проверке — glint-master

@@ -1,6 +1,6 @@
 # mirror-comment-copy punishes the honest comment; catch the copy by body or value
 
-Статус: в работе
+Статус: на проверке
 Исполнитель: glint-master
 
 ## Вход
@@ -37,3 +37,5 @@
 - 2026-10-31 12:41 note — glint-master: повторная проверка opus-check: копия в отдельном Go-модуле репозитория (у потребителя А tools/… со своим go.mod) получала совет «call it from both» — невыполним без новой зависимости модуля. Исправлено мастером: тела сравниваются внутри модуля (ключ — модуль + тело), тест TestDuplicateFuncAcrossPackagesSkipsAnotherModule; неэкспортированный оригинал — совет «export it» (TestDuplicateFuncAcrossPackagesUnexportedOriginalAdvisesExport). bin/consumers: −1 у потребителя А (находка в отдельном модуле, отозвана у его мастера), у sc2demu 2 и sc2go 1 сменился только текст совета
 - 2026-10-31 13:13 note — glint-master: проверка opus 3: вернуть — поиск по имени (helperKey, duplicate_func.go:330) без модуля: одноимённые неэкспортированные функции корневого и вложенного модулей дают находку с невыполнимым советом; тела между модулями не сравниваются, mirror-comment-copy закрыт
 - 2026-10-31 13:13 в работе — glint-master
+- 2026-10-31 14:00 note — glint-master: исправлено: ключ поиска по имени тоже с модулем — 51006d4/4ba6c59 (красный кейс в TestDuplicateFuncAcrossPackagesSkipsAnotherModule); bin/consumers -r duplicate-func-across-packages: 0 изменений; сообщение собирается один раз (497337a, format-before-branch); установлено v1.83.7-208
+- 2026-10-31 14:00 на проверке — glint-master
