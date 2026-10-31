@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -47,7 +48,11 @@ func readsSystemFile(call *ast.CallExpr) bool {
 	if !ok || lit.Kind != token.STRING {
 		return false
 	}
-	path := filepath.Clean(strings.Trim(lit.Value, "`\""))
+	value, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return false
+	}
+	path := filepath.Clean(value)
 	for _, prefix := range systemFilePrefixes {
 		if strings.HasPrefix(path, prefix) {
 			return true
