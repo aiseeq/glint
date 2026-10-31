@@ -291,7 +291,7 @@ func IsDuplicateFuncBodyCandidate(fd *ast.FuncDecl, info *types.Info) bool {
 	if fd == nil || fd.Recv != nil || fd.Body == nil || fd.Name == nil || fd.Type == nil || fd.Type.Params == nil || fd.Type.Params.NumFields() == 0 {
 		return false
 	}
-	if info == nil || DelegateCallee(fd, info) != nil {
+	if info == nil || delegates(fd.Body, info, funcPackage(fd, info)) {
 		return false
 	}
 	normalizer := newFunctionBlockNormalizer(info, fd)
@@ -300,16 +300,20 @@ func IsDuplicateFuncBodyCandidate(fd *ast.FuncDecl, info *types.Info) bool {
 }
 
 // DelegateCallee returns the function or method of another package that the
-// body of fd only calls, or nil when the body does more than that one call.
-func DelegateCallee(fd *ast.FuncDecl, info *types.Info) *types.Func {
+// body of fd only calls, or nil when the body does more than that one call,
+// and the name the call is qualified by (an import alias, a variable), if any.
+func DelegateCallee(fd *ast.FuncDecl, info *types.Info) (*types.Func, string) {
 	if fd == nil || fd.Body == nil || fd.Name == nil || info == nil {
-		return nil
+		return nil, ""
 	}
-	var own *types.Package
+	return delegateCallee(fd.Body, info, funcPackage(fd, info))
+}
+
+func funcPackage(fd *ast.FuncDecl, info *types.Info) *types.Package {
 	if fn, ok := info.Defs[fd.Name].(*types.Func); ok {
-		own = fn.Pkg()
+		return fn.Pkg()
 	}
-	return delegateCallee(fd.Body, info, own)
+	return nil
 }
 
 func uniquePackageFuncs(funcs []*types.Func) []*types.Func {
@@ -371,12 +375,13 @@ func helperKey(fn *types.Func) string {
 // delegates reports a body of one statement that only calls a function or
 // method of another package: the implementation is already shared.
 func delegates(body *ast.BlockStmt, info *types.Info, own *types.Package) bool {
-	return delegateCallee(body, info, own) != nil
+	callee, _ := delegateCallee(body, info, own)
+	return callee != nil
 }
 
-func delegateCallee(body *ast.BlockStmt, info *types.Info, own *types.Package) *types.Func {
+func delegateCallee(body *ast.BlockStmt, info *types.Info, own *types.Package) (*types.Func, string) {
 	if len(body.List) != 1 {
-		return nil
+		return nil, ""
 	}
 	var call *ast.CallExpr
 	switch s := body.List[0].(type) {
@@ -388,21 +393,32 @@ func delegateCallee(body *ast.BlockStmt, info *types.Info, own *types.Package) *
 		call, _ = s.X.(*ast.CallExpr)
 	}
 	if call == nil {
-		return nil
+		return nil, ""
+	}
+	fun := ast.Unparen(call.Fun)
+	switch generic := fun.(type) {
+	case *ast.IndexExpr:
+		fun = ast.Unparen(generic.X)
+	case *ast.IndexListExpr:
+		fun = ast.Unparen(generic.X)
 	}
 	var name *ast.Ident
-	switch fun := ast.Unparen(call.Fun).(type) {
+	var qualifier string
+	switch fun := fun.(type) {
 	case *ast.Ident:
 		name = fun
 	case *ast.SelectorExpr:
 		name = fun.Sel
+		if x, ok := ast.Unparen(fun.X).(*ast.Ident); ok {
+			qualifier = x.Name
+		}
 	}
 	if name == nil {
-		return nil
+		return nil, ""
 	}
 	callee, ok := info.Uses[name].(*types.Func)
 	if !ok || callee.Pkg() == nil || callee.Pkg() == own {
-		return nil
+		return nil, ""
 	}
-	return callee
+	return callee, qualifier
 }

@@ -116,14 +116,17 @@ func (r *MirrorCommentCopyRule) AnalyzeFile(c *core.FileContext) []*core.Violati
 }
 
 // callsNamedSource reports a Go function whose body only calls the function
-// or method the comment names as its source, as pkg.Name or, for a method,
-// Type.Name.
+// or method the comment names as its source, as pkg.Name, alias.Name under the
+// import alias of the call or, for a method, Type.Name.
 func callsNamedSource(fd *ast.FuncDecl, info *types.Info, comment string) bool {
-	callee := duplication.DelegateCallee(fd, info)
+	callee, qualifier := duplication.DelegateCallee(fd, info)
 	if callee == nil {
 		return false
 	}
 	owners := []string{callee.Pkg().Name()}
+	if qualifier != "" && callee.Signature().Recv() == nil {
+		owners = append(owners, qualifier)
+	}
 	if recv := callee.Signature().Recv(); recv != nil {
 		t := recv.Type()
 		if p, ok := t.(*types.Pointer); ok {

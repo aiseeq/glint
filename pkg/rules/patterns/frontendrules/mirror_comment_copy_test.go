@@ -260,3 +260,41 @@ func (w Weigher) weigh(xs []int) int { return w.s.Score(xs) }
 	}
 	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewMirrorCommentCopyRule(), files))
 }
+
+// The note may name the source by the import alias or call it with explicit
+// type arguments: the function still only calls it.
+func TestMirrorCommentCopyGoWrapperByAliasOrInstantiationNotReported(t *testing.T) {
+	files := map[string]string{
+		"lib/score.go": `package lib
+
+// Score sums the values capped at ceiling.
+func Score(xs []int, ceiling int) int {
+	total := 0
+	for _, x := range xs {
+		total += min(x, ceiling)
+	}
+	return total
+}
+
+// Sum adds the values.
+func Sum[T int | float64](xs []T) T {
+	var total T
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
+`,
+		"app/weigh.go": `package app
+
+import scoring "example.com/rulestest/lib"
+
+// weigh mirrors scoring.Score.
+func weigh(xs []int, ceiling int) int { return scoring.Score(xs, ceiling) }
+
+// total mirrors scoring.Sum.
+func total(xs []int) int { return scoring.Sum[int](xs) }
+`,
+	}
+	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewMirrorCommentCopyRule(), files))
+}
