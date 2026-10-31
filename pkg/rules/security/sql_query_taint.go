@@ -100,7 +100,7 @@ type sqlTaintCheck struct {
 	collectContext sqlNodeContext
 	functions      map[*types.Func]*ast.FuncDecl
 	literalMaps    map[types.Object]bool
-	syncCalls      map[*ast.FuncLit]bool
+	goCalls        map[*ast.FuncLit]bool
 	regexpPatterns map[types.Object]string
 	at             token.Pos
 	scope          ast.Node
@@ -120,7 +120,7 @@ func newSQLTaintCheck(file *ast.File, info *types.Info) *sqlTaintCheck {
 		contexts:       make(map[token.Pos]sqlNodeContext),
 		functions:      make(map[*types.Func]*ast.FuncDecl),
 		literalMaps:    make(map[types.Object]bool),
-		syncCalls:      make(map[*ast.FuncLit]bool),
+		goCalls:        make(map[*ast.FuncLit]bool),
 		regexpPatterns: make(map[types.Object]string),
 		writes:         make(map[*types.Var][]token.Pos),
 		taints:         make(map[*types.Var]*sqlTaint),
@@ -160,28 +160,22 @@ func (c *sqlTaintCheck) collect(file *ast.File) {
 			c.contexts[n.Pos()] = context
 		}
 		c.collectContext = context
-		c.recordSyncCall(stack)
+		c.recordGoCall(stack)
 		c.collectNode(n)
 		return true
 	})
 }
 
-// recordSyncCall marks a function literal called in place, not by go or
-// defer: it returns before the statement after the call runs.
-func (c *sqlTaintCheck) recordSyncCall(stack []ast.Node) {
-	call, ok := stack[len(stack)-1].(*ast.CallExpr)
+// recordGoCall marks a function literal a go statement launches: it runs
+// alongside the statements after the go statement.
+func (c *sqlTaintCheck) recordGoCall(stack []ast.Node) {
+	statement, ok := stack[len(stack)-1].(*ast.GoStmt)
 	if !ok {
 		return
 	}
-	literal, ok := ast.Unparen(call.Fun).(*ast.FuncLit)
-	if !ok || len(stack) < 2 {
-		return
+	if literal, ok := ast.Unparen(statement.Call.Fun).(*ast.FuncLit); ok {
+		c.goCalls[literal] = true
 	}
-	switch stack[len(stack)-2].(type) {
-	case *ast.GoStmt, *ast.DeferStmt:
-		return
-	}
-	c.syncCalls[literal] = true
 }
 
 func sqlContextFor(stack []ast.Node) sqlNodeContext {
@@ -201,16 +195,20 @@ func sqlContextFor(stack []ast.Node) sqlNodeContext {
 				}
 				j--
 			}
+			// A literal not called in place - deferred, launched, stored or
+			// passed on - runs later, if at all.
+			inPlace := false
 			if j > 0 {
 				if call, ok := stack[j].(*ast.CallExpr); ok && ast.Unparen(call.Fun) == node {
 					_, deferred := stack[j-1].(*ast.DeferStmt)
 					_, goroutine := stack[j-1].(*ast.GoStmt)
-					if deferred || goroutine {
-						context.deferredScopes = append(context.deferredScopes, outer)
-					} else {
-						context.iifeScopes = append(context.iifeScopes, outer)
-					}
+					inPlace = !deferred && !goroutine
 				}
+			}
+			if inPlace {
+				context.iifeScopes = append(context.iifeScopes, outer)
+			} else {
+				context.deferredScopes = append(context.deferredScopes, outer)
 			}
 		case *ast.BlockStmt:
 			context.blocks = append(context.blocks, node)
@@ -919,12 +917,12 @@ func (c *sqlTaintCheck) varTaint(v *types.Var) sqlTaint {
 	return t
 }
 
-// capturedByClosure reports a local variable that a function literal checks
-// but does not declare: unless the literal is called in place, the enclosing
-// function may write it after the literal starts, while the literal still runs.
+// capturedByClosure reports a local variable that a goroutine's function
+// literal checks but does not declare: the enclosing function may write it
+// after the goroutine checks it, while the goroutine still runs.
 func (c *sqlTaintCheck) capturedByClosure(v *types.Var, scope ast.Node) bool {
 	literal, ok := scope.(*ast.FuncLit)
-	if !ok || c.syncCalls[literal] || v.Pkg() == nil || v.Parent() == v.Pkg().Scope() {
+	if !ok || !c.goCalls[literal] || v.Pkg() == nil || v.Parent() == v.Pkg().Scope() {
 		return false
 	}
 	return v.Pos() < scope.Pos() || v.Pos() >= scope.End()

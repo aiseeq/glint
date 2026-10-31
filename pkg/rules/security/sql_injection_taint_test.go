@@ -951,3 +951,39 @@ func run(db *sql.DB, single, double string) {
 	violations := analyzeSQLInjection(t, code)
 	assert.Len(t, violations, 0, "parentheses around a closure called in place do not change when it runs")
 }
+
+func TestSQLInjectionStoredAndDeferredClosuresKeepTheirChecks(t *testing.T) {
+	code := `package main
+import "database/sql"
+func run(db *sql.DB, outer, inner, deferred, input string) {
+	if outer != "column" { return }
+	stored := func() { db.Query("SELECT " + outer) }
+	stored()
+	checking := func() {
+		if inner != "column" { return }
+		db.Query("SELECT " + inner)
+	}
+	checking()
+	inner = input
+	defer func() {
+		if deferred != "column" { return }
+		db.Query("SELECT " + deferred)
+	}()
+	deferred = input
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 0, "a closure that checks when it runs, or runs after an unchanged check, is guarded")
+}
+
+func TestSQLInjectionStoredClosureLosesOuterCheckOnLaterWrite(t *testing.T) {
+	code := `package main
+import "database/sql"
+func run(db *sql.DB, x, input string) {
+	if x != "column" { return }
+	stored := func() { db.Query("SELECT " + x) }
+	x = input
+	stored()
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 1, "the closure runs after the checked variable is replaced")
+}
