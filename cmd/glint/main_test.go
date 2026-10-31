@@ -20,6 +20,11 @@ import (
 // TestMain points model-not-approved at a list of its own, so that no test
 // reads the approved list of the machine it runs on.
 func TestMain(m *testing.M) {
+	// Test runs of check must not land in the user's run journal; journal
+	// tests set their own path.
+	if err := os.Setenv("GLINT_RUN_LOG", "off"); err != nil {
+		panic(err)
+	}
 	dir, err := os.MkdirTemp("", "glint-cmd-test")
 	if err != nil {
 		panic(err)

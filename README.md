@@ -351,6 +351,14 @@ If glint hangs on your project, run it with `--timing` and press Ctrl+C: the
 report names the rule and file it is stuck on (or the loading phase, if
 type-checking is the problem). Please attach that output when filing an issue.
 
+Every `glint check` also appends a JSON line to
+`$XDG_STATE_HOME/glint/runs.jsonl` (`~/.local/state/glint/runs.jsonl` when
+`XDG_STATE_HOME` is unset). Each line records the project root, version, run
+time, analyzed and cached file counts, findings by rule, rule times of at
+least 5 ms, and the exit code. Suppressed finding counts are not available.
+Set `GLINT_RUN_LOG` to another path to change the journal location, or to
+`off` to disable it.
+
 ## Result Cache
 
 Findings of rules that look at one file only are kept per project root in the

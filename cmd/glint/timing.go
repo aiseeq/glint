@@ -8,24 +8,29 @@ import (
 	"runtime/pprof"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aiseeq/glint/pkg/output"
 )
 
-// timingCollector accumulates per-phase and per-rule durations under --timing.
-// A nil collector is the disabled state: every method is a no-op, so call
-// sites never check the flag. In-flight runs are kept so that an interrupted
-// (hung) analysis can still report which rule is stuck on which file.
+// timingCollector accumulates rule durations for the run journal, and keeps
+// detailed phase and per-file data when --timing is enabled. A nil collector
+// is the disabled state: every method is a no-op, so call sites never check
+// the flag. In-flight runs localize hangs in detailed mode.
 type timingCollector struct {
 	// now is replaceable in tests; measuring real durations otherwise.
 	now func() time.Time
+	// detailed keeps the lock-based data needed by --timing reports. The
+	// lightweight path only accumulates per-rule totals for the run journal.
+	detailed bool
 
 	mu       sync.Mutex
 	phases   []phaseTiming
 	rules    map[string]*ruleTiming
 	inFlight map[uint64]inFlightRun
 	nextID   uint64
+	quick    sync.Map // map[string]*atomic.Int64, nanoseconds
 }
 
 type phaseTiming struct {
@@ -47,11 +52,16 @@ type inFlightRun struct {
 }
 
 func newTimingCollector() *timingCollector {
-	return &timingCollector{
-		now:      time.Now,
-		rules:    make(map[string]*ruleTiming),
-		inFlight: make(map[uint64]inFlightRun),
+	return newTimingCollectorMode(true)
+}
+
+func newTimingCollectorMode(detailed bool) *timingCollector {
+	tc := &timingCollector{now: time.Now, detailed: detailed}
+	if detailed {
+		tc.rules = make(map[string]*ruleTiming)
+		tc.inFlight = make(map[uint64]inFlightRun)
 	}
+	return tc
 }
 
 // track registers a (rule, file) run and returns the function that finishes
@@ -60,6 +70,18 @@ func newTimingCollector() *timingCollector {
 func (tc *timingCollector) track(rule, file string) func() {
 	if tc == nil {
 		return func() {}
+	}
+	if !tc.detailed {
+		started := tc.now()
+		return func() {
+			elapsed := tc.now().Sub(started)
+			value, ok := tc.quick.Load(rule)
+			if !ok {
+				candidate := new(atomic.Int64)
+				value, _ = tc.quick.LoadOrStore(rule, candidate)
+			}
+			value.(*atomic.Int64).Add(int64(elapsed))
+		}
 	}
 	started := tc.now()
 	tc.mu.Lock()
@@ -90,7 +112,7 @@ func (tc *timingCollector) track(rule, file string) func() {
 // kept in-flight until finished for the same reason rules are: a hang inside
 // go/packages loading must be visible on interrupt.
 func (tc *timingCollector) phase(name string) func() {
-	if tc == nil {
+	if tc == nil || !tc.detailed {
 		return func() {}
 	}
 	started := tc.now()
@@ -107,6 +129,34 @@ func (tc *timingCollector) phase(name string) func() {
 		delete(tc.inFlight, id)
 		tc.phases = append(tc.phases, phaseTiming{name: name, duration: elapsed})
 	}
+}
+
+func (tc *timingCollector) ruleDurations() map[string]time.Duration {
+	if tc == nil {
+		return nil
+	}
+	if tc.detailed {
+		tc.mu.Lock()
+		defer tc.mu.Unlock()
+		durations := make(map[string]time.Duration, len(tc.rules))
+		for name, timing := range tc.rules {
+			durations[name] = timing.total
+		}
+		return durations
+	}
+	durations := make(map[string]time.Duration)
+	tc.quick.Range(func(key, value any) bool {
+		durations[key.(string)] = time.Duration(value.(*atomic.Int64).Load())
+		return true
+	})
+	return durations
+}
+
+func writeTimingReport() error {
+	if !flagTiming {
+		return nil
+	}
+	return timings.report(os.Stderr)
 }
 
 // report writes the collected timings. Rules are sorted by total time

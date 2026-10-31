@@ -53,6 +53,23 @@ func TestTimingCollectorAccumulatesPerRule(t *testing.T) {
 	}
 }
 
+func TestLightweightTimingCollectorAccumulatesRuleDurations(t *testing.T) {
+	tc := newTimingCollectorMode(false)
+	now, advance := fakeClock()
+	tc.now = now
+
+	done := tc.track("slow-rule", "a.go")
+	advance(6 * time.Millisecond)
+	done()
+
+	if got := ruleMilliseconds(tc)["slow-rule"]; got != 6 {
+		t.Fatalf("journal rule time = %dms, want 6ms", got)
+	}
+	if tc.detailed || tc.inFlight != nil || tc.rules != nil {
+		t.Fatalf("lightweight collector unexpectedly enabled detailed tracking: %#v", tc)
+	}
+}
+
 func TestTimingCollectorReportsInFlightRuns(t *testing.T) {
 	tc := newTimingCollector()
 	now, advance := fakeClock()

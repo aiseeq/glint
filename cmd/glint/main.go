@@ -332,14 +332,23 @@ func applyJobs() error {
 	return nil
 }
 
-func runCheck(_ *cobra.Command, args []string) error {
+func runCheck(_ *cobra.Command, args []string) (runErr error) {
 	startTime := time.Now()
+	journal := runJournalEntry{Time: runJournalTime(startTime), Version: resolveVersion(), Findings: map[string]int{}, Suppressed: map[string]int{}, RuleMS: map[string]int64{}}
+	journalCachedFiles := 0
+	defer func() {
+		journal.WallMS = time.Since(startTime).Milliseconds()
+		journal.CachedFiles = journalCachedFiles
+		journal.Exit = runExitCode(runErr)
+		journal.RuleMS = ruleMilliseconds(timings)
+		appendRunJournalWarning(journal)
+	}()
 	if err := applyJobs(); err != nil {
 		return err
 	}
 
+	timings = newTimingCollectorMode(flagTiming)
 	if flagTiming {
-		timings = newTimingCollector()
 		stop := reportTimingsOnInterrupt(timings)
 		defer stop()
 	}
@@ -355,6 +364,7 @@ func runCheck(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	journal.Root = journalRoot(roots)
 
 	findings := newFindingSet()
 	// Roots of one Go module share its typed load.
@@ -417,6 +427,7 @@ func runCheck(_ *cobra.Command, args []string) error {
 		}
 		panics = append(panics, rootPanics...)
 		if cache != nil {
+			journalCachedFiles += cache.reused
 			if err := cache.save(); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: result cache of %s not saved: %v\n", projectRoot, err)
 			}
@@ -463,8 +474,10 @@ func runCheck(_ *cobra.Command, args []string) error {
 	// Overlapping roots (./backend and ./backend/auth) walk the same file twice.
 	stats.FilesAnalyzed = len(analyzedFiles)
 	allViolations := findings.list
+	journal.Files = stats.FilesAnalyzed
+	journal.Findings = findingsByRule(allViolations)
 	stats.Duration = time.Since(startTime).Seconds()
-	if err := timings.report(os.Stderr); err != nil {
+	if err := writeTimingReport(); err != nil {
 		return fmt.Errorf("write timing report: %w", err)
 	}
 
