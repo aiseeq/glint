@@ -69,7 +69,7 @@
 ```
 
 ## Приёмка
-- `-r sql-injection`: есть main.go:27; main.go:19 остаётся; белый список до запроса (main.go:49) — без находки (сейчас `glint check -C <проба> -r sql-injection --no-cache ./...` даёт только main.go:19).
+- `-r sql-injection`: есть main.go:27; main.go:19 остаётся; белый список до запроса (main.go:48) — без находки (сейчас `glint check -C <проба> -r sql-injection --no-cache ./...` даёт только main.go:19).
 - Прогон bin/consumers по правилу до установки, каждая новая находка разобрана; graft all зелёный.
 
 ## Журнал

@@ -1,6 +1,6 @@
 # Synthetic names in place of 207 names copied from closed projects (HEAD only)
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Что сделать
@@ -29,3 +29,4 @@
 - 2026-10-31 17:12 note — glint-master: партия 6 влита (afdff44 после sync). Остаток в HEAD по names-files-after (193): только 11 зарезервированных. 3 общих имени — метка graft:leak-ok на 14 строках в 10 файлах (по слову graft-master), тесты deadcode/dbrules/httprules ok
 - 2026-10-31 17:48 note — glint-master: независимая проверка HEAD — боец Terra 1031-1748-glint (бриф synth/verify-brief.md, вердикт synth/verdict.md в каталоге замеров)
 - 2026-10-31 18:26 note — glint-master: проверка Terra 1031-1748-glint — вернуть: (1) AccountBalance (партия 6) совпал с объявлением типа в старом рабочем проекте — переименован в HoldingBalance (errrules, 2 файла теста); (2) поправка журнала 17:12: партия 6 в main — 9cd8104 (afdff44 — коммит ветки до sync); (3) graft leaks HEAD сканирует историю, не дерево — проверка дерева по git grep (97 строк: 83 — 7 имён остатка, 14 — leak-ok), принято
+- 2026-10-31 18:54 готово — terra-verifier-1031-1748 (session glint-master): вердикт Terra 1031-1748-glint (synth/verdict.md в каталоге замеров glint-measure): git grep по 193 именам на HEAD 565dd70 — 97 строк, из них 83 только 7 имён остатка до 02.11, 14 — leak-ok; 20 новых имён не объявлены в частных деревьях (после переименования HoldingBalance); go test ./pkg/rules/... и graft all — код 0; коммиты журнала в main
