@@ -237,15 +237,16 @@ func (r *DuplicateFuncAcrossPackagesRule) findings(ctx *core.GoProjectContext, t
 			if file.IsSuppressed(line, r.Name()) {
 				continue
 			}
-			message := fmt.Sprintf("Function %s duplicates %s — keep one implementation and call it from both packages", fd.Name.Name, twin.original)
-			if twin.unexported {
-				message = fmt.Sprintf("Function %s duplicates %s — keep one implementation, export it and call it from both packages", fd.Name.Name, twin.original)
-			}
+			advice := "keep one implementation and call it from both packages"
 			suggestion := "Keep one implementation and call it from both places; when neither package should import the other, move it to a shared package, and when the standard library already does it, call that instead"
-			if !twin.canCall {
-				message = fmt.Sprintf("Function %s duplicates %s — move one implementation into a package both can import", fd.Name.Name, twin.original)
+			switch {
+			case !twin.canCall:
+				advice = "move one implementation into a package both can import"
 				suggestion = "Move the shared implementation into a package both packages can import"
+			case twin.unexported:
+				advice = "keep one implementation, export it and call it from both packages"
 			}
+			message := fmt.Sprintf("Function %s duplicates %s — %s", fd.Name.Name, twin.original, advice)
 			v := r.CreateViolation(file.RelPath, line, message)
 			v.WithCode(strings.TrimSpace(file.GetLine(line)))
 			v.WithSuggestion(suggestion)
