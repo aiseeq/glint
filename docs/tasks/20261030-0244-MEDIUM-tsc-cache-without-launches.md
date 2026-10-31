@@ -19,6 +19,6 @@
 - 2026-10-30 02:45 в работе — glint-master
 - 2026-10-30 03:16 note — glint-master: сдача 1: tsc TOTAL 10,8 с → 27 мс; ревью 1 — две цепочки extends (массив роняет правило), гонка stat/ключа; раунд 2 — review-tsc-stat-1.md
 - 2026-10-30 03:38 note — glint-master: 03:38 CET раунд 2 (общая tsconfigChain, stat до чтения, 21 потребитель 0 различий, tsc TOTAL 30 мс) принят по сути; раунд 3 бойцу 1030-0245: окно правки во время --listFilesOnly (racy mtime), каталоги node_modules вне каталога tsconfig. Бриф scratchpad review-tsc-stat-2.md
-- 2026-10-30 04:07 note — glint-master: 04:07 CET раунд 3 принят (racy mtime, node_modules вне каталога tsconfig, typeRoots): abcb83d в main, graft all rc=0; tsc TOTAL второго прогона 10,8 с → 23–28 мс, 21 потребитель 0 различий
+- 2026-10-30 04:07 note — glint-master: 04:07 CET раунд 3 принят (racy mtime, node_modules вне каталога tsconfig, typeRoots): ab167b4 в main, graft all rc=0; tsc TOTAL второго прогона 10,8 с → 23–28 мс, 21 потребитель 0 различий
 - 2026-10-30 04:07 на проверке — glint-master
-- 2026-10-30 04:21 готово — git-admin (session glint-master): git-admin 04:16 CET: abcb83d в origin/main; /home/aisee/bin/glint v1.83.7-149-g1202235; потребитель Б, второй glint check -r tsc --timing: 1089/1089 из кэша, tsc TOTAL 17 мс, No issues
+- 2026-10-30 04:21 готово — git-admin (session glint-master): git-admin 04:16 CET: ab167b4 в origin/main; /home/aisee/bin/glint v1.83.7-149-g1202235; потребитель Б, второй glint check -r tsc --timing: 1089/1089 из кэша, tsc TOTAL 17 мс, No issues

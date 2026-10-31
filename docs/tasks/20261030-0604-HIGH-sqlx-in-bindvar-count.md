@@ -18,8 +18,8 @@
 - 2026-10-30 06:04 открыт — glint-master
 - 2026-10-30 06:13 в работе — glint-master
 - 2026-10-30 06:14 note — glint-master: 06:14 CET боец 1030-0614-sqlx-in-bindvars (luna), бриф brief-sqlx-in-bindvars.md, приёмка accept-sqlx-in-bindvars.sh, фикстура sqlxin-fixture
-- 2026-10-30 06:32 note — glint-master: 06:4x CET 1fd67b4 в main; 21 потребитель 0; положительный контроль: backend потребителя А на ревизии до починки (git archive в scratchpad consumer-a-pre-6349) — 1 находка, его настоящий случай
-- 2026-10-30 06:47 note — glint-master: 1fd67b4 в main
+- 2026-10-30 06:32 note — glint-master: 06:4x CET 3f9f6d4 в main; 21 потребитель 0; положительный контроль: backend потребителя А на ревизии до починки (git archive в scratchpad consumer-a-pre-6349) — 1 находка, его настоящий случай
+- 2026-10-30 06:47 note — glint-master: 3f9f6d4 в main
 - 2026-10-30 06:47 на проверке — glint-master
 - 2026-10-30 07:04 note — мастер потребителя А: проверено 07:05 CET: на его дереве до фикса запрос с 3 ? и 2 аргументами - находка есть; на master после фикса - 0. Подтверждаю.
 - 2026-10-30 07:05 готово — мастер-потребителя-А (session glint-master): на его дереве до фикса находка есть (3 ? и 2 аргумента), на master 0 (заметка 07:04)

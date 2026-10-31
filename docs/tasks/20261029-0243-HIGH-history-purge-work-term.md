@@ -13,7 +13,7 @@
 
 ## Что сделать
 - Задание лида через git-admin/graft-master (29.10, Сон шаг 3): вычистить имя рабочего проекта из истории публичного glint и сделать force-push. Решение: decisions.md public-repo-names (28.10 09:53, «кроме прям рабочих проектов»), прочитано user-word.
-- Находки: термин рабочего проекта, 3 вхождения в 1545845 и 142058e (response_cast.go/_test.go, в HEAD — httprules/). Сообщения коммитов и тегов чисты; PR-ref pull/4 его не содержит.
+- Находки: термин рабочего проекта, 3 вхождения в 6afc1e0 и c8f4d46 (response_cast.go/_test.go, в HEAD — httprules/). Сообщения коммитов и тегов чисты; PR-ref pull/4 его не содержит.
 - Шаги: clone --mirror → filter-repo --replace-text → сверка (0 вхождений, деревья тегов кроме двух файлов равны) → ls-remote не сдвинулся → push --force heads+tags → локально fetch+reset; дерево Сна — switch --detach на новый коммит с сохранением его правки CLAUDE.md; хеши в docs/tasks — по commit-map обычным коммитом; graft install.
 - 768 идентификаторов рабочего кода — не термины, решение их не касается: фактом.
 
@@ -24,7 +24,7 @@
 ## Журнал
 - 2026-10-29 02:43 открыт — glint-master
 - 2026-10-29 02:43 в работе — glint-master
-- 2026-10-29 02:44 note — glint-master: Зеркало переписано filter-repo (замена вызова клиента рабочего проекта на api.listPayouts): 0 вхождений терминов, деревья main и 154 тегов отличаются только response_cast.go/_test.go, origin не сдвинулся; main 3b27b7d → 3b27b7d. Дальше force-push heads+tags.
-- 2026-10-29 02:46 note — glint-master: Force-push: 105 тегов отклонены GitHub (email privacy: gmail у автора тега и коммита); почта автора тега в 125 тегах gmail→noreply (git mktag, коммиты не тронуты), повторный push без отказов. Свежий клон: ветки+теги — 0 вхождений, remote == переписанное зеркало (main 3b27b7d). Остаток: refs/pull/4/merge (закрытый внешний PR, 04.10) держит старый main — пушем не снять. Локально fetch+reset на 3b27b7d; дерево Сна → 3b27b7d с его правкой CLAUDE.md; 43 хеша в 11 тикетах пересчитаны по commit-map.
-- 2026-10-29 03:36 на проверке — glint-master — Исполнено: история и теги на GitHub переписаны, локально a963cc3, установлено v1.83.7-83-ga963cc3. Независимая проверка — graft-master: graft leaks по всем веткам и тегам свежего клона.
-- 2026-10-29 03:37 готово — git-admin: git-admin 29.10: свежий клон github.com/aiseeq/glint (main a963cc3, 154 тега): git log --tags --branches -p по термину рабочего проекта — 0. refs/pull/4/head — 0; refs/pull/4/merge — 2 вхождения в 66 старых коммитах (служебное слияние закрытого PR, пушем не снять — решение пользователя: переоткрыть PR или поддержка GitHub).
+- 2026-10-29 02:44 note — glint-master: Зеркало переписано filter-repo (замена вызова клиента рабочего проекта на api.listPayouts): 0 вхождений терминов, деревья main и 154 тегов отличаются только response_cast.go/_test.go, origin не сдвинулся; main 64ae596 → 64ae596. Дальше force-push heads+tags.
+- 2026-10-29 02:46 note — glint-master: Force-push: 105 тегов отклонены GitHub (email privacy: gmail у автора тега и коммита); почта автора тега в 125 тегах gmail→noreply (git mktag, коммиты не тронуты), повторный push без отказов. Свежий клон: ветки+теги — 0 вхождений, remote == переписанное зеркало (main 64ae596). Остаток: refs/pull/4/merge (закрытый внешний PR, 04.10) держит старый main — пушем не снять. Локально fetch+reset на 64ae596; дерево Сна → 64ae596 с его правкой CLAUDE.md; 43 хеша в 11 тикетах пересчитаны по commit-map.
+- 2026-10-29 03:36 на проверке — glint-master — Исполнено: история и теги на GitHub переписаны, локально aa9e5e9, установлено v1.83.7-83-ga963cc3. Независимая проверка — graft-master: graft leaks по всем веткам и тегам свежего клона.
+- 2026-10-29 03:37 готово — git-admin: git-admin 29.10: свежий клон github.com/aiseeq/glint (main aa9e5e9, 154 тега): git log --tags --branches -p по термину рабочего проекта — 0. refs/pull/4/head — 0; refs/pull/4/merge — 2 вхождения в 66 старых коммитах (служебное слияние закрытого PR, пушем не снять — решение пользователя: переоткрыть PR или поддержка GitHub).

@@ -11,7 +11,7 @@
 - Если не делать:
 
 ## Что сделать
-- Паника правила в UseProjectFiles, RestoreProjectFiles и CacheProjectFiles выходила из analyzeProjectContained мимо обработчика паник (ревью релиза 83855ee..1e34fdc, гипотеза 2).
+- Паника правила в UseProjectFiles, RestoreProjectFiles и CacheProjectFiles выходила из analyzeProjectContained мимо обработчика паник (ревью релиза f9b8d6c..19cbf16, гипотеза 2).
 - Ждём: паника — именованная ошибка правила, его файловый проход не идёт, находки остальных правил остаются; запись проекта в кэш не идёт.
 
 ## Приёмка
