@@ -77,3 +77,5 @@
 - 2026-10-31 17:44 открыт — glint-master
 - 2026-10-31 20:14 в работе — glint-master
 - 2026-10-31 20:14 note — glint-master: боец Luna 1031-2014-sec-tls (F4+F5): бриф glint-measure/security/brief-tls.md, приёмка glint-measure/security/accept-tls.sh, дерево sec-tls
+- 2026-10-31 20:27 note — glint-master: ревью 1031-2014-sec-tls: регресс — якорь [,{] на той же строке теряет многострочный объект (new https.Agent({\n  rejectUnauthorized: false,\n})): установленный glint его находит, правка нет. Проба дополнена agent.js (нужны 3 и 6, не нужны 8 строка-литерал и 9 комментарий), приёмка accept-tls.sh дополнена; боец возвращён classом правка-по-ревью
+- 2026-10-31 20:41 note — glint-master: влито 11c1703 (боец 1031-2014-sec-tls, 3 захода): accept-tls.sh ok (probe: main.go:13 :16 client.js:1 :2 agent.js:3 :6; probe-nogo: agent.js:3 :6 t.ts:2); consumers 20 проектов 0 разниц (/home/aisee/.cache/worktrees/glint-measure/consumers-sec-tls.txt). Остаток: присваивание InsecureSkipVerify без типов не ловится; свойство, разнесённое по строкам (ключ/двоеточие/false), не ловится

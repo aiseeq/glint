@@ -77,3 +77,5 @@
 - 2026-10-31 17:44 открыт — glint-master
 - 2026-10-31 20:14 в работе — glint-master
 - 2026-10-31 20:14 note — glint-master: боец Luna 1031-2014-sec-tls (F4+F5): бриф glint-measure/security/brief-tls.md, приёмка glint-measure/security/accept-tls.sh, дерево sec-tls
+- 2026-10-31 20:32 note — glint-master: ревью 2-го захода 1031-2014-sec-tls: многострочный JS исправлен, но NeedsTypedGoProject = есть Go-файл, а раннер (cmd/glint/main.go selectTypedProjectRules) снимает typed-правило целиком при false: на корне без Go правило молчит (проба probe-nogo: установленный glint 3 находки, правка 0). Приёмка accept-tls.sh дополнена корнем без Go; боец возвращён
+- 2026-10-31 20:41 note — glint-master: влито 11c1703 (боец 1031-2014-sec-tls, 3 захода): accept-tls.sh ok (probe: main.go:13 :16 client.js:1 :2 agent.js:3 :6; probe-nogo: agent.js:3 :6 t.ts:2); consumers 20 проектов 0 разниц (/home/aisee/.cache/worktrees/glint-measure/consumers-sec-tls.txt). Остаток: присваивание InsecureSkipVerify без типов не ловится; свойство, разнесённое по строкам (ключ/двоеточие/false), не ловится
