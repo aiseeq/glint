@@ -300,3 +300,39 @@ func total(xs []int) int { return scoring.Sum[int](xs) }
 	}
 	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewMirrorCommentCopyRule(), files))
 }
+
+// A wrapper that calls its named source with a function literal of its own
+// keeps its own logic in the literal, not a copy of the source.
+func TestMirrorCommentCopyGoWrapperPassingLiteralToNamedSourceNotReported(t *testing.T) {
+	files := map[string]string{
+		"retry/retry.go": `package retry
+
+import "context"
+
+// Do runs f until it succeeds or ctx ends.
+func Do(ctx context.Context, f func() error) error {
+	for {
+		if err := f(); err == nil || ctx.Err() != nil {
+			return err
+		}
+	}
+}
+`,
+		"app/a.go": `package app
+
+import (
+	"context"
+
+	"example.com/rulestest/retry"
+)
+
+func fetch(url string) error { return nil }
+
+// retryFetch mirrors retry.Do for one URL.
+func retryFetch(ctx context.Context, url string) error {
+	return retry.Do(ctx, func() error { return fetch(url) })
+}
+`,
+	}
+	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewMirrorCommentCopyRule(), files))
+}

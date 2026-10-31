@@ -385,14 +385,19 @@ func passesFuncLit(call *ast.CallExpr) bool {
 
 // delegates reports a body of one statement that only calls a function or
 // method of another package: the implementation is already shared.
+// A call given a function literal is not shared: the literal is.
 func delegates(body *ast.BlockStmt, info *types.Info, own *types.Package) bool {
+	if call := soleCall(body); call == nil || passesFuncLit(call) {
+		return false
+	}
 	callee, _ := delegateCallee(body, info, own)
 	return callee != nil
 }
 
-func delegateCallee(body *ast.BlockStmt, info *types.Info, own *types.Package) (*types.Func, string) {
+// soleCall returns the call a body of one statement makes, or nil.
+func soleCall(body *ast.BlockStmt) *ast.CallExpr {
 	if len(body.List) != 1 {
-		return nil, ""
+		return nil
 	}
 	var call *ast.CallExpr
 	switch s := body.List[0].(type) {
@@ -403,7 +408,12 @@ func delegateCallee(body *ast.BlockStmt, info *types.Info, own *types.Package) (
 	case *ast.ExprStmt:
 		call, _ = s.X.(*ast.CallExpr)
 	}
-	if call == nil || passesFuncLit(call) {
+	return call
+}
+
+func delegateCallee(body *ast.BlockStmt, info *types.Info, own *types.Package) (*types.Func, string) {
+	call := soleCall(body)
+	if call == nil {
 		return nil, ""
 	}
 	fun := ast.Unparen(call.Fun)
