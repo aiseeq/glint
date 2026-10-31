@@ -171,9 +171,13 @@ func sqlContextFor(stack []ast.Node) sqlNodeContext {
 		case *ast.FuncLit:
 			outer := context.callable
 			context.callable = node
-			if i > 0 {
+			if i > 1 {
 				if call, ok := stack[i-1].(*ast.CallExpr); ok && call.Fun == node {
-					context.iifeScopes = append(context.iifeScopes, outer)
+					_, deferred := stack[i-2].(*ast.DeferStmt)
+					_, goroutine := stack[i-2].(*ast.GoStmt)
+					if !deferred && !goroutine {
+						context.iifeScopes = append(context.iifeScopes, outer)
+					}
 				}
 			}
 		case *ast.BlockStmt:
@@ -199,6 +203,14 @@ func (c *sqlTaintCheck) collectNode(n ast.Node) {
 		c.collectIf(node)
 	case *ast.BlockStmt:
 		c.recordValidatorResults(node.List)
+	case *ast.CallExpr:
+		for _, arg := range node.Args {
+			c.invalidateLiteralMap(arg)
+		}
+	case *ast.ReturnStmt:
+		for _, result := range node.Results {
+			c.invalidateLiteralMap(result)
+		}
 	}
 }
 
@@ -228,6 +240,13 @@ func (c *sqlTaintCheck) collectRange(node *ast.RangeStmt) {
 
 func (c *sqlTaintCheck) collectAssignment(node *ast.AssignStmt) {
 	c.recordAssign(node)
+	for _, rhs := range node.Rhs {
+		if typ := c.typeOf(rhs); typ != nil {
+			if _, mapType := typ.Underlying().(*types.Map); mapType {
+				c.invalidateLiteralMap(rhs)
+			}
+		}
+	}
 	for _, lhs := range node.Lhs {
 		if _, indexed := ast.Unparen(lhs).(*ast.IndexExpr); indexed {
 			if v := c.rootVar(lhs); v != nil {
@@ -253,6 +272,19 @@ func (c *sqlTaintCheck) collectAssignment(node *ast.AssignStmt) {
 		if pattern := c.regexpLiteral(node.Rhs[i]); pattern != "" {
 			c.regexpPatterns[obj] = pattern
 		}
+	}
+}
+
+func (c *sqlTaintCheck) invalidateLiteralMap(expr ast.Expr) {
+	if typ := c.typeOf(expr); typ != nil {
+		if _, ok := typ.Underlying().(*types.Map); !ok {
+			return
+		}
+	} else {
+		return
+	}
+	if v := c.rootVar(expr); v != nil {
+		c.literalMaps[v] = false
 	}
 }
 
@@ -918,7 +950,60 @@ func (c *sqlTaintCheck) httpRequestValue(call *ast.CallExpr) bool {
 	if isNamedType(receiver, "net/http", "Request") {
 		return name == "FormValue" || name == "PostFormValue" || name == "PathValue" || name == "Cookie"
 	}
-	return name == "Get" && (isNamedType(receiver, "net/url", "Values") || isNamedType(receiver, "net/http", "Header"))
+	return name == "Get" && (isNamedType(receiver, "net/url", "Values") || isNamedType(receiver, "net/http", "Header")) && c.httpRequestContainer(selector.X, make(map[*types.Var]bool))
+}
+
+func (c *sqlTaintCheck) httpRequestContainer(expr ast.Expr, visiting map[*types.Var]bool) bool {
+	expr = ast.Unparen(expr)
+	switch node := expr.(type) {
+	case *ast.CallExpr:
+		selector, ok := ast.Unparen(node.Fun).(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "Query" || len(node.Args) != 0 {
+			return false
+		}
+		fn, ok := c.info.Uses[selector.Sel].(*types.Func)
+		if !ok {
+			return false
+		}
+		sig, ok := fn.Type().(*types.Signature)
+		if !ok || sig.Recv() == nil || !isNamedType(sig.Recv().Type(), "net/url", "URL") {
+			return false
+		}
+		urlField, ok := ast.Unparen(selector.X).(*ast.SelectorExpr)
+		if !ok || urlField.Sel.Name != "URL" {
+			return false
+		}
+		return c.isHTTPRequest(urlField.X)
+	case *ast.SelectorExpr:
+		if selectorIsRequestField(node, c) {
+			return true
+		}
+	case *ast.Ident:
+		v := c.varOf(node)
+		if v == nil || visiting[v] {
+			return false
+		}
+		visiting[v] = true
+		defer delete(visiting, v)
+		for _, assigned := range c.assigned[v] {
+			if c.httpRequestContainer(assigned, visiting) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func selectorIsRequestField(selector *ast.SelectorExpr, c *sqlTaintCheck) bool {
+	if selector.Sel.Name != "Form" && selector.Sel.Name != "PostForm" && selector.Sel.Name != "Header" {
+		return false
+	}
+	return c.isHTTPRequest(selector.X)
+}
+
+func (c *sqlTaintCheck) isHTTPRequest(expr ast.Expr) bool {
+	typ := c.typeOf(expr)
+	return isNamedType(typ, "net/http", "Request")
 }
 
 func (c *sqlTaintCheck) httpRequestCookie(call ast.Expr) bool {

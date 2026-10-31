@@ -482,6 +482,22 @@ func run(db *sql.DB, request *http.Request) {
 			want: 1,
 		},
 		{
+			name: "request containers kept through local variables",
+			code: `package main
+import ("database/sql"; "net/http")
+func run(db *sql.DB, request *http.Request) {
+	values := request.URL.Query()
+	form := request.Form
+	postForm := request.PostForm
+	header := request.Header
+	db.Query("SELECT * FROM users WHERE name='" + values.Get("name") + "'")
+	db.Query("SELECT * FROM users WHERE name='" + form.Get("name") + "'")
+	db.Query("SELECT * FROM users WHERE name='" + postForm.Get("name") + "'")
+	db.Query("SELECT * FROM " + header.Get("X-Table"))
+}`,
+			want: 4,
+		},
+		{
 			name: "request form methods",
 			code: `package main
 import ("database/sql"; "net/http")
@@ -515,7 +531,7 @@ func run(db *sql.DB, request *http.Request) {
 			want: 1,
 		},
 		{
-			name: "typed values and headers",
+			name: "local typed values and headers are not request sources",
 			code: `package main
 import ("database/sql"; "net/http"; "net/url")
 func run(db *sql.DB) {
@@ -524,7 +540,7 @@ func run(db *sql.DB) {
 	db.Query("SELECT * FROM users WHERE name='" + values.Get("name") + "'")
 	db.Query("SELECT * FROM " + header.Get("X-Table"))
 }`,
-			want: 2,
+			want: 0,
 		},
 		{
 			name: "unrelated method with matching name",
@@ -753,4 +769,45 @@ func run(db *sql.DB, value string) {
 			assert.Len(t, violations, tt.want, "Code:\n%s", tt.code)
 		})
 	}
+}
+
+func TestSQLInjectionDeferredClosureRunsAfterWhitelistCanChange(t *testing.T) {
+	code := `package main
+import "database/sql"
+func run(db *sql.DB, value, replacement string) {
+	if value != "column" { return }
+	defer func() { db.Query("SELECT " + value) }()
+	value = replacement
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 1, "deferred closures run after the enclosing function returns")
+}
+
+func TestSQLInjectionEscapedLiteralMapIsNotAWhitelist(t *testing.T) {
+	code := `package main
+import "database/sql"
+func addValue(values map[string]bool, value string) { values[value] = true }
+func run(db *sql.DB, value, extra string) {
+	allowed := map[string]bool{"fixed": true}
+	addValue(allowed, extra)
+	if !allowed[value] { return }
+	db.Query("SELECT " + value)
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 1, "a map passed to a function may no longer have a finite literal key set")
+}
+
+func TestSQLInjectionLocalURLValuesAndHeadersAreNotRequestSources(t *testing.T) {
+	code := `package main
+import ("database/sql"; "net/http"; "net/url")
+func run(db *sql.DB) {
+	values := url.Values{"name": []string{"fixed"}}
+	header := http.Header{"X-Table": []string{"users"}}
+	parsed, _ := url.ParseQuery("name=fixed")
+	db.Query("SELECT * FROM users WHERE name='" + values.Get("name") + "'")
+	db.Query("SELECT * FROM " + header.Get("X-Table"))
+	db.Query("SELECT * FROM users WHERE name='" + parsed.Get("name") + "'")
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 0, "local values and parsed constants are not HTTP request data")
 }
