@@ -48,6 +48,7 @@ type MigrationDuplicateVersionRule struct {
 	seen map[string]map[string]migrationID // dir -> numeric version -> first migration
 }
 
+// ProjectFilesCacheExclusion keeps the rule out of the root-files cache: it reads more than the root files.
 func (*MigrationDuplicateVersionRule) ProjectFilesCacheExclusion() string {
 	return "checks for migration counterpart files on disk"
 }

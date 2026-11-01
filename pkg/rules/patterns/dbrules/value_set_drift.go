@@ -90,6 +90,7 @@ func NewValueSetDriftRule() *ValueSetDriftRule {
 	)}
 }
 
+// ProjectFilesCacheExclusion keeps the rule out of the root-files cache: it reads more than the root files.
 func (*ValueSetDriftRule) ProjectFilesCacheExclusion() string {
 	return "reads template files from disk while building its project index"
 }

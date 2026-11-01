@@ -1,13 +1,34 @@
 package shellrules
 
-func (*EnvKeyMissingFromDeployEnvRule) RootFilesOnlyProjectFiles()           {}
-func (*HandRolledDotenvParserRule) RootFilesOnlyProjectFiles()               {}
+// RootFilesOnlyProjectFiles declares that EnvKeyMissingFromDeployEnvRule reads only the root files it is given.
+func (*EnvKeyMissingFromDeployEnvRule) RootFilesOnlyProjectFiles() {}
+
+// RootFilesOnlyProjectFiles declares that HandRolledDotenvParserRule reads only the root files it is given.
+func (*HandRolledDotenvParserRule) RootFilesOnlyProjectFiles() {}
+
+// RootFilesOnlyProjectFiles declares that HostNetworkServiceBindsAllInterfacesRule reads only the root files it is given.
 func (*HostNetworkServiceBindsAllInterfacesRule) RootFilesOnlyProjectFiles() {}
-func (*certbotReloadHookRule) RootFilesOnlyProjectFiles()                    {}
-func (*shellCaptureRule) RootFilesOnlyProjectFiles()                         {}
-func (*shellCaseDriftRule) RootFilesOnlyProjectFiles()                       {}
-func (*shellCopyListRule) RootFilesOnlyProjectFiles()                        {}
-func (*shellProjectRule) RootFilesOnlyProjectFiles()                         {}
-func (*shellSiblingEnvRule) RootFilesOnlyProjectFiles()                      {}
-func (*shellSourceTextRule) RootFilesOnlyProjectFiles()                      {}
-func (*unitEnvRule) RootFilesOnlyProjectFiles()                              {}
+
+// RootFilesOnlyProjectFiles declares that certbotReloadHookRule reads only the root files it is given.
+func (*certbotReloadHookRule) RootFilesOnlyProjectFiles() {}
+
+// RootFilesOnlyProjectFiles declares that shellCaptureRule reads only the root files it is given.
+func (*shellCaptureRule) RootFilesOnlyProjectFiles() {}
+
+// RootFilesOnlyProjectFiles declares that shellCaseDriftRule reads only the root files it is given.
+func (*shellCaseDriftRule) RootFilesOnlyProjectFiles() {}
+
+// RootFilesOnlyProjectFiles declares that shellCopyListRule reads only the root files it is given.
+func (*shellCopyListRule) RootFilesOnlyProjectFiles() {}
+
+// RootFilesOnlyProjectFiles declares that shellProjectRule reads only the root files it is given.
+func (*shellProjectRule) RootFilesOnlyProjectFiles() {}
+
+// RootFilesOnlyProjectFiles declares that shellSiblingEnvRule reads only the root files it is given.
+func (*shellSiblingEnvRule) RootFilesOnlyProjectFiles() {}
+
+// RootFilesOnlyProjectFiles declares that shellSourceTextRule reads only the root files it is given.
+func (*shellSourceTextRule) RootFilesOnlyProjectFiles() {}
+
+// RootFilesOnlyProjectFiles declares that unitEnvRule reads only the root files it is given.
+func (*unitEnvRule) RootFilesOnlyProjectFiles() {}

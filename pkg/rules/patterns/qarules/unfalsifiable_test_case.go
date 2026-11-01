@@ -46,6 +46,7 @@ type UnfalsifiableTestCaseRule struct {
 	sharedPageErr  error
 }
 
+// ProjectFilesCacheExclusion keeps the rule out of the root-files cache: it reads more than the root files.
 func (*UnfalsifiableTestCaseRule) ProjectFilesCacheExclusion() string {
 	return "scans and reads layout and stylesheet files outside the walker input"
 }
