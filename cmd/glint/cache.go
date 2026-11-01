@@ -553,7 +553,11 @@ func resultCacheDir() (string, error) {
 // depends on. Go trees parsed by the project loader skip object resolution,
 // trees parsed by the walker do not, so their origin is part of it.
 func cacheStamp(cfg *core.Config, goTreesFromLoader, tolerant bool, coreFingerprint string) (string, error) {
-	config, err := yaml.Marshal(cfg)
+	// The severity filter, the failure threshold and the output format apply
+	// to the findings after analysis, so they stay out of the stamp.
+	analysis := *cfg
+	analysis.Settings.MinSeverity, analysis.Settings.FailOn, analysis.Settings.Output = "", "", ""
+	config, err := yaml.Marshal(&analysis)
 	if err != nil {
 		return "", fmt.Errorf("serialize configuration for the result cache: %w", err)
 	}

@@ -1,6 +1,7 @@
 # нелокальные правила идут по всем файлам на каждом прогоне: 8 с на проекте без изменений
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Вход
 - Мастер потребителя Б (perf-baseline, этап 1), 30.10 ~14:20 CET: glint в гейте — 19–23 с из ~60 с.
@@ -32,3 +33,5 @@
 ## Журнал
 - 2026-10-30 14:30 открыт — glint-master
 - 2026-10-30 14:35 note — glint-master: вариант 1 почти ничего не даёт: задача glint у потребителя Б с cache (graft пропускает дерево, уже прошедшее проверку), повтор и деплой после гейта glint не зовут. Значим для гейта только floor с правками — варианты 2 и 3; ждёт решения по приоритету в perf-baseline (этап 1 — замер)
+- 2026-11-01 08:44 note — glint-master: 01.11 akit-master: tk done (glint check . -s low -o json) после гейта (glint check .) ждёт полный прогон; приёмка akit-тикета /home/aisee/git/akit/docs/tasks/20261101-0256-LOW-tk-done-glint-reuse.md < 5 с. Пересмотр записи 30.10 14:35: повтор без изменений — это tk done после гейта, вариант 1 теперь нужен. Сделано сразу: (а) min_severity/fail_on/output вне штампа кэша (флаги -s/-o перебивали кэш друг друга), тест TestCacheStampIgnoresReportOnlySettings; (б) test-data-ignored-by-git обходил testdata на каждый тестовый файл (sc2go: 466 файлов, 7,1 с CPU) — память по каталогу на процесс, 66 мс, тест TestTestDataIgnoredWalksEachDirectoryOnce. sc2go полное попадание: 9,1 → 6,6 с wall; остаток — indexProjectFiles 2,3 с (последовательно, ~40 правил без CachedProjectFilesRule) и нелокальные правила по файлам 2,6 с CPU. Профиль /home/aisee/.cache/worktrees/glint-measure/sc2go-hit.pprof. Дальше — вариант 1 через противника замысла
+- 2026-11-01 08:44 в работе — glint-master

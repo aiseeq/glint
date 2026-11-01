@@ -514,3 +514,21 @@ func TestResultCacheStartsFromTheMainWorktree(t *testing.T) {
 	run("/other", "/main", "stamp-2", contexts)
 	assert.Equal(t, int32(5), rule.calls.Load(), "a cache of another stamp is no start")
 }
+
+// The severity filter, the failure threshold and the output format apply to
+// the findings after analysis: a gate run and a json run share one cache.
+func TestCacheStampIgnoresReportOnlySettings(t *testing.T) {
+	base := core.DefaultConfig()
+	stamp := func(cfg *core.Config) string {
+		got, err := cacheStamp(cfg, false, false, "core")
+		require.NoError(t, err)
+		return got
+	}
+	report := core.DefaultConfig()
+	report.Settings.MinSeverity, report.Settings.FailOn, report.Settings.Output = "high", "critical", "json"
+	assert.Equal(t, stamp(base), stamp(report))
+
+	excluded := core.DefaultConfig()
+	excluded.Settings.Exclude = append(excluded.Settings.Exclude, "generated/**")
+	assert.NotEqual(t, stamp(base), stamp(excluded), "what is analyzed stays in the stamp")
+}

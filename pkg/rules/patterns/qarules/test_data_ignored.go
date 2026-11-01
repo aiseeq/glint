@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -19,10 +20,34 @@ func init() {
 		core.SeverityHigh)})
 }
 
-type testDataIgnoredRule struct{ *rules.BaseRule }
+type testDataIgnoredRule struct {
+	*rules.BaseRule
+	// ignored keeps what each testdata directory holds that git ignores, for
+	// the life of the glint process: every test of a package names the same
+	// directory, and walking it per test file cost seconds on a large root.
+	// Keyed by absolute directory; a run does not change testdata or
+	// .gitignore.
+	mu      sync.Mutex
+	ignored map[string]func() ([]string, error)
+}
 
 // ReadsOtherFiles reports that the findings depend on testdata and .gitignore.
 func (r *testDataIgnoredRule) ReadsOtherFiles() bool { return true }
+
+// ignoredUnder lists the ignored files of a directory once.
+func (r *testDataIgnoredRule) ignoredUnder(dir string) ([]string, error) {
+	r.mu.Lock()
+	list, ok := r.ignored[dir]
+	if !ok {
+		if r.ignored == nil {
+			r.ignored = make(map[string]func() ([]string, error))
+		}
+		list = sync.OnceValues(func() ([]string, error) { return ignoredUnder(dir) })
+		r.ignored[dir] = list
+	}
+	r.mu.Unlock()
+	return list()
+}
 
 var (
 	testDataLiteral = regexp.MustCompile(`"(testdata/[^"]*)"`)
@@ -46,7 +71,7 @@ func (r *testDataIgnoredRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 				continue
 			}
 			checked[dir] = true
-			ignored, err := ignoredUnder(filepath.Join(pkgDir, dir))
+			ignored, err := r.ignoredUnder(filepath.Join(pkgDir, dir))
 			switch {
 			case err != nil:
 				out = append(out, r.CreateViolation(ctx.RelPath, i+1, dir+" could not be checked against .gitignore: "+err.Error()))
@@ -100,8 +125,11 @@ func ignoredUnder(dir string) ([]string, error) {
 	case !info.IsDir():
 		return nil, nil
 	}
-	return core.IgnoredFiles(dir)
+	return listIgnoredFiles(dir)
 }
+
+// listIgnoredFiles is core.IgnoredFiles; tests count its calls.
+var listIgnoredFiles = core.IgnoredFiles
 
 func firstOf(list []string, n int) []string {
 	if len(list) > n {

@@ -58,3 +58,34 @@ func TestGlob(t *testing.T) {
 	got := patterntest.ShellFindingsIn(t, "test-data-ignored-by-git", root, "report/idle_test.go", "keep/keep_test.go", "glob/glob_test.go")
 	assert.Equal(t, []string{"glob/glob_test.go:9", "report/idle_test.go:6"}, got)
 }
+
+// Every test of a package names the same testdata directory; on a large root
+// walking it once per test file took seconds, so a run walks it once.
+func TestTestDataIgnoredWalksEachDirectoryOnce(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o755))
+	files := map[string]string{
+		".gitignore":                  "*.rep\n",
+		"report/testdata/runs/a.rep":  "replay\n",
+		"report/testdata/runs/b.json": "{}\n",
+	}
+	var tests []string
+	for _, name := range []string{"a", "b", "c"} {
+		path := "report/" + name + "_test.go"
+		files[path] = "package report\n\nvar _ = \"testdata/runs/a.rep\"\n"
+		tests = append(tests, path)
+	}
+	patterntest.WriteFiles(t, root, files)
+	walks := 0
+	real := listIgnoredFiles
+	listIgnoredFiles = func(dir string) ([]string, error) {
+		walks++
+		return real(dir)
+	}
+	t.Cleanup(func() { listIgnoredFiles = real })
+
+	got := patterntest.ShellFindingsIn(t, "test-data-ignored-by-git", root, tests...)
+
+	assert.Equal(t, []string{"report/a_test.go:3", "report/b_test.go:3", "report/c_test.go:3"}, got)
+	assert.Equal(t, 1, walks)
+}
