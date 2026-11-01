@@ -1,6 +1,7 @@
 # Result cache rewrites the whole root file on every run, also when nothing changed
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Вход
 - Лид 01.11 09:22 CET (тикет лида /home/aisee/docs/tasks/20261029-1711-MEDIUM-snapper-cleanup-freeze.md): ~/.cache/glint/results — 438 МБ записи в /home за 45 минут (06:30–07:15), фризы snapper.
@@ -18,3 +19,7 @@
 
 ## Журнал
 - 2026-11-01 09:26 открыт — lead
+- 2026-11-01 09:43 в работе — glint-master
+- 2026-11-01 09:43 note — glint-master: бриф /home/aisee/.cache/worktrees/glint-measure/brief-cache-rewrite.md, приёмка accept-cache-rewrite.sh (повтор не меняет inode и содержимое файла кэша, mtime новее; правка файла переписывает, находки = --no-cache). Ловушка: gob кодирует map в случайном порядке — сравнение по содержанию структур, не по байтам. Дерево /home/aisee/.cache/worktrees/glint/cache-rewrite
+- 2026-11-01 10:09 note — glint-master: Luna 1101-0943 принято (26 мин): save() при равной по содержанию записи только Chtimes; карты отпечатков файлов хранятся одним набором (были 36,6 МБ из 51,7 МБ файла sc2go, расчёт после — 15,2 МБ). Ревью мастера: дефектов нет. Коммит 9b02b4d в ветке cache-rewrite. Проверка Terra (одна на тикет): verify-rewrite-brief.md → verdict-rewrite.md
+- 2026-11-01 10:28 note — glint-master: Terra 1101-1009-glint: ВЕРДИКТ готово (/home/aisee/.cache/worktrees/glint-measure/verdict-rewrite.md): файл кэша sc2go 51 916 729 → 15 277 748 байт; два повтора — inode и sha256 те же, mtime растёт; находки старой и новой сборки совпадают; параллельные прогоны ок; consumers 20/0/0. Влито: main 9b02b4d (ff, код 0). Дальше graft install.

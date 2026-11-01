@@ -1,6 +1,6 @@
 # нелокальные правила идут по всем файлам на каждом прогоне: 8 с на проекте без изменений
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -39,3 +39,4 @@
 - 2026-11-01 09:21 note — glint-master: Luna 1101-0846 принято (34 мин): sc2go повтор 6,80→3,87 с wall, CPU 9,3→6,2 с; glint 5,94→5,15 с. Аудит: 46 правил объявили RootFilesOnlyProjectFiles, исключены 4 (migration-duplicate-version os.Stat, unfalsifiable-test-case, value-set-drift чтение шаблонов, sql-child-rows-include-voided-parent ReadsOtherFiles). Ревью мастера: grep диска/env/времени по файлам объявленных правил чист. Коммит 7f7a4b6 в ветке nonlocal-floor. Проверка Terra (одна на тикет, покрывает и fa688b7): бриф verify-nonlocal-brief.md → verdict-nonlocal.md
 - 2026-11-01 09:37 note — glint-master: Terra 1101-0921-glint: вернуть — ts-test-outside-typecheck объявил RootFilesOnlyProjectFiles, но читает tsconfig extends (и вне корня) и конфиг раннера с диска; репро: правка только ../base.json оставляла старую находку из кэша. Остальное подтверждено: приёмка ok (sc2go 4,49 с), аудит прочих объявленных правил чист, сценарии 1,3–7 и fa688b7 совпали с --no-cache, consumers 20/0/0. Фикс мастера: правило объявляет ProjectFilesCacheExclusion, тест TestTSConfigReaderStaysOutOfTheRootFilesCache; репро Terra на пересобранном бинаре: кэш = --no-cache ([]). Других потребителей readJSONC/tsFileTypeChecked среди объявленных правил нет (вызовы — у правил с ReadsOtherFiles и внешним tsc). Влито ff в main.
 - 2026-11-01 09:39 note — glint-master: поправка к предыдущей записи: первое ff-влитие не прошло (main ушёл вперёд на 82905e0), установлен был ab94629 без этой работы; после graft worktree sync влито ff 42c97f3 и установлено. Проверка установленного: sc2go GOWORK=off, повтор -s low -o json после гейта — 2071/2071 файлов, 304 проектных правила из кэша, 3,69 с wall (было 9,1 с утром, 6,6 с после fa688b7)
+- 2026-11-01 09:43 готово — terra-1101-0921-glint (session glint-master): вердикт /home/aisee/.cache/worktrees/glint-measure/verdict-nonlocal.md: приёмка ok, аудит, сценарии 1,3–7 и fa688b7 совпали с --no-cache, consumers 20/0/0; дефект ts-test-outside-typecheck закрыт (ProjectFilesCacheExclusion), репро Terra на бинаре: кэш = --no-cache. Установлен 42c97f3+: sc2go повтор 3,69 с
