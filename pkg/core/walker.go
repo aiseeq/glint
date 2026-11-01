@@ -24,6 +24,7 @@ type Walker struct {
 	parseGo        bool
 	parseGoImports bool
 	goImportPaths  []string
+	requiredFile   func(string) bool
 	// gitignore строится в начале каждого обхода (settings.respect_gitignore);
 	// nil — учёт .gitignore выключен. Заполняется и читается только в
 	// goroutine обнаружения файлов, лока не требует.
@@ -106,6 +107,13 @@ func (w *Walker) WithGoImportPaths(paths []string) *Walker {
 	return w
 }
 
+// WithRequiredFilePredicate limits the walk to paths needed by at least one
+// enabled rule. A nil predicate keeps the usual analyzable-file selection.
+func (w *Walker) WithRequiredFilePredicate(predicate func(string) bool) *Walker {
+	w.requiredFile = predicate
+	return w
+}
+
 // WithWorkers sets the number of worker goroutines
 func (w *Walker) WithWorkers(n int) *Walker {
 	if n > 0 {
@@ -171,8 +179,8 @@ func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 				walkErrors <- err
 				continue
 			}
-			if err := filepath.Walk(scope, func(path string, info os.FileInfo, err error) error {
-				return w.visitPath(fileQueue, walkErrors, path, info, err)
+			if err := filepath.WalkDir(scope, func(path string, entry os.DirEntry, walkErr error) error {
+				return w.visitEntry(fileQueue, walkErrors, path, entry, walkErr)
 			}); err != nil {
 				walkErrors <- err
 			}
@@ -244,9 +252,8 @@ func (w *Walker) WalkSync() ([]*FileContext, []error) {
 	return contexts, errors
 }
 
-// visitPath is called for each entry during walk and queues the analyzable
-// files onto this walk's channel.
-func (w *Walker) visitPath(fileQueue chan<- string, walkErrors chan<- error, path string, info os.FileInfo, err error) error {
+// visitEntry filters a discovered path and queues files for analysis.
+func (w *Walker) visitEntry(fileQueue chan<- string, walkErrors chan<- error, path string, entry os.DirEntry, err error) error {
 	if err != nil {
 		// Returning the error would abort the entire filepath.Walk (its
 		// documented contract), silently losing every file after this point.
@@ -254,10 +261,12 @@ func (w *Walker) visitPath(fileQueue chan<- string, walkErrors chan<- error, pat
 		walkErrors <- fmt.Errorf("visit %q: %w", path, err)
 		return nil
 	}
+	name := entry.Name()
+	isDir := entry.IsDir()
 
 	// Skip directories we don't need to traverse
-	if info.IsDir() {
-		if w.shouldSkipDir(info.Name()) {
+	if isDir {
+		if w.shouldSkipDir(name) {
 			return filepath.SkipDir
 		}
 		if w.gitignore != nil {
@@ -273,6 +282,12 @@ func (w *Walker) visitPath(fileQueue chan<- string, walkErrors chan<- error, pat
 				walkErrors <- err
 			}
 		}
+		return nil
+	}
+
+	// Apply rule path requirements before extension checks; some analyzable
+	// extensionless files need to be opened just to identify their type.
+	if w.requiredFile != nil && !w.requiredFile(path) {
 		return nil
 	}
 
@@ -313,9 +328,17 @@ func (w *Walker) visitPath(fileQueue chan<- string, walkErrors chan<- error, pat
 		}
 		w.mu.Unlock()
 		if keep {
+			if _, err := entry.Info(); err != nil {
+				walkErrors <- fmt.Errorf("visit %q: %w", path, err)
+				return nil
+			}
 			// Отправка без лока: воркеры берут тот же лок на каждом файле.
 			fileQueue <- path
 		}
+		return nil
+	}
+	if _, err := entry.Info(); err != nil {
+		walkErrors <- fmt.Errorf("visit %q: %w", path, err)
 		return nil
 	}
 

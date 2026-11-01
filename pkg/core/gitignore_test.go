@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -14,6 +16,62 @@ func sortedWalkPaths(t *testing.T, root string, cfg *Config) []string {
 	paths := walkPaths(t, root, cfg)
 	sort.Strings(paths)
 	return paths
+}
+
+func TestGitignorePatternsAreAddedByDomain(t *testing.T) {
+	root := t.TempDir()
+	idx := &gitignoreIndex{root: root}
+	path := filepath.Join(root, "generated.go")
+	idx.addPatterns("other.go\n", nil)
+	idx.addPatterns("generated.go\n", nil)
+	ignored, err := idx.ignored(path, false)
+	require.NoError(t, err)
+	require.True(t, ignored)
+}
+
+func TestGitignoreDomainPatternsMatchFlatMatcher(t *testing.T) {
+	root := t.TempDir()
+	idx := &gitignoreIndex{root: root}
+	var flat []gitignore.Pattern
+	add := func(content string, domain []string) {
+		idx.addPatterns(content, domain)
+		for line := range strings.SplitSeq(content, "\n") {
+			if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "#") {
+				flat = append(flat, gitignore.ParsePattern(strings.TrimRight(line, "\r"), domain))
+			}
+		}
+	}
+	add("*.tmp\n/root.txt\nlogs/\n!logs/keep.tmp\n", nil)
+	add("!*.tmp\nsub/*.tmp\nlogs/keep.tmp\n", []string{"a"})
+	add("deep/*.tmp\n!deep/keep.tmp\n", []string{"a", "b"})
+	add("!*.tmp\n", []string{"other"})
+
+	paths := []struct {
+		name  string
+		isDir bool
+	}{
+		{name: "root.txt"},
+		{name: "a/file.tmp"},
+		{name: "a/keep.tmp"},
+		{name: "a/sub/file.tmp"},
+		{name: "a/logs", isDir: true},
+		{name: "a/logs/keep.tmp"},
+		{name: "a/logs/drop.tmp"},
+		{name: "a/b/deep/file.tmp"},
+		{name: "a/b/deep/keep.tmp"},
+		{name: "other/file.tmp"},
+	}
+	for _, tc := range paths {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(root, filepath.FromSlash(tc.name))
+			got, err := idx.ignored(path, tc.isDir)
+			require.NoError(t, err)
+			rel, err := filepath.Rel(root, path)
+			require.NoError(t, err)
+			want := gitignore.NewMatcher(flat).Match(strings.Split(rel, string(filepath.Separator)), tc.isDir)
+			require.Equal(t, want, got)
+		})
+	}
 }
 
 // Генерируемые файлы, перечисленные в .gitignore, не должны попадать в анализ:

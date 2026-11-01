@@ -22,7 +22,7 @@ import (
 // из уже пройденных веток не влияет на соседние.
 type gitignoreIndex struct {
 	root     string // абсолютный корень применения паттернов
-	patterns []gitignore.Pattern
+	patterns map[string][]gitignore.Pattern
 }
 
 // newGitignoreIndex строит индекс для projectRoot: находит корень репозитория
@@ -235,21 +235,22 @@ func (g *gitignoreIndex) addDir(dir string) error {
 // addPatterns разбирает содержимое ignore-файла с доменом domain (сегменты
 // каталога от корня индекса).
 func (g *gitignoreIndex) addPatterns(content string, domain []string) {
+	if g.patterns == nil {
+		g.patterns = make(map[string][]gitignore.Pattern)
+	}
+	key := strings.Join(domain, string(filepath.Separator))
 	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		g.patterns = append(g.patterns, gitignore.ParsePattern(line, domain))
+		g.patterns[key] = append(g.patterns[key], gitignore.ParsePattern(line, domain))
 	}
 }
 
 // ignored сообщает, исключает ли git этот путь. Сам корень не проверяется:
 // запуск glint на игнорируемом каталоге — явное решение пользователя.
 func (g *gitignoreIndex) ignored(path string, isDir bool) (bool, error) {
-	if len(g.patterns) == 0 {
-		return false, nil
-	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return false, fmt.Errorf("resolve %q: %w", path, err)
@@ -258,10 +259,21 @@ func (g *gitignoreIndex) ignored(path string, isDir bool) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if len(parts) == 0 {
+	if len(parts) == 0 || len(g.patterns) == 0 {
 		return false, nil
 	}
-	return gitignore.NewMatcher(g.patterns).Match(parts, isDir), nil
+	// Patterns only match files below the directory whose .gitignore declared
+	// them. Collect those domains from the repository root to the target's
+	// parent, preserving Git's last-match-wins order.
+	applicable := make([]gitignore.Pattern, 0)
+	for depth := range parts {
+		key := strings.Join(parts[:depth], string(filepath.Separator))
+		applicable = append(applicable, g.patterns[key]...)
+	}
+	if len(applicable) == 0 {
+		return false, nil
+	}
+	return gitignore.NewMatcher(applicable).Match(parts, isDir), nil
 }
 
 // split переводит абсолютный путь в сегменты относительно корня индекса;

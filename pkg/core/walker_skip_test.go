@@ -62,6 +62,24 @@ func TestDefaultSkipDirsStillApply(t *testing.T) {
 	assert.Equal(t, []string{"pkg/app.go"}, paths)
 }
 
+func TestRequiredFileWalkKeepsGitignoreBehavior(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		".gitignore":        "ignored/\n",
+		"ignored/CLAUDE.md": "ignored instructions\n",
+		"visible/CLAUDE.md": "visible instructions\n",
+		"visible/other.go":  "package visible\n",
+		"visible/other.md":  "not an instruction\n",
+	})
+
+	contexts, errs := NewWalker(root, DefaultConfig()).
+		WithRequiredFilePredicate(func(path string) bool { return InstructionKindOf(path) != NotInstruction }).
+		WalkSync()
+	require.Empty(t, errs)
+	require.Len(t, contexts, 1)
+	assert.Equal(t, filepath.Join("visible", "CLAUDE.md"), contexts[0].RelPath)
+}
+
 // Walking twice used to panic on closing already-closed channels.
 func TestWalkerCanRunTwice(t *testing.T) {
 	root := t.TempDir()

@@ -911,6 +911,30 @@ func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core
 	return prepareScopedAnalysis(loader, analysisRoot{dir: projectRoot}, cfg, enabledRules, useCache)
 }
 
+// requiredFilePredicate returns a union of the enabled rules' path predicates.
+// If any rule does not declare its inputs, the walk must retain its old scope.
+func requiredFilePredicate(enabledRules []rules.Rule) (func(string) bool, bool) {
+	if len(enabledRules) == 0 {
+		return nil, false
+	}
+	predicates := make([]rules.RequiredFileRule, 0, len(enabledRules))
+	for _, rule := range enabledRules {
+		predicate, ok := rule.(rules.RequiredFileRule)
+		if !ok {
+			return nil, false
+		}
+		predicates = append(predicates, predicate)
+	}
+	return func(path string) bool {
+		for _, predicate := range predicates {
+			if predicate.RequiresFile(path) {
+				return true
+			}
+		}
+		return false
+	}, true
+}
+
 // prepareScopedAnalysis walks the scopes of a root and loads what its rules
 // need.
 func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg *core.Config, enabledRules []rules.Rule, useCache bool) (*preparedRoot, error) {
@@ -928,6 +952,9 @@ func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg 
 	walker := core.NewWalker(projectRoot, cfg).WithGoParsing(projectRuleCount == 0).
 		WithGoImportPaths(typedProjectImports).WithScopes(root.walkScopes()).
 		WithExcludedInstructions(slices.ContainsFunc(enabledRules, rules.ReadsExcludedInstructions))
+	if predicate, ok := requiredFilePredicate(enabledRules); ok {
+		walker.WithRequiredFilePredicate(predicate)
+	}
 	walked, walker, err := walkWithWalker(walker)
 	prepared := &preparedRoot{walker: walker}
 	if err != nil {

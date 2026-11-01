@@ -44,6 +44,11 @@ func NewInstructionSizeRule() *InstructionSizeRule {
 	}
 }
 
+// RequiresFile reports whether path can be measured by this rule.
+func (r *InstructionSizeRule) RequiresFile(path string) bool {
+	return core.InstructionKindOf(path) != core.NotInstruction
+}
+
 // Configure reads the max_bytes and max_chars thresholds.
 func (r *InstructionSizeRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {

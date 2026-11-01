@@ -18,12 +18,23 @@ func TestWalkerVisitFileReportsFilesystemErrorAndContinues(t *testing.T) {
 	walkErr := errors.New("permission denied")
 	walkErrors := make(chan error, 1)
 
-	// Returning the error would abort the whole filepath.Walk; it must go to
+	// Returning the error would abort the whole filepath.WalkDir; it must go to
 	// the error channel instead so the rest of the tree is still discovered.
-	err := walker.visitPath(make(chan string, 1), walkErrors, "blocked", nil, walkErr)
+	err := walker.visitEntry(make(chan string, 1), walkErrors, "blocked", nil, walkErr)
 	require.NoError(t, err)
 	require.Len(t, walkErrors, 1)
 	require.ErrorIs(t, <-walkErrors, walkErr)
+}
+
+func TestWalkerDoesNotFollowDirectorySymlinks(t *testing.T) {
+	root := t.TempDir()
+	target := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(target, "hidden.go"), []byte("package hidden\n"), 0644))
+	require.NoError(t, os.Symlink(target, filepath.Join(root, "linked")))
+
+	contexts, errs := NewWalker(root, DefaultConfig()).WalkSync()
+	require.Empty(t, errs)
+	require.Empty(t, contexts)
 }
 
 func TestWalkerContinuesPastUnreadableDir(t *testing.T) {
@@ -41,7 +52,15 @@ func TestWalkerContinuesPastUnreadableDir(t *testing.T) {
 
 	contexts, errs := NewWalker(tmpDir, DefaultConfig()).WalkSync()
 
-	require.Len(t, errs, 1, "the unreadable directory must surface as an error")
+	require.NotEmpty(t, errs, "the unreadable directory must surface as an error")
+	var reportedUnreadableDir bool
+	for _, err := range errs {
+		if strings.Contains(err.Error(), blocked) {
+			reportedUnreadableDir = true
+			break
+		}
+	}
+	require.True(t, reportedUnreadableDir, "the unreadable directory must be named in an error")
 	require.Len(t, contexts, 1, "files after the unreadable directory must still be discovered")
 	assert.Equal(t, filepath.Join("zzz", "z.go"), contexts[0].RelPath)
 }

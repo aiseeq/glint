@@ -41,6 +41,15 @@ type TypedGoProjectRule interface {
 	TypedGoProjectImports() []string
 }
 
+// RequiredFileRule optionally limits the files a rule needs by path alone.
+// The predicate runs before a file is read or parsed. A check can use these
+// predicates to narrow its walk only when every enabled rule implements this
+// interface.
+type RequiredFileRule interface {
+	Rule
+	RequiresFile(path string) bool
+}
+
 // BaseRule provides common functionality for rules
 type BaseRule struct {
 	name            string
