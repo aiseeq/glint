@@ -6,6 +6,8 @@ import (
 	"io"
 	"slices"
 	"strings"
+
+	"github.com/aiseeq/glint/pkg/rules"
 )
 
 // rulePanic is a rule that panicked - a bug in that rule. glint check goes on
@@ -41,6 +43,21 @@ func (ps rulePanics) rules() []string {
 	}
 	slices.Sort(names)
 	return slices.Compact(names)
+}
+
+// The files a panic names when a rule chokes on the project files index:
+// without the index the rule judges no file at all.
+const (
+	projectFilesPanic      = "(project files)"
+	projectFilesCachePanic = "(project files cache)"
+)
+
+// lostIndex reports whether rule panicked while it indexed the project files
+// or saved that index.
+func (ps rulePanics) lostIndex(rule rules.Rule) bool {
+	return slices.ContainsFunc(ps, func(p *rulePanic) bool {
+		return p.rule == rule.Name() && (p.file == projectFilesPanic || p.file == projectFilesCachePanic)
+	})
 }
 
 // writeStacks writes every panic with its stack for the bug report.

@@ -20,3 +20,6 @@
 ## Журнал
 - 2026-10-29 23:52 открыт — glint-master
 - 2026-10-29 23:53 note — glint-master: фикс: indexProjectFiles и cachedProjectFilesState под recover; правило с паникой индекса выпадает из файлового прохода; паника кэша индекса — запись проекта не идёт. Оба теста зелёные, graft all 0.
+- 2026-11-01 02:39 note — glint-master: Сон 01.11: независимая проверка — боец Terra 1101-0239-glint, бриф /home/aisee/.cache/worktrees/glint-measure/security/verify-index-panic-brief.md, вердикт → verdict-index-panic.md
+- 2026-11-01 02:40 note — glint-master: проверка Terra 1101-0239-glint: ВЕРДИКТ вернуть — (1) паника CacheProjectFiles: правило остаётся в fileRules и идёт файловым проходом; (2) при непустом excludedInstructions readers собираются из enabledRules без фильтра по panics. Возврат в работу, фикс — glint-master
+- 2026-11-01 02:42 note — glint-master: фикс по возврату: паника CacheProjectFiles убирает правило из файлового прохода; readers исключённых инструкций без правил с паникой индекса (rulePanics.lostIndex). Тесты TestIndexPanicSkipsTheExcludedInstructionFiles и дополненный TestProjectFilesCachePanicIsNotCached: красные до, зелёные после; self-check cmd/glint 0

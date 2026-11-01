@@ -1435,7 +1435,9 @@ func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *cor
 	if err != nil || len(prepared.excludedInstructions) == 0 {
 		return violations, panics, err
 	}
-	readers := slices.DeleteFunc(slices.Clone(enabledRules), func(rule rules.Rule) bool { return !rules.ReadsExcludedInstructions(rule) })
+	readers := slices.DeleteFunc(slices.Clone(enabledRules), func(rule rules.Rule) bool {
+		return !rules.ReadsExcludedInstructions(rule) || panics.lostIndex(rule)
+	})
 	overrides, err := buildSeverityOverrides(cfg, readers)
 	if err != nil {
 		return nil, nil, err
@@ -1500,6 +1502,7 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 		}
 		if statePanic != nil {
 			panics = append(panics, statePanic)
+			fileRules = slices.DeleteFunc(fileRules, panics.lostIndex)
 		} else {
 			cache.storeProject(allViolations, project.SkippedPackages, state)
 		}
@@ -1575,7 +1578,7 @@ func indexProjectFiles(rule rules.Rule, rootFiles []*core.FileContext, cache *re
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			indexPanic = &rulePanic{rule: rule.Name(), file: "(project files)", value: recovered, stack: debug.Stack()}
+			indexPanic = &rulePanic{rule: rule.Name(), file: projectFilesPanic, value: recovered, stack: debug.Stack()}
 		}
 	}()
 	if cached, ok := rule.(rules.CachedProjectFilesRule); ok && cachedProject {
@@ -1600,7 +1603,7 @@ func cachedProjectFilesState(list []rules.Rule) (state map[string][]byte, stateP
 		data, err := func() (data []byte, err error) {
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					statePanic = &rulePanic{rule: rule.Name(), file: "(project files cache)", value: recovered, stack: debug.Stack()}
+					statePanic = &rulePanic{rule: rule.Name(), file: projectFilesCachePanic, value: recovered, stack: debug.Stack()}
 				}
 			}()
 			return cached.CacheProjectFiles()

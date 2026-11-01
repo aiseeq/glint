@@ -135,9 +135,13 @@ func TestProjectFilesCachePanicIsNotCached(t *testing.T) {
 		prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, cfg, list, true)
 		require.NoError(t, err)
 		require.NotNil(t, prepared.project, "run %d loads the project: nothing was cached", run)
-		_, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, cfg, prepared.project, prepared.cache)
+		violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, cfg, prepared.project, prepared.cache)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"cache-boom"}, panics.rules(), "run %d", run)
+		// Its file analysis is skipped, as after any index panic.
+		for _, v := range violations {
+			assert.NotEqual(t, "cache-boom", v.Rule, "run %d: %s", run, v.File)
+		}
 		require.NoError(t, prepared.cache.save())
 	}
 }

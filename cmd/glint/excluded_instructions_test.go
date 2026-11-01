@@ -57,6 +57,33 @@ func TestExcludedInstructionFilesReachOnlyInstructionSize(t *testing.T) {
 	assert.Empty(t, prepared.excludedInstructions)
 }
 
+type panickingIndexReader struct{ *everyFileRule }
+
+func (r *panickingIndexReader) UseProjectFiles([]*core.FileContext) { panic("index boom") }
+func (r *panickingIndexReader) ResetState()                         {}
+func (r *panickingIndexReader) ReadsExcludedInstructions()          {}
+
+// A rule whose index panicked judges no file, the excluded instruction files
+// neither: without its index it would judge them against nothing.
+func TestIndexPanicSkipsTheExcludedInstructionFiles(t *testing.T) {
+	module := t.TempDir()
+	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
+	writeModuleFile(t, module, "main.go", "package main\n\nfunc main() {}\n")
+	writeModuleFile(t, module, "CLAUDE.md", "# Rules\n")
+	cfg := core.DefaultConfig()
+	cfg.Settings.Exclude = []string{"*.md"}
+	boom := &panickingIndexReader{&everyFileRule{rules.NewBaseRule("index-boom", "patterns", "panics", core.SeverityLow)}}
+	list := []rules.Rule{boom}
+
+	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), module, cfg, list, false)
+	require.NoError(t, err)
+	require.NotEmpty(t, prepared.excludedInstructions)
+	violations, panics, err := analyzePrepared(prepared, list, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"index-boom"}, panics.rules())
+	assert.Empty(t, violations)
+}
+
 // The cache report counts the excluded instruction files among the analyzed
 // ones: they are analyzed and cached too, and a report of more unchanged
 // files than analyzed ones reads as a counting bug.
