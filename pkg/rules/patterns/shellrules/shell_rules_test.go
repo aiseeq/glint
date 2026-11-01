@@ -130,6 +130,112 @@ p=$(port_for blue)
 	}))
 }
 
+func TestShellCapturedFunctionCompoundRedirects(t *testing.T) {
+	assert.Empty(t, patterntest.ShellFindings(t, "shell-captured-function-writes-logs", map[string]string{
+		"oneline.sh": `#!/bin/bash
+job() {
+  local name=$1 brief=$2 out=$3 b tmp
+  b=/tmp/$name.md
+  tmp=$(mktemp "/tmp/.$name.XXXXXX") || return 1
+  if grep -qxF "$H" "$brief"; then cat "$brief"; else cat "$brief"; printf 'Result file: %s\\n' "$out"; fi > "$tmp" &&
+    mv "$tmp" "$b" || { rm -f "$tmp"; return 1; }
+  echo "$b"
+}
+id=$(job a /tmp/b /tmp/c) || exit 1
+echo "$id"
+grouped() {
+  local brief=$1 out=$2 tmp=$3
+  { cat "$brief"; printf 'Result file: %s\\n' "$out"; } > "$tmp" &&
+    echo "$tmp"
+}
+x=$(grouped a b c)
+echo "$x"
+`,
+		"multi.sh": `#!/bin/bash
+ml_if() {
+  local brief=$1 out=$2 tmp=$3
+  if grep -q x "$brief"; then
+    printf 'Result file: %s\\n' "$out"
+  fi > "$tmp"
+  echo "$tmp"
+}
+ml_group() {
+  local brief=$1 out=$2 tmp=$3
+  {
+    printf 'Result file: %s\\n' "$out"
+  } > "$tmp"
+  echo "$tmp"
+}
+ml_while() {
+  local out=$1 tmp=$2
+  while read -r l; do printf 'Result file: %s\\n' "$l"; done < "$out" > "$tmp"
+  echo "$tmp"
+}
+a=$(ml_if a b c); b=$(ml_group a b c); c=$(ml_while a b)
+echo "$a $b $c"
+`,
+	}))
+	assert.Equal(t, []string{"negative.sh:10", "negative.sh:16", "negative.sh:28", "negative.sh:4"}, patterntest.ShellFindings(t, "shell-captured-function-writes-logs", map[string]string{
+		"negative.sh": `#!/bin/bash
+plain_if() {
+  local out=$1
+  if [ -n "$out" ]; then printf 'Result file: %s\\n' "$out"; fi
+  echo "$out"
+}
+err_if() {
+  local out=$1 err=$2
+  if [ -n "$out" ]; then
+    printf 'Result file: %s\\n' "$out"
+  fi 2> "$err"
+  echo "$out"
+}
+in_while() {
+  local in=$1
+  while read -r l; do printf 'Result file: %s\\n' "$l"; done < "$in"
+  echo "$in"
+}
+piped_group() {
+  local out=$1
+  { printf 'Result file: %s\\n' "$out"; } | tee /dev/null
+  echo "$out"
+}
+nested_inner_only() {
+  local out=$1 tmp=$2
+  if [ -n "$out" ]; then
+    { printf 'Saved: %s\\n' "$out"; } > "$tmp"
+    printf 'Result file: %s\\n' "$out"
+  fi
+  echo "$out"
+}
+a=$(plain_if x); b=$(err_if x y); c=$(in_while x); d=$(piped_group x); e=$(nested_inner_only x y)
+echo "$a $b $c $d $e"
+`,
+	}))
+	assert.Equal(t, []string{"after-close.sh:16", "after-close.sh:4", "after-close.sh:9"}, patterntest.ShellFindings(t, "shell-captured-function-writes-logs", map[string]string{
+		"after-close.sh": `#!/bin/bash
+ tail_after_fi() {
+  local out=$1 tmp=$2
+  if [ -n "$out" ]; then printf 'Saved: %s\\n' "$out"; fi > "$tmp"; printf 'Result file: %s\\n' "$out"
+  echo "$out"
+}
+tail_after_brace_var() {
+  local out=$1 tmp=$2
+  echo ${out} > "$tmp"; printf 'Result file: %s\\n' "$out"
+  echo "$out"
+}
+tail_after_multiline() {
+  local out=$1 tmp=$2
+  {
+    printf 'Saved: %s\\n' "$out"
+  } > "$tmp"; printf 'Result file: %s\\n' "$out"
+  echo "$out"
+}
+a=$(tail_after_fi x y); b=$(tail_after_brace_var x y); c=$(tail_after_multiline x y)
+echo "$a $b $c"
+`,
+	}))
+}
+
 // A bare wait returns 0 whatever the jobs returned.
 func TestShellWaitIgnoresJobStatus(t *testing.T) {
 	// wait "$pid" || true is not reported: the jobs may pass their outcome

@@ -21,8 +21,13 @@ func WritesToStdout(command string) bool {
 // StdoutWrites returns the lines where a function echoes to stdout.
 func (src *ShellSource) StdoutWrites(fn ShellFunc) []int {
 	var lines []int
-	for _, l := range src.Body(fn) {
+	body := src.Body(fn)
+	redirected := RedirectedCompoundSegments(body)
+	for i, l := range body {
 		for _, seg := range Segments(l.Text) {
+			if redirected[i][seg.Offset] {
+				continue
+			}
 			if write := seg.Trimmed(); stdoutWrite.MatchString(write) && WritesToStdout(write) {
 				lines = append(lines, l.LineAt(seg.Offset))
 			}
