@@ -114,6 +114,8 @@ func BuildManifest(modulePath string, packages map[string]Package, environment m
 		ids[path] = pkg.BuildID
 	}
 	manifest := Manifest{Packages: make(map[string]string)}
+	commandPath := modulePath + "/cmd/glint"
+	linked := linkedInto(commandPath, packages)
 	coreParts := make([]string, 0, len(packages)+8)
 	for path, pkg := range packages {
 		if !withinModule(path, modulePath) {
@@ -123,11 +125,12 @@ func BuildManifest(modulePath string, packages map[string]Package, environment m
 			manifest.Packages[path] = pkg.BuildID
 			continue
 		}
-		if path != modulePath+"/cmd/glint" {
+		// Module packages the binary does not link (build tools, test
+		// helpers) cannot change what it reports.
+		if path != commandPath && linked[path] {
 			coreParts = append(coreParts, path+" "+pkg.BuildID)
 		}
 	}
-	commandPath := modulePath + "/cmd/glint"
 	command, ok := packages[commandPath]
 	if !ok {
 		return Manifest{}, fmt.Errorf("go list did not include %s", commandPath)
@@ -182,6 +185,23 @@ func VerifyStable(before, after Snapshot) error {
 	}
 	sort.Strings(changed)
 	return fmt.Errorf("package BuildIDs changed during the graft build: %s", strings.Join(changed, ", "))
+}
+
+// linkedInto returns the packages root imports, directly or transitively.
+func linkedInto(root string, packages map[string]Package) map[string]bool {
+	linked := make(map[string]bool)
+	pending := []string{root}
+	for len(pending) > 0 {
+		path := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		for _, imported := range packages[path].Imports {
+			if !linked[imported] {
+				linked[imported] = true
+				pending = append(pending, imported)
+			}
+		}
+	}
+	return linked
 }
 
 func withinModule(importPath, modulePath string) bool {

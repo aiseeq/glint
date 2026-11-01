@@ -74,3 +74,16 @@ func write(t *testing.T, root, name, content string) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 }
+
+func TestPackageOutsideTheBinaryLeavesTheCoreFingerprint(t *testing.T) {
+	root := fixtureModule(t)
+	write(t, root, "cmd/glint/main.go", "package main\nimport _ \"example.com/fixture/pkg/core\"\nfunc main() {}\n")
+	write(t, root, "tools/perf/perf.go", "package perf\nconst Value = 1\n")
+	before := capture(t, root)
+	write(t, root, "tools/perf/perf.go", "package perf\nconst Value = 2\n")
+	after := capture(t, root)
+	require.Equal(t, before.Manifest.Core, after.Manifest.Core, "a package the binary does not link")
+	write(t, root, "pkg/core/core.go", "package core\nconst Value = 2\n")
+	changed := capture(t, root)
+	require.NotEqual(t, after.Manifest.Core, changed.Manifest.Core, "a package the binary links")
+}

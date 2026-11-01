@@ -1,6 +1,6 @@
 # Result cache keyed by the build: every release reruns all rules everywhere
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -30,3 +30,4 @@
 - 2026-11-01 07:37 note — glint-master: ревью мастера 1-го захода Luna (принято приёмкой, 46 мин): вернуть — python в scripts/build-glint.sh (запрещён), строка ключа кэша в stderr на каждом запуске, вариативный параметр cacheStamp, нет тестов сценариев 2/3/4/6, projectState 'reused' при частичном попадании. Замер бойца: правка правила 21,31→10,86 с, правка ядра 21,83 с; consumers 0 различий. Приёмка ужесточена (строка ключа только под --timing, обычный go build → ключ по хэшу бинаря, без python). worker continue --class правка-по-ревью
 - 2026-11-01 08:18 note — glint-master: 2-й заход Luna принят; ревью мастера: цепочка append → slices.Concat. Коммит 237079b в ветке cache-key-per-rule. Проверка Terra (одна на тикет): worker 1101-0818-glint, бриф /home/aisee/.cache/worktrees/glint-measure/verify-cache-brief.md, вердикт → verdict-cache.md
 - 2026-11-01 08:27 note — glint-master: Terra 1101-0818-glint: вернуть — сценарий 6: при смене кода во время сборки glintbuild оставлял непроверенный бинарь в bin/glint (доверял старому манифесту, кэш давал old вместо new). Остальное подтверждено: сценарии 1–6 e2e совпали с --no-cache, consumers 20/0/0, sc2go: правка правила 10.31 с (проектные 304 cached), правка ядра 29.64 с (0 cached). Фикс мастера f812def: линковка во временный файл, перенос только после сверки, тесты publishVerified; репро Terra run-race.sh: сборка код 1, bin/glint прежний, B = --no-cache. Влито ff в main.
+- 2026-11-01 08:32 готово — terra-1101-0818-glint (session glint-master): вердикт /home/aisee/.cache/worktrees/glint-measure/verdict-cache.md: сценарии 1–5 e2e совпали с --no-cache, consumers 20/0/0; дефект сценария 6 закрыт f812def, репро Terra verify-cache/run-race.sh после фикса: сборка код 1, bin/glint прежний, кэш = --no-cache. Установлен 9cdcc3b; на akit кэш пережил переустановку ce43cc0→9cdcc3b (ключ rule fingerprints, файлы и проектные правила из кэша)
