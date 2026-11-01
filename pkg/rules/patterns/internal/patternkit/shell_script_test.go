@@ -62,3 +62,25 @@ func TestRedirectedCompoundSegments(t *testing.T) {
 	assert.Empty(t, got[18])
 	assert.Empty(t, got[19])
 }
+
+func TestStdoutIsRedirectedOnlyByStdoutRedirections(t *testing.T) {
+	for tail, want := range map[string]bool{
+		` > "$f"`:     true,
+		` 1>> "$f"`:   true,
+		` &> "$f"`:    true,
+		` >&2`:        true,
+		` 3> "$f"`:    false,
+		` 12> "$f"`:   false,
+		` 0> "$f"`:    false,
+		` 3>&2`:       false,
+		` <> "$f"`:    false,
+		` < "$f"`:     false,
+		` 2> "$f"`:    false,
+		` # > file`:   false,
+		` | tee "$f"`: false,
+		` 3>&1 >&2`:   true,
+		` <"$in" >&2`: true,
+	} {
+		assert.Equal(t, want, stdoutIsRedirected(tail), tail)
+	}
+}
