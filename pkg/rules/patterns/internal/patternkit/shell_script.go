@@ -726,21 +726,49 @@ func parseRedirect(text string, start int, descriptors map[int]bool, fd1Touched 
 			for i < len(text) && text[i] >= '0' && text[i] <= '9' {
 				i++
 			}
-			target, valid := decimalDescriptor(text[targetStart:i])
-			if valid {
-				captured, exists := descriptors[target]
-				if !exists {
-					captured = target != 2
-				}
-				setDescriptor(fd, captured, descriptors, fd1Touched)
+			if target, valid := decimalDescriptor(text[targetStart:i]); valid {
+				setDescriptor(fd, dupCaptured(descriptors, target), descriptors, fd1Touched)
 			}
 			return i, true
 		}
 		setDescriptor(fd, false, descriptors, fd1Touched)
 		return skipRedirectTarget(text, i), true
 	}
-	setDescriptor(fd, false, descriptors, fd1Touched)
-	return skipRedirectTarget(text, i), true
+	end := skipRedirectTarget(text, i)
+	setDescriptor(fd, fileTargetCaptured(descriptors, text[i:end]), descriptors, fd1Touched)
+	return end, true
+}
+
+// dupCaptured reports whether a duplicate of target reaches the captured
+// stdout. A descriptor the text has not set yet may be one the caller opened
+// on the capture, as in $(job 3>&1).
+func dupCaptured(descriptors map[int]bool, target int) bool {
+	captured, exists := descriptors[target]
+	if !exists {
+		captured = target != 2
+	}
+	return captured
+}
+
+// fileTargetCaptured reports whether a redirection to the file named by
+// target reaches the captured stdout: /dev/stdout, /dev/stderr and
+// /dev/fd/N reopen a descriptor rather than a file.
+func fileTargetCaptured(descriptors map[int]bool, target string) bool {
+	name := strings.Trim(strings.TrimSpace(target), `"'`)
+	switch name {
+	case "/dev/stdout":
+		return dupCaptured(descriptors, 1)
+	case "/dev/stderr":
+		return dupCaptured(descriptors, 2)
+	}
+	for _, prefix := range []string{"/dev/fd/", "/proc/self/fd/"} {
+		if number, ok := strings.CutPrefix(name, prefix); ok && number != "" && strings.Trim(number, "0123456789") == "" {
+			if fd, valid := decimalDescriptor(number); valid {
+				return dupCaptured(descriptors, fd)
+			}
+		}
+	}
+	return false
 }
 
 func setDescriptor(fd int, captured bool, descriptors map[int]bool, fd1Touched *bool) {
