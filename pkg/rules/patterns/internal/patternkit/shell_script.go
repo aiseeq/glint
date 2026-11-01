@@ -734,6 +734,15 @@ func parseRedirect(text string, start int, descriptors map[int]bool, fd1Touched 
 		setDescriptor(fd, false, descriptors, fd1Touched)
 		return skipRedirectTarget(text, i), true
 	}
+	for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+		i++
+	}
+	if strings.HasPrefix(text[i:], ">(") {
+		// A process substitution runs its command on the stdout the
+		// compound command had: its output stays in the capture.
+		setDescriptor(fd, true, descriptors, fd1Touched)
+		return compoundExpansionEnd(text, i), true
+	}
 	end := skipRedirectTarget(text, i)
 	setDescriptor(fd, fileTargetCaptured(descriptors, text[i:end]), descriptors, fd1Touched)
 	return end, true
