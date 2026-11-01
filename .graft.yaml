@@ -47,8 +47,9 @@ tasks:
       # HEAD on main before the build. The build runs as its own graft so it
       # stamps the new tag: GRAFT_VERSION of this task predates it. A tree
       # with changes or untracked files is not HEAD, so it gets no tag. HEAD
-      # is released when graft's own describe of it is more than a tag.
-      - sh: '[ "$(git rev-parse --abbrev-ref HEAD)" != main ] || [ -n "$(git status --porcelain)" ] || ! graft version --describe | grep -q -- - || graft release'
+      # is released unless it carries a plain vX.Y.Z tag, the check graft
+      # release itself refuses on (requireUnreleased).
+      - sh: '[ "$(git rev-parse --abbrev-ref HEAD)" != main ] || [ -n "$(git status --porcelain)" ] || git tag --points-at HEAD --list "v*" | grep -qE "^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$" || graft release'
       - sh: graft build
       - install: bin/glint
   install-gopath:
