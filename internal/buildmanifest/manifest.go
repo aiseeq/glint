@@ -1,6 +1,7 @@
 package buildmanifest
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,38 +16,29 @@ import (
 	"strings"
 )
 
-const GlintModule = "github.com/aiseeq/glint"
-
 type Manifest struct {
 	Core     string            `json:"core"`
 	Packages map[string]string `json:"packages"`
 }
 
 type Snapshot struct {
-	ModulePath string
-	Packages   map[string]Package
-	Manifest   Manifest
+	Packages map[string]Package
+	Manifest Manifest
 }
 
 type Package struct {
 	ImportPath string
 	Dir        string
 	BuildID    string
-	ModulePath string
-	Main       bool
 	Imports    []string
 	Sources    []string
 }
 
 type listedPackage struct {
-	ImportPath string
-	Dir        string
-	BuildID    string
-	Imports    []string
-	Module     *struct {
-		Path string
-		Main bool
-	}
+	ImportPath   string
+	Dir          string
+	BuildID      string
+	Imports      []string
 	GoFiles      []string
 	CgoFiles     []string
 	CFiles       []string
@@ -60,26 +52,20 @@ type listedPackage struct {
 }
 
 func Capture(ctx context.Context, root string) (Snapshot, error) {
-	cmd := exec.CommandContext(ctx, "go", "list", "-export", "-deps", "-json", "./...")
-	cmd.Dir = root
-	cmd.Stderr = os.Stderr
-	stdout, err := os.CreateTemp("", "glint-build-list-*.json")
+	listed, err := commandOutput(ctx, root, "go", "list", "-export", "-deps", "-json", "./...")
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("create go list output: %w", err)
-	}
-	defer func() {
-		_ = stdout.Close()
-		_ = os.Remove(stdout.Name())
-	}()
-	cmd.Stdout = stdout
-	if err := cmd.Run(); err != nil {
 		return Snapshot{}, fmt.Errorf("go list -export: %w", err)
 	}
-	if _, err := stdout.Seek(0, io.SeekStart); err != nil {
-		return Snapshot{}, fmt.Errorf("rewind go list output: %w", err)
+	module, err := commandOutput(ctx, root, "go", "list", "-m")
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("go list -m: %w", err)
+	}
+	modulePath := strings.TrimSpace(string(module))
+	if modulePath == "" || strings.Contains(modulePath, "\n") {
+		return Snapshot{}, fmt.Errorf("go list -m reported %q, want one main module", modulePath)
 	}
 	packages := make(map[string]Package)
-	decoder := json.NewDecoder(stdout)
+	decoder := json.NewDecoder(bytes.NewReader(listed))
 	for {
 		var listed listedPackage
 		err := decoder.Decode(&listed)
@@ -103,21 +89,10 @@ func Capture(ctx context.Context, root string) (Snapshot, error) {
 			Sources: slices.Concat(listed.GoFiles, listed.CgoFiles, listed.CFiles, listed.CXXFiles, listed.MFiles,
 				listed.HFiles, listed.SFiles, listed.SwigFiles, listed.SwigCXXFiles, listed.EmbedFiles),
 		}
-		if listed.Module != nil {
-			pkg.ModulePath, pkg.Main = listed.Module.Path, listed.Module.Main
-		}
+
 		packages[pkg.ImportPath] = pkg
 	}
-	modulePath := ""
-	for _, pkg := range packages {
-		if pkg.Main {
-			modulePath = pkg.ModulePath
-			break
-		}
-	}
-	if modulePath == "" {
-		return Snapshot{}, fmt.Errorf("go list did not report a main module")
-	}
+
 	goEnv, err := commandOutput(ctx, root, "go", "env", "-json", "GOFLAGS", "GOOS", "GOARCH", "CGO_ENABLED", "GOEXPERIMENT")
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("read build environment: %w", err)
@@ -126,14 +101,14 @@ func Capture(ctx context.Context, root string) (Snapshot, error) {
 	if err := json.Unmarshal(goEnv, &environment); err != nil {
 		return Snapshot{}, fmt.Errorf("decode build environment: %w", err)
 	}
-	manifest, err := BuildManifest(root, modulePath, packages, environment)
+	manifest, err := BuildManifest(modulePath, packages, environment)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{ModulePath: modulePath, Packages: packages, Manifest: manifest}, nil
+	return Snapshot{Packages: packages, Manifest: manifest}, nil
 }
 
-func BuildManifest(root, modulePath string, packages map[string]Package, environment map[string]string) (Manifest, error) {
+func BuildManifest(modulePath string, packages map[string]Package, environment map[string]string) (Manifest, error) {
 	ids := make(map[string]string, len(packages))
 	for path, pkg := range packages {
 		ids[path] = pkg.BuildID
@@ -206,7 +181,7 @@ func VerifyStable(before, after Snapshot) error {
 		return nil
 	}
 	sort.Strings(changed)
-	return fmt.Errorf("Go package BuildIDs changed during the graft build: %s", strings.Join(changed, ", "))
+	return fmt.Errorf("package BuildIDs changed during the graft build: %s", strings.Join(changed, ", "))
 }
 
 func withinModule(importPath, modulePath string) bool {
@@ -231,6 +206,6 @@ var readFile = os.ReadFile
 
 func commandOutput(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
+	cmd.Dir, cmd.Stderr = dir, os.Stderr
 	return cmd.Output()
 }

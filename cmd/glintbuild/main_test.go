@@ -14,7 +14,7 @@ func TestPublishVerifiedKeepsThePreviousBinaryWhenVerificationFails(t *testing.T
 	out := filepath.Join(t.TempDir(), "glint")
 	require.NoError(t, os.WriteFile(out, []byte("previous"), 0o755))
 	link := func(path string) error { return os.WriteFile(path, []byte("changed during build"), 0o755) }
-	stale := errors.New("Go package BuildIDs changed during the graft build")
+	stale := errors.New("package BuildIDs changed during the graft build")
 
 	err := publishVerified(out, link, func() error { return stale })
 

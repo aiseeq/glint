@@ -29,7 +29,7 @@ func main() {
 func build(ctx context.Context, version string) error {
 	root, err := os.Getwd()
 	if err != nil {
-		return err
+		return fmt.Errorf("working directory: %w", err)
 	}
 	before, err := buildmanifest.Capture(ctx, root)
 	if err != nil {
@@ -41,7 +41,7 @@ func build(ctx context.Context, version string) error {
 	}
 	manifest := base64.StdEncoding.EncodeToString(data)
 	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
-		return err
+		return fmt.Errorf("create bin: %w", err)
 	}
 	ldflags := fmt.Sprintf("-X main.version=%s -X main.cacheBuildManifest=%s", version, manifest)
 	link := func(out string) error {
