@@ -25,7 +25,24 @@ func TestRedirectedCompoundSegments(t *testing.T) {
 		{Text: "fi", starts: []int{0}, Nums: []int{15}},
 		{Text: "echo ${out} > file; printf after", starts: []int{0}, Nums: []int{16}},
 		{Text: "echo $(printf ')') > file", starts: []int{0}, Nums: []int{17}},
+		{Text: "echo fi > f; echo done; echo esac; echo {; echo }", starts: []int{0}, Nums: []int{18}},
+		{Text: "if true; then", starts: []int{0}, Nums: []int{19}},
+		{Text: "cat <<EOF", starts: []int{0}, Nums: []int{20}},
+		{Text: "fi > body.out", starts: []int{0}, Nums: []int{21}},
+		{Text: "EOF", starts: []int{0}, Nums: []int{22}},
+		{Text: "cat <<'QUOTED'", starts: []int{0}, Nums: []int{23}},
+		{Text: "done > body.out", starts: []int{0}, Nums: []int{24}},
+		{Text: "QUOTED", starts: []int{0}, Nums: []int{25}},
+		{Text: "cat <<-END", starts: []int{0}, Nums: []int{26}},
+		{Text: "\tesac > body.out", starts: []int{0}, Nums: []int{27}},
+		{Text: "\tEND", starts: []int{0}, Nums: []int{28}},
+		{Text: "fi", starts: []int{0}, Nums: []int{29}},
+		{Text: "if x; then printf x; fi 2>&1 >&2", starts: []int{0}, Nums: []int{30}},
+		{Text: "if x; then printf x; fi >&2 2>&1", starts: []int{0}, Nums: []int{31}},
 	}
+	assert.False(t, stdoutIsRedirected(" 2>&1 >&2"))
+	assert.True(t, stdoutIsRedirected(" >&2 2>&1"))
+	assert.NotContains(t, heredocBodyLines(lines), 29)
 	got := RedirectedCompoundSegments(lines)
 	assert.Equal(t, map[int]map[int]bool{
 		0:  {0: true, 10: true},
@@ -37,7 +54,11 @@ func TestRedirectedCompoundSegments(t *testing.T) {
 		9:  {2: true},
 		10: {0: true},
 		12: {2: true},
+		30: {0: true, 6: true, 21: true},
 	}, got)
 	assert.Empty(t, got[15])
 	assert.Empty(t, got[16])
+	assert.Empty(t, got[17])
+	assert.Empty(t, got[18])
+	assert.Empty(t, got[19])
 }

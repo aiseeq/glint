@@ -151,6 +151,18 @@ grouped() {
 x=$(grouped a b c)
 echo "$x"
 `,
+		"subshell.sh": `#!/bin/bash
+job() {
+  local out=$1 f=$2
+  if true; then
+    (cd /tmp && make)
+    printf 'Result file: %s\\n' "$out"
+  fi > "$f"
+  echo "$out"
+}
+x=$(job a b)
+echo "$x"
+`,
 		"multi.sh": `#!/bin/bash
 ml_if() {
   local brief=$1 out=$2 tmp=$3
@@ -232,6 +244,110 @@ tail_after_multiline() {
 }
 a=$(tail_after_fi x y); b=$(tail_after_brace_var x y); c=$(tail_after_multiline x y)
 echo "$a $b $c"
+`,
+	}))
+}
+
+func TestShellCapturedFunctionRedirectParserBoundaries(t *testing.T) {
+	assert.Equal(t, []string{
+		"brace_word.sh:5",
+		"done_argument.sh:5",
+		"esac_argument.sh:6",
+		"fi_argument.sh:5",
+		"fi_dup_order.sh:5",
+		"fi_dup_order.sh:6",
+		"heredoc_dash.sh:8",
+		"heredoc_valid.sh:7",
+	}, patterntest.ShellFindings(t, "shell-captured-function-writes-logs", map[string]string{
+		"brace_word.sh": `#!/bin/bash
+job() {
+  local out=abc f=/dev/null
+echo { > "$f"
+printf "Result file: %s\\n" "$out"
+echo } > "$f"
+  echo "$out"
+}
+x=$(job)
+echo "$x"
+`,
+		"done_argument.sh": `#!/bin/bash
+job() {
+  local out=abc f=/dev/null
+while read -r x; do
+  printf "Result file: %s\\n" "$out"
+  echo done > "$f"
+done < /dev/null
+  echo "$out"
+}
+x=$(job)
+echo "$x"
+`,
+		"esac_argument.sh": `#!/bin/bash
+job() {
+  local out=abc f=/dev/null
+case "$out" in
+ *)
+  printf "Result file: %s\\n" "$out"
+  echo esac > "$f"
+ ;;
+esac
+  echo "$out"
+}
+x=$(job)
+echo "$x"
+`,
+		"fi_argument.sh": `#!/bin/bash
+job() {
+  local out=abc f=/dev/null
+if true; then
+  printf "Result file: %s\\n" "$out"
+  echo fi > "$f"
+fi
+  echo "$out"
+}
+x=$(job)
+echo "$x"
+`,
+		"fi_dup_order.sh": `#!/bin/bash
+job() {
+  local out=abc f=/dev/null
+if true; then
+  printf "Result file: %s\\n" "$out"
+fi 2>&1 >&2
+  echo "$out"
+}
+x=$(job)
+echo "$x"
+`,
+		"heredoc_dash.sh": "#!/bin/bash\njob() {\n  local out=abc f=/dev/null\nif true; then\n\tcat <<-EOF > \"$f\"\n\tfi\n\tEOF\n  printf \"Result file: %s\\\\n\" \"$out\"\nfi\n  echo \"$out\"\n}\nx=$(job)\necho \"$x\"\n",
+		"heredoc_valid.sh": `#!/bin/bash
+job() {
+  local out=abc f=/dev/null
+cat <<EOF > "$f"
+if
+EOF
+printf "Result file: %s\\n" "$out"
+echo fi > "$f"
+  echo "$out"
+}
+x=$(job)
+echo "$x"
+`,
+	}))
+	assert.Empty(t, patterntest.ShellFindings(t, "shell-captured-function-writes-logs", map[string]string{
+		"silenced-extra.sh": `#!/bin/bash
+job() {
+  local out=abc
+  if true; then
+    printf "Result file: %s\\n" "$out"
+  fi >&2 2>&1
+  while false; do
+    printf "Result file: %s\\n" "$out"
+  done > /dev/null &
+  echo "$out"
+}
+x=$(job)
+echo "$x"
 `,
 	}))
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // ShellLine is one logical command line of a shell script or a make recipe:
@@ -383,8 +384,12 @@ type compoundFrame struct {
 // The first key is the index in lines; the second is the segment offset.
 func RedirectedCompoundSegments(lines []ShellLine) map[int]map[int]bool {
 	redirected := make(map[int]map[int]bool)
+	ignored := heredocBodyLines(lines)
 	var stack []compoundFrame
 	for lineIndex, line := range lines {
+		if ignored[lineIndex] {
+			continue
+		}
 		for _, segment := range Segments(line.Text) {
 			text := segment.Trimmed()
 			if text == "" {
@@ -393,15 +398,17 @@ func RedirectedCompoundSegments(lines []ShellLine) map[int]map[int]bool {
 			for _, syntax := range compoundTokens(text) {
 				switch syntax.word {
 				case "if", "while", "until", "for", "select", "case", "{", "(":
-					if syntax.word == "{" || syntax.word == "(" || compoundCommandPosition(text, syntax.start) {
+					if compoundCommandPosition(text, syntax.start) {
 						stack = append(stack, compoundFrame{syntax.word, lineIndex, segment.Offset})
 					}
 				case "fi", "done", "esac", "}", ")":
-					if len(stack) == 0 || !compoundCloseMatches(stack[len(stack)-1].kind, syntax.word) {
+					// An unquoted ")" is never an argument: it closes a subshell
+					// after its last command too, as in (cd dir && make).
+					if syntax.word != ")" && !compoundCommandPosition(text, syntax.start) || len(stack) == 0 || !compoundCloseMatches(stack[len(stack)-1].kind, syntax.word) {
 						continue
 					}
 
-					if isStdoutRedirect(text[syntax.end:]) {
+					if stdoutIsRedirected(text[syntax.end:]) {
 						markCompoundRange(redirected, lines, stack[len(stack)-1], lineIndex, segment.Offset)
 					}
 					stack = stack[:len(stack)-1]
@@ -531,25 +538,137 @@ func compoundCloseMatches(open, close string) bool {
 	}
 }
 
-func isStdoutRedirect(tail string) bool {
-	if pipe := unquotedPipe(tail); pipe >= 0 {
-		tail = tail[:pipe]
-	}
-	return FileRedirect.MatchString(tail) || stderrRedirect.MatchString(tail)
+type heredocDelimiter struct {
+	word      string
+	stripTabs bool
 }
 
-func unquotedPipe(text string) int {
-	var quote QuoteScanner
-	for i := 0; i < len(text); i++ {
-		if n := quote.Step(text, i); n > 0 {
-			i += n - 1
+var heredocRedirect = regexp.MustCompile(`<<(-?)\s*(?:'([^']*)'|"([^"]*)"|([^\s;|&]+))`)
+
+func heredocBodyLines(lines []ShellLine) map[int]bool {
+	ignored := make(map[int]bool)
+	var pending []heredocDelimiter
+	for i, line := range lines {
+		if len(pending) > 0 {
+			ignored[i] = true
+			content := line.Text
+			if pending[0].stripTabs {
+				content = strings.TrimLeft(content, "\t")
+			}
+			if content == pending[0].word {
+				pending = pending[1:]
+			}
 			continue
 		}
-		if text[i] == '|' {
-			return i
+		pending = append(pending, heredocDelimiters(line.Text)...)
+	}
+	return ignored
+}
+
+func heredocDelimiters(text string) []heredocDelimiter {
+	var delimiters []heredocDelimiter
+	for _, loc := range heredocRedirect.FindAllStringSubmatchIndex(WithoutComment(text), -1) {
+		start := loc[0]
+		if QuoteAt(text, start) != 0 || start > 0 && text[start-1] == '<' || loc[1] < len(text) && text[loc[1]] == '<' {
+			continue
+		}
+		word := ""
+		if loc[4] >= 0 {
+			word = text[loc[4]:loc[5]]
+		} else if loc[6] >= 0 {
+			word = text[loc[6]:loc[7]]
+		} else if loc[8] >= 0 {
+			word = text[loc[8]:loc[9]]
+		}
+		delimiters = append(delimiters, heredocDelimiter{word: word, stripTabs: text[start+2] == '-'})
+	}
+	return delimiters
+}
+
+func stdoutIsRedirected(tail string) bool {
+	var fd1, fd2 = true, false // fd1 is captured; fd2 is the original stderr.
+	var quote QuoteScanner
+	for i := 0; i < len(tail); {
+		if n := quote.Step(tail, i); n > 0 {
+			i += n
+			continue
+		}
+		if tail[i] == '|' || tail[i] == ';' || tail[i] == '&' && (i+1 >= len(tail) || tail[i+1] != '>') {
+			break
+		}
+		if next, changed := parseRedirect(tail, i, &fd1, &fd2); changed {
+			i = next
+		} else {
+			i++
 		}
 	}
-	return -1
+	return !fd1
+}
+
+func parseRedirect(text string, start int, fd1, fd2 *bool) (int, bool) {
+	i, fd := start, 1
+	if i < len(text) && (text[i] == '1' || text[i] == '2') && (i == 0 || !helpers.IsIdentifierChar(text[i-1])) {
+		fd = int(text[i] - '0')
+		i++
+	}
+	if i+1 < len(text) && text[i] == '&' && text[i+1] == '>' {
+		i += 2
+		if i < len(text) && text[i] == '>' {
+			i++
+		}
+		*fd1, *fd2 = false, false
+		return skipRedirectTarget(text, i), true
+	}
+	if i >= len(text) || text[i] != '>' {
+		return start, false
+	}
+	i++
+	if i < len(text) && text[i] == '>' {
+		i++
+	}
+	if i < len(text) && text[i] == '&' {
+		i++
+		if i < len(text) && (text[i] == '1' || text[i] == '2') {
+			target := text[i] - '0'
+			i++
+			if fd == 1 && target == 2 {
+				*fd1 = *fd2
+			} else if fd == 2 && target == 1 {
+				*fd2 = *fd1
+			}
+			return i, true
+		}
+		setDescriptor(fd, false, fd1, fd2)
+		return skipRedirectTarget(text, i), true
+	}
+	setDescriptor(fd, false, fd1, fd2)
+	return skipRedirectTarget(text, i), true
+}
+
+func setDescriptor(fd int, captured bool, fd1, fd2 *bool) {
+	if fd == 1 {
+		*fd1 = captured
+	} else {
+		*fd2 = captured
+	}
+}
+
+func skipRedirectTarget(text string, i int) int {
+	for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+		i++
+	}
+	var quote QuoteScanner
+	for i < len(text) {
+		if n := quote.Step(text, i); n > 0 {
+			i += n
+			continue
+		}
+		if text[i] == ' ' || text[i] == '\t' || text[i] == ';' || text[i] == '&' || text[i] == '|' {
+			break
+		}
+		i++
+	}
+	return i
 }
 
 // ShellFunc is a function of a script.
