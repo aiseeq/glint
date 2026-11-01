@@ -1,6 +1,7 @@
 # Result cache keyed by the build: every release reruns all rules everywhere
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Вход
 - akit-master 01.11 (тикет akit /home/aisee/git/akit/docs/tasks/20261101-0256-LOW-tk-done-glint-reuse.md): `cli:tk done` p95 5,4 → 34 с; ожидание — `glint check . -s low -o json`.
@@ -24,3 +25,8 @@
 ## Журнал
 - 2026-11-01 03:06 открыт — glint-master
 - 2026-11-01 04:07 note — glint-master: противник Terra (/home/aisee/.cache/worktrees/glint-measure/adversary-cache-key-per-rule.out): 8 сценариев. Корректность: (1) индекс RuleState и связи правил, (2) go:embed без правки .go, (3) replace/cgo вне go.mod/go.sum, (4) build tags/GOOS/ldflags, (5) удалённое или переименованное правило оставляет находки, (6) отпечаток расходится с собранным кодом. Выигрыш: (7) правка общей зависимости сбрасывает всё, (8) типизированная загрузка дорога и при частичном попадании. Пересмотр замысла: отпечаток пакета правила — BuildID из go list -export -deps (actionID/contentID самого Go: учитывает embed, tags, ldflags, replace, транзитивные зависимости) — закрывает 2,3,4; снимать его в той же сборке и сверять после линковки — 6; выдавать находки только текущих правил — 5; RuleState и правила, читающие чужой индекс, — в ключ их отпечатки — 1. Замер выигрыша (7,8): история 7 дней — из 184 коммитов с не-тестовым Go 145 трогают только пакеты правил; patternkit общий у patterns — мерить по выпускам. Все 8 — в приёмку тестами.
+- 2026-11-01 06:50 в работе — glint-master
+- 2026-11-01 06:50 note — glint-master: боец Luna 1101-0650-cache-key-per-rule (фича-инструмента): бриф /home/aisee/.cache/worktrees/glint-measure/brief-cache-key-per-rule.md (BuildID из go list -export, сверка после линковки, отпечаток ядра в штампе, по-правилу в записи, тесты на сценарии 1-6, замер 7-8 на sc2go), приёмка accept-cache-key-per-rule.sh, дерево /home/aisee/.cache/worktrees/glint/cache-key-per-rule
+- 2026-11-01 07:37 note — glint-master: ревью мастера 1-го захода Luna (принято приёмкой, 46 мин): вернуть — python в scripts/build-glint.sh (запрещён), строка ключа кэша в stderr на каждом запуске, вариативный параметр cacheStamp, нет тестов сценариев 2/3/4/6, projectState 'reused' при частичном попадании. Замер бойца: правка правила 21,31→10,86 с, правка ядра 21,83 с; consumers 0 различий. Приёмка ужесточена (строка ключа только под --timing, обычный go build → ключ по хэшу бинаря, без python). worker continue --class правка-по-ревью
+- 2026-11-01 08:18 note — glint-master: 2-й заход Luna принят; ревью мастера: цепочка append → slices.Concat. Коммит 237079b в ветке cache-key-per-rule. Проверка Terra (одна на тикет): worker 1101-0818-glint, бриф /home/aisee/.cache/worktrees/glint-measure/verify-cache-brief.md, вердикт → verdict-cache.md
+- 2026-11-01 08:27 note — glint-master: Terra 1101-0818-glint: вернуть — сценарий 6: при смене кода во время сборки glintbuild оставлял непроверенный бинарь в bin/glint (доверял старому манифесту, кэш давал old вместо new). Остальное подтверждено: сценарии 1–6 e2e совпали с --no-cache, consumers 20/0/0, sc2go: правка правила 10.31 с (проектные 304 cached), правка ядра 29.64 с (0 cached). Фикс мастера f812def: линковка во временный файл, перенос только после сверки, тесты publishVerified; репро Terra run-race.sh: сборка код 1, bin/glint прежний, B = --no-cache. Влито ff в main.
