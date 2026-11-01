@@ -27,6 +27,149 @@ type countingRule struct {
 	contextValue int
 }
 
+type indexedFindingRule struct {
+	*rules.BaseRule
+	indexCalls int
+	fileCalls  int
+	value      string
+}
+
+func (r *indexedFindingRule) ResetState()                         { r.indexCalls = 0 }
+func (r *indexedFindingRule) UseProjectFiles([]*core.FileContext) { r.indexCalls++ }
+func (*indexedFindingRule) RootFilesOnlyProjectFiles()            {}
+func (r *indexedFindingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	r.fileCalls++
+	return []*core.Violation{r.CreateViolation(ctx.RelPath, 1, "indexed finding "+r.value)}
+}
+
+type excludedInputFindingRule struct{ *indexedFindingRule }
+
+func (*excludedInputFindingRule) ProjectFilesCacheExclusion() string {
+	return "depends on external state"
+}
+
+type diskInputFindingRule struct{ *indexedFindingRule }
+
+func (*diskInputFindingRule) ReadsOtherFiles() bool { return true }
+
+type externalToolFindingRule struct{ *indexedFindingRule }
+
+func (*externalToolFindingRule) CheckTools([]*core.FileContext) error { return nil }
+
+func runIndexedCached(t *testing.T, dir string, rule rules.Rule, root, run []*core.FileContext) core.ViolationList {
+	t.Helper()
+	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	got, panics, err := analyzeProjectContained(run, root, []rules.Rule{rule}, core.DefaultConfig(), nil, cache)
+	require.NoError(t, err)
+	require.Empty(t, panics)
+	require.NoError(t, cache.save())
+	return got
+}
+
+func runIndexedUncached(t *testing.T, rule rules.Rule, root, run []*core.FileContext) core.ViolationList {
+	t.Helper()
+	got, panics, err := analyzeProjectContained(run, root, []rules.Rule{rule}, core.DefaultConfig(), nil, nil)
+	require.NoError(t, err)
+	require.Empty(t, panics)
+	return got
+}
+
+func newIndexedFindingRule() *indexedFindingRule {
+	return &indexedFindingRule{BaseRule: rules.NewBaseRule("indexed-finding", "patterns", "test indexed results", core.SeverityMedium)}
+}
+
+func newIndexedFindingRuleWithValue(value string) *indexedFindingRule {
+	rule := newIndexedFindingRule()
+	rule.value = value
+	return rule
+}
+
+func TestProjectFileRuleFindingsAreReusedForUnchangedRoot(t *testing.T) {
+	dir := t.TempDir()
+	root := []*core.FileContext{goContext(t, "a.go", "package a\n"), goContext(t, "b.go", "package b\n")}
+	firstRule := newIndexedFindingRule()
+	want := runIndexedCached(t, dir, firstRule, root, root)
+	require.Equal(t, 1, firstRule.indexCalls)
+	require.Equal(t, 2, firstRule.fileCalls)
+
+	secondRule := newIndexedFindingRule()
+	got := runIndexedCached(t, dir, secondRule, root, root)
+	assert.Equal(t, fingerprint(want), fingerprint(got))
+	assert.Zero(t, secondRule.indexCalls, "the hit skips building the index")
+	assert.Zero(t, secondRule.fileCalls, "the hit skips the per-file rule")
+}
+
+func TestPartialProjectFileRunDoesNotReplaceWholeRootFindings(t *testing.T) {
+	dir := t.TempDir()
+	root := []*core.FileContext{goContext(t, "a.go", "package a\n"), goContext(t, "b.go", "package b\n")}
+	full := newIndexedFindingRule()
+	want := runIndexedCached(t, dir, full, root, root)
+
+	changed := []*core.FileContext{root[0], goContext(t, "b.go", "package b // changed\n")}
+	partialRule := newIndexedFindingRule()
+	partial := runIndexedCached(t, dir, partialRule, changed, []*core.FileContext{changed[0]})
+	require.Len(t, partial, 1)
+	assert.Equal(t, 1, partialRule.indexCalls, "changed root input reruns on a partial request")
+
+	lastRule := newIndexedFindingRule()
+	got := runIndexedCached(t, dir, lastRule, changed, changed)
+	assert.Equal(t, fingerprint(want), fingerprint(got))
+	assert.Equal(t, 1, lastRule.indexCalls, "partial result was not written as a whole-root result")
+	assert.Equal(t, fingerprint(runIndexedUncached(t, newIndexedFindingRule(), changed, changed)), fingerprint(got))
+}
+
+func TestProjectFilesWithExternalInputsMatchUncachedResults(t *testing.T) {
+	root := []*core.FileContext{goContext(t, "a.go", "package a\n")}
+	for _, test := range []struct {
+		name string
+		make func(value string) rules.Rule
+	}{
+		{name: "environment, git, time, or external file", make: func(value string) rules.Rule {
+			return &excludedInputFindingRule{indexedFindingRule: newIndexedFindingRuleWithValue(value)}
+		}},
+		{name: "disk files and symlink targets", make: func(value string) rules.Rule {
+			return &diskInputFindingRule{indexedFindingRule: newIndexedFindingRuleWithValue(value)}
+		}},
+		{name: "external program", make: func(value string) rules.Rule {
+			return &externalToolFindingRule{indexedFindingRule: newIndexedFindingRuleWithValue(value)}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			first := test.make("old input")
+			runIndexedCached(t, dir, first, root, root)
+			second := test.make("changed input")
+			got := runIndexedCached(t, dir, second, root, root)
+			want := runIndexedUncached(t, test.make("changed input"), root, root)
+			assert.Equal(t, fingerprint(want), fingerprint(got))
+		})
+	}
+}
+
+func TestProjectFilesCacheRulesAreExplicitlyAudited(t *testing.T) {
+	for _, category := range rules.Categories() {
+		for _, rule := range rules.GetByCategory(category) {
+			if _, ok := rule.(rules.ProjectFilesRule); !ok {
+				continue
+			}
+			name := rule.Name()
+			_, external := rule.(rules.ExternalToolRule)
+			_, excluded := rule.(rules.ProjectFilesCacheExclusion)
+			reader, readsOtherFiles := rule.(rules.ReadsOtherFiles)
+			if readsOtherFiles && reader.ReadsOtherFiles() || external || excluded {
+				assert.False(t, rootProjectRuleCacheable(rule), "%s has external inputs", name)
+				if exclusion, ok := rule.(rules.ProjectFilesCacheExclusion); ok {
+					assert.NotEmpty(t, exclusion.ProjectFilesCacheExclusion(), "%s must explain its exclusion", name)
+				}
+				continue
+			}
+			assert.Implements(t, (*rules.RootFilesOnlyProjectFiles)(nil), rule, "%s must declare root-only inputs", name)
+			assert.True(t, rootProjectRuleCacheable(rule), "%s is audited for root-only inputs", name)
+		}
+	}
+}
+
 func newCountingRule(name string, readsOthers bool) *countingRule {
 	return &countingRule{
 		BaseRule:     rules.NewBaseRule(name, "patterns", "counts its runs", core.SeverityMedium),
@@ -531,4 +674,10 @@ func TestCacheStampIgnoresReportOnlySettings(t *testing.T) {
 	excluded := core.DefaultConfig()
 	excluded.Settings.Exclude = append(excluded.Settings.Exclude, "generated/**")
 	assert.NotEqual(t, stamp(base), stamp(excluded), "what is analyzed stays in the stamp")
+
+	severity := core.DefaultConfig()
+	category := severity.Categories["patterns"]
+	category.SeverityOverride = "high"
+	severity.Categories["patterns"] = category
+	assert.NotEqual(t, stamp(base), stamp(severity), "severity overrides change stored findings")
 }

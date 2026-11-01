@@ -90,6 +90,10 @@ func NewValueSetDriftRule() *ValueSetDriftRule {
 	)}
 }
 
+func (*ValueSetDriftRule) ProjectFilesCacheExclusion() string {
+	return "reads template files from disk while building its project index"
+}
+
 // UseProjectFiles indexes the sets of every file of the root.
 func (r *ValueSetDriftRule) UseProjectFiles(files []*core.FileContext) {
 	r.index = valueset.IndexFiles(files)

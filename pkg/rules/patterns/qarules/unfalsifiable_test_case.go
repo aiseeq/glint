@@ -46,6 +46,10 @@ type UnfalsifiableTestCaseRule struct {
 	sharedPageErr  error
 }
 
+func (*UnfalsifiableTestCaseRule) ProjectFilesCacheExclusion() string {
+	return "scans and reads layout and stylesheet files outside the walker input"
+}
+
 // NewUnfalsifiableTestCaseRule creates the rule.
 func NewUnfalsifiableTestCaseRule() *UnfalsifiableTestCaseRule {
 	return &UnfalsifiableTestCaseRule{
