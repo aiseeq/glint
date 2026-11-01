@@ -26,7 +26,7 @@ import (
 )
 
 // cacheFormat changes whenever the stored layout does.
-const cacheFormat = "glint-results-5"
+const cacheFormat = "glint-results-6"
 
 // resultCache keeps the findings of file-local rules (rules.FileLocal) per
 // file of one project root between runs. A file whose content is unchanged
@@ -52,15 +52,21 @@ type resultCache struct {
 	// The project findings are stored for the inputs of the typed load
 	// (core.GoProjectLoader.GoInputs); projectKeyed is false when this run
 	// could not identify them, and nothing is stored then.
-	previousProject     *projectEntry
-	projectInputs       string
-	projectRules        []string
-	projectFingerprints map[string]string
-	projectKeyed        bool
-	projectHit          *projectEntry
-	currentProject      *projectEntry
-	projectRulesCached  int
-	projectRulesRerun   int
+	previousProject      *projectEntry
+	projectInputs        string
+	projectRules         []string
+	projectFingerprints  map[string]string
+	projectKeyed         bool
+	projectHit           *projectEntry
+	currentProject       *projectEntry
+	projectRulesCached   int
+	projectRulesRerun    int
+	rootFingerprint      string
+	rootRuleFindings     map[string]map[string][]core.Violation
+	rootRuleFingerprints map[string]string
+	rootRuleHits         map[string]bool
+	rootContentHashes    map[string][sha256.Size]byte
+	rootFilesComplete    bool
 }
 
 // projectEntry holds the findings of the project rules, filtered like every
@@ -74,6 +80,9 @@ type projectEntry struct {
 	Skipped           []core.SkippedPackage
 	RuleState         map[string][]byte
 	StateFingerprints map[string]string
+	RootFingerprint   string
+	RootRules         map[string]string
+	RootViolations    map[string]map[string][]core.Violation
 }
 
 type cacheEntry struct {
@@ -353,6 +362,87 @@ func (c *resultCache) projectStateReusable(rule rules.Rule) bool {
 	return c.projectHit != nil && c.projectHit.RuleState[rule.Name()] != nil && c.projectHit.StateFingerprints[rule.Name()] == c.fingerprint(rule)
 }
 
+// keyRootFiles binds project-file findings to the exact loaded root inputs.
+// Hashes are supplied by the caller so files are never reread for this key.
+func (c *resultCache) keyRootFiles(files []*core.FileContext, hashes map[string][sha256.Size]byte, enabled []rules.Rule) {
+	c.rootContentHashes = hashes
+	type rootFileDigest struct {
+		path string
+		hash [sha256.Size]byte
+	}
+	entries := make([]rootFileDigest, 0, len(files))
+	for _, file := range files {
+		entries = append(entries, rootFileDigest{path: file.RelPath, hash: hashes[file.RelPath]})
+	}
+	slices.SortFunc(entries, func(a, b rootFileDigest) int { return strings.Compare(a.path, b.path) })
+	hasher := sha256.New()
+	for _, entry := range entries {
+		_, _ = hasher.Write([]byte(entry.path))
+		_, _ = hasher.Write([]byte{0})
+		_, _ = hasher.Write(entry.hash[:])
+	}
+	c.rootFingerprint = hex.EncodeToString(hasher.Sum(nil))
+	c.rootRuleFindings = make(map[string]map[string][]core.Violation)
+	c.rootRuleFingerprints = make(map[string]string)
+	c.rootRuleHits = make(map[string]bool)
+	for _, rule := range enabled {
+		if !rootProjectRuleCacheable(rule) {
+			continue
+		}
+		fingerprint := c.fingerprint(rule)
+		c.rootRuleFingerprints[rule.Name()] = fingerprint
+	}
+	if c.previousProject == nil || c.previousProject.RootFingerprint != c.rootFingerprint {
+		return
+	}
+	for _, rule := range enabled {
+		if !rootProjectRuleCacheable(rule) {
+			continue
+		}
+		fingerprint := c.rootRuleFingerprints[rule.Name()]
+		if c.previousProject.RootRules[rule.Name()] != fingerprint {
+			continue
+		}
+		c.rootRuleHits[rule.Name()] = true
+		c.rootRuleFindings[rule.Name()] = c.previousProject.RootViolations[rule.Name()]
+	}
+}
+
+func (c *resultCache) rootRuleReusable(rule rules.Rule) bool {
+	return c.rootRuleHits[rule.Name()]
+}
+
+func (c *resultCache) rootRuleFindingsFor(rule rules.Rule, contexts []*core.FileContext) core.ViolationList {
+	var found core.ViolationList
+	for _, ctx := range contexts {
+		violations := c.rootRuleFindings[rule.Name()][ctx.RelPath]
+		for i := range violations {
+			found = append(found, &violations[i])
+		}
+	}
+	return found
+}
+
+// rootProjectRuleCacheable is the audited allow policy for project-file
+// rules. Most indexes are pure functions of the supplied root contexts and
+// configuration. These exceptions have additional machine or disk inputs.
+func rootProjectRuleCacheable(rule rules.Rule) bool {
+	if _, ok := rule.(rules.ProjectFilesRule); !ok {
+		return false
+	}
+	if _, ok := rule.(rules.RootFilesOnlyProjectFiles); !ok {
+		return false
+	}
+	if reader, ok := rule.(rules.ReadsOtherFiles); ok && reader.ReadsOtherFiles() {
+		return false
+	}
+	if _, ok := rule.(rules.ExternalToolRule); ok {
+		return false
+	}
+	_, excluded := rule.(rules.ProjectFilesCacheExclusion)
+	return !excluded
+}
+
 // storeProject records the project findings of this run's load.
 func (c *resultCache) storeProject(found core.ViolationList, skipped []core.SkippedPackage, ruleState map[string][]byte) {
 	if !c.projectKeyed {
@@ -387,6 +477,10 @@ func (c *resultCache) storeProject(found core.ViolationList, skipped []core.Skip
 			}
 		}
 	}
+	rootFingerprint, rootRules, rootViolations := c.rootFingerprint, c.rootRuleFingerprints, c.rootRuleFindings
+	if !c.rootFilesComplete && c.previousProject != nil {
+		rootFingerprint, rootRules, rootViolations = c.previousProject.RootFingerprint, c.previousProject.RootRules, c.previousProject.RootViolations
+	}
 	c.currentProject = &projectEntry{
 		Inputs:            c.projectInputs,
 		Rules:             c.projectRules,
@@ -395,7 +489,52 @@ func (c *resultCache) storeProject(found core.ViolationList, skipped []core.Skip
 		Skipped:           append([]core.SkippedPackage(nil), skipped...),
 		RuleState:         ruleState,
 		StateFingerprints: stateFingerprints,
+		RootFingerprint:   rootFingerprint,
+		RootRules:         rootRules,
+		RootViolations:    rootViolations,
 	}
+}
+
+// storeRootProjectResults updates only whole-root rule results. Partial runs
+// leave the previous complete record untouched.
+func (c *resultCache) storeRootProjectResults(found map[string]core.ViolationList, fullRoot bool) {
+	if !fullRoot || c.rootFingerprint == "" {
+		return
+	}
+	entry := c.currentProject
+	if entry == nil && c.previousProject != nil {
+		copy := *c.previousProject
+		entry = &copy
+	}
+	if entry == nil {
+		entry = &projectEntry{}
+	}
+	entry.RootFingerprint = c.rootFingerprint
+	entry.RootRules = make(map[string]string, len(c.rootRuleHits)+len(found))
+	entry.RootViolations = make(map[string]map[string][]core.Violation, len(c.rootRuleFindings)+len(found))
+	for name, findings := range c.rootRuleFindings {
+		if !c.rootRuleHits[name] {
+			continue
+		}
+		entry.RootViolations[name] = findings
+		entry.RootRules[name] = c.rootRuleFingerprints[name]
+	}
+	for name, violations := range found {
+		byFile := make(map[string][]core.Violation)
+		for _, violation := range violations {
+			byFile[violation.File] = append(byFile[violation.File], *violation)
+		}
+		entry.RootViolations[name] = byFile
+		entry.RootRules[name] = c.fingerprintByName(name)
+	}
+	c.currentProject = entry
+}
+
+func (c *resultCache) fingerprintByName(name string) string {
+	if fingerprint := c.rootRuleFingerprints[name]; fingerprint != "" {
+		return fingerprint
+	}
+	return c.build
 }
 
 // projectState describes for --timing where the project findings came from.
@@ -429,7 +568,11 @@ func (c *resultCache) storeFile(relPath string, content [sha256.Size]byte, list 
 // concurrent run reads either the old cache or the new one.
 func (c *resultCache) save() error {
 	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(cacheContents{Stamp: c.stamp, Entries: c.current, Project: c.currentProject}); err != nil {
+	project := c.currentProject
+	if project == nil {
+		project = c.previousProject
+	}
+	if err := gob.NewEncoder(&buf).Encode(cacheContents{Stamp: c.stamp, Entries: c.current, Project: project}); err != nil {
 		return fmt.Errorf("encode result cache: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {

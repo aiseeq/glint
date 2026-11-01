@@ -48,6 +48,10 @@ type MigrationDuplicateVersionRule struct {
 	seen map[string]map[string]migrationID // dir -> numeric version -> first migration
 }
 
+func (*MigrationDuplicateVersionRule) ProjectFilesCacheExclusion() string {
+	return "checks for migration counterpart files on disk"
+}
+
 // migrationID is a migration file name without its direction.
 type migrationID struct {
 	version string // as written, leading zeros included

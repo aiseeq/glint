@@ -331,6 +331,20 @@ type CachedProjectFilesRule interface {
 	RestoreProjectFiles(data []byte) error
 }
 
+// ProjectFilesCacheExclusion marks a project-files rule whose index or
+// findings also depend on inputs outside the supplied root contexts.
+type ProjectFilesCacheExclusion interface {
+	ProjectFilesRule
+	ProjectFilesCacheExclusion() string
+}
+
+// RootFilesOnlyProjectFiles declares that a project-files rule derives its
+// findings only from the contexts supplied to UseProjectFiles and its config.
+type RootFilesOnlyProjectFiles interface {
+	ProjectFilesRule
+	RootFilesOnlyProjectFiles()
+}
+
 // ExternalToolRule is a rule that runs a program glint does not ship
 // (shellcheck, tsc). Before a root's files are analyzed, the check flow
 // hands it the files: it returns an error when they need the program and

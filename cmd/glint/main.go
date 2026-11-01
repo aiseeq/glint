@@ -1256,7 +1256,11 @@ func analyzeFilesContained(contexts []*core.FileContext, enabledRules []rules.Ru
 		contents = make([][sha256.Size]byte, len(contexts))
 		reuse = make([]map[string][]core.Violation, len(contexts))
 		for i, ctx := range contexts {
-			contents[i] = sha256.Sum256(ctx.Content)
+			if hash, ok := cache.rootContentHashes[ctx.RelPath]; ok {
+				contents[i] = hash
+			} else {
+				contents[i] = sha256.Sum256(ctx.Content)
+			}
 			reuse[i] = cache.lookup(ctx.RelPath, contents[i], cache.fingerprints(enabledRules))
 		}
 	}
@@ -1488,43 +1492,102 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 	if err != nil {
 		return nil, nil, err
 	}
-	var panics rulePanics
+	fullRoot := contextsCoverRoot(contexts, rootFiles)
+	keyRootFileCache(cache, rootFiles, enabledRules, fullRoot)
+	fileRules := nonGoProjectRules(enabledRules)
+	allViolations, panics, err := analyzeProjectRules(contexts, rootFiles, enabledRules, cfg, project, overrides, cache)
+	if err != nil {
+		return nil, panics, err
+	}
+	fileRules, panics, err = indexProjectRules(fileRules, rootFiles, cache, project, panics, allViolations)
+	if err != nil {
+		return nil, panics, err
+	}
+	cachedRootFindings := cachedRootProjectFindings(cache, enabledRules, contexts)
+	fileViolations, filePanics, err := analyzeFilesContained(contexts, fileRules, cfg, overrides, cache)
+	if err != nil {
+		return nil, nil, err
+	}
+	storeRootProjectFindings(cache, fileRules, fileViolations, filePanics, fullRoot)
+	allViolations = append(allViolations, cachedRootFindings...)
+	return append(allViolations, fileViolations...), append(filePanics, panics...), nil
+}
 
+func contextsCoverRoot(contexts, rootFiles []*core.FileContext) bool {
+	if len(contexts) != len(rootFiles) {
+		return false
+	}
+	seen := make(map[string]bool, len(contexts))
+	for _, ctx := range contexts {
+		seen[ctx.RelPath] = true
+	}
+	for _, ctx := range rootFiles {
+		if !seen[ctx.RelPath] {
+			return false
+		}
+	}
+	return true
+}
+
+func keyRootFileCache(cache *resultCache, rootFiles []*core.FileContext, enabledRules []rules.Rule, fullRoot bool) {
+	if cache == nil {
+		return
+	}
+	cache.rootFilesComplete = fullRoot
+	hashes := make(map[string][sha256.Size]byte, len(rootFiles))
+	for _, ctx := range rootFiles {
+		hashes[ctx.RelPath] = sha256.Sum256(ctx.Content)
+	}
+	cache.keyRootFiles(rootFiles, hashes, enabledRules)
+}
+
+func nonGoProjectRules(enabledRules []rules.Rule) []rules.Rule {
 	fileRules := make([]rules.Rule, 0, len(enabledRules))
 	for _, rule := range enabledRules {
 		if _, ok := rule.(rules.GoProjectRule); !ok {
 			fileRules = append(fileRules, rule)
 		}
 	}
-	cachedProject := cache != nil && cache.projectHit != nil
-	var allViolations core.ViolationList
-	if cachedProject {
-		allViolations = core.ViolationListOf(cache.projectFindings(enabledRules))
+	return fileRules
+}
+
+func analyzeProjectRules(contexts, rootFiles []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext, overrides severityOverrides, cache *resultCache) (core.ViolationList, rulePanics, error) {
+	cached := cache != nil && cache.projectHit != nil
+	var findings core.ViolationList
+	if cached {
+		findings = core.ViolationListOf(cache.projectFindings(enabledRules))
 	}
+	var panics rulePanics
 	if project != nil {
 		toRun := enabledRules
-		if cache != nil && cache.projectHit != nil {
+		if cached {
 			toRun = slices.DeleteFunc(slices.Clone(enabledRules), func(rule rules.Rule) bool {
-				_, ok := rule.(rules.GoProjectRule)
-				return !ok || cache.projectRuleReusable(rule)
+				_, isProjectRule := rule.(rules.GoProjectRule)
+				return !isProjectRule || cache.projectRuleReusable(rule)
 			})
 		}
-		newFindings, newPanics, analyzeErr := analyzeGoProjectRules(contexts, rootFiles, toRun, cfg, project, overrides)
-		allViolations = append(allViolations, newFindings...)
+		newFindings, newPanics, err := analyzeGoProjectRules(contexts, rootFiles, toRun, cfg, project, overrides)
+		findings = append(findings, newFindings...)
 		panics = append(panics, newPanics...)
-		err = analyzeErr
 		if err != nil {
 			return nil, panics, err
 		}
-	} else if !cachedProject && hasGoFiles(contexts) {
+	} else if !cached && hasGoFiles(contexts) {
 		for _, rule := range enabledRules {
 			if _, ok := rule.(rules.GoProjectRule); ok {
 				return nil, nil, fmt.Errorf("analyze Go project with rule %q: project context is nil", rule.Name())
 			}
 		}
 	}
+	return findings, panics, nil
+}
+
+func indexProjectRules(fileRules []rules.Rule, rootFiles []*core.FileContext, cache *resultCache, project *core.GoProjectContext, panics rulePanics, findings core.ViolationList) ([]rules.Rule, rulePanics, error) {
 	indexed := fileRules[:0:0]
 	for _, rule := range fileRules {
+		if cache != nil && cache.rootRuleReusable(rule) {
+			continue
+		}
 		indexPanic, err := indexProjectFiles(rule, rootFiles, cache)
 		if err != nil {
 			return nil, nil, err
@@ -1535,24 +1598,49 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 		}
 		indexed = append(indexed, rule)
 	}
-	fileRules = indexed
-	if cache != nil && project != nil && len(panics) == 0 {
-		state, statePanic, err := cachedProjectFilesState(fileRules)
-		if err != nil {
-			return nil, panics, err
-		}
-		if statePanic != nil {
-			panics = append(panics, statePanic)
-			fileRules = slices.DeleteFunc(fileRules, panics.lostIndex)
-		} else {
-			cache.storeProject(allViolations, project.SkippedPackages, state)
-		}
+	if cache == nil || project == nil || len(panics) != 0 {
+		return indexed, panics, nil
 	}
-	fileViolations, filePanics, err := analyzeFilesContained(contexts, fileRules, cfg, overrides, cache)
+	state, statePanic, err := cachedProjectFilesState(indexed)
 	if err != nil {
-		return nil, nil, err
+		return nil, panics, err
 	}
-	return append(allViolations, fileViolations...), append(filePanics, panics...), nil
+	if statePanic != nil {
+		panics = append(panics, statePanic)
+		indexed = slices.DeleteFunc(indexed, panics.lostIndex)
+	} else {
+		cache.storeProject(findings, project.SkippedPackages, state)
+	}
+	return indexed, panics, nil
+}
+
+func cachedRootProjectFindings(cache *resultCache, enabledRules []rules.Rule, contexts []*core.FileContext) core.ViolationList {
+	var found core.ViolationList
+	if cache == nil {
+		return found
+	}
+	for _, rule := range enabledRules {
+		if cache.rootRuleReusable(rule) {
+			found = append(found, cache.rootRuleFindingsFor(rule, contexts)...)
+		}
+	}
+	return found
+}
+
+func storeRootProjectFindings(cache *resultCache, fileRules []rules.Rule, violations core.ViolationList, panics rulePanics, fullRoot bool) {
+	if cache == nil {
+		return
+	}
+	rootFindings := make(map[string]core.ViolationList)
+	for _, rule := range fileRules {
+		if rootProjectRuleCacheable(rule) {
+			rootFindings[rule.Name()] = slices.DeleteFunc(slices.Clone(violations), func(v *core.Violation) bool { return v.Rule != rule.Name() })
+		}
+	}
+	for _, name := range panics.rules() {
+		delete(rootFindings, name)
+	}
+	cache.storeRootProjectResults(rootFindings, fullRoot)
 }
 
 func analyzeGoProjectRules(contexts, rootFiles []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext, overrides severityOverrides) (core.ViolationList, rulePanics, error) {
@@ -1615,6 +1703,9 @@ func analyzeGoProjectRules(contexts, rootFiles []*core.FileContext, enabledRules
 func indexProjectFiles(rule rules.Rule, rootFiles []*core.FileContext, cache *resultCache) (indexPanic *rulePanic, err error) {
 	projectFiles, ok := rule.(rules.ProjectFilesRule)
 	if !ok {
+		return nil, nil
+	}
+	if cache != nil && cache.rootRuleReusable(rule) {
 		return nil, nil
 	}
 	defer func() {
