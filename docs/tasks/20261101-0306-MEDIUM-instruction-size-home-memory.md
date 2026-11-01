@@ -1,6 +1,7 @@
 # glint check -r instruction-size on $HOME takes 14 GB and over 120 s
 
-Статус: открыт
+Статус: в работе
+Исполнитель: glint-master
 
 ## Вход
 - aguard-master 01.11: `aguard memory report -since 168h` — пик ~15 ГБ у `glint check -r instruction-size` в сессии lead 29.10 02:32 CET (группа 19 ГБ, крупнейший за неделю).
@@ -17,3 +18,5 @@
 
 ## Журнал
 - 2026-11-01 03:06 открыт — glint-master
+- 2026-11-01 04:05 в работе — glint-master
+- 2026-11-01 04:05 note — glint-master: причина: walker читает и разбирает каждый подходящий файл под корнем (isAnalyzableFile/processFile), в $HOME — кэш модулей и чужие репо; правилу нужны только файлы инструкций. План: необязательный предикат файлов у правила, обход читает только нужные, когда предикат есть у всех включённых. Боец Luna, бриф /home/aisee/.cache/worktrees/glint-measure/brief-instruction-size-home-memory.md, приёмка accept-instruction-size-home-memory.sh (maxrss < 1,5 ГБ на $HOME, те же находки на ~/.claude, ~/work, ~/git)
