@@ -681,3 +681,9 @@ func TestCacheStampIgnoresReportOnlySettings(t *testing.T) {
 	severity.Categories["patterns"] = category
 	assert.NotEqual(t, stamp(base), stamp(severity), "severity overrides change stored findings")
 }
+
+// ts-test-outside-typecheck follows tsconfig "extends" on the disk, also out
+// of the root: a change there alone left its old finding cached with the root.
+func TestTSConfigReaderStaysOutOfTheRootFilesCache(t *testing.T) {
+	assert.False(t, rootProjectRuleCacheable(frontendrules.NewTSTestOutsideTypecheckRule()))
+}

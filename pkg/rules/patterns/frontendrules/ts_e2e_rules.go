@@ -227,6 +227,13 @@ type TSTestOutsideTypecheckRule struct {
 	failure error
 }
 
+// ProjectFilesCacheExclusion keeps the rule out of the root-files cache: it
+// reads tsconfig files on the disk, extends chains out of the root and runner
+// configs included.
+func (*TSTestOutsideTypecheckRule) ProjectFilesCacheExclusion() string {
+	return "reads tsconfig extends chains and runner configs from disk, also outside the root"
+}
+
 // NewTSTestOutsideTypecheckRule creates the rule.
 func NewTSTestOutsideTypecheckRule() *TSTestOutsideTypecheckRule {
 	return &TSTestOutsideTypecheckRule{BaseRule: rules.NewBaseRule(

@@ -9,4 +9,3 @@ func (*TSNumberFieldForDecimalJSONRule) RootFilesOnlyProjectFiles()     {}
 func (*TSParamIgnoredRule) RootFilesOnlyProjectFiles()                  {}
 func (*TSPathNotRoutedRule) RootFilesOnlyProjectFiles()                 {}
 func (*TSPeriodBoundaryByHandRule) RootFilesOnlyProjectFiles()          {}
-func (*TSTestOutsideTypecheckRule) RootFilesOnlyProjectFiles()          {}
