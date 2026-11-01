@@ -44,9 +44,10 @@ tasks:
     deps: [self-check]
     run:
       # An install ships glint to every consumer, so it is the release: tag
-      # HEAD on main before the build, which stamps the new version.
+      # HEAD on main before the build. The build runs as its own graft so it
+      # stamps the new tag: GRAFT_VERSION of this task predates it.
       - sh: '[ "$(git rev-parse --abbrev-ref HEAD)" != main ] || git describe --exact-match --match "v[0-9]*" HEAD >/dev/null 2>&1 || graft release'
-      - task: build
+      - sh: graft build
       - install: bin/glint
   install-gopath:
     desc: install to GOPATH/bin with go install
