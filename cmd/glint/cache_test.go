@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/gob"
 	"maps"
 	"os"
 	"path/filepath"
@@ -198,6 +200,62 @@ func runCached(t *testing.T, dir, stamp string, contexts []*core.FileContext, li
 	return violations, cache
 }
 
+func TestResultCacheUnchangedSaveTouchesWithoutReplacing(t *testing.T) {
+	dir := t.TempDir()
+	rule := newCountingRule("counting-local", false)
+	contexts := []*core.FileContext{goContext(t, "a.go", "package a\n")}
+	first, firstCache := runCached(t, dir, "stamp", contexts, []rules.Rule{rule})
+	before, err := os.Stat(firstCache.path)
+	require.NoError(t, err)
+	beforeBytes, err := os.ReadFile(firstCache.path)
+	require.NoError(t, err)
+
+	secondCache, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	second, err := analyzeFiles(contexts, []rules.Rule{rule}, core.DefaultConfig(), nil, secondCache)
+	require.NoError(t, err)
+	oldTime := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(secondCache.path, oldTime, oldTime))
+	require.NoError(t, secondCache.save())
+
+	after, err := os.Stat(secondCache.path)
+	require.NoError(t, err)
+	afterBytes, err := os.ReadFile(secondCache.path)
+	require.NoError(t, err)
+	assert.True(t, os.SameFile(before, after), "unchanged cache keeps its inode")
+	assert.Equal(t, beforeBytes, afterBytes, "unchanged cache keeps its contents")
+	assert.True(t, after.ModTime().After(oldTime), "unchanged cache is touched for LRU pruning")
+	assert.Equal(t, fingerprint(first), fingerprint(second))
+
+	changed := []*core.FileContext{goContext(t, "a.go", "package a // changed\n")}
+	third, changedCache := runCached(t, dir, "stamp", changed, []rules.Rule{rule})
+	changedInfo, err := os.Stat(changedCache.path)
+	require.NoError(t, err)
+	assert.False(t, os.SameFile(after, changedInfo), "changed findings replace the cache")
+	uncached, err := analyzeFiles(changed, []rules.Rule{newCountingRule("counting-local", false)}, core.DefaultConfig(), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, fingerprint(uncached), fingerprint(third), "cached findings match a full run")
+}
+
+func TestCacheFingerprintSetsRoundTripAndDeduplicate(t *testing.T) {
+	shared := map[string]string{"rule-a": "fingerprint-a", "rule-b": "fingerprint-b"}
+	other := map[string]string{"rule-a": "fingerprint-a", "rule-c": "fingerprint-c"}
+	contents := cacheContents{Stamp: "stamp", Entries: map[string]cacheEntry{
+		"a.go": {Fingerprints: maps.Clone(shared)},
+		"b.go": {Fingerprints: maps.Clone(shared)},
+		"c.go": {Fingerprints: maps.Clone(other)},
+	}}
+	var expandedBytes, compactBytes bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&expandedBytes).Encode(contents))
+	compact := compactCacheFingerprints(contents)
+	require.Len(t, compact.FingerprintSets, 2)
+	require.NoError(t, gob.NewEncoder(&compactBytes).Encode(compact))
+	assert.Less(t, compactBytes.Len(), expandedBytes.Len(), "shared fingerprint maps are serialized once")
+	require.NoError(t, expandCacheFingerprints(&compact))
+	assert.Nil(t, compact.FingerprintSets)
+	assert.Equal(t, contents, compact)
+}
+
 func TestResultCacheReusesFindingsOfUnchangedFiles(t *testing.T) {
 	dir := t.TempDir()
 	local := newCountingRule("counting-local", false)
@@ -247,12 +305,37 @@ func TestResultCacheInvalidatesOnlyRulesWithChangedFingerprint(t *testing.T) {
 	}
 
 	first := run("package-A")
+	firstInfo, err := os.Stat(resultCachePath(dir, "/project", "build"))
+	require.NoError(t, err)
 	second := run("package-B")
+	secondInfo, err := os.Stat(resultCachePath(dir, "/project", "build"))
+	require.NoError(t, err)
+	assert.False(t, os.SameFile(firstInfo, secondInfo), "a changed rule fingerprint replaces the cache")
 	assert.Equal(t, fingerprint(first), fingerprint(second))
+	uncached, err := analyzeFiles(ctx, []rules.Rule{newCountingRule("fingerprinted", false)}, core.DefaultConfig(), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, fingerprint(uncached), fingerprint(second), "changed rule findings match a full run")
 	assert.Equal(t, int32(2), rule.calls.Load(), "a package change reruns its findings")
 	third := run("package-B")
 	assert.Equal(t, fingerprint(second), fingerprint(third))
 	assert.Equal(t, int32(2), rule.calls.Load(), "the rebuilt package now reuses its findings")
+}
+
+func TestResultCacheChangedStampRewritesAndMatchesUncached(t *testing.T) {
+	dir := t.TempDir()
+	ctx := []*core.FileContext{goContext(t, "a.go", "package a\n")}
+	rule := newCountingRule("counting-local", false)
+	first, cache := runCached(t, dir, "config-A", ctx, []rules.Rule{rule})
+	firstInfo, err := os.Stat(cache.path)
+	require.NoError(t, err)
+	second, nextCache := runCached(t, dir, "config-B", ctx, []rules.Rule{newCountingRule("counting-local", false)})
+	secondInfo, err := os.Stat(nextCache.path)
+	require.NoError(t, err)
+	assert.False(t, os.SameFile(firstInfo, secondInfo), "a changed config stamp replaces the cache")
+	assert.Equal(t, fingerprint(first), fingerprint(second))
+	uncached, err := analyzeFiles(ctx, []rules.Rule{newCountingRule("counting-local", false)}, core.DefaultConfig(), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, fingerprint(uncached), fingerprint(second), "changed config findings match a full run")
 }
 
 func TestResultCacheEmitsOnlyEnabledRuleFindings(t *testing.T) {

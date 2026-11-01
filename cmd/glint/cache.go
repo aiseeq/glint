@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/gob"
 	"encoding/hex"
 	"errors"
@@ -26,7 +27,7 @@ import (
 )
 
 // cacheFormat changes whenever the stored layout does.
-const cacheFormat = "glint-results-6"
+const cacheFormat = "glint-results-7"
 
 // resultCache keeps the findings of file-local rules (rules.FileLocal) per
 // file of one project root between runs. A file whose content is unchanged
@@ -44,6 +45,7 @@ type resultCache struct {
 	ruleFingerprints map[string]string
 	// previous is what the last run stored, by path relative to the root.
 	previous map[string]cacheEntry
+	loaded   bool
 	// current is what this run stores: only the files it analyzed, so files
 	// that are gone drop out.
 	current map[string]cacheEntry
@@ -86,17 +88,19 @@ type projectEntry struct {
 }
 
 type cacheEntry struct {
-	Content      [sha256.Size]byte
-	Fingerprints map[string]string
+	Content        [sha256.Size]byte
+	Fingerprints   map[string]string
+	FingerprintSet int
 	// Findings by rule name, after exceptions, suppression and severity
 	// overrides — all of which the file and the stamp decide.
 	Rules map[string][]core.Violation
 }
 
 type cacheContents struct {
-	Stamp   string
-	Entries map[string]cacheEntry
-	Project *projectEntry
+	Stamp           string
+	Entries         map[string]cacheEntry
+	Project         *projectEntry
+	FingerprintSets []map[string]string
 }
 
 // openRootCache opens the result cache of a root walked over scopes: a run
@@ -235,9 +239,13 @@ func (c *resultCache) read(path string) (found bool, err error) {
 	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&stored); err != nil {
 		return false, fmt.Errorf("decode result cache %s: %w", path, err)
 	}
+	if err := expandCacheFingerprints(&stored); err != nil {
+		return false, fmt.Errorf("decode result cache %s: %w", path, err)
+	}
 	if stored.Stamp == c.stamp {
 		c.previous = stored.Entries
 		c.previousProject = stored.Project
+		c.loaded = true
 		now := time.Now()
 		if err := os.Chtimes(path, now, now); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return false, fmt.Errorf("mark result cache used: %w", err)
@@ -567,12 +575,22 @@ func (c *resultCache) storeFile(relPath string, content [sha256.Size]byte, list 
 // save writes this run's entries. The file is replaced atomically, so a
 // concurrent run reads either the old cache or the new one.
 func (c *resultCache) save() error {
-	var buf bytes.Buffer
 	project := c.currentProject
 	if project == nil {
 		project = c.previousProject
 	}
-	if err := gob.NewEncoder(&buf).Encode(cacheContents{Stamp: c.stamp, Entries: c.current, Project: project}); err != nil {
+	contents := cacheContents{Stamp: c.stamp, Entries: c.current, Project: project}
+	if c.loaded && cacheContentsEqual(contents, cacheContents{Stamp: c.stamp, Entries: c.previous, Project: c.previousProject}) {
+		now := time.Now()
+		if err := os.Chtimes(c.path, now, now); err == nil {
+			return c.prune()
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("mark result cache used: %w", err)
+		}
+	}
+	contents = compactCacheFingerprints(contents)
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(contents); err != nil {
 		return fmt.Errorf("encode result cache: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
@@ -590,6 +608,151 @@ func (c *resultCache) save() error {
 	if err != nil {
 		return errors.Join(fmt.Errorf("write result cache: %w", err), os.Remove(tmp.Name()))
 	}
+	return c.prune()
+}
+
+// cacheContentsEqual compares the stored data while treating nil and empty
+// slices as the same content. Gob decodes empty slices as nil, and both have
+// identical cache semantics.
+func cacheContentsEqual(a, b cacheContents) bool {
+	return cacheValuesEqual(reflect.ValueOf(a), reflect.ValueOf(b))
+}
+
+func cacheValuesEqual(a, b reflect.Value) bool {
+	if !a.IsValid() || !b.IsValid() {
+		return a.IsValid() == b.IsValid()
+	}
+	if a.Type() != b.Type() {
+		return false
+	}
+	switch a.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		if a.IsNil() || b.IsNil() {
+			return a.IsNil() == b.IsNil()
+		}
+		return cacheValuesEqual(a.Elem(), b.Elem())
+	case reflect.Slice:
+		if a.Len() == 0 || b.Len() == 0 {
+			return a.Len() == b.Len()
+		}
+		if a.Len() != b.Len() {
+			return false
+		}
+		for i := 0; i < a.Len(); i++ {
+			if !cacheValuesEqual(a.Index(i), b.Index(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Map:
+		if a.IsNil() || b.IsNil() {
+			return a.IsNil() == b.IsNil()
+		}
+		if a.Len() != b.Len() {
+			return false
+		}
+		iter := a.MapRange()
+		for iter.Next() {
+			other := b.MapIndex(iter.Key())
+			if !other.IsValid() || !cacheValuesEqual(iter.Value(), other) {
+				return false
+			}
+		}
+		return true
+	case reflect.Array:
+		for i := 0; i < a.Len(); i++ {
+			if !cacheValuesEqual(a.Index(i), b.Index(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Struct:
+		for i := 0; i < a.NumField(); i++ {
+			if !cacheValuesEqual(a.Field(i), b.Field(i)) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(a.Interface(), b.Interface())
+	}
+}
+
+// compactCacheFingerprints stores each distinct rule fingerprint map once.
+// File entries often have the same map, and repeating it for every file made
+// the gob grow with the number of files despite identical metadata.
+func compactCacheFingerprints(contents cacheContents) cacheContents {
+	sets := make([]map[string]string, 0)
+	byHash := make(map[[sha256.Size]byte][]int)
+	entries := make(map[string]cacheEntry, len(contents.Entries))
+	paths := make([]string, 0, len(contents.Entries))
+	for path := range contents.Entries {
+		paths = append(paths, path)
+	}
+	slices.Sort(paths)
+	for _, path := range paths {
+		entry := contents.Entries[path]
+		hash := fingerprintSetHash(entry.Fingerprints)
+		setIndex := -1
+		for _, candidate := range byHash[hash] {
+			if reflect.DeepEqual(sets[candidate], entry.Fingerprints) {
+				setIndex = candidate
+				break
+			}
+		}
+		if setIndex < 0 {
+			setIndex = len(sets)
+			sets = append(sets, maps.Clone(entry.Fingerprints))
+			byHash[hash] = append(byHash[hash], setIndex)
+		}
+		entry.Fingerprints = nil
+		entry.FingerprintSet = setIndex
+		entries[path] = entry
+	}
+	contents.Entries = entries
+	contents.FingerprintSets = sets
+	return contents
+}
+
+func expandCacheFingerprints(contents *cacheContents) error {
+	if len(contents.FingerprintSets) == 0 {
+		return nil
+	}
+	for path, entry := range contents.Entries {
+		if entry.FingerprintSet < 0 || entry.FingerprintSet >= len(contents.FingerprintSets) {
+			return fmt.Errorf("file %q has invalid fingerprint set %d", path, entry.FingerprintSet)
+		}
+		entry.Fingerprints = contents.FingerprintSets[entry.FingerprintSet]
+		entry.FingerprintSet = 0
+		contents.Entries[path] = entry
+	}
+	contents.FingerprintSets = nil
+	return nil
+}
+
+func fingerprintSetHash(fingerprints map[string]string) [sha256.Size]byte {
+	keys := make([]string, 0, len(fingerprints))
+	for key := range fingerprints {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	hasher := sha256.New()
+	var size [binary.MaxVarintLen64]byte
+	for _, key := range keys {
+		keySize := binary.PutUvarint(size[:], uint64(len(key)))
+		_, _ = hasher.Write(size[:keySize])
+		_, _ = hasher.Write([]byte(key))
+		value := fingerprints[key]
+		valueSize := binary.PutUvarint(size[:], uint64(len(value)))
+		_, _ = hasher.Write(size[:valueSize])
+		_, _ = hasher.Write([]byte(value))
+	}
+	var sum [sha256.Size]byte
+	copy(sum[:], hasher.Sum(nil))
+	return sum
+}
+
+func (c *resultCache) prune() error {
 	if !pruned.CompareAndSwap(false, true) {
 		return nil
 	}
