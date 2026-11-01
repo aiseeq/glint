@@ -3,8 +3,10 @@ package gorules
 import (
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
+	"path/filepath"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -66,7 +68,7 @@ func (r *CloserNeverClosedRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 	if ctx == nil {
 		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
-	project := &closerProject{index: newConstructorIndex(ctx), callees: newCloserCallees(ctx)}
+	project := &closerProject{index: newConstructorIndex(ctx), callees: newCloserCallees(ctx), delegated: newDelegatedClosers(ctx)}
 	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(fileCtx, info, project)
 	})
@@ -74,8 +76,9 @@ func (r *CloserNeverClosedRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 
 // closerProject is what the rule knows about the project's functions.
 type closerProject struct {
-	index   *constructorIndex
-	callees *closerCallees
+	index     *constructorIndex
+	callees   *closerCallees
+	delegated *delegatedClosers
 }
 
 // openedCloser is a local variable holding a closable value from a call.
@@ -253,7 +256,7 @@ func (t *closerTracker) mention(ident *ast.Ident, stack []ast.Node) {
 	if c == nil {
 		return
 	}
-	use := closerUseOf(stack, t.info)
+	use := closerUseOf(stack, t.info, t.project)
 	if use == closerUseOther {
 		return
 	}
@@ -303,7 +306,7 @@ func isNamedFrom(t types.Type, pkgPath string) bool {
 // stack. Without type information an argument always escapes; with it, only
 // an argument bound to a parameter that can be closed does. A closable field
 // of the variable carries it on: db := client.DB; defer db.Close().
-func closerUseOf(stack []ast.Node, info *types.Info) closerUse {
+func closerUseOf(stack []ast.Node, info *types.Info, project *closerProject) closerUse {
 	current := stack[len(stack)-1]
 	viaField := false
 	for i := len(stack) - 2; i >= 0; i-- {
@@ -317,6 +320,13 @@ func closerUseOf(stack []ast.Node, info *types.Info) closerUse {
 			}
 			if parent.Sel.Name == "Close" {
 				return closerUseClosed
+			}
+			if info != nil {
+				if ident, ok := current.(*ast.Ident); ok {
+					if variable, ok := info.Uses[ident].(*types.Var); ok && project.delegated.closesThrough(variable.Type(), parent.Sel.Name) {
+						return closerUseClosed
+					}
+				}
 			}
 			if !closerField(parent, info) {
 				return closerUseNone
@@ -346,6 +356,133 @@ func closerUseOf(stack []ast.Node, info *types.Info) closerUse {
 		return closerUseEscapes
 	}
 	return closerUseNone
+}
+
+// delegatedClosers maps a Close method to the sole method call in its body:
+// func (f *Flock) Close() error { return f.Unlock() } makes f.Unlock() a
+// close. A Close of a dependency is read from its source file, parsed once
+// per analysis; without the file the Close is not known to delegate.
+type delegatedClosers struct {
+	ctx       *core.GoProjectContext
+	decls     map[*types.Func]*ast.FuncDecl
+	delegates map[*types.Func]string
+	files     map[string]*parsedCloserFile
+}
+
+type parsedCloserFile struct {
+	fset *token.FileSet
+	file *ast.File
+}
+
+func newDelegatedClosers(ctx *core.GoProjectContext) *delegatedClosers {
+	d := &delegatedClosers{
+		ctx:       ctx,
+		decls:     make(map[*types.Func]*ast.FuncDecl),
+		delegates: make(map[*types.Func]string),
+		files:     make(map[string]*parsedCloserFile),
+	}
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
+			continue
+		}
+		info := pkg.Package.TypesInfo
+		for _, file := range pkg.Package.Syntax {
+			for _, decl := range file.Decls {
+				fd, ok := decl.(*ast.FuncDecl)
+				if !ok || fd.Body == nil || fd.Recv == nil || fd.Name.Name != "Close" {
+					continue
+				}
+				if fn, ok := info.Defs[fd.Name].(*types.Func); ok {
+					d.decls[fn] = fd
+				}
+			}
+		}
+	}
+	return d
+}
+
+func (d *delegatedClosers) closesThrough(typ types.Type, method string) bool {
+	closeObj, _, _ := types.LookupFieldOrMethod(typ, true, nil, "Close")
+	closeFn, ok := closeObj.(*types.Func)
+	if !ok {
+		return false
+	}
+	delegated, known := d.delegates[closeFn]
+	if !known {
+		decl := d.decls[closeFn]
+		if decl == nil {
+			decl = d.dependencyDecl(closeFn)
+		}
+		delegated = delegatedCloseMethod(decl)
+		d.delegates[closeFn] = delegated
+	}
+	return delegated != "" && delegated == method
+}
+
+func (d *delegatedClosers) dependencyDecl(fn *types.Func) *ast.FuncDecl {
+	if d.ctx.FileSet == nil || !fn.Pos().IsValid() {
+		return nil
+	}
+	position := d.ctx.FileSet.PositionFor(fn.Pos(), false)
+	if !position.IsValid() || position.Filename == "" || position.Offset < 0 {
+		return nil
+	}
+	path := filepath.Clean(position.Filename)
+	parsed, attempted := d.files[path]
+	if !attempted {
+		parsed = parseDelegatedFile(path)
+		d.files[path] = parsed
+	}
+	if parsed == nil {
+		return nil
+	}
+	for _, decl := range parsed.file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if ok && fd.Name.Name == fn.Name() && parsed.fset.PositionFor(fd.Name.Pos(), false).Line == position.Line {
+			return fd
+		}
+	}
+	return nil
+}
+
+// parseDelegatedFile parses a dependency source file, nil when it cannot be
+// read or parsed: its Close is then not known to delegate.
+func parseDelegatedFile(path string) *parsedCloserFile {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil { //nolint:silent-error-handling // A dependency whose source cannot be read only leaves its Close unknown as a delegate.
+		return nil
+	}
+	return &parsedCloserFile{fset: fset, file: file}
+}
+
+func delegatedCloseMethod(decl *ast.FuncDecl) string {
+	if decl == nil || decl.Name.Name != "Close" || decl.Recv == nil || len(decl.Recv.List) != 1 || len(decl.Recv.List[0].Names) != 1 || decl.Body == nil || len(decl.Body.List) != 1 {
+		return ""
+	}
+	receiver := decl.Recv.List[0].Names[0].Name
+	var call *ast.CallExpr
+	switch stmt := decl.Body.List[0].(type) {
+	case *ast.ReturnStmt:
+		if len(stmt.Results) != 1 {
+			return ""
+		}
+		call, _ = ast.Unparen(stmt.Results[0]).(*ast.CallExpr)
+	case *ast.ExprStmt:
+		call, _ = ast.Unparen(stmt.X).(*ast.CallExpr)
+	}
+	if call == nil || len(call.Args) != 0 {
+		return ""
+	}
+	selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name == "Close" {
+		return ""
+	}
+	recv, ok := ast.Unparen(selector.X).(*ast.Ident)
+	if !ok || recv.Name != receiver {
+		return ""
+	}
+	return selector.Sel.Name
 }
 
 // closerField reports a selector that reads a field able to carry the

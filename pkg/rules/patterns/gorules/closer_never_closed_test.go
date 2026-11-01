@@ -95,6 +95,72 @@ func CloseTakesArgs() {
 }
 `
 
+func TestCloserNeverClosedDelegatedCloseMethod(t *testing.T) {
+	found := rulestest.ProjectRulePlaces(t, NewCloserNeverClosedRule(), map[string]string{
+		"filelock/lock.go": `package filelock
+
+type Lock struct{}
+
+func (l *Lock) Close() error { return l.Release() }
+func (l *Lock) Release() error { return nil }
+func NewLock() *Lock { return &Lock{} }
+
+type MultiClose struct{}
+
+func (l *MultiClose) Close() error {
+	_ = l.Release()
+	return l.Release()
+}
+func (l *MultiClose) Release() error { return nil }
+func NewMultiClose() *MultiClose { return &MultiClose{} }
+
+type OtherReceiver struct{}
+
+func (l *OtherReceiver) Close() error { return (&Lock{}).Release() }
+func (l *OtherReceiver) Release() error { return nil }
+func NewOtherReceiver() *OtherReceiver { return &OtherReceiver{} }
+
+type SameName struct{}
+
+func (l *SameName) Close() error { return nil }
+func (l *SameName) Release() error { return nil }
+func NewSameName() *SameName { return &SameName{} }
+`,
+		"store/store.go": `package store
+
+import "example.com/rulestest/filelock"
+
+func Delegated() {
+	l := filelock.NewLock()
+	defer l.Release()
+}
+
+func MissingRelease() {
+	l := filelock.NewLock()
+	if l == nil {
+		return
+	}
+}
+
+func MultipleCalls() {
+	l := filelock.NewMultiClose()
+	defer l.Release()
+}
+
+func DifferentReceiver() {
+	l := filelock.NewOtherReceiver()
+	defer l.Release()
+}
+
+func OtherTypeSameMethodName() {
+	l := filelock.NewSameName()
+	defer l.Release()
+}
+`,
+	})
+	assert.Equal(t, []string{"store/store.go:11", "store/store.go:18", "store/store.go:23", "store/store.go:28"}, found)
+}
+
 // The value is not the caller's to close: a shared instance, one the
 // constructor already hands to the test's cleanup, one a later Wait closes,
 // a reflect.Value whose Close closes a channel, or a field of it closed
