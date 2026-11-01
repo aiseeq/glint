@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -43,17 +44,38 @@ func build(ctx context.Context, version string) error {
 		return err
 	}
 	ldflags := fmt.Sprintf("-X main.version=%s -X main.cacheBuildManifest=%s", version, manifest)
-	cmd := exec.CommandContext(ctx, "go", "build", "-ldflags", ldflags, "-o", "bin/glint", "./cmd/glint")
-	cmd.Dir, cmd.Stdout, cmd.Stderr = root, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("build bin/glint: %w", err)
+	link := func(out string) error {
+		cmd := exec.CommandContext(ctx, "go", "build", "-ldflags", ldflags, "-o", out, "./cmd/glint")
+		cmd.Dir, cmd.Stdout, cmd.Stderr = root, os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("build bin/glint: %w", err)
+		}
+		return nil
 	}
-	after, err := buildmanifest.Capture(ctx, root)
-	if err != nil {
-		return fmt.Errorf("verify Go package fingerprints: %w", err)
+	verify := func() error {
+		after, err := buildmanifest.Capture(ctx, root)
+		if err != nil {
+			return fmt.Errorf("verify Go package fingerprints: %w", err)
+		}
+		return buildmanifest.VerifyStable(before, after)
 	}
-	if err := buildmanifest.VerifyStable(before, after); err != nil {
-		return err
+	return publishVerified(filepath.Join(root, "bin", "glint"), link, verify)
+}
+
+// publishVerified links the binary next to out and moves it there only after
+// verify accepts it: a binary whose code changed after its manifest was
+// captured would trust stale cached findings.
+func publishVerified(out string, link func(string) error, verify func() error) error {
+	unverified := out + ".unverified"
+	err := link(unverified)
+	if err == nil {
+		err = verify()
 	}
-	return nil
+	if err == nil {
+		return os.Rename(unverified, out)
+	}
+	if removeErr := os.Remove(unverified); removeErr != nil && !os.IsNotExist(removeErr) {
+		return errors.Join(err, fmt.Errorf("remove unverified binary: %w", removeErr))
+	}
+	return err
 }
