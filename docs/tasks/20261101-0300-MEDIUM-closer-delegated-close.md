@@ -1,6 +1,6 @@
 # closer-never-closed: a method Close delegates to closes the value
 
-Статус: в работе
+Статус: готово
 Исполнитель: glint-master
 
 ## Вход
@@ -19,3 +19,5 @@
 - 2026-11-01 03:00 открыт — glint-master
 - 2026-11-01 03:01 note — glint-master: боец Luna 1101-0301-closer-delegated-close (glint-правило): бриф /home/aisee/.cache/worktrees/glint-measure/brief-closer-delegated-close.md, приёмка accept-closer-delegated-close.sh, дерево /home/aisee/.cache/worktrees/glint/closer-delegated-close
 - 2026-11-01 03:01 в работе — glint-master
+- 2026-11-01 03:57 note — glint-master: Luna: приёмка ok. Мастер: ревью — индекс только Close, разбор файла без (ptr,bool)-обхода (nolint с причиной). consumers: graft stats.go:406,:480 пропали (верно), остальное 0 различий (/home/aisee/.cache/worktrees/glint-measure/consumers-closer-delegated.txt). Коммит 7e59da7 в ветке closer-delegated-close. Проверка — Terra, бриф verify-closer-brief.md
+- 2026-11-01 04:03 готово — terra-1101-0357-glint (session glint-master): verdict-closer.md: ВЕРДИКТ готово на 7e59da7; проба flock lock.go:6 нет / :15 есть; 14 собственных проб; новый тест падает без non-test части; consumers: только graft stats.go:406,:480 пропали, обе верные. Остаток: значение метода без вызова (и Close, и делегат) не ловится — как и до правки
