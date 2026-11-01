@@ -587,6 +587,7 @@ func heredocDelimiters(text string) []heredocDelimiter {
 
 func stdoutIsRedirected(tail string) bool {
 	var fd1, fd2 = true, false // fd1 is captured; fd2 is the original stderr.
+	tail = WithoutComment(tail)
 	var quote QuoteScanner
 	for i := 0; i < len(tail); {
 		if n := quote.Step(tail, i); n > 0 {
@@ -605,13 +606,52 @@ func stdoutIsRedirected(tail string) bool {
 	return !fd1
 }
 
-func parseRedirect(text string, start int, fd1, fd2 *bool) (int, bool) {
-	i, fd := start, 1
-	if i < len(text) && (text[i] == '1' || text[i] == '2') && (i == 0 || !helpers.IsIdentifierChar(text[i-1])) {
-		fd = int(text[i] - '0')
+// redirectDescriptor reads the descriptor number written before a < or >
+// at start: 1 without one, 0 for a descriptor other than 1 and 2. ok is false
+// when the digits there are a word rather than a descriptor.
+func redirectDescriptor(text string, start int) (fd, end int, ok bool) {
+	end = start
+	if start > 0 && helpers.IsIdentifierChar(text[start-1]) {
+		return 1, start, true
+	}
+	for end < len(text) && text[end] >= '0' && text[end] <= '9' {
+		end++
+	}
+	switch {
+	case end == start:
+		return 1, end, true
+	case end >= len(text) || text[end] != '<' && text[end] != '>':
+		return 0, start, false
+	case text[start:end] == "1":
+		return 1, end, true
+	case text[start:end] == "2":
+		return 2, end, true
+	}
+	return 0, end, true
+}
+
+// skipOperator skips the bytes of a redirection operator and its target.
+func skipOperator(text string, i int, operator string) int {
+	for i < len(text) && strings.IndexByte(operator, text[i]) >= 0 {
 		i++
 	}
-	if i+1 < len(text) && text[i] == '&' && text[i+1] == '>' {
+	return skipRedirectTarget(text, i)
+}
+
+func parseRedirect(text string, start int, fd1, fd2 *bool) (int, bool) {
+	fd, i, ok := redirectDescriptor(text, start)
+	if !ok {
+		return start, false
+	}
+	if i < len(text) && text[i] == '<' {
+		// An input redirection, <> included, leaves stdout where it is.
+		return skipOperator(text, i, "<>&"), true
+	}
+	if fd == 0 && i > start {
+		// A redirection of another descriptor leaves stdout and stderr alone.
+		return skipOperator(text, i, ">&|"), true
+	}
+	if i == start && i+1 < len(text) && text[i] == '&' && text[i+1] == '>' {
 		i += 2
 		if i < len(text) && text[i] == '>' {
 			i++
