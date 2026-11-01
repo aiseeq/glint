@@ -1,0 +1,59 @@
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+
+	"github.com/aiseeq/glint/internal/buildmanifest"
+)
+
+func main() {
+	flag.Parse()
+	if flag.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: go run ./cmd/glintbuild <version>")
+		os.Exit(2)
+	}
+	if err := build(context.Background(), flag.Arg(0)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func build(ctx context.Context, version string) error {
+	root, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	before, err := buildmanifest.Capture(ctx, root)
+	if err != nil {
+		return fmt.Errorf("capture Go package fingerprints: %w", err)
+	}
+	data, err := json.Marshal(before.Manifest)
+	if err != nil {
+		return fmt.Errorf("encode build manifest: %w", err)
+	}
+	manifest := base64.StdEncoding.EncodeToString(data)
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		return err
+	}
+	ldflags := fmt.Sprintf("-X main.version=%s -X main.cacheBuildManifest=%s", version, manifest)
+	cmd := exec.CommandContext(ctx, "go", "build", "-ldflags", ldflags, "-o", "bin/glint", "./cmd/glint")
+	cmd.Dir, cmd.Stdout, cmd.Stderr = root, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("build bin/glint: %w", err)
+	}
+	after, err := buildmanifest.Capture(ctx, root)
+	if err != nil {
+		return fmt.Errorf("verify Go package fingerprints: %w", err)
+	}
+	if err := buildmanifest.VerifyStable(before, after); err != nil {
+		return err
+	}
+	return nil
+}

@@ -432,6 +432,7 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 				fmt.Fprintf(os.Stderr, "warning: result cache of %s not saved: %v\n", projectRoot, err)
 			}
 			if flagTiming {
+				fmt.Fprintln(os.Stderr, cache.keyDescription)
 				fmt.Fprintf(os.Stderr, "result cache %s: %d of %d files unchanged, project rules %s\n",
 					projectRoot, cache.reused, prepared.analyzedFiles(), cache.projectState())
 			}
@@ -1133,19 +1134,21 @@ func (p *preparedRoot) cachedProject(loader *core.GoProjectLoader, projectRoot s
 	if !cacheable {
 		return false, nil
 	}
-	hit := p.cache.keyProject(inputs, projectRules)
+	hit := p.cache.keyProject(inputs, projectRules, enabledRules)
 	if hit == nil {
 		return false, nil
 	}
+	canSkipLoad := true
 	for _, rule := range enabledRules {
-		if _, keyed := slices.BinarySearch(projectRules, rule.Name()); !keyed {
-			continue
+		if _, keyed := slices.BinarySearch(projectRules, rule.Name()); keyed && !p.cache.projectRuleReusable(rule) {
+			canSkipLoad = false
 		}
-		if _, ok := rule.(rules.CachedProjectFilesRule); ok && hit.RuleState[rule.Name()] == nil {
-			p.cache.projectHit = nil
-			p.cache.currentProject = nil
-			return false, nil
+		if _, ok := rule.(rules.CachedProjectFilesRule); ok && !p.cache.projectStateReusable(rule) {
+			canSkipLoad = false
 		}
+	}
+	if !canSkipLoad {
+		return false, nil
 	}
 	if err := core.ParseGoFiles(projectRoot, p.rootFiles, flagTolerant); err != nil {
 		return false, fmt.Errorf("parse Go files of %s: %w", projectRoot, err)
@@ -1254,7 +1257,7 @@ func analyzeFilesContained(contexts []*core.FileContext, enabledRules []rules.Ru
 		reuse = make([]map[string][]core.Violation, len(contexts))
 		for i, ctx := range contexts {
 			contents[i] = sha256.Sum256(ctx.Content)
-			reuse[i] = cache.lookup(ctx.RelPath, contents[i])
+			reuse[i] = cache.lookup(ctx.RelPath, contents[i], cache.fingerprints(enabledRules))
 		}
 	}
 
@@ -1496,13 +1499,24 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 	cachedProject := cache != nil && cache.projectHit != nil
 	var allViolations core.ViolationList
 	if cachedProject {
-		allViolations = core.ViolationListOf(cache.projectHit.Violations)
-	} else if project != nil {
-		allViolations, panics, err = analyzeGoProjectRules(contexts, rootFiles, enabledRules, cfg, project, overrides)
+		allViolations = core.ViolationListOf(cache.projectFindings(enabledRules))
+	}
+	if project != nil {
+		toRun := enabledRules
+		if cache != nil && cache.projectHit != nil {
+			toRun = slices.DeleteFunc(slices.Clone(enabledRules), func(rule rules.Rule) bool {
+				_, ok := rule.(rules.GoProjectRule)
+				return !ok || cache.projectRuleReusable(rule)
+			})
+		}
+		newFindings, newPanics, analyzeErr := analyzeGoProjectRules(contexts, rootFiles, toRun, cfg, project, overrides)
+		allViolations = append(allViolations, newFindings...)
+		panics = append(panics, newPanics...)
+		err = analyzeErr
 		if err != nil {
 			return nil, panics, err
 		}
-	} else if hasGoFiles(contexts) {
+	} else if !cachedProject && hasGoFiles(contexts) {
 		for _, rule := range enabledRules {
 			if _, ok := rule.(rules.GoProjectRule); ok {
 				return nil, nil, fmt.Errorf("analyze Go project with rule %q: project context is nil", rule.Name())
@@ -1511,7 +1525,7 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 	}
 	indexed := fileRules[:0:0]
 	for _, rule := range fileRules {
-		indexPanic, err := indexProjectFiles(rule, rootFiles, cache, cachedProject)
+		indexPanic, err := indexProjectFiles(rule, rootFiles, cache)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1598,7 +1612,7 @@ func analyzeGoProjectRules(contexts, rootFiles []*core.FileContext, enabledRules
 // indexProjectFiles gives a project-files rule the root files, or the index a
 // cached run kept. A panic becomes a rule panic: without its index the rule
 // would judge the files against nothing.
-func indexProjectFiles(rule rules.Rule, rootFiles []*core.FileContext, cache *resultCache, cachedProject bool) (indexPanic *rulePanic, err error) {
+func indexProjectFiles(rule rules.Rule, rootFiles []*core.FileContext, cache *resultCache) (indexPanic *rulePanic, err error) {
 	projectFiles, ok := rule.(rules.ProjectFilesRule)
 	if !ok {
 		return nil, nil
@@ -1608,7 +1622,7 @@ func indexProjectFiles(rule rules.Rule, rootFiles []*core.FileContext, cache *re
 			indexPanic = &rulePanic{rule: rule.Name(), file: projectFilesPanic, value: recovered, stack: debug.Stack()}
 		}
 	}()
-	if cached, ok := rule.(rules.CachedProjectFilesRule); ok && cachedProject {
+	if cached, ok := rule.(rules.CachedProjectFilesRule); ok && cache != nil && cache.projectStateReusable(rule) {
 		if err := cached.RestoreProjectFiles(cache.projectHit.RuleState[rule.Name()]); err != nil {
 			return nil, fmt.Errorf("restore cached project files for rule %q: %w", rule.Name(), err)
 		}

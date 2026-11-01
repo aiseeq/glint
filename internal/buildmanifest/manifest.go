@@ -1,0 +1,236 @@
+package buildmanifest
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+)
+
+const GlintModule = "github.com/aiseeq/glint"
+
+type Manifest struct {
+	Core     string            `json:"core"`
+	Packages map[string]string `json:"packages"`
+}
+
+type Snapshot struct {
+	ModulePath string
+	Packages   map[string]Package
+	Manifest   Manifest
+}
+
+type Package struct {
+	ImportPath string
+	Dir        string
+	BuildID    string
+	ModulePath string
+	Main       bool
+	Imports    []string
+	Sources    []string
+}
+
+type listedPackage struct {
+	ImportPath string
+	Dir        string
+	BuildID    string
+	Imports    []string
+	Module     *struct {
+		Path string
+		Main bool
+	}
+	GoFiles      []string
+	CgoFiles     []string
+	CFiles       []string
+	CXXFiles     []string
+	MFiles       []string
+	HFiles       []string
+	SFiles       []string
+	SwigFiles    []string
+	SwigCXXFiles []string
+	EmbedFiles   []string
+}
+
+func Capture(ctx context.Context, root string) (Snapshot, error) {
+	cmd := exec.CommandContext(ctx, "go", "list", "-export", "-deps", "-json", "./...")
+	cmd.Dir = root
+	cmd.Stderr = os.Stderr
+	stdout, err := os.CreateTemp("", "glint-build-list-*.json")
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("create go list output: %w", err)
+	}
+	defer func() {
+		_ = stdout.Close()
+		_ = os.Remove(stdout.Name())
+	}()
+	cmd.Stdout = stdout
+	if err := cmd.Run(); err != nil {
+		return Snapshot{}, fmt.Errorf("go list -export: %w", err)
+	}
+	if _, err := stdout.Seek(0, io.SeekStart); err != nil {
+		return Snapshot{}, fmt.Errorf("rewind go list output: %w", err)
+	}
+	packages := make(map[string]Package)
+	decoder := json.NewDecoder(stdout)
+	for {
+		var listed listedPackage
+		err := decoder.Decode(&listed)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("decode go list output: %w", err)
+		}
+		if listed.ImportPath == "" {
+			return Snapshot{}, fmt.Errorf("go list omitted import path")
+		}
+		if listed.BuildID == "" {
+			continue
+		}
+		pkg := Package{
+			ImportPath: listed.ImportPath,
+			Dir:        listed.Dir,
+			BuildID:    listed.BuildID,
+			Imports:    listed.Imports,
+			Sources: slices.Concat(listed.GoFiles, listed.CgoFiles, listed.CFiles, listed.CXXFiles, listed.MFiles,
+				listed.HFiles, listed.SFiles, listed.SwigFiles, listed.SwigCXXFiles, listed.EmbedFiles),
+		}
+		if listed.Module != nil {
+			pkg.ModulePath, pkg.Main = listed.Module.Path, listed.Module.Main
+		}
+		packages[pkg.ImportPath] = pkg
+	}
+	modulePath := ""
+	for _, pkg := range packages {
+		if pkg.Main {
+			modulePath = pkg.ModulePath
+			break
+		}
+	}
+	if modulePath == "" {
+		return Snapshot{}, fmt.Errorf("go list did not report a main module")
+	}
+	goEnv, err := commandOutput(ctx, root, "go", "env", "-json", "GOFLAGS", "GOOS", "GOARCH", "CGO_ENABLED", "GOEXPERIMENT")
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("read build environment: %w", err)
+	}
+	var environment map[string]string
+	if err := json.Unmarshal(goEnv, &environment); err != nil {
+		return Snapshot{}, fmt.Errorf("decode build environment: %w", err)
+	}
+	manifest, err := BuildManifest(root, modulePath, packages, environment)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return Snapshot{ModulePath: modulePath, Packages: packages, Manifest: manifest}, nil
+}
+
+func BuildManifest(root, modulePath string, packages map[string]Package, environment map[string]string) (Manifest, error) {
+	ids := make(map[string]string, len(packages))
+	for path, pkg := range packages {
+		ids[path] = pkg.BuildID
+	}
+	manifest := Manifest{Packages: make(map[string]string)}
+	coreParts := make([]string, 0, len(packages)+8)
+	for path, pkg := range packages {
+		if !withinModule(path, modulePath) {
+			continue
+		}
+		if isRulePackage(path, modulePath) {
+			manifest.Packages[path] = pkg.BuildID
+			continue
+		}
+		if path != modulePath+"/cmd/glint" {
+			coreParts = append(coreParts, path+" "+pkg.BuildID)
+		}
+	}
+	commandPath := modulePath + "/cmd/glint"
+	command, ok := packages[commandPath]
+	if !ok {
+		return Manifest{}, fmt.Errorf("go list did not include %s", commandPath)
+	}
+	sources := append([]string(nil), command.Sources...)
+	sort.Strings(sources)
+	hash := sha256.New()
+	for _, name := range sources {
+		data, err := readFile(filepath.Join(command.Dir, name))
+		if err != nil {
+			return Manifest{}, fmt.Errorf("read %s source %s: %w", commandPath, name, err)
+		}
+		_, _ = fmt.Fprintf(hash, "%s\x00", name)
+		_, _ = hash.Write(data)
+		_, _ = hash.Write([]byte{0})
+	}
+	coreParts = append(coreParts, "cmd/glint sources "+hex.EncodeToString(hash.Sum(nil)))
+	for _, imported := range command.Imports {
+		if isRulePackage(imported, modulePath) || isCommand(imported, modulePath) {
+			continue
+		}
+		if id := ids[imported]; id != "" {
+			coreParts = append(coreParts, "cmd/glint dependency "+imported+" "+id)
+		}
+	}
+	environmentJSON, err := json.Marshal(environment)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("encode build environment: %w", err)
+	}
+	coreParts = append(coreParts, "build environment "+string(environmentJSON))
+	sort.Strings(coreParts)
+	coreHash := sha256.Sum256([]byte(strings.Join(coreParts, "\n")))
+	manifest.Core = hex.EncodeToString(coreHash[:])[:16]
+	return manifest, nil
+}
+
+func VerifyStable(before, after Snapshot) error {
+	changed := make([]string, 0)
+	for path, previous := range before.Packages {
+		current, ok := after.Packages[path]
+		if !ok || previous.BuildID != current.BuildID {
+			changed = append(changed, path)
+		}
+	}
+	for path := range after.Packages {
+		if _, ok := before.Packages[path]; !ok {
+			changed = append(changed, path)
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	sort.Strings(changed)
+	return fmt.Errorf("Go package BuildIDs changed during the graft build: %s", strings.Join(changed, ", "))
+}
+
+func withinModule(importPath, modulePath string) bool {
+	return importPath == modulePath || strings.HasPrefix(importPath, modulePath+"/")
+}
+
+func isRulePackage(importPath, modulePath string) bool {
+	if !withinModule(importPath, modulePath) {
+		return false
+	}
+	relative := strings.TrimPrefix(strings.TrimPrefix(importPath, modulePath), "/")
+	return strings.HasPrefix(relative, "pkg/rules/") &&
+		!strings.HasPrefix(relative, "pkg/rules/patterns/internal/") &&
+		!strings.HasPrefix(relative, "pkg/rules/helpers")
+}
+
+func isCommand(importPath, modulePath string) bool {
+	return importPath == modulePath+"/cmd/glint"
+}
+
+var readFile = os.ReadFile
+
+func commandOutput(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	return cmd.Output()
+}

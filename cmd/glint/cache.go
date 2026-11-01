@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -25,7 +26,7 @@ import (
 )
 
 // cacheFormat changes whenever the stored layout does.
-const cacheFormat = "glint-results-4"
+const cacheFormat = "glint-results-5"
 
 // resultCache keeps the findings of file-local rules (rules.FileLocal) per
 // file of one project root between runs. A file whose content is unchanged
@@ -36,9 +37,11 @@ const cacheFormat = "glint-results-4"
 // build, the configuration, where the Go syntax trees came from and the
 // tolerance flag. A different stamp discards the whole cache.
 type resultCache struct {
-	path  string
-	build string
-	stamp string
+	path             string
+	build            string
+	stamp            string
+	keyDescription   string
+	ruleFingerprints map[string]string
 	// previous is what the last run stored, by path relative to the root.
 	previous map[string]cacheEntry
 	// current is what this run stores: only the files it analyzed, so files
@@ -49,27 +52,33 @@ type resultCache struct {
 	// The project findings are stored for the inputs of the typed load
 	// (core.GoProjectLoader.GoInputs); projectKeyed is false when this run
 	// could not identify them, and nothing is stored then.
-	previousProject *projectEntry
-	projectInputs   string
-	projectRules    []string
-	projectKeyed    bool
-	projectHit      *projectEntry
-	currentProject  *projectEntry
+	previousProject     *projectEntry
+	projectInputs       string
+	projectRules        []string
+	projectFingerprints map[string]string
+	projectKeyed        bool
+	projectHit          *projectEntry
+	currentProject      *projectEntry
+	projectRulesCached  int
+	projectRulesRerun   int
 }
 
 // projectEntry holds the findings of the project rules, filtered like every
 // finding, the names of the rules that produced them, and the packages the
 // load left out.
 type projectEntry struct {
-	Inputs     string
-	Rules      []string
-	Violations []core.Violation
-	Skipped    []core.SkippedPackage
-	RuleState  map[string][]byte
+	Inputs            string
+	Rules             []string
+	Fingerprints      map[string]string
+	Violations        map[string][]core.Violation
+	Skipped           []core.SkippedPackage
+	RuleState         map[string][]byte
+	StateFingerprints map[string]string
 }
 
 type cacheEntry struct {
-	Content [sha256.Size]byte
+	Content      [sha256.Size]byte
+	Fingerprints map[string]string
 	// Findings by rule name, after exceptions, suppression and severity
 	// overrides — all of which the file and the stamp decide.
 	Rules map[string][]core.Violation
@@ -116,15 +125,47 @@ func newRootCache(root, seed string, cfg *core.Config, goTreesFromLoader bool) (
 	if err != nil {
 		return nil, err
 	}
-	stamp, err := cacheStamp(cfg, goTreesFromLoader, flagTolerant)
+	key, err := cacheBuildKey()
 	if err != nil {
 		return nil, err
 	}
-	build, err := executableHash()
+	stamp, err := cacheStamp(cfg, goTreesFromLoader, flagTolerant, key.core)
 	if err != nil {
 		return nil, err
 	}
-	return openResultCache(dir, root, seed, buildTag(build), stamp)
+	cache, err := openResultCache(dir, root, seed, key.core, stamp)
+	if err == nil {
+		cache.ruleFingerprints = key.packages
+		cache.keyDescription = key.description
+	}
+	return cache, err
+}
+
+type resultCacheKey struct {
+	core        string
+	packages    map[string]string
+	description string
+}
+
+func cacheBuildKey() (resultCacheKey, error) {
+	manifest := cacheKeyManifest()
+	if manifest.trusted {
+		return resultCacheKey{
+			core:        manifest.core,
+			packages:    manifest.packages,
+			description: fmt.Sprintf("result cache key: rule fingerprints (core %s)", manifest.core),
+		}, nil
+	}
+	binary, err := executableHash()
+	if err != nil {
+		return resultCacheKey{}, err
+	}
+	core := buildTag(binary)
+	return resultCacheKey{
+		core:        core,
+		packages:    map[string]string{},
+		description: fmt.Sprintf("result cache key: binary hash %s (build without verified fingerprints)", core),
+	}, nil
 }
 
 // buildTag is the part of a glint build's hash that names its caches.
@@ -143,11 +184,12 @@ func buildTag(build string) string {
 // limit of pruneResultCaches goes by.
 func openResultCache(dir, root, seed, build, stamp string) (*resultCache, error) {
 	cache := &resultCache{
-		path:     resultCachePath(dir, root, build),
-		build:    build,
-		stamp:    stamp,
-		previous: make(map[string]cacheEntry),
-		current:  make(map[string]cacheEntry),
+		path:             resultCachePath(dir, root, build),
+		build:            build,
+		stamp:            stamp,
+		ruleFingerprints: make(map[string]string),
+		previous:         make(map[string]cacheEntry),
+		current:          make(map[string]cacheEntry),
 	}
 	found, err := cache.read(cache.path)
 	if !found && err == nil && seed != "" {
@@ -196,34 +238,119 @@ func (c *resultCache) read(path string) (found bool, err error) {
 }
 
 // lookup returns the stored findings of an unchanged file, by rule name.
-func (c *resultCache) lookup(relPath string, content [sha256.Size]byte) map[string][]core.Violation {
+func (c *resultCache) lookup(relPath string, content [sha256.Size]byte, fingerprints map[string]string) map[string][]core.Violation {
 	entry, ok := c.previous[relPath]
 	if !ok || entry.Content != content {
 		return nil
 	}
-	return entry.Rules
+	found := make(map[string][]core.Violation)
+	for name, values := range entry.Rules {
+		if fingerprints[name] != "" && entry.Fingerprints[name] == fingerprints[name] {
+			found[name] = values
+		}
+	}
+	return found
 }
 
 // store records the findings of one file for the next run. Rules the stored
 // entry has and this run did not execute keep their findings: the content is
 // the same.
-func (c *resultCache) store(relPath string, content [sha256.Size]byte, found map[string][]core.Violation) {
+func (c *resultCache) store(relPath string, content [sha256.Size]byte, found map[string][]core.Violation, fingerprints map[string]string) {
 	merged := make(map[string][]core.Violation, len(found))
-	maps.Copy(merged, c.lookup(relPath, content))
+	mergedFingerprints := make(map[string]string, len(found))
+	if old, ok := c.previous[relPath]; ok && old.Content == content {
+		maps.Copy(merged, old.Rules)
+		maps.Copy(mergedFingerprints, old.Fingerprints)
+	}
 	maps.Copy(merged, found)
-	c.current[relPath] = cacheEntry{Content: content, Rules: merged}
+	maps.Copy(mergedFingerprints, fingerprints)
+	c.current[relPath] = cacheEntry{Content: content, Rules: merged, Fingerprints: mergedFingerprints}
 }
 
 // keyProject records the inputs of this run's typed load and the project
 // rules it runs (sorted names), and returns the stored project findings when
 // they were computed by the same rules for the same inputs.
-func (c *resultCache) keyProject(inputs string, projectRules []string) *projectEntry {
+func (c *resultCache) keyProject(inputs string, projectRules []string, enabled []rules.Rule) *projectEntry {
 	c.projectInputs, c.projectRules, c.projectKeyed = inputs, projectRules, true
-	if c.previousProject != nil && c.previousProject.Inputs == inputs && slices.Equal(c.previousProject.Rules, projectRules) {
+	c.projectRulesCached, c.projectRulesRerun = 0, len(projectRules)
+	c.projectFingerprints = make(map[string]string, len(projectRules))
+	projectNames := make(map[string]bool, len(projectRules))
+	for _, name := range projectRules {
+		projectNames[name] = true
+	}
+	for _, rule := range enabled {
+		if _, indexes := rule.(rules.ProjectFilesRule); indexes {
+			// A project-files rule can build or consume a cached index. Keep its
+			// code in the project key even when it has no findings of its own.
+			c.projectFingerprints[rule.Name()] = c.fingerprint(rule)
+		}
+	}
+	for _, rule := range enabled {
+		if projectNames[rule.Name()] {
+			c.projectFingerprints[rule.Name()] = c.fingerprint(rule)
+		}
+	}
+	var indexDependencies []string
+	for _, rule := range enabled {
+		_, indexes := rule.(rules.ProjectFilesRule)
+		_, analyzesProject := rule.(rules.GoProjectRule)
+		if indexes || analyzesProject {
+			indexDependencies = append(indexDependencies, rule.Name()+"="+c.projectFingerprints[rule.Name()])
+		}
+	}
+	slices.Sort(indexDependencies)
+	for _, rule := range enabled {
+		if !projectNames[rule.Name()] {
+			continue
+		}
+		fingerprint := c.fingerprint(rule)
+		if _, ok := rule.(rules.GoProjectRule); ok {
+			dependencies := fingerprint + "\n" + strings.Join(indexDependencies, "\n")
+			sum := sha256.Sum256([]byte(dependencies))
+			fingerprint = buildTag(hex.EncodeToString(sum[:]))
+		}
+		c.projectFingerprints[rule.Name()] = fingerprint
+	}
+	if c.previousProject != nil && c.previousProject.Inputs == inputs {
 		c.projectHit = c.previousProject
 		c.currentProject = c.previousProject
+		c.projectRulesRerun = 0
+		for _, name := range projectRules {
+			previous, previousOK := c.previousProject.Fingerprints[name]
+			current, currentOK := c.projectFingerprints[name]
+			if previousOK && currentOK && previous == current {
+				c.projectRulesCached++
+			} else {
+				c.projectRulesRerun++
+			}
+		}
 	}
 	return c.projectHit
+}
+
+func (c *resultCache) projectRuleReusable(rule rules.Rule) bool {
+	if c.projectHit == nil || c.projectHit.Fingerprints[rule.Name()] != c.projectFingerprints[rule.Name()] {
+		return false
+	}
+	return true
+}
+
+func (c *resultCache) projectFindings(enabled []rules.Rule) []core.Violation {
+	if c.projectHit == nil {
+		return nil
+	}
+	var found []core.Violation
+	for _, rule := range enabled {
+		if _, ok := rule.(rules.GoProjectRule); !ok || !c.projectRuleReusable(rule) {
+			continue
+		}
+		found = append(found, c.projectHit.Violations[rule.Name()]...)
+	}
+	return found
+}
+
+func (c *resultCache) projectStateReusable(rule rules.Rule) bool {
+	return c.projectHit != nil && c.projectHit.RuleState[rule.Name()] != nil && c.projectHit.StateFingerprints[rule.Name()] == c.fingerprint(rule)
 }
 
 // storeProject records the project findings of this run's load.
@@ -231,37 +358,63 @@ func (c *resultCache) storeProject(found core.ViolationList, skipped []core.Skip
 	if !c.projectKeyed {
 		return
 	}
+	violations := make(map[string][]core.Violation)
+	active := make(map[string]bool)
+	for _, name := range c.projectRules {
+		active[name] = true
+	}
+	if old := c.previousProject; old != nil && old.Inputs == c.projectInputs {
+		for name, values := range old.Violations {
+			if !active[name] {
+				violations[name] = values
+			}
+		}
+	}
+	for _, violation := range found {
+		if active[violation.Rule] {
+			violations[violation.Rule] = append(violations[violation.Rule], *violation)
+		}
+	}
+	stateFingerprints := make(map[string]string)
+	for name := range ruleState {
+		stateFingerprints[name] = c.projectFingerprints[name]
+	}
+	if old := c.previousProject; old != nil && old.Inputs == c.projectInputs {
+		for name, data := range old.RuleState {
+			if _, exists := ruleState[name]; !exists && old.StateFingerprints[name] == c.projectFingerprints[name] {
+				ruleState[name] = data
+				stateFingerprints[name] = old.StateFingerprints[name]
+			}
+		}
+	}
 	c.currentProject = &projectEntry{
-		Inputs:     c.projectInputs,
-		Rules:      c.projectRules,
-		Violations: found.Values(),
-		Skipped:    append([]core.SkippedPackage(nil), skipped...),
-		RuleState:  ruleState,
+		Inputs:            c.projectInputs,
+		Rules:             c.projectRules,
+		Fingerprints:      c.projectFingerprints,
+		Violations:        violations,
+		Skipped:           append([]core.SkippedPackage(nil), skipped...),
+		RuleState:         ruleState,
+		StateFingerprints: stateFingerprints,
 	}
 }
 
 // projectState describes for --timing where the project findings came from.
 func (c *resultCache) projectState() string {
-	switch {
-	case c.projectHit != nil:
-		return "reused"
-	case c.projectKeyed:
-		return "analyzed"
-	default:
-		return "not cached"
-	}
+	return fmt.Sprintf("%d cached, %d rerun", c.projectRulesCached, c.projectRulesRerun)
 }
 
 // storeFile records the findings of a file's file-local rules and counts the
 // file as reused when every one of them came from the cache.
 func (c *resultCache) storeFile(relPath string, content [sha256.Size]byte, list []rules.Rule, local []bool, found []core.ViolationList, reused map[string][]core.Violation) {
 	stored := make(map[string][]core.Violation)
+	fingerprints := make(map[string]string)
 	allReused := true
 	for i, rule := range list {
 		if !local[i] {
 			continue
 		}
 		stored[rule.Name()] = found[i].Values()
+		fingerprints[rule.Name()] = c.fingerprint(rule)
 		if _, ok := reused[rule.Name()]; !ok {
 			allReused = false
 		}
@@ -269,7 +422,7 @@ func (c *resultCache) storeFile(relPath string, content [sha256.Size]byte, list 
 	if allReused {
 		c.reused++
 	}
-	c.store(relPath, content, stored)
+	c.store(relPath, content, stored, fingerprints)
 }
 
 // save writes this run's entries. The file is replaced atomically, so a
@@ -399,18 +552,33 @@ func resultCacheDir() (string, error) {
 // cacheStamp identifies everything besides the file that a file-local finding
 // depends on. Go trees parsed by the project loader skip object resolution,
 // trees parsed by the walker do not, so their origin is part of it.
-func cacheStamp(cfg *core.Config, goTreesFromLoader, tolerant bool) (string, error) {
-	build, err := executableHash()
-	if err != nil {
-		return "", err
-	}
+func cacheStamp(cfg *core.Config, goTreesFromLoader, tolerant bool, coreFingerprint string) (string, error) {
 	config, err := yaml.Marshal(cfg)
 	if err != nil {
 		return "", fmt.Errorf("serialize configuration for the result cache: %w", err)
 	}
-	header := fmt.Sprintf("%s\n%s\nloader=%t tolerant=%t\n", cacheFormat, build, goTreesFromLoader, tolerant)
+	header := fmt.Sprintf("%s\n%s\nloader=%t tolerant=%t\n", cacheFormat, coreFingerprint, goTreesFromLoader, tolerant)
 	sum := sha256.Sum256(append([]byte(header), config...))
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func (c *resultCache) fingerprint(rule rules.Rule) string {
+	t := reflect.TypeOf(rule)
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t != nil && c.ruleFingerprints[t.PkgPath()] != "" {
+		return c.ruleFingerprints[t.PkgPath()]
+	}
+	return c.build
+}
+
+func (c *resultCache) fingerprints(list []rules.Rule) map[string]string {
+	fingerprints := make(map[string]string, len(list))
+	for _, rule := range list {
+		fingerprints[rule.Name()] = c.fingerprint(rule)
+	}
+	return fingerprints
 }
 
 // executableHash identifies the running glint build by its content: a version

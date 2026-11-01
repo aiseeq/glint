@@ -1,8 +1,10 @@
 package main
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -85,6 +87,96 @@ func TestResultCacheReusesFindingsOfUnchangedFiles(t *testing.T) {
 
 	runCached(t, dir, "stamp-2", contexts, list)
 	assert.Equal(t, int32(5), local.calls.Load(), "another stamp discards the cache")
+}
+
+func TestResultCacheInvalidatesOnlyRulesWithChangedFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	rule := newCountingRule("fingerprinted", false)
+	ctx := []*core.FileContext{goContext(t, "a.go", "package a\n")}
+	run := func(fingerprint string) core.ViolationList {
+		cache, err := openResultCache(dir, "/project", "", "build", "stamp")
+		require.NoError(t, err)
+		cache.ruleFingerprints[reflect.TypeFor[countingRule]().PkgPath()] = fingerprint
+		got, err := analyzeFiles(ctx, []rules.Rule{rule}, core.DefaultConfig(), nil, cache)
+		require.NoError(t, err)
+		require.NoError(t, cache.save())
+		return got
+	}
+
+	first := run("package-A")
+	second := run("package-B")
+	assert.Equal(t, fingerprint(first), fingerprint(second))
+	assert.Equal(t, int32(2), rule.calls.Load(), "a package change reruns its findings")
+	third := run("package-B")
+	assert.Equal(t, fingerprint(second), fingerprint(third))
+	assert.Equal(t, int32(2), rule.calls.Load(), "the rebuilt package now reuses its findings")
+}
+
+func TestResultCacheEmitsOnlyEnabledRuleFindings(t *testing.T) {
+	dir := t.TempDir()
+	removed := newCountingRule("removed-rule", false)
+	active := newCountingRule("active-rule", false)
+	ctx := []*core.FileContext{goContext(t, "a.go", "package a\n")}
+	runCached(t, dir, "stamp", ctx, []rules.Rule{removed})
+	got, _ := runCached(t, dir, "stamp", ctx, []rules.Rule{active})
+	require.Len(t, got, 1)
+	assert.Equal(t, active.Name(), got[0].Rule)
+}
+
+func TestNewRootCacheUsesBinaryHashWithoutBuildManifest(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	previous := cacheBuildManifest
+	cacheBuildManifest = ""
+	t.Cleanup(func() { cacheBuildManifest = previous })
+
+	cache, err := newRootCache("/project", "", core.DefaultConfig(), false)
+	require.NoError(t, err)
+	binary, err := executableHash()
+	require.NoError(t, err)
+	want := buildTag(binary)
+	assert.Equal(t, want, cache.build)
+	assert.Equal(t, "result cache key: binary hash "+want+" (build without verified fingerprints)", cache.keyDescription)
+	assert.Empty(t, cache.ruleFingerprints)
+}
+
+func TestProjectCacheFingerprintCoversRuleStateDependencies(t *testing.T) {
+	dir := t.TempDir()
+	consumer := newProjectStubRule()
+	indexer := frontendrules.NewTSPathNotRoutedRule()
+	ruleset := []rules.Rule{indexer, consumer}
+	open := func(indexFingerprint string) *resultCache {
+		cache, err := openResultCache(dir, "/project", "", "build", "stamp")
+		require.NoError(t, err)
+		cache.ruleFingerprints[reflect.TypeFor[frontendrules.TSPathNotRoutedRule]().PkgPath()] = indexFingerprint
+		cache.ruleFingerprints[reflect.TypeFor[projectStubRule]().PkgPath()] = "consumer-v1"
+		return cache
+	}
+	first := open("index-v1")
+	first.keyProject("inputs", []string{consumer.Name()}, ruleset)
+	first.storeProject(nil, nil, map[string][]byte{indexer.Name(): []byte("old index")})
+	require.NoError(t, first.save())
+
+	second := open("index-v2")
+	hit := second.keyProject("inputs", []string{consumer.Name()}, ruleset)
+	require.NotNil(t, hit, "unchanged project inputs retain per-rule cache entries")
+	assert.False(t, second.projectRuleReusable(consumer), "a changed index producer invalidates dependent project findings")
+	assert.False(t, second.projectStateReusable(indexer), "a changed producer cannot restore its old RuleState")
+}
+
+func TestProjectCacheReportsPartialRuleHits(t *testing.T) {
+	first := newProjectStubRule()
+	second := &projectStubRule{BaseRule: rules.NewBaseRule("project-stub-2", "patterns", "another project rule", core.SeverityMedium)}
+	cache := &resultCache{
+		ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "code-v1"},
+	}
+	ruleNames := []string{first.Name(), second.Name()}
+	cache.keyProject("inputs", ruleNames, []rules.Rule{first, second})
+	previous := make(map[string]string, len(cache.projectFingerprints))
+	maps.Copy(previous, cache.projectFingerprints)
+	previous[second.Name()] = "stale-code"
+	cache.previousProject = &projectEntry{Inputs: "inputs", Fingerprints: previous}
+	cache.keyProject("inputs", ruleNames, []rules.Rule{first, second})
+	assert.Equal(t, "1 cached, 1 rerun", cache.projectState())
 }
 
 // Files the run did not analyze drop out of the cache; rules the run did not
@@ -303,7 +395,7 @@ func TestTypedProjectLoadIsRequiredOnlyForAnalyzedFrontendFiles(t *testing.T) {
 	tsSecond, _ := analyzeCachedRoot(t, tsRoot, tsList)
 	assert.Nil(t, tsSecond.project, "a root with analyzed TypeScript reuses its typed findings")
 	assert.Equal(t, []bool{true, true}, tsRule.requirements)
-	assert.Equal(t, "reused", tsSecond.cache.projectState())
+	assert.Equal(t, "1 cached, 0 rerun", tsSecond.cache.projectState())
 }
 
 func TestTSPathRoutesAreCachedAndInvalidatedByGoInputs(t *testing.T) {
@@ -328,7 +420,7 @@ func TestTSPathRoutesAreCachedAndInvalidatedByGoInputs(t *testing.T) {
 	second, secondFindings := analyzeCachedRoot(t, root, list)
 	assert.Nil(t, second.project, "cached routes avoid a typed load")
 	assert.Equal(t, fingerprint(firstFindings), fingerprint(secondFindings))
-	assert.Equal(t, "reused", second.cache.projectState())
+	assert.Equal(t, "1 cached, 0 rerun", second.cache.projectState())
 
 	writeModuleFile(t, root, "backend/routes.go", "package backend\nimport \"github.com/gorilla/mux\"\nfunc Register(router *mux.Router) { router.HandleFunc(\"/api/known\", nil); router.HandleFunc(\"/api/missing\", nil) }\n")
 	third, thirdFindings := analyzeCachedRoot(t, root, list)

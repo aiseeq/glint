@@ -38,7 +38,7 @@ tasks:
     heavy: true
     env: {GOFLAGS: -tags=pgquery_cgo}
     run:
-      - [go, build, -ldflags, '-X main.version=${GRAFT_VERSION}', -o, bin/glint, ./cmd/glint]
+      - [go, run, ./cmd/glintbuild, '${GRAFT_VERSION}']
   install:
     desc: install the committed build to ~/bin atomically (a running glint keeps its file); glint on itself first
     deps: [build, self-check]
