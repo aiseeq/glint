@@ -304,8 +304,13 @@ func checkCapturedFunctionOutput(r *shellRule, src *patternkit.ShellSource) []*c
 		out = appendReport(out, src.Report(r, line, message, suggestion))
 	}
 	for name := range captured {
-		for _, l := range src.Body(funcs[name]) {
+		body := src.Body(funcs[name])
+		redirected := patternkit.RedirectedCompoundSegments(body)
+		for i, l := range body {
 			for _, seg := range patternkit.Segments(l.Text) {
+				if redirected[i][seg.Offset] {
+					continue
+				}
 				text := patternkit.CommandPrefix.ReplaceAllString(seg.Trimmed(), "")
 				callee, _, _ := strings.Cut(text, " ")
 				logger, ok := funcs[callee]

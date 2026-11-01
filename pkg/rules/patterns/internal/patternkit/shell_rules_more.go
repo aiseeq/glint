@@ -67,8 +67,13 @@ func textWords(text string) int {
 func (src *ShellSource) OwnMessages(fn ShellFunc) []int {
 	var messages []int
 	data := false
-	for _, l := range src.Body(fn) {
+	body := src.Body(fn)
+	redirected := RedirectedCompoundSegments(body)
+	for i, l := range body {
 		for _, seg := range Segments(l.Text) {
+			if redirected[i][seg.Offset] {
+				continue
+			}
 			write := CommandPrefix.ReplaceAllString(seg.Trimmed(), "")
 			if !stdoutWrite.MatchString(write) || !WritesToStdout(write) || strings.Contains(seg.Text, "|") {
 				continue

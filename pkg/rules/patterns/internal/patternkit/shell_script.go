@@ -373,6 +373,185 @@ func isRedirection(text string, i int) bool {
 	return before || (i+1 < len(text) && text[i+1] == '>')
 }
 
+type compoundFrame struct {
+	kind                    string
+	startLine, startSegment int
+}
+
+// RedirectedCompoundSegments returns the segment offsets covered by a
+// compound command whose closing segment redirects stdout to a file or stderr.
+// The first key is the index in lines; the second is the segment offset.
+func RedirectedCompoundSegments(lines []ShellLine) map[int]map[int]bool {
+	redirected := make(map[int]map[int]bool)
+	var stack []compoundFrame
+	for lineIndex, line := range lines {
+		for _, segment := range Segments(line.Text) {
+			text := segment.Trimmed()
+			if text == "" {
+				continue
+			}
+			for _, syntax := range compoundTokens(text) {
+				switch syntax.word {
+				case "if", "while", "until", "for", "select", "case", "{", "(":
+					if syntax.word == "{" || syntax.word == "(" || compoundCommandPosition(text, syntax.start) {
+						stack = append(stack, compoundFrame{syntax.word, lineIndex, segment.Offset})
+					}
+				case "fi", "done", "esac", "}", ")":
+					if len(stack) == 0 || !compoundCloseMatches(stack[len(stack)-1].kind, syntax.word) {
+						continue
+					}
+
+					if isStdoutRedirect(text[syntax.end:]) {
+						markCompoundRange(redirected, lines, stack[len(stack)-1], lineIndex, segment.Offset)
+					}
+					stack = stack[:len(stack)-1]
+				}
+			}
+		}
+	}
+	return redirected
+}
+
+type compoundToken struct {
+	word       string
+	start, end int
+}
+
+var compoundTokenPattern = regexp.MustCompile(`\b(?:if|while|until|for|select|case|fi|done|esac)\b|[{}()]`)
+
+func markCompoundRange(redirected map[int]map[int]bool, lines []ShellLine, open compoundFrame, endLine, endSegment int) {
+	for i := open.startLine; i <= endLine; i++ {
+		for _, covered := range Segments(lines[i].Text) {
+			if i == open.startLine && covered.Offset < open.startSegment || i == endLine && covered.Offset > endSegment {
+				continue
+			}
+			if redirected[i] == nil {
+				redirected[i] = make(map[int]bool)
+			}
+			redirected[i][covered.Offset] = true
+		}
+	}
+}
+
+func compoundTokens(text string) []compoundToken {
+	var tokens []compoundToken
+	expansions := compoundExpansions(text)
+	for _, loc := range compoundTokenPattern.FindAllStringIndex(text, -1) {
+		if QuoteAt(text, loc[0]) != 0 {
+			continue
+		}
+		inExpansion := false
+		for _, expansion := range expansions {
+			if loc[0] >= expansion[0] && loc[0] < expansion[1] {
+				inExpansion = true
+				break
+			}
+		}
+		if !inExpansion {
+			tokens = append(tokens, compoundToken{text[loc[0]:loc[1]], loc[0], loc[1]})
+		}
+	}
+	return tokens
+}
+
+func compoundExpansions(text string) [][2]int {
+	var expansions [][2]int
+	var quote QuoteScanner
+	for i := 0; i < len(text); {
+		if n := quote.Step(text, i); n > 0 {
+			i += n
+			continue
+		}
+		if text[i] == '$' && i+1 < len(text) && (text[i+1] == '{' || text[i+1] == '(') {
+			end := compoundExpansionEnd(text, i)
+			expansions = append(expansions, [2]int{i, end})
+			i = end
+			continue
+		}
+		i++
+	}
+	return expansions
+}
+
+func compoundExpansionEnd(text string, start int) int {
+	open := text[start+1]
+	close := byte('}')
+	if open == '(' {
+		close = ')'
+	}
+	depth := 1
+	var quote QuoteScanner
+	for i := start + 2; i < len(text); {
+		if n := quote.Step(text, i); n > 0 {
+			i += n
+			continue
+		}
+		if text[i] == '$' && i+1 < len(text) && (text[i+1] == '{' || text[i+1] == '(') {
+			i = compoundExpansionEnd(text, i)
+			continue
+		}
+		if text[i] == open {
+			depth++
+		} else if text[i] == close {
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		}
+		i++
+	}
+	return len(text)
+}
+
+func compoundCommandPosition(text string, offset int) bool {
+	prefix := text[:offset]
+	for _, sep := range []string{";", "&&", "||", "|", "{"} {
+		if i := strings.LastIndex(prefix, sep); i >= 0 {
+			prefix = prefix[i+len(sep):]
+		}
+	}
+	prefix = strings.TrimSpace(prefix)
+	return prefix == "" || prefix == "then" || prefix == "do" || prefix == "else"
+}
+
+func compoundCloseMatches(open, close string) bool {
+	switch open {
+	case "if":
+		return close == "fi"
+	case "while", "until", "for", "select":
+		return close == "done"
+	case "case":
+		return close == "esac"
+	case "{":
+		return close == "}"
+	case "(":
+		return close == ")"
+	default:
+		return false
+	}
+}
+
+func isStdoutRedirect(tail string) bool {
+	if pipe := unquotedPipe(tail); pipe >= 0 {
+		tail = tail[:pipe]
+	}
+	return FileRedirect.MatchString(tail) || stderrRedirect.MatchString(tail)
+}
+
+func unquotedPipe(text string) int {
+	var quote QuoteScanner
+	for i := 0; i < len(text); i++ {
+		if n := quote.Step(text, i); n > 0 {
+			i += n - 1
+			continue
+		}
+		if text[i] == '|' {
+			return i
+		}
+	}
+	return -1
+}
+
 // ShellFunc is a function of a script.
 type ShellFunc struct {
 	Name   string
