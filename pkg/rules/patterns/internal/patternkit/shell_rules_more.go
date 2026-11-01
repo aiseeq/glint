@@ -71,7 +71,7 @@ func (src *ShellSource) OwnMessages(fn ShellFunc) []int {
 	redirected := RedirectedCompoundSegments(body)
 	for i, l := range body {
 		for _, seg := range Segments(l.Text) {
-			if redirected[i][seg.Offset] {
+			if redirected[i][seg.Offset] == OutputRedirected {
 				continue
 			}
 			write := CommandPrefix.ReplaceAllString(seg.Trimmed(), "")

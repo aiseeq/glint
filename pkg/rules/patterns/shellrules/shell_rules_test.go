@@ -253,11 +253,15 @@ func TestShellCapturedFunctionRedirectParserBoundaries(t *testing.T) {
 		"brace_word.sh:5",
 		"done_argument.sh:5",
 		"esac_argument.sh:6",
+		"fd_restore.sh:5",
 		"fi_argument.sh:5",
 		"fi_dup_order.sh:5",
 		"fi_dup_order.sh:6",
+		"file_then_fd3.sh:5",
 		"heredoc_dash.sh:8",
 		"heredoc_valid.sh:7",
+		"inside_fd3.sh:5",
+		"nested_fd3.sh:6",
 	}, patterntest.ShellFindings(t, "shell-captured-function-writes-logs", map[string]string{
 		"brace_word.sh": `#!/bin/bash
 job() {
@@ -319,6 +323,28 @@ fi 2>&1 >&2
 x=$(job)
 echo "$x"
 `,
+		"fd_restore.sh": `#!/bin/bash
+job() {
+  local out=abc f=/dev/null
+if true; then
+  printf "Result file: %s\\n" "$out"
+fi >&2 1>&3
+  echo "$out"
+}
+x=$(job 3>&1)
+echo "$x"
+`,
+		"file_then_fd3.sh": `#!/bin/bash
+job() {
+  local out=abc f=/dev/null
+if true; then
+  printf "Result file: %s\\n" "$out"
+fi > "$f" 1>&3
+  echo "$out"
+}
+x=$(job 3>&1)
+echo "$x"
+`,
 		"heredoc_dash.sh": "#!/bin/bash\njob() {\n  local out=abc f=/dev/null\nif true; then\n\tcat <<-EOF > \"$f\"\n\tfi\n\tEOF\n  printf \"Result file: %s\\\\n\" \"$out\"\nfi\n  echo \"$out\"\n}\nx=$(job)\necho \"$x\"\n",
 		"heredoc_valid.sh": `#!/bin/bash
 job() {
@@ -331,6 +357,30 @@ echo fi > "$f"
   echo "$out"
 }
 x=$(job)
+echo "$x"
+`,
+		"inside_fd3.sh": `#!/bin/bash
+job() {
+  local out=abc f=/dev/null
+if true; then
+  printf "Result file: %s\\n" "$out" 1>&3
+fi > "$f"
+  echo "$out"
+}
+x=$(job 3>&1)
+echo "$x"
+`,
+		"nested_fd3.sh": `#!/bin/bash
+job() {
+  local out=abc f=/dev/null
+if true; then
+  {
+    printf "Result file: %s\\n" "$out"
+  } 1>&3
+fi > "$f"
+  echo "$out"
+}
+x=$(job 3>&1)
 echo "$x"
 `,
 	}))

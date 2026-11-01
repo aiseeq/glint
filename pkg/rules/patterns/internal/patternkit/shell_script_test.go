@@ -44,21 +44,22 @@ func TestRedirectedCompoundSegments(t *testing.T) {
 	assert.True(t, stdoutIsRedirected(" >&2 2>&1"))
 	assert.NotContains(t, heredocBodyLines(lines), 29)
 	got := RedirectedCompoundSegments(lines)
-	assert.Equal(t, map[int]map[int]bool{
-		0:  {0: true, 10: true},
-		1:  {2: true, 12: true, 31: true},
-		2:  {2: true},
-		3:  {0: true},
-		7:  {0: true, 22: true, 24: true},
-		8:  {0: true},
-		9:  {2: true},
-		10: {0: true},
-		12: {2: true},
-		30: {0: true, 6: true, 21: true},
+	assert.Equal(t, map[int]map[int]OutputRedirectState{
+		0:  {0: OutputRedirected, 10: OutputRedirected},
+		1:  {2: OutputRedirected, 12: OutputRedirected, 31: OutputRedirected},
+		2:  {2: OutputRedirected},
+		3:  {0: OutputRedirected},
+		7:  {0: OutputRedirected, 22: OutputRedirected, 24: OutputRedirected},
+		8:  {0: OutputRedirected},
+		9:  {2: OutputRedirected},
+		10: {0: OutputRedirected},
+		12: {2: OutputRedirected},
+		15: {0: OutputRedirected},
+		16: {0: OutputRedirected},
+		17: {0: OutputRedirected},
+		29: {0: OutputRestored, 6: OutputRestored, 21: OutputRestored},
+		30: {0: OutputRedirected, 6: OutputRedirected, 21: OutputRedirected},
 	}, got)
-	assert.Empty(t, got[15])
-	assert.Empty(t, got[16])
-	assert.Empty(t, got[17])
 	assert.Empty(t, got[18])
 	assert.Empty(t, got[19])
 }
@@ -82,5 +83,24 @@ func TestStdoutIsRedirectedOnlyByStdoutRedirections(t *testing.T) {
 		` <"$in" >&2`: true,
 	} {
 		assert.Equal(t, want, stdoutIsRedirected(tail), tail)
+	}
+}
+
+func TestStdoutRedirectStateTracksDescriptorCopies(t *testing.T) {
+	for tail, want := range map[string]OutputRedirectState{
+		` > file`:            OutputRedirected,
+		` >&2 1>&3`:          OutputRestored,
+		` > file 1>&3`:       OutputRestored,
+		` >&3`:               OutputRestored,
+		` 3>&2 1>&3`:         OutputRedirected,
+		` 3> file 1>&3`:      OutputRedirected,
+		` 2>&1 >&2`:          OutputRestored,
+		` >&2 2>&1`:          OutputRedirected,
+		` 2> error`:          OutputUnchanged,
+		` 3>&2`:              OutputUnchanged,
+		` > file | next`:     OutputRedirected,
+		` >&2; printf later`: OutputRedirected,
+	} {
+		assert.Equal(t, want, stdoutRedirectState(tail), tail)
 	}
 }

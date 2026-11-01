@@ -25,7 +25,7 @@ func (src *ShellSource) StdoutWrites(fn ShellFunc) []int {
 	redirected := RedirectedCompoundSegments(body)
 	for i, l := range body {
 		for _, seg := range Segments(l.Text) {
-			if redirected[i][seg.Offset] {
+			if redirected[i][seg.Offset] == OutputRedirected {
 				continue
 			}
 			if write := seg.Trimmed(); stdoutWrite.MatchString(write) && WritesToStdout(write) {

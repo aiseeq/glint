@@ -308,7 +308,7 @@ func checkCapturedFunctionOutput(r *shellRule, src *patternkit.ShellSource) []*c
 		redirected := patternkit.RedirectedCompoundSegments(body)
 		for i, l := range body {
 			for _, seg := range patternkit.Segments(l.Text) {
-				if redirected[i][seg.Offset] {
+				if redirected[i][seg.Offset] == patternkit.OutputRedirected {
 					continue
 				}
 				text := patternkit.CommandPrefix.ReplaceAllString(seg.Trimmed(), "")

@@ -379,11 +379,22 @@ type compoundFrame struct {
 	startLine, startSegment int
 }
 
-// RedirectedCompoundSegments returns the segment offsets covered by a
-// compound command whose closing segment redirects stdout to a file or stderr.
-// The first key is the index in lines; the second is the segment offset.
-func RedirectedCompoundSegments(lines []ShellLine) map[int]map[int]bool {
-	redirected := make(map[int]map[int]bool)
+// OutputRedirectState describes whether a segment's stdout is redirected,
+// explicitly returned to the caller's capture, or unchanged.
+type OutputRedirectState uint8
+
+const (
+	OutputUnchanged OutputRedirectState = iota
+	OutputRedirected
+	OutputRestored
+)
+
+// RedirectedCompoundSegments returns the stdout state of affected segments.
+// A command's own redirection overrides enclosing compound redirects. The
+// first key is the index in lines; the second is the segment offset.
+func RedirectedCompoundSegments(lines []ShellLine) map[int]map[int]OutputRedirectState {
+	states := make(map[int]map[int]OutputRedirectState)
+	depths := make(map[int]map[int]int)
 	ignored := heredocBodyLines(lines)
 	var stack []compoundFrame
 	for lineIndex, line := range lines {
@@ -408,15 +419,29 @@ func RedirectedCompoundSegments(lines []ShellLine) map[int]map[int]bool {
 						continue
 					}
 
-					if stdoutIsRedirected(text[syntax.end:]) {
-						markCompoundRange(redirected, lines, stack[len(stack)-1], lineIndex, segment.Offset)
+					state := stdoutRedirectState(text[syntax.end:])
+					if state != OutputUnchanged {
+						markCompoundRange(states, depths, lines, stack[len(stack)-1], lineIndex, segment.Offset, state, len(stack)-1)
 					}
 					stack = stack[:len(stack)-1]
 				}
 			}
 		}
 	}
-	return redirected
+	// A command's own redirection takes precedence over every enclosing
+	// compound command. In particular, 1>&3 may restore the capture.
+	for lineIndex, line := range lines {
+		if ignored[lineIndex] {
+			continue
+		}
+		for _, segment := range Segments(line.Text) {
+			state := stdoutRedirectState(segment.Trimmed())
+			if state != OutputUnchanged {
+				setOutputState(states, depths, lineIndex, segment.Offset, state, int(^uint(0)>>1))
+			}
+		}
+	}
+	return states
 }
 
 type compoundToken struct {
@@ -426,18 +451,27 @@ type compoundToken struct {
 
 var compoundTokenPattern = regexp.MustCompile(`\b(?:if|while|until|for|select|case|fi|done|esac)\b|[{}()]`)
 
-func markCompoundRange(redirected map[int]map[int]bool, lines []ShellLine, open compoundFrame, endLine, endSegment int) {
+func markCompoundRange(states map[int]map[int]OutputRedirectState, depths map[int]map[int]int, lines []ShellLine, open compoundFrame, endLine, endSegment int, state OutputRedirectState, depth int) {
 	for i := open.startLine; i <= endLine; i++ {
 		for _, covered := range Segments(lines[i].Text) {
 			if i == open.startLine && covered.Offset < open.startSegment || i == endLine && covered.Offset > endSegment {
 				continue
 			}
-			if redirected[i] == nil {
-				redirected[i] = make(map[int]bool)
-			}
-			redirected[i][covered.Offset] = true
+			setOutputState(states, depths, i, covered.Offset, state, depth)
 		}
 	}
+}
+
+func setOutputState(states map[int]map[int]OutputRedirectState, depths map[int]map[int]int, line, offset int, state OutputRedirectState, depth int) {
+	if depths[line] != nil && depths[line][offset] > depth {
+		return
+	}
+	if states[line] == nil {
+		states[line] = make(map[int]OutputRedirectState)
+		depths[line] = make(map[int]int)
+	}
+	states[line][offset] = state
+	depths[line][offset] = depth
 }
 
 func compoundTokens(text string) []compoundToken {
@@ -586,7 +620,12 @@ func heredocDelimiters(text string) []heredocDelimiter {
 }
 
 func stdoutIsRedirected(tail string) bool {
-	var fd1, fd2 = true, false // fd1 is captured; fd2 is the original stderr.
+	return stdoutRedirectState(tail) == OutputRedirected
+}
+
+func stdoutRedirectState(tail string) OutputRedirectState {
+	descriptors := map[int]bool{1: true, 2: false} // true means this fd reaches captured stdout.
+	fd1Touched := false
 	tail = WithoutComment(tail)
 	var quote QuoteScanner
 	for i := 0; i < len(tail); {
@@ -597,18 +636,24 @@ func stdoutIsRedirected(tail string) bool {
 		if tail[i] == '|' || tail[i] == ';' || tail[i] == '&' && (i+1 >= len(tail) || tail[i+1] != '>') {
 			break
 		}
-		if next, changed := parseRedirect(tail, i, &fd1, &fd2); changed {
+		if next, changed := parseRedirect(tail, i, descriptors, &fd1Touched); changed {
 			i = next
 		} else {
 			i++
 		}
 	}
-	return !fd1
+	if !fd1Touched {
+		return OutputUnchanged
+	}
+	if descriptors[1] {
+		return OutputRestored
+	}
+	return OutputRedirected
 }
 
 // redirectDescriptor reads the descriptor number written before a < or >
-// at start: 1 without one, 0 for a descriptor other than 1 and 2. ok is false
-// when the digits there are a word rather than a descriptor.
+// at start: 1 without one. ok is false when the digits there are a word rather
+// than a descriptor.
 func redirectDescriptor(text string, start int) (fd, end int, ok bool) {
 	end = start
 	if start > 0 && helpers.IsIdentifierChar(text[start-1]) {
@@ -622,12 +667,23 @@ func redirectDescriptor(text string, start int) (fd, end int, ok bool) {
 		return 1, end, true
 	case end >= len(text) || text[end] != '<' && text[end] != '>':
 		return 0, start, false
-	case text[start:end] == "1":
-		return 1, end, true
-	case text[start:end] == "2":
-		return 2, end, true
+	default:
+		fd, ok := decimalDescriptor(text[start:end])
+		return fd, end, ok
 	}
-	return 0, end, true
+}
+
+func decimalDescriptor(text string) (int, bool) {
+	maxInt := int(^uint(0) >> 1)
+	value := 0
+	for i := 0; i < len(text); i++ {
+		digit := int(text[i] - '0')
+		if value > (maxInt-digit)/10 {
+			return 0, false
+		}
+		value = value*10 + digit
+	}
+	return value, true
 }
 
 // skipOperator skips the bytes of a redirection operator and its target.
@@ -638,7 +694,7 @@ func skipOperator(text string, i int, operator string) int {
 	return skipRedirectTarget(text, i)
 }
 
-func parseRedirect(text string, start int, fd1, fd2 *bool) (int, bool) {
+func parseRedirect(text string, start int, descriptors map[int]bool, fd1Touched *bool) (int, bool) {
 	fd, i, ok := redirectDescriptor(text, start)
 	if !ok {
 		return start, false
@@ -647,16 +703,13 @@ func parseRedirect(text string, start int, fd1, fd2 *bool) (int, bool) {
 		// An input redirection, <> included, leaves stdout where it is.
 		return skipOperator(text, i, "<>&"), true
 	}
-	if fd == 0 && i > start {
-		// A redirection of another descriptor leaves stdout and stderr alone.
-		return skipOperator(text, i, ">&|"), true
-	}
 	if i == start && i+1 < len(text) && text[i] == '&' && text[i+1] == '>' {
 		i += 2
 		if i < len(text) && text[i] == '>' {
 			i++
 		}
-		*fd1, *fd2 = false, false
+		setDescriptor(1, false, descriptors, fd1Touched)
+		setDescriptor(2, false, descriptors, fd1Touched)
 		return skipRedirectTarget(text, i), true
 	}
 	if i >= len(text) || text[i] != '>' {
@@ -668,28 +721,32 @@ func parseRedirect(text string, start int, fd1, fd2 *bool) (int, bool) {
 	}
 	if i < len(text) && text[i] == '&' {
 		i++
-		if i < len(text) && (text[i] == '1' || text[i] == '2') {
-			target := text[i] - '0'
-			i++
-			if fd == 1 && target == 2 {
-				*fd1 = *fd2
-			} else if fd == 2 && target == 1 {
-				*fd2 = *fd1
+		if i < len(text) && text[i] >= '0' && text[i] <= '9' {
+			targetStart := i
+			for i < len(text) && text[i] >= '0' && text[i] <= '9' {
+				i++
+			}
+			target, valid := decimalDescriptor(text[targetStart:i])
+			if valid {
+				captured, exists := descriptors[target]
+				if !exists {
+					captured = target != 2
+				}
+				setDescriptor(fd, captured, descriptors, fd1Touched)
 			}
 			return i, true
 		}
-		setDescriptor(fd, false, fd1, fd2)
+		setDescriptor(fd, false, descriptors, fd1Touched)
 		return skipRedirectTarget(text, i), true
 	}
-	setDescriptor(fd, false, fd1, fd2)
+	setDescriptor(fd, false, descriptors, fd1Touched)
 	return skipRedirectTarget(text, i), true
 }
 
-func setDescriptor(fd int, captured bool, fd1, fd2 *bool) {
+func setDescriptor(fd int, captured bool, descriptors map[int]bool, fd1Touched *bool) {
+	descriptors[fd] = captured
 	if fd == 1 {
-		*fd1 = captured
-	} else {
-		*fd2 = captured
+		*fd1Touched = true
 	}
 }
 
