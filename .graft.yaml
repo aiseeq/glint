@@ -46,8 +46,9 @@ tasks:
       # An install ships glint to every consumer, so it is the release: tag
       # HEAD on main before the build. The build runs as its own graft so it
       # stamps the new tag: GRAFT_VERSION of this task predates it. A tree
-      # with uncommitted changes is not HEAD, so it gets no tag (-dirty).
-      - sh: '[ "$(git rev-parse --abbrev-ref HEAD)" != main ] || ! git diff --quiet HEAD || git tag --points-at HEAD | grep -qxE "v[0-9]+\.[0-9]+\.[0-9]+" || graft release'
+      # with changes or untracked files is not HEAD, so it gets no tag. HEAD
+      # is released when graft's own describe of it is more than a tag.
+      - sh: '[ "$(git rev-parse --abbrev-ref HEAD)" != main ] || [ -n "$(git status --porcelain)" ] || ! graft version --describe | grep -q -- - || graft release'
       - sh: graft build
       - install: bin/glint
   install-gopath:
