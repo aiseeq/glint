@@ -354,6 +354,7 @@ func TestFirstFoldDatesRulesFromTheirFirstDayInJournal(t *testing.T) {
 	for _, entry := range []runJournalEntry{
 		{Time: earliest.Format(time.RFC3339), Root: root, WallMS: 1, RuleMS: map[string]int64{"long-function": 7}},
 		{Time: middle.Format(time.RFC3339), Root: root, WallMS: 1, Findings: map[string]int{"deep-nesting": 1}},
+		{Time: middle.Format(time.RFC3339), Root: t.TempDir(), WallMS: 1, RuleMS: map[string]int64{"empty-go-file": 5}},
 	} {
 		line, err := json.Marshal(entry)
 		if err != nil {
@@ -374,6 +375,7 @@ func TestFirstFoldDatesRulesFromTheirFirstDayInJournal(t *testing.T) {
 	for rule, want := range map[string]string{
 		"long-function": earliest.Format("2006-01-02"),
 		"deep-nesting":  middle.Format("2006-01-02"),
+		"empty-go-file": middle.Format("2006-01-02"),
 		"magic-number":  time.Now().Format("2006-01-02"),
 	} {
 		if got := header.FirstSeen[rule]; got != want {
