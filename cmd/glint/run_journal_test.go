@@ -367,3 +367,41 @@ func TestFirstFoldDatesRulesFromEarliestFoldedDay(t *testing.T) {
 		t.Fatalf("first fold: first_seen = %q, want the earliest folded day %q", got, want)
 	}
 }
+
+func TestCalendarDaysSinceCountsDatesAcrossDST(t *testing.T) {
+	// Standard time at since, daylight time at today, as in a zone that moved
+	// its clocks in between: the span is 37 days and 23 hours, the dates 38.
+	since := time.Date(2026, 9, 26, 0, 0, 0, 0, time.FixedZone("NZST", 12*3600))
+	today := time.Date(2026, 11, 2, 0, 0, 0, 0, time.FixedZone("NZDT", 13*3600))
+	if got := calendarDaysSince(since, today); got != 38 {
+		t.Fatalf("26 Sep through 2 Nov across the DST change: got %d days, want 38", got)
+	}
+}
+
+func TestFoldKeepsExactlyRetentionDays(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "runs.jsonl")
+	root := permanentTestRoot(t)
+	var lines []byte
+	for _, ago := range []int{runJournalRetention - 1, runJournalRetention} {
+		entry := runJournalEntry{Time: localDay(time.Now()).AddDate(0, 0, -ago).Add(12 * time.Hour).Format(time.RFC3339), Root: root, WallMS: 1}
+		line, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(append(lines, line...), '\n')
+	}
+	if err := os.WriteFile(path+".1", lines, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := foldRotatedJournal(path); err != nil {
+		t.Fatal(err)
+	}
+	data := make(map[string]*dailyRecord)
+	if err := readDaily(filepath.Join(dir, "runs-daily.jsonl"), data, &dailyHeader{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 1 {
+		t.Fatalf("want only the day %d days ago kept, got %d days", runJournalRetention-1, len(data))
+	}
+}
