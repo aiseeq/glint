@@ -70,6 +70,7 @@ type statsRuleFinding struct {
 type statsRuleEmpty struct {
 	Rule  string `json:"rule"`
 	Since string `json:"since"`
+	Days  int    `json:"days"`
 }
 
 type statsCPU struct {
@@ -184,7 +185,7 @@ func makeStatsReport(path string, days int, now time.Time) (statsReport, error) 
 			header.FirstSeen[name] = start.Format("2006-01-02")
 		}
 	}
-	return buildStats(data, header, days, start, end), nil
+	return buildStats(data, header, days, start, end)
 }
 
 func localDay(t time.Time) time.Time {
@@ -504,7 +505,7 @@ func writeDailyAtomic(path string, header dailyHeader, data map[string]*dailyRec
 	return nil
 }
 
-func buildStats(data map[string]*dailyRecord, header dailyHeader, days int, start, end time.Time) statsReport {
+func buildStats(data map[string]*dailyRecord, header dailyHeader, days int, start, end time.Time) (statsReport, error) {
 	report := statsReport{Days: days, RulesWithFindings: []statsRuleFinding{}, RulesWithoutFindings: []statsRuleEmpty{}, CPU: []statsCPU{}, CPUNote: "CPU is a lower estimate: the journal records only rules taking at least 5 ms per run."}
 	rootSet := make(map[string]map[string]bool)
 	ruleDays := make(map[string]map[string]bool)
@@ -562,7 +563,14 @@ func buildStats(data map[string]*dailyRecord, header dailyHeader, days int, star
 		if first := header.FirstSeen[name]; first > since {
 			since = first
 		}
-		report.RulesWithoutFindings = append(report.RulesWithoutFindings, statsRuleEmpty{name, since})
+		first, err := time.ParseInLocation("2006-01-02", since, time.Local)
+		if err != nil {
+			return statsReport{}, fmt.Errorf("parse first-seen day for rule %s: %w", name, err)
+		}
+		// Counted to the report's end day, not the wall clock, so a report
+		// reads the same whenever it is printed.
+		n := min(max(calendarDaysSince(first, end), 1), days)
+		report.RulesWithoutFindings = append(report.RulesWithoutFindings, statsRuleEmpty{name, since, n})
 	}
 	sort.Slice(report.RulesWithoutFindings, func(i, j int) bool {
 		if report.RulesWithoutFindings[i].Since == report.RulesWithoutFindings[j].Since {
@@ -591,7 +599,7 @@ func buildStats(data map[string]*dailyRecord, header dailyHeader, days int, star
 		}
 		return report.CPU[i].MS > report.CPU[j].MS
 	})
-	return report
+	return report, nil
 }
 
 func printStats(w io.Writer, report statsReport) error {
@@ -616,12 +624,7 @@ func printStats(w io.Writer, report statsReport) error {
 		return fmt.Errorf("write stats header: %w", err)
 	}
 	for _, r := range report.RulesWithoutFindings {
-		since, err := time.ParseInLocation("2006-01-02", r.Since, time.Local)
-		if err != nil {
-			return fmt.Errorf("parse first-seen day for rule %s: %w", r.Rule, err)
-		}
-		n := min(max(calendarDaysSince(since, time.Now()), 1), report.Days)
-		if _, err := fmt.Fprintf(w, "  %s  since %s (%d days)\n", r.Rule, r.Since, n); err != nil {
+		if _, err := fmt.Fprintf(w, "  %s  since %s (%d days)\n", r.Rule, r.Since, r.Days); err != nil {
 			return fmt.Errorf("write stats rule %s: %w", r.Rule, err)
 		}
 	}

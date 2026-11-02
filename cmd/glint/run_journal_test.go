@@ -277,7 +277,10 @@ func TestStatsWindowReportsCoverageHoleAndFindings(t *testing.T) {
 		d.Roots[root] = &dailyRoot{Runs: 1, Findings: map[string]int{"long-function": 1}}
 		data[d.Day] = d
 	}
-	report := buildStats(data, dailyHeader{FirstSeen: map[string]string{"deep-nesting": start.AddDate(0, 0, 1).Format("2006-01-02")}}, 3, start, localDay(now))
+	report, err := buildStats(data, dailyHeader{FirstSeen: map[string]string{"deep-nesting": start.AddDate(0, 0, 1).Format("2006-01-02")}}, 3, start, localDay(now))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if report.Coverage.DaysWithRuns != 2 || report.Coverage.DaysWithoutRuns != 1 || report.Coverage.Complete {
 		t.Fatalf("coverage = %#v", report.Coverage)
 	}
@@ -307,11 +310,18 @@ func TestStatsRulesWithoutFindingsOrderAndConsoleCPULimit(t *testing.T) {
 	firstSeen[names[0]] = start.Format("2006-01-02")
 	firstSeen[names[1]] = start.Format("2006-01-02")
 	firstSeen[names[2]] = start.AddDate(0, 0, 1).Format("2006-01-02")
-	report := buildStats(nil, dailyHeader{FirstSeen: firstSeen}, 3, start, localDay(now))
+	report, err := buildStats(nil, dailyHeader{FirstSeen: firstSeen}, 3, start, localDay(now))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i, want := range names[:3] {
 		if got := report.RulesWithoutFindings[i].Rule; got != want {
 			t.Fatalf("rule at position %d = %q, want %q", i, got, want)
 		}
+	}
+	// Days run to the report's end day, whatever the wall clock says.
+	if got := []int{report.RulesWithoutFindings[0].Days, report.RulesWithoutFindings[2].Days}; got[0] != 3 || got[1] != 2 {
+		t.Fatalf("days since first seen = %v, want [3 2]", got)
 	}
 	if report.RulesWithoutFindings[0].Since != report.RulesWithoutFindings[1].Since {
 		t.Fatalf("same-day rules have different since dates: %#v", report.RulesWithoutFindings[:2])
@@ -321,7 +331,7 @@ func TestStatsRulesWithoutFindingsOrderAndConsoleCPULimit(t *testing.T) {
 	consoleReport := statsReport{
 		Days:                 3,
 		Coverage:             statsCoverage{From: today, To: today, DaysWithRuns: 1, DaysWithoutRuns: 2},
-		RulesWithoutFindings: []statsRuleEmpty{{Rule: "deep-nesting", Since: today}},
+		RulesWithoutFindings: []statsRuleEmpty{{Rule: "deep-nesting", Since: today, Days: 1}},
 		CPU:                  make([]statsCPU, 25),
 		CPUNote:              "CPU is a lower estimate.",
 	}
