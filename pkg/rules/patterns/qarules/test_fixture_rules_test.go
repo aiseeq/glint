@@ -3,6 +3,7 @@ package qarules
 import (
 	"go/parser"
 	"go/token"
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules"
@@ -213,6 +214,18 @@ func bearer(r *http.Request) string { return r.Header.Get(headerAuth) }
 		"no cookie": `package server
 
 func ping() {}
+`,
+		// The header is read inside a library function, which the project's
+		// files do not show.
+		"library bearer": strings.Replace(cookieAuthServer, `import "net/http"`, `import (
+	"net/http"
+
+	"example.com/shared/httpauth"
+)`, 1) + `
+func serviceToken(r *http.Request) string { return httpauth.BearerToken(r) }
+`,
+		"local extractor": cookieAuthServer + `
+func token(r *http.Request) (string, bool) { return extractBearer(r) }
 `,
 	} {
 		assert.Empty(t, patterntest.DeployFindings(t, "test-auth-scheme-drift", map[string]string{
