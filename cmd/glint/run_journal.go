@@ -17,6 +17,17 @@ const defaultRunLogLimit int64 = 64 << 20
 
 var runLogLimit = defaultRunLogLimit
 
+// noteCacheMiss records why the cache of a root missed; with several roots
+// the first miss of each kind stands.
+func (e *runJournalEntry) noteCacheMiss(cache *resultCache) {
+	if e.RootCache == "" {
+		e.RootCache = cache.rootMiss
+	}
+	if e.ProjectCache == "" {
+		e.ProjectCache = cache.projectMiss
+	}
+}
+
 type runJournalEntry struct {
 	Time         string         `json:"time"`
 	Root         string         `json:"root"`

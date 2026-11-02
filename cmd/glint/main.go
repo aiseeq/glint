@@ -429,12 +429,7 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 		panics = append(panics, rootPanics...)
 		if cache != nil {
 			journalCachedFiles += cache.reused
-			if journal.RootCache == "" {
-				journal.RootCache = cache.rootMiss
-			}
-			if journal.ProjectCache == "" {
-				journal.ProjectCache = cache.projectMiss
-			}
+			journal.noteCacheMiss(cache)
 			if err := cache.save(); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: result cache of %s not saved: %v\n", projectRoot, err)
 			}
@@ -1136,9 +1131,11 @@ func (p *preparedRoot) cachedProject(loader *core.GoProjectLoader, projectRoot s
 	inputs, cacheable, err := loader.GoInputs(projectRoot, loaded, flagTolerant)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: project findings of %s not cached: %v\n", projectRoot, err)
+		p.cache.projectMiss = "inputs-error"
 		return false, nil
 	}
 	if !cacheable {
+		p.cache.projectMiss = "uncacheable"
 		return false, nil
 	}
 	hit := p.cache.keyProject(inputs, projectRules, enabledRules, reportScope)

@@ -729,6 +729,20 @@ func TestProjectCacheKeepsOnlyEightNewestInputVariants(t *testing.T) {
 	assert.Equal(t, "inputs-09", cache.projectHit.Violations["marker"][0].Message)
 }
 
+// Variants written within the grace period stay over the limit: another run
+// may be reading them.
+func TestProjectCacheVariantLimitSparesRecentFiles(t *testing.T) {
+	dir := t.TempDir()
+	paths := make([]string, maxProjectCacheVariants+2)
+	for i := range paths {
+		paths[i] = projectCachePath(dir, "/project", "build", fmt.Sprintf("inputs-%02d", i))
+		require.NoError(t, writeProjectCache(paths[i], projectEntry{Inputs: fmt.Sprintf("inputs-%02d", i)}))
+	}
+	for _, path := range paths {
+		assert.FileExists(t, path)
+	}
+}
+
 func TestResultCacheFullHitDoesNotRewriteCacheFiles(t *testing.T) {
 	dir := t.TempDir()
 	first, err := openResultCache(dir, "/project", "", "build", "stamp")
