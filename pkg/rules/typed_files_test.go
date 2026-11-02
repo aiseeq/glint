@@ -44,12 +44,24 @@ func TestAnalyzeTypedRunFilesUsesReportScope(t *testing.T) {
 	}
 }
 
-func TestAnalyzeRunFilesValidatesFindingFileWithoutReportScope(t *testing.T) {
+func TestAnalyzeRunFilesValidatesFindingFile(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		testRunFilesFindingFileContract(t, scoped)
+	}
+}
+
+// testRunFilesFindingFileContract makes the callback of first.go return a
+// finding of second.go, with first.go as the report scope or without one.
+func testRunFilesFindingFileContract(t *testing.T, scoped bool) {
+	t.Helper()
 	first := &core.FileContext{RelPath: "first.go", GoAST: &ast.File{}}
 	second := &core.FileContext{RelPath: "second.go", GoAST: &ast.File{}}
 	project := &core.GoProjectContext{Packages: []*core.GoPackageContext{{
 		Package: &packages.Package{TypesInfo: &types.Info{}}, Files: []*core.FileContext{first, second},
 	}}}
+	if scoped {
+		project.SetReportFiles([]*core.FileContext{first})
+	}
 	for _, run := range []struct {
 		name string
 		call func() ([]*core.Violation, error)
@@ -71,12 +83,10 @@ func TestAnalyzeRunFilesValidatesFindingFileWithoutReportScope(t *testing.T) {
 			})
 		}},
 	} {
-		t.Run(run.name, func(t *testing.T) {
-			_, err := run.call()
-			if err == nil || !strings.Contains(err.Error(), "returned a finding for") {
-				t.Fatalf("expected callback contract error, got %v", err)
-			}
-		})
+		_, err := run.call()
+		if err == nil || !strings.Contains(err.Error(), "returned a finding for") {
+			t.Fatalf("%s, scoped %v: expected callback contract error, got %v", run.name, scoped, err)
+		}
 	}
 }
 

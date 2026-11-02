@@ -20,8 +20,8 @@ func TestSetReportFilesDoesNotChangeFunctionDeclarationIndex(t *testing.T) {
 	scoped, err := FuncDeclsByObject(project)
 	require.NoError(t, err)
 	require.Equal(t, before, scoped)
-	project.SetReportFiles(nil)
-	full, err := FuncDeclsByObject(project)
+	project.SetReportFiles([]*core.FileContext{})
+	empty, err := FuncDeclsByObject(project)
 	require.NoError(t, err)
-	require.Equal(t, before, full)
+	require.Equal(t, before, empty)
 }

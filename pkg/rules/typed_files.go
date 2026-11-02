@@ -64,7 +64,7 @@ func analyzeTypedFiles(
 				return nil, fmt.Errorf("%s: package has no typed syntax", ruleName)
 			}
 			found := analyze(fileCtx, info)
-			if err := validateRunFindings(inScope, fileCtx, ruleName, found); err != nil {
+			if err := validateRunFindings(fileCtx, ruleName, found); err != nil {
 				return nil, err
 			}
 			violations = append(violations, found...)
@@ -169,7 +169,7 @@ func analyzeGoFiles(
 			}
 			found := analyze(fileCtx, fileInfo)
 			if validate {
-				if err := validateRunFindings(inScope, fileCtx, ruleName, found); err != nil {
+				if err := validateRunFindings(fileCtx, ruleName, found); err != nil {
 					return nil, err
 				}
 			}
@@ -193,7 +193,7 @@ func analyzeGoFiles(
 			}
 			found := analyze(fileCtx, pkg.Package.TypesInfo)
 			if validate {
-				if err := validateRunFindings(inScope, fileCtx, ruleName, found); err != nil {
+				if err := validateRunFindings(fileCtx, ruleName, found); err != nil {
 					return nil, err
 				}
 			}
@@ -206,7 +206,7 @@ func analyzeGoFiles(
 		}
 		found := analyze(fileCtx, nil)
 		if validate {
-			if err := validateRunFindings(inScope, fileCtx, ruleName, found); err != nil {
+			if err := validateRunFindings(fileCtx, ruleName, found); err != nil {
 				return nil, err
 			}
 		}
@@ -217,9 +217,9 @@ func analyzeGoFiles(
 	return violations, nil
 }
 
-func validateRunFindings(inScope func(*core.FileContext) bool, file *core.FileContext, ruleName string, found []*core.Violation) error {
+func validateRunFindings(file *core.FileContext, ruleName string, found []*core.Violation) error {
 	for _, violation := range found {
-		if violation == nil || !sameFilePath(file, violation.File) || inScope != nil && !inScope(file) {
+		if violation == nil || !sameFilePath(file, violation.File) {
 			return fmt.Errorf("%s: report callback for %q returned a finding for %q", ruleName, file.RelPath, violationPath(violation))
 		}
 	}

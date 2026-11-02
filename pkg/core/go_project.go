@@ -97,8 +97,8 @@ func (ctx *GoProjectContext) SetReportFiles(files []*FileContext) {
 	}
 }
 
-// ReportFiles returns the files selected for this run. A nil result means
-// no report scope was set and callers should use the full project.
+// ReportFiles returns the files selected for this run; it means something
+// only when HasReportScope is true, and an empty selection reports nothing.
 func (ctx *GoProjectContext) ReportFiles() []*FileContext {
 	return ctx.reportFileList
 }

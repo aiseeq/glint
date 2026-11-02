@@ -466,6 +466,21 @@ func TestProjectCachePartialScopesDoNotShareOrUpgrade(t *testing.T) {
 	assert.Nil(t, cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-b"), "partial areas cannot satisfy one another")
 }
 
+// A partial run stores its project findings under its scope, so they never
+// come back as the findings of a full run.
+func TestProjectCachePartialRunIsNotStoredAsFull(t *testing.T) {
+	rule := newProjectStubRule()
+	partial := &resultCache{}
+	partial.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a")
+	partial.storeProject(nil, nil, map[string][]byte{})
+	require.NotNil(t, partial.currentProject)
+	assert.Equal(t, "file-a", partial.currentProject.Scope)
+
+	next := &resultCache{previousProject: partial.currentProject}
+	assert.Nil(t, next.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, ""), "a full run recomputes")
+	assert.NotNil(t, next.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a"), "the same scope reuses")
+}
+
 // Files the run did not analyze drop out of the cache; rules the run did not
 // execute keep their findings for an unchanged file.
 func TestResultCacheKeepsOnlyAnalyzedFilesAndMergesRules(t *testing.T) {
