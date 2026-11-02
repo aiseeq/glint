@@ -2,15 +2,19 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/glint/pkg/rules"
 )
 
 func TestAppendRunJournalWritesJSONLine(t *testing.T) {
@@ -127,10 +131,9 @@ func TestAppendRunJournalConcurrentWrites(t *testing.T) {
 func TestAppendRunJournalRotates(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runs.jsonl")
 	t.Setenv("GLINT_RUN_LOG", path)
-	if err := os.WriteFile(path, []byte("previous record\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path+".1", []byte("older rotation\n"), 0o644); err != nil {
+	root := permanentTestRoot(t)
+	previous, _ := json.Marshal(runJournalEntry{Time: time.Now().Format(time.RFC3339), Root: root, RuleMS: map[string]int64{"rule-a": 6}})
+	if err := os.WriteFile(path, append(previous, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	oldLimit := runLogLimit
@@ -139,9 +142,12 @@ func TestAppendRunJournalRotates(t *testing.T) {
 	if err := appendRunJournal(runJournalEntry{Version: "new"}); err != nil {
 		t.Fatal(err)
 	}
-	rotated, err := os.ReadFile(path + ".1")
-	if err != nil || string(rotated) != "previous record\n" {
-		t.Fatalf("rotated file = %q, %v", rotated, err)
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Fatalf("rotated source should be removed after fold: %v", err)
+	}
+	daily, err := os.ReadFile(filepath.Join(filepath.Dir(path), "runs-daily.jsonl"))
+	if err != nil || !strings.Contains(string(daily), `"rule-a":6`) {
+		t.Fatalf("daily journal = %q, %v", daily, err)
 	}
 	current, err := os.ReadFile(path)
 	if err != nil {
@@ -190,5 +196,174 @@ func TestRunJournalWriteFailureDoesNotChangeExitCode(t *testing.T) {
 	}
 	if got := runExitCode(errFindingsReported); got != 1 {
 		t.Fatalf("journal failure must not affect the existing check exit code, got %d", got)
+	}
+}
+
+func TestFoldRotatedJournalMergesAndIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	root := permanentTestRoot(t)
+	path := filepath.Join(dir, "runs.jsonl")
+	entry := runJournalEntry{Time: time.Now().Format(time.RFC3339), Root: root, WallMS: 12, Findings: map[string]int{"long-function": 2}, RuleMS: map[string]int64{"long-function": 7}}
+	line, _ := json.Marshal(entry)
+	if err := os.WriteFile(path+".1", append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := foldRotatedJournal(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := foldRotatedJournal(path); err != nil {
+		t.Fatal(err)
+	}
+	data := make(map[string]*dailyRecord)
+	header := dailyHeader{}
+	if err := readDaily(filepath.Join(dir, "runs-daily.jsonl"), data, &header); err != nil {
+		t.Fatal(err)
+	}
+	d := data[time.Now().Format("2006-01-02")]
+	if d == nil || d.Runs != 1 || d.RuleMS["long-function"] != 7 || d.Roots[root].Findings["long-function"] != 2 {
+		t.Fatalf("daily record was lost or counted twice: %#v", d)
+	}
+	if header.FirstSeen["long-function"] == "" {
+		t.Fatal("first_seen was not recorded")
+	}
+	report, err := makeStatsReport(path, 1, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Runs != 1 {
+		t.Fatalf("stats counted a crash-left rotation twice: runs=%d", report.Runs)
+	}
+}
+
+func TestPermanentRootClassification(t *testing.T) {
+	root := permanentTestRoot(t)
+	if !isPermanentRoot(root) {
+		t.Fatal("git directory should be permanent")
+	}
+	if isPermanentRoot(filepath.Join(root, "missing")) {
+		t.Fatal("root without .git should be temporary")
+	}
+	if isPermanentRoot(t.TempDir()) {
+		t.Fatal("temporary directory should be temporary")
+	}
+}
+
+func permanentTestRoot(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp(".", ".run-stats-project-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestStatsWindowReportsCoverageHoleAndFindings(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.Local)
+	start := localDay(now).AddDate(0, 0, -2)
+	data := make(map[string]*dailyRecord)
+	root := permanentTestRoot(t)
+	for _, offset := range []int{0, 2} {
+		day := start.AddDate(0, 0, offset)
+		d := newDaily(day.Format("2006-01-02"))
+		d.Runs = 1
+		d.Roots[root] = &dailyRoot{Runs: 1, Findings: map[string]int{"long-function": 1}}
+		data[d.Day] = d
+	}
+	report := buildStats(data, dailyHeader{FirstSeen: map[string]string{"deep-nesting": start.AddDate(0, 0, 1).Format("2006-01-02")}}, 3, start, localDay(now))
+	if report.Coverage.DaysWithRuns != 2 || report.Coverage.DaysWithoutRuns != 1 || report.Coverage.Complete {
+		t.Fatalf("coverage = %#v", report.Coverage)
+	}
+	if len(report.RulesWithFindings) != 1 || report.RulesWithFindings[0].Days != 2 {
+		t.Fatalf("findings = %#v", report.RulesWithFindings)
+	}
+	if !strings.Contains(report.CPUNote, "lower estimate") {
+		t.Fatalf("missing CPU qualification: %q", report.CPUNote)
+	}
+}
+
+func TestStatsRulesWithoutFindingsOrderAndConsoleCPULimit(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.Local)
+	start := localDay(now).AddDate(0, 0, -2)
+	allRules := rules.All()
+	if len(allRules) < 3 {
+		t.Fatalf("need at least three rules, got %d", len(allRules))
+	}
+	names := make([]string, 0, len(allRules))
+	firstSeen := make(map[string]string, len(allRules))
+	for _, rule := range allRules {
+		name := rule.Name()
+		names = append(names, name)
+		firstSeen[name] = now.Format("2006-01-02")
+	}
+	sort.Strings(names)
+	firstSeen[names[0]] = start.Format("2006-01-02")
+	firstSeen[names[1]] = start.Format("2006-01-02")
+	firstSeen[names[2]] = start.AddDate(0, 0, 1).Format("2006-01-02")
+	report := buildStats(nil, dailyHeader{FirstSeen: firstSeen}, 3, start, localDay(now))
+	for i, want := range names[:3] {
+		if got := report.RulesWithoutFindings[i].Rule; got != want {
+			t.Fatalf("rule at position %d = %q, want %q", i, got, want)
+		}
+	}
+	if report.RulesWithoutFindings[0].Since != report.RulesWithoutFindings[1].Since {
+		t.Fatalf("same-day rules have different since dates: %#v", report.RulesWithoutFindings[:2])
+	}
+
+	today := now.Format("2006-01-02")
+	consoleReport := statsReport{
+		Days:                 3,
+		Coverage:             statsCoverage{From: today, To: today, DaysWithRuns: 1, DaysWithoutRuns: 2},
+		RulesWithoutFindings: []statsRuleEmpty{{Rule: "deep-nesting", Since: today}},
+		CPU:                  make([]statsCPU, 25),
+		CPUNote:              "CPU is a lower estimate.",
+	}
+	for i := range consoleReport.CPU {
+		consoleReport.CPU[i] = statsCPU{Rule: fmt.Sprintf("cpu-%02d", i), MS: int64(25 - i)}
+	}
+	var output bytes.Buffer
+	if err := printStats(&output, consoleReport); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "Rules without findings:\n  deep-nesting  since "+today+" (1 days)") {
+		t.Fatalf("English rule section missing: %s", text)
+	}
+	if !strings.Contains(text, "Rule CPU (lower estimate):") || !strings.Contains(text, "... 5 more rules: -o json") {
+		t.Fatalf("CPU section or truncation notice missing: %s", text)
+	}
+	if strings.Contains(text, "cpu-20:") || !strings.Contains(text, "cpu-19:") {
+		t.Fatalf("console CPU list was not limited to 20: %s", text)
+	}
+}
+
+func TestFirstFoldDatesRulesFromEarliestFoldedDay(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "runs.jsonl")
+	earliest := time.Now().AddDate(0, 0, -5)
+	entry := runJournalEntry{Time: earliest.Format(time.RFC3339), Root: permanentTestRoot(t), WallMS: 1}
+	line, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".1", append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := foldRotatedJournal(path); err != nil {
+		t.Fatal(err)
+	}
+	header := dailyHeader{}
+	if err := readDaily(filepath.Join(dir, "runs-daily.jsonl"), make(map[string]*dailyRecord), &header); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := header.FirstSeen["long-function"], earliest.Format("2006-01-02"); got != want {
+		t.Fatalf("first fold: first_seen = %q, want the earliest folded day %q", got, want)
 	}
 }

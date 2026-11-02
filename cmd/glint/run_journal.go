@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -50,6 +51,32 @@ func runLogPath() (string, bool, error) {
 	return filepath.Join(state, "glint", "runs.jsonl"), true, nil
 }
 
+func absoluteRunJournalPath(path, operation string) (string, error) {
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve run journal path for %s: %w", operation, err)
+	}
+	return abs, nil
+}
+
+func ensureRunJournalDirectory(path, operation string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("%s: create run journal directory: %w", operation, err)
+	}
+	return nil
+}
+
+func openRunJournalLock(path, operation string) (*os.File, error) {
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("%s: open run journal lock: %w", operation, err)
+	}
+	return lock, nil
+}
+
 func appendRunJournal(entry runJournalEntry) (retErr error) {
 	path, enabled, err := runLogPath()
 	if err != nil {
@@ -58,28 +85,40 @@ func appendRunJournal(entry runJournalEntry) (retErr error) {
 	if !enabled {
 		return nil
 	}
-	if !filepath.IsAbs(path) {
-		path, err = filepath.Abs(path)
-		if err != nil {
-			return fmt.Errorf("resolve run journal path: %w", err)
+	limit := runLogLimit
+	if raw, ok := os.LookupEnv("GLINT_RUN_LOG_LIMIT"); ok {
+		parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || parsed < 1 {
+			return fmt.Errorf("GLINT_RUN_LOG_LIMIT must be a positive byte count")
 		}
+		limit = parsed
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create run journal directory: %w", err)
-	}
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	path, err = absoluteRunJournalPath(path, "append")
 	if err != nil {
-		return fmt.Errorf("open run journal lock: %w", err)
+		return err
 	}
+	if err := ensureRunJournalDirectory(path, "append"); err != nil {
+		return err
+	}
+	lock, err := openRunJournalLock(path, "append")
+	if err != nil {
+		return err
+	}
+	locked := false
 	defer func() {
-		if err := lock.Close(); retErr == nil && err != nil {
-			retErr = fmt.Errorf("close run journal lock: %w", err)
+		if locked {
+			if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("unlock run journal: %w", err))
+			}
+		}
+		if err := lock.Close(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close run journal lock: %w", err))
 		}
 	}()
-	// Closing the lock file above releases the lock.
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return fmt.Errorf("lock run journal: %w", err)
 	}
+	locked = true
 
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -87,23 +126,25 @@ func appendRunJournal(entry runJournalEntry) (retErr error) {
 	}
 	info, statErr := file.Stat()
 	if statErr != nil {
+		closeErr := file.Close()
+		if closeErr != nil {
+			return errors.Join(fmt.Errorf("stat run journal: %w", statErr), fmt.Errorf("close run journal after stat failure: %w", closeErr))
+		}
 		return fmt.Errorf("stat run journal: %w", statErr)
 	}
-	if info.Size() > runLogLimit {
+	if info.Size() > limit {
 		if err := file.Close(); err != nil {
 			return fmt.Errorf("close run journal before rotation: %w", err)
 		}
-		if err := os.Remove(path + ".1"); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove previous run journal: %w", err)
-		}
-		if err := os.Rename(path, path+".1"); err != nil {
-			return fmt.Errorf("rotate run journal: %w", err)
+		if err := rotateRunJournal(path); err != nil {
+			return err
 		}
 		file, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
-			return fmt.Errorf("create rotated run journal: %w", err)
+			return fmt.Errorf("open run journal after rotation: %w", err)
 		}
 	}
+
 	defer func() {
 		if err := file.Close(); retErr == nil && err != nil {
 			retErr = fmt.Errorf("close run journal: %w", err)
@@ -120,6 +161,32 @@ func appendRunJournal(entry runJournalEntry) (retErr error) {
 	}
 	if n != len(line) {
 		return fmt.Errorf("short write: wrote %d of %d bytes", n, len(line))
+	}
+	return nil
+}
+
+func rotateRunJournal(path string) error {
+	rotated := path + ".1"
+	if _, err := os.Stat(rotated); err == nil {
+		if err := foldRotatedJournal(path); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: run journal fold failed: %v\n", err)
+			return nil
+		}
+		if err := os.Remove(rotated); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove previous run journal: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat previous run journal: %w", err)
+	}
+	if err := os.Rename(path, rotated); err != nil {
+		return fmt.Errorf("rotate run journal: %w", err)
+	}
+	if err := foldRotatedJournal(path); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: run journal fold failed: %v\n", err)
+		return nil
+	}
+	if err := os.Remove(rotated); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "warning: remove folded run journal: %v\n", err)
 	}
 	return nil
 }
