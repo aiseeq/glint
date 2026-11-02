@@ -234,4 +234,28 @@ func token(r *http.Request) (string, bool) { return extractBearer(r) }
 `,
 		}), name)
 	}
+	// A bearer token the server sends to another service, a token helper
+	// that reads a cookie, a declaration or a comment is no reading of the
+	// incoming header.
+	for name, server := range map[string]string{
+		"outgoing token": cookieAuthServer + `
+func callBilling(req *http.Request) { req.Header.Set("X-Trace", "1"); _ = getBearerToken() }
+`,
+		"cookie helper": cookieAuthServer + `
+func session(r *http.Request) string { return readBearerCookie(r) }
+`,
+		"declaration": cookieAuthServer + `
+func BearerToken(r *http.Request) string { return "" }
+`,
+		"comment": cookieAuthServer + `
+// Unlike BearerToken(r), the service reads the session cookie.
+func noop() {}
+`,
+	} {
+		assert.Equal(t, []string{"frontend/e2e/stats.spec.ts:1"}, patterntest.DeployFindings(t, "test-auth-scheme-drift", map[string]string{
+			"backend/server/auth.go": server,
+			"frontend/e2e/stats.spec.ts": `const headers = { Authorization: ` + "`Bearer ${token}`" + ` }
+`,
+		}), name)
+	}
 }

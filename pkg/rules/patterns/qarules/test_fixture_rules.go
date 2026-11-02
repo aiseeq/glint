@@ -587,16 +587,17 @@ var (
 	requestCookieRead    = regexp.MustCompile(`\.Cookie\(\s*[\w."]`)
 	authHeaderConstant   = regexp.MustCompile(`\b(\w+)\s*=\s*"Authorization"`)
 	authHeaderMiddleware = regexp.MustCompile(`(?i)\b(?:echojwt|jwtauth|ginjwt|jwtmiddleware|BearerAuth|HeaderAuthorization)\b|(?:TrimPrefix|HasPrefix|CutPrefix)\([^)]*"Bearer `)
-	// bearerTokenCall is a call to a function named for reading the bearer
-	// token, a library one too: its body, and the header it reads, is not
-	// among the project's files.
-	bearerTokenCall  = regexp.MustCompile(`(?i)\b(?:(?:parse|extract|get|read)bearer\w*|bearertoken\w*|\w*tokenfromheader)\s*\(`)
+	// bearerTokenCall is a call that hands the incoming request to a function
+	// named for reading its bearer token, a library one too: its body, and
+	// the header it reads, is not among the project's files. A call without
+	// the request (a token for an outgoing call) and a declaration do not match.
+	bearerTokenCall  = regexp.MustCompile(`(?i)\b(?:(?:parse|extract|get|read)?bearer(?:token)?|tokenfromheader)\s*\(\s*(?:r|req|request|\w+\.request(?:\(\))?)\s*[,)]`)
 	corsHeaderList   = regexp.MustCompile(`(?i)allow-?headers|allowedheaders|expose-?headers`)
 	testAuthHeaderTS = regexp.MustCompile(`['"]?\bAuthorization['"]?\s*:\s*[` + "`" + `'"]Bearer\b`)
 	testAuthHeaderGo = regexp.MustCompile(`\.Header\.(?:Set|Add)\(\s*"Authorization"`)
 	// authHeaderWords are in every line readsAuthHeader takes, in any case:
 	// a file without one is not matched line by line.
-	authHeaderWords = []string{"auth", "jwt", "bearer"}
+	authHeaderWords = []string{"auth", "jwt", "bearer", "tokenfromheader"}
 )
 
 // UseProjectFiles learns how the project's Go server reads authentication.
@@ -632,7 +633,10 @@ func (r *TestAuthSchemeDriftRule) UseProjectFiles(files []*core.FileContext) {
 // readsAuthHeader reports a line that reads the Authorization header of a
 // request, by name or through a constant holding it.
 func readsAuthHeader(line string, headerNames []string) bool {
-	if authHeaderMiddleware.MatchString(line) || bearerTokenCall.MatchString(line) {
+	if authHeaderMiddleware.MatchString(line) {
+		return true
+	}
+	if bearerTokenCall.MatchString(line) && !strings.HasPrefix(strings.TrimSpace(line), "//") {
 		return true
 	}
 	if !strings.Contains(line, "Get") && !strings.Contains(line, "Values") {
