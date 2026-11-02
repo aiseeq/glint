@@ -3,10 +3,8 @@ package gorules
 import (
 	"fmt"
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"go/types"
-	"path/filepath"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -363,23 +361,16 @@ func closerUseOf(stack []ast.Node, info *types.Info, project *closerProject) clo
 // close. A Close of a dependency is read from its source file, parsed once
 // per analysis; without the file the Close is not known to delegate.
 type delegatedClosers struct {
-	ctx       *core.GoProjectContext
 	decls     map[*types.Func]*ast.FuncDecl
 	delegates map[*types.Func]string
-	files     map[string]*parsedCloserFile
-}
-
-type parsedCloserFile struct {
-	fset *token.FileSet
-	file *ast.File
+	sources   *patternkit.DependencySources
 }
 
 func newDelegatedClosers(ctx *core.GoProjectContext) *delegatedClosers {
 	d := &delegatedClosers{
-		ctx:       ctx,
 		decls:     make(map[*types.Func]*ast.FuncDecl),
 		delegates: make(map[*types.Func]string),
-		files:     make(map[string]*parsedCloserFile),
+		sources:   patternkit.NewDependencySources(ctx.FileSet),
 	}
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
@@ -411,49 +402,12 @@ func (d *delegatedClosers) closesThrough(typ types.Type, method string) bool {
 	if !known {
 		decl := d.decls[closeFn]
 		if decl == nil {
-			decl = d.dependencyDecl(closeFn)
+			decl = d.sources.FuncDecl(closeFn)
 		}
 		delegated = delegatedCloseMethod(decl)
 		d.delegates[closeFn] = delegated
 	}
 	return delegated != "" && delegated == method
-}
-
-func (d *delegatedClosers) dependencyDecl(fn *types.Func) *ast.FuncDecl {
-	if d.ctx.FileSet == nil || !fn.Pos().IsValid() {
-		return nil
-	}
-	position := d.ctx.FileSet.PositionFor(fn.Pos(), false)
-	if !position.IsValid() || position.Filename == "" || position.Offset < 0 {
-		return nil
-	}
-	path := filepath.Clean(position.Filename)
-	parsed, attempted := d.files[path]
-	if !attempted {
-		parsed = parseDelegatedFile(path)
-		d.files[path] = parsed
-	}
-	if parsed == nil {
-		return nil
-	}
-	for _, decl := range parsed.file.Decls {
-		fd, ok := decl.(*ast.FuncDecl)
-		if ok && fd.Name.Name == fn.Name() && parsed.fset.PositionFor(fd.Name.Pos(), false).Line == position.Line {
-			return fd
-		}
-	}
-	return nil
-}
-
-// parseDelegatedFile parses a dependency source file, nil when it cannot be
-// read or parsed: its Close is then not known to delegate.
-func parseDelegatedFile(path string) *parsedCloserFile {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, nil, 0)
-	if err != nil { //nolint:silent-error-handling // A dependency whose source cannot be read only leaves its Close unknown as a delegate.
-		return nil
-	}
-	return &parsedCloserFile{fset: fset, file: file}
 }
 
 func delegatedCloseMethod(decl *ast.FuncDecl) string {

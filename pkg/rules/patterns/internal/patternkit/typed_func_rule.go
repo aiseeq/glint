@@ -16,6 +16,8 @@ type FuncScope struct {
 	Info    *types.Info
 	Decls   map[*types.Func]TypedFuncDecl
 	Callers map[*types.Func][]FuncCallSite
+	// Sources reads the bodies of library functions, which Decls lacks.
+	Sources *DependencySources
 }
 
 // Callee returns the declaration a static call reaches, ok false for a call
@@ -75,8 +77,9 @@ func (r *TypedFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Vi
 	if r.ForProject != nil {
 		check = r.ForProject(decls)
 	}
+	sources := NewDependencySources(ctx.FileSet)
 	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
-		scope := FuncScope{Info: info, Decls: decls, Callers: callers}
+		scope := FuncScope{Info: info, Decls: decls, Callers: callers, Sources: sources}
 		return AnalyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {
 			var violations []*core.Violation
 			for _, f := range check(scope, fn) {
@@ -106,5 +109,5 @@ func NewTypedFuncRule(base *rules.BaseRule, suggestion string, check func(scope 
 // WithInfo returns the scope of a function type-checked in info: the
 // declarations and callers of the run stay the same.
 func (s FuncScope) WithInfo(info *types.Info) FuncScope {
-	return FuncScope{Info: info, Decls: s.Decls, Callers: s.Callers}
+	return FuncScope{Info: info, Decls: s.Decls, Callers: s.Callers, Sources: s.Sources}
 }

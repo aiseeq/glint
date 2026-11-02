@@ -82,7 +82,8 @@ func goroutineBodyOf(scope patternkit.FuncScope, call *ast.CallExpr) (*ast.Block
 
 // guardsPanics reports a body that recovers: a deferred recover, directly or
 // in a helper the defer calls, or a call of a helper that defers one around
-// the work it runs (guard.Run("tick", s.refresh)).
+// the work it runs (guard.Run("tick", s.refresh)). A helper of another
+// module counts too: its body is read from the module's source.
 func guardsPanics(scope patternkit.FuncScope, info *types.Info, body *ast.BlockStmt) bool {
 	guarded := false
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -93,8 +94,10 @@ func guardsPanics(scope patternkit.FuncScope, info *types.Info, body *ast.BlockS
 		case *ast.DeferStmt:
 			guarded = deferredRecover(scope, info, node.Call)
 		case *ast.CallExpr:
-			if decl, ok := (patternkit.FuncScope{Info: info, Decls: scope.Decls}).Callee(node); ok {
+			if decl, ok := scope.WithInfo(info).Callee(node); ok {
 				guarded = defersRecover(scope, decl)
+			} else if fn := patternkit.StaticFunc(info, node); fn != nil {
+				guarded = dependencyDefersRecover(scope.Sources, fn)
 			}
 		}
 		return !guarded
@@ -108,8 +111,51 @@ func deferredRecover(scope patternkit.FuncScope, info *types.Info, call *ast.Cal
 	if lit, ok := ast.Unparen(call.Fun).(*ast.FuncLit); ok {
 		return callsRecover(info, lit.Body)
 	}
-	decl, ok := (patternkit.FuncScope{Info: info, Decls: scope.Decls}).Callee(call)
-	return ok && callsRecover(decl.Info, decl.Decl.Body)
+	if decl, ok := scope.WithInfo(info).Callee(call); ok {
+		return callsRecover(decl.Info, decl.Decl.Body)
+	}
+	return dependencyCallsRecover(scope.Sources, patternkit.StaticFunc(info, call))
+}
+
+// dependencyCallsRecover reports a library function whose body calls
+// recover.
+func dependencyCallsRecover(sources *patternkit.DependencySources, fn *types.Func) bool {
+	if fn == nil || fn.Pkg() == nil || fn.Pkg().Scope().Lookup("recover") != nil {
+		// A package of its own recover: the name is not the builtin.
+		return false
+	}
+	decl := sources.FuncDecl(fn)
+	return decl != nil && decl.Body != nil && callsRecover(nil, decl.Body)
+}
+
+// dependencyDefersRecover reports a library function whose own body defers a
+// recover: in a literal or in a function of the same package.
+func dependencyDefersRecover(sources *patternkit.DependencySources, fn *types.Func) bool {
+	decl := sources.FuncDecl(fn)
+	if decl == nil || decl.Body == nil {
+		return false
+	}
+	for _, stmt := range decl.Body.List {
+		d, ok := stmt.(*ast.DeferStmt)
+		if !ok {
+			continue
+		}
+		switch callee := ast.Unparen(d.Call.Fun).(type) {
+		case *ast.FuncLit:
+			if callsRecover(nil, callee.Body) {
+				return true
+			}
+		case *ast.Ident:
+			// A name the file resolves is a parameter or local, not the package function.
+			if callee.Obj != nil && callee.Obj.Kind != ast.Fun { //nolint:staticcheck // the parser's resolution is all an untyped library body has
+				continue
+			}
+			if helper, ok := fn.Pkg().Scope().Lookup(callee.Name).(*types.Func); ok && dependencyCallsRecover(sources, helper) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // defersRecover reports a function whose own body defers a recover.
@@ -122,14 +168,18 @@ func defersRecover(scope patternkit.FuncScope, decl patternkit.TypedFuncDecl) bo
 	return false
 }
 
-// callsRecover reports a call of the builtin recover in a body.
+// callsRecover reports a call of the builtin recover in a body. Without types
+// (a body parsed from a library's source) recover is the builtin unless the
+// file declares the name: the parser resolves only names the file declares.
 func callsRecover(info *types.Info, body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
-			if ident, ok := ast.Unparen(call.Fun).(*ast.Ident); ok {
-				if _, builtin := info.Uses[ident].(*types.Builtin); builtin && ident.Name == "recover" {
-					found = true
+			if ident, ok := ast.Unparen(call.Fun).(*ast.Ident); ok && ident.Name == "recover" {
+				if info == nil {
+					found = ident.Obj == nil //nolint:staticcheck // the parser's resolution is all an untyped library body has
+				} else {
+					_, found = info.Uses[ident].(*types.Builtin)
 				}
 			}
 		}

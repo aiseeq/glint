@@ -459,3 +459,96 @@ func (p *Poller) Daily() {
 `,
 	}))
 }
+
+// A recover helper of another module guards the goroutine as a helper of the
+// project does: its body is read from the dependency's source.
+func TestBackgroundGoroutineRecoverFromDependency(t *testing.T) {
+	assert.Equal(t, []string{"svc/poll.go:29", "svc/poll.go:35", "svc/poll.go:40"}, patterntest.TypedFuncFindings(t, NewBackgroundGoroutineWithoutRecoverRule(), map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n\n" +
+			"require (\n\tgithub.com/shopspring/decimal v0.0.0\n\texample.com/safe v0.0.0\n)\n\n" +
+			"replace github.com/shopspring/decimal => ./third_party/decimal\n\n" +
+			"replace example.com/safe => ./third_party/safe\n\n" +
+			"require example.com/odd v0.0.0\n\nreplace example.com/odd => ./third_party/odd\n",
+		"third_party/safe/go.mod": "module example.com/safe\n\ngo 1.24\n",
+		"third_party/odd/go.mod":  "module example.com/odd\n\ngo 1.24\n",
+		"third_party/odd/recover.go": `package odd
+
+func recover() any { return nil }
+`,
+		"third_party/odd/catch.go": `package odd
+
+func Catch() {
+	if r := recover(); r != nil {
+		println("caught")
+	}
+}
+`,
+		"third_party/safe/safe.go": `package safe
+
+func Recover(name string, onPanic func(any)) {
+	if r := recover(); r != nil && onPanic != nil {
+		onPanic(r)
+	}
+}
+
+func Run(name string, f func()) {
+	defer Recover(name, nil)
+	f()
+}
+
+func Trace(name string) { println(name) }
+
+func RunWith(Recover func(), f func()) {
+	defer Recover()
+	f()
+}
+`,
+		"svc/poll.go": `package svc
+
+import (
+	"time"
+
+	"example.com/odd"
+	"example.com/safe"
+)
+
+type Cache struct {
+	ticker *time.Ticker
+	name   string
+}
+
+func (c *Cache) refresh() {}
+
+func (c *Cache) Start() {
+	go func() {
+		defer safe.Recover("warmer:"+c.name, nil)
+		for range c.ticker.C {
+			c.refresh()
+		}
+	}()
+	go func() {
+		for range c.ticker.C {
+			safe.Run("iteration", c.refresh)
+		}
+	}()
+	go func() {
+		defer safe.Trace("traced")
+		for range c.ticker.C {
+			c.refresh()
+		}
+	}()
+	go func() {
+		for range c.ticker.C {
+			safe.RunWith(func() {}, c.refresh)
+		}
+	}()
+	go func() {
+		defer odd.Catch()
+		for range c.ticker.C {
+			c.refresh()
+		}
+	}()
+}
+`,
+	}))
+}
