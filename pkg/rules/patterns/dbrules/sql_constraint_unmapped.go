@@ -241,15 +241,17 @@ func unhandledUniqueConflicts(ctx *core.GoProjectContext, callers *callerIndex, 
 	return conflicts, nil
 }
 
-// truncatedRandomUniqueOrigin finds a short random identifier passed by an
-// HTTP handler to the function that writes a unique key. The database error
-// already has a finding at the INSERT; this points at the lossy construction
-// that made retries necessary.
+// truncatedRandomOrigin records the function and syntax node that construct a
+// short random identifier passed to the function that writes a unique key.
 type truncatedRandomOrigin struct {
 	fn   patternkit.TypedFunc
 	node ast.Node
 }
 
+// truncatedRandomUniqueOrigin finds a short random identifier passed by an
+// HTTP handler to the function that writes a unique key. The database error
+// already has a finding at the INSERT; this points at the lossy construction
+// that made retries necessary.
 func truncatedRandomUniqueOrigin(callers *callerIndex, target *types.Func) *truncatedRandomOrigin {
 	return truncatedRandomUniqueOriginAt(callers, target.Origin(), 0, make(map[*types.Func]bool))
 }

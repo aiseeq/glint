@@ -202,3 +202,96 @@ func pickAnchor() int { return 0 }
 
 	assert.Empty(t, violations)
 }
+
+func TestDocWrongSubjectReportsFunctionDocAttachedToGenDecl(t *testing.T) {
+	tests := []struct {
+		name    string
+		decl    string
+		subject string
+		kind    string
+	}{
+		{name: "unexported method", decl: `// saveNote stores a note atomically.
+const noteOrigin = "manual"
+
+func (r *repo) saveNote() {}`, subject: "saveNote", kind: "const"},
+		{name: "exported method", decl: `// SaveNote stores a note atomically.
+var noteOrigin = "manual"
+
+func (r *repo) SaveNote() {}`, subject: "SaveNote", kind: "var"},
+		{name: "function", decl: `// fetchAll loads every record.
+type retryPolicy struct{}
+
+func fetchAll() {}`, subject: "fetchAll", kind: "type"},
+		{name: "exported function", decl: `// FetchAll loads every record.
+var noteOrigin = "manual"
+
+func FetchAll() {}`, subject: "FetchAll", kind: "var"},
+		{name: "grouped const spec", decl: `const (
+	// fetchAll loads every record.
+	retryDelay = 1
+)
+
+func fetchAll() {}`, subject: "fetchAll", kind: "const"},
+		{name: "grouped const declaration", decl: `// fetchAll loads every record.
+const (
+	retryDelay = 1
+)
+
+func fetchAll() {}`, subject: "fetchAll", kind: "const"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := "package subject\n\ntype repo struct{}\n\n" + tt.decl + "\n"
+			violations := analyzeDocSubject(t, map[string]string{"subject.go": source})
+			require.Len(t, violations, 1)
+			assert.Contains(t, violations[0].Message, tt.subject)
+			assert.Contains(t, violations[0].Message, tt.kind)
+			assert.Contains(t, violations[0].Suggestion, tt.kind)
+		})
+	}
+}
+
+func TestDocWrongSubjectAcceptsGenDeclComments(t *testing.T) {
+	violations := analyzeDocSubject(t, map[string]string{"subject.go": `package subject
+
+// retryDelay controls spacing between attempts.
+const retryDelay = 1
+
+// fetchAll waits this long between attempts.
+const wait = retryDelay
+
+// fetchAll waits this long between attempts.
+func fetchAll() {}
+
+// maxAttempts is the maximum number of retries.
+const maxAttempts = 3
+`})
+
+	assert.Empty(t, violations)
+}
+
+func TestDocWrongSubjectReportsDocAboveSeveralInsertedDecls(t *testing.T) {
+	violations := analyzeDocSubject(t, map[string]string{"subject.go": `package subject
+
+// saveNote stores a note and its revision.
+const noteOrigin = "manual"
+var saveTimeout = 30
+
+func saveNote() {}
+`})
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 4, violations[0].Line)
+	assert.Contains(t, violations[0].Message, "saveNote")
+}
+
+func TestDocWrongSubjectReportsGroupDocAtTheGroup(t *testing.T) {
+	for name, specs := range map[string]string{"one spec": "\tlimit = 1\n", "two specs": "\tlimit = 1\n\tdepth = 2\n"} {
+		t.Run(name, func(t *testing.T) {
+			violations := analyzeDocSubject(t, map[string]string{"subject.go": "package subject\n\n// fetch loads records.\nconst (\n" + specs + ")\n\nfunc fetch() {}\n"})
+			require.Len(t, violations, 1)
+			assert.Equal(t, 4, violations[0].Line)
+		})
+	}
+}

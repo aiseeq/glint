@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -43,6 +44,19 @@ func init() {
 // So a first word written as an unexported name of several words (heatSpot)
 // that the code of the package never mentions is reported too; an exported
 // one (PostgreSQL could be a brand) only when the own name opens a later line.
+//
+// A const, var or type pasted between a function and its doc takes the doc
+// over, and the function stands undocumented:
+//
+//	// saveNote stores a note and its revision in one transaction.
+//	const noteOrigin = "manual"
+//
+//	func (r *repo) saveNote(id int64) error { … }
+//
+// Such a declaration, or a spec of a group, is reported when its doc opens
+// with the name of the function declared right after it, the function has no
+// doc of its own and the doc does not name the declaration: prose about a
+// later, separately documented function is a comment of the declaration.
 type DocWrongSubjectRule struct {
 	*rules.BaseRule
 }
@@ -53,7 +67,7 @@ func NewDocWrongSubjectRule() *DocWrongSubjectRule {
 		BaseRule: rules.NewBaseRule(
 			"doc-wrong-subject",
 			"documentation",
-			"Detects a doc comment whose first word names another function of the package, or a name the package no longer has — the comment was left above the wrong declaration",
+			"Detects a doc comment whose first word names another function of the package, or a name the package no longer has, and a function doc a const, var or type pasted above the function took over — the comment was left above the wrong declaration",
 			core.SeverityMedium,
 		),
 	}
@@ -125,34 +139,129 @@ type packageNames struct {
 func (r *DocWrongSubjectRule) analyzeFile(fileCtx *core.FileContext, names packageNames) []*core.Violation {
 	var violations []*core.Violation
 
-	for _, decl := range fileCtx.GoAST.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Doc == nil {
-			continue
-		}
-		doc := fn.Doc.Text()
-		subject, ok := docSubject(doc)
-		if !ok || subject == fn.Name.Name {
-			continue
-		}
-		// A doc that names its own function too explains a pair; it did not
-		// lose its declaration — unless the own name opens a later line.
-		glued := opensLaterLine(doc, fn.Name.Name)
-		if !glued && mentionsWord(doc, fn.Name.Name) {
-			continue
-		}
-		switch {
-		case names.funcs[subject]:
-			violations = append(violations, r.report(fileCtx, fn, subject, false))
-		case !names.used[subject] && namedLikeCode(subject, glued):
-			violations = append(violations, r.report(fileCtx, fn, subject, true))
+	decls := fileCtx.GoAST.Decls
+	for i, decl := range decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if v := r.checkFuncDoc(fileCtx, d, names); v != nil {
+				violations = append(violations, v)
+			}
+		case *ast.GenDecl:
+			if next := undocumentedFuncAfter(decls[i+1:]); next != nil {
+				violations = append(violations, r.checkGenDecl(fileCtx, d, next)...)
+			}
 		}
 	}
 
 	return violations
 }
 
-func (r *DocWrongSubjectRule) report(fileCtx *core.FileContext, fn *ast.FuncDecl, subject string, gone bool) *core.Violation {
+func (r *DocWrongSubjectRule) checkFuncDoc(fileCtx *core.FileContext, fn *ast.FuncDecl, names packageNames) *core.Violation {
+	if fn.Doc == nil {
+		return nil
+	}
+	doc := fn.Doc.Text()
+	subject, ok := docSubject(doc)
+	if !ok || subject == fn.Name.Name {
+		return nil
+	}
+	// A doc that names its own function too explains a pair; it did not
+	// lose its declaration — unless the own name opens a later line.
+	glued := opensLaterLine(doc, fn.Name.Name)
+	if !glued && mentionsWord(doc, fn.Name.Name) {
+		return nil
+	}
+	switch {
+	case names.funcs[subject]:
+		return r.reportFunction(fileCtx, fn, subject, false)
+	case !names.used[subject] && namedLikeCode(subject, glued):
+		return r.reportFunction(fileCtx, fn, subject, true)
+	}
+	return nil
+}
+
+// undocumentedFuncAfter returns the function that follows a run of
+// undocumented const, var and type declarations when it has no doc either:
+// the function whose doc the declaration in front of them may have taken.
+func undocumentedFuncAfter(decls []ast.Decl) *ast.FuncDecl {
+	for _, decl := range decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Doc != nil {
+				return nil
+			}
+			return d
+		case *ast.GenDecl:
+			if d.Doc != nil || slices.ContainsFunc(d.Specs, func(spec ast.Spec) bool { return specDoc(spec) != nil }) {
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+func specDoc(spec ast.Spec) *ast.CommentGroup {
+	switch spec := spec.(type) {
+	case *ast.ValueSpec:
+		return spec.Doc
+	case *ast.TypeSpec:
+		return spec.Doc
+	}
+	return nil
+}
+
+// checkGenDecl checks the doc of the declaration, reported at the
+// declaration, and the doc of each spec of a group, reported at the spec.
+func (r *DocWrongSubjectRule) checkGenDecl(fileCtx *core.FileContext, gen *ast.GenDecl, next *ast.FuncDecl) []*core.Violation {
+	var violations []*core.Violation
+	kind := gen.Tok.String()
+	if gen.Doc != nil {
+		violations = append(violations, r.checkGenDoc(fileCtx, gen.Doc, kind, gen.Specs, gen, next)...)
+	}
+	for _, spec := range gen.Specs {
+		if doc := specDoc(spec); doc != nil {
+			violations = append(violations, r.checkGenDoc(fileCtx, doc, kind, []ast.Spec{spec}, spec, next)...)
+		}
+	}
+	return violations
+}
+
+func (r *DocWrongSubjectRule) checkGenDoc(fileCtx *core.FileContext, comment *ast.CommentGroup, kind string, specs []ast.Spec, at ast.Node, next *ast.FuncDecl) []*core.Violation {
+	doc := comment.Text()
+	subject, ok := docSubject(doc)
+	if !ok || subject != next.Name.Name {
+		return nil
+	}
+	for _, spec := range specs {
+		switch spec := spec.(type) {
+		case *ast.ValueSpec:
+			for _, name := range spec.Names {
+				if mentionsWord(doc, name.Name) {
+					return nil
+				}
+			}
+		case *ast.TypeSpec:
+			if mentionsWord(doc, spec.Name.Name) {
+				return nil
+			}
+		}
+	}
+	return []*core.Violation{r.reportGenDecl(fileCtx, at, kind, subject)}
+}
+
+func (r *DocWrongSubjectRule) reportGenDecl(fileCtx *core.FileContext, node ast.Node, kind, subject string) *core.Violation {
+	line := fileCtx.LineFor(node)
+	message := fmt.Sprintf("Doc comment above %s declaration starts with %s, the next undocumented function — the %s was inserted between the function and its doc", kind, subject, kind)
+	suggestion := fmt.Sprintf("Move the comment back above %s, and give the %s a doc of its own if it needs one", subject, kind)
+	v := r.CreateViolation(fileCtx.RelPath, line, message)
+	v.WithCode(strings.TrimSpace(fileCtx.GetLine(line)))
+	v.WithSuggestion(suggestion)
+	v.WithContext("pattern", "doc_wrong_subject")
+	v.WithContext("subject", subject)
+	return v
+}
+
+func (r *DocWrongSubjectRule) reportFunction(fileCtx *core.FileContext, fn *ast.FuncDecl, subject string, gone bool) *core.Violation {
 	line := fileCtx.LineFor(fn.Name)
 	message := fmt.Sprintf("Doc comment above %s describes %s — the comment was left behind when the code between them was inserted", fn.Name.Name, subject)
 	suggestion := fmt.Sprintf("Move the comment back above %s, or rewrite it for %s", subject, fn.Name.Name)
