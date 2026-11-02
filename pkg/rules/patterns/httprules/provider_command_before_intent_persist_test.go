@@ -96,7 +96,7 @@ func send(s *Service, req Request) error {
 func TestProviderCommandBeforeIntentPersistRule_MatchesCancellationIntentSemantics(t *testing.T) {
 	code := `package service
 func cancel(s *Service, tx Transaction) error {
-	if err := s.repo.ClaimCancellationIntent(tx.ID); err != nil { return err }
+	if err := s.repo.ClaimCancelIntent(tx.ID); err != nil { return err }
 	return s.provider.CancelTransaction(tx.Reference)
 }`
 	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
@@ -107,7 +107,7 @@ func cancel(s *Service, tx Transaction) error {
 func TestProviderCommandBeforeIntentPersistRule_OperationSemanticsRequireSameEntityRoot(t *testing.T) {
 	code := `package service
 func cancel(s *Service, txA, txB Transaction) error {
-	if err := s.repo.ClaimCancellationIntent(txA.ID); err != nil { return err }
+	if err := s.repo.ClaimCancelIntent(txA.ID); err != nil { return err }
 	return s.provider.CancelTransaction(txB.Reference)
 }`
 	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
@@ -118,7 +118,7 @@ func cancel(s *Service, txA, txB Transaction) error {
 func TestProviderCommandBeforeIntentPersistRule_DoesNotMatchDifferentIntentOperation(t *testing.T) {
 	code := `package service
 func refund(s *Service, tx Transaction) error {
-	if err := s.repo.ClaimCancellationIntent(tx.ID); err != nil { return err }
+	if err := s.repo.ClaimCancelIntent(tx.ID); err != nil { return err }
 	return s.provider.RefundPayment(tx.Reference)
 }`
 	ctx := rulestest.InMemoryFileContext(t, "service.go", code)
@@ -129,7 +129,7 @@ func refund(s *Service, tx Transaction) error {
 func TestProviderCommandBeforeIntentPersistRule_DoesNotCombineOperationAndEntityAcrossIntents(t *testing.T) {
 	code := `package service
 func cancel(s *Service, txA, txB Transaction) error {
-	if err := s.repo.ClaimCancellationIntent(txA.ID); err != nil { return err }
+	if err := s.repo.ClaimCancelIntent(txA.ID); err != nil { return err }
 	if err := s.repo.ClaimRefundIntent(txB.ID); err != nil { return err }
 	return s.provider.CancelTransaction(txB.Reference)
 }`
@@ -153,7 +153,7 @@ func TestProviderCommandBeforeIntentPersistRule_EntityOwnerPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			code := fmt.Sprintf(`package service
 func cancel(s *Service, tx Transaction, req Request) error {
-	if err := s.repo.ClaimCancellationIntent(%s); err != nil { return err }
+	if err := s.repo.ClaimCancelIntent(%s); err != nil { return err }
 	return s.provider.CancelTransaction(%s)
 }`, tt.persistArg, tt.commandArg)
 			ctx := rulestest.InMemoryFileContext(t, "service.go", code)

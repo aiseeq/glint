@@ -21,14 +21,14 @@ import (
 )
 
 var defaultAuditActorSinks = []string{
-	"RecordStatusHistory",
-	"CreateWithHistory",
+	"AppendStatusHistory",
+	"CreateWithAudit",
 	"CreateOrGet", // graft:leak-ok общее имя, список по умолчанию правила
-	"ApplyStatusTransition",
-	"ClaimCancellationIntent",
-	"MarkWaitingApproval",
-	"ApplyQuote",
-	"ApplySentToProvider",
+	"TransitionStatus",
+	"ReserveCancellation",
+	"MarkPendingReview",
+	"SetQuote",
+	"MarkSentToGateway",
 }
 
 var auditActorParameterNames = map[string]bool{

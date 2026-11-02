@@ -18,7 +18,7 @@ import (
 const auditSinkDefinition = `
 type Repo struct{}
 
-func (r *Repo) RecordStatusHistory(txnID string, source string, actorUserID int) {}
+func (r *Repo) AppendStatusHistory(txnID string, source string, actorUserID int) {}
 `
 
 func TestAuditActorPropagationRule_Metadata(t *testing.T) {
@@ -41,7 +41,7 @@ func TestAuditActorPropagationRule_DirectActorParameterIsSafe(t *testing.T) {
 		"audit.go": `package audit
 ` + auditSinkDefinition + `
 func update(repo *Repo, actorUserID int) {
-	repo.RecordStatusHistory("txn", "admin:update", actorUserID)
+	repo.AppendStatusHistory("txn", "admin:update", actorUserID)
 }
 `,
 	})
@@ -239,7 +239,7 @@ func TestAuditActorPropagationRule_DetectsReplacedSourceParameter(t *testing.T) 
 		"audit.go": `package audit
 ` + auditSinkDefinition + `
 func update(repo *Repo, source string, actorUserID int) {
-	repo.RecordStatusHistory("txn", "api", actorUserID)
+	repo.AppendStatusHistory("txn", "api", actorUserID)
 }
 `,
 	})
@@ -256,7 +256,7 @@ func entry(repo *Repo, source string, actorUserID int) { first(repo, source, act
 func first(repo *Repo, origin string, uid int) { second(repo, origin, uid) }
 func second(repo *Repo, auditOrigin string, adminID int) { third(repo, auditOrigin, adminID) }
 func third(repo *Repo, propagatedSource string, propagatedActor int) {
-	repo.RecordStatusHistory("txn", propagatedSource, propagatedActor)
+	repo.AppendStatusHistory("txn", propagatedSource, propagatedActor)
 }
 `,
 	})
@@ -275,14 +275,14 @@ func admin(request any, repo *Repo) {
 	dropped(repo, user.ID)
 }
 func dropped(repo *Repo, ignoredUserID int) {
-	repo.RecordStatusHistory("txn", "api", 0)
+	repo.AppendStatusHistory("txn", "api", 0)
 }
 `,
 	})
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, "actor_loss", violations[0].Context["pattern"])
-	assert.Equal(t, "RecordStatusHistory", violations[0].Context["sink"])
+	assert.Equal(t, "AppendStatusHistory", violations[0].Context["sink"])
 }
 
 func TestAuditActorPropagationRule_DetectsAdminLiteralWithZeroActor(t *testing.T) {
@@ -290,7 +290,7 @@ func TestAuditActorPropagationRule_DetectsAdminLiteralWithZeroActor(t *testing.T
 		"audit.go": `package audit
 ` + auditSinkDefinition + `
 func requote(repo *Repo) {
-	repo.RecordStatusHistory("txn", "admin:requote", 0)
+	repo.AppendStatusHistory("txn", "admin:requote", 0)
 }
 `,
 	})
@@ -304,7 +304,7 @@ func TestAuditActorPropagationRule_APIActorZeroIsSafe(t *testing.T) {
 		"audit.go": `package audit
 ` + auditSinkDefinition + `
 func receive(repo *Repo) {
-	repo.RecordStatusHistory("txn", "api", 0)
+	repo.AppendStatusHistory("txn", "api", 0)
 }
 `,
 	})
@@ -318,7 +318,7 @@ func TestAuditActorPropagationRule_SystemCallerActorZeroIsSafe(t *testing.T) {
 ` + auditSinkDefinition + `
 func reconcile(repo *Repo) { recordReconciliation(repo, 0) }
 func recordReconciliation(repo *Repo, actorUserID int) {
-	repo.RecordStatusHistory("txn", "system/reconciler", actorUserID)
+	repo.AppendStatusHistory("txn", "system/reconciler", actorUserID)
 }
 `,
 	})
@@ -331,7 +331,7 @@ func TestAuditActorPropagationRule_SystemSourceWithHumanActorIsSafe(t *testing.T
 		"audit.go": `package audit
 ` + auditSinkDefinition + `
 func reconcile(repo *Repo, approverUserID int) {
-	repo.RecordStatusHistory("txn", "system/reconciler", approverUserID)
+	repo.AppendStatusHistory("txn", "system/reconciler", approverUserID)
 }
 `,
 	})
@@ -345,7 +345,7 @@ func TestAuditActorPropagationRule_ActorLikeFieldIsSafe(t *testing.T) {
 ` + auditSinkDefinition + `
 type input struct { submittedByUserID int }
 func submit(repo *Repo, value input) {
-	repo.RecordStatusHistory("txn", "admin", value.submittedByUserID)
+	repo.AppendStatusHistory("txn", "admin", value.submittedByUserID)
 }
 `,
 	})
@@ -358,7 +358,7 @@ func TestAuditActorPropagationRule_CancelPrefixPreservesSourceTaint(t *testing.T
 		"audit.go": `package audit
 ` + auditSinkDefinition + `
 func cancel(repo *Repo, source string, operatorUserID int) {
-	repo.RecordStatusHistory("txn", "cancel_intent:" + source, operatorUserID)
+	repo.AppendStatusHistory("txn", "cancel_intent:" + source, operatorUserID)
 }
 `,
 	})
@@ -377,7 +377,7 @@ func update(repo *Repo, source string, actorUserID int, choose bool) {
 		actor = actorUserID
 		origin = source
 	}
-	repo.RecordStatusHistory("txn", origin, actor)
+	repo.AppendStatusHistory("txn", origin, actor)
 }
 `,
 	})
@@ -393,7 +393,7 @@ func TestAuditActorPropagationRule_InterfaceCallsUseAllImplementations(t *testin
 type Writer interface { Write(txnID string, source string, actorUserID int) }
 type Forwarding struct { repo *Repo }
 func (w *Forwarding) Write(txnID string, source string, actorUserID int) {
-	w.repo.RecordStatusHistory(txnID, source, actorUserID)
+	w.repo.AppendStatusHistory(txnID, source, actorUserID)
 }
 func dispatch(writer Writer, source string, actorUserID int) {
 	writer.Write("txn", source, actorUserID)
@@ -411,11 +411,11 @@ func dispatch(writer Writer, source string, actorUserID int) {
 type Writer interface { Write(txnID string, source string, actorUserID int) }
 type Forwarding struct { repo *Repo }
 func (w *Forwarding) Write(txnID string, source string, actorUserID int) {
-	w.repo.RecordStatusHistory(txnID, source, actorUserID)
+	w.repo.AppendStatusHistory(txnID, source, actorUserID)
 }
 type Dropping struct { repo *Repo }
 func (w *Dropping) Write(txnID string, source string, actorUserID int) {
-	w.repo.RecordStatusHistory(txnID, source, 0)
+	w.repo.AppendStatusHistory(txnID, source, 0)
 }
 func dispatch(writer Writer, source string, actorUserID int) {
 	writer.Write("txn", source, actorUserID)
@@ -433,9 +433,9 @@ func TestAuditActorPropagationRule_ClosureCapturesPreserveTaint(t *testing.T) {
 		"audit.go": `package audit
 ` + auditSinkDefinition + `
 func update(repo *Repo, source string, actorUserID int) {
-	forward := func() { repo.RecordStatusHistory("safe", source, actorUserID) }
+	forward := func() { repo.AppendStatusHistory("safe", source, actorUserID) }
 	forward()
-	drop := func() { repo.RecordStatusHistory("loss", source, 0) }
+	drop := func() { repo.AppendStatusHistory("loss", source, 0) }
 	drop()
 }
 `,
@@ -451,8 +451,8 @@ func TestAuditActorPropagationRule_GoAndDeferDoNotReceiveAmbientHumanContext(t *
 ` + auditSinkDefinition + `
 type User struct { ID int }
 func authenticatedUser(request any) *User { return &User{ID: 42} }
-func background(repo *Repo) { repo.RecordStatusHistory("background", "api", 0) }
-func attributed(repo *Repo, userID int) { repo.RecordStatusHistory("attributed", "api", userID) }
+func background(repo *Repo) { repo.AppendStatusHistory("background", "api", 0) }
+func attributed(repo *Repo, userID int) { repo.AppendStatusHistory("attributed", "api", userID) }
 func handle(request any, repo *Repo) {
 	actor := authenticatedUser(request).ID
 	go background(repo)
@@ -476,11 +476,11 @@ func handle(request any, repo *Repo) {
 	actor := currentAdmin(request).ID
 	go func() {
 		_ = actor
-		repo.RecordStatusHistory("go", "api", 0)
+		repo.AppendStatusHistory("go", "api", 0)
 	}()
 	defer func() {
 		_ = actor
-		repo.RecordStatusHistory("defer", "api", 0)
+		repo.AppendStatusHistory("defer", "api", 0)
 	}()
 }
 `,
@@ -494,7 +494,7 @@ func TestAuditActorPropagationRule_DoesNotTaintUnrelatedEntityValues(t *testing.
 		"audit.go": `package audit
 ` + auditSinkDefinition + `
 func update(repo *Repo, txnID int, actorUserID int) {
-	repo.RecordStatusHistory("txn", "api", txnID)
+	repo.AppendStatusHistory("txn", "api", txnID)
 }
 `,
 	})
@@ -509,7 +509,7 @@ func TestAuditActorPropagationRule_TestPackagesAreNotAnalyzed(t *testing.T) {
 ` + auditSinkDefinition,
 		"audit_test.go": `package audit
 func badFixture(repo *Repo) {
-	repo.RecordStatusHistory("txn", "admin:test", 0)
+	repo.AppendStatusHistory("txn", "admin:test", 0)
 }
 `,
 	})
@@ -521,9 +521,9 @@ func TestAuditActorPropagationRule_SinkRolesComeFromFormalParameterNames(t *test
 	violations := analyzeAuditModule(t, map[string]string{
 		"audit.go": `package audit
 type Repo struct{}
-func (r *Repo) ApplyQuote(actorUserID int, entity string, source string) {}
+func (r *Repo) SetQuote(actorUserID int, entity string, source string) {}
 func quote(repo *Repo, source string, createdByUserID int) {
-	repo.ApplyQuote(createdByUserID, "txn", source)
+	repo.SetQuote(createdByUserID, "txn", source)
 }
 `,
 	})
@@ -538,10 +538,10 @@ func TestAuditActorPropagationRule_ConfiguredSinksReplaceDefaults(t *testing.T) 
 		"audit.go": `package audit
 type Repo struct{}
 func (r *Repo) WriteAudit(source string, userID int) {}
-func (r *Repo) RecordStatusHistory(source string, actorUserID int) {}
+func (r *Repo) AppendStatusHistory(source string, actorUserID int) {}
 func update(repo *Repo) {
 	repo.WriteAudit("admin:write", 0)
-	repo.RecordStatusHistory("admin:default", 0)
+	repo.AppendStatusHistory("admin:default", 0)
 }
 `,
 	})
@@ -571,9 +571,9 @@ func use(r *UserRepo) { _, _ = r.CreateOrGet(1, "x") } // graft:leak-ok обще
 			name: "two actor parameters",
 			source: `package audit
 type Repo struct{}
-func (r *Repo) RecordStatusHistory(source string, actorUserID int, operatorUserID int) {}
+func (r *Repo) AppendStatusHistory(source string, actorUserID int, operatorUserID int) {}
 func update(repo *Repo, actorUserID int) {
-	repo.RecordStatusHistory("api", actorUserID, actorUserID)
+	repo.AppendStatusHistory("api", actorUserID, actorUserID)
 }
 `,
 		},
@@ -581,9 +581,9 @@ func update(repo *Repo, actorUserID int) {
 			name: "role types do not match",
 			source: `package audit
 type Repo struct{}
-func (r *Repo) RecordStatusHistory(source int, actorUserID string) {}
+func (r *Repo) AppendStatusHistory(source int, actorUserID string) {}
 func update(repo *Repo) {
-	repo.RecordStatusHistory(1, "admin")
+	repo.AppendStatusHistory(1, "admin")
 }
 `,
 		},
@@ -623,7 +623,7 @@ func TestAuditActorPropagationRule_RejectsUnmappableSourceSinkPosition(t *testin
 	root, contexts := writeAuditModule(t, map[string]string{
 		"audit.go": `package audit
 ` + auditSinkDefinition + `
-func update(repo *Repo) { repo.RecordStatusHistory("txn", "admin:update", 0) }
+func update(repo *Repo) { repo.AppendStatusHistory("txn", "admin:update", 0) }
 `,
 	})
 	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{RequireSSA: true})
@@ -641,7 +641,7 @@ func TestAuditActorPropagationRule_SuppressionIsLeftToStandardEngine(t *testing.
 ` + auditSinkDefinition + `
 func update(repo *Repo) {
 	//nolint:audit-actor-propagation // trusted administrative migration
-	repo.RecordStatusHistory("txn", "admin:migration", 0)
+	repo.AppendStatusHistory("txn", "admin:migration", 0)
 }
 `,
 	})

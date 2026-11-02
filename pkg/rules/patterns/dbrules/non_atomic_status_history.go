@@ -21,12 +21,12 @@ func init() {
 // entity's status when the config names none (setting mutation_methods).
 var defaultStatusMutationMethods = []string{
 	"UpdateStatus", "UpdateStatusWithPayprov", "UpdateQuote", "UpdateSentToProvider",
-	"MarkWaitingApproval", "Create", "CreateOrGet", // graft:leak-ok общее имя, список по умолчанию правила
+	"MarkPendingReview", "Create", "CreateOrGet", // graft:leak-ok общее имя, список по умолчанию правила
 }
 
 // defaultStatusHistoryMethods are the repository methods that append a status
 // history row when the config names none (setting history_methods).
-var defaultStatusHistoryMethods = []string{"RecordStatusHistory"}
+var defaultStatusHistoryMethods = []string{"AppendStatusHistory"}
 
 // NonAtomicStatusHistoryRule detects status mutations followed by a separate
 // history write on the same repository and entity in one function.

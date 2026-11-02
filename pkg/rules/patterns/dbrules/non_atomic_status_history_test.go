@@ -28,7 +28,7 @@ func (ctx context.Context, s *Service) markSent(ctx context.Context, txnID strin
 	if err := s.txnRepo.UpdateStatusWithPayprov(ctx, txnID, "sent", "PW-123"); err != nil {
 		return err
 	}
-	return s.txnRepo.RecordStatusHistory(ctx, txnID, "sent")
+	return s.txnRepo.AppendStatusHistory(ctx, txnID, "sent")
 }`)
 
 	violations := rule.AnalyzeFile(ctx)
@@ -36,13 +36,13 @@ func (ctx context.Context, s *Service) markSent(ctx context.Context, txnID strin
 	v := violations[0]
 	assert.Equal(t, 4, v.Line)
 	assert.Contains(t, v.Message, "UpdateStatusWithPayprov")
-	assert.Contains(t, v.Message, "RecordStatusHistory")
+	assert.Contains(t, v.Message, "AppendStatusHistory")
 	assert.Contains(t, v.Suggestion, "atomic repository method or transaction")
 	assert.Equal(t, "non_atomic_status_history", v.Context["pattern"])
 	assert.Equal(t, "markSent", v.Context["function"])
 	assert.Equal(t, "s.txnRepo", v.Context["receiver"])
 	assert.Equal(t, "UpdateStatusWithPayprov", v.Context["mutation_method"])
-	assert.Equal(t, "RecordStatusHistory", v.Context["history_method"])
+	assert.Equal(t, "AppendStatusHistory", v.Context["history_method"])
 	assert.Contains(t, v.Code, "UpdateStatusWithPayprov")
 }
 
@@ -53,7 +53,7 @@ func TestNonAtomicStatusHistoryRule_MutationMethods(t *testing.T) {
 		"UpdateStatusWithPayprov",
 		"UpdateQuote",
 		"UpdateSentToProvider",
-		"MarkWaitingApproval",
+		"MarkPendingReview",
 		"Create",
 		"CreateOrGet", // graft:leak-ok общее имя, список по умолчанию правила
 	} {
@@ -61,7 +61,7 @@ func TestNonAtomicStatusHistoryRule_MutationMethods(t *testing.T) {
 			code := `package service; import "context"
 func update(ctx context.Context, repo Repository) {
 	repo.` + method + `(ctx, id)
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`
 			ctx := createNonAtomicStatusHistoryContext(t, "service.go", code)
 			assert.Len(t, rule.AnalyzeFile(ctx), 1)
@@ -74,7 +74,7 @@ func TestNonAtomicStatusHistoryRule_DetectsQuoteHelperBeforeHistory(t *testing.T
 	ctx := createNonAtomicStatusHistoryContext(t, "quote_service.go", `package service; import "context"
 func persist(ctx context.Context, s *Service) error {
 	if err := s.updateOrderQuoteRecord(ctx, tx); err != nil { return err }
-	return s.txnRepo.RecordStatusHistory(ctx, tx.ID)
+	return s.txnRepo.AppendStatusHistory(ctx, tx.ID)
 }`)
 
 	violations := rule.AnalyzeFile(ctx)
@@ -89,7 +89,7 @@ func update(ctx context.Context, repo Repository, approved bool) {
 	if approved {
 		repo.UpdateStatus(ctx, id)
 	} else {
-		repo.RecordStatusHistory(ctx, id)
+		repo.AppendStatusHistory(ctx, id)
 	}
 }`)
 
@@ -104,7 +104,7 @@ func update(ctx context.Context, repo Repository, id string, cond bool) {
 		repo.UpdateStatus(ctx, id)
 		return
 	}
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`)
 
 	assert.Empty(t, rule.AnalyzeFile(ctx))
@@ -123,7 +123,7 @@ func update(ctx context.Context, repo Repository, id string) {
 	repo.UpdateStatus(ctx, id)
 	{
 		repo := auditRepo
-		repo.RecordStatusHistory(ctx, id)
+		repo.AppendStatusHistory(ctx, id)
 	}
 }`,
 		},
@@ -135,7 +135,7 @@ func update(ctx context.Context, repo Repository, id string) {
 		repo := auditRepo
 		repo.UpdateStatus(ctx, id)
 	}
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`,
 		},
 		{
@@ -145,7 +145,7 @@ func update(ctx context.Context, repo Repository, id string) {
 	repo.UpdateStatus(ctx, id)
 	{
 		id := auditID
-		repo.RecordStatusHistory(ctx, id)
+		repo.AppendStatusHistory(ctx, id)
 	}
 }`,
 		},
@@ -157,7 +157,7 @@ func update(ctx context.Context, repo Repository, id string) {
 		id := auditID
 		repo.UpdateStatus(ctx, id)
 	}
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`,
 		},
 	}
@@ -182,7 +182,7 @@ func TestNonAtomicStatusHistoryRule_DoesNotLinkReassignedIdentifiers(t *testing.
 func update(ctx context.Context, repo Repository, id string) {
 	repo.UpdateStatus(ctx, id)
 	repo = auditRepo
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`,
 		},
 		{
@@ -191,7 +191,7 @@ func update(ctx context.Context, repo Repository, id string) {
 func update(ctx context.Context, repo Repository, id string) {
 	repo.UpdateStatus(ctx, id)
 	id = auditID
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`,
 		},
 	}
@@ -209,7 +209,7 @@ func TestNonAtomicStatusHistoryRule_DoesNotLinkDifferentEntities(t *testing.T) {
 	ctx := createNonAtomicStatusHistoryContext(t, "service.go", `package service; import "context"
 func update(ctx context.Context, repo Repository) {
 	repo.UpdateStatus(ctx, idA)
-	repo.RecordStatusHistory(ctx, idB)
+	repo.AppendStatusHistory(ctx, idB)
 }`)
 
 	assert.Empty(t, rule.AnalyzeFile(ctx))
@@ -221,7 +221,7 @@ func TestNonAtomicStatusHistoryRule_DetectsSequenceInsideFuncLit(t *testing.T) {
 func update(ctx context.Context, repo Repository) func() {
 	return func() {
 		repo.UpdateStatus(ctx, id)
-		repo.RecordStatusHistory(ctx, id)
+		repo.AppendStatusHistory(ctx, id)
 	}
 }`)
 
@@ -233,7 +233,7 @@ func TestNonAtomicStatusHistoryRule_DoesNotLinkSiblingReceivers(t *testing.T) {
 	ctx := createNonAtomicStatusHistoryContext(t, "service.go", `package service; import "context"
 func update(ctx context.Context, s *Service) {
 	s.UpdateStatus(ctx, id)
-	s.auditRepo.RecordStatusHistory(ctx, id)
+	s.auditRepo.AppendStatusHistory(ctx, id)
 }`)
 
 	assert.Empty(t, rule.AnalyzeFile(ctx))
@@ -250,7 +250,7 @@ func TestNonAtomicStatusHistoryRule_DoesNotFlagSafeBoundaries(t *testing.T) {
 			code: `package service; import "context"
 func update(ctx context.Context, repo Repository) {
 	repo.ApplyStatusAndHistory(ctx, id)
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`,
 		},
 		{
@@ -264,14 +264,14 @@ func update(ctx context.Context, repo Repository) {
 			name: "history only",
 			code: `package service; import "context"
 func update(ctx context.Context, repo Repository) {
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`,
 		},
 		{
 			name: "history is before mutation",
 			code: `package service; import "context"
 func update(ctx context.Context, repo Repository) {
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 	repo.UpdateStatus(ctx, id)
 }`,
 		},
@@ -282,7 +282,7 @@ func update(ctx context.Context, repo Repository) {
 	repo.UpdateStatus(ctx, id)
 }
 func history(ctx context.Context, repo Repository) {
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`,
 		},
 		{
@@ -290,7 +290,7 @@ func history(ctx context.Context, repo Repository) {
 			code: `package service; import "context"
 func update(ctx context.Context, s *Service) {
 	s.txnRepo.UpdateStatus(ctx, id)
-	s.auditRepo.RecordStatusHistory(ctx, id)
+	s.auditRepo.AppendStatusHistory(ctx, id)
 }`,
 		},
 		{
@@ -298,7 +298,7 @@ func update(ctx context.Context, s *Service) {
 			code: `package service; import "context"
 func update(ctx context.Context, repo Repository) {
 	repo.UpdateStatus(ctx, id)
-	record := func() { repo.RecordStatusHistory(ctx, id) }
+	record := func() { repo.AppendStatusHistory(ctx, id) }
 	_ = record
 }`,
 		},
@@ -318,7 +318,7 @@ func TestNonAtomicStatusHistoryRule_Suppression(t *testing.T) {
 func update(ctx context.Context, repo Repository) {
 	//nolint:non-atomic-status-history // external transaction wraps both writes
 	repo.UpdateStatus(ctx, id)
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`
 	ctx := createNonAtomicStatusHistoryContext(t, "service.go", code)
 
@@ -330,7 +330,7 @@ func TestNonAtomicStatusHistoryRule_SkipsTestFiles(t *testing.T) {
 	code := `package service; import "context"
 func update(ctx context.Context, repo Repository) {
 	repo.UpdateStatus(ctx, id)
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`
 	ctx := createNonAtomicStatusHistoryContext(t, "service_test.go", code)
 
@@ -346,7 +346,7 @@ func (s *Service) Transition(ctx context.Context, id string) error {
 		if err := s.repo.UpdateStatus(ctx, id, "done"); err != nil {
 			return err
 		}
-		return s.repo.RecordStatusHistory(ctx, id, "done")
+		return s.repo.AppendStatusHistory(ctx, id, "done")
 	})
 }
 
@@ -355,7 +355,7 @@ func (s *Service) Outside(ctx context.Context, id string) error {
 		if err := s.repo.UpdateStatus(ctx, id, "done"); err != nil {
 			return err
 		}
-		return s.repo.RecordStatusHistory(ctx, id, "done")
+		return s.repo.AppendStatusHistory(ctx, id, "done")
 	})
 }`
 	violations := NewNonAtomicStatusHistoryRule().AnalyzeFile(createNonAtomicStatusHistoryContext(t, "service.go", code))
@@ -373,7 +373,7 @@ func (s *Service) Transition(ctx context.Context, id string) error {
 		if err := s.repo.UpdateStatus(ctx, id); err != nil {
 			return err
 		}
-		return s.repo.RecordStatusHistory(ctx, id)
+		return s.repo.AppendStatusHistory(ctx, id)
 	})
 }`
 	assert.Empty(t, rule.AnalyzeFile(createNonAtomicStatusHistoryContext(t, "service.go", code)))
@@ -394,7 +394,7 @@ func configured(ctx context.Context, repo Repository, id string) {
 }
 func defaults(ctx context.Context, repo Repository, id string) {
 	repo.UpdateStatus(ctx, id)
-	repo.RecordStatusHistory(ctx, id)
+	repo.AppendStatusHistory(ctx, id)
 }`
 	violations := rule.AnalyzeFile(createNonAtomicStatusHistoryContext(t, "service.go", code))
 	require.Len(t, violations, 1)
@@ -416,7 +416,7 @@ func TestNonAtomicStatusHistoryRule_UndeclaredFirstArgumentIsUnknown(t *testing.
 	code := `package service
 func update(repo Repository) {
 	repo.UpdateStatus(ctx, idA)
-	repo.RecordStatusHistory(ctx, idB)
+	repo.AppendStatusHistory(ctx, idB)
 }`
 	assert.Empty(t, NewNonAtomicStatusHistoryRule().AnalyzeFile(createNonAtomicStatusHistoryContext(t, "service.go", code)))
 }
@@ -432,27 +432,27 @@ import "context"
 type Repo struct{}
 
 func (r *Repo) UpdateStatus(ctx context.Context, id string) error        { return nil }
-func (r *Repo) RecordStatusHistory(ctx context.Context, id string) error { return nil }
+func (r *Repo) AppendStatusHistory(ctx context.Context, id string) error { return nil }
 
 type Other struct{}
 
-func (o *Other) RecordStatusHistory(ctx context.Context, id string) error { return nil }
+func (o *Other) AppendStatusHistory(ctx context.Context, id string) error { return nil }
 
 func contextNamedC(c context.Context, repo *Repo, idA, idB string) {
 	_ = repo.UpdateStatus(c, idA)
-	_ = repo.RecordStatusHistory(c, idB)
+	_ = repo.AppendStatusHistory(c, idB)
 }
 
 func sameEntity(c context.Context, repo *Repo, id string) {
 	_ = repo.UpdateStatus(c, id)
-	_ = repo.RecordStatusHistory(c, id)
+	_ = repo.AppendStatusHistory(c, id)
 }
 
 func typeSwitchShadow(ctx context.Context, repo *Repo, r any, id string) {
 	_ = repo.UpdateStatus(ctx, id)
 	switch repo := r.(type) {
 	case *Other:
-		_ = repo.RecordStatusHistory(ctx, id)
+		_ = repo.AppendStatusHistory(ctx, id)
 	}
 }
 `,
@@ -492,7 +492,7 @@ func TestNonAtomicStatusHistoryRule_BranchExplosion(t *testing.T) {
 		body.WriteString(strconv.Itoa(i))
 		body.WriteString(" {\n\t\tn++\n\t} else {\n\t\tn--\n\t}\n")
 	}
-	body.WriteString("\trepo.UpdateStatus(ctx, id)\n\trepo.RecordStatusHistory(ctx, id)\n}\n")
+	body.WriteString("\trepo.UpdateStatus(ctx, id)\n\trepo.AppendStatusHistory(ctx, id)\n}\n")
 
 	rule := NewNonAtomicStatusHistoryRule()
 	ctx := createNonAtomicStatusHistoryContext(t, "branch_explosion.go", body.String())
