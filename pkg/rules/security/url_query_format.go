@@ -63,7 +63,7 @@ var queryValueEnd = regexp.MustCompile(`[?&][A-Za-z0-9_.\[\]-]+=$`)
 // AnalyzeGoProject reports the Sprintf calls of the project's files that
 // format a string into a query value.
 func (r *URLQueryBuiltByFormatRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		if fileCtx.IsTestFile() {
 			return nil
 		}

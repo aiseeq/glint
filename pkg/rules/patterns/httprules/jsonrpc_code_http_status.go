@@ -63,7 +63,7 @@ func (r *JSONRPCCodeComparedToHTTPStatusRule) AnalyzeGoProject(ctx *core.GoProje
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		report := func(node ast.Node) {
 			line := fileCtx.LineFor(node)

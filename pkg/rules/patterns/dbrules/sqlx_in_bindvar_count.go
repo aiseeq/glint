@@ -37,7 +37,7 @@ func (r *SQLXInBindvarCountRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject checks sqlx.In calls with static query strings.
 func (r *SQLXInBindvarCountRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		staticVars := sqlxInStaticVariables(file.GoAST, info)
 		var violations []*core.Violation
 		ast.Inspect(file.GoAST, func(node ast.Node) bool {

@@ -47,7 +47,7 @@ func (r *UnboundedResponseReadRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports unbounded reads of response bodies.
 func (r *UnboundedResponseReadRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), r.analyzeFile)
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), r.analyzeFile)
 }
 
 // analyzeFile checks every declared function of the file; function literals

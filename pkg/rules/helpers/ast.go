@@ -36,14 +36,12 @@ func AnalyzeFuncBodies(ctx *core.FileContext, checker FuncBodyChecker) []*core.V
 
 	var violations []*core.Violation
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			return true
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Body != nil {
+			checker(ctx, fn.Body, &violations)
 		}
-		checker(ctx, fn.Body, &violations)
-		return true
-	})
+	}
 
 	return violations
 }
@@ -57,16 +55,15 @@ func AnalyzeFuncDecls(ctx *core.FileContext, checker FuncDeclChecker) []*core.Vi
 
 	var violations []*core.Violation
 
-	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
+	for _, decl := range ctx.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
-			return true
+			continue
 		}
 		if vs := checker(ctx, fn); len(vs) > 0 {
 			violations = append(violations, vs...)
 		}
-		return true
-	})
+	}
 
 	return violations
 }

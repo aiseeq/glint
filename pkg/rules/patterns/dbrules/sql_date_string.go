@@ -58,7 +58,7 @@ func (r *SQLDateStringParsedAsDateRule) AnalyzeGoProject(ctx *core.GoProjectCont
 	if ctx == nil {
 		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		schema, ok := fileSchema(file, r.BaseRule)
 		if !ok || schema == nil {
 			return nil

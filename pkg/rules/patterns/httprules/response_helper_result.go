@@ -53,7 +53,7 @@ func (r *ResponseHelperResultIgnoredRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports the calls whose bool answer is dropped.
 func (r *ResponseHelperResultIgnoredRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		if file.IsTestFile() {
 			return nil
 		}

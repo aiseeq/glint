@@ -43,7 +43,7 @@ func (r *BoolCompareRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; an operand declared anywhere in the
 // project is judged by its declared type.
 func (r *BoolCompareRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze checks for redundant boolean comparisons. info is nil for a file

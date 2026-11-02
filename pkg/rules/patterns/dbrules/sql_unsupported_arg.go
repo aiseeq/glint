@@ -58,7 +58,7 @@ func (r *SQLUnsupportedArgRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 	if !onLibPQ(ctx) {
 		return nil, nil
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		ast.Inspect(file.GoAST, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)

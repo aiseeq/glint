@@ -63,7 +63,7 @@ func (r *UncheckedLenDivisionRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject walks every file; with type information the length of an
 // array, a compile-time constant, is not taken for a collection size.
 func (r *UncheckedLenDivisionRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze walks every function of the file. info is nil for a file without

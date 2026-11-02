@@ -61,7 +61,7 @@ func (r *JSONShapeByFailedUnmarshalRule) AnalyzeGoProject(ctx *core.GoProjectCon
 		return nil, errors.New("json shape by failed unmarshal: nil Go project context")
 	}
 	decoders := jsonDecodingFuncs(ctx)
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		ast.Inspect(file.GoAST, func(n ast.Node) bool {
 			block, ok := n.(*ast.BlockStmt)

@@ -140,7 +140,7 @@ func (r *NeverAssignedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 		}
 	}
 
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		// a fixture of a test-helper package fills only what its test needs,
 		// as a literal in a _test.go file does

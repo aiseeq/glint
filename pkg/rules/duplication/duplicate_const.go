@@ -113,7 +113,7 @@ func (r *DuplicateConstAcrossPackagesRule) AnalyzeGoProject(ctx *core.GoProjectC
 		}
 	}
 	twins := constTwins(byKey, imports)
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		ast.Inspect(file.GoAST, func(n ast.Node) bool {
 			decl, ok := n.(*ast.GenDecl)

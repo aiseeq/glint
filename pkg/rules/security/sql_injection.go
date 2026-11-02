@@ -80,7 +80,7 @@ func (r *SQLInjectionRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject checks every type-checked file.
 func (r *SQLInjectionRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze checks the database calls of one file. Without type information the

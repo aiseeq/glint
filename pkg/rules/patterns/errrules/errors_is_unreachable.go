@@ -257,7 +257,6 @@ func newErrorFlow(ctx *core.GoProjectContext) *errorFlow {
 			flow.project[pkg.Package.PkgPath] = true
 		}
 	}
-	interfaces := patternkit.ProjectInterfaces(ctx)
 	flow.order = patternkit.ProjectFuncDecls(ctx)
 	for _, fn := range flow.order {
 		obj, ok := fn.Info.Defs[fn.Decl.Name].(*types.Func)
@@ -268,7 +267,7 @@ func newErrorFlow(ctx *core.GoProjectContext) *errorFlow {
 		if testDouble(obj) {
 			continue
 		}
-		for _, method := range patternkit.ImplementedMethods(obj, interfaces) {
+		for _, method := range patternkit.ImplementedMethods(ctx, obj) {
 			flow.impls[method] = append(flow.impls[method], obj)
 		}
 		flow.collectAliases(fn.File.GoAST, fn.Info)

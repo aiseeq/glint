@@ -53,7 +53,7 @@ func (r *GlobalSwapRestoreRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports the swaps of package variables in production code.
 func (r *GlobalSwapRestoreRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		if file.IsTestFile() {
 			return nil
 		}

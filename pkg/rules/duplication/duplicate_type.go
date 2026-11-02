@@ -121,7 +121,7 @@ func (r *DuplicateTypeAcrossPackagesRule) AnalyzeGoProject(ctx *core.GoProjectCo
 	if len(twins) == 0 {
 		return nil, nil
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		ast.Inspect(file.GoAST, func(n ast.Node) bool {
 			spec, ok := n.(*ast.TypeSpec)

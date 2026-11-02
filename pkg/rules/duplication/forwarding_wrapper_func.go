@@ -50,7 +50,7 @@ func (r *ForwardingWrapperFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	if err != nil {
 		return nil, err
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range file.GoAST.Decls {
 			fd, ok := decl.(*ast.FuncDecl)

@@ -152,7 +152,7 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	// _test.go достаточно, чтобы отличить «мёртвый совсем» от «нужен только тестам»
 	countTestIdentUses(ctx, candidates)
 
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, usage := range byFile[fileCtx] {
 			if uses[usage.object] > 0 || usage.otherTestUses > 0 || (usage.kind == "method" && usage.testUses > 0) || (usage.initializer && usage.testUses == 0) || ctx.GeneratedTSImports[usage.object.Name()] {

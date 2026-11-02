@@ -64,7 +64,7 @@ func (r *StringPrefixSliceUnguardedRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file, tests included: a test helper that
 // panics on a short value fails for a reason unrelated to the test.
 func (r *StringPrefixSliceUnguardedRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		if !fileCtx.IsGoFile() || !fileCtx.HasGoAST() {
 			return nil
 		}
@@ -294,7 +294,7 @@ func (r *JSONTagShadowsEmbeddedFieldRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject checks the struct declarations of the analyzed packages.
 func (r *JSONTagShadowsEmbeddedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), r.analyze)
 }
 
 func (r *JSONTagShadowsEmbeddedFieldRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
@@ -580,7 +580,7 @@ var (
 
 // AnalyzeGoProject checks the production files.
 func (r *HostSuffixWithoutDotRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 func (r *HostSuffixWithoutDotRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
@@ -762,7 +762,7 @@ var (
 
 // AnalyzeGoProject checks the production files.
 func (r *JSONBuiltByFormatRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 func (r *JSONBuiltByFormatRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
@@ -845,7 +845,7 @@ func (r *SQLQuoteEscapedByHandRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(file, info, decls, callers)
 	})
 }
@@ -966,7 +966,7 @@ func (r *SQLMetricLiteralZeroRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject checks the production files.
 func (r *SQLMetricLiteralZeroRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 func (r *SQLMetricLiteralZeroRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {

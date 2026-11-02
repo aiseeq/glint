@@ -67,7 +67,7 @@ func (r *CloserNeverClosedRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
 	project := &closerProject{index: newConstructorIndex(ctx), callees: newCloserCallees(ctx), delegated: newDelegatedClosers(ctx)}
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(fileCtx, info, project)
 	})
 }

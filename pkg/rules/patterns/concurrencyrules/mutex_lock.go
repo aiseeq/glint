@@ -43,7 +43,7 @@ func (r *MutexLockRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; with type information only methods of
 // sync.Mutex and sync.RWMutex open and close a critical section.
 func (r *MutexLockRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 func (r *MutexLockRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {

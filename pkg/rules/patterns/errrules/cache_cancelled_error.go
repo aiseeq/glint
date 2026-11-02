@@ -57,7 +57,7 @@ func (r *CacheStoresCancelledErrorRule) AnalyzeGoProject(ctx *core.GoProjectCont
 	if ctx == nil {
 		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return patternkit.AnalyzeGoFunctions(fileCtx, func(fn *ast.FuncDecl) []*core.Violation {
 			return r.checkFunction(fileCtx, info, fn)
 		})

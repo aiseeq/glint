@@ -48,7 +48,7 @@ func (r *SQLRowsErrUncheckedRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports the loops over rows whose error nobody reads.
 func (r *SQLRowsErrUncheckedRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		if fileCtx.IsTestFile() {
 			return nil
 		}

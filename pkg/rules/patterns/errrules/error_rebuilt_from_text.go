@@ -59,7 +59,7 @@ func (r *ErrorRebuiltFromTextRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports errors built from the text of another error.
 func (r *ErrorRebuiltFromTextRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), r.analyzeFile)
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), r.analyzeFile)
 }
 
 // analyzeFile inspects every function of one file. Messages assembled into a

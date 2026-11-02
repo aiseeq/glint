@@ -45,7 +45,7 @@ func (r *ErrorStringCompareRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; the receiver of .Error() is judged by
 // its type.
 func (r *ErrorStringCompareRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze checks for error string comparisons. info is nil for a file without

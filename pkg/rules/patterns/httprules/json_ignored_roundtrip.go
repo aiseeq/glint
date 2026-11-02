@@ -129,7 +129,7 @@ func eachProductionGoFile(ctx *core.GoProjectContext, visit func(info *types.Inf
 func (t *jsonRoundTrip) analyzeStructs(ctx *core.GoProjectContext, rule string,
 	check func(file *core.FileContext, info *types.Info, name *types.TypeName, st *ast.StructType) []*core.Violation,
 ) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, rule, func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, rule, func(file *core.FileContext, info *types.Info) []*core.Violation {
 		if !file.HasGoAST() || file.IsTestFile() {
 			return nil
 		}

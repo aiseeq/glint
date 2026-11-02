@@ -71,7 +71,7 @@ func (r *HelperOutsideTypePackageRule) AnalyzeGoProject(ctx *core.GoProjectConte
 			local[pkg.Package.PkgPath] = true
 		}
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range file.GoAST.Decls {
 			fd, ok := decl.(*ast.FuncDecl)

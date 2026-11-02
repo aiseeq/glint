@@ -60,7 +60,7 @@ func (r *ParamAlwaysSameConstantRule) AnalyzeGoProject(ctx *core.GoProjectContex
 	if err != nil {
 		return nil, err
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyzeFile(fileCtx, info, index)
 	})
 }

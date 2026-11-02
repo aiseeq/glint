@@ -57,7 +57,7 @@ func (r *JWTTokenTypeRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject reports the refresh functions of the project that read
 // claims without their kind.
 func (r *JWTTokenTypeRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range fileCtx.GoAST.Decls {
 			fn, ok := decl.(*ast.FuncDecl)

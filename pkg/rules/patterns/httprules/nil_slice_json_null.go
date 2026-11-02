@@ -72,7 +72,7 @@ func (r *NilSliceJSONNullRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*
 		return nil, err
 	}
 	funcs := patternkit.ProjectFuncDecls(ctx)
-	sources := nilSliceFuncs(funcs, patternkit.ProjectInterfaces(ctx))
+	sources := nilSliceFuncs(ctx, funcs)
 	responders := jsonResponders(funcs, decls)
 
 	reported := make(map[*ast.Ident]bool)
@@ -567,7 +567,7 @@ func isJSONStruct(st *types.Struct) bool {
 
 // nilSliceFuncs returns the functions and interface methods whose slice
 // result may be a nil slice on success, with the declaration it comes from.
-func nilSliceFuncs(funcs []patternkit.TypedFunc, interfaces []*types.TypeName) map[*types.Func]nilSliceSource {
+func nilSliceFuncs(ctx *core.GoProjectContext, funcs []patternkit.TypedFunc) map[*types.Func]nilSliceSource {
 	sources := make(map[*types.Func]nilSliceSource)
 	for changed := true; changed; {
 		changed = false
@@ -581,7 +581,7 @@ func nilSliceFuncs(funcs []patternkit.TypedFunc, interfaces []*types.TypeName) m
 			}
 			if src, ok := returnedNilSlice(fn, sources); ok {
 				sources[obj] = src
-				for _, method := range patternkit.ImplementedMethods(obj, interfaces) {
+				for _, method := range patternkit.ImplementedMethods(ctx, obj) {
 					if _, done := sources[method]; !done {
 						sources[method] = src
 					}

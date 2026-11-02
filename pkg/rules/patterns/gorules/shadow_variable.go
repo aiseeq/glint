@@ -62,7 +62,7 @@ func (r *ShadowVariableRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject checks every file with the scopes of its package.
 func (r *ShadowVariableRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 func (r *ShadowVariableRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {

@@ -61,7 +61,7 @@ func (r *StatusLiteralRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 	if len(constants) == 0 {
 		return nil, nil
 	}
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		if fileCtx.IsTestFile() {
 			return nil
 		}

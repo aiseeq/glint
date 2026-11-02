@@ -80,7 +80,7 @@ func (r *IdentityHeaderFromClientRule) AnalyzeGoProject(ctx *core.GoProjectConte
 	if err != nil {
 		return nil, err
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		if fileCtx.IsTestFile() {
 			return nil
 		}

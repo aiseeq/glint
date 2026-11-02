@@ -65,7 +65,7 @@ func (r *PaginatedCallFirstPageOnlyRule) AnalyzeGoProject(ctx *core.GoProjectCon
 	if err != nil {
 		return nil, err
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		report := func(node ast.Node, message, suggestion string) {
 			line := file.LineFor(node)
@@ -619,7 +619,7 @@ func (r *PaginatedTotalRecountedRule) AnalyzeGoProject(ctx *core.GoProjectContex
 			handMapped[file] = append(handMapped[file], found...)
 		}
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, found := range handMapped[file] {
 			line := file.LineFor(found.node)

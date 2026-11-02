@@ -161,7 +161,7 @@ func (r *ServerErrorHidesClientCancelRule) AnalyzeGoProject(ctx *core.GoProjectC
 
 	sighted := sightedResponders(funcs, statusParams, responders)
 
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range fileCtx.GoAST.Decls {
 			fn, ok := decl.(*ast.FuncDecl)

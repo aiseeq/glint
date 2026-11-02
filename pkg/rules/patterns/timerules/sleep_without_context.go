@@ -49,7 +49,7 @@ func (r *SleepWithoutContextRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file, with type information where the package
 // has it.
 func (r *SleepWithoutContextRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze flags time.Sleep calls that ignore an available context.

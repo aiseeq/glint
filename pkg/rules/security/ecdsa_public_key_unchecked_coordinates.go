@@ -38,7 +38,7 @@ func (r *ECDSAPublicKeyUncheckedCoordinatesRule) RequiresSSA() bool { return fal
 
 // AnalyzeGoProject reports unvalidated ECDSA public key coordinates.
 func (r *ECDSAPublicKeyUncheckedCoordinatesRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		if file.IsTestFile() {
 			return nil
 		}

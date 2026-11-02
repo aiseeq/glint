@@ -76,7 +76,7 @@ func (r *ServiceNeverStartedRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range file.GoAST.Decls {
 			fn, ok := decl.(*ast.FuncDecl)

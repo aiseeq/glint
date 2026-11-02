@@ -54,7 +54,7 @@ func (r *NilDIRule) RequiresSSA() bool { return false }
 // load resolves the constructors of the project through the index.
 func (r *NilDIRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	index := newConstructorIndex(ctx)
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(fileCtx, info, index)
 	})
 }

@@ -60,7 +60,7 @@ func (r *ResponseTypeInFunctionRule) RequiresSSA() bool { return false }
 // local type — a variable, a pointer, a slice of it — that reaches a call or a
 // return counts.
 func (r *ResponseTypeInFunctionRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze reports function-local structs with json tags that are sent as a response.

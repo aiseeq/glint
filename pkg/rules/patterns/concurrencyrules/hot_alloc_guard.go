@@ -66,7 +66,7 @@ func (r *HotFunctionWithoutAllocGuardRule) AnalyzeGoProject(ctx *core.GoProjectC
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
 	guarded := measuredFunctions(decls, measuredNames(ctx.Files))
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
 		return patternkit.AnalyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {
 			if !patternkit.HasDirective(fn.Doc, patternkit.HotFunctionDirective) || guarded[fn] {
 				return nil

@@ -90,7 +90,7 @@ func (r *HTTPErrorPlaintextRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 	if err != nil {
 		return nil, err
 	}
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		if !fileCtx.IsGoFile() || fileCtx.IsTestFile() {
 			return nil
 		}

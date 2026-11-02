@@ -55,7 +55,7 @@ func (r *SentinelErrorReassignedRule) AnalyzeFile(_ *core.FileContext) []*core.V
 // AnalyzeGoProject reports the assignments of sentinels in production code.
 func (r *SentinelErrorReassignedRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	declared := declaredSentinels(ctx)
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		// A package that failed to type-check has no objects to tell a
 		// sentinel of the package from a local of the same name.
 		if file.IsTestFile() || info == nil {

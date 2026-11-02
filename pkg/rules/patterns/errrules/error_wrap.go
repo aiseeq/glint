@@ -51,7 +51,7 @@ func (r *ErrorWrapRule) RequiresSSA() bool { return false }
 // are resolved wherever the project declares them.
 func (r *ErrorWrapRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	own := newProjectCode(ctx)
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(fileCtx, info, own)
 	})
 }

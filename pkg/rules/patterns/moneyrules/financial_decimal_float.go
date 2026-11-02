@@ -46,7 +46,7 @@ func (r *FinancialDecimalFloatRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; with type information the receiver's
 // type decides whether Float64 is decimal.Decimal's.
 func (r *FinancialDecimalFloatRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze reports `x, _ := d.Float64()` on a decimal named as money. info is

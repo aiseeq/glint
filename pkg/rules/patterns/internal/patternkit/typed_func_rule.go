@@ -78,7 +78,7 @@ func (r *TypedFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Vi
 		check = r.ForProject(decls)
 	}
 	sources := NewDependencySources(ctx.FileSet)
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		scope := FuncScope{Info: info, Decls: decls, Callers: callers, Sources: sources}
 		return AnalyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {
 			var violations []*core.Violation

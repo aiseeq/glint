@@ -56,6 +56,7 @@ type resultCache struct {
 	// could not identify them, and nothing is stored then.
 	previousProject      *projectEntry
 	projectInputs        string
+	projectScope         string
 	projectRules         []string
 	projectFingerprints  map[string]string
 	projectKeyed         bool
@@ -76,6 +77,7 @@ type resultCache struct {
 // load left out.
 type projectEntry struct {
 	Inputs            string
+	Scope             string
 	Rules             []string
 	Fingerprints      map[string]string
 	Violations        map[string][]core.Violation
@@ -285,10 +287,11 @@ func (c *resultCache) store(relPath string, content [sha256.Size]byte, found map
 }
 
 // keyProject records the inputs of this run's typed load and the project
-// rules it runs (sorted names), and returns the stored project findings when
-// they were computed by the same rules for the same inputs.
-func (c *resultCache) keyProject(inputs string, projectRules []string, enabled []rules.Rule) *projectEntry {
-	c.projectInputs, c.projectRules, c.projectKeyed = inputs, projectRules, true
+// rules it runs (sorted names), and returns stored project findings when they
+// were computed by the same rules for the same inputs and an equal or broader scope.
+func (c *resultCache) keyProject(inputs string, projectRules []string, enabled []rules.Rule, scope string) *projectEntry {
+	c.projectHit = nil
+	c.projectInputs, c.projectScope, c.projectRules, c.projectKeyed = inputs, scope, projectRules, true
 	c.projectRulesCached, c.projectRulesRerun = 0, len(projectRules)
 	c.projectFingerprints = make(map[string]string, len(projectRules))
 	projectNames := make(map[string]bool, len(projectRules))
@@ -328,7 +331,7 @@ func (c *resultCache) keyProject(inputs string, projectRules []string, enabled [
 		}
 		c.projectFingerprints[rule.Name()] = fingerprint
 	}
-	if c.previousProject != nil && c.previousProject.Inputs == inputs {
+	if c.previousProject != nil && c.previousProject.Inputs == inputs && (c.previousProject.Scope == scope || c.previousProject.Scope == "") {
 		c.projectHit = c.previousProject
 		c.currentProject = c.previousProject
 		c.projectRulesRerun = 0
@@ -461,7 +464,7 @@ func (c *resultCache) storeProject(found core.ViolationList, skipped []core.Skip
 	for _, name := range c.projectRules {
 		active[name] = true
 	}
-	if old := c.previousProject; old != nil && old.Inputs == c.projectInputs {
+	if old := c.previousProject; old != nil && old.Inputs == c.projectInputs && (old.Scope == c.projectScope || old.Scope == "") {
 		for name, values := range old.Violations {
 			if !active[name] {
 				violations[name] = values
@@ -477,7 +480,7 @@ func (c *resultCache) storeProject(found core.ViolationList, skipped []core.Skip
 	for name := range ruleState {
 		stateFingerprints[name] = c.projectFingerprints[name]
 	}
-	if old := c.previousProject; old != nil && old.Inputs == c.projectInputs {
+	if old := c.previousProject; old != nil && old.Inputs == c.projectInputs && (old.Scope == c.projectScope || old.Scope == "") {
 		for name, data := range old.RuleState {
 			if _, exists := ruleState[name]; !exists && old.StateFingerprints[name] == c.projectFingerprints[name] {
 				ruleState[name] = data
@@ -491,6 +494,7 @@ func (c *resultCache) storeProject(found core.ViolationList, skipped []core.Skip
 	}
 	c.currentProject = &projectEntry{
 		Inputs:            c.projectInputs,
+		Scope:             c.projectScope,
 		Rules:             c.projectRules,
 		Fingerprints:      c.projectFingerprints,
 		Violations:        violations,

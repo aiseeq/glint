@@ -68,7 +68,7 @@ func (r *ContextFirstRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file, with type information where the package
 // has it.
 func (r *ContextFirstRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze reports every function that manufactures the context it should have

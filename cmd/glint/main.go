@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1013,7 +1014,7 @@ func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg 
 			return prepared, fmt.Errorf("find the Go modules of the run: %w", err)
 		}
 	}
-	if hit, err := prepared.cachedProject(loader, projectRoot, loaded, projectRules, prepared.enabledRules); err != nil || hit {
+	if hit, err := prepared.cachedProject(loader, projectRoot, loaded, projectRules, prepared.enabledRules, reportScopeKey(contexts, prepared.rootFiles)); err != nil || hit {
 		return prepared, err
 	}
 	project, err := loader.Load(projectRoot, loaded, core.GoProjectOptions{
@@ -1122,7 +1123,7 @@ func filesOfRoot(projectRoot string, cfg *core.Config, run []*core.FileContext, 
 // the typed load changed and the same project rules run, and gives the Go files the syntax trees the load
 // would have given them. An input hash that cannot be computed is reported and
 // the project is loaded.
-func (p *preparedRoot) cachedProject(loader *core.GoProjectLoader, projectRoot string, loaded []*core.FileContext, projectRules []string, enabledRules []rules.Rule) (bool, error) {
+func (p *preparedRoot) cachedProject(loader *core.GoProjectLoader, projectRoot string, loaded []*core.FileContext, projectRules []string, enabledRules []rules.Rule, reportScope string) (bool, error) {
 	if p.cache == nil {
 		return false, nil
 	}
@@ -1134,7 +1135,7 @@ func (p *preparedRoot) cachedProject(loader *core.GoProjectLoader, projectRoot s
 	if !cacheable {
 		return false, nil
 	}
-	hit := p.cache.keyProject(inputs, projectRules, enabledRules)
+	hit := p.cache.keyProject(inputs, projectRules, enabledRules, reportScope)
 	if hit == nil {
 		return false, nil
 	}
@@ -1155,6 +1156,19 @@ func (p *preparedRoot) cachedProject(loader *core.GoProjectLoader, projectRoot s
 	}
 	p.skipped = hit.Skipped
 	return true, nil
+}
+
+func reportScopeKey(contexts, rootFiles []*core.FileContext) string {
+	if contextsCoverRoot(contexts, rootFiles) {
+		return ""
+	}
+	paths := make([]string, 0, len(contexts))
+	for _, file := range contexts {
+		paths = append(paths, file.RelPath)
+	}
+	slices.Sort(paths)
+	sum := sha256.Sum256([]byte(strings.Join(paths, "\x00")))
+	return hex.EncodeToString(sum[:])
 }
 
 // reportSkippedPackages keeps a tolerated load honest: whatever was left out of
@@ -1644,6 +1658,7 @@ func storeRootProjectFindings(cache *resultCache, fileRules []rules.Rule, violat
 }
 
 func analyzeGoProjectRules(contexts, rootFiles []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext, overrides severityOverrides) (core.ViolationList, rulePanics, error) {
+	project.SetReportFiles(contexts)
 	results := runProjectRules(enabledRules, project)
 	var allViolations core.ViolationList
 	var panics rulePanics
@@ -1688,6 +1703,9 @@ func analyzeGoProjectRules(contexts, rootFiles []*core.FileContext, enabledRules
 			allViolations = append(allViolations, violation)
 		}
 		for _, fileCtx := range project.Files {
+			if !project.IsReportFile(fileCtx) {
+				continue
+			}
 			allViolations = append(allViolations, inlineSuppressions(fileCtx, rule)...)
 		}
 	}

@@ -55,7 +55,7 @@ func (r *TokenPosOffsetRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject inspects the analyzed files of every loaded package.
 func (r *TokenPosOffsetRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), r.analyzeFile)
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), r.analyzeFile)
 }
 
 func (r *TokenPosOffsetRule) analyzeFile(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
