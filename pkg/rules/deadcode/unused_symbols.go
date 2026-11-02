@@ -76,6 +76,7 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 	if err != nil {
 		return nil, fmt.Errorf("unused symbol: %w", err)
 	}
+	linked := linknameNames(ctx.Files)
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
 			return nil, errors.New("unused symbol: package has no typed syntax")
@@ -123,7 +124,7 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		var violations []*core.Violation
 		for _, sym := range byFile[fileCtx] {
 			name := sym.obj.Name()
-			if uses[sym.obj] > 0 || mentions.mentioned(fileCtx, name) || ofUnusedType(sym.obj, uses) {
+			if uses[sym.obj] > 0 || linked[name] || mentions.mentioned(fileCtx, name) || ofUnusedType(sym.obj, uses) {
 				continue
 			}
 			v := r.CreateViolation(fileCtx.RelPath, sym.line,
@@ -141,7 +142,7 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 	}
 	for _, fileCtx := range ctx.Files {
 		for _, sym := range testFunctions[fileCtx] {
-			if mentions.functionUsed(fileCtx, sym.name) {
+			if linked[sym.name] || mentions.functionUsed(fileCtx, sym.name) {
 				continue
 			}
 			v := r.CreateViolation(fileCtx.RelPath, sym.line,
@@ -154,6 +155,31 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		}
 	}
 	return violations, nil
+}
+
+// linknameNames returns the names //go:linkname directives bind: the local
+// name and the last element of the target. The linker reaches them without
+// any identifier naming them. Names are matched without their package, so a
+// same-named function of another package also counts as linked.
+func linknameNames(files []*core.FileContext) map[string]bool {
+	names := make(map[string]bool)
+	for _, fileCtx := range files {
+		if fileCtx == nil || fileCtx.GoAST == nil {
+			continue
+		}
+		for _, group := range fileCtx.GoAST.Comments {
+			for _, comment := range group.List {
+				args, ok := strings.CutPrefix(comment.Text, "//go:linkname ")
+				if !ok {
+					continue
+				}
+				for arg := range strings.FieldsSeq(args) {
+					names[arg[strings.LastIndex(arg, ".")+1:]] = true
+				}
+			}
+		}
+	}
+	return names
 }
 
 func excludedTestFunction(name string) bool {
