@@ -235,6 +235,78 @@ func (h *Holder) Name() string { return h.inner.Name }
 	assert.Contains(t, violations[0].Message, "inner")
 }
 
+func TestNeverAssignedFieldOnlyReportsPanickingFunctionAndInterfaceUses(t *testing.T) {
+	violations := analyzeNeverAssigned(t, map[string]string{
+		"hooks.go": `package hooks
+
+type Service interface{ Run() }
+
+type BorrowedFunc struct{ callback func() }
+type CalledFunc struct{ callback func() }
+type BorrowedInterface struct{ service Service }
+type CalledInterface struct{ service Service }
+type SentChannel struct{ events chan int }
+
+func consume(any) {}
+func returnService(h *BorrowedInterface) Service { return h.service }
+func (h *BorrowedFunc) pass() {
+	_ = struct{ callback func() }{callback: h.callback}
+	consume((h.callback))
+	_ = h.callback == nil
+}
+func (h *CalledFunc) call() { (h.callback)() }
+func (h *BorrowedInterface) pass() {
+	consume(h.service)
+	_ = h.service == nil
+}
+func (h *CalledInterface) call() { h.service.Run() }
+func (h *SentChannel) send() { h.events <- 1 }
+`,
+	})
+
+	require.Len(t, violations, 3)
+	assert.ElementsMatch(t, []any{
+		"CalledFunc.callback",
+		"CalledInterface.service",
+		"SentChannel.events",
+	}, []any{
+		violations[0].Context["field"],
+		violations[1].Context["field"],
+		violations[2].Context["field"],
+	})
+}
+
+func TestNeverAssignedFieldOnlyReportsPanickingInterfaceTypeAssertion(t *testing.T) {
+	violations := analyzeNeverAssigned(t, map[string]string{
+		"assertion.go": `package assertion
+
+type Service interface{ Run() }
+
+type Checked struct{ service Service }
+type Declared struct{ service Service }
+type Switched struct{ service Service }
+type Asserted struct{ service Service }
+
+func (h *Checked) check() { _, _ = h.service.(interface{ Run() }) }
+func (h *Declared) check() bool {
+	var _, ok = h.service.(interface{ Run() })
+	return ok
+}
+func (h *Switched) kind() int {
+	switch h.service.(type) {
+	case nil:
+		return 0
+	}
+	return 1
+}
+func (h *Asserted) assert() { _ = h.service.(interface{ Run() }) }
+`,
+	})
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, "Asserted.service", violations[0].Context["field"])
+}
+
 // A decoder fills exported fields by name, without tags: a response struct
 // handed to json.Unmarshal is assigned even though no statement assigns it.
 func TestNeverAssignedFieldAcceptsFieldsOfDecodedType(t *testing.T) {

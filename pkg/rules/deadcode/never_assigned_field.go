@@ -48,7 +48,12 @@ func init() {
 // an optional filter — misleads but does not crash, and belongs to
 // unused-field's territory rather than here. A map field counts only where
 // something stores into it (p.field[k] = v): reading a nil map yields the zero
-// value, storing into one panics.
+// value, storing into one panics. A function field counts only when called;
+// passing, returning, copying, or comparing it with nil is safe. An interface
+// field counts when a method or nested selector is used through it, or when a
+// type assertion without a comma-ok result is made; a comma-ok assertion and
+// passing, returning, copying, or comparing it with nil are safe. A nil
+// channel still counts on any use because it blocks or panics.
 //
 // A write of nil or (*T)(nil) gives the field no value. A literal of the type
 // outside the functions that return it (its constructors) is reported when it
@@ -88,9 +93,10 @@ func (r *NeverAssignedFieldRule) RequiresSSA() bool { return false }
 type nilUse int
 
 const (
-	nilUseRead  nilUse = iota // interface, func, chan: any use
-	nilUseDeref               // pointer: going through it
+	nilUseRead  nilUse = iota // chan: any use blocks or panics
+	nilUseDeref               // pointer or interface: going through it
 	nilUseStore               // map: storing into it
+	nilUseCall                // func: calling it
 )
 
 // nilableField is a field of an analyzed struct whose zero value is nil.
@@ -165,6 +171,8 @@ func crashingUse(use nilUse, access *fieldAccess, pos token.Pos) bool {
 		return access.dereferenced[pos]
 	case nilUseStore:
 		return access.storedInto[pos]
+	case nilUseCall:
+		return access.called[pos]
 	default:
 		return access.read[pos]
 	}
@@ -243,7 +251,11 @@ func nilUseOf(t types.Type) (nilUse, bool) {
 		return nilUseDeref, true
 	case *types.Map:
 		return nilUseStore, true
-	case *types.Interface, *types.Chan, *types.Signature:
+	case *types.Interface:
+		return nilUseDeref, true
+	case *types.Signature:
+		return nilUseCall, true
+	case *types.Chan:
 		return nilUseRead, true
 	}
 	return 0, false

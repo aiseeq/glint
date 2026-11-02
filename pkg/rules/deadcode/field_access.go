@@ -28,11 +28,14 @@ type fieldAccess struct {
 	// valueWritten: written with something other than a provable nil — a
 	// field only ever given nil or (*T)(nil) holds no value.
 	valueWritten map[token.Pos]bool
-	// dereferenced: a pointer field used through (x.f.y, x.f.M(), *x.f).
+	// dereferenced: a pointer or interface field used through (x.f.y,
+	// x.f.M(), *x.f), or a panicking type assertion on an interface field.
 	dereferenced map[token.Pos]bool
 	// storedInto: a map field indexed on the left of an assignment or of
 	// ++/-- (x.f[k] = v) — the one use of a nil map that panics.
 	storedInto map[token.Pos]bool
+	// called: a function field used as a call target (x.f(...)).
+	called map[token.Pos]bool
 	// hashed: the field of a struct used as a whole — compared with == or !=,
 	// used as a map key, or handed out as raw memory (unsafe.Pointer,
 	// encoding/binary) — which the runtime or the receiver of that memory
@@ -69,6 +72,7 @@ func newFieldAccess() *fieldAccess {
 		valueWritten: make(map[token.Pos]bool),
 		dereferenced: make(map[token.Pos]bool),
 		storedInto:   make(map[token.Pos]bool),
+		called:       make(map[token.Pos]bool),
 		hashed:       make(map[token.Pos]bool),
 		decoded:      make(map[*types.Named]bool),
 		encoded:      make(map[*types.Named]bool),
@@ -175,6 +179,26 @@ func (a *fieldAccess) collect(file *ast.File, info *types.Info) {
 	// assignment are known by the time its selectors are classified.
 	targets := make(map[ast.Expr]bool)
 	nilTargets := make(map[ast.Expr]bool)
+	commaOKAssertions := make(map[*ast.TypeAssertExpr]bool)
+	ast.Inspect(file, func(n ast.Node) bool {
+		var lhs int
+		var rhs []ast.Expr
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			lhs, rhs = len(node.Lhs), node.Rhs
+		case *ast.ValueSpec:
+			lhs, rhs = len(node.Names), node.Values
+		default:
+			return true
+		}
+		if lhs != 2 || len(rhs) != 1 {
+			return true
+		}
+		if assertion, ok := ast.Unparen(rhs[0]).(*ast.TypeAssertExpr); ok {
+			commaOKAssertions[assertion] = true
+		}
+		return true
+	})
 
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -210,9 +234,20 @@ func (a *fieldAccess) collect(file *ast.File, info *types.Info) {
 				a.markHashed(info.TypeOf(node.Y))
 			}
 		case *ast.CallExpr:
+			if pos, ok := selectedField(info, node.Fun); ok {
+				a.called[pos] = true
+			}
 			a.serialization(node, info)
 			a.emptyInterfaceArguments(node, info)
 			a.rawMemory(node, info)
+		case *ast.TypeAssertExpr:
+			// x.(type) of a type switch and a comma-ok assertion take a nil
+			// interface without panicking.
+			if node.Type != nil && !commaOKAssertions[node] {
+				if pos, ok := selectedField(info, node.X); ok {
+					a.dereferenced[pos] = true
+				}
+			}
 		case *ast.IndexExpr:
 			// m[k] of a map[any]: the key is hashed as the interface's
 			// dynamic value.
