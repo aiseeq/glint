@@ -921,7 +921,6 @@ func defaultAppliedOnOnePathOnly(scope patternkit.FuncScope, fn *ast.FuncDecl) [
 	info := scope.Info
 	type defaulted struct {
 		raw    string
-		local  types.Object
 		callee *types.Func
 	}
 	var defaults []defaulted
@@ -942,7 +941,7 @@ func defaultAppliedOnOnePathOnly(scope patternkit.FuncScope, fn *ast.FuncDecl) [
 			obj := info.ObjectOf(local)
 			for _, call := range callsWith(stmts[i+2:], obj, info) {
 				if callee := patternkit.StaticFunc(info, call); callee != nil && scope.Decls[callee].Decl != nil {
-					defaults = append(defaults, defaulted{types.ExprString(assign.Rhs[0]), obj, callee})
+					defaults = append(defaults, defaulted{types.ExprString(assign.Rhs[0]), callee})
 				}
 			}
 		}

@@ -190,6 +190,33 @@ func New() *Stats {
 	assert.Empty(t, violations)
 }
 
+// Exported settings are judged inside the module, including reads from an
+// external test package in the same directory.
+func TestUnusedFieldAcceptsExportedFieldReadFromExternalTestPackage(t *testing.T) {
+	violations := analyzeFields(t, map[string]string{
+		"cache.go": `package cache
+
+type CacheConfig struct {
+	Endpoint string
+}
+`,
+		"cache_test.go": `package cache_test
+
+import (
+	"testing"
+	cache "example.com/rulestest"
+)
+
+func TestExternalRead(t *testing.T) {
+	config := cache.CacheConfig{}
+	_ = config.Endpoint
+}
+`,
+	})
+
+	assert.Empty(t, violations)
+}
+
 // Serialization fills and reads tagged fields without naming them in code.
 func TestUnusedFieldIgnoresTaggedField(t *testing.T) {
 	violations := analyzeFields(t, map[string]string{

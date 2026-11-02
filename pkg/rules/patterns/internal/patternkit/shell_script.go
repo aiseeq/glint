@@ -531,9 +531,10 @@ func compoundExpansionEnd(text string, start int) int {
 			i = compoundExpansionEnd(text, i)
 			continue
 		}
-		if text[i] == open {
+		switch text[i] {
+		case open:
 			depth++
-		} else if text[i] == close {
+		case close:
 			depth--
 			if depth == 0 {
 				return i + 1

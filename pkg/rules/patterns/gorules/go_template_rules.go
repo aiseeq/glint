@@ -1018,10 +1018,10 @@ func NewHtmxSelectInheritedByDescendantRequestRule() *HtmxSelectInheritedByDesce
 }
 
 type htmxHTMLTag struct {
-	name       string
-	attrs      string
-	start, end int
-	parent     int
+	name   string
+	attrs  string
+	start  int
+	parent int
 }
 
 var (
@@ -1080,7 +1080,6 @@ func parseHtmxHTMLTags(text string) []htmxHTMLTag {
 			for pos := len(stack) - 1; pos >= 0; pos-- {
 				idx := stack[pos]
 				if tags[idx].name == name {
-					tags[idx].end = match[1]
 					stack = stack[:pos]
 					break
 				}
@@ -1093,7 +1092,7 @@ func parseHtmxHTMLTags(text string) []htmxHTMLTag {
 		}
 		attrs := text[match[0]:match[1]]
 		idx := len(tags)
-		tags = append(tags, htmxHTMLTag{name: name, attrs: attrs, start: match[0], end: match[1], parent: parent})
+		tags = append(tags, htmxHTMLTag{name: name, attrs: attrs, start: match[0], parent: parent})
 		if !void[name] && !strings.HasSuffix(strings.TrimSpace(attrs[:len(attrs)-1]), "/") {
 			stack = append(stack, idx)
 		}

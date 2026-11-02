@@ -68,7 +68,6 @@ func NewIndependentChecksAbortTogetherRule() *patternkit.TypedFuncRule {
 // value to a call.
 type passStep struct {
 	at    int
-	value *types.Var
 	call  *ast.CallExpr
 	check *ast.IfStmt
 }
@@ -127,7 +126,7 @@ func fetchActStep(info *types.Info, list []ast.Stmt, at int) (passStep, bool) {
 	if !ok || !patternkit.MentionsVar(info, actCall, value) {
 		return passStep{}, false
 	}
-	return passStep{at: at, value: value, call: call, check: check}, true
+	return passStep{at: at, call: call, check: check}, true
 }
 
 // independentStep reports a later step whose call uses nothing defined from
