@@ -18,13 +18,15 @@ const defaultRunLogLimit int64 = 64 << 20
 var runLogLimit = defaultRunLogLimit
 
 type runJournalEntry struct {
-	Time        string         `json:"time"`
-	Root        string         `json:"root"`
-	Version     string         `json:"version"`
-	WallMS      int64          `json:"wall_ms"`
-	Files       int            `json:"files"`
-	CachedFiles int            `json:"cached_files"`
-	Findings    map[string]int `json:"findings"`
+	Time         string         `json:"time"`
+	Root         string         `json:"root"`
+	Version      string         `json:"version"`
+	WallMS       int64          `json:"wall_ms"`
+	Files        int            `json:"files"`
+	CachedFiles  int            `json:"cached_files"`
+	RootCache    string         `json:"root_cache,omitempty"`
+	ProjectCache string         `json:"project_cache,omitempty"`
+	Findings     map[string]int `json:"findings"`
 
 	RuleMS map[string]int64 `json:"rule_ms"`
 	Exit   int              `json:"exit"`
