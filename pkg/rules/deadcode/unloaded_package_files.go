@@ -27,11 +27,16 @@ func (m *testMentions) addUnloadedPackageFiles(pkg *core.GoPackageContext) error
 		return fmt.Errorf("list package directory %q: %w", dir, err)
 	}
 
-	words := make(map[string]bool)
+	key := mentionPackage{dir: filepath.Dir(pkg.Package.GoFiles[0]), packageName: pkg.Package.Name}
+	words := m.fallback[key]
+	if words == nil {
+		words = make(map[string]bool)
+		m.fallback[key] = words
+	}
 	for _, entry := range entries {
 		path := filepath.Join(dir, entry.Name())
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") ||
-			slices.Contains(pkg.Package.GoFiles, path) {
+			slices.Contains(pkg.Package.GoFiles, path) || m.seen[path] {
 			continue
 		}
 		content, err := os.ReadFile(path)
@@ -41,18 +46,6 @@ func (m *testMentions) addUnloadedPackageFiles(pkg *core.GoPackageContext) error
 		collectIdentifierWords(string(content), words)
 	}
 
-	// mentioned() looks names up by the directory of the declaring file's
-	// context path, which may be relative; key the words the same way.
-	for _, fileCtx := range pkg.Files {
-		key := filepath.Dir(fileCtx.Path)
-		set := m.names[key]
-		if set == nil {
-			set = make(map[string]bool)
-			m.names[key] = set
-		}
-		for word := range words {
-			set[word] = true
-		}
-	}
+	// Keep fallback mentions under the same directory/package key as parsed files.
 	return nil
 }

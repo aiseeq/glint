@@ -91,7 +91,6 @@ var sqlSafeTypePackages = map[string]bool{
 // passes it to a validator or compares it with a non-empty constant and
 // rejects - is clean.
 type sqlTaintCheck struct {
-	file           *ast.File
 	info           *types.Info
 	params         map[*types.Var]bool
 	assigned       map[*types.Var][]ast.Expr
@@ -113,7 +112,6 @@ type sqlTaintCheck struct {
 func newSQLTaintCheck(file *ast.File, info *types.Info) *sqlTaintCheck {
 	c := &sqlTaintCheck{
 		info:           info,
-		file:           file,
 		params:         make(map[*types.Var]bool),
 		assigned:       make(map[*types.Var][]ast.Expr),
 		validated:      make(map[*types.Var][]sqlValidation),

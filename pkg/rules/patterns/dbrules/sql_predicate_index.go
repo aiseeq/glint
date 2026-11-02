@@ -110,7 +110,6 @@ type sqlPredicateSource struct {
 	name, path string
 	line       int
 	norms      map[string]bool
-	legacy     bool
 }
 
 func sqlPredicateSources(index map[string][]predicateConstant) []sqlPredicateSource {
@@ -120,7 +119,7 @@ func sqlPredicateSources(index map[string][]predicateConstant) []sqlPredicateSou
 			key := fmt.Sprintf("%s\x00%s\x00%d\x00%t", entry.name, entry.path, entry.line, entry.legacy)
 			source := byLocation[key]
 			if source == nil {
-				source = &sqlPredicateSource{name: entry.name, path: entry.path, line: entry.line, norms: make(map[string]bool), legacy: entry.legacy}
+				source = &sqlPredicateSource{name: entry.name, path: entry.path, line: entry.line, norms: make(map[string]bool)}
 				byLocation[key] = source
 			}
 			source.norms[norm] = true

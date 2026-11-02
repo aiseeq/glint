@@ -103,6 +103,34 @@ func Format(r Root) string {
 	assert.Empty(t, violations)
 }
 
+// An external test package in the same directory can read exported config
+// fields, so its identifier use keeps the field alive.
+func TestUnusedConfigFieldAcceptsReadFromExternalTestPackage(t *testing.T) {
+	violations := analyzeConfigFields(t, map[string]string{
+		"loader.go": configLoader,
+		"config.go": `package config
+
+type Root struct {
+	RPCEndpoints []string ` + "`yaml:\"rpc_endpoints\"`" + `
+}
+`,
+		"config_test.go": `package config_test
+
+import (
+	"testing"
+	config "example.com/rulestest"
+)
+
+func TestExternalRead(t *testing.T) {
+	root := config.Root{}
+	_ = root.RPCEndpoints
+}
+`,
+	})
+
+	assert.Empty(t, violations)
+}
+
 // A default written into a composite literal is a write, not a use: the
 // setting still does nothing, whatever value it starts with.
 func TestUnusedConfigFieldReportsFieldOnlyGivenDefault(t *testing.T) {

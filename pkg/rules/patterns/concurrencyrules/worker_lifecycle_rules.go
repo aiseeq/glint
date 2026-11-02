@@ -47,7 +47,6 @@ func NewStatefulClientConstructedTwiceRule() *patternkit.TypedFuncRule {
 			return nil
 		}
 		type site struct {
-			call *ast.CallExpr
 			path []ast.Node
 		}
 		first := make(map[string]site)
@@ -68,7 +67,7 @@ func NewStatefulClientConstructedTwiceRule() *patternkit.TypedFuncRule {
 				return true
 			}
 			key := callee.FullName() + "(" + argsText(call) + ")"
-			here := site{call: call, path: slices.Clone(stack)}
+			here := site{path: slices.Clone(stack)}
 			prev, seen := first[key]
 			if !seen {
 				first[key] = here

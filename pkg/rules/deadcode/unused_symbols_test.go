@@ -251,9 +251,9 @@ func TestUnusedSymbolsIgnoresExcludedTemplateSibling(t *testing.T) {
 	root, contexts := rulestest.Module(t, map[string]string{
 		"p/a.go": "package p\n\nfunc helper() int { return 1 }\n\ntype thing struct{ n int }\n\nvar registry = map[string]int{}\n",
 		"p/b.go": "package p\n\n// Use uses symbols from a.go.\nfunc Use() int { _ = registry; t := thing{n: 1}; return helper() + t.n }\n",
-		"q/q.go": "package q\n\n// Q is exported.\nfunc Q() int { return 1 }\n\nfunc dead() {}\n",
+		"q/q.go": "package q\n\n// Q is exported.\nfunc Q() int { return 1 }\n\nfunc dead() {}\nfunc deadOther() {}\n",
 	})
-	template := "//go:build ignore\n\npackage main\n\nfunc main() {\n\t{{range .Items}}\n}\n"
+	template := "//go:build ignore\n\npackage main\n\nfunc main() {\n\t{{range .Items}}\n\t{{.deadOther}}\n}\n"
 	require.NoError(t, os.WriteFile(filepath.Join(root, "q", "gen.go"), []byte(template), 0o644))
 	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
@@ -301,12 +301,116 @@ func TestUnusedSymbolsRuleMetadata(t *testing.T) {
 	assert.NotContains(t, rule.Description(), "within their file")
 }
 
-func TestUnusedSymbolsSkipsTestFiles(t *testing.T) {
+func TestUnusedSymbolsReportsUnusedTestHelpers(t *testing.T) {
 	violations := analyzeUnusedSymbols(t, map[string]string{
-		"main.go":      "package main\n\nfunc main() {}\n",
-		"main_test.go": "package main\n\nimport \"testing\"\n\nfunc unusedHelper() {}\n\nfunc TestSomething(t *testing.T) {}\n",
+		"main.go": "package main\n\nfunc main() {}\n",
+		"main_test.go": `package main
+
+import "testing"
+
+func unusedHelper() {}
+func calledHelper() {}
+func TestMain(m *testing.M) {}
+func TestSomething(t *testing.T) { calledHelper() }
+func BenchmarkSomething(b *testing.B) {}
+func FuzzSomething(f *testing.F) {}
+func ExampleSomething() {}
+func init() {}
+type testType struct{}
+func (testType) methodMayImplementInterface() {}
+`,
+		"other_test.go": "package main\n\nfunc TestAcrossFiles(t *testing.T) { calledHelper() }\n",
 	})
-	assert.Empty(t, violations, "Should skip test files")
+	require.Len(t, violations, 1)
+	assert.Equal(t, "main_test.go", violations[0].File)
+	assert.Contains(t, violations[0].Message, "'unusedHelper'")
+}
+
+func TestUnusedSymbolsTestHelpersFollowPackageName(t *testing.T) {
+	violations := analyzeUnusedSymbols(t, map[string]string{
+		"main.go": `package sample
+
+func packageHelper() {}
+var _ = "deadExternal"
+`,
+		"main_test.go": `package sample
+
+import "testing"
+
+func packageTestCaller() { packageHelper() }
+func deadInternal() {}
+func TestCaller() { packageTestCaller() }
+`,
+		"external_test.go": `package sample_test
+
+import sample "example.com/rulestest"
+import "testing"
+
+func deadExternal() {}
+func liveExternal() {}
+func TestExternal(t *testing.T) { liveExternal(); sample.Exported() }
+var _ = "deadInternal"
+// deadInternal
+`,
+	})
+	require.Len(t, violations, 2)
+	assert.Contains(t, violations[0].Message, "'deadExternal'")
+	assert.Contains(t, violations[1].Message, "'deadInternal'")
+}
+
+func TestUnusedSymbolsCodeMentionsInTestFilesKeepHelperAlive(t *testing.T) {
+	violations := analyzeUnusedSymbols(t, map[string]string{
+		"main.go": `package sample
+
+type receiver struct{}
+func (receiver) methodMentionedBySelector() {}
+func functionValue() {}
+func selectorMentioned() {}
+`,
+		"main_test.go": `package sample
+
+var _ = functionValue
+func TestMentions(t *testing.T) {
+	var r receiver
+	r.methodMentionedBySelector()
+	selectorMentioned()
+}
+`,
+	})
+	assert.Empty(t, violations)
+}
+
+func TestUnusedSymbolsTestTextDoesNotKeepSymbolsAlive(t *testing.T) {
+	violations := analyzeUnusedSymbols(t, map[string]string{
+		"main.go": `package sample
+
+func deadByTextOnly() {}
+`,
+		"main_test.go": `package sample
+
+const fixtureName = "deadByTextOnly"
+// deadByTextOnly
+`,
+	})
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "'deadByTextOnly'")
+}
+
+func TestUnusedSymbolsMalformedTestFileStillUsesWordScan(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"p/source.go": "package p\n\nfunc keptByMalformedFile() {}\nfunc dead() {}\n",
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+	require.NoError(t, err)
+	broken, err := core.NewFileContextChecked(filepath.Join(root, "p", "broken_test.go"), root,
+		[]byte("package p\n\nfunc broken( { keptByMalformedFile\n"), core.DefaultConfig())
+	require.NoError(t, err)
+	assert.Nil(t, broken.GoAST)
+	project.Files = append(project.Files, broken)
+	violations, err := NewUnusedSymbolsRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "'dead'")
 }
 
 // An unexported method can satisfy only an interface of its own package that

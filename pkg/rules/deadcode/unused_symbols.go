@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -56,6 +57,7 @@ func (r *UnusedSymbolsRule) RequiresSSA() bool { return false }
 // declaredSymbol is an unexported package-level declaration of an analyzed file.
 type declaredSymbol struct {
 	obj  types.Object
+	name string
 	kind string
 	line int
 }
@@ -68,6 +70,7 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 	}
 
 	byFile := make(map[*core.FileContext][]declaredSymbol)
+	testFunctions := make(map[*core.FileContext][]declaredSymbol)
 	uses := make(map[types.Object]int)
 	mentions, err := projectMentions(ctx)
 	if err != nil {
@@ -99,8 +102,24 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		own.addPackage(pkg.Package.Syntax, info)
 		countOutsideUses(info, own, uses)
 	}
+	for _, fileCtx := range ctx.Files {
+		if fileCtx == nil || !fileCtx.IsTestFile() || fileCtx.GoAST == nil {
+			continue
+		}
+		for _, decl := range fileCtx.GoAST.Decls {
+			function, ok := decl.(*ast.FuncDecl)
+			if !ok || function.Recv != nil || excludedTestFunction(function.Name.Name) || ast.IsExported(function.Name.Name) {
+				continue
+			}
+			testFunctions[fileCtx] = append(testFunctions[fileCtx], declaredSymbol{
+				name: function.Name.Name,
+				kind: "function",
+				line: fileCtx.LineFor(function.Name),
+			})
+		}
+	}
 
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
+	violations, err := rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, sym := range byFile[fileCtx] {
 			name := sym.obj.Name()
@@ -117,6 +136,36 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		}
 		return violations
 	})
+	if err != nil {
+		return nil, err
+	}
+	for _, fileCtx := range ctx.Files {
+		for _, sym := range testFunctions[fileCtx] {
+			if mentions.functionUsed(fileCtx, sym.name) {
+				continue
+			}
+			v := r.CreateViolation(fileCtx.RelPath, sym.line,
+				"Unexported "+sym.kind+" '"+sym.name+"' appears to be unused")
+			v.WithCode(fileCtx.GetLine(sym.line))
+			v.WithSuggestion("Remove unused " + sym.kind + " or export it if intended for external use")
+			v.WithContext("symbol", sym.name)
+			v.WithContext("kind", sym.kind)
+			violations = append(violations, v)
+		}
+	}
+	return violations, nil
+}
+
+func excludedTestFunction(name string) bool {
+	if name == "init" || name == "TestMain" {
+		return true
+	}
+	for _, prefix := range []string{"Test", "Benchmark", "Fuzz", "Example"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // unexportedDeclarations returns the unexported package-level functions,

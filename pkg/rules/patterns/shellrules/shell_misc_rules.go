@@ -545,7 +545,6 @@ type shellCaseDriftRule struct {
 type projectCaseArm struct {
 	path     string
 	patterns map[string]bool
-	all      map[string]bool
 }
 
 // UseProjectFiles indexes the case arms of the root's scripts.
@@ -558,7 +557,7 @@ func (r *shellCaseDriftRule) UseProjectFiles(files []*core.FileContext) {
 		}
 		for _, c := range idCases(src) {
 			for _, arm := range c.arms {
-				r.arms = append(r.arms, projectCaseArm{path: ctx.RelPath, patterns: arm.set, all: c.all})
+				r.arms = append(r.arms, projectCaseArm{path: ctx.RelPath, patterns: arm.set})
 			}
 		}
 	}
