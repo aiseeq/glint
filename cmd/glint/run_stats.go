@@ -169,13 +169,13 @@ func makeStatsReport(path string, days int, now time.Time) (statsReport, error) 
 	}
 	rotated := path + ".1"
 	if fingerprint, err := journalFingerprint(rotated); err == nil && fingerprint != header.Folded {
-		if err := foldRawFile(rotated, data, rootCache); err != nil {
+		if err := foldRawFile(rotated, data, rootCache, nil); err != nil {
 			return statsReport{}, fmt.Errorf("read rotated run journal: %w", err)
 		}
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return statsReport{}, fmt.Errorf("fingerprint rotated run journal: %w", err)
 	}
-	if err := foldRawFile(path, data, rootCache); err != nil {
+	if err := foldRawFile(path, data, rootCache, nil); err != nil {
 		return statsReport{}, fmt.Errorf("read run journal: %w", err)
 	}
 	for _, rule := range rules.All() {
@@ -224,12 +224,23 @@ func newDaily(day string) *dailyRecord {
 	return &dailyRecord{Day: day, RuleMS: make(map[string]int64), Roots: make(map[string]*dailyRoot)}
 }
 
-func addEntry(data map[string]*dailyRecord, entry runJournalEntry, rootCache map[string]bool) error {
+// addEntry adds a run to its day. firstDays, when not nil, gets the earliest
+// day each rule shows time or findings in, temporary roots included: a run
+// anywhere shows the rule existed, though only permanent roots are counted.
+func addEntry(data map[string]*dailyRecord, entry runJournalEntry, rootCache map[string]bool, firstDays map[string]string) error {
 	t, err := time.Parse(time.RFC3339, entry.Time)
 	if err != nil {
 		return fmt.Errorf("parse run timestamp %q: %w", entry.Time, err)
 	}
 	day := t.In(time.Local).Format("2006-01-02")
+	if firstDays != nil {
+		for rule := range entry.RuleMS {
+			noteFirstDay(firstDays, rule, day)
+		}
+		for rule := range entry.Findings {
+			noteFirstDay(firstDays, rule, day)
+		}
+	}
 	d := data[day]
 	if d == nil {
 		d = newDaily(day)
@@ -258,30 +269,9 @@ func addEntry(data map[string]*dailyRecord, entry runJournalEntry, rootCache map
 	return nil
 }
 
-// ruleFirstDays returns the earliest day each rule shows in the data, by
-// its time or a finding, and today for a rule the data does not show.
-func ruleFirstDays(data map[string]*dailyRecord, today string) func(string) string {
-	first := make(map[string]string)
-	note := func(rule, day string) {
-		if prev, ok := first[rule]; !ok || day < prev {
-			first[rule] = day
-		}
-	}
-	for day, d := range data {
-		for rule := range d.RuleMS {
-			note(rule, day)
-		}
-		for _, root := range d.Roots {
-			for rule := range root.Findings {
-				note(rule, day)
-			}
-		}
-	}
-	return func(rule string) string {
-		if day, ok := first[rule]; ok {
-			return min(day, today)
-		}
-		return today
+func noteFirstDay(firstDays map[string]string, rule, day string) {
+	if prev, ok := firstDays[rule]; !ok || day < prev {
+		firstDays[rule] = day
 	}
 }
 
@@ -307,7 +297,7 @@ func mergeDaily(dst, src *dailyRecord) {
 	}
 }
 
-func foldRawFile(path string, data map[string]*dailyRecord, rootCache map[string]bool) (retErr error) {
+func foldRawFile(path string, data map[string]*dailyRecord, rootCache map[string]bool, firstDays map[string]string) (retErr error) {
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
 		return nil
@@ -329,7 +319,7 @@ func foldRawFile(path string, data map[string]*dailyRecord, rootCache map[string
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			return fmt.Errorf("decode %s line %d: %w", path, lineNumber, err)
 		}
-		if err := addEntry(data, e, rootCache); err != nil {
+		if err := addEntry(data, e, rootCache, firstDays); err != nil {
 			return fmt.Errorf("process %s line %d: %w", path, lineNumber, err)
 		}
 	}
@@ -431,15 +421,19 @@ func foldRotatedJournal(path string) error {
 	if header.Folded == fingerprint {
 		return nil
 	}
-	if err := foldRawFile(rotated, data, make(map[string]bool)); err != nil {
+	firstDays := make(map[string]string)
+	if err := foldRawFile(rotated, data, make(map[string]bool), firstDays); err != nil {
 		return fmt.Errorf("fold rotated run journal: %w", err)
 	}
 	// A rule new to the map was born at most this fold ago, or earlier when
-	// the journal shows it running: its time or findings on an earlier day.
-	seen := ruleFirstDays(data, time.Now().In(time.Local).Format("2006-01-02"))
+	// the folded runs show it: its time or findings on an earlier day.
+	today := time.Now().In(time.Local).Format("2006-01-02")
 	for _, rule := range rules.All() {
 		if _, ok := header.FirstSeen[rule.Name()]; !ok {
-			header.FirstSeen[rule.Name()] = seen(rule.Name())
+			header.FirstSeen[rule.Name()] = today
+			if day, ok := firstDays[rule.Name()]; ok {
+				header.FirstSeen[rule.Name()] = min(day, today)
+			}
 		}
 	}
 	header.Folded = fingerprint
