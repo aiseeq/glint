@@ -446,3 +446,29 @@ func (p *pool) String() string { return "pool" }
 	assert.Equal(t, 11, violations[0].Line)
 	assert.Contains(t, violations[0].Message, "createCleanRouter")
 }
+
+// A //go:linkname directive binds a body-less declaration in another package
+// to a function by its import path and name: the linker calls it, and no
+// identifier anywhere names it. Both an ordinary function and a test helper
+// pulled this way are alive; a function no directive names is still dead.
+func TestUnusedSymbolsLinknameTargetIsAlive(t *testing.T) {
+	violations := analyzeUnusedSymbols(t, map[string]string{
+		"p/p.go":      "package p\n\nfunc linked() int { return 1 }\n\nfunc dead() {}\n",
+		"p/p_test.go": "package p\n\nimport \"testing\"\n\nfunc linkedTest() int { return 2 }\n\nfunc TestP(t *testing.T) {}\n",
+		"bridge/bridge.go": `package bridge
+
+import _ "unsafe"
+
+//go:linkname remote example.com/rulestest/p.linked
+func remote() int
+
+//go:linkname remoteTest example.com/rulestest/p.linkedTest
+func remoteTest() int
+
+// Call calls through the links.
+func Call() int { return remote() + remoteTest() }
+`,
+	})
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "'dead'")
+}
