@@ -344,16 +344,24 @@ func TestStatsRulesWithoutFindingsOrderAndConsoleCPULimit(t *testing.T) {
 	}
 }
 
-func TestFirstFoldDatesRulesFromEarliestFoldedDay(t *testing.T) {
+func TestFirstFoldDatesRulesFromTheirFirstDayInJournal(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "runs.jsonl")
+	root := permanentTestRoot(t)
 	earliest := time.Now().AddDate(0, 0, -5)
-	entry := runJournalEntry{Time: earliest.Format(time.RFC3339), Root: permanentTestRoot(t), WallMS: 1}
-	line, err := json.Marshal(entry)
-	if err != nil {
-		t.Fatal(err)
+	middle := time.Now().AddDate(0, 0, -3)
+	var lines []byte
+	for _, entry := range []runJournalEntry{
+		{Time: earliest.Format(time.RFC3339), Root: root, WallMS: 1, RuleMS: map[string]int64{"long-function": 7}},
+		{Time: middle.Format(time.RFC3339), Root: root, WallMS: 1, Findings: map[string]int{"deep-nesting": 1}},
+	} {
+		line, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(append(lines, line...), '\n')
 	}
-	if err := os.WriteFile(path+".1", append(line, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(path+".1", lines, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := foldRotatedJournal(path); err != nil {
@@ -363,8 +371,14 @@ func TestFirstFoldDatesRulesFromEarliestFoldedDay(t *testing.T) {
 	if err := readDaily(filepath.Join(dir, "runs-daily.jsonl"), make(map[string]*dailyRecord), &header); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := header.FirstSeen["long-function"], earliest.Format("2006-01-02"); got != want {
-		t.Fatalf("first fold: first_seen = %q, want the earliest folded day %q", got, want)
+	for rule, want := range map[string]string{
+		"long-function": earliest.Format("2006-01-02"),
+		"deep-nesting":  middle.Format("2006-01-02"),
+		"magic-number":  time.Now().Format("2006-01-02"),
+	} {
+		if got := header.FirstSeen[rule]; got != want {
+			t.Errorf("first fold: %s first_seen = %q, want %q", rule, got, want)
+		}
 	}
 }
 

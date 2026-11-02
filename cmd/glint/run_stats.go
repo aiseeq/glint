@@ -258,6 +258,33 @@ func addEntry(data map[string]*dailyRecord, entry runJournalEntry, rootCache map
 	return nil
 }
 
+// ruleFirstDays returns the earliest day each rule shows in the data, by
+// its time or a finding, and today for a rule the data does not show.
+func ruleFirstDays(data map[string]*dailyRecord, today string) func(string) string {
+	first := make(map[string]string)
+	note := func(rule, day string) {
+		if prev, ok := first[rule]; !ok || day < prev {
+			first[rule] = day
+		}
+	}
+	for day, d := range data {
+		for rule := range d.RuleMS {
+			note(rule, day)
+		}
+		for _, root := range d.Roots {
+			for rule := range root.Findings {
+				note(rule, day)
+			}
+		}
+	}
+	return func(rule string) string {
+		if day, ok := first[rule]; ok {
+			return min(day, today)
+		}
+		return today
+	}
+}
+
 func mergeDaily(dst, src *dailyRecord) {
 	dst.Runs += src.Runs
 	dst.TempRuns += src.TempRuns
@@ -407,18 +434,12 @@ func foldRotatedJournal(path string) error {
 	if err := foldRawFile(rotated, data, make(map[string]bool)); err != nil {
 		return fmt.Errorf("fold rotated run journal: %w", err)
 	}
-	// A rule new to the map was born at most this fold ago. The first fold
-	// has no earlier map, so its rules count from the first day it folds:
-	// the journal shows them running since then.
-	firstSeen := time.Now().In(time.Local).Format("2006-01-02")
-	if len(header.FirstSeen) == 0 {
-		for day := range data {
-			firstSeen = min(firstSeen, day)
-		}
-	}
+	// A rule new to the map was born at most this fold ago, or earlier when
+	// the journal shows it running: its time or findings on an earlier day.
+	seen := ruleFirstDays(data, time.Now().In(time.Local).Format("2006-01-02"))
 	for _, rule := range rules.All() {
 		if _, ok := header.FirstSeen[rule.Name()]; !ok {
-			header.FirstSeen[rule.Name()] = firstSeen
+			header.FirstSeen[rule.Name()] = seen(rule.Name())
 		}
 	}
 	header.Folded = fingerprint
