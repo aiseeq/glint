@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,23 +19,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// runJournalRetention is how many local days, today included, the daily
+// journal keeps.
 const runJournalRetention = 400
 
-func runJournalRetentionDays(defaultDays int) int {
-	raw, ok := os.LookupEnv("GLINT_RUN_LOG_DAYS")
-	if !ok {
-		return defaultDays
-	}
-	days, err := strconv.Atoi(raw)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: parse GLINT_RUN_LOG_DAYS: %v; using %d days\n", err, defaultDays)
-		return defaultDays
-	}
-	if days < 1 {
-		fmt.Fprintf(os.Stderr, "warning: GLINT_RUN_LOG_DAYS must be positive; using %d days\n", defaultDays)
-		return defaultDays
-	}
-	return days
+// calendarDaysSince counts the local days from since through today, both
+// included. Days are counted on dates, not hours: a DST change makes a local
+// day 23 or 25 hours long.
+func calendarDaysSince(since, today time.Time) int {
+	sy, sm, sd := since.Date()
+	ty, tm, td := today.Date()
+	from := time.Date(sy, sm, sd, 0, 0, 0, 0, time.UTC)
+	to := time.Date(ty, tm, td, 0, 0, 0, 0, time.UTC)
+	return int(to.Sub(from).Hours()/24) + 1
 }
 
 type dailyRoot struct {
@@ -427,8 +422,7 @@ func foldRotatedJournal(path string) error {
 		}
 	}
 	header.Folded = fingerprint
-	retentionDays := runJournalRetentionDays(runJournalRetention)
-	cutoff := localDay(time.Now()).AddDate(0, 0, -retentionDays)
+	cutoff := localDay(time.Now()).AddDate(0, 0, -(runJournalRetention - 1))
 	for day := range data {
 		parsed, err := time.ParseInLocation("2006-01-02", day, time.Local)
 		if err != nil {
@@ -595,15 +589,23 @@ func printStats(w io.Writer, report statsReport) error {
 			return fmt.Errorf("write stats coverage: %w", err)
 		}
 	}
-	if _, err := fmt.Fprintf(w, "Permanent runs: %d; temporary runs: %d.\nRules without findings:\n", report.Runs, report.TempRuns); err != nil {
+	if _, err := fmt.Fprintf(w, "Permanent runs: %d; temporary runs: %d.\nRules with findings:\n", report.Runs, report.TempRuns); err != nil {
 		return fmt.Errorf("write stats run counts: %w", err)
+	}
+	for _, r := range report.RulesWithFindings {
+		if _, err := fmt.Fprintf(w, "  %s  %d roots, %d days\n", r.Rule, r.Roots, r.Days); err != nil {
+			return fmt.Errorf("write stats rule %s: %w", r.Rule, err)
+		}
+	}
+	if _, err := fmt.Fprintln(w, "Rules without findings:"); err != nil {
+		return fmt.Errorf("write stats header: %w", err)
 	}
 	for _, r := range report.RulesWithoutFindings {
 		since, err := time.ParseInLocation("2006-01-02", r.Since, time.Local)
 		if err != nil {
 			return fmt.Errorf("parse first-seen day for rule %s: %w", r.Rule, err)
 		}
-		n := min(max(int(localDay(time.Now()).Sub(since).Hours()/24)+1, 1), report.Days)
+		n := min(max(calendarDaysSince(since, time.Now()), 1), report.Days)
 		if _, err := fmt.Fprintf(w, "  %s  since %s (%d days)\n", r.Rule, r.Since, n); err != nil {
 			return fmt.Errorf("write stats rule %s: %w", r.Rule, err)
 		}
