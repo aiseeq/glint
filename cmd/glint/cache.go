@@ -29,6 +29,10 @@ import (
 // cacheFormat changes whenever the stored layout does.
 const cacheFormat = "glint-results-7"
 
+// maxProjectCacheVariants keeps room for the five Go input modes in the
+// adversary scenario, plus variants created by edits and concurrent runs.
+const maxProjectCacheVariants = 8
+
 // resultCache keeps the findings of file-local rules (rules.FileLocal) per
 // file of one project root between runs. A file whose content is unchanged
 // gets them back instead of being analyzed again: between two commits most
@@ -39,6 +43,8 @@ const cacheFormat = "glint-results-7"
 // tolerance flag. A different stamp discards the whole cache.
 type resultCache struct {
 	path             string
+	root             string
+	dir              string
 	build            string
 	stamp            string
 	keyDescription   string
@@ -56,6 +62,7 @@ type resultCache struct {
 	// could not identify them, and nothing is stored then.
 	previousProject      *projectEntry
 	projectInputs        string
+	projectPath          string
 	projectScope         string
 	projectRules         []string
 	projectFingerprints  map[string]string
@@ -64,6 +71,8 @@ type resultCache struct {
 	currentProject       *projectEntry
 	projectRulesCached   int
 	projectRulesRerun    int
+	rootMiss             string
+	projectMiss          string
 	rootFingerprint      string
 	rootRuleFindings     map[string]map[string][]core.Violation
 	rootRuleFingerprints map[string]string
@@ -200,6 +209,8 @@ func buildTag(build string) string {
 func openResultCache(dir, root, seed, build, stamp string) (*resultCache, error) {
 	cache := &resultCache{
 		path:             resultCachePath(dir, root, build),
+		root:             root,
+		dir:              dir,
 		build:            build,
 		stamp:            stamp,
 		ruleFingerprints: make(map[string]string),
@@ -207,6 +218,19 @@ func openResultCache(dir, root, seed, build, stamp string) (*resultCache, error)
 		current:          make(map[string]cacheEntry),
 	}
 	found, err := cache.read(cache.path)
+	if !found && err == nil {
+		cache.rootMiss = "file"
+		matches, _ := filepath.Glob(filepath.Join(dir, cacheRootPrefix(root)+"-*.gob"))
+		for _, match := range matches {
+			name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(match), cacheRootPrefix(root)+"-"), ".gob")
+			if name != filepath.Base(match) && name != "" && !strings.Contains(name, "-p") {
+				cache.rootMiss = "build"
+				break
+			}
+		}
+	} else if found && err == nil && !cache.loaded {
+		cache.rootMiss = "stamp"
+	}
 	if !found && err == nil && seed != "" {
 		_, err = cache.read(resultCachePath(dir, seed, build))
 		// The project findings of the main worktree went by its files
@@ -222,6 +246,49 @@ func openResultCache(dir, root, seed, build, stamp string) (*resultCache, error)
 func resultCachePath(dir, root, build string) string {
 	name := sha256.Sum256([]byte(root))
 	return filepath.Join(dir, hex.EncodeToString(name[:])+"-"+build+".gob")
+}
+
+func cacheRootPrefix(root string) string {
+	name := sha256.Sum256([]byte(root))
+	return hex.EncodeToString(name[:])
+}
+
+func projectCachePath(dir, root, build, inputs string) string {
+	rootHash := sha256.Sum256([]byte(root))
+	inputHash := sha256.Sum256([]byte(inputs))
+	return filepath.Join(dir, hex.EncodeToString(rootHash[:])+"-"+build+"-p"+hex.EncodeToString(inputHash[:])+".gob")
+}
+
+func (c *resultCache) readProject(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var entry projectEntry
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&entry); err != nil {
+		return false, err
+	}
+	c.previousProject = &entry
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	return true, nil
+}
+
+func (c *resultCache) loadProject(path string) {
+	c.projectPath = path
+	c.previousProject = nil
+	if _, err := c.readProject(path); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: project result cache %s not used: %v\n", path, err)
+		c.projectMiss = "corrupt"
+		c.previousProject = nil
+	} else if c.previousProject == nil {
+		c.projectMiss = "inputs"
+	}
 }
 
 // read takes the entries of the cache file at path when its stamp matches;
@@ -331,7 +398,12 @@ func (c *resultCache) keyProject(inputs string, projectRules []string, enabled [
 		}
 		c.projectFingerprints[rule.Name()] = fingerprint
 	}
-	if c.previousProject != nil && c.previousProject.Inputs == inputs && (c.previousProject.Scope == scope || c.previousProject.Scope == "") {
+	if c.dir != "" {
+		c.loadProject(projectCachePath(c.dir, c.root, c.build, inputs))
+	}
+	if c.previousProject != nil && c.previousProject.Inputs == inputs && c.previousProject.Scope != scope && c.previousProject.Scope != "" {
+		c.projectMiss = "scope"
+	} else if c.previousProject != nil && c.previousProject.Inputs == inputs {
 		c.projectHit = c.previousProject
 		c.currentProject = c.previousProject
 		c.projectRulesRerun = 0
@@ -344,6 +416,13 @@ func (c *resultCache) keyProject(inputs string, projectRules []string, enabled [
 				c.projectRulesRerun++
 			}
 		}
+		if c.projectRulesRerun > 0 {
+			c.projectMiss = "rules"
+		} else {
+			c.projectMiss = ""
+		}
+	} else if c.previousProject != nil {
+		c.projectMiss = "rules"
 	}
 	return c.projectHit
 }
@@ -393,6 +472,10 @@ func (c *resultCache) keyRootFiles(files []*core.FileContext, hashes map[string]
 		_, _ = hasher.Write(entry.hash[:])
 	}
 	c.rootFingerprint = hex.EncodeToString(hasher.Sum(nil))
+	if c.projectPath == "" && c.dir != "" {
+		c.projectInputs = "root:" + c.rootFingerprint
+		c.loadProject(projectCachePath(c.dir, c.root, c.build, c.projectInputs))
+	}
 	c.rootRuleFindings = make(map[string]map[string][]core.Violation)
 	c.rootRuleFingerprints = make(map[string]string)
 	c.rootRuleHits = make(map[string]bool)
@@ -580,39 +663,139 @@ func (c *resultCache) storeFile(relPath string, content [sha256.Size]byte, list 
 // concurrent run reads either the old cache or the new one.
 func (c *resultCache) save() error {
 	project := c.currentProject
-	if project == nil {
-		project = c.previousProject
-	}
-	contents := cacheContents{Stamp: c.stamp, Entries: c.current, Project: project}
-	if c.loaded && cacheContentsEqual(contents, cacheContents{Stamp: c.stamp, Entries: c.previous, Project: c.previousProject}) {
+	contents := cacheContents{Stamp: c.stamp, Entries: c.current}
+	rootChanged := !c.loaded || !cacheContentsEqual(contents, cacheContents{Stamp: c.stamp, Entries: c.previous})
+	if !rootChanged {
 		now := time.Now()
-		if err := os.Chtimes(c.path, now, now); err == nil {
-			return c.prune()
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("mark result cache used: %w", err)
+		if err := os.Chtimes(c.path, now, now); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				rootChanged = true
+			} else {
+				return fmt.Errorf("mark result cache used: %w", err)
+			}
 		}
 	}
-	contents = compactCacheFingerprints(contents)
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(contents); err != nil {
-		return fmt.Errorf("encode result cache: %w", err)
+	if rootChanged {
+		contents = compactCacheFingerprints(contents)
+		var buf bytes.Buffer
+		if err := gob.NewEncoder(&buf).Encode(contents); err != nil {
+			return fmt.Errorf("encode result cache: %w", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
+			return fmt.Errorf("create result cache directory: %w", err)
+		}
+		tmp, err := os.CreateTemp(filepath.Dir(c.path), tempCachePrefix+"*")
+		if err != nil {
+			return fmt.Errorf("create result cache: %w", err)
+		}
+		_, err = tmp.Write(buf.Bytes())
+		err = errors.Join(err, tmp.Close())
+		if err == nil {
+			err = os.Rename(tmp.Name(), c.path)
+		}
+		if err != nil {
+			return errors.Join(fmt.Errorf("write result cache: %w", err), os.Remove(tmp.Name()))
+		}
 	}
-	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
+	projectChanged := project != nil && c.projectPath != "" && (c.previousProject == nil || !projectEntriesEqual(*project, *c.previousProject))
+	if !projectChanged && project != nil && c.projectPath != "" {
+		if _, err := os.Stat(c.projectPath); errors.Is(err, fs.ErrNotExist) {
+			projectChanged = true
+		} else if err != nil {
+			return fmt.Errorf("stat project result cache: %w", err)
+		}
+	}
+	if projectChanged {
+		if err := writeProjectCache(c.projectPath, *project); err != nil {
+			return err
+		}
+	}
+	return c.prune()
+}
+
+func writeProjectCache(path string, entry projectEntry) error {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(entry); err != nil {
+		return fmt.Errorf("encode project result cache: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create result cache directory: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(c.path), tempCachePrefix+"*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), tempCachePrefix+"*")
 	if err != nil {
-		return fmt.Errorf("create result cache: %w", err)
+		return fmt.Errorf("create project result cache: %w", err)
 	}
 	_, err = tmp.Write(buf.Bytes())
 	err = errors.Join(err, tmp.Close())
 	if err == nil {
-		err = os.Rename(tmp.Name(), c.path)
+		err = os.Rename(tmp.Name(), path)
 	}
 	if err != nil {
-		return errors.Join(fmt.Errorf("write result cache: %w", err), os.Remove(tmp.Name()))
+		return errors.Join(fmt.Errorf("write project result cache: %w", err), os.Remove(tmp.Name()))
 	}
-	return c.prune()
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		return err
+	}
+	return pruneProjectCacheVariants(path)
+}
+
+func projectEntriesEqual(a, b projectEntry) bool {
+	return cacheValuesEqual(reflect.ValueOf(a), reflect.ValueOf(b))
+}
+
+func pruneProjectCacheVariants(path string) error {
+	base := filepath.Base(path)
+	marker := strings.LastIndex(base, "-p")
+	if marker < 0 || filepath.Ext(base) != ".gob" {
+		return nil
+	}
+	prefix := base[:marker+2]
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("list project result caches: %w", err)
+	}
+	type projectCacheFile struct {
+		path    string
+		name    string
+		modTime time.Time
+	}
+	var files []projectCacheFile
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".gob" || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		info, err := entry.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("stat project result cache %s: %w", entry.Name(), err)
+		}
+		files = append(files, projectCacheFile{path: filepath.Join(dir, entry.Name()), name: entry.Name(), modTime: info.ModTime()})
+	}
+	slices.SortFunc(files, func(a, b projectCacheFile) int {
+		if cmp := b.modTime.Compare(a.modTime); cmp != 0 {
+			return cmp
+		}
+		if a.path == path {
+			return -1
+		}
+		if b.path == path {
+			return 1
+		}
+		return strings.Compare(b.name, a.name)
+	})
+	if len(files) <= maxProjectCacheVariants {
+		return nil
+	}
+	for _, file := range files[maxProjectCacheVariants:] {
+		if err := os.Remove(file.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove old project result cache %s: %w", file.name, err)
+		}
+	}
+	return nil
 }
 
 // cacheContentsEqual compares the stored data while treating nil and empty
@@ -775,10 +958,11 @@ type cacheLimits struct {
 	// another run may be writing or reading them right now.
 	grace time.Duration
 	// maxBytes caps the caches of this build; the least recently used go.
-	maxBytes int64
+	maxBytes   int64
+	foreignAge time.Duration
 }
 
-var defaultCacheLimits = cacheLimits{maxAge: 7 * 24 * time.Hour, grace: 10 * time.Minute, maxBytes: 1 << 30}
+var defaultCacheLimits = cacheLimits{maxAge: 7 * 24 * time.Hour, grace: 10 * time.Minute, maxBytes: 1 << 30, foreignAge: 24 * time.Hour}
 
 // tempCachePrefix starts the temporary file a save writes before renaming it.
 const tempCachePrefix = ".results-"
@@ -803,7 +987,7 @@ func pruneCacheEntries(dir string, entries []fs.DirEntry, now time.Time, build s
 		path string
 		info fs.FileInfo
 	}
-	var own []cacheFile
+	var caches []cacheFile
 	var errs []error
 	remove := func(path string) {
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -829,25 +1013,48 @@ func pruneCacheEntries(dir string, entries []fs.DirEntry, now time.Time, build s
 		switch {
 		case age > limits.maxAge:
 			remove(path)
-		case !cache || !strings.HasSuffix(name, "-"+build+".gob"):
+		case !cache:
 			if age > limits.grace {
 				remove(path)
 			}
 		default:
-			own = append(own, cacheFile{path: path, info: info})
+			if !cacheBuildMatches(name, build) && age > limits.foreignAge {
+				remove(path)
+				continue
+			}
+			caches = append(caches, cacheFile{path: path, info: info})
 		}
 	}
-	// Newest first: what is left once the limit is reached is the least
-	// recently used.
-	slices.SortFunc(own, func(a, b cacheFile) int { return b.info.ModTime().Compare(a.info.ModTime()) })
 	var total int64
-	for _, file := range own {
+	for _, file := range caches {
 		total += file.info.Size()
-		if total > limits.maxBytes && now.Sub(file.info.ModTime()) > limits.grace {
-			remove(file.path)
+	}
+	slices.SortFunc(caches, func(a, b cacheFile) int {
+		aOwn := cacheBuildMatches(filepath.Base(a.path), build)
+		bOwn := cacheBuildMatches(filepath.Base(b.path), build)
+		if aOwn != bOwn {
+			if aOwn {
+				return 1
+			}
+			return -1
 		}
+		return a.info.ModTime().Compare(b.info.ModTime())
+	})
+	for _, file := range caches {
+		if total <= limits.maxBytes {
+			break
+		}
+		if now.Sub(file.info.ModTime()) <= limits.grace {
+			continue
+		}
+		remove(file.path)
+		total -= file.info.Size()
 	}
 	return errors.Join(errs...)
+}
+
+func cacheBuildMatches(name, build string) bool {
+	return strings.HasSuffix(name, "-"+build+".gob") || strings.Contains(name, "-"+build+"-p")
 }
 
 // resultCacheDir is where the caches of all roots live.

@@ -3,12 +3,17 @@ package main
 import (
 	"bytes"
 	"encoding/gob"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,6 +67,7 @@ func runIndexedCached(t *testing.T, dir string, rule rules.Rule, root, run []*co
 	t.Helper()
 	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
+	cache.keyProject("test-inputs", nil, []rules.Rule{rule}, "")
 	got, panics, err := analyzeProjectContained(run, root, []rules.Rule{rule}, core.DefaultConfig(), nil, cache)
 	require.NoError(t, err)
 	require.Empty(t, panics)
@@ -535,7 +541,7 @@ func TestOpenResultCacheReportsCorruptFile(t *testing.T) {
 func TestPruneResultCachesBoundsTheDirectory(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
-	limits := cacheLimits{maxAge: 7 * 24 * time.Hour, grace: 10 * time.Minute, maxBytes: 250}
+	limits := cacheLimits{maxAge: 7 * 24 * time.Hour, grace: 10 * time.Minute, maxBytes: 250, foreignAge: 24 * time.Hour}
 	files := []struct {
 		name string
 		age  time.Duration
@@ -600,6 +606,225 @@ func TestResultCacheNamesItsBuildAndMarksUse(t *testing.T) {
 	info, err := os.Stat(cache.path)
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now(), info.ModTime(), time.Minute)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.NoError(t, pruneCacheEntries(dir, entries, time.Now(), "build2", defaultCacheLimits))
+	assert.FileExists(t, cache.path, "a recent cache hit survives pruning")
+}
+
+func TestProjectCacheDoesNotLookLikeAnotherRootCacheBuild(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, writeProjectCache(projectCachePath(dir, "/project", "build", "inputs"), projectEntry{Inputs: "inputs"}))
+	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	assert.Equal(t, "file", cache.rootMiss)
+
+	otherBuild := resultCachePath(dir, "/project", "other")
+	require.NoError(t, os.WriteFile(otherBuild, []byte("cache"), 0o600))
+	cache, err = openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	assert.Equal(t, "build", cache.rootMiss)
+}
+
+func TestProjectCacheKeepsDifferentInputsAcrossSequentialAndConcurrentSaves(t *testing.T) {
+	for _, concurrent := range []bool{false, true} {
+		name := "sequential"
+		if concurrent {
+			name = "concurrent"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			save := func(inputs string) {
+				cache, err := openResultCache(dir, "/project", "", "build", "stamp")
+				require.NoError(t, err)
+				cache.keyProject(inputs, nil, nil, "")
+				cache.currentProject = &projectEntry{Inputs: inputs, Scope: "", Violations: map[string][]core.Violation{"marker": {{Message: inputs}}}}
+				require.NoError(t, cache.save())
+			}
+			if concurrent {
+				var wg sync.WaitGroup
+				for _, inputs := range []string{"inputs-a", "inputs-b"} {
+					wg.Add(1)
+					go func(inputs string) { defer wg.Done(); save(inputs) }(inputs)
+				}
+				wg.Wait()
+			} else {
+				save("inputs-a")
+				save("inputs-b")
+			}
+			for _, inputs := range []string{"inputs-a", "inputs-b"} {
+				cache, err := openResultCache(dir, "/project", "", "build", "stamp")
+				require.NoError(t, err)
+				assert.NotNil(t, cache.keyProject(inputs, nil, nil, ""), inputs)
+				assert.Equal(t, inputs, cache.projectHit.Violations["marker"][0].Message)
+			}
+		})
+	}
+}
+
+func TestPartialProjectRunDoesNotReuseFindingsFromDifferentInputs(t *testing.T) {
+	dir := t.TempDir()
+	full, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	full.keyProject("inputs-off", []string{"project-rule"}, nil, "")
+	full.currentProject = &projectEntry{Inputs: "inputs-off", Scope: "", Violations: map[string][]core.Violation{"project-rule": {{File: "a.go", Message: "old mode"}}}}
+	require.NoError(t, full.save())
+
+	partial, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	assert.Nil(t, partial.keyProject("inputs-work", []string{"other-rule"}, nil, "b.go"))
+	partial.storeProject(nil, nil, nil)
+	assert.NotContains(t, partial.currentProject.Violations, "project-rule")
+}
+
+func TestProjectCacheInputsAndBuildAreIsolated(t *testing.T) {
+	dir := t.TempDir()
+	for _, inputs := range []string{"use-a", "use-b"} {
+		cache, err := openResultCache(dir, "/project", "", "build-old", "stamp")
+		require.NoError(t, err)
+		cache.keyProject(inputs, nil, nil, "")
+		cache.currentProject = &projectEntry{Inputs: inputs}
+		require.NoError(t, cache.save())
+	}
+	assert.NotEqual(t, projectCachePath(dir, "/project", "build-old", "use-a"), projectCachePath(dir, "/project", "build-old", "use-b"))
+	for _, inputs := range []string{"use-a", "use-b"} {
+		cache, err := openResultCache(dir, "/project", "", "build-old", "stamp")
+		require.NoError(t, err)
+		assert.NotNil(t, cache.keyProject(inputs, nil, nil, ""))
+	}
+	newBuild, err := openResultCache(dir, "/project", "", "build-new", "stamp")
+	require.NoError(t, err)
+	assert.Nil(t, newBuild.keyProject("use-a", nil, nil, ""), "a new build cannot use the old build's record")
+}
+
+func TestProjectCacheKeepsOnlyEightNewestInputVariants(t *testing.T) {
+	dir := t.TempDir()
+	paths := make([]string, 10)
+	base := time.Now().Add(-24 * time.Hour)
+	for i := range paths {
+		for previous := range i {
+			if _, err := os.Stat(paths[previous]); errors.Is(err, fs.ErrNotExist) {
+				continue
+			} else {
+				require.NoError(t, err)
+			}
+			stamp := base.Add(time.Duration(previous) * time.Second)
+			require.NoError(t, os.Chtimes(paths[previous], stamp, stamp))
+		}
+		inputs := fmt.Sprintf("inputs-%02d", i)
+		paths[i] = projectCachePath(dir, "/project", "build", inputs)
+		err := writeProjectCache(paths[i], projectEntry{Inputs: inputs, Violations: map[string][]core.Violation{"marker": {{Message: inputs}}}})
+		require.NoError(t, err)
+	}
+	for i, path := range paths {
+		if i < 2 {
+			assert.NoFileExists(t, path, "old input variant %d was evicted", i)
+		} else {
+			assert.FileExists(t, path, "recent input variant %d was retained", i)
+		}
+	}
+	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	assert.NotNil(t, cache.keyProject("inputs-09", nil, nil, ""))
+	assert.Equal(t, "inputs-09", cache.projectHit.Violations["marker"][0].Message)
+}
+
+func TestResultCacheFullHitDoesNotRewriteCacheFiles(t *testing.T) {
+	dir := t.TempDir()
+	first, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	first.keyProject("inputs", nil, nil, "")
+	first.currentProject = &projectEntry{Inputs: "inputs", Violations: map[string][]core.Violation{"marker": {{Message: "cached"}}}}
+	require.NoError(t, first.save())
+	projectPath := projectCachePath(dir, "/project", "build", "inputs")
+
+	second, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	assert.NotNil(t, second.keyProject("inputs", nil, nil, ""))
+	second.current = second.previous
+	rootBefore, err := os.Stat(second.path)
+	require.NoError(t, err)
+	projectBefore, err := os.Stat(projectPath)
+	require.NoError(t, err)
+	rootBytesBefore, err := os.ReadFile(second.path)
+	require.NoError(t, err)
+	projectBytesBefore, err := os.ReadFile(projectPath)
+	require.NoError(t, err)
+
+	require.NoError(t, second.save())
+	rootAfter, err := os.Stat(second.path)
+	require.NoError(t, err)
+	projectAfter, err := os.Stat(projectPath)
+	require.NoError(t, err)
+	rootBytesAfter, err := os.ReadFile(second.path)
+	require.NoError(t, err)
+	projectBytesAfter, err := os.ReadFile(projectPath)
+	require.NoError(t, err)
+	assert.True(t, os.SameFile(rootBefore, rootAfter), "unchanged root cache should only be marked used")
+	assert.True(t, os.SameFile(projectBefore, projectAfter), "unchanged project cache should not be rewritten")
+	assert.Equal(t, rootBytesBefore, rootBytesAfter)
+	assert.Equal(t, projectBytesBefore, projectBytesAfter)
+	assert.Equal(t, projectBefore.ModTime(), projectAfter.ModTime(), "a project cache hit already marked the file used")
+}
+
+func TestCorruptProjectCacheWarnsAndReportsCorruptMiss(t *testing.T) {
+	dir := t.TempDir()
+	path := projectCachePath(dir, "/project", "build", "inputs")
+	require.NoError(t, os.WriteFile(path, []byte("not a project cache"), 0o600))
+	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	oldStderr := os.Stderr
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = writer
+	assert.Nil(t, cache.keyProject("inputs", nil, nil, ""))
+	os.Stderr = oldStderr
+	require.NoError(t, writer.Close())
+	warning, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Contains(t, string(warning), "warning: project result cache "+path+" not used:")
+	assert.Equal(t, "corrupt", cache.projectMiss)
+	assert.Nil(t, cache.previousProject)
+}
+
+func TestProjectCacheScopeMismatchHasScopeMissReason(t *testing.T) {
+	dir := t.TempDir()
+	first, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	first.keyProject("inputs", nil, nil, "file-a.go")
+	first.currentProject = &projectEntry{Inputs: "inputs", Scope: "file-a.go"}
+	require.NoError(t, first.save())
+
+	second, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	assert.Nil(t, second.keyProject("inputs", nil, nil, "file-b.go"))
+	assert.Equal(t, "scope", second.projectMiss)
+}
+
+func TestPruneCacheEvictsOldForeignFilesBeforeRecentCache(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	files := []struct {
+		name string
+		age  time.Duration
+	}{
+		{"old-dev-1.gob", time.Hour}, {"old-dev-2.gob", 2 * time.Hour},
+		{"installed-recent.gob", 5 * time.Minute},
+	}
+	for _, file := range files {
+		path := filepath.Join(dir, file.name)
+		require.NoError(t, os.WriteFile(path, make([]byte, 60), 0o600))
+		stamp := now.Add(-file.age)
+		require.NoError(t, os.Chtimes(path, stamp, stamp))
+	}
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	limits := cacheLimits{maxAge: 7 * 24 * time.Hour, grace: 10 * time.Minute, foreignAge: 24 * time.Hour, maxBytes: 60}
+	require.NoError(t, pruneCacheEntries(dir, entries, now, "installed", limits))
+	assert.NoFileExists(t, filepath.Join(dir, "old-dev-1.gob"))
+	assert.NoFileExists(t, filepath.Join(dir, "old-dev-2.gob"))
+	assert.FileExists(t, filepath.Join(dir, "installed-recent.gob"))
 }
 
 // analyzeCachedRoot runs one root through the check pipeline with the cache,

@@ -22,7 +22,7 @@ func TestAppendRunJournalWritesJSONLine(t *testing.T) {
 	t.Setenv("GLINT_RUN_LOG", path)
 	entry := runJournalEntry{
 		Time: "2026-10-31T04:00:00+01:00", Root: filepath.Dir(path), Version: "v1.2.3",
-		WallMS: 123, Files: 4, CachedFiles: 2, Findings: map[string]int{"rule-a": 3},
+		WallMS: 123, Files: 4, CachedFiles: 2, RootCache: "stamp", ProjectCache: "rules", Findings: map[string]int{"rule-a": 3},
 		RuleMS: map[string]int64{"rule-a": 6}, Exit: 1,
 	}
 	if err := appendRunJournal(entry); err != nil {
@@ -39,7 +39,7 @@ func TestAppendRunJournalWritesJSONLine(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("invalid journal JSON: %v", err)
 	}
-	if got.Time != entry.Time || got.Root != entry.Root || got.Version != entry.Version || got.WallMS != entry.WallMS || got.Files != entry.Files || got.CachedFiles != entry.CachedFiles || got.Exit != entry.Exit || got.Findings["rule-a"] != 3 || got.RuleMS["rule-a"] != 6 {
+	if got.Time != entry.Time || got.Root != entry.Root || got.Version != entry.Version || got.WallMS != entry.WallMS || got.Files != entry.Files || got.CachedFiles != entry.CachedFiles || got.RootCache != entry.RootCache || got.ProjectCache != entry.ProjectCache || got.Exit != entry.Exit || got.Findings["rule-a"] != 3 || got.RuleMS["rule-a"] != 6 {
 		t.Errorf("decoded entry does not preserve fields: %#v", got)
 	}
 	if _, err := time.Parse(time.RFC3339, got.Time); err != nil {

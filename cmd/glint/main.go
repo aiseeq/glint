@@ -429,6 +429,12 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 		panics = append(panics, rootPanics...)
 		if cache != nil {
 			journalCachedFiles += cache.reused
+			if journal.RootCache == "" {
+				journal.RootCache = cache.rootMiss
+			}
+			if journal.ProjectCache == "" {
+				journal.ProjectCache = cache.projectMiss
+			}
 			if err := cache.save(); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: result cache of %s not saved: %v\n", projectRoot, err)
 			}
