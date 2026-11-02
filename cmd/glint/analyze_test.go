@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -62,6 +65,68 @@ func fingerprint(violations core.ViolationList) string {
 		fmt.Fprintf(&b, "%s|%s|%d|%s\n", v.Rule, v.File, v.Line, v.Message)
 	}
 	return b.String()
+}
+
+type sharedIndexKey struct{}
+
+type concurrentProjectFilesRule struct {
+	*rules.BaseRule
+	ready   *atomic.Int32
+	started chan struct{}
+	once    *sync.Once
+	// serial is set when an index waited in vain for the others: they ran
+	// one after another
+	serial *atomic.Bool
+}
+
+func (r *concurrentProjectFilesRule) AnalyzeFile(*core.FileContext) []*core.Violation { return nil }
+func (r *concurrentProjectFilesRule) ResetState()                                     {}
+func (r *concurrentProjectFilesRule) UseProjectFiles(files []*core.FileContext) {
+	if r.ready.Add(1) == 4 {
+		r.once.Do(func() { close(r.started) })
+	}
+	select {
+	case <-r.started:
+	case <-time.After(10 * time.Second):
+		r.serial.Store(true)
+	}
+	for _, file := range files {
+		core.FileShared(file, sharedIndexKey{}, func() int { return len(file.Lines) })
+	}
+}
+
+// Indexing rules in parallel must safely share the same FileContexts and the
+// per-file derived-value cache.
+func TestProjectFileIndexesAreConcurrentAndRaceFree(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
+	var ready atomic.Int32
+	var once sync.Once
+	var serial atomic.Bool
+	started := make(chan struct{})
+	ruleList := make([]rules.Rule, 4)
+	for i := range ruleList {
+		ruleList[i] = &concurrentProjectFilesRule{
+			BaseRule: rules.NewBaseRule(fmt.Sprintf("shared-index-%d", i), "patterns", "test", core.SeverityLow),
+			ready:    &ready,
+			started:  started,
+			once:     &once,
+			serial:   &serial,
+		}
+	}
+	files := sampleContexts(t, 8)
+	indexed, panics, err := indexProjectRules(ruleList, files, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(panics) != 0 {
+		t.Fatalf("unexpected index panics: %v", panics)
+	}
+	if serial.Load() {
+		t.Fatal("project-file indexes ran one after another, not concurrently")
+	}
+	if len(indexed) != len(ruleList) || ready.Load() != int32(len(ruleList)) {
+		t.Fatalf("indexes=%d, concurrent index calls=%d; want %d", len(indexed), ready.Load(), len(ruleList))
+	}
 }
 
 // Analysis runs rules concurrently; the reported findings and their order must

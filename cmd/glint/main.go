@@ -1601,15 +1601,33 @@ func analyzeProjectRules(contexts, rootFiles []*core.FileContext, enabledRules [
 
 func indexProjectRules(fileRules []rules.Rule, rootFiles []*core.FileContext, cache *resultCache, project *core.GoProjectContext, panics rulePanics, findings core.ViolationList) ([]rules.Rule, rulePanics, error) {
 	indexed := fileRules[:0:0]
-	for _, rule := range fileRules {
+	indexes := make([]int, 0, len(fileRules))
+	reusable := make([]bool, len(fileRules))
+	for i, rule := range fileRules {
 		if cache != nil && cache.rootRuleReusable(rule) {
+			reusable[i] = true
 			continue
 		}
-		indexPanic, err := indexProjectFiles(rule, rootFiles, cache)
-		if err != nil {
+		if _, ok := rule.(rules.ProjectFilesRule); ok {
+			indexes = append(indexes, i)
+		}
+	}
+	results := runProjectFileIndexes(indexes, fileRules, rootFiles, cache)
+	nextIndex := 0
+	for i, rule := range fileRules {
+		if reusable[i] {
+			continue
+		}
+		if nextIndex >= len(indexes) || indexes[nextIndex] != i {
+			indexed = append(indexed, rule)
+			continue
+		}
+		result := results[nextIndex]
+		nextIndex++
+		if err := result.err; err != nil {
 			return nil, nil, err
 		}
-		if indexPanic != nil {
+		if indexPanic := result.panic; indexPanic != nil {
 			panics = append(panics, indexPanic)
 			continue
 		}
@@ -1629,6 +1647,37 @@ func indexProjectRules(fileRules []rules.Rule, rootFiles []*core.FileContext, ca
 		cache.storeProject(findings, project.SkippedPackages, state)
 	}
 	return indexed, panics, nil
+}
+
+type projectFileIndexResult struct {
+	panic *rulePanic
+	err   error
+}
+
+// runProjectFileIndexes builds independent project-file indexes on the same
+// bounded worker pool as Go project rules. Results remain keyed by rule index
+// so panics and errors are handled in rule order by indexProjectRules.
+func runProjectFileIndexes(indexes []int, list []rules.Rule, rootFiles []*core.FileContext, cache *resultCache) []projectFileIndexResult {
+	results := make([]projectFileIndexResult, len(indexes))
+	if len(indexes) == 0 {
+		return results
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range max(min(runtime.GOMAXPROCS(0), len(indexes)), 1) {
+		wg.Go(func() {
+			for {
+				n := int(next.Add(1)) - 1
+				if n >= len(indexes) {
+					return
+				}
+				i := indexes[n]
+				results[n].panic, results[n].err = indexProjectFiles(list[i], rootFiles, cache)
+			}
+		})
+	}
+	wg.Wait()
+	return results
 }
 
 func cachedRootProjectFindings(cache *resultCache, enabledRules []rules.Rule, contexts []*core.FileContext) core.ViolationList {
