@@ -220,7 +220,10 @@ func openResultCache(dir, root, seed, build, stamp string) (*resultCache, error)
 	found, err := cache.read(cache.path)
 	if !found && err == nil {
 		cache.rootMiss = "file"
-		matches, _ := filepath.Glob(filepath.Join(dir, cacheRootPrefix(root)+"-*.gob"))
+		matches, err := filepath.Glob(filepath.Join(dir, cacheRootPrefix(root)+"-*.gob"))
+		if err != nil {
+			return nil, fmt.Errorf("list result caches of the root: %w", err)
+		}
 		for _, match := range matches {
 			name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(match), cacheRootPrefix(root)+"-"), ".gob")
 			if name != filepath.Base(match) && name != "" && !strings.Contains(name, "-p") {
@@ -265,16 +268,16 @@ func (c *resultCache) readProject(path string) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("read project result cache: %w", err)
 	}
 	var entry projectEntry
 	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&entry); err != nil {
-		return false, err
+		return false, fmt.Errorf("decode project result cache: %w", err)
 	}
 	c.previousProject = &entry
 	now := time.Now()
 	if err := os.Chtimes(path, now, now); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return false, err
+		return false, fmt.Errorf("mark project result cache used: %w", err)
 	}
 	return true, nil
 }
@@ -667,12 +670,11 @@ func (c *resultCache) save() error {
 	rootChanged := !c.loaded || !cacheContentsEqual(contents, cacheContents{Stamp: c.stamp, Entries: c.previous})
 	if !rootChanged {
 		now := time.Now()
-		if err := os.Chtimes(c.path, now, now); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				rootChanged = true
-			} else {
-				return fmt.Errorf("mark result cache used: %w", err)
-			}
+		err := os.Chtimes(c.path, now, now)
+		// A file another run pruned meanwhile is written anew.
+		rootChanged = errors.Is(err, fs.ErrNotExist)
+		if err != nil && !rootChanged {
+			return fmt.Errorf("mark result cache used: %w", err)
 		}
 	}
 	if rootChanged {
@@ -735,7 +737,7 @@ func writeProjectCache(path string, entry projectEntry) error {
 	}
 	now := time.Now()
 	if err := os.Chtimes(path, now, now); err != nil {
-		return err
+		return fmt.Errorf("mark project result cache used: %w", err)
 	}
 	return pruneProjectCacheVariants(path)
 }
@@ -791,6 +793,10 @@ func pruneProjectCacheVariants(path string) error {
 		return nil
 	}
 	for _, file := range files[maxProjectCacheVariants:] {
+		// A variant another run wrote or read moments ago may be in use.
+		if time.Since(file.modTime) <= defaultCacheLimits.grace {
+			continue
+		}
 		if err := os.Remove(file.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("remove old project result cache %s: %w", file.name, err)
 		}
