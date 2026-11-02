@@ -85,7 +85,7 @@ func (r *QueryInLoopRule) RequiresSSA() bool { return false }
 func (r *QueryInLoopRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	reach := storageReach{}
 	helpers := queryHelpers(ctx, reach)
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyzeFile(file, info, reach, helpers)
 	})
 }

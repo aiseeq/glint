@@ -49,7 +49,7 @@ func (r *SpreadsheetGetRowsTruncatesOnCellErrorRule) AnalyzeGoProject(project *c
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
-	return rules.AnalyzeGoFiles(project, r.Name(), func(ctx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(project, r.Name(), func(ctx *core.FileContext, info *types.Info) []*core.Violation {
 		if ctx.IsTestFile() || info == nil {
 			return nil
 		}

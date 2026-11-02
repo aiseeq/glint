@@ -41,7 +41,7 @@ func (r *SQLRowsCloseRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports rows no path closes or hands on.
 func (r *SQLRowsCloseRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), r.analyzeFile)
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), r.analyzeFile)
 }
 
 // analyzeFile checks every function of the file, function literals included.

@@ -228,7 +228,7 @@ func packageImportableFrom(importerPath, importedPath string) bool {
 }
 
 func (r *DuplicateFuncAcrossPackagesRule) findings(ctx *core.GoProjectContext, twins map[*types.Func]duplicateFuncTwin) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range file.GoAST.Decls {
 			fd, ok := decl.(*ast.FuncDecl)

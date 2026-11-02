@@ -122,7 +122,7 @@ func (r *UnusedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.
 		return nil, fmt.Errorf("unused field: %w", err)
 	}
 
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, field := range collectCheckedFields(fileCtx, info, r.application) {
 			pos := field.obj.Pos()

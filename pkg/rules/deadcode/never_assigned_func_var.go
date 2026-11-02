@@ -91,7 +91,7 @@ func (r *NeverAssignedFuncVarRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 	for _, file := range files {
 		index.markWrites(file)
 	}
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
 		if file.IsTestFile() {
 			return nil
 		}

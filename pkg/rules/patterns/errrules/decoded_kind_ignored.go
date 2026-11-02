@@ -67,7 +67,7 @@ func (r *DecodedKindFieldIgnoredRule) AnalyzeGoProject(ctx *core.GoProjectContex
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return patternkit.AnalyzeGoFunctions(fileCtx, func(fn *ast.FuncDecl) []*core.Violation {
 			return r.checkFunction(fileCtx, info, fn, index)
 		})

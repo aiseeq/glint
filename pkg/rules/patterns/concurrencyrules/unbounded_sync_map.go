@@ -73,7 +73,7 @@ func (r *UnboundedSyncMapRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*
 		growOnly[pkgCtx.Package.TypesInfo] = growOnlySyncMaps(pkgCtx)
 	}
 
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, usage := range growOnly[info] {
 			pos := usage.variable.Pos()

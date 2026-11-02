@@ -51,7 +51,7 @@ func (r *IgnoredErrorRule) AnalyzeFile(_ *core.FileContext) []*core.Violation { 
 // value. Test files are skipped; every other file of a typed package is
 // production code whatever its name looks like.
 func (r *IgnoredErrorRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyzeFile(fileCtx, fileCtx.GoAST, info)
 	})
 }

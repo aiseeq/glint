@@ -61,7 +61,7 @@ func (r *FinancialJSONFloatRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 			modules[file] = pkg.Package.Module.Path
 		}
 	}
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(fileCtx, info, modules[fileCtx])
 	})
 }

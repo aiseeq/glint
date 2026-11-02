@@ -90,7 +90,7 @@ func (r *SQLModelFieldSkippedRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 			insertedByInfo[pkg.Package.TypesInfo] = writtenColumns(pkg, schema, "insert")
 		}
 	}
-	violations, err := rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	violations, err := rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		check := &modelFieldCheck{rule: r, ctx: fileCtx, info: info, schema: schema,
 			funcs: funcsByInfo[info], updated: updatedByInfo[info], inserted: insertedByInfo[info]}
 		for _, decl := range fileCtx.GoAST.Decls {

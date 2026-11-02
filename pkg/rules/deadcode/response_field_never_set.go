@@ -103,7 +103,7 @@ func (r *ResponseFieldNeverSetRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	}
 	sources := collectFillSources(ctx)
 
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		ast.Inspect(fileCtx.GoAST, func(n ast.Node) bool {
 			spec, ok := n.(*ast.TypeSpec)

@@ -105,7 +105,7 @@ func (r *OptionalInterfaceUnsatisfiedRule) AnalyzeGoProject(ctx *core.GoProjectC
 			}
 		}
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
 		lines := never[filepath.Clean(file.Path)]
 		var violations []*core.Violation
 		for _, line := range slices.Sorted(maps.Keys(lines)) {

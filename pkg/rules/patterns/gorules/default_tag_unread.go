@@ -108,7 +108,7 @@ func (r *DefaultTagUnreadRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*
 			reads[module] = true
 		}
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
 		module := moduleOf[file]
 		if reads[module] {
 			return nil

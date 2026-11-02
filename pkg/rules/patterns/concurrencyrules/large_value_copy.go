@@ -66,7 +66,7 @@ func (r *LargeValueCopiedPerElementRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every production file of the typed project.
 func (r *LargeValueCopiedPerElementRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	sizes := projectSizes(ctx)
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		check := largeCopyCheck{info: info, sizes: sizes, maxBytes: r.maxBytes}
 		var violations []*core.Violation
 		ast.Inspect(file.GoAST, func(n ast.Node) bool {

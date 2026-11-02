@@ -64,7 +64,7 @@ func (r *UnboundedRequestBodyReadRule) AnalyzeGoProject(ctx *core.GoProjectConte
 	if global {
 		return nil, nil
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		check := &bodyReadCheck{rule: r, file: file, info: info, rawOnly: !perHandler}
 		for _, decl := range file.GoAST.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {

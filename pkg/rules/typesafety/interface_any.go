@@ -47,7 +47,7 @@ func (r *InterfaceAnyRule) RequiresSSA() bool { return false }
 // of the module it belongs to.
 func (r *InterfaceAnyRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	versions := helpers.NewGoVersions(ctx)
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(fileCtx, info, versions)
 	})
 }

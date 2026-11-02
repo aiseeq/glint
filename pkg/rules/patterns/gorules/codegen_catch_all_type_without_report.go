@@ -161,7 +161,7 @@ func (r *CodegenCatchAllTypeWithoutReportRule) AnalyzeGoProject(ctx *core.GoProj
 			checkedByFile[file] = checked
 		}
 	}
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
 		if !isTypeGeneratorFile(file.GoAST) {
 			return nil
 		}

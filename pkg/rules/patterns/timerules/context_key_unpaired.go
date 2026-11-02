@@ -90,7 +90,7 @@ func (u *contextKeyUse) id(site contextKeySite) string {
 func (r *ContextKeyUnpairedRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	use := gatherContextKeys(ctx)
 	partial := partialWriters(use)
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, site := range use.sites {
 			if site.file != file || file.IsSuppressed(site.line, r.Name()) {

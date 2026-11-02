@@ -122,7 +122,7 @@ func (r *UnboundedMapRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core
 		return nil, nil
 	}
 
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, pos := range slices.Sorted(maps.Keys(tracker.usages)) {
 			if pos < fileCtx.GoAST.FileStart || pos >= fileCtx.GoAST.FileEnd {

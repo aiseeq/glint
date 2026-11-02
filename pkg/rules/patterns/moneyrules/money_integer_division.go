@@ -57,7 +57,7 @@ func (r *MoneyIntegerDivisionTruncatesRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file, with type information where its
 // package has it.
 func (r *MoneyIntegerDivisionTruncatesRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze reports the truncating divisions whose quotient becomes a

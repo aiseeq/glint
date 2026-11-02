@@ -51,7 +51,7 @@ func (r *ProviderCommandBeforeIntentPersistRule) RequiresSSA() bool { return fal
 // AnalyzeGoProject checks every file; with type information a context
 // argument is recognised by its type.
 func (r *ProviderCommandBeforeIntentPersistRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze checks command and persistence ordering within each function. The

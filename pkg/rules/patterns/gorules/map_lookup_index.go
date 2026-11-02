@@ -48,7 +48,7 @@ func (r *IndexIntoMapLookupRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports the unchecked indexes into map lookups.
 func (r *IndexIntoMapLookupRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		if file.IsTestFile() {
 			return nil
 		}

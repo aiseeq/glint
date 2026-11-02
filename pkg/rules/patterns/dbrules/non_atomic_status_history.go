@@ -109,7 +109,7 @@ func (r *NonAtomicStatusHistoryRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; with type information identities are
 // the type checker's objects and a context argument is known by its type.
 func (r *NonAtomicStatusHistoryRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze checks each function. info is nil for a file without type

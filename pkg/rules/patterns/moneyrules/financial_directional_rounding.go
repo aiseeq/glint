@@ -67,7 +67,7 @@ func (r *FinancialDirectionalRoundingRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; with type information the receiver's
 // type decides whether the call rounds a decimal.
 func (r *FinancialDirectionalRoundingRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze reports directional rounding of decimal.Decimal values named as

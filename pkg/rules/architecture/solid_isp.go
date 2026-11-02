@@ -58,7 +58,7 @@ func (r *SolidISPRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every Go file; with types an embedded interface
 // counts with its whole method set.
 func (r *SolidISPRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // interfaceMethodCount returns the size of the method set an implementation

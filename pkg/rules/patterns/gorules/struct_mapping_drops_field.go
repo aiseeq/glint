@@ -73,7 +73,7 @@ var recordLifecycle = map[string]bool{"ID": true, "CreatedAt": true, "UpdatedAt"
 
 // AnalyzeGoProject reports the mapping literals that drop fields.
 func (r *StructMappingDropsFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		outer := outerKeys(file.GoAST)
 		for _, body := range patternkit.FunctionBodies(file.GoAST) {

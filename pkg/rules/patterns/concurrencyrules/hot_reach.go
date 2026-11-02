@@ -199,7 +199,7 @@ func (r *hotFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Viol
 			return nil, fmt.Errorf("%s: %w", r.Name(), err)
 		}
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		return patternkit.AnalyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {
 			h, isHot := hot[fn]
 			if !isHot {

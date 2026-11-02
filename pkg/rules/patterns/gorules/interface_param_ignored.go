@@ -52,7 +52,7 @@ func (r *InterfaceParamIgnoredRule) RequiresSSA() bool { return false }
 // implement an interface of the project.
 func (r *InterfaceParamIgnoredRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	interfaces := patternkit.ProjectInterfaces(ctx)
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range file.GoAST.Decls {
 			fn, ok := decl.(*ast.FuncDecl)

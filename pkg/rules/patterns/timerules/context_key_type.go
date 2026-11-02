@@ -51,7 +51,7 @@ func (r *ContextKeyBuiltinTypeRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports the context keys of built-in types.
 func (r *ContextKeyBuiltinTypeRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		ast.Inspect(fileCtx.GoAST, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)

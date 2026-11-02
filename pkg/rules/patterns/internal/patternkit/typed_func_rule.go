@@ -75,7 +75,7 @@ func (r *TypedFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Vi
 	if r.ForProject != nil {
 		check = r.ForProject(decls)
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		scope := FuncScope{Info: info, Decls: decls, Callers: callers}
 		return AnalyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {
 			var violations []*core.Violation

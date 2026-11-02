@@ -57,6 +57,9 @@ func (r *ExternalAPIURLPlainHTTPRule) AnalyzeFile(ctx *core.FileContext) []*core
 		}
 	}
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		if n == nil {
+			return true
+		}
 		switch node := n.(type) {
 		case *ast.ValueSpec:
 			for i, name := range node.Names {

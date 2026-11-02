@@ -43,7 +43,7 @@ func (r *TimeEqualRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; operands declared anywhere in the
 // project are judged by their declared type.
 func (r *TimeEqualRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze checks for time.Time == comparisons. info is nil for a file

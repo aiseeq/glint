@@ -57,7 +57,7 @@ func (r *TemplateExecutedIntoResponseRule) AnalyzeGoProject(ctx *core.GoProjectC
 	if ctx == nil {
 		return nil, errors.New("template executed into response: nil Go project context")
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		ast.Inspect(file.GoAST, func(n ast.Node) bool {
 			block, ok := n.(*ast.BlockStmt)

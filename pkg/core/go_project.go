@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -61,13 +62,66 @@ type GoProjectContext struct {
 	// TypeScript generated from Go types (GeneratedTSImports).
 	GeneratedTSImports map[string]bool
 
-	filesByPath map[string]*FileContext
+	filesByPath     map[string]*FileContext
+	reportFiles     map[*FileContext]struct{}
+	reportFileList  []*FileContext
+	reportTypesInfo map[*FileContext]*types.Info
 
 	// shared holds values built once for this project; loadShared holds
 	// values built once for the load behind it, which other roots of the same
 	// module see too.
 	shared     sharedCache
 	loadShared *sharedCache
+}
+
+// SetReportFiles limits findings from rules that analyze files independently
+// to the files selected for this run. Project indexes must still use all files.
+func (ctx *GoProjectContext) SetReportFiles(files []*FileContext) {
+	ctx.reportFiles = make(map[*FileContext]struct{}, len(files))
+	ctx.reportFileList = slices.Clone(files)
+	ctx.reportTypesInfo = make(map[*FileContext]*types.Info, len(files))
+	for _, file := range files {
+		ctx.reportFiles[file] = struct{}{}
+	}
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil {
+			continue
+		}
+		for _, file := range pkg.Files {
+			if _, selected := ctx.reportFiles[file]; selected {
+				if _, found := ctx.reportTypesInfo[file]; !found {
+					ctx.reportTypesInfo[file] = pkg.Package.TypesInfo
+				}
+			}
+		}
+	}
+}
+
+// ReportFiles returns the files selected for this run. A nil result means
+// no report scope was set and callers should use the full project.
+func (ctx *GoProjectContext) ReportFiles() []*FileContext {
+	return ctx.reportFileList
+}
+
+// HasReportScope reports whether this run explicitly selected report files.
+func (ctx *GoProjectContext) HasReportScope() bool {
+	return ctx != nil && ctx.reportFiles != nil
+}
+
+// ReportTypesInfo returns the typed package information for a selected file.
+func (ctx *GoProjectContext) ReportTypesInfo(file *FileContext) (*types.Info, bool) {
+	info, ok := ctx.reportTypesInfo[file]
+	return info, ok
+}
+
+// IsReportFile reports whether a file belongs to the current run's report
+// scope. An unset scope keeps direct rule runs over the whole project intact.
+func (ctx *GoProjectContext) IsReportFile(file *FileContext) bool {
+	if ctx.reportFiles == nil {
+		return true
+	}
+	_, ok := ctx.reportFiles[file]
+	return ok
 }
 
 type sharedCache struct {

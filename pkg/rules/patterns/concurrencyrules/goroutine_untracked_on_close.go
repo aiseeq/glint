@@ -75,7 +75,7 @@ func (r *GoroutineUntrackedOnCloseRule) AnalyzeGoProject(ctx *core.GoProjectCont
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
 	mainWaits := mainPackagesWaiting(ctx)
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		waited := make(map[*types.Named]closeWaits)
 		violations := r.untrackedMainWorkers(file, info, mainWaits)
 		for _, decl := range file.GoAST.Decls {

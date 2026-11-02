@@ -58,7 +58,7 @@ func (r *RetryRequestReuseRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file, with type information where the package
 // has it.
 func (r *RetryRequestReuseRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze reports send calls that reuse a request built outside their loop.

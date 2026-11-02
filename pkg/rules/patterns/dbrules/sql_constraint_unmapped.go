@@ -145,6 +145,9 @@ func (r *SQLConstraintViolationUnmappedRule) AnalyzeGoProject(ctx *core.GoProjec
 	checkersByFile := make(map[*core.FileContext]map[string]bool)
 	var violations []*core.Violation
 	for _, fn := range callers.funcs {
+		if !ctx.IsReportFile(fn.File) {
+			continue
+		}
 		literals := patternkit.SqlLiterals(fn.Decl.Body)
 		if len(literals) == 0 {
 			continue
@@ -260,7 +263,7 @@ func truncatedRandomUniqueOriginAt(callers *callerIndex, target *types.Func, dep
 	}
 	seen[target] = true
 	sites := callers.sites[target]
-	for _, method := range patternkit.ImplementedMethods(target, callers.interfaces) {
+	for _, method := range patternkit.ImplementedMethods(callers.project, target) {
 		sites = append(sites, callers.sites[method]...)
 	}
 	for _, site := range sites {
@@ -410,9 +413,9 @@ func randomIdentifierVars(fn patternkit.TypedFunc) map[types.Object]bool {
 // callerIndex tells, for a project function, where it is called: directly
 // or through a project interface method it implements.
 type callerIndex struct {
-	funcs      []patternkit.TypedFunc
-	sites      map[*types.Func][]patternkit.FuncCallSite
-	interfaces []*types.TypeName
+	funcs   []patternkit.TypedFunc
+	sites   map[*types.Func][]patternkit.FuncCallSite
+	project *core.GoProjectContext
 }
 
 func newCallerIndex(ctx *core.GoProjectContext) (*callerIndex, error) {
@@ -424,7 +427,7 @@ func newCallerIndex(ctx *core.GoProjectContext) (*callerIndex, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &callerIndex{funcs: patternkit.ProjectFuncDecls(ctx), sites: sites, interfaces: patternkit.ProjectInterfaces(ctx)}, nil
+	return &callerIndex{funcs: patternkit.ProjectFuncDecls(ctx), sites: sites, project: ctx}, nil
 }
 
 // reachesHandlerUnmapped reports a function whose error reaches an HTTP
@@ -436,7 +439,7 @@ func (c *callerIndex) reachesHandlerUnmapped(fn *types.Func, depth int, seen map
 	}
 	seen[fn] = true
 	sites := c.sites[fn]
-	for _, method := range patternkit.ImplementedMethods(fn, c.interfaces) {
+	for _, method := range patternkit.ImplementedMethods(c.project, fn) {
 		sites = append(sites, c.sites[method]...)
 	}
 	for _, site := range sites {

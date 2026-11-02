@@ -49,7 +49,7 @@ func (r *RangeValPointerRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject checks every file whose language version is known.
 func (r *RangeValPointerRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 func (r *RangeValPointerRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {

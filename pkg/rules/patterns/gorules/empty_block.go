@@ -48,7 +48,7 @@ func (r *EmptyBlockRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every Go file; range operands are judged by their type
 // where the file was type-checked.
 func (r *EmptyBlockRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze checks for empty blocks. info is nil for a file without type information.

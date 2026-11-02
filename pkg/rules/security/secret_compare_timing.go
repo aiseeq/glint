@@ -62,7 +62,7 @@ func (r *SecretCompareNotConstantTimeRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports the secret comparisons of the project's files.
 func (r *SecretCompareNotConstantTimeRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		if fileCtx.IsTestFile() {
 			return nil
 		}

@@ -49,7 +49,7 @@ func (r *HTTPBodyCloseRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
 	closers := bodyClosingHelpers(ctx)
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyzeFile(fileCtx, info, closers)
 	})
 }

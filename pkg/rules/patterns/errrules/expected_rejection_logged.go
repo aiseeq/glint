@@ -62,7 +62,7 @@ func (r *ExpectedRejectionLoggedAsErrorRule) AnalyzeGoProject(ctx *core.GoProjec
 	if ctx == nil {
 		return nil, errors.New("expected rejection logged as error: nil Go project context")
 	}
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		addViolation := func(logged *ast.CallExpr) {
 			if logged == nil {

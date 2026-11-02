@@ -378,12 +378,12 @@ func TestProjectCacheFingerprintCoversRuleStateDependencies(t *testing.T) {
 		return cache
 	}
 	first := open("index-v1")
-	first.keyProject("inputs", []string{consumer.Name()}, ruleset)
+	first.keyProject("inputs", []string{consumer.Name()}, ruleset, "")
 	first.storeProject(nil, nil, map[string][]byte{indexer.Name(): []byte("old index")})
 	require.NoError(t, first.save())
 
 	second := open("index-v2")
-	hit := second.keyProject("inputs", []string{consumer.Name()}, ruleset)
+	hit := second.keyProject("inputs", []string{consumer.Name()}, ruleset, "")
 	require.NotNil(t, hit, "unchanged project inputs retain per-rule cache entries")
 	assert.False(t, second.projectRuleReusable(consumer), "a changed index producer invalidates dependent project findings")
 	assert.False(t, second.projectStateReusable(indexer), "a changed producer cannot restore its old RuleState")
@@ -396,13 +396,41 @@ func TestProjectCacheReportsPartialRuleHits(t *testing.T) {
 		ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "code-v1"},
 	}
 	ruleNames := []string{first.Name(), second.Name()}
-	cache.keyProject("inputs", ruleNames, []rules.Rule{first, second})
+	cache.keyProject("inputs", ruleNames, []rules.Rule{first, second}, "")
 	previous := make(map[string]string, len(cache.projectFingerprints))
 	maps.Copy(previous, cache.projectFingerprints)
 	previous[second.Name()] = "stale-code"
 	cache.previousProject = &projectEntry{Inputs: "inputs", Fingerprints: previous}
-	cache.keyProject("inputs", ruleNames, []rules.Rule{first, second})
+	cache.keyProject("inputs", ruleNames, []rules.Rule{first, second}, "")
 	assert.Equal(t, "1 cached, 1 rerun", cache.projectState())
+}
+
+func TestProjectCacheFullScopeServesPartialRun(t *testing.T) {
+	rule := newProjectStubRule()
+	previous := &projectEntry{Inputs: "inputs", Scope: "", Fingerprints: map[string]string{rule.Name(): "code-v1"}}
+	cache := &resultCache{
+		previousProject:  previous,
+		build:            "code-v1",
+		ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "code-v1"},
+	}
+	assert.Same(t, previous, cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a"))
+	previous.Fingerprints = maps.Clone(cache.projectFingerprints)
+	assert.Same(t, previous, cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a"))
+	assert.Zero(t, cache.projectRulesRerun)
+
+	full := core.Violation{Rule: rule.Name(), File: "file-a", Message: "a"}
+	other := core.Violation{Rule: rule.Name(), File: "file-b", Message: "b"}
+	cache.projectHit.Violations = map[string][]core.Violation{rule.Name(): {full, other}}
+	got := inRun(core.ViolationListOf(cache.projectFindings([]rules.Rule{rule})), []*core.FileContext{goContext(t, "file-a", "package a\n")})
+	assert.Equal(t, fingerprint(core.ViolationList{&full}), fingerprint(got))
+}
+
+func TestProjectCachePartialScopesDoNotShareOrUpgrade(t *testing.T) {
+	rule := newProjectStubRule()
+	previous := &projectEntry{Inputs: "inputs", Scope: "file-a"}
+	cache := &resultCache{previousProject: previous}
+	assert.Nil(t, cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, ""), "partial data cannot satisfy a full run")
+	assert.Nil(t, cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-b"), "partial areas cannot satisfy one another")
 }
 
 // Files the run did not analyze drop out of the cache; rules the run did not

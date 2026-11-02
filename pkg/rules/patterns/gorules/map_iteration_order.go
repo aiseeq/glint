@@ -64,7 +64,7 @@ func (r *MapIterationOrderRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject inspects every function of the loaded packages.
 func (r *MapIterationOrderRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	versions := helpers.NewGoVersions(ctx)
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyzeFile(fileCtx, info, versions)
 	})
 }

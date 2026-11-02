@@ -79,7 +79,7 @@ func (r *SecretInQueryURLRule) RequiresSSA() bool { return false }
 // type of their receiver.
 func (r *SecretInQueryURLRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	unwrappers := urlErrorUnwrappers(ctx)
-	return rules.AnalyzeGoFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(file, info, unwrappers)
 	})
 }

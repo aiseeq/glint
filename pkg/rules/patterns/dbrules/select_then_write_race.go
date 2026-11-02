@@ -120,7 +120,7 @@ func (r *SelectThenWriteRaceRule) RequiresSSA() bool { return false }
 // AnalyzeGoProject checks every file; with type information a query held in
 // a constant (a package const, a concatenation of consts) is read by its value.
 func (r *SelectThenWriteRaceRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoFiles(ctx, r.Name(), r.analyze)
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
 }
 
 // analyze checks each function of the file. info is nil for a file without

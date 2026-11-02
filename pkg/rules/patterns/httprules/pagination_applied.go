@@ -91,7 +91,7 @@ func (r *PaginationParamNotAppliedRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports the page parameters that only label the response.
 func (r *PaginationParamNotAppliedRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range file.GoAST.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
@@ -273,7 +273,7 @@ func (r *PaginationInMemoryRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject reports the page slices of lists loaded without the page.
 func (r *PaginationInMemoryRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, decl := range file.GoAST.Decls {
 			fn, ok := decl.(*ast.FuncDecl)

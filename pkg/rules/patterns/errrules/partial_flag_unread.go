@@ -49,7 +49,7 @@ func (r *PartialFlagUnreadRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
 	functions := indexPartialFunctions(ctx)
-	return rules.AnalyzeTypedFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		return patternkit.AnalyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {
 			return r.checkFunction(file, info, fn, functions)
 		})
