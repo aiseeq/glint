@@ -155,7 +155,8 @@ func (r *NeverAssignedFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 			if field.obj.Exported() && field.named != nil && access.decoded[field.named] {
 				continue // a decoder fills exported fields by name
 			}
-			if mentions.mentioned(field.fileCtx, field.fieldName) {
+			if field.obj.Embedded() && mentions.mentionedAsField(field.fileCtx, field.fieldName) ||
+				!field.obj.Embedded() && mentions.mentioned(field.fileCtx, field.fieldName) {
 				continue
 			}
 			violations = append(violations, r.report(field))
@@ -208,11 +209,36 @@ func collectNilableFields(fileCtx *core.FileContext, info *types.Info) []nilable
 		for _, field := range structType.Fields.List {
 			// Тегированные поля заполняет рефлексия (json.Unmarshal, sql.Scan, yaml):
 			// явного присваивания там нет по построению.
-			if field.Tag != nil || len(field.Names) == 0 {
+			if field.Tag != nil {
 				continue
 			}
 			use, ok := nilUseOf(info.TypeOf(field.Type))
 			if !ok {
+				continue
+			}
+			if len(field.Names) == 0 {
+				if named == nil {
+					continue
+				}
+				structFields, ok := named.Underlying().(*types.Struct)
+				if !ok {
+					continue
+				}
+				for obj := range structFields.Fields() {
+					if obj.Name() != embeddedFieldName(field.Type) {
+						continue
+					}
+					fields = append(fields, nilableField{
+						obj:       obj,
+						named:     named,
+						fileCtx:   fileCtx,
+						line:      fileCtx.LineFor(field),
+						typeName:  spec.Name.Name,
+						fieldName: obj.Name(),
+						use:       use,
+					})
+					break
+				}
 				continue
 			}
 			for _, name := range field.Names {
@@ -238,6 +264,25 @@ func collectNilableFields(fileCtx *core.FileContext, info *types.Info) []nilable
 	})
 
 	return fields
+}
+
+func embeddedFieldName(expr ast.Expr) string {
+	switch typ := expr.(type) {
+	case *ast.Ident:
+		return typ.Name
+	case *ast.SelectorExpr:
+		return typ.Sel.Name
+	case *ast.StarExpr:
+		return embeddedFieldName(typ.X)
+	case *ast.IndexExpr:
+		return embeddedFieldName(typ.X)
+	case *ast.IndexListExpr:
+		return embeddedFieldName(typ.X)
+	case *ast.ParenExpr:
+		return embeddedFieldName(typ.X)
+	default:
+		return ""
+	}
 }
 
 // nilUseOf reports whether a missing assignment of a field of type t can turn

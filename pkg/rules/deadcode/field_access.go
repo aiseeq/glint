@@ -374,6 +374,11 @@ func commaOKTypeAssertions(file *ast.File) map[*ast.TypeAssertExpr]bool {
 
 // selector classifies one field selector.
 func (a *fieldAccess) selector(sel *ast.SelectorExpr, info *types.Info, targets, nilTargets map[ast.Expr]bool) {
+	if selection, ok := info.Selections[sel]; ok {
+		for _, embeddedField := range embeddedSelectionFields(sel, selection, info) {
+			a.dereferenced[embeddedField.Pos()] = true
+		}
+	}
 	if pos, ok := selectedField(info, sel); ok {
 		if targets[sel] {
 			a.markWritten(pos, !nilTargets[sel])
@@ -385,6 +390,68 @@ func (a *fieldAccess) selector(sel *ast.SelectorExpr, info *types.Info, targets,
 	if pos, ok := selectedField(info, sel.X); ok {
 		a.dereferenced[pos] = true
 	}
+}
+
+func embeddedSelectionFields(sel *ast.SelectorExpr, selection *types.Selection, info *types.Info) []*types.Var {
+	if selection.Kind() == types.MethodExpr {
+		return nil // selecting a method expression does not bind a receiver
+	}
+
+	index := selection.Index()
+	fieldPathLen := len(index) - 1 // the last index selects the field or method itself
+	if fieldPathLen <= 0 {
+		return nil
+	}
+
+	methodHasPointerReceiver := false
+	if selection.Kind() == types.MethodVal {
+		if method, ok := selection.Obj().(*types.Func); ok {
+			if signature, ok := method.Type().(*types.Signature); ok && signature.Recv() != nil {
+				_, methodHasPointerReceiver = types.Unalias(signature.Recv().Type()).Underlying().(*types.Pointer)
+			}
+		}
+	}
+
+	current := types.Unalias(info.TypeOf(sel.X))
+	structType := selectionStruct(current)
+	var fields []*types.Var
+	for i := range fieldPathLen {
+		if structType == nil || index[i] >= structType.NumFields() {
+			return fields
+		}
+		field := structType.Field(index[i])
+		if !field.Embedded() {
+			return fields
+		}
+		// A nil embedded pointer is passed directly to a pointer-receiver
+		// method at the end of the path. Earlier pointer fields still need to
+		// be dereferenced to reach that method's receiver.
+		lastPointerReceiver := i == fieldPathLen-1 && methodHasPointerReceiver &&
+			isPointerType(field.Type())
+		if !lastPointerReceiver {
+			fields = append(fields, field)
+		}
+		structType = selectionStruct(field.Type())
+	}
+	return fields
+}
+
+func selectionStruct(t types.Type) *types.Struct {
+	t = types.Unalias(t)
+	if pointer, ok := t.(*types.Pointer); ok {
+		t = types.Unalias(pointer.Elem())
+	}
+	named, ok := t.(*types.Named)
+	if !ok {
+		return nil
+	}
+	structType, _ := named.Underlying().(*types.Struct)
+	return structType
+}
+
+func isPointerType(t types.Type) bool {
+	_, ok := types.Unalias(t).(*types.Pointer)
+	return ok
 }
 
 // literal records the fields a composite literal fills. A literal without

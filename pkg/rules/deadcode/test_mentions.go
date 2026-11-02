@@ -2,7 +2,9 @@ package deadcode
 
 import (
 	"go/ast"
+	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/helpers"
@@ -22,7 +24,10 @@ type testMentions struct {
 	// package name. Counts let test-function declarations exclude themselves.
 	names    map[mentionPackage]map[string]int
 	fallback map[mentionPackage]map[string]bool
-	seen     map[string]bool
+	// names written where a field goes: x.Name outside a package selector,
+	// and Name: in a composite literal
+	fieldNames map[mentionPackage]map[string]bool
+	seen       map[string]bool
 }
 
 type mentionPackage struct {
@@ -66,9 +71,10 @@ func newUntypedMentions(ctx *core.GoProjectContext) *testMentions {
 		}
 	}
 	mentions := &testMentions{
-		names:    make(map[mentionPackage]map[string]int),
-		fallback: make(map[mentionPackage]map[string]bool),
-		seen:     make(map[string]bool),
+		names:      make(map[mentionPackage]map[string]int),
+		fallback:   make(map[mentionPackage]map[string]bool),
+		fieldNames: make(map[mentionPackage]map[string]bool),
+		seen:       make(map[string]bool),
 	}
 	packagesByDir := make(map[string]map[string]bool)
 	for _, pkg := range ctx.Packages {
@@ -119,12 +125,60 @@ func (m *testMentions) add(fileCtx *core.FileContext, packageName string) {
 		collectIdentifierWords(string(fileCtx.Content), fallback)
 		return
 	}
+	fields := m.fieldNames[key]
+	if fields == nil {
+		fields = make(map[string]bool)
+		m.fieldNames[key] = fields
+	}
+	imports := importNames(fileCtx.GoAST)
 	ast.Inspect(fileCtx.GoAST, func(node ast.Node) bool {
-		if ident, ok := node.(*ast.Ident); ok {
-			set[ident.Name]++
+		switch node := node.(type) {
+		case *ast.Ident:
+			set[node.Name]++
+		case *ast.SelectorExpr:
+			if x, ok := node.X.(*ast.Ident); !ok || !imports[x.Name] {
+				fields[node.Sel.Name] = true
+			}
+		case *ast.KeyValueExpr:
+			if key, ok := node.Key.(*ast.Ident); ok {
+				fields[key.Name] = true
+			}
 		}
 		return true
 	})
+}
+
+// importNames are the names a file refers to its imported packages by.
+func importNames(file *ast.File) map[string]bool {
+	names := make(map[string]bool, len(file.Imports))
+	for _, spec := range file.Imports {
+		if spec.Name != nil {
+			names[spec.Name.Name] = true
+			continue
+		}
+		names[path.Base(strings.Trim(spec.Path.Value, "`\""))] = true
+	}
+	return names
+}
+
+// mentionedAsField reports whether a scanned file in the declaration's
+// directory writes the name where a field goes. An embedded field is named
+// after its type, and a test that only names the type (a fake, an interface
+// assertion) does not reach the field. A file without an AST counts any
+// mention, as mentioned does.
+func (m *testMentions) mentionedAsField(declCtx *core.FileContext, name string) bool {
+	dir := filepath.Dir(declCtx.Path)
+	for key, set := range m.fieldNames {
+		if key.dir == dir && set[name] {
+			return true
+		}
+	}
+	for key, set := range m.fallback {
+		if key.dir == dir && set[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // mentioned reports whether a scanned file in the declaration's directory
