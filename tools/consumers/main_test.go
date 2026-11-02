@@ -120,3 +120,48 @@ func TestOldBinaryWithoutTheNewRuleCountsAsNoFindings(t *testing.T) {
 		t.Fatalf("code %d, stdout %q, stderr %q: want the new rule's finding as added", code, stdout.String(), stderr.String())
 	}
 }
+
+// The new build keeps its result cache apart: a glint run prunes the caches of
+// other builds, so a run of the new build in the shared directory would wipe
+// the caches the installed glint keeps for every project.
+func TestNewBinaryUsesItsOwnResultCacheDirectory(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "alpha")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	userCache := filepath.Join(root, "cache")
+	t.Setenv("XDG_CACHE_HOME", userCache)
+	t.Setenv("GLINT_CACHE_DIR", "")
+	seen := map[string]string{}
+	for _, name := range []string{"old", "new"} {
+		script := "#!/bin/sh\nprintf '%s' \"$GLINT_CACHE_DIR\" > " + filepath.Join(root, name+".env") + "\necho '{\"issues\":[]}'\n"
+		if err := os.WriteFile(filepath.Join(root, name), []byte(script), 0o700); err != nil { //nolint:gosec // an executable test double
+			t.Fatal(err)
+		}
+	}
+	cfg := filepath.Join(root, "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root "+root+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	if code := run([]string{"-config", cfg, "-old", filepath.Join(root, "old"), "-new", filepath.Join(root, "new")}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+	for _, name := range []string{"old", "new"} {
+		data, err := os.ReadFile(filepath.Join(root, name+".env"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[name] = string(data)
+	}
+	if seen["old"] != "" {
+		t.Fatalf("installed glint got GLINT_CACHE_DIR %q, want the shared default", seen["old"])
+	}
+	if want := filepath.Join(userCache, "glint", "consumers-new"); seen["new"] != want {
+		t.Fatalf("new glint got GLINT_CACHE_DIR %q, want %q", seen["new"], want)
+	}
+}

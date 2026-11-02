@@ -96,10 +96,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	userCache, err := os.UserCacheDir()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "consumers: find user cache directory: %v\n", err)
+		return 2
+	}
+	// A glint run prunes the result caches of other builds, so the new build
+	// runs in a directory of its own and leaves the installed glint's caches.
+	newCache := filepath.Join(userCache, "glint", "consumers-new")
+
 	diffs, errs := 0, 0
 	for _, p := range targets {
 		name := filepath.Base(p)
-		oldIssues, oldErr := check(oldAbs, p, *rules, *jobs)
+		oldIssues, oldErr := check(oldAbs, p, *rules, *jobs, "")
 		if errors.Is(oldErr, errUnknownRule) {
 			// A rule the new build adds: the installed glint has no findings of it.
 			oldIssues, oldErr = nil, nil
@@ -109,7 +118,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			errs++
 			continue
 		}
-		newIssues, newErr := check(newAbs, p, *rules, *jobs)
+		newIssues, newErr := check(newAbs, p, *rules, *jobs, newCache)
 		if newErr != nil {
 			_, _ = fmt.Fprintf(stderr, "%s: %s\n", name, newErr)
 			errs++
@@ -258,7 +267,8 @@ func skipUnreadable(path, root string, err error) error {
 // given with -r.
 var errUnknownRule = errors.New("unknown rule")
 
-func check(bin, dir, rules, jobs string) ([]output.JSONIssue, error) {
+// check runs glint over dir; a non-empty cacheDir becomes its GLINT_CACHE_DIR.
+func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, error) {
 	args := []string{"check", "-o", "json", "--no-color"}
 	if rules != "" {
 		args = append(args, "-r", rules)
@@ -269,6 +279,9 @@ func check(bin, dir, rules, jobs string) ([]output.JSONIssue, error) {
 	args = append(args, "./...")
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
+	if cacheDir != "" {
+		cmd.Env = append(os.Environ(), "GLINT_CACHE_DIR="+cacheDir)
+	}
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
