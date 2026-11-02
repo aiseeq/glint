@@ -70,7 +70,6 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 	}
 
 	byFile := make(map[*core.FileContext][]declaredSymbol)
-	testFunctions := make(map[*core.FileContext][]declaredSymbol)
 	uses := make(map[types.Object]int)
 	mentions, err := projectMentions(ctx)
 	if err != nil {
@@ -103,23 +102,6 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		own.addPackage(pkg.Package.Syntax, info)
 		countOutsideUses(info, own, uses)
 	}
-	for _, fileCtx := range ctx.Files {
-		if fileCtx == nil || !fileCtx.IsTestFile() || fileCtx.GoAST == nil {
-			continue
-		}
-		for _, decl := range fileCtx.GoAST.Decls {
-			function, ok := decl.(*ast.FuncDecl)
-			if !ok || function.Recv != nil || excludedTestFunction(function.Name.Name) || ast.IsExported(function.Name.Name) {
-				continue
-			}
-			testFunctions[fileCtx] = append(testFunctions[fileCtx], declaredSymbol{
-				name: function.Name.Name,
-				kind: "function",
-				line: fileCtx.LineFor(function.Name),
-			})
-		}
-	}
-
 	violations, err := rules.AnalyzeTypedFiles(ctx, r.Name(), func(fileCtx *core.FileContext, _ *types.Info) []*core.Violation {
 		var violations []*core.Violation
 		for _, sym := range byFile[fileCtx] {
@@ -127,13 +109,7 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 			if uses[sym.obj] > 0 || linked[name] || mentions.mentioned(fileCtx, name) || ofUnusedType(sym.obj, uses) {
 				continue
 			}
-			v := r.CreateViolation(fileCtx.RelPath, sym.line,
-				"Unexported "+sym.kind+" '"+name+"' appears to be unused")
-			v.WithCode(fileCtx.GetLine(sym.line))
-			v.WithSuggestion("Remove unused " + sym.kind + " or export it if intended for external use")
-			v.WithContext("symbol", name)
-			v.WithContext("kind", sym.kind)
-			violations = append(violations, v)
+			violations = append(violations, r.unusedViolation(fileCtx, sym.line, sym.kind, name))
 		}
 		return violations
 	})
@@ -141,20 +117,45 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		return nil, err
 	}
 	for _, fileCtx := range ctx.Files {
-		for _, sym := range testFunctions[fileCtx] {
+		for _, sym := range testFileFunctions(fileCtx) {
 			if linked[sym.name] || mentions.functionUsed(fileCtx, sym.name) {
 				continue
 			}
-			v := r.CreateViolation(fileCtx.RelPath, sym.line,
-				"Unexported "+sym.kind+" '"+sym.name+"' appears to be unused")
-			v.WithCode(fileCtx.GetLine(sym.line))
-			v.WithSuggestion("Remove unused " + sym.kind + " or export it if intended for external use")
-			v.WithContext("symbol", sym.name)
-			v.WithContext("kind", sym.kind)
-			violations = append(violations, v)
+			violations = append(violations, r.unusedViolation(fileCtx, sym.line, sym.kind, sym.name))
 		}
 	}
 	return violations, nil
+}
+
+// testFileFunctions returns the unexported top-level functions of a test
+// file that the test runner does not call by name.
+func testFileFunctions(fileCtx *core.FileContext) []declaredSymbol {
+	if fileCtx == nil || !fileCtx.IsTestFile() || fileCtx.GoAST == nil {
+		return nil
+	}
+	var functions []declaredSymbol
+	for _, decl := range fileCtx.GoAST.Decls {
+		function, ok := decl.(*ast.FuncDecl)
+		if !ok || function.Recv != nil || excludedTestFunction(function.Name.Name) || ast.IsExported(function.Name.Name) {
+			continue
+		}
+		functions = append(functions, declaredSymbol{
+			name: function.Name.Name,
+			kind: "function",
+			line: fileCtx.LineFor(function.Name),
+		})
+	}
+	return functions
+}
+
+func (r *UnusedSymbolsRule) unusedViolation(fileCtx *core.FileContext, line int, kind, name string) *core.Violation {
+	v := r.CreateViolation(fileCtx.RelPath, line,
+		"Unexported "+kind+" '"+name+"' appears to be unused")
+	v.WithCode(fileCtx.GetLine(line))
+	v.WithSuggestion("Remove unused " + kind + " or export it if intended for external use")
+	v.WithContext("symbol", name)
+	v.WithContext("kind", kind)
+	return v
 }
 
 // linknameNames returns the names //go:linkname directives bind: the local
