@@ -179,26 +179,7 @@ func (a *fieldAccess) collect(file *ast.File, info *types.Info) {
 	// assignment are known by the time its selectors are classified.
 	targets := make(map[ast.Expr]bool)
 	nilTargets := make(map[ast.Expr]bool)
-	commaOKAssertions := make(map[*ast.TypeAssertExpr]bool)
-	ast.Inspect(file, func(n ast.Node) bool {
-		var lhs int
-		var rhs []ast.Expr
-		switch node := n.(type) {
-		case *ast.AssignStmt:
-			lhs, rhs = len(node.Lhs), node.Rhs
-		case *ast.ValueSpec:
-			lhs, rhs = len(node.Names), node.Values
-		default:
-			return true
-		}
-		if lhs != 2 || len(rhs) != 1 {
-			return true
-		}
-		if assertion, ok := ast.Unparen(rhs[0]).(*ast.TypeAssertExpr); ok {
-			commaOKAssertions[assertion] = true
-		}
-		return true
-	})
+	commaOKAssertions := commaOKTypeAssertions(file)
 
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -362,6 +343,33 @@ func (a *fieldAccess) boxedElements(lit *ast.CompositeLit, info *types.Info) {
 func isEmptyInterface(t types.Type) bool {
 	iface, ok := t.Underlying().(*types.Interface)
 	return ok && iface.NumMethods() == 0
+}
+
+// commaOKTypeAssertions returns the type assertions of the file that give
+// their ok result (v, ok := x.(T), and the same in = and var): they take a
+// nil interface without panicking.
+func commaOKTypeAssertions(file *ast.File) map[*ast.TypeAssertExpr]bool {
+	assertions := make(map[*ast.TypeAssertExpr]bool)
+	ast.Inspect(file, func(n ast.Node) bool {
+		var lhs int
+		var rhs []ast.Expr
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			lhs, rhs = len(node.Lhs), node.Rhs
+		case *ast.ValueSpec:
+			lhs, rhs = len(node.Names), node.Values
+		default:
+			return true
+		}
+		if lhs != 2 || len(rhs) != 1 {
+			return true
+		}
+		if assertion, ok := ast.Unparen(rhs[0]).(*ast.TypeAssertExpr); ok {
+			assertions[assertion] = true
+		}
+		return true
+	})
+	return assertions
 }
 
 // selector classifies one field selector.
