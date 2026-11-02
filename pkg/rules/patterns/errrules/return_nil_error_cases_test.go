@@ -255,3 +255,61 @@ func Page(id int, raw string) (string, *Comment, error) {
 	require.Len(t, violations, 1)
 	assert.Equal(t, 24, violations[0].Line)
 }
+
+// A caller may keep the first result straight in a field of a record and test
+// the field later; the absence stays a nil field, as with a variable only stored
+// in a field. Another caller that reads the result without a test still counts.
+func TestReturnNilErrorKeepsResultStoredInField(t *testing.T) {
+	violations, err := NewReturnNilErrorRule().AnalyzeGoProject(rulestest.Project(t, map[string]string{
+		"store/store.go": `package store
+
+type Fault struct{ Rule string }
+
+type outcome struct {
+	fault *Fault
+	err   error
+}
+
+func indexOne(name string) (*Fault, error) {
+	if name == "" {
+		return nil, nil
+	}
+	return &Fault{Rule: name}, nil
+}
+
+func faultOf(name string) (*Fault, error) {
+	if name == "" {
+		return nil, nil
+	}
+	return &Fault{Rule: name}, nil
+}
+
+func IndexAll(names []string) []string {
+	results := make([]outcome, len(names))
+	for i, name := range names {
+		results[i].fault, results[i].err = indexOne(name)
+	}
+	var faults []string
+	for _, r := range results {
+		if r.fault != nil {
+			faults = append(faults, r.fault.Rule)
+		}
+	}
+	return faults
+}
+
+func Describe(names []string) string {
+	var o outcome
+	o.fault, o.err = faultOf(names[0])
+	other, _ := faultOf(names[1])
+	return o.fault.Rule + other.Rule
+}
+`,
+	}))
+	require.NoError(t, err)
+	lines := make([]int, 0, len(violations))
+	for _, v := range violations {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{19}, lines)
+}

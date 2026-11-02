@@ -103,19 +103,27 @@ func nilCheckedByCallers(decls map[*types.Func]patternkit.TypedFuncDecl, sites m
 }
 
 // resultTestedForNil reports a call site whose first result is assigned to a
-// variable that the caller tests for nil (see nilHandled).
+// variable that the caller tests for nil (see nilHandled), or straight to a
+// field (results[i].fault, results[i].err = f()), where nil stays the absence
+// it says, as with a variable only stored in a field.
 func resultTestedForNil(decls map[*types.Func]patternkit.TypedFuncDecl, site patternkit.FuncCallSite) bool {
 	info, body := site.Caller.Info, site.Caller.Decl.Body
 	var record types.Object
+	inField := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if assign, ok := n.(*ast.AssignStmt); ok && len(assign.Rhs) == 1 && ast.Unparen(assign.Rhs[0]) == site.Call && len(assign.Lhs) > 0 {
-			if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
-				record = info.ObjectOf(ident)
+			switch lhs := assign.Lhs[0].(type) {
+			case *ast.Ident:
+				if lhs.Name != "_" {
+					record = info.ObjectOf(lhs)
+				}
+			case *ast.SelectorExpr:
+				inField = true
 			}
 		}
-		return record == nil
+		return record == nil && !inField
 	})
-	return record != nil && nilHandled(decls, patternkit.TypedFuncDecl{Decl: site.Caller.Decl, Info: info}, record, 2)
+	return inField || record != nil && nilHandled(decls, patternkit.TypedFuncDecl{Decl: site.Caller.Decl, Info: info}, record, 2)
 }
 
 // nilHandled reports a pointer variable of a function whose nil is handled
