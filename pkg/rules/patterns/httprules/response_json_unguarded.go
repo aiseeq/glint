@@ -66,6 +66,8 @@ func (r *ResponseJSONUnguardedRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 	var tries []int // depths inside the try blocks open here
 	for i, line := range code {
 		matches := responseJSONCall.FindAllStringSubmatchIndex(line, -1)
+		firstNonSpace := strings.IndexFunc(line, notSpace)
+		previousLineIsTry := i > 0 && tryKeyword.MatchString(code[i-1])
 		next := 0
 		for col := 0; col <= len(line); col++ {
 			for next < len(matches) && matches[next][0] == col {
@@ -91,7 +93,7 @@ func (r *ResponseJSONUnguardedRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 			switch line[col] {
 			case '{':
 				depth++
-				if tryKeyword.MatchString(line[:col]) || (col == strings.IndexFunc(line, notSpace) && i > 0 && tryKeyword.MatchString(code[i-1])) {
+				if tryKeywordBefore(line, col) || (col == firstNonSpace && previousLineIsTry) {
 					tries = append(tries, depth)
 				}
 			case '}':
@@ -106,6 +108,20 @@ func (r *ResponseJSONUnguardedRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 }
 
 func notSpace(r rune) bool { return r != ' ' && r != '\t' }
+
+// tryKeywordBefore reports whether a brace follows `try` and optional
+// whitespace. It examines only that token and its preceding word boundary.
+func tryKeywordBefore(line string, col int) bool {
+	end := col
+	for end > 0 && strings.ContainsRune(" \t\r\n\f\v", rune(line[end-1])) {
+		end--
+	}
+	if end < len("try") {
+		return false
+	}
+	start := max(end-len("try")-1, 0)
+	return tryKeyword.MatchString(line[start:end])
+}
 
 // caughtInChain reports a .catch after the parse: later on its line, or on
 // the lines that continue the chain.

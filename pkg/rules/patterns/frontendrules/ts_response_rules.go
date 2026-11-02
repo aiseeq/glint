@@ -208,22 +208,16 @@ func checkFormNumberPayload(r *tsRule, ctx *core.FileContext, f patternkit.JsFla
 			"A parsed number goes into the payload unchecked — text in the field is NaN, which JSON sends as null, and the server clears the value",
 			"Check Number.isFinite on the parsed value and show the field error before sending")
 	}
-	for open := strings.IndexByte(f.Code, '{'); open >= 0; {
-		if callArgumentObject(f, open) {
-			if end, ok := f.Closing(open); ok {
-				for _, item := range f.Items(open, end) {
-					text := f.Code[item.Start:item.End]
-					if payloadNumberProperty.MatchString(text) && !hasFallback(f, item) {
-						report(item.Start + len(text) - len(strings.TrimLeft(text, " \t\n")))
-					}
-				}
+	for _, object := range payloadObjects(f.Code) {
+		if !object.awaitedCall || object.close < 0 {
+			continue
+		}
+		for _, item := range object.items {
+			text := f.Code[item.Start:item.End]
+			if payloadNumberProperty.MatchString(text) && !hasFallback(f, item) {
+				report(item.Start + len(text) - len(strings.TrimLeft(text, " \t\n")))
 			}
 		}
-		next := strings.IndexByte(f.Code[open+1:], '{')
-		if next < 0 {
-			break
-		}
-		open += next + 1
 	}
 	for _, m := range payloadNumberAssign.FindAllStringSubmatchIndex(f.Code, -1) {
 		name := f.Code[m[2]:m[3]]
@@ -239,16 +233,108 @@ func checkFormNumberPayload(r *tsRule, ctx *core.FileContext, f patternkit.JsFla
 	return out
 }
 
-var awaitedCallee = regexp.MustCompile(`\bawait\s+[\w$.?]+\s*$`)
+type payloadObject struct {
+	close       int
+	awaitedCall bool
+	items       []patternkit.JsSpanRange
+}
 
-// callArgumentObject reports an object literal written as an argument of an
-// awaited call: await api.create({ ... }), await api.update(id, { ... }).
-func callArgumentObject(f patternkit.JsFlat, open int) bool {
-	paren, ok := f.EnclosingParen(open)
-	if !ok || !strings.HasSuffix(strings.TrimRight(f.Code[:open], " \t\n"), "(") && !strings.HasSuffix(strings.TrimRight(f.Code[:open], " \t\n"), ",") {
+type payloadDelimiter struct {
+	object    int
+	itemStart int
+}
+
+type payloadParen struct {
+	awaitedCall bool
+}
+
+// payloadObjects finds brace pairs and whether an object is a direct argument
+// of an awaited call in one pass. Repeated EnclosingParen and Closing scans
+// make a minified line quadratic in the number of object literals.
+func payloadObjects(code string) []payloadObject {
+	objects := make([]payloadObject, 0)
+	stack := make([]payloadDelimiter, 0)
+	parens := make([]payloadParen, 0)
+	for i := 0; i < len(code); i++ {
+		switch code[i] {
+		case '(', '[', '{':
+			objectIndex := -1
+			if code[i] == '{' {
+				objectIndex = len(objects)
+				objects = append(objects, payloadObject{
+					close:       -1,
+					awaitedCall: len(parens) > 0 && directCallArgument(code, i, parens[len(parens)-1]),
+				})
+			}
+			itemStart := -1
+			if objectIndex >= 0 {
+				itemStart = i + 1
+			}
+			stack = append(stack, payloadDelimiter{object: objectIndex, itemStart: itemStart})
+			if code[i] == '(' {
+				parens = append(parens, payloadParen{awaitedCall: awaitedCalleeBefore(code, i)})
+			}
+		case ')', ']', '}':
+			if len(stack) > 0 {
+				last := len(stack) - 1
+				delimiter := stack[last]
+				stack = stack[:last]
+				if delimiter.object >= 0 {
+					objects[delimiter.object].close = i
+					if strings.TrimSpace(code[delimiter.itemStart:i]) != "" {
+						objects[delimiter.object].items = append(objects[delimiter.object].items, patternkit.JsSpanRange{Start: delimiter.itemStart, End: i})
+					}
+				}
+			}
+			if code[i] == ')' && len(parens) > 0 {
+				parens = parens[:len(parens)-1]
+			}
+		case ',':
+			if len(stack) > 0 {
+				last := len(stack) - 1
+				delimiter := &stack[last]
+				if delimiter.object >= 0 {
+					objects[delimiter.object].items = append(objects[delimiter.object].items, patternkit.JsSpanRange{Start: delimiter.itemStart, End: i})
+					delimiter.itemStart = i + 1
+				}
+			}
+		}
+	}
+	return objects
+}
+
+func directCallArgument(code string, open int, paren payloadParen) bool {
+	previous := open - 1
+	for previous >= 0 && (code[previous] == ' ' || code[previous] == '\t' || code[previous] == '\n') {
+		previous--
+	}
+	if previous < 0 || code[previous] != '(' && code[previous] != ',' {
 		return false
 	}
-	return awaitedCallee.MatchString(f.Code[:paren])
+	return paren.awaitedCall
+}
+
+func awaitedCalleeBefore(code string, paren int) bool {
+	i := paren
+	for i > 0 && (code[i-1] == ' ' || code[i-1] == '\t' || code[i-1] == '\n') {
+		i--
+	}
+	calleeEnd := i
+	for i > 0 {
+		c := code[i-1]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '$' || c == '.' || c == '?' {
+			i--
+			continue
+		}
+		break
+	}
+	if i == calleeEnd {
+		return false
+	}
+	for i > 0 && (code[i-1] == ' ' || code[i-1] == '\t' || code[i-1] == '\n') {
+		i--
+	}
+	return i >= len("await") && code[i-len("await"):i] == "await" && (i == len("await") || !isJSIdentifierByte(code[i-len("await")-1], false))
 }
 
 // hasFallback reports a property value ending in || or ?? fallback.
@@ -258,44 +344,43 @@ func hasFallback(f patternkit.JsFlat, item patternkit.JsSpanRange) bool {
 }
 
 var (
-	enumFilterKey      = regexp.MustCompile(`^(?:status|state|direction|type|kind|side|mode|category|level|stage|phase)$`)
-	filterProperty     = regexp.MustCompile(`(?s)^\s*([A-Za-z_$][\w$]*)\s*:\s*(.*?)\s*$`)
-	rawFilterValue     = regexp.MustCompile(`(?s)^(?:typeof\s+[\w$.]+\s*===?\s*['"]string['"]\s*\?\s*[\w$.]+\s*:\s*['"]{2}|[\w$]+\.get\(\s*['"][\w-]+['"]\s*\)(?:\s*(?:\?\?|\|\|)\s*['"]{2})?|[\w$]+\.[\w$]+(?:\s*(?:\?\?|\|\|)\s*['"]{2})?)$`)
-	validatorCall      = regexp.MustCompile(`^([A-Za-z_$][\w$]*)\s*\(`)
-	allowedValuesCheck = regexp.MustCompile(`\.(?:has|includes)\s*\(`)
+	enumFilterKey          = regexp.MustCompile(`^(?:status|state|direction|type|kind|side|mode|category|level|stage|phase)$`)
+	filterPropertyKey      = regexp.MustCompile(`^\s*([A-Za-z_$][\w$]*)\s*:\s*`)
+	rawFilterValue         = regexp.MustCompile(`(?s)^(?:typeof\s+[\w$.]+\s*===?\s*['"]string['"]\s*\?\s*[\w$.]+\s*:\s*['"]{2}|[\w$]+\.get\(\s*['"][\w-]+['"]\s*\)(?:\s*(?:\?\?|\|\|)\s*['"]{2})?|[\w$]+\.[\w$]+(?:\s*(?:\?\?|\|\|)\s*['"]{2})?)$`)
+	validatorCall          = regexp.MustCompile(`^([A-Za-z_$][\w$]*)\s*\(`)
+	allowedValueDefinition = regexp.MustCompile(`\b(?:const|let|function)\s+([A-Za-z_$][\w$]*)\b`)
+	allowedValuesCheck     = regexp.MustCompile(`\.(?:has|includes)\s*\(`)
 )
 
 // checkURLFilterEnum reports raw enum filters of an object literal in which
 // another filter goes through a function that checks the allowed values.
 func checkURLFilterEnum(r *tsRule, ctx *core.FileContext, f patternkit.JsFlat) []*core.Violation {
 	var out []*core.Violation
-	validators := make(map[string]bool)
-	for open := strings.IndexByte(f.Code, '{'); open >= 0; {
-		if end, ok := f.Closing(open); ok {
-			out = append(out, rawEnumFilters(r, ctx, f, open, end, validators)...)
+	validators := allowedValueValidators(f)
+	for _, object := range payloadObjects(f.Code) {
+		if object.close >= 0 {
+			out = append(out, rawEnumFilters(r, ctx, f, object.items, validators)...)
 		}
-		next := strings.IndexByte(f.Code[open+1:], '{')
-		if next < 0 {
-			break
-		}
-		open += next + 1
 	}
 	return out
 }
 
-func rawEnumFilters(r *tsRule, ctx *core.FileContext, f patternkit.JsFlat, open, end int, validators map[string]bool) []*core.Violation {
+func rawEnumFilters(r *tsRule, ctx *core.FileContext, f patternkit.JsFlat, items []patternkit.JsSpanRange, validators map[string]bool) []*core.Violation {
 	var raw []patternkit.JsSpanRange
 	checked := false
-	for _, item := range f.Items(open, end) {
-		m := filterProperty.FindStringSubmatch(f.Text[item.Start:item.End])
-		if m == nil {
+	for _, item := range items {
+		text := f.Text[item.Start:item.End]
+		key := filterPropertyKey.FindStringSubmatchIndex(text)
+		if key == nil {
 			continue
 		}
-		if call := validatorCall.FindStringSubmatch(m[2]); call != nil && checksAllowedValues(f, call[1], validators) {
+		name := text[key[2]:key[3]]
+		value := strings.TrimSpace(text[key[1]:])
+		if call := validatorCall.FindStringSubmatch(value); call != nil && checksAllowedValues(f, call[1], validators) {
 			checked = true
 			continue
 		}
-		if enumFilterKey.MatchString(m[1]) && rawFilterValue.MatchString(m[2]) {
+		if enumFilterKey.MatchString(name) && rawFilterValue.MatchString(value) {
 			raw = append(raw, item)
 		}
 	}
@@ -313,20 +398,25 @@ func rawEnumFilters(r *tsRule, ctx *core.FileContext, f patternkit.JsFlat, open,
 	return out
 }
 
-// checksAllowedValues reports a function of the file whose definition checks
-// its input against a set or a list of allowed values.
-func checksAllowedValues(f patternkit.JsFlat, name string, cache map[string]bool) bool {
-	if known, ok := cache[name]; ok {
-		return known
-	}
-	def := regexp.MustCompile(`\b(?:const|let|function)\s+` + regexp.QuoteMeta(name) + `\b`).FindStringIndex(f.Code)
-	found := false
-	if def != nil {
+// allowedValueValidators indexes functions that check their input against a
+// set or list of allowed values in a single pass over the file.
+func allowedValueValidators(f patternkit.JsFlat) map[string]bool {
+	validators := make(map[string]bool)
+	for _, def := range allowedValueDefinition.FindAllStringSubmatchIndex(f.Code, -1) {
+		name := f.Code[def[2]:def[3]]
+		if _, seen := validators[name]; seen {
+			continue
+		}
 		end := min(def[1]+400, len(f.Code))
-		found = allowedValuesCheck.MatchString(f.Code[def[1]:end])
+		validators[name] = allowedValuesCheck.MatchString(f.Code[def[1]:end])
 	}
-	cache[name] = found
-	return found
+	return validators
+}
+
+// checksAllowedValues reports whether name has a definition that checks its
+// input against a set or list of allowed values.
+func checksAllowedValues(_ patternkit.JsFlat, name string, cache map[string]bool) bool {
+	return cache[name]
 }
 
 // TSNumberFieldForDecimalJSONRule detects a TypeScript response field typed

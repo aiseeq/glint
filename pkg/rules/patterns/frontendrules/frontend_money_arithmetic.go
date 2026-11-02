@@ -252,50 +252,84 @@ func (r *FrontendMoneyArithmeticRule) moneyVariables(f patternkit.JsFlat, parsed
 
 func (r *FrontendMoneyArithmeticRule) arithmeticFindings(ctx *core.FileContext, f patternkit.JsFlat, parsed []moneySpan, vars map[string][]int) map[int]bool {
 	found := make(map[int]bool)
+	duplicateRanges := financialFPRoundingDuplicateRanges(f)
+	duplicateIndex := 0
 	for _, op := range arithmeticOperators(f.Code) {
-		if jsxTagOperator(f.Code, op.pos) || insideFormattingFunction(f, op.pos) {
-			continue
-		}
-		if financialFPRoundingDuplicateAt(f, op.pos) {
-			continue
+		for duplicateIndex < len(duplicateRanges) && duplicateRanges[duplicateIndex].End < op.pos {
+			duplicateIndex++
 		}
 		leftName := moneyNameBefore(f.Code, op.pos)
 		rightName := moneyNameAfter(f.Code, op.pos+len(op.op))
-		leftMoney := r.isMoneyVariable(f, vars, identifierBefore(f.Code, op.pos), op.pos) || r.isMoneyFieldName(leftName) && !counterParameterAt(f, leftName, op.pos)
-		rightMoney := r.isMoneyVariable(f, vars, identifierAfter(f.Code, op.pos+len(op.op)), op.pos) || r.isMoneyFieldName(rightName) && !counterParameterAt(f, rightName, op.pos)
+		leftID := identifierBefore(f.Code, op.pos)
+		rightID := identifierAfter(f.Code, op.pos+len(op.op))
+		leftMoney := len(vars[leftID]) > 0 && r.isMoneyVariable(f, vars, leftID, op.pos) || r.isMoneyFieldName(leftName) && !counterParameterAt(f, leftName, op.pos)
+		rightMoney := len(vars[rightID]) > 0 && r.isMoneyVariable(f, vars, rightID, op.pos) || r.isMoneyFieldName(rightName) && !counterParameterAt(f, rightName, op.pos)
+		potential := leftMoney || rightMoney
 		if strings.HasSuffix(op.op, "=") {
-			if leftMoney {
-				addMoneyFinding(r, ctx, f, found, op.pos)
-				continue
+			if !potential {
+				rhs := op.pos + len(op.op)
+				for _, p := range parsed {
+					if p.start >= rhs && strings.TrimSpace(f.Code[rhs:p.start]) == "" {
+						potential = true
+						break
+					}
+				}
 			}
-			rhs := op.pos + len(op.op)
+		} else if stringConcatAt(f.Code, op.pos) {
+			potential = false
+		} else {
 			for _, p := range parsed {
-				if p.start >= rhs && strings.TrimSpace(f.Code[rhs:p.start]) == "" {
-					addMoneyFinding(r, ctx, f, found, op.pos)
+				if operandTouches(f.Code, op.pos, p.start, p.end) {
+					potential = true
 					break
 				}
 			}
+		}
+		if !potential || jsxTagOperator(f.Code, op.pos) || insideFormattingFunction(f, op.pos) {
 			continue
 		}
-		if stringConcatAt(f.Code, op.pos) {
+		if duplicateIndex < len(duplicateRanges) && duplicateRanges[duplicateIndex].Start <= op.pos {
 			continue
 		}
-		for _, p := range parsed {
-			if operandTouches(f.Code, op.pos, p.start, p.end) {
-				addMoneyFinding(r, ctx, f, found, op.pos)
-				break
-			}
-		}
-		if leftMoney || rightMoney {
-			addMoneyFinding(r, ctx, f, found, op.pos)
-		}
+		addMoneyFinding(r, ctx, f, found, op.pos)
 	}
 	return found
 }
 
+func financialFPRoundingDuplicateRanges(f patternkit.JsFlat) []patternkit.JsSpanRange {
+	var ranges []patternkit.JsSpanRange
+	for _, m := range moneyMathCallName.FindAllStringSubmatchIndex(f.Code, -1) {
+		open := strings.LastIndex(f.Code[m[0]:m[1]], "(") + m[0]
+		close, ok := f.Closing(open)
+		if !ok {
+			continue
+		}
+		div := divideByCents.FindStringIndex(f.Code[close+1:])
+		if div == nil {
+			continue
+		}
+		args := f.CallArgs(open)
+		if len(args) == 0 {
+			continue
+		}
+		arg := strings.TrimSpace(f.Code[args[0].Start:args[0].End])
+		if centScaledArgument.MatchString(arg) && financialFPRoundingDuplicate(f.Code[m[2]:m[3]], arg) {
+			ranges = append(ranges, patternkit.JsSpanRange{Start: m[0], End: close + 1 + div[1]})
+		}
+	}
+	return ranges
+}
+
 func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f patternkit.JsFlat, parsed []moneySpan, vars map[string][]int, found map[int]bool) {
+	duplicateRanges := financialFPRoundingDuplicateRanges(f)
+	formattingCalls := formattingCallRanges(f)
+	duplicateIndex := 0
 	for _, m := range moneyMathCall.FindAllStringIndex(f.Code, -1) {
-		if insideFormattingFunction(f, m[0]) || financialFPRoundingDuplicateAt(f, m[0]) {
+		for duplicateIndex < len(duplicateRanges) && duplicateRanges[duplicateIndex].End < m[0] {
+			duplicateIndex++
+		}
+		duplicate := duplicateIndex < len(duplicateRanges) && duplicateRanges[duplicateIndex].Start <= m[0]
+		if insideFormattingFunction(f, m[0]) || duplicate {
 			continue
 		}
 		open := strings.LastIndex(f.Code[m[0]:m[1]], "(")
@@ -309,7 +343,7 @@ func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f p
 		arg := strings.TrimSpace(f.Code[args[0].Start:args[0].End])
 		id := strings.Trim(arg, "() \t\n")
 		moneyName := r.moneyNameExpression(id) && !counterParameterAt(f, id, m[0])
-		if insideFormattingCall(f, m[0]) && !moneyName {
+		if formattingCallContains(formattingCalls, m[0]) && !moneyName {
 			continue
 		}
 		if moneyName {
@@ -357,32 +391,6 @@ func financialFPRoundingDuplicate(method, arg string) bool {
 	for _, token := range patternkit.IdentifierTokens(arg) {
 		switch token {
 		case "amount", "balance", "cost", "fee", "price", "profit", "usd", "total", "subtotal", "sum", "payout", "payment", "deposit", "withdraw", "withdrawal", "principal", "usdc", "usdt":
-			return true
-		}
-	}
-	return false
-}
-
-func financialFPRoundingDuplicateAt(f patternkit.JsFlat, pos int) bool {
-	for _, m := range moneyMathCallName.FindAllStringSubmatchIndex(f.Code, -1) {
-		if pos < m[0] {
-			continue
-		}
-		open := strings.LastIndex(f.Code[m[0]:m[1]], "(") + m[0]
-		close, ok := f.Closing(open)
-		if !ok {
-			continue
-		}
-		div := divideByCents.FindStringIndex(f.Code[close+1:])
-		if div == nil || pos > close+1+div[1] {
-			continue
-		}
-		args := f.CallArgs(open)
-		if len(args) == 0 {
-			continue
-		}
-		arg := strings.TrimSpace(f.Code[args[0].Start:args[0].End])
-		if centScaledArgument.MatchString(arg) && financialFPRoundingDuplicate(f.Code[m[2]:m[3]], arg) {
 			return true
 		}
 	}
@@ -441,17 +449,32 @@ func insideFormattingFunction(f patternkit.JsFlat, pos int) bool {
 	return false
 }
 
-func insideFormattingCall(f patternkit.JsFlat, pos int) bool {
-	for _, loc := range formattingCall.FindAllStringIndex(f.Code, -1) {
+type formattingCallRange struct {
+	start  int
+	maxEnd int
+}
+
+func formattingCallRanges(f patternkit.JsFlat) []formattingCallRange {
+	locations := formattingCall.FindAllStringIndex(f.Code, -1)
+	ranges := make([]formattingCallRange, 0, len(locations))
+	maxEnd := -1
+	for _, loc := range locations {
 		if loc[1] == 0 {
 			continue
 		}
 		close, ok := f.Closing(loc[1] - 1)
-		if ok && loc[1] <= pos && pos < close {
-			return true
+		if !ok {
+			continue
 		}
+		maxEnd = max(maxEnd, close)
+		ranges = append(ranges, formattingCallRange{start: loc[1], maxEnd: maxEnd})
 	}
-	return false
+	return ranges
+}
+
+func formattingCallContains(ranges []formattingCallRange, pos int) bool {
+	i := sort.Search(len(ranges), func(i int) bool { return ranges[i].start > pos }) - 1
+	return i >= 0 && ranges[i].maxEnd > pos
 }
 
 func existingPatternFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, found map[int]bool) {

@@ -3,7 +3,9 @@ package frontendrules
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -140,6 +142,16 @@ const label = async () => {
 }
 `,
 	}))
+}
+
+func TestPayloadObjectsLongMinifiedLine(t *testing.T) {
+	code := "await api.save({value:1});" + strings.Repeat("{x:1}", 40_000)
+	started := time.Now()
+	objects := payloadObjects(code)
+	assert.Len(t, objects, 40_001)
+	assert.True(t, objects[0].awaitedCall)
+	assert.Equal(t, len("await api.save({value:1"), objects[0].close)
+	assert.Less(t, time.Since(started), 3*time.Second)
 }
 
 // A filter read from the link goes to the API as it was typed, while its

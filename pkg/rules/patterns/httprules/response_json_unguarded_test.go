@@ -1,7 +1,9 @@
 package httprules
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
@@ -54,4 +56,11 @@ const s = 'response.json()'
 	assert.Empty(t, rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "e2e/tests/codes-api.spec.ts", code), "tests read raw responses on purpose")
 	assert.Empty(t, rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "web/src/__tests__/api.test.ts", code))
 	assert.Empty(t, rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "api/x.go", "package api\n// await response.json()\n"))
+}
+
+func TestResponseJSONUnguardedLongMinifiedLine(t *testing.T) {
+	code := "const response=await fetch('/');" + strings.Repeat("{x:1}", 40_000) + "response.json()"
+	started := time.Now()
+	assert.Equal(t, []int{1}, rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "web/src/bundle.js", code))
+	assert.Less(t, time.Since(started), 3*time.Second)
 }

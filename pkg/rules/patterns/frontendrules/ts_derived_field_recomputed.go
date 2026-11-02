@@ -111,14 +111,15 @@ func (r *TSDerivedFieldRecomputedRule) AnalyzeFile(c *core.FileContext) []*core.
 	}
 	f := patternkit.NewJSFlat(c)
 	seen := map[int]bool{}
+	bindings := make(map[int]map[string]string)
 	var out []*core.Violation
-	out = r.analyzeDerivedComparisons(c, f, seen, out)
-	out = r.analyzeBareComparisons(c, f, seen, out)
-	out = r.analyzeDerivedCandidates(c, f, seen, out)
+	out = r.analyzeDerivedComparisons(c, f, seen, bindings, out)
+	out = r.analyzeBareComparisons(c, f, seen, bindings, out)
+	out = r.analyzeDerivedCandidates(c, f, seen, bindings, out)
 	return out
 }
 
-func (r *TSDerivedFieldRecomputedRule) analyzeDerivedComparisons(c *core.FileContext, f patternkit.JsFlat, seen map[int]bool, out []*core.Violation) []*core.Violation {
+func (r *TSDerivedFieldRecomputedRule) analyzeDerivedComparisons(c *core.FileContext, f patternkit.JsFlat, seen map[int]bool, bindingsCache map[int]map[string]string, out []*core.Violation) []*core.Violation {
 	for _, m := range dCmp.FindAllStringSubmatchIndex(f.Code, -1) {
 		name, field, lit := dCmpParts(f.Code, m)
 		fn, ok := f.EnclosingFunction(m[0])
@@ -130,7 +131,7 @@ func (r *TSDerivedFieldRecomputedRule) analyzeDerivedComparisons(c *core.FileCon
 			continue
 		}
 		body := f.Code[fn.Start : end+1]
-		bindings := dFunctionBindings(f, fn, body, r, c.RelPath)
+		bindings := dCachedFunctionBindings(bindingsCache, f, fn, body, r, c.RelPath)
 		derived := bindings[name+"."+field]
 		if derived == "" || dReadsDerived(body, name, derived) {
 			continue
@@ -161,7 +162,7 @@ func dHasMultipleValues(body, name, field, initial string) bool {
 	return len(values) >= 2
 }
 
-func (r *TSDerivedFieldRecomputedRule) analyzeBareComparisons(c *core.FileContext, f patternkit.JsFlat, seen map[int]bool, out []*core.Violation) []*core.Violation {
+func (r *TSDerivedFieldRecomputedRule) analyzeBareComparisons(c *core.FileContext, f patternkit.JsFlat, seen map[int]bool, bindingsCache map[int]map[string]string, out []*core.Violation) []*core.Violation {
 	for _, m := range dBareCmp.FindAllStringSubmatchIndex(f.Code, -1) {
 		name, value := dBareParts(f.Code, m)
 		if strings.HasSuffix(f.Code[:m[0]], ".") {
@@ -176,7 +177,7 @@ func (r *TSDerivedFieldRecomputedRule) analyzeBareComparisons(c *core.FileContex
 			continue
 		}
 		body := f.Code[fn.Start : end+1]
-		bindings := dFunctionBindings(f, fn, body, r, c.RelPath)
+		bindings := dCachedFunctionBindings(bindingsCache, f, fn, body, r, c.RelPath)
 		derived := bindings[name]
 		if derived == "" || dReadsDerived(body, name, derived) || !dBareHasMultipleValues(body, name, value) {
 			continue
@@ -198,7 +199,7 @@ func dBareHasMultipleValues(body, name, initial string) bool {
 	return len(values) >= 2
 }
 
-func (r *TSDerivedFieldRecomputedRule) analyzeDerivedCandidates(c *core.FileContext, f patternkit.JsFlat, seen map[int]bool, out []*core.Violation) []*core.Violation {
+func (r *TSDerivedFieldRecomputedRule) analyzeDerivedCandidates(c *core.FileContext, f patternkit.JsFlat, seen map[int]bool, bindingsCache map[int]map[string]string, out []*core.Violation) []*core.Violation {
 	for _, candidate := range dCandidates(f.Code) {
 		fn, ok := f.EnclosingFunction(candidate.pos)
 		if !ok || seen[fn.Start] {
@@ -209,7 +210,7 @@ func (r *TSDerivedFieldRecomputedRule) analyzeDerivedCandidates(c *core.FileCont
 			continue
 		}
 		body := f.Code[fn.Start : end+1]
-		bindings := dFunctionBindings(f, fn, body, r, c.RelPath)
+		bindings := dCachedFunctionBindings(bindingsCache, f, fn, body, r, c.RelPath)
 		derived := bindings[candidate.name+"."+candidate.field]
 		if derived == "" {
 			derived = bindings[candidate.name]
@@ -221,6 +222,15 @@ func (r *TSDerivedFieldRecomputedRule) analyzeDerivedCandidates(c *core.FileCont
 		out = patternkit.JsReport(out, r.BaseRule, c, f.Line(candidate.pos), "Function recomputes "+derived+" from raw "+candidate.field+" values", "Read "+candidate.name+"."+derived+" supplied by the API")
 	}
 	return out
+}
+
+func dCachedFunctionBindings(cache map[int]map[string]string, f patternkit.JsFlat, fn patternkit.JsFunc, body string, r *TSDerivedFieldRecomputedRule, currentPath string) map[string]string {
+	if bindings, ok := cache[fn.Start]; ok {
+		return bindings
+	}
+	bindings := dFunctionBindings(f, fn, body, r, currentPath)
+	cache[fn.Start] = bindings
+	return bindings
 }
 
 func dFunctionBindings(f patternkit.JsFlat, fn patternkit.JsFunc, body string, r *TSDerivedFieldRecomputedRule, currentPath string) map[string]string {

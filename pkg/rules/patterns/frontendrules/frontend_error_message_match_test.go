@@ -1,7 +1,10 @@
 package frontendrules
 
 import (
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
@@ -77,6 +80,21 @@ func TestFrontendErrorMessageMatchErrorName(t *testing.T) {
 	}
 }
 
+func TestFrontendErrorMessageMatch_SubjectForms(t *testing.T) {
+	errors := map[string]bool{"err": true}
+	texts := map[string]bool{"messageText": true}
+	for _, line := range []string{
+		"if (err.message?.includes('expired')) retry()",
+		"if ('expired' === messageText) retry()",
+		"if (/expired/i.test(messageText)) retry()",
+		"if (messageText != `expired`) retry()",
+	} {
+		assert.True(t, lineTestsText(line, errors, texts), line)
+	}
+	assert.False(t, lineTestsText("if (messageText.length === 0) retry()", errors, texts))
+	assert.True(t, containsErrorMessage("(err as Error).message", errors))
+}
+
 // A helper's first parameter holds a message only when the first argument
 // carries one: a message passed further along the argument list does not make
 // the first argument, and what is read from it, an error message.
@@ -109,4 +127,25 @@ export function show(err: Error, code: string) {
 }
 `
 	assert.Equal(t, []int{20}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/lib/body.ts", source))
+}
+
+func TestFrontendErrorMessageMatch_LongMinifiedLine(t *testing.T) {
+	var source strings.Builder
+	source.WriteString("try{throw 0}catch(err){")
+	for i := range 240 {
+		fmt.Fprintf(&source, "function helper%d(message%d){return message%d}", i, i, i)
+	}
+	for i := range 240 {
+		fmt.Fprintf(&source, "helper%d(err.message);", i)
+	}
+	source.WriteString("if(err.message.includes('failed')){run()}/*")
+	source.WriteString(strings.Repeat("x", 320*1024))
+	source.WriteString("*/}")
+	assert.GreaterOrEqual(t, source.Len(), 300*1024)
+
+	started := time.Now()
+	lines := rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "frontend/src/bundle.js", source.String())
+	elapsed := time.Since(started)
+	assert.Equal(t, []int{1}, lines)
+	assert.Less(t, elapsed, 3*time.Second, "long single-line source took %s", elapsed)
 }
