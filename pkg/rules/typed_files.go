@@ -21,7 +21,7 @@ func AnalyzeTypedFiles(
 	ruleName string,
 	analyze func(fileCtx *core.FileContext, info *types.Info) []*core.Violation,
 ) ([]*core.Violation, error) {
-	return analyzeTypedFiles(ctx, ruleName, nil, analyze)
+	return analyzeTypedFiles(ctx, ruleName, nil, false, analyze)
 }
 
 // AnalyzeTypedRunFiles analyzes only files selected for the current run. Use
@@ -32,16 +32,18 @@ func AnalyzeTypedRunFiles(
 	ruleName string,
 	analyze func(fileCtx *core.FileContext, info *types.Info) []*core.Violation,
 ) ([]*core.Violation, error) {
-	if ctx == nil || !ctx.HasReportScope() {
-		return AnalyzeTypedFiles(ctx, ruleName, analyze)
+	var inScope func(*core.FileContext) bool
+	if ctx != nil && ctx.HasReportScope() {
+		inScope = ctx.IsReportFile
 	}
-	return analyzeTypedFiles(ctx, ruleName, ctx.IsReportFile, analyze)
+	return analyzeTypedFiles(ctx, ruleName, inScope, true, analyze)
 }
 
 func analyzeTypedFiles(
 	ctx *core.GoProjectContext,
 	ruleName string,
 	inScope func(*core.FileContext) bool,
+	validate bool,
 	analyze func(fileCtx *core.FileContext, info *types.Info) []*core.Violation,
 ) ([]*core.Violation, error) {
 	if ctx == nil {
@@ -79,7 +81,7 @@ func analyzeTypedFiles(
 				continue
 			}
 			found := analyze(fileCtx, pkg.Package.TypesInfo)
-			if inScope != nil {
+			if validate {
 				for _, violation := range found {
 					if violation == nil || !sameFilePath(fileCtx, violation.File) {
 						return nil, fmt.Errorf("%s: report callback for %q returned a finding for %q", ruleName, fileCtx.RelPath, violationPath(violation))
@@ -122,7 +124,7 @@ func AnalyzeGoFiles(
 	ruleName string,
 	analyze func(fileCtx *core.FileContext, info *types.Info) []*core.Violation,
 ) ([]*core.Violation, error) {
-	return analyzeGoFiles(ctx, ruleName, nil, analyze)
+	return analyzeGoFiles(ctx, ruleName, nil, false, analyze)
 }
 
 // AnalyzeGoRunFiles analyzes only files selected for the current run. Use it
@@ -133,16 +135,18 @@ func AnalyzeGoRunFiles(
 	ruleName string,
 	analyze func(fileCtx *core.FileContext, info *types.Info) []*core.Violation,
 ) ([]*core.Violation, error) {
-	if ctx == nil || !ctx.HasReportScope() {
-		return AnalyzeGoFiles(ctx, ruleName, analyze)
+	var inScope func(*core.FileContext) bool
+	if ctx != nil && ctx.HasReportScope() {
+		inScope = ctx.IsReportFile
 	}
-	return analyzeGoFiles(ctx, ruleName, ctx.IsReportFile, analyze)
+	return analyzeGoFiles(ctx, ruleName, inScope, true, analyze)
 }
 
 func analyzeGoFiles(
 	ctx *core.GoProjectContext,
 	ruleName string,
 	inScope func(*core.FileContext) bool,
+	validate bool,
 	analyze func(fileCtx *core.FileContext, info *types.Info) []*core.Violation,
 ) ([]*core.Violation, error) {
 	if ctx == nil {
@@ -164,8 +168,10 @@ func analyzeGoFiles(
 				fileInfo = info
 			}
 			found := analyze(fileCtx, fileInfo)
-			if err := validateRunFindings(inScope, fileCtx, ruleName, found); err != nil {
-				return nil, err
+			if validate {
+				if err := validateRunFindings(inScope, fileCtx, ruleName, found); err != nil {
+					return nil, err
+				}
 			}
 			violations = append(violations, found...)
 		}
@@ -186,8 +192,10 @@ func analyzeGoFiles(
 				continue
 			}
 			found := analyze(fileCtx, pkg.Package.TypesInfo)
-			if err := validateRunFindings(inScope, fileCtx, ruleName, found); err != nil {
-				return nil, err
+			if validate {
+				if err := validateRunFindings(inScope, fileCtx, ruleName, found); err != nil {
+					return nil, err
+				}
 			}
 			violations = append(violations, found...)
 		}
@@ -197,8 +205,10 @@ func analyzeGoFiles(
 			continue
 		}
 		found := analyze(fileCtx, nil)
-		if err := validateRunFindings(inScope, fileCtx, ruleName, found); err != nil {
-			return nil, err
+		if validate {
+			if err := validateRunFindings(inScope, fileCtx, ruleName, found); err != nil {
+				return nil, err
+			}
 		}
 		violations = append(violations, found...)
 	}
@@ -208,11 +218,8 @@ func analyzeGoFiles(
 }
 
 func validateRunFindings(inScope func(*core.FileContext) bool, file *core.FileContext, ruleName string, found []*core.Violation) error {
-	if inScope == nil {
-		return nil
-	}
 	for _, violation := range found {
-		if violation == nil || !sameFilePath(file, violation.File) {
+		if violation == nil || !sameFilePath(file, violation.File) || inScope != nil && !inScope(file) {
 			return fmt.Errorf("%s: report callback for %q returned a finding for %q", ruleName, file.RelPath, violationPath(violation))
 		}
 	}
