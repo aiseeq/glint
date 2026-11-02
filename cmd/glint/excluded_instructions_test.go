@@ -88,7 +88,7 @@ func TestIndexPanicSkipsTheExcludedInstructionFiles(t *testing.T) {
 // ones: they are analyzed and cached too, and a report of more unchanged
 // files than analyzed ones reads as a counting bug.
 func TestCacheReportCountsExcludedInstructionFiles(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
 	module := t.TempDir()
 	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
 	writeModuleFile(t, module, "main.go", "package main\n\nfunc main() {}\n")

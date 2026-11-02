@@ -56,7 +56,7 @@ func TestRequiredFileWalkFallsBackWhenARuleHasNoPredicate(t *testing.T) {
 }
 
 func TestRequiredFileWalkDoesNotCorruptFullResultCache(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
 	root := requiredFilesFixture(t)
 	instructionRule := doccheck.NewInstructionSizeRule()
 	filteredRules := []rules.Rule{instructionRule}

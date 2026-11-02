@@ -49,6 +49,8 @@ files unchecked:
 
 Their answers are cached under the user cache directory (`glint/tools`), keyed
 by everything the program read; `--no-cache` asks them again.
+Set `GLINT_CACHE_DIR` to an absolute path to choose the result cache directory; an empty or unset
+value keeps the default (`<user cache>/glint/results`).
 
 Or build from source (graft builds the native parser, so it needs a C compiler). Development commands run through
 [graft](https://github.com/aiseeq/graft) (tasks in `.graft.yaml`):

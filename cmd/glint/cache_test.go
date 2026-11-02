@@ -350,7 +350,7 @@ func TestResultCacheEmitsOnlyEnabledRuleFindings(t *testing.T) {
 }
 
 func TestNewRootCacheUsesBinaryHashWithoutBuildManifest(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
 	previous := cacheBuildManifest
 	cacheBuildManifest = ""
 	t.Cleanup(func() { cacheBuildManifest = previous })
@@ -363,6 +363,39 @@ func TestNewRootCacheUsesBinaryHashWithoutBuildManifest(t *testing.T) {
 	assert.Equal(t, want, cache.build)
 	assert.Equal(t, "result cache key: binary hash "+want+" (build without verified fingerprints)", cache.keyDescription)
 	assert.Empty(t, cache.ruleFingerprints)
+}
+
+func TestResultCacheDirUsesGLINTCacheDir(t *testing.T) {
+	userCache := t.TempDir()
+	cacheDir := filepath.Join(t.TempDir(), "results")
+	t.Setenv("XDG_CACHE_HOME", userCache)
+	t.Setenv("GLINT_CACHE_DIR", cacheDir)
+
+	cache, err := newRootCache("/project", "", core.DefaultConfig(), false)
+	require.NoError(t, err)
+	require.NoError(t, cache.save())
+	assert.Equal(t, cacheDir, filepath.Dir(cache.path))
+	assert.FileExists(t, cache.path)
+	assert.NoDirExists(t, filepath.Join(userCache, "glint"))
+}
+
+func TestResultCacheDirDefaultsToUserCacheWhenGLINTCacheDirIsEmpty(t *testing.T) {
+	userCache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", userCache)
+	t.Setenv("GLINT_CACHE_DIR", "")
+
+	dir, err := resultCacheDir()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(userCache, "glint", "results"), dir)
+}
+
+func TestResultCacheDirRejectsRelativeGLINTCacheDir(t *testing.T) {
+	t.Setenv("GLINT_CACHE_DIR", "relative/cache")
+
+	dir, err := resultCacheDir()
+	require.Error(t, err)
+	assert.Empty(t, dir)
+	assert.ErrorContains(t, err, "GLINT_CACHE_DIR must be an absolute path")
 }
 
 func TestProjectCacheFingerprintCoversRuleStateDependencies(t *testing.T) {
@@ -544,7 +577,7 @@ func analyzeCachedRoot(t *testing.T, root string, list []rules.Rule) (*preparedR
 // findings come from the cache; the Go files still get their syntax trees. A
 // frontend edit changes no input, a Go edit anywhere in the module does.
 func TestProjectCacheSkipsTheLoadWhileGoInputsAreUnchanged(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
 	module := t.TempDir()
 	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
 	writeModuleFile(t, module, "svc/check.go", "package svc\n\nfunc Value() int { return 1 }\n")
@@ -581,7 +614,7 @@ func TestProjectCacheSkipsTheLoadWhileGoInputsAreUnchanged(t *testing.T) {
 }
 
 func TestTypedProjectLoadIsRequiredOnlyForAnalyzedFrontendFiles(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
 	goRoot := t.TempDir()
 	writeModuleFile(t, goRoot, "go.mod", "module example.com/check\n\ngo 1.24\n")
 	writeModuleFile(t, goRoot, "check.go", "package svc\n\nfunc Value() int { return 1 }\n")
@@ -625,7 +658,7 @@ func TestTypedProjectLoadIsRequiredOnlyForAnalyzedFrontendFiles(t *testing.T) {
 }
 
 func TestTSPathRoutesAreCachedAndInvalidatedByGoInputs(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
 	root := t.TempDir()
 	writeModuleFile(t, root, "go.mod", "module example.com/routes\n\ngo 1.24\n\nrequire github.com/gorilla/mux v1.8.1\n")
 	writeModuleFile(t, root, "vendor/modules.txt", "# github.com/gorilla/mux v1.8.1\n## explicit; go 1.24\ngithub.com/gorilla/mux\n")
@@ -689,7 +722,7 @@ func (r *typedProjectStubRule) AnalyzeFile(*core.FileContext) []*core.Violation 
 // another rule selection (--rule) loads the project and runs its own rules
 // instead of taking the other rule's findings.
 func TestProjectCacheKeysOnTheProjectRulesThatRan(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
 	module := t.TempDir()
 	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
 	writeModuleFile(t, module, "svc/check.go", "package svc\n\nfunc Value() int { return 1 }\n")

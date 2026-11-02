@@ -55,7 +55,7 @@ func TestAnalyzeKeepsTheOtherFindingsWhenARulePanics(t *testing.T) {
 // The cache keeps no result of a run with a panic: the next run would take the
 // panicked rule's missing findings for "nothing found".
 func TestRulePanicIsNotCached(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
 	module := t.TempDir()
 	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
 	writeModuleFile(t, module, "svc/check.go", "package svc\n\nfunc Value() int { return 1 }\n")
@@ -122,7 +122,7 @@ func (r *panickingCacheRule) RestoreProjectFiles([]byte) error    { return nil }
 // A panic while the index is saved leaves the project entry unstored: the
 // next run loads the project again instead of reusing a partial entry.
 func TestProjectFilesCachePanicIsNotCached(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
 	module := t.TempDir()
 	writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
 	writeModuleFile(t, module, "svc/check.go", "package svc\n\nfunc Value() int { return 1 }\n")

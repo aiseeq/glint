@@ -235,7 +235,7 @@ func init() {
 	checkCmd.Flags().BoolVar(&flagTolerant, "tolerate-broken-packages", false, "Analyze packages that type-check and report the ones that do not, instead of failing (for trees that do not compile as a whole)")
 	checkCmd.Flags().BoolVar(&flagTiming, "timing", false, "Report per-rule timings to stderr; on Ctrl+C also names the rule and file still running")
 	checkCmd.Flags().StringVar(&flagCPUProfile, "cpuprofile", "", "Write a CPU profile of the run to this file (go tool pprof)")
-	checkCmd.Flags().BoolVar(&flagNoCache, "no-cache", false, "Analyze every file instead of reusing the findings of unchanged files from the previous run")
+	checkCmd.Flags().BoolVar(&flagNoCache, "no-cache", false, "Analyze every file instead of reusing the findings of unchanged files from the previous run (GLINT_CACHE_DIR, an absolute path, moves the result cache)")
 
 	// Rules command flags
 	rulesCmd.Flags().StringVarP(&flagCategory, "category", "c", "", "Filter by category")

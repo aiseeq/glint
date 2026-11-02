@@ -848,6 +848,12 @@ func pruneCacheEntries(dir string, entries []fs.DirEntry, now time.Time, build s
 
 // resultCacheDir is where the caches of all roots live.
 func resultCacheDir() (string, error) {
+	if dir := os.Getenv("GLINT_CACHE_DIR"); dir != "" {
+		if !filepath.IsAbs(dir) {
+			return "", fmt.Errorf("GLINT_CACHE_DIR must be an absolute path: %q", dir)
+		}
+		return dir, nil
+	}
 	base, err := os.UserCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("locate the user cache directory: %w", err)
