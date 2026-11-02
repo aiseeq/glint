@@ -332,20 +332,31 @@ func walk(m protoreflect.Message, visit func(proto.Message)) {
 		return
 	}
 	visit(m.Interface())
-	m.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
-		if field.Message() == nil || field.IsMap() {
-			return true
+	eachChild(m, func(_ protoreflect.FieldDescriptor, child protoreflect.Message) {
+		walk(child, visit)
+	})
+}
+
+// eachChild calls visit for every message held in a set field of m, in the
+// order the fields are declared. Message.Range is not used: protobuf-go swaps
+// two neighbouring fields of its order by a hash of the executable, so the
+// order of what a walk finds would change from one build to another.
+func eachChild(m protoreflect.Message, visit func(field protoreflect.FieldDescriptor, child protoreflect.Message)) {
+	fields := m.Descriptor().Fields()
+	for i := range fields.Len() {
+		field := fields.Get(i)
+		if field.Message() == nil || field.IsMap() || !m.Has(field) {
+			continue
 		}
 		if field.IsList() {
-			list := value.List()
-			for i := range list.Len() {
-				walk(list.Get(i).Message(), visit)
+			list := m.Get(field).List()
+			for j := range list.Len() {
+				visit(field, list.Get(j).Message())
 			}
-			return true
+			continue
 		}
-		walk(value.Message(), visit)
-		return true
-	})
+		visit(field, m.Get(field).Message())
+	}
 }
 
 // Shape is what a single INSERT, UPDATE or SELECT writes or reads of one

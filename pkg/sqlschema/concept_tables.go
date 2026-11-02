@@ -91,19 +91,10 @@ func ReadTables(sql string) []TableRead {
 		for _, from := range sel.GetFromClause() {
 			visitFrom(from, false)
 		}
-		sel.ProtoReflect().Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
-			if field.Name() == "withClause" || field.Message() == nil || field.IsMap() {
-				return true
+		eachChild(sel.ProtoReflect(), func(field protoreflect.FieldDescriptor, child protoreflect.Message) {
+			if field.Name() != "with_clause" {
+				visitNested(child, ctes)
 			}
-			if field.IsList() {
-				list := value.List()
-				for i := 0; i < list.Len(); i++ {
-					visitNested(list.Get(i).Message(), ctes)
-				}
-				return true
-			}
-			visitNested(value.Message(), ctes)
-			return true
 		})
 	}
 	visitNested = func(message protoreflect.Message, ctes map[string]bool) {
@@ -114,19 +105,8 @@ func ReadTables(sql string) []TableRead {
 			visitSelect(sel, ctes)
 			return
 		}
-		message.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
-			if field.Message() == nil || field.IsMap() {
-				return true
-			}
-			if field.IsList() {
-				list := value.List()
-				for i := 0; i < list.Len(); i++ {
-					visitNested(list.Get(i).Message(), ctes)
-				}
-				return true
-			}
-			visitNested(value.Message(), ctes)
-			return true
+		eachChild(message, func(_ protoreflect.FieldDescriptor, child protoreflect.Message) {
+			visitNested(child, ctes)
 		})
 	}
 	for _, raw := range result.GetStmts() {

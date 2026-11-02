@@ -484,19 +484,8 @@ func walkTargetExpressions(message protoreflect.Message, visit func(*pgquery.A_E
 			visit(expr)
 		}
 	}
-	message.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
-		if field.Message() == nil || field.IsMap() {
-			return true
-		}
-		if field.IsList() {
-			list := value.List()
-			for i := range list.Len() {
-				walkTargetExpressions(list.Get(i).Message(), visit)
-			}
-			return true
-		}
-		walkTargetExpressions(value.Message(), visit)
-		return true
+	eachChild(message, func(_ protoreflect.FieldDescriptor, child protoreflect.Message) {
+		walkTargetExpressions(child, visit)
 	})
 }
 
