@@ -19,7 +19,9 @@ func init() {
 // handful of entries fixed in the source - an array, a literal, a package
 // table nothing reassigns - is left alone: it concatenates a known small
 // number of times, and the quadratic copying strings.Builder avoids is not
-// there.
+// there. Nor is a concatenation onto the element the loop picks by its own
+// key (out[i].Message += s in for i := range out): each iteration grows a
+// string of its own.
 type StringConcatRule struct {
 	*rules.BaseRule
 }
@@ -172,10 +174,10 @@ func (r *StringConcatRule) analyze(ctx *core.FileContext, info *types.Info, fixe
 		// Check for loops
 		switch loop := n.(type) {
 		case *ast.ForStmt:
-			r.checkLoop(ctx, info, loop.Body, &violations)
+			r.checkLoop(ctx, info, loop.Body, forCounter(info, loop), &violations)
 		case *ast.RangeStmt:
 			if !rangesOverFixedSmall(info, fixedTables, loop.X) {
-				r.checkLoop(ctx, info, loop.Body, &violations)
+				r.checkLoop(ctx, info, loop.Body, rangeKey(info, loop), &violations)
 			}
 		}
 
@@ -185,9 +187,183 @@ func (r *StringConcatRule) analyze(ctx *core.FileContext, info *types.Info, fixe
 	return violations
 }
 
-func (r *StringConcatRule) checkLoop(ctx *core.FileContext, info *types.Info, body *ast.BlockStmt, violations *[]*core.Violation) {
+// rangeKey returns the key a range statement declares when no two
+// iterations share it: an index of a slice, array or string, a map key, an
+// integer. A channel or an iterator may repeat its values; nil then, and for
+// no key.
+func rangeKey(info *types.Info, loop *ast.RangeStmt) *ast.Ident {
+	key, ok := loop.Key.(*ast.Ident)
+	if !ok || loop.Tok != token.DEFINE || info == nil {
+		return nil
+	}
+	ranged := info.TypeOf(loop.X)
+	if ranged == nil {
+		return nil
+	}
+	if pointer, ok := ranged.Underlying().(*types.Pointer); ok {
+		ranged = pointer.Elem()
+	}
+	switch t := ranged.Underlying().(type) {
+	case *types.Slice, *types.Array, *types.Map:
+		return key
+	case *types.Basic:
+		if t.Info()&(types.IsString|types.IsInteger) != 0 {
+			return key
+		}
+	}
+	return nil
+}
+
+// forCounter returns the variable a for statement declares in its init,
+// bounds in its condition and steps in its post statement (for i := 0; i < n;
+// i++), nil otherwise. A step of a constant zero is no step: continue comes
+// back to the same i; with no condition a counter may wrap around.
+func forCounter(info *types.Info, loop *ast.ForStmt) *ast.Ident {
+	init, ok := loop.Init.(*ast.AssignStmt)
+	if !ok || init.Tok != token.DEFINE || len(init.Lhs) != 1 || loop.Cond == nil {
+		return nil
+	}
+	counter, ok := init.Lhs[0].(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	var stepped ast.Expr
+	switch post := loop.Post.(type) {
+	case *ast.IncDecStmt:
+		stepped = post.X
+	case *ast.AssignStmt:
+		if len(post.Lhs) == 1 && (post.Tok == token.ADD_ASSIGN || post.Tok == token.SUB_ASSIGN) && !constantZero(info, post.Rhs[0]) {
+			stepped = post.Lhs[0]
+		}
+	}
+	if ident, ok := stepped.(*ast.Ident); !ok || ident.Name != counter.Name {
+		return nil
+	}
+	return counter
+}
+
+// elementOfIteration reports a target that is the element the loop picks by
+// key: out[key], out[key].Message. A field behind a pointer is not the
+// element's own: elements may share what it points to. Only types tell the
+// key from a variable of its name.
+func elementOfIteration(info *types.Info, target ast.Expr, key *ast.Ident) bool {
+	if key == nil || info == nil {
+		return false
+	}
+	expr := ast.Unparen(target)
+	for selector, ok := expr.(*ast.SelectorExpr); ok; selector, ok = expr.(*ast.SelectorExpr) {
+		if selection := info.Selections[selector]; selection == nil || selection.Indirect() {
+			return false
+		}
+		expr = ast.Unparen(selector.X)
+	}
+	element, ok := expr.(*ast.IndexExpr)
+	if !ok {
+		return false
+	}
+	index, ok := ast.Unparen(element.Index).(*ast.Ident)
+	return ok && sameVariable(info, index, key)
+}
+
+// keyMoves reports a body that moves the loop's key, or a part of it, or
+// jumps back with goto: then an iteration may come back to an element.
+func keyMoves(info *types.Info, body *ast.BlockStmt, key *ast.Ident) bool {
+	moved := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		var targets []ast.Expr
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			targets = node.Lhs
+		case *ast.RangeStmt:
+			if node.Tok == token.ASSIGN {
+				targets = []ast.Expr{node.Key, node.Value}
+			}
+		case *ast.IncDecStmt:
+			targets = []ast.Expr{node.X}
+		case *ast.UnaryExpr:
+			if node.Op == token.AND {
+				targets = []ast.Expr{node.X}
+			}
+		case *ast.SelectorExpr:
+			// A method of a pointer receiver takes the key's address.
+			if selection := info.Selections[node]; selection != nil && selection.Kind() == types.MethodVal {
+				if method, ok := selection.Obj().(*types.Func); ok {
+					if _, ok := method.Signature().Recv().Type().(*types.Pointer); ok {
+						targets = []ast.Expr{node.X}
+					}
+				}
+			}
+		case *ast.BranchStmt:
+			moved = moved || node.Tok == token.GOTO
+		}
+		for _, target := range targets {
+			if ident, ok := variableOf(target).(*ast.Ident); ok && sameVariable(info, ident, key) {
+				moved = true
+			}
+		}
+		return !moved
+	})
+	return moved
+}
+
+// variableOf returns the variable an expression writes a part of: k of
+// k.Field and k[1].
+func variableOf(expr ast.Expr) ast.Expr {
+	for {
+		switch part := ast.Unparen(expr).(type) {
+		case *ast.SelectorExpr:
+			expr = part.X
+		case *ast.IndexExpr:
+			expr = part.X
+		default:
+			return part
+		}
+	}
+}
+
+// constantZero reports an expression of the constant value zero: a number,
+// or an empty string.
+func constantZero(info *types.Info, expr ast.Expr) bool {
+	if info == nil {
+		return false
+	}
+	value := info.Types[expr].Value
+	if value == nil {
+		return false
+	}
+	switch value.Kind() {
+	case constant.Int, constant.Float:
+		return constant.Sign(value) == 0
+	case constant.String:
+		return constant.StringVal(value) == ""
+	}
+	return false
+}
+
+// sameVariable reports an identifier that names the variable key declares.
+func sameVariable(info *types.Info, ident, key *ast.Ident) bool {
+	declared := info.Defs[key]
+	return declared != nil && info.Uses[ident] == declared
+}
+
+func (r *StringConcatRule) checkLoop(ctx *core.FileContext, info *types.Info, body *ast.BlockStmt, key *ast.Ident, violations *[]*core.Violation) {
 	if body == nil {
 		return
+	}
+
+	// ownElement reports a concatenation onto the element the iteration picks
+	// by its key: each iteration grows a string of its own. Whether the body
+	// moves the key is read once per loop.
+	var moves *bool
+	ownElement := func(target ast.Expr) bool {
+		if !elementOfIteration(info, target, key) {
+			return false
+		}
+		if moves == nil {
+			moved := keyMoves(info, body, key)
+			moves = &moved
+		}
+		return !*moves
 	}
 
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -205,7 +381,7 @@ func (r *StringConcatRule) checkLoop(ctx *core.FileContext, info *types.Info, bo
 		// Check for += with string
 		if assign.Tok == token.ADD_ASSIGN {
 			if len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && r.isStringAccumulation(info, assign.Lhs[0], assign.Rhs[0]) {
-				if !r.variableResetBefore(body, assign) {
+				if !ownElement(assign.Lhs[0]) && !r.variableResetBefore(body, assign) {
 					r.reportConcatViolation(ctx, assign, violations)
 				}
 			}
@@ -215,7 +391,7 @@ func (r *StringConcatRule) checkLoop(ctx *core.FileContext, info *types.Info, bo
 		// Check for s = s + "..."
 		if assign.Tok == token.ASSIGN && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 {
 			if r.isAssignPlusPattern(info, assign) {
-				if !r.variableResetBefore(body, assign) {
+				if !ownElement(assign.Lhs[0]) && !r.variableResetBefore(body, assign) {
 					r.reportConcatViolation(ctx, assign, violations)
 				}
 			}
