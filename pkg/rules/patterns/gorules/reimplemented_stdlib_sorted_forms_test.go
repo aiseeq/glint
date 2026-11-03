@@ -189,6 +189,114 @@ func TestReimplementedStdlibMarksSortedKeysBlockForFix(t *testing.T) {
 	assert.Equal(t, "keys", mark("keys := make([]string, 0, len(m))", "for _, k := range keys { fmt.Println(k, len(keys)) }"))
 	assert.Equal(t, "keys", mark("var keys []string", "_, _ = json.Marshal(keys)"))
 	assert.Nil(t, mark("keys := []string{}", "_, _ = json.Marshal(keys)"))
-	assert.Equal(t, "keys", mark("keys := []string{}", "fmt.Println(keys[0], keys[1:])"))
+	assert.Equal(t, "keys", mark("keys := []string{}", "fmt.Println(keys[0], len(keys))"))
 	assert.Nil(t, mark("keys := make([]string, 0)", "fmt.Println(keys == nil)"))
+	// A subslice of nil is nil, of an empty slice empty: it carries the difference out.
+	assert.Nil(t, mark("keys := []string{}", "_, _ = json.Marshal(keys[1:])"))
+	// keys := replacement with no read after it does not compile.
+	assert.Nil(t, mark("keys := []string{}", ""))
+	assert.Nil(t, mark("var keys []string", ""))
+	// An assignment is no read: keys := replacement with only keys = nil after it does not compile.
+	assert.Nil(t, mark("var keys []string", "keys = nil"))
+	assert.Nil(t, mark("var keys []string", "(keys) = nil"))
+	assert.Nil(t, mark("var keys []string", "for _, keys = range [][]string{} {}"))
+}
+
+func TestReimplementedStdlibSortedKeysNeedBuiltinLenAndNil(t *testing.T) {
+	run := func(source string) []*core.Violation {
+		return rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+			"go.mod":     "module example.com/helpers\n\ngo 1.23\n",
+			"helpers.go": source,
+		})
+	}
+	// A local len in the capacity runs for its effect; the rewrite would drop the call.
+	assert.Empty(t, run("package helpers\n\nimport (\"fmt\"; \"sort\")\n\nfunc report(m map[string]int) {\n\tlen := func(map[string]int) int { fmt.Println(); return 0 }\n"+
+		"\tkeys := make([]string, 0, len(m))\n\tfor k := range m { keys = append(keys, k) }\n\tsort.Strings(keys)\n\tfmt.Println(keys)\n}\n"))
+	// A package nil that is no empty slice starts keys with elements.
+	assert.Empty(t, run("package helpers\n\nimport \"sort\"\n\nvar nil = []string{\"x\"}\n\nfunc keysOf(m map[string]int) (keys []string) {\n\tkeys = nil\n"+
+		"\tfor k := range m { keys = append(keys, k) }\n\tsort.Strings(keys)\n\treturn keys\n}\n"))
+}
+
+func TestReimplementedStdlibSortedKeysNeedBuiltinAppend(t *testing.T) {
+	// A local append collects whatever it likes.
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"go.mod": "module example.com/helpers\n\ngo 1.23\n",
+		"helpers.go": "package helpers\n\nimport (\"fmt\"; \"sort\")\n\nfunc report(m map[string]int) {\n\tappend := func(s []string, _ string) []string { return s }\n\tvar keys []string\n" +
+			"\tfor k := range m { keys = append(keys, k) }\n\tsort.Strings(keys)\n\tfmt.Println(keys)\n}\n",
+	})
+	assert.Empty(t, violations)
+}
+
+func TestReimplementedStdlibSortedKeysBlockFixKeepsImportsUsed(t *testing.T) {
+	// slices imported as s: the rewrite would leave the import s unused.
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"go.mod": "module example.com/helpers\n\ngo 1.23\n",
+		"helpers.go": "package helpers\n\nimport (\"fmt\"; s \"slices\")\n\nfunc report(m map[string]int) {\n\tfmt.Println()\n\tvar keys []string\n" +
+			"\tfor k := range m { keys = append(keys, k) }\n\ts.Sort(keys)\n\tfmt.Println(keys)\n}\n",
+	})
+	require.Len(t, violations, 1)
+	assert.Nil(t, violations[0].Context["fix_sorted_keys"])
+}
+
+func TestReimplementedStdlibSortedKeysBlockFixNeedsBuiltinLen(t *testing.T) {
+	// A local len may tell nil from empty.
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"go.mod": "module example.com/helpers\n\ngo 1.23\n",
+		"helpers.go": "package helpers\n\nimport (\"fmt\"; \"sort\")\n\nfunc report(m map[string]int) {\n\tlen := func(s []string) bool { return s == nil }\n\tkeys := []string{}\n" +
+			"\tfor k := range m { keys = append(keys, k) }\n\tsort.Strings(keys)\n\tfmt.Println(len(keys))\n}\n",
+	})
+	require.Len(t, violations, 1)
+	assert.Nil(t, violations[0].Context["fix_sorted_keys"])
+}
+
+func TestReimplementedStdlibSortSliceOfFloatKeysIsNotSorted(t *testing.T) {
+	// sort.Slice by < leaves NaN keys anywhere; slices.Sorted puts them first.
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"go.mod": "module example.com/helpers\n\ngo 1.23\n",
+		"helpers.go": "package helpers\n\nimport (\"fmt\"; \"sort\")\n\nfunc report(m map[float64]int) {\n\tfmt.Println()\n\tvar keys []float64\n" +
+			"\tfor k := range m { keys = append(keys, k) }\n\tsort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })\n\tfmt.Println(keys)\n}\n",
+	})
+	assert.Empty(t, violations)
+}
+
+func TestReimplementedStdlibSortedKeysBlockFixNeedsPlainNames(t *testing.T) {
+	run := func(files map[string]string) []*core.Violation {
+		files["go.mod"] = "module example.com/helpers\n\ngo 1.23\n"
+		return rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), files)
+	}
+	body := func(rangeOver string) string {
+		return "\tfmt.Println()\n\tvar keys []string\n\tfor k := range " + rangeOver + " { keys = append(keys, k) }\n\tsort.Strings(keys)\n\tfmt.Println(keys)\n"
+	}
+
+	// maps declared by another file of the package: an added import "maps" collides with it.
+	violations := run(map[string]string{
+		"helpers.go": "package helpers\n\nimport (\"fmt\"; \"sort\")\n\nfunc report(m map[string]int) {\n" + body("m") + "}\n",
+		"other.go":   "package helpers\n\nvar maps = 1\n",
+	})
+	require.Len(t, violations, 1)
+	assert.Nil(t, violations[0].Context["fix_sorted_keys"], "maps names a package variable")
+
+	// The replacement must be the map's source: a literal prints as {…}.
+	violations = run(map[string]string{
+		"helpers.go": "package helpers\n\nimport (\"fmt\"; \"sort\")\n\nfunc report() {\n" + body(`map[string]int{"a": 1}`) + "}\n",
+	})
+	require.Len(t, violations, 1)
+	assert.Nil(t, violations[0].Context["fix_sorted_keys"], "a map literal")
+
+	// The map is computed from keys itself: the rewrite would hand it the outer keys.
+	violations = run(map[string]string{
+		"helpers.go": "package helpers\n\nimport (\"fmt\"; \"sort\")\n\nfunc pick(s []string) map[string]int { return nil }\n\nfunc report() {\n" + body("pick(keys)") + "}\n",
+	})
+	require.Len(t, violations, 1)
+	assert.Nil(t, violations[0].Context["fix_sorted_keys"], "a map computed from keys")
+}
+
+func TestReimplementedStdlibSortedKeysBlockSortsWithPackageSort(t *testing.T) {
+	// sort here is a value whose Strings sorts in descending order, not package sort.
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"go.mod": "module example.com/helpers\n\ngo 1.23\n",
+		"helpers.go": "package helpers\n\nimport \"fmt\"\n\ntype descending struct{}\n\nfunc (descending) Strings([]string) {}\n\n" +
+			"func report(m map[string]int) {\n\tsort := descending{}\n\tfmt.Println()\n\tkeys := []string{}\n\tfor k := range m { keys = append(keys, k) }\n\tsort.Strings(keys)\n\tfmt.Println(keys[0])\n}\n",
+	})
+	assert.Empty(t, violations)
 }
