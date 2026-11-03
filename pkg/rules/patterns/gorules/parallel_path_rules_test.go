@@ -246,7 +246,7 @@ type Amount struct{ v int64 }
 
 type TxRepo struct{}
 
-func (r *TxRepo) StoreQuote(id string, amount Amount, local, rate Amount, source string, at *time.Time, actor string) error {
+func (r *TxRepo) StoreQuote(id string, amount Amount, local, rate Amount, source string, at *time.Time, actor string, budget int64) error {
 	return nil
 }
 
@@ -306,7 +306,7 @@ type Tx struct {
 type Service struct{ repo *store.TxRepo }
 
 func (s *Service) Save(tx *Tx, raw []byte) error {
-	if err := s.repo.StoreQuote(tx.ID, tx.Amount, tx.Local, tx.Rate, tx.Source, tx.At, "api"); err != nil {
+	if err := s.repo.StoreQuote(tx.ID, tx.Amount, tx.Local, tx.Rate, tx.Source, tx.At, "api", 16<<20); err != nil {
 		return err
 	}
 	return s.repo.RecordHistory(tx.ID, "a", "b", raw)
@@ -326,7 +326,7 @@ type Tx struct {
 func (a *Admin) Save(tx *Tx) error {
 	if err := a.repo.StoreQuote(tx.ID, tx.Amount,
 		store.Amount{}, store.Amount{}, "", nil,
-		"admin"); err != nil {
+		"admin", 16<<20); err != nil {
 		return err
 	}
 	// One optional value left out: a history row without the raw body.

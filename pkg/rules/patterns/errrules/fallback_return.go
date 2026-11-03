@@ -2,6 +2,7 @@ package errrules
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"maps"
@@ -39,6 +40,14 @@ func NewFallbackReturnRule() *FallbackReturnRule {
 	}
 	return r
 }
+
+// NeedsTypedGoProject asks the runner to load Go types for files this rule analyzes.
+func (r *FallbackReturnRule) NeedsTypedGoProject(files []*core.FileContext) bool {
+	return slices.ContainsFunc(files, func(file *core.FileContext) bool { return file.IsGoFile() })
+}
+
+// TypedGoProjectImports lists no extra imports because fallback analysis uses each file's package load.
+func (r *FallbackReturnRule) TypedGoProjectImports() []string { return nil }
 
 // tsContextPatterns detect an error/failure context for TypeScript.
 var tsContextPatterns = []*regexp.Regexp{
@@ -202,22 +211,7 @@ func (r *FallbackReturnRule) checkFailedCalls(ctx *core.FileContext, body *ast.B
 			if !ok || ifStmt.Init != nil {
 				continue
 			}
-			// A reason written right above the call explains the branch too.
-			if r.hasLegitimateComment(ctx.Lines, ctx.PositionFor(list[i]).Line-1) {
-				continue
-			}
-			failed := failedCall{list: list, index: i, inLoop: inLoop}
-			if results, errName := failedCallResults(list[i]); errName != "" && patternkit.ErrNilCheckName(ifStmt.Cond) == errName {
-				failed.results, failed.errName = results, errName
-				violations = append(violations, r.detectReplacedResult(ctx, ifStmt, results, errName)...)
-			} else if results, okName := okCallResults(list[i]); okName != "" && isNegatedIdent(ifStmt.Cond, okName) {
-				failed.results = results
-			} else {
-				continue
-			}
-			if v := r.detectUsedFailedResult(ctx, ifStmt, failed); v != nil {
-				violations = append(violations, v)
-			}
+			violations = append(violations, r.checkFailedCallBranch(ctx, list, i, inLoop, ifStmt, list[i])...)
 		}
 	}
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -230,10 +224,40 @@ func (r *FallbackReturnRule) checkFailedCalls(ctx *core.FileContext, body *ast.B
 			check(node.Body, false)
 		case *ast.CommClause:
 			check(node.Body, false)
+		case *ast.IfStmt:
+			if node.Init != nil {
+				violations = append(violations, r.checkFailedCallBranch(ctx, nil, -1, false, node, node.Init)...)
+			}
 		}
 		return true
 	})
 	return violations
+}
+
+// checkFailedCallBranch checks a guard immediately following a fallible call.
+func (r *FallbackReturnRule) checkFailedCallBranch(ctx *core.FileContext, list []ast.Stmt, index int, inLoop bool, ifStmt *ast.IfStmt, callStmt ast.Stmt) []*core.Violation {
+	if r.hasLegitimateComment(ctx.Lines, ctx.PositionFor(ifStmt).Line) {
+		return nil
+	}
+	failed := failedCall{list: list, index: index, inLoop: inLoop}
+	if results, errName := failedCallResultsForContext(ctx, callStmt); errName != "" && errorNilCheckName(ctx, ifStmt.Cond) == errName {
+		failed.results, failed.errName = results, errName
+		violations := r.detectReplacedResult(ctx, ifStmt, results, errName)
+		violations = append(violations, r.detectLiteralReturn(ctx, ifStmt, errName)...)
+		if list != nil {
+			if v := r.detectUsedFailedResult(ctx, ifStmt, failed); v != nil {
+				violations = append(violations, v)
+			}
+		}
+		return violations
+	}
+	if results, okName := okCallResults(callStmt); okName != "" && isNegatedIdent(ifStmt.Cond, okName) {
+		failed.results = results
+		if v := r.detectUsedFailedResult(ctx, ifStmt, failed); v != nil {
+			return []*core.Violation{v}
+		}
+	}
+	return nil
 }
 
 // failedCall is a call whose outcome the next statement checks: the call is
@@ -269,9 +293,6 @@ func callResults(stmt ast.Stmt, validResultName func(string) bool) (map[string]b
 			results[ident.Name] = true
 		}
 	}
-	if len(results) == 0 {
-		return nil, ""
-	}
 	return results, okIdent.Name
 }
 
@@ -298,7 +319,10 @@ func (r *FallbackReturnRule) detectUsedFailedResult(ctx *core.FileContext, ifStm
 	if assignsAnyOf(body, failed.results) || r.blockExplainsFallback(ctx, body) {
 		return nil
 	}
-	rest := failed.list[failed.index+2:]
+	var rest []ast.Stmt
+	if failed.list != nil && failed.index >= 0 && failed.index+2 <= len(failed.list) {
+		rest = failed.list[failed.index+2:]
+	}
 	var message string
 	switch branchExit(body) {
 	case exitNone:
@@ -586,10 +610,408 @@ func readsAnyOf(expr ast.Expr, names map[string]bool) bool {
 	return false
 }
 
-// failedCallResults returns the result variables and the error variable of
-// `v1, v2, err := call()` (or =).
-func failedCallResults(stmt ast.Stmt) (map[string]bool, string) {
-	return callResults(stmt, patternkit.IsErrorVarName)
+// failedCallResultsForContext finds call results and their trailing error using types when available.
+func failedCallResultsForContext(ctx *core.FileContext, stmt ast.Stmt) (map[string]bool, string) {
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) == 0 {
+		return nil, ""
+	}
+	call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+	if !ok {
+		return nil, ""
+	}
+	if ctx.GoTypesInfo != nil {
+		callType := ctx.GoTypesInfo.TypeOf(call)
+		if patternkit.IsErrorType(callType) && len(assign.Lhs) == 1 {
+			if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
+				return nil, ident.Name
+			}
+		}
+		if tuple, ok := callType.(*types.Tuple); ok && tuple.Len() == len(assign.Lhs) && patternkit.IsErrorType(tuple.At(tuple.Len()-1).Type()) {
+			if ident, ok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident); ok && ident.Name != "_" {
+				results := make(map[string]bool, len(assign.Lhs)-1)
+				for _, lhs := range assign.Lhs[:len(assign.Lhs)-1] {
+					if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+						results[id.Name] = true
+					}
+				}
+				return results, ident.Name
+			}
+		}
+		return nil, ""
+	}
+	ident, ok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
+	if !ok || ident.Name == "_" || (!patternkit.IsErrorVarName(ident.Name) && ident.Name != "e") {
+		return nil, ""
+	}
+	results := make(map[string]bool, len(assign.Lhs)-1)
+	for _, lhs := range assign.Lhs[:len(assign.Lhs)-1] {
+		if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+			results[id.Name] = true
+		}
+	}
+	return results, ident.Name
+}
+
+// errorNilCheckName identifies the error variable tested against nil.
+func errorNilCheckName(ctx *core.FileContext, cond ast.Expr) string {
+	if name := patternkit.ErrNilCheckName(cond); name != "" {
+		return name
+	}
+	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
+	if !ok || bin.Op != token.NEQ || !helpers.IsNilIdent(bin.Y) {
+		return ""
+	}
+	ident, ok := ast.Unparen(bin.X).(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	if ctx.GoTypesInfo == nil {
+		if patternkit.IsErrorVarName(ident.Name) || ident.Name == "e" {
+			return ident.Name
+		}
+		return ""
+	}
+	if patternkit.IsErrorType(ctx.GoTypesInfo.TypeOf(ident)) {
+		return ident.Name
+	}
+	return ""
+}
+
+// detectLiteralReturn reports a constant nonzero return used after a failed call.
+func (r *FallbackReturnRule) detectLiteralReturn(ctx *core.FileContext, ifStmt *ast.IfStmt, errName string) []*core.Violation {
+	if ctx.GoTypesInfo == nil || functionHasErrorResult(ctx, ifStmt) || readsIdentOutsideLoggers(ifStmt.Body, errName) || r.hasLoggingStatement(ifStmt) || r.blockExplainsFallback(ctx, ifStmt.Body) {
+		return nil
+	}
+	errorChannels := zeroResultPositionsOnSuccess(ctx, ifStmt)
+	produced := namesAssignedFromCalls(ifStmt.Body)
+	var violations []*core.Violation
+	patternkit.ForEachOwnStatement(ifStmt.Body, func(stmt ast.Stmt) {
+		ret, ok := stmt.(*ast.ReturnStmt)
+		if !ok {
+			return
+		}
+		for i, result := range ret.Results {
+			if !errorChannels[i] && isNonZeroFallbackValue(ctx, result, produced) {
+				pos := ctx.PositionFor(ret)
+				v := r.CreateViolation(ctx.RelPath, pos.Line, "The call failed and returns a fallback value instead - callers go on as if it had succeeded")
+				v.WithCode(ctx.GetLine(pos.Line))
+				v.WithSuggestion("Return the error. A deliberate failover returns the result of another call; a deliberate fallback is suppressed with the reason.")
+				v.WithContext("pattern", "replaced-failed-result")
+				violations = append(violations, v)
+				return
+			}
+		}
+	})
+	return violations
+}
+
+// zeroResultPositionsOnSuccess reports result positions that every return
+// outside the failed-call branch sets to a zero value.
+func zeroResultPositionsOnSuccess(ctx *core.FileContext, branch *ast.IfStmt) map[int]bool {
+	fn := enclosingFunction(ctx, branch)
+	if fn == nil {
+		return nil
+	}
+	var body *ast.BlockStmt
+	var resultCount int
+	var resultTypes []types.Type
+	switch node := fn.(type) {
+	case *ast.FuncDecl:
+		body = node.Body
+		if obj, ok := ctx.GoTypesInfo.Defs[node.Name].(*types.Func); ok {
+			if sig, ok := obj.Type().(*types.Signature); ok {
+				resultCount = sig.Results().Len()
+				for i := 0; i < resultCount; i++ {
+					resultTypes = append(resultTypes, sig.Results().At(i).Type())
+				}
+			}
+		}
+	case *ast.FuncLit:
+		body = node.Body
+		if sig, ok := ctx.GoTypesInfo.TypeOf(node).(*types.Signature); ok {
+			resultCount = sig.Results().Len()
+			for i := 0; i < resultCount; i++ {
+				resultTypes = append(resultTypes, sig.Results().At(i).Type())
+			}
+		}
+	}
+	if body == nil || resultCount == 0 {
+		return nil
+	}
+	seen, allZero, returns := successfulResultPositions(ctx, fn, body, branch, resultCount)
+	if returns == 0 {
+		return nil
+	}
+	positions := make(map[int]bool)
+	for i := range allZero {
+		if seen[i] && allZero[i] && isErrorChannelType(resultTypes[i]) {
+			positions[i] = true
+		}
+	}
+	return positions
+}
+
+// successfulResultPositions summarizes named return positions on successful paths.
+func successfulResultPositions(ctx *core.FileContext, fn ast.Node, body *ast.BlockStmt, branch *ast.IfStmt, resultCount int) ([]bool, []bool, int) {
+	seen := make([]bool, resultCount)
+	allZero := make([]bool, resultCount)
+	for i := range allZero {
+		allZero[i] = true
+	}
+	returns := 0
+	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok || (ret.Pos() >= branch.Body.Pos() && ret.End() <= branch.Body.End()) {
+			return true
+		}
+		if inErrorReturnBranch(ctx, body, ret) {
+			return true
+		}
+		if len(ret.Results) == 0 {
+			returns++
+			for i := range seen {
+				seen[i] = true
+			}
+			return true
+		}
+		if len(ret.Results) != resultCount {
+			for i := range allZero {
+				allZero[i] = false
+			}
+			return true
+		}
+		returns++
+		for i, result := range ret.Results {
+			seen[i] = true
+			if isDefinitelyNonZeroReturnValue(ctx, body, ret, result) {
+				allZero[i] = false
+			}
+		}
+		return true
+	})
+	return seen, allZero, returns
+}
+
+// isErrorChannelType limits return-position checks to scalar and nilable results.
+func isErrorChannelType(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	switch typ.Underlying().(type) {
+	case *types.Basic, *types.Pointer, *types.Interface:
+		return true
+	default:
+		return false
+	}
+}
+
+// inErrorReturnBranch reports returns nested in a branch that checks an error.
+func inErrorReturnBranch(ctx *core.FileContext, functionBody *ast.BlockStmt, ret *ast.ReturnStmt) bool {
+	found := false
+	ast.Inspect(functionBody, func(n ast.Node) bool {
+		if found || n == nil {
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok || ifStmt.Body.Pos() > ret.Pos() || ifStmt.Body.End() < ret.End() {
+			return true
+		}
+		found = errorNilCheckName(ctx, ifStmt.Cond) != ""
+		return !found
+	})
+	return found
+}
+
+// isDefinitelyNonZeroReturnValue reports a known nonzero result; unknown
+// values remain possible error channels.
+func isDefinitelyNonZeroReturnValue(ctx *core.FileContext, body *ast.BlockStmt, ret *ast.ReturnStmt, expr ast.Expr) bool {
+	if ctx.GoTypesInfo == nil {
+		return false
+	}
+	if info, ok := ctx.GoTypesInfo.Types[ast.Unparen(expr)]; ok && info.Value != nil {
+		return !isZeroConstantValue(info.Value)
+	}
+	if ident, ok := ast.Unparen(expr).(*ast.Ident); ok {
+		return identifierProducedByCall(ctx, body, ret, ident)
+	}
+	return true
+}
+
+// identifierProducedByCall reports whether the latest prior assignment to an
+// identifier gives it a call result.
+func identifierProducedByCall(ctx *core.FileContext, body *ast.BlockStmt, ret *ast.ReturnStmt, target *ast.Ident) bool {
+	if ctx.GoTypesInfo == nil {
+		return false
+	}
+	targetObject := ctx.GoTypesInfo.ObjectOf(target)
+	if targetObject == nil {
+		return false
+	}
+	var latestPos token.Pos
+	var latestCall bool
+	ast.Inspect(body, func(node ast.Node) bool {
+		if node == nil || node.Pos() >= ret.Pos() {
+			return node != nil
+		}
+		if _, ok := node.(*ast.FuncLit); ok {
+			return false
+		}
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok || assign.Pos() < latestPos {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			ident, ok := ast.Unparen(lhs).(*ast.Ident)
+			if !ok || ctx.GoTypesInfo.ObjectOf(ident) != targetObject {
+				continue
+			}
+			latestPos = assign.Pos()
+			_, singleCall := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+			indexedCall := false
+			if i < len(assign.Rhs) {
+				_, indexedCall = ast.Unparen(assign.Rhs[i]).(*ast.CallExpr)
+			}
+			latestCall = len(assign.Rhs) == 1 && singleCall || indexedCall
+		}
+		return true
+	})
+	return latestCall
+}
+
+// enclosingFunction finds the closest function declaration or literal
+// containing the checked branch.
+func enclosingFunction(ctx *core.FileContext, branch *ast.IfStmt) ast.Node {
+	var nearest ast.Node
+	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
+		var body *ast.BlockStmt
+		switch fn := n.(type) {
+		case *ast.FuncDecl:
+			body = fn.Body
+		case *ast.FuncLit:
+			body = fn.Body
+		default:
+			return true
+		}
+		if body != nil && body.Pos() <= branch.Pos() && body.End() >= branch.End() && (nearest == nil || body.End()-body.Pos() < nearest.End()-nearest.Pos()) {
+			nearest = n
+		}
+		return true
+	})
+	return nearest
+}
+
+// functionHasErrorResult reports whether the enclosing function returns an error.
+func functionHasErrorResult(ctx *core.FileContext, branch *ast.IfStmt) bool {
+	nearest := enclosingFunction(ctx, branch)
+	if nearest == nil {
+		return false
+	}
+	if ctx.GoTypesInfo != nil {
+		var sig *types.Signature
+		switch fn := nearest.(type) {
+		case *ast.FuncDecl:
+			if obj, ok := ctx.GoTypesInfo.Defs[fn.Name].(*types.Func); ok {
+				sig, _ = obj.Type().(*types.Signature)
+			}
+		case *ast.FuncLit:
+			sig, _ = ctx.GoTypesInfo.TypeOf(fn).(*types.Signature)
+		}
+		if sig != nil {
+			for result := range sig.Results().Variables() {
+				if patternkit.IsErrorType(result.Type()) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	var results *ast.FieldList
+	switch fn := nearest.(type) {
+	case *ast.FuncDecl:
+		results = fn.Type.Results
+	case *ast.FuncLit:
+		results = fn.Type.Results
+	}
+	if results != nil {
+		for _, field := range results.List {
+			if id, ok := field.Type.(*ast.Ident); ok && id.Name == "error" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isNonZeroFallbackValue accepts typed constants and nonempty composite literals, not call results.
+func isNonZeroFallbackValue(ctx *core.FileContext, expr ast.Expr, produced map[string]bool) bool {
+	if ctx.GoTypesInfo == nil || !isLiteralOrConstantExpr(ctx, expr, produced) {
+		return false
+	}
+	if value, ok := ctx.GoTypesInfo.Types[expr]; ok && value.Value != nil {
+		return !patternkit.IsZeroValueExpr(expr, ctx.GoTypesInfo) && !isZeroConstantValue(value.Value)
+	}
+	lit, ok := ast.Unparen(expr).(*ast.CompositeLit)
+	if !ok || len(lit.Elts) == 0 {
+		return false
+	}
+	for _, elt := range lit.Elts {
+		value := elt
+		if keyed, ok := elt.(*ast.KeyValueExpr); ok {
+			value = keyed.Value
+		}
+		if isNonZeroFallbackValue(ctx, value, produced) {
+			return true
+		}
+	}
+	return false
+}
+
+// isZeroConstantValue reports whether a typed constant is a zero value.
+func isZeroConstantValue(value constant.Value) bool {
+	if value == nil {
+		return true
+	}
+	switch value.Kind() {
+	case constant.Bool:
+		return !constant.BoolVal(value)
+	case constant.String:
+		return constant.StringVal(value) == ""
+	case constant.Int, constant.Float:
+		return constant.Sign(value) == 0
+	case constant.Complex:
+		return constant.Sign(constant.Real(value)) == 0 && constant.Sign(constant.Imag(value)) == 0
+	default:
+		return true
+	}
+}
+
+// isLiteralOrConstantExpr reports typed constants and composite literals, excluding produced variables.
+func isLiteralOrConstantExpr(ctx *core.FileContext, expr ast.Expr, produced map[string]bool) bool {
+	if ctx.GoTypesInfo == nil {
+		return false
+	}
+	expr = ast.Unparen(expr)
+	if ident, ok := expr.(*ast.Ident); ok && produced[ident.Name] {
+		return false
+	}
+	if value, ok := ctx.GoTypesInfo.Types[expr]; ok && value.Value != nil {
+		return true
+	}
+	switch expr.(type) {
+	case *ast.CompositeLit:
+		return true
+	}
+	return false
 }
 
 // detectReplacedResult reports, in the `if err != nil` that follows a call,
@@ -816,7 +1238,11 @@ func (r *FallbackReturnRule) checkErrorBranch(ctx *core.FileContext, ifStmt *ast
 			violations = append(violations, v)
 			continue
 		}
-
+		// Calls in an if initializer use the stricter failed-call checks,
+		// which account for the function signature and the returned value.
+		if ifStmt.Init != nil {
+			continue
+		}
 		for _, result := range retStmt.Results {
 			if !r.isFallbackReturn(result) {
 				continue
@@ -1275,14 +1701,22 @@ func (r *FallbackReturnRule) hasLegitimateComment(lines []string, lineIdx int) b
 
 // hasLoggingStatement checks if the if block logs (see helpers.IsLoggerCall).
 func (r *FallbackReturnRule) hasLoggingStatement(ifStmt *ast.IfStmt) bool {
-	for _, stmt := range ifStmt.Body.List {
-		if exprStmt, ok := stmt.(*ast.ExprStmt); ok {
-			if call, ok := exprStmt.X.(*ast.CallExpr); ok && helpers.IsLoggerCall(call) {
-				return true
+	found := false
+	ast.Inspect(ifStmt.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.CallExpr:
+			if helpers.IsLoggerCall(node) {
+				found = true
 			}
 		}
-	}
-	return false
+		return !found
+	})
+	return found
 }
 
 // detectImplicitElseFallback detects pattern: if good { return good } return fallback
