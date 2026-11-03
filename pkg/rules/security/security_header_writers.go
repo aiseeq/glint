@@ -124,3 +124,8 @@ func headerWrites(ctx *core.FileContext) []headerWrite {
 	}
 	return writes
 }
+
+// ReportsOn reports whether HeaderMultipleWritersRule can report on this file.
+func (r *HeaderMultipleWritersRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

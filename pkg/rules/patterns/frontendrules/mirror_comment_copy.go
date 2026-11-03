@@ -49,6 +49,11 @@ func mirrorInitializer(line string) string {
 // rule that declines is not run at all, so TypeScript-only roots ask too.
 func (r *MirrorCommentCopyRule) NeedsTypedGoProject([]*core.FileContext) bool { return true }
 
+// ReportsOn reports whether this rule can find a declaration in this file.
+func (r *MirrorCommentCopyRule) ReportsOn(ctx *core.FileContext) bool {
+	return !ctx.IsTestFile() && (ctx.IsGoFile() || ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile())
+}
+
 // TypedGoProjectImports lists no imports: the need does not depend on them.
 func (r *MirrorCommentCopyRule) TypedGoProjectImports() []string { return nil }
 

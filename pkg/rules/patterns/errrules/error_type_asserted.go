@@ -32,6 +32,7 @@ func init() {
 // the Is and As methods of an error type, which errors.Is and errors.As call
 // on one link of the chain at a time.
 type ErrorTypeAssertedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

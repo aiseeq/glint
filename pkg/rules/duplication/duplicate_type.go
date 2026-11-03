@@ -40,6 +40,7 @@ func init() {
 // alpha.Client and beta.Client behind one interface are two providers, not
 // two copies.
 type DuplicateTypeAcrossPackagesRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

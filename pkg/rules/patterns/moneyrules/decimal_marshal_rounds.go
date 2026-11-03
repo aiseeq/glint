@@ -31,6 +31,7 @@ func init() {
 // carries itself (a.StringFixed(a.places)) is its own scale and is not
 // reported.
 type DecimalMarshalRoundsRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

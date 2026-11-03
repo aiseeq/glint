@@ -191,3 +191,12 @@ func constantNameWords(name string) []string {
 	}
 	return words
 }
+
+func frontendProjectReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile()
+}
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *TSConstantCopiesGoConstantRule) ReportsOn(ctx *core.FileContext) bool {
+	return frontendProjectReportsOn(ctx)
+}

@@ -21,6 +21,7 @@ func init() {
 // only when its operand is known not to be a channel or an iterator: through
 // types, or, in a file without type information, a literal operand.
 type EmptyBlockRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

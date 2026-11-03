@@ -30,6 +30,7 @@ func init() {
 // declares a method of that name: it may be how the type satisfies it. An
 // exported method may satisfy an interface anywhere and is not checked.
 type UnusedSymbolsRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

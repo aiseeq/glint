@@ -25,7 +25,10 @@ func init() { rules.Register(NewPartialFlagUnreadRule()) }
 // Not flagged: functions that check or pass on the flag, return or pass the
 // whole structure, set the flag, accept the structure as a parameter, or are
 // methods or constructors of the structure itself.
-type PartialFlagUnreadRule struct{ *rules.BaseRule }
+type PartialFlagUnreadRule struct {
+	rules.GoFileFindingRule
+	*rules.BaseRule
+}
 
 // NewPartialFlagUnreadRule creates the rule.
 func NewPartialFlagUnreadRule() *PartialFlagUnreadRule {

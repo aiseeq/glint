@@ -27,6 +27,7 @@ func init() {
 // encode it (json.Marshal). pgx accepts slices, so a project on pgx's
 // database/sql driver is not checked.
 type SQLUnsupportedArgRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

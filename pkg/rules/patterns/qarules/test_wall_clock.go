@@ -363,3 +363,8 @@ func fakesOrReadsClock(body *ast.BlockStmt) bool {
 	})
 	return found
 }
+
+// ReportsOn reports whether TestDependsOnWallClockRule can report on this file.
+func (r *TestDependsOnWallClockRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

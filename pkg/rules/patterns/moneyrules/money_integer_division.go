@@ -33,6 +33,7 @@ func init() {
 // reads what the syntax states for certain: new(big.Int), big.NewInt with a
 // literal, the decimal package's constructors.
 type MoneyIntegerDivisionTruncatesRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

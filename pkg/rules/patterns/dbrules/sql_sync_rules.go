@@ -151,6 +151,7 @@ func (r *SQLChildRowsIncludeVoidedParentRule) AnalyzeFile(ctx *core.FileContext)
 // function that also updates the parent (a CTE, a second statement) is left
 // out.
 type DeltaExportMissesUnlinkRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -295,6 +296,7 @@ func NewSyncNewerWinsOnStampedTableRule() *SyncNewerWinsOnStampedTableRule {
 
 // SyncNewerWinsOnStampedTableRule is the rule NewSyncNewerWinsOnStampedTableRule creates.
 type SyncNewerWinsOnStampedTableRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -476,6 +478,7 @@ var unlinkCall = regexp.MustCompile(`^(?:Unlink|Detach|Unassign|Remove|Delete|Pr
 //
 // The copy keeps every link it ever received and drifts from its source.
 type MirrorImportNeverRemovesRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -598,6 +601,7 @@ var skipCounter = regexp.MustCompile(`(?i)skip|ignor|unmatched|unlinked|leftover
 // LIMIT $2) and marks nothing: a pass that finds no change does not touch
 // updated_at, so the same rows head every page.
 type PendingPageSkipsStayAtHeadRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -964,4 +968,9 @@ func countsSkipped(body *ast.BlockStmt) bool {
 		return !found
 	})
 	return found
+}
+
+// ReportsOn reports whether SQLChildRowsIncludeVoidedParentRule can report on this file.
+func (r *SQLChildRowsIncludeVoidedParentRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
 }

@@ -299,6 +299,7 @@ func (f *flagFeeds) markChecked(n ast.Node) {
 
 // flagRule runs a check over the flag values of every package.
 type flagRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	suggestion string
 	check      func(feeds *flagFeeds, file *core.FileContext) []flagFinding

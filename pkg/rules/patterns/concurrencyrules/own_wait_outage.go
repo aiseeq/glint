@@ -37,6 +37,7 @@ func init() {
 // tells the deadline apart (context.DeadlineExceeded, context.Canceled,
 // ctx.Err()).
 type OwnWaitReportedAsOutageRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

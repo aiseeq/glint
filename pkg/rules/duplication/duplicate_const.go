@@ -50,6 +50,7 @@ var qualifiedName = regexp.MustCompile(`\b([a-z][a-z0-9_]*)\.([A-Za-z_][A-Za-z0-
 // enumeration counts its own states; test files and mock packages are left
 // out.
 type DuplicateConstAcrossPackagesRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

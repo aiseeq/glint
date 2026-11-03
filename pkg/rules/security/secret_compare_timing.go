@@ -39,6 +39,7 @@ func init() {
 // constant (an empty check, a token kind) reveals nothing, and tests are
 // left alone.
 type SecretCompareNotConstantTimeRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

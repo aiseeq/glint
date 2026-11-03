@@ -33,6 +33,7 @@ func init() {
 // expression are compared; a route with a host, header, query or custom
 // matcher may let requests through, and is not taken as shadowing.
 type MuxRouteShadowedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -40,6 +40,7 @@ func init() {
 // its parameter into an envelope (a struct or map literal, inline or in a
 // local) and encodes it.
 type NilSliceJSONNullRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

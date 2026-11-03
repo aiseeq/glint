@@ -34,6 +34,7 @@ func init() {
 // integer formatting and parsing, a linear search for an element, absolute
 // value, the smaller/larger of two values, and reversing a slice in place.
 type ReimplementedStdlibRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

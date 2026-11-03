@@ -25,7 +25,10 @@ func init() { rules.Register(NewClockBypassRule()) }
 // The clock_package setting enables module-wide checks, including SQL literals.
 // Not flagged: the clock implementation, tests, or a time.Now()
 // used to measure elapsed time with time.Since(start) in the same function.
-type ClockBypassRule struct{ *rules.BaseRule }
+type ClockBypassRule struct {
+	rules.GoFileFindingRule
+	*rules.BaseRule
+}
 
 // NewClockBypassRule creates the clock-bypass rule.
 func NewClockBypassRule() *ClockBypassRule {

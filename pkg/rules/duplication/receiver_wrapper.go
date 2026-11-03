@@ -32,6 +32,7 @@ func init() {
 // wrapper that is the only way the package takes the field to the function
 // is a choice of spelling: both are left alone, and so are test files.
 type ReceiverWrapperDuplicatesCallRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

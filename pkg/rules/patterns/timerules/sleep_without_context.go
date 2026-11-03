@@ -22,6 +22,7 @@ func init() {
 // Typical case: a sync job sleeps between provider calls with a live ctx in
 // scope; stopping the sync has to wait for the whole backlog of pauses.
 type SleepWithoutContextRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

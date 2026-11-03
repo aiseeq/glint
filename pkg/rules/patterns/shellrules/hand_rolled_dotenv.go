@@ -212,3 +212,8 @@ func (r *HandRolledDotenvParserRule) shellKeyReads(src *patternkit.ShellSource) 
 	}
 	return out
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *HandRolledDotenvParserRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile() || shellProjectReportsOn(ctx)
+}

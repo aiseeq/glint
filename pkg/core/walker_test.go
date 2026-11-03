@@ -37,6 +37,21 @@ func TestWalkerDoesNotFollowDirectorySymlinks(t *testing.T) {
 	require.Empty(t, contexts)
 }
 
+func TestWalkerFileScopesDoNotBuildGitignoreIndex(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "selected.conf")
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.conf\n"), 0644))
+	require.NoError(t, os.WriteFile(path, []byte("setting=value\n"), 0644))
+
+	walker := NewWalker(root, DefaultConfig()).WithScopes([]string{path})
+	contexts, errs := walker.WalkSync()
+
+	require.Empty(t, errs)
+	require.Len(t, contexts, 1)
+	assert.Equal(t, "selected.conf", contexts[0].RelPath)
+	assert.Nil(t, walker.gitignore)
+}
+
 func TestWalkerContinuesPastUnreadableDir(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root ignores directory permissions")

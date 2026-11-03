@@ -42,6 +42,7 @@ func init() {
 // alone; and a loop that does not repeat a request at all (no attempt
 // counter, no pause, no continue), such as a pagination walk.
 type RetryDropsTransportFailureRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

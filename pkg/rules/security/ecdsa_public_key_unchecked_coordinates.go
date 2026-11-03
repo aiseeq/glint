@@ -15,6 +15,7 @@ func init() {
 
 // ECDSAPublicKeyUncheckedCoordinatesRule detects ECDSA public keys built from unvalidated byte coordinates.
 type ECDSAPublicKeyUncheckedCoordinatesRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

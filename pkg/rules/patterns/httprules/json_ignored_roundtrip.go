@@ -31,6 +31,7 @@ func init() {
 // back from storage always sees the zero value, and what depends on it never
 // happens there.
 type JSONIgnoredFieldLostInRoundTripRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

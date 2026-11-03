@@ -66,6 +66,7 @@ func init() {
 // fields of a type handed to a decoder (json.Unmarshal and the like), which
 // reflection fills without any assignment appearing in the source.
 type NeverAssignedFieldRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

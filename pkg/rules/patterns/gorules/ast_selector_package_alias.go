@@ -13,7 +13,10 @@ func init() { rules.Register(NewASTSelectorPackageResolvedByAliasRule()) }
 
 // ASTSelectorPackageResolvedByAliasRule reports AST selector identifiers used
 // as unresolved package keys.
-type ASTSelectorPackageResolvedByAliasRule struct{ *rules.BaseRule }
+type ASTSelectorPackageResolvedByAliasRule struct {
+	rules.GoFileFindingRule
+	*rules.BaseRule
+}
 
 // NewASTSelectorPackageResolvedByAliasRule creates the rule.
 func NewASTSelectorPackageResolvedByAliasRule() *ASTSelectorPackageResolvedByAliasRule {

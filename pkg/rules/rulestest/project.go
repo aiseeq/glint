@@ -214,7 +214,29 @@ func ProjectFilesRulePlaces(t *testing.T, rule rules.ProjectFilesRule, files map
 	for _, file := range contexts {
 		violations = append(violations, rule.AnalyzeFile(file)...)
 	}
+	AssertFindingFiles(t, rule, contexts, violations)
 	return ViolationPlaces(violations)
+}
+
+// AssertFindingFiles checks that every finding's file satisfies the rule's
+// declared finding-file predicate.
+func AssertFindingFiles(t *testing.T, rule rules.Rule, contexts []*core.FileContext, findings []*core.Violation) {
+	t.Helper()
+	declared, ok := rule.(rules.FindingFileRule)
+	if !ok {
+		return
+	}
+	for _, finding := range findings {
+		found := false
+		for _, ctx := range contexts {
+			if filepath.Clean(ctx.Path) != filepath.Clean(finding.File) && filepath.Clean(ctx.RelPath) != filepath.Clean(finding.File) {
+				continue
+			}
+			found = declared.ReportsOn(ctx)
+			break
+		}
+		require.True(t, found, "rule %q reported file %q outside its declared finding files", rule.Name(), finding.File)
+	}
 }
 
 // ProjectRulePlaces runs a project rule on files and returns sorted file:line

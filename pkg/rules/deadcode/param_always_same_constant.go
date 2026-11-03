@@ -21,6 +21,7 @@ func init() {
 // ParamAlwaysSameConstantRule detects parameters that receive one constant at
 // every in-module call and control a branch in their function.
 type ParamAlwaysSameConstantRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -20,6 +20,7 @@ func init() {
 // UnboundedResponseReadRule detects unbounded reads of HTTP response bodies
 // and of decompressed streams.
 type UnboundedResponseReadRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -198,3 +198,8 @@ func collectDBColumns(files []*core.FileContext) map[string]string {
 	}
 	return columns
 }
+
+// ReportsOn reports whether GoFilterCopiesSQLPredicateRule can report on this file.
+func (r *GoFilterCopiesSQLPredicateRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

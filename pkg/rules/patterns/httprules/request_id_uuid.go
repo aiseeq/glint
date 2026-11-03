@@ -29,6 +29,7 @@ func init() {
 // uuid.Parse on the way - in the handler or in a function it is handed to -
 // is fine.
 type RequestIDUnparsedForUUIDColumnRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

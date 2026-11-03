@@ -68,6 +68,7 @@ func isPaginationType(t types.Type) bool {
 // The response says "page 2 of 20 per page" and carries every row: the
 // client renders the whole table on each page, and the next page repeats it.
 type PaginationParamNotAppliedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -252,6 +253,7 @@ func isPageResponseType(t types.Type) bool {
 // Every request reads the whole table to return twenty rows of it: the cost
 // grows with the table, not with the page, and so does the memory.
 type PaginationInMemoryRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

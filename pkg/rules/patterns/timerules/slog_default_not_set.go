@@ -28,6 +28,7 @@ func init() {
 // the JSON format and the fields of the configured logger, and the log
 // pipeline that parses JSON drops them.
 type SlogDefaultNotSetRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

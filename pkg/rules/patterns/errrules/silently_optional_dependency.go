@@ -37,6 +37,7 @@ func init() {
 // правильно, и трогать его незачем. Считается по всему проекту, тестовые файлы не в счёт —
 // там конструируют без зависимостей намеренно.
 type SilentlyOptionalDependencyRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

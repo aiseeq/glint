@@ -39,6 +39,7 @@ func init() {
 // package already shares the implementation; test files and mock packages
 // are left out.
 type DuplicateFuncAcrossPackagesRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

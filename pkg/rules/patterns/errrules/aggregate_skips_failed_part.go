@@ -359,3 +359,8 @@ func accumulates(stmt ast.Stmt, values map[string]bool, loopPos token.Pos) bool 
 	})
 	return usesValue && usesAcc
 }
+
+// ReportsOn reports whether AggregateSkipsFailedPartRule can report on this file.
+func (r *AggregateSkipsFailedPartRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

@@ -38,6 +38,7 @@ func init() {
 // reported when cookies of its name are set and none of them has its Domain
 // presence and Path.
 type CookieDeletedWithOtherAttributesRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

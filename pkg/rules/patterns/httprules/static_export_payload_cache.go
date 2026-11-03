@@ -125,3 +125,8 @@ func setsRevalidation(body *ast.BlockStmt) bool {
 	})
 	return found
 }
+
+// ReportsOn reports whether UnhashedBuildDataServedCacheableRule can report on this file.
+func (r *UnhashedBuildDataServedCacheableRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

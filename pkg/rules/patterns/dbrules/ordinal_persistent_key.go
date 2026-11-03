@@ -46,6 +46,7 @@ func NewOrdinalInPersistentKeyRule() *OrdinalInPersistentKeyRule {
 // OrdinalInPersistentKeyRule is the rule; it needs the call sites of every
 // function to follow an index parameter up.
 type OrdinalInPersistentKeyRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

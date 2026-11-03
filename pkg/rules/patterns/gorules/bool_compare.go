@@ -16,6 +16,7 @@ func init() {
 
 // BoolCompareRule detects redundant boolean comparisons
 type BoolCompareRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

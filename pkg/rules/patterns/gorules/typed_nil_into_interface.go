@@ -51,6 +51,7 @@ func init() {
 //     и после `if ptr == nil { ptr = &T{} }` (или любого `ptr = &T{}` / `new(T)`)
 //     признаются правильными — это и есть нужная нормализация.
 type TypedNilIntoInterfaceRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

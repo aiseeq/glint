@@ -29,6 +29,7 @@ func init() {
 // x != nil, a read inside a function literal and a pointer assigned again
 // between the read and the check are not reported.
 type NilCheckAfterDereferenceRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

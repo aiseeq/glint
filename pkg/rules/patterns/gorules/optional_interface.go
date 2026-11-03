@@ -44,6 +44,7 @@ func init() {
 // interfaces declared in the project are judged: io.Writer and the like are
 // implemented outside it.
 type OptionalInterfaceUnsatisfiedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

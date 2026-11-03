@@ -1003,3 +1003,18 @@ func enclosingText(text string, spans []quotedSpan, offset int) string {
 	}
 	return text[start : offset+end]
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *certbotReloadHookRule) ReportsOn(ctx *core.FileContext) bool {
+	return shellProjectReportsOn(ctx)
+}
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *shellSourceTextRule) ReportsOn(ctx *core.FileContext) bool {
+	return shellProjectReportsOn(ctx)
+}
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *unitEnvRule) ReportsOn(ctx *core.FileContext) bool {
+	return shellProjectReportsOn(ctx)
+}

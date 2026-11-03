@@ -53,6 +53,7 @@ func init() {
 // not a package. Test files keep fixtures and
 // quotes of old output and are not checked.
 type DocStaleReferenceRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

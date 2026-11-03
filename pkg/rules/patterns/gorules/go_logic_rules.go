@@ -426,12 +426,13 @@ func memoFills(body *ast.BlockStmt, cache string, after token.Pos) []memoFill {
 // When the pattern stops matching - the code it scans was renamed - the loop
 // runs zero times and the test passes without checking anything.
 type AssertionsOnlyInScanLoopRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
 // NewAssertionsOnlyInScanLoopRule creates the rule
 func NewAssertionsOnlyInScanLoopRule() *AssertionsOnlyInScanLoopRule {
-	return &AssertionsOnlyInScanLoopRule{rules.NewBaseRule("test-assertions-only-in-scan-loop", "patterns",
+	return &AssertionsOnlyInScanLoopRule{BaseRule: rules.NewBaseRule("test-assertions-only-in-scan-loop", "patterns",
 		"Detects a test whose assertions sit only inside a loop over regexp matches, with no check that anything matched — a pattern that stops matching makes the test pass without checking",
 		core.SeverityMedium)}
 }
@@ -680,12 +681,13 @@ func literalForRole(body *ast.BlockStmt, role, idVar string, pos token.Pos, info
 //
 //	for pos, cell := range dst { dst[pos-1] = cell }   // column 0 writes into the previous row
 type FlatGridNeighborCrossesRowRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
 // NewFlatGridNeighborCrossesRowRule creates the rule
 func NewFlatGridNeighborCrossesRowRule() *FlatGridNeighborCrossesRowRule {
-	return &FlatGridNeighborCrossesRowRule{rules.NewBaseRule("flat-grid-neighbor-crosses-row", "patterns",
+	return &FlatGridNeighborCrossesRowRule{BaseRule: rules.NewBaseRule("flat-grid-neighbor-crosses-row", "patterns",
 		"Detects pos-1 or pos+1 over a flattened grid (the file reads pos%W and pos/W) with no guard on pos%W — the first or last column reaches into another row or out of the slice",
 		core.SeverityMedium)}
 }
@@ -1009,12 +1011,13 @@ func callsWith(stmts []ast.Stmt, obj types.Object, info *types.Info) []*ast.Call
 //	RuleScoutHome  = "B4"
 //	RuleRushStage = "B4"   // the summary by rule adds both together
 type ConstFamilyDuplicateValueRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
 // NewConstFamilyDuplicateValueRule creates the rule
 func NewConstFamilyDuplicateValueRule() *ConstFamilyDuplicateValueRule {
-	return &ConstFamilyDuplicateValueRule{rules.NewBaseRule("const-family-duplicate-value", "patterns",
+	return &ConstFamilyDuplicateValueRule{BaseRule: rules.NewBaseRule("const-family-duplicate-value", "patterns",
 		"Detects two string constants of one naming family (Rule*, Event*, Code*) in a package of otherwise distinct values that hold the same value — whatever keys on the value mixes the two up",
 		core.SeverityMedium)}
 }
@@ -1236,12 +1239,13 @@ func nameRole(name string) (stem, role string) {
 //
 // The first message written silences the other for the window.
 type ThrottleStateSharedByMessagesRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
 // NewThrottleStateSharedByMessagesRule creates the rule
 func NewThrottleStateSharedByMessagesRule() *ThrottleStateSharedByMessagesRule {
-	return &ThrottleStateSharedByMessagesRule{rules.NewBaseRule("throttle-state-shared-by-messages", "patterns",
+	return &ThrottleStateSharedByMessagesRule{BaseRule: rules.NewBaseRule("throttle-state-shared-by-messages", "patterns",
 		"Detects a log throttle (if now-last[k] < every { return }; last[k] = now) whose state is shared by functions writing different messages — the first message written silences the others for the window",
 		core.SeverityLow)}
 }

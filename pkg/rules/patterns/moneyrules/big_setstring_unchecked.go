@@ -25,6 +25,7 @@ func init() {
 // undefined (zero in practice): the amount silently becomes 0 instead of the
 // call failing. Check the ok result and return an error.
 type BigSetStringUncheckedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -21,6 +21,7 @@ func valueSetDriftFindings(t *testing.T, files map[string]string) []*core.Violat
 	for _, ctx := range contexts {
 		violations = append(violations, rule.AnalyzeFile(ctx)...)
 	}
+	patterntest.AssertFindingFiles(t, rule, contexts, violations)
 	return violations
 }
 

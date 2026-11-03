@@ -35,6 +35,7 @@ func init() {
 // decoded from an incoming request are judged: a provider's response keeps
 // the provider's names.
 type RequestJSONTagCaseRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

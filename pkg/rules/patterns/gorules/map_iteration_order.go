@@ -37,6 +37,7 @@ func init() {
 // they are used, and slices handed to a call other than a writer - a batch
 // lookup or a query over a set of ids answers the same in any order.
 type MapIterationOrderRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

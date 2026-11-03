@@ -45,6 +45,7 @@ func init() {
 // of the nested value whose prefixed name the target has and the literal
 // skips is reported.
 type StructMappingDropsFieldRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

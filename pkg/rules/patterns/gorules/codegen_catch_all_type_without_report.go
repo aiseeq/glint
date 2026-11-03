@@ -21,6 +21,7 @@ func init() {
 // CodegenCatchAllTypeWithoutReportRule detects type generators that silently
 // replace unsupported types with a catch-all type.
 type CodegenCatchAllTypeWithoutReportRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

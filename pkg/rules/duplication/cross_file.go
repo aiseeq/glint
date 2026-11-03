@@ -273,3 +273,8 @@ func isFrontendBoilerplate(line string) bool {
 	}
 	return false
 }
+
+// ReportsOn reports whether CrossFileDuplicateRule can report on this file.
+func (r *CrossFileDuplicateRule) ReportsOn(ctx *core.FileContext) bool {
+	return isDuplicationCandidate(ctx)
+}

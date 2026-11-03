@@ -67,6 +67,7 @@ func init() {
 // AuditActorPropagationRule detects loss of human actor and audit source
 // attribution before typed audit sinks.
 type AuditActorPropagationRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	sinks map[string]bool
 }

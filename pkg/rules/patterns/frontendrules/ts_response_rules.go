@@ -538,3 +538,8 @@ func (r *TSNumberFieldForDecimalJSONRule) AnalyzeFile(ctx *core.FileContext) []*
 	}
 	return out
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *TSNumberFieldForDecimalJSONRule) ReportsOn(ctx *core.FileContext) bool {
+	return frontendProjectReportsOn(ctx)
+}

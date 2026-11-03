@@ -30,6 +30,7 @@ func init() {
 // text glued to it, and monitoring, logs and tests reading the status see a
 // success. Rendered into a buffer first, the failure can still become a 500.
 type TemplateExecutedIntoResponseRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

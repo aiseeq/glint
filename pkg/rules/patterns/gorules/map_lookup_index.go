@@ -26,6 +26,7 @@ func init() {
 // check the length first. A slice whose length the function checks is not
 // reported.
 type IndexIntoMapLookupRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

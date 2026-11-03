@@ -39,6 +39,7 @@ func init() {
 // it, and is left alone; so are a setter and a function that only builds
 // values of the type (rows of data written as literals).
 type HelperOutsideTypePackageRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

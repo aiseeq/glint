@@ -447,3 +447,8 @@ func joinRoute(prefix, route string) string {
 	}
 	return path.Clean(strings.TrimSuffix(prefix, "/") + "/" + strings.TrimPrefix(route, "/"))
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *TSPathNotRoutedRule) ReportsOn(ctx *core.FileContext) bool {
+	return frontendProjectReportsOn(ctx)
+}

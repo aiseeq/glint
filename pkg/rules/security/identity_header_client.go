@@ -32,6 +32,7 @@ func init() {
 // proxy sets by convention (X-Forwarded-*, X-Auth-Request-*) are left to
 // proxy-header-trust.
 type IdentityHeaderFromClientRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

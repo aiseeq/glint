@@ -23,6 +23,7 @@ func init() {
 // by length, callers pass a literal nil for it, or it is a variable left nil
 // until one path sets it to a slice it did not build.
 type NilSliceRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

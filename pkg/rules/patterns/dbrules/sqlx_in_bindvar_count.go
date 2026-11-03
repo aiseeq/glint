@@ -17,7 +17,10 @@ func init() { rules.Register(NewSQLXInBindvarCountRule()) }
 
 // SQLXInBindvarCountRule detects sqlx.In calls whose query has a different
 // number of question mark bind variables than arguments.
-type SQLXInBindvarCountRule struct{ *rules.BaseRule }
+type SQLXInBindvarCountRule struct {
+	rules.GoFileFindingRule
+	*rules.BaseRule
+}
 
 // NewSQLXInBindvarCountRule creates the rule.
 func NewSQLXInBindvarCountRule() *SQLXInBindvarCountRule {

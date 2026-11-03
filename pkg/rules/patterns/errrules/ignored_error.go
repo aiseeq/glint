@@ -26,6 +26,7 @@ func init() {
 // anything useful to the caller, and writing the blank there is the documented way to say
 // "checked and deliberately dropped".
 type IgnoredErrorRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

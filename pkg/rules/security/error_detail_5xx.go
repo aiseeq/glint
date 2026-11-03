@@ -535,3 +535,8 @@ func carriesErrorText(arg ast.Expr) bool {
 	})
 	return found
 }
+
+// ReportsOn reports whether ErrorDetailResponseRule can report on this file.
+func (r *ErrorDetailResponseRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

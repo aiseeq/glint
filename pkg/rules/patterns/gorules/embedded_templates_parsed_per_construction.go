@@ -230,3 +230,8 @@ func calledIdent(call *ast.CallExpr) (string, bool) {
 		return id.Name, true
 	}()
 }
+
+// ReportsOn reports whether EmbeddedTemplatesParsedPerConstructionRule can report on this file.
+func (r *EmbeddedTemplatesParsedPerConstructionRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

@@ -56,6 +56,7 @@ func init() {
 // нет), а собственная отмена вызывающего тоже приходит без статуса. Функция
 // получает ошибку и не спрашивает её про context.Canceled и истёкший срок.
 type ServerErrorHidesClientCancelRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	minCallSites int
 }

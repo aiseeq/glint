@@ -73,6 +73,7 @@ func init() {
 // is no flag: a full run opens it. A project-specific opt-in helper can also be named in the
 // guard_functions setting, and tests calling it are not reported.
 type TestExternalServiceRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 
 	guardFunctions  map[string]bool

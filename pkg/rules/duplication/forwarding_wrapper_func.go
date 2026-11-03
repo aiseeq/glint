@@ -20,6 +20,7 @@ func init() {
 // ForwardingWrapperFuncRule detects unexported functions that only forward
 // their parameters to a function in another package of the same module.
 type ForwardingWrapperFuncRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

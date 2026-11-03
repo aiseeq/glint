@@ -39,6 +39,7 @@ func init() {
 // caller checks). An assignment in a test does not count: production calls
 // still meet nil.
 type NeverAssignedFuncVarRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

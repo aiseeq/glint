@@ -41,6 +41,7 @@ var entryPointFuncs = map[string]bool{"main": true, "init": true, "TestMain": tr
 // rather than deferred, which belong to something started here and stopped
 // elsewhere.
 type ContextFirstRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

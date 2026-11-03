@@ -37,6 +37,7 @@ func init() {
 // a context (go poller.Run(ctx)) in a program that refers to no WaitGroup or
 // errgroup is cancelled on shutdown and never waited for.
 type GoroutineUntrackedOnCloseRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

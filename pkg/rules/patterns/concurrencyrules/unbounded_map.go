@@ -56,6 +56,7 @@ func init() {
 // returned, passed on, aliased — is not judged: what happens to its entries is
 // not visible here.
 type UnboundedMapRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

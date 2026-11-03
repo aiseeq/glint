@@ -26,6 +26,7 @@ func init() {
 // would abort the cleanup at once; a context parameter declared `_`, which the
 // function deliberately discards; test files.
 type ContextBackgroundRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

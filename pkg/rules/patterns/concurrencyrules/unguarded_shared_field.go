@@ -48,6 +48,7 @@ var lockedNameSuffixes = []string{"locked", "nolock", "unsafe", "unlocked"}
 // it and a request handler reads it: a background goroutine publishing a
 // cache while requests are served is not a set-once value.
 type UnguardedSharedFieldRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

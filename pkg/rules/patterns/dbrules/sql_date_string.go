@@ -26,6 +26,7 @@ func init() {
 // RFC 3339 ("2024-03-01T00:00:00Z"): the date-only parse fails on every row,
 // and whatever depends on the date never happens.
 type SQLDateStringParsedAsDateRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

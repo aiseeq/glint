@@ -29,6 +29,7 @@ func init() {
 // what it gets, a context, and a parameter the interface does not name are
 // left out.
 type InterfaceParamIgnoredRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

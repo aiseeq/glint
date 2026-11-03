@@ -21,6 +21,7 @@ func init() {
 // inside the function - a price against a threshold, amounts against a
 // tolerance - is not reported: the approximation never becomes an amount.
 type FinancialDecimalFloatRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

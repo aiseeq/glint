@@ -73,3 +73,8 @@ func (r *MigrationSessionSettingsLeakRule) AnalyzeFile(ctx *core.FileContext) []
 	}
 	return violations
 }
+
+// ReportsOn reports whether MigrationSessionSettingsLeakRule can report on this file.
+func (r *MigrationSessionSettingsLeakRule) ReportsOn(ctx *core.FileContext) bool {
+	return isSQLProjectFile(ctx)
+}

@@ -384,8 +384,8 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 	var panics rulePanics
 	// failed is set when a root reports a finding at or above its fail_on.
 	failed := false
-	// The configurations of the roots whose rules include the dead
-	// exception check, by file: each is checked once.
+	// Configurations whose dead-exception finding file is in the run, by file:
+	// each is checked once.
 	deadCheckConfigs := make(map[string]*core.Config)
 	var deadRule *deadcode.DeadConfigExceptionRule
 
@@ -912,9 +912,33 @@ type preparedRoot struct {
 	enabledRules []rules.Rule
 }
 
+// goProjectLoader loads the typed Go project and hashes the inputs of the load.
+type goProjectLoader interface {
+	Load(root string, contexts []*core.FileContext, opts core.GoProjectOptions) (*core.GoProjectContext, error)
+	GoInputs(root string, contexts []*core.FileContext, tolerate bool) (string, bool, error)
+}
+
 // prepareAnalysis prepares a whole root.
-func prepareAnalysis(loader *core.GoProjectLoader, projectRoot string, cfg *core.Config, enabledRules []rules.Rule, useCache bool) (*preparedRoot, error) {
+func prepareAnalysis(loader goProjectLoader, projectRoot string, cfg *core.Config, enabledRules []rules.Rule, useCache bool) (*preparedRoot, error) {
 	return prepareScopedAnalysis(loader, analysisRoot{dir: projectRoot}, cfg, enabledRules, useCache)
+}
+
+// parseFilesOutsideLoad gives the Go files of the modules the run does not
+// touch their trees for the rules that compare a file with the root, as the
+// cached path gives.
+func parseFilesOutsideLoad(projectRoot string, rootFiles, loaded []*core.FileContext) error {
+	if len(loaded) >= len(rootFiles) {
+		return nil
+	}
+	inLoad := make(map[*core.FileContext]bool, len(loaded))
+	for _, ctx := range loaded {
+		inLoad[ctx] = true
+	}
+	others := slices.DeleteFunc(slices.Clone(rootFiles), func(ctx *core.FileContext) bool { return inLoad[ctx] })
+	if err := core.ParseGoFiles(projectRoot, others, flagTolerant); err != nil {
+		return fmt.Errorf("parse Go files of %s: %w", projectRoot, err)
+	}
+	return nil
 }
 
 // requiredFilePredicate returns a union of the enabled rules' path predicates.
@@ -943,7 +967,7 @@ func requiredFilePredicate(enabledRules []rules.Rule) (func(string) bool, bool) 
 
 // prepareScopedAnalysis walks the scopes of a root and loads what its rules
 // need.
-func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg *core.Config, enabledRules []rules.Rule, useCache bool) (*preparedRoot, error) {
+func prepareScopedAnalysis(loader goProjectLoader, root analysisRoot, cfg *core.Config, enabledRules []rules.Rule, useCache bool) (*preparedRoot, error) {
 	projectRoot := root.dir
 	projectRules, typedProjectRules, requireSSA := rootProjectRulePlan(enabledRules)
 	var typedProjectImports []string
@@ -974,6 +998,7 @@ func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg 
 		}
 	}
 	contexts := prepared.contexts
+	typedProjectRules = typedProjectRulesForRun(typedProjectRules, contexts)
 	typedFiles := contexts
 	if len(typedProjectRules) > 0 && root.walkScopes() != nil {
 		if typedFiles, err = filesOfRoot(projectRoot, cfg, contexts, projectRuleCount == 0, typedProjectImports); err != nil {
@@ -981,13 +1006,17 @@ func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg 
 		}
 	}
 	projectRules, prepared.enabledRules = selectTypedProjectRules(enabledRules, projectRules, typedProjectRules, typedFiles)
+	if !hasGoFiles(contexts) {
+		projectRules, prepared.enabledRules = projectRulesForRun(projectRules, prepared.enabledRules, contexts)
+	}
+	prepared.enabledRules = projectFilesRulesForRun(prepared.enabledRules, contexts)
 	slices.Sort(projectRules)
 	projectRuleCount = len(projectRules)
 	// A run over some files of the root judges them against the whole root:
 	// the project rules load and analyze all of it and report on the run's
 	// files, the rules that compare a file with the project index all of it.
 	prepared.rootFiles = contexts
-	if root.walkScopes() != nil && (projectRuleCount > 0 || slices.ContainsFunc(enabledRules, comparesWithRoot)) {
+	if root.walkScopes() != nil && (projectRuleCount > 0 || slices.ContainsFunc(prepared.enabledRules, comparesWithRoot)) {
 		if len(typedProjectRules) > 0 {
 			prepared.rootFiles = typedFiles
 		} else {
@@ -1005,7 +1034,7 @@ func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg 
 	if !needProject {
 		// The Go files of the root outside a run without Go files get their
 		// trees here, as the load would give them.
-		if projectRuleCount > 0 && len(prepared.rootFiles) > len(contexts) {
+		if !hasGoFiles(contexts) && len(prepared.rootFiles) > len(contexts) && hasGoFiles(prepared.rootFiles) {
 			if err := core.ParseGoFiles(projectRoot, prepared.rootFiles, flagTolerant); err != nil {
 				return prepared, fmt.Errorf("parse Go files of %s: %w", projectRoot, err)
 			}
@@ -1028,17 +1057,8 @@ func prepareScopedAnalysis(loader *core.GoProjectLoader, root analysisRoot, cfg 
 	if err != nil {
 		return prepared, fmt.Errorf("load Go project context: %w", err)
 	}
-	// The Go files of the modules the run does not touch get their trees for
-	// the rules that compare a file with the root, as the cached path gives.
-	if len(loaded) < len(prepared.rootFiles) {
-		inLoad := make(map[*core.FileContext]bool, len(loaded))
-		for _, ctx := range loaded {
-			inLoad[ctx] = true
-		}
-		others := slices.DeleteFunc(slices.Clone(prepared.rootFiles), func(ctx *core.FileContext) bool { return inLoad[ctx] })
-		if err := core.ParseGoFiles(projectRoot, others, flagTolerant); err != nil {
-			return prepared, fmt.Errorf("parse Go files of %s: %w", projectRoot, err)
-		}
+	if err := parseFilesOutsideLoad(projectRoot, prepared.rootFiles, loaded); err != nil {
+		return prepared, err
 	}
 	prepared.project = project
 	prepared.skipped = project.SkippedPackages
@@ -1061,6 +1081,58 @@ func rootProjectRulePlan(enabledRules []rules.Rule) ([]string, []rules.TypedGoPr
 		}
 	}
 	return projectRules, typedRules, requireSSA
+}
+
+// projectRulesForRun keeps Go project rules only when the run includes a file
+// kind they can report on. Undeclared rules may report on any file.
+func projectRulesForRun(projectRuleNames []string, enabledRules []rules.Rule, contexts []*core.FileContext) ([]string, []rules.Rule) {
+	wanted := make(map[string]bool, len(projectRuleNames))
+	for _, name := range projectRuleNames {
+		wanted[name] = true
+	}
+	keptNames := make([]string, 0, len(projectRuleNames))
+	keptRules := make([]rules.Rule, 0, len(enabledRules))
+	for _, rule := range enabledRules {
+		if _, isProject := rule.(rules.GoProjectRule); !isProject || !wanted[rule.Name()] || projectRuleReportsOnRun(rule, contexts) {
+			keptRules = append(keptRules, rule)
+			continue
+		}
+		delete(wanted, rule.Name())
+	}
+	for _, name := range projectRuleNames {
+		if wanted[name] {
+			keptNames = append(keptNames, name)
+		}
+	}
+	return keptNames, keptRules
+}
+
+func projectRuleReportsOnRun(rule rules.Rule, contexts []*core.FileContext) bool {
+	declared, ok := rule.(rules.FindingFileRule)
+	if !ok {
+		return true
+	}
+	return slices.ContainsFunc(contexts, declared.ReportsOn)
+}
+
+func typedProjectRulesForRun(typedRules []rules.TypedGoProjectRule, contexts []*core.FileContext) []rules.TypedGoProjectRule {
+	return slices.DeleteFunc(typedRules, func(rule rules.TypedGoProjectRule) bool {
+		return !projectRuleReportsOnRun(rule, contexts)
+	})
+}
+
+func projectFilesRulesForRun(enabledRules []rules.Rule, contexts []*core.FileContext) []rules.Rule {
+	return slices.DeleteFunc(enabledRules, func(rule rules.Rule) bool {
+		projectFilesRule, ok := rule.(rules.ProjectFilesRule)
+		if !ok {
+			return false
+		}
+		declared, ok := projectFilesRule.(rules.FindingFileRule)
+		if !ok {
+			return false
+		}
+		return !slices.ContainsFunc(contexts, declared.ReportsOn)
+	})
 }
 
 func selectTypedProjectRules(enabledRules []rules.Rule, projectRules []string, typedRules []rules.TypedGoProjectRule, files []*core.FileContext) ([]string, []rules.Rule) {
@@ -1127,7 +1199,7 @@ func filesOfRoot(projectRoot string, cfg *core.Config, run []*core.FileContext, 
 // the typed load changed and the same project rules run, and gives the Go files the syntax trees the load
 // would have given them. An input hash that cannot be computed is reported and
 // the project is loaded.
-func (p *preparedRoot) cachedProject(loader *core.GoProjectLoader, projectRoot string, loaded []*core.FileContext, projectRules []string, enabledRules []rules.Rule, reportScope string) (bool, error) {
+func (p *preparedRoot) cachedProject(loader goProjectLoader, projectRoot string, loaded []*core.FileContext, projectRules []string, enabledRules []rules.Rule, reportScope string) (bool, error) {
 	if p.cache == nil {
 		return false, nil
 	}
@@ -1486,8 +1558,11 @@ func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *cor
 		enabledRules = prepared.enabledRules
 	}
 	violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.rootFiles, enabledRules, cfg, prepared.project, prepared.cache)
-	if err != nil || len(prepared.excludedInstructions) == 0 {
+	if err != nil {
 		return violations, panics, err
+	}
+	if len(prepared.excludedInstructions) == 0 {
+		return violations, panics, nil
 	}
 	readers := slices.DeleteFunc(slices.Clone(enabledRules), func(rule rules.Rule) bool {
 		return !rules.ReadsExcludedInstructions(rule) || panics.lostIndex(rule)
@@ -1500,7 +1575,8 @@ func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *cor
 	if err != nil {
 		return nil, nil, err
 	}
-	return append(violations, kept...), append(panics, keptPanics...), nil
+	violations = append(violations, kept...)
+	return violations, append(panics, keptPanics...), validateFindingFiles(kept, readers, prepared.excludedInstructions)
 }
 
 // analyzeProjectContained runs the project and the file rules on contexts,
@@ -1514,7 +1590,7 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 	}
 	fullRoot := contextsCoverRoot(contexts, rootFiles)
 	keyRootFileCache(cache, rootFiles, enabledRules, fullRoot)
-	fileRules := nonGoProjectRules(enabledRules)
+	fileRules := projectFilesRulesForRun(nonGoProjectRules(enabledRules), contexts)
 	allViolations, panics, err := analyzeProjectRules(contexts, rootFiles, enabledRules, cfg, project, overrides, cache)
 	if err != nil {
 		return nil, panics, err
@@ -1530,7 +1606,39 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 	}
 	storeRootProjectFindings(cache, fileRules, fileViolations, filePanics, fullRoot)
 	allViolations = append(allViolations, cachedRootFindings...)
-	return append(allViolations, fileViolations...), append(filePanics, panics...), nil
+	allViolations = append(allViolations, fileViolations...)
+	if err := validateFindingFiles(allViolations, enabledRules, contexts); err != nil {
+		return nil, append(filePanics, panics...), err
+	}
+	return allViolations, append(filePanics, panics...), nil
+}
+
+// validateFindingFiles enforces each rule's declared finding-file predicate at
+// the common boundary where project and file findings are combined.
+func validateFindingFiles(violations core.ViolationList, enabledRules []rules.Rule, contexts []*core.FileContext) error {
+	byName := make(map[string]rules.Rule, len(enabledRules))
+	byPath := make(map[string]*core.FileContext, len(contexts))
+	for _, rule := range enabledRules {
+		byName[rule.Name()] = rule
+	}
+	for _, ctx := range contexts {
+		byPath[filepath.Clean(ctx.RelPath)] = ctx
+	}
+	for _, violation := range violations {
+		rule, ok := byName[violation.Rule]
+		if !ok {
+			continue
+		}
+		declared, ok := rule.(rules.FindingFileRule)
+		if !ok {
+			continue
+		}
+		ctx := byPath[filepath.Clean(violation.File)]
+		if ctx != nil && !declared.ReportsOn(ctx) {
+			return fmt.Errorf("rule %q reported a finding on %q but ReportsOn is false", violation.Rule, violation.File)
+		}
+	}
+	return nil
 }
 
 func contextsCoverRoot(contexts, rootFiles []*core.FileContext) bool {

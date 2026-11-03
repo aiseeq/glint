@@ -58,6 +58,7 @@ func init() {
 // doc of its own and the doc does not name the declaration: prose about a
 // later, separately documented function is a comment of the declaration.
 type DocWrongSubjectRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

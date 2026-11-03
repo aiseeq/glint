@@ -284,3 +284,8 @@ func (r *UnfalsifiableTestCaseRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 
 	return violations
 }
+
+// ReportsOn reports whether UnfalsifiableTestCaseRule can report on this file.
+func (r *UnfalsifiableTestCaseRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsTestFile() && (ctx.IsGoFile() || ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile())
+}

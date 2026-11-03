@@ -46,6 +46,7 @@ func init() {
 // entity, checks its status in Go and sends a provider command with no claim
 // of the row between the check and the send.
 type SelectThenWriteRaceRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 
 	selectQuery *regexp.Regexp

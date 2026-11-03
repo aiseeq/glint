@@ -36,6 +36,7 @@ func init() {
 // on the way counts as checked, and so does a write whose function maps the
 // check violation (23514).
 type SQLCheckConstraintInputUnvalidatedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

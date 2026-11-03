@@ -35,6 +35,7 @@ func init() {
 // is state, not a sentinel. Functions named init and test files are not
 // checked.
 type SentinelErrorReassignedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

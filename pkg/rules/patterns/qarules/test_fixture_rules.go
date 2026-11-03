@@ -678,3 +678,8 @@ func (r *TestAuthSchemeDriftRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 	}
 	return out
 }
+
+// ReportsOn reports whether TestAuthSchemeDriftRule can report on this file.
+func (r *TestAuthSchemeDriftRule) ReportsOn(ctx *core.FileContext) bool {
+	return patternkit.TestSourceFile(ctx)
+}

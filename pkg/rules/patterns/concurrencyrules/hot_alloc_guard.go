@@ -32,6 +32,7 @@ func init() {
 // the side of a guard that may not measure the function, never of a report
 // for a measured one.
 type HotFunctionWithoutAllocGuardRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

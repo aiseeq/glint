@@ -26,6 +26,7 @@ func init() {
 // looks like an ID (a cache key, an ETag) is not one, and neither is a
 // name-based UUID folded into a longer string such as an idempotency key.
 type DeterministicUUIDRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -37,6 +37,7 @@ func init() {
 // an early return on the empty case, an `if len(x) > 0`, a minimum-size check,
 // or being inside a loop over that same collection — makes the division safe.
 type UncheckedLenDivisionRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

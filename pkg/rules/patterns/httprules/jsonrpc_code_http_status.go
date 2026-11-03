@@ -29,6 +29,7 @@ func init() {
 // failover. The error is recognized by its envelope: a struct with a "result"
 // and an "error" JSON field, the error holding a "code".
 type JSONRPCCodeComparedToHTTPStatusRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

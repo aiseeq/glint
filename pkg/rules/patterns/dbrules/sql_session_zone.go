@@ -223,3 +223,8 @@ func (r *SQLSessionTimeZoneRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	}
 	return violations
 }
+
+// ReportsOn reports whether SQLSessionTimeZoneRule can report on this file.
+func (r *SQLSessionTimeZoneRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

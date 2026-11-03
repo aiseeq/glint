@@ -45,6 +45,7 @@ func init() {
 // Tagged fields belong to unused-config-field, which knows about values arriving
 // from outside. Embedded and blank fields carry no name to use.
 type UnusedFieldRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	// application judges every exported field (setting application).
 	application bool

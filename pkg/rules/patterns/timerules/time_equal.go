@@ -16,6 +16,7 @@ func init() {
 
 // TimeEqualRule detects time.Time comparisons using == instead of .Equal()
 type TimeEqualRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

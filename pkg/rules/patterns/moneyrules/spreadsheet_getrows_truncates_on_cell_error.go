@@ -19,11 +19,14 @@ func init() {
 // SpreadsheetGetRowsTruncatesOnCellErrorRule detects a sheet read whose
 // row-slice result is returned directly, without checking every cell or using
 // an iterator that reports row-read errors.
-type SpreadsheetGetRowsTruncatesOnCellErrorRule struct{ *rules.BaseRule }
+type SpreadsheetGetRowsTruncatesOnCellErrorRule struct {
+	rules.GoFileFindingRule
+	*rules.BaseRule
+}
 
 // NewSpreadsheetGetRowsTruncatesOnCellErrorRule creates the rule.
 func NewSpreadsheetGetRowsTruncatesOnCellErrorRule() *SpreadsheetGetRowsTruncatesOnCellErrorRule {
-	return &SpreadsheetGetRowsTruncatesOnCellErrorRule{rules.NewBaseRule(
+	return &SpreadsheetGetRowsTruncatesOnCellErrorRule{BaseRule: rules.NewBaseRule(
 		"spreadsheet-getrows-truncates-on-cell-error",
 		"patterns",
 		"Detects a typed GetRows result returned as a complete sheet without validating cell reads",

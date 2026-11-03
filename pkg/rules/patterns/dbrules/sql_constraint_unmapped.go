@@ -25,6 +25,7 @@ func init() {
 // TruncatedRandomIDAsUniqueNumberRule reports short random values used as
 // unique database keys when a collision is neither retried nor mapped.
 type TruncatedRandomIDAsUniqueNumberRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -100,6 +101,7 @@ func (r *TruncatedRandomIDAsUniqueNumberRule) AnalyzeGoProject(ctx *core.GoProje
 // mapper named for it, or a caller's error branch tells a conflict apart. A
 // refusal in a background job or a command-line tool reaches no user.
 type SQLConstraintViolationUnmappedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

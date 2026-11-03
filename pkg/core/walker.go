@@ -159,7 +159,11 @@ func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 	go func() {
 		defer close(fileQueue)
 		w.gitignore = nil
-		if w.config.RespectGitignore() {
+		scopes := w.scopes
+		if len(scopes) == 0 {
+			scopes = []string{w.projectRoot}
+		}
+		if w.config.RespectGitignore() && scopesNeedGitignoreIndex(scopes) {
 			idx, err := newGitignoreIndex(w.projectRoot)
 			if err != nil {
 				// Нечитаемый .gitignore — не повод молча анализировать
@@ -168,10 +172,6 @@ func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 				return
 			}
 			w.gitignore = idx
-		}
-		scopes := w.scopes
-		if len(scopes) == 0 {
-			scopes = []string{w.projectRoot}
 		}
 		loaded := make(map[string]bool)
 		for _, scope := range scopes {
@@ -197,6 +197,19 @@ func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 	}()
 
 	return results, walkErrors
+}
+
+// scopesNeedGitignoreIndex reports whether a scope can traverse descendants.
+// Explicit file scopes are never filtered as ignored paths, so loading the
+// project's ignore tree for them would only add work without changing results.
+func scopesNeedGitignoreIndex(scopes []string) bool {
+	for _, scope := range scopes {
+		info, err := os.Stat(scope)
+		if err != nil || info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // enterScope loads the .gitignore files of the directories between the root

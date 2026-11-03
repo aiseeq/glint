@@ -36,6 +36,7 @@ func init() {
 // code registers) are small fixed sets and are not reported either, and
 // neither are goroutines doing in-memory work only.
 type UnboundedGoroutineFanoutRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

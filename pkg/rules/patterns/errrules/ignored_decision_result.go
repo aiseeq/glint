@@ -54,6 +54,7 @@ var decisionDocPhrases = []string{
 // comma-ok of a lookup (Get(key) (string, bool)) whatever its doc says, and a
 // result the caller uses in a condition, an assignment or an argument.
 type IgnoredDecisionResultRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

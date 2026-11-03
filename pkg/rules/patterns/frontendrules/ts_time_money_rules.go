@@ -275,3 +275,8 @@ func (r *ClientFloorsServerRoundedAmountRule) mentionedField(expr string) string
 	}
 	return ""
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *ClientFloorsServerRoundedAmountRule) ReportsOn(ctx *core.FileContext) bool {
+	return frontendProjectReportsOn(ctx)
+}

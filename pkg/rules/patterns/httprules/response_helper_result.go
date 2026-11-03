@@ -30,6 +30,7 @@ func init() {
 // A call the function ends with is not reported: nothing follows it that
 // could write again.
 type ResponseHelperResultIgnoredRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

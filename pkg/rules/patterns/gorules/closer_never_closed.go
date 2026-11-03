@@ -39,6 +39,7 @@ func init() {
 // connections for the rest of the run. In a test file, outside the typed
 // load, only calls of the package functions of typed packages are resolved.
 type CloserNeverClosedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

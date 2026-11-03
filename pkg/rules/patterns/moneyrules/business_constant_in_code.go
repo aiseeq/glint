@@ -57,6 +57,7 @@ var decimalConstructors = map[string]bool{
 // The finding sits on the constant's declaration and names the first such use,
 // wherever in the project it is.
 type BusinessConstantInCodeRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

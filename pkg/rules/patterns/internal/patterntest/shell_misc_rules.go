@@ -27,13 +27,16 @@ func ShellFindingsIn(t *testing.T, name, root string, paths ...string) []string 
 	rule, ok := rules.Get(name)
 	require.True(t, ok, name)
 	var found []*core.Violation
+	var contexts []*core.FileContext
 	for _, p := range paths {
 		full := filepath.Join(root, p)
 		data, err := os.ReadFile(full)
 		require.NoError(t, err)
 		ctx, err := core.NewFileContextChecked(full, root, data, core.DefaultConfig())
 		require.NoError(t, err)
+		contexts = append(contexts, ctx)
 		found = append(found, rule.AnalyzeFile(ctx)...)
 	}
+	AssertFindingFiles(t, rule, contexts, found)
 	return FoundLines(found)
 }

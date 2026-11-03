@@ -34,6 +34,7 @@ func init() {
 // any (or json.RawMessage plus its first byte), the shape is a switch with
 // an error for the unknown case.
 type JSONShapeByFailedUnmarshalRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

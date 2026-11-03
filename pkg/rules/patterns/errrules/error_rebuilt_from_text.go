@@ -33,6 +33,7 @@ func init() {
 // it is a choice), and a cause printed into a log line rather than into a
 // returned error.
 type ErrorRebuiltFromTextRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

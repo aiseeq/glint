@@ -31,6 +31,7 @@ func init() {
 // that the function also returns, with no look at the context's own error
 // (ctx.Err(), context.Canceled, context.DeadlineExceeded) in the function.
 type CacheStoresCancelledErrorRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

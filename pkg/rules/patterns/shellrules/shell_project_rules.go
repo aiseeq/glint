@@ -139,3 +139,13 @@ func checkDBPasswordLiteral(r *shellRule, src *patternkit.ShellSource) []*core.V
 	}
 	return out
 }
+
+func shellProjectReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsShellFile() || ctx.IsMakefile() || ctx.IsDockerfile() || ctx.IsEnvTemplate() ||
+		strings.HasSuffix(strings.ToLower(ctx.RelPath), ".yaml") || strings.HasSuffix(strings.ToLower(ctx.RelPath), ".yml")
+}
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *shellProjectRule) ReportsOn(ctx *core.FileContext) bool {
+	return shellProjectReportsOn(ctx)
+}

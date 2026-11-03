@@ -312,3 +312,8 @@ func valueSetMessage(set valueset.Set, m setMatch) string {
 	}
 	return fmt.Sprintf("Set of values copies %s but differs (%s)", where, strings.Join(diff, "; "))
 }
+
+// ReportsOn reports whether ValueSetDriftRule can report on this file.
+func (r *ValueSetDriftRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile() || ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile() || isSQLProjectFile(ctx)
+}

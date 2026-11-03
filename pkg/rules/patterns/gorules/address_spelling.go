@@ -271,6 +271,7 @@ type addressIndex struct {
 // addressRule is a rule over the functions of a project whose check needs
 // the project's address index.
 type addressRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	suggestion string
 	check      func(scope patternkit.FuncScope, fn *ast.FuncDecl, index addressIndex) []patternkit.FuncFinding

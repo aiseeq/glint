@@ -286,3 +286,8 @@ func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext, underSlog, wi
 
 	return violations
 }
+
+// ReportsOn reports whether NonCanonicalLoggerRule can report on this file.
+func (r *NonCanonicalLoggerRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

@@ -44,6 +44,7 @@ func init() {
 // without the schema: a field the code sets that the repository package never
 // mentions, neither in the write nor in a read, is lost on the next load.
 type SQLModelFieldSkippedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -37,6 +37,7 @@ func init() {
 // package has no type information, keys are compared by name and only the
 // family check runs.
 type ContextKeyUnpairedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

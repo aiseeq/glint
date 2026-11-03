@@ -16,6 +16,7 @@ func init() {
 // that handles a recognized argument and then continues into the default
 // action without rejecting unrecognized arguments.
 type CLIUnknownArgumentRunsDefaultActionRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -31,6 +31,7 @@ func init() {
 // satisfies an interface with that method is left out — the call may come
 // through the interface, from a library the project hands it to.
 type ServiceNeverStartedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -222,3 +222,8 @@ func splitTSParams(list string) []string {
 	}
 	return params
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *TSParamIgnoredRule) ReportsOn(ctx *core.FileContext) bool {
+	return frontendProjectReportsOn(ctx)
+}

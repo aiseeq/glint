@@ -29,6 +29,7 @@ const defaultLargeValueMaxBytes = 128
 // named slice). Each copy is a memmove of the whole value, and in a loop over
 // many elements the copies cost more than the comparison or the sum they feed.
 type LargeValueCopiedPerElementRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	maxBytes int64
 }

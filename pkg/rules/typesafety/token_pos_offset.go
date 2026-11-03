@@ -30,6 +30,7 @@ func init() {
 //
 // The fix is always the same: ask the file set, FileSet.Position(pos).Line.
 type TokenPosOffsetRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

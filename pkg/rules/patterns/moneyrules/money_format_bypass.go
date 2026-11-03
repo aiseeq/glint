@@ -172,3 +172,8 @@ func handFormattedMoney(code, text []string, i int) (string, bool) {
 	}
 	return "", false
 }
+
+// ReportsOn reports whether MoneyFormatBypassesFormatterRule can report on this file.
+func (r *MoneyFormatBypassesFormatterRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile()
+}

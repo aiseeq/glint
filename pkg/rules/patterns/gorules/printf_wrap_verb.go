@@ -180,3 +180,8 @@ func forwardsFormat(file *ast.File, fn *ast.FuncDecl) bool {
 	})
 	return found
 }
+
+// ReportsOn reports whether PrintfWrapVerbRule can report on this file.
+func (r *PrintfWrapVerbRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

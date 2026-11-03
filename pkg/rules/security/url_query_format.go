@@ -36,6 +36,7 @@ func init() {
 // title). Identifiers and enum words never need escaping and are left
 // alone, as are numbers, constants and escaped values.
 type URLQueryBuiltByFormatRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

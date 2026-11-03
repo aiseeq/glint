@@ -60,6 +60,7 @@ func init() {
 // to the textual rules; test files, generated files and test-double packages
 // are left out.
 type RenamedDuplicateBlockRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

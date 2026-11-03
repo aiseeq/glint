@@ -49,6 +49,7 @@ func init() {
 // judged by its type alone: errors.Is compares it with the sentinel and
 // nothing else, and a sentinel made by errors.New is never of that type.
 type ErrorsIsTargetUnreachableRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

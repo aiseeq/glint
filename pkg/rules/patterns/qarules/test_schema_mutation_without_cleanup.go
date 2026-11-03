@@ -303,3 +303,8 @@ func (r *TestSchemaMutationWithoutCleanupRule) AnalyzeFile(ctx *core.FileContext
 func collapseSQL(sql string) string {
 	return strings.Join(strings.Fields(sql), " ")
 }
+
+// ReportsOn reports whether TestSchemaMutationWithoutCleanupRule can report on this file.
+func (r *TestSchemaMutationWithoutCleanupRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

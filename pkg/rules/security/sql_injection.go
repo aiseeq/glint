@@ -29,6 +29,7 @@ func init() {
 // sqlTaintCheck: constants, numbers, placeholders built from counters and
 // fragments returned by helpers carry no outside string.
 type SQLInjectionRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

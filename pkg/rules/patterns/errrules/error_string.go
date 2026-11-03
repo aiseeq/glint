@@ -282,3 +282,8 @@ func (r *ErrorStringRule) endsWithPunctuation(s string) bool {
 	// . ! ? are problematic, but : is often used in structured errors
 	return lastRune == '.' || lastRune == '!' || lastRune == '?'
 }
+
+// ReportsOn reports whether ErrorStringRule can report on this file.
+func (r *ErrorStringRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

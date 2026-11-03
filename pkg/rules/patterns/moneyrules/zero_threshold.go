@@ -29,6 +29,7 @@ func init() {
 // judged when it is a duration, or when a sibling field of the same struct is
 // already checked for 0 elsewhere — the struct's own convention.
 type ZeroThresholdNotHonoredRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

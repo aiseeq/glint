@@ -275,3 +275,8 @@ func laterSubtestUsing(list []ast.Stmt, handles map[string]bool, name string) as
 	}
 	return nil
 }
+
+// ReportsOn reports whether SubtestFixtureCleanedEarlyRule can report on this file.
+func (r *SubtestFixtureCleanedEarlyRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

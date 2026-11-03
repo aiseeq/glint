@@ -16,6 +16,7 @@ func init() {
 
 // MutexLockRule detects mutex Lock() without corresponding Unlock()
 type MutexLockRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

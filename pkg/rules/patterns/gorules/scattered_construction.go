@@ -37,6 +37,7 @@ func init() {
 // server's options) states on each entry what it needs; the type is not ours
 // to add a field to, and a field the library adds works unset.
 type ScatteredConstructionRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	maxSites int
 }

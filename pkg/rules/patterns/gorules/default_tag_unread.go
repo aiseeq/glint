@@ -51,6 +51,7 @@ var defaultTagReaders = []string{
 // packages imports a library that does (defaultTagReaders, plus the readers
 // setting) or reads it itself through reflect.StructTag.
 type DefaultTagUnreadRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	readers map[string]bool
 }

@@ -24,6 +24,7 @@ func init() {
 // through a local variable that holds nothing else. Test files are not
 // checked: a nil that crashes a test fails that test.
 type NilDIRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

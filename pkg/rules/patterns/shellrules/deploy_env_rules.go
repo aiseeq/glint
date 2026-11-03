@@ -1195,3 +1195,13 @@ func composeEnvLine(line string, index int) (composeEnv, bool) {
 	_, value, _ := strings.Cut(line, ":")
 	return composeEnv{key: m[2], value: strings.Trim(strings.TrimSpace(value), `"'`), index: index}, true
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *EnvKeyMissingFromDeployEnvRule) ReportsOn(ctx *core.FileContext) bool {
+	return shellProjectReportsOn(ctx)
+}
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *HostNetworkServiceBindsAllInterfacesRule) ReportsOn(ctx *core.FileContext) bool {
+	return shellProjectReportsOn(ctx)
+}

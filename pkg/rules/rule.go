@@ -32,6 +32,19 @@ type GoProjectRule interface {
 	RequiresSSA() bool
 }
 
+// FindingFileRule declares which file contexts a project rule can report on.
+// Rules without this declaration are assumed to support every file kind.
+type FindingFileRule interface {
+	ReportsOn(ctx *core.FileContext) bool
+}
+
+// GoFileFindingRule is embedded by project rules whose findings always name
+// Go source files.
+type GoFileFindingRule struct{}
+
+// ReportsOn reports whether the rule can name this Go source file.
+func (GoFileFindingRule) ReportsOn(ctx *core.FileContext) bool { return ctx.IsGoFile() }
+
 // TypedGoProjectRule is a file rule that needs Go type information from the
 // shared project load while still analyzing files individually. Returning false
 // removes the rule from the entire root, including per-file analysis.

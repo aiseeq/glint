@@ -14,6 +14,7 @@ import (
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/dbrules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/errrules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/gorules"
 	"github.com/aiseeq/glint/pkg/rules/typesafety"
 )
 
@@ -391,12 +392,48 @@ type projectStubRule struct {
 	project      *core.GoProjectContext
 }
 
+type countingGoProjectLoader struct {
+	loader *core.GoProjectLoader
+	loads  int
+}
+
+func (l *countingGoProjectLoader) Load(root string, contexts []*core.FileContext, opts core.GoProjectOptions) (*core.GoProjectContext, error) {
+	l.loads++
+	return l.loader.Load(root, contexts, opts)
+}
+
+func (l *countingGoProjectLoader) GoInputs(root string, contexts []*core.FileContext, tolerate bool) (string, bool, error) {
+	return l.loader.GoInputs(root, contexts, tolerate)
+}
+
+type projectFileFindingRule struct {
+	*rules.BaseRule
+	files []*core.FileContext
+}
+
+func newProjectFileFindingRule() *projectFileFindingRule {
+	return &projectFileFindingRule{BaseRule: rules.NewBaseRule("project-file-finding", "patterns", "test project file rule", core.SeverityLow)}
+}
+
+func (r *projectFileFindingRule) ResetState() { r.files = nil }
+
+func (r *projectFileFindingRule) UseProjectFiles(files []*core.FileContext) { r.files = files }
+
+func (r *projectFileFindingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if !ctx.IsTypeScriptFile() {
+		return nil
+	}
+	return []*core.Violation{r.CreateViolation(ctx.RelPath, 1, "project file finding")}
+}
+
 func newProjectStubRule() *projectStubRule {
 	return &projectStubRule{BaseRule: rules.NewBaseRule(
 		"project-stub", "patterns", "test project rule", core.SeverityMedium)}
 }
 
 func (r *projectStubRule) RequiresSSA() bool { return r.requireSSA }
+
+func (r *projectStubRule) ReportsOn(ctx *core.FileContext) bool { return ctx.IsGoFile() }
 
 func (r *projectStubRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	r.projectCalls++
@@ -509,6 +546,100 @@ func TestPrepareAnalysisSkipsGoProjectForTreeWithoutGoFiles(t *testing.T) {
 	}
 	if projectRule.projectCalls != 0 {
 		t.Fatalf("project rule calls=%d, want 0 on a tree without Go files", projectRule.projectCalls)
+	}
+}
+
+func TestPrepareScopedAnalysisSkipsGoProjectForNonGoRunAndKeepsProjectFileFinding(t *testing.T) {
+	root := writeAnalysisModule(t, "package check\n")
+	if err := os.WriteFile(filepath.Join(root, "app.ts"), []byte("export const value = 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	loader := &countingGoProjectLoader{loader: core.NewGoProjectLoader()}
+	projectRule := newProjectStubRule()
+	projectFileRule := newProjectFileFindingRule()
+	prepared, err := prepareScopedAnalysis(loader, analysisRoot{dir: root, scopes: []string{filepath.Join(root, "app.ts")}}, core.DefaultConfig(), []rules.Rule{projectRule, projectFileRule}, false)
+	if err != nil {
+		t.Fatalf("prepare scoped analysis: %v", err)
+	}
+	if loader.loads != 0 || prepared.project != nil {
+		t.Fatalf("Go project loads=%d project=%v, want no load", loader.loads, prepared.project)
+	}
+	findings, err := analyzeProject(prepared.contexts, prepared.enabledRules, core.DefaultConfig(), prepared.project, nil)
+	if err != nil {
+		t.Fatalf("analyze project: %v", err)
+	}
+	if len(findings) != 1 || findings[0].File != "app.ts" {
+		t.Fatalf("findings=%v, want project file finding on app.ts", findings)
+	}
+	if projectRule.projectCalls != 0 {
+		t.Fatalf("Go project rule calls=%d, want 0", projectRule.projectCalls)
+	}
+}
+
+func TestPrepareScopedAnalysisLoadsGoProjectForGoRun(t *testing.T) {
+	root := writeAnalysisModule(t, "package check\n")
+	loader := &countingGoProjectLoader{loader: core.NewGoProjectLoader()}
+	projectRule := newProjectStubRule()
+	prepared, err := prepareScopedAnalysis(loader, analysisRoot{dir: root, scopes: []string{filepath.Join(root, "check.go")}}, core.DefaultConfig(), []rules.Rule{projectRule}, false)
+	if err != nil {
+		t.Fatalf("prepare scoped analysis: %v", err)
+	}
+	if loader.loads != 1 || prepared.project == nil {
+		t.Fatalf("Go project loads=%d project=%v, want one load", loader.loads, prepared.project)
+	}
+}
+
+func TestUndeclaredGoProjectRuleMayReportOnTemplates(t *testing.T) {
+	root := t.TempDir()
+	contexts := []*core.FileContext{core.NewFileContext(filepath.Join(root, "page.html"), root, nil, nil)}
+	for _, rule := range []rules.Rule{
+		gorules.NewGoTemplateRootFieldInsideRangeRule(),
+		gorules.NewI18nKeyUsedButNotDefinedRule(),
+	} {
+		if !projectRuleReportsOnRun(rule, contexts) {
+			t.Errorf("%s must be retained for its .html finding", rule.Name())
+		}
+	}
+}
+
+type misdeclaredFindingRule struct{ *rules.BaseRule }
+
+func newMisdeclaredFindingRule() *misdeclaredFindingRule {
+	return &misdeclaredFindingRule{BaseRule: rules.NewBaseRule("misdeclared-finding", "patterns", "test rule", core.SeverityLow)}
+}
+
+func (r *misdeclaredFindingRule) ReportsOn(ctx *core.FileContext) bool { return ctx.IsGoFile() }
+
+func (r *misdeclaredFindingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return []*core.Violation{r.CreateViolation(ctx.RelPath, 1, "finding")}
+}
+
+func TestAnalyzeProjectRejectsFindingOutsideDeclaredFiles(t *testing.T) {
+	root := t.TempDir()
+	ctx := core.NewFileContext(filepath.Join(root, "app.ts"), root, []byte("const x = 1\n"), nil)
+	_, err := analyzeProject([]*core.FileContext{ctx}, []rules.Rule{newMisdeclaredFindingRule()}, core.DefaultConfig(), nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "misdeclared-finding") || !strings.Contains(err.Error(), "app.ts") {
+		t.Fatalf("got error %v, want rule and file in the declaration violation", err)
+	}
+}
+
+func TestScopedGoRunKeepsDeadConfigExceptionFinding(t *testing.T) {
+	root := t.TempDir()
+	for path, contents := range map[string]string{
+		"go.mod":      "module example.com/check\n\ngo 1.24\n",
+		"sample.go":   "package check\n",
+		".glint.yaml": "version: 1\ncategories:\n  patterns:\n    rules:\n      error-string:\n        exceptions:\n          - file: missing.go\n            reason: no matching source file\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, path), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output, err := mainSubprocess(t, []string{"-C", root, "check", "sample.go"}).CombinedOutput()
+	if err != nil {
+		t.Fatalf("glint check failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "dead-config-exception") || !strings.Contains(string(output), ".glint.yaml") {
+		t.Fatalf("scoped Go run omitted dead-config-exception from .glint.yaml:\n%s", output)
 	}
 }
 

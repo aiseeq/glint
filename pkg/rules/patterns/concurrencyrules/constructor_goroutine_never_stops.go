@@ -224,3 +224,8 @@ func leavesLoop(loopBody *ast.BlockStmt) bool {
 	}
 	return walk(loopBody, true)
 }
+
+// ReportsOn reports whether ConstructorGoroutineNeverStopsRule can report on this file.
+func (r *ConstructorGoroutineNeverStopsRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

@@ -226,3 +226,8 @@ func namedAsTest(label string) bool {
 	}
 	return false
 }
+
+// ReportsOn reports whether TestEmailRegistrableDomainRule can report on this file.
+func (r *TestEmailRegistrableDomainRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile() || ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile() || patternkit.IsUpMigration(ctx.RelPath)
+}

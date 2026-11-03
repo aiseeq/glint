@@ -22,6 +22,7 @@ func init() {
 // ErrorWrapRule detects errors from foreign code returned without context:
 // the project's own functions are checked where their errors arise.
 type ErrorWrapRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

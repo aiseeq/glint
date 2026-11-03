@@ -36,6 +36,7 @@ func init() {
 // calling the next handler, http.MaxBytesHandler, or a framework's body-limit
 // middleware (chi RequestSize, echo BodyLimit).
 type UnboundedRequestBodyReadRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

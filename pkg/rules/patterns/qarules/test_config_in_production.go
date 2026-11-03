@@ -25,6 +25,7 @@ func init() {
 // with the implementations of the project. A getter named for tests
 // (TestOperationTimeout) is what it says and is not reported.
 type TestConfigInProductionRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

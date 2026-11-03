@@ -18,6 +18,7 @@ func init() {
 
 // HTTPBodyCloseRule detects HTTP response body not being closed
 type HTTPBodyCloseRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

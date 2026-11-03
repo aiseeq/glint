@@ -35,6 +35,7 @@ func init() {
 // reaches deadlines and hijacking only through Unwrap, and a handler behind
 // the wrapper gets http.ErrNotSupported.
 type ResponseWriterWrapperRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -40,6 +40,7 @@ func init() {
 // A shared map written the same way (m[k] = v, delete(m, k)) is reported
 // too: concurrent map writes abort the program.
 type HandlerCounterRaceRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

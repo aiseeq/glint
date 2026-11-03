@@ -23,6 +23,7 @@ const perIterationLoopVarsVersion = "go1.22"
 // outlives its iteration in code compiled with the pre-Go 1.22 loop semantics,
 // where one variable serves every iteration.
 type RangeValPointerRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -137,6 +137,7 @@ type hotScope struct {
 // cold in every mode: its findings are not reported and its calls are not
 // followed.
 type hotFuncRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	suggestion string
 	check      func(scope hotScope, fn *ast.FuncDecl) []patternkit.FuncFinding

@@ -31,6 +31,7 @@ func init() {
 // that builds its own request per item, and a request built without a body
 // (nil or http.NoBody) — a GET poll resends nothing that could be drained.
 type RetryRequestReuseRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

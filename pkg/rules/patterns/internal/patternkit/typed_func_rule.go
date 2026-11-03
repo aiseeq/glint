@@ -41,6 +41,7 @@ type FuncFinding struct {
 // production files of a typed Go project; check returns the findings of one
 // function.
 type TypedFuncRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	Suggestion string
 	Check      func(scope FuncScope, fn *ast.FuncDecl) []FuncFinding

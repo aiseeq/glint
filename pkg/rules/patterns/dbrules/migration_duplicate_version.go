@@ -203,3 +203,12 @@ func (r *MigrationDuplicateVersionRule) checkPairing(ctx *core.FileContext, dire
 		"or set require_pairs: false if the project does not keep down migrations")
 	return v
 }
+
+// ReportsOn reports whether MigrationDuplicateVersionRule can report on this file.
+func (r *MigrationDuplicateVersionRule) ReportsOn(ctx *core.FileContext) bool {
+	return isSQLProjectFile(ctx)
+}
+
+func isSQLProjectFile(ctx *core.FileContext) bool {
+	return strings.EqualFold(filepath.Ext(ctx.RelPath), ".sql")
+}

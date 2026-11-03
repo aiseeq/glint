@@ -18,6 +18,7 @@ func init() {
 
 // ReturnNilErrorRule detects functions returning (nil, nil) which is often a bug
 type ReturnNilErrorRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

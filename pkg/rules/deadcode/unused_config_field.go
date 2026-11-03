@@ -45,6 +45,7 @@ func init() {
 // are left alone, because there the encoder reads the field on the program's
 // behalf.
 type UnusedConfigFieldRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

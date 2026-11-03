@@ -27,6 +27,7 @@ func init() {
 //		a.Decimal = decimal.NewFromFloat(f)   // 12345678901234567.891 arrives as 12345678901234568
 //	}
 type FinancialJSONFloatRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

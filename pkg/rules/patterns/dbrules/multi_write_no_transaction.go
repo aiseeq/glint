@@ -81,6 +81,7 @@ func init() {
 // only if it truly runs under one, so the honest way to silence this rule for a deliberate
 // split is a comment on the function and a rule exclusion, not a fake transaction.
 type MultiWriteNoTransactionRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 
 	mutation  *regexp.Regexp

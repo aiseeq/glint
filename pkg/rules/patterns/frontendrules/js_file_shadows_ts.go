@@ -83,3 +83,8 @@ func jsBuildPath(path string) bool {
 	}
 	return false
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *JSFileShadowsTSModuleRule) ReportsOn(ctx *core.FileContext) bool {
+	return frontendProjectReportsOn(ctx)
+}

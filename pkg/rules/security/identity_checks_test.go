@@ -79,10 +79,13 @@ func projectFileLines(t *testing.T, rule interface {
 	}
 	rule.UseProjectFiles(contexts)
 	var found []string
+	var violations []*core.Violation
 	for _, ctx := range contexts {
-		for _, v := range rule.AnalyzeFile(ctx) {
-			found = append(found, fmt.Sprintf("%s:%d", v.File, v.Line))
-		}
+		violations = append(violations, rule.AnalyzeFile(ctx)...)
+	}
+	rulestest.AssertFindingFiles(t, rule, contexts, violations)
+	for _, v := range violations {
+		found = append(found, fmt.Sprintf("%s:%d", v.File, v.Line))
 	}
 	slices.Sort(found)
 	return found

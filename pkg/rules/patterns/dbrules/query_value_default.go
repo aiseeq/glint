@@ -37,6 +37,7 @@ func init() {
 // preset, as its own case. The value is followed from url.Values.Get through
 // the parameters of the functions it is handed to.
 type QueryValueFallsBackToDefaultRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

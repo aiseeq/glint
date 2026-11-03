@@ -40,6 +40,7 @@ func init() {
 // 5xx status) and neither compares the error nor hands it to a function that
 // does (a mapper with errors.Is inside).
 type NotFoundAnsweredAsServerErrorRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -31,6 +31,7 @@ func init() {
 // action, category, operation) the function never reads, while it stores a
 // constant into a field named ...Type or ...Kind.
 type DecodedKindFieldIgnoredRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

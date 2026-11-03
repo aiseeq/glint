@@ -18,6 +18,7 @@ func init() {
 
 // ErrorStringCompareRule detects error comparisons using string matching
 type ErrorStringCompareRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

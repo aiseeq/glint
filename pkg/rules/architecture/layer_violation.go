@@ -31,6 +31,7 @@ func init() {
 // not reported. A file without type information keeps the SQL-text check,
 // which needs no types, and is silent about calls.
 type LayerViolationRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

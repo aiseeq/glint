@@ -40,6 +40,7 @@ func init() {
 // comment speaks of credentials or 401/403 - the decision about them taken
 // on purpose - are left alone.
 type AuthFailureClassifiedAsRejectionRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

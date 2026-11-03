@@ -865,3 +865,8 @@ func sqlConst(value string) string {
 	}
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
+
+// ReportsOn reports whether SQLLiteralCopiesConstantRule can report on this file.
+func (r *SQLLiteralCopiesConstantRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

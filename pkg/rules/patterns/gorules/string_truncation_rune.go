@@ -39,6 +39,7 @@ func init() {
 // ([:10]), a value named as an id, a hash or a token, and a function that
 // already looks at runes (utf8, []rune).
 type StringTruncationSplitsRuneRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

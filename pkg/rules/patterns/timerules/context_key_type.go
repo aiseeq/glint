@@ -30,6 +30,7 @@ func init() {
 // type of its own with a Value method, a web framework's context, keeps
 // its own string keys.
 type ContextKeyBuiltinTypeRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

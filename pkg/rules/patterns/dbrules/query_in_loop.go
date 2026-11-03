@@ -57,6 +57,7 @@ func (reach storageReach) reaches(pkg *types.Package) bool {
 // network client) through its imports. An interface keeps the name heuristic: its
 // implementation is not known at the call site.
 type QueryInLoopRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

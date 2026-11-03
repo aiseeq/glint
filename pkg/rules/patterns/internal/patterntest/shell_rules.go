@@ -31,5 +31,6 @@ func ShellFindings(t *testing.T, name string, files map[string]string) []string 
 	for _, ctx := range contexts {
 		found = append(found, rule.AnalyzeFile(ctx)...)
 	}
+	AssertFindingFiles(t, rule, contexts, found)
 	return FoundLines(found)
 }

@@ -37,6 +37,7 @@ var defaultStatusHistoryMethods = []string{"AppendStatusHistory"}
 // callback of a transaction runner (transaction_functions, the same setting
 // and defaults multi-write-no-transaction reads) are atomic and not reported.
 type NonAtomicStatusHistoryRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 
 	mutationMethods map[string]bool

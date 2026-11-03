@@ -29,6 +29,7 @@ func init() {
 // The destination is judged by its name (money_context.go): a float named
 // as an amount, a balance, a total.
 type MoneyScannedIntoFloatRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

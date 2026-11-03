@@ -153,3 +153,8 @@ func namesID(expr ast.Expr) bool {
 	words := helpers.IdentifierWords(name)
 	return len(words) > 0 && words[len(words)-1] == "id"
 }
+
+// ReportsOn reports whether IDEncodesDataRule can report on this file.
+func (r *IDEncodesDataRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

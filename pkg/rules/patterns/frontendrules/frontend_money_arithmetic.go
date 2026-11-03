@@ -949,3 +949,8 @@ func stripTrailingComment(line string) string {
 	}
 	return line
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *FrontendMoneyArithmeticRule) ReportsOn(ctx *core.FileContext) bool {
+	return frontendProjectReportsOn(ctx)
+}

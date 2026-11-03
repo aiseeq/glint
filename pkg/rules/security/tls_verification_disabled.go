@@ -52,6 +52,11 @@ func (r *TLSVerificationDisabledRule) NeedsTypedGoProject(files []*core.FileCont
 	})
 }
 
+// ReportsOn reports whether this rule can find disabled TLS verification in this file.
+func (r *TLSVerificationDisabledRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile() || ctx.IsGoFile() && !ctx.IsTestFile()
+}
+
 // TypedGoProjectImports lists the package used by this rule's type checks.
 func (r *TLSVerificationDisabledRule) TypedGoProjectImports() []string {
 	return []string{"crypto/tls"}

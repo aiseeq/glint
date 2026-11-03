@@ -20,6 +20,7 @@ func init() {
 
 // SolidISPRule detects interfaces that violate Interface Segregation Principle
 type SolidISPRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	maxMethods int
 }

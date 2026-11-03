@@ -173,3 +173,8 @@ func (r *SkippedTestRule) report(ctx *core.FileContext, line int, message, sugge
 	v.WithSuggestion(suggestion)
 	return v
 }
+
+// ReportsOn reports whether SkippedTestRule can report on this file.
+func (r *SkippedTestRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsTestFile() && (ctx.IsGoFile() || ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile())
+}

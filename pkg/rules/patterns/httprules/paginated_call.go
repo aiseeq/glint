@@ -38,6 +38,7 @@ const pageCapMin = 100
 // rows past it vanish without an error. The frontend side is
 // paginated-fetch-first-page-only.
 type PaginatedCallFirstPageOnlyRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -583,6 +584,7 @@ func pageIntConstant(expr ast.Expr, info *types.Info) (int64, bool) {
 // passed to it: the pager shows 40 pages for 3 rows. Even with the same
 // arguments the two queries see different moments.
 type PaginatedTotalRecountedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

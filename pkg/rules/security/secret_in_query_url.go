@@ -44,6 +44,7 @@ func init() {
 // Do(*http.Request), or the net/http package functions Get, Post, PostForm,
 // Head. Without type information only the package functions are recognized.
 type SecretInQueryURLRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	secretParam   *regexp.Regexp
 	secretLiteral *regexp.Regexp

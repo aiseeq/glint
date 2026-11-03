@@ -28,6 +28,7 @@ func init() {
 // (передача указателя наружу — судьбу записей отсюда не видно). Delete только
 // в _test.go не спасает: production-рост он не ограничивает.
 type UnboundedSyncMapRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

@@ -40,6 +40,7 @@ const mapperDepth = 3
 // server's own state): a path id is never empty, and a missing dependency is
 // a server failure.
 type ValidationErrorAnsweredAsServerErrorRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

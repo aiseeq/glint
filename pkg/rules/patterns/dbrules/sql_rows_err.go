@@ -27,6 +27,7 @@ func init() {
 // returns what it read as the whole list. Rows are *database/sql.Rows or a
 // cursor with the same methods (sqlx, pgx).
 type SQLRowsErrUncheckedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

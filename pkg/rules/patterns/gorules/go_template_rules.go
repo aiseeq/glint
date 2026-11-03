@@ -52,6 +52,9 @@ func (r *templateProjectRule) AnalyzeFile(*core.FileContext) []*core.Violation {
 // RequiresSSA reports that the rule needs no SSA.
 func (r *templateProjectRule) RequiresSSA() bool { return false }
 
+// ReportsOn reports the template files to which this rule can map a finding.
+func (r *templateProjectRule) ReportsOn(ctx *core.FileContext) bool { return ctx.IsTemplate() }
+
 // AnalyzeGoProject runs the check and maps its findings to the files of the
 // run.
 func (r *templateProjectRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {

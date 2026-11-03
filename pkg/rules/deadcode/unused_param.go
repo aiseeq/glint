@@ -25,6 +25,7 @@ func init() {
 // (passed to HandleFunc, stored in a table), whose type the receiving side
 // dictates.
 type UnusedParamRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

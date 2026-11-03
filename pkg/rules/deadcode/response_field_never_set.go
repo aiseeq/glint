@@ -45,6 +45,7 @@ func init() {
 // covers the nil-able fields the code reads; this rule covers the values the
 // code only sends out.
 type ResponseFieldNeverSetRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

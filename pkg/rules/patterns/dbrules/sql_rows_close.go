@@ -15,6 +15,7 @@ func init() {
 
 // SQLRowsCloseRule detects SQL rows not being closed
 type SQLRowsCloseRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

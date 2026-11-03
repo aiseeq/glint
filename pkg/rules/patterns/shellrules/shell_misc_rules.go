@@ -985,3 +985,23 @@ func checkDockerLogsSince(r *shellRule, src *patternkit.ShellSource) []*core.Vio
 	}
 	return out
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *shellCaptureRule) ReportsOn(ctx *core.FileContext) bool {
+	return shellProjectReportsOn(ctx)
+}
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *shellCaseDriftRule) ReportsOn(ctx *core.FileContext) bool {
+	return shellProjectReportsOn(ctx)
+}
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *shellSiblingEnvRule) ReportsOn(ctx *core.FileContext) bool {
+	return shellProjectReportsOn(ctx)
+}
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *shellCopyListRule) ReportsOn(ctx *core.FileContext) bool {
+	return shellProjectReportsOn(ctx)
+}

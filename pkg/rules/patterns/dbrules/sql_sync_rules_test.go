@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
@@ -15,8 +16,8 @@ import (
 // projectSQLRuleLines runs a project-files rule over a module with its
 // migrations and returns the lines it reports in one file.
 func projectSQLRuleLines(t *testing.T, rule interface {
+	rules.Rule
 	UseProjectFiles([]*core.FileContext)
-	AnalyzeFile(*core.FileContext) []*core.Violation
 }, files map[string]string, path string) []int {
 	t.Helper()
 	_, contexts := rulestest.Module(t, files)
@@ -28,6 +29,7 @@ func projectSQLRuleLines(t *testing.T, rule interface {
 	}
 	rule.UseProjectFiles(contexts)
 	for _, ctx := range contexts {
+		patterntest.AssertFindingFiles(t, rule, contexts, rule.AnalyzeFile(ctx))
 		if ctx.RelPath == path {
 			return sqlRuleLines(t, rule, ctx)
 		}

@@ -36,6 +36,7 @@ func init() {
 // a value some status constant has is reported: other values are a
 // provider's statuses or labels, not a member of the project's sets.
 type StatusLiteralRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

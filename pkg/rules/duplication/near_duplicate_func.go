@@ -27,6 +27,7 @@ const (
 // NearDuplicateFuncRule finds functions in one package whose bodies differ in
 // only a small number of expressions and could share one implementation.
 type NearDuplicateFuncRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	maxDifferences int
 }

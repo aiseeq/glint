@@ -40,6 +40,7 @@ func init() {
 // interface method counts when one of its implementations lives there. A
 // branch that tells errors apart (an if, a switch, errors.As) is left alone.
 type Upstream4xxReportedAsOutageRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

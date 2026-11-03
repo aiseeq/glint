@@ -25,6 +25,7 @@ func init() {
 // did not type-check (--tolerant) fall back to the syntax of every file of
 // their package.
 type OrphanedInterfaceRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

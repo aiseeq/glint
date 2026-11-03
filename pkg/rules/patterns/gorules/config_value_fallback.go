@@ -49,6 +49,7 @@ func init() {
 // only: an applyDefaults there writes the default into the field, while a
 // getter returning a literal leaves the loaded configuration empty.
 type ConfigValueFallbackRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

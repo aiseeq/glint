@@ -37,6 +37,7 @@ func init() {
 // with its own Scan; a column read through COALESCE or another expression is
 // not checked.
 type SQLScanNullableRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -72,6 +73,7 @@ func (r *SQLScanNullableRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*c
 // with "missing destination name channel_name". Where a field without a tag
 // matches the column in snake case, the field is reported.
 type SQLXColumnWithoutFieldRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -109,6 +111,7 @@ func (r *SQLXColumnWithoutFieldRule) AnalyzeGoProject(ctx *core.GoProjectContext
 // arguments in Scan, not 4): a column added to the Scan and not to the query,
 // or the other way round, breaks the read for good.
 type SQLScanArgCountRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

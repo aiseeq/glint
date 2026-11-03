@@ -42,6 +42,7 @@ var directionalRoundingMethods = map[string]string{
 // the code goes on to use. That is the largest-remainder split: the parts are
 // floored and the dropped cents handed out again, so they add up exactly.
 type FinancialDirectionalRoundingRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

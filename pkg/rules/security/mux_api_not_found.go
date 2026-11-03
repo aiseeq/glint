@@ -131,3 +131,8 @@ func registersAPIRoute(file *ast.File) bool {
 	})
 	return found
 }
+
+// ReportsOn reports whether MuxAPIDefaultNotFoundRule can report on this file.
+func (r *MuxAPIDefaultNotFoundRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

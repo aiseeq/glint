@@ -31,6 +31,7 @@ func init() {
 // struct named ...Claims or embedding RegisteredClaims or StandardClaims,
 // with a TokenType, Typ or Type field.
 type JWTTokenTypeRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

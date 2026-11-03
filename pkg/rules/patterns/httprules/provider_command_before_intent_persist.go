@@ -26,6 +26,7 @@ func init() {
 // ProviderCommandBeforeIntentPersistRule detects financial provider commands
 // executed before their durable request or intent is recorded.
 type ProviderCommandBeforeIntentPersistRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

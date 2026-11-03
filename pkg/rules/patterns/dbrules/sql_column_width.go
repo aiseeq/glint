@@ -34,6 +34,7 @@ func init() {
 // and the write fails every time the code takes that path — usually the path
 // that records a failure, so the failure itself is lost.
 type StringLiteralExceedsColumnWidthRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -203,6 +204,7 @@ func passesParam(info *types.Info, arg ast.Expr, param *types.Var) bool {
 // the code wrote no longer matches. VARCHAR(n) or TEXT keeps the value as
 // written.
 type SQLCharColumnPadsValueRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -218,6 +220,11 @@ func NewSQLCharColumnPadsValueRule() *SQLCharColumnPadsValueRule {
 
 // ReadsOtherFiles reports that the findings depend on the later migrations.
 func (r *SQLCharColumnPadsValueRule) ReadsOtherFiles() bool { return true }
+
+// ReportsOn reports findings on Go files and SQL migrations.
+func (r *SQLCharColumnPadsValueRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile() || isSQLProjectFile(ctx)
+}
 
 // AnalyzeFile reports, on a migration, the CHAR(n) columns whose type it
 // gave last.

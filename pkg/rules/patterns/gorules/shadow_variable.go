@@ -23,6 +23,7 @@ func init() {
 // if/for/switch headers are all seen, and a name declared in an if header does
 // not leak past the if statement.
 type ShadowVariableRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	// Common Go variable names that are safe to shadow
 	safeToShadow map[string]bool

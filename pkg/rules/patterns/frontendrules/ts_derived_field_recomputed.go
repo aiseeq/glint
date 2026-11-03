@@ -475,3 +475,8 @@ func dLiteralValue(source string, m []int) string {
 	}
 	return source[m[4]:m[5]]
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *TSDerivedFieldRecomputedRule) ReportsOn(ctx *core.FileContext) bool {
+	return frontendProjectReportsOn(ctx)
+}

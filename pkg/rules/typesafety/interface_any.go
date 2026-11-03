@@ -19,6 +19,7 @@ func init() {
 // data, and it stays silent where 'any' would not compile: in a module older
 // than Go 1.18 and where the package declares its own 'any'.
 type InterfaceAnyRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

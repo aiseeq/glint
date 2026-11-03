@@ -31,6 +31,7 @@ func init() {
 // the wrapper record a failure the client never got, and the access log,
 // metrics or alerts built on it disagree with what was sent.
 type ResponseWrapperRecordsLastStatusRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

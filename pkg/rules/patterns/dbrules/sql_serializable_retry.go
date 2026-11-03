@@ -140,3 +140,8 @@ func readOnlyRepeatableReads(file *ast.File) map[*ast.SelectorExpr]bool {
 	})
 	return exempt
 }
+
+// ReportsOn reports whether SQLSerializableNoRetryRule can report on this file.
+func (r *SQLSerializableNoRetryRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

@@ -28,6 +28,7 @@ func init() {
 // string literal outside tests contains it. Test data writing the marker does
 // not count - it is how the dead check stays green.
 type MarkerNeverWrittenRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

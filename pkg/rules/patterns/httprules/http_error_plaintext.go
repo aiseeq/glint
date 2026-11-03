@@ -26,6 +26,7 @@ func init() {
 // sees "Unexpected token" instead of the reason the request was rejected —
 // and the layer that rejected the request stays invisible in the client logs.
 type HTTPErrorPlaintextRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

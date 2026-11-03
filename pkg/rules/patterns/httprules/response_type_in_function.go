@@ -33,6 +33,7 @@ func init() {
 // normal Go idiom: it is filled by the decoder, never composed field by field, so it does not
 // match.
 type ResponseTypeInFunctionRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

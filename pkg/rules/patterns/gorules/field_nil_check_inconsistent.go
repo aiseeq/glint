@@ -31,7 +31,10 @@ func init() { rules.Register(NewFieldNilCheckInconsistentRule()) }
 // check for the same receiver field, including through protected helpers;
 // exported helpers and helpers with an unprotected or unknown caller remain
 // checked.
-type FieldNilCheckInconsistentRule struct{ *rules.BaseRule }
+type FieldNilCheckInconsistentRule struct {
+	rules.GoFileFindingRule
+	*rules.BaseRule
+}
 
 // NewFieldNilCheckInconsistentRule creates the field nil check rule. Medium:
 // a field set by construction on every path that reaches the dereference is

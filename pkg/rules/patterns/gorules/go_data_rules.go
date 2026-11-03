@@ -40,6 +40,7 @@ func init() {
 // left out. Without type information (test files) only a slice printed with
 // %s is judged.
 type StringPrefixSliceUnguardedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -271,6 +272,7 @@ func printedArgument(slice *ast.SliceExpr, parents map[ast.Node]ast.Node) bool {
 // nil value, nothing) instead of the strategy. A field of the same Go name is
 // a deliberate override and is left out.
 type JSONTagShadowsEmbeddedFieldRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -408,6 +410,7 @@ func collectPromotedJSON(t types.Type, into map[string]promotedJSONField, depth 
 // compiler, which would reject a constant of the wrong type, sees a plain
 // string. A type without declared constants is not an enum and is left out.
 type EnumComparedToForeignLiteralRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -552,6 +555,7 @@ func (e enumIndex) enumValues(named *types.Named) (*types.Named, map[string]bool
 // evilexample.com ends with example.com: an attacker's domain passes the
 // check. Compare host == domain || strings.HasSuffix(host, "."+domain).
 type HostSuffixWithoutDotRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -734,6 +738,7 @@ func hostNamed(expr ast.Expr) bool {
 // The value is not escaped: a quote or a newline in it breaks the document (an
 // SSE frame ends at the newline) or adds fields. Marshal the value instead.
 type JSONBuiltByFormatRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -809,6 +814,7 @@ func (r *JSONBuiltByFormatRule) analyze(ctx *core.FileContext, info *types.Info)
 // texts too (a sheet name in a spreadsheet range), so only an escaped value
 // that reaches SQL text is reported (see escapedSQLFlow).
 type SQLQuoteEscapedByHandRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 
@@ -943,6 +949,7 @@ func (r *SQLQuoteEscapedByHandRule) analyze(ctx *core.FileContext, info *types.I
 //	totalLiabilities := models.MoneyZero()
 //	nav := gav.Sub(totalLiabilities)
 type SQLMetricLiteralZeroRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

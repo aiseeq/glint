@@ -325,3 +325,8 @@ func (r *TSTestOutsideTypecheckRule) AnalyzeFile(ctx *core.FileContext) []*core.
 	v.WithSuggestion("Add a tsconfig for the tests (extending the app's) and run tsc --noEmit -p on it in the type-check script, or compile them with ts-jest")
 	return []*core.Violation{v}
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *TSTestOutsideTypecheckRule) ReportsOn(ctx *core.FileContext) bool {
+	return frontendProjectReportsOn(ctx)
+}

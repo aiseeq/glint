@@ -60,6 +60,7 @@ func init() {
 // production code does not is reported: production runs without it, and what
 // it would have set up answers as if it had.
 type UnusedInternalExportRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 	closed map[string]bool
 }

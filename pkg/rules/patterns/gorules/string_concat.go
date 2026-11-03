@@ -23,6 +23,7 @@ func init() {
 // key (out[i].Message += s in for i := range out): each iteration grows a
 // string of its own.
 type StringConcatRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

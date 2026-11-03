@@ -31,6 +31,7 @@ func init() {
 // amount)). Test files are not checked: a test swapping a global for its own
 // run is the usual way to stub one.
 type GlobalSwapRestoreRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

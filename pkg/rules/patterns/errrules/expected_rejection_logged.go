@@ -36,6 +36,7 @@ func init() {
 // branches that pick the expected outcomes out, or at a lower level inside
 // them.
 type ExpectedRejectionLoggedAsErrorRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

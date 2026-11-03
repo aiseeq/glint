@@ -225,3 +225,8 @@ func nilCheckAfter(body *ast.BlockStmt, variable *ast.Ident, pos token.Pos) *ast
 	})
 	return found
 }
+
+// ReportsOn reports whether ErrVariableHoldsNonErrorRule can report on this file.
+func (r *ErrVariableHoldsNonErrorRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile()
+}

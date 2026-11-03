@@ -37,6 +37,7 @@ func init() {
 // A function named for division (floorDiv, a wrapper's Div) that divides by
 // its own parameter hands the zero case to its caller, as decimal does.
 type DecimalDivUnguardedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

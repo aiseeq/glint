@@ -34,6 +34,7 @@ func init() {
 // first call, far from the cause. Return an error or a bool with the value,
 // or panic where a mismatch is a programming error.
 type TypeAssertMismatchReturnsZeroRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

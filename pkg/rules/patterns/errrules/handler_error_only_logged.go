@@ -31,6 +31,7 @@ func init() {
 // says success. The ERROR level is the author's own verdict that this is a
 // failure; a WARN is taken for a deliberate degradation and left alone.
 type HandlerErrorOnlyLoggedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

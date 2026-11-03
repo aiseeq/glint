@@ -30,6 +30,7 @@ func init() {
 // the reverse), so what the program saved does not load back. A string base
 // kind is left out: there both sides are a JSON string.
 type JSONTextCodecOneSidedRule struct {
+	rules.GoFileFindingRule
 	*rules.BaseRule
 }
 

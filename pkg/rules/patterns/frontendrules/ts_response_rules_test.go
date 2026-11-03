@@ -425,6 +425,7 @@ func projectTSFindings(t *testing.T, name string, files map[string]string) []str
 	for _, ctx := range contexts {
 		found = append(found, rule.AnalyzeFile(ctx)...)
 	}
+	patterntest.AssertFindingFiles(t, rule, contexts, found)
 	return patterntest.FoundLines(found)
 }
 

@@ -236,3 +236,8 @@ func hasTopLevelOperator(expression string, operator byte) bool {
 	parts := splitTopLevel(expression, operator)
 	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }
+
+// ReportsOn reports whether this rule can report on this file.
+func (r *TSPeriodBoundaryByHandRule) ReportsOn(ctx *core.FileContext) bool {
+	return frontendProjectReportsOn(ctx)
+}
