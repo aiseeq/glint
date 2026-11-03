@@ -309,7 +309,8 @@ func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, error) {
 func panicLines(stderr string) string {
 	var named []string
 	for line := range strings.SplitSeq(stderr, "\n") {
-		if strings.Contains(line, `" panicked on `) {
+		// The closing summary repeats the lines of each panic.
+		if strings.Contains(line, `" panicked on `) && !strings.Contains(line, " rule panic(s), ") {
 			named = append(named, strings.TrimSpace(line))
 		}
 	}

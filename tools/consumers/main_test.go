@@ -181,7 +181,7 @@ func TestRulePanicCountsAsError(t *testing.T) {
 	old := filepath.Join(root, "old")
 	oldScript := "#!/bin/sh\necho '{\"issues\":[]}'\n"
 	newer := filepath.Join(root, "new")
-	newScript := "#!/bin/sh\necho '{\"issues\":[]}'\necho 'goroutine 1 [running]:' >&2\necho 'Error: 1 rule panic(s), the findings of these rules are missing: rule \"broken-rule\" panicked on a.go: boom' >&2\nexit 1\n"
+	newScript := "#!/bin/sh\necho '{\"issues\":[]}'\necho 'Error: rule \"broken-rule\" panicked on a.go: boom' >&2\necho 'goroutine 1 [running]:' >&2\necho 'Error: 1 rule panic(s), the findings of these rules are missing: rule \"broken-rule\" panicked on a.go: boom' >&2\nexit 1\n"
 	for path, script := range map[string]string{old: oldScript, newer: newScript} {
 		if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // an executable test double
 			t.Fatal(err)
@@ -193,7 +193,7 @@ func TestRulePanicCountsAsError(t *testing.T) {
 	}
 	var stdout, stderr strings.Builder
 	code := run([]string{"-config", cfg, "-old", old, "-new", newer}, &stdout, &stderr)
-	if code != 2 || !strings.Contains(stdout.String(), "1 errors") || !strings.Contains(stderr.String(), "alpha: ") || !strings.Contains(stderr.String(), `"broken-rule" panicked`) {
+	if code != 2 || !strings.Contains(stdout.String(), "1 errors") || !strings.Contains(stderr.String(), "alpha: ") || strings.Count(stderr.String(), `"broken-rule" panicked`) != 1 {
 		t.Fatalf("code %d, stdout %q, stderr %q: want the panic counted as an error of alpha", code, stdout.String(), stderr.String())
 	}
 }
