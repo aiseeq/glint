@@ -123,6 +123,24 @@ func main() { fmt.Println("ok") }`,
 			expectedCount: 0,
 		},
 		{
+			// Repro from a real project: a subcommand of a CLI printed its result
+			// from a file next to cmd/<tool>/main.go.
+			name: "another file of a cmd package main is skipped",
+			path: "/src/cmd/corpus/snapshots.go",
+			code: `package main
+import "fmt"
+func listSnapshots() { fmt.Printf("%d snapshots\n", 3) }`,
+			expectedCount: 0,
+		},
+		{
+			name: "a library package under cmd is checked",
+			path: "/src/cmd/corpus/store/store.go",
+			code: `package store
+import "fmt"
+func Save() { fmt.Println("saved") }`,
+			expectedCount: 1,
+		},
+		{
 			name: "tools package main stdout is skipped",
 			path: "/src/tools/report/output.go",
 			code: `package main
