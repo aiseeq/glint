@@ -162,6 +162,42 @@ const adminURL = "https://admin.projectA.local"
 `,
 			expect: "",
 		},
+		{
+			name: "хост из глагола формата — адрес не известен",
+			code: `package auth
+
+import "fmt"
+
+func callbackURL(appDomain, query string) string {
+	return fmt.Sprintf("https://%s/auth/callback/?%s", appDomain, query)
+}
+`,
+			expect: "",
+		},
+		{
+			name: "хост и порт из глаголов формата",
+			code: `package auth
+
+const addrFormat = "http://%s:%d/health"
+`,
+			expect: "",
+		},
+		{
+			name: "домен из глагола формата под литеральным поддоменом",
+			code: `package auth
+
+const apiFormat = "https://api.%s/v1"
+`,
+			expect: "",
+		},
+		{
+			name: "поддомен из глагола формата у литерального домена вендора",
+			code: `package extvault
+
+const regionFormat = "https://%s.extvault.com/v1"
+`,
+			expect: "https://%s.extvault.com/v1",
+		},
 	}
 
 	for _, tt := range tests {
