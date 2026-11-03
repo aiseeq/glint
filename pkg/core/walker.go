@@ -179,11 +179,13 @@ func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 				walkErrors <- err
 				continue
 			}
+			var held heldDirError
 			if err := filepath.WalkDir(scope, func(path string, entry os.DirEntry, walkErr error) error {
-				return w.visitEntry(fileQueue, walkErrors, path, entry, walkErr)
+				return w.visitEntry(fileQueue, walkErrors, &held, path, entry, walkErr)
 			}); err != nil {
 				walkErrors <- err
 			}
+			held.release(walkErrors, "", nil)
 		}
 	}()
 
@@ -252,8 +254,29 @@ func (w *Walker) WalkSync() ([]*FileContext, []error) {
 	return contexts, errors
 }
 
+// heldDirError keeps the error of loading a directory's .gitignore until the
+// walk shows whether the directory itself is readable. filepath.WalkDir calls
+// the handler of a directory before reading its listing and, failing to read
+// it, calls the handler again for the same directory with the error. A
+// directory that cannot be read cannot give its .gitignore either; that
+// second call reports it, so the held error would be a second copy.
+type heldDirError struct {
+	dir string
+	err error
+}
+
+// release reports the held error unless the walk now reports the held
+// directory itself, and empties the hold.
+func (h *heldDirError) release(walkErrors chan<- error, path string, walkErr error) {
+	if h.err != nil && (walkErr == nil || path != h.dir) {
+		walkErrors <- h.err
+	}
+	*h = heldDirError{}
+}
+
 // visitEntry filters a discovered path and queues files for analysis.
-func (w *Walker) visitEntry(fileQueue chan<- string, walkErrors chan<- error, path string, entry os.DirEntry, err error) error {
+func (w *Walker) visitEntry(fileQueue chan<- string, walkErrors chan<- error, held *heldDirError, path string, entry os.DirEntry, err error) error {
+	held.release(walkErrors, path, err)
 	if err != nil {
 		// Returning the error would abort the entire filepath.Walk (its
 		// documented contract), silently losing every file after this point.
@@ -279,7 +302,7 @@ func (w *Walker) visitEntry(fileQueue chan<- string, walkErrors chan<- error, pa
 				return filepath.SkipDir
 			}
 			if err := w.gitignore.addDir(path); err != nil {
-				walkErrors <- err
+				*held = heldDirError{dir: path, err: err}
 			}
 		}
 		return nil

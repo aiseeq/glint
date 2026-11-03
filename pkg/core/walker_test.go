@@ -20,7 +20,7 @@ func TestWalkerVisitFileReportsFilesystemErrorAndContinues(t *testing.T) {
 
 	// Returning the error would abort the whole filepath.WalkDir; it must go to
 	// the error channel instead so the rest of the tree is still discovered.
-	err := walker.visitEntry(make(chan string, 1), walkErrors, "blocked", nil, walkErr)
+	err := walker.visitEntry(make(chan string, 1), walkErrors, &heldDirError{}, "blocked", nil, walkErr)
 	require.NoError(t, err)
 	require.Len(t, walkErrors, 1)
 	require.ErrorIs(t, <-walkErrors, walkErr)
@@ -52,17 +52,28 @@ func TestWalkerContinuesPastUnreadableDir(t *testing.T) {
 
 	contexts, errs := NewWalker(tmpDir, DefaultConfig()).WalkSync()
 
-	require.NotEmpty(t, errs, "the unreadable directory must surface as an error")
-	var reportedUnreadableDir bool
-	for _, err := range errs {
-		if strings.Contains(err.Error(), blocked) {
-			reportedUnreadableDir = true
-			break
-		}
-	}
-	require.True(t, reportedUnreadableDir, "the unreadable directory must be named in an error")
+	require.Len(t, errs, 1, "the unreadable directory must surface as exactly one error: %v", errs)
+	require.Contains(t, errs[0].Error(), blocked, "the unreadable directory must be named in the error")
 	require.Len(t, contexts, 1, "files after the unreadable directory must still be discovered")
 	assert.Equal(t, filepath.Join("zzz", "z.go"), contexts[0].RelPath)
+}
+
+func TestWalkerReportsUnreadableGitignoreInReadableDir(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	tmpDir := t.TempDir()
+	sub := filepath.Join(tmpDir, "sub")
+	require.NoError(t, os.MkdirAll(sub, 0755))
+	gitignore := filepath.Join(sub, ".gitignore")
+	require.NoError(t, os.WriteFile(gitignore, []byte("*.gen.go\n"), 0644))
+	require.NoError(t, os.Chmod(gitignore, 0))
+	t.Cleanup(func() { _ = os.Chmod(gitignore, 0644) })
+
+	_, errs := NewWalker(tmpDir, DefaultConfig()).WalkSync()
+
+	require.Len(t, errs, 1, "an unreadable .gitignore must surface as one error: %v", errs)
+	require.Contains(t, errs[0].Error(), gitignore)
 }
 
 func TestWalkerReportsGoParseError(t *testing.T) {
