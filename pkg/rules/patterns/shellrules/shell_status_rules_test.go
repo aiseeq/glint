@@ -438,6 +438,29 @@ test_lock() {
 }
 check test_lock
 `)
+	shellWanted(t, "shell-test-and-last-status", "one-line.sh", `#!/bin/bash
+shifted() {
+  shift; if "$1"; then echo ok || true; fi
+}
+bound() {
+  local fn=$1; if "$fn"; then echo ok; fi
+}
+grouped() {
+  { fn=$1; if "$fn"; then echo ok || true; fi; }
+}
+test_lock() {
+  [ -f lock ] && grep -q ok lock
+}
+test_pid() {
+  [ -f pid ] && grep -q 1 pid
+}
+test_tmp() {
+  [ -d tmp ] && ls tmp
+}
+shifted "lock" test_lock
+bound test_pid
+grouped test_tmp
+`)
 	shellWanted(t, "shell-test-and-last-status", "shifted.sh", `#!/bin/bash
 run_case() {
   local name=$1
@@ -481,6 +504,10 @@ reassigned() {
   fn=probe
   if $fn; then :; fi
 }
+reassigned_inline() {
+  local fn=$1; fn=probe
+  if "$fn"; then :; fi
+}
 swallowed() {
   "$1" || true && echo ok
 }
@@ -492,6 +519,9 @@ drop_out() {
 }
 drop_dist() {
   [ -d dist ] && rm -r dist # want
+}
+drop_lib() {
+  [ -d lib ] && rm -r lib # want
 }
 drop_tmp() {
   [ -d "$tmp" ] && rm -r "$tmp" # want
@@ -509,6 +539,7 @@ verbose_run "before drop_logs after"
 after_shift drop_bin other
 reassigned drop_out
 swallowed drop_dist
+reassigned_inline drop_lib
 `)
 	shellWanted(t, "shell-test-and-last-status", "flag.sh", `#!/bin/bash
 cleanup() {

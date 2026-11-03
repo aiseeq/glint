@@ -509,28 +509,57 @@ func handedToRunner(text string, runners map[string]int, name string) bool {
 func statusTestingRunners(src *patternkit.ShellSource) map[string]int {
 	runners := make(map[string]int)
 	for _, fn := range src.Functions() {
-		params := make(map[string]int)
-		shifted := 0
-		for _, l := range src.Body(fn) {
-			if m := shiftStatement.FindStringSubmatch(l.Text); m != nil {
+		if pos, ok := testedArgumentPosition(src.Body(fn)); ok {
+			runners[fn.Name] = pos
+		}
+	}
+	return runners
+}
+
+// testedArgumentPosition walks the statements of a function body in order -
+// fn=$1; shift; if "$fn" on one line are three - and returns the position of
+// the argument the first tested call runs.
+func testedArgumentPosition(body []patternkit.ShellLine) (int, bool) {
+	params := make(map[string]int)
+	shifted := 0
+	for _, l := range body {
+		for _, statement := range shellStatements(l.Text) {
+			if m := shiftStatement.FindStringSubmatch(statement); m != nil {
 				shifted += max(1, atoiDigit(m[1]))
 				continue
 			}
-			if m := variableAssignment.FindStringSubmatch(l.Text); m != nil {
+			if m := variableAssignment.FindStringSubmatch(statement); m != nil {
 				_, seen := params[m[1]]
 				params[m[1]] = 0
-				if p := positionalAssignment.FindStringSubmatch(l.Text); p != nil && !seen {
+				if p := positionalAssignment.FindStringSubmatch(statement); p != nil && !seen {
 					params[m[1]] = atoiDigit(p[2]) + shifted
 				}
 				continue
 			}
-			if pos, ok := testedArgumentCall(l.Text, params, shifted); ok {
-				runners[fn.Name] = pos
-				break
+			if pos, ok := testedArgumentCall(statement, params, shifted); ok {
+				return pos, true
 			}
 		}
 	}
-	return runners
+	return 0, false
+}
+
+// shellStatements splits a line at its ; and &, inside groups too, without
+// the { or ( that opens one - the commands joined by && and || stay one
+// statement, so cmd || true keeps its status thrown away.
+func shellStatements(text string) []string {
+	var out []string
+	start := -1
+	for _, seg := range patternkit.SplitList(text, true) {
+		if start < 0 {
+			start = seg.Offset
+		}
+		if seg.Sep != "&&" && seg.Sep != "||" {
+			out = append(out, strings.TrimLeft(text[start:seg.Offset+len(seg.Text)], "{( \t"))
+			start = -1
+		}
+	}
+	return out
 }
 
 // testedArgumentCall returns the argument position of a command run from a
