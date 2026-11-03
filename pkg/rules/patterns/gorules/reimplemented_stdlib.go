@@ -129,7 +129,7 @@ func sortsMapKeys(fn *ast.FuncDecl, info *types.Info) bool {
 		return false
 	}
 	loop, ok := fn.Body.List[1].(*ast.RangeStmt)
-	if !ok || !mapKeyAppendLoop(loop, info, keysName) || !initializedKeySlice(fn.Body.List[0], keysName, loop.X, namesResult(fn, keysName)) {
+	if !ok || !mapKeyAppendLoop(loop, info, keysName) || !startsKeySlice(fn, keysName, loop.X) {
 		return false
 	}
 	returnStmt, ok := fn.Body.List[3].(*ast.ReturnStmt)
@@ -221,13 +221,19 @@ func namesResult(fn *ast.FuncDecl, name string) bool {
 	return false
 }
 
-// initializedKeySlice recognizes the first statement declaring an empty keys
-// slice: `var keys []T`, `keys := []T{}`, `keys := make([]T, 0[, len(m)])`,
-// or `keys = nil` when keys is the named result.
-func initializedKeySlice(stmt ast.Stmt, keys string, mapExpr ast.Expr, namedResult bool) bool {
-	if assign, ok := stmt.(*ast.AssignStmt); ok && assign.Tok == token.ASSIGN && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 {
-		return namedResult && sameIdent(assign.Lhs[0], keys) && sameIdent(assign.Rhs[0], "nil")
+// startsKeySlice recognizes the first statement of fn as the start of an empty
+// keys slice: a declaration, or `keys = nil` when keys is the named result.
+func startsKeySlice(fn *ast.FuncDecl, keys string, mapExpr ast.Expr) bool {
+	stmt := fn.Body.List[0]
+	if assign, ok := stmt.(*ast.AssignStmt); ok && assign.Tok == token.ASSIGN {
+		return namesResult(fn, keys) && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && sameIdent(assign.Lhs[0], keys) && sameIdent(assign.Rhs[0], "nil")
 	}
+	return initializedKeySlice(stmt, keys, mapExpr)
+}
+
+// initializedKeySlice recognizes a statement declaring an empty keys slice:
+// `var keys []T`, `keys := []T{}` or `keys := make([]T, 0[, len(m)])`.
+func initializedKeySlice(stmt ast.Stmt, keys string, mapExpr ast.Expr) bool {
 	emptySliceOf := func(expr ast.Expr) bool {
 		slice, ok := expr.(*ast.ArrayType)
 		return ok && slice.Len == nil
