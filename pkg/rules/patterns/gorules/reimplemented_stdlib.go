@@ -160,8 +160,13 @@ func (r *ReimplementedStdlibRule) sortedKeyBlocks(ctx *core.FileContext, fn *ast
 			v.WithColumn(ctx.PositionFor(list[i]).Column)
 			v.WithContext("pattern", "reimplemented_stdlib")
 			v.WithContext("replacement", replacement)
-			if nilAsGood(fn, list[i], list[i+2], keys, info) {
-				// The fixer may replace the three statements with keys := replacement.
+			// The fixer may replace the three statements with keys := replacement:
+			// a plain map operand prints as its source and cannot mention keys,
+			// maps and slices must name the packages an added import brings, and
+			// the sort's own import must not be renamed: the fixer drops "sort"
+			// once nothing refers to it, a renamed import would stay behind.
+			if isPlainOperand(loop.X) && namesStdlibPackages(ctx.GoAST, list[i].Pos(), info, "maps", "slices") &&
+				packagesCalledByPath(list[i+2], info) && nilAsGood(fn, list[i], list[i+2], keys, info) {
 				v.WithContext("fix_sorted_keys", keys.Name)
 			}
 			violations = append(violations, v)
@@ -171,32 +176,40 @@ func (r *ReimplementedStdlibRule) sortedKeyBlocks(ctx *core.FileContext, fn *ast
 	return violations
 }
 
-// nilAsGood reports keys that read the same nil as empty: declared nil by
-// var keys []T, or after the sort only ranged over, measured with len,
-// indexed and sliced.
-// slices.Sorted of an empty map returns nil.
+// nilAsGood reports keys that are read after the sort and read the same nil
+// as empty: declared nil by var keys []T, or after the sort only ranged over,
+// measured with len and indexed. slices.Sorted of an empty map returns nil; a
+// subslice of nil is nil again and carries the difference out. Unread keys
+// would leave keys := replacement unused, which does not compile.
 func nilAsGood(fn *ast.FuncDecl, start, sort ast.Stmt, keys *ast.Ident, info *types.Info) bool {
-	if _, ok := start.(*ast.DeclStmt); ok {
-		return true
-	}
 	obj := info.ObjectOf(keys)
+	assigned := make(map[*ast.Ident]bool)
 	readsAsList := make(map[*ast.Ident]bool)
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range node.Lhs {
+				if id, ok := ast.Unparen(lhs).(*ast.Ident); ok {
+					assigned[id] = true
+				}
+			}
 		case *ast.RangeStmt:
 			if id, ok := node.X.(*ast.Ident); ok {
 				readsAsList[id] = true
+			}
+			if node.Tok == token.ASSIGN {
+				for _, target := range []ast.Expr{node.Key, node.Value} {
+					if id, ok := ast.Unparen(target).(*ast.Ident); ok {
+						assigned[id] = true
+					}
+				}
 			}
 		case *ast.IndexExpr:
 			if id, ok := node.X.(*ast.Ident); ok {
 				readsAsList[id] = true
 			}
-		case *ast.SliceExpr:
-			if id, ok := node.X.(*ast.Ident); ok {
-				readsAsList[id] = true
-			}
 		case *ast.CallExpr:
-			if id, ok := node.Fun.(*ast.Ident); ok && id.Name == "len" && len(node.Args) == 1 {
+			if id, ok := node.Fun.(*ast.Ident); ok && isBuiltin(id, "len", info) && len(node.Args) == 1 {
 				if arg, ok := node.Args[0].(*ast.Ident); ok {
 					readsAsList[arg] = true
 				}
@@ -204,14 +217,42 @@ func nilAsGood(fn *ast.FuncDecl, start, sort ast.Stmt, keys *ast.Ident, info *ty
 		}
 		return true
 	})
-	good := true
+	_, declaredNil := start.(*ast.DeclStmt)
+	read, good := false, true
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && id.Pos() > sort.End() && info.Uses[id] == obj && !readsAsList[id] {
+		id, ok := n.(*ast.Ident)
+		if !ok || id.Pos() <= sort.End() || info.Uses[id] != obj || assigned[id] {
+			return true
+		}
+		read = true
+		if !declaredNil && !readsAsList[id] {
 			good = false
 		}
 		return good
 	})
-	return good
+	return read && good
+}
+
+// isBuiltin reports id naming the predeclared function name, not a local
+// one that shadows it.
+func isBuiltin(id *ast.Ident, name string, info *types.Info) bool {
+	_, ok := info.Uses[id].(*types.Builtin)
+	return ok && id.Name == name
+}
+
+// packagesCalledByPath reports a statement whose every package name is the
+// last element of its import path.
+func packagesCalledByPath(stmt ast.Stmt, info *types.Info) bool {
+	plain := true
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			if path := importedPackage(id, info); path != "" && path[strings.LastIndex(path, "/")+1:] != id.Name {
+				plain = false
+			}
+		}
+		return plain
+	})
+	return plain
 }
 
 // appendedSlice returns the slice a range loop appends to in its only
@@ -231,7 +272,7 @@ func appendedSlice(loop *ast.RangeStmt) *ast.Ident {
 // sortedKeyBlock reports start, loop and sort as an empty keys slice of the
 // map's key type, a loop appending every key to it and its ascending sort.
 func sortedKeyBlock(start ast.Stmt, loop *ast.RangeStmt, sort ast.Stmt, keys *ast.Ident, info *types.Info) bool {
-	if !initializedKeySlice(start, keys.Name, loop.X) || !mapKeyAppendLoop(loop, info, keys.Name) {
+	if !initializedKeySlice(start, keys.Name, loop.X, info) || !mapKeyAppendLoop(loop, info, keys.Name) {
 		return false
 	}
 	mapType, ok := info.TypeOf(loop.X).Underlying().(*types.Map)
@@ -239,7 +280,7 @@ func sortedKeyBlock(start ast.Stmt, loop *ast.RangeStmt, sort ast.Stmt, keys *as
 		return false
 	}
 	sortStmt, ok := sort.(*ast.ExprStmt)
-	return ok && isSortCall(sortStmt.X, keys.Name, mapType.Key())
+	return ok && isSortCall(sortStmt.X, keys.Name, mapType.Key(), info)
 }
 
 // sortsMapKeys recognizes a function that collects every key from one map,
@@ -254,7 +295,7 @@ func sortsMapKeys(fn *ast.FuncDecl, info *types.Info) bool {
 		return false
 	}
 	loop, ok := fn.Body.List[1].(*ast.RangeStmt)
-	if !ok || !mapKeyAppendLoop(loop, info, keysName) || !startsKeySlice(fn, keysName, loop.X) {
+	if !ok || !mapKeyAppendLoop(loop, info, keysName) || !startsKeySlice(fn, keysName, loop.X, info) {
 		return false
 	}
 	returnStmt, ok := fn.Body.List[3].(*ast.ReturnStmt)
@@ -270,7 +311,7 @@ func sortsMapKeys(fn *ast.FuncDecl, info *types.Info) bool {
 		return false
 	}
 	sortStmt, ok := fn.Body.List[2].(*ast.ExprStmt)
-	return ok && isSortCall(sortStmt.X, keysName, mapType.Key())
+	return ok && isSortCall(sortStmt.X, keysName, mapType.Key(), info)
 }
 
 func returnedSlice(fn *ast.FuncDecl) (string, bool) {
@@ -309,7 +350,7 @@ func mapKeyAppendLoop(loop *ast.RangeStmt, info *types.Info, keys string) bool {
 		return false
 	}
 	appendCall, ok := assign.Rhs[0].(*ast.CallExpr)
-	return ok && isBuiltinAppend(appendCall) && len(appendCall.Args) == 2 && sameIdent(appendCall.Args[0], keys) && sameIdent(appendCall.Args[1], key.Name)
+	return ok && isBuiltinAppend(appendCall, info) && len(appendCall.Args) == 2 && sameIdent(appendCall.Args[0], keys) && sameIdent(appendCall.Args[1], key.Name)
 }
 
 func isOrderedKey(t types.Type) bool {
@@ -348,17 +389,27 @@ func namesResult(fn *ast.FuncDecl, name string) bool {
 
 // startsKeySlice recognizes the first statement of fn as the start of an empty
 // keys slice: a declaration, or `keys = nil` when keys is the named result.
-func startsKeySlice(fn *ast.FuncDecl, keys string, mapExpr ast.Expr) bool {
+func startsKeySlice(fn *ast.FuncDecl, keys string, mapExpr ast.Expr, info *types.Info) bool {
 	stmt := fn.Body.List[0]
 	if assign, ok := stmt.(*ast.AssignStmt); ok && assign.Tok == token.ASSIGN {
-		return namesResult(fn, keys) && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && sameIdent(assign.Lhs[0], keys) && sameIdent(assign.Rhs[0], "nil")
+		return namesResult(fn, keys) && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && sameIdent(assign.Lhs[0], keys) && isPredeclaredNil(assign.Rhs[0], info)
 	}
-	return initializedKeySlice(stmt, keys, mapExpr)
+	return initializedKeySlice(stmt, keys, mapExpr, info)
+}
+
+// isPredeclaredNil reports the predeclared nil, not a package variable named so.
+func isPredeclaredNil(expr ast.Expr, info *types.Info) bool {
+	id, ok := expr.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	_, ok = info.Uses[id].(*types.Nil)
+	return ok
 }
 
 // initializedKeySlice recognizes a statement declaring an empty keys slice:
 // `var keys []T`, `keys := []T{}` or `keys := make([]T, 0[, len(m)])`.
-func initializedKeySlice(stmt ast.Stmt, keys string, mapExpr ast.Expr) bool {
+func initializedKeySlice(stmt ast.Stmt, keys string, mapExpr ast.Expr, info *types.Info) bool {
 	emptySliceOf := func(expr ast.Expr) bool {
 		slice, ok := expr.(*ast.ArrayType)
 		return ok && slice.Len == nil
@@ -388,23 +439,31 @@ func initializedKeySlice(stmt ast.Stmt, keys string, mapExpr ast.Expr) bool {
 	case 2:
 		return patternkit.IsIntLiteral(call.Args[1], 0)
 	case 3:
-		return patternkit.IsIntLiteral(call.Args[1], 0) && isLenOf(call.Args[2], mapExpr)
+		return patternkit.IsIntLiteral(call.Args[1], 0) && isLenOf(call.Args[2], mapExpr, info)
 	}
 	return false
 }
 
-// isLenOf reports len(target), with target written the same way (m, s.items).
-func isLenOf(expr, target ast.Expr) bool {
+// isLenOf reports the builtin len(target), with target written the same way
+// (m, s.items).
+func isLenOf(expr, target ast.Expr, info *types.Info) bool {
 	call, ok := expr.(*ast.CallExpr)
-	return ok && sameIdent(call.Fun, "len") && len(call.Args) == 1 && types.ExprString(call.Args[0]) == types.ExprString(target)
-}
-
-func isBuiltinAppend(call *ast.CallExpr) bool {
+	if !ok || len(call.Args) != 1 || types.ExprString(call.Args[0]) != types.ExprString(target) {
+		return false
+	}
 	id, ok := call.Fun.(*ast.Ident)
-	return ok && id.Name == "append"
+	return ok && isBuiltin(id, "len", info)
 }
 
-func isSortCall(expr ast.Expr, keys string, elem types.Type) bool {
+func isBuiltinAppend(call *ast.CallExpr, info *types.Info) bool {
+	id, ok := call.Fun.(*ast.Ident)
+	return ok && isBuiltin(id, "append", info)
+}
+
+// isSortCall recognizes an ascending sort of keys by package sort or slices,
+// resolved by import path: a local sort value or a package imported under
+// that name sorts as it likes.
+func isSortCall(expr ast.Expr, keys string, elem types.Type, info *types.Info) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok || len(call.Args) == 0 {
 		return false
@@ -413,25 +472,23 @@ func isSortCall(expr ast.Expr, keys string, elem types.Type) bool {
 	if !ok {
 		return false
 	}
-	pkg, ok := selector.X.(*ast.Ident)
-	if !ok {
-		return false
-	}
-	if selector.Sel.Name != "Sort" || pkg.Name != "sort" {
+	pkg := importedPackage(selector.X, info)
+	if selector.Sel.Name != "Sort" || pkg != "sort" {
 		if !sameIdent(call.Args[0], keys) {
 			return false
 		}
 	}
 	switch {
-	case selector.Sel.Name == "Strings" && pkg.Name == "sort" && basicKind(elem) == types.String:
+	case selector.Sel.Name == "Strings" && pkg == "sort" && basicKind(elem) == types.String:
 		return true
-	case selector.Sel.Name == "Ints" && pkg.Name == "sort" && basicKind(elem) == types.Int:
+	case selector.Sel.Name == "Ints" && pkg == "sort" && basicKind(elem) == types.Int:
 		return true
-	case selector.Sel.Name == "Sort" && pkg.Name == "slices":
+	case selector.Sel.Name == "Sort" && pkg == "slices":
 		return true
-	case selector.Sel.Name == "Slice" && pkg.Name == "sort" && len(call.Args) == 2:
+	case selector.Sel.Name == "Slice" && pkg == "sort" && len(call.Args) == 2 && !isFloatType(elem):
+		// By < a NaN key compares with nothing and lands anywhere; slices.Sorted puts it first.
 		return ascendingSortSlice(call.Args[1], keys)
-	case selector.Sel.Name == "Sort" && pkg.Name == "sort" && len(call.Args) == 1:
+	case selector.Sel.Name == "Sort" && pkg == "sort" && len(call.Args) == 1:
 		wrapped, ok := call.Args[0].(*ast.CallExpr)
 		if !ok || len(wrapped.Args) != 1 || basicKind(elem) != types.String {
 			return false
@@ -440,10 +497,23 @@ func isSortCall(expr ast.Expr, keys string, elem types.Type) bool {
 		if !ok || wrappedSelector.Sel.Name != "StringSlice" {
 			return false
 		}
-		wrappedPkg, ok := wrappedSelector.X.(*ast.Ident)
-		return ok && wrappedPkg.Name == "sort" && sameIdent(wrapped.Args[0], keys)
+		return importedPackage(wrappedSelector.X, info) == "sort" && sameIdent(wrapped.Args[0], keys)
 	}
 	return false
+}
+
+// importedPackage returns the import path of the package expr names, empty
+// when expr names no package.
+func importedPackage(expr ast.Expr, info *types.Info) string {
+	id, ok := expr.(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	pkg, ok := info.Uses[id].(*types.PkgName)
+	if !ok {
+		return ""
+	}
+	return pkg.Imported().Path()
 }
 
 func basicKind(t types.Type) types.BasicKind {
