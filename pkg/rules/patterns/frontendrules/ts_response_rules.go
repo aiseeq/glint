@@ -208,8 +208,9 @@ func checkFormNumberPayload(r *tsRule, ctx *core.FileContext, f patternkit.JsFla
 			"A parsed number goes into the payload unchecked — text in the field is NaN, which JSON sends as null, and the server clears the value",
 			"Check Number.isFinite on the parsed value and show the field error before sending")
 	}
+	brackets := patternkit.NewJsBrackets(f.Code)
 	for open := strings.IndexByte(f.Code, '{'); open >= 0; {
-		if callArgumentObject(f, open) {
+		if callArgumentObject(f, brackets, open) {
 			if end, ok := f.Closing(open); ok {
 				for _, item := range f.Items(open, end) {
 					text := f.Code[item.Start:item.End]
@@ -242,10 +243,15 @@ func checkFormNumberPayload(r *tsRule, ctx *core.FileContext, f patternkit.JsFla
 var awaitedCallee = regexp.MustCompile(`\bawait\s+[\w$.?]+\s*$`)
 
 // callArgumentObject reports an object literal written as an argument of an
-// awaited call: await api.create({ ... }), await api.update(id, { ... }).
-func callArgumentObject(f patternkit.JsFlat, open int) bool {
-	paren, ok := f.EnclosingParen(open)
-	if !ok || !strings.HasSuffix(strings.TrimRight(f.Code[:open], " \t\n"), "(") && !strings.HasSuffix(strings.TrimRight(f.Code[:open], " \t\n"), ",") {
+// awaited call: await api.create({ ... }), await api.update(id, { ... }),
+// await api.update({ id }, { ... }).
+func callArgumentObject(f patternkit.JsFlat, brackets *patternkit.JsBrackets, open int) bool {
+	before := strings.TrimRight(f.Code[:open], " \t\n")
+	if !strings.HasSuffix(before, "(") && !strings.HasSuffix(before, ",") {
+		return false
+	}
+	paren, ok := brackets.EnclosingParen(open)
+	if !ok {
 		return false
 	}
 	return awaitedCalleeBefore(f.Code, paren)

@@ -1,6 +1,7 @@
 package frontendrules
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -505,4 +506,532 @@ export function LineChart({ data, top, chartHeight }: { data: LineDatum[]; top: 
 `,
 	}
 	assert.Equal(t, []string{"frontend/limits.ts:1"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+// A money field on the right of a compound assignment adds money as surely as
+// one on the left: total += it.price sums prices on the client. A counter or
+// a length on the right is no money.
+func TestFrontendMoneyArithmetic_CompoundAssignMoneyOnRight(t *testing.T) {
+	files := map[string]string{
+		"frontend/calc.ts": `export function sum(items: Item[]) {
+  let total = 0
+  for (const it of items) {
+    total += it.price
+    count -= it.fee
+  }
+  return total
+}
+export function layout(rows: Row[]) {
+  let width = 0
+  for (const row of rows) {
+    width += row.padding
+    shown += row.prices.length
+    pricesApplied += row.appliedRows
+  }
+  return width
+}
+`,
+	}
+	assert.Equal(t, []string{"frontend/calc.ts:4", "frontend/calc.ts:5"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+// A money field appended to a string builds text, not a sum: the
+// accumulator holds a string, or the right side ends in a string literal.
+func TestFrontendMoneyArithmetic_CompoundAssignStringConcat(t *testing.T) {
+	files := map[string]string{
+		"frontend/csv.ts": `export function toCsv(rows: Row[]): string {
+  let csv = "id,amount\n"
+  for (const row of rows) {
+    csv += row.id + ","
+    csv += row.amount + "\n"
+  }
+  return csv
+}
+export function tooltip(p: Point): string {
+  let text = p.label
+  text += ": "
+  text += p.price
+  return text
+}
+export function binary(rows: Row[]): string {
+  let csv = ""
+  for (const row of rows) csv = csv + row.amount + "\n"
+  return csv
+}
+export function lines(rows: Row[], out: Out, p: Point) {
+  rows.forEach((row) => { out.text += row.amount + " USD" })
+  let line = ` + "``" + `
+  line += p.price
+}
+export function sum(items: Item[], qty: number) {
+  let total = 0
+  for (const it of items) {
+    total += it.price
+    total += it.price * qty
+    total = total + it.fee
+  }
+  return total
+}
+export function other(p: Point) {
+  let label = ""
+  let total = 0
+  total += p.price
+  return label
+}
+`,
+	}
+	// The file-wide conservative string rule permits the mixed-use tooltip,
+	// callback, and template accumulators after their nonliteral += assignments.
+	assert.Equal(t, []string{"frontend/csv.ts:12", "frontend/csv.ts:17", "frontend/csv.ts:23", "frontend/csv.ts:28", "frontend/csv.ts:29", "frontend/csv.ts:30", "frontend/csv.ts:37"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_StringAccumulatorClearedByNumber(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function total(items: Item[]) {
+  let total = ""
+  total = 0
+  for (const it of items) total += it.price
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_TemplateAccumulatorClearedByNumber(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": "export function total(items: Item[]) {\n  let total = `start`\n  total = 0\n  for (const it of items) total += it.price\n}\n"}
+	assert.Equal(t, []string{"frontend/total.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_BlockShadowDoesNotClearOuterAccumulator(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function total(items: Item[], mode: string) {
+  let total = 0
+  if (flag) { let total = ""; total += items.length }
+  for (const it of items) total += it.price
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_StringInParserFallbackDoesNotHideMoney(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function total(items: Item[], seed: Seed, url: URL) {
+  let parsed = parseFloat(seed.amount || "0")
+  for (const it of items) parsed += it.price
+  let numbered = Number(url.searchParams.get("amount") ?? 0)
+  for (const it of items) numbered += it.price
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:3", "frontend/total.ts:5"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_StringInObjectArgumentDoesNotHideMoney(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function total(items: Item[], seed: Seed) {
+  let total = parseTotal({ label: "" })
+  for (const it of items) total += it.price
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:3"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_CommaAssignmentDoesNotHideMoney(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function total(items: Item[], mode: boolean) {
+  let total = 0, note = ""
+  for (const it of items) total += it.price
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:3"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_AssignmentAfterComparisonDoesNotHideMoney(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function total(items: Item[], mode: string) {
+  let total = ""
+  if (mode === "x") { total = 0 }
+  for (const it of items) total += it.price
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_ArrowParameterDoesNotHideMoney(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function total(items: Item[]) {
+  let total = ""
+  const add = (total: number): number => total + 1
+  for (const it of items) total += it.price
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_FunctionDefaultParameterDoesNotHideMoney(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function total(items: Item[]) {
+  let total = 0
+  function label(total = "") { return total }
+  for (const it of items) total += it.price
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_ClosureStringAppendIsNotMoney(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function render(rows: Row[]) {
+  let out = ""
+  rows.forEach((row) => { out += row.amount })
+}
+`}
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_EqualityDoesNotMarkAccumulatorString(t *testing.T) {
+	files := map[string]string{"frontend/cmp.ts": `export function total(items: Item[]) {
+  let total = 0
+  if (total === "") return 0
+  for (const it of items) total += it.price
+}
+`}
+	assert.Equal(t, []string{"frontend/cmp.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_ArrowDoesNotMarkOuterAccumulatorString(t *testing.T) {
+	files := map[string]string{"frontend/cmp.ts": `export function arrow(items: Item[]) {
+  return items.reduce((total, it) => { const label = total => total + ""; total += it.price; return total }, 0)
+}
+`}
+	assert.Equal(t, []string{"frontend/cmp.ts:2"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_NumberThenStringAppendKeepsMoneyFinding(t *testing.T) {
+	files := map[string]string{"frontend/append.ts": `export function sum(items: Item[]) {
+  let total = 0
+  for (const it of items) total += it.price
+  return total
+}
+export function label(n: number) {
+  let total = 0
+  total += " units"
+  return total
+}
+`}
+	assert.Equal(t, []string{"frontend/append.ts:3"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_StringAccumulatorAppendWithoutReset(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function render(rows: Row[]) {
+  let out = ""
+  for (const row of rows) out += row.amount
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:3"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_JSXTextIsNotStringAssignment(t *testing.T) {
+	files := map[string]string{
+		"frontend/total.tsx": `export function sum(rows: Row[]) {
+  let total
+  for (const row of rows) total += row.amount
+}
+export function label() {
+  const node = <div>total = ""</div>
+  return node
+}
+`,
+		"frontend/self.tsx": `export function label() { return <p>total = "loading"</p> }
+export function calc(row: Row) {
+  let total
+  total = total + parseFloat(row.amount)
+  return total
+}
+`,
+		"frontend/fee.tsx": `export function label() { return <p>amount = "loading"</p> }
+export function calcFee(row: Row) {
+  const fee = amount + parseFloat(row.price)
+  return fee
+}
+`,
+	}
+	assert.Equal(t, []string{"frontend/fee.tsx:3", "frontend/self.tsx:4", "frontend/total.tsx:3"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_GenericTypeBeforeMoneyAppend(t *testing.T) {
+	files := map[string]string{"frontend/generic.ts": `export function label() {
+  let total = ""
+  return total
+}
+export function calc(rows: Row[]) {
+  let total
+  const values: Map<string, number>
+  total += row.amount
+  return total
+}
+`}
+	assert.Equal(t, []string{"frontend/generic.ts:8"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_JSXClosingTagBeforeMoneyAppend(t *testing.T) {
+	files := map[string]string{"frontend/tag.tsx": `export function label() {
+  let total = ""
+  return total
+}
+export function calc(rows: Row[]) {
+  let total
+  const node = <div>text</div>
+  total += row.amount
+  return node
+}
+`}
+	assert.Equal(t, []string{"frontend/tag.tsx:8"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_GenericTypeBeforeStringAssignment(t *testing.T) {
+	files := map[string]string{"frontend/generic.ts": `export function decl() {
+  let values: Map<string, number>
+  amount = ""
+  return values
+}
+export function calc(row: Row) {
+  const fee = amount + parseFloat(row.price)
+  return fee
+}
+`}
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_JSXSelfClosingTagBeforeStringAssignment(t *testing.T) {
+	files := map[string]string{"frontend/tag.tsx": `export function View() {
+  const node = <div className="x" />
+  amount = ""
+  return node
+}
+export function calc(row: Row) {
+  const fee = amount + parseFloat(row.price)
+  return fee
+}
+`}
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_JSXClosingTagBeforeStringAssignment(t *testing.T) {
+	files := map[string]string{"frontend/tag.tsx": `export function View() {
+  const node = <div>text</div>
+  amount = ""
+  return node
+}
+export function calc(row: Row) {
+  const fee = amount + parseFloat(row.price)
+  return fee
+}
+`}
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_NonStringCompoundAssignmentClearsAccumulator(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function label() {
+  let total = ""
+  return total
+}
+export function sum(rows: Row[]) {
+  let total
+  for (const row of rows) total += row.amount
+  return total
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:7"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_FunctionNameIsNotParameterBinding(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function render() { return null }
+export function sum(rows: Row[]) {
+  let render = ""
+  for (const row of rows) render = render + row.amount
+}
+`}
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_ParenthesizedSelfReferenceStaysString(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function sum(rows: Row[]) {
+  let out = ""
+  out = (out + "x")
+  for (const row of rows) out = out + row.amount
+}
+`}
+	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_FunctionDefaultParameterIsExcluded(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function sum(rows: Row[]) {
+	  let total
+	  function label(total = "") { return total }
+	  for (const row of rows) total += row.amount
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_ArrowDefaultParameterIsExcluded(t *testing.T) {
+	files := map[string]string{"frontend/total.ts": `export function sum(rows: Row[]) {
+	  let total
+	  const label = (total = "") => total
+	  for (const row of rows) total += row.amount
+}
+`}
+	assert.Equal(t, []string{"frontend/total.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+// A money field that only decides what a counter adds is not added itself;
+// a money value in a branch of that decision is.
+func TestFrontendMoneyArithmetic_GenericCallDoesNotHideMoneyAppend(t *testing.T) {
+	files := map[string]string{"frontend/generic.ts": `export function label() {
+  let total = ""
+  return total
+}
+export function sum(rows: Row[]) {
+  let total
+  const parsed = parseRows<Row>(rows)
+  for (const row of rows) total += row.amount
+  return total
+}
+`}
+	assert.Equal(t, []string{"frontend/generic.ts:8"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_GenericHookDoesNotHideMoneyAppend(t *testing.T) {
+	files := map[string]string{"frontend/react.tsx": `export function label() {
+  let total = ""
+  return total
+}
+export function Sum({ rows }: { rows: Row[] }) {
+  let total
+  const [state, setState] = useState<Row[]>([])
+  for (const row of rows) total += row.amount
+  return <div>{state.map((r) => r.id)}</div>
+}
+`}
+	assert.Equal(t, []string{"frontend/react.tsx:8"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_FunctionParameterStringDefaultDoesNotHideMoney(t *testing.T) {
+	files := map[string]string{"frontend/params.ts": `export function sum(total = "", rows: Row[]) {
+  rows.forEach((row) => { total += row.amount })
+  return total
+}
+`}
+	assert.Equal(t, []string{"frontend/params.ts:2"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_NestedFunctionHeaderDoesNotHideMoney(t *testing.T) {
+	files := map[string]string{"frontend/params.ts": `export function sum(rows: Row[]) {
+  let total
+  function label(total = "") { return total }
+  for (const row of rows) total += row.amount
+}
+`}
+	assert.Equal(t, []string{"frontend/params.ts:4"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_NestedArrowHeaderDoesNotHideMoney(t *testing.T) {
+	files := map[string]string{"frontend/params.ts": `export function label() {
+  let amount = ""
+  return amount
+}
+export function fee(row: Row) {
+  const value = (amount) => amount + parseFloat(row.price)
+  return value
+}
+`}
+	assert.Equal(t, []string{"frontend/params.ts:6"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+func TestFrontendMoneyArithmetic_CompoundAssignMoneyInCondition(t *testing.T) {
+	files := map[string]string{
+		"frontend/count.ts": `export function countPriced(items: Item[], max: number): number {
+  let count = 0
+  let total = 0
+  for (const it of items) {
+    count += it.price ? 1 : 0
+    count += it.amount > 0 ? 1 : 0
+    count += it.fee === undefined ? 0 : 1
+    count += (it.price !== 0)
+    count = count + (it.price ? 1 : 0)
+    total += it.price > max ? max : it.price
+    total += it.fee ? it.amount : 0
+    total += it.price ?? 0
+    total = total + it.price > 0
+  }
+  return count + total
+}
+`,
+	}
+	assert.Equal(t, []string{"frontend/count.ts:10", "frontend/count.ts:11", "frontend/count.ts:12", "frontend/count.ts:13"}, rulestest.ProjectFilesRulePlaces(t, NewFrontendMoneyArithmeticRule(), files))
+}
+
+// jsxTagOperatorScan is the former per-offset check jsxTagOperators replaces:
+// it reads back from each offset to the last '<'.
+func jsxTagOperatorScan(code string, pos int) bool {
+	start := strings.LastIndex(code[:pos], "<")
+	if start < 0 || strings.Contains(code[start:pos], ">") {
+		return false
+	}
+	i := start + 1
+	if i < pos && code[i] == '/' {
+		i++
+	}
+	if i >= pos || (code[i] < 'A' || code[i] > 'Z') && (code[i] < 'a' || code[i] > 'z') {
+		return false
+	}
+	depth := 0
+	var quote byte
+	for i = start + 1; i < pos; i++ {
+		c := code[i]
+		if quote != 0 {
+			if c == quote && (i == 0 || code[i-1] != '\\') {
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' {
+			quote = c
+			continue
+		}
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return quote != 0 || depth == 0
+}
+
+// jsxTagOperators answers as the per-offset scan does for every offset.
+func TestJsxTagOperatorsMatchScan(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	alphabet := []byte("<>/{}'\"`\\aZ +=-")
+	for range 3000 {
+		code := make([]byte, rng.Intn(30))
+		for i := range code {
+			code[i] = alphabet[rng.Intn(len(alphabet))]
+		}
+		var positions []int
+		for i := range code {
+			if rng.Intn(3) == 0 {
+				positions = append(positions, i)
+			}
+		}
+		got := jsxTagOperators(string(code), positions)
+		for k, pos := range positions {
+			if want := jsxTagOperatorScan(string(code), pos); got[k] != want {
+				t.Fatalf("offset %d of %q: one pass %v, scan %v", pos, code, got[k], want)
+			}
+		}
+	}
+}
+
+// Operators far from the last '<' cost no walk back to it: the time grows
+// with the file, not with its square.
+func TestFrontendMoneyArithmeticCompoundAssignsGrowLinearly(t *testing.T) {
+	source := func(n int) string {
+		return "export function s(o){let total=0;" + strings.Repeat("total+=o.price;", n) + "return total}"
+	}
+	if growth := ruleGrowth(t, NewFrontendMoneyArithmeticRule(), "web/src/sum.js", source, 1<<12); growth > 8 {
+		t.Errorf("four times the input took %.1f times as long, want at most 8", growth)
+	}
 }
