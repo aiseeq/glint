@@ -4,6 +4,7 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -38,7 +39,10 @@ type FrontendErrorMessageMatchRule struct {
 	*rules.BaseRule
 	catchParam  *regexp.Regexp
 	declaration *regexp.Regexp
-	function    *regexp.Regexp
+	// functions are the helper declarations: a named function, an arrow
+	// function bound to a name. Each is searched on its own, so a function
+	// declared inside the value of a binding is found too.
+	functions []*regexp.Regexp
 }
 
 // NewFrontendErrorMessageMatchRule creates the rule
@@ -52,7 +56,10 @@ func NewFrontendErrorMessageMatchRule() *FrontendErrorMessageMatchRule {
 		),
 		catchParam:  regexp.MustCompile(`\bcatch\s*\(\s*([A-Za-z_$][\w$]*)|\.catch\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)|\bon[A-Z]\w*Error\w*\s*[:=]\s*\(?\s*([A-Za-z_$][\w$]*)|\bon[Ee]rror\s*[:=]\s*\(?\s*([A-Za-z_$][\w$]*)`),
 		declaration: regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(.+)$`),
-		function:    regexp.MustCompile(`\bfunction\s+([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)|\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(\s*([A-Za-z_$][\w$]*)`),
+		functions: []*regexp.Regexp{
+			regexp.MustCompile(`\bfunction\s+([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)`),
+			regexp.MustCompile(`\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(\s*([A-Za-z_$][\w$]*)`),
+		},
 	}
 }
 
@@ -61,18 +68,19 @@ func (r *FrontendErrorMessageMatchRule) AnalyzeFile(ctx *core.FileContext) []*co
 	if (!ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile()) || patternkit.SkipFrontendPath(ctx) {
 		return nil
 	}
-	code := helpers.FileJSCode(ctx)
+	code := separateDollars(helpers.FileJSCode(ctx))
 	errorNames := r.errorNames(code)
 	if len(errorNames) == 0 {
 		return nil
 	}
-	names := alternation(errorNames)
-	messageOf := regexp.MustCompile(`(?:\b(?:` + names + `)|\(\s*(?:` + names + `)\s+as\s+[\w$.<>]+\s*\))\s*\??\.\s*message\b`)
+	names := wordAlternation(errorNames)
+	// A cast names a type, generic ones with their arguments: Foo<A, B<C>>.
+	messageOf := regexp.MustCompile(`(?:` + names + `|\(\s*` + names + `\s+as\s+(?:[\w$.<>]*<[\w$.<>]*(?:,\s*[\w$.<>]+)+|[\w$.<>]+)\s*\))\s*\??\.\s*message\b`)
 	texts := r.messageTexts(code, messageOf)
 
-	subject := `(?:\b(?:` + names + `)\s*\??\.\s*message`
+	subject := `(?:` + names + `\s*\??\.\s*message`
 	if len(texts) > 0 {
-		subject += `|\b(?:` + alternation(texts) + `)\b`
+		subject += `|` + wordAlternation(texts)
 	}
 	subject += `)`
 	match := regexp.MustCompile(subject + `(?:\s*\??\.\s*(?:includes|startsWith|endsWith|indexOf|match|search)\s*\(` +
@@ -157,78 +165,290 @@ func (r *FrontendErrorMessageMatchRule) errorNames(code []string) []string {
 // messageTexts returns the names that hold the message of an error: variables
 // assigned from a message or from another such name, and the first parameter
 // of a helper the file calls with a message.
+//
+// The names each declaration and each helper argument read are found once;
+// marking a name then marks what reads it, so a chain of n names costs no n
+// passes over the file.
 func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, messageOf *regexp.Regexp) []string {
-	texts := make(map[string]bool)
-	helperParams := make(map[string]string)
-	for _, line := range code {
-		for _, m := range r.function.FindAllStringSubmatch(line, -1) {
-			if m[1] != "" {
-				helperParams[m[1]] = m[2]
-			} else {
-				helperParams[m[3]] = m[4]
-			}
-		}
-	}
+	helperParams := r.helperParams(code)
 	type declarationMatch struct {
 		name  string
 		value string
 	}
 	declarations := make([]declarationMatch, len(code))
+	names := nameIndex{names: make(map[string]bool, len(helperParams))}
+	for _, param := range helperParams {
+		names.add(param)
+	}
 	for i, line := range code {
 		if m := r.declaration.FindStringSubmatch(line); m != nil {
 			declarations[i] = declarationMatch{name: m[1], value: m[2]}
+			names.add(m[1])
 		}
 	}
-	// Each helper call is matched by an expression compiled once per file.
 	calls := make(map[string]*regexp.Regexp, len(helperParams))
 	for helper := range helperParams {
-		calls[helper] = regexp.MustCompile(`\b` + regexp.QuoteMeta(helper) + `\s*\(([^;]*)`)
+		calls[helper] = regexp.MustCompile(`\b` + regexp.QuoteMeta(helper) + `\s*\(`)
 	}
-	// A helper call on a source line does not change between propagation
-	// passes. Index helper-name occurrences once, then cache each exact regex
-	// result so the propagation loop only performs lookups.
-	callMatches := indexHelperCalls(code, calls)
-	messageMatches := make(map[string]bool)
-	for changed := true; changed; {
-		changed = false
-		var holds *regexp.Regexp
-		if len(texts) > 0 {
-			holds = regexp.MustCompile(`\b(?:` + alternation(slices.Sorted(maps.Keys(texts))) + `)\b`)
+	callLines := indexHelperCalls(code, calls)
+
+	texts := make(map[string]bool)
+	var queue []string
+	mark := func(name string) {
+		if !texts[name] {
+			texts[name] = true
+			queue = append(queue, name)
 		}
-		carries := func(expr string) bool {
-			messageMatch, known := messageMatches[expr]
-			if !known {
-				messageMatch = messageOf.MatchString(expr)
-				messageMatches[expr] = messageMatch
-			}
-			return messageMatch || (holds != nil && holds.MatchString(expr))
+	}
+	// readers maps a name to the declarations whose value reads it.
+	readers := make(map[string][]string)
+	for _, declaration := range declarations {
+		if declaration.name == "" {
+			continue
 		}
-		for i := range code {
-			declaration := declarations[i]
-			if declaration.name != "" && !texts[declaration.name] && carries(declaration.value) {
-				texts[declaration.name] = true
-				changed = true
+		if messageOf.MatchString(declaration.value) {
+			mark(declaration.name)
+			continue
+		}
+		names.each(declaration.value, func(name string, _ int) {
+			readers[name] = append(readers[name], declaration.name)
+		})
+	}
+	// all holds every helper call of the file and parents the call whose first
+	// argument holds each one: a name inside an inner argument is inside the
+	// outer ones too. argumentsOf maps a name to the innermost calls whose
+	// first argument reads it.
+	var all []helperCall
+	var parents []int
+	argumentsOf := make(map[string][]int)
+	for i, line := range callLines {
+		if line == nil {
+			continue
+		}
+		line.messages = messageOf.FindAllStringIndex(code[i], -1)
+		nest := newCallNest(line.calls, len(all))
+		all = append(all, line.calls...)
+		parents = append(parents, nest.parents...)
+		names.each(code[i], func(name string, at int) {
+			if call := nest.innermost(at); call >= 0 {
+				argumentsOf[name] = append(argumentsOf[name], call)
 			}
-			for _, call := range callMatches[i] {
-				param := helperParams[call.helper]
-				if texts[param] {
-					continue
-				}
-				if call.matched && carries(firstArgument(call.argument)) {
-					texts[param] = true
-					changed = true
-				}
+		})
+		for _, call := range line.calls {
+			if spanHolds(line.messages, call.start, call.end) {
+				mark(helperParams[call.helper])
+			}
+		}
+	}
+	// live returns the first call from call outwards whose helper parameter is
+	// not marked yet, -1 when there is none. A call passed over stays passed
+	// over, since marks are never taken back, so it jumps there next time.
+	jump := make([]int, len(all))
+	for i := range jump {
+		jump[i] = i
+	}
+	dead := func(call int) bool { return texts[helperParams[all[call].helper]] }
+	up := func(call int) int {
+		if jump[call] != call {
+			return jump[call]
+		}
+		return parents[call]
+	}
+	live := func(call int) int {
+		found := call
+		for found >= 0 && dead(found) {
+			found = up(found)
+		}
+		for call >= 0 && call != found {
+			next := up(call)
+			jump[call] = found
+			call = next
+		}
+		return found
+	}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		for _, reader := range readers[name] {
+			mark(reader)
+		}
+		for _, call := range argumentsOf[name] {
+			for call = live(call); call >= 0; call = live(parents[call]) {
+				mark(helperParams[all[call].helper])
 			}
 		}
 	}
 	return slices.Sorted(maps.Keys(texts))
 }
 
-type helperCallMatch struct {
-	helper   string
-	argument string
-	matched  bool
-	position int
+// nameIndex finds the names of a set in a text as the expressions of
+// wordAlternation match them: a name with no '$' at an end is bounded by \b,
+// for which '$' is no word character, so x$err reads err; an end at '$' is
+// bounded by \B, so $m is read in ($m) and not in a$m.
+type nameIndex struct {
+	names   map[string]bool
+	longest int
+}
+
+func (x *nameIndex) add(name string) {
+	x.names[name] = true
+	x.longest = max(x.longest, len(name))
+}
+
+// each calls found with every name of the set in text and its offset, in
+// the order of the offsets. Inside a run of word characters and '$' a name
+// starts at the run's start or right after a '$' and ends at the run's end or
+// right before a '$', as \b and \B allow; a name that starts or ends with '$'
+// only at the run's own start or end.
+func (x *nameIndex) each(text string, found func(name string, at int)) {
+	if len(x.names) == 0 {
+		return
+	}
+	var dollars []int
+	for i := 0; i < len(text); {
+		if !identifierByte(text[i]) {
+			i++
+			continue
+		}
+		start := i
+		for i < len(text) && identifierByte(text[i]) {
+			i++
+		}
+		end := i
+		dollars = dollars[:0]
+		for k := start; k < end; k++ {
+			if text[k] == '$' {
+				dollars = append(dollars, k)
+			}
+		}
+		x.run(text, start, end, dollars, found)
+	}
+}
+
+// run finds the names of the run text[start:end] whose '$' are at dollars.
+func (x *nameIndex) run(text string, start, end int, dollars []int, found func(name string, at int)) {
+	check := func(from, to int) {
+		if name := text[from:to]; x.names[name] {
+			found(name, from)
+		}
+	}
+	for k := -1; k < len(dollars); k++ {
+		from := start
+		if k >= 0 {
+			from = dollars[k] + 1
+			if from == end || text[from] == '$' {
+				continue
+			}
+		}
+		for _, to := range dollars[k+1:] {
+			if to-from > x.longest {
+				break
+			}
+			if to > from && text[to-1] != '$' {
+				check(from, to)
+			}
+		}
+		if end-from <= x.longest {
+			check(from, end)
+		}
+	}
+}
+
+func identifierByte(c byte) bool {
+	return c == '$' || patternkit.IsWordChar(c)
+}
+
+// callNest pairs the helper calls of a line, in the order of their first
+// arguments, with the calls whose first argument holds them.
+type callNest struct {
+	calls   []helperCall
+	offset  int
+	parents []int
+	stack   []int
+	next    int
+}
+
+// newCallNest indexes calls numbered from offset on. The first arguments of
+// a line come from one pairing of its brackets, so two of them either nest or
+// do not meet.
+func newCallNest(calls []helperCall, offset int) *callNest {
+	slices.SortStableFunc(calls, func(a, b helperCall) int {
+		if a.start != b.start {
+			return a.start - b.start
+		}
+		return b.end - a.end
+	})
+	nest := &callNest{calls: calls, offset: offset, parents: make([]int, len(calls))}
+	var stack []int
+	for k, call := range calls {
+		for len(stack) > 0 && calls[stack[len(stack)-1]].end <= call.start {
+			stack = stack[:len(stack)-1]
+		}
+		nest.parents[k] = -1
+		if len(stack) > 0 {
+			nest.parents[k] = offset + stack[len(stack)-1]
+		}
+		stack = append(stack, k)
+	}
+	return nest
+}
+
+// innermost returns the innermost call whose first argument holds offset at,
+// -1 for none. Offsets come in increasing order.
+func (n *callNest) innermost(at int) int {
+	for n.next < len(n.calls) && n.calls[n.next].start <= at {
+		n.pop(n.calls[n.next].start + 1)
+		n.stack = append(n.stack, n.next)
+		n.next++
+	}
+	n.pop(at + 1)
+	if len(n.stack) == 0 {
+		return -1
+	}
+	return n.offset + n.stack[len(n.stack)-1]
+}
+
+func (n *callNest) pop(at int) {
+	for len(n.stack) > 0 && n.calls[n.stack[len(n.stack)-1]].end < at {
+		n.stack = n.stack[:len(n.stack)-1]
+	}
+}
+
+// helperParams maps each helper the file declares to its first parameter. A
+// later declaration of a name replaces an earlier one.
+func (r *FrontendErrorMessageMatchRule) helperParams(code []string) map[string]string {
+	params := make(map[string]string)
+	for _, line := range code {
+		var found [][]int
+		for _, re := range r.functions {
+			found = append(found, re.FindAllStringSubmatchIndex(line, -1)...)
+		}
+		slices.SortStableFunc(found, func(a, b []int) int { return a[0] - b[0] })
+		for _, m := range found {
+			params[line[m[2]:m[3]]] = line[m[4]:m[5]]
+		}
+	}
+	return params
+}
+
+// spanHolds reports whether one of matches, sorted and not overlapping, lies
+// within [start, end).
+func spanHolds(matches [][]int, start, end int) bool {
+	i := sort.Search(len(matches), func(i int) bool { return matches[i][0] >= start })
+	return i < len(matches) && matches[i][1] <= end
+}
+
+// helperCallLine holds the helper calls of a line and the offsets where the
+// line reads an error message.
+type helperCallLine struct {
+	calls    []helperCall
+	messages [][]int
+}
+
+// helperCall is a call of a helper with the span of its first argument.
+type helperCall struct {
+	helper     string
+	start, end int
 }
 
 type helperCallTrieNode struct {
@@ -237,11 +457,14 @@ type helperCallTrieNode struct {
 	output  []string
 }
 
-func indexHelperCalls(code []string, calls map[string]*regexp.Regexp) [][]helperCallMatch {
+// indexHelperCalls finds every call of a helper on every line: one pass of
+// the helper names' automaton over the line, and the line's brackets paired
+// once for the ends of the first arguments.
+func indexHelperCalls(code []string, calls map[string]*regexp.Regexp) []*helperCallLine {
 	trie := helperCallTrie(calls)
-	matches := make([][]helperCallMatch, len(code))
+	lines := make([]*helperCallLine, len(code))
 	for lineIndex, line := range code {
-		seen := make(map[string]bool)
+		var brackets *patternkit.JsBrackets
 		state := 0
 		for end := 0; end < len(line); end++ {
 			for state != 0 {
@@ -255,19 +478,22 @@ func indexHelperCalls(code []string, calls map[string]*regexp.Regexp) [][]helper
 			}
 			for _, name := range trie[state].output {
 				start := end + 1 - len(name)
-				if start < 0 || patternkit.IsWordChar(line[start]) == (start > 0 && patternkit.IsWordChar(line[start-1])) || seen[name] {
+				if start < 0 || patternkit.IsWordChar(line[start]) == (start > 0 && patternkit.IsWordChar(line[start-1])) {
 					continue
 				}
-				if addHelperCallMatch(&matches[lineIndex], line, start, end, name, calls[name]) {
-					seen[name] = true
+				paren, ok := helperCallParen(line, start, end, calls[name])
+				if !ok {
+					continue
 				}
+				if brackets == nil {
+					brackets = patternkit.NewJsBrackets(line)
+					lines[lineIndex] = &helperCallLine{}
+				}
+				lines[lineIndex].calls = append(lines[lineIndex].calls, helperCall{helper: name, start: paren + 1, end: brackets.FirstItemEnd(paren)})
 			}
 		}
-		slices.SortFunc(matches[lineIndex], func(a, b helperCallMatch) int {
-			return a.position - b.position
-		})
 	}
-	return matches
+	return lines
 }
 
 func helperCallTrie(calls map[string]*regexp.Regexp) []helperCallTrieNode {
@@ -311,72 +537,75 @@ func helperCallTrie(calls map[string]*regexp.Regexp) []helperCallTrieNode {
 	return trie
 }
 
-func addHelperCallMatch(matches *[]helperCallMatch, line string, start, end int, name string, call *regexp.Regexp) bool {
+// helperCallParen returns the '(' of the call of the helper whose name spans
+// line[start:end+1], when call's expression matches there.
+func helperCallParen(line string, start, end int, call *regexp.Regexp) (int, bool) {
 	paren := end + 1
 	for paren < len(line) && regexpSpaceByte(line[paren]) {
 		paren++
 	}
 	if paren >= len(line) || line[paren] != '(' {
-		return false
+		return 0, false
 	}
 	prefixStart := start
 	if prefixStart > 0 {
 		prefixStart--
 	}
 	prefix := line[prefixStart : paren+1]
-	m := call.FindStringSubmatchIndex(prefix)
+	m := call.FindStringIndex(prefix)
 	if m == nil || m[0] != start-prefixStart || m[1] != len(prefix) {
-		return false
+		return 0, false
 	}
-	argument := line[paren+1:]
-	if semicolon := strings.IndexByte(argument, ';'); semicolon >= 0 {
-		argument = argument[:semicolon]
-	}
-	*matches = append(*matches, helperCallMatch{helper: name, argument: argument, matched: true, position: start})
-	return true
+	return paren, true
 }
 
 func regexpSpaceByte(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
 }
 
-// firstArgument returns the first argument of an argument list: the text up
-// to the first comma outside brackets, quotes and template literals. Only the
-// first argument lands in the helper's first parameter.
-func firstArgument(args string) string {
-	depth := 0
-	var quote byte
-	for i := 0; i < len(args); i++ {
-		c := args[i]
-		switch {
-		case quote != 0:
-			switch c {
-			case '\\':
-				i++
-			case quote:
-				quote = 0
-			}
-		case c == '\'' || c == '"' || c == '`':
-			quote = c
-		case c == '(' || c == '[' || c == '{':
-			depth++
-		case c == ')' || c == ']' || c == '}':
-			if depth == 0 {
-				return args[:i]
-			}
-			depth--
-		case c == ',' && depth == 0:
-			return args[:i]
-		}
-	}
-	return args
-}
-
-// alternation joins names into a regular expression alternation.
-func alternation(names []string) string {
+// wordAlternation matches any of names as a whole identifier. Like \b it
+// takes '$' for no word character, so x$err holds err; a name that starts or
+// ends with '$' is bounded there by \B instead: $m is a name of its own, and
+// a$m does not hold it. \B also passes between two '$', which separateDollars
+// leaves none of.
+func wordAlternation(names []string) string {
 	quoted := make([]string, len(names))
 	for i, name := range names {
-		quoted[i] = regexp.QuoteMeta(name)
+		quoted[i] = wordBoundary(name[0]) + regexp.QuoteMeta(name) + wordBoundary(name[len(name)-1])
 	}
-	return strings.Join(quoted, "|")
+	return `(?:` + strings.Join(quoted, "|") + `)`
+}
+
+func wordBoundary(c byte) string {
+	if patternkit.IsWordChar(c) {
+		return `\b`
+	}
+	return `\B`
+}
+
+// separateDollars returns code with the first '$' of every "$$" made a word
+// character. Neither \b nor \B tells '$' from '$', so in $$m an expression
+// for the name $m would find it; in _$m it does not. Every name the rule
+// follows comes from the same lines, so a name $$m reads _$m too.
+func separateDollars(code []string) []string {
+	var out []string
+	for i, line := range code {
+		if !strings.Contains(line, "$$") {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(code)
+		}
+		b := []byte(line)
+		for k := 0; k+1 < len(b); k++ {
+			if b[k] == '$' && b[k+1] == '$' {
+				b[k] = '_'
+			}
+		}
+		out[i] = string(b)
+	}
+	if out == nil {
+		return code
+	}
+	return out
 }

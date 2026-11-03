@@ -504,3 +504,57 @@ CLIENT_RETRIES=${CLIENT_RETRIES:-3}
 `,
 	}))
 }
+
+// The payload is an argument of the awaited call after an argument that holds
+// brackets of its own: an object, a callback with a block body, an array.
+func TestTSFormNumberUncheckedInPayloadLaterArgument(t *testing.T) {
+	assert.Equal(t, []string{"src/save.ts:2", "src/save.ts:5", "src/save.ts:8"},
+		patterntest.DeployFindings(t, "ts-form-number-unchecked-in-payload", map[string]string{
+			"src/save.ts": `export async function update(form: Form) {
+  await api.update({ id: form.id }, { amount: Number(form.amount) })
+}
+export async function retry(form: Form) {
+  await withRetry(() => { log() }, { amount: Number(form.amount) })
+}
+export async function batch(form: Form) {
+  await api.batch([{ id: form.id }], { amount: Number(form.amount) })
+}
+`,
+		}))
+	// The object is in a callback's body, in a call that is not awaited, or
+	// in an array that is no argument.
+	assert.Empty(t, patterntest.DeployFindings(t, "ts-form-number-unchecked-in-payload", map[string]string{
+		"src/save.ts": `export async function update(form: Form) {
+  await withRetry(() => { const v = { amount: Number(form.amount) }; log(v) })
+  api.update({ id: form.id }, { amount: Number(form.amount) })
+  const rows = [{ id: form.id }, { amount: Number(form.amount) }]
+  await api.update(rows)
+}
+`,
+	}))
+	// Only a brace that starts an argument opens an object: after => it opens
+	// a block, and amount: is a label there, so the call is handed no payload.
+	assert.Empty(t, patterntest.DeployFindings(t, "ts-form-number-unchecked-in-payload", map[string]string{
+		"src/save.ts": `export async function update(form: Form) {
+  await withRetry(() => { amount: Number(form.amount) })
+}
+`,
+	}))
+}
+
+// A no-break space between a filter's colon and its value is no space to the
+// frontend rules: they read whitespace as \s and IsRegexpSpace do, ASCII only,
+// and a raw U+00A0 outside a string is a typing slip a JS linter reports. The
+// filter after it is not read, while the same filter after a space is.
+func TestTSURLFilterEnumUnvalidatedNoBreakSpace(t *testing.T) {
+	const source = `export function filters(params: URLSearchParams) {
+  return { kind: checkKind(params.get("kind")), status:` + " " + `params.status }
+}
+export function plain(params: URLSearchParams) {
+  return { kind: checkKind(params.get("kind")), status: params.status }
+}
+function checkKind(v: string) { return ALLOWED.has(v) ? v : "" }
+`
+	assert.Equal(t, []string{"src/filters.ts:5"},
+		patterntest.DeployFindings(t, "ts-url-filter-enum-unvalidated", map[string]string{"src/filters.ts": source}))
+}

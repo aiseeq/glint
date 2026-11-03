@@ -258,47 +258,351 @@ func (r *FrontendMoneyArithmeticRule) arithmeticFindings(ctx *core.FileContext, 
 		positions[i] = op.pos
 	}
 	functions := enclosingFunctionsAt(f, index, positions)
+	inJSXTag := jsxTagOperators(f.Code, positions)
+	texts := stringAccumulators(f, index, ops)
 	parameters := make(map[int]map[string]bool)
-	for _, op := range ops {
-		if jsxTagOperator(f.Code, op.pos) || formatting.inFunction(op.pos) {
+	for k, op := range ops {
+		if inJSXTag[k] || formatting.inFunction(op.pos) {
 			continue
 		}
 		if duplicateRounding.contains(op.pos) {
 			continue
 		}
 		leftName := moneyNameBefore(f.Code, op.pos)
-		rightName := moneyNameAfter(f.Code, op.pos+len(op.op))
 		fn, inFunction := functions[op.pos]
+		moneyAt := func(pos int) bool {
+			name := moneyNameAfter(f.Code, pos)
+			return moneyVariableInScope(vars, identifierAfter(f.Code, pos), fn, inFunction) || r.isMoneyFieldName(name) && !counterParameterCached(f, name, fn, inFunction, parameters)
+		}
 		leftMoney := moneyVariableInScope(vars, identifierBefore(f.Code, op.pos), fn, inFunction) || r.isMoneyFieldName(leftName) && !counterParameterCached(f, leftName, fn, inFunction, parameters)
-		rightMoney := moneyVariableInScope(vars, identifierAfter(f.Code, op.pos+len(op.op)), fn, inFunction) || r.isMoneyFieldName(rightName) && !counterParameterCached(f, rightName, fn, inFunction, parameters)
+		rightMoney := addendMoney(f.Code, op.pos+len(op.op), strings.HasSuffix(op.op, "="), moneyAt)
+		hit := leftMoney || rightMoney
 		if strings.HasSuffix(op.op, "=") {
-			if leftMoney {
-				addMoneyFinding(r, ctx, f, found, op.pos)
-				continue
-			}
+			// total += it.price sums money as much as amount += 1 changes it.
 			rhs := op.pos + len(op.op)
 			for _, p := range parsed {
-				if p.start >= rhs && strings.TrimSpace(f.Code[rhs:p.start]) == "" {
-					addMoneyFinding(r, ctx, f, found, op.pos)
+				if hit {
 					break
 				}
+				hit = p.start >= rhs && strings.TrimSpace(f.Code[rhs:p.start]) == ""
 			}
+		} else {
+			if stringConcatAt(f.Code, op.pos) {
+				continue
+			}
+			for _, p := range parsed {
+				if hit {
+					break
+				}
+				hit = operandTouches(f.Code, op.pos, p.start, p.end)
+			}
+		}
+		if !hit {
 			continue
 		}
-		if stringConcatAt(f.Code, op.pos) {
-			continue
-		}
-		for _, p := range parsed {
-			if operandTouches(f.Code, op.pos, p.start, p.end) {
-				addMoneyFinding(r, ctx, f, found, op.pos)
-				break
-			}
-		}
-		if leftMoney || rightMoney {
+		if appends := op.op == "+" || op.op == "+="; !appends || !texts.appendsText(f.Code, op) {
 			addMoneyFinding(r, ctx, f, found, op.pos)
 		}
 	}
 	return found
+}
+
+// addendMoney tells whether the value added at pos, right after an operator,
+// is money. A money name there is that value unless it only decides it:
+// count += it.price ? 1 : 0 adds one, total += it.fee ? it.amount : 0 adds
+// the amount, and shown += it.price > 0 adds a boolean. The right side of a
+// compound assignment is the whole expression; the right operand of a binary
+// operator is the whole condition only inside parentheses, since + binds
+// tighter than ?: and the comparisons.
+func addendMoney(code string, pos int, whole bool, moneyAt func(int) bool) bool {
+	if !moneyAt(pos) {
+		return false
+	}
+	start, opened := pos, false
+	for start < len(code) && (code[start] == ' ' || code[start] == '\t' || code[start] == '(') {
+		opened = opened || code[start] == '('
+		start++
+	}
+	if !whole && !opened {
+		return true
+	}
+	next := start
+	for next < len(code) && (patternkit.IsWordChar(code[next]) || code[next] == '.') {
+		next++
+	}
+	for next < len(code) && (code[next] == ' ' || code[next] == '\t') {
+		next++
+	}
+	if !decidesValue(code, next) {
+		return true
+	}
+	end := moneyExpressionEnd(code, start)
+	question := ternaryQuestion(code, next, end)
+	if question < 0 {
+		return false
+	}
+	colon := ternaryColon(code, question+1, end)
+	return moneyAt(question+1) || colon >= 0 && moneyAt(colon+1)
+}
+
+// decidesValue tells whether the operator at i makes the operand before it a
+// condition or a comparison rather than a value.
+func decidesValue(code string, i int) bool {
+	if i >= len(code) {
+		return false
+	}
+	nextIs := func(c byte) bool { return i+1 < len(code) && code[i+1] == c }
+	switch code[i] {
+	case '?':
+		return !nextIs('.') && !nextIs('?')
+	case '<', '>':
+		return true
+	case '=', '!':
+		return nextIs('=')
+	}
+	return false
+}
+
+func ternaryQuestion(code string, from, end int) int {
+	depth := 0
+	for i := from; i < end; i++ {
+		switch code[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case '?':
+			if i+1 < end && (code[i+1] == '.' || code[i+1] == '?') {
+				i++
+				continue
+			}
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func ternaryColon(code string, from, end int) int {
+	depth, nested := 0, 0
+	for i := from; i < end; i++ {
+		switch code[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case '?':
+			if i+1 < end && (code[i+1] == '.' || code[i+1] == '?') {
+				i++
+				continue
+			}
+			if depth == 0 {
+				nested++
+			}
+		case ':':
+			if depth != 0 {
+				continue
+			}
+			if nested == 0 {
+				return i
+			}
+			nested--
+		}
+	}
+	return -1
+}
+
+var stringAssignment = regexp.MustCompile(`(?:^|[^\w$.])([A-Za-z_$][\w$]*)\s*(?::\s*string\s*)?(\+=|-=|\*=|/=|=)`)
+var stringIdentifier = regexp.MustCompile(`[A-Za-z_$][\w$]*`)
+var stringArrow = regexp.MustCompile(`=>`)
+
+type textAccumulators struct {
+	at map[int]bool
+}
+
+// stringAccumulators marks a name when a literal assignment exists, no
+// non-string assignment exists, and no function parameter binds it. It
+// deliberately ignores scope and order, conservatively preserving findings.
+func stringAccumulators(f patternkit.JsFlat, functions *patternkit.JsFunctions, ops []arithmeticOperator) textAccumulators {
+	stringNames, nonStringNames := stringAssignmentNames(f)
+	brackets := patternkit.NewJsBrackets(f.Code)
+	parameters := functionParameterNames(f.Code, functions, brackets)
+	addArrowParameterNames(f.Code, brackets, parameters)
+	closureText := arrowTextAppends(f.Code, ops, stringNames, parameters, brackets)
+	return stringAccumulatorOps(f.Code, ops, stringNames, nonStringNames, parameters, closureText)
+}
+
+func stringAssignmentNames(f patternkit.JsFlat) (map[string]bool, map[string]bool) {
+	code := f.Code
+	stringNames := make(map[string]bool)
+	nonStringNames := make(map[string]bool)
+	matches := stringAssignment.FindAllStringSubmatchIndex(code, -1)
+	for _, match := range matches {
+		if followsJSXTextBoundary(code, match[2]) {
+			continue
+		}
+		name := code[match[2]:match[3]]
+		opEnd := match[5]
+		if opEnd < len(code) && (code[opEnd] == '=' || code[opEnd] == '>') {
+			continue
+		}
+		rhs := opEnd
+		for rhs < len(f.Text) && isExpressionSpace(f.Text[rhs]) {
+			rhs++
+		}
+		if rhs < len(f.Text) && isStringSelfReference(f.Text, rhs, name) {
+			continue
+		}
+		if rhs < len(f.Text) && strings.ContainsRune("\"'`", rune(f.Text[rhs])) {
+			stringNames[name] = true
+		} else {
+			nonStringNames[name] = true
+		}
+	}
+
+	return stringNames, nonStringNames
+}
+
+func stringAccumulatorOps(code string, ops []arithmeticOperator, stringsFound, nonStrings, parameters map[string]bool, closureText map[int]bool) textAccumulators {
+	out := textAccumulators{at: make(map[int]bool)}
+	for _, op := range ops {
+		name := identifierBefore(code, op.pos)
+		if closureText[op.pos] || stringsFound[name] && !nonStrings[name] && !parameters[name] && moneyNameBefore(code, op.pos) == name {
+			out.at[op.pos] = true
+		}
+	}
+	return out
+}
+
+func arrowTextAppends(code string, ops []arithmeticOperator, stringsFound, parameters map[string]bool, brackets *patternkit.JsBrackets) map[int]bool {
+	var ranges []arrowBodyRange
+	for _, arrow := range stringArrow.FindAllStringIndex(code, -1) {
+		start := arrow[1]
+		for start < len(code) && isExpressionSpace(code[start]) {
+			start++
+		}
+		if start >= len(code) || code[start] != '{' {
+			continue
+		}
+		if end, ok := brackets.Closing(start); ok {
+			ranges = append(ranges, arrowBodyRange{start, end})
+		}
+	}
+	out := make(map[int]bool)
+	var active []int
+	next := 0
+	for _, op := range ops {
+		for next < len(ranges) && ranges[next].start < op.pos {
+			active = append(active, ranges[next].end)
+			next++
+		}
+		for len(active) > 0 && active[len(active)-1] < op.pos {
+			active = active[:len(active)-1]
+		}
+		if op.op != "+=" {
+			continue
+		}
+		name := identifierBefore(code, op.pos)
+		if len(active) > 0 && stringsFound[name] && !parameters[name] {
+			out[op.pos] = true
+		}
+	}
+	return out
+}
+
+type arrowBodyRange struct{ start, end int }
+
+func functionParameterNames(code string, functions *patternkit.JsFunctions, brackets *patternkit.JsBrackets) map[string]bool {
+	names := make(map[string]bool)
+	for _, brace := range brackets.Braces() {
+		fn, ok := functions.AtBrace(brace.Open)
+		if !ok {
+			continue
+		}
+		open, ok := brackets.OpeningBefore(fn.Brace)
+		if !ok || open < fn.Start {
+			continue
+		}
+		close, ok := brackets.Closing(open)
+		if ok && close < fn.Brace {
+			addParameterIdentifiers(code, open+1, close, names)
+		}
+	}
+	return names
+}
+
+func addArrowParameterNames(code string, brackets *patternkit.JsBrackets, names map[string]bool) {
+	for _, arrow := range stringArrow.FindAllStringIndex(code, -1) {
+		end := arrow[0]
+		for end > 0 && isExpressionSpace(code[end-1]) {
+			end--
+		}
+		if end > 0 && code[end-1] == ')' {
+			if open, ok := brackets.Opening(end - 1); ok {
+				addParameterIdentifiers(code, open+1, end-1, names)
+			}
+			continue
+		}
+		start := end
+		for start > 0 && identifierByte(code[start-1]) {
+			start--
+		}
+		if start < end {
+			names[code[start:end]] = true
+		}
+	}
+}
+
+func addParameterIdentifiers(code string, start, end int, names map[string]bool) {
+	for _, match := range stringIdentifier.FindAllStringIndex(code[start:end], -1) {
+		names[code[start+match[0]:start+match[1]]] = true
+	}
+}
+
+func followsJSXTextBoundary(code string, nameStart int) bool {
+	for nameStart > 0 && (code[nameStart-1] == ' ' || code[nameStart-1] == '\t') {
+		nameStart--
+	}
+	return nameStart > 0 && code[nameStart-1] == '>' && (nameStart < 2 || code[nameStart-2] != '=')
+}
+
+func isStringSelfReference(code string, start int, name string) bool {
+	for start < len(code) && (code[start] == '(' || isExpressionSpace(code[start])) {
+		start++
+	}
+	if !strings.HasPrefix(code[start:], name) {
+		return false
+	}
+	end := start + len(name)
+	return end == len(code) || !identifierByte(code[end])
+}
+
+// appendsText tells whether the + or += at op builds text based on the
+// file-wide string classification or a string literal on the right.
+func (t textAccumulators) appendsText(code string, op arithmeticOperator) bool {
+	if t.at[op.pos] {
+		return true
+	}
+	if op.op != "+=" {
+		return false
+	}
+	rhs := op.pos + len(op.op)
+	end := moneyExpressionEnd(code, rhs)
+	depth := 0
+	for i := rhs; i < end; i++ {
+		switch code[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case '"', '\'', '`':
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f patternkit.JsFlat, parsed []moneySpan, vars map[string][]int, found map[int]bool, duplicateRounding financialFPRoundingDuplicateIndex, formatting formattingIndex) {
@@ -474,6 +778,7 @@ func newFormattingIndex(f patternkit.JsFlat, functions *patternkit.JsFunctions) 
 	functionNames := formattingFunctionName.FindAllStringIndex(f.Code, -1)
 	functionBraces := make([]int, 0)
 	lastHeaderBoundary := -1
+	functionNameIndex := 0
 	for pos := 0; pos < len(f.Code); pos++ {
 		switch f.Code[pos] {
 		case '{':
@@ -481,8 +786,10 @@ func newFormattingIndex(f patternkit.JsFlat, functions *patternkit.JsFunctions) 
 			if len(parenStack) > 0 {
 				headerStart = parenStack[len(parenStack)-1] + 1
 			}
-			nameIndex := sort.Search(len(functionNames), func(i int) bool { return functionNames[i][0] >= headerStart })
-			if nameIndex < len(functionNames) && functionNames[nameIndex][0] < pos {
+			for functionNameIndex < len(functionNames) && functionNames[functionNameIndex][0] < headerStart {
+				functionNameIndex++
+			}
+			if functionNameIndex < len(functionNames) && functionNames[functionNameIndex][0] < pos {
 				if fn, ok := functions.AtBrace(pos); ok {
 					name := strings.ToLower(fn.Name)
 					if strings.HasPrefix(name, "format") || strings.HasPrefix(name, "money") {
@@ -695,7 +1002,7 @@ func counterParameterInFunction(f patternkit.JsFlat, name string, fn patternkit.
 // one forward pass. Calling EnclosingFunction separately for each arithmetic
 // operator rescans the preceding source each time on minified files.
 func enclosingFunctionsAt(f patternkit.JsFlat, index *patternkit.JsFunctions, positions []int) map[int]patternkit.JsFunc {
-	sort.Ints(positions)
+	// arithmeticOperators returns source-ordered offsets, so keep this scan linear.
 	functions := make(map[int]patternkit.JsFunc, len(positions))
 	type functionScope struct {
 		function patternkit.JsFunc
@@ -747,42 +1054,57 @@ type arithmeticOperator struct {
 	op  string
 }
 
-func jsxTagOperator(code string, pos int) bool {
-	start := strings.LastIndex(code[:pos], "<")
-	if start < 0 || strings.Contains(code[start:pos], ">") {
-		return false
-	}
-	i := start + 1
-	if i < pos && code[i] == '/' {
-		i++
-	}
-	if i >= pos || (code[i] < 'A' || code[i] > 'Z') && (code[i] < 'a' || code[i] > 'z') {
-		return false
-	}
-	depth := 0
+// jsxTagOperators reports, for each of the sorted offsets, whether it sits
+// inside a JSX tag: after the last '<' before it, with no '>' since, the '<'
+// opening a tag name (<div, </div), and not inside a {...} expression of the
+// tag unless a quote is still open. One pass carries the scan state from one
+// offset to the next and starts it again at every '<'.
+func jsxTagOperators(code string, positions []int) []bool {
+	out := make([]bool, len(positions))
+	start, depth := -1, 0
 	var quote byte
-	for i = start + 1; i < pos; i++ {
-		c := code[i]
-		if quote != 0 {
-			if c == quote && (i == 0 || code[i-1] != '\\') {
-				quote = 0
+	closed := false
+	i := 0
+	for k, pos := range positions {
+		for ; i < pos; i++ {
+			c := code[i]
+			if c == '<' {
+				start, depth, quote, closed = i, 0, 0, false
+				continue
 			}
+			if c == '>' {
+				closed = true
+			}
+			if quote != 0 {
+				if c == quote && code[i-1] != '\\' {
+					quote = 0
+				}
+				continue
+			}
+			switch c {
+			case '\'', '"', '`':
+				quote = c
+			case '{':
+				depth++
+			case '}':
+				if depth > 0 {
+					depth--
+				}
+			}
+		}
+		if start < 0 || closed {
 			continue
 		}
-		if c == '\'' || c == '"' || c == '`' {
-			quote = c
+		name := start + 1
+		if name < pos && code[name] == '/' {
+			name++
+		}
+		if name >= pos || (code[name] < 'A' || code[name] > 'Z') && (code[name] < 'a' || code[name] > 'z') {
 			continue
 		}
-		switch c {
-		case '{':
-			depth++
-		case '}':
-			if depth > 0 {
-				depth--
-			}
-		}
+		out[k] = quote != 0 || depth == 0
 	}
-	return quote != 0 || depth == 0
+	return out
 }
 
 func arithmeticOperators(code string) []arithmeticOperator {
@@ -858,6 +1180,10 @@ func stringConcatAt(code string, pos int) bool {
 	return left >= 0 && (code[left] == '\'' || code[left] == '"' || code[left] == '`') || right < len(code) && (code[right] == '\'' || code[right] == '"' || code[right] == '`')
 }
 
+func isExpressionSpace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n' || value == '\v' || value == '\f'
+}
+
 func moneyExpressionEnd(code string, start int) int {
 	depth := 0
 	for i := start; i < len(code); i++ {
@@ -875,9 +1201,17 @@ func moneyExpressionEnd(code string, start int) int {
 			}
 		case '\n':
 			if depth == 0 {
-				prev := strings.TrimSpace(code[start:i])
-				next := strings.TrimSpace(code[i+1:])
-				if strings.HasSuffix(prev, "?") || strings.HasSuffix(prev, ":") || strings.HasSuffix(prev, "??") || strings.HasSuffix(prev, "||") || strings.HasSuffix(prev, "+") || strings.HasSuffix(prev, "-") || strings.HasPrefix(next, ":") {
+				prev := i - 1
+				for prev >= start && isExpressionSpace(code[prev]) {
+					prev--
+				}
+				continues := prev >= start && (code[prev] == '?' || code[prev] == ':' || code[prev] == '+' || code[prev] == '-')
+				continues = continues || prev-1 >= start && code[prev-1] == '|' && code[prev] == '|'
+				next := i + 1
+				for next < len(code) && isExpressionSpace(code[next]) {
+					next++
+				}
+				if continues || next < len(code) && code[next] == ':' {
 					continue
 				}
 				return i
