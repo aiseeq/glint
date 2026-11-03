@@ -473,16 +473,45 @@ func checkTestAndLastStatus(r *shellRule, src *patternkit.ShellSource) []*core.V
 	return appendReport(out, testAndLast(r, src, src.Lines[last], "the script exits 1"))
 }
 
-// testedCall reports a function the script calls as a condition.
+// testedCall reports a function the script calls as a condition, by its name
+// or handed by name to a runner that calls a variable as a condition
+// (run_test "case" test_fn, with if $fn; then PASS else FAIL inside).
 func testedCall(src *patternkit.ShellSource, name string) bool {
-	call := regexp.MustCompile(`(?:\b(?:if|elif|while|until)\s+!?\s*|\|\|\s*|&&\s*|!\s+)` + regexp.QuoteMeta(name) + `\b|\b` + regexp.QuoteMeta(name) + `\b[^;|&]*(?:\|\||&&)`)
+	quoted := regexp.QuoteMeta(name)
+	call := regexp.MustCompile(`(?:\b(?:if|elif|while|until)\s+!?\s*|\|\|\s*|&&\s*|!\s+)` + quoted + `\b|\b` + quoted + `\b[^;|&]*(?:\|\||&&)`)
+	var handed *regexp.Regexp
+	if runners := statusTestingRunners(src); len(runners) > 0 {
+		handed = regexp.MustCompile(`^\s*(?:` + strings.Join(runners, "|") + `)\s+(?:[^;|&]*\s)?` + quoted + `(?:\s|;|$)`)
+	}
 	for _, l := range src.Lines {
-		if !patternkit.ShellFuncStart.MatchString(l.Text) && call.MatchString(l.Text) {
+		if patternkit.ShellFuncStart.MatchString(l.Text) {
+			continue
+		}
+		if call.MatchString(l.Text) || (handed != nil && handed.MatchString(l.Text)) {
 			return true
 		}
 	}
 	return false
 }
+
+// statusTestingRunners returns the quoted names of the functions of the script
+// that run a command from a variable and test its status.
+func statusTestingRunners(src *patternkit.ShellSource) []string {
+	var runners []string
+	for _, fn := range src.Functions() {
+		for _, l := range src.Body(fn) {
+			if testedVariableCall.MatchString(l.Text) {
+				runners = append(runners, regexp.QuoteMeta(fn.Name))
+				break
+			}
+		}
+	}
+	return runners
+}
+
+// testedVariableCall matches a command run from a variable and tested as a
+// condition: if $fn, if "$@", "$1" || ..., $fn && ...
+var testedVariableCall = regexp.MustCompile(`(?:\b(?:if|elif|while|until)\s+!?\s*|\|\|\s*|&&\s*|!\s+)"?\$\{?[\w@]+\}?"?(?:\s|;|$)|^\s*"?\$\{?[\w@]+\}?"?(?:\s+"?\$\{?[\w@]+\}?"?)*\s*(?:\|\||&&)`)
 
 // testAndLast reports a line that ends in [ ... ] && cmd.
 func testAndLast(r *shellRule, src *patternkit.ShellSource, l patternkit.ShellLine, outcome string) *core.Violation {

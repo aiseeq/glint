@@ -404,3 +404,58 @@ build
 [ -f stale.lock ] && rm stale.lock # want
 `)
 }
+
+// Repro from a real project: a test script whose test functions end in their
+// assertions, [ ... ] && check, and a runner that calls each one by name as
+// if $fn; then PASS else FAIL - the status is the answer.
+func TestShellTestAndLastStatusRunnerTestsTheStatus(t *testing.T) {
+	shellWanted(t, "shell-test-and-last-status", "suite.sh", `#!/bin/bash
+run_test() {
+  local name="$1"
+  local fn="$2"
+  if $fn; then
+    echo "PASS: $name"
+  else
+    echo "FAIL: $name"
+  fi
+}
+test_one_call() {
+  setup || return 1
+  [ "$(calls)" -eq 1 ] && marker_ok frontend
+}
+test_retry() {
+  [ "$(calls)" -eq 2 ] && marker_ok e2e
+}
+run_test "one call" test_one_call
+run_test "retry" test_retry
+`)
+	shellWanted(t, "shell-test-and-last-status", "positional.sh", `#!/bin/bash
+check() {
+  "$@" || echo "FAIL: $1"
+}
+test_lock() {
+  [ -f lock ] && grep -q ok lock
+}
+check test_lock
+`)
+	shellWanted(t, "shell-test-and-last-status", "untested.sh", `#!/bin/bash
+each() {
+  local fn="$1"
+  $fn
+  echo "ran $fn"
+}
+cleanup_cache() {
+  [ -d cache ] && rm -r cache # want
+}
+each cleanup_cache
+`)
+	shellWanted(t, "shell-test-and-last-status", "flag.sh", `#!/bin/bash
+cleanup() {
+  [ -d "$tmp" ] && rm -r "$tmp" # want
+}
+trap cleanup EXIT
+if $VERBOSE; then
+  echo start
+fi
+`)
+}
