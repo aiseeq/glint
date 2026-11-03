@@ -523,7 +523,13 @@ func (r *TestExternalServiceRule) localURL(lit *ast.BasicLit) bool {
 		return false
 	}
 	match := r.externalURL.FindStringSubmatch(value)
-	return match != nil && r.localHost.MatchString(urlHost(match[1]))
+	return match != nil && r.isLocalHost(urlHost(match[1]))
+}
+
+// isLocalHost reports a local or reserved host; a verb in it stands for a
+// label, so https://%s.local:%d is local.
+func (r *TestExternalServiceRule) isLocalHost(host string) bool {
+	return r.localHost.MatchString(strings.ReplaceAll(host, verbMark, "x"))
 }
 
 // externalURLOf returns the value when it is a URL on a third-party host, ""
@@ -534,7 +540,7 @@ func (r *TestExternalServiceRule) externalURLOf(value string) string {
 		return ""
 	}
 	host := urlHost(match[1])
-	if r.localHost.MatchString(host) || formattedDomain(host) {
+	if host == "" || r.isLocalHost(host) || formattedDomain(host) {
 		return ""
 	}
 	return value
@@ -542,9 +548,15 @@ func (r *TestExternalServiceRule) externalURLOf(value string) string {
 
 // urlHost returns the host of a URL authority as the regexp captured it: the
 // query, the fragment, the user info and the port cut off, an IPv6 address kept
-// in its brackets, and every format verb folded into a single %.
+// in its brackets, and every format verb folded into verbMark. A %% and a
+// percent-encoded %25 stay literal.
 func urlHost(authority string) string {
-	host := formatVerb.ReplaceAllString(authority, "%")
+	host := hostFormatVerb.ReplaceAllStringFunc(authority, func(verb string) string {
+		if verb == "%%" {
+			return verb
+		}
+		return verbMark
+	})
 	if end := strings.IndexAny(host, "?#"); end >= 0 {
 		host = host[:end]
 	}
@@ -565,9 +577,18 @@ func urlHost(authority string) string {
 // verb (https://%s/..., http://%s:%d, https://api.%s): the address is filled in
 // by the caller, not written in the package. A verb under a literal domain
 // (https://%s.vendor.com) still names the vendor.
+// An IPv6 literal is an address, never a template.
 func formattedDomain(host string) bool {
-	return strings.Contains(host[strings.LastIndex(host, ".")+1:], "%")
+	return !strings.HasPrefix(host, "[") && strings.Contains(host[strings.LastIndex(host, ".")+1:], verbMark)
 }
+
+// verbMark stands for a format verb in a host: no host holds a NUL.
+const verbMark = "\x00"
+
+// hostFormatVerb matches a format verb with an explicit argument index
+// (%[1]s, %[2]d) as well as a plain one, and the escaped %% so that it is
+// not read as one.
+var hostFormatVerb = regexp.MustCompile(`%%|%[-+# 0-9.]*(?:\[\d+\][-+# 0-9.]*)?[sdvxXq]`)
 
 // analyzeTestFile reports live calls and credential gates inside one test file.
 func (r *TestExternalServiceRule) analyzeTestFile(

@@ -188,7 +188,7 @@ func (r *TestEmailRegistrableDomainRule) add(violations []*core.Violation, ctx *
 
 var (
 	templateSubstitution = regexp.MustCompile(`\$\{[^}]*\}`)
-	formatVerb           = regexp.MustCompile(`%[-+# 0-9.]*(?:\[\d+\][-+# 0-9.]*)?[sdvxXq]`)
+	formatVerb           = regexp.MustCompile(`%[-+# 0-9.]*[sdvxXq]`)
 )
 
 // fillSubstitutions replaces each substitution (a template's ${...}, a

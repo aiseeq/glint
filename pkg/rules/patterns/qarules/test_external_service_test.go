@@ -241,6 +241,49 @@ const loopback6 = "http://[::1]:%d/health"
 `,
 			expect: "",
 		},
+		{
+			name: "глаголы с индексом, %v и глагол под зарезервированным доменом",
+			code: `package common
+
+const pair = "https://%[1]s.%[2]s/v1"
+const value = "https://%v/v1"
+const local = "https://%s.local:%d/v1"
+`,
+			expect: "",
+		},
+		{
+			name: "%%s - литерал, а не глагол",
+			code: `package common
+
+const escapedVerb = "https://%%s.extvault.com/v1"
+`,
+			expect: "https://%%s.extvault.com/v1",
+		},
+		{
+			name: "URL без хоста",
+			code: `package common
+
+const query = "https://?x=%s"
+const fragment = "https://#fragment"
+`,
+			expect: "",
+		},
+		{
+			name: "IPv6 с зоной - адрес, а не шаблон",
+			code: `package common
+
+const zoned = "http://[fe80::1%25eth0]/"
+`,
+			expect: "http://[fe80::1%25eth0]/",
+		},
+		{
+			name: "экранированный %% - не глагол",
+			code: `package common
+
+const escaped = "https://extvault.co%%/v1"
+`,
+			expect: "https://extvault.co%%/v1",
+		},
 	}
 
 	for _, tt := range tests {
