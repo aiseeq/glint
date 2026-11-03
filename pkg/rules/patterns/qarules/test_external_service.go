@@ -523,29 +523,49 @@ func (r *TestExternalServiceRule) localURL(lit *ast.BasicLit) bool {
 		return false
 	}
 	match := r.externalURL.FindStringSubmatch(value)
-	return match != nil && r.localHost.MatchString(match[1])
+	return match != nil && r.localHost.MatchString(urlHost(match[1]))
 }
 
 // externalURLOf returns the value when it is a URL on a third-party host, ""
 // for a local or reserved one and for anything else.
 func (r *TestExternalServiceRule) externalURLOf(value string) string {
 	match := r.externalURL.FindStringSubmatch(value)
-	if match == nil || r.localHost.MatchString(match[1]) || formattedDomain(match[1]) {
+	if match == nil {
+		return ""
+	}
+	host := urlHost(match[1])
+	if r.localHost.MatchString(host) || formattedDomain(host) {
 		return ""
 	}
 	return value
 }
 
-// formattedDomain reports a host whose domain - the last label, port aside - is
-// a format verb (https://%s/..., http://%s:%d, https://api.%s): the address is
-// filled in by the caller, not written in the package. A verb under a literal
-// domain (https://%s.vendor.com) still names the vendor.
-func formattedDomain(host string) bool {
-	if bracket := strings.LastIndex(host, "]"); bracket >= 0 {
-		host = host[:bracket+1]
-	} else if colon := strings.Index(host, ":"); colon >= 0 {
+// urlHost returns the host of a URL authority as the regexp captured it: the
+// query, the fragment, the user info and the port cut off, an IPv6 address kept
+// in its brackets, and every format verb folded into a single %.
+func urlHost(authority string) string {
+	host := formatVerb.ReplaceAllString(authority, "%")
+	if end := strings.IndexAny(host, "?#"); end >= 0 {
+		host = host[:end]
+	}
+	host = host[strings.LastIndex(host, "@")+1:]
+	if strings.HasPrefix(host, "[") {
+		if end := strings.Index(host, "]"); end >= 0 {
+			return host[:end+1]
+		}
+		return host
+	}
+	if colon := strings.Index(host, ":"); colon >= 0 {
 		host = host[:colon]
 	}
+	return host
+}
+
+// formattedDomain reports a host whose domain - its last label - is a format
+// verb (https://%s/..., http://%s:%d, https://api.%s): the address is filled in
+// by the caller, not written in the package. A verb under a literal domain
+// (https://%s.vendor.com) still names the vendor.
+func formattedDomain(host string) bool {
 	return strings.Contains(host[strings.LastIndex(host, ".")+1:], "%")
 }
 

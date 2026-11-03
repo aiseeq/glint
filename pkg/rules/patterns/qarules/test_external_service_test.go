@@ -198,6 +198,49 @@ const regionFormat = "https://%s.extvault.com/v1"
 `,
 			expect: "https://%s.extvault.com/v1",
 		},
+		{
+			name: "индексированный глагол хоста и порт из глагола",
+			code: `package auth
+
+const indexed = "https://%[1]s:%d/health"
+const precision = "https://%[1].2s/health"
+const userinfo = "https://user:%s@%s/health"
+`,
+			expect: "",
+		},
+		{
+			name: "глагол в userinfo у литерального домена вендора",
+			code: `package extvault
+
+const withUser = "https://%s@extvault.com/v1"
+`,
+			expect: "https://%s@extvault.com/v1",
+		},
+		{
+			name: "индексированный порт у литерального домена вендора",
+			code: `package extvault
+
+const withPort = "https://extvault.com:%[1]d/v1"
+`,
+			expect: "https://extvault.com:%[1]d/v1",
+		},
+		{
+			name: "query сразу за литеральным доменом вендора",
+			code: `package extvault
+
+const withQuery = "https://extvault.com?key=%s"
+`,
+			expect: "https://extvault.com?key=%s",
+		},
+		{
+			name: "локальный хост с портом из глагола",
+			code: `package common
+
+const local = "http://localhost:%d/health"
+const loopback6 = "http://[::1]:%d/health"
+`,
+			expect: "",
+		},
 	}
 
 	for _, tt := range tests {
