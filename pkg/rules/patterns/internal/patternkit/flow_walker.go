@@ -203,6 +203,12 @@ type FlowRule[S, C any] interface {
 	Normalize(edges *FlowEdges[S])
 }
 
+// switchNoMatchRule lets rules refine the state that leaves a switch when no
+// case matches. Rules that do not track switch conditions keep the entry state.
+type switchNoMatchRule[S, C any] interface {
+	SwitchNoMatch(sw ast.Stmt, state S, parent C) S
+}
+
 // Walk runs the statement list of a callable body. The rule prepares the
 // function-level scope itself; the walker does not open a scope for the body.
 func (w *FlowWalker[S, C]) Walk(body *ast.BlockStmt, state S, scope C) FlowEdges[S] {
@@ -487,7 +493,11 @@ func (w *FlowWalker[S, C]) switchLike(
 		edges.Continues = w.join(edges.Continues, clauseEdges.Continues)
 	}
 	if !hasDefault {
-		edges.Next = w.join(edges.Next, w.Rule.CloneState(entered))
+		noMatch := w.Rule.CloneState(entered)
+		if rule, ok := any(w.Rule).(switchNoMatchRule[S, C]); ok {
+			noMatch = rule.SwitchNoMatch(sw, noMatch, parent)
+		}
+		edges.Next = w.join(edges.Next, noMatch)
 	}
 	w.Rule.Normalize(&edges)
 	w.Rule.LeaveScope(flowScopeSwitchHeader, scope, &edges)

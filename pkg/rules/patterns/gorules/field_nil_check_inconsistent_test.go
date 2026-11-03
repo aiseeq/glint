@@ -79,6 +79,30 @@ func (r *Router) cleanup() { defer func() { if r.service == nil { return }; r.se
 	assert.Empty(t, violations)
 }
 
+func TestFieldNilCheckInconsistentDirectClosureDeref(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
+		"service.go": `package example
+
+type Dependency struct{}
+func (*Dependency) Value() int { return 0 }
+type Service struct { dep *Dependency }
+func (s *Service) optional() int { if s.dep == nil { return 0 }; return s.dep.Value() }
+func (s *Service) checked() {
+	if s.dep == nil { return }
+	consume(func() { _ = s.dep.Value() })
+}
+func (s *Service) unchecked() {
+	consume(func() { _ = s.dep.Value() })
+}
+func consume(func()) {}
+`,
+	}
+	violations, err := NewFieldNilCheckInconsistentRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"service.go:12"}, patterntest.FoundLines(violations))
+}
+
 func TestFieldNilCheckInconsistentGuardWithError(t *testing.T) {
 	files := map[string]string{
 		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
@@ -424,6 +448,7 @@ func TestFieldNilCheckInconsistentAssignedBeforeUse(t *testing.T) {
 	}{
 		{name: "literal assignment", body: "s.mesh = &mesh{}; use(&s.mesh.tri)", want: 0},
 		{name: "constructor after error check", body: "var err error; s.mesh, err = NewMesh(); if err != nil { return }; use(&s.mesh.tri)", want: 0},
+		{name: "local constructor after error check", body: "mesh, err := NewMesh(); if err != nil { return }; s.mesh = mesh; use(&s.mesh.tri)", want: 0},
 		{name: "assignment in one branch", body: "if ready { s.mesh = &mesh{} }; use(&s.mesh.tri)", want: 1},
 		{name: "nil assignment", body: "s.mesh = nil; use(&s.mesh.tri)", want: 1},
 	} {
