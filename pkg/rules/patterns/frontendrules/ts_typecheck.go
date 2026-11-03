@@ -5,10 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 
@@ -373,11 +374,7 @@ func checkedTSConfigs(root string) ([]tsconfigScope, error) {
 			return err
 		}
 		dir := filepath.Dir(path)
-		names := make([]string, 0, len(pkg.Scripts))
-		for name := range pkg.Scripts {
-			names = append(names, name)
-		}
-		sort.Strings(names)
+		names := slices.Sorted(maps.Keys(pkg.Scripts))
 		for _, name := range names {
 			script := pkg.Scripts[name]
 			var targets []string

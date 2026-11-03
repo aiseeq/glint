@@ -8,9 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -137,11 +139,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			printIssue(stdout, "-", removed[i])
 		}
 	}
-	skipped := make([]string, 0, len(cfg.skips))
-	for name := range cfg.skips {
-		skipped = append(skipped, name)
-	}
-	sort.Strings(skipped)
+	skipped := slices.Sorted(maps.Keys(cfg.skips))
 	_, _ = fmt.Fprintf(stdout, "%d projects, %d with differences, %d errors, skipped: %s\n", len(targets), diffs, errs, strings.Join(skipped, ", "))
 	if errs > 0 {
 		return 2
@@ -237,12 +235,7 @@ func findProjects(c config) ([]string, error) {
 			return nil, fmt.Errorf("scan %s: %w", root, err)
 		}
 	}
-	out := make([]string, 0, len(found))
-	for p := range found {
-		out = append(out, p)
-	}
-	sort.Strings(out)
-	return out, nil
+	return slices.Sorted(maps.Keys(found)), nil
 }
 
 // linkedWorktree reports whether dir is a linked git worktree: git writes its

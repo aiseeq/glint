@@ -3,7 +3,8 @@ package errrules
 import (
 	"go/ast"
 	"go/token"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -47,11 +48,7 @@ func (r *SilentlyOptionalDependencyRule) nilSwitchedStandInModes(ctx *core.GoPro
 			continue
 		}
 		mocked := standInSwitchedFields(files, flags)
-		fields := make([]string, 0, len(flags))
-		for field := range flags {
-			fields = append(fields, field)
-		}
-		sort.Strings(fields)
+		fields := slices.Sorted(maps.Keys(flags))
 		for _, field := range fields {
 			if !mocked[field] {
 				continue

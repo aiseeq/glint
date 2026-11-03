@@ -2,7 +2,8 @@ package architecture
 
 import (
 	"go/ast"
-	"sort"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -214,11 +215,7 @@ func (r *SolidSRPRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 	// Analyze each struct's methods for responsibility areas, in a stable
 	// order: map iteration would shuffle the findings of one file between runs.
-	structNames := make([]string, 0, len(structMethods))
-	for structName := range structMethods {
-		structNames = append(structNames, structName)
-	}
-	sort.Strings(structNames)
+	structNames := slices.Sorted(maps.Keys(structMethods))
 
 	for _, structName := range structNames {
 		methods := structMethods[structName]
@@ -335,15 +332,9 @@ func detectResponsibilityAreas(methods []string) []string {
 		}
 	}
 
-	areas := make([]string, 0, len(detectedAreas))
-	for area := range detectedAreas {
-		areas = append(areas, area)
-	}
 	// The areas end up in the finding's message; map order would make the
 	// same code produce different text on every run.
-	sort.Strings(areas)
-
-	return areas
+	return slices.Sorted(maps.Keys(detectedAreas))
 }
 
 // camelWords splits an identifier into its lower-cased words: at an upper

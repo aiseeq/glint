@@ -83,13 +83,17 @@ func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Inf
 		}
 		replacement, ok := stdlibEquivalent(fn, operands)
 		caveat := ""
-		if !ok && versions != nil && versions.AtLeast(ctx, info, "go1.23") && sortsMapKeys(fn, info) {
+		mapsKeys := versions != nil && versions.AtLeast(ctx, info, "go1.23")
+		if !ok && mapsKeys && sortsMapKeys(fn, info) {
 			if sortedReplacement, hasReplacement := sortedMapKeysReplacement(fn); hasReplacement {
 				replacement, ok = sortedReplacement, true
-				caveat = "; for an empty map it returns nil, not an empty slice, so keep a non-nil result where a caller encodes it to JSON or compares it with nil"
+				caveat = nilForEmptyMapCaveat
 			}
 		}
 		if !ok {
+			if mapsKeys {
+				violations = append(violations, r.sortedKeyBlocks(ctx, fn, info)...)
+			}
 			continue
 		}
 
@@ -115,6 +119,127 @@ func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Inf
 	}
 
 	return violations
+}
+
+const nilForEmptyMapCaveat = "; for an empty map it returns nil, not an empty slice, so keep a non-nil result where a caller encodes it to JSON or compares it with nil"
+
+// sortedKeyBlocks reports the three statements that collect every key of a
+// map and sort them - an empty keys slice, a range appending each key, an
+// ascending sort - standing in a row in any block of fn.
+func (r *ReimplementedStdlibRule) sortedKeyBlocks(ctx *core.FileContext, fn *ast.FuncDecl, info *types.Info) []*core.Violation {
+	if info == nil {
+		return nil
+	}
+	var violations []*core.Violation
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		var list []ast.Stmt
+		switch block := n.(type) {
+		case *ast.BlockStmt:
+			list = block.List
+		case *ast.CaseClause:
+			list = block.Body
+		case *ast.CommClause:
+			list = block.Body
+		}
+		for i := 0; i+2 < len(list); i++ {
+			loop, ok := list[i+1].(*ast.RangeStmt)
+			if !ok {
+				continue
+			}
+			keys := appendedSlice(loop)
+			if keys == nil || !sortedKeyBlock(list[i], loop, list[i+2], keys, info) {
+				continue
+			}
+			replacement := "slices.Sorted(maps.Keys(" + types.ExprString(loop.X) + "))"
+			line := ctx.LineFor(list[i])
+			v := r.CreateViolation(ctx.RelPath, line,
+				fmt.Sprintf("%s collects and sorts the keys of %s by hand — %s already does it, and the hand-written copy is the one without tests behind it",
+					keys.Name, types.ExprString(loop.X), replacement))
+			v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
+			v.WithSuggestion(fmt.Sprintf("Replace the three statements with %s := %s%s", keys.Name, replacement, nilForEmptyMapCaveat))
+			v.WithColumn(ctx.PositionFor(list[i]).Column)
+			v.WithContext("pattern", "reimplemented_stdlib")
+			v.WithContext("replacement", replacement)
+			if nilAsGood(fn, list[i], list[i+2], keys, info) {
+				// The fixer may replace the three statements with keys := replacement.
+				v.WithContext("fix_sorted_keys", keys.Name)
+			}
+			violations = append(violations, v)
+		}
+		return true
+	})
+	return violations
+}
+
+// nilAsGood reports keys that read the same nil as empty: declared nil by
+// var keys []T, or after the sort only ranged over, measured with len,
+// indexed and sliced.
+// slices.Sorted of an empty map returns nil.
+func nilAsGood(fn *ast.FuncDecl, start, sort ast.Stmt, keys *ast.Ident, info *types.Info) bool {
+	if _, ok := start.(*ast.DeclStmt); ok {
+		return true
+	}
+	obj := info.ObjectOf(keys)
+	readsAsList := make(map[*ast.Ident]bool)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.RangeStmt:
+			if id, ok := node.X.(*ast.Ident); ok {
+				readsAsList[id] = true
+			}
+		case *ast.IndexExpr:
+			if id, ok := node.X.(*ast.Ident); ok {
+				readsAsList[id] = true
+			}
+		case *ast.SliceExpr:
+			if id, ok := node.X.(*ast.Ident); ok {
+				readsAsList[id] = true
+			}
+		case *ast.CallExpr:
+			if id, ok := node.Fun.(*ast.Ident); ok && id.Name == "len" && len(node.Args) == 1 {
+				if arg, ok := node.Args[0].(*ast.Ident); ok {
+					readsAsList[arg] = true
+				}
+			}
+		}
+		return true
+	})
+	good := true
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && id.Pos() > sort.End() && info.Uses[id] == obj && !readsAsList[id] {
+			good = false
+		}
+		return good
+	})
+	return good
+}
+
+// appendedSlice returns the slice a range loop appends to in its only
+// statement: keys in `for k := range m { keys = append(keys, k) }`.
+func appendedSlice(loop *ast.RangeStmt) *ast.Ident {
+	if len(loop.Body.List) != 1 {
+		return nil
+	}
+	assign, ok := loop.Body.List[0].(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 1 {
+		return nil
+	}
+	keys, _ := assign.Lhs[0].(*ast.Ident)
+	return keys
+}
+
+// sortedKeyBlock reports start, loop and sort as an empty keys slice of the
+// map's key type, a loop appending every key to it and its ascending sort.
+func sortedKeyBlock(start ast.Stmt, loop *ast.RangeStmt, sort ast.Stmt, keys *ast.Ident, info *types.Info) bool {
+	if !initializedKeySlice(start, keys.Name, loop.X) || !mapKeyAppendLoop(loop, info, keys.Name) {
+		return false
+	}
+	mapType, ok := info.TypeOf(loop.X).Underlying().(*types.Map)
+	if !ok || !sliceContainsType(info.TypeOf(keys), mapType.Key()) {
+		return false
+	}
+	sortStmt, ok := sort.(*ast.ExprStmt)
+	return ok && isSortCall(sortStmt.X, keys.Name, mapType.Key())
 }
 
 // sortsMapKeys recognizes a function that collects every key from one map,

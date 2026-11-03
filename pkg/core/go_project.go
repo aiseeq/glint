@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"go/types"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -431,12 +432,7 @@ func goModuleDirs(root string, goFiles []*FileContext, tolerate bool) ([]string,
 		}
 		modules[moduleDir] = true
 	}
-	moduleDirs := make([]string, 0, len(modules))
-	for moduleDir := range modules {
-		moduleDirs = append(moduleDirs, moduleDir)
-	}
-	sort.Strings(moduleDirs)
-	return moduleDirs, outside, nil
+	return slices.Sorted(maps.Keys(modules)), outside, nil
 }
 
 // FilesOfRunModules returns the files of the root a run over some of them

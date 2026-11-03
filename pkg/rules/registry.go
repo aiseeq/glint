@@ -159,20 +159,12 @@ func (r *Registry) ValidateConfig(cfg *core.Config) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	categories := make([]string, 0, len(cfg.Categories))
-	for category := range cfg.Categories {
-		categories = append(categories, category)
-	}
-	sort.Strings(categories)
+	categories := slices.Sorted(maps.Keys(cfg.Categories))
 	for _, category := range categories {
 		if _, ok := r.byCategory[category]; !ok {
 			return fmt.Errorf("categories.%s: unknown category (known: %s)", category, strings.Join(slices.Sorted(maps.Keys(r.byCategory)), ", "))
 		}
-		ruleNames := make([]string, 0, len(cfg.Categories[category].Rules))
-		for name := range cfg.Categories[category].Rules {
-			ruleNames = append(ruleNames, name)
-		}
-		sort.Strings(ruleNames)
+		ruleNames := slices.Sorted(maps.Keys(cfg.Categories[category].Rules))
 		for _, name := range ruleNames {
 			rule, ok := r.rules[name]
 			if !ok {

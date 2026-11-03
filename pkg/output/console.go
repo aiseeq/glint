@@ -3,7 +3,9 @@ package output
 import (
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -150,11 +152,7 @@ func (c *ConsoleOutput) printViolations(out *ReportWriter, violations core.Viola
 	}
 
 	// Sort files
-	files := make([]string, 0, len(byFile))
-	for f := range byFile {
-		files = append(files, f)
-	}
-	sort.Strings(files)
+	files := slices.Sorted(maps.Keys(byFile))
 
 	cyan := color.New(color.FgCyan, color.Bold)
 	for _, file := range files {

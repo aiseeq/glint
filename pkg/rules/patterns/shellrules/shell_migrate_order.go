@@ -1,9 +1,9 @@
 package shellrules
 
 import (
+	"maps"
 	"regexp"
 	"slices"
-	"sort"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -36,11 +36,7 @@ func checkMigrationsAfterStart(r *shellRule, src *patternkit.ShellSource) []*cor
 		return nil
 	}
 	funcs := src.Functions()
-	names := make([]string, 0, len(funcs))
-	for name := range funcs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(funcs))
 	rc := deployReach{names: names, starts: make(map[string]bool), migrations: make(map[string][]int)}
 	for changed := true; changed; {
 		changed = false

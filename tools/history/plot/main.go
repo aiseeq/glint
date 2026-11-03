@@ -20,9 +20,11 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -149,11 +151,7 @@ func load(path, metric string) (series, error) {
 		s.points = append(s.points, p)
 	}
 	if len(s.points) == 0 {
-		available := make([]string, 0, len(records[len(records)-1]))
-		for k := range records[len(records)-1] {
-			available = append(available, k)
-		}
-		sort.Strings(available)
+		available := slices.Sorted(maps.Keys(records[len(records)-1]))
 		return series{}, fmt.Errorf("%s: no field '%s' in any record; available: %s", path, metric, strings.Join(available, ", "))
 	}
 	sort.SliceStable(s.points, func(i, j int) bool { return s.points[i].date.Before(s.points[j].date) })

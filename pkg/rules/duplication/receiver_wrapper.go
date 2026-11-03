@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -264,11 +266,7 @@ func namedOf(t types.Type) *types.Named {
 
 // fieldList names the fields the wrapper passes, in argument order.
 func fieldList(w receiverWrapper) string {
-	positions := make([]int, 0, len(w.fields))
-	for i := range w.fields {
-		positions = append(positions, i)
-	}
-	sort.Ints(positions)
+	positions := slices.Sorted(maps.Keys(w.fields))
 	recv := w.decl.Recv.List[0].Names[0].Name
 	names := make([]string, 0, len(positions))
 	for _, i := range positions {
