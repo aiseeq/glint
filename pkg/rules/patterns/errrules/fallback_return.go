@@ -739,7 +739,7 @@ func zeroResultPositionsOnSuccess(ctx *core.FileContext, branch *ast.IfStmt) map
 	if body == nil || resultCount == 0 {
 		return nil
 	}
-	seen, allZero, returns := successfulResultPositions(ctx, fn, body, branch, resultCount)
+	seen, allZero, returns := successfulResultPositions(ctx, body, branch, resultCount)
 	if returns == 0 {
 		return nil
 	}
@@ -753,7 +753,7 @@ func zeroResultPositionsOnSuccess(ctx *core.FileContext, branch *ast.IfStmt) map
 }
 
 // successfulResultPositions summarizes named return positions on successful paths.
-func successfulResultPositions(ctx *core.FileContext, fn ast.Node, body *ast.BlockStmt, branch *ast.IfStmt, resultCount int) ([]bool, []bool, int) {
+func successfulResultPositions(ctx *core.FileContext, body *ast.BlockStmt, branch *ast.IfStmt, resultCount int) ([]bool, []bool, int) {
 	seen := make([]bool, resultCount)
 	allZero := make([]bool, resultCount)
 	for i := range allZero {
