@@ -379,7 +379,7 @@ func fieldNilBranchGoesOn(method fieldNilMethod, field *types.Var, body *ast.Blo
 	if !ok {
 		return false
 	}
-	if _, imported := method.info.Uses[qualifier].(*types.PkgName); !imported {
+	if _, imported := method.info.Uses[qualifier].(*types.PkgName); !imported || fieldNilCallTakesReceiver(method, call) {
 		return false
 	}
 	setsField := false
@@ -394,6 +394,25 @@ func fieldNilBranchGoesOn(method fieldNilMethod, field *types.Var, body *ast.Blo
 		return !setsField
 	})
 	return !setsField
+}
+
+// fieldNilCallTakesReceiver reports a call handed the receiver, which may set
+// the field itself (`setup.Init(s)`, `load(&s.cache)`).
+func fieldNilCallTakesReceiver(method fieldNilMethod, call *ast.CallExpr) bool {
+	receiver := fieldNilReceiverObject(method.info, method.decl)
+	if receiver == nil {
+		return false
+	}
+	takes := false
+	for _, arg := range call.Args {
+		ast.Inspect(arg, func(node ast.Node) bool {
+			if ident, ok := node.(*ast.Ident); ok && method.info.Uses[ident] == receiver {
+				takes = true
+			}
+			return !takes
+		})
+	}
+	return takes
 }
 
 func fieldNilBranchReturnsFalse(stmt ast.Stmt) bool {

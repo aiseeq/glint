@@ -71,7 +71,7 @@ func TestFieldNilCheckInconsistentNilBranchThatGoesOn(t *testing.T) {
 		"go.mod": "module example.com/rulestest\n\ngo 1.24\n",
 		"store.go": `package example
 
-import "log/slog"
+import ("fmt"; "log/slog")
 
 type Cache struct{}
 func (*Cache) Get(string) string { return "" }
@@ -95,6 +95,10 @@ func (s *Store) loaded(key string) string {
 	return s.cache.Get(key)
 }
 func (s *Store) fail() { panic("cache missing") }
+func (s *Store) handed(key string) string {
+	if s.cache == nil { fmt.Sscan(key, s) }
+	return s.cache.Get(key)
+}
 `,
 	}
 	violations, err := NewFieldNilCheckInconsistentRule().AnalyzeGoProject(rulestest.Project(t, files))
