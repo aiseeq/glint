@@ -112,43 +112,112 @@ func NewEngine(registry *Registry, dryRun bool) *Engine {
 	}
 }
 
-// WorkingTreeState describes what can be recovered if a fix goes wrong.
-type WorkingTreeState int
+// Unrecoverable names, as their Fix.File, the fix targets git cannot give
+// back. Uncommitted ones differ from HEAD or are not committed at all in the
+// repository that holds them; Untracked ones lie outside any repository.
+// Uncommitted files the fixes do not touch, such as a ticket being written,
+// do not matter.
+type Unrecoverable struct {
+	Uncommitted []string
+	Untracked   []string
+}
 
-const (
-	// WorkingTreeClean means every fix can be reverted with git.
-	WorkingTreeClean WorkingTreeState = iota
-	// WorkingTreeDirty means fixes would mix into uncommitted work.
-	WorkingTreeDirty
-	// WorkingTreeUntracked means the path is not inside a git repository, so
-	// nothing can be reverted.
-	WorkingTreeUntracked
-)
-
-// CheckWorkingTree reports whether fixes applied under projectRoot could be
-// reverted. Being outside a repository is a distinct answer, not an error:
-// the caller decides whether to require --force for it.
-func (e *Engine) CheckWorkingTree(projectRoot string) (WorkingTreeState, error) {
-	inside := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	inside.Dir = projectRoot
-	if err := inside.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return WorkingTreeUntracked, nil
+// UnrecoverableTargets finds the targets of fixes git cannot give back. A fix
+// is written through symlinks, so git is asked about the file that is written
+// and about the entry that leads to it, each in the repository holding it:
+// a nested repository or a submodule answers for its own files.
+func (e *Engine) UnrecoverableTargets(projectRoot string, fixes []*Fix) (Unrecoverable, error) {
+	tops := make(map[string]string)
+	byRepo := make(map[string]map[string]string)
+	untracked := make(map[string]struct{})
+	for _, fix := range fixes {
+		paths, err := targetPaths(projectRoot, fix.File)
+		if err != nil {
+			return Unrecoverable{}, err
 		}
-		return WorkingTreeUntracked, fmt.Errorf("run git in %q: %w", projectRoot, err)
+		for _, path := range paths {
+			top, err := repositoryTop(filepath.Dir(path), tops)
+			if err != nil {
+				return Unrecoverable{}, err
+			}
+			if top == "" {
+				untracked[fix.File] = struct{}{}
+				continue
+			}
+			rel, err := filepath.Rel(top, path)
+			if err != nil {
+				return Unrecoverable{}, fmt.Errorf("relate fix target to repository top: %w", err)
+			}
+			if byRepo[top] == nil {
+				byRepo[top] = make(map[string]string)
+			}
+			byRepo[top][filepath.ToSlash(rel)] = fix.File
+		}
 	}
 
-	status := exec.Command("git", "status", "--porcelain")
-	status.Dir = projectRoot
-	output, err := status.Output()
+	uncommitted := make(map[string]struct{})
+	for top, files := range byRepo {
+		// --no-renames reports a staged rename as its added path, so every
+		// entry is one "XY path" record.
+		args := []string{"--literal-pathspecs", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--"}
+		status := exec.Command("git", append(args, slices.Sorted(maps.Keys(files))...)...)
+		status.Dir = top
+		output, err := status.Output()
+		if err != nil {
+			return Unrecoverable{}, fmt.Errorf("git status in %q: %w", top, err)
+		}
+		for record := range strings.SplitSeq(string(output), "\x00") {
+			if len(record) > 3 {
+				uncommitted[files[record[3:]]] = struct{}{}
+			}
+		}
+	}
+	return Unrecoverable{
+		Uncommitted: slices.Sorted(maps.Keys(uncommitted)),
+		Untracked:   slices.Sorted(maps.Keys(untracked)),
+	}, nil
+}
+
+// targetPaths names a fix target with every symlink resolved: the file the
+// fix writes and, when that differs, the entry the target names itself.
+func targetPaths(projectRoot, file string) ([]string, error) {
+	if !filepath.IsAbs(file) {
+		file = filepath.Join(projectRoot, file)
+	}
+	written, err := filepath.EvalSymlinks(file)
 	if err != nil {
-		return WorkingTreeUntracked, fmt.Errorf("git status in %q: %w", projectRoot, err)
+		return nil, fmt.Errorf("resolve fix target: %w", err)
 	}
-	if len(strings.TrimSpace(string(output))) > 0 {
-		return WorkingTreeDirty, nil
+	dir, err := filepath.EvalSymlinks(filepath.Dir(file))
+	if err != nil {
+		return nil, fmt.Errorf("resolve fix target directory: %w", err)
 	}
-	return WorkingTreeClean, nil
+	return slices.Compact([]string{written, filepath.Join(dir, filepath.Base(file))}), nil
+}
+
+// repositoryTop returns the top of the work tree holding dir, "" when dir is
+// in none, caching the answer per directory in tops.
+func repositoryTop(dir string, tops map[string]string) (string, error) {
+	if top, ok := tops[dir]; ok {
+		return top, nil
+	}
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	var exitErr *exec.ExitError
+	switch {
+	case errors.As(err, &exitErr):
+		tops[dir] = ""
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("run git in %q: %w", dir, err)
+	}
+	top, err := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+	if err != nil {
+		return "", fmt.Errorf("resolve repository top: %w", err)
+	}
+	tops[dir] = top
+	return top, nil
 }
 
 // GenerateFixes generates fixes for violations without applying them
@@ -257,6 +326,20 @@ func (e *Engine) applyToFile(file string, fixes []*Fix) Result {
 	return result
 }
 
+// DisplayPath names a fix target the way the preview lists it: relative to
+// the working directory when it can be, as given otherwise.
+func DisplayPath(file string) string {
+	cwd, err := os.Getwd()
+	if err != nil { //nolint:silent-error-handling // Without a working directory the path is shown as given.
+		return file
+	}
+	rel, err := filepath.Rel(cwd, file)
+	if err != nil { //nolint:silent-error-handling // A path Rel cannot relate is shown as given.
+		return file
+	}
+	return rel
+}
+
 // Preview formats fixes for display
 func (e *Engine) Preview(fixes []*Fix) string {
 	if len(fixes) == 0 {
@@ -274,13 +357,7 @@ func (e *Engine) Preview(fixes []*Fix) string {
 
 	for _, file := range slices.Sorted(maps.Keys(byFile)) {
 		fileFixes := byFile[file]
-		relPath := file
-		if cwd, err := os.Getwd(); err == nil {
-			if rel, err := filepath.Rel(cwd, file); err == nil {
-				relPath = rel
-			}
-		}
-
+		relPath := DisplayPath(file)
 		for _, fix := range fileFixes {
 			fmt.Fprintf(&sb, "  %s:%d [%s]\n", relPath, fix.StartLine, fix.RuleName)
 			fmt.Fprintf(&sb, "    - %s\n", fix.OldText)
@@ -293,10 +370,6 @@ func (e *Engine) Preview(fixes []*Fix) string {
 			}
 			sb.WriteString("\n")
 		}
-	}
-
-	if e.dryRun {
-		sb.WriteString("Run with --dry-run=false to apply changes.\n")
 	}
 
 	return sb.String()

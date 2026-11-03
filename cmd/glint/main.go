@@ -250,7 +250,7 @@ func init() {
 
 	// Fix command flags
 	fixCmd.Flags().BoolVar(&flagDryRun, "dry-run", true, "Show what would be fixed without applying (default: true)")
-	fixCmd.Flags().BoolVar(&flagForce, "force", false, "Apply fixes even with uncommitted changes")
+	fixCmd.Flags().BoolVar(&flagForce, "force", false, "Apply fixes even to files with uncommitted changes or outside git")
 	fixCmd.Flags().StringSliceVarP(&flagFixRules, "rule", "r", nil, "Fix only the specified rules (repeat the flag or separate names with commas)")
 	fixCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed output")
 	fixCmd.Flags().IntVarP(&flagJobs, "jobs", "j", defaultJobs, "Threads the run may use (type checking and the rules)")
@@ -2130,39 +2130,18 @@ func runFix(_ *cobra.Command, args []string) error {
 		return err
 	}
 
+	// A root that refuses or fails does not keep the roots after it unfixed.
+	var failures []error
 	for _, projectRoot := range projectRoots {
 		if err := fixProjectRoot(projectRoot); err != nil {
-			return err
+			failures = append(failures, fmt.Errorf("%s: %w", projectRoot, err))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func fixProjectRoot(projectRoot string) error {
-	// Whether this root is fixed in place is decided per root: a dirty working
-	// tree here must not silence the fixes for the roots that follow.
-	dryRun := flagDryRun
-	state, err := fix.NewEngine(fix.DefaultRegistry, dryRun).CheckWorkingTree(projectRoot)
-	if err != nil {
-		return fmt.Errorf("check working tree: %w", err)
-	}
-
-	if !dryRun && !flagForce {
-		switch state {
-		case fix.WorkingTreeDirty:
-			fmt.Printf("WARNING: %s has uncommitted changes.\n", projectRoot)
-			fmt.Println("Use --force to apply fixes anyway, or commit your changes first.")
-			fmt.Println("Running in dry-run mode instead.")
-			dryRun = true
-		case fix.WorkingTreeUntracked:
-			fmt.Printf("WARNING: %s is not inside a git repository — fixes could not be reverted.\n", projectRoot)
-			fmt.Println("Use --force to apply fixes anyway.")
-			fmt.Println("Running in dry-run mode instead.")
-			dryRun = true
-		case fix.WorkingTreeClean:
-		}
-	}
-	engine := fix.NewEngine(fix.DefaultRegistry, dryRun)
+	engine := fix.NewEngine(fix.DefaultRegistry, flagDryRun)
 
 	// Load config and get enabled rules
 	cfg, enabledRules, err := loadConfig(projectRoot)
@@ -2194,15 +2173,61 @@ func fixProjectRoot(projectRoot string) error {
 		fmt.Printf("Running %d fixable rules...\n", len(fixableRules))
 	}
 
-	if dryRun {
+	if flagDryRun {
 		fixes, err := collectFixes(projectRoot, cfg, fixableRules, engine)
 		if err != nil || len(fixes) == 0 {
 			return err
 		}
 		fmt.Print(engine.Preview(fixes))
+		reason, err := unrecoverableReason(projectRoot, fixes, nil, engine)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			fmt.Printf("NOTE: %s.\n", reason)
+			fmt.Println("Run with --dry-run=false --force to apply anyway.")
+			return nil
+		}
+		fmt.Println("Run with --dry-run=false to apply changes.")
 		return nil
 	}
 	return applyFixesUntilStable(projectRoot, cfg, fixableRules, engine)
+}
+
+// unrecoverableReason names, as the preview does, the files of this pass's
+// fixes git could not give back, leaving out the ones this run has fixed
+// already: those differ from HEAD by the run's own edits. It is "" when there
+// are none or --force holds nothing back.
+func unrecoverableReason(projectRoot string, fixes []*fix.Fix, fixedFiles map[string]struct{}, engine *fix.Engine) (string, error) {
+	if flagForce {
+		return "", nil
+	}
+	var fresh []*fix.Fix
+	for _, f := range fixes {
+		if _, fixed := fixedFiles[f.File]; !fixed {
+			fresh = append(fresh, f)
+		}
+	}
+	targets, err := engine.UnrecoverableTargets(projectRoot, fresh)
+	if err != nil {
+		return "", err
+	}
+	var reasons []string
+	if len(targets.Uncommitted) > 0 {
+		reasons = append(reasons, "files to fix have uncommitted changes: "+displayPaths(targets.Uncommitted)+" (commit them first)")
+	}
+	if len(targets.Untracked) > 0 {
+		reasons = append(reasons, "files to fix are outside any git repository: "+displayPaths(targets.Untracked))
+	}
+	return strings.Join(reasons, "; "), nil
+}
+
+func displayPaths(files []string) string {
+	shown := make([]string, len(files))
+	for i, file := range files {
+		shown[i] = fix.DisplayPath(file)
+	}
+	return strings.Join(shown, ", ")
 }
 
 // maxFixPasses bounds the analyze-and-fix loop. A fix that overlaps another
@@ -2227,8 +2252,18 @@ func applyFixesUntilStable(projectRoot string, cfg *core.Config, fixableRules []
 			}
 			return nil
 		}
+		reason, err := unrecoverableReason(projectRoot, fixes, fixedFiles, engine)
+		if err != nil {
+			return err
+		}
 		if pass == 1 {
 			fmt.Print(engine.Preview(fixes))
+			if reason != "" {
+				return fmt.Errorf("%s; nothing was changed: use --force to apply fixes anyway", reason)
+			}
+		} else if reason != "" {
+			fmt.Printf("\nApplied %d fixes in %d files.\n", totalFixed, len(fixedFiles))
+			return fmt.Errorf("pass %d: %s; use --force to apply fixes anyway", pass, reason)
 		}
 
 		applied, deferred := 0, 0
@@ -2265,7 +2300,7 @@ func applyFixesUntilStable(projectRoot string, cfg *core.Config, fixableRules []
 		}
 	}
 	fmt.Printf("\nApplied %d fixes in %d files.\n", totalFixed, len(fixedFiles))
-	return fmt.Errorf("fixes still overlapping after %d passes; run glint fix again", maxFixPasses)
+	return fmt.Errorf("fixes still overlapping after %d passes; commit the fixed files and run glint fix again", maxFixPasses)
 }
 
 // collectFixes analyzes the root through the same pipeline as `check` — project
