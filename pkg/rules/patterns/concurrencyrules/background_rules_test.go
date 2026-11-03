@@ -463,12 +463,21 @@ func (p *Poller) Daily() {
 // A recover helper of another module guards the goroutine as a helper of the
 // project does: its body is read from the dependency's source.
 func TestBackgroundGoroutineRecoverFromDependency(t *testing.T) {
-	assert.Equal(t, []string{"svc/poll.go:29", "svc/poll.go:35", "svc/poll.go:40"}, patterntest.TypedFuncFindings(t, NewBackgroundGoroutineWithoutRecoverRule(), map[string]string{
+	assert.Equal(t, []string{"svc/poll.go:104", "svc/poll.go:115", "svc/poll.go:34", "svc/poll.go:40", "svc/poll.go:45", "svc/poll.go:52"}, patterntest.TypedFuncFindings(t, NewBackgroundGoroutineWithoutRecoverRule(), map[string]string{
 		"go.mod": "module example.com/rulestest\n\ngo 1.24\n\n" +
 			"require (\n\tgithub.com/shopspring/decimal v0.0.0\n\texample.com/safe v0.0.0\n)\n\n" +
 			"replace github.com/shopspring/decimal => ./third_party/decimal\n\n" +
 			"replace example.com/safe => ./third_party/safe\n\n" +
-			"require example.com/odd v0.0.0\n\nreplace example.com/odd => ./third_party/odd\n",
+			"require example.com/odd v0.0.0\n\nreplace example.com/odd => ./third_party/odd\n\n" +
+			"require guardlib v0.0.0\n\nreplace guardlib => ./third_party/guardlib\n",
+		"third_party/guardlib/go.mod": "module guardlib\n\ngo 1.24\n",
+		"third_party/guardlib/guard.go": `package guardlib
+
+func Run(f func()) {
+	defer func() { _ = recover() }()
+	f()
+}
+`,
 		"third_party/safe/go.mod": "module example.com/safe\n\ngo 1.24\n",
 		"third_party/odd/go.mod":  "module example.com/odd\n\ngo 1.24\n",
 		"third_party/odd/recover.go": `package odd
@@ -502,14 +511,55 @@ func RunWith(Recover func(), f func()) {
 	defer Recover()
 	f()
 }
+
+func RunAll(fs ...func()) {
+	defer func() { _ = recover() }()
+	for _, f := range fs {
+		f()
+	}
+}
+
+type Job struct {
+	Name string
+	Fn   func()
+}
+
+func RunJob(j Job) {
+	defer func() { _ = recover() }()
+	j.Fn()
+}
+
+type Runner interface{ Run() }
+
+func RunRunner(r Runner) {
+	defer func() { _ = recover() }()
+	r.Run()
+}
+
+type Task func()
+
+func (t Task) Safe() {
+	defer func() { _ = recover() }()
+	t()
+}
+
+func GenericF[F ~func()](f F) {
+	defer func() { _ = recover() }()
+	f()
+}
 `,
 		"svc/poll.go": `package svc
 
 import (
+	"go/parser"
+	"go/token"
+	"log/slog"
+	"sync"
 	"time"
 
 	"example.com/odd"
 	"example.com/safe"
+	"guardlib"
 )
 
 type Cache struct {
@@ -544,6 +594,76 @@ func (c *Cache) Start() {
 	}()
 	go func() {
 		defer odd.Catch()
+		for range c.ticker.C {
+			c.refresh()
+		}
+	}()
+
+	go func() {
+		for range c.ticker.C {
+			_, _ = parser.ParseExprFrom(token.NewFileSet(), "x", "1", 0)
+			c.refresh()
+		}
+	}()
+}
+
+type runner struct{ c *Cache }
+
+func (r runner) Run() { r.c.refresh() }
+
+// Each hands the guard the work it runs: no finding.
+func (c *Cache) Guarded(fns []func()) {
+	go func() {
+		for range c.ticker.C {
+			safe.RunAll(fns...)
+		}
+	}()
+	go func() {
+		for range c.ticker.C {
+			safe.RunJob(safe.Job{Fn: c.refresh})
+		}
+	}()
+	go func() {
+		for range c.ticker.C {
+			safe.RunRunner(runner{c})
+		}
+	}()
+	go func() {
+		for range c.ticker.C {
+			safe.Task(c.refresh).Safe()
+		}
+	}()
+	go func() {
+		for range c.ticker.C {
+			guardlib.Run(c.refresh)
+		}
+	}()
+}
+
+func StartGeneric[F ~func()](ticker *time.Ticker, f F) {
+	go func() {
+		for range ticker.C {
+			safe.GenericF(f)
+		}
+	}()
+}
+
+// Resolve's recover covers the LogValue call it makes, not the refresh after
+// it: a function of the standard library guards nothing.
+func (c *Cache) Resolving(v slog.Value) {
+	go func() {
+		for range c.ticker.C {
+			_ = v.Resolve()
+			c.refresh()
+		}
+	}()
+}
+
+// The recover of OnceFunc guards the call of its function, not the deferring
+// goroutine.
+func (c *Cache) Once() {
+	go func() {
+		defer sync.OnceFunc(c.refresh)
 		for range c.ticker.C {
 			c.refresh()
 		}

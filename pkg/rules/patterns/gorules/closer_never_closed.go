@@ -66,7 +66,11 @@ func (r *CloserNeverClosedRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]
 	if ctx == nil {
 		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
-	project := &closerProject{index: newConstructorIndex(ctx), callees: newCloserCallees(ctx), delegated: newDelegatedClosers(ctx)}
+	sources, err := patternkit.DependencySourcesOf(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", r.Name(), err)
+	}
+	project := &closerProject{index: newConstructorIndex(ctx), callees: newCloserCallees(ctx), delegated: newDelegatedClosers(ctx, sources)}
 	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(fileCtx *core.FileContext, info *types.Info) []*core.Violation {
 		return r.analyze(fileCtx, info, project)
 	})
@@ -366,11 +370,11 @@ type delegatedClosers struct {
 	sources   *patternkit.DependencySources
 }
 
-func newDelegatedClosers(ctx *core.GoProjectContext) *delegatedClosers {
+func newDelegatedClosers(ctx *core.GoProjectContext, sources *patternkit.DependencySources) *delegatedClosers {
 	d := &delegatedClosers{
 		decls:     make(map[*types.Func]*ast.FuncDecl),
 		delegates: make(map[*types.Func]string),
-		sources:   patternkit.NewDependencySources(ctx.FileSet),
+		sources:   sources,
 	}
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {

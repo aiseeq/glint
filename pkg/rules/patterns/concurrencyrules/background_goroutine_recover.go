@@ -83,7 +83,10 @@ func goroutineBodyOf(scope patternkit.FuncScope, call *ast.CallExpr) (*ast.Block
 // guardsPanics reports a body that recovers: a deferred recover, directly or
 // in a helper the defer calls, or a call of a helper that defers one around
 // the work it runs (guard.Run("tick", s.refresh)). A helper of another
-// module counts too: its body is read from the module's source.
+// module counts too: its body is read from the module's source. A function
+// of the standard library does not, called or deferred: its recover sits in
+// a literal around a call of its own (parser.ParseFile, slog.Value.Resolve,
+// sync.OnceFunc), not around the work the goroutine goes on to do.
 func guardsPanics(scope patternkit.FuncScope, info *types.Info, body *ast.BlockStmt) bool {
 	guarded := false
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -120,7 +123,7 @@ func deferredRecover(scope patternkit.FuncScope, info *types.Info, call *ast.Cal
 // dependencyCallsRecover reports a library function whose body calls
 // recover.
 func dependencyCallsRecover(sources *patternkit.DependencySources, fn *types.Func) bool {
-	if fn == nil || fn.Pkg() == nil || fn.Pkg().Scope().Lookup("recover") != nil {
+	if fn == nil || fn.Pkg() == nil || sources.Standard(fn.Pkg()) || fn.Pkg().Scope().Lookup("recover") != nil {
 		// A package of its own recover: the name is not the builtin.
 		return false
 	}
@@ -131,6 +134,9 @@ func dependencyCallsRecover(sources *patternkit.DependencySources, fn *types.Fun
 // dependencyDefersRecover reports a library function whose own body defers a
 // recover: in a literal or in a function of the same package.
 func dependencyDefersRecover(sources *patternkit.DependencySources, fn *types.Func) bool {
+	if fn == nil || fn.Pkg() == nil || sources.Standard(fn.Pkg()) {
+		return false
+	}
 	decl := sources.FuncDecl(fn)
 	if decl == nil || decl.Body == nil {
 		return false

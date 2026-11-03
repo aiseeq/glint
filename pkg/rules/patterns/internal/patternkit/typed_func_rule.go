@@ -77,7 +77,10 @@ func (r *TypedFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Vi
 	if r.ForProject != nil {
 		check = r.ForProject(decls)
 	}
-	sources := NewDependencySources(ctx.FileSet)
+	sources, err := DependencySourcesOf(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", r.Name(), err)
+	}
 	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		scope := FuncScope{Info: info, Decls: decls, Callers: callers, Sources: sources}
 		return AnalyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {

@@ -66,11 +66,13 @@ func notMirrored(format string, args ...any) error {
 }
 
 // stdIndex is what the go command reports about the standard library once
-// per test process: the export data file of every package and the target.
+// per test process: the export data file and the Go files of every package,
+// and the target.
 type stdIndex struct {
-	export map[string]string
-	goarch string
-	gowork string
+	export  map[string]string
+	goFiles map[string][]string
+	goarch  string
+	gowork  string
 }
 
 var (
@@ -83,20 +85,24 @@ var (
 // reads the export data from the build cache, as packages.Load does.
 func standardLibrary(dir string) (stdIndex, error) {
 	stdOnce.Do(func() {
-		index := stdIndex{export: map[string]string{}}
-		out, err := goCommand(dir, "list", "-e", "-export", "-f", "{{.ImportPath}}\t{{.Export}}", "std")
+		index := stdIndex{export: map[string]string{}, goFiles: map[string][]string{}}
+		out, err := goCommand(dir, "list", "-e", "-export", "-f", "{{.ImportPath}}\t{{.Export}}\t{{.Dir}}{{range .GoFiles}}\t{{.}}{{end}}", "std")
 		if err != nil {
 			stdErr = err
 			return
 		}
 		scanner := bufio.NewScanner(bytes.NewReader(out))
 		for scanner.Scan() {
-			importPath, export, found := strings.Cut(scanner.Text(), "\t")
-			if !found {
+			fields := strings.Split(scanner.Text(), "\t")
+			if len(fields) < 3 {
 				stdErr = fmt.Errorf("go list std: unexpected line %q", scanner.Text())
 				return
 			}
+			importPath, export, pkgDir := fields[0], fields[1], fields[2]
 			index.export[importPath] = export
+			for _, name := range fields[3:] {
+				index.goFiles[importPath] = append(index.goFiles[importPath], filepath.Join(pkgDir, name))
+			}
 		}
 		env, err := goCommand(dir, "env", "GOARCH", "GOWORK")
 		if err != nil {
@@ -482,8 +488,11 @@ func (l *inProcessLoad) check(local *localPackage) error {
 		return notMirrored("type-check %s: %v", local.path, checkErr)
 	}
 	pkg.Types = checked
+	// packages.Load lists the files of a dependency too, though it reads its
+	// types from export data.
+	pkg.GoFiles, pkg.CompiledGoFiles = files, slices.Clone(files)
 	if local.root {
-		pkg.GoFiles, pkg.CompiledGoFiles, pkg.Syntax, pkg.TypesInfo = files, slices.Clone(files), syntax, info
+		pkg.Syntax, pkg.TypesInfo = syntax, info
 	}
 	local.pkg = pkg
 	return nil
@@ -502,7 +511,10 @@ func typesOf(pkg *packages.Package, importPath string) (*types.Package, error) {
 }
 
 // standard returns a package of the standard library, its types read from
-// export data into the load's file set.
+// export data into the load's file set, with the files go list gave it. A
+// package the standard library imports in turn gets no Package: its types
+// are only what export data of its importers holds, so its files, which
+// packages.Load lists, stay unknown here.
 func (l *inProcessLoad) standard(importPath string) (*packages.Package, error) {
 	if dep, ok := l.deps[importPath]; ok {
 		return dep, nil
@@ -522,6 +534,7 @@ func (l *inProcessLoad) standard(importPath string) (*packages.Package, error) {
 		return nil, err
 	}
 	dep.Name, dep.Types = typed.Name(), typed
+	dep.GoFiles = slices.Clone(l.index.goFiles[importPath])
 	l.deps[importPath] = dep
 	return dep, nil
 }
