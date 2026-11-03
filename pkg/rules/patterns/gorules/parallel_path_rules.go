@@ -697,7 +697,7 @@ func zeroPlaceholders(scope patternkit.FuncScope, fn *ast.FuncDecl, call *ast.Ca
 	if !ok || sig.Variadic() || sig.Params().Len() != len(call.Args) {
 		return patternkit.FuncFinding{}, false
 	}
-	placeholders, other := filledElsewhere(call, fn, scope.Callers[callee.Origin()])
+	placeholders, other := filledElsewhere(scope.Info, call, fn, scope.Callers[callee.Origin()])
 	if len(placeholders) < 2 {
 		return patternkit.FuncFinding{}, false
 	}
@@ -809,13 +809,13 @@ func callsMethodOf(decls map[*types.Func]patternkit.TypedFuncDecl, info *types.I
 // site's caller; nothing when every placeholder is nil (an optional value
 // left out). A site of the same function is another outcome of one
 // operation, not another path.
-func filledElsewhere(call *ast.CallExpr, fn *ast.FuncDecl, sites []patternkit.FuncCallSite) ([]int, string) {
+func filledElsewhere(info *types.Info, call *ast.CallExpr, fn *ast.FuncDecl, sites []patternkit.FuncCallSite) ([]int, string) {
 	var positions []int
 	other := ""
 	nonNil := false
 	for i, arg := range call.Args {
 		arg = ast.Unparen(arg)
-		if !patternkit.IsZeroValueExpr(arg) {
+		if !patternkit.IsZeroValueExpr(arg, info) {
 			continue
 		}
 		for _, site := range sites {
