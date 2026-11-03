@@ -295,8 +295,25 @@ func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, error) {
 		if !errors.As(err, &ee) {
 			return nil, fmt.Errorf("run glint: %w", err)
 		}
+		// A rule panic still prints the findings of the other rules: the
+		// report lacks that rule's findings, so the run is an error.
+		if panics := panicLines(stderr.String()); panics != "" {
+			return nil, fmt.Errorf("rule panic: %s", panics)
+		}
 	}
 	return report.Issues, nil
+}
+
+// panicLines returns the stderr lines of glint that name a rule panic, without
+// the stacks, joined for one error line.
+func panicLines(stderr string) string {
+	var named []string
+	for line := range strings.SplitSeq(stderr, "\n") {
+		if strings.Contains(line, `" panicked on `) {
+			named = append(named, strings.TrimSpace(line))
+		}
+	}
+	return strings.Join(named, " | ")
 }
 
 type issueKey struct {

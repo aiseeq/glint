@@ -165,3 +165,35 @@ func TestNewBinaryUsesItsOwnResultCacheDirectory(t *testing.T) {
 		t.Fatalf("new glint got GLINT_CACHE_DIR %q, want %q", seen["new"], want)
 	}
 }
+
+// A rule panic still prints the JSON of the other rules and names the panic on
+// stderr: the run lost that rule's findings and counts as an error, not as a
+// project without differences.
+func TestRulePanicCountsAsError(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "alpha")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(root, "old")
+	oldScript := "#!/bin/sh\necho '{\"issues\":[]}'\n"
+	newer := filepath.Join(root, "new")
+	newScript := "#!/bin/sh\necho '{\"issues\":[]}'\necho 'goroutine 1 [running]:' >&2\necho 'Error: 1 rule panic(s), the findings of these rules are missing: rule \"broken-rule\" panicked on a.go: boom' >&2\nexit 1\n"
+	for path, script := range map[string]string{old: oldScript, newer: newScript} {
+		if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // an executable test double
+			t.Fatal(err)
+		}
+	}
+	cfg := filepath.Join(root, "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root "+root+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	code := run([]string{"-config", cfg, "-old", old, "-new", newer}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stdout.String(), "1 errors") || !strings.Contains(stderr.String(), "alpha: ") || !strings.Contains(stderr.String(), `"broken-rule" panicked`) {
+		t.Fatalf("code %d, stdout %q, stderr %q: want the panic counted as an error of alpha", code, stdout.String(), stderr.String())
+	}
+}
