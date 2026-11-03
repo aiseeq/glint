@@ -133,6 +133,22 @@ func listSnapshots() { fmt.Printf("%d snapshots\n", 3) }`,
 			expectedCount: 0,
 		},
 		{
+			name: "log calls in another file of a cmd package main are checked",
+			path: "/src/cmd/billing/run.go",
+			code: `package main
+import "log"
+func serve() { log.Printf("listening") }`,
+			expectedCount: 1,
+		},
+		{
+			name: "a logger import in another file of a cmd package main is checked",
+			path: "/src/cmd/billing/run.go",
+			code: `package main
+import "go.uber.org/zap"
+var _ = zap.NewNop()`,
+			expectedCount: 1,
+		},
+		{
 			name: "a library package under cmd is checked",
 			path: "/src/cmd/corpus/store/store.go",
 			code: `package store

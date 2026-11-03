@@ -104,7 +104,7 @@ func (r *NonCanonicalLoggerRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 
 	if r.shouldSkipFile(ctx) {
 		if r.slogDefaultDirs[filepath.Dir(ctx.Path)] || callsSlogSetDefault(ctx) {
-			return r.checkCalls(ctx, true)
+			return r.checkCalls(ctx, true, false)
 		}
 		return nil
 	}
@@ -114,10 +114,20 @@ func (r *NonCanonicalLoggerRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	// 1. Detect forbidden imports
 	violations = append(violations, r.checkImports(ctx)...)
 
-	// 2. Detect log.Printf / fmt.Println calls via AST
-	violations = append(violations, r.checkCalls(ctx, false)...)
+	// 2. Detect log.Printf / fmt.Println calls via AST; the fmt output of a
+	// command is its result.
+	violations = append(violations, r.checkCalls(ctx, false, !commandFile(ctx))...)
 
 	return violations
+}
+
+// commandFile reports a package main file under cmd/ other than its main.go:
+// part of the same command, whose fmt output is the command result. Its log
+// calls and logger imports are still checked - a service in cmd/ logs from
+// more files than main.go.
+func commandFile(ctx *core.FileContext) bool {
+	path := ctx.RelPath
+	return ctx.GoPackage == "main" && (strings.HasPrefix(path, "cmd/") || strings.Contains(path, "/cmd/"))
 }
 
 // shouldSkipFile excludes entry points and CLI utilities where bare fmt/log is
@@ -137,12 +147,10 @@ func (r *NonCanonicalLoggerRule) shouldSkipFile(ctx *core.FileContext) bool {
 		return true
 	}
 
-	// package main files under tools/** and cmd/** are command-line programs -
-	// under cmd/ the same program as its main.go. Their fmt output is the
-	// user-facing command result, not application logging.
+	// tools/** package main files are command-line programs. Their fmt output is
+	// the user-facing command result, not application logging.
 	if ctx.GoPackage == "main" &&
-		(strings.HasPrefix(path, "tools/") || strings.Contains(path, "/tools/") ||
-			strings.HasPrefix(path, "cmd/") || strings.Contains(path, "/cmd/")) {
+		(strings.HasPrefix(path, "tools/") || strings.Contains(path, "/tools/")) {
 		return true
 	}
 
@@ -211,13 +219,13 @@ func callsSlogSetDefault(ctx *core.FileContext) bool {
 // checkCalls walks the AST and flags log.Printf / fmt.Println style calls.
 // underSlog limits it to the log package of an entry point whose program
 // installs a slog default.
-func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext, underSlog bool) []*core.Violation {
+func (r *NonCanonicalLoggerRule) checkCalls(ctx *core.FileContext, underSlog, withFmt bool) []*core.Violation {
 	var violations []*core.Violation
 
 	// Identifier the file uses → standard-library import path it stands for.
 	pkgOf := make(map[string]string, len(logPkgCalls))
 	for path := range logPkgCalls {
-		if underSlog && path != "log" {
+		if (underSlog || !withFmt) && path != "log" {
 			continue
 		}
 		for alias := range helpers.PackageAliases(ctx.GoAST, `"`+path+`"`, path) {
