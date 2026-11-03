@@ -2,7 +2,6 @@ package shellrules
 
 import (
 	"regexp"
-	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -475,45 +474,109 @@ func checkTestAndLastStatus(r *shellRule, src *patternkit.ShellSource) []*core.V
 }
 
 // testedCall reports a function the script calls as a condition, by its name
-// or handed by name to a runner that calls a variable as a condition
+// or handed by name to a runner that calls that argument as a condition
 // (run_test "case" test_fn, with if $fn; then PASS else FAIL inside).
 func testedCall(src *patternkit.ShellSource, name string) bool {
 	quoted := regexp.QuoteMeta(name)
 	call := regexp.MustCompile(`(?:\b(?:if|elif|while|until)\s+!?\s*|\|\|\s*|&&\s*|!\s+)` + quoted + `\b|\b` + quoted + `\b[^;|&]*(?:\|\||&&)`)
-	var handed *regexp.Regexp
-	if runners := statusTestingRunners(src); len(runners) > 0 {
-		handed = regexp.MustCompile(`^\s*(?:` + strings.Join(runners, "|") + `)\s+(?:[^;|&]*\s)?` + quoted + `(?:\s|;|$)`)
-	}
+	runners := statusTestingRunners(src)
 	for _, l := range src.Lines {
 		if patternkit.ShellFuncStart.MatchString(l.Text) {
 			continue
 		}
-		if call.MatchString(l.Text) || (handed != nil && handed.MatchString(l.Text)) {
+		if call.MatchString(l.Text) || handedToRunner(l.Text, runners, name) {
 			return true
 		}
 	}
 	return false
 }
 
-// statusTestingRunners returns the quoted names of the functions of the script
-// that run a command from a variable and test its status.
-func statusTestingRunners(src *patternkit.ShellSource) []string {
-	var runners []string
+// handedToRunner reports a call of a runner with name as a word of its own at
+// the argument position the runner tests.
+func handedToRunner(text string, runners map[string]int, name string) bool {
+	words := commandWords(text)
+	if len(words) < 2 {
+		return false
+	}
+	pos, ok := runners[words[0]]
+	return ok && pos < len(words) && strings.Trim(words[pos], `"'`) == name
+}
+
+// statusTestingRunners returns the functions of the script that run one of
+// their arguments as a command and test its status, with the position of that
+// argument: $2 directly, "$@" as $1, or a variable assigned from $N, each
+// moved by the shifts before it. A variable assigned again names no argument.
+func statusTestingRunners(src *patternkit.ShellSource) map[string]int {
+	runners := make(map[string]int)
 	for _, fn := range src.Functions() {
+		params := make(map[string]int)
+		shifted := 0
 		for _, l := range src.Body(fn) {
-			if testedVariableCall.MatchString(l.Text) {
-				runners = append(runners, regexp.QuoteMeta(fn.Name))
+			if m := shiftStatement.FindStringSubmatch(l.Text); m != nil {
+				shifted += max(1, atoiDigit(m[1]))
+				continue
+			}
+			if m := variableAssignment.FindStringSubmatch(l.Text); m != nil {
+				_, seen := params[m[1]]
+				params[m[1]] = 0
+				if p := positionalAssignment.FindStringSubmatch(l.Text); p != nil && !seen {
+					params[m[1]] = atoiDigit(p[2]) + shifted
+				}
+				continue
+			}
+			if pos, ok := testedArgumentCall(l.Text, params, shifted); ok {
+				runners[fn.Name] = pos
 				break
 			}
 		}
 	}
-	slices.Sort(runners)
 	return runners
 }
 
-// testedVariableCall matches a command run from a variable and tested as a
-// condition: if $fn, if "$@", "$1" || ..., $fn && ...
-var testedVariableCall = regexp.MustCompile(`(?:\b(?:if|elif|while|until)\s+!?\s*|\|\|\s*|&&\s*|!\s+)"?\$\{?[\w@]+\}?"?(?:\s|;|$)|^\s*"?\$\{?[\w@]+\}?"?(?:\s+"?\$\{?[\w@]+\}?"?)*\s*(?:\|\||&&)`)
+// testedArgumentCall returns the argument position of a command run from a
+// parameter and tested as a condition, after shifted shifts. A status thrown
+// away with || true or || : is not tested.
+func testedArgumentCall(text string, params map[string]int, shifted int) (int, bool) {
+	if swallowedStatus.MatchString(text) {
+		return 0, false
+	}
+	for _, m := range testedVariableCall.FindAllStringSubmatch(text, -1) {
+		name := m[1] + m[2]
+		switch {
+		case name == "@" || name == "*":
+			return 1 + shifted, true
+		case len(name) == 1 && name[0] >= '1' && name[0] <= '9':
+			return atoiDigit(name) + shifted, true
+		}
+		if pos := params[name]; pos > 0 {
+			return pos, true
+		}
+	}
+	return 0, false
+}
+
+// atoiDigit returns the value of a one-digit number, 0 for "".
+func atoiDigit(s string) int {
+	if s == "" {
+		return 0
+	}
+	return int(s[0] - '0')
+}
+
+var (
+	// testedVariableCall matches a command run from a variable and tested as
+	// a condition: if $fn, if "$@", "$1" || ..., $fn && ...; the variable is
+	// in the first or the second group.
+	testedVariableCall = regexp.MustCompile(`(?:\b(?:if|elif|while|until)\s+!?\s*|\|\|\s*|&&\s*|!\s+)"?\$\{?([\w@*]+)\}?"?(?:\s|;|$)|^\s*"?\$\{?([\w@*]+)\}?"?(?:\s+"?\$\{?[\w@*]+\}?"?)*\s*(?:\|\||&&)`)
+	// positionalAssignment matches fn="$2" or local fn=$2.
+	positionalAssignment = regexp.MustCompile(`^\s*(?:local\s+)?(\w+)="?\$\{?([1-9])\}?"?\s*(?:;|$)`)
+	// variableAssignment matches any assignment of a variable: fn=..., local fn=...
+	variableAssignment = regexp.MustCompile(`^\s*(?:local\s+)?(\w+)=`)
+	// shiftStatement matches shift and shift N.
+	shiftStatement = regexp.MustCompile(`^\s*shift(?:\s+([1-9]))?\s*(?:;|#|$)`)
+	// swallowedStatus matches a status thrown away: cmd || true, cmd || :.
+	swallowedStatus = regexp.MustCompile(`\|\|\s*(?:true|:)\s*(?:;|#|&|$)`)
+)
 
 // testAndLast reports a line that ends in [ ... ] && cmd.
 func testAndLast(r *shellRule, src *patternkit.ShellSource, l patternkit.ShellLine, outcome string) *core.Violation {

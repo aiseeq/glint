@@ -438,6 +438,17 @@ test_lock() {
 }
 check test_lock
 `)
+	shellWanted(t, "shell-test-and-last-status", "shifted.sh", `#!/bin/bash
+run_case() {
+  local name=$1
+  shift
+  if "$@"; then echo "PASS $name"; else echo "FAIL $name"; fi
+}
+test_lock() {
+  [ -f lock ] && grep -q ok lock
+}
+run_case "lock" test_lock
+`)
 	shellWanted(t, "shell-test-and-last-status", "untested.sh", `#!/bin/bash
 each() {
   local fn="$1"
@@ -448,6 +459,56 @@ cleanup_cache() {
   [ -d cache ] && rm -r cache # want
 }
 each cleanup_cache
+`)
+	shellWanted(t, "shell-test-and-last-status", "other.sh", `#!/bin/bash
+verbose_run() {
+  if $VERBOSE; then echo "running $1"; fi
+  "$1"
+}
+probe_then_run() {
+  if "$1"; then :; fi
+  "$2"
+}
+quiet() {
+  "$1" || true
+}
+after_shift() {
+  shift
+  if "$1"; then :; fi
+}
+reassigned() {
+  local fn=$1
+  fn=probe
+  if $fn; then :; fi
+}
+swallowed() {
+  "$1" || true && echo ok
+}
+drop_bin() {
+  [ -d bin ] && rm -r bin # want
+}
+drop_out() {
+  [ -d out ] && rm -r out # want
+}
+drop_dist() {
+  [ -d dist ] && rm -r dist # want
+}
+drop_tmp() {
+  [ -d "$tmp" ] && rm -r "$tmp" # want
+}
+drop_cache() {
+  [ -d cache ] && rm -r cache # want
+}
+drop_logs() {
+  [ -d logs ] && rm -r logs # want
+}
+verbose_run drop_tmp
+probe_then_run true drop_cache
+quiet drop_logs
+verbose_run "before drop_logs after"
+after_shift drop_bin other
+reassigned drop_out
+swallowed drop_dist
 `)
 	shellWanted(t, "shell-test-and-last-status", "flag.sh", `#!/bin/bash
 cleanup() {
