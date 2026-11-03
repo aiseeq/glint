@@ -84,8 +84,10 @@ func (r *ReimplementedStdlibRule) analyze(ctx *core.FileContext, info *types.Inf
 		replacement, ok := stdlibEquivalent(fn, operands)
 		caveat := ""
 		if !ok && versions != nil && versions.AtLeast(ctx, info, "go1.23") && sortsMapKeys(fn, info) {
-			replacement, ok = "slices.Sorted(maps.Keys(m))", true
-			caveat = "; for an empty map it returns nil, not an empty slice, so keep a non-nil result where a caller encodes it to JSON or compares it with nil"
+			if sortedReplacement, hasReplacement := sortedMapKeysReplacement(fn); hasReplacement {
+				replacement, ok = sortedReplacement, true
+				caveat = "; for an empty map it returns nil, not an empty slice, so keep a non-nil result where a caller encodes it to JSON or compares it with nil"
+			}
 		}
 		if !ok {
 			continue
@@ -122,42 +124,50 @@ func sortsMapKeys(fn *ast.FuncDecl, info *types.Info) bool {
 	if info == nil || fn.Type.Results == nil || len(fn.Type.Results.List) != 1 || len(fn.Body.List) != 4 {
 		return false
 	}
-	keysName, elemType, ok := returnedSlice(fn)
+	keysName, ok := returnedSlice(fn)
 	if !ok {
 		return false
 	}
 	loop, ok := fn.Body.List[1].(*ast.RangeStmt)
-	if !ok || !mapKeyAppendLoop(loop, info, keysName, elemType) || !initializedKeySlice(fn.Body.List[0], keysName, loop.X, elemType) {
+	if !ok || !mapKeyAppendLoop(loop, info, keysName) || !initializedKeySlice(fn.Body.List[0], keysName, loop.X, namesResult(fn, keysName)) {
+		return false
+	}
+	returnStmt, ok := fn.Body.List[3].(*ast.ReturnStmt)
+	if !ok || len(returnStmt.Results) != 1 {
+		return false
+	}
+	targetType := info.TypeOf(loop.X)
+	if targetType == nil {
+		return false
+	}
+	mapType, ok := targetType.Underlying().(*types.Map)
+	if !ok || !isOrderedKey(mapType.Key()) || !sliceContainsType(info.TypeOf(returnStmt.Results[0]), mapType.Key()) {
 		return false
 	}
 	sortStmt, ok := fn.Body.List[2].(*ast.ExprStmt)
-	return ok && isSortCall(sortStmt.X, keysName, elemType)
+	return ok && isSortCall(sortStmt.X, keysName, mapType.Key())
 }
 
-func returnedSlice(fn *ast.FuncDecl) (string, string, bool) {
+func returnedSlice(fn *ast.FuncDecl) (string, bool) {
 	result, ok := fn.Type.Results.List[0].Type.(*ast.ArrayType)
 	if !ok || result.Len != nil {
-		return "", "", false
-	}
-	elem, ok := result.Elt.(*ast.Ident)
-	if !ok || (elem.Name != "string" && elem.Name != "int") {
-		return "", "", false
+		return "", false
 	}
 	last, ok := fn.Body.List[len(fn.Body.List)-1].(*ast.ReturnStmt)
 	if !ok || len(last.Results) != 1 {
-		return "", "", false
+		return "", false
 	}
 	name, ok := last.Results[0].(*ast.Ident)
 	if !ok {
-		return "", "", false
+		return "", false
 	}
-	return name.Name, elem.Name, true
+	return name.Name, true
 }
 
 // mapKeyAppendLoop recognizes `for k := range m { keys = append(keys, k) }`
-// over a map whose key type is elemType.
-func mapKeyAppendLoop(loop *ast.RangeStmt, info *types.Info, keys, elemType string) bool {
-	if loop.Tok != token.DEFINE || loop.Value != nil || len(loop.Body.List) != 1 {
+// over a map whose key type is ordered.
+func mapKeyAppendLoop(loop *ast.RangeStmt, info *types.Info, keys string) bool {
+	if loop.Tok != token.DEFINE || (loop.Value != nil && !sameIdent(loop.Value, "_")) || len(loop.Body.List) != 1 {
 		return false
 	}
 	key, keyOK := loop.Key.(*ast.Ident)
@@ -166,7 +176,7 @@ func mapKeyAppendLoop(loop *ast.RangeStmt, info *types.Info, keys, elemType stri
 		return false
 	}
 	mapType, mapOK := targetType.Underlying().(*types.Map)
-	if !mapOK || basicName(mapType.Key()) != elemType {
+	if !mapOK || !isOrderedKey(mapType.Key()) {
 		return false
 	}
 	assign, ok := loop.Body.List[0].(*ast.AssignStmt)
@@ -177,20 +187,50 @@ func mapKeyAppendLoop(loop *ast.RangeStmt, info *types.Info, keys, elemType stri
 	return ok && isBuiltinAppend(appendCall) && len(appendCall.Args) == 2 && sameIdent(appendCall.Args[0], keys) && sameIdent(appendCall.Args[1], key.Name)
 }
 
-func basicName(t types.Type) string {
+func isOrderedKey(t types.Type) bool {
 	basic, ok := t.Underlying().(*types.Basic)
-	if !ok {
-		return ""
+	return ok && basic.Info()&(types.IsInteger|types.IsFloat|types.IsString) != 0
+}
+
+func sliceContainsType(slice, elem types.Type) bool {
+	if slice == nil || elem == nil {
+		return false
 	}
-	return basic.Name()
+	t, ok := slice.Underlying().(*types.Slice)
+	return ok && types.Identical(t.Elem(), elem)
+}
+
+func sortedMapKeysReplacement(fn *ast.FuncDecl) (string, bool) {
+	if fn == nil || fn.Body == nil || len(fn.Body.List) < 2 {
+		return "", false
+	}
+	loop, ok := fn.Body.List[1].(*ast.RangeStmt)
+	if !ok || loop.X == nil {
+		return "", false
+	}
+	return "slices.Sorted(maps.Keys(" + types.ExprString(loop.X) + "))", true
+}
+
+// namesResult reports a function whose single result is named name.
+func namesResult(fn *ast.FuncDecl, name string) bool {
+	for _, ident := range fn.Type.Results.List[0].Names {
+		if ident.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // initializedKeySlice recognizes the first statement declaring an empty keys
-// slice: `var keys []T`, `keys := []T{}` or `keys := make([]T, 0[, len(m)])`.
-func initializedKeySlice(stmt ast.Stmt, keys string, mapExpr ast.Expr, elem string) bool {
+// slice: `var keys []T`, `keys := []T{}`, `keys := make([]T, 0[, len(m)])`,
+// or `keys = nil` when keys is the named result.
+func initializedKeySlice(stmt ast.Stmt, keys string, mapExpr ast.Expr, namedResult bool) bool {
+	if assign, ok := stmt.(*ast.AssignStmt); ok && assign.Tok == token.ASSIGN && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 {
+		return namedResult && sameIdent(assign.Lhs[0], keys) && sameIdent(assign.Rhs[0], "nil")
+	}
 	emptySliceOf := func(expr ast.Expr) bool {
 		slice, ok := expr.(*ast.ArrayType)
-		return ok && slice.Len == nil && basicNameFromExpr(slice.Elt) == elem
+		return ok && slice.Len == nil
 	}
 	if decl, ok := stmt.(*ast.DeclStmt); ok {
 		gen, ok := decl.Decl.(*ast.GenDecl)
@@ -222,14 +262,6 @@ func initializedKeySlice(stmt ast.Stmt, keys string, mapExpr ast.Expr, elem stri
 	return false
 }
 
-func basicNameFromExpr(expr ast.Expr) string {
-	id, ok := expr.(*ast.Ident)
-	if !ok {
-		return ""
-	}
-	return id.Name
-}
-
 // isLenOf reports len(target), with target written the same way (m, s.items).
 func isLenOf(expr, target ast.Expr) bool {
 	call, ok := expr.(*ast.CallExpr)
@@ -241,13 +273,9 @@ func isBuiltinAppend(call *ast.CallExpr) bool {
 	return ok && id.Name == "append"
 }
 
-func isSortCall(expr ast.Expr, keys, elem string) bool {
+func isSortCall(expr ast.Expr, keys string, elem types.Type) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok || len(call.Args) == 0 {
-		return false
-	}
-	arg, ok := call.Args[0].(*ast.Ident)
-	if !ok || arg.Name != keys {
 		return false
 	}
 	selector, ok := call.Fun.(*ast.SelectorExpr)
@@ -258,17 +286,41 @@ func isSortCall(expr ast.Expr, keys, elem string) bool {
 	if !ok {
 		return false
 	}
+	if selector.Sel.Name != "Sort" || pkg.Name != "sort" {
+		if !sameIdent(call.Args[0], keys) {
+			return false
+		}
+	}
 	switch {
-	case selector.Sel.Name == "Strings" && pkg.Name == "sort" && elem == "string":
+	case selector.Sel.Name == "Strings" && pkg.Name == "sort" && basicKind(elem) == types.String:
 		return true
-	case selector.Sel.Name == "Ints" && pkg.Name == "sort" && elem == "int":
+	case selector.Sel.Name == "Ints" && pkg.Name == "sort" && basicKind(elem) == types.Int:
 		return true
 	case selector.Sel.Name == "Sort" && pkg.Name == "slices":
 		return true
 	case selector.Sel.Name == "Slice" && pkg.Name == "sort" && len(call.Args) == 2:
 		return ascendingSortSlice(call.Args[1], keys)
+	case selector.Sel.Name == "Sort" && pkg.Name == "sort" && len(call.Args) == 1:
+		wrapped, ok := call.Args[0].(*ast.CallExpr)
+		if !ok || len(wrapped.Args) != 1 || basicKind(elem) != types.String {
+			return false
+		}
+		wrappedSelector, ok := wrapped.Fun.(*ast.SelectorExpr)
+		if !ok || wrappedSelector.Sel.Name != "StringSlice" {
+			return false
+		}
+		wrappedPkg, ok := wrappedSelector.X.(*ast.Ident)
+		return ok && wrappedPkg.Name == "sort" && sameIdent(wrapped.Args[0], keys)
 	}
 	return false
+}
+
+func basicKind(t types.Type) types.BasicKind {
+	basic, ok := t.Underlying().(*types.Basic)
+	if !ok {
+		return types.Invalid
+	}
+	return basic.Kind()
 }
 
 func ascendingSortSlice(expr ast.Expr, keys string) bool {

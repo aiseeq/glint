@@ -645,3 +645,25 @@ func TestReimplementedStdlibSortedMapKeysOrderAndForms(t *testing.T) {
 }
 `), "map in a field")
 }
+
+// `keys = nil` starts the collection only when keys is the named result: a
+// package-level slice reset and refilled is state the copy keeps for others.
+func TestReimplementedStdlibSortedMapKeysResetOfOuterSlice(t *testing.T) {
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"go.mod": "module example.com/helpers\n\ngo 1.23\n",
+		"helpers.go": `package helpers
+
+import "sort"
+
+var keys []string
+
+func sortedKeys(m map[string]int) []string {
+	keys = nil
+	for k := range m { keys = append(keys, k) }
+	sort.Strings(keys)
+	return keys
+}
+`,
+	})
+	assert.Empty(t, violations)
+}
