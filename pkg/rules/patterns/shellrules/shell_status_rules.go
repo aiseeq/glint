@@ -2,6 +2,7 @@ package shellrules
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -506,6 +507,7 @@ func statusTestingRunners(src *patternkit.ShellSource) []string {
 			}
 		}
 	}
+	slices.Sort(runners)
 	return runners
 }
 
