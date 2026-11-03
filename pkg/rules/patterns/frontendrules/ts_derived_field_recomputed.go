@@ -6,6 +6,7 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -26,15 +27,17 @@ func NewTSDerivedFieldRecomputedRule() *TSDerivedFieldRecomputedRule {
 }
 
 var (
-	dType     = regexp.MustCompile(`(?s)\b(?:interface|type)\s+([A-Za-z_$][\w$]*)\s*(?:=\s*)?\{([^}]*)\}`)
-	dProp     = regexp.MustCompile(`(?:^|[,;\n])\s*(?:readonly\s+)?([A-Za-z_$][\w$]*)\s*[?:]`)
-	dAnn      = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$]*(?:\s*\[\])?)`)
-	dCmp      = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*\??\.\s*([A-Za-z_$][\w$]*)\s*(?:===|!==|==|!=)\s*(?:'([^']*)'|"([^"]*)")`)
-	dSwitch   = regexp.MustCompile(`switch\s*\(\s*([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\)\s*\{([^}]*)\}`)
-	dIncludes = regexp.MustCompile(`\[([^\]]*)\]\s*\.includes\(\s*([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\)`)
-	dLiteral  = regexp.MustCompile(`'([^']*)'|"([^"]*)"`)
-	dBareCmp  = regexp.MustCompile(`\b([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:===|!==|==|!=)\s*'([^']*)'|\b([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:===|!==|==|!=)\s*"([^"]*)"`)
-	dParam    = regexp.MustCompile(`^\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\??\s*:\s*(?:\{\s*)?([A-Za-z_$][A-Za-z0-9_$]*)`)
+	dType           = regexp.MustCompile(`(?s)\b(?:interface|type)\s+([A-Za-z_$][\w$]*)\s*(?:=\s*)?\{([^}]*)\}`)
+	dProp           = regexp.MustCompile(`(?:^|[,;\n])\s*(?:readonly\s+)?([A-Za-z_$][\w$]*)\s*[?:]`)
+	dAnn            = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$]*(?:\s*\[\])?)`)
+	dCmp            = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*\??\.\s*([A-Za-z_$][\w$]*)\s*(?:===|!==|==|!=)\s*(?:'([^']*)'|"([^"]*)")`)
+	dSwitch         = regexp.MustCompile(`switch\s*\(\s*([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\)\s*\{([^}]*)\}`)
+	dIncludes       = regexp.MustCompile(`\[([^\]]*)\]\s*\.includes\(\s*([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\)`)
+	dLiteral        = regexp.MustCompile(`'([^']*)'|"([^"]*)"`)
+	dBareCmp        = regexp.MustCompile(`\b([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:===|!==|==|!=)\s*'([^']*)'|\b([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:===|!==|==|!=)\s*"([^"]*)"`)
+	dParam          = regexp.MustCompile(`^\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\??\s*:\s*(?:\{\s*)?([A-Za-z_$][A-Za-z0-9_$]*)`)
+	dCmpAtStart     = regexp.MustCompile(`^(?:` + dCmp.String() + `)`)
+	dBareCmpAtStart = regexp.MustCompile(`^(?:` + dBareCmp.String() + `)`)
 )
 
 func dCmpParts(source string, m []int) (string, string, string) {
@@ -111,15 +114,20 @@ func (r *TSDerivedFieldRecomputedRule) AnalyzeFile(c *core.FileContext) []*core.
 	}
 	f := patternkit.NewJSFlat(c)
 	seen := map[int]bool{}
+	summaries := map[int]*dFunctionSummary{}
+	comparisons := dComparisonMatches{
+		derived: dCmp.FindAllStringSubmatchIndex(f.Code, -1),
+		bare:    dBareCmp.FindAllStringSubmatchIndex(f.Code, -1),
+	}
 	var out []*core.Violation
-	out = r.analyzeDerivedComparisons(c, f, seen, out)
-	out = r.analyzeBareComparisons(c, f, seen, out)
-	out = r.analyzeDerivedCandidates(c, f, seen, out)
+	out = r.analyzeDerivedComparisons(c, f, comparisons.derived, seen, summaries, comparisons, out)
+	out = r.analyzeBareComparisons(c, f, comparisons.bare, seen, summaries, comparisons, out)
+	out = r.analyzeDerivedCandidates(c, f, seen, summaries, comparisons, out)
 	return out
 }
 
-func (r *TSDerivedFieldRecomputedRule) analyzeDerivedComparisons(c *core.FileContext, f patternkit.JsFlat, seen map[int]bool, out []*core.Violation) []*core.Violation {
-	for _, m := range dCmp.FindAllStringSubmatchIndex(f.Code, -1) {
+func (r *TSDerivedFieldRecomputedRule) analyzeDerivedComparisons(c *core.FileContext, f patternkit.JsFlat, matches [][]int, seen map[int]bool, summaries map[int]*dFunctionSummary, comparisons dComparisonMatches, out []*core.Violation) []*core.Violation {
+	for _, m := range matches {
 		name, field, lit := dCmpParts(f.Code, m)
 		fn, ok := f.EnclosingFunction(m[0])
 		if !ok || seen[fn.Start] {
@@ -129,13 +137,12 @@ func (r *TSDerivedFieldRecomputedRule) analyzeDerivedComparisons(c *core.FileCon
 		if !ok {
 			continue
 		}
-		body := f.Code[fn.Start : end+1]
-		bindings := dFunctionBindings(f, fn, body, r, c.RelPath)
-		derived := bindings[name+"."+field]
-		if derived == "" || dReadsDerived(body, name, derived) {
+		summary := r.functionSummary(f, fn, end, summaries, comparisons, c.RelPath)
+		derived := summary.bindings[name+"."+field]
+		if derived == "" || summary.readsDerived(name, derived) {
 			continue
 		}
-		if !dHasMultipleValues(body, name, field, lit) {
+		if !summary.hasMultipleFieldValues(name, field, lit) {
 			continue
 		}
 		seen[fn.Start] = true
@@ -144,25 +151,8 @@ func (r *TSDerivedFieldRecomputedRule) analyzeDerivedComparisons(c *core.FileCon
 	return out
 }
 
-func dHasMultipleValues(body, name, field, initial string) bool {
-	values := map[string]bool{initial: true}
-	for _, m := range dCmp.FindAllStringSubmatchIndex(body, -1) {
-		matchedName, matchedField, value := dCmpParts(body, m)
-		if matchedName == name && matchedField == field {
-			values[value] = true
-		}
-	}
-	for _, m := range dBareCmp.FindAllStringSubmatchIndex(body, -1) {
-		identifier, value := dBareParts(body, m)
-		if identifier == name && !strings.HasSuffix(body[:m[0]], ".") {
-			values[value] = true
-		}
-	}
-	return len(values) >= 2
-}
-
-func (r *TSDerivedFieldRecomputedRule) analyzeBareComparisons(c *core.FileContext, f patternkit.JsFlat, seen map[int]bool, out []*core.Violation) []*core.Violation {
-	for _, m := range dBareCmp.FindAllStringSubmatchIndex(f.Code, -1) {
+func (r *TSDerivedFieldRecomputedRule) analyzeBareComparisons(c *core.FileContext, f patternkit.JsFlat, matches [][]int, seen map[int]bool, summaries map[int]*dFunctionSummary, comparisons dComparisonMatches, out []*core.Violation) []*core.Violation {
+	for _, m := range matches {
 		name, value := dBareParts(f.Code, m)
 		if strings.HasSuffix(f.Code[:m[0]], ".") {
 			continue
@@ -175,10 +165,9 @@ func (r *TSDerivedFieldRecomputedRule) analyzeBareComparisons(c *core.FileContex
 		if !ok {
 			continue
 		}
-		body := f.Code[fn.Start : end+1]
-		bindings := dFunctionBindings(f, fn, body, r, c.RelPath)
-		derived := bindings[name]
-		if derived == "" || dReadsDerived(body, name, derived) || !dBareHasMultipleValues(body, name, value) {
+		summary := r.functionSummary(f, fn, end, summaries, comparisons, c.RelPath)
+		derived := summary.bindings[name]
+		if derived == "" || summary.readsDerived(name, derived) || !summary.hasMultipleBareValues(name, value) {
 			continue
 		}
 		seen[fn.Start] = true
@@ -187,18 +176,7 @@ func (r *TSDerivedFieldRecomputedRule) analyzeBareComparisons(c *core.FileContex
 	return out
 }
 
-func dBareHasMultipleValues(body, name, initial string) bool {
-	values := map[string]bool{initial: true}
-	for _, m := range dBareCmp.FindAllStringSubmatchIndex(body, -1) {
-		matchedName, value := dBareParts(body, m)
-		if matchedName == name && !strings.HasSuffix(body[:m[0]], ".") {
-			values[value] = true
-		}
-	}
-	return len(values) >= 2
-}
-
-func (r *TSDerivedFieldRecomputedRule) analyzeDerivedCandidates(c *core.FileContext, f patternkit.JsFlat, seen map[int]bool, out []*core.Violation) []*core.Violation {
+func (r *TSDerivedFieldRecomputedRule) analyzeDerivedCandidates(c *core.FileContext, f patternkit.JsFlat, seen map[int]bool, summaries map[int]*dFunctionSummary, comparisons dComparisonMatches, out []*core.Violation) []*core.Violation {
 	for _, candidate := range dCandidates(f.Code) {
 		fn, ok := f.EnclosingFunction(candidate.pos)
 		if !ok || seen[fn.Start] {
@@ -208,19 +186,126 @@ func (r *TSDerivedFieldRecomputedRule) analyzeDerivedCandidates(c *core.FileCont
 		if !ok {
 			continue
 		}
-		body := f.Code[fn.Start : end+1]
-		bindings := dFunctionBindings(f, fn, body, r, c.RelPath)
-		derived := bindings[candidate.name+"."+candidate.field]
+		summary := r.functionSummary(f, fn, end, summaries, comparisons, c.RelPath)
+		derived := summary.bindings[candidate.name+"."+candidate.field]
 		if derived == "" {
-			derived = bindings[candidate.name]
+			derived = summary.bindings[candidate.name]
 		}
-		if derived == "" || dReadsDerived(body, candidate.name, derived) || len(candidate.values) < 2 {
+		if derived == "" || summary.readsDerived(candidate.name, derived) || len(candidate.values) < 2 {
 			continue
 		}
 		seen[fn.Start] = true
 		out = patternkit.JsReport(out, r.BaseRule, c, f.Line(candidate.pos), "Function recomputes "+derived+" from raw "+candidate.field+" values", "Read "+candidate.name+"."+derived+" supplied by the API")
 	}
 	return out
+}
+
+type dFieldKey struct {
+	name  string
+	field string
+}
+
+type dFunctionSummary struct {
+	body        string
+	bindings    map[string]string
+	bareValues  map[string]map[string]bool
+	fieldValues map[dFieldKey]map[string]bool
+	derivedRead map[dFieldKey]bool
+}
+
+type dComparisonMatches struct {
+	derived [][]int
+	bare    [][]int
+}
+
+func (r *TSDerivedFieldRecomputedRule) functionSummary(f patternkit.JsFlat, fn patternkit.JsFunc, end int, summaries map[int]*dFunctionSummary, comparisons dComparisonMatches, currentPath string) *dFunctionSummary {
+	// Keyed by the body's brace: two functions can share a header start when
+	// one header runs back over the other (a ')' in JSX text).
+	if summary := summaries[fn.Brace]; summary != nil {
+		return summary
+	}
+	body := f.Code[fn.Start : end+1]
+	summary := &dFunctionSummary{
+		body:        body,
+		bindings:    dFunctionBindings(f, fn, body, r, currentPath),
+		bareValues:  map[string]map[string]bool{},
+		fieldValues: map[dFieldKey]map[string]bool{},
+		derivedRead: map[dFieldKey]bool{},
+	}
+	for _, m := range comparisonMatchesInRange(comparisons.derived, fn.Start, end) {
+		name, field, value := dCmpParts(f.Code, m)
+		addDerivedValue(summary.fieldValues, dFieldKey{name: name, field: field}, value)
+	}
+	for _, m := range comparisonMatchesInRange(comparisons.bare, fn.Start, end) {
+		name, value := dBareParts(f.Code, m)
+		if m[0] > fn.Start && f.Code[m[0]-1] == '.' {
+			continue
+		}
+		addBareValue(summary.bareValues, name, value)
+	}
+	if fn.Start > 0 && fn.Start < len(f.Code) && patternkit.IsWordChar(f.Code[fn.Start-1]) && patternkit.IsWordChar(f.Code[fn.Start]) {
+		if m := dCmpAtStart.FindStringSubmatchIndex(body); m != nil && m[0] == 0 {
+			name, field, value := dCmpParts(body, m)
+			addDerivedValue(summary.fieldValues, dFieldKey{name: name, field: field}, value)
+		}
+		if m := dBareCmpAtStart.FindStringSubmatchIndex(body); m != nil && m[0] == 0 {
+			name, value := dBareParts(body, m)
+			addBareValue(summary.bareValues, name, value)
+		}
+	}
+	summaries[fn.Brace] = summary
+	return summary
+}
+
+func comparisonMatchesInRange(matches [][]int, start, end int) [][]int {
+	first := sort.Search(len(matches), func(i int) bool { return matches[i][0] >= start })
+	var inRange [][]int
+	for i := first; i < len(matches) && matches[i][0] <= end; i++ {
+		if matches[i][1] <= end+1 {
+			inRange = append(inRange, matches[i])
+		}
+	}
+	return inRange
+}
+
+func (s *dFunctionSummary) hasMultipleFieldValues(name, field, initial string) bool {
+	values := map[string]bool{initial: true}
+	for value := range s.fieldValues[dFieldKey{name: name, field: field}] {
+		values[value] = true
+	}
+	for value := range s.bareValues[name] {
+		values[value] = true
+	}
+	return len(values) >= 2
+}
+
+func (s *dFunctionSummary) hasMultipleBareValues(name, initial string) bool {
+	values := s.bareValues[name]
+	return len(values) >= 2 || len(values) == 1 && !values[initial]
+}
+
+func (s *dFunctionSummary) readsDerived(name, derived string) bool {
+	key := dFieldKey{name: name, field: derived}
+	if read, ok := s.derivedRead[key]; ok {
+		return read
+	}
+	read := strings.Contains(s.body, name+"."+derived)
+	s.derivedRead[key] = read
+	return read
+}
+
+func addDerivedValue(values map[dFieldKey]map[string]bool, key dFieldKey, value string) {
+	if values[key] == nil {
+		values[key] = map[string]bool{}
+	}
+	values[key][value] = true
+}
+
+func addBareValue(values map[string]map[string]bool, name, value string) {
+	if values[name] == nil {
+		values[name] = map[string]bool{}
+	}
+	values[name][value] = true
 }
 
 func dFunctionBindings(f patternkit.JsFlat, fn patternkit.JsFunc, body string, r *TSDerivedFieldRecomputedRule, currentPath string) map[string]string {
@@ -310,10 +395,6 @@ func dBareParts(source string, m []int) (string, string) {
 		return source[m[2]:m[3]], source[m[4]:m[5]]
 	}
 	return source[m[6]:m[7]], source[m[8]:m[9]]
-}
-
-func dReadsDerived(body, name, derived string) bool {
-	return strings.Contains(body, name+"."+derived)
 }
 
 func dPropNames(body string) map[string]bool {

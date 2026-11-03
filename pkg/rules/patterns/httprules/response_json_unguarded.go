@@ -66,6 +66,7 @@ func (r *ResponseJSONUnguardedRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 	var tries []int // depths inside the try blocks open here
 	for i, line := range code {
 		matches := responseJSONCall.FindAllStringSubmatchIndex(line, -1)
+		firstNonSpace := strings.IndexFunc(line, notSpace)
 		next := 0
 		for col := 0; col <= len(line); col++ {
 			for next < len(matches) && matches[next][0] == col {
@@ -91,7 +92,7 @@ func (r *ResponseJSONUnguardedRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 			switch line[col] {
 			case '{':
 				depth++
-				if tryKeyword.MatchString(line[:col]) || (col == strings.IndexFunc(line, notSpace) && i > 0 && tryKeyword.MatchString(code[i-1])) {
+				if endsWithTryKeyword(line, col) || (col == firstNonSpace && i > 0 && tryKeyword.MatchString(code[i-1])) {
 					tries = append(tries, depth)
 				}
 			case '}':
@@ -103,6 +104,17 @@ func (r *ResponseJSONUnguardedRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 		}
 	}
 	return violations
+}
+
+func endsWithTryKeyword(line string, end int) bool {
+	start := end
+	for start > 0 && patternkit.IsRegexpSpace(line[start-1]) {
+		start--
+	}
+	if start < 3 || line[start-3:start] != "try" {
+		return false
+	}
+	return start == 3 || !patternkit.IsWordChar(line[start-4])
 }
 
 func notSpace(r rune) bool { return r != ' ' && r != '\t' }

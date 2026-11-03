@@ -3,14 +3,78 @@ package frontendrules
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTSFormNumberUncheckedInPayloadLargeFileCompletes(t *testing.T) {
+	source := "await api.send({value: Number(input)});" + strings.Repeat("({});", 1<<17)
+	start := time.Now()
+	rulestest.TextFileRuleLines(t, newTSRule("ts-form-number-unchecked-in-payload", "", checkFormNumberPayload), "frontend/src/generated.ts", source)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("analyzing %d bytes took %s, want at most 10s", len(source), elapsed)
+	}
+}
+
+func TestTSURLFilterEnumUnvalidatedLargeFileCompletes(t *testing.T) {
+	var source strings.Builder
+	for i := range 4096 {
+		name := "validate" + strconv.Itoa(i)
+		source.WriteString("const " + name + " = value => allowed.has(value);")
+		source.WriteString("({status:" + name + "(input)});")
+	}
+	start := time.Now()
+	rulestest.TextFileRuleLines(t, newTSRule("ts-url-filter-enum-unvalidated", "", checkURLFilterEnum), "frontend/src/generated.ts", source.String())
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("analyzing %d bytes took %s, want at most 10s", source.Len(), elapsed)
+	}
+}
+
+func TestAllowedValidatorDefinitionsPreserveWordBoundaries(t *testing.T) {
+	definitions := allowedValidatorDefinitions("const validate$Extra = value => allowed.has(value);")
+	code := "const validate$Extra = value => allowed.has(value);"
+	if !checksAllowedValues(patternkit.JsFlat{Code: code}, "validate", map[string]bool{}, definitions) {
+		t.Fatalf("a dollar suffix should preserve the former word-boundary match: definitions=%v", definitions)
+	}
+	if !checksAllowedValues(patternkit.JsFlat{Code: code}, "validate$", map[string]bool{}, definitions) {
+		t.Fatal("a dollar before an identifier character should preserve the former word-boundary match")
+	}
+}
+
+func TestAllowedValidatorDefinitionsIndexEveryRegexpWordBoundary(t *testing.T) {
+	for _, test := range []struct {
+		code string
+		name string
+	}{
+		{code: "const $x = value => allowed.has(value);", name: "$"},
+		{code: "const $1 = value => allowed.has(value);", name: "$"},
+		{code: "const $$b = value => allowed.has(value);", name: "$$"},
+		{code: "const a$$b = value => allowed.has(value);", name: "a$$"},
+	} {
+		definitions := allowedValidatorDefinitions(test.code)
+		if !checksAllowedValues(patternkit.JsFlat{Code: test.code}, test.name, map[string]bool{}, definitions) {
+			t.Errorf("definition prefix %q was not indexed from %q: %v", test.name, test.code, definitions)
+		}
+	}
+}
+
+func TestAllowedValidatorDefinitionsFindsOverlappingKeywords(t *testing.T) {
+	code := "const a$function pick = 1; const pick = value => allowed.has(value);"
+	definitions := allowedValidatorDefinitions(code)
+	if got, want := definitions["pick"], strings.Index(code, "pick")+len("pick"); got != want {
+		t.Fatalf("pick definition end = %d, want first overlapping declaration end %d", got, want)
+	}
+}
 
 // A malformed response answered with an empty list or a zero total shows
 // "nothing there" for data that failed to arrive.

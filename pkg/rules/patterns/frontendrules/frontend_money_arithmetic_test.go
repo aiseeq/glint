@@ -1,13 +1,40 @@
 package frontendrules
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
-
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestFrontendMoneyArithmeticLargeFileCompletes(t *testing.T) {
+	source := "let value = 0;" + strings.Repeat("value += 1;", 1<<17)
+	start := time.Now()
+	rulestest.TextFileRuleLines(t, NewFrontendMoneyArithmeticRule(), "frontend/src/generated.ts", source)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("analyzing %d bytes took %s, want at most 10s", len(source), elapsed)
+	}
+}
+
+func TestFormattingIndexFindsContainingRangeBehindNestedRange(t *testing.T) {
+	code := "function formatOuter(){function formatInner(){}; Math.round(value)}"
+	f := patternkit.JsFlat{Code: code}
+	index := newFormattingIndex(f, f.Functions())
+	pos := strings.Index(code, "Math.round")
+	assert.True(t, index.inFunction(pos))
+}
+
+func TestFormattingIndexUsesBraceScopesWithoutPairedAllBracketClose(t *testing.T) {
+	code := `function formatAmount(){const view = <div title="(">; Math.round(value)`
+	f := patternkit.JsFlat{Code: code}
+	index := newFormattingIndex(f, f.Functions())
+	pos := strings.Index(code, "Math.round")
+	assert.True(t, index.inFunction(pos))
+}
 
 func TestFrontendMoneyArithmeticRule(t *testing.T) {
 	rule := NewFrontendMoneyArithmeticRule()
@@ -48,6 +75,46 @@ investments.forEach((inv) => {
 			code: `const total = rows.reduce((acc, r) => acc + r.balance, 0)
 `,
 			wantCount: 1,
+		},
+		{
+			name:     "a parsed amount inside a function returning a tuple",
+			filename: "pair.ts",
+			code: `export function pair(o: O): [number, number] {
+  const v = parseFloat(o.amount)
+  const w = v * 2
+  return [w, w]
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name:     "a parsed amount inside a computed method",
+			filename: "bag.ts",
+			code: `export class Bag {
+  [Symbol.iterator]() {
+    const v = parseFloat(this.o.amount)
+    return [v * 2].values()
+  }
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name:     "a parsed amount inside a downleveled async generator",
+			filename: "load.js",
+			code: `function load(o){return __awaiter(this,void 0,void 0,function*(){const v=parseFloat(o.amount);return v*2})}
+`,
+			wantCount: 1,
+		},
+		{
+			name:     "a counter parameter of a function returning a tuple",
+			filename: "pages.ts",
+			code: `export function pages(o: O, amount = 3): [number, number] {
+  const a = amount * 2
+  return [a, a]
+}
+`,
+			wantCount: 0,
 		},
 		{
 			name:     "formatting a parsed amount is display only",

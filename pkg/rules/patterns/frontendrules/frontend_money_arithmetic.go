@@ -184,8 +184,11 @@ func (r *FrontendMoneyArithmeticRule) isMoneyFieldName(name string) bool {
 func (r *FrontendMoneyArithmeticRule) analyzeFlat(ctx *core.FileContext, f patternkit.JsFlat) []*core.Violation {
 	parsed := r.moneyParseSpans(f)
 	vars := r.moneyVariables(f, parsed)
-	found := r.arithmeticFindings(ctx, f, parsed, vars)
-	roundingFindings(r, ctx, f, parsed, vars, found)
+	functions := f.Functions()
+	formatting := newFormattingIndex(f, functions)
+	duplicateRounding := newFinancialFPRoundingDuplicateIndex(f)
+	found := r.arithmeticFindings(ctx, f, functions, parsed, vars, duplicateRounding, formatting)
+	roundingFindings(r, ctx, f, parsed, vars, found, duplicateRounding, formatting)
 	centRoundingFindings(r, ctx, f, found)
 	existingPatternFindings(r, ctx, found)
 	lines := slices.Sorted(maps.Keys(found))
@@ -246,19 +249,27 @@ func (r *FrontendMoneyArithmeticRule) moneyVariables(f patternkit.JsFlat, parsed
 	return vars
 }
 
-func (r *FrontendMoneyArithmeticRule) arithmeticFindings(ctx *core.FileContext, f patternkit.JsFlat, parsed []moneySpan, vars map[string][]int) map[int]bool {
+func (r *FrontendMoneyArithmeticRule) arithmeticFindings(ctx *core.FileContext, f patternkit.JsFlat, index *patternkit.JsFunctions, parsed []moneySpan, vars map[string][]int, duplicateRounding financialFPRoundingDuplicateIndex, formatting formattingIndex) map[int]bool {
 	found := make(map[int]bool)
-	for _, op := range arithmeticOperators(f.Code) {
-		if jsxTagOperator(f.Code, op.pos) || insideFormattingFunction(f, op.pos) {
+	ops := arithmeticOperators(f.Code)
+	positions := make([]int, len(ops))
+	for i, op := range ops {
+		positions[i] = op.pos
+	}
+	functions := enclosingFunctionsAt(f, index, positions)
+	parameters := make(map[int]map[string]bool)
+	for _, op := range ops {
+		if jsxTagOperator(f.Code, op.pos) || formatting.inFunction(op.pos) {
 			continue
 		}
-		if financialFPRoundingDuplicateAt(f, op.pos) {
+		if duplicateRounding.contains(op.pos) {
 			continue
 		}
 		leftName := moneyNameBefore(f.Code, op.pos)
 		rightName := moneyNameAfter(f.Code, op.pos+len(op.op))
-		leftMoney := r.isMoneyVariable(f, vars, identifierBefore(f.Code, op.pos), op.pos) || r.isMoneyFieldName(leftName) && !counterParameterAt(f, leftName, op.pos)
-		rightMoney := r.isMoneyVariable(f, vars, identifierAfter(f.Code, op.pos+len(op.op)), op.pos) || r.isMoneyFieldName(rightName) && !counterParameterAt(f, rightName, op.pos)
+		fn, inFunction := functions[op.pos]
+		leftMoney := moneyVariableInScope(vars, identifierBefore(f.Code, op.pos), fn, inFunction) || r.isMoneyFieldName(leftName) && !counterParameterCached(f, leftName, fn, inFunction, parameters)
+		rightMoney := moneyVariableInScope(vars, identifierAfter(f.Code, op.pos+len(op.op)), fn, inFunction) || r.isMoneyFieldName(rightName) && !counterParameterCached(f, rightName, fn, inFunction, parameters)
 		if strings.HasSuffix(op.op, "=") {
 			if leftMoney {
 				addMoneyFinding(r, ctx, f, found, op.pos)
@@ -289,9 +300,9 @@ func (r *FrontendMoneyArithmeticRule) arithmeticFindings(ctx *core.FileContext, 
 	return found
 }
 
-func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f patternkit.JsFlat, parsed []moneySpan, vars map[string][]int, found map[int]bool) {
+func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f patternkit.JsFlat, parsed []moneySpan, vars map[string][]int, found map[int]bool, duplicateRounding financialFPRoundingDuplicateIndex, formatting formattingIndex) {
 	for _, m := range moneyMathCall.FindAllStringIndex(f.Code, -1) {
-		if insideFormattingFunction(f, m[0]) || financialFPRoundingDuplicateAt(f, m[0]) {
+		if formatting.inFunction(m[0]) || duplicateRounding.contains(m[0]) {
 			continue
 		}
 		open := strings.LastIndex(f.Code[m[0]:m[1]], "(")
@@ -305,7 +316,7 @@ func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f p
 		arg := strings.TrimSpace(f.Code[args[0].Start:args[0].End])
 		id := strings.Trim(arg, "() \t\n")
 		moneyName := r.moneyNameExpression(id) && !counterParameterAt(f, id, m[0])
-		if insideFormattingCall(f, m[0]) && !moneyName {
+		if formatting.inCall(m[0]) && !moneyName {
 			continue
 		}
 		if moneyName {
@@ -359,18 +370,26 @@ func financialFPRoundingDuplicate(method, arg string) bool {
 	return false
 }
 
-func financialFPRoundingDuplicateAt(f patternkit.JsFlat, pos int) bool {
+type financialFPRoundingDuplicateRange struct {
+	start int
+	end   int
+}
+
+type financialFPRoundingDuplicateIndex struct {
+	ranges  []financialFPRoundingDuplicateRange
+	maxEnds []int
+}
+
+func newFinancialFPRoundingDuplicateIndex(f patternkit.JsFlat) financialFPRoundingDuplicateIndex {
+	var index financialFPRoundingDuplicateIndex
 	for _, m := range moneyMathCallName.FindAllStringSubmatchIndex(f.Code, -1) {
-		if pos < m[0] {
-			continue
-		}
 		open := strings.LastIndex(f.Code[m[0]:m[1]], "(") + m[0]
 		close, ok := f.Closing(open)
 		if !ok {
 			continue
 		}
 		div := divideByCents.FindStringIndex(f.Code[close+1:])
-		if div == nil || pos > close+1+div[1] {
+		if div == nil {
 			continue
 		}
 		args := f.CallArgs(open)
@@ -378,11 +397,25 @@ func financialFPRoundingDuplicateAt(f patternkit.JsFlat, pos int) bool {
 			continue
 		}
 		arg := strings.TrimSpace(f.Code[args[0].Start:args[0].End])
-		if centScaledArgument.MatchString(arg) && financialFPRoundingDuplicate(f.Code[m[2]:m[3]], arg) {
-			return true
+		if !centScaledArgument.MatchString(arg) || !financialFPRoundingDuplicate(f.Code[m[2]:m[3]], arg) {
+			continue
+		}
+		index.ranges = append(index.ranges, financialFPRoundingDuplicateRange{start: m[0], end: close + 1 + div[1]})
+	}
+	index.maxEnds = make([]int, len(index.ranges))
+	for i, item := range index.ranges {
+		if i > 0 && index.maxEnds[i-1] > item.end {
+			index.maxEnds[i] = index.maxEnds[i-1]
+		} else {
+			index.maxEnds[i] = item.end
 		}
 	}
-	return false
+	return index
+}
+
+func (index financialFPRoundingDuplicateIndex) contains(pos int) bool {
+	i := sort.Search(len(index.ranges), func(i int) bool { return index.ranges[i].start > pos }) - 1
+	return i >= 0 && index.maxEnds[i] >= pos
 }
 
 func insideMoneyFormatter(r *FrontendMoneyArithmeticRule, f patternkit.JsFlat, pos int) bool {
@@ -419,35 +452,129 @@ func moneyNameAfter(code string, pos int) string {
 	return code[start:pos]
 }
 
-func insideFormattingFunction(f patternkit.JsFlat, pos int) bool {
-	for pos >= 0 {
-		fn, ok := f.EnclosingFunction(pos)
-		if !ok {
-			return false
-		}
-		name := strings.ToLower(fn.Name)
-		if strings.HasPrefix(name, "format") || strings.HasPrefix(name, "money") {
-			return true
-		}
-		if fn.Start >= pos {
-			return false
-		}
-		pos = fn.Start
-	}
-	return false
+type formattingRange struct{ start, end int }
+
+type formattingIndex struct {
+	functions       []formattingRange
+	functionMaxEnds []int
+	calls           []formattingRange
+	callMaxEnds     []int
 }
 
-func insideFormattingCall(f patternkit.JsFlat, pos int) bool {
+var formattingFunctionName = regexp.MustCompile(`(?i)\b(?:format|money)[A-Za-z0-9_$]*`)
+
+func newFormattingIndex(f patternkit.JsFlat, functions *patternkit.JsFunctions) formattingIndex {
+	var index formattingIndex
+	closing := make(map[int]int)
+	stack := make([]int, 0)
+	parenStack := make([]int, 0)
+	braceClosing := make(map[int]int)
+	braceStack := make([]int, 0)
+	functionNames := formattingFunctionName.FindAllStringIndex(f.Code, -1)
+	functionBraces := make([]int, 0)
+	lastHeaderBoundary := -1
+	for pos := 0; pos < len(f.Code); pos++ {
+		switch f.Code[pos] {
+		case '{':
+			headerStart := lastHeaderBoundary + 1
+			if len(parenStack) > 0 {
+				headerStart = parenStack[len(parenStack)-1] + 1
+			}
+			nameIndex := sort.Search(len(functionNames), func(i int) bool { return functionNames[i][0] >= headerStart })
+			if nameIndex < len(functionNames) && functionNames[nameIndex][0] < pos {
+				if fn, ok := functions.AtBrace(pos); ok {
+					name := strings.ToLower(fn.Name)
+					if strings.HasPrefix(name, "format") || strings.HasPrefix(name, "money") {
+						functionBraces = append(functionBraces, pos)
+					}
+				}
+			}
+			if len(parenStack) == 0 {
+				lastHeaderBoundary = pos
+			}
+			stack = append(stack, pos)
+			braceStack = append(braceStack, pos)
+		case '}':
+			if len(stack) > 0 {
+				open := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				closing[open] = pos
+				if len(parenStack) > 0 && parenStack[len(parenStack)-1] == open {
+					parenStack = parenStack[:len(parenStack)-1]
+				}
+			}
+			if len(braceStack) > 0 {
+				open := braceStack[len(braceStack)-1]
+				braceStack = braceStack[:len(braceStack)-1]
+				braceClosing[open] = pos
+			}
+			if len(parenStack) == 0 {
+				lastHeaderBoundary = pos
+			}
+		case '(', '[':
+			stack = append(stack, pos)
+			parenStack = append(parenStack, pos)
+		case ')', ']':
+			if len(stack) > 0 {
+				open := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				closing[open] = pos
+				if len(parenStack) > 0 && parenStack[len(parenStack)-1] == open {
+					parenStack = parenStack[:len(parenStack)-1]
+				}
+			}
+		case ';', '\n':
+			if len(parenStack) == 0 {
+				lastHeaderBoundary = pos
+			}
+		}
+	}
+	for _, pos := range functionBraces {
+		close, hasClose := braceClosing[pos]
+		if !hasClose {
+			close = len(f.Code)
+		}
+		index.functions = append(index.functions, formattingRange{start: pos, end: close})
+	}
 	for _, loc := range formattingCall.FindAllStringIndex(f.Code, -1) {
 		if loc[1] == 0 {
 			continue
 		}
-		close, ok := f.Closing(loc[1] - 1)
-		if ok && loc[1] <= pos && pos < close {
-			return true
+		if close, ok := closing[loc[1]-1]; ok {
+			index.calls = append(index.calls, formattingRange{start: loc[1], end: close})
 		}
 	}
-	return false
+	index.functionMaxEnds = rangePrefixMaxEnds(index.functions)
+	index.callMaxEnds = rangePrefixMaxEnds(index.calls)
+	return index
+}
+
+func rangePrefixMaxEnds(ranges []formattingRange) []int {
+	maxEnds := make([]int, len(ranges))
+	for i, current := range ranges {
+		maxEnds[i] = current.end
+		if i > 0 && maxEnds[i-1] > maxEnds[i] {
+			maxEnds[i] = maxEnds[i-1]
+		}
+	}
+	return maxEnds
+}
+
+func (index formattingIndex) inFunction(pos int) bool {
+	return index.contains(index.functions, index.functionMaxEnds, pos, false)
+}
+func (index formattingIndex) inCall(pos int) bool {
+	return index.contains(index.calls, index.callMaxEnds, pos, true)
+}
+
+func (index formattingIndex) contains(ranges []formattingRange, maxEnds []int, pos int, includeStart bool) bool {
+	bound := sort.Search(len(ranges), func(i int) bool {
+		if includeStart {
+			return ranges[i].start > pos
+		}
+		return ranges[i].start >= pos
+	}) - 1
+	return bound >= 0 && maxEnds[bound] > pos
 }
 
 func existingPatternFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, found map[int]bool) {
@@ -472,15 +599,63 @@ func addMoneyFinding(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f pa
 	found[line] = true
 }
 
-func (r *FrontendMoneyArithmeticRule) isMoneyVariable(f patternkit.JsFlat, vars map[string][]int, name string, pos int) bool {
-	return name != "" && moneyVariableAt(f, vars, name, pos)
-}
-
 func counterParameterAt(f patternkit.JsFlat, name string, pos int) bool {
 	fn, ok := f.EnclosingFunction(pos)
 	if !ok {
 		return false
 	}
+	return counterParameterInFunction(f, name, fn)
+}
+
+func counterParameterCached(f patternkit.JsFlat, name string, fn patternkit.JsFunc, inFunction bool, cache map[int]map[string]bool) bool {
+	if !inFunction {
+		return false
+	}
+	parameters, ok := cache[fn.Brace]
+	if !ok {
+		parameters = make(map[string]bool)
+		header := f.Code[fn.Start:fn.Brace]
+		if openOffset := strings.Index(header, "("); openOffset >= 0 {
+			for _, arg := range f.CallArgs(fn.Start + openOffset) {
+				text := strings.TrimSpace(f.Code[arg.Start:arg.End])
+				before, after, ok := strings.Cut(text, "=")
+				if !ok || strings.TrimSpace(after) == "" {
+					continue
+				}
+				parameter := parameterName.FindStringSubmatch(before)
+				if len(parameter) != 2 {
+					continue
+				}
+				allDigits := true
+				for _, char := range strings.TrimSpace(after) {
+					if char < '0' || char > '9' {
+						allDigits = false
+						break
+					}
+				}
+				defaultValue := strings.TrimSpace(after)
+				if allDigits && strings.TrimLeft(defaultValue, "0") != "" {
+					parameters[parameter[1]] = true
+				}
+			}
+		}
+		cache[fn.Brace] = parameters
+	}
+	return parameters[name]
+}
+
+func moneyVariableInScope(vars map[string][]int, name string, fn patternkit.JsFunc, inFunction bool) bool {
+	if name == "" {
+		return false
+	}
+	scope := -1
+	if inFunction {
+		scope = fn.Brace
+	}
+	return slices.Contains(vars[name], scope)
+}
+
+func counterParameterInFunction(f patternkit.JsFlat, name string, fn patternkit.JsFunc) bool {
 	header := f.Code[fn.Start:fn.Brace]
 	openOffset := strings.Index(header, "(")
 	if openOffset < 0 {
@@ -513,6 +688,42 @@ func counterParameterAt(f patternkit.JsFlat, name string, pos int) bool {
 		}
 	}
 	return false
+}
+
+// enclosingFunctionsAt resolves function scopes for sorted source positions in
+// one forward pass. Calling EnclosingFunction separately for each arithmetic
+// operator rescans the preceding source each time on minified files.
+func enclosingFunctionsAt(f patternkit.JsFlat, index *patternkit.JsFunctions, positions []int) map[int]patternkit.JsFunc {
+	sort.Ints(positions)
+	functions := make(map[int]patternkit.JsFunc, len(positions))
+	type functionScope struct {
+		function patternkit.JsFunc
+		ok       bool
+	}
+	active := functionScope{}
+	stack := make([]functionScope, 0)
+	positionIndex := 0
+	for i := 0; i < len(f.Code) && positionIndex < len(positions); i++ {
+		for positionIndex < len(positions) && positions[positionIndex] == i {
+			if active.ok {
+				functions[i] = active.function
+			}
+			positionIndex++
+		}
+		switch f.Code[i] {
+		case '{':
+			stack = append(stack, active)
+			if fn, ok := index.AtBrace(i); ok {
+				active = functionScope{function: fn, ok: true}
+			}
+		case '}':
+			if len(stack) > 0 {
+				active = stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+	return functions
 }
 
 func moneyVariableAt(f patternkit.JsFlat, vars map[string][]int, name string, pos int) bool {

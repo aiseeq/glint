@@ -1,7 +1,9 @@
 package frontendrules
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
@@ -109,4 +111,13 @@ export function show(err: Error, code: string) {
 }
 `
 	assert.Equal(t, []int{20}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/lib/body.ts", source))
+}
+
+func TestFrontendErrorMessageMatchLargeFileCompletes(t *testing.T) {
+	source := "const helper = (message) => message;\n" + strings.Repeat("helper(error.message);", 1<<16)
+	start := time.Now()
+	rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "frontend/src/generated.ts", source)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("analyzing %d bytes took %s, want at most 10s", len(source), elapsed)
+	}
 }

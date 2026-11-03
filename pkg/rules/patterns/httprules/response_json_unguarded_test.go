@@ -1,11 +1,22 @@
 package httprules
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestResponseJSONUnguardedLargeLineCompletes(t *testing.T) {
+	source := "const response=await fetch('/');response.json();" + strings.Repeat("{};", 1<<18)
+	start := time.Now()
+	rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "web/src/generated.ts", source)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("analyzing %d bytes took %s, want at most 10s", len(source), elapsed)
+	}
+}
 
 // A body that is not JSON — a plain-text refusal from a middleware, a proxy's
 // HTML page — makes response.json() throw a SyntaxError, and the user reads

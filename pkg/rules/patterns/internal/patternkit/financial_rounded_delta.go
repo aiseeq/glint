@@ -7,3 +7,8 @@ func IsWordChar(b byte) bool {
 		(b >= 'A' && b <= 'Z') ||
 		(b >= 'a' && b <= 'z')
 }
+
+// IsRegexpSpace reports ASCII whitespace matched by the JavaScript rule regexes.
+func IsRegexpSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\f' || b == '\r'
+}

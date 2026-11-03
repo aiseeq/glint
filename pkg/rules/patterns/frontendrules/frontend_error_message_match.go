@@ -70,13 +70,13 @@ func (r *FrontendErrorMessageMatchRule) AnalyzeFile(ctx *core.FileContext) []*co
 	messageOf := regexp.MustCompile(`(?:\b(?:` + names + `)|\(\s*(?:` + names + `)\s+as\s+[\w$.<>]+\s*\))\s*\??\.\s*message\b`)
 	texts := r.messageTexts(code, messageOf)
 
-	subject := `(?:\b(?:` + alternation(errorNames) + `)\s*\??\.\s*message`
+	subject := `(?:\b(?:` + names + `)\s*\??\.\s*message`
 	if len(texts) > 0 {
 		subject += `|\b(?:` + alternation(texts) + `)\b`
 	}
 	subject += `)`
-	match := regexp.MustCompile(subject + `\s*\??\.\s*(?:includes|startsWith|endsWith|indexOf|match|search)\s*\(` +
-		`|` + subject + `\s*[!=]==?\s*['"` + "`" + `]` +
+	match := regexp.MustCompile(subject + `(?:\s*\??\.\s*(?:includes|startsWith|endsWith|indexOf|match|search)\s*\(` +
+		`|\s*[!=]==?\s*['"` + "`" + `])` +
 		`|['"` + "`" + `]\s*[!=]==?\s*` + subject +
 		`|/[gimsuy]*\s*\.\s*test\s*\(\s*` + subject + `\s*\)`)
 
@@ -169,11 +169,26 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, messageOf *r
 			}
 		}
 	}
+	type declarationMatch struct {
+		name  string
+		value string
+	}
+	declarations := make([]declarationMatch, len(code))
+	for i, line := range code {
+		if m := r.declaration.FindStringSubmatch(line); m != nil {
+			declarations[i] = declarationMatch{name: m[1], value: m[2]}
+		}
+	}
 	// Each helper call is matched by an expression compiled once per file.
 	calls := make(map[string]*regexp.Regexp, len(helperParams))
 	for helper := range helperParams {
 		calls[helper] = regexp.MustCompile(`\b` + regexp.QuoteMeta(helper) + `\s*\(([^;]*)`)
 	}
+	// A helper call on a source line does not change between propagation
+	// passes. Index helper-name occurrences once, then cache each exact regex
+	// result so the propagation loop only performs lookups.
+	callMatches := indexHelperCalls(code, calls)
+	messageMatches := make(map[string]bool)
 	for changed := true; changed; {
 		changed = false
 		var holds *regexp.Regexp
@@ -181,18 +196,25 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, messageOf *r
 			holds = regexp.MustCompile(`\b(?:` + alternation(slices.Sorted(maps.Keys(texts))) + `)\b`)
 		}
 		carries := func(expr string) bool {
-			return messageOf.MatchString(expr) || (holds != nil && holds.MatchString(expr))
+			messageMatch, known := messageMatches[expr]
+			if !known {
+				messageMatch = messageOf.MatchString(expr)
+				messageMatches[expr] = messageMatch
+			}
+			return messageMatch || (holds != nil && holds.MatchString(expr))
 		}
-		for _, line := range code {
-			if m := r.declaration.FindStringSubmatch(line); m != nil && !texts[m[1]] && carries(m[2]) {
-				texts[m[1]] = true
+		for i := range code {
+			declaration := declarations[i]
+			if declaration.name != "" && !texts[declaration.name] && carries(declaration.value) {
+				texts[declaration.name] = true
 				changed = true
 			}
-			for helper, param := range helperParams {
-				if texts[param] || !strings.Contains(line, helper) {
+			for _, call := range callMatches[i] {
+				param := helperParams[call.helper]
+				if texts[param] {
 					continue
 				}
-				if m := calls[helper].FindStringSubmatch(line); m != nil && carries(firstArgument(m[1])) {
+				if call.matched && carries(firstArgument(call.argument)) {
 					texts[param] = true
 					changed = true
 				}
@@ -200,6 +222,122 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, messageOf *r
 		}
 	}
 	return slices.Sorted(maps.Keys(texts))
+}
+
+type helperCallMatch struct {
+	helper   string
+	argument string
+	matched  bool
+	position int
+}
+
+type helperCallTrieNode struct {
+	next    map[byte]int
+	failure int
+	output  []string
+}
+
+func indexHelperCalls(code []string, calls map[string]*regexp.Regexp) [][]helperCallMatch {
+	trie := helperCallTrie(calls)
+	matches := make([][]helperCallMatch, len(code))
+	for lineIndex, line := range code {
+		seen := make(map[string]bool)
+		state := 0
+		for end := 0; end < len(line); end++ {
+			for state != 0 {
+				if _, ok := trie[state].next[line[end]]; ok {
+					break
+				}
+				state = trie[state].failure
+			}
+			if next, ok := trie[state].next[line[end]]; ok {
+				state = next
+			}
+			for _, name := range trie[state].output {
+				start := end + 1 - len(name)
+				if start < 0 || patternkit.IsWordChar(line[start]) == (start > 0 && patternkit.IsWordChar(line[start-1])) || seen[name] {
+					continue
+				}
+				if addHelperCallMatch(&matches[lineIndex], line, start, end, name, calls[name]) {
+					seen[name] = true
+				}
+			}
+		}
+		slices.SortFunc(matches[lineIndex], func(a, b helperCallMatch) int {
+			return a.position - b.position
+		})
+	}
+	return matches
+}
+
+func helperCallTrie(calls map[string]*regexp.Regexp) []helperCallTrieNode {
+	trie := []helperCallTrieNode{{next: make(map[byte]int)}}
+	for _, name := range slices.Sorted(maps.Keys(calls)) {
+		state := 0
+		for i := 0; i < len(name); i++ {
+			c := name[i]
+			next, ok := trie[state].next[c]
+			if !ok {
+				next = len(trie)
+				trie[state].next[c] = next
+				trie = append(trie, helperCallTrieNode{next: make(map[byte]int)})
+			}
+			state = next
+		}
+		trie[state].output = append(trie[state].output, name)
+	}
+	queue := make([]int, 0, len(trie))
+	for _, child := range trie[0].next {
+		queue = append(queue, child)
+	}
+	for len(queue) > 0 {
+		state := queue[0]
+		queue = queue[1:]
+		for char, child := range trie[state].next {
+			fallback := trie[state].failure
+			for fallback != 0 {
+				if _, ok := trie[fallback].next[char]; ok {
+					break
+				}
+				fallback = trie[fallback].failure
+			}
+			if next, ok := trie[fallback].next[char]; ok && next != child {
+				trie[child].failure = next
+			}
+			trie[child].output = append(trie[child].output, trie[trie[child].failure].output...)
+			queue = append(queue, child)
+		}
+	}
+	return trie
+}
+
+func addHelperCallMatch(matches *[]helperCallMatch, line string, start, end int, name string, call *regexp.Regexp) bool {
+	paren := end + 1
+	for paren < len(line) && regexpSpaceByte(line[paren]) {
+		paren++
+	}
+	if paren >= len(line) || line[paren] != '(' {
+		return false
+	}
+	prefixStart := start
+	if prefixStart > 0 {
+		prefixStart--
+	}
+	prefix := line[prefixStart : paren+1]
+	m := call.FindStringSubmatchIndex(prefix)
+	if m == nil || m[0] != start-prefixStart || m[1] != len(prefix) {
+		return false
+	}
+	argument := line[paren+1:]
+	if semicolon := strings.IndexByte(argument, ';'); semicolon >= 0 {
+		argument = argument[:semicolon]
+	}
+	*matches = append(*matches, helperCallMatch{helper: name, argument: argument, matched: true, position: start})
+	return true
+}
+
+func regexpSpaceByte(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
 }
 
 // firstArgument returns the first argument of an argument list: the text up

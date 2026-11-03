@@ -184,20 +184,27 @@ type JsFunc struct {
 // EnclosingFunction returns the innermost function whose body holds pos.
 func (f JsFlat) EnclosingFunction(pos int) (JsFunc, bool) {
 	for brace := f.EnclosingBrace(pos); brace >= 0; brace = f.EnclosingBrace(brace) {
-		head, start := f.Header(brace)
-		if JsControlHeader.MatchString(head) || !jsFuncHeader.MatchString(head) {
-			continue
+		if fn, ok := f.FunctionAtBrace(brace); ok {
+			return fn, true
 		}
-		fn := JsFunc{Brace: brace, Start: start}
-		for _, re := range []*regexp.Regexp{jsNamedFunction, jsMethodHeader, jsArrowBinding} {
-			if m := re.FindStringSubmatch(head); m != nil {
-				fn.Name = m[1]
-				break
-			}
-		}
-		return fn, true
 	}
 	return JsFunc{}, false
+}
+
+// FunctionAtBrace reports whether brace opens a function body.
+func (f JsFlat) FunctionAtBrace(brace int) (JsFunc, bool) {
+	head, start := f.Header(brace)
+	if JsControlHeader.MatchString(head) || !jsFuncHeader.MatchString(head) {
+		return JsFunc{}, false
+	}
+	fn := JsFunc{Brace: brace, Start: start}
+	for _, re := range []*regexp.Regexp{jsNamedFunction, jsMethodHeader, jsArrowBinding} {
+		if m := re.FindStringSubmatch(head); m != nil {
+			fn.Name = m[1]
+			break
+		}
+	}
+	return fn, true
 }
 
 // InsideNamedFunction reports whether pos is inside the named enclosing function.

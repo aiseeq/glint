@@ -248,7 +248,40 @@ func callArgumentObject(f patternkit.JsFlat, open int) bool {
 	if !ok || !strings.HasSuffix(strings.TrimRight(f.Code[:open], " \t\n"), "(") && !strings.HasSuffix(strings.TrimRight(f.Code[:open], " \t\n"), ",") {
 		return false
 	}
-	return awaitedCallee.MatchString(f.Code[:paren])
+	return awaitedCalleeBefore(f.Code, paren)
+}
+
+// awaitedCalleeBefore bounds the existing suffix regexp to its only possible
+// match. The prefix can be the whole minified file, but the match itself must
+// end immediately before paren.
+func awaitedCalleeBefore(code string, end int) bool {
+	start := end
+	for start > 0 && patternkit.IsRegexpSpace(code[start-1]) {
+		start--
+	}
+	calleeEnd := start
+	for start > 0 && isAwaitCalleeChar(code[start-1]) {
+		start--
+	}
+	if start == calleeEnd {
+		return false
+	}
+	spaceEnd := start
+	for start > 0 && patternkit.IsRegexpSpace(code[start-1]) {
+		start--
+	}
+	if spaceEnd == start || start < len("await") || code[start-len("await"):start] != "await" {
+		return false
+	}
+	start -= len("await")
+	if start > 0 && patternkit.IsWordChar(code[start-1]) {
+		return false
+	}
+	return awaitedCallee.MatchString(code[start:end])
+}
+
+func isAwaitCalleeChar(c byte) bool {
+	return patternkit.IsWordChar(c) || c == '$' || c == '.' || c == '?'
 }
 
 // hasFallback reports a property value ending in || or ?? fallback.
@@ -270,9 +303,10 @@ var (
 func checkURLFilterEnum(r *tsRule, ctx *core.FileContext, f patternkit.JsFlat) []*core.Violation {
 	var out []*core.Violation
 	validators := make(map[string]bool)
+	definitions := allowedValidatorDefinitions(f.Code)
 	for open := strings.IndexByte(f.Code, '{'); open >= 0; {
 		if end, ok := f.Closing(open); ok {
-			out = append(out, rawEnumFilters(r, ctx, f, open, end, validators)...)
+			out = append(out, rawEnumFilters(r, ctx, f, open, end, validators, definitions)...)
 		}
 		next := strings.IndexByte(f.Code[open+1:], '{')
 		if next < 0 {
@@ -283,7 +317,7 @@ func checkURLFilterEnum(r *tsRule, ctx *core.FileContext, f patternkit.JsFlat) [
 	return out
 }
 
-func rawEnumFilters(r *tsRule, ctx *core.FileContext, f patternkit.JsFlat, open, end int, validators map[string]bool) []*core.Violation {
+func rawEnumFilters(r *tsRule, ctx *core.FileContext, f patternkit.JsFlat, open, end int, validators map[string]bool, definitions map[string]int) []*core.Violation {
 	var raw []patternkit.JsSpanRange
 	checked := false
 	for _, item := range f.Items(open, end) {
@@ -291,7 +325,7 @@ func rawEnumFilters(r *tsRule, ctx *core.FileContext, f patternkit.JsFlat, open,
 		if m == nil {
 			continue
 		}
-		if call := validatorCall.FindStringSubmatch(m[2]); call != nil && checksAllowedValues(f, call[1], validators) {
+		if call := validatorCall.FindStringSubmatch(m[2]); call != nil && checksAllowedValues(f, call[1], validators, definitions) {
 			checked = true
 			continue
 		}
@@ -315,15 +349,45 @@ func rawEnumFilters(r *tsRule, ctx *core.FileContext, f patternkit.JsFlat, open,
 
 // checksAllowedValues reports a function of the file whose definition checks
 // its input against a set or a list of allowed values.
-func checksAllowedValues(f patternkit.JsFlat, name string, cache map[string]bool) bool {
+var (
+	validatorKeyword = regexp.MustCompile(`\b(?:const|let|function)\b`)
+	validatorName    = regexp.MustCompile(`^\s+([A-Za-z_$][\w$]*)`)
+)
+
+func allowedValidatorDefinitions(code string) map[string]int {
+	definitions := make(map[string]int)
+	for _, keyword := range validatorKeyword.FindAllStringIndex(code, -1) {
+		nameMatch := validatorName.FindStringSubmatchIndex(code[keyword[1]:])
+		if nameMatch == nil {
+			continue
+		}
+		start := keyword[1] + nameMatch[2]
+		end := keyword[1] + nameMatch[3]
+		name := code[start:end]
+		for k := 1; k <= len(name); k++ {
+			leftIsWord := patternkit.IsWordChar(code[start+k-1])
+			rightIsWord := k < len(name) && patternkit.IsWordChar(code[start+k])
+			if leftIsWord != rightIsWord {
+				addValidatorDefinition(definitions, name[:k], start+k)
+			}
+		}
+	}
+	return definitions
+}
+
+func addValidatorDefinition(definitions map[string]int, name string, end int) {
+	if _, exists := definitions[name]; !exists {
+		definitions[name] = end
+	}
+}
+
+func checksAllowedValues(f patternkit.JsFlat, name string, cache map[string]bool, definitions map[string]int) bool {
 	if known, ok := cache[name]; ok {
 		return known
 	}
-	def := regexp.MustCompile(`\b(?:const|let|function)\s+` + regexp.QuoteMeta(name) + `\b`).FindStringIndex(f.Code)
 	found := false
-	if def != nil {
-		end := min(def[1]+400, len(f.Code))
-		found = allowedValuesCheck.MatchString(f.Code[def[1]:end])
+	if end, ok := definitions[name]; ok {
+		found = allowedValuesCheck.MatchString(f.Code[end:min(end+400, len(f.Code))])
 	}
 	cache[name] = found
 	return found
