@@ -319,19 +319,81 @@ func fieldNilBoolGuardMethods(methods []fieldNilMethod, field *types.Var) map[*t
 }
 
 func fieldNilCheckPrecedes(method fieldNilMethod, field *types.Var, use ast.Node) bool {
+	passed := fieldNilChecksFallenThrough(method, field, use)
 	found := false
 	ast.Inspect(method.decl.Body, func(node ast.Node) bool {
 		comparison, ok := node.(*ast.BinaryExpr)
 		if !ok {
 			return true
 		}
-		if fieldNilCompared(method.info, method.recv, comparison) == field && comparison.Pos() < use.Pos() {
+		if fieldNilCompared(method.info, method.recv, comparison) == field && comparison.Pos() < use.Pos() && !passed[comparison] {
 			found = true
 			return false
 		}
 		return true
 	})
 	return found
+}
+
+// fieldNilChecksFallenThrough collects the checks that do not guard use: the
+// whole condition of an if without else that use comes after, where the field
+// is not nil in the branch (`if f != nil { … }`) or the nil branch goes on to
+// use (`if f == nil { log.Printf(…) }`: it ends in a call of another package
+// that returns, and does not set the field).
+func fieldNilChecksFallenThrough(method fieldNilMethod, field *types.Var, use ast.Node) map[*ast.BinaryExpr]bool {
+	passed := make(map[*ast.BinaryExpr]bool)
+	ast.Inspect(method.decl.Body, func(node ast.Node) bool {
+		ifStmt, ok := node.(*ast.IfStmt)
+		if !ok || ifStmt.Else != nil || ifStmt.End() > use.Pos() {
+			return true
+		}
+		comparison, ok := ast.Unparen(ifStmt.Cond).(*ast.BinaryExpr)
+		if !ok || fieldNilCompared(method.info, method.recv, comparison) != field {
+			return true
+		}
+		if comparison.Op == token.NEQ || fieldNilBranchGoesOn(method, field, ifStmt.Body) {
+			passed[comparison] = true
+		}
+		return true
+	})
+	return passed
+}
+
+func fieldNilBranchGoesOn(method fieldNilMethod, field *types.Var, body *ast.BlockStmt) bool {
+	if len(body.List) == 0 {
+		return false
+	}
+	last, ok := body.List[len(body.List)-1].(*ast.ExprStmt)
+	if !ok || patternkit.StmtNoReturn(last, method.info, nil) != patternkit.CallReturns {
+		return false
+	}
+	call, ok := ast.Unparen(last.X).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	qualifier, ok := selector.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	if _, imported := method.info.Uses[qualifier].(*types.PkgName); !imported {
+		return false
+	}
+	setsField := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		if assign, ok := node.(*ast.AssignStmt); ok {
+			for _, lhs := range assign.Lhs {
+				if fieldNilAssignedField(method.info, method.recv, lhs) == field {
+					setsField = true
+				}
+			}
+		}
+		return !setsField
+	})
+	return !setsField
 }
 
 func fieldNilBranchReturnsFalse(stmt ast.Stmt) bool {
