@@ -23,6 +23,11 @@ go_vet:
 go_fix:
   enabled: true
 
+# bin/ holds glint (graft build) and tools/consumers (go build): rebuilt on
+# demand, so a merged worktree goes with them.
+worktree:
+  disposable: [bin]
+
 # Go tasks build the SQL parser natively (cgo): the WebAssembly one a plain
 # go install gets costs a second and hundreds of MB on every run that parses SQL.
 #
