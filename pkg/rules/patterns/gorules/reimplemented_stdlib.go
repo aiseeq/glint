@@ -161,11 +161,11 @@ func (r *ReimplementedStdlibRule) sortedKeyBlocks(ctx *core.FileContext, fn *ast
 			v.WithContext("pattern", "reimplemented_stdlib")
 			v.WithContext("replacement", replacement)
 			// The fixer may replace the three statements with keys := replacement:
-			// a plain map operand prints as its source and cannot mention keys,
+			// the map operand must print as its source and read the same once,
 			// maps and slices must name the packages an added import brings, and
 			// the sort's own import must not be renamed: the fixer drops "sort"
 			// once nothing refers to it, a renamed import would stay behind.
-			if isPlainOperand(loop.X) && namesStdlibPackages(ctx.GoAST, list[i].Pos(), info, "maps", "slices") &&
+			if isSortedKeysOperand(loop.X, keys.Name) && namesStdlibPackages(ctx.GoAST, list[i].Pos(), info, "maps", "slices") &&
 				packagesCalledByPath(list[i+2], info) && nilAsGood(fn, list[i], list[i+2], keys, info) {
 				v.WithContext("fix_sorted_keys", keys.Name)
 			}
@@ -176,11 +176,29 @@ func (r *ReimplementedStdlibRule) sortedKeyBlocks(ctx *core.FileContext, fn *ast
 	return violations
 }
 
+// isSortedKeysOperand reports a map expression the replacement can name once
+// for the block's two reads of it: a plain operand, or one indexed by a plain
+// operand or a literal, so nothing in it runs or changes between the reads,
+// and none of it the keys slice the rewrite declares.
+func isSortedKeysOperand(expr ast.Expr, keys string) bool {
+	switch node := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		return node.Name != keys
+	case *ast.SelectorExpr:
+		return isSortedKeysOperand(node.X, keys)
+	case *ast.IndexExpr:
+		_, literal := ast.Unparen(node.Index).(*ast.BasicLit)
+		return isSortedKeysOperand(node.X, keys) && (literal || isSortedKeysOperand(node.Index, keys))
+	}
+	return false
+}
+
 // nilAsGood reports keys that are read after the sort and read the same nil
 // as empty: declared nil by var keys []T, or after the sort only ranged over,
-// measured with len and indexed. slices.Sorted of an empty map returns nil; a
-// subslice of nil is nil again and carries the difference out. Unread keys
-// would leave keys := replacement unused, which does not compile.
+// measured with len, indexed and joined by strings.Join. slices.Sorted of an
+// empty map returns nil; a subslice of nil is nil again and carries the
+// difference out. Unread keys would leave keys := replacement unused, which
+// does not compile.
 func nilAsGood(fn *ast.FuncDecl, start, sort ast.Stmt, keys *ast.Ident, info *types.Info) bool {
 	obj := info.ObjectOf(keys)
 	assigned := make(map[*ast.Ident]bool)
@@ -209,7 +227,7 @@ func nilAsGood(fn *ast.FuncDecl, start, sort ast.Stmt, keys *ast.Ident, info *ty
 				readsAsList[id] = true
 			}
 		case *ast.CallExpr:
-			if id, ok := node.Fun.(*ast.Ident); ok && isBuiltin(id, "len", info) && len(node.Args) == 1 {
+			if isLenCall(node, info) || isStringsJoin(node, info) {
 				if arg, ok := node.Args[0].(*ast.Ident); ok {
 					readsAsList[arg] = true
 				}
@@ -231,6 +249,19 @@ func nilAsGood(fn *ast.FuncDecl, start, sort ast.Stmt, keys *ast.Ident, info *ty
 		return good
 	})
 	return read && good
+}
+
+// isLenCall reports a call of the builtin len.
+func isLenCall(call *ast.CallExpr, info *types.Info) bool {
+	id, ok := call.Fun.(*ast.Ident)
+	return ok && isBuiltin(id, "len", info) && len(call.Args) == 1
+}
+
+// isStringsJoin reports strings.Join(elems, sep) of the standard library:
+// it joins nil as it joins an empty slice, to "".
+func isStringsJoin(call *ast.CallExpr, info *types.Info) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Join" && importedPackage(sel.X, info) == "strings" && len(call.Args) == 2
 }
 
 // isBuiltin reports id naming the predeclared function name, not a local

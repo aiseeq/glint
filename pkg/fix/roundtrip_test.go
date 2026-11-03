@@ -382,6 +382,36 @@ func Encode(m map[string]int) ([]byte, error) {
 	assert.NotContains(t, fixed["a.go"], `"sort"`)
 }
 
+// The map indexed out of another one and the keys joined straight away.
+func TestRoundTripSortedKeysOfIndexedMapJoined(t *testing.T) {
+	fixed := roundTrip(t, map[string]string{
+		"go.mod": modGo123,
+		"a.go": `package projecta
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
+
+type groups struct{ other map[string]map[string]int }
+
+// Names joins.
+func Names(g groups, name string) string {
+	fmt.Println("names")
+	keys := make([]string, 0, len(g.other[name]))
+	for k := range g.other[name] {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+`,
+	})
+	assert.Contains(t, fixed["a.go"], "keys := slices.Sorted(maps.Keys(g.other[name]))\n\treturn strings.Join(keys, \",\")")
+	assert.NotContains(t, fixed["a.go"], `"sort"`)
+}
+
 // A named key type with an ordered underlying type sorts fine.
 func TestRoundTripNamedOrderedKeyIsSorted(t *testing.T) {
 	fixed := roundTrip(t, map[string]string{

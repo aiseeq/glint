@@ -300,3 +300,49 @@ func TestReimplementedStdlibSortedKeysBlockSortsWithPackageSort(t *testing.T) {
 	})
 	assert.Empty(t, violations)
 }
+
+// strings.Join reads nil as it reads an empty slice: both join to "".
+func TestReimplementedStdlibSortedKeysBlockFixJoinsKeys(t *testing.T) {
+	mark := func(imports, use string) any {
+		source := "package helpers\n\nimport (\"fmt\"; \"sort\"; " + imports + ")\n\nfunc report(m map[string]int) string {\n\tfmt.Println()\n\tkeys := make([]string, 0, len(m))\n\tfor k := range m { keys = append(keys, k) }\n\tsort.Strings(keys)\n\treturn " + use + "\n}\n"
+		violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+			"go.mod":             "module example.com/helpers\n\ngo 1.23\n",
+			"helpers.go":         source,
+			"strings/strings.go": "package strings\n\nimport \"fmt\"\n\nfunc Join(s []string, sep string) string { return fmt.Sprint(s == nil) }\n",
+		})
+		require.Len(t, violations, 1, use)
+		return violations[0].Context["fix_sorted_keys"]
+	}
+	assert.Equal(t, "keys", mark(`"strings"`, `strings.Join(keys, ",")`))
+	assert.Nil(t, mark(`strs "strings"`, `strs.Join(keys, ",") + fmt.Sprint(keys == nil)`), "another read tells nil apart")
+	assert.Nil(t, mark(`"example.com/helpers/strings"`, `strings.Join(keys, ",")`), "a Join of another package")
+	assert.Nil(t, mark(`"strings"`, `strings.Join(keys[1:], ",")`), "a subslice carries nil out")
+}
+
+// The keys of a map held in another map or a field's map are the same
+// expression read once: slices.Sorted(maps.Keys(g[name])).
+func TestReimplementedStdlibSortedKeysBlockFixOfIndexedMap(t *testing.T) {
+	mark := func(over string) (any, any) {
+		source := "package helpers\n\nimport (\"fmt\"; \"sort\")\n\ntype groups struct{ other map[string]map[string]int }\n\nfunc name() string { return \"\" }\n\n" +
+			"func report(g groups, byID []map[string]int, id int, n string) {\n\tfmt.Println()\n\tvar keys []string\n\tfor k := range " + over + " { keys = append(keys, k) }\n\tsort.Strings(keys)\n\tfmt.Println(keys)\n}\n"
+		violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+			"go.mod":     "module example.com/helpers\n\ngo 1.23\n",
+			"helpers.go": source,
+		})
+		require.Len(t, violations, 1, over)
+		return violations[0].Context["fix_sorted_keys"], violations[0].Context["replacement"]
+	}
+	keys, replacement := mark("g.other[n]")
+	assert.Equal(t, "keys", keys)
+	assert.Equal(t, "slices.Sorted(maps.Keys(g.other[n]))", replacement)
+	keys, _ = mark(`g.other["a"]`)
+	assert.Equal(t, "keys", keys)
+	keys, _ = mark("byID[id]")
+	assert.Equal(t, "keys", keys)
+	keys, _ = mark("g.other[name()]")
+	assert.Nil(t, keys, "a call in the index runs once instead of twice")
+	keys, _ = mark("g.other[fmt.Sprint(id)]")
+	assert.Nil(t, keys, "a call in the index")
+	keys, _ = mark("g.other[keys[0]]")
+	assert.Nil(t, keys, "the map read through the slice the block declares")
+}
