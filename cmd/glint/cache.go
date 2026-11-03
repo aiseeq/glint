@@ -40,7 +40,7 @@ const maxProjectCacheVariants = 8
 //
 // The stamp covers everything else a file-local finding depends on: the glint
 // build, the configuration, where the Go syntax trees came from and the
-// tolerance flag. A different stamp discards the whole cache.
+// tolerance flag. Each stamp has an independent cache file.
 type resultCache struct {
 	path             string
 	root             string
@@ -78,7 +78,7 @@ type resultCache struct {
 	rootRuleFingerprints map[string]string
 	rootRuleHits         map[string]bool
 	rootContentHashes    map[string][sha256.Size]byte
-	rootFilesComplete    bool
+	rootRunComplete      bool
 }
 
 // projectEntry holds the findings of the project rules, filtered like every
@@ -200,7 +200,7 @@ func buildTag(build string) string {
 
 // openResultCache reads the cache of root from dir, named after the root and
 // the build: a cache of another build can never match its stamp. A cache
-// written under another stamp is discarded, a missing one starts from the
+// written under another stamp is ignored, a missing one starts from the
 // file entries of the cache of seed - the root in the main worktree, for a
 // root in a fresh worktree of the same repository: they are keyed by
 // relative path and content, so the files the worktree did not change are
@@ -208,7 +208,7 @@ func buildTag(build string) string {
 // limit of pruneResultCaches goes by.
 func openResultCache(dir, root, seed, build, stamp string) (*resultCache, error) {
 	cache := &resultCache{
-		path:             resultCachePath(dir, root, build),
+		path:             stampedResultCachePath(dir, root, build, stamp),
 		root:             root,
 		dir:              dir,
 		build:            build,
@@ -220,22 +220,33 @@ func openResultCache(dir, root, seed, build, stamp string) (*resultCache, error)
 	found, err := cache.read(cache.path)
 	if !found && err == nil {
 		cache.rootMiss = "file"
+		stampMiss := false
 		matches, err := filepath.Glob(filepath.Join(dir, cacheRootPrefix(root)+"-*.gob"))
 		if err != nil {
 			return nil, fmt.Errorf("list result caches of the root: %w", err)
 		}
 		for _, match := range matches {
 			name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(match), cacheRootPrefix(root)+"-"), ".gob")
-			if name != filepath.Base(match) && name != "" && !strings.Contains(name, "-p") {
+			if name == filepath.Base(match) || name == "" {
+				continue
+			}
+			base := filepath.Base(match)
+			if !cacheBuildMatches(base, build) {
 				cache.rootMiss = "build"
 				break
 			}
+			if strings.Contains(base, "-"+build+"-s") {
+				stampMiss = true
+			}
+		}
+		if cache.rootMiss != "build" && stampMiss {
+			cache.rootMiss = "stamp"
 		}
 	} else if found && err == nil && !cache.loaded {
 		cache.rootMiss = "stamp"
 	}
 	if !found && err == nil && seed != "" {
-		_, err = cache.read(resultCachePath(dir, seed, build))
+		_, err = cache.read(stampedResultCachePath(dir, seed, build, stamp))
 		// The project findings of the main worktree went by its files
 		// outside git too, which a fresh worktree lacks.
 		cache.previousProject = nil
@@ -246,9 +257,10 @@ func openResultCache(dir, root, seed, build, stamp string) (*resultCache, error)
 	return cache, nil
 }
 
-func resultCachePath(dir, root, build string) string {
+func stampedResultCachePath(dir, root, build, stamp string) string {
 	name := sha256.Sum256([]byte(root))
-	return filepath.Join(dir, hex.EncodeToString(name[:])+"-"+build+".gob")
+	stampHash := sha256.Sum256([]byte(stamp))
+	return filepath.Join(dir, hex.EncodeToString(name[:])+"-"+build+"-s"+hex.EncodeToString(stampHash[:])+".gob")
 }
 
 func cacheRootPrefix(root string) string {
@@ -341,13 +353,12 @@ func (c *resultCache) lookup(relPath string, content [sha256.Size]byte, fingerpr
 	return found
 }
 
-// store records the findings of one file for the next run. Rules the stored
-// entry has and this run did not execute keep their findings: the content is
-// the same.
+// store records the findings of one file for the next run. A run with a
+// partial rule set keeps findings from rules it did not execute.
 func (c *resultCache) store(relPath string, content [sha256.Size]byte, found map[string][]core.Violation, fingerprints map[string]string) {
 	merged := make(map[string][]core.Violation, len(found))
 	mergedFingerprints := make(map[string]string, len(found))
-	if old, ok := c.previous[relPath]; ok && old.Content == content {
+	if old, ok := c.previous[relPath]; ok && old.Content == content && !c.rootRunComplete {
 		maps.Copy(merged, old.Rules)
 		maps.Copy(mergedFingerprints, old.Fingerprints)
 	}
@@ -542,20 +553,13 @@ func rootProjectRuleCacheable(rule rules.Rule) bool {
 
 // storeProject records the project findings of this run's load.
 func (c *resultCache) storeProject(found core.ViolationList, skipped []core.SkippedPackage, ruleState map[string][]byte) {
-	if !c.projectKeyed {
+	if !c.projectEntryComplete() {
 		return
 	}
 	violations := make(map[string][]core.Violation)
 	active := make(map[string]bool)
 	for _, name := range c.projectRules {
 		active[name] = true
-	}
-	if old := c.previousProject; old != nil && old.Inputs == c.projectInputs && (old.Scope == c.projectScope || old.Scope == "") {
-		for name, values := range old.Violations {
-			if !active[name] {
-				violations[name] = values
-			}
-		}
 	}
 	for _, violation := range found {
 		if active[violation.Rule] {
@@ -566,23 +570,16 @@ func (c *resultCache) storeProject(found core.ViolationList, skipped []core.Skip
 	for name := range ruleState {
 		stateFingerprints[name] = c.projectFingerprints[name]
 	}
-	if old := c.previousProject; old != nil && old.Inputs == c.projectInputs && (old.Scope == c.projectScope || old.Scope == "") {
-		for name, data := range old.RuleState {
-			if _, exists := ruleState[name]; !exists && old.StateFingerprints[name] == c.projectFingerprints[name] {
-				ruleState[name] = data
-				stateFingerprints[name] = old.StateFingerprints[name]
-			}
-		}
-	}
+	fingerprints := maps.Clone(c.projectFingerprints)
 	rootFingerprint, rootRules, rootViolations := c.rootFingerprint, c.rootRuleFingerprints, c.rootRuleFindings
-	if !c.rootFilesComplete && c.previousProject != nil {
+	if !c.rootRunComplete && c.previousProject != nil {
 		rootFingerprint, rootRules, rootViolations = c.previousProject.RootFingerprint, c.previousProject.RootRules, c.previousProject.RootViolations
 	}
 	c.currentProject = &projectEntry{
 		Inputs:            c.projectInputs,
 		Scope:             c.projectScope,
 		Rules:             c.projectRules,
-		Fingerprints:      c.projectFingerprints,
+		Fingerprints:      fingerprints,
 		Violations:        violations,
 		Skipped:           append([]core.SkippedPackage(nil), skipped...),
 		RuleState:         ruleState,
@@ -593,10 +590,35 @@ func (c *resultCache) storeProject(found core.ViolationList, skipped []core.Skip
 	}
 }
 
+// projectEntryComplete reports whether this run covers the project entry's
+// full scope and rule set, so it may replace that entry.
+func (c *resultCache) projectEntryComplete() bool {
+	if !c.projectKeyed || c.projectScope != "" {
+		return false
+	}
+	return c.previousProject == nil || c.previousProject.Inputs != c.projectInputs || !projectRulesAreSubset(c.projectRules, c.previousProject.Rules)
+}
+
+func projectRulesAreSubset(current, previous []string) bool {
+	if len(current) >= len(previous) {
+		return false
+	}
+	previousSet := make(map[string]bool, len(previous))
+	for _, name := range previous {
+		previousSet[name] = true
+	}
+	for _, name := range current {
+		if !previousSet[name] {
+			return false
+		}
+	}
+	return true
+}
+
 // storeRootProjectResults updates only whole-root rule results. Partial runs
 // leave the previous complete record untouched.
-func (c *resultCache) storeRootProjectResults(found map[string]core.ViolationList, fullRoot bool) {
-	if !fullRoot || c.rootFingerprint == "" {
+func (c *resultCache) storeRootProjectResults(found map[string]core.ViolationList) {
+	if !c.rootRunComplete || c.rootFingerprint == "" {
 		return
 	}
 	entry := c.currentProject
@@ -607,24 +629,30 @@ func (c *resultCache) storeRootProjectResults(found map[string]core.ViolationLis
 	if entry == nil {
 		entry = &projectEntry{}
 	}
-	entry.RootFingerprint = c.rootFingerprint
-	entry.RootRules = make(map[string]string, len(c.rootRuleHits)+len(found))
-	entry.RootViolations = make(map[string]map[string][]core.Violation, len(c.rootRuleFindings)+len(found))
+	rootRules := make(map[string]string)
+	rootViolations := make(map[string]map[string][]core.Violation)
+	if previous := c.previousProject; previous != nil && previous.RootFingerprint == c.rootFingerprint {
+		maps.Copy(rootRules, previous.RootRules)
+		maps.Copy(rootViolations, previous.RootViolations)
+	}
 	for name, findings := range c.rootRuleFindings {
 		if !c.rootRuleHits[name] {
 			continue
 		}
-		entry.RootViolations[name] = findings
-		entry.RootRules[name] = c.rootRuleFingerprints[name]
+		rootViolations[name] = findings
+		rootRules[name] = c.rootRuleFingerprints[name]
 	}
 	for name, violations := range found {
 		byFile := make(map[string][]core.Violation)
 		for _, violation := range violations {
 			byFile[violation.File] = append(byFile[violation.File], *violation)
 		}
-		entry.RootViolations[name] = byFile
-		entry.RootRules[name] = c.fingerprintByName(name)
+		rootViolations[name] = byFile
+		rootRules[name] = c.fingerprintByName(name)
 	}
+	entry.RootRules = rootRules
+	entry.RootViolations = rootViolations
+	entry.RootFingerprint = c.rootFingerprint
 	c.currentProject = entry
 }
 
@@ -666,7 +694,15 @@ func (c *resultCache) storeFile(relPath string, content [sha256.Size]byte, list 
 // concurrent run reads either the old cache or the new one.
 func (c *resultCache) save() error {
 	project := c.currentProject
-	contents := cacheContents{Stamp: c.stamp, Entries: c.current}
+	entries := maps.Clone(c.current)
+	if c.loaded && !c.rootRunComplete {
+		for path, previous := range c.previous {
+			if _, updated := entries[path]; !updated {
+				entries[path] = previous
+			}
+		}
+	}
+	contents := cacheContents{Stamp: c.stamp, Entries: entries}
 	rootChanged := !c.loaded || !cacheContentsEqual(contents, cacheContents{Stamp: c.stamp, Entries: c.previous})
 	if !rootChanged {
 		now := time.Now()
@@ -1052,7 +1088,7 @@ func pruneCacheEntries(dir string, entries []fs.DirEntry, now time.Time, build s
 }
 
 func cacheBuildMatches(name, build string) bool {
-	return strings.HasSuffix(name, "-"+build+".gob") || strings.Contains(name, "-"+build+"-p")
+	return strings.HasSuffix(name, "-"+build+".gob") || strings.Contains(name, "-"+build+"-s") || strings.Contains(name, "-"+build+"-p")
 }
 
 // resultCacheDir is where the caches of all roots live.
@@ -1140,4 +1176,28 @@ func fileLocalRules(list []rules.Rule) []bool {
 		local[i] = rules.FileLocal(rule)
 	}
 	return local
+}
+
+func sameRootRuleNames(enabled, configured []rules.Rule) bool {
+	rootRule := func(rule rules.Rule) bool {
+		return rules.FileLocal(rule) || rootProjectRuleCacheable(rule)
+	}
+	enabledNames := make(map[string]bool)
+	for _, rule := range enabled {
+		if rootRule(rule) {
+			enabledNames[rule.Name()] = true
+		}
+	}
+	configuredNames := make(map[string]bool)
+	for _, rule := range configured {
+		if rootRule(rule) {
+			configuredNames[rule.Name()] = true
+		}
+	}
+	for name := range configuredNames {
+		if !enabledNames[name] {
+			return false
+		}
+	}
+	return true
 }

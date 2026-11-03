@@ -218,7 +218,7 @@ func run%d() error { return nil }
 	projectFindings := func() string {
 		t.Helper()
 		rules.ResetState(allRules)
-		violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, allRules, cfg, prepared.project, nil)
+		violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, allRules, allRules, cfg, prepared.project, nil)
 		if err != nil || len(panics) > 0 {
 			t.Fatalf("analyze: %v %v", err, panics)
 		}

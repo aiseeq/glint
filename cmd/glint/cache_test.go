@@ -68,7 +68,9 @@ func runIndexedCached(t *testing.T, dir string, rule rules.Rule, root, run []*co
 	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
 	cache.keyProject("test-inputs", nil, []rules.Rule{rule}, "")
-	got, panics, err := analyzeProjectContained(run, root, []rules.Rule{rule}, core.DefaultConfig(), nil, cache)
+	cfg := core.DefaultConfig()
+	rootRules := append(rules.GetEnabled(cfg), rule)
+	got, panics, err := analyzeProjectContained(run, root, []rules.Rule{rule}, rootRules, cfg, nil, cache)
 	require.NoError(t, err)
 	require.Empty(t, panics)
 	require.NoError(t, cache.save())
@@ -77,7 +79,9 @@ func runIndexedCached(t *testing.T, dir string, rule rules.Rule, root, run []*co
 
 func runIndexedUncached(t *testing.T, rule rules.Rule, root, run []*core.FileContext) core.ViolationList {
 	t.Helper()
-	got, panics, err := analyzeProjectContained(run, root, []rules.Rule{rule}, core.DefaultConfig(), nil, nil)
+	cfg := core.DefaultConfig()
+	rootRules := append(rules.GetEnabled(cfg), rule)
+	got, panics, err := analyzeProjectContained(run, root, []rules.Rule{rule}, rootRules, cfg, nil, nil)
 	require.NoError(t, err)
 	require.Empty(t, panics)
 	return got
@@ -311,10 +315,10 @@ func TestResultCacheInvalidatesOnlyRulesWithChangedFingerprint(t *testing.T) {
 	}
 
 	first := run("package-A")
-	firstInfo, err := os.Stat(resultCachePath(dir, "/project", "build"))
+	firstInfo, err := os.Stat(stampedResultCachePath(dir, "/project", "build", "stamp"))
 	require.NoError(t, err)
 	second := run("package-B")
-	secondInfo, err := os.Stat(resultCachePath(dir, "/project", "build"))
+	secondInfo, err := os.Stat(stampedResultCachePath(dir, "/project", "build", "stamp"))
 	require.NoError(t, err)
 	assert.False(t, os.SameFile(firstInfo, secondInfo), "a changed rule fingerprint replaces the cache")
 	assert.Equal(t, fingerprint(first), fingerprint(second))
@@ -353,6 +357,76 @@ func TestResultCacheEmitsOnlyEnabledRuleFindings(t *testing.T) {
 	got, _ := runCached(t, dir, "stamp", ctx, []rules.Rule{active})
 	require.Len(t, got, 1)
 	assert.Equal(t, active.Name(), got[0].Rule)
+}
+
+func TestRestrictedRunPreservesFullRunCache(t *testing.T) {
+	dir := t.TempDir()
+	contexts := []*core.FileContext{goContext(t, "a.go", "package a\n"), goContext(t, "b.go", "package b\n")}
+	full := newCountingRule("full-rule", false)
+	restricted := newCountingRule("restricted-rule", true)
+	run := func(stamp string, rule *countingRule) *resultCache {
+		_, cache := runCached(t, dir, stamp, contexts, []rules.Rule{rule})
+		return cache
+	}
+
+	first := run("loader", full)
+	assert.Zero(t, first.reused)
+	assert.Equal(t, int32(2), full.calls.Load())
+
+	second, err := openResultCache(dir, "/project", "", "build", "loader")
+	require.NoError(t, err)
+	_, err = analyzeFiles(contexts, []rules.Rule{restricted}, core.DefaultConfig(), nil, second)
+	require.NoError(t, err)
+	require.NoError(t, second.save())
+	assert.Equal(t, int32(2), restricted.calls.Load())
+
+	third := run("loader", full)
+	assert.Equal(t, 2, third.reused, "the full run reuses its original file findings")
+	assert.Equal(t, int32(2), full.calls.Load())
+}
+
+func TestRestrictedRunCacheDoesNotReuseChangedFile(t *testing.T) {
+	dir := t.TempDir()
+	contexts := []*core.FileContext{goContext(t, "a.go", "package a\n"), goContext(t, "b.go", "package b\n")}
+	rule := newCountingRule("full-rule", false)
+	run := func(files []*core.FileContext, stamp string) *resultCache {
+		_, cache := runCached(t, dir, stamp, files, []rules.Rule{rule})
+		return cache
+	}
+
+	run(contexts, "loader")
+	restricted, err := openResultCache(dir, "/project", "", "build", "loader")
+	require.NoError(t, err)
+	require.NoError(t, restricted.save())
+	changed := []*core.FileContext{goContext(t, "a.go", "package a // edited\n"), contexts[1]}
+	third := run(changed, "loader")
+	assert.Equal(t, 1, third.reused, "only the unchanged file is reused")
+	assert.Equal(t, int32(3), rule.calls.Load(), "the edited file is analyzed again after the restricted run")
+}
+
+func TestFullRunDropsDeletedFileFromCache(t *testing.T) {
+	dir := t.TempDir()
+	rule := newCountingRule("full-rule", false)
+	a := goContext(t, "a.go", "package a\n")
+	b := goContext(t, "b.go", "package b\n")
+
+	first, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	first.rootRunComplete = true
+	_, err = analyzeFiles([]*core.FileContext{a, b}, []rules.Rule{rule}, core.DefaultConfig(), nil, first)
+	require.NoError(t, err)
+	require.NoError(t, first.save())
+
+	second, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	second.rootRunComplete = true
+	_, err = analyzeFiles([]*core.FileContext{a}, []rules.Rule{rule}, core.DefaultConfig(), nil, second)
+	require.NoError(t, err)
+	require.NoError(t, second.save())
+
+	third, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	assert.NotContains(t, third.previous, "b.go", "a complete full-root save drops deleted files")
 }
 
 func TestNewRootCacheUsesBinaryHashWithoutBuildManifest(t *testing.T) {
@@ -479,17 +553,68 @@ func TestProjectCachePartialRunIsNotStoredAsFull(t *testing.T) {
 	partial := &resultCache{}
 	partial.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a")
 	partial.storeProject(nil, nil, map[string][]byte{})
-	require.NotNil(t, partial.currentProject)
-	assert.Equal(t, "file-a", partial.currentProject.Scope)
-
-	next := &resultCache{previousProject: partial.currentProject}
-	assert.Nil(t, next.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, ""), "a full run recomputes")
-	assert.NotNil(t, next.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a"), "the same scope reuses")
+	assert.Nil(t, partial.currentProject, "a partial scope is not stored")
 }
 
-// Files the run did not analyze drop out of the cache; rules the run did not
-// execute keep their findings for an unchanged file.
-func TestResultCacheKeepsOnlyAnalyzedFilesAndMergesRules(t *testing.T) {
+func TestProjectCachePartialRunPreservesFullEntry(t *testing.T) {
+	rule := newProjectStubRule()
+	full := &projectEntry{
+		Inputs:       "inputs",
+		Fingerprints: map[string]string{rule.Name(): "fingerprint"},
+		Violations:   map[string][]core.Violation{rule.Name(): {{Rule: rule.Name(), File: "a.go"}}},
+	}
+	partial := &resultCache{previousProject: full}
+	partial.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a")
+	partial.storeProject(nil, nil, map[string][]byte{})
+
+	require.Same(t, full, partial.currentProject)
+	assert.Empty(t, full.Scope)
+	assert.Len(t, full.Violations[rule.Name()], 1)
+}
+
+func TestProjectCacheFullRunReplacesFindingsWithNewFingerprint(t *testing.T) {
+	rule := newProjectStubRule()
+	previous := &projectEntry{
+		Inputs:       "inputs",
+		Rules:        []string{rule.Name()},
+		Fingerprints: map[string]string{rule.Name(): "old"},
+		Violations:   map[string][]core.Violation{rule.Name(): {{Rule: rule.Name(), Message: "old finding"}}},
+	}
+	cache := &resultCache{previousProject: previous, ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "new"}}
+	cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "")
+	newFingerprint := cache.projectFingerprints[rule.Name()]
+	newFinding := &core.Violation{Rule: rule.Name(), Message: "new finding"}
+	cache.storeProject(core.ViolationList{newFinding}, nil, map[string][]byte{})
+
+	require.NotNil(t, cache.currentProject)
+	assert.Equal(t, newFingerprint, cache.currentProject.Fingerprints[rule.Name()])
+	assert.Equal(t, "new finding", cache.currentProject.Violations[rule.Name()][0].Message)
+
+	next := &resultCache{previousProject: cache.currentProject, ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "new"}}
+	next.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "")
+	assert.True(t, next.projectRuleReusable(rule), "the next full run reuses the refreshed entry")
+	assert.Equal(t, "1 cached, 0 rerun", next.projectState())
+}
+
+func TestProjectCachePartialRuleSetLeavesFullEntryUntouched(t *testing.T) {
+	rule := newProjectStubRule()
+	other := &projectStubRule{BaseRule: rules.NewBaseRule("project-stub-2", "patterns", "another project rule", core.SeverityMedium)}
+	previous := &projectEntry{
+		Inputs:       "inputs",
+		Rules:        []string{rule.Name(), other.Name()},
+		Fingerprints: map[string]string{rule.Name(): "old", other.Name(): "other"},
+		Violations:   map[string][]core.Violation{rule.Name(): {{Rule: rule.Name(), Message: "full finding"}}},
+	}
+	cache := &resultCache{previousProject: previous}
+	cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "")
+	cache.storeProject(nil, nil, map[string][]byte{})
+
+	assert.Same(t, previous, cache.currentProject, "a strict subset of the cached rules must leave the entry untouched")
+}
+
+// Files the run did not analyze and rules it did not execute keep their
+// findings for unchanged inputs.
+func TestResultCacheKeepsUnanalyzedFilesAndMergesRules(t *testing.T) {
 	dir := t.TempDir()
 	first := newCountingRule("counting-first", false)
 	second := newCountingRule("counting-second", false)
@@ -503,7 +628,7 @@ func TestResultCacheKeepsOnlyAnalyzedFilesAndMergesRules(t *testing.T) {
 	assert.Equal(t, int32(1), second.calls.Load())
 	assert.Equal(t, int32(2), first.calls.Load(), "a.go keeps its findings of the first rule")
 	assert.Equal(t, 1, cache.reused)
-	assert.NotContains(t, cache.previous, "b.go", "a file the run did not analyze is dropped")
+	assert.Contains(t, cache.previous, "b.go", "a file the run did not analyze is preserved")
 }
 
 // Every registered rule's findings survive the cache unchanged, and a second
@@ -596,7 +721,8 @@ func TestResultCacheNamesItsBuildAndMarksUse(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := openResultCache(dir, "/project", "", "build1", "stamp")
 	require.NoError(t, err)
-	assert.True(t, strings.HasSuffix(cache.path, "-build1.gob"), cache.path)
+	assert.Contains(t, cache.path, "-build1-s")
+	assert.True(t, strings.HasSuffix(cache.path, ".gob"), cache.path)
 	require.NoError(t, cache.save())
 	old := time.Now().Add(-5 * 24 * time.Hour)
 	require.NoError(t, os.Chtimes(cache.path, old, old))
@@ -619,11 +745,69 @@ func TestProjectCacheDoesNotLookLikeAnotherRootCacheBuild(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "file", cache.rootMiss)
 
-	otherBuild := resultCachePath(dir, "/project", "other")
+	otherBuild := stampedResultCachePath(dir, "/project", "other", "stamp")
 	require.NoError(t, os.WriteFile(otherBuild, []byte("cache"), 0o600))
 	cache, err = openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
 	assert.Equal(t, "build", cache.rootMiss)
+}
+
+func TestStampedRootCacheMissAndPruning(t *testing.T) {
+	dir := t.TempDir()
+	old, err := openResultCache(dir, "/project", "", "build", "config-old")
+	require.NoError(t, err)
+	old.current["a.go"] = cacheEntry{}
+	require.NoError(t, old.save())
+
+	current, err := openResultCache(dir, "/project", "", "build", "config-new")
+	require.NoError(t, err)
+	assert.Equal(t, "stamp", current.rootMiss)
+	current.current["a.go"] = cacheEntry{}
+	require.NoError(t, current.save())
+
+	oldTime := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(old.path, oldTime, oldTime))
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	limits := cacheLimits{maxAge: time.Hour, grace: time.Minute, maxBytes: 1 << 30, foreignAge: time.Hour}
+	require.NoError(t, pruneCacheEntries(dir, entries, time.Now(), "build", limits))
+	assert.NoFileExists(t, old.path, "an expired stamped variant is pruned")
+	assert.FileExists(t, current.path, "the current stamped variant remains")
+}
+
+func TestPureTypeScriptRootRulesAreCachedWithoutProjectKey(t *testing.T) {
+	dir := t.TempDir()
+	root := []*core.FileContext{
+		{RelPath: "a.ts", Content: []byte("export const a = 1\n")},
+		{RelPath: "b.ts", Content: []byte("export const b = 2\n")},
+	}
+	cfg := core.DefaultConfig()
+	enabled := rules.GetEnabled(cfg)
+	var cachedRule rules.Rule
+	for _, rule := range enabled {
+		if rootProjectRuleCacheable(rule) {
+			cachedRule = rule
+			break
+		}
+	}
+	require.NotNil(t, cachedRule, "the registry must include a cacheable root project-file rule")
+
+	first, err := openResultCache(dir, "/typescript-root", "", "build", "stamp")
+	require.NoError(t, err)
+	keyRootFileCache(first, root, enabled, cfg, true)
+	assert.True(t, first.rootRunComplete)
+	first.storeRootProjectResults(map[string]core.ViolationList{
+		cachedRule.Name(): {&core.Violation{Rule: cachedRule.Name(), File: "a.ts", Message: "cached"}},
+	})
+	require.NotNil(t, first.currentProject)
+	require.NoError(t, first.save())
+
+	second, err := openResultCache(dir, "/typescript-root", "", "build", "stamp")
+	require.NoError(t, err)
+	keyRootFileCache(second, root, enabled, cfg, true)
+	assert.False(t, second.projectKeyed, "a pure TypeScript run does not key a Go project")
+	assert.True(t, second.rootRuleReusable(cachedRule), "the second full run reuses the root-rule finding")
+	assert.Len(t, second.rootRuleFindings[cachedRule.Name()]["a.ts"], 1)
 }
 
 func TestProjectCacheKeepsDifferentInputsAcrossSequentialAndConcurrentSaves(t *testing.T) {
@@ -674,7 +858,7 @@ func TestPartialProjectRunDoesNotReuseFindingsFromDifferentInputs(t *testing.T) 
 	require.NoError(t, err)
 	assert.Nil(t, partial.keyProject("inputs-work", []string{"other-rule"}, nil, "b.go"))
 	partial.storeProject(nil, nil, nil)
-	assert.NotContains(t, partial.currentProject.Violations, "project-rule")
+	assert.Nil(t, partial.currentProject, "a partial run with different inputs is not stored")
 }
 
 func TestProjectCacheInputsAndBuildAreIsolated(t *testing.T) {
@@ -849,7 +1033,9 @@ func analyzeCachedRoot(t *testing.T, root string, list []rules.Rule) (*preparedR
 	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, cfg, list, true)
 	require.NoError(t, err)
 	require.NotNil(t, prepared.cache)
-	violations, err := analyzeProject(prepared.contexts, list, cfg, prepared.project, prepared.cache)
+	rootRules := append(rules.GetEnabled(cfg), list...)
+	violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.rootFiles, list, rootRules, cfg, prepared.project, prepared.cache)
+	require.Empty(t, panics)
 	require.NoError(t, err)
 	require.NoError(t, prepared.cache.save())
 	return prepared, violations

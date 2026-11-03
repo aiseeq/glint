@@ -40,7 +40,7 @@ func TestAnalyzeKeepsTheOtherFindingsWhenARulePanics(t *testing.T) {
 	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), list, false)
 	require.NoError(t, err)
 
-	violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, core.DefaultConfig(), prepared.project, nil)
+	violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, list, core.DefaultConfig(), prepared.project, nil)
 	require.NoError(t, err)
 	require.Len(t, violations, 1)
 	assert.Equal(t, "finding-rule", violations[0].Rule)
@@ -69,7 +69,7 @@ func TestRulePanicIsNotCached(t *testing.T) {
 		prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, cfg, list, true)
 		require.NoError(t, err)
 		require.NotNil(t, prepared.project, "run %d loads the project: nothing was cached", run)
-		_, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, cfg, prepared.project, prepared.cache)
+		_, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, list, cfg, prepared.project, prepared.cache)
 		require.NoError(t, err)
 		require.Len(t, panics, 2, "run %d: both rules run again and panic again", run)
 		require.NoError(t, prepared.cache.save())
@@ -104,7 +104,7 @@ func TestAnalyzeKeepsTheOtherFindingsWhenIndexingPanics(t *testing.T) {
 	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, core.DefaultConfig(), list, false)
 	require.NoError(t, err)
 
-	violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, core.DefaultConfig(), prepared.project, nil)
+	violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, list, core.DefaultConfig(), prepared.project, nil)
 	require.NoError(t, err)
 	require.Len(t, violations, 1)
 	assert.Equal(t, "finding-rule", violations[0].Rule)
@@ -135,7 +135,7 @@ func TestProjectFilesCachePanicIsNotCached(t *testing.T) {
 		prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, cfg, list, true)
 		require.NoError(t, err)
 		require.NotNil(t, prepared.project, "run %d loads the project: nothing was cached", run)
-		violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, cfg, prepared.project, prepared.cache)
+		violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.contexts, list, list, cfg, prepared.project, prepared.cache)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"cache-boom"}, panics.rules(), "run %d", run)
 		// Its file analysis is skipped, as after any index panic.

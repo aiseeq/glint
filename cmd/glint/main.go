@@ -1540,7 +1540,7 @@ func hasGoFiles(contexts []*core.FileContext) bool {
 }
 
 func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext, cache *resultCache) (core.ViolationList, error) {
-	violations, panics, err := analyzeProjectContained(contexts, contexts, enabledRules, cfg, project, cache)
+	violations, panics, err := analyzeProjectContained(contexts, contexts, enabledRules, enabledRules, cfg, project, cache)
 	if err != nil {
 		return nil, err
 	}
@@ -1554,10 +1554,11 @@ func analyzeProject(contexts []*core.FileContext, enabledRules []rules.Rule, cfg
 // rules that measure instruction files on the ones an exclude pattern leaves
 // out.
 func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *core.Config) (core.ViolationList, rulePanics, error) {
+	originalEnabledRules := enabledRules
 	if prepared.enabledRules != nil {
 		enabledRules = prepared.enabledRules
 	}
-	violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.rootFiles, enabledRules, cfg, prepared.project, prepared.cache)
+	violations, panics, err := analyzeProjectContained(prepared.contexts, prepared.rootFiles, enabledRules, originalEnabledRules, cfg, prepared.project, prepared.cache)
 	if err != nil {
 		return violations, panics, err
 	}
@@ -1583,13 +1584,13 @@ func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *cor
 // the rules that compare a file with the project knowing rootFiles; a rule
 // panic is returned apart from the findings of the other rules and is not
 // cached.
-func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext, cache *resultCache) (core.ViolationList, rulePanics, error) {
+func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRules, rootEnabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext, cache *resultCache) (core.ViolationList, rulePanics, error) {
 	overrides, err := buildSeverityOverrides(cfg, enabledRules)
 	if err != nil {
 		return nil, nil, err
 	}
 	fullRoot := contextsCoverRoot(contexts, rootFiles)
-	keyRootFileCache(cache, rootFiles, enabledRules, fullRoot)
+	keyRootFileCache(cache, rootFiles, rootEnabledRules, cfg, fullRoot)
 	fileRules := projectFilesRulesForRun(nonGoProjectRules(enabledRules), contexts)
 	allViolations, panics, err := analyzeProjectRules(contexts, rootFiles, enabledRules, cfg, project, overrides, cache)
 	if err != nil {
@@ -1604,7 +1605,7 @@ func analyzeProjectContained(contexts, rootFiles []*core.FileContext, enabledRul
 	if err != nil {
 		return nil, nil, err
 	}
-	storeRootProjectFindings(cache, fileRules, fileViolations, filePanics, fullRoot)
+	storeRootProjectFindings(cache, fileRules, fileViolations, filePanics)
 	allViolations = append(allViolations, cachedRootFindings...)
 	allViolations = append(allViolations, fileViolations...)
 	if err := validateFindingFiles(allViolations, enabledRules, contexts); err != nil {
@@ -1657,11 +1658,11 @@ func contextsCoverRoot(contexts, rootFiles []*core.FileContext) bool {
 	return true
 }
 
-func keyRootFileCache(cache *resultCache, rootFiles []*core.FileContext, enabledRules []rules.Rule, fullRoot bool) {
+func keyRootFileCache(cache *resultCache, rootFiles []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, fullRoot bool) {
 	if cache == nil {
 		return
 	}
-	cache.rootFilesComplete = fullRoot
+	cache.rootRunComplete = fullRoot && sameRootRuleNames(enabledRules, rules.GetEnabled(cfg))
 	hashes := make(map[string][sha256.Size]byte, len(rootFiles))
 	for _, ctx := range rootFiles {
 		hashes[ctx.RelPath] = sha256.Sum256(ctx.Content)
@@ -1804,7 +1805,7 @@ func cachedRootProjectFindings(cache *resultCache, enabledRules []rules.Rule, co
 	return found
 }
 
-func storeRootProjectFindings(cache *resultCache, fileRules []rules.Rule, violations core.ViolationList, panics rulePanics, fullRoot bool) {
+func storeRootProjectFindings(cache *resultCache, fileRules []rules.Rule, violations core.ViolationList, panics rulePanics) {
 	if cache == nil {
 		return
 	}
@@ -1817,7 +1818,7 @@ func storeRootProjectFindings(cache *resultCache, fileRules []rules.Rule, violat
 	for _, name := range panics.rules() {
 		delete(rootFindings, name)
 	}
-	cache.storeRootProjectResults(rootFindings, fullRoot)
+	cache.storeRootProjectResults(rootFindings)
 }
 
 func analyzeGoProjectRules(contexts, rootFiles []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config, project *core.GoProjectContext, overrides severityOverrides) (core.ViolationList, rulePanics, error) {
