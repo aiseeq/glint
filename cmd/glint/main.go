@@ -214,6 +214,9 @@ Available fixers:
   - interface-any: Replace the empty interface type with any (Go 1.18+)
   - deprecated-ioutil: Replace io/ioutil with io/os
   - bool-compare: Simplify boolean comparisons (x == true -> x)
+  - map-iteration-order: Range over slices.Sorted(maps.Keys(m)) where the order shows
+  - reimplemented-stdlib: Replace an exact linear search with slices.Contains and
+    collected and sorted map keys with slices.Sorted(maps.Keys(m))
   - md-line-break, md-list-after-label: Markdown formatting`,
 	RunE: runFix,
 }
@@ -2074,11 +2077,7 @@ func runConfigShow(_ *cobra.Command, _ []string) error {
 	}
 	fmt.Println()
 	fmt.Println("Categories:")
-	names := make([]string, 0, len(cfg.Categories))
-	for name := range cfg.Categories {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(cfg.Categories))
 	for _, name := range names {
 		status := "enabled"
 		if !cfg.Categories[name].Enabled {

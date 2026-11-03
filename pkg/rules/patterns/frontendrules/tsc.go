@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -722,11 +724,7 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 		}
 		root = filepath.Dir(config)
 	}
-	filePaths := make([]string, 0, len(files))
-	for path := range files {
-		filePaths = append(filePaths, path)
-	}
-	sort.Strings(filePaths)
+	filePaths := slices.Sorted(maps.Keys(files))
 	for _, path := range filePaths {
 		stamp, err := statPath(path)
 		if err != nil {
@@ -738,11 +736,7 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 	for _, path := range watchedDirs {
 		addFingerprintDirs(path, "", directories)
 	}
-	dirs := make([]string, 0, len(directories))
-	for path := range directories {
-		dirs = append(dirs, path)
-	}
-	sort.Strings(dirs)
+	dirs := slices.Sorted(maps.Keys(directories))
 	for _, path := range dirs {
 		stamp, err := statPath(path)
 		if err != nil {

@@ -312,6 +312,76 @@ func Names(m map[point]string) []string {
 	assert.Contains(t, fixed["a.go"], "for p, name := range m {")
 }
 
+// Keys collected and sorted inside a longer function become one
+// slices.Sorted(maps.Keys(m)) where nil reads as an empty list - ranged over or
+// measured - and sort goes once unused; keys handed on as a value stay.
+func TestRoundTripSortedKeysBlock(t *testing.T) {
+	fixed := roundTrip(t, map[string]string{
+		"go.mod": modGo123,
+		"a.go": `package projecta
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+)
+
+// Report prints.
+func Report(m map[string]int) {
+	fmt.Println("report")
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Println(k, m[k], len(keys))
+	}
+}
+
+// Encode encodes.
+func Encode(m map[string]int) ([]byte, error) {
+	fmt.Println("encode")
+	keys := []string{}
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return json.Marshal(keys)
+}
+`,
+	})
+
+	assert.Contains(t, fixed["a.go"], "keys := slices.Sorted(maps.Keys(m))\n\tfor _, k := range keys {")
+	assert.Contains(t, fixed["a.go"], "keys := []string{}", "an empty map encodes as [], not null: the block stays")
+	assert.Contains(t, fixed["a.go"], `"sort"`, "Encode still sorts")
+
+	fixed = roundTrip(t, map[string]string{
+		"go.mod": modGo123,
+		"a.go": `package projecta
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+)
+
+// Encode encodes.
+func Encode(m map[string]int) ([]byte, error) {
+	fmt.Println("encode")
+	var keys []string
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return json.Marshal(keys)
+}
+`,
+	})
+	assert.Contains(t, fixed["a.go"], "keys := slices.Sorted(maps.Keys(m))", "var keys []T is nil for an empty map already")
+	assert.NotContains(t, fixed["a.go"], `"sort"`)
+}
+
 // A named key type with an ordered underlying type sorts fine.
 func TestRoundTripNamedOrderedKeyIsSorted(t *testing.T) {
 	fixed := roundTrip(t, map[string]string{

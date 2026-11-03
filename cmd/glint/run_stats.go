@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -477,11 +479,7 @@ func writeDailyAtomic(path string, header dailyHeader, data map[string]*dailyRec
 	if err := json.NewEncoder(writer).Encode(header); err != nil {
 		return fmt.Errorf("encode daily journal header: %w", err)
 	}
-	days := make([]string, 0, len(data))
-	for day := range data {
-		days = append(days, day)
-	}
-	sort.Strings(days)
+	days := slices.Sorted(maps.Keys(data))
 	for _, day := range days {
 		if err := json.NewEncoder(writer).Encode(data[day]); err != nil {
 			return fmt.Errorf("encode daily journal day %s: %w", day, err)
@@ -539,11 +537,7 @@ func buildStats(data map[string]*dailyRecord, header dailyHeader, days int, star
 		}
 	}
 	if len(populated) > 0 {
-		keys := make([]string, 0, len(populated))
-		for d := range populated {
-			keys = append(keys, d)
-		}
-		sort.Strings(keys)
+		keys := slices.Sorted(maps.Keys(populated))
 		report.Coverage.From = keys[0]
 		report.Coverage.To = keys[len(keys)-1]
 		report.Coverage.DaysWithRuns = len(keys)

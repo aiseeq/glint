@@ -7,9 +7,9 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"maps"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -298,11 +298,7 @@ func moduleOf(pkg *packages.Package) string {
 // another copy.
 func constTwins(byKey map[string][]*types.Const, imports *importReach) map[*types.Const]string {
 	twins := make(map[*types.Const]string)
-	keys := make([]string, 0, len(byKey))
-	for key := range byKey {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(byKey))
 	for _, key := range keys {
 		copies := byKey[key]
 		var holders []*types.Package

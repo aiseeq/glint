@@ -135,11 +135,7 @@ type duplicateFuncTwin struct {
 
 func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]duplicateFuncTwin {
 	twins := make(map[*types.Func]duplicateFuncTwin)
-	keys := make([]string, 0, len(byKey))
-	for key := range byKey {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(byKey))
 	for _, key := range keys {
 		// One copy per package: the twin is always another package.
 		copies := uniquePackageFuncs(byKey[key])
@@ -174,11 +170,7 @@ func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]duplicateFuncTwi
 
 func bodyTwins(byBody map[string][]*types.Func) map[*types.Func]duplicateFuncTwin {
 	twins := make(map[*types.Func]duplicateFuncTwin)
-	bodyKeys := make([]string, 0, len(byBody))
-	for key := range byBody {
-		bodyKeys = append(bodyKeys, key)
-	}
-	sort.Strings(bodyKeys)
+	bodyKeys := slices.Sorted(maps.Keys(byBody))
 	for _, key := range bodyKeys {
 		copies := uniquePackageFuncs(byBody[key])
 		if len(copies) < 2 {

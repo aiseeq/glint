@@ -44,6 +44,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -309,12 +310,7 @@ func (m *manifest) rules(key [2]string) []string {
 			set[rule] = true
 		}
 	}
-	rules := make([]string, 0, len(set))
-	for rule := range set {
-		rules = append(rules, rule)
-	}
-	sort.Strings(rules)
-	return rules
+	return slices.Sorted(maps.Keys(set))
 }
 
 func (r *replay) manifestJobs(m *manifest) ([]job, error) {
@@ -697,11 +693,7 @@ func (r *replay) run(commit, tree, side string, rules, anchorTexts []string, who
 		}
 		byRoot[root] = append(byRoot[root], f)
 	}
-	roots := make([]string, 0, len(byRoot))
-	for root := range byRoot {
-		roots = append(roots, root)
-	}
-	sort.Strings(roots)
+	roots := slices.Sorted(maps.Keys(byRoot))
 
 	run := &treeRun{Fired: map[string][]string{}, Hits: [][2]string{}}
 	var errs []string

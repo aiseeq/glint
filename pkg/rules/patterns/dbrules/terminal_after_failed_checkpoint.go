@@ -236,11 +236,7 @@ func (a *checkpointFlowAnalyzer) JoinStates(left, right []checkpointFlow) []chec
 // checkpointFlowKey identifies a path by its checkpoint bindings and the
 // failures seen on it; bindings are sorted so map order cannot change the key.
 func checkpointFlowKey(flow checkpointFlow) string {
-	bindings := make([]checkpointBindingID, 0, len(flow.assignments))
-	for binding := range flow.assignments {
-		bindings = append(bindings, binding)
-	}
-	slices.Sort(bindings)
+	bindings := slices.Sorted(maps.Keys(flow.assignments))
 	parts := make([]string, 0, len(bindings)+len(flow.failures))
 	for _, binding := range bindings {
 		assignment := flow.assignments[binding]

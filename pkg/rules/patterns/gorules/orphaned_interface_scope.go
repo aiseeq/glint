@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"maps"
 	"path/filepath"
-	"sort"
+	"slices"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -161,11 +162,7 @@ func (r *OrphanedInterfaceRule) analyzeUntyped(ctx *core.GoProjectContext) []*co
 		key := filepath.Dir(fileCtx.Path) + "\x00" + fileCtx.GoPackage
 		groups[key] = append(groups[key], fileCtx)
 	}
-	keys := make([]string, 0, len(groups))
-	for key := range groups {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(groups))
 
 	var violations []*core.Violation
 	for _, key := range keys {

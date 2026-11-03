@@ -878,11 +878,7 @@ func compactCacheFingerprints(contents cacheContents) cacheContents {
 	sets := make([]map[string]string, 0)
 	byHash := make(map[[sha256.Size]byte][]int)
 	entries := make(map[string]cacheEntry, len(contents.Entries))
-	paths := make([]string, 0, len(contents.Entries))
-	for path := range contents.Entries {
-		paths = append(paths, path)
-	}
-	slices.Sort(paths)
+	paths := slices.Sorted(maps.Keys(contents.Entries))
 	for _, path := range paths {
 		entry := contents.Entries[path]
 		hash := fingerprintSetHash(entry.Fingerprints)
@@ -924,11 +920,7 @@ func expandCacheFingerprints(contents *cacheContents) error {
 }
 
 func fingerprintSetHash(fingerprints map[string]string) [sha256.Size]byte {
-	keys := make([]string, 0, len(fingerprints))
-	for key := range fingerprints {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
+	keys := slices.Sorted(maps.Keys(fingerprints))
 	hasher := sha256.New()
 	var size [binary.MaxVarintLen64]byte
 	for _, key := range keys {

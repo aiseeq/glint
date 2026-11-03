@@ -3,6 +3,7 @@ package shellrules
 import (
 	"go/ast"
 	"go/token"
+	"maps"
 	"path"
 	"reflect"
 	"regexp"
@@ -158,11 +159,7 @@ func (r *EnvKeyMissingFromDeployEnvRule) UseProjectFiles(files []*core.FileConte
 		}
 	}
 	report := reportWriter(writers)
-	keys := make([]string, 0, len(reads))
-	for key := range reads {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(reads))
 	for _, key := range keys {
 		reason := missingEnvKeyReason(key, provided, filled, hasDeployWriter, example)
 		if reason == "" {

@@ -1,9 +1,10 @@
 package shellrules
 
 import (
+	"maps"
 	"path"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -158,11 +159,7 @@ func capturedPipeTails(r *shellRule, src *patternkit.ShellSource) []*core.Violat
 	}
 	funcs := src.Functions()
 	captured := capturedFunctions(src, funcs)
-	names := make([]string, 0, len(captured))
-	for name := range captured {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(captured))
 	var out []*core.Violation
 	for _, name := range names {
 		body := src.Body(funcs[name])

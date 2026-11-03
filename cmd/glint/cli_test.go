@@ -331,3 +331,13 @@ func TestJobsDefaultsToFourAndRejectsZero(t *testing.T) {
 		t.Fatalf("--jobs 3 must set GOMAXPROCS to 3, got %d, %v", runtime.GOMAXPROCS(0), err)
 	}
 }
+
+// glint fix --help names every registered fixer: the list is written by hand
+// and fell behind twice.
+func TestFixHelpNamesEveryFixer(t *testing.T) {
+	for name := range fix.DefaultRegistry.All() {
+		if !strings.Contains(fixCmd.Long, name) {
+			t.Errorf("glint fix --help does not name the %s fixer", name)
+		}
+	}
+}

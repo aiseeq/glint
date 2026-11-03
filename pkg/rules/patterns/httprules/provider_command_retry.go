@@ -3,8 +3,9 @@ package httprules
 import (
 	"go/ast"
 	"go/token"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -112,11 +113,7 @@ func (a *providerCommandRetryAnalyzer) detectRetryHelperPaths(decls map[string]*
 	if len(helpers) == 0 {
 		return
 	}
-	names := make([]string, 0, len(decls))
-	for name := range decls {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(decls))
 	for _, name := range names {
 		if !patternkit.ProviderCommandMethods[name] {
 			continue

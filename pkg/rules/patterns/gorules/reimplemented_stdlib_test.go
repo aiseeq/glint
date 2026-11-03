@@ -162,13 +162,22 @@ func sortedKeys(m map[string]int) []string {
 		{"1.23", source},
 		{"1.23", strings.Replace(strings.Replace(unfiltered, "map[string]int", "map[string]string", 1), "keys = append(keys, k)", "keys = append(keys, m[k])", 1)},
 		{"1.23", strings.Replace(unfiltered, "sort.Strings(keys)", "sort.Slice(keys, func(i, j int) bool { return keys[i] > keys[j] })", 1)},
-		{"1.23", strings.Replace(unfiltered, "sort.Strings(keys)", "sort.Strings(keys)\n\tkeys = append(keys, \"total\")", 1)},
 	} {
 		violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
 			"go.mod":     "module example.com/helpers\n\ngo " + tc.version + "\n",
 			"helpers.go": tc.body,
 		})
 		assert.Empty(t, violations, "go %s", tc.version)
+	}
+
+	// A function that appends after the sort is no sorted-keys function, but
+	// its first three statements still are slices.Sorted(maps.Keys(m)).
+	violations := rulestest.RunRuleOnFiles(t, NewReimplementedStdlibRule(), map[string]string{
+		"go.mod":     "module example.com/helpers\n\ngo 1.23\n",
+		"helpers.go": strings.Replace(unfiltered, "sort.Strings(keys)", "sort.Strings(keys)\n\tkeys = append(keys, \"total\")", 1),
+	})
+	if assert.Len(t, violations, 1, "append after the sort") {
+		assert.Contains(t, violations[0].Message, "keys collects and sorts the keys of m by hand")
 	}
 }
 

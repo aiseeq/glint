@@ -3,8 +3,9 @@ package httprules
 import (
 	"go/ast"
 	"go/types"
+	"maps"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -80,11 +81,7 @@ func (r *ResponseTypeInFunctionRule) analyze(ctx *core.FileContext, info *types.
 		// Порядок обхода map в Go случаен: без сортировки один и тот же файл давал бы
 		// находки в разном порядке от запуска к запуску.
 		locals := localJSONStructs(body)
-		typeNames := make([]string, 0, len(locals))
-		for typeName := range locals {
-			typeNames = append(typeNames, typeName)
-		}
-		sort.Strings(typeNames)
+		typeNames := slices.Sorted(maps.Keys(locals))
 
 		for _, typeName := range typeNames {
 			spec := locals[typeName]

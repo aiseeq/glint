@@ -1,8 +1,9 @@
 package shellrules
 
 import (
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -724,11 +725,7 @@ var argsInCScript = regexp.MustCompile(`(?:bash|sh)\s+-c\s+'\$(?:\*|@|\{?1\}?)'`
 // caller's text, and its first ' closes the script on the far side.
 func checkCScriptWrappers(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
 	funcs := src.Functions()
-	names := make([]string, 0, len(funcs))
-	for name := range funcs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(funcs))
 	var out []*core.Violation
 	for _, name := range names {
 		pasted := 0

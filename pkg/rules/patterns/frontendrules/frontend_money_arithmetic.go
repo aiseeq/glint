@@ -2,9 +2,9 @@ package frontendrules
 
 import (
 	"go/ast"
+	"maps"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -188,11 +188,7 @@ func (r *FrontendMoneyArithmeticRule) analyzeFlat(ctx *core.FileContext, f patte
 	roundingFindings(r, ctx, f, parsed, vars, found)
 	centRoundingFindings(r, ctx, f, found)
 	existingPatternFindings(r, ctx, found)
-	lines := make([]int, 0, len(found))
-	for line := range found {
-		lines = append(lines, line)
-	}
-	sort.Ints(lines)
+	lines := slices.Sorted(maps.Keys(found))
 	out := make([]*core.Violation, 0, len(lines))
 	for _, line := range lines {
 		raw := stripTrailingComment(ctx.Lines[line-1])
