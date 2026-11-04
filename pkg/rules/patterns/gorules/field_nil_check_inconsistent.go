@@ -30,7 +30,8 @@ func init() { rules.Register(NewFieldNilCheckInconsistentRule()) }
 // unexported helper whose every package-local call is reached after a nil
 // check for the same receiver field, including through protected helpers;
 // exported helpers and helpers with an unprotected or unknown caller remain
-// checked.
+// checked. Not flagged either: a use past an exit on the last bool result of a
+// method of the same receiver that answers false whenever the field may be nil.
 type FieldNilCheckInconsistentRule struct {
 	rules.GoFileFindingRule
 	*rules.BaseRule
@@ -281,44 +282,37 @@ func fieldNilBoolGuardMethods(methods []fieldNilMethod, field *types.Var) map[*t
 			continue
 		}
 		sig, ok := obj.Type().(*types.Signature)
-		if !ok || sig.Results() == nil || sig.Results().Len() != 1 || !types.Identical(sig.Results().At(0).Type(), types.Typ[types.Bool]) {
+		if !ok || sig.Results().Len() == 0 || !types.Identical(sig.Results().At(sig.Results().Len()-1).Type(), types.Typ[types.Bool]) {
 			continue
 		}
-		seen := false
-		falseGuard := false
-		ast.Inspect(method.decl.Body, func(node ast.Node) bool {
-			stmt, ok := node.(*ast.IfStmt)
-			if !ok || !fieldNilExprEnsuresNil(method, stmt.Cond, field) || !fieldNilBranchReturnsFalse(stmt.Body) {
-				return true
-			}
-			falseGuard = true
-			return true
-		})
-		valid := true
-		ast.Inspect(method.decl.Body, func(node ast.Node) bool {
-			ret, ok := node.(*ast.ReturnStmt)
-			if !ok {
-				return true
-			}
-			if len(ret.Results) != 1 {
-				valid = false
-				return false
-			}
-			if fieldNilIsFalse(ret.Results[0]) {
-				return true
-			}
-			if !falseGuard && !fieldNilBoolExprEnsuresNonNil(method, ret.Results[0], field) {
-				valid = false
-				return false
-			}
-			seen = true
-			return true
-		})
-		if valid && seen {
+		if fieldNilAnswerGuards(method, field, sig.Results().Len()) {
 			guards[obj] = true
 		}
 	}
 	return guards
+}
+
+// fieldNilAnswerGuards reports a method whose last result, when true, means the
+// field is not nil: a return on a path where the field may be nil answers a
+// literal false or an expression that requires the field.
+func fieldNilAnswerGuards(method fieldNilMethod, field *types.Var, results int) bool {
+	seen, valid := false, true
+	flow := &fieldNilFlow{info: method.info, recv: method.recv, field: field, decl: method.decl}
+	flow.onReturn = func(ret *ast.ReturnStmt, checked bool) {
+		switch {
+		case checked:
+			seen = true
+		case len(ret.Results) != results:
+			valid = false
+		case fieldNilIsFalse(ret.Results[results-1]):
+		case fieldNilBoolExprEnsuresNonNil(method, ret.Results[results-1], field):
+			seen = true
+		default:
+			valid = false
+		}
+	}
+	(&patternkit.FlowWalker[fieldNilState, struct{}]{Rule: flow}).Walk(method.decl.Body, fieldNilState{live: true}, struct{}{})
+	return valid && seen
 }
 
 func fieldNilCheckPrecedes(method fieldNilMethod, field *types.Var, use ast.Node) bool {
@@ -416,36 +410,6 @@ func fieldNilCallTakesReceiver(method fieldNilMethod, call *ast.CallExpr) bool {
 		})
 	}
 	return takes
-}
-
-func fieldNilBranchReturnsFalse(stmt ast.Stmt) bool {
-	block, ok := stmt.(*ast.BlockStmt)
-	if !ok {
-		block = &ast.BlockStmt{List: []ast.Stmt{stmt}}
-	}
-	for _, child := range block.List {
-		if ret, ok := child.(*ast.ReturnStmt); ok {
-			if len(ret.Results) == 1 && fieldNilIsFalse(ret.Results[0]) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func fieldNilExprEnsuresNil(method fieldNilMethod, expr ast.Expr, field *types.Var) bool {
-	expr = ast.Unparen(expr)
-	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
-		return fieldNilBoolExprEnsuresNonNil(method, unary.X, field)
-	}
-	bin, ok := expr.(*ast.BinaryExpr)
-	if !ok {
-		return false
-	}
-	if bin.Op == token.LOR {
-		return fieldNilExprEnsuresNil(method, bin.X, field) || fieldNilExprEnsuresNil(method, bin.Y, field)
-	}
-	return bin.Op == token.EQL && fieldNilCompared(method.info, method.recv, bin) == field
 }
 
 func fieldNilBoolExprEnsuresNonNil(method fieldNilMethod, expr ast.Expr, field *types.Var) bool {
@@ -1181,6 +1145,9 @@ func fieldNilGuardError(info *types.Info, guards map[types.Object]bool, comparis
 type fieldNilState struct {
 	live    bool
 	checked bool
+	// answer is the variable holding a guard method's answer, for as long as
+	// neither it nor the field has been assigned since the call.
+	answer types.Object
 }
 
 type fieldNilFlow struct {
@@ -1193,11 +1160,16 @@ type fieldNilFlow struct {
 	guardErrors    map[types.Object]bool
 	boolGuards     map[*types.Func]bool
 	nilSafeMethods map[*types.Func]bool
+	onReturn       func(*ast.ReturnStmt, bool)
 }
 
 func (*fieldNilFlow) CloneState(s fieldNilState) fieldNilState { return s }
 func (*fieldNilFlow) JoinStates(a, b fieldNilState) fieldNilState {
-	return fieldNilState{live: true, checked: a.checked && b.checked}
+	joined := fieldNilState{live: true, checked: a.checked && b.checked}
+	if a.answer == b.answer {
+		joined.answer = a.answer
+	}
+	return joined
 }
 func (*fieldNilFlow) LiveState(s fieldNilState) bool { return s.live }
 func (*fieldNilFlow) DeadState() fieldNilState       { return fieldNilState{} }
@@ -1209,38 +1181,78 @@ func (*fieldNilFlow) LeaveScope(patternkit.FlowScopeKind, struct{}, *patternkit.
 func (a *fieldNilFlow) SimpleStmt(stmt ast.Stmt, state fieldNilState, _ struct{}) (fieldNilState, bool) {
 	a.inspectUses(stmt, state.checked)
 	if assign, ok := stmt.(*ast.AssignStmt); ok {
+		state.answer = a.answerAfter(assign, state.answer)
 		for i, lhs := range assign.Lhs {
 			if fieldNilAssignedField(a.info, a.recv, lhs) != a.field {
 				continue
 			}
 			rhs := assign.Rhs[min(i, len(assign.Rhs)-1)]
 			state.checked = fieldNilKnownNonNil(a.info, rhs)
+			state.answer = nil
 		}
 	}
-	_, ret := stmt.(*ast.ReturnStmt)
-	return state, ret
-}
-func (a *fieldNilFlow) IfCondition(stmt *ast.IfStmt, state fieldNilState, _ struct{}) (fieldNilState, fieldNilState) {
-	a.inspectConditionUses(stmt.Cond, state.checked)
-	thenState, elseState := state, state
-	thenState.checked = a.when(stmt.Cond, true, state.checked)
-	elseState.checked = a.when(stmt.Cond, false, state.checked)
-	return thenState, elseState
+	ret, isReturn := stmt.(*ast.ReturnStmt)
+	if isReturn && a.onReturn != nil {
+		a.onReturn(ret, state.checked)
+	}
+	return state, isReturn
 }
 
-func (a *fieldNilFlow) inspectConditionUses(expr ast.Expr, checked bool) {
+// answerAfter gives the variable that holds a guard method's answer after the
+// assignment: its last target when it calls a guard, none when it overwrites
+// the current one.
+func (a *fieldNilFlow) answerAfter(assign *ast.AssignStmt, current types.Object) types.Object {
+	if len(assign.Rhs) == 1 && a.guardCall(assign.Rhs[0]) {
+		id, ok := ast.Unparen(assign.Lhs[len(assign.Lhs)-1]).(*ast.Ident)
+		if !ok || id.Name == "_" {
+			return nil
+		}
+		return a.info.ObjectOf(id)
+	}
+	for _, lhs := range assign.Lhs {
+		if id, ok := ast.Unparen(lhs).(*ast.Ident); ok && a.info.ObjectOf(id) == current {
+			return nil
+		}
+	}
+	return current
+}
+
+// guardCall reports a call of a guard method on the method's own receiver.
+func (a *fieldNilFlow) guardCall(expr ast.Expr) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	selection := a.info.Selections[selector]
+	id, sameReceiver := ast.Unparen(selector.X).(*ast.Ident)
+	if selection == nil || selection.Kind() != types.MethodVal || !sameReceiver || a.info.ObjectOf(id) != fieldNilReceiverObject(a.info, a.decl) {
+		return false
+	}
+	guard, ok := selection.Obj().(*types.Func)
+	return ok && a.boolGuards[guard]
+}
+func (a *fieldNilFlow) IfCondition(stmt *ast.IfStmt, state fieldNilState, _ struct{}) (fieldNilState, fieldNilState) {
+	a.inspectConditionUses(stmt.Cond, state)
+	return a.when(stmt.Cond, true, state), a.when(stmt.Cond, false, state)
+}
+
+func (a *fieldNilFlow) inspectConditionUses(expr ast.Expr, state fieldNilState) {
 	expr = ast.Unparen(expr)
 	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
-		a.inspectConditionUses(unary.X, checked)
+		a.inspectConditionUses(unary.X, state)
 		return
 	}
 	if bin, ok := expr.(*ast.BinaryExpr); ok && (bin.Op == token.LAND || bin.Op == token.LOR) {
-		a.inspectConditionUses(bin.X, checked)
+		a.inspectConditionUses(bin.X, state)
 		truth := bin.Op == token.LAND
-		a.inspectConditionUses(bin.Y, a.when(bin.X, truth, checked))
+		a.inspectConditionUses(bin.Y, a.when(bin.X, truth, state))
 		return
 	}
-	a.inspectUses(expr, checked)
+	a.inspectUses(expr, state.checked)
 }
 func (a *fieldNilFlow) FlowExpr(expr ast.Expr, state fieldNilState, _ struct{}) fieldNilState {
 	a.inspectUses(expr, state.checked)
@@ -1264,47 +1276,43 @@ func (*fieldNilFlow) CommClause(_ *ast.CommClause, state fieldNilState, scope st
 }
 func (*fieldNilFlow) Normalize(*patternkit.FlowEdges[fieldNilState]) {}
 
-func (a *fieldNilFlow) when(expr ast.Expr, truth, checked bool) bool {
+func (a *fieldNilFlow) when(expr ast.Expr, truth bool, state fieldNilState) fieldNilState {
 	expr = ast.Unparen(expr)
 	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
-		return a.when(unary.X, !truth, checked)
+		return a.when(unary.X, !truth, state)
 	}
-	if call, ok := expr.(*ast.CallExpr); ok {
-		selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-		if ok {
-			selection := a.info.Selections[selector]
-			id, sameReceiver := ast.Unparen(selector.X).(*ast.Ident)
-			if selection != nil && selection.Kind() == types.MethodVal && sameReceiver && a.info.ObjectOf(id) == fieldNilReceiverObject(a.info, a.decl) {
-				if guard, ok := selection.Obj().(*types.Func); ok && a.boolGuards[guard] && truth {
-					return true
-				}
-			}
-		}
+	if truth && (a.guardCall(expr) || a.answerVariable(expr, state)) {
+		state.checked = true
+		return state
 	}
 	bin, ok := expr.(*ast.BinaryExpr)
 	if !ok {
-		return checked
+		return state
 	}
 	if fieldNilGuardError(a.info, a.guardErrors, bin) {
-		return checked || truth == (bin.Op == token.EQL)
+		state.checked = state.checked || truth == (bin.Op == token.EQL)
+		return state
 	}
 	if fieldNilCompared(a.info, a.recv, bin) == a.field && (bin.Op == token.EQL || bin.Op == token.NEQ) {
-		if truth == (bin.Op == token.NEQ) {
-			return true
-		}
-		return checked
+		state.checked = state.checked || truth == (bin.Op == token.NEQ)
+		return state
 	}
 	switch bin.Op {
 	case token.LAND:
 		if truth {
-			return a.when(bin.Y, true, a.when(bin.X, true, checked))
+			return a.when(bin.Y, true, a.when(bin.X, true, state))
 		}
 	case token.LOR:
 		if !truth {
-			return a.when(bin.Y, false, a.when(bin.X, false, checked))
+			return a.when(bin.Y, false, a.when(bin.X, false, state))
 		}
 	}
-	return checked
+	return state
+}
+
+func (a *fieldNilFlow) answerVariable(expr ast.Expr, state fieldNilState) bool {
+	id, ok := expr.(*ast.Ident)
+	return ok && state.answer != nil && a.info.ObjectOf(id) == state.answer
 }
 
 func (a *fieldNilFlow) inspectUses(node ast.Node, checked bool) {
