@@ -108,6 +108,10 @@ func (s *Store) handed(key string) string {
 
 const fieldNilGuardHelperHeader = `package example
 
+import "os"
+
+var _ = os.Args
+
 type Amount struct{ N int }
 func load() *Amount { return nil }
 func other() (int, bool) { return 0, true }
@@ -174,6 +178,55 @@ func (b *Row) peek() (int, bool) {
 }
 func (b *Row) use() int {
 	_, ok := b.peek()
+	if !ok { return 0 }
+	return b.value.N
+}`,
+		"exit by panic": `
+func (b *Row) use() int {
+	_, _, ok := b.delta()
+	if !ok { panic("no value") }
+	return b.value.N
+}`,
+		"exit by a call that never returns": `
+func (b *Row) use() int {
+	_, _, ok := b.delta()
+	if !ok { os.Exit(1) }
+	return b.value.N
+}`,
+		"bare return answers false": `
+func (b *Row) peek() (n int, ok bool) {
+	if b.value == nil { return }
+	return b.value.N, true
+}
+func (b *Row) use() int {
+	n, ok := b.peek()
+	if !ok { return n }
+	return b.value.N
+}`,
+		"bare return past the check": `
+func (b *Row) peek() (n int, ok bool) {
+	if b.value == nil { return }
+	n, ok = b.value.N, true
+	return
+}
+func (b *Row) use() int {
+	n, ok := b.peek()
+	if !ok { return n }
+	return b.value.N
+}`,
+		"loop past the exit": `
+func (b *Row) use(items []int) int {
+	_, _, ok := b.delta()
+	for range items {
+		if !ok { return 0 }
+		println(b.value.N)
+	}
+	return 0
+}`,
+		"answer used after an unrelated loop": `
+func (b *Row) use(items []int) int {
+	_, _, ok := b.delta()
+	for range items { println("item") }
 	if !ok { return 0 }
 	return b.value.N
 }`,
@@ -259,6 +312,71 @@ func (b *Row) peek() (int, bool) {
 func (b *Row) use() int {
 	_, ok := b.peek()
 	if !ok { return 0 }
+	return b.value.N // flagged
+}`,
+		"bare return after the answer was set": `
+func (b *Row) peek() (n int, ok bool) {
+	ok = true
+	if b.value == nil { return }
+	return b.value.N, true
+}
+func (b *Row) use() int {
+	_, ok := b.peek()
+	if !ok { return 0 }
+	return b.value.N // flagged
+}`,
+		"field replaced in the loop": `
+func (b *Row) use(items []int) int {
+	_, _, ok := b.delta()
+	for range items {
+		if !ok { return 0 }
+		println(b.value.N) // flagged
+		b.value = load()
+	}
+	return 0
+}`,
+		"answer overwritten in the loop": `
+func (b *Row) use(items []int) int {
+	_, _, ok := b.delta()
+	for range items {
+		if !ok { return 0 }
+		println(b.value.N) // flagged
+		_, ok = other()
+	}
+	return 0
+}`,
+		"answer overwritten by range": `
+func (b *Row) use(flags []bool) int {
+	_, _, ok := b.delta()
+	for _, ok = range flags { println("flag") }
+	if !ok { return 0 }
+	return b.value.N // flagged
+}`,
+		"called method checks another instance": `
+func (b *Row) peek(q *Row) (int, bool) {
+	if q.value == nil { return 0, false }
+	return 1, true
+}
+func (b *Row) use(q *Row) int {
+	_, ok := b.peek(q)
+	if !ok { return 0 }
+	return b.value.N // flagged
+}`,
+		"called method answers about another instance": `
+func (b *Row) peek(q *Row) (int, bool) { return 1, q.value != nil }
+func (b *Row) use(q *Row) int {
+	_, ok := b.peek(q)
+	if !ok { return 0 }
+	return b.value.N // flagged
+}`,
+		"check of another instance in place": `
+func (b *Row) use(q *Row) int {
+	if q.value == nil { return 0 }
+	return b.value.N // flagged
+}`,
+		"another instance assigned in place": `
+func (b *Row) use(q *Row) int {
+	q.value = &Amount{}
 	return b.value.N // flagged
 }`,
 		"check only on one path": `

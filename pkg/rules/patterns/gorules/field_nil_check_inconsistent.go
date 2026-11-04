@@ -141,7 +141,7 @@ func fieldNilOptionalFields(methods []fieldNilMethod) (map[*types.Var]fieldNilMe
 			if !ok || (bin.Op != token.EQL && bin.Op != token.NEQ) {
 				return true
 			}
-			field := fieldNilCompared(method.info, method.recv, bin)
+			field := fieldNilCompared(method, bin)
 			if field == nil || !fieldNilType(field.Type()) {
 				return true
 			}
@@ -176,8 +176,7 @@ func (r *FieldNilCheckInconsistentRule) analyzeField(methods []fieldNilMethod, f
 			continue
 		}
 		flow := &fieldNilFlow{
-			info: method.info, recv: method.recv, field: field,
-			decl:           method.decl,
+			fieldNilMethod: method, field: field,
 			guardErrors:    fieldNilGuardErrors(method, methods, field),
 			boolGuards:     boolGuards,
 			nilSafeMethods: nilSafeMethods,
@@ -285,7 +284,7 @@ func fieldNilBoolGuardMethods(methods []fieldNilMethod, field *types.Var) map[*t
 		if !ok || sig.Results().Len() == 0 || !types.Identical(sig.Results().At(sig.Results().Len()-1).Type(), types.Typ[types.Bool]) {
 			continue
 		}
-		if fieldNilAnswerGuards(method, field, sig.Results().Len()) {
+		if fieldNilAnswerGuards(method, field, sig.Results()) {
 			guards[obj] = true
 		}
 	}
@@ -295,17 +294,20 @@ func fieldNilBoolGuardMethods(methods []fieldNilMethod, field *types.Var) map[*t
 // fieldNilAnswerGuards reports a method whose last result, when true, means the
 // field is not nil: a return on a path where the field may be nil answers a
 // literal false or an expression that requires the field.
-func fieldNilAnswerGuards(method fieldNilMethod, field *types.Var, results int) bool {
+func fieldNilAnswerGuards(method fieldNilMethod, field *types.Var, results *types.Tuple) bool {
+	last := results.Len() - 1
 	seen, valid := false, true
-	flow := &fieldNilFlow{info: method.info, recv: method.recv, field: field, decl: method.decl}
+	flow := &fieldNilFlow{fieldNilMethod: method, field: field}
 	flow.onReturn = func(ret *ast.ReturnStmt, checked bool) {
 		switch {
 		case checked:
 			seen = true
-		case len(ret.Results) != results:
+		case len(ret.Results) == 0:
+			valid = valid && !fieldNilVarAssignedBefore(method, results.At(last), ret.Pos())
+		case len(ret.Results) != results.Len():
 			valid = false
-		case fieldNilIsFalse(ret.Results[results-1]):
-		case fieldNilBoolExprEnsuresNonNil(method, ret.Results[results-1], field):
+		case fieldNilIsFalse(ret.Results[last]):
+		case fieldNilBoolExprEnsuresNonNil(method, ret.Results[last], field):
 			seen = true
 		default:
 			valid = false
@@ -313,6 +315,22 @@ func fieldNilAnswerGuards(method fieldNilMethod, field *types.Var, results int) 
 	}
 	(&patternkit.FlowWalker[fieldNilState, struct{}]{Rule: flow}).Walk(method.decl.Body, fieldNilState{live: true}, struct{}{})
 	return valid && seen
+}
+
+// fieldNilVarAssignedBefore reports an assignment to the variable ahead of pos:
+// without one a named result still holds its zero value.
+func fieldNilVarAssignedBefore(method fieldNilMethod, variable *types.Var, pos token.Pos) bool {
+	assigned := false
+	ast.Inspect(method.decl.Body, func(node ast.Node) bool {
+		if assign, ok := node.(*ast.AssignStmt); ok && assign.Pos() < pos {
+			assigned = assigned || slices.ContainsFunc(assign.Lhs, func(lhs ast.Expr) bool {
+				id, ok := ast.Unparen(lhs).(*ast.Ident)
+				return ok && method.info.ObjectOf(id) == variable
+			})
+		}
+		return !assigned
+	})
+	return assigned
 }
 
 func fieldNilCheckPrecedes(method fieldNilMethod, field *types.Var, use ast.Node) bool {
@@ -323,7 +341,7 @@ func fieldNilCheckPrecedes(method fieldNilMethod, field *types.Var, use ast.Node
 		if !ok {
 			return true
 		}
-		if fieldNilCompared(method.info, method.recv, comparison) == field && comparison.Pos() < use.Pos() && !passed[comparison] {
+		if fieldNilCompared(method, comparison) == field && comparison.Pos() < use.Pos() && !passed[comparison] {
 			found = true
 			return false
 		}
@@ -345,7 +363,7 @@ func fieldNilChecksFallenThrough(method fieldNilMethod, field *types.Var, use as
 			return true
 		}
 		comparison, ok := ast.Unparen(ifStmt.Cond).(*ast.BinaryExpr)
-		if !ok || fieldNilCompared(method.info, method.recv, comparison) != field {
+		if !ok || fieldNilCompared(method, comparison) != field {
 			return true
 		}
 		if comparison.Op == token.NEQ || fieldNilBranchGoesOn(method, field, ifStmt.Body) {
@@ -383,7 +401,7 @@ func fieldNilBranchGoesOn(method fieldNilMethod, field *types.Var, body *ast.Blo
 	ast.Inspect(body, func(node ast.Node) bool {
 		if assign, ok := node.(*ast.AssignStmt); ok {
 			for _, lhs := range assign.Lhs {
-				if fieldNilAssignedField(method.info, method.recv, lhs) == field {
+				if fieldNilSelectedField(method, lhs) == field {
 					setsField = true
 				}
 			}
@@ -418,7 +436,7 @@ func fieldNilBoolExprEnsuresNonNil(method fieldNilMethod, expr ast.Expr, field *
 		if expr.Op == token.LAND {
 			return fieldNilBoolExprEnsuresNonNil(method, expr.X, field) || fieldNilBoolExprEnsuresNonNil(method, expr.Y, field)
 		}
-		return expr.Op == token.NEQ && fieldNilCompared(method.info, method.recv, expr) == field
+		return expr.Op == token.NEQ && fieldNilCompared(method, expr) == field
 	default:
 		return false
 	}
@@ -525,7 +543,7 @@ func fieldNilType(t types.Type) bool {
 	}
 }
 
-func fieldNilCompared(info *types.Info, recv *types.Named, bin *ast.BinaryExpr) *types.Var {
+func fieldNilCompared(method fieldNilMethod, bin *ast.BinaryExpr) *types.Var {
 	var expr ast.Expr
 	if fieldNilIsNil(bin.X) {
 		expr = bin.Y
@@ -534,11 +552,17 @@ func fieldNilCompared(info *types.Info, recv *types.Named, bin *ast.BinaryExpr) 
 	} else {
 		return nil
 	}
+	return fieldNilSelectedField(method, expr)
+}
+
+// fieldNilSelectedField gives the field expr selects on the method's receiver.
+// The same field of another instance says nothing about the receiver's.
+func fieldNilSelectedField(method fieldNilMethod, expr ast.Expr) *types.Var {
 	sel, ok := ast.Unparen(expr).(*ast.SelectorExpr)
-	if !ok {
+	if !ok || !method.onReceiver(sel) {
 		return nil
 	}
-	selection := info.Selections[sel]
+	selection := method.info.Selections[sel]
 	if selection == nil || selection.Kind() != types.FieldVal {
 		return nil
 	}
@@ -546,7 +570,12 @@ func fieldNilCompared(info *types.Info, recv *types.Named, bin *ast.BinaryExpr) 
 	if !ok || !field.IsField() {
 		return nil
 	}
-	return fieldNilReceiverField(recv, field)
+	return fieldNilReceiverField(method.recv, field)
+}
+
+func (m fieldNilMethod) onReceiver(sel *ast.SelectorExpr) bool {
+	id, ok := ast.Unparen(sel.X).(*ast.Ident)
+	return ok && m.info.ObjectOf(id) == fieldNilReceiverObject(m.info, m.decl)
 }
 
 func fieldNilReceiverField(recv *types.Named, field *types.Var) *types.Var {
@@ -574,7 +603,7 @@ func fieldNilSoftComparison(method fieldNilMethod, comparison *ast.BinaryExpr, f
 	soft := false
 	ast.Inspect(method.decl.Body, func(node ast.Node) bool {
 		stmt, ok := node.(*ast.IfStmt)
-		if !ok || ast.Unparen(stmt.Cond) != comparison || fieldNilCompared(method.info, method.recv, comparison) != field {
+		if !ok || ast.Unparen(stmt.Cond) != comparison || fieldNilCompared(method, comparison) != field {
 			return true
 		}
 		var nilBranch ast.Stmt = stmt.Body
@@ -624,7 +653,7 @@ func fieldNilBranchInitializes(method fieldNilMethod, branch ast.Stmt, field *ty
 			return false
 		}
 		for i, lhs := range assign.Lhs {
-			if fieldNilAssignedField(method.info, method.recv, lhs) != field {
+			if fieldNilSelectedField(method, lhs) != field {
 				continue
 			}
 			rhsIndex := min(i, len(assign.Rhs)-1)
@@ -634,22 +663,6 @@ func fieldNilBranchInitializes(method fieldNilMethod, branch ast.Stmt, field *ty
 		}
 	}
 	return false
-}
-
-func fieldNilAssignedField(info *types.Info, recv *types.Named, expr ast.Expr) *types.Var {
-	sel, ok := ast.Unparen(expr).(*ast.SelectorExpr)
-	if !ok {
-		return nil
-	}
-	selection := info.Selections[sel]
-	if selection == nil || selection.Kind() != types.FieldVal {
-		return nil
-	}
-	field, ok := selection.Obj().(*types.Var)
-	if !ok || !field.IsField() {
-		return nil
-	}
-	return fieldNilReceiverField(recv, field)
 }
 
 func fieldNilKnownNonNil(info *types.Info, expr ast.Expr) bool {
@@ -930,7 +943,7 @@ func fieldNilHasHardCheck(method fieldNilMethod, field *types.Var) bool {
 			return true
 		}
 		comparison, ok := ast.Unparen(stmt.Cond).(*ast.BinaryExpr)
-		if !ok || fieldNilCompared(method.info, method.recv, comparison) != field {
+		if !ok || fieldNilCompared(method, comparison) != field {
 			return true
 		}
 		nilBranch := ast.Stmt(stmt.Body)
@@ -1050,7 +1063,7 @@ func fieldNilConstructorErrors(method fieldNilMethod, field *types.Var) map[type
 			}
 			fieldAssigned := false
 			for _, lhs := range assign.Lhs {
-				fieldAssigned = fieldAssigned || fieldNilAssignedField(method.info, method.recv, lhs) == field
+				fieldAssigned = fieldAssigned || fieldNilSelectedField(method, lhs) == field
 			}
 			if !fieldAssigned {
 				continue
@@ -1151,10 +1164,8 @@ type fieldNilState struct {
 }
 
 type fieldNilFlow struct {
-	info           *types.Info
-	recv           *types.Named
+	fieldNilMethod
 	field          *types.Var
-	decl           *ast.FuncDecl
 	deref          ast.Node
 	calls          []fieldNilCall
 	guardErrors    map[types.Object]bool
@@ -1173,8 +1184,36 @@ func (*fieldNilFlow) JoinStates(a, b fieldNilState) fieldNilState {
 }
 func (*fieldNilFlow) LiveState(s fieldNilState) bool { return s.live }
 func (*fieldNilFlow) DeadState() fieldNilState       { return fieldNilState{} }
-func (*fieldNilFlow) EnterScope(_ patternkit.FlowScopeKind, _ ast.Node, scope struct{}, state fieldNilState) (struct{}, fieldNilState) {
+func (a *fieldNilFlow) EnterScope(_ patternkit.FlowScopeKind, node ast.Node, scope struct{}, state fieldNilState) (struct{}, fieldNilState) {
+	switch node.(type) {
+	case *ast.ForStmt, *ast.RangeStmt:
+		if state.answer != nil && a.loopWritesAnswer(node, state.answer) {
+			state.answer = nil
+		}
+	}
 	return scope, state
+}
+
+// loopWritesAnswer reports a loop that assigns the answer or the field: the walk
+// goes through the body once, so a write at its end would not reach its start.
+func (a *fieldNilFlow) loopWritesAnswer(loop ast.Node, answer types.Object) bool {
+	isAnswer := func(expr ast.Expr) bool {
+		id, ok := ast.Unparen(expr).(*ast.Ident)
+		return ok && a.info.ObjectOf(id) == answer
+	}
+	writes := false
+	ast.Inspect(loop, func(node ast.Node) bool {
+		switch node := node.(type) {
+		case *ast.AssignStmt:
+			writes = writes || slices.ContainsFunc(node.Lhs, func(lhs ast.Expr) bool {
+				return isAnswer(lhs) || fieldNilSelectedField(a.fieldNilMethod, lhs) == a.field
+			})
+		case *ast.RangeStmt:
+			writes = writes || isAnswer(node.Key) || isAnswer(node.Value)
+		}
+		return !writes
+	})
+	return writes
 }
 func (*fieldNilFlow) LeaveScope(patternkit.FlowScopeKind, struct{}, *patternkit.FlowEdges[fieldNilState]) {
 }
@@ -1183,7 +1222,7 @@ func (a *fieldNilFlow) SimpleStmt(stmt ast.Stmt, state fieldNilState, _ struct{}
 	if assign, ok := stmt.(*ast.AssignStmt); ok {
 		state.answer = a.answerAfter(assign, state.answer)
 		for i, lhs := range assign.Lhs {
-			if fieldNilAssignedField(a.info, a.recv, lhs) != a.field {
+			if fieldNilSelectedField(a.fieldNilMethod, lhs) != a.field {
 				continue
 			}
 			rhs := assign.Rhs[min(i, len(assign.Rhs)-1)]
@@ -1195,7 +1234,7 @@ func (a *fieldNilFlow) SimpleStmt(stmt ast.Stmt, state fieldNilState, _ struct{}
 	if isReturn && a.onReturn != nil {
 		a.onReturn(ret, state.checked)
 	}
-	return state, isReturn
+	return state, isReturn || patternkit.StmtNoReturn(stmt, a.info, nil) != patternkit.CallReturns
 }
 
 // answerAfter gives the variable that holds a guard method's answer after the
@@ -1293,7 +1332,7 @@ func (a *fieldNilFlow) when(expr ast.Expr, truth bool, state fieldNilState) fiel
 		state.checked = state.checked || truth == (bin.Op == token.EQL)
 		return state
 	}
-	if fieldNilCompared(a.info, a.recv, bin) == a.field && (bin.Op == token.EQL || bin.Op == token.NEQ) {
+	if fieldNilCompared(a.fieldNilMethod, bin) == a.field && (bin.Op == token.EQL || bin.Op == token.NEQ) {
 		state.checked = state.checked || truth == (bin.Op == token.NEQ)
 		return state
 	}
@@ -1329,7 +1368,7 @@ func (a *fieldNilFlow) inspectUses(node ast.Node, checked bool) {
 		}
 		if sel, ok := n.(*ast.SelectorExpr); ok && len(stack) > 0 {
 			s := a.info.Selections[sel]
-			if !checked && !fieldNilSafeMethodReceiver(sel, stack, a.info, a.nilSafeMethods) && a.deref == nil && s != nil && s.Kind() == types.FieldVal && s.Obj() == a.field && fieldNilDereference(sel, stack) {
+			if !checked && !fieldNilSafeMethodReceiver(sel, stack, a.info, a.nilSafeMethods) && a.deref == nil && s != nil && s.Kind() == types.FieldVal && s.Obj() == a.field && a.onReceiver(sel) && fieldNilDereference(sel, stack) {
 				a.deref = sel
 			}
 			if call, ok := stack[len(stack)-1].(*ast.CallExpr); ok && call.Fun == sel && s != nil && s.Kind() == types.MethodVal {
