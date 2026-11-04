@@ -115,6 +115,7 @@ var _ = os.Args
 type Amount struct{ N int }
 func load() *Amount { return nil }
 func other() (int, bool) { return 0, true }
+func set(*bool) {}
 type Row struct { value *Amount; start *Amount; cached, strict bool }
 func (b *Row) render() int { if b.value != nil { return b.value.N }; return 0 }
 func (b *Row) delta() (d, net int, ok bool) {
@@ -228,6 +229,11 @@ func (b *Row) use(items []int) int {
 	_, _, ok := b.delta()
 	for range items { println("item") }
 	if !ok { return 0 }
+	return b.value.N
+}`,
+		"check through a dereferenced receiver": `
+func (b *Row) use() int {
+	if (*b).value == nil { return 0 }
 	return b.value.N
 }`,
 		"answer computed from the field": `
@@ -378,6 +384,86 @@ func (b *Row) use(q *Row) int {
 func (b *Row) use(q *Row) int {
 	q.value = &Amount{}
 	return b.value.N // flagged
+}`,
+		"answer in the for header": `
+func (b *Row) use(items []int) int {
+	for _, _, ok := b.delta(); len(items) > 0; {
+		if !ok { return 0 }
+		println(b.value.N) // flagged
+		b.value = load()
+	}
+	return 0
+}`,
+		"answer overwritten in the for post": `
+func (b *Row) use(n int) int {
+	var ok bool
+	for _, _, ok = b.delta(); n > 0; _, ok = other() {
+		if !ok { return 0 }
+		println(b.value.N) // flagged
+		n--
+	}
+	return 0
+}`,
+		"field replaced by range": `
+func (b *Row) use(values []*Amount) int {
+	_, _, ok := b.delta()
+	for _, b.value = range values {
+		if !ok { return 0 }
+		println(b.value.N) // flagged
+	}
+	return 0
+}`,
+		"answer handed to a call": `
+func (b *Row) use() int {
+	_, _, ok := b.delta()
+	set(&ok)
+	if !ok { return 0 }
+	return b.value.N // flagged
+}`,
+		"answer written by a closure": `
+func (b *Row) use() int {
+	_, _, ok := b.delta()
+	func() { ok = true }()
+	if !ok { return 0 }
+	return b.value.N // flagged
+}`,
+		"bare return after range wrote the answer": `
+func (b *Row) peek(flags []bool) (ok bool) {
+	for _, ok = range flags { println("flag") }
+	if b.value == nil { return }
+	return true
+}
+func (b *Row) use(flags []bool) int {
+	if !b.peek(flags) { return 0 }
+	return b.value.N // flagged
+}`,
+		"bare return after the answer was handed to a call": `
+func (b *Row) peek() (ok bool) {
+	set(&ok)
+	if b.value == nil { return }
+	return true
+}
+func (b *Row) use() int {
+	if !b.peek() { return 0 }
+	return b.value.N // flagged
+}`,
+		"bare return in a loop that sets the answer": `
+func (b *Row) peek(items []int) (ok bool) {
+	for range items {
+		if b.value == nil { return }
+		ok = true
+		b.value = load()
+	}
+	if b.value != nil && b.strict { return true }
+	return false
+}
+func (b *Row) use(items []int) int {
+	if !b.peek(items) { return 0 }
+	return b.value.N // flagged
+}`,
+		"use through a dereferenced receiver": `
+func (b *Row) use() int {
+	return (*b).value.N // flagged
 }`,
 		"check only on one path": `
 func (b *Row) ready() bool {

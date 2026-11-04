@@ -303,7 +303,7 @@ func fieldNilAnswerGuards(method fieldNilMethod, field *types.Var, results *type
 		case checked:
 			seen = true
 		case len(ret.Results) == 0:
-			valid = valid && !fieldNilVarAssignedBefore(method, results.At(last), ret.Pos())
+			valid = valid && !fieldNilResultMayBeSet(method, results.At(last), ret)
 		case len(ret.Results) != results.Len():
 			valid = false
 		case fieldNilIsFalse(ret.Results[last]):
@@ -317,20 +317,26 @@ func fieldNilAnswerGuards(method fieldNilMethod, field *types.Var, results *type
 	return valid && seen
 }
 
-// fieldNilVarAssignedBefore reports an assignment to the variable ahead of pos:
-// without one a named result still holds its zero value.
-func fieldNilVarAssignedBefore(method fieldNilMethod, variable *types.Var, pos token.Pos) bool {
-	assigned := false
-	ast.Inspect(method.decl.Body, func(node ast.Node) bool {
-		if assign, ok := node.(*ast.AssignStmt); ok && assign.Pos() < pos {
-			assigned = assigned || slices.ContainsFunc(assign.Lhs, func(lhs ast.Expr) bool {
-				id, ok := ast.Unparen(lhs).(*ast.Ident)
-				return ok && method.info.ObjectOf(id) == variable
-			})
+// fieldNilResultMayBeSet reports a named result that may no longer hold its zero
+// value at the bare return: a write ahead of it, or in a loop around it.
+func fieldNilResultMayBeSet(method fieldNilMethod, result *types.Var, ret *ast.ReturnStmt) bool {
+	set := false
+	mark := func(limit token.Pos) func(ast.Expr) {
+		return func(target ast.Expr) {
+			set = set || method.isVar(target, result) && target.Pos() < limit
 		}
-		return !assigned
+	}
+	fieldNilVisitWrites(method.decl.Body, mark(ret.Pos()))
+	ast.Inspect(method.decl.Body, func(node ast.Node) bool {
+		switch node.(type) {
+		case *ast.ForStmt, *ast.RangeStmt:
+			if node.Pos() <= ret.Pos() && ret.End() <= node.End() {
+				fieldNilVisitWrites(node, mark(node.End()))
+			}
+		}
+		return !set
 	})
-	return assigned
+	return set
 }
 
 func fieldNilCheckPrecedes(method fieldNilMethod, field *types.Var, use ast.Node) bool {
@@ -574,8 +580,56 @@ func fieldNilSelectedField(method fieldNilMethod, expr ast.Expr) *types.Var {
 }
 
 func (m fieldNilMethod) onReceiver(sel *ast.SelectorExpr) bool {
-	id, ok := ast.Unparen(sel.X).(*ast.Ident)
+	expr := ast.Unparen(sel.X)
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = ast.Unparen(star.X)
+	}
+	id, ok := expr.(*ast.Ident)
 	return ok && m.info.ObjectOf(id) == fieldNilReceiverObject(m.info, m.decl)
+}
+
+func (m fieldNilMethod) isVar(expr ast.Expr, variable types.Object) bool {
+	id, ok := ast.Unparen(expr).(*ast.Ident)
+	return ok && m.info.ObjectOf(id) == variable
+}
+
+// varEscapes reports a variable whose writes the walk over statements does not
+// follow: its address is taken, or a closure assigns it.
+func (m fieldNilMethod) varEscapes(variable types.Object) bool {
+	escapes := false
+	ast.Inspect(m.decl.Body, func(node ast.Node) bool {
+		switch node := node.(type) {
+		case *ast.UnaryExpr:
+			escapes = escapes || node.Op == token.AND && m.isVar(node.X, variable)
+		case *ast.FuncLit:
+			fieldNilVisitWrites(node, func(target ast.Expr) {
+				escapes = escapes || m.isVar(target, variable)
+			})
+		}
+		return !escapes
+	})
+	return escapes
+}
+
+// fieldNilVisitWrites calls visit with each expression the code under root
+// assigns or takes the address of.
+func fieldNilVisitWrites(root ast.Node, visit func(ast.Expr)) {
+	ast.Inspect(root, func(node ast.Node) bool {
+		switch node := node.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range node.Lhs {
+				visit(lhs)
+			}
+		case *ast.RangeStmt:
+			visit(node.Key)
+			visit(node.Value)
+		case *ast.UnaryExpr:
+			if node.Op == token.AND {
+				visit(node.X)
+			}
+		}
+		return true
+	})
 }
 
 func fieldNilReceiverField(recv *types.Named, field *types.Var) *types.Var {
@@ -1172,6 +1226,7 @@ type fieldNilFlow struct {
 	boolGuards     map[*types.Func]bool
 	nilSafeMethods map[*types.Func]bool
 	onReturn       func(*ast.ReturnStmt, bool)
+	loopInit       ast.Stmt
 }
 
 func (*fieldNilFlow) CloneState(s fieldNilState) fieldNilState { return s }
@@ -1185,36 +1240,33 @@ func (*fieldNilFlow) JoinStates(a, b fieldNilState) fieldNilState {
 func (*fieldNilFlow) LiveState(s fieldNilState) bool { return s.live }
 func (*fieldNilFlow) DeadState() fieldNilState       { return fieldNilState{} }
 func (a *fieldNilFlow) EnterScope(_ patternkit.FlowScopeKind, node ast.Node, scope struct{}, state fieldNilState) (struct{}, fieldNilState) {
-	switch node.(type) {
-	case *ast.ForStmt, *ast.RangeStmt:
-		if state.answer != nil && a.loopWritesAnswer(node, state.answer) {
-			state.answer = nil
-		}
+	switch loop := node.(type) {
+	case *ast.ForStmt:
+		a.loopInit = loop.Init
+		state.answer = a.answerThroughLoop(loop, state.answer)
+	case *ast.RangeStmt:
+		state.answer = a.answerThroughLoop(loop, state.answer)
 	}
 	return scope, state
 }
 
-// loopWritesAnswer reports a loop that assigns the answer or the field: the walk
-// goes through the body once, so a write at its end would not reach its start.
-func (a *fieldNilFlow) loopWritesAnswer(loop ast.Node, answer types.Object) bool {
-	isAnswer := func(expr ast.Expr) bool {
-		id, ok := ast.Unparen(expr).(*ast.Ident)
-		return ok && a.info.ObjectOf(id) == answer
+// answerThroughLoop drops an answer the loop may overwrite, or a field it may
+// replace: the walk goes through the body once, so a write at its end would not
+// reach its start.
+func (a *fieldNilFlow) answerThroughLoop(loop ast.Node, answer types.Object) types.Object {
+	if answer == nil {
+		return nil
 	}
 	writes := false
-	ast.Inspect(loop, func(node ast.Node) bool {
-		switch node := node.(type) {
-		case *ast.AssignStmt:
-			writes = writes || slices.ContainsFunc(node.Lhs, func(lhs ast.Expr) bool {
-				return isAnswer(lhs) || fieldNilSelectedField(a.fieldNilMethod, lhs) == a.field
-			})
-		case *ast.RangeStmt:
-			writes = writes || isAnswer(node.Key) || isAnswer(node.Value)
-		}
-		return !writes
+	fieldNilVisitWrites(loop, func(target ast.Expr) {
+		writes = writes || a.isVar(target, answer) || fieldNilSelectedField(a.fieldNilMethod, target) == a.field
 	})
-	return writes
+	if writes {
+		return nil
+	}
+	return answer
 }
+
 func (*fieldNilFlow) LeaveScope(patternkit.FlowScopeKind, struct{}, *patternkit.FlowEdges[fieldNilState]) {
 }
 func (a *fieldNilFlow) SimpleStmt(stmt ast.Stmt, state fieldNilState, _ struct{}) (fieldNilState, bool) {
@@ -1238,18 +1290,23 @@ func (a *fieldNilFlow) SimpleStmt(stmt ast.Stmt, state fieldNilState, _ struct{}
 }
 
 // answerAfter gives the variable that holds a guard method's answer after the
-// assignment: its last target when it calls a guard, none when it overwrites
-// the current one.
+// assignment: its last target when it calls a guard, none when it overwrites the
+// current one. An answer in a for header is not kept: the header runs before the
+// loop is checked for writes, and the loop runs on past them.
 func (a *fieldNilFlow) answerAfter(assign *ast.AssignStmt, current types.Object) types.Object {
 	if len(assign.Rhs) == 1 && a.guardCall(assign.Rhs[0]) {
 		id, ok := ast.Unparen(assign.Lhs[len(assign.Lhs)-1]).(*ast.Ident)
-		if !ok || id.Name == "_" {
+		if !ok || id.Name == "_" || a.loopInit == assign {
 			return nil
 		}
-		return a.info.ObjectOf(id)
+		answer := a.info.ObjectOf(id)
+		if a.varEscapes(answer) {
+			return nil
+		}
+		return answer
 	}
 	for _, lhs := range assign.Lhs {
-		if id, ok := ast.Unparen(lhs).(*ast.Ident); ok && a.info.ObjectOf(id) == current {
+		if a.isVar(lhs, current) {
 			return nil
 		}
 	}
@@ -1267,8 +1324,7 @@ func (a *fieldNilFlow) guardCall(expr ast.Expr) bool {
 		return false
 	}
 	selection := a.info.Selections[selector]
-	id, sameReceiver := ast.Unparen(selector.X).(*ast.Ident)
-	if selection == nil || selection.Kind() != types.MethodVal || !sameReceiver || a.info.ObjectOf(id) != fieldNilReceiverObject(a.info, a.decl) {
+	if selection == nil || selection.Kind() != types.MethodVal || !a.onReceiver(selector) {
 		return false
 	}
 	guard, ok := selection.Obj().(*types.Func)
@@ -1350,8 +1406,7 @@ func (a *fieldNilFlow) when(expr ast.Expr, truth bool, state fieldNilState) fiel
 }
 
 func (a *fieldNilFlow) answerVariable(expr ast.Expr, state fieldNilState) bool {
-	id, ok := expr.(*ast.Ident)
-	return ok && state.answer != nil && a.info.ObjectOf(id) == state.answer
+	return state.answer != nil && a.isVar(expr, state.answer)
 }
 
 func (a *fieldNilFlow) inspectUses(node ast.Node, checked bool) {
@@ -1372,7 +1427,7 @@ func (a *fieldNilFlow) inspectUses(node ast.Node, checked bool) {
 				a.deref = sel
 			}
 			if call, ok := stack[len(stack)-1].(*ast.CallExpr); ok && call.Fun == sel && s != nil && s.Kind() == types.MethodVal {
-				if id, ok := ast.Unparen(sel.X).(*ast.Ident); ok && a.info.ObjectOf(id) == fieldNilReceiverObject(a.info, a.decl) {
+				if a.onReceiver(sel) {
 					if target, ok := s.Obj().(*types.Func); ok {
 						a.calls = append(a.calls, fieldNilCall{target: target, guarded: checked})
 					}
