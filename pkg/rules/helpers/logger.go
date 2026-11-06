@@ -72,11 +72,19 @@ func logVerbOfName(name string) string {
 	return strings.TrimSuffix(strings.TrimSuffix(verb, "structured"), "context")
 }
 
-// IsLoggingName reports whether a function or method name says it logs: warn,
-// Errorf, WarnContext, LogLine. The name alone proves little (err.Error(),
-// fmt.Errorf): the caller decides by how the call is used.
-func IsLoggingName(name string) bool {
-	return loggingVerbs[logVerbOfName(name)] || isLogWordName(name)
+// IsLogLevelName reports whether a function or method name, whatever it is
+// called on, says it logs: warn, Errorf, WarnContext, LogLine. The print,
+// trace and capture verbs of the table count only on a logger: a.out.Println
+// is stdout and a.capture(err) may just keep the error. The name alone proves
+// little (err.Error(), fmt.Errorf): the caller decides by how the call is used.
+func IsLogLevelName(name string) bool {
+	verb := logVerbOfName(name)
+	for _, prefix := range []string{"print", "trace", "capture"} {
+		if strings.HasPrefix(verb, prefix) {
+			return false
+		}
+	}
+	return loggingVerbs[verb] || isLogWordName(name)
 }
 
 // IsLoggerReceiver reports whether the receiver of a call is a logger: its

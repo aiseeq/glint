@@ -204,7 +204,7 @@ func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *a
 		if ret == nil {
 			return true
 		}
-		if r.hasLoggingCall(ifStmt.Body, errName) {
+		if r.hasLoggingCall(ifStmt.Body) || handsErrorToLogWrapper(ifStmt.Body, errName, ret) {
 			return true
 		}
 		if answersClient(fn, ifStmt.Body) {
@@ -314,38 +314,69 @@ func classifiesError(cond ast.Expr, errName string) bool {
 }
 
 // hasLoggingCall returns true if any statement in the block calls a logger
-// (see helpers.IsLoggerCall) or hands the error to a wrapper over one.
-func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt, errName string) bool {
+// (see helpers.IsLoggerCall).
+func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if found {
 			return false
 		}
-		switch node := n.(type) {
-		case *ast.CallExpr:
-			found = helpers.IsLoggerCall(node)
-		case *ast.ExprStmt:
-			found = handsErrorToLoggingCall(node, errName)
+		if call, ok := n.(*ast.CallExpr); ok && helpers.IsLoggerCall(call) {
+			found = true
 		}
 		return !found
 	})
 	return found
 }
 
-// handsErrorToLoggingCall reports a statement like a.warn("not sent", "err", err):
-// the callee's name says it logs, whatever its receiver is called, it is given
-// the error and nothing is done with its result. That last part tells a log
-// from a constructor of the same name: wrapped := errorf("...: %v", err) keeps
-// the error out of any log. fmt.Print* is the CLI's stdout, not a log (see
-// helpers.IsLoggerCall).
-func handsErrorToLoggingCall(stmt *ast.ExprStmt, errName string) bool {
-	call, ok := stmt.X.(*ast.CallExpr)
-	if !ok || patternkit.IsFmtPrint(call) || !helpers.IsLoggingName(helpers.CalleeName(call)) {
-		return false
+// handsErrorToLogWrapper reports a branch that hands the error it checks to a
+// wrapper over a logger: a.warn("not sent", "err", err). The wrapper's body is
+// not read, so the evidence is its name, the error among its arguments and a
+// result nobody uses, which tells a log from a constructor of the same name.
+// Only the branch's own statements before the return count, in order: a call
+// under a nested if or in a closure does not run on every path, and an err
+// assigned anew is another error. A variable made from the error carries it
+// (wrapped := fmt.Errorf(...)).
+func handsErrorToLogWrapper(body *ast.BlockStmt, errName string, ret *ast.ReturnStmt) bool {
+	carriers := map[string]bool{errName: true}
+	carried := func(expr ast.Expr) bool { return mentionsCarrier(expr, carriers) }
+	for _, stmt := range body.List {
+		if stmt.Pos() > ret.Pos() {
+			return false
+		}
+		switch s := stmt.(type) {
+		case *ast.AssignStmt:
+			fromError := slices.ContainsFunc(s.Rhs, carried)
+			for _, lhs := range s.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok {
+					carriers[ident.Name] = fromError
+				}
+			}
+		case *ast.ExprStmt:
+			call, ok := s.X.(*ast.CallExpr)
+			if ok && helpers.IsLogLevelName(helpers.CalleeName(call)) && slices.ContainsFunc(call.Args, carried) {
+				return true
+			}
+		}
 	}
-	return slices.ContainsFunc(call.Args, func(arg ast.Expr) bool {
-		return patternkit.MentionsIdent(arg, errName)
+	return false
+}
+
+// mentionsCarrier reports a use of one of the variables in expr. The name after
+// a dot is a field, not the variable: res.err does not use err.
+func mentionsCarrier(expr ast.Expr, carriers map[string]bool) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.SelectorExpr:
+			found = found || mentionsCarrier(node.X, carriers)
+			return false
+		case *ast.Ident:
+			found = found || carriers[node.Name]
+		}
+		return !found
 	})
+	return found
 }
 
 // answersClient reports whether the branch hands the function's own

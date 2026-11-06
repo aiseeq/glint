@@ -199,6 +199,183 @@ func Stall(id string) bool {
 			expectedCount: 1,
 		},
 		{
+			name: "error handed to a wrapper through a variable NOT flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+import "fmt"
+type App struct{}
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		wrapped := fmt.Errorf("load %s: %w", id, err)
+		a.warn("not sent", "err", wrapped)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "wrapper logs the error of a cleanup, the original is lost — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) cleanup() error { return nil }
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		if err := a.cleanup(); err != nil {
+			a.warn("cleanup", "err", err)
+		}
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "err overwritten before the wrapper — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) cleanup() error { return nil }
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		err = a.cleanup()
+		a.warn("cleanup", "err", err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "closure parameter named err — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) each(f func(error)) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.each(func(err error) { a.warn("item", "err", err) })
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "field named err handed to a wrapper — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type result struct{ err error }
+type App struct{ res result }
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.warn("last", "err", a.res.err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "wrapper called on one path only — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{ verbose bool }
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		if a.verbose {
+			a.warn("not sent", "err", err)
+		}
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "wrapper called after the return it should precede — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{ verbose bool }
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		if !a.verbose {
+			return false
+		}
+		a.warn("not sent", "err", err)
+		return true
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "print, capture and trace on any receiver say nothing of a log — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type out struct{}
+func (o out) Println(args ...any) {}
+type App struct{ out out; last error }
+func (a *App) capture(err error) { a.last = err }
+func (a *App) trace(err error) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) One(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.out.Println(err)
+		return false
+	}
+	return n > 0
+}
+func (a *App) Two(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.capture(err)
+		return false
+	}
+	return n > 0
+}
+func (a *App) Three(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.trace(err)
+		return false
+	}
+	return n > 0
+}
+func (a *App) Four(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		println(err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 4,
+		},
+		{
 			name: "a call whose name says nothing of logging — still flagged",
 			path: "/src/backend/plan.go",
 			code: `package plan
