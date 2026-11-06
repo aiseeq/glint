@@ -218,6 +218,26 @@ func (a *App) Stall(id string) bool {
 			expectedCount: 0,
 		},
 		{
+			name: "err replaced by another call's error that was given the old one — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) warn(what string, kv ...any) {}
+func render(err error) (string, error) { return "", nil }
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		msg, err := render(err)
+		_ = msg
+		a.warn("render", "err", err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
 			name: "a value computed from the error is no log of it — still flagged",
 			path: "/src/backend/plan.go",
 			code: `package plan

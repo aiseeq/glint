@@ -337,7 +337,7 @@ func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt) bool {
 // result nobody uses, which tells a log from a constructor of the same name.
 // Only the branch's own statements before the return count, in order: a call
 // under a nested if or in a closure does not run on every path, and an err
-// assigned anew is another error. A value computed from the error does not
+// assigned anew is another error. A variable computed from the error does not
 // count: retry := isRetryable(err) keeps none of its text.
 func handsErrorToLogWrapper(body *ast.BlockStmt, errName string, ret *ast.ReturnStmt) bool {
 	usesErr := func(expr ast.Expr) bool { return usesVariable(expr, errName) }
@@ -361,15 +361,16 @@ func handsErrorToLogWrapper(body *ast.BlockStmt, errName string, ret *ast.Return
 // depth outside a closure: err = cleanup(), if err := cleanup(); ..., var err = x.
 // A wrap of the old value keeps the error: err = fmt.Errorf("load: %w", err).
 func rebindsVariable(stmt ast.Stmt, name string) bool {
-	isName := func(expr ast.Expr) bool { return helpers.IsIdentNamed(expr, name) }
 	found := false
 	ast.Inspect(stmt, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.FuncLit:
 			return false
 		case *ast.AssignStmt:
-			keepsOld := slices.ContainsFunc(node.Rhs, func(expr ast.Expr) bool { return usesVariable(expr, name) })
-			found = found || (slices.ContainsFunc(node.Lhs, isName) && !keepsOld)
+			for i, lhs := range node.Lhs {
+				keepsOld := len(node.Lhs) == len(node.Rhs) && usesVariable(node.Rhs[i], name)
+				found = found || (helpers.IsIdentNamed(lhs, name) && !keepsOld)
+			}
 		case *ast.ValueSpec:
 			found = found || slices.ContainsFunc(node.Names, func(ident *ast.Ident) bool { return ident.Name == name })
 		}
