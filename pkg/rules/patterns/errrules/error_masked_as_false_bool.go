@@ -3,6 +3,7 @@ package errrules
 import (
 	"go/ast"
 	"go/token"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -43,7 +44,8 @@ func init() {
 // Skips:
 //   - Test files
 //   - Pure predicate functions (Is/Has/Can/Should prefix)
-//   - Blocks that log the error before returning false
+//   - Blocks that log the error before returning false, a wrapper over the
+//     logger included: a.warn("not sent", "err", err)
 //   - Returns under a classification of the error (errors.Is(err, ErrNoRows))
 //   - Branches that answer the client through the http.ResponseWriter
 //   - Iterators in the manner of sql.Rows: the branch stores the error in a
@@ -202,7 +204,7 @@ func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *a
 		if ret == nil {
 			return true
 		}
-		if r.hasLoggingCall(ifStmt.Body) {
+		if r.hasLoggingCall(ifStmt.Body, errName) {
 			return true
 		}
 		if answersClient(fn, ifStmt.Body) {
@@ -312,19 +314,38 @@ func classifiesError(cond ast.Expr, errName string) bool {
 }
 
 // hasLoggingCall returns true if any statement in the block calls a logger
-// (see helpers.IsLoggerCall).
-func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt) bool {
+// (see helpers.IsLoggerCall) or hands the error to a wrapper over one.
+func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt, errName string) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if found {
 			return false
 		}
-		if call, ok := n.(*ast.CallExpr); ok && helpers.IsLoggerCall(call) {
-			found = true
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			found = helpers.IsLoggerCall(node)
+		case *ast.ExprStmt:
+			found = handsErrorToLoggingCall(node, errName)
 		}
 		return !found
 	})
 	return found
+}
+
+// handsErrorToLoggingCall reports a statement like a.warn("not sent", "err", err):
+// the callee's name says it logs, whatever its receiver is called, it is given
+// the error and nothing is done with its result. That last part tells a log
+// from a constructor of the same name: wrapped := errorf("...: %v", err) keeps
+// the error out of any log. fmt.Print* is the CLI's stdout, not a log (see
+// helpers.IsLoggerCall).
+func handsErrorToLoggingCall(stmt *ast.ExprStmt, errName string) bool {
+	call, ok := stmt.X.(*ast.CallExpr)
+	if !ok || patternkit.IsFmtPrint(call) || !helpers.IsLoggingName(helpers.CalleeName(call)) {
+		return false
+	}
+	return slices.ContainsFunc(call.Args, func(arg ast.Expr) bool {
+		return patternkit.MentionsIdent(arg, errName)
+	})
 }
 
 // answersClient reports whether the branch hands the function's own

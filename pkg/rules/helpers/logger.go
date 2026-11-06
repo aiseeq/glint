@@ -64,8 +64,19 @@ func isMathPackage(expr ast.Expr) bool {
 // the Structured/Context suffix of structured loggers: ErrorWithFieldMap and
 // WarnContext are error and warn.
 func LogVerb(sel *ast.SelectorExpr) string {
-	verb := strings.ToLower(sel.Sel.Name)
+	return logVerbOfName(sel.Sel.Name)
+}
+
+func logVerbOfName(name string) string {
+	verb := strings.ToLower(name)
 	return strings.TrimSuffix(strings.TrimSuffix(verb, "structured"), "context")
+}
+
+// IsLoggingName reports whether a function or method name says it logs: warn,
+// Errorf, WarnContext, LogLine. The name alone proves little (err.Error(),
+// fmt.Errorf): the caller decides by how the call is used.
+func IsLoggingName(name string) bool {
+	return loggingVerbs[logVerbOfName(name)] || isLogWordName(name)
 }
 
 // IsLoggerReceiver reports whether the receiver of a call is a logger: its

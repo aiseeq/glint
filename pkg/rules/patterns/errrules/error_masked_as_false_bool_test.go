@@ -67,6 +67,155 @@ func (c *Ctx) PlaceBuilding(id string) bool {
 			expectedCount: 0,
 		},
 		{
+			name: "error handed to the receiver's own warn wrapper NOT flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) warn(where, what string, kv ...any) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.warn("stall", "not sent", "id", id, "err", err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "error text handed to a wrapper NOT flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.warn("not sent", "err", err.Error())
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "error handed to a logger in a field with a short name NOT flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type sink interface{ Warn(string, ...any) }
+type App struct{ l sink }
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.l.Warn("not sent", "err", err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "error handed to a package-level logging function NOT flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+func warnf(format string, args ...any) {}
+func load(id string) (int, error) { return 0, nil }
+func Stall(id string) bool {
+	n, err := load(id)
+	if err != nil {
+		warnf("not sent: %v", err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "wrapper told of the failure without the error — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.warn("not sent", "id", id)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "a built error thrown away is no log — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+func errorf(format string, args ...any) error { return nil }
+func load(id string) (int, error) { return 0, nil }
+func Stall(id string) bool {
+	n, err := load(id)
+	if err != nil {
+		wrapped := errorf("not sent: %v", err)
+		_ = wrapped
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "the error's own Error method is no log — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+func load(id string) (int, error) { return 0, nil }
+func Stall(id string) bool {
+	n, err := load(id)
+	if err != nil {
+		err.Error()
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "fmt.Printf of the error is no log — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+import "fmt"
+func load(id string) (int, error) { return 0, nil }
+func Stall(id string) bool {
+	n, err := load(id)
+	if err != nil {
+		fmt.Printf("not sent: %v", err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "a call whose name says nothing of logging — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) keep(err error) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.keep(err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
 			name: "Login is not a logging verb — masked error still flagged",
 			path: "/src/backend/session.go",
 			code: `package session
