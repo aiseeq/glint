@@ -250,6 +250,8 @@ func (r *ErrorMaskedAsFalseBoolRule) findReturnFalse(body *ast.BlockStmt, errNam
 			return false
 		}
 		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false // its return answers the closure's caller, not ours
 		case *ast.IfStmt:
 			if classifiesError(node.Cond, errName) {
 				classified[node.Body] = true
@@ -335,44 +337,61 @@ func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt) bool {
 // result nobody uses, which tells a log from a constructor of the same name.
 // Only the branch's own statements before the return count, in order: a call
 // under a nested if or in a closure does not run on every path, and an err
-// assigned anew is another error. A variable made from the error carries it
-// (wrapped := fmt.Errorf(...)).
+// assigned anew is another error. A value computed from the error does not
+// count: retry := isRetryable(err) keeps none of its text.
 func handsErrorToLogWrapper(body *ast.BlockStmt, errName string, ret *ast.ReturnStmt) bool {
-	carriers := map[string]bool{errName: true}
-	carried := func(expr ast.Expr) bool { return mentionsCarrier(expr, carriers) }
+	usesErr := func(expr ast.Expr) bool { return usesVariable(expr, errName) }
 	for _, stmt := range body.List {
-		if stmt.Pos() > ret.Pos() {
+		if stmt.Pos() > ret.Pos() || rebindsVariable(stmt, errName) {
 			return false
 		}
-		switch s := stmt.(type) {
-		case *ast.AssignStmt:
-			fromError := slices.ContainsFunc(s.Rhs, carried)
-			for _, lhs := range s.Lhs {
-				if ident, ok := lhs.(*ast.Ident); ok {
-					carriers[ident.Name] = fromError
-				}
-			}
-		case *ast.ExprStmt:
-			call, ok := s.X.(*ast.CallExpr)
-			if ok && helpers.IsLogLevelName(helpers.CalleeName(call)) && slices.ContainsFunc(call.Args, carried) {
-				return true
-			}
+		exprStmt, ok := stmt.(*ast.ExprStmt)
+		if !ok {
+			continue
+		}
+		call, ok := exprStmt.X.(*ast.CallExpr)
+		if ok && helpers.IsLogLevelName(helpers.CalleeName(call)) && slices.ContainsFunc(call.Args, usesErr) {
+			return true
 		}
 	}
 	return false
 }
 
-// mentionsCarrier reports a use of one of the variables in expr. The name after
-// a dot is a field, not the variable: res.err does not use err.
-func mentionsCarrier(expr ast.Expr, carriers map[string]bool) bool {
+// rebindsVariable reports a statement that gives the name another value, at any
+// depth outside a closure: err = cleanup(), if err := cleanup(); ..., var err = x.
+// A wrap of the old value keeps the error: err = fmt.Errorf("load: %w", err).
+func rebindsVariable(stmt ast.Stmt, name string) bool {
+	isName := func(expr ast.Expr) bool { return helpers.IsIdentNamed(expr, name) }
+	found := false
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.AssignStmt:
+			keepsOld := slices.ContainsFunc(node.Rhs, func(expr ast.Expr) bool { return usesVariable(expr, name) })
+			found = found || (slices.ContainsFunc(node.Lhs, isName) && !keepsOld)
+		case *ast.ValueSpec:
+			found = found || slices.ContainsFunc(node.Names, func(ident *ast.Ident) bool { return ident.Name == name })
+		}
+		return !found
+	})
+	return found
+}
+
+// usesVariable reports a use of the variable in expr. The name after a dot and
+// the key of a literal are fields, not the variable: res.err, attrs{err: "none"}.
+func usesVariable(expr ast.Expr, name string) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.SelectorExpr:
-			found = found || mentionsCarrier(node.X, carriers)
+			found = found || usesVariable(node.X, name)
+			return false
+		case *ast.KeyValueExpr:
+			found = found || usesVariable(node.Value, name)
 			return false
 		case *ast.Ident:
-			found = found || carriers[node.Name]
+			found = found || node.Name == name
 		}
 		return !found
 	})

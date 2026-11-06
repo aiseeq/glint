@@ -199,7 +199,7 @@ func Stall(id string) bool {
 			expectedCount: 1,
 		},
 		{
-			name: "error handed to a wrapper through a variable NOT flagged",
+			name: "the error wrapped in place and handed to a wrapper NOT flagged",
 			path: "/src/backend/plan.go",
 			code: `package plan
 import "fmt"
@@ -209,9 +209,122 @@ func (a *App) Load(id string) (int, error) { return 0, nil }
 func (a *App) Stall(id string) bool {
 	n, err := a.Load(id)
 	if err != nil {
-		wrapped := fmt.Errorf("load %s: %w", id, err)
-		a.warn("not sent", "err", wrapped)
+		err = fmt.Errorf("load %s: %w", id, err)
+		a.warn("not sent", "err", err)
 		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "a value computed from the error is no log of it — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) warn(what string, kv ...any) {}
+func isRetryable(err error) bool { return false }
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		retry := isRetryable(err)
+		a.warn("not sent", "retry", retry)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "err overwritten under a nested if before the wrapper — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{ verbose bool }
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) cleanup() error { return nil }
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		if a.verbose {
+			err = a.cleanup()
+		}
+		a.warn("not sent", "err", err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "err declared anew with var before the wrapper — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) cleanup() error { return nil }
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		var err = a.cleanup()
+		a.warn("not sent", "err", err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "literal key named err handed to a wrapper — still flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type attrs struct{ err string }
+type App struct{}
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.warn("not sent", attrs{err: "none"})
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 1,
+		},
+		{
+			name: "a closure's return false before the wrapper is not the branch's NOT flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) warn(what string, kv ...any) {}
+func (a *App) each(f func() bool) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.each(func() bool { return false })
+		a.warn("not sent", "err", err)
+		return false
+	}
+	return n > 0
+}`,
+			expectedCount: 0,
+		},
+		{
+			name: "only a closure says false, the branch answers true NOT flagged",
+			path: "/src/backend/plan.go",
+			code: `package plan
+type App struct{}
+func (a *App) each(f func() bool) {}
+func (a *App) Load(id string) (int, error) { return 0, nil }
+func (a *App) Stall(id string) bool {
+	n, err := a.Load(id)
+	if err != nil {
+		a.each(func() bool { return false })
+		return true
 	}
 	return n > 0
 }`,
