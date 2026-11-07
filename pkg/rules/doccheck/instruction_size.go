@@ -19,6 +19,8 @@ const (
 	// Claude Code keeps the first 5000 tokens of a skill after compacting
 	// the context.
 	defaultSkillMaxChars = 12000
+	// A file from this share of its limit, in percent, is reported as LOW.
+	defaultNearPercent = 90
 )
 
 // InstructionSizeRule limits the size of the Claude Code instruction files:
@@ -26,8 +28,9 @@ const (
 // session, and a skill is cut to its start after the context is compacted.
 type InstructionSizeRule struct {
 	*rules.BaseRule
-	maxBytes int
-	maxChars int
+	maxBytes    int
+	maxChars    int
+	nearPercent int
 }
 
 // NewInstructionSizeRule creates the rule
@@ -36,11 +39,12 @@ func NewInstructionSizeRule() *InstructionSizeRule {
 		BaseRule: rules.NewBaseRule(
 			"instruction-size",
 			"documentation",
-			"Detects a Claude Code instruction file near or over its size limit: CLAUDE.md, CLAUDE.local.md and .claude/rules/*.md from max_bytes (24576) on, skills/*/SKILL.md from max_chars (12000 characters) on, with 80% named as the reference to shrink to; block-level HTML comments are not counted, Claude Code strips them",
+			"Detects a Claude Code instruction file near or over its size limit: CLAUDE.md, CLAUDE.local.md and .claude/rules/*.md from max_bytes (24576) on, skills/*/SKILL.md from max_chars (12000 characters) on, as LOW from near_percent (90%) of the limit, with 80% named as the reference to shrink to; block-level HTML comments are not counted, Claude Code strips them",
 			core.SeverityMedium,
 		),
-		maxBytes: defaultInstructionMaxBytes,
-		maxChars: defaultSkillMaxChars,
+		maxBytes:    defaultInstructionMaxBytes,
+		maxChars:    defaultSkillMaxChars,
+		nearPercent: defaultNearPercent,
 	}
 }
 
@@ -49,7 +53,9 @@ func (r *InstructionSizeRule) RequiresFile(path string) bool {
 	return core.InstructionKindOf(path) != core.NotInstruction
 }
 
-// Configure reads the max_bytes and max_chars thresholds.
+// Configure reads the max_bytes and max_chars thresholds and near_percent,
+// the share of the limit from which a file is reported as LOW: 1 to 100, 100
+// reports a file only at the limit.
 func (r *InstructionSizeRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
@@ -70,27 +76,41 @@ func (r *InstructionSizeRule) Configure(settings map[string]any) error {
 		}
 		*s.target = value
 	}
+	value, present, err := rules.IntSetting(settings, r.Name(), "near_percent")
+	if err != nil {
+		return err
+	}
+	if present {
+		if value < 1 || value > 100 {
+			return fmt.Errorf("configure %s: near_percent must be from 1 to 100, got %d", r.Name(), value)
+		}
+		r.nearPercent = value
+	}
 	return nil
 }
 
 // AnalyzeFile measures an instruction file against its limit. A file is
-// reported from the limit on and kept under it; the finding names the
+// reported from the limit on and kept under it, and as LOW from nearPercent
+// of the limit, so it is shrunk before it gets there; the finding names the
 // reference share it is shrunk to.
 func (r *InstructionSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	var message string
+	var m sizeMeasure
 	switch core.InstructionKindOf(ctx.Path) {
 	case core.AlwaysLoaded:
-		base := filepath.Base(ctx.Path)
-		size := len(withoutBlockComments(ctx.Lines))
-		message = sizeMessage(base, size, r.maxBytes, "bytes", "it is loaded into every session")
+		m = sizeMeasure{filepath.Base(ctx.Path), len(withoutBlockComments(ctx.Lines)), r.maxBytes, "bytes", "it is loaded into every session"}
 	case core.Skill:
-		size := utf8.RuneCountInString(withoutBlockComments(ctx.Lines))
-		message = sizeMessage("SKILL.md", size, r.maxChars, "characters", "after compacting the context Claude Code keeps only the first 5000 tokens of a skill")
+		m = sizeMeasure{"SKILL.md", utf8.RuneCountInString(withoutBlockComments(ctx.Lines)), r.maxChars, "characters", "after compacting the context Claude Code keeps only the first 5000 tokens of a skill"}
+	default:
+		return nil
 	}
+	message, near := m.message(r.nearPercent)
 	if message == "" {
 		return nil
 	}
 	v := r.CreateViolation(ctx.RelPath, 1, message)
+	if near {
+		v.Severity = core.SeverityLow
+	}
 	v.WithSuggestion(fmt.Sprintf("Do not stop at just under the limit, shrink it to the reference of %d%%: move a rule into a mechanism (a check, a hook), a file read on demand (.claude/rules with paths, a reference file of the skill), or drop it", referenceShare))
 	return []*core.Violation{v}
 }
@@ -99,16 +119,26 @@ func (r *InstructionSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 // is shrunk to.
 const referenceShare = 80
 
-// sizeMessage describes a size at or over the limit, "" below it.
-func sizeMessage(name string, size, limit int, unit, why string) string {
-	aim := fmt.Sprintf(", the reference is %d%% (%d %s)", referenceShare, limit*referenceShare/100, unit)
+// sizeMeasure is the size of an instruction file against its limit.
+type sizeMeasure struct {
+	name        string
+	size, limit int
+	unit, why   string
+}
+
+// message describes a size from nearPercent of the limit on, "" below it;
+// near reports a size under the limit.
+func (m sizeMeasure) message(nearPercent int) (message string, near bool) {
+	aim := fmt.Sprintf(", the reference is %d%% (%d %s)", referenceShare, m.limit*referenceShare/100, m.unit)
 	switch {
-	case size > limit:
-		return fmt.Sprintf("%s is %d %s without comments, over the limit of %d%s: %s", name, size, unit, limit, aim, why)
-	case size == limit:
-		return fmt.Sprintf("%s is %d %s without comments, 100%% of the limit of %d%s: %s, and the next rules put it over", name, size, unit, limit, aim, why)
+	case m.size > m.limit:
+		return fmt.Sprintf("%s is %d %s without comments, over the limit of %d%s: %s", m.name, m.size, m.unit, m.limit, aim, m.why), false
+	case m.size == m.limit:
+		return fmt.Sprintf("%s is %d %s without comments, 100%% of the limit of %d%s: %s, and the next rules put it over", m.name, m.size, m.unit, m.limit, aim, m.why), false
+	case m.size*100 >= m.limit*nearPercent:
+		return fmt.Sprintf("%s is %d %s without comments, %d%% of the limit of %d%s: %s", m.name, m.size, m.unit, m.size*100/m.limit, m.limit, aim, m.why), true
 	}
-	return ""
+	return "", false
 }
 
 // withoutBlockComments returns the text of a Markdown document without its

@@ -51,10 +51,12 @@ func TestInstructionSize(t *testing.T) {
 }
 
 func TestInstructionSizeDefaults(t *testing.T) {
-	require.Empty(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 24575)))
+	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 24575)), 1)
+	require.Equal(t, core.SeverityLow, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 24575))[0].Severity)
 	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 24576)), 1)
 	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 24577)), 1)
-	require.Empty(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 11999)))
+	require.Equal(t, core.SeverityLow, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 11999))[0].Severity)
+	require.Equal(t, core.SeverityMedium, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 12000))[0].Severity)
 	require.Len(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 12000)), 1)
 	require.Len(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 12001)), 1)
 }
@@ -64,7 +66,7 @@ func TestInstructionSizeDefaults(t *testing.T) {
 // 80% as the size to shrink it to.
 func TestInstructionSizeWarnsAtTheLimit(t *testing.T) {
 	limit := map[string]any{"max_bytes": 100, "max_chars": 100}
-	for _, size := range []int{80, 99} {
+	for _, size := range []int{80, 89} {
 		require.Empty(t, instructionSizeFindings(t, limit, "CLAUDE.md", strings.Repeat("a", size)), size)
 	}
 	got := instructionSizeFindings(t, limit, "CLAUDE.md", strings.Repeat("a", 100))
@@ -76,7 +78,7 @@ func TestInstructionSizeWarnsAtTheLimit(t *testing.T) {
 	require.Contains(t, over, "over the limit of 100")
 	require.Contains(t, over, "the reference is 80% (80 bytes)")
 
-	for _, size := range []int{85, 90, 99} {
+	for _, size := range []int{85, 89} {
 		require.Empty(t, instructionSizeFindings(t, limit, ".claude/skills/x/SKILL.md", strings.Repeat("я", size)), size)
 	}
 	got = instructionSizeFindings(t, limit, ".claude/skills/x/SKILL.md", strings.Repeat("я", 100))
@@ -89,6 +91,52 @@ func TestInstructionSizeWarnsAtTheLimit(t *testing.T) {
 	require.Contains(t, got[0].Message, "the reference is 80% (80 characters)")
 	require.Contains(t, got[0].Suggestion, "shrink it to the reference of 80%")
 	require.NotContains(t, got[0].Suggestion, "always-loaded set")
+}
+
+// From 90% of the limit to just under it a file is reported as LOW, by the
+// same measure as the limit, so it is shrunk before it reaches the limit;
+// near_percent moves the share, 100 turns the early finding off.
+func TestInstructionSizeReportsNearTheLimit(t *testing.T) {
+	limit := map[string]any{"max_bytes": 100, "max_chars": 100}
+	for _, c := range []struct{ path, letter, unit string }{
+		{"CLAUDE.md", "a", "bytes"},
+		{".claude/skills/x/SKILL.md", "я", "characters"},
+	} {
+		require.Empty(t, instructionSizeFindings(t, limit, c.path, strings.Repeat(c.letter, 89)), c.path)
+		for _, size := range []int{90, 91, 99} {
+			got := instructionSizeFindings(t, limit, c.path, strings.Repeat(c.letter, size))
+			require.Len(t, got, 1, "%s %d", c.path, size)
+			require.Equal(t, core.SeverityLow, got[0].Severity, "%s %d", c.path, size)
+			require.Contains(t, got[0].Message, fmt.Sprintf("%d %s without comments, %d%% of the limit of 100", size, c.unit, size))
+			require.Contains(t, got[0].Message, fmt.Sprintf("the reference is 80%% (80 %s)", c.unit))
+			require.Contains(t, got[0].Suggestion, "shrink it to the reference of 80%")
+		}
+		at := instructionSizeFindings(t, limit, c.path, strings.Repeat(c.letter, 100))
+		require.Len(t, at, 1, c.path)
+		require.Equal(t, core.SeverityMedium, at[0].Severity, c.path)
+		require.Contains(t, at[0].Message, "100% of the limit of 100")
+	}
+
+	// The share is measured without block comments, as the limit is.
+	commented := strings.Repeat("a", 88) + "\n<!-- " + strings.Repeat("b", 50) + " -->\n"
+	require.Empty(t, instructionSizeFindings(t, limit, "CLAUDE.md", commented))
+
+	// The default limit: worker-sized skill at 92% of 12000 characters.
+	got := instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 11081))
+	require.Len(t, got, 1)
+	require.Equal(t, core.SeverityLow, got[0].Severity)
+	require.Contains(t, got[0].Message, "11081 characters without comments, 92% of the limit of 12000")
+	require.Empty(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 10799)))
+	require.Len(t, instructionSizeFindings(t, nil, ".claude/skills/x/SKILL.md", strings.Repeat("я", 10800)), 1)
+	require.Empty(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 22118)))
+	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 22119)), 1)
+
+	near := map[string]any{"max_chars": 100, "near_percent": 95}
+	require.Empty(t, instructionSizeFindings(t, near, ".claude/skills/x/SKILL.md", strings.Repeat("я", 94)))
+	require.Len(t, instructionSizeFindings(t, near, ".claude/skills/x/SKILL.md", strings.Repeat("я", 95)), 1)
+	off := map[string]any{"max_chars": 100, "near_percent": 100}
+	require.Empty(t, instructionSizeFindings(t, off, ".claude/skills/x/SKILL.md", strings.Repeat("я", 99)))
+	require.Len(t, instructionSizeFindings(t, off, ".claude/skills/x/SKILL.md", strings.Repeat("я", 100)), 1)
 }
 
 // Claude Code strips block-level HTML comments from CLAUDE.md before the
@@ -121,6 +169,7 @@ func TestInstructionSizeSkipsBlockComments(t *testing.T) {
 func TestInstructionSizeRejectsBadThresholds(t *testing.T) {
 	for _, settings := range []map[string]any{
 		{"max_bytes": "16k"}, {"max_bytes": 0}, {"max_chars": -1}, {"max_chars": 1.5},
+		{"near_percent": 0}, {"near_percent": 101}, {"near_percent": "90%"},
 	} {
 		require.Error(t, NewInstructionSizeRule().Configure(settings), "%v", settings)
 	}
