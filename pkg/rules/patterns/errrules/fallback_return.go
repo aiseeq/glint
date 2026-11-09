@@ -155,7 +155,7 @@ func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violati
 		return r.checkIdentifierMapperMiss(ctx, fn)
 	})...)
 
-	patternkit.ForEachFunction(ctx.GoAST, func(name string, _ *ast.FuncType, body *ast.BlockStmt) {
+	patternkit.ForEachFunction(ctx.GoAST, func(name string, functionType *ast.FuncType, body *ast.BlockStmt) {
 		if r.isFunctionException(name) {
 			return
 		}
@@ -168,7 +168,7 @@ func (r *FallbackReturnRule) analyzeGoAST(ctx *core.FileContext) []*core.Violati
 		})
 		// After the branch checks: where both see an assignment, their
 		// finding stays.
-		violations = append(violations, r.checkFailedCalls(ctx, body)...)
+		violations = append(violations, r.checkFailedCalls(ctx, body, functionType)...)
 	})
 
 	return uniqueViolationLines(violations)
@@ -191,19 +191,10 @@ func uniqueViolationLines(violations []*core.Violation) []*core.Violation {
 // checkFailedCalls pairs every call with the check of its outcome that
 // follows it — `v, err := f()` with `if err != nil`, `v, ok := f()` with
 // `if !ok` — and reports what the rest of the function makes of a failure.
-func (r *FallbackReturnRule) checkFailedCalls(ctx *core.FileContext, body *ast.BlockStmt) []*core.Violation {
+func (r *FallbackReturnRule) checkFailedCalls(ctx *core.FileContext, body *ast.BlockStmt, functionType *ast.FuncType) []*core.Violation {
 	loopBodies := make(map[*ast.BlockStmt]bool)
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch loop := n.(type) {
-		case *ast.FuncLit:
-			return false
-		case *ast.ForStmt:
-			loopBodies[loop.Body] = true
-		case *ast.RangeStmt:
-			loopBodies[loop.Body] = true
-		}
-		return true
-	})
+	ifLoopBodies := make(map[*ast.IfStmt]*ast.BlockStmt)
+	ast.Walk(failedCallLoopVisitor{loopBodies: loopBodies, ifLoopBodies: ifLoopBodies}, body)
 	var violations []*core.Violation
 	check := func(list []ast.Stmt, inLoop bool) {
 		for i := 0; i+1 < len(list); i++ {
@@ -211,7 +202,7 @@ func (r *FallbackReturnRule) checkFailedCalls(ctx *core.FileContext, body *ast.B
 			if !ok || ifStmt.Init != nil {
 				continue
 			}
-			violations = append(violations, r.checkFailedCallBranch(ctx, list, i, inLoop, ifStmt, list[i])...)
+			violations = append(violations, r.checkFailedCallBranch(ctx, list, i, inLoop, ifStmt, list[i], ifLoopBodies[ifStmt], functionType, body)...)
 		}
 	}
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -226,7 +217,7 @@ func (r *FallbackReturnRule) checkFailedCalls(ctx *core.FileContext, body *ast.B
 			check(node.Body, false)
 		case *ast.IfStmt:
 			if node.Init != nil {
-				violations = append(violations, r.checkFailedCallBranch(ctx, nil, -1, false, node, node.Init)...)
+				violations = append(violations, r.checkFailedCallBranch(ctx, nil, -1, false, node, node.Init, ifLoopBodies[node], functionType, body)...)
 			}
 		}
 		return true
@@ -234,13 +225,50 @@ func (r *FallbackReturnRule) checkFailedCalls(ctx *core.FileContext, body *ast.B
 	return violations
 }
 
+type failedCallLoopVisitor struct {
+	loopBodies   map[*ast.BlockStmt]bool
+	ifLoopBodies map[*ast.IfStmt]*ast.BlockStmt
+	loopBody     *ast.BlockStmt
+}
+
+func (v failedCallLoopVisitor) Visit(node ast.Node) ast.Visitor {
+	if node == nil {
+		return nil
+	}
+	if _, ok := node.(*ast.FuncLit); ok {
+		return nil
+	}
+	if ifStmt, ok := node.(*ast.IfStmt); ok && v.loopBody != nil {
+		v.ifLoopBodies[ifStmt] = v.loopBody
+	}
+	loopBody := v.loopBody
+	switch loop := node.(type) {
+	case *ast.ForStmt:
+		v.loopBodies[loop.Body] = true
+		loopBody = loop.Body
+	case *ast.RangeStmt:
+		v.loopBodies[loop.Body] = true
+		loopBody = loop.Body
+	}
+	return failedCallLoopVisitor{loopBodies: v.loopBodies, ifLoopBodies: v.ifLoopBodies, loopBody: loopBody}
+}
+
 // checkFailedCallBranch checks a guard immediately following a fallible call.
-func (r *FallbackReturnRule) checkFailedCallBranch(ctx *core.FileContext, list []ast.Stmt, index int, inLoop bool, ifStmt *ast.IfStmt, callStmt ast.Stmt) []*core.Violation {
+func (r *FallbackReturnRule) checkFailedCallBranch(ctx *core.FileContext, list []ast.Stmt, index int, inLoop bool, ifStmt *ast.IfStmt, callStmt ast.Stmt, loopBody *ast.BlockStmt, functionType *ast.FuncType, functionBody *ast.BlockStmt) []*core.Violation {
 	if r.hasLegitimateComment(ctx.Lines, ctx.PositionFor(ifStmt).Line) {
 		return nil
 	}
 	failed := failedCall{list: list, index: index, inLoop: inLoop}
-	if results, errName := failedCallResultsForContext(ctx, callStmt); errName != "" && errorNilCheckName(ctx, ifStmt.Cond) == errName {
+	if results, errName := failedCallResultsForContext(ctx, callStmt); errName != "" {
+		if errorNilSuccessCheckName(ctx, ifStmt.Cond) == errName {
+			if v := r.detectInvertedPartialSum(ctx, list, index, ifStmt, results, errName, loopBody, functionType, functionBody); v != nil {
+				return []*core.Violation{v}
+			}
+			return nil
+		}
+		if errorNilCheckName(ctx, ifStmt.Cond) != errName {
+			return nil
+		}
 		failed.results, failed.errName = results, errName
 		violations := r.detectReplacedResult(ctx, ifStmt, results, errName)
 		violations = append(violations, r.detectLiteralReturn(ctx, ifStmt, errName)...)
@@ -258,6 +286,129 @@ func (r *FallbackReturnRule) checkFailedCallBranch(ctx *core.FileContext, list [
 		}
 	}
 	return nil
+}
+
+// detectInvertedPartialSum reports a loop that adds only successful call results.
+func (r *FallbackReturnRule) detectInvertedPartialSum(ctx *core.FileContext, list []ast.Stmt, index int, ifStmt *ast.IfStmt, results map[string]bool, errName string, loopBody *ast.BlockStmt, functionType *ast.FuncType, functionBody *ast.BlockStmt) *core.Violation {
+	if loopBody == nil || ifStmt.Else != nil || branchExit(ifStmt.Body) != exitNone || r.blockExplainsFallback(ctx, ifStmt.Body) {
+		return nil
+	}
+	if ifStmt.Init == nil && errorReadAfterIf(list, index, errName) {
+		return nil
+	}
+	name := accumulatedFrom(loopBody.List, ifStmt.Body.List, results)
+	// An error declared in the if is out of scope at the return: a same-named
+	// err there is another one.
+	returnedErr := errName
+	if assign, ok := ifStmt.Init.(*ast.AssignStmt); ok && assign.Tok == token.DEFINE {
+		returnedErr = ""
+	}
+	if name == "" || !sumReturnedAfterIf(functionBody, functionType, ifStmt, name, returnedErr) {
+		return nil
+	}
+	pos := ctx.PositionFor(ifStmt)
+	v := r.CreateViolation(ctx.RelPath, pos.Line, "Items whose call failed are skipped and the rest summed into "+name+" - the total comes out partial")
+	v.WithCode(ctx.GetLine(pos.Line))
+	v.WithSuggestion("Return the error, or leave the branch. A deliberate fallback is suppressed with the reason.")
+	v.WithContext("pattern", "failed-result-used")
+	return v
+}
+
+// errorReadAfterIf reports an error read in statements after a separate call
+// and check in the same statement list.
+func errorReadAfterIf(list []ast.Stmt, index int, errName string) bool {
+	for _, stmt := range list[index+2:] {
+		if nodeReadsIdent(stmt, errName) {
+			return true
+		}
+	}
+	return false
+}
+
+// sumReturnedAfterIf reports a later return that reads the sum. A bare return
+// also returns a named result with that name.
+func sumReturnedAfterIf(body *ast.BlockStmt, functionType *ast.FuncType, ifStmt *ast.IfStmt, sumName, errName string) bool {
+	if body == nil {
+		return false
+	}
+	namedSum, namedErr := namedFunctionResult(functionType, sumName), namedFunctionResult(functionType, errName)
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok || ret.Pos() <= ifStmt.End() {
+			return true
+		}
+		readsSum := len(ret.Results) == 0 && namedSum || expressionsReadIdent(ret.Results, sumName, true)
+		if !readsSum {
+			return true
+		}
+		readsErr := len(ret.Results) == 0 && namedErr || expressionsReadIdent(ret.Results, errName, false)
+		found = !readsErr
+		return true
+	})
+	return found
+}
+
+func namedFunctionResult(functionType *ast.FuncType, name string) bool {
+	if functionType == nil || functionType.Results == nil {
+		return false
+	}
+	for _, field := range functionType.Results.List {
+		for _, result := range field.Names {
+			if result.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// expressionsReadIdent ignores selector names and composite literal keys, and
+// with skipErrorText what is quoted in an fmt.Errorf.
+func expressionsReadIdent(exprs []ast.Expr, name string, skipErrorText bool) bool {
+	ignored := make(map[*ast.Ident]bool)
+	for _, expr := range exprs {
+		ast.Inspect(expr, func(n ast.Node) bool {
+			if _, ok := n.(*ast.FuncLit); ok {
+				return false
+			}
+			switch node := n.(type) {
+			case *ast.SelectorExpr:
+				ignored[node.Sel] = true
+			case *ast.KeyValueExpr:
+				if ident, ok := node.Key.(*ast.Ident); ok {
+					ignored[ident] = true
+				}
+			}
+			return true
+		})
+	}
+	found := false
+	for _, expr := range exprs {
+		ast.Inspect(expr, func(n ast.Node) bool {
+			if found {
+				return false
+			}
+			if _, ok := n.(*ast.FuncLit); ok {
+				return false
+			}
+			// The sum quoted in an error text is not the sum handed back.
+			if call, ok := n.(*ast.CallExpr); ok && skipErrorText && patternkit.IsSelectorCall(call, "fmt", "Errorf") {
+				return false
+			}
+			if ident, ok := n.(*ast.Ident); ok && ident.Name == name && !ignored[ident] {
+				found = true
+			}
+			return true
+		})
+	}
+	return found
 }
 
 // failedCall is a call whose outcome the next statement checks: the call is
@@ -653,13 +804,25 @@ func failedCallResultsForContext(ctx *core.FileContext, stmt ast.Stmt) (map[stri
 	return results, ident.Name
 }
 
+// errorNilSuccessCheckName identifies the error variable tested equal to nil.
+func errorNilSuccessCheckName(ctx *core.FileContext, cond ast.Expr) string {
+	return errorNilComparisonName(ctx, cond, token.EQL)
+}
+
 // errorNilCheckName identifies the error variable tested against nil.
 func errorNilCheckName(ctx *core.FileContext, cond ast.Expr) string {
-	if name := patternkit.ErrNilCheckName(cond); name != "" {
-		return name
+	return errorNilComparisonName(ctx, cond, token.NEQ)
+}
+
+// errorNilComparisonName identifies the error variable compared with nil.
+func errorNilComparisonName(ctx *core.FileContext, cond ast.Expr, op token.Token) string {
+	if op == token.NEQ {
+		if name := patternkit.ErrNilCheckName(cond); name != "" {
+			return name
+		}
 	}
 	bin, ok := ast.Unparen(cond).(*ast.BinaryExpr)
-	if !ok || bin.Op != token.NEQ || !helpers.IsNilIdent(bin.Y) {
+	if !ok || bin.Op != op || !helpers.IsNilIdent(bin.Y) {
 		return ""
 	}
 	ident, ok := ast.Unparen(bin.X).(*ast.Ident)
