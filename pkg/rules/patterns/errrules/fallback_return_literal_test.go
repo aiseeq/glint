@@ -190,6 +190,37 @@ func check(s string) bool { value, err := parse(s); if err != nil { return false
 	})
 }
 
+func TestFallbackReturn_LiteralTrueAlsoReturnedOnSuccess(t *testing.T) {
+	const prelude = "package svc\nfunc parse(string) (int, error) { return 0, nil }\nfunc check() (bool, error) { return false, nil }\nconst keepIt = true\n"
+	cases := []struct {
+		name, function string
+		want           []int
+	}{
+		{"filter returns true after the failure and on success", `func keep(s string) bool { n, err := parse(s); if err != nil { return true }; if n > 0 { return true }; return false }`, nil},
+		{"same constant on success", `func keep(s string) bool { n, err := parse(s); if err != nil { return keepIt }; if n > 0 { return true }; return false }`, nil},
+		{"false on every success is an error channel", `func failed(s string) bool { _, err := parse(s); if err != nil { return true }; return false }`, nil},
+		{"success returns the checked value", `func allowed() bool { ok, err := check(); if err != nil { return true }; return ok }`, []int{5}},
+		{"the other true is another failed call", "func both(s string) bool { n, err := parse(s); if err != nil { return true }\n_, err = parse(s); if err != nil { return true }; return n > 0 }", []int{5, 6}},
+		{"the true of a closure is not the function's", `func outer(s string) bool { n, err := parse(s); if err != nil { return true }; f := func() bool { return true }; return f() && n > 0 }`, []int{5}},
+		{"a named bool type", `type verdict bool
+func keep(s string) verdict { n, err := parse(s); if err != nil { return true }; if n > 0 { return true }; return false }`, nil},
+		{"a bare return beside the true", `func keep(s string) (ok bool) { n, err := parse(s); if err != nil { return true }; if n > 0 { return true }; if n < 0 { return }; return false }`, nil},
+		{"a true before the branch", `func keep(s string) bool { if s == "" { return true }; n, err := parse(s); if err != nil { return true }; return n > 0 }`, nil},
+		{"the filter is a closure", `func outer() func(string) bool { return func(s string) bool { n, err := parse(s); if err != nil { return true }; if n > 0 { return true }; return false } }`, nil},
+		{"a computed false and a constant false are not a true", `func keep(s string) bool { n, err := parse(s); if err != nil { return true }; if n > 9 { return false }; return n > 0 }`, []int{5}},
+		{"a true elsewhere does not excuse a literal of an any result", `func kind(s string) any { n, err := parse(s); if err != nil { return -1 }; if n > 9 { return true }; return n }`, []int{5}},
+		{"a true of an any result is not a bool answer", `func kind(s string) any { n, err := parse(s); if err != nil { return true }; if n > 9 { return true }; return n }`, []int{5}},
+		{"a valid flag beside a result claims the failed value is valid", `func lookup(s string) (int, bool) { n, err := parse(s); if err != nil { return 0, true }; return n, true }`, []int{5}},
+		{"a sentinel number returned elsewhere stays", `func find(s string) int { n, err := parse(s); if err != nil { return -1 }; if n > 9 { return -1 }; return n }`, []int{5}},
+		{"another result of the same return is still a fallback", `func pair(s string) (string, bool) { n, err := parse(s); if err != nil { return "x", true }; if n > 0 { return "y", true }; return "", false }`, []int{5}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, typedFallbackLines(t, "svc/filter.go", prelude+tc.function+"\n"))
+		})
+	}
+}
+
 func TestFallbackReturn_LiteralExcludesCallProducedNames(t *testing.T) {
 	const source = `package svc
 const Default = 3

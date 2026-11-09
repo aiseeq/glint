@@ -847,6 +847,7 @@ func (r *FallbackReturnRule) detectLiteralReturn(ctx *core.FileContext, ifStmt *
 		return nil
 	}
 	errorChannels := zeroResultPositionsOnSuccess(ctx, ifStmt)
+	trueIsOrdinary := soleBoolAlsoTrueOnSuccess(ctx, ifStmt)
 	produced := namesAssignedFromCalls(ifStmt.Body)
 	var violations []*core.Violation
 	patternkit.ForEachOwnStatement(ifStmt.Body, func(stmt ast.Stmt) {
@@ -855,7 +856,7 @@ func (r *FallbackReturnRule) detectLiteralReturn(ctx *core.FileContext, ifStmt *
 			return
 		}
 		for i, result := range ret.Results {
-			if !errorChannels[i] && isNonZeroFallbackValue(ctx, result, produced) {
+			if !errorChannels[i] && !trueIsOrdinary && isNonZeroFallbackValue(ctx, result, produced) {
 				pos := ctx.PositionFor(ret)
 				v := r.CreateViolation(ctx.RelPath, pos.Line, "The call failed and returns a fallback value instead - callers go on as if it had succeeded")
 				v.WithCode(ctx.GetLine(pos.Line))
@@ -872,37 +873,11 @@ func (r *FallbackReturnRule) detectLiteralReturn(ctx *core.FileContext, ifStmt *
 // zeroResultPositionsOnSuccess reports result positions that every return
 // outside the failed-call branch sets to a zero value.
 func zeroResultPositionsOnSuccess(ctx *core.FileContext, branch *ast.IfStmt) map[int]bool {
-	fn := enclosingFunction(ctx, branch)
-	if fn == nil {
+	body, resultTypes := enclosingBodyAndResults(ctx, branch)
+	if body == nil || len(resultTypes) == 0 {
 		return nil
 	}
-	var body *ast.BlockStmt
-	var resultCount int
-	var resultTypes []types.Type
-	switch node := fn.(type) {
-	case *ast.FuncDecl:
-		body = node.Body
-		if obj, ok := ctx.GoTypesInfo.Defs[node.Name].(*types.Func); ok {
-			if sig, ok := obj.Type().(*types.Signature); ok {
-				resultCount = sig.Results().Len()
-				for i := 0; i < resultCount; i++ {
-					resultTypes = append(resultTypes, sig.Results().At(i).Type())
-				}
-			}
-		}
-	case *ast.FuncLit:
-		body = node.Body
-		if sig, ok := ctx.GoTypesInfo.TypeOf(node).(*types.Signature); ok {
-			resultCount = sig.Results().Len()
-			for i := 0; i < resultCount; i++ {
-				resultTypes = append(resultTypes, sig.Results().At(i).Type())
-			}
-		}
-	}
-	if body == nil || resultCount == 0 {
-		return nil
-	}
-	seen, allZero, returns := successfulResultPositions(ctx, body, branch, resultCount)
+	seen, allZero, returns := successfulResultPositions(ctx, body, branch, len(resultTypes))
 	if returns == 0 {
 		return nil
 	}
@@ -915,6 +890,70 @@ func zeroResultPositionsOnSuccess(ctx *core.FileContext, branch *ast.IfStmt) map
 	return positions
 }
 
+// soleBoolAlsoTrueOnSuccess reports a function whose only result is a bool
+// and that returns a constant true outside its `err != nil` branches too. A
+// bool has no value set aside for failure, so such a true is one of the
+// function's ordinary answers, not a stand-in for the failed result. Beside
+// other results a bool says whether they are valid, and there a true after a
+// failure is a false claim.
+func soleBoolAlsoTrueOnSuccess(ctx *core.FileContext, branch *ast.IfStmt) bool {
+	body, resultTypes := enclosingBodyAndResults(ctx, branch)
+	if body == nil || len(resultTypes) != 1 || !types.Identical(resultTypes[0].Underlying(), types.Typ[types.Bool]) {
+		return false
+	}
+	found := false
+	forEachSuccessReturn(ctx, body, branch, func(ret *ast.ReturnStmt) {
+		if len(ret.Results) != 1 {
+			return
+		}
+		value := ctx.GoTypesInfo.Types[ast.Unparen(ret.Results[0])].Value
+		if value != nil && value.Kind() == constant.Bool && constant.BoolVal(value) {
+			found = true
+		}
+	})
+	return found
+}
+
+// enclosingBodyAndResults returns the body and result types of the function
+// around the branch; a nil body means none is known.
+func enclosingBodyAndResults(ctx *core.FileContext, branch *ast.IfStmt) (*ast.BlockStmt, []types.Type) {
+	var body *ast.BlockStmt
+	var signature *types.Signature
+	switch node := enclosingFunction(ctx, branch).(type) {
+	case *ast.FuncDecl:
+		body = node.Body
+		if obj, ok := ctx.GoTypesInfo.Defs[node.Name].(*types.Func); ok {
+			signature, _ = obj.Type().(*types.Signature)
+		}
+	case *ast.FuncLit:
+		body = node.Body
+		signature, _ = ctx.GoTypesInfo.TypeOf(node).(*types.Signature)
+	}
+	if signature == nil {
+		return body, nil
+	}
+	resultTypes := make([]types.Type, signature.Results().Len())
+	for i := range resultTypes {
+		resultTypes[i] = signature.Results().At(i).Type()
+	}
+	return body, resultTypes
+}
+
+// forEachSuccessReturn visits the function's own returns outside the given
+// branch and outside any other branch that checks an error.
+func forEachSuccessReturn(ctx *core.FileContext, body *ast.BlockStmt, branch *ast.IfStmt, visit func(*ast.ReturnStmt)) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		ret, ok := n.(*ast.ReturnStmt)
+		if ok && (ret.Pos() < branch.Body.Pos() || ret.End() > branch.Body.End()) && !inErrorReturnBranch(ctx, body, ret) {
+			visit(ret)
+		}
+		return true
+	})
+}
+
 // successfulResultPositions summarizes named return positions on successful paths.
 func successfulResultPositions(ctx *core.FileContext, body *ast.BlockStmt, branch *ast.IfStmt, resultCount int) ([]bool, []bool, int) {
 	seen := make([]bool, resultCount)
@@ -923,32 +962,19 @@ func successfulResultPositions(ctx *core.FileContext, body *ast.BlockStmt, branc
 		allZero[i] = true
 	}
 	returns := 0
-	ast.Inspect(body, func(n ast.Node) bool {
-		if n == nil {
-			return false
-		}
-		if _, ok := n.(*ast.FuncLit); ok {
-			return false
-		}
-		ret, ok := n.(*ast.ReturnStmt)
-		if !ok || (ret.Pos() >= branch.Body.Pos() && ret.End() <= branch.Body.End()) {
-			return true
-		}
-		if inErrorReturnBranch(ctx, body, ret) {
-			return true
-		}
+	forEachSuccessReturn(ctx, body, branch, func(ret *ast.ReturnStmt) {
 		if len(ret.Results) == 0 {
 			returns++
 			for i := range seen {
 				seen[i] = true
 			}
-			return true
+			return
 		}
 		if len(ret.Results) != resultCount {
 			for i := range allZero {
 				allZero[i] = false
 			}
-			return true
+			return
 		}
 		returns++
 		for i, result := range ret.Results {
@@ -957,7 +983,6 @@ func successfulResultPositions(ctx *core.FileContext, body *ast.BlockStmt, branc
 				allZero[i] = false
 			}
 		}
-		return true
 	})
 	return seen, allZero, returns
 }
