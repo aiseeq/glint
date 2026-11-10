@@ -136,3 +136,70 @@ func mean(xs []float64, sum float64) float64 {
 	})
 	assert.Empty(t, violations)
 }
+
+// A minimum size held in a named constant guards like the literal: below the
+// minimum the function leaves, so the length is at least that constant. A
+// constant that is not positive proves nothing.
+func TestUncheckedLenDivisionTypedAcceptsNamedMinimumGuard(t *testing.T) {
+	violations := rulestest.RunRuleOnFiles(t, NewUncheckedLenDivisionRule(), map[string]string{
+		"pool.go": `package geometry
+
+const minPool = 30
+
+const (
+	noneAllowed = 0
+	belowAll    = -1
+	huge        = 1 << 40
+	one         = 1
+)
+
+func reliable(pool []float64, sum float64) float64 {
+	if len(pool) < minPool {
+		return 0
+	}
+	n := float64(len(pool))
+	return sum / n
+}
+
+func reliableLe(pool []float64, sum float64) float64 {
+	if minPool >= len(pool) {
+		return 0
+	}
+	return sum / float64(len(pool))
+}
+
+func reliableHuge(pool []float64, sum float64) float64 {
+	if len(pool) < huge {
+		return 0
+	}
+	return sum / float64(len(pool))
+}
+
+func oneBound(pool []float64, sum float64) float64 {
+	if len(pool) < one {
+		return 0
+	}
+	return sum / float64(len(pool))
+}
+
+func zeroBound(pool []float64, sum float64) float64 {
+	if len(pool) < noneAllowed {
+		return 0
+	}
+	return sum / float64(len(pool))
+}
+
+func negativeBound(pool []float64, sum float64) float64 {
+	if len(pool) <= belowAll {
+		return 0
+	}
+	return sum / float64(len(pool))
+}
+`,
+	})
+	var lines []int
+	for _, v := range violations {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{45, 52}, lines)
+}

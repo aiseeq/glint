@@ -3,6 +3,7 @@ package moneyrules
 import (
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"maps"
@@ -502,7 +503,7 @@ func (a *lenDivisionAnalyzer) loopBodyGuards(cond ast.Expr, state *lenState) []s
 }
 
 // lengthComparisonGuard reads a comparison of a length (len(x) or a variable
-// holding it) with an integer literal and reports in which branch the
+// holding it) with an integer constant and reports in which branch the
 // collection is known to have elements.
 func (a *lenDivisionAnalyzer) lengthComparisonGuard(expr *ast.BinaryExpr, state *lenState) (whenTrue, whenFalse []string) {
 	collection, bound, op, ok := a.lengthComparison(expr, state)
@@ -523,13 +524,13 @@ func (a *lenDivisionAnalyzer) lengthComparisonGuard(expr *ast.BinaryExpr, state 
 // form.
 func (a *lenDivisionAnalyzer) lengthComparison(expr *ast.BinaryExpr, state *lenState) (collection string, bound int, op token.Token, ok bool) {
 	if collection, ok = a.lengthCollection(expr.X, state); ok {
-		if bound, ok = intLiteral(expr.Y); ok {
+		if bound, ok = a.intBound(expr.Y); ok {
 			return collection, bound, expr.Op, true
 		}
 		return "", 0, expr.Op, false
 	}
 	if collection, ok = a.lengthCollection(expr.Y, state); ok {
-		if bound, ok = intLiteral(expr.X); ok {
+		if bound, ok = a.intBound(expr.X); ok {
 			return collection, bound, mirrorComparison(expr.Op), true
 		}
 	}
@@ -570,6 +571,24 @@ func boundImpliesNonEmpty(op token.Token, bound int) (whenTrue, whenFalse bool) 
 	default:
 		return false, false
 	}
+}
+
+// intBound returns the value of an integer constant bound: a literal, or a
+// named or computed constant the type checker evaluated. A bound compared
+// with len fits int, or the package would not compile.
+func (a *lenDivisionAnalyzer) intBound(expr ast.Expr) (int, bool) {
+	if value, ok := intLiteral(expr); ok {
+		return value, true
+	}
+	if a.info == nil {
+		return 0, false
+	}
+	tv, ok := a.info.Types[expr]
+	if !ok || tv.Value == nil || tv.Value.Kind() != constant.Int {
+		return 0, false
+	}
+	value, exact := constant.Int64Val(tv.Value)
+	return int(value), exact
 }
 
 func intLiteral(expr ast.Expr) (int, bool) {
