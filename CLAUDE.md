@@ -14,7 +14,7 @@
 Правила анализатора
 - Ложное срабатывание чинить в правиле: TDD-репро (красный тест с синтетическим аналогом реального кода) → фикс правила. Suppress в целевом проекте — только для осознанного дизайна, не вместо фикса правила.
 - У правил много общей инфраструктуры (core.LineSuppresses, реестр, AST-хелперы). Документация — go/ast, go/types, tree-sitter.
-- Правила лежат по группам `pkg/rules/patterns/<группа>/`, общий слой — `pkg/rules/patterns/internal/patternkit`, хелперы тестов — `internal/patterntest`.
+- Правила лежат по группам `pkg/rules/patterns/<группа>/`, общий слой — `pkg/rules/patterns/internal/patternkit`, хелперы тестов — `pkg/rules/patterns/internal/patterntest`.
 - Path-sensitive правила писать на generic `patternkit.FlowWalker` (pkg/rules/patterns/internal/patternkit/flow_walker.go), а не на собственном обходе потока управления.
 - Список путей в flow-правилах объединять только через `patternkit.JoinFlowPaths` (там же, flow_paths.go) с ключом пути: `append(left, right...)` даёт 2^N путей и съедает память на больших функциях.
 - Поведение правила проверять запуском на тест-кейсе и `glint rules`, а не по README и комментариям.
