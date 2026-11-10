@@ -6,9 +6,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // shellWanted runs a rule over one file and compares its findings with the
@@ -550,4 +554,86 @@ if $VERBOSE; then
   echo start
 fi
 `)
+}
+
+// A script of many functions is read in time linear in its size: each
+// function's callers are looked up, not searched for line by line. Half the
+// functions are called as conditions and report nothing; the other half end
+// in a test and report.
+func TestShellTestAndLastStatusManyFunctions(t *testing.T) {
+	const n = 3000
+	var b strings.Builder
+	var want []string
+	line := 1
+	b.WriteString("#!/bin/bash\n")
+	for i := range n {
+		name := fmt.Sprintf("emit_%d", i)
+		fmt.Fprintf(&b, "%s() {\n  [ -n \"$1\" ] && echo \"$1\"\n}\n", name)
+		if i%2 == 1 {
+			want = append(want, fmt.Sprintf("many.sh:%d", line+2))
+		}
+		line += 3
+	}
+	for i := 0; i < n; i += 2 {
+		fmt.Fprintf(&b, "if emit_%d x; then echo ok; fi\n", i)
+	}
+	b.WriteString("echo done\n")
+	start := time.Now()
+	got := patterntest.ShellFindings(t, "shell-test-and-last-status", map[string]string{"many.sh": b.String()})
+	elapsed := time.Since(start)
+	sort.Slice(got, func(i, j int) bool { return lineOfFinding(got[i]) < lineOfFinding(got[j]) })
+	assert.Equal(t, want, got)
+	assert.Less(t, elapsed, 5*time.Second, "a quadratic search takes minutes on this script")
+}
+
+// Each function is looked for only on the lines that hold its name, so the
+// lines tried for all functions together stay linear in the script.
+func TestCallIndexCandidatesStayLinear(t *testing.T) {
+	const n = 400
+	var b strings.Builder
+	b.WriteString("#!/bin/bash\n")
+	for i := range n {
+		fmt.Fprintf(&b, "emit_%d() {\n  [ -n \"$1\" ] && echo \"$1\"\n}\nif emit_%d x; then echo ok; fi\n", i, i)
+	}
+	ctx, err := core.NewFileContextChecked("/x/many.sh", "/x", []byte(b.String()), core.DefaultConfig())
+	require.NoError(t, err)
+	src, ok := patternkit.ReadShell(ctx)
+	require.True(t, ok)
+	funcs := src.Functions()
+	require.Len(t, funcs, n)
+	index := newCallIndex(src)
+	tried := 0
+	for _, fn := range funcs {
+		lines := index.candidates(fn.Name)
+		require.NotEmpty(t, lines, fn.Name)
+		tried += len(lines)
+	}
+	assert.Equal(t, n, tried)
+}
+
+// A name can stand on several lines: the conditional call counts whether it is
+// the first mention or a later one, and a name with capitals is looked up as
+// written.
+func TestShellTestAndLastStatusCallAmongMentions(t *testing.T) {
+	script := `#!/bin/bash
+Check_a() {
+  [ -n "$1" ] && echo "$1"
+}
+emit_b() {
+  [ -n "$1" ] && echo "$1"
+}
+emit_c() {
+  [ -n "$1" ] && echo "$1"
+}
+emit_d() {
+  [ -n "$1" ] && echo "$1"
+}
+if emit_c x; then echo ok; fi
+echo "Check_a emit_b emit_c emit_d"
+if emit_b x; then echo ok; fi
+if Check_a x; then echo ok; fi
+emit_d x
+`
+	got := patterntest.ShellFindings(t, "shell-test-and-last-status", map[string]string{"mentions.sh": script})
+	assert.Equal(t, []string{"mentions.sh:12"}, got)
 }

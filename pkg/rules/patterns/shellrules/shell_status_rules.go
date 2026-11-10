@@ -2,6 +2,7 @@ package shellrules
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -449,8 +450,9 @@ func checkTestAndLastStatus(r *shellRule, src *patternkit.ShellSource) []*core.V
 	}
 	var out []*core.Violation
 	funcs := src.Functions()
+	calls := newCallIndex(src)
 	for _, fn := range funcs {
-		if testedCall(src, fn.Name) {
+		if calls.tested(fn.Name) {
 			continue // a predicate: callers test its status
 		}
 		body := src.Body(fn)
@@ -473,22 +475,53 @@ func checkTestAndLastStatus(r *shellRule, src *patternkit.ShellSource) []*core.V
 	return appendReport(out, testAndLast(r, src, src.Lines[last], "the script exits 1"))
 }
 
-// testedCall reports a function the script calls as a condition, by its name
-// or handed by name to a runner that calls that argument as a condition
-// (run_test "case" test_fn, with if $fn; then PASS else FAIL inside).
-func testedCall(src *patternkit.ShellSource, name string) bool {
-	quoted := regexp.QuoteMeta(name)
-	call := regexp.MustCompile(`(?:\b(?:if|elif|while|until)\s+!?\s*|\|\|\s*|&&\s*|!\s+)` + quoted + `\b|\b` + quoted + `\b[^;|&]*(?:\|\||&&)`)
-	runners := statusTestingRunners(src)
-	for _, l := range src.Lines {
+// callIndex answers tested for every function of one script: the runners are
+// found once, and a name is looked for only on the lines that hold it as a
+// word, so a script of many functions is not read once per function.
+type callIndex struct {
+	lines   []patternkit.ShellLine
+	runners map[string]int
+	words   map[string][]int // a run of word characters -> lines holding it
+}
+
+var wordRun = regexp.MustCompile(`\w+`)
+
+func newCallIndex(src *patternkit.ShellSource) *callIndex {
+	index := &callIndex{lines: src.Lines, runners: statusTestingRunners(src), words: make(map[string][]int)}
+	for i, l := range src.Lines {
 		if patternkit.ShellFuncStart.MatchString(l.Text) {
 			continue
 		}
-		if call.MatchString(l.Text) || handedToRunner(l.Text, runners, name) {
-			return true
+		seen := make(map[string]bool)
+		for _, word := range wordRun.FindAllString(l.Text, -1) {
+			if !seen[word] {
+				seen[word] = true
+				index.words[word] = append(index.words[word], i)
+			}
 		}
 	}
-	return false
+	return index
+}
+
+// tested reports a function the script calls as a condition, by its name or
+// handed by name to a runner that calls that argument as a condition
+// (run_test "case" test_fn, with if $fn; then PASS else FAIL inside).
+func (index *callIndex) tested(name string) bool {
+	quoted := regexp.QuoteMeta(name)
+	call := regexp.MustCompile(`(?:\b(?:if|elif|while|until)\s+!?\s*|\|\|\s*|&&\s*|!\s+)` + quoted + `\b|\b` + quoted + `\b[^;|&]*(?:\|\||&&)`)
+	check := func(i int) bool {
+		text := index.lines[i].Text
+		return call.MatchString(text) || handedToRunner(text, index.runners, name)
+	}
+	return slices.ContainsFunc(index.candidates(name), check)
+}
+
+// candidates returns the lines that can call name as a condition. A function
+// name is word characters only (patternkit.ShellFuncStart), and a match of it
+// has a non-word character or the line's edge on both sides, so the name
+// stands on the line as a whole run of word characters.
+func (index *callIndex) candidates(name string) []int {
+	return index.words[name]
 }
 
 // handedToRunner reports a call of a runner with name as a word of its own at
