@@ -602,9 +602,15 @@ func heredocBodyLines(lines []ShellLine) map[int]bool {
 
 func heredocDelimiters(text string) []heredocDelimiter {
 	var delimiters []heredocDelimiter
-	for _, loc := range heredocRedirect.FindAllStringSubmatchIndex(WithoutComment(text), -1) {
+	var arith []bool
+	for i, loc := range heredocRedirect.FindAllStringSubmatchIndex(WithoutComment(text), -1) {
 		start := loc[0]
-		if QuoteAt(text, start) != 0 || start > 0 && text[start-1] == '<' || loc[1] < len(text) && text[loc[1]] == '<' {
+		if i == 0 {
+			arith = arithmeticMask(text)
+		}
+		hereString := start+2 < len(text) && text[start+2] == '<'
+		if QuoteAt(text, start) != 0 || start > 0 && text[start-1] == '<' || loc[1] < len(text) && text[loc[1]] == '<' ||
+			hereString || arith != nil && arith[start] {
 			continue
 		}
 		word := ""
@@ -618,6 +624,53 @@ func heredocDelimiters(text string) []heredocDelimiter {
 		delimiters = append(delimiters, heredocDelimiter{word: word, stripTabs: text[start+2] == '-'})
 	}
 	return delimiters
+}
+
+// arithmeticMask marks the bytes of the text inside an arithmetic expansion
+// $(( )) or command (( )), where << is a shift; nil when there is none. A
+// (( closed by a single ) was two subshell parens, not arithmetic.
+func arithmeticMask(text string) []bool {
+	if !strings.Contains(text, "((") {
+		return nil
+	}
+	type frame struct{ start, parens int }
+	mask := make([]bool, len(text))
+	var frames []frame
+	var q QuoteScanner
+	for i := 0; i < len(text); {
+		step := q.Step(text, i)
+		top := len(frames) - 1
+		switch {
+		case step > 0:
+		case strings.HasPrefix(text[i:], "$(("):
+			frames = append(frames, frame{start: i})
+			step = 3
+		case top < 0 && strings.HasPrefix(text[i:], "(("):
+			frames = append(frames, frame{start: i})
+			step = 2
+		case top >= 0 && text[i] == '(':
+			frames[top].parens++
+		case top >= 0 && text[i] == ')' && frames[top].parens > 0:
+			frames[top].parens--
+		case top >= 0 && strings.HasPrefix(text[i:], "))"):
+			frames = frames[:top]
+			step = 2
+		case top >= 0 && text[i] == ')':
+			start := frames[top].start
+			frames = frames[:top]
+			for j := start; j < i; j++ {
+				mask[j] = len(frames) > 0
+			}
+		}
+		if step == 0 {
+			step = 1
+		}
+		for j := i; j < i+step && j < len(text); j++ {
+			mask[j] = len(frames) > 0
+		}
+		i += step
+	}
+	return mask
 }
 
 func stdoutIsRedirected(tail string) bool {

@@ -151,6 +151,18 @@ grouped() {
 x=$(grouped a b c)
 echo "$x"
 `,
+		"arith.sh": `#!/bin/bash
+job() {
+  local out=$1 f=$2 n
+  n=$((1 << 2))
+  if true; then
+    printf 'Result file: %s\\n' "$out"
+  fi > "$f"
+  echo "$out"
+}
+x=$(job a b)
+echo "$x"
+`,
 		"subshell.sh": `#!/bin/bash
 job() {
   local out=$1 f=$2

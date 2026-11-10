@@ -111,3 +111,41 @@ func TestStdoutRedirectStateTracksDescriptorCopies(t *testing.T) {
 		assert.Equal(t, want, stdoutRedirectState(tail), tail)
 	}
 }
+
+func TestHeredocDelimitersSkipArithmeticShift(t *testing.T) {
+	for _, text := range []string{
+		"n=$((1 << 2))",
+		"n=$(( (1+2) << 3 ))",
+		"n=$(((1+2)<<3))",
+		"(( n <<= 2 ))",
+		"if (( 1 << 2 )); then",
+		"for ((i = 1; i < 1 << 4; i <<= 1)); do",
+		"echo $(( $((1 << 2)) << 1 ))",
+		"n=$(( (1+(2)) << 3 ))",
+		"n=$(( ((1)) << 2 ))",
+		"cat <<< word",
+		`cat <<<"$((1<<2))"`,
+	} {
+		assert.Empty(t, heredocDelimiters(text), text)
+	}
+	for text, want := range map[string]string{
+		"cat <<EOF":                      "EOF",
+		"n=$((1 << 2)); cat <<EOF":       "EOF",
+		"(( n > 0 )) && cat <<END":       "END",
+		"echo $( (cat) <<SUB":            "SUB",
+		"cat <<EOF # $((1 << 2))":        "EOF",
+		"x=$(( 2 )) cat <<-'DONE'":       "DONE",
+		"((cat); echo b) <<SUBA":         "SUBA",
+		"((a) ; b) <<SUBB":               "SUBB",
+		"x=$((cat) <<SUBC":               "SUBC",
+		"((cat <<SUBD ); echo b)":        "SUBD",
+		"n=$(( ((1)+2) << 3 )); cat <<E": "E",
+		"echo '((' <<Q":                  "Q",
+		"cat <<< $((1 << 2)); cat <<HS":  "HS",
+	} {
+		got := heredocDelimiters(text)
+		if assert.Len(t, got, 1, text) {
+			assert.Equal(t, want, got[0].word, text)
+		}
+	}
+}
