@@ -22,15 +22,22 @@ type sqlTaint struct {
 }
 
 type sqlValidation struct {
-	at        token.Pos
-	scope     ast.Node
-	block     *ast.BlockStmt
-	statement int
+	at         token.Pos
+	scope      ast.Node
+	block      *ast.BlockStmt
+	statement  int
+	switchNode *ast.SwitchStmt
+}
+
+type sqlSwitchCaseContext struct {
+	switchNode *ast.SwitchStmt
+	clause     *ast.CaseClause
 }
 
 type sqlNodeContext struct {
 	callable       ast.Node
 	blocks         []*ast.BlockStmt
+	switchCases    []sqlSwitchCaseContext
 	iifeScopes     []ast.Node
 	deferredScopes []ast.Node
 }
@@ -180,6 +187,14 @@ func sqlContextFor(stack []ast.Node) sqlNodeContext {
 	var context sqlNodeContext
 	for i, parent := range stack {
 		switch node := parent.(type) {
+		case *ast.CaseClause:
+			// A clause sits in the body of its own switch: one of a type
+			// switch nested in a branch is not a case of the outer switch.
+			if i >= 2 {
+				if switchNode, ok := stack[i-2].(*ast.SwitchStmt); ok {
+					context.switchCases = append(context.switchCases, sqlSwitchCaseContext{switchNode: switchNode, clause: node})
+				}
+			}
 		case *ast.FuncDecl:
 			context.callable = node
 		case *ast.FuncLit:
@@ -454,6 +469,12 @@ func (c *sqlTaintCheck) recordSwitchWhitelist(node *ast.SwitchStmt) {
 	}
 	if rejects {
 		c.markValidated(v, node.Pos())
+		for i := range c.validated[v] {
+			validation := &c.validated[v][i]
+			if validation.at == node.Pos() {
+				validation.switchNode = node
+			}
+		}
 	}
 }
 
@@ -926,6 +947,15 @@ func (c *sqlTaintCheck) capturedByClosure(v *types.Var, scope ast.Node) bool {
 	return v.Pos() < scope.Pos() || v.Pos() >= scope.End()
 }
 
+func (c *sqlTaintCheck) inConstantCase(node *ast.SwitchStmt) bool {
+	for _, context := range c.queryContext.switchCases {
+		if context.switchNode == node && context.clause != nil && context.clause.List != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
 	for _, validation := range c.validated[v] {
 		deferred := slices.Contains(c.queryContext.deferredScopes, validation.scope)
@@ -939,7 +969,8 @@ func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
 				break
 			}
 		}
-		if queryStatement < 0 || validation.statement >= queryStatement {
+		insideValidatedCase := validation.switchNode != nil && c.inConstantCase(validation.switchNode)
+		if queryStatement < 0 || validation.statement >= queryStatement && !insideValidatedCase {
 			continue
 		}
 		// A deferred or launched closure runs later: a write anywhere after
