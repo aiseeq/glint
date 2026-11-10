@@ -15,6 +15,8 @@ func TestNonCanonicalLoggerRule(t *testing.T) {
 		path          string
 		code          string
 		expectedCount int
+		// notInMessage is text no finding may carry.
+		notInMessage string
 	}{
 		{
 			name: "log.Printf in production code",
@@ -157,6 +159,41 @@ func Save() { fmt.Println("saved") }`,
 			expectedCount: 1,
 		},
 		{
+			// Repro from a real project: a statistics CLI kept in its own
+			// directory at the repository root printed its report with fmt.
+			name: "fmt output of a package main outside cmd and tools is skipped",
+			path: "/src/statstool/reach.go",
+			code: `package main
+import "fmt"
+func report(n int) { fmt.Printf("reach %d\n", n) }`,
+			expectedCount: 0,
+		},
+		{
+			name: "log calls of a package main outside cmd and tools are checked",
+			path: "/src/statstool/reach.go",
+			code: `package main
+import "log"
+func report(n int) { log.Printf("reach %d", n) }`,
+			expectedCount: 1,
+			notInMessage:  "slog.SetDefault",
+		},
+		{
+			name: "fmt output of a library package outside cmd is checked",
+			path: "/src/statstool/reach/reach.go",
+			code: `package reach
+import "fmt"
+func Report(n int) { fmt.Printf("reach %d\n", n) }`,
+			expectedCount: 1,
+		},
+		{
+			name: "a library package under tools is checked",
+			path: "/src/tools/report/format/format.go",
+			code: `package format
+import "fmt"
+func Show() { fmt.Println("complete") }`,
+			expectedCount: 1,
+		},
+		{
 			name: "tools package main stdout is skipped",
 			path: "/src/tools/report/output.go",
 			code: `package main
@@ -257,6 +294,11 @@ var x = zapx.X`,
 
 			violations := rule.AnalyzeFile(ctx)
 			assert.Len(t, violations, tt.expectedCount, "Code: %s", tt.code)
+			for _, v := range violations {
+				if tt.notInMessage != "" {
+					assert.NotContains(t, v.Message, tt.notInMessage)
+				}
+			}
 		})
 	}
 }

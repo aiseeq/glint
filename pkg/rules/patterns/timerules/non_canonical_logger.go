@@ -31,6 +31,8 @@ func init() {
 //
 // Skips:
 //   - Test files (*_test.go, /tests/, /testdata/)
+//   - fmt.Print* in any package main: the output of a command is its result
+//     (log calls and logger imports there are still checked)
 //   - cmd/**/main.go (CLI entry points can use bare fmt/log) - unless the
 //     program installs a slog default (slog.SetDefault in any file of its
 //     directory): the standard log package then writes through slog at INFO,
@@ -121,13 +123,11 @@ func (r *NonCanonicalLoggerRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	return violations
 }
 
-// commandFile reports a package main file under cmd/ other than its main.go:
-// part of the same command, whose fmt output is the command result. Its log
-// calls and logger imports are still checked - a service in cmd/ logs from
-// more files than main.go.
+// commandFile reports a file of a package main, wherever it lies: part of a
+// command, whose fmt output is the command result. Its log calls and logger
+// imports are still checked - a service logs from more files than main.go.
 func commandFile(ctx *core.FileContext) bool {
-	path := ctx.RelPath
-	return ctx.GoPackage == "main" && (strings.HasPrefix(path, "cmd/") || strings.Contains(path, "/cmd/"))
+	return ctx.GoPackage == "main"
 }
 
 // shouldSkipFile excludes entry points and CLI utilities where bare fmt/log is
