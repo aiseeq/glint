@@ -49,6 +49,16 @@ categories:
             reason: >-
               The models off the list are the inputs of the rule's own test:
               the test checks that the rule reports them, nothing runs them.
+      signal-implicit-target:
+        exceptions:
+          - file: "pkg/rules/patterns/shellrules/signal_implicit_target_test.go"
+            reason: >-
+              The shell and Go snippets are test inputs for the rule and are
+              never executed as part of the test.
+          - file: "cmd/glint/signal_implicit_target_accept_test.go"
+            reason: >-
+              The embedded shell and Go snippets are acceptance inputs for the
+              rule and are never executed by the analyzer.
       sql-runtime-ddl:
         exceptions:
           - file: "pkg/rules/patterns/internal/patterntest/sql_sync_rules.go"

@@ -149,3 +149,9 @@ func TestHeredocDelimitersSkipArithmeticShift(t *testing.T) {
 		}
 	}
 }
+
+func TestHeredocDelimitersExported(t *testing.T) {
+	assert.Equal(t, []HeredocRedirect{{Word: "EOF"}}, HeredocDelimiters(`cat <<\EOF`))
+	assert.Equal(t, []HeredocRedirect{{Word: "A"}, {Word: "B", StripTabs: true}}, HeredocDelimiters(`cat <<A <<-'B'`))
+	assert.Empty(t, HeredocDelimiters(`n=$((1 << 4))`))
+}

@@ -580,6 +580,23 @@ type heredocDelimiter struct {
 
 var heredocRedirect = regexp.MustCompile(`<<(-?)\s*(?:'([^']*)'|"([^"]*)"|([^\s;|&]+))`)
 
+// HeredocRedirect is a here-document opened on a command line: the word that
+// ends its body, and whether <<- strips the leading tabs of the body lines.
+type HeredocRedirect struct {
+	Word      string
+	StripTabs bool
+}
+
+// HeredocDelimiters returns the here-documents a command line opens, in
+// order; their bodies follow the line one after another.
+func HeredocDelimiters(text string) []HeredocRedirect {
+	var out []HeredocRedirect
+	for _, d := range heredocDelimiters(text) {
+		out = append(out, HeredocRedirect{Word: d.word, StripTabs: d.stripTabs})
+	}
+	return out
+}
+
 func heredocBodyLines(lines []ShellLine) map[int]bool {
 	ignored := make(map[int]bool)
 	var pending []heredocDelimiter
@@ -619,7 +636,7 @@ func heredocDelimiters(text string) []heredocDelimiter {
 		} else if loc[6] >= 0 {
 			word = text[loc[6]:loc[7]]
 		} else if loc[8] >= 0 {
-			word = text[loc[8]:loc[9]]
+			word = strings.TrimPrefix(text[loc[8]:loc[9]], `\`) // <<\EOF quotes the word like <<'EOF'
 		}
 		delimiters = append(delimiters, heredocDelimiter{word: word, stripTabs: text[start+2] == '-'})
 	}
