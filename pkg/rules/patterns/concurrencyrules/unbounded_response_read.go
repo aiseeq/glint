@@ -218,8 +218,15 @@ func (s *responseState) isTracked(name string) bool {
 	return false
 }
 
+// mergeResponseStates joins states at one point. A goto leaves from a block
+// at least as deep as its label, so the extra inner scopes a state may carry
+// are blocks already left: the join keeps the scopes all states share.
 func mergeResponseStates(states ...*responseState) *responseState {
-	merged := &responseState{scopes: make([]map[string]bool, len(states[0].scopes))}
+	depth := len(states[0].scopes)
+	for _, state := range states[1:] {
+		depth = min(depth, len(state.scopes))
+	}
+	merged := &responseState{scopes: make([]map[string]bool, depth)}
 	for i := range merged.scopes {
 		merged.scopes[i] = make(map[string]bool)
 		for _, state := range states {

@@ -705,3 +705,66 @@ func plain(src io.Reader) ([]byte, error) {
 	assert.Equal(t, 29, violations[2].Line)
 	assert.Contains(t, violations[0].Message, "Decompressed stream")
 }
+
+// Gotos reach their label from blocks of different depth: the states that
+// meet there carry different numbers of scopes, and the read after the label
+// still sees the response opened in the function scope.
+func TestUnboundedResponseReadRule_GotosFromDifferentDepths(t *testing.T) {
+	for name, code := range map[string]string{
+		"deeper first": `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+func fetch(a, b bool) ([]byte, error) {
+	resp, err := http.Get("https://example.com")
+	if err != nil {
+		return nil, err
+	}
+	if a {
+		if b {
+			goto done
+		}
+	}
+	if b {
+		goto done
+	}
+	return nil, nil
+done:
+	return io.ReadAll(resp.Body)
+}
+`,
+		"shallower first": `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+func fetch(a, b bool) ([]byte, error) {
+	resp, err := http.Get("https://example.com")
+	if err != nil {
+		return nil, err
+	}
+	if b {
+		goto done
+	}
+	if a {
+		if b {
+			goto done
+		}
+	}
+done:
+	return io.ReadAll(resp.Body)
+}
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			violations := rulestest.RunRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"fetch.go": code})
+			require.Len(t, violations, 1)
+			assert.Equal(t, "resp", violations[0].Context["variable"])
+		})
+	}
+}
