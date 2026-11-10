@@ -42,8 +42,12 @@ type UnfalsifiableTestCaseRule struct {
 	mayFail        *regexp.Regexp
 	// sharedPageText maps a directory to the text of the layouts and
 	// stylesheets under it.
-	sharedPageText map[string]string
-	sharedPageErr  error
+	sharedPageText    map[string]string
+	packageNamesByDir map[string]map[string]bool
+	// unknownPackageDirs: directories with a Go file that does not parse,
+	// with the parse error; their package names are unknown.
+	unknownPackageDirs map[string]error
+	sharedPageErr      error
 }
 
 // ProjectFilesCacheExclusion keeps the rule out of the root-files cache: it reads more than the root files.
