@@ -258,3 +258,226 @@ func Materialize(raw []byte) int {
 `,
 	}))
 }
+
+// A key derived from the row into a local and looked up in a map the loop
+// fills with such keys checks the rows as well as the row's field itself
+// does; a lookup alone in a map of allowed values or owners, a tally, the
+// key of another row and a key never looked up do not.
+func TestBatchUpsertDuplicateConflictKeys_DerivedKey(t *testing.T) {
+	assert.Equal(t, []string{"store/store.go:161", "store/store.go:173", "store/store.go:183", "store/store.go:200", "store/store.go:210", "store/store.go:50", "store/store.go:61", "store/store.go:72", "store/store.go:82", "store/store.go:96"}, rulestest.ProjectRulePlaces(t, NewBatchUpsertDuplicateConflictKeysRule(), map[string]string{
+		"db/db.go": dbStubSource,
+		"store/store.go": `package store
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"example.com/rulestest/db"
+)
+
+type Row struct{ Key, Value string }
+
+type Store struct{ db db.DB }
+
+const upsert = "INSERT INTO rows (key, value) VALUES (:key, :value) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+
+func normalKey(key string) string { return strings.ToLower(key) }
+
+func (s *Store) UpsertDerived(ctx context.Context, rows []Row) error {
+	seen := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		key := normalKey(row.Key)
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("key %s appears twice", row.Key)
+		}
+		seen[key] = struct{}{}
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertDerivedByIndex(ctx context.Context, rows []Row) error {
+	seen := make(map[string]int, len(rows))
+	for i := range rows {
+		key := normalKey(rows[i].Key)
+		if prev, dup := seen[key]; dup {
+			return fmt.Errorf("rows %d and %d share a key", prev, i)
+		}
+		seen[key] = i
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertDerivedUnchecked(ctx context.Context, rows []Row, names map[string]string) error {
+	for _, row := range rows {
+		key := normalKey(row.Key)
+		_ = names["fixed"] + key
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertAllowedOnly(ctx context.Context, rows []Row, allowed map[string]bool) error {
+	for _, row := range rows {
+		key := normalKey(row.Key)
+		if !allowed[key] {
+			return fmt.Errorf("key %s is not allowed", row.Key)
+		}
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertKnownOwner(ctx context.Context, rows []Row, owners map[string]int) error {
+	for i := range rows {
+		owner := rows[i].Value
+		if _, ok := owners[owner]; !ok {
+			return fmt.Errorf("row %d has no owner", i)
+		}
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertCounted(ctx context.Context, rows []Row) error {
+	counts := map[string]int{}
+	for _, row := range rows {
+		key := normalKey(row.Key)
+		counts[key] += 1
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertFirstOnly(ctx context.Context, rows []Row) error {
+	seen := map[string]bool{}
+	last := len(rows) - 1
+	for i := range rows {
+		first := rows[last].Key
+		if seen[first] {
+			return fmt.Errorf("row %d repeats the first key", i)
+		}
+		seen[first] = true
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertVarKey(ctx context.Context, rows []Row) error {
+	seen := map[string]bool{}
+	for _, row := range rows {
+		var key = normalKey(row.Key)
+		if seen[key] {
+			return fmt.Errorf("key %s appears twice", row.Key)
+		}
+		seen[key] = true
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertIndexedInline(ctx context.Context, rows []Row) error {
+	seen := map[string]bool{}
+	for i := range rows {
+		if seen[normalKey(rows[i].Key)] {
+			return fmt.Errorf("row %d repeats a key", i)
+		}
+		seen[normalKey(rows[i].Key)] = true
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertAssignedKey(ctx context.Context, rows []Row) error {
+	seen := map[string]bool{}
+	var key string
+	for _, row := range rows {
+		key = normalKey(row.Key)
+		if seen[key] {
+			return fmt.Errorf("key %s appears twice", key)
+		}
+		seen[key] = true
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertParsedKey(ctx context.Context, rows []Row) error {
+	seen := map[string]bool{}
+	for _, row := range rows {
+		label, key := "row", normalKey(row.Key)
+		if seen[key] {
+			return fmt.Errorf("%s key %s appears twice", label, key)
+		}
+		seen[key] = true
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertMarksPrefix(ctx context.Context, rows []Row, prefix string) error {
+	seen := map[string]bool{}
+	for _, row := range rows {
+		key := normalKey(row.Key)
+		if seen[key] {
+			return fmt.Errorf("key %s is taken", key)
+		}
+		seen[prefix] = true
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertOtherLocal(ctx context.Context, rows []Row, seen map[string]bool, names []string) error {
+	for i := range rows {
+		key := normalKey(names[i])
+		if seen[key] {
+			return fmt.Errorf("name %s appears twice", key)
+		}
+		seen[key] = true
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertCollectsKeys(ctx context.Context, rows []Row) ([]string, error) {
+	keys := map[string]struct{}{}
+	for _, row := range rows {
+		key := normalKey(row.Key)
+		keys[key] = struct{}{}
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	out := make([]string, 0, len(keys))
+	for key := range keys {
+		out = append(out, key)
+	}
+	return out, err
+}
+
+func (s *Store) UpsertAllowedMarksUsed(ctx context.Context, rows []Row, allowed map[string]bool) error {
+	used := map[string]bool{}
+	for _, row := range rows {
+		code := normalKey(row.Key)
+		if !allowed[code] {
+			return fmt.Errorf("key %s is not allowed", code)
+		}
+		used[code] = true
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+
+func (s *Store) UpsertLastWinsUnused(ctx context.Context, rows []Row) error {
+	byKey := map[string]Row{}
+	for _, row := range rows {
+		key := normalKey(row.Key)
+		byKey[key] = row
+	}
+	_, err := s.db.NamedExecContext(ctx, upsert, rows)
+	return err
+}
+`,
+	}))
+}

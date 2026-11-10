@@ -351,7 +351,10 @@ func rowsSource(info *types.Info, fn *ast.FuncDecl, arg ast.Expr) *types.Var {
 }
 
 // keyedPerRow reports a loop over the rows that looks a row's value up in a
-// map: seen[row.Key], the check for a key met twice.
+// map: seen[row.Key], the check for a key met twice. A key the loop derives
+// from the row (key := normalKey(row.Key), normalKey(rows[i].Key)) counts
+// only in a map the loop also writes at such a key (seen[key] = true): a
+// lookup alone, in a map of allowed values or of owners, keeps no row out.
 func keyedPerRow(info *types.Info, body *ast.BlockStmt, rows *types.Var) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -363,27 +366,141 @@ func keyedPerRow(info *types.Info, body *ast.BlockStmt, rows *types.Var) bool {
 		if !ok || info.ObjectOf(x) != rows {
 			return true
 		}
-		row := map[types.Object]bool{}
-		for _, obj := range patternkit.RangeElementVars(info, loop) {
-			row[obj] = true
-		}
-		ast.Inspect(loop.Body, func(n ast.Node) bool {
-			index, ok := n.(*ast.IndexExpr)
-			if !ok {
-				return !found
-			}
-			typ := info.TypeOf(index.X)
-			if typ == nil {
-				return true
-			}
-			if _, isMap := typ.Underlying().(*types.Map); isMap && patternkit.MentionsAnyObject(info, index.Index, row) {
-				found = true
-			}
-			return !found
-		})
+		found = newRowKeys(info, loop, rows).keyed(loop.Body)
 		return !found
 	})
 	return found
+}
+
+// rowKeys tells the values of one row in a loop over the rows: its range
+// variables (row), the locals derived from them or from rows[i] (derived).
+type rowKeys struct {
+	info    *types.Info
+	rows    *types.Var
+	index   types.Object
+	row     map[types.Object]bool
+	derived map[types.Object]bool
+}
+
+func newRowKeys(info *types.Info, loop *ast.RangeStmt, rows *types.Var) *rowKeys {
+	keys := &rowKeys{info: info, rows: rows, row: map[types.Object]bool{}, derived: map[types.Object]bool{}}
+	for _, obj := range patternkit.RangeElementVars(info, loop) {
+		keys.row[obj] = true
+	}
+	if id, ok := loop.Key.(*ast.Ident); ok {
+		keys.index = info.ObjectOf(id)
+	}
+	return keys
+}
+
+// keyed reports a lookup of a row's own value in a map, or a read of a
+// derived key in a map the loop writes at a derived key. The write itself is
+// no lookup: a map only filled (keys[key] = struct{}{}, byKey[key] = row)
+// keeps no row out.
+func (k *rowKeys) keyed(body *ast.BlockStmt) bool {
+	written := map[types.Object]bool{}
+	targets := map[*ast.IndexExpr]bool{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.AssignStmt:
+			k.derive(node.Lhs, node.Rhs)
+			for _, lhs := range node.Lhs {
+				index, ok := ast.Unparen(lhs).(*ast.IndexExpr)
+				if !ok {
+					continue
+				}
+				targets[index] = true
+				if node.Tok == token.ASSIGN && k.isMap(index.X) && k.fromRow(index.Index) {
+					if m := mapObject(k.info, index.X); m != nil {
+						written[m] = true
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			names := make([]ast.Expr, len(node.Names))
+			for i, name := range node.Names {
+				names[i] = name
+			}
+			k.derive(names, node.Values)
+		}
+		return true
+	})
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		index, ok := n.(*ast.IndexExpr)
+		if !ok || found || !k.isMap(index.X) {
+			return !found
+		}
+		if patternkit.MentionsAnyObject(k.info, index.Index, k.row) {
+			found = true
+		} else if m := mapObject(k.info, index.X); m != nil && written[m] && !targets[index] && k.fromRow(index.Index) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// derive adds to derived the names an assignment or declaration computes
+// from the row.
+func (k *rowKeys) derive(lhs, rhs []ast.Expr) {
+	fromRow := false
+	for _, value := range rhs {
+		fromRow = fromRow || k.fromRow(value)
+	}
+	if !fromRow {
+		return
+	}
+	for _, target := range lhs {
+		if id, ok := target.(*ast.Ident); ok && id.Name != "_" {
+			if obj := k.info.ObjectOf(id); obj != nil {
+				k.derived[obj] = true
+			}
+		}
+	}
+}
+
+// fromRow reports an expression that reads the row: a range variable, a
+// derived local or rows[i] with the loop's index.
+func (k *rowKeys) fromRow(expr ast.Expr) bool {
+	if patternkit.MentionsAnyObject(k.info, expr, k.row) || patternkit.MentionsAnyObject(k.info, expr, k.derived) {
+		return true
+	}
+	if k.index == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if index, ok := n.(*ast.IndexExpr); ok {
+			x, okX := ast.Unparen(index.X).(*ast.Ident)
+			i, okI := ast.Unparen(index.Index).(*ast.Ident)
+			found = okX && okI && k.info.ObjectOf(x) == k.rows && k.info.ObjectOf(i) == k.index
+		}
+		return !found
+	})
+	return found
+}
+
+func (k *rowKeys) isMap(expr ast.Expr) bool {
+	typ := k.info.TypeOf(expr)
+	if typ == nil {
+		return false
+	}
+	_, isMap := typ.Underlying().(*types.Map)
+	return isMap
+}
+
+// mapObject is the variable or field a map expression names: seen, s.seen.
+func mapObject(info *types.Info, expr ast.Expr) types.Object {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		return info.ObjectOf(e)
+	case *ast.SelectorExpr:
+		return info.ObjectOf(e.Sel)
+	}
+	return nil
 }
 
 // selectorName returns the name a call's function is written with: Chunk of
