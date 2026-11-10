@@ -28,10 +28,14 @@ type TechDebtRule struct {
 }
 
 type debtPattern struct {
-	regex       *regexp.Regexp
-	severity    core.Severity
-	description string
-	suggestion  string
+	regex *regexp.Regexp
+	// except, when set, takes back a match of regex: a line it matches is
+	// not reported by this pattern, unless exceptUnless matches it too.
+	except       *regexp.Regexp
+	exceptUnless *regexp.Regexp
+	severity     core.Severity
+	description  string
+	suggestion   string
 }
 
 // techDebtNeedles are lower-case texts one of which every pattern match
@@ -55,6 +59,44 @@ func NewTechDebtRule() *TechDebtRule {
 	r.initPatterns()
 	r.order = slices.Sorted(maps.Keys(r.patterns))
 	return r
+}
+
+// unfinishedLabelEnd follows a word used as a label rather than as part of
+// a phrase: the comment ends, or the next thing is not a word: punctuation
+// ("в работе.", "в работе: перенос") or a dash apart from the word
+// ("в работе — перенос").
+const unfinishedLabelEnd = `(?:$|[^\p{L}\p{N}\s._-]|\.(?:[^\p{L}\p{N}]|$)|\s+(?:[^\p{L}\p{N}\s]|$))`
+
+// incompleteDataNouns name data rather than code: "incomplete" before one
+// describes the data.
+const incompleteDataNouns = `data|info(?:rmation)?|responses?|requests?|repl(?:y|ies)|records?|rows?|transactions?|payloads?|inputs?|outputs?|reads?|writes?|pages?|batch(?:es)?|results?|uploads?|downloads?|messages?|frames?|packets?|lines?|chunks?|streams?|bod(?:y|ies)|entr(?:y|ies)|items?|orders?|snapshots?|headers?|json|utf-?8|code\s+(?:points?|units?)`
+
+// incompleteWorld takes back "incomplete" and "незаверш..." that describe
+// data rather than the code: a name of data or of a data file
+// ("incomplete-data", "incomplete.json", "incomplete_reply") or the word
+// followed by a noun about data that the sentence goes on from. A sign right
+// after the noun ("incomplete data: in progress", "незавершённые записи —
+// заглушка") makes it a label. Any other use stays a marker, so the
+// pattern reports a subset of what it did before, and a marker it does not
+// know is still reported.
+var incompleteWorld = regexp.MustCompile(`(?i)//\s*(?:incomplete(?:[-._](?:` + incompleteDataNouns + `|ya?ml|csv|txt|log|xml|html)\b|\s+(?:` + incompleteDataNouns + `)(?:\s+\p{L}|\s*$))` +
+	`|незаверш\p{L}*\s+(?:заказ|транзакци|операци|плат[её]ж|сделк|запрос|ответ|загрузк|выгрузк|сесси|запис|строк|данн|пакет|сообщени)\p{L}*(?:\s+\p{L}|\s*$))`)
+
+// unfinishedCodeWords in a comment make "incomplete data handling: not
+// wired yet" about the code again: another marker of unfinished work, a word
+// for work on the code or for work left to do, or a noun about data used as
+// a modifier of a noun for work or of a part of the code ("response
+// decoding", "stream reader").
+var unfinishedCodeWords = regexp.MustCompile(`(?i)\b(?:WIP|work[\s-]+in[\s-]+progress|stub\p{L}*|tests?|checks?|handling|parsing|processing|formatting|serializ\p{L}*|validation|support|logic|(?:un)?implement\p{L}*|mapping|conversion|(?:un)?finish\p{L}*|wired|yet|later|todo|fixme|xxx|hack|tbd|temporary|needs?\s+(?:work|fix\p{L}*)|not\s+done|rework\p{L}*)\b` +
+	`|\b(?:` + incompleteDataNouns + `)\s+(?:\p{L}+(?:ing|ion|ment|[tnr]ch)(?:es|s)?|(?:read|writ|build|pars|handl|rout)ers?|caches?|layouts?|paths?|flows?|modes?|pipelines?|(?:im|ex)ports?)\b` +
+	`|обработ|разбор|импорт|экспорт|додела|дописа|передела|допилить|доработ|реализ|:\s*нет(?:\P{L}|$)`)
+
+// excused reports whether except takes back a match of the pattern on line.
+func (p *debtPattern) excused(line string) bool {
+	if p.except == nil || !p.except.MatchString(line) {
+		return false
+	}
+	return p.exceptUnless == nil || !p.exceptUnless.MatchString(line)
 }
 
 func (r *TechDebtRule) initPatterns() {
@@ -116,10 +158,15 @@ func (r *TechDebtRule) initPatterns() {
 			suggestion:  "Add explanation why ignoring is safe (e.g. 'Non-critical: uses defaults if fails')",
 		},
 		"unfinished_work": {
-			regex:       regexp.MustCompile(`(?i)//\s*(\bWIP\b|work\s+in\s+progress|not\s+finished|incomplete|незаверш|в\s+работе)`),
-			severity:    core.SeverityMedium,
-			description: "Unfinished work marker",
-			suggestion:  "Complete the implementation or create a task",
+			// "incomplete data", "незавершённые транзакции" describe the
+			// world, not the code (incompleteWorld); "в работе" marks work
+			// only as a label, "в работе сервиса" is ordinary prose.
+			regex:        regexp.MustCompile(`(?i)//\s*(\bWIP\b|work\s+in\s+progress|not\s+finished|incomplete|незаверш|в\s+работе` + unfinishedLabelEnd + `)`),
+			except:       incompleteWorld,
+			exceptUnless: unfinishedCodeWords,
+			severity:     core.SeverityMedium,
+			description:  "Unfinished work marker",
+			suggestion:   "Complete the implementation or create a task",
 		},
 	}
 }
@@ -151,7 +198,7 @@ func (r *TechDebtRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 		for _, patternName := range r.order {
 			pattern := r.patterns[patternName]
-			if pattern.regex.MatchString(line) {
+			if pattern.regex.MatchString(line) && !pattern.excused(line) {
 				v := r.CreateViolation(ctx.RelPath, lineNum+1, pattern.description)
 				v.Severity = pattern.severity
 				v.WithCode(trimmed)
