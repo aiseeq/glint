@@ -850,3 +850,31 @@ func TestAnalyzeFilesReportsPanickingRule(t *testing.T) {
 		t.Fatalf("got %v, want an error naming the rule and the file", err)
 	}
 }
+
+// A run over a file no Go rule reports on, with every rule the default
+// configuration enables, loads no Go project: a typed Go rule that analyzes
+// other languages too must say which files it reports on.
+func TestPrepareScopedAnalysisDefaultRulesSkipGoProjectForConfigFile(t *testing.T) {
+	root := writeAnalysisModule(t, "package check\n")
+	conf := filepath.Join(root, "app.conf")
+	if err := os.WriteFile(conf, []byte("listen = 8080\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.DefaultConfig()
+	loader := &countingGoProjectLoader{loader: core.NewGoProjectLoader()}
+	prepared, err := prepareScopedAnalysis(loader, analysisRoot{dir: root, scopes: []string{conf}}, cfg, rules.GetEnabled(cfg), false)
+	if err != nil {
+		t.Fatalf("prepare scoped analysis: %v", err)
+	}
+	if loader.loads != 0 || prepared.project != nil {
+		var typed []string
+		for _, rule := range prepared.enabledRules {
+			if _, ok := rule.(rules.TypedGoProjectRule); ok {
+				if _, declared := rule.(rules.FindingFileRule); !declared {
+					typed = append(typed, rule.Name())
+				}
+			}
+		}
+		t.Fatalf("Go project loads=%d, want none; typed rules without ReportsOn: %v", loader.loads, typed)
+	}
+}

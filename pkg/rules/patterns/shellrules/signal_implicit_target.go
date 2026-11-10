@@ -50,6 +50,12 @@ func (r *signalImplicitTargetRule) RequiresSSA() bool                           
 func (r *signalImplicitTargetRule) NeedsTypedGoProject(_ []*core.FileContext) bool { return true }
 func (r *signalImplicitTargetRule) TypedGoProjectImports() []string                { return nil }
 
+// ReportsOn reports whether signalImplicitTargetRule can report on this file:
+// Go (tests too: their scripts run), shell scripts and Makefiles.
+func (r *signalImplicitTargetRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile() || ctx.IsShellFile() || ctx.IsMakefile()
+}
+
 func (r *signalImplicitTargetRule) shell(ctx *core.FileContext, src *patternkit.ShellSource) []*core.Violation {
 	var inputs []signalInput
 	if src.Make {

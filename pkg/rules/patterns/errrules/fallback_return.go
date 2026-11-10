@@ -46,6 +46,12 @@ func (r *FallbackReturnRule) NeedsTypedGoProject(files []*core.FileContext) bool
 	return slices.ContainsFunc(files, func(file *core.FileContext) bool { return file.IsGoFile() })
 }
 
+// ReportsOn reports whether FallbackReturnRule can report on this file: Go,
+// TypeScript or JavaScript outside tests, mocks and generated code.
+func (r *FallbackReturnRule) ReportsOn(ctx *core.FileContext) bool {
+	return (ctx.IsGoFile() || ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile()) && !r.shouldSkipFile(ctx)
+}
+
 // TypedGoProjectImports lists no extra imports because fallback analysis uses each file's package load.
 func (r *FallbackReturnRule) TypedGoProjectImports() []string { return nil }
 
