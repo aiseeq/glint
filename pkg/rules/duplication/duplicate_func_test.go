@@ -1,12 +1,19 @@
 package duplication
 
 import (
+	"errors"
 	"fmt"
+	"go/token"
+	"go/types"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 
+	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
@@ -234,11 +241,16 @@ func TestDuplicateFuncAcrossPackagesInternalWithoutSharedImportAdvice(t *testing
 		"zoutside/main.go":            streamFunction("main", "IsStreamingRequest", "req"),
 	}
 	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
-	assert.Len(t, violations, 1)
-	assert.Equal(t, "zoutside/main.go", violations[0].File)
-	assert.Contains(t, violations[0].Message, "example.com/rulestest/a/internal/shared.IsStreamRequest")
-	assert.Contains(t, violations[0].Message, "move one implementation into a package both can import")
-	assert.Contains(t, violations[0].Suggestion, "Move the shared implementation into a package both packages can import")
+	require.Len(t, violations, 2, "with no package to keep it, each copy is to move")
+	byFile := map[string]*core.Violation{violations[0].File: violations[0], violations[1].File: violations[1]}
+	require.Contains(t, byFile, "zoutside/main.go")
+	require.Contains(t, byFile, "a/internal/shared/stream.go")
+	assert.Contains(t, byFile["zoutside/main.go"].Message, "example.com/rulestest/a/internal/shared.IsStreamRequest")
+	assert.Contains(t, byFile["a/internal/shared/stream.go"].Message, "example.com/rulestest/zoutside.IsStreamingRequest")
+	for _, v := range violations {
+		assert.Contains(t, v.Message, "move one implementation into a package both can import")
+		assert.Contains(t, v.Suggestion, "Move the shared implementation into a package both packages can import")
+	}
 }
 
 func TestDuplicateFuncAcrossPackagesMainPackagesNeedMoveAdvice(t *testing.T) {
@@ -247,9 +259,11 @@ func TestDuplicateFuncAcrossPackagesMainPackagesNeedMoveAdvice(t *testing.T) {
 		"cmd/beta/main.go":  streamFunction("main", "IsStreamingRequest", "req"),
 	}
 	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
-	assert.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "move one implementation into a package both can import")
-	assert.Contains(t, violations[0].Suggestion, "Move the shared implementation into a package both packages can import")
+	require.Len(t, violations, 2, "with no package to keep it, each copy is to move")
+	for _, v := range violations {
+		assert.Contains(t, v.Message, "move one implementation into a package both can import")
+		assert.Contains(t, v.Suggestion, "Move the shared implementation into a package both packages can import")
+	}
 }
 
 func streamFunction(pkg, name, param string) string {
@@ -380,4 +394,122 @@ func labels(xs []int) []string {
 		files := map[string]string{"lib/lib.go": lib, "alpha/alpha.go": copyOf("alpha", call), "beta/beta.go": copyOf("beta", call)}
 		assert.Len(t, rulestest.ProjectRulePlaces(t, NewDuplicateFuncAcrossPackagesRule(), files), 1, call)
 	}
+}
+
+// A package that imports the other copy's package cannot be the one it calls:
+// the import back closes a cycle. The copy in the importing package is the
+// one to drop and call the imported package instead, directly or through a
+// package between them.
+func TestDuplicateFuncAcrossPackagesAdviceAvoidsImportCycle(t *testing.T) {
+	helper := "package %s\n\nimport \"strings\"\n\nfunc formatLabel(name string) string { return strings.ToUpper(name) + \":\" }\n"
+	for name, files := range map[string]map[string]string{
+		"direct": {
+			"alpha/label.go": fmt.Sprintf(helper, "alpha"),
+			"alpha/use.go":   "package alpha\n\nimport \"example.com/rulestest/beta\"\n\nvar _ = beta.Name\n",
+			"beta/label.go":  fmt.Sprintf(helper, "beta") + "\nconst Name = \"beta\"\n",
+		},
+		"through a package": {
+			"alpha/label.go": fmt.Sprintf(helper, "alpha"),
+			"alpha/use.go":   "package alpha\n\nimport \"example.com/rulestest/mid\"\n\nvar _ = mid.Name\n",
+			"mid/mid.go":     "package mid\n\nimport \"example.com/rulestest/beta\"\n\nconst Name = beta.Name\n",
+			"beta/label.go":  fmt.Sprintf(helper, "beta") + "\nconst Name = \"beta\"\n",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+			require.Len(t, violations, 1)
+			assert.Equal(t, "alpha/label.go", violations[0].File)
+			assert.Contains(t, violations[0].Message, "duplicates example.com/rulestest/beta — keep one implementation, export it")
+		})
+	}
+}
+
+// The same holds for copies matched by body under different names.
+func TestDuplicateFuncAcrossPackagesRenamedBodyAvoidsImportCycle(t *testing.T) {
+	files := map[string]string{
+		"alpha/stream.go": streamFunction("alpha", "IsStreamRequest", "request"),
+		"alpha/use.go":    "package alpha\n\nimport \"example.com/rulestest/beta\"\n\nvar _ = beta.IsStreamingRequest\n",
+		"beta/stream.go":  streamFunction("beta", "IsStreamingRequest", "req"),
+	}
+	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "alpha/stream.go", violations[0].File)
+	assert.Contains(t, violations[0].Message, "example.com/rulestest/beta.IsStreamingRequest")
+	assert.Contains(t, violations[0].Suggestion, "call it from both")
+}
+
+// go test and go vet build a package with its in-package tests: a test of
+// alpha importing beta makes beta importing alpha a cycle there, while an
+// external test package (alpha_test) adds no edge to alpha.
+func TestDuplicateFuncAcrossPackagesAdviceCountsInPackageTestImports(t *testing.T) {
+	helper := "package %s\n\nimport \"strings\"\n\nfunc formatLabel(name string) string { return strings.ToUpper(name) + \":\" }\n"
+	files := map[string]string{
+		"alpha/label.go":      fmt.Sprintf(helper, "alpha"),
+		"alpha/label_test.go": "package alpha\n\nimport (\n\t\"testing\"\n\n\t\"example.com/rulestest/beta\"\n)\n\nfunc TestName(t *testing.T) { _ = beta.Name }\n",
+		"beta/label.go":       fmt.Sprintf(helper, "beta") + "\nconst Name = \"beta\"\n",
+	}
+	violations := rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "alpha/label.go", violations[0].File)
+	assert.Contains(t, violations[0].Message, "duplicates example.com/rulestest/beta")
+
+	files["alpha/label_test.go"] = "package alpha_test\n\nimport (\n\t\"testing\"\n\n\t\"example.com/rulestest/beta\"\n)\n\nfunc TestName(t *testing.T) { _ = beta.Name }\n"
+	violations = rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "beta/label.go", violations[0].File, "an external test package closes no cycle")
+	assert.Contains(t, violations[0].Message, "duplicates example.com/rulestest/alpha")
+
+	files["alpha/label_test.go"] = "package alpha\n\nimport (\n\t\"testing\"\n\n\t\"example.com/rulestest/testutil\"\n)\n\nfunc TestName(t *testing.T) { _ = testutil.Name }\n"
+	files["testutil/util.go"] = "package testutil\n\nimport \"example.com/rulestest/beta\"\n\nconst Name = beta.Name\n"
+	violations = rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "alpha/label.go", violations[0].File, "the test of alpha reaches beta through testutil")
+	assert.Contains(t, violations[0].Message, "duplicates example.com/rulestest/beta")
+	delete(files, "testutil/util.go")
+
+	delete(files, "alpha/label_test.go")
+	files["alpha/label.go"] = "package alpha\n\nimport (\n\t\"strings\"\n\n\t\"example.com/rulestest/mid\"\n)\n\nvar _ = mid.Name\n\nfunc formatLabel(name string) string { return strings.ToUpper(name) + \":\" }\n"
+	files["mid/mid.go"] = "package mid\n\nconst Name = \"mid\"\n"
+	files["mid/mid_test.go"] = "package mid\n\nimport (\n\t\"testing\"\n\n\t\"example.com/rulestest/beta\"\n)\n\nfunc TestName(t *testing.T) { _ = beta.Name }\n"
+	violations = rulestest.RunRuleOnFiles(t, NewDuplicateFuncAcrossPackagesRule(), files)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "alpha/label.go", violations[0].File, "beta importing alpha closes a cycle in the test of mid")
+	assert.Contains(t, violations[0].Message, "duplicates example.com/rulestest/beta")
+}
+
+func TestDuplicateFuncAcrossPackagesUnreadTestsKeepNoImplementation(t *testing.T) {
+	alpha := types.NewPackage("example.com/x/alpha", "alpha")
+	beta := types.NewPackage("example.com/x/beta", "beta")
+	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+	copies := []*types.Func{types.NewFunc(token.NoPos, alpha, "f", sig), types.NewFunc(token.NoPos, beta, "f", sig)}
+	newGraph := func(err error) *importGraph {
+		graph := newImportGraph(&core.GoProjectContext{})
+		graph.tests[alpha.Path()] = testImportList{err: err}
+		return graph
+	}
+	assert.True(t, newGraph(nil).importedByAll(alpha, copies))
+	assert.False(t, newGraph(errors.New("unreadable")).importedByAll(alpha, copies), "tests that cannot be read may import beta")
+}
+
+func TestDuplicateFuncAcrossPackagesTestImportThroughDependency(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, src string) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(src), 0o600))
+	}
+	write("label.go", "package alpha\n")
+	write("_old_test.go", "package alpha\n\nimport (\n")
+	alphaTypes := types.NewPackage("example.com/x/alpha", "alpha")
+	betaTypes := types.NewPackage("example.com/x/beta", "beta")
+	beta := &packages.Package{PkgPath: betaTypes.Path(), Name: "beta"}
+	mid := &packages.Package{PkgPath: "example.com/ext/mid", Name: "mid", Imports: map[string]*packages.Package{beta.PkgPath: beta}}
+	gamma := &packages.Package{PkgPath: "example.com/x/gamma", Name: "gamma", Imports: map[string]*packages.Package{mid.PkgPath: mid}}
+	alpha := &packages.Package{PkgPath: alphaTypes.Path(), Name: "alpha", GoFiles: []string{filepath.Join(dir, "label.go")}}
+	ctx := &core.GoProjectContext{Packages: []*core.GoPackageContext{{Package: alpha}, {Package: beta}, {Package: gamma}}}
+	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+	copies := []*types.Func{types.NewFunc(token.NoPos, alphaTypes, "f", sig), types.NewFunc(token.NoPos, betaTypes, "f", sig)}
+
+	assert.True(t, newImportGraph(ctx).importedByAll(alphaTypes, copies), "go skips _old_test.go, so it does not make the tests unread")
+
+	write("label_test.go", "package alpha\n\nimport \"example.com/ext/mid\"\n\nvar _ = mid.Name\n")
+	assert.False(t, newImportGraph(ctx).importedByAll(alphaTypes, copies), "the test of alpha reaches beta through mid, a dependency of gamma")
 }

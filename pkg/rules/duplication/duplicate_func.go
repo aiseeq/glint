@@ -4,15 +4,21 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/parser"
+	"go/token"
 	"go/types"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/helpers"
+	"golang.org/x/tools/go/packages"
 )
 
 func init() {
@@ -70,8 +76,9 @@ func (r *DuplicateFuncAcrossPackagesRule) AnalyzeGoProject(ctx *core.GoProjectCo
 	if err != nil {
 		return nil, err
 	}
-	twins := keyedTwins(byKey)
-	maps.Copy(twins, bodyTwins(byBody))
+	graph := newImportGraph(ctx)
+	twins := keyedTwins(byKey, graph)
+	maps.Copy(twins, bodyTwins(byBody, graph))
 	if len(twins) == 0 {
 		return nil, nil
 	}
@@ -134,7 +141,7 @@ type duplicateFuncTwin struct {
 	unexported bool
 }
 
-func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]duplicateFuncTwin {
+func keyedTwins(byKey map[string][]*types.Func, graph *importGraph) map[*types.Func]duplicateFuncTwin {
 	twins := make(map[*types.Func]duplicateFuncTwin)
 	keys := slices.Sorted(maps.Keys(byKey))
 	for _, key := range keys {
@@ -147,7 +154,7 @@ func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]duplicateFuncTwi
 		// Named helpers are unexported by selection, so calling across needs
 		// an export, and only a package every copy can import may keep it:
 		// that package is the twin of every other copy and is not reported.
-		kept := slices.IndexFunc(copies, func(c *types.Func) bool { return packageImportedByAll(c.Pkg(), copies) })
+		kept := slices.IndexFunc(copies, func(c *types.Func) bool { return graph.importedByAll(c.Pkg(), copies) })
 		if kept >= 0 {
 			for i, c := range copies {
 				if i != kept {
@@ -169,7 +176,7 @@ func keyedTwins(byKey map[string][]*types.Func) map[*types.Func]duplicateFuncTwi
 	return twins
 }
 
-func bodyTwins(byBody map[string][]*types.Func) map[*types.Func]duplicateFuncTwin {
+func bodyTwins(byBody map[string][]*types.Func, graph *importGraph) map[*types.Func]duplicateFuncTwin {
 	twins := make(map[*types.Func]duplicateFuncTwin)
 	bodyKeys := slices.Sorted(maps.Keys(byBody))
 	for _, key := range bodyKeys {
@@ -180,35 +187,194 @@ func bodyTwins(byBody map[string][]*types.Func) map[*types.Func]duplicateFuncTwi
 		sort.Slice(copies, func(i, j int) bool { return originalFuncLess(copies[i], copies[j]) })
 		original, canCall := copies[0], false
 		for _, candidate := range copies {
-			if packageImportedByAll(candidate.Pkg(), copies) {
+			if graph.importedByAll(candidate.Pkg(), copies) {
 				original, canCall = candidate, true
 				break
 			}
 		}
 		for _, copyFn := range copies {
+			twin := original
 			if copyFn == original {
-				continue
+				// A kept copy is not reported; with none to keep the first
+				// copy is reported too, against the second.
+				if canCall {
+					continue
+				}
+				twin = copies[1]
 			}
 			twins[copyFn] = duplicateFuncTwin{
-				original:   fmt.Sprintf("%s.%s", original.Pkg().Path(), original.Name()),
+				original:   fmt.Sprintf("%s.%s", twin.Pkg().Path(), twin.Name()),
 				canCall:    canCall,
-				unexported: !original.Exported(),
+				unexported: !twin.Exported(),
 			}
 		}
 	}
 	return twins
 }
 
-func packageImportedByAll(candidate *types.Package, copies []*types.Func) bool {
+// importGraph answers whether a package reaches another through imports. A
+// package that reaches a copy's package cannot keep the implementation: the
+// copy importing it back would close a cycle. go vet and go test build each
+// package with its in-package tests, so the test of any package the candidate
+// reaches closes the cycle too when it imports the copy: those test files are
+// read from disk for their imports, which the load without tests leaves out.
+// A package whose tests cannot be read keeps no implementation either: what
+// they import is unknown.
+type importGraph struct {
+	imports *importReach
+	// known holds the loaded packages and every package they import.
+	known    map[string]*packages.Package
+	closures map[string]map[string]bool
+	tests    map[string]testImportList
+	reached  map[string]cycleReach
+}
+
+type testImportList struct {
+	paths []string
+	err   error
+}
+
+type cycleReach struct {
+	paths map[string]bool
+	// unread is set when the tests of a package on the way could not be read.
+	unread bool
+}
+
+func newImportGraph(ctx *core.GoProjectContext) *importGraph {
+	graph := &importGraph{
+		imports:  newImportReach(ctx),
+		known:    map[string]*packages.Package{},
+		closures: map[string]map[string]bool{},
+		tests:    map[string]testImportList{},
+		reached:  map[string]cycleReach{},
+	}
+	var index func(pkg *packages.Package)
+	index = func(pkg *packages.Package) {
+		if pkg == nil || graph.known[pkg.PkgPath] != nil {
+			return
+		}
+		graph.known[pkg.PkgPath] = pkg
+		for _, dep := range pkg.Imports {
+			index(dep)
+		}
+	}
+	for _, pkg := range graph.imports.byPath {
+		index(pkg)
+	}
+	return graph
+}
+
+func (g *importGraph) importedByAll(candidate *types.Package, copies []*types.Func) bool {
 	if candidate == nil || candidate.Name() == "main" {
 		return false
 	}
+	reach := g.reaches(candidate.Path())
+	if reach.unread {
+		return false
+	}
 	for _, copyFn := range copies {
-		if copyFn.Pkg() != candidate && !packageImportableFrom(copyFn.Pkg().Path(), candidate.Path()) {
+		if copyFn.Pkg() == candidate {
+			continue
+		}
+		if !packageImportableFrom(copyFn.Pkg().Path(), candidate.Path()) || reach.paths[copyFn.Pkg().Path()] {
 			return false
 		}
 	}
 	return true
+}
+
+// reaches returns the import paths a new import of from would close a cycle
+// with: those from imports, directly or through other packages, and those the
+// in-package tests of from or of a package it reaches import, directly or
+// through other packages.
+func (g *importGraph) reaches(from string) cycleReach {
+	if reach, ok := g.reached[from]; ok {
+		return reach
+	}
+	closure := g.closure(from)
+	reach := cycleReach{paths: make(map[string]bool, len(closure))}
+	addTests := func(path string) {
+		tests := g.testImports(path)
+		if tests.err != nil {
+			reach.unread = true
+			return
+		}
+		for _, imported := range tests.paths {
+			reach.paths[imported] = true
+			maps.Copy(reach.paths, g.closure(imported))
+		}
+	}
+	addTests(from)
+	for path := range closure {
+		reach.paths[path] = true
+		addTests(path)
+	}
+	g.reached[from] = reach
+	return reach
+}
+
+// closure returns the loaded packages (the copies are among them) a loaded
+// package or a dependency of one reaches through imports. A package only tests import is not loaded, so what
+// it imports is not seen: a module that depends back on this one through such
+// a package is out of reach.
+func (g *importGraph) closure(path string) map[string]bool {
+	if closure, ok := g.closures[path]; ok {
+		return closure
+	}
+	var closure map[string]bool
+	if pkg := g.known[path]; pkg != nil {
+		closure = map[string]bool{}
+		for reached := range g.imports.imports(pkg) {
+			if g.imports.byPath[reached] != nil {
+				closure[reached] = true
+			}
+		}
+	}
+	g.closures[path] = closure
+	return closure
+}
+
+// testImports lists the imports of the in-package test files (package p, not
+// p_test) of a package of the project, once per package.
+func (g *importGraph) testImports(path string) testImportList {
+	if tests, ok := g.tests[path]; ok {
+		return tests
+	}
+	var tests testImportList
+	if pkg := g.imports.byPath[path]; pkg != nil && len(pkg.GoFiles) > 0 {
+		tests.paths, tests.err = readTestImports(filepath.Dir(pkg.GoFiles[0]), pkg.Name)
+	}
+	g.tests[path] = tests
+	return tests
+}
+
+func readTestImports(dir, pkgName string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("list tests of %s: %w", dir, err)
+	}
+	var paths []string
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") || strings.HasPrefix(entry.Name(), "_") || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, entry.Name()), nil, parser.ImportsOnly)
+		if err != nil {
+			return nil, fmt.Errorf("read imports of %s: %w", entry.Name(), err)
+		}
+		if file.Name.Name != pkgName {
+			continue
+		}
+		for _, spec := range file.Imports {
+			path, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				return nil, fmt.Errorf("import path %s in %s: %w", spec.Path.Value, entry.Name(), err)
+			}
+			paths = append(paths, path)
+		}
+	}
+	return paths, nil
 }
 
 func packageImportableFrom(importerPath, importedPath string) bool {
