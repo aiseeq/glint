@@ -529,10 +529,27 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 			answer.TSC7 = append(answer.TSC7, d)
 		}
 	}
-	if err := storeProjectStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, answer, slowStarted); err != nil {
-		return tscAnswer{}, err
+	if !hasUnresolvedReferenceDiagnostic(answer) {
+		if err := storeProjectStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, answer, slowStarted); err != nil {
+			return tscAnswer{}, err
+		}
 	}
 	return answer, nil
+}
+
+// hasUnresolvedReferenceDiagnostic reports a module or file reference that
+// could resolve after a file or package appears, so such an answer is not
+// kept by stat.
+func hasUnresolvedReferenceDiagnostic(answer tscAnswer) bool {
+	for _, diagnostics := range [][]tscDiagnostic{answer.Errors, answer.TSC7} {
+		for _, diagnostic := range diagnostics {
+			switch diagnostic.Code {
+			case "TS2307", "TS2792", "TS7016", "TS2688", "TS6053":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func incrementalTscDiagnostics(tsc, dir, config string, args ...string) ([]tscDiagnostic, []byte, error) {
@@ -649,7 +666,7 @@ func runStandalone(file string, global globalTscInfo) (tscAnswer, error) {
 		return tscAnswer{}, err
 	}
 	if hit {
-		if err := storeStatFingerprintIfStable(identity, []string{global.path}, "", listed, before, key, slowStarted, global.typeRoots); err != nil {
+		if err := storeStandaloneFingerprint(identity, global, listed, before, key, slowStarted, answer); err != nil {
 			return tscAnswer{}, err
 		}
 		return answer, nil
@@ -661,10 +678,20 @@ func runStandalone(file string, global globalTscInfo) (tscAnswer, error) {
 	if err := tscCache.Store(key, answer); err != nil {
 		return tscAnswer{}, err
 	}
-	if err := storeStatFingerprintIfStable(identity, []string{global.path}, "", listed, before, key, slowStarted, global.typeRoots); err != nil {
+	if err := storeStandaloneFingerprint(identity, global, listed, before, key, slowStarted, answer); err != nil {
 		return tscAnswer{}, err
 	}
 	return answer, nil
+}
+
+// storeStandaloneFingerprint keeps the stat fingerprint of a standalone file
+// unless its answer misses a module: the file that appears later need not lie
+// in a directory the fingerprint watches.
+func storeStandaloneFingerprint(identity []string, global globalTscInfo, listed []byte, before tscStatFingerprint, key string, slowStarted time.Time, answer tscAnswer) error {
+	if hasUnresolvedReferenceDiagnostic(answer) {
+		return nil
+	}
+	return storeStatFingerprintIfStable(identity, []string{global.path}, "", listed, before, key, slowStarted, global.typeRoots)
 }
 
 type tscFileStat struct {

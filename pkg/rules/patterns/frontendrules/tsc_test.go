@@ -616,3 +616,33 @@ exit 2
 	assert.Contains(t, err.Error(), "failed without reporting an error")
 	assert.Contains(t, err.Error(), "Maximum call stack")
 }
+
+func TestTscAnswerWithUnresolvedReferenceIsNotCached(t *testing.T) {
+	for _, code := range []string{"TS2307", "TS2792", "TS7016", "TS2688", "TS6053"} {
+		t.Run(code, func(t *testing.T) {
+			answer := tscAnswer{Errors: []tscDiagnostic{{Code: code}}}
+			assert.True(t, hasUnresolvedReferenceDiagnostic(answer))
+		})
+	}
+}
+
+func TestTsc7UnresolvedReferenceIsNotCached(t *testing.T) {
+	answer := tscAnswer{TSC7: []tscDiagnostic{{Code: "TS2792"}}}
+	assert.True(t, hasUnresolvedReferenceDiagnostic(answer))
+}
+
+// A file no tsconfig compiles is checked again once the file it imports
+// appears, as a file of a program is.
+func TestTscStatCacheStandaloneMissingModuleAppears(t *testing.T) {
+	root, local, _ := countedTscProject(t, map[string]string{
+		"tsconfig.json":  strictTSConfig,
+		"src/main.ts":    "export const n: number = 1\n",
+		"tools/run.ts":   "import { gen } from \"../shared/gen\"\nconsole.log(gen)\n",
+		"shared/kept.ts": "export const kept = 1\n",
+	})
+	ageTscInputs(t, root, local)
+	assert.Contains(t, strings.Join(runCountedTsc(t, root), "\n"), "tools/run.ts:1 TS2307")
+	assert.Contains(t, strings.Join(runCountedTsc(t, root), "\n"), "tools/run.ts:1 TS2307")
+	patterntest.WriteProjectFile(t, root, "shared/gen.ts", "export const gen = 1\n")
+	assert.Empty(t, runCountedTsc(t, root))
+}
