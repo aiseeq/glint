@@ -3,6 +3,7 @@ package deadcode
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -471,4 +472,123 @@ func Call() int { return remote() + remoteTest() }
 	})
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "'dead'")
+}
+
+// Repro from a real project: a test declared a constant in its body that
+// nothing read, and the compiler, unlike for an unused variable, said
+// nothing. A constant declared in a function is checked in code and tests
+// alike; one read anywhere after it, a later constant of its group included,
+// is used.
+func TestUnusedSymbolsReportsUnusedLocalConstants(t *testing.T) {
+	violations := rulestest.RunRuleOnFiles(t, NewUnusedSymbolsRule(), map[string]string{
+		"calc.go": `package calc
+
+func Area(w int) int {
+	const unused = 3
+	const side = 2
+	const (
+		base  = 10
+		twice = base * 2
+	)
+	return w * side * twice
+}
+
+func Loop(n int) int {
+	const step = 1
+	total := 0
+	for i := 0; i < n; i++ {
+		total += func() int { return step }()
+	}
+	return total
+}
+
+func Blank() {
+	const _ = 1
+}
+
+func Kinds(n int) int {
+	type local int
+	const (
+		read   = 1
+		unread = 2
+	)
+	switch n {
+	case 1:
+		const inCase = 5
+		return read
+	}
+	select {
+	default:
+		const inSelect = 6
+	}
+end:
+	const labeled = 7
+	_ = local(0)
+	if n < 0 {
+		goto end
+	}
+	return 0
+}
+
+func Weekdays() int {
+	const (
+		sunday = iota + 1
+		monday
+		tuesday
+	)
+	const scale = 2
+	const (
+		_  = iota
+		kb = 1 << (10 * iota * scale)
+		mb
+	)
+	const (
+		first = iota
+		second
+	)
+	const (
+		one = 1
+		alsoOne
+	)
+	const (
+		zero = iota
+		two  = iota * 2
+	)
+	const (
+		low = iota
+		mid
+		high
+	)
+	const (
+		_ = iota
+		idle
+		busy
+	)
+	return tuesday + int(mb) + alsoOne + two + low
+}
+`,
+		"calc_test.go": `package calc
+
+import "testing"
+
+func TestArea(t *testing.T) {
+	const ok = true
+	const want = 12
+	if got := Area(1); got != want {
+		t.Fatal(got)
+	}
+}
+`,
+	})
+	var places []string
+	for _, v := range violations {
+		places = append(places, filepath.Base(v.File)+":"+strconv.Itoa(v.Line))
+	}
+	// A group repeating an expression or counting with iota is one unit:
+	// removing a constant read by none still changes or breaks the others.
+	assert.ElementsMatch(t, []string{
+		"calc.go:4", "calc_test.go:6",
+		"calc.go:30", "calc.go:34", "calc.go:39", "calc.go:42",
+		"calc.go:63", "calc.go:64", "calc.go:81", "calc.go:82",
+	}, places)
 }

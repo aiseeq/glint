@@ -40,7 +40,7 @@ func NewUnusedSymbolsRule() *UnusedSymbolsRule {
 		BaseRule: rules.NewBaseRule(
 			"unused-symbol",
 			"deadcode",
-			"Detects unexported package-level functions, types, variables and constants that nothing in their package uses",
+			"Detects unexported package-level functions, types, variables and constants that nothing in their package uses, and constants declared in a function that nothing reads",
 			core.SeverityLow,
 		),
 	}
@@ -64,7 +64,8 @@ type declaredSymbol struct {
 }
 
 // AnalyzeGoProject reports the unexported symbols of the analyzed files that
-// no other part of their package references.
+// no other part of their package references, and the constants declared in
+// function bodies of the analyzed files, tests included, that nothing reads.
 func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	if ctx == nil {
 		return nil, errors.New("unused symbol: nil Go project context")
@@ -118,6 +119,9 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		return nil, err
 	}
 	for _, fileCtx := range ctx.Files {
+		if fileCtx.IsGoFile() && fileCtx.HasGoAST() {
+			violations = append(violations, r.unusedLocalConstants(fileCtx)...)
+		}
 		for _, sym := range testFileFunctions(fileCtx) {
 			if linked[sym.name] || mentions.functionUsed(fileCtx, sym.name) {
 				continue
