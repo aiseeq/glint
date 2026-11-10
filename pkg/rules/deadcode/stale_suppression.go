@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -154,6 +153,10 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 	if err != nil {
 		return nil, fmt.Errorf("list the files of the configuration's directory: %w", err)
 	}
+	nested, err := core.NestedRepositories(filepath.Dir(run.Config.ConfigPath()))
+	if err != nil {
+		return nil, fmt.Errorf("find the nested repositories of the configuration's directory: %w", err)
+	}
 	usedExceptions := map[string]bool{}
 	for key := range used {
 		if _, exception, ok := strings.Cut(key, "\x00"+core.SuppressionExceptionPrefix); ok {
@@ -170,8 +173,17 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 		if !ran || usedExceptions[run.Config.ExceptionKey(exc)] || ruleException.Rule == r.Name() {
 			continue
 		}
-		if (exc.File != "" || exc.Files != "") && !slices.ContainsFunc(files, exc.NamesFile) {
-			continue // the files do not exist: dead-config-exception's finding
+		if exc.File != "" || exc.Files != "" {
+			reached, err := reachedFile(files, exc, nested)
+			if err != nil {
+				return nil, err
+			}
+			if !reached {
+				// The files do not exist, dead-config-exception's finding, or
+				// lie in nested repositories, which only a run scoped to them
+				// analyzes.
+				continue
+			}
 		}
 		source, err := filepath.Rel(filepath.Dir(run.Config.ConfigPath()), exc.Source())
 		if err != nil {
@@ -184,6 +196,24 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 		violations = append(violations, v)
 	}
 	return violations, nil
+}
+
+// reachedFile reports whether an exception names a file a whole-root run
+// analyzes: one that exists outside the nested repositories.
+func reachedFile(files []string, exc core.Exception, nested func(string) (bool, error)) (bool, error) {
+	for _, file := range files {
+		if !exc.NamesFile(file) {
+			continue
+		}
+		inNested, err := nested(file)
+		if err != nil {
+			return false, err
+		}
+		if !inNested {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *StaleSuppressionRule) markerViolation(ctx *core.FileContext, line int, message, suggestion string) *core.Violation {

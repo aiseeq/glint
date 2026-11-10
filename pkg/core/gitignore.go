@@ -1,10 +1,12 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
@@ -65,6 +67,65 @@ func findGitRepoRoot(start string) string {
 		}
 		dir = parent
 	}
+}
+
+// hasOwnGit reports whether dir holds a .git entry of its own: a directory,
+// or a file as a linked worktree and a submodule have. A link is followed: one
+// to nothing or into a loop makes no repository, for git either.
+func hasOwnGit(dir string) (bool, error) {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) || errors.Is(err, syscall.ELOOP) {
+		return false, nil
+	}
+	return false, fmt.Errorf("look for a repository in %s: %w", dir, err)
+}
+
+// insideRepository reports whether dir or a directory above it is the top of
+// a git repository or worktree. Inside one, a directory with a .git of its
+// own is another repository, whose files git does not list as the project's;
+// outside any, such directories are what the walk was pointed at.
+func insideRepository(dir string) (bool, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return false, fmt.Errorf("make %s absolute: %w", dir, err)
+	}
+	return hasOwnGit(findGitRepoRoot(abs))
+}
+
+// NestedRepositories returns a test of a path relative to root: whether it
+// lies in a directory below root that holds a repository of its own, the
+// directories a walk of root inside a repository leaves out. Outside any
+// repository the walk enters them, and the test is always false.
+func NestedRepositories(root string) (func(rel string) (bool, error), error) {
+	inside, err := insideRepository(root)
+	if err != nil || !inside {
+		return func(string) (bool, error) { return false, nil }, err
+	}
+	known := map[string]bool{}
+	var nested func(dir string) (bool, error)
+	nested = func(dir string) (bool, error) {
+		if dir == "." || dir == "/" || dir == "" {
+			return false, nil
+		}
+		if result, ok := known[dir]; ok {
+			return result, nil
+		}
+		result, err := nested(filepath.Dir(dir))
+		if err == nil && !result {
+			result, err = hasOwnGit(filepath.Join(root, dir))
+		}
+		if err != nil {
+			return false, err
+		}
+		known[dir] = result
+		return result, nil
+	}
+	return func(rel string) (bool, error) {
+		return nested(filepath.Dir(filepath.FromSlash(rel)))
+	}, nil
 }
 
 // ancestorChain возвращает каталоги от root (включительно) до last

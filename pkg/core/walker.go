@@ -29,6 +29,11 @@ type Walker struct {
 	// nil — учёт .gitignore выключен. Заполняется и читается только в
 	// goroutine обнаружения файлов, лока не требует.
 	gitignore *gitignoreIndex
+	// skipNestedRepos is set at the start of each walk when the root lies in
+	// a git repository: a directory below it holding its own .git (an agent's
+	// worktree, a cloned dependency) is another repository, not the
+	// project's code, and is not descended into unless named as a scope.
+	skipNestedRepos bool
 
 	// Worker pool size. The channels belong to one walk: walk creates them,
 	// so the same walker can be reused.
@@ -159,6 +164,12 @@ func (w *Walker) walk() (<-chan *FileContext, <-chan error) {
 	go func() {
 		defer close(fileQueue)
 		w.gitignore = nil
+		inside, err := insideRepository(w.projectRoot)
+		if err != nil {
+			walkErrors <- err
+			return
+		}
+		w.skipNestedRepos = inside
 		scopes := w.scopes
 		if len(scopes) == 0 {
 			scopes = []string{w.projectRoot}
@@ -314,6 +325,22 @@ func (w *Walker) visitEntry(fileQueue chan<- string, walkErrors chan<- error, he
 			} else if skip {
 				return filepath.SkipDir
 			}
+		}
+		// After .gitignore: an ignored directory is not looked into, even
+		// for a .git it may hold.
+		if w.skipNestedRepos && path != w.projectRoot && !slices.Contains(w.scopes, path) {
+			nested, err := hasOwnGit(path)
+			if err != nil {
+				// A directory that cannot be looked into for a .git cannot
+				// be read either: one error for it, and no walk inside.
+				walkErrors <- err
+				return filepath.SkipDir
+			}
+			if nested {
+				return filepath.SkipDir
+			}
+		}
+		if w.gitignore != nil {
 			if err := w.gitignore.addDir(path); err != nil {
 				*held = heldDirError{dir: path, err: err}
 			}

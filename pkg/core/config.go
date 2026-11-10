@@ -217,7 +217,8 @@ func (e Exception) NamesFile(path string) bool {
 
 // ConfigFiles returns the files under the configuration's directory,
 // relative to it, leaving out the directories settings.skip_dirs names and
-// .git; nil for the defaults.
+// .git; nil for the defaults. Nested repositories stay in: a check scoped to
+// one analyzes it, and its exceptions then suppress findings.
 func (c *Config) ConfigFiles() ([]string, error) {
 	if c.path == "" {
 		return nil, nil
@@ -255,6 +256,7 @@ func (c *Config) ConfigFiles() ([]string, error) {
 			if path != dir && (entry.Name() == ".git" || slices.Contains(c.SkipDirs(), entry.Name())) {
 				return filepath.SkipDir
 			}
+
 			if ignore != nil {
 				return ignore.addDir(path)
 			}

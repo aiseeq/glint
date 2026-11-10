@@ -163,8 +163,8 @@ Reference:
 |-----|---------|
 | `extends` | Path to a base config merged under this one (relative to this file). |
 | `settings.exclude` | Glob patterns; `*` stays inside one path segment, `**` spans segments. A pattern without a separator also matches the base name. |
-| `settings.skip_dirs` | Directory names never descended into. Defaults to `.git .svn .hg .idea .vscode node_modules vendor .next out dist build bin` — set it if one of those is a real package of yours. |
-| `settings.respect_gitignore` | Honour `.gitignore` files (default `true`): whatever the project excludes from git — generated bundles, test-runner reports, local scratch files — is not analyzed. Patterns are applied with git semantics from the repository root down, so running glint on a subdirectory still sees the root `.gitignore`. Set to `false` to analyze everything. |
+| `settings.skip_dirs` | Directory names never descended into. Defaults to `.git .svn .hg .idea .vscode node_modules vendor .next out dist build bin` — set it if one of those is a real package of yours. Inside a git repository a directory holding its own `.git` (an agent's worktree, a submodule, a cloned dependency) is another repository and is not walked either, unless named as the path to check; outside any repository, as in `glint check ~/src`, the repositories under it are walked. |
+| `settings.respect_gitignore` | Honour `.gitignore` files (default `true`): whatever the project excludes from git — generated bundles, test-runner reports, local scratch files — is not analyzed. Patterns are applied with git semantics from the repository root down, so running glint on a subdirectory still sees the root `.gitignore`. Set to `false` to analyze what git ignores too. |
 | `settings.min_severity` | `low` / `medium` / `high` / `critical`. |
 | `settings.fail_on` | Lowest severity of a reported finding that makes `glint check` exit non-zero: `low` / `medium` / `high` / `critical`, default `high`. Findings below `min_severity` are not reported and never fail the run. An unknown value is a config error. |
 | `settings.output` | `console` / `json` / `summary`. |
