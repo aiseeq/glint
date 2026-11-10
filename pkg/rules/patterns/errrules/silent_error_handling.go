@@ -151,7 +151,7 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 			return true
 		}
 
-		if countsIntoResult(ftype, body, ifStmt.Body) {
+		if countsIntoResult(ftype, body, ifStmt.Body) || appendsIntoResult(ftype, body, ifStmt) {
 			return true
 		}
 
@@ -375,10 +375,23 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[st
 			return true
 		}
 
+	case *ast.ForStmt, *ast.RangeStmt:
+		return r.loopHandlesError(stmt, writers)
+
 	case *ast.SendStmt:
 		return r.exprReferencesError(s.Value) || r.exprUsesErrorValue(s.Value)
 	}
 
+	return false
+}
+
+func (r *SilentErrorHandlingRule) loopHandlesError(stmt ast.Stmt, writers map[string]bool) bool {
+	switch loop := stmt.(type) {
+	case *ast.ForStmt:
+		return r.bodyHandlesError(loop.Body, writers)
+	case *ast.RangeStmt:
+		return r.bodyHandlesError(loop.Body, writers)
+	}
 	return false
 }
 
@@ -758,6 +771,148 @@ func countsIntoResult(ftype *ast.FuncType, body, branch *ast.BlockStmt) bool {
 		}
 	}
 	return false
+}
+
+// appendsIntoResult reports a check whose only answer is its error
+// (_, err := parse(row.Addr)) where the branch hands the checked item on to
+// the slice the function returns, as it is or marked: out = append(out, row)
+// or addr+" (unknown)" among the branch's own statements. The error answers
+// which way the item goes; it is no failure to report. A fallback the success
+// path could also have produced (a cached item, a zero, defaults) hides the
+// failure and keeps the finding.
+func appendsIntoResult(ftype *ast.FuncType, body *ast.BlockStmt, ifStmt *ast.IfStmt) bool {
+	branch := ifStmt.Body
+	for _, stmt := range branch.List {
+		dst, items := appendToSelf(stmt)
+		if dst == "" || (!namedResults(ftype)[dst] && !returnedByFunc(body, dst)) {
+			continue
+		}
+		if declaresName(branch, dst) || returnsWithout(branch, dst) {
+			return false
+		}
+		checked := predicateSubjects(ifStmt)
+		for _, item := range items {
+			if checked[keptItem(item)] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// appendToSelf returns x and the appended items of x = append(x, items...).
+func appendToSelf(stmt ast.Stmt) (string, []ast.Expr) {
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return "", nil
+	}
+	dst, ok := assign.Lhs[0].(*ast.Ident)
+	if !ok {
+		return "", nil
+	}
+	call, ok := assign.Rhs[0].(*ast.CallExpr)
+	if !ok || len(call.Args) < 2 {
+		return "", nil
+	}
+	if fn, ok := call.Fun.(*ast.Ident); !ok || fn.Name != "append" {
+		return "", nil
+	}
+	if base, ok := call.Args[0].(*ast.Ident); !ok || base.Name != dst.Name {
+		return "", nil
+	}
+	return dst.Name, call.Args[1:]
+}
+
+// declaresName reports a declaration of name in the branch: the slice there
+// is another one.
+func declaresName(branch *ast.BlockStmt, name string) bool {
+	found := false
+	ast.Inspect(branch, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.AssignStmt:
+			if n.Tok == token.DEFINE {
+				for _, lhs := range n.Lhs {
+					found = found || patternkit.MentionsIdent(lhs, name)
+				}
+			}
+		case *ast.ValueSpec:
+			for _, id := range n.Names {
+				found = found || id.Name == name
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// returnsWithout reports a return in the branch that does not hand name to
+// the caller.
+func returnsWithout(branch *ast.BlockStmt, name string) bool {
+	found := false
+	ast.Inspect(branch, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			found = found || !patternkit.ReturnsIdent(n, name)
+		}
+		return !found
+	})
+	return found
+}
+
+// keptItem is the variable an appended item carries on as it is or marked
+// with a string literal: row, addr+" (unknown)", "unknown: "+addr; else "".
+func keptItem(item ast.Expr) string {
+	switch e := ast.Unparen(item).(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.BinaryExpr:
+		if e.Op != token.ADD {
+			return ""
+		}
+		if lit, ok := ast.Unparen(e.Y).(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if id, ok := ast.Unparen(e.X).(*ast.Ident); ok {
+				return id.Name
+			}
+		}
+		if lit, ok := ast.Unparen(e.X).(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if id, ok := ast.Unparen(e.Y).(*ast.Ident); ok {
+				return id.Name
+			}
+		}
+	}
+	return ""
+}
+
+// predicateSubjects are the variables a check whose only answer is its error
+// reads: row for if _, err := parse(row.Addr); err != nil. Empty when the if
+// keeps a value of the call.
+func predicateSubjects(ifStmt *ast.IfStmt) map[string]bool {
+	init, ok := ifStmt.Init.(*ast.AssignStmt)
+	if !ok || len(init.Rhs) != 1 || len(init.Lhs) < 2 {
+		return nil
+	}
+	errName := patternkit.ErrNilCheckName(ifStmt.Cond)
+	for _, lhs := range init.Lhs {
+		name, ok := lhs.(*ast.Ident)
+		if !ok || (name.Name != "_" && name.Name != errName) {
+			return nil
+		}
+	}
+	call, ok := init.Rhs[0].(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	subjects := map[string]bool{}
+	for _, arg := range call.Args {
+		if root := rootIdentName(arg); root != "" {
+			subjects[root] = true
+		}
+	}
+	return subjects
 }
 
 // incrementedName is the variable of x++ or x += n, or "".
