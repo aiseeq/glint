@@ -218,9 +218,10 @@ func (s *responseState) isTracked(name string) bool {
 	return false
 }
 
-// mergeResponseStates joins states at one point. A goto leaves from a block
-// at least as deep as its label, so the extra inner scopes a state may carry
-// are blocks already left: the join keeps the scopes all states share.
+// mergeResponseStates joins states at one point. FlowWalker closes scopes
+// crossed by labeled branches before it joins their states at the target, so
+// the depths match; the join still keeps only the scopes all states share,
+// so a broken walker invariant costs precision, not the run.
 func mergeResponseStates(states ...*responseState) *responseState {
 	depth := len(states[0].scopes)
 	for _, state := range states[1:] {

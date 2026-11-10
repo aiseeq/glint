@@ -768,3 +768,231 @@ done:
 		})
 	}
 }
+
+func TestUnboundedResponseReadRule_GotoShadowedNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		code      string
+		wantCount int
+	}{
+		{
+			name: "goto leaves shadow and preserves outer response",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+type fake struct { Body io.Reader }
+
+func fetch(flag bool) ([]byte, error) {
+	resp, err := http.Get("https://example.com")
+	if err != nil { return nil, err }
+	if flag {
+		resp := fake{}
+		_ = resp
+		if flag {
+			goto done
+		}
+		goto done
+	}
+	return nil, nil
+done:
+	return io.ReadAll(resp.Body)
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "goto leaves shadowed response over outer fake",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+type fake struct { Body io.Reader }
+
+func fetch(flag bool, resp fake) ([]byte, error) {
+	if flag {
+		resp, err := http.Get("https://example.com")
+		_ = err
+		_ = resp
+		if flag {
+			goto done
+		}
+		goto done
+	}
+	return nil, nil
+done:
+	return io.ReadAll(resp.Body)
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "backward goto from shadowed block",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+func fetch(flag bool) ([]byte, error) {
+	resp, err := http.Get("https://example.com")
+	if err != nil { return nil, err }
+again:
+	if flag {
+		resp := 1
+		_ = resp
+		goto again
+	}
+	return io.ReadAll(resp.Body)
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "label inside nested block with shadow",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+func fetch(flag bool) ([]byte, error) {
+	resp, err := http.Get("https://example.com")
+	if err != nil { return nil, err }
+	if flag {
+		resp := 1
+		_ = resp
+		goto done
+	done:
+		return nil, nil
+	}
+	return io.ReadAll(resp.Body)
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "labeled break leaves shadow and preserves outer response",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+type fake struct { Body io.Reader }
+
+func fetch(flag bool) ([]byte, error) {
+	resp, err := http.Get("https://example.com")
+	if err != nil { return nil, err }
+done:
+	for {
+		if flag {
+			resp := fake{}
+			_ = resp
+			break done
+		}
+		break done
+	}
+	return io.ReadAll(resp.Body)
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "labeled break leaves shadowed response over outer fake",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+type fake struct { Body io.Reader }
+
+func fetch(flag bool, resp fake) ([]byte, error) {
+done:
+	for {
+		if flag {
+			resp, err := http.Get("https://example.com")
+			_ = err
+			_ = resp
+			break done
+		}
+		break done
+	}
+	return io.ReadAll(resp.Body)
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name: "labeled continue leaves shadow and preserves outer response",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+type fake struct { Body io.Reader }
+
+func fetch(flag bool, values []int) ([]byte, error) {
+	resp, err := http.Get("https://example.com")
+	if err != nil { return nil, err }
+outer:
+	for range values {
+		if flag {
+			resp := fake{}
+			_ = resp
+			continue outer
+		}
+	}
+	return io.ReadAll(resp.Body)
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name: "labeled continue leaves shadowed response over outer fake",
+			code: `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+type fake struct { Body io.Reader }
+
+func fetch(flag bool, values []int, resp fake) ([]byte, error) {
+outer:
+	for range values {
+		if flag {
+			resp, err := http.Get("https://example.com")
+			_ = err
+			_ = resp
+			continue outer
+		}
+	}
+	return io.ReadAll(resp.Body)
+}
+`,
+			wantCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			violations := rulestest.RunRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"fetch.go": tt.code})
+			require.Len(t, violations, tt.wantCount)
+		})
+	}
+}
