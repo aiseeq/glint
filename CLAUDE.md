@@ -9,7 +9,7 @@
 Сборка и проверки
 - `graft build`; `graft install` — атомарная установка в ~/bin. После изменения правил переустановить, иначе потребители не увидят новую версию. В бинарь вшивается `graft version --describe` (теги `v*`, `version.mode: git-tag`), её печатает `glint --version`.
 - `graft test | all` (fmt-check vet lint test test-race) | `self-check` (glint на самом себе). После правки правила — тесты и self-check.
-- Гейт `graft commit` — `smoke` (fmt-check, vet, test-short). Полный прогон — `graft all`. Тег релиза — `graft release`.
+- Гейт `graft commit` — `smoke` (fmt-check, vet, test-short). Полный прогон — `graft all`. Тег релиза ставит `graft install` на main (HEAD без тега); ручной `graft release` — только для `--minor`/`--major`.
 
 Правила анализатора
 - Ложное срабатывание чинить в правиле: TDD-репро (красный тест с синтетическим аналогом реального кода) → фикс правила. Suppress в целевом проекте — только для осознанного дизайна, не вместо фикса правила.
