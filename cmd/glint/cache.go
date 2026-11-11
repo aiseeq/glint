@@ -79,6 +79,8 @@ type resultCache struct {
 	rootRuleHits         map[string]bool
 	rootContentHashes    map[string][sha256.Size]byte
 	rootRunComplete      bool
+	scopeSpecific        bool
+	rootScopeComplete    bool
 }
 
 // projectEntry holds the findings of the project rules, filtered like every
@@ -122,6 +124,9 @@ func openRootCache(root string, scopes []string, cfg *core.Config, goTreesFromLo
 	var cache *resultCache
 	if err == nil {
 		cache, err = newRootCache(strings.Join(append([]string{root}, scopes...), "\n"), seed, cfg, goTreesFromLoader)
+		if err == nil {
+			cache.scopeSpecific = len(scopes) > 0
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: result cache off for %s: %v\n", root, err)
@@ -498,6 +503,20 @@ func (c *resultCache) keyRootFiles(files []*core.FileContext, hashes map[string]
 			continue
 		}
 		fingerprint := c.fingerprint(rule)
+		if input, ok := rule.(rules.RootFilesAndCacheInputs); ok {
+			if len(files) == 0 {
+				continue
+			}
+			value, err := input.CacheInputs(files[0].ProjectRoot)
+			if err != nil {
+				if flagTiming || flagVerbose {
+					fmt.Fprintf(os.Stderr, "result cache: %s inputs unavailable: %v\n", rule.Name(), err)
+				}
+				continue
+			}
+			sum := sha256.Sum256([]byte(fingerprint + "\x00" + value))
+			fingerprint = hex.EncodeToString(sum[:])
+		}
 		c.rootRuleFingerprints[rule.Name()] = fingerprint
 	}
 	if c.previousProject == nil || c.previousProject.RootFingerprint != c.rootFingerprint {
@@ -508,7 +527,7 @@ func (c *resultCache) keyRootFiles(files []*core.FileContext, hashes map[string]
 			continue
 		}
 		fingerprint := c.rootRuleFingerprints[rule.Name()]
-		if c.previousProject.RootRules[rule.Name()] != fingerprint {
+		if fingerprint == "" || c.previousProject.RootRules[rule.Name()] != fingerprint {
 			continue
 		}
 		c.rootRuleHits[rule.Name()] = true
@@ -538,10 +557,11 @@ func rootProjectRuleCacheable(rule rules.Rule) bool {
 	if _, ok := rule.(rules.ProjectFilesRule); !ok {
 		return false
 	}
-	if _, ok := rule.(rules.RootFilesOnlyProjectFiles); !ok {
+	_, keyed := rule.(rules.RootFilesAndCacheInputs)
+	if _, ok := rule.(rules.RootFilesOnlyProjectFiles); !ok && !keyed {
 		return false
 	}
-	if reader, ok := rule.(rules.ReadsOtherFiles); ok && reader.ReadsOtherFiles() {
+	if reader, ok := rule.(rules.ReadsOtherFiles); ok && reader.ReadsOtherFiles() && !keyed {
 		return false
 	}
 	if _, ok := rule.(rules.ExternalToolRule); ok {
@@ -615,10 +635,10 @@ func projectRulesAreSubset(current, previous []string) bool {
 	return true
 }
 
-// storeRootProjectResults updates only whole-root rule results. Partial runs
-// leave the previous complete record untouched.
+// storeRootProjectResults keeps results for a complete root or an isolated
+// scope. Other partial runs leave the previous complete record untouched.
 func (c *resultCache) storeRootProjectResults(found map[string]core.ViolationList) {
-	if !c.rootRunComplete || c.rootFingerprint == "" {
+	if (!c.rootRunComplete && !c.rootScopeComplete) || c.rootFingerprint == "" {
 		return
 	}
 	entry := c.currentProject

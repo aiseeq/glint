@@ -326,7 +326,7 @@ type ReadsOtherFiles interface {
 	ReadsOtherFiles() bool
 }
 
-// CacheInputRule identifies additional disk inputs of a stateless file rule.
+// CacheInputRule identifies additional disk inputs of a rule.
 // An error disables reuse for the rule on this run.
 type CacheInputRule interface {
 	Rule
@@ -363,6 +363,14 @@ type ProjectFilesCacheExclusion interface {
 type RootFilesOnlyProjectFiles interface {
 	ProjectFilesRule
 	RootFilesOnlyProjectFiles()
+}
+
+// RootFilesAndCacheInputs declares that a project-files rule depends only on
+// the supplied root contexts, its configuration and its CacheInputs snapshot.
+type RootFilesAndCacheInputs interface {
+	ProjectFilesRule
+	CacheInputRule
+	RootFilesAndCacheInputs()
 }
 
 // ExternalToolRule is a rule that runs a program glint does not ship

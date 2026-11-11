@@ -67,7 +67,12 @@ func (*externalToolFindingRule) CheckTools([]*core.FileContext) error { return n
 
 func runIndexedCached(t *testing.T, dir string, rule rules.Rule, root, run []*core.FileContext) core.ViolationList {
 	t.Helper()
-	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
+	return runIndexedCachedRoot(t, dir, "/project", rule, root, run)
+}
+
+func runIndexedCachedRoot(t *testing.T, dir, projectRoot string, rule rules.Rule, root, run []*core.FileContext) core.ViolationList {
+	t.Helper()
+	cache, err := openResultCache(dir, projectRoot, "", "build", "stamp")
 	require.NoError(t, err)
 	cache.keyProject("test-inputs", nil, []rules.Rule{rule}, "")
 	cfg := core.DefaultConfig()
@@ -168,6 +173,10 @@ func TestProjectFilesCacheRulesAreExplicitlyAudited(t *testing.T) {
 				continue
 			}
 			name := rule.Name()
+			if _, ok := rule.(rules.RootFilesAndCacheInputs); ok {
+				assert.True(t, rootProjectRuleCacheable(rule), "%s declares its external inputs", name)
+				continue
+			}
 			_, external := rule.(rules.ExternalToolRule)
 			_, excluded := rule.(rules.ProjectFilesCacheExclusion)
 			reader, readsOtherFiles := rule.(rules.ReadsOtherFiles)

@@ -1699,7 +1699,9 @@ func keyRootFileCache(cache *resultCache, rootFiles []*core.FileContext, enabled
 	if cache == nil {
 		return
 	}
-	cache.rootRunComplete = fullRoot && sameRootRuleNames(enabledRules, rules.GetEnabled(cfg))
+	allRules := sameRootRuleNames(enabledRules, rules.GetEnabled(cfg))
+	cache.rootRunComplete = fullRoot && allRules
+	cache.rootScopeComplete = cache.scopeSpecific
 	hashes := make(map[string][sha256.Size]byte, len(rootFiles))
 	for _, ctx := range rootFiles {
 		hashes[ctx.RelPath] = sha256.Sum256(ctx.Content)
@@ -1848,7 +1850,7 @@ func storeRootProjectFindings(cache *resultCache, fileRules []rules.Rule, violat
 	}
 	rootFindings := make(map[string]core.ViolationList)
 	for _, rule := range fileRules {
-		if rootProjectRuleCacheable(rule) {
+		if rootProjectRuleCacheable(rule) && cache.rootRuleFingerprints[rule.Name()] != "" {
 			rootFindings[rule.Name()] = slices.DeleteFunc(slices.Clone(violations), func(v *core.Violation) bool { return v.Rule != rule.Name() })
 		}
 	}

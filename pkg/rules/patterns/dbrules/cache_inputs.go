@@ -10,6 +10,14 @@ func migrationCacheInputs(root string, rule *rules.BaseRule) (string, error) {
 	return sqlschema.InputsHash(root, patternkit.MigrationDirs(rule))
 }
 
+// RootFilesAndCacheInputs declares the complete inputs of the query index.
+func (*SQLChildRowsIncludeVoidedParentRule) RootFilesAndCacheInputs() {}
+
+// CacheInputs identifies the migration bytes used by the rule and its index.
+func (r *SQLChildRowsIncludeVoidedParentRule) CacheInputs(root string) (string, error) {
+	return migrationCacheInputs(root, r.BaseRule)
+}
+
 // CacheInputs identifies the migration bytes used by the rule.
 func (r *SQLUnknownColumnRule) CacheInputs(root string) (string, error) {
 	return migrationCacheInputs(root, r.BaseRule)
