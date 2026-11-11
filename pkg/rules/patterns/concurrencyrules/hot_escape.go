@@ -279,7 +279,7 @@ func (e *escapeNotes) allocates(info *types.Info, node ast.Node, note escapeNote
 		if !ok || info.Defs[ident] == nil {
 			return false
 		}
-		return e.sizes.Sizeof(info.Defs[ident].Type()) > 0
+		return e.sized(info.Defs[ident].Type())
 	}
 	expr, ok := node.(ast.Expr)
 	if !ok || note.expr == "... argument" || note.expr == "func literal" {
@@ -295,7 +295,14 @@ func (e *escapeNotes) allocates(info *types.Info, node ast.Node, note escapeNote
 			t = ptr.Elem()
 		}
 	}
-	return e.sizes.Sizeof(t) > 0
+	return e.sized(t)
+}
+
+// sized reports a value of nonzero size. A value that holds a type parameter
+// in place counts as sized: its size is known only per instance, and go/types
+// cannot measure it.
+func (e *escapeNotes) sized(t types.Type) bool {
+	return holdsTypeParam(t) || e.sizes.Sizeof(t) > 0
 }
 
 // escapeMessage describes a heap note for a finding.

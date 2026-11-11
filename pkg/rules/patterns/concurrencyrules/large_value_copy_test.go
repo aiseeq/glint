@@ -252,3 +252,39 @@ func deferred(bodies []Body) []func() uint64 {
 		assert.NotContains(t, advice[line], "use &xs[i]", "line %d", line)
 	}
 }
+
+// The size of a record whose fields hold a type parameter is known only per
+// instance: the generic code is not measured (go/types asserts on it).
+func TestLargeValueCopiedPerElementSkipsTypeParameterRecords(t *testing.T) {
+	files := map[string]string{"queue/queue.go": `package queue
+
+type entry[S any] struct {
+	state S
+	depth int
+	pad   [64]float64
+}
+
+type pair[S any] struct{ items [2]entry[S] }
+
+type cells[S any] = [32]S
+
+type grid[S any] struct{ rows cells[S] }
+
+func Sum[S any](entries []entry[S], pairs []pair[S], grids []grid[S]) int {
+	total := 0
+	for _, e := range entries {
+		total += e.depth
+	}
+	for _, p := range pairs {
+		total += p.items[0].depth
+	}
+	for _, g := range grids {
+		_ = g.rows
+	}
+	return total
+}
+`}
+	violations, err := NewLargeValueCopiedPerElementRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+}

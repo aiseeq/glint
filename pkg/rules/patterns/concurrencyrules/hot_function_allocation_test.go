@@ -324,3 +324,25 @@ func TestParseEscapeLine(t *testing.T) {
 		assert.False(t, ok, skipped)
 	}
 }
+
+// A generic hot function keeps a value of its type parameter: the compiler
+// moves it to the heap, and its size is known only per instance.
+func TestAllocationInHotFunctionEscapeTypeParameter(t *testing.T) {
+	files := map[string]string{"engine/box.go": `package engine
+
+type Box[T any] struct{ keep *T }
+
+//glint:hot
+func Keep[T any](b *Box[T], v T) {
+	x := v // want allocation-in-hot-function
+	b.keep = &x
+}
+
+func Use(b *Box[int]) { Keep(b, 1) }
+`}
+	rule := NewAllocationInHotFunctionRule()
+	require.NoError(t, rule.Configure(map[string]any{"escape": true}))
+	violations, err := rule.AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	assert.Equal(t, patterntest.WantedLines(files, "allocation-in-hot-function"), patterntest.FoundLines(violations))
+}

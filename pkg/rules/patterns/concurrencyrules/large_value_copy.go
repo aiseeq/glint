@@ -134,8 +134,31 @@ func (c largeCopyCheck) large(t types.Type) (int64, bool) {
 	default:
 		return 0, false
 	}
+	if holdsTypeParam(t) {
+		return 0, false
+	}
 	size := c.sizes.Sizeof(t)
 	return size, size > c.maxBytes
+}
+
+// holdsTypeParam reports a record that stores a type parameter in place: its
+// size is known only per instance, and go/types cannot measure it.
+func holdsTypeParam(t types.Type) bool {
+	switch t := types.Unalias(t).(type) {
+	case *types.TypeParam:
+		return true
+	case *types.Named:
+		return holdsTypeParam(t.Underlying())
+	case *types.Array:
+		return holdsTypeParam(t.Elem())
+	case *types.Struct:
+		for field := range t.Fields() {
+			if holdsTypeParam(field.Type()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // qualifiedTypeName spells t with package names, as the code that uses it does.
