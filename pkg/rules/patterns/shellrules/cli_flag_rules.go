@@ -471,14 +471,35 @@ func NewCLIFlagMapLookupWithoutOKRule() *flagRule {
 	}
 }
 
+func appendOfSameMapEntry(info *types.Info, rhs ast.Expr, lhs *ast.IndexExpr) *ast.IndexExpr {
+	call, ok := ast.Unparen(rhs).(*ast.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return nil
+	}
+	builtin, ok := typeutil.Callee(info, call).(*types.Builtin)
+	if !ok || builtin.Name() != "append" {
+		return nil
+	}
+	appended, ok := ast.Unparen(call.Args[0]).(*ast.IndexExpr)
+	if !ok || types.ExprString(appended) != types.ExprString(lhs) {
+		return nil
+	}
+	return appended
+}
+
 func flagMapLookups(feeds *flagFeeds, file *core.FileContext) []flagFinding {
 	checked := map[*ast.IndexExpr]bool{}
 	ast.Inspect(file.GoAST, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.AssignStmt:
-			for _, lhs := range node.Lhs {
+			for i, lhs := range node.Lhs {
 				if index, ok := ast.Unparen(lhs).(*ast.IndexExpr); ok {
 					checked[index] = true
+					if i < len(node.Rhs) {
+						if appended := appendOfSameMapEntry(feeds.info, node.Rhs[i], index); appended != nil {
+							checked[appended] = true
+						}
+					}
 				}
 			}
 			if len(node.Lhs) == 2 && len(node.Rhs) == 1 {

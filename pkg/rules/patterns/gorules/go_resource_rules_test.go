@@ -421,6 +421,37 @@ func main() {
 `))
 }
 
+func TestCLIFlagMapAppendOnlySkipsBuiltinAppend(t *testing.T) {
+	assert.Equal(t, []int{10}, rulestest.GoProjectRuleLines(t, shellrules.NewCLIFlagMapLookupWithoutOKRule(), "app.go", `package main
+
+import "flag"
+
+var groups = map[string]int{}
+
+func main() {
+	name := flag.String("name", "", "")
+	flag.Parse()
+	groups[*name] = max(groups[*name], 1)
+}
+`))
+}
+
+func TestCLIFlagMapAppendRequiresSameKey(t *testing.T) {
+	assert.Equal(t, []int{11}, rulestest.GoProjectRuleLines(t, shellrules.NewCLIFlagMapLookupWithoutOKRule(), "app.go", `package main
+
+import "flag"
+
+var groups = map[string][]int{}
+
+func main() {
+	a := flag.String("a", "", "")
+	b := flag.String("b", "", "")
+	flag.Parse()
+	groups[*a] = append(groups[*b], 1)
+}
+`))
+}
+
 func TestCLIFlagMapLookupWithoutOKAccepts(t *testing.T) {
 	assert.Empty(t, rulestest.GoProjectRuleLines(t, shellrules.NewCLIFlagMapLookupWithoutOKRule(), "app.go", `package main
 
