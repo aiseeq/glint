@@ -265,6 +265,84 @@ func analyzeSQLInjection(t *testing.T, code string) []*core.Violation {
 	return inFile
 }
 
+func TestSQLInjectionWhitelistFunctionDeclarations(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  int
+	}{
+		{
+			name: "declaration below call in same file",
+			files: map[string]string{"db/db.go": `package db
+import "database/sql"
+func query(db *sql.DB, value string) { if !isKnownCol(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value) }
+func isKnownCol(v string) bool { return v == "name" || v == "email" }
+`},
+		},
+		{
+			name: "declaration in another package file",
+			files: map[string]string{
+				"db/db.go": `package db
+import "database/sql"
+func query(db *sql.DB, value string) { if !isKnownCol(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value) }
+`,
+				"db/whitelist.go": `package db
+func isKnownCol(v string) bool { return v == "name" || v == "email" }
+`,
+			},
+		},
+		{
+			name: "dynamic predicate in another package file",
+			files: map[string]string{
+				"db/db.go": `package db
+import "database/sql"
+func query(db *sql.DB, value string) { if !accept(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value) }
+`,
+				"db/whitelist.go": `package db
+func accept(v string) bool { return v != "" }
+`,
+			},
+			want: 1,
+		},
+		{
+			name: "whitelist called through a package selector is not recognized",
+			files: map[string]string{
+				"db/db.go": `package db
+import (
+ "database/sql"
+ "example.com/rulestest/filter"
+)
+func query(db *sql.DB, value string) { if !filter.Accept(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value) }
+`,
+				"filter/filter.go": `package filter
+func Accept(v string) bool { return v == "name" || v == "email" }
+`,
+			},
+			want: 1,
+		},
+		{
+			name: "method predicate is not a free function whitelist",
+			files: map[string]string{"db/db.go": `package db
+import "database/sql"
+type checker struct{}
+func (checker) known(v string) bool { return v == "name" || v == "email" }
+func query(db *sql.DB, c checker, value string) { if !c.known(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value) }
+`},
+			want: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files := maps.Clone(tt.files)
+			maps.Copy(files, fakeSQLXModule)
+			project := rulestest.Project(t, files)
+			violations, err := NewSQLInjectionRule().AnalyzeGoProject(project)
+			require.NoError(t, err)
+			assert.Len(t, violations, tt.want)
+		})
+	}
+}
+
 func TestSQLInjectionQueryArgumentBySignature(t *testing.T) {
 	code := `package main
 

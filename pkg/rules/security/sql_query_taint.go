@@ -105,6 +105,7 @@ type sqlTaintCheck struct {
 	contexts       map[token.Pos]sqlNodeContext
 	collectContext sqlNodeContext
 	functions      map[*types.Func]*ast.FuncDecl
+	projectDecls   map[*types.Func]*ast.FuncDecl
 	literalMaps    map[types.Object]bool
 	goCalls        map[*ast.FuncLit]bool
 	regexpPatterns map[types.Object]string
@@ -116,7 +117,7 @@ type sqlTaintCheck struct {
 	mentions       map[*types.Var]*bool
 }
 
-func newSQLTaintCheck(file *ast.File, info *types.Info) *sqlTaintCheck {
+func newSQLTaintCheck(file *ast.File, info *types.Info, decls map[*types.Func]*ast.FuncDecl) *sqlTaintCheck {
 	c := &sqlTaintCheck{
 		info:           info,
 		params:         make(map[*types.Var]bool),
@@ -130,6 +131,16 @@ func newSQLTaintCheck(file *ast.File, info *types.Info) *sqlTaintCheck {
 		writes:         make(map[*types.Var][]token.Pos),
 		taints:         make(map[*types.Var]*sqlTaint),
 		mentions:       make(map[*types.Var]*bool),
+		projectDecls:   decls,
+	}
+	for _, node := range file.Decls {
+		decl, ok := node.(*ast.FuncDecl)
+		if !ok || decl.Name == nil {
+			continue
+		}
+		if fn, ok := info.Defs[decl.Name].(*types.Func); ok {
+			c.functions[fn] = decl
+		}
 	}
 	c.collect(file)
 	return c
@@ -590,6 +601,9 @@ func (c *sqlTaintCheck) boolWhitelistFunction(call *ast.CallExpr) bool {
 		return false
 	}
 	decl := c.functions[fn]
+	if decl == nil {
+		decl = c.projectDecls[fn]
+	}
 	if decl == nil || decl.Body == nil || len(decl.Body.List) != 1 || len(decl.Type.Params.List) != 1 {
 		return false
 	}

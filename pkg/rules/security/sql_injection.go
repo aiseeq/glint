@@ -73,7 +73,7 @@ var sqlKeyword = regexp.MustCompile(`(?i)\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|W
 // AnalyzeFile has no type information and so cannot tell a database call from
 // any other method with the same name: it reports nothing.
 func (r *SQLInjectionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	return r.analyze(ctx, nil)
+	return r.analyze(ctx, nil, nil)
 }
 
 // RequiresSSA reports that typed syntax is enough for this rule.
@@ -81,12 +81,33 @@ func (r *SQLInjectionRule) RequiresSSA() bool { return false }
 
 // AnalyzeGoProject checks every type-checked file.
 func (r *SQLInjectionRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
-	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
+	decls := make(map[*types.Func]*ast.FuncDecl)
+	if ctx != nil {
+		for _, pkg := range ctx.Packages {
+			if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
+				continue
+			}
+			for _, file := range pkg.Package.Syntax {
+				for _, node := range file.Decls {
+					fn, ok := node.(*ast.FuncDecl)
+					if !ok || fn.Body == nil {
+						continue
+					}
+					if obj, ok := pkg.Package.TypesInfo.Defs[fn.Name].(*types.Func); ok {
+						decls[obj] = fn
+					}
+				}
+			}
+		}
+	}
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
+		return r.analyze(file, info, decls)
+	})
 }
 
 // analyze checks the database calls of one file. Without type information the
 // callee is unknown, and the rule stays silent.
-func (r *SQLInjectionRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
+func (r *SQLInjectionRule) analyze(ctx *core.FileContext, info *types.Info, decls map[*types.Func]*ast.FuncDecl) []*core.Violation {
 	if info == nil || !ctx.IsGoFile() || ctx.GoAST == nil {
 		return nil
 	}
@@ -95,7 +116,7 @@ func (r *SQLInjectionRule) analyze(ctx *core.FileContext, info *types.Info) []*c
 		return nil
 	}
 
-	check := newSQLTaintCheck(ctx.GoAST, info)
+	check := newSQLTaintCheck(ctx.GoAST, info, decls)
 	var violations []*core.Violation
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
