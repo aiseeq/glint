@@ -1341,7 +1341,7 @@ func analyzeFilesContained(contexts []*core.FileContext, enabledRules []rules.Ru
 	failures := make([]error, len(contexts))
 	panicked := make([]rulePanics, len(contexts))
 
-	local := fileLocalRules(enabledRules)
+	local, keys := fileCacheRules(cache, enabledRules, contexts[0].ProjectRoot)
 	var contents [][sha256.Size]byte
 	var reuse []map[string][]core.Violation
 	if cache != nil {
@@ -1353,7 +1353,7 @@ func analyzeFilesContained(contexts []*core.FileContext, enabledRules []rules.Ru
 			} else {
 				contents[i] = sha256.Sum256(ctx.Content)
 			}
-			reuse[i] = cache.lookup(ctx.RelPath, contents[i], cache.fingerprints(enabledRules))
+			reuse[i] = cache.lookup(ctx.RelPath, contents[i], keys)
 		}
 	}
 
@@ -1383,7 +1383,7 @@ func analyzeFilesContained(contexts []*core.FileContext, enabledRules []rules.Ru
 	if cache != nil {
 		for fileIndex, ctx := range contexts {
 			if len(panicked[fileIndex]) == 0 {
-				cache.storeFile(ctx.RelPath, contents[fileIndex], enabledRules, local, found[fileIndex], reuse[fileIndex])
+				cache.storeFile(ctx.RelPath, contents[fileIndex], enabledRules, local, found[fileIndex], reuse[fileIndex], keys)
 			}
 		}
 	}
@@ -1395,6 +1395,43 @@ func analyzeFilesContained(contexts []*core.FileContext, enabledRules []rules.Ru
 		}
 	}
 	return allViolations, panics, nil
+}
+
+// fileCacheRules identifies file findings reusable with the additional inputs
+// declared by a rule. Project and stateful rules cannot use the file cache.
+func fileCacheRules(cache *resultCache, enabled []rules.Rule, root string) ([]bool, map[string]string) {
+	local := fileLocalRules(enabled)
+	if cache == nil {
+		return local, nil
+	}
+	keys := cache.fingerprints(enabled)
+	for i, rule := range enabled {
+		input, ok := rule.(rules.CacheInputRule)
+		if !ok {
+			continue
+		}
+		if _, stateful := rule.(rules.StatefulRule); stateful {
+			continue
+		}
+		if _, project := rule.(rules.GoProjectRule); project {
+			continue
+		}
+		reader, reads := rule.(rules.ReadsOtherFiles)
+		if !reads || !reader.ReadsOtherFiles() {
+			continue
+		}
+		value, err := input.CacheInputs(root)
+		if err != nil {
+			if flagTiming || flagVerbose {
+				fmt.Fprintf(os.Stderr, "result cache: %s inputs unavailable: %v\n", rule.Name(), err)
+			}
+			continue
+		}
+		sum := sha256.Sum256([]byte(keys[rule.Name()] + "\x00" + value))
+		keys[rule.Name()] = fmt.Sprintf("%x", sum)
+		local[i] = true
+	}
+	return local, keys
 }
 
 // recordRuleFailure files the error of one rule on one file: a panic apart,

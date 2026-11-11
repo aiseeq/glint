@@ -10,7 +10,10 @@ package sqlschema
 
 import (
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io/fs"
 	"maps"
 	"os"
@@ -241,10 +244,15 @@ var skippedDirs = map[string]bool{
 // project without migrations and an error naming the file that does not
 // parse.
 func Load(root string, dirs []string) (*Schema, error) {
+	schema, _, err := load(root, dirs)
+	return schema, err
+}
+
+func load(root string, dirs []string) (*Schema, string, error) {
 	if len(dirs) == 0 {
 		found, err := findMigrationDirs(root)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		dirs = found
 	} else {
@@ -255,23 +263,25 @@ func Load(root string, dirs []string) (*Schema, error) {
 		dirs = joined
 	}
 	schema := &Schema{tables: make(map[string]*Table)}
+	digest := sha256.New()
 	loaded := false
 	for _, dir := range dirs {
 		files, err := upMigrations(dir)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		for _, file := range files {
-			if err := schema.applyFile(file); err != nil {
-				return nil, err
+			if err := schema.applyFile(file, digest); err != nil {
+				return nil, "", err
 			}
 			loaded = true
 		}
 	}
+	key := hex.EncodeToString(digest.Sum(nil))
 	if !loaded {
-		return nil, nil
+		return nil, key, nil
 	}
-	return schema, nil
+	return schema, key, nil
 }
 
 func findMigrationDirs(root string) ([]string, error) {
@@ -338,11 +348,13 @@ func compareVersions(a, b string) int {
 
 var gooseDown = regexp.MustCompile(`(?m)^--\s*\+goose\s+Down\b`)
 
-func (s *Schema) applyFile(path string) error {
+func (s *Schema) applyFile(path string, digest hash.Hash) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return &MigrationError{Path: path, Err: err}
 	}
+	_, _ = fmt.Fprintf(digest, "%d:%s%d:", len(path), path, len(content))
+	_, _ = digest.Write(content)
 	text := string(content)
 	if loc := gooseDown.FindStringIndex(text); loc != nil {
 		text = text[:loc[0]]
@@ -788,6 +800,7 @@ func (e *MigrationError) Unwrap() error { return e.Err }
 type cacheEntry struct {
 	once   sync.Once
 	schema *Schema
+	inputs string
 	err    error
 }
 
@@ -799,6 +812,11 @@ var (
 // LoadCached is Load done once per root and directories for the process:
 // every file of a project checks against the same schema.
 func LoadCached(root string, dirs []string) (*Schema, error) {
+	schema, _, err := loadCached(root, dirs)
+	return schema, err
+}
+
+func loadCached(root string, dirs []string) (*Schema, string, error) {
 	key := root + "\x00" + strings.Join(dirs, "\x00")
 	cacheMu.Lock()
 	entry, ok := cache[key]
@@ -807,6 +825,6 @@ func LoadCached(root string, dirs []string) (*Schema, error) {
 		cache[key] = entry
 	}
 	cacheMu.Unlock()
-	entry.once.Do(func() { entry.schema, entry.err = Load(root, dirs) })
-	return entry.schema, entry.err
+	entry.once.Do(func() { entry.schema, entry.inputs, entry.err = load(root, dirs) })
+	return entry.schema, entry.inputs, entry.err
 }

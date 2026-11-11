@@ -1271,3 +1271,90 @@ func TestCacheStampIgnoresReportOnlySettings(t *testing.T) {
 func TestTSConfigReaderStaysOutOfTheRootFilesCache(t *testing.T) {
 	assert.False(t, rootProjectRuleCacheable(frontendrules.NewTSTestOutsideTypecheckRule()))
 }
+
+type inputCountingRule struct {
+	*rules.BaseRule
+	calls int
+}
+
+func (*inputCountingRule) ReadsOtherFiles() bool { return true }
+func (*inputCountingRule) CacheInputs(root string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(root, "schema.txt"))
+	return string(data), err
+}
+func (r *inputCountingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	r.calls++
+	data, err := os.ReadFile(filepath.Join(ctx.ProjectRoot, "schema.txt"))
+	if err != nil {
+		return nil
+	}
+	return []*core.Violation{r.CreateViolation(ctx.RelPath, 1, string(data))}
+}
+
+func TestCacheInputsInvalidatesFileFindings(t *testing.T) {
+	root, dir := t.TempDir(), t.TempDir()
+	path := filepath.Join(root, "schema.txt")
+	require.NoError(t, os.WriteFile(path, []byte("old"), 0o600))
+	ctx := core.NewFileContext(filepath.Join(root, "a.go"), root, []byte("package a\n"), core.DefaultConfig())
+	rule := &inputCountingRule{BaseRule: rules.NewBaseRule("input-counting", "patterns", "test", core.SeverityMedium)}
+	list := []rules.Rule{rule}
+	first, _ := runCached(t, dir, "stamp", []*core.FileContext{ctx}, list)
+	second, _ := runCached(t, dir, "stamp", []*core.FileContext{ctx}, list)
+	assert.Equal(t, 1, rule.calls)
+	assert.Equal(t, fingerprint(first), fingerprint(second))
+	require.NoError(t, os.WriteFile(path, []byte("new"), 0o600))
+	third, _ := runCached(t, dir, "stamp", []*core.FileContext{ctx}, list)
+	assert.Equal(t, 2, rule.calls)
+	assert.NotEqual(t, fingerprint(first), fingerprint(third))
+	uncached, err := analyzeFiles([]*core.FileContext{ctx}, list, core.DefaultConfig(), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, fingerprint(uncached), fingerprint(third))
+}
+
+type indexedInputCountingRule struct {
+	*indexedFindingRule
+	inputCalls int
+}
+
+func (*indexedInputCountingRule) ReadsOtherFiles() bool { return true }
+func (r *indexedInputCountingRule) CacheInputs(string) (string, error) {
+	r.inputCalls++
+	return "input", nil
+}
+
+func TestCacheInputsDoesNotCacheProjectFilesRule(t *testing.T) {
+	dir := t.TempDir()
+	rule := &indexedInputCountingRule{indexedFindingRule: newIndexedFindingRule()}
+	contexts := []*core.FileContext{goContext(t, "a.go", "package a\n")}
+	list := []rules.Rule{rule}
+	runCached(t, dir, "stamp", contexts, list)
+	runCached(t, dir, "stamp", contexts, list)
+	assert.Equal(t, 2, rule.fileCalls)
+	assert.Zero(t, rule.inputCalls)
+}
+
+type projectInputCountingRule struct {
+	*inputCountingRule
+	inputCalls int
+}
+
+func (r *projectInputCountingRule) CacheInputs(string) (string, error) {
+	r.inputCalls++
+	return "input", nil
+}
+func (*projectInputCountingRule) AnalyzeGoProject(*core.GoProjectContext) ([]*core.Violation, error) {
+	return nil, nil
+}
+func (*projectInputCountingRule) RequiresSSA() bool { return false }
+
+func TestCacheInputsDoesNotCacheGoProjectRule(t *testing.T) {
+	root, dir := t.TempDir(), t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "schema.txt"), []byte("value"), 0o600))
+	ctx := core.NewFileContext(filepath.Join(root, "a.go"), root, []byte("package a\n"), core.DefaultConfig())
+	rule := &projectInputCountingRule{inputCountingRule: &inputCountingRule{BaseRule: rules.NewBaseRule("project-input", "patterns", "test", core.SeverityMedium)}}
+	list := []rules.Rule{rule}
+	runCached(t, dir, "stamp", []*core.FileContext{ctx}, list)
+	runCached(t, dir, "stamp", []*core.FileContext{ctx}, list)
+	assert.Equal(t, 2, rule.calls)
+	assert.Zero(t, rule.inputCalls)
+}

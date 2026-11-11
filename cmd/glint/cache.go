@@ -670,7 +670,7 @@ func (c *resultCache) projectState() string {
 
 // storeFile records the findings of a file's file-local rules and counts the
 // file as reused when every one of them came from the cache.
-func (c *resultCache) storeFile(relPath string, content [sha256.Size]byte, list []rules.Rule, local []bool, found []core.ViolationList, reused map[string][]core.Violation) {
+func (c *resultCache) storeFile(relPath string, content [sha256.Size]byte, list []rules.Rule, local []bool, found []core.ViolationList, reused map[string][]core.Violation, keys map[string]string) {
 	stored := make(map[string][]core.Violation)
 	fingerprints := make(map[string]string)
 	allReused := true
@@ -679,7 +679,7 @@ func (c *resultCache) storeFile(relPath string, content [sha256.Size]byte, list 
 			continue
 		}
 		stored[rule.Name()] = found[i].Values()
-		fingerprints[rule.Name()] = c.fingerprint(rule)
+		fingerprints[rule.Name()] = keys[rule.Name()]
 		if _, ok := reused[rule.Name()]; !ok {
 			allReused = false
 		}
