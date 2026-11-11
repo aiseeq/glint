@@ -84,10 +84,6 @@ func (r *LongFunctionRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation 
 				v.WithContext("lines", lineCount)
 				v.WithContext("max_lines", r.maxLines)
 
-				if lineCount > r.maxLines*2 {
-					v.Severity = core.SeverityHigh
-				}
-
 				violations = append(violations, v)
 			}
 		}

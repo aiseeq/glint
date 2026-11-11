@@ -104,3 +104,20 @@ func TestLongFunctionNamesGenericReceiver(t *testing.T) {
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "*Box.Fill is")
 }
+
+// Length is a smell, not a defect: however long the function, the finding
+// stays Medium and does not fail a gate that stops on High.
+func TestLongFunctionSeverityStaysMediumAtAnyLength(t *testing.T) {
+	rule := NewLongFunctionRule()
+	require.NoError(t, rule.Configure(map[string]any{"max_lines": 10}))
+
+	code := generateLongFunction(30)
+	ctx := core.NewFileContext("/app/file.go", "/app", []byte(code), core.DefaultConfig())
+	fset, astFile, err := core.NewParser().ParseGoFile("/app/file.go", []byte(code))
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, astFile)
+
+	violations := rule.AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+	assert.Equal(t, core.SeverityMedium, violations[0].Severity)
+}
