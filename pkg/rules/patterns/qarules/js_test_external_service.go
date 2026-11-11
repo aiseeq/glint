@@ -42,6 +42,7 @@ type JSTestExternalServiceRule struct {
 // projectEnv is the keys of a project's env files, or why they are unknown.
 type projectEnv struct {
 	keys map[string]bool
+	hash string
 	err  error
 }
 
@@ -200,10 +201,16 @@ func (r *JSTestExternalServiceRule) projectEnv(root string) projectEnv {
 	if env, ok := r.envKeys[root]; ok {
 		return env
 	}
-	keys, err := envFileKeys(root)
-	env := projectEnv{keys: keys, err: err}
+	keys, hash, err := envFileInputs(root)
+	env := projectEnv{keys: keys, hash: hash, err: err}
 	r.envKeys[root] = env
 	return env
+}
+
+// CacheInputs identifies the env files used by the gate index.
+func (r *JSTestExternalServiceRule) CacheInputs(root string) (string, error) {
+	env := r.projectEnv(root)
+	return env.hash, env.err
 }
 
 // firstNonEmpty returns the first non-empty string.

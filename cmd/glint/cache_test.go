@@ -24,6 +24,8 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/frontendrules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/qarules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/shellrules"
 )
 
 // countingRule reports one finding per file and counts how often it runs.
@@ -1291,6 +1293,74 @@ func (r *inputCountingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation
 	return []*core.Violation{r.CreateViolation(ctx.RelPath, 1, string(data))}
 }
 
+func TestJSEnvCacheInputsInvalidatesFileFindings(t *testing.T) {
+	root, dir := t.TempDir(), t.TempDir()
+	path := filepath.Join(root, ".env")
+	ctx := core.NewFileContext(filepath.Join(root, "api.test.ts"), root, []byte("test('x', async () => {\n  test.skip(!process.env.LIVE, 'live')\n  await fetch('https://api.ratesbank.io/data')\n})\n"), core.DefaultConfig())
+	key := func() string {
+		value, err := qarules.NewJSTestExternalServiceRule().CacheInputs(root)
+		require.NoError(t, err)
+		return value
+	}
+	empty := key()
+	first, _ := runCached(t, dir, "stamp", []*core.FileContext{ctx}, []rules.Rule{qarules.NewJSTestExternalServiceRule()})
+	require.Empty(t, first)
+	second, _ := runCached(t, dir, "stamp", []*core.FileContext{ctx}, []rules.Rule{qarules.NewJSTestExternalServiceRule()})
+	require.Empty(t, second)
+	require.NoError(t, os.WriteFile(path, []byte("LIVE=1\n"), 0o600))
+	added := key()
+	assert.NotEqual(t, empty, added)
+	third, _ := runCached(t, dir, "stamp", []*core.FileContext{ctx}, []rules.Rule{qarules.NewJSTestExternalServiceRule()})
+	require.Len(t, third, 1)
+	uncached, err := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{qarules.NewJSTestExternalServiceRule()}, core.DefaultConfig(), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, fingerprint(uncached), fingerprint(third))
+	require.NoError(t, os.WriteFile(path, []byte("LIVE=2\n"), 0o600))
+	changed := key()
+	assert.NotEqual(t, added, changed)
+	require.NoError(t, os.Rename(path, filepath.Join(root, ".env.test")))
+	assert.NotEqual(t, changed, key())
+	require.NoError(t, os.Remove(filepath.Join(root, ".env.test")))
+	assert.Equal(t, empty, key())
+}
+
+func TestModelCacheInputsInvalidatesFileFindings(t *testing.T) {
+	root, dir := t.TempDir(), t.TempDir()
+	path := filepath.Join(root, "approved")
+	write := func(text string) { require.NoError(t, os.WriteFile(path, []byte(text), 0o600)) }
+	newRule := func() *shellrules.ModelNotApprovedRule {
+		rule := shellrules.NewModelNotApprovedRule()
+		require.NoError(t, rule.Configure(map[string]any{"approved_file": path}))
+		return rule
+	}
+	ctx := core.NewFileContext(filepath.Join(root, "run.sh"), root, []byte("claude --model sonnet\n"), core.DefaultConfig())
+	write("sonnet claude-sonnet\n")
+	firstRule := newRule()
+	firstKey, err := firstRule.CacheInputs(root)
+	require.NoError(t, err)
+	first, _ := runCached(t, dir, "stamp", []*core.FileContext{ctx}, []rules.Rule{firstRule})
+	require.Empty(t, first)
+	second, _ := runCached(t, dir, "stamp", []*core.FileContext{ctx}, []rules.Rule{newRule()})
+	require.Empty(t, second)
+	write("opus claude-opus\n")
+	changed := newRule()
+	changedKey, err := changed.CacheInputs(root)
+	require.NoError(t, err)
+	assert.NotEqual(t, firstKey, changedKey)
+	third, _ := runCached(t, dir, "stamp", []*core.FileContext{ctx}, []rules.Rule{changed})
+	require.Len(t, third, 1)
+	uncached, err := analyzeFiles([]*core.FileContext{ctx}, []rules.Rule{newRule()}, core.DefaultConfig(), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, fingerprint(uncached), fingerprint(third))
+	write("opus claude-opus\n# comment\n")
+	commentKey, err := newRule().CacheInputs(root)
+	require.NoError(t, err)
+	assert.NotEqual(t, changedKey, commentKey)
+	require.NoError(t, os.Remove(path))
+	_, err = newRule().CacheInputs(root)
+	require.Error(t, err)
+}
+
 func TestCacheInputsInvalidatesFileFindings(t *testing.T) {
 	root, dir := t.TempDir(), t.TempDir()
 	path := filepath.Join(root, "schema.txt")
@@ -1357,4 +1427,28 @@ func TestCacheInputsDoesNotCacheGoProjectRule(t *testing.T) {
 	runCached(t, dir, "stamp", []*core.FileContext{ctx}, list)
 	assert.Equal(t, 2, rule.calls)
 	assert.Zero(t, rule.inputCalls)
+}
+
+// A rule keys its findings by the very bytes it reads them from: a change of
+// the input after the first read does not move the key of the same run.
+func TestCacheInputsKeyTheBytesReadOncePerRun(t *testing.T) {
+	root := t.TempDir()
+	js := qarules.NewJSTestExternalServiceRule()
+	before, err := js.CacheInputs(root)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".env"), []byte("LIVE=1\n"), 0o600))
+	after, err := js.CacheInputs(root)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "env files")
+
+	path := filepath.Join(root, "approved")
+	require.NoError(t, os.WriteFile(path, []byte("sonnet claude-sonnet\n"), 0o600))
+	model := shellrules.NewModelNotApprovedRule()
+	require.NoError(t, model.Configure(map[string]any{"approved_file": path}))
+	before, err = model.CacheInputs(root)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, []byte("opus claude-opus\n"), 0o600))
+	after, err = model.CacheInputs(root)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "approved list")
 }

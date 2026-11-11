@@ -1,6 +1,7 @@
 package shellrules
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -48,6 +49,7 @@ type ModelNotApprovedRule struct {
 type approvedModels struct {
 	accepted map[string]bool
 	names    []string
+	hash     [sha256.Size]byte
 }
 
 // NewModelNotApprovedRule creates the rule
@@ -86,6 +88,15 @@ func (r *ModelNotApprovedRule) setPath(path string) {
 
 // ReadsOtherFiles reports that the findings depend on the approved list.
 func (r *ModelNotApprovedRule) ReadsOtherFiles() bool { return true }
+
+// CacheInputs identifies the exact approved list read for this run.
+func (r *ModelNotApprovedRule) CacheInputs(_ string) (string, error) {
+	approved, err := r.approved()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", approved.hash), nil
+}
 
 // CheckTools fails when the files hold code and the approved list cannot be
 // read: without it every model would pass.
@@ -203,7 +214,7 @@ func readApprovedModels(path string) (*approvedModels, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read the approved models: %w", err)
 	}
-	list := &approvedModels{accepted: map[string]bool{}}
+	list := &approvedModels{accepted: map[string]bool{}, hash: sha256.Sum256(data)}
 	for n, line := range strings.Split(string(data), "\n") {
 		line, _, _ = strings.Cut(line, "#")
 		fields := strings.Fields(line)

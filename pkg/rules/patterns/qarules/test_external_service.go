@@ -1,6 +1,7 @@
 package qarules
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -175,7 +176,13 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 // developer's environment holds when the runner exports the file. Only the
 // key names are kept.
 func envFileKeys(root string) (map[string]bool, error) {
+	keys, _, err := envFileInputs(root)
+	return keys, err
+}
+
+func envFileInputs(root string) (map[string]bool, string, error) {
 	keys := make(map[string]bool)
+	hash := sha256.New()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -197,6 +204,8 @@ func envFileKeys(root string) (map[string]bool, error) {
 		if err != nil {
 			return fmt.Errorf("read env file %s: %w", rel, err)
 		}
+		fmt.Fprintf(hash, "%d:%s:%d:", len(rel), rel, len(content))
+		_, _ = hash.Write(content)
 		for line := range strings.SplitSeq(string(content), "\n") {
 			if m := patternkit.EnvAssignmentLine.FindStringSubmatch(line); m != nil {
 				keys[m[1]] = true
@@ -205,9 +214,9 @@ func envFileKeys(root string) (map[string]bool, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list env files under %s: %w", root, err)
+		return nil, "", fmt.Errorf("list env files under %s: %w", root, err)
 	}
-	return keys, nil
+	return keys, fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 // outboundDirectories maps a package directory to its outbound description, so an in-package
