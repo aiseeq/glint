@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io/fs"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 
 	"golang.org/x/mod/modfile"
 )
@@ -49,8 +51,8 @@ type moduleInputs struct {
 // toolchain and build environment, and the names hand-written TypeScript
 // imports from generated TypeScript (GeneratedTSImports).
 // Modules come from the module cache by the versions go.sum pins, so they are
-// covered by go.sum. cacheable is false when the load reads what the hash
-// cannot cover: a replace directive pointing at a local directory.
+// covered by go.sum. cacheable is false when the load reads a local replace
+// target that is not a Go module.
 //
 // The walk skips what the go command ignores (directories starting with . or
 // _, testdata, nested modules) and node_modules, which holds no Go packages.
@@ -131,9 +133,15 @@ func hashModuleInputs(moduleDir string) (string, bool, error) {
 	}
 	dirs := []string{moduleDir}
 	if work := env["GOWORK"]; work != "" && work != "off" {
-		uses, cacheable, err := workspaceModules(work)
-		if err != nil || !cacheable {
+		uses, localReplaces, err := workspaceModules(work)
+		if err != nil {
 			return "", false, err
+		}
+		for _, target := range localReplaces {
+			cacheable, err := isLocalReplaceModule(target)
+			if err != nil || !cacheable {
+				return "", false, err
+			}
 		}
 		if err := hashFile(sum, work); err != nil {
 			return "", false, err
@@ -142,11 +150,13 @@ func hashModuleInputs(moduleDir string) (string, bool, error) {
 			return "", false, err
 		}
 		dirs = append(dirs, uses...)
+		dirs = append(dirs, localReplaces...)
 	}
 	slices.Sort(dirs)
 	dirs = slices.Compact(dirs)
+	visited := make(map[string]struct{})
 	for _, dir := range dirs {
-		cacheable, err := hashModuleTree(sum, dir)
+		cacheable, err := hashModuleTree(sum, dir, visited)
 		if err != nil || !cacheable {
 			return "", false, err
 		}
@@ -168,23 +178,19 @@ func goEnv(dir string) (map[string]string, error) {
 	return env, nil
 }
 
-// workspaceModules returns the module directories a go.work uses. A replace
-// to a local directory makes the workspace uncacheable.
-func workspaceModules(workFile string) ([]string, bool, error) {
+// workspaceModules returns the module directories and local replace targets
+// a go.work makes the load read.
+func workspaceModules(workFile string) ([]string, []string, error) {
 	data, err := os.ReadFile(workFile)
 	if err != nil {
-		return nil, false, fmt.Errorf("read %s: %w", workFile, err)
+		return nil, nil, fmt.Errorf("read %s: %w", workFile, err)
 	}
 	work, err := modfile.ParseWork(workFile, data, nil)
 	if err != nil {
-		return nil, false, fmt.Errorf("parse %s: %w", workFile, err)
-	}
-	for _, replace := range work.Replace {
-		if replace.New.Version == "" {
-			return nil, false, nil
-		}
+		return nil, nil, fmt.Errorf("parse %s: %w", workFile, err)
 	}
 	dirs := make([]string, 0, len(work.Use))
+	localReplaces := make([]string, 0, len(work.Replace))
 	for _, use := range work.Use {
 		dir := use.Path
 		if !filepath.IsAbs(dir) {
@@ -192,12 +198,35 @@ func workspaceModules(workFile string) ([]string, bool, error) {
 		}
 		dirs = append(dirs, filepath.Clean(dir))
 	}
-	return dirs, true, nil
+	for _, replace := range work.Replace {
+		if replace.New.Version != "" {
+			continue
+		}
+		dir := replace.New.Path
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(filepath.Dir(workFile), dir)
+		}
+		localReplaces = append(localReplaces, filepath.Clean(dir))
+	}
+	return dirs, localReplaces, nil
 }
 
 // hashModuleTree hashes the sources and module files of the module rooted at
-// dir. A replace to a local directory makes the module uncacheable.
-func hashModuleTree(sum hash.Hash, dir string) (bool, error) {
+// dir, along with the modules reached through local replace directives.
+func hashModuleTree(sum hash.Hash, dir string, visited map[string]struct{}) (bool, error) {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return false, fmt.Errorf("make module directory absolute: %w", err)
+	}
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false, fmt.Errorf("resolve module directory: %w", err)
+	}
+	dir = filepath.Clean(dir)
+	if _, ok := visited[dir]; ok {
+		return true, nil
+	}
+	visited[dir] = struct{}{}
 	goMod := filepath.Join(dir, "go.mod")
 	data, err := os.ReadFile(goMod)
 	if err != nil {
@@ -207,42 +236,159 @@ func hashModuleTree(sum hash.Hash, dir string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("parse %s: %w", goMod, err)
 	}
+	var localReplaces []string
 	for _, replace := range mod.Replace {
-		if replace.New.Version == "" {
+		if replace.New.Version != "" {
+			continue
+		}
+		target := replace.New.Path
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(dir, target)
+		}
+		target = filepath.Clean(target)
+		writeHashLine(sum, "replace %s\n", target)
+		localReplaces = append(localReplaces, target)
+	}
+	if err := hashModuleSources(sum, dir, dir, visited, false); err != nil {
+		var linkedErr *linkedTreeReadError
+		if errors.As(err, &linkedErr) {
 			return false, nil
 		}
+		return false, fmt.Errorf("hash Go sources of %s: %w", dir, err)
 	}
-	err = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	for _, target := range localReplaces {
+		cacheable, err := isLocalReplaceModule(target)
+		if err != nil || !cacheable {
+			return false, err
 		}
+		cacheable, err = hashModuleTree(sum, target, visited)
+		if err != nil || !cacheable {
+			return cacheable, err
+		}
+	}
+	return true, nil
+}
+
+func isLocalReplaceModule(target string) (bool, error) {
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return false, fmt.Errorf("make local replace target absolute: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(absTarget)
+	if unresolvableLink(absTarget, err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolve local replace target %s: %w", target, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return false, fmt.Errorf("stat local replace target %s: %w", target, err)
+	}
+	if !info.IsDir() {
+		return false, nil
+	}
+	if _, err := os.Stat(filepath.Join(resolved, "go.mod")); os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("stat local replace module file in %s: %w", target, err)
+	}
+	return true, nil
+}
+
+type linkedTreeReadError struct {
+	err error
+}
+
+func (e *linkedTreeReadError) Error() string { return e.err.Error() }
+func (e *linkedTreeReadError) Unwrap() error { return e.err }
+
+// hashModuleSources walks module files and Go sources, following symlinks.
+func hashModuleSources(sum hash.Hash, dir, moduleRoot string, visited map[string]struct{}, underExternalLink bool) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return markLinkedTreeReadError(err, underExternalLink)
+	}
+	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() {
-			if path == dir {
-				return nil
+		path := filepath.Join(dir, name)
+		info, err := entry.Info()
+		if err != nil {
+			if os.IsNotExist(err) && !underExternalLink {
+				continue
 			}
-			if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "testdata" || name == "node_modules" {
-				return filepath.SkipDir
-			}
-			if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
-				return filepath.SkipDir
-			}
-			return nil
+			return markLinkedTreeReadError(err, underExternalLink)
 		}
-		if !entry.Type().IsRegular() {
-			return nil
+		isSymlink := info.Mode()&fs.ModeSymlink != 0
+		resolved := path
+		childUnderExternalLink := underExternalLink
+		if isSymlink {
+			resolved, err = filepath.EvalSymlinks(path)
+			if unresolvableLink(path, err) {
+				writeHashLine(sum, "link %s -> dangling\n", path)
+				continue
+			}
+			if err != nil {
+				return markLinkedTreeReadError(err, underExternalLink)
+			}
+			writeHashLine(sum, "link %s -> %s\n", path, resolved)
+			info, err = os.Stat(resolved)
+			if err != nil {
+				if os.IsNotExist(err) {
+					writeHashLine(sum, "link %s -> dangling\n", path)
+					continue
+				}
+				return markLinkedTreeReadError(err, underExternalLink)
+			}
+			childUnderExternalLink = underExternalLink || !pathWithin(moduleRoot, resolved)
+		}
+		if info.IsDir() {
+			if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "testdata" || name == "node_modules" {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(resolved, "go.mod")); err == nil {
+				continue
+			} else if !os.IsNotExist(err) {
+				return markLinkedTreeReadError(err, childUnderExternalLink)
+			}
+			resolved, err = filepath.Abs(resolved)
+			if err != nil {
+				return markLinkedTreeReadError(err, childUnderExternalLink)
+			}
+			resolved = filepath.Clean(resolved)
+			if _, ok := visited[resolved]; ok {
+				continue
+			}
+			visited[resolved] = struct{}{}
+			if err := hashModuleSources(sum, resolved, moduleRoot, visited, childUnderExternalLink); err != nil {
+				return err
+			}
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			continue
 		}
 		isModuleFile := filepath.Dir(path) == dir && (name == "go.mod" || name == "go.sum")
 		isVendorList := name == "modules.txt" && filepath.Base(filepath.Dir(path)) == "vendor"
 		if strings.HasSuffix(name, ".go") || cgoSourceExts[filepath.Ext(name)] || isModuleFile || isVendorList {
-			return hashFile(sum, path)
+			if err := hashFile(sum, path); err != nil {
+				return markLinkedTreeReadError(err, childUnderExternalLink)
+			}
 		}
-		return nil
-	})
-	if err != nil {
-		return false, fmt.Errorf("hash Go sources of %s: %w", dir, err)
 	}
-	return true, nil
+	return nil
+}
+
+func pathWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+func markLinkedTreeReadError(err error, underExternalLink bool) error {
+	if underExternalLink {
+		return &linkedTreeReadError{err: err}
+	}
+	return err
 }
 
 // writeHashLine adds a formatted line to a hash. hash.Hash.Write never
@@ -266,4 +412,18 @@ func hashOptionalFile(sum hash.Hash, path string) error {
 		return nil
 	}
 	return hashFile(sum, path)
+}
+
+// unresolvableLink reports a symlink that leads nowhere: its target is
+// missing, or the links loop. The go command reads neither, so the link counts
+// as dangling rather than as an error of the hash.
+func unresolvableLink(path string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsNotExist(err) {
+		return true
+	}
+	_, statErr := os.Stat(path)
+	return os.IsNotExist(statErr) || errors.Is(statErr, syscall.ELOOP)
 }
