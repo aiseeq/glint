@@ -133,15 +133,7 @@ func newSQLTaintCheck(file *ast.File, info *types.Info, decls map[*types.Func]*a
 		mentions:       make(map[*types.Var]*bool),
 		projectDecls:   decls,
 	}
-	for _, node := range file.Decls {
-		decl, ok := node.(*ast.FuncDecl)
-		if !ok || decl.Name == nil {
-			continue
-		}
-		if fn, ok := info.Defs[decl.Name].(*types.Func); ok {
-			c.functions[fn] = decl
-		}
-	}
+	helpers.IndexFuncDecls(c.functions, file, info)
 	c.collect(file)
 	return c
 }

@@ -88,15 +88,7 @@ func (r *SQLInjectionRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core
 				continue
 			}
 			for _, file := range pkg.Package.Syntax {
-				for _, node := range file.Decls {
-					fn, ok := node.(*ast.FuncDecl)
-					if !ok || fn.Body == nil {
-						continue
-					}
-					if obj, ok := pkg.Package.TypesInfo.Defs[fn.Name].(*types.Func); ok {
-						decls[obj] = fn
-					}
-				}
+				helpers.IndexFuncDecls(decls, file, pkg.Package.TypesInfo)
 			}
 		}
 	}

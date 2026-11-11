@@ -100,15 +100,7 @@ func indexDuplicateFuncs(ctx *core.GoProjectContext) (map[string][]*types.Func, 
 				continue
 			}
 			decls := make(map[*types.Func]*ast.FuncDecl)
-			for _, decl := range file.GoAST.Decls {
-				fd, ok := decl.(*ast.FuncDecl)
-				if !ok || fd.Name == nil {
-					continue
-				}
-				if fn, ok := pkg.Package.TypesInfo.Defs[fd.Name].(*types.Func); ok {
-					decls[fn] = fd
-				}
-			}
+			helpers.IndexFuncDecls(decls, file.GoAST, pkg.Package.TypesInfo)
 			// Another module of the repository cannot call the original
 			// without a new module dependency: copies match within a module.
 			module := moduleOf(pkg.Package) + "\x00"
