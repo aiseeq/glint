@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -16,7 +15,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +22,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/toolcache"
 )
 
 // cacheFormat changes whenever the stored layout does.
@@ -1162,32 +1161,8 @@ func (c *resultCache) fingerprints(list []rules.Rule) map[string]string {
 	return fingerprints
 }
 
-// executableHash identifies the running glint build by its content: a version
-// tag does not change between two development builds.
-var executableHash = sync.OnceValues(func() (string, error) {
-	path, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("locate the glint executable: %w", err)
-	}
-	sum, err := fileHash(path)
-	if err != nil {
-		return "", fmt.Errorf("read the glint executable: %w", err)
-	}
-	return sum, nil
-})
-
-func fileHash(path string) (sum string, err error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("hash a file of the run: %w", err)
-	}
-	defer func() { err = errors.Join(err, file.Close()) }()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", fmt.Errorf("hash %s: %w", path, err)
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
+// executableHash returns the process-wide executable hash shared with analysis rules.
+var executableHash = toolcache.ExecutableHash
 
 // fileLocalRules marks the rules whose findings the cache may keep.
 func fileLocalRules(list []rules.Rule) []bool {

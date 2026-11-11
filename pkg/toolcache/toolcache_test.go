@@ -19,6 +19,24 @@ func useDir(t *testing.T) string {
 	return dir
 }
 
+func TestExecutableHashIsReadOncePerProcess(t *testing.T) {
+	previousRead, previous := readExecutableHash, processExecutableHash
+	t.Cleanup(func() { readExecutableHash, processExecutableHash = previousRead, previous })
+	reads := 0
+	readExecutableHash = func() (string, error) {
+		reads++
+		return "synthetic-binary-hash", nil
+	}
+	processExecutableHash = onceExecutableHash()
+	first, err := ExecutableHash()
+	require.NoError(t, err)
+	second, err := ExecutableHash()
+	require.NoError(t, err)
+	assert.Equal(t, "synthetic-binary-hash", first)
+	assert.Equal(t, first, second)
+	assert.Equal(t, 1, reads)
+}
+
 func TestStoreThenLoad(t *testing.T) {
 	useDir(t)
 	cache := New("shellcheck")

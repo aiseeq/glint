@@ -63,6 +63,7 @@ func TestRuleSettingsDeclared(t *testing.T) {
 		"multi-write-no-transaction":      {"store_types": "Configure uses the package default regular expression when the key is absent.", "independent_calls": "NameSetSetting has no fallback argument.", "transaction_functions": "NameSetSetting has no fallback argument."},
 		"sql-concept-table-outside-owner": {"concepts": "Configure parses the nested list of maps directly from the raw settings map."},
 		"ts-period-boundary-by-hand":      {"period_modules": "GetStringListSetting reports presence and has no fallback argument."},
+		"duplicate-func-of-library":       {"library_modules": "GetStringListSetting reports presence and has no fallback argument."},
 		"non-atomic-status-history":       {"mutation_methods": "NameSetSetting has no fallback argument.", "history_methods": "NameSetSetting has no fallback argument.", "transaction_functions": "NameSetSetting has no fallback argument."},
 		"test-external-service":           {"guard_functions": "NameSetSetting has no fallback argument."},
 		"unused-internal-export":          {"closed_modules": "NameSetSetting has no fallback argument."},

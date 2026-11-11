@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -22,6 +23,39 @@ import (
 // Disabled makes every Load miss: glint check --no-cache asks the
 // programs again.
 var Disabled bool
+
+// ExecutableHash returns the process-wide SHA-256 hash of the running executable.
+func ExecutableHash() (string, error) {
+	return processExecutableHash()
+}
+
+var (
+	readExecutableHash    = hashRunningExecutable
+	processExecutableHash = onceExecutableHash()
+)
+
+// onceExecutableHash reads the executable on the first call and returns the
+// same hash after it.
+func onceExecutableHash() func() (string, error) {
+	return sync.OnceValues(func() (string, error) { return readExecutableHash() })
+}
+
+func hashRunningExecutable() (string, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate the running executable: %w", err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open the running executable: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", fmt.Errorf("hash the running executable: %w", err)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
 
 // maxAge is how long an entry nobody read stays on disk.
 const maxAge = 30 * 24 * time.Hour

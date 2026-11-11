@@ -211,6 +211,20 @@ func workspaceModules(workFile string) ([]string, []string, error) {
 	return dirs, localReplaces, nil
 }
 
+// HashGoModuleTree returns a content hash of the Go sources and module files
+// rooted at dir, following local replace directives.
+func HashGoModuleTree(dir string) (string, error) {
+	sum := sha256.New()
+	cacheable, err := hashModuleTree(sum, dir, make(map[string]struct{}))
+	if err != nil {
+		return "", err
+	}
+	if !cacheable {
+		return "", fmt.Errorf("module tree %s is not cacheable", dir)
+	}
+	return hex.EncodeToString(sum.Sum(nil)), nil
+}
+
 // hashModuleTree hashes the sources and module files of the module rooted at
 // dir, along with the modules reached through local replace directives.
 func hashModuleTree(sum hash.Hash, dir string, visited map[string]struct{}) (bool, error) {

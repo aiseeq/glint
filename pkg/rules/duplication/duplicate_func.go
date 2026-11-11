@@ -21,9 +21,7 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-func init() {
-	rules.Register(NewDuplicateFuncAcrossPackagesRule())
-}
+func init() { rules.Register(NewDuplicateFuncAcrossPackagesRule()) }
 
 // DuplicateFuncAcrossPackagesRule detects helpers copied between packages,
 // either under the same name and signature or with an identical normalized
