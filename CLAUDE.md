@@ -1,3 +1,4 @@
+<!-- lex: собран из /home/aisee/.claude/codex/manifest/git-glint-CLAUDE.md.yaml. Правь фрагменты в /home/aisee/.claude/codex/frag и запусти `lex build --codex /home/aisee/.claude/codex`; правку прямо в этом файле перенеси во фрагменты: `lex absorb --codex /home/aisee/.claude/codex <этот файл>` -->
 Контекст
 - glint (github.com/aiseeq/glint) — универсальный статический анализатор Go/TypeScript. Единственный remote — `origin` (GitHub), trunk — `main`.
 - Правила разложены по категориям (architecture, duplication, patterns, typesafety, security, deadcode, naming, documentation). Авторитетный список — `glint rules`; README вторичен, количество правил в тексте не фиксировать.
