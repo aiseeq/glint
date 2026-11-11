@@ -323,22 +323,13 @@ func hashModuleSources(sum hash.Hash, dir, moduleRoot string, visited map[string
 		resolved := path
 		childUnderExternalLink := underExternalLink
 		if isSymlink {
-			resolved, err = filepath.EvalSymlinks(path)
-			if unresolvableLink(path, err) {
-				writeHashLine(sum, "link %s -> dangling\n", path)
+			var dangling bool
+			resolved, info, dangling, err = followLink(sum, path)
+			if err != nil {
+				return markLinkedTreeReadError(err, underExternalLink)
+			}
+			if dangling {
 				continue
-			}
-			if err != nil {
-				return markLinkedTreeReadError(err, underExternalLink)
-			}
-			writeHashLine(sum, "link %s -> %s\n", path, resolved)
-			info, err = os.Stat(resolved)
-			if err != nil {
-				if os.IsNotExist(err) {
-					writeHashLine(sum, "link %s -> dangling\n", path)
-					continue
-				}
-				return markLinkedTreeReadError(err, underExternalLink)
 			}
 			childUnderExternalLink = underExternalLink || !pathWithin(moduleRoot, resolved)
 		}
@@ -377,6 +368,26 @@ func hashModuleSources(sum hash.Hash, dir, moduleRoot string, visited map[string
 		}
 	}
 	return nil
+}
+
+// followLink writes the link at path and its target into the hash and
+// returns the target; a link that leads nowhere is written as dangling.
+func followLink(sum hash.Hash, path string) (string, fs.FileInfo, bool, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if unresolvableLink(path, err) {
+		writeHashLine(sum, "link %s -> dangling\n", path)
+		return "", nil, true, nil
+	}
+	if err != nil {
+		return "", nil, false, err
+	}
+	writeHashLine(sum, "link %s -> %s\n", path, resolved)
+	info, err := os.Stat(resolved)
+	if os.IsNotExist(err) {
+		writeHashLine(sum, "link %s -> dangling\n", path)
+		return "", nil, true, nil
+	}
+	return resolved, info, false, err
 }
 
 func pathWithin(root, path string) bool {
