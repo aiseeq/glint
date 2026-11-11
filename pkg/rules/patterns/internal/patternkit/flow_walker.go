@@ -255,8 +255,9 @@ func (w *FlowWalker[S, C]) enterScope(
 	return scope, entered
 }
 
-func (w *FlowWalker[S, C]) leaveScope(kind FlowScopeKind, scope C, edges *FlowEdges[S]) {
+func (w *FlowWalker[S, C]) leaveScope(kind FlowScopeKind, node ast.Node, scope C, edges *FlowEdges[S]) {
 	w.Rule.LeaveScope(kind, scope, edges)
+	w.notifyScopeLeft(kind, node, edges)
 	labels := w.pendingLabels()
 	for _, pending := range []map[string][]flowLabelState[S]{labels.gotos, labels.breaks, labels.continues} {
 		for label, states := range pending {
@@ -267,6 +268,7 @@ func (w *FlowWalker[S, C]) leaveScope(kind FlowScopeKind, scope C, edges *FlowEd
 				deferredEdges := w.deadEdges()
 				deferredEdges.Next = states[i].state
 				w.Rule.LeaveScope(kind, scope, &deferredEdges)
+				w.notifyScopeLeft(kind, node, &deferredEdges)
 				states[i].state = deferredEdges.Next
 				states[i].depth--
 			}
@@ -274,6 +276,14 @@ func (w *FlowWalker[S, C]) leaveScope(kind FlowScopeKind, scope C, edges *FlowEd
 		}
 	}
 	w.depth--
+}
+
+func (w *FlowWalker[S, C]) notifyScopeLeft(kind FlowScopeKind, node ast.Node, edges *FlowEdges[S]) {
+	if observer, ok := any(w.Rule).(interface {
+		FlowScopeLeft(FlowScopeKind, ast.Node, *FlowEdges[S])
+	}); ok {
+		observer.FlowScopeLeft(kind, node, edges)
+	}
 }
 
 func (w *FlowWalker[S, C]) join(left, right S) S {
@@ -391,7 +401,7 @@ func (w *FlowWalker[S, C]) body(block *ast.BlockStmt, state S, parent C, kind Fl
 	}
 	scope, entered := w.enterScope(kind, block, parent, state)
 	edges := w.stmtList(block.List, entered, scope)
-	w.leaveScope(kind, scope, &edges)
+	w.leaveScope(kind, block, scope, &edges)
 	return edges
 }
 
@@ -401,7 +411,7 @@ func (w *FlowWalker[S, C]) ifStmt(stmt *ast.IfStmt, state S, parent C) FlowEdges
 		initEdges := w.Stmt(stmt.Init, entered, scope)
 		entered = initEdges.Next
 		if !w.Rule.LiveState(entered) {
-			w.leaveScope(flowScopeIfHeader, scope, &initEdges)
+			w.leaveScope(flowScopeIfHeader, stmt, scope, &initEdges)
 			return initEdges
 		}
 	}
@@ -421,7 +431,7 @@ func (w *FlowWalker[S, C]) ifStmt(stmt *ast.IfStmt, state S, parent C) FlowEdges
 	edges.Breaks = w.join(edges.Breaks, elseEdges.Breaks)
 	edges.Continues = w.join(edges.Continues, elseEdges.Continues)
 	w.Rule.Normalize(&edges)
-	w.leaveScope(flowScopeIfHeader, scope, &edges)
+	w.leaveScope(flowScopeIfHeader, stmt, scope, &edges)
 	return edges
 }
 
@@ -432,7 +442,7 @@ func (w *FlowWalker[S, C]) forStmt(stmt *ast.ForStmt, state S, parent C) FlowEdg
 		initEdges := w.Stmt(stmt.Init, entered, scope)
 		entered = initEdges.Next
 		if !w.Rule.LiveState(entered) {
-			w.leaveScope(FlowScopeForHeader, scope, &initEdges)
+			w.leaveScope(FlowScopeForHeader, stmt, scope, &initEdges)
 			return initEdges
 		}
 	}
@@ -462,7 +472,7 @@ func (w *FlowWalker[S, C]) forStmt(stmt *ast.ForStmt, state S, parent C) FlowEdg
 		edges.Next = w.join(edges.Next, iteration)
 	}
 	w.Rule.Normalize(&edges)
-	w.leaveScope(FlowScopeForHeader, scope, &edges)
+	w.leaveScope(FlowScopeForHeader, stmt, scope, &edges)
 	return edges
 }
 
@@ -485,7 +495,7 @@ func (w *FlowWalker[S, C]) rangeStmt(stmt *ast.RangeStmt, state S, parent C) Flo
 		edges.Next = w.join(edges.Next, w.takeLabeled(w.pendingLabels().continues, label))
 	}
 	w.Rule.Normalize(&edges)
-	w.leaveScope(flowScopeRangeHeader, scope, &edges)
+	w.leaveScope(flowScopeRangeHeader, stmt, scope, &edges)
 	return edges
 }
 
@@ -503,7 +513,7 @@ func (w *FlowWalker[S, C]) switchLike(
 		entered = w.Stmt(init, entered, scope).Next
 		if !w.Rule.LiveState(entered) {
 			edges := w.deadEdges()
-			w.leaveScope(flowScopeSwitchHeader, scope, &edges)
+			w.leaveScope(flowScopeSwitchHeader, sw, scope, &edges)
 			return edges
 		}
 	}
@@ -515,7 +525,7 @@ func (w *FlowWalker[S, C]) switchLike(
 	}
 	edges := w.deadEdges()
 	if !w.Rule.LiveState(entered) {
-		w.leaveScope(flowScopeSwitchHeader, scope, &edges)
+		w.leaveScope(flowScopeSwitchHeader, sw, scope, &edges)
 		return edges
 	}
 	hasDefault := false
@@ -536,7 +546,7 @@ func (w *FlowWalker[S, C]) switchLike(
 			clauseEdges = w.stmtList(clause.Body, clauseState, clauseScope)
 		}
 		carried = w.takeFallthrough()
-		w.leaveScope(FlowScopeCaseClause, clauseScope, &clauseEdges)
+		w.leaveScope(FlowScopeCaseClause, clause, clauseScope, &clauseEdges)
 		edges.Next = w.join(edges.Next, clauseEdges.Next)
 		edges.Next = w.join(edges.Next, clauseEdges.Breaks)
 		edges.Continues = w.join(edges.Continues, clauseEdges.Continues)
@@ -545,7 +555,7 @@ func (w *FlowWalker[S, C]) switchLike(
 		edges.Next = w.join(edges.Next, w.Rule.CloneState(entered))
 	}
 	w.Rule.Normalize(&edges)
-	w.leaveScope(flowScopeSwitchHeader, scope, &edges)
+	w.leaveScope(flowScopeSwitchHeader, sw, scope, &edges)
 	return edges
 }
 
@@ -565,7 +575,7 @@ func (w *FlowWalker[S, C]) selectStmt(stmt *ast.SelectStmt, state S, parent C) F
 		if w.Rule.LiveState(clauseState) {
 			clauseEdges = w.stmtList(clause.Body, clauseState, clauseScope)
 		}
-		w.leaveScope(FlowScopeCommClause, clauseScope, &clauseEdges)
+		w.leaveScope(FlowScopeCommClause, clause, clauseScope, &clauseEdges)
 		edges.Next = w.join(edges.Next, clauseEdges.Next)
 		edges.Next = w.join(edges.Next, clauseEdges.Breaks)
 		edges.Continues = w.join(edges.Continues, clauseEdges.Continues)

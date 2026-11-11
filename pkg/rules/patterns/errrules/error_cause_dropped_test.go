@@ -283,6 +283,309 @@ func (h *Handler) page(w http.ResponseWriter, r *http.Request) {
 	assert.Len(t, analyzeGoSnippet(t, rule, withoutLog), 1)
 }
 
+func TestErrorCauseDropped5xxLogPaths(t *testing.T) {
+	rule := NewErrorCauseDroppedRule()
+	tests := []struct {
+		name     string
+		body     string
+		expected int
+	}{
+		{
+			name: "log on returning branch does not reach response",
+			body: `if retry {
+			slog.Error("retrying", "err", err)
+			return
+		}
+		http.Error(w, "request failed", http.StatusInternalServerError)`,
+			expected: 1,
+		},
+		{
+			name: "log before response",
+			body: `slog.Error("request failed", "err", err)
+			http.Error(w, "request failed", http.StatusInternalServerError)`,
+		},
+		{
+			name: "both branches log before common response",
+			body: `if retry {
+			slog.Error("retrying", "err", err)
+		} else {
+			slog.Error("not retrying", "err", err)
+		}
+		http.Error(w, "request failed", http.StatusInternalServerError)`,
+		},
+		{
+			name: "one branch log does not cover common response",
+			body: `if retry {
+			slog.Error("retrying", "err", err)
+		}
+		http.Error(w, "request failed", http.StatusInternalServerError)`,
+			expected: 1,
+		},
+		{
+			name: "loop log does not cover zero iterations",
+			body: `for range items {
+			slog.Error("retrying", "err", err)
+		}
+		http.Error(w, "request failed", http.StatusInternalServerError)`,
+			expected: 1,
+		},
+		{
+			name: "with logger on response path",
+			body: `logger := slog.With("err", err)
+			logger.Error("request failed")
+			http.Error(w, "request failed", http.StatusInternalServerError)`,
+		},
+		{
+			name: "log after response covers it",
+			body: `http.Error(w, "internal failure", http.StatusInternalServerError)
+			slog.Error("request failed", "err", err)`,
+		},
+		{
+			name: "response in immediately called function literal",
+			body: `slog.Error("request failed", "err", err)
+			func() { http.Error(w, "internal failure", 500) }()`,
+		},
+		{
+			name: "response in deferred function literal",
+			body: `slog.Error("request failed", "err", err)
+			defer func() { http.Error(w, "internal failure", 500) }()`,
+		},
+		{
+			name: "response in if condition",
+			body: `slog.Error("request failed", "err", err)
+			if writeError(w, 500, "internal failure") != nil { return }`,
+		},
+		{
+			name: "second response without a log is reported",
+			body: `if retry {
+			slog.Error("retrying", "err", err)
+			http.Error(w, "internal failure", 500)
+			return
+		}
+		http.Error(w, "service failure", 500)`,
+			expected: 1,
+		},
+		{
+			name: "log in immediately called function literal",
+			body: `func() { slog.Error("request failed", "err", err) }()
+			http.Error(w, "internal failure", 500)`,
+		},
+		{
+			name: "stored response closure after log",
+			body: `respond := func() { http.Error(w, "internal failure", 500) }
+			slog.Error("request failed", "err", err)
+			respond()`,
+		},
+		{
+			name: "stored logger closure uses unexpanded-literal fallback",
+			body: `logIt := func() { slog.Error("request failed", "err", err) }
+			logIt()
+			http.Error(w, "internal failure", 500)`,
+		},
+		{
+			name: "nested error construction inside logger is not a response",
+			body: `log.Println(errors.New("internal failure"), err)
+			http.Error(w, "internal failure", 500)`,
+		},
+		{
+			name: "unreached once callback uses whole-branch logged fallback",
+			body: `slog.Error("request failed", "err", err)
+			once.Do(func() { http.Error(w, "internal failure", 500) })`,
+		},
+		{
+			name: "recursive function literal with an unexpanded log uses fallback",
+			body: `var again func(k int)
+			again = func(k int) { slog.Error("request failed", "err", err); if k > 0 { again(k - 1) } }
+			again(3)
+			http.Error(w, "internal failure", http.StatusInternalServerError)`,
+		},
+		{
+			name: "mutually recursive literals with an unexpanded log use fallback",
+			body: `var ping, pong func()
+			ping = func() { slog.Error("request failed", "err", err); pong() }
+			pong = func() { ping() }
+			ping()
+			http.Error(w, "internal failure", http.StatusInternalServerError)`,
+		},
+		{
+			name: "inner function literal binding does not shadow outer call after block",
+			body: `respond := func() {
+				slog.Error("request failed", "err", err)
+				http.Error(w, "internal failure", 500)
+			}
+			{
+				respond := func() { http.Error(w, "internal failure", 500) }
+				_ = respond
+			}
+			respond()`,
+		},
+		{
+			name: "reassignment to plain function uses unexpanded-literal fallback",
+			body: `logIt := func() { slog.Error("request failed", "err", err) }
+			logIt = plain
+			logIt()
+			http.Error(w, "internal failure", 500)`,
+		},
+		{
+			name: "callback argument log uses unexpanded-literal fallback",
+			body: `run(func() { slog.Error("request failed", "err", err) })
+			http.Error(w, "internal failure", 500)`,
+		},
+		{
+			name: "struct field log uses unexpanded-literal fallback",
+			body: `h := hooks{logIt: func() { slog.Error("request failed", "err", err) }}
+			h.logIt()
+			http.Error(w, "internal failure", 500)`,
+		},
+		{
+			name: "nested local literal log uses unexpanded-literal fallback",
+			body: `c := func() { slog.Error("request failed", "err", err) }
+			b := func() { c() }
+			a := func() { b() }
+			a()
+			http.Error(w, "internal failure", 500)`,
+		},
+		{
+			name: "select then log preserves response path",
+			body: `http.Error(w, "internal failure", 500)
+			select { case <-ch: default: }
+			slog.Error("request failed", "err", err)`,
+		},
+		{
+			name: "select with unexpanded local log uses fallback",
+			body: `logIt := func() { slog.Error("request failed", "err", err) }
+			select { case <-ch: default: }
+			logIt()
+			http.Error(w, "internal failure", 500)`,
+		},
+		{
+			name: "switch case local literal does not leak binding",
+			body: `respond := func() {
+				slog.Error("request failed", "err", err)
+				http.Error(w, "internal failure", 500)
+			}
+			switch n {
+			case 1:
+			case 2:
+				respond := func() { http.Error(w, "internal failure", 500) }
+				_ = respond
+			}
+			respond()`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code := `package h
+import (
+	"errors"
+	"log"
+	"log/slog"
+	"net/http"
+)
+func handle(w http.ResponseWriter, retry bool, items []int) {
+	err := load()
+	if err != nil {
+		` + tt.body + `
+	}
+}
+func load() error { return nil }`
+			code += `
+func plain() {}
+type hooks struct { logIt func() }
+func run(func()) {}`
+			assert.Len(t, analyzeGoSnippet(t, rule, code), tt.expected, "code:\n%s", code)
+		})
+	}
+}
+
+func TestErrorCauseDroppedFlowExitPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+	}{
+		{
+			name: "break",
+			code: `package h
+import "net/http"
+func handle(w http.ResponseWriter, err error) {
+	for {
+		if err != nil {
+			http.Error(w, "internal failure", 500)
+			break
+		}
+		break
+	}
+}`,
+		},
+		{
+			name: "continue",
+			code: `package h
+import "net/http"
+func handle(w http.ResponseWriter, err error) {
+	for retry := true; retry; retry = false {
+		if err != nil {
+			http.Error(w, "internal failure", 500)
+			continue
+		}
+	}
+}`,
+		},
+		{
+			name: "goto out of branch",
+			code: `package h
+import "net/http"
+func handle(w http.ResponseWriter, err error) {
+	if err != nil {
+		http.Error(w, "internal failure", 500)
+		goto end
+	}
+end:
+}`,
+		},
+		{
+			name: "labeled break out of branch",
+			code: `package h
+import "net/http"
+func handle(w http.ResponseWriter, err error) {
+outer:
+	for {
+		if err != nil {
+			http.Error(w, "internal failure", 500)
+			break outer
+		}
+		break outer
+	}
+}`,
+		},
+		{
+			name: "pending response survives another branch return",
+			code: `package h
+import "log/slog"
+import "net/http"
+func handle(w http.ResponseWriter, err error, retry bool) {
+	for {
+		if err != nil {
+			http.Error(w, "internal failure", 500)
+			if retry {
+				slog.Error("retrying", "err", err)
+				return
+			}
+			break
+		}
+		break
+	}
+}
+	`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Len(t, analyzeGoSnippet(t, NewErrorCauseDroppedRule(), tt.code), 1)
+		})
+	}
+}
+
 func analyzeSecurityRule(t *testing.T, rule interface {
 	AnalyzeFile(*core.FileContext) []*core.Violation
 }, code string) []*core.Violation {

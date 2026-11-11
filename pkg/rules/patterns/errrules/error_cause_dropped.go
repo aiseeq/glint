@@ -4,6 +4,8 @@ import (
 	"go/ast"
 	"go/token"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -124,9 +126,7 @@ func (r *ErrorCauseDroppedRule) droppedCauseEmission(body *ast.BlockStmt, errNam
 				return false
 			}
 			if isCauseLogCall(node) {
-				if nodeReadsIdent(node, errName) {
-					causeLogged = true
-				}
+				causeLogged = causeLogged || nodeReadsIdent(node, errName)
 				// The cause may be logged — that is not the caller seeing it.
 				return false
 			}
@@ -144,11 +144,230 @@ func (r *ErrorCauseDroppedRule) droppedCauseEmission(body *ast.BlockStmt, errNam
 	if emission == nil || causeUsed || terminates {
 		return nil
 	}
-	if causeLogged && emitsFixedMessage(emission) && isServerErrorResponse(emission) {
+	unexpandedLog := causeLoggedInUnexpandedLiteral(body, errName)
+	if unlogged, reached := firstUnloggedResponse(body, errName, emission); unlogged != nil {
+		if unexpandedLog && emitsFixedMessage(emission) && isServerErrorResponse(emission) {
+			return nil
+		}
+		return unlogged
+	} else if reached {
+		return nil
+	}
+	// Preserve the former whole-branch result when the walker cannot reach the
+	// selected emission, such as a function literal stored for a later call.
+	if (causeLogged || unexpandedLog) && emitsFixedMessage(emission) && isServerErrorResponse(emission) {
 		return nil
 	}
 	return emission
 }
+
+type causeLogFlowState struct {
+	live    bool
+	logged  bool
+	pending []*ast.CallExpr
+}
+
+type causeLogFlowRule struct {
+	errName    string
+	bad        *[]*ast.CallExpr
+	selected   *ast.CallExpr
+	reached    *bool
+	branchBody *ast.BlockStmt
+	exits      []causeLogFlowState
+	completed  []causeLogFlowState
+}
+
+func firstUnloggedResponse(body *ast.BlockStmt, errName string, selected *ast.CallExpr) (*ast.CallExpr, bool) {
+	var bad []*ast.CallExpr
+	var reached bool
+	rule := &causeLogFlowRule{
+		errName: errName, bad: &bad, selected: selected, reached: &reached,
+		branchBody: body,
+	}
+	walker := &patternkit.FlowWalker[causeLogFlowState, struct{}]{Rule: rule}
+	edges := walker.Stmt(body, causeLogFlowState{live: true}, struct{}{})
+	states := append(rule.exits, rule.completed...)
+	states = append(states, edges.Next, edges.Breaks, edges.Continues)
+	for _, state := range states {
+		bad = append(bad, state.pending...)
+	}
+	if len(bad) == 0 {
+		return nil, reached
+	}
+	sort.SliceStable(bad, func(left, right int) bool { return bad[left].Pos() < bad[right].Pos() })
+	return bad[0], reached
+}
+
+func causeLoggedInUnexpandedLiteral(body *ast.BlockStmt, errName string) bool {
+	var literals []*ast.FuncLit
+	called := make(map[*ast.FuncLit]bool)
+	ast.Inspect(body, func(node ast.Node) bool {
+		switch current := node.(type) {
+		case *ast.FuncLit:
+			literals = append(literals, current)
+		case *ast.CallExpr:
+			if literal, ok := ast.Unparen(current.Fun).(*ast.FuncLit); ok {
+				called[literal] = true
+			}
+		}
+		return true
+	})
+	for _, literal := range literals {
+		if called[literal] {
+			continue
+		}
+		logged := false
+		ast.Inspect(literal.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if isCauseLogCall(call) && nodeReadsIdent(call, errName) {
+				logged = true
+				return false
+			}
+			return !isCauseLogCall(call)
+		})
+		if logged {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *causeLogFlowRule) CloneState(state causeLogFlowState) causeLogFlowState {
+	state.pending = append([]*ast.CallExpr(nil), state.pending...)
+	return state
+}
+
+func (r *causeLogFlowRule) JoinStates(left, right causeLogFlowState) causeLogFlowState {
+	joined := causeLogFlowState{live: left.live || right.live, logged: left.logged && right.logged}
+	joined.pending = append(joined.pending, left.pending...)
+	for _, pending := range right.pending {
+		if !slices.Contains(joined.pending, pending) {
+			joined.pending = append(joined.pending, pending)
+		}
+	}
+	return joined
+}
+
+func (r *causeLogFlowRule) LiveState(state causeLogFlowState) bool { return state.live }
+
+func (r *causeLogFlowRule) DeadState() causeLogFlowState { return causeLogFlowState{} }
+
+func (r *causeLogFlowRule) EnterScope(_ patternkit.FlowScopeKind, _ ast.Node, parent struct{}, state causeLogFlowState) (struct{}, causeLogFlowState) {
+	return parent, state
+}
+
+func (r *causeLogFlowRule) LeaveScope(patternkit.FlowScopeKind, struct{}, *patternkit.FlowEdges[causeLogFlowState]) {
+}
+
+func (r *causeLogFlowRule) FlowScopeLeft(_ patternkit.FlowScopeKind, node ast.Node, edges *patternkit.FlowEdges[causeLogFlowState]) {
+	if node == r.branchBody {
+		r.exits = append(r.exits, r.CloneState(edges.Next), r.CloneState(edges.Breaks), r.CloneState(edges.Continues))
+	}
+}
+
+func (r *causeLogFlowRule) SimpleStmt(stmt ast.Stmt, state causeLogFlowState, _ struct{}) (causeLogFlowState, bool) {
+	state = r.scanNode(stmt, state)
+	if _, ok := stmt.(*ast.ReturnStmt); ok {
+		r.completed = append(r.completed, state)
+		return causeLogFlowState{}, true
+	}
+	return state, false
+}
+
+func (r *causeLogFlowRule) scanNode(node ast.Node, state causeLogFlowState) causeLogFlowState {
+	var calls []*ast.CallExpr
+	ast.Inspect(node, func(current ast.Node) bool {
+		if _, ok := current.(*ast.FuncLit); ok {
+			return false
+		}
+		if call, ok := current.(*ast.CallExpr); ok {
+			calls = append(calls, call)
+			if isCauseLogCall(call) {
+				return false
+			}
+		}
+		return true
+	})
+	sort.SliceStable(calls, func(left, right int) bool { return calls[left].End() < calls[right].End() })
+	for _, call := range calls {
+		if literal, ok := ast.Unparen(call.Fun).(*ast.FuncLit); ok {
+			state = r.inlineBody(literal.Body, state)
+		}
+		if r.reached != nil && call == r.selected {
+			*r.reached = true
+		}
+		if isCauseLogCall(call) && nodeReadsIdent(call, r.errName) {
+			state.logged = true
+			state.pending = nil
+			continue
+		}
+		if isCauseLogCall(call) {
+			continue
+		}
+		if !emitsFixedMessage(call) {
+			continue
+		}
+		if !isServerErrorResponse(call) {
+			*r.bad = append(*r.bad, call)
+		} else if !state.logged && !slices.Contains(state.pending, call) {
+			state.pending = append(state.pending, call)
+		}
+	}
+	return state
+}
+
+func (r *causeLogFlowRule) inlineBody(body *ast.BlockStmt, state causeLogFlowState) causeLogFlowState {
+	child := &causeLogFlowRule{errName: r.errName, bad: r.bad, selected: r.selected, reached: r.reached}
+	walker := &patternkit.FlowWalker[causeLogFlowState, struct{}]{Rule: child}
+	edges := walker.Stmt(body, state, struct{}{})
+	completed := append([]causeLogFlowState(nil), child.completed...)
+	for _, edge := range []causeLogFlowState{edges.Next, edges.Breaks, edges.Continues} {
+		if child.LiveState(edge) {
+			completed = append(completed, edge)
+		}
+	}
+	if len(completed) == 0 {
+		return state
+	}
+	joined := completed[0]
+	for _, result := range completed[1:] {
+		joined = r.JoinStates(joined, result)
+	}
+	return joined
+}
+
+func (r *causeLogFlowRule) IfCondition(stmt *ast.IfStmt, state causeLogFlowState, _ struct{}) (causeLogFlowState, causeLogFlowState) {
+	state = r.scanNode(stmt.Cond, state)
+	return state, state
+}
+
+func (r *causeLogFlowRule) FlowExpr(expr ast.Expr, state causeLogFlowState, _ struct{}) causeLogFlowState {
+	return r.scanNode(expr, state)
+}
+
+func (r *causeLogFlowRule) RangeVars(_ *ast.RangeStmt, state causeLogFlowState, _ struct{}) causeLogFlowState {
+	return state
+}
+
+func (r *causeLogFlowRule) TypeSwitchGuard(stmt ast.Stmt, state causeLogFlowState, _ struct{}) causeLogFlowState {
+	return r.scanNode(stmt, state)
+}
+
+func (r *causeLogFlowRule) CaseClause(_ ast.Stmt, clause *ast.CaseClause, state causeLogFlowState, parent struct{}) (causeLogFlowState, struct{}) {
+	for _, expression := range clause.List {
+		state = r.scanNode(expression, state)
+	}
+	return state, parent
+}
+
+func (r *causeLogFlowRule) CommClause(_ *ast.CommClause, state causeLogFlowState, parent struct{}) (causeLogFlowState, struct{}) {
+	return state, parent
+}
+
+func (r *causeLogFlowRule) Normalize(*patternkit.FlowEdges[causeLogFlowState]) {}
 
 // isCauseLogCall also accepts With-style logger calls, which attach the error to
 // the logger context before the response is written.
