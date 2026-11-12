@@ -518,6 +518,7 @@ func (c *resultCache) keyRootFiles(files []*core.FileContext, hashes map[string]
 	c.rootRuleFingerprints = make(map[string]string)
 	c.rootRuleHits = make(map[string]bool)
 	c.subsetKeys = make(map[string]string)
+	var subsetSum [sha256.Size]byte
 	for _, rule := range enabled {
 		if !rootProjectRuleCacheable(rule) {
 			continue
@@ -549,7 +550,7 @@ func (c *resultCache) keyRootFiles(files []*core.FileContext, hashes map[string]
 					_, _ = h.Write(entry.hash[:])
 				}
 			}
-			key := hex.EncodeToString(h.Sum(nil))
+			key := hex.EncodeToString(h.Sum(subsetSum[:0]))
 			c.subsetKeys[rule.Name()] = key
 			if previous, ok := c.subsetPrevious[rule.Name()]; ok && previous.Key == key {
 				c.rootRuleHits[rule.Name()] = true
