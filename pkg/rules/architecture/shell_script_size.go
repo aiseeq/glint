@@ -70,7 +70,8 @@ func (r *ShellScriptSizeRule) Configure(settings map[string]any) error {
 func (r *ShellScriptSizeRule) ReadsOtherFiles() bool { return true }
 
 // AnalyzeFile reports, at its first line, a shell script over the limit that is
-// new or larger than in HEAD. A link is skipped: HEAD keeps the link's target
+// new or larger than in HEAD, under its own path or the one it moved from. A
+// link is skipped: HEAD keeps the link's target
 // path, and the script it points to is checked under its own name.
 func (r *ShellScriptSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	size := len(ctx.Content)
@@ -80,22 +81,26 @@ func (r *ShellScriptSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	if info, err := os.Lstat(ctx.Path); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return nil
 	}
-	headSize, tracked, err := committedSize(ctx.Path)
-	if !tracked {
-		headSize = -1
-	}
-	if size <= headSize {
+	head, err := committedVersion(ctx.Path)
+	if size <= head.size {
 		return nil
 	}
-	v := r.CreateViolation(ctx.RelPath, 1, sizeMessage(size, r.maxBytes, headSize, err))
+	v := r.CreateViolation(ctx.RelPath, 1, sizeMessage(size, r.maxBytes, head, err))
 	v.WithSuggestion("Move the script to Go or TypeScript; keep in shell only a short wrapper that runs it. A large script may be fixed without growing")
 	return []*core.Violation{v}
 }
 
-// sizeMessage tells the size against the limit and against HEAD, headSize -1
-// for a new script, headErr when HEAD was not read. A number that rounds to the
-// same text as the one it is compared with is given in bytes, both of them.
-func sizeMessage(size, limit, headSize int, headErr error) string {
+// headVersion is a script as HEAD has it: size -1 when HEAD has no version of
+// it, from the HEAD path when the script moved.
+type headVersion struct {
+	size int
+	from string
+}
+
+// sizeMessage tells the size against the limit and against HEAD, headErr
+// when HEAD was not read. A number that rounds to the same text as the one it
+// is compared with is given in bytes, both of them.
+func sizeMessage(size, limit int, head headVersion, headErr error) string {
 	sizeShown, limitShown := sizeText(size), sizeText(limit)
 	if sizeShown == limitShown {
 		sizeShown, limitShown = byteText(size), byteText(limit)
@@ -104,36 +109,149 @@ func sizeMessage(size, limit, headSize int, headErr error) string {
 	if headErr != nil {
 		growth = "its size in HEAD not read: " + headErr.Error()
 	}
-	if headSize >= 0 {
-		headShown := sizeText(headSize)
+	if head.size >= 0 {
+		headShown := sizeText(head.size)
 		if headShown == sizeText(size) {
-			sizeShown, headShown = byteText(size), byteText(headSize)
+			sizeShown, headShown = byteText(size), byteText(head.size)
 		}
 		growth = "grown from " + headShown + " in HEAD"
+		if head.from != "" {
+			growth += " as " + head.from
+		}
 	}
 	return fmt.Sprintf("Shell script of %s, over the %s limit for shell: %s", sizeShown, limitShown, growth)
 }
 
-// committedSize is the size of path in the HEAD commit of the git repository
-// holding it, read by the git command. A path outside a repository, in one
-// without commits, or absent from HEAD is untracked, which git tells by exit
-// code 128; any other failure, git missing too, is an error.
-func committedSize(path string) (int, bool, error) {
-	cmd := exec.Command("git", "--no-replace-objects", "-C", filepath.Dir(path), "cat-file", "-s", "HEAD:./"+filepath.Base(path))
-	cmd.Env = repositoryNeutralEnv(os.Environ())
+// committedVersion finds the script in HEAD: under its own path, under the
+// path git's rename detection pairs it with, or, for a move or copy git does
+// not track, as a blob of HEAD with the same content.
+func committedVersion(path string) (headVersion, error) {
+	dir, base := filepath.Dir(path), filepath.Base(path)
+	size, found, err := committedSize(dir, "./"+base)
+	if err != nil || found != headPathAbsent {
+		return headVersion{size: size}, err
+	}
+	none := headVersion{size: -1}
+	prefix, err := gitOutput(dir, "rev-parse", "--show-prefix")
+	if err != nil {
+		return none, err
+	}
+	diff, err := gitOutput(dir, "diff", "-M", "-z", "--name-status", "HEAD", "--")
+	if err != nil {
+		return none, err
+	}
+	if from := renamedFrom(diff, strings.TrimSpace(prefix)+base); from != "" {
+		size, _, err := committedSize(dir, ":"+from)
+		if err != nil {
+			return none, err
+		}
+		return headVersion{size: size, from: from}, nil
+	}
+	blob, err := gitOutput(dir, "hash-object", "--", base)
+	if err != nil {
+		return none, err
+	}
+	tree, err := gitOutput(dir, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
+	if err != nil {
+		return none, err
+	}
+	if from := treePathOf(tree, strings.TrimSpace(blob)); from != "" {
+		size, _, err := committedSize(dir, ":"+from)
+		return headVersion{size: size, from: from}, err
+	}
+	return none, nil
+}
+
+// renamedFrom is the HEAD path that `git diff -M -z --name-status` pairs with
+// path in a rename, or "".
+func renamedFrom(diff, path string) string {
+	fields := strings.Split(diff, "\x00")
+	for i := 0; i < len(fields); i++ {
+		status := fields[i]
+		if !strings.HasPrefix(status, "R") {
+			i++ // one path
+			continue
+		}
+		if i+2 < len(fields) && fields[i+2] == path {
+			return fields[i+1]
+		}
+		i += 2
+	}
+	return ""
+}
+
+// treePathOf is a path of `git ls-tree -r -z` whose blob is hash, or "".
+func treePathOf(tree, hash string) string {
+	for entry := range strings.SplitSeq(tree, "\x00") {
+		meta, path, ok := strings.Cut(entry, "\t")
+		if ok && strings.HasSuffix(meta, " "+hash) {
+			return path
+		}
+	}
+	return ""
+}
+
+// headLookup is what HEAD has for a path.
+type headLookup int
+
+const (
+	headPathFound  headLookup = iota
+	headPathAbsent            // HEAD is there, the path is not
+	headMissing               // outside a repository, or one without commits
+)
+
+// committedSize is the size of a path in HEAD, "./name" from dir or ":path"
+// from the top of the repository holding dir; size -1 when it is not there.
+// git tells an absent path and a missing HEAD by the text of its exit 128,
+// which is also its code for a real failure (another owner, a missing
+// object), so the text decides. A repository whose HEAD names a broken ref
+// reads as one without commits: git words both alike.
+func committedSize(dir, path string) (int, headLookup, error) {
+	out, err := gitOutput(dir, "cat-file", "-s", "HEAD:"+strings.TrimPrefix(path, ":"))
+	switch {
+	case gitSaid(err, "exists on disk, but not in 'HEAD'"):
+		return -1, headPathAbsent, nil
+	case gitSaid(err, "not a git repository", "invalid object name 'HEAD'"):
+		return -1, headMissing, nil
+	case err != nil:
+		return -1, headMissing, err
+	}
+	size, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return -1, headMissing, fmt.Errorf("git cat-file size %q: %w", out, err)
+	}
+	return size, headPathFound, nil
+}
+
+// gitSaid tells a git failure whose words hold one of the texts.
+func gitSaid(err error, texts ...string) bool {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return false
+	}
+	for _, text := range texts {
+		if strings.Contains(string(exit.Stderr), text) {
+			return true
+		}
+	}
+	return false
+}
+
+// gitOutput runs git in dir with replace refs off, its messages in English,
+// and without the variables that would point it at another repository. A
+// failure carries git's own words.
+func gitOutput(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"--no-replace-objects", "-C", dir}, args...)...)
+	cmd.Env = append(repositoryNeutralEnv(os.Environ()), "LC_ALL=C")
 	out, err := cmd.Output()
 	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() == 128 {
-		return 0, false, nil
+	if errors.As(err, &exit) {
+		return string(out), fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(string(exit.Stderr)))
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("git cat-file: %w", err)
+		return string(out), fmt.Errorf("git %s: %w", args[0], err)
 	}
-	size, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		return 0, false, fmt.Errorf("git cat-file size %q: %w", out, err)
-	}
-	return size, true, nil
+	return string(out), nil
 }
 
 // repositoryNeutralEnv drops the variables a hook may have set for its own

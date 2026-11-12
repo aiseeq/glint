@@ -48,6 +48,10 @@ func TestShellScriptSizeRule(t *testing.T) {
 	rule = NewShellScriptSizeRule()
 	assert.Empty(t, rule.AnalyzeFile(rulestest.TextFile(t, "tools/data.txt", strings.Repeat("x", limit+1))))
 	assert.Empty(t, rule.AnalyzeFile(rulestest.TextFile(t, "tools/run", strings.Repeat("x", limit+1))))
+	// Outside a repository every script is new.
+	found = rule.AnalyzeFile(rulestest.TextFile(t, "tools/run.sh", shellOfSize(limit+1)))
+	require.Len(t, found, 1)
+	assert.Equal(t, "Shell script of 20.1 KB, over the 20 KB limit for shell: a new shell script", found[0].Message)
 }
 
 // committedRepo is a git repository whose HEAD holds the given files.
@@ -171,6 +175,93 @@ func TestShellScriptSizeRuleTellsAnUnreadHead(t *testing.T) {
 	found = analyzeIn(t, NewShellScriptSizeRule(), root, "ops/big.sh", shellOfSize(limit+2048))
 	require.Len(t, found, 1)
 	assert.Contains(t, found[0].Message, "its size in HEAD not read: git cat-file: exit status 3")
+
+}
+
+// git's exit 128 counts as a new script only when its words say HEAD has no
+// such path; a store without the script's blob is a failure, told with them.
+func TestShellScriptSizeRuleTellsAFailedHead(t *testing.T) {
+	limit := defaultShellScriptMaxBytes
+	root := committedRepo(t, map[string]string{"ops/big.sh": shellOfSize(limit + 2048)})
+	cmd := exec.Command("git", "-C", root, "rev-parse", "HEAD:ops/big.sh")
+	cmd.Env = repositoryNeutralEnv(os.Environ())
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	blob := strings.TrimSpace(string(out))
+	require.NoError(t, os.Remove(filepath.Join(root, ".git", "objects", blob[:2], blob[2:])))
+
+	found := analyzeIn(t, NewShellScriptSizeRule(), root, "ops/big.sh", shellOfSize(limit+2048))
+	require.Len(t, found, 1)
+	assert.Contains(t, found[0].Message, "its size in HEAD not read: git cat-file: exit status 128: fatal: ")
+}
+
+// git's words are read in English whatever the caller's locale, and a
+// repository without commits has every script new.
+func TestShellScriptSizeRuleReadsGitInAnyLocale(t *testing.T) {
+	limit := defaultShellScriptMaxBytes
+	root := committedRepo(t, map[string]string{"ops/big.sh": shellOfSize(limit + 2048)})
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de")
+	found := analyzeIn(t, NewShellScriptSizeRule(), root, "ops/new.sh", shellOfSize(limit+1))
+	require.Len(t, found, 1)
+	assert.Contains(t, found[0].Message, "a new shell script")
+
+	empty := t.TempDir()
+	cmd := exec.Command("git", "-C", empty, "init", "-q")
+	cmd.Env = repositoryNeutralEnv(os.Environ())
+	require.NoError(t, cmd.Run())
+	found = analyzeIn(t, NewShellScriptSizeRule(), empty, "ops/big.sh", shellOfSize(limit+1))
+	require.Len(t, found, 1)
+	assert.Contains(t, found[0].Message, "a new shell script")
+}
+
+// A script moved without growing is not new: git mv, edited or not, is
+// matched to its HEAD path by git's rename detection, and a plain move or copy
+// by its content being a blob of HEAD.
+func TestShellScriptSizeRuleFollowsMoves(t *testing.T) {
+	limit := defaultShellScriptMaxBytes
+	big, other := shellOfSize(limit+2048), shellOfSize(limit+4096)
+	git := func(root string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd.Env = repositoryNeutralEnv(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	rule := NewShellScriptSizeRule()
+	moved := func(t *testing.T, content string, move func(root string)) []*core.Violation {
+		t.Helper()
+		root := committedRepo(t, map[string]string{"ops/big.sh": big, "AAA.sh": other, "README": "scripts\n"})
+		move(root)
+		return analyzeIn(t, rule, root, "deploy/big.sh", content)
+	}
+	gitMove := func(root string) {
+		// A change listed before the rename, under a name that starts as a
+		// rename status does, and a rename of another script listed first.
+		require.NoError(t, os.WriteFile(filepath.Join(root, "README"), []byte("scripts moved\n"), 0o644))
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "CCC"), 0o755))
+		git(root, "mv", "AAA.sh", "CCC/AAA.sh")
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "deploy"), 0o755))
+		git(root, "mv", "ops/big.sh", "deploy/big.sh")
+	}
+	plainMove := func(root string) {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "deploy"), 0o755))
+		require.NoError(t, os.Rename(filepath.Join(root, "ops/big.sh"), filepath.Join(root, "deploy/big.sh")))
+	}
+	copied := func(root string) {}
+
+	assert.Empty(t, moved(t, big, gitMove), "git mv")
+	assert.Empty(t, moved(t, big[:len(big)-100], gitMove), "git mv, shrunk")
+	assert.Empty(t, moved(t, big, plainMove), "mv")
+	assert.Empty(t, moved(t, big, copied), "cp")
+
+	found := moved(t, big+"echo more\n", gitMove)
+	require.Len(t, found, 1, "git mv, grown")
+	assert.Contains(t, found[0].Message, "grown from 22 KB in HEAD as ops/big.sh")
+
+	found = moved(t, big+"echo more\n", plainMove)
+	require.Len(t, found, 1, "mv, grown, not in the index")
+	assert.Contains(t, found[0].Message, "a new shell script")
 }
 
 // A committed link to a large script is not reported: git keeps the link's
@@ -212,7 +303,7 @@ func TestShellScriptSizeRuleMessageTellsSizesApart(t *testing.T) {
 		{1000, -1, 1023, "Shell script of 1023 bytes, over the 1000 bytes limit for shell: a new shell script"},
 	}
 	for _, c := range cases {
-		assert.Equal(t, c.want, sizeMessage(c.size, c.limit, c.head, nil), "%+v", c)
+		assert.Equal(t, c.want, sizeMessage(c.size, c.limit, headVersion{size: c.head}, nil), "%+v", c)
 	}
 }
 
