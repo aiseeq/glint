@@ -3,6 +3,7 @@ package httprules
 import (
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/constant"
 	"go/token"
 	"go/types"
@@ -18,6 +19,7 @@ import (
 	"golang.org/x/tools/go/callgraph/cha"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
+	"golang.org/x/tools/go/types/typeutil"
 )
 
 var defaultAuditActorSinks = []string{
@@ -126,6 +128,9 @@ func (r *AuditActorPropagationRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	if ctx.FileSet == nil {
 		return nil, errors.New("audit actor propagation: project has no file set for source positions")
 	}
+	if !auditProjectHasCandidateSink(ctx.Packages, ctx.FileSet, r.sinks) {
+		return nil, nil
+	}
 
 	analyzer := &auditActorAnalyzer{
 		rule:           r,
@@ -163,6 +168,185 @@ func (r *AuditActorPropagationRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 		return leftPattern < rightPattern
 	})
 	return analyzer.violations, nil
+}
+
+// auditProjectHasCandidateSink is a cheap syntax scan that avoids constructing
+// the CHA call index for projects with no call that can lead to a finding. It
+// deliberately treats every status write as a candidate: the sibling audit
+// and actor checks happen later, and may reject it. It scans only source files
+// in the project context; function-value calls remain candidates when their
+// signature could reach a named sink through CHA's address-taken edges.
+func auditProjectHasCandidateSink(packages []*core.GoPackageContext, fileSet *token.FileSet, sinks map[string]bool) bool {
+	candidateSignatures, safe := auditProjectCandidateSignatures(packages, fileSet, sinks)
+	if !safe {
+		return true
+	}
+	for _, packageContext := range packages {
+		if auditPackageHasCandidateSink(packageContext, fileSet, sinks, candidateSignatures) {
+			return true
+		}
+	}
+	return false
+}
+
+func auditProjectCandidateSignatures(packages []*core.GoPackageContext, fileSet *token.FileSet, sinks map[string]bool) ([]*types.Signature, bool) {
+	var signatures []*types.Signature
+	for _, packageContext := range packages {
+		if packageContext == nil || packageContext.Package == nil || len(packageContext.Files) == 0 {
+			continue
+		}
+		pkg := packageContext.Package
+		if pkg.TypesInfo == nil {
+			return nil, false
+		}
+		sourceFiles := auditSourceFileSet(packageContext.Files)
+		for _, file := range pkg.Syntax {
+			position := fileSet.PositionFor(file.Pos(), false)
+			if !position.IsValid() {
+				return nil, false
+			}
+			if !sourceFiles[filepath.Clean(position.Filename)] {
+				continue
+			}
+			for _, declaration := range file.Decls {
+				function, ok := declaration.(*ast.FuncDecl)
+				if !ok || !auditCandidateFunctionName(function.Name.Name, sinks) {
+					continue
+				}
+				object, ok := pkg.TypesInfo.Defs[function.Name].(*types.Func)
+				if !ok {
+					return nil, false
+				}
+				signature, ok := auditCallableSignature(object.Type())
+				if !ok {
+					return nil, false
+				}
+				signatures = append(signatures, signature)
+			}
+		}
+	}
+	return signatures, true
+}
+
+func auditPackageHasCandidateSink(packageContext *core.GoPackageContext, fileSet *token.FileSet, sinks map[string]bool, candidateSignatures []*types.Signature) bool {
+	if packageContext == nil || packageContext.Package == nil || len(packageContext.Files) == 0 {
+		return false
+	}
+	pkg := packageContext.Package
+	if pkg.TypesInfo == nil {
+		return true
+	}
+	sourceFiles := auditSourceFileSet(packageContext.Files)
+	for _, file := range pkg.Syntax {
+		position := fileSet.PositionFor(file.Pos(), false)
+		if !position.IsValid() {
+			return true
+		}
+		if !sourceFiles[filepath.Clean(position.Filename)] {
+			continue
+		}
+		candidate := false
+		ast.Inspect(file, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name, resolved := auditCallSyntaxName(call, pkg.TypesInfo)
+			if resolved {
+				if auditCandidateFunctionName(name, sinks) {
+					candidate = true
+					return false
+				}
+				return true
+			}
+			signature, ok := auditCallableSignature(pkg.TypesInfo.TypeOf(call.Fun))
+			if !ok {
+				if len(candidateSignatures) == 0 {
+					return true
+				}
+				candidate = true
+				return false
+			}
+			for _, possible := range candidateSignatures {
+				if types.Identical(signature, possible) {
+					candidate = true
+					return false
+				}
+			}
+			return true
+		})
+		if candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func auditSourceFileSet(files []*core.FileContext) map[string]bool {
+	result := make(map[string]bool, len(files))
+	for _, file := range files {
+		if file != nil {
+			result[filepath.Clean(file.Path)] = true
+		}
+	}
+	return result
+}
+
+func auditCandidateFunctionName(name string, sinks map[string]bool) bool {
+	return sinks[name] || auditWriteCall(strings.ToLower(name)) || auditStatusWriteName(name)
+}
+
+func auditCallableSignature(typ types.Type) (*types.Signature, bool) {
+	if typ == nil {
+		return nil, false
+	}
+	if _, isTypeParameter := typ.(*types.TypeParam); isTypeParameter {
+		return nil, false
+	}
+	signature, ok := types.Unalias(typ).Underlying().(*types.Signature)
+	if !ok {
+		return nil, false
+	}
+	if signature.Recv() == nil {
+		return signature, true
+	}
+	var typeParameters []*types.TypeParam
+	if list := signature.TypeParams(); list != nil {
+		typeParameters = make([]*types.TypeParam, list.Len())
+		for i := range typeParameters {
+			typeParameters[i] = list.At(i)
+		}
+	}
+	return types.NewSignatureType(nil, nil, typeParameters, signature.Params(), signature.Results(), signature.Variadic()), true
+}
+
+func auditCallSyntaxName(call *ast.CallExpr, info *types.Info) (string, bool) {
+	if typeAndValue, ok := info.Types[call.Fun]; ok && typeAndValue.IsType() {
+		// A conversion is a type expression, not an indirect function call.
+		return "", true
+	}
+	if _, isFunctionLiteral := call.Fun.(*ast.FuncLit); isFunctionLiteral {
+		// Calls inside the literal are visited independently; invoking the
+		// literal itself cannot dispatch to a named sink.
+		return "", true
+	}
+	switch callee := typeutil.Callee(info, call).(type) {
+	case *types.Func:
+		return callee.Name(), true
+	case *types.Builtin:
+		return callee.Name(), true
+	default:
+		// The caller checks function values against candidate signatures.
+		return "", false
+	}
+}
+
+func auditStatusWriteName(name string) bool {
+	name = strings.ToLower(name)
+	return strings.Contains(name, "status") && slices.ContainsFunc(
+		[]string{"update", "set", "transition", "change", "move"},
+		func(verb string) bool { return strings.HasPrefix(name, verb) },
+	)
 }
 
 // bitsPerTaintWord is how many values one word of the taint bitset holds.
@@ -565,9 +749,7 @@ func auditStatusWriteCall(target, root *ssa.Function) bool {
 	if target == nil || target.Signature == nil || target.Signature.Recv() == nil {
 		return false
 	}
-	name := strings.ToLower(target.Name())
-	verbs := []string{"update", "set", "transition", "change", "move"}
-	if !strings.Contains(name, "status") || !slices.ContainsFunc(verbs, func(verb string) bool { return strings.HasPrefix(name, verb) }) {
+	if !auditStatusWriteName(target.Name()) {
 		return false
 	}
 	if root == nil || root.Signature == nil || root.Signature.Recv() == nil {
