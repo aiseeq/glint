@@ -153,6 +153,26 @@ func TestShellScriptSizeRuleReadsTheCommittedBlob(t *testing.T) {
 	assert.Contains(t, found[0].Message, "grown from 0 bytes in HEAD")
 }
 
+// A HEAD that git could not read is told in the finding, not passed off as a
+// new script: without git every large script would look new.
+func TestShellScriptSizeRuleTellsAnUnreadHead(t *testing.T) {
+	limit := defaultShellScriptMaxBytes
+	root := committedRepo(t, map[string]string{"ops/big.sh": shellOfSize(limit + 2048)})
+	t.Setenv("PATH", t.TempDir())
+	found := analyzeIn(t, NewShellScriptSizeRule(), root, "ops/big.sh", shellOfSize(limit+2048))
+	require.Len(t, found, 1)
+	assert.Contains(t, found[0].Message, "Shell script of 22 KB, over the 20 KB limit for shell: its size in HEAD not read: ")
+	assert.Contains(t, found[0].Message, "executable file not found")
+
+	// git that fails otherwise than on a path absent from HEAD (exit 128).
+	fake := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(fake, "git"), []byte("#!/bin/sh\nexit 3\n"), 0o755))
+	t.Setenv("PATH", fake)
+	found = analyzeIn(t, NewShellScriptSizeRule(), root, "ops/big.sh", shellOfSize(limit+2048))
+	require.Len(t, found, 1)
+	assert.Contains(t, found[0].Message, "its size in HEAD not read: git cat-file: exit status 3")
+}
+
 // A committed link to a large script is not reported: git keeps the link's
 // target path, not the script, and the script is checked under its own name.
 func TestShellScriptSizeRuleSkipsLinks(t *testing.T) {
@@ -192,7 +212,7 @@ func TestShellScriptSizeRuleMessageTellsSizesApart(t *testing.T) {
 		{1000, -1, 1023, "Shell script of 1023 bytes, over the 1000 bytes limit for shell: a new shell script"},
 	}
 	for _, c := range cases {
-		assert.Equal(t, c.want, sizeMessage(c.size, c.limit, c.head), "%+v", c)
+		assert.Equal(t, c.want, sizeMessage(c.size, c.limit, c.head, nil), "%+v", c)
 	}
 }
 

@@ -1,6 +1,7 @@
 package architecture
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -79,27 +80,30 @@ func (r *ShellScriptSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	if info, err := os.Lstat(ctx.Path); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return nil
 	}
-	headSize, tracked := committedSize(ctx.Path)
+	headSize, tracked, err := committedSize(ctx.Path)
 	if !tracked {
 		headSize = -1
 	}
 	if size <= headSize {
 		return nil
 	}
-	v := r.CreateViolation(ctx.RelPath, 1, sizeMessage(size, r.maxBytes, headSize))
+	v := r.CreateViolation(ctx.RelPath, 1, sizeMessage(size, r.maxBytes, headSize, err))
 	v.WithSuggestion("Move the script to Go or TypeScript; keep in shell only a short wrapper that runs it. A large script may be fixed without growing")
 	return []*core.Violation{v}
 }
 
 // sizeMessage tells the size against the limit and against HEAD, headSize -1
-// for a new script. A number that rounds to the same text as the one it is
-// compared with is given in bytes, both of them.
-func sizeMessage(size, limit, headSize int) string {
+// for a new script, headErr when HEAD was not read. A number that rounds to the
+// same text as the one it is compared with is given in bytes, both of them.
+func sizeMessage(size, limit, headSize int, headErr error) string {
 	sizeShown, limitShown := sizeText(size), sizeText(limit)
 	if sizeShown == limitShown {
 		sizeShown, limitShown = byteText(size), byteText(limit)
 	}
 	growth := "a new shell script"
+	if headErr != nil {
+		growth = "its size in HEAD not read: " + headErr.Error()
+	}
 	if headSize >= 0 {
 		headShown := sizeText(headSize)
 		if headShown == sizeText(size) {
@@ -112,20 +116,24 @@ func sizeMessage(size, limit, headSize int) string {
 
 // committedSize is the size of path in the HEAD commit of the git repository
 // holding it, read by the git command. A path outside a repository, in one
-// without commits, or absent from HEAD is untracked, as is any path when git
-// is missing: it counts as a new script.
-func committedSize(path string) (int, bool) {
+// without commits, or absent from HEAD is untracked, which git tells by exit
+// code 128; any other failure, git missing too, is an error.
+func committedSize(path string) (int, bool, error) {
 	cmd := exec.Command("git", "--no-replace-objects", "-C", filepath.Dir(path), "cat-file", "-s", "HEAD:./"+filepath.Base(path))
 	cmd.Env = repositoryNeutralEnv(os.Environ())
 	out, err := cmd.Output()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 128 {
+		return 0, false, nil
+	}
 	if err != nil {
-		return 0, false
+		return 0, false, fmt.Errorf("git cat-file: %w", err)
 	}
 	size, err := strconv.Atoi(strings.TrimSpace(string(out)))
 	if err != nil {
-		return 0, false
+		return 0, false, fmt.Errorf("git cat-file size %q: %w", out, err)
 	}
-	return size, true
+	return size, true, nil
 }
 
 // repositoryNeutralEnv drops the variables a hook may have set for its own
@@ -148,10 +156,11 @@ func repositoryNeutralEnv(env []string) []string {
 // sizeText prints a byte count in kilobytes rounded up to a tenth, trailing
 // .0 dropped: a script even one byte over the limit reads as larger than it.
 func sizeText(n int) string {
-	if n < 1024 {
+	const kilobyte = 1024
+	if n < kilobyte {
 		return byteText(n)
 	}
-	tenths := (n*10 + 1023) / 1024
+	tenths := (n*10 + kilobyte - 1) / kilobyte
 	return strings.TrimSuffix(fmt.Sprintf("%d.%d", tenths/10, tenths%10), ".0") + " KB"
 }
 
