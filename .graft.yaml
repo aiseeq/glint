@@ -7,7 +7,7 @@ version:
   mode: git-tag
 
 # glint on itself is not in the commit gate: consumers get glint only through
-# install, and install runs self-check first and stops on a finding of high,
+# install, and install runs every check (all, with self-check) first and stops on a finding of high,
 # as a gate would; the lower ones wait for tk done. In the gate it would add
 # ~30 s to every commit (29.5 s on an idle laptop; the short tests take 31 s).
 gate:
@@ -45,8 +45,10 @@ tasks:
     run:
       - [go, run, ./cmd/glintbuild, '${GRAFT_VERSION}']
   install:
-    desc: install the committed build to ~/bin atomically (a running glint keeps its file); glint on itself first; on main an untagged HEAD is released first
-    deps: [self-check]
+    desc: install the committed build to ~/bin atomically (a running glint keeps its file); every check (all) first; on main an untagged HEAD is released first
+    # The release runs every check first (all: fmt, vet, lint, tests, race,
+    # glint on itself); a check the tree already passed is skipped (cache).
+    deps: [all]
     run:
       # An install ships glint to every consumer, so it is the release: tag
       # HEAD on main before the build. The build runs as its own graft so it
@@ -78,7 +80,9 @@ tasks:
     tests: go
     usage: <go test flags, e.g. -run TestX>
     env: {GOFLAGS: -tags=pgquery_cgo}
-    run: ['go test -json -p {threads} {args} ./...']
+    # 6m: about 3x the longest run on a quiet machine (2m2s); the go default
+    # of 10m let a hung test hold the queue.
+    run: ['go test -json -timeout 6m -p {threads} {args} ./...']
   test-short:
     desc: tests without the long-running ones
     heavy: true
@@ -87,7 +91,7 @@ tasks:
     remote: true
     cache: *tools_cache
     env: {GOFLAGS: -tags=pgquery_cgo}
-    run: ['go test -p {threads} -short -v ./...']
+    run: ['go test -timeout 6m -p {threads} -short -v ./...']
   # Only the packages whose own code runs goroutines or takes locks: a rule
   # test runs one rule in one goroutine, and the race detector finds nothing
   # there. Rules run in parallel in cmd/glint (TestAnalyzeFilesIsDeterministicAndRaceFree
@@ -99,7 +103,7 @@ tasks:
     cache: *tools_cache
     tests: go
     env: {GOFLAGS: -tags=pgquery_cgo}
-    run: ['go test -json -p {threads} -race ./cmd/glint ./pkg/core ./pkg/rules ./pkg/sqlschema ./pkg/valueset ./pkg/rules/rulestest ./pkg/rules/duplication']
+    run: ['go test -json -timeout 6m -p {threads} -race ./cmd/glint ./pkg/core ./pkg/rules ./pkg/sqlschema ./pkg/valueset ./pkg/rules/rulestest ./pkg/rules/duplication']
   test-coverage:
     desc: tests with a coverage report in coverage.html
     heavy: true

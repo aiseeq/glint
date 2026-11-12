@@ -261,7 +261,7 @@ func (r *DuplicateFuncOfLibraryRule) warnLibraryInput(path, action string, err e
 	if writer == nil {
 		writer = os.Stderr
 	}
-	fmt.Fprintf(writer, "warning: duplicate-func-of-library could not %s %s: %v\n", action, path, err)
+	_, _ = fmt.Fprintf(writer, "warning: duplicate-func-of-library could not %s %s: %v\n", action, path, err) // ignored-error: safe — a warning on stderr has nowhere left to be reported
 }
 
 func libraryMatchLess(a, b libraryMatch) bool {

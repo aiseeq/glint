@@ -204,7 +204,7 @@ func envFileInputs(root string) (map[string]bool, string, error) {
 		if err != nil {
 			return fmt.Errorf("read env file %s: %w", rel, err)
 		}
-		fmt.Fprintf(hash, "%d:%s:%d:", len(rel), rel, len(content))
+		_, _ = fmt.Fprintf(hash, "%d:%s:%d:", len(rel), rel, len(content))
 		_, _ = hash.Write(content)
 		for line := range strings.SplitSeq(string(content), "\n") {
 			if m := patternkit.EnvAssignmentLine.FindStringSubmatch(line); m != nil {
