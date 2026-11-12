@@ -112,9 +112,65 @@ func TestShellScriptSizeRuleRatchet(t *testing.T) {
 	require.NoError(t, os.Rename(nested, filepath.Join(root, "vendored")))
 	assert.Empty(t, analyzeIn(t, rule, root, "vendored/run.sh", shellOfSize(limit+2048)))
 
-	// A hook's GIT_DIR names another repository; the script's own one is read.
-	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "elsewhere.git"))
-	assert.Empty(t, analyzeIn(t, rule, root, "ops/big.sh", shellOfSize(limit+2048)), "under a hook")
+	// A hook's variables name another repository; the script's own one is read.
+	other := committedRepo(t, map[string]string{"ops/big.sh": "#!/bin/sh\n"})
+	for _, name := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"} {
+		t.Run(name, func(t *testing.T) {
+			value := filepath.Join(other, ".git")
+			switch name {
+			case "GIT_WORK_TREE":
+				value = other
+			case "GIT_OBJECT_DIRECTORY":
+				value = filepath.Join(other, ".git", "objects")
+			}
+			t.Setenv(name, value)
+			assert.Empty(t, analyzeIn(t, rule, root, "ops/big.sh", shellOfSize(limit+2048)), "unchanged under %s", name)
+			assert.Len(t, analyzeIn(t, rule, root, "ops/big.sh", shellOfSize(limit+2049)), 1, "grown under %s", name)
+		})
+	}
+}
+
+// A committed link to a large script is not reported: git keeps the link's
+// target path, not the script, and the script is checked under its own name.
+func TestShellScriptSizeRuleSkipsLinks(t *testing.T) {
+	limit := defaultShellScriptMaxBytes
+	root := committedRepo(t, map[string]string{"scripts/check.sh": shellOfSize(limit + 2048)})
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "githooks"), 0o755))
+	require.NoError(t, os.Symlink("../scripts/check.sh", filepath.Join(root, "githooks", "pre-commit")))
+	require.NoError(t, os.Symlink("check.sh", filepath.Join(root, "scripts", "link.sh")))
+	cmd := exec.Command("git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "links")
+	cmd.Env = repositoryNeutralEnv(os.Environ())
+	require.NoError(t, exec.Command("git", "-C", root, "add", "-A").Run())
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	rule := NewShellScriptSizeRule()
+	content, err := os.ReadFile(filepath.Join(root, "scripts", "check.sh"))
+	require.NoError(t, err)
+	for _, link := range []string{"githooks/pre-commit", "scripts/link.sh"} {
+		ctx, err := core.NewFileContextChecked(filepath.Join(root, link), root, content, core.DefaultConfig())
+		require.NoError(t, err)
+		assert.Empty(t, rule.AnalyzeFile(ctx), link)
+	}
+}
+
+// The size and the limit, and the HEAD size and the size, never read the same:
+// rounding to a tenth of a kilobyte that would make them equal gives bytes.
+func TestShellScriptSizeRuleMessageTellsSizesApart(t *testing.T) {
+	cases := []struct {
+		limit, head, size int
+		want              string
+	}{
+		{20000, 0, 20001, "Shell script of 20001 bytes, over the 20000 bytes limit for shell: a new shell script"},
+		{1100, 0, 1101, "Shell script of 1101 bytes, over the 1100 bytes limit for shell: a new shell script"},
+		{defaultShellScriptMaxBytes, 22600, 22601, "Shell script of 22601 bytes, over the 20 KB limit for shell: grown from 22600 bytes in HEAD"},
+		{defaultShellScriptMaxBytes, 20000, 23000, "Shell script of 22.5 KB, over the 20 KB limit for shell: grown from 19.6 KB in HEAD"},
+		{1000, 0, 1024, "Shell script of 1 KB, over the 1000 bytes limit for shell: a new shell script"},
+		{1000, 0, 1023, "Shell script of 1023 bytes, over the 1000 bytes limit for shell: a new shell script"},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, sizeMessage(c.size, c.limit, c.head), "%+v", c)
+	}
 }
 
 // max_bytes moves the limit; zero, a negative number or a non-number is an

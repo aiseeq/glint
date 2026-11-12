@@ -69,23 +69,42 @@ func (r *ShellScriptSizeRule) Configure(settings map[string]any) error {
 func (r *ShellScriptSizeRule) ReadsOtherFiles() bool { return true }
 
 // AnalyzeFile reports, at its first line, a shell script over the limit that is
-// new or larger than in HEAD.
+// new or larger than in HEAD. A link is skipped: HEAD keeps the link's target
+// path, and the script it points to is checked under its own name.
 func (r *ShellScriptSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	size := len(ctx.Content)
 	if !ctx.IsShellFile() || size <= r.maxBytes {
 		return nil
 	}
-	headSize, tracked := committedSize(ctx.Path)
+	if info, err := os.Lstat(ctx.Path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	headSize, _ := committedSize(ctx.Path)
 	if size <= headSize { // an untracked script has headSize 0
 		return nil
 	}
-	growth := "a new shell script"
-	if tracked {
-		growth = "grown from " + sizeText(headSize) + " in HEAD"
-	}
-	v := r.CreateViolation(ctx.RelPath, 1, fmt.Sprintf("Shell script of %s, over the %s limit for shell: %s", sizeText(size), sizeText(r.maxBytes), growth))
+	v := r.CreateViolation(ctx.RelPath, 1, sizeMessage(size, r.maxBytes, headSize))
 	v.WithSuggestion("Move the script to Go or TypeScript; keep in shell only a short wrapper that runs it. A large script may be fixed without growing")
 	return []*core.Violation{v}
+}
+
+// sizeMessage tells the size against the limit and against HEAD, headSize 0
+// for a new script. A number that rounds to the same text as the one it is
+// compared with is given in bytes, both of them.
+func sizeMessage(size, limit, headSize int) string {
+	sizeShown, limitShown := sizeText(size), sizeText(limit)
+	if sizeShown == limitShown {
+		sizeShown, limitShown = byteText(size), byteText(limit)
+	}
+	growth := "a new shell script"
+	if headSize > 0 {
+		headShown := sizeText(headSize)
+		if headShown == sizeText(size) {
+			sizeShown, headShown = byteText(size), byteText(headSize)
+		}
+		growth = "grown from " + headShown + " in HEAD"
+	}
+	return fmt.Sprintf("Shell script of %s, over the %s limit for shell: %s", sizeShown, limitShown, growth)
 }
 
 // committedSize is the size of path in the HEAD commit of the git repository
@@ -106,14 +125,16 @@ func committedSize(path string) (int, bool) {
 	return size, true
 }
 
-// repositoryNeutralEnv drops the variables a git hook sets for its own
-// repository, so git finds the repository from the script's directory.
+// repositoryNeutralEnv drops the variables a hook may have set for its own
+// repository that change what HEAD:path reads, so git finds the repository
+// from the script's directory. The other local ones of `git rev-parse
+// --local-env-vars` (index, prefix, config, alternates) leave it as is.
 func repositoryNeutralEnv(env []string) []string {
 	kept := make([]string, 0, len(env))
 	for _, entry := range env {
 		name, _, _ := strings.Cut(entry, "=")
 		switch name {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_PREFIX":
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY":
 			continue
 		}
 		kept = append(kept, entry)
@@ -125,8 +146,10 @@ func repositoryNeutralEnv(env []string) []string {
 // .0 dropped: a script even one byte over the limit reads as larger than it.
 func sizeText(n int) string {
 	if n < 1024 {
-		return fmt.Sprintf("%d bytes", n)
+		return byteText(n)
 	}
 	tenths := (n*10 + 1023) / 1024
 	return strings.TrimSuffix(fmt.Sprintf("%d.%d", tenths/10, tenths%10), ".0") + " KB"
 }
+
+func byteText(n int) string { return fmt.Sprintf("%d bytes", n) }
