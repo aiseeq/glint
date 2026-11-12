@@ -42,6 +42,14 @@ type sqlNodeContext struct {
 	deferredScopes []ast.Node
 }
 
+// sqlWrite is a store into a variable: where it stands, the function or
+// literal it stands in, and whether a deferred call makes it.
+type sqlWrite struct {
+	at       token.Pos
+	callable ast.Node
+	deferred bool
+}
+
 type sqlRegexpOutcome uint8
 
 type sqlRegexpResult struct {
@@ -103,16 +111,19 @@ type sqlTaintCheck struct {
 	assigned       map[*types.Var][]ast.Expr
 	validated      map[*types.Var][]sqlValidation
 	contexts       map[token.Pos]sqlNodeContext
+	varScopes      map[*types.Var]ast.Node
 	collectContext sqlNodeContext
 	functions      map[*types.Func]*ast.FuncDecl
 	projectDecls   map[*types.Func]*ast.FuncDecl
 	literalMaps    map[types.Object]bool
-	goCalls        map[*ast.FuncLit]bool
 	regexpPatterns map[types.Object]string
 	at             token.Pos
 	scope          ast.Node
 	queryContext   sqlNodeContext
-	writes         map[*types.Var][]token.Pos
+	writes         map[*types.Var][]sqlWrite
+	escaped        map[*types.Var]bool
+	loops          []ast.Node
+	gotoBack       [][2]token.Pos
 	taints         map[*types.Var]*sqlTaint
 	mentions       map[*types.Var]*bool
 }
@@ -124,11 +135,12 @@ func newSQLTaintCheck(file *ast.File, info *types.Info, decls map[*types.Func]*a
 		assigned:       make(map[*types.Var][]ast.Expr),
 		validated:      make(map[*types.Var][]sqlValidation),
 		contexts:       make(map[token.Pos]sqlNodeContext),
+		varScopes:      make(map[*types.Var]ast.Node),
 		functions:      make(map[*types.Func]*ast.FuncDecl),
 		literalMaps:    make(map[types.Object]bool),
-		goCalls:        make(map[*ast.FuncLit]bool),
 		regexpPatterns: make(map[types.Object]string),
-		writes:         make(map[*types.Var][]token.Pos),
+		writes:         make(map[*types.Var][]sqlWrite),
+		escaped:        make(map[*types.Var]bool),
 		taints:         make(map[*types.Var]*sqlTaint),
 		mentions:       make(map[*types.Var]*bool),
 		projectDecls:   decls,
@@ -168,22 +180,22 @@ func (c *sqlTaintCheck) collect(file *ast.File) {
 			c.contexts[n.Pos()] = context
 		}
 		c.collectContext = context
-		c.recordGoCall(stack)
+		// A type switch declares its variable once per clause, implicitly.
+		var defined types.Object
+		switch node := n.(type) {
+		case *ast.Ident:
+			defined = c.info.Defs[node]
+		case *ast.CaseClause:
+			defined = c.info.Implicits[node]
+		}
+		if v, ok := defined.(*types.Var); ok {
+			c.varScopes[v] = context.callable
+		}
+		c.collectAddress(stack)
+		c.collectFlow(n, stack)
 		c.collectNode(n)
 		return true
 	})
-}
-
-// recordGoCall marks a function literal a go statement launches: it runs
-// alongside the statements after the go statement.
-func (c *sqlTaintCheck) recordGoCall(stack []ast.Node) {
-	statement, ok := stack[len(stack)-1].(*ast.GoStmt)
-	if !ok {
-		return
-	}
-	if literal, ok := ast.Unparen(statement.Call.Fun).(*ast.FuncLit); ok {
-		c.goCalls[literal] = true
-	}
 }
 
 func sqlContextFor(stack []ast.Node) sqlNodeContext {
@@ -204,13 +216,7 @@ func sqlContextFor(stack []ast.Node) sqlNodeContext {
 			outer := context.callable
 			context.callable = node
 			// Parentheses around the literal do not change when it runs.
-			j := i - 1
-			for j > 0 {
-				if _, paren := stack[j].(*ast.ParenExpr); !paren {
-					break
-				}
-				j--
-			}
+			j := sqlParentIndex(stack[:i+1])
 			// A literal not called in place - deferred, launched, stored or
 			// passed on - runs later, if at all.
 			inPlace := false
@@ -250,7 +256,7 @@ func (c *sqlTaintCheck) collectNode(n ast.Node) {
 	case *ast.BlockStmt:
 		c.recordValidatorResults(node.List)
 	case *ast.CallExpr:
-		if !c.readOnlyMapBuiltin(node) {
+		if c.builtinName(node) != "len" {
 			for _, arg := range node.Args {
 				c.invalidateLiteralMap(arg)
 			}
@@ -323,13 +329,17 @@ func (c *sqlTaintCheck) collectAssignment(node *ast.AssignStmt) {
 	}
 }
 
-func (c *sqlTaintCheck) readOnlyMapBuiltin(call *ast.CallExpr) bool {
+// builtinName returns the name of the builtin function a call calls, or "".
+func (c *sqlTaintCheck) builtinName(call *ast.CallExpr) string {
 	id, ok := ast.Unparen(call.Fun).(*ast.Ident)
 	if !ok {
-		return false
+		return ""
 	}
 	builtin, ok := c.info.Uses[id].(*types.Builtin)
-	return ok && (builtin.Name() == "len" || builtin.Name() == "cap")
+	if !ok {
+		return ""
+	}
+	return builtin.Name()
 }
 
 func (c *sqlTaintCheck) invalidateLiteralMap(expr ast.Expr) {
@@ -395,7 +405,12 @@ func (c *sqlTaintCheck) recordAssign(node *ast.AssignStmt) {
 			}
 			c.record(lhs, value)
 		}
-	case len(node.Rhs) == 1 && len(node.Lhs) == 2:
+	case len(node.Rhs) == 1 && len(node.Lhs) >= 2:
+		for _, lhs := range node.Lhs {
+			if v := c.rootVar(lhs); v != nil {
+				c.recordWrite(v, lhs.Pos(), false)
+			}
+		}
 		// v, ok := m[k] / x.(T) / <-ch: the first result is the value.
 		switch ast.Unparen(node.Rhs[0]).(type) {
 		case *ast.IndexExpr, *ast.TypeAssertExpr, *ast.UnaryExpr:
@@ -417,7 +432,26 @@ func (c *sqlTaintCheck) record(target, value ast.Expr) {
 	}
 	if v := c.rootVar(target); v != nil {
 		c.assigned[v] = append(c.assigned[v], value)
-		c.writes[v] = append(c.writes[v], target.Pos())
+		c.recordWrite(v, target.Pos(), false)
+	}
+}
+
+// recordWrite notes a store into v in the function or literal being collected.
+func (c *sqlTaintCheck) recordWrite(v *types.Var, at token.Pos, deferred bool) {
+	c.writes[v] = append(c.writes[v], sqlWrite{at: at, callable: c.collectContext.callable, deferred: deferred})
+}
+
+// recordCallWrite notes a call that stores into v: the arguments of a go or
+// defer statement are evaluated in place, its call runs later - a launched one
+// at any time, a deferred one when the function returns.
+func (c *sqlTaintCheck) recordCallWrite(v *types.Var, call *ast.CallExpr, parent ast.Node) {
+	switch parent.(type) {
+	case *ast.GoStmt:
+		c.escaped[v] = true
+	case *ast.DeferStmt:
+		c.recordWrite(v, call.Pos(), true)
+	default:
+		c.recordWrite(v, call.Pos(), false)
 	}
 }
 
@@ -942,17 +976,6 @@ func (c *sqlTaintCheck) varTaint(v *types.Var) sqlTaint {
 	return t
 }
 
-// capturedByClosure reports a local variable that a goroutine's function
-// literal checks but does not declare: the enclosing function may write it
-// after the goroutine checks it, while the goroutine still runs.
-func (c *sqlTaintCheck) capturedByClosure(v *types.Var, scope ast.Node) bool {
-	literal, ok := scope.(*ast.FuncLit)
-	if !ok || !c.goCalls[literal] || v.Pkg() == nil || v.Parent() == v.Pkg().Scope() {
-		return false
-	}
-	return v.Pos() < scope.Pos() || v.Pos() >= scope.End()
-}
-
 func (c *sqlTaintCheck) inConstantCase(node *ast.SwitchStmt) bool {
 	for _, context := range c.queryContext.switchCases {
 		if context.switchNode == node && context.clause != nil && context.clause.List != nil {
@@ -962,7 +985,115 @@ func (c *sqlTaintCheck) inConstantCase(node *ast.SwitchStmt) bool {
 	return false
 }
 
+func (c *sqlTaintCheck) writeRepeats(validation sqlValidation, write token.Pos) bool {
+	for _, window := range c.gotoBack {
+		if validation.at < window[0] && window[0] <= c.at && write < window[1] {
+			return true
+		}
+	}
+	for _, loop := range c.loops {
+		if validation.at < loop.Pos() && write < loop.End() && loop.Pos() <= c.at {
+			return true
+		}
+	}
+	return false
+}
+
+// sqlParentIndex returns the index in stack of the parent of its last node,
+// parentheses around the node skipped.
+func sqlParentIndex(stack []ast.Node) int {
+	i := len(stack) - 2
+	for i > 0 {
+		if _, paren := stack[i].(*ast.ParenExpr); !paren {
+			break
+		}
+		i--
+	}
+	return i
+}
+
+func (c *sqlTaintCheck) collectAddress(stack []ast.Node) {
+	address, ok := stack[len(stack)-1].(*ast.UnaryExpr)
+	if !ok || address.Op != token.AND {
+		return
+	}
+	v := c.rootVar(address.X)
+	if v == nil {
+		return
+	}
+	i := sqlParentIndex(stack)
+	if call, ok := stack[i].(*ast.CallExpr); ok && slices.ContainsFunc(call.Args, func(arg ast.Expr) bool { return ast.Unparen(arg) == address }) {
+		if c.isConversion(call) || c.builtinName(call) == "append" {
+			c.escaped[v] = true
+			return
+		}
+		c.recordCallWrite(v, call, stack[i-1])
+		return
+	}
+	c.escaped[v] = true
+}
+
+func (c *sqlTaintCheck) collectFlow(n ast.Node, stack []ast.Node) {
+	switch node := n.(type) {
+	case *ast.ForStmt, *ast.RangeStmt:
+		c.loops = append(c.loops, n)
+	case *ast.BranchStmt:
+		if label, ok := c.info.Uses[node.Label].(*types.Label); ok && node.Tok == token.GOTO {
+			c.gotoBack = append(c.gotoBack, [2]token.Pos{label.Pos(), node.Pos()})
+		}
+	case *ast.SelectorExpr:
+		selection := c.info.Selections[node]
+		if selection == nil || selection.Kind() != types.MethodVal {
+			return
+		}
+		// A method value always denotes a *types.Func with a receiver.
+		method, _ := selection.Obj().(*types.Func)
+		if _, ptr := method.Signature().Recv().Type().(*types.Pointer); !ptr {
+			return
+		}
+		v := c.rootVar(node.X)
+		if v == nil {
+			return
+		}
+		i := sqlParentIndex(stack)
+		if call, ok := stack[i].(*ast.CallExpr); ok && ast.Unparen(call.Fun) == node {
+			c.recordCallWrite(v, call, stack[i-1])
+			return
+		}
+		c.escaped[v] = true
+	}
+}
+
+// validationChanged reports a write that may reach the query after the check.
+// A literal is opaque: a write in any literal inside the function that
+// declares v - or, for a package variable, inside the checking function -
+// may run at any time there. A write in that function itself counts where it
+// stands; for a local variable checked in a literal, also after the literal,
+// which may run again later.
+func (c *sqlTaintCheck) validationChanged(v *types.Var, validation sqlValidation, deferred bool, until token.Pos) bool {
+	declaration := c.varScopes[v]
+	local := declaration != nil
+	if !local {
+		declaration = validation.scope
+	}
+	for _, write := range c.writes[v] {
+		if write.callable != declaration && declaration.Pos() <= write.at && write.at < declaration.End() {
+			return true
+		}
+		if write.deferred && !deferred {
+			continue
+		}
+		if validation.at < write.at && (write.at < until || c.writeRepeats(validation, write.at)) || local && write.at > validation.scope.End() {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
+	if c.escaped[v] {
+		return false
+	}
 	for _, validation := range c.validated[v] {
 		deferred := slices.Contains(c.queryContext.deferredScopes, validation.scope)
 		if validation.scope != c.scope && !deferred && !slices.Contains(c.queryContext.iifeScopes, validation.scope) {
@@ -985,15 +1116,7 @@ func (c *sqlTaintCheck) validatedAt(v *types.Var) bool {
 		if deferred {
 			until = validation.scope.End()
 		}
-		captured := c.capturedByClosure(v, validation.scope)
-		changed := false
-		for _, write := range c.writes[v] {
-			if validation.at < write && write < until || captured && write > validation.scope.End() {
-				changed = true
-				break
-			}
-		}
-		if !changed {
+		if !c.validationChanged(v, validation, deferred, until) {
 			return true
 		}
 	}

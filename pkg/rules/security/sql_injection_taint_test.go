@@ -936,7 +936,7 @@ func run(db *sql.DB, plain, deferred, input string) {
 	deferred = input
 }`
 	violations := analyzeSQLInjection(t, code)
-	assert.Len(t, violations, 0, "a closure called in place finishes before the enclosing function writes again")
+	assert.Len(t, violations, 2, "writes in the declaration function after each literal begins conservatively invalidate its check")
 }
 
 func TestSQLInjectionParenthesizedClosureCalledInPlaceKeepsCheck(t *testing.T) {
@@ -950,6 +950,18 @@ func run(db *sql.DB, single, double string) {
 }`
 	violations := analyzeSQLInjection(t, code)
 	assert.Len(t, violations, 0, "parentheses around a closure called in place do not change when it runs")
+}
+
+func TestSQLInjectionParenthesizedClosureRunsBeforeLaterWrite(t *testing.T) {
+	code := `package main
+import "database/sql"
+func run(db *sql.DB, single, input string) {
+	if single != "column" { return }
+	(func() { db.Query("SELECT " + single) })()
+	single = input
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 0, "a closure called in place in parentheses runs before the later write")
 }
 
 func TestSQLInjectionStoredAndDeferredClosuresKeepTheirChecks(t *testing.T) {
@@ -972,7 +984,7 @@ func run(db *sql.DB, outer, inner, deferred, input string) {
 	deferred = input
 }`
 	violations := analyzeSQLInjection(t, code)
-	assert.Len(t, violations, 0, "a closure that checks when it runs, or runs after an unchanged check, is guarded")
+	assert.Len(t, violations, 2, "writes in the declaration function after captured literals begin conservatively invalidate their checks")
 }
 
 func TestSQLInjectionStoredClosureLosesOuterCheckOnLaterWrite(t *testing.T) {
@@ -986,4 +998,648 @@ func run(db *sql.DB, x, input string) {
 }`
 	violations := analyzeSQLInjection(t, code)
 	assert.Len(t, violations, 1, "the closure runs after the checked variable is replaced")
+}
+
+func TestSQLInjectionWhitelistWritesAreVisibleToQueries(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "direct assignment before check", body: `value = raw
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`},
+		{name: "direct assignment after check", body: `if value != "name" { return }
+	value = raw
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "immediate closure write after check", body: `if value != "name" { return }
+	func() { value = raw }()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "multiple assignment from call after check", body: `if value != "name" { return }
+	var err error
+	value, err = strconv.Unquote(raw)
+	_ = err
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "multiple assignment writes second result", body: `if value != "name" { return }
+	_, value = pairText(raw)
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "multiple assignment writes later result", body: `if value != "name" { return }
+	var err error
+_, value, err = tripleText(raw)
+	_ = err
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "range assignment after check", body: `if value != "name" { return }
+	for _, value = range []string{raw} { db.Query("SELECT " + value) }
+`, want: 1},
+		{name: "loop write reaches next query", body: `if value != "name" { return }
+	for i := 0; i < count; i++ { db.Query("SELECT " + value); value = raw }
+`, want: 1},
+		{name: "write in later loop cannot reach earlier query", body: `if value != "name" { return }
+	db.Query("SELECT " + value)
+	for i := 0; i < count; i++ { value = raw }
+`},
+		{name: "loop rechecks after its write", body: `if value != "name" { return }
+	for _, raw = range []string{raw} {
+		db.Query("SELECT " + value)
+		value = raw
+		if value != "name" { return }
+	}
+`, want: 1},
+		{name: "loop check after each range write", body: `for _, value = range []string{raw} {
+		if value != "name" { return }
+		db.Query("SELECT " + value)
+		value = raw
+	}
+`},
+		{name: "backward goto reaches next query", body: `if value != "name" { return }
+	i := 0
+again:
+	db.Query("SELECT " + value)
+	value = raw
+	i++
+	if i < count { goto again }
+`, want: 1},
+		{name: "backward goto repeats a check after its label", body: `i := 0
+again:
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+	value = raw
+	i++
+	if i < count { goto again }
+`},
+		{name: "write after goto cannot reach earlier query", body: `if value != "name" { return }
+	db.Query("SELECT " + value)
+	i := 0
+again:
+	value = raw
+	i++
+	if i < count { goto again }
+`},
+		{name: "write after backward goto runs after the last query", body: `if value != "name" { return }
+	i := 0
+again:
+	db.Query("SELECT " + value)
+	i++
+	if i < count { goto again }
+	value = raw
+`},
+		{name: "break to labeled switch does not repeat it", body: `if value != "name" { return }
+done:
+	switch {
+	case count > 0:
+		db.Query("SELECT " + value)
+		value = raw
+		break done
+	}
+`},
+		{name: "write after loop cannot reach query in loop", body: `if value != "name" { return }
+	for i := 0; i < count; i++ { db.Query("SELECT " + value) }
+	value = raw
+`},
+		{name: "address call before check", body: `fmt.Sscan(raw, &value)
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`},
+		{name: "parenthesized direct address before check", body: `fmt.Sscan(raw, (&value))
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`},
+		{name: "address call after check", body: `if value != "name" { return }
+	fmt.Sscan(raw, &value)
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "go call writes after check asynchronously", body: `if value != "name" { return }
+	set := func() { value = raw }
+	go set()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "go scan before check asynchronously", body: `go fmt.Sscan(raw, &value)
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "go closure call before check escapes", body: `set := func() { value = raw }
+	go set()
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "go closure scan precedes its own check", body: `go func() {
+		fmt.Sscan(raw, &value)
+		if value != "name" { return }
+		db.Query("SELECT " + value)
+	}()
+`, want: 1},
+		{name: "parenthesized address passed directly", body: `if value != "name" { return }
+	fmt.Sscan(raw, (&value))
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "address passed to append escapes", body: `if value != "name" { return }
+	ptrs := append([]*string(nil), &value)
+	*ptrs[0] = raw
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "local function named append is a direct call", body: `append := func(p *string) { _ = p }
+	append(&value)
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`},
+		{name: "address appended before check escapes", body: `ptrs := append([]*string(nil), &value)
+	if value != "name" { return }
+	*ptrs[0] = raw
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "address converted to a pointer escapes", body: `if value != "name" { return }
+	p := (*string)(&value)
+	*p = raw
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "address converted before check escapes", body: `p := (*string)(&value)
+	if value != "name" { return }
+	*p = raw
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "deferred address call in outer function", body: `if value != "name" { return }
+	defer fmt.Sscan(raw, &value)
+	db.Query("SELECT " + value)
+`},
+		{name: "deferred address call in directly called closure", body: `if value != "name" { return }
+	set := func() { defer fmt.Sscan(raw, &value) }
+	set()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "address stored in local", body: `if value != "name" { return }
+	p := &value
+	_ = p
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "address stored in field", body: `if value != "name" { return }
+	h := struct{ p *string }{p: &value}
+	_ = h
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "address stored in slice", body: `if value != "name" { return }
+	ps := []*string{&value}
+	_ = ps
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "address sent on channel", body: `if value != "name" { return }
+	ch := make(chan *string, 1)
+	ch <- &value
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "address converted to interface", body: `if value != "name" { return }
+	var anyValue any = &value
+	_ = anyValue
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "address stored globally", body: `if value != "name" { return }
+	globalText = &value
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "directly called named closure writes after check", body: `set := func() { value = raw }
+	if value != "name" { return }
+	set()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "var initialized closure is called after check", body: `var set = func() { value = raw }
+	if value != "name" { return }
+	set()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "var initialized closure is called before check", body: `var set = func() { value = raw }
+	set()
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "closure reassigned and called after check", body: `var set func()
+	set = func() { value = raw }
+	if value != "name" { return }
+	set()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "deferred named closure after check escapes", body: `set := func() { value = raw }
+	if value != "name" { return }
+	defer set()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "deferred named closure before check escapes", body: `set := func() { value = raw }
+	defer set()
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "recursive writer closure is conservative", body: `var first, second func()
+	first = func() { second() }
+	second = func() { value = raw; first() }
+	first()
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "literal writing before check is opaque", body: `func() { value = raw }()
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "nested literal writing before check is opaque", body: `func() { func() { value = raw }() }()
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "literal inside declaring literal writing before check is opaque", body: `run := func() {
+		value := raw
+		func() { value = raw }()
+		if value != "name" { return }
+		db.Query("SELECT " + value)
+	}
+run()
+`, want: 1},
+		{name: "write in declaring literal itself before check", body: `run := func() {
+		value := raw
+		value = raw
+		if value != "name" { return }
+		db.Query("SELECT " + value)
+	}
+run()
+`},
+		{name: "check write and query in one literal", body: `func() {
+		switch value { case "name": default: return }
+		value = raw
+		db.Query("SELECT " + value)
+	}()
+`, want: 1},
+		{name: "check and query in literal, write in nested literal", body: `func() {
+		if value != "name" { return }
+		func() { value = raw }()
+		db.Query("SELECT " + value)
+	}()
+`, want: 1},
+		{name: "check and write in literal, query in nested literal", body: `func() {
+		if value != "name" { return }
+		value = raw
+		func() { db.Query("SELECT " + value) }()
+	}()
+`, want: 1},
+		{name: "scan between check and query in one literal", body: `func() {
+		if value != "name" { return }
+		fmt.Sscan(raw, &value)
+		db.Query("SELECT " + value)
+	}()
+`, want: 1},
+		{name: "stored closure writes second of a call's results", body: `set := func() { count, value = pairText(raw) }
+	if value != "name" { return }
+	set()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "stored closure writes second of parallel values", body: `set := func() { count, value = 1, raw }
+	if value != "name" { return }
+	set()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "stored closure ranges into the value", body: `set := func() { for _, value = range []string{raw} {} }
+	if value != "name" { return }
+	set()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "scan in deferred call arguments writes in place", body: `if value != "name" { return }
+	defer fmt.Sprint(fmt.Sscan(raw, &value))
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "scan in go call arguments before check writes in place", body: `go fmt.Sprint(fmt.Sscan(raw, &value))
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`},
+		{name: "inner IIFE write follows check in declaring literal", body: `func() {
+		value := "name"
+		if value != "name" { return }
+		func() { value = raw }()
+		db.Query("SELECT " + value)
+	}()
+`, want: 1},
+		{name: "nested immediately called literal writes before check", body: `set := func() { value = raw }
+	func() { set() }()
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "stored closure assigned in directly called literal", body: `var set func()
+	func() { set = func() { value = raw } }()
+	if value != "name" { return }
+	set()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "goroutine literal in directly called literal", body: `func() { go func() { value = raw }() }()
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "deferred literal address write runs after the query", body: `if value != "name" { return }
+	defer func(p *string) { *p = raw }(&value)
+	db.Query("SELECT " + value)
+`},
+		{name: "named closure in directly called literal runs after check", body: `func() {
+		set := func() { value = raw }
+		if value != "name" { return }
+		set()
+		db.Query("SELECT " + value)
+	}()
+`, want: 1},
+		{name: "directly called closure calls writer closure", body: `set := func() { value = raw }
+	run := func() { set() }
+	if value != "name" { return }
+	run()
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "stored closure writing after check escapes", body: `set := func() { value = raw }
+	_ = set
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+`, want: 1},
+		{name: "closure writing another value does not escape", body: `set := func() { other = raw }
+	if value != "name" { return }
+	set()
+	db.Query("SELECT " + value)
+`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			code := `package main
+import ("database/sql"; "fmt"; "strconv")
+var globalText *string
+func run(db *sql.DB, value, raw, other string, count int) {
+	_ = fmt.Sscan
+	_ = strconv.Unquote
+` + tt.body + `}
+func pairText(s string) (int, string) { return 0, s }
+func tripleText(s string) (int, string, error) { return 0, s, nil }
+`
+			violations := analyzeSQLInjection(t, code)
+			assert.Len(t, violations, tt.want, "Code:\n%s", code)
+		})
+	}
+}
+
+func TestSQLInjectionWhitelistNamedClosureDeferredAddressWrite(t *testing.T) {
+	code := `package main
+import ("database/sql"; "fmt")
+func run(db *sql.DB, value, raw string) {
+	set := func() { defer fmt.Sscan(raw, &value) }
+	switch value {
+	case "name":
+	default:
+		return
+	}
+	set()
+	db.Query("SELECT " + value)
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 1, "deferred writes in a directly called named closure run before the query")
+}
+
+func TestSQLInjectionPointerMethodValuesAndCalls(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "method value stored before check", body: `set := value.Set
+	if value != "name" { return }
+	set(raw)
+	db.Query("SELECT " + string(value))
+`, want: 1},
+		{name: "method value passed after check", body: `if value != "name" { return }
+	runCallback(value.Set)
+	db.Query("SELECT " + string(value))
+`, want: 1},
+		{name: "method value passed before check escapes", body: `runCallback(value.Set)
+	if value != "name" { return }
+	db.Query("SELECT " + string(value))
+`, want: 1},
+		{name: "go method call after check", body: `if value != "name" { return }
+	go value.Set(raw)
+	db.Query("SELECT " + string(value))
+`, want: 1},
+		{name: "go method call before check escapes", body: `go value.Set(raw)
+	if value != "name" { return }
+	db.Query("SELECT " + string(value))
+`, want: 1},
+		{name: "synchronous method write before check", body: `value.Set(raw)
+	if value != "name" { return }
+	db.Query("SELECT " + string(value))
+`},
+		{name: "parenthesized method value called before check", body: `(value.Set)(raw)
+	if value != "name" { return }
+	db.Query("SELECT " + string(value))
+`},
+		{name: "parenthesized method value called after check", body: `if value != "name" { return }
+	((value.Set))(raw)
+	db.Query("SELECT " + string(value))
+`, want: 1},
+		{name: "synchronous method write after check", body: `if value != "name" { return }
+	value.Set(raw)
+	db.Query("SELECT " + string(value))
+`, want: 1},
+		{name: "deferred pointer method runs after query", body: `if value != "name" { return }
+	defer value.Set(raw)
+	db.Query("SELECT " + string(value))
+`},
+		{name: "parenthesized deferred method value runs after query", body: `if value != "name" { return }
+	defer (value.Set)(raw)
+	db.Query("SELECT " + string(value))
+`},
+		{name: "parenthesized address in deferred call runs after query", body: `if value != "name" { return }
+	defer scanInto(raw, (&value))
+	db.Query("SELECT " + string(value))
+`},
+		{name: "pointer method in deferred call arguments writes in place", body: `if value != "name" { return }
+	defer keep(value.Load(raw))
+	db.Query("SELECT " + string(value))
+`, want: 1},
+		{name: "value receiver read does not write", body: `if value != "name" { return }
+	_ = value.Name()
+	db.Query("SELECT " + string(value))
+`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code := `package main
+import "database/sql"
+type Column string
+func (c *Column) Set(s string) { *c = Column(s) }
+func (c *Column) Load(s string) string { *c = Column(s); return s }
+func (c Column) Name() string { return string(c) }
+func run(db *sql.DB, value Column, raw string) {
+` + tt.body + `}
+func runCallback(f func(string)) { f("name") }
+func keep(string) {}
+func scanInto(s string, c *Column) { *c = Column(s) }
+`
+			violations := analyzeSQLInjection(t, code)
+			assert.Len(t, violations, tt.want, "Code:\n%s", code)
+		})
+	}
+}
+
+func TestSQLInjectionPointerReceiverAliasWritesThroughPointer(t *testing.T) {
+	code := `package main
+import "database/sql"
+type Column string
+type ColumnAlias = Column
+func (c *ColumnAlias) Set(s string) { *c = Column(s) }
+func run(db *sql.DB, value ColumnAlias, raw string) {
+	if value != "name" { return }
+	value.Set(raw)
+	db.Query("SELECT " + string(value))
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 1, "an alias does not change a pointer receiver write")
+}
+
+func TestSQLInjectionPointerReceiverCallWritesThroughPointer(t *testing.T) {
+	code := `package main
+import "database/sql"
+type Column string
+func (c *Column) Set(s string) { *c = Column(s) }
+func run(db *sql.DB, value *Column, raw string) {
+	if *value != "name" { return }
+	value.Set(raw)
+	db.Query("SELECT " + string(*value))
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 1, "a pointer receiver can replace the checked value")
+}
+
+func TestSQLInjectionDeferredWriteAndQueryOrder(t *testing.T) {
+	code := `package main
+import ("database/sql"; "fmt")
+func run(db *sql.DB, value, raw string) {
+	if value != "name" { return }
+	defer func() { db.Query("SELECT " + value) }()
+	defer fmt.Sscan(raw, &value)
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 1, "a deferred write registered after the query runs before it")
+}
+
+func TestSQLInjectionTypeSwitchVariableIsLocalToItsFunction(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "checked in goroutine, written after it", body: `go func() {
+			if s != "name" { return }
+			db.Query("SELECT " + s)
+		}()
+		s = raw
+		_ = s
+`, want: 1},
+		{name: "stored closure writes it inside checking literal", body: `set := func() { s = raw }
+		func() {
+			if s != "name" { return }
+			set()
+			db.Query("SELECT " + s)
+		}()
+`, want: 1},
+		{name: "checked in goroutine, not written", body: `go func() {
+			if s != "name" { return }
+			db.Query("SELECT " + s)
+		}()
+`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code := `package main
+import "database/sql"
+func run(db *sql.DB, x any, raw string) {
+	switch s := x.(type) {
+	case string:
+		` + tt.body + `	}
+}`
+			violations := analyzeSQLInjection(t, code)
+			assert.Len(t, violations, tt.want, "Code:\n%s", code)
+		})
+	}
+}
+
+func TestSQLInjectionGlobalWrittenInLiteralOfCheckingFunction(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "literal writing before check is opaque", body: `globalValue = raw
+	reset := func() { globalValue = "name" }
+	_ = reset
+	if globalValue != "name" { return }
+	db.Query("SELECT " + globalValue)
+`, want: 1},
+		{name: "called literal writes between check and query", body: `switch globalValue { case "name": default: return }
+	func() { globalValue = raw }()
+	db.Query("SELECT " + globalValue)
+`, want: 1},
+		{name: "write in checking function before check", body: `globalValue = raw
+	if globalValue != "name" { return }
+	db.Query("SELECT " + globalValue)
+`},
+		{name: "write in body of another function", body: `if globalValue != "name" { return }
+	db.Query("SELECT " + globalValue)
+}
+func other(raw string) {
+	globalValue = raw
+`},
+		{name: "check in literal, write in function body before it", body: `globalValue = raw
+	func() {
+		if globalValue != "name" { return }
+		db.Query("SELECT " + globalValue)
+	}()
+`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code := `package main
+import "database/sql"
+var globalValue string
+func run(db *sql.DB, raw string) {
+` + tt.body + `}`
+			violations := analyzeSQLInjection(t, code)
+			assert.Len(t, violations, tt.want, "Code:\n%s", code)
+		})
+	}
+}
+
+func TestSQLInjectionGlobalWriteAfterSynchronousClosureCheck(t *testing.T) {
+	code := `package main
+import "database/sql"
+var checkedGlobal string
+func run(db *sql.DB, raw string) {
+	check := func() {
+		if checkedGlobal != "name" { return }
+		db.Query("SELECT " + checkedGlobal)
+	}
+	check()
+	checkedGlobal = raw
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 0, "a later write to a package variable does not change a completed synchronous closure query")
+}
+
+func TestSQLInjectionStoredGlobalClosureWriteInvalidatesCapturedValue(t *testing.T) {
+	code := `package main
+import "database/sql"
+var hook func()
+func fire() { if hook != nil { hook() } }
+func run(db *sql.DB, value, raw string) {
+	hook = func() { value = raw }
+	if value != "name" { return }
+	fire()
+	db.Query("SELECT " + value)
+}
+func runWithoutCallingHook(db *sql.DB, value, raw string) {
+	hook = func() { value = raw }
+	if value != "name" { return }
+	db.Query("SELECT " + value)
+}`
+	violations := analyzeSQLInjection(t, code)
+	assert.Len(t, violations, 2, "storing a writer closure globally invalidates the captured whitelist even without a local call")
 }
