@@ -125,8 +125,10 @@ func sizeMessage(size, limit int, head headVersion, headErr error) string {
 
 // committedVersion finds the script in HEAD: under its own path, under the
 // path git's rename detection pairs it with, or, for a move git does not
-// track, as a blob of HEAD with the same content whose path is gone from disk.
-// A copy beside its original is new shell code.
+// track, as a blob of HEAD with the same content whose path is gone from disk
+// and taken by no rename. A copy beside its original is new shell code. Before
+// git add, a move and a copy of one script both match the gone path; the gate
+// of graft commit sees them staged, where the rename takes it.
 func committedVersion(path string) (headVersion, error) {
 	dir, base := filepath.Dir(path), filepath.Base(path)
 	size, found, err := committedSize(dir, "./"+base)
@@ -143,7 +145,8 @@ func committedVersion(path string) (headVersion, error) {
 	if err != nil {
 		return none, err
 	}
-	if from := renamedFrom(diff, prefix+base); from != "" {
+	pairs := renames(diff)
+	if from := pairs[prefix+base]; from != "" {
 		size, _, err := committedSize(dir, ":"+from)
 		if err != nil {
 			return none, err
@@ -158,37 +161,41 @@ func committedVersion(path string) (headVersion, error) {
 	if err != nil {
 		return none, err
 	}
-	if from := movedBlobPath(tree, strings.TrimSpace(blob), top); from != "" {
+	taken := make(map[string]bool, len(pairs))
+	for _, from := range pairs {
+		taken[from] = true
+	}
+	if from := movedBlobPath(tree, strings.TrimSpace(blob), top, taken); from != "" {
 		size, _, err := committedSize(dir, ":"+from)
 		return headVersion{size: size, from: from}, err
 	}
 	return none, nil
 }
 
-// renamedFrom is the HEAD path that `git diff -M -z --name-status` pairs with
-// path in a rename, or "".
-func renamedFrom(diff, path string) string {
+// renames maps each new path of `git diff -M -z --name-status` to the HEAD
+// path it was renamed from.
+func renames(diff string) map[string]string {
+	pairs := make(map[string]string)
 	fields := strings.Split(diff, "\x00")
 	for i := 0; i < len(fields); i++ {
-		status := fields[i]
-		if !strings.HasPrefix(status, "R") {
+		if !strings.HasPrefix(fields[i], "R") {
 			i++ // one path
 			continue
 		}
-		if i+2 < len(fields) && fields[i+2] == path {
-			return fields[i+1]
+		if i+2 < len(fields) {
+			pairs[fields[i+2]] = fields[i+1]
 		}
 		i += 2
 	}
-	return ""
+	return pairs
 }
 
-// movedBlobPath is a path of `git ls-tree -r -z` whose blob is hash and which
-// is gone from the work tree at top, or "".
-func movedBlobPath(tree, hash, top string) string {
+// movedBlobPath is a path of `git ls-tree -r -z` whose blob is hash, which is
+// gone from the work tree at top and which no rename has taken, or "".
+func movedBlobPath(tree, hash, top string, taken map[string]bool) string {
 	for entry := range strings.SplitSeq(tree, "\x00") {
 		meta, path, ok := strings.Cut(entry, "\t")
-		if !ok || !strings.HasSuffix(meta, " "+hash) {
+		if !ok || !strings.HasSuffix(meta, " "+hash) || taken[path] {
 			continue
 		}
 		if _, err := os.Lstat(filepath.Join(top, filepath.FromSlash(path))); errors.Is(err, fs.ErrNotExist) {

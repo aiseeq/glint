@@ -265,8 +265,19 @@ func TestShellScriptSizeRuleFollowsMoves(t *testing.T) {
 	require.Len(t, found, 1, "mv, grown, not in the index")
 	assert.Contains(t, found[0].Message, "a new shell script")
 
-	// A folder whose name starts with a space.
+	// A move and a copy of one script in one change: the HEAD path is moved
+	// once, so one of the two is new shell code once staged, as the gate sees it.
 	root := committedRepo(t, map[string]string{"ops/big.sh": big})
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "deploy"), 0o755))
+	require.NoError(t, os.Rename(filepath.Join(root, "ops/big.sh"), filepath.Join(root, "deploy/prod.sh")))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "deploy/stage.sh"), []byte(big), 0o644))
+	git(root, "add", "-A")
+	found = append(analyzeIn(t, rule, root, "deploy/prod.sh", big), analyzeIn(t, rule, root, "deploy/stage.sh", big)...)
+	require.Len(t, found, 1, "a move and a copy")
+	assert.Contains(t, found[0].Message, "a new shell script")
+
+	// A folder whose name starts with a space.
+	root = committedRepo(t, map[string]string{"ops/big.sh": big})
 	require.NoError(t, os.MkdirAll(filepath.Join(root, " lead"), 0o755))
 	git(root, "mv", "ops/big.sh", " lead/big.sh")
 	found = analyzeIn(t, rule, root, " lead/big.sh", big+"echo more\n")
