@@ -36,6 +36,171 @@ func TestAuditActorPropagationRule_Metadata(t *testing.T) {
 	assert.IsType(t, rule, registered)
 }
 
+func TestAuditActorPropagationRule_EarlyExitWithoutCandidateCalls(t *testing.T) {
+	project := loadAuditProject(t, map[string]string{
+		"plain.go": `package audit
+func ordinary(value string) string { return value }
+func use() { _ = ordinary("input") }
+`,
+	})
+	violations, err := NewAuditActorPropagationRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+	assertAuditCallIndexNotAlreadyBuilt(t, project)
+}
+
+func TestAuditActorPropagationRule_NamedFunctionTypeNeedsMatchingSinkSignature(t *testing.T) {
+	project := loadAuditProject(t, map[string]string{
+		"plain.go": `package audit
+func AppendStatusHistory(txnID string, source string, actorUserID int) {}
+type callback func(string)
+func invoke(fn callback) { fn("input") }
+func use() { invoke(func(string) {}) }
+`,
+	})
+	violations, err := NewAuditActorPropagationRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+	assertAuditCallIndexNotAlreadyBuilt(t, project)
+}
+
+func TestAuditActorPropagationRule_CandidateCallsKeepAnalysisEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		rule func() *AuditActorPropagationRule
+	}{
+		{
+			name: "default sink name",
+			code: `package audit
+type Repo struct{}
+func (*Repo) AppendStatusHistory(source string, actorUserID int) {}
+func use(repo *Repo) { repo.AppendStatusHistory("api", 0) }
+`,
+			rule: NewAuditActorPropagationRule,
+		},
+		{
+			name: "parenthesized sink call",
+			code: `package audit
+func AppendStatusHistory(txnID string, source string, actorUserID int) {}
+func use() { (AppendStatusHistory)("txn", "admin:update", 0) }
+`,
+			rule: NewAuditActorPropagationRule,
+		},
+		{
+			name: "sink from map function value",
+			code: `package audit
+func AppendStatusHistory(txnID string, source string, actorUserID int) {}
+var hooks = map[string]func(string, string, int){"a": AppendStatusHistory}
+func use() { hooks["a"]("txn", "admin:update", 0) }
+`,
+			rule: NewAuditActorPropagationRule,
+		},
+		{
+			name: "sink from function field",
+			code: `package audit
+func AppendStatusHistory(txnID string, source string, actorUserID int) {}
+type service struct { write func(string, string, int) }
+var global = service{write: AppendStatusHistory}
+func use() { global.write("txn", "admin:update", 0) }
+`,
+			rule: NewAuditActorPropagationRule,
+		},
+		{
+			name: "named function type",
+			code: `package audit
+func AppendStatusHistory(txnID string, source string, actorUserID int) {}
+type hook func(string, string, int)
+func forward(write hook) { write("txn", "admin:update", 0) }
+func use() { forward(AppendStatusHistory) }
+`,
+			rule: NewAuditActorPropagationRule,
+		},
+		{
+			name: "function type parameter",
+			code: `package audit
+func AppendStatusHistory(txnID string, source string, actorUserID int) {}
+func forward[F ~func(string, string, int)](write F) { write("txn", "admin:update", 0) }
+func use() { forward(AppendStatusHistory) }
+`,
+			rule: NewAuditActorPropagationRule,
+		},
+		{
+			name: "configured sink name",
+			code: `package audit
+type Repo struct{}
+func (*Repo) WriteRecord(source string, actorUserID int) {}
+func use(repo *Repo) { repo.WriteRecord("api", 0) }
+`,
+			rule: func() *AuditActorPropagationRule {
+				rule := NewAuditActorPropagationRule()
+				if err := rule.Configure(map[string]any{"sinks": []string{"WriteRecord"}}); err != nil {
+					panic(err)
+				}
+				return rule
+			},
+		},
+		{
+			name: "audit write call",
+			code: `package audit
+func writeAuditRecord() {}
+func use() { writeAuditRecord() }
+`,
+			rule: NewAuditActorPropagationRule,
+		},
+		{
+			name: "audit write through function value",
+			code: `package audit
+func writeAuditRecord() {}
+func use() {
+	write := writeAuditRecord
+	write()
+}
+`,
+			rule: NewAuditActorPropagationRule,
+		},
+		{
+			name: "status write call",
+			code: `package audit
+type Repo struct{}
+func (*Repo) UpdateRecordStatus(status int) {}
+func use(repo *Repo) { repo.UpdateRecordStatus(1) }
+`,
+			rule: NewAuditActorPropagationRule,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project := loadAuditProject(t, map[string]string{"candidate.go": tt.code})
+			_, err := tt.rule().AnalyzeGoProject(project)
+			require.NoError(t, err)
+			assertAuditCallIndexBuilt(t, project)
+		})
+	}
+}
+
+func assertAuditCallIndexNotAlreadyBuilt(t *testing.T, project *core.GoProjectContext) {
+	t.Helper()
+	built := false
+	_, err := core.SharedLoad(project, auditCallIndexKey{}, func() (*auditCallIndex, error) {
+		built = true
+		return nil, nil
+	})
+	require.NoError(t, err)
+	assert.True(t, built, "probe should build the index after the rule's early exit")
+}
+
+func assertAuditCallIndexBuilt(t *testing.T, project *core.GoProjectContext) {
+	t.Helper()
+	built := false
+	_, err := core.SharedLoad(project, auditCallIndexKey{}, func() (*auditCallIndex, error) {
+		built = true
+		return nil, nil
+	})
+	require.NoError(t, err)
+	assert.False(t, built, "analysis should already have built the call index")
+}
+
 func TestAuditActorPropagationRule_DirectActorParameterIsSafe(t *testing.T) {
 	violations := analyzeAuditModule(t, map[string]string{
 		"audit.go": `package audit
@@ -669,11 +834,7 @@ func analyzeAuditModuleWithRule(t *testing.T, rule *AuditActorPropagationRule, f
 
 func analyzeAuditModuleError(t *testing.T, rule *AuditActorPropagationRule, files map[string]string) ([]*core.Violation, error) {
 	t.Helper()
-	root, contexts := writeAuditModule(t, files)
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{RequireSSA: true})
-	if err != nil {
-		return nil, err
-	}
+	project := loadAuditProject(t, files)
 	violations, err := rule.AnalyzeGoProject(project)
 	sort.Slice(violations, func(i, j int) bool {
 		if violations[i].File != violations[j].File {
@@ -685,6 +846,14 @@ func analyzeAuditModuleError(t *testing.T, rule *AuditActorPropagationRule, file
 		return violations[i].Context["pattern"].(string) < violations[j].Context["pattern"].(string)
 	})
 	return violations, err
+}
+
+func loadAuditProject(t *testing.T, files map[string]string) *core.GoProjectContext {
+	t.Helper()
+	root, contexts := writeAuditModule(t, files)
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{RequireSSA: true})
+	require.NoError(t, err)
+	return project
 }
 
 func writeAuditModule(t *testing.T, files map[string]string) (string, []*core.FileContext) {
