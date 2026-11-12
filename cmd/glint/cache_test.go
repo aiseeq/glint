@@ -51,6 +51,19 @@ func (r *indexedFindingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violatio
 	return []*core.Violation{r.CreateViolation(ctx.RelPath, 1, "indexed finding "+r.value)}
 }
 
+type subsetIndexedFindingRule struct{ *indexedFindingRule }
+
+func (*subsetIndexedFindingRule) RootCacheFile(ctx *core.FileContext) bool {
+	return ctx.IsTypeScriptFile()
+}
+
+func (r *subsetIndexedFindingRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if !r.RootCacheFile(ctx) {
+		return nil
+	}
+	return r.indexedFindingRule.AnalyzeFile(ctx)
+}
+
 type excludedInputFindingRule struct{ *indexedFindingRule }
 
 func (*excludedInputFindingRule) ProjectFilesCacheExclusion() string {
@@ -275,6 +288,126 @@ func TestCacheFingerprintSetsRoundTripAndDeduplicate(t *testing.T) {
 	require.NoError(t, expandCacheFingerprints(&compact))
 	assert.Nil(t, compact.FingerprintSets)
 	assert.Equal(t, contents, compact)
+}
+
+func TestRootIndexCacheIgnoresUnrelatedGoEdit(t *testing.T) {
+	dir := t.TempDir()
+	cfg := core.DefaultConfig()
+	rule := frontendrules.NewTSDerivedFieldRecomputedRule()
+	list := []rules.Rule{rule}
+	files := func(goCode, tsCode string) []*core.FileContext {
+		return []*core.FileContext{
+			goContext(t, "a.go", goCode),
+			core.NewFileContext("/project/b.ts", "/project", []byte(tsCode), cfg),
+		}
+	}
+	open := func(inputs string, contexts []*core.FileContext) *resultCache {
+		cache, err := openResultCache(dir, "/project", "", "build", "stamp")
+		require.NoError(t, err)
+		cache.keyProject(inputs, nil, list, "")
+		keyRootFileCache(cache, contexts, append(rules.GetEnabled(cfg), rule), cfg, true)
+		return cache
+	}
+	original := files("package a\n", "export type T = { status: string; statusGroup: string }\n")
+	first := open("go-before", original)
+	first.storeRootProjectResults(map[string]core.ViolationList{rule.Name(): nil})
+	require.NoError(t, first.save())
+	editedGo := open("go-after", files("package a // edited\n", "export type T = { status: string; statusGroup: string }\n"))
+	require.True(t, editedGo.rootRuleReusable(rule), "Go input is not read by the TypeScript index or its file analysis")
+	editedTS := open("go-after", files("package a // edited\n", "export type T = { status: string }\n"))
+	require.False(t, editedTS.rootRuleReusable(rule), "TypeScript changes invalidate the index")
+}
+
+func runSubsetIndexedCached(t *testing.T, dir, version, value, path string) (core.ViolationList, bool, *subsetIndexedFindingRule) {
+	t.Helper()
+	cfg := core.DefaultConfig()
+	contexts := []*core.FileContext{
+		core.NewFileContext("/project/"+path, "/project", []byte("const value = 1\n"), cfg),
+	}
+	rule := &subsetIndexedFindingRule{newIndexedFindingRuleWithValue(value)}
+	list := []rules.Rule{rule}
+	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
+	require.NoError(t, err)
+	cache.ruleFingerprints[reflect.TypeFor[subsetIndexedFindingRule]().PkgPath()] = version
+	cache.keyProject("same-inputs", nil, list, "")
+	found, panics, err := analyzeProjectContained(contexts, contexts, list, append(rules.GetEnabled(cfg), rule), cfg, nil, cache)
+	require.NoError(t, err)
+	require.Empty(t, panics)
+	hit := cache.rootRuleReusable(rule)
+	require.NoError(t, cache.save())
+	return found, hit, rule
+}
+
+func TestRootSubsetCacheInvalidatesChangedRuleFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	first, hit, _ := runSubsetIndexedCached(t, dir, "rule-v1", "old", "view.ts")
+	require.False(t, hit)
+	require.Len(t, first, 1)
+	require.Equal(t, "indexed finding old", first[0].Message)
+	second, hit, rule := runSubsetIndexedCached(t, dir, "rule-v2", "new", "view.ts")
+	require.False(t, hit, "a new rule fingerprint must invalidate the subset")
+	require.Equal(t, 1, rule.indexCalls)
+	require.Len(t, second, 1)
+	require.Equal(t, "indexed finding new", second[0].Message)
+}
+
+func TestRootSubsetCacheInvalidatesRenamedFile(t *testing.T) {
+	dir := t.TempDir()
+	first, hit, _ := runSubsetIndexedCached(t, dir, "rule-v1", "same", "old.ts")
+	require.False(t, hit)
+	require.Len(t, first, 1)
+	require.Equal(t, "old.ts", first[0].File)
+	second, hit, rule := runSubsetIndexedCached(t, dir, "rule-v1", "same", "new.ts")
+	require.False(t, hit, "a renamed input must invalidate the subset")
+	require.Equal(t, 1, rule.indexCalls)
+	require.Len(t, second, 1)
+	require.Equal(t, "new.ts", second[0].File)
+}
+
+func TestRootSubsetCacheRetainsAndInvalidatesFindings(t *testing.T) {
+	dir := t.TempDir()
+	cfg := core.DefaultConfig()
+	files := func(goCode, typeCode string) []*core.FileContext {
+		return []*core.FileContext{
+			goContext(t, "a.go", goCode),
+			core.NewFileContext("/project/types.ts", "/project", []byte(typeCode), cfg),
+			core.NewFileContext("/project/view.ts", "/project", []byte("export function displayStatus(w: Item): string {\n if (w.status === 'pending' || w.status === 'approved') return 'pending'\n return 'done'\n}\n"), cfg),
+		}
+	}
+	run := func(inputs string, contexts []*core.FileContext, cached bool) (core.ViolationList, bool) {
+		rule := frontendrules.NewTSDerivedFieldRecomputedRule()
+		list := []rules.Rule{rule}
+		var cache *resultCache
+		if cached {
+			var err error
+			cache, err = openResultCache(dir, "/project", "", "build", "stamp")
+			require.NoError(t, err)
+			cache.keyProject(inputs, nil, list, "")
+		}
+		found, panics, err := analyzeProjectContained(contexts, contexts, list, append(rules.GetEnabled(cfg), rule), cfg, nil, cache)
+		require.NoError(t, err)
+		require.Empty(t, panics)
+		hit := cache != nil && cache.rootRuleReusable(rule)
+		if cache != nil {
+			require.NoError(t, cache.save())
+		}
+		return found, hit
+	}
+	withGroup := "interface Item { status: string; statusGroup: string }\n"
+	first, hit := run("go-before", files("package a\n", withGroup), true)
+	require.False(t, hit)
+	require.Len(t, first, 1)
+	changedGo := files("package a // edited\n", withGroup)
+	second, hit := run("go-after", changedGo, true)
+	require.True(t, hit)
+	full, _ := run("", changedGo, false)
+	require.Equal(t, fingerprint(full), fingerprint(second))
+	changedType := files("package a // edited\n", "interface Item { status: string }\n")
+	third, hit := run("go-after", changedType, true)
+	require.False(t, hit)
+	full, _ = run("", changedType, false)
+	require.Empty(t, third)
+	require.Equal(t, fingerprint(full), fingerprint(third))
 }
 
 func TestResultCacheReusesFindingsOfUnchangedFiles(t *testing.T) {

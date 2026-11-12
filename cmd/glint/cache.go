@@ -80,6 +80,9 @@ type resultCache struct {
 	rootRunComplete      bool
 	scopeSpecific        bool
 	rootScopeComplete    bool
+	subsetPrevious       map[string]rootSubsetEntry
+	subsetCurrent        map[string]rootSubsetEntry
+	subsetKeys           map[string]string
 }
 
 // projectEntry holds the findings of the project rules, filtered like every
@@ -108,7 +111,13 @@ type cacheEntry struct {
 	Rules map[string][]core.Violation
 }
 
+type rootSubsetEntry struct {
+	Key      string
+	Findings map[string][]core.Violation
+}
+
 type cacheContents struct {
+	Subsets         map[string]rootSubsetEntry
 	Stamp           string
 	Entries         map[string]cacheEntry
 	Project         *projectEntry
@@ -332,6 +341,7 @@ func (c *resultCache) read(path string) (found bool, err error) {
 	}
 	if stored.Stamp == c.stamp {
 		c.previous = stored.Entries
+		c.subsetPrevious = stored.Subsets
 		c.previousProject = stored.Project
 		c.loaded = true
 		now := time.Now()
@@ -479,8 +489,10 @@ func (c *resultCache) keyRootFiles(files []*core.FileContext, hashes map[string]
 		hash [sha256.Size]byte
 	}
 	entries := make([]rootFileDigest, 0, len(files))
+	byPath := make(map[string]*core.FileContext, len(files))
 	for _, file := range files {
 		entries = append(entries, rootFileDigest{path: file.RelPath, hash: hashes[file.RelPath]})
+		byPath[file.RelPath] = file
 	}
 	slices.SortFunc(entries, func(a, b rootFileDigest) int { return strings.Compare(a.path, b.path) })
 	hasher := sha256.New()
@@ -497,6 +509,7 @@ func (c *resultCache) keyRootFiles(files []*core.FileContext, hashes map[string]
 	c.rootRuleFindings = make(map[string]map[string][]core.Violation)
 	c.rootRuleFingerprints = make(map[string]string)
 	c.rootRuleHits = make(map[string]bool)
+	c.subsetKeys = make(map[string]string)
 	for _, rule := range enabled {
 		if !rootProjectRuleCacheable(rule) {
 			continue
@@ -517,6 +530,24 @@ func (c *resultCache) keyRootFiles(files []*core.FileContext, hashes map[string]
 			fingerprint = hex.EncodeToString(sum[:])
 		}
 		c.rootRuleFingerprints[rule.Name()] = fingerprint
+		if subset, ok := rule.(rules.RootCacheFileSubset); ok {
+			h := sha256.New()
+			_, _ = h.Write([]byte(fingerprint))
+			_, _ = h.Write([]byte{0})
+			for _, entry := range entries {
+				if subset.RootCacheFile(byPath[entry.path]) {
+					_, _ = h.Write([]byte(entry.path))
+					_, _ = h.Write([]byte{0})
+					_, _ = h.Write(entry.hash[:])
+				}
+			}
+			key := hex.EncodeToString(h.Sum(nil))
+			c.subsetKeys[rule.Name()] = key
+			if previous, ok := c.subsetPrevious[rule.Name()]; ok && previous.Key == key {
+				c.rootRuleHits[rule.Name()] = true
+				c.rootRuleFindings[rule.Name()] = previous.Findings
+			}
+		}
 	}
 	if c.previousProject == nil || c.previousProject.RootFingerprint != c.rootFingerprint {
 		return
@@ -526,6 +557,9 @@ func (c *resultCache) keyRootFiles(files []*core.FileContext, hashes map[string]
 			continue
 		}
 		fingerprint := c.rootRuleFingerprints[rule.Name()]
+		if c.rootRuleHits[rule.Name()] {
+			continue
+		}
 		if fingerprint == "" || c.previousProject.RootRules[rule.Name()] != fingerprint {
 			continue
 		}
@@ -668,6 +702,15 @@ func (c *resultCache) storeRootProjectResults(found map[string]core.ViolationLis
 		}
 		rootViolations[name] = byFile
 		rootRules[name] = c.fingerprintByName(name)
+		if key := c.subsetKeys[name]; key != "" && c.rootRunComplete {
+			if c.subsetCurrent == nil {
+				c.subsetCurrent = maps.Clone(c.subsetPrevious)
+				if c.subsetCurrent == nil {
+					c.subsetCurrent = make(map[string]rootSubsetEntry)
+				}
+			}
+			c.subsetCurrent[name] = rootSubsetEntry{Key: key, Findings: byFile}
+		}
 	}
 	entry.RootRules = rootRules
 	entry.RootViolations = rootViolations
@@ -721,8 +764,12 @@ func (c *resultCache) save() error {
 			}
 		}
 	}
-	contents := cacheContents{Stamp: c.stamp, Entries: entries}
-	rootChanged := !c.loaded || !cacheContentsEqual(contents, cacheContents{Stamp: c.stamp, Entries: c.previous})
+	subsets := c.subsetPrevious
+	if c.subsetCurrent != nil {
+		subsets = c.subsetCurrent
+	}
+	contents := cacheContents{Stamp: c.stamp, Entries: entries, Subsets: subsets}
+	rootChanged := !c.loaded || !cacheContentsEqual(contents, cacheContents{Stamp: c.stamp, Entries: c.previous, Subsets: c.subsetPrevious})
 	if !rootChanged {
 		now := time.Now()
 		err := os.Chtimes(c.path, now, now)

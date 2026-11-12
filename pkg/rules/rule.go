@@ -382,6 +382,14 @@ type RootFilesAndCacheInputs interface {
 	RootFilesAndCacheInputs()
 }
 
+// RootCacheFileSubset declares the complete set of root files read by both
+// the index and file analysis of a root-files-only rule.
+// Files not selected must not affect its findings or index.
+type RootCacheFileSubset interface {
+	RootFilesOnlyProjectFiles
+	RootCacheFile(*core.FileContext) bool
+}
+
 // ExternalToolRule is a rule that runs a program glint does not ship
 // (shellcheck, tsc). Before a root's files are analyzed, the check flow
 // hands it the files: it returns an error when they need the program and

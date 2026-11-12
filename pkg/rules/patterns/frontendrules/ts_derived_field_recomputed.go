@@ -56,6 +56,11 @@ func dFindingSource(c *core.FileContext) bool {
 	return dTypeSource(c) && !c.IsGenerated()
 }
 
+// RootCacheFile selects every file read by the index and file analysis.
+func (r *TSDerivedFieldRecomputedRule) RootCacheFile(c *core.FileContext) bool {
+	return c.IsTypeScriptFile() || c.IsJavaScriptFile()
+}
+
 // UseProjectFiles indexes generated and handwritten API type declarations.
 func (r *TSDerivedFieldRecomputedRule) UseProjectFiles(files []*core.FileContext) {
 	r.types = map[string]map[string]string{}
