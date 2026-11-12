@@ -1,6 +1,7 @@
 package errrules
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -336,6 +337,368 @@ func (s *Service) PriorError(ctx context.Context) (*store.Record, error) {
 }
 `,
 	}))
+}
+
+func TestNotFoundAnsweredAsServerErrorSwallowedByCallee(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		condition string
+	}{
+		{
+			name:      "errors.Is",
+			condition: "err != nil && !errors.Is(err, store.ErrRecordNotFound)",
+		},
+		{
+			name:      "comparison",
+			condition: "err != nil && err != store.ErrRecordNotFound",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := func() map[string]string {
+				return map[string]string{
+					"store/store.go": `package store
+import ("context"; "errors")
+var ErrRecordNotFound = errors.New("record not found")
+type Store struct{}
+func (*Store) Report(context.Context, string) (string, error) {
+	return "", ErrRecordNotFound
+}
+`,
+					"service/service.go": `package service
+import (
+	"context"
+	"errors"
+	"example.com/rulestest/store"
+)
+var _ = errors.Is
+type Service struct { store *store.Store }
+func (s *Service) Submit(ctx context.Context, id string) (string, error) {
+	value, err := s.store.Report(ctx, id)
+	if CONDITION {
+		return "", err
+	}
+	return value, nil
+}
+`,
+					"api/api.go": `package api
+import (
+	"net/http"
+	"example.com/rulestest/service"
+)
+type Handler struct { service *service.Service }
+func (h *Handler) report(w http.ResponseWriter, req *http.Request) {
+	_, err := h.service.Submit(req.Context(), req.PathValue("id"))
+	if err != nil {
+		http.Error(w, "failed", http.StatusInternalServerError)
+		return
+	}
+}
+`,
+				}
+			}
+			protected := source()
+			protected["service/service.go"] = strings.Replace(protected["service/service.go"], "CONDITION", test.condition, 1)
+			assert.Empty(t, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), protected))
+
+			unprotected := source()
+			unprotected["service/service.go"] = strings.Replace(unprotected["service/service.go"], "CONDITION", "err != nil", 1)
+			assert.Equal(t, []string{"api/api.go:10"}, rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), unprotected))
+		})
+	}
+}
+
+func TestNotFoundAnsweredAsServerErrorGuardedReturnAfterMutation(t *testing.T) {
+	tests := []struct {
+		name            string
+		body            string
+		wantNotFound    bool
+		wantUnreachable bool
+	}{
+		{
+			name: "direct reassignment",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		err = s.store.Other(ctx, id)
+		return "", err
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "nested reassignment",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		if id == "x" {
+			err = s.store.Other(ctx, id)
+		}
+		return "", err
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "pointer mutation",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		s.store.Fill(&err)
+		return "", err
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "closure reassignment",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		func() { err = s.store.Other(ctx, id) }()
+		return "", err
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "switch case mutation",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		switch id {
+		case "a":
+			err = s.store.Other(ctx, id)
+			return "", err
+		}
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "nested if init mutation",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		if err = s.store.Other(ctx, id); id == "a" {
+			return "", err
+		}
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "closure assigned before guard",
+			body: `	value, err := s.store.Report(ctx, id)
+	reload := func() { err = s.store.Other(ctx, id) }
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		reload()
+		return "", err
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "other variable address preserves subtraction",
+			body: `	value, err := s.store.Report(ctx, id)
+	other := s.store.Other(ctx, id)
+	s.store.Fill(&other)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		return "", err
+	}
+	return value, nil`,
+			wantUnreachable: true,
+		},
+		{
+			name: "address taken before guard",
+			body: `	value, err := s.store.Report(ctx, id)
+	p := &err
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		*p = s.store.Other(ctx, id)
+		return "", err
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "address taken in nested if init",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		if s.store.Fill(&err); true {
+			return "", err
+		}
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "select case mutation",
+			body: `	value, err := s.store.Report(ctx, id)
+	ch := make(chan int)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		select {
+		case <-ch:
+			err = s.store.Other(ctx, id)
+			return "", err
+		}
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "outer mutation before inner return",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		err = s.store.Other(ctx, id)
+		if id == "a" {
+			return "", err
+		}
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "read-only closure retains subtraction",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		log := func() string { return err.Error() }
+		_ = log
+		return "", err
+	}
+	return value, nil`,
+			wantUnreachable: true,
+		},
+		{
+			name: "else branch",
+			body: `	value, err := s.store.Report(ctx, id)
+	if !errors.Is(err, store.ErrRecordNotFound) {
+		return value, nil
+	} else {
+		return "", err
+	}`,
+			wantNotFound: true,
+		},
+		{
+			name: "or condition",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil || !errors.Is(err, store.ErrRecordNotFound) {
+		return "", err
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "reversed comparison",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && store.ErrRecordNotFound != err {
+		return "", err
+	}
+	return value, nil`,
+			wantUnreachable: true,
+		},
+		{
+			name: "different variable",
+			body: `	value, err := s.store.Report(ctx, id)
+	other := s.store.Other(ctx, id)
+	if err != nil && !errors.Is(other, store.ErrRecordNotFound) {
+		return "", err
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "equality is not an exclusion",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && err == store.ErrRecordNotFound {
+		return "", err
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "different variable comparison",
+			body: `	value, err := s.store.Report(ctx, id)
+	other := s.store.Other(ctx, id)
+	if other != store.ErrRecordNotFound && err != nil {
+		return "", err
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "unrelated predicate",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !customCheck(err, store.ErrRecordNotFound) {
+		return "", err
+	}
+	return value, nil`,
+			wantNotFound: true,
+		},
+		{
+			name: "sentinel alias from another package",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !errors.Is(err, ErrMissing) {
+		return "", err
+	}
+	return value, nil`,
+			wantUnreachable: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			files := map[string]string{
+				"store/store.go": `package store
+import ("context"; "errors")
+var ErrRecordNotFound = errors.New("record not found")
+type Store struct{}
+func (*Store) Report(context.Context, string) (string, error) { return "", ErrRecordNotFound }
+func (*Store) Other(context.Context, string) error { return ErrRecordNotFound }
+func (*Store) Fill(p *error) { *p = ErrRecordNotFound }
+`,
+				"service/service.go": `package service
+import (
+	"context"
+	"errors"
+	"fmt"
+	"example.com/rulestest/store"
+)
+var _ = fmt.Errorf
+var ErrMissing = store.ErrRecordNotFound
+var ErrLocalMissing = errors.New("local missing")
+func customCheck(error, error) bool { return false }
+type Service struct { store *store.Store }
+func (s *Service) Submit(ctx context.Context, id string) (string, error) {
+BODY
+}
+`,
+				"api/api.go": `package api
+import (
+	"errors"
+	"net/http"
+	"example.com/rulestest/service"
+	"example.com/rulestest/store"
+)
+type Handler struct { service *service.Service }
+func (h *Handler) report(w http.ResponseWriter, req *http.Request) {
+	_, err := h.service.Submit(req.Context(), req.PathValue("id"))
+	if err != nil {
+		http.Error(w, "failed", http.StatusInternalServerError)
+		return
+	}
+}
+func (h *Handler) check(w http.ResponseWriter, req *http.Request) {
+	_, err := h.service.Submit(req.Context(), req.PathValue("id"))
+	if errors.Is(err, store.ErrRecordNotFound) {
+		http.Error(w, "missing", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "failed", http.StatusInternalServerError)
+		return
+	}
+}
+`,
+			}
+			files["service/service.go"] = strings.Replace(files["service/service.go"], "BODY", test.body, 1)
+			notFound := rulestest.ProjectRulePlaces(t, NewNotFoundAnsweredAsServerErrorRule(), files)
+			unreachable := rulestest.ProjectRulePlaces(t, NewErrorsIsTargetUnreachableRule(), files)
+			assert.Equal(t, test.wantNotFound, len(notFound) > 0, "not-found rule")
+			assert.Equal(t, test.wantUnreachable, len(unreachable) > 0, "unreachable rule")
+		})
+	}
 }
 
 func TestNotFoundAnsweredAsServerErrorRule_Metadata(t *testing.T) {

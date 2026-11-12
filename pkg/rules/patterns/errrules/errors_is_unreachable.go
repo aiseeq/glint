@@ -1118,7 +1118,7 @@ func (f *errorFlow) returnErrors(fn patternkit.TypedFunc, sig *types.Signature, 
 		}
 	case len(ret.Results) == sig.Results().Len():
 		for _, index := range errIndexes {
-			set.add(f.exprErrors(fn, ret.Results[index], ret, 0), nil)
+			set.add(f.returnExprErrors(fn, ret.Results[index], ret), nil)
 		}
 	case len(ret.Results) == 1:
 		call, ok := ast.Unparen(ret.Results[0]).(*ast.CallExpr)
@@ -1130,6 +1130,69 @@ func (f *errorFlow) returnErrors(fn patternkit.TypedFunc, sig *types.Signature, 
 		return unknownErrors()
 	}
 	return set
+}
+
+// returnExprErrors returns the errors from a return expression after removing
+// sentinels excluded by a negative conjunct in the enclosing if condition.
+func (f *errorFlow) returnExprErrors(fn patternkit.TypedFunc, expr ast.Expr, ret *ast.ReturnStmt) *errorSet {
+	set := f.exprErrors(fn, expr, ret, 0)
+	ident, ok := ast.Unparen(expr).(*ast.Ident)
+	if !ok {
+		return set
+	}
+	v, ok := fn.Info.Uses[ident].(*types.Var)
+	if !ok {
+		return set
+	}
+	path, _ := astutil.PathEnclosingInterval(fn.File.GoAST, ret.Pos(), ret.Pos())
+	for i := 1; i < len(path); i++ {
+		ifStmt, ok := path[i].(*ast.IfStmt)
+		if !ok || path[i-1] != ifStmt.Body {
+			continue
+		}
+		if patternkit.MayMutateVar(fn.Info, ifStmt.Body, v) ||
+			patternkit.AddressTakenVar(fn.Info, fn.Decl.Body, v) ||
+			patternkit.MutatedVarInClosure(fn.Info, fn.Decl.Body, v) {
+			return set
+		}
+		for _, sentinel := range excludedGuardSentinels(fn, ifStmt.Cond, v, f) {
+			delete(set.sentinels, sentinel)
+		}
+	}
+	return set
+}
+
+// excludedGuardSentinels finds error sentinels excluded by a true && conjunct.
+func excludedGuardSentinels(fn patternkit.TypedFunc, cond ast.Expr, value types.Object, flow *errorFlow) []*types.Var {
+	switch node := ast.Unparen(cond).(type) {
+	case *ast.BinaryExpr:
+		if node.Op == token.LAND {
+			return append(excludedGuardSentinels(fn, node.X, value, flow), excludedGuardSentinels(fn, node.Y, value, flow)...)
+		}
+		if node.Op == token.NEQ {
+			if patternkit.VariableOf(fn.Info, ast.Unparen(node.X)) == value {
+				if sentinel := sentinelVar(fn.Info, node.Y); sentinel != nil {
+					return []*types.Var{flow.canonical(sentinel)}
+				}
+			}
+			if patternkit.VariableOf(fn.Info, ast.Unparen(node.Y)) == value {
+				if sentinel := sentinelVar(fn.Info, node.X); sentinel != nil {
+					return []*types.Var{flow.canonical(sentinel)}
+				}
+			}
+		}
+	case *ast.UnaryExpr:
+		if node.Op == token.NOT {
+			call, ok := ast.Unparen(node.X).(*ast.CallExpr)
+			if ok && len(call.Args) == 2 && patternkit.IsPackageFuncCall(fn.File.GoAST, fn.Info, call, "errors", "Is") &&
+				patternkit.VariableOf(fn.Info, ast.Unparen(call.Args[0])) == value {
+				if sentinel := sentinelVar(fn.Info, call.Args[1]); sentinel != nil {
+					return []*types.Var{flow.canonical(sentinel)}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // handledBefore returns the sentinels a guard before the node already took

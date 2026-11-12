@@ -2,6 +2,7 @@ package patternkit
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 	"strings"
 
@@ -56,6 +57,44 @@ func AssignsVar(info *types.Info, stmt ast.Stmt, v *types.Var) bool {
 					found = true
 				}
 			}
+		}
+		return !found
+	})
+	return found
+}
+
+// MayMutateVar reports whether a node assigns the variable or takes its
+// address. AST inspection includes nested statements and closures.
+func MayMutateVar(info *types.Info, node ast.Node, v *types.Var) bool {
+	if stmt, ok := node.(ast.Stmt); ok && AssignsVar(info, stmt, v) {
+		return true
+	}
+	return AddressTakenVar(info, node, v)
+}
+
+// AddressTakenVar reports whether a node takes the variable's address.
+func AddressTakenVar(info *types.Info, node ast.Node, v *types.Var) bool {
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		unary, ok := n.(*ast.UnaryExpr)
+		if !ok || unary.Op != token.AND {
+			return true
+		}
+		ident, ok := ast.Unparen(unary.X).(*ast.Ident)
+		found = ok && info.ObjectOf(ident) == v
+		return !found
+	})
+	return found
+}
+
+// MutatedVarInClosure reports whether a function literal assigns the variable
+// or takes its address anywhere inside node.
+func MutatedVarInClosure(info *types.Info, node ast.Node, v *types.Var) bool {
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		literal, ok := n.(*ast.FuncLit)
+		if ok && MayMutateVar(info, literal.Body, v) {
+			found = true
 		}
 		return !found
 	})
