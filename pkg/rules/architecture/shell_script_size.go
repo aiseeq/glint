@@ -3,6 +3,7 @@ package architecture
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,8 +124,9 @@ func sizeMessage(size, limit int, head headVersion, headErr error) string {
 }
 
 // committedVersion finds the script in HEAD: under its own path, under the
-// path git's rename detection pairs it with, or, for a move or copy git does
-// not track, as a blob of HEAD with the same content.
+// path git's rename detection pairs it with, or, for a move git does not
+// track, as a blob of HEAD with the same content whose path is gone from disk.
+// A copy beside its original is new shell code.
 func committedVersion(path string) (headVersion, error) {
 	dir, base := filepath.Dir(path), filepath.Base(path)
 	size, found, err := committedSize(dir, "./"+base)
@@ -132,15 +134,16 @@ func committedVersion(path string) (headVersion, error) {
 		return headVersion{size: size}, err
 	}
 	none := headVersion{size: -1}
-	prefix, err := gitOutput(dir, "rev-parse", "--show-prefix")
+	where, err := gitOutput(dir, "rev-parse", "--show-toplevel", "--show-prefix")
 	if err != nil {
 		return none, err
 	}
+	top, prefix, _ := strings.Cut(strings.TrimSuffix(where, "\n"), "\n")
 	diff, err := gitOutput(dir, "diff", "-M", "-z", "--name-status", "HEAD", "--")
 	if err != nil {
 		return none, err
 	}
-	if from := renamedFrom(diff, strings.TrimSpace(prefix)+base); from != "" {
+	if from := renamedFrom(diff, prefix+base); from != "" {
 		size, _, err := committedSize(dir, ":"+from)
 		if err != nil {
 			return none, err
@@ -155,7 +158,7 @@ func committedVersion(path string) (headVersion, error) {
 	if err != nil {
 		return none, err
 	}
-	if from := treePathOf(tree, strings.TrimSpace(blob)); from != "" {
+	if from := movedBlobPath(tree, strings.TrimSpace(blob), top); from != "" {
 		size, _, err := committedSize(dir, ":"+from)
 		return headVersion{size: size, from: from}, err
 	}
@@ -180,11 +183,15 @@ func renamedFrom(diff, path string) string {
 	return ""
 }
 
-// treePathOf is a path of `git ls-tree -r -z` whose blob is hash, or "".
-func treePathOf(tree, hash string) string {
+// movedBlobPath is a path of `git ls-tree -r -z` whose blob is hash and which
+// is gone from the work tree at top, or "".
+func movedBlobPath(tree, hash, top string) string {
 	for entry := range strings.SplitSeq(tree, "\x00") {
 		meta, path, ok := strings.Cut(entry, "\t")
-		if ok && strings.HasSuffix(meta, " "+hash) {
+		if !ok || !strings.HasSuffix(meta, " "+hash) {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(top, filepath.FromSlash(path))); errors.Is(err, fs.ErrNotExist) {
 			return path
 		}
 	}
@@ -255,15 +262,16 @@ func gitOutput(dir string, args ...string) (string, error) {
 }
 
 // repositoryNeutralEnv drops the variables a hook may have set for its own
-// repository that change what HEAD:path reads, so git finds the repository
-// from the script's directory. The other local ones of `git rev-parse
-// --local-env-vars` (index, prefix, config, alternates) leave it as is.
+// repository that change what HEAD:path or the diff against HEAD reads, so git
+// finds the repository from the script's directory. The other local ones of
+// `git rev-parse --local-env-vars` (prefix, config, alternates) leave them as
+// they are.
 func repositoryNeutralEnv(env []string) []string {
 	kept := make([]string, 0, len(env))
 	for _, entry := range env {
 		name, _, _ := strings.Cut(entry, "=")
 		switch name {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY":
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_INDEX_FILE":
 			continue
 		}
 		kept = append(kept, entry)

@@ -253,15 +253,34 @@ func TestShellScriptSizeRuleFollowsMoves(t *testing.T) {
 	assert.Empty(t, moved(t, big, gitMove), "git mv")
 	assert.Empty(t, moved(t, big[:len(big)-100], gitMove), "git mv, shrunk")
 	assert.Empty(t, moved(t, big, plainMove), "mv")
-	assert.Empty(t, moved(t, big, copied), "cp")
+	found := moved(t, big, copied)
+	require.Len(t, found, 1, "cp: the original stays, the copy is new shell code")
+	assert.Contains(t, found[0].Message, "a new shell script")
 
-	found := moved(t, big+"echo more\n", gitMove)
+	found = moved(t, big+"echo more\n", gitMove)
 	require.Len(t, found, 1, "git mv, grown")
 	assert.Contains(t, found[0].Message, "grown from 22 KB in HEAD as ops/big.sh")
 
 	found = moved(t, big+"echo more\n", plainMove)
 	require.Len(t, found, 1, "mv, grown, not in the index")
 	assert.Contains(t, found[0].Message, "a new shell script")
+
+	// A folder whose name starts with a space.
+	root := committedRepo(t, map[string]string{"ops/big.sh": big})
+	require.NoError(t, os.MkdirAll(filepath.Join(root, " lead"), 0o755))
+	git(root, "mv", "ops/big.sh", " lead/big.sh")
+	found = analyzeIn(t, rule, root, " lead/big.sh", big+"echo more\n")
+	require.Len(t, found, 1, "git mv into a folder with a leading space, grown")
+	assert.Contains(t, found[0].Message, "grown from 22 KB in HEAD as ops/big.sh")
+
+	// Under a hook's index of another repository.
+	elsewhere := committedRepo(t, map[string]string{"tools/other.sh": "#!/bin/sh\n"})
+	root = committedRepo(t, map[string]string{"ops/big.sh": big, "AAA.sh": other, "README": "scripts\n"})
+	gitMove(root)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(elsewhere, ".git", "index"))
+	found = analyzeIn(t, rule, root, "deploy/big.sh", big+"echo more\n")
+	require.Len(t, found, 1, "git mv, grown, under another index")
+	assert.Contains(t, found[0].Message, "grown from 22 KB in HEAD as ops/big.sh")
 }
 
 // A committed link to a large script is not reported: git keeps the link's
