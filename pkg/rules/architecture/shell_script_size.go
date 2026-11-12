@@ -79,8 +79,11 @@ func (r *ShellScriptSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	if info, err := os.Lstat(ctx.Path); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return nil
 	}
-	headSize, _ := committedSize(ctx.Path)
-	if size <= headSize { // an untracked script has headSize 0
+	headSize, tracked := committedSize(ctx.Path)
+	if !tracked {
+		headSize = -1
+	}
+	if size <= headSize {
 		return nil
 	}
 	v := r.CreateViolation(ctx.RelPath, 1, sizeMessage(size, r.maxBytes, headSize))
@@ -88,7 +91,7 @@ func (r *ShellScriptSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	return []*core.Violation{v}
 }
 
-// sizeMessage tells the size against the limit and against HEAD, headSize 0
+// sizeMessage tells the size against the limit and against HEAD, headSize -1
 // for a new script. A number that rounds to the same text as the one it is
 // compared with is given in bytes, both of them.
 func sizeMessage(size, limit, headSize int) string {
@@ -97,7 +100,7 @@ func sizeMessage(size, limit, headSize int) string {
 		sizeShown, limitShown = byteText(size), byteText(limit)
 	}
 	growth := "a new shell script"
-	if headSize > 0 {
+	if headSize >= 0 {
 		headShown := sizeText(headSize)
 		if headShown == sizeText(size) {
 			sizeShown, headShown = byteText(size), byteText(headSize)
@@ -112,7 +115,7 @@ func sizeMessage(size, limit, headSize int) string {
 // without commits, or absent from HEAD is untracked, as is any path when git
 // is missing: it counts as a new script.
 func committedSize(path string) (int, bool) {
-	cmd := exec.Command("git", "-C", filepath.Dir(path), "cat-file", "-s", "HEAD:./"+filepath.Base(path))
+	cmd := exec.Command("git", "--no-replace-objects", "-C", filepath.Dir(path), "cat-file", "-s", "HEAD:./"+filepath.Base(path))
 	cmd.Env = repositoryNeutralEnv(os.Environ())
 	out, err := cmd.Output()
 	if err != nil {

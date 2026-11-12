@@ -130,6 +130,29 @@ func TestShellScriptSizeRuleRatchet(t *testing.T) {
 	}
 }
 
+// HEAD is read as committed: a replace ref in the repository does not stand
+// in for the script, and a script committed empty that grew is not new.
+func TestShellScriptSizeRuleReadsTheCommittedBlob(t *testing.T) {
+	limit := defaultShellScriptMaxBytes
+	root := committedRepo(t, map[string]string{"ops/big.sh": shellOfSize(limit + 2048), "ops/empty.sh": ""})
+	git := func(args ...string) string {
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd.Env = repositoryNeutralEnv(os.Environ())
+		out, err := cmd.Output()
+		require.NoError(t, err)
+		return strings.TrimSpace(string(out))
+	}
+	small := filepath.Join(t.TempDir(), "small")
+	require.NoError(t, os.WriteFile(small, []byte("#!/bin/sh\n"), 0o644))
+	git("replace", git("rev-parse", "HEAD:ops/big.sh"), git("hash-object", "-w", small))
+
+	rule := NewShellScriptSizeRule()
+	assert.Empty(t, analyzeIn(t, rule, root, "ops/big.sh", shellOfSize(limit+2048)))
+	found := analyzeIn(t, rule, root, "ops/empty.sh", shellOfSize(limit+1))
+	require.Len(t, found, 1)
+	assert.Contains(t, found[0].Message, "grown from 0 bytes in HEAD")
+}
+
 // A committed link to a large script is not reported: git keeps the link's
 // target path, not the script, and the script is checked under its own name.
 func TestShellScriptSizeRuleSkipsLinks(t *testing.T) {
@@ -161,12 +184,12 @@ func TestShellScriptSizeRuleMessageTellsSizesApart(t *testing.T) {
 		limit, head, size int
 		want              string
 	}{
-		{20000, 0, 20001, "Shell script of 20001 bytes, over the 20000 bytes limit for shell: a new shell script"},
-		{1100, 0, 1101, "Shell script of 1101 bytes, over the 1100 bytes limit for shell: a new shell script"},
+		{20000, -1, 20001, "Shell script of 20001 bytes, over the 20000 bytes limit for shell: a new shell script"},
+		{1100, -1, 1101, "Shell script of 1101 bytes, over the 1100 bytes limit for shell: a new shell script"},
 		{defaultShellScriptMaxBytes, 22600, 22601, "Shell script of 22601 bytes, over the 20 KB limit for shell: grown from 22600 bytes in HEAD"},
 		{defaultShellScriptMaxBytes, 20000, 23000, "Shell script of 22.5 KB, over the 20 KB limit for shell: grown from 19.6 KB in HEAD"},
-		{1000, 0, 1024, "Shell script of 1 KB, over the 1000 bytes limit for shell: a new shell script"},
-		{1000, 0, 1023, "Shell script of 1023 bytes, over the 1000 bytes limit for shell: a new shell script"},
+		{1000, -1, 1024, "Shell script of 1 KB, over the 1000 bytes limit for shell: a new shell script"},
+		{1000, -1, 1023, "Shell script of 1023 bytes, over the 1000 bytes limit for shell: a new shell script"},
 	}
 	for _, c := range cases {
 		assert.Equal(t, c.want, sizeMessage(c.size, c.limit, c.head), "%+v", c)
