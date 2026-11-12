@@ -41,13 +41,14 @@ const maxProjectCacheVariants = 8
 // build, the configuration, where the Go syntax trees came from and the
 // tolerance flag. Each stamp has an independent cache file.
 type resultCache struct {
-	path             string
-	root             string
-	dir              string
-	build            string
-	stamp            string
-	keyDescription   string
-	ruleFingerprints map[string]string
+	path              string
+	root              string
+	dir               string
+	build             string
+	stamp             string
+	configFingerprint string
+	keyDescription    string
+	ruleFingerprints  map[string]string
 	// previous is what the last run stored, by path relative to the root.
 	previous map[string]cacheEntry
 	loaded   bool
@@ -174,6 +175,13 @@ func newRootCache(root, seed string, cfg *core.Config, goTreesFromLoader bool) (
 	if err == nil {
 		cache.ruleFingerprints = key.packages
 		cache.keyDescription = key.description
+		analysis := cacheAnalysisConfig(cfg)
+		config, marshalErr := yaml.Marshal(&analysis)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("serialize configuration for project results: %w", marshalErr)
+		}
+		sum := sha256.Sum256(config)
+		cache.configFingerprint = hex.EncodeToString(sum[:])
 	}
 	return cache, err
 }
@@ -1172,14 +1180,20 @@ func resultCacheDir() (string, error) {
 	return filepath.Join(base, "glint", "results"), nil
 }
 
+// cacheAnalysisConfig is the part of cfg that analysis depends on: report
+// filtering, thresholds and format apply after analysis, so a gate run and a
+// json run share one cache.
+func cacheAnalysisConfig(cfg *core.Config) core.Config {
+	analysis := *cfg
+	analysis.Settings.MinSeverity, analysis.Settings.FailOn, analysis.Settings.Output = "", "", ""
+	return analysis
+}
+
 // cacheStamp identifies everything besides the file that a file-local finding
 // depends on. Go trees parsed by the project loader skip object resolution,
 // trees parsed by the walker do not, so their origin is part of it.
 func cacheStamp(cfg *core.Config, goTreesFromLoader, tolerant bool, coreFingerprint string) (string, error) {
-	// The severity filter, the failure threshold and the output format apply
-	// to the findings after analysis, so they stay out of the stamp.
-	analysis := *cfg
-	analysis.Settings.MinSeverity, analysis.Settings.FailOn, analysis.Settings.Output = "", "", ""
+	analysis := cacheAnalysisConfig(cfg)
 	config, err := yaml.Marshal(&analysis)
 	if err != nil {
 		return "", fmt.Errorf("serialize configuration for the result cache: %w", err)
@@ -1194,10 +1208,15 @@ func (c *resultCache) fingerprint(rule rules.Rule) string {
 	for t != nil && t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
+	fingerprint := c.build
 	if t != nil && c.ruleFingerprints[t.PkgPath()] != "" {
-		return c.ruleFingerprints[t.PkgPath()]
+		fingerprint = c.ruleFingerprints[t.PkgPath()]
 	}
-	return c.build
+	if c.configFingerprint != "" {
+		sum := sha256.Sum256([]byte(fingerprint + "\x00" + c.configFingerprint))
+		return hex.EncodeToString(sum[:])
+	}
+	return fingerprint
 }
 
 func (c *resultCache) fingerprints(list []rules.Rule) map[string]string {

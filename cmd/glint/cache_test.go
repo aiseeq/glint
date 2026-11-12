@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -115,6 +116,18 @@ func newIndexedFindingRuleWithValue(value string) *indexedFindingRule {
 	rule := newIndexedFindingRule()
 	rule.value = value
 	return rule
+}
+
+func TestRootProjectRuleCacheFingerprintIncludesConfig(t *testing.T) {
+	root := []*core.FileContext{goContext(t, "a.go", "package a\n")}
+	rule := newIndexedFindingRule()
+	first := &resultCache{build: "build", root: "/project", rootRuleFindings: make(map[string]map[string][]core.Violation), subsetPrevious: make(map[string]rootSubsetEntry)}
+	first.configFingerprint = "config-one"
+	first.keyRootFiles(root, map[string][sha256.Size]byte{"a.go": sha256.Sum256(root[0].Content)}, []rules.Rule{rule})
+	second := &resultCache{build: "build", root: "/project", rootRuleFindings: make(map[string]map[string][]core.Violation), subsetPrevious: make(map[string]rootSubsetEntry)}
+	second.configFingerprint = "config-two"
+	second.keyRootFiles(root, map[string][sha256.Size]byte{"a.go": sha256.Sum256(root[0].Content)}, []rules.Rule{rule})
+	assert.NotEqual(t, first.rootRuleFingerprints[rule.Name()], second.rootRuleFingerprints[rule.Name()])
 }
 
 func TestProjectFileRuleFindingsAreReusedForUnchangedRoot(t *testing.T) {
