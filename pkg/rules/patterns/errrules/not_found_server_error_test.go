@@ -415,6 +415,20 @@ func TestNotFoundAnsweredAsServerErrorGuardedReturnAfterMutation(t *testing.T) {
 		wantUnreachable bool
 	}{
 		{
+			// The guard drops the sentinel only from its own return: when the
+			// later branch is skipped, err still holds it at the final return.
+			name: "sentinel survives to a later return",
+			body: `	value, err := s.store.Report(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
+		return "", err
+	}
+	if id == "x" {
+		err = s.store.Other(ctx, id)
+	}
+	return value, err`,
+			wantNotFound: true,
+		},
+		{
 			name: "direct reassignment",
 			body: `	value, err := s.store.Report(ctx, id)
 	if err != nil && !errors.Is(err, store.ErrRecordNotFound) {
