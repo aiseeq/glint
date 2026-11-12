@@ -338,24 +338,40 @@ func walk(m protoreflect.Message, visit func(proto.Message)) {
 }
 
 // eachChild calls visit for every message held in a set field of m, in the
-// order the fields are declared. Message.Range is not used: protobuf-go swaps
-// two neighbouring fields of its order by a hash of the executable, so the
-// order of what a walk finds would change from one build to another.
+// order the fields are declared. Range visits only populated fields, but its
+// order can vary between builds, so sort those fields before visiting them.
 func eachChild(m protoreflect.Message, visit func(field protoreflect.FieldDescriptor, child protoreflect.Message)) {
-	fields := m.Descriptor().Fields()
-	for i := range fields.Len() {
-		field := fields.Get(i)
-		if field.Message() == nil || field.IsMap() || !m.Has(field) {
-			continue
+	type presentField struct {
+		field protoreflect.FieldDescriptor
+		value protoreflect.Value
+	}
+	var storage [8]presentField
+	fields := storage[:0]
+	m.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		if field.Message() == nil || field.IsMap() {
+			return true
 		}
+		// Insertion sort: nodes hold few set fields; it orders
+		// by declaration rather than by protobuf's unstable iteration order.
+		i := len(fields)
+		fields = append(fields, presentField{})
+		for i > 0 && fields[i-1].field.Index() > field.Index() {
+			fields[i] = fields[i-1]
+			i--
+		}
+		fields[i] = presentField{field, value}
+		return true
+	})
+	for _, item := range fields {
+		field, value := item.field, item.value
 		if field.IsList() {
-			list := m.Get(field).List()
+			list := value.List()
 			for j := range list.Len() {
 				visit(field, list.Get(j).Message())
 			}
 			continue
 		}
-		visit(field, m.Get(field).Message())
+		visit(field, value.Message())
 	}
 }
 
