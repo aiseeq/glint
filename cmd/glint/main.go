@@ -1712,7 +1712,9 @@ func keyRootFileCache(cache *resultCache, rootFiles []*core.FileContext, enabled
 func nonGoProjectRules(enabledRules []rules.Rule) []rules.Rule {
 	fileRules := make([]rules.Rule, 0, len(enabledRules))
 	for _, rule := range enabledRules {
-		if _, ok := rule.(rules.GoProjectRule); !ok {
+		_, project := rule.(rules.GoProjectRule)
+		_, otherFiles := rule.(rules.NonGoFilesRule)
+		if !project || otherFiles {
 			fileRules = append(fileRules, rule)
 		}
 	}

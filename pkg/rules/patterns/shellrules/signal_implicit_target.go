@@ -32,11 +32,10 @@ func newSignalImplicitTargetRule() *signalImplicitTargetRule {
 	return &signalImplicitTargetRule{rules.NewBaseRule("signal-implicit-target", "patterns", "Detects a terminating signal sent to the parent, every process or the caller's process group", core.SeverityHigh)}
 }
 
+// AnalyzeFile reads shell scripts and Makefiles; Go files are read by
+// AnalyzeGoProject.
 func (r *signalImplicitTargetRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if ctx.GoAST != nil {
-		return r.goFile(ctx, ctx.GoTypesInfo)
-	}
-	if !strings.Contains(string(ctx.Content), "kill") {
+	if ctx.GoAST != nil || !strings.Contains(string(ctx.Content), "kill") {
 		return nil
 	}
 	src, ok := patternkit.ReadShell(ctx)
@@ -46,9 +45,15 @@ func (r *signalImplicitTargetRule) AnalyzeFile(ctx *core.FileContext) []*core.Vi
 	return r.shell(ctx, src)
 }
 
-func (r *signalImplicitTargetRule) RequiresSSA() bool                              { return false }
-func (r *signalImplicitTargetRule) NeedsTypedGoProject(_ []*core.FileContext) bool { return true }
-func (r *signalImplicitTargetRule) TypedGoProjectImports() []string                { return nil }
+func (r *signalImplicitTargetRule) RequiresSSA() bool { return false }
+
+// ReadsNonGoFiles: shell scripts and Makefiles go through AnalyzeFile, cached
+// by the file.
+func (r *signalImplicitTargetRule) ReadsNonGoFiles() {}
+
+func (r *signalImplicitTargetRule) AnalyzeGoProject(project *core.GoProjectContext) ([]*core.Violation, error) {
+	return analyzeSignalProject(project, r.goFile)
+}
 
 // ReportsOn reports whether signalImplicitTargetRule can report on this file:
 // Go (tests too: their scripts run), shell scripts and Makefiles.
@@ -363,40 +368,24 @@ func terminatingShellSignal(sig string) bool {
 
 func unquote(s string) string { return strings.Trim(s, `"'`) }
 
-func (r *signalImplicitTargetRule) goFile(f *core.FileContext, info *types.Info) []*core.Violation {
-	if f.GoAST == nil || !strings.Contains(string(f.Content), "Kill") && !strings.Contains(string(f.Content), "Getppid") && !strings.Contains(string(f.Content), "kill") {
+func (r *signalImplicitTargetRule) goFile(f *core.FileContext, pkg *signalPackage) []*core.Violation {
+	if f.GoAST == nil {
 		return nil
 	}
-	out := goSignalFindings(r, f, info)
-	return append(out, goStringFindings(r, f, info)...)
-}
-
-func goSignalFindings(r *signalImplicitTargetRule, f *core.FileContext, info *types.Info) []*core.Violation {
 	var out []*core.Violation
-	for _, decl := range f.GoAST.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
+	for _, site := range fileSignalSites(f, pkg) {
+		if site.implicitTarget() {
+			out = append(out, signalViolation(r, f, site.node))
 		}
-		out = append(out, goFunctionSignalFindings(r, f, info, fn)...)
 	}
-	return out
-}
-
-func goFunctionSignalFindings(r *signalImplicitTargetRule, f *core.FileContext, info *types.Info, fn *ast.FuncDecl) []*core.Violation {
-	pids, handles := parentAliases(fn.Body, info)
-	var out []*core.Violation
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		c, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if isParentSignal(c, info, pids, handles) {
-			out = append(out, signalViolation(r, f, c))
-		}
-		return true
-	})
-	return out
+	if !strings.Contains(string(f.Content), "kill") {
+		return out
+	}
+	var info *types.Info
+	if pkg != nil {
+		info = pkg.info
+	}
+	return append(out, goStringFindings(r, f, info)...)
 }
 
 func goStringFindings(r *signalImplicitTargetRule, f *core.FileContext, info *types.Info) []*core.Violation {
@@ -543,8 +532,10 @@ func isSubtest(call *ast.CallExpr, info *types.Info) bool {
 	if !ok || sel.Sel.Name != "Run" || len(call.Args) == 0 {
 		return false
 	}
+	// A receiver typed only partially (a test file on an unloaded import) is
+	// known by its name.
 	if info != nil {
-		if t := info.TypeOf(sel.X); t != nil {
+		if t := info.TypeOf(sel.X); t != nil && t != types.Typ[types.Invalid] {
 			return testingReceiver(t)
 		}
 	}
@@ -602,62 +593,6 @@ func testingReceiver(t types.Type) bool {
 		(named.Obj().Name() == "T" || named.Obj().Name() == "B" || named.Obj().Name() == "TB")
 }
 
-func parentAliases(body *ast.BlockStmt, info *types.Info) (map[types.Object]bool, map[types.Object]bool) {
-	pids, handles := map[types.Object]bool{}, map[types.Object]bool{}
-	ast.Inspect(body, func(n ast.Node) bool {
-		a, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-		for i, e := range a.Rhs {
-			if i >= len(a.Lhs) {
-				break
-			}
-			id, ok := a.Lhs[i].(*ast.Ident)
-			if !ok {
-				continue
-			}
-			obj := infoObject(info, id)
-			if isGetppid(e, info) || pidsFrom(e, info, pids) {
-				pids[obj] = true
-			}
-			if findProcessParent(e, info) {
-				handles[obj] = true
-			}
-		}
-		return true
-	})
-	return pids, handles
-}
-
-func isParentSignal(c *ast.CallExpr, info *types.Info, pids, handles map[types.Object]bool) bool {
-	sel, _ := ast.Unparen(c.Fun).(*ast.SelectorExpr)
-	if sel == nil {
-		return false
-	}
-	if sel.Sel.Name == "Kill" || sel.Sel.Name == "Signal" {
-		if id, ok := ast.Unparen(sel.X).(*ast.Ident); ok && handles[infoObject(info, id)] {
-			return sel.Sel.Name == "Kill" || len(c.Args) > 0 && !harmlessSignal(c.Args[0], info)
-		}
-	}
-	if sel.Sel.Name != "Kill" || info == nil || len(c.Args) < 2 {
-		return false
-	}
-	pkg, ok := ast.Unparen(sel.X).(*ast.Ident)
-	if !ok {
-		return false
-	}
-	pn, ok := info.Uses[pkg].(*types.PkgName)
-	if !ok {
-		return false
-	}
-	path := pn.Imported().Path()
-	if path != "syscall" && path != "golang.org/x/sys/unix" {
-		return false
-	}
-	return (isTarget(c.Args[0], info, pids) || isZeroInt(c.Args[0], info)) && !harmlessSignal(c.Args[1], info)
-}
-
 func signalViolation(r *signalImplicitTargetRule, f *core.FileContext, n ast.Node) *core.Violation {
 	return signalViolationAt(r, f, f.LineFor(n))
 }
@@ -678,42 +613,17 @@ func infoObject(i *types.Info, id *ast.Ident) types.Object {
 	}
 	return i.ObjectOf(id)
 }
-func isGetppid(e ast.Expr, i *types.Info) bool {
-	c, ok := ast.Unparen(e).(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	s, ok := ast.Unparen(c.Fun).(*ast.SelectorExpr)
-	if !ok || s.Sel.Name != "Getppid" {
-		return false
-	}
-	id, ok := ast.Unparen(s.X).(*ast.Ident)
-	if !ok || i == nil {
-		return false
-	}
-	p, ok := i.Uses[id].(*types.PkgName)
-	return ok && p.Imported().Path() == "os"
-}
 func pidsFrom(e ast.Expr, i *types.Info, p map[types.Object]bool) bool {
 	id, ok := ast.Unparen(e).(*ast.Ident)
 	return ok && p[infoObject(i, id)]
 }
-func findProcessParent(e ast.Expr, i *types.Info) bool {
-	c, ok := ast.Unparen(e).(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	s, ok := ast.Unparen(c.Fun).(*ast.SelectorExpr)
-	return ok && s.Sel.Name == "FindProcess" && len(c.Args) > 0 && isGetppid(c.Args[0], i)
-}
 func isTarget(e ast.Expr, i *types.Info, p map[types.Object]bool) bool {
-	if isGetppid(e, i) || pidsFrom(e, i, p) {
+	if isParentProcessID(e, i) || pidsFrom(e, i, p) {
 		return true
 	}
 	u, ok := ast.Unparen(e).(*ast.UnaryExpr)
-	return ok && u.Op == token.SUB && isOne(u.X, i)
+	return ok && u.Op == token.SUB && strings.HasPrefix(iValue(e, i), "-")
 }
-func isOne(e ast.Expr, i *types.Info) bool     { v := iValue(e, i); return v == "1" }
 func isZeroInt(e ast.Expr, i *types.Info) bool { return iValue(e, i) == "0" }
 
 // harmlessSignal reports a signal value that ends no process by default.

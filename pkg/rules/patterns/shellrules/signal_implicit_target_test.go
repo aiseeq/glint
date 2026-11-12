@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -216,7 +217,7 @@ func stop() { _ = syscall.Kill(Getppid(), syscall.SIGTERM) }
 	require.NoError(t, err)
 	file := core.NewFileContext("other.go", ".", []byte(source), nil)
 	file.GoAST, file.GoFileSet, file.GoTypesInfo = parsed, fset, info
-	assert.Empty(t, newSignalImplicitTargetRule().goFile(file, info))
+	assert.Empty(t, newSignalImplicitTargetRule().goFile(file, newSignalPackage("", info, parsed)))
 }
 
 func TestSignalImplicitTargetGoExecutedHeredocIsNotScriptData(t *testing.T) {
@@ -307,7 +308,8 @@ func stop(ctx context.Context) {
 }
 
 func TestSignalImplicitTargetAlwaysKeepsShellRoots(t *testing.T) {
-	assert.True(t, newSignalImplicitTargetRule().NeedsTypedGoProject(nil))
+	_, ok := any(newSignalImplicitTargetRule()).(rules.GoProjectRule)
+	assert.True(t, ok)
 }
 
 func TestSignalImplicitTargetTypedPackageCallsAndProcessHandles(t *testing.T) {
@@ -336,9 +338,29 @@ func send() {
 	require.NoError(t, err)
 	file := core.NewFileContext("typed.go", ".", []byte(source), nil)
 	file.GoAST, file.GoFileSet, file.GoTypesInfo = parsed, fset, info
-	violations := newSignalImplicitTargetRule().goFile(file, info)
+	violations := newSignalImplicitTargetRule().goFile(file, newSignalPackage("", info, parsed))
 	assert.Equal(t, []int{9, 11, 13, 14}, rulestest.ViolationLines(violations))
 	assert.Contains(t, violations[0].Suggestion, "cmd.Process")
+}
+
+func TestSignalImplicitTargetTgkillSecondTargetAndPackageLiteral(t *testing.T) {
+	source := `package sample
+import (
+	"os"
+	"syscall"
+)
+func send(pid, tid int) {
+	_ = syscall.Tgkill(pid, 0, syscall.SIGTERM) // want
+	_ = syscall.Tgkill(os.Getppid(), tid, syscall.SIGTERM) // want
+	_ = syscall.Tgkill(os.Getpid(), 0, syscall.SIGTERM) // want
+}
+var sendGroup = func() {
+	_ = syscall.Tgkill(0, 21, syscall.SIGTERM) // want
+}
+`
+	file, pkg := rawProcessTypedFile(t, "tgkill.go", "example.com/sample", source)
+	findings := newSignalImplicitTargetRule().goFile(file, pkg)
+	assert.Equal(t, []int{7, 8, 9, 12}, rulestest.ViolationLines(findings))
 }
 
 func TestSignalImplicitTargetSkipsTypedCallsWithoutTypes(t *testing.T) {
@@ -354,7 +376,7 @@ func TestSignalImplicitTargetSkipsTypedCallsWithoutTypes(t *testing.T) {
 type signalTestImporter struct{ base types.Importer }
 
 func (i signalTestImporter) Import(path string) (*types.Package, error) {
-	if path != "golang.org/x/sys/unix" && path != "example.com/other" {
+	if path != "golang.org/x/sys/unix" && path != "example.com/other" && path != "github.com/aiseeq/akit/proc" {
 		return i.base.Import(path)
 	}
 	syscall, err := i.base.Import("syscall")
@@ -362,15 +384,30 @@ func (i signalTestImporter) Import(path string) (*types.Package, error) {
 		return nil, err
 	}
 	pkg := types.NewPackage(path, filepath.Base(path))
+	if path == "github.com/aiseeq/akit/proc" {
+		params := types.NewTuple(
+			types.NewVar(token.NoPos, pkg, "pid", types.Typ[types.Int]),
+			types.NewVar(token.NoPos, pkg, "grace", types.Typ[types.Int]),
+			types.NewVar(token.NoPos, pkg, "request", types.NewSignatureType(nil, nil, nil, nil, nil, false)),
+		)
+		fn := types.NewSignatureType(nil, nil, nil, params, nil, false)
+		pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "StopChild", fn))
+		pkg.MarkComplete()
+		return pkg, nil
+	}
+	pid := types.NewSignatureType(nil, nil, nil, nil, types.NewTuple(types.NewVar(token.NoPos, pkg, "", types.Typ[types.Int])), false)
 	if path == "example.com/other" {
-		getppid := types.NewSignatureType(nil, nil, nil, nil, types.NewTuple(types.NewVar(token.NoPos, pkg, "", types.Typ[types.Int])), false)
-		pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "Getppid", getppid))
+		pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "Getppid", pid))
+	} else {
+		pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "Getpid", pid))
 	}
 	signal := syscall.Scope().Lookup("Signal").Type()
 	pkg.Scope().Insert(types.NewConst(token.NoPos, pkg, "SIGTERM", signal, constant.MakeInt64(15)))
 	params := types.NewTuple(types.NewVar(token.NoPos, pkg, "pid", types.Typ[types.Int]), types.NewVar(token.NoPos, pkg, "sig", signal))
 	results := types.NewTuple(types.NewVar(token.NoPos, pkg, "", types.Universe.Lookup("error").Type()))
 	pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "Kill", types.NewSignatureType(nil, nil, nil, params, results, false)))
+	tgkillParams := types.NewTuple(types.NewVar(token.NoPos, pkg, "tgid", types.Typ[types.Int]), types.NewVar(token.NoPos, pkg, "tid", types.Typ[types.Int]), types.NewVar(token.NoPos, pkg, "sig", signal))
+	pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "Tgkill", types.NewSignatureType(nil, nil, nil, tgkillParams, results, false)))
 	pkg.MarkComplete()
 	return pkg, nil
 }
@@ -545,6 +582,9 @@ func typed(t *testing.T, x runner) {
   _ = p.Signal(syscall.SIGCONT)
   _ = p.Signal(syscall.SIGTSTP) // want
 }
+func named(t runner) {
+  t.Run("a; kill 0", func() {}) // want
+}
 `
 	fset := token.NewFileSet()
 	parsed, err := parser.ParseFile(fset, "typed.go", source, parser.AllErrors)
@@ -554,7 +594,27 @@ func typed(t *testing.T, x runner) {
 	require.NoError(t, err)
 	file := core.NewFileContext("typed.go", ".", []byte(source), nil)
 	file.GoAST, file.GoFileSet, file.GoTypesInfo = parsed, fset, info
-	got := rulestest.ViolationLines(newSignalImplicitTargetRule().goFile(file, info))
+	got := rulestest.ViolationLines(newSignalImplicitTargetRule().goFile(file, newSignalPackage("", info, parsed)))
 	slices.Sort(got)
-	assert.Equal(t, []int{14, 16, 21, 26, 27, 30}, got)
+	assert.Equal(t, []int{14, 16, 21, 26, 27, 30, 33}, got)
+}
+
+// A test file typed partially: the receiver of a package that did not load
+// is known by its name.
+func TestSignalImplicitTargetSubtestOfUnloadedReceiver(t *testing.T) {
+	source := `package sample
+import "example.com/missing"
+func check(t missing.T) {
+  t.Run("a; kill 0", nil)
+}
+`
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, "partial_test.go", source, parser.AllErrors)
+	require.NoError(t, err)
+	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue), Defs: make(map[*ast.Ident]types.Object), Uses: make(map[*ast.Ident]types.Object)}
+	_, err = (&types.Config{Importer: importer.Default(), Error: func(error) {}}).Check("example.com/sample", fset, []*ast.File{parsed}, info)
+	require.Error(t, err)
+	file := core.NewFileContext("partial_test.go", ".", []byte(source), nil)
+	file.GoAST, file.GoFileSet, file.GoTypesInfo = parsed, fset, info
+	assert.Empty(t, newSignalImplicitTargetRule().goFile(file, newSignalPackage("", info, parsed)))
 }

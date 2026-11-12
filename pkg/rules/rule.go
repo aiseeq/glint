@@ -32,6 +32,15 @@ type GoProjectRule interface {
 	RequiresSSA() bool
 }
 
+// NonGoFilesRule is a GoProjectRule that also reads files other than Go
+// (shell scripts, Makefiles) in AnalyzeFile: the check flow runs it on every
+// file like a file rule, its findings cached by the file, and AnalyzeFile
+// leaves Go files to AnalyzeGoProject.
+type NonGoFilesRule interface {
+	GoProjectRule
+	ReadsNonGoFiles()
+}
+
 // FindingFileRule declares which file contexts a project rule can report on.
 // Rules without this declaration are assumed to support every file kind.
 type FindingFileRule interface {
@@ -403,9 +412,11 @@ func ReadsExcludedInstructions(r Rule) bool {
 // file — its path and content — and the configuration, so that they can be
 // reused while the file is unchanged. Project rules see the whole module,
 // stateful rules the files analyzed before, and rules that read other files
-// the disk; none of them is file-local.
+// the disk; none of them is file-local. AnalyzeFile of a NonGoFilesRule reads
+// its file alone.
 func FileLocal(r Rule) bool {
-	if _, ok := r.(GoProjectRule); ok {
+	_, otherFiles := r.(NonGoFilesRule)
+	if _, ok := r.(GoProjectRule); ok && !otherFiles {
 		return false
 	}
 	if _, ok := r.(StatefulRule); ok {

@@ -328,6 +328,65 @@ import "os/exec"
 func stop() error { return exec.Command("sh", "-c", "kill -9 $PPID").Run() } // WANT
 `
 
+type countedScriptRule struct {
+	rules.NonGoFilesRule
+	scriptReads int
+}
+
+func (r *countedScriptRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	if ctx.IsShellFile() {
+		r.scriptReads++
+	}
+	return r.NonGoFilesRule.AnalyzeFile(ctx)
+}
+
+// A script of a Go root is read file by file and cached by the file: a line
+// added to it shows on the next cached run, though no Go input of the project
+// cache changed, and an unchanged script is not read again.
+func TestSignalImplicitTargetCachedScriptEdit(t *testing.T) {
+	withFlags(t, "", "signal-implicit-target")
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
+	root := t.TempDir()
+	write := func(name, content string) {
+		path := filepath.Join(root, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	}
+	write("go.mod", "module example.com/check\n\ngo 1.24\n")
+	write("main.go", "package main\n\nfunc main() {}\n")
+	write("scripts/stop.sh", "#!/bin/bash\nkill 0\n")
+	run := func() ([]string, int) {
+		roots, err := analysisRoots([]string{root})
+		require.NoError(t, err)
+		require.Len(t, roots, 1)
+		cfg, enabled, err := loadConfig(root)
+		require.NoError(t, err)
+		require.Len(t, enabled, 1)
+		rule := &countedScriptRule{NonGoFilesRule: enabled[0].(rules.NonGoFilesRule)}
+		enabled = []rules.Rule{rule}
+		prepared, err := prepareScopedAnalysis(core.NewGoProjectLoader(), roots[0], cfg, enabled, true)
+		require.NoError(t, err)
+		require.NotNil(t, prepared.cache)
+		violations, panics, err := analyzePrepared(prepared, enabled, cfg)
+		require.NoError(t, err)
+		require.Empty(t, panics)
+		require.NoError(t, prepared.cache.save())
+		found := foundAt(violations)
+		slices.Sort(found)
+		return found, rule.scriptReads
+	}
+	found, reads := run()
+	assert.Equal(t, []string{"scripts/stop.sh:2"}, found)
+	assert.Equal(t, 1, reads)
+	found, reads = run()
+	assert.Equal(t, []string{"scripts/stop.sh:2"}, found)
+	assert.Equal(t, 0, reads, "an unchanged script comes from the cache")
+	write("scripts/stop.sh", "#!/bin/bash\nkill 0\nkill -TERM -1\n")
+	found, reads = run()
+	assert.Equal(t, []string{"scripts/stop.sh:2", "scripts/stop.sh:3"}, found)
+	assert.Equal(t, 1, reads)
+}
+
 // The rule reads shell too, so a root is not dropped for having no Go file
 // that mentions a signal.
 func TestSignalImplicitTargetRootsWithoutGoSignals(t *testing.T) {
