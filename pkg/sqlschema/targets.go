@@ -128,6 +128,12 @@ func markNotNull(qual *pgquery.Node, sources []targetSource) {
 			operands = append(operands, expr.GetLexpr(), expr.GetRexpr())
 		}
 	}
+	if call := qual.GetFuncCall(); call != nil && len(call.GetArgs()) > 0 {
+		name := call.GetFuncname()
+		if len(name) > 0 && strings.EqualFold(name[len(name)-1].GetString_().GetSval(), "starts_with") {
+			operands = append(operands, call.GetArgs()[0])
+		}
+	}
 	for _, operand := range operands {
 		for operand.GetTypeCast() != nil {
 			operand = operand.GetTypeCast().GetArg()

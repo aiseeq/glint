@@ -15,6 +15,7 @@ CREATE TABLE requests (
     account_id UUID NOT NULL,
     from_addr TEXT,
     to_addr TEXT,
+    notes TEXT,
     memo TEXT DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -100,6 +101,70 @@ func Email(ctx context.Context, db DB, id string) (string, error) {
 	var email string
 	err := db.QueryRowContext(ctx, "SELECT email FROM accounts WHERE id = $1", id).Scan(&email)
 	return email, err
+}
+
+type Leg struct {
+	Note string ` + "`db:\"note\"`" + `
+}
+
+func ReadLeg(ctx context.Context, db DB, owner, prefix string) (Leg, error) {
+	var leg Leg
+	err := db.GetContext(ctx, &leg, ` + "`SELECT p.notes AS note FROM requests p WHERE p.account_id = $1 AND starts_with(p.notes, $2)`" + `, owner, prefix)
+	return leg, err
+}
+
+func ReadLegWithCustomPredicate(ctx context.Context, db DB, prefix string) (Leg, error) {
+	var leg Leg
+	err := db.GetContext(ctx, &leg, ` + "`SELECT p.notes AS note FROM requests p WHERE is_blank(p.notes, $1)`" + `, prefix) // want sql-scan-nullable-into-value
+	return leg, err
+}
+
+func ReadLegWithQualifiedStartsWith(ctx context.Context, db DB, prefix string) (Leg, error) {
+	var leg Leg
+	err := db.GetContext(ctx, &leg, ` + "`SELECT p.notes AS note FROM requests p WHERE pg_catalog.starts_with(p.notes, $1)`" + `, prefix)
+	return leg, err
+}
+
+func ReadLegILike(ctx context.Context, db DB, pattern string) (Leg, error) {
+	var leg Leg
+	err := db.GetContext(ctx, &leg, ` + "`SELECT p.notes AS note FROM requests p WHERE p.notes ILIKE $1`" + `, pattern)
+	return leg, err
+}
+
+func ReadLegWithoutFilter(ctx context.Context, db DB) (Leg, error) {
+	var leg Leg
+	err := db.GetContext(ctx, &leg, "SELECT p.notes AS note FROM requests p") // want sql-scan-nullable-into-value
+	return leg, err
+}
+
+func ReadLegWithNullAlternative(ctx context.Context, db DB, prefix string) (Leg, error) {
+	var leg Leg
+	err := db.GetContext(ctx, &leg, ` + "`SELECT p.notes AS note FROM requests p WHERE p.notes IS NULL OR starts_with(p.notes, $1)`" + `, prefix) // want sql-scan-nullable-into-value
+	return leg, err
+}
+
+func ReadLegLike(ctx context.Context, db DB, pattern string) (Leg, error) {
+	var leg Leg
+	err := db.GetContext(ctx, &leg, ` + "`SELECT p.notes AS note FROM requests p WHERE p.notes LIKE $1`" + `, pattern)
+	return leg, err
+}
+
+func ReadLegEqual(ctx context.Context, db DB, note string) (Leg, error) {
+	var leg Leg
+	err := db.GetContext(ctx, &leg, ` + "`SELECT p.notes AS note FROM requests p WHERE p.notes = $1`" + `, note)
+	return leg, err
+}
+
+func ReadLegIn(ctx context.Context, db DB, notes []string) (Leg, error) {
+	var leg Leg
+	err := db.GetContext(ctx, &leg, ` + "`SELECT p.notes AS note FROM requests p WHERE p.notes IN ($1)`" + `, notes)
+	return leg, err
+}
+
+func ReadLegNotNull(ctx context.Context, db DB) (Leg, error) {
+	var leg Leg
+	err := db.GetContext(ctx, &leg, ` + "`SELECT p.notes AS note FROM requests p WHERE p.notes IS NOT NULL`" + `)
+	return leg, err
 }
 
 func Recent(ctx context.Context, db DB, filter string) ([]*Request, error) {
