@@ -1,13 +1,145 @@
 package dbrules
 
 import (
+	"go/ast"
+	"go/types"
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestStagePrechecksFollowBoundQueryArguments(t *testing.T) {
+	statusProject := rulestest.Project(t, map[string]string{"store.go": `package sample
+import "context"
+type Repo struct{}
+func (r *Repo) exec(context.Context, string, ...any) int { return 0 }
+func (r *Repo) ConfirmPair(ctx context.Context, a, b int64) int {
+	return r.exec(ctx, "UPDATE transfers SET status = 'CONFIRMED', confirmed_at = NOW() WHERE id = $1", a) +
+		r.exec(ctx, "UPDATE transfers SET status = 'CONFIRMED' WHERE id = $1", b)
+}
+`})
+	statusDecls, err := patternkit.FuncDeclsByObject(statusProject)
+	require.NoError(t, err)
+	status := NewStatusWriteSkipsStageTimestampRule()
+	assert.True(t, status.ProjectPrecheck(statusDecls))
+	violations, err := status.AnalyzeGoProject(statusProject)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+
+	terminalProject := rulestest.Project(t, map[string]string{"store.go": `package sample
+import (
+	"context"
+	"time"
+)
+type Repo struct{}
+type Status string
+const StatusCompleted Status = "COMPLETED"
+func (r *Repo) exec(context.Context, string, ...any) int { return 0 }
+func (r *Repo) ApplyWebhookEvent(ctx context.Context, id int64, status Status, at *time.Time) int {
+	return 0 + r.exec(ctx, "UPDATE transfers SET status = $1, completed_at = $2 WHERE id = $3", status, at, id)
+}
+`})
+	terminalDecls, err := patternkit.FuncDeclsByObject(terminalProject)
+	require.NoError(t, err)
+	terminal := NewTerminalTimestampOverwrittenRule()
+	assert.True(t, terminal.ProjectPrecheck(terminalDecls))
+	violations, err = terminal.AnalyzeGoProject(terminalProject)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+}
+
+func TestStageLiteralUpdatesUsesBareFallback(t *testing.T) {
+	updates := stageLiteralUpdates(patternkit.SqlLiteral{
+		Text: "not valid SQL",
+		Bare: "UPDATE records SET status = 'DONE'",
+	})
+	require.Len(t, updates, 1)
+	_, ok := updates[0].Assignment("status")
+	assert.True(t, ok)
+}
+
+func TestStageRulesProjectPrechecks(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{"store.go": `package sample
+func read() { _ = "SELECT 1" }
+`})
+	decls, err := patternkit.FuncDeclsByObject(project)
+	require.NoError(t, err)
+	status := NewStatusWriteSkipsStageTimestampRule()
+	terminal := NewTerminalTimestampOverwrittenRule()
+	statusAnalysisCalled, terminalAnalysisCalled := false, false
+	statusProjectAnalysis := status.ForProject
+	status.ForProject = func(decls map[*types.Func]patternkit.TypedFuncDecl) func(patternkit.FuncScope, *ast.FuncDecl) []patternkit.FuncFinding {
+		statusAnalysisCalled = true
+		return statusProjectAnalysis(decls)
+	}
+	terminalProjectAnalysis := terminal.ForProject
+	terminal.ForProject = func(decls map[*types.Func]patternkit.TypedFuncDecl) func(patternkit.FuncScope, *ast.FuncDecl) []patternkit.FuncFinding {
+		terminalAnalysisCalled = true
+		return terminalProjectAnalysis(decls)
+	}
+	assert.False(t, status.ProjectPrecheck(decls))
+	assert.False(t, terminal.ProjectPrecheck(decls))
+	violations, err := status.AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+	assert.False(t, statusAnalysisCalled, "ранний выход должен пропустить проектный индекс")
+	violations, err = terminal.AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+	assert.False(t, terminalAnalysisCalled, "ранний выход должен пропустить проектный индекс")
+
+	statusOnly := rulestest.Project(t, map[string]string{"store.go": `package sample
+import "context"
+func exec(context.Context, string) {}
+func update(ctx context.Context) { exec(ctx, "UPDATE records SET status = 'done'"); exec(ctx, "UPDATE records SET finished_at = NOW()") }
+`})
+	statusDecls, err := patternkit.FuncDeclsByObject(statusOnly)
+	require.NoError(t, err)
+	assert.True(t, status.ProjectPrecheck(statusDecls))
+	assert.True(t, terminal.ProjectPrecheck(statusDecls))
+
+	statusNotAssigned := rulestest.Project(t, map[string]string{"store.go": `package sample
+import "context"
+func exec(context.Context, string) {}
+func update(ctx context.Context) { exec(ctx, "UPDATE records SET note = 'done' WHERE status = 'done'") }
+`})
+	statusNotAssignedDecls, err := patternkit.FuncDeclsByObject(statusNotAssigned)
+	require.NoError(t, err)
+	assert.False(t, status.ProjectPrecheck(statusNotAssignedDecls))
+
+	statusWithoutTimestamp := rulestest.Project(t, map[string]string{"store.go": `package sample
+import "context"
+func exec(context.Context, string) {}
+func update(ctx context.Context) { exec(ctx, "UPDATE records SET status = 'done'") }
+`})
+	statusWithoutTimestampDecls, err := patternkit.FuncDeclsByObject(statusWithoutTimestamp)
+	require.NoError(t, err)
+	assert.True(t, status.ProjectPrecheck(statusWithoutTimestampDecls))
+	assert.False(t, terminal.ProjectPrecheck(statusWithoutTimestampDecls))
+
+	timestampPredicateOnly := rulestest.Project(t, map[string]string{"store.go": `package sample
+import "context"
+func exec(context.Context, string) {}
+func update(ctx context.Context) { exec(ctx, "UPDATE records SET status = 'done' WHERE finished_at IS NULL") }
+`})
+	predicateDecls, err := patternkit.FuncDeclsByObject(timestampPredicateOnly)
+	require.NoError(t, err)
+	assert.False(t, terminal.ProjectPrecheck(predicateDecls))
+
+	timestampOnly := rulestest.Project(t, map[string]string{"store.go": `package sample
+import "context"
+func exec(context.Context, string) {}
+func update(ctx context.Context) { exec(ctx, "UPDATE records SET finished_at = NOW()") }
+`})
+	timestampDecls, err := patternkit.FuncDeclsByObject(timestampOnly)
+	require.NoError(t, err)
+	assert.False(t, status.ProjectPrecheck(timestampDecls))
+	assert.True(t, terminal.ProjectPrecheck(timestampDecls))
+}
 
 const stageRepo = `package store
 

@@ -45,6 +45,9 @@ func NewStatusWriteSkipsStageTimestampRule() *patternkit.TypedFuncRule {
 		),
 		Suggestion: "Stamp the column wherever the status is written (CASE WHEN $n = 'COMPLETED' AND completed_at IS NULL THEN NOW() ELSE completed_at END), or select by a column every path sets",
 	}
+	rule.ProjectPrecheck = func(decls map[*types.Func]patternkit.TypedFuncDecl) bool {
+		return stageProjectHasAssignment(decls, "status")
+	}
 	rule.ForProject = func(decls map[*types.Func]patternkit.TypedFuncDecl) func(patternkit.FuncScope, *ast.FuncDecl) []patternkit.FuncFinding {
 		index := newStageIndex(decls)
 		return index.skippedStamps
@@ -73,11 +76,77 @@ func NewTerminalTimestampOverwrittenRule() *patternkit.TypedFuncRule {
 		),
 		Suggestion: "Keep a value once set: completed_at = COALESCE(completed_at, $n), or CASE WHEN completed_at IS NULL THEN $n ELSE completed_at END",
 	}
+	rule.ProjectPrecheck = func(decls map[*types.Func]patternkit.TypedFuncDecl) bool {
+		return stageProjectHasTimestampAssignment(decls)
+	}
 	rule.ForProject = func(decls map[*types.Func]patternkit.TypedFuncDecl) func(patternkit.FuncScope, *ast.FuncDecl) []patternkit.FuncFinding {
 		index := newStageIndex(decls)
 		return index.overwrittenStamps
 	}
 	return rule
+}
+
+// stageProjectHasAssignment cheaply filters SQL text before following the same
+// query-call arguments that the stage index analyzes.
+func stageProjectHasAssignment(decls map[*types.Func]patternkit.TypedFuncDecl, column string) bool {
+	statusWrite := false
+	for _, decl := range decls {
+		if decl.Decl == nil || decl.Decl.Body == nil {
+			continue
+		}
+		text := strings.ToLower(stageStringLiterals(decl.Decl.Body))
+		if !strings.Contains(text, "update") {
+			continue
+		}
+
+		if !strings.Contains(text, strings.ToLower(column)) || statusWrite {
+			continue
+		}
+		for _, write := range boundUpdates(decl) {
+			update := write.update
+			if _, ok := update.Assignment(column); ok {
+				statusWrite = true
+				break
+			}
+		}
+	}
+	return statusWrite
+}
+
+func stageProjectHasTimestampAssignment(decls map[*types.Func]patternkit.TypedFuncDecl) bool {
+	for _, decl := range decls {
+		if decl.Decl == nil || decl.Decl.Body == nil {
+			continue
+		}
+		text := strings.ToLower(stageStringLiterals(decl.Decl.Body))
+		if !strings.Contains(text, "update") || !strings.Contains(text, "_at") {
+			continue
+		}
+		for _, write := range boundUpdates(decl) {
+			update := write.update
+			for _, assignment := range update.Sets {
+				if strings.HasSuffix(assignment.Column, "_at") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func stageStringLiterals(root ast.Node) string {
+	var text strings.Builder
+	ast.Inspect(root, func(node ast.Node) bool {
+		literal, ok := node.(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return true
+		}
+		if value, ok := patternkit.GoStringLiteral(literal); ok {
+			text.WriteString(value)
+		}
+		return true
+	})
+	return text.String()
 }
 
 // stageWrite is an UPDATE of the project that sets the status of a table.
@@ -387,9 +456,13 @@ func literalUpdates(expr ast.Expr) []sqlschema.UpdateWrite {
 	if len(literals) != 1 {
 		return nil
 	}
-	updates := sqlschema.Updates(literals[0].Text)
-	if len(updates) == 0 && literals[0].Bare != "" {
-		updates = sqlschema.Updates(literals[0].Bare)
+	return stageLiteralUpdates(literals[0])
+}
+
+func stageLiteralUpdates(literal patternkit.SqlLiteral) []sqlschema.UpdateWrite {
+	updates := sqlschema.Updates(literal.Text)
+	if len(updates) == 0 && literal.Bare != "" {
+		updates = sqlschema.Updates(literal.Bare)
 	}
 	return updates
 }

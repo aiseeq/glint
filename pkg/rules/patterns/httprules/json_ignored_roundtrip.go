@@ -33,6 +33,8 @@ func init() {
 type JSONIgnoredFieldLostInRoundTripRule struct {
 	rules.GoFileFindingRule
 	*rules.BaseRule
+	// projectAnalysis is a per-instance seam for observing the post-precheck path.
+	projectAnalysis func(*core.GoProjectContext) ([]*core.Violation, error)
 }
 
 // NewJSONIgnoredFieldLostInRoundTripRule creates the rule
@@ -78,6 +80,12 @@ func (r *JSONIgnoredFieldLostInRoundTripRule) AnalyzeGoProject(ctx *core.GoProje
 	if ctx == nil {
 		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
+	if !projectHasIgnoredJSONField(ctx) {
+		return nil, nil
+	}
+	if r.projectAnalysis != nil {
+		return r.projectAnalysis(ctx)
+	}
 	trip := jsonRoundTrip{
 		marshalled: map[*types.TypeName]bool{}, unmarshalled: map[*types.TypeName]bool{},
 		written: map[*types.Var]bool{}, read: map[*types.Var]bool{}, refilled: map[*types.Var]bool{},
@@ -108,6 +116,43 @@ func (r *JSONIgnoredFieldLostInRoundTripRule) AnalyzeGoProject(ctx *core.GoProje
 		}
 		return violations
 	})
+}
+
+func projectHasIgnoredJSONField(ctx *core.GoProjectContext) bool {
+	if ctx == nil {
+		return false
+	}
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil {
+			continue
+		}
+		if pkgCtx.Package.Fset == nil {
+			return true
+		}
+		for _, file := range pkgCtx.Package.Syntax {
+			if strings.HasSuffix(pkgCtx.Package.Fset.Position(file.Pos()).Filename, "_test.go") {
+				continue
+			}
+			found := false
+			ast.Inspect(file, func(node ast.Node) bool {
+				st, ok := node.(*ast.StructType)
+				if !ok {
+					return true
+				}
+				for _, field := range st.Fields.List {
+					if field.Tag != nil && len(field.Names) > 0 && jsonIgnored(strings.Trim(field.Tag.Value, "`")) {
+						found = true
+						return false
+					}
+				}
+				return !found
+			})
+			if found {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // eachProductionGoFile calls visit with every typed file of the project that

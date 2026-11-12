@@ -92,6 +92,8 @@ type MultiWriteNoTransactionRule struct {
 	// фоновых задач (аргумент выполняется в чужой горутине) и телеметрия, которая обязана
 	// сохраниться именно тогда, когда бизнес-операция провалилась.
 	independent map[string]bool
+	// projectAnalysis is a per-instance seam for observing the post-precheck path.
+	projectAnalysis func(*core.GoProjectContext) ([]*core.Violation, error)
 }
 
 // multiWriteMutation matches the name of a method that changes state;
@@ -185,6 +187,14 @@ func (r *MultiWriteNoTransactionRule) AnalyzeGoProject(ctx *core.GoProjectContex
 		return nil, errors.New("multi write no transaction: nil Go project context")
 	}
 
+	hasCandidates := r.projectHasWriteCandidates(ctx)
+
+	if !hasCandidates {
+		return nil, nil
+	}
+	if r.projectAnalysis != nil {
+		return r.projectAnalysis(ctx)
+	}
 	runners := r.derivedTransactionRunners(ctx)
 	covered := r.functionsUnderTransaction(ctx, runners)
 	graph := r.buildGraph(ctx)
@@ -212,6 +222,37 @@ func (r *MultiWriteNoTransactionRule) AnalyzeGoProject(ctx *core.GoProjectContex
 		return violations[i].Line < violations[j].Line
 	})
 	return violations, nil
+}
+
+// projectHasWriteCandidates reports whether a configured store mutation occurs.
+// A single call is enough because a failing write in a loop can itself be a finding.
+func (r *MultiWriteNoTransactionRule) projectHasWriteCandidates(ctx *core.GoProjectContext) bool {
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil {
+			continue
+		}
+
+		for _, file := range pkg.Package.Syntax {
+			if ctx.FileSet != nil && strings.HasSuffix(ctx.FileSet.Position(file.Pos()).Filename, "_test.go") {
+				continue
+			}
+			found := false
+			ast.Inspect(file, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+
+				method, candidate := r.storeMutation(call, pkg.Package.TypesInfo)
+				found = found || (candidate && method != "")
+				return !found
+			})
+			if found {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // writeCall is one mutating call.

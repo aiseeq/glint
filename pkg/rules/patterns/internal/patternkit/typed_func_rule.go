@@ -49,6 +49,9 @@ type TypedFuncRule struct {
 	// of the whole project: what the check compares a function with is
 	// collected once per run, not kept on the shared rule.
 	ForProject func(decls map[*types.Func]TypedFuncDecl) func(scope FuncScope, fn *ast.FuncDecl) []FuncFinding
+	// ProjectPrecheck cheaply reports whether the project can contain findings,
+	// before call-site indexes and dependency sources are loaded.
+	ProjectPrecheck func(decls map[*types.Func]TypedFuncDecl) bool
 	// SeverityOf, when set, gives the severity of the findings of one
 	// function, raising the default where the cost matters more (a hot
 	// function); it never lowers it.
@@ -69,6 +72,9 @@ func (r *TypedFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Vi
 	decls, err := FuncDeclsByObject(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
+	}
+	if r.ProjectPrecheck != nil && !r.ProjectPrecheck(decls) {
+		return nil, nil
 	}
 	callers, err := FuncCallSites(ctx, decls)
 	if err != nil {

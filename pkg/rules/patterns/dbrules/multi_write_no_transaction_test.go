@@ -15,6 +15,7 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 )
 
 // storeDefinition — минимальное хранилище. Без типов правило не отличит репозиторий
@@ -32,6 +33,69 @@ func (r *Repo) RunInTx(ctx context.Context, fn func(context.Context) error) erro
 
 type Service struct{ repo *Repo }
 `
+
+func TestMultiWriteNoTransactionRule_ProjectPrecheck(t *testing.T) {
+	rule := NewMultiWriteNoTransactionRule()
+	root, contexts := writeStoreModule(t, map[string]string{"sample.go": "package sample\nimport \"context\"\n" + storeDefinition + `
+func (s *Service) Read(ctx context.Context) { _ = s.repo.GetThing(ctx) }
+`})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+	require.NoError(t, err)
+	assert.False(t, rule.projectHasWriteCandidates(project))
+	analysisCalled := false
+	rule.projectAnalysis = func(*core.GoProjectContext) ([]*core.Violation, error) {
+		analysisCalled = true
+		return nil, nil
+	}
+	violations, err := rule.AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations)
+	assert.False(t, analysisCalled, "ранний выход должен пропустить дорогой анализ")
+
+	root, contexts = writeStoreModule(t, map[string]string{"sample.go": "package sample\nimport \"context\"\n" + storeDefinition + `
+func (s *Service) Backfill(ctx context.Context) error {
+	for { if err := s.repo.UpdateThing(ctx); err != nil { return err } }
+}`})
+	project, err = core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+	require.NoError(t, err)
+	assert.True(t, rule.projectHasWriteCandidates(project))
+
+	root, contexts = writeStoreModule(t, map[string]string{
+		"sample.go":      "package sample\ntype Repo struct{}\n",
+		"sample_test.go": "package sample\nimport \"context\"\nfunc (r *Repo) UpdateThing(context.Context) {}\nfunc testWrite(ctx context.Context) { (&Repo{}).UpdateThing(ctx) }\n",
+	})
+	project, err = core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+	require.NoError(t, err)
+	assert.False(t, rule.projectHasWriteCandidates(project))
+
+	testRoot, testContexts := writeStoreModule(t, map[string]string{
+		"sample.go":      "package sample\ntype Repo struct{}\n",
+		"sample_test.go": "package sample\nimport \"context\"\nfunc (r *Repo) UpdateThing(context.Context) {}\nfunc testWrite(ctx context.Context) { (&Repo{}).UpdateThing(ctx) }\n",
+	})
+	var productionContexts []*core.FileContext
+	for _, fileContext := range testContexts {
+		if fileContext.RelPath == "sample.go" {
+			productionContexts = append(productionContexts, fileContext)
+		}
+	}
+	require.Len(t, productionContexts, 1)
+	testProject, err := core.LoadGoProject(testRoot, productionContexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+	require.NoError(t, err)
+	loaded, err := packages.Load(&packages.Config{Mode: packages.LoadSyntax, Dir: testRoot, Fset: testProject.FileSet, Tests: true}, "./...")
+	require.NoError(t, err)
+	loadedTestSyntax := false
+	for _, loadedPackage := range loaded {
+		for _, file := range loadedPackage.Syntax {
+			if strings.HasSuffix(loadedPackage.Fset.Position(file.Pos()).Filename, "_test.go") {
+				loadedTestSyntax = true
+				testProject.Packages = append(testProject.Packages, &core.GoPackageContext{Package: loadedPackage})
+				break
+			}
+		}
+	}
+	require.True(t, loadedTestSyntax)
+	assert.False(t, rule.projectHasWriteCandidates(testProject))
+}
 
 func TestMultiWriteNoTransactionRule_Metadata(t *testing.T) {
 	rule := NewMultiWriteNoTransactionRule()
