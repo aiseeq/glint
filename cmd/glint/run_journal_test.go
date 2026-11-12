@@ -250,6 +250,19 @@ func TestPermanentRootClassification(t *testing.T) {
 
 func permanentTestRoot(t *testing.T) string {
 	t.Helper()
+	// The checkout itself may lie under TMPDIR (a merge gate's copy), where
+	// every root counts as temporary; a temp directory of its own that is not
+	// an ancestor of the checkout keeps the project root permanent.
+	tmp, err := os.MkdirTemp("", "glint-run-stats-tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(tmp); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Setenv("TMPDIR", tmp)
 	root, err := os.MkdirTemp(".", ".run-stats-project-")
 	if err != nil {
 		t.Fatal(err)
