@@ -313,7 +313,7 @@ func enclosingBudgetGuard(typed partialTypedFunction, node ast.Node, params map[
 		}
 		if n == node {
 			for i := len(parents) - 1; i >= 0; i-- {
-				if conditional, ok := parents[i].(*ast.IfStmt); ok && nodeWithin(conditional.Body, node) {
+				if conditional, ok := parents[i].(*ast.IfStmt); ok && patternkit.ContainsNode(conditional.Body, node) {
 					if candidate, ok := positiveBudgetGuard(typed.info, conditional.Cond, params); ok {
 						guard, found = candidate, true
 						return false
@@ -326,18 +326,6 @@ func enclosingBudgetGuard(typed partialTypedFunction, node ast.Node, params map[
 		return true
 	})
 	return guard, found
-}
-
-func nodeWithin(root ast.Node, target ast.Node) bool {
-	found := false
-	ast.Inspect(root, func(n ast.Node) bool {
-		if n == target {
-			found = true
-			return false
-		}
-		return !found
-	})
-	return found
 }
 
 func positiveBudgetGuard(info *types.Info, expr ast.Expr, params map[types.Object]int) (budgetGuard, bool) {

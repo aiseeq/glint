@@ -11,6 +11,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
 const rawProcessKillSuggestion = "Use proc.StopChild from github.com/aiseeq/akit/proc; pass the request (signal, stdin close, or context cancellation) in its request function literal."
@@ -160,7 +161,7 @@ func commandContextAssignedTarget(constructor *ast.CallExpr, body *ast.BlockStmt
 					target = stmt.Lhs[i]
 					return false
 				}
-				if i < len(stmt.Lhs) && containsNode(rhs, constructor) {
+				if i < len(stmt.Lhs) && patternkit.ContainsNode(rhs, constructor) {
 					target = compositeCommandTarget(stmt.Lhs[i], rhs, constructor, info)
 					if target != nil {
 						return false
@@ -173,7 +174,7 @@ func commandContextAssignedTarget(constructor *ast.CallExpr, body *ast.BlockStmt
 					target = stmt.Names[i]
 					return false
 				}
-				if i < len(stmt.Names) && containsNode(rhs, constructor) {
+				if i < len(stmt.Names) && patternkit.ContainsNode(rhs, constructor) {
 					target = compositeCommandTarget(stmt.Names[i], rhs, constructor, info)
 					if target != nil {
 						return false
@@ -197,7 +198,7 @@ func compositeCommandTarget(base, value ast.Expr, constructor *ast.CallExpr, inf
 			return true
 		}
 		for i, elt := range lit.Elts {
-			if !containsNode(elt, constructor) {
+			if !patternkit.ContainsNode(elt, constructor) {
 				continue
 			}
 			if pair, ok := elt.(*ast.KeyValueExpr); ok {
@@ -239,18 +240,6 @@ func compositeLiteralStruct(lit *ast.CompositeLit, info *types.Info) (*types.Str
 	}
 	structure, ok := typ.Underlying().(*types.Struct)
 	return structure, ok
-}
-
-func containsNode(node, target ast.Node) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if n == target {
-			found = true
-			return false
-		}
-		return !found
-	})
-	return found
 }
 
 func commandContextTerminal(constructor *ast.CallExpr, target ast.Expr, constructors []*ast.CallExpr, body *ast.BlockStmt, info *types.Info) *ast.CallExpr {
@@ -304,8 +293,8 @@ func commandContextInDifferentIfBranches(first, second ast.Node, body *ast.Block
 		if !ok || statement.Else == nil {
 			return true
 		}
-		firstThen, secondThen := containsNode(statement.Body, first), containsNode(statement.Body, second)
-		firstElse, secondElse := containsNode(statement.Else, first), containsNode(statement.Else, second)
+		firstThen, secondThen := patternkit.ContainsNode(statement.Body, first), patternkit.ContainsNode(statement.Body, second)
+		firstElse, secondElse := patternkit.ContainsNode(statement.Else, first), patternkit.ContainsNode(statement.Else, second)
 		different = (firstThen && secondElse) || (secondThen && firstElse)
 		return !different
 	})
