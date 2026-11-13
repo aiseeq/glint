@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"go/types"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -41,9 +42,299 @@ import "syscall"
 func TestStop(sig syscall.Signal, pid int) {
 	_ = syscall.Kill(pid, sig) // want
 }
+
 `
 	file, pkg := rawProcessTypedFile(t, "sample_test.go", "example.com/sample", source)
 	assert.Equal(t, []int{4}, rulestest.ViolationLines(newRawProcessKillRule().analyzeGo(file, pkg)))
+}
+
+func TestRawProcessKillReportsCommandContextWithoutCancel(t *testing.T) {
+	source := `package sample
+import (
+	"context"
+	"os/exec"
+	"time"
+	"github.com/aiseeq/akit/proc"
+)
+func direct() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "worker")
+	_ = cmd.Run() // want
+}
+
+func chained(ctx context.Context) {
+	_ = exec.CommandContext(ctx, "worker").Run() // want
+	_, _ = exec.CommandContext(ctx, "worker").Output() // want
+	_, _ = exec.CommandContext(ctx, "worker").CombinedOutput() // want
+	_ = exec.CommandContext(ctx, "worker").Start() // want
+}
+func allowed(ctx context.Context, cmd *exec.Cmd) {
+	cmd = exec.CommandContext(ctx, "worker")
+	cmd.Cancel = func() error { return nil }
+	_ = cmd.Run()
+	byStop := exec.CommandContext(ctx, "worker")
+	proc.CancelByStop(byStop, time.Second, 15)
+	_ = byStop.Run()
+	byObserver := exec.CommandContext(ctx, "worker")
+	proc.CancelByStopWithObserver(byObserver, time.Second, 15, nil)
+	_ = byObserver.Run()
+	separate := exec.CommandContext(ctx, "worker")
+	proc.CancelByStop(byStop, time.Second, 15)
+	_ = separate.Run() // want
+	_ = exec.Command("worker").Run()
+	passed := exec.CommandContext(ctx, "worker")
+	configure(passed)
+	_ = passed.Run()
+}
+func configure(*exec.Cmd) {}
+`
+	file, pkg := rawProcessTypedFile(t, "command_context_test.go", "example.com/sample", source)
+	assert.Equal(t, []int{11, 16, 17, 18, 19, 31}, rulestest.ViolationLines(newRawProcessKillRule().analyzeGo(file, pkg)))
+}
+
+func TestRawProcessKillCommandContextFindingSuggestsAkitHelper(t *testing.T) {
+	source := `package sample
+import (
+	"context"
+	"os/exec"
+)
+func run(ctx context.Context) { _ = exec.CommandContext(ctx, "worker").Run() }
+`
+	file, pkg := rawProcessTypedFile(t, "command_context.go", "example.com/sample", source)
+	findings := newRawProcessKillRule().analyzeGo(file, pkg)
+	require.Len(t, findings, 1)
+	assert.Contains(t, findings[0].Message, "proc.CancelByStop")
+	assert.Contains(t, findings[0].Suggestion, "proc.CancelByStop")
+	assert.Contains(t, findings[0].Message, "On context cancellation, os/exec calls Process.Kill by default.")
+}
+
+func TestRawProcessKillReportsCommandContextInProjectTestFiles(t *testing.T) {
+	source := `package sample
+import (
+	"context"
+	"os/exec"
+	"testing"
+)
+func TestCommandContext(t *testing.T) {
+	ctx := t.Context()
+	_ = exec.CommandContext(ctx, "worker").Run() // want
+}
+var packageCommand = func(ctx context.Context) { _ = exec.CommandContext(ctx, "worker").Run() }
+
+`
+	assert.Equal(t, []int{9, 11}, rulestest.GoProjectRuleLines(t, newRawProcessKillRule(), "command_context_test.go", source))
+}
+
+func TestRawProcessKillCommandContextProbeForms(t *testing.T) {
+	source := `package sample
+import (
+	"context"
+	"os/exec"
+	"syscall"
+	"time"
+	ap "github.com/aiseeq/akit/proc"
+)
+type holder struct { cmd *exec.Cmd }
+type runner struct{}
+func (runner) CommandContext(context.Context, string) *exec.Cmd { return exec.Command("worker") }
+func stopFn() error { return nil }
+func logCmd(*exec.Cmd) {}
+func logCmdPointer(**exec.Cmd) {}
+func forms(ctx context.Context, s *holder, logf func(string, ...any)) {
+	n1 := exec.CommandContext(ctx, "n1")
+	n1.Dir = "/"
+	n1.Cancel = stopFn
+	n1.Env = nil
+	_ = n1.Start()
+	n2 := exec.CommandContext(ctx, "n2")
+	s.cmd = n2
+	s.cmd.Cancel = stopFn
+	_ = n2.Run()
+	literal := &holder{cmd: exec.CommandContext(ctx, "literal")}
+	literal.cmd.Cancel = stopFn
+	_ = literal.cmd.Run()
+	n3 := exec.CommandContext(ctx, "n3")
+	c := n3
+	c.Cancel = stopFn
+	_ = n3.Run()
+	n4 := exec.CommandContext(ctx, "n4")
+	setup := func() { n4.Cancel = stopFn }
+	setup()
+	_ = n4.Run()
+	n5 := exec.CommandContext(ctx, "n5")
+	_ = ap.CancelByStop(n5, time.Second, syscall.SIGTERM)
+	_ = n5.Run()
+	n6 := []*exec.Cmd{exec.CommandContext(ctx, "a"), exec.CommandContext(ctx, "b")}
+	for _, item := range n6 {
+		item.Cancel = stopFn
+		_ = item.Run()
+	}
+	n6b := map[string]*exec.Cmd{"a": exec.CommandContext(ctx, "a")}
+	n6b["a"].Cancel = stopFn
+	_ = n6b["a"].Run()
+	_ = exec.CommandContext(context.Background(), "background").Run()
+	n8 := exec.CommandContext(ctx, "n8")
+	if true { n8.Cancel = stopFn }
+	_ = n8.Run()
+	passed := exec.CommandContext(ctx, "passed")
+	logCmd(passed)
+	_ = passed.Run()
+	passedAgain := exec.CommandContext(ctx, "passed first")
+	logCmd(passedAgain)
+	_ = passedAgain.Run()
+	passedAgain = exec.CommandContext(ctx, "passed second") // want
+	_ = passedAgain.Run()
+	passedPointer := exec.CommandContext(ctx, "passed pointer")
+	logCmdPointer(&passedPointer)
+	_ = passedPointer.Run()
+	dirOnly := exec.CommandContext(ctx, "dir only") // want
+	dirOnly.Dir = "/tmp"
+	_ = dirOnly.Run()
+	noise := exec.CommandContext(ctx, "noise") // want
+	noise.Env = append(noise.Env, "X=1")
+	logf("%s", noise.String())
+	_ = noise.Run()
+	reused := exec.CommandContext(ctx, "first")
+	reused.Cancel = stopFn
+	_ = reused.Run()
+	reused = exec.CommandContext(ctx, "second") // want
+	_ = reused.Run()
+	firstTerminal := exec.CommandContext(ctx, "first terminal") // want
+	_ = firstTerminal.Run()
+	firstTerminal.Cancel = stopFn
+	_ = firstTerminal.Run()
+	firstMiss := exec.CommandContext(ctx, "first miss") // want
+	_ = firstMiss.Run()
+	firstMiss = exec.CommandContext(ctx, "second miss")
+	firstMiss.Cancel = stopFn
+	_ = firstMiss.Run()
+	field := exec.CommandContext(ctx, "field") // want
+	s.cmd = field
+	_ = s.cmd.Run()
+	var assigned *exec.Cmd
+	assigned = exec.CommandContext(ctx, "assigned") // want
+	_ = assigned.Run()
+	var declared = exec.CommandContext(ctx, "declared") // want
+	_ = declared.Run()
+	var branch *exec.Cmd
+	if ctx.Err() != nil {
+		branch = exec.CommandContext(ctx, "branch then") // want
+	} else {
+		branch = exec.CommandContext(ctx, "branch else") // want
+	}
+	_, _ = branch.Output()
+	late := exec.CommandContext(ctx, "late") // want
+	_ = late.Start()
+	late.Cancel = stopFn
+	_ = late.Wait()
+	lateHelper := exec.CommandContext(ctx, "late helper") // want
+	_ = lateHelper.Run()
+	_ = ap.CancelByStop(lateHelper, time.Second, syscall.SIGTERM)
+	_ = (runner{}).CommandContext(ctx, "foreign").Run()
+}
+func nested(ctx context.Context) {
+	f := func() {
+		g := func() { _ = exec.CommandContext(ctx, "nested").Run() } // want
+		g()
+	}
+	f()
+}
+var packageRun = func(ctx context.Context) { _ = exec.CommandContext(ctx, "package literal").Run() } // want
+`
+	file, pkg := rawProcessTypedFile(t, "probe.go", "example.com/sample", source)
+	assert.Equal(t, rawProcessKillWantedLines(source), rulestest.ViolationLines(newRawProcessKillRule().analyzeGo(file, pkg)))
+}
+
+func TestRawProcessKillAdditionalMutantCases(t *testing.T) {
+	source := `package sample
+import (
+	stdctx "context"
+	"os/exec"
+	"syscall"
+	"time"
+	ap "github.com/aiseeq/akit/proc"
+)
+type runner struct { cmd *exec.Cmd }
+type pair struct { first, second *exec.Cmd }
+type fakeContext struct{}
+func (fakeContext) Background() stdctx.Context { return stdctx.Background() }
+func stop() error { return nil }
+func (r *runner) configure() { r.cmd.Cancel = stop }
+func configureRunner(r *runner) { r.cmd.Cancel = stop }
+func runGroup(f func() error) { _ = f() }
+func cases(ctx stdctx.Context, branch bool) {
+	var branchCmd *exec.Cmd
+	if branch {
+		branchCmd = exec.CommandContext(ctx, "branch then") // want
+	} else {
+		branchCmd = exec.CommandContext(ctx, "branch else") // want
+	}
+	_ = branchCmd.Run()
+	var alias = exec.CommandContext(ctx, "var alias") // want
+	_ = alias.Run()
+	cmdForAlias := exec.CommandContext(ctx, "assigned alias") // want
+	var assignedAlias = cmdForAlias
+	_ = assignedAlias.Run()
+	overwritten := exec.CommandContext(ctx, "overwritten")
+	overwritten = exec.CommandContext(ctx, "replacement") // want
+	_ = overwritten.Run()
+	rangeCmds := []*exec.Cmd{exec.CommandContext(ctx, "range alias")} // want
+	for _, item := range rangeCmds {
+		_ = item.Run()
+	}
+	first, second := &runner{}, &runner{}
+	first.cmd = exec.CommandContext(ctx, "first owner") // want
+	second.cmd = exec.CommandContext(ctx, "second owner") // want
+	_ = first.cmd.Run()
+	_ = second.cmd.Run()
+	indexes := [2]*exec.Cmd{
+		exec.CommandContext(ctx, "index 0"), // want
+		exec.CommandContext(ctx, "index 1"), // want
+	}
+	_ = indexes[0].Run()
+	_ = indexes[1].Run()
+	positional := &pair{nil, exec.CommandContext(ctx, "positional second")} // want
+	_ = positional.second.Run()
+	keyed := &runner{cmd: exec.CommandContext(ctx, "keyed field")} // want
+	_ = keyed.cmd.Run()
+	deferred := exec.CommandContext(ctx, "deferred cancel") // want
+	defer func() { deferred.Cancel = stop }()
+	_ = deferred.Run()
+	immediate := exec.CommandContext(ctx, "immediate cancel")
+	func() { immediate.Cancel = stop }()
+	_ = immediate.Run()
+	ownerMethod := &runner{}
+	ownerMethod.cmd = exec.CommandContext(ctx, "owner method")
+	ownerMethod.configure()
+	_ = ownerMethod.cmd.Run()
+	ownerArgument := &runner{}
+	ownerArgument.cmd = exec.CommandContext(ctx, "owner argument")
+	configureRunner(ownerArgument)
+	_ = ownerArgument.cmd.Run()
+	insideGroup := exec.CommandContext(ctx, "configured inside callback")
+	runGroup(func() error {
+		if err := ap.CancelByStop(insideGroup, time.Second, syscall.SIGTERM); err != nil { return err }
+		return insideGroup.Run()
+	})
+	background := exec.CommandContext(stdctx.TODO(), "todo")
+	_ = background.Run()
+	foreign := exec.CommandContext(fakeContext{}.Background(), "foreign context") // want
+	_ = foreign.Run()
+}
+`
+	file, pkg := rawProcessTypedFile(t, "mutants.go", "example.com/sample", source)
+	assert.Equal(t, rawProcessKillWantedLines(source), rulestest.ViolationLines(newRawProcessKillRule().analyzeGo(file, pkg)))
+}
+
+func rawProcessKillWantedLines(source string) []int {
+	var lines []int
+	for i, line := range strings.Split(source, "\n") {
+		if strings.Contains(line, "// want") {
+			lines = append(lines, i+1)
+		}
+	}
+	return lines
 }
 
 func TestRawProcessKillTypesTestFilesWithoutProjectTypes(t *testing.T) {

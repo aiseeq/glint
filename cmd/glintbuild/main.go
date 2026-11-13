@@ -10,7 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
+	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/glint/internal/buildmanifest"
 )
 
@@ -47,6 +50,9 @@ func build(ctx context.Context, version string) error {
 	link := func(out string) error {
 		cmd := exec.CommandContext(ctx, "go", "build", "-ldflags", ldflags, "-o", out, "./cmd/glint")
 		cmd.Dir, cmd.Stdout, cmd.Stderr = root, os.Stdout, os.Stderr
+		if err := proc.CancelByStop(cmd, time.Second, syscall.SIGTERM); err != nil {
+			return fmt.Errorf("configure build cancellation: %w", err)
+		}
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("build bin/glint: %w", err)
 		}

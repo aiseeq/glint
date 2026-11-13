@@ -392,6 +392,27 @@ func (i signalTestImporter) Import(path string) (*types.Package, error) {
 		)
 		fn := types.NewSignatureType(nil, nil, nil, params, nil, false)
 		pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "StopChild", fn))
+		execPkg, err := i.base.Import("os/exec")
+		if err != nil {
+			return nil, err
+		}
+		timePkg, err := i.base.Import("time")
+		if err != nil {
+			return nil, err
+		}
+		cmdType := types.NewPointer(execPkg.Scope().Lookup("Cmd").Type())
+		for _, name := range []string{"CancelByStop", "CancelByStopWithObserver"} {
+			cancelParams := []*types.Var{
+				types.NewVar(token.NoPos, pkg, "cmd", cmdType),
+				types.NewVar(token.NoPos, pkg, "grace", timePkg.Scope().Lookup("Duration").Type()),
+				types.NewVar(token.NoPos, pkg, "sig", syscall.Scope().Lookup("Signal").Type()),
+			}
+			if name == "CancelByStopWithObserver" {
+				cancelParams = append(cancelParams, types.NewVar(token.NoPos, pkg, "observer", types.NewSignatureType(nil, nil, nil, nil, nil, false)))
+			}
+			cancelSig := types.NewSignatureType(nil, nil, nil, types.NewTuple(cancelParams...), types.NewTuple(types.NewVar(token.NoPos, pkg, "", types.Universe.Lookup("error").Type())), false)
+			pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, name, cancelSig))
+		}
 		pkg.MarkComplete()
 		return pkg, nil
 	}

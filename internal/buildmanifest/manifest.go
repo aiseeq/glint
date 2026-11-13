@@ -14,6 +14,10 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
+
+	"github.com/aiseeq/akit/proc"
 )
 
 type Manifest struct {
@@ -227,5 +231,8 @@ var readFile = os.ReadFile
 func commandOutput(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir, cmd.Stderr = dir, os.Stderr
+	if err := proc.CancelByStop(cmd, time.Second, syscall.SIGTERM); err != nil {
+		return nil, fmt.Errorf("configure command cancellation: %w", err)
+	}
 	return cmd.Output()
 }
