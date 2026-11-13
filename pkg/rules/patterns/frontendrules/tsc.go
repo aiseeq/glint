@@ -834,32 +834,8 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 			addFingerprintDirs(filepath.Dir(path), root, directories)
 		}
 	}
-	// tsc resolves workspace symlinks to their targets, so watch package scopes
-	// in node_modules even when --listFiles only reports the resolved target.
-	for path := range optional {
-		if filepath.Base(path) != "node_modules" {
-			continue
-		}
-		entries, err := os.ReadDir(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return tscStatFingerprint{}, fmt.Errorf("read a tsc module directory %s: %w", path, err)
-		}
-		directories[path] = true
-		for _, entry := range entries {
-			if !strings.HasPrefix(entry.Name(), "@") {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil {
-				return tscStatFingerprint{}, fmt.Errorf("stat a tsc package scope %s: %w", filepath.Join(path, entry.Name()), err)
-			}
-			if info.IsDir() {
-				directories[filepath.Join(path, entry.Name())] = true
-			}
-		}
+	if err := addModuleScopeDirs(optional, directories); err != nil {
+		return tscStatFingerprint{}, err
 	}
 	for _, path := range filePaths {
 		stamp, err := statPath(path)
@@ -890,6 +866,38 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 	return fingerprint, nil
 }
 
+// addModuleScopeDirs watches each existing node_modules among the optional
+// paths and its @scope directories: tsc resolves workspace symlinks to their
+// targets, so --listFiles reports only the resolved target.
+func addModuleScopeDirs(optional, directories map[string]bool) error {
+	for path := range optional {
+		if filepath.Base(path) != "node_modules" {
+			continue
+		}
+		entries, err := os.ReadDir(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read a tsc module directory %s: %w", path, err)
+		}
+		directories[path] = true
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), "@") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return fmt.Errorf("stat a tsc package scope %s: %w", filepath.Join(path, entry.Name()), err)
+			}
+			if info.IsDir() {
+				directories[filepath.Join(path, entry.Name())] = true
+			}
+		}
+	}
+	return nil
+}
+
 // tscDirectoryEntries fingerprints entry names, types and symlink targets.
 // The target matters because module resolution can follow a retargeted link
 // without changing the directory's entry names or types.
@@ -917,13 +925,13 @@ var hashTscFile = hashTscFileContents
 func hashTscFileContents(path string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("open a tsc input to hash %s: %w", path, err)
 	}
 	defer func() { _ = file.Close() }() // read only
 
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
+		return "", fmt.Errorf("hash a tsc input %s: %w", path, err)
 	}
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
@@ -1057,7 +1065,7 @@ func tscFingerprintChangesWithRefresh(fingerprint tscStatFingerprint, tscPaths [
 			continue
 		}
 		if err != nil {
-			stale = true
+			stale = true // expected: an input that cannot be stat'ed is a change; tsc reruns and reports it
 		} else if current.Size != saved.Size || current.Directory != saved.Directory {
 			stale = true
 		} else if current.ModTimeNS != saved.ModTimeNS {
@@ -1097,6 +1105,7 @@ func tscFingerprintChangesWithRefresh(fingerprint tscStatFingerprint, tscPaths [
 	for i, saved := range fingerprint.Dirs {
 		current, err := statPath(saved.Path)
 		if err != nil {
+			// expected: a directory that cannot be stat'ed is a change; tsc reruns from scratch and reports it
 			stale = true
 			reuse = false
 			configChanged = true
@@ -1180,7 +1189,7 @@ func storeStatFingerprintIfStable(identity, tscPaths []string, config string, li
 		}
 	}
 	if err := populateTscFileHashes(&after); err != nil {
-		return nil
+		return nil // best effort: without hashes no fingerprint is saved, and the next run asks tsc again
 	}
 	after.AnswerKey = answerKey
 	return tscCache.Store(statFingerprintKey(identity), after)
