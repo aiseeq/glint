@@ -3,9 +3,11 @@ package frontendrules
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"maps"
@@ -743,6 +745,8 @@ type tscFileStat struct {
 	Path      string `json:"path"`
 	Size      int64  `json:"size"`
 	ModTimeNS int64  `json:"mtimeNs"`
+	Hash      string `json:"hash,omitempty"`
+	Directory bool   `json:"directory,omitempty"`
 	Missing   bool   `json:"missing,omitempty"`
 	Entries   string `json:"entries,omitempty"`
 }
@@ -770,7 +774,7 @@ func statPath(path string) (tscFileStat, error) {
 	if err != nil {
 		return tscFileStat{}, fmt.Errorf("stat %s: %w", path, err)
 	}
-	return tscFileStat{Path: path, Size: info.Size(), ModTimeNS: info.ModTime().UnixNano()}, nil
+	return tscFileStat{Path: path, Size: info.Size(), ModTimeNS: info.ModTime().UnixNano(), Directory: info.IsDir()}, nil
 }
 
 func makeStatFingerprint(tscPaths []string, config string, listed []byte, answerKey string, watchedDirs ...string) (tscStatFingerprint, error) {
@@ -830,6 +834,33 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 			addFingerprintDirs(filepath.Dir(path), root, directories)
 		}
 	}
+	// tsc resolves workspace symlinks to their targets, so watch package scopes
+	// in node_modules even when --listFiles only reports the resolved target.
+	for path := range optional {
+		if filepath.Base(path) != "node_modules" {
+			continue
+		}
+		entries, err := os.ReadDir(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return tscStatFingerprint{}, fmt.Errorf("read a tsc module directory %s: %w", path, err)
+		}
+		directories[path] = true
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), "@") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return tscStatFingerprint{}, fmt.Errorf("stat a tsc package scope %s: %w", filepath.Join(path, entry.Name()), err)
+			}
+			if info.IsDir() {
+				directories[filepath.Join(path, entry.Name())] = true
+			}
+		}
+	}
 	for _, path := range filePaths {
 		stamp, err := statPath(path)
 		if optional[path] && errors.Is(err, fs.ErrNotExist) {
@@ -859,18 +890,61 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 	return fingerprint, nil
 }
 
-// tscDirectoryEntries distinguishes an atomic replacement from a change in
-// the set of files tsc can discover in a watched directory.
+// tscDirectoryEntries fingerprints entry names, types and symlink targets.
+// The target matters because module resolution can follow a retargeted link
+// without changing the directory's entry names or types.
 func tscDirectoryEntries(path string) (string, error) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return "", fmt.Errorf("read a tsc input directory %s: %w", path, err)
 	}
-	parts := make([][]byte, 0, len(entries)*2)
+	parts := make([][]byte, 0, len(entries)*3)
 	for _, entry := range entries {
 		parts = append(parts, []byte(entry.Name()), []byte(entry.Type().String()))
+		if entry.Type()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(filepath.Join(path, entry.Name()))
+			if err != nil {
+				return "", fmt.Errorf("read a tsc input symlink in %s: %w", path, err)
+			}
+			parts = append(parts, []byte(target))
+		}
 	}
 	return toolcache.Key(parts...), nil
+}
+
+var hashTscFile = hashTscFileContents
+
+func hashTscFileContents(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func populateTscFileHashes(fingerprint *tscStatFingerprint) error {
+	for i := range fingerprint.Files {
+		saved := &fingerprint.Files[i]
+		if saved.Missing || saved.Directory {
+			continue
+		}
+		hash, err := hashTscFile(saved.Path)
+		if err != nil {
+			return fmt.Errorf("hash a tsc input %s: %w", saved.Path, err)
+		}
+		current, err := statPath(saved.Path)
+		if err != nil || current.Directory || current.Size != saved.Size || current.ModTimeNS != saved.ModTimeNS {
+			return fmt.Errorf("tsc input changed while hashing: %s", saved.Path)
+		}
+		saved.Hash = hash
+	}
+	return nil
 }
 
 func addFingerprintDirs(dir, root string, directories map[string]bool) {
@@ -927,7 +1001,7 @@ func statCachedAnswer(identity, tscPaths []string) (tscStatLookup, error) {
 	if fingerprint.Answer == nil && fingerprint.AnswerKey == "" {
 		return tscStatLookup{status: tscStatMiss}, nil
 	}
-	stale, reuse, compilerChanged, configChanged := tscFingerprintChanges(fingerprint, tscPaths)
+	stale, reuse, compilerChanged, configChanged, refreshed, refreshedChanged := tscFingerprintChangesWithRefresh(fingerprint, tscPaths)
 	if fingerprint.Answer != nil && hasUnresolvedReferenceDiagnostic(*fingerprint.Answer) {
 		// A missing JSX runtime can appear inside an unlisted package directory.
 		// tsc 7 retains TS2875 even when it appears, so this answer needs a fresh run.
@@ -948,6 +1022,11 @@ func statCachedAnswer(identity, tscPaths []string) (tscStatLookup, error) {
 		}
 		return lookup, nil
 	}
+	if refreshedChanged {
+		if err := tscCache.Store(statFingerprintKey(identity), refreshed); err != nil {
+			return tscStatLookup{}, err
+		}
+	}
 	if fingerprint.Answer != nil {
 		return tscStatLookup{answer: *fingerprint.Answer, status: tscStatHit}, nil
 	}
@@ -963,16 +1042,43 @@ func statCachedAnswer(identity, tscPaths []string) (tscStatLookup, error) {
 }
 
 func tscFingerprintChanges(fingerprint tscStatFingerprint, tscPaths []string) (bool, bool, bool, bool) {
+	stale, reuse, compilerChanged, configChanged, _, _ := tscFingerprintChangesWithRefresh(fingerprint, tscPaths)
+	return stale, reuse, compilerChanged, configChanged
+}
+
+func tscFingerprintChangesWithRefresh(fingerprint tscStatFingerprint, tscPaths []string) (bool, bool, bool, bool, tscStatFingerprint, bool) {
+	refreshed := fingerprint
+	filesCopied, dirsCopied := false, false
 	stale, reuse := false, true
-	compilerChanged := false
-	configChanged := false
-	for _, saved := range fingerprint.Files {
+	compilerChanged, configChanged, changed := false, false, false
+	for i, saved := range fingerprint.Files {
 		current, err := statPath(saved.Path)
 		if saved.Missing && errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		if err != nil || current.Size != saved.Size || current.ModTimeNS != saved.ModTimeNS {
+		if err != nil {
 			stale = true
+		} else if current.Size != saved.Size || current.Directory != saved.Directory {
+			stale = true
+		} else if current.ModTimeNS != saved.ModTimeNS {
+			if slices.Contains(tscPaths, saved.Path) {
+				stale = true
+			} else {
+				hash, hashErr := hashTscFile(saved.Path)
+				if hashErr != nil || hash != saved.Hash {
+					stale = true
+				} else {
+					current.Hash = saved.Hash
+					if !filesCopied {
+						refreshed.Files = append([]tscFileStat(nil), fingerprint.Files...)
+						filesCopied = true
+					}
+					refreshed.Files[i] = current
+					changed = true
+				}
+			}
+		}
+		if stale && (err != nil || current.Size != saved.Size || current.ModTimeNS != saved.ModTimeNS || current.Directory != saved.Directory) {
 			// Package metadata, type roots and compiler versions affect resolution.
 			if slices.Contains(tscPaths, saved.Path) || filepath.Base(saved.Path) == "package.json" || strings.Contains(saved.Path+string(filepath.Separator), string(filepath.Separator)+"node_modules"+string(filepath.Separator)) {
 				reuse = false
@@ -988,18 +1094,36 @@ func tscFingerprintChanges(fingerprint tscStatFingerprint, tscPaths []string) (b
 			}
 		}
 	}
-	for _, saved := range fingerprint.Dirs {
+	for i, saved := range fingerprint.Dirs {
 		current, err := statPath(saved.Path)
-		if err != nil || current.Size != saved.Size || current.ModTimeNS != saved.ModTimeNS {
+		if err != nil {
 			stale = true
+			reuse = false
+			configChanged = true
+			continue
+		}
+		if current.Size != saved.Size || current.ModTimeNS != saved.ModTimeNS {
 			entries, readErr := tscDirectoryEntries(saved.Path)
-			if readErr != nil || entries != saved.Entries || strings.Contains(saved.Path+string(filepath.Separator), string(filepath.Separator)+"node_modules"+string(filepath.Separator)) {
+			if strings.Contains(saved.Path+string(filepath.Separator), string(filepath.Separator)+"node_modules"+string(filepath.Separator)) {
 				reuse = false
 				configChanged = true
 			}
+			if readErr != nil || entries != saved.Entries {
+				stale = true
+				reuse = false
+				configChanged = true
+			} else {
+				current.Entries = saved.Entries
+				if !dirsCopied {
+					refreshed.Dirs = append([]tscFileStat(nil), fingerprint.Dirs...)
+					dirsCopied = true
+				}
+				refreshed.Dirs[i] = current
+				changed = true
+			}
 		}
 	}
-	return stale, reuse, compilerChanged, configChanged
+	return stale, reuse, compilerChanged, configChanged, refreshed, changed
 }
 
 // refreshTscInputs captures the inputs just before a slow run. Comparing them
@@ -1055,6 +1179,9 @@ func storeStatFingerprintIfStable(identity, tscPaths []string, config string, li
 			return nil
 		}
 	}
+	if err := populateTscFileHashes(&after); err != nil {
+		return nil
+	}
 	after.AnswerKey = answerKey
 	return tscCache.Store(statFingerprintKey(identity), after)
 }
@@ -1072,6 +1199,10 @@ func storeProjectStatFingerprintIfStable(identity, tscPaths []string, config str
 				return false, nil
 			}
 		}
+	}
+	if err := populateTscFileHashes(&after); err != nil {
+		slog.Debug("cannot hash a tsc input fingerprint", "error", err)
+		return false, nil
 	}
 	after.Answer = &answer
 	after.LocalMajor = localMajor

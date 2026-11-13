@@ -166,6 +166,196 @@ func TestTscStatCacheSkipsLaunches(t *testing.T) {
 	assert.Equal(t, before, tscRunCount(t, log))
 }
 
+func TestTscStatCacheSameContentRewrites(t *testing.T) {
+	root, local, log := countedTscProject(t, map[string]string{
+		"tsconfig.json": strictTSConfig,
+		"src/main.ts":   "export const n: number = 1\n",
+	})
+	ageTscInputs(t, root, local)
+	assert.Empty(t, runCountedTsc(t, root))
+	before := tscRunCount(t, log)
+	path := filepath.Join(root, "src/main.ts")
+	content, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	now := time.Now()
+	require.NoError(t, os.Chtimes(path, now, now))
+	assert.Empty(t, runCountedTsc(t, root))
+	assert.Equal(t, before, tscRunCount(t, log), "touching an unchanged source should keep the cached answer")
+
+	require.NoError(t, os.WriteFile(path, content, 0o644))
+	assert.Empty(t, runCountedTsc(t, root))
+	assert.Equal(t, before, tscRunCount(t, log), "rewriting the same source should keep the cached answer")
+
+	temporary := path + ".tmp"
+	require.NoError(t, os.WriteFile(temporary, content, 0o644))
+	require.NoError(t, os.Rename(temporary, path))
+	assert.Empty(t, runCountedTsc(t, root))
+	assert.Equal(t, before, tscRunCount(t, log), "atomically replacing an unchanged source should keep the cached answer")
+
+	edited := strings.Replace(string(content), "= 1", "= 2", 1)
+	require.Len(t, edited, len(content))
+	require.NoError(t, os.WriteFile(path, []byte(edited), 0o644))
+	assert.Empty(t, runCountedTsc(t, root))
+	assert.Greater(t, tscRunCount(t, log), before, "a same-size source edit should rerun tsc")
+}
+
+func TestTscStatCacheResavesRefreshedHashMtime(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	path := filepath.Join(t.TempDir(), "main.ts")
+	require.NoError(t, os.WriteFile(path, []byte("export {}\n"), 0o644))
+	old := time.Now().Add(-time.Minute)
+	require.NoError(t, os.Chtimes(path, old, old))
+	stamp, err := statPath(path)
+	require.NoError(t, err)
+	stamp.Hash, err = hashTscFile(path)
+	require.NoError(t, err)
+	identity := []string{"resaved-hash-mtime"}
+	fingerprint := tscStatFingerprint{Answer: &tscAnswer{}, Files: []tscFileStat{stamp}}
+	require.NoError(t, tscCache.Store(statFingerprintKey(identity), fingerprint))
+
+	now := time.Now()
+	require.NoError(t, os.Chtimes(path, now, now))
+	originalHasher := hashTscFile
+	hashCalls := 0
+	hashTscFile = func(path string) (string, error) {
+		hashCalls++
+		return originalHasher(path)
+	}
+	t.Cleanup(func() { hashTscFile = originalHasher })
+
+	lookup, err := statCachedAnswer(identity, nil)
+	require.NoError(t, err)
+	assert.Equal(t, tscStatHit, lookup.status)
+	assert.Equal(t, 1, hashCalls)
+	var refreshed tscStatFingerprint
+	found, err := tscCache.Load(statFingerprintKey(identity), &refreshed)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, now.UnixNano(), refreshed.Files[0].ModTimeNS)
+
+	lookup, err = statCachedAnswer(identity, nil)
+	require.NoError(t, err)
+	assert.Equal(t, tscStatHit, lookup.status)
+	assert.Equal(t, 1, hashCalls, "a stat hit after refresh should not hash the input again")
+}
+
+func TestTscFingerprintRefreshesSameContentStat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main.ts")
+	require.NoError(t, os.WriteFile(path, []byte("export {}\n"), 0o644))
+	old := time.Now().Add(-time.Minute)
+	require.NoError(t, os.Chtimes(path, old, old))
+	stamp, err := statPath(path)
+	require.NoError(t, err)
+	stamp.Hash, err = hashTscFile(path)
+	require.NoError(t, err)
+	fingerprint := tscStatFingerprint{Files: []tscFileStat{stamp}}
+	now := time.Now()
+	require.NoError(t, os.Chtimes(path, now, now))
+
+	stale, reuse, compilerChanged, configChanged, refreshed, changed := tscFingerprintChangesWithRefresh(fingerprint, nil)
+	assert.False(t, stale)
+	assert.True(t, reuse)
+	assert.False(t, compilerChanged)
+	assert.False(t, configChanged)
+	assert.True(t, changed)
+	assert.Equal(t, stamp.Hash, refreshed.Files[0].Hash)
+	assert.Equal(t, now.UnixNano(), refreshed.Files[0].ModTimeNS)
+}
+
+func TestTscFingerprintRefreshesUnchangedDirectoryEntries(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "entry.ts")
+	require.NoError(t, os.WriteFile(file, []byte("export {}\n"), 0o644))
+	old := time.Now().Add(-time.Minute)
+	require.NoError(t, os.Chtimes(dir, old, old))
+	stamp, err := statPath(dir)
+	require.NoError(t, err)
+	stamp.Entries, err = tscDirectoryEntries(dir)
+	require.NoError(t, err)
+	fingerprint := tscStatFingerprint{Dirs: []tscFileStat{stamp}}
+	now := time.Now()
+	require.NoError(t, os.Chtimes(dir, now, now))
+
+	stale, _, _, _, refreshed, changed := tscFingerprintChangesWithRefresh(fingerprint, nil)
+	assert.False(t, stale)
+	assert.True(t, changed)
+	assert.Equal(t, stamp.Entries, refreshed.Dirs[0].Entries)
+	assert.Equal(t, now.UnixNano(), refreshed.Dirs[0].ModTimeNS)
+}
+
+func TestTscDirectoryEntriesDetectAdditionAndRemoval(t *testing.T) {
+	dir := t.TempDir()
+	stamp, err := statPath(dir)
+	require.NoError(t, err)
+	stamp.Entries, err = tscDirectoryEntries(dir)
+	require.NoError(t, err)
+	fingerprint := tscStatFingerprint{Dirs: []tscFileStat{stamp}}
+
+	file := filepath.Join(dir, "entry.ts")
+	require.NoError(t, os.WriteFile(file, []byte("export {}\n"), 0o644))
+	stale, _, _, _ := tscFingerprintChanges(fingerprint, nil)
+	assert.True(t, stale, "adding an entry must invalidate the fingerprint")
+
+	stamp, err = statPath(dir)
+	require.NoError(t, err)
+	stamp.Entries, err = tscDirectoryEntries(dir)
+	require.NoError(t, err)
+	fingerprint.Dirs[0] = stamp
+	require.NoError(t, os.Remove(file))
+	stale, _, _, _ = tscFingerprintChanges(fingerprint, nil)
+	assert.True(t, stale, "removing an entry must invalidate the fingerprint")
+}
+
+func TestTscStatCacheWorkspaceSymlinkRetargeted(t *testing.T) {
+	root, local, log := countedTscProject(t, map[string]string{
+		"tsconfig.json":              "{\"compilerOptions\":{\"strict\":true,\"noEmit\":true},\"include\":[\"src\"]}",
+		"src/main.ts":                "import { v } from '@acme/ui'; export const value: string = v\n",
+		"packages/ui-a/package.json": `{"name":"@acme/ui","types":"index.d.ts"}`,
+		"packages/ui-a/index.d.ts":   "export declare const v: string\n",
+		"packages/ui-b/package.json": `{"name":"@acme/ui","types":"index.d.ts"}`,
+		"packages/ui-b/index.d.ts":   "export declare const v: number\n",
+	})
+	link := filepath.Join(root, "node_modules", "@acme", "ui")
+	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+	require.NoError(t, os.Symlink("../../packages/ui-a", link))
+	ageTscInputs(t, root, local)
+	assert.Empty(t, runCountedTsc(t, root))
+	before := tscRunCount(t, log)
+
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.Symlink("../../packages/ui-b", link))
+	findings := runCountedTsc(t, root)
+	assert.Contains(t, strings.Join(findings, ""), "TS2322")
+	assert.Greater(t, tscRunCount(t, log), before)
+}
+
+func TestTscStatCacheFileSymlinkRetargeted(t *testing.T) {
+	root, local, log := countedTscProject(t, map[string]string{
+		"tsconfig.json": "{\"compilerOptions\":{\"strict\":true,\"noEmit\":true},\"include\":[\"src\"]}",
+		"src/main.ts":   "import { w } from './sym'; export const value: string = w\n",
+		"variants/a.ts": "export declare const w: string\n",
+		"variants/b.ts": "export declare const w: number\n",
+	})
+	link := filepath.Join(root, "src", "sym.ts")
+	require.NoError(t, os.Symlink("../variants/a.ts", link))
+	ageTscInputs(t, root, local)
+	aInfo, err := os.Stat(filepath.Join(root, "variants", "a.ts"))
+	require.NoError(t, err)
+	bInfo, err := os.Stat(filepath.Join(root, "variants", "b.ts"))
+	require.NoError(t, err)
+	require.Equal(t, aInfo.Size(), bInfo.Size())
+	require.Equal(t, aInfo.ModTime(), bInfo.ModTime())
+	assert.Empty(t, runCountedTsc(t, root))
+	before := tscRunCount(t, log)
+
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.Symlink("../variants/b.ts", link))
+	findings := runCountedTsc(t, root)
+	assert.Contains(t, strings.Join(findings, ""), "TS2322")
+	assert.Greater(t, tscRunCount(t, log), before)
+}
+
 func TestTscStatCacheEditedFile(t *testing.T) {
 	root, _, log := countedTscProject(t, map[string]string{
 		"tsconfig.json": strictTSConfig,
