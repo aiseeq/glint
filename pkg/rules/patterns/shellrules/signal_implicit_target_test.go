@@ -9,14 +9,26 @@ import (
 	"go/types"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// goFile preserves the package-level acceptance tests' typed-info helper.
+func (r *signalImplicitTargetRule) goFile(f *core.FileContext, info *types.Info) []*core.Violation {
+	var pkg *signalPackage
+	if info != nil {
+		pkg = newSignalPackage("", info, f.GoAST)
+	}
+	return r.goTypedFile(f, pkg)
+}
 
 func TestSignalImplicitTargetShell(t *testing.T) {
 	shellWanted(t, "signal-implicit-target", "signal.sh", `#!/bin/sh
@@ -29,6 +41,199 @@ bash <<'EOF'
 kill -9 ${PPID} # want
 EOF
 `)
+}
+
+func TestSignalImplicitTargetCallExprAfterLineEndingOperator(t *testing.T) {
+	shellWanted(t, "signal-implicit-target", "operators.sh", `#!/bin/bash
+true &&
+kill 0 # want
+false || # note
+kill $PPID # want
+if true; then true &&
+  kill 0 # want
+fi
+cat >/dev/null <<EOF
+x
+EOF
+true &&
+kill 0 # want
+bash <<'BODY'
+true &&
+kill 0 # want
+BODY
+bash <<A; cat >/dev/null <<B
+true &&
+kill 0 # want
+A
+data
+B
+x="a &&
+"; kill 0 # want
+kill 0 && # want
+kill $PPID # want
+`)
+}
+
+func TestSignalImplicitTargetParserBranches(t *testing.T) {
+	t.Run("here document interpreter", func(t *testing.T) {
+		shellWanted(t, "signal-implicit-target", "heredoc.sh", `#!/bin/bash
+bash <<'EOF'
+kill -9 0 # want
+EOF
+cat <<EOF | bash
+kill -TERM -1 # want
+EOF
+sh <<'SH_BODY'
+kill -9 $PPID # want
+SH_BODY
+ssh worker <<'SSH_BODY'
+kill -9 -1 # want
+SSH_BODY
+cat <<EOF | sh
+kill -9 0 # want
+EOF
+cat > note <<EOF
+kill 0
+EOF
+bash <<'OUTER'
+bash <<'INNER'
+kill -9 0 # want
+INNER
+OUTER
+bash <<A; cat >/dev/null <<B
+kill 0 # want
+A
+data
+B
+`)
+	})
+	t.Run("make recipe", func(t *testing.T) {
+		shellWanted(t, "signal-implicit-target", "Makefile", `all:
+	command kill -9 $$PPID # want
+	command \
+	  kill -TERM $$PPID # want
+`)
+	})
+	t.Run("make recipe here document", func(t *testing.T) {
+		shellWanted(t, "signal-implicit-target", "Makefile", "all:\n"+
+			"\tbash <<EOF\n"+
+			"\tkill -9 $$PPID # want\n"+
+			"\tEOF\n")
+	})
+	t.Run("Go shell string", func(t *testing.T) {
+		source := `package sample
+import "os/exec"
+func run() { _ = exec.Command("bash", "-c", "kill -9 $PPID").Run() }
+`
+		file := core.NewFileContext("run.go", ".", []byte(source), nil)
+		file.GoFileSet = token.NewFileSet()
+		file.GoAST, _ = parser.ParseFile(file.GoFileSet, file.Path, source, parser.AllErrors)
+		assert.Equal(t, []int{3}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, nil)))
+	})
+	t.Run("parse error fallback", func(t *testing.T) {
+		shellWanted(t, "signal-implicit-target", "broken.sh", `#!/bin/bash
+if then
+kill -9 0 # want
+kill -TERM $PPID # want
+`)
+	})
+}
+
+func TestSignalImplicitTargetFindsExecutedGoStringsInsideLoggingCalls(t *testing.T) {
+	cases := []struct {
+		name, expression string
+	}{
+		{"log.Println", `log.Println(exec.Command("sh", "-c", "kill -TERM 0").Run())`},
+		{"fmt.Fprintln", `fmt.Fprintln(os.Stderr, exec.Command("bash", "-c", "kill -9 $PPID").Run())`},
+		{"log.Fatal", "log.Fatal(exec.Command(\"bash\", \"-c\", \"#!/bin/bash\\nkill 0\").Run())"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := "package sample\nfunc run() {\n" + tc.expression + "\n}\n"
+			file := core.NewFileContext("run.go", ".", []byte(source), nil)
+			file.GoFileSet = token.NewFileSet()
+			file.GoAST, _ = parser.ParseFile(file.GoFileSet, file.Path, source, parser.AllErrors)
+			assert.Equal(t, []int{3}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, nil)))
+		})
+	}
+}
+
+func TestSignalImplicitTargetMapsUnknownCallOffsetAcrossInputs(t *testing.T) {
+	inputs := []signalInput{
+		{text: "echo ready", line: 7, next: "bash -c $'kill -9 0'"},
+		{text: "bash -c $'kill -9 0'", line: 11},
+	}
+	assert.Equal(t, []int{11}, parseSignalLines(inputs, false))
+}
+
+func TestSignalImplicitTargetMakeStripTabsHeredoc(t *testing.T) {
+	delim := patternkit.HeredocRedirect{Word: "EOF", StripTabs: true}
+	assert.True(t, signalHeredocTerminator("\tEOF", delim))
+	assert.False(t, signalHeredocTerminator("  EOF", delim))
+	assert.False(t, signalHeredocTerminator("\tEOF", patternkit.HeredocRedirect{Word: "EOF"}))
+	inputs := []signalInput{
+		{text: "\tbash <<-EOF", line: 1},
+		{text: "\tEOF", line: 2},
+		{text: "\tkill -9 0", line: 3},
+	}
+	assert.Equal(t, []int{3}, parseMakeSignalLines(inputs))
+}
+
+func TestSignalImplicitTargetParserFallbackBranches(t *testing.T) {
+	t.Run("make continuation", func(t *testing.T) {
+		// patternkit has already turned make's $$ into $ in a recipe line.
+		text := "command \\\n kill -9 $PPID"
+		input := signalInput{text: text, lineAt: func(offset int) int { return 2 + strings.Count(text[:offset], "\n") }}
+		assert.Equal(t, []int{3}, parseMakeSignalLines([]signalInput{input}))
+	})
+	t.Run("nested script", func(t *testing.T) {
+		shellWanted(t, "signal-implicit-target", "nested.sh", `kill -9 0 # want
+bash -c 'if then; kill -9 0'`)
+	})
+	t.Run("make recipe", func(t *testing.T) {
+		shellWanted(t, "signal-implicit-target", "Makefile", "all:\n\tif then; kill -9 0 # want\n")
+	})
+	t.Run("executed here document", func(t *testing.T) {
+		shellWanted(t, "signal-implicit-target", "body.sh", `kill -9 0 # want
+bash <<'END_BODY'
+if then; kill 0
+END_BODY
+`)
+	})
+	t.Run("suffix fallback", func(t *testing.T) {
+		source := signalDeepChain("echo safe\n", "if then\nkill -TERM -1\n")
+		assert.Equal(t, []int{131}, scanSignalLines(signalTestInputs(source), false))
+	})
+}
+
+func signalDeepChain(leaf, suffix string) string {
+	var source strings.Builder
+	for i := range 64 {
+		source.WriteString("bash <<D")
+		source.WriteString(strconv.Itoa(i))
+		source.WriteByte('\n')
+	}
+	source.WriteString(leaf)
+	for i := 63; i >= 0; i-- {
+		source.WriteByte('D')
+		source.WriteString(strconv.Itoa(i))
+		source.WriteByte('\n')
+	}
+	source.WriteString(suffix)
+	return source.String()
+}
+
+func signalTestInputs(text string) []signalInput {
+	lines := strings.Split(text, "\n")
+	inputs := make([]signalInput, len(lines))
+	for i, line := range lines {
+		lineNum := i + 1
+		inputs[i] = signalInput{text: line, lineAt: func(int) int { return lineNum }}
+		if i+1 < len(lines) {
+			inputs[i].next = lines[i+1]
+		}
+	}
+	return inputs
 }
 
 func TestSignalImplicitTargetCommandFormsAndQuotedText(t *testing.T) {
@@ -97,7 +302,7 @@ kill -9 -1 # want
 EOF
 cat > stub <<EOF
 #!/bin/sh
-kill 0 # want
+kill 0
 EOF
 `)
 }
@@ -200,7 +405,7 @@ func report(t *testing.T) {
 	file := core.NewFileContext("prose.go", ".", []byte(source), nil)
 	file.GoFileSet = token.NewFileSet()
 	file.GoAST, _ = parser.ParseFile(file.GoFileSet, file.Path, source, parser.AllErrors)
-	assert.Equal(t, []int{15, 17, 18, 19}, rulestest.ViolationLines(newSignalImplicitTargetRule().goFile(file, nil)))
+	assert.Equal(t, []int{15, 17, 18, 19}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, nil)))
 }
 
 func TestSignalImplicitTargetDoesNotTreatOtherGetppidAsOS(t *testing.T) {
@@ -217,9 +422,8 @@ func stop() { _ = syscall.Kill(Getppid(), syscall.SIGTERM) }
 	require.NoError(t, err)
 	file := core.NewFileContext("other.go", ".", []byte(source), nil)
 	file.GoAST, file.GoFileSet, file.GoTypesInfo = parsed, fset, info
-	assert.Empty(t, newSignalImplicitTargetRule().goFile(file, newSignalPackage("", info, parsed)))
+	assert.Empty(t, newSignalImplicitTargetRule().goTypedFile(file, newSignalPackage("", info, parsed)))
 }
-
 func TestSignalImplicitTargetGoExecutedHeredocIsNotScriptData(t *testing.T) {
 	source := `package sample
 import "os/exec"
@@ -231,7 +435,7 @@ func run() {
 	file := core.NewFileContext("run.go", ".", []byte(source), nil)
 	file.GoFileSet = token.NewFileSet()
 	file.GoAST, _ = parser.ParseFile(file.GoFileSet, file.Path, source, parser.AllErrors)
-	assert.Equal(t, []int{5}, rulestest.ViolationLines(newSignalImplicitTargetRule().goFile(file, nil)))
+	assert.Equal(t, []int{5}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, nil)))
 }
 
 func TestSignalImplicitTargetGoSuggestionNamesExplicitChildPID(t *testing.T) {
@@ -273,7 +477,7 @@ func TestSignalImplicitTargetGoLiterals(t *testing.T) {
 	file := core.NewFileContext("signal.go", ".", []byte(source), nil)
 	file.GoFileSet = token.NewFileSet()
 	file.GoAST, _ = parser.ParseFile(file.GoFileSet, file.Path, source, parser.AllErrors)
-	assert.Equal(t, []int{3}, rulestest.ViolationLines(newSignalImplicitTargetRule().goFile(file, nil)))
+	assert.Equal(t, []int{3}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, nil)))
 }
 
 func TestSignalImplicitTargetTestFileCommandData(t *testing.T) {
@@ -285,7 +489,7 @@ func stop() { _ = exec.Command("sh", "-c", "kill -9 -1") }
 	file := core.NewFileContext("guard_test.go", ".", []byte(source), nil)
 	file.GoFileSet = token.NewFileSet()
 	file.GoAST, _ = parser.ParseFile(file.GoFileSet, file.Path, source, parser.AllErrors)
-	assert.Equal(t, []int{4}, rulestest.ViolationLines(newSignalImplicitTargetRule().goFile(file, nil)))
+	assert.Equal(t, []int{4}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, nil)))
 }
 
 func TestSignalImplicitTargetGoLiteralContexts(t *testing.T) {
@@ -304,7 +508,7 @@ func stop(ctx context.Context) {
 	file := core.NewFileContext("guard_test.go", ".", []byte(source), nil)
 	file.GoFileSet = token.NewFileSet()
 	file.GoAST, _ = parser.ParseFile(file.GoFileSet, file.Path, source, parser.AllErrors)
-	assert.Equal(t, []int{7, 10}, rulestest.ViolationLines(newSignalImplicitTargetRule().goFile(file, nil)))
+	assert.Equal(t, []int{7, 10}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, nil)))
 }
 
 func TestSignalImplicitTargetAlwaysKeepsShellRoots(t *testing.T) {
@@ -338,7 +542,7 @@ func send() {
 	require.NoError(t, err)
 	file := core.NewFileContext("typed.go", ".", []byte(source), nil)
 	file.GoAST, file.GoFileSet, file.GoTypesInfo = parsed, fset, info
-	violations := newSignalImplicitTargetRule().goFile(file, newSignalPackage("", info, parsed))
+	violations := newSignalImplicitTargetRule().goTypedFile(file, newSignalPackage("", info, parsed))
 	assert.Equal(t, []int{9, 11, 13, 14}, rulestest.ViolationLines(violations))
 	assert.Contains(t, violations[0].Suggestion, "cmd.Process")
 }
@@ -359,7 +563,7 @@ var sendGroup = func() {
 }
 `
 	file, pkg := rawProcessTypedFile(t, "tgkill.go", "example.com/sample", source)
-	findings := newSignalImplicitTargetRule().goFile(file, pkg)
+	findings := newSignalImplicitTargetRule().goTypedFile(file, pkg)
 	assert.Equal(t, []int{7, 8, 9, 12}, rulestest.ViolationLines(findings))
 }
 
@@ -370,7 +574,7 @@ func TestSignalImplicitTargetSkipsTypedCallsWithoutTypes(t *testing.T) {
 	require.NoError(t, err)
 	file := core.NewFileContext("untyped.go", ".", []byte(source), nil)
 	file.GoAST, file.GoFileSet = parsed, fset
-	assert.Empty(t, newSignalImplicitTargetRule().goFile(file, nil))
+	assert.Empty(t, newSignalImplicitTargetRule().goTypedFile(file, nil))
 }
 
 type signalTestImporter struct{ base types.Importer }
@@ -431,7 +635,7 @@ bash -c '
 echo \
 kill 0
 kill 0 && # want
-  kill 0
+  kill 0 # want
 echo a\|
 kill 0 # want
 echo a#'b
@@ -467,7 +671,7 @@ kill 0 # want
 cat > stub <<EOF \
   && chmod +x stub
 #!/bin/sh
-kill 0 # want
+kill 0
 EOF
 bash <<EOF
 echo "never closed
@@ -484,7 +688,7 @@ func TestSignalImplicitTargetOuterDelimiterEndsNested(t *testing.T) {
 
 func TestSignalImplicitTargetCarriageReturns(t *testing.T) {
 	inputs := textInputs([]string{"cat <<EOF\r", "kill 0\r", "EOF\r", "kill 0 &&\r", "kill 0\r"}, func(i int) int { return i + 1 })
-	assert.Equal(t, []int{4}, scanSignalLines(inputs, false))
+	assert.Equal(t, []int{4, 5}, scanSignalLines(inputs, false))
 }
 
 func TestSignalImplicitTargetMakeHeredocsAndLines(t *testing.T) {
@@ -495,7 +699,7 @@ func TestSignalImplicitTargetMakeHeredocsAndLines(t *testing.T) {
 		"stub:\n"+
 		"\tcat > stub <<EOF\n"+
 		"\t#!/bin/sh\n"+
-		"\tkill 0 # want\n"+
+		"\tkill 0\n"+
 		"\tEOF\n"+
 		"quote:\n"+
 		"\techo \"a\n"+
@@ -547,7 +751,7 @@ func check(out string, t, b, r runner, audit logger) {
 	file := core.NewFileContext("data.go", ".", []byte(source), nil)
 	file.GoFileSet = token.NewFileSet()
 	file.GoAST, _ = parser.ParseFile(file.GoFileSet, file.Path, source, parser.AllErrors)
-	assert.Equal(t, []int{18, 19, 20, 21}, rulestest.ViolationLines(newSignalImplicitTargetRule().goFile(file, nil)))
+	assert.Equal(t, []int{18, 19, 20, 21}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, nil)))
 }
 
 func TestSignalImplicitTargetTypedReceiversPackagesAndSignals(t *testing.T) {
@@ -594,7 +798,7 @@ func named(t runner) {
 	require.NoError(t, err)
 	file := core.NewFileContext("typed.go", ".", []byte(source), nil)
 	file.GoAST, file.GoFileSet, file.GoTypesInfo = parsed, fset, info
-	got := rulestest.ViolationLines(newSignalImplicitTargetRule().goFile(file, newSignalPackage("", info, parsed)))
+	got := rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, newSignalPackage("", info, parsed)))
 	slices.Sort(got)
 	assert.Equal(t, []int{14, 16, 21, 26, 27, 30, 33}, got)
 }
@@ -616,5 +820,65 @@ func check(t missing.T) {
 	require.Error(t, err)
 	file := core.NewFileContext("partial_test.go", ".", []byte(source), nil)
 	file.GoAST, file.GoFileSet, file.GoTypesInfo = parsed, fset, info
-	assert.Empty(t, newSignalImplicitTargetRule().goFile(file, newSignalPackage("", info, parsed)))
+	assert.Empty(t, newSignalImplicitTargetRule().goTypedFile(file, newSignalPackage("", info, parsed)))
+}
+
+func TestSignalImplicitTargetSingleInputKeepsSourceLine(t *testing.T) {
+	text := "echo harmless\nkill -9 0"
+	input := signalInput{text: text, lineAt: func(offset int) int { return 40 + strings.Count(text[:offset], "\n") }}
+	assert.Equal(t, []int{41}, parseSignalLines([]signalInput{input}, false))
+}
+
+func TestSignalImplicitTargetEmptyInputs(t *testing.T) {
+	assert.Nil(t, parseSignalLines(nil, false))
+}
+
+// In a shell script $$PPID is the shell's own PID followed by the letters
+// PPID: an explicit target, not $PPID. Only make turns $$ into $, so in a
+// recipe $$PPID is $PPID and $$$$PPID is the shell's $$PPID again.
+func TestSignalImplicitTargetDoubleDollarIsOwnPID(t *testing.T) {
+	shellWanted(t, "signal-implicit-target", "own.sh", `#!/bin/bash
+kill -9 $$PPID
+kill "$$PPID"
+kill -9 $PPID # want
+`)
+	shellWanted(t, "signal-implicit-target", "Makefile", "all:\n"+
+		"\tkill -9 $$PPID # want\n"+
+		"\tkill $$$$PPID\n"+
+		"\tkill \"$$$$PPID\"\n")
+}
+
+// A $PPID that the shell passes as text is no target: kill gets the letters
+// $PPID and fails. shellcmd proves a word literal only in a simple script, so
+// each form is a script of its own; 0 and -1 written literally still are
+// targets.
+func TestSignalImplicitTargetLiteralDollarIsNoTarget(t *testing.T) {
+	for _, src := range []string{
+		"kill \\$PPID",
+		"kill '$PPID'",
+		"kill -TERM '${PPID}'",
+		"bash -c 'kill \\$PPID'",
+	} {
+		assert.Empty(t, parseSignalLines([]signalInput{{text: src, line: 1}}, false), src)
+	}
+	for _, src := range []string{
+		"kill $PPID",
+		"kill \"$PPID\"",
+		"bash -c \"kill \\$PPID\"",
+		"kill '0'",
+		"kill -- '-1'",
+	} {
+		assert.Equal(t, []int{1}, parseSignalLines([]signalInput{{text: src, line: 1}}, false), src)
+	}
+}
+
+// shellcmd gives Offset -1 when the command name comes from a variable, as in
+// a heredoc body; the finding then takes the line the call reports.
+func TestSignalImplicitTargetCommandNameFromVariable(t *testing.T) {
+	inputs := []signalInput{
+		{text: "K=kill; runuser -k <<EOF", line: 7},
+		{text: "$K 0", line: 11},
+		{text: "EOF", line: 12},
+	}
+	assert.Equal(t, []int{11}, parseSignalLines(inputs, false))
 }

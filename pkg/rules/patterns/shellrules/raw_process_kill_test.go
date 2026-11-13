@@ -261,7 +261,7 @@ var stopErr = syscall.Kill(42, syscall.SIGTERM) // raw
 `
 	file, pkg := rawProcessTypedFile(t, "init.go", "example.com/sample", source)
 	assert.Equal(t, []int{5}, rulestest.ViolationLines(newRawProcessKillRule().analyzeGo(file, pkg)))
-	assert.Equal(t, []int{3, 4}, rulestest.ViolationLines(newSignalImplicitTargetRule().goFile(file, pkg)))
+	assert.Equal(t, []int{3, 4}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
 }
 
 func TestRawProcessKillReportsPackageLevelFunctionLiteral(t *testing.T) {

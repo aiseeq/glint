@@ -11,7 +11,15 @@ import (
 type signalInput struct {
 	text   string
 	lineAt func(offset int) int // the 1-based source line of an offset
+	line   int                  // the 1-based source line when every offset maps to one line
 	next   string               // the physical line after it, "" at the end
+}
+
+func (in signalInput) sourceLine(offset int) int {
+	if in.lineAt != nil {
+		return in.lineAt(offset)
+	}
+	return in.line
 }
 
 // signalPiece is where an input begins in a logical line.
@@ -29,8 +37,8 @@ type signalHeredoc struct {
 // comments, and skips the bodies of here-documents that are data. The quote
 // state carries over to the next line, so each byte is read once.
 type signalScanner struct {
-	inputs   []signalInput
-	make     bool // each input is a whole command line: make runs each alone
+	inputs []signalInput
+
 	quote    signalQuote
 	building bool
 	buf      strings.Builder
@@ -43,7 +51,11 @@ type signalScanner struct {
 // scanSignalLines returns the source line of each command line that signals
 // the parent, every process or the caller's process group.
 func scanSignalLines(inputs []signalInput, makeRecipes bool) []int {
-	s := &signalScanner{inputs: inputs, make: makeRecipes}
+	return parseSignalLines(inputs, makeRecipes)
+}
+
+func scanSignalLinesFallback(inputs []signalInput) []int {
+	s := &signalScanner{inputs: inputs}
 	for j, in := range inputs {
 		if len(s.heredocs) > 0 && s.closesHeredoc(in.text) {
 			s.flush()
@@ -98,7 +110,7 @@ func (s *signalScanner) feed(j int, text string) {
 	s.pieces = append(s.pieces, signalPiece{start: s.buf.Len(), input: j})
 	s.buf.WriteString(kept)
 	s.last = j
-	if !s.make && (backslash || operator || s.quote.open != 0) {
+	if backslash || operator || s.quote.open != 0 {
 		return
 	}
 	s.flush()

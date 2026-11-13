@@ -52,7 +52,7 @@ func (r *signalImplicitTargetRule) RequiresSSA() bool { return false }
 func (r *signalImplicitTargetRule) ReadsNonGoFiles() {}
 
 func (r *signalImplicitTargetRule) AnalyzeGoProject(project *core.GoProjectContext) ([]*core.Violation, error) {
-	return analyzeSignalProject(project, r.goFile)
+	return analyzeSignalProject(project, r.goTypedFile)
 }
 
 // ReportsOn reports whether signalImplicitTargetRule can report on this file:
@@ -72,7 +72,7 @@ func (r *signalImplicitTargetRule) shell(ctx *core.FileContext, src *patternkit.
 			inputs = append(inputs, signalInput{text: l.Text, lineAt: l.LineAt, next: next})
 		}
 	} else {
-		inputs = textInputs(ctx.Lines, func(i int) int { return i + 1 })
+		inputs = []signalInput{{text: string(ctx.Content)}}
 	}
 	var out []*core.Violation
 	for _, line := range scanSignalLines(inputs, src.Make) {
@@ -87,7 +87,7 @@ func textInputs(lines []string, line func(i int) int) []signalInput {
 	inputs := make([]signalInput, len(lines))
 	for i, text := range lines {
 		num := line(i)
-		inputs[i] = signalInput{text: text, lineAt: func(int) int { return num }}
+		inputs[i] = signalInput{text: text, line: num}
 		if i+1 < len(lines) {
 			inputs[i].next = lines[i+1]
 		}
@@ -302,10 +302,23 @@ func badKill(s string) bool {
 	if len(words) == 0 || unquote(words[0].text) != "kill" {
 		return false
 	}
-	args := words[1:]
+	args := make([]string, len(words)-1)
+	for i, word := range words[1:] {
+		args[i] = unquote(word.text)
+	}
+	return badKillArgs(args, nil)
+}
+
+// badKillArgs reports a terminating kill of the parent, every process or the
+// process group. literal(i) tells that args[i] reaches kill as written, so a
+// $PPID there is text, not the parent; nil means no word is known literal.
+func badKillArgs(args []string, literal func(int) bool) bool {
+	for i := range args {
+		args[i] = unquote(args[i])
+	}
 	j, sig := 0, ""
 	for j < len(args) {
-		x := unquote(args[j].text)
+		x := args[j]
 		if x == "--" {
 			j++
 			break
@@ -317,7 +330,7 @@ func badKill(s string) bool {
 			if j+1 >= len(args) {
 				return false
 			}
-			sig = unquote(args[j+1].text)
+			sig = args[j+1]
 			j += 2
 			continue
 		}
@@ -345,8 +358,10 @@ func badKill(s string) bool {
 		return false
 	}
 	for ; j < len(args); j++ {
-		x := unquote(args[j].text)
-		if x == "$PPID" || x == "${PPID}" || x == "-1" || x == "0" {
+		if args[j] == "-1" || args[j] == "0" {
+			return true
+		}
+		if (args[j] == "$PPID" || args[j] == "${PPID}") && (literal == nil || !literal(j)) {
 			return true
 		}
 	}
@@ -368,7 +383,7 @@ func terminatingShellSignal(sig string) bool {
 
 func unquote(s string) string { return strings.Trim(s, `"'`) }
 
-func (r *signalImplicitTargetRule) goFile(f *core.FileContext, pkg *signalPackage) []*core.Violation {
+func (r *signalImplicitTargetRule) goTypedFile(f *core.FileContext, pkg *signalPackage) []*core.Violation {
 	if f.GoAST == nil {
 		return nil
 	}
@@ -402,7 +417,7 @@ func goStringFindings(r *signalImplicitTargetRule, f *core.FileContext, info *ty
 			return true
 		}
 		script := executed[l] || strings.HasPrefix(value, "#!")
-		if !script && (singleKillFixture(value) || strings.Contains(value, "\n") || data[l]) {
+		if !script && (data[l] || singleKillFixture(value) || strings.Contains(value, "\n")) {
 			return true
 		}
 		start := f.LineFor(l)

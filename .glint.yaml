@@ -52,6 +52,22 @@ categories:
             reason: >-
               The shell and Go snippets are test inputs for the rule and are
               never executed as part of the test.
+          - file: "pkg/rules/patterns/shellrules/signal_scan_accept_test.go"
+            reason: >-
+              The shell snippets are test inputs for the rule and are never
+              executed as part of the test.
+          - file: "pkg/rules/patterns/shellrules/signal_scan_accept2_test.go"
+            reason: >-
+              The shell snippets are test inputs for the rule and are never
+              executed as part of the test.
+          - file: "pkg/rules/patterns/shellrules/signal_scan_accept3_test.go"
+            reason: >-
+              The shell and Go snippets are test inputs for the rule and are
+              never executed as part of the test.
+          - file: "pkg/rules/patterns/shellrules/signal_scan_accept4_test.go"
+            reason: >-
+              The shell snippets are test inputs for the rule and are never
+              executed as part of the test.
           - file: "cmd/glint/signal_implicit_target_accept_test.go"
             reason: >-
               The embedded shell and Go snippets are acceptance inputs for the

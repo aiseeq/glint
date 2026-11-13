@@ -211,7 +211,7 @@ const signalAcceptStub = `#!/bin/bash
 cat > "$dir/stub" <<'EOF'
 #!/bin/bash
 sleep 1
-kill -TERM "$PPID" # WANT
+kill -TERM "$PPID"
 EOF
 chmod +x "$dir/stub"
 `
