@@ -15,7 +15,6 @@ import (
 const rawKillAkitProc = `package proc
 
 import (
-	"os/exec"
 	"syscall"
 	"time"
 )
@@ -31,11 +30,6 @@ func StopChild(pid int, grace time.Duration, request func() error) (StopResult, 
 
 func StopFromShell(pid int, grace time.Duration, sig syscall.Signal) (StopResult, error) {
 	return StopResult{}, syscall.Kill(pid, sig)
-}
-
-func CancelByStop(cmd *exec.Cmd, grace time.Duration, sig syscall.Signal) error {
-	cmd.Cancel = func() error { return nil }
-	return nil
 }
 `
 
@@ -97,10 +91,7 @@ func allowed(cmd *exec.Cmd, p *os.Process, pid int) {
 	_, _ = proc.StopFromShell(pid, time.Second, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_ = exec.CommandContext(ctx, "sleep", "1").Run() // WANT
-	ctxCmd := exec.CommandContext(ctx, "sleep", "1")
-	proc.CancelByStop(ctxCmd, time.Second, syscall.SIGTERM)
-	_ = ctxCmd.Run()
+	_ = exec.CommandContext(ctx, "sleep", "1").Run()
 }
 
 // The implicit targets belong to signal-implicit-target: no second finding here.

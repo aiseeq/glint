@@ -99,7 +99,7 @@ func typeSignalFiles(project *core.GoProjectContext) map[*core.FileContext]*sign
 // directory is needed when a test file names a signal function or one of the
 // aliases of Kill and Tgkill the loaded packages declare.
 func signalSourceGroups(project *core.GoProjectContext, aliases map[types.Object]*types.Func) (map[string]*signalSourcePackage, map[string]bool) {
-	names := map[string]bool{"Kill": true, "Signal": true, "Tgkill": true, "CommandContext": true}
+	names := map[string]bool{"Kill": true, "Signal": true, "Tgkill": true}
 	for obj := range aliases {
 		names[obj.Name()] = true
 	}
