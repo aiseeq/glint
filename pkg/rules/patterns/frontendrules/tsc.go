@@ -919,7 +919,7 @@ func hashTscFileContents(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }() // read only
 
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
