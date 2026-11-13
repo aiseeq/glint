@@ -31,7 +31,8 @@ const defaultShellScriptMaxBytes = 20 * 1024
 // The rule is a ratchet against the HEAD commit of the script's repository: a
 // new script over the limit, or one that grew past the limit or beyond its HEAD
 // size, is reported; a large script that kept or lost size is not, so a fix
-// inside it does not have to wait for its move to another language.
+// inside it does not have to wait for its move to another language. Outside a
+// repository there is no HEAD, and no script is reported.
 type ShellScriptSizeRule struct {
 	*rules.BaseRule
 	maxBytes int
@@ -83,7 +84,7 @@ func (r *ShellScriptSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 		return nil
 	}
 	head, err := committedVersion(ctx.Path)
-	if size <= head.size {
+	if size <= head.size || head.noRepository {
 		return nil
 	}
 	v := r.CreateViolation(ctx.RelPath, 1, sizeMessage(size, r.maxBytes, head, err))
@@ -92,10 +93,13 @@ func (r *ShellScriptSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 }
 
 // headVersion is a script as HEAD has it: size -1 when HEAD has no version of
-// it, from the HEAD path when the script moved.
+// it, from the HEAD path when the script moved. noRepository is a script
+// outside every repository, a copy of a tree without .git among them: there
+// is no HEAD to tell a new script from an old one, so neither is reported.
 type headVersion struct {
-	size int
-	from string
+	size         int
+	from         string
+	noRepository bool
 }
 
 // sizeMessage tells the size against the limit and against HEAD, headErr
@@ -133,7 +137,7 @@ func committedVersion(path string) (headVersion, error) {
 	dir, base := filepath.Dir(path), filepath.Base(path)
 	size, found, err := committedSize(dir, "./"+base)
 	if err != nil || found != headPathAbsent {
-		return headVersion{size: size}, err
+		return headVersion{size: size, noRepository: found == headNoRepository}, err
 	}
 	none := headVersion{size: -1}
 	where, err := gitOutput(dir, "rev-parse", "--show-toplevel", "--show-prefix")
@@ -209,9 +213,10 @@ func movedBlobPath(tree, hash, top string, taken map[string]bool) string {
 type headLookup int
 
 const (
-	headPathFound  headLookup = iota
-	headPathAbsent            // HEAD is there, the path is not
-	headMissing               // outside a repository, or one without commits
+	headPathFound    headLookup = iota
+	headPathAbsent              // HEAD is there, the path is not
+	headMissing                 // a repository without commits, or HEAD not read
+	headNoRepository            // outside every repository
 )
 
 // committedSize is the size of a path in HEAD, "./name" from dir or ":path"
@@ -225,7 +230,9 @@ func committedSize(dir, path string) (int, headLookup, error) {
 	switch {
 	case gitSaid(err, "exists on disk, but not in 'HEAD'"):
 		return -1, headPathAbsent, nil
-	case gitSaid(err, "not a git repository", "invalid object name 'HEAD'"):
+	case gitSaid(err, "not a git repository"):
+		return -1, headNoRepository, nil
+	case gitSaid(err, "invalid object name 'HEAD'"):
 		return -1, headMissing, nil
 	case err != nil:
 		return -1, headMissing, err

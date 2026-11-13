@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func shellOfSize(size int) string {
@@ -25,9 +24,10 @@ func shellOfSize(size int) string {
 func TestShellScriptSizeRule(t *testing.T) {
 	rule := NewShellScriptSizeRule()
 	limit := defaultShellScriptMaxBytes
+	repo := emptyRepo(t)
 
 	for _, path := range []string{"tools/run.sh", "tools/run.bash", "tools/run"} {
-		found := rule.AnalyzeFile(rulestest.TextFile(t, path, shellOfSize(limit+1)))
+		found := analyzeIn(t, rule, repo, path, shellOfSize(limit+1))
 		require.Len(t, found, 1, path)
 		assert.Equal(t, 1, found[0].Line, path)
 		assert.Equal(t, path, found[0].File, path)
@@ -35,23 +35,44 @@ func TestShellScriptSizeRule(t *testing.T) {
 		assert.Contains(t, found[0].Message, "over the 20 KB limit", path)
 	}
 
-	assert.Empty(t, rule.AnalyzeFile(rulestest.TextFile(t, "tools/run.sh", shellOfSize(limit))))
+	assert.Empty(t, analyzeIn(t, rule, repo, "tools/run.sh", shellOfSize(limit)))
 
 	// Just over the limit reads as over it, not as equal.
-	found := rule.AnalyzeFile(rulestest.TextFile(t, "tools/run.sh", shellOfSize(limit+400)))
+	found := analyzeIn(t, rule, repo, "tools/run.sh", shellOfSize(limit+400))
 	require.Len(t, found, 1)
 	assert.Contains(t, found[0].Message, "Shell script of 20.4 KB, over the 20 KB limit")
 	require.NoError(t, rule.Configure(map[string]any{"max_bytes": 500}))
-	found = rule.AnalyzeFile(rulestest.TextFile(t, "tools/run.sh", shellOfSize(501)))
+	found = analyzeIn(t, rule, repo, "tools/run.sh", shellOfSize(501))
 	require.Len(t, found, 1)
 	assert.Contains(t, found[0].Message, "Shell script of 501 bytes, over the 500 bytes limit")
 	rule = NewShellScriptSizeRule()
-	assert.Empty(t, rule.AnalyzeFile(rulestest.TextFile(t, "tools/data.txt", strings.Repeat("x", limit+1))))
-	assert.Empty(t, rule.AnalyzeFile(rulestest.TextFile(t, "tools/run", strings.Repeat("x", limit+1))))
-	// Outside a repository every script is new.
-	found = rule.AnalyzeFile(rulestest.TextFile(t, "tools/run.sh", shellOfSize(limit+1)))
+	assert.Empty(t, analyzeIn(t, rule, repo, "tools/data.txt", strings.Repeat("x", limit+1)))
+	assert.Empty(t, analyzeIn(t, rule, repo, "tools/run", strings.Repeat("x", limit+1)))
+	// In a repository without commits every script is new.
+	found = analyzeIn(t, rule, repo, "tools/run.sh", shellOfSize(limit+1))
 	require.Len(t, found, 1)
 	assert.Equal(t, "Shell script of 20.1 KB, over the 20 KB limit for shell: a new shell script", found[0].Message)
+}
+
+// Outside a repository there is no HEAD to hold the ratchet against: a script
+// that may be years old is not passed off as new. A gate step run on another
+// host, on a copy of the tree without .git, sees every committed script so.
+func TestShellScriptSizeRuleOutsideARepository(t *testing.T) {
+	root := t.TempDir()
+	cmd := exec.Command("git", "-C", root, "rev-parse", "--git-dir")
+	cmd.Env = repositoryNeutralEnv(os.Environ())
+	require.Error(t, cmd.Run(), "the temporary directory must lie outside every repository")
+	assert.Empty(t, analyzeIn(t, NewShellScriptSizeRule(), root, "ops/big.sh", shellOfSize(defaultShellScriptMaxBytes+2048)))
+}
+
+// emptyRepo is a git repository without commits.
+func emptyRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	cmd := exec.Command("git", "-C", root, "init", "-q")
+	cmd.Env = repositoryNeutralEnv(os.Environ())
+	require.NoError(t, cmd.Run())
+	return root
 }
 
 // committedRepo is a git repository whose HEAD holds the given files.
@@ -341,9 +362,10 @@ func TestShellScriptSizeRuleMessageTellsSizesApart(t *testing.T) {
 // error, not a silent default.
 func TestShellScriptSizeRuleConfigure(t *testing.T) {
 	rule := NewShellScriptSizeRule()
+	repo := emptyRepo(t)
 	require.NoError(t, rule.Configure(map[string]any{"max_bytes": 100}))
-	assert.Len(t, rule.AnalyzeFile(rulestest.TextFile(t, "a.sh", shellOfSize(101))), 1)
-	assert.Empty(t, rule.AnalyzeFile(rulestest.TextFile(t, "a.sh", shellOfSize(100))))
+	assert.Len(t, analyzeIn(t, rule, repo, "a.sh", shellOfSize(101)), 1)
+	assert.Empty(t, analyzeIn(t, rule, repo, "a.sh", shellOfSize(100)))
 
 	for _, bad := range []any{0, -5, "big"} {
 		assert.Error(t, NewShellScriptSizeRule().Configure(map[string]any{"max_bytes": bad}), bad)
