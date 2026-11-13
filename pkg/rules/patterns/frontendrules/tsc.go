@@ -496,25 +496,50 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 		return lookup.answer, nil
 	}
 	slowStarted := time.Now()
-	shown, err := tscOutput(program.tsc, dir, append(project, "--showConfig")...)
-	if err != nil {
-		return tscAnswer{}, err
+	notStrict := lookup.notStrict
+	if !lookup.configKnown {
+		shown, showErr := tscOutput(program.tsc, dir, append(project, "--showConfig")...)
+		if showErr != nil {
+			return tscAnswer{}, showErr
+		}
+		notStrict, err = strictGaps(shown)
+		if err != nil {
+			return tscAnswer{}, fmt.Errorf("read tsc --showConfig of %s: %w", program.config, err)
+		}
 	}
-	notStrict, err := strictGaps(shown)
-	if err != nil {
-		return tscAnswer{}, fmt.Errorf("read tsc --showConfig of %s: %w", program.config, err)
+	if lookup.globalVersion != "" {
+		global.version = lookup.globalVersion
+	} else {
+		global, err = globalTscVersion(global)
+		if err != nil {
+			return tscAnswer{}, err
+		}
 	}
-	global, err = globalTscVersion(global)
-	if err != nil {
-		return tscAnswer{}, err
+	localMajor := lookup.localMajor
+	localReuse := lookup.reuseBuildInfo
+	if !toolcache.Disabled {
+		if localMajor == 0 {
+			localVersion, versionErr := toolVersion(program.tsc)
+			if versionErr != nil {
+				return tscAnswer{}, versionErr
+			}
+			if match := tscVersion.FindStringSubmatch(localVersion); match != nil {
+				if major, parseErr := strconv.Atoi(match[1]); parseErr == nil {
+					localMajor = major
+				}
+			}
+		}
+		if localMajor > 0 && localMajor < 7 {
+			localReuse = true
+		}
 	}
 	answer := tscAnswer{NotStrict: notStrict}
 	var listed []byte
-	answer.Errors, listed, err = incrementalTscDiagnostics(program.tsc, dir, program.config, run...)
+	answer.Errors, listed, err = incrementalTscDiagnostics(program.tsc, dir, program.config, localReuse, run...)
 	if err != nil {
 		return tscAnswer{}, err
 	}
-	newer, _, err := incrementalTscDiagnostics(global.path, dir, program.config, run...)
+	newer, newerListed, err := incrementalTscDiagnostics(global.path, dir, program.config, lookup.reuseBuildInfo, run...)
 	if err != nil {
 		return tscAnswer{}, fmt.Errorf("tsc 7: %w", err)
 	}
@@ -529,9 +554,16 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 			answer.TSC7 = append(answer.TSC7, d)
 		}
 	}
-	if !hasUnresolvedReferenceDiagnostic(answer) {
-		if err := storeProjectStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, answer, slowStarted); err != nil {
+	if !toolcache.Disabled {
+		listed = append(listed, newerListed...)
+		stored, err := storeProjectStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, answer, slowStarted, lookup.inputs, localMajor, global.version)
+		if err != nil {
 			return tscAnswer{}, err
+		}
+		if !stored && hasUnresolvedReferenceDiagnostic(answer) {
+			if err := tscCache.Store(statFingerprintKey(identity), tscStatFingerprint{}); err != nil {
+				return tscAnswer{}, err
+			}
 		}
 	}
 	return answer, nil
@@ -541,10 +573,13 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 // could resolve after a file or package appears, so such an answer is not
 // kept by stat.
 func hasUnresolvedReferenceDiagnostic(answer tscAnswer) bool {
+	return hasTscDiagnostic(answer, "TS2307", "TS2792", "TS7016", "TS2688", "TS6053", "TS2875")
+}
+
+func hasTscDiagnostic(answer tscAnswer, codes ...string) bool {
 	for _, diagnostics := range [][]tscDiagnostic{answer.Errors, answer.TSC7} {
 		for _, diagnostic := range diagnostics {
-			switch diagnostic.Code {
-			case "TS2307", "TS2792", "TS7016", "TS2688", "TS6053":
+			if slices.Contains(codes, diagnostic.Code) {
 				return true
 			}
 		}
@@ -552,7 +587,11 @@ func hasUnresolvedReferenceDiagnostic(answer tscAnswer) bool {
 	return false
 }
 
-func incrementalTscDiagnostics(tsc, dir, config string, args ...string) ([]tscDiagnostic, []byte, error) {
+func incrementalTscDiagnostics(tsc, dir, config string, reuse bool, args ...string) ([]tscDiagnostic, []byte, error) {
+	if toolcache.Disabled {
+		result, listed, temp, runErr := runTscWithTempBuildInfo(tsc, dir, args, filepath.Join(os.TempDir(), "tsc.tsbuildinfo"), nil, false)
+		return result, listed, errors.Join(runErr, removeTempBuildInfo(temp))
+	}
 	cacheDir, err := tscCache.Dir()
 	if err != nil {
 		return nil, nil, fmt.Errorf("locate the tsc build info cache: %w", err)
@@ -567,11 +606,15 @@ func incrementalTscDiagnostics(tsc, dir, config string, args ...string) ([]tscDi
 	}
 	identity := toolcache.Key([]byte(config), []byte(tsc))
 	buildInfo := filepath.Join(cacheDir, identity+".tsbuildinfo")
-	return runWithBuildInfo(tsc, dir, args, buildInfo)
+	return runWithBuildInfo(tsc, dir, args, buildInfo, reuse)
 }
 
-func runWithBuildInfo(tsc, dir string, args []string, buildInfo string) ([]tscDiagnostic, []byte, error) {
-	data, readErr := os.ReadFile(buildInfo)
+func runWithBuildInfo(tsc, dir string, args []string, buildInfo string, reuse bool) ([]tscDiagnostic, []byte, error) {
+	var data []byte
+	readErr := error(fs.ErrNotExist)
+	if reuse {
+		data, readErr = os.ReadFile(buildInfo)
+	}
 	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
 		return nil, nil, fmt.Errorf("read tsc build info %s: %w", buildInfo, readErr)
 	}
@@ -675,8 +718,10 @@ func runStandalone(file string, global globalTscInfo) (tscAnswer, error) {
 	if err != nil {
 		return tscAnswer{}, err
 	}
-	if err := tscCache.Store(key, answer); err != nil {
-		return tscAnswer{}, err
+	if !toolcache.Disabled {
+		if err := tscCache.Store(key, answer); err != nil {
+			return tscAnswer{}, err
+		}
 	}
 	if err := storeStandaloneFingerprint(identity, global, listed, before, key, slowStarted, answer); err != nil {
 		return tscAnswer{}, err
@@ -688,7 +733,7 @@ func runStandalone(file string, global globalTscInfo) (tscAnswer, error) {
 // unless its answer misses a module: the file that appears later need not lie
 // in a directory the fingerprint watches.
 func storeStandaloneFingerprint(identity []string, global globalTscInfo, listed []byte, before tscStatFingerprint, key string, slowStarted time.Time, answer tscAnswer) error {
-	if hasUnresolvedReferenceDiagnostic(answer) {
+	if toolcache.Disabled || hasUnresolvedReferenceDiagnostic(answer) {
 		return nil
 	}
 	return storeStatFingerprintIfStable(identity, []string{global.path}, "", listed, before, key, slowStarted, global.typeRoots)
@@ -698,13 +743,18 @@ type tscFileStat struct {
 	Path      string `json:"path"`
 	Size      int64  `json:"size"`
 	ModTimeNS int64  `json:"mtimeNs"`
+	Missing   bool   `json:"missing,omitempty"`
+	Entries   string `json:"entries,omitempty"`
 }
 
 type tscStatFingerprint struct {
-	AnswerKey string        `json:"answerKey"`
-	Answer    *tscAnswer    `json:"answer,omitempty"`
-	Files     []tscFileStat `json:"files"`
-	Dirs      []tscFileStat `json:"dirs"`
+	AnswerKey     string        `json:"answerKey"`
+	Answer        *tscAnswer    `json:"answer,omitempty"`
+	LocalMajor    int           `json:"localMajor,omitempty"`
+	GlobalVersion string        `json:"globalVersion,omitempty"`
+	ConfigFiles   []string      `json:"configFiles,omitempty"`
+	Files         []tscFileStat `json:"files"`
+	Dirs          []tscFileStat `json:"dirs"`
 }
 
 func statFingerprintKey(identity []string) string {
@@ -712,7 +762,7 @@ func statFingerprintKey(identity []string) string {
 	for i, part := range identity {
 		parts[i] = []byte(part)
 	}
-	return "stat-" + toolcache.Key(parts...)
+	return "stat-v3-" + toolcache.Key(parts...)
 }
 
 func statPath(path string) (tscFileStat, error) {
@@ -726,6 +776,7 @@ func statPath(path string) (tscFileStat, error) {
 func makeStatFingerprint(tscPaths []string, config string, listed []byte, answerKey string, watchedDirs ...string) (tscStatFingerprint, error) {
 	fingerprint := tscStatFingerprint{AnswerKey: answerKey}
 	files := map[string]bool{}
+	optional := map[string]bool{}
 	directories := map[string]bool{}
 	for _, path := range tscPaths {
 		files[path] = true
@@ -749,16 +800,46 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 		for _, path := range configs {
 			files[path] = true
 		}
+		fingerprint.ConfigFiles = configs
 		root = filepath.Dir(config)
+		// Type roots can affect resolution even when no file in them was listed.
+		for dir := root; ; dir = filepath.Dir(dir) {
+			for _, path := range []string{filepath.Join(dir, "node_modules"), filepath.Join(dir, "node_modules", "@types")} {
+				files[path] = true
+				optional[path] = true
+			}
+			if filepath.Dir(dir) == dir {
+				break
+			}
+		}
+	}
+	// Package metadata controls module resolution, but --listFiles omits it.
+	for path := range maps.Clone(files) {
+		for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+			packageJSON := filepath.Join(dir, "package.json")
+			files[packageJSON] = true
+			optional[packageJSON] = true
+			if filepath.Dir(dir) == dir {
+				break
+			}
+		}
 	}
 	filePaths := slices.Sorted(maps.Keys(files))
 	for _, path := range filePaths {
+		if !optional[path] {
+			addFingerprintDirs(filepath.Dir(path), root, directories)
+		}
+	}
+	for _, path := range filePaths {
 		stamp, err := statPath(path)
+		if optional[path] && errors.Is(err, fs.ErrNotExist) {
+			fingerprint.Files = append(fingerprint.Files, tscFileStat{Path: path, Missing: true})
+			continue
+		}
 		if err != nil {
 			return tscStatFingerprint{}, fmt.Errorf("stat a tsc input %s: %w", path, err)
 		}
 		fingerprint.Files = append(fingerprint.Files, stamp)
-		addFingerprintDirs(filepath.Dir(path), root, directories)
 	}
 	for _, path := range watchedDirs {
 		addFingerprintDirs(path, "", directories)
@@ -769,9 +850,27 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 		if err != nil {
 			return tscStatFingerprint{}, fmt.Errorf("stat a tsc input directory %s: %w", path, err)
 		}
+		stamp.Entries, err = tscDirectoryEntries(path)
+		if err != nil {
+			return tscStatFingerprint{}, err
+		}
 		fingerprint.Dirs = append(fingerprint.Dirs, stamp)
 	}
 	return fingerprint, nil
+}
+
+// tscDirectoryEntries distinguishes an atomic replacement from a change in
+// the set of files tsc can discover in a watched directory.
+func tscDirectoryEntries(path string) (string, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return "", fmt.Errorf("read a tsc input directory %s: %w", path, err)
+	}
+	parts := make([][]byte, 0, len(entries)*2)
+	for _, entry := range entries {
+		parts = append(parts, []byte(entry.Name()), []byte(entry.Type().String()))
+	}
+	return toolcache.Key(parts...), nil
 }
 
 func addFingerprintDirs(dir, root string, directories map[string]bool) {
@@ -798,8 +897,14 @@ func addFingerprintDirs(dir, root string, directories map[string]bool) {
 }
 
 type tscStatLookup struct {
-	answer tscAnswer
-	status tscStatStatus
+	answer         tscAnswer
+	status         tscStatStatus
+	reuseBuildInfo bool
+	inputs         *tscStatFingerprint
+	localMajor     int
+	globalVersion  string
+	configKnown    bool
+	notStrict      []string
 }
 
 type tscStatStatus uint8
@@ -819,29 +924,29 @@ func statCachedAnswer(identity, tscPaths []string) (tscStatLookup, error) {
 	if !found {
 		return tscStatLookup{status: tscStatMiss}, nil
 	}
-	stale := false
-	for _, saved := range append(append([]tscFileStat{}, fingerprint.Files...), fingerprint.Dirs...) {
-		current, err := statPath(saved.Path)
-		if err != nil { //nolint:silent-error-handling // A stat failure invalidates the fingerprint and the slow path rechecks the input.
-			// A stat failure invalidates the optimization; the slow path reports or rechecks it.
-			stale = true
-			break
+	if fingerprint.Answer == nil && fingerprint.AnswerKey == "" {
+		return tscStatLookup{status: tscStatMiss}, nil
+	}
+	stale, reuse, compilerChanged, configChanged := tscFingerprintChanges(fingerprint, tscPaths)
+	if fingerprint.Answer != nil && hasUnresolvedReferenceDiagnostic(*fingerprint.Answer) {
+		// A missing JSX runtime can appear inside an unlisted package directory.
+		// tsc 7 retains TS2875 even when it appears, so this answer needs a fresh run.
+		if hasTscDiagnostic(*fingerprint.Answer, "TS2875") {
+			reuse = false
 		}
-		if current.Size != saved.Size || current.ModTimeNS != saved.ModTimeNS {
-			stale = true
-			break
-		}
+		stale = true // unresolved references are never answer-cache hits
 	}
 	if stale {
-		for _, executable := range tscPaths {
-			for _, saved := range fingerprint.Files {
-				if saved.Path == executable {
-					forgetToolVersion(executable)
-					break
-				}
-			}
+		lookup := tscStatLookup{status: tscStatStale, reuseBuildInfo: reuse, inputs: refreshTscInputs(fingerprint)}
+		if !compilerChanged {
+			lookup.localMajor = fingerprint.LocalMajor
+			lookup.globalVersion = fingerprint.GlobalVersion
 		}
-		return tscStatLookup{status: tscStatStale}, nil
+		if !configChanged && len(fingerprint.ConfigFiles) > 0 && fingerprint.Answer != nil {
+			lookup.configKnown = true
+			lookup.notStrict = fingerprint.Answer.NotStrict
+		}
+		return lookup, nil
 	}
 	if fingerprint.Answer != nil {
 		return tscStatLookup{answer: *fingerprint.Answer, status: tscStatHit}, nil
@@ -855,6 +960,79 @@ func statCachedAnswer(identity, tscPaths []string) (tscStatLookup, error) {
 		return tscStatLookup{status: tscStatMiss}, nil
 	}
 	return tscStatLookup{answer: answer, status: tscStatHit}, nil
+}
+
+func tscFingerprintChanges(fingerprint tscStatFingerprint, tscPaths []string) (bool, bool, bool, bool) {
+	stale, reuse := false, true
+	compilerChanged := false
+	configChanged := false
+	for _, saved := range fingerprint.Files {
+		current, err := statPath(saved.Path)
+		if saved.Missing && errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil || current.Size != saved.Size || current.ModTimeNS != saved.ModTimeNS {
+			stale = true
+			// Package metadata, type roots and compiler versions affect resolution.
+			if slices.Contains(tscPaths, saved.Path) || filepath.Base(saved.Path) == "package.json" || strings.Contains(saved.Path+string(filepath.Separator), string(filepath.Separator)+"node_modules"+string(filepath.Separator)) {
+				reuse = false
+				configChanged = true
+			}
+			if slices.Contains(fingerprint.ConfigFiles, saved.Path) {
+				configChanged = true
+				reuse = false
+			}
+			if slices.Contains(tscPaths, saved.Path) {
+				compilerChanged = true
+				forgetToolVersion(saved.Path)
+			}
+		}
+	}
+	for _, saved := range fingerprint.Dirs {
+		current, err := statPath(saved.Path)
+		if err != nil || current.Size != saved.Size || current.ModTimeNS != saved.ModTimeNS {
+			stale = true
+			entries, readErr := tscDirectoryEntries(saved.Path)
+			if readErr != nil || entries != saved.Entries || strings.Contains(saved.Path+string(filepath.Separator), string(filepath.Separator)+"node_modules"+string(filepath.Separator)) {
+				reuse = false
+				configChanged = true
+			}
+		}
+	}
+	return stale, reuse, compilerChanged, configChanged
+}
+
+// refreshTscInputs captures the inputs just before a slow run. Comparing them
+// with the inputs after tsc permits caching recent edits without caching a
+// result when an input changed while tsc was running.
+func refreshTscInputs(saved tscStatFingerprint) *tscStatFingerprint {
+	current := tscStatFingerprint{ConfigFiles: append([]string(nil), saved.ConfigFiles...)}
+	for _, file := range saved.Files {
+		stamp, err := statPath(file.Path)
+		if file.Missing && errors.Is(err, fs.ErrNotExist) {
+			current.Files = append(current.Files, file)
+			continue
+		}
+		if err != nil {
+			slog.Debug("cannot refresh a tsc input", "path", file.Path, "error", err)
+			return nil
+		}
+		current.Files = append(current.Files, stamp)
+	}
+	for _, dir := range saved.Dirs {
+		stamp, err := statPath(dir.Path)
+		if err != nil {
+			slog.Debug("cannot refresh a tsc input directory", "path", dir.Path, "error", err)
+			return nil
+		}
+		stamp.Entries, err = tscDirectoryEntries(dir.Path)
+		if err != nil {
+			slog.Debug("cannot list a tsc input directory", "path", dir.Path, "error", err)
+			return nil
+		}
+		current.Dirs = append(current.Dirs, stamp)
+	}
+	return &current
 }
 
 func forgetToolVersion(program string) {
@@ -881,23 +1059,31 @@ func storeStatFingerprintIfStable(identity, tscPaths []string, config string, li
 	return tscCache.Store(statFingerprintKey(identity), after)
 }
 
-func storeProjectStatFingerprintIfStable(identity, tscPaths []string, config string, listed []byte, answer tscAnswer, slowStarted time.Time) error {
+func storeProjectStatFingerprintIfStable(identity, tscPaths []string, config string, listed []byte, answer tscAnswer, slowStarted time.Time, before *tscStatFingerprint, localMajor int, globalVersion string) (bool, error) {
 	after, err := makeStatFingerprint(tscPaths, config, listed, "")
-	if err != nil { //nolint:silent-error-handling // An input changed or disappeared during tsc, so the optimization must not be saved.
-		return nil
+	if err != nil {
+		slog.Debug("cannot save a tsc input fingerprint", "error", err)
+		return false, nil
 	}
-	cutoff := slowStarted.Add(-time.Second).UnixNano()
-	for _, saved := range append(append([]tscFileStat{}, after.Files...), after.Dirs...) {
-		if saved.ModTimeNS >= cutoff {
-			return nil
+	if before == nil || !sameStatFingerprint(*before, after) {
+		cutoff := slowStarted.Add(-time.Second).UnixNano()
+		for _, saved := range append(append([]tscFileStat{}, after.Files...), after.Dirs...) {
+			if saved.ModTimeNS >= cutoff {
+				return false, nil
+			}
 		}
 	}
 	after.Answer = &answer
-	return tscCache.Store(statFingerprintKey(identity), after)
+	after.LocalMajor = localMajor
+	after.GlobalVersion = globalVersion
+	if err := tscCache.Store(statFingerprintKey(identity), after); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func sameStatFingerprint(left, right tscStatFingerprint) bool {
-	if len(left.Files) != len(right.Files) || len(left.Dirs) != len(right.Dirs) {
+	if len(left.Files) != len(right.Files) || len(left.Dirs) != len(right.Dirs) || !slices.Equal(left.ConfigFiles, right.ConfigFiles) {
 		return false
 	}
 	for i := range left.Files {
