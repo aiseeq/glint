@@ -798,3 +798,38 @@ func hostName(rawURL string) string {
 	host, _, _ = strings.Cut(host, ":")
 	return host
 }
+
+// calleeCandidates is what a call's function may be: the expression itself,
+// and, when it is a plain name, every value the test body assigns to that
+// name. A constructor taken as a value (f := New; f()) is the same call as
+// the constructor. Test files carry no type information, so the name is
+// matched syntactically: a stray assignment of the same name can only add a
+// candidate, which keeps the rule on the side of reporting.
+func calleeCandidates(body *ast.BlockStmt, fun ast.Expr) []ast.Expr {
+	candidates := []ast.Expr{fun}
+	id, ok := ast.Unparen(fun).(*ast.Ident)
+	if !ok {
+		return candidates
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			if len(n.Lhs) != len(n.Rhs) {
+				return true
+			}
+			for i, lhs := range n.Lhs {
+				if l, isIdent := lhs.(*ast.Ident); isIdent && l.Name == id.Name {
+					candidates = append(candidates, ast.Unparen(n.Rhs[i]))
+				}
+			}
+		case *ast.ValueSpec:
+			for i, name := range n.Names {
+				if name.Name == id.Name && i < len(n.Values) {
+					candidates = append(candidates, ast.Unparen(n.Values[i]))
+				}
+			}
+		}
+		return true
+	})
+	return candidates
+}

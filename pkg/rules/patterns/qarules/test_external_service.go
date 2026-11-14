@@ -880,24 +880,20 @@ func (r *TestExternalServiceRule) outboundCalls(
 		if call.Pos() >= scope.liveEnd {
 			return false
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
+		var (
+			sel      *ast.SelectorExpr
+			ident    *ast.Ident
+			path     string
+			evidence outboundPackage
+			entry    liveEntry
+		)
+		found := false
+		for _, candidate := range calleeCandidates(fn.Body, call.Fun) {
+			if sel, ident, path, evidence, entry, found = qualifiedEntry(candidate, imports, outbound); found {
+				break
+			}
 		}
-		ident, ok := sel.X.(*ast.Ident)
-		if !ok {
-			return true
-		}
-		path, ok := imports[ident.Name]
-		if !ok {
-			return true
-		}
-		evidence, ok := outbound[path]
-		if !ok {
-			return true
-		}
-		entry, ok := evidence.entries[sel.Sel.Name]
-		if !ok {
+		if !found {
 			return true
 		}
 		// Конструктор, которому транспорт передали как nil, никуда не пойдёт: так тесты
@@ -954,8 +950,7 @@ func (r *TestExternalServiceRule) inPackageCalls(
 		if call.Pos() >= scope.liveEnd {
 			return false
 		}
-		ident, ok := call.Fun.(*ast.Ident)
-		if !ok {
+		if _, ok := call.Fun.(*ast.Ident); !ok {
 			if sel, isMethod := call.Fun.(*ast.SelectorExpr); isMethod {
 				global, isGlobal := sel.X.(*ast.Ident)
 				if isGlobal {
@@ -979,8 +974,19 @@ func (r *TestExternalServiceRule) inPackageCalls(
 			}
 			return true
 		}
-		entry, ok := own.entries[ident.Name]
-		if !ok || entry.nilTransport(call) {
+		var (
+			ident *ast.Ident
+			entry liveEntry
+		)
+		for _, candidate := range calleeCandidates(fn.Body, call.Fun) {
+			if id, isIdent := candidate.(*ast.Ident); isIdent {
+				if e, isEntry := own.entries[id.Name]; isEntry {
+					ident, entry = id, e
+					break
+				}
+			}
+		}
+		if ident == nil || entry.nilTransport(call) {
 			return true
 		}
 		host, live := scope.reaches(fn.Body, call, entry, own, nil, file.GoTypesInfo)
@@ -1175,4 +1181,26 @@ func importAliases(file *ast.File, outbound map[string]outboundPackage) map[stri
 		aliases[name] = path
 	}
 	return aliases
+}
+
+// qualifiedEntry resolves pkg.Name to a live entry point of an outbound package.
+func qualifiedEntry(fun ast.Expr, imports map[string]string, outbound map[string]outboundPackage) (*ast.SelectorExpr, *ast.Ident, string, outboundPackage, liveEntry, bool) {
+	sel, ok := fun.(*ast.SelectorExpr)
+	if !ok {
+		return nil, nil, "", outboundPackage{}, liveEntry{}, false
+	}
+	ident, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return nil, nil, "", outboundPackage{}, liveEntry{}, false
+	}
+	path, ok := imports[ident.Name]
+	if !ok {
+		return nil, nil, "", outboundPackage{}, liveEntry{}, false
+	}
+	evidence, ok := outbound[path]
+	if !ok {
+		return nil, nil, "", outboundPackage{}, liveEntry{}, false
+	}
+	entry, ok := evidence.entries[sel.Sel.Name]
+	return sel, ident, path, evidence, entry, ok
 }

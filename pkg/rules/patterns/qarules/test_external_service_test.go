@@ -1700,3 +1700,44 @@ func TestOwnPackageHelperSends(t *testing.T) { c := provider.New(); ignore(c) }
 	}
 	assert.ElementsMatch(t, []string{"provider/client_test.go:6", "provider/external_test.go:10"}, found, "%v", messages(violations))
 }
+
+func TestTestExternalServiceRule_ConstructorTakenAsFunctionValue(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() *Client { return &Client{Base: "https://func-value-api.example.com"} }
+func (c *Client) Send() { _, _ = http.Get(c.Base) }
+`,
+		"provider/client_test.go": `package provider
+
+import "testing"
+
+func TestFuncValue(t *testing.T) { f := New; c := f(); c.Send() }
+func TestFuncValueVar(t *testing.T) { var f = New; f().Send() }
+func TestFuncValueUnused(t *testing.T) { f := New; c := f(); _ = c.Base }
+func TestFuncValueNotCalled(t *testing.T) { f := New; _ = f }
+`,
+		"provider/external_test.go": `package provider_test
+
+import (
+	"testing"
+
+	"example.com/rulestest/provider"
+)
+
+func TestQualifiedFuncValue(t *testing.T) { f := provider.New; f().Send() }
+func TestQualifiedFuncValueUnused(t *testing.T) { f := provider.New; _ = f().Base }
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var found []string
+	for _, v := range violations {
+		found = append(found, v.File+":"+strconv.Itoa(v.Line))
+	}
+	assert.ElementsMatch(t, []string{"provider/client_test.go:5", "provider/client_test.go:6", "provider/external_test.go:9"}, found, "%v", messages(violations))
+}
