@@ -432,11 +432,6 @@ func commentHasSuppressionMarker(comment, ruleName string) bool {
 	return slices.Contains(names, ruleName)
 }
 
-func nolintListContains(comment, ruleName string) bool {
-	names, _ := nolintNames(comment)
-	return slices.Contains(names, ruleName)
-}
-
 // nolintNames returns the rule names of the comment's nolint:<list>, and found
 // reports whether the comment has a nolint list at all. The list is
 // comma-separated and may have spaces after the commas (nolint:a, b). Prose
