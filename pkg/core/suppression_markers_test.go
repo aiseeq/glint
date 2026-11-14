@@ -68,6 +68,7 @@ var markerFixtures = []markerFixture{
 	{"sql dollar string after AS and a bracket", "m.sql", "SELECT 1 AS (\n$$\n-- nolint:my-rule\n$$);\nSET x = 1;\n", nil},
 	{"sql dollar string after AS and a quoted name", "m.sql", "SELECT 1 AS \"a\" $$\n-- nolint:my-rule\n$$;\nSET x = 1;\n", nil},
 	{"sql dollar string first in a body", "m.sql", "DO $a$\n$q$\n-- nolint:my-rule\n$q$\n$a$;\nSET x = 1;\n", nil},
+	{"sql body closed right after a word", "m.sql", "DO $$\nBEGIN\n  SET x = 1;\nEND$$;\nSELECT $$ -- nolint:my-rule $$;\nSET x = 1;\n", nil},
 	{"sql dollar in a name ending in do", "m.sql", "SELECT do$$ FROM t;\nSELECT $$\n-- nolint:my-rule\n$$;\nSET x = 1;\n", nil},
 	{"sql dollar string after AS and a comma", "m.sql", "SELECT 1 AS a, $$\n-- nolint:my-rule\n$$;\nSET x = 1;\n", nil},
 	{"sql escape string", "m.sql", "SELECT E'\\'' AS q; -- nolint:my-rule\nSET x = 1;\n", []int{1}},
