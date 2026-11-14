@@ -1,6 +1,6 @@
-# Working with glint
-
 This guide describes the glint version that printed it.
+
+# Working with glint
 
 ## Finding
 

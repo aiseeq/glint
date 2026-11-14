@@ -33,7 +33,7 @@ func TestGuideSections(t *testing.T) {
 	if err := runGuide(guideCmd, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out.String(), "# Working with glint\n\nThis guide describes the glint version that printed it.") {
+	if !strings.HasPrefix(out.String(), "This guide describes the glint version that printed it.\n\n# Working with glint\n") {
 		t.Fatalf("unexpected guide introduction: %q", out.String())
 	}
 	if err := runGuide(guideCmd, []string{"unknown"}); err == nil || !strings.Contains(err.Error(), strings.Join(sections, ", ")) {
