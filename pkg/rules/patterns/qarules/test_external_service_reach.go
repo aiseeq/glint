@@ -305,8 +305,10 @@ func intraPackageCallees(body *ast.BlockStmt, info *types.Info, self *types.Pack
 	return callees
 }
 
-// returnsLiveType reports whether the function hands back a client of this package dedicated to
-// the outside service — one whose exported methods are mostly network calls.
+// returnsLiveType reports whether the function hands back a type of this package with an
+// exported method that reaches the network. Inert methods beside it (getters, labels) do not
+// make it less of a client: a test counts as live only when it calls a live method or lets the
+// value escape (liveCallScope.reaches).
 func returnsLiveType(fn *ast.FuncDecl, info *types.Info, self *types.Package, live map[string]bool) bool {
 	obj, ok := info.Defs[fn.Name].(*types.Func)
 	if !ok || obj.Type() == nil {
@@ -321,18 +323,10 @@ func returnsLiveType(fn *ast.FuncDecl, info *types.Info, self *types.Package, li
 		if named == nil || named.Obj().Pkg() != self {
 			continue
 		}
-		var exported, liveCount int
 		for method := range named.Methods() {
-			if !method.Exported() {
-				continue
+			if method.Exported() && live[named.Obj().Name()+"."+method.Name()] {
+				return true
 			}
-			exported++
-			if live[named.Obj().Name()+"."+method.Name()] {
-				liveCount++
-			}
-		}
-		if liveCount > 0 && liveCount*2 > exported {
-			return true
 		}
 	}
 	return false

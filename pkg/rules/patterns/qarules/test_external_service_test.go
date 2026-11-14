@@ -1762,3 +1762,33 @@ var sharedCtor = provider.New
 	}
 	assert.ElementsMatch(t, []string{"provider/client_test.go:5", "provider/client_test.go:6", "provider/client_test.go:10", "provider/client_test.go:11", "provider/client_test.go:12", "provider/client_test.go:14", "provider/client_test.go:17", "provider/client_test.go:20", "provider/external_test.go:9", "provider/external_test.go:12", "provider/external_test.go:13"}, found, "%v", messages(violations))
 }
+
+func TestTestExternalServiceRule_ClientWithMoreInertThanLiveMethods(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() *Client { return &Client{Base: "https://getter-api.example.com"} }
+func (c *Client) Send() { _, _ = http.Get(c.Base) }
+func (c *Client) Name() string { return c.Base }
+func (c *Client) Label() string { return "client" }
+`,
+		"provider/client_test.go": `package provider
+
+import "testing"
+
+func TestSend(t *testing.T) { New().Send() }
+func TestOnlyInert(t *testing.T) { c := New(); _ = c.Name(); _ = c.Label() }
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var found []string
+	for _, v := range violations {
+		found = append(found, v.File+":"+strconv.Itoa(v.Line))
+	}
+	assert.ElementsMatch(t, []string{"provider/client_test.go:5"}, found, "%v", messages(violations))
+}
