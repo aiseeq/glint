@@ -57,6 +57,8 @@ tasks:
   build:
     desc: build the binary into bin/
     heavy: true
+    # Stays here: bin/glint is the build's product, and a host run leaves its
+    # files on the host (worker pc returns none, measured 14.11).
     env: {GOFLAGS: -tags=pgquery_cgo}
     run:
       - [go, run, ./cmd/glintbuild, '${GRAFT_VERSION}']
@@ -182,12 +184,16 @@ tasks:
   consumers:
     desc: compare old and new glint across configured consumers
     heavy: true
+    # Stays here: the consumer projects live on this machine only, and the old
+    # glint and its run cache are files here.
     deps: [build]
     usage: -config PATH, -old PATH, -new PATH, -r rules, -j N, -only a,b
     run: ['go build -o bin/consumers ./tools/consumers', 'bin/consumers -new bin/glint -j {threads} {args}']
   self-check:
     desc: glint on itself, built from this tree
     heavy: true
+    # Stays here: it runs bin/glint, which build makes on this machine, and
+    # graft keeps a glint check by a relative path here.
     cache: *tools_cache
     usage: <glint check flags, e.g. --verbose>
     deps: [build]
