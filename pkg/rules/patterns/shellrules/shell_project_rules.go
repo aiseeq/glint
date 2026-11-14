@@ -1,10 +1,12 @@
 package shellrules
 
 import (
+	"errors"
 	"path"
 	"regexp"
 	"strings"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/helpers"
@@ -61,6 +63,52 @@ func checkMissingScript(r *shellProjectRule, src *patternkit.ShellSource) []*cor
 		}
 	}
 	dir := path.Dir(src.Ctx.RelPath)
+	text := string(src.Ctx.Content)
+	calls, err := shellcmd.Calls(text)
+	var nested *shellcmd.NestedError
+	if err != nil && !errors.As(err, &nested) {
+		return checkMissingScriptFallback(r, src, dir, dirVars)
+	}
+	var out []*core.Violation
+	for _, call := range calls {
+		lineText := ""
+		if call.Line > 0 && call.Line <= len(src.Ctx.Lines) {
+			lineText = src.Ctx.Lines[call.Line-1]
+		}
+		if !isScriptInvocation(call) || strings.Contains(lineText, "ssh ") || existenceTest.MatchString(lineText) {
+			continue
+		}
+		for _, m := range siblingScriptRef.FindAllStringSubmatchIndex(call.Raw, -1) {
+			name := ""
+			switch {
+			case m[2] >= 0 && dirVars[call.Raw[m[2]:m[3]]]:
+				name = call.Raw[m[4]:m[5]]
+			case m[6] >= 0:
+				name = call.Raw[m[6]:m[7]]
+			default:
+				continue
+			}
+			if r.paths[path.Join(dir, name)] {
+				continue
+			}
+			out = appendReport(out, src.Report(r, call.Line,
+				name+" is run from the script's directory, and there is no such file next to it",
+				"Point to the script that exists, or add it"))
+		}
+	}
+	return out
+}
+
+func isScriptInvocation(call shellcmd.Call) bool {
+	if call.Name == "" || call.Name == "." || call.Name == "source" ||
+		call.Name == "bash" || call.Name == "sh" || call.Name == "dash" ||
+		call.Name == "ksh" || call.Name == "zsh" {
+		return true
+	}
+	return strings.HasSuffix(call.Name, ".sh")
+}
+
+func checkMissingScriptFallback(r *shellProjectRule, src *patternkit.ShellSource, dir string, dirVars map[string]bool) []*core.Violation {
 	var out []*core.Violation
 	for _, l := range src.Lines {
 		if strings.Contains(l.Text, "ssh ") || existenceTest.MatchString(l.Text) {
