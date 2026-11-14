@@ -66,6 +66,20 @@ func (r *TestExternalServiceRule) collectTestDirFacts(files []*core.FileContext,
 				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && onlyBareReturns(fn.Body) {
 					f.emptyFuncs[file.GoAST.Name.Name+"."+fn.Name.Name] = true
 				}
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "init" && fn.Body != nil {
+					// A package variable set in init holds that value for every test.
+					ast.Inspect(fn.Body, func(n ast.Node) bool {
+						if as, isAssign := n.(*ast.AssignStmt); isAssign && as.Tok == token.ASSIGN && len(as.Lhs) == len(as.Rhs) {
+							for i, lhs := range as.Lhs {
+								if id, isIdent := lhs.(*ast.Ident); isIdent {
+									key := file.GoAST.Name.Name + "." + id.Name
+									f.packageValues[key] = append(f.packageValues[key], as.Rhs[i])
+								}
+							}
+						}
+						return true
+					})
+				}
 				if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.VAR {
 					for _, spec := range gen.Specs {
 						vs, isValue := spec.(*ast.ValueSpec)
@@ -817,7 +831,8 @@ func hostName(rawURL string) string {
 
 // calleeCandidates is what a call's function may be: the expression itself
 // and, while it is a plain name, every value bound to that name where the
-// call can see it — in the test body or at the top of its package — followed
+// call can see it — in the test body, at the top of its package or in its
+// init — followed
 // through names bound to names. A constructor taken as a value (f := New;
 // f()) is the same call as the constructor. Test files carry no type
 // information, so names are matched syntactically by scope: a definition
@@ -851,49 +866,30 @@ func calleeCandidates(body *ast.BlockStmt, call *ast.CallExpr, packageValues fun
 }
 
 // visibleBindings maps a name to the values body binds to it that a call at
-// pos can see.
+// pos can see. A definition counts when its scope — a block, a case or comm
+// clause, the implicit block of if, for, range, switch and select —
+// encloses the call. An assignment counts anywhere in
+// body: a closure or a branch may run it before the call.
 func visibleBindings(body *ast.BlockStmt, pos token.Pos) map[string][]ast.Expr {
 	bindings := map[string][]ast.Expr{}
-	bindSpec := func(spec *ast.ValueSpec) {
-		for i, name := range spec.Names {
-			if i < len(spec.Values) {
-				bindings[name.Name] = append(bindings[name.Name], spec.Values[i])
-			}
-		}
-	}
 	encloses := func(n ast.Node) bool { return n.Pos() <= pos && pos < n.End() }
-	var blocks, funcs []ast.Node
-	var stack []ast.Node
+	var scopes, stack []ast.Node
 	ast.Inspect(body, func(n ast.Node) bool {
 		if n == nil {
 			top := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			if len(blocks) > 0 && blocks[len(blocks)-1] == top {
-				blocks = blocks[:len(blocks)-1]
-			}
-			if len(funcs) > 0 && funcs[len(funcs)-1] == top {
-				funcs = funcs[:len(funcs)-1]
+			if len(scopes) > 0 && scopes[len(scopes)-1] == top {
+				scopes = scopes[:len(scopes)-1]
 			}
 			return true
 		}
 		stack = append(stack, n)
 		switch n := n.(type) {
-		case *ast.BlockStmt:
-			blocks = append(blocks, n)
-			if len(funcs) == 0 {
-				funcs = append(funcs, n)
-			}
-		case *ast.FuncLit:
-			funcs = append(funcs, n)
+		case *ast.BlockStmt, *ast.CaseClause, *ast.CommClause, *ast.IfStmt, *ast.ForStmt,
+			*ast.RangeStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+			scopes = append(scopes, n)
 		case *ast.AssignStmt:
-			if len(n.Lhs) != len(n.Rhs) {
-				return true
-			}
-			scope := funcs[len(funcs)-1]
-			if n.Tok == token.DEFINE {
-				scope = blocks[len(blocks)-1]
-			}
-			if !encloses(scope) {
+			if len(n.Lhs) != len(n.Rhs) || (n.Tok == token.DEFINE && !encloses(scopes[len(scopes)-1])) {
 				return true
 			}
 			for i, lhs := range n.Lhs {
@@ -902,8 +898,12 @@ func visibleBindings(body *ast.BlockStmt, pos token.Pos) map[string][]ast.Expr {
 				}
 			}
 		case *ast.ValueSpec:
-			if encloses(blocks[len(blocks)-1]) {
-				bindSpec(n)
+			if encloses(scopes[len(scopes)-1]) {
+				for i, name := range n.Names {
+					if i < len(n.Values) {
+						bindings[name.Name] = append(bindings[name.Name], n.Values[i])
+					}
+				}
 			}
 		}
 		return true

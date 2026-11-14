@@ -1725,6 +1725,12 @@ func TestChain(t *testing.T) { f := New; g := f; g().Send() }
 func TestParen(t *testing.T) { f := (New); (f)().Send() }
 func TestSubtests(t *testing.T) { t.Run("a", func(t *testing.T) { mk := New; _ = mk().Base }); t.Run("b", func(t *testing.T) { mk := func() *Client { return &Client{} }; mk().Send() }) }
 func TestBranchAssign(t *testing.T) { var f func() *Client; if t != nil { f = New }; f().Send() }
+func TestCases(t *testing.T) { switch t.Name() { case "a": mk := New; _ = mk().Base; case "b": mk := func() *Client { return &Client{} }; mk().Send() } }
+func TestIfInit(t *testing.T) { if mk := New; mk != nil { _ = mk().Base }; mk := func() *Client { return &Client{} }; mk().Send() }
+func TestClosureAssign(t *testing.T) { mk := func() *Client { return &Client{} }; func() { mk = New }(); mk().Send() }
+var initCtor func() *Client
+func init() { initCtor = New }
+func TestInitVar(t *testing.T) { initCtor().Send() }
 `,
 		"provider/external_test.go": `package provider_test
 
@@ -1754,5 +1760,5 @@ var sharedCtor = provider.New
 	for _, v := range violations {
 		found = append(found, v.File+":"+strconv.Itoa(v.Line))
 	}
-	assert.ElementsMatch(t, []string{"provider/client_test.go:5", "provider/client_test.go:6", "provider/client_test.go:10", "provider/client_test.go:11", "provider/client_test.go:12", "provider/client_test.go:14", "provider/external_test.go:9", "provider/external_test.go:12", "provider/external_test.go:13"}, found, "%v", messages(violations))
+	assert.ElementsMatch(t, []string{"provider/client_test.go:5", "provider/client_test.go:6", "provider/client_test.go:10", "provider/client_test.go:11", "provider/client_test.go:12", "provider/client_test.go:14", "provider/client_test.go:17", "provider/client_test.go:20", "provider/external_test.go:9", "provider/external_test.go:12", "provider/external_test.go:13"}, found, "%v", messages(violations))
 }
