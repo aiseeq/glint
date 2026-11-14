@@ -77,6 +77,30 @@ const Limit = 5`
 	assert.Equal(t, []string{"src/limits.go:2"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/limits.go", code))
 }
 
+// A staged or working copy of a file is the file's version in the git index
+// or the work tree, not a copy of another source of truth.
+func TestMirrorCommentCopyGitCopyOfFile(t *testing.T) {
+	source := `package stage
+
+// stagedDiffers explains a staged copy of m.out that differs from its fragments, naming the tree it was read from.
+func (s *stagedPaths) stagedDiffers(dir string, m manifest) string { return dir }
+
+// readWorking reads the working copy of cfg.path and the worktree copy of cfg.dst.
+func readWorking(cfg config) string { return cfg.path }
+
+// indexed reads the index copy of e.name.
+func indexed(e entry) string { return e.name }`
+	assert.Empty(t, rulestest.GoFileRuleLines(t, NewMirrorCommentCopyRule(), "src/stage.go", source))
+	code := `package stage
+
+// limitOf is a local copy of limits.Value.
+func (s *stagedPaths) limitOf() int { return 5 }
+
+// isAdmin mirrors httpx.IsAdmin.
+func (s *stagedPaths) isAdmin() bool { return false }`
+	assert.Equal(t, []int{4, 7}, rulestest.GoFileRuleLines(t, NewMirrorCommentCopyRule(), "src/stage.go", code))
+}
+
 // A method is not considered by the body rule, so its comment remains reportable.
 func TestMirrorCommentCopyGoMethodReported(t *testing.T) {
 	source := `package stream
