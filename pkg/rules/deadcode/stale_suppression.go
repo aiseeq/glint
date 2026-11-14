@@ -60,7 +60,7 @@ type BroadExclusionRule struct{ *rules.BaseRule }
 
 // NewBroadExclusionRule constructs the broad exclusion rule.
 func NewBroadExclusionRule() *BroadExclusionRule {
-	return &BroadExclusionRule{rules.NewBaseRule("broad-exclusion", "deadcode", "Reports exclusions that hide an entire source directory, every file of a language or a category", core.SeverityLow)}
+	return &BroadExclusionRule{rules.NewBaseRule("broad-exclusion", "deadcode", "Reports exclusions that hide an entire source directory, every file or every test of a language, or a category", core.SeverityLow)}
 }
 
 // AnalyzeFile is a no-op because broad exclusions are checked against project configuration.

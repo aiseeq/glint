@@ -110,7 +110,7 @@ func TestBroadExclusionReportsAWholeLanguage(t *testing.T) {
 		"**/*.ts":     true,
 		"*.ts":        true,
 		"*.pb.go":     false,
-		"*_test.go":   false,
+		"*_test.go":   true,
 		"*.md":        false,
 		"**/*.min.js": false,
 	} {
@@ -228,6 +228,10 @@ func TestBroadExclusionMessagesEndWithAMarkerToFill(t *testing.T) {
 		require.GreaterOrEqual(t, at, 0, message)
 		assert.False(t, core.SuppressionHasReason(message[at:], "broad-exclusion"), message)
 	}
+	message := testsFindingMessage("Go")
+	at := strings.Index(message, "# broad-exclusion: safe")
+	require.GreaterOrEqual(t, at, 0, message)
+	assert.False(t, core.SuppressionHasReason(message[at:], "broad-exclusion"), message)
 }
 
 // adviceMarker finds a marker example in glint's text: nolint:<rule> or

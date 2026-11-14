@@ -233,8 +233,8 @@ func TestBroadExclusionAllowsOneRuleScopedToSubpackage(t *testing.T) {
 func TestBroadExclusionIgnoresMalformedGlob(t *testing.T) {
 	files := []string{"src/a.go"}
 	found, err := checkBroadEntry(broadEntry{pattern: "src/[", line: 1}, files, sourceCatalog(files))
-	if err != nil || found {
-		t.Fatalf("malformed glob should not be a finding: found=%v err=%v", found, err)
+	if err != nil || found != "" {
+		t.Fatalf("malformed glob should not be a finding: found=%q err=%v", found, err)
 	}
 }
 

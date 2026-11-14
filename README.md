@@ -137,7 +137,6 @@ settings:
   exclude:
     - vendor/**
     - node_modules/**
-    - "**/*_test.go"
   min_severity: medium
   fail_on: medium              # exit non-zero from medium findings up (default high)
   output: console
