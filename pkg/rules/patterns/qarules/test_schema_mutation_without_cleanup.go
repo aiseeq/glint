@@ -2,7 +2,9 @@ package qarules
 
 import (
 	"go/ast"
+	"maps"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -266,6 +268,189 @@ func (r *TestSchemaMutationWithoutCleanupRule) ddlLiteral(fn *ast.FuncDecl) (nod
 	return node, text
 }
 
+type schemaTxState struct {
+	ddl       bool
+	rollback  bool
+	deferred  bool
+	committed bool
+}
+
+type schemaTxPath struct {
+	transactions map[string]schemaTxState
+	unsafe       bool
+}
+
+type schemaTxFlow struct {
+	rule   *TestSchemaMutationWithoutCleanupRule
+	unsafe bool
+}
+
+func (f *schemaTxFlow) CloneState(state []schemaTxPath) []schemaTxPath {
+	clone := make([]schemaTxPath, len(state))
+	for i, path := range state {
+		clone[i] = schemaTxPath{unsafe: path.unsafe, transactions: make(map[string]schemaTxState, len(path.transactions))}
+		maps.Copy(clone[i].transactions, path.transactions)
+	}
+	return clone
+}
+
+func schemaTxPathKey(path schemaTxPath) string {
+	var parts []string
+	for name, tx := range path.transactions {
+		parts = append(parts, name+":"+boolDigit(tx.ddl)+boolDigit(tx.rollback)+boolDigit(tx.deferred)+boolDigit(tx.committed))
+	}
+	sort.Strings(parts)
+	return strings.Join(append([]string{boolDigit(path.unsafe)}, parts...), "\x00")
+}
+
+func boolDigit(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+func (f *schemaTxFlow) JoinStates(left, right []schemaTxPath) []schemaTxPath {
+	joined := append(f.CloneState(left), f.CloneState(right)...)
+	return patternkit.JoinFlowPaths(joined, nil, schemaTxPathKey)
+}
+
+func (f *schemaTxFlow) LiveState(state []schemaTxPath) bool { return len(state) != 0 }
+func (f *schemaTxFlow) DeadState() []schemaTxPath           { return nil }
+func (f *schemaTxFlow) EnterScope(_ patternkit.FlowScopeKind, _ ast.Node, parent struct{}, state []schemaTxPath) (struct{}, []schemaTxPath) {
+	return parent, state
+}
+func (f *schemaTxFlow) LeaveScope(patternkit.FlowScopeKind, struct{}, *patternkit.FlowEdges[[]schemaTxPath]) {
+}
+func (f *schemaTxFlow) IfCondition(_ *ast.IfStmt, state []schemaTxPath, _ struct{}) ([]schemaTxPath, []schemaTxPath) {
+	return f.CloneState(state), f.CloneState(state)
+}
+func (f *schemaTxFlow) FlowExpr(_ ast.Expr, state []schemaTxPath, _ struct{}) []schemaTxPath {
+	return state
+}
+func (f *schemaTxFlow) RangeVars(_ *ast.RangeStmt, state []schemaTxPath, _ struct{}) []schemaTxPath {
+	return state
+}
+func (f *schemaTxFlow) TypeSwitchGuard(_ ast.Stmt, state []schemaTxPath, _ struct{}) []schemaTxPath {
+	return state
+}
+func (f *schemaTxFlow) CaseClause(_ ast.Stmt, _ *ast.CaseClause, state []schemaTxPath, parent struct{}) ([]schemaTxPath, struct{}) {
+	return state, parent
+}
+func (f *schemaTxFlow) CommClause(_ *ast.CommClause, state []schemaTxPath, parent struct{}) ([]schemaTxPath, struct{}) {
+	return state, parent
+}
+func (f *schemaTxFlow) Normalize(edges *patternkit.FlowEdges[[]schemaTxPath]) {
+	edges.Next = patternkit.JoinFlowPaths(edges.Next, nil, schemaTxPathKey)
+}
+
+func (f *schemaTxFlow) SimpleStmt(stmt ast.Stmt, state []schemaTxPath, _ struct{}) ([]schemaTxPath, bool) {
+	for i := range state {
+		f.scanStatement(stmt, &state[i])
+	}
+	if _, ok := stmt.(*ast.ReturnStmt); ok {
+		for _, path := range state {
+			f.checkExit(path)
+		}
+		return nil, true
+	}
+	return state, false
+}
+
+func (f *schemaTxFlow) scanStatement(stmt ast.Stmt, path *schemaTxPath) {
+	if assign, ok := stmt.(*ast.AssignStmt); ok {
+		for _, rhs := range assign.Rhs {
+			call, ok := rhs.(*ast.CallExpr)
+			if !ok || !isBeginTransaction(call) {
+				continue
+			}
+			for _, lhs := range assign.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+					path.transactions[id.Name] = schemaTxState{}
+				}
+			}
+		}
+	}
+	var calls []*ast.CallExpr
+	ast.Inspect(stmt, func(node ast.Node) bool {
+		if _, ok := node.(*ast.FuncLit); ok {
+			return false
+		}
+		if call, ok := node.(*ast.CallExpr); ok {
+			calls = append(calls, call)
+		}
+		return true
+	})
+	sort.SliceStable(calls, func(i, j int) bool { return calls[i].Pos() < calls[j].Pos() })
+	for _, call := range calls {
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		id, ok := selector.X.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		tx, known := path.transactions[id.Name]
+		if executors[selector.Sel.Name] {
+			for _, arg := range call.Args {
+				lit, ok := arg.(*ast.BasicLit)
+				if !ok {
+					continue
+				}
+				query, ok := patternkit.GoStringLiteral(lit)
+				if !ok || !f.rule.ddl.MatchString(query) || f.rule.sessionScoped.MatchString(query) {
+					continue
+				}
+				if !known {
+					path.unsafe = true
+				} else {
+					tx.ddl = true
+					tx.rollback = false
+					path.transactions[id.Name] = tx
+				}
+				break
+			}
+		}
+		if !known {
+			continue
+		}
+		switch selector.Sel.Name {
+		case "Rollback":
+			if tx.ddl {
+				tx.rollback = true
+			}
+		case "Commit":
+			tx.committed = true
+			if tx.ddl {
+				path.unsafe = true
+			}
+		}
+		path.transactions[id.Name] = tx
+		if deferStmt, ok := stmt.(*ast.DeferStmt); ok && deferStmt.Call == call && selector.Sel.Name == "Rollback" {
+			tx.deferred = true
+			path.transactions[id.Name] = tx
+		}
+	}
+}
+
+func isBeginTransaction(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && strings.HasPrefix(sel.Sel.Name, "Begin")
+}
+
+func (f *schemaTxFlow) checkExit(path schemaTxPath) {
+	if path.unsafe {
+		f.unsafe = true
+		return
+	}
+	for _, tx := range path.transactions {
+		if tx.ddl && !tx.rollback && !tx.deferred || tx.ddl && tx.committed {
+			f.unsafe = true
+		}
+	}
+}
+
 // AnalyzeFile reports test functions that run DDL with no undo registered.
 func (r *TestSchemaMutationWithoutCleanupRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	if !ctx.IsGoFile() || !ctx.IsTestFile() || ctx.GoAST == nil {
@@ -286,6 +471,15 @@ func (r *TestSchemaMutationWithoutCleanupRule) AnalyzeFile(ctx *core.FileContext
 		}
 		lit, sql := r.ddlLiteral(fn)
 		if lit == nil || undoRegistered(fn) || r.usesDisposableDatabase(fn, ctx.GoAST.Name.Name) {
+			continue
+		}
+		flow := &schemaTxFlow{rule: r}
+		edges := (&patternkit.FlowWalker[[]schemaTxPath, struct{}]{Rule: flow}).Walk(fn.Body,
+			[]schemaTxPath{{transactions: make(map[string]schemaTxState)}}, struct{}{})
+		for _, path := range edges.Next {
+			flow.checkExit(path)
+		}
+		if !flow.unsafe {
 			continue
 		}
 		line := ctx.LineFor(lit)

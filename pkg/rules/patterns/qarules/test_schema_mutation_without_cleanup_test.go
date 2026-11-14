@@ -96,6 +96,70 @@ func TestInsert(t *testing.T) {
 }`,
 		},
 		{
+			name: "sql transaction deferred rollback",
+			code: `package tests
+
+import "testing"
+
+func TestSchemaTx(t *testing.T) {
+	tx, _ := db.Begin()
+	defer tx.Rollback()
+	_, _ = tx.Exec("ALTER TABLE users ADD COLUMN probe bool")
+}`,
+		},
+		{
+			name: "sqlx transaction explicit rollback",
+			code: `package tests
+
+import "testing"
+
+func TestSchemaTx(t *testing.T) {
+	tx, _ := db.BeginTxx(ctx, nil)
+	_, _ = tx.ExecContext(ctx, "CREATE INDEX idx_probe ON users (email)")
+	_ = tx.Rollback()
+}`,
+		},
+		{
+			name: "transaction commits after ddl",
+			code: `package tests
+
+import "testing"
+
+func TestSchemaTx(t *testing.T) {
+	tx, _ := db.Begin()
+	defer tx.Rollback()
+	_, _ = tx.Exec("ALTER TABLE users ADD COLUMN probe bool")
+	_ = tx.Commit()
+}`,
+			expect: true,
+		},
+		{
+			name: "transaction rolls back only on one path",
+			code: `package tests
+
+import "testing"
+
+func TestSchemaTx(t *testing.T) {
+	tx, _ := db.Begin()
+	_, _ = tx.Exec("ALTER TABLE users ADD COLUMN probe bool")
+	if condition { _ = tx.Rollback() } else { _ = tx.Commit() }
+}`,
+			expect: true,
+		},
+		{
+			name: "database executor remains a finding",
+			code: `package tests
+
+import "testing"
+
+func TestSchemaTx(t *testing.T) {
+	tx, _ := db.Begin()
+	defer tx.Rollback()
+	_, _ = db.Exec("ALTER TABLE users ADD COLUMN probe bool")
+}`,
+			expect: true,
+		},
+		{
 			// Хелпер не тест: за ним чистит вызывающий, и правило туда не лезет.
 			name: "helper function is not a test",
 			code: `package tests
