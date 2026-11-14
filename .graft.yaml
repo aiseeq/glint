@@ -1,10 +1,16 @@
 schema: 1
-graft: '>=2.37.0'
+graft: '>=2.90.0'
 
 # Versions are annotated tags vX.Y.Z (graft release); the build stamps
 # graft version --describe into the binary.
 version:
   mode: git-tag
+
+# A release (install, with every check in all) should take at most 3 minutes
+# without waits; graft applies limits.task to every task but the gate, and the
+# other tasks stay well under it (graft stats).
+limits:
+  task: 3m
 
 # glint on itself is not in the commit gate: consumers get glint only through
 # install, and install runs every check (all, with self-check) first and stops on a finding of high,
