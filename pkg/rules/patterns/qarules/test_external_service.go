@@ -1005,7 +1005,7 @@ func (r *TestExternalServiceRule) inPackageCalls(
 
 		reportedCall := call
 		if !entry.direct {
-			if methodCall := liveMethodCall(fn.Body, call, entry.liveMethods, entry.resultIndexes, file.GoTypesInfo); methodCall != nil {
+			if methodCall := liveMethodCall(fn.Body, call, entry.liveMethods, entry.resultIndexes, entry.selfMethods, file.GoTypesInfo); methodCall != nil {
 				reportedCall = methodCall
 			}
 		}

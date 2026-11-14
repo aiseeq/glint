@@ -90,6 +90,7 @@ func liveEntryPoints(pkg *core.GoPackageContext, hostOf func(*ast.BasicLit) stri
 			entry.liveMethods = map[string]bool{}
 			entry.resultIndexes = namedResultIndexes(fn, info)
 			entry.knownMembers = returnedClientMembers(fn, info)
+			entry.selfMethods = returnedSelfMethods(fn, info)
 			entry.address = addresses[key]
 			for _, methodKey := range methodKeys {
 				_, method, _ := strings.Cut(methodKey, ".")
@@ -127,6 +128,9 @@ type liveEntry struct {
 	// knownMembers are methods and fields on returned client types, used to distinguish
 	// local inspection from an unknown use when test-file type information is unavailable.
 	knownMembers map[string]bool
+	// selfMethods are methods of a returned client type that hand back that type
+	// (builders: New().WithKey(k)), so their result is the client again.
+	selfMethods map[string]bool
 }
 
 func namedResultIndexes(fn *ast.FuncDecl, info *types.Info) map[int]bool {
@@ -880,4 +884,37 @@ func closeOverCallees(marked map[string]bool, callees map[string][]string) {
 			}
 		}
 	}
+}
+
+// returnedSelfMethods lists the methods of the types fn returns whose results
+// include the same type, by value or pointer.
+func returnedSelfMethods(fn *ast.FuncDecl, info *types.Info) map[string]bool {
+	methods := map[string]bool{}
+	obj, ok := info.Defs[fn.Name].(*types.Func)
+	if !ok {
+		return methods
+	}
+	signature, ok := obj.Type().(*types.Signature)
+	if !ok || signature.Results() == nil {
+		return methods
+	}
+	for v := range signature.Results().Variables() {
+		named := patternkit.NamedOf(v.Type())
+		if named == nil {
+			continue
+		}
+		set := types.NewMethodSet(types.NewPointer(named))
+		for method := range set.Methods() {
+			sig, isSig := method.Type().(*types.Signature)
+			if !isSig {
+				continue
+			}
+			for result := range sig.Results().Variables() {
+				if patternkit.NamedOf(result.Type()) == named {
+					methods[method.Obj().Name()] = true
+				}
+			}
+		}
+	}
+	return methods
 }

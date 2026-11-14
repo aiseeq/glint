@@ -375,10 +375,10 @@ func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry li
 		}
 	}
 	if host == "" && !entry.direct {
-		host = liveMethodArgument(body, call, entry.liveMethods, entry.resultIndexes, pkg.urlNames, isQualifier, s.hostOf, info)
+		host = liveMethodArgument(body, call, entry.liveMethods, entry.resultIndexes, entry.selfMethods, pkg.urlNames, isQualifier, s.hostOf, info)
 	}
 	if !s.unitTests {
-		if !entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, info) && !constructorResultEscapes(body, call, entry.liveMethods, entry.knownMembers, entry.resultIndexes, info, s.emptyFunc) {
+		if !entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, entry.selfMethods, info) && !constructorResultEscapes(body, call, entry.liveMethods, entry.knownMembers, entry.selfMethods, entry.resultIndexes, info, s.emptyFunc) {
 			return "", false
 		}
 		if host == "" {
@@ -386,7 +386,7 @@ func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry li
 		}
 		return "ходит в " + host, true
 	}
-	if host == "" || (!entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, info)) {
+	if host == "" || (!entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, entry.selfMethods, info)) {
 		return "", false
 	}
 	return "ходит в " + host, true
@@ -395,7 +395,7 @@ func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry li
 // constructorResultEscapes reports whether the test lets the constructed client reach code
 // whose behavior the rule cannot establish. A live method call is handled separately; reads
 // of fields and calls to known non-live methods are safe.
-func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMethods, knownMembers map[string]bool, resultIndexes map[int]bool, info *types.Info, emptyFunc func(string) bool) bool {
+func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMethods, knownMembers, selfMethods map[string]bool, resultIndexes map[int]bool, info *types.Info, emptyFunc func(string) bool) bool {
 	parents := map[ast.Node]ast.Node{}
 	var stack []ast.Node
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -410,7 +410,7 @@ func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMetho
 		return true
 	})
 
-	holders, initializers := constructorResultHolders(body, ctor, resultIndexes, info)
+	holders, initializers := constructorResultHolders(body, ctor, resultIndexes, selfMethods, info)
 	if constructorOnlyInspectedOrDiscarded(body, ctor, holders, initializers, parents) {
 		return false
 	}
@@ -418,7 +418,7 @@ func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMetho
 	// A constructor result used directly as a return value, argument, field, channel value,
 	// literal element or any other non-local expression escapes without a named holder.
 	if len(holders) == 0 {
-		return directConstructorResultEscapes(parents[ctor], parents, ctor, liveMethods, knownMembers, resultIndexes)
+		return directConstructorResultEscapes(parents[ctor], parents, ctor, liveMethods, knownMembers, selfMethods, resultIndexes)
 	}
 	return constructorHolderEscapes(body, parents, holders, initializers, liveMethods, knownMembers, info, emptyFunc)
 }
@@ -487,7 +487,7 @@ func constructorNestedInComposite(ctor *ast.CallExpr, parents map[ast.Node]ast.N
 	return false
 }
 
-func directConstructorResultEscapes(parent ast.Node, parents map[ast.Node]ast.Node, ctor *ast.CallExpr, liveMethods, knownMembers map[string]bool, resultIndexes map[int]bool) bool {
+func directConstructorResultEscapes(parent ast.Node, parents map[ast.Node]ast.Node, ctor *ast.CallExpr, liveMethods, knownMembers, selfMethods map[string]bool, resultIndexes map[int]bool) bool {
 	switch p := parent.(type) {
 	case *ast.AssignStmt:
 		for i, lhs := range p.Lhs {
@@ -522,6 +522,10 @@ func directConstructorResultEscapes(parent ast.Node, parents map[ast.Node]ast.No
 		return true
 	case *ast.SelectorExpr:
 		if p.X == ctor {
+			if call, ok := parents[p].(*ast.CallExpr); ok && call.Fun == p && selfMethods[p.Sel.Name] {
+				// A builder hands back the client: follow its result.
+				return directConstructorResultEscapes(parents[call], parents, call, liveMethods, knownMembers, selfMethods, map[int]bool{0: true})
+			}
 			if call, ok := parents[p].(*ast.CallExpr); ok && call.Fun == p {
 				return liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name]
 			}
@@ -665,7 +669,33 @@ func declaresName(body *ast.BlockStmt, name string) bool {
 	return found
 }
 
-func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultIndexes map[int]bool, info *types.Info) ([]clientHolder, map[*ast.Ident]bool) {
+// holdsConstructor reports whether the value of e is the constructed client
+// itself, the client handed back by a builder method (New().WithKey(k)) or a
+// literal holding it (&Box{C: New()}, []*Client{New()}). The result of
+// another method called on the client (New().Name()) is not the client.
+func holdsConstructor(e ast.Expr, ctor *ast.CallExpr, selfMethods map[string]bool) bool {
+	switch e := ast.Unparen(e).(type) {
+	case *ast.CallExpr:
+		if e == ctor {
+			return true
+		}
+		sel, isMethod := e.Fun.(*ast.SelectorExpr)
+		return isMethod && selfMethods[sel.Sel.Name] && holdsConstructor(sel.X, ctor, selfMethods)
+	case *ast.UnaryExpr:
+		return e.Op == token.AND && holdsConstructor(e.X, ctor, selfMethods)
+	case *ast.CompositeLit:
+		for _, elt := range e.Elts {
+			if holdsConstructor(elt, ctor, selfMethods) {
+				return true
+			}
+		}
+	case *ast.KeyValueExpr:
+		return holdsConstructor(e.Key, ctor, selfMethods) || holdsConstructor(e.Value, ctor, selfMethods)
+	}
+	return false
+}
+
+func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultIndexes map[int]bool, selfMethods map[string]bool, info *types.Info) ([]clientHolder, map[*ast.Ident]bool) {
 	var holders []clientHolder
 	initializers := make(map[*ast.Ident]bool)
 	add := func(id *ast.Ident) {
@@ -685,7 +715,7 @@ func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultInd
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch assign := n.(type) {
 		case *ast.AssignStmt:
-			if len(assign.Rhs) == 1 && containsASTNode(assign.Rhs[0], ctor) {
+			if len(assign.Rhs) == 1 && holdsConstructor(assign.Rhs[0], ctor, selfMethods) {
 				for i, lhs := range assign.Lhs {
 					if resultIndexes[i] {
 						if id, ok := lhs.(*ast.Ident); ok {
@@ -695,7 +725,7 @@ func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultInd
 				}
 			}
 		case *ast.ValueSpec:
-			if len(assign.Values) == 1 && containsASTNode(assign.Values[0], ctor) {
+			if len(assign.Values) == 1 && holdsConstructor(assign.Values[0], ctor, selfMethods) {
 				for i, id := range assign.Names {
 					if resultIndexes[i] {
 						add(id)
@@ -757,8 +787,8 @@ func comparedWithNil(expr *ast.BinaryExpr, value ast.Expr) bool {
 // liveMethodArgument returns the first external URL passed to a live method of the
 // client returned by call. This lets a caller supplied URL take precedence over an unrelated
 // URL literal elsewhere in the package.
-func liveMethodArgument(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool, resultIndexes map[int]bool, urls map[string]string, isQualifier func(ast.Expr) bool, hostOf func(*ast.BasicLit) string, info *types.Info) string {
-	call := liveMethodCall(body, ctor, methods, resultIndexes, info)
+func liveMethodArgument(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool, resultIndexes map[int]bool, selfMethods map[string]bool, urls map[string]string, isQualifier func(ast.Expr) bool, hostOf func(*ast.BasicLit) string, info *types.Info) string {
+	call := liveMethodCall(body, ctor, methods, resultIndexes, selfMethods, info)
 	if call == nil {
 		return ""
 	}
@@ -804,12 +834,12 @@ func productionArgument(arg ast.Expr, urlNames map[string]string, isQualifier fu
 
 // callsLiveMethod returns a sending method called on the result of the constructor call:
 // chained (New().Rate()) or through the variable it is assigned to.
-func callsLiveMethod(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool, resultIndexes map[int]bool, info *types.Info) bool {
-	return liveMethodCall(body, ctor, methods, resultIndexes, info) != nil
+func callsLiveMethod(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool, resultIndexes map[int]bool, selfMethods map[string]bool, info *types.Info) bool {
+	return liveMethodCall(body, ctor, methods, resultIndexes, selfMethods, info) != nil
 }
 
-func liveMethodCall(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool, resultIndexes map[int]bool, info *types.Info) *ast.CallExpr {
-	holders, _ := constructorResultHolders(body, ctor, resultIndexes, info)
+func liveMethodCall(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool, resultIndexes map[int]bool, selfMethods map[string]bool, info *types.Info) *ast.CallExpr {
+	holders, _ := constructorResultHolders(body, ctor, resultIndexes, selfMethods, info)
 	var found *ast.CallExpr
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -822,7 +852,7 @@ func liveMethodCall(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]
 		}
 		switch x := ast.Unparen(sel.X).(type) {
 		case *ast.CallExpr:
-			if x == ctor {
+			if holdsConstructor(x, ctor, selfMethods) {
 				found = call
 			}
 		case *ast.Ident:

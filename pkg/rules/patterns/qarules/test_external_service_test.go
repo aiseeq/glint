@@ -1774,6 +1774,8 @@ func New() *Client { return &Client{Base: "https://getter-api.example.com"} }
 func (c *Client) Send() { _, _ = http.Get(c.Base) }
 func (c *Client) Name() string { return c.Base }
 func (c *Client) Label() string { return "client" }
+func (c *Client) Pair() (string, bool) { return c.Base, true }
+func (c *Client) WithKey(k string) *Client { return c }
 `,
 		"provider/client_test.go": `package provider
 
@@ -1781,6 +1783,13 @@ import "testing"
 
 func TestSend(t *testing.T) { New().Send() }
 func TestOnlyInert(t *testing.T) { c := New(); _ = c.Name(); _ = c.Label() }
+func TestResultOfInertMethod(t *testing.T) { name := New().Name(); if len(name) == 0 { t.Fatal(name) } }
+func TestResultOfInertPair(t *testing.T) { got, ok := New().Pair(); if !ok { t.Fatal(got) } }
+func TestBuilderHeld(t *testing.T) { c := New().WithKey("k"); c.Send() }
+func TestBuilderChained(t *testing.T) { New().WithKey("k").Send() }
+func deliver(c *Client) { c.Send() }
+func TestBuilderEscapes(t *testing.T) { deliver(New().WithKey("k")) }
+func TestBuilderInert(t *testing.T) { c := New().WithKey("k"); _ = c.Name() }
 `,
 	})
 
@@ -1790,5 +1799,5 @@ func TestOnlyInert(t *testing.T) { c := New(); _ = c.Name(); _ = c.Label() }
 	for _, v := range violations {
 		found = append(found, v.File+":"+strconv.Itoa(v.Line))
 	}
-	assert.ElementsMatch(t, []string{"provider/client_test.go:5"}, found, "%v", messages(violations))
+	assert.ElementsMatch(t, []string{"provider/client_test.go:5", "provider/client_test.go:9", "provider/client_test.go:10", "provider/client_test.go:12"}, found, "%v", messages(violations))
 }
