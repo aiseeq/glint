@@ -226,7 +226,7 @@ func (r *ExceptionTicketClosedRule) Check(run StaleSuppressionRun) ([]*core.Viol
 		if !bytes.Contains(ctx.Content, []byte("glint#")) || ctx.IsGenerated() {
 			continue
 		}
-		for _, marker := range suppressionMarkers(ctx) {
+		for _, marker := range ctx.SuppressionMarkers() {
 			for _, name := range marker.Rules {
 				add(ctx.RelPath, marker.Line, name, marker.Text)
 			}
