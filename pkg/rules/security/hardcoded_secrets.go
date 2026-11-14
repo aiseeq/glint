@@ -128,10 +128,10 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 // a key: test fixtures write them to exercise the parsing.
 var truncatedPEMBlock = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----(?:\\n|\s)*[A-Za-z0-9+/=\\n]{0,120}-----END [A-Z ]*PRIVATE KEY-----`)
 
-// codeOfLine returns the line with a leading /* … */ blanked out, columns kept,
-// and false for a line that is comment only: a // line or a # line of an env
-// template.
-// Code after a closing */ is scanned like any other code.
+// codeOfLine returns the line with leading /* … */ comments blanked out, byte
+// offsets kept, and false for a line that is comment only: a // line, a #
+// line of an env template, or either of them after a leading /* … */. Code
+// after a closing */ is scanned like any other code.
 func codeOfLine(line string, envTemplate bool) (string, bool) {
 	trimmed := strings.TrimSpace(line)
 	if strings.HasPrefix(trimmed, "//") || (envTemplate && strings.HasPrefix(trimmed, "#")) {
@@ -140,9 +140,10 @@ func codeOfLine(line string, envTemplate bool) (string, bool) {
 	if !strings.HasPrefix(trimmed, "/*") {
 		return line, true
 	}
-	// An unclosed /* leaves nothing after it: the whole line is blank.
+	// An unclosed /* leaves nothing after it: the whole line is blank. What
+	// follows a closed one is judged again: another comment, or code.
 	_, after, _ := strings.Cut(line[strings.Index(line, "/*")+2:], "*/")
-	return strings.Repeat(" ", len(line)-len(after)) + after, true
+	return codeOfLine(strings.Repeat(" ", len(line)-len(after))+after, envTemplate)
 }
 
 // AnalyzeFile checks for hardcoded secrets
@@ -161,7 +162,7 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		if credential := credentialInLine(line, envTemplate); credential != "" {
 			if !ctx.IsSuppressed(lineNum+1, r.Name()) {
 				v := r.CreateViolation(ctx.RelPath, lineNum+1, "Hardcoded credential: a real-looking password in a URL's userinfo or a secret value in an env template")
-				v.WithCode(strings.ReplaceAll(line, credential, "[REDACTED]"))
+				v.WithCode(strings.ReplaceAll(raw, credential, "[REDACTED]"))
 				v.WithSuggestion("Read the credential from the environment or a secrets manager; leave a placeholder (user:password@) in templates")
 				v.WithContext("pattern", "url_userinfo")
 				violations = append(violations, v)
@@ -189,7 +190,7 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 					break
 				}
 				v := r.CreateViolation(ctx.RelPath, lineNum+1, pattern.message)
-				v.WithCode(r.maskSecretMatches(line))
+				v.WithCode(r.maskSecretMatches(raw))
 				v.WithSuggestion("Use environment variables or a secrets manager")
 				v.WithContext("pattern", pattern.name)
 				violations = append(violations, v)

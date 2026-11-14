@@ -193,6 +193,21 @@ var pwd = "abc"`,
 			wantViolations: 0,
 		},
 		{
+			name: "a line comment after a leading block comment is comment text",
+			code: `package main
+
+/* fallback */ // var apiKey = "AbCdEfGhIjKlMnOpQrStUvWx"`,
+			wantViolations: 0,
+		},
+		{
+			name: "code after two leading block comments is scanned",
+			code: `package main
+
+/* a */ /* b */ var apiKey = "AbCdEfGhIjKlMnOpQrStUvWx"`,
+			wantViolations: 1,
+			wantPattern:    "api_key",
+		},
+		{
 			name: "an unclosed block comment opening a line is comment text",
 			code: `package main
 
@@ -342,6 +357,18 @@ func TestHardcodedSecretsMasksOutput(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHardcodedSecretsShowsTheLineAsWrittenAfterABlockComment(t *testing.T) {
+	code := "package main\n\n/* запасной */ var apiKey = \"AbCdEfGhIjKlMnOpQrStUvWx\"\n"
+	ctx := core.NewFileContext("/src/config.go", "/src", []byte(code), core.DefaultConfig())
+
+	violations := NewHardcodedSecretsRule().AnalyzeFile(ctx)
+
+	if assert.Len(t, violations, 1) {
+		assert.True(t, strings.HasPrefix(violations[0].Code, "/* запасной */ var "), "code: %q", violations[0].Code)
+		assert.NotContains(t, violations[0].Code, "AbCdEfGhIjKlMnOpQrStUvWx")
 	}
 }
 

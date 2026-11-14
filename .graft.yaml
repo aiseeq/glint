@@ -15,7 +15,7 @@ limits:
 checks:
   secrets:
     exceptions:
-      - path: 'pkg/rules/security/hardcoded_secrets*_test.go'
+      - path: pkg/rules/security/hardcoded_secrets_test.go
         reason: the tests of the hardcoded-secret rule hold fake credentials (the AWS docs key, a bare PEM header, a sample JWT) that the rule must detect
 
 # glint on itself is not in the commit gate: consumers get glint only through
