@@ -619,22 +619,31 @@ func closedTicketSuppressions(enabled []rules.Rule, run deadcode.StaleSuppressio
 // YAML files read only for exception-ticket-closed: a bare marker of that rule
 // there hides its finding, so it needs a reason like a marker in analyzed code.
 func ticketFileSuppressionsWithoutReason(enabled []rules.Rule, cfg *core.Config, files []*core.FileContext) core.ViolationList {
-	var check *deadcode.SuppressionWithoutReasonRule
-	var ticketRule *deadcode.ExceptionTicketClosedRule
+	var names []string
 	for _, rule := range enabled {
-		switch candidate := rule.(type) {
-		case *deadcode.SuppressionWithoutReasonRule:
-			check = candidate
-		case *deadcode.ExceptionTicketClosedRule:
-			ticketRule = candidate
+		if _, ok := rule.(*deadcode.ExceptionTicketClosedRule); ok {
+			names = append(names, rule.Name())
 		}
 	}
-	if check == nil || ticketRule == nil {
+	return readOnlySuppressionsWithoutReason(enabled, cfg, files, names)
+}
+
+// readOnlySuppressionsWithoutReason runs suppression-without-reason over
+// files read only for the named rules, judging only their markers: those are
+// all a marker there can hide.
+func readOnlySuppressionsWithoutReason(enabled []rules.Rule, cfg *core.Config, files []*core.FileContext, names []string) core.ViolationList {
+	var check *deadcode.SuppressionWithoutReasonRule
+	for _, rule := range enabled {
+		if candidate, ok := rule.(*deadcode.SuppressionWithoutReasonRule); ok {
+			check = candidate
+		}
+	}
+	if check == nil || len(names) == 0 {
 		return nil
 	}
 	var kept core.ViolationList
 	for _, ctx := range files {
-		for _, v := range check.MarkersWithoutReasonFor(ctx, ticketRule.Name()) {
+		for _, v := range check.MarkersWithoutReasonFor(ctx, names...) {
 			if cfg.IsFileExcepted(check.Category(), check.Name(), v.File) || cfg.IsViolationExcepted(check.Category(), check.Name(), v.File, v) || ctx.IsSuppressed(v.Line, check.Name()) {
 				continue
 			}
@@ -1790,6 +1799,15 @@ func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *cor
 		return nil, nil, err
 	}
 	violations = append(violations, kept...)
+	// A marker there hides what a reader that honors markers reports, so it
+	// is judged too.
+	var honoring []string
+	for _, rule := range readers {
+		if rules.HonorsSuppression(rule) {
+			honoring = append(honoring, rule.Name())
+		}
+	}
+	violations = append(violations, readOnlySuppressionsWithoutReason(enabledRules, cfg, prepared.excludedInstructions, honoring)...)
 	return violations, append(panics, keptPanics...), validateFindingFiles(kept, readers, prepared.excludedInstructions)
 }
 

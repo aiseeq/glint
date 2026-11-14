@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -21,6 +22,9 @@ type broadEntry struct {
 	pattern   string
 	line      int
 	exception bool
+	// skipDir is a directory name of settings.skip_dirs: the walk leaves
+	// out every directory of that name.
+	skipDir bool
 }
 
 func configNode(n *yaml.Node, key string) *yaml.Node {
@@ -86,28 +90,18 @@ func ignoredBroadPattern(pattern string) bool {
 	return false
 }
 
+// broadLineHasReason reports a marker of broad-exclusion with a reason on the
+// line of the entry, read like every inline marker (core.SuppressionMarkers).
 func broadLineHasReason(ctx *core.FileContext, line int) bool {
-	if line < 1 || line > len(ctx.Lines) {
-		return false
-	}
-	comment := ctx.CommentOf(ctx.Lines[line-1])
-	names, _ := core.ParseSuppressionComment(comment)
-	if !containsString(names, "broad-exclusion") {
-		return false
-	}
-	text := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(comment), "/#*"))
-	for _, marker := range []string{"broad-exclusion: safe", "broad-exclusion:safe"} {
-		if _, after, ok := strings.Cut(text, marker); ok {
-			tail := strings.TrimSpace(strings.TrimSuffix(after, "*/"))
-			return strings.TrimLeft(tail, "-—: \t") != ""
+	for _, marker := range ctx.SuppressionMarkers() {
+		if marker.Line == line && slices.Contains(marker.Rules, broadExclusionRule) && core.SuppressionHasReason(marker.Text, broadExclusionRule) {
+			return true
 		}
 	}
 	return false
 }
 
-func containsString(values []string, target string) bool {
-	return slices.Contains(values, target)
-}
+const broadExclusionRule = "broad-exclusion"
 
 func collectProjectSourceFiles(root string, cfg *core.Config) ([]string, error) {
 	files := make([]string, 0)
@@ -182,6 +176,11 @@ func parseBroadEntries(cfg *core.Config, data []byte) ([]broadEntry, error) {
 		if excluded := configNode(settings, "exclude"); excluded != nil {
 			for _, value := range excluded.Content {
 				entries = append(entries, broadEntry{pattern: value.Value, line: value.Line})
+			}
+		}
+		if skipped := configNode(settings, "skip_dirs"); skipped != nil {
+			for _, value := range skipped.Content {
+				entries = append(entries, broadEntry{pattern: value.Value, line: value.Line, skipDir: true})
 			}
 		}
 	}
@@ -262,12 +261,18 @@ func checkBroadEntries(entries []broadEntry, files []string, catalog map[string]
 		if !found {
 			continue
 		}
-		findings = append(findings, rule.CreateViolation(configName, entry.line, broadFindingMessage(entry)))
+		findings = append(findings, rule.CreateViolation(configName, entry.line, broadFindingMessage(entry, files)))
 	}
 	return findings, nil
 }
 
-func broadFindingMessage(entry broadEntry) string {
+func broadFindingMessage(entry broadEntry, files []string) string {
+	if entry.skipDir {
+		return fmt.Sprintf("settings.skip_dirs leaves out every directory named %s, and the project's sources are in one; intentional cases can be marked # broad-exclusion: safe — <reason>", entry.pattern)
+	}
+	if language := coveredLanguage(entry, files); language != "" {
+		return fmt.Sprintf("Exclusion covers every %s file of the project; intentional cases can be marked # broad-exclusion: safe — <reason>", language)
+	}
 	if entry.pattern == "<category>" {
 		return "An entire rule category is disabled; intentional cases can be marked # broad-exclusion: safe — <reason>"
 	}
@@ -281,8 +286,14 @@ func checkBroadEntry(entry broadEntry, files []string, catalog map[string]int) (
 	if entry.pattern == "<category>" {
 		return true, nil
 	}
+	if entry.skipDir {
+		return skipsSourceDirectory(entry.pattern, files), nil
+	}
 	if ignoredBroadPattern(entry.pattern) || !strings.ContainsAny(entry.pattern, "*?[{") {
 		return false, nil
+	}
+	if coveredLanguage(entry, files) != "" {
+		return true, nil
 	}
 	matched := make(map[string]int)
 	projectMatches := 0
@@ -312,6 +323,57 @@ func checkBroadEntry(entry broadEntry, files []string, catalog map[string]int) (
 		}
 	}
 	return false, nil
+}
+
+// skipsSourceDirectory reports whether a settings.skip_dirs name leaves out a
+// directory with sources of the project. The walk's default artifact
+// directories and the foreign, generated and test-data ones are no finding.
+func skipsSourceDirectory(name string, files []string) bool {
+	if ignoredBroadDirectory(name) || slices.Contains(core.DefaultSkipDirs, name) {
+		return false
+	}
+	for _, file := range files {
+		if slices.Contains(strings.Split(filepath.ToSlash(filepath.Dir(file)), "/"), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// languageExtensions are the source languages of the project by extension.
+var languageExtensions = map[string][]string{
+	"Go":         {".go"},
+	"TypeScript": core.TypeScriptExtensions,
+	"JavaScript": core.JavaScriptExtensions,
+}
+
+// extensionGlob is the last path element of a pattern that names files by
+// their extension alone ("*.go", "*.{ts,tsx}").
+var extensionGlob = regexp.MustCompile(`^\*\.[A-Za-z0-9{},]+$`)
+
+// coveredLanguage returns the language of the project every file of which an
+// exclude pattern that names files by extension ("*.go", "**/*.ts") takes
+// out, matched as the exclusion matches (core.MatchGlob); "" when none.
+func coveredLanguage(entry broadEntry, files []string) string {
+	if entry.exception || entry.skipDir || !extensionGlob.MatchString(entry.pattern[strings.LastIndex(entry.pattern, "/")+1:]) {
+		return ""
+	}
+	for _, language := range slices.Sorted(maps.Keys(languageExtensions)) {
+		total, covered := 0, 0
+		for _, file := range files {
+			if !slices.Contains(languageExtensions[language], strings.ToLower(filepath.Ext(file))) {
+				continue
+			}
+			total++
+			if core.MatchGlob(entry.pattern, file) {
+				covered++
+			}
+		}
+		if total > 0 && covered == total {
+			return language
+		}
+	}
+	return ""
 }
 
 func matchesBroadPattern(pattern, file string) (bool, error) {

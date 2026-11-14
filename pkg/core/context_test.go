@@ -384,7 +384,7 @@ func TestFileContextIsSuppressed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := &FileContext{Lines: tt.lines}
+			ctx := &FileContext{Path: "a.go", RelPath: "a.go", Lines: tt.lines}
 			assert.Equal(t, tt.expected, ctx.IsSuppressed(tt.line, tt.rule))
 		})
 	}

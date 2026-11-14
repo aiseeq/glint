@@ -245,11 +245,19 @@ Shell scripts, make files, Dockerfiles, YAML and env templates comment with `#`,
 printf 'TOKEN=%s\n' "$TOKEN" # secret-exposure: safe — captured by the caller, never printed
 ```
 
+Every other analyzed file takes the markers in its own comments: `#` in Python and nginx `.conf`, `--` and `/* */` in SQL, `<!-- -->` in Markdown (outside code spans and fenced blocks) and HTML, `{{/* */}}` in Go templates, `//` and `/* */` in `tsconfig.json`. Text that only looks like a comment — `//nolint:x` inside a Go raw string or a TypeScript template literal, `//` in Markdown or Python — is none and suppresses nothing. A marker suppresses exactly when `suppression-without-reason` and `stale-suppression` see it.
+
+```markdown
+See [the release notes](notes.md). <!-- nolint:md-broken-link — published with the release -->
+```
+
+A reason is text with a letter or a digit after the rule list or after `safe`: `//nolint:x .` or `// x: safe –` has none.
+
 To refer to a glint ticket in a suppression reason, use `glint#<slug>`. Set `tickets_dir` in `<UserConfigDir>/glint/config.yaml` (`$XDG_CONFIG_HOME/glint/config.yaml` on Linux); `glint tickets-state` supplies a cache input for ticket status changes.
 
 Always add the reason after the marker. Policy rules may opt out of suppression entirely (implement `rules.SuppressionExempt`; `silent-config-error` does).
 
-A marker or a finding exception that silenced nothing in the run is reported by `stale-suppression`: it would hide the next real finding on that spot unseen. The rule judges only rules the run executed; a bare `//nolint` and a name that is no glint rule are reported unless the project configures golangci-lint (`.golangci.yml` in the root or above), whose linters such names may mean. Markers are read from the comments of Go, TypeScript and JavaScript, and from the `#` comments of shell scripts, make files, Dockerfiles, YAML and env templates. `//nolint:glint` names the tool, not a rule, and is reported always: glint honors only `nolint:<rule>`, and golangci-lint takes it for an unknown linter. Exceptions are judged when the run covers the configuration's whole directory. A file-only exception (`file`/`files` and nothing else) is judged by running the rule on the files it names and keeping the findings out of the report; rules whose analysis of one file feeds their findings on others (cross-file duplication, for instance) are not run there, so their file exceptions are not judged. An exception whose files do not exist is `dead-config-exception`'s.
+A marker or a finding exception that silenced nothing in the run is reported by `stale-suppression`: it would hide the next real finding on that spot unseen. The rule judges only rules the run executed; a bare `//nolint` and a name that is no glint rule are reported unless the project configures golangci-lint (`.golangci.yml` in the root or above), whose linters such names may mean. Markers are read from the comments of each file's language, the same ones that suppress (see above). `//nolint:glint` names the tool, not a rule, and is reported always: glint honors only `nolint:<rule>`, and golangci-lint takes it for an unknown linter. Exceptions are judged when the run covers the configuration's whole directory. A file-only exception (`file`/`files` and nothing else) is judged by running the rule on the files it names and keeping the findings out of the report; rules whose analysis of one file feeds their findings on others (cross-file duplication, for instance) are not run there, so their file exceptions are not judged. An exception whose files do not exist is `dead-config-exception`'s.
 
 ### Known Limitations
 

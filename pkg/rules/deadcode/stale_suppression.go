@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
-	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 func init() {
@@ -28,16 +28,18 @@ func (r *SuppressionWithoutReasonRule) AnalyzeFile(ctx *core.FileContext) []*cor
 	return r.markersWithoutReason(ctx, func(string) bool { return true })
 }
 
-// MarkersWithoutReasonFor reports markers in ctx that name rule without a
-// reason. A YAML file read only for exception-ticket-closed can hide nothing
-// but that rule's findings, so only its markers are judged there.
-func (r *SuppressionWithoutReasonRule) MarkersWithoutReasonFor(ctx *core.FileContext, rule string) []*core.Violation {
-	return r.markersWithoutReason(ctx, func(name string) bool { return name == rule })
+// MarkersWithoutReasonFor reports markers in ctx that name one of names
+// without a reason. A file read only for some rules — a YAML file for
+// exception-ticket-closed, an excluded instruction file for instruction-size
+// — can hide nothing but their findings, so only their markers are judged
+// there.
+func (r *SuppressionWithoutReasonRule) MarkersWithoutReasonFor(ctx *core.FileContext, names ...string) []*core.Violation {
+	return r.markersWithoutReason(ctx, func(name string) bool { return slices.Contains(names, name) })
 }
 
 func (r *SuppressionWithoutReasonRule) markersWithoutReason(ctx *core.FileContext, judged func(string) bool) []*core.Violation {
 	var found []*core.Violation
-	for _, marker := range suppressionMarkers(ctx) {
+	for _, marker := range ctx.SuppressionMarkers() {
 		for _, name := range marker.Rules {
 			if _, ok := rules.Get(name); !ok || !judged(name) || core.SuppressionHasReason(marker.Text, name) {
 				continue
@@ -58,7 +60,7 @@ type BroadExclusionRule struct{ *rules.BaseRule }
 
 // NewBroadExclusionRule constructs the broad exclusion rule.
 func NewBroadExclusionRule() *BroadExclusionRule {
-	return &BroadExclusionRule{rules.NewBaseRule("broad-exclusion", "deadcode", "Reports exclusions that hide an entire source directory or category", core.SeverityLow)}
+	return &BroadExclusionRule{rules.NewBaseRule("broad-exclusion", "deadcode", "Reports exclusions that hide an entire source directory, every file of a language or a category", core.SeverityLow)}
 }
 
 // AnalyzeFile is a no-op because broad exclusions are checked against project configuration.
@@ -145,7 +147,7 @@ func (r *StaleSuppressionRule) Check(run StaleSuppressionRun) ([]*core.Violation
 		if ctx.IsGenerated() {
 			continue
 		}
-		for _, marker := range suppressionMarkers(ctx) {
+		for _, marker := range ctx.SuppressionMarkers() {
 			if marker.Bare {
 				violations = append(violations, r.markerViolation(ctx, marker.Line,
 					"Bare nolint names no rule — glint honors only nolint:<rule>, so it silences nothing here",
@@ -277,61 +279,6 @@ func (r *StaleSuppressionRule) markerViolation(ctx *core.FileContext, line int, 
 	v.WithCode(strings.TrimSpace(ctx.GetLine(line)))
 	v.WithSuggestion(suggestion)
 	return v
-}
-
-// suppressionMarker is an inline suppression comment of a line: the rule
-// names it lists, or a bare nolint that names none.
-type suppressionMarker struct {
-	Line  int
-	Rules []string
-	Bare  bool
-	Text  string
-}
-
-// suppressionMarkers returns the markers of the file's comments: of the
-// syntax tree for Go, of the lines outside literals for TypeScript and
-// JavaScript, of the '#' comments outside quotes for the files that comment
-// with '#' (core.FileContext.HashComments). Other files are not read: a
-// marker quoted in documentation is an example.
-func suppressionMarkers(ctx *core.FileContext) []suppressionMarker {
-	var markers []suppressionMarker
-	add := func(line int, comment string) {
-		if names, bare := core.ParseSuppressionComment(comment); len(names) > 0 || bare {
-			markers = append(markers, suppressionMarker{Line: line, Rules: names, Bare: bare, Text: comment})
-		}
-	}
-	switch {
-	case ctx.IsGoFile() && ctx.HasGoAST():
-		for _, group := range ctx.GoAST.Comments {
-			for _, comment := range group.List {
-				first := ctx.LineForPos(comment.Pos())
-				for i, text := range strings.Split(comment.Text, "\n") {
-					// A Go doc code block (//<tab>) quotes an example.
-					if !strings.HasPrefix(text, "//\t") {
-						add(first+i, text)
-					}
-				}
-			}
-		}
-	case ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile():
-		text := helpers.FileJSText(ctx)
-		for i, line := range ctx.Lines {
-			comment := core.CommentPart(line)
-			start := len(line) - len(comment)
-			// The comment masked away in the text view is a comment, not
-			// a "//" inside a literal.
-			if comment != "" && i < len(text) && start < len(text[i]) && text[i][start] == ' ' {
-				add(i+1, comment)
-			}
-		}
-	case ctx.HashComments():
-		for i, line := range ctx.Lines {
-			if comment := ctx.CommentOf(line); comment != "" {
-				add(i+1, comment)
-			}
-		}
-	}
-	return markers
 }
 
 // suppressionKey identifies a suppression entry: an inline marker by its file,

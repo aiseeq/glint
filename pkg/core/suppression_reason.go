@@ -1,6 +1,9 @@
 package core
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // SuppressionReasonRule names the rule that requires a reason after inline
 // suppression markers. Its own marker suppresses only when it has a reason:
@@ -8,26 +11,26 @@ import "strings"
 const SuppressionReasonRule = "suppression-without-reason"
 
 // SuppressionHasReason reports whether the suppression comment gives a reason
-// for the named rule: text after the rule list of "nolint:" or after "safe".
+// for the named rule: text after the rule list of "nolint:" or after "safe"
+// with a letter or a digit in it. Punctuation alone (".", "//", "–") is no
+// reason.
 func SuppressionHasReason(comment, name string) bool {
 	text := SuppressionCommentText(comment)
 	if after, ok := strings.CutPrefix(text, "nolint:"); ok {
-		segments := strings.SplitSeq(strings.TrimSuffix(after, "*/"), ",")
-		for segment := range segments {
+		for segment := range strings.SplitSeq(after, ",") {
 			fields := strings.Fields(segment)
 			if len(fields) == 0 {
 				return false
 			}
 			if len(fields) > 1 {
-				tail := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(segment), fields[0]))
-				return suppressionReasonText(tail) != ""
+				return isSuppressionReason(strings.TrimPrefix(strings.TrimSpace(segment), fields[0]))
 			}
 		}
 		return false
 	}
-	for _, marker := range []string{name + ": safe", name + ":safe"} {
-		if _, after, ok := strings.Cut(text, marker); ok {
-			return suppressionReasonText(after) != ""
+	for _, match := range safeMarker.FindAllStringSubmatchIndex(text, -1) {
+		if text[match[2]:match[3]] == name {
+			return isSuppressionReason(text[match[1]:])
 		}
 	}
 	return false
@@ -39,25 +42,8 @@ func SuppressionCommentText(comment string) string {
 	return strings.TrimSpace(strings.TrimSuffix(text, "*/"))
 }
 
-func suppressionReasonText(text string) string {
-	return strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(text), "-—:"))
-}
-
-// markerSuppresses reports whether a line comment suppresses the rule.
-func markerSuppresses(comment, ruleName string) bool {
-	if !commentHasSuppressionMarker(comment, ruleName) {
-		return false
-	}
-	return ruleName != SuppressionReasonRule || SuppressionHasReason(comment, ruleName)
-}
-
-// lineMarkerSuppresses reports whether the comment of a source line suppresses
-// the rule. A Go doc code block (//<tab>) quotes an example and suppresses
-// nothing, which is also why suppression-without-reason does not judge it.
-func (ctx *FileContext) lineMarkerSuppresses(line, ruleName string) bool {
-	comment := ctx.CommentOf(line)
-	if ctx.IsGoFile() && strings.HasPrefix(comment, "//\t") {
-		return false
-	}
-	return markerSuppresses(comment, ruleName)
+// isSuppressionReason reports text that explains: one with a letter or a
+// digit.
+func isSuppressionReason(text string) bool {
+	return strings.ContainsFunc(text, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) })
 }

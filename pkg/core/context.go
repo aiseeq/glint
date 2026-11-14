@@ -349,19 +349,17 @@ func (ctx *FileContext) IsGenerated() bool {
 //	//nolint:<rule-name>
 //	// <rule-name>: safe — <reason>
 //
-// The marker must appear inside a comment of the file's language: "//" or
-// "/*", or "#" in a shell script, a make file, a Dockerfile, YAML or an env
-// template; string literals containing the same text do not suppress. Rule names match exactly:
-// "nolint:my-rule" does not suppress rule "my-rule-extended" and vice versa.
+// The marker must start a comment of the file's language, as
+// SuppressionMarkers reads them: the marker rules judge exactly the markers
+// that suppress, and text in a literal or a file without comments suppresses
+// nothing. Rule names match exactly: "nolint:my-rule" does not suppress rule
+// "my-rule-extended" and vice versa.
 //
 // The marker that answers is recorded for the rule (TakeSuppressionHits), so
 // that a marker nothing needs can be told apart.
 func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
 	for checkLine := line - 1; checkLine <= line; checkLine++ {
-		if checkLine < 1 || checkLine > len(ctx.Lines) {
-			continue
-		}
-		if ctx.lineMarkerSuppresses(ctx.Lines[checkLine-1], ruleName) {
+		if ctx.lineSuppresses(checkLine, ruleName) {
 			ctx.suppression.record(ruleName, checkLine)
 			return true
 		}
@@ -374,7 +372,7 @@ func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
 // that tie a marker to one line — a declaration's — use it instead of
 // IsSuppressed.
 func (ctx *FileContext) LineSuppresses(line int, ruleName string) bool {
-	if line < 1 || line > len(ctx.Lines) || !ctx.lineMarkerSuppresses(ctx.Lines[line-1], ruleName) {
+	if !ctx.lineSuppresses(line, ruleName) {
 		return false
 	}
 	ctx.suppression.record(ruleName, line)
@@ -421,15 +419,6 @@ func hashCommentPart(line string) string {
 		}
 	}
 	return ""
-}
-
-// commentHasSuppressionMarker checks a comment for suppression markers of
-// the given rule.
-func commentHasSuppressionMarker(comment, ruleName string) bool {
-	// The marker rules judge what ParseSuppressionComment reads; a marker
-	// they do not see (one inside prose) must not suppress either.
-	names, _ := ParseSuppressionComment(strings.TrimSpace(comment))
-	return slices.Contains(names, ruleName)
 }
 
 // nolintNames returns the rule names of the comment's nolint:<list>, and found
