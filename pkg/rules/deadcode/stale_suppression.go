@@ -73,7 +73,8 @@ func init() {
 
 // StaleSuppressionRule detects suppressions that silence nothing:
 //
-//	x := load() //nolint:ignored-error  — the rule reports nothing on this line or the next
+//	x := load() //nolint:ignored-error  — the rule reports nothing on this line
+//	//nolint:ignored-error              — of its own line: nothing on this line or the next
 //	//nolint                            — names no rule; glint honors only nolint:<rule>
 //	//nolint:errcheck                   — not a glint rule, and the project has no golangci-lint
 //	//nolint:glint                      — the tool, not a rule: golangci-lint has no such linter either
@@ -154,7 +155,7 @@ func (r *StaleSuppressionRule) Check(run StaleSuppressionRun) ([]*core.Violation
 					"Name the rules it is meant for (nolint:<rule>) or delete it"))
 			}
 			for _, name := range marker.Rules {
-				if v := r.judgeName(ctx, marker.Line, name, run, used, golangci); v != nil {
+				if v := r.judgeName(ctx, marker, name, run, used, golangci); v != nil {
 					violations = append(violations, v)
 				}
 			}
@@ -173,7 +174,8 @@ func (r *StaleSuppressionRule) Check(run StaleSuppressionRun) ([]*core.Violation
 // judgeName reports a rule name of a marker that silences nothing: a name
 // that is no glint rule (unless golangci-lint is configured, whose linters it
 // may name), or an executed rule that reported nothing the marker covers.
-func (r *StaleSuppressionRule) judgeName(ctx *core.FileContext, line int, name string, run StaleSuppressionRun, used map[string]bool, golangci bool) *core.Violation {
+func (r *StaleSuppressionRule) judgeName(ctx *core.FileContext, marker core.SuppressionMarker, name string, run StaleSuppressionRun, used map[string]bool, golangci bool) *core.Violation {
+	line := marker.Line
 	rule, known := rules.Get(name)
 	if name == toolName {
 		return r.markerViolation(ctx, line,
@@ -195,8 +197,12 @@ func (r *StaleSuppressionRule) judgeName(ctx *core.FileContext, line int, name s
 	if used[suppressionKey(ctx.RelPath, name, line, core.SuppressionInline)] {
 		return nil
 	}
+	covered := "this line or the next"
+	if marker.WithCode {
+		covered = "this line" // a marker after code covers its line only
+	}
 	return r.markerViolation(ctx, line,
-		fmt.Sprintf("Suppression of %s silences nothing: the rule reports nothing on this line or the next", name),
+		fmt.Sprintf("Suppression of %s silences nothing: the rule reports nothing on %s", name, covered),
 		"Delete the marker; if the finding moved, put the marker where the rule reports it now")
 }
 

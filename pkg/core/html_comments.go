@@ -23,10 +23,15 @@ type htmlScanner struct {
 	state htmlState
 	// outer is the state a template action returns to: htmlText or
 	// htmlRawText.
-	outer    htmlState
-	quote    byte   // the open quote inside a tag or an action, 0 when none
-	rawEnd   string // the end tag of raw text, lowercase
-	tagName  string // the name of the tag being read, lowercase
+	outer   htmlState
+	quote   byte   // the open quote inside a tag or an action, 0 when none
+	rawEnd  string // the end tag of raw text, lowercase
+	tagName string // the name of the tag being read, lowercase
+	// commentAction is set while the action being read is a comment
+	// ({{/* … */}}): what closes it after the comment is no code.
+	commentAction bool
+	// code is set once the line being read shows code or text.
+	code     bool
 	comments []lineComment
 }
 
@@ -44,7 +49,16 @@ func (s *htmlScanner) add(line int, text string, cont bool) {
 	}
 }
 
+// scanLine reads the comments of a line, and marks them when the line holds
+// code or text besides them.
 func (s *htmlScanner) scanLine(n int, line string) {
+	first := len(s.comments)
+	s.code = false
+	s.scanStates(n, line)
+	markCode(s.comments[first:], s.code)
+}
+
+func (s *htmlScanner) scanStates(n int, line string) {
 	cont := s.state == htmlComment || s.state == htmlActionComment
 	for i := 0; i < len(line); {
 		switch s.state {
@@ -97,6 +111,10 @@ func (s *htmlScanner) scanText(line string, i int) int {
 		return i + 4
 	case strings.HasPrefix(rest, "{{"):
 		return s.openAction(line, i, htmlText)
+	case rest[0] != ' ' && rest[0] != '\t':
+		s.code = true
+	}
+	switch {
 	case rest[0] == '<' && len(rest) > 1 && (isASCIILetter(rest[1]) || rest[1] == '/' || rest[1] == '!' || rest[1] == '?'):
 		s.state = htmlTag
 		name := rest[1:]
@@ -115,7 +133,8 @@ func (s *htmlScanner) scanText(line string, i int) int {
 func (s *htmlScanner) openAction(line string, i int, outer htmlState) int {
 	s.outer = outer
 	after := strings.TrimLeft(strings.TrimPrefix(line[i+2:], "-"), " \t")
-	if strings.HasPrefix(after, "/*") {
+	s.commentAction = strings.HasPrefix(after, "/*")
+	if s.commentAction {
 		s.state = htmlActionComment
 		return len(line) - len(after) + 2
 	}
@@ -130,8 +149,10 @@ func (s *htmlScanner) scanRawText(line string, i int) int {
 	action := strings.Index(line[i:], "{{")
 	switch {
 	case action >= 0 && (end < 0 || action < end):
+		s.code = s.code || strings.TrimSpace(line[i:i+action]) != ""
 		return s.openAction(line, i+action, htmlRawText)
 	case end < 0:
+		s.code = s.code || strings.TrimSpace(line[i:]) != ""
 		return len(line)
 	}
 	s.state, s.tagName = htmlTag, ""
@@ -140,6 +161,7 @@ func (s *htmlScanner) scanRawText(line string, i int) int {
 
 func (s *htmlScanner) scanTag(line string, i int) int {
 	c := line[i]
+	s.code = true
 	switch {
 	case s.quote != 0:
 		if c == s.quote {
@@ -171,6 +193,9 @@ func (s *htmlScanner) scanAction(line string, i int) int {
 	case strings.HasPrefix(line[i:], "}}"):
 		s.state = s.outer
 		return i + 2
+	}
+	if !s.commentAction {
+		s.code = true // a comment action closes with no code: " -}}"
 	}
 	return i + 1
 }

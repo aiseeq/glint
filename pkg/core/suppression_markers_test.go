@@ -93,6 +93,101 @@ var markerFixtures = []markerFixture{
 	{"html comment in a textarea", "p.html", "<textarea><!-- nolint:my-rule --></textarea>\n<p>x</p>\n", nil},
 	{"html comment in a title", "p.html", "<TITLE>a <!-- nolint:my-rule --></TITLE>\n<p>x</p>\n", nil},
 	{"html comment after a textarea", "p.html", "<textarea>x</textarea> <!-- nolint:my-rule -->\n<p>x</p>\n", []int{1}},
+	{"shell heredoc", "a.sh", "cat > out <<EOF\n# nolint:my-rule\nEOF\n# nolint:my-rule\necho x\n", []int{4}},
+	{"shell quoted heredoc", "a.sh", "cat <<'EOF'\n# nolint:my-rule\nEOF\ncat <<\"END\"\n# nolint:my-rule\nEND\necho x\n", nil},
+	{"shell heredoc with tabs stripped", "a.sh", "cat <<-EOF\n\t# nolint:my-rule\n\tEOF\n# nolint:my-rule\necho x\n", []int{4}},
+	{"shell heredoc terminator must stand alone", "a.sh", "cat <<EOF\n EOF\nEOF x\n# nolint:my-rule\nEOF\necho x\n", nil},
+	{"shell comment on the heredoc line", "a.sh", "cat <<EOF # nolint:my-rule\n# nolint:my-rule\nEOF\necho x\n", []int{1}},
+	{"shell two heredocs on a line", "a.sh", "paste <<A <<B\n# nolint:my-rule\nA\n# nolint:my-rule\nB\n# nolint:my-rule\necho x\n", []int{6}},
+	{"shell here-string", "a.sh", "cat <<<x\n# nolint:my-rule\necho x\n", []int{2}},
+	{"shell arithmetic shift", "a.sh", "echo $((1 << n))\n# nolint:my-rule\necho x\n", []int{2}},
+	{"shell heredoc in quotes", "a.sh", "echo \"<<EOF\"\n# nolint:my-rule\necho x\n", []int{2}},
+	{"shell multi-line double quotes", "a.sh", "echo \"multi\n# nolint:my-rule\n\"\necho x\n", nil},
+	{"shell multi-line single quotes", "a.sh", "echo 'multi\n# nolint:my-rule\n'\necho x\n", nil},
+	{"shell backslash in single quotes", "a.sh", "echo 'a\\' # nolint:my-rule\necho x\n", []int{1}},
+	{"shell ansi-c quotes", "a.sh", "echo $'it\\'s' # nolint:my-rule\necho x\n", []int{1}},
+	{"shell escaped quote", "a.sh", "echo \\\" # nolint:my-rule\necho x\n", []int{1}},
+	{"shell hash in a word", "a.sh", "echo a#nolint:my-rule ${#x}#nolint:my-rule\necho x\n", nil},
+	{"yaml block scalar", "ci.yml", "run: |\n  # nolint:my-rule\n# nolint:my-rule\nkey: v\n", []int{3}},
+	{"yaml folded scalar", "ci.yml", "a: >-\n  # nolint:my-rule\n\n  # nolint:my-rule\nb: c\n", nil},
+	{"yaml block scalar in a sequence", "ci.yml", "steps:\n  - run: |\n      # nolint:my-rule\n    container: x # nolint:my-rule\n", []int{4}},
+	{"yaml block scalar header comment", "ci.yml", "a: |2 # nolint:my-rule\n  x\n", []int{1}},
+	{"yaml empty block scalar", "ci.yml", "a: |\nb: 1 # nolint:my-rule\n", []int{2}},
+	{"yaml anchored block scalar", "ci.yml", "a: &x |\n  # nolint:my-rule\nb: 1\n", nil},
+	{"yaml bar in a plain scalar", "ci.yml", "a: x |\n# nolint:my-rule\nb: 1\n", []int{2}},
+	{"yaml double-quoted", "ci.yml", "a: \"# nolint:my-rule\"\nb: { n: '# nolint:my-rule' }\n", nil},
+	{"yaml multi-line quotes", "ci.yml", "a: \"x\n  # nolint:my-rule\"\nb: 1\n", nil},
+	{"yaml apostrophe in a plain scalar", "ci.yml", "a: don't # nolint:my-rule\nb: 1\n", []int{1}},
+	{"yaml doubled single quote", "ci.yml", "a: 'it''s # x' # nolint:my-rule\nb: 1\n", []int{1}},
+	{"yaml hash in a word", "ci.yml", "a: x#nolint:my-rule\n", nil},
+	{"dockerfile comment line", "Dockerfile", "FROM alpine\n  # nolint:my-rule\nRUN x\n", []int{2}},
+	{"dockerfile hash after an instruction", "Dockerfile", "FROM alpine\nCOPY a b # nolint:my-rule\nRUN x\n", nil},
+	{"dockerfile comment in a continuation", "Containerfile", "RUN a \\\n# nolint:my-rule\n  b\n", []int{2}},
+	{"dockerfile heredoc", "app.dockerfile", "RUN <<EOF\n# nolint:my-rule\nEOF\n# nolint:my-rule\nRUN x\n", []int{4}},
+	{"make comment after a recipe", "Makefile", "build:\n\t@echo x # nolint:my-rule\n\t@echo y\n", []int{2}},
+	{"shell comment after a closing quote", "a.sh", "echo \"a\n\" # nolint:my-rule\necho x\n", []int{2}},
+	{"yaml empty block scalar in a mapping", "ci.yml", "x:\n  a: |\n  b: 1 # nolint:my-rule\n  c: 2\n", []int{3}},
+	{"yaml comment after a closing quote", "ci.yml", "a: \"x\n  y\" # nolint:my-rule\nb: 1\n", []int{2}},
+	{"yaml bar after a plain scalar", "ci.yml", "a: b |\n  # nolint:my-rule\nc: 1\n", []int{2}},
+	{"yaml bracket in a plain scalar", "ci.yml", "a: x[, 'y # nolint:my-rule\nb: 1\n", []int{1}},
+	{"yaml comma in a plain scalar", "ci.yml", "a: x, 'y # nolint:my-rule\nb: 1\n", []int{1}},
+	{"yaml colon in a plain scalar", "ci.yml", "a: b:'c # nolint:my-rule\nd: 1\n", []int{1}},
+	{"yaml second block scalar indented less", "ci.yml", "a: |\n    x\nb: |\n  # nolint:my-rule\nc: 1\n", nil},
+	{"yaml comma after a closed flow sequence", "ci.yml", "a: [x], 'y # nolint:my-rule\nb: 1\n", []int{1}},
+	{"yaml quoted sequence entry", "ci.yml", "- 'a # nolint:my-rule\n  b'\n- x\n", nil},
+	{"template action after a template comment", "p.tmpl", "{{/* a */}}\n{{ .X }} <!-- nolint:my-rule -->\n<p>x</p>\n", []int{2}},
+	{"yaml escaped double quote", "ci.yml", "a: \"x\\\" # nolint:my-rule\n  y\"\nb: 1\n", nil},
+	{"go comment after a closing raw string", "a.go", "package p\n\nvar s = `\n` //nolint:my-rule\nconst ()\n", []int{4}},
+	{"html comment after spaces", "p.html", "  <!-- nolint:my-rule -->\n<p>x</p>\n", []int{1}},
+	{"html comment after text", "p.html", "text <!-- nolint:my-rule -->\nmore\n", []int{1}},
+	{"template comment after script code", "p.html", "<script>\nvar a = 1; {{/* nolint:my-rule */}}\n</script>\n", []int{2}},
+	{"template comment before script code", "p.html", "<script>\n{{/* nolint:my-rule */}} var a = 1;\n</script>\n", []int{2}},
+	{"html comment after a tag over lines", "p.html", "<div\n  title=\"a\"> <!-- nolint:my-rule -->\n<p>x</p>\n", []int{2}},
+}
+
+// markerWithCode are, by fixture, the marker lines that hold code besides
+// the marker: such a marker covers its line only, not the next one.
+var markerWithCode = map[string][]int{
+	"ts line comment":                          {1},
+	"md comment on the line":                   {3},
+	"html comment":                             {1},
+	"md comment after a closed double span":    {1},
+	"md unmatched backtick is text":            {1},
+	"sql dollar quote":                         {1},
+	"sql tagged dollar quote":                  {3},
+	"sql tagged DO body over lines":            {4},
+	"sql dollar string in a body":              {4},
+	"sql escape string":                        {1},
+	"sql positional parameter":                 {1},
+	"html comment after a script":              {1},
+	"html text with a less-than":               {1},
+	"template comment after an action":         {1},
+	"template comment in a script after code":  {1},
+	"template action after a script":           {1},
+	"comment after a script with an action":    {1},
+	"html comment after a textarea":            {1},
+	"shell comment on the heredoc line":        {1},
+	"shell backslash in single quotes":         {1},
+	"shell ansi-c quotes":                      {1},
+	"shell escaped quote":                      {1},
+	"yaml block scalar in a sequence":          {4},
+	"yaml block scalar header comment":         {1},
+	"yaml empty block scalar":                  {2},
+	"yaml apostrophe in a plain scalar":        {1},
+	"yaml doubled single quote":                {1},
+	"make comment after a recipe":              {2},
+	"shell comment after a closing quote":      {2},
+	"yaml empty block scalar in a mapping":     {3},
+	"yaml comment after a closing quote":       {2},
+	"yaml bracket in a plain scalar":           {1},
+	"yaml comma in a plain scalar":             {1},
+	"yaml colon in a plain scalar":             {1},
+	"html comment after text":                  {1},
+	"template comment after script code":       {2},
+	"template comment before script code":      {2},
+	"html comment after a tag over lines":      {2},
+	"yaml comma after a closed flow sequence":  {1},
+	"template action after a template comment": {2},
 }
 
 func fixtureContext(f markerFixture) *FileContext {
@@ -101,20 +196,23 @@ func fixtureContext(f markerFixture) *FileContext {
 
 // The markers a file carries are the comments of its own language, and they
 // are what both suppression and the marker rules read: a line is suppressed
-// exactly when a marker the rules see stands on it or directly above it.
+// exactly when a marker the rules see stands on it, or directly above it on a
+// line of its own; a marker after code covers that line only.
 func TestSuppressionMarkersAreWhatSuppresses(t *testing.T) {
 	for _, f := range markerFixtures {
 		t.Run(f.name, func(t *testing.T) {
+			withCode := markerWithCode[f.name]
 			var lines []int
 			for _, marker := range fixtureContext(f).SuppressionMarkers() {
 				assert.Equal(t, []string{"my-rule"}, marker.Rules)
+				assert.Equal(t, slices.Contains(withCode, marker.Line), marker.WithCode, "WithCode of the marker on line %d", marker.Line)
 				lines = append(lines, marker.Line)
 			}
 			assert.Equal(t, f.lines, lines, "marker lines")
 			for line := 1; line <= len(fixtureContext(f).Lines); line++ {
 				want := false
 				for _, marked := range f.lines {
-					want = want || marked == line || marked == line-1
+					want = want || marked == line || marked == line-1 && !slices.Contains(withCode, marked)
 				}
 				assert.Equal(t, want, fixtureContext(f).IsSuppressed(line, "my-rule"), "IsSuppressed(%d)", line)
 				assert.Equal(t, slices.Contains(f.lines, line), fixtureContext(f).LineSuppresses(line, "my-rule"), "LineSuppresses(%d)", line)
@@ -182,5 +280,43 @@ func TestSuppressionReasonNeedsALetterOrDigit(t *testing.T) {
 		"// my-rule: safe — ` followed by the reason written out": false,
 	} {
 		assert.Equal(t, want, SuppressionHasReason(comment, "my-rule"), comment)
+	}
+}
+
+// A marker after code on line N is that line's: the finding on N+1 is not
+// hidden by it, and a marker on N+1 is the one that silences there, so it
+// is not left stale. A marker on a line of its own still covers the line
+// under it, the declaration below a Go marker among them.
+func TestMarkerAfterCodeCoversItsLineOnly(t *testing.T) {
+	tests := []struct {
+		name, path, source string
+		// hits are the lines of the markers that silence findings on
+		// lines 1 to 3, by finding line; 0 when none does.
+		hits [3]int
+	}{
+		{"ts", "a.ts", "const a = \"x\"; // nolint:my-rule\nconst b = \"y\"; // nolint:my-rule fixture key\nconst c = 1;\n", [3]int{1, 2, 0}},
+		{"js after code only", "b.js", "const a = \"x\"; // nolint:my-rule\nconst b = \"y\";\n\n", [3]int{1, 0, 0}},
+		{"ts block before code", "a.ts", "/* nolint:my-rule */ const a = 1;\nconst b = 2; // nolint:my-rule\n\n", [3]int{1, 2, 0}},
+		{"sql", "m.sql", "CREATE TABLE g (c CHAR(3)); -- nolint:my-rule\nCREATE TABLE h (c CHAR(3)); -- nolint:my-rule fixed-width code\n\n", [3]int{1, 2, 0}},
+		{"shell", "a.sh", "echo x # nolint:my-rule\npsql -f d.sql\n\n", [3]int{1, 0, 0}},
+		{"yaml", "compose.yml", "image: nginx # nolint:my-rule\nports: [80]\n\n", [3]int{1, 0, 0}},
+		{"go declaration below a marker", "a.go", "//nolint:my-rule generated table\nfunc f() {}\n\n", [3]int{1, 1, 0}},
+		{"go marker after code covers the next line, as golangci-lint reads it", "a.go", "if err != nil { //nolint:my-rule\n\treturn nil\n}\n", [3]int{1, 1, 0}},
+		{"python marker after code", "s.py", "x = 1  # nolint:my-rule\ny = 2\n\n", [3]int{1, 0, 0}},
+		{"html comment after text", "p.html", "<p>x</p> <!-- nolint:my-rule -->\n<p>y</p>\n\n", [3]int{1, 0, 0}},
+		{"template comment of its own", "p.tmpl", "{{- /* nolint:my-rule */ -}}\n<p>y</p>\n\n", [3]int{1, 1, 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for line, want := range tt.hits {
+				ctx := &FileContext{Path: tt.path, RelPath: tt.path, Lines: strings.Split(tt.source, "\n")}
+				assert.Equal(t, want != 0, ctx.IsSuppressed(line+1, "my-rule"), "IsSuppressed(%d)", line+1)
+				var hits []int
+				if want != 0 {
+					hits = []int{want}
+				}
+				assert.Equal(t, hits, ctx.TakeSuppressionHits("my-rule"), "marker that silences line %d", line+1)
+			}
+		})
 	}
 }

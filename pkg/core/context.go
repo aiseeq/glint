@@ -344,7 +344,8 @@ func (ctx *FileContext) IsGenerated() bool {
 
 // IsSuppressed reports whether a violation of the given rule at the given
 // line is suppressed by an inline comment. Two forms are recognized, on the
-// violation line itself or on the line directly above it:
+// violation line itself or on a line of their own directly above it (a
+// marker after code on the line above is that line's):
 //
 //	//nolint:<rule-name>
 //	// <rule-name>: safe — <reason>
@@ -359,7 +360,7 @@ func (ctx *FileContext) IsGenerated() bool {
 // that a marker nothing needs can be told apart.
 func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
 	for checkLine := line - 1; checkLine <= line; checkLine++ {
-		if ctx.lineSuppresses(checkLine, ruleName) {
+		if ctx.lineSuppresses(checkLine, ruleName, checkLine < line) {
 			ctx.suppression.record(ruleName, checkLine)
 			return true
 		}
@@ -372,7 +373,7 @@ func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
 // that tie a marker to one line — a declaration's — use it instead of
 // IsSuppressed.
 func (ctx *FileContext) LineSuppresses(line int, ruleName string) bool {
-	if !ctx.lineSuppresses(line, ruleName) {
+	if !ctx.lineSuppresses(line, ruleName, false) {
 		return false
 	}
 	ctx.suppression.record(ruleName, line)

@@ -7,11 +7,14 @@ import (
 )
 
 // lineComment is the part of one line a comment takes. A comment that spans
-// lines gives one per line; Cont is set on the lines after its first.
+// lines gives one per line; Cont is set on the lines after its first. Code is
+// set when the line holds code besides its comments: a literal, a word, a
+// bracket.
 type lineComment struct {
 	Line int
 	Text string
 	Cont bool
+	Code bool
 }
 
 // commentSyntax describes the comments and literals of a language well
@@ -97,14 +100,14 @@ func fileComments(ctx *FileContext) []lineComment {
 		return scanComments(lines, goSyntax)
 	case ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile():
 		return jsComments(lines)
+	case ctx.IsShellFile():
+		return shellComments(lines)
+	case ctx.IsDockerfile():
+		return dockerfileComments(lines)
+	case ext == ".yml" || ext == ".yaml":
+		return yamlComments(lines)
 	case ctx.HashComments() || ext == ".conf":
-		var comments []lineComment
-		for i, line := range lines {
-			if comment := hashCommentPart(line); comment != "" {
-				comments = append(comments, lineComment{Line: i + 1, Text: comment})
-			}
-		}
-		return comments
+		return hashComments(lines)
 	case ext == ".py":
 		return scanComments(lines, pythonSyntax)
 	case ext == ".sql":
@@ -207,6 +210,8 @@ type commentScanner struct {
 	// last.
 	lastWord string
 	bodies   []string
+	// code is set once the line being read shows code.
+	code bool
 	// comments are the comments read so far.
 	comments []lineComment
 }
@@ -225,7 +230,23 @@ func (s *commentScanner) add(line int, text string, cont bool) {
 	}
 }
 
+// scanLine reads the comments of a line, and marks them when the line holds
+// code besides them.
 func (s *commentScanner) scanLine(n int, line string) {
+	first := len(s.comments)
+	s.code = s.quoting
+	s.scanCode(n, line)
+	markCode(s.comments[first:], s.code)
+}
+
+// markCode sets Code on the comments of a line when the line holds code.
+func markCode(comments []lineComment, code bool) {
+	for i := range comments {
+		comments[i].Code = code
+	}
+}
+
+func (s *commentScanner) scanCode(n int, line string) {
 	i := 0
 	if s.block >= 0 {
 		i = s.closeBlock(n, line, 0, true)
@@ -243,6 +264,9 @@ func (s *commentScanner) scanLine(n int, line string) {
 			s.block = b
 			i = s.closeBlock(n, line, i, false)
 			continue
+		}
+		if line[i] != ' ' && line[i] != '\t' {
+			s.code = true
 		}
 		if next, ok := s.dollarBody(line, i); ok {
 			i = next

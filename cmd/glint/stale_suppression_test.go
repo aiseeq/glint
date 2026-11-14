@@ -146,6 +146,20 @@ func TestStaleSuppressionLeavesGolangciNamesToGolangci(t *testing.T) {
 	assert.NotContains(t, staleFindings(t, root, nil), "errs.go:26")
 }
 
+// A stale marker after code is told to cover its line only, one on a line of
+// its own the next line too.
+func TestStaleSuppressionTellsTheLinesAMarkerCovers(t *testing.T) {
+	_, stale := analyzeWithRules(t, writeStaleModule(t, false), nil, "error-string", "magic-number", "stale-suppression")
+	messages := map[string]string{}
+	for _, v := range stale {
+		messages[v.Location()] = v.Message
+	}
+	// Go reads a marker after code as golangci-lint does: it covers the
+	// line under it too.
+	assert.True(t, strings.HasSuffix(messages["errs.go:15"], "reports nothing on this line or the next"), messages["errs.go:15"])
+	assert.True(t, strings.HasSuffix(messages["errs.go:19"], "reports nothing on this line or the next"), messages["errs.go:19"])
+}
+
 // The markers in use are known from the result cache too: a second run that
 // reuses every finding judges them the same.
 func TestStaleSuppressionSeesMarkersThroughTheResultCache(t *testing.T) {
