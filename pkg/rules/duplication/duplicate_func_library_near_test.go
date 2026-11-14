@@ -119,6 +119,20 @@ func payprovTransfer(from, to string, amount int64) map[string]string {
 }
 `
 
+// isolateLibraryCache gives the rule an empty cache of its own. The Go build
+// cache stays where it was: under a new XDG_CACHE_HOME the go command would
+// build the export data of every imported standard package again, seconds
+// per test.
+func isolateLibraryCache(t *testing.T) {
+	t.Helper()
+	if os.Getenv("GOCACHE") == "" {
+		base, err := os.UserCacheDir()
+		require.NoError(t, err)
+		t.Setenv("GOCACHE", filepath.Join(base, "go-build"))
+	}
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+}
+
 func nearLibraryFindings(t *testing.T, libSource, source string) []*core.Violation {
 	t.Helper()
 	return nearLibraryFilesFindings(t, map[string]string{"lib.go": libSource}, source)
@@ -126,7 +140,7 @@ func nearLibraryFindings(t *testing.T, libSource, source string) []*core.Violati
 
 func nearLibraryFilesFindings(t *testing.T, libFiles map[string]string, source string) []*core.Violation {
 	t.Helper()
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolateLibraryCache(t)
 	ctx := duplicateLibraryTestProject(t, "example.com/owner/lib", "example.com/owner/app", source, libFiles, true, "")
 	violations, err := NewDuplicateFuncOfLibraryRule().AnalyzeGoProject(ctx)
 	require.NoError(t, err)
@@ -404,7 +418,7 @@ const libraryDependencyTS = `export function addFee(amount: number): number {
 // and runs the rule on the files as the check flow does.
 func tsLibraryFindings(t *testing.T, tsPath, goModDir, source string) []*core.Violation {
 	t.Helper()
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolateLibraryCache(t)
 	root := t.TempDir()
 	writeLibraryTestModule(t, filepath.Join(root, "library"), "example.com/owner/lib", map[string]string{
 		"lib.go":                     libraryReferenceSource,
@@ -518,7 +532,7 @@ func TestDuplicateFuncOfLibraryTypeScriptKeepsDifferentFunctionsApart(t *testing
 // The library's own TypeScript, inside the analyzed root, belongs to the
 // library module, which does not require itself: it is no copy of itself.
 func TestDuplicateFuncOfLibraryTypeScriptSkipsLibraryFiles(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolateLibraryCache(t)
 	root := t.TempDir()
 	library := filepath.Join(root, "library")
 	writeLibraryTestModule(t, library, "example.com/owner/lib", map[string]string{"lib.go": libraryReferenceSource, "amount.ts": libraryReferenceTS})
@@ -601,7 +615,7 @@ func TestDuplicateFuncOfLibraryTypeScriptCallbacksKeptApart(t *testing.T) {
 // with the libraries of that module only, though another module of the root
 // requires it.
 func TestDuplicateFuncOfLibraryTypeScriptModuleWithoutTheLibrary(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolateLibraryCache(t)
 	root := t.TempDir()
 	writeLibraryTestModule(t, filepath.Join(root, "library"), "example.com/owner/lib", map[string]string{"lib.go": libraryReferenceSource, "ts/amount.ts": libraryReferenceTS})
 	writeLibraryTestConsumer(t, filepath.Join(root, "backend"), "example.com/owner/app", "example.com/owner/lib", "../library", "package app\n")
@@ -622,7 +636,7 @@ func TestDuplicateFuncOfLibraryTypeScriptModuleWithoutTheLibrary(t *testing.T) {
 // A changed TypeScript source of a local library is read again: the cache
 // key of a local library covers its TypeScript too.
 func TestDuplicateFuncOfLibraryLocalTypeScriptChangeMissesCache(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolateLibraryCache(t)
 	root := t.TempDir()
 	library := filepath.Join(root, "library")
 	writeLibraryTestModule(t, library, "example.com/owner/lib", map[string]string{"lib.go": libraryReferenceSource, "ts/set.ts": librarySetTS})
