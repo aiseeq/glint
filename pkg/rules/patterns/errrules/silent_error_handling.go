@@ -3,7 +3,9 @@ package errrules
 import (
 	"go/ast"
 	"go/token"
+	"path"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -45,8 +47,9 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 		return nil
 	}
 
-	// Build a set of if statements that are inside defer function literals
+	// Build sets shared by the function-body checks.
 	ifStmtsInDefer := r.findIfStmtsInDefers(ctx.GoAST)
+	imports := standardImportAliases(ctx.GoAST)
 
 	var violations []*core.Violation
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
@@ -56,11 +59,11 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 			if fn.Name != nil {
 				name = fn.Name.Name
 			}
-			violations = append(violations, r.analyzeFuncBody(ctx, fn.Type, name, fn.Body, nil, ifStmtsInDefer)...)
+			violations = append(violations, r.analyzeFuncBody(ctx, fn.Type, name, fn.Body, nil, ifStmtsInDefer, imports)...)
 			return false
 		case *ast.FuncLit:
 			// Функциональный литерал вне FuncDecl (var handler = func() {...}).
-			violations = append(violations, r.analyzeFuncBody(ctx, fn.Type, "", fn.Body, nil, ifStmtsInDefer)...)
+			violations = append(violations, r.analyzeFuncBody(ctx, fn.Type, "", fn.Body, nil, ifStmtsInDefer, imports)...)
 			return false
 		}
 		return true
@@ -72,7 +75,7 @@ func (r *SilentErrorHandlingRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 // analyzeFuncBody проверяет `if err != nil` внутри тела одной функции. Вложенные
 // замыкания разбираются рекурсивно со своей сигнатурой: исключения для
 // (T, bool)-функций и bool-предикатов не наследуются от объемлющей функции.
-func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *ast.FuncType, name string, body *ast.BlockStmt, outerWriters map[string]bool, ifStmtsInDefer map[*ast.IfStmt]bool) []*core.Violation {
+func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *ast.FuncType, name string, body *ast.BlockStmt, outerWriters map[string]bool, ifStmtsInDefer map[*ast.IfStmt]bool, imports map[string]string) []*core.Violation {
 	if body == nil {
 		return nil
 	}
@@ -94,7 +97,7 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 	ast.Inspect(body, func(n ast.Node) bool {
 		// Тело замыкания живёт со своей сигнатурой — рекурсия вместо спуска.
 		if lit, ok := n.(*ast.FuncLit); ok {
-			violations = append(violations, r.analyzeFuncBody(ctx, lit.Type, "", lit.Body, writers, ifStmtsInDefer)...)
+			violations = append(violations, r.analyzeFuncBody(ctx, lit.Type, "", lit.Body, writers, ifStmtsInDefer, imports)...)
 			return false
 		}
 
@@ -115,9 +118,14 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 			return true
 		}
 
+		// An assigned replacement error that reaches a later return is propagated.
+		if assignedErrorReturnedAfterIf(body, ifStmt) {
+			return true
+		}
+
 		// Check if the if body handles the error properly
 		// For (T, bool) functions, returning false is acceptable error handling
-		if !debugOnlyLostValue(body, ifStmt) && r.bodyHandlesError(ifStmt.Body, writers) {
+		if !debugOnlyLostValue(body, ifStmt) && r.bodyHandlesError(ifStmt.Body, writers, imports) {
 			return true
 		}
 
@@ -168,13 +176,13 @@ func (r *SilentErrorHandlingRule) analyzeFuncBody(ctx *core.FileContext, ftype *
 }
 
 // bodyHandlesError checks if the if body logs or propagates error
-func (r *SilentErrorHandlingRule) bodyHandlesError(body *ast.BlockStmt, writers map[string]bool) bool {
+func (r *SilentErrorHandlingRule) bodyHandlesError(body *ast.BlockStmt, writers map[string]bool, imports map[string]string) bool {
 	if body == nil {
 		return false
 	}
 
 	for _, stmt := range body.List {
-		if r.stmtHandlesError(stmt, writers) {
+		if r.stmtHandlesError(stmt, writers, imports) {
 			return true
 		}
 	}
@@ -296,7 +304,7 @@ func (r *SilentErrorHandlingRule) bodyHasErrorHandledComment(ctx *core.FileConte
 }
 
 // stmtHandlesError checks if a statement handles error
-func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[string]bool) bool {
+func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[string]bool, imports map[string]string) bool {
 	switch s := stmt.(type) {
 	case *ast.ReturnStmt:
 		// Check if return includes error or uses error value
@@ -341,22 +349,22 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[st
 		}
 
 	case *ast.IfStmt:
-		// Nested if might handle error
-		if r.bodyHandlesError(s.Body, writers) {
+		// A nested condition evaluates its calls on the error path too.
+		if conditionTakesError(s.Cond, imports) || r.bodyHandlesError(s.Body, writers, imports) {
 			return true
 		}
 
 	case *ast.SwitchStmt:
 		// A switch over the kind of the error, as a nested if.
 		for _, clause := range s.Body.List {
-			if cc, ok := clause.(*ast.CaseClause); ok && slices.ContainsFunc(cc.Body, func(inner ast.Stmt) bool { return r.stmtHandlesError(inner, writers) }) {
+			if cc, ok := clause.(*ast.CaseClause); ok && slices.ContainsFunc(cc.Body, func(inner ast.Stmt) bool { return r.stmtHandlesError(inner, writers, imports) }) {
 				return true
 			}
 		}
 
 	case *ast.BlockStmt:
 		for _, inner := range s.List {
-			if r.stmtHandlesError(inner, writers) {
+			if r.stmtHandlesError(inner, writers, imports) {
 				return true
 			}
 		}
@@ -376,7 +384,7 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[st
 		}
 
 	case *ast.ForStmt, *ast.RangeStmt:
-		return r.loopHandlesError(stmt, writers)
+		return r.loopHandlesError(stmt, writers, imports)
 
 	case *ast.SendStmt:
 		return r.exprReferencesError(s.Value) || r.exprUsesErrorValue(s.Value)
@@ -385,12 +393,12 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[st
 	return false
 }
 
-func (r *SilentErrorHandlingRule) loopHandlesError(stmt ast.Stmt, writers map[string]bool) bool {
+func (r *SilentErrorHandlingRule) loopHandlesError(stmt ast.Stmt, writers map[string]bool, imports map[string]string) bool {
 	switch loop := stmt.(type) {
 	case *ast.ForStmt:
-		return r.bodyHandlesError(loop.Body, writers)
+		return r.bodyHandlesError(loop.Body, writers, imports)
 	case *ast.RangeStmt:
-		return r.bodyHandlesError(loop.Body, writers)
+		return r.bodyHandlesError(loop.Body, writers, imports)
 	}
 	return false
 }
@@ -932,8 +940,9 @@ func incrementedName(stmt ast.Stmt) string {
 	return ""
 }
 
-// returnedByFunc reports a return of the function (not of a closure in it)
-// that hands name to the caller.
+// returnedByFunc reports whether any return of the function (excluding returns
+// inside closures) hands name to the caller. Accumulating with OR makes the
+// answer independent of the source order of return statements.
 func returnedByFunc(body *ast.BlockStmt, name string) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -941,11 +950,203 @@ func returnedByFunc(body *ast.BlockStmt, name string) bool {
 		case *ast.FuncLit:
 			return false
 		case *ast.ReturnStmt:
-			found = patternkit.ReturnsIdent(n, name)
+			found = found || patternkit.ReturnsIdent(n, name)
 		}
-		return !found
+		return true
 	})
 	return found
+}
+
+func conditionTakesError(cond ast.Expr, imports map[string]string) bool {
+	found := false
+	ast.Inspect(cond, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if isStandardErrorClassifier(call, imports) {
+			return false
+		}
+		if callTakesErrorArgument(call) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func standardImportAliases(file *ast.File) map[string]string {
+	aliases := make(map[string]string, len(file.Imports))
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			continue
+		}
+		name := path.Base(importPath)
+		if spec.Name != nil {
+			name = spec.Name.Name
+		}
+		if name != "." && name != "_" {
+			aliases[name] = importPath
+		}
+	}
+	return aliases
+}
+
+// isStandardErrorClassifier recognizes standard-library calls that inspect an
+// error's kind without reporting or forwarding the error.
+func isStandardErrorClassifier(call *ast.CallExpr, imports map[string]string) bool {
+	selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	if selector.Sel.Name == "Is" && callTakesErrorArgument(call) {
+		for _, importPath := range imports {
+			if importPath == "syscall" {
+				return true // syscall.Errno.Is classifies the target error.
+			}
+		}
+	}
+	qualifier, ok := ast.Unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	importPath := imports[qualifier.Name]
+	switch importPath {
+	case "errors":
+		return selector.Sel.Name == "Is" || selector.Sel.Name == "As"
+	case "os":
+		switch selector.Sel.Name {
+		case "IsNotExist", "IsExist", "IsPermission", "IsTimeout":
+			return true
+		}
+	case "io/fs", "net", "syscall", "context":
+		return strings.HasPrefix(selector.Sel.Name, "Is") || selector.Sel.Name == "As"
+	}
+	return false
+}
+
+type assignedErrorScope struct{ insideTarget bool }
+
+type assignedErrorFlow struct {
+	target  *ast.IfStmt
+	errName string
+	found   bool
+}
+
+func (r *assignedErrorFlow) CloneState(paths []bool) []bool { return slices.Clone(paths) }
+func (r *assignedErrorFlow) JoinStates(left, right []bool) []bool {
+	return patternkit.JoinFlowPaths(left, right, func(assigned bool) string {
+		if assigned {
+			return "assigned"
+		}
+		return "unassigned"
+	})
+}
+func (r *assignedErrorFlow) LiveState(paths []bool) bool { return len(paths) != 0 }
+func (r *assignedErrorFlow) DeadState() []bool           { return nil }
+func (r *assignedErrorFlow) EnterScope(_ patternkit.FlowScopeKind, node ast.Node, parent assignedErrorScope, paths []bool) (assignedErrorScope, []bool) {
+	if node == r.target.Body {
+		return assignedErrorScope{insideTarget: true}, paths
+	}
+	return parent, paths
+}
+func (*assignedErrorFlow) LeaveScope(patternkit.FlowScopeKind, assignedErrorScope, *patternkit.FlowEdges[[]bool]) {
+}
+func (r *assignedErrorFlow) SimpleStmt(stmt ast.Stmt, paths []bool, scope assignedErrorScope) ([]bool, bool) {
+	if assign, ok := stmt.(*ast.AssignStmt); ok && patternkit.AssignsName(assign, r.errName) {
+		for i := range paths {
+			paths[i] = scope.insideTarget && assignedNonNilValue(assign, r.errName)
+		}
+	}
+	if ret, ok := stmt.(*ast.ReturnStmt); ok {
+		if patternkit.ReturnsIdent(ret, r.errName) {
+			for _, assigned := range paths {
+				r.found = r.found || assigned
+			}
+		}
+		return nil, true
+	}
+	return paths, false
+}
+func (r *assignedErrorFlow) IfCondition(_ *ast.IfStmt, paths []bool, _ assignedErrorScope) ([]bool, []bool) {
+	return slices.Clone(paths), slices.Clone(paths)
+}
+func (*assignedErrorFlow) FlowExpr(_ ast.Expr, paths []bool, _ assignedErrorScope) []bool {
+	return paths
+}
+func (*assignedErrorFlow) RangeVars(_ *ast.RangeStmt, paths []bool, _ assignedErrorScope) []bool {
+	return paths
+}
+func (*assignedErrorFlow) TypeSwitchGuard(_ ast.Stmt, paths []bool, _ assignedErrorScope) []bool {
+	return paths
+}
+func (*assignedErrorFlow) CaseClause(_ ast.Stmt, _ *ast.CaseClause, paths []bool, parent assignedErrorScope) ([]bool, assignedErrorScope) {
+	return paths, parent
+}
+func (*assignedErrorFlow) CommClause(_ *ast.CommClause, paths []bool, parent assignedErrorScope) ([]bool, assignedErrorScope) {
+	return paths, parent
+}
+func (*assignedErrorFlow) Normalize(*patternkit.FlowEdges[[]bool]) {}
+
+// assignedNonNilValue reports whether the assignment gives name a value that
+// may carry an error. Nil and empty literals do not make the checked error visible.
+func assignedNonNilValue(assign *ast.AssignStmt, name string) bool {
+	for i, lhs := range assign.Lhs {
+		id, ok := lhs.(*ast.Ident)
+		if !ok || id.Name != name {
+			continue
+		}
+		var rhs ast.Expr
+		if len(assign.Rhs) == 1 {
+			rhs = assign.Rhs[0]
+		} else if i < len(assign.Rhs) {
+			rhs = assign.Rhs[i]
+		}
+		if rhs == nil {
+			return false
+		}
+		switch value := ast.Unparen(rhs).(type) {
+		case *ast.Ident:
+			return value.Name != "nil"
+		case *ast.BasicLit:
+			return value.Value != `""` && value.Value != "0"
+		}
+		return true
+	}
+	return false
+}
+
+// assignedErrorReturnedAfterIf follows the function's control flow and reports
+// only when an assignment in this branch reaches a return of the same variable.
+func assignedErrorReturnedAfterIf(body *ast.BlockStmt, target *ast.IfStmt) bool {
+	errName := patternkit.ErrNilCheckName(target.Cond)
+	if errName == "" && narrowedErrCheck(target.Cond) {
+		if cond, ok := ast.Unparen(target.Cond).(*ast.BinaryExpr); ok {
+			errName = patternkit.ErrNilCheckName(ast.Unparen(cond.X))
+		}
+	}
+	if errName == "" {
+		return false
+	}
+	hasAssignment := false
+	ast.Inspect(target.Body, func(node ast.Node) bool {
+		if _, ok := node.(*ast.FuncLit); ok {
+			return false
+		}
+		if assign, ok := node.(*ast.AssignStmt); ok && patternkit.AssignsName(assign, errName) {
+			hasAssignment = true
+		}
+		return !hasAssignment
+	})
+	if !hasAssignment {
+		return false
+	}
+	analyzer := &assignedErrorFlow{target: target, errName: errName}
+	walker := &patternkit.FlowWalker[[]bool, assignedErrorScope]{Rule: analyzer}
+	walker.Walk(body, []bool{false}, assignedErrorScope{})
+	return analyzer.found
 }
 
 func onlyDebugLogs(list []ast.Stmt) bool {

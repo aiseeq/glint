@@ -1,6 +1,8 @@
 package errrules
 
 import (
+	"fmt"
+	"go/ast"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -488,6 +490,117 @@ func period(from, to string) (start, end *time.Time, errKey string) {
 	violations := NewSilentErrorHandlingRule().AnalyzeFile(ctx)
 	require.Len(t, violations, 1)
 	require.Equal(t, 8, violations[0].Line)
+}
+
+func TestSilentErrorHandlingRule_AssignedErrorReturnedAfterIf(t *testing.T) {
+	code := `package main
+
+func load() ([]byte, error) { return nil, nil }
+func run() ([]byte, error) {
+	data, err := load()
+	if err != nil && ctxErr() != nil {
+		err = currentCause()
+	}
+	return data, err
+}
+func runLost() ([]byte, error) {
+	data, err := load()
+	if err != nil {
+		err = currentCause()
+	}
+	return data, nil
+}
+func runNil() ([]byte, error) {
+	data, err := load()
+	if err != nil {
+		err = nil
+	}
+	return data, err
+}
+func currentCause() error { return nil }
+func ctxErr() error { return nil }
+`
+
+	violations := NewSilentErrorHandlingRule().AnalyzeFile(createSilentErrorContext(t, "assign.go", code))
+	require.Equal(t, []int{13, 20}, rulestest.ViolationLines(violations))
+}
+
+func TestSilentErrorHandlingRule_ErrorClassificationPredicatesDoNotHandleIt(t *testing.T) {
+	cases := []struct {
+		name, importPath, qualifier, call string
+	}{
+		{name: "errors.Is", importPath: "errors", qualifier: "errors", call: `errors.Is(err, errors.ErrUnsupported)`},
+		{name: "errors.As", importPath: "errors", qualifier: "errors", call: `errors.As(err, &target)`},
+		{name: "os.IsNotExist", importPath: "os", qualifier: "os", call: `os.IsNotExist(err)`},
+		{name: "os.IsExist", importPath: "os", qualifier: "os", call: `os.IsExist(err)`},
+		{name: "os.IsPermission", importPath: "os", qualifier: "os", call: `os.IsPermission(err)`},
+		{name: "os.IsTimeout", importPath: "os", qualifier: "os", call: `os.IsTimeout(err)`},
+		{name: "aliased errors.Is", importPath: "errors", qualifier: "errlib", call: `errlib.Is(err, errlib.ErrUnsupported)`},
+		{name: "io/fs Is predicate", importPath: "io/fs", qualifier: "fs", call: `fs.IsNotExist(err)`},
+		{name: "net Is predicate", importPath: "net", qualifier: "net", call: `net.IsTimeout(err)`},
+		{name: "syscall As predicate", importPath: "syscall", qualifier: "syscall", call: `syscall.As(err, &target)`},
+		{name: "syscall.Errno.Is method", importPath: "syscall", qualifier: "syscall", call: `errno.Is(err)`},
+		{name: "context Is predicate", importPath: "context", qualifier: "ctx", call: `ctx.IsCanceled(err)`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code := fmt.Sprintf("package main\nimport %s %q\nfunc check(err error) {\n if err != nil {\n  var target error\n  if %s { return }\n }\n}\n", tc.qualifier, tc.importPath, tc.call)
+			violations := NewSilentErrorHandlingRule().AnalyzeFile(createSilentErrorContext(t, "predicate.go", code))
+			require.Len(t, violations, 1, tc.name)
+		})
+	}
+}
+
+func TestSilentErrorHandlingRule_ErrorPassedInNestedIfCondition(t *testing.T) {
+	code := `package main
+
+import "fmt"
+
+type recorder struct{}
+func (recorder) logFail(string) bool { return false }
+func run() {
+	_, err := load()
+	if err != nil {
+		if (recorder{}).logFail(fmt.Sprintf("load failed: %v", err)) {
+			return
+		}
+	}
+}
+func load() (int, error) { return 0, nil }
+`
+
+	require.Empty(t, NewSilentErrorHandlingRule().AnalyzeFile(createSilentErrorContext(t, "condition.go", code)))
+}
+
+// A count is caller-visible when any function return carries it, independent
+// of the source order of those returns.
+func TestSilentErrorHandlingRule_CountResultDoesNotDependOnReturnOrder(t *testing.T) {
+	code := `package main
+func first() int {
+	bad := 0
+	if err != nil { bad++ }
+	if choose { return bad }
+	return 0
+}
+func last() int {
+	bad := 0
+	if err != nil { bad++ }
+	if choose { return 0 }
+	return bad
+}
+`
+	ctx := createSilentErrorContext(t, "order.go", code)
+	funcs := map[string]*ast.FuncDecl{}
+	for _, decl := range ctx.GoAST.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			funcs[fn.Name.Name] = fn
+		}
+	}
+	for _, name := range []string{"first", "last"} {
+		fn := funcs[name]
+		branch := fn.Body.List[1].(*ast.IfStmt).Body
+		require.True(t, countsIntoResult(fn.Type, fn.Body, branch), name)
+	}
 }
 
 // A parser that skips a malformed record and counts it in a result the caller
