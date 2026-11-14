@@ -75,9 +75,8 @@ func (c *Config) SkipDirs() []string {
 type CategoryConfig struct {
 	Enabled          bool   `yaml:"enabled"`
 	SeverityOverride string `yaml:"severity_override,omitempty"`
-	// Rule settings are user-authored YAML whose shape each rule defines; a
-	// typed struct here would have to know all of them.
-	// any-in-public-contract: safe
+	// Rule settings are user-authored YAML whose shape each rule defines.
+	// any-in-public-contract: safe — a typed struct would have to know every rule's settings
 	Settings map[string]any        `yaml:"settings,omitempty"`
 	Rules    map[string]RuleConfig `yaml:"rules,omitempty"`
 }
@@ -99,8 +98,7 @@ func (c *CategoryConfig) UnmarshalYAML(value *yaml.Node) error {
 type RuleConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	Severity string `yaml:"severity,omitempty"`
-	// See CategoryConfig.Settings.
-	// any-in-public-contract: safe
+	// any-in-public-contract: safe — user-authored YAML, see CategoryConfig.Settings.
 	Settings   map[string]any `yaml:"settings,omitempty"`
 	Exceptions []Exception    `yaml:"exceptions,omitempty"`
 }

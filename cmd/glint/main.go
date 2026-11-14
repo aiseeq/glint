@@ -336,6 +336,50 @@ func applyJobs() error {
 	return nil
 }
 
+func recordDeadConfigRule(enabledRules []rules.Rule, cfg *core.Config, configs map[string]*core.Config) *deadcode.DeadConfigExceptionRule {
+	configPath := cfg.ConfigPath()
+	if configPath == "" {
+		return nil
+	}
+	for _, rule := range enabledRules {
+		if dead, ok := rule.(*deadcode.DeadConfigExceptionRule); ok {
+			configs[configPath] = cfg
+			return dead
+		}
+	}
+	return nil
+}
+
+func analyzeConfigurationRules(enabledRules []rules.Rule, cfg *core.Config, contexts []*core.FileContext, projectRoot string) ([]*core.Violation, error) {
+	var findings []*core.Violation
+	for _, rule := range enabledRules {
+		switch rule.Name() {
+		case "broad-exclusion":
+			done := timings.track("broad-exclusion", "(project config)")
+			violations, err := broadExclusionFindings(cfg, contexts)
+			done()
+			if err != nil {
+				return nil, err
+			}
+			findings = append(findings, violations...)
+		case "suppression-without-reason":
+			configPath := cfg.ConfigPath()
+			if configPath == "" || slices.ContainsFunc(contexts, func(ctx *core.FileContext) bool { return ctx.Path == configPath }) {
+				continue
+			}
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				return nil, fmt.Errorf("read configuration for suppression markers: %w", err)
+			}
+			ctx := core.NewFileContext(configPath, projectRoot, data, cfg)
+			done := timings.track("suppression-without-reason", ctx.RelPath)
+			findings = append(findings, rule.AnalyzeFile(ctx)...)
+			done()
+		}
+	}
+	return findings, nil
+}
+
 func runCheck(_ *cobra.Command, args []string) (runErr error) {
 	startTime := time.Now()
 	journal := runJournalEntry{Time: runJournalTime(startTime), Version: resolveVersion(), Findings: map[string]int{}, RuleMS: map[string]int64{}}
@@ -395,11 +439,8 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 		if err != nil {
 			return err
 		}
-		for _, rule := range enabledRules {
-			if dead, ok := rule.(*deadcode.DeadConfigExceptionRule); ok && cfg.ConfigPath() != "" {
-				deadRule = dead
-				deadCheckConfigs[cfg.ConfigPath()] = cfg
-			}
+		if dead := recordDeadConfigRule(enabledRules, cfg, deadCheckConfigs); dead != nil {
+			deadRule = dead
 		}
 
 		if len(enabledRules) == 0 {
@@ -429,6 +470,12 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 		if err != nil {
 			return err
 		}
+		var configFindings []*core.Violation
+		configFindings, err = analyzeConfigurationRules(enabledRules, cfg, contexts, projectRoot)
+		if err != nil {
+			return err
+		}
+		violations = append(violations, configFindings...)
 		panics = append(panics, rootPanics...)
 		if cache != nil {
 			journalCachedFiles += cache.reused
@@ -787,9 +834,7 @@ func loadConfig(projectRoot string) (*core.Config, []rules.Rule, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if warning := excludedTestRulesWarning(cfg, enabledRules); warning != "" {
-		fmt.Fprintln(os.Stderr, warning)
-	}
+
 	return cfg, enabledRules, nil
 }
 
