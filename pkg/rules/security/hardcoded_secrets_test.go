@@ -178,6 +178,29 @@ var pwd = "abc"`,
 			wantViolations: 0,
 		},
 		{
+			name: "code after a block comment on the same line is scanned",
+			code: `package main
+
+/* fallback */ var apiKey = "AbCdEfGhIjKlMnOpQrStUvWx"`,
+			wantViolations: 1,
+			wantPattern:    "api_key",
+		},
+		{
+			name: "a secret inside a one-line block comment is comment text",
+			code: `package main
+
+/* apiKey = "AbCdEfGhIjKlMnOpQrStUvWx" */ var count = 42`,
+			wantViolations: 0,
+		},
+		{
+			name: "an unclosed block comment opening a line is comment text",
+			code: `package main
+
+/* apiKey = "AbCdEfGhIjKlMnOpQrStUvWx"
+*/`,
+			wantViolations: 0,
+		},
+		{
 			name: "environment variable reference - ok",
 			code: `package main
 

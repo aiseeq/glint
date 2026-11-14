@@ -128,6 +128,23 @@ func NewHardcodedSecretsRule() *HardcodedSecretsRule {
 // a key: test fixtures write them to exercise the parsing.
 var truncatedPEMBlock = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----(?:\\n|\s)*[A-Za-z0-9+/=\\n]{0,120}-----END [A-Z ]*PRIVATE KEY-----`)
 
+// codeOfLine returns the line with a leading /* … */ blanked out, columns kept,
+// and false for a line that is comment only: a // line or a # line of an env
+// template.
+// Code after a closing */ is scanned like any other code.
+func codeOfLine(line string, envTemplate bool) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "//") || (envTemplate && strings.HasPrefix(trimmed, "#")) {
+		return "", false
+	}
+	if !strings.HasPrefix(trimmed, "/*") {
+		return line, true
+	}
+	// An unclosed /* leaves nothing after it: the whole line is blank.
+	_, after, _ := strings.Cut(line[strings.Index(line, "/*")+2:], "*/")
+	return strings.Repeat(" ", len(line)-len(after)) + after, true
+}
+
 // AnalyzeFile checks for hardcoded secrets
 func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	var violations []*core.Violation
@@ -136,10 +153,9 @@ func (r *HardcodedSecretsRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	testData := ctx.IsTestFile() || isTestConfigPath(ctx.RelPath)
 	envTemplate := ctx.IsEnvTemplate()
 
-	for lineNum, line := range ctx.Lines {
-		// Skip comments
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || (envTemplate && strings.HasPrefix(trimmed, "#")) {
+	for lineNum, raw := range ctx.Lines {
+		line, ok := codeOfLine(raw, envTemplate)
+		if !ok {
 			continue
 		}
 		if credential := credentialInLine(line, envTemplate); credential != "" {
