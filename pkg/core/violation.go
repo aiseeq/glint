@@ -29,7 +29,7 @@ type Violation struct {
 	// Context carries rule-specific metadata consumed by config exceptions and
 	// by the JSON output. Every rule attaches its own keys, so the payload has
 	// no single schema to declare.
-	// any-in-public-contract: safe
+	// any-in-public-contract: safe — each rule attaches its own keys.
 	Context map[string]any
 
 	// Suppression is set on an entry that is no finding: it records that an

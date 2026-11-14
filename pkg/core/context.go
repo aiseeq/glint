@@ -471,7 +471,11 @@ func nolintNames(comment string) (names []string, found bool) {
 		if len(fields) == 0 {
 			break
 		}
-		names = append(names, fields[0])
+		name := fields[0]
+		if strings.HasSuffix(name, ":") && ruleNameShape.MatchString(strings.TrimSuffix(name, ":")) {
+			name = strings.TrimSuffix(name, ":")
+		}
+		names = append(names, name)
 		if len(fields) > 1 {
 			break
 		}

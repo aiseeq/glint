@@ -88,7 +88,7 @@ type SettingSpec struct {
 	Type        string
 	Default     string
 	Description string
-	Example     any // any-in-public-contract: safe
+	Example     any // any-in-public-contract: safe — an example value of any setting type
 }
 
 type settingDefault interface {
