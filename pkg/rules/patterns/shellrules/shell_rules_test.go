@@ -619,6 +619,18 @@ ssh host "$REMOTE_DIR/remote.sh"
 	}))
 }
 
+// Script-looking text passed as an argument is data, while a shell source
+// command is still a real sibling script reference.
+func TestShellScriptReferenceMissingIgnoresQuotedData(t *testing.T) {
+	assert.Equal(t, []string{"check.sh:4"}, patterntest.ShellFindings(t, "shell-script-reference-missing", map[string]string{
+		"check.sh": `#!/bin/bash
+deploy_with '# shellcheck source=helper.sh' '. "$(dirname "$0")/helper.sh"'
+printf '#!/usr/bin/env bash\n. "$(dirname "$0")/helper.sh"\n' > mid.sh
+. "$(dirname "$0")/missing.sh"
+`,
+	}))
+}
+
 // The database password is in the repository and in the process list.
 func TestShellDBPasswordLiteral(t *testing.T) {
 	assert.Equal(t, []string{"Makefile:2", "Makefile:3", "Makefile:4"}, patterntest.ShellFindings(t, "shell-db-password-literal", map[string]string{
