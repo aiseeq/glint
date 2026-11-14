@@ -25,6 +25,7 @@ type Walker struct {
 	parseGoImports bool
 	goImportPaths  []string
 	requiredFile   func(string) bool
+	additionalFile func(string) bool
 	// gitignore строится в начале каждого обхода (settings.respect_gitignore);
 	// nil — учёт .gitignore выключен. Заполняется и читается только в
 	// goroutine обнаружения файлов, лока не требует.
@@ -117,6 +118,17 @@ func (w *Walker) WithGoImportPaths(paths []string) *Walker {
 func (w *Walker) WithRequiredFilePredicate(predicate func(string) bool) *Walker {
 	w.requiredFile = predicate
 	return w
+}
+
+// WithAdditionalFilePredicate includes extra files for a dedicated check.
+func (w *Walker) WithAdditionalFilePredicate(predicate func(string) bool) *Walker {
+	w.additionalFile = predicate
+	return w
+}
+
+// AdditionalFile reports a file included only by the additional predicate.
+func (w *Walker) AdditionalFile(path string) bool {
+	return w.additionalFile != nil && w.additionalFile(path) && !w.isAnalyzableFile(path)
 }
 
 // WithWorkers sets the number of worker goroutines
@@ -350,12 +362,12 @@ func (w *Walker) visitEntry(fileQueue chan<- string, walkErrors chan<- error, he
 
 	// Apply rule path requirements before extension checks; some analyzable
 	// extensionless files need to be opened just to identify their type.
-	if w.requiredFile != nil && !w.requiredFile(path) {
+	if w.requiredFile != nil && !w.requiredFile(path) && (w.additionalFile == nil || !w.additionalFile(path)) {
 		return nil
 	}
 
 	// Skip non-analyzable files
-	if !w.isAnalyzableFile(path) {
+	if !w.isAnalyzableFile(path) && (w.additionalFile == nil || !w.additionalFile(path)) {
 		return nil
 	}
 

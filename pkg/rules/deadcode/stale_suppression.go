@@ -66,6 +66,8 @@ type StaleSuppressionRun struct {
 	Config   *core.Config
 	// WholeRoot is set when the run covered the root's whole tree.
 	WholeRoot bool
+	// Scopes are the explicit paths of a partial run, absolute.
+	Scopes []string
 }
 
 // Check reports the stale suppressions of one root: inline markers, files
@@ -229,6 +231,7 @@ type suppressionMarker struct {
 	Line  int
 	Rules []string
 	Bare  bool
+	Text  string
 }
 
 // suppressionMarkers returns the markers of the file's comments: of the
@@ -240,7 +243,7 @@ func suppressionMarkers(ctx *core.FileContext) []suppressionMarker {
 	var markers []suppressionMarker
 	add := func(line int, comment string) {
 		if names, bare := core.ParseSuppressionComment(comment); len(names) > 0 || bare {
-			markers = append(markers, suppressionMarker{Line: line, Rules: names, Bare: bare})
+			markers = append(markers, suppressionMarker{Line: line, Rules: names, Bare: bare, Text: comment})
 		}
 	}
 	switch {

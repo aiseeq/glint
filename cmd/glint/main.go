@@ -268,6 +268,10 @@ func init() {
 	fixCmd.Flags().BoolVar(&flagTolerant, "tolerate-broken-packages", false, "Fix the packages that type-check and report the ones that do not, instead of failing")
 
 	// Root commands
+	rootCmd.AddCommand(&cobra.Command{
+		Use: "tickets-state", Short: "Print a fingerprint of ticket statuses", Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, _ []string) { fmt.Fprintln(cmd.OutOrStdout(), deadcode.TicketState()) },
+	})
 	rootCmd.AddCommand(checkCmd)
 	rootCmd.AddCommand(guideCmd)
 	rootCmd.AddCommand(rulesCmd)
@@ -462,6 +466,7 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 			return err
 		}
 		violations = append(violations, stale...)
+		violations = append(violations, closedTicketSuppressions(enabledRules, deadcode.StaleSuppressionRun{Contexts: append(slices.Clone(contexts), prepared.ticketFiles...), Config: cfg, WholeRoot: root.wholeRoot(), Scopes: root.walkScopes()})...)
 		minSeverity, err := cfg.GetMinSeverity()
 		if err != nil {
 			return err
@@ -475,7 +480,7 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 		// Each root fails by its own threshold: roots can carry different configs.
 		failed = failed || shown.AnyAtLeast(failOn)
 
-		for _, ctx := range append(slices.Clone(contexts), prepared.excludedInstructions...) {
+		for _, ctx := range slices.Concat(contexts, prepared.excludedInstructions, prepared.ticketFiles) {
 			analyzedFiles[ctx.Path] = struct{}{}
 		}
 		stats.FilesSkipped += prepared.walker.Stats().SkippedFiles
@@ -514,6 +519,38 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 	}
 
 	return nil
+}
+
+// closedTicketSuppressions checks current ticket state independently of the result cache.
+func closedTicketSuppressions(enabled []rules.Rule, run deadcode.StaleSuppressionRun) core.ViolationList {
+	var check *deadcode.ExceptionTicketClosedRule
+	for _, rule := range enabled {
+		if candidate, ok := rule.(*deadcode.ExceptionTicketClosedRule); ok {
+			check = candidate
+			break
+		}
+	}
+	if check == nil {
+		return nil
+	}
+	done := timings.track(check.Name(), "(suppressions)")
+	found := check.Check(run)
+	done()
+	contexts := make(map[string]*core.FileContext, len(run.Contexts))
+	for _, ctx := range run.Contexts {
+		contexts[ctx.RelPath] = ctx
+	}
+	var kept core.ViolationList
+	for _, v := range found {
+		if run.Config.IsFileExcepted(check.Category(), check.Name(), v.File) || run.Config.IsViolationExcepted(check.Category(), check.Name(), v.File, v) {
+			continue
+		}
+		if ctx := contexts[v.File]; ctx != nil && ctx.IsSuppressed(v.Line, check.Name()) {
+			continue
+		}
+		kept = append(kept, v)
+	}
+	return kept
 }
 
 // staleSuppressions runs the stale-suppression check over one analyzed root
@@ -895,12 +932,14 @@ func walkWithWalker(walker *core.Walker) ([]*core.FileContext, *core.Walker, err
 // analyzedFiles counts the files the analysis of the root reads: its
 // contexts and the instruction files kept for the rules that measure them.
 func (p *preparedRoot) analyzedFiles() int {
-	return len(p.contexts) + len(p.excludedInstructions)
+	return len(p.contexts) + len(p.excludedInstructions) + len(p.ticketFiles)
 }
 
 // preparedRoot is a walked project root ready for analysis.
 type preparedRoot struct {
 	contexts []*core.FileContext
+	// ticketFiles are additional YAML files read only for ticket suppressions.
+	ticketFiles []*core.FileContext
 	// excludedInstructions are the Claude Code instruction files an exclude
 	// pattern leaves out, kept for the rules that measure them; no other rule
 	// sees them.
@@ -997,6 +1036,15 @@ func prepareScopedAnalysis(loader goProjectLoader, root analysisRoot, cfg *core.
 	if predicate, ok := requiredFilePredicate(enabledRules); ok {
 		walker.WithRequiredFilePredicate(predicate)
 	}
+	if deadcode.TicketsConfigured() && slices.ContainsFunc(enabledRules, func(rule rules.Rule) bool {
+		_, ok := rule.(*deadcode.ExceptionTicketClosedRule)
+		return ok
+	}) {
+		walker.WithAdditionalFilePredicate(func(path string) bool {
+			ext := strings.ToLower(filepath.Ext(path))
+			return ext == ".yaml" || ext == ".yml"
+		})
+	}
 	walked, walker, err := walkWithWalker(walker)
 	prepared := &preparedRoot{walker: walker}
 	if err != nil {
@@ -1005,6 +1053,8 @@ func prepareScopedAnalysis(loader goProjectLoader, root analysisRoot, cfg *core.
 	for _, ctx := range walked {
 		if walker.ExcludedInstruction(ctx.Path) {
 			prepared.excludedInstructions = append(prepared.excludedInstructions, ctx)
+		} else if walker.AdditionalFile(ctx.Path) {
+			prepared.ticketFiles = append(prepared.ticketFiles, ctx)
 		} else {
 			prepared.contexts = append(prepared.contexts, ctx)
 		}
