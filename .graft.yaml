@@ -137,6 +137,10 @@ tasks:
   lint:
     desc: golangci-lint (installed on first use)
     heavy: true
+    # The pc host has the same golangci-lint (v2.15.0) as a copy in ~/bin: its
+    # sandbox sees ~/bin, not ~/go/bin. The lint reads nothing outside the tree
+    # but its own cache (16 s there with a cold cache, 14.11).
+    remote: true
     cache:
       commands: [[go, version], [golangci-lint, --version]]
     run:
@@ -150,6 +154,7 @@ tasks:
   lint-trunk:
     desc: golangci-lint on a commit made on main; a branch commit skips it (merge runs lint)
     heavy: true
+    remote: true
     run:
       - sh: '[ "$(git rev-parse --abbrev-ref HEAD)" != main ] || golangci-lint run --concurrency {threads}'
   fmt:
