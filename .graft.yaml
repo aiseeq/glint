@@ -19,6 +19,13 @@ limits:
 gate:
   - task: smoke
 
+# golangci-lint (errcheck and the rest) guards main at merge, not every
+# commit: after a change it takes 30-57 s (one package or pkg/core, measured
+# 14.11), on top of a gate of 3-6 min. Without it a merge once left main red
+# until install ran lint.
+merge:
+  deps: [lint]
+
 # graft's own vet runs with the tag the tests build with, so it shares their
 # build cache; smoke does not vet again.
 go_vet:
