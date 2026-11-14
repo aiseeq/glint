@@ -43,16 +43,15 @@ func TestBroadExclusionReportsOversightRuleException(t *testing.T) {
 			"one file by file":       "          - file: internal/payprov/client.go\n            reason: legacy markers\n",
 			"one file and a pattern": "          - files: internal/payprov/client.go\n            pattern: \"Suppression\"\n            reason: legacy markers\n",
 			"reason first":           "          - reason: legacy markers\n            files: \"internal/**\"\n",
-			"a line of a glob":       "          - files: \"internal/payprov/c*.go\"\n            line: 3\n            reason: legacy markers\n",
+			"a line of a glob":       "          - files: \"**/client.go\"\n            line: 3\n            reason: legacy markers\n",
 			"line zero of one file":  "          - files: internal/payprov/client.go\n            line: 0\n            reason: legacy markers\n",
 			"a line of no file":      "          - files: \"\"\n            line: 3\n            reason: legacy markers\n",
 			"a line of a base name":  "          - file: client.go\n            line: 3\n            reason: legacy markers\n",
 		} {
 			t.Run(rule+"/"+name, func(t *testing.T) {
 				root := oversightExceptionProject(t, rule, exception)
-				if name == "a line of a base name" {
-					writeModuleFile(t, root, "internal/ledger/client.go", "package ledger\n")
-				}
+				// A second client.go: a base name or a glob of it names two files.
+				writeModuleFile(t, root, "internal/ledger/client.go", "package ledger\n")
 				cfg, err := core.LoadConfigWithDefaults(root)
 				require.NoError(t, err)
 				found := broadFindingsForTest(t, cfg)
@@ -66,17 +65,20 @@ func TestBroadExclusionReportsOversightRuleException(t *testing.T) {
 }
 
 // An exception of one line of one file - the file by its path, or by a base
-// name only one file of the project has - keeps one marker and is no finding.
+// name or a glob only one file of the project has, matched as the exception
+// matches: file and files both - keeps one marker and is no finding.
 // Exceptions of other rules keep their judgement: a pattern or a directory
 // is none.
 func TestBroadExclusionAllowsOversightRuleExceptionOfOneLine(t *testing.T) {
 	for _, rule := range oversightRules {
 		for name, exception := range map[string]string{
-			"files and line":   "          - files: internal/payprov/client.go\n            line: 3\n            reason: one legacy marker\n",
-			"file and line":    "          - file: internal/payprov/client.go\n            line: 3\n            reason: one legacy marker\n",
-			"unique base name": "          - file: client.go\n            line: 3\n            reason: one legacy marker\n",
-			"and a pattern":    "          - files: internal/payprov/client.go\n            line: 3\n            pattern: \"Suppression\"\n            reason: one legacy marker\n",
-			"the first line":   "          - files: internal/payprov/client.go\n            line: 1\n            reason: one legacy marker\n",
+			"files and line":     "          - files: internal/payprov/client.go\n            line: 3\n            reason: one legacy marker\n",
+			"file and line":      "          - file: internal/payprov/client.go\n            line: 3\n            reason: one legacy marker\n",
+			"unique base name":   "          - file: client.go\n            line: 3\n            reason: one legacy marker\n",
+			"and a pattern":      "          - files: internal/payprov/client.go\n            line: 3\n            pattern: \"Suppression\"\n            reason: one legacy marker\n",
+			"the first line":     "          - files: internal/payprov/client.go\n            line: 1\n            reason: one legacy marker\n",
+			"a glob of one file": "          - files: \"**/client.go\"\n            line: 3\n            reason: one legacy marker\n",
+			"a file in a glob":   "          - file: internal/payprov/client.go\n            files: \"**/*.go\"\n            line: 3\n            reason: one legacy marker\n",
 		} {
 			t.Run(rule+"/"+name, func(t *testing.T) {
 				assert.Empty(t, broadPlaces(t, oversightExceptionProject(t, rule, exception)))

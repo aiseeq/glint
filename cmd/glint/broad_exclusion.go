@@ -37,9 +37,9 @@ type broadEntry struct {
 	// what it covers; "" for other entries.
 	excepted string
 	// oneLine names the files of an exception of a rule watching
-	// suppressions that keeps a line of files named by base name, with no
-	// glob: one line of one file when the project holds at most one file of
-	// that name; nil for other entries.
+	// suppressions that keeps a line of files named by base name or by a
+	// glob: one line of one file when the project holds at most one file
+	// they name; nil for other entries.
 	oneLine *core.Exception
 	// file is the configuration file, absolute, the entry is reported in and
 	// whose marker keeps it.
@@ -94,6 +94,7 @@ func readBroadChain(configPath, root string) ([]broadConfigFile, error) {
 		if err := yaml.Unmarshal(data, &doc); err != nil {
 			return nil, fmt.Errorf("parse configuration %q for broad exclusions: %w", path, err)
 		}
+		expandBroadAliases(&doc)
 		file := broadConfigFile{path: path, data: data, reportIn: reportIn, reportLine: reportLine}
 		if len(doc.Content) > 0 {
 			file.top = doc.Content[0]
@@ -117,6 +118,31 @@ func readBroadChain(configPath, root string) ([]broadConfigFile, error) {
 		path = next
 	}
 	return chain, nil
+}
+
+// expandBroadAliases replaces every YAML alias under n with a copy of the
+// node it names, placed on the line of the alias: the load of the
+// configuration follows an alias (core.LoadConfig), so what it names is in
+// effect where it is used, and is judged and kept by a marker there. The load
+// refuses an alias of a node that holds it, so the copies end.
+func expandBroadAliases(n *yaml.Node) {
+	for i, child := range n.Content {
+		if child.Kind == yaml.AliasNode {
+			n.Content[i] = relinedBroadNode(child.Alias, child.Line)
+		}
+		expandBroadAliases(n.Content[i])
+	}
+}
+
+// relinedBroadNode copies a node and everything under it onto one line.
+func relinedBroadNode(n *yaml.Node, line int) *yaml.Node {
+	clone := *n
+	clone.Line = line
+	clone.Content = make([]*yaml.Node, len(n.Content))
+	for i, child := range n.Content {
+		clone.Content[i] = relinedBroadNode(child, line)
+	}
+	return &clone
 }
 
 // inBroadProject reports a path under the project's directory.
@@ -183,12 +209,12 @@ func collectBroadExceptions(n *yaml.Node, rule string, entries *[]broadEntry) er
 // oversightException is the entry of an exception of a rule watching
 // suppressions, on the line of the exception: whatever narrows it - a
 // pattern, a function, a line, a directory - a marker it covers goes
-// unwatched. One of a line of a file named by its path, with no glob, keeps
-// one line of one file and is none: wide is false. One of a line of files
-// named by base name keeps their names in oneLine, and is none when the
-// project holds one file of that name (narrowOversightExceptions). One that
-// names no file names every file, the configuration among them, so it is
-// never one.
+// unwatched. One of a line of a file named by its path - file, or files with
+// no glob - keeps one line of one file and is none: wide is false. One of a
+// line of files named by base name or by a glob keeps their names in oneLine,
+// and is none when they name one file of the project
+// (narrowOversightExceptions). One that names no file names every file, the
+// configuration among them, so it is never one.
 func oversightException(exception *yaml.Node, rule string) (entry broadEntry, wide bool, err error) {
 	entry = broadEntry{line: exception.Line, exception: true, oversight: true, excepted: rule}
 	var decoded core.Exception
@@ -199,12 +225,10 @@ func oversightException(exception *yaml.Node, rule string) (entry broadEntry, wi
 	if decoded.Line <= 0 {
 		return entry, true, nil
 	}
-	// file names a file, never a glob (core.Exception.NamesFile).
-	if strings.ContainsAny(decoded.Files, "*?[{") {
-		return entry, true, nil
-	}
-	// A name with a directory matches the file of that path alone.
-	if strings.Contains(decoded.File+decoded.Files, "/") {
+	// A name with a directory matches the file of that path alone, and the
+	// exception matches a file both file and files name
+	// (core.Exception.NamesFile); file is never a glob.
+	if strings.Contains(decoded.File, "/") || strings.Contains(decoded.Files, "/") && !strings.ContainsAny(decoded.Files, "*?[{") {
 		return entry, false, nil
 	}
 	entry.oneLine = &decoded
@@ -213,8 +237,8 @@ func oversightException(exception *yaml.Node, rule string) (entry broadEntry, wi
 
 // narrowOversightExceptions drops the exceptions of a rule watching
 // suppressions that keep one line of one file: a line of files named by base
-// name that name at most one file of the project, matched as the exception
-// matches.
+// name or by a glob that name at most one file of the project, matched as the
+// exception matches.
 func narrowOversightExceptions(entries []broadEntry, cfg *core.Config) ([]broadEntry, error) {
 	if !slices.ContainsFunc(entries, func(entry broadEntry) bool { return entry.oneLine != nil }) {
 		return entries, nil
