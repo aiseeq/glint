@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -944,7 +945,9 @@ func loadConfig(projectRoot string) (*core.Config, []rules.Rule, error) {
 // --category is an error: silently falling back to "all rules" made glint
 // report findings the caller never asked for.
 func getEnabledRules(cfg *core.Config) ([]rules.Rule, error) {
-	enabledRules := rules.GetEnabled(cfg)
+	// --category and --rule below replace the configured set, and with it
+	// broad-exclusion added to it.
+	enabledRules := withBroadExclusion(rules.GetEnabled(cfg))
 
 	if flagCategory != "" {
 		categoryRules := rules.GetByCategory(flagCategory)
@@ -981,6 +984,24 @@ func getEnabledRules(cfg *core.Config) ([]rules.Rule, error) {
 	}
 
 	return enabledRules, nil
+}
+
+// withBroadExclusion adds broad-exclusion to a run of the configured rules
+// when the configuration switches it off. Its category holds the rules that
+// watch suppressions, so switching the category off would take away the
+// watch, and the report of that switch, in one line: broad-exclusion runs
+// and reports it. Switched off by name, it runs to report only that
+// (broadExclusionFindings).
+func withBroadExclusion(enabled []rules.Rule) []rules.Rule {
+	broad, ok := rules.Get(broadExclusionRule)
+	if !ok || slices.ContainsFunc(enabled, func(rule rules.Rule) bool { return rule.Name() == broadExclusionRule }) {
+		return enabled
+	}
+	enabled = append(slices.Clone(enabled), broad)
+	slices.SortFunc(enabled, func(a, b rules.Rule) int {
+		return cmp.Or(cmp.Compare(a.Category(), b.Category()), cmp.Compare(a.Name(), b.Name()))
+	})
+	return enabled
 }
 
 // requestedRules resolves the --rule names, each once, in the order given.
