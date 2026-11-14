@@ -6,6 +6,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -37,6 +38,7 @@ type TestLiteralsMatchedInProdRule struct {
 	*rules.BaseRule
 }
 
+// NewTestLiteralsMatchedInProdRule creates the test literal comparison rule.
 func NewTestLiteralsMatchedInProdRule() *TestLiteralsMatchedInProdRule {
 	return &TestLiteralsMatchedInProdRule{BaseRule: rules.NewBaseRule(
 		"test-literals-matched-in-prod",
@@ -46,9 +48,12 @@ func NewTestLiteralsMatchedInProdRule() *TestLiteralsMatchedInProdRule {
 	)}
 }
 
+// AnalyzeFile has no findings; the rule compares tests with production code.
 func (r *TestLiteralsMatchedInProdRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
 	return nil
 }
+
+// RequiresSSA reports that this rule needs no SSA data.
 func (r *TestLiteralsMatchedInProdRule) RequiresSSA() bool { return false }
 
 type testLiteralPackage struct {
@@ -63,6 +68,7 @@ type matchedLiteralSet struct {
 	file   *core.FileContext
 }
 
+// AnalyzeGoProject compares classifier literals with same-package test inputs.
 func (r *TestLiteralsMatchedInProdRule) AnalyzeGoProject(project *core.GoProjectContext) ([]*core.Violation, error) {
 	tests := make(map[testLiteralPackage]map[string]map[string]bool)
 	production := make(map[testLiteralPackage][]*core.FileContext)
@@ -94,7 +100,14 @@ func (r *TestLiteralsMatchedInProdRule) AnalyzeGoProject(project *core.GoProject
 	}
 
 	var violations []*core.Violation
-	for key, files := range production {
+	keys := slices.SortedFunc(maps.Keys(production), func(a, b testLiteralPackage) int {
+		if order := strings.Compare(a.name, b.name); order != 0 {
+			return order
+		}
+		return strings.Compare(a.dir, b.dir)
+	})
+	for _, key := range keys {
+		files := production[key]
 		testValues := tests[key]
 		if len(testValues) == 0 {
 			continue
@@ -372,91 +385,93 @@ func collectTestLiteralSets(file *core.FileContext) []matchedLiteralSet {
 	mapsByName := mapLiteralSets(file.GoAST)
 	for _, decl := range file.GoAST.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil || !isBooleanFunction(fn) {
-			continue
-		}
-		params := stringParameterNames(fn)
-		if len(params) == 0 {
-			continue
-		}
-		var sets []matchedLiteralSet
-		add := func(values []*ast.BasicLit) {
-			set := matchedLiteralSet{values: make(map[string]bool), nodes: make(map[token.Pos]bool)}
-			for _, lit := range values {
-				value, err := strconv.Unquote(lit.Value)
-				if err != nil {
-					continue
-				}
-				set.values[value] = true
-				set.nodes[lit.Pos()] = true
-			}
-			if len(set.values) >= 3 {
-				sets = append(sets, set)
-			}
-		}
-		ast.Inspect(fn.Body, func(node ast.Node) bool {
-			switch n := node.(type) {
-			case *ast.SwitchStmt:
-				tag, ok := ast.Unparen(n.Tag).(*ast.Ident)
-				if !ok || !slices.Contains(params, tag.Name) {
-					return true
-				}
-				add(uniformBoolSwitchLiterals(n))
-			case *ast.ValueSpec:
-				for i, value := range n.Values {
-					if i < len(n.Names) {
-						if lit, ok := ast.Unparen(value).(*ast.CompositeLit); ok {
-							addFunctionMap(mapsByName, n.Names[i].Name, lit)
-						}
-					}
-				}
-			case *ast.AssignStmt:
-				for i, value := range n.Rhs {
-					if i < len(n.Lhs) {
-						id, ok := ast.Unparen(n.Lhs[i]).(*ast.Ident)
-						lit, litOK := ast.Unparen(value).(*ast.CompositeLit)
-						if ok && litOK {
-							addFunctionMap(mapsByName, id.Name, lit)
-						}
-					}
-				}
-			case *ast.IndexExpr:
-				name, ok := ast.Unparen(n.X).(*ast.Ident)
-				if !ok {
-					return true
-				}
-				input, ok := ast.Unparen(n.Index).(*ast.Ident)
-				if !ok || !slices.Contains(params, input.Name) {
-					return true
-				}
-				if set, exists := mapsByName[name.Name]; exists {
-					sets = append(sets, set)
-				}
-			case *ast.CallExpr:
-				sel, ok := ast.Unparen(n.Fun).(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "Contains" || len(n.Args) != 2 {
-					return true
-				}
-				input, ok := ast.Unparen(n.Args[1]).(*ast.Ident)
-				if !ok || !slices.Contains(params, input.Name) {
-					return true
-				}
-				lit, ok := ast.Unparen(n.Args[0]).(*ast.CompositeLit)
-				if !ok {
-					return true
-				}
-				add(stringLiterals(lit.Elts))
-			}
-			return true
-		})
-
-		for _, set := range sets {
-			set.fn = fn
-			set.file = file
-			found = append(found, set)
+		if ok {
+			found = append(found, collectFunctionLiteralSets(file, fn, mapsByName)...)
 		}
 	}
 	return found
+}
+
+func collectFunctionLiteralSets(file *core.FileContext, fn *ast.FuncDecl, mapsByName map[string]matchedLiteralSet) []matchedLiteralSet {
+	if fn.Body == nil || !isBooleanFunction(fn) {
+		return nil
+	}
+	params := stringParameterNames(fn)
+	if len(params) == 0 {
+		return nil
+	}
+	var sets []matchedLiteralSet
+	add := func(values []*ast.BasicLit) {
+		set := matchedLiteralSet{values: make(map[string]bool), nodes: make(map[token.Pos]bool)}
+		for _, lit := range values {
+			value, ok := patternkit.GoStringLiteral(lit)
+			if ok {
+				set.values[value] = true
+				set.nodes[lit.Pos()] = true
+			}
+		}
+		if len(set.values) >= 3 {
+			sets = append(sets, set)
+		}
+	}
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		collectFunctionLiteralNode(node, params, mapsByName, &sets, add)
+		return true
+	})
+	for i := range sets {
+		sets[i].fn = fn
+		sets[i].file = file
+	}
+	return sets
+}
+
+func collectFunctionLiteralNode(node ast.Node, params []string, mapsByName map[string]matchedLiteralSet, sets *[]matchedLiteralSet, add func([]*ast.BasicLit)) {
+	switch n := node.(type) {
+	case *ast.SwitchStmt:
+		tag, ok := ast.Unparen(n.Tag).(*ast.Ident)
+		if ok && slices.Contains(params, tag.Name) {
+			add(uniformBoolSwitchLiterals(n))
+		}
+	case *ast.ValueSpec:
+		for i, value := range n.Values {
+			if i < len(n.Names) {
+				if lit, ok := ast.Unparen(value).(*ast.CompositeLit); ok {
+					addFunctionMap(mapsByName, n.Names[i].Name, lit)
+				}
+			}
+		}
+	case *ast.AssignStmt:
+		for i, value := range n.Rhs {
+			if i < len(n.Lhs) {
+				id, ok := ast.Unparen(n.Lhs[i]).(*ast.Ident)
+				lit, litOK := ast.Unparen(value).(*ast.CompositeLit)
+				if ok && litOK {
+					addFunctionMap(mapsByName, id.Name, lit)
+				}
+			}
+		}
+	case *ast.IndexExpr:
+		name, nameOK := ast.Unparen(n.X).(*ast.Ident)
+		input, inputOK := ast.Unparen(n.Index).(*ast.Ident)
+		if nameOK && inputOK && slices.Contains(params, input.Name) {
+			if set, exists := mapsByName[name.Name]; exists {
+				*sets = append(*sets, set)
+			}
+		}
+	case *ast.CallExpr:
+		sel, ok := ast.Unparen(n.Fun).(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Contains" || len(n.Args) != 2 {
+			return
+		}
+		input, ok := ast.Unparen(n.Args[1]).(*ast.Ident)
+		if !ok || !slices.Contains(params, input.Name) {
+			return
+		}
+		lit, ok := ast.Unparen(n.Args[0]).(*ast.CompositeLit)
+		if ok {
+			add(stringLiterals(lit.Elts))
+		}
+	}
 }
 
 func mapLiteralSets(file *ast.File) map[string]matchedLiteralSet {
@@ -562,8 +577,8 @@ func productionLiteralIndex(files []*core.FileContext) map[string][]token.Pos {
 			if !ok || lit.Kind != token.STRING {
 				return true
 			}
-			value, err := strconv.Unquote(lit.Value)
-			if err == nil {
+			value, ok := patternkit.GoStringLiteral(lit)
+			if ok {
 				index[value] = append(index[value], lit.Pos())
 			}
 			return true

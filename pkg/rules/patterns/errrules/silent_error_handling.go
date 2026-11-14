@@ -5,7 +5,6 @@ import (
 	"go/token"
 	"path"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -307,19 +306,7 @@ func (r *SilentErrorHandlingRule) bodyHasErrorHandledComment(ctx *core.FileConte
 func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[string]bool, imports map[string]string) bool {
 	switch s := stmt.(type) {
 	case *ast.ReturnStmt:
-		// Check if return includes error or uses error value
-		for _, result := range s.Results {
-			if r.exprReferencesError(result) {
-				return true
-			}
-			// Also check if error is used in return value (e.g., struct with error in field)
-			if r.exprUsesErrorValue(result) {
-				return true
-			}
-			if r.exprReturnsUserVisibleError(result) {
-				return true
-			}
-		}
+		return r.returnHandlesError(s)
 
 	case *ast.ExprStmt:
 		// Check for logging calls
@@ -355,12 +342,7 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[st
 		}
 
 	case *ast.SwitchStmt:
-		// A switch over the kind of the error, as a nested if.
-		for _, clause := range s.Body.List {
-			if cc, ok := clause.(*ast.CaseClause); ok && slices.ContainsFunc(cc.Body, func(inner ast.Stmt) bool { return r.stmtHandlesError(inner, writers, imports) }) {
-				return true
-			}
-		}
+		return r.switchHandlesError(s, writers, imports)
 
 	case *ast.BlockStmt:
 		for _, inner := range s.List {
@@ -390,6 +372,24 @@ func (r *SilentErrorHandlingRule) stmtHandlesError(stmt ast.Stmt, writers map[st
 		return r.exprReferencesError(s.Value) || r.exprUsesErrorValue(s.Value)
 	}
 
+	return false
+}
+
+func (r *SilentErrorHandlingRule) returnHandlesError(stmt *ast.ReturnStmt) bool {
+	for _, result := range stmt.Results {
+		if r.exprReferencesError(result) || r.exprUsesErrorValue(result) || r.exprReturnsUserVisibleError(result) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *SilentErrorHandlingRule) switchHandlesError(stmt *ast.SwitchStmt, writers map[string]bool, imports map[string]string) bool {
+	for _, clause := range stmt.Body.List {
+		if cc, ok := clause.(*ast.CaseClause); ok && slices.ContainsFunc(cc.Body, func(inner ast.Stmt) bool { return r.stmtHandlesError(inner, writers, imports) }) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -979,8 +979,8 @@ func conditionTakesError(cond ast.Expr, imports map[string]string) bool {
 func standardImportAliases(file *ast.File) map[string]string {
 	aliases := make(map[string]string, len(file.Imports))
 	for _, spec := range file.Imports {
-		importPath, err := strconv.Unquote(spec.Path.Value)
-		if err != nil {
+		importPath, ok := patternkit.GoStringLiteral(spec.Path)
+		if !ok {
 			continue
 		}
 		name := path.Base(importPath)

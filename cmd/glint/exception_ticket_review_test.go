@@ -57,7 +57,9 @@ categories:
 		require.NoError(t, err)
 		prepared, err := prepareScopedAnalysis(core.NewGoProjectLoader(), scope, cfg, enabled, false)
 		require.NoError(t, err)
-		return closedTicketSuppressions(enabled, deadcode.StaleSuppressionRun{Contexts: append(slices.Clone(prepared.contexts), prepared.ticketFiles...), Config: cfg, WholeRoot: scope.wholeRoot(), Scopes: scope.walkScopes()})
+		found, err := closedTicketSuppressions(enabled, deadcode.StaleSuppressionRun{Contexts: append(slices.Clone(prepared.contexts), prepared.ticketFiles...), Config: cfg, WholeRoot: scope.wholeRoot(), Scopes: scope.walkScopes()})
+		require.NoError(t, err)
+		return found
 	}
 	full := run(root)
 	var yamlLines []int

@@ -271,7 +271,11 @@ func init() {
 	rootCmd.AddCommand(&cobra.Command{
 		Use: "tickets-state", Short: "Print a fingerprint of ticket statuses", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := fmt.Fprintln(cmd.OutOrStdout(), deadcode.TicketState())
+			state, err := deadcode.TicketState()
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), state)
 			return err
 		},
 	})
@@ -516,7 +520,11 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 			return err
 		}
 		violations = append(violations, stale...)
-		violations = append(violations, closedTicketSuppressions(enabledRules, deadcode.StaleSuppressionRun{Contexts: append(slices.Clone(contexts), prepared.ticketFiles...), Config: cfg, WholeRoot: root.wholeRoot(), Scopes: root.walkScopes()})...)
+		closed, err := closedTicketSuppressions(enabledRules, deadcode.StaleSuppressionRun{Contexts: append(slices.Clone(contexts), prepared.ticketFiles...), Config: cfg, WholeRoot: root.wholeRoot(), Scopes: root.walkScopes()})
+		if err != nil {
+			return err
+		}
+		violations = append(violations, closed...)
 		minSeverity, err := cfg.GetMinSeverity()
 		if err != nil {
 			return err
@@ -572,7 +580,7 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 }
 
 // closedTicketSuppressions checks current ticket state independently of the result cache.
-func closedTicketSuppressions(enabled []rules.Rule, run deadcode.StaleSuppressionRun) core.ViolationList {
+func closedTicketSuppressions(enabled []rules.Rule, run deadcode.StaleSuppressionRun) (core.ViolationList, error) {
 	var check *deadcode.ExceptionTicketClosedRule
 	for _, rule := range enabled {
 		if candidate, ok := rule.(*deadcode.ExceptionTicketClosedRule); ok {
@@ -581,10 +589,13 @@ func closedTicketSuppressions(enabled []rules.Rule, run deadcode.StaleSuppressio
 		}
 	}
 	if check == nil {
-		return nil
+		return nil, nil
 	}
 	done := timings.track(check.Name(), "(suppressions)")
-	found := check.Check(run)
+	found, err := check.Check(run)
+	if err != nil {
+		return nil, fmt.Errorf("check closed-ticket suppressions: %w", err)
+	}
 	done()
 	contexts := make(map[string]*core.FileContext, len(run.Contexts))
 	for _, ctx := range run.Contexts {
@@ -600,7 +611,7 @@ func closedTicketSuppressions(enabled []rules.Rule, run deadcode.StaleSuppressio
 		}
 		kept = append(kept, v)
 	}
-	return kept
+	return kept, nil
 }
 
 // staleSuppressions runs the stale-suppression check over one analyzed root
@@ -1077,21 +1088,9 @@ func prepareScopedAnalysis(loader goProjectLoader, root analysisRoot, cfg *core.
 	typedProjectImports = slices.Compact(typedProjectImports)
 	slices.Sort(projectRules)
 	projectRuleCount := len(projectRules)
-
-	walker := core.NewWalker(projectRoot, cfg).WithGoParsing(projectRuleCount == 0).
-		WithGoImportPaths(typedProjectImports).WithScopes(root.walkScopes()).
-		WithExcludedInstructions(slices.ContainsFunc(enabledRules, rules.ReadsExcludedInstructions))
-	if predicate, ok := requiredFilePredicate(enabledRules); ok {
-		walker.WithRequiredFilePredicate(predicate)
-	}
-	if deadcode.TicketsConfigured() && slices.ContainsFunc(enabledRules, func(rule rules.Rule) bool {
-		_, ok := rule.(*deadcode.ExceptionTicketClosedRule)
-		return ok
-	}) {
-		walker.WithAdditionalFilePredicate(func(path string) bool {
-			ext := strings.ToLower(filepath.Ext(path))
-			return ext == ".yaml" || ext == ".yml"
-		})
+	walker, err := scopedAnalysisWalker(projectRoot, root, cfg, enabledRules, typedProjectImports, projectRuleCount)
+	if err != nil {
+		return nil, err
 	}
 	walked, walker, err := walkWithWalker(walker)
 	prepared := &preparedRoot{walker: walker}
@@ -1174,6 +1173,43 @@ func prepareScopedAnalysis(loader goProjectLoader, root analysisRoot, cfg *core.
 	prepared.skipped = project.SkippedPackages
 	reportSkippedPackages(prepared.skipped, cfg.Settings.Output)
 	return prepared, nil
+}
+
+// ticketFilesWanted reports whether the walk must also read YAML files for
+// exception-ticket-closed. The user config is read only when that rule runs,
+// so a broken config does not fail a run without it.
+func ticketFilesWanted(enabledRules []rules.Rule) (bool, error) {
+	if !slices.ContainsFunc(enabledRules, func(rule rules.Rule) bool {
+		_, ok := rule.(*deadcode.ExceptionTicketClosedRule)
+		return ok
+	}) {
+		return false, nil
+	}
+	configured, err := deadcode.TicketsConfigured()
+	if err != nil {
+		return false, fmt.Errorf("configure ticket files: %w", err)
+	}
+	return configured, nil
+}
+
+func scopedAnalysisWalker(projectRoot string, root analysisRoot, cfg *core.Config, enabledRules []rules.Rule, typedImports []string, projectRuleCount int) (*core.Walker, error) {
+	walker := core.NewWalker(projectRoot, cfg).WithGoParsing(projectRuleCount == 0).
+		WithGoImportPaths(typedImports).WithScopes(root.walkScopes()).
+		WithExcludedInstructions(slices.ContainsFunc(enabledRules, rules.ReadsExcludedInstructions))
+	if predicate, ok := requiredFilePredicate(enabledRules); ok {
+		walker.WithRequiredFilePredicate(predicate)
+	}
+	ticketsConfigured, err := ticketFilesWanted(enabledRules)
+	if err != nil {
+		return nil, err
+	}
+	if ticketsConfigured {
+		walker.WithAdditionalFilePredicate(func(path string) bool {
+			ext := strings.ToLower(filepath.Ext(path))
+			return ext == ".yaml" || ext == ".yml"
+		})
+	}
+	return walker, nil
 }
 
 func rootProjectRulePlan(enabledRules []rules.Rule) ([]string, []rules.TypedGoProjectRule, bool) {

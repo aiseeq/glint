@@ -109,6 +109,13 @@ func analyzeRangeObject(scope ast.Node, tracked map[types.Object]bool, info *typ
 	if depth >= 8 {
 		return rangeFlowResult{unknown: true}
 	}
+	propagated := propagateRangeObjects(scope, tracked, info)
+	result, handled := analyzeRangeCalls(scope, tracked, info, pkg, depth, stack)
+	markUnknownRangeUses(scope, tracked, propagated, handled, info, &result)
+	return result
+}
+
+func propagateRangeObjects(scope ast.Node, tracked map[types.Object]bool, info *types.Info) map[*ast.Ident]bool {
 	propagated := make(map[*ast.Ident]bool)
 	for changed := true; changed; {
 		changed = false
@@ -172,94 +179,105 @@ func analyzeRangeObject(scope ast.Node, tracked map[types.Object]bool, info *typ
 			return true
 		})
 	}
+	return propagated
+}
 
+func analyzeRangeCalls(scope ast.Node, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool) (rangeFlowResult, map[*ast.Ident]bool) {
 	result := rangeFlowResult{}
 	handled := make(map[*ast.Ident]bool)
 	ast.Inspect(scope, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+		if ok {
+			analyzeRangeCall(call, tracked, info, pkg, depth, stack, handled, &result)
 		}
-		var dependent []int
-		for i, arg := range call.Args {
-			if rangeExprDepends(arg, tracked, info) {
-				dependent = append(dependent, i)
-			}
-		}
-		if len(dependent) == 0 {
-			return true
-		}
-		for _, i := range dependent {
-			markRangeUses(call.Args[i], tracked, info, handled)
-		}
-		if _, ok := shellExecutionScript(call, info); ok {
-			result.executes = true
-			return true
-		}
-		if rangeDataCall(call, info) {
-			return true
-		}
-		fn := rangeCallFunc(call, info)
-		if fn != nil && fn.Pkg() != nil && pkg.path != "" && fn.Pkg().Path() == pkg.path {
-			if stack[fn] {
-				result.unknown = true
-				return true
-			}
-			decl := rangeFunctionDecl(fn, pkg, info)
-			if decl == nil || decl.Body == nil {
-				result.unknown = true
-				return true
-			}
-			params := decl.Type.Params
-			if params == nil {
-				result.unknown = true
-				return true
-			}
-			nextStack := make(map[*types.Func]bool, len(stack)+1)
-			for active := range stack {
-				nextStack[active] = true
-			}
-			nextStack[fn] = true
-			signature, ok := fn.Type().(*types.Signature)
-			if !ok {
-				result.unknown = true
-				return true
-			}
-			for _, argIndex := range dependent {
-				paramIndex := argIndex
-				paramList := params
-				if selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok {
-					if selection := info.Selections[selector]; selection != nil && selection.Kind() == types.MethodExpr {
-						if paramIndex == 0 {
-							paramList = decl.Recv
-						} else {
-							paramIndex--
-						}
-					}
-				}
-				parameter, found := rangeParameterName(paramList, paramIndex, signature.Variadic() && paramList == params)
-				if !found {
-					result.unknown = true
-					continue
-				}
-				if parameter == nil {
-					continue
-				}
-				param := info.ObjectOf(parameter)
-				if param == nil {
-					result.unknown = true
-					continue
-				}
-				nested := analyzeRangeObject(decl.Body, map[types.Object]bool{param: true}, info, pkg, depth+1, nextStack)
-				result.executes = result.executes || nested.executes
-				result.unknown = result.unknown || nested.unknown
-			}
-			return true
-		}
-		result.unknown = true
 		return true
 	})
+	return result, handled
+}
 
+func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool, handled map[*ast.Ident]bool, result *rangeFlowResult) {
+	var dependent []int
+	for i, arg := range call.Args {
+		if rangeExprDepends(arg, tracked, info) {
+			dependent = append(dependent, i)
+		}
+	}
+	if len(dependent) == 0 {
+		return
+	}
+	for _, i := range dependent {
+		markRangeUses(call.Args[i], tracked, info, handled)
+	}
+	if _, ok := shellExecutionScript(call, info); ok {
+		result.executes = true
+		return
+	}
+	if rangeDataCall(call, info) {
+		return
+	}
+	fn := rangeCallFunc(call, info)
+	if fn != nil && fn.Pkg() != nil && pkg.path != "" && fn.Pkg().Path() == pkg.path {
+		analyzeProjectRangeCall(call, dependent, fn, info, pkg, depth, stack, result)
+		return
+	}
+	result.unknown = true
+}
+
+func analyzeProjectRangeCall(call *ast.CallExpr, dependent []int, fn *types.Func, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool, result *rangeFlowResult) {
+	if stack[fn] {
+		result.unknown = true
+		return
+	}
+	decl := rangeFunctionDecl(fn, pkg, info)
+	if decl == nil || decl.Body == nil || decl.Type.Params == nil {
+		result.unknown = true
+		return
+	}
+	nextStack := make(map[*types.Func]bool, len(stack)+1)
+	for active := range stack {
+		nextStack[active] = true
+	}
+	nextStack[fn] = true
+	signature, ok := fn.Type().(*types.Signature)
+	if !ok {
+		result.unknown = true
+		return
+	}
+	for _, argIndex := range dependent {
+		paramIndex, paramList := projectRangeParameter(call, argIndex, decl, info)
+		parameter, found := rangeParameterName(paramList, paramIndex, signature.Variadic() && paramList == decl.Type.Params)
+		if !found {
+			result.unknown = true
+			continue
+		}
+		if parameter == nil {
+			continue
+		}
+		param := info.ObjectOf(parameter)
+		if param == nil {
+			result.unknown = true
+			continue
+		}
+		nested := analyzeRangeObject(decl.Body, map[types.Object]bool{param: true}, info, pkg, depth+1, nextStack)
+		result.executes = result.executes || nested.executes
+		result.unknown = result.unknown || nested.unknown
+	}
+}
+
+func projectRangeParameter(call *ast.CallExpr, index int, decl *ast.FuncDecl, info *types.Info) (int, *ast.FieldList) {
+	paramList := decl.Type.Params
+	if selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok {
+		if selection := info.Selections[selector]; selection != nil && selection.Kind() == types.MethodExpr {
+			if index == 0 {
+				return index, decl.Recv
+			}
+			index--
+		}
+	}
+	return index, paramList
+}
+
+func markUnknownRangeUses(scope ast.Node, tracked map[types.Object]bool, propagated map[*ast.Ident]bool, handled map[*ast.Ident]bool, info *types.Info, result *rangeFlowResult) {
 	ast.Inspect(scope, func(n ast.Node) bool {
 		id, ok := n.(*ast.Ident)
 		if !ok || !tracked[info.Uses[id]] || propagated[id] || handled[id] {
@@ -271,7 +289,6 @@ func analyzeRangeObject(scope ast.Node, tracked map[types.Object]bool, info *typ
 		result.unknown = true
 		return true
 	})
-	return result
 }
 
 func rangeEnclosingScope(file *ast.File, target *ast.RangeStmt) ast.Node {
@@ -332,21 +349,8 @@ func rangeParameterName(params *ast.FieldList, index int, variadic bool) (*ast.I
 }
 
 func shellExecutionScript(call *ast.CallExpr, info *types.Info) (ast.Expr, bool) {
-	name := ""
-	if info == nil {
-		selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-		if !ok || selector.Sel.Name != "Command" && selector.Sel.Name != "CommandContext" {
-			return nil, false
-		}
-		name = selector.Sel.Name
-	} else {
-		fn := rangeCallFunc(call, info)
-		if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != "os/exec" || fn.Name() != "Command" && fn.Name() != "CommandContext" {
-			return nil, false
-		}
-		name = fn.Name()
-	}
-	if name != "Command" && name != "CommandContext" {
+	name, ok := shellCommandName(call, info)
+	if !ok {
 		return nil, false
 	}
 	start := 0
@@ -362,20 +366,49 @@ func shellExecutionScript(call *ast.CallExpr, info *types.Info) (ast.Expr, bool)
 	}
 	command = filepath.Base(command)
 	if command == "sh" || command == "bash" {
-		if len(call.Args) < start+3 {
-			return nil, false
-		}
-		flag, ok := helpers.StringLiteral(call.Args[start+1])
-		if !ok || flag != "-c" {
-			return nil, false
-		}
-		return call.Args[start+2], true
+		return shellFlagScript(call.Args, start+1)
 	}
-	if command != "env" {
+	if command == "env" {
+		return envShellScript(call.Args, start+1)
+	}
+	return nil, false
+}
+
+func shellCommandName(call *ast.CallExpr, info *types.Info) (string, bool) {
+	name := ""
+	if info == nil {
+		selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "Command" && selector.Sel.Name != "CommandContext" {
+			return "", false
+		}
+		name = selector.Sel.Name
+	} else {
+		fn := rangeCallFunc(call, info)
+		if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != "os/exec" || fn.Name() != "Command" && fn.Name() != "CommandContext" {
+			return "", false
+		}
+		name = fn.Name()
+	}
+	if name != "Command" && name != "CommandContext" {
+		return "", false
+	}
+	return name, true
+}
+
+func shellFlagScript(args []ast.Expr, flagIndex int) (ast.Expr, bool) {
+	if len(args) <= flagIndex+1 {
 		return nil, false
 	}
-	for i := start + 1; i < len(call.Args); i++ {
-		word, literal := helpers.StringLiteral(call.Args[i])
+	flag, ok := helpers.StringLiteral(args[flagIndex])
+	if !ok || flag != "-c" {
+		return nil, false
+	}
+	return args[flagIndex+1], true
+}
+
+func envShellScript(args []ast.Expr, start int) (ast.Expr, bool) {
+	for i := start; i < len(args); i++ {
+		word, literal := helpers.StringLiteral(args[i])
 		if !literal {
 			return nil, false
 		}
@@ -391,14 +424,7 @@ func shellExecutionScript(call *ast.CallExpr, info *types.Info) (ast.Expr, bool)
 		if filepath.Base(word) != "sh" && filepath.Base(word) != "bash" {
 			return nil, false
 		}
-		if i+2 >= len(call.Args) {
-			return nil, false
-		}
-		flag, ok := helpers.StringLiteral(call.Args[i+1])
-		if !ok || flag != "-c" {
-			return nil, false
-		}
-		return call.Args[i+2], true
+		return shellFlagScript(args, i+1)
 	}
 	return nil, false
 }

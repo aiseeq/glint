@@ -3,11 +3,14 @@ package deadcode
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -17,12 +20,15 @@ import (
 
 func init() { rules.Register(NewExceptionTicketClosedRule()) }
 
+// ExceptionTicketClosedRule reports suppressions tied to closed tickets.
 type ExceptionTicketClosedRule struct{ *rules.BaseRule }
 
+// NewExceptionTicketClosedRule creates the closed-ticket suppression rule.
 func NewExceptionTicketClosedRule() *ExceptionTicketClosedRule {
 	return &ExceptionTicketClosedRule{rules.NewBaseRule("exception-ticket-closed", "deadcode", "Reports suppressions referring to closed tickets with glint#<slug>; set tickets_dir in <UserConfigDir>/glint/config.yaml (XDG_CONFIG_HOME/glint/config.yaml on Linux)", core.SeverityMedium)}
 }
 
+// AnalyzeFile has no per-file findings; Check handles suppressions project-wide.
 func (r *ExceptionTicketClosedRule) AnalyzeFile(_ *core.FileContext) []*core.Violation { return nil }
 
 var ticketFile = regexp.MustCompile(`^[0-9]{8}-[0-9]{4}-(?:LOW|MED|HIGH|CRIT)(?:-(?:DO|HUNT|ARCH))?-(.+)\.md$`)
@@ -36,73 +42,88 @@ func ticketReferences(reason string) []string {
 	return result
 }
 
-func ticketStatuses() map[string]string {
-	statuses, _, _ := readTicketStatuses()
-	return statuses
-}
-
 // TicketsConfigured reports whether the optional ticket directory is available.
-func TicketsConfigured() bool {
-	dir := ticketsDirectory()
+func TicketsConfigured() (bool, error) {
+	dir, err := ticketsDirectory()
+	if err != nil {
+		return false, err
+	}
 	if dir == "" {
-		return false
+		return false, nil
 	}
 	info, err := os.Stat(dir)
-	return err == nil && info.IsDir()
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat tickets directory %q: %w", dir, err)
+	}
+	return info.IsDir(), nil
 }
 
-func ticketsDirectory() string {
+func ticketsDirectory() (string, error) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("find glint user config directory: %w", err)
 	}
-	data, err := os.ReadFile(filepath.Join(configDir, "glint", "config.yaml"))
+	configPath := filepath.Join(configDir, "glint", "config.yaml")
+	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return ""
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read glint user config %q: %w", configPath, err)
 	}
 	var config struct {
 		TicketsDir string `yaml:"tickets_dir"`
 	}
-	if yaml.Unmarshal(data, &config) != nil {
-		return ""
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return "", fmt.Errorf("parse glint user config %q: %w", configPath, err)
 	}
-	return config.TicketsDir
+	return config.TicketsDir, nil
 }
 
-func readTicketStatuses() (map[string]string, map[string]string, map[string][]string) {
-	statuses := make(map[string]string)
-	files := make(map[string]string)
-	names := make(map[string][]string)
-	dir := ticketsDirectory()
+type ticketStatusData struct {
+	statuses map[string]string
+	files    map[string]string
+	names    map[string][]string
+}
+
+func readTicketStatuses() (ticketStatusData, error) {
+	data := ticketStatusData{statuses: make(map[string]string), files: make(map[string]string), names: make(map[string][]string)}
+	dir, err := ticketsDirectory()
+	if err != nil {
+		return ticketStatusData{}, err
+	}
 	if dir == "" {
-		return statuses, files, names
+		return data, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return statuses, files, names
+		return ticketStatusData{}, fmt.Errorf("read tickets directory %q: %w", dir, err)
 	}
 	for _, entry := range entries {
 		match := ticketFile.FindStringSubmatch(entry.Name())
 		if entry.IsDir() || match == nil {
 			continue
 		}
-		names[match[1]] = append(names[match[1]], entry.Name())
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		data.names[match[1]] = append(data.names[match[1]], entry.Name())
+		content, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
-			continue
+			return ticketStatusData{}, fmt.Errorf("read ticket %q: %w", filepath.Join(dir, entry.Name()), err)
 		}
-		for line := range strings.SplitSeq(string(data), "\n") {
+		for line := range strings.SplitSeq(string(content), "\n") {
 			if status, ok := strings.CutPrefix(line, "Статус:"); ok {
 				status = strings.TrimSpace(status)
-				if previous, ok := statuses[match[1]]; !ok || ticketStatusRank(status) > ticketStatusRank(previous) {
-					statuses[match[1]] = status
+				if previous, ok := data.statuses[match[1]]; !ok || ticketStatusRank(status) > ticketStatusRank(previous) {
+					data.statuses[match[1]] = status
 				}
-				files[entry.Name()] = status
+				data.files[entry.Name()] = status
 				break
 			}
 		}
 	}
-	return statuses, files, names
+	return data, nil
 }
 
 func ticketStatusRank(status string) int {
@@ -142,25 +163,27 @@ func ticketExceptionInScope(exc core.Exception, run StaleSuppressionRun) bool {
 }
 
 // TicketState is a stable fingerprint of all configured ticket statuses.
-func TicketState() string {
-	_, files, _ := readTicketStatuses()
-	keys := make([]string, 0, len(files))
-	for key := range files {
-		keys = append(keys, key)
+func TicketState() (string, error) {
+	data, err := readTicketStatuses()
+	if err != nil {
+		return "", err
 	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(data.files))
 	hash := sha256.New()
 	for _, key := range keys {
-		hash.Write([]byte(key + "\x00" + files[key] + "\x00")) // hash.Hash.Write never returns an error
+		hash.Write([]byte(key + "\x00" + data.files[key] + "\x00")) // hash.Hash.Write never returns an error
 	}
-	return fmt.Sprintf("%x", hash.Sum(nil))
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 // Check reads ticket statuses afresh even when source findings come from cache.
-func (r *ExceptionTicketClosedRule) Check(run StaleSuppressionRun) []*core.Violation {
-	statuses, _, names := readTicketStatuses()
-	if len(statuses) == 0 {
-		return nil
+func (r *ExceptionTicketClosedRule) Check(run StaleSuppressionRun) ([]*core.Violation, error) {
+	tickets, err := readTicketStatuses()
+	if err != nil {
+		return nil, err
+	}
+	if len(tickets.statuses) == 0 {
+		return nil, nil
 	}
 	var found []*core.Violation
 	add := func(file string, line int, name, reason string) {
@@ -173,7 +196,7 @@ func (r *ExceptionTicketClosedRule) Check(run StaleSuppressionRun) []*core.Viola
 			severity = configured
 		}
 		for _, slug := range ticketReferences(reason) {
-			status := statuses[slug]
+			status := tickets.statuses[slug]
 			if status != "готово" && status != "отклонён" {
 				continue
 			}
@@ -186,8 +209,8 @@ func (r *ExceptionTicketClosedRule) Check(run StaleSuppressionRun) []*core.Viola
 				suggestion = "Remove the suppression and fix the code"
 			}
 			message := fmt.Sprintf("Ticket glint#%s is %s; suppression of %s must be removed", slug, status, name)
-			if len(names[slug]) > 1 {
-				message += "; matching tickets: " + strings.Join(names[slug], ", ") + "; use an unambiguous ticket reference"
+			if len(tickets.names[slug]) > 1 {
+				message += "; matching tickets: " + strings.Join(tickets.names[slug], ", ") + "; use an unambiguous ticket reference"
 				suggestion += "; use an unambiguous ticket reference"
 			}
 			v := r.CreateViolation(file, line, message)
@@ -207,7 +230,9 @@ func (r *ExceptionTicketClosedRule) Check(run StaleSuppressionRun) []*core.Viola
 		}
 	}
 	if run.Config.AnalyzesConfigDir() {
-		for _, item := range run.Config.Exceptions() {
+		exceptions := run.Config.Exceptions()
+		for i := range exceptions {
+			item := &exceptions[i]
 			exc := item.Exception
 			if !run.WholeRoot && !ticketExceptionInScope(exc, run) {
 				continue
@@ -218,5 +243,5 @@ func (r *ExceptionTicketClosedRule) Check(run StaleSuppressionRun) []*core.Viola
 			}
 		}
 	}
-	return found
+	return found, nil
 }

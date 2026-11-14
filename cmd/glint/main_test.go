@@ -1139,3 +1139,22 @@ func TestBroadExclusionSkipsUnreadableDirectory(t *testing.T) {
 		t.Fatalf("unexpected broad exclusions: %#v", found)
 	}
 }
+
+func TestTicketFilesWantedReadsUserConfigOnlyForTicketRule(t *testing.T) {
+	xdg := t.TempDir()
+	// A directory where the config file should be: reading it fails.
+	if err := os.MkdirAll(filepath.Join(xdg, "glint", "config.yaml"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	other, ok := rules.Get("magic-number")
+	if !ok {
+		t.Fatal("magic-number is not registered")
+	}
+	if wanted, err := ticketFilesWanted([]rules.Rule{other}); err != nil || wanted {
+		t.Fatalf("run without exception-ticket-closed: wanted=%v err=%v", wanted, err)
+	}
+	if _, err := ticketFilesWanted([]rules.Rule{other, deadcode.NewExceptionTicketClosedRule()}); err == nil {
+		t.Fatal("broken user config is not reported when exception-ticket-closed runs")
+	}
+}

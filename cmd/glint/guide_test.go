@@ -56,9 +56,19 @@ func TestGuideReferencesCLIAndRegisteredRules(t *testing.T) {
 	inline := regexp.MustCompile("`([^`]+)`")
 	flags := regexp.MustCompile(`(?:^|\s)(--?[a-z][a-z0-9-]*)`)
 	ruleRef := regexp.MustCompile("Rule: `([a-z][a-z0-9-]+)`")
-	for _, match := range inline.FindAllStringSubmatch(agentGuide, -1) {
+	inlineMatches := inline.FindAllStringSubmatch(agentGuide, -1)
+	if len(inlineMatches) == 0 {
+		t.Fatal("guide has no inline code references")
+	}
+	flagCount := 0
+	for _, match := range inlineMatches {
 		code := match[1]
-		for _, flag := range flags.FindAllStringSubmatch(code, -1) {
+		flagMatches := flags.FindAllStringSubmatch(code, -1)
+		if len(flagMatches) == 0 {
+			continue
+		}
+		flagCount += len(flagMatches)
+		for _, flag := range flagMatches {
 			name := strings.TrimLeft(flag[1], "-")
 			found := name == "version" && rootCmd.Version != "" || rootCmd.PersistentFlags().Lookup(name) != nil || rootCmd.Flags().Lookup(name) != nil
 			if len(name) == 1 {
@@ -89,12 +99,16 @@ func TestGuideReferencesCLIAndRegisteredRules(t *testing.T) {
 			t.Errorf("guide command %q does not exist in CLI", strings.Join(path, " "))
 		}
 	}
-	for _, match := range ruleRef.FindAllStringSubmatch(agentGuide, -1) {
+	if flagCount == 0 {
+		t.Fatal("guide has no CLI flag references")
+	}
+	ruleMatches := ruleRef.FindAllStringSubmatch(agentGuide, -1)
+	if len(ruleMatches) == 0 {
+		t.Fatal("guide has no explicitly marked rule references")
+	}
+	for _, match := range ruleMatches {
 		if _, ok := rules.Get(match[1]); !ok {
 			t.Errorf("guide rule %q is absent from the registry", match[1])
 		}
-	}
-	if len(ruleRef.FindAllStringSubmatch(agentGuide, -1)) == 0 {
-		t.Fatal("guide has no explicitly marked rule references")
 	}
 }

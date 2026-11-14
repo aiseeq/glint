@@ -320,45 +320,45 @@ func (w *Walker) visitEntry(fileQueue chan<- string, walkErrors chan<- error, he
 		walkErrors <- fmt.Errorf("visit %q: %w", path, err)
 		return nil
 	}
-	name := entry.Name()
-	isDir := entry.IsDir()
+	if entry.IsDir() {
+		return w.visitDirectory(walkErrors, held, path, entry.Name())
+	}
+	return w.visitFile(fileQueue, walkErrors, path, entry)
+}
 
-	// Skip directories we don't need to traverse
-	if isDir {
-		if w.shouldSkipDir(name) {
+func (w *Walker) visitDirectory(walkErrors chan<- error, held *heldDirError, path, name string) error {
+	if w.shouldSkipDir(name) {
+		return filepath.SkipDir
+	}
+	if w.gitignore != nil {
+		// Сначала проверка, потом загрузка собственного .gitignore:
+		// git не даёт каталогу исключить самого себя.
+		skip, ignErr := w.gitignore.ignored(path, true)
+		if ignErr != nil {
+			walkErrors <- ignErr
+		} else if skip {
 			return filepath.SkipDir
 		}
-		if w.gitignore != nil {
-			// Сначала проверка, потом загрузка собственного .gitignore:
-			// git не даёт каталогу исключить самого себя.
-			skip, ignErr := w.gitignore.ignored(path, true)
-			if ignErr != nil {
-				walkErrors <- ignErr
-			} else if skip {
-				return filepath.SkipDir
-			}
-		}
-		// After .gitignore: an ignored directory is not looked into, even
-		// for a .git it may hold.
-		if w.skipNestedRepos && path != w.projectRoot && !slices.Contains(w.scopes, path) {
-			nested, err := hasOwnGit(path)
-			if err != nil {
-				// A directory that cannot be looked into for a .git cannot
-				// be read either: one error for it, and no walk inside.
-				walkErrors <- err
-				return filepath.SkipDir
-			}
-			if nested {
-				return filepath.SkipDir
-			}
-		}
-		if w.gitignore != nil {
-			if err := w.gitignore.addDir(path); err != nil {
-				*held = heldDirError{dir: path, err: err}
-			}
-		}
-		return nil
 	}
+	if w.skipNestedRepos && path != w.projectRoot && !slices.Contains(w.scopes, path) {
+		nested, err := hasOwnGit(path)
+		if err != nil {
+			walkErrors <- err
+			return filepath.SkipDir
+		}
+		if nested {
+			return filepath.SkipDir
+		}
+	}
+	if w.gitignore != nil {
+		if err := w.gitignore.addDir(path); err != nil {
+			*held = heldDirError{dir: path, err: err}
+		}
+	}
+	return nil
+}
+
+func (w *Walker) visitFile(fileQueue chan<- string, walkErrors chan<- error, path string, entry os.DirEntry) error {
 
 	// Apply rule path requirements before extension checks; some analyzable
 	// extensionless files need to be opened just to identify their type.

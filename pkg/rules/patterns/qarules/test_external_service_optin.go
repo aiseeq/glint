@@ -345,8 +345,119 @@ func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMetho
 		return true
 	})
 
+	holders, initializers := constructorResultHolders(body, ctor, resultIndexes, info)
+
+	// A constructor result used directly as a return value, argument, field, channel value,
+	// literal element or any other non-local expression escapes without a named holder.
+	if len(holders) == 0 {
+		return directConstructorResultEscapes(parents[ctor], parents, ctor, liveMethods, knownMembers, resultIndexes)
+	}
+	return constructorHolderEscapes(body, parents, holders, initializers, liveMethods, knownMembers, info)
+}
+
+func directConstructorResultEscapes(parent ast.Node, parents map[ast.Node]ast.Node, ctor *ast.CallExpr, liveMethods, knownMembers map[string]bool, resultIndexes map[int]bool) bool {
+	switch p := parent.(type) {
+	case *ast.AssignStmt:
+		for i, lhs := range p.Lhs {
+			if !resultIndexes[i] {
+				continue
+			}
+			if id, ok := lhs.(*ast.Ident); !ok || id.Name != "_" {
+				return true
+			}
+		}
+		return false
+	case *ast.ValueSpec:
+		for i, name := range p.Names {
+			if resultIndexes[i] {
+				return name.Name != "_"
+			}
+		}
+		return false
+	case *ast.ExprStmt:
+		return false
+	case *ast.BinaryExpr:
+		return !comparedWithNil(p, ctor)
+	case *ast.CallExpr:
+		if p.Fun == ctor {
+			return true
+		}
+		for _, arg := range p.Args {
+			if arg == ctor {
+				return true
+			}
+		}
+		return true
+	case *ast.SelectorExpr:
+		if p.X == ctor {
+			if call, ok := parents[p].(*ast.CallExpr); ok && call.Fun == p {
+				return liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name]
+			}
+			return liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name]
+		}
+		return true
+	case *ast.ReturnStmt, *ast.CompositeLit, *ast.SendStmt, *ast.FuncLit:
+		return true
+	default:
+		return parent != nil
+	}
+}
+
+func constructorHolderEscapes(body *ast.BlockStmt, parents map[ast.Node]ast.Node, holders []clientHolder, initializers map[*ast.Ident]bool, liveMethods, knownMembers map[string]bool, info *types.Info) bool {
+	escapes := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		id, ok := n.(*ast.Ident)
+		if !ok || escapes || initializers[id] || !isHolderUse(id, holders, info) {
+			return !escapes
+		}
+		escapes = holderUseEscapes(id, parents[id], parents, liveMethods, knownMembers)
+		return !escapes
+	})
+	return escapes
+}
+
+func holderUseEscapes(id *ast.Ident, parent ast.Node, parents map[ast.Node]ast.Node, liveMethods, knownMembers map[string]bool) bool {
+	for ancestor := parent; ancestor != nil; ancestor = parents[ancestor] {
+		if _, ok := ancestor.(*ast.FuncLit); ok {
+			return true
+		}
+	}
+	switch p := parent.(type) {
+	case *ast.SelectorExpr:
+		if p.X != id {
+			return true
+		}
+		if call, ok := parents[p].(*ast.CallExpr); ok && call.Fun == p {
+			return !knownMembers[p.Sel.Name]
+		}
+		return liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name]
+	case *ast.BinaryExpr:
+		return !comparedWithNil(p, id)
+	case *ast.AssignStmt:
+		for _, rhs := range p.Rhs {
+			if rhs == id {
+				discarded := len(p.Lhs) > 0
+				for _, lhs := range p.Lhs {
+					blank, ok := lhs.(*ast.Ident)
+					discarded = discarded && ok && blank.Name == "_"
+				}
+				return !discarded
+			}
+		}
+		return false
+	case *ast.CallExpr:
+		return true
+	case *ast.UnaryExpr, *ast.CompositeLit, *ast.ReturnStmt, *ast.SendStmt, *ast.KeyValueExpr:
+		return true
+	default:
+		return true
+	}
+}
+
+func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultIndexes map[int]bool, info *types.Info) ([]clientHolder, map[*ast.Ident]bool) {
 	var holders []clientHolder
-	addHolder := func(id *ast.Ident) {
+	initializers := make(map[*ast.Ident]bool)
+	add := func(id *ast.Ident) {
 		if id == nil || id.Name == "_" {
 			return
 		}
@@ -358,158 +469,32 @@ func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMetho
 			}
 		}
 		holders = append(holders, clientHolder{name: id.Name, obj: obj})
+		initializers[id] = true
 	}
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch assign := n.(type) {
 		case *ast.AssignStmt:
 			if len(assign.Rhs) == 1 && assign.Rhs[0] == ast.Expr(ctor) {
 				for i, lhs := range assign.Lhs {
-					if !resultIndexes[i] {
-						continue
-					}
-					if id, ok := lhs.(*ast.Ident); ok {
-						addHolder(id)
-					}
-				}
-			}
-		case *ast.ValueSpec:
-			if len(assign.Values) == 1 && assign.Values[0] == ast.Expr(ctor) {
-				for i, name := range assign.Names {
-					if !resultIndexes[i] {
-						continue
-					}
-					addHolder(name)
-				}
-			}
-		}
-		return true
-	})
-
-	// A constructor result used directly as a return value, argument, field, channel value,
-	// literal element or any other non-local expression escapes without a named holder.
-	if len(holders) == 0 {
-		parent := parents[ctor]
-		switch p := parent.(type) {
-		case *ast.AssignStmt:
-			for i, lhs := range p.Lhs {
-				if !resultIndexes[i] {
-					continue
-				}
-				if id, ok := lhs.(*ast.Ident); !ok || id.Name != "_" {
-					return true
-				}
-			}
-			return false
-		case *ast.ValueSpec:
-			for i, name := range p.Names {
-				if resultIndexes[i] {
-					return name.Name != "_"
-				}
-			}
-			return false
-		case *ast.ExprStmt:
-			return false
-		case *ast.BinaryExpr:
-			return !comparedWithNil(p, ctor)
-		case *ast.CallExpr:
-			if p.Fun == ctor {
-				return true
-			}
-			for _, arg := range p.Args {
-				if arg == ctor {
-					return true
-				}
-			}
-			return true
-		case *ast.SelectorExpr:
-			if p.X == ctor {
-				if call, ok := parents[p].(*ast.CallExpr); ok && call.Fun == p {
-					return liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name]
-				}
-				return liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name]
-			}
-			return true
-		case *ast.ReturnStmt, *ast.CompositeLit, *ast.SendStmt, *ast.FuncLit:
-			return true
-		default:
-			return parent != nil
-		}
-	}
-
-	initializers := map[*ast.Ident]bool{}
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch assign := n.(type) {
-		case *ast.AssignStmt:
-			if len(assign.Rhs) == 1 && assign.Rhs[0] == ast.Expr(ctor) {
-				for i, lhs := range assign.Lhs {
-					if !resultIndexes[i] {
-						continue
-					}
-					if id, ok := lhs.(*ast.Ident); ok {
-						initializers[id] = true
+					if resultIndexes[i] {
+						if id, ok := lhs.(*ast.Ident); ok {
+							add(id)
+						}
 					}
 				}
 			}
 		case *ast.ValueSpec:
 			if len(assign.Values) == 1 && assign.Values[0] == ast.Expr(ctor) {
 				for i, id := range assign.Names {
-					if !resultIndexes[i] {
-						continue
+					if resultIndexes[i] {
+						add(id)
 					}
-					initializers[id] = true
 				}
 			}
 		}
 		return true
 	})
-
-	escapes := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		id, ok := n.(*ast.Ident)
-		if !ok || escapes || initializers[id] || !isHolderUse(id, holders, info) {
-			return !escapes
-		}
-		parent := parents[id]
-		for ancestor := parent; ancestor != nil; ancestor = parents[ancestor] {
-			if _, ok := ancestor.(*ast.FuncLit); ok {
-				escapes = true
-				return false
-			}
-		}
-		switch p := parent.(type) {
-		case *ast.SelectorExpr:
-			if p.X != id {
-				escapes = true
-				break
-			}
-			if call, ok := parents[p].(*ast.CallExpr); ok && call.Fun == p {
-				escapes = !knownMembers[p.Sel.Name]
-			} else if liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name] {
-				escapes = true // a live method value may be invoked by unknown code
-			}
-		case *ast.BinaryExpr:
-			escapes = !comparedWithNil(p, id)
-		case *ast.AssignStmt:
-			for _, rhs := range p.Rhs {
-				if rhs == id {
-					discarded := len(p.Lhs) > 0
-					for _, lhs := range p.Lhs {
-						blank, ok := lhs.(*ast.Ident)
-						discarded = discarded && ok && blank.Name == "_"
-					}
-					escapes = !discarded
-				}
-			}
-		case *ast.CallExpr:
-			escapes = true
-		case *ast.UnaryExpr, *ast.CompositeLit, *ast.ReturnStmt, *ast.SendStmt, *ast.KeyValueExpr:
-			escapes = true
-		default:
-			escapes = true
-		}
-		return !escapes
-	})
-	return escapes
+	return holders, initializers
 }
 
 func isHolderUse(id *ast.Ident, holders []clientHolder, info *types.Info) bool {
@@ -601,44 +586,7 @@ func callsLiveMethod(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string
 }
 
 func liveMethodCall(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool, resultIndexes map[int]bool, info *types.Info) *ast.CallExpr {
-	var holders []clientHolder
-	addHolder := func(id *ast.Ident) {
-		if id == nil || id.Name == "_" {
-			return
-		}
-		var obj types.Object
-		if info != nil {
-			obj = info.Defs[id]
-			if obj == nil {
-				obj = info.Uses[id]
-			}
-		}
-		holders = append(holders, clientHolder{name: id.Name, obj: obj})
-	}
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch assign := n.(type) {
-		case *ast.AssignStmt:
-			if len(assign.Rhs) == 1 && assign.Rhs[0] == ast.Expr(ctor) {
-				for i, lhs := range assign.Lhs {
-					if !resultIndexes[i] {
-						continue
-					}
-					if id, ok := lhs.(*ast.Ident); ok {
-						addHolder(id)
-					}
-				}
-			}
-		case *ast.ValueSpec:
-			if len(assign.Values) == 1 && assign.Values[0] == ast.Expr(ctor) {
-				for i, id := range assign.Names {
-					if resultIndexes[i] {
-						addHolder(id)
-					}
-				}
-			}
-		}
-		return true
-	})
+	holders, _ := constructorResultHolders(body, ctor, resultIndexes, info)
 	var found *ast.CallExpr
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)

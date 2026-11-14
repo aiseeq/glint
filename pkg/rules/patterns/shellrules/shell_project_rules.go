@@ -82,21 +82,7 @@ func checkMissingScript(r *shellProjectRule, src *patternkit.ShellSource) []*cor
 			continue
 		}
 		for _, m := range siblingScriptRef.FindAllStringSubmatchIndex(call.Raw, -1) {
-			name := ""
-			switch {
-			case m[2] >= 0 && dirVars[call.Raw[m[2]:m[3]]]:
-				name = call.Raw[m[4]:m[5]]
-			case m[6] >= 0:
-				name = call.Raw[m[6]:m[7]]
-			default:
-				continue
-			}
-			if r.paths[path.Join(dir, name)] {
-				continue
-			}
-			out = appendReport(out, src.Report(r, call.Line,
-				name+" is run from the script's directory, and there is no such file next to it",
-				"Point to the script that exists, or add it"))
+			out = appendMissingScriptReference(r, src, out, dir, dirVars, call.Raw, call.Line, m)
 		}
 	}
 	return out
@@ -118,24 +104,28 @@ func checkMissingScriptFallback(r *shellProjectRule, src *patternkit.ShellSource
 			continue
 		}
 		for _, m := range siblingScriptRef.FindAllStringSubmatchIndex(l.Text, -1) {
-			name := ""
-			switch {
-			case m[2] >= 0 && dirVars[l.Text[m[2]:m[3]]]:
-				name = l.Text[m[4]:m[5]]
-			case m[6] >= 0:
-				name = l.Text[m[6]:m[7]]
-			default:
-				continue
-			}
-			if r.paths[path.Join(dir, name)] {
-				continue
-			}
-			out = appendReport(out, src.Report(r, l.LineAt(m[0]),
-				name+" is run from the script's directory, and there is no such file next to it",
-				"Point to the script that exists, or add it"))
+			out = appendMissingScriptReference(r, src, out, dir, dirVars, l.Text, l.LineAt(m[0]), m)
 		}
 	}
 	return out
+}
+
+func appendMissingScriptReference(r *shellProjectRule, src *patternkit.ShellSource, out []*core.Violation, dir string, dirVars map[string]bool, text string, line int, match []int) []*core.Violation {
+	name := ""
+	switch {
+	case match[2] >= 0 && dirVars[text[match[2]:match[3]]]:
+		name = text[match[4]:match[5]]
+	case match[6] >= 0:
+		name = text[match[6]:match[7]]
+	default:
+		return out
+	}
+	if r.paths[path.Join(dir, name)] {
+		return out
+	}
+	return appendReport(out, src.Report(r, line,
+		name+" is run from the script's directory, and there is no such file next to it",
+		"Point to the script that exists, or add it"))
 }
 
 func init() {
