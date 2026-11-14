@@ -24,25 +24,22 @@ const shellWordBreak = " \t;&|()"
 
 // heredoc is a here-document whose body is still to come: the line that
 // ends it, and whether leading tabs are stripped before the comparison
-// (<<-). script is set for a body that is a shell script: one fed to a
-// shell (bash <<EOF, ssh host <<EOF), or one whose first line is a shell's
-// shebang; read is set once its first line is read.
+// (<<-).
 type heredoc struct {
 	delim     string
 	stripTabs bool
-	script    bool
-	read      bool
 }
 
 // shellScanner reads the comments of a shell script. A '#' starts one at
-// the start of a word, outside quotes and outside the body of a
-// here-document that is data; the body of one that is a script is read as
-// a script of its own. '…', "…" and $'…' span lines.
+// the start of a word, outside quotes; '…', "…" and $'…' span lines. The
+// body of a here-document is read as a script of its own, as the shell
+// rules read it (cat <<EOF | bash, ssh host <<EOF, a script written to a
+// file): what it leaves open ends with its delimiter.
 type shellScanner struct {
 	quote    string // the open quote: ', " or $', "" when none
 	pending  []heredoc
 	bodies   []heredoc     // the here-documents being read, the current one first
-	inner    *shellScanner // the reader of the current body when it is a script
+	inner    *shellScanner // the reader of the current body
 	comments []lineComment
 }
 
@@ -105,24 +102,16 @@ func (s *shellScanner) scanLine(n int, line string) {
 	s.pending = nil
 }
 
-// scanBody reads a line of the current here-document: its delimiter ends it,
-// whatever a script body left open; a line of a script body is read as
-// script.
+// scanBody reads a line of the current here-document as script: its
+// delimiter ends it, whatever the body left open.
 func (s *shellScanner) scanBody(n int, line string) {
-	body := &s.bodies[0]
+	body := s.bodies[0]
 	end := line
 	if body.stripTabs {
 		end = strings.TrimLeft(line, "\t")
 	}
 	if end == body.delim {
 		s.bodies, s.inner = s.bodies[1:], nil
-		return
-	}
-	if !body.read {
-		body.read = true
-		body.script = body.script || shellShebang.MatchString(end)
-	}
-	if !body.script {
 		return
 	}
 	if s.inner == nil {
@@ -164,52 +153,8 @@ func (s *shellScanner) openHeredoc(line string, i int) int {
 	if m == nil {
 		return i
 	}
-	s.pending = append(s.pending, heredoc{delim: m[2] + m[3] + m[4], stripTabs: m[1] == "-", script: feedsShell(line[:i-2])})
+	s.pending = append(s.pending, heredoc{delim: m[2] + m[3] + m[4], stripTabs: m[1] == "-"})
 	return i + len(m[0])
-}
-
-// feedsShell reports whether the command that ends in line's text (the code
-// before a <<) runs a shell that reads its script from standard input: sh,
-// bash and the like with no script operand (or with -s), or ssh. Words
-// before it that only run it — sudo and its options, env, exec, command,
-// variable assignments, then and do — are passed over.
-func feedsShell(before string) bool {
-	words := strings.Fields(before[strings.LastIndexAny(before, ";&|(){}`")+1:])
-	for len(words) > 0 && shellCommandPrefix(words[0]) {
-		if words[0] == "-u" || words[0] == "-g" {
-			words = words[1:] // sudo's user or group
-		}
-		words = words[1:]
-	}
-	if len(words) == 0 {
-		return false
-	}
-	name := words[0][strings.LastIndex(words[0], "/")+1:]
-	if name == "ssh" {
-		return true
-	}
-	if name != "sh" && name != "bash" && name != "dash" && name != "ksh" && name != "zsh" {
-		return false
-	}
-	for _, word := range words[1:] {
-		if word == "-s" {
-			return true
-		}
-		if !strings.HasPrefix(word, "-") && !strings.ContainsAny(word, "<>") {
-			return false // a script to run or the string of -c: stdin is its data
-		}
-	}
-	return true
-}
-
-// shellCommandPrefix reports a word that runs the command after it, or is
-// an option of such a word or an assignment in front of it.
-func shellCommandPrefix(word string) bool {
-	switch word {
-	case "sudo", "env", "exec", "command", "then", "do", "else", "!":
-		return true
-	}
-	return strings.HasPrefix(word, "-") || strings.Contains(word, "=")
 }
 
 // dockerHeredoc matches a word of a Dockerfile instruction that opens a
