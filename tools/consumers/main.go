@@ -116,13 +116,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	checkArguments := checkArgs(*rules, *jobs)
 
-	diffs, errs, cached := 0, 0, 0
+	diffs, errs, cached, rerun := 0, 0, 0, 0
 	for _, p := range targets {
 		name := filepath.Base(p)
-		oldIssues, fromCache, oldErr := oldRuns.check(p, checkArguments, stderr)
-		if fromCache {
-			cached++
-		}
+		oldIssues, fromCache, oldErr := oldRuns.check(p, checkArguments, true, stderr)
 		if oldErr != nil {
 			_, _ = fmt.Fprintf(stderr, "%s: %s\n", name, oldErr)
 			errs++
@@ -135,6 +132,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 			continue
 		}
 		added, removed := difference(oldIssues, newIssues)
+		if fromCache && len(added)+len(removed) > 0 {
+			// glint reads more than the key covers (a list outside the
+			// project, a go.work module, an ignored file): a difference from
+			// a cached run holds only once the installed glint differs again.
+			rerun++
+			fromCache = false
+			if oldIssues, _, oldErr = oldRuns.check(p, checkArguments, false, stderr); oldErr != nil {
+				_, _ = fmt.Fprintf(stderr, "%s: %s\n", name, oldErr)
+				errs++
+				continue
+			}
+			added, removed = difference(oldIssues, newIssues)
+		}
+		if fromCache {
+			cached++
+		}
 		if len(added)+len(removed) == 0 {
 			continue
 		}
@@ -148,7 +161,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	skipped := slices.Sorted(maps.Keys(cfg.skips))
-	_, _ = fmt.Fprintf(stdout, "old glint: %d of %d projects from cache\n", cached, len(targets))
+	_, _ = fmt.Fprintf(stdout, "old glint: %d of %d projects from cache", cached, len(targets))
+	if rerun > 0 {
+		_, _ = fmt.Fprintf(stdout, ", %d run again on a difference", rerun)
+	}
+	_, _ = fmt.Fprintln(stdout)
 	_, _ = fmt.Fprintf(stdout, "%d projects, %d with differences, %d errors, skipped: %s\n", len(targets), diffs, errs, strings.Join(skipped, ", "))
 	if errs > 0 {
 		return 2
@@ -341,18 +358,19 @@ func newOldRunCache(dir, bin string) (*oldRunCache, error) {
 // errNoWorkTree is a project outside a git work tree: git cannot tell its state.
 var errNoWorkTree = errors.New("not in a git work tree")
 
-// check returns the old glint's findings over dir, from the cache when the
-// binary, the tree and the arguments are those of the cached run. A project
+// check returns the old glint's findings over dir, from the cache when lookup
+// is set and the binary, the tree and the arguments are those of the cached
+// run; the run it makes replaces the entry. A project
 // outside git has no tree state to compare, so its run is not cached; a cache
 // that cannot be read or written is reported and the run goes on without it.
-func (c *oldRunCache) check(dir string, args []string, stderr io.Writer) (issues []output.JSONIssue, fromCache bool, err error) {
+func (c *oldRunCache) check(dir string, args []string, lookup bool, stderr io.Writer) (issues []output.JSONIssue, fromCache bool, err error) {
 	name := filepath.Base(dir)
 	path := filepath.Join(c.dir, cacheFileName(dir))
 	key, keyErr := c.key(dir, args)
 	if keyErr != nil && !errors.Is(keyErr, errNoWorkTree) {
 		_, _ = fmt.Fprintf(stderr, "consumers: %s: old run not cached: %v\n", name, keyErr)
 	}
-	if keyErr == nil {
+	if keyErr == nil && lookup {
 		storedIssues, hit, loadErr := loadOldRun(path, key)
 		if loadErr != nil {
 			_, _ = fmt.Fprintf(stderr, "consumers: %s: %v\n", name, loadErr)

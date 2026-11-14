@@ -261,7 +261,7 @@ const (
 )
 
 // consumersFixture is a root with one git project, alpha, and counting
-// doubles of the old and the new glint.
+// doubles of the old and the new glint, which find the same.
 type consumersFixture struct {
 	root, project, cfg, old, newer, oldCount, userCache string
 }
@@ -283,19 +283,19 @@ func newConsumersFixture(t *testing.T, withGit bool) consumersFixture {
 		runGit(t, f.project, "commit", "-q", "-m", "init")
 	}
 	countingGlint(t, f.old, f.oldCount, oldIssue, "")
-	countingGlint(t, f.newer, filepath.Join(root, "new.count"), oldIssue+","+newIssue, "")
+	countingGlint(t, f.newer, filepath.Join(root, "new.count"), oldIssue, "")
 	writeFile(t, f.cfg, "root "+root+"\n", 0o600)
 	return f
 }
 
 // run runs consumers with extra flags and returns its stdout; the run must
-// report the new build's finding as added.
+// find no difference.
 func (f consumersFixture) run(t *testing.T, extra ...string) string {
 	t.Helper()
 	var stdout, stderr strings.Builder
 	args := append([]string{"-config", f.cfg, "-old", f.old, "-new", f.newer}, extra...)
-	if code := run(args, &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), "+ b.go:2 r") || strings.Contains(stdout.String(), "a.go:1") {
-		t.Fatalf("code %d, stdout %q, stderr %q: want b.go:2 added and a.go:1 in both", code, stdout.String(), stderr.String())
+	if code := run(args, &stdout, &stderr); code != 0 || strings.Contains(stdout.String(), "== ") {
+		t.Fatalf("code %d, stdout %q, stderr %q: want no difference", code, stdout.String(), stderr.String())
 	}
 	if stderr.String() != "" {
 		t.Fatalf("stderr %q", stderr.String())
@@ -395,5 +395,67 @@ func TestOldRunOverAChangingTreeIsNotCached(t *testing.T) {
 	f.run(t)
 	if got := runCount(t, f.oldCount); got != 2 {
 		t.Fatalf("the old glint ran %d times, want 2: the first run saw the tree change", got)
+	}
+}
+
+// glint reads files outside the tree the cache key covers (the approved
+// models list, a go.work module, a git-ignored file, tickets): when such an
+// input changes, the installed glint finds what the new build finds, and the
+// cached old run is stale. A difference from a cached old run is not reported
+// until the installed glint, run again, still differs.
+func TestCachedOldRunThatDiffersIsRunAgain(t *testing.T) {
+	f := newConsumersFixture(t, true)
+	input := filepath.Join(f.root, "outside")
+	writeFile(t, input, oldIssue, 0o600)
+	reads := "issues=$(cat " + input + ")\n"
+	report := "echo '{\"issues\":['\"$issues\"']}'\nexit 1\n"
+	writeFile(t, f.old, "#!/bin/sh\necho run >> "+f.oldCount+"\n"+reads+report, 0o700)
+	writeFile(t, f.newer, "#!/bin/sh\n"+reads+report, 0o700)
+	consumers := func() (int, string) {
+		var stdout, stderr strings.Builder
+		code := run([]string{"-config", f.cfg, "-old", f.old, "-new", f.newer}, &stdout, &stderr)
+		if stderr.String() != "" {
+			t.Fatalf("stderr %q", stderr.String())
+		}
+		return code, stdout.String()
+	}
+	if code, out := consumers(); code != 0 {
+		t.Fatalf("first run: code %d, stdout %q", code, out)
+	}
+	writeFile(t, input, oldIssue+","+newIssue, 0o600)
+	code, out := consumers()
+	if code != 0 || strings.Contains(out, "b.go:2") {
+		t.Fatalf("after the outside input changed: code %d, stdout %q; want no difference", code, out)
+	}
+	if !strings.Contains(out, "old glint: 0 of 1 projects from cache, 1 run again on a difference\n") {
+		t.Fatalf("stdout %q, want the cached run counted as run again", out)
+	}
+	if got := runCount(t, f.oldCount); got != 2 {
+		t.Fatalf("the old glint ran %d times, want 2", got)
+	}
+	if _, out := consumers(); !strings.Contains(out, "old glint: 1 of 1 projects from cache\n") {
+		t.Fatalf("third run: stdout %q, want the fresh old run from the cache", out)
+	}
+}
+
+// A difference the installed glint confirms on its run again is reported, on
+// every consumers run: the entry it refreshes still differs.
+func TestDifferenceFromACachedOldRunIsReported(t *testing.T) {
+	f := newConsumersFixture(t, true)
+	f.run(t)
+	countingGlint(t, f.newer, filepath.Join(f.root, "new.count"), oldIssue+","+newIssue, "")
+	for i, want := range []int{2, 3} {
+		var stdout, stderr strings.Builder
+		code := run([]string{"-config", f.cfg, "-old", f.old, "-new", f.newer}, &stdout, &stderr)
+		out := stdout.String()
+		if code != 1 || !strings.Contains(out, "+ b.go:2 r") || strings.Contains(out, "a.go:1") || stderr.String() != "" {
+			t.Fatalf("run %d: code %d, stdout %q, stderr %q: want b.go:2 added", i+2, code, out, stderr.String())
+		}
+		if !strings.Contains(out, "old glint: 0 of 1 projects from cache, 1 run again on a difference\n") {
+			t.Fatalf("run %d: stdout %q, want the cached run counted as run again", i+2, out)
+		}
+		if got := runCount(t, f.oldCount); got != want {
+			t.Fatalf("run %d: the old glint ran %d times, want %d", i+2, got, want)
+		}
 	}
 }
