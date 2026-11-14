@@ -40,6 +40,13 @@ type Violation struct {
 	// suppression is as severe as what it silenced (Severity, the highest);
 	// they never reach the output.
 	Suppression string
+
+	// MarkerRules is set on a finding about a suppression marker
+	// (suppression-without-reason) and on the entry of an exception that
+	// silenced one: the rules the marker names without a reason. The finding
+	// is as severe as what the marker silenced of those, not as every marker
+	// of its line. It never reaches the output.
+	MarkerRules []string
 }
 
 // NewSuppressionEntry makes the entry of a silenced finding of the rule: at

@@ -1710,20 +1710,24 @@ func runRule(ctx *core.FileContext, rule rules.Rule, cfg *core.Config, overrides
 }
 
 // exceptionSuppression returns the suppression entry of a finding a configured
-// exception silences, nil when none does; it carries the finding's severity.
+// exception silences, nil when none does; it carries the finding's severity
+// and, for a finding about a marker, the marker's rules.
 func exceptionSuppression(cfg *core.Config, rule rules.Rule, relPath string, violation *core.Violation) *core.Violation {
 	exc, ok := cfg.MatchingException(rule.Category(), rule.Name(), relPath, violation)
 	if !ok {
 		return nil
 	}
-	return core.NewSuppressionEntry(rule.Name(), rule.Category(), relPath, violation.Line, violation.Severity, core.SuppressionExceptionPrefix+cfg.ExceptionKey(exc))
+	entry := core.NewSuppressionEntry(rule.Name(), rule.Category(), relPath, violation.Line, violation.Severity, core.SuppressionExceptionPrefix+cfg.ExceptionKey(exc))
+	entry.MarkerRules = violation.MarkerRules
+	return entry
 }
 
 // fileExceptionSuppression returns the suppression entries of a file a
 // file-only exception keeps the rule off, when the rule found anything there:
 // the rule runs on such a file only for stale-suppression to know whether the
 // exception silences something. There is one entry per line with a finding,
-// with the highest severity found on it as it would be reported.
+// with the highest severity found on it as it would be reported and the
+// rules of the markers the findings there are about.
 func fileExceptionSuppression(cfg *core.Config, relPath string, rule rules.Rule, exc core.Exception, violations []*core.Violation, overrides severityOverrides) core.ViolationList {
 	var entries core.ViolationList
 	at := map[int]*core.Violation{}
@@ -1731,9 +1735,11 @@ func fileExceptionSuppression(cfg *core.Config, relPath string, rule rules.Rule,
 		severity := overrides.severity(rule.Name(), violation.Severity)
 		if entry, ok := at[violation.Line]; ok {
 			entry.Severity = max(entry.Severity, severity)
+			entry.MarkerRules = append(entry.MarkerRules, violation.MarkerRules...)
 			continue
 		}
 		entry := core.NewSuppressionEntry(rule.Name(), rule.Category(), relPath, violation.Line, severity, core.SuppressionExceptionPrefix+cfg.ExceptionKey(exc))
+		entry.MarkerRules = slices.Clone(violation.MarkerRules)
 		at[violation.Line] = entry
 		entries = append(entries, entry)
 	}
@@ -1742,15 +1748,18 @@ func fileExceptionSuppression(cfg *core.Config, relPath string, rule rules.Rule,
 
 // inlineSuppressions turns the markers that silenced the rule's findings in
 // the file — in the rule itself or above — into suppression entries, each
-// with the highest severity of what it silenced. A marker the rule consulted
-// on its own silenced a finding of the rule's severity.
+// with the highest severity of what it silenced, as the configuration
+// reports it: a severity set for the rule replaces the one the rule rated
+// the marker with on its own, as it replaces the findings'. A marker the
+// rule consulted unrated silenced a finding of the rule's severity.
 func inlineSuppressions(ctx *core.FileContext, rule rules.Rule, overrides severityOverrides) core.ViolationList {
 	var entries core.ViolationList
 	for _, hit := range ctx.TakeSuppressions(rule.Name()) {
 		severity := hit.Severity
 		if !hit.Rated {
-			severity = overrides.severity(rule.Name(), rule.DefaultSeverity())
+			severity = rule.DefaultSeverity()
 		}
+		severity = overrides.severity(rule.Name(), severity)
 		entries = append(entries, core.NewSuppressionEntry(rule.Name(), rule.Category(), ctx.RelPath, hit.Line, severity, core.SuppressionInline))
 	}
 	return entries

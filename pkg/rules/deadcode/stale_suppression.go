@@ -37,20 +37,39 @@ func (r *SuppressionWithoutReasonRule) MarkersWithoutReasonFor(ctx *core.FileCon
 	return r.markersWithoutReason(ctx, func(name string) bool { return slices.Contains(names, name) })
 }
 
+// markersWithoutReason reports each marker that names a judged rule without
+// a reason, with those rules (MarkerRules): the finding is as severe as what
+// the marker silenced of them. Markers of one line with the same message —
+// two bare nolint markers — are one finding, with the rules of both.
 func (r *SuppressionWithoutReasonRule) markersWithoutReason(ctx *core.FileContext, judged func(string) bool) []*core.Violation {
+	type place struct {
+		line    int
+		message string
+	}
 	var found []*core.Violation
+	at := map[place]*core.Violation{}
 	for _, marker := range ctx.SuppressionMarkers() {
+		var names []string
 		for _, name := range marker.Rules {
-			if _, ok := rules.Get(name); !ok || !judged(name) || core.SuppressionHasReason(marker.Text, name) {
-				continue
+			if _, ok := rules.Get(name); ok && judged(name) && !core.SuppressionHasReason(marker.Text, name) {
+				names = append(names, name)
 			}
-			message := "Suppression has no reason after safe"
-			if strings.HasPrefix(core.SuppressionCommentText(marker.Text), "nolint:") {
-				message = "Suppression has no reason; add a short explanation after the rule name"
-			}
-			found = append(found, r.CreateViolation(ctx.RelPath, marker.Line, message))
-			break
 		}
+		if len(names) == 0 {
+			continue
+		}
+		message := "Suppression has no reason after safe"
+		if strings.HasPrefix(core.SuppressionCommentText(marker.Text), "nolint:") {
+			message = "Suppression has no reason; add a short explanation after the rule name"
+		}
+		if v, ok := at[place{marker.Line, message}]; ok {
+			v.MarkerRules = append(v.MarkerRules, names...)
+			continue
+		}
+		v := r.CreateViolation(ctx.RelPath, marker.Line, message)
+		v.MarkerRules = names
+		at[place{marker.Line, message}] = v
+		found = append(found, v)
 	}
 	return found
 }

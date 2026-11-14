@@ -16,9 +16,9 @@ import (
 // it hides: min_severity above low would otherwise hide the oversight with
 // the finding, and a bare marker would silence a critical one unseen.
 type silencedSeverities struct {
-	// markers are by the file, relative to the root, and the line of the
-	// marker.
-	markers map[silencedPlace]core.Severity
+	// markers are by the file, relative to the root, the line of the marker
+	// and the rule it silenced: two markers of one line silence each its own.
+	markers map[silencedMarker]core.Severity
 	// exceptions are by the configuration file, absolute, and the line that
 	// declares the exception.
 	exceptions map[silencedPlace]core.Severity
@@ -29,14 +29,20 @@ type silencedPlace struct {
 	line int
 }
 
+type silencedMarker struct {
+	silencedPlace
+	rule string
+}
+
 // newSilencedSeverities reads the suppression entries of one root. A finding
 // of suppression-without-reason an exception silences is as severe as the
 // marker it is about.
 func newSilencedSeverities(cfg *core.Config, suppressions core.ViolationList) silencedSeverities {
-	silenced := silencedSeverities{markers: map[silencedPlace]core.Severity{}, exceptions: map[silencedPlace]core.Severity{}}
+	silenced := silencedSeverities{markers: map[silencedMarker]core.Severity{}, exceptions: map[silencedPlace]core.Severity{}}
 	for _, entry := range suppressions {
 		if entry.Suppression == core.SuppressionInline {
-			raiseSilenced(silenced.markers, silencedPlace{entry.File, entry.Line}, entry.Severity)
+			at := silencedMarker{silencedPlace{entry.File, entry.Line}, entry.Rule}
+			silenced.markers[at] = max(silenced.markers[at], entry.Severity)
 		}
 	}
 	byKey := map[string]core.Severity{}
@@ -47,7 +53,7 @@ func newSilencedSeverities(cfg *core.Config, suppressions core.ViolationList) si
 		}
 		severity := entry.Severity
 		if entry.Rule == core.SuppressionReasonRule {
-			severity = max(severity, silenced.markers[silencedPlace{entry.File, entry.Line}])
+			severity = max(severity, silenced.marker(entry))
 		}
 		byKey[key] = max(byKey[key], severity)
 	}
@@ -74,13 +80,25 @@ func (s silencedSeverities) exception(file string, line int) core.Severity {
 	return s.exceptions[silencedPlace{filepath.Clean(file), line}]
 }
 
+// marker returns the highest severity of what the marker a finding of
+// suppression-without-reason is about silenced of the rules it names without
+// a reason; low when it silenced none.
+func (s silencedSeverities) marker(finding *core.Violation) core.Severity {
+	var severity core.Severity
+	for _, rule := range finding.MarkerRules {
+		severity = max(severity, s.markers[silencedMarker{silencedPlace{finding.File, finding.Line}, rule}])
+	}
+	return severity
+}
+
 // raiseMarkerFindings gives each finding of suppression-without-reason the
-// severity of what its marker silenced, when that is higher. The finding is
-// copied: the stored one, in the result cache too, keeps the rule's own.
+// severity of what its marker silenced, when that is higher; no other finding
+// names marker rules. The finding is copied: the stored one, in the result
+// cache too, keeps the rule's own.
 func (s silencedSeverities) raiseMarkerFindings(list core.ViolationList) core.ViolationList {
 	raised := make(core.ViolationList, 0, len(list))
 	for _, v := range list {
-		if severity := s.markers[silencedPlace{v.File, v.Line}]; v.Rule == core.SuppressionReasonRule && severity > v.Severity {
+		if severity := s.marker(v); severity > v.Severity {
 			copied := *v
 			copied.Severity = severity
 			v = &copied

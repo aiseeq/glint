@@ -94,13 +94,18 @@ func (r *TypedFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Vi
 			var violations []*core.Violation
 			for _, f := range check(scope, fn) {
 				line := file.LineFor(f.Node)
-				if file.IsSuppressed(line, r.Name()) {
+				severity := r.DefaultSeverity()
+				if r.SeverityOf != nil {
+					severity = max(severity, r.SeverityOf(fn))
+				}
+				// The marker is asked with the severity the finding would be
+				// reported with, raised as it is: what it silences in a hot
+				// function is that much more severe.
+				if file.SuppressesFinding(line, r.Name(), severity) {
 					continue
 				}
 				v := r.CreateViolation(file.RelPath, line, f.Message)
-				if r.SeverityOf != nil {
-					v.Severity = max(v.Severity, r.SeverityOf(fn))
-				}
+				v.Severity = severity
 				v.WithCode(strings.TrimSpace(file.GetLine(line)))
 				v.WithSuggestion(r.Suggestion)
 				violations = append(violations, v)
