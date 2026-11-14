@@ -379,7 +379,7 @@ func analyzeConfigurationRules(enabledRules []rules.Rule, cfg *core.Config, cont
 		switch rule.Name() {
 		case "broad-exclusion":
 			done := timings.track("broad-exclusion", "(project config)")
-			violations, err := broadExclusionFindings(cfg, contexts)
+			violations, err := broadExclusionFindings(cfg)
 			done()
 			if err != nil {
 				return nil, err

@@ -186,6 +186,28 @@ func parse(args []string) bool {
 		rulestest.ProjectRulePlaces(t, NewTestLiteralsMatchedInProdRule(), files))
 }
 
+func TestTestLiteralsMatchedInProdKeepsRangeSourcesSeparate(t *testing.T) {
+	files := map[string]string{
+		"classify.go": `package probe
+func suspicious(s string) bool { switch s { case "JavaScript", "PostgreSQL", "WebAuthn": return true }; return false }
+// Keywords from RFC 9110.
+func keyword(s string) bool { switch s { case "GET", "POST", "HEAD": return true }; return false }
+const ( a = "alpha"; b = "beta"; c = "gamma" )
+func constants(s string) bool { switch s { case a,b,c: return true }; return false }
+`,
+		"classify_test.go": `package probe
+import "testing"
+func TestClassifiers(t *testing.T) {
+	for _, s := range []string{"JavaScript", "PostgreSQL", "WebAuthn"} { suspicious(s) }
+	for _, s := range []string{"GET", "POST", "HEAD"} { keyword(s) }
+	for _, s := range []string{"alpha", "beta", "gamma"} { constants(s) }
+}
+`,
+	}
+	assert.Equal(t, []string{"classify.go:2"},
+		rulestest.ProjectRulePlaces(t, NewTestLiteralsMatchedInProdRule(), files))
+}
+
 // A prefix cut from a value of unknown length panics on a short one: a short
 // e-mail turns the handler into a 500, a short secret fails the test helper.
 func TestStringPrefixSliceUnguarded(t *testing.T) {

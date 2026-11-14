@@ -154,84 +154,157 @@ func testClassifierInputs(file *ast.File) map[string]map[string]bool {
 	inputs := make(map[string]map[string]bool)
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil || !isTestFunction(fn.Name.Name) {
-			continue
+		if ok && fn.Body != nil && isTestFunction(fn.Name.Name) {
+			collectTestFunctionInputs(fn, inputs)
 		}
-		sources := make(map[string]*ast.CompositeLit)
-		ast.Inspect(fn.Body, func(node ast.Node) bool {
-			switch n := node.(type) {
-			case *ast.ValueSpec:
-				for i, value := range n.Values {
-					if i < len(n.Names) {
-						if lit, ok := ast.Unparen(value).(*ast.CompositeLit); ok {
-							sources[n.Names[i].Name] = lit
-						}
-					}
-				}
-			case *ast.AssignStmt:
-				for i, value := range n.Rhs {
-					if i < len(n.Lhs) {
-						id, ok := ast.Unparen(n.Lhs[i]).(*ast.Ident)
-						lit, litOK := ast.Unparen(value).(*ast.CompositeLit)
-						if ok && litOK {
-							sources[id.Name] = lit
-						}
-					}
-				}
-			}
-			return true
-		})
-		ranges := make(map[string]*ast.CompositeLit)
-		ast.Inspect(fn.Body, func(node ast.Node) bool {
-			rangeStmt, ok := node.(*ast.RangeStmt)
-			if !ok {
-				return true
-			}
-			var variable *ast.Ident
-			if rangeStmt.Value != nil {
-				variable, _ = ast.Unparen(rangeStmt.Value).(*ast.Ident)
-			}
-			if variable == nil && rangeStmt.Key != nil {
-				variable, _ = ast.Unparen(rangeStmt.Key).(*ast.Ident)
-			}
-			if variable == nil {
-				return true
-			}
-			source, ok := ast.Unparen(rangeStmt.X).(*ast.CompositeLit)
-			if !ok {
-				id, isIdent := ast.Unparen(rangeStmt.X).(*ast.Ident)
-				if !isIdent {
-					return true
-				}
-				source = sources[id.Name]
-			}
-			if source != nil {
-				ranges[variable.Name] = source
-			}
-			return true
-		})
-		ast.Inspect(fn.Body, func(node ast.Node) bool {
-			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			name := calledFunctionName(call.Fun)
-			if name == "" {
-				return true
-			}
-			for _, arg := range call.Args {
-				values := testArgumentLiterals(arg, ranges)
-				for value := range values {
-					if inputs[name] == nil {
-						inputs[name] = make(map[string]bool)
-					}
-					inputs[name][value] = true
-				}
-			}
-			return true
-		})
 	}
 	return inputs
+}
+
+type testRangeSource struct {
+	variable *ast.Ident
+	body     *ast.BlockStmt
+	source   *ast.CompositeLit
+}
+
+func collectTestFunctionInputs(fn *ast.FuncDecl, inputs map[string]map[string]bool) {
+	sources := testCompositeSources(fn.Body)
+	ranges := testRangeSources(fn.Body, sources)
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name := calledFunctionName(call.Fun)
+		if name == "" {
+			return true
+		}
+		for _, arg := range call.Args {
+			values := testArgumentLiterals(arg, sourceForTestArgument(arg, ranges))
+			addTestInputValues(inputs, name, values)
+		}
+		return true
+	})
+}
+
+func testCompositeSources(body *ast.BlockStmt) map[string]*ast.CompositeLit {
+	sources := make(map[string]*ast.CompositeLit)
+	ast.Inspect(body, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.ValueSpec:
+			for i, value := range n.Values {
+				if i < len(n.Names) {
+					addCompositeSource(sources, n.Names[i].Name, value)
+				}
+			}
+		case *ast.AssignStmt:
+			for i, value := range n.Rhs {
+				if i < len(n.Lhs) {
+					id, ok := ast.Unparen(n.Lhs[i]).(*ast.Ident)
+					if ok {
+						addCompositeSource(sources, id.Name, value)
+					}
+				}
+			}
+		}
+		return true
+	})
+	return sources
+}
+
+func addCompositeSource(sources map[string]*ast.CompositeLit, name string, value ast.Expr) {
+	if lit, ok := ast.Unparen(value).(*ast.CompositeLit); ok {
+		sources[name] = lit
+	}
+}
+
+func testRangeSources(body *ast.BlockStmt, sources map[string]*ast.CompositeLit) []testRangeSource {
+	var ranges []testRangeSource
+	ast.Inspect(body, func(node ast.Node) bool {
+		rangeStmt, ok := node.(*ast.RangeStmt)
+		if !ok {
+			return true
+		}
+		if source := rangeCompositeSource(rangeStmt, sources); source != nil {
+			variable := rangeIterationVariable(rangeStmt)
+			if variable != nil {
+				ranges = append(ranges, testRangeSource{variable: variable, body: rangeStmt.Body, source: source})
+			}
+		}
+		return true
+	})
+	return ranges
+}
+
+func rangeIterationVariable(rangeStmt *ast.RangeStmt) *ast.Ident {
+	if variable, ok := ast.Unparen(rangeStmt.Value).(*ast.Ident); ok {
+		return variable
+	}
+	variable, _ := ast.Unparen(rangeStmt.Key).(*ast.Ident)
+	return variable
+}
+
+func rangeCompositeSource(rangeStmt *ast.RangeStmt, sources map[string]*ast.CompositeLit) *ast.CompositeLit {
+	if source, ok := ast.Unparen(rangeStmt.X).(*ast.CompositeLit); ok {
+		return source
+	}
+	id, ok := ast.Unparen(rangeStmt.X).(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	return sources[id.Name]
+}
+
+func sourceForTestArgument(arg ast.Expr, ranges []testRangeSource) map[string]*ast.CompositeLit {
+	variable := testArgumentRangeVariable(arg)
+	if variable == nil {
+		return nil
+	}
+	selected := innermostRangeSource(variable, ranges)
+	if selected == nil {
+		return nil
+	}
+	return map[string]*ast.CompositeLit{variable.Name: selected.source}
+}
+
+func testArgumentRangeVariable(arg ast.Expr) *ast.Ident {
+	switch value := ast.Unparen(arg).(type) {
+	case *ast.Ident:
+		return value
+	case *ast.SelectorExpr:
+		variable, _ := ast.Unparen(value.X).(*ast.Ident)
+		return variable
+	default:
+		return nil
+	}
+}
+
+func innermostRangeSource(variable *ast.Ident, ranges []testRangeSource) *testRangeSource {
+	var selected *testRangeSource
+	for i := range ranges {
+		candidate := &ranges[i]
+		if candidate.variable.Name != variable.Name || candidate.body == nil ||
+			variable.Pos() < candidate.body.Pos() || variable.Pos() > candidate.body.End() {
+			continue
+		}
+		if selected == nil || rangeBodySize(candidate) < rangeBodySize(selected) {
+			selected = candidate
+		}
+	}
+	return selected
+}
+
+func rangeBodySize(source *testRangeSource) token.Pos {
+	return source.body.End() - source.body.Pos()
+}
+
+func addTestInputValues(inputs map[string]map[string]bool, function string, values map[string]bool) {
+	for value := range values {
+		if inputs[function] == nil {
+			inputs[function] = make(map[string]bool)
+		}
+		inputs[function][value] = true
+	}
 }
 
 func isTestFunction(name string) bool {
