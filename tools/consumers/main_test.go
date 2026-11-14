@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -94,6 +95,7 @@ func TestDifferenceTreatsFindingsAsMultisetAndIgnoresOtherFields(t *testing.T) {
 
 func TestOldBinaryWithoutTheNewRuleCountsAsNoFindings(t *testing.T) {
 	root := t.TempDir()
+	isolate(t, root)
 	project := filepath.Join(root, "alpha")
 	if err := os.MkdirAll(project, 0o755); err != nil {
 		t.Fatal(err)
@@ -171,6 +173,7 @@ func TestNewBinaryUsesItsOwnResultCacheDirectory(t *testing.T) {
 // project without differences.
 func TestRulePanicCountsAsError(t *testing.T) {
 	root := t.TempDir()
+	isolate(t, root)
 	project := filepath.Join(root, "alpha")
 	if err := os.MkdirAll(project, 0o755); err != nil {
 		t.Fatal(err)
@@ -195,5 +198,202 @@ func TestRulePanicCountsAsError(t *testing.T) {
 	code := run([]string{"-config", cfg, "-old", old, "-new", newer}, &stdout, &stderr)
 	if code != 2 || !strings.Contains(stdout.String(), "1 errors") || !strings.Contains(stderr.String(), "alpha: ") || strings.Count(stderr.String(), `"broken-rule" panicked`) != 1 {
 		t.Fatalf("code %d, stdout %q, stderr %q: want the panic counted as an error of alpha", code, stdout.String(), stderr.String())
+	}
+}
+
+// isolate keeps a test's runs off the user's caches and off a git repository
+// that may hold the temporary directory.
+func isolate(t *testing.T, root string) string {
+	t.Helper()
+	userCache := filepath.Join(root, "cache")
+	t.Setenv("XDG_CACHE_HOME", userCache)
+	t.Setenv("GIT_CEILING_DIRECTORIES", root)
+	gitConfig := filepath.Join(root, "gitconfig")
+	if err := os.WriteFile(gitConfig, []byte("[user]\n\tname = t\n\temail = t@example.invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", gitConfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	return userCache
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+}
+
+func writeFile(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// countingGlint writes a test double of glint that adds a line to count on
+// every run and reports issues; extra goes into the script before the report.
+func countingGlint(t *testing.T, path, count, issues, extra string) {
+	t.Helper()
+	script := "#!/bin/sh\necho run >> " + count + "\n" + extra + "echo '{\"issues\":[" + issues + "]}'\nexit 1\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // an executable test double
+		t.Fatal(err)
+	}
+}
+
+func runCount(t *testing.T, count string) int {
+	t.Helper()
+	data, err := os.ReadFile(count)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(data), "run\n")
+}
+
+const (
+	oldIssue = `{"rule":"r","file":"a.go","line":1,"message":"old"}`
+	newIssue = `{"rule":"r","file":"b.go","line":2,"message":"new"}`
+)
+
+// consumersFixture is a root with one git project, alpha, and counting
+// doubles of the old and the new glint.
+type consumersFixture struct {
+	root, project, cfg, old, newer, oldCount, userCache string
+}
+
+func newConsumersFixture(t *testing.T, withGit bool) consumersFixture {
+	t.Helper()
+	root := t.TempDir()
+	f := consumersFixture{root: root, project: filepath.Join(root, "alpha"), cfg: filepath.Join(root, "consumers.txt"),
+		old: filepath.Join(root, "old"), newer: filepath.Join(root, "new"), oldCount: filepath.Join(root, "old.count")}
+	f.userCache = isolate(t, root)
+	if err := os.MkdirAll(f.project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(f.project, ".glint.yaml"), "version: 1\n", 0o600)
+	writeFile(t, filepath.Join(f.project, "a.go"), "package a\n", 0o600)
+	if withGit {
+		runGit(t, f.project, "init", "-q")
+		runGit(t, f.project, "add", ".")
+		runGit(t, f.project, "commit", "-q", "-m", "init")
+	}
+	countingGlint(t, f.old, f.oldCount, oldIssue, "")
+	countingGlint(t, f.newer, filepath.Join(root, "new.count"), oldIssue+","+newIssue, "")
+	writeFile(t, f.cfg, "root "+root+"\n", 0o600)
+	return f
+}
+
+// run runs consumers with extra flags and returns its stdout; the run must
+// report the new build's finding as added.
+func (f consumersFixture) run(t *testing.T, extra ...string) string {
+	t.Helper()
+	var stdout, stderr strings.Builder
+	args := append([]string{"-config", f.cfg, "-old", f.old, "-new", f.newer}, extra...)
+	if code := run(args, &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), "+ b.go:2 r") || strings.Contains(stdout.String(), "a.go:1") {
+		t.Fatalf("code %d, stdout %q, stderr %q: want b.go:2 added and a.go:1 in both", code, stdout.String(), stderr.String())
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr %q", stderr.String())
+	}
+	return stdout.String()
+}
+
+// A second run of the installed glint with the same binary over the same tree
+// with the same flags is taken from the cache; a change of a tracked or an
+// untracked file, of HEAD, of the flags or of the binary runs it again.
+func TestOldRunIsCachedByBinaryTreeAndFlags(t *testing.T) {
+	f := newConsumersFixture(t, true)
+	steps := []struct {
+		name   string
+		change func()
+		flags  []string
+		runs   int
+	}{
+		{"first run", func() {}, nil, 1},
+		{"same tree", func() {}, nil, 1},
+		{"tracked file edited", func() { writeFile(t, filepath.Join(f.project, "a.go"), "package a // edited\n", 0o600) }, nil, 2},
+		{"same edit", func() {}, nil, 2},
+		{"tracked file edited again", func() { writeFile(t, filepath.Join(f.project, "a.go"), "package a // again\n", 0o600) }, nil, 3},
+		{"untracked file", func() { writeFile(t, filepath.Join(f.project, "c.go"), "package a\n", 0o600) }, nil, 4},
+		{"untracked file edited", func() { writeFile(t, filepath.Join(f.project, "c.go"), "package a // edited\n", 0o600) }, nil, 5},
+		{"untracked file in a new directory", func() {
+			if err := os.Mkdir(filepath.Join(f.project, "sub"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(f.project, "sub", "d.go"), "package sub\n", 0o600)
+		}, nil, 6},
+		{"file in the untracked directory edited", func() { writeFile(t, filepath.Join(f.project, "sub", "d.go"), "package sub // edited\n", 0o600) }, nil, 7},
+		{"new HEAD", func() { runGit(t, f.project, "commit", "-q", "--allow-empty", "-m", "empty") }, nil, 8},
+		{"rules flag", func() {}, []string{"-r", "r"}, 9},
+		{"same rules flag", func() {}, []string{"-r", "r"}, 9},
+		{"jobs flag", func() {}, []string{"-r", "r", "-j", "2"}, 10},
+		{"new binary", func() { countingGlint(t, f.old, f.oldCount, oldIssue, "# rebuilt\n") }, []string{"-r", "r", "-j", "2"}, 11},
+		{"same binary", func() {}, []string{"-r", "r", "-j", "2"}, 11},
+	}
+	var firstReport string
+	for _, step := range steps {
+		step.change()
+		before := runCount(t, f.oldCount)
+		out := f.run(t, step.flags...)
+		if got := runCount(t, f.oldCount); got != step.runs {
+			t.Fatalf("%s: the old glint ran %d times in all, want %d", step.name, got, step.runs)
+		}
+		fromCache := before == step.runs
+		wantLine := "old glint: 0 of 1 projects from cache\n"
+		if fromCache {
+			wantLine = "old glint: 1 of 1 projects from cache\n"
+		}
+		if !strings.Contains(out, wantLine) {
+			t.Fatalf("%s: stdout %q, want %q", step.name, out, wantLine)
+		}
+		report := strings.Replace(out, wantLine, "", 1)
+		if firstReport == "" {
+			firstReport = report
+		} else if report != firstReport {
+			t.Fatalf("%s: report %q, want the first run's %q", step.name, report, firstReport)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(f.userCache, "glint", "consumers"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "alpha-") {
+		t.Fatalf("cache entries %v, want one entry of alpha and no temporary file", entries)
+	}
+}
+
+// A project outside git has no tree state to compare: its old run is not cached.
+func TestOldRunOutsideGitIsNotCached(t *testing.T) {
+	f := newConsumersFixture(t, false)
+	for want := 1; want <= 2; want++ {
+		if out := f.run(t); !strings.Contains(out, "old glint: 0 of 1 projects from cache\n") {
+			t.Fatalf("stdout %q", out)
+		}
+		if got := runCount(t, f.oldCount); got != want {
+			t.Fatalf("the old glint ran %d times, want %d", got, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(f.userCache, "glint", "consumers")); !os.IsNotExist(err) {
+		t.Fatalf("cache directory of a project outside git: %v, want none", err)
+	}
+}
+
+// A tree that changes while the old glint runs may not be the tree it read:
+// that run is not cached, even under the key of the tree before the run.
+func TestOldRunOverAChangingTreeIsNotCached(t *testing.T) {
+	f := newConsumersFixture(t, true)
+	source := filepath.Join(f.project, "a.go")
+	mark := filepath.Join(f.root, "edited")
+	countingGlint(t, f.old, f.oldCount, oldIssue, "if [ ! -e "+mark+" ]; then touch "+mark+"; echo '// mid-run' >> "+source+"; fi\n")
+	f.run(t)
+	writeFile(t, source, "package a\n", 0o600)
+	f.run(t)
+	if got := runCount(t, f.oldCount); got != 2 {
+		t.Fatalf("the old glint ran %d times, want 2: the first run saw the tree change", got)
 	}
 }

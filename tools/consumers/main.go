@@ -3,11 +3,14 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -106,21 +109,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// A glint run prunes the result caches of other builds, so the new build
 	// runs in a directory of its own and leaves the installed glint's caches.
 	newCache := filepath.Join(userCache, "glint", "consumers-new")
+	oldRuns, err := newOldRunCache(filepath.Join(userCache, "glint", "consumers"), oldAbs)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "consumers: old binary %s: %v\n", oldAbs, err)
+		return 2
+	}
+	checkArguments := checkArgs(*rules, *jobs)
 
-	diffs, errs := 0, 0
+	diffs, errs, cached := 0, 0, 0
 	for _, p := range targets {
 		name := filepath.Base(p)
-		oldIssues, oldErr := check(oldAbs, p, *rules, *jobs, "")
-		if errors.Is(oldErr, errUnknownRule) {
-			// A rule the new build adds: the installed glint has no findings of it.
-			oldIssues, oldErr = nil, nil
+		oldIssues, fromCache, oldErr := oldRuns.check(p, checkArguments, stderr)
+		if fromCache {
+			cached++
 		}
 		if oldErr != nil {
 			_, _ = fmt.Fprintf(stderr, "%s: %s\n", name, oldErr)
 			errs++
 			continue
 		}
-		newIssues, newErr := check(newAbs, p, *rules, *jobs, newCache)
+		newIssues, newErr := check(newAbs, p, checkArguments, newCache)
 		if newErr != nil {
 			_, _ = fmt.Fprintf(stderr, "%s: %s\n", name, newErr)
 			errs++
@@ -140,6 +148,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	skipped := slices.Sorted(maps.Keys(cfg.skips))
+	_, _ = fmt.Fprintf(stdout, "old glint: %d of %d projects from cache\n", cached, len(targets))
 	_, _ = fmt.Fprintf(stdout, "%d projects, %d with differences, %d errors, skipped: %s\n", len(targets), diffs, errs, strings.Join(skipped, ", "))
 	if errs > 0 {
 		return 2
@@ -260,8 +269,8 @@ func skipUnreadable(path, root string, err error) error {
 // given with -r.
 var errUnknownRule = errors.New("unknown rule")
 
-// check runs glint over dir; a non-empty cacheDir becomes its GLINT_CACHE_DIR.
-func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, error) {
+// checkArgs returns the arguments of a glint run over a project.
+func checkArgs(rules, jobs string) []string {
 	args := []string{"check", "-o", "json", "--no-color"}
 	if rules != "" {
 		args = append(args, "-r", rules)
@@ -269,7 +278,11 @@ func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, error) {
 	if jobs != "" {
 		args = append(args, "-j", jobs)
 	}
-	args = append(args, "./...")
+	return append(args, "./...")
+}
+
+// check runs glint with args over dir; a non-empty cacheDir becomes its GLINT_CACHE_DIR.
+func check(bin, dir string, args []string, cacheDir string) ([]output.JSONIssue, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
 	if cacheDir != "" {
@@ -302,6 +315,217 @@ func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, error) {
 		}
 	}
 	return report.Issues, nil
+}
+
+// oldRunCache keeps the findings of the installed glint, one entry per
+// project: the same binary over the same tree with the same arguments finds
+// the same, and the old runs are about half of what a consumers run costs.
+type oldRunCache struct {
+	dir, bin, binHash string
+}
+
+// oldRunEntry is the cached old run of a project and the key it holds for.
+type oldRunEntry struct {
+	Key    string             `json:"key"`
+	Issues []output.JSONIssue `json:"issues"`
+}
+
+func newOldRunCache(dir, bin string) (*oldRunCache, error) {
+	h, err := fileHash(bin)
+	if err != nil {
+		return nil, err
+	}
+	return &oldRunCache{dir: dir, bin: bin, binHash: h}, nil
+}
+
+// errNoWorkTree is a project outside a git work tree: git cannot tell its state.
+var errNoWorkTree = errors.New("not in a git work tree")
+
+// check returns the old glint's findings over dir, from the cache when the
+// binary, the tree and the arguments are those of the cached run. A project
+// outside git has no tree state to compare, so its run is not cached; a cache
+// that cannot be read or written is reported and the run goes on without it.
+func (c *oldRunCache) check(dir string, args []string, stderr io.Writer) (issues []output.JSONIssue, fromCache bool, err error) {
+	name := filepath.Base(dir)
+	path := filepath.Join(c.dir, cacheFileName(dir))
+	key, keyErr := c.key(dir, args)
+	if keyErr != nil && !errors.Is(keyErr, errNoWorkTree) {
+		_, _ = fmt.Fprintf(stderr, "consumers: %s: old run not cached: %v\n", name, keyErr)
+	}
+	if keyErr == nil {
+		storedIssues, hit, loadErr := loadOldRun(path, key)
+		if loadErr != nil {
+			_, _ = fmt.Fprintf(stderr, "consumers: %s: %v\n", name, loadErr)
+		}
+		if hit {
+			return storedIssues, true, nil
+		}
+	}
+	issues, err = check(c.bin, dir, args, "")
+	if errors.Is(err, errUnknownRule) {
+		// A rule the new build adds: the installed glint has no findings of it.
+		issues, err = nil, nil
+	}
+	if err != nil || keyErr != nil {
+		return issues, false, err
+	}
+	// A tree that changed while glint ran may not be the tree it read.
+	after, afterErr := c.key(dir, args)
+	if afterErr != nil {
+		_, _ = fmt.Fprintf(stderr, "consumers: %s: old run not cached: %v\n", name, afterErr)
+	}
+	if after == key {
+		if storeErr := storeOldRun(path, oldRunEntry{Key: key, Issues: issues}); storeErr != nil {
+			_, _ = fmt.Fprintf(stderr, "consumers: %s: %v\n", name, storeErr)
+		}
+	}
+	return issues, false, nil
+}
+
+// key is the hash of the old binary, the arguments and the tree state of dir.
+func (c *oldRunCache) key(dir string, args []string) (string, error) {
+	state, err := treeState(dir)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(fmt.Appendf(nil, "glint %s\nargs %q\n%s", c.binHash, args, state))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// cacheFileName names the cache entry of a project by its directory.
+func cacheFileName(dir string) string {
+	sum := sha256.Sum256([]byte(dir))
+	return filepath.Base(dir) + "-" + hex.EncodeToString(sum[:8]) + ".json"
+}
+
+// loadOldRun returns the cached findings when the entry at path holds for
+// key; a project not run before has no entry.
+func loadOldRun(path, key string) (issues []output.JSONIssue, hit bool, err error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read the old run cache: %w", err)
+	}
+	var entry oldRunEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		return nil, false, fmt.Errorf("decode the old run cache %s: %w", path, err)
+	}
+	return entry.Issues, entry.Key == key, nil
+}
+
+// storeOldRun writes the entry through a temporary file and a rename, so a
+// reader sees the old entry or the new one, never a part.
+func storeOldRun(path string, entry oldRunEntry) error {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("encode the old run cache: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create the old run cache directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create the old run cache file: %w", err)
+	}
+	_, werr := tmp.Write(data)
+	cerr := tmp.Close()
+	if err := errors.Join(werr, cerr); err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("write the old run cache: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("replace the old run cache: %w", err)
+	}
+	return nil
+}
+
+// treeState describes the work tree of dir: HEAD, the status with every
+// untracked file, and the content of each changed or untracked file, since
+// the status line of a file edited again stays the same. Outside a git work
+// tree it returns errNoWorkTree.
+func treeState(dir string) (string, error) {
+	top, err := git(dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", errNoWorkTree, err)
+	}
+	top = strings.TrimSpace(top)
+	head, err := git(dir, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	status, err := git(dir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	_, _ = fmt.Fprintf(&b, "head %s\nstatus %q\n", strings.TrimSpace(head), status)
+	entries := strings.Split(status, "\x00")
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i]
+		if len(entry) < 4 {
+			continue
+		}
+		xy, rel := entry[:2], entry[3:]
+		if strings.ContainsAny(xy, "RC") {
+			i++ // the original path of a rename or copy follows
+		}
+		h, err := pathHash(filepath.Join(top, filepath.FromSlash(rel)))
+		if err != nil {
+			return "", err
+		}
+		_, _ = fmt.Fprintf(&b, "file %q %s\n", rel, h)
+	}
+	return b.String(), nil
+}
+
+// git runs git in dir without the optional index lock, so a consumers run
+// does not race the project's own git.
+func git(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"--no-optional-locks"}, args...)...)
+	cmd.Dir = dir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return string(out), nil
+}
+
+// pathHash describes a changed path: the hash of a file, the target of a
+// link, a mark for a directory (a submodule) or for a deleted path.
+func pathHash(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "absent", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("stat a changed file: %w", err)
+	}
+	switch {
+	case info.Mode()&fs.ModeSymlink != 0:
+		target, err := os.Readlink(path)
+		return "link " + target, err
+	case info.IsDir():
+		return "dir", nil
+	}
+	return fileHash(path)
+}
+
+func fileHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open %s to hash: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("hash %s: %w", path, err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // panicLines returns the stderr lines of glint that name a rule panic, without
