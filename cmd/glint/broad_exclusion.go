@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/deadcode"
 )
 
@@ -25,6 +26,104 @@ type broadEntry struct {
 	// skipDir is a directory name of settings.skip_dirs: the walk leaves
 	// out every directory of that name.
 	skipDir bool
+	// rule is the rule watching suppressions that the entry switches off by
+	// name; "" for other entries.
+	rule string
+	// oversight marks an entry that switches off a rule watching
+	// suppressions, by name or with its category.
+	oversight bool
+	// file is the configuration file, absolute, the entry is reported in and
+	// whose marker keeps it.
+	file string
+	// origin is the base file outside the project the entry is set in, and
+	// originLine its line there; "" when it is set in file itself.
+	origin     string
+	originLine int
+}
+
+// oversightRules are the rules that watch suppressions: switching one off
+// takes that watch away from the whole project.
+var oversightRules = []string{"suppression-without-reason", "stale-suppression", broadExclusionRule}
+
+// broadConfigFile is one file of the extends chain of the project's
+// configuration, the project's own file first.
+type broadConfigFile struct {
+	path string
+	data []byte
+	top  *yaml.Node
+	// reportIn and reportLine place what a base file outside the project
+	// sets: on the extends line that leads out of the project. reportLine is
+	// 0 for a file of the project, whose own lines are its places.
+	reportIn   string
+	reportLine int
+}
+
+// entry places an entry read at a line of the file.
+func (f broadConfigFile) entry(entry broadEntry) broadEntry {
+	entry.file = f.path
+	if f.reportLine != 0 {
+		entry.origin, entry.originLine = f.path, entry.line
+		entry.file, entry.line = f.reportIn, f.reportLine
+	}
+	return entry
+}
+
+// readBroadChain reads the configuration and every file it extends, as
+// core.LoadConfig resolves them: extends is relative to the directory of the
+// file that declares it.
+func readBroadChain(configPath, root string) ([]broadConfigFile, error) {
+	var chain []broadConfigFile
+	seen := make(map[string]bool)
+	reportIn, reportLine := configPath, 0
+	for path := configPath; !seen[path]; {
+		seen[path] = true
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read configuration for broad exclusions: %w", err)
+		}
+		var doc yaml.Node
+		if err := yaml.Unmarshal(data, &doc); err != nil {
+			return nil, fmt.Errorf("parse configuration %q for broad exclusions: %w", path, err)
+		}
+		file := broadConfigFile{path: path, data: data, reportIn: reportIn, reportLine: reportLine}
+		if len(doc.Content) > 0 {
+			file.top = doc.Content[0]
+		}
+		inProject := inBroadProject(root, path)
+		if inProject {
+			file.reportIn, file.reportLine = path, 0
+		}
+		chain = append(chain, file)
+		extends := configNode(file.top, "extends")
+		if extends == nil || extends.Value == "" {
+			break
+		}
+		if inProject {
+			reportIn, reportLine = path, extends.Line
+		}
+		next := extends.Value
+		if !filepath.IsAbs(next) {
+			next = filepath.Join(filepath.Dir(path), next)
+		}
+		path = next
+	}
+	return chain, nil
+}
+
+// inBroadProject reports a path under the project's directory.
+func inBroadProject(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && !strings.HasPrefix(filepath.ToSlash(rel), "../")
+}
+
+// forEachPair calls fn with every key and value of a mapping node.
+func forEachPair(n *yaml.Node, fn func(key, value *yaml.Node)) {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		fn(n.Content[i], n.Content[i+1])
+	}
 }
 
 func configNode(n *yaml.Node, key string) *yaml.Node {
@@ -37,25 +136,6 @@ func configNode(n *yaml.Node, key string) *yaml.Node {
 		}
 	}
 	return nil
-}
-
-func broadFiles(n *yaml.Node, entries *[]broadEntry) {
-	if n == nil {
-		return
-	}
-	if n.Kind == yaml.MappingNode {
-		collectBroadExceptions(n, entries)
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			key, value := n.Content[i], n.Content[i+1]
-			if key.Value != "exceptions" {
-				broadFiles(value, entries)
-			}
-		}
-		return
-	}
-	for _, child := range n.Content {
-		broadFiles(child, entries)
-	}
 }
 
 func collectBroadExceptions(n *yaml.Node, entries *[]broadEntry) {
@@ -76,14 +156,22 @@ func collectBroadExceptions(n *yaml.Node, entries *[]broadEntry) {
 	}
 }
 
+// foreignBroadNames are directories of foreign code and test data: no source
+// of the project's own is in them.
+var foreignBroadNames = map[string]bool{"third_party": true, "vendor": true, "external": true, "node_modules": true, "testdata": true}
+
+// artifactBroadNames are directories of build output and generated code by
+// name. An exclusion pattern over one is no finding; settings.skip_dirs that
+// names one takes out the sources the walk would read in it.
+var artifactBroadNames = map[string]bool{"gen": true, "out": true, "dist": true, "build": true, "site": true}
+
 func ignoredBroadPattern(pattern string) bool {
 	lower := strings.ToLower(pattern)
 	if strings.Contains(lower, "generated") {
 		return true
 	}
-	ignored := map[string]bool{"third_party": true, "vendor": true, "external": true, "node_modules": true, "testdata": true, "gen": true, "out": true, "dist": true, "build": true, "site": true}
 	for _, segment := range strings.FieldsFunc(lower, func(r rune) bool { return r == '/' || r == '\\' }) {
-		if ignored[segment] {
+		if foreignBroadNames[segment] || artifactBroadNames[segment] {
 			return true
 		}
 	}
@@ -113,9 +201,11 @@ const broadMarkerAdvice = "keep an intentional one with a marker on its line or 
 // project when its own exclusions (settings.exclude, settings.skip_dirs) are
 // left out: .gitignore, nested repositories and the default artifact
 // directories keep theirs, so an exclusion of what the walk never reaches is
-// no finding. Generated files and foreign, test-data and generated
-// directories are left out too.
-func collectProjectSourceFiles(root string, cfg *core.Config) ([]string, error) {
+// no finding. Generated files are left out too, and so are foreign and
+// test-data directories; artifact directories by name are left out of files
+// but stay in walked, where settings.skip_dirs is judged: the walk reads a
+// tracked build directory unless skip_dirs names it.
+func collectProjectSourceFiles(root string, cfg *core.Config) (broadSources, error) {
 	unexcluded := *cfg
 	unexcluded.Settings.Exclude, unexcluded.Settings.SkipDirs = nil, nil
 	walker := core.NewWalker(root, &unexcluded).WithGoParsing(false).WithRequiredFilePredicate(isSourceFile)
@@ -123,30 +213,57 @@ func collectProjectSourceFiles(root string, cfg *core.Config) ([]string, error) 
 	for _, err := range walkErrors {
 		// A directory or file the user cannot read holds no source glint checks.
 		if !errors.Is(err, fs.ErrPermission) {
-			return nil, fmt.Errorf("walk project source files: %w", err)
+			return broadSources{}, fmt.Errorf("walk project source files: %w", err)
 		}
 	}
-	files := make([]string, 0, len(contexts))
+	var files, walked []string
 	for _, ctx := range contexts {
 		rel := filepath.ToSlash(ctx.RelPath)
-		if ctx.IsGenerated() || inIgnoredBroadDirectory(ctx.RelPath) {
+		if ctx.IsGenerated() || inBroadDirectory(rel, foreignBroadDirectory) {
 			continue
 		}
-		files = append(files, rel)
+		walked = append(walked, rel)
+		if !inBroadDirectory(rel, ignoredBroadDirectory) {
+			files = append(files, rel)
+		}
 	}
 	slices.Sort(files)
-	return files, nil
+	slices.Sort(walked)
+	return newBroadSources(files, walked), nil
 }
 
-// inIgnoredBroadDirectory reports a file below a directory broad-exclusion
-// leaves out of the project's sources.
-func inIgnoredBroadDirectory(rel string) bool {
+// broadSources are the sources broad-exclusion judges an entry by.
+type broadSources struct {
+	// files are the project's own sources, artifact directories left out.
+	files []string
+	// walked are the sources the walk reads without the configuration's
+	// exclusions, those in artifact directories it reads too.
+	walked  []string
+	catalog map[string]int
+}
+
+func newBroadSources(files, walked []string) broadSources {
+	return broadSources{files: files, walked: walked, catalog: sourceCatalog(files)}
+}
+
+// inBroadDirectory reports a file below a directory the predicate names.
+func inBroadDirectory(rel string, directory func(string) bool) bool {
 	dir := filepath.ToSlash(filepath.Dir(rel))
-	return dir != "." && slices.ContainsFunc(strings.Split(dir, "/"), ignoredBroadDirectory)
+	return dir != "." && slices.ContainsFunc(strings.Split(dir, "/"), directory)
 }
 
+// ignoredBroadDirectory reports a directory broad-exclusion leaves out of
+// the project's own sources: a foreign or artifact one.
 func ignoredBroadDirectory(name string) bool {
-	return name == ".git" || strings.HasPrefix(name, ".") || ignoredBroadPattern(name)
+	return foreignBroadDirectory(name) || ignoredBroadPattern(name)
+}
+
+// foreignBroadDirectory reports a hidden, foreign, test-data or generated
+// directory: none holds a source of the project's own, by name or by
+// settings.skip_dirs.
+func foreignBroadDirectory(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasPrefix(name, ".") || strings.Contains(lower, "generated") || foreignBroadNames[lower]
 }
 
 func isSourceFile(path string) bool {
@@ -154,36 +271,27 @@ func isSourceFile(path string) bool {
 	return strings.Contains("|.go|.ts|.tsx|.js|.jsx|.mts|.cts|.mjs|.cjs|", "|"+ext+"|")
 }
 
-func parseBroadEntries(cfg *core.Config, data []byte) ([]broadEntry, error) {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parse configuration for broad exclusions: %w", err)
-	}
-	if len(doc.Content) == 0 {
-		return nil, nil
-	}
-	top := doc.Content[0]
+// parseBroadEntries returns the entries of the extends chain that are in
+// effect, as core.MergeConfigs merges the files: a list or a switch is set by
+// the first file of the chain, from the project's own, that sets it.
+func parseBroadEntries(cfg *core.Config, chain []broadConfigFile) []broadEntry {
 	entries := make([]broadEntry, 0)
-	if settings := configNode(top, "settings"); settings != nil {
-		if excluded := configNode(settings, "exclude"); excluded != nil {
-			for _, value := range excluded.Content {
-				entries = append(entries, broadEntry{pattern: value.Value, line: value.Line})
-			}
-		}
-		if skipped := configNode(settings, "skip_dirs"); skipped != nil {
-			for _, value := range skipped.Content {
-				entries = append(entries, broadEntry{pattern: value.Value, line: value.Line, skipDir: true})
-			}
+	if file, list := firstBroadSetting(chain, "exclude"); list != nil {
+		for _, value := range list.Content {
+			entries = append(entries, file.entry(broadEntry{pattern: value.Value, line: value.Line}))
 		}
 	}
-	broadFiles(top, &entries)
-	categories := configNode(top, "categories")
+	if file, list := firstBroadSetting(chain, "skip_dirs"); list != nil {
+		for _, value := range list.Content {
+			entries = append(entries, file.entry(broadEntry{pattern: value.Value, line: value.Line, skipDir: true}))
+		}
+	}
+	entries = append(entries, broadRuleExceptions(chain)...)
 	for _, name := range slices.Sorted(maps.Keys(cfg.Categories)) {
-		category := cfg.Categories[name]
-		if category.Enabled || categories == nil {
+		if cfg.Categories[name].Enabled {
 			continue
 		}
-		node := configNode(categories, name)
+		file, node := firstBroadNode(chain, name)
 		if node == nil {
 			continue
 		}
@@ -191,9 +299,89 @@ func parseBroadEntries(cfg *core.Config, data []byte) ([]broadEntry, error) {
 		if enabled := configNode(node, "enabled"); enabled != nil {
 			line = enabled.Line
 		}
-		entries = append(entries, broadEntry{pattern: "<category>", line: line})
+		entries = append(entries, file.entry(broadEntry{pattern: "<category>", line: line, oversight: holdsOversightRule(name)}))
 	}
-	return entries, nil
+	for _, name := range oversightRules {
+		category := oversightCategory(name)
+		if !cfg.IsRuleDisabled(category, name) {
+			continue
+		}
+		file, node := firstBroadNode(chain, category, "rules", name)
+		if node == nil {
+			continue
+		}
+		line := node.Line
+		if enabled := configNode(node, "enabled"); enabled != nil {
+			line = enabled.Line
+		}
+		entries = append(entries, file.entry(broadEntry{pattern: "<rule>", line: line, rule: name, oversight: true}))
+	}
+	return entries
+}
+
+// firstBroadSetting returns the first file of the chain that sets a list of
+// settings, and the list: an empty one sets nothing.
+func firstBroadSetting(chain []broadConfigFile, key string) (broadConfigFile, *yaml.Node) {
+	for _, file := range chain {
+		if list := configNode(configNode(file.top, "settings"), key); list != nil && len(list.Content) > 0 {
+			return file, list
+		}
+	}
+	return broadConfigFile{}, nil
+}
+
+// firstBroadNode returns the first file of the chain that names a node under
+// categories, and the node.
+func firstBroadNode(chain []broadConfigFile, path ...string) (broadConfigFile, *yaml.Node) {
+	for _, file := range chain {
+		node := configNode(file.top, "categories")
+		for _, key := range path {
+			node = configNode(node, key)
+		}
+		if node != nil {
+			return file, node
+		}
+	}
+	return broadConfigFile{}, nil
+}
+
+// broadRuleExceptions returns the file exceptions of every rule, each from
+// the first file of the chain that lists the rule's exceptions.
+func broadRuleExceptions(chain []broadConfigFile) []broadEntry {
+	var entries []broadEntry
+	listed := make(map[string]bool)
+	for _, file := range chain {
+		forEachPair(configNode(file.top, "categories"), func(category, categoryNode *yaml.Node) {
+			forEachPair(configNode(categoryNode, "rules"), func(rule, ruleNode *yaml.Node) {
+				exceptions := configNode(ruleNode, "exceptions")
+				key := category.Value + "/" + rule.Value
+				if exceptions == nil || exceptions.Tag == "!!null" || listed[key] {
+					return
+				}
+				listed[key] = true
+				var found []broadEntry
+				collectBroadExceptions(ruleNode, &found)
+				for _, entry := range found {
+					entries = append(entries, file.entry(entry))
+				}
+			})
+		})
+	}
+	return entries
+}
+
+// oversightCategory returns the category of a rule watching suppressions.
+func oversightCategory(name string) string {
+	rule, ok := rules.Get(name)
+	if !ok {
+		return ""
+	}
+	return rule.Category()
+}
+
+// holdsOversightRule reports a category with a rule watching suppressions.
+func holdsOversightRule(category string) bool {
+	return slices.ContainsFunc(oversightRules, func(name string) bool { return oversightCategory(name) == category })
 }
 
 func broadExclusionFindings(cfg *core.Config) ([]*core.Violation, error) {
@@ -201,29 +389,20 @@ func broadExclusionFindings(cfg *core.Config) ([]*core.Violation, error) {
 		return nil, nil
 	}
 	root := filepath.Dir(cfg.ConfigPath())
-	files, err := collectProjectSourceFiles(root, cfg)
+	sources, err := collectProjectSourceFiles(root, cfg)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(cfg.ConfigPath())
-	if err != nil {
-		return nil, fmt.Errorf("read configuration for broad exclusions: %w", err)
-	}
-	entries, err := parseBroadEntries(cfg, data)
+	chain, err := readBroadChain(cfg.ConfigPath(), root)
 	if err != nil {
 		return nil, err
 	}
-	catalog := sourceCatalog(files)
-	configContext := core.NewFileContext(cfg.ConfigPath(), root, data, cfg)
-	configName, err := filepath.Rel(root, cfg.ConfigPath())
-	if err != nil {
-		return nil, fmt.Errorf("relative configuration path: %w", err)
+	entries := parseBroadEntries(cfg, chain)
+	// broad-exclusion switched off by name runs only to report that it is.
+	if cfg.IsRuleDisabled(oversightCategory(broadExclusionRule), broadExclusionRule) {
+		entries = slices.DeleteFunc(entries, func(entry broadEntry) bool { return !entry.oversight })
 	}
-	findings, err := checkBroadEntries(entries, files, catalog, configContext, filepath.ToSlash(configName))
-	if err != nil {
-		return nil, err
-	}
-	return findings, nil
+	return checkBroadEntries(entries, sources, chain, root, cfg)
 }
 
 func sourceCatalog(files []string) map[string]int {
@@ -239,31 +418,61 @@ func sourceCatalog(files []string) map[string]int {
 	return catalog
 }
 
-func checkBroadEntries(entries []broadEntry, files []string, catalog map[string]int, configContext *core.FileContext, configName string) ([]*core.Violation, error) {
+func checkBroadEntries(entries []broadEntry, sources broadSources, chain []broadConfigFile, root string, cfg *core.Config) ([]*core.Violation, error) {
 	rule := deadcode.NewBroadExclusionRule()
+	contexts := make(map[string]*core.FileContext, len(chain))
+	for _, file := range chain {
+		contexts[file.path] = core.NewFileContext(file.path, root, file.data, cfg)
+	}
 	findings := make([]*core.Violation, 0)
 	for _, entry := range entries {
-		if broadLineHasReason(configContext, entry.line) {
+		if broadLineHasReason(contexts[entry.file], entry.line) {
 			continue
 		}
-		message, err := checkBroadEntry(entry, files, catalog)
+		message, err := checkBroadEntry(entry, sources)
 		if err != nil {
 			return nil, err
 		}
 		if message == "" {
 			continue
 		}
-		findings = append(findings, rule.CreateViolation(configName, entry.line, message))
+		name, err := broadRelPath(root, entry.file)
+		if err != nil {
+			return nil, err
+		}
+		if entry.origin != "" {
+			origin, err := broadRelPath(root, entry.origin)
+			if err != nil {
+				return nil, err
+			}
+			message = fmt.Sprintf("%s:%d, outside the project, through extends: %s", origin, entry.originLine, message)
+		}
+		findings = append(findings, rule.CreateViolation(name, entry.line, message))
 	}
 	return findings, nil
 }
 
+// broadRelPath is a configuration file relative to the project.
+func broadRelPath(root, path string) (string, error) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return "", fmt.Errorf("relative configuration path: %w", err)
+	}
+	return filepath.ToSlash(rel), nil
+}
+
 func broadFindingMessage(entry broadEntry, files []string) string {
+	if entry.rule != "" {
+		return fmt.Sprintf("Rule %s, which watches suppressions, is switched off for the whole project; "+broadMarkerAdvice, entry.rule)
+	}
 	if entry.skipDir {
 		return fmt.Sprintf("settings.skip_dirs leaves out every directory named %s, and the project's sources are in one; "+broadMarkerAdvice, entry.pattern)
 	}
 	if language := coveredLanguage(entry, files); language != "" {
 		return fmt.Sprintf("Exclusion covers every %s file of the project; "+broadMarkerAdvice, language)
+	}
+	if entry.pattern == "<category>" && entry.oversight {
+		return "An entire rule category is disabled, and with it the rules that watch suppressions; " + broadMarkerAdvice
 	}
 	if entry.pattern == "<category>" {
 		return "An entire rule category is disabled; " + broadMarkerAdvice
@@ -283,33 +492,34 @@ func testsFindingMessage(language string) string {
 // checkBroadEntry returns the finding message of an entry, "" when it is
 // narrow. An exclusion of a whole directory or language keeps that message
 // even when it takes out every test too.
-func checkBroadEntry(entry broadEntry, files []string, catalog map[string]int) (string, error) {
-	covers, err := coversBroadly(entry, files, catalog)
+func checkBroadEntry(entry broadEntry, sources broadSources) (string, error) {
+	covers, err := coversBroadly(entry, sources)
 	if err != nil {
 		return "", err
 	}
 	if covers {
-		return broadFindingMessage(entry, files), nil
+		return broadFindingMessage(entry, sources.files), nil
 	}
-	if language := coveredTestLanguage(entry, files); language != "" {
+	if language := coveredTestLanguage(entry, sources.files); language != "" {
 		return testsFindingMessage(language), nil
 	}
 	return "", nil
 }
 
-// coversBroadly reports an entry that disables a category, skips a directory
-// of sources, or excludes a whole language, a whole source directory, or the
-// whole project for one rule.
-func coversBroadly(entry broadEntry, files []string, catalog map[string]int) (bool, error) {
-	if entry.pattern == "<category>" {
+// coversBroadly reports an entry that disables a category or a rule watching
+// suppressions, skips a directory of sources, or excludes a whole language, a
+// whole source directory, or the whole project for one rule.
+func coversBroadly(entry broadEntry, sources broadSources) (bool, error) {
+	if entry.pattern == "<category>" || entry.rule != "" {
 		return true, nil
 	}
 	if entry.skipDir {
-		return skipsSourceDirectory(entry.pattern, files), nil
+		return skipsSourceDirectory(entry.pattern, sources.walked), nil
 	}
 	if !broadGlob(entry.pattern) {
 		return false, nil
 	}
+	files := sources.files
 	if coveredLanguage(entry, files) != "" {
 		return true, nil
 	}
@@ -335,7 +545,7 @@ func coversBroadly(entry broadEntry, files []string, catalog map[string]int) (bo
 	if entry.exception {
 		return projectMatches == len(files), nil
 	}
-	for directory, total := range catalog {
+	for directory, total := range sources.catalog {
 		if total > 0 && matched[directory] == total {
 			return true, nil
 		}
@@ -344,13 +554,11 @@ func coversBroadly(entry broadEntry, files []string, catalog map[string]int) (bo
 }
 
 // skipsSourceDirectory reports whether a settings.skip_dirs name leaves out a
-// directory with sources of the project. The walk's default artifact
-// directories and the foreign, generated and test-data ones are no finding.
-func skipsSourceDirectory(name string, files []string) bool {
-	if ignoredBroadDirectory(name) || slices.Contains(core.DefaultSkipDirs, name) {
-		return false
-	}
-	for _, file := range files {
+// directory with sources the walk reads: an artifact one such as a tracked
+// build directory too. A hidden, foreign, generated or test-data one holds
+// none of walked.
+func skipsSourceDirectory(name string, walked []string) bool {
+	for _, file := range walked {
 		if slices.Contains(strings.Split(filepath.ToSlash(filepath.Dir(file)), "/"), name) {
 			return true
 		}
