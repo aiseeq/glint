@@ -1328,12 +1328,12 @@ func TestDirectMethod(t *testing.T) { c := New(); _ = c.Deposit() }
 
 	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
-	require.Len(t, violations, 7, "%v", messages(violations))
+	require.Len(t, violations, 6, "%v", messages(violations))
 	got := strings.Join(messages(violations), "\n")
-	for _, name := range []string{"TestAssignedElsewhere", "TestAssignedToField", "TestStoredInLiteral", "TestReturned", "TestCaptured", "TestSentToChannel", "TestDirectMethod"} {
+	for _, name := range []string{"TestAssignedToField", "TestStoredInLiteral", "TestReturned", "TestCaptured", "TestSentToChannel", "TestDirectMethod"} {
 		assert.Contains(t, got, name)
 	}
-	for _, name := range []string{"TestDiscarded", "TestComparedWithNil", "TestFieldRead", "TestSafeMethod", "TestDiscardedHolder", "TestHolderComparedWithNil", "TestPassedToHelper"} {
+	for _, name := range []string{"TestDiscarded", "TestComparedWithNil", "TestFieldRead", "TestSafeMethod", "TestDiscardedHolder", "TestHolderComparedWithNil", "TestPassedToHelper", "TestAssignedElsewhere"} {
 		assert.NotContains(t, got, name)
 	}
 }
@@ -1800,4 +1800,285 @@ func TestBuilderInert(t *testing.T) { c := New().WithKey("k"); _ = c.Name() }
 		found = append(found, v.File+":"+strconv.Itoa(v.Line))
 	}
 	assert.ElementsMatch(t, []string{"provider/client_test.go:5", "provider/client_test.go:9", "provider/client_test.go:10", "provider/client_test.go:12"}, found, "%v", messages(violations))
+}
+
+// externalServiceFindings runs the rule on the project and returns its findings as "file:line".
+func externalServiceFindings(t *testing.T, files map[string]string) ([]string, []string) {
+	t.Helper()
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(rulestest.Project(t, files))
+	require.NoError(t, err)
+	var found []string
+	for _, v := range violations {
+		found = append(found, v.File+":"+strconv.Itoa(v.Line))
+	}
+	return found, messages(violations)
+}
+
+// c := *New() holds a copy of the client: a call of its inert method is no live call.
+func TestTestExternalServiceRule_DereferencedConstructorHoldsClient(t *testing.T) {
+	found, msgs := externalServiceFindings(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() *Client { return &Client{Base: "https://deref-api.example.com"} }
+func (c *Client) Send() { _, _ = http.Get(c.Base) }
+func (c Client) Value() string { return c.Base }
+`,
+		"provider/client_test.go": `package provider
+
+import "testing"
+
+func TestDerefInert(t *testing.T) { c := *New(); _ = c.Value() }
+func TestDerefLive(t *testing.T) { c := *New(); c.Send() }
+`,
+	})
+	assert.ElementsMatch(t, []string{"provider/client_test.go:6"}, found, "%v", msgs)
+}
+
+// b := struct{ C *Client }{C: New()} holds the client in field C: b.C is the client,
+// another field of the literal is not, and a method of the literal may use the client.
+func TestTestExternalServiceRule_LiteralFieldHoldsClient(t *testing.T) {
+	found, msgs := externalServiceFindings(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() *Client { return &Client{Base: "https://field-api.example.com"} }
+func (c *Client) WithKey(k string) *Client { return c }
+func (c *Client) Send() { _, _ = http.Get(c.Base) }
+func (c *Client) Name() string { return c.Base }
+`,
+		"provider/client_test.go": `package provider
+
+import "testing"
+
+func TestFieldInert(t *testing.T) { b := struct{ C *Client }{C: New()}; _ = b.C.Name() }
+func TestFieldLive(t *testing.T) { b := struct{ C *Client }{C: New()}; b.C.Send() }
+func TestFieldOther(t *testing.T) { b := struct{ C *Client; N string }{C: New(), N: "x"}; n := b.N; _ = n }
+func TestFieldPassed(t *testing.T) { b := &struct{ C *Client }{C: New()}; deliver(b.C) }
+func TestFieldBuilder(t *testing.T) { b := struct{ C *Client }{C: New()}; b.C.WithKey("k").Send() }
+func TestFieldMethod(t *testing.T) { b := box{C: New()}; b.run() }
+func TestMapAlias(t *testing.T) { key := "a"; m := map[string]*Client{key: New()}; n := m; _ = n }
+func TestFieldRefInert(t *testing.T) { b := &struct{ C *Client }{C: New()}; _ = b.C.Name() }
+func TestFieldOtherPassed(t *testing.T) { b := struct{ C *Client; N string }{C: New(), N: "x"}; println(b.N) }
+func TestFieldOtherClient(t *testing.T) { b := struct{ C, D *Client }{C: New(), D: &Client{}}; b.D.Send() }
+func deliver(c *Client) { c.Send() }
+type box struct{ C *Client }
+func (b box) run() { b.C.Send() }
+`,
+	})
+	assert.ElementsMatch(t, []string{"provider/client_test.go:6", "provider/client_test.go:8", "provider/client_test.go:9", "provider/client_test.go:10"}, found, "%v", msgs)
+}
+
+// c := New(); c.WithKey("k").Send(): a builder called on the variable holding the client
+// hands the client back, as it does on the constructor call itself.
+func TestTestExternalServiceRule_BuilderOnHolder(t *testing.T) {
+	found, msgs := externalServiceFindings(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() *Client { return &Client{Base: "https://hbuild-api.example.com"} }
+func (c *Client) WithKey(k string) *Client { return c }
+func (c *Client) Send() { _, _ = http.Get(c.Base) }
+func (c *Client) Name() string { return c.Base }
+`,
+		"provider/client_test.go": `package provider
+
+import "testing"
+
+func TestHolderThenBuilder(t *testing.T) { c := New(); c.WithKey("k").Send() }
+func TestHolderThenBuilderInert(t *testing.T) { c := New(); _ = c.WithKey("k").Name() }
+`,
+	})
+	assert.ElementsMatch(t, []string{"provider/client_test.go:5"}, found, "%v", msgs)
+}
+
+// d := c.WithKey("k") and d := c take over the client from its holder c: d is a holder too,
+// and handing the client over to it is no escape.
+func TestTestExternalServiceRule_HolderAssignedFromHolder(t *testing.T) {
+	found, msgs := externalServiceFindings(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() *Client { return &Client{Base: "https://hbuild-api.example.com"} }
+func (c *Client) WithKey(k string) *Client { return c }
+func (c *Client) Send() { _, _ = http.Get(c.Base) }
+func (c *Client) Name() string { return c.Base }
+`,
+		"provider/client_test.go": `package provider
+
+import "testing"
+
+func TestHolderBuilderVar(t *testing.T) { c := New(); d := c.WithKey("k"); d.Send() }
+func TestHolderBuilderVarInert(t *testing.T) { c := New(); d := c.WithKey("k"); _ = d.Name() }
+func TestAliasInert(t *testing.T) { c := New(); d := c; _ = d.Name() }
+func TestAliasLive(t *testing.T) { c := New(); var d = c; d.Send() }
+func TestAliasVarInert(t *testing.T) { c := New(); var d = c; _ = d.Name() }
+func TestAliasPassed(t *testing.T) { c := New(); d := c; deliver(d) }
+func TestDiscardedVar(t *testing.T) { c := New(); var _ = c }
+func TestDeclaredThenAssigned(t *testing.T) { var c *Client; c = New(); _ = c.Name() }
+func TestAliasBeforeConstructor(t *testing.T) { var c, d *Client; for i := range 2 { if i == 1 { _ = d.Name() }; d = c; c = New() } }
+func deliver(c *Client) { c.Send() }
+`,
+	})
+	assert.ElementsMatch(t, []string{"provider/client_test.go:5", "provider/client_test.go:8", "provider/client_test.go:10"}, found, "%v", msgs)
+}
+
+// c, _ := New() with an error result: a builder on c and its result hold the client as well.
+func TestTestExternalServiceRule_BuilderOnHolderOfErrorConstructor(t *testing.T) {
+	found, msgs := externalServiceFindings(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() (*Client, error) { return &Client{Base: "https://errctor-api.example.com"}, nil }
+func (c *Client) WithKey(k string) *Client { return c }
+func (c *Client) Fetch() error { _, err := http.Get(c.Base); return err }
+func (c *Client) Name() string { return c.Base }
+`,
+		"provider/client_test.go": `package provider
+
+import "testing"
+
+func TestBuilderAfterErr(t *testing.T) { c, _ := New(); _ = c.WithKey("k").Fetch() }
+func TestBuilderVarAfterErr(t *testing.T) { c, _ := New(); d := c.WithKey("k"); _ = d.Fetch() }
+func TestNameAfterErr(t *testing.T) { c, err := New(); if err != nil { t.Fatal(err) }; d := c.WithKey("k"); _ = d.Name() }
+func TestErrChecked(t *testing.T) { c, err := New(); check(err); _ = c.Name() }
+func TestOtherPair(t *testing.T) { c, _ := New(); v, ok := lookup(); if ok { keep(v) }; _ = c.Name() }
+func check(err error) { if err != nil { panic(err) } }
+func lookup() (string, bool) { return "", true }
+func keep(v string) { println(v) }
+`,
+	})
+	assert.ElementsMatch(t, []string{"provider/client_test.go:5", "provider/client_test.go:6"}, found, "%v", msgs)
+}
+
+// t.Log(c) formats the client: it calls no method of it but String, so a client whose
+// String stays local does not escape into the log of the test's own handle.
+func TestTestExternalServiceRule_ClientLoggedByTestingHandle(t *testing.T) {
+	found, msgs := externalServiceFindings(t, map[string]string{
+		"config/config.go": `package config
+
+import (
+	"fmt"
+	"net/http"
+)
+
+type Config struct{ Endpoint string }
+func Load() *Config { return &Config{Endpoint: "https://config-api.example.com"} }
+func (c *Config) String() string { return fmt.Sprintf("config %s", c.Endpoint) }
+func (c *Config) Ping() error { _, err := http.Get(c.Endpoint); return err }
+`,
+		"config/config_test.go": `package config
+
+import "testing"
+
+func TestLog(t *testing.T) { c := Load(); t.Log(c) }
+func BenchmarkFatalf(b *testing.B) { c := Load(); if c == nil { b.Fatalf("no config %v", c) } }
+func TestLogDirect(t *testing.T) { t.Error(Load()) }
+func TestOtherLogger(t *testing.T) { c := Load(); var l logger; l.Log(c) }
+func TestSkip(t *testing.T) { c := Load(); t.Skip(c) }
+type logger struct{}
+func (logger) Log(args ...any) { _ = args[0].(*Config).Ping() }
+`,
+	})
+	assert.ElementsMatch(t, []string{"config/config_test.go:8", "config/config_test.go:9"}, found, "%v", msgs)
+}
+
+// fmt.Sprint(c) formats the client and calls only its String; a writer of fmt.Fprint
+// is written to.
+func TestTestExternalServiceRule_ClientFormattedByFmt(t *testing.T) {
+	found, msgs := externalServiceFindings(t, map[string]string{
+		"config/config.go": `package config
+
+import (
+	"fmt"
+	"net/http"
+)
+
+type Config struct{ Endpoint string }
+func Load() *Config { return &Config{Endpoint: "https://config-api.example.com"} }
+func (c *Config) String() string { return fmt.Sprintf("config %s", c.Endpoint) }
+func (c *Config) Write(p []byte) (int, error) { _, err := http.Post(c.Endpoint, "text/plain", nil); return len(p), err }
+func (c *Config) Ping() error { _, err := http.Get(c.Endpoint); return err }
+`,
+		"config/config_test.go": `package config
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
+
+func TestSprint(t *testing.T) { c := Load(); _ = fmt.Sprint(c) }
+func TestSprintDirect(t *testing.T) { _ = fmt.Sprintf("%v", Load()) }
+func TestFprintWriter(t *testing.T) { c := Load(); fmt.Fprint(c, "x") }
+func TestFprintArg(t *testing.T) { c := Load(); var sb strings.Builder; fmt.Fprint(&sb, c) }
+func TestSprintShadowed(t *testing.T) { fmt := struct{ Sprint func(...any) string }{}; c := Load(); _ = fmt.Sprint(c) }
+func TestSscan(t *testing.T) { c := Load(); _, _ = fmt.Sscan("x", c) }
+`,
+	})
+	assert.ElementsMatch(t, []string{"config/config_test.go:11", "config/config_test.go:13", "config/config_test.go:14"}, found, "%v", msgs)
+}
+
+// reflect.DeepEqual compares two clients without calling a method of either.
+func TestTestExternalServiceRule_ClientComparedByDeepEqual(t *testing.T) {
+	found, msgs := externalServiceFindings(t, map[string]string{
+		"config/config.go": `package config
+
+import "net/http"
+
+type Config struct{ Endpoint string }
+func Load() *Config { return &Config{Endpoint: "https://config-api.example.com"} }
+func (c *Config) Ping() error { _, err := http.Get(c.Endpoint); return err }
+`,
+		"config/config_test.go": `package config
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestDeepEqual(t *testing.T) { a, b := Load(), Load(); if !reflect.DeepEqual(a, b) { t.Fatal("x") } }
+func TestPairLive(t *testing.T) { a, b := Load(), Load(); _ = b.Endpoint; _ = a.Ping() }
+func TestValueOf(t *testing.T) { c := Load(); _ = reflect.ValueOf(c) }
+func TestDeepEqualShadowed(t *testing.T) { reflect := struct{ DeepEqual func(a, b any) bool }{}; c := Load(); _ = reflect.DeepEqual(c, nil) }
+`,
+	})
+	assert.ElementsMatch(t, []string{"config/config_test.go:9", "config/config_test.go:10", "config/config_test.go:11"}, found, "%v", msgs)
+}
+
+// A client whose String goes to the network is called by fmt and by the log of the test.
+func TestTestExternalServiceRule_ClientWithLiveStringFormatted(t *testing.T) {
+	found, msgs := externalServiceFindings(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() *Client { return &Client{Base: "https://stringer-api.example.com"} }
+func (c *Client) String() string { _, _ = http.Get(c.Base); return c.Base }
+`,
+		"provider/client_test.go": `package provider
+
+import (
+	"fmt"
+	"reflect"
+	"testing"
+)
+
+func TestLogLiveString(t *testing.T) { c := New(); t.Log(c) }
+func TestSprintLiveString(t *testing.T) { c := New(); _ = fmt.Sprint(c) }
+func TestDeepEqualLiveString(t *testing.T) { a, b := New(), New(); _ = reflect.DeepEqual(a, b) }
+`,
+	})
+	assert.ElementsMatch(t, []string{"provider/client_test.go:9", "provider/client_test.go:10"}, found, "%v", msgs)
 }
