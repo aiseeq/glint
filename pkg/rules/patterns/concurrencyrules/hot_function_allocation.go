@@ -56,7 +56,7 @@ func NewAllocationInHotFunctionRule() *hotFuncRule {
 			"Detects an allocation in a function marked //glint:hot: make, new, a slice or map literal, &T{...}, slices.Clone and the like, append to a slice that starts empty in the function — the hot path leaves garbage on every call; reuse a buffer with append(buf[:0], ...)",
 			core.SeverityMedium,
 		),
-		suggestion:  "Keep the buffer on the receiver or take it as a parameter and refill it with append(buf[:0], ...); a deliberate allocation outside the loop takes // allocation-in-hot-function: safe — <reason>",
+		suggestion:  "Keep the buffer on the receiver or take it as a parameter and refill it with append(buf[:0], ...); a deliberate allocation outside the loop takes // allocation-in-hot-function: safe — followed by why it is needed",
 		check:       hotAllocations,
 		takesEscape: true,
 	}

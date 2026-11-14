@@ -91,10 +91,11 @@ func ignoredBroadPattern(pattern string) bool {
 }
 
 // broadLineHasReason reports a marker of broad-exclusion with a reason on the
-// line of the entry, read like every inline marker (core.SuppressionMarkers).
+// line of the entry or the line above, read like every inline marker
+// (core.SuppressionMarkers).
 func broadLineHasReason(ctx *core.FileContext, line int) bool {
 	for _, marker := range ctx.SuppressionMarkers() {
-		if marker.Line == line && slices.Contains(marker.Rules, broadExclusionRule) && core.SuppressionHasReason(marker.Text, broadExclusionRule) {
+		if (marker.Line == line || marker.Line == line-1) && slices.Contains(marker.Rules, broadExclusionRule) && core.SuppressionHasReason(marker.Text, broadExclusionRule) {
 			return true
 		}
 	}
@@ -103,54 +104,44 @@ func broadLineHasReason(ctx *core.FileContext, line int) bool {
 
 const broadExclusionRule = "broad-exclusion"
 
+// broadMarkerAdvice tells how to keep an intentional broad exclusion: a
+// marker with the reason written out, not a placeholder.
+const broadMarkerAdvice = "an intentional one takes # broad-exclusion: safe — followed by why the project needs it, on its line or the line above"
+
+// collectProjectSourceFiles returns the source files the walker visits in the
+// project when its own exclusions (settings.exclude, settings.skip_dirs) are
+// left out: .gitignore, nested repositories and the default artifact
+// directories keep theirs, so an exclusion of what the walk never reaches is
+// no finding. Generated files and foreign, test-data and generated
+// directories are left out too.
 func collectProjectSourceFiles(root string, cfg *core.Config) ([]string, error) {
-	files := make([]string, 0)
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if errors.Is(walkErr, fs.ErrPermission) {
-			return skipUnreadable(entry) // a directory the user cannot read holds no source glint checks
+	unexcluded := *cfg
+	unexcluded.Settings.Exclude, unexcluded.Settings.SkipDirs = nil, nil
+	walker := core.NewWalker(root, &unexcluded).WithGoParsing(false).WithRequiredFilePredicate(isSourceFile)
+	contexts, walkErrors := walker.WalkSync()
+	for _, err := range walkErrors {
+		// A directory or file the user cannot read holds no source glint checks.
+		if !errors.Is(err, fs.ErrPermission) {
+			return nil, fmt.Errorf("walk project source files: %w", err)
 		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			if ignoredBroadDirectory(entry.Name()) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !isSourceFile(path) {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if errors.Is(err, fs.ErrPermission) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read source file %s: %w", path, err)
-		}
-		if core.NewFileContext(path, root, data, cfg).IsGenerated() {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return fmt.Errorf("relative source path %s: %w", path, err)
-		}
-		files = append(files, filepath.ToSlash(rel))
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("walk project source files: %w", err)
 	}
+	files := make([]string, 0, len(contexts))
+	for _, ctx := range contexts {
+		rel := filepath.ToSlash(ctx.RelPath)
+		if ctx.IsGenerated() || inIgnoredBroadDirectory(ctx.RelPath) {
+			continue
+		}
+		files = append(files, rel)
+	}
+	slices.Sort(files)
 	return files, nil
 }
 
-// skipUnreadable skips an entry the walk could not read: the whole
-// directory when it is one.
-func skipUnreadable(entry os.DirEntry) error {
-	if entry != nil && entry.IsDir() {
-		return filepath.SkipDir
-	}
-	return nil
+// inIgnoredBroadDirectory reports a file below a directory broad-exclusion
+// leaves out of the project's sources.
+func inIgnoredBroadDirectory(rel string) bool {
+	dir := filepath.ToSlash(filepath.Dir(rel))
+	return dir != "." && slices.ContainsFunc(strings.Split(dir, "/"), ignoredBroadDirectory)
 }
 
 func ignoredBroadDirectory(name string) bool {
@@ -268,18 +259,18 @@ func checkBroadEntries(entries []broadEntry, files []string, catalog map[string]
 
 func broadFindingMessage(entry broadEntry, files []string) string {
 	if entry.skipDir {
-		return fmt.Sprintf("settings.skip_dirs leaves out every directory named %s, and the project's sources are in one; intentional cases can be marked # broad-exclusion: safe — <reason>", entry.pattern)
+		return fmt.Sprintf("settings.skip_dirs leaves out every directory named %s, and the project's sources are in one; "+broadMarkerAdvice, entry.pattern)
 	}
 	if language := coveredLanguage(entry, files); language != "" {
-		return fmt.Sprintf("Exclusion covers every %s file of the project; intentional cases can be marked # broad-exclusion: safe — <reason>", language)
+		return fmt.Sprintf("Exclusion covers every %s file of the project; "+broadMarkerAdvice, language)
 	}
 	if entry.pattern == "<category>" {
-		return "An entire rule category is disabled; intentional cases can be marked # broad-exclusion: safe — <reason>"
+		return "An entire rule category is disabled; " + broadMarkerAdvice
 	}
 	if entry.exception {
-		return "Exception covers the whole project for one rule; switch the rule off instead, or mark an intentional case # broad-exclusion: safe — <reason>"
+		return "Exception covers the whole project for one rule; switch the rule off instead, or " + broadMarkerAdvice
 	}
-	return "Exclusion covers all source files in a project directory; intentional cases can be marked # broad-exclusion: safe — <reason>"
+	return "Exclusion covers all source files in a project directory; " + broadMarkerAdvice
 }
 
 func checkBroadEntry(entry broadEntry, files []string, catalog map[string]int) (bool, error) {
@@ -340,28 +331,26 @@ func skipsSourceDirectory(name string, files []string) bool {
 	return false
 }
 
-// languageExtensions are the source languages of the project by extension.
-var languageExtensions = map[string][]string{
-	"Go":         {".go"},
-	"TypeScript": core.TypeScriptExtensions,
-	"JavaScript": core.JavaScriptExtensions,
-}
+// sourceExtensions are the extensions of the project's source files.
+var sourceExtensions = slices.Concat([]string{".go"}, core.TypeScriptExtensions, core.JavaScriptExtensions)
 
 // extensionGlob is the last path element of a pattern that names files by
 // their extension alone ("*.go", "*.{ts,tsx}").
 var extensionGlob = regexp.MustCompile(`^\*\.[A-Za-z0-9{},]+$`)
 
-// coveredLanguage returns the language of the project every file of which an
-// exclude pattern that names files by extension ("*.go", "**/*.ts") takes
-// out, matched as the exclusion matches (core.MatchGlob); "" when none.
+// coveredLanguage returns the extension (".ts") every file of which in the
+// project an exclude pattern that names files by extension ("*.go",
+// "**/*.ts") takes out, matched as the exclusion matches (core.MatchGlob);
+// "" when none. Each extension counts by itself: "**/*.ts" takes out the
+// TypeScript of a project whose views stay in .tsx all the same.
 func coveredLanguage(entry broadEntry, files []string) string {
 	if entry.exception || entry.skipDir || !extensionGlob.MatchString(entry.pattern[strings.LastIndex(entry.pattern, "/")+1:]) {
 		return ""
 	}
-	for _, language := range slices.Sorted(maps.Keys(languageExtensions)) {
+	for _, ext := range sourceExtensions {
 		total, covered := 0, 0
 		for _, file := range files {
-			if !slices.Contains(languageExtensions[language], strings.ToLower(filepath.Ext(file))) {
+			if strings.ToLower(filepath.Ext(file)) != ext {
 				continue
 			}
 			total++
@@ -370,7 +359,7 @@ func coveredLanguage(entry broadEntry, files []string) string {
 			}
 		}
 		if total > 0 && covered == total {
-			return language
+			return ext
 		}
 	}
 	return ""

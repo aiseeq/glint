@@ -33,7 +33,7 @@ func NewReflectInHotFunctionRule() *hotFuncRule {
 			"Detects a call into package reflect (ValueOf, Value.Set, FieldByName, DeepEqual, Type methods) in a function marked //glint:hot — reflection boxes values and looks fields up at run time on every call; name the fields in code (a bit mask and an assignment per bit)",
 			core.SeverityMedium,
 		),
-		suggestion: "Name the fields in code: a bit mask of the fields with a switch or an assignment per bit, a typed comparison instead of reflect.DeepEqual; a lookup done once outside the tick takes // reflect-in-hot-function: safe — <reason>",
+		suggestion: "Name the fields in code: a bit mask of the fields with a switch or an assignment per bit, a typed comparison instead of reflect.DeepEqual; a lookup done once outside the tick takes // reflect-in-hot-function: safe — followed by why it is needed",
 		check:      hotReflectCalls,
 	}
 }

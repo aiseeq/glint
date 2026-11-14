@@ -151,3 +151,73 @@ func TestBroadExclusionReportsSkipDirsOverSources(t *testing.T) {
 	}
 	assert.Equal(t, []int{3, 8}, lines)
 }
+
+// broad-exclusion counts the sources the walker visits: a skip_dirs entry for
+// a directory .gitignore already keeps out of the walk takes nothing out.
+func TestBroadExclusionSkipDirsCountsOnlyWalkedSources(t *testing.T) {
+	root := t.TempDir()
+	writeModuleFile(t, root, ".gitignore", "scratch/\n")
+	writeModuleFile(t, root, ".glint.yaml", "settings:\n  skip_dirs:\n    - tools\n    - scratch\n")
+	writeModuleFile(t, root, "go.mod", "module example.com/p\n\ngo 1.24\n")
+	writeModuleFile(t, root, "pkg/a/a.go", "package a\n")
+	writeModuleFile(t, root, "tools/cli/main.go", "package main\n")
+	writeModuleFile(t, root, "scratch/s.go", "package scratch\n")
+	cfg, err := core.LoadConfigWithDefaults(root)
+	require.NoError(t, err)
+	var lines []int
+	for _, v := range broadFindingsForTest(t, cfg) {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{3}, lines)
+}
+
+// A language is judged by extension: "**/*.ts" takes out every .ts file even
+// when .tsx files stay, and so for .js and .jsx.
+func TestBroadExclusionJudgesEachExtension(t *testing.T) {
+	for _, pattern := range []string{"**/*.ts", "*.tsx", "*.js", "**/*.jsx"} {
+		t.Run(pattern, func(t *testing.T) {
+			root := t.TempDir()
+			writeModuleFile(t, root, ".glint.yaml", "settings:\n  exclude:\n    - \""+pattern+"\"\n")
+			writeModuleFile(t, root, "cmd/app/main.go", "package main\n")
+			writeModuleFile(t, root, "web/src/api/a1.ts", "export const a = 1;\n")
+			writeModuleFile(t, root, "web/src/api/a2.ts", "export const b = 1;\n")
+			writeModuleFile(t, root, "web/src/ui/b.tsx", "export const c = 1;\n")
+			writeModuleFile(t, root, "web/src/ui/view.tsx", "export const v = 1;\n")
+			writeModuleFile(t, root, "web/lib/c.js", "export const d = 1;\n")
+			writeModuleFile(t, root, "web/ui/d.jsx", "export const e = 1;\n")
+			writeModuleFile(t, root, "web/ui/e.js", "export const f = 1;\n")
+			cfg, err := core.LoadConfigWithDefaults(root)
+			require.NoError(t, err)
+			found := broadFindingsForTest(t, cfg)
+			require.Len(t, found, 1)
+			ext := pattern[strings.LastIndex(pattern, "."):]
+			assert.Contains(t, found[0].Message, "every "+ext+" file")
+		})
+	}
+}
+
+// A broad-exclusion marker counts on the entry's line or the line above, as
+// every marker does, and only with a reason: a placeholder is none.
+func TestBroadExclusionMarkerOnTheLineAbove(t *testing.T) {
+	root := t.TempDir()
+	writeModuleFile(t, root, ".glint.yaml", "settings:\n  exclude:\n    # broad-exclusion: safe — snapshots of retired bots\n    - \"tools/**\"\n    - \"pkg/**\" # broad-exclusion: safe <reason>\n")
+	writeModuleFile(t, root, "cmd/app/main.go", "package main\n")
+	writeModuleFile(t, root, "tools/cli/main.go", "package main\n")
+	writeModuleFile(t, root, "pkg/a/a.go", "package a\n")
+	cfg, err := core.LoadConfigWithDefaults(root)
+	require.NoError(t, err)
+	var lines []int
+	for _, v := range broadFindingsForTest(t, cfg) {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{5}, lines)
+}
+
+// glint's own advice must not hand out a placeholder that is no reason.
+func TestBroadExclusionMessagesGiveNoPlaceholder(t *testing.T) {
+	files := []string{"a.go"}
+	for _, entry := range []broadEntry{{pattern: "<category>"}, {pattern: "src/**", exception: true}, {pattern: "src/**"}, {pattern: "tools", skipDir: true}, {pattern: "*.go"}} {
+		message := broadFindingMessage(entry, files)
+		assert.NotContains(t, message, "<reason>", message)
+	}
+}
