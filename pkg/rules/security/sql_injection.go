@@ -108,7 +108,9 @@ func (r *SQLInjectionRule) analyze(ctx *core.FileContext, info *types.Info, decl
 		return nil
 	}
 
-	check := newSQLTaintCheck(ctx.GoAST, info, decls)
+	// The taint index of the file is built on its first database call: most
+	// files make none, and the index is a pass over the whole file.
+	var check *sqlTaintCheck
 	var violations []*core.Violation
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -118,6 +120,9 @@ func (r *SQLInjectionRule) analyze(ctx *core.FileContext, info *types.Info, decl
 		query := sqlQueryArgument(call, info)
 		if query == nil {
 			return true
+		}
+		if check == nil {
+			check = newSQLTaintCheck(ctx.GoAST, info, decls)
 		}
 		pattern := check.injectedPattern(query, call.Pos())
 		if pattern == "" {

@@ -479,7 +479,8 @@ func buildAuditCallIndex(program *ssa.Program, fset *token.FileSet) *auditCallIn
 			index.files[function] = filepath.Clean(position.Filename)
 		}
 	}
-	sortFunctionsByName(index.functions)
+	names := make(auditFunctionNames, len(index.functions))
+	names.sort(index.functions)
 
 	graph := cha.CallGraph(program)
 	for _, node := range graph.Nodes {
@@ -510,7 +511,7 @@ func buildAuditCallIndex(program *ssa.Program, fset *token.FileSet) *auditCallIn
 		}
 	}
 	for _, targets := range index.targets {
-		sortFunctionsByName(targets)
+		names.sort(targets)
 	}
 	for _, function := range index.functions {
 		for _, block := range function.Blocks {
@@ -549,7 +550,7 @@ func (a *auditActorAnalyzer) initialize() error {
 			a.sources[function] = true
 		}
 	}
-	a.statusWithoutSiblingAudit = auditStatusCallsWithoutSiblingAudit(index, a.sources)
+	a.statusWithoutSiblingAudit = auditStatusCallsWithoutSiblingAudit(index, a.sources, a.hasHumanRoot)
 	sourceIncoming := make(map[*ssa.Function]bool)
 	for _, edge := range index.edges {
 		if a.isSourceFunction(edge.caller) && a.isSourceFunction(edge.callee) {
@@ -575,7 +576,8 @@ func (a *auditActorAnalyzer) initialize() error {
 // repository operation and receiver type with a method that also writes an
 // audit or history record. It reports only the sibling method that omits that
 // write. Nested transaction callbacks are attributed to their enclosing method.
-func auditStatusCallsWithoutSiblingAudit(index *auditCallIndex, sourceFunctions map[*ssa.Function]bool) map[ssa.CallInstruction]bool {
+// humanRoot is auditFunctionHasHumanRoot, memoized by the caller.
+func auditStatusCallsWithoutSiblingAudit(index *auditCallIndex, sourceFunctions map[*ssa.Function]bool, humanRoot func(*ssa.Function) bool) map[ssa.CallInstruction]bool {
 	transactionHelpers := make(map[*ssa.Function]bool)
 	for _, function := range index.functions {
 		root := auditFunctionRoot(function)
@@ -597,6 +599,7 @@ func auditStatusCallsWithoutSiblingAudit(index *auditCallIndex, sourceFunctions 
 			}
 		}
 	}
+	nested := auditNestedFunctions(index.functions)
 	methods := make(map[*ssa.Function]*auditMethodCalls)
 	for _, function := range index.functions {
 		root := auditFunctionRoot(function)
@@ -607,7 +610,7 @@ func auditStatusCallsWithoutSiblingAudit(index *auditCallIndex, sourceFunctions 
 			methods[root] = &auditMethodCalls{
 				function: root,
 				status:   make(map[string][]ssa.CallInstruction),
-				actor:    auditMethodHasActor(root, index),
+				actor:    auditMethodHasActor(root, nested[root], humanRoot),
 			}
 		}
 		collectAuditMethodCalls(methods[root], function, root, index)
@@ -639,16 +642,27 @@ func auditStatusCallsWithoutSiblingAudit(index *auditCallIndex, sourceFunctions 
 	return missing
 }
 
-func auditMethodHasActor(root *ssa.Function, index *auditCallIndex) bool {
-	if auditFunctionHasActor(root) {
-		return true
-	}
-	for _, function := range index.functions {
-		if function != root && auditFunctionRoot(function) == root && auditFunctionHasHumanRoot(function) {
-			return true
+// auditNestedFunctions returns the closures of each function among functions,
+// nested ones included, gathered in one pass: auditMethodHasActor looks at
+// the closures of every method, and a pass over all functions per method was
+// quadratic.
+func auditNestedFunctions(functions []*ssa.Function) map[*ssa.Function][]*ssa.Function {
+	nested := make(map[*ssa.Function][]*ssa.Function)
+	for _, function := range functions {
+		if root := auditFunctionRoot(function); function != root {
+			nested[root] = append(nested[root], function)
 		}
 	}
-	return false
+	return nested
+}
+
+// auditMethodHasActor reports a method that has an actor itself or in one of
+// its closures, nested.
+func auditMethodHasActor(root *ssa.Function, nested []*ssa.Function, humanRoot func(*ssa.Function) bool) bool {
+	if auditActorParameter(root) || humanRoot(root) {
+		return true
+	}
+	return slices.ContainsFunc(nested, humanRoot)
 }
 
 type auditMethodCalls struct {
@@ -766,13 +780,14 @@ func auditWriteCall(name string) bool {
 	return slices.ContainsFunc(verbs, func(verb string) bool { return strings.HasPrefix(name, verb) })
 }
 
-func auditFunctionHasActor(function *ssa.Function) bool {
+// auditActorParameter reports a function with a parameter named for an actor.
+func auditActorParameter(function *ssa.Function) bool {
 	for _, parameter := range function.Params {
 		if auditActorParameterName(parameter.Name()) {
 			return true
 		}
 	}
-	return auditFunctionHasHumanRoot(function)
+	return false
 }
 
 func auditActorParameterName(name string) bool {
@@ -801,16 +816,21 @@ func auditStatusCallKey(function *ssa.Function) string {
 	return receiver + "." + name
 }
 
-// sortFunctionsByName orders functions by their full name for a stable walk.
-// The name is built once per function: ssa.Function.String formats the whole
-// qualified signature, and building it in every comparison dominated the rule.
-func sortFunctionsByName(functions []*ssa.Function) {
+// auditFunctionNames holds the full names of functions, which order them for
+// a stable walk. A name is built once per function: ssa.Function.String
+// formats the whole qualified signature, and the call index sorts every
+// function and then the targets of every call.
+type auditFunctionNames map[*ssa.Function]string
+
+// sort orders functions by their full name.
+func (names auditFunctionNames) sort(functions []*ssa.Function) {
 	if len(functions) < 2 {
 		return
 	}
-	names := make(map[*ssa.Function]string, len(functions))
 	for _, function := range functions {
-		names[function] = function.String()
+		if _, ok := names[function]; !ok {
+			names[function] = function.String()
+		}
 	}
 	sort.Slice(functions, func(i, j int) bool { return names[functions[i]] < names[functions[j]] })
 }
@@ -900,6 +920,7 @@ func (a *auditActorAnalyzer) run() error {
 
 func (a *auditActorAnalyzer) analyzeFunction(state auditState) error {
 	localHuman := state.human || a.hasHumanRoot(state.function)
+	root := auditFunctionRoot(state.function)
 	for _, block := range state.function.Blocks {
 		for _, instruction := range block.Instrs {
 			call, ok := instruction.(ssa.CallInstruction)
@@ -907,7 +928,7 @@ func (a *auditActorAnalyzer) analyzeFunction(state auditState) error {
 				continue
 			}
 			for _, target := range a.targets[call] {
-				actorAvailable := localHuman || auditFunctionHasActor(auditFunctionRoot(state.function))
+				actorAvailable := localHuman || auditActorParameter(root) || a.hasHumanRoot(root)
 				if a.statusWithoutSiblingAudit[call] && a.isSourceFunction(state.function) && actorAvailable && !a.statusCallPassesActor(state, call) {
 					if err := a.report(state, localHuman, call, target, "status_without_sibling_audit", "status change omits the audit write present in a sibling method"); err != nil {
 						return err

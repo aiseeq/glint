@@ -61,18 +61,22 @@ type jsonRoundTrip struct {
 	// written and read are the ignored fields assigned and read; refilled
 	// are those a function decoding their type assigns itself.
 	written, read, refilled map[*types.Var]bool
-	// owners caches the struct type declaring a field.
-	owners map[*types.Var]*types.TypeName
+	// owners maps, per package, each field of a package-level struct type to
+	// the type declaring it, built on the first field of the package asked.
+	owners map[*types.Package]map[*types.Var]*types.TypeName
 }
 
 // owner returns the named struct type that declares the field.
 func (t *jsonRoundTrip) owner(v *types.Var) *types.TypeName {
-	if owner, ok := t.owners[v]; ok {
-		return owner
+	if v.Pkg() == nil {
+		return nil
 	}
-	owner := fieldOwner(v)
-	t.owners[v] = owner
-	return owner
+	owners, ok := t.owners[v.Pkg()]
+	if !ok {
+		owners = fieldOwners(v.Pkg())
+		t.owners[v.Pkg()] = owners
+	}
+	return owners[v]
 }
 
 // AnalyzeGoProject reports the ignored fields lost by the round trip.
@@ -89,7 +93,7 @@ func (r *JSONIgnoredFieldLostInRoundTripRule) AnalyzeGoProject(ctx *core.GoProje
 	trip := jsonRoundTrip{
 		marshalled: map[*types.TypeName]bool{}, unmarshalled: map[*types.TypeName]bool{},
 		written: map[*types.Var]bool{}, read: map[*types.Var]bool{}, refilled: map[*types.Var]bool{},
-		owners: map[*types.Var]*types.TypeName{},
+		owners: map[*types.Package]map[*types.Var]*types.TypeName{},
 	}
 	eachProductionGoFile(ctx, trip.collect)
 	return trip.analyzeStructs(ctx, r.Name(), func(file *core.FileContext, info *types.Info, name *types.TypeName, st *ast.StructType) []*core.Violation {
@@ -322,12 +326,13 @@ func ignoredField(info *types.Info, expr ast.Expr) *types.Var {
 	return v
 }
 
-// fieldOwner returns the named struct type that declares the field.
-func fieldOwner(v *types.Var) *types.TypeName {
-	if v.Pkg() == nil {
-		return nil
-	}
-	scope := v.Pkg().Scope()
+// fieldOwners maps each field of the package-level struct types of pkg to the
+// first type, in name order, whose struct holds it: a defined type over
+// another (type B A) shares its fields. One pass over the scope serves every
+// field of the package, where a search per field sorted the names each time.
+func fieldOwners(pkg *types.Package) map[*types.Var]*types.TypeName {
+	owners := map[*types.Var]*types.TypeName{}
+	scope := pkg.Scope()
 	for _, name := range scope.Names() {
 		tn, ok := scope.Lookup(name).(*types.TypeName)
 		if !ok {
@@ -338,10 +343,10 @@ func fieldOwner(v *types.Var) *types.TypeName {
 			continue
 		}
 		for field := range st.Fields() {
-			if field == v {
-				return tn
+			if _, found := owners[field]; !found {
+				owners[field] = tn
 			}
 		}
 	}
-	return nil
+	return owners
 }
