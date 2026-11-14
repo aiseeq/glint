@@ -265,7 +265,6 @@ func mergeNearFunctions(lib *moduleLibrary, project goModule, dep libraryDepende
 			lib.tsNear = append(lib.tsNear, newNearCandidate(match, fn.Body))
 		}
 	}
-	return
 }
 
 func loadLibraryCache(cache *toolcache.Cache, key string) (libraryCacheEntry, bool, error) {
