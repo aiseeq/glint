@@ -1081,3 +1081,49 @@ func tables() {
 	}
 	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
 }
+
+// A subtest body t.Run receives as a value — a method value bound to a table
+// string, a named closure, a closure a package factory returns — may run the
+// string in a shell; only a function literal on the spot shows what the body
+// does with it.
+func TestSignalImplicitTargetRangeStringsReachSubtestFunctionValues(t *testing.T) {
+	source := `package sample
+import (
+	"os/exec"
+	"testing"
+)
+func inspect(string) {}
+type job struct{ command string }
+func (j job) run(t *testing.T) { _ = exec.Command("sh", "-c", j.command).Run() }
+func (j job) check(t *testing.T) { inspect(j.command) }
+func mk(command string) func(*testing.T) {
+	return func(t *testing.T) { _ = exec.Command("sh", "-c", command).Run() }
+}
+func mkRead(command string) func(*testing.T) {
+	return func(t *testing.T) { inspect(command) }
+}
+var fixed job
+func TestTable(t *testing.T) {
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("case", job{command: s}.run) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { j := job{command: s}; t.Run("case", j.run) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { j := job{command: s}; t.Run("case", (j.check)) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { run := job{command: s}.run; t.Run("case", run) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { run := func(t *testing.T) { _ = exec.Command("sh", "-c", s).Run() }; t.Run("case", run) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("case", mk(s)) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { run := mk(s); t.Run("case", run) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("case", func(t *testing.T) { inspect(s) }) } // WANT-NONE
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("case", func(t *testing.T) { t.Log(s) }) } // WANT-NONE
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("case", (func(t *testing.T) { inspect(s) })) } // WANT-NONE
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run(s, fixed.run) } // WANT-NONE
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("case", mkRead(s)) } // WANT-NONE
+}
+`
+	file, pkg := signalSourceTyped(t, "signal_test.go", source)
+	var want []int
+	for i, line := range strings.Split(source, "\n") {
+		if strings.Contains(line, "// WANT") && !strings.Contains(line, "WANT-NONE") {
+			want = append(want, i+1)
+		}
+	}
+	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+}

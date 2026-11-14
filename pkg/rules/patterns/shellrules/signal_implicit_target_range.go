@@ -215,6 +215,10 @@ func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *t
 		result.executes = true
 		return
 	}
+	if isSubtest(call, info) && rangeSubtestBodyOpaque(call, dependent) {
+		result.unknown = true
+		return
+	}
 	if rangeDataCall(call, info) {
 		return
 	}
@@ -278,6 +282,25 @@ func projectRangeParameter(call *ast.CallExpr, index int, decl *ast.FuncDecl, in
 		}
 	}
 	return index, paramList
+}
+
+// rangeSubtestBodyOpaque reports a subtest body that depends on the table
+// string and comes as a value: a method value bound to the string or a name
+// for a function hides what the body does with it. A function literal is read
+// on the spot, and a call that builds the body is followed as a call of its
+// own, so neither is opaque.
+func rangeSubtestBodyOpaque(call *ast.CallExpr, dependent []int) bool {
+	for _, i := range dependent {
+		if i == 0 {
+			continue
+		}
+		switch ast.Unparen(call.Args[i]).(type) {
+		case *ast.FuncLit, *ast.CallExpr:
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func markUnknownRangeUses(scope ast.Node, tracked map[types.Object]bool, propagated map[*ast.Ident]bool, handled map[*ast.Ident]bool, info *types.Info, result *rangeFlowResult) {
