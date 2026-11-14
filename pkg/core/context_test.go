@@ -304,6 +304,13 @@ func TestFileContextIsSuppressed(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "nolint reason after colon separator",
+			lines:    []string{`x := foo() //nolint:my-rule: because it applies here`},
+			line:     1,
+			rule:     "my-rule",
+			expected: true,
+		},
+		{
 			name:     "nolint list followed by prose does not read the prose as rules",
 			lines:    []string{`x := foo() //nolint:first-rule, my-rule justified because reasons`},
 			line:     1,

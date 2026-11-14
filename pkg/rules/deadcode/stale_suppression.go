@@ -15,6 +15,82 @@ func init() {
 	rules.Register(NewStaleSuppressionRule())
 }
 
+// SuppressionWithoutReasonRule requires explanations after inline suppression markers.
+type SuppressionWithoutReasonRule struct{ *rules.BaseRule }
+
+// NewSuppressionWithoutReasonRule constructs the suppression reason rule.
+func NewSuppressionWithoutReasonRule() *SuppressionWithoutReasonRule {
+	return &SuppressionWithoutReasonRule{rules.NewBaseRule("suppression-without-reason", "deadcode", "Requires a reason after inline suppression markers", core.SeverityLow)}
+}
+
+// AnalyzeFile reports suppression markers that have no explanation.
+func (r *SuppressionWithoutReasonRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	var found []*core.Violation
+	for _, marker := range suppressionMarkers(ctx) {
+		text := suppressionCommentText(marker.Text)
+		for _, name := range marker.Rules {
+			if _, ok := rules.Get(name); !ok || suppressionHasReason(text, name) {
+				continue
+			}
+			message := "Suppression has no reason after safe"
+			if strings.HasPrefix(text, "nolint:") {
+				message = "Suppression has no reason; add a short explanation after the rule name"
+			}
+			found = append(found, r.CreateViolation(ctx.RelPath, marker.Line, message))
+			break
+		}
+	}
+	return found
+}
+
+func suppressionCommentText(comment string) string {
+	text := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(comment), "/#*"))
+	return strings.TrimSpace(strings.TrimSuffix(text, "*/"))
+}
+
+func suppressionHasReason(text, name string) bool {
+	if after, ok := strings.CutPrefix(text, "nolint:"); ok {
+		segments := strings.SplitSeq(strings.TrimSuffix(after, "*/"), ",")
+		for segment := range segments {
+			fields := strings.Fields(segment)
+			if len(fields) == 0 {
+				return false
+			}
+			if len(fields) > 1 {
+				tail := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(segment), fields[0]))
+				return suppressionReasonText(tail) != ""
+			}
+		}
+		return false
+	}
+	for _, marker := range []string{name + ": safe", name + ":safe"} {
+		if _, after, ok := strings.Cut(text, marker); ok {
+			return suppressionReasonText(after) != ""
+		}
+	}
+	return false
+}
+
+func suppressionReasonText(text string) string {
+	return strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(text), "-—:"))
+}
+
+// BroadExclusionRule reports project configuration that excludes broad source areas.
+type BroadExclusionRule struct{ *rules.BaseRule }
+
+// NewBroadExclusionRule constructs the broad exclusion rule.
+func NewBroadExclusionRule() *BroadExclusionRule {
+	return &BroadExclusionRule{rules.NewBaseRule("broad-exclusion", "deadcode", "Reports exclusions that hide an entire source directory or category", core.SeverityLow)}
+}
+
+// AnalyzeFile is a no-op because broad exclusions are checked against project configuration.
+func (*BroadExclusionRule) AnalyzeFile(*core.FileContext) []*core.Violation { return nil }
+
+func init() {
+	rules.Register(NewSuppressionWithoutReasonRule())
+	rules.Register(NewBroadExclusionRule())
+}
+
 // StaleSuppressionRule detects suppressions that silence nothing:
 //
 //	x := load() //nolint:ignored-error  — the rule reports nothing on this line or the next
