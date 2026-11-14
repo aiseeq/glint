@@ -27,6 +27,9 @@ type testDirFacts struct {
 	// emptyFuncs holds "package.function" for the functions of the directory,
 	// test files and sources alike, whose body is only bare returns.
 	emptyFuncs map[string]bool
+	// packageValues holds, by "package.variable", the values given to the
+	// package-level variables of the directory, test files and sources alike.
+	packageValues map[string][]ast.Expr
 }
 
 type clientHolder struct {
@@ -52,6 +55,7 @@ func (r *TestExternalServiceRule) collectTestDirFacts(files []*core.FileContext,
 	for dir, dirFiles := range byDir {
 		facts[dir] = r.dirFacts(dirFiles, envKeys)
 		facts[dir].emptyFuncs = map[string]bool{}
+		facts[dir].packageValues = map[string][]ast.Expr{}
 	}
 	for _, file := range files {
 		if file == nil || file.GoAST == nil {
@@ -61,6 +65,15 @@ func (r *TestExternalServiceRule) collectTestDirFacts(files []*core.FileContext,
 			for _, decl := range file.GoAST.Decls {
 				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && onlyBareReturns(fn.Body) {
 					f.emptyFuncs[file.GoAST.Name.Name+"."+fn.Name.Name] = true
+				}
+				if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.VAR {
+					for _, spec := range gen.Specs {
+						vs, isValue := spec.(*ast.ValueSpec)
+						for i := 0; isValue && i < len(vs.Names) && i < len(vs.Values); i++ {
+							key := file.GoAST.Name.Name + "." + vs.Names[i].Name
+							f.packageValues[key] = append(f.packageValues[key], vs.Values[i])
+						}
+					}
 				}
 			}
 		}
@@ -309,6 +322,9 @@ type liveCallScope struct {
 	// emptyFunc reports a function of the test's own package whose body is
 	// only bare returns.
 	emptyFunc func(name string) bool
+	// packageValues lists the values given to a package-level variable of
+	// the test's own package.
+	packageValues func(name string) []ast.Expr
 }
 
 // reaches returns the evidence of a live call and whether the call is one. A direct sending
@@ -799,37 +815,98 @@ func hostName(rawURL string) string {
 	return host
 }
 
-// calleeCandidates is what a call's function may be: the expression itself,
-// and, when it is a plain name, every value the test body assigns to that
-// name. A constructor taken as a value (f := New; f()) is the same call as
-// the constructor. Test files carry no type information, so the name is
-// matched syntactically: a stray assignment of the same name can only add a
-// candidate, which keeps the rule on the side of reporting.
-func calleeCandidates(body *ast.BlockStmt, fun ast.Expr) []ast.Expr {
-	candidates := []ast.Expr{fun}
-	id, ok := ast.Unparen(fun).(*ast.Ident)
-	if !ok {
-		return candidates
+// calleeCandidates is what a call's function may be: the expression itself
+// and, while it is a plain name, every value bound to that name where the
+// call can see it — in the test body or at the top of its package — followed
+// through names bound to names. A constructor taken as a value (f := New;
+// f()) is the same call as the constructor. Test files carry no type
+// information, so names are matched syntactically by scope: a definition
+// counts when its block encloses the call, an assignment when its function
+// does. A stray binding of the same name can only add a candidate, which
+// keeps the rule on the side of reporting.
+func calleeCandidates(body *ast.BlockStmt, call *ast.CallExpr, packageValues func(string) []ast.Expr) []ast.Expr {
+	bindings := visibleBindings(body, call.Pos())
+	var candidates []ast.Expr
+	seen := map[string]bool{}
+	var expand func(ast.Expr)
+	expand = func(e ast.Expr) {
+		e = ast.Unparen(e)
+		candidates = append(candidates, e)
+		id, ok := e.(*ast.Ident)
+		if !ok || seen[id.Name] {
+			return
+		}
+		seen[id.Name] = true
+		for _, value := range bindings[id.Name] {
+			expand(value)
+		}
+		if packageValues != nil {
+			for _, value := range packageValues(id.Name) {
+				expand(value)
+			}
+		}
 	}
+	expand(call.Fun)
+	return candidates
+}
+
+// visibleBindings maps a name to the values body binds to it that a call at
+// pos can see.
+func visibleBindings(body *ast.BlockStmt, pos token.Pos) map[string][]ast.Expr {
+	bindings := map[string][]ast.Expr{}
+	bindSpec := func(spec *ast.ValueSpec) {
+		for i, name := range spec.Names {
+			if i < len(spec.Values) {
+				bindings[name.Name] = append(bindings[name.Name], spec.Values[i])
+			}
+		}
+	}
+	encloses := func(n ast.Node) bool { return n.Pos() <= pos && pos < n.End() }
+	var blocks, funcs []ast.Node
+	var stack []ast.Node
 	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if len(blocks) > 0 && blocks[len(blocks)-1] == top {
+				blocks = blocks[:len(blocks)-1]
+			}
+			if len(funcs) > 0 && funcs[len(funcs)-1] == top {
+				funcs = funcs[:len(funcs)-1]
+			}
+			return true
+		}
+		stack = append(stack, n)
 		switch n := n.(type) {
+		case *ast.BlockStmt:
+			blocks = append(blocks, n)
+			if len(funcs) == 0 {
+				funcs = append(funcs, n)
+			}
+		case *ast.FuncLit:
+			funcs = append(funcs, n)
 		case *ast.AssignStmt:
 			if len(n.Lhs) != len(n.Rhs) {
 				return true
 			}
+			scope := funcs[len(funcs)-1]
+			if n.Tok == token.DEFINE {
+				scope = blocks[len(blocks)-1]
+			}
+			if !encloses(scope) {
+				return true
+			}
 			for i, lhs := range n.Lhs {
-				if l, isIdent := lhs.(*ast.Ident); isIdent && l.Name == id.Name {
-					candidates = append(candidates, ast.Unparen(n.Rhs[i]))
+				if l, isIdent := lhs.(*ast.Ident); isIdent {
+					bindings[l.Name] = append(bindings[l.Name], n.Rhs[i])
 				}
 			}
 		case *ast.ValueSpec:
-			for i, name := range n.Names {
-				if name.Name == id.Name && i < len(n.Values) {
-					candidates = append(candidates, ast.Unparen(n.Values[i]))
-				}
+			if encloses(blocks[len(blocks)-1]) {
+				bindSpec(n)
 			}
 		}
 		return true
 	})
-	return candidates
+	return bindings
 }

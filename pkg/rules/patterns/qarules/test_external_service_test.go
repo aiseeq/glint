@@ -1719,6 +1719,12 @@ func TestFuncValue(t *testing.T) { f := New; c := f(); c.Send() }
 func TestFuncValueVar(t *testing.T) { var f = New; f().Send() }
 func TestFuncValueUnused(t *testing.T) { f := New; c := f(); _ = c.Base }
 func TestFuncValueNotCalled(t *testing.T) { f := New; _ = f }
+var pkgCtor = New
+func TestPackageVar(t *testing.T) { pkgCtor().Send() }
+func TestChain(t *testing.T) { f := New; g := f; g().Send() }
+func TestParen(t *testing.T) { f := (New); (f)().Send() }
+func TestSubtests(t *testing.T) { t.Run("a", func(t *testing.T) { mk := New; _ = mk().Base }); t.Run("b", func(t *testing.T) { mk := func() *Client { return &Client{} }; mk().Send() }) }
+func TestBranchAssign(t *testing.T) { var f func() *Client; if t != nil { f = New }; f().Send() }
 `,
 		"provider/external_test.go": `package provider_test
 
@@ -1730,6 +1736,15 @@ import (
 
 func TestQualifiedFuncValue(t *testing.T) { f := provider.New; f().Send() }
 func TestQualifiedFuncValueUnused(t *testing.T) { f := provider.New; _ = f().Base }
+var extCtor = provider.New
+func TestQualifiedPackageVar(t *testing.T) { extCtor().Send() }
+func TestOtherFilePackageVar(t *testing.T) { f := sharedCtor; f().Send() }
+`,
+		"provider/vars_test.go": `package provider_test
+
+import "example.com/rulestest/provider"
+
+var sharedCtor = provider.New
 `,
 	})
 
@@ -1739,5 +1754,5 @@ func TestQualifiedFuncValueUnused(t *testing.T) { f := provider.New; _ = f().Bas
 	for _, v := range violations {
 		found = append(found, v.File+":"+strconv.Itoa(v.Line))
 	}
-	assert.ElementsMatch(t, []string{"provider/client_test.go:5", "provider/client_test.go:6", "provider/external_test.go:9"}, found, "%v", messages(violations))
+	assert.ElementsMatch(t, []string{"provider/client_test.go:5", "provider/client_test.go:6", "provider/client_test.go:10", "provider/client_test.go:11", "provider/client_test.go:12", "provider/client_test.go:14", "provider/external_test.go:9", "provider/external_test.go:12", "provider/external_test.go:13"}, found, "%v", messages(violations))
 }

@@ -833,6 +833,11 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 		}
 		scope := liveCallScope{liveEnd: liveEnd, unitTests: unitTests, hostOf: r.externalHost, isLocalURL: r.localURL, emptyFunc: func(name string) bool {
 			return facts != nil && facts.emptyFuncs[file.GoAST.Name.Name+"."+name]
+		}, packageValues: func(name string) []ast.Expr {
+			if facts == nil {
+				return nil
+			}
+			return facts.packageValues[file.GoAST.Name.Name+"."+name]
 		}}
 		violations = append(violations, r.outboundCalls(file, imports, fn, outbound, scope)...)
 		if own, ok := outboundDirs[filepath.Dir(file.Path)]; ok {
@@ -888,7 +893,7 @@ func (r *TestExternalServiceRule) outboundCalls(
 			entry    liveEntry
 		)
 		found := false
-		for _, candidate := range calleeCandidates(fn.Body, call.Fun) {
+		for _, candidate := range calleeCandidates(fn.Body, call, scope.packageValues) {
 			if sel, ident, path, evidence, entry, found = qualifiedEntry(candidate, imports, outbound); found {
 				break
 			}
@@ -950,7 +955,7 @@ func (r *TestExternalServiceRule) inPackageCalls(
 		if call.Pos() >= scope.liveEnd {
 			return false
 		}
-		if _, ok := call.Fun.(*ast.Ident); !ok {
+		if _, ok := ast.Unparen(call.Fun).(*ast.Ident); !ok {
 			if sel, isMethod := call.Fun.(*ast.SelectorExpr); isMethod {
 				global, isGlobal := sel.X.(*ast.Ident)
 				if isGlobal {
@@ -978,7 +983,7 @@ func (r *TestExternalServiceRule) inPackageCalls(
 			ident *ast.Ident
 			entry liveEntry
 		)
-		for _, candidate := range calleeCandidates(fn.Body, call.Fun) {
+		for _, candidate := range calleeCandidates(fn.Body, call, scope.packageValues) {
 			if id, isIdent := candidate.(*ast.Ident); isIdent {
 				if e, isEntry := own.entries[id.Name]; isEntry {
 					ident, entry = id, e
