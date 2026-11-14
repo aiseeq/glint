@@ -62,8 +62,11 @@ func checkMissingScript(r *shellProjectRule, src *patternkit.ShellSource) []*cor
 			dirVars[m[1]] = true
 		}
 	}
-	dir := path.Dir(src.Ctx.RelPath)
 	text := string(src.Ctx.Content)
+	if !strings.Contains(text, ".sh") {
+		return nil // no script name at all: nothing to parse
+	}
+	dir := path.Dir(src.Ctx.RelPath)
 	calls, err := shellcmd.Calls(text)
 	var nested *shellcmd.NestedError
 	if err != nil && !errors.As(err, &nested) {
