@@ -275,10 +275,11 @@ func (s *commentScanner) scanLine(n int, line string) {
 }
 
 // dollarBody reads a dollar quote at i that opens or closes a body of code:
-// the tag of the innermost open body closes it, a tag after DO or AS opens
-// one. It returns where the code after the tag starts.
+// the tag of the innermost open body closes it wherever it stands (END$$), as
+// PostgreSQL looks for it; a tag after DO or AS that does not continue a name
+// opens one. It returns where the code after the tag starts.
 func (s *commentScanner) dollarBody(line string, i int) (int, bool) {
-	if !s.syntax.dollarQuotes || line[i] != '$' || (i > 0 && isRuleNameChar(line[i-1])) {
+	if !s.syntax.dollarQuotes || line[i] != '$' {
 		return 0, false
 	}
 	tag := dollarQuote.FindString(line[i:])
@@ -287,6 +288,8 @@ func (s *commentScanner) dollarBody(line string, i int) (int, bool) {
 		return 0, false
 	case len(s.bodies) > 0 && s.bodies[len(s.bodies)-1] == tag:
 		s.bodies = s.bodies[:len(s.bodies)-1]
+	case i > 0 && isRuleNameChar(line[i-1]):
+		return 0, false
 	case strings.EqualFold(s.lastWord, "do") || strings.EqualFold(s.lastWord, "as"):
 		s.bodies = append(s.bodies, tag)
 	default:
