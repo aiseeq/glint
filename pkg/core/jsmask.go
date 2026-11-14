@@ -59,7 +59,9 @@ func jsComments(lines []string) []lineComment {
 	m := &jsMasker{collect: true}
 	for i, line := range lines {
 		m.line, m.src = i+1, line
-		m.maskLine(line)
+		first := len(m.comments)
+		code := strings.TrimSpace(m.maskLine(line)) != ""
+		markCode(m.comments[first:], code)
 	}
 	return m.comments
 }

@@ -13,6 +13,12 @@ type SuppressionMarker struct {
 	Rules []string
 	Bare  bool
 	Text  string
+	// WithCode is set when the line holds code besides the marker: the
+	// marker then covers that line only, a marker on a line of its own also
+	// the next one. Go keeps golangci-lint's reading, where a marker at the
+	// end of `if err != nil {` covers the block under it, so in Go it is
+	// never set.
+	WithCode bool
 }
 
 // fileMarkers are the markers of a file, and by line the indexes of those on
@@ -54,19 +60,24 @@ func (ctx *FileContext) markers() *fileMarkers {
 				continue
 			}
 			markers.byLine[comment.Line] = append(markers.byLine[comment.Line], len(markers.list))
-			markers.list = append(markers.list, SuppressionMarker{Line: comment.Line, Rules: names, Bare: bare, Text: text})
+			markers.list = append(markers.list, SuppressionMarker{Line: comment.Line, Rules: names, Bare: bare, Text: text, WithCode: comment.Code && !ctx.IsGoFile()})
 		}
 		return markers
 	})
 }
 
 // lineSuppresses reports whether a marker on the line (1-based) suppresses
-// the rule. The marker of suppression-without-reason suppresses only with a
-// reason: a bare one would hide its own finding and the marker it stands over.
-func (ctx *FileContext) lineSuppresses(line int, ruleName string) bool {
+// the rule, a marker of the line above when below is set: only one on a line
+// of its own covers the line under it. The marker of suppression-without-reason
+// suppresses only with a reason: a bare one would hide its own finding and the
+// marker it stands over.
+func (ctx *FileContext) lineSuppresses(line int, ruleName string, below bool) bool {
 	markers := ctx.markers()
 	for _, i := range markers.byLine[line] {
 		marker := markers.list[i]
+		if below && marker.WithCode {
+			continue
+		}
 		if slices.Contains(marker.Rules, ruleName) && (ruleName != SuppressionReasonRule || SuppressionHasReason(marker.Text, ruleName)) {
 			return true
 		}

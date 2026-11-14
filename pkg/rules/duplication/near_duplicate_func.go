@@ -442,8 +442,8 @@ func nearFuncDifferenceText(fset *token.FileSet, differences []nearExprDifferenc
 func nearExprPair(fset *token.FileSet, a, b ast.Node) string {
 	render := func(node ast.Node) string {
 		var out bytes.Buffer
-		if err := format.Node(&out, fset, node); err != nil { //nolint:silent-error-handling,fallback-return // formatting a valid AST node is best-effort for diagnostics
-			return "<expression>"
+		if err := format.Node(&out, fset, node); err != nil { //nolint:silent-error-handling // formatting a valid AST node is best-effort for diagnostics
+			return "<expression>" //nolint:fallback-return // a placeholder stands for the node in the diagnostic
 		}
 		return out.String()
 	}
