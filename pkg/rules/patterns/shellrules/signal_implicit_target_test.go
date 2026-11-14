@@ -1058,3 +1058,26 @@ func TestSignalImplicitTargetCommandNameFromVariable(t *testing.T) {
 	}
 	assert.Equal(t, []int{11}, parseSignalLines(inputs, false))
 }
+
+// A table string whose use the analysis cannot follow (here: a struct field
+// handed to a method) keeps the verdict it had without the analysis: a lone
+// kill is a fixture, a nested shell is still a finding.
+func TestSignalImplicitTargetRangeStringsUnknownUseKeepsDefaultVerdict(t *testing.T) {
+	source := `package sample
+type toolInput struct{ Command string }
+type guard struct{}
+func (guard) Validate(in *toolInput) bool { return len(in.Command) > 0 }
+func tables() {
+	for _, command := range []string{"kill -9 -1"} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE
+	for _, command := range []string{"bash -c 'kill -9 $PPID'"} { (guard{}).Validate(&toolInput{Command: command}) } // WANT
+}
+`
+	file, pkg := signalSourceTyped(t, "guard_test.go", source)
+	var want []int
+	for i, line := range strings.Split(source, "\n") {
+		if strings.Contains(line, "// WANT") && !strings.Contains(line, "WANT-NONE") {
+			want = append(want, i+1)
+		}
+	}
+	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+}

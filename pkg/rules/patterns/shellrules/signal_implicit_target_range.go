@@ -92,11 +92,14 @@ func rangeStringLiterals(file *ast.File, info *types.Info, pkg *signalPackage) (
 				if !ok || literal.Kind != token.STRING {
 					return true
 				}
-				if flow.executes || flow.unknown {
+				switch {
+				case flow.executes:
 					executed[literal] = true
-				} else {
+				case !flow.unknown:
 					data[literal] = true
 				}
+				// An unknown use is neither: the literal keeps the verdict it
+				// has without the range analysis (a lone kill stays a fixture).
 				return true
 			})
 		}
