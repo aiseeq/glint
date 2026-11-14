@@ -270,7 +270,10 @@ func init() {
 	// Root commands
 	rootCmd.AddCommand(&cobra.Command{
 		Use: "tickets-state", Short: "Print a fingerprint of ticket statuses", Args: cobra.NoArgs,
-		Run: func(cmd *cobra.Command, _ []string) { fmt.Fprintln(cmd.OutOrStdout(), deadcode.TicketState()) },
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), deadcode.TicketState())
+			return err
+		},
 	})
 	rootCmd.AddCommand(checkCmd)
 	rootCmd.AddCommand(guideCmd)

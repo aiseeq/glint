@@ -151,7 +151,7 @@ func TicketState() string {
 	sort.Strings(keys)
 	hash := sha256.New()
 	for _, key := range keys {
-		fmt.Fprintf(hash, "%s\x00%s\x00", key, files[key])
+		hash.Write([]byte(key + "\x00" + files[key] + "\x00")) // hash.Hash.Write never returns an error
 	}
 	return fmt.Sprintf("%x", hash.Sum(nil))
 }
