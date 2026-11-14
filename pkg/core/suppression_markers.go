@@ -13,12 +13,14 @@ type SuppressionMarker struct {
 	Rules []string
 	Bare  bool
 	Text  string
-	// WithCode is set when the line holds code besides the marker: the
-	// marker then covers that line only, a marker on a line of its own also
-	// the next one. Go keeps golangci-lint's reading, where a marker at the
-	// end of `if err != nil {` covers the block under it, so in Go it is
-	// never set.
-	WithCode bool
+	// LineOnly is set when the marker covers its line only, a marker on a
+	// line of its own also the next one: when the line holds code besides
+	// the marker, or when the marker stands in embedded text (a multi-line
+	// shell quote, a heredoc body, a YAML block scalar) and the next line is
+	// not wholly in that text. Go keeps golangci-lint's reading, where a
+	// marker at the end of `if err != nil {` covers the block under it, so in
+	// Go code alone does not set it.
+	LineOnly bool
 }
 
 // fileMarkers are the markers of a file, and by line the indexes of those on
@@ -60,7 +62,8 @@ func (ctx *FileContext) markers() *fileMarkers {
 				continue
 			}
 			markers.byLine[comment.Line] = append(markers.byLine[comment.Line], len(markers.list))
-			markers.list = append(markers.list, SuppressionMarker{Line: comment.Line, Rules: names, Bare: bare, Text: text, WithCode: comment.Code && !ctx.IsGoFile()})
+			lineOnly := comment.Code && !goFile || comment.Confined
+			markers.list = append(markers.list, SuppressionMarker{Line: comment.Line, Rules: names, Bare: bare, Text: text, LineOnly: lineOnly})
 		}
 		return markers
 	})
@@ -75,7 +78,7 @@ func (ctx *FileContext) lineSuppresses(line int, ruleName string, below bool) bo
 	markers := ctx.markers()
 	for _, i := range markers.byLine[line] {
 		marker := markers.list[i]
-		if below && marker.WithCode {
+		if below && marker.LineOnly {
 			continue
 		}
 		if slices.Contains(marker.Rules, ruleName) && (ruleName != SuppressionReasonRule || SuppressionHasReason(marker.Text, ruleName)) {

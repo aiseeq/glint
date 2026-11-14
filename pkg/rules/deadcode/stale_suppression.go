@@ -198,8 +198,8 @@ func (r *StaleSuppressionRule) judgeName(ctx *core.FileContext, marker core.Supp
 		return nil
 	}
 	covered := "this line or the next"
-	if marker.WithCode {
-		covered = "this line" // a marker after code covers its line only
+	if marker.LineOnly {
+		covered = "this line" // a marker after code or at the end of embedded text covers its line only
 	}
 	return r.markerViolation(ctx, line,
 		fmt.Sprintf("Suppression of %s silences nothing: the rule reports nothing on %s", name, covered),

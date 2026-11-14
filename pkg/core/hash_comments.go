@@ -30,16 +30,70 @@ type heredoc struct {
 	stripTabs bool
 }
 
+// regionLines records, line by line, the embedded region of text (a
+// multi-line quote, a heredoc body, a block scalar) a line ends in, 0 for the
+// text of the file itself. Each region has an id of its own.
+type regionLines struct {
+	ends []int
+	last int
+}
+
+// open returns the id of a new region.
+func (r *regionLines) open() int {
+	r.last++
+	return r.last
+}
+
+// record adds the region the next line ends in.
+func (r *regionLines) record(end int) {
+	r.ends = append(r.ends, end)
+}
+
+// confine sets Confined on the comments of a region whose next line is not
+// wholly in it: a marker there covers its own line only, not the line after
+// the closing quote, the terminator or the end of the block. A region once
+// closed never opens again (another one gets another id), so the next line is
+// wholly in the region of a comment when it ends in it.
+func (r *regionLines) confine(comments []lineComment) {
+	for i := range comments {
+		c := &comments[i]
+		next := c.Line // the index of the next line
+		c.Confined = c.Region != 0 && (next >= len(r.ends) || r.ends[next] != c.Region)
+	}
+}
+
+// embed reads text of line n, embedded text of the given region, with
+// inner and adds its comments to out as comments of the region; code is set
+// when the line holds code before the text.
+func embed(inner *shellScanner, n int, text string, region int, code bool, out *[]lineComment) {
+	inner.scanLine(n, text)
+	for _, c := range inner.comments {
+		c.Region, c.Code = region, c.Code || code
+		*out = append(*out, c)
+	}
+	inner.comments = inner.comments[:0]
+}
+
 // shellScanner reads the comments of a shell script. A '#' starts one at
 // the start of a word, outside quotes; '…', "…" and $'…' span lines. The
-// body of a here-document is read as a script of its own, as the shell
-// rules read it (cat <<EOF | bash, ssh host <<EOF, a script written to a
-// file): what it leaves open ends with its delimiter.
+// text of a quote that spans lines and the body of a here-document are code
+// too (ssh host "…", bash -c '…', cat <<EOF | bash, a script written to a
+// file) and are read as script by an inner reader, line by line: a quote
+// opened there ends with its line, so an apostrophe of text does not hide
+// what follows. Such text is a region (regionLines) its markers do not
+// leave.
 type shellScanner struct {
-	quote    string // the open quote: ', " or $', "" when none
-	pending  []heredoc
-	bodies   []heredoc     // the here-documents being read, the current one first
-	inner    *shellScanner // the reader of the current body
+	quote   string // the open quote: ', " or $', "" when none
+	pending []heredoc
+	bodies  []heredoc // the here-documents being read, the current one first
+	// inner reads the embedded text being read: the open quote or the
+	// current body; region is its id, 0 outside one.
+	inner  *shellScanner
+	region int
+	// local is set on an inner reader: its quotes end with the line, and the
+	// text it reads is the region of its outer reader.
+	local    bool
+	lines    regionLines
 	comments []lineComment
 }
 
@@ -48,18 +102,29 @@ func shellComments(lines []string) []lineComment {
 	for i, line := range lines {
 		s.scanLine(i+1, line)
 	}
+	s.lines.confine(s.comments)
 	return s.comments
 }
 
 func (s *shellScanner) scanLine(n int, line string) {
 	if len(s.bodies) > 0 {
 		s.scanBody(n, line)
-		return
+	} else {
+		s.scanCode(n, line)
 	}
+	s.lines.record(s.region)
+}
+
+// enter starts a new region of embedded text and its reader.
+func (s *shellScanner) enter() {
+	s.region, s.inner = s.lines.open(), &shellScanner{local: true}
+}
+
+func (s *shellScanner) scanCode(n int, line string) {
 	code := s.quote != ""
 	i := 0
 	if s.quote != "" {
-		i = s.closeQuote(line, 0)
+		i = s.continueQuote(n, line)
 	}
 	arith := 0 // the open parentheses of an arithmetic expression, (( included
 	for i < len(line) && s.quote == "" {
@@ -78,11 +143,9 @@ func (s *shellScanner) scanLine(n int, line string) {
 		case c == '\\':
 			i += 2
 		case c == '\'' || c == '"':
-			s.quote = string(c)
-			i = s.closeQuote(line, i+1)
+			i = s.openQuote(n, line, i+1, string(c))
 		case c == '$' && strings.HasPrefix(line[i:], "$'"):
-			s.quote = "$'"
-			i = s.closeQuote(line, i+2)
+			i = s.openQuote(n, line, i+2, "$'")
 		case strings.HasPrefix(line[i:], "(("):
 			arith += 2
 			i += 2
@@ -98,8 +161,41 @@ func (s *shellScanner) scanLine(n int, line string) {
 			i++
 		}
 	}
-	s.bodies = append(s.bodies, s.pending...)
-	s.pending = nil
+	if s.local {
+		s.quote = "" // a quote in embedded text ends with its line
+	}
+	// The bodies start on the line after the one where the open quote, if
+	// any, closes.
+	if len(s.pending) > 0 && s.quote == "" {
+		s.bodies, s.pending = append(s.bodies, s.pending...), nil
+		s.enter()
+	}
+}
+
+// openQuote opens the quote whose text starts at i and returns where the
+// code after it starts. The text of one that goes on to the next line is
+// read as script: the line holds code before it.
+func (s *shellScanner) openQuote(n int, line string, i int, quote string) int {
+	s.quote = quote
+	end := s.closeQuote(line, i)
+	if s.quote != "" && !s.local {
+		s.enter()
+		embed(s.inner, n, line[i:], s.region, true, &s.comments)
+	}
+	return end
+}
+
+// continueQuote reads the text of the open quote on a line it goes on to
+// and returns where the code after the closing quote starts.
+func (s *shellScanner) continueQuote(n int, line string) int {
+	end := s.closeQuote(line, 0)
+	if s.quote != "" {
+		embed(s.inner, n, line, s.region, false, &s.comments)
+		return end
+	}
+	embed(s.inner, n, line[:end-1], s.region, false, &s.comments)
+	s.region, s.inner = 0, nil
+	return end
 }
 
 // scanBody reads a line of the current here-document as script: its
@@ -110,16 +206,14 @@ func (s *shellScanner) scanBody(n int, line string) {
 	if body.stripTabs {
 		end = strings.TrimLeft(line, "\t")
 	}
-	if end == body.delim {
-		s.bodies, s.inner = s.bodies[1:], nil
+	if end != body.delim {
+		embed(s.inner, n, line, s.region, false, &s.comments)
 		return
 	}
-	if s.inner == nil {
-		s.inner = &shellScanner{}
+	s.bodies, s.region, s.inner = s.bodies[1:], 0, nil
+	if len(s.bodies) > 0 {
+		s.enter()
 	}
-	s.inner.scanLine(n, line)
-	s.comments = append(s.comments, s.inner.comments...)
-	s.inner.comments = s.inner.comments[:0]
 }
 
 // closeQuote returns where the code after the open quote starts, len(line)
@@ -161,41 +255,80 @@ func (s *shellScanner) openHeredoc(line string, i int) int {
 // here-document (RUN <<EOF, COPY <<-"EOF" /dst), as BuildKit reads one.
 var dockerHeredoc = regexp.MustCompile(`^[0-9]*<<(-?)(?:'([^']+)'|"([^"]+)"|([^<'"]+))$`)
 
-// dockerfileComments returns the comments of a Dockerfile: a line whose
-// first character past the indentation is '#'. A '#' further on is an
-// argument of the instruction, and a here-document's body is its text.
+// dockerfileScanner reads the comments of a Dockerfile: a line whose first
+// character past the indentation is '#'. A '#' further on is an argument of
+// the instruction. The body of a here-document of RUN is a script, read as
+// shell, a region its markers do not leave; that of another instruction
+// (COPY <<EOF /dst) is data.
+type dockerfileScanner struct {
+	bodies []heredoc
+	script bool // the bodies are scripts of RUN
+	inner  *shellScanner
+	region int
+	lines  regionLines
+	// comments are those read so far.
+	comments []lineComment
+}
+
 func dockerfileComments(lines []string) []lineComment {
-	var comments []lineComment
-	var bodies []heredoc
+	s := &dockerfileScanner{}
 	for i, line := range lines {
-		if len(bodies) > 0 {
-			end := line
-			if bodies[0].stripTabs {
-				end = strings.TrimLeft(line, "\t")
-			}
-			if end == bodies[0].delim {
-				bodies = bodies[1:]
-			}
-			continue
-		}
-		trimmed := strings.TrimLeft(line, " \t")
-		if strings.HasPrefix(trimmed, "#") {
-			comments = append(comments, lineComment{Line: i + 1, Text: trimmed})
-			continue
-		}
-		for word := range strings.FieldsSeq(line) {
-			if m := dockerHeredoc.FindStringSubmatch(word); m != nil {
-				bodies = append(bodies, heredoc{delim: m[2] + m[3] + m[4], stripTabs: m[1] == "-"})
-			}
+		s.scanLine(i+1, line)
+		s.lines.record(s.region)
+	}
+	s.lines.confine(s.comments)
+	return s.comments
+}
+
+func (s *dockerfileScanner) scanLine(n int, line string) {
+	if len(s.bodies) > 0 {
+		s.scanBody(n, line)
+		return
+	}
+	trimmed := strings.TrimLeft(line, " \t")
+	if strings.HasPrefix(trimmed, "#") {
+		s.comments = append(s.comments, lineComment{Line: n, Text: trimmed})
+		return
+	}
+	fields := strings.Fields(line)
+	for _, word := range fields {
+		if m := dockerHeredoc.FindStringSubmatch(word); m != nil {
+			s.bodies = append(s.bodies, heredoc{delim: m[2] + m[3] + m[4], stripTabs: m[1] == "-"})
 		}
 	}
-	return comments
+	s.script = len(s.bodies) > 0 && strings.EqualFold(fields[0], "RUN")
+	s.enter()
+}
+
+// enter starts the region of the current body when it is a script.
+func (s *dockerfileScanner) enter() {
+	s.region, s.inner = 0, nil
+	if s.script {
+		s.region, s.inner = s.lines.open(), &shellScanner{local: true}
+	}
+}
+
+func (s *dockerfileScanner) scanBody(n int, line string) {
+	end := line
+	if s.bodies[0].stripTabs {
+		end = strings.TrimLeft(line, "\t")
+	}
+	if end == s.bodies[0].delim {
+		s.bodies = s.bodies[1:]
+		s.script = s.script && len(s.bodies) > 0
+		s.enter()
+		return
+	}
+	if s.script {
+		embed(s.inner, n, line, s.region, false, &s.comments)
+	}
 }
 
 // yamlScanner reads the comments of a YAML file: a '#' after a space or at
-// the start of a line, outside a quoted scalar and outside the body of a
-// block scalar (| or >). A quote opens a scalar only where a scalar starts:
-// in "a: don't" the apostrophe is text.
+// the start of a line, outside a quoted scalar. A quote opens a scalar only
+// where a scalar starts: in "a: don't" the apostrophe is text. The body of a
+// block scalar (| or >) is mostly a script (run: |) and is read as shell, a
+// region its markers do not leave.
 type yamlScanner struct {
 	quote byte // the open quote of a quoted scalar spanning lines, 0 when none
 	// block is the indentation of the line that opened a block scalar
@@ -203,22 +336,34 @@ type yamlScanner struct {
 	// its body once its first line is read, 0 before.
 	block      int
 	bodyIndent int
-	comments   []lineComment
+	// inner reads the body of the block scalar, region is its id, 0
+	// outside one.
+	inner    *shellScanner
+	region   int
+	lines    regionLines
+	comments []lineComment
 }
 
 func yamlComments(lines []string) []lineComment {
 	s := &yamlScanner{block: -1}
 	for i, line := range lines {
 		s.scanLine(i+1, line)
+		s.lines.record(s.region)
 	}
+	s.lines.confine(s.comments)
 	return s.comments
 }
 
 func (s *yamlScanner) scanLine(n int, line string) {
 	indent := len(line) - len(strings.TrimLeft(line, " "))
 	if s.inBlockBody(line, indent) {
+		if s.inner == nil {
+			s.region, s.inner = s.lines.open(), &shellScanner{local: true}
+		}
+		embed(s.inner, n, line, s.region, false, &s.comments)
 		return
 	}
+	s.region, s.inner = 0, nil
 	code := s.quote != 0
 	i := 0
 	if s.quote != 0 {

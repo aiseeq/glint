@@ -9,12 +9,17 @@ import (
 // lineComment is the part of one line a comment takes. A comment that spans
 // lines gives one per line; Cont is set on the lines after its first. Code is
 // set when the line holds code besides its comments: a literal, a word, a
-// bracket.
+// bracket. Region is the embedded text the comment stands in (a multi-line
+// shell quote, a heredoc body, a YAML block scalar), 0 for the text of the
+// file itself; Confined is set on one whose next line is not wholly in its
+// region, so that it covers its own line only.
 type lineComment struct {
-	Line int
-	Text string
-	Cont bool
-	Code bool
+	Line     int
+	Text     string
+	Cont     bool
+	Code     bool
+	Region   int
+	Confined bool
 }
 
 // commentSyntax describes the comments and literals of a language well

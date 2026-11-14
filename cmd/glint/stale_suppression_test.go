@@ -351,6 +351,45 @@ func TestStaleSuppressionJudgesHashCommentMarkers(t *testing.T) {
 	assert.ElementsMatch(t, []string{"deploy.sh:3", "deploy.sh:8", ".github/workflows/ci.yml:2"}, foundAt(stale))
 }
 
+// A marker in embedded script (a multi-line quote, a heredoc body, a block
+// scalar) covers the next line only while it is still in that script: the
+// line after the closing quote or the terminator is the outer file's, and a
+// stale marker at the end of the script is told to cover its own line.
+func TestStaleSuppressionKeepsEmbeddedMarkersInTheirScript(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"go.mod": "module example.com/check\n\ngo 1.24\n",
+		"deploy.sh": `#!/usr/bin/env bash
+ssh host.example "
+  # secret-exposure: safe - the remote end prints nothing
+"
+echo "$API_TOKEN"
+bash <<EOF
+# secret-exposure: safe - the operator asked for it
+echo "$API_TOKEN"
+EOF
+`,
+		".github/workflows/ci.yml": `steps:
+  - run: |
+      make test
+      # nolint:secret-exposure - nothing below prints a secret
+  - run: make lint
+`,
+	} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte(content), 0o644))
+	}
+	findings, stale := analyzeWithRules(t, root, nil, "secret-exposure", "stale-suppression")
+	assert.ElementsMatch(t, []string{"deploy.sh:5"}, foundAt(findings))
+	messages := map[string]string{}
+	for _, v := range stale {
+		messages[v.Location()] = v.Message
+	}
+	assert.Len(t, messages, 2, foundAt(stale))
+	assert.True(t, strings.HasSuffix(messages["deploy.sh:3"], "reports nothing on this line"), messages["deploy.sh:3"])
+	assert.True(t, strings.HasSuffix(messages[".github/workflows/ci.yml:4"], "reports nothing on this line"), messages[".github/workflows/ci.yml:4"])
+}
+
 // A fresh worktree starts from the cache of the main worktree, whose entries
 // name the exceptions they used: the same exception of the worktree's own
 // configuration file is in use there too, though that file has another path.
