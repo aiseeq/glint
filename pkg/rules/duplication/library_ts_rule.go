@@ -145,8 +145,7 @@ func (r *DuplicateFuncOfLibraryRule) AnalyzeFile(ctx *core.FileContext) []*core.
 	src := parseTSSource(ctx.Lines)
 	var out []*core.Violation
 	for _, f := range src.funcs {
-		body := src.tsNearBody(f)
-		candidate, score := idx.best(body)
+		candidate, score, body := idx.best(src.tsNearBody(f, false), func() nearBody { return src.tsNearBody(f, true) })
 		if candidate == nil || ctx.IsSuppressed(f.line, r.Name()) {
 			continue
 		}
@@ -229,7 +228,7 @@ func libraryTSFunctions(dir string) ([]libraryNearFunction, error) {
 			if !f.exported {
 				continue
 			}
-			body := src.tsNearBody(f)
+			body := src.tsNearBody(f, true)
 			if len(body.Tokens) < minTSNearCopyTokens {
 				continue
 			}

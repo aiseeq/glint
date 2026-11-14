@@ -515,57 +515,46 @@ func (s *tsSource) scanDeclaration(i int) {
 }
 
 // tsNearBody normalizes the body of f: the variables the function declares
-// as one placeholder, a property and every other name as written, strings by
-// their content; a statement ends at ; and braces, or at a line end outside
-// brackets, since TypeScript lets the line end a statement.
-func (s *tsSource) tsNearBody(f tsFunc) nearBody {
-	locals := make(map[string]bool)
+// as one placeholder, numbered by their first appearance in the roles, a
+// property and every other name as written, strings by their content; a
+// statement ends at ; and braces, or at a line end outside brackets, since
+// TypeScript lets the line end a statement. The shape of a statement inside
+// braces starts from the shape of the statement that opened them.
+func (s *tsSource) tsNearBody(f tsFunc, detailed bool) nearBody {
+	locals := &tsLocals{numbers: make(map[string]int)}
 	lo := lowerBound(s.decls, f.paramsOpen)
 	for _, d := range s.decls[lo:] {
 		if d > f.bodyClose {
 			break
 		}
-		locals[s.toks[d].text] = true
+		locals.numbers[s.toks[d].text] = -1
 	}
-	b := newNearBodyBuilder()
-	b.openStmt()
+	b := newNearBodyBuilder(detailed)
+	// blocks holds, for every brace open, what a statement inside starts
+	// from and the statement that opened it.
+	type block struct {
+		seed   uint64
+		parent int
+	}
+	blocks := []block{{seed: fnvOffset64, parent: -1}}
+	reopen := func() { b.openSeeded(blocks[len(blocks)-1].seed, blocks[len(blocks)-1].parent) }
+	reopen()
 	depth := 0
 	for i := f.bodyOpen + 1; i < f.bodyClose; i++ {
 		tok := s.toks[i]
 		if depth == 0 && i > f.bodyOpen+1 && tok.line > s.toks[i-1].line {
 			b.closeStmt()
-			b.openStmt()
+			reopen()
 		}
-		// A property after a dot, or the key of an object literal, is a name
-		// of the data and no variable, though a variable may be called so.
-		property := s.text(i-1) == "." || s.text(i-1) == "?." ||
-			s.text(i+1) == ":" && (s.text(i-1) == "{" || s.text(i-1) == ",")
 		switch tok.kind {
 		case tsIdent:
-			out := tok.text
-			call := s.text(i+1) == "(" || s.text(i+1) == "?." && s.text(i+2) == "("
-			switch {
-			case property:
-				// A property may be named like a keyword: set.delete(key).
-				if call {
-					b.calls["."+tok.text] = true
-				}
-			case tsKeywords[tok.text]:
-			case locals[tok.text]:
-				out = "$L"
-			case call:
-				b.calls[tok.text] = true
-			}
-			if !property && tsOperators[tok.text] {
-				b.ops[tok.text] = true
-			}
-			b.emit(out)
+			s.emitName(b, i, locals)
 		case tsString:
 			value := tok.text[1:max(1, len(tok.text)-1)]
-			b.emit(`"` + value + `"`)
+			b.emitAnchor(`"`+value+`"`, "s:"+value, nearLiteralMask)
 			b.lits["s:"+value] = true
 		case tsNumber, tsTemplate, tsRegex:
-			b.emit(tok.text)
+			b.emitAnchor(tok.text, tok.text, nearLiteralMask)
 			b.lits[tok.text] = true
 		default:
 			b.emit(tok.text)
@@ -577,13 +566,64 @@ func (s *tsSource) tsNearBody(f tsFunc) nearBody {
 				depth++
 			case ")", "]":
 				depth = max(0, depth-1)
-			case ";", "{", "}":
+			case ";":
 				b.closeStmt()
-				b.openStmt()
+				reopen()
+			case "{":
+				seed, id := b.closeStmt()
+				blocks = append(blocks, block{seed: seed, parent: id})
+				reopen()
+			case "}":
+				b.closeStmt()
+				if len(blocks) > 1 {
+					blocks = blocks[:len(blocks)-1]
+				}
+				reopen()
 			}
 		}
 	}
 	return b.finish()
+}
+
+// tsLocals numbers the variables of a function by their first appearance in
+// its body; a name it holds with -1 is a variable not seen yet.
+type tsLocals struct {
+	numbers map[string]int
+	next    int
+}
+
+// emitName emits the name at i: a property after a dot or the key of an
+// object literal as written, though a variable may be called so, the name
+// of a called function as an anchor, a variable by its number.
+func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) {
+	name := s.text(i)
+	property := s.text(i-1) == "." || s.text(i-1) == "?." ||
+		s.text(i+1) == ":" && (s.text(i-1) == "{" || s.text(i-1) == ",")
+	call := s.text(i+1) == "(" || s.text(i+1) == "?." && s.text(i+2) == "("
+	num, local := locals.numbers[name]
+	if !property && tsOperators[name] {
+		b.ops[name] = true
+	}
+	switch {
+	case property && call:
+		// A property may be named like a keyword: set.delete(key).
+		b.calls["."+name] = true
+		b.emitAnchor(name, "."+name, nearCallMask)
+	case property, tsKeywords[name]:
+		b.emit(name)
+	case local:
+		if num < 0 {
+			num = locals.next
+			locals.next++
+			locals.numbers[name] = num
+		}
+		b.emitLocal(num)
+	case call:
+		b.calls[name] = true
+		b.emitAnchor(name, name, nearCallMask)
+	default:
+		b.emit(name)
+	}
 }
 
 func lowerBound(sorted []int, value int) int {

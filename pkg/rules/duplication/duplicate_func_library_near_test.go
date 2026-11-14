@@ -371,6 +371,59 @@ const librarySetTS = `export function toggleKey<Key>(values: ReadonlySet<Key>, k
 }
 `
 
+const libraryBoundTS = `export function limitAmounts(values: number[], low: number, high: number): number[] {
+  const out: number[] = []
+  for (let v of values) {
+    if (v < low) v = low
+    if (v > high) v = high
+    out.push(v)
+  }
+  return out
+}
+
+export function capAmounts(values: number[], low: number, high: number): number[] {
+  const out: number[] = []
+  for (let v of values) {
+    if (v < low) {
+      v = low
+    }
+    if (v > high) {
+      v = high
+    }
+    out.push(v)
+  }
+  return out
+}
+`
+
+// The checks of cleanCode hold their statements in braces.
+const libraryCodeTS = `export function cleanCode(raw: string): string {
+  let value = raw.trim()
+  if (value === '') {
+    return 'none'
+  }
+  if (value.startsWith('#')) {
+    value = 'ref' + value
+  }
+  if (value.endsWith('#')) {
+    value = value + '0'
+  }
+  return value
+}
+
+export function widenRange(values: number[], low: number, high: number): number[] {
+  for (const v of values) {
+    if (v < low) {
+      low = v
+    }
+    if (high < v) {
+      high = v
+    }
+  }
+  return [low, high]
+}
+`
+
 const libraryAccountTS = `export function buildAccount(accountID: string, label?: string): Account {
   return {
     id: accountID,
@@ -424,6 +477,8 @@ func tsLibraryFindings(t *testing.T, tsPath, goModDir, source string) []*core.Vi
 		"lib.go":                     libraryReferenceSource,
 		"ts/amount.ts":               libraryReferenceTS,
 		"ts/set.ts":                  librarySetTS,
+		"ts/bound.ts":                libraryBoundTS,
+		"ts/code.ts":                 libraryCodeTS,
 		"ts/account.ts":              libraryAccountTS,
 		"ts/transfer.ts":             libraryTransferTS,
 		"ts/limit.ts":                libraryLimitTS,
@@ -657,4 +712,546 @@ func TestDuplicateFuncOfLibraryLocalTypeScriptChangeMissesCache(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(library, "ts", "set.ts"), []byte(strings.Replace(librarySetTS, "toggleKey", "flipKey", 1)), 0o644))
 	index()
 	assert.Greater(t, libraryPackageLoads.Load(), first, "a changed TypeScript source misses the cache")
+}
+
+// The library limits every amount to a range and cuts a window of a list.
+const libraryLimitSource = `package lib
+
+func LimitAmounts(amounts []int, floor, ceiling int) []int {
+	out := make([]int, 0, len(amounts))
+	for _, amount := range amounts {
+		if amount < floor {
+			amount = floor
+		}
+		if amount > ceiling {
+			amount = ceiling
+		}
+		out = append(out, amount)
+	}
+	return out
+}
+
+func PageOf(rows []string, start, end int) []string {
+	if start < 0 {
+		start = 0
+	}
+	if end > len(rows) {
+		end = len(rows)
+	}
+	if start >= end {
+		return nil
+	}
+	return rows[start:end]
+}
+`
+
+// A copy may name its variables otherwise, check in another order, write
+// the second check as an else branch, run over a field of its receiver or
+// repeat a statement of the library function: each variable keeps its role.
+func TestDuplicateFuncOfLibraryNearCopyKeepsRolesOfRenamedLocals(t *testing.T) {
+	for name, tc := range map[string]struct{ lib, source, subject string }{
+		"renamed and reordered": {libraryLimitSource, `package app
+
+func payprovBound(values []int, lo, hi int) []int {
+	res := make([]int, 0, len(values))
+	for _, v := range values {
+		if v > hi {
+			v = hi
+		}
+		if v < lo {
+			v = lo
+		}
+		res = append(res, v)
+	}
+	return res
+}
+`, "Function payprovBound is a near copy"},
+		"else branch": {libraryLimitSource, `package app
+
+func payprovBound(values []int, lo, hi int) []int {
+	res := make([]int, 0, len(values))
+	for _, v := range values {
+		if v < lo {
+			v = lo
+		} else if v > hi {
+			v = hi
+		}
+		res = append(res, v)
+	}
+	return res
+}
+`, "Function payprovBound is a near copy"},
+		"method over a field": {libraryLimitSource, `package app
+
+type payprovScores struct{ list []int }
+
+func (s *payprovScores) bound(lo, hi int) []int {
+	res := make([]int, 0, len(s.list))
+	for _, v := range s.list {
+		if v < lo {
+			v = lo
+		}
+		if v > hi {
+			v = hi
+		}
+		res = append(res, v)
+	}
+	return res
+}
+`, "Function payprovScores.bound is a near copy"},
+		"repeated statement": {libraryReferenceSource, `package app
+
+import "strings"
+
+func tidyReference(raw string) string {
+	value := strings.TrimSpace(raw)
+	value = strings.ReplaceAll(value, "-", "")
+	value = strings.ReplaceAll(value, " ", "")
+	if value == "" { return "none" }
+	if strings.HasPrefix(value, "#") { value = "ref" + value }
+	if strings.HasSuffix(value, "#") { value = value + "0" }
+	value = strings.ReplaceAll(value, " ", "")
+	return value
+}
+`, "Function tidyReference is a near copy"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			violations := nearLibraryFindings(t, tc.lib, tc.source)
+			require.Len(t, violations, 1)
+			assert.Contains(t, violations[0].Message, tc.subject)
+		})
+	}
+}
+
+// Variables in other roles make another function of the same tokens: a value
+// below the range becomes its upper bound, a check reads another variable, the
+// bounds of a slice are swapped.
+func TestDuplicateFuncOfLibraryNearCopyLocalsInOtherRoles(t *testing.T) {
+	for name, source := range map[string]string{
+		"bounds swapped in the assignments": `package app
+
+func payprovBound(values []int, lo, hi int) []int {
+	res := make([]int, 0, len(values))
+	for _, v := range values {
+		if v < lo {
+			v = hi
+		}
+		if v > hi {
+			v = lo
+		}
+		res = append(res, v)
+	}
+	return res
+}
+`,
+		"check of another variable": `package app
+
+func payprovBound(values []int, lo, hi int) []int {
+	res := make([]int, 0, len(values))
+	for _, v := range values {
+		if hi < lo {
+			v = lo
+		}
+		if v > hi {
+			v = hi
+		}
+		res = append(res, v)
+	}
+	return res
+}
+`,
+		"slice bounds swapped": `package app
+
+func payprovPage(rows []string, start, end int) []string {
+	if start < 0 {
+		start = 0
+	}
+	if end > len(rows) {
+		end = len(rows)
+	}
+	if start >= end {
+		return nil
+	}
+	return rows[end:start]
+}
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Empty(t, nearLibraryFindings(t, libraryLimitSource, source))
+		})
+	}
+}
+
+// A literal of the library function in another place is another function:
+// a separator replaced by another separator, or the arguments of a
+// replacement swapped.
+func TestDuplicateFuncOfLibraryNearCopyLiteralsInOtherPlaces(t *testing.T) {
+	for name, replacement := range map[string]string{
+		"other literal of the library": `strings.ReplaceAll(value, "-", "#")`,
+		"arguments swapped":            `strings.ReplaceAll(value, "", "-")`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			source := strings.Replace(libraryReferenceSource, "package lib", "package app", 1)
+			source = strings.Replace(source, "func CleanReference", "func tidyReference", 1)
+			source = strings.Replace(source, `strings.ReplaceAll(value, "-", "")`, replacement, 1)
+			assert.Empty(t, nearLibraryFindings(t, libraryReferenceSource, source))
+		})
+	}
+}
+
+// Only a body equal to the library function by the exact key duplicates it:
+// a method with the very tokens of the library function is a near copy.
+func TestDuplicateFuncOfLibraryNearCopyMethodWithTheSameTokens(t *testing.T) {
+	violations := nearLibraryFindings(t, libraryLimitSource, `package app
+
+type payprovLimiter struct{}
+
+func (payprovLimiter) bound(amounts []int, floor, ceiling int) []int {
+	out := make([]int, 0, len(amounts))
+	for _, amount := range amounts {
+		if amount < floor {
+			amount = floor
+		}
+		if amount > ceiling {
+			amount = ceiling
+		}
+		out = append(out, amount)
+	}
+	return out
+}
+`)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Function payprovLimiter.bound is a near copy (100% alike) of function LimitAmounts")
+}
+
+// TypeScript copies keep the roles of their variables and the places of
+// their calls and literals; a renamed copy with reordered checks is one.
+func TestDuplicateFuncOfLibraryTypeScriptRolesAndPlaces(t *testing.T) {
+	for name, tc := range map[string]struct{ source, subject string }{
+		"renamed and reordered": {`function payprovBound(xs: number[], lo: number, hi: number): number[] {
+  const res: number[] = []
+  for (let x of xs) {
+    if (x > hi) x = hi
+    if (x < lo) x = lo
+    res.push(x)
+  }
+  return res
+}
+`, "Function payprovBound is a near copy (100% alike) of function limitAmounts"},
+		"renamed": {`function payprovFlip<T>(source: ReadonlySet<T>, item: T): Set<T> {
+  const copy = new Set(source)
+  if (copy.has(item)) copy.delete(item)
+  else copy.add(item)
+  return copy
+}
+`, "Function payprovFlip duplicates function toggleKey"},
+		"bounds swapped": {`function payprovBound(values: number[], low: number, high: number): number[] {
+  const out: number[] = []
+  for (let v of values) {
+    if (v < low) v = high
+    if (v > high) v = low
+    out.push(v)
+  }
+  return out
+}
+`, ""},
+		"bounds swapped in blocks": {`function payprovBound(values: number[], low: number, high: number): number[] {
+  const out: number[] = []
+  for (let v of values) {
+    if (v < low) {
+      v = high
+    }
+    if (v > high) {
+      v = low
+    }
+    out.push(v)
+  }
+  return out
+}
+`, ""},
+		"one bound swapped in a block": {`function payprovBound(values: number[], low: number, high: number): number[] {
+  const out: number[] = []
+  for (let v of values) {
+    if (v < low) v = low
+    if (v > high) {
+      v = low
+    }
+    out.push(v)
+  }
+  return out
+}
+`, ""},
+		"argument of another parameter": {`function payprovFlip<T>(source: ReadonlySet<T>, item: T, other: T): Set<T> {
+  const copy = new Set(source)
+  if (copy.has(item)) copy.delete(item)
+  else copy.add(other)
+  return copy
+}
+`, ""},
+		"calls swapped": {`function payprovFlip<T>(source: ReadonlySet<T>, item: T): Set<T> {
+  const copy = new Set(source)
+  if (copy.has(item)) copy.add(item)
+  else copy.delete(item)
+  return copy
+}
+`, ""},
+		"check of the source": {`function payprovFlip<T>(source: ReadonlySet<T>, item: T): Set<T> {
+  const copy = new Set(source)
+  if (source.has(item)) copy.delete(item)
+  else copy.add(item)
+  return copy
+}
+`, ""},
+		"checks trade what they guard": {`function payprovCode(raw: string): string {
+  let value = raw.trim()
+  if (value === '') {
+    return 'none'
+  }
+  if (value.startsWith('#')) {
+    value = value + '0'
+  }
+  if (value.endsWith('#')) {
+    value = 'ref' + value
+  }
+  return value
+}
+`, ""},
+		"checks of one shape trade what they guard": {`function payprovRange(values: number[], low: number, high: number): number[] {
+  for (const v of values) {
+    if (v < low) {
+      high = v
+    }
+    if (high < v) {
+      low = v
+    }
+  }
+  return [low, high]
+}
+`, ""},
+		"renamed range": {`function payprovRange(xs: number[], lo: number, hi: number): number[] {
+  for (const x of xs) {
+    if (x < lo) {
+      lo = x
+    }
+    if (hi < x) {
+      hi = x
+    }
+  }
+  return [lo, hi]
+}
+`, "Function payprovRange duplicates function widenRange"},
+		"extra check of the input": {`function payprovCode(raw: string): string {
+  if (raw === '') {
+    return 'none'
+  }
+  let value = raw.trim()
+  if (value === '') {
+    return 'none'
+  }
+  if (value.startsWith('#')) {
+    value = 'ref' + value
+  }
+  if (value.endsWith('#')) {
+    value = value + '0'
+  }
+  return value
+}
+`, "Function payprovCode is a near copy"},
+		"literals swapped": {strings.Replace(strings.Replace(libraryReferenceTS, "export function normalizeReference", "function tidyReference", 1), "value.replaceAll('-', '')", "value.replaceAll('', '-')", 1), ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			violations := tsLibraryFindings(t, "frontend/bound.ts", "backend", tc.source)
+			if tc.subject == "" {
+				assert.Empty(t, violations)
+				return
+			}
+			require.Len(t, violations, 1)
+			assert.Contains(t, violations[0].Message, tc.subject)
+		})
+	}
+}
+
+// The library keys a name by case and tallies values on a counter of its own.
+const libraryCallsSource = `package lib
+
+import "strings"
+
+func CaseKey(value string, upper bool) string {
+	key := strings.TrimSpace(value)
+	if upper {
+		key = strings.ToUpper(key)
+	} else {
+		key = strings.ToLower(key)
+	}
+	if key == "" {
+		return "none"
+	}
+	return strings.ReplaceAll(key, " ", "_")
+}
+
+type Counter struct{ up, down int }
+
+func (c *Counter) Up() { c.up++ }
+
+func (c *Counter) Down() { c.down++ }
+
+func Tally(c *Counter, values []int) int {
+	total := 0
+	for _, v := range values {
+		if v > 0 {
+			c.Up()
+		} else {
+			c.Down()
+		}
+		total += v
+	}
+	return total
+}
+
+func WidenRange(values []int, low, high int) (int, int) {
+	for _, v := range values {
+		if v < low {
+			low = v
+		}
+		if high < v {
+			high = v
+		}
+	}
+	return low, high
+}
+`
+
+// A call in the place of another is another function, though the copy calls
+// the same functions: a check that trades the statements it guards with the
+// other check, a function or a method of each branch called in the other.
+func TestDuplicateFuncOfLibraryNearCopyCallsInOtherPlaces(t *testing.T) {
+	for name, tc := range map[string]struct{ lib, source string }{
+		"checks trade what they guard": {libraryReferenceSource, `package app
+
+import "strings"
+
+func tidyReference(raw string) string {
+	value := strings.TrimSpace(raw)
+	value = strings.ReplaceAll(value, "-", "")
+	value = strings.ReplaceAll(value, " ", "")
+	if value == "" { return "none" }
+	if strings.HasSuffix(value, "#") { value = "ref" + value }
+	if strings.HasPrefix(value, "#") { value = value + "0" }
+	return value
+}
+`},
+		"functions of the branches swapped": {libraryCallsSource, `package app
+
+import "strings"
+
+func payprovKey(value string, upper bool) string {
+	key := strings.TrimSpace(value)
+	if upper {
+		key = strings.ToLower(key)
+	} else {
+		key = strings.ToUpper(key)
+	}
+	if key == "" {
+		return "none"
+	}
+	return strings.ReplaceAll(key, " ", "_")
+}
+`},
+		"checks of one shape trade what they guard": {libraryCallsSource, `package app
+
+func payprovRange(values []int, low, high int) (int, int) {
+	for _, v := range values {
+		if v < low {
+			high = v
+		}
+		if high < v {
+			low = v
+		}
+	}
+	return low, high
+}
+`},
+		"methods of the branches swapped": {libraryCallsSource, `package app
+
+import "example.com/owner/lib"
+
+func payprovTally(c *lib.Counter, values []int) int {
+	total := 0
+	for _, v := range values {
+		if v > 0 {
+			c.Down()
+		} else {
+			c.Up()
+		}
+		total += v
+	}
+	return total
+}
+`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Empty(t, nearLibraryFindings(t, tc.lib, tc.source))
+		})
+	}
+}
+
+// A copy that checks its input once more before the library function's own
+// check, with a variable of its own in the place of the library one, is
+// still a copy: the check that agrees pairs with the library check.
+func TestDuplicateFuncOfLibraryNearCopyWithAnExtraCheckOfTheInput(t *testing.T) {
+	violations := nearLibraryFindings(t, libraryReferenceSource, `package app
+
+import "strings"
+
+func tidyReference(raw string) string {
+	if raw == "" { return "none" }
+	value := strings.TrimSpace(raw)
+	value = strings.ReplaceAll(value, "-", "")
+	value = strings.ReplaceAll(value, " ", "")
+	if value == "" { return "none" }
+	if strings.HasPrefix(value, "#") { value = "ref" + value }
+	if strings.HasSuffix(value, "#") { value = value + "0" }
+	return value
+}
+`)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Function tidyReference is a near copy")
+}
+
+// unify leaves the correspondence as it was when a statement does not pair.
+func TestNearRoleMappingUnifyChangesNothingOnFailure(t *testing.T) {
+	m := &roleMapping{forward: map[int]int{1: 1}, back: map[int]int{1: 1}}
+	require.False(t, m.unify(nearRole{Locals: []int{5, 1}}, nearRole{Locals: []int{7, 2}}))
+	assert.Equal(t, map[int]int{1: 1}, m.forward)
+	assert.Equal(t, map[int]int{1: 1}, m.back)
+	require.True(t, m.unify(nearRole{Locals: []int{6, 1}}, nearRole{Locals: []int{7, 1}}))
+	assert.Equal(t, map[int]int{1: 1, 6: 7}, m.forward)
+}
+
+// sameRest takes a literal or a call skipped on both sides between two
+// matched tokens for one in the place of the other; an anchor dropped in one
+// place and one added in another, or a plain token in the place of an
+// anchor, is no such place.
+func TestNearSameRestReadsAnchorsInPlace(t *testing.T) {
+	plain := func(text string) nearToken { return nearToken{text: text, vr: -1} }
+	anchor := func(text string) nearToken { return nearToken{text: text, vr: nearAnchor} }
+	local := func(vr int) nearToken { return nearToken{text: "$L", vr: vr} }
+	for name, tc := range map[string]struct {
+		lib, own []nearToken
+		same     bool
+	}{
+		"anchor in the place of another":         {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("b")}, false},
+		"anchors in two places":                  {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), plain("b"), anchor("y")}, true},
+		"plain token for an anchor":              {[]nearToken{plain("a"), plain("p"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("b")}, true},
+		"anchor for a plain token":               {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), plain("q"), plain("b")}, true},
+		"anchor and a plain token for an anchor": {[]nearToken{plain("a"), anchor("x"), plain("p"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("b")}, false},
+		"anchor for an anchor and a plain token": {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("q"), plain("b")}, false},
+		"a variable in two places":               {[]nearToken{plain("a"), local(0), plain("b"), plain("c")}, []nearToken{plain("a"), plain("b"), local(0), plain("c")}, true},
+		"one anchor in two places":               {[]nearToken{plain("a"), anchor("x"), plain("b"), plain("c")}, []nearToken{plain("a"), plain("b"), anchor("x"), plain("c")}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := &roleMapping{forward: map[int]int{}, back: map[int]int{}}
+			assert.Equal(t, tc.same, m.sameRest(tc.lib, tc.own))
+		})
+	}
 }

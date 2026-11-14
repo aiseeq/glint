@@ -307,12 +307,11 @@ func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectCo
 			}
 			continue
 		}
-		body := goNearBody(info, fd)
-		candidate, score := lib.goNear.best(body)
+		candidate, score, _ := lib.goNear.best(goNearBody(info, fd, false), func() nearBody { return goNearBody(info, fd, true) })
 		if candidate == nil || file.IsSuppressed(line, r.Name()) {
 			continue
 		}
-		out = append(out, r.libraryViolation(file, fd, line, candidate.fn, score, slices.Equal(body.Tokens, candidate.body.Tokens)))
+		out = append(out, r.libraryViolation(file, fd, line, candidate.fn, score, false))
 	}
 	return out
 }
@@ -719,7 +718,7 @@ func loadLibraryFunctionKeys(dir string) (libraryCacheEntry, error) {
 				if n.nodes >= minimumDuplicateBodyNodes {
 					found := libraryFunction{Name: fd.Name.Name, Package: pkg.Name, ImportPath: pkg.PkgPath}
 					entry.Keys[n.b.String()] = append(entry.Keys[n.b.String()], found)
-					if body := goNearBody(pkg.TypesInfo, fd); len(body.Tokens) >= minGoNearCopyTokens {
+					if body := goNearBody(pkg.TypesInfo, fd, true); len(body.Tokens) >= minGoNearCopyTokens {
 						entry.Near = append(entry.Near, libraryNearFunction{libraryFunction: found, Lang: "go", Body: body})
 					}
 				}

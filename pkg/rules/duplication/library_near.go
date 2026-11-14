@@ -33,46 +33,111 @@ const (
 )
 
 // nearBody is the comparable form of a function body: its normalized token
-// sequence, the hashes of its statements, and the anchors a copy keeps — the
-// functions it calls, its operators, its literals and package-level values. A function that calls
-// another function, compares the other way or carries a value the library
-// function does not is no copy of it however alike the rest is.
+// sequence, with every variable as one placeholder, the hashes of its
+// statements, the anchors a copy keeps — the functions it calls, its
+// operators, its literals and package-level values — and the roles of its
+// statements. A function that calls another function, compares the other way
+// or carries a value the library function does not is no copy of it however
+// alike the rest is.
 type nearBody struct {
-	Tokens []string `json:"tokens"`
-	Stmts  []uint64 `json:"stmts"`
+	Tokens []string   `json:"tokens"`
+	Stmts  []uint64   `json:"stmts"`
+	Roles  []nearRole `json:"roles"`
+	// Owners is the statement in Roles every token belongs to, -1 for none;
+	// Vars the number of the variable a token is, nearAnchor for a literal
+	// or the name of a called function, -1 for another token.
+	Owners []int    `json:"owners"`
+	Vars   []int    `json:"vars"`
 	Calls  []string `json:"calls"`
 	Ops    []string `json:"ops"`
 	Lits   []string `json:"lits"`
 }
 
+// nearAnchor marks a literal or the name of a called function in Vars.
+const nearAnchor = -2
+
+// nearRole is a statement as sameRoles reads it: its shape, the hash of the
+// statements that hold it and of its tokens with the variables, literals and
+// called functions masked; the hash of its literals and called functions in
+// their order; its variables in their order, numbered by their first
+// appearance in the function as the exact key numbers them; and the
+// statement that holds it, -1 for none.
+type nearRole struct {
+	Shape   uint64 `json:"s"`
+	Anchors uint64 `json:"a"`
+	Locals  []int  `json:"l,omitempty"`
+	Parent  int    `json:"p"`
+}
+
 // nearBodyBuilder collects a nearBody in one pass over the body: every token
 // goes to the sequence and to the innermost statement that holds it, so the
-// work is linear in the size of the function.
+// work is linear in the size of the function. Roles, Owners and Vars are
+// collected for a detailed body only: a function of the project needs them
+// when it comes near a library function, which few do.
 type nearBodyBuilder struct {
-	body  nearBody
-	open  []nearStmt
-	calls map[string]bool
-	ops   map[string]bool
-	lits  map[string]bool
+	body     nearBody
+	detailed bool
+	open     []nearStmt
+	// roleOf is the index in Roles of every statement opened, by its order
+	// of opening, -1 for one with no tokens.
+	roleOf []int
+	calls  map[string]bool
+	ops    map[string]bool
+	lits   map[string]bool
 }
 
 type nearStmt struct {
+	id    int
 	hash  uint64
+	role  nearRole
 	count int
 }
 
-func newNearBodyBuilder() *nearBodyBuilder {
-	return &nearBodyBuilder{calls: map[string]bool{}, ops: map[string]bool{}, lits: map[string]bool{}}
+// Masks of the shape of a statement: a literal and a called function are
+// compared by place in sameRoles, not by shape.
+const (
+	nearLiteralMask = "$lit"
+	nearCallMask    = "$call"
+)
+
+func newNearBodyBuilder(detailed bool) *nearBodyBuilder {
+	return &nearBodyBuilder{detailed: detailed, calls: map[string]bool{}, ops: map[string]bool{}, lits: map[string]bool{}}
 }
 
-func (b *nearBodyBuilder) emit(tok string) {
+// emit adds a token that is the same in every form of the body.
+func (b *nearBodyBuilder) emit(tok string) { b.add(tok, tok, "", -1) }
+
+// emitLocal adds the variable the function numbers num.
+func (b *nearBodyBuilder) emitLocal(num int) { b.add("$L", "$L", "", num) }
+
+// emitAnchor adds a literal or the name of a called function: tok in the
+// sequence, value among the anchors of its statement, mask in its shape.
+func (b *nearBodyBuilder) emitAnchor(tok, value, mask string) { b.add(tok, mask, value, nearAnchor) }
+
+func (b *nearBodyBuilder) add(tok, shape, anchor string, vr int) {
 	b.body.Tokens = append(b.body.Tokens, tok)
 	if len(b.open) == 0 {
+		if b.detailed {
+			b.body.Vars = append(b.body.Vars, vr)
+			b.body.Owners = append(b.body.Owners, -1)
+		}
 		return
 	}
 	top := &b.open[len(b.open)-1]
 	top.hash = fnvMix(top.hash, tok)
 	top.count++
+	if !b.detailed {
+		return
+	}
+	b.body.Vars = append(b.body.Vars, vr)
+	b.body.Owners = append(b.body.Owners, top.id)
+	top.role.Shape = fnvMix(top.role.Shape, shape)
+	if anchor != "" {
+		top.role.Anchors = fnvMix(top.role.Anchors, anchor)
+	}
+	if vr >= 0 {
+		top.role.Locals = append(top.role.Locals, vr)
+	}
 }
 
 // fnvMix adds one token and a separator to an FNV-1a hash.
@@ -85,20 +150,49 @@ func fnvMix(hash uint64, tok string) uint64 {
 	return hash * fnvPrime64
 }
 
-func (b *nearBodyBuilder) openStmt() { b.open = append(b.open, nearStmt{hash: 14695981039346656037}) }
+// context is what a statement inside st starts from: the shape and the
+// anchors of st so far, so the statements of a then branch and of an else
+// branch, of two loops, or of two checks that call other functions have
+// other shapes.
+func (st *nearStmt) context() uint64 { return (st.role.Shape ^ st.role.Anchors) * fnvPrime64 }
 
-func (b *nearBodyBuilder) closeStmt() {
+// openStmt opens a statement inside the innermost open one.
+func (b *nearBodyBuilder) openStmt() {
+	if len(b.open) == 0 {
+		b.openSeeded(fnvOffset64, -1)
+		return
+	}
+	top := &b.open[len(b.open)-1]
+	b.openSeeded(top.context(), top.id)
+}
+
+// openSeeded opens a statement whose shape starts from seed, inside the
+// statement opened as parent, -1 for none.
+func (b *nearBodyBuilder) openSeeded(seed uint64, parent int) {
+	b.open = append(b.open, nearStmt{id: len(b.roleOf), hash: fnvOffset64, role: nearRole{Shape: seed, Anchors: fnvOffset64, Parent: parent}})
+	b.roleOf = append(b.roleOf, -1)
+}
+
+// closeStmt closes the innermost statement and returns what a statement
+// inside it starts from and its order of opening.
+func (b *nearBodyBuilder) closeStmt() (uint64, int) {
 	last := b.open[len(b.open)-1]
 	b.open = b.open[:len(b.open)-1]
 	if last.count > 0 {
 		b.body.Stmts = append(b.body.Stmts, last.hash)
+		if b.detailed {
+			b.roleOf[last.id] = len(b.body.Roles)
+			b.body.Roles = append(b.body.Roles, last.role)
+		}
 	}
+	return last.context(), last.id
 }
 
 func (b *nearBodyBuilder) finish() nearBody {
 	for len(b.open) > 0 {
 		b.closeStmt()
 	}
+	b.orderRoles()
 	slices.Sort(b.body.Stmts)
 	b.body.Calls = slices.Sorted(maps.Keys(b.calls))
 	b.body.Ops = slices.Sorted(maps.Keys(b.ops))
@@ -106,12 +200,42 @@ func (b *nearBodyBuilder) finish() nearBody {
 	return b.body
 }
 
+// orderRoles puts the roles, which close inner first, in the order the
+// statements open, a statement before the statements it holds, and points
+// Owners and Parent at that order.
+func (b *nearBodyBuilder) orderRoles() {
+	if !b.detailed {
+		return
+	}
+	final := make([]int, len(b.roleOf))
+	roles := make([]nearRole, 0, len(b.body.Roles))
+	for id, index := range b.roleOf {
+		final[id] = -1
+		if index >= 0 {
+			final[id] = len(roles)
+			roles = append(roles, b.body.Roles[index])
+		}
+	}
+	for i := range roles {
+		if parent := roles[i].Parent; parent >= 0 {
+			roles[i].Parent = final[parent]
+		}
+	}
+	for i, id := range b.body.Owners {
+		if id >= 0 {
+			b.body.Owners[i] = final[id]
+		}
+	}
+	b.body.Roles = roles
+}
+
 // goNearBody normalizes a Go function body for the near comparison: the
 // printing of blockNormalizer, with every variable of the function as one
-// placeholder, so that the numbering of variables, which follows their
-// order, does not tell a copy with swapped statements from its original.
-func goNearBody(info *types.Info, fd *ast.FuncDecl) nearBody {
-	w := &goNearWalker{n: newFunctionBlockNormalizer(info, fd), b: newNearBodyBuilder(), own: funcPackage(fd, info)}
+// placeholder in the sequence, so that the numbering of variables, which
+// follows their order, does not tell a copy with swapped statements from its
+// original; the roles of a detailed body keep the numbers.
+func goNearBody(info *types.Info, fd *ast.FuncDecl, detailed bool) nearBody {
+	w := &goNearWalker{n: newFunctionBlockNormalizer(info, fd), b: newNearBodyBuilder(detailed), own: funcPackage(fd, info)}
 	w.walk(fd.Body)
 	return w.b.finish()
 }
@@ -120,7 +244,13 @@ type goNearWalker struct {
 	n   *blockNormalizer
 	b   *nearBodyBuilder
 	own *types.Package
+	// callees holds the names of called functions not printed yet, which the
+	// shape of their statement masks: a selector, printed as one atom, and
+	// its last name, printed otherwise.
+	callees []calleeName
 }
+
+type calleeName struct{ sel, name ast.Node }
 
 func (w *goNearWalker) walk(root ast.Node) {
 	var stack []ast.Node
@@ -140,16 +270,17 @@ func (w *goNearWalker) walk(root ast.Node) {
 			return false
 		case *ast.Ident:
 			w.packageValue(x)
-			w.b.emit(anonymousLocal(w.n.ident(x)))
+			w.name(x, w.n.ident(x))
 			return false
 		case *ast.BasicLit:
-			w.b.emit(x.Value)
-			w.b.lits[goLiteralValue(x)] = true
+			value := goLiteralValue(x)
+			w.b.emitAnchor(x.Value, value, nearLiteralMask)
+			w.b.lits[value] = true
 			return false
 		case *ast.SelectorExpr:
 			if atom, ok := w.n.selector(x); ok {
 				w.packageValue(x.Sel)
-				w.b.emit(anonymousLocal(atom))
+				w.name(x, atom)
 				return false
 			}
 		case *ast.Comment, *ast.CommentGroup:
@@ -157,6 +288,9 @@ func (w *goNearWalker) walk(root ast.Node) {
 		case *ast.CallExpr:
 			if callee := w.callee(x); callee != "" {
 				w.b.calls[callee] = true
+				if w.b.detailed {
+					w.markCallee(x.Fun)
+				}
 			}
 		case *ast.BinaryExpr:
 			w.b.ops[x.Op.String()] = true
@@ -176,6 +310,39 @@ func (w *goNearWalker) walk(root ast.Node) {
 		w.b.emit("(" + nodeKind(node))
 		return true
 	})
+}
+
+// name emits a printed name: a numbered variable, the name of a called
+// function or another name.
+func (w *goNearWalker) name(node ast.Node, tok string) {
+	if strings.HasPrefix(tok, "$L") {
+		if num, err := strconv.Atoi(tok[2:]); err == nil {
+			w.b.emitLocal(num)
+			return
+		}
+	}
+	for i, callee := range w.callees {
+		if callee.sel == node || callee.name == node {
+			w.callees = slices.Delete(w.callees, i, i+1)
+			w.b.emitAnchor(tok, tok, nearCallMask)
+			return
+		}
+	}
+	w.b.emit(tok)
+}
+
+// markCallee marks the name callee reads.
+func (w *goNearWalker) markCallee(fun ast.Expr) {
+	switch fun := ast.Unparen(fun).(type) {
+	case *ast.Ident:
+		w.callees = append(w.callees, calleeName{name: fun})
+	case *ast.SelectorExpr:
+		w.callees = append(w.callees, calleeName{sel: fun, name: fun.Sel})
+	case *ast.IndexExpr:
+		w.markCallee(fun.X)
+	case *ast.IndexListExpr:
+		w.markCallee(fun.X)
+	}
 }
 
 // packageValue counts a package-level constant or variable among the
@@ -199,15 +366,6 @@ func isNearStmt(node ast.Node) bool {
 	}
 	_, block := node.(*ast.BlockStmt)
 	return !block
-}
-
-// anonymousLocal prints every numbered variable of the function as one
-// placeholder.
-func anonymousLocal(tok string) string {
-	if strings.HasPrefix(tok, "$L") {
-		return "$L"
-	}
-	return tok
 }
 
 // callee names the function or method a call reaches: a function of the
@@ -258,8 +416,10 @@ type nearCandidate struct {
 	fn    libraryMatch
 	body  nearBody
 	match map[string][]uint64
-	calls string
-	ops   string
+	// shapes indexes the statements of the body by their shape.
+	shapes map[uint64][]int
+	calls  string
+	ops    string
 }
 
 // matchWordBits is the number of library tokens a word of a match set holds.
@@ -276,7 +436,11 @@ func newNearCandidate(fn libraryMatch, body nearBody) *nearCandidate {
 		}
 		set[i/matchWordBits] |= 1 << (i % matchWordBits)
 	}
-	return &nearCandidate{fn: fn, body: body, match: match, calls: strings.Join(body.Calls, "\x00"), ops: strings.Join(body.Ops, "\x00")}
+	shapes := make(map[uint64][]int, len(body.Roles))
+	for i, role := range body.Roles {
+		shapes[role.Shape] = append(shapes[role.Shape], i)
+	}
+	return &nearCandidate{fn: fn, body: body, match: match, shapes: shapes, calls: strings.Join(body.Calls, "\x00"), ops: strings.Join(body.Ops, "\x00")}
 }
 
 // nearIndex groups library functions by the functions they call and their
@@ -307,30 +471,283 @@ func newNearIndex(candidates []*nearCandidate, minTokens int) *nearIndex {
 }
 
 // best returns the library function body is closest to, at nearCopyThreshold
-// or above, and the similarity.
-func (idx *nearIndex) best(body nearBody) (*nearCandidate, float64) {
+// or above, and the similarity, and the body in detail, which detail makes
+// for the first library function that comes near.
+func (idx *nearIndex) best(body nearBody, detail func() nearBody) (*nearCandidate, float64, nearBody) {
 	if idx == nil || len(body.Tokens) < idx.minTokens {
-		return nil, 0
+		return nil, 0, body
 	}
 	key := strings.Join(body.Calls, "\x00") + "\x01" + strings.Join(body.Ops, "\x00")
 	var best *nearCandidate
 	bestScore := 0.0
+	detailed := false
 	for _, c := range idx.groups[key] {
 		if !subsetOf(body.Lits, c.body.Lits) {
 			continue
 		}
 		score := nearSimilarity(c, body)
-		if score >= nearCopyThreshold && score > bestScore {
+		if score < nearCopyThreshold || score <= bestScore {
+			continue
+		}
+		if !detailed {
+			body, detailed = detail(), true
+		}
+		if sameRoles(c, body) {
 			best, bestScore = c, score
 		}
 	}
-	return best, bestScore
+	return best, bestScore, body
 }
 
 func subsetOf(sub, set []string) bool {
 	for _, value := range sub {
 		if _, found := slices.BinarySearch(set, value); !found {
 			return false
+		}
+	}
+	return true
+}
+
+// sameRoles reports whether a body keeps the roles of the library function:
+// the statements of a body that have the shape of a statement of the library
+// function agree with it — the same literals and called functions in the same
+// places, and variables that stand for the variables of the library function
+// one to one — and so do the variables in the rest of the two bodies, in the
+// order they keep. A literal or a call moved to another place, or a variable
+// in the place of another (a value below the range set to its upper bound,
+// slice bounds swapped), makes another function of the same tokens.
+//
+// Statements of a shape the library function has once are paired first, as
+// they pair for certain; then each statement of a shape it has more than once
+// takes the first statement of that shape that agrees and is held by the
+// partner of the statement that holds it, and every statement of the side
+// with fewer must find one. Statements moved, as a copy may move
+// independent ones, still pair by shape; the rest is compared in order, with
+// the statements that hold a statement left unpaired, so that a check that
+// trades the statements it guards with another check is compared in place.
+func sameRoles(c *nearCandidate, body nearBody) bool {
+	roles := body.Roles
+	shapes := make(map[uint64][]int, len(roles))
+	for i, role := range roles {
+		shapes[role.Shape] = append(shapes[role.Shape], i)
+	}
+	m := &roleMapping{forward: map[int]int{}, back: map[int]int{}}
+	ownPartner, libPartner := unpaired(len(roles)), unpaired(len(c.body.Roles))
+	var shared []int
+	for i, role := range roles {
+		lib := c.shapes[role.Shape]
+		switch {
+		case len(lib) == 0:
+		case len(lib) == 1 && len(shapes[role.Shape]) == 1:
+			if !m.unify(role, c.body.Roles[lib[0]]) {
+				return false
+			}
+			ownPartner[i], libPartner[lib[0]] = lib[0], i
+		default:
+			shared = append(shared, i)
+		}
+	}
+	paired := make(map[uint64]int)
+	for _, i := range shared {
+		role := roles[i]
+		for _, j := range c.shapes[role.Shape] {
+			if libPartner[j] < 0 && heldAlike(role, c.body.Roles[j], ownPartner) && m.unify(role, c.body.Roles[j]) {
+				ownPartner[i], libPartner[j] = j, i
+				paired[role.Shape]++
+				break
+			}
+		}
+	}
+	for _, i := range shared {
+		shape := roles[i].Shape
+		if paired[shape] < min(len(shapes[shape]), len(c.shapes[shape])) {
+			return false
+		}
+	}
+	unpairHolders(roles, ownPartner, libPartner)
+	unpairHolders(c.body.Roles, libPartner, ownPartner)
+	return m.sameRest(unpairedTokens(c.body, libPartner), unpairedTokens(body, ownPartner))
+}
+
+// heldAlike reports whether a statement of the body and one of the library
+// function of its shape are held alike: both by no statement, or the one by
+// the partner of the other. A statement held by a check that pairs with
+// another check moved from one check to another. The shape starts from what
+// holds a statement, so statements of one shape are both held or both not.
+func heldAlike(role, lib nearRole, ownPartner []int) bool {
+	return role.Parent < 0 || ownPartner[role.Parent] == lib.Parent
+}
+
+// unpaired is a partner list of n statements with none paired yet.
+func unpaired(n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = -1
+	}
+	return out
+}
+
+// unpairHolders unpairs, with their partners, the statements that hold a
+// statement of roles without a partner.
+func unpairHolders(roles []nearRole, partner, other []int) {
+	for i := range roles {
+		if partner[i] >= 0 {
+			continue
+		}
+		for p := roles[i].Parent; p >= 0 && partner[p] >= 0; p = roles[p].Parent {
+			other[partner[p]] = -1
+			partner[p] = -1
+		}
+	}
+}
+
+// nearToken is a token of a statement that sameRoles did not pair, with the
+// number of the variable it is, or -1.
+type nearToken struct {
+	text string
+	vr   int
+}
+
+func unpairedTokens(body nearBody, partner []int) []nearToken {
+	var out []nearToken
+	for i, owner := range body.Owners {
+		if owner >= 0 && partner[owner] < 0 {
+			out = append(out, nearToken{text: body.Tokens[i], vr: body.Vars[i]})
+		}
+	}
+	return out
+}
+
+// maxRestAlignCells bounds the table of sameRest; the rest of two bodies
+// larger than that is left to the share and the anchors.
+const maxRestAlignCells = 1 << 22
+
+// sameRest aligns the tokens of the statements sameRoles did not pair by a
+// longest common subsequence. Where the alignment skips a literal or a called
+// function on both sides between two matched tokens, one stands in the place
+// of the other: another function; so does one the alignment skips on both
+// sides anywhere, written in one place in the body and in another in the
+// library function, as when two checks trade what they guard. The variables
+// the alignment matches are checked together with the pairs sameRoles made.
+// An adapted copy may merge variables (one pointer for the index and the
+// element of the library function) or split one, so a variable may stand for
+// several; what it may not do is cross: a variable that stands for two of the
+// library function, one of which another variable stands for too, as when the
+// bounds of a range trade places in a statement written as a block in one body
+// and on one line in the other.
+func (m *roleMapping) sameRest(lib, own []nearToken) bool {
+	rows, cols := len(lib)+1, len(own)+1
+	if len(lib) == 0 || len(own) == 0 || rows*cols > maxRestAlignCells {
+		return true
+	}
+	table := make([]uint16, rows*cols)
+	for i := len(lib) - 1; i >= 0; i-- {
+		for j := len(own) - 1; j >= 0; j-- {
+			at := i*cols + j
+			switch {
+			case lib[i].text == own[j].text:
+				table[at] = table[at+cols+1] + 1
+			case table[at+cols] >= table[at+1]:
+				table[at] = table[at+cols]
+			default:
+				table[at] = table[at+1]
+			}
+		}
+	}
+	edges := make(map[[2]int]bool, len(m.forward))
+	for from, to := range m.forward {
+		edges[[2]int{from, to}] = true
+	}
+	libSkipped, ownSkipped := false, false
+	libLeft, ownLeft := make(map[string]bool), make(map[string]bool)
+	for i, j := 0, 0; i < len(lib) || j < len(own); {
+		at := i*cols + j
+		switch {
+		case i < len(lib) && j < len(own) && lib[i].text == own[j].text:
+			if lib[i].vr >= 0 && own[j].vr >= 0 {
+				edges[[2]int{own[j].vr, lib[i].vr}] = true
+			}
+			libSkipped, ownSkipped = false, false
+			i++
+			j++
+		case j == len(own) || i < len(lib) && table[at+cols] >= table[at+1]:
+			libSkipped = skipAnchor(lib[i], libLeft) || libSkipped
+			i++
+		default:
+			ownSkipped = skipAnchor(own[j], ownLeft) || ownSkipped
+			j++
+		}
+		if libSkipped && ownSkipped {
+			return false
+		}
+	}
+	for text := range libLeft {
+		if ownLeft[text] {
+			return false
+		}
+	}
+	ownDegree, libDegree := make(map[int]int), make(map[int]int)
+	for edge := range edges {
+		ownDegree[edge[0]]++
+		libDegree[edge[1]]++
+	}
+	for edge := range edges {
+		if ownDegree[edge[0]] > 1 && libDegree[edge[1]] > 1 {
+			return false
+		}
+	}
+	return true
+}
+
+// skipAnchor records in left a literal or a called function the alignment
+// skips, and reports whether tok is one.
+func skipAnchor(tok nearToken, left map[string]bool) bool {
+	if tok.vr != nearAnchor {
+		return false
+	}
+	left[tok.text] = true
+	return true
+}
+
+// roleMapping is the correspondence of the variables of a body with the
+// variables of the library function, both ways.
+type roleMapping struct{ forward, back map[int]int }
+
+// pair makes own stand for lib, and fails when either stands for another.
+// forward and back stay inverse, so when both are mapped, own standing for
+// lib is lib standing for own.
+func (m *roleMapping) pair(own, lib int) bool {
+	to, mapped := m.forward[own]
+	_, taken := m.back[lib]
+	switch {
+	case mapped && taken:
+		return to == lib
+	case mapped || taken:
+		return false
+	}
+	m.forward[own], m.back[lib] = lib, own
+	return true
+}
+
+// unify pairs a statement of the body with a statement of the library
+// function of its shape: it fails, and changes nothing, when their anchors
+// differ or a variable would stand for two.
+func (m *roleMapping) unify(role, lib nearRole) bool {
+	if role.Anchors != lib.Anchors || len(role.Locals) != len(lib.Locals) {
+		return false
+	}
+	var added []int
+	for k, local := range role.Locals {
+		_, known := m.forward[local]
+		if !m.pair(local, lib.Locals[k]) {
+			for _, undo := range added {
+				delete(m.back, m.forward[undo])
+				delete(m.forward, undo)
+			}
+			return false
+		}
+		if !known {
+			added = append(added, local)
 		}
 	}
 	return true
