@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -30,8 +31,16 @@ type broadEntry struct {
 	// name; "" for other entries.
 	rule string
 	// oversight marks an entry that switches off a rule watching
-	// suppressions, by name or with its category.
+	// suppressions, by name, with its category or by an exception of it.
 	oversight bool
+	// excepted is the rule watching suppressions an exception keeps off for
+	// what it covers; "" for other entries.
+	excepted string
+	// oneLine names the files of an exception of a rule watching
+	// suppressions that keeps a line of files named by base name, with no
+	// glob: one line of one file when the project holds at most one file of
+	// that name; nil for other entries.
+	oneLine *core.Exception
 	// file is the configuration file, absolute, the entry is reported in and
 	// whose marker keeps it.
 	file string
@@ -138,12 +147,26 @@ func configNode(n *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-func collectBroadExceptions(n *yaml.Node, entries *[]broadEntry) {
+// collectBroadExceptions returns the exceptions of a rule. One of another rule
+// is an entry when it names files and nothing narrows it further; every one
+// of a rule watching suppressions is, since it takes that watch away from
+// what it covers (oversightException).
+func collectBroadExceptions(n *yaml.Node, rule string, entries *[]broadEntry) error {
 	exceptions := configNode(n, "exceptions")
 	if exceptions == nil || exceptions.Kind != yaml.SequenceNode {
-		return
+		return nil
 	}
 	for _, exception := range exceptions.Content {
+		if slices.Contains(oversightRules, rule) {
+			entry, wide, err := oversightException(exception, rule)
+			if err != nil {
+				return err
+			}
+			if wide {
+				*entries = append(*entries, entry)
+			}
+			continue
+		}
 		if configNode(exception, "pattern") != nil || configNode(exception, "function") != nil || configNode(exception, "line") != nil {
 			continue
 		}
@@ -154,6 +177,64 @@ func collectBroadExceptions(n *yaml.Node, entries *[]broadEntry) {
 			}
 		}
 	}
+	return nil
+}
+
+// oversightException is the entry of an exception of a rule watching
+// suppressions, on the line of the exception: whatever narrows it - a
+// pattern, a function, a line, a directory - a marker it covers goes
+// unwatched. One of a line of a file named by its path, with no glob, keeps
+// one line of one file and is none: wide is false. One of a line of files
+// named by base name keeps their names in oneLine, and is none when the
+// project holds one file of that name (narrowOversightExceptions). One that
+// names no file names every file, the configuration among them, so it is
+// never one.
+func oversightException(exception *yaml.Node, rule string) (entry broadEntry, wide bool, err error) {
+	entry = broadEntry{line: exception.Line, exception: true, oversight: true, excepted: rule}
+	var decoded core.Exception
+	if err := exception.Decode(&decoded); err != nil {
+		return broadEntry{}, false, fmt.Errorf("decode the exception of %s at line %d: %w", rule, exception.Line, err)
+	}
+	// A line of 0 or less is none (core.Exception.matchesViolation).
+	if decoded.Line <= 0 {
+		return entry, true, nil
+	}
+	// file names a file, never a glob (core.Exception.NamesFile).
+	if strings.ContainsAny(decoded.Files, "*?[{") {
+		return entry, true, nil
+	}
+	// A name with a directory matches the file of that path alone.
+	if strings.Contains(decoded.File+decoded.Files, "/") {
+		return entry, false, nil
+	}
+	entry.oneLine = &decoded
+	return entry, true, nil
+}
+
+// narrowOversightExceptions drops the exceptions of a rule watching
+// suppressions that keep one line of one file: a line of files named by base
+// name that name at most one file of the project, matched as the exception
+// matches.
+func narrowOversightExceptions(entries []broadEntry, cfg *core.Config) ([]broadEntry, error) {
+	if !slices.ContainsFunc(entries, func(entry broadEntry) bool { return entry.oneLine != nil }) {
+		return entries, nil
+	}
+	files, err := cfg.ConfigFiles()
+	if err != nil {
+		return nil, fmt.Errorf("list project files for exceptions of one line: %w", err)
+	}
+	return slices.DeleteFunc(entries, func(entry broadEntry) bool {
+		if entry.oneLine == nil {
+			return false
+		}
+		named := 0
+		for _, file := range files {
+			if entry.oneLine.NamesFile(file) {
+				named++
+			}
+		}
+		return named <= 1
+	}), nil
 }
 
 // foreignBroadNames are directories of foreign code and test data: no source
@@ -261,7 +342,7 @@ func isSourceFile(path string) bool {
 // parseBroadEntries returns the entries of the extends chain that are in
 // effect, as core.MergeConfigs merges the files: a list or a switch is set by
 // the first file of the chain, from the project's own, that sets it.
-func parseBroadEntries(cfg *core.Config, chain []broadConfigFile) []broadEntry {
+func parseBroadEntries(cfg *core.Config, chain []broadConfigFile) ([]broadEntry, error) {
 	entries := make([]broadEntry, 0)
 	if file, list := firstBroadSetting(chain, "exclude"); list != nil {
 		for _, value := range list.Content {
@@ -273,7 +354,11 @@ func parseBroadEntries(cfg *core.Config, chain []broadConfigFile) []broadEntry {
 			entries = append(entries, file.entry(broadEntry{pattern: value.Value, line: value.Line, skipDir: true}))
 		}
 	}
-	entries = append(entries, broadRuleExceptions(chain)...)
+	exceptions, err := broadRuleExceptions(chain)
+	if err != nil {
+		return nil, err
+	}
+	entries = append(entries, exceptions...)
 	for _, name := range slices.Sorted(maps.Keys(cfg.Categories)) {
 		if cfg.Categories[name].Enabled {
 			continue
@@ -303,7 +388,7 @@ func parseBroadEntries(cfg *core.Config, chain []broadConfigFile) []broadEntry {
 		}
 		entries = append(entries, file.entry(broadEntry{pattern: "<rule>", line: line, rule: name, oversight: true}))
 	}
-	return entries
+	return entries, nil
 }
 
 // firstBroadSetting returns the first file of the chain that sets a list of
@@ -334,27 +419,31 @@ func firstBroadNode(chain []broadConfigFile, path ...string) (broadConfigFile, *
 
 // broadRuleExceptions returns the file exceptions of every rule, each from
 // the first file of the chain that lists the rule's exceptions.
-func broadRuleExceptions(chain []broadConfigFile) []broadEntry {
+func broadRuleExceptions(chain []broadConfigFile) ([]broadEntry, error) {
 	var entries []broadEntry
+	var failed error
 	listed := make(map[string]bool)
 	for _, file := range chain {
 		forEachPair(configNode(file.top, "categories"), func(category, categoryNode *yaml.Node) {
 			forEachPair(configNode(categoryNode, "rules"), func(rule, ruleNode *yaml.Node) {
 				exceptions := configNode(ruleNode, "exceptions")
 				key := category.Value + "/" + rule.Value
-				if exceptions == nil || exceptions.Tag == "!!null" || listed[key] {
+				if failed != nil || exceptions == nil || exceptions.Tag == "!!null" || listed[key] {
 					return
 				}
 				listed[key] = true
 				var found []broadEntry
-				collectBroadExceptions(ruleNode, &found)
+				if err := collectBroadExceptions(ruleNode, rule.Value, &found); err != nil {
+					failed = fmt.Errorf("%s: %w", file.path, err)
+					return
+				}
 				for _, entry := range found {
 					entries = append(entries, file.entry(entry))
 				}
 			})
 		})
 	}
-	return entries
+	return entries, failed
 }
 
 // oversightCategory returns the category of a rule watching suppressions.
@@ -384,7 +473,14 @@ func broadExclusionFindings(cfg *core.Config) ([]*core.Violation, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries := parseBroadEntries(cfg, chain)
+	entries, err := parseBroadEntries(cfg, chain)
+	if err != nil {
+		return nil, err
+	}
+	entries, err = narrowOversightExceptions(entries, cfg)
+	if err != nil {
+		return nil, err
+	}
 	// broad-exclusion switched off by name runs only to report that it is.
 	if cfg.IsRuleDisabled(oversightCategory(broadExclusionRule), broadExclusionRule) {
 		entries = slices.DeleteFunc(entries, func(entry broadEntry) bool { return !entry.oversight })
@@ -449,6 +545,9 @@ func broadRelPath(root, path string) (string, error) {
 }
 
 func broadFindingMessage(entry broadEntry, files []string) string {
+	if entry.excepted != "" {
+		return fmt.Sprintf("Exception keeps rule %s, which watches suppressions, off for more than one line, so a marker there goes unwatched; narrow it to one line of one file (files and line), or "+broadMarkerAdvice, entry.excepted)
+	}
 	if entry.rule != "" {
 		return fmt.Sprintf("Rule %s, which watches suppressions, is switched off for the whole project; "+broadMarkerAdvice, entry.rule)
 	}
@@ -497,7 +596,7 @@ func checkBroadEntry(entry broadEntry, sources broadSources) (string, error) {
 // suppressions, skips a directory of sources, or excludes a whole language, a
 // whole source directory, or the whole project for one rule.
 func coversBroadly(entry broadEntry, sources broadSources) (bool, error) {
-	if entry.pattern == "<category>" || entry.rule != "" {
+	if entry.pattern == "<category>" || entry.rule != "" || entry.excepted != "" {
 		return true, nil
 	}
 	if entry.skipDir {
