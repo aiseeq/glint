@@ -205,17 +205,14 @@ func parseBroadEntries(cfg *core.Config, data []byte) ([]broadEntry, error) {
 	return entries, nil
 }
 
-func broadExclusionFindings(cfg *core.Config, contexts []*core.FileContext) ([]*core.Violation, error) {
-	if cfg.ConfigPath() == "" || len(contexts) == 0 {
+func broadExclusionFindings(cfg *core.Config) ([]*core.Violation, error) {
+	if cfg.ConfigPath() == "" {
 		return nil, nil
 	}
-	root := contexts[0].ProjectRoot
+	root := filepath.Dir(cfg.ConfigPath())
 	files, err := collectProjectSourceFiles(root, cfg)
 	if err != nil {
 		return nil, err
-	}
-	if len(files) == 0 {
-		return nil, nil
 	}
 	data, err := os.ReadFile(cfg.ConfigPath())
 	if err != nil {

@@ -63,6 +63,19 @@ func TestGuideReferencesCLIAndRegisteredRules(t *testing.T) {
 	flagCount := 0
 	for _, match := range inlineMatches {
 		code := match[1]
+		fields := strings.Fields(code)
+		if len(fields) > 0 && fields[0] == "glint" {
+			path := []string{"glint"}
+			for _, field := range fields[1:] {
+				if strings.HasPrefix(field, "-") || strings.HasPrefix(field, "<") || strings.ContainsAny(field, "[]/") {
+					break
+				}
+				path = append(path, field)
+			}
+			if _, ok := commands[strings.Join(path, " ")]; !ok {
+				t.Errorf("guide command %q does not exist in CLI", strings.Join(path, " "))
+			}
+		}
 		flagMatches := flags.FindAllStringSubmatch(code, -1)
 		if len(flagMatches) == 0 {
 			continue
@@ -83,20 +96,6 @@ func TestGuideReferencesCLIAndRegisteredRules(t *testing.T) {
 			if !found {
 				t.Errorf("guide flag %q does not exist in CLI", flag[1])
 			}
-		}
-		if !strings.HasPrefix(code, "glint") {
-			continue
-		}
-		fields := strings.Fields(code)
-		path := []string{"glint"}
-		for _, field := range fields[1:] {
-			if strings.HasPrefix(field, "-") || strings.HasPrefix(field, "<") || strings.ContainsAny(field, "[]/") {
-				break
-			}
-			path = append(path, field)
-		}
-		if _, ok := commands[strings.Join(path, " ")]; !ok {
-			t.Errorf("guide command %q does not exist in CLI", strings.Join(path, " "))
 		}
 	}
 	if flagCount == 0 {

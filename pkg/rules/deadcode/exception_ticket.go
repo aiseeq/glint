@@ -99,6 +99,9 @@ func readTicketStatuses() (ticketStatusData, error) {
 		return data, nil
 	}
 	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return data, nil // the ticket repository is not on this machine: the rule is off, as without a config
+	}
 	if err != nil {
 		return ticketStatusData{}, fmt.Errorf("read tickets directory %q: %w", dir, err)
 	}

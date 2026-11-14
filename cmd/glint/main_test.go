@@ -22,9 +22,9 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/typesafety"
 )
 
-func broadFindingsForTest(t *testing.T, cfg *core.Config, contexts []*core.FileContext) []*core.Violation {
+func broadFindingsForTest(t *testing.T, cfg *core.Config) []*core.Violation {
 	t.Helper()
-	findings, err := broadExclusionFindings(cfg, contexts)
+	findings, err := broadExclusionFindings(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,12 +88,32 @@ func TestBroadExclusionFindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := core.NewFileContext(filepath.Join(root, "pkg/api/api.go"), root, []byte("package api\n"), cfg)
-	found := broadFindingsForTest(t, cfg, []*core.FileContext{ctx})
+	found := broadFindingsForTest(t, cfg)
 	// A directory exempted from one rule (pkg/**) is narrower than switching
 	// the rule off; a glob over the whole project (**) for one rule is not.
 	if len(found) != 3 || found[0].Line != 3 || found[1].Line != 16 || found[2].Line != 7 {
 		t.Fatalf("unexpected broad exclusions: %#v", found)
+	}
+}
+
+func TestBroadExclusionFindingsWithNoAnalysisContexts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".glint.yaml"), []byte("settings:\n  exclude:\n    - src/**\ncategories:\n  naming:\n    enabled: false\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := core.LoadConfigWithDefaults(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := broadFindingsForTest(t, cfg)
+	if len(found) != 2 || found[0].Line != 3 || found[1].Line != 6 {
+		t.Fatalf("expected broad exclusion and disabled category findings with no analysis contexts, got %#v", found)
 	}
 }
 
@@ -136,8 +156,7 @@ settings:
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := core.NewFileContext(filepath.Join(root, "src/two.go"), root, []byte("package src\n"), cfg)
-	if found := broadFindingsForTest(t, cfg, []*core.FileContext{ctx}); len(found) != 0 {
+	if found := broadFindingsForTest(t, cfg); len(found) != 0 {
 		t.Fatalf("narrow exceptions reported: %#v", found)
 	}
 }
@@ -171,8 +190,7 @@ func TestBroadExclusionSafeMarkerAndSuppressionMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := core.NewFileContext(filepath.Join(root, "src", "a.go"), root, []byte("package src\n"), cfg)
-	if found := broadFindingsForTest(t, cfg, []*core.FileContext{ctx}); len(found) != 0 {
+	if found := broadFindingsForTest(t, cfg); len(found) != 0 {
 		t.Fatalf("reasoned broad marker was reported: %#v", found)
 	}
 	configCtx := core.NewFileContext(filepath.Join(root, ".glint.yaml"), root, []byte("settings:\n  exclude:\n    - src/** # broad-exclusion: safe\n"), cfg)
@@ -207,8 +225,7 @@ func TestBroadExclusionAllowsOneRuleScopedToSubpackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := core.NewFileContext(filepath.Join(root, "pkg/core/config.go"), root, []byte("package core\n"), cfg)
-	if found := broadFindingsForTest(t, cfg, []*core.FileContext{ctx}); len(found) != 0 {
+	if found := broadFindingsForTest(t, cfg); len(found) != 0 {
 		t.Fatalf("subpackage exception reported: %#v", found)
 	}
 }
@@ -233,8 +250,7 @@ func TestBroadExclusionFindingsForProjectRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := core.NewFileContext(filepath.Join(root, "main.go"), root, []byte("package main\n"), cfg)
-	found := broadFindingsForTest(t, cfg, []*core.FileContext{ctx})
+	found := broadFindingsForTest(t, cfg)
 	if len(found) != 1 || found[0].Line != 3 {
 		t.Fatalf("unexpected root exclusion: %#v", found)
 	}
@@ -1130,8 +1146,7 @@ func TestBroadExclusionSkipsUnreadableDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := core.NewFileContext(filepath.Join(root, "pkg/b.go"), root, []byte("package pkg\n"), cfg)
-	found, err := broadExclusionFindings(cfg, []*core.FileContext{ctx})
+	found, err := broadExclusionFindings(cfg)
 	if err != nil {
 		t.Fatalf("unreadable directory failed the check: %v", err)
 	}

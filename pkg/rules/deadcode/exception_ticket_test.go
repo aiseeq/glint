@@ -168,3 +168,22 @@ func TestTicketConfigurationErrorsAreVisible(t *testing.T) {
 	_, err = TicketState()
 	require.Error(t, err)
 }
+
+// A configured tickets_dir that does not exist (the ticket repository is not
+// checked out on this machine) switches the rule off like a missing config.
+func TestMissingTicketsDirectoryIsNotAnError(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	configDir := filepath.Join(root, "glint")
+	require.NoError(t, os.MkdirAll(configDir, 0755))
+	missing := filepath.Join(root, "no-tickets-here")
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("tickets_dir: "+missing+"\n"), 0644))
+	configured, err := TicketsConfigured()
+	require.NoError(t, err)
+	require.False(t, configured)
+	_, err = TicketState()
+	require.NoError(t, err)
+	found, err := NewExceptionTicketClosedRule().Check(StaleSuppressionRun{})
+	require.NoError(t, err)
+	require.Empty(t, found)
+}
