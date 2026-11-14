@@ -374,13 +374,13 @@ func recordDeadConfigRule(enabledRules []rules.Rule, cfg *core.Config, configs m
 	return nil
 }
 
-func analyzeConfigurationRules(enabledRules []rules.Rule, cfg *core.Config, contexts []*core.FileContext, projectRoot string) ([]*core.Violation, error) {
+func analyzeConfigurationRules(enabledRules []rules.Rule, cfg *core.Config, contexts []*core.FileContext, projectRoot string, silenced silencedSeverities) ([]*core.Violation, error) {
 	var findings []*core.Violation
 	for _, rule := range enabledRules {
 		switch rule.Name() {
 		case "broad-exclusion":
 			done := timings.track("broad-exclusion", "(project config)")
-			violations, err := broadExclusionFindings(cfg)
+			violations, err := broadExclusionFindings(cfg, silenced)
 			done()
 			if err != nil {
 				return nil, err
@@ -494,12 +494,6 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 		if err != nil {
 			return err
 		}
-		var configFindings []*core.Violation
-		configFindings, err = analyzeConfigurationRules(enabledRules, cfg, contexts, projectRoot)
-		if err != nil {
-			return err
-		}
-		violations = append(violations, configFindings...)
 		panics = append(panics, rootPanics...)
 		if cache != nil {
 			journalCachedFiles += cache.reused
@@ -513,20 +507,10 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 					projectRoot, cache.reused, prepared.analyzedFiles(), cache.projectState())
 			}
 		}
-		violations, suppressions := core.SplitSuppressions(violations)
-		stale, err := staleSuppressions(enabledRules, deadcode.StaleSuppressionRun{
-			Contexts: contexts, Suppressions: suppressions, Config: cfg, WholeRoot: root.wholeRoot(),
-		})
+		violations, err = checkSuppressions(root, prepared, enabledRules, cfg, violations)
 		if err != nil {
 			return err
 		}
-		violations = append(violations, stale...)
-		closed, err := closedTicketSuppressions(enabledRules, deadcode.StaleSuppressionRun{Contexts: append(slices.Clone(contexts), prepared.ticketFiles...), Config: cfg, WholeRoot: root.wholeRoot(), Scopes: root.walkScopes()})
-		if err != nil {
-			return err
-		}
-		violations = append(violations, closed...)
-		violations = append(violations, ticketFileSuppressionsWithoutReason(enabledRules, cfg, prepared.ticketFiles)...)
 		minSeverity, err := cfg.GetMinSeverity()
 		if err != nil {
 			return err
@@ -599,21 +583,7 @@ func closedTicketSuppressions(enabled []rules.Rule, run deadcode.StaleSuppressio
 		return nil, fmt.Errorf("check closed-ticket suppressions: %w", err)
 	}
 	done()
-	contexts := make(map[string]*core.FileContext, len(run.Contexts))
-	for _, ctx := range run.Contexts {
-		contexts[ctx.RelPath] = ctx
-	}
-	var kept core.ViolationList
-	for _, v := range found {
-		if run.Config.IsFileExcepted(check.Category(), check.Name(), v.File) || run.Config.IsViolationExcepted(check.Category(), check.Name(), v.File, v) {
-			continue
-		}
-		if ctx := contexts[v.File]; ctx != nil && ctx.IsSuppressed(v.Line, check.Name()) {
-			continue
-		}
-		kept = append(kept, v)
-	}
-	return kept, nil
+	return silenceLateFindings(check, run, found), nil
 }
 
 // ticketFileSuppressionsWithoutReason runs suppression-without-reason over the
@@ -676,23 +646,10 @@ func staleSuppressions(enabledRules []rules.Rule, run deadcode.StaleSuppressionR
 	if err != nil {
 		return nil, err
 	}
-	contexts := make(map[string]*core.FileContext, len(run.Contexts))
-	for _, ctx := range run.Contexts {
-		contexts[ctx.RelPath] = ctx
-	}
-	var kept core.ViolationList
 	for _, violation := range found {
-		if run.Config.IsFileExcepted(check.Category(), check.Name(), violation.File) ||
-			run.Config.IsViolationExcepted(check.Category(), check.Name(), violation.File, violation) {
-			continue
-		}
-		if ctx, ok := contexts[violation.File]; ok && ctx.IsSuppressed(violation.Line, check.Name()) {
-			continue
-		}
 		overrides.apply(violation)
-		kept = append(kept, violation)
 	}
-	return kept, nil
+	return silenceLateFindings(check, run, found), nil
 }
 
 // addDeadExceptions reports the exceptions of each configuration that match
@@ -1499,6 +1456,15 @@ func (o severityOverrides) apply(violation *core.Violation) {
 	}
 }
 
+// severity is the severity a finding of the rule rated found is reported
+// with.
+func (o severityOverrides) severity(rule string, found core.Severity) core.Severity {
+	if severity, ok := o[rule]; ok {
+		return severity
+	}
+	return found
+}
+
 // analyzeFiles runs every rule over every file. Stateless rules run in
 // parallel across files; rules that accumulate cross-file state run in a fixed
 // file order afterwards. Findings are collected per (file, rule) and only then
@@ -1718,24 +1684,25 @@ func runRule(ctx *core.FileContext, rule rules.Rule, cfg *core.Config, overrides
 	if excepted {
 		// Markers in the file are not judged: drop the ones the rule consulted.
 		ctx.TakeSuppressionHits(rule.Name())
-		return fileExceptionSuppression(cfg, ctx.RelPath, rule, fileException, violations), nil
+		return fileExceptionSuppression(cfg, ctx.RelPath, rule, fileException, violations, overrides), nil
 	}
 
 	honorsSuppression := rules.HonorsSuppression(rule)
 	kept = make(core.ViolationList, 0, len(violations))
 	for _, violation := range violations {
 		ctx.AnnotateFunction(violation)
+		// A silenced finding is rated as it would be reported.
+		overrides.apply(violation)
 		if suppression := exceptionSuppression(cfg, rule, ctx.RelPath, violation); suppression != nil {
 			kept = append(kept, suppression)
 			continue
 		}
-		if honorsSuppression && ctx.IsSuppressed(violation.Line, rule.Name()) {
+		if honorsSuppression && ctx.SuppressesFinding(violation.Line, rule.Name(), violation.Severity) {
 			continue
 		}
-		overrides.apply(violation)
 		kept = append(kept, violation)
 	}
-	kept = append(kept, inlineSuppressions(ctx, rule)...)
+	kept = append(kept, inlineSuppressions(ctx, rule, overrides)...)
 	if len(kept) == 0 {
 		return nil, nil
 	}
@@ -1743,32 +1710,48 @@ func runRule(ctx *core.FileContext, rule rules.Rule, cfg *core.Config, overrides
 }
 
 // exceptionSuppression returns the suppression entry of a finding a configured
-// exception silences, nil when none does.
+// exception silences, nil when none does; it carries the finding's severity.
 func exceptionSuppression(cfg *core.Config, rule rules.Rule, relPath string, violation *core.Violation) *core.Violation {
 	exc, ok := cfg.MatchingException(rule.Category(), rule.Name(), relPath, violation)
 	if !ok {
 		return nil
 	}
-	return core.NewSuppressionEntry(rule.Name(), rule.Category(), relPath, violation.Line, core.SuppressionExceptionPrefix+cfg.ExceptionKey(exc))
+	return core.NewSuppressionEntry(rule.Name(), rule.Category(), relPath, violation.Line, violation.Severity, core.SuppressionExceptionPrefix+cfg.ExceptionKey(exc))
 }
 
-// fileExceptionSuppression returns the suppression entry of a file a file-only
-// exception keeps the rule off, when the rule found anything there: the rule
-// runs on such a file only for stale-suppression to know whether the
-// exception silences something.
-func fileExceptionSuppression(cfg *core.Config, relPath string, rule rules.Rule, exc core.Exception, violations []*core.Violation) core.ViolationList {
-	if len(violations) == 0 {
-		return nil
+// fileExceptionSuppression returns the suppression entries of a file a
+// file-only exception keeps the rule off, when the rule found anything there:
+// the rule runs on such a file only for stale-suppression to know whether the
+// exception silences something. There is one entry per line with a finding,
+// with the highest severity found on it as it would be reported.
+func fileExceptionSuppression(cfg *core.Config, relPath string, rule rules.Rule, exc core.Exception, violations []*core.Violation, overrides severityOverrides) core.ViolationList {
+	var entries core.ViolationList
+	at := map[int]*core.Violation{}
+	for _, violation := range violations {
+		severity := overrides.severity(rule.Name(), violation.Severity)
+		if entry, ok := at[violation.Line]; ok {
+			entry.Severity = max(entry.Severity, severity)
+			continue
+		}
+		entry := core.NewSuppressionEntry(rule.Name(), rule.Category(), relPath, violation.Line, severity, core.SuppressionExceptionPrefix+cfg.ExceptionKey(exc))
+		at[violation.Line] = entry
+		entries = append(entries, entry)
 	}
-	return core.ViolationList{core.NewSuppressionEntry(rule.Name(), rule.Category(), relPath, violations[0].Line, core.SuppressionExceptionPrefix+cfg.ExceptionKey(exc))}
+	return entries
 }
 
 // inlineSuppressions turns the markers that silenced the rule's findings in
-// the file — in the rule itself or above — into suppression entries.
-func inlineSuppressions(ctx *core.FileContext, rule rules.Rule) core.ViolationList {
+// the file — in the rule itself or above — into suppression entries, each
+// with the highest severity of what it silenced. A marker the rule consulted
+// on its own silenced a finding of the rule's severity.
+func inlineSuppressions(ctx *core.FileContext, rule rules.Rule, overrides severityOverrides) core.ViolationList {
 	var entries core.ViolationList
-	for _, line := range ctx.TakeSuppressionHits(rule.Name()) {
-		entries = append(entries, core.NewSuppressionEntry(rule.Name(), rule.Category(), ctx.RelPath, line, core.SuppressionInline))
+	for _, hit := range ctx.TakeSuppressions(rule.Name()) {
+		severity := hit.Severity
+		if !hit.Rated {
+			severity = overrides.severity(rule.Name(), rule.DefaultSeverity())
+		}
+		entries = append(entries, core.NewSuppressionEntry(rule.Name(), rule.Category(), ctx.RelPath, hit.Line, severity, core.SuppressionInline))
 	}
 	return entries
 }
@@ -2108,25 +2091,26 @@ func analyzeGoProjectRules(contexts, rootFiles []*core.FileContext, enabledRules
 				continue
 			}
 			if exc, ok := cfg.FileException(rule.Category(), rule.Name(), fileCtx.RelPath); ok {
-				allViolations = append(allViolations, fileExceptionSuppression(cfg, fileCtx.RelPath, rule, exc, []*core.Violation{violation})...)
+				allViolations = append(allViolations, fileExceptionSuppression(cfg, fileCtx.RelPath, rule, exc, []*core.Violation{violation}, overrides)...)
 				continue
 			}
+			// A silenced finding is rated as it would be reported.
+			overrides.apply(violation)
 			if suppression := exceptionSuppression(cfg, rule, fileCtx.RelPath, violation); suppression != nil {
 				allViolations = append(allViolations, suppression)
 				continue
 			}
-			if rules.HonorsSuppression(rule) && fileCtx.IsSuppressed(violation.Line, rule.Name()) {
+			if rules.HonorsSuppression(rule) && fileCtx.SuppressesFinding(violation.Line, rule.Name(), violation.Severity) {
 				continue
 			}
 			violation.File = fileCtx.RelPath
-			overrides.apply(violation)
 			allViolations = append(allViolations, violation)
 		}
 		for _, fileCtx := range project.Files {
 			if !project.IsReportFile(fileCtx) {
 				continue
 			}
-			allViolations = append(allViolations, inlineSuppressions(fileCtx, rule)...)
+			allViolations = append(allViolations, inlineSuppressions(fileCtx, rule, overrides)...)
 		}
 	}
 	if len(rootFiles) > len(contexts) {

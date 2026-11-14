@@ -41,6 +41,10 @@ type broadEntry struct {
 	// glob: one line of one file when the project holds at most one file
 	// they name; nil for other entries.
 	oneLine *core.Exception
+	// declaredAt is the line of an exception's entry that declares the
+	// exception, in origin when it is set and in file otherwise: what the
+	// exception silenced is found there (silencedSeverities.exception).
+	declaredAt int
 	// file is the configuration file, absolute, the entry is reported in and
 	// whose marker keeps it.
 	file string
@@ -236,7 +240,7 @@ func collectBroadExceptions(n *yaml.Node, rule string, entries *[]broadEntry) er
 		for _, key := range []string{"files", "file"} {
 			path := configNode(exception, key)
 			if path != nil && path.Kind == yaml.ScalarNode {
-				*entries = append(*entries, broadEntry{pattern: path.Value, line: path.Line, exception: true})
+				*entries = append(*entries, broadEntry{pattern: path.Value, line: path.Line, exception: true, declaredAt: exception.Line})
 			}
 		}
 	}
@@ -253,7 +257,7 @@ func collectBroadExceptions(n *yaml.Node, rule string, entries *[]broadEntry) er
 // (narrowOversightExceptions). One that names no file names every file, the
 // configuration among them, so it is never one.
 func oversightException(exception *yaml.Node, rule string) (entry broadEntry, wide bool, err error) {
-	entry = broadEntry{line: exception.Line, exception: true, oversight: true, excepted: rule}
+	entry = broadEntry{line: exception.Line, exception: true, oversight: true, excepted: rule, declaredAt: exception.Line}
 	var decoded core.Exception
 	if err := exception.Decode(&decoded); err != nil {
 		return broadEntry{}, false, fmt.Errorf("decode the exception of %s at line %d: %w", rule, exception.Line, err)
@@ -522,7 +526,10 @@ func holdsOversightRule(category string) bool {
 	return slices.ContainsFunc(oversightRules, func(name string) bool { return oversightCategory(name) == category })
 }
 
-func broadExclusionFindings(cfg *core.Config) ([]*core.Violation, error) {
+// broadExclusionFindings reports the broad exclusions of the configuration;
+// one of an exception is as severe as the findings it silenced in the run
+// (silenced).
+func broadExclusionFindings(cfg *core.Config, silenced silencedSeverities) ([]*core.Violation, error) {
 	if cfg.ConfigPath() == "" {
 		return nil, nil
 	}
@@ -547,7 +554,7 @@ func broadExclusionFindings(cfg *core.Config) ([]*core.Violation, error) {
 	if cfg.IsRuleDisabled(oversightCategory(broadExclusionRule), broadExclusionRule) {
 		entries = slices.DeleteFunc(entries, func(entry broadEntry) bool { return !entry.oversight })
 	}
-	return checkBroadEntries(entries, sources, chain, root, cfg)
+	return checkBroadEntries(entries, sources, chain, root, cfg, silenced)
 }
 
 func sourceCatalog(files []string) map[string]int {
@@ -563,7 +570,7 @@ func sourceCatalog(files []string) map[string]int {
 	return catalog
 }
 
-func checkBroadEntries(entries []broadEntry, sources broadSources, chain []broadConfigFile, root string, cfg *core.Config) ([]*core.Violation, error) {
+func checkBroadEntries(entries []broadEntry, sources broadSources, chain []broadConfigFile, root string, cfg *core.Config, silenced silencedSeverities) ([]*core.Violation, error) {
 	rule := deadcode.NewBroadExclusionRule()
 	contexts := make(map[string]*core.FileContext, len(chain))
 	for _, file := range chain {
@@ -592,9 +599,20 @@ func checkBroadEntries(entries []broadEntry, sources broadSources, chain []broad
 			}
 			message = fmt.Sprintf("%s:%d, outside the project, through extends: %s", origin, entry.originLine, message)
 		}
-		findings = append(findings, rule.CreateViolation(name, entry.line, message))
+		finding := rule.CreateViolation(name, entry.line, message)
+		finding.Severity = max(finding.Severity, silenced.exception(entry.declaredIn(), entry.declaredAt))
+		findings = append(findings, finding)
 	}
 	return findings, nil
+}
+
+// declaredIn is the configuration file, absolute, that holds the entry: the
+// base file outside the project for one set there.
+func (entry broadEntry) declaredIn() string {
+	if entry.origin != "" {
+		return entry.origin
+	}
+	return entry.file
 }
 
 // broadRelPath is a configuration file relative to the project.

@@ -25,8 +25,9 @@ import (
 	"github.com/aiseeq/glint/pkg/toolcache"
 )
 
-// cacheFormat changes whenever the stored layout does.
-const cacheFormat = "glint-results-7"
+// cacheFormat changes whenever the stored layout does, or what it means: a
+// suppression entry carries the severity of what it silenced since 8.
+const cacheFormat = "glint-results-8"
 
 // maxProjectCacheVariants keeps room for the five Go input modes in the
 // adversary scenario, plus variants created by edits and concurrent runs.

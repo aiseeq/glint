@@ -359,13 +359,34 @@ func (ctx *FileContext) IsGenerated() bool {
 // The marker that answers is recorded for the rule (TakeSuppressionHits), so
 // that a marker nothing needs can be told apart.
 func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
+	marker, ok := ctx.suppressingMarker(line, ruleName)
+	if ok {
+		ctx.suppression.record(ruleName, marker)
+	}
+	return ok
+}
+
+// SuppressesFinding is IsSuppressed for a finding of the given severity: the
+// marker that answers keeps the highest severity of the findings it
+// silenced, so that the finding about a marker without a reason is as severe
+// as what it hides (TakeSuppressions).
+func (ctx *FileContext) SuppressesFinding(line int, ruleName string, severity Severity) bool {
+	marker, ok := ctx.suppressingMarker(line, ruleName)
+	if ok {
+		ctx.suppression.rate(ruleName, marker, severity)
+	}
+	return ok
+}
+
+// suppressingMarker returns the line of the marker that suppresses the rule
+// at line: on the line itself or of its own on the line above.
+func (ctx *FileContext) suppressingMarker(line int, ruleName string) (int, bool) {
 	for checkLine := line - 1; checkLine <= line; checkLine++ {
 		if ctx.lineSuppresses(checkLine, ruleName, checkLine < line) {
-			ctx.suppression.record(ruleName, checkLine)
-			return true
+			return checkLine, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // LineSuppresses reports whether the given line itself (1-based) carries a
