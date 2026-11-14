@@ -137,7 +137,7 @@ func signalSourceGroups(project *core.GoProjectContext, aliases map[types.Object
 		}
 		group.asts = append(group.asts, file.GoAST)
 		group.root = append(group.root, file)
-		if hasSignalRefs(file.GoAST, names) {
+		if hasSignalRefs(file.GoAST, names) || hasSignalStringRange(file.GoAST) {
 			neededDirs[dir] = true
 		}
 	}

@@ -11,7 +11,6 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
-	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -400,13 +399,22 @@ func (r *signalImplicitTargetRule) goTypedFile(f *core.FileContext, pkg *signalP
 	if pkg != nil {
 		info = pkg.info
 	}
-	return append(out, goStringFindings(r, f, info)...)
+	return append(out, goStringFindings(r, f, info, pkg)...)
 }
 
-func goStringFindings(r *signalImplicitTargetRule, f *core.FileContext, info *types.Info) []*core.Violation {
+func goStringFindings(r *signalImplicitTargetRule, f *core.FileContext, info *types.Info, pkg *signalPackage) []*core.Violation {
 	var out []*core.Violation
-	executed := shellExecutedLiterals(f.GoAST)
+	executed := shellExecutedLiterals(f.GoAST, info)
 	data := dataLiterals(f.GoAST, info)
+	if info != nil {
+		rangeData, rangeExecuted := rangeStringLiterals(f.GoAST, info, pkg)
+		for literal := range rangeData {
+			data[literal] = true
+		}
+		for literal := range rangeExecuted {
+			executed[literal] = true
+		}
+	}
 	ast.Inspect(f.GoAST, func(n ast.Node) bool {
 		l, ok := n.(*ast.BasicLit)
 		if !ok || l.Kind != token.STRING {
@@ -452,31 +460,18 @@ func singleKillFixture(value string) bool {
 	return true
 }
 
-func shellExecutedLiterals(file *ast.File) map[*ast.BasicLit]bool {
+func shellExecutedLiterals(file *ast.File, info *types.Info) map[*ast.BasicLit]bool {
 	executed := make(map[*ast.BasicLit]bool)
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-		if !ok || selector.Sel.Name != "Command" && selector.Sel.Name != "CommandContext" {
+		script, ok := shellExecutionScript(call, info)
+		if !ok {
 			return true
 		}
-		start := 0
-		if selector.Sel.Name == "CommandContext" {
-			start = 1
-		}
-		if len(call.Args) < start+3 {
-			return true
-		}
-		shell, shellOK := helpers.StringLiteral(call.Args[start])
-		flag, flagOK := helpers.StringLiteral(call.Args[start+1])
-		shell = filepath.Base(shell)
-		if !shellOK || shell != "sh" && shell != "bash" || !flagOK || flag != "-c" {
-			return true
-		}
-		if literal, ok := ast.Unparen(call.Args[start+2]).(*ast.BasicLit); ok && literal.Kind == token.STRING {
+		if literal, ok := ast.Unparen(script).(*ast.BasicLit); ok && literal.Kind == token.STRING {
 			executed[literal] = true
 		}
 		return true

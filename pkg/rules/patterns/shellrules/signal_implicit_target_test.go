@@ -492,6 +492,182 @@ func stop() { _ = exec.Command("sh", "-c", "kill -9 -1") }
 	assert.Equal(t, []int{4}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, nil)))
 }
 
+func TestSignalImplicitTargetRangeStringsFollowTheirUse(t *testing.T) {
+	source := `package sample
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"strings"
+)
+func inspect(string) {}
+type recorder struct{}
+func (recorder) Command(string, string, string) {}
+type command string
+func (c command) run() { _ = exec.Command("sh", "-c", string(c)).Run() }
+type commandRecord struct { command string }
+var storedCommand commandRecord
+func runShell(s string) { _ = exec.Command("sh", "-c", s).Run() }
+func runGrouped(a, b string) { _ = exec.Command("sh", "-c", b).Run() }
+func reverse(a, b string) { _ = exec.Command("sh", "-c", a).Run() }
+func tables() {
+	var saved string
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { runShell(s) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { runOtherFile(s) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { alias := s; _ = exec.Command("sh", "-c", alias).Run() } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { _ = exec.Command("sh", "-c", "exec " + s).Run() } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { _ = exec.CommandContext(context.Background(), "bash", "-c", fmt.Sprintf("exec %s", s)).Run() } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { _ = exec.Command("env", "sh", "-c", s).Run() } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { _ = exec.Command("/bin/sh", "-c", s).Run() } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { _ = exec.CommandContext(context.Background(), "bash", "-c", s, "arg").Run() } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { command(s).run() } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { runGrouped("safe", s) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { reverse(s, "safe") } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { inspect(strings.TrimSpace(s)) } // WANT-NONE
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { _ = s == strings.TrimSpace(s) } // WANT-NONE
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { saved = s } // WANT
+	_ = exec.Command("sh", "-c", saved).Run()
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { inspect(s); { s := "safe"; _ = exec.Command("sh", "-c", s) } } // WANT-NONE
+	for _, s := range []string{"kill -9 $PPID"} { inspect(s); { s := "safe"; _ = exec.Command("sh", "-c", s) } } // WANT-NONE
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { (recorder{}).Command("sh", "-c", s) } // WANT-NONE
+	for _, s := range []string{"kill -9 $PPID"} { (recorder{}).Command("sh", "-c", s) } // WANT-NONE
+	for _, s := range []string{
+		"kill -9 $PPID", // WANT
+		"bash -c 'kill -9 $PPID'", // WANT
+	} { _ = exec.Command("sh", "-c", s).Run() }
+	for _, s := range []string{} { _ = exec.Command("sh", "-c", s).Run() }
+	for _, s := range []string{"kill -9 $PPID"} { other := "safe"; inspect(s); _ = exec.Command("sh", "-c", other).Run() } // WANT-NONE
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { inspect(s) } // WANT-NONE
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { storedCommand.command = s } // WANT-NONE
+}
+`
+	helper := `package sample
+import "os/exec"
+func runOtherFile(s string) { _ = exec.Command("bash", "-c", s).Run() }
+`
+	file, pkg := signalSourceTyped(t, "signal_test.go", source, helper)
+	var want []int
+	for i, line := range strings.Split(source, "\n") {
+		if strings.Contains(line, "// WANT") && !strings.Contains(line, "WANT-NONE") {
+			want = append(want, i+1)
+		}
+	}
+	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+}
+
+func TestSignalImplicitTargetRangeStringsWithoutTypesRemainFindings(t *testing.T) {
+	source := `package sample
+func inspect(string) {}
+func tables() {
+	for _, command := range []string{"bash -c 'kill -9 $PPID'"} { inspect(command) }
+}
+`
+	file := core.NewFileContext("signal_test.go", ".", []byte(source), nil)
+	file.GoFileSet = token.NewFileSet()
+	file.GoAST, _ = parser.ParseFile(file.GoFileSet, file.Path, source, parser.AllErrors)
+	assert.Equal(t, []int{4}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, nil)))
+}
+
+func TestSignalImplicitTargetRangeStringsRecognizeShellInvocationForms(t *testing.T) {
+	source := `package sample
+import (
+	"context"
+	"os/exec"
+)
+type recorder struct{}
+func (recorder) Command(string, string, string) {}
+func run(command string) {
+	_ = exec.Command("/bin/sh", "-c", command)
+	_ = exec.CommandContext(context.Background(), "bash", "-c", command, "extra")
+	_ = exec.Command("env", "sh", "-c", command)
+	(recorder{}).Command("sh", "-c", command)
+}
+`
+	file, pkg := signalSourceTyped(t, "signal_test.go", source)
+	var recognized, rejected int
+	ast.Inspect(file.GoAST, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		_, ok = shellExecutionScript(call, pkg.info)
+		if ok {
+			recognized++
+		} else if rangeCallFunc(call, pkg.info) != nil {
+			rejected++
+		}
+		return true
+	})
+	assert.Equal(t, 3, recognized)
+	assert.GreaterOrEqual(t, rejected, 1)
+}
+
+func signalSourceTyped(t *testing.T, filename, source string, otherSources ...string) (*core.FileContext, *signalPackage) {
+	t.Helper()
+	fset := token.NewFileSet()
+	allSources := append([]string{source}, otherSources...)
+	parsed := make([]*ast.File, 0, len(allSources))
+	for i, text := range allSources {
+		name := filename
+		if i > 0 {
+			name = "helper.go"
+		}
+		file, err := parser.ParseFile(fset, name, text, parser.AllErrors)
+		require.NoError(t, err)
+		parsed = append(parsed, file)
+	}
+	info := &types.Info{
+		Types: make(map[ast.Expr]types.TypeAndValue), Defs: make(map[*ast.Ident]types.Object),
+		Uses: make(map[*ast.Ident]types.Object), Selections: make(map[*ast.SelectorExpr]*types.Selection),
+	}
+	_, err := (&types.Config{Importer: signalTestImporter{base: importer.Default()}}).Check("example.com/sample", fset, parsed, info)
+	require.NoError(t, err)
+	ctx := core.NewFileContext(filename, ".", []byte(source), nil)
+	ctx.GoAST, ctx.GoFileSet, ctx.GoTypesInfo = parsed[0], fset, info
+	return ctx, newSignalPackage("example.com/sample", info, parsed...)
+}
+
+func TestSignalImplicitTargetRangeHelperDepthIsConservative(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		helpers     int
+		wantFinding bool
+	}{
+		{name: "text helper chain below limit", helpers: 6},
+		{name: "depth limit leaves finding", helpers: 8, wantFinding: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var source strings.Builder
+			source.WriteString("package sample\nfunc inspect(string) {}\n")
+			for i := 0; i < tc.helpers; i++ {
+				source.WriteString("func helper")
+				source.WriteString(strconv.Itoa(i))
+				source.WriteString("(command string) {")
+				if i+1 < tc.helpers {
+					source.WriteString(" helper")
+					source.WriteString(strconv.Itoa(i + 1))
+					source.WriteString("(command)")
+				} else if !tc.wantFinding {
+					source.WriteString(" inspect(command)")
+				}
+				source.WriteString(" }\n")
+			}
+			source.WriteString("func tables() {\n for _, command := range []string{\"bash -c 'kill -9 $PPID'\"} { helper0(command) }")
+			if tc.wantFinding {
+				source.WriteString(" // WANT")
+			}
+			source.WriteString("\n}\n")
+			file, pkg := signalSourceTyped(t, "signal_test.go", source.String())
+			got := rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg))
+			if tc.wantFinding {
+				assert.Equal(t, []int{tc.helpers + 4}, got)
+			} else {
+				assert.Empty(t, got)
+			}
+		})
+	}
+}
+
 func TestSignalImplicitTargetGoLiteralContexts(t *testing.T) {
 	source := `package sample
 import (
