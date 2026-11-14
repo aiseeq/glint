@@ -1137,7 +1137,7 @@ func TestDuplicateFuncOfLibraryMissingSourceIsSilent(t *testing.T) {
 	var warnings bytes.Buffer
 	rule.warningWriter = &warnings
 	keys := map[string]libraryMatch{}
-	rule.mergeDependencyKeys(keys, goModule{path: "example.com/owner/app", dir: t.TempDir()}, libraryDependency{path: "example.com/owner/lib", version: "v1.0.0"}, toolcache.New("missing-source-test"))
+	rule.mergeDependencyKeys(&moduleLibrary{keys: keys}, goModule{path: "example.com/owner/app", dir: t.TempDir()}, libraryDependency{path: "example.com/owner/lib", version: "v1.0.0"}, toolcache.New("missing-source-test"))
 	assert.Empty(t, keys)
 	assert.Empty(t, warnings.String())
 }
@@ -1149,7 +1149,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenDependenciesCannotBeRead(t *testing.T) {
 	var warnings bytes.Buffer
 	rule.warningWriter = &warnings
 	keys := rule.loadModuleLibraryKeys(goModule{path: "example.com/owner/app", dir: dir}, nil, toolcache.New("bad-project-mod-test"))
-	assert.Empty(t, keys)
+	assert.Empty(t, keys.keys)
 	assert.Contains(t, warnings.String(), "could not read dependencies")
 	assert.Contains(t, warnings.String(), "go.mod")
 }
@@ -1160,7 +1160,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenSourceLocationFails(t *testing.T) {
 	var warnings bytes.Buffer
 	rule.warningWriter = &warnings
 	keys := map[string]libraryMatch{}
-	rule.mergeDependencyKeys(keys, goModule{path: "example.com/owner/app", dir: t.TempDir()}, libraryDependency{path: "invalid path", version: "v1.0.0"}, toolcache.New("bad-source-path-test"))
+	rule.mergeDependencyKeys(&moduleLibrary{keys: keys}, goModule{path: "example.com/owner/app", dir: t.TempDir()}, libraryDependency{path: "invalid path", version: "v1.0.0"}, toolcache.New("bad-source-path-test"))
 	assert.Empty(t, keys)
 	assert.Contains(t, warnings.String(), "could not locate source")
 }
@@ -1174,7 +1174,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenExecutableHashFails(t *testing.T) {
 	rule := NewDuplicateFuncOfLibraryRule()
 	var warnings bytes.Buffer
 	rule.warningWriter = &warnings
-	rule.mergeDependencyKeys(map[string]libraryMatch{}, project, dep, cache)
+	rule.mergeDependencyKeys(&moduleLibrary{keys: map[string]libraryMatch{}}, project, dep, cache)
 	assert.Contains(t, warnings.String(), "could not identify analyzer")
 }
 
@@ -1191,7 +1191,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenCacheLoadFails(t *testing.T) {
 		return libraryCacheEntry{Keys: map[string][]libraryFunction{}}, nil
 	}
 	rule.storeCache = func(*toolcache.Cache, string, libraryCacheEntry) error { return nil }
-	rule.mergeDependencyKeys(map[string]libraryMatch{}, project, dep, cache)
+	rule.mergeDependencyKeys(&moduleLibrary{keys: map[string]libraryMatch{}}, project, dep, cache)
 	assert.Contains(t, warnings.String(), "could not read cache")
 }
 
@@ -1207,7 +1207,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenDiskCacheLoadFails(t *testing.T) {
 		return libraryCacheEntry{Keys: map[string][]libraryFunction{}}, nil
 	}
 	rule.storeCache = func(*toolcache.Cache, string, libraryCacheEntry) error { return nil }
-	rule.mergeDependencyKeys(map[string]libraryMatch{}, project, dep, cache)
+	rule.mergeDependencyKeys(&moduleLibrary{keys: map[string]libraryMatch{}}, project, dep, cache)
 	assert.Contains(t, warnings.String(), "could not read cache")
 }
 
@@ -1223,7 +1223,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenLibraryLoadFails(t *testing.T) {
 	rule.loadLibraryKeys = func(string) (libraryCacheEntry, error) {
 		return libraryCacheEntry{}, errors.New("synthetic package load failure")
 	}
-	rule.mergeDependencyKeys(map[string]libraryMatch{}, project, dep, cache)
+	rule.mergeDependencyKeys(&moduleLibrary{keys: map[string]libraryMatch{}}, project, dep, cache)
 	assert.Contains(t, warnings.String(), "could not load source")
 }
 
@@ -1242,7 +1242,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenCacheStoreFails(t *testing.T) {
 	rule.storeCache = func(*toolcache.Cache, string, libraryCacheEntry) error {
 		return errors.New("synthetic cache write failure")
 	}
-	rule.mergeDependencyKeys(map[string]libraryMatch{}, project, dep, cache)
+	rule.mergeDependencyKeys(&moduleLibrary{keys: map[string]libraryMatch{}}, project, dep, cache)
 	assert.Contains(t, warnings.String(), "could not write cache")
 }
 

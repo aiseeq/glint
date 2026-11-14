@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/aiseeq/glint/pkg/core"
 )
 
 // JsFunctions answers FunctionAtBrace for every '{' of a file without walking
@@ -149,7 +151,7 @@ func (x *JsFunctions) controlHeader(from, to int) bool {
 	if strings.HasPrefix(head, "else") && (len(head) == 4 || !IsWordChar(head[4])) {
 		return true
 	}
-	for _, keyword := range []string{"if", "for", "while", "switch", "catch", "with"} {
+	for _, keyword := range core.JSParenControlKeywords {
 		if strings.HasPrefix(head, keyword) {
 			open := x.skipSpace(from+len(keyword), to)
 			return open < to && x.code[open] == '('

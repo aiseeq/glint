@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -29,14 +30,23 @@ func init() { rules.Register(NewDuplicateFuncOfLibraryRule()) }
 
 // DuplicateFuncOfLibraryRule compares normalized function bodies with exported
 // functions from directly required libraries of the same owner and with modules
-// listed in library_modules. Function names do not affect a match.
+// listed in library_modules. Function names do not affect a match. Besides a
+// body equal token for token, a near copy counts (nearCopyThreshold): one with
+// independent statements swapped, or a method that runs the body of a library
+// function over its own element type. The TypeScript of the project is
+// compared with the exported TypeScript functions those libraries ship.
 type DuplicateFuncOfLibraryRule struct {
-	rules.GoFileFindingRule
 	*rules.BaseRule
 	warningWriter   io.Writer
 	loadCache       func(*toolcache.Cache, string) (libraryCacheEntry, bool, error)
 	storeCache      func(*toolcache.Cache, string, libraryCacheEntry) error
 	loadLibraryKeys func(string) (libraryCacheEntry, error)
+
+	// mu guards the libraries of the root: AnalyzeGoProject loads them for
+	// the Go files, UseProjectFiles reuses them for the TypeScript files.
+	mu        sync.Mutex
+	libraries map[string]*moduleLibrary
+	tsFiles   map[string]*nearIndex
 }
 
 // NewDuplicateFuncOfLibraryRule creates the library function duplication rule.
@@ -54,8 +64,23 @@ func NewDuplicateFuncOfLibraryRule() *DuplicateFuncOfLibraryRule {
 		).DeclareSettings(rules.NewSettingSpec("library_modules", "string list", []string{}, "Module path prefixes treated as libraries.", []string{"example.com/shared"}))}
 }
 
-// AnalyzeFile is a no-op because this rule needs project module metadata.
-func (r *DuplicateFuncOfLibraryRule) AnalyzeFile(*core.FileContext) []*core.Violation { return nil }
+// ReportsOn reports the files the rule names: Go and TypeScript sources.
+func (r *DuplicateFuncOfLibraryRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile() || ctx.IsTypeScriptFile()
+}
+
+// ReadsNonGoFiles marks that AnalyzeFile reads the TypeScript files.
+func (r *DuplicateFuncOfLibraryRule) ReadsNonGoFiles() {}
+
+// ReadsOtherFiles reports that findings depend on the library sources.
+func (r *DuplicateFuncOfLibraryRule) ReadsOtherFiles() bool { return true }
+
+// ResetState forgets the libraries of the previous root.
+func (r *DuplicateFuncOfLibraryRule) ResetState() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.libraries, r.tsFiles = nil, nil
+}
 
 // RequiresSSA reports that typed syntax is enough for this rule.
 func (r *DuplicateFuncOfLibraryRule) RequiresSSA() bool { return false }
@@ -68,10 +93,30 @@ type libraryFunction struct {
 	Package    string `json:"package"`
 	ImportPath string `json:"import_path"`
 }
+
+// libraryNearFunction is a library function in the form of the near
+// comparison; File is the source of a TypeScript function in the library.
+type libraryNearFunction struct {
+	libraryFunction
+	Lang string   `json:"lang"`
+	File string   `json:"file,omitempty"`
+	Body nearBody `json:"body"`
+}
 type libraryCacheEntry struct {
 	Keys map[string][]libraryFunction `json:"keys"`
+	Near []libraryNearFunction        `json:"near,omitempty"`
 }
 type libraryMatch struct{ name, module, packageName, importPath string }
+
+// moduleLibrary is what the libraries of one project module offer: the exact
+// bodies of their Go functions and the near forms of their Go and TypeScript
+// functions.
+type moduleLibrary struct {
+	keys         map[string]libraryMatch
+	goCandidates []*nearCandidate
+	goNear       *nearIndex
+	tsNear       []*nearCandidate
+}
 type goModule struct{ path, dir, goMod string }
 
 func moduleIdentity(m goModule) string {
@@ -94,10 +139,10 @@ func (r *DuplicateFuncOfLibraryRule) AnalyzeGoProject(ctx *core.GoProjectContext
 	if len(modules) == 0 {
 		return nil, nil
 	}
-	keysByModule := r.loadProjectLibraryKeys(modules, allowed)
+	libraries := r.loadProjectLibraryKeys(modules, allowed, false)
 	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		id := fileModules[filepath.Clean(file.Path)]
-		return r.findLibraryDuplicates(ctx, file, info, keysByModule[id])
+		return r.findLibraryDuplicates(ctx, file, info, libraries[id])
 	})
 }
 
@@ -121,30 +166,44 @@ func projectModules(ctx *core.GoProjectContext) (map[string]goModule, map[string
 	return modules, fileModules
 }
 
-func (r *DuplicateFuncOfLibraryRule) loadProjectLibraryKeys(modules map[string]goModule, allowed []string) map[string]map[string]libraryMatch {
+// loadProjectLibraryKeys loads the libraries of the modules. AnalyzeGoProject
+// loads them anew each run (reuse false) and keeps them for UseProjectFiles,
+// which runs after it in the same run (reuse true).
+func (r *DuplicateFuncOfLibraryRule) loadProjectLibraryKeys(modules map[string]goModule, allowed []string, reuse bool) map[string]*moduleLibrary {
 	moduleIDs := slices.Sorted(maps.Keys(modules))
-	keysByModule := make(map[string]map[string]libraryMatch, len(modules))
+	out := make(map[string]*moduleLibrary, len(modules))
 	cache := toolcache.New("duplicate-func-of-library")
-	for _, id := range moduleIDs {
-		keysByModule[id] = r.loadModuleLibraryKeys(modules[id], allowed, cache)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.libraries == nil {
+		r.libraries = make(map[string]*moduleLibrary)
 	}
-	return keysByModule
+	for _, id := range moduleIDs {
+		lib, ok := r.libraries[id]
+		if !ok || !reuse {
+			lib = r.loadModuleLibraryKeys(modules[id], allowed, cache)
+			r.libraries[id] = lib
+		}
+		out[id] = lib
+	}
+	return out
 }
 
-func (r *DuplicateFuncOfLibraryRule) loadModuleLibraryKeys(m goModule, allowed []string, cache *toolcache.Cache) map[string]libraryMatch {
-	keys := make(map[string]libraryMatch)
+func (r *DuplicateFuncOfLibraryRule) loadModuleLibraryKeys(m goModule, allowed []string, cache *toolcache.Cache) *moduleLibrary {
+	lib := &moduleLibrary{keys: make(map[string]libraryMatch)}
 	deps, err := libraryDependencies(m.dir, m.path, allowed)
 	if err != nil {
 		r.warnLibraryInput(m.path, "read dependencies", err)
-		return keys
+		return lib
 	}
 	for _, dep := range deps {
-		r.mergeDependencyKeys(keys, m, dep, cache)
+		r.mergeDependencyKeys(lib, m, dep, cache)
 	}
-	return keys
+	lib.goNear = newNearIndex(lib.goCandidates, minGoNearCopyTokens)
+	return lib
 }
 
-func (r *DuplicateFuncOfLibraryRule) mergeDependencyKeys(keys map[string]libraryMatch, project goModule, dep libraryDependency, cache *toolcache.Cache) {
+func (r *DuplicateFuncOfLibraryRule) mergeDependencyKeys(lib *moduleLibrary, project goModule, dep libraryDependency, cache *toolcache.Cache) {
 	dir, digest, found, err := dependencySource(project.dir, dep)
 	if err != nil {
 		r.warnLibraryInput(dep.path, "locate source", err)
@@ -187,7 +246,26 @@ func (r *DuplicateFuncOfLibraryRule) mergeDependencyKeys(keys map[string]library
 			}
 		}
 	}
-	mergeImportableFunctions(keys, project, dep, entry)
+	mergeImportableFunctions(lib.keys, project, dep, entry)
+	mergeNearFunctions(lib, project, dep, entry)
+}
+
+// mergeNearFunctions adds the near forms of the entry: the Go functions the
+// project can import and the TypeScript ones.
+func mergeNearFunctions(lib *moduleLibrary, project goModule, dep libraryDependency, entry libraryCacheEntry) {
+	for i := range entry.Near {
+		fn := &entry.Near[i]
+		match := libraryMatch{name: fn.Name, module: dep.path, packageName: fn.Package, importPath: fn.ImportPath}
+		switch fn.Lang {
+		case "go":
+			if packageImportableFrom(project.path, fn.ImportPath) {
+				lib.goCandidates = append(lib.goCandidates, newNearCandidate(match, fn.Body))
+			}
+		case "ts":
+			lib.tsNear = append(lib.tsNear, newNearCandidate(match, fn.Body))
+		}
+	}
+	return
 }
 
 func loadLibraryCache(cache *toolcache.Cache, key string) (libraryCacheEntry, bool, error) {
@@ -213,35 +291,58 @@ func mergeImportableFunctions(keys map[string]libraryMatch, project goModule, de
 	}
 }
 
-func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectContext, file *core.FileContext, info *types.Info, libraryKeys map[string]libraryMatch) []*core.Violation {
-	if len(libraryKeys) == 0 {
+func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectContext, file *core.FileContext, info *types.Info, lib *moduleLibrary) []*core.Violation {
+	if lib == nil || len(lib.keys) == 0 && lib.goNear.empty() {
 		return nil
 	}
 	var out []*core.Violation
 	for _, decl := range file.GoAST.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
-		if !ok || !IsDuplicateFuncBodyCandidate(fd, info) {
-			continue
-		}
-		n := newFunctionBlockNormalizer(info, fd)
-		n.walk(fd.Body)
-		if n.nodes < minimumDuplicateBodyNodes {
-			continue
-		}
-		match, ok := libraryKeys[n.b.String()]
-		if !ok {
+		if !ok || !nearCopyCandidate(fd, info) {
 			continue
 		}
 		line := ctx.FileSet.Position(fd.Pos()).Line
-		if file.IsSuppressed(line, r.Name()) {
+		if match, ok := exactLibraryMatch(fd, info, lib.keys); ok {
+			if !file.IsSuppressed(line, r.Name()) {
+				out = append(out, r.libraryViolation(file, fd, line, match, 1, true))
+			}
 			continue
 		}
-		out = append(out, r.libraryViolation(file, fd, line, match))
+		body := goNearBody(info, fd)
+		candidate, score := lib.goNear.best(body)
+		if candidate == nil || file.IsSuppressed(line, r.Name()) {
+			continue
+		}
+		out = append(out, r.libraryViolation(file, fd, line, candidate.fn, score, slices.Equal(body.Tokens, candidate.body.Tokens)))
 	}
 	return out
 }
 
-func (r *DuplicateFuncOfLibraryRule) libraryViolation(file *core.FileContext, fd *ast.FuncDecl, line int, match libraryMatch) *core.Violation {
+// nearCopyCandidate admits what IsDuplicateFuncBodyCandidate admits and
+// methods as well: a method may run the body of a library function over the
+// fields of its receiver. A method that only calls a function of another
+// package needs no check of its own: no library function is such a call.
+func nearCopyCandidate(fd *ast.FuncDecl, info *types.Info) bool {
+	if fd.Recv == nil {
+		return IsDuplicateFuncBodyCandidate(fd, info)
+	}
+	return fd.Body != nil && fd.Name != nil && fd.Type != nil && fd.Type.Params != nil && fd.Type.Params.NumFields() > 0 && info != nil
+}
+
+func exactLibraryMatch(fd *ast.FuncDecl, info *types.Info, keys map[string]libraryMatch) (libraryMatch, bool) {
+	if fd.Recv != nil || len(keys) == 0 {
+		return libraryMatch{}, false
+	}
+	n := newFunctionBlockNormalizer(info, fd)
+	n.walk(fd.Body)
+	if n.nodes < minimumDuplicateBodyNodes {
+		return libraryMatch{}, false
+	}
+	match, ok := keys[n.b.String()]
+	return match, ok
+}
+
+func (r *DuplicateFuncOfLibraryRule) libraryViolation(file *core.FileContext, fd *ast.FuncDecl, line int, match libraryMatch, score float64, exact bool) *core.Violation {
 	packageName := match.packageName
 	for _, spec := range file.GoAST.Imports {
 		importPath, err := strconv.Unquote(spec.Path.Value)
@@ -250,7 +351,11 @@ func (r *DuplicateFuncOfLibraryRule) libraryViolation(file *core.FileContext, fd
 			break
 		}
 	}
-	v := r.CreateViolation(file.RelPath, line, fmt.Sprintf("Function %s duplicates function %s of library %s — call %s.%s instead", fd.Name.Name, match.name, match.module, packageName, match.name))
+	message := fmt.Sprintf("Function %s duplicates function %s of library %s — call %s.%s instead", fd.Name.Name, match.name, match.module, packageName, match.name)
+	if !exact {
+		message = fmt.Sprintf("Function %s is a near copy (%d%% alike) of function %s of library %s — call %s.%s instead", funcDisplayName(fd), int(score*100), match.name, match.module, packageName, match.name)
+	}
+	v := r.CreateViolation(file.RelPath, line, message)
 	v.WithCode(strings.TrimSpace(file.GetLine(line)))
 	v.WithSuggestion(fmt.Sprintf("Call %s.%s instead of keeping a copy", packageName, match.name))
 	return v
@@ -456,7 +561,11 @@ func dependencySource(root string, dep libraryDependency) (string, string, bool,
 		if err != nil {
 			return "", "", false, fmt.Errorf("hash local module tree %s: %w", dep.dir, err)
 		}
-		return dep.dir, "local:" + hash, true, nil
+		tsHash, err := hashLibraryTSFiles(dep.dir)
+		if err != nil {
+			return "", "", false, fmt.Errorf("hash local module tree %s: %w", dep.dir, err)
+		}
+		return dep.dir, "local:" + hash + ":" + tsHash, true, nil
 	}
 	cache, err := moduleCacheDir(root)
 	if err != nil {
@@ -609,10 +718,19 @@ func loadLibraryFunctionKeys(dir string) (libraryCacheEntry, error) {
 				n := newFunctionBlockNormalizer(pkg.TypesInfo, fd)
 				n.walk(fd.Body)
 				if n.nodes >= minimumDuplicateBodyNodes {
-					entry.Keys[n.b.String()] = append(entry.Keys[n.b.String()], libraryFunction{Name: fd.Name.Name, Package: pkg.Name, ImportPath: pkg.PkgPath})
+					found := libraryFunction{Name: fd.Name.Name, Package: pkg.Name, ImportPath: pkg.PkgPath}
+					entry.Keys[n.b.String()] = append(entry.Keys[n.b.String()], found)
+					if body := goNearBody(pkg.TypesInfo, fd); len(body.Tokens) >= minGoNearCopyTokens {
+						entry.Near = append(entry.Near, libraryNearFunction{libraryFunction: found, Lang: "go", Body: body})
+					}
 				}
 			}
 		}
 	}
+	tsFuncs, err := libraryTSFunctions(dir)
+	if err != nil {
+		return libraryCacheEntry{}, err
+	}
+	entry.Near = append(entry.Near, tsFuncs...)
 	return entry, nil
 }

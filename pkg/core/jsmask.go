@@ -12,12 +12,16 @@ const (
 	jsModeTemplate
 )
 
-// jsRegexKeywords are the words after which a '/' starts a regex literal.
-var jsRegexKeywords = map[string]bool{
+// JSRegexKeywords are the words after which a '/' starts a regex literal.
+var JSRegexKeywords = map[string]bool{
 	"return": true, "typeof": true, "case": true, "do": true, "else": true,
 	"in": true, "of": true, "new": true, "delete": true, "void": true,
 	"throw": true, "yield": true, "await": true,
 }
+
+// JSParenControlKeywords open a statement with a parenthesized head: the
+// braces after the head are a block, not the body of a function.
+var JSParenControlKeywords = []string{"if", "for", "while", "switch", "catch", "with"}
 
 // jsMasker carries the scanner state across lines: block comments and
 // template literals span lines, and the previous token decides whether a
@@ -226,7 +230,7 @@ func (m *jsMasker) regexAllowed() bool {
 		return true
 	}
 	if isJSWordChar(m.prev) {
-		return jsRegexKeywords[m.prevWord]
+		return JSRegexKeywords[m.prevWord]
 	}
 	return strings.IndexByte("(,=:[!&|?{};+-*%~^", m.prev) >= 0
 }
