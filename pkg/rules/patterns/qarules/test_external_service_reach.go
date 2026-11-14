@@ -596,7 +596,7 @@ func httpAddressIn(body *ast.BlockStmt, info *types.Info, urls, fields map[types
 			}
 			return host == ""
 		}
-		if !isNetHTTPClientMethod(info, sel) {
+		if !isNetHTTPClientSendMethod(info, sel) {
 			return true
 		}
 		if helpers.NetHTTPSendFuncs[sel.Sel.Name] && len(call.Args) > 0 {
@@ -821,7 +821,7 @@ func httpURLFieldsIn(body *ast.BlockStmt, info *types.Info) map[types.Object]boo
 			}
 			return true
 		}
-		if !isNetHTTPClientMethod(info, sel) {
+		if !isNetHTTPClientSendMethod(info, sel) {
 			return true
 		}
 		if helpers.NetHTTPSendFuncs[sel.Sel.Name] && len(call.Args) > 0 {

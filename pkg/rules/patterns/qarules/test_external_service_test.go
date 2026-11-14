@@ -1327,12 +1327,12 @@ func TestDirectMethod(t *testing.T) { c := New(); _ = c.Deposit() }
 
 	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
-	require.Len(t, violations, 8, "%v", messages(violations))
+	require.Len(t, violations, 7, "%v", messages(violations))
 	got := strings.Join(messages(violations), "\n")
-	for _, name := range []string{"TestPassedToHelper", "TestAssignedElsewhere", "TestAssignedToField", "TestStoredInLiteral", "TestReturned", "TestCaptured", "TestSentToChannel", "TestDirectMethod"} {
+	for _, name := range []string{"TestAssignedElsewhere", "TestAssignedToField", "TestStoredInLiteral", "TestReturned", "TestCaptured", "TestSentToChannel", "TestDirectMethod"} {
 		assert.Contains(t, got, name)
 	}
-	for _, name := range []string{"TestDiscarded", "TestComparedWithNil", "TestFieldRead", "TestSafeMethod", "TestDiscardedHolder", "TestHolderComparedWithNil"} {
+	for _, name := range []string{"TestDiscarded", "TestComparedWithNil", "TestFieldRead", "TestSafeMethod", "TestDiscardedHolder", "TestHolderComparedWithNil", "TestPassedToHelper"} {
 		assert.NotContains(t, got, name)
 	}
 }
@@ -1519,4 +1519,143 @@ func TestPricesOnDefault(t *testing.T) {
 	require.Len(t, violations, 2, "%v", reported)
 	assert.Contains(t, reported[0]+reported[1], "TestPricesFromConfiguredBase")
 	assert.Contains(t, reported[0]+reported[1], "TestPricesOnDefault")
+}
+
+func TestTestExternalServiceRule_GlobalClientMethodCallIsReported(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"fixed/client.go": `package fixed
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() *Client { return &Client{Base: "https://global-api.example.org/send"} }
+func (c *Client) Send() { _, _ = http.Get(c.Base) }
+var Global = New()
+`,
+		"fixed/client_test.go": `package fixed
+
+import "testing"
+
+func TestGlobalSend(t *testing.T) { Global.Send() }
+func TestGlobalInspect(t *testing.T) { _ = Global.Base }
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1, "%v", messages(violations))
+	assert.Contains(t, violations[0].Message, "TestGlobalSend")
+}
+
+func TestTestExternalServiceRule_DefaultClientConvenienceMethodsAreReported(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+func Direct() { _, _ = http.DefaultClient.Get("https://get-api.example.net/data") }
+func AlsoDirect() { _, _ = http.DefaultClient.Post("https://post-api.example.net/data", "text/plain", nil) }
+func Do() { req, _ := http.NewRequest("GET", "https://do-api.example.net/data", nil); _, _ = http.DefaultClient.Do(req) }
+`,
+		"provider/client_test.go": `package provider
+
+import "testing"
+
+func TestGet(t *testing.T) { Direct() }
+func TestPost(t *testing.T) { AlsoDirect() }
+func TestDo(t *testing.T) { Do() }
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 3, "%v", messages(violations))
+}
+
+func TestTestExternalServiceRule_EnvironmentAddressIsOutboundWithoutCredential(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"provider/client.go": `package provider
+
+import (
+	"net/http"
+	"os"
+)
+
+type Client struct{ URL string }
+func New() *Client { return &Client{URL: os.Getenv("PROVIDER_URL")} }
+func (c *Client) Send() { _, _ = http.Get(c.URL) }
+func Direct() { _, _ = http.Get(os.Getenv("PROVIDER_URL")) }
+func Config(url string) { _, _ = http.Get(url) }
+`,
+		"provider/client_test.go": `package provider
+
+import (
+	"os"
+	"testing"
+)
+
+func TestConfiguredAddress(t *testing.T) { New().Send() }
+func TestDirectAddress(t *testing.T) { Direct() }
+func TestCallerURL(t *testing.T) { Config(os.Getenv("PROVIDER_URL")) }
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 3, "%v", messages(violations))
+}
+
+func TestTestExternalServiceRule_ProvenUnusedConstructorResultsAreSilent(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() *Client { return &Client{Base: "https://unused-api.example.com"} }
+func (c *Client) Send() { _, _ = http.Get(c.Base) }
+`,
+		"provider/client_test.go": `package provider
+
+import "testing"
+
+type Box struct{ C *Client }
+func ignore(*Client) {}
+func TestInspectBoxField(t *testing.T) { b := Box{C: New()}; _ = b.C.Base }
+func TestDiscardMapValue(t *testing.T) { m := map[string]*Client{"x": New()}; _ = m["x"] }
+func TestPassToEmptyLocalFunction(t *testing.T) { c := New(); ignore(c) }
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations, "%v", messages(violations))
+}
+
+func TestTestExternalServiceRule_UncertainConstructorUsesRemainReported(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() *Client { return &Client{Base: "https://uncertain-api.example.com"} }
+func (c *Client) Send() { _, _ = http.Get(c.Base) }
+func (c *Client) Fetch() error { _, err := http.Get(c.Base); return err }
+`,
+		"provider/client_test.go": `package provider
+
+import "testing"
+
+var opaque func(*Client)
+func forward(c *Client) error { return c.Fetch() }
+func TestStoredAndUnknown(t *testing.T) { m := map[string]*Client{"x": New()}; opaque(m["x"]) }
+func TestLiveMethod(t *testing.T) { New().Send() }
+func TestReturnsLiveCall(t *testing.T) { c := New(); _ = forward(c) }
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 3, "%v", messages(violations))
 }

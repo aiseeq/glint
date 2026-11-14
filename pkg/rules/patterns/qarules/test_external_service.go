@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"io/fs"
 	"os"
@@ -241,6 +242,173 @@ func outboundDirectories(ctx *core.GoProjectContext, outbound map[string]outboun
 	return dirs
 }
 
+func packageHasEnvironmentHTTPAddress(pkg *core.GoPackageContext) bool {
+	if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
+		return false
+	}
+	info := pkg.Package.TypesInfo
+	envFields := environmentAddressFields(pkg, info)
+	for _, file := range pkg.Files {
+		if file == nil || file.GoAST == nil || file.IsTestFile() {
+			continue
+		}
+		if fileSendsToEnvironmentAddress(file.GoAST, info, envFields) {
+			return true
+		}
+	}
+	return false
+}
+
+func environmentAddressFields(pkg *core.GoPackageContext, info *types.Info) map[types.Object]bool {
+	fields := map[types.Object]bool{}
+	for _, file := range pkg.Files {
+		if file == nil || file.GoAST == nil || file.IsTestFile() {
+			continue
+		}
+		ast.Inspect(file.GoAST, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			for _, elt := range lit.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok || !expressionUsesOSGetenv(kv.Value, info) {
+					continue
+				}
+				key, ok := kv.Key.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				if field := structFieldObject(info.TypeOf(lit), key.Name); field != nil {
+					fields[field] = true
+				}
+			}
+			return true
+		})
+	}
+	return fields
+}
+
+func fileSendsToEnvironmentAddress(file *ast.File, info *types.Info, fields map[types.Object]bool) bool {
+	found := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if isNetHTTPPackageFunc(sel, info, helpers.NetHTTPSendFuncs) {
+			found = len(call.Args) > 0 && expressionUsesEnvironmentAddress(call.Args[0], info, fields)
+			return !found
+		}
+		if !isNetHTTPClientSendMethod(info, sel) {
+			return true
+		}
+		if len(call.Args) > 0 && expressionUsesOSGetenv(call.Args[0], info) {
+			found = true
+			return false
+		}
+		found = expressionUsesEnvironmentField(call.Fun, info, fields)
+		return !found
+	})
+	return found
+}
+
+func expressionUsesEnvironmentAddress(root ast.Node, info *types.Info, fields map[types.Object]bool) bool {
+	return expressionUsesOSGetenv(root, info) || expressionUsesEnvironmentField(root, info, fields)
+}
+
+func expressionUsesEnvironmentField(root ast.Node, info *types.Info, fields map[types.Object]bool) bool {
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if ok {
+			if selection := info.Selections[sel]; selection != nil && fields[selection.Obj()] {
+				found = true
+				return false
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+func expressionUsesOSGetenv(root ast.Node, info *types.Info) bool {
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Getenv" {
+			return true
+		}
+		id, ok := sel.X.(*ast.Ident)
+		if ok {
+			if pkg, ok := info.Uses[id].(*types.PkgName); ok && pkg.Imported().Path() == "os" {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func packageGlobalLiveMethods(pkg *core.GoPackageContext, entries map[string]liveEntry) map[string]map[string]string {
+	globals := map[string]map[string]string{}
+	if pkg == nil || pkg.Package == nil {
+		return globals
+	}
+	for _, file := range pkg.Files {
+		if file == nil || file.GoAST == nil || file.IsTestFile() {
+			continue
+		}
+		for _, decl := range file.GoAST.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				values, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, name := range values.Names {
+					if i >= len(values.Values) {
+						continue
+					}
+					call, ok := values.Values[i].(*ast.CallExpr)
+					if !ok {
+						continue
+					}
+					id, ok := call.Fun.(*ast.Ident)
+					if !ok {
+						continue
+					}
+					entry, ok := entries[id.Name]
+					if !ok || len(entry.liveMethods) == 0 {
+						continue
+					}
+					methods := map[string]string{}
+					for method := range entry.liveMethods {
+						methods[method] = entry.address
+					}
+					globals[name.Name] = methods
+				}
+			}
+		}
+	}
+	return globals
+}
+
 // outboundPackage records why a package counts as talking to a third party.
 type outboundPackage struct {
 	// evidence renders inside the message: either the vendor URL or the credential the
@@ -256,6 +424,8 @@ type outboundPackage struct {
 	// else the package exports — config readers, decoders, constructors of inert types —
 	// is left alone, otherwise a test that never sends anything gets reported.
 	entries map[string]liveEntry
+	// globalMethods describes package-level clients initialized from a live constructor.
+	globalMethods map[string]map[string]string
 }
 
 // outboundPackages finds packages that issue HTTP requests to somebody else's server.
@@ -298,10 +468,13 @@ func (r *TestExternalServiceRule) outboundPackages(ctx *core.GoProjectContext) m
 			}
 		}
 
+		hasEnvAddress := packageHasEnvironmentHTTPAddress(pkg)
 		var evidence string
 		switch {
 		case doesHTTP && url != "":
 			evidence = "достигает внешнего HTTP-клиента (адрес вызова не установлен)"
+		case doesHTTP && hasEnvAddress && !hasLocalURL:
+			evidence = "адрес внешнего HTTP-вызова берётся из окружения"
 		case doesHTTP && credential != "" && !hasLocalURL:
 			evidence = "подписывает запросы секретом (" + credential + "), адрес приходит из конфигурации"
 		default:
@@ -312,11 +485,19 @@ func (r *TestExternalServiceRule) outboundPackages(ctx *core.GoProjectContext) m
 		if len(entries) == 0 {
 			continue
 		}
+		if hasEnvAddress {
+			for name, entry := range entries {
+				if entry.address == "" {
+					entry.address = "адрес из окружения"
+					entries[name] = entry
+				}
+			}
+		}
 		urlNames := map[string]string{}
 		for obj, host := range packageURLs(pkg, r.externalHost) {
 			urlNames[obj.Name()] = host
 		}
-		outbound[pkg.Package.PkgPath] = outboundPackage{evidence: evidence, name: pkg.Package.Name, entries: entries, urlNames: urlNames}
+		outbound[pkg.Package.PkgPath] = outboundPackage{evidence: evidence, name: pkg.Package.Name, entries: entries, urlNames: urlNames, globalMethods: packageGlobalLiveMethods(pkg, entries)}
 	}
 	return outbound
 }
@@ -376,7 +557,7 @@ func httpRequestIn(root ast.Node, info *types.Info, clientLiteral bool) bool {
 				}
 			}
 			// client.Do(req) — только если получатель действительно *http.Client.
-			if sel.Sel.Name == "Do" && isNetHTTPClientMethod(info, sel) {
+			if isNetHTTPClientSendMethod(info, sel) {
 				found = true
 				return false
 			}
@@ -406,6 +587,12 @@ func isNetHTTPClientMethod(info *types.Info, sel *ast.SelectorExpr) bool {
 		return false
 	}
 	return named.Obj().Pkg().Path() == netHTTPPath && named.Obj().Name() == "Client"
+}
+
+// isNetHTTPClientSendMethod recognizes both Do and the convenience methods on
+// *http.Client (Get, Post, PostForm, Head).
+func isNetHTTPClientSendMethod(info *types.Info, sel *ast.SelectorExpr) bool {
+	return (sel.Sel.Name == "Do" || helpers.NetHTTPSendFuncs[sel.Sel.Name]) && isNetHTTPClientMethod(info, sel)
 }
 
 // isNetHTTPType reports whether the expression names the given net/http type.
@@ -644,7 +831,7 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 		if start := r.optInStart(fn, envKeys, osPkgs, facts.optInHelpers); start.IsValid() {
 			liveEnd = start
 		}
-		scope := liveCallScope{liveEnd: liveEnd, unitTests: unitTests, hostOf: r.externalHost, isLocalURL: r.localURL}
+		scope := liveCallScope{liveEnd: liveEnd, unitTests: unitTests, hostOf: r.externalHost, isLocalURL: r.localURL, file: file.GoAST}
 		violations = append(violations, r.outboundCalls(file, imports, fn, outbound, scope)...)
 		if own, ok := outboundDirs[filepath.Dir(file.Path)]; ok {
 			violations = append(violations, r.inPackageCalls(file, fn, own, scope)...)
@@ -767,6 +954,27 @@ func (r *TestExternalServiceRule) inPackageCalls(
 		}
 		ident, ok := call.Fun.(*ast.Ident)
 		if !ok {
+			if sel, isMethod := call.Fun.(*ast.SelectorExpr); isMethod {
+				global, isGlobal := sel.X.(*ast.Ident)
+				if isGlobal {
+					if host, isLive := own.globalMethods[global.Name][sel.Sel.Name]; isLive {
+						if host == "" {
+							host = own.evidence
+						} else {
+							host = "ходит в " + host
+						}
+						pos := file.PositionFor(call)
+						v := r.CreateViolation(file.RelPath, pos.Line, fmt.Sprintf(
+							"Тест %s вызывает %s.%s из своего же пакета — пакет %s. Тест не проверяет чужой код и не должен менять внешний мир",
+							fn.Name.Name, global.Name, sel.Sel.Name, host))
+						v.WithCode(file.GetLine(pos.Line))
+						v.WithSuggestion("Подставьте провайдера на HTTP-границе (httptest) или засейте данные напрямую; живой вызов оставьте за явным опт-ином из guard_functions")
+						v.WithContext("pattern", "test_external_service")
+						v.WithContext("kind", "outbound_client")
+						violations = append(violations, v)
+					}
+				}
+			}
 			return true
 		}
 		entry, ok := own.entries[ident.Name]

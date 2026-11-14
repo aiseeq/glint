@@ -289,6 +289,7 @@ type liveCallScope struct {
 	hostOf func(*ast.BasicLit) string
 	// isLocalURL reports a literal URL on a loopback or reserved host.
 	isLocalURL func(*ast.BasicLit) bool
+	file       *ast.File
 }
 
 // reaches returns the evidence of a live call and whether the call is one. A direct sending
@@ -313,7 +314,7 @@ func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry li
 		host = liveMethodArgument(body, call, entry.liveMethods, entry.resultIndexes, pkg.urlNames, isQualifier, s.hostOf, info)
 	}
 	if !s.unitTests {
-		if !entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, info) && !constructorResultEscapes(body, call, entry.liveMethods, entry.knownMembers, entry.resultIndexes, info) {
+		if !entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, info) && !constructorResultEscapes(body, call, entry.liveMethods, entry.knownMembers, entry.resultIndexes, info, s.file) {
 			return "", false
 		}
 		if host == "" {
@@ -330,7 +331,7 @@ func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry li
 // constructorResultEscapes reports whether the test lets the constructed client reach code
 // whose behavior the rule cannot establish. A live method call is handled separately; reads
 // of fields and calls to known non-live methods are safe.
-func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMethods, knownMembers map[string]bool, resultIndexes map[int]bool, info *types.Info) bool {
+func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMethods, knownMembers map[string]bool, resultIndexes map[int]bool, info *types.Info, file *ast.File) bool {
 	parents := map[ast.Node]ast.Node{}
 	var stack []ast.Node
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -346,13 +347,80 @@ func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMetho
 	})
 
 	holders, initializers := constructorResultHolders(body, ctor, resultIndexes, info)
+	if constructorOnlyInspectedOrDiscarded(body, ctor, holders, initializers, parents) {
+		return false
+	}
 
 	// A constructor result used directly as a return value, argument, field, channel value,
 	// literal element or any other non-local expression escapes without a named holder.
 	if len(holders) == 0 {
 		return directConstructorResultEscapes(parents[ctor], parents, ctor, liveMethods, knownMembers, resultIndexes)
 	}
-	return constructorHolderEscapes(body, parents, holders, initializers, liveMethods, knownMembers, info)
+	return constructorHolderEscapes(body, parents, holders, initializers, liveMethods, knownMembers, info, file)
+}
+
+func constructorOnlyInspectedOrDiscarded(body *ast.BlockStmt, ctor *ast.CallExpr, holders []clientHolder, initializers map[*ast.Ident]bool, parents map[ast.Node]ast.Node) bool {
+	if len(holders) == 0 || !constructorNestedInComposite(ctor, parents) {
+		return false
+	}
+	for _, holder := range holders {
+		used := false
+		var safe = true
+		ast.Inspect(body, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if !ok || initializers[id] || id.Name != holder.name {
+				return true
+			}
+			used = true
+			parent := parents[id]
+			for {
+				switch node := parent.(type) {
+				case *ast.SelectorExpr:
+					if node.X != id && !containsASTNode(node.X, id) {
+						safe = false
+						return false
+					}
+					if call, ok := parents[node].(*ast.CallExpr); ok && call.Fun == node {
+						safe = false
+						return false
+					}
+					parent = parents[node]
+				case *ast.IndexExpr:
+					if node.X != id && !containsASTNode(node.X, id) {
+						safe = false
+						return false
+					}
+					parent = parents[node]
+				case *ast.AssignStmt:
+					if len(node.Lhs) == 0 || !allBlank(node.Lhs) {
+						safe = false
+					}
+					return false
+				case *ast.ExprStmt:
+					return false
+				default:
+					safe = false
+					return false
+				}
+			}
+		})
+		if !used || !safe {
+			return false
+		}
+	}
+	return true
+}
+
+func constructorNestedInComposite(ctor *ast.CallExpr, parents map[ast.Node]ast.Node) bool {
+	for parent := parents[ctor]; parent != nil; parent = parents[parent] {
+		if _, ok := parent.(*ast.CompositeLit); ok {
+			return true
+		}
+		if _, ok := parent.(*ast.AssignStmt); ok || func() bool { _, ok := parent.(*ast.ValueSpec); return ok }() {
+			return false
+		}
+	}
+	return false
 }
 
 func directConstructorResultEscapes(parent ast.Node, parents map[ast.Node]ast.Node, ctor *ast.CallExpr, liveMethods, knownMembers map[string]bool, resultIndexes map[int]bool) bool {
@@ -403,12 +471,15 @@ func directConstructorResultEscapes(parent ast.Node, parents map[ast.Node]ast.No
 	}
 }
 
-func constructorHolderEscapes(body *ast.BlockStmt, parents map[ast.Node]ast.Node, holders []clientHolder, initializers map[*ast.Ident]bool, liveMethods, knownMembers map[string]bool, info *types.Info) bool {
+func constructorHolderEscapes(body *ast.BlockStmt, parents map[ast.Node]ast.Node, holders []clientHolder, initializers map[*ast.Ident]bool, liveMethods, knownMembers map[string]bool, info *types.Info, file *ast.File) bool {
 	escapes := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		id, ok := n.(*ast.Ident)
 		if !ok || escapes || initializers[id] || !isHolderUse(id, holders, info) {
 			return !escapes
+		}
+		if call, ok := parents[id].(*ast.CallExpr); ok && localEmptyCallConsumes(file, call, id) {
+			return true
 		}
 		escapes = holderUseEscapes(id, parents[id], parents, liveMethods, knownMembers)
 		return !escapes
@@ -431,6 +502,19 @@ func holderUseEscapes(id *ast.Ident, parent ast.Node, parents map[ast.Node]ast.N
 			return !knownMembers[p.Sel.Name]
 		}
 		return liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name]
+	case *ast.IndexExpr:
+		for ancestor := parents[p]; ancestor != nil; ancestor = parents[ancestor] {
+			if assign, ok := ancestor.(*ast.AssignStmt); ok {
+				return len(assign.Lhs) > 0 && allBlank(assign.Lhs)
+			}
+			if _, ok := ancestor.(*ast.ExprStmt); ok {
+				return true
+			}
+			if _, ok := ancestor.(*ast.CallExpr); ok {
+				return true
+			}
+		}
+		return true
 	case *ast.BinaryExpr:
 		return !comparedWithNil(p, id)
 	case *ast.AssignStmt:
@@ -454,6 +538,50 @@ func holderUseEscapes(id *ast.Ident, parent ast.Node, parents map[ast.Node]ast.N
 	}
 }
 
+func allBlank(lhs []ast.Expr) bool {
+	for _, expr := range lhs {
+		id, ok := expr.(*ast.Ident)
+		if !ok || id.Name != "_" {
+			return false
+		}
+	}
+	return true
+}
+
+func localEmptyCallConsumes(file *ast.File, call *ast.CallExpr, value *ast.Ident) bool {
+	if file == nil {
+		return false
+	}
+	id, ok := call.Fun.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	passed := false
+	for _, arg := range call.Args {
+		if arg == value {
+			passed = true
+		}
+	}
+	if !passed {
+		return false
+	}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.FuncDecl)
+		if ok && gen.Recv == nil && gen.Name.Name == id.Name && gen.Body != nil {
+			// Only a body of bare returns provably drops the client: a returned
+			// expression can still call it.
+			for _, bodyStmt := range gen.Body.List {
+				ret, isReturn := bodyStmt.(*ast.ReturnStmt)
+				if !isReturn || len(ret.Results) > 0 {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
 func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultIndexes map[int]bool, info *types.Info) ([]clientHolder, map[*ast.Ident]bool) {
 	var holders []clientHolder
 	initializers := make(map[*ast.Ident]bool)
@@ -474,7 +602,7 @@ func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultInd
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch assign := n.(type) {
 		case *ast.AssignStmt:
-			if len(assign.Rhs) == 1 && assign.Rhs[0] == ast.Expr(ctor) {
+			if len(assign.Rhs) == 1 && containsASTNode(assign.Rhs[0], ctor) {
 				for i, lhs := range assign.Lhs {
 					if resultIndexes[i] {
 						if id, ok := lhs.(*ast.Ident); ok {
@@ -484,7 +612,7 @@ func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultInd
 				}
 			}
 		case *ast.ValueSpec:
-			if len(assign.Values) == 1 && assign.Values[0] == ast.Expr(ctor) {
+			if len(assign.Values) == 1 && containsASTNode(assign.Values[0], ctor) {
 				for i, id := range assign.Names {
 					if resultIndexes[i] {
 						add(id)
@@ -495,6 +623,18 @@ func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultInd
 		return true
 	})
 	return holders, initializers
+}
+
+func containsASTNode(root ast.Node, target ast.Node) bool {
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		if n == target {
+			found = true
+			return false
+		}
+		return !found
+	})
+	return found
 }
 
 func isHolderUse(id *ast.Ident, holders []clientHolder, info *types.Info) bool {
