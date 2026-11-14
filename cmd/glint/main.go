@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -170,6 +171,16 @@ var rulesCmd = &cobra.Command{
 	RunE:  runRules,
 }
 
+//go:embed docs/guide.md
+var agentGuide string
+
+var guideCmd = &cobra.Command{
+	Use:   "guide [section]",
+	Short: "Show the agent guide",
+	Args:  cobra.MaximumNArgs(1),
+	RunE:  runGuide,
+}
+
 var explainCmd = &cobra.Command{
 	Use:   "explain <rule>",
 	Short: "Explain a specific rule",
@@ -258,6 +269,7 @@ func init() {
 
 	// Root commands
 	rootCmd.AddCommand(checkCmd)
+	rootCmd.AddCommand(guideCmd)
 	rootCmd.AddCommand(rulesCmd)
 	rootCmd.AddCommand(explainCmd)
 	rootCmd.AddCommand(initCmd)
@@ -2143,6 +2155,24 @@ func ruleDistance(a, b string) int {
 		prev = cur
 	}
 	return prev[len(b)]
+}
+
+func runGuide(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		_, err := fmt.Fprint(cmd.OutOrStdout(), agentGuide)
+		return err
+	}
+	sections := strings.Split(agentGuide, "\n## ")
+	var names []string
+	for _, section := range sections[1:] {
+		name, body, _ := strings.Cut(section, "\n")
+		names = append(names, name)
+		if strings.EqualFold(args[0], name) {
+			_, err := fmt.Fprintf(cmd.OutOrStdout(), "## %s\n%s", name, body)
+			return err
+		}
+	}
+	return fmt.Errorf("unknown guide section; choose one of: %s", strings.Join(names, ", "))
 }
 
 func runExplain(_ *cobra.Command, args []string) error {

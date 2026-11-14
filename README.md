@@ -66,6 +66,8 @@ graft help      # every task
 graft consumers # compare installed and new glint on configured projects
 ```
 
+Agent guidance: run `glint guide` (or `glint guide <section>`).
+
 ## Quick Start
 
 ```bash
