@@ -302,11 +302,7 @@ func truncatedRandomUniqueOriginAt(callers *callerIndex, target *types.Func, dep
 		return nil
 	}
 	seen[target] = true
-	sites := callers.sites[target]
-	for _, method := range patternkit.ImplementedMethods(callers.project, target) {
-		sites = append(sites, callers.sites[method]...)
-	}
-	for _, site := range sites {
+	for _, site := range callers.callSitesOf(target) {
 		if conflictHandledAt(site) || retriesConflictAt(site) {
 			continue
 		}
@@ -470,6 +466,18 @@ func newCallerIndex(ctx *core.GoProjectContext) (*callerIndex, error) {
 	return &callerIndex{funcs: patternkit.ProjectFuncDecls(ctx), sites: sites, project: ctx}, nil
 }
 
+// callSitesOf returns where fn is called: directly, then through each project
+// interface method it implements. The index is the load's, read by every rule
+// at once, so its slice is clipped: the interface's sites go to a copy, never
+// past the length of the shared one.
+func (c *callerIndex) callSitesOf(fn *types.Func) []patternkit.FuncCallSite {
+	sites := slices.Clip(c.sites[fn])
+	for _, method := range patternkit.ImplementedMethods(c.project, fn) {
+		sites = append(sites, c.sites[method]...)
+	}
+	return sites
+}
+
 // reachesHandlerUnmapped reports a function whose error reaches an HTTP
 // handler within maxRefusalHops callers, through call sites none of which
 // tells a conflict apart.
@@ -478,11 +486,7 @@ func (c *callerIndex) reachesHandlerUnmapped(fn *types.Func, depth int, seen map
 		return false
 	}
 	seen[fn] = true
-	sites := c.sites[fn]
-	for _, method := range patternkit.ImplementedMethods(c.project, fn) {
-		sites = append(sites, c.sites[method]...)
-	}
-	for _, site := range sites {
+	for _, site := range c.callSitesOf(fn) {
 		if conflictHandledAt(site) {
 			continue
 		}
