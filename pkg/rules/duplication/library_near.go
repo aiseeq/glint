@@ -71,10 +71,17 @@ const nearAnchor = -2
 // stand in the roles as variables of their own, apart from the variables.
 const nearFieldBase = 1 << 20
 
-// isNearJump reports whether an anchor is a jump: break, continue, goto or
-// fallthrough.
+// isNearJump reports whether an anchor is a jump: return, break, continue,
+// goto or fallthrough.
 func isNearJump(tok nearToken) bool {
-	return tok.vr == nearAnchor && (strings.HasPrefix(tok.text, "(BranchStmt") || tok.text == "break" || tok.text == "continue")
+	if tok.vr != nearAnchor {
+		return false
+	}
+	switch tok.text {
+	case "(ReturnStmt", "return", "break", "continue":
+		return true
+	}
+	return strings.HasPrefix(tok.text, "(BranchStmt")
 }
 
 // nearRole is a statement as sameRoles reads it: its shape, the hash of the
@@ -87,7 +94,9 @@ type nearRole struct {
 	Shape   uint64 `json:"s"`
 	Anchors uint64 `json:"a"`
 	Locals  []int  `json:"l,omitempty"`
-	Parent  int    `json:"p"`
+	// Writes are the variables of Locals the statement writes.
+	Writes []int `json:"w,omitempty"`
+	Parent int   `json:"p"`
 }
 
 // nearBodyBuilder collects a nearBody in one pass over the body: every token
@@ -130,6 +139,16 @@ func (b *nearBodyBuilder) emit(tok string) { b.add(tok, tok, "", -1) }
 
 // emitLocal adds the variable the function numbers num.
 func (b *nearBodyBuilder) emitLocal(num int) { b.add("$L", "$L", "", num) }
+
+// emitVar adds the variable the function numbers num, which the statement
+// writes when write is set.
+func (b *nearBodyBuilder) emitVar(num int, write bool) {
+	b.emitLocal(num)
+	if write && b.detailed && len(b.open) > 0 {
+		top := &b.open[len(b.open)-1]
+		top.role.Writes = append(top.role.Writes, num)
+	}
+}
 
 // emitAnchor adds a literal or the name of a called function: tok in the
 // sequence, value among the anchors of its statement, mask in its shape.
@@ -262,8 +281,53 @@ func (b *nearBodyBuilder) orderRoles() {
 // original; the roles of a detailed body keep the numbers.
 func goNearBody(info *types.Info, fd *ast.FuncDecl, detailed bool) nearBody {
 	w := &goNearWalker{n: newFunctionBlockNormalizer(info, fd), b: newNearBodyBuilder(detailed), own: funcPackage(fd, info), fields: make(map[string]int)}
+	w.body = fd.Body
+	if detailed {
+		w.writes = goWrites(fd.Body)
+	}
 	w.walk(fd.Body)
 	return w.b.finish()
+}
+
+// goWrites collects what a body writes: the left side of an assignment, the
+// operand of ++ and --, the key and the value of a range, down to the
+// variable an index or a field of it writes.
+func goWrites(body *ast.BlockStmt) map[ast.Node]bool {
+	out := make(map[ast.Node]bool)
+	mark := func(e ast.Expr) {
+		for e != nil {
+			out[e] = true
+			switch x := e.(type) {
+			case *ast.IndexExpr:
+				e = x.X
+			case *ast.IndexListExpr:
+				e = x.X
+			case *ast.SelectorExpr:
+				e = x.X
+			case *ast.StarExpr:
+				e = x.X
+			case *ast.ParenExpr:
+				e = x.X
+			default:
+				e = nil
+			}
+		}
+	}
+	ast.Inspect(body, func(node ast.Node) bool {
+		switch x := node.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				mark(lhs)
+			}
+		case *ast.IncDecStmt:
+			mark(x.X)
+		case *ast.RangeStmt:
+			mark(x.Key)
+			mark(x.Value)
+		}
+		return true
+	})
+	return out
 }
 
 type goNearWalker struct {
@@ -276,6 +340,17 @@ type goNearWalker struct {
 	callees []calleeName
 	// fields numbers the fields of variables the body reads.
 	fields map[string]int
+	// writes holds what the body writes (goWrites), for a detailed body.
+	writes map[ast.Node]bool
+	// body is the body walked; uses counts the reads of its objects
+	// (goUses), once a swap through a temporary needs them.
+	body *ast.BlockStmt
+	uses map[types.Object]int
+	// assigns is what the body assigns (goAssignments), once a variable
+	// named a second time needs it; aliases maps every such name to what
+	// it names.
+	assigns *goAssigned
+	aliases map[types.Object]ast.Expr
 }
 
 type calleeName struct{ sel, name ast.Node }
@@ -299,7 +374,28 @@ func (w *goNearWalker) walk(root ast.Node) {
 		case *ast.ParenExpr:
 			w.walk(x.X)
 			return false
+		case *ast.BlockStmt:
+			if list, swapped := w.tupleSwaps(x.List); swapped {
+				w.openNode(x)
+				elseBlock := isElseBlock(x, stack)
+				if elseBlock {
+					w.b.openStmt()
+					w.b.emit("else")
+				}
+				for _, stmt := range list {
+					w.walk(stmt)
+				}
+				if elseBlock {
+					w.b.closeStmt()
+				}
+				w.b.emit(")")
+				return false
+			}
 		case *ast.Ident:
+			if target, ok := w.aliases[w.n.info.ObjectOf(x)]; ok {
+				w.walk(target)
+				return false
+			}
 			w.packageValue(x)
 			w.name(x, w.n.ident(x))
 			return false
@@ -328,7 +424,17 @@ func (w *goNearWalker) walk(root ast.Node) {
 			}
 		case *ast.BinaryExpr:
 			w.b.ops[x.Op.String()] = true
+			if w.commuted(x) {
+				w.openNode(x)
+				w.walk(x.Y)
+				w.walk(x.X)
+				w.b.emit(")")
+				return false
+			}
 		case *ast.AssignStmt:
+			if w.alias(x) {
+				return false
+			}
 			if x.Tok != token.ASSIGN && x.Tok != token.DEFINE {
 				w.b.ops[x.Tok.String()] = true
 			}
@@ -355,11 +461,263 @@ func (w *goNearWalker) walk(root ast.Node) {
 func (w *goNearWalker) openNode(node ast.Node) {
 	kind := "(" + nodeKind(node)
 	switch node.(type) {
-	case *ast.BinaryExpr, *ast.UnaryExpr, *ast.IncDecStmt, *ast.BranchStmt:
+	case *ast.BinaryExpr, *ast.UnaryExpr, *ast.IncDecStmt, *ast.BranchStmt, *ast.ReturnStmt:
 		w.b.emitAnchor(kind, kind, kind)
 	default:
 		w.b.emit(kind)
 	}
+}
+
+// alias reports whether assign names a variable of the function or a field
+// of one a second time, y := v, and records y to stand for v: a copy may
+// read a value through a name of its own. Neither name may be set again,
+// and y may write into what it names only when that is shared, a slice, a
+// map or a pointer.
+func (w *goNearWalker) alias(assign *ast.AssignStmt) bool {
+	if assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return false
+	}
+	name, ok := assign.Lhs[0].(*ast.Ident)
+	if !ok || name.Name == "_" {
+		return false
+	}
+	root, field, local := w.localValue(assign.Rhs[0])
+	if !local {
+		return false
+	}
+	if w.assigns == nil {
+		assigned := goAssignments(w.n.info, w.body)
+		w.assigns = &assigned
+	}
+	obj := w.n.info.ObjectOf(name)
+	if obj == nil || w.assigns.rebound[obj] || w.assigns.into[obj] && !sharesValue(obj.Type()) || !w.assigns.keeps(root, field, w.n.info.TypeOf(assign.Rhs[0])) {
+		return false
+	}
+	if w.aliases == nil {
+		w.aliases = make(map[types.Object]ast.Expr)
+	}
+	w.aliases[obj] = assign.Rhs[0]
+	return true
+}
+
+// localValue returns the variable of the function e is, or whose field it
+// is, with the name of the field, and whether e is either.
+func (w *goNearWalker) localValue(e ast.Expr) (types.Object, string, bool) {
+	field := ""
+	if sel, ok := e.(*ast.SelectorExpr); ok {
+		obj, isVar := w.n.info.ObjectOf(sel.Sel).(*types.Var)
+		if !isVar || !obj.IsField() {
+			return nil, "", false
+		}
+		e, field = sel.X, sel.Sel.Name
+	}
+	id, ok := e.(*ast.Ident)
+	if !ok {
+		return nil, "", false
+	}
+	v, isVar := w.n.info.ObjectOf(id).(*types.Var)
+	return v, field, isVar && !v.IsField() && v.Pos() >= w.n.lo && v.Pos() < w.n.hi
+}
+
+func sharesValue(t types.Type) bool {
+	switch t.Underlying().(type) {
+	case *types.Slice, *types.Map, *types.Pointer, *types.Chan:
+		return true
+	}
+	return false
+}
+
+// goAssigned is what a body assigns: the variables and the fields of
+// variables it sets again after they are declared, and the variables it
+// writes into, at an index, a field or through a pointer.
+type goAssigned struct {
+	rebound map[types.Object]bool
+	fields  map[fieldRef]bool
+	into    map[types.Object]bool
+}
+
+// fieldRef is a field of a variable.
+type fieldRef struct {
+	root types.Object
+	name string
+}
+
+func goAssignments(info *types.Info, body *ast.BlockStmt) goAssigned {
+	out := goAssigned{rebound: map[types.Object]bool{}, fields: map[fieldRef]bool{}, into: map[types.Object]bool{}}
+	into := func(e ast.Expr) {
+		for e != nil {
+			switch x := ast.Unparen(e).(type) {
+			case *ast.IndexExpr:
+				e = x.X
+			case *ast.IndexListExpr:
+				e = x.X
+			case *ast.SelectorExpr:
+				e = x.X
+			case *ast.StarExpr:
+				e = x.X
+			case *ast.Ident:
+				if obj := info.ObjectOf(x); obj != nil {
+					out.into[obj] = true
+				}
+				e = nil
+			default:
+				e = nil
+			}
+		}
+	}
+	mark := func(e ast.Expr) {
+		switch x := ast.Unparen(e).(type) {
+		case *ast.Ident:
+			if obj := info.ObjectOf(x); obj != nil && info.Defs[x] == nil {
+				out.rebound[obj] = true
+			}
+			return
+		case *ast.SelectorExpr:
+			if id, ok := ast.Unparen(x.X).(*ast.Ident); ok {
+				out.fields[fieldRef{info.ObjectOf(id), x.Sel.Name}] = true
+			}
+		}
+		into(e)
+	}
+	ast.Inspect(body, func(node ast.Node) bool {
+		switch x := node.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				mark(lhs)
+			}
+		case *ast.IncDecStmt:
+			mark(x.X)
+		case *ast.RangeStmt:
+			if x.Key != nil {
+				mark(x.Key)
+			}
+			if x.Value != nil {
+				mark(x.Value)
+			}
+		case *ast.UnaryExpr:
+			// What is taken by address may be set through the pointer.
+			if x.Op == token.AND {
+				mark(x.X)
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// keeps reports whether the body never sets the variable root, or its
+// field when one is named, again, nor writes into a value of type t of it
+// that is not shared.
+func (a goAssigned) keeps(root types.Object, field string, t types.Type) bool {
+	if a.rebound[root] || field != "" && a.fields[fieldRef{root, field}] {
+		return false
+	}
+	return !a.into[root] || sharesValue(t)
+}
+
+// tupleSwaps rewrites every swap through a temporary in list, t := a; a = b;
+// b = t, as the swap a, b = b, a it is, when the body reads t nowhere else,
+// and reports whether it found one.
+func (w *goNearWalker) tupleSwaps(list []ast.Stmt) ([]ast.Stmt, bool) {
+	var out []ast.Stmt
+	swapped := false
+	for i := 0; i < len(list); i++ {
+		if i+2 < len(list) {
+			if swap := w.tupleSwap(list[i], list[i+1], list[i+2]); swap != nil {
+				if !swapped {
+					out = append(make([]ast.Stmt, 0, len(list)), list[:i]...)
+					swapped = true
+				}
+				out = append(out, swap)
+				i += 2
+				continue
+			}
+		}
+		if swapped {
+			out = append(out, list[i])
+		}
+	}
+	return out, swapped
+}
+
+func (w *goNearWalker) tupleSwap(first, second, third ast.Stmt) ast.Stmt {
+	save, move, back := singleAssign(first, token.DEFINE), singleAssign(second, token.ASSIGN), singleAssign(third, token.ASSIGN)
+	if save == nil || move == nil || back == nil {
+		return nil
+	}
+	tmp, ok := save.Lhs[0].(*ast.Ident)
+	read, isIdent := back.Rhs[0].(*ast.Ident)
+	if !ok || !isIdent || w.n.info.ObjectOf(tmp) == nil || w.n.info.ObjectOf(read) != w.n.info.ObjectOf(tmp) {
+		return nil
+	}
+	if types.ExprString(save.Rhs[0]) != types.ExprString(move.Lhs[0]) || types.ExprString(move.Rhs[0]) != types.ExprString(back.Lhs[0]) {
+		return nil
+	}
+	if w.uses == nil {
+		w.uses = goUses(w.n.info, w.body)
+	}
+	if w.uses[w.n.info.ObjectOf(tmp)] != 1 {
+		return nil
+	}
+	return &ast.AssignStmt{Lhs: []ast.Expr{move.Lhs[0], back.Lhs[0]}, Tok: token.ASSIGN, Rhs: []ast.Expr{move.Rhs[0], save.Rhs[0]}}
+}
+
+// singleAssign is stmt when it assigns one value to one name with tok.
+func singleAssign(stmt ast.Stmt, tok token.Token) *ast.AssignStmt {
+	assign, ok := stmt.(*ast.AssignStmt)
+	if !ok || assign.Tok != tok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return nil
+	}
+	return assign
+}
+
+// goUses counts the reads of every object in body.
+func goUses(info *types.Info, body *ast.BlockStmt) map[types.Object]int {
+	out := make(map[types.Object]int)
+	ast.Inspect(body, func(node ast.Node) bool {
+		if id, ok := node.(*ast.Ident); ok {
+			if obj := info.Uses[id]; obj != nil {
+				out[obj]++
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// commuted reports whether a commutative operation is written with the
+// smaller operand first, which the body prints second, as a copy may write
+// b + v*k for v*k + b. A sum of texts does not commute.
+func (w *goNearWalker) commuted(x *ast.BinaryExpr) bool {
+	switch x.Op {
+	case token.EQL, token.NEQ:
+	case token.ADD, token.MUL, token.AND, token.OR, token.XOR:
+		basic, ok := w.n.info.TypeOf(x).(*types.Basic)
+		if !ok || basic.Info()&types.IsNumeric == 0 {
+			return false
+		}
+	default:
+		return false
+	}
+	return nodeCount(x.X) < nodeCount(x.Y)
+}
+
+// nodeCount counts the nodes of an expression as the body prints them: a
+// selector, a field or a qualified name, is one, a parenthesis none.
+func nodeCount(node ast.Node) int {
+	n := 0
+	ast.Inspect(node, func(node ast.Node) bool {
+		switch node.(type) {
+		case nil, *ast.ParenExpr:
+			return true
+		case *ast.SelectorExpr:
+			n++
+			return false
+		}
+		n++
+		return true
+	})
+	return n
 }
 
 // field emits a field of a variable of the function as a variable of its
@@ -388,7 +746,7 @@ func (w *goNearWalker) field(sel *ast.SelectorExpr) bool {
 		w.fields[key] = num
 	}
 	w.b.field(num, rootNum)
-	w.b.emitLocal(num)
+	w.b.emitVar(num, w.writes[sel])
 	return true
 }
 
@@ -410,7 +768,7 @@ func isElseBlock(node ast.Node, stack []ast.Node) bool {
 func (w *goNearWalker) name(node ast.Node, tok string) {
 	if strings.HasPrefix(tok, "$L") {
 		if num, err := strconv.Atoi(tok[2:]); err == nil {
-			w.b.emitLocal(num)
+			w.b.emitVar(num, w.writes[node])
 			return
 		}
 	}
@@ -659,9 +1017,96 @@ func sameRoles(c *nearCandidate, body nearBody) bool {
 	}
 	unpairHolders(roles, ownPartner, libPartner)
 	unpairHolders(c.body.Roles, libPartner, ownPartner)
+	if !keepsDependentOrder(roles, ownPartner) {
+		return false
+	}
 	return m.sameRest(
 		restSide{tokens: unpairedTokens(c.body, libPartner), roles: c.body.Roles, roots: c.body.Roots},
 		restSide{tokens: unpairedTokens(body, ownPartner), roles: roles, roots: body.Roots})
+}
+
+// keepsDependentOrder reports whether the paired statements of a body that
+// depend on each other, one reading without writing it a variable the other
+// writes, run in the order of their partners. A copy may swap two lookups,
+// or two rewrites of one value, but not a rewrite of a value and a
+// statement that reads it, which then reads another value. A statement
+// opens before the statements it holds, on both sides, so the two keep
+// their order.
+func keepsDependentOrder(roles []nearRole, partner []int) bool {
+	last := -1
+	inOrder := true
+	for _, p := range partner {
+		if p >= 0 {
+			inOrder = inOrder && p > last
+			last = p
+		}
+	}
+	if inOrder {
+		return true
+	}
+	vars := statementVars(roles)
+	writers, readers := make(map[int][]int), make(map[int][]int)
+	for i, sv := range vars {
+		if partner[i] < 0 {
+			continue
+		}
+		for v := range sv.writes {
+			writers[v] = append(writers[v], i)
+		}
+		for v := range sv.reads {
+			readers[v] = append(readers[v], i)
+		}
+	}
+	for v, written := range writers {
+		for _, w := range written {
+			if !readsInOrder(partner, w, readers[v]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// readsInOrder reports whether every statement of readers runs on the side
+// of the writer w its partner runs on.
+func readsInOrder(partner []int, w int, readers []int) bool {
+	for _, r := range readers {
+		if (w < r) != (partner[w] < partner[r]) {
+			return false
+		}
+	}
+	return true
+}
+
+// stmtVars are the variables a statement, with the statements it holds,
+// writes and those it reads without writing them.
+type stmtVars struct{ writes, reads map[int]bool }
+
+// statementVars collects the variables of every statement with those of the
+// statements it holds; a statement comes before the statements it holds.
+func statementVars(roles []nearRole) []stmtVars {
+	out := make([]stmtVars, len(roles))
+	for i := range out {
+		out[i] = stmtVars{writes: map[int]bool{}, reads: map[int]bool{}}
+	}
+	for i := len(roles) - 1; i >= 0; i-- {
+		for _, v := range roles[i].Writes {
+			out[i].writes[v] = true
+		}
+		for _, v := range roles[i].Locals {
+			out[i].reads[v] = true
+		}
+		if p := roles[i].Parent; p >= 0 {
+			maps.Copy(out[p].writes, out[i].writes)
+			maps.Copy(out[p].reads, out[i].reads)
+		}
+	}
+	for i := range out {
+		for v := range out[i].writes {
+			delete(out[i].reads, v)
+		}
+	}
+	return out
 }
 
 // heldAlike reports whether a statement of the body and one of the library
