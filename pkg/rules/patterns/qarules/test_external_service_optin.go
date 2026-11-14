@@ -66,33 +66,48 @@ func (r *TestExternalServiceRule) collectTestDirFacts(files []*core.FileContext,
 				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && onlyBareReturns(fn.Body) {
 					f.emptyFuncs[file.GoAST.Name.Name+"."+fn.Name.Name] = true
 				}
-				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "init" && fn.Body != nil {
-					// A package variable set in init holds that value for every test.
-					ast.Inspect(fn.Body, func(n ast.Node) bool {
-						if as, isAssign := n.(*ast.AssignStmt); isAssign && as.Tok == token.ASSIGN && len(as.Lhs) == len(as.Rhs) {
-							for i, lhs := range as.Lhs {
-								if id, isIdent := lhs.(*ast.Ident); isIdent {
-									key := file.GoAST.Name.Name + "." + id.Name
-									f.packageValues[key] = append(f.packageValues[key], as.Rhs[i])
-								}
-							}
-						}
-						return true
-					})
-				}
-				if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.VAR {
-					for _, spec := range gen.Specs {
-						vs, isValue := spec.(*ast.ValueSpec)
-						for i := 0; isValue && i < len(vs.Names) && i < len(vs.Values); i++ {
-							key := file.GoAST.Name.Name + "." + vs.Names[i].Name
-							f.packageValues[key] = append(f.packageValues[key], vs.Values[i])
-						}
-					}
-				}
+				f.addPackageValues(file.GoAST.Name.Name, decl)
 			}
 		}
 	}
 	return facts
+}
+
+// addPackageValues records the values decl gives to package-level variables
+// of pkg: a var declaration, and assignments in init, whose value holds for
+// every test.
+func (f *testDirFacts) addPackageValues(pkg string, decl ast.Decl) {
+	add := func(name string, value ast.Expr) {
+		f.packageValues[pkg+"."+name] = append(f.packageValues[pkg+"."+name], value)
+	}
+	switch d := decl.(type) {
+	case *ast.FuncDecl:
+		if d.Recv != nil || d.Name.Name != "init" || d.Body == nil {
+			return
+		}
+		ast.Inspect(d.Body, func(n ast.Node) bool {
+			as, isAssign := n.(*ast.AssignStmt)
+			if !isAssign || as.Tok != token.ASSIGN || len(as.Lhs) != len(as.Rhs) {
+				return true
+			}
+			for i, lhs := range as.Lhs {
+				if id, isIdent := lhs.(*ast.Ident); isIdent {
+					add(id.Name, as.Rhs[i])
+				}
+			}
+			return true
+		})
+	case *ast.GenDecl:
+		if d.Tok != token.VAR {
+			return
+		}
+		for _, spec := range d.Specs {
+			vs, isValue := spec.(*ast.ValueSpec)
+			for i := 0; isValue && i < len(vs.Names) && i < len(vs.Values); i++ {
+				add(vs.Names[i].Name, vs.Values[i])
+			}
+		}
+	}
 }
 
 // namedTestDecl is a function or a package-level variable of a test file,
