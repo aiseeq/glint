@@ -184,8 +184,10 @@ tasks:
   consumers:
     desc: compare old and new glint across configured consumers
     heavy: true
-    # Stays here: the consumer projects live on this machine only, and the old
-    # glint and its run cache are files here.
+    # Stays here: the consumer projects live on this machine only. The old
+    # glint's run is not cached by tree (dropped 14.11): glint reads inputs
+    # outside the project (approved list, tickets_dir, go.work modules, ignored
+    # files), and a stale entry could hide a difference before install.
     deps: [build]
     usage: -config PATH, -old PATH, -new PATH, -r rules, -j N, -only a,b
     run: ['go build -o bin/consumers ./tools/consumers', 'bin/consumers -new bin/glint -j {threads} {args}']
