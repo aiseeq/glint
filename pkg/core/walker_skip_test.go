@@ -2,6 +2,7 @@ package core
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -60,6 +61,37 @@ func TestDefaultSkipDirsStillApply(t *testing.T) {
 
 	paths := walkPaths(t, root, DefaultConfig())
 	assert.Equal(t, []string{"pkg/app.go"}, paths)
+}
+
+func TestDefaultArtifactDirsWalkTrackedGitSources(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"pkg/build/x.go": "package build\n",
+		"build/out.go":   "package build\n",
+	})
+	gitTestCommand(t, root, "init", "-q")
+	gitTestCommand(t, root, "add", "pkg/build/x.go")
+
+	paths := walkPaths(t, root, DefaultConfig())
+	assert.Contains(t, paths, "pkg/build/x.go", "tracked source in a default artifact directory must be analyzed")
+	assert.NotContains(t, paths, "build/out.go", "untracked content in a default artifact directory must remain skipped")
+
+	outsideGit := t.TempDir()
+	writeTree(t, outsideGit, map[string]string{"build/x.go": "package build\n"})
+	assert.NotContains(t, walkPaths(t, outsideGit, DefaultConfig()), "build/x.go",
+		"default artifact directories outside git must remain skipped")
+
+	config := DefaultConfig()
+	config.Settings.SkipDirs = []string{"build"}
+	assert.NotContains(t, walkPaths(t, root, config), "pkg/build/x.go",
+		"an explicit skip_dirs list must continue to hide tracked sources")
+}
+
+func gitTestCommand(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v: %s", args, output)
 }
 
 func TestRequiredFileWalkKeepsGitignoreBehavior(t *testing.T) {
