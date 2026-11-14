@@ -32,7 +32,11 @@ var mirrorLiteralInitializer = regexp.MustCompile(`(?s)^\s*(?:['"\x60][^'"\x60]*
 // mirrorDataFile is a data file name (auth.json, config.yaml): a copy of it
 // is made at run time and names no declaration of another source.
 var mirrorDataFile = regexp.MustCompile(`(?i)\b[\w$-]+\.(?:json|jsonl|ya?ml|toml|env|txt|csv|ini|conf|cfg|log|pem|key|crt|xml|lock|db|sqlite)\b`)
-var mirrorExplanatory = regexp.MustCompile(`(?i)returns?\s+(?:a\s+)?copy\s+of\b|\b(?:staged|working|worktree|index)\s+copy\s+of\b|backup\s+mirrors?\b|mirror\s+of\s+what\b|reported\s+as\s+(?:a\s+)?copy\s+of\b`)
+
+// mirrorGitFileCopy is a staged, working, worktree or index copy of a file:
+// its version in git, cut out of the comment so a value copy beside it stays.
+var mirrorGitFileCopy = regexp.MustCompile(`(?i)\b(?:staged|working|worktree|index)\s+copy\s+of\s+[\w$./-]+`)
+var mirrorExplanatory = regexp.MustCompile(`(?i)returns?\s+(?:a\s+)?copy\s+of\b|backup\s+mirrors?\b|mirror\s+of\s+what\b|reported\s+as\s+(?:a\s+)?copy\s+of\b`)
 
 var mirrorVariableDecl = regexp.MustCompile(`^(?:(?:export|default|declare)\s+)*(?:const|let|var)\b|^(?:var|const)\s+[A-Za-z_][A-Za-z0-9_]*\b`)
 var mirrorDecl = regexp.MustCompile(`^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:const|let|var|function|type|interface|class)\b|^(?:func\s+(?:\([^)]*\)\s*)?[A-Za-z_][A-Za-z0-9_]*\s*\(|(?:var|const|type)\s+[A-Za-z_][A-Za-z0-9_]*\b)`)
@@ -94,7 +98,7 @@ func (r *MirrorCommentCopyRule) AnalyzeFile(c *core.FileContext) []*core.Violati
 			}
 			start--
 		}
-		comment := mirrorDataFile.ReplaceAllString(strings.Join(c.Lines[start:i], " "), "file")
+		comment := mirrorDataFile.ReplaceAllString(mirrorGitFileCopy.ReplaceAllString(strings.Join(c.Lines[start:i], " "), "file version"), "file")
 		if mirrorExplanatory.MatchString(comment) || !mirrorPhrase.MatchString(comment) {
 			continue
 		}

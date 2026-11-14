@@ -91,6 +91,16 @@ func readWorking(cfg config) string { return cfg.path }
 // indexed reads the index copy of e.name.
 func indexed(e entry) string { return e.name }`
 	assert.Empty(t, rulestest.GoFileRuleLines(t, NewMirrorCommentCopyRule(), "src/stage.go", source))
+	// The git copy is cut out of the comment, not the whole comment: a value
+	// copy beside it is still reported.
+	both := `package stage
+
+// syncStaged writes the staged copy of m.out. Its quota is a copy of limits.Quota.
+func (s *stagedPaths) syncStaged() int { return 5 }
+
+// readWorking reads the working copy of cfg.path; the value mirrors retry.Count.
+func (s *stagedPaths) readWorking() int { return 3 }`
+	assert.Equal(t, []int{4, 7}, rulestest.GoFileRuleLines(t, NewMirrorCommentCopyRule(), "src/stage.go", both))
 	code := `package stage
 
 // limitOf is a local copy of limits.Value.
