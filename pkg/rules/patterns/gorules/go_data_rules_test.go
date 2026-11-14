@@ -7,6 +7,185 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// Test literals mirrored by production logic are a sign that only examples
+// were implemented, not a general classifier.
+func TestTestLiteralsMatchedInProd(t *testing.T) {
+	files := map[string]string{
+		"label.go": `package label
+
+import "slices"
+
+func isGreeting(value string) bool {
+	switch value {
+	case "morning-glow", "evening-blue", "night-sky":
+		return true
+	}
+	return false
+}
+
+var knownZones = map[string]bool{"north-bay": true, "west-ridge": true, "south-field": true}
+func isKnownZone(value string) bool { return knownZones[value] }
+
+func isAlias(value string) bool {
+	return slices.Contains([]string{"amber-fox", "silver-wren", "quiet-owl"}, value)
+}
+
+func isUnit(value string) bool {
+	switch value { case "kg", "lb", "oz": return true }
+	return false
+}
+func hasSmallSet(value string) bool { return value == "ready" || value == "done" }
+func usesConstants(value string) bool {
+	switch value { case StateNew, StateOld, StateGone: return true }
+	return false
+}
+const (StateNew = "new"; StateOld = "old"; StateGone = "gone")
+
+// The values follow the protocol specification (https://example.com/spec).
+func specToken(value string) bool {
+	switch value { case "proto-a", "proto-b", "proto-c": return true }
+	return false
+}
+
+// The values are specified at https://example.com/format.
+func documentedWord(value string) bool {
+	switch value { case "format-a", "format-b", "format-c": return true }
+	return false
+}
+
+func isUncovered(value string) bool {
+	switch value { case "hidden-a", "hidden-b", "hidden-c": return true }
+	return false
+}
+
+var protocolHelp = []string{"proto-a", "proto-b", "proto-c"}
+`,
+		"label_test.go": `package label
+import "testing"
+func TestLabels(t *testing.T) {
+	_ = isGreeting("morning-glow"); _ = isGreeting("evening-blue"); _ = isGreeting("night-sky")
+	_ = isKnownZone("north-bay"); _ = isKnownZone("west-ridge"); _ = isKnownZone("south-field")
+	_ = isAlias("amber-fox"); _ = isAlias("silver-wren"); _ = isAlias("quiet-owl")
+	_ = isUnit("kg"); _ = isUnit("lb"); _ = isUnit("oz")
+	_ = usesConstants("new"); _ = usesConstants("old"); _ = usesConstants("gone")
+	_ = specToken("proto-a"); _ = specToken("proto-b"); _ = specToken("proto-c")
+	_ = documentedWord("format-a"); _ = documentedWord("format-b"); _ = documentedWord("format-c")
+}
+`,
+	}
+	assert.Equal(t, []string{"label.go:14", "label.go:16", "label.go:20", "label.go:5"},
+		rulestest.ProjectRulePlaces(t, NewTestLiteralsMatchedInProdRule(), files))
+}
+
+func TestTestLiteralsMatchedInProdRequiresClassifierCalls(t *testing.T) {
+	files := map[string]string{
+		"forms.go": `package forms
+
+import "slices"
+
+func direct(value string) bool {
+	switch value { case "direct-red", "direct-blue", "direct-green": return true }
+	return false
+}
+func ranged(value string) bool {
+	switch value { case "range-red", "range-blue", "range-green": return true }
+	return false
+}
+func tabled(value string) bool {
+	switch value { case "table-red", "table-blue", "table-green": return true }
+	return false
+}
+func dispatch(flag string) bool {
+	switch flag {
+	case "--disable-a": return true
+	case "--disable-b": return true
+	case "--disable-c": return true
+	}
+	return false
+}
+func scan(fields []string) []string {
+	var result []string
+	for _, field := range fields {
+		if operation(field) { result = append(result, field) }
+	}
+	return result
+}
+func operation(value string) bool {
+	return value == "op-a" || value == "op-b" || value == "op-c"
+}
+
+type flagSet struct{ first, second, third bool }
+func (f *flagSet) set(flag string) bool {
+	switch flag {
+	case "--flag-a": f.first = true
+	case "--flag-b": f.second = true
+	case "--flag-c": f.third = true
+	default: return false
+	}
+	return true
+}
+func pairKind(word string) (int, bool) {
+	switch word {
+	case "file", "gone", "time", "ok": return 1, true
+	case "line": return 2, true
+	}
+	return 0, false
+}
+func hasConfigCheck(check string) bool {
+	return slices.Contains([]string{"builtin:alpha", "builtin:beta", "builtin:gamma"}, check)
+}
+func isErrorWord(word string) bool {
+	switch word { case "e", "err", "error": return true }
+	return false
+}
+func parseFlags(args []string) bool {
+	var flags flagSet
+	for _, arg := range args { if !flags.set(arg) { return false } }
+	return true
+}
+func readPairs(lines []string) int {
+	for _, line := range lines { if _, ok := pairKind(line); ok { return 1 } }
+	return 0
+}
+func loadChecks(lines []string) bool {
+	for _, line := range lines { if hasConfigCheck(line) { return true } }
+	return false
+}
+func countErrorWords(lines []string) int {
+	n := 0
+	for _, line := range lines { if isErrorWord(line) { n++ } }
+	return n
+}
+`,
+		"forms_test.go": `package forms
+import "testing"
+func TestForms(t *testing.T) {
+	_ = direct("direct-red")
+	_ = direct("direct-blue")
+	_ = direct("direct-green")
+	for _, value := range []string{"range-red", "range-blue", "range-green"} {
+		_ = ranged(value)
+	}
+	cases := []struct{ value string }{{"table-red"}, {"table-blue"}, {"table-green"}}
+	for _, tc := range cases { _ = tabled(tc.value) }
+
+	_ = parse([]string{"--disable-a", "--disable-b", "--disable-c"})
+	_ = scan([]string{"op-a", "op-b", "op-c"})
+	_ = parseFlags([]string{"--flag-a", "--flag-b", "--flag-c"})
+	_ = readPairs([]string{"file", "gone", "time"})
+	_ = loadChecks([]string{"builtin:alpha", "builtin:beta", "builtin:gamma"})
+	_ = countErrorWords([]string{"e", "err", "error"})
+}
+func parse(args []string) bool {
+	for _, arg := range args { if !dispatch(arg) { return false } }
+	return true
+}
+`,
+	}
+	assert.Equal(t, []string{"forms.go:13", "forms.go:5", "forms.go:9"},
+		rulestest.ProjectRulePlaces(t, NewTestLiteralsMatchedInProdRule(), files))
+}
+
 // A prefix cut from a value of unknown length panics on a short one: a short
 // e-mail turns the handler into a 500, a short secret fails the test helper.
 func TestStringPrefixSliceUnguarded(t *testing.T) {

@@ -6,9 +6,11 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -25,6 +27,575 @@ func init() {
 	rules.Register(NewJSONBuiltByFormatRule())
 	rules.Register(NewSQLQuoteEscapedByHandRule())
 	rules.Register(NewSQLMetricLiteralZeroRule())
+	rules.Register(NewTestLiteralsMatchedInProdRule())
+}
+
+// TestLiteralsMatchedInProdRule detects boolean classifiers whose literal
+// values are passed directly from tests in the same package.
+type TestLiteralsMatchedInProdRule struct {
+	rules.GoFileFindingRule
+	*rules.BaseRule
+}
+
+func NewTestLiteralsMatchedInProdRule() *TestLiteralsMatchedInProdRule {
+	return &TestLiteralsMatchedInProdRule{BaseRule: rules.NewBaseRule(
+		"test-literals-matched-in-prod",
+		"patterns",
+		"Detects boolean classifiers whose string literals are passed directly by package tests",
+		core.SeverityMedium,
+	)}
+}
+
+func (r *TestLiteralsMatchedInProdRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
+	return nil
+}
+func (r *TestLiteralsMatchedInProdRule) RequiresSSA() bool { return false }
+
+type testLiteralPackage struct {
+	name string
+	dir  string
+}
+
+type matchedLiteralSet struct {
+	values map[string]bool
+	nodes  map[token.Pos]bool
+	fn     *ast.FuncDecl
+	file   *core.FileContext
+}
+
+func (r *TestLiteralsMatchedInProdRule) AnalyzeGoProject(project *core.GoProjectContext) ([]*core.Violation, error) {
+	tests := make(map[testLiteralPackage]map[string]map[string]bool)
+	production := make(map[testLiteralPackage][]*core.FileContext)
+	for _, file := range project.Files {
+		if file == nil || file.GoAST == nil || !file.IsGoFile() {
+			continue
+		}
+		key := testLiteralPackage{name: file.GoAST.Name.Name, dir: filepath.Dir(file.RelPath)}
+		if file.IsTestFile() {
+			if strings.HasSuffix(file.GoAST.Name.Name, "_test") {
+				continue
+			}
+			functionInputs := tests[key]
+			if functionInputs == nil {
+				functionInputs = make(map[string]map[string]bool)
+				tests[key] = functionInputs
+			}
+			for name, values := range testClassifierInputs(file.GoAST) {
+				if functionInputs[name] == nil {
+					functionInputs[name] = make(map[string]bool)
+				}
+				for value := range values {
+					functionInputs[name][value] = true
+				}
+			}
+		} else {
+			production[key] = append(production[key], file)
+		}
+	}
+
+	var violations []*core.Violation
+	for key, files := range production {
+		testValues := tests[key]
+		if len(testValues) == 0 {
+			continue
+		}
+		var sets []matchedLiteralSet
+		for _, file := range files {
+			sets = append(sets, collectTestLiteralSets(file)...)
+		}
+		if len(sets) == 0 {
+			continue
+		}
+		literalIndex := productionLiteralIndex(files)
+		reported := make(map[token.Pos]bool)
+		for _, set := range sets {
+			file, fn := set.file, set.fn
+			matches := 0
+			for value := range set.values {
+				if testValues[fn.Name.Name][value] {
+					matches++
+				}
+			}
+			if matches < 3 || hasProductionLiteralSet(literalIndex, set) ||
+				file == nil || fn == nil || !project.IsReportFile(file) || hasSpecReference(fn) || reported[fn.Pos()] {
+				continue
+			}
+			line := file.LineFor(fn)
+			if file.IsSuppressed(line, r.Name()) {
+				continue
+			}
+			v := r.CreateViolation(file.RelPath, line,
+				"Package tests pass these same string literals directly to this boolean classifier — its behavior may be fitted to examples instead of implementing the general rule")
+			v.WithCode(strings.TrimSpace(file.GetLine(line)))
+			v.WithSuggestion("Implement the general rule, or move the domain dictionary to a shared declaration with its specification or source")
+			violations = append(violations, v)
+			reported[fn.Pos()] = true
+		}
+	}
+	return violations, nil
+}
+
+// testClassifierInputs records string values passed to a classifier directly
+// from a test, including values ranged from a literal slice or test table.
+func testClassifierInputs(file *ast.File) map[string]map[string]bool {
+	inputs := make(map[string]map[string]bool)
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || !isTestFunction(fn.Name.Name) {
+			continue
+		}
+		sources := make(map[string]*ast.CompositeLit)
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			switch n := node.(type) {
+			case *ast.ValueSpec:
+				for i, value := range n.Values {
+					if i < len(n.Names) {
+						if lit, ok := ast.Unparen(value).(*ast.CompositeLit); ok {
+							sources[n.Names[i].Name] = lit
+						}
+					}
+				}
+			case *ast.AssignStmt:
+				for i, value := range n.Rhs {
+					if i < len(n.Lhs) {
+						id, ok := ast.Unparen(n.Lhs[i]).(*ast.Ident)
+						lit, litOK := ast.Unparen(value).(*ast.CompositeLit)
+						if ok && litOK {
+							sources[id.Name] = lit
+						}
+					}
+				}
+			}
+			return true
+		})
+		ranges := make(map[string]*ast.CompositeLit)
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			rangeStmt, ok := node.(*ast.RangeStmt)
+			if !ok {
+				return true
+			}
+			var variable *ast.Ident
+			if rangeStmt.Value != nil {
+				variable, _ = ast.Unparen(rangeStmt.Value).(*ast.Ident)
+			}
+			if variable == nil && rangeStmt.Key != nil {
+				variable, _ = ast.Unparen(rangeStmt.Key).(*ast.Ident)
+			}
+			if variable == nil {
+				return true
+			}
+			source, ok := ast.Unparen(rangeStmt.X).(*ast.CompositeLit)
+			if !ok {
+				id, isIdent := ast.Unparen(rangeStmt.X).(*ast.Ident)
+				if !isIdent {
+					return true
+				}
+				source = sources[id.Name]
+			}
+			if source != nil {
+				ranges[variable.Name] = source
+			}
+			return true
+		})
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name := calledFunctionName(call.Fun)
+			if name == "" {
+				return true
+			}
+			for _, arg := range call.Args {
+				values := testArgumentLiterals(arg, ranges)
+				for value := range values {
+					if inputs[name] == nil {
+						inputs[name] = make(map[string]bool)
+					}
+					inputs[name][value] = true
+				}
+			}
+			return true
+		})
+	}
+	return inputs
+}
+
+func isTestFunction(name string) bool {
+	return strings.HasPrefix(name, "Test") || strings.HasPrefix(name, "Benchmark") ||
+		strings.HasPrefix(name, "Example") || strings.HasPrefix(name, "Fuzz")
+}
+
+func calledFunctionName(expr ast.Expr) string {
+	switch callee := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		return callee.Name
+	case *ast.SelectorExpr:
+		return callee.Sel.Name
+	default:
+		return ""
+	}
+}
+
+func testArgumentLiterals(arg ast.Expr, ranges map[string]*ast.CompositeLit) map[string]bool {
+	switch value := ast.Unparen(arg).(type) {
+	case *ast.BasicLit:
+		if value.Kind == token.STRING {
+			if text, err := strconv.Unquote(value.Value); err == nil {
+				return map[string]bool{text: true}
+			}
+		}
+	case *ast.Ident:
+		if source := ranges[value.Name]; source != nil {
+			return compositeStringValues(source)
+		}
+	case *ast.SelectorExpr:
+		if variable, ok := ast.Unparen(value.X).(*ast.Ident); ok {
+			if source := ranges[variable.Name]; source != nil {
+				return compositeStructFieldValues(source, value.Sel.Name)
+			}
+		}
+	}
+	return nil
+}
+
+func compositeStringValues(source *ast.CompositeLit) map[string]bool {
+	values := make(map[string]bool)
+	if array, ok := ast.Unparen(source.Type).(*ast.ArrayType); ok {
+		if element, ok := ast.Unparen(array.Elt).(*ast.Ident); !ok || element.Name != "string" {
+			return values
+		}
+	}
+	for _, expr := range source.Elts {
+		lit, ok := ast.Unparen(expr).(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			continue
+		}
+		if value, err := strconv.Unquote(lit.Value); err == nil {
+			values[value] = true
+		}
+	}
+	return values
+}
+
+func compositeStructFieldValues(source *ast.CompositeLit, fieldName string) map[string]bool {
+	array, ok := ast.Unparen(source.Type).(*ast.ArrayType)
+	if !ok {
+		return nil
+	}
+	structType, ok := ast.Unparen(array.Elt).(*ast.StructType)
+	if !ok {
+		return nil
+	}
+	fieldIndex := -1
+	index := 0
+	for _, field := range structType.Fields.List {
+		if len(field.Names) == 0 {
+			index++
+			continue
+		}
+		for _, name := range field.Names {
+			if name.Name == fieldName {
+				fieldIndex = index
+			}
+			index++
+		}
+	}
+	if fieldIndex < 0 {
+		return nil
+	}
+	values := make(map[string]bool)
+	for _, element := range source.Elts {
+		var value ast.Expr
+		if keyed, ok := ast.Unparen(element).(*ast.CompositeLit); ok {
+			element = keyed
+		}
+		if keyed, ok := element.(*ast.KeyValueExpr); ok {
+			key, isName := ast.Unparen(keyed.Key).(*ast.Ident)
+			if !isName || key.Name != fieldName {
+				continue
+			}
+			value = keyed.Value
+		} else if row, ok := ast.Unparen(element).(*ast.CompositeLit); ok && fieldIndex < len(row.Elts) {
+			value = row.Elts[fieldIndex]
+		} else {
+			continue
+		}
+		lit, ok := ast.Unparen(value).(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			continue
+		}
+		if text, err := strconv.Unquote(lit.Value); err == nil {
+			values[text] = true
+		}
+	}
+	return values
+}
+
+func uniformBoolSwitchLiterals(sw *ast.SwitchStmt) []*ast.BasicLit {
+	var literals []*ast.BasicLit
+	answer := ""
+	for _, stmt := range sw.Body.List {
+		clause, ok := stmt.(*ast.CaseClause)
+		if !ok || len(clause.List) == 0 {
+			continue
+		}
+		caseStrings := stringLiterals(clause.List)
+		if len(caseStrings) == 0 {
+			continue
+		}
+		if len(clause.Body) != 1 {
+			return nil
+		}
+		ret, ok := clause.Body[0].(*ast.ReturnStmt)
+		if !ok || len(ret.Results) != 1 {
+			return nil
+		}
+		result, ok := ast.Unparen(ret.Results[0]).(*ast.Ident)
+		if !ok || (result.Name != "true" && result.Name != "false") {
+			return nil
+		}
+		if answer != "" && answer != result.Name {
+			return nil
+		}
+		answer = result.Name
+		literals = append(literals, caseStrings...)
+	}
+	if len(literals) < 3 {
+		return nil
+	}
+	return literals
+}
+
+func collectTestLiteralSets(file *core.FileContext) []matchedLiteralSet {
+	var found []matchedLiteralSet
+	mapsByName := mapLiteralSets(file.GoAST)
+	for _, decl := range file.GoAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || !isBooleanFunction(fn) {
+			continue
+		}
+		params := stringParameterNames(fn)
+		if len(params) == 0 {
+			continue
+		}
+		var sets []matchedLiteralSet
+		add := func(values []*ast.BasicLit) {
+			set := matchedLiteralSet{values: make(map[string]bool), nodes: make(map[token.Pos]bool)}
+			for _, lit := range values {
+				value, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					continue
+				}
+				set.values[value] = true
+				set.nodes[lit.Pos()] = true
+			}
+			if len(set.values) >= 3 {
+				sets = append(sets, set)
+			}
+		}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			switch n := node.(type) {
+			case *ast.SwitchStmt:
+				tag, ok := ast.Unparen(n.Tag).(*ast.Ident)
+				if !ok || !slices.Contains(params, tag.Name) {
+					return true
+				}
+				add(uniformBoolSwitchLiterals(n))
+			case *ast.ValueSpec:
+				for i, value := range n.Values {
+					if i < len(n.Names) {
+						if lit, ok := ast.Unparen(value).(*ast.CompositeLit); ok {
+							addFunctionMap(mapsByName, n.Names[i].Name, lit)
+						}
+					}
+				}
+			case *ast.AssignStmt:
+				for i, value := range n.Rhs {
+					if i < len(n.Lhs) {
+						id, ok := ast.Unparen(n.Lhs[i]).(*ast.Ident)
+						lit, litOK := ast.Unparen(value).(*ast.CompositeLit)
+						if ok && litOK {
+							addFunctionMap(mapsByName, id.Name, lit)
+						}
+					}
+				}
+			case *ast.IndexExpr:
+				name, ok := ast.Unparen(n.X).(*ast.Ident)
+				if !ok {
+					return true
+				}
+				input, ok := ast.Unparen(n.Index).(*ast.Ident)
+				if !ok || !slices.Contains(params, input.Name) {
+					return true
+				}
+				if set, exists := mapsByName[name.Name]; exists {
+					sets = append(sets, set)
+				}
+			case *ast.CallExpr:
+				sel, ok := ast.Unparen(n.Fun).(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Contains" || len(n.Args) != 2 {
+					return true
+				}
+				input, ok := ast.Unparen(n.Args[1]).(*ast.Ident)
+				if !ok || !slices.Contains(params, input.Name) {
+					return true
+				}
+				lit, ok := ast.Unparen(n.Args[0]).(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				add(stringLiterals(lit.Elts))
+			}
+			return true
+		})
+
+		for _, set := range sets {
+			set.fn = fn
+			set.file = file
+			found = append(found, set)
+		}
+	}
+	return found
+}
+
+func mapLiteralSets(file *ast.File) map[string]matchedLiteralSet {
+	mapsByName := make(map[string]matchedLiteralSet)
+	addMap := func(name string, lit *ast.CompositeLit) {
+		if set, ok := stringMapLiteralSet(lit); ok {
+			mapsByName[name] = set
+		}
+	}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, value := range valueSpec.Values {
+				if i < len(valueSpec.Names) {
+					if lit, ok := ast.Unparen(value).(*ast.CompositeLit); ok {
+						addMap(valueSpec.Names[i].Name, lit)
+					}
+				}
+			}
+		}
+	}
+	return mapsByName
+}
+
+func addFunctionMap(mapsByName map[string]matchedLiteralSet, name string, lit *ast.CompositeLit) {
+	if set, ok := stringMapLiteralSet(lit); ok {
+		mapsByName[name] = set
+	}
+}
+
+func stringMapLiteralSet(lit *ast.CompositeLit) (matchedLiteralSet, bool) {
+	if _, ok := lit.Type.(*ast.MapType); !ok {
+		return matchedLiteralSet{}, false
+	}
+	set := matchedLiteralSet{values: make(map[string]bool), nodes: make(map[token.Pos]bool)}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := ast.Unparen(kv.Key).(*ast.BasicLit)
+		if !ok || key.Kind != token.STRING {
+			continue
+		}
+		value, err := strconv.Unquote(key.Value)
+		if err == nil {
+			set.values[value] = true
+			set.nodes[key.Pos()] = true
+		}
+	}
+	return set, len(set.values) >= 3
+}
+
+func stringLiterals(exprs []ast.Expr) []*ast.BasicLit {
+	var literals []*ast.BasicLit
+	for _, expr := range exprs {
+		lit, ok := ast.Unparen(expr).(*ast.BasicLit)
+		if ok && lit.Kind == token.STRING {
+			literals = append(literals, lit)
+		}
+	}
+	return literals
+}
+
+func isBooleanFunction(fn *ast.FuncDecl) bool {
+	if fn.Type.Results == nil || len(fn.Type.Results.List) == 0 {
+		return false
+	}
+	last := fn.Type.Results.List[len(fn.Type.Results.List)-1]
+	id, ok := ast.Unparen(last.Type).(*ast.Ident)
+	return ok && id.Name == "bool"
+}
+
+func stringParameterNames(fn *ast.FuncDecl) []string {
+	var params []string
+	if fn.Type.Params == nil {
+		return params
+	}
+	for _, field := range fn.Type.Params.List {
+		id, ok := ast.Unparen(field.Type).(*ast.Ident)
+		if !ok || id.Name != "string" {
+			continue
+		}
+		for _, name := range field.Names {
+			params = append(params, name.Name)
+		}
+	}
+	return params
+}
+
+func productionLiteralIndex(files []*core.FileContext) map[string][]token.Pos {
+	index := make(map[string][]token.Pos)
+	for _, file := range files {
+		ast.Inspect(file.GoAST, func(node ast.Node) bool {
+			lit, ok := node.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			value, err := strconv.Unquote(lit.Value)
+			if err == nil {
+				index[value] = append(index[value], lit.Pos())
+			}
+			return true
+		})
+	}
+	return index
+}
+
+func hasProductionLiteralSet(index map[string][]token.Pos, candidate matchedLiteralSet) bool {
+	repeated := 0
+	for value := range candidate.values {
+		for _, pos := range index[value] {
+			inCandidate := candidate.fn != nil && pos >= candidate.fn.Pos() && pos < candidate.fn.End()
+			if !candidate.nodes[pos] && !inCandidate {
+				repeated++
+				break
+			}
+		}
+		if repeated >= 3 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSpecReference(fn *ast.FuncDecl) bool {
+	if fn.Doc == nil {
+		return false
+	}
+	text := strings.ToLower(fn.Doc.Text())
+	return strings.Contains(text, "spec") || strings.Contains(text, "rfc") ||
+		strings.Contains(text, "protocol") || strings.Contains(text, "http://") || strings.Contains(text, "https://")
 }
 
 // StringPrefixSliceUnguardedRule detects a prefix cut from a string of
