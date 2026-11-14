@@ -182,8 +182,9 @@ not `services/**`. An exception whose `file` or `files` matches no file under
 that directory suppresses nothing, and the `dead-config-exception` rule reports
 it on its line of `.glint.yaml`.
 
-Individual findings can also be silenced at the source with `//nolint:<rule>` or
-`// <rule>: safe — reason`, on the offending line or the line above it.
+Individual findings can also be silenced at the source with `//nolint:<rule> <reason>` or
+`// <rule>: safe — <reason>`, on the offending line or the line above it; the
+reason is written out in place of `<reason>`.
 
 ## Rules
 

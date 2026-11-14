@@ -1,7 +1,12 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -213,11 +218,66 @@ func TestBroadExclusionMarkerOnTheLineAbove(t *testing.T) {
 	assert.Equal(t, []int{5}, lines)
 }
 
-// glint's own advice must not hand out a placeholder that is no reason.
-func TestBroadExclusionMessagesGiveNoPlaceholder(t *testing.T) {
+// glint's broad-exclusion advice ends with the marker to copy, and the copy
+// is no reason until one is written in place of the placeholder.
+func TestBroadExclusionMessagesEndWithAMarkerToFill(t *testing.T) {
 	files := []string{"a.go"}
 	for _, entry := range []broadEntry{{pattern: "<category>"}, {pattern: "src/**", exception: true}, {pattern: "src/**"}, {pattern: "tools", skipDir: true}, {pattern: "*.go"}} {
 		message := broadFindingMessage(entry, files)
-		assert.NotContains(t, message, "<reason>", message)
+		at := strings.Index(message, "# broad-exclusion: safe")
+		require.GreaterOrEqual(t, at, 0, message)
+		assert.False(t, core.SuppressionHasReason(message[at:], "broad-exclusion"), message)
+	}
+}
+
+// adviceMarker finds a marker example in glint's text: nolint:<rule> or
+// <rule>: safe, with the comment opener before it when there is one.
+var adviceMarker = regexp.MustCompile(`(?:(?://|#)\s*)?(?:nolint:([a-z][a-z0-9]*(?:-[a-z0-9]+)*)|([a-z][a-z0-9]*(?:-[a-z0-9]+)+):\s?safe\b)`)
+
+// A marker example in glint's advice, copied from the marker to the end of
+// the advice, is no reason: the advice leaves the reason to the reader with a
+// placeholder, and its own words do not stand in for one.
+func TestGlintAdviceMarkersAreNoReason(t *testing.T) {
+	found := map[string]bool{}
+	for _, dir := range []string{"../../pkg", "../../cmd"} {
+		require.NoError(t, filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() && d.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+			if err != nil {
+				return err
+			}
+			ast.Inspect(file, func(n ast.Node) bool {
+				lit, ok := n.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					return true
+				}
+				text, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					return true
+				}
+				for _, m := range adviceMarker.FindAllStringSubmatchIndex(text, -1) {
+					name, end := m[2], m[3] // nolint:<rule>
+					if name < 0 {
+						name, end = m[4], m[5] // <rule>: safe
+					}
+					rule := text[name:end]
+					found[rule] = true
+					assert.False(t, core.SuppressionHasReason(text[m[0]:], rule), "%s: %s", path, text[m[0]:])
+				}
+				return true
+			})
+			return nil
+		}))
+	}
+	for _, name := range []string{"broad-exclusion", "allocation-in-hot-function", "reflect-in-hot-function", "runtime-gc-tuning", "nil-di", "any-in-public-contract"} {
+		assert.True(t, found[name], "advice of %s carries a marker example", name)
 	}
 }

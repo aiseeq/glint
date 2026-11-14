@@ -15,11 +15,15 @@ const (
 )
 
 // htmlScanner reads the comments of HTML and Go templates: <!-- … --> in
-// text and {{/* … */}} actions. Text that only looks like a comment is none:
-// inside a tag (an attribute value), in the raw text of <script> and
-// <style>, and in a string of a template action.
+// text and {{/* … */}} actions, in text and in the raw text of an element
+// alike. Text that only looks like a comment is none: inside a tag (an
+// attribute value), in the raw text of <script>, <style>, <textarea> and
+// <title>, and in a string of a template action.
 type htmlScanner struct {
-	state    htmlState
+	state htmlState
+	// outer is the state a template action returns to: htmlText or
+	// htmlRawText.
+	outer    htmlState
 	quote    byte   // the open quote inside a tag or an action, 0 when none
 	rawEnd   string // the end tag of raw text, lowercase
 	tagName  string // the name of the tag being read, lowercase
@@ -49,12 +53,7 @@ func (s *htmlScanner) scanLine(n int, line string) {
 		case htmlTag:
 			i = s.scanTag(line, i)
 		case htmlRawText:
-			end := strings.Index(strings.ToLower(line[i:]), s.rawEnd)
-			if end < 0 {
-				return
-			}
-			s.state, s.tagName = htmlTag, ""
-			i += end + 2
+			i = s.scanRawText(line, i)
 		case htmlAction:
 			i = s.scanAction(line, i)
 		default:
@@ -97,13 +96,7 @@ func (s *htmlScanner) scanText(line string, i int) int {
 		s.state = htmlComment
 		return i + 4
 	case strings.HasPrefix(rest, "{{"):
-		after := strings.TrimLeft(strings.TrimPrefix(rest[2:], "-"), " \t")
-		if strings.HasPrefix(after, "/*") {
-			s.state = htmlActionComment
-			return len(line) - len(after) + 2
-		}
-		s.state = htmlAction
-		return i + 2
+		return s.openAction(line, i, htmlText)
 	case rest[0] == '<' && len(rest) > 1 && (isASCIILetter(rest[1]) || rest[1] == '/' || rest[1] == '!' || rest[1] == '?'):
 		s.state = htmlTag
 		name := rest[1:]
@@ -117,6 +110,34 @@ func (s *htmlScanner) scanText(line string, i int) int {
 	return i + 1
 }
 
+// openAction reads the template action that opens at i and returns where its
+// body starts; the action returns to outer when it closes.
+func (s *htmlScanner) openAction(line string, i int, outer htmlState) int {
+	s.outer = outer
+	after := strings.TrimLeft(strings.TrimPrefix(line[i+2:], "-"), " \t")
+	if strings.HasPrefix(after, "/*") {
+		s.state = htmlActionComment
+		return len(line) - len(after) + 2
+	}
+	s.state = htmlAction
+	return i + 2
+}
+
+// scanRawText reads raw text from i up to the end tag of its element or a
+// template action, whichever comes first.
+func (s *htmlScanner) scanRawText(line string, i int) int {
+	end := strings.Index(strings.ToLower(line[i:]), s.rawEnd)
+	action := strings.Index(line[i:], "{{")
+	switch {
+	case action >= 0 && (end < 0 || action < end):
+		return s.openAction(line, i+action, htmlRawText)
+	case end < 0:
+		return len(line)
+	}
+	s.state, s.tagName = htmlTag, ""
+	return i + end + 2
+}
+
 func (s *htmlScanner) scanTag(line string, i int) int {
 	c := line[i]
 	switch {
@@ -128,7 +149,7 @@ func (s *htmlScanner) scanTag(line string, i int) int {
 		s.quote = c
 	case c == '>':
 		s.state = htmlText
-		if s.tagName == "script" || s.tagName == "style" {
+		if s.tagName == "script" || s.tagName == "style" || s.tagName == "textarea" || s.tagName == "title" {
 			s.state, s.rawEnd = htmlRawText, "</"+s.tagName
 		}
 	}
@@ -148,7 +169,7 @@ func (s *htmlScanner) scanAction(line string, i int) int {
 	case c == '"' || c == '\'' || c == '`':
 		s.quote = c
 	case strings.HasPrefix(line[i:], "}}"):
-		s.state = htmlText
+		s.state = s.outer
 		return i + 2
 	}
 	return i + 1
