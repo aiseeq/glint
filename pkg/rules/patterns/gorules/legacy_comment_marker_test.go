@@ -63,7 +63,7 @@ var policy = "legacy"
 			code: `package router
 
 func Route() {
-	// Legacy compat branch //nolint:legacy-comment-marker
+	//nolint:legacy-comment-marker // Legacy compat branch
 	_ = 1
 }`,
 			filename:  "router/r.go",

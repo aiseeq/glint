@@ -549,13 +549,16 @@ func TestMarkerInsideProseDoesNotSuppress(t *testing.T) {
 	}
 }
 
-func TestMarkerInLaterCommentSegmentSuppresses(t *testing.T) {
+// A marker starts its comment: one after prose, even behind a second "//",
+// is a quoted example in documentation, not a suppression.
+func TestMarkerAfterProseDoesNotSuppress(t *testing.T) {
 	for line, expected := range map[string]bool{
-		"// Legacy compat branch //nolint:my-rule":    true,
-		"// text // my-rule: safe — reason":           true,
+		"// Legacy compat branch //nolint:my-rule":    false,
+		"//   - //nolint:my-rule on the line":         false,
 		"// disabled nolint:my-rule":                  false,
-		"# text #nolint:my-rule":                      true,
 		"# disabled nolint:my-rule":                   false,
+		"#nolint:my-rule":                             true,
+		"x() //nolint:my-rule // reason":              true,
 		"// see https://example.com/x nolint:my-rule": false,
 	} {
 		path := "a.go"
