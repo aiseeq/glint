@@ -91,6 +91,7 @@ func liveEntryPoints(pkg *core.GoPackageContext, hostOf func(*ast.BasicLit) stri
 			entry.resultIndexes = namedResultIndexes(fn, info)
 			entry.knownMembers = returnedClientMembers(fn, info)
 			entry.selfMethods = returnedSelfMethods(fn, info)
+			entry.foreignMethods = returnedForeignMethods(fn, info, pkg.Package.Types)
 			entry.address = addresses[key]
 			for _, methodKey := range methodKeys {
 				_, method, _ := strings.Cut(methodKey, ".")
@@ -131,6 +132,50 @@ type liveEntry struct {
 	// selfMethods are methods of a returned client type that hand back that type
 	// (builders: New().WithKey(k)), so their result is the client again.
 	selfMethods map[string]bool
+	// foreignMethods are the methods a returned client type gets from an embedded
+	// type of another package: the rule does not see whether they reach the wire.
+	foreignMethods map[string]bool
+}
+
+// escapingMethods are the methods a use of the client may run without the test
+// calling them: the live ones and those of another package, such as a String
+// fmt or a testing log would call.
+func (e liveEntry) escapingMethods() map[string]bool {
+	if len(e.foreignMethods) == 0 {
+		return e.liveMethods
+	}
+	methods := maps.Clone(e.liveMethods)
+	maps.Copy(methods, e.foreignMethods)
+	return methods
+}
+
+// returnedForeignMethods returns the methods the client types returned by fn
+// get from embedded types of other packages.
+func returnedForeignMethods(fn *ast.FuncDecl, info *types.Info, self *types.Package) map[string]bool {
+	obj, ok := info.Defs[fn.Name].(*types.Func)
+	if !ok || obj.Signature().Results() == nil {
+		return nil
+	}
+	var found map[string]bool
+	for v := range obj.Signature().Results().Variables() {
+		named := patternkit.NamedOf(v.Type())
+		if named == nil || named.Obj().Pkg() != self {
+			continue
+		}
+		for selection := range types.NewMethodSet(types.NewPointer(named)).Methods() {
+			method, ok := selection.Obj().(*types.Func)
+			if !ok {
+				continue
+			}
+			if owner := patternkit.NamedOf(method.Signature().Recv().Type()); owner != nil && owner.Obj().Pkg() != self {
+				if found == nil {
+					found = map[string]bool{}
+				}
+				found[method.Name()] = true
+			}
+		}
+	}
+	return found
 }
 
 func namedResultIndexes(fn *ast.FuncDecl, info *types.Info) map[int]bool {
