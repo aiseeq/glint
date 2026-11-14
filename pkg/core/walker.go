@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -327,7 +328,12 @@ func (w *Walker) visitEntry(fileQueue chan<- string, walkErrors chan<- error, he
 }
 
 func (w *Walker) visitDirectory(walkErrors chan<- error, held *heldDirError, path, name string) error {
-	if w.shouldSkipDir(name) {
+	skip, err := w.shouldSkipDir(name, path)
+	if err != nil {
+		walkErrors <- err
+		return filepath.SkipDir
+	}
+	if skip {
 		return filepath.SkipDir
 	}
 	if w.gitignore != nil {
@@ -506,10 +512,39 @@ func containsAny(content []byte, paths []string) bool {
 }
 
 // shouldSkipDir reports whether a directory is not descended into at all. The
-// list comes from settings.skip_dirs, which defaults to DefaultSkipDirs — a
-// project whose own package is called build/ or out/ can override it.
-func (w *Walker) shouldSkipDir(name string) bool {
-	return slices.Contains(w.config.SkipDirs(), name)
+// default artifact directories are skipped unless the current git index tracks
+// something inside them; explicit settings.skip_dirs keeps its existing
+// verbatim behavior.
+func (w *Walker) shouldSkipDir(name, path string) (bool, error) {
+	if len(w.config.Settings.SkipDirs) > 0 {
+		return slices.Contains(w.config.Settings.SkipDirs, name), nil
+	}
+	if !slices.Contains(DefaultSkipDirs, name) {
+		return false, nil
+	}
+	if name != "out" && name != "dist" && name != "build" && name != "bin" {
+		return true, nil
+	}
+	if !w.skipNestedRepos {
+		return true, nil
+	}
+	rel, err := filepath.Rel(w.projectRoot, path)
+	if err != nil {
+		return false, fmt.Errorf("make %q relative to project root %q: %w", path, w.projectRoot, err)
+	}
+	cmd := exec.Command("git", "-C", w.projectRoot, "ls-files", "-z", "--", ":(literal)"+filepath.ToSlash(rel))
+	output, err := cmd.Output()
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return true, nil
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "not a git repository") {
+			return true, nil
+		}
+		return false, fmt.Errorf("list tracked files in %q: %w", path, err)
+	}
+	return len(output) == 0, nil
 }
 
 // isAnalyzableFile returns true if file should be analyzed
