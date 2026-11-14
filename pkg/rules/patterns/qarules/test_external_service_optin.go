@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"go/types"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -23,6 +24,9 @@ type testDirFacts struct {
 	// optInHelpers holds the functions of the test files that skip the test
 	// unless a dedicated env flag is set.
 	optInHelpers map[string]bool
+	// emptyFuncs holds "package.function" for the functions of the directory,
+	// test files and sources alike, whose body is only bare returns.
+	emptyFuncs map[string]bool
 }
 
 type clientHolder struct {
@@ -47,6 +51,19 @@ func (r *TestExternalServiceRule) collectTestDirFacts(files []*core.FileContext,
 	facts := make(map[string]*testDirFacts, len(byDir))
 	for dir, dirFiles := range byDir {
 		facts[dir] = r.dirFacts(dirFiles, envKeys)
+		facts[dir].emptyFuncs = map[string]bool{}
+	}
+	for _, file := range files {
+		if file == nil || file.GoAST == nil {
+			continue
+		}
+		if f := facts[filepath.Dir(file.Path)]; f != nil {
+			for _, decl := range file.GoAST.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && onlyBareReturns(fn.Body) {
+					f.emptyFuncs[file.GoAST.Name.Name+"."+fn.Name.Name] = true
+				}
+			}
+		}
 	}
 	return facts
 }
@@ -289,7 +306,9 @@ type liveCallScope struct {
 	hostOf func(*ast.BasicLit) string
 	// isLocalURL reports a literal URL on a loopback or reserved host.
 	isLocalURL func(*ast.BasicLit) bool
-	file       *ast.File
+	// emptyFunc reports a function of the test's own package whose body is
+	// only bare returns.
+	emptyFunc func(name string) bool
 }
 
 // reaches returns the evidence of a live call and whether the call is one. A direct sending
@@ -314,7 +333,7 @@ func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry li
 		host = liveMethodArgument(body, call, entry.liveMethods, entry.resultIndexes, pkg.urlNames, isQualifier, s.hostOf, info)
 	}
 	if !s.unitTests {
-		if !entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, info) && !constructorResultEscapes(body, call, entry.liveMethods, entry.knownMembers, entry.resultIndexes, info, s.file) {
+		if !entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, info) && !constructorResultEscapes(body, call, entry.liveMethods, entry.knownMembers, entry.resultIndexes, info, s.emptyFunc) {
 			return "", false
 		}
 		if host == "" {
@@ -331,7 +350,7 @@ func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry li
 // constructorResultEscapes reports whether the test lets the constructed client reach code
 // whose behavior the rule cannot establish. A live method call is handled separately; reads
 // of fields and calls to known non-live methods are safe.
-func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMethods, knownMembers map[string]bool, resultIndexes map[int]bool, info *types.Info, file *ast.File) bool {
+func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMethods, knownMembers map[string]bool, resultIndexes map[int]bool, info *types.Info, emptyFunc func(string) bool) bool {
 	parents := map[ast.Node]ast.Node{}
 	var stack []ast.Node
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -356,7 +375,7 @@ func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMetho
 	if len(holders) == 0 {
 		return directConstructorResultEscapes(parents[ctor], parents, ctor, liveMethods, knownMembers, resultIndexes)
 	}
-	return constructorHolderEscapes(body, parents, holders, initializers, liveMethods, knownMembers, info, file)
+	return constructorHolderEscapes(body, parents, holders, initializers, liveMethods, knownMembers, info, emptyFunc)
 }
 
 func constructorOnlyInspectedOrDiscarded(body *ast.BlockStmt, ctor *ast.CallExpr, holders []clientHolder, initializers map[*ast.Ident]bool, parents map[ast.Node]ast.Node) bool {
@@ -471,14 +490,14 @@ func directConstructorResultEscapes(parent ast.Node, parents map[ast.Node]ast.No
 	}
 }
 
-func constructorHolderEscapes(body *ast.BlockStmt, parents map[ast.Node]ast.Node, holders []clientHolder, initializers map[*ast.Ident]bool, liveMethods, knownMembers map[string]bool, info *types.Info, file *ast.File) bool {
+func constructorHolderEscapes(body *ast.BlockStmt, parents map[ast.Node]ast.Node, holders []clientHolder, initializers map[*ast.Ident]bool, liveMethods, knownMembers map[string]bool, info *types.Info, emptyFunc func(string) bool) bool {
 	escapes := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		id, ok := n.(*ast.Ident)
 		if !ok || escapes || initializers[id] || !isHolderUse(id, holders, info) {
 			return !escapes
 		}
-		if call, ok := parents[id].(*ast.CallExpr); ok && localEmptyCallConsumes(file, call, id) {
+		if call, ok := parents[id].(*ast.CallExpr); ok && localEmptyCallConsumes(body, call, id, emptyFunc) {
 			return true
 		}
 		escapes = holderUseEscapes(id, parents[id], parents, liveMethods, knownMembers)
@@ -548,38 +567,57 @@ func allBlank(lhs []ast.Expr) bool {
 	return true
 }
 
-func localEmptyCallConsumes(file *ast.File, call *ast.CallExpr, value *ast.Ident) bool {
-	if file == nil {
-		return false
-	}
+func localEmptyCallConsumes(body *ast.BlockStmt, call *ast.CallExpr, value *ast.Ident, emptyFunc func(string) bool) bool {
 	id, ok := call.Fun.(*ast.Ident)
-	if !ok {
+	if !ok || emptyFunc == nil || !emptyFunc(id.Name) || declaresName(body, id.Name) {
 		return false
 	}
-	passed := false
-	for _, arg := range call.Args {
-		if arg == value {
-			passed = true
+	return slices.ContainsFunc(call.Args, func(arg ast.Expr) bool { return arg == value })
+}
+
+// onlyBareReturns reports a body that provably drops its arguments: a
+// returned expression can still call them.
+func onlyBareReturns(body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+	for _, stmt := range body.List {
+		ret, ok := stmt.(*ast.ReturnStmt)
+		if !ok || len(ret.Results) > 0 {
+			return false
 		}
 	}
-	if !passed {
-		return false
-	}
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.FuncDecl)
-		if ok && gen.Recv == nil && gen.Name.Name == id.Name && gen.Body != nil {
-			// Only a body of bare returns provably drops the client: a returned
-			// expression can still call it.
-			for _, bodyStmt := range gen.Body.List {
-				ret, isReturn := bodyStmt.(*ast.ReturnStmt)
-				if !isReturn || len(ret.Results) > 0 {
-					return false
+	return true
+}
+
+// declaresName reports whether the test body declares the name itself, so a
+// call by that name may not reach the package function.
+func declaresName(body *ast.BlockStmt, name string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			if node.Tok == token.DEFINE {
+				for _, lhs := range node.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && id.Name == name {
+						found = true
+					}
 				}
 			}
-			return true
+		case *ast.ValueSpec:
+			for _, id := range node.Names {
+				found = found || id.Name == name
+			}
+		case *ast.Field:
+			for _, id := range node.Names {
+				found = found || id.Name == name
+			}
+		case *ast.TypeSpec:
+			found = found || node.Name.Name == name
 		}
-	}
-	return false
+		return !found
+	})
+	return found
 }
 
 func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultIndexes map[int]bool, info *types.Info) ([]clientHolder, map[*ast.Ident]bool) {

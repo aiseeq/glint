@@ -831,7 +831,9 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 		if start := r.optInStart(fn, envKeys, osPkgs, facts.optInHelpers); start.IsValid() {
 			liveEnd = start
 		}
-		scope := liveCallScope{liveEnd: liveEnd, unitTests: unitTests, hostOf: r.externalHost, isLocalURL: r.localURL, file: file.GoAST}
+		scope := liveCallScope{liveEnd: liveEnd, unitTests: unitTests, hostOf: r.externalHost, isLocalURL: r.localURL, emptyFunc: func(name string) bool {
+			return facts != nil && facts.emptyFuncs[file.GoAST.Name.Name+"."+name]
+		}}
 		violations = append(violations, r.outboundCalls(file, imports, fn, outbound, scope)...)
 		if own, ok := outboundDirs[filepath.Dir(file.Path)]; ok {
 			violations = append(violations, r.inPackageCalls(file, fn, own, scope)...)

@@ -514,3 +514,15 @@ func TestSuppressionReasonMarkerNeedsReason(t *testing.T) {
 	bare := &FileContext{Path: "a.go", RelPath: "a.go", Lines: []string{"//nolint:my-rule"}}
 	assert.True(t, bare.IsSuppressed(1, "my-rule"), "other rules keep suppressing with a bare marker")
 }
+
+// A Go doc code block (//<tab>) quotes an example: a marker there suppresses
+// nothing, as suppression-without-reason and stale-suppression skip it too.
+func TestGoDocCodeBlockMarkerDoesNotSuppress(t *testing.T) {
+	quoted := &FileContext{Path: "a.go", RelPath: "a.go", Lines: []string{"//\tnolint:my-rule", "const ()"}}
+	assert.False(t, quoted.IsSuppressed(2, "my-rule"))
+	assert.False(t, quoted.LineSuppresses(1, "my-rule"))
+	spaced := &FileContext{Path: "a.go", RelPath: "a.go", Lines: []string{"// nolint:my-rule", "const ()"}}
+	assert.True(t, spaced.IsSuppressed(2, "my-rule"))
+	trailing := &FileContext{Path: "a.go", RelPath: "a.go", Lines: []string{"const () //\tnolint:my-rule"}}
+	assert.False(t, trailing.IsSuppressed(1, "my-rule"))
+}

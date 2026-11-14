@@ -50,3 +50,14 @@ func markerSuppresses(comment, ruleName string) bool {
 	}
 	return ruleName != SuppressionReasonRule || SuppressionHasReason(comment, ruleName)
 }
+
+// lineMarkerSuppresses reports whether the comment of a source line suppresses
+// the rule. A Go doc code block (//<tab>) quotes an example and suppresses
+// nothing, which is also why suppression-without-reason does not judge it.
+func (ctx *FileContext) lineMarkerSuppresses(line, ruleName string) bool {
+	comment := ctx.CommentOf(line)
+	if ctx.IsGoFile() && strings.HasPrefix(comment, "//\t") {
+		return false
+	}
+	return markerSuppresses(comment, ruleName)
+}

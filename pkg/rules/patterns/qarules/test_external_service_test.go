@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1658,4 +1659,44 @@ func TestReturnsLiveCall(t *testing.T) { c := New(); _ = forward(c) }
 	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
 	require.Len(t, violations, 3, "%v", messages(violations))
+}
+
+func TestTestExternalServiceRule_EmptyFunctionInAnotherFileOfThePackage(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"provider/client.go": `package provider
+
+import "net/http"
+
+type Client struct{ Base string }
+func New() *Client { return &Client{Base: "https://other-file-api.example.com"} }
+func (c *Client) Send() { _, _ = http.Get(c.Base) }
+func ignore(*Client) {}
+`,
+		"provider/client_test.go": `package provider
+
+import "testing"
+
+func TestIgnoredInOtherFile(t *testing.T) { c := New(); ignore(c) }
+func TestShadowedByLocal(t *testing.T) { ignore := func(x *Client) { x.Send() }; c := New(); ignore(c) }
+`,
+		"provider/external_test.go": `package provider_test
+
+import (
+	"testing"
+
+	"example.com/rulestest/provider"
+)
+
+func ignore(x *provider.Client) { x.Send() }
+func TestOwnPackageHelperSends(t *testing.T) { c := provider.New(); ignore(c) }
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var found []string
+	for _, v := range violations {
+		found = append(found, v.File+":"+strconv.Itoa(v.Line))
+	}
+	assert.ElementsMatch(t, []string{"provider/client_test.go:6", "provider/external_test.go:10"}, found, "%v", messages(violations))
 }
