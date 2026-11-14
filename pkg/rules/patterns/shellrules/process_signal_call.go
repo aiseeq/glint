@@ -135,6 +135,10 @@ type signalPackage struct {
 	self      processAliases
 	parent    processAliases
 	functions map[types.Object]*types.Func
+
+	// rangeDecls index the function declarations for the range analysis.
+	rangeOnce  sync.Once
+	rangeDecls map[*types.Func]*ast.FuncDecl
 }
 
 func newSignalPackage(path string, info *types.Info, files ...*ast.File) *signalPackage {

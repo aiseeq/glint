@@ -14,6 +14,8 @@ import (
 type rangeFlowResult struct {
 	executes bool
 	unknown  bool
+	// limited: the depth limit cut the analysis somewhere.
+	limited bool
 }
 
 // hasSignalStringRange makes test-only package helpers available to the
@@ -53,7 +55,7 @@ func hasSignalStringRange(file *ast.File) bool {
 	return found
 }
 
-func rangeStringLiterals(file *ast.File, info *types.Info, pkg *signalPackage) (data, executed map[*ast.BasicLit]bool) {
+func rangeStringLiterals(file *ast.File, fset *token.FileSet, info *types.Info, pkg *signalPackage) (data, executed map[*ast.BasicLit]bool) {
 	data = make(map[*ast.BasicLit]bool)
 	executed = make(map[*ast.BasicLit]bool)
 	if info == nil || pkg == nil {
@@ -64,29 +66,12 @@ func rangeStringLiterals(file *ast.File, info *types.Info, pkg *signalPackage) (
 		if !ok {
 			return true
 		}
-		values, ok := ast.Unparen(loop.X).(*ast.CompositeLit)
-		if !ok {
-			return true
-		}
-		array, ok := ast.Unparen(values.Type).(*ast.ArrayType)
-		if !ok {
-			return true
-		}
-		elementType, ok := ast.Unparen(array.Elt).(*ast.Ident)
-		if !ok || elementType.Name != "string" {
-			return true
-		}
-		value, ok := ast.Unparen(loop.Value).(*ast.Ident)
-		if !ok || value.Name == "_" {
-			return true
-		}
-		object := info.ObjectOf(value)
+		elements, object := rangeStringTable(loop, info)
 		if object == nil {
 			return true
 		}
-		scope := rangeEnclosingScope(file, loop)
-		flow := analyzeRangeObject(scope, map[types.Object]bool{object: true}, info, pkg, 0, make(map[*types.Func]bool))
-		for _, element := range values.Elts {
+		flow := analyzeRangeObject(rangeEnclosingScope(file, loop), object, info, pkg, fset)
+		for _, element := range elements {
 			ast.Inspect(element, func(child ast.Node) bool {
 				literal, ok := child.(*ast.BasicLit)
 				if !ok || literal.Kind != token.STRING {
@@ -108,190 +93,26 @@ func rangeStringLiterals(file *ast.File, info *types.Info, pkg *signalPackage) (
 	return data, executed
 }
 
-func analyzeRangeObject(scope ast.Node, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool) rangeFlowResult {
-	if depth >= 8 {
-		return rangeFlowResult{unknown: true}
+// rangeStringTable is the elements of the []string literal a range statement
+// walks and the variable that takes its values, or nil.
+func rangeStringTable(loop *ast.RangeStmt, info *types.Info) ([]ast.Expr, types.Object) {
+	values, ok := ast.Unparen(loop.X).(*ast.CompositeLit)
+	if !ok || values.Incomplete {
+		return nil, nil
 	}
-	propagated := propagateRangeObjects(scope, tracked, info)
-	result, handled := analyzeRangeCalls(scope, tracked, info, pkg, depth, stack)
-	markUnknownRangeUses(scope, tracked, propagated, handled, info, &result)
-	return result
-}
-
-func propagateRangeObjects(scope ast.Node, tracked map[types.Object]bool, info *types.Info) map[*ast.Ident]bool {
-	propagated := make(map[*ast.Ident]bool)
-	for changed := true; changed; {
-		changed = false
-		ast.Inspect(scope, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.AssignStmt:
-				for _, rhs := range n.Rhs {
-					if !rangeExprDepends(rhs, tracked, info) {
-						continue
-					}
-					for _, lhs := range n.Lhs {
-						var obj types.Object
-						switch lhs := ast.Unparen(lhs).(type) {
-						case *ast.Ident:
-							if lhs.Name != "_" {
-								obj = info.ObjectOf(lhs)
-							}
-						case *ast.SelectorExpr:
-							obj = info.Uses[lhs.Sel]
-							propagated[lhs.Sel] = true
-						}
-						if obj == nil {
-							continue
-						}
-						if obj != nil && !tracked[obj] {
-							tracked[obj] = true
-							changed = true
-						}
-						if obj != nil && tracked[obj] {
-							ast.Inspect(rhs, func(child ast.Node) bool {
-								if use, ok := child.(*ast.Ident); ok && tracked[info.Uses[use]] {
-									propagated[use] = true
-								}
-								return true
-							})
-						}
-					}
-				}
-			case *ast.ValueSpec:
-				for _, rhs := range n.Values {
-					if !rangeExprDepends(rhs, tracked, info) {
-						continue
-					}
-					for _, lhs := range n.Names {
-						obj := info.ObjectOf(lhs)
-						if obj != nil && !tracked[obj] {
-							tracked[obj] = true
-							changed = true
-						}
-						if obj != nil && tracked[obj] {
-							ast.Inspect(rhs, func(child ast.Node) bool {
-								if use, ok := child.(*ast.Ident); ok && tracked[info.Uses[use]] {
-									propagated[use] = true
-								}
-								return true
-							})
-						}
-					}
-				}
-			}
-			return true
-		})
-	}
-	return propagated
-}
-
-func analyzeRangeCalls(scope ast.Node, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool) (rangeFlowResult, map[*ast.Ident]bool) {
-	result := rangeFlowResult{}
-	handled := make(map[*ast.Ident]bool)
-	ast.Inspect(scope, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if ok {
-			analyzeRangeCall(call, tracked, info, pkg, depth, stack, handled, &result)
-		}
-		return true
-	})
-	return result, handled
-}
-
-func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool, handled map[*ast.Ident]bool, result *rangeFlowResult) {
-	var dependent []int
-	for i, arg := range call.Args {
-		if rangeExprDepends(arg, tracked, info) {
-			dependent = append(dependent, i)
-		}
-	}
-	if len(dependent) == 0 {
-		return
-	}
-	for _, i := range dependent {
-		markRangeUses(call.Args[i], tracked, info, handled)
-	}
-	if _, ok := shellExecutionScript(call, info); ok {
-		result.executes = true
-		return
-	}
-	if rangeDataCall(call, info) {
-		return
-	}
-	fn := rangeCallFunc(call, info)
-	if fn != nil && fn.Pkg() != nil && pkg.path != "" && fn.Pkg().Path() == pkg.path {
-		analyzeProjectRangeCall(call, dependent, fn, info, pkg, depth, stack, result)
-		return
-	}
-	result.unknown = true
-}
-
-func analyzeProjectRangeCall(call *ast.CallExpr, dependent []int, fn *types.Func, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool, result *rangeFlowResult) {
-	if stack[fn] {
-		result.unknown = true
-		return
-	}
-	decl := rangeFunctionDecl(fn, pkg, info)
-	if decl == nil || decl.Body == nil || decl.Type.Params == nil {
-		result.unknown = true
-		return
-	}
-	nextStack := make(map[*types.Func]bool, len(stack)+1)
-	for active := range stack {
-		nextStack[active] = true
-	}
-	nextStack[fn] = true
-	signature, ok := fn.Type().(*types.Signature)
+	array, ok := ast.Unparen(values.Type).(*ast.ArrayType)
 	if !ok {
-		result.unknown = true
-		return
+		return nil, nil
 	}
-	for _, argIndex := range dependent {
-		paramIndex, paramList := projectRangeParameter(call, argIndex, decl, info)
-		parameter, found := rangeParameterName(paramList, paramIndex, signature.Variadic() && paramList == decl.Type.Params)
-		if !found {
-			result.unknown = true
-			continue
-		}
-		if parameter == nil {
-			continue
-		}
-		param := info.ObjectOf(parameter)
-		if param == nil {
-			result.unknown = true
-			continue
-		}
-		nested := analyzeRangeObject(decl.Body, map[types.Object]bool{param: true}, info, pkg, depth+1, nextStack)
-		result.executes = result.executes || nested.executes
-		result.unknown = result.unknown || nested.unknown
+	elementType, ok := ast.Unparen(array.Elt).(*ast.Ident)
+	if !ok || elementType.Name != "string" {
+		return nil, nil
 	}
-}
-
-func projectRangeParameter(call *ast.CallExpr, index int, decl *ast.FuncDecl, info *types.Info) (int, *ast.FieldList) {
-	paramList := decl.Type.Params
-	if selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok {
-		if selection := info.Selections[selector]; selection != nil && selection.Kind() == types.MethodExpr {
-			if index == 0 {
-				return index, decl.Recv
-			}
-			index--
-		}
+	value, ok := ast.Unparen(loop.Value).(*ast.Ident)
+	if !ok || value.Name == "_" {
+		return nil, nil
 	}
-	return index, paramList
-}
-
-func markUnknownRangeUses(scope ast.Node, tracked map[types.Object]bool, propagated map[*ast.Ident]bool, handled map[*ast.Ident]bool, info *types.Info, result *rangeFlowResult) {
-	ast.Inspect(scope, func(n ast.Node) bool {
-		id, ok := n.(*ast.Ident)
-		if !ok || !tracked[info.Uses[id]] || propagated[id] || handled[id] {
-			return true
-		}
-		if rangeIdentInEquality(id, scope, tracked, info) {
-			return true
-		}
-		result.unknown = true
-		return true
-	})
+	return values.Elts, info.ObjectOf(value)
 }
 
 func rangeEnclosingScope(file *ast.File, target *ast.RangeStmt) ast.Node {
@@ -436,8 +257,15 @@ func rangeCallFunc(call *ast.CallExpr, info *types.Info) *types.Func {
 	if info == nil {
 		return nil
 	}
+	fun := ast.Unparen(call.Fun)
+	switch generic := fun.(type) {
+	case *ast.IndexExpr:
+		fun = generic.X
+	case *ast.IndexListExpr:
+		fun = generic.X
+	}
 	var object types.Object
-	switch fun := ast.Unparen(call.Fun).(type) {
+	switch fun := fun.(type) {
 	case *ast.Ident:
 		object = info.Uses[fun]
 	case *ast.SelectorExpr:
@@ -447,33 +275,9 @@ func rangeCallFunc(call *ast.CallExpr, info *types.Info) *types.Func {
 	return fn
 }
 
-func rangeExprDepends(expr ast.Node, tracked map[types.Object]bool, info *types.Info) bool {
-	depends := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.Ident:
-			if tracked[info.Uses[n]] {
-				depends = true
-			}
-		case *ast.SelectorExpr:
-			if tracked[info.Uses[n.Sel]] {
-				depends = true
-			}
-		}
-		return !depends
-	})
-	return depends
-}
-
-func markRangeUses(expr ast.Node, tracked map[types.Object]bool, info *types.Info, handled map[*ast.Ident]bool) {
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && tracked[info.Uses[id]] {
-			handled[id] = true
-		}
-		return true
-	})
-}
-
+// rangeDataCall reports a call that reads its arguments as text and returns
+// what it computes, without running anything: the analysis follows the
+// result through the expression it stands in.
 func rangeDataCall(call *ast.CallExpr, info *types.Info) bool {
 	if isSubtest(call, info) {
 		return true
@@ -481,9 +285,6 @@ func rangeDataCall(call *ast.CallExpr, info *types.Info) bool {
 	fn := rangeCallFunc(call, info)
 	if fn == nil || fn.Pkg() == nil {
 		return false
-	}
-	if isTextComparison(call) {
-		return fn.Pkg() != nil && (fn.Pkg().Path() == "strings" || fn.Pkg().Path() == "bytes")
 	}
 	if selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok && testingReceiver(info.TypeOf(selector.X)) {
 		for _, prefix := range []string{"Log", "Error", "Fatal", "Skip"} {
@@ -493,16 +294,51 @@ func rangeDataCall(call *ast.CallExpr, info *types.Info) bool {
 		}
 	}
 	name, path := fn.Name(), fn.Pkg().Path()
-	if path == "strings" || path == "bytes" {
-		return true
+	if path == "fmt" && strings.HasPrefix(name, "Fprint") {
+		return len(call.Args) > 0 && rangeMemoryWriter(info.TypeOf(call.Args[0]))
 	}
-	if path == "fmt" && (strings.HasPrefix(name, "Sprint") || strings.HasPrefix(name, "Fprint") || strings.HasPrefix(name, "Errorf")) {
-		return true
+	return rangeDataFunc(fn)
+}
+
+// rangeTextPackages compute on text and values in memory; none of them starts
+// a process or writes anywhere but to its own result.
+var rangeTextPackages = map[string]bool{
+	"strings": true, "bytes": true, "regexp": true, "regexp/syntax": true,
+	"strconv": true, "unicode": true, "unicode/utf8": true, "unicode/utf16": true,
+	"slices": true, "maps": true, "sort": true, "cmp": true, "errors": true,
+	"path": true, "path/filepath": true,
+}
+
+// rangeDataFunc reports a function or method that only computes on its
+// arguments. Writers to an io.Writer (WriteTo, fmt.Fprint) are not: the
+// writer may be the stdin of a shell.
+func rangeDataFunc(fn *types.Func) bool {
+	if fn == nil || fn.Pkg() == nil {
+		return false
 	}
-	if (path == "log" || path == "log/slog") && hasRangeLoggerPrefix(name) {
-		return true
+	name, path := fn.Name(), fn.Pkg().Path()
+	switch {
+	case rangeTextPackages[path]:
+		return name != "WriteTo" && name != "Walk" && name != "WalkDir"
+	case path == "fmt":
+		return strings.HasPrefix(name, "Sprint") || strings.HasPrefix(name, "Errorf") || strings.HasPrefix(name, "Append")
+	case path == "log" || path == "log/slog":
+		return hasRangeLoggerPrefix(name)
 	}
-	return (path == "strings" || path == "bytes") && textComparisons[name]
+	return false
+}
+
+// rangeMemoryWriter is a writer that keeps what is written in memory.
+func rangeMemoryWriter(t types.Type) bool {
+	if pointer, ok := t.(*types.Pointer); ok {
+		t = pointer.Elem()
+	}
+	named, ok := types.Unalias(t).(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	path, name := named.Obj().Pkg().Path(), named.Obj().Name()
+	return path == "strings" && name == "Builder" || path == "bytes" && name == "Buffer"
 }
 
 func hasRangeLoggerPrefix(name string) bool {
@@ -512,34 +348,4 @@ func hasRangeLoggerPrefix(name string) bool {
 		}
 	}
 	return false
-}
-
-func rangeFunctionDecl(fn *types.Func, pkg *signalPackage, info *types.Info) *ast.FuncDecl {
-	for _, file := range pkg.files {
-		for _, decl := range file.Decls {
-			function, ok := decl.(*ast.FuncDecl)
-			if ok && info.Defs[function.Name] == fn {
-				return function
-			}
-		}
-	}
-	return nil
-}
-
-func rangeIdentInEquality(id *ast.Ident, scope ast.Node, tracked map[types.Object]bool, info *types.Info) bool {
-	found := false
-	ast.Inspect(scope, func(n ast.Node) bool {
-		binary, ok := n.(*ast.BinaryExpr)
-		if !ok || binary.Op != token.EQL && binary.Op != token.NEQ {
-			return true
-		}
-		ast.Inspect(binary, func(child ast.Node) bool {
-			if child == id && tracked[info.Uses[id]] {
-				found = true
-			}
-			return !found
-		})
-		return !found
-	})
-	return found
 }

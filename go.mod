@@ -3,7 +3,7 @@ module github.com/aiseeq/glint
 go 1.26.0
 
 require (
-	github.com/aiseeq/akit v1.69.5
+	github.com/aiseeq/akit v1.70.0
 	github.com/bmatcuk/doublestar/v4 v4.10.3
 	github.com/fatih/color v1.19.0
 	github.com/go-git/go-git/v5 v5.19.3

@@ -538,7 +538,8 @@ func tables() {
 	for _, s := range []string{} { _ = exec.Command("sh", "-c", s).Run() }
 	for _, s := range []string{"kill -9 $PPID"} { other := "safe"; inspect(s); _ = exec.Command("sh", "-c", other).Run() } // WANT-NONE
 	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { inspect(s) } // WANT-NONE
-	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { storedCommand.command = s } // WANT-NONE
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { storedCommand.command = s } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { var record commandRecord; record.command = s; inspect(record.command) } // WANT-NONE
 }
 `
 	helper := `package sample
@@ -756,6 +757,18 @@ func TestSignalImplicitTargetSkipsTypedCallsWithoutTypes(t *testing.T) {
 type signalTestImporter struct{ base types.Importer }
 
 func (i signalTestImporter) Import(path string) (*types.Package, error) {
+	if path == "example.com/runner" {
+		pkg := types.NewPackage(path, "runner")
+		params := types.NewTuple(types.NewVar(token.NoPos, pkg, "command", types.Typ[types.String]))
+		pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "Run", types.NewSignatureType(nil, nil, nil, params, nil, false)))
+		dependency, err := i.base.Import("os/exec")
+		if err != nil {
+			return nil, err
+		}
+		pkg.SetImports([]*types.Package{dependency})
+		pkg.MarkComplete()
+		return pkg, nil
+	}
 	if path != "golang.org/x/sys/unix" && path != "example.com/other" && path != "github.com/aiseeq/akit/proc" {
 		return i.base.Import(path)
 	}
@@ -1060,13 +1073,14 @@ func TestSignalImplicitTargetCommandNameFromVariable(t *testing.T) {
 }
 
 // A table string whose use the analysis cannot follow (here: a struct field
-// handed to a method) keeps the verdict it had without the analysis: a lone
-// kill is a fixture, a nested shell is still a finding.
+// handed to a function variable) keeps the verdict it had without the
+// analysis: a lone kill is a fixture, a nested shell is still a finding.
 func TestSignalImplicitTargetRangeStringsUnknownUseKeepsDefaultVerdict(t *testing.T) {
 	source := `package sample
 type toolInput struct{ Command string }
 type guard struct{}
-func (guard) Validate(in *toolInput) bool { return len(in.Command) > 0 }
+var check func(string) bool
+func (guard) Validate(in *toolInput) bool { return check(in.Command) }
 func tables() {
 	for _, command := range []string{"kill -9 -1"} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE
 	for _, command := range []string{"bash -c 'kill -9 $PPID'"} { (guard{}).Validate(&toolInput{Command: command}) } // WANT

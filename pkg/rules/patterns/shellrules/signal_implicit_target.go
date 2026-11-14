@@ -407,7 +407,7 @@ func goStringFindings(r *signalImplicitTargetRule, f *core.FileContext, info *ty
 	executed := shellExecutedLiterals(f.GoAST, info)
 	data := dataLiterals(f.GoAST, info)
 	if info != nil {
-		rangeData, rangeExecuted := rangeStringLiterals(f.GoAST, info, pkg)
+		rangeData, rangeExecuted := rangeStringLiterals(f.GoAST, f.GoFileSet, info, pkg)
 		for literal := range rangeData {
 			data[literal] = true
 		}
