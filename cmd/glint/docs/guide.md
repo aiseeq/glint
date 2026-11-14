@@ -14,7 +14,7 @@ A false finding is a glint defect. File a glint ticket with the rule name, a min
 
 Use exceptions only for deliberate design, scoped to a line, function, or file and backed by a verifiable reason. Disable a whole rule only when it does not fit the project. Never exclude your code by directory, rule category, or all tests.
 
-In `.glint.yaml`, use `exceptions` with `file`, `files`, `line`, `pattern`, or `function`, and always give `reason`. In code, use `//nolint:<rule>` or `// <rule>: safe — <reason>`; in shell, Makefile, Dockerfile, and YAML, prefix the same markers with `#`. `//nolint:glint` is always reported. Bare `//nolint` and unknown rule names are reported when the project has no `.golangci.yml`.
+In `.glint.yaml`, use `exceptions` with `file`, `files`, `line`, `pattern`, or `function`, and always give `reason`. In code, use `//nolint:<rule>` or `// <rule>: safe — <reason>`; in shell, Makefile, Dockerfile, and YAML, prefix the same markers with `#`. A marker starts its comment: one inside prose suppresses nothing. `//nolint:glint` is always reported. Bare `//nolint` and unknown rule names are reported when the project has no `.golangci.yml`.
 
 Rule: `stale-suppression` reports obsolete code suppressions. Rule: `dead-config-exception` reports obsolete config exceptions.
 

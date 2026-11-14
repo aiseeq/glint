@@ -426,27 +426,10 @@ func hashCommentPart(line string) string {
 // commentHasSuppressionMarker checks a comment for suppression markers of
 // the given rule.
 func commentHasSuppressionMarker(comment, ruleName string) bool {
-	if comment == "" {
-		return false
-	}
-	if nolintListContains(comment, ruleName) {
-		return true
-	}
-	markers := []string{ruleName + ": safe", ruleName + ":safe"}
-	for _, marker := range markers {
-		idx := strings.Index(comment, marker)
-		if idx < 0 {
-			continue
-		}
-		// The character right after the rule name must not extend the name,
-		// so "nolint:my-rule" never suppresses "my-rule-extended".
-		end := idx + len(marker)
-		if strings.HasSuffix(marker, ruleName) && end < len(comment) && isRuleNameChar(comment[end]) {
-			continue
-		}
-		return true
-	}
-	return false
+	// The marker rules judge what ParseSuppressionComment reads; a marker
+	// they do not see (one inside prose) must not suppress either.
+	names, _ := ParseSuppressionComment(strings.TrimSpace(comment))
+	return slices.Contains(names, ruleName)
 }
 
 func nolintListContains(comment, ruleName string) bool {

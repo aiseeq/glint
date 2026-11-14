@@ -526,3 +526,43 @@ func TestGoDocCodeBlockMarkerDoesNotSuppress(t *testing.T) {
 	trailing := &FileContext{Path: "a.go", RelPath: "a.go", Lines: []string{"const () //\tnolint:my-rule"}}
 	assert.False(t, trailing.IsSuppressed(1, "my-rule"))
 }
+
+// A marker inside prose ("// disabled nolint:x") is not one the marker rules
+// judge, so it must not suppress either: suppression and judgement share
+// ParseSuppressionComment.
+func TestMarkerInsideProseDoesNotSuppress(t *testing.T) {
+	tests := []struct {
+		line     string
+		expected bool
+	}{
+		{"// disabled nolint:my-rule", false},
+		{"// see my-rule: safe — prose", false},
+		{"//nolint:my-rule", true},
+		{"// nolint:other, my-rule — reason", true},
+		{"// my-rule: safe — reason", true},
+		{"/* nolint:my-rule */", true},
+		{"x := 1 // nolint:my-rule", true},
+	}
+	for _, tt := range tests {
+		ctx := &FileContext{Path: "a.go", RelPath: "a.go", Lines: []string{tt.line}}
+		assert.Equal(t, tt.expected, ctx.IsSuppressed(1, "my-rule"), tt.line)
+	}
+}
+
+func TestMarkerInLaterCommentSegmentSuppresses(t *testing.T) {
+	for line, expected := range map[string]bool{
+		"// Legacy compat branch //nolint:my-rule":    true,
+		"// text // my-rule: safe — reason":           true,
+		"// disabled nolint:my-rule":                  false,
+		"# text #nolint:my-rule":                      true,
+		"# disabled nolint:my-rule":                   false,
+		"// see https://example.com/x nolint:my-rule": false,
+	} {
+		path := "a.go"
+		if strings.HasPrefix(line, "#") {
+			path = "a.sh"
+		}
+		ctx := &FileContext{Path: path, RelPath: path, Lines: []string{line}}
+		assert.Equal(t, expected, ctx.IsSuppressed(1, "my-rule"), line)
+	}
+}

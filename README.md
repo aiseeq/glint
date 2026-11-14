@@ -230,7 +230,7 @@ glint rules
 
 ### Suppressing a finding
 
-Two equivalent inline forms, placed on the violation line or the line directly above; markers work only inside comments and match the rule name exactly. Comma-separated `nolint` lists are supported:
+Two equivalent inline forms, placed on the violation line or the line directly above; markers work only at the start of a comment (`// disabled nolint:x` in prose suppresses nothing) and match the rule name exactly. Comma-separated `nolint` lists are supported:
 
 ```go
 db := NewRepo(nil) //nolint:nil-di

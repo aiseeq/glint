@@ -57,6 +57,30 @@ var ruleNameShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 // directive that names no rule. Prose that mentions a marker after other words
 // is no marker.
 func ParseSuppressionComment(comment string) (names []string, bare bool) {
+	// A marker starts the comment or a later "//" (or "#") segment of it:
+	// "// Legacy branch //nolint:x" is a marker, "// disabled nolint:x" prose.
+	sep := "//"
+	if strings.HasPrefix(comment, "#") {
+		sep = "#"
+	}
+	for start := 0; start < len(comment); {
+		segNames, segBare := parseSuppressionSegment(comment[start:])
+		names = append(names, segNames...)
+		bare = bare || segBare
+		from := start + len(sep)
+		if from >= len(comment) {
+			break
+		}
+		next := strings.Index(comment[from:], sep)
+		if next < 0 {
+			break
+		}
+		start = from + next
+	}
+	return names, bare
+}
+
+func parseSuppressionSegment(comment string) (names []string, bare bool) {
 	directive := strings.HasPrefix(comment, "//nolint") || strings.HasPrefix(comment, "#nolint")
 	text := strings.TrimLeft(strings.TrimLeft(comment, "/*#"), " \t")
 	switch {
