@@ -47,9 +47,13 @@ func SuppressionCommentText(comment string) string {
 }
 
 // notReason matches what explains nothing in the text after a marker: a
-// placeholder copied from an example (<reason>, ${reason}, {{reason}}) and
-// another marker (nolint:<list>, <rule>: safe, a bare nolint).
-var notReason = regexp.MustCompile(`<[^<>]*>|\$\{[^}]*\}|\{\{[^}]*\}\}|\bnolint(?::[A-Za-z0-9_,-]*)?|\b[a-z][a-z0-9]*(?:-[a-z0-9]+)+:\s?safe\b`)
+// placeholder copied from an example (<reason>, ${reason}, {{reason}}; a link
+// or an issue in angle brackets, <https://…>, <issue-12>, is no
+// placeholder), the words earlier advice of glint put in place of a reason,
+// and another marker (nolint:<list>, <rule>: safe, a bare nolint).
+var notReason = regexp.MustCompile(`<[^<>/#0-9]*>|\$\{[^}]*\}|\{\{[^}]*\}\}|` +
+	`\bfollowed by (?:why it is needed|why the project needs it|the reason written out)\b|` +
+	`\bnolint(?::[A-Za-z0-9_,-]*)?|\b[a-z][a-z0-9]*(?:-[a-z0-9]+)+:\s?safe\b`)
 
 // isSuppressionReason reports text that explains: one with a letter or a
 // digit once placeholders, markers and the marker's own rule names are left

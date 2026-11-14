@@ -155,7 +155,7 @@ func (r *AnyInPublicContractRule) checkStructFields(
 		v := r.CreateViolation(ctx.RelPath, pos.Line,
 			"Exported field "+fieldName+" is "+shape+" — schema-less payload in a public contract")
 		v.WithCode(strings.TrimSpace(ctx.GetLine(pos.Line)))
-		v.WithSuggestion("Define a typed struct for the payload; keep any only for genuinely external data, with an \"any-in-public-contract: safe\" comment saying why")
+		v.WithSuggestion("Define a typed struct for the payload; keep any only for genuinely external data, which takes // any-in-public-contract: safe — <reason>")
 		v.Severity = core.SeverityLow
 		violations = append(violations, v)
 	}

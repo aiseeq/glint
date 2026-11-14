@@ -23,7 +23,9 @@ type commentSyntax struct {
 	// delimited languages (Markdown, SQL) have comment delimiters a marker
 	// parser does not know: their comment text is given without them.
 	delimited bool
-	// dollarQuotes reads PostgreSQL dollar quoting: $$…$$, $tag$…$tag$.
+	// dollarQuotes reads PostgreSQL dollar quoting: $$…$$, $tag$…$tag$. A
+	// dollar quote after DO or AS opens a body of code (a DO block, a
+	// function), whose comments are comments; elsewhere it is a string.
 	dollarQuotes bool
 	// codeSpans reads Markdown code spans: a run of backticks up to the next
 	// run of the same length on the line.
@@ -200,6 +202,11 @@ type commentScanner struct {
 	block   int // index of the open block comment, -1 when none
 	quoting bool
 	quote   quoteSyntax // the open literal while quoting
+	// lastWord is the word the code read last, "" when other code follows
+	// it; bodies are the tags of the open dollar-quoted bodies, innermost
+	// last.
+	lastWord string
+	bodies   []string
 	// comments are the comments read so far.
 	comments []lineComment
 }
@@ -237,8 +244,12 @@ func (s *commentScanner) scanLine(n int, line string) {
 			i = s.closeBlock(n, line, i, false)
 			continue
 		}
+		if next, ok := s.dollarBody(line, i); ok {
+			i = next
+			continue
+		}
 		if q, ok := s.opensQuote(line, i); ok {
-			s.quote, s.quoting = q, true
+			s.quote, s.quoting, s.lastWord = q, true, ""
 			i = s.closeQuote(line, i+len(q.open))
 			if s.quoting && !q.multiline {
 				s.quoting = false // a one-line literal ends with its line
@@ -250,8 +261,48 @@ func (s *commentScanner) scanLine(n int, line string) {
 			i = codeSpanEnd(line, i)
 			continue
 		}
+		if s.syntax.dollarQuotes {
+			if end := wordEnd(line, i); end > i {
+				s.lastWord, i = line[i:end], end
+				continue
+			}
+			if line[i] != ' ' && line[i] != '\t' {
+				s.lastWord = ""
+			}
+		}
 		i++
 	}
+}
+
+// dollarBody reads a dollar quote at i that opens or closes a body of code:
+// the tag of the innermost open body closes it, a tag after DO or AS opens
+// one. It returns where the code after the tag starts.
+func (s *commentScanner) dollarBody(line string, i int) (int, bool) {
+	if !s.syntax.dollarQuotes || line[i] != '$' || (i > 0 && isRuleNameChar(line[i-1])) {
+		return 0, false
+	}
+	tag := dollarQuote.FindString(line[i:])
+	switch {
+	case tag == "":
+		return 0, false
+	case len(s.bodies) > 0 && s.bodies[len(s.bodies)-1] == tag:
+		s.bodies = s.bodies[:len(s.bodies)-1]
+	case strings.EqualFold(s.lastWord, "do") || strings.EqualFold(s.lastWord, "as"):
+		s.bodies = append(s.bodies, tag)
+	default:
+		return 0, false
+	}
+	s.lastWord = ""
+	return i + len(tag), true
+}
+
+// wordEnd returns where the SQL word that starts at i ends, i when none does.
+func wordEnd(line string, i int) int {
+	end := i
+	for end < len(line) && (line[end] == '_' || isASCIILetter(line[end]) || (end > i && line[end] >= '0' && line[end] <= '9')) {
+		end++
+	}
+	return end
 }
 
 func (s *commentScanner) opensLineComment(rest string) bool {

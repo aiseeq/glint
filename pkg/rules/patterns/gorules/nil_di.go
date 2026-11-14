@@ -84,7 +84,7 @@ func (r *NilDIRule) analyze(ctx *core.FileContext, info *types.Info, index *cons
 		reported[place{line, param}] = true
 		v := r.CreateViolation(ctx.RelPath, line, message)
 		v.WithCode(ctx.GetLine(line))
-		v.WithSuggestion("Pass the real dependency. Add '// nil-di: safe' comment to suppress if the nil is intended.")
+		v.WithSuggestion("Pass the real dependency; a nil meant here takes // nil-di: safe — <reason>")
 		v.WithContext("constructor", constructor)
 		v.WithContext("param_hint", param)
 		violations = append(violations, v)

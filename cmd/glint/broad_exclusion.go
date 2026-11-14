@@ -104,9 +104,10 @@ func broadLineHasReason(ctx *core.FileContext, line int) bool {
 
 const broadExclusionRule = "broad-exclusion"
 
-// broadMarkerAdvice tells how to keep an intentional broad exclusion: a
-// marker with the reason written out, not a placeholder.
-const broadMarkerAdvice = "an intentional one takes # broad-exclusion: safe — followed by why the project needs it, on its line or the line above"
+// broadMarkerAdvice tells how to keep an intentional broad exclusion. It
+// ends with the marker to copy, whose placeholder is no reason: a copy stays a
+// finding until the reason is written in its place.
+const broadMarkerAdvice = "keep an intentional one with a marker on its line or the line above: # broad-exclusion: safe — <reason>"
 
 // collectProjectSourceFiles returns the source files the walker visits in the
 // project when its own exclusions (settings.exclude, settings.skip_dirs) are
