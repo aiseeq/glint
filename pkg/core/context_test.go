@@ -488,3 +488,29 @@ func TestShellTestScriptIsTestFile(t *testing.T) {
 	assert.True(t, NewFileContext("scripts/loader_test.sh", ".", nil, nil).IsTestFile())
 	assert.False(t, NewFileContext("scripts/loader.sh", ".", nil, nil).IsTestFile())
 }
+
+// A marker of suppression-without-reason that has no reason itself would hide
+// both its own finding and the bare marker below it, so it suppresses only
+// when it carries a reason.
+func TestSuppressionReasonMarkerNeedsReason(t *testing.T) {
+	tests := []struct {
+		name, path, line string
+		expected         bool
+	}{
+		{"bare nolint", "a.go", "//nolint:suppression-without-reason", false},
+		{"bare safe", "a.go", "// suppression-without-reason: safe", false},
+		{"bare nolint in yaml", "settings.yaml", "#nolint:suppression-without-reason", false},
+		{"nolint with reason", "a.go", "//nolint:suppression-without-reason -- generated table", true},
+		{"safe with reason", "a.go", "// suppression-without-reason: safe — generated table", true},
+		{"yaml with reason", "settings.yaml", "#nolint:suppression-without-reason -- generated table", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := &FileContext{Path: tt.path, RelPath: tt.path, Lines: []string{tt.line, "//nolint:error-wrap"}}
+			assert.Equal(t, tt.expected, ctx.IsSuppressed(2, SuppressionReasonRule))
+			assert.Equal(t, tt.expected, ctx.LineSuppresses(1, SuppressionReasonRule))
+		})
+	}
+	bare := &FileContext{Path: "a.go", RelPath: "a.go", Lines: []string{"//nolint:my-rule"}}
+	assert.True(t, bare.IsSuppressed(1, "my-rule"), "other rules keep suppressing with a bare marker")
+}

@@ -361,7 +361,7 @@ func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
 		if checkLine < 1 || checkLine > len(ctx.Lines) {
 			continue
 		}
-		if commentHasSuppressionMarker(ctx.CommentOf(ctx.Lines[checkLine-1]), ruleName) {
+		if markerSuppresses(ctx.CommentOf(ctx.Lines[checkLine-1]), ruleName) {
 			ctx.suppression.record(ruleName, checkLine)
 			return true
 		}
@@ -374,7 +374,7 @@ func (ctx *FileContext) IsSuppressed(line int, ruleName string) bool {
 // that tie a marker to one line — a declaration's — use it instead of
 // IsSuppressed.
 func (ctx *FileContext) LineSuppresses(line int, ruleName string) bool {
-	if line < 1 || line > len(ctx.Lines) || !commentHasSuppressionMarker(ctx.CommentOf(ctx.Lines[line-1]), ruleName) {
+	if line < 1 || line > len(ctx.Lines) || !markerSuppresses(ctx.CommentOf(ctx.Lines[line-1]), ruleName) {
 		return false
 	}
 	ctx.suppression.record(ruleName, line)

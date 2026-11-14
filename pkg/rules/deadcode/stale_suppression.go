@@ -38,13 +38,12 @@ func (r *SuppressionWithoutReasonRule) MarkersWithoutReasonFor(ctx *core.FileCon
 func (r *SuppressionWithoutReasonRule) markersWithoutReason(ctx *core.FileContext, judged func(string) bool) []*core.Violation {
 	var found []*core.Violation
 	for _, marker := range suppressionMarkers(ctx) {
-		text := suppressionCommentText(marker.Text)
 		for _, name := range marker.Rules {
-			if _, ok := rules.Get(name); !ok || !judged(name) || suppressionHasReason(text, name) {
+			if _, ok := rules.Get(name); !ok || !judged(name) || core.SuppressionHasReason(marker.Text, name) {
 				continue
 			}
 			message := "Suppression has no reason after safe"
-			if strings.HasPrefix(text, "nolint:") {
+			if strings.HasPrefix(core.SuppressionCommentText(marker.Text), "nolint:") {
 				message = "Suppression has no reason; add a short explanation after the rule name"
 			}
 			found = append(found, r.CreateViolation(ctx.RelPath, marker.Line, message))
@@ -52,38 +51,6 @@ func (r *SuppressionWithoutReasonRule) markersWithoutReason(ctx *core.FileContex
 		}
 	}
 	return found
-}
-
-func suppressionCommentText(comment string) string {
-	text := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(comment), "/#*"))
-	return strings.TrimSpace(strings.TrimSuffix(text, "*/"))
-}
-
-func suppressionHasReason(text, name string) bool {
-	if after, ok := strings.CutPrefix(text, "nolint:"); ok {
-		segments := strings.SplitSeq(strings.TrimSuffix(after, "*/"), ",")
-		for segment := range segments {
-			fields := strings.Fields(segment)
-			if len(fields) == 0 {
-				return false
-			}
-			if len(fields) > 1 {
-				tail := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(segment), fields[0]))
-				return suppressionReasonText(tail) != ""
-			}
-		}
-		return false
-	}
-	for _, marker := range []string{name + ": safe", name + ":safe"} {
-		if _, after, ok := strings.Cut(text, marker); ok {
-			return suppressionReasonText(after) != ""
-		}
-	}
-	return false
-}
-
-func suppressionReasonText(text string) string {
-	return strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(text), "-—:"))
 }
 
 // BroadExclusionRule reports project configuration that excludes broad source areas.
