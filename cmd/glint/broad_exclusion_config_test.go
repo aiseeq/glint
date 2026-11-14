@@ -242,19 +242,22 @@ func TestEnabledRulesHoldBroadExclusionOnce(t *testing.T) {
 	assert.Equal(t, 1, count)
 }
 
-// A directory of build output or generated code by name is no source of the
-// project's own: an exclusion over every other Go file covers the language,
-// though skip_dirs counts what the walk reads there.
-func TestBroadExclusionLanguageLeavesArtifactDirectoriesOut(t *testing.T) {
-	root := t.TempDir()
-	writeModuleFile(t, root, ".glint.yaml", "settings:\n  exclude:\n    - \"internal/**/*.go\"\n")
-	writeModuleFile(t, root, "internal/svc/svc.go", "package svc\n")
-	writeModuleFile(t, root, "gen/api/api.go", "package api\n")
-	cfg, err := core.LoadConfigWithDefaults(root)
-	require.NoError(t, err)
-	found := broadFindingsForTest(t, cfg)
-	require.Len(t, found, 1)
-	assert.Contains(t, found[0].Message, "every .go file")
+// A language is judged by the files the walk reads: an untracked build
+// directory it leaves out does not keep an exclusion over every other Go file
+// from covering the language, while a gen directory, which it reads, does.
+func TestBroadExclusionLanguageCountsWalkedArtifactDirectories(t *testing.T) {
+	for dir, message := range map[string]string{"build": "every .go file", "gen": "all source files in a project directory"} {
+		root := t.TempDir()
+		writeModuleFile(t, root, ".glint.yaml", "settings:\n  exclude:\n    - \"internal/**/*.go\"\n")
+		writeModuleFile(t, root, "internal/svc/svc.go", "package svc\n")
+		writeModuleFile(t, root, dir+"/api/api.go", "package api\n")
+		gitTrack(t, root, ".glint.yaml", "internal/svc/svc.go")
+		cfg, err := core.LoadConfigWithDefaults(root)
+		require.NoError(t, err)
+		found := broadFindingsForTest(t, cfg)
+		require.Len(t, found, 1, dir)
+		assert.Contains(t, found[0].Message, message, dir)
+	}
 }
 
 // A category switched off says so; the one that holds the rules watching
@@ -272,4 +275,67 @@ func TestBroadExclusionCategoryMessageNamesTheOversight(t *testing.T) {
 	require.Len(t, messages, 2)
 	assert.NotContains(t, messages[3], "watch suppressions")
 	assert.Contains(t, messages[5], "the rules that watch suppressions")
+}
+
+// A marker after the entry on its line covers that line only, as every YAML
+// marker after code does: one at the end of the line that switches security
+// off used to keep the line under it too, so deadcode, and with it the
+// rules watching suppressions, went off without a finding. A marker on a line
+// of its own still covers the line under it.
+func TestBroadExclusionMarkerAtTheLineEndCoversItsLineOnly(t *testing.T) {
+	for config, want := range map[string][]string{
+		"categories:\n  security: {enabled: false} # broad-exclusion: safe — no secrets in this tool\n  deadcode: {enabled: false}\n":                                                     {".glint.yaml:3"},
+		"categories:\n  security: {enabled: false} # broad-exclusion: safe — no secrets in this tool\n  # broad-exclusion: safe — the gate runs deadcode\n  deadcode: {enabled: false}\n": nil,
+		"settings:\n  exclude:\n    - \"tools/**\" # broad-exclusion: safe — snapshots of retired bots\n    - \"internal/**\"\n":                                                          {".glint.yaml:4"},
+	} {
+		root := t.TempDir()
+		writeModuleFile(t, root, ".glint.yaml", config)
+		writeModuleFile(t, root, "cmd/app/main.go", "package main\n")
+		writeModuleFile(t, root, "tools/cli/main.go", "package main\n")
+		writeModuleFile(t, root, "internal/svc/svc.go", "package svc\n")
+		assert.Equal(t, want, broadPlaces(t, root), config)
+	}
+}
+
+// settings.exclude over a tracked directory named build, out, dist, bin, site
+// or gen takes its sources out of the analysis as over any other name: the
+// walk reads a tracked build, out, dist or bin directory and always reads site
+// and gen. Each used to count as a default artifact directory, so the
+// exclusion hid a package of the project without a finding.
+func TestBroadExclusionReportsExcludeOverTrackedArtifactDirectory(t *testing.T) {
+	for _, name := range []string{"build", "out", "dist", "bin", "site", "gen"} {
+		for _, pattern := range []string{"internal/" + name + "/**", "**/" + name + "/**"} {
+			t.Run(pattern, func(t *testing.T) {
+				root := t.TempDir()
+				writeModuleFile(t, root, ".glint.yaml", "settings:\n  exclude:\n    - \""+pattern+"\"\n")
+				writeModuleFile(t, root, "go.mod", "module example.com/projecta\n\ngo 1.22\n")
+				writeModuleFile(t, root, "cmd/app/main.go", "package main\n")
+				writeModuleFile(t, root, "internal/"+name+"/version.go", "package "+name+"\n")
+				gitTrack(t, root, ".")
+				assert.Equal(t, []string{".glint.yaml:3"}, broadPlaces(t, root))
+			})
+		}
+	}
+}
+
+// An untracked build, out, dist or bin directory, or one outside git, is not
+// walked, so an exclusion over it takes nothing out; an exclusion by language
+// is judged without its files.
+func TestBroadExclusionExcludeOverUntrackedArtifactDirectory(t *testing.T) {
+	for _, name := range []string{"build", "out", "dist", "bin"} {
+		t.Run(name, func(t *testing.T) {
+			inGit := t.TempDir()
+			writeModuleFile(t, inGit, ".glint.yaml", "settings:\n  exclude:\n    - \""+name+"/**\"\n    - \"**/"+name+"/**\"\n")
+			writeModuleFile(t, inGit, "cmd/app/main.go", "package main\n")
+			writeModuleFile(t, inGit, name+"/x/version.go", "package x\n")
+			gitTrack(t, inGit, ".glint.yaml", "cmd/app/main.go")
+			assert.Empty(t, broadPlaces(t, inGit))
+
+			outsideGit := t.TempDir()
+			writeModuleFile(t, outsideGit, ".glint.yaml", "settings:\n  exclude:\n    - \"internal/"+name+"/**\"\n")
+			writeModuleFile(t, outsideGit, "cmd/app/main.go", "package main\n")
+			writeModuleFile(t, outsideGit, "internal/"+name+"/version.go", "package x\n")
+			assert.Empty(t, broadPlaces(t, outsideGit))
+		})
+	}
 }

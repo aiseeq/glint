@@ -160,18 +160,17 @@ func collectBroadExceptions(n *yaml.Node, entries *[]broadEntry) {
 // of the project's own is in them.
 var foreignBroadNames = map[string]bool{"third_party": true, "vendor": true, "external": true, "node_modules": true, "testdata": true}
 
-// artifactBroadNames are directories of build output and generated code by
-// name. An exclusion pattern over one is no finding; settings.skip_dirs that
-// names one takes out the sources the walk would read in it.
-var artifactBroadNames = map[string]bool{"gen": true, "out": true, "dist": true, "build": true, "site": true}
-
+// ignoredBroadPattern reports a pattern over a foreign, test-data or
+// generated path. A build, out, dist, bin, site or gen directory is none: the
+// walk reads a tracked one, and an untracked one it leaves out holds none of
+// the sources an exclusion is judged by.
 func ignoredBroadPattern(pattern string) bool {
 	lower := strings.ToLower(pattern)
 	if strings.Contains(lower, "generated") {
 		return true
 	}
 	for _, segment := range strings.FieldsFunc(lower, func(r rune) bool { return r == '/' || r == '\\' }) {
-		if foreignBroadNames[segment] || artifactBroadNames[segment] {
+		if foreignBroadNames[segment] {
 			return true
 		}
 	}
@@ -179,11 +178,12 @@ func ignoredBroadPattern(pattern string) bool {
 }
 
 // broadLineHasReason reports a marker of broad-exclusion with a reason on the
-// line of the entry or the line above, read like every inline marker
-// (core.SuppressionMarkers).
+// line of the entry, or on the line above when it covers the line under it,
+// read like every inline marker (core.SuppressionMarkers): one after an entry
+// keeps that entry alone.
 func broadLineHasReason(ctx *core.FileContext, line int) bool {
 	for _, marker := range ctx.SuppressionMarkers() {
-		if (marker.Line == line || marker.Line == line-1) && slices.Contains(marker.Rules, broadExclusionRule) && core.SuppressionHasReason(marker.Text, broadExclusionRule) {
+		if (marker.Line == line || marker.Line == line-1 && !marker.LineOnly) && slices.Contains(marker.Rules, broadExclusionRule) && core.SuppressionHasReason(marker.Text, broadExclusionRule) {
 			return true
 		}
 	}
@@ -201,10 +201,9 @@ const broadMarkerAdvice = "keep an intentional one with a marker on its line or 
 // project when its own exclusions (settings.exclude, settings.skip_dirs) are
 // left out: .gitignore, nested repositories and the default artifact
 // directories keep theirs, so an exclusion of what the walk never reaches is
-// no finding. Generated files are left out too, and so are foreign and
-// test-data directories; artifact directories by name are left out of files
-// but stay in walked, where settings.skip_dirs is judged: the walk reads a
-// tracked build directory unless skip_dirs names it.
+// no finding, and one of a tracked build directory the walk reads is judged
+// as any other. Generated files are left out too, and so are foreign and
+// test-data directories.
 func collectProjectSourceFiles(root string, cfg *core.Config) (broadSources, error) {
 	unexcluded := *cfg
 	unexcluded.Settings.Exclude, unexcluded.Settings.SkipDirs = nil, nil
@@ -216,46 +215,34 @@ func collectProjectSourceFiles(root string, cfg *core.Config) (broadSources, err
 			return broadSources{}, fmt.Errorf("walk project source files: %w", err)
 		}
 	}
-	var files, walked []string
+	var files []string
 	for _, ctx := range contexts {
 		rel := filepath.ToSlash(ctx.RelPath)
 		if ctx.IsGenerated() || inBroadDirectory(rel, foreignBroadDirectory) {
 			continue
 		}
-		walked = append(walked, rel)
-		if !inBroadDirectory(rel, ignoredBroadDirectory) {
-			files = append(files, rel)
-		}
+		files = append(files, rel)
 	}
 	slices.Sort(files)
-	slices.Sort(walked)
-	return newBroadSources(files, walked), nil
+	return newBroadSources(files), nil
 }
 
 // broadSources are the sources broad-exclusion judges an entry by.
 type broadSources struct {
-	// files are the project's own sources, artifact directories left out.
-	files []string
-	// walked are the sources the walk reads without the configuration's
-	// exclusions, those in artifact directories it reads too.
-	walked  []string
+	// files are the project's own sources the walk reads without the
+	// configuration's exclusions.
+	files   []string
 	catalog map[string]int
 }
 
-func newBroadSources(files, walked []string) broadSources {
-	return broadSources{files: files, walked: walked, catalog: sourceCatalog(files)}
+func newBroadSources(files []string) broadSources {
+	return broadSources{files: files, catalog: sourceCatalog(files)}
 }
 
 // inBroadDirectory reports a file below a directory the predicate names.
 func inBroadDirectory(rel string, directory func(string) bool) bool {
 	dir := filepath.ToSlash(filepath.Dir(rel))
 	return dir != "." && slices.ContainsFunc(strings.Split(dir, "/"), directory)
-}
-
-// ignoredBroadDirectory reports a directory broad-exclusion leaves out of
-// the project's own sources: a foreign or artifact one.
-func ignoredBroadDirectory(name string) bool {
-	return foreignBroadDirectory(name) || ignoredBroadPattern(name)
 }
 
 // foreignBroadDirectory reports a hidden, foreign, test-data or generated
@@ -514,7 +501,7 @@ func coversBroadly(entry broadEntry, sources broadSources) (bool, error) {
 		return true, nil
 	}
 	if entry.skipDir {
-		return skipsSourceDirectory(entry.pattern, sources.walked), nil
+		return skipsSourceDirectory(entry.pattern, sources.files), nil
 	}
 	if !broadGlob(entry.pattern) {
 		return false, nil
@@ -556,7 +543,7 @@ func coversBroadly(entry broadEntry, sources broadSources) (bool, error) {
 // skipsSourceDirectory reports whether a settings.skip_dirs name leaves out a
 // directory with sources the walk reads: an artifact one such as a tracked
 // build directory too. A hidden, foreign, generated or test-data one holds
-// none of walked.
+// none of them.
 func skipsSourceDirectory(name string, walked []string) bool {
 	for _, file := range walked {
 		if slices.Contains(strings.Split(filepath.ToSlash(filepath.Dir(file)), "/"), name) {

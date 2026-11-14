@@ -161,13 +161,16 @@ settings:
 	}
 }
 
-func TestBroadExclusionIgnoresBuildAndForeignPaths(t *testing.T) {
-	for _, pattern := range []string{"third_party/**", "vendor/**", "external/**", "node_modules/**", "testdata/**", "gen/**", "generated/**", "**/*generated*", "out/**", "dist/**", "build/**", "site/**"} {
+// A pattern over foreign, test-data or generated code is no finding; one over
+// a build, out, dist, bin, site or gen directory is judged by the sources the
+// walk reads there (TestBroadExclusionReportsExcludeOverTrackedArtifactDirectory).
+func TestBroadExclusionIgnoresForeignPaths(t *testing.T) {
+	for _, pattern := range []string{"third_party/**", "vendor/**", "external/**", "node_modules/**", "testdata/**", "generated/**", "**/*generated*"} {
 		if !ignoredBroadPattern(pattern) {
 			t.Errorf("expected ignored path pattern %q", pattern)
 		}
 	}
-	for _, pattern := range []string{"studies/**", "legacy/**", "docs/javascripts/**"} {
+	for _, pattern := range []string{"studies/**", "legacy/**", "docs/javascripts/**", "gen/**", "out/**", "dist/**", "build/**", "bin/**", "site/**"} {
 		if ignoredBroadPattern(pattern) {
 			t.Errorf("unexpectedly ignored project path %q", pattern)
 		}
@@ -232,7 +235,7 @@ func TestBroadExclusionAllowsOneRuleScopedToSubpackage(t *testing.T) {
 
 func TestBroadExclusionIgnoresMalformedGlob(t *testing.T) {
 	files := []string{"src/a.go"}
-	found, err := checkBroadEntry(broadEntry{pattern: "src/[", line: 1}, newBroadSources(files, files))
+	found, err := checkBroadEntry(broadEntry{pattern: "src/[", line: 1}, newBroadSources(files))
 	if err != nil || found != "" {
 		t.Fatalf("malformed glob should not be a finding: found=%q err=%v", found, err)
 	}
