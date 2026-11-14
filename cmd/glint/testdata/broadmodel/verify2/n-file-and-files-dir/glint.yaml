@@ -1,0 +1,12 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions:
+          - file: a.go
+            files: "internal/**"
+            reason: wide over one file
+          - files: "internal/svc/a.go"
+            file: "a.go"
+            reason: whole file

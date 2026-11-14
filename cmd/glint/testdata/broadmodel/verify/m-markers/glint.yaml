@@ -1,0 +1,18 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions:
+          # broad-exclusion: safe — checked upstream
+          - pattern: "Suppression"
+            reason: legacy markers
+          - function: F # broad-exclusion: safe — checked upstream
+            reason: legacy markers
+          - line: 3
+            reason: legacy markers
+      stale-suppression:
+        exceptions:
+          # broad-exclusion
+          - line: 3
+            reason: legacy markers

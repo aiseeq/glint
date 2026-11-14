@@ -1,0 +1,7 @@
+version: 1
+extends: conf/base.yaml
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions: ~

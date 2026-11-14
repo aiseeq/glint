@@ -1,0 +1,12 @@
+version: 1
+categories:
+  ? !!binary ZGVhZGNvZGU=
+  : rules:
+      ? !!binary c3VwcHJlc3Npb24td2l0aG91dC1yZWFzb24=
+      : exceptions:
+          - pattern: Suppression
+            reason: legacy markers
+      ? !!binary c3RhbGUtc3VwcHJlc3Npb24=
+      : enabled: false
+  ? !!binary c2VjdXJpdHk=
+  : enabled: false

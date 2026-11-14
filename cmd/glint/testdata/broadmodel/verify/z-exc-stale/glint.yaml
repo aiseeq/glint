@@ -1,0 +1,8 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      stale-suppression:
+        exceptions:
+          - pattern: "silences"
+            reason: we know

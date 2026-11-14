@@ -1,0 +1,12 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      unused-internal-export:
+        settings:
+          tpl: &rr
+            suppression-without-reason:
+              exceptions:
+                - pattern: "Suppression"
+                  reason: legacy markers
+      <<: *rr

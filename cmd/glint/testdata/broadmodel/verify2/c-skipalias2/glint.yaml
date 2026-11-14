@@ -1,0 +1,11 @@
+version: 1
+categories:
+  security:
+    rules:
+      hardcoded-secret:
+        exceptions:
+          - files: &ex "internal/**"
+            reason: fixtures
+settings:
+  exclude:
+    - *ex

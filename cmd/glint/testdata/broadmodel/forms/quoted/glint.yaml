@@ -1,0 +1,20 @@
+version: 1
+"settings":
+  'exclude':
+    - "internal/\x2a\x2a"
+    - 'vendor/**'
+  "skip_dirs": ["build"]
+"categories":
+  "dead\x63ode":
+    'rules':
+      "suppression-without-reason":
+        "exceptions":
+          - "files": "**"
+            'reason': 'it''s legacy'
+          - "file": |-
+              a.go
+            "line": 4
+            reason: >-
+              one line
+      'stale-suppression':
+        "enabled": false

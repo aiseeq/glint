@@ -1,0 +1,15 @@
+version: 1
+settings:
+  exclude: [internal/**]
+  skip_dirs: [build]
+categories:
+  deadcode:
+    rules:
+      broad-exclusion:
+        exceptions:
+          - files: "**"
+            reason: all
+      stale-suppression:
+        exceptions:
+          - files: "**"
+            reason: all

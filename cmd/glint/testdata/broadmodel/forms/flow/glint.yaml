@@ -1,0 +1,3 @@
+{version: 1, settings: {exclude: [!!binary aW50ZXJuYWwvKio=, "vendor/**"], skip_dirs: [!x build]},
+ categories: {? !!binary ZGVhZGNvZGU= : {rules: {suppression-without-reason: {exceptions: [{files: !!binary Kio=, reason: all}]},
+   !!str stale-suppression: {enabled: false}}}, security: {rules: {hardcoded-secret: {exceptions: [{files: !!binary Kio=, reason: x}]}}}}}

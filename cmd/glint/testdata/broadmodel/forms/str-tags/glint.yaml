@@ -1,0 +1,16 @@
+version: 1
+settings:
+  exclude:
+    - !!str internal/**
+  skip_dirs: [!!str build]
+categories:
+  !!str deadcode:
+    rules:
+      !!str suppression-without-reason:
+        exceptions:
+          - files: !!str "**"
+            reason: !!str everything
+      !!str stale-suppression:
+        enabled: false
+  !!str security:
+    enabled: false

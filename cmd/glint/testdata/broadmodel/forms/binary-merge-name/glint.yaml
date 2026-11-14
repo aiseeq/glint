@@ -1,0 +1,12 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      unused-internal-export:
+        settings:
+          tpl: &tpl
+            suppression-without-reason:
+              enabled: false
+      ? !!binary PDw=
+      : enabled: false
+      <<: [*tpl]

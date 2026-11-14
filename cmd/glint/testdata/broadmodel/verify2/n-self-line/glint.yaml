@@ -1,0 +1,13 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions:
+          - pattern: "Suppression"
+            reason: legacy markers
+      broad-exclusion:
+        exceptions:
+          - file: .glint.yaml
+            line: 7
+            reason: config reviewed

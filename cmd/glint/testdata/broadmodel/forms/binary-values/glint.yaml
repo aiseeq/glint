@@ -1,0 +1,24 @@
+version: 1
+settings:
+  exclude:
+    - !!binary dmVuZG9yLyoq
+    - !!binary aW50ZXJuYWwvKio=
+  skip_dirs:
+    - !!binary YnVpbGQ=
+categories:
+  security:
+    rules:
+      hardcoded-secret:
+        exceptions:
+          - files: !!binary Kio=
+            reason: fixtures
+          - file: !!binary YS5nbw==
+            pattern: !!binary U3VwcHJlc3Npb24=
+            reason: one marker
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions:
+          - file: !!binary aW50ZXJuYWwvc3ZjL2EuZ28=
+            line: 3
+            reason: one line

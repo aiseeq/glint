@@ -1,0 +1,11 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      unused-internal-export:
+        settings:
+          tpl: &rr
+            enabled: true
+      !!merge stale-suppression: *rr
+      suppression-without-reason:
+        enabled: true

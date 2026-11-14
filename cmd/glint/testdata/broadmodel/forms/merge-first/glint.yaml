@@ -1,0 +1,13 @@
+version: 1
+categories:
+  security:
+    settings:
+      templates:
+        off: &off
+          ? !!binary c3VwcHJlc3Npb24td2l0aG91dC1yZWFzb24=
+          : enabled: false
+  deadcode:
+    rules:
+      <<: [*off]
+      stale-suppression:
+        enabled: true

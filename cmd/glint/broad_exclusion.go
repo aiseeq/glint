@@ -128,9 +128,13 @@ func readBroadChain(configPath, root string) ([]broadConfigFile, error) {
 // node it names, placed on the line of the alias: the load of the
 // configuration follows an alias (core.LoadConfig), so what it names is in
 // effect where it is used, and is judged and kept by a marker there. The load
-// refuses an alias of a node that holds it, so the copies end. A mapping with
-// a merge key gets the keys it merges (mergeBroadKeys).
+// refuses an alias of a node that holds it, so the copies end. Every scalar
+// holds the string the load decodes of it (decodeBroadScalar), and a mapping
+// holds the keys the load reads of it (mergeBroadKeys).
 func expandBroadAliases(n *yaml.Node) {
+	if n.Kind == yaml.ScalarNode {
+		decodeBroadScalar(n)
+	}
 	for i, child := range n.Content {
 		if child.Kind == yaml.AliasNode {
 			n.Content[i] = relinedBroadNode(child.Alias, child.Line)
@@ -142,23 +146,58 @@ func expandBroadAliases(n *yaml.Node) {
 	}
 }
 
-// mergeBroadKeys replaces the merge key (<<) of a mapping with the keys it
-// brings, as the load merges them (yaml.v3, decoder.merge): a key the mapping
-// sets itself wins, and of a list of mappings the earlier one wins. The keys
-// it brings are placed on the line
-// of the merge key, where they take effect. A merged mapping has had its own
-// merge key replaced before (expandBroadAliases).
+// decodeBroadScalar sets the value of a scalar to the string the load
+// decodes of it, whatever its tag: a !!binary key or value is its decoded
+// bytes, a null one is "". A decoded one is a plain string from then on, so
+// decoding it again (decodeBroadException) keeps it; a null one stays null,
+// a list of none. One the load cannot decode into a string is left as it is:
+// the load refuses it where it wants one.
+func decodeBroadScalar(n *yaml.Node) {
+	var decoded string
+	if n.Decode(&decoded) != nil || decoded == n.Value {
+		return
+	}
+	n.Value = decoded
+	if n.ShortTag() != "!!null" {
+		n.Tag = "!!str"
+	}
+}
+
+// isBroadMergeKey reports a merge key (<<) as the load tells one (yaml.v3,
+// isMerge): a key tagged !!merge of any other name is a key of that name.
+func isBroadMergeKey(key *yaml.Node) bool {
+	return key.Value == "<<" && key.ShortTag() == "!!merge"
+}
+
+// mergeBroadKeys sets the keys of a mapping to those the load reads of it.
+// Of keys the load decodes to one name, the last is the one in effect
+// (yaml.v3 sets the map entry anew; it refuses the same name spelled the same
+// way, and in a struct any two). The merge key (<<) is replaced with the keys
+// it brings, as the load merges them (yaml.v3, decoder.merge): a key the
+// mapping sets itself wins, and of a list of mappings the earlier one wins.
+// The keys it brings are placed on the line of the merge key, where they take
+// effect. A merged mapping has had its own merge key replaced before
+// (expandBroadAliases).
 func mergeBroadKeys(n *yaml.Node) {
 	var sources []*yaml.Node
 	line := 0
 	content := make([]*yaml.Node, 0, len(n.Content))
 	set := make(map[string]bool)
+	last := make(map[string]int)
 	for i := 0; i+1 < len(n.Content); i += 2 {
-		if key := n.Content[i]; key.ShortTag() == "!!merge" {
+		if !isBroadMergeKey(n.Content[i]) {
+			last[n.Content[i].Value] = i
+		}
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if key := n.Content[i]; isBroadMergeKey(key) {
 			sources, line = []*yaml.Node{n.Content[i+1]}, key.Line
 			if n.Content[i+1].Kind == yaml.SequenceNode {
 				sources = n.Content[i+1].Content
 			}
+			continue
+		}
+		if last[n.Content[i].Value] != i {
 			continue
 		}
 		content = append(content, n.Content[i], n.Content[i+1])
@@ -218,31 +257,32 @@ func configNode(n *yaml.Node, key string) *yaml.Node {
 // is an entry when it names files and nothing narrows it further; every one
 // of a rule watching suppressions is, since it takes that watch away from
 // what it covers (oversightException).
-func collectBroadExceptions(n *yaml.Node, rule string, entries *[]broadEntry) error {
-	exceptions := configNode(n, "exceptions")
-	if exceptions == nil || exceptions.Kind != yaml.SequenceNode {
-		return nil
-	}
-	for _, exception := range exceptions.Content {
+func collectBroadExceptions(exceptions *yaml.Node, rule string, entries *[]broadEntry) error {
+	for _, exception := range broadListItems(exceptions) {
+		decoded, err := decodeBroadException(exception, rule)
+		if err != nil {
+			return err
+		}
 		if slices.Contains(oversightRules, rule) {
-			entry, wide, err := oversightException(exception, rule)
-			if err != nil {
-				return err
-			}
-			if wide {
+			if entry, wide := oversightException(exception, decoded, rule); wide {
 				*entries = append(*entries, entry)
 			}
 			continue
 		}
-		if configNode(exception, "pattern") != nil || configNode(exception, "function") != nil || configNode(exception, "line") != nil {
+		// A pattern, a function, a line above 0 or a file narrows an
+		// exception: an empty one or a line of 0 or less narrows nothing
+		// (core.Exception.matchesViolation), and a file is no glob, so the
+		// exception keeps the files of that path or base name alone
+		// (core.Exception.NamesFile).
+		if decoded.Pattern != "" || decoded.Function != "" || decoded.Line > 0 || decoded.File != "" {
 			continue
 		}
-		for _, key := range []string{"files", "file"} {
-			path := configNode(exception, key)
-			if path != nil && path.Kind == yaml.ScalarNode {
-				*entries = append(*entries, broadEntry{pattern: path.Value, line: path.Line, exception: true, declaredAt: exception.Line})
-			}
+		// One that names no files - a line below 1 alone - keeps every file.
+		entry := broadEntry{pattern: "**", line: exception.Line, exception: true, declaredAt: exception.Line}
+		if decoded.Files != "" {
+			entry.pattern, entry.line = decoded.Files, configNode(exception, "files").Line
 		}
+		*entries = append(*entries, entry)
 	}
 	return nil
 }
@@ -256,24 +296,29 @@ func collectBroadExceptions(n *yaml.Node, rule string, entries *[]broadEntry) er
 // and is none when they name one file of the project
 // (narrowOversightExceptions). One that names no file names every file, the
 // configuration among them, so it is never one.
-func oversightException(exception *yaml.Node, rule string) (entry broadEntry, wide bool, err error) {
+func oversightException(exception *yaml.Node, decoded core.Exception, rule string) (entry broadEntry, wide bool) {
 	entry = broadEntry{line: exception.Line, exception: true, oversight: true, excepted: rule, declaredAt: exception.Line}
-	var decoded core.Exception
-	if err := exception.Decode(&decoded); err != nil {
-		return broadEntry{}, false, fmt.Errorf("decode the exception of %s at line %d: %w", rule, exception.Line, err)
-	}
 	// A line of 0 or less is none (core.Exception.matchesViolation).
 	if decoded.Line <= 0 {
-		return entry, true, nil
+		return entry, true
 	}
 	// A name with a directory matches the file of that path alone, and the
 	// exception matches a file both file and files name
 	// (core.Exception.NamesFile); file is never a glob.
 	if strings.Contains(decoded.File, "/") || strings.Contains(decoded.Files, "/") && !strings.ContainsAny(decoded.Files, "*?[{") {
-		return entry, false, nil
+		return entry, false
 	}
 	entry.oneLine = &decoded
-	return entry, true, nil
+	return entry, true
+}
+
+// decodeBroadException reads an exception of a rule as the load reads it.
+func decodeBroadException(exception *yaml.Node, rule string) (core.Exception, error) {
+	var decoded core.Exception
+	if err := exception.Decode(&decoded); err != nil {
+		return core.Exception{}, fmt.Errorf("decode the exception of %s at line %d: %w", rule, exception.Line, err)
+	}
+	return decoded, nil
 }
 
 // narrowOversightExceptions drops the exceptions of a rule watching
@@ -410,15 +455,13 @@ func isSourceFile(path string) bool {
 // the first file of the chain, from the project's own, that sets it.
 func parseBroadEntries(cfg *core.Config, chain []broadConfigFile) ([]broadEntry, error) {
 	entries := make([]broadEntry, 0)
-	if file, list := firstBroadSetting(chain, "exclude"); list != nil {
-		for _, value := range list.Content {
-			entries = append(entries, file.entry(broadEntry{pattern: value.Value, line: value.Line}))
-		}
+	file, list := firstBroadSetting(chain, "exclude")
+	for _, value := range list {
+		entries = append(entries, file.entry(broadEntry{pattern: value.Value, line: value.Line}))
 	}
-	if file, list := firstBroadSetting(chain, "skip_dirs"); list != nil {
-		for _, value := range list.Content {
-			entries = append(entries, file.entry(broadEntry{pattern: value.Value, line: value.Line, skipDir: true}))
-		}
+	file, list = firstBroadSetting(chain, "skip_dirs")
+	for _, value := range list {
+		entries = append(entries, file.entry(broadEntry{pattern: value.Value, line: value.Line, skipDir: true}))
 	}
 	exceptions, err := broadRuleExceptions(chain)
 	if err != nil {
@@ -458,14 +501,25 @@ func parseBroadEntries(cfg *core.Config, chain []broadConfigFile) ([]broadEntry,
 }
 
 // firstBroadSetting returns the first file of the chain that sets a list of
-// settings, and the list: an empty one sets nothing.
-func firstBroadSetting(chain []broadConfigFile, key string) (broadConfigFile, *yaml.Node) {
+// settings, and the items of the list: an empty one sets nothing.
+func firstBroadSetting(chain []broadConfigFile, key string) (broadConfigFile, []*yaml.Node) {
 	for _, file := range chain {
-		if list := configNode(configNode(file.top, "settings"), key); list != nil && len(list.Content) > 0 {
-			return file, list
+		if items := broadListItems(configNode(configNode(file.top, "settings"), key)); len(items) > 0 {
+			return file, items
 		}
 	}
 	return broadConfigFile{}, nil
+}
+
+// broadListItems returns the items of a list the load reads: it drops a null
+// item of a list of strings or of exceptions (yaml.v3 decodes null into
+// nothing but a pointer, map, slice or interface), so a list of nulls alone
+// sets nothing. A scalar holds no item; the load refuses a mapping there.
+func broadListItems(list *yaml.Node) []*yaml.Node {
+	if list == nil {
+		return nil
+	}
+	return slices.DeleteFunc(slices.Clone(list.Content), func(item *yaml.Node) bool { return item.ShortTag() == "!!null" })
 }
 
 // firstBroadNode returns the first file of the chain that names a node under
@@ -483,33 +537,50 @@ func firstBroadNode(chain []broadConfigFile, path ...string) (broadConfigFile, *
 	return broadConfigFile{}, nil
 }
 
-// broadRuleExceptions returns the file exceptions of every rule, each from
-// the first file of the chain that lists the rule's exceptions.
-func broadRuleExceptions(chain []broadConfigFile) ([]broadEntry, error) {
-	var entries []broadEntry
-	var failed error
+// broadExceptionList is the list of exceptions of a rule in effect, and the
+// file of the chain that sets it.
+type broadExceptionList struct {
+	file           broadConfigFile
+	category, rule string
+	exceptions     *yaml.Node
+}
+
+// broadExceptionLists returns the exceptions of every rule, each list from
+// the first file of the chain that lists the rule's exceptions, as
+// core.MergeConfigs merges them: a null list sets none.
+func broadExceptionLists(chain []broadConfigFile) []broadExceptionList {
+	var lists []broadExceptionList
 	listed := make(map[string]bool)
 	for _, file := range chain {
 		forEachPair(configNode(file.top, "categories"), func(category, categoryNode *yaml.Node) {
 			forEachPair(configNode(categoryNode, "rules"), func(rule, ruleNode *yaml.Node) {
 				exceptions := configNode(ruleNode, "exceptions")
 				key := category.Value + "/" + rule.Value
-				if failed != nil || exceptions == nil || exceptions.Tag == "!!null" || listed[key] {
+				if exceptions == nil || exceptions.Tag == "!!null" || listed[key] {
 					return
 				}
 				listed[key] = true
-				var found []broadEntry
-				if err := collectBroadExceptions(ruleNode, rule.Value, &found); err != nil {
-					failed = fmt.Errorf("%s: %w", file.path, err)
-					return
-				}
-				for _, entry := range found {
-					entries = append(entries, file.entry(entry))
-				}
+				lists = append(lists, broadExceptionList{file: file, category: category.Value, rule: rule.Value, exceptions: exceptions})
 			})
 		})
 	}
-	return entries, failed
+	return lists
+}
+
+// broadRuleExceptions returns the file exceptions of every rule, each from
+// the first file of the chain that lists the rule's exceptions.
+func broadRuleExceptions(chain []broadConfigFile) ([]broadEntry, error) {
+	var entries []broadEntry
+	for _, list := range broadExceptionLists(chain) {
+		var found []broadEntry
+		if err := collectBroadExceptions(list.exceptions, list.rule, &found); err != nil {
+			return nil, fmt.Errorf("%s: %w", list.file.path, err)
+		}
+		for _, entry := range found {
+			entries = append(entries, list.file.entry(entry))
+		}
+	}
+	return entries, nil
 }
 
 // oversightCategory returns the category of a rule watching suppressions.

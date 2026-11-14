@@ -1,0 +1,16 @@
+version: 1
+settings:
+  exclude:
+    - !x internal/**
+  skip_dirs: [!x build]
+categories:
+  !x deadcode:
+    rules:
+      !x suppression-without-reason:
+        exceptions:
+          - files: !x "**"
+            reason: !x everything
+      ! stale-suppression:
+        enabled: false
+  !<tag:example.com,2026:cat> security:
+    enabled: false

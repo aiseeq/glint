@@ -1,0 +1,12 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions:
+          - pattern: "Suppression"
+            reason: legacy markers
+      broad-exclusion:
+        exceptions:
+          - pattern: "watches suppressions"
+            reason: config reviewed

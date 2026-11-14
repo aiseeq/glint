@@ -1,0 +1,5 @@
+version: 1
+settings:
+  exclude: &ex
+    - "internal/**"
+  skip_dirs: *ex

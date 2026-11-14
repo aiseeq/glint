@@ -1,0 +1,18 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      unused-internal-export:
+        settings:
+          tpl: &tpl
+            ? !!binary c3VwcHJlc3Npb24td2l0aG91dC1yZWFzb24=
+            : enabled: false
+            stale-suppression:
+              exceptions:
+                - files: &all !!binary Kio=
+                  reason: all
+      <<: [*tpl]
+      broad-exclusion:
+        exceptions:
+          - files: *all
+            reason: all

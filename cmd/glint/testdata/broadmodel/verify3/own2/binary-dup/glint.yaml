@@ -1,0 +1,10 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      unused-internal-export:
+        severity: low
+      ? !!binary c3RhbGUtc3VwcHJlc3Npb24=
+      : exceptions:
+          - files: "internal/**"
+            reason: legacy markers

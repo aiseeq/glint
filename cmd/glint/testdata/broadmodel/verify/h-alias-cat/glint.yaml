@@ -1,0 +1,10 @@
+version: 1
+x-templates:
+  cat: &cat
+    rules:
+      suppression-without-reason:
+        exceptions:
+          - pattern: "Suppression"
+            reason: legacy markers
+categories:
+  deadcode: *cat

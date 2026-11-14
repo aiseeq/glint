@@ -1,0 +1,14 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      unused-internal-export:
+        settings:
+          off: &off
+            suppression-without-reason:
+              enabled: false
+      !!merge "<<": [*off]
+  ? !!binary c2VjdXJpdHk=
+  : rules:
+      !!merge hardcoded-secret:
+        enabled: false

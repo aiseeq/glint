@@ -1,0 +1,11 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      unused-internal-export:
+        settings:
+          name: &n suppression-without-reason
+      *n :
+        exceptions:
+          - pattern: "Suppression"
+            reason: legacy markers

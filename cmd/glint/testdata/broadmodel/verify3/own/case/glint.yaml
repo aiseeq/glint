@@ -1,0 +1,10 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      Suppression-Without-Reason:
+        enabled: false
+      Stale-Suppression:
+        exceptions:
+          - pattern: "Suppression"
+            reason: legacy markers

@@ -1,0 +1,10 @@
+version: 1
+categories:
+  security:
+    rules:
+      hardcoded-secret:
+        settings:
+          tpl: &cc
+            deadcode:
+              enabled: false
+  <<: [*cc]

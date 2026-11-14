@@ -1,0 +1,4 @@
+version: 1
+settings:
+  skip_dirs:
+    - !!binary aW50ZXJuYWw=

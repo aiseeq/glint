@@ -1,0 +1,14 @@
+version: 1
+settings:
+  skip_dirs:
+    - old
+  exclude:
+    - "legacy/**"
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions:
+          - files: "**/a.go"
+            line: 3
+            reason: one legacy marker

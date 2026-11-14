@@ -1,0 +1,14 @@
+version: 1
+categories:
+  security:
+    rules:
+      hardcoded-secret:
+        settings:
+          tpl: &cc
+            deadcode:
+              rules:
+                suppression-without-reason:
+                  exceptions:
+                    - pattern: "Suppression"
+                      reason: legacy markers
+  <<: [*cc]

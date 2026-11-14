@@ -1,0 +1,24 @@
+version: 1
+extends: ~
+settings:
+  exclude: ~
+  skip_dirs: [~, build]
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions: ~
+      stale-suppression:
+        exceptions:
+          - files: "**"
+            pattern: ~
+            function: null
+            reason: all
+  security:
+    rules:
+      hardcoded-secret:
+        exceptions:
+          - files: "**"
+            pattern: ""
+            line: 0
+            reason: all

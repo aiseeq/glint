@@ -1,0 +1,11 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions:
+          # broad-exclusion: safe — legacy markers tracked in one ticket
+          - pattern: "Suppression"
+            reason: legacy markers
+          - files: "internal/**"
+            reason: second one, not covered by the marker above

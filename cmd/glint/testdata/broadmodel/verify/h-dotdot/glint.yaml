@@ -1,0 +1,9 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions:
+          - files: internal/x/../svc/a.go
+            line: 3
+            reason: one marker

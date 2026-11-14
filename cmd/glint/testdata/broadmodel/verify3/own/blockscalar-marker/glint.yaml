@@ -1,0 +1,13 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions:
+          - file: internal/svc/a.go
+            line: 1
+            reason: |
+              one marker
+              # broad-exclusion: safe — text of a reason, not a comment
+          - pattern: "Suppression"
+            reason: legacy markers

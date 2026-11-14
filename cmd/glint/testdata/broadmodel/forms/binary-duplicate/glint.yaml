@@ -1,0 +1,17 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions:
+          - file: internal/svc/a.go
+            line: 3
+            reason: one line
+      ? !!binary c3VwcHJlc3Npb24td2l0aG91dC1yZWFzb24=
+      : exceptions:
+          - files: "**"
+            reason: all
+  security:
+    enabled: true
+  ? !!binary c2VjdXJpdHk=
+  : enabled: false

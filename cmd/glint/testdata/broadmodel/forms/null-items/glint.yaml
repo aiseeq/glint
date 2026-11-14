@@ -1,0 +1,18 @@
+version: 1
+extends: base.yaml
+settings:
+  exclude: [~]
+  skip_dirs:
+    - null
+categories:
+  deadcode:
+    rules:
+      broad-exclusion:
+        exceptions: [~]
+      stale-suppression:
+        exceptions: ~
+      suppression-without-reason:
+        exceptions:
+          - ~
+          - files: "**"
+            reason: all

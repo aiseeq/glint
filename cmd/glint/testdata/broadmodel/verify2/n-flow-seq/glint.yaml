@@ -1,0 +1,2 @@
+version: 1
+categories: {deadcode: {rules: {suppression-without-reason: {exceptions: [{file: a.go, line: 3, reason: one}, {line: 3, reason: wide}]}}}}

@@ -1,0 +1,8 @@
+version: 1
+categories:
+  security:
+    rules:
+      hardcoded-secret:
+        exceptions:
+          - files: "**"
+            reason: fixtures

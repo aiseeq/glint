@@ -1,0 +1,8 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions: # broad-exclusion: safe — covers this line only
+          - pattern: "Suppression"
+            reason: legacy markers

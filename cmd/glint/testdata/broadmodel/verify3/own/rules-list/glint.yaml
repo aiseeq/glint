@@ -1,0 +1,6 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      - suppression-without-reason:
+          enabled: false

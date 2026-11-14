@@ -1,0 +1,9 @@
+version: 1
+categories:
+  deadcode:
+    rules:
+      unused-internal-export: &rulecfg
+        exceptions:
+          - pattern: "Suppression"
+            reason: legacy markers
+      suppression-without-reason: *rulecfg

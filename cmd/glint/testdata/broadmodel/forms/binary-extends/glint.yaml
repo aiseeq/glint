@@ -1,0 +1,7 @@
+version: 1
+extends: !!binary YmFzZS55YW1s
+categories:
+  deadcode:
+    rules:
+      stale-suppression:
+        enabled: true
