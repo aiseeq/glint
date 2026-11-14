@@ -36,16 +36,17 @@ type Violation struct {
 	// inline marker (SuppressionInline, at the marker's line) or a configured
 	// exception (SuppressionExceptionPrefix + key) silenced one. Such entries
 	// travel with the findings, through the result cache too, only so that a
-	// suppression nothing needs can be told apart; they never reach the
-	// output.
+	// suppression nothing needs can be told apart and the finding about a
+	// suppression is as severe as what it silenced (Severity, the highest);
+	// they never reach the output.
 	Suppression string
 }
 
 // NewSuppressionEntry makes the entry of a silenced finding of the rule: at
 // the marker's line for SuppressionInline, at the finding's line for an
-// exception.
-func NewSuppressionEntry(rule, category, file string, line int, suppression string) *Violation {
-	return &Violation{Rule: rule, Category: category, File: file, Line: line, Suppression: suppression}
+// exception, with the highest severity of what it silenced there.
+func NewSuppressionEntry(rule, category, file string, line int, severity Severity, suppression string) *Violation {
+	return &Violation{Rule: rule, Category: category, File: file, Line: line, Severity: severity, Suppression: suppression}
 }
 
 // SplitSuppressions separates the suppression entries from the findings.

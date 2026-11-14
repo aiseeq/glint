@@ -131,7 +131,7 @@ func TestBroadExclusionRunsWithItsCategoryOff(t *testing.T) {
 			}
 		}
 		assert.Equal(t, []string{"broad-exclusion"}, names, config)
-		found, err := analyzeConfigurationRules(enabled, cfg, nil, root)
+		found, err := analyzeConfigurationRules(enabled, cfg, nil, root, silencedSeverities{})
 		require.NoError(t, err)
 		var places []string
 		for _, v := range found {

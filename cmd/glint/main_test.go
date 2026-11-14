@@ -24,7 +24,7 @@ import (
 
 func broadFindingsForTest(t *testing.T, cfg *core.Config) []*core.Violation {
 	t.Helper()
-	findings, err := broadExclusionFindings(cfg)
+	findings, err := broadExclusionFindings(cfg, silencedSeverities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1149,7 +1149,7 @@ func TestBroadExclusionSkipsUnreadableDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	found, err := broadExclusionFindings(cfg)
+	found, err := broadExclusionFindings(cfg, silencedSeverities{})
 	if err != nil {
 		t.Fatalf("unreadable directory failed the check: %v", err)
 	}
