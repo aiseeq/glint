@@ -53,16 +53,12 @@ func (r *TruncatedRandomIDAsUniqueNumberRule) AnalyzeGoProject(ctx *core.GoProje
 	if ctx == nil {
 		return nil, errors.New("truncated random identifier as unique number: nil Go project context")
 	}
-	callers, err := newCallerIndex(ctx)
-	if err != nil {
-		return nil, err
-	}
-	conflicts, err := unhandledUniqueConflicts(ctx, callers, r.BaseRule)
+	found, err := projectRefusals(ctx, r.BaseRule)
 	if err != nil {
 		return nil, err
 	}
 	var violations []*core.Violation
-	for _, conflict := range conflicts {
+	for _, conflict := range found.conflicts {
 		origin := truncatedRandomUniqueOrigin(conflict.callers, conflict.target)
 		if origin == nil {
 			continue
@@ -118,6 +114,22 @@ func NewSQLConstraintViolationUnmappedRule() *SQLConstraintViolationUnmappedRule
 // constraintCheck is code looking at a constraint violation of the driver.
 var constraintCheck = regexp.MustCompile(`PgError|pq\.Error|"23505"|"23503"|"23P01"|UniqueViolation|ForeignKeyViolation|pgerrcode|ConstraintName|Constraint\b|(?i:duplicate key)`)
 
+// constraintCheckWords are words one of which every match of constraintCheck
+// holds: a text with none of them cannot match, and the regular expression,
+// a backtracking search with no literal prefix, runs only on the rest.
+// "duplicate key" is looked for in the lowercased text, as (?i) matches it.
+var constraintCheckWords = []string{"PgError", "pq.Error", `"23505"`, `"23503"`, `"23P01"`, "UniqueViolation", "ForeignKeyViolation", "pgerrcode", "Constraint"}
+
+// matchesConstraintCheck is constraintCheck.MatchString, skipping the
+// regular expression on a text without any of its words.
+func matchesConstraintCheck(text string) bool {
+	if !slices.ContainsFunc(constraintCheckWords, func(word string) bool { return strings.Contains(text, word) }) &&
+		!strings.Contains(strings.ToLower(text), "duplicate key") {
+		return false
+	}
+	return constraintCheck.MatchString(text)
+}
+
 // constraintMapper is the name of a function handed an error to translate.
 var constraintMapper = regexp.MustCompile(`(?i)^(map|translate|convert|classify)\w*err|pgerr|constraint|unique|duplicate|conflict|foreignkey`)
 
@@ -140,31 +152,14 @@ func (r *SQLConstraintViolationUnmappedRule) AnalyzeGoProject(ctx *core.GoProjec
 	if ctx == nil {
 		return nil, errors.New("sql constraint violation unmapped: nil Go project context")
 	}
-	callers, err := newCallerIndex(ctx)
+	found, err := projectRefusals(ctx, r.BaseRule)
 	if err != nil {
 		return nil, err
 	}
-	checkersByFile := make(map[*core.FileContext]map[string]bool)
 	var violations []*core.Violation
-	for _, fn := range callers.funcs {
+	for _, refusable := range found.funcs {
+		fn, literals, schema := refusable.fn, refusable.literals, refusable.schema
 		if !ctx.IsReportFile(fn.File) {
-			continue
-		}
-		literals := patternkit.SqlLiterals(fn.Decl.Body)
-		if len(literals) == 0 {
-			continue
-		}
-		schema, ok := fileSchema(fn.File, r.BaseRule)
-		if !ok || schema == nil {
-			continue
-		}
-		checkers, ok := checkersByFile[fn.File]
-		if !ok {
-			checkers = constraintCheckingFuncs(fn.File)
-			checkersByFile[fn.File] = checkers
-		}
-		obj, ok := fn.Info.Defs[fn.Decl.Name].(*types.Func)
-		if !ok || checksConstraints(fn.File, fn.Decl, checkers) || !callers.reachesHandlerUnmapped(obj, 0, map[*types.Func]bool{}) {
 			continue
 		}
 		for i, literal := range literals {
@@ -184,11 +179,7 @@ func (r *SQLConstraintViolationUnmappedRule) AnalyzeGoProject(ctx *core.GoProjec
 
 		}
 	}
-	conflicts, err := unhandledUniqueConflicts(ctx, callers, r.BaseRule)
-	if err != nil {
-		return nil, err
-	}
-	for _, conflict := range conflicts {
+	for _, conflict := range found.conflicts {
 		violations = r.report(conflict.file, violations, conflict.line,
 			"The INSERT writes the whole unique key ("+strings.Join(conflict.key, ", ")+") of "+conflict.table+" with no ON CONFLICT, and nothing between here and the handler checks the database error — a duplicate comes back to the user as a server error")
 	}
@@ -204,14 +195,53 @@ type unhandledUniqueConflict struct {
 	target  *types.Func
 }
 
-// unhandledUniqueConflicts finds unique-key INSERTs whose errors reach an
-// HTTP handler without a conflict check, retry, or earlier write ruling them out.
-func unhandledUniqueConflicts(ctx *core.GoProjectContext, callers *callerIndex, rule *rules.BaseRule) ([]unhandledUniqueConflict, error) {
-	if ctx == nil {
-		return nil, errors.New("sql constraint violation unmapped: nil Go project context")
-	}
-	checkersByFile := make(map[*core.FileContext]map[string]bool)
-	var conflicts []unhandledUniqueConflict
+// refusals is what sql-constraint-violation-unmapped and
+// truncated-random-id-as-unique-number both start from: the project functions
+// whose SQL the migrations' constraints can refuse, whose error reaches an
+// HTTP handler with nothing on the way checking it, and the unique-key
+// INSERTs among their statements. One project run builds it once for both
+// rules.
+type refusals struct {
+	funcs     []refusableFunc
+	conflicts []unhandledUniqueConflict
+}
+
+// refusableFunc is a function of refusals with its object, its SQL and its
+// schema.
+type refusableFunc struct {
+	fn       patternkit.TypedFunc
+	target   *types.Func
+	literals []patternkit.SqlLiteral
+	schema   *sqlschema.Schema
+}
+
+// refusalsKey tells refusals apart by the migration directories of the rule:
+// the schema, and so the statements it refuses, depends on them.
+type refusalsKey struct{ migrations string }
+
+// projectRefusals returns the refusals of the project under the migrations
+// of rule, built once per project and migration directories. It depends on
+// the files this root analyzes (the functions are those of its files), so it
+// is shared per project, not per load.
+func projectRefusals(ctx *core.GoProjectContext, rule *rules.BaseRule) (*refusals, error) {
+	key := refusalsKey{migrations: strings.Join(patternkit.MigrationDirs(rule), "\x00")}
+	return core.Shared(ctx, key, func() (*refusals, error) {
+		callers, err := newCallerIndex(ctx)
+		if err != nil {
+			return nil, err
+		}
+		found := &refusals{funcs: refusableFuncs(callers, rule)}
+		found.conflicts = unhandledUniqueConflicts(callers, found.funcs)
+		return found, nil
+	})
+}
+
+// refusableFuncs returns, in the order of callers.funcs, the functions with
+// SQL and a schema that neither check a constraint violation nor have one
+// checked on the way to the HTTP handler their error reaches.
+func refusableFuncs(callers *callerIndex, rule *rules.BaseRule) []refusableFunc {
+	checks := newConstraintChecks()
+	var funcs []refusableFunc
 	for _, fn := range callers.funcs {
 		literals := patternkit.SqlLiterals(fn.Decl.Body)
 		if len(literals) == 0 {
@@ -221,15 +251,21 @@ func unhandledUniqueConflicts(ctx *core.GoProjectContext, callers *callerIndex, 
 		if !ok || schema == nil {
 			continue
 		}
-		checkers, ok := checkersByFile[fn.File]
-		if !ok {
-			checkers = constraintCheckingFuncs(fn.File)
-			checkersByFile[fn.File] = checkers
-		}
-		target, ok := fn.Info.Defs[fn.Decl.Name].(*types.Func)
-		if !ok || checksConstraints(fn.File, fn.Decl, checkers) || !callers.reachesHandlerUnmapped(target, 0, map[*types.Func]bool{}) {
+		obj, ok := fn.Info.Defs[fn.Decl.Name].(*types.Func)
+		if !ok || checks.checksConstraints(fn.File, fn.Decl) || !callers.reachesHandlerUnmapped(obj, 0, map[*types.Func]bool{}) {
 			continue
 		}
+		funcs = append(funcs, refusableFunc{fn: fn, target: obj, literals: literals, schema: schema})
+	}
+	return funcs
+}
+
+// unhandledUniqueConflicts finds the unique-key INSERTs of the refusable
+// functions that no retry or earlier write of the function rules out.
+func unhandledUniqueConflicts(callers *callerIndex, funcs []refusableFunc) []unhandledUniqueConflict {
+	var conflicts []unhandledUniqueConflict
+	for _, refusable := range funcs {
+		fn, target, literals, schema := refusable.fn, refusable.target, refusable.literals, refusable.schema
 		for i, literal := range literals {
 			earlier := earlierStatements(literals[:i])
 			for _, conflict := range schema.UniqueConflicts(literal.Text) {
@@ -243,7 +279,7 @@ func unhandledUniqueConflicts(ctx *core.GoProjectContext, callers *callerIndex, 
 			}
 		}
 	}
-	return conflicts, nil
+	return conflicts
 }
 
 // truncatedRandomOrigin records the function and syntax node that construct a
@@ -562,23 +598,53 @@ func (r *SQLConstraintViolationUnmappedRule) report(ctx *core.FileContext, viola
 		"Check the error for the violation (errors.As to the driver's error, code 23503 or 23505 and the constraint name) and return a conflict the caller can explain"))
 }
 
-// constraintCheckingFuncs returns the names of the file's functions that
-// look at a constraint violation.
-func constraintCheckingFuncs(ctx *core.FileContext) map[string]bool {
-	names := make(map[string]bool)
-	for _, decl := range ctx.GoAST.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil && constraintCheck.MatchString(funcText(ctx, fn)) {
-			names[fn.Name.Name] = true
-		}
+// constraintChecks tells which functions look at a constraint violation. The
+// source of a function is matched against constraintCheck at most once, and
+// only when asked: for a function with SQL, and for a function of its file
+// it calls - not for every function of every file with SQL.
+type constraintChecks struct {
+	// byName holds the functions of a file with a body, by name.
+	byName map[*core.FileContext]map[string][]*ast.FuncDecl
+	// matched caches constraintCheck on the source of a function.
+	matched map[*ast.FuncDecl]bool
+}
+
+func newConstraintChecks() *constraintChecks {
+	return &constraintChecks{byName: make(map[*core.FileContext]map[string][]*ast.FuncDecl), matched: make(map[*ast.FuncDecl]bool)}
+}
+
+// looksAtConstraint reports a function whose source looks at a constraint
+// violation.
+func (c *constraintChecks) looksAtConstraint(ctx *core.FileContext, fn *ast.FuncDecl) bool {
+	matched, ok := c.matched[fn]
+	if !ok {
+		matched = matchesConstraintCheck(funcText(ctx, fn))
+		c.matched[fn] = matched
 	}
-	return names
+	return matched
+}
+
+// checker reports a function of the file named name - any of them, methods
+// of several receivers share a name - that looks at a constraint violation.
+func (c *constraintChecks) checker(ctx *core.FileContext, name string) bool {
+	funcs, ok := c.byName[ctx]
+	if !ok {
+		funcs = make(map[string][]*ast.FuncDecl)
+		for _, decl := range ctx.GoAST.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+				funcs[fn.Name.Name] = append(funcs[fn.Name.Name], fn)
+			}
+		}
+		c.byName[ctx] = funcs
+	}
+	return slices.ContainsFunc(funcs[name], func(fn *ast.FuncDecl) bool { return c.looksAtConstraint(ctx, fn) })
 }
 
 // checksConstraints reports a function looking at a constraint violation
 // itself, calling a function of the file that does, or handing its error to
 // a mapper named for it.
-func checksConstraints(ctx *core.FileContext, fn *ast.FuncDecl, checkers map[string]bool) bool {
-	if constraintCheck.MatchString(funcText(ctx, fn)) {
+func (c *constraintChecks) checksConstraints(ctx *core.FileContext, fn *ast.FuncDecl) bool {
+	if c.looksAtConstraint(ctx, fn) {
 		return true
 	}
 	found := false
@@ -588,7 +654,7 @@ func checksConstraints(ctx *core.FileContext, fn *ast.FuncDecl, checkers map[str
 			return !found
 		}
 		name := helpers.CalleeName(call)
-		if checkers[name] || constraintMapper.MatchString(name) {
+		if c.checker(ctx, name) || constraintMapper.MatchString(name) {
 			found = true
 		}
 		return !found
