@@ -35,6 +35,10 @@ type testDirFacts struct {
 type clientHolder struct {
 	name string
 	obj  types.Object
+	// field is the field of the struct literal the name holds that keeps the
+	// client (b := Box{C: New()}): the name is the client only through it.
+	// Empty when the name holds the client itself.
+	field string
 }
 
 // collectTestDirFacts reads the test files of every directory once.
@@ -354,6 +358,63 @@ type liveCallScope struct {
 	// packageValues lists the values given to a package-level variable of
 	// the test's own package.
 	packageValues func(name string) []ast.Expr
+	// consumers are the standard functions the test may hand the client to
+	// without the client escaping.
+	consumers stdConsumers
+}
+
+// stdConsumers names, by the import names of the test file and the testing
+// handles of the test, the known standard functions that take the client
+// without calling it: the printers of fmt and the log methods of the testing
+// handle call only its formatting methods, reflect.DeepEqual calls none.
+type stdConsumers struct {
+	fmtPkgs, reflectPkgs, handles map[string]bool
+}
+
+// fmtPrinters maps a printer of fmt to the index of its first formatted
+// argument: before it stands the writer or buffer the printer writes to.
+var fmtPrinters = map[string]int{
+	"Print": 0, "Printf": 0, "Println": 0, "Sprint": 0, "Sprintf": 0, "Sprintln": 0, "Errorf": 0,
+	"Fprint": 1, "Fprintf": 1, "Fprintln": 1, "Append": 1, "Appendf": 1, "Appendln": 1,
+}
+
+// testingLoggers are the methods of a testing handle that format their arguments.
+var testingLoggers = map[string]bool{"Log": true, "Logf": true, "Error": true, "Errorf": true, "Fatal": true, "Fatalf": true}
+
+// formattingMethods are the methods fmt calls on a value it formats.
+var formattingMethods = []string{"String", "Error", "GoString", "Format"}
+
+// inert reports whether call is a known standard function given value as an
+// argument that calls no live method of it: a printer of fmt or a log method
+// of the testing handle formatting it while none of its formatting methods is
+// live, or reflect.DeepEqual. A package name the test declares itself is not
+// the package.
+func (c stdConsumers) inert(body *ast.BlockStmt, call *ast.CallExpr, value ast.Expr, liveMethods map[string]bool) bool {
+	sel, isSelector := call.Fun.(*ast.SelectorExpr)
+	if !isSelector {
+		return false
+	}
+	x, isIdent := sel.X.(*ast.Ident)
+	at := slices.Index(call.Args, value)
+	if !isIdent || at < 0 {
+		return false
+	}
+	switch {
+	case c.reflectPkgs[x.Name]:
+		return sel.Sel.Name == "DeepEqual" && !declaresName(body, x.Name)
+	case c.fmtPkgs[x.Name]:
+		start, printer := fmtPrinters[sel.Sel.Name]
+		if !printer || at < start || declaresName(body, x.Name) {
+			return false
+		}
+	case c.handles[x.Name]:
+		if !testingLoggers[sel.Sel.Name] {
+			return false
+		}
+	default:
+		return false
+	}
+	return !slices.ContainsFunc(formattingMethods, func(method string) bool { return liveMethods[method] })
 }
 
 // reaches returns the evidence of a live call and whether the call is one. A direct sending
@@ -378,7 +439,7 @@ func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry li
 		host = liveMethodArgument(body, call, entry.liveMethods, entry.resultIndexes, entry.selfMethods, pkg.urlNames, isQualifier, s.hostOf, info)
 	}
 	if !s.unitTests {
-		if !entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, entry.selfMethods, info) && !constructorResultEscapes(body, call, entry.liveMethods, entry.knownMembers, entry.selfMethods, entry.resultIndexes, info, s.emptyFunc) {
+		if !entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, entry.selfMethods, info) && !constructorResultEscapes(body, call, entry.liveMethods, entry.knownMembers, entry.selfMethods, entry.resultIndexes, info, s) {
 			return "", false
 		}
 		if host == "" {
@@ -394,8 +455,9 @@ func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry li
 
 // constructorResultEscapes reports whether the test lets the constructed client reach code
 // whose behavior the rule cannot establish. A live method call is handled separately; reads
-// of fields and calls to known non-live methods are safe.
-func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMethods, knownMembers, selfMethods map[string]bool, resultIndexes map[int]bool, info *types.Info, emptyFunc func(string) bool) bool {
+// of fields, calls to known non-live methods and the known standard consumers of the scope
+// are safe.
+func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMethods, knownMembers, selfMethods map[string]bool, resultIndexes map[int]bool, info *types.Info, scope liveCallScope) bool {
 	parents := map[ast.Node]ast.Node{}
 	var stack []ast.Node
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -414,13 +476,17 @@ func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMetho
 	if constructorOnlyInspectedOrDiscarded(body, ctor, holders, initializers, parents) {
 		return false
 	}
+	consumed := func(call *ast.CallExpr, value ast.Expr) bool {
+		return scope.consumers.inert(body, call, value, liveMethods)
+	}
 
 	// A constructor result used directly as a return value, argument, field, channel value,
 	// literal element or any other non-local expression escapes without a named holder.
 	if len(holders) == 0 {
-		return directConstructorResultEscapes(parents[ctor], parents, ctor, liveMethods, knownMembers, selfMethods, resultIndexes)
+		return directConstructorResultEscapes(parents[ctor], parents, ctor, liveMethods, knownMembers, selfMethods, resultIndexes, consumed)
 	}
-	return constructorHolderEscapes(body, parents, holders, initializers, liveMethods, knownMembers, info, emptyFunc)
+	uses := clientUses{parents: parents, liveMethods: liveMethods, knownMembers: knownMembers, initializers: initializers, consumed: consumed}
+	return constructorHolderEscapes(body, holders, info, scope.emptyFunc, uses)
 }
 
 func constructorOnlyInspectedOrDiscarded(body *ast.BlockStmt, ctor *ast.CallExpr, holders []clientHolder, initializers map[*ast.Ident]bool, parents map[ast.Node]ast.Node) bool {
@@ -487,7 +553,7 @@ func constructorNestedInComposite(ctor *ast.CallExpr, parents map[ast.Node]ast.N
 	return false
 }
 
-func directConstructorResultEscapes(parent ast.Node, parents map[ast.Node]ast.Node, ctor *ast.CallExpr, liveMethods, knownMembers, selfMethods map[string]bool, resultIndexes map[int]bool) bool {
+func directConstructorResultEscapes(parent ast.Node, parents map[ast.Node]ast.Node, ctor *ast.CallExpr, liveMethods, knownMembers, selfMethods map[string]bool, resultIndexes map[int]bool, consumed func(*ast.CallExpr, ast.Expr) bool) bool {
 	switch p := parent.(type) {
 	case *ast.AssignStmt:
 		for i, lhs := range p.Lhs {
@@ -511,20 +577,12 @@ func directConstructorResultEscapes(parent ast.Node, parents map[ast.Node]ast.No
 	case *ast.BinaryExpr:
 		return !comparedWithNil(p, ctor)
 	case *ast.CallExpr:
-		if p.Fun == ctor {
-			return true
-		}
-		for _, arg := range p.Args {
-			if arg == ctor {
-				return true
-			}
-		}
-		return true
+		return !consumed(p, ctor)
 	case *ast.SelectorExpr:
 		if p.X == ctor {
 			if call, ok := parents[p].(*ast.CallExpr); ok && call.Fun == p && selfMethods[p.Sel.Name] {
 				// A builder hands back the client: follow its result.
-				return directConstructorResultEscapes(parents[call], parents, call, liveMethods, knownMembers, selfMethods, map[int]bool{0: true})
+				return directConstructorResultEscapes(parents[call], parents, call, liveMethods, knownMembers, selfMethods, map[int]bool{0: true}, consumed)
 			}
 			if call, ok := parents[p].(*ast.CallExpr); ok && call.Fun == p {
 				return liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name]
@@ -539,31 +597,63 @@ func directConstructorResultEscapes(parent ast.Node, parents map[ast.Node]ast.No
 	}
 }
 
-func constructorHolderEscapes(body *ast.BlockStmt, parents map[ast.Node]ast.Node, holders []clientHolder, initializers map[*ast.Ident]bool, liveMethods, knownMembers map[string]bool, info *types.Info, emptyFunc func(string) bool) bool {
+// clientUses is what tells a use of a holder of the client that lets it escape from one
+// that stays local.
+type clientUses struct {
+	parents                   map[ast.Node]ast.Node
+	liveMethods, knownMembers map[string]bool
+	// initializers are the names the holders are bound to: handing the client to one of
+	// them is no escape.
+	initializers map[*ast.Ident]bool
+	// consumed reports a known standard function taking the client without calling it.
+	consumed func(*ast.CallExpr, ast.Expr) bool
+}
+
+// constructorHolderEscapes reports whether a use of a holder lets the client escape. A
+// holder whose literal keeps the client in a field (b := Box{C: New()}) is the client
+// only through that field: another field of the literal is not the client, a method of
+// the literal may use it.
+func constructorHolderEscapes(body *ast.BlockStmt, holders []clientHolder, info *types.Info, emptyFunc func(string) bool, uses clientUses) bool {
 	escapes := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		id, ok := n.(*ast.Ident)
-		if !ok || escapes || initializers[id] || !isHolderUse(id, holders, info) {
+		if !ok || escapes || uses.initializers[id] {
 			return !escapes
 		}
-		if call, ok := parents[id].(*ast.CallExpr); ok && localEmptyCallConsumes(body, call, id, emptyFunc) {
+		holder, isHolder := holderOf(id, holders, info)
+		if !isHolder {
 			return true
 		}
-		escapes = holderUseEscapes(id, parents[id], parents, liveMethods, knownMembers)
+		if call, ok := uses.parents[id].(*ast.CallExpr); ok && localEmptyCallConsumes(body, call, id, emptyFunc) {
+			return true
+		}
+		var use ast.Expr = id
+		if sel, ok := uses.parents[id].(*ast.SelectorExpr); ok && sel.X == id && holder.field != "" {
+			if sel.Sel.Name != holder.field {
+				call, called := uses.parents[sel].(*ast.CallExpr)
+				escapes = called && call.Fun == sel
+				return !escapes
+			}
+			use = sel
+		}
+		escapes = uses.escapes(use)
 		return !escapes
 	})
 	return escapes
 }
 
-func holderUseEscapes(id *ast.Ident, parent ast.Node, parents map[ast.Node]ast.Node, liveMethods, knownMembers map[string]bool) bool {
-	for ancestor := parent; ancestor != nil; ancestor = parents[ancestor] {
+// escapes reports whether the use of the client value lets it reach unknown code.
+func (u clientUses) escapes(use ast.Expr) bool {
+	parent := u.parents[use]
+	for ancestor := parent; ancestor != nil; ancestor = u.parents[ancestor] {
 		if _, ok := ancestor.(*ast.FuncLit); ok {
 			return true
 		}
 	}
+	parents, liveMethods, knownMembers := u.parents, u.liveMethods, u.knownMembers
 	switch p := parent.(type) {
 	case *ast.SelectorExpr:
-		if p.X != id {
+		if p.X != use {
 			return true
 		}
 		if call, ok := parents[p].(*ast.CallExpr); ok && call.Fun == p {
@@ -584,10 +674,14 @@ func holderUseEscapes(id *ast.Ident, parent ast.Node, parents map[ast.Node]ast.N
 		}
 		return true
 	case *ast.BinaryExpr:
-		return !comparedWithNil(p, id)
+		return !comparedWithNil(p, use)
 	case *ast.AssignStmt:
-		for _, rhs := range p.Rhs {
-			if rhs == id {
+		for i, rhs := range p.Rhs {
+			if rhs == use {
+				// The client handed to another holder stays with the test.
+				if holder, ok := p.Lhs[i].(*ast.Ident); ok && u.initializers[holder] {
+					return false
+				}
 				discarded := len(p.Lhs) > 0
 				for _, lhs := range p.Lhs {
 					blank, ok := lhs.(*ast.Ident)
@@ -597,8 +691,15 @@ func holderUseEscapes(id *ast.Ident, parent ast.Node, parents map[ast.Node]ast.N
 			}
 		}
 		return false
+	case *ast.ValueSpec:
+		i := slices.Index(p.Values, use)
+		if i < 0 {
+			// The declaration of a holder (var c *Client) is no use of the client.
+			return !slices.ContainsFunc(p.Names, func(name *ast.Ident) bool { return ast.Expr(name) == use })
+		}
+		return len(p.Names) != len(p.Values) || (p.Names[i].Name != "_" && !u.initializers[p.Names[i]])
 	case *ast.CallExpr:
-		return true
+		return !u.consumed(p, use)
 	case *ast.UnaryExpr, *ast.CompositeLit, *ast.ReturnStmt, *ast.SendStmt, *ast.KeyValueExpr:
 		return true
 	default:
@@ -670,37 +771,94 @@ func declaresName(body *ast.BlockStmt, name string) bool {
 }
 
 // holdsConstructor reports whether the value of e is the constructed client
-// itself, the client handed back by a builder method (New().WithKey(k)) or a
-// literal holding it (&Box{C: New()}, []*Client{New()}). The result of
-// another method called on the client (New().Name()) is not the client.
-func holdsConstructor(e ast.Expr, ctor *ast.CallExpr, selfMethods map[string]bool) bool {
+// itself, a copy of it (*New()), the client handed back by a builder method
+// (New().WithKey(k), c.WithKey(k)), a literal holding it (&Box{C: New()},
+// []*Client{New()}) or a value held reports: a holder of the client or the
+// field of a literal holder that keeps it. The result of another method
+// called on the client (New().Name()) is not the client.
+func holdsConstructor(e ast.Expr, ctor *ast.CallExpr, selfMethods map[string]bool, held func(ast.Expr) bool) bool {
 	switch e := ast.Unparen(e).(type) {
 	case *ast.CallExpr:
 		if e == ctor {
 			return true
 		}
 		sel, isMethod := e.Fun.(*ast.SelectorExpr)
-		return isMethod && selfMethods[sel.Sel.Name] && holdsConstructor(sel.X, ctor, selfMethods)
+		return isMethod && selfMethods[sel.Sel.Name] && holdsConstructor(sel.X, ctor, selfMethods, held)
 	case *ast.UnaryExpr:
-		return e.Op == token.AND && holdsConstructor(e.X, ctor, selfMethods)
+		return e.Op == token.AND && holdsConstructor(e.X, ctor, selfMethods, held)
+	case *ast.StarExpr:
+		return holdsConstructor(e.X, ctor, selfMethods, held)
 	case *ast.CompositeLit:
 		for _, elt := range e.Elts {
-			if holdsConstructor(elt, ctor, selfMethods) {
+			if holdsConstructor(elt, ctor, selfMethods, held) {
 				return true
 			}
 		}
 	case *ast.KeyValueExpr:
-		return holdsConstructor(e.Key, ctor, selfMethods) || holdsConstructor(e.Value, ctor, selfMethods)
+		return holdsConstructor(e.Key, ctor, selfMethods, held) || holdsConstructor(e.Value, ctor, selfMethods, held)
+	case *ast.Ident, *ast.SelectorExpr:
+		return held != nil && held(e)
 	}
 	return false
 }
 
+// heldClient reports whether e is the client through a holder: the name of a
+// holder of the client itself, or the field of a literal holder that keeps it.
+func heldClient(e ast.Expr, holders []clientHolder, info *types.Info) bool {
+	switch e := e.(type) {
+	case *ast.Ident:
+		holder, ok := holderOf(e, holders, info)
+		return ok && holder.field == ""
+	case *ast.SelectorExpr:
+		x, isIdent := ast.Unparen(e.X).(*ast.Ident)
+		if !isIdent {
+			return false
+		}
+		holder, ok := holderOf(x, holders, info)
+		return ok && holder.field == e.Sel.Name
+	}
+	return false
+}
+
+// literalField returns the field of a struct literal (Box{C: New()},
+// &Box{C: New()}) whose value holds the client, "" for any other value.
+func literalField(e ast.Expr, ctor *ast.CallExpr, selfMethods map[string]bool, held func(ast.Expr) bool) string {
+	e = ast.Unparen(e)
+	if ref, ok := e.(*ast.UnaryExpr); ok && ref.Op == token.AND {
+		e = ast.Unparen(ref.X)
+	}
+	lit, ok := e.(*ast.CompositeLit)
+	if !ok {
+		return ""
+	}
+	switch lit.Type.(type) {
+	case *ast.MapType, *ast.ArrayType:
+		return ""
+	}
+	for _, elt := range lit.Elts {
+		kv, isKeyed := elt.(*ast.KeyValueExpr)
+		if !isKeyed {
+			continue
+		}
+		if key, isIdent := kv.Key.(*ast.Ident); isIdent && holdsConstructor(kv.Value, ctor, selfMethods, held) {
+			return key.Name
+		}
+	}
+	return ""
+}
+
+// constructorResultHolders returns the names the test binds the client to and
+// the identifiers that bind them. A name bound to a value of a holder (d := c,
+// d := c.WithKey(k), d := b.C) holds the client too, so binding repeats until
+// no holder is added.
 func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultIndexes map[int]bool, selfMethods map[string]bool, info *types.Info) ([]clientHolder, map[*ast.Ident]bool) {
 	var holders []clientHolder
 	initializers := make(map[*ast.Ident]bool)
-	add := func(id *ast.Ident) {
-		if id == nil || id.Name == "_" {
-			return
+	held := func(e ast.Expr) bool { return heldClient(e, holders, info) }
+	add := func(lhs, value ast.Expr) bool {
+		id, ok := lhs.(*ast.Ident)
+		if !ok || id.Name == "_" || initializers[id] {
+			return false
 		}
 		var obj types.Object
 		if info != nil {
@@ -709,32 +867,45 @@ func constructorResultHolders(body *ast.BlockStmt, ctor *ast.CallExpr, resultInd
 				obj = info.Uses[id]
 			}
 		}
-		holders = append(holders, clientHolder{name: id.Name, obj: obj})
+		holders = append(holders, clientHolder{name: id.Name, obj: obj, field: literalField(value, ctor, selfMethods, held)})
 		initializers[id] = true
-	}
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch assign := n.(type) {
-		case *ast.AssignStmt:
-			if len(assign.Rhs) == 1 && holdsConstructor(assign.Rhs[0], ctor, selfMethods) {
-				for i, lhs := range assign.Lhs {
-					if resultIndexes[i] {
-						if id, ok := lhs.(*ast.Ident); ok {
-							add(id)
-						}
-					}
-				}
-			}
-		case *ast.ValueSpec:
-			if len(assign.Values) == 1 && holdsConstructor(assign.Values[0], ctor, selfMethods) {
-				for i, id := range assign.Names {
-					if resultIndexes[i] {
-						add(id)
-					}
-				}
-			}
-		}
 		return true
-	})
+	}
+	bind := func(names, values []ast.Expr) bool {
+		added := false
+		if len(values) == 1 && len(names) > 1 {
+			// Only the constructor itself has several results.
+			if ast.Unparen(values[0]) == ctor {
+				for i, name := range names {
+					added = resultIndexes[i] && add(name, values[0]) || added
+				}
+			}
+			return added
+		}
+		if len(names) != len(values) {
+			return false
+		}
+		for i, value := range values {
+			added = holdsConstructor(value, ctor, selfMethods, held) && add(names[i], value) || added
+		}
+		return added
+	}
+	for changed := true; changed; {
+		changed = false
+		ast.Inspect(body, func(n ast.Node) bool {
+			switch assign := n.(type) {
+			case *ast.AssignStmt:
+				changed = bind(assign.Lhs, assign.Rhs) || changed
+			case *ast.ValueSpec:
+				names := make([]ast.Expr, len(assign.Names))
+				for i, name := range assign.Names {
+					names[i] = name
+				}
+				changed = bind(names, assign.Values) || changed
+			}
+			return true
+		})
+	}
 	return holders, initializers
 }
 
@@ -750,7 +921,9 @@ func containsASTNode(root ast.Node, target ast.Node) bool {
 	return found
 }
 
-func isHolderUse(id *ast.Ident, holders []clientHolder, info *types.Info) bool {
+// holderOf returns the holder the identifier names: by its object when both
+// have one, by name otherwise.
+func holderOf(id *ast.Ident, holders []clientHolder, info *types.Info) (clientHolder, bool) {
 	var object types.Object
 	if info != nil {
 		object = info.Uses[id]
@@ -761,15 +934,15 @@ func isHolderUse(id *ast.Ident, holders []clientHolder, info *types.Info) bool {
 	for _, h := range holders {
 		if object != nil && h.obj != nil {
 			if object == h.obj {
-				return true
+				return h, true
 			}
 			continue
 		}
 		if h.name == id.Name {
-			return true
+			return h, true
 		}
 	}
-	return false
+	return clientHolder{}, false
 }
 
 func comparedWithNil(expr *ast.BinaryExpr, value ast.Expr) bool {
@@ -840,6 +1013,7 @@ func callsLiveMethod(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string
 
 func liveMethodCall(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool, resultIndexes map[int]bool, selfMethods map[string]bool, info *types.Info) *ast.CallExpr {
 	holders, _ := constructorResultHolders(body, ctor, resultIndexes, selfMethods, info)
+	held := func(e ast.Expr) bool { return heldClient(e, holders, info) }
 	var found *ast.CallExpr
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -851,12 +1025,8 @@ func liveMethodCall(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]
 			return true
 		}
 		switch x := ast.Unparen(sel.X).(type) {
-		case *ast.CallExpr:
-			if holdsConstructor(x, ctor, selfMethods) {
-				found = call
-			}
-		case *ast.Ident:
-			if isHolderUse(x, holders, info) {
+		case *ast.CallExpr, *ast.Ident, *ast.SelectorExpr:
+			if holdsConstructor(x, ctor, selfMethods, held) {
 				found = call
 			}
 		}

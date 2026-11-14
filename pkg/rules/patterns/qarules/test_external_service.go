@@ -809,6 +809,8 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 	drivesOwnServer := r.hasLocalURLLiteral(file.GoAST)
 
 	testingPkgs := testingImportNames(file.GoAST)
+	fmtPkgs := helpers.PackageAliases(file.GoAST, `"fmt"`, "fmt")
+	reflectPkgs := helpers.PackageAliases(file.GoAST, `"reflect"`, "reflect")
 
 	var violations []*core.Violation
 	for _, decl := range file.GoAST.Decls {
@@ -838,7 +840,7 @@ func (r *TestExternalServiceRule) analyzeTestFile(
 				return nil
 			}
 			return facts.packageValues[file.GoAST.Name.Name+"."+name]
-		}}
+		}, consumers: stdConsumers{fmtPkgs: fmtPkgs, reflectPkgs: reflectPkgs, handles: scopeTestingHandles(nil, fn.Type.Params, testingPkgs)}}
 		violations = append(violations, r.outboundCalls(file, imports, fn, outbound, scope)...)
 		if own, ok := outboundDirs[filepath.Dir(file.Path)]; ok {
 			violations = append(violations, r.inPackageCalls(file, fn, own, scope)...)
