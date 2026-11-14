@@ -2391,7 +2391,6 @@ settings:
   exclude:
     - vendor/**
     - node_modules/**
-    - "**/*_test.go"
   min_severity: medium
   output: console
 

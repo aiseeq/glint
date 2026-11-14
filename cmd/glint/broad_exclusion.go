@@ -246,14 +246,14 @@ func checkBroadEntries(entries []broadEntry, files []string, catalog map[string]
 		if broadLineHasReason(configContext, entry.line) {
 			continue
 		}
-		found, err := checkBroadEntry(entry, files, catalog)
+		message, err := checkBroadEntry(entry, files, catalog)
 		if err != nil {
 			return nil, err
 		}
-		if !found {
+		if message == "" {
 			continue
 		}
-		findings = append(findings, rule.CreateViolation(configName, entry.line, broadFindingMessage(entry, files)))
+		findings = append(findings, rule.CreateViolation(configName, entry.line, message))
 	}
 	return findings, nil
 }
@@ -274,14 +274,40 @@ func broadFindingMessage(entry broadEntry, files []string) string {
 	return "Exclusion covers all source files in a project directory; " + broadMarkerAdvice
 }
 
-func checkBroadEntry(entry broadEntry, files []string, catalog map[string]int) (bool, error) {
+// testsFindingMessage is the finding of an exclusion that takes out every
+// test file of a language.
+func testsFindingMessage(language string) string {
+	return fmt.Sprintf("Exclusion covers every %s test file of the project, so no rule reads its tests; except the tests per rule instead, or "+broadMarkerAdvice, language)
+}
+
+// checkBroadEntry returns the finding message of an entry, "" when it is
+// narrow. An exclusion of a whole directory or language keeps that message
+// even when it takes out every test too.
+func checkBroadEntry(entry broadEntry, files []string, catalog map[string]int) (string, error) {
+	covers, err := coversBroadly(entry, files, catalog)
+	if err != nil {
+		return "", err
+	}
+	if covers {
+		return broadFindingMessage(entry, files), nil
+	}
+	if language := coveredTestLanguage(entry, files); language != "" {
+		return testsFindingMessage(language), nil
+	}
+	return "", nil
+}
+
+// coversBroadly reports an entry that disables a category, skips a directory
+// of sources, or excludes a whole language, a whole source directory, or the
+// whole project for one rule.
+func coversBroadly(entry broadEntry, files []string, catalog map[string]int) (bool, error) {
 	if entry.pattern == "<category>" {
 		return true, nil
 	}
 	if entry.skipDir {
 		return skipsSourceDirectory(entry.pattern, files), nil
 	}
-	if ignoredBroadPattern(entry.pattern) || !strings.ContainsAny(entry.pattern, "*?[{") {
+	if !broadGlob(entry.pattern) {
 		return false, nil
 	}
 	if coveredLanguage(entry, files) != "" {
@@ -361,6 +387,63 @@ func coveredLanguage(entry broadEntry, files []string) string {
 		}
 		if total > 0 && covered == total {
 			return ext
+		}
+	}
+	return ""
+}
+
+// broadGlob reports a pattern that may take out more than one file of the
+// project's own: a glob over no foreign, generated or test-data path.
+func broadGlob(pattern string) bool {
+	return !ignoredBroadPattern(pattern) && strings.ContainsAny(pattern, "*?[{")
+}
+
+// testFileLanguage returns the language of a source file ("Go",
+// "TypeScript", "JavaScript", "" for none) and whether it is a test of that
+// language: x_test.go, x.test.ts or x.spec.ts and so for every TypeScript and
+// JavaScript extension.
+func testFileLanguage(file string) (string, bool) {
+	base := filepath.Base(filepath.ToSlash(file))
+	ext := strings.ToLower(filepath.Ext(base))
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	switch {
+	case ext == ".go":
+		return "Go", strings.HasSuffix(stem, "_test")
+	case slices.Contains(core.TypeScriptExtensions, ext):
+		return "TypeScript", isTestStem(stem)
+	case slices.Contains(core.JavaScriptExtensions, ext):
+		return "JavaScript", isTestStem(stem)
+	}
+	return "", false
+}
+
+func isTestStem(stem string) bool {
+	return strings.HasSuffix(stem, ".test") || strings.HasSuffix(stem, ".spec")
+}
+
+// coveredTestLanguage returns the language ("Go") every test file of which
+// in the project a settings.exclude pattern takes out, matched as the walk
+// matches it (core.MatchGlob: a pattern without a separator matches the base
+// name); "" when none, or when the project has no test of that language.
+// Each language counts by itself, all its extensions together: "**/*.test.ts"
+// leaves the tests of a project that has .test.tsx ones too.
+func coveredTestLanguage(entry broadEntry, files []string) string {
+	if entry.exception || entry.skipDir || !broadGlob(entry.pattern) {
+		return ""
+	}
+	for _, language := range []string{"Go", "TypeScript", "JavaScript"} {
+		tests, covered := 0, 0
+		for _, file := range files {
+			if fileLanguage, test := testFileLanguage(file); fileLanguage != language || !test {
+				continue
+			}
+			tests++
+			if core.MatchGlob(entry.pattern, file) {
+				covered++
+			}
+		}
+		if tests > 0 && covered == tests {
+			return language
 		}
 	}
 	return ""
