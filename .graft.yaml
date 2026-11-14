@@ -18,11 +18,14 @@ limits:
 # ~30 s to every commit (29.5 s on an idle laptop; the short tests take 31 s).
 gate:
   - task: smoke
+  - task: lint-trunk
 
-# golangci-lint (errcheck and the rest) guards main at merge, not every
-# commit: after a change it takes 30-57 s (one package or pkg/core, measured
-# 14.11), on top of a gate of 3-6 min. Without it a merge once left main red
-# until install ran lint.
+# golangci-lint (errcheck and the rest) guards main, not every commit of a
+# branch: after a change it takes 33-57 s (graft stats median 33 s; one
+# package or pkg/core, measured 14.11), on top of a gate median of 1m52s.
+# A merge runs it as merge.deps, a commit made on main runs it in the gate
+# (lint-trunk); a branch commit skips it. Without it a merge once left main
+# red until install ran lint.
 merge:
   deps: [lint]
 
@@ -144,6 +147,11 @@ tasks:
             go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
           fi
           golangci-lint run --concurrency {threads}
+  lint-trunk:
+    desc: golangci-lint on a commit made on main; a branch commit skips it (merge runs lint)
+    heavy: true
+    run:
+      - sh: '[ "$(git rev-parse --abbrev-ref HEAD)" != main ] || golangci-lint run --concurrency {threads}'
   fmt:
     desc: format the code
     run:
