@@ -1,9 +1,11 @@
 package duplication
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -409,6 +411,34 @@ const libraryCodeTS = `export function cleanCode(raw: string): string {
     value = value + '0'
   }
   return value
+}
+
+export function withMark(s: string, p: string): string {
+  s = s.trim()
+  p = p.trim()
+  if (s === '') return p
+  if (s.startsWith(p)) return s
+  return p + s
+}
+
+export function grade(score: number, name: string): string {
+  let label = 'unknown'
+  if (score >= 90) {
+    label = 'high'
+  } else {
+    label = 'low'
+  }
+  if (name === '') name = 'anon'
+  return name + ':' + label + ':' + '*'.repeat(score / 10)
+}
+
+export function addCounts(a: Map<string, number>, b: Map<string, number>): string[] {
+  const added: string[] = []
+  for (const [k, v] of b) {
+    if (!a.has(k)) added.push(k)
+    a.set(k, (a.get(k) ?? 0) + v)
+  }
+  return added
 }
 
 export function widenRange(values: number[], low: number, high: number): number[] {
@@ -1040,6 +1070,102 @@ func TestDuplicateFuncOfLibraryTypeScriptRolesAndPlaces(t *testing.T) {
   return [lo, hi]
 }
 `, "Function payprovRange duplicates function widenRange"},
+		"trims swapped": {`function payprovMark(str: string, p: string): string {
+  p = p.trim()
+  str = str.trim()
+  if (str === '') return p
+  if (str.startsWith(p)) return str
+  return p + str
+}
+`, "Function payprovMark is a near copy (100% alike) of function withMark"},
+		"variable and literal trade places": {`function payprovGrade(score: number, name: string): string {
+  let label = 'unknown'
+  if (score >= 90) {
+    label = 'high'
+  } else {
+    label = 'low'
+  }
+  if (name === '') name = 'anon'
+  return name + ':' + label + ':' + '*'.repeat(10 / score)
+}
+`, ""},
+		"variable in the place of a literal": {`function payprovGrade(score: number, name: string): string {
+  let label = 'unknown'
+  if (score >= 90) {
+    label = 'high'
+  } else {
+    label = name
+  }
+  if (name === '') name = 'anon'
+  return name + ':' + label + ':' + '*'.repeat(score / 10)
+}
+`, ""},
+		"statement moved to the other branch": {`function payprovCounts(a: Map<string, number>, b: Map<string, number>): string[] {
+  const added: string[] = []
+  for (const [k, v] of b) {
+    if (!a.has(k)) {
+    } else {
+      added.push(k)
+    }
+    a.set(k, (a.get(k) ?? 0) + v)
+  }
+  return added
+}
+`, ""},
+		"checks on one line": {`function payprovCode(raw: string): string {
+  let value = raw.trim()
+  if (value === '') return 'none'
+  if (value.startsWith('#')) value = 'ref' + value
+  if (value.endsWith('#')) value = value + '0'
+  return value
+}
+`, "Function payprovCode is a near copy"},
+		"check dropped": {`function payprovGrade(score: number, name: string): string {
+  let label = 'unknown'
+  if (score >= 90) {
+    label = 'high'
+  } else {
+    label = 'low'
+  }
+  name = 'anon'
+  return name + ':' + label + ':' + '*'.repeat(score / 10)
+}
+`, ""},
+		"statement moved out of its check": {`function payprovGrade(score: number, name: string): string {
+  let label = 'unknown'
+  if (score >= 90) {
+    label = 'high'
+  } else {
+    label = 'low'
+  }
+  if (name === '') {
+  }
+  name = 'anon'
+  return name + ':' + label + ':' + '*'.repeat(score / 10)
+}
+`, ""},
+		"statement moved out of its check in a loop": {`function payprovCounts(a: Map<string, number>, b: Map<string, number>): string[] {
+  const added: string[] = []
+  for (const [k, v] of b) {
+    if (!a.has(k)) {
+    }
+    added.push(k)
+    a.set(k, (a.get(k) ?? 0) + v)
+  }
+  return added
+}
+`, ""},
+		"statement held in braces": {`function payprovCounts(dst: Map<string, number>, src: Map<string, number>): string[] {
+  const keys: string[] = []
+  for (const [name, n] of src) {
+    if (!dst.has(name)) {
+      keys.push(name)
+    }
+    dst.set(name, (dst.get(name) ?? 0) + n)
+  }
+  return keys
+}
+`, "Function payprovCounts is a near copy"},
 		"extra check of the input": {`function payprovCode(raw: string): string {
   if (raw === '') {
     return 'none'
@@ -1120,6 +1246,184 @@ func WidenRange(values []int, low, high int) (int, int) {
 	return low, high
 }
 `
+
+// The library grades a score with a label and adds the counts of one map to
+// another, keeping the keys it adds.
+const libraryGradeSource = `package lib
+
+import "strings"
+
+func Grade(score int, name string) string {
+	label := "unknown"
+	if score >= 90 {
+		label = "high"
+	} else {
+		label = "low"
+	}
+	if name == "" {
+		name = "anon"
+	}
+	return name + ":" + label + ":" + strings.Repeat("*", score/10)
+}
+
+func AddCounts(a, b map[string]int) []string {
+	var added []string
+	for k, v := range b {
+		old, ok := a[k]
+		if !ok {
+			added = append(added, k)
+		}
+		a[k] = old + v
+	}
+	return added
+}
+
+func BoundAll(values []int, low, high int) []int {
+	out := make([]int, 0, len(values))
+	for _, v := range values {
+		if v < low {
+			v = low
+		} else if v > high {
+			v = high
+		}
+		out = append(out, v)
+	}
+	return out
+}
+`
+
+// A statement that pairs with no statement of the library function is still
+// read in place: a variable and a literal that trade places, a variable in
+// the place of a literal, a statement moved from one branch to the other are
+// other functions; a copy that moves an independent check is a copy.
+func TestDuplicateFuncOfLibraryNearCopyStatementsThatDoNotPair(t *testing.T) {
+	for name, tc := range map[string]struct{ source, subject string }{
+		"independent check moved": {`package app
+
+import "strings"
+
+func payprovGrade(s int, who string) string {
+	if who == "" {
+		who = "anon"
+	}
+	l := "unknown"
+	if s >= 90 {
+		l = "high"
+	} else {
+		l = "low"
+	}
+	return who + ":" + l + ":" + strings.Repeat("*", s/10)
+}
+`, "Function payprovGrade is a near copy (100% alike) of function Grade"},
+		"two checks for an else if": {`package app
+
+func payprovBound(values []int, lo, hi int) []int {
+	res := make([]int, 0, len(values))
+	for _, x := range values {
+		if x < lo {
+			x = lo
+		}
+		if x > hi {
+			x = hi
+		}
+		res = append(res, x)
+	}
+	return res
+}
+`, "Function payprovBound is a near copy"},
+		"variable and literal trade places": {`package app
+
+import "strings"
+
+func payprovGrade(score int, name string) string {
+	label := "unknown"
+	if score >= 90 {
+		label = "high"
+	} else {
+		label = "low"
+	}
+	if name == "" {
+		name = "anon"
+	}
+	return name + ":" + label + ":" + strings.Repeat("*", 10/score)
+}
+`, ""},
+		"variable in the place of a literal": {`package app
+
+import "strings"
+
+func payprovGrade(score int, name string) string {
+	label := "unknown"
+	if score >= 90 {
+		label = "high"
+	} else {
+		label = name
+	}
+	if name == "" {
+		name = "anon"
+	}
+	return name + ":" + label + ":" + strings.Repeat("*", score/10)
+}
+`, ""},
+		"statement moved out of its check": {`package app
+
+import "strings"
+
+func payprovGrade(score int, name string) string {
+	label := "unknown"
+	if score >= 90 {
+		label = "high"
+	} else {
+		label = "low"
+	}
+	if name == "" {
+	}
+	name = "anon"
+	return name + ":" + label + ":" + strings.Repeat("*", score/10)
+}
+`, ""},
+		"check dropped": {`package app
+
+import "strings"
+
+func payprovGrade(score int, name string) string {
+	label := "unknown"
+	if score >= 90 {
+		label = "high"
+	} else {
+		label = "low"
+	}
+	name = "anon"
+	return name + ":" + label + ":" + strings.Repeat("*", score/10)
+}
+`, ""},
+		"statement moved to the other branch": {`package app
+
+func payprovCounts(a, b map[string]int) []string {
+	var added []string
+	for k, v := range b {
+		old, ok := a[k]
+		if !ok {
+		} else {
+			added = append(added, k)
+		}
+		a[k] = old + v
+	}
+	return added
+}
+`, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			violations := nearLibraryFindings(t, libraryGradeSource, tc.source)
+			if tc.subject == "" {
+				assert.Empty(t, violations)
+				return
+			}
+			require.Len(t, violations, 1)
+			assert.Contains(t, violations[0].Message, tc.subject)
+		})
+	}
+}
 
 // A call in the place of another is another function, though the copy calls
 // the same functions: a check that trades the statements it guards with the
@@ -1228,10 +1532,12 @@ func TestNearRoleMappingUnifyChangesNothingOnFailure(t *testing.T) {
 	assert.Equal(t, map[int]int{1: 1, 6: 7}, m.forward)
 }
 
-// sameRest takes a literal or a call skipped on both sides between two
-// matched tokens for one in the place of the other; an anchor dropped in one
-// place and one added in another, or a plain token in the place of an
-// anchor, is no such place.
+// sameRest takes a literal, a call or a variable skipped on both sides
+// between two matched tokens for one in the place of the other, and so a
+// literal or a call skipped on both sides anywhere and a variable skipped on
+// both sides with the one it stands for; an anchor dropped in one place and
+// another added elsewhere, a plain token in the place of an anchor, or a
+// variable of its own in two places is no such place.
 func TestNearSameRestReadsAnchorsInPlace(t *testing.T) {
 	plain := func(text string) nearToken { return nearToken{text: text, vr: -1} }
 	anchor := func(text string) nearToken { return nearToken{text: text, vr: nearAnchor} }
@@ -1239,19 +1545,164 @@ func TestNearSameRestReadsAnchorsInPlace(t *testing.T) {
 	for name, tc := range map[string]struct {
 		lib, own []nearToken
 		same     bool
+		paired   bool
 	}{
-		"anchor in the place of another":         {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("b")}, false},
-		"anchors in two places":                  {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), plain("b"), anchor("y")}, true},
-		"plain token for an anchor":              {[]nearToken{plain("a"), plain("p"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("b")}, true},
-		"anchor for a plain token":               {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), plain("q"), plain("b")}, true},
-		"anchor and a plain token for an anchor": {[]nearToken{plain("a"), anchor("x"), plain("p"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("b")}, false},
-		"anchor for an anchor and a plain token": {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("q"), plain("b")}, false},
-		"a variable in two places":               {[]nearToken{plain("a"), local(0), plain("b"), plain("c")}, []nearToken{plain("a"), plain("b"), local(0), plain("c")}, true},
-		"one anchor in two places":               {[]nearToken{plain("a"), anchor("x"), plain("b"), plain("c")}, []nearToken{plain("a"), plain("b"), anchor("x"), plain("c")}, false},
+		"variable in the place of an anchor":                 {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), local(0), plain("b")}, false, false},
+		"anchor in the place of a variable":                  {[]nearToken{plain("a"), local(0), plain("b")}, []nearToken{plain("a"), anchor("x"), plain("b")}, false, false},
+		"a variable in two places, standing for its partner": {[]nearToken{plain("a"), local(0), plain("b"), plain("c")}, []nearToken{plain("a"), plain("b"), local(0), plain("c")}, false, true},
+		"anchor in the place of another":                     {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("b")}, false, false},
+		"anchors in two places":                              {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), plain("b"), anchor("y")}, true, false},
+		"plain token for an anchor":                          {[]nearToken{plain("a"), plain("p"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("b")}, true, false},
+		"anchor for a plain token":                           {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), plain("q"), plain("b")}, true, false},
+		"anchor and a plain token for an anchor":             {[]nearToken{plain("a"), anchor("x"), plain("p"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("b")}, false, false},
+		"anchor for an anchor and a plain token":             {[]nearToken{plain("a"), anchor("x"), plain("b")}, []nearToken{plain("a"), anchor("y"), plain("q"), plain("b")}, false, false},
+		"a variable in two places":                           {[]nearToken{plain("a"), local(0), plain("b"), plain("c")}, []nearToken{plain("a"), plain("b"), local(0), plain("c")}, true, false},
+		"one anchor in two places":                           {[]nearToken{plain("a"), anchor("x"), plain("b"), plain("c")}, []nearToken{plain("a"), plain("b"), anchor("x"), plain("c")}, false, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := &roleMapping{forward: map[int]int{}, back: map[int]int{}}
-			assert.Equal(t, tc.same, m.sameRest(tc.lib, tc.own))
+			if tc.paired {
+				require.True(t, m.pair(0, 0))
+			}
+			roles := []nearRole{{Parent: -1}}
+			assert.Equal(t, tc.same, m.sameRest(restSide{tokens: tc.lib, roles: roles}, restSide{tokens: tc.own, roles: roles}))
 		})
 	}
+}
+
+// tsHeldStatements prints the statements of the first function of a
+// TypeScript source, each with the number of statements that hold it and
+// its tokens but braces and semicolons, which tell nothing of what holds it.
+func tsHeldStatements(t *testing.T, source string) []string {
+	t.Helper()
+	src := parseTSSource(strings.Split(source, "\n"))
+	require.NotEmpty(t, src.funcs)
+	body := src.tsNearBody(src.funcs[0], true)
+	texts := make([][]string, len(body.Roles))
+	for i, owner := range body.Owners {
+		if owner >= 0 && !slices.Contains([]string{"{", "}", ";"}, body.Tokens[i]) {
+			texts[owner] = append(texts[owner], body.Tokens[i])
+		}
+	}
+	var out []string
+	for i, role := range body.Roles {
+		if len(texts[i]) == 0 {
+			continue
+		}
+		depth := 0
+		for p := role.Parent; p >= 0; p = body.Roles[p].Parent {
+			depth++
+		}
+		out = append(out, fmt.Sprintf("%d %s", depth, strings.Join(texts[i], " ")))
+	}
+	return out
+}
+
+// A statement a check, a loop or an else holds without braces is held as in
+// braces, on the line of the check or the next; the while that ends a do
+// loop and the semicolons of a for loop hold nothing.
+func TestTSNearBodyHoldsStatementsWithoutBraces(t *testing.T) {
+	for name, tc := range map[string]struct{ line, braces string }{
+		"check": {`function f(a: boolean, x: number) {
+  if (a) x = 1
+  return x
+}`, `function f(a: boolean, x: number) {
+  if (a) {
+    x = 1
+  }
+  return x
+}`},
+		"check and else": {`function f(a: boolean, x: number) {
+  if (a) x = 1
+  else x = 2
+  return x
+}`, `function f(a: boolean, x: number) {
+  if (a) {
+    x = 1
+  } else {
+    x = 2
+  }
+  return x
+}`},
+		"else if": {`function f(a: boolean, b: boolean, x: number) {
+  if (a) x = 1
+  else if (b) x = 2
+  return x
+}`, `function f(a: boolean, b: boolean, x: number) {
+  if (a) {
+    x = 1
+  } else if (b) {
+    x = 2
+  }
+  return x
+}`},
+		"statement on the next line": {`function f(a: boolean, x: number) {
+  if (a)
+    x = 1
+  return x
+}`, `function f(a: boolean, x: number) {
+  if (a) {
+    x = 1
+  }
+  return x
+}`},
+		"loops": {`function f(xs: number[], n: number) {
+  const out: number[] = []
+  for (const v of xs) out.push(v)
+  for (let i = 0; i < n; i++) out.push(i)
+  while (n > 0) n--
+  return out
+}`, `function f(xs: number[], n: number) {
+  const out: number[] = []
+  for (const v of xs) {
+    out.push(v)
+  }
+  for (let i = 0; i < n; i++) {
+    out.push(i)
+  }
+  while (n > 0) {
+    n--
+  }
+  return out
+}`},
+		"check in braces closed on its line": {`function f(a: boolean, b: boolean, x: number) {
+  if (a) { if (b) x = 1 }
+  return x
+}`, `function f(a: boolean, b: boolean, x: number) {
+  if (a) { if (b) { x = 1 } }
+  return x
+}`},
+		"loop held without braces": {`function f(a: boolean, xs: number[]) {
+  const out: number[] = []
+  if (a) for (const v of xs) { out.push(v) }
+  return out
+}`, `function f(a: boolean, xs: number[]) {
+  const out: number[] = []
+  if (a) { for (const v of xs) { out.push(v) } }
+  return out
+}`},
+		"do loop": {`function f(x: number) {
+  do {
+    x++
+  } while (x < 3)
+  return x
+}`, `function f(x: number) {
+  do {
+    x++
+  } while (x < 3);
+  return x
+}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tsHeldStatements(t, tc.braces), tsHeldStatements(t, tc.line))
+		})
+	}
+}
+
+// The header of a for loop is one statement, its semicolons and all.
+func TestTSNearBodyKeepsTheHeaderOfALoop(t *testing.T) {
+	assert.Equal(t, []string{"0 for ( let $L = 0 $L < $L $L ++ )", "1 $L += $L", "0 return $L"}, tsHeldStatements(t, `function f(n: number, s: number) {
+  for (let i = 0; i < n; i++) s += i
+  return s
+}`))
 }

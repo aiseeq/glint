@@ -140,6 +140,11 @@ func (b *nearBodyBuilder) add(tok, shape, anchor string, vr int) {
 	}
 }
 
+// fresh reports whether the innermost open statement holds no token yet.
+func (b *nearBodyBuilder) fresh() bool {
+	return len(b.open) > 0 && b.open[len(b.open)-1].count == 0
+}
+
 // fnvMix adds one token and a separator to an FNV-1a hash.
 func fnvMix(hash uint64, tok string) uint64 {
 	for i := 0; i < len(tok); i++ {
@@ -258,6 +263,9 @@ func (w *goNearWalker) walk(root ast.Node) {
 		if node == nil {
 			top := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
+			if isElseBlock(top, stack) {
+				w.b.closeStmt()
+			}
 			w.b.emit(")")
 			if isNearStmt(top) {
 				w.b.closeStmt()
@@ -306,10 +314,29 @@ func (w *goNearWalker) walk(root ast.Node) {
 		if isNearStmt(node) {
 			w.b.openStmt()
 		}
+		if isElseBlock(node, stack) {
+			w.b.emit("(" + nodeKind(node))
+			w.b.openStmt()
+			w.b.emit("else")
+		} else {
+			w.b.emit("(" + nodeKind(node))
+		}
 		stack = append(stack, node)
-		w.b.emit("(" + nodeKind(node))
 		return true
 	})
+}
+
+// isElseBlock reports whether node is the else block of the statement on top
+// of stack. The block is a statement of its own for the near comparison, so
+// that the statements it holds are held otherwise than those of the then
+// block: a statement moved from one branch to the other is no copy.
+func isElseBlock(node ast.Node, stack []ast.Node) bool {
+	if len(stack) == 0 {
+		return false
+	}
+	parent, ok := stack[len(stack)-1].(*ast.IfStmt)
+	_, block := node.(*ast.BlockStmt)
+	return ok && block && parent.Else == node
 }
 
 // name emits a printed name: a numbered variable, the name of a called
@@ -566,7 +593,9 @@ func sameRoles(c *nearCandidate, body nearBody) bool {
 	}
 	unpairHolders(roles, ownPartner, libPartner)
 	unpairHolders(c.body.Roles, libPartner, ownPartner)
-	return m.sameRest(unpairedTokens(c.body, libPartner), unpairedTokens(body, ownPartner))
+	return m.sameRest(
+		restSide{tokens: unpairedTokens(c.body, libPartner), roles: c.body.Roles},
+		restSide{tokens: unpairedTokens(body, ownPartner), roles: roles})
 }
 
 // heldAlike reports whether a statement of the body and one of the library
@@ -602,20 +631,28 @@ func unpairHolders(roles []nearRole, partner, other []int) {
 }
 
 // nearToken is a token of a statement that sameRoles did not pair, with the
-// number of the variable it is, or -1.
+// number of the variable it is, or -1, and the statement it is of.
 type nearToken struct {
 	text string
 	vr   int
+	stmt int
 }
 
 func unpairedTokens(body nearBody, partner []int) []nearToken {
 	var out []nearToken
 	for i, owner := range body.Owners {
 		if owner >= 0 && partner[owner] < 0 {
-			out = append(out, nearToken{text: body.Tokens[i], vr: body.Vars[i]})
+			out = append(out, nearToken{text: body.Tokens[i], vr: body.Vars[i], stmt: owner})
 		}
 	}
 	return out
+}
+
+// restSide is what sameRest reads of one side: the tokens of the statements
+// sameRoles did not pair and the statements.
+type restSide struct {
+	tokens []nearToken
+	roles  []nearRole
 }
 
 // maxRestAlignCells bounds the table of sameRest; the rest of two bodies
@@ -623,11 +660,14 @@ func unpairedTokens(body nearBody, partner []int) []nearToken {
 const maxRestAlignCells = 1 << 22
 
 // sameRest aligns the tokens of the statements sameRoles did not pair by a
-// longest common subsequence. Where the alignment skips a literal or a called
-// function on both sides between two matched tokens, one stands in the place
-// of the other: another function; so does one the alignment skips on both
-// sides anywhere, written in one place in the body and in another in the
-// library function, as when two checks trade what they guard. The variables
+// longest common subsequence. Where the alignment skips a literal, a called
+// function or a variable on both sides between two matched tokens, one stands
+// in the place of the other: another function; so does a literal or a call the
+// alignment skips on both sides anywhere, and a variable skipped on both
+// sides with its counterpart, written in one place in the body and in another
+// in the library function, as when two checks trade what they guard or a
+// variable and a literal trade places. A statement the alignment matches must
+// be held as its counterpart is (heldInPlace). The variables
 // the alignment matches are checked together with the pairs sameRoles made.
 // An adapted copy may merge variables (one pointer for the index and the
 // element of the library function) or split one, so a variable may stand for
@@ -635,12 +675,56 @@ const maxRestAlignCells = 1 << 22
 // library function, one of which another variable stands for too, as when the
 // bounds of a range trade places in a statement written as a block in one body
 // and on one line in the other.
-func (m *roleMapping) sameRest(lib, own []nearToken) bool {
+func (m *roleMapping) sameRest(libSide, ownSide restSide) bool {
+	lib, own := libSide.tokens, ownSide.tokens
 	rows, cols := len(lib)+1, len(own)+1
 	if len(lib) == 0 || len(own) == 0 || rows*cols > maxRestAlignCells {
 		return true
 	}
-	table := make([]uint16, rows*cols)
+	table := restTable(lib, own)
+	edges := make(map[[2]int]bool, len(m.forward))
+	for from, to := range m.forward {
+		edges[[2]int{from, to}] = true
+	}
+	libSkipped, ownSkipped := false, false
+	libLeft, ownLeft := make(map[string]bool), make(map[string]bool)
+	libVars, ownVars := make(map[int]bool), make(map[int]bool)
+	stmts := make(map[[2]int]bool)
+	for i, j := 0, 0; i < len(lib) || j < len(own); {
+		at := i*cols + j
+		switch {
+		case i < len(lib) && j < len(own) && lib[i].text == own[j].text:
+			if lib[i].vr >= 0 && own[j].vr >= 0 {
+				edges[[2]int{own[j].vr, lib[i].vr}] = true
+			}
+			stmts[[2]int{own[j].stmt, lib[i].stmt}] = true
+			libSkipped, ownSkipped = false, false
+			i++
+			j++
+		case j == len(own) || i < len(lib) && table[at+cols] >= table[at+1]:
+			libSkipped = skipToken(lib[i], libLeft, libVars) || libSkipped
+			i++
+		default:
+			ownSkipped = skipToken(own[j], ownLeft, ownVars) || ownSkipped
+			j++
+		}
+		if libSkipped && ownSkipped {
+			return false
+		}
+	}
+	for text := range libLeft {
+		if ownLeft[text] {
+			return false
+		}
+	}
+	return heldInPlace(stmts, libSide, ownSide) && keptApart(edges, libVars, ownVars)
+}
+
+// restTable is the table of the longest common subsequence of the suffixes
+// of lib and own, a row per token of lib.
+func restTable(lib, own []nearToken) []uint16 {
+	cols := len(own) + 1
+	table := make([]uint16, (len(lib)+1)*cols)
 	for i := len(lib) - 1; i >= 0; i-- {
 		for j := len(own) - 1; j >= 0; j-- {
 			at := i*cols + j
@@ -654,40 +738,17 @@ func (m *roleMapping) sameRest(lib, own []nearToken) bool {
 			}
 		}
 	}
-	edges := make(map[[2]int]bool, len(m.forward))
-	for from, to := range m.forward {
-		edges[[2]int{from, to}] = true
-	}
-	libSkipped, ownSkipped := false, false
-	libLeft, ownLeft := make(map[string]bool), make(map[string]bool)
-	for i, j := 0, 0; i < len(lib) || j < len(own); {
-		at := i*cols + j
-		switch {
-		case i < len(lib) && j < len(own) && lib[i].text == own[j].text:
-			if lib[i].vr >= 0 && own[j].vr >= 0 {
-				edges[[2]int{own[j].vr, lib[i].vr}] = true
-			}
-			libSkipped, ownSkipped = false, false
-			i++
-			j++
-		case j == len(own) || i < len(lib) && table[at+cols] >= table[at+1]:
-			libSkipped = skipAnchor(lib[i], libLeft) || libSkipped
-			i++
-		default:
-			ownSkipped = skipAnchor(own[j], ownLeft) || ownSkipped
-			j++
-		}
-		if libSkipped && ownSkipped {
-			return false
-		}
-	}
-	for text := range libLeft {
-		if ownLeft[text] {
-			return false
-		}
-	}
+	return table
+}
+
+// keptApart reports whether the variables keep their places: none skipped
+// on both sides together with the one it stands for, and none crossing.
+func keptApart(edges map[[2]int]bool, libVars, ownVars map[int]bool) bool {
 	ownDegree, libDegree := make(map[int]int), make(map[int]int)
 	for edge := range edges {
+		if ownVars[edge[0]] && libVars[edge[1]] {
+			return false
+		}
 		ownDegree[edge[0]]++
 		libDegree[edge[1]]++
 	}
@@ -699,13 +760,37 @@ func (m *roleMapping) sameRest(lib, own []nearToken) bool {
 	return true
 }
 
-// skipAnchor records in left a literal or a called function the alignment
-// skips, and reports whether tok is one.
-func skipAnchor(tok nearToken, left map[string]bool) bool {
-	if tok.vr != nearAnchor {
+// skipToken records a literal or a called function the alignment skips in
+// left, a variable in vars, and reports whether tok is either.
+func skipToken(tok nearToken, left map[string]bool, vars map[int]bool) bool {
+	switch {
+	case tok.vr >= 0:
+		vars[tok.vr] = true
+	case tok.vr == nearAnchor:
+		left[tok.text] = true
+	default:
 		return false
 	}
-	left[tok.text] = true
+	return true
+}
+
+// heldInPlace reports whether every two statements the alignment matches
+// are held alike: both by no statement, by statements the alignment matches
+// as well, or the one by a statement that matches the other, as a check
+// written as a block in one body and on one line in the other. A statement
+// moved from one branch of a check to the other, or out of a check, is not.
+// The holders of a statement sameRoles left unpaired are unpaired too
+// (unpairHolders), so the alignment is all that pairs them.
+func heldInPlace(stmts map[[2]int]bool, lib, own restSide) bool {
+	for pair := range stmts {
+		ownHolder, libHolder := own.roles[pair[0]].Parent, lib.roles[pair[1]].Parent
+		switch {
+		case ownHolder < 0 && libHolder < 0:
+		case stmts[[2]int{ownHolder, libHolder}], stmts[[2]int{ownHolder, pair[1]}], stmts[[2]int{pair[0], libHolder}]:
+		default:
+			return false
+		}
+	}
 	return true
 }
 

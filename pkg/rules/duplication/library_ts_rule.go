@@ -151,7 +151,7 @@ func (r *DuplicateFuncOfLibraryRule) AnalyzeFile(ctx *core.FileContext) []*core.
 		}
 		match := candidate.fn
 		message := fmt.Sprintf("%s duplicates function %s of library %s (%s) — import %s from %s instead", src.displayName(f), match.name, match.module, match.importPath, match.name, match.packageName)
-		if !slices.Equal(body.Tokens, candidate.body.Tokens) {
+		if !slices.Equal(body.Tokens, candidate.body.Tokens) || !slices.Equal(body.Vars, candidate.body.Vars) {
 			message = fmt.Sprintf("%s is a near copy (%d%% alike) of function %s of library %s (%s) — import %s from %s instead", src.displayName(f), int(score*100), match.name, match.module, match.importPath, match.name, match.packageName)
 		}
 		v := r.CreateViolation(ctx.RelPath, f.line, message)

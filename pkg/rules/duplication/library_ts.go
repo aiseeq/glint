@@ -519,7 +519,9 @@ func (s *tsSource) scanDeclaration(i int) {
 // property and every other name as written, strings by their content; a
 // statement ends at ; and braces, or at a line end outside brackets, since
 // TypeScript lets the line end a statement. The shape of a statement inside
-// braces starts from the shape of the statement that opened them.
+// braces starts from the shape of the statement that opened them; so does
+// the statement a check, a loop or an else holds without braces, which is
+// held as it is in braces (tsNearWalker).
 func (s *tsSource) tsNearBody(f tsFunc, detailed bool) nearBody {
 	locals := &tsLocals{numbers: make(map[string]int)}
 	lo := lowerBound(s.decls, f.paramsOpen)
@@ -529,60 +531,123 @@ func (s *tsSource) tsNearBody(f tsFunc, detailed bool) nearBody {
 		}
 		locals.numbers[s.toks[d].text] = -1
 	}
-	b := newNearBodyBuilder(detailed)
-	// blocks holds, for every brace open, what a statement inside starts
-	// from and the statement that opened it.
-	type block struct {
-		seed   uint64
-		parent int
-	}
-	blocks := []block{{seed: fnvOffset64, parent: -1}}
-	reopen := func() { b.openSeeded(blocks[len(blocks)-1].seed, blocks[len(blocks)-1].parent) }
-	reopen()
-	depth := 0
+	w := &tsNearWalker{s: s, b: newNearBodyBuilder(detailed), blocks: []tsBlock{{seed: fnvOffset64, parent: -1}}}
+	w.reopen()
 	for i := f.bodyOpen + 1; i < f.bodyClose; i++ {
 		tok := s.toks[i]
-		if depth == 0 && i > f.bodyOpen+1 && tok.line > s.toks[i-1].line {
-			b.closeStmt()
-			reopen()
+		if w.depth == 0 && i > f.bodyOpen+1 && tok.line > s.toks[i-1].line && !w.b.fresh() {
+			w.endStmt()
 		}
+		w.markHead(i)
 		switch tok.kind {
 		case tsIdent:
-			s.emitName(b, i, locals)
+			s.emitName(w.b, i, locals)
 		case tsString:
 			value := tok.text[1:max(1, len(tok.text)-1)]
-			b.emitAnchor(`"`+value+`"`, "s:"+value, nearLiteralMask)
-			b.lits["s:"+value] = true
+			w.b.emitAnchor(`"`+value+`"`, "s:"+value, nearLiteralMask)
+			w.b.lits["s:"+value] = true
 		case tsNumber, tsTemplate, tsRegex:
-			b.emitAnchor(tok.text, tok.text, nearLiteralMask)
-			b.lits[tok.text] = true
+			w.b.emitAnchor(tok.text, tok.text, nearLiteralMask)
+			w.b.lits[tok.text] = true
 		default:
-			b.emit(tok.text)
+			w.b.emit(tok.text)
 			if tsOperators[tok.text] {
-				b.ops[tok.text] = true
+				w.b.ops[tok.text] = true
 			}
-			switch tok.text {
-			case "(", "[":
-				depth++
-			case ")", "]":
-				depth = max(0, depth-1)
-			case ";":
-				b.closeStmt()
-				reopen()
-			case "{":
-				seed, id := b.closeStmt()
-				blocks = append(blocks, block{seed: seed, parent: id})
-				reopen()
-			case "}":
-				b.closeStmt()
-				if len(blocks) > 1 {
-					blocks = blocks[:len(blocks)-1]
-				}
-				reopen()
-			}
+			w.punct(i)
+		}
+		if tok.text == "else" && s.text(i+1) != "{" {
+			w.hold(true)
 		}
 	}
-	return b.finish()
+	return w.b.finish()
+}
+
+// tsNearWalker splits the body of a TypeScript function into statements.
+type tsNearWalker struct {
+	s *tsSource
+	b *nearBodyBuilder
+	// blocks holds, for every brace open and every statement a check or a
+	// loop holds without braces, what a statement inside starts from and the
+	// statement that opened it.
+	blocks []tsBlock
+	depth  int
+	// head is set while the condition of a check or a loop that opens the
+	// statement is read.
+	head bool
+}
+
+type tsBlock struct {
+	seed   uint64
+	parent int
+	inline bool
+}
+
+func (w *tsNearWalker) reopen() {
+	top := w.blocks[len(w.blocks)-1]
+	w.b.openSeeded(top.seed, top.parent)
+}
+
+// hold closes the open statement as one that holds the next ones: in braces,
+// or inline, the one statement it holds without them.
+func (w *tsNearWalker) hold(inline bool) {
+	seed, id := w.b.closeStmt()
+	w.blocks = append(w.blocks, tsBlock{seed: seed, parent: id, inline: inline})
+	w.reopen()
+}
+
+// endStmt closes the open statement, and with it the statements without
+// braces that hold it.
+func (w *tsNearWalker) endStmt() {
+	w.b.closeStmt()
+	w.popInline()
+	w.reopen()
+}
+
+func (w *tsNearWalker) popInline() {
+	for len(w.blocks) > 1 && w.blocks[len(w.blocks)-1].inline {
+		w.blocks = w.blocks[:len(w.blocks)-1]
+	}
+}
+
+// markHead notes a check or a loop that opens a statement, and not the while
+// that ends a do loop.
+func (w *tsNearWalker) markHead(i int) {
+	switch w.s.text(i) {
+	case "if":
+		w.head = w.head || w.b.fresh()
+	case "for", "while":
+		w.head = w.head || w.b.fresh() && w.s.text(i-1) != "}"
+	}
+}
+
+func (w *tsNearWalker) punct(i int) {
+	switch w.s.text(i) {
+	case "(", "[":
+		w.depth++
+	case ")", "]":
+		w.depth = max(0, w.depth-1)
+		if w.head && w.depth == 0 {
+			w.head = false
+			if w.s.text(i+1) != "{" {
+				w.hold(true)
+			}
+		}
+	case ";":
+		if w.depth == 0 {
+			w.endStmt()
+		}
+	case "{":
+		w.hold(false)
+	case "}":
+		w.b.closeStmt()
+		w.popInline()
+		if len(w.blocks) > 1 {
+			w.blocks = w.blocks[:len(w.blocks)-1]
+		}
+		w.popInline()
+		w.reopen()
+	}
 }
 
 // tsLocals numbers the variables of a function by their first appearance in
