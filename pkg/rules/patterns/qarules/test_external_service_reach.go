@@ -857,8 +857,19 @@ func returnedLiveMethods(fn *ast.FuncDecl, info *types.Info, self *types.Package
 		if named == nil || named.Obj().Pkg() != self {
 			continue
 		}
-		for method := range named.Methods() {
-			if key := named.Obj().Name() + "." + method.Name(); live[key] {
+		// The method set of *T holds the methods of T and those promoted from
+		// embedded types: a live String of an embedded type is a live String of
+		// the client.
+		for selection := range types.NewMethodSet(types.NewPointer(named)).Methods() {
+			method, ok := selection.Obj().(*types.Func)
+			if !ok {
+				continue
+			}
+			owner := patternkit.NamedOf(method.Signature().Recv().Type())
+			if owner == nil || owner.Obj().Pkg() != self {
+				continue
+			}
+			if key := owner.Obj().Name() + "." + method.Name(); live[key] {
 				methods = append(methods, key)
 			}
 		}

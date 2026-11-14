@@ -388,8 +388,8 @@ var formattingMethods = []string{"String", "Error", "GoString", "Format"}
 // argument that calls no live method of it: a printer of fmt or a log method
 // of the testing handle formatting it while none of its formatting methods is
 // live, or reflect.DeepEqual. A package name the test declares itself is not
-// the package.
-func (c stdConsumers) inert(body *ast.BlockStmt, call *ast.CallExpr, value ast.Expr, liveMethods map[string]bool) bool {
+// the package, and a handle name bound to a value of another type is no handle.
+func (c stdConsumers) inert(body *ast.BlockStmt, call *ast.CallExpr, value ast.Expr, liveMethods map[string]bool, info *types.Info) bool {
 	sel, isSelector := call.Fun.(*ast.SelectorExpr)
 	if !isSelector {
 		return false
@@ -408,7 +408,7 @@ func (c stdConsumers) inert(body *ast.BlockStmt, call *ast.CallExpr, value ast.E
 			return false
 		}
 	case c.handles[x.Name]:
-		if !testingLoggers[sel.Sel.Name] {
+		if !testingLoggers[sel.Sel.Name] || !testingHandleValue(body, x, info) {
 			return false
 		}
 	default:
@@ -477,7 +477,7 @@ func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMetho
 		return false
 	}
 	consumed := func(call *ast.CallExpr, value ast.Expr) bool {
-		return scope.consumers.inert(body, call, value, liveMethods)
+		return scope.consumers.inert(body, call, value, liveMethods, info)
 	}
 
 	// A constructor result used directly as a return value, argument, field, channel value,
@@ -738,6 +738,49 @@ func onlyBareReturns(body *ast.BlockStmt) bool {
 		}
 	}
 	return true
+}
+
+// testingHandleValue reports whether the name stands for a *testing.T, B or F
+// or a testing.TB: a test may bind the handle's name to its own logger in a
+// nested block. Without type information the name is the handle unless the
+// test binds it again.
+func testingHandleValue(body *ast.BlockStmt, x *ast.Ident, info *types.Info) bool {
+	if info == nil || info.Uses[x] == nil {
+		return !redeclaresHandle(body, x.Name)
+	}
+	t := info.Uses[x].Type()
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != "testing" {
+		return false
+	}
+	switch named.Obj().Name() {
+	case "T", "B", "F", "TB":
+		return true
+	}
+	return false
+}
+
+// redeclaresHandle reports whether the test binds the name of its testing
+// handle to something else by := or var. A parameter of a function literal
+// needs no look: a use of the client inside a literal escapes anyway.
+func redeclaresHandle(body *ast.BlockStmt, name string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			found = node.Tok == token.DEFINE && slices.ContainsFunc(node.Lhs, func(lhs ast.Expr) bool {
+				id, ok := lhs.(*ast.Ident)
+				return ok && id.Name == name
+			})
+		case *ast.ValueSpec:
+			found = slices.ContainsFunc(node.Names, func(id *ast.Ident) bool { return id.Name == name })
+		}
+		return !found
+	})
+	return found
 }
 
 // declaresName reports whether the test body declares the name itself, so a
