@@ -25,11 +25,22 @@ func NewSuppressionWithoutReasonRule() *SuppressionWithoutReasonRule {
 
 // AnalyzeFile reports suppression markers that have no explanation.
 func (r *SuppressionWithoutReasonRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.markersWithoutReason(ctx, func(string) bool { return true })
+}
+
+// MarkersWithoutReasonFor reports markers in ctx that name rule without a
+// reason. A YAML file read only for exception-ticket-closed can hide nothing
+// but that rule's findings, so only its markers are judged there.
+func (r *SuppressionWithoutReasonRule) MarkersWithoutReasonFor(ctx *core.FileContext, rule string) []*core.Violation {
+	return r.markersWithoutReason(ctx, func(name string) bool { return name == rule })
+}
+
+func (r *SuppressionWithoutReasonRule) markersWithoutReason(ctx *core.FileContext, judged func(string) bool) []*core.Violation {
 	var found []*core.Violation
 	for _, marker := range suppressionMarkers(ctx) {
 		text := suppressionCommentText(marker.Text)
 		for _, name := range marker.Rules {
-			if _, ok := rules.Get(name); !ok || suppressionHasReason(text, name) {
+			if _, ok := rules.Get(name); !ok || !judged(name) || suppressionHasReason(text, name) {
 				continue
 			}
 			message := "Suppression has no reason after safe"

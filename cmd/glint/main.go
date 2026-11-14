@@ -525,6 +525,7 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 			return err
 		}
 		violations = append(violations, closed...)
+		violations = append(violations, ticketFileSuppressionsWithoutReason(enabledRules, cfg, prepared.ticketFiles)...)
 		minSeverity, err := cfg.GetMinSeverity()
 		if err != nil {
 			return err
@@ -612,6 +613,35 @@ func closedTicketSuppressions(enabled []rules.Rule, run deadcode.StaleSuppressio
 		kept = append(kept, v)
 	}
 	return kept, nil
+}
+
+// ticketFileSuppressionsWithoutReason runs suppression-without-reason over the
+// YAML files read only for exception-ticket-closed: a bare marker of that rule
+// there hides its finding, so it needs a reason like a marker in analyzed code.
+func ticketFileSuppressionsWithoutReason(enabled []rules.Rule, cfg *core.Config, files []*core.FileContext) core.ViolationList {
+	var check *deadcode.SuppressionWithoutReasonRule
+	var ticketRule *deadcode.ExceptionTicketClosedRule
+	for _, rule := range enabled {
+		switch candidate := rule.(type) {
+		case *deadcode.SuppressionWithoutReasonRule:
+			check = candidate
+		case *deadcode.ExceptionTicketClosedRule:
+			ticketRule = candidate
+		}
+	}
+	if check == nil || ticketRule == nil {
+		return nil
+	}
+	var kept core.ViolationList
+	for _, ctx := range files {
+		for _, v := range check.MarkersWithoutReasonFor(ctx, ticketRule.Name()) {
+			if cfg.IsFileExcepted(check.Category(), check.Name(), v.File) || cfg.IsViolationExcepted(check.Category(), check.Name(), v.File, v) || ctx.IsSuppressed(v.Line, check.Name()) {
+				continue
+			}
+			kept = append(kept, v)
+		}
+	}
+	return kept
 }
 
 // staleSuppressions runs the stale-suppression check over one analyzed root

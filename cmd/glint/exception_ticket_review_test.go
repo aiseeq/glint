@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -96,4 +97,34 @@ categories:
 		}
 	}
 	require.Equal(t, []int{1, 2}, scopedYAML)
+}
+
+// A YAML file read only for exception-ticket-closed can hide that rule's
+// finding with a bare marker; suppression-without-reason must report it there.
+func TestTicketYAMLMarkerWithoutReasonIsReported(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	dir := filepath.Join(home, "tickets")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "glint"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "glint", "config.yaml"), []byte("tickets_dir: "+dir+"\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "20260101-0100-HIGH-sample.md"), []byte("Статус: отклонён\n"), 0644))
+	writeModuleFile(t, root, "go.mod", "module example.org/test\n\ngo 1.24\n")
+	writeModuleFile(t, root, ".glint.yaml", "version: 1\n")
+	writeModuleFile(t, root, "settings.yaml", "#nolint:exception-ticket-closed\n#nolint:never-assigned-func-var -- glint#sample\n#nolint:never-assigned-func-var\n")
+	writeModuleFile(t, root, "reasoned.yaml", "#nolint:exception-ticket-closed -- ticket review pending\n#nolint:never-assigned-func-var -- glint#sample\n")
+	withFlags(t, "", "exception-ticket-closed", "suppression-without-reason")
+	roots, err := analysisRoots([]string{root})
+	require.NoError(t, err)
+	scope := roots[0]
+	cfg, enabled, err := loadConfig(scope.dir)
+	require.NoError(t, err)
+	prepared, err := prepareScopedAnalysis(core.NewGoProjectLoader(), scope, cfg, enabled, false)
+	require.NoError(t, err)
+	var found []string
+	for _, v := range ticketFileSuppressionsWithoutReason(enabled, cfg, prepared.ticketFiles) {
+		found = append(found, v.File+":"+strconv.Itoa(v.Line)+":"+v.Rule)
+	}
+	assert.Equal(t, []string{"settings.yaml:1:suppression-without-reason"}, found)
 }
