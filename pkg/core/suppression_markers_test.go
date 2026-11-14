@@ -44,6 +44,32 @@ var markerFixtures = []markerFixture{
 	{"shell hash comment", "a.sh", "#nolint:my-rule\necho x\n", []int{1}},
 	{"yaml hash comment", "settings.yaml", "#nolint:my-rule\nkey: v\n", []int{1}},
 	{"plain text has no comments", "notes.txt", "//nolint:my-rule\n# nolint:my-rule\n", nil},
+	{"md code span of two backticks", "doc.md", "`` <!-- nolint:my-rule --> ``\ntext\n", nil},
+	{"md single backtick inside a double span", "doc.md", "``a ` <!-- nolint:my-rule --> ``\ntext\n", nil},
+	{"md comment after a closed double span", "doc.md", "`` a `` <!-- nolint:my-rule -->\ntext\n", []int{1}},
+	{"md unmatched backtick is text", "doc.md", "a ` b <!-- nolint:my-rule -->\ntext\n", []int{1}},
+	{"md long fence holds a short one", "doc.md", "````markdown\n```\n<!-- nolint:my-rule -->\n```\n````\n<!-- nolint:my-rule -->\ntext\n", []int{6}},
+	{"md tilde fence", "doc.md", "~~~\n<!-- nolint:my-rule -->\n~~~\n<!-- nolint:my-rule -->\ntext\n", []int{4}},
+	{"md tildes do not close backticks", "doc.md", "```\n~~~\n<!-- nolint:my-rule -->\n```\ntext\n", nil},
+	{"md indented code block", "doc.md", "# E\n\n    <!-- nolint:my-rule -->\ntext\n", nil},
+	{"md tab-indented code block", "doc.md", "# E\n\n\t<!-- nolint:my-rule -->\ntext\n", nil},
+	{"md indented paragraph continuation", "doc.md", "text\n    <!-- nolint:my-rule -->\ntext\n", []int{2}},
+	{"sql multi-line string", "m.sql", "SELECT 'multi\n-- nolint:my-rule\n';\nSET x = 1;\n", nil},
+	{"sql dollar quote", "m.sql", "SELECT $$ it's $$; -- nolint:my-rule\nSET x = 1;\n", []int{1}},
+	{"sql tagged dollar quote", "m.sql", "DO $body$\n-- nolint:my-rule\n$body$; -- nolint:my-rule\nSET x = 1;\n", []int{3}},
+	{"sql escape string", "m.sql", "SELECT E'\\'' AS q; -- nolint:my-rule\nSET x = 1;\n", []int{1}},
+	{"sql positional parameter", "m.sql", "SELECT $1, 'a'; -- nolint:my-rule\nSET x = 1;\n", []int{1}},
+	{"html comment in an attribute", "p.html", "<div title=\"<!-- nolint:my-rule -->\"></div>\n<p>x</p>\n", nil},
+	{"html attribute with a greater-than", "p.html", "<div title=\"a > b <!-- nolint:my-rule -->\"></div>\n<p>x</p>\n", nil},
+	{"template action string with braces", "p.tmpl", "{{ printf \"}} <!-- nolint:my-rule -->\" }}\n<p>x</p>\n", nil},
+	{"html comment in a script string", "p.html", "<script>var s = \"<!-- nolint:my-rule -->\";</script>\n<p>x</p>\n", nil},
+	{"html comment after a script", "p.html", "<script>var s = 1;</script> <!-- nolint:my-rule -->\n<p>x</p>\n", []int{1}},
+	{"html attribute over lines", "p.html", "<div\n  title='a\n<!-- nolint:my-rule -->'>\n</div>\n", nil},
+	{"html multi-line comment", "p.html", "<!--\n nolint:my-rule\n-->\n<p>x</p>\n", []int{2}},
+	{"html text with a less-than", "p.html", "<p>a < b</p> <!-- nolint:my-rule -->\n<p>x</p>\n", []int{1}},
+	{"template action string", "p.tmpl", "{{ \"<!-- nolint:my-rule -->\" }}\n<p>x</p>\n", nil},
+	{"template trimmed comment", "p.tmpl", "{{- /* nolint:my-rule */ -}}\n<p>x</p>\n", []int{1}},
+	{"template comment after an action", "p.gohtml", "{{ .Name }} {{/* nolint:my-rule */}}\n<p>x</p>\n", []int{1}},
 }
 
 func fixtureContext(f markerFixture) *FileContext {
@@ -74,24 +100,53 @@ func TestSuppressionMarkersAreWhatSuppresses(t *testing.T) {
 	}
 }
 
+// A CRLF file has the markers of the same file with LF line ends.
+func TestSuppressionMarkersReadCRLF(t *testing.T) {
+	for _, f := range markerFixtures {
+		t.Run(f.name, func(t *testing.T) {
+			f.source = strings.ReplaceAll(f.source, "\n", "\r\n")
+			var lines []int
+			for _, marker := range fixtureContext(f).SuppressionMarkers() {
+				assert.Equal(t, []string{"my-rule"}, marker.Rules)
+				lines = append(lines, marker.Line)
+			}
+			assert.Equal(t, f.lines, lines, "marker lines")
+		})
+	}
+}
+
 // A reason is text with a letter or a digit: punctuation alone explains
 // nothing.
 func TestSuppressionReasonNeedsALetterOrDigit(t *testing.T) {
 	for comment, want := range map[string]bool{
-		"//nolint:my-rule .":                        false,
-		"//nolint:my-rule //":                       false,
-		"//nolint:my-rule –":                        false,
-		"//nolint:my-rule --":                       false,
-		"// my-rule: safe.":                         false,
-		"// my-rule: safe –":                        false,
-		"// my-rule: safe —":                        false,
-		"/* nolint:my-rule */":                      false,
-		"//nolint:my-rule — real reason":            true,
-		"/* nolint:my-rule real reason */":          true,
-		"//nolint:my-rule -- 42":                    true,
-		"// my-rule: safe — причина":                true,
-		"// my-rule:\tsafe — real reason":           true,
-		"//nolint:other, my-rule — reason for both": true,
+		"//nolint:my-rule .":                                false,
+		"//nolint:my-rule //":                               false,
+		"//nolint:my-rule –":                                false,
+		"//nolint:my-rule --":                               false,
+		"// my-rule: safe.":                                 false,
+		"// my-rule: safe –":                                false,
+		"// my-rule: safe —":                                false,
+		"/* nolint:my-rule */":                              false,
+		"//nolint:my-rule — real reason":                    true,
+		"/* nolint:my-rule real reason */":                  true,
+		"//nolint:my-rule -- 42":                            true,
+		"// my-rule: safe — причина":                        true,
+		"// my-rule:\tsafe — real reason":                   true,
+		"//nolint:other, my-rule — reason for both":         true,
+		"//nolint:my-rule //nolint:other":                   false,
+		"//nolint:my-rule # nolint":                         false,
+		"//nolint:my-rule //nolint:other — generated table": true,
+		"//nolint:my-rule my-rule":                          false,
+		"//nolint:other, my-rule other my-rule":             false,
+		"// my-rule: safe my-rule: safe":                    false,
+		"// my-rule: safe — other-rule: safe":               false,
+		"//nolint:my-rule ${reason}":                        false,
+		"//nolint:my-rule <reason>":                         false,
+		"// my-rule: safe — <reason>":                       false,
+		"// my-rule: safe — {{reason}}":                     false,
+		"//nolint:my-rule 1":                                true,
+		"//nolint:my-rule x < y holds here":                 true,
+		"// my-rule: safe — returns <nil> by design":        true,
 	} {
 		assert.Equal(t, want, SuppressionHasReason(comment, "my-rule"), comment)
 	}

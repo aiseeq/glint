@@ -2,6 +2,7 @@ package core
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -19,9 +20,14 @@ type commentSyntax struct {
 	line   []string
 	blocks []blockSyntax
 	quotes []quoteSyntax
-	// delimited languages (HTML, SQL) have comment delimiters a marker parser
-	// does not know: their comment text is given without them.
+	// delimited languages (Markdown, SQL) have comment delimiters a marker
+	// parser does not know: their comment text is given without them.
 	delimited bool
+	// dollarQuotes reads PostgreSQL dollar quoting: $$…$$, $tag$…$tag$.
+	dollarQuotes bool
+	// codeSpans reads Markdown code spans: a run of backticks up to the next
+	// run of the same length on the line.
+	codeSpans bool
 }
 
 type blockSyntax struct{ open, close string }
@@ -30,56 +36,66 @@ type quoteSyntax struct {
 	open, close string
 	escape      bool
 	multiline   bool
+	// wordStart: the opener counts only where no word goes on before it
+	// (E'…' in SQL, unlike the name E followed by a quote).
+	wordStart bool
 }
 
 var (
 	goSyntax = commentSyntax{
 		line:   []string{"//"},
 		blocks: []blockSyntax{{"/*", "*/"}},
-		quotes: []quoteSyntax{{"`", "`", false, true}, {`"`, `"`, true, false}, {"'", "'", true, false}},
+		quotes: []quoteSyntax{{open: "`", close: "`", multiline: true}, {open: `"`, close: `"`, escape: true}, {open: "'", close: "'", escape: true}},
 	}
 	jsonSyntax = commentSyntax{
 		line:   []string{"//"},
 		blocks: []blockSyntax{{"/*", "*/"}},
-		quotes: []quoteSyntax{{`"`, `"`, true, false}},
+		quotes: []quoteSyntax{{open: `"`, close: `"`, escape: true}},
 	}
 	pythonSyntax = commentSyntax{
 		line: []string{"#"},
 		quotes: []quoteSyntax{
-			{`"""`, `"""`, true, true}, {"'''", "'''", true, true},
-			{`"`, `"`, true, false}, {"'", "'", true, false},
+			{open: `"""`, close: `"""`, escape: true, multiline: true}, {open: "'''", close: "'''", escape: true, multiline: true},
+			{open: `"`, close: `"`, escape: true}, {open: "'", close: "'", escape: true},
 		},
 	}
+	// SQL literals span lines; E'…' takes backslash escapes, '…' doubles its
+	// quote ('it''s' reads as two literals, which is the same for comments).
 	sqlSyntax = commentSyntax{
-		line:      []string{"--"},
-		blocks:    []blockSyntax{{"/*", "*/"}},
-		quotes:    []quoteSyntax{{"'", "'", false, false}, {`"`, `"`, false, false}},
-		delimited: true,
+		line:   []string{"--"},
+		blocks: []blockSyntax{{"/*", "*/"}},
+		quotes: []quoteSyntax{
+			{open: "E'", close: "'", escape: true, multiline: true, wordStart: true},
+			{open: "e'", close: "'", escape: true, multiline: true, wordStart: true},
+			{open: "'", close: "'", multiline: true}, {open: `"`, close: `"`, multiline: true},
+		},
+		dollarQuotes: true,
+		delimited:    true,
 	}
-	// Markdown: HTML comments; inline code quotes one (fenced blocks are
-	// blanked before the scan).
+	// Markdown: HTML comments in prose (code blocks are blanked before the
+	// scan); a code span quotes one.
 	markdownSyntax = commentSyntax{
 		blocks:    []blockSyntax{{"<!--", "-->"}},
-		quotes:    []quoteSyntax{{"`", "`", false, false}},
-		delimited: true,
-	}
-	// HTML and Go templates: HTML comments and template comments.
-	templateSyntax = commentSyntax{
-		blocks:    []blockSyntax{{"<!--", "-->"}, {"{{/*", "*/"}, {"{{- /*", "*/"}},
+		codeSpans: true,
 		delimited: true,
 	}
 )
 
 // fileComments returns the comments of the file in the syntax of its
-// language, nil for a file that has none glint knows.
+// language, nil for a file that has none glint knows. A line's trailing CR
+// (CRLF files) is no part of it.
 func fileComments(ctx *FileContext) []lineComment {
-	lines := ctx.Lines
+	lines := make([]string, len(ctx.Lines))
+	for i, line := range ctx.Lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	ext := strings.ToLower(filepath.Ext(ctx.Path))
 	switch {
 	case ctx.IsGoFile():
 		return scanComments(lines, goSyntax)
 	case ctx.IsTypeScriptFile() || ctx.IsJavaScriptFile():
 		return jsComments(lines)
-	case ctx.HashComments() || strings.EqualFold(filepath.Ext(ctx.Path), ".conf"):
+	case ctx.HashComments() || ext == ".conf":
 		var comments []lineComment
 		for i, line := range lines {
 			if comment := hashCommentPart(line); comment != "" {
@@ -87,44 +103,92 @@ func fileComments(ctx *FileContext) []lineComment {
 			}
 		}
 		return comments
-	case strings.EqualFold(filepath.Ext(ctx.Path), ".py"):
+	case ext == ".py":
 		return scanComments(lines, pythonSyntax)
-	case strings.EqualFold(filepath.Ext(ctx.Path), ".sql"):
+	case ext == ".sql":
 		return scanComments(lines, sqlSyntax)
-	case strings.EqualFold(filepath.Ext(ctx.Path), ".md"):
-		return scanComments(withoutFences(lines), markdownSyntax)
+	case ext == ".md":
+		return scanComments(markdownProse(lines), markdownSyntax)
 	case ctx.IsTemplate():
-		return scanComments(lines, templateSyntax)
+		return htmlComments(lines)
 	case ctx.IsTSConfig():
 		return scanComments(lines, jsonSyntax)
 	}
 	return nil
 }
 
-// withoutFences blanks the fenced code blocks of Markdown lines: what they
-// hold is quoted, not part of the document.
-func withoutFences(lines []string) []string {
+// markdownProse blanks the code blocks of Markdown lines, fenced and
+// indented: what they hold is quoted, not part of the document. A fence
+// closes on a fence of its character at least as long as the opening one; an
+// indented line is code unless it continues a paragraph.
+func markdownProse(lines []string) []string {
 	out := make([]string, len(lines))
-	fence := ""
+	fenceChar, fenceLen := byte(0), 0
+	paragraph := false
 	for i, line := range lines {
-		trimmed := strings.TrimLeft(line, " ")
-		switch {
-		case fence != "":
-			if strings.HasPrefix(trimmed, fence) && strings.Trim(trimmed, fence[:1]+" \t") == "" {
-				fence = ""
+		if fenceLen > 0 {
+			if c, n, rest := fenceRun(line); c == fenceChar && n >= fenceLen && strings.TrimSpace(rest) == "" {
+				fenceLen = 0
 			}
-		case strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~"):
-			fence = trimmed[:3]
-		default:
-			out[i] = line
+			continue
 		}
+		if c, n, rest := fenceRun(line); n >= 3 && (c == '~' || !strings.Contains(rest, "`")) {
+			fenceChar, fenceLen, paragraph = c, n, false
+			continue
+		}
+		blank := strings.TrimSpace(line) == ""
+		if !blank && !paragraph && indentWidth(line) >= 4 {
+			continue // indented code
+		}
+		out[i] = line
+		trimmed := strings.TrimLeft(line, " \t")
+		paragraph = !blank && !strings.HasPrefix(trimmed, "#")
 	}
 	return out
 }
 
+// fenceRun reads a code fence: up to three spaces, then a run of backticks
+// or tildes. It returns the character, the run's length (0 when the line is
+// no fence) and what follows the run.
+func fenceRun(line string) (byte, int, string) {
+	indent := len(line) - len(strings.TrimLeft(line, " "))
+	if indent > 3 || indent == len(line) {
+		return 0, 0, ""
+	}
+	c := line[indent]
+	if c != '`' && c != '~' {
+		return 0, 0, ""
+	}
+	n := indent
+	for n < len(line) && line[n] == c {
+		n++
+	}
+	if n-indent < 3 {
+		return 0, 0, ""
+	}
+	return c, n - indent, line[n:]
+}
+
+// indentWidth is the indentation of a line in columns, a tab to the next
+// multiple of four.
+func indentWidth(line string) int {
+	width := 0
+	for _, c := range line {
+		switch c {
+		case ' ':
+			width++
+		case '\t':
+			width += 4 - width%4
+		default:
+			return width
+		}
+	}
+	return width
+}
+
 // scanComments returns the comments of lines in the given syntax.
 func scanComments(lines []string, syntax commentSyntax) []lineComment {
-	s := commentScanner{syntax: syntax, block: -1, quote: -1}
+	s := commentScanner{syntax: syntax, block: -1}
 	for i, line := range lines {
 		s.scanLine(i+1, line)
 	}
@@ -132,9 +196,11 @@ func scanComments(lines []string, syntax commentSyntax) []lineComment {
 }
 
 type commentScanner struct {
-	syntax   commentSyntax
-	block    int // index of the open block comment, -1 when none
-	quote    int // index of the open multi-line literal, -1 when none
+	syntax  commentSyntax
+	block   int // index of the open block comment, -1 when none
+	quoting bool
+	quote   quoteSyntax // the open literal while quoting
+	// comments are the comments read so far.
 	comments []lineComment
 }
 
@@ -157,13 +223,10 @@ func (s *commentScanner) scanLine(n int, line string) {
 	if s.block >= 0 {
 		i = s.closeBlock(n, line, 0, true)
 	}
-	if s.quote >= 0 {
+	if s.quoting {
 		i = s.closeQuote(line, i)
 	}
-	for i < len(line) {
-		if s.block >= 0 || s.quote >= 0 {
-			return
-		}
+	for i < len(line) && s.block < 0 && !s.quoting {
 		rest := line[i:]
 		if s.opensLineComment(rest) {
 			s.add(n, rest, false)
@@ -174,13 +237,17 @@ func (s *commentScanner) scanLine(n int, line string) {
 			i = s.closeBlock(n, line, i, false)
 			continue
 		}
-		if q := s.opensQuote(rest); q >= 0 {
-			s.quote = q
-			i = s.closeQuote(line, i+len(s.syntax.quotes[q].open))
-			if s.quote >= 0 && !s.syntax.quotes[q].multiline {
-				s.quote = -1 // a one-line literal ends with its line
+		if q, ok := s.opensQuote(line, i); ok {
+			s.quote, s.quoting = q, true
+			i = s.closeQuote(line, i+len(q.open))
+			if s.quoting && !q.multiline {
+				s.quoting = false // a one-line literal ends with its line
 				return
 			}
+			continue
+		}
+		if s.syntax.codeSpans && line[i] == '`' {
+			i = codeSpanEnd(line, i)
 			continue
 		}
 		i++
@@ -205,13 +272,51 @@ func (s *commentScanner) opensBlock(rest string) int {
 	return -1
 }
 
-func (s *commentScanner) opensQuote(rest string) int {
-	for q, quote := range s.syntax.quotes {
-		if strings.HasPrefix(rest, quote.open) {
-			return q
+// dollarQuote matches the opening delimiter of a PostgreSQL dollar-quoted
+// string: $$ or $tag$.
+var dollarQuote = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$`)
+
+func (s *commentScanner) opensQuote(line string, i int) (quoteSyntax, bool) {
+	rest := line[i:]
+	wordBefore := i > 0 && isRuleNameChar(line[i-1])
+	if s.syntax.dollarQuotes && rest[0] == '$' && !wordBefore {
+		if tag := dollarQuote.FindString(rest); tag != "" {
+			return quoteSyntax{open: tag, close: tag, multiline: true}, true
 		}
 	}
-	return -1
+	for _, quote := range s.syntax.quotes {
+		if strings.HasPrefix(rest, quote.open) && (!quote.wordStart || !wordBefore) {
+			return quote, true
+		}
+	}
+	return quoteSyntax{}, false
+}
+
+// codeSpanEnd returns where the code span opened by the backtick run at i
+// ends: after the next run of the same length on the line, or after the run
+// itself when none closes it (the backticks are then text).
+func codeSpanEnd(line string, i int) int {
+	run := backtickRun(line, i)
+	for j := i + run; j < len(line); {
+		if line[j] != '`' {
+			j++
+			continue
+		}
+		closing := backtickRun(line, j)
+		if closing == run {
+			return j + closing
+		}
+		j += closing
+	}
+	return i + run
+}
+
+func backtickRun(line string, i int) int {
+	n := 0
+	for i+n < len(line) && line[i+n] == '`' {
+		n++
+	}
+	return n
 }
 
 // closeBlock records the part of the open block comment that starts at
@@ -241,15 +346,14 @@ func (s *commentScanner) closeBlock(n int, line string, start int, cont bool) in
 // closeQuote returns where the code after the open literal starts, len(line)
 // when the literal goes on.
 func (s *commentScanner) closeQuote(line string, i int) int {
-	quote := s.syntax.quotes[s.quote]
 	for i < len(line) {
-		if quote.escape && line[i] == '\\' {
+		if s.quote.escape && line[i] == '\\' {
 			i += 2
 			continue
 		}
-		if strings.HasPrefix(line[i:], quote.close) {
-			s.quote = -1
-			return i + len(quote.close)
+		if strings.HasPrefix(line[i:], s.quote.close) {
+			s.quoting = false
+			return i + len(s.quote.close)
 		}
 		i++
 	}
