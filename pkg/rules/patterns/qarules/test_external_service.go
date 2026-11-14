@@ -301,7 +301,7 @@ func (r *TestExternalServiceRule) outboundPackages(ctx *core.GoProjectContext) m
 		var evidence string
 		switch {
 		case doesHTTP && url != "":
-			evidence = "ходит в " + url
+			evidence = "достигает внешнего HTTP-клиента (адрес вызова не установлен)"
 		case doesHTTP && credential != "" && !hasLocalURL:
 			evidence = "подписывает запросы секретом (" + credential + "), адрес приходит из конфигурации"
 		default:
@@ -364,7 +364,11 @@ func httpRequestIn(root ast.Node, info *types.Info, clientLiteral bool) bool {
 			// http.Get / http.NewRequest и прочие пакетные функции.
 			if ident, ok := sel.X.(*ast.Ident); ok {
 				if pkgName, ok := info.Uses[ident].(*types.PkgName); ok {
-					if pkgName.Imported().Path() == netHTTPPath && helpers.NetHTTPRequestFuncs[sel.Sel.Name] {
+					requestFunc := helpers.NetHTTPRequestFuncs[sel.Sel.Name]
+					if !clientLiteral {
+						requestFunc = helpers.NetHTTPSendFuncs[sel.Sel.Name]
+					}
+					if pkgName.Imported().Path() == netHTTPPath && requestFunc {
 						found = true
 						return false
 					}
@@ -717,7 +721,7 @@ func (r *TestExternalServiceRule) outboundCalls(
 		host, live := scope.reaches(fn.Body, call, entry, evidence, func(e ast.Expr) bool {
 			q, isIdent := e.(*ast.Ident)
 			return isIdent && q.Name == ident.Name
-		})
+		}, file.GoTypesInfo)
 		if !live {
 			return true
 		}
@@ -769,7 +773,7 @@ func (r *TestExternalServiceRule) inPackageCalls(
 		if !ok || entry.nilTransport(call) {
 			return true
 		}
-		host, live := scope.reaches(fn.Body, call, entry, own, nil)
+		host, live := scope.reaches(fn.Body, call, entry, own, nil, file.GoTypesInfo)
 		if !live {
 			return true
 		}
@@ -778,10 +782,20 @@ func (r *TestExternalServiceRule) inPackageCalls(
 		}
 		reported[ident.Name] = true
 
-		pos := file.PositionFor(call)
+		reportedCall := call
+		if !entry.direct {
+			if methodCall := liveMethodCall(fn.Body, call, entry.liveMethods, entry.resultIndexes, file.GoTypesInfo); methodCall != nil {
+				reportedCall = methodCall
+			}
+		}
+		reportedName := ident.Name
+		if method, ok := reportedCall.Fun.(*ast.SelectorExpr); ok {
+			reportedName = method.Sel.Name
+		}
+		pos := file.PositionFor(reportedCall)
 		v := r.CreateViolation(file.RelPath, pos.Line, fmt.Sprintf(
 			"Тест %s вызывает %s из своего же пакета — пакет %s. Тест не проверяет чужой код и не должен менять внешний мир",
-			fn.Name.Name, ident.Name, host))
+			fn.Name.Name, reportedName, host))
 		v.WithCode(file.GetLine(pos.Line))
 		v.WithSuggestion("Подставьте провайдера на HTTP-границе (httptest) или засейте данные напрямую; живой вызов оставьте за явным опт-ином из guard_functions")
 		v.WithContext("pattern", "test_external_service")

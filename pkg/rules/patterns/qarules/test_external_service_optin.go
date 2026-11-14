@@ -3,6 +3,7 @@ package qarules
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"path/filepath"
 	"strings"
 
@@ -22,6 +23,11 @@ type testDirFacts struct {
 	// optInHelpers holds the functions of the test files that skip the test
 	// unless a dedicated env flag is set.
 	optInHelpers map[string]bool
+}
+
+type clientHolder struct {
+	name string
+	obj  types.Object
 }
 
 // collectTestDirFacts reads the test files of every directory once.
@@ -285,33 +291,275 @@ type liveCallScope struct {
 	isLocalURL func(*ast.BasicLit) bool
 }
 
-// reaches returns the evidence of a live call and whether the call is one. Outside a file of
-// unit tests every call of an entry is, as the client it builds has no offline mode. In such a
-// file the call must aim at production - the entry's own address, a URL literal or a URL
-// constant of the package among the arguments - and reach the wire: a function that sends
-// itself, or a client whose sending method the test calls. In any file an entry that takes its
-// address from the caller and gets a loopback or reserved URL literal reaches nothing outside.
-func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry liveEntry, pkg outboundPackage, isQualifier func(ast.Expr) bool) (string, bool) {
-	evidence := pkg.evidence
-	if entry.address != "" {
-		evidence = "ходит в " + entry.address
-	} else if s.aimsLocally(call) {
-		return "", false
+// reaches returns the evidence of a live call and whether the call is one. A direct sending
+// entry reaches the wire itself. A constructor counts only when the test calls one of its live
+// methods. The call must use an external address: the entry's own address, a URL literal or
+// package URL constant among the arguments, or an address passed to a live method. In a file
+// of unit tests the test must also call the sending method explicitly. A caller-supplied
+// loopback or reserved URL does not reach outside.
+func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry liveEntry, pkg outboundPackage, isQualifier func(ast.Expr) bool, info *types.Info) (string, bool) {
+	host := entry.address
+	if host == "" {
+		if s.aimsLocally(call) {
+			return "", false
+		}
+		for _, arg := range call.Args {
+			if host = productionArgument(arg, pkg.urlNames, isQualifier, s.hostOf); host != "" {
+				break
+			}
+		}
+	}
+	if host == "" && !entry.direct {
+		host = liveMethodArgument(body, call, entry.liveMethods, entry.resultIndexes, pkg.urlNames, isQualifier, s.hostOf, info)
 	}
 	if !s.unitTests {
-		return evidence, true
-	}
-	host := entry.address
-	for _, arg := range call.Args {
-		if host != "" {
-			break
+		if !entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, info) && !constructorResultEscapes(body, call, entry.liveMethods, entry.knownMembers, entry.resultIndexes, info) {
+			return "", false
 		}
-		host = productionArgument(arg, pkg.urlNames, isQualifier, s.hostOf)
+		if host == "" {
+			return pkg.evidence, true
+		}
+		return "ходит в " + host, true
 	}
-	if host == "" || (!entry.direct && !callsLiveMethod(body, call, entry.liveMethods)) {
+	if host == "" || (!entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, info)) {
 		return "", false
 	}
 	return "ходит в " + host, true
+}
+
+// constructorResultEscapes reports whether the test lets the constructed client reach code
+// whose behavior the rule cannot establish. A live method call is handled separately; reads
+// of fields and calls to known non-live methods are safe.
+func constructorResultEscapes(body *ast.BlockStmt, ctor *ast.CallExpr, liveMethods, knownMembers map[string]bool, resultIndexes map[int]bool, info *types.Info) bool {
+	parents := map[ast.Node]ast.Node{}
+	var stack []ast.Node
+	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return false
+		}
+		if len(stack) > 0 {
+			parents[n] = stack[len(stack)-1]
+		}
+		stack = append(stack, n)
+		return true
+	})
+
+	var holders []clientHolder
+	addHolder := func(id *ast.Ident) {
+		if id == nil || id.Name == "_" {
+			return
+		}
+		var obj types.Object
+		if info != nil {
+			obj = info.Defs[id]
+			if obj == nil {
+				obj = info.Uses[id]
+			}
+		}
+		holders = append(holders, clientHolder{name: id.Name, obj: obj})
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch assign := n.(type) {
+		case *ast.AssignStmt:
+			if len(assign.Rhs) == 1 && assign.Rhs[0] == ast.Expr(ctor) {
+				for i, lhs := range assign.Lhs {
+					if !resultIndexes[i] {
+						continue
+					}
+					if id, ok := lhs.(*ast.Ident); ok {
+						addHolder(id)
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			if len(assign.Values) == 1 && assign.Values[0] == ast.Expr(ctor) {
+				for i, name := range assign.Names {
+					if !resultIndexes[i] {
+						continue
+					}
+					addHolder(name)
+				}
+			}
+		}
+		return true
+	})
+
+	// A constructor result used directly as a return value, argument, field, channel value,
+	// literal element or any other non-local expression escapes without a named holder.
+	if len(holders) == 0 {
+		parent := parents[ctor]
+		switch p := parent.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range p.Lhs {
+				if !resultIndexes[i] {
+					continue
+				}
+				if id, ok := lhs.(*ast.Ident); !ok || id.Name != "_" {
+					return true
+				}
+			}
+			return false
+		case *ast.ValueSpec:
+			for i, name := range p.Names {
+				if resultIndexes[i] {
+					return name.Name != "_"
+				}
+			}
+			return false
+		case *ast.ExprStmt:
+			return false
+		case *ast.BinaryExpr:
+			return !comparedWithNil(p, ctor)
+		case *ast.CallExpr:
+			if p.Fun == ctor {
+				return true
+			}
+			for _, arg := range p.Args {
+				if arg == ctor {
+					return true
+				}
+			}
+			return true
+		case *ast.SelectorExpr:
+			if p.X == ctor {
+				if call, ok := parents[p].(*ast.CallExpr); ok && call.Fun == p {
+					return liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name]
+				}
+				return liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name]
+			}
+			return true
+		case *ast.ReturnStmt, *ast.CompositeLit, *ast.SendStmt, *ast.FuncLit:
+			return true
+		default:
+			return parent != nil
+		}
+	}
+
+	initializers := map[*ast.Ident]bool{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch assign := n.(type) {
+		case *ast.AssignStmt:
+			if len(assign.Rhs) == 1 && assign.Rhs[0] == ast.Expr(ctor) {
+				for i, lhs := range assign.Lhs {
+					if !resultIndexes[i] {
+						continue
+					}
+					if id, ok := lhs.(*ast.Ident); ok {
+						initializers[id] = true
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			if len(assign.Values) == 1 && assign.Values[0] == ast.Expr(ctor) {
+				for i, id := range assign.Names {
+					if !resultIndexes[i] {
+						continue
+					}
+					initializers[id] = true
+				}
+			}
+		}
+		return true
+	})
+
+	escapes := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		id, ok := n.(*ast.Ident)
+		if !ok || escapes || initializers[id] || !isHolderUse(id, holders, info) {
+			return !escapes
+		}
+		parent := parents[id]
+		for ancestor := parent; ancestor != nil; ancestor = parents[ancestor] {
+			if _, ok := ancestor.(*ast.FuncLit); ok {
+				escapes = true
+				return false
+			}
+		}
+		switch p := parent.(type) {
+		case *ast.SelectorExpr:
+			if p.X != id {
+				escapes = true
+				break
+			}
+			if call, ok := parents[p].(*ast.CallExpr); ok && call.Fun == p {
+				escapes = !knownMembers[p.Sel.Name]
+			} else if liveMethods[p.Sel.Name] || !knownMembers[p.Sel.Name] {
+				escapes = true // a live method value may be invoked by unknown code
+			}
+		case *ast.BinaryExpr:
+			escapes = !comparedWithNil(p, id)
+		case *ast.AssignStmt:
+			for _, rhs := range p.Rhs {
+				if rhs == id {
+					discarded := len(p.Lhs) > 0
+					for _, lhs := range p.Lhs {
+						blank, ok := lhs.(*ast.Ident)
+						discarded = discarded && ok && blank.Name == "_"
+					}
+					escapes = !discarded
+				}
+			}
+		case *ast.CallExpr:
+			escapes = true
+		case *ast.UnaryExpr, *ast.CompositeLit, *ast.ReturnStmt, *ast.SendStmt, *ast.KeyValueExpr:
+			escapes = true
+		default:
+			escapes = true
+		}
+		return !escapes
+	})
+	return escapes
+}
+
+func isHolderUse(id *ast.Ident, holders []clientHolder, info *types.Info) bool {
+	var object types.Object
+	if info != nil {
+		object = info.Uses[id]
+		if object == nil {
+			object = info.Defs[id]
+		}
+	}
+	for _, h := range holders {
+		if object != nil && h.obj != nil {
+			if object == h.obj {
+				return true
+			}
+			continue
+		}
+		if h.name == id.Name {
+			return true
+		}
+	}
+	return false
+}
+
+func comparedWithNil(expr *ast.BinaryExpr, value ast.Expr) bool {
+	if expr.Op != token.EQL && expr.Op != token.NEQ {
+		return false
+	}
+	other := expr.X
+	if other == value {
+		other = expr.Y
+	}
+	id, ok := ast.Unparen(other).(*ast.Ident)
+	return ok && id.Name == "nil"
+}
+
+// liveMethodArgument returns the first external URL passed to a live method of the
+// client returned by call. This lets a caller supplied URL take precedence over an unrelated
+// URL literal elsewhere in the package.
+func liveMethodArgument(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool, resultIndexes map[int]bool, urls map[string]string, isQualifier func(ast.Expr) bool, hostOf func(*ast.BasicLit) string, info *types.Info) string {
+	call := liveMethodCall(body, ctor, methods, resultIndexes, info)
+	if call == nil {
+		return ""
+	}
+	for _, arg := range call.Args {
+		if host := productionArgument(arg, urls, isQualifier, hostOf); host != "" {
+			return host
+		}
+	}
+	return ""
 }
 
 // aimsLocally reports a loopback or reserved URL literal among the arguments of the call.
@@ -346,23 +594,56 @@ func productionArgument(arg ast.Expr, urlNames map[string]string, isQualifier fu
 	return ""
 }
 
-// callsLiveMethod reports a sending method called on the result of the constructor call:
+// callsLiveMethod returns a sending method called on the result of the constructor call:
 // chained (New().Rate()) or through the variable it is assigned to.
-func callsLiveMethod(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool) bool {
-	holders := map[string]bool{}
+func callsLiveMethod(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool, resultIndexes map[int]bool, info *types.Info) bool {
+	return liveMethodCall(body, ctor, methods, resultIndexes, info) != nil
+}
+
+func liveMethodCall(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string]bool, resultIndexes map[int]bool, info *types.Info) *ast.CallExpr {
+	var holders []clientHolder
+	addHolder := func(id *ast.Ident) {
+		if id == nil || id.Name == "_" {
+			return
+		}
+		var obj types.Object
+		if info != nil {
+			obj = info.Defs[id]
+			if obj == nil {
+				obj = info.Uses[id]
+			}
+		}
+		holders = append(holders, clientHolder{name: id.Name, obj: obj})
+	}
 	ast.Inspect(body, func(n ast.Node) bool {
-		if assign, ok := n.(*ast.AssignStmt); ok && len(assign.Rhs) == 1 && assign.Rhs[0] == ast.Expr(ctor) && len(assign.Lhs) > 0 {
-			if ident, isIdent := assign.Lhs[0].(*ast.Ident); isIdent {
-				holders[ident.Name] = true
+		switch assign := n.(type) {
+		case *ast.AssignStmt:
+			if len(assign.Rhs) == 1 && assign.Rhs[0] == ast.Expr(ctor) {
+				for i, lhs := range assign.Lhs {
+					if !resultIndexes[i] {
+						continue
+					}
+					if id, ok := lhs.(*ast.Ident); ok {
+						addHolder(id)
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			if len(assign.Values) == 1 && assign.Values[0] == ast.Expr(ctor) {
+				for i, id := range assign.Names {
+					if resultIndexes[i] {
+						addHolder(id)
+					}
+				}
 			}
 		}
 		return true
 	})
-	found := false
+	var found *ast.CallExpr
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || found {
-			return !found
+		if !ok || found != nil {
+			return found == nil
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok || !methods[sel.Sel.Name] {
@@ -370,11 +651,15 @@ func callsLiveMethod(body *ast.BlockStmt, ctor *ast.CallExpr, methods map[string
 		}
 		switch x := ast.Unparen(sel.X).(type) {
 		case *ast.CallExpr:
-			found = x == ctor
+			if x == ctor {
+				found = call
+			}
 		case *ast.Ident:
-			found = holders[x.Name]
+			if isHolderUse(x, holders, info) {
+				found = call
+			}
 		}
-		return !found
+		return found == nil
 	})
 	return found
 }

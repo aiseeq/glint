@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -116,6 +117,32 @@ func Bootstrap() { once.Do(func() {}) }
 			assert.Equal(t, tt.expect, fileIssuesHTTPRequest(file, info))
 		})
 	}
+}
+
+func TestTestExternalServiceRule_RequestConstructionIsNotSending(t *testing.T) {
+	file, info := typedFile(t, `package requestonly
+
+import "net/http"
+
+func prepare(url string) (*http.Request, error) {
+	return http.NewRequest(http.MethodGet, url, nil)
+}
+`)
+	assert.True(t, nodeIssuesHTTPRequest(file, info))
+	assert.False(t, nodeSendsHTTPRequest(file, info))
+
+	file, info = typedFile(t, `package requestonly
+
+import "net/http"
+
+func send(url string) error {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil { return err }
+	_, err = http.DefaultClient.Do(req)
+	return err
+}
+`)
+	assert.True(t, nodeSendsHTTPRequest(file, info))
 }
 
 // Литерал URL в теге структуры не означает, что пакет туда ходит: на этом
@@ -1217,6 +1244,232 @@ func TestChainHead(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, violations, 1, "%v", messages(violations))
 	assert.Contains(t, violations[0].Message, "https://rpc.bvendor.io")
+}
+
+func TestTestExternalServiceRule_OnlyReportsReachedOutboundCalls(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"routing/router.go": `package routing
+
+import "net/http"
+
+var explorerLinks = map[string]string{"alpha": "https://explorer-one.example.org/tx/"}
+
+type Router struct { client *http.Client }
+
+func NewRouter() *Router { return &Router{client: &http.Client{}} }
+
+func (r *Router) Notify(url string) error {
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil { return err }
+	_, err = r.client.Do(req)
+	return err
+}
+
+func Link(network, tx string) string { return explorerLinks[network] + tx }
+`,
+		"routing/router_test.go": `package routing
+
+import "testing"
+
+func TestNewRouterDoesNotSend(t *testing.T) {
+	_ = NewRouter()
+}
+
+func TestNotifyUsesCallerURL(t *testing.T) {
+	r := NewRouter()
+	_ = r.Notify("https://notify-two.example.net/hook")
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1, "%v", messages(violations))
+	assert.Contains(t, violations[0].Message, "TestNotifyUsesCallerURL")
+	assert.Contains(t, violations[0].Message, "https://notify-two.example.net/hook")
+	assert.NotContains(t, violations[0].Message, "explorer-one.example.org")
+}
+
+func TestTestExternalServiceRule_ConstructorResultEscapes(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"vendorapi/client.go": `package vendorapi
+
+import "net/http"
+
+type Client struct { base string }
+func New() *Client { return &Client{base: "https://api.vendor-result.example.org"} }
+func (c *Client) Deposit() error { _, err := http.Get(c.base); return err }
+func (c *Client) Balance() error { _, err := http.Get(c.base); return err }
+func (c *Client) Label() string { return c.base }
+`,
+		"vendorapi/client_test.go": `package vendorapi
+
+import "testing"
+
+func consume(*Client) {}
+
+func TestDiscarded(t *testing.T) { _ = New() }
+func TestComparedWithNil(t *testing.T) { _ = New() == nil }
+func TestFieldRead(t *testing.T) { c := New(); _ = c.base }
+func TestSafeMethod(t *testing.T) { c := New(); _ = c.Label() }
+func TestDiscardedHolder(t *testing.T) { c := New(); _ = c }
+func TestHolderComparedWithNil(t *testing.T) { c := New(); _ = c == nil }
+func TestPassedToHelper(t *testing.T) { c := New(); consume(c) }
+func TestAssignedElsewhere(t *testing.T) { c := New(); other := c; _ = other }
+func TestAssignedToField(t *testing.T) { type box struct { client *Client }; c := New(); b := box{}; b.client = c }
+func TestStoredInLiteral(t *testing.T) { c := New(); _ = []*Client{c} }
+func TestReturned(t *testing.T) *Client { c := New(); return c }
+func TestCaptured(t *testing.T) { c := New(); _ = func() { _ = c } }
+func TestSentToChannel(t *testing.T) { c := New(); ch := make(chan *Client, 1); ch <- c }
+func TestDirectMethod(t *testing.T) { c := New(); _ = c.Deposit() }
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 8, "%v", messages(violations))
+	got := strings.Join(messages(violations), "\n")
+	for _, name := range []string{"TestPassedToHelper", "TestAssignedElsewhere", "TestAssignedToField", "TestStoredInLiteral", "TestReturned", "TestCaptured", "TestSentToChannel", "TestDirectMethod"} {
+		assert.Contains(t, got, name)
+	}
+	for _, name := range []string{"TestDiscarded", "TestComparedWithNil", "TestFieldRead", "TestSafeMethod", "TestDiscardedHolder", "TestHolderComparedWithNil"} {
+		assert.NotContains(t, got, name)
+	}
+}
+
+func TestTestExternalServiceRule_InterfaceHolderAndAsyncConstructor(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"dispatch/client.go": `package dispatch
+
+import "net/http"
+
+type Client struct { endpoint string }
+func New() *Client { return &Client{endpoint: "https://dispatch-api.example.org/send"} }
+func (c *Client) Send() { _, _ = http.Get(c.endpoint) }
+
+var finished = make(chan struct{})
+func NewAsync() *Client {
+	c := New()
+	go func() { c.Send(); close(finished) }()
+	return c
+}
+`,
+		"dispatch/client_test.go": `package dispatch
+
+import "testing"
+
+type Sender interface { Send() }
+
+func TestInterfaceDispatch(t *testing.T) {
+	var sender Sender = New()
+	sender.Send()
+}
+
+func TestAsyncDispatch(t *testing.T) {
+	_ = NewAsync()
+	<-finished
+}
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 2, "%v", messages(violations))
+	joined := strings.Join(messages(violations), "\n")
+	assert.Contains(t, joined, "TestInterfaceDispatch")
+	assert.Contains(t, joined, "Send")
+	assert.Contains(t, joined, "https://dispatch-api.example.org/send")
+	assert.Contains(t, joined, "TestAsyncDispatch")
+	assert.Contains(t, joined, "NewAsync")
+}
+
+func TestTestExternalServiceRule_MultiResultConstructorAndAddressEvidence(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{
+		"adminui/constructors.go": `package adminui
+
+import "net/http"
+
+type services struct { client *http.Client }
+type CleanRouter struct { services *services }
+type PortfolioHandler struct { alertService *services }
+
+func newServices() *services { return &services{client: &http.Client{}} }
+func NewCleanRouter() (*CleanRouter, error) { return &CleanRouter{services: newServices()}, nil }
+func NewPortfolioHandler() (*PortfolioHandler, error) { return &PortfolioHandler{alertService: newServices()}, nil }
+
+var displayLinks = map[string]string{"one": "https://display-only.example.org/tx/"}
+func DisplayLink(network string) string { return displayLinks[network] }
+`,
+		"adminui/constructors_test.go": `package adminui
+
+import "testing"
+
+func requireError(error) {}
+func requireSame(...any) {}
+
+func TestDiscardRouterResult(t *testing.T) {
+	_, err := NewCleanRouter()
+	requireError(err)
+}
+
+func TestInspectPortfolioField(t *testing.T) {
+	h, err := NewPortfolioHandler()
+	requireError(err)
+	requireSame(t, &services{}, h.alertService)
+}
+`,
+		"notify/client.go": `package notify
+
+import "net/http"
+
+var displayLinks = map[string]string{"two": "https://display-again.example.net/tx/"}
+
+func Send() error {
+	_, err := http.Get("https://notify-api.example.com/v2/events")
+	return err
+}
+
+func DisplayLink(network string) string { return displayLinks[network] }
+`,
+		"notify/client_test.go": `package notify
+
+import "testing"
+
+func TestSendToVendor(t *testing.T) { _ = Send() }
+`,
+		"fieldnotify/client.go": `package fieldnotify
+
+import "net/http"
+
+var displayLinks = map[string]string{"three": "https://field-display.example.net/tx/"}
+
+type Sender struct { base string; client *http.Client }
+func NewSender() *Sender { return &Sender{base: "https://field-api.example.com/v3", client: &http.Client{}} }
+func (s *Sender) Send() error {
+	req, err := http.NewRequest(http.MethodGet, s.base, nil)
+	if err != nil { return err }
+	_, err = s.client.Do(req)
+	return err
+}
+func DisplayLink(network string) string { return displayLinks[network] }
+`,
+		"fieldnotify/client_test.go": `package fieldnotify
+
+import "testing"
+
+func TestSendFromField(t *testing.T) { s := NewSender(); _ = s.Send() }
+`,
+	})
+
+	violations, err := NewTestExternalServiceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 2, "%v", messages(violations))
+	joined := strings.Join(messages(violations), "\n")
+	assert.Contains(t, joined, "https://notify-api.example.com/v2/events")
+	assert.Contains(t, joined, "https://field-api.example.com/v3")
+	assert.NotContains(t, joined, "display-only.example.org")
+	assert.NotContains(t, joined, "display-again.example.net")
+	assert.NotContains(t, joined, "field-display.example.net")
 }
 
 // A client whose address comes from the caller and is built on a loopback or

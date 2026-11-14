@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -72,7 +73,9 @@ func liveEntryPoints(pkg *core.GoPackageContext, hostOf func(*ast.BasicLit) stri
 	closeOverCallees(sends, callees)
 
 	liveTypes := liveTypesOf(pkg.Package.Types, live)
-	addresses := entryAddresses(decls, callees, info, packageURLs(pkg, hostOf), hostOf)
+	urls := packageURLs(pkg, hostOf)
+	fieldURLs := packageFieldURLs(pkg, urls, hostOf)
+	addresses := entryAddresses(decls, callees, info, urls, fieldURLs, hostOf, live, pkg.Package.Types)
 	entries := map[string]liveEntry{}
 	for key, fn := range decls {
 		if fn.Recv != nil || !fn.Name.IsExported() {
@@ -81,9 +84,12 @@ func liveEntryPoints(pkg *core.GoPackageContext, hostOf func(*ast.BasicLit) stri
 		if live[key] || returnsLiveType(fn, info, pkg.Package.Types, live) {
 			entry := newLiveEntry(fn, info, liveTypes)
 			methodKeys := returnedLiveMethods(fn, info, pkg.Package.Types, live)
-			// Конструктор, собравший &http.Client{}, сам ничего не шлёт: шлют методы клиента.
-			entry.direct = sends[key] && len(methodKeys) == 0
+			// Если тело конструктора само доходит до отправки, вызов конструктора живой,
+			// даже когда оно также возвращает тип с сетевыми методами.
+			entry.direct = sends[key]
 			entry.liveMethods = map[string]bool{}
+			entry.resultIndexes = namedResultIndexes(fn, info)
+			entry.knownMembers = returnedClientMembers(fn, info)
 			entry.address = addresses[key]
 			for _, methodKey := range methodKeys {
 				_, method, _ := strings.Cut(methodKey, ".")
@@ -112,11 +118,68 @@ type liveEntry struct {
 	variadic  bool
 	// direct marks a function that reaches an HTTP call itself; otherwise the entry is a
 	// constructor of a client whose liveMethods do.
-	direct      bool
-	liveMethods map[string]bool
+	direct        bool
+	liveMethods   map[string]bool
+	resultIndexes map[int]bool
 	// address is the third-party URL the entry reaches on its own, "" when the address
 	// comes from the caller.
 	address string
+	// knownMembers are methods and fields on returned client types, used to distinguish
+	// local inspection from an unknown use when test-file type information is unavailable.
+	knownMembers map[string]bool
+}
+
+func namedResultIndexes(fn *ast.FuncDecl, info *types.Info) map[int]bool {
+	indexes := map[int]bool{}
+	obj, ok := info.Defs[fn.Name].(*types.Func)
+	if !ok {
+		return indexes
+	}
+	sig, ok := obj.Type().(*types.Signature)
+	if !ok || sig.Results() == nil {
+		return indexes
+	}
+	for i := range sig.Results().Len() {
+		v := sig.Results().At(i)
+		if patternkit.NamedOf(v.Type()) != nil {
+			indexes[i] = true
+		}
+	}
+	return indexes
+}
+
+func returnedClientMembers(fn *ast.FuncDecl, info *types.Info) map[string]bool {
+	members := map[string]bool{}
+	obj, ok := info.Defs[fn.Name].(*types.Func)
+	if !ok {
+		return members
+	}
+	sig, ok := obj.Type().(*types.Signature)
+	if !ok || sig.Results() == nil {
+		return members
+	}
+	for v := range sig.Results().Variables() {
+		named := patternkit.NamedOf(v.Type())
+		if named == nil {
+			continue
+		}
+		for _, recv := range []types.Type{named, types.NewPointer(named)} {
+			set := types.NewMethodSet(recv)
+			for method := range set.Methods() {
+				members[method.Obj().Name()] = true
+			}
+		}
+		underlying := named.Underlying()
+		if ptr, ok := underlying.(*types.Pointer); ok {
+			underlying = ptr.Elem().Underlying()
+		}
+		if structType, ok := underlying.(*types.Struct); ok {
+			for field := range structType.Fields() {
+				members[field.Name()] = true
+			}
+		}
+	}
+	return members
 }
 
 // nilTransport reports whether the call passes nil in place of a transport parameter.
@@ -297,6 +360,9 @@ func packageURLs(pkg *core.GoPackageContext, hostOf func(*ast.BasicLit) string) 
 					if i >= len(value.Values) {
 						break
 					}
+					if !isStringType(pkg.Package.TypesInfo.TypeOf(value.Values[i])) {
+						continue
+					}
 					if host := literalHost(value.Values[i], hostOf); host != "" && pkg.Package.TypesInfo.Defs[name] != nil {
 						urls[pkg.Package.TypesInfo.Defs[name]] = host
 					}
@@ -305,6 +371,14 @@ func packageURLs(pkg *core.GoPackageContext, hostOf func(*ast.BasicLit) string) 
 		}
 	}
 	return urls
+}
+
+func isStringType(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	basic, ok := typ.Underlying().(*types.Basic)
+	return ok && (basic.Kind() == types.String || basic.Kind() == types.UntypedString)
 }
 
 // literalHost returns the first third-party URL among the literals of an expression.
@@ -323,20 +397,18 @@ func literalHost(node ast.Node, hostOf func(*ast.BasicLit) string) string {
 // body, a package-level URL it reads, or the address of a package function it calls.
 func entryAddresses(
 	decls map[string]*ast.FuncDecl, callees map[string][]string, info *types.Info,
-	urls map[types.Object]string, hostOf func(*ast.BasicLit) string,
+	urls, fieldURLs map[types.Object]string, hostOf func(*ast.BasicLit) string,
+	live map[string]bool, self *types.Package,
 ) map[string]string {
 	addresses := map[string]string{}
 	for key, fn := range decls {
 		if fn.Body == nil {
 			continue
 		}
-		host := literalHost(fn.Body, hostOf)
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			if ident, ok := n.(*ast.Ident); ok && host == "" {
-				host = urls[info.Uses[ident]]
-			}
-			return host == ""
-		})
+		host := httpAddressIn(fn.Body, info, urls, fieldURLs, hostOf)
+		if host == "" {
+			host = liveClientConstructorArgument(fn.Body, decls, info, urls, fieldURLs, hostOf, live, self)
+		}
 		if host != "" {
 			addresses[key] = host
 		}
@@ -357,6 +429,417 @@ func entryAddresses(
 		}
 	}
 	return addresses
+}
+
+func packageFieldURLs(pkg *core.GoPackageContext, urls map[types.Object]string, hostOf func(*ast.BasicLit) string) map[types.Object]string {
+	fields := map[types.Object]string{}
+	ambiguous := map[types.Object]bool{}
+	info := pkg.Package.TypesInfo
+	store := func(field types.Object, value ast.Expr) {
+		if field == nil {
+			return
+		}
+		if ambiguous[field] {
+			return
+		}
+		host := expressionURL(value, info, urls, fields, hostOf)
+		if host == "" {
+			ambiguous[field] = true
+			delete(fields, field)
+			return
+		}
+		if previous := fields[field]; previous != "" && previous != host {
+			ambiguous[field] = true
+			delete(fields, field)
+			return
+		}
+		fields[field] = host
+	}
+	for _, file := range pkg.Files {
+		if file == nil || file.GoAST == nil || file.IsTestFile() {
+			continue
+		}
+		ast.Inspect(file.GoAST, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.CompositeLit:
+				for _, elt := range node.Elts {
+					kv, ok := elt.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					key, ok := kv.Key.(*ast.Ident)
+					if !ok {
+						continue
+					}
+					store(structFieldObject(info.TypeOf(node), key.Name), kv.Value)
+				}
+			case *ast.AssignStmt:
+				if len(node.Lhs) != len(node.Rhs) {
+					break
+				}
+				for i, lhs := range node.Lhs {
+					sel, ok := lhs.(*ast.SelectorExpr)
+					if !ok {
+						continue
+					}
+					selection := info.Selections[sel]
+					if selection != nil {
+						store(selection.Obj(), node.Rhs[i])
+					}
+				}
+			}
+			return true
+		})
+	}
+	return fields
+}
+
+func structFieldObject(typ types.Type, name string) types.Object {
+	named := patternkit.NamedOf(typ)
+	if named == nil {
+		return nil
+	}
+	underlying := named.Underlying()
+	if ptr, ok := underlying.(*types.Pointer); ok {
+		underlying = ptr.Elem().Underlying()
+	}
+	structType, ok := underlying.(*types.Struct)
+	if !ok {
+		return nil
+	}
+	for field := range structType.Fields() {
+		if field.Name() == name {
+			return field
+		}
+	}
+	return nil
+}
+
+func expressionURL(expr ast.Expr, info *types.Info, urls, fields map[types.Object]string, hostOf func(*ast.BasicLit) string) string {
+	if host := literalHost(expr, hostOf); host != "" {
+		return host
+	}
+	var host string
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if host != "" {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.Ident:
+			host = urls[info.Uses[node]]
+		case *ast.SelectorExpr:
+			if selection := info.Selections[node]; selection != nil {
+				host = fields[selection.Obj()]
+			}
+			if host == "" {
+				host = urls[info.Uses[node.Sel]]
+			}
+		}
+		return host == ""
+	})
+	return host
+}
+
+func httpAddressIn(body *ast.BlockStmt, info *types.Info, urls, fields map[types.Object]string, hostOf func(*ast.BasicLit) string) string {
+	requestURLs := map[types.Object]string{}
+	requestNames := map[string]string{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		index, isRequest := netHTTPRequestURLIndex(call, info)
+		if !isRequest || index >= len(call.Args) {
+			return true
+		}
+		host := expressionURL(call.Args[index], info, urls, fields, hostOf)
+		if host == "" {
+			return true
+		}
+		for _, node := range []ast.Node{body} {
+			ast.Inspect(node, func(child ast.Node) bool {
+				assign, ok := child.(*ast.AssignStmt)
+				if !ok || len(assign.Rhs) != 1 || assign.Rhs[0] != ast.Expr(call) {
+					return true
+				}
+				for _, lhs := range assign.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok {
+						requestNames[id.Name] = host
+						obj := info.Defs[id]
+						if obj == nil {
+							obj = info.Uses[id]
+						}
+						if obj != nil {
+							requestURLs[obj] = host
+						}
+					}
+				}
+				return true
+			})
+		}
+		return true
+	})
+
+	var host string
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || host != "" {
+			return host == ""
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if isNetHTTPPackageFunc(sel, info, helpers.NetHTTPSendFuncs) {
+			if len(call.Args) > 0 {
+				host = expressionURL(call.Args[0], info, urls, fields, hostOf)
+			}
+			return host == ""
+		}
+		if !isNetHTTPClientMethod(info, sel) {
+			return true
+		}
+		if helpers.NetHTTPSendFuncs[sel.Sel.Name] && len(call.Args) > 0 {
+			host = expressionURL(call.Args[0], info, urls, fields, hostOf)
+		} else if sel.Sel.Name == "Do" && len(call.Args) > 0 {
+			if id, ok := ast.Unparen(call.Args[0]).(*ast.Ident); ok {
+				obj := info.Uses[id]
+				host = requestURLs[obj]
+				if host == "" {
+					host = requestNames[id.Name]
+				}
+			} else if request, ok := ast.Unparen(call.Args[0]).(*ast.CallExpr); ok {
+				if index, yes := netHTTPRequestURLIndex(request, info); yes && index < len(request.Args) {
+					host = expressionURL(request.Args[index], info, urls, fields, hostOf)
+				}
+			}
+		}
+		return host == ""
+	})
+	return host
+}
+
+func netHTTPRequestURLIndex(call *ast.CallExpr, info *types.Info) (int, bool) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !isNetHTTPPackageFunc(sel, info, helpers.NetHTTPRequestFuncs) {
+		return 0, false
+	}
+	switch sel.Sel.Name {
+	case "NewRequest":
+		return 1, true
+	case "NewRequestWithContext":
+		return 2, true
+	default:
+		if helpers.NetHTTPSendFuncs[sel.Sel.Name] {
+			return 0, true
+		}
+	}
+	return 0, false
+}
+
+func isNetHTTPPackageFunc(sel *ast.SelectorExpr, info *types.Info, names map[string]bool) bool {
+	ident, ok := sel.X.(*ast.Ident)
+	if !ok || !names[sel.Sel.Name] {
+		return false
+	}
+	pkg, ok := info.Uses[ident].(*types.PkgName)
+	return ok && pkg.Imported().Path() == netHTTPPath
+}
+
+func liveClientConstructorArgument(body *ast.BlockStmt, decls map[string]*ast.FuncDecl, info *types.Info, urls, fields map[types.Object]string, hostOf func(*ast.BasicLit) string, live map[string]bool, self *types.Package) string {
+	var host string
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || host != "" {
+			return host == ""
+		}
+		var name string
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			if fn, ok := info.Uses[fun].(*types.Func); ok && fn.Pkg() == self {
+				name = fn.Name()
+			}
+		case *ast.SelectorExpr:
+			if selection := info.Selections[fun]; selection != nil && selection.Kind() == types.MethodVal {
+				if named := patternkit.NamedOf(selection.Recv()); named != nil && named.Obj().Pkg() == self {
+					name = named.Obj().Name() + "." + fun.Sel.Name
+				}
+			}
+		}
+		callee := decls[name]
+		if name == "" || callee == nil || !live[name] || !returnsLiveType(callee, info, self, live) {
+			return true
+		}
+		for index := range liveClientURLParameterIndexes(callee, decls, info, self, live) {
+			if index >= len(call.Args) {
+				continue
+			}
+			if host = expressionURL(call.Args[index], info, urls, fields, hostOf); host != "" {
+				return false
+			}
+		}
+		return true
+	})
+	return host
+}
+
+func liveClientURLParameterIndexes(fn *ast.FuncDecl, decls map[string]*ast.FuncDecl, info *types.Info, self *types.Package, live map[string]bool) map[int]bool {
+	indexes := map[int]bool{}
+	obj, ok := info.Defs[fn.Name].(*types.Func)
+	if !ok {
+		return indexes
+	}
+	sig, ok := obj.Type().(*types.Signature)
+	if !ok || sig.Params() == nil {
+		return indexes
+	}
+	fields := map[types.Object]bool{}
+	for _, key := range returnedLiveMethods(fn, info, self, live) {
+		method := decls[key]
+		if method == nil || !nodeSendsHTTPRequest(method.Body, info) {
+			continue
+		}
+		for field := range httpURLFieldsIn(method.Body, info) {
+			fields[field] = true
+		}
+	}
+	if len(fields) == 0 {
+		return indexes
+	}
+	markParam := func(field types.Object, value ast.Expr) {
+		if !fields[field] {
+			return
+		}
+		id, ok := ast.Unparen(value).(*ast.Ident)
+		if !ok {
+			return
+		}
+		param := info.Uses[id]
+		for i := range sig.Params().Len() {
+			if sig.Params().At(i) == param {
+				indexes[i] = true
+			}
+		}
+	}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CompositeLit:
+			for _, elt := range node.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := kv.Key.(*ast.Ident)
+				if ok {
+					markParam(structFieldObject(info.TypeOf(node), key.Name), kv.Value)
+				}
+			}
+		case *ast.AssignStmt:
+			if len(node.Lhs) != len(node.Rhs) {
+				break
+			}
+			for i, lhs := range node.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok {
+					if selection := info.Selections[sel]; selection != nil {
+						markParam(selection.Obj(), node.Rhs[i])
+					}
+				}
+			}
+		}
+		return true
+	})
+	return indexes
+}
+
+func httpURLFieldsIn(body *ast.BlockStmt, info *types.Info) map[types.Object]bool {
+	fields := map[types.Object]bool{}
+	requestFields := map[types.Object]map[types.Object]bool{}
+	requestNames := map[string]map[types.Object]bool{}
+	addFields := func(dst map[types.Object]bool, expr ast.Expr) {
+		ast.Inspect(expr, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if selection := info.Selections[sel]; selection != nil {
+				if _, ok := selection.Obj().(*types.Var); ok {
+					dst[selection.Obj()] = true
+				}
+			}
+			return true
+		})
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		index, request := netHTTPRequestURLIndex(call, info)
+		if !request || index >= len(call.Args) {
+			return true
+		}
+		sources := map[types.Object]bool{}
+		addFields(sources, call.Args[index])
+		if len(sources) == 0 {
+			return true
+		}
+		ast.Inspect(body, func(child ast.Node) bool {
+			assign, ok := child.(*ast.AssignStmt)
+			if !ok || len(assign.Rhs) != 1 || assign.Rhs[0] != ast.Expr(call) {
+				return true
+			}
+			for _, lhs := range assign.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				obj := info.Defs[id]
+				if obj == nil {
+					obj = info.Uses[id]
+				}
+				if obj != nil {
+					requestFields[obj] = sources
+				}
+				requestNames[id.Name] = sources
+			}
+			return true
+		})
+		return true
+	})
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if isNetHTTPPackageFunc(sel, info, helpers.NetHTTPSendFuncs) {
+			if len(call.Args) > 0 {
+				addFields(fields, call.Args[0])
+			}
+			return true
+		}
+		if !isNetHTTPClientMethod(info, sel) {
+			return true
+		}
+		if helpers.NetHTTPSendFuncs[sel.Sel.Name] && len(call.Args) > 0 {
+			addFields(fields, call.Args[0])
+		} else if sel.Sel.Name == "Do" && len(call.Args) > 0 {
+			if id, ok := ast.Unparen(call.Args[0]).(*ast.Ident); ok {
+				obj := info.Uses[id]
+				for field := range requestFields[obj] {
+					fields[field] = true
+				}
+				for field := range requestNames[id.Name] {
+					fields[field] = true
+				}
+			}
+		}
+		return true
+	})
+	return fields
 }
 
 // returnedLiveMethods returns the methods reaching the network ("Type.Method", sorted) of the
