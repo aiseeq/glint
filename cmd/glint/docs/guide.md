@@ -8,7 +8,7 @@ Fix findings in code instead of hiding them. Handle high and critical findings i
 
 ## False positive
 
-A false finding is a glint defect. File a glint ticket with the rule name, a minimal example using synthetic names, and `glint --version`. While the ticket is open, suppress only the affected line or function, with a reason linking to `glint#<slug>`. Remove the exception when the ticket closes: a fixed rule makes it stale; a rejected ticket means the finding is valid and the code must be fixed.
+A false finding is a glint defect. File a glint ticket with the rule name, a minimal example using synthetic names, and `glint --version`. While the ticket is open, suppress only the affected line or function, with a reason linking to `glint#<slug>`. Remove the exception when the ticket closes: a fixed rule makes it stale; a rejected ticket means the finding is valid and the code must be fixed. Rule: `exception-ticket-closed` reports a `glint#<slug>` exception whose ticket is done or rejected, when `tickets_dir` is set in the user config.
 
 ## Exceptions
 
