@@ -439,7 +439,7 @@ func (s liveCallScope) reaches(body *ast.BlockStmt, call *ast.CallExpr, entry li
 		host = liveMethodArgument(body, call, entry.liveMethods, entry.resultIndexes, entry.selfMethods, pkg.urlNames, isQualifier, s.hostOf, info)
 	}
 	if !s.unitTests {
-		if !entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, entry.selfMethods, info) && !constructorResultEscapes(body, call, entry.liveMethods, entry.knownMembers, entry.selfMethods, entry.resultIndexes, info, s) {
+		if !entry.direct && !callsLiveMethod(body, call, entry.liveMethods, entry.resultIndexes, entry.selfMethods, info) && !constructorResultEscapes(body, call, entry.escapingMethods(), entry.knownMembers, entry.selfMethods, entry.resultIndexes, info, s) {
 			return "", false
 		}
 		if host == "" {
@@ -746,7 +746,7 @@ func onlyBareReturns(body *ast.BlockStmt) bool {
 // test binds it again.
 func testingHandleValue(body *ast.BlockStmt, x *ast.Ident, info *types.Info) bool {
 	if info == nil || info.Uses[x] == nil {
-		return !redeclaresHandle(body, x.Name)
+		return !redeclaresHandle(body, x)
 	}
 	t := info.Uses[x].Type()
 	if ptr, ok := t.(*types.Pointer); ok {
@@ -763,24 +763,60 @@ func testingHandleValue(body *ast.BlockStmt, x *ast.Ident, info *types.Info) boo
 	return false
 }
 
-// redeclaresHandle reports whether the test binds the name of its testing
-// handle to something else by := or var. A parameter of a function literal
-// needs no look: a use of the client inside a literal escapes anyway.
-func redeclaresHandle(body *ast.BlockStmt, name string) bool {
+// redeclaresHandle reports whether, where use stands, the test has bound the
+// name of its testing handle to something else by :=, var or a range clause:
+// the binding precedes use, and its scope (the enclosing block, the if, for or
+// switch it opens, the range statement) encloses it. A parameter of a function
+// literal needs no look: a use of the client inside a literal escapes anyway.
+func redeclaresHandle(body *ast.BlockStmt, use *ast.Ident) bool {
+	name := use.Name
 	found := false
+	var stack []ast.Node
 	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return false
+		}
+		if found {
+			return false
+		}
+		var scope ast.Node
 		switch node := n.(type) {
 		case *ast.AssignStmt:
-			found = node.Tok == token.DEFINE && slices.ContainsFunc(node.Lhs, func(lhs ast.Expr) bool {
-				id, ok := lhs.(*ast.Ident)
-				return ok && id.Name == name
-			})
+			if node.Tok == token.DEFINE && slices.ContainsFunc(node.Lhs, func(lhs ast.Expr) bool { return isIdentNamed(lhs, name) }) {
+				scope = enclosingScope(stack)
+			}
 		case *ast.ValueSpec:
-			found = slices.ContainsFunc(node.Names, func(id *ast.Ident) bool { return id.Name == name })
+			if slices.ContainsFunc(node.Names, func(id *ast.Ident) bool { return id.Name == name }) {
+				scope = enclosingScope(stack)
+			}
+		case *ast.RangeStmt:
+			if node.Tok == token.DEFINE && (isIdentNamed(node.Key, name) || isIdentNamed(node.Value, name)) {
+				scope = node
+			}
 		}
-		return !found
+		found = scope != nil && n.Pos() < use.Pos() && scope.Pos() <= use.Pos() && use.End() <= scope.End()
+		stack = append(stack, n)
+		return true
 	})
 	return found
+}
+
+// enclosingScope returns the innermost node of the stack that opens a scope
+// for a binding made in it.
+func enclosingScope(stack []ast.Node) ast.Node {
+	for i := len(stack) - 1; i >= 0; i-- {
+		switch stack[i].(type) {
+		case *ast.BlockStmt, *ast.CaseClause, *ast.CommClause, *ast.IfStmt, *ast.ForStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt:
+			return stack[i]
+		}
+	}
+	return nil
+}
+
+func isIdentNamed(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
 }
 
 // declaresName reports whether the test body declares the name itself, so a

@@ -2014,9 +2014,16 @@ func (logger) Log(args ...any) { _ = args[0].(*Config).Ping() }
 func TestShadowed(t *testing.T) { c := Load(); { t := logger{}; t.Log(c) } }
 func TestShadowedVar(t *testing.T) { c := Load(); { var t logger; t.Log(c) } }
 func TestRealLog(t *testing.T) { c := Load(); t.Log(c) }
+func TestShadowedThenOther(t *testing.T) { c := Load(); { t := logger{}; t.Log(c) }; x := 1; _ = x }
+func TestShadowedAmongOthers(t *testing.T) { c := Load(); { t, n := logger{}, 1; _ = n; t.Log(c) } }
+func TestShadowedByRange(t *testing.T) { c := Load(); for _, t := range []logger{{}} { t.Log(c) } }
+func TestRealAfterShadow(t *testing.T) { c := Load(); { t := logger{}; _ = t }; t.Log(c) }
+func TestShadowedInIf(t *testing.T) { c := Load(); if t := (logger{}); true { t.Log(c) } }
+func TestRealBeforeShadow(t *testing.T) { c := Load(); t.Log(c); t := logger{}; _ = t }
+func TestRealAfterIf(t *testing.T) { c := Load(); if t := (logger{}); true { _ = t }; t.Log(c) }
 `,
 	})
-	assert.ElementsMatch(t, []string{"config/config_test.go:7", "config/config_test.go:8"}, found, "%v", msgs)
+	assert.ElementsMatch(t, []string{"config/config_test.go:7", "config/config_test.go:8", "config/config_test.go:10", "config/config_test.go:11", "config/config_test.go:12", "config/config_test.go:14"}, found, "%v", msgs)
 }
 
 // A formatting method promoted from an embedded type that reaches the wire is
@@ -2052,7 +2059,9 @@ func TestLog(t *testing.T) { c := Load(); t.Log(c) }
 
 // A method promoted from a type of another package is not the live method of a
 // type of this package that shares its name: strings.Builder.String is no
-// Builder.String of the client's package.
+// Builder.String of the client's package. Whether such a formatting method
+// reaches the wire the rule does not see, so fmt formatting the client is an
+// escape again.
 func TestTestExternalServiceRule_PromotedForeignMethodNotLive(t *testing.T) {
 	found, msgs := externalServiceFindings(t, map[string]string{
 		"config/config.go": `package config
@@ -2077,9 +2086,47 @@ import (
 
 func TestSprint(t *testing.T) { c := Load(); _ = fmt.Sprint(c) }
 func TestPing(t *testing.T) { c := Load(); _ = c.Ping() }
+func TestString(t *testing.T) { c := Load(); _ = c.String() }
 `,
 	})
-	assert.ElementsMatch(t, []string{"config/config_test.go:9"}, found, "%v", msgs)
+	assert.ElementsMatch(t, []string{"config/config_test.go:8", "config/config_test.go:9"}, found, "%v", msgs)
+}
+
+// A formatting method embedded from another package of the module may reach the
+// wire unseen: fmt formatting the client is an escape.
+func TestTestExternalServiceRule_PromotedStringOfAnotherPackage(t *testing.T) {
+	found, msgs := externalServiceFindings(t, map[string]string{
+		"inner/inner.go": `package inner
+
+import "net/http"
+
+type Inner struct{ Endpoint string }
+func (i *Inner) String() string { r, _ := http.Get(i.Endpoint); return r.Status }
+`,
+		"config/config.go": `package config
+
+import (
+	"net/http"
+
+	"example.com/rulestest/inner"
+)
+
+type Config struct{ *inner.Inner }
+func Load() *Config { return &Config{Inner: &inner.Inner{Endpoint: "https://inner-api.example.com"}} }
+func (c *Config) Ping() error { _, err := http.Get(c.Endpoint); return err }
+`,
+		"config/config_test.go": `package config
+
+import (
+	"fmt"
+	"testing"
+)
+
+func TestSprint(t *testing.T) { c := Load(); _ = fmt.Sprint(c) }
+func TestLog(t *testing.T) { c := Load(); t.Log(c) }
+`,
+	})
+	assert.ElementsMatch(t, []string{"config/config_test.go:8", "config/config_test.go:9"}, found, "%v", msgs)
 }
 
 // fmt.Sprint(c) formats the client and calls only its String; a writer of fmt.Fprint
