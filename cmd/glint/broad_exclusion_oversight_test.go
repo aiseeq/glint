@@ -92,6 +92,22 @@ func TestBroadExclusionAllowsOversightRuleExceptionOfOneLine(t *testing.T) {
 	assert.Equal(t, []string{".glint.yaml:10"}, broadPlaces(t, oversightExceptionProject(t, "suppression-without-reason", both)))
 }
 
+// A file settings.exclude or settings.skip_dirs takes out is analyzed by no
+// rule, so a base name it shares names one file all the same: the exception
+// of its line is none, while the exclusion is judged by itself.
+func TestBroadExclusionOversightRuleExceptionOfOneLineLeavesExcludedFilesOut(t *testing.T) {
+	for settings, want := range map[string][]string{
+		"settings:\n  exclude:\n    - \"retired/**\"\n":   {".glint.yaml:3"},
+		"settings:\n  skip_dirs:\n    - retired\n":        {".glint.yaml:3"},
+		"settings:\n  exclude:\n    - \"retired/*.md\"\n": {".glint.yaml:9"},
+	} {
+		root := oversightExceptionProject(t, "suppression-without-reason", "          - file: client.go\n            line: 3\n            reason: one legacy marker\n")
+		writeModuleFile(t, root, ".glint.yaml", settings+"categories:\n  deadcode:\n    rules:\n      suppression-without-reason:\n        exceptions:\n          - file: client.go\n            line: 3\n            reason: one legacy marker\n")
+		writeModuleFile(t, root, "retired/payprov/client.go", "package payprov\n")
+		assert.Equal(t, want, broadPlaces(t, root), settings)
+	}
+}
+
 // An exception of one line of a file named by its path keeps one file
 // whatever the tree holds: telling it needs no walk, so a directory the user
 // cannot read fails no run.

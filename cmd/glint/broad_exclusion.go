@@ -124,7 +124,8 @@ func readBroadChain(configPath, root string) ([]broadConfigFile, error) {
 // node it names, placed on the line of the alias: the load of the
 // configuration follows an alias (core.LoadConfig), so what it names is in
 // effect where it is used, and is judged and kept by a marker there. The load
-// refuses an alias of a node that holds it, so the copies end.
+// refuses an alias of a node that holds it, so the copies end. A mapping with
+// a merge key gets the keys it merges (mergeBroadKeys).
 func expandBroadAliases(n *yaml.Node) {
 	for i, child := range n.Content {
 		if child.Kind == yaml.AliasNode {
@@ -132,6 +133,42 @@ func expandBroadAliases(n *yaml.Node) {
 		}
 		expandBroadAliases(n.Content[i])
 	}
+	if n.Kind == yaml.MappingNode {
+		mergeBroadKeys(n)
+	}
+}
+
+// mergeBroadKeys replaces the merge key (<<) of a mapping with the keys it
+// brings, as the load merges them (yaml.v3, decoder.merge): a key the mapping
+// sets itself wins, and of a list of mappings the earlier one wins. The keys
+// it brings are placed on the line
+// of the merge key, where they take effect. A merged mapping has had its own
+// merge key replaced before (expandBroadAliases).
+func mergeBroadKeys(n *yaml.Node) {
+	var sources []*yaml.Node
+	line := 0
+	content := make([]*yaml.Node, 0, len(n.Content))
+	set := make(map[string]bool)
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if key := n.Content[i]; key.ShortTag() == "!!merge" {
+			sources, line = []*yaml.Node{n.Content[i+1]}, key.Line
+			if n.Content[i+1].Kind == yaml.SequenceNode {
+				sources = n.Content[i+1].Content
+			}
+			continue
+		}
+		content = append(content, n.Content[i], n.Content[i+1])
+		set[n.Content[i].Value] = true
+	}
+	for _, source := range sources {
+		for i := 0; i+1 < len(source.Content); i += 2 {
+			if key := source.Content[i]; !set[key.Value] {
+				set[key.Value] = true
+				content = append(content, relinedBroadNode(key, line), relinedBroadNode(source.Content[i+1], line))
+			}
+		}
+	}
+	n.Content = content
 }
 
 // relinedBroadNode copies a node and everything under it onto one line.
@@ -253,7 +290,8 @@ func narrowOversightExceptions(entries []broadEntry, cfg *core.Config) ([]broadE
 		}
 		named := 0
 		for _, file := range files {
-			if entry.oneLine.NamesFile(file) {
+			// settings.skip_dirs leaves its files out of the list already.
+			if entry.oneLine.NamesFile(file) && !slices.ContainsFunc(cfg.Settings.Exclude, func(pattern string) bool { return core.MatchGlob(pattern, file) }) {
 				named++
 			}
 		}
