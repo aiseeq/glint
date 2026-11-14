@@ -541,7 +541,7 @@ func (s *tsSource) tsNearBody(f tsFunc, detailed bool) nearBody {
 		w.markHead(i)
 		switch tok.kind {
 		case tsIdent:
-			s.emitName(w.b, i, locals)
+			i += s.emitName(w.b, i, locals)
 		case tsString:
 			value := tok.text[1:max(1, len(tok.text)-1)]
 			w.b.emitAnchor(`"`+value+`"`, "s:"+value, nearLiteralMask)
@@ -550,9 +550,11 @@ func (s *tsSource) tsNearBody(f tsFunc, detailed bool) nearBody {
 			w.b.emitAnchor(tok.text, tok.text, nearLiteralMask)
 			w.b.lits[tok.text] = true
 		default:
-			w.b.emit(tok.text)
 			if tsOperators[tok.text] {
+				w.b.emitAnchor(tok.text, tok.text, tok.text)
 				w.b.ops[tok.text] = true
+			} else {
+				w.b.emit(tok.text)
 			}
 			w.punct(i)
 		}
@@ -657,15 +659,29 @@ type tsLocals struct {
 	next    int
 }
 
+// number is the number of a variable, or of a field of a variable read as
+// v.name, which stands in the roles as a variable of its own.
+func (l *tsLocals) number(name string) int {
+	num, known := l.numbers[name]
+	if !known || num < 0 {
+		num = l.next
+		l.next++
+		l.numbers[name] = num
+	}
+	return num
+}
+
 // emitName emits the name at i: a property after a dot or the key of an
 // object literal as written, though a variable may be called so, the name
-// of a called function as an anchor, a variable by its number.
-func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) {
+// of a called function as an anchor, a variable by its number, a field read
+// of a variable, v.name, as a variable of its own; it returns the number of
+// the tokens after i it emitted too.
+func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) int {
 	name := s.text(i)
 	property := s.text(i-1) == "." || s.text(i-1) == "?." ||
 		s.text(i+1) == ":" && (s.text(i-1) == "{" || s.text(i-1) == ",")
 	call := s.text(i+1) == "(" || s.text(i+1) == "?." && s.text(i+2) == "("
-	num, local := locals.numbers[name]
+	_, local := locals.numbers[name]
 	if !property && tsOperators[name] {
 		b.ops[name] = true
 	}
@@ -674,21 +690,27 @@ func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) {
 		// A property may be named like a keyword: set.delete(key).
 		b.calls["."+name] = true
 		b.emitAnchor(name, "."+name, nearCallMask)
-	case property, tsKeywords[name]:
+	case property:
 		b.emit(name)
+	case name == "break" || name == "continue":
+		b.emitAnchor(name, name, name)
+	case tsKeywords[name]:
+		b.emit(name)
+	case local && s.text(i+1) == "." && s.isIdent(i+2) && s.text(i+3) != "(" && s.text(i+3) != "?.":
+		root := locals.number(name)
+		field := locals.number(name + "." + s.text(i+2))
+		b.field(field, root)
+		b.emitLocal(field)
+		return 2
 	case local:
-		if num < 0 {
-			num = locals.next
-			locals.next++
-			locals.numbers[name] = num
-		}
-		b.emitLocal(num)
+		b.emitLocal(locals.number(name))
 	case call:
 		b.calls[name] = true
 		b.emitAnchor(name, name, nearCallMask)
 	default:
 		b.emit(name)
 	}
+	return 0
 }
 
 func lowerBound(sorted []int, value int) int {

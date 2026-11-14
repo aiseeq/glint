@@ -51,10 +51,31 @@ type nearBody struct {
 	Calls  []string `json:"calls"`
 	Ops    []string `json:"ops"`
 	Lits   []string `json:"lits"`
+	// Roots is the variable whose field a field variable in Vars reads.
+	Roots map[int]int `json:"roots,omitempty"`
 }
 
-// nearAnchor marks a literal or the name of a called function in Vars.
+// field records that field reads a field of the variable root.
+func (b *nearBodyBuilder) field(field, root int) {
+	if b.body.Roots == nil {
+		b.body.Roots = make(map[int]int)
+	}
+	b.body.Roots[field] = root
+}
+
+// nearAnchor marks a literal, the name of a called function, an operator or a
+// jump in Vars.
 const nearAnchor = -2
+
+// nearFieldBase numbers the fields of the variables of a Go function, which
+// stand in the roles as variables of their own, apart from the variables.
+const nearFieldBase = 1 << 20
+
+// isNearJump reports whether an anchor is a jump: break, continue, goto or
+// fallthrough.
+func isNearJump(tok nearToken) bool {
+	return tok.vr == nearAnchor && (strings.HasPrefix(tok.text, "(BranchStmt") || tok.text == "break" || tok.text == "continue")
+}
 
 // nearRole is a statement as sameRoles reads it: its shape, the hash of the
 // statements that hold it and of its tokens with the variables, literals and
@@ -240,7 +261,7 @@ func (b *nearBodyBuilder) orderRoles() {
 // follows their order, does not tell a copy with swapped statements from its
 // original; the roles of a detailed body keep the numbers.
 func goNearBody(info *types.Info, fd *ast.FuncDecl, detailed bool) nearBody {
-	w := &goNearWalker{n: newFunctionBlockNormalizer(info, fd), b: newNearBodyBuilder(detailed), own: funcPackage(fd, info)}
+	w := &goNearWalker{n: newFunctionBlockNormalizer(info, fd), b: newNearBodyBuilder(detailed), own: funcPackage(fd, info), fields: make(map[string]int)}
 	w.walk(fd.Body)
 	return w.b.finish()
 }
@@ -253,6 +274,8 @@ type goNearWalker struct {
 	// shape of their statement masks: a selector, printed as one atom, and
 	// its last name, printed otherwise.
 	callees []calleeName
+	// fields numbers the fields of variables the body reads.
+	fields map[string]int
 }
 
 type calleeName struct{ sel, name ast.Node }
@@ -291,6 +314,9 @@ func (w *goNearWalker) walk(root ast.Node) {
 				w.name(x, atom)
 				return false
 			}
+			if w.field(x) {
+				return false
+			}
 		case *ast.Comment, *ast.CommentGroup:
 			return false
 		case *ast.CallExpr:
@@ -314,16 +340,56 @@ func (w *goNearWalker) walk(root ast.Node) {
 		if isNearStmt(node) {
 			w.b.openStmt()
 		}
+		w.openNode(node)
 		if isElseBlock(node, stack) {
-			w.b.emit("(" + nodeKind(node))
 			w.b.openStmt()
 			w.b.emit("else")
-		} else {
-			w.b.emit("(" + nodeKind(node))
 		}
 		stack = append(stack, node)
 		return true
 	})
+}
+
+// openNode emits the kind of node; an operator of an expression, an
+// increment and a jump are anchors, which keep their places as literals do.
+func (w *goNearWalker) openNode(node ast.Node) {
+	kind := "(" + nodeKind(node)
+	switch node.(type) {
+	case *ast.BinaryExpr, *ast.UnaryExpr, *ast.IncDecStmt, *ast.BranchStmt:
+		w.b.emitAnchor(kind, kind, kind)
+	default:
+		w.b.emit(kind)
+	}
+}
+
+// field emits a field of a variable of the function as a variable of its
+// own, numbered by the variable and the field: a copy that reads one field
+// in the place of another is another function, as with variables, and a
+// copy that reads a field where the library function reads a variable reads
+// it in the same place.
+func (w *goNearWalker) field(sel *ast.SelectorExpr) bool {
+	id, ok := ast.Unparen(sel.X).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	if obj, ok := w.n.info.ObjectOf(sel.Sel).(*types.Var); !ok || !obj.IsField() {
+		return false
+	}
+	// Naming the variable numbers it, when it is a variable of the function.
+	root := w.n.ident(id)
+	rootNum, local := w.n.locals[w.n.info.ObjectOf(id)]
+	if !local {
+		return false
+	}
+	key := root + "." + sel.Sel.Name
+	num, known := w.fields[key]
+	if !known {
+		num = nearFieldBase + len(w.fields)
+		w.fields[key] = num
+	}
+	w.b.field(num, rootNum)
+	w.b.emitLocal(num)
+	return true
 }
 
 // isElseBlock reports whether node is the else block of the statement on top
@@ -594,8 +660,8 @@ func sameRoles(c *nearCandidate, body nearBody) bool {
 	unpairHolders(roles, ownPartner, libPartner)
 	unpairHolders(c.body.Roles, libPartner, ownPartner)
 	return m.sameRest(
-		restSide{tokens: unpairedTokens(c.body, libPartner), roles: c.body.Roles},
-		restSide{tokens: unpairedTokens(body, ownPartner), roles: roles})
+		restSide{tokens: unpairedTokens(c.body, libPartner), roles: c.body.Roles, roots: c.body.Roots},
+		restSide{tokens: unpairedTokens(body, ownPartner), roles: roles, roots: body.Roots})
 }
 
 // heldAlike reports whether a statement of the body and one of the library
@@ -653,10 +719,11 @@ func unpairedTokens(body nearBody, partner []int) []nearToken {
 type restSide struct {
 	tokens []nearToken
 	roles  []nearRole
+	roots  map[int]int
 }
 
 // maxRestAlignCells bounds the table of sameRest; the rest of two bodies
-// larger than that is left to the share and the anchors.
+// larger than that is no copy, since nothing compares it.
 const maxRestAlignCells = 1 << 22
 
 // sameRest aligns the tokens of the statements sameRoles did not pair by a
@@ -678,8 +745,13 @@ const maxRestAlignCells = 1 << 22
 func (m *roleMapping) sameRest(libSide, ownSide restSide) bool {
 	lib, own := libSide.tokens, ownSide.tokens
 	rows, cols := len(lib)+1, len(own)+1
-	if len(lib) == 0 || len(own) == 0 || rows*cols > maxRestAlignCells {
+	switch {
+	case len(own) == 0:
+		return !slices.ContainsFunc(lib, isNearJump)
+	case len(lib) == 0:
 		return true
+	case rows*cols > maxRestAlignCells:
+		return false
 	}
 	table := restTable(lib, own)
 	edges := make(map[[2]int]bool, len(m.forward))
@@ -702,6 +774,9 @@ func (m *roleMapping) sameRest(libSide, ownSide restSide) bool {
 			i++
 			j++
 		case j == len(own) || i < len(lib) && table[at+cols] >= table[at+1]:
+			if isNearJump(lib[i]) {
+				return false
+			}
 			libSkipped = skipToken(lib[i], libLeft, libVars) || libSkipped
 			i++
 		default:
@@ -717,7 +792,7 @@ func (m *roleMapping) sameRest(libSide, ownSide restSide) bool {
 			return false
 		}
 	}
-	return heldInPlace(stmts, libSide, ownSide) && keptApart(edges, libVars, ownVars)
+	return heldInPlace(stmts, libSide, ownSide) && keptApart(edges, libVars, ownVars, libSide.roots, ownSide.roots)
 }
 
 // restTable is the table of the longest common subsequence of the suffixes
@@ -742,17 +817,27 @@ func restTable(lib, own []nearToken) []uint16 {
 }
 
 // keptApart reports whether the variables keep their places: none skipped
-// on both sides together with the one it stands for, and none crossing.
-func keptApart(edges map[[2]int]bool, libVars, ownVars map[int]bool) bool {
+// on both sides together with the one it stands for, and none crossing. A
+// field that stands for what its variable stands for is that variable, as
+// when a copy reads the slice of an element where the library function
+// reads the element; two fields of one variable are two variables.
+func keptApart(edges map[[2]int]bool, libVars, ownVars map[int]bool, libRoots, ownRoots map[int]int) bool {
 	ownDegree, libDegree := make(map[int]int), make(map[int]int)
+	kept := make([][2]int, 0, len(edges))
 	for edge := range edges {
 		if ownVars[edge[0]] && libVars[edge[1]] {
 			return false
 		}
+		ownRoot, ownField := ownRoots[edge[0]]
+		libRoot, libField := libRoots[edge[1]]
+		if ownField && edges[[2]int{ownRoot, edge[1]}] || libField && edges[[2]int{edge[0], libRoot}] {
+			continue
+		}
+		kept = append(kept, edge)
 		ownDegree[edge[0]]++
 		libDegree[edge[1]]++
 	}
-	for edge := range edges {
+	for _, edge := range kept {
 		if ownDegree[edge[0]] > 1 && libDegree[edge[1]] > 1 {
 			return false
 		}

@@ -2,6 +2,10 @@ package duplication
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -439,6 +443,48 @@ export function addCounts(a: Map<string, number>, b: Map<string, number>): strin
     a.set(k, (a.get(k) ?? 0) + v)
   }
   return added
+}
+
+export function limitSpan(values: number[], s: { low: number; high: number }): number[] {
+  const out: number[] = []
+  for (let v of values) {
+    if (v < s.low) v = s.low
+    if (v > s.high) v = s.high
+    out.push(v)
+  }
+  return out
+}
+
+export function sumUntil(xs: number[]): number {
+  let total = 0
+  let count = 0
+  for (const x of xs) {
+    if (x === 0) continue
+    if (x < 0) break
+    total += x
+    count++
+  }
+  return total * count
+}
+
+export function spread(xs: number[], pad: number): [number, number] {
+  let lo = xs[0]
+  let hi = xs[0]
+  for (const x of xs) {
+    if (x < lo) lo = x
+    if (x > hi) hi = x
+  }
+  return [lo - pad, hi + pad]
+}
+
+export function countKnown(groups: string[][], key: string): number {
+  let n = 0
+  for (const group of groups) {
+    for (const known of group) {
+      if (known === key) n++
+    }
+  }
+  return n
 }
 
 export function widenRange(values: number[], low: number, high: number): number[] {
@@ -1166,6 +1212,91 @@ func TestDuplicateFuncOfLibraryTypeScriptRolesAndPlaces(t *testing.T) {
   return keys
 }
 `, "Function payprovCounts is a near copy"},
+		"span renamed": {`function payprovLimit(xs: number[], r: { low: number; high: number }): number[] {
+  const res: number[] = []
+  for (let x of xs) {
+    if (x < r.low) x = r.low
+    if (x > r.high) x = r.high
+    res.push(x)
+  }
+  return res
+}
+`, "Function payprovLimit "},
+		"fields trade places": {`function payprovLimit(values: number[], s: { low: number; high: number }): number[] {
+  const out: number[] = []
+  for (let v of values) {
+    if (v < s.low) v = s.high
+    if (v > s.high) v = s.low
+    out.push(v)
+  }
+  return out
+}
+`, ""},
+		"jumps trade places": {`function payprovSum(xs: number[]): number {
+  let total = 0
+  let count = 0
+  for (const x of xs) {
+    if (x === 0) break
+    if (x < 0) continue
+    total += x
+    count++
+  }
+  return total * count
+}
+`, ""},
+		"signs trade places": {`function payprovSpread(xs: number[], pad: number): [number, number] {
+  let lo = xs[0]
+  let hi = xs[0]
+  for (const x of xs) {
+    if (x < lo) lo = x
+    if (x > hi) hi = x
+  }
+  return [lo + pad, hi - pad]
+}
+`, ""},
+		"break dropped": {`function payprovSum(xs: number[]): number {
+  let total = 0
+  let count = 0
+  for (const x of xs) {
+    if (x === 0) continue
+    if (x < 0) {}
+    total += x
+    count++
+  }
+  return total * count
+}
+`, ""},
+		"continue dropped": {`function payprovSum(xs: number[]): number {
+  let total = 0
+  let count = 0
+  for (const x of xs) {
+    if (x === 0) {}
+    if (x < 0) break
+    total += x
+    count++
+  }
+  return total * count
+}
+`, ""},
+		"calls trade places": {`function payprovCounts(a: Map<string, number>, b: Map<string, number>): string[] {
+  const added: string[] = []
+  for (const [k, v] of b) {
+    if (!a.get(k)) added.push(k)
+    a.set(k, (a.has(k) ?? 0) + v)
+  }
+  return added
+}
+`, ""},
+		"field of the element": {`function payprovCountKnown(accounts: { keys: string[] }[], key: string): number {
+  let n = 0
+  for (const account of accounts) {
+    for (let known of account.keys) {
+      if (known === key) n++
+    }
+  }
+  return n
+}
+`, "Function payprovCountKnown is a near copy"},
 		"extra check of the input": {`function payprovCode(raw: string): string {
   if (raw === '') {
     return 'none'
@@ -1423,6 +1554,322 @@ func payprovCounts(a, b map[string]int) []string {
 			assert.Contains(t, violations[0].Message, tc.subject)
 		})
 	}
+}
+
+// The library limits values to a span held in fields, sums values up to the
+// first negative and pads the extent of values.
+const librarySpanSource = `package lib
+
+type Span struct{ Low, High int }
+
+func Limit(values []int, s Span) []int {
+	out := make([]int, 0, len(values))
+	for _, v := range values {
+		if v < s.Low {
+			v = s.Low
+		}
+		if v > s.High {
+			v = s.High
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+func SumUntil(xs []int) int {
+	total := 0
+	count := 0
+	for _, x := range xs {
+		if x == 0 {
+			continue
+		}
+		if x < 0 {
+			break
+		}
+		total += x
+		count++
+	}
+	return total * count
+}
+
+func Spread(xs []int, pad int) (int, int) {
+	lo, hi := xs[0], xs[0]
+	for _, x := range xs {
+		if x < lo {
+			lo = x
+		}
+		if x > hi {
+			hi = x
+		}
+	}
+	return lo - pad, hi + pad
+}
+
+func Offsets(xs []int, base, step int) []int {
+	out := make([]int, 0, len(xs))
+	total := 0
+	for _, x := range xs {
+		total += step
+		if x < base {
+			out = append(out, -x, base+total)
+		} else {
+			out = append(out, x, base-total)
+		}
+	}
+	return append(out, total)
+}
+
+`
+
+// A field read in the place of another, an operator or a jump in the place
+// of another, and a jump dropped make another function; a copy that renames
+// the span or checks the bounds in the other order is a copy.
+func TestDuplicateFuncOfLibraryNearCopyFieldsOperatorsAndJumps(t *testing.T) {
+	for name, tc := range map[string]struct{ source, subject string }{
+		"renamed and reordered": {`package app
+
+import "example.com/owner/lib"
+
+func payprovLimit(xs []int, r lib.Span) []int {
+	res := make([]int, 0, len(xs))
+	for _, x := range xs {
+		if x > r.High {
+			x = r.High
+		}
+		if x < r.Low {
+			x = r.Low
+		}
+		res = append(res, x)
+	}
+	return res
+}
+`, "Function payprovLimit is a near copy (100% alike) of function Limit"},
+		"fields trade places": {`package app
+
+import "example.com/owner/lib"
+
+func payprovLimit(values []int, s lib.Span) []int {
+	out := make([]int, 0, len(values))
+	for _, v := range values {
+		if v < s.Low {
+			v = s.High
+		}
+		if v > s.High {
+			v = s.Low
+		}
+		out = append(out, v)
+	}
+	return out
+}
+`, ""},
+		"fields trade places in the checks": {`package app
+
+import "example.com/owner/lib"
+
+func payprovLimit(values []int, s lib.Span) []int {
+	out := make([]int, 0, len(values))
+	for _, v := range values {
+		if v < s.High {
+			v = s.Low
+		}
+		if v > s.Low {
+			v = s.High
+		}
+		out = append(out, v)
+	}
+	return out
+}
+`, ""},
+		"jumps trade places": {`package app
+
+func payprovSum(xs []int) int {
+	total := 0
+	count := 0
+	for _, x := range xs {
+		if x == 0 {
+			break
+		}
+		if x < 0 {
+			continue
+		}
+		total += x
+		count++
+	}
+	return total * count
+}
+`, ""},
+		"jump dropped": {`package app
+
+func payprovSum(xs []int) int {
+	total := 0
+	count := 0
+	for _, x := range xs {
+		if x == 0 {
+			continue
+		}
+		if x < 0 {
+		}
+		total += x
+		count++
+	}
+	return total * count
+}
+`, ""},
+		"signs trade places": {`package app
+
+func payprovSpread(xs []int, pad int) (int, int) {
+	lo, hi := xs[0], xs[0]
+	for _, x := range xs {
+		if x < lo {
+			lo = x
+		}
+		if x > hi {
+			hi = x
+		}
+	}
+	return lo + pad, hi - pad
+}
+`, ""},
+		"counter runs down": {`package app
+
+func payprovSum(xs []int) int {
+	total := 0
+	count := 0
+	for _, x := range xs {
+		if x == 0 {
+			continue
+		}
+		if x < 0 {
+			break
+		}
+		total += x
+		count--
+	}
+	return total * count
+}
+`, ""},
+		"negation moves": {`package app
+
+func payprovOffsets(xs []int, base, step int) []int {
+	out := make([]int, 0, len(xs))
+	total := 0
+	for _, x := range xs {
+		total += step
+		if x < base {
+			out = append(out, x, -base+total)
+		} else {
+			out = append(out, x, base-total)
+		}
+	}
+	return append(out, total)
+}
+`, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			violations := nearLibraryFindings(t, librarySpanSource, tc.source)
+			if tc.subject == "" {
+				assert.Empty(t, violations)
+				return
+			}
+			require.Len(t, violations, 1)
+			assert.Contains(t, violations[0].Message, tc.subject)
+		})
+	}
+}
+
+// Above the bound of its table sameRest compares nothing and so takes the
+// two bodies for different: a long function is no copy unchecked.
+func TestNearSameRestRejectsWhatItCannotAlign(t *testing.T) {
+	long := make([]nearToken, 2100)
+	for i := range long {
+		long[i] = nearToken{text: "a", vr: -1}
+	}
+	m := &roleMapping{forward: map[int]int{}, back: map[int]int{}}
+	roles := []nearRole{{Parent: -1}}
+	assert.False(t, m.sameRest(restSide{tokens: long, roles: roles}, restSide{tokens: long, roles: roles}))
+	assert.True(t, m.sameRest(restSide{tokens: long[:100], roles: roles}, restSide{tokens: long[:100], roles: roles}))
+}
+
+// A jump of the library function the copy lacks makes another function, even
+// when the copy has nothing the library function lacks; a name that reads
+// like a jump is no jump.
+func TestNearSameRestRejectsADroppedJump(t *testing.T) {
+	m := &roleMapping{forward: map[int]int{}, back: map[int]int{}}
+	roles := []nearRole{{Parent: -1}}
+	jump := []nearToken{{text: "continue", vr: nearAnchor}}
+	assert.False(t, m.sameRest(restSide{tokens: jump, roles: roles}, restSide{roles: roles}))
+	assert.True(t, m.sameRest(restSide{tokens: []nearToken{{text: "x", vr: -1}}, roles: roles}, restSide{roles: roles}))
+	assert.False(t, isNearJump(nearToken{text: "break", vr: -1}))
+	assert.True(t, isNearJump(nearToken{text: "break", vr: nearAnchor}))
+}
+
+// A field the copy reads where the library function reads the variable is
+// that variable on either side; two fields of one variable stay two.
+func TestNearKeptApartTakesAFieldForItsVariable(t *testing.T) {
+	const root, field, other, lib = 1, 10, 2, 0
+	edges := map[[2]int]bool{{root, lib}: true, {field, lib}: true, {field, 5}: true}
+	assert.False(t, keptApart(edges, nil, nil, nil, nil))
+	assert.True(t, keptApart(edges, nil, nil, nil, map[int]int{field: root}))
+	reversed := map[[2]int]bool{{lib, root}: true, {lib, field}: true, {5, field}: true}
+	assert.False(t, keptApart(reversed, nil, nil, nil, nil))
+	assert.True(t, keptApart(reversed, nil, nil, map[int]int{field: root}, nil))
+	assert.False(t, keptApart(edges, nil, nil, nil, map[int]int{field: other}))
+}
+
+// A Go body takes a field read of a variable of the function for a variable
+// of its own, but not a field of a variable from outside.
+func TestGoNearBodyFieldsOfItsVariables(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "app.go", `package app
+
+type span struct{ Low, High int }
+
+var limits span
+
+func payprovClip(v int, s span) int {
+	if v < limits.Low {
+		v = s.Low
+	}
+	return v
+}
+`, 0)
+	require.NoError(t, err)
+	info := &types.Info{Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
+	_, err = (&types.Config{}).Check("app", fset, []*ast.File{file}, info)
+	require.NoError(t, err)
+	fd, ok := file.Decls[len(file.Decls)-1].(*ast.FuncDecl)
+	require.True(t, ok)
+	body := goNearBody(info, fd, true)
+	assert.Len(t, body.Roots, 1)
+}
+
+// A TypeScript body takes break and continue for jumps but a property named
+// so, and a field read of a variable for a variable of its own but a method
+// called on it, an optional call, and a property of a name of no variable.
+func TestTSNearBodyJumpsAndFields(t *testing.T) {
+	src := parseTSSource(strings.Split(`function payprovWalk(o: { v: number; break: number; f?: (n: number) => void }, xs: number[]): number {
+  let n = o.break
+  for (const x of xs) {
+    if (x < 0) break
+    if (x > o.v) continue
+    n += x + Number.EPSILON
+  }
+  o.f?.(n)
+  const flags = { continue: n > 0 }
+  console.log(flags)
+  return n
+}
+`, "\n"))
+	require.NotEmpty(t, src.funcs)
+	body := src.tsNearBody(src.funcs[0], true)
+	var jumps []string
+	for i, text := range body.Tokens {
+		if isNearJump(nearToken{text: text, vr: body.Vars[i]}) {
+			jumps = append(jumps, text)
+		}
+	}
+	assert.Equal(t, []string{"break", "continue"}, jumps)
+	assert.Len(t, body.Roots, 1)
 }
 
 // A call in the place of another is another function, though the copy calls
