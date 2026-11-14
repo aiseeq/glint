@@ -547,9 +547,7 @@ const libraryDependencyTS = `export function addFee(amount: number): number {
 // and runs the rule on the files as the check flow does.
 func tsLibraryFindings(t *testing.T, tsPath, goModDir, source string) []*core.Violation {
 	t.Helper()
-	isolateLibraryCache(t)
-	root := t.TempDir()
-	writeLibraryTestModule(t, filepath.Join(root, "library"), "example.com/owner/lib", map[string]string{
+	return tsLibraryFilesFindings(t, map[string]string{
 		"lib.go":                     libraryReferenceSource,
 		"ts/amount.ts":               libraryReferenceTS,
 		"ts/set.ts":                  librarySetTS,
@@ -561,7 +559,16 @@ func tsLibraryFindings(t *testing.T, tsPath, goModDir, source string) []*core.Vi
 		"ts/cents.ts":                libraryCentsTS,
 		"node_modules/fees/index.ts": libraryDependencyTS,
 		"package.json":               `{"name": "@owner/lib"}`,
-	})
+	}, tsPath, goModDir, source)
+}
+
+// tsLibraryFilesFindings checks a TypeScript file against a library of the
+// files given.
+func tsLibraryFilesFindings(t *testing.T, libFiles map[string]string, tsPath, goModDir, source string) []*core.Violation {
+	t.Helper()
+	isolateLibraryCache(t)
+	root := t.TempDir()
+	writeLibraryTestModule(t, filepath.Join(root, "library"), "example.com/owner/lib", libFiles)
 	project := filepath.Join(root, "project")
 	moduleDir := filepath.Join(project, goModDir)
 	rel, err := filepath.Rel(moduleDir, filepath.Join(root, "library"))
@@ -1843,7 +1850,7 @@ func payprovClip(v int, s span) int {
 	assert.Len(t, body.Roots, 1)
 }
 
-// A TypeScript body takes break and continue for jumps but a property named
+// A TypeScript body takes break, continue and return for jumps but a property named
 // so, and a field read of a variable for a variable of its own but a method
 // called on it, an optional call, and a property of a name of no variable.
 func TestTSNearBodyJumpsAndFields(t *testing.T) {
@@ -1868,7 +1875,7 @@ func TestTSNearBodyJumpsAndFields(t *testing.T) {
 			jumps = append(jumps, text)
 		}
 	}
-	assert.Equal(t, []string{"break", "continue"}, jumps)
+	assert.Equal(t, []string{"break", "continue", "return"}, jumps)
 	assert.Len(t, body.Roots, 1)
 }
 

@@ -318,13 +318,17 @@ func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectCo
 
 // nearCopyCandidate admits what IsDuplicateFuncBodyCandidate admits and
 // methods as well: a method may run the body of a library function over the
-// fields of its receiver. A method that only calls a function of another
+// fields of its receiver, with the parameters of the library function among
+// them or among its own. A method that only calls a function of another
 // package needs no check of its own: no library function is such a call.
 func nearCopyCandidate(fd *ast.FuncDecl, info *types.Info) bool {
 	if fd.Recv == nil {
 		return IsDuplicateFuncBodyCandidate(fd, info)
 	}
-	return fd.Body != nil && fd.Name != nil && fd.Type != nil && fd.Type.Params != nil && fd.Type.Params.NumFields() > 0 && info != nil
+	if fd.Body == nil || fd.Name == nil || fd.Type == nil || fd.Type.Params == nil || info == nil {
+		return false
+	}
+	return fd.Type.Params.NumFields() > 0 || len(fd.Recv.List) == 1 && len(fd.Recv.List[0].Names) == 1
 }
 
 func exactLibraryMatch(fd *ast.FuncDecl, info *types.Info, keys map[string]libraryMatch) (libraryMatch, bool) {

@@ -692,18 +692,23 @@ func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) int {
 		b.emitAnchor(name, "."+name, nearCallMask)
 	case property:
 		b.emit(name)
-	case name == "break" || name == "continue":
+	case name == "break" || name == "continue" || name == "return":
 		b.emitAnchor(name, name, name)
-	case tsKeywords[name]:
-		b.emit(name)
-	case local && s.text(i+1) == "." && s.isIdent(i+2) && s.text(i+3) != "(" && s.text(i+3) != "?.":
+	case (local || name == "this") && s.fieldRead(i):
 		root := locals.number(name)
 		field := locals.number(name + "." + s.text(i+2))
 		b.field(field, root)
-		b.emitLocal(field)
+		b.emitVar(field, s.writes(i, i+3))
+		return 2
+	case tsKeywords[name]:
+		b.emit(name)
+	case tsConstantHolders[name] && s.fieldRead(i):
+		value := name + "." + s.text(i+2)
+		b.emitAnchor(value, value, nearLiteralMask)
+		b.lits[value] = true
 		return 2
 	case local:
-		b.emitLocal(locals.number(name))
+		b.emitVar(locals.number(name), s.writes(i, i+1))
 	case call:
 		b.calls[name] = true
 		b.emitAnchor(name, name, nearCallMask)
@@ -711,6 +716,45 @@ func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) int {
 		b.emit(name)
 	}
 	return 0
+}
+
+// tsConstantHolders are the objects whose properties a function reads as
+// constants: Number.MAX_SAFE_INTEGER is a literal, as 9007199254740991 is.
+var tsConstantHolders = map[string]bool{"Number": true, "Math": true}
+
+// tsAssignments are the operators that write the name before them, but for
+// ++ and --, which write it on its line only.
+var tsAssignments = map[string]bool{
+	"=": true, "+=": true, "-=": true, "*=": true, "/=": true, "%=": true, "**=": true,
+	"&&=": true, "||=": true, "??=": true, "<<=": true, ">>=": true, ">>>=": true,
+	"&=": true, "|=": true, "^=": true,
+}
+
+// fieldRead reports whether the name at i reads a field, name.field, and
+// calls no method.
+func (s *tsSource) fieldRead(i int) bool {
+	return s.text(i+1) == "." && s.isIdent(i+2) && s.text(i+3) != "(" && s.text(i+3) != "?."
+}
+
+// writes reports whether the name at i, whose tokens end before next, is
+// written: declared, incremented in front, or assigned, itself or at an
+// index.
+func (s *tsSource) writes(i, next int) bool {
+	switch s.text(i - 1) {
+	case "let", "const", "var":
+		return true
+	case "++", "--":
+		if s.toks[i-1].line == s.toks[i].line {
+			return true
+		}
+	}
+	for s.text(next) == "[" && s.match[next] > next {
+		next = s.match[next] + 1
+	}
+	if op := s.text(next); op == "++" || op == "--" {
+		return s.toks[next].line == s.toks[next-1].line
+	}
+	return tsAssignments[s.text(next)]
 }
 
 func lowerBound(sorted []int, value int) int {
