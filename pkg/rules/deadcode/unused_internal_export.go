@@ -227,7 +227,9 @@ func (r *UnusedInternalExportRule) includeGoCandidate(usage *exportUsage, pkgCtx
 var templateFieldSelector = regexp.MustCompile(`\.([A-Za-z_][A-Za-z0-9_]*)`)
 
 // templateSelectorNames collects field and method selectors used inside Go
-// template actions in module template files and Go string literals.
+// template actions in module template files and Go string literals. The
+// template files are those of the module's directories the run walks
+// (core.RepositoryTree).
 func templateSelectorNames(ctx *core.GoProjectContext) (map[string]bool, error) {
 	names := make(map[string]bool)
 	addActions := func(source string) {
@@ -266,7 +268,11 @@ func templateSelectorNames(ctx *core.GoProjectContext) (map[string]bool, error) 
 	if ctx.ProjectRoot == "" {
 		return names, nil
 	}
-	err := filepath.WalkDir(ctx.ProjectRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+	tree, err := core.NewRepositoryTree(ctx.ProjectRoot)
+	if err != nil {
+		return nil, err
+	}
+	err = filepath.WalkDir(ctx.ProjectRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -280,7 +286,7 @@ func templateSelectorNames(ctx *core.GoProjectContext) (map[string]bool, error) 
 					return filepath.SkipDir
 				}
 			}
-			return nil
+			return tree.Enter(path)
 		}
 		switch strings.ToLower(filepath.Ext(path)) {
 		case ".html", ".tmpl", ".tpl", ".gohtml", ".gotmpl", ".txt":

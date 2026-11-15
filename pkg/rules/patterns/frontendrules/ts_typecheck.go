@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -346,11 +347,17 @@ var nextBuild = regexp.MustCompile(`(?:^|[\s;&|])next\s+build\b`)
 
 // checkedTSConfigs returns the tsconfigs of the project that a package.json
 // script type-checks: tsc -p <path>, a plain tsc (the tsconfig.json beside
-// the package.json) and next build, which checks that one too.
+// the package.json) and next build, which checks that one too. A package.json
+// in a directory the run does not walk (core.RepositoryTree) is not the
+// project's.
 func checkedTSConfigs(root string) ([]tsconfigScope, error) {
 	var scopes []tsconfigScope
 	seen := make(map[string]bool)
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	tree, err := core.NewRepositoryTree(root)
+	if err != nil {
+		return nil, fmt.Errorf("find type-checked tsconfigs under %s: %w", root, err)
+	}
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -362,7 +369,7 @@ func checkedTSConfigs(root string) ([]tsconfigScope, error) {
 			if path != root && (patternkit.EnvFileSkipDirs[d.Name()] || strings.HasPrefix(d.Name(), ".") || strings.Count(rel, string(filepath.Separator)) >= 4) {
 				return filepath.SkipDir
 			}
-			return nil
+			return tree.Enter(path)
 		}
 		if d.Name() != "package.json" {
 			return nil

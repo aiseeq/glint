@@ -26,6 +26,8 @@ import (
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 	parser "github.com/wasilibs/go-pgquery"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/aiseeq/glint/pkg/core"
 )
 
 // Schema is the set of tables the migrations create.
@@ -284,9 +286,16 @@ func load(root string, dirs []string) (*Schema, string, error) {
 	return schema, key, nil
 }
 
+// findMigrationDirs returns the directories named migrations under root that
+// the run walks: not in a dependency or test directory, one git ignores or a
+// repository of its own below the project.
 func findMigrationDirs(root string) ([]string, error) {
+	tree, err := core.NewRepositoryTree(root)
+	if err != nil {
+		return nil, fmt.Errorf("find migrations under %s: %w", root, err)
+	}
 	var dirs []string
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("walk %s: %w", path, err)
 		}
@@ -295,6 +304,9 @@ func findMigrationDirs(root string) ([]string, error) {
 		}
 		if path != root && skippedDirs[entry.Name()] {
 			return filepath.SkipDir
+		}
+		if err := tree.Enter(path); err != nil {
+			return err
 		}
 		if entry.Name() == "migrations" {
 			dirs = append(dirs, path)

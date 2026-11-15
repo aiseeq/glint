@@ -173,7 +173,8 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 }
 
 // envFileKeys returns the keys of the env files of the project (.env,
-// .env.example, .env.test) up to three directories deep: the variables a
+// .env.example, .env.test) up to three directories deep, outside the
+// directories the run does not walk (core.RepositoryTree): the variables a
 // developer's environment holds when the runner exports the file. Only the
 // key names are kept.
 func envFileKeys(root string) (map[string]bool, error) {
@@ -184,7 +185,11 @@ func envFileKeys(root string) (map[string]bool, error) {
 func envFileInputs(root string) (map[string]bool, string, error) {
 	keys := make(map[string]bool)
 	hash := sha256.New()
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	tree, err := core.NewRepositoryTree(root)
+	if err != nil {
+		return nil, "", fmt.Errorf("list env files under %s: %w", root, err)
+	}
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -196,7 +201,7 @@ func envFileInputs(root string) (map[string]bool, string, error) {
 			if path != root && (patternkit.EnvFileSkipDirs[d.Name()] || strings.Count(rel, string(filepath.Separator)) >= 3) {
 				return filepath.SkipDir
 			}
-			return nil
+			return tree.Enter(path)
 		}
 		if d.Name() != ".env" && !strings.HasPrefix(d.Name(), ".env.") {
 			return nil
