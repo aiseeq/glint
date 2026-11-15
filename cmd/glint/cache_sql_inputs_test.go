@@ -213,7 +213,7 @@ func TestSQLChildInvalidInputsNeverCacheFindings(t *testing.T) {
 		require.Equal(t, 1, rule.calls)
 		cache, err := openResultCache(dir, root, "", "build", "stamp")
 		require.NoError(t, err)
-		cache.keyProject("test-inputs", nil, []rules.Rule{rule}, "")
+		cache.keyProject("", "test-inputs", nil, []rules.Rule{rule}, "")
 		require.NotNil(t, cache.previousProject)
 		require.NotContains(t, cache.previousProject.RootRules, rule.Name())
 		require.NotContains(t, cache.previousProject.RootViolations, rule.Name())
