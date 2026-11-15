@@ -2,6 +2,7 @@ package patternkit
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -64,4 +65,22 @@ func TestTemplateFilesReadWorktreeRoot(t *testing.T) {
 		"web/templates/page.html": "{{.Title}}",
 	})
 	assert.Equal(t, []string{"web/templates/page.html"}, got)
+}
+
+// A dist directory git tracks is walked by the run, so its templates are the
+// project's; an untracked one is a build output both leave out.
+func TestTemplateFilesReadTrackedDistAsTheRunDoes(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{"dist/page.html": "{{.Title}}", "web/dist/x.html": "{{.Out}}"} {
+		path := filepath.Join(root, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "dist/page.html"}} {
+		out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	paths, err := TemplateFiles(root, true)
+	require.NoError(t, err)
+	assert.Equal(t, []string{filepath.Join(root, "dist/page.html")}, paths)
 }

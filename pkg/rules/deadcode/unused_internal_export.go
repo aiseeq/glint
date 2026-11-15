@@ -2,6 +2,7 @@ package deadcode
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -286,7 +287,7 @@ func templateSelectorNames(ctx *core.GoProjectContext, respectGitignore bool, sk
 	for _, path := range files {
 		content, err := os.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read template %s: %w", path, err)
 		}
 		addActions(string(content))
 	}

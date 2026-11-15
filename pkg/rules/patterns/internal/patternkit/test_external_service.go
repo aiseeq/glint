@@ -9,8 +9,12 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 )
 
-// EnvFileSkipDirs are the directories whose env files are not the project's.
-var EnvFileSkipDirs = map[string]bool{"node_modules": true, ".git": true, "vendor": true, "dist": true}
+// EnvFileSkipDirs are the dependency directories whose env files, templates
+// and tsconfigs are never the project's, even under an explicit
+// settings.skip_dirs that leaves them in. A build directory (dist, build, out,
+// bin) is not here: RepositoryTree decides it as the run's walk does, reading
+// one git tracks.
+var EnvFileSkipDirs = map[string]bool{"node_modules": true, ".git": true, "vendor": true}
 
 // CalleeName renders `pkg.Func` or `Func` for a call expression; the rendering
 // itself is core.ExtractFullFunctionName.

@@ -16,8 +16,9 @@ func TemplateFiles(root string, respectGitignore bool, skipDirs ...string) ([]st
 }
 
 // FilesWithExt returns the files under root with one of the extensions,
-// outside dependency, build and hidden directories and those the run does not
-// walk under respectGitignore (core.RepositoryTree): templates and
+// outside dependency (EnvFileSkipDirs) and hidden directories and those the
+// run does not walk (core.RepositoryTree: skip_dirs, untracked build output,
+// .gitignore under respectGitignore): templates and
 // stylesheets, which the analysis does not list.
 func FilesWithExt(root string, respectGitignore bool, exts []string, skipDirs ...string) ([]string, error) {
 	tree, err := core.NewRepositoryTree(root, respectGitignore, skipDirs...)
