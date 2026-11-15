@@ -228,7 +228,7 @@ func TestBroadExclusionOneLineExceptionCountsWhatTheRunExcepts(t *testing.T) {
 	const rule = "suppression-without-reason"
 	forms := []string{"file: a.go", "files: a.go", "files: \"*.go\"", "files: \"internal/**\"", "files: \"*\"", "files: \"*.yaml\""}
 	for name, tree := range broadFilesTrees {
-		for _, form := range forms {
+		for _, form := range raceForms(forms) {
 			exception := form + "\nline: 3"
 			t.Run(name+"/"+form, func(t *testing.T) {
 				// Each run is a subprocess in its own directory; in parallel
@@ -322,7 +322,7 @@ func TestBroadExclusionOneLineStaleExceptionCountsTheConfiguration(t *testing.T)
 		},
 	}
 	for name, tree := range trees {
-		for _, form := range tree.forms {
+		for _, form := range raceForms(tree.forms) {
 			t.Run(name+"/"+form, func(t *testing.T) {
 				t.Parallel()
 				root := t.TempDir()
@@ -401,7 +401,7 @@ func TestBroadExclusionFileExceptionCoversWhatTheRunExcepts(t *testing.T) {
 	}
 	forms := []string{"files: \"*.go\"", "files: a.go", "file: a.go", "files: \"**\"\nfile: a.go", "line: -1", "files: \"**/*.go\"", "files: \"cmd/**\""}
 	for name, tree := range trees {
-		for _, exception := range forms {
+		for _, exception := range raceForms(forms) {
 			t.Run(name+"/"+strings.ReplaceAll(exception, "\n", " "), func(t *testing.T) {
 				t.Parallel()
 				root := t.TempDir()
@@ -478,4 +478,17 @@ func TestBroadExclusionNestedRepositoryCountsTheExceptionsItKeeps(t *testing.T) 
 	places := broadPlaces(t, root)
 	assert.Contains(t, places, ".glint.yaml:5")
 	assert.NotContains(t, places, ".glint.yaml:6")
+}
+
+// raceForms are the forms of an exception a comparison runs: every form, and
+// under the race detector the first alone. The forms differ in what the
+// exception matches, which the run without the detector compares; the
+// detector watches the run itself - the walk of each tree, its nested
+// repositories among them - which is the same for every form, while a run of
+// the race build is many times slower.
+func raceForms(forms []string) []string {
+	if raceDetector && len(forms) > 1 {
+		return forms[:1]
+	}
+	return forms
 }
