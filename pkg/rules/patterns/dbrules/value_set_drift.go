@@ -103,7 +103,7 @@ func (r *ValueSetDriftRule) UseProjectFiles(files []*core.FileContext) {
 	r.sqlExact, r.sqlColumns = indexSQLValueSetGroups(r.sqlSets)
 	r.options, r.optionsErr = nil, nil
 	if len(files) > 0 && files[0].ProjectRoot != "" {
-		r.options, r.optionsErr = templateOptionSets(files[0].ProjectRoot, r.RespectGitignore())
+		r.options, r.optionsErr = templateOptionSets(files[0].ProjectRoot, r.RespectGitignore(), r.SkipDirs()...)
 	}
 }
 

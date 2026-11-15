@@ -1,6 +1,8 @@
 package dbrules
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -9,6 +11,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTemplateOptionSetsRespectsSkipDirs(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "generated/page.html")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(`<select name="status"><option value="a">A</option><option value="b">B</option><option value="c">C</option></select>`), 0o644))
+	sets, err := templateOptionSets(root, true, "generated")
+	require.NoError(t, err)
+	assert.Empty(t, sets)
+}
 
 func valueSetDriftFindings(t *testing.T, files map[string]string) []*core.Violation {
 	t.Helper()

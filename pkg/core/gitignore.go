@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -147,13 +149,13 @@ type RepositoryTree struct {
 	// ignore is nil when settings.respect_gitignore is off.
 	ignore     *gitignoreIndex
 	skipNested bool
-	skipDirs   map[string]bool
+	skipDirs   []string
 }
 
 // NewRepositoryTree tells whether root lies inside a repository and, with
 // respectGitignore (settings.respect_gitignore of the run), loads the ignore
-// files above it. skipDirs are settings.skip_dirs of that run, including the
-// walker's default directory names when the setting is absent.
+// files above it. skipDirs is the explicit settings.skip_dirs override; when
+// omitted, the walker's shared default directory policy applies.
 func NewRepositoryTree(root string, respectGitignore bool, skipDirs ...string) (*RepositoryTree, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -164,12 +166,7 @@ func NewRepositoryTree(root string, respectGitignore bool, skipDirs ...string) (
 		return nil, err
 	}
 	tree := &RepositoryTree{root: abs, skipNested: inside}
-	if len(skipDirs) > 0 {
-		tree.skipDirs = make(map[string]bool, len(skipDirs))
-		for _, name := range skipDirs {
-			tree.skipDirs[name] = true
-		}
-	}
+	tree.skipDirs = slices.Clone(skipDirs)
 	if respectGitignore {
 		if tree.ignore, err = newGitignoreIndex(abs); err != nil {
 			return nil, fmt.Errorf("load gitignore patterns for %s: %w", abs, err)
@@ -189,7 +186,11 @@ func (t *RepositoryTree) Enter(dir string) error {
 		return fmt.Errorf("make %s absolute: %w", dir, err)
 	}
 	if abs != t.root {
-		if t.skipDirs[filepath.Base(abs)] {
+		skip, err := shouldSkipDirectory(filepath.Base(abs), abs, t.root, t.skipDirs, t.skipNested)
+		if err != nil {
+			return err
+		}
+		if skip {
 			return filepath.SkipDir
 		}
 		// Сначала .gitignore: игнорируемый каталог не открывается вовсе.
@@ -210,6 +211,42 @@ func (t *RepositoryTree) Enter(dir string) error {
 		return nil
 	}
 	return t.ignore.addDir(abs)
+}
+
+// shouldSkipDirectory makes the directory decision shared by the file walker
+// and rules that traverse the project tree themselves. An explicit list is
+// verbatim; otherwise the defaults skip artifact directories unless Git tracks
+// something below build, out, dist, or bin.
+func shouldSkipDirectory(name, path, root string, explicit []string, insideRepo bool) (bool, error) {
+	if len(explicit) > 0 {
+		return slices.Contains(explicit, name), nil
+	}
+	if !slices.Contains(DefaultSkipDirs, name) {
+		return false, nil
+	}
+	if name != "out" && name != "dist" && name != "build" && name != "bin" {
+		return true, nil
+	}
+	if !insideRepo {
+		return true, nil
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false, fmt.Errorf("make %q relative to project root %q: %w", path, root, err)
+	}
+	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", ":(literal)"+filepath.ToSlash(rel))
+	output, err := cmd.Output()
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return true, nil
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "not a git repository") {
+			return true, nil
+		}
+		return false, fmt.Errorf("list tracked files in %q: %w", path, err)
+	}
+	return len(output) == 0, nil
 }
 
 // skipIgnored returns filepath.SkipDir for a directory git ignores while the

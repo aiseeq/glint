@@ -162,10 +162,13 @@ type runConfigured interface {
 func (r *BaseRule) useRunConfig(cfg *core.Config) {
 	respect := cfg.RespectGitignore()
 	r.respectGitignore = &respect
-	r.skipDirs = cfg.SkipDirs()
+	// Keep the raw override: core walkers and RepositoryTree apply their
+	// shared default skip policy when this is empty.
+	r.skipDirs = cfg.Settings.SkipDirs
 }
 
-// SkipDirs reports the directory names the run's walker leaves out.
+// SkipDirs reports the explicit settings.skip_dirs override, or nil when the
+// run uses the shared default directory policy.
 func (r *BaseRule) SkipDirs() []string { return r.skipDirs }
 
 // RespectGitignore reports settings.respect_gitignore of the run: whether a

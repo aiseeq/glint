@@ -268,20 +268,17 @@ func load(root string, dirs []string, respectGitignore bool, skipDirs ...string)
 	schema := &Schema{tables: make(map[string]*Table)}
 	digest := sha256.New()
 	loaded := false
-	var migrations []string
 	for _, dir := range dirs {
 		files, err := upMigrations(dir)
 		if err != nil {
 			return nil, "", err
 		}
-		migrations = append(migrations, files...)
-	}
-	slices.SortFunc(migrations, compareVersions)
-	for _, file := range migrations {
-		if err := schema.applyFile(file, digest); err != nil {
-			return nil, "", err
+		for _, file := range files {
+			if err := schema.applyFile(file, digest); err != nil {
+				return nil, "", err
+			}
+			loaded = true
 		}
-		loaded = true
 	}
 	key := hex.EncodeToString(digest.Sum(nil))
 	if !loaded {

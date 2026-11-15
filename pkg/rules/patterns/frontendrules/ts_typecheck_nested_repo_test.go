@@ -94,6 +94,20 @@ func TestTSFileTypeCheckedFollowsRespectGitignore(t *testing.T) {
 	assert.True(t, checked)
 }
 
+func TestTSFileTypeCheckedRespectsSkipDirs(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		".git/HEAD":               "ref: refs/heads/main\n",
+		"generated/package.json":  typecheckPackage,
+		"generated/tsconfig.json": "{}",
+		"generated/src/probe.ts":  "export const probe = 1\n",
+	}
+	checkedTSConfigPaths(t, root, files)
+	checked, err := tsFileTypeChecked(root, filepath.Join(root, "generated/src/probe.ts"), true, "generated")
+	require.NoError(t, err)
+	assert.False(t, checked)
+}
+
 // The tsc rule of a run without respect_gitignore checks the file of the
 // ignored directory by the tsconfig its package.json names; respecting
 // .gitignore, by the nearest tsconfig.json above it, as an editor does.

@@ -3,6 +3,7 @@ package core
 import (
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,9 +14,9 @@ import (
 
 // treeWalkedDirs walks root the way a rule does with RepositoryTree and
 // returns the directories it enters, relative to root.
-func treeWalkedDirs(t *testing.T, root string, respectGitignore bool) string {
+func treeWalkedDirs(t *testing.T, root string, respectGitignore bool, skipDirs ...string) string {
 	t.Helper()
-	tree, err := NewRepositoryTree(root, respectGitignore)
+	tree, err := NewRepositoryTree(root, respectGitignore, skipDirs...)
 	require.NoError(t, err)
 	var got []string
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
@@ -136,6 +137,26 @@ func TestRepositoryTreeEntersIgnoredDirectoryWithoutRespectGitignore(t *testing.
 	cfg.Settings.RespectGitignore = &respect
 	if got, want := walkedPaths(t, NewWalker(root, cfg).WithAdditionalFilePredicate(func(path string) bool { return filepath.Ext(path) == ".sql" || filepath.Base(path) == ".gitignore" })), ".gitignore,gen/.gitignore,gen/migrations/1.sql"; got != want {
 		t.Fatalf("the run's walk of the same tree: %s, want %s", got, want)
+	}
+}
+
+func TestRepositoryTreeMatchesWalkerForTrackedBuildDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		".git/HEAD":     "ref: refs/heads/main\n",
+		"build/main.go": "package build\n",
+	})
+	for _, args := range [][]string{{"init", "-q"}, {"add", "build/main.go"}} {
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if got := walkedPaths(t, NewWalker(root, DefaultConfig())); got != "build/main.go" {
+		t.Fatalf("walker paths: %s", got)
+	}
+	if got := treeWalkedDirs(t, root, true); !strings.Contains(got, "build") {
+		t.Fatalf("RepositoryTree dirs: %s", got)
 	}
 }
 

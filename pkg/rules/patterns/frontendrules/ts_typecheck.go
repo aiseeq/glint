@@ -458,8 +458,8 @@ func projectCheckedTSConfigs(root string, respectGitignore bool, skipDirs ...str
 
 // tsFileTypeChecked reports a TS file that a type-checked tsconfig of the
 // project compiles.
-func tsFileTypeChecked(root, file string, respectGitignore bool) (bool, error) {
-	scopes, err := projectCheckedTSConfigs(root, respectGitignore)
+func tsFileTypeChecked(root, file string, respectGitignore bool, skipDirs ...string) (bool, error) {
+	scopes, err := projectCheckedTSConfigs(root, respectGitignore, skipDirs...)
 	if err != nil {
 		return false, err
 	}

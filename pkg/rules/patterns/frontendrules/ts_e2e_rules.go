@@ -69,7 +69,7 @@ func (r *UntypedFulfillPayloadRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 func checkUntypedFulfillPayload(rule *rules.BaseRule, ctx *core.FileContext, f patternkit.JsFlat) []*core.Violation {
 	// A type on a mock helps only where the compiler reads the spec;
 	// ts-test-outside-typecheck reports the specs it does not.
-	checked, err := tsFileTypeChecked(ctx.ProjectRoot, ctx.Path, rule.RespectGitignore())
+	checked, err := tsFileTypeChecked(ctx.ProjectRoot, ctx.Path, rule.RespectGitignore(), rule.SkipDirs()...)
 	if err != nil {
 		return patternkit.JsReport(nil, rule, ctx, 1, "The tsconfigs of the project cannot be read, so the mocks were not checked: "+err.Error(), "Fix the tsconfig or package.json the error names")
 	}
@@ -259,7 +259,7 @@ func (r *TSTestOutsideTypecheckRule) UseProjectFiles(files []*core.FileContext) 
 		if !ctx.IsTypeScriptFile() || !ctx.IsTestFile() || !patternkit.TestSourceFile(ctx) {
 			continue
 		}
-		checked, err := tsFileTypeChecked(ctx.ProjectRoot, ctx.Path, r.RespectGitignore())
+		checked, err := tsFileTypeChecked(ctx.ProjectRoot, ctx.Path, r.RespectGitignore(), r.SkipDirs()...)
 		if err == nil && !checked {
 			checked, err = typeCheckedByRunner(ctx.ProjectRoot, ctx.Path)
 		}
