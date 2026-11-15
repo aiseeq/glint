@@ -477,3 +477,51 @@ func TestScopedRunLoadsOnlyTheModulesOfTheRun(t *testing.T) {
 		t.Fatalf("got %v, want the unused export of the run", violations)
 	}
 }
+
+// A file argument that is a symlink keeps its own name, inside the project or
+// pointing out of it; only the directories above it resolve.
+func TestResolvePathKeepsSymlinkedFileName(t *testing.T) {
+	parent := t.TempDir()
+	project := filepath.Join(parent, "project")
+	writeModuleFile(t, project, "go.mod", "module example.com/projecta\n\ngo 1.22\n")
+	writeModuleFile(t, project, "sub/b.go", "package sub\n")
+	writeModuleFile(t, parent, "outside/ext.go", "package projecta\n")
+	for link, target := range map[string]string{
+		filepath.Join(project, "aliases"):         "",
+		filepath.Join(project, "aliases", "b.go"): filepath.Join("..", "sub", "b.go"),
+		filepath.Join(project, "ext.go"):          filepath.Join("..", "outside", "ext.go"),
+		filepath.Join(parent, "link"):             project,
+	} {
+		if target == "" {
+			if err := os.MkdirAll(link, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	real, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for arg, want := range map[string]string{
+		filepath.Join(project, "aliases", "b.go"): filepath.Join(real, "aliases", "b.go"),
+		filepath.Join(project, "ext.go"):          filepath.Join(real, "ext.go"),
+		filepath.Join(parent, "link", "ext.go"):   filepath.Join(real, "ext.go"),
+		filepath.Join(parent, "link", "aliases"):  filepath.Join(real, "aliases"),
+		filepath.Join(parent, "link"):             real,
+	} {
+		got, err := resolvePath(arg, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("resolvePath(%s) = %s, want %s", arg, got, want)
+		}
+	}
+}

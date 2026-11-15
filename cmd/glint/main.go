@@ -659,9 +659,15 @@ func addDeadExceptions(findings *findingSet, rule *deadcode.DeadConfigExceptionR
 	if len(configs) == 0 {
 		return nil
 	}
-	base, err := os.Getwd()
+	// The roots are resolved through symlinks (resolvePath), so is the
+	// directory the names are relative to.
+	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	base, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return fmt.Errorf("resolve working directory %s: %w", cwd, err)
 	}
 	for _, path := range slices.Sorted(maps.Keys(configs)) {
 		cfg := configs[path]
@@ -863,11 +869,22 @@ func resolvePath(path string, allowFiles bool) (string, error) {
 	if !info.IsDir() && !allowFiles {
 		return "", fmt.Errorf("invalid project root %q: not a directory", projectRoot)
 	}
-	resolvedRoot, err := filepath.EvalSymlinks(projectRoot)
-	if err != nil {
-		return "", fmt.Errorf("resolve project root %q: %w", projectRoot, err)
+	// The walk does not descend a root that is a symlink, so a directory is
+	// resolved whole. A file keeps its own name: a symlinked file of the
+	// project is reported, excluded and loaded under the path the tree
+	// gives it, and only the directories above it are resolved.
+	if info.IsDir() {
+		resolvedRoot, err := filepath.EvalSymlinks(projectRoot)
+		if err != nil {
+			return "", fmt.Errorf("resolve project root %q: %w", projectRoot, err)
+		}
+		return filepath.Clean(resolvedRoot), nil
 	}
-	return filepath.Clean(resolvedRoot), nil
+	dir, err := filepath.EvalSymlinks(filepath.Dir(projectRoot))
+	if err != nil {
+		return "", fmt.Errorf("resolve the directory of %q: %w", projectRoot, err)
+	}
+	return filepath.Join(dir, filepath.Base(projectRoot)), nil
 }
 
 func loadConfig(projectRoot string) (*core.Config, []rules.Rule, error) {
