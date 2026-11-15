@@ -264,16 +264,13 @@ export function load() {
 	assert.Equal(t, []int{2}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.ts", source))
 }
 
-// operationGrowth compares the fastest of three runs at two input sizes, in
+// operationGrowthAtScale compares the fastest of three runs at n and at scale
+// times n, in
 // CPU time of the process: a loaded machine delays the run, it does not make
 // the run do more work, so the ratio does not follow the load (a wall clock
 // did: 14.11, load 25, a linear path measured 8.3 times for 4 times the input).
 // The limit sits between the scale and its square, so a path gone quadratic
 // fails.
-func operationGrowth(t *testing.T, operation func(int), n int) float64 {
-	return operationGrowthAtScale(t, operation, n, 10)
-}
-
 func operationGrowthAtScale(t *testing.T, operation func(int), n, scale int) float64 {
 	t.Helper()
 	fastest := func(size int) time.Duration {
