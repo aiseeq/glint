@@ -148,7 +148,7 @@ const (
 )
 
 func analyzeScans(ctx *core.GoProjectContext, rule *rules.BaseRule, check scanCheck) ([]*core.Violation, error) {
-	schema, err := sqlschema.LoadCached(ctx.ProjectRoot, patternkit.MigrationDirs(rule))
+	schema, err := patternkit.LoadSchema(ctx.ProjectRoot, rule)
 	var migrationErr *sqlschema.MigrationError
 	if errors.As(err, &migrationErr) {
 		return nil, nil // the schema rules report the migration; nothing to check against

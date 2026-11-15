@@ -242,17 +242,18 @@ var skippedDirs = map[string]bool{
 }
 
 // Load reads the migrations under root: the directories given, relative to
-// root, or else every directory named migrations. It returns nil for a
-// project without migrations and an error naming the file that does not
-// parse.
-func Load(root string, dirs []string) (*Schema, error) {
-	schema, _, err := load(root, dirs)
+// root, or else every directory named migrations the run walks, which
+// respectGitignore (settings.respect_gitignore) decides as for the run. It
+// returns nil for a project without migrations and an error naming the file
+// that does not parse.
+func Load(root string, dirs []string, respectGitignore bool) (*Schema, error) {
+	schema, _, err := load(root, dirs, respectGitignore)
 	return schema, err
 }
 
-func load(root string, dirs []string) (*Schema, string, error) {
+func load(root string, dirs []string, respectGitignore bool) (*Schema, string, error) {
 	if len(dirs) == 0 {
-		found, err := findMigrationDirs(root)
+		found, err := findMigrationDirs(root, respectGitignore)
 		if err != nil {
 			return nil, "", err
 		}
@@ -287,10 +288,10 @@ func load(root string, dirs []string) (*Schema, string, error) {
 }
 
 // findMigrationDirs returns the directories named migrations under root that
-// the run walks: not in a dependency or test directory, one git ignores or a
-// repository of its own below the project.
-func findMigrationDirs(root string) ([]string, error) {
-	tree, err := core.NewRepositoryTree(root)
+// the run walks: not in a dependency or test directory, one git ignores (with
+// respectGitignore) or a repository of its own below the project.
+func findMigrationDirs(root string, respectGitignore bool) ([]string, error) {
+	tree, err := core.NewRepositoryTree(root, respectGitignore)
 	if err != nil {
 		return nil, fmt.Errorf("find migrations under %s: %w", root, err)
 	}
@@ -821,15 +822,15 @@ var (
 	cache   = make(map[string]*cacheEntry)
 )
 
-// LoadCached is Load done once per root and directories for the process:
-// every file of a project checks against the same schema.
-func LoadCached(root string, dirs []string) (*Schema, error) {
-	schema, _, err := loadCached(root, dirs)
+// LoadCached is Load done once per root, directories and respectGitignore for
+// the process: every file of a project checks against the same schema.
+func LoadCached(root string, dirs []string, respectGitignore bool) (*Schema, error) {
+	schema, _, err := loadCached(root, dirs, respectGitignore)
 	return schema, err
 }
 
-func loadCached(root string, dirs []string) (*Schema, string, error) {
-	key := root + "\x00" + strings.Join(dirs, "\x00")
+func loadCached(root string, dirs []string, respectGitignore bool) (*Schema, string, error) {
+	key := fmt.Sprintf("%s\x00%t\x00%s", root, respectGitignore, strings.Join(dirs, "\x00"))
 	cacheMu.Lock()
 	entry, ok := cache[key]
 	if !ok {
@@ -837,6 +838,6 @@ func loadCached(root string, dirs []string) (*Schema, string, error) {
 		cache[key] = entry
 	}
 	cacheMu.Unlock()
-	entry.once.Do(func() { entry.schema, entry.inputs, entry.err = load(root, dirs) })
+	entry.once.Do(func() { entry.schema, entry.inputs, entry.err = load(root, dirs, respectGitignore) })
 	return entry.schema, entry.inputs, entry.err
 }

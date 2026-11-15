@@ -30,7 +30,7 @@ ALTER TABLE items ADD CONSTRAINT items_kind_valid CHECK (kind IN ('a', 'b', 'c')
 ALTER TABLE items DROP CONSTRAINT items_score_check;
 `,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	items := schema.Table("items")
 	require.NotNil(t, items)
@@ -51,7 +51,7 @@ func TestValueCheckRange(t *testing.T) {
 	writeMigrations(t, root, map[string]string{
 		"migrations/001_init.up.sql": `CREATE TABLE scores (id INT PRIMARY KEY, score SMALLINT CHECK (score BETWEEN 1 AND 10));`,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	check := schema.Table("scores").Column("score").Check
 	require.NotNil(t, check)

@@ -80,6 +80,9 @@ type BaseRule struct {
 	defaultSeverity core.Severity
 	settings        map[string]any
 	settingSpecs    []SettingSpec
+	// respectGitignore is settings.respect_gitignore of the run's
+	// configuration (ConfigureAll); nil before one, the default.
+	respectGitignore *bool
 }
 
 // SettingSpec describes a configurable rule setting.
@@ -147,6 +150,24 @@ func (r *BaseRule) DefaultSeverity() core.Severity {
 func (r *BaseRule) Configure(settings map[string]any) error {
 	r.settings = settings
 	return nil
+}
+
+// runConfigured is a rule that keeps the settings of the run its rule
+// settings do not carry; a rule embedding *BaseRule is one.
+type runConfigured interface {
+	useRunConfig(cfg *core.Config)
+}
+
+func (r *BaseRule) useRunConfig(cfg *core.Config) {
+	respect := cfg.RespectGitignore()
+	r.respectGitignore = &respect
+}
+
+// RespectGitignore reports settings.respect_gitignore of the run: whether a
+// walk of the tree the rule makes itself leaves out what git ignores, as the
+// run's walk does (core.RepositoryTree).
+func (r *BaseRule) RespectGitignore() bool {
+	return r.respectGitignore == nil || *r.respectGitignore
 }
 
 // GetSetting retrieves a setting value

@@ -16,7 +16,7 @@ func filesWithExtUnder(t *testing.T, root string, files map[string]string) []str
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 	}
-	paths, err := TemplateFiles(root)
+	paths, err := TemplateFiles(root, true)
 	require.NoError(t, err)
 	var rels []string
 	for _, path := range paths {
@@ -39,6 +39,22 @@ func TestTemplateFilesLeaveOutNestedRepository(t *testing.T) {
 		"third_party/plain/templates/y.tmpl": "{{.Plain}}",
 	})
 	assert.Equal(t, []string{"third_party/plain/templates/y.tmpl", "web/templates/page.html"}, got)
+}
+
+// The templates of a directory git ignores are the project's only when the
+// run walks that directory: with settings.respect_gitignore off.
+func TestTemplateFilesReadIgnoredDirectoryOnlyWithoutRespectGitignore(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		".git/HEAD":               "ref: refs/heads/main\n",
+		".gitignore":              "/build-out/\n",
+		"web/templates/page.html": "{{.Title}}",
+		"build-out/page.html":     "{{.Built}}",
+	}
+	assert.Equal(t, []string{"web/templates/page.html"}, filesWithExtUnder(t, root, files))
+	paths, err := TemplateFiles(root, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{filepath.Join(root, "build-out/page.html"), filepath.Join(root, "web/templates/page.html")}, paths)
 }
 
 // Run in a linked worktree of the project, its own templates count.

@@ -313,7 +313,7 @@ func (r *SyncNewerWinsOnStampedTableRule) AnalyzeGoProject(ctx *core.GoProjectCo
 	if ctx == nil {
 		return nil, fmt.Errorf("%s: nil Go project context", r.Name())
 	}
-	schema, err := sqlschema.LoadCached(ctx.ProjectRoot, patternkit.MigrationDirs(r.BaseRule))
+	schema, err := patternkit.LoadSchema(ctx.ProjectRoot, r.BaseRule)
 	var migrationErr *sqlschema.MigrationError
 	if errors.As(err, &migrationErr) {
 		return nil, nil // the schema rules report the migration; nothing to check against

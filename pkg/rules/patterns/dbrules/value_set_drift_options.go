@@ -33,8 +33,8 @@ var (
 
 // templateOptionSets reads the <select> elements of the project's templates
 // whose options carry three or more literal codes.
-func templateOptionSets(root string) ([]optionSet, error) {
-	paths, err := patternkit.TemplateFiles(root)
+func templateOptionSets(root string, respectGitignore bool) ([]optionSet, error) {
+	paths, err := patternkit.TemplateFiles(root, respectGitignore)
 	if err != nil {
 		return nil, err
 	}

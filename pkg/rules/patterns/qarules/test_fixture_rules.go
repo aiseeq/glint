@@ -224,7 +224,7 @@ func (r *TestFixtureWriteOverriddenByDBTriggerRule) AnalyzeFile(ctx *core.FileCo
 	if len(literals) == 0 {
 		return nil
 	}
-	schema, err := sqlschema.LoadCached(ctx.ProjectRoot, patternkit.MigrationDirs(r.BaseRule))
+	schema, err := patternkit.LoadSchema(ctx.ProjectRoot, r.BaseRule)
 	var migrationErr *sqlschema.MigrationError
 	if errors.As(err, &migrationErr) {
 		return nil // the schema rules report the migration; nothing to check against

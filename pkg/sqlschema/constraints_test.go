@@ -33,7 +33,7 @@ CREATE TABLE order_notes (
 );
 `,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 
 	assert.Equal(t, []Reference{{Table: "order_notes", Column: "tariff_id"}, {Table: "orders", Column: "tariff_id"}}, schema.RestrictingReferences("tariffs"))

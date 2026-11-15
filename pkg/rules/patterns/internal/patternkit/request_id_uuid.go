@@ -18,7 +18,7 @@ func AnalyzeAgainstSchema(ctx *core.GoProjectContext, rule *rules.BaseRule, sugg
 	if ctx == nil {
 		return nil, fmt.Errorf("%s: nil Go project context", rule.Name())
 	}
-	schema, err := sqlschema.LoadCached(ctx.ProjectRoot, MigrationDirs(rule))
+	schema, err := LoadSchema(ctx.ProjectRoot, rule)
 	var migrationErr *sqlschema.MigrationError
 	if errors.As(err, &migrationErr) {
 		return nil, nil // the schema rules report the migration; nothing to check against

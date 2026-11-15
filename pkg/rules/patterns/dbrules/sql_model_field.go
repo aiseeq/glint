@@ -70,7 +70,7 @@ func (r *SQLModelFieldSkippedRule) RequiresSSA() bool { return false }
 // model against the schema.
 func (r *SQLModelFieldSkippedRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
 	unpersisted := r.unpersistedModelFields(ctx)
-	schema, err := sqlschema.LoadCached(ctx.ProjectRoot, patternkit.MigrationDirs(r.BaseRule))
+	schema, err := patternkit.LoadSchema(ctx.ProjectRoot, r.BaseRule)
 	var migrationErr *sqlschema.MigrationError
 	if errors.As(err, &migrationErr) {
 		return unpersisted, nil // the schema rules report the migration; nothing to check against

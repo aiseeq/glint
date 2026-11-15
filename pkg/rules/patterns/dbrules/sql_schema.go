@@ -279,7 +279,7 @@ func analyzeSQLAgainstSchema(ctx *core.FileContext, rule *rules.BaseRule, messag
 	if ctx.IsTestFile() || ctx.ProjectRoot == "" {
 		return nil
 	}
-	schema, err := sqlschema.LoadCached(ctx.ProjectRoot, patternkit.MigrationDirs(rule))
+	schema, err := patternkit.LoadSchema(ctx.ProjectRoot, rule)
 	if strings.EqualFold(filepath.Ext(ctx.RelPath), ".sql") {
 		_, reportFaults := messages["alter_before_create"]
 		return migrationViolations(ctx, rule, schema, err, reportFaults)

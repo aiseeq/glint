@@ -146,6 +146,9 @@ func (r *Registry) ConfigureAll(cfg *core.Config) error {
 		if err := rule.Configure(effectiveSettings(cfg, rule)); err != nil {
 			return fmt.Errorf("failed to configure rule %s: %w", rule.Name(), err)
 		}
+		if run, ok := rule.(runConfigured); ok {
+			run.useRunConfig(cfg)
+		}
 	}
 
 	return nil

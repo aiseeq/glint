@@ -57,7 +57,7 @@ CREATE VIEW active_accounts AS SELECT id, email FROM accounts;
 		"tests/migrations/000001_extra.up.sql": `CREATE TABLE only_in_tests (id INT);`,
 	})
 
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 
 	accounts := schema.Table("accounts")
@@ -92,14 +92,14 @@ func TestLoadReportsUnparsableMigration(t *testing.T) {
 	writeMigrations(t, root, map[string]string{
 		"migrations/000001_init.up.sql": `CREATE TABLE users (id UUID PRIMARY KEY`,
 	})
-	_, err := Load(root, nil)
+	_, err := Load(root, nil, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "000001_init.up.sql")
 }
 
 // A project without migrations has no schema to check against.
 func TestLoadWithoutMigrations(t *testing.T) {
-	schema, err := Load(t.TempDir(), nil)
+	schema, err := Load(t.TempDir(), nil, true)
 	require.NoError(t, err)
 	assert.Nil(t, schema)
 }
@@ -117,7 +117,7 @@ func TestLoadConfiguredDirectories(t *testing.T) {
 		"db/schema/004_second.up.sql":     `ALTER TABLE a ADD COLUMN name TEXT;`,
 		"storage/migrations/002.down.sql": `DROP TABLE b;`,
 	})
-	schema, err := Load(root, []string{"db/schema"})
+	schema, err := Load(root, []string{"db/schema"}, true)
 	require.NoError(t, err)
 	require.NotNil(t, schema)
 	assert.NotNil(t, schema.Table("a"))
@@ -136,7 +136,7 @@ func TestLoadAlterBeforeCreate(t *testing.T) {
 		"migrations/001_categories.up.sql":    "-- categories\n\nALTER TABLE conversations\n    ADD COLUMN category TEXT NOT NULL DEFAULT 'none';\nALTER TABLE conversations ADD CONSTRAINT category_check CHECK (category <> '');\nALTER TABLE IF EXISTS archive ADD COLUMN note TEXT;\n",
 		"migrations/002_conversations.up.sql": "CREATE TABLE conversations (id UUID PRIMARY KEY);\n",
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	require.Len(t, schema.Faults, 1)
 	assert.Equal(t, filepath.Join(root, "migrations/001_categories.up.sql"), schema.Faults[0].Path)

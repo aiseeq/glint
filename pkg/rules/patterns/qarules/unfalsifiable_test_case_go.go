@@ -34,7 +34,7 @@ func (r *UnfalsifiableTestCaseRule) UseProjectFiles(files []*core.FileContext) {
 		}
 	}
 	for root := range roots {
-		paths, err := patternkit.FilesWithExt(root, ".css", ".html", ".tmpl", ".gohtml")
+		paths, err := patternkit.FilesWithExt(root, r.RespectGitignore(), ".css", ".html", ".tmpl", ".gohtml")
 		if err != nil {
 			r.sharedPageErr = fmt.Errorf("list layouts under %s: %w", root, err)
 			return

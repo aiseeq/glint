@@ -350,10 +350,10 @@ var nextBuild = regexp.MustCompile(`(?:^|[\s;&|])next\s+build\b`)
 // the package.json) and next build, which checks that one too. A package.json
 // in a directory the run does not walk (core.RepositoryTree) is not the
 // project's.
-func checkedTSConfigs(root string) ([]tsconfigScope, error) {
+func checkedTSConfigs(root string, respectGitignore bool) ([]tsconfigScope, error) {
 	var scopes []tsconfigScope
 	seen := make(map[string]bool)
-	tree, err := core.NewRepositoryTree(root)
+	tree, err := core.NewRepositoryTree(root, respectGitignore)
 	if err != nil {
 		return nil, fmt.Errorf("find type-checked tsconfigs under %s: %w", root, err)
 	}
@@ -428,8 +428,13 @@ func checkedTSConfigs(root string) ([]tsconfigScope, error) {
 
 var (
 	checkedTSConfigsMu    sync.Mutex
-	checkedTSConfigsCache = make(map[string]tsCheckResult)
+	checkedTSConfigsCache = make(map[tsCheckKey]tsCheckResult)
 )
+
+type tsCheckKey struct {
+	root             string
+	respectGitignore bool
+}
 
 type tsCheckResult struct {
 	scopes []tsconfigScope
@@ -437,22 +442,23 @@ type tsCheckResult struct {
 }
 
 // projectCheckedTSConfigs returns the type-checked tsconfigs of the project
-// at root, read once per root.
-func projectCheckedTSConfigs(root string) ([]tsconfigScope, error) {
+// at root, read once per root and settings.respect_gitignore.
+func projectCheckedTSConfigs(root string, respectGitignore bool) ([]tsconfigScope, error) {
 	checkedTSConfigsMu.Lock()
 	defer checkedTSConfigsMu.Unlock()
-	result, ok := checkedTSConfigsCache[root]
+	key := tsCheckKey{root: root, respectGitignore: respectGitignore}
+	result, ok := checkedTSConfigsCache[key]
 	if !ok {
-		result.scopes, result.err = checkedTSConfigs(root)
-		checkedTSConfigsCache[root] = result
+		result.scopes, result.err = checkedTSConfigs(root, respectGitignore)
+		checkedTSConfigsCache[key] = result
 	}
 	return result.scopes, result.err
 }
 
 // tsFileTypeChecked reports a TS file that a type-checked tsconfig of the
 // project compiles.
-func tsFileTypeChecked(root, file string) (bool, error) {
-	scopes, err := projectCheckedTSConfigs(root)
+func tsFileTypeChecked(root, file string, respectGitignore bool) (bool, error) {
+	scopes, err := projectCheckedTSConfigs(root, respectGitignore)
 	if err != nil {
 		return false, err
 	}

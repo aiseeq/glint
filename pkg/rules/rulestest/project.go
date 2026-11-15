@@ -180,6 +180,20 @@ func InMemoryFileContext(t *testing.T, path, source string) *core.FileContext {
 	return InMemoryGoFile(t, "/"+path, "/", source, nil)
 }
 
+// WithoutGitignore configures the rule the way a run with
+// settings.respect_gitignore: false does, through the registry's
+// ConfigureAll, and returns it.
+func WithoutGitignore[R rules.Rule](t *testing.T, rule R) R {
+	t.Helper()
+	cfg := core.DefaultConfig()
+	respect := false
+	cfg.Settings.RespectGitignore = &respect
+	registry := rules.NewRegistry()
+	require.NoError(t, registry.Register(rule))
+	require.NoError(t, registry.ConfigureAll(cfg))
+	return rule
+}
+
 // RunRuleOnProject runs a project rule once or a file rule on every file in
 // the loaded Go project.
 func RunRuleOnProject(t *testing.T, rule rules.Rule, project *core.GoProjectContext) []*core.Violation {

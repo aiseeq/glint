@@ -131,7 +131,8 @@ func NestedRepositories(root string) (func(rel string) (bool, error), error) {
 // RepositoryTree tells a rule that walks the project itself (migrations, env
 // files, package.json scripts, templates) the directories the run's walk
 // leaves out by the repository, in the walk's order (Walker.visitDirectory):
-// first a directory git ignores, then, while the root lies inside a
+// first a directory git ignores (unless settings.respect_gitignore is off,
+// and the walk enters it too), then, while the root lies inside a
 // repository, one holding a repository of its own (an agent's worktree, a
 // submodule, a checkout of another project). An ignored directory is never
 // opened, so one the walk cannot read (a database volume owned by another
@@ -139,14 +140,16 @@ func NestedRepositories(root string) (func(rel string) (bool, error), error) {
 // out. Files are not filtered: what a rule reads of a directory it enters is
 // its own decision.
 type RepositoryTree struct {
-	root       string
+	root string
+	// ignore is nil when settings.respect_gitignore is off.
 	ignore     *gitignoreIndex
 	skipNested bool
 }
 
-// NewRepositoryTree loads the ignore files above root and tells whether root
-// lies inside a repository.
-func NewRepositoryTree(root string) (*RepositoryTree, error) {
+// NewRepositoryTree tells whether root lies inside a repository and, with
+// respectGitignore (settings.respect_gitignore of the run), loads the ignore
+// files above it.
+func NewRepositoryTree(root string, respectGitignore bool) (*RepositoryTree, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("make %s absolute: %w", root, err)
@@ -155,11 +158,13 @@ func NewRepositoryTree(root string) (*RepositoryTree, error) {
 	if err != nil {
 		return nil, err
 	}
-	ignore, err := newGitignoreIndex(abs)
-	if err != nil {
-		return nil, fmt.Errorf("load gitignore patterns for %s: %w", abs, err)
+	tree := &RepositoryTree{root: abs, skipNested: inside}
+	if respectGitignore {
+		if tree.ignore, err = newGitignoreIndex(abs); err != nil {
+			return nil, fmt.Errorf("load gitignore patterns for %s: %w", abs, err)
+		}
 	}
-	return &RepositoryTree{root: abs, ignore: ignore, skipNested: inside}, nil
+	return tree, nil
 }
 
 // Enter returns filepath.SkipDir for a directory the walk leaves out, and
@@ -174,12 +179,8 @@ func (t *RepositoryTree) Enter(dir string) error {
 	}
 	if abs != t.root {
 		// Сначала .gitignore: игнорируемый каталог не открывается вовсе.
-		ignored, err := t.ignore.ignored(abs, true)
-		if err != nil {
+		if err := t.skipIgnored(abs); err != nil {
 			return err
-		}
-		if ignored {
-			return filepath.SkipDir
 		}
 		if t.skipNested {
 			nested, err := hasOwnGit(abs)
@@ -191,7 +192,26 @@ func (t *RepositoryTree) Enter(dir string) error {
 			}
 		}
 	}
+	if t.ignore == nil {
+		return nil
+	}
 	return t.ignore.addDir(abs)
+}
+
+// skipIgnored returns filepath.SkipDir for a directory git ignores while the
+// run respects .gitignore.
+func (t *RepositoryTree) skipIgnored(dir string) error {
+	if t.ignore == nil {
+		return nil
+	}
+	ignored, err := t.ignore.ignored(dir, true)
+	if err != nil {
+		return err
+	}
+	if ignored {
+		return filepath.SkipDir
+	}
+	return nil
 }
 
 // ancestorChain возвращает каталоги от root (включительно) до last

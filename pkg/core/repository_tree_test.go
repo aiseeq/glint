@@ -13,9 +13,9 @@ import (
 
 // treeWalkedDirs walks root the way a rule does with RepositoryTree and
 // returns the directories it enters, relative to root.
-func treeWalkedDirs(t *testing.T, root string) string {
+func treeWalkedDirs(t *testing.T, root string, respectGitignore bool) string {
 	t.Helper()
-	tree, err := NewRepositoryTree(root)
+	tree, err := NewRepositoryTree(root, respectGitignore)
 	require.NoError(t, err)
 	var got []string
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
@@ -48,7 +48,7 @@ func treeWalkedDirs(t *testing.T, root string) string {
 func TestRepositoryTreeLeavesOutNestedRepositories(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, nestedRepoTree)
-	if got, want := treeWalkedDirs(t, root), ".claude,.claude/worktrees,third_party,tools"; got != want {
+	if got, want := treeWalkedDirs(t, root, true), ".claude,.claude/worktrees,third_party,tools"; got != want {
 		t.Fatalf("got %s, want %s", got, want)
 	}
 	if got := walkedPaths(t, NewWalker(root, DefaultConfig())); got != "main.go,tools/run.sh" {
@@ -61,10 +61,10 @@ func TestRepositoryTreeLeavesOutNestedRepositories(t *testing.T) {
 func TestRepositoryTreeRootIsAlwaysEntered(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, nestedRepoTree)
-	if got := treeWalkedDirs(t, filepath.Join(root, ".claude")); got != "worktrees" {
+	if got := treeWalkedDirs(t, filepath.Join(root, ".claude"), true); got != "worktrees" {
 		t.Fatalf("got %s, want worktrees", got)
 	}
-	if got := treeWalkedDirs(t, filepath.Join(root, ".claude/worktrees/agent-1")); got != "tools" {
+	if got := treeWalkedDirs(t, filepath.Join(root, ".claude/worktrees/agent-1"), true); got != "tools" {
 		t.Fatalf("got %s, want tools", got)
 	}
 }
@@ -79,7 +79,7 @@ func TestRepositoryTreeEntersRepositoriesOutsideAnyRepository(t *testing.T) {
 		"b/.git":      "gitdir: /elsewhere/.git/worktrees/b\n",
 		"b/b.go":      "package b\n",
 	})
-	if got := treeWalkedDirs(t, root); got != "a,b" {
+	if got := treeWalkedDirs(t, root, true); got != "a,b" {
 		t.Fatalf("got %s, want a,b", got)
 	}
 }
@@ -105,8 +105,37 @@ func TestRepositoryTreeSkipsIgnoredDirectoryBeforeLookingForRepository(t *testin
 	locked := filepath.Join(root, "pgdata")
 	require.NoError(t, os.Chmod(locked, 0))
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-	if got := treeWalkedDirs(t, root); got != "web,web/cache-kept" {
+	if got := treeWalkedDirs(t, root, true); got != "web,web/cache-kept" {
 		t.Fatalf("got %s, want web,web/cache-kept", got)
+	}
+}
+
+// With settings.respect_gitignore off the run walks what git ignores, and so
+// does a rule: the ignored directory is entered, its .gitignore is not read,
+// and a repository of its own below the project is still left out, as the
+// run's walk leaves it out under the same configuration.
+func TestRepositoryTreeEntersIgnoredDirectoryWithoutRespectGitignore(t *testing.T) {
+	root := t.TempDir()
+	tree := map[string]string{
+		".git/HEAD":                 "ref: refs/heads/main\n",
+		".gitignore":                "/gen/\n",
+		"gen/.gitignore":            "*\n",
+		"gen/migrations/1.sql":      "x\n",
+		"third_party/lib/.git/HEAD": "ref: refs/heads/main\n",
+		"third_party/lib/lib.go":    "package lib\n",
+	}
+	writeTree(t, root, tree)
+	if got, want := treeWalkedDirs(t, root, false), "gen,gen/migrations,third_party"; got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+	if got, want := treeWalkedDirs(t, root, true), "third_party"; got != want {
+		t.Fatalf("respecting .gitignore: got %s, want %s", got, want)
+	}
+	cfg := DefaultConfig()
+	respect := false
+	cfg.Settings.RespectGitignore = &respect
+	if got, want := walkedPaths(t, NewWalker(root, cfg).WithAdditionalFilePredicate(func(path string) bool { return filepath.Ext(path) == ".sql" || filepath.Base(path) == ".gitignore" })), ".gitignore,gen/.gitignore,gen/migrations/1.sql"; got != want {
+		t.Fatalf("the run's walk of the same tree: %s, want %s", got, want)
 	}
 }
 
@@ -124,7 +153,7 @@ func TestRepositoryTreeReportsUnreadableDirectory(t *testing.T) {
 	locked := filepath.Join(root, "locked")
 	require.NoError(t, os.Chmod(locked, 0o600))
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-	tree, err := NewRepositoryTree(root)
+	tree, err := NewRepositoryTree(root, true)
 	require.NoError(t, err)
 	require.NoError(t, tree.Enter(root))
 	require.ErrorContains(t, tree.Enter(filepath.Join(locked, "inner")), "look for a repository")
