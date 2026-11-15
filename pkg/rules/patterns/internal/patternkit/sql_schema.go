@@ -10,7 +10,20 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/helpers"
+	"github.com/aiseeq/glint/pkg/sqlschema"
 )
+
+// LoadSchema returns the schema of the migrations of the project at root the
+// rule reads: those its migrations setting names, or else those the run's
+// walk reaches under its settings.respect_gitignore.
+func LoadSchema(root string, rule *rules.BaseRule) (*sqlschema.Schema, error) {
+	return sqlschema.LoadCached(root, MigrationDirs(rule), rule.RespectGitignore())
+}
+
+// SchemaInputsHash identifies the migration bytes LoadSchema reads.
+func SchemaInputsHash(root string, rule *rules.BaseRule) (string, error) {
+	return sqlschema.InputsHash(root, MigrationDirs(rule), rule.RespectGitignore())
+}
 
 // MigrationDirs reads the migrations setting.
 func MigrationDirs(rule *rules.BaseRule) []string {

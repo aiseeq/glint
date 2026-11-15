@@ -137,7 +137,7 @@ func (r *EnumComparedToForeignLiteralRule) templateForeignLiterals(ctx *core.GoP
 	}
 	sort.Strings(names)
 	call := regexp.MustCompile(`(?:\{\{-?|\(|\|)\s*(?:if\s+|with\s+|not\s+)?(` + strings.Join(names, "|") + `)\s+([^}]*)`)
-	files, err := patternkit.TemplateFiles(ctx.ProjectRoot)
+	files, err := patternkit.TemplateFiles(ctx.ProjectRoot, r.RespectGitignore())
 	if err != nil {
 		return nil, err
 	}

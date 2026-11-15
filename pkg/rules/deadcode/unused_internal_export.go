@@ -127,7 +127,7 @@ func (r *UnusedInternalExportRule) AnalyzeGoProject(ctx *core.GoProjectContext) 
 
 	interfaces := moduleInterfaces(ctx)
 	templateTypes := templateMethodTypes(ctx)
-	templateNames, err := templateSelectorNames(ctx)
+	templateNames, err := templateSelectorNames(ctx, r.RespectGitignore())
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +230,7 @@ var templateFieldSelector = regexp.MustCompile(`\.([A-Za-z_][A-Za-z0-9_]*)`)
 // template actions in module template files and Go string literals. The
 // template files are those of the module's directories the run walks
 // (core.RepositoryTree).
-func templateSelectorNames(ctx *core.GoProjectContext) (map[string]bool, error) {
+func templateSelectorNames(ctx *core.GoProjectContext, respectGitignore bool) (map[string]bool, error) {
 	names := make(map[string]bool)
 	addActions := func(source string) {
 		for rest := source; ; {
@@ -268,7 +268,7 @@ func templateSelectorNames(ctx *core.GoProjectContext) (map[string]bool, error) 
 	if ctx.ProjectRoot == "" {
 		return names, nil
 	}
-	tree, err := core.NewRepositoryTree(ctx.ProjectRoot)
+	tree, err := core.NewRepositoryTree(ctx.ProjectRoot, respectGitignore)
 	if err != nil {
 		return nil, err
 	}

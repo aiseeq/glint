@@ -29,14 +29,14 @@ func TestLoadLeavesOutMigrationsOfNestedRepositories(t *testing.T) {
 		"services/reports/migrations/001_report_runs.up.sql":            "CREATE TABLE report_runs (id UUID PRIMARY KEY);\n",
 		"services/reports/migrations/002_report_runs_account_id.up.sql": "ALTER TABLE report_runs ADD COLUMN account_id UUID;\n",
 	})
-	dirs, err := findMigrationDirs(root)
+	dirs, err := findMigrationDirs(root, true)
 	require.NoError(t, err)
 	assert.Equal(t, []string{
 		filepath.Join(root, "services/reports/migrations"),
 		filepath.Join(root, "storage/migrations"),
 	}, dirs)
 
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"id", "email"}, schema.Table("accounts").Columns())
 	assert.Nil(t, schema.Table("invoices"))
@@ -52,7 +52,7 @@ func TestLoadFindsMigrationsOfWorktreeRootAndOutsideRepository(t *testing.T) {
 		".git":                               "gitdir: /elsewhere/.git/worktrees/wt\n",
 		"storage/migrations/001_init.up.sql": nestedRepoInit,
 	})
-	dirs, err := findMigrationDirs(worktree)
+	dirs, err := findMigrationDirs(worktree, true)
 	require.NoError(t, err)
 	assert.Equal(t, []string{filepath.Join(worktree, "storage/migrations")}, dirs)
 
@@ -61,7 +61,7 @@ func TestLoadFindsMigrationsOfWorktreeRootAndOutsideRepository(t *testing.T) {
 		"app/.git/HEAD":                          "ref: refs/heads/main\n",
 		"app/storage/migrations/001_init.up.sql": nestedRepoInit,
 	})
-	dirs, err = findMigrationDirs(outside)
+	dirs, err = findMigrationDirs(outside, true)
 	require.NoError(t, err)
 	assert.Equal(t, []string{filepath.Join(outside, "app/storage/migrations")}, dirs)
 }
@@ -84,7 +84,7 @@ func TestLoadSkipsUnreadableIgnoredDirectory(t *testing.T) {
 	require.NoError(t, os.Chmod(locked, 0))
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
 
-	dirs, err := findMigrationDirs(root)
+	dirs, err := findMigrationDirs(root, true)
 	require.NoError(t, err)
 	assert.Equal(t, []string{filepath.Join(root, "storage/migrations")}, dirs)
 }

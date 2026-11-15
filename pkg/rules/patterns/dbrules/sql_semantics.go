@@ -30,7 +30,7 @@ func fileSchema(ctx *core.FileContext, rule *rules.BaseRule) (*sqlschema.Schema,
 	if ctx.ProjectRoot == "" {
 		return nil, true
 	}
-	schema, err := sqlschema.LoadCached(ctx.ProjectRoot, patternkit.MigrationDirs(rule))
+	schema, err := patternkit.LoadSchema(ctx.ProjectRoot, rule)
 	return schema, err == nil
 }
 

@@ -63,7 +63,7 @@ CREATE TABLE roles (member_id UUID NOT NULL, name TEXT NOT NULL);
 `,
 		"migrations/002_drop.up.sql": `DROP INDEX members_nickname_idx;`,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	return schema
 }
@@ -152,7 +152,7 @@ func TestSessionDatesAfterTypeChange(t *testing.T) {
 		"migrations/002_zones.up.sql": `ALTER TABLE holdings ALTER COLUMN closed_at TYPE TIMESTAMPTZ USING closed_at AT TIME ZONE 'UTC';`,
 		"migrations/003_naive.up.sql": `ALTER TABLE holdings ALTER COLUMN opened_at SET DATA TYPE TIMESTAMP;`,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	assert.Equal(t, "timestamptz", schema.Table("holdings").Column("closed_at").Type)
 	assert.Equal(t, "timestamp", schema.Table("holdings").Column("opened_at").Type)
@@ -171,7 +171,7 @@ CREATE TABLE payout_requests (id UUID PRIMARY KEY, account_id UUID, kind TEXT, s
 CREATE TABLE accounts (id UUID PRIMARY KEY, email TEXT);
 `,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	sql := `SELECT * FROM (
 		SELECT r.id, 'payout' AS kind, r.state, '' AS receipt, '' AS note FROM payout_requests r WHERE r.account_id = $1 AND r.kind = 'payout'
@@ -216,7 +216,7 @@ func TestDateOnlyOrders(t *testing.T) {
 CREATE TABLE cohorts (id UUID PRIMARY KEY, account_id UUID NOT NULL, event_date DATE NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE daily (account_id UUID NOT NULL, day DATE NOT NULL, amount NUMERIC, UNIQUE (account_id, day));`,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	sql := `SELECT * FROM cohorts WHERE account_id = $1 ORDER BY event_date ASC`
 	assert.Equal(t, at(sql, "event_date ASC"), schema.DateOnlyOrders(sql))

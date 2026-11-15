@@ -37,7 +37,7 @@ CREATE TRIGGER notes_touch AFTER UPDATE ON notes FOR EACH ROW EXECUTE FUNCTION t
 CREATE TRIGGER batches_audit BEFORE UPDATE ON batches FOR EACH ROW EXECUTE FUNCTION audit_row();
 `,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	return schema
 }
@@ -143,7 +143,7 @@ DROP TRIGGER IF EXISTS requests_status ON requests;
 CREATE TRIGGER requests_status BEFORE UPDATE ON requests FOR EACH ROW EXECUTE FUNCTION track_status();
 `,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	assert.Equal(t, "status_changed_at", schema.Table("requests").StampedOnUpdate())
 	assert.Empty(t, schema.StampOverwrites(`UPDATE requests SET status_changed_at = NOW() - INTERVAL '5 days' WHERE id = $1`))

@@ -52,7 +52,7 @@ DROP INDEX payments_code;
 CREATE UNIQUE INDEX payments_email ON payments (LOWER(email)) WHERE email IS NOT NULL AND email <> '';
 CREATE UNIQUE INDEX payments_account_note ON payments (account_id, note) WHERE note LIKE 'auto:%';`,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	sql := `SELECT * FROM payments WHERE order_id = $1 FOR UPDATE`
 	assert.Equal(t, at(sql, "order_id"), schema.PartialKeyReads(sql))
@@ -81,7 +81,7 @@ CREATE TABLE links (id UUID PRIMARY KEY, source_transaction_id UUID, CONSTRAINT 
 CREATE TABLE marks (id UUID PRIMARY KEY, transaction_id UUID, CONSTRAINT marks_tx FOREIGN KEY (transaction_id) REFERENCES transactions(id));
 ALTER TABLE marks DROP CONSTRAINT marks_tx;`,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	assert.Equal(t, []Reference{
 		{Table: "ledger_lines", Column: "chain_tx_id"},
@@ -107,7 +107,7 @@ CREATE TABLE accounts (id UUID PRIMARY KEY);
 CREATE TABLE entries (id UUID PRIMARY KEY, batch_id UUID, owner_id UUID REFERENCES accounts(id), chat_account_id TEXT, holder_id UUID);
 CREATE TABLE holds (id UUID PRIMARY KEY, holder_id UUID REFERENCES accounts(id));`,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	assert.True(t, schema.NamesTable("entries", "batch_id"))
 	assert.True(t, schema.NamesTable("entries", "owner_id"))

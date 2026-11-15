@@ -1,6 +1,7 @@
 package shellrules
 
 import (
+	"errors"
 	"fmt"
 	"go/version"
 	"os"
@@ -49,7 +50,7 @@ func (r *CIToolchainImageOlderThanGoModRule) AnalyzeFile(ctx *core.FileContext) 
 	if !ctx.IsCIConfig() && !ctx.IsDockerfile() {
 		return nil
 	}
-	goMod, err := nearestGoMod(ctx)
+	goMod, err := nearestGoMod(ctx, r.RespectGitignore())
 	if err == nil && goMod == "" {
 		return nil
 	}
@@ -92,8 +93,11 @@ func olderToolchain(image, module string) bool {
 
 // nearestGoMod returns the go.mod nearest to the file, looking up to the
 // project root; for a CI config without one above it, the go.mod of the
-// single module one level below the root. "" when there is none.
-func nearestGoMod(ctx *core.FileContext) (string, error) {
+// single module one level below the root, among the directories the run
+// walks under respectGitignore (core.RepositoryTree): a clone of another
+// repository there is not the module the pipeline builds. "" when there is
+// none.
+func nearestGoMod(ctx *core.FileContext, respectGitignore bool) (string, error) {
 	root := filepath.Clean(ctx.ProjectRoot)
 	for dir := filepath.Dir(ctx.Path); strings.HasPrefix(dir, root); dir = filepath.Dir(dir) {
 		if candidate := filepath.Join(dir, "go.mod"); regularFileExists(candidate) {
@@ -110,11 +114,25 @@ func nearestGoMod(ctx *core.FileContext) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("list %s: %w", root, err)
 	}
+	tree, err := core.NewRepositoryTree(root, respectGitignore)
+	if err != nil {
+		return "", err
+	}
+	if err := tree.Enter(root); err != nil {
+		return "", err
+	}
 	var nested []string
 	for _, entry := range entries {
-		if candidate := filepath.Join(root, entry.Name(), "go.mod"); entry.IsDir() && regularFileExists(candidate) {
-			nested = append(nested, candidate)
+		candidate := filepath.Join(root, entry.Name(), "go.mod")
+		if !entry.IsDir() || !regularFileExists(candidate) {
+			continue
 		}
+		if err := tree.Enter(filepath.Join(root, entry.Name())); errors.Is(err, filepath.SkipDir) {
+			continue
+		} else if err != nil {
+			return "", err
+		}
+		nested = append(nested, candidate)
 	}
 	if len(nested) != 1 {
 		return "", nil // no module, or several: which one the pipeline builds is unknown

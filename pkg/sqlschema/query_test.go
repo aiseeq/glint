@@ -25,7 +25,7 @@ CREATE TABLE ledger (id BIGSERIAL PRIMARY KEY, ref TEXT, account_id UUID NOT NUL
 CREATE VIEW account_summary AS SELECT id FROM accounts;
 `,
 	})
-	schema, err := Load(root, nil)
+	schema, err := Load(root, nil, true)
 	require.NoError(t, err)
 	return schema
 }

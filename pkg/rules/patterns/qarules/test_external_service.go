@@ -150,7 +150,7 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 	// поэтому у *_test.go типовой информации нет, и они висят только в ctx.Files.
 	// Имя пакета в вызове разрешается по секции import самого файла — этого хватает
 	// и заодно корректно обрабатывает алиасы импорта.
-	envKeys, err := envFileKeys(ctx.ProjectRoot)
+	envKeys, err := envFileKeys(ctx.ProjectRoot, r.RespectGitignore())
 	if err != nil {
 		return nil, fmt.Errorf("test external service: %w", err)
 	}
@@ -177,15 +177,15 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 // directories the run does not walk (core.RepositoryTree): the variables a
 // developer's environment holds when the runner exports the file. Only the
 // key names are kept.
-func envFileKeys(root string) (map[string]bool, error) {
-	keys, _, err := envFileInputs(root)
+func envFileKeys(root string, respectGitignore bool) (map[string]bool, error) {
+	keys, _, err := envFileInputs(root, respectGitignore)
 	return keys, err
 }
 
-func envFileInputs(root string) (map[string]bool, string, error) {
+func envFileInputs(root string, respectGitignore bool) (map[string]bool, string, error) {
 	keys := make(map[string]bool)
 	hash := sha256.New()
-	tree, err := core.NewRepositoryTree(root)
+	tree, err := core.NewRepositoryTree(root, respectGitignore)
 	if err != nil {
 		return nil, "", fmt.Errorf("list env files under %s: %w", root, err)
 	}

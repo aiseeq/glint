@@ -18,7 +18,7 @@ func templateNamesUnder(t *testing.T, root string, files map[string]string) map[
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 	}
-	names, err := templateSelectorNames(&core.GoProjectContext{ProjectRoot: root})
+	names, err := templateSelectorNames(&core.GoProjectContext{ProjectRoot: root}, true)
 	require.NoError(t, err)
 	return names
 }
@@ -36,6 +36,22 @@ func TestTemplateSelectorNamesLeaveOutNestedRepository(t *testing.T) {
 		"third_party/plain/templates/y.tmpl": "{{.Plain}}",
 	})
 	assert.Equal(t, map[string]bool{"Title": true, "Plain": true}, got)
+}
+
+// A template in a directory git ignores keeps a method alive only when the
+// run walks that directory: with settings.respect_gitignore off.
+func TestTemplateSelectorNamesReadIgnoredDirectoryOnlyWithoutRespectGitignore(t *testing.T) {
+	root := t.TempDir()
+	got := templateNamesUnder(t, root, map[string]string{
+		".git/HEAD":               "ref: refs/heads/main\n",
+		".gitignore":              "/gen/\n",
+		"web/templates/page.html": "{{.Title}}",
+		"gen/templates/mail.tmpl": "{{.Generated}}",
+	})
+	assert.Equal(t, map[string]bool{"Title": true}, got)
+	all, err := templateSelectorNames(&core.GoProjectContext{ProjectRoot: root}, false)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"Title": true, "Generated": true}, all)
 }
 
 // Run in a linked worktree of the project, its own templates count.
