@@ -94,10 +94,28 @@ type nearRole struct {
 	Shape   uint64 `json:"s"`
 	Anchors uint64 `json:"a"`
 	Locals  []int  `json:"l,omitempty"`
-	// Writes are the variables of Locals the statement writes.
-	Writes []int `json:"w,omitempty"`
-	Parent int   `json:"p"`
+	// Writes are the variables of Locals the statement writes; Changes
+	// those of them a call may change: the receiver of a method, a value
+	// passed on or taken by address. Two calls that change a value, as two
+	// writes to a builder, give another value in another order.
+	Writes  []int `json:"w,omitempty"`
+	Changes []int `json:"c,omitempty"`
+	// Parallel marks an assignment of several values at once, which reads
+	// all of them before it writes any.
+	Parallel bool `json:"t,omitempty"`
+	Parent   int  `json:"p"`
 }
+
+// nearAccess is how a statement uses a variable it names.
+type nearAccess uint8
+
+const (
+	nearRead nearAccess = iota
+	nearWrite
+	// nearChange is a write by a call: of a method of the variable, of a
+	// call it is passed to, or through its address.
+	nearChange
+)
 
 // nearBodyBuilder collects a nearBody in one pass over the body: every token
 // goes to the sequence and to the innermost statement that holds it, so the
@@ -140,13 +158,25 @@ func (b *nearBodyBuilder) emit(tok string) { b.add(tok, tok, "", -1) }
 // emitLocal adds the variable the function numbers num.
 func (b *nearBodyBuilder) emitLocal(num int) { b.add("$L", "$L", "", num) }
 
-// emitVar adds the variable the function numbers num, which the statement
-// writes when write is set.
-func (b *nearBodyBuilder) emitVar(num int, write bool) {
+// emitVar adds the variable the function numbers num, as the statement uses
+// it.
+func (b *nearBodyBuilder) emitVar(num int, access nearAccess) {
 	b.emitLocal(num)
-	if write && b.detailed && len(b.open) > 0 {
-		top := &b.open[len(b.open)-1]
-		top.role.Writes = append(top.role.Writes, num)
+	if access == nearRead || !b.detailed || len(b.open) == 0 {
+		return
+	}
+	top := &b.open[len(b.open)-1]
+	top.role.Writes = append(top.role.Writes, num)
+	if access == nearChange {
+		top.role.Changes = append(top.role.Changes, num)
+	}
+}
+
+// parallel marks the innermost open statement as an assignment of several
+// values at once.
+func (b *nearBodyBuilder) parallel() {
+	if b.detailed && len(b.open) > 0 {
+		b.open[len(b.open)-1].role.Parallel = true
 	}
 }
 
@@ -283,24 +313,29 @@ func goNearBody(info *types.Info, fd *ast.FuncDecl, detailed bool) nearBody {
 	w := &goNearWalker{n: newFunctionBlockNormalizer(info, fd), b: newNearBodyBuilder(detailed), own: funcPackage(fd, info), fields: make(map[string]int)}
 	w.body = fd.Body
 	if detailed {
-		w.writes = goWrites(fd.Body)
+		w.writes = goWrites(info, fd.Body)
 	}
 	w.walk(fd.Body)
 	return w.b.finish()
 }
 
-// goWrites collects what a body writes: the left side of an assignment, the
-// operand of ++ and --, the key and the value of a range, down to the
-// variable an index or a field of it writes.
-func goWrites(body *ast.BlockStmt) map[ast.Node]bool {
-	out := make(map[ast.Node]bool)
-	mark := func(e ast.Expr) {
+// goWrites collects what a body writes, down to the variable an index, a
+// slice or a field of it writes: the left side of an assignment, the operand of ++ and
+// --, the key and the value of a range; and what a call may change: what is
+// taken by address, the receiver of a method that may change it and the
+// values passed to a call that may change them, a slice, a map, a pointer
+// or an interface.
+func goWrites(info *types.Info, body *ast.BlockStmt) map[ast.Node]nearAccess {
+	out := make(map[ast.Node]nearAccess)
+	mark := func(e ast.Expr, access nearAccess) {
 		for e != nil {
-			out[e] = true
+			out[e] = max(out[e], access)
 			switch x := e.(type) {
 			case *ast.IndexExpr:
 				e = x.X
 			case *ast.IndexListExpr:
+				e = x.X
+			case *ast.SliceExpr:
 				e = x.X
 			case *ast.SelectorExpr:
 				e = x.X
@@ -317,17 +352,108 @@ func goWrites(body *ast.BlockStmt) map[ast.Node]bool {
 		switch x := node.(type) {
 		case *ast.AssignStmt:
 			for _, lhs := range x.Lhs {
-				mark(lhs)
+				mark(lhs, nearWrite)
 			}
 		case *ast.IncDecStmt:
-			mark(x.X)
+			mark(x.X, nearWrite)
 		case *ast.RangeStmt:
-			mark(x.Key)
-			mark(x.Value)
+			mark(x.Key, nearWrite)
+			mark(x.Value, nearWrite)
+		case *ast.UnaryExpr:
+			if x.Op == token.AND {
+				mark(x.X, nearChange)
+			}
+		case *ast.CallExpr:
+			if sel, ok := ast.Unparen(x.Fun).(*ast.SelectorExpr); ok && goMethodChanges(info, sel) {
+				mark(sel.X, nearChange)
+			}
+			for k, arg := range x.Args {
+				if t := info.TypeOf(arg); t != nil && (sharesValue(t) || types.IsInterface(t)) && goCallChanges(info, x, k) {
+					mark(arg, nearChange)
+				}
+			}
 		}
 		return true
 	})
 	return out
+}
+
+// goMethodChanges reports whether the method sel calls may change its
+// receiver: one on a pointer, an interface or a value that shares what it
+// holds, a slice or a map, unless goPureMethods knows it changes nothing.
+func goMethodChanges(info *types.Info, sel *ast.SelectorExpr) bool {
+	selection := info.Selections[sel]
+	if selection == nil || selection.Kind() != types.MethodVal {
+		return false
+	}
+	fn, ok := selection.Obj().(*types.Func)
+	if !ok || goPureMethods[fn.FullName()] {
+		return false
+	}
+	recv := fn.Signature().Recv().Type()
+	return types.IsInterface(recv) || sharesValue(recv)
+}
+
+// goCallChanges reports whether call may change the value of its argument
+// k: a builtin copy, delete or clear changes the first, a function of
+// goPurePackages or goPureFuncs and a conversion none, any other function
+// any.
+func goCallChanges(info *types.Info, call *ast.CallExpr, k int) bool {
+	var obj types.Object
+	switch x := ast.Unparen(call.Fun).(type) {
+	case *ast.Ident:
+		obj = info.Uses[x]
+	case *ast.SelectorExpr:
+		obj = info.Uses[x.Sel]
+	}
+	switch obj := obj.(type) {
+	case *types.Builtin:
+		switch obj.Name() {
+		case "copy", "delete", "clear":
+			return k == 0
+		}
+		return false
+	case *types.TypeName:
+		return false
+	case *types.Func:
+		if obj.Pkg() != nil && obj.Signature().Recv() == nil && goPurePackages[obj.Pkg().Path()] {
+			return false
+		}
+		return !goPureFuncs[obj.FullName()] && !goPureMethods[obj.FullName()]
+	}
+	return true
+}
+
+// goPurePackages are the packages whose functions change none of the values
+// passed to them.
+var goPurePackages = map[string]bool{
+	"bytes": true, "math": true, "math/bits": true, "path": true, "path/filepath": true,
+	"strconv": true, "strings": true, "unicode": true, "unicode/utf8": true,
+}
+
+// goPureFuncs are other functions that change none of the values passed to
+// them.
+var goPureFuncs = map[string]bool{
+	"errors.Is": true, "fmt.Errorf": true, "fmt.Print": true, "fmt.Printf": true, "fmt.Println": true,
+	"fmt.Sprint": true, "fmt.Sprintf": true, "fmt.Sprintln": true,
+	"maps.Clone": true, "maps.Equal": true, "maps.Keys": true, "maps.Values": true,
+	"slices.BinarySearch": true, "slices.Clone": true, "slices.Contains": true, "slices.ContainsFunc": true,
+	"slices.Equal": true, "slices.Index": true, "slices.IndexFunc": true, "slices.Max": true, "slices.Min": true,
+}
+
+// goPureMethods are the methods that change neither their receiver nor what
+// is passed to them, by types.Func.FullName.
+var goPureMethods = map[string]bool{
+	"(*strings.Builder).Cap": true, "(*strings.Builder).Len": true, "(*strings.Builder).String": true,
+	"(*bytes.Buffer).Bytes": true, "(*bytes.Buffer).Cap": true, "(*bytes.Buffer).Len": true, "(*bytes.Buffer).String": true,
+	"(*math/big.Int).BitLen": true, "(*math/big.Int).Cmp": true, "(*math/big.Int).CmpAbs": true,
+	"(*math/big.Int).Int64": true, "(*math/big.Int).IsInt64": true, "(*math/big.Int).Sign": true,
+	"(*math/big.Int).String": true, "(*math/big.Int).Text": true, "(*math/big.Int).Uint64": true,
+	"(*math/big.Float).Cmp": true, "(*math/big.Float).Sign": true, "(*math/big.Float).String": true, "(*math/big.Float).Text": true,
+	"(*math/big.Rat).Cmp": true, "(*math/big.Rat).Sign": true, "(*math/big.Rat).String": true,
+	"(*regexp.Regexp).FindAllString": true, "(*regexp.Regexp).FindString": true, "(*regexp.Regexp).FindStringSubmatch": true,
+	"(*regexp.Regexp).MatchString": true, "(*regexp.Regexp).ReplaceAllString": true, "(*regexp.Regexp).Split": true,
+	"(*regexp.Regexp).String": true, "(error).Error": true, "(fmt.Stringer).String": true,
 }
 
 type goNearWalker struct {
@@ -341,7 +467,7 @@ type goNearWalker struct {
 	// fields numbers the fields of variables the body reads.
 	fields map[string]int
 	// writes holds what the body writes (goWrites), for a detailed body.
-	writes map[ast.Node]bool
+	writes map[ast.Node]nearAccess
 	// body is the body walked; uses counts the reads of its objects
 	// (goUses), once a swap through a temporary needs them.
 	body *ast.BlockStmt
@@ -432,11 +558,8 @@ func (w *goNearWalker) walk(root ast.Node) {
 				return false
 			}
 		case *ast.AssignStmt:
-			if w.alias(x) {
+			if w.rewritten(x) {
 				return false
-			}
-			if x.Tok != token.ASSIGN && x.Tok != token.DEFINE {
-				w.b.ops[x.Tok.String()] = true
 			}
 		case *ast.UnaryExpr:
 			if x.Op == token.NOT {
@@ -444,7 +567,7 @@ func (w *goNearWalker) walk(root ast.Node) {
 			}
 		}
 		if isNearStmt(node) {
-			w.b.openStmt()
+			w.openStmt(node)
 		}
 		w.openNode(node)
 		if isElseBlock(node, stack) {
@@ -660,6 +783,71 @@ func (w *goNearWalker) tupleSwap(first, second, third ast.Stmt) ast.Stmt {
 		return nil
 	}
 	return &ast.AssignStmt{Lhs: []ast.Expr{move.Lhs[0], back.Lhs[0]}, Tok: token.ASSIGN, Rhs: []ast.Expr{move.Rhs[0], save.Rhs[0]}}
+}
+
+// rewritten prints an assignment that stands for another, a second name of
+// a variable or a swap from the other end, as the other and reports whether
+// it did; for another assignment it notes its operator.
+func (w *goNearWalker) rewritten(x *ast.AssignStmt) bool {
+	if w.alias(x) {
+		return true
+	}
+	if swap := w.orderedSwap(x); swap != nil {
+		w.walk(swap)
+		return true
+	}
+	if x.Tok != token.ASSIGN && x.Tok != token.DEFINE {
+		w.b.ops[x.Tok.String()] = true
+	}
+	return false
+}
+
+// openStmt opens the statement node, marked when it assigns several values
+// at once.
+func (w *goNearWalker) openStmt(node ast.Node) {
+	w.b.openStmt()
+	if assign, ok := node.(*ast.AssignStmt); ok && len(assign.Rhs) > 1 {
+		w.b.parallel()
+	}
+}
+
+// orderedSwap is a swap a, b = b, a written with the value of the variable
+// declared later first, b, a = a, b, as the other, which it is: a copy may
+// swap from either end. It is nil for another assignment.
+func (w *goNearWalker) orderedSwap(x *ast.AssignStmt) *ast.AssignStmt {
+	if len(x.Lhs) != 2 || len(x.Rhs) != 2 {
+		return nil
+	}
+	first, second := types.ExprString(x.Lhs[0]), types.ExprString(x.Lhs[1])
+	if first != types.ExprString(x.Rhs[1]) || second != types.ExprString(x.Rhs[0]) || !w.declaredBefore(x.Lhs[1], x.Lhs[0]) {
+		return nil
+	}
+	return &ast.AssignStmt{Lhs: []ast.Expr{x.Lhs[1], x.Lhs[0]}, Tok: token.ASSIGN, Rhs: []ast.Expr{x.Rhs[1], x.Rhs[0]}}
+}
+
+// declaredBefore reports whether, at the first name where they differ, a
+// names a variable declared before the one b names.
+func (w *goNearWalker) declaredBefore(a, b ast.Expr) bool {
+	left, right := goNames(a), goNames(b)
+	for k := range min(len(left), len(right)) {
+		l, r := w.n.info.ObjectOf(left[k]), w.n.info.ObjectOf(right[k])
+		if l != r {
+			return l != nil && r != nil && l.Pos() < r.Pos()
+		}
+	}
+	return false
+}
+
+// goNames lists the names in e in their order.
+func goNames(e ast.Expr) []*ast.Ident {
+	var out []*ast.Ident
+	ast.Inspect(e, func(node ast.Node) bool {
+		if id, ok := node.(*ast.Ident); ok {
+			out = append(out, id)
+		}
+		return true
+	})
+	return out
 }
 
 // singleAssign is stmt when it assigns one value to one name with tok.
@@ -1017,49 +1205,162 @@ func sameRoles(c *nearCandidate, body nearBody) bool {
 	}
 	unpairHolders(roles, ownPartner, libPartner)
 	unpairHolders(c.body.Roles, libPartner, ownPartner)
-	if !keepsDependentOrder(roles, ownPartner) {
+	if !keepsDependentOrder(roles, ownPartner, body.Roots) {
 		return false
 	}
-	return m.sameRest(
+	same, matched := m.alignRest(
 		restSide{tokens: unpairedTokens(c.body, libPartner), roles: c.body.Roles, roots: c.body.Roots},
 		restSide{tokens: unpairedTokens(body, ownPartner), roles: roles, roots: body.Roots})
+	if !same || len(matched) == 0 {
+		return same
+	}
+	partner := restPartners(ownPartner, matched)
+	return keepsDependentOrder(roles, partner, body.Roots) && keepsParallel(roles, c.body.Roles, partner)
 }
 
-// keepsDependentOrder reports whether the paired statements of a body that
-// depend on each other, one reading without writing it a variable the other
-// writes, run in the order of their partners. A copy may swap two lookups,
-// or two rewrites of one value, but not a rewrite of a value and a
-// statement that reads it, which then reads another value. A statement
-// opens before the statements it holds, on both sides, so the two keep
-// their order.
-func keepsDependentOrder(roles []nearRole, partner []int) bool {
+// restPartners adds to the partners of the paired statements the statement
+// of the library function every other statement of the body shares the
+// most tokens with in the alignment of sameRest, the first of those.
+func restPartners(paired []int, matched map[[2]int]int) []int {
+	partner := slices.Clone(paired)
+	best := make(map[int]int)
+	for pair, count := range matched {
+		own, lib := pair[0], pair[1]
+		if count > best[own] || count == best[own] && lib < partner[own] {
+			best[own], partner[own] = count, lib
+		}
+	}
+	return partner
+}
+
+// keepsParallel reports whether the statements of the body that stand for
+// one assignment of several values at once of the library function, which
+// reads all of them before it writes any, read nothing an earlier one of
+// them writes: xs[i] = xs[j]; xs[j] = xs[i] loses a value that the swap
+// xs[i], xs[j] = xs[j], xs[i] keeps.
+func keepsParallel(roles, lib []nearRole, partner []int) bool {
+	written := make(map[int]map[int]bool)
+	for i, p := range partner {
+		if p < 0 || !lib[p].Parallel {
+			continue
+		}
+		before := written[p]
+		if before == nil {
+			before = make(map[int]bool)
+			written[p] = before
+		}
+		for _, v := range roles[i].Locals {
+			if before[v] {
+				return false
+			}
+		}
+		for _, v := range roles[i].Writes {
+			before[v] = true
+		}
+	}
+	return true
+}
+
+// keepsDependentOrder reports whether the statements of a body with a
+// partner that depend on each other run in the order of their partners.
+// Two statements depend on each other when one writes a variable the other
+// reads without writing it, or both write it and a call changes it in one
+// of them. A field stands for its variable as well: writing the variable
+// writes its fields, reading or writing a field reads or writes the
+// variable, but two fields of one variable are apart. A copy may swap two
+// lookups, two counts or two rewrites of one value, but not a rewrite of a
+// value and a statement that reads it, which then reads another value, nor
+// two writes to one builder. A statement opens before the statements it
+// holds, on both sides, so the two keep their order.
+func keepsDependentOrder(roles []nearRole, partner []int, roots map[int]int) bool {
 	last := -1
 	inOrder := true
 	for _, p := range partner {
 		if p >= 0 {
-			inOrder = inOrder && p > last
-			last = p
+			inOrder = inOrder && p >= last
+			last = max(last, p)
 		}
 	}
 	if inOrder {
 		return true
 	}
 	vars := statementVars(roles)
-	writers, readers := make(map[int][]int), make(map[int][]int)
+	access := make(map[int]*varAccess)
+	at := func(v int) *varAccess {
+		if access[v] == nil {
+			access[v] = &varAccess{}
+		}
+		return access[v]
+	}
 	for i, sv := range vars {
 		if partner[i] < 0 {
 			continue
 		}
-		for v := range sv.writes {
-			writers[v] = append(writers[v], i)
+		for v, changed := range sv.writes {
+			a := at(v)
+			a.writers = append(a.writers, varUse{i, changed})
+			if root, field := roots[v]; field {
+				at(root).fieldWriters = append(at(root).fieldWriters, varUse{i, changed})
+			}
 		}
 		for v := range sv.reads {
-			readers[v] = append(readers[v], i)
+			at(v).readers = append(at(v).readers, i)
+			if root, field := roots[v]; field {
+				at(root).fieldReaders = append(at(root).fieldReaders, i)
+			}
 		}
 	}
-	for v, written := range writers {
-		for _, w := range written {
-			if !readsInOrder(partner, w, readers[v]) {
+	for _, a := range access {
+		if !a.inOrder(partner) {
+			return false
+		}
+	}
+	return true
+}
+
+// varAccess is how the statements use one variable: those that write it,
+// read it, and, for a variable with fields, write or read a field of it.
+type varAccess struct {
+	writers, fieldWriters []varUse
+	readers, fieldReaders []int
+}
+
+// varUse is a statement that writes a variable, by a call when changed is
+// set.
+type varUse struct {
+	stmt    int
+	changed bool
+}
+
+func (a *varAccess) inOrder(partner []int) bool {
+	kept := func(x, y int) bool {
+		return partner[x] == partner[y] || (x < y) == (partner[x] < partner[y])
+	}
+	for k, w := range a.writers {
+		for _, r := range a.readers {
+			if !kept(w.stmt, r) {
+				return false
+			}
+		}
+		for _, r := range a.fieldReaders {
+			if !kept(w.stmt, r) {
+				return false
+			}
+		}
+		for _, f := range a.fieldWriters {
+			if (w.changed || f.changed) && !kept(w.stmt, f.stmt) {
+				return false
+			}
+		}
+		for _, other := range a.writers[k+1:] {
+			if (w.changed || other.changed) && !kept(w.stmt, other.stmt) {
+				return false
+			}
+		}
+	}
+	for _, f := range a.fieldWriters {
+		for _, r := range a.readers {
+			if !kept(f.stmt, r) {
 				return false
 			}
 		}
@@ -1067,20 +1368,13 @@ func keepsDependentOrder(roles []nearRole, partner []int) bool {
 	return true
 }
 
-// readsInOrder reports whether every statement of readers runs on the side
-// of the writer w its partner runs on.
-func readsInOrder(partner []int, w int, readers []int) bool {
-	for _, r := range readers {
-		if (w < r) != (partner[w] < partner[r]) {
-			return false
-		}
-	}
-	return true
-}
-
 // stmtVars are the variables a statement, with the statements it holds,
-// writes and those it reads without writing them.
-type stmtVars struct{ writes, reads map[int]bool }
+// writes, each set when a call changes it, and those it reads without
+// writing them.
+type stmtVars struct {
+	writes map[int]bool
+	reads  map[int]bool
+}
 
 // statementVars collects the variables of every statement with those of the
 // statements it holds; a statement comes before the statements it holds.
@@ -1091,13 +1385,15 @@ func statementVars(roles []nearRole) []stmtVars {
 	}
 	for i := len(roles) - 1; i >= 0; i-- {
 		for _, v := range roles[i].Writes {
-			out[i].writes[v] = true
+			out[i].writes[v] = out[i].writes[v] || slices.Contains(roles[i].Changes, v)
 		}
 		for _, v := range roles[i].Locals {
 			out[i].reads[v] = true
 		}
 		if p := roles[i].Parent; p >= 0 {
-			maps.Copy(out[p].writes, out[i].writes)
+			for v, changed := range out[i].writes {
+				out[p].writes[v] = out[p].writes[v] || changed
+			}
 			maps.Copy(out[p].reads, out[i].reads)
 		}
 	}
@@ -1188,15 +1484,22 @@ const maxRestAlignCells = 1 << 22
 // bounds of a range trade places in a statement written as a block in one body
 // and on one line in the other.
 func (m *roleMapping) sameRest(libSide, ownSide restSide) bool {
+	same, _ := m.alignRest(libSide, ownSide)
+	return same
+}
+
+// alignRest is sameRest that returns as well how many tokens every two
+// statements the alignment matches share.
+func (m *roleMapping) alignRest(libSide, ownSide restSide) (bool, map[[2]int]int) {
 	lib, own := libSide.tokens, ownSide.tokens
 	rows, cols := len(lib)+1, len(own)+1
 	switch {
 	case len(own) == 0:
-		return !slices.ContainsFunc(lib, isNearJump)
+		return !slices.ContainsFunc(lib, isNearJump), nil
 	case len(lib) == 0:
-		return true
+		return true, nil
 	case rows*cols > maxRestAlignCells:
-		return false
+		return false, nil
 	}
 	table := restTable(lib, own)
 	edges := make(map[[2]int]bool, len(m.forward))
@@ -1206,7 +1509,7 @@ func (m *roleMapping) sameRest(libSide, ownSide restSide) bool {
 	libSkipped, ownSkipped := false, false
 	libLeft, ownLeft := make(map[string]bool), make(map[string]bool)
 	libVars, ownVars := make(map[int]bool), make(map[int]bool)
-	stmts := make(map[[2]int]bool)
+	stmts := make(map[[2]int]int)
 	for i, j := 0, 0; i < len(lib) || j < len(own); {
 		at := i*cols + j
 		switch {
@@ -1214,13 +1517,13 @@ func (m *roleMapping) sameRest(libSide, ownSide restSide) bool {
 			if lib[i].vr >= 0 && own[j].vr >= 0 {
 				edges[[2]int{own[j].vr, lib[i].vr}] = true
 			}
-			stmts[[2]int{own[j].stmt, lib[i].stmt}] = true
+			stmts[[2]int{own[j].stmt, lib[i].stmt}]++
 			libSkipped, ownSkipped = false, false
 			i++
 			j++
 		case j == len(own) || i < len(lib) && table[at+cols] >= table[at+1]:
 			if isNearJump(lib[i]) {
-				return false
+				return false, nil
 			}
 			libSkipped = skipToken(lib[i], libLeft, libVars) || libSkipped
 			i++
@@ -1229,15 +1532,15 @@ func (m *roleMapping) sameRest(libSide, ownSide restSide) bool {
 			j++
 		}
 		if libSkipped && ownSkipped {
-			return false
+			return false, nil
 		}
 	}
 	for text := range libLeft {
 		if ownLeft[text] {
-			return false
+			return false, nil
 		}
 	}
-	return heldInPlace(stmts, libSide, ownSide) && keptApart(edges, libVars, ownVars, libSide.roots, ownSide.roots)
+	return heldInPlace(stmts, libSide, ownSide) && keptApart(edges, libVars, ownVars, libSide.roots, ownSide.roots), stmts
 }
 
 // restTable is the table of the longest common subsequence of the suffixes
@@ -1311,12 +1614,12 @@ func skipToken(tok nearToken, left map[string]bool, vars map[int]bool) bool {
 // moved from one branch of a check to the other, or out of a check, is not.
 // The holders of a statement sameRoles left unpaired are unpaired too
 // (unpairHolders), so the alignment is all that pairs them.
-func heldInPlace(stmts map[[2]int]bool, lib, own restSide) bool {
+func heldInPlace(stmts map[[2]int]int, lib, own restSide) bool {
 	for pair := range stmts {
 		ownHolder, libHolder := own.roles[pair[0]].Parent, lib.roles[pair[1]].Parent
 		switch {
 		case ownHolder < 0 && libHolder < 0:
-		case stmts[[2]int{ownHolder, libHolder}], stmts[[2]int{ownHolder, pair[1]}], stmts[[2]int{pair[0], libHolder}]:
+		case stmts[[2]int{ownHolder, libHolder}] > 0, stmts[[2]int{ownHolder, pair[1]}] > 0, stmts[[2]int{pair[0], libHolder}] > 0:
 		default:
 			return false
 		}
