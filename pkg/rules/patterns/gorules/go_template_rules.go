@@ -533,11 +533,11 @@ func templateFilesCacheInputs(root string, respectGitignore bool, skipDirs ...st
 	return rules.HashCacheInputs(root, paths)
 }
 
-// templateDefineCacheInputs hashes the files matched by the same literal
-// ParseGlob/ParseFiles/ParseFS calls that the rule analyzes. It reads the Go
-// files of the tree, tests too, since the rule reads every file of the typed
-// packages: a file more in the key only costs a rerun, one less a stale
-// finding.
+// templateDefineCacheInputs hashes the files matched by literal
+// ParseGlob/ParseFiles/ParseFS calls in Go files under the same repository
+// tree as the run. It deliberately reads every Go file and does not filter by
+// imports or go.mod: analysis can see calls through helpers and across module
+// boundaries, while extra inputs only cause a harmless rerun.
 func templateDefineCacheInputs(root string, respectGitignore bool, skipDirs ...string) (string, error) {
 	tree, err := core.NewRepositoryTree(root, respectGitignore, skipDirs...)
 	if err != nil {
@@ -549,14 +549,6 @@ func templateDefineCacheInputs(root string, respectGitignore bool, skipDirs ...s
 			return walkErr
 		}
 		if entry.IsDir() {
-			if path != root {
-				if patternkit.EnvFileSkipDirs[entry.Name()] || strings.HasPrefix(entry.Name(), ".") {
-					return filepath.SkipDir
-				}
-				if _, statErr := os.Stat(filepath.Join(path, "go.mod")); statErr == nil {
-					return filepath.SkipDir
-				}
-			}
 			return tree.Enter(path)
 		}
 		if strings.ToLower(filepath.Ext(path)) != ".go" {
@@ -566,6 +558,8 @@ func templateDefineCacheInputs(root string, respectGitignore bool, skipDirs ...s
 		if readErr != nil {
 			return readErr
 		}
+		// A call the analysis counts names its method, so a file without
+		// the name holds none: it is not parsed.
 		if !bytes.Contains(source, []byte("ParseGlob")) && !bytes.Contains(source, []byte("ParseFiles")) && !bytes.Contains(source, []byte("ParseFS")) {
 			return nil
 		}
@@ -575,7 +569,7 @@ func templateDefineCacheInputs(root string, respectGitignore bool, skipDirs ...s
 		}
 		for _, call := range templateParseCalls(syntax) {
 			at, ok := parseCalls[helpers.CalleeName(call)]
-			if !ok || !templateParseCall(syntax, call) {
+			if !ok {
 				continue
 			}
 			matches, err := matchedTemplateFiles(filepath.Dir(path), root, call.Args[min(at, len(call.Args)):])
@@ -613,41 +607,6 @@ func templateParseCalls(file *ast.File) []*ast.CallExpr {
 		return true
 	})
 	return calls
-}
-
-func templateParseCall(file *ast.File, call *ast.CallExpr) bool {
-	if _, ok := call.Fun.(*ast.Ident); ok {
-		for _, spec := range file.Imports {
-			if spec.Name == nil || spec.Name.Name != "." {
-				continue
-			}
-			path, ok := helpers.StringLiteral(spec.Path)
-			if ok && (path == "html/template" || path == "text/template") {
-				return true
-			}
-		}
-		return false
-	}
-	selector, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	imports := make(map[string]bool, len(file.Imports))
-	for _, spec := range file.Imports {
-		path, ok := helpers.StringLiteral(spec.Path)
-		if !ok || (path != "html/template" && path != "text/template") {
-			continue
-		}
-		name := filepath.Base(path)
-		if spec.Name != nil {
-			name = spec.Name.Name
-		}
-		imports[name] = true
-	}
-	if ident, ok := selector.X.(*ast.Ident); ok && imports[ident.Name] {
-		return true
-	}
-	return len(imports) > 0
 }
 
 // sharedDefine returns a name two or more of the files define, with the

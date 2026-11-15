@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -43,6 +44,7 @@ func TestTemplateProjectRuleCacheInputsKeyTheirFindings(t *testing.T) {
 		files   map[string]string
 		edit    map[string]string
 		exclude []string
+		track   []string
 	}{
 		{
 			name: "unused-internal-export",
@@ -85,6 +87,39 @@ func TestTemplateProjectRuleCacheInputsKeyTheirFindings(t *testing.T) {
 			edit:    map[string]string{"templates/page.html": "{{define \"content\"}}page{{end}}\n"},
 			exclude: []string{"templates/**"},
 		},
+		{
+			name: "go-template-define-collision-in-shared-set nested module",
+			rule: func() rules.Rule { return gorules.NewGoTemplateDefineCollisionInSharedSetRule() },
+			files: map[string]string{
+				"sub/go.mod":             "module example.com/project/sub\n\ngo 1.24\n",
+				"sub/templates.go":       "package sub\n\nimport \"html/template\"\n\nvar parsed, _ = template.New(\"pages\").ParseGlob(\"templates/*.tpl\")\n",
+				"sub/templates/base.tpl": "{{define \"content\"}}base{{end}}\n",
+				"sub/templates/page.tpl": "page\n",
+			},
+			edit: map[string]string{"sub/templates/page.tpl": "{{define \"content\"}}page{{end}}\n"},
+		},
+		{
+			name: "go-template-define-collision-in-shared-set call without template import",
+			rule: func() rules.Rule { return gorules.NewGoTemplateDefineCollisionInSharedSetRule() },
+			files: map[string]string{
+				"templates.go":       "package project\n\nimport \"html/template\"\n\nfunc newSet() *template.Template { return template.New(\"pages\") }\n",
+				"pages.go":           "package project\n\nvar parsed, _ = newSet().ParseGlob(\"templates/*.tpl\")\n",
+				"templates/base.tpl": "{{define \"content\"}}base{{end}}\n",
+				"templates/page.tpl": "page\n",
+			},
+			edit: map[string]string{"templates/page.tpl": "{{define \"content\"}}page{{end}}\n"},
+		},
+		{
+			name: "go-template-define-collision-in-shared-set tracked dist",
+			rule: func() rules.Rule { return gorules.NewGoTemplateDefineCollisionInSharedSetRule() },
+			files: map[string]string{
+				"dist/templates.go":       "package project\n\nimport \"html/template\"\n\nvar parsed, _ = template.New(\"pages\").ParseGlob(\"dist/templates/*.tpl\")\n",
+				"dist/templates/base.tpl": "{{define \"content\"}}base{{end}}\n",
+				"dist/templates/page.tpl": "page\n",
+			},
+			edit:  map[string]string{"dist/templates/page.tpl": "{{define \"content\"}}page{{end}}\n"},
+			track: []string{"dist"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -94,6 +129,16 @@ func TestTemplateProjectRuleCacheInputsKeyTheirFindings(t *testing.T) {
 			writeModuleFile(t, root, "go.mod", "module example.com/project\n\ngo 1.24\n")
 			for path, content := range tc.files {
 				writeModuleFile(t, root, path, content)
+			}
+			if len(tc.track) > 0 {
+				for _, args := range [][]string{{"init", "-q"}, {"add"}} {
+					cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+					if len(args) == 1 && args[0] == "add" {
+						cmd.Args = append(cmd.Args, tc.track...)
+					}
+					output, err := cmd.CombinedOutput()
+					require.NoError(t, err, string(output))
+				}
 			}
 			rule := tc.rule()
 			list := []rules.Rule{goProjectReportAdapter{GoProjectRule: rule.(rules.GoProjectRule)}}
