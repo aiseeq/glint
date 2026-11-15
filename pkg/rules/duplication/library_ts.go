@@ -698,7 +698,9 @@ func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) int {
 	case name == "break" || name == "continue" || name == "return":
 		b.emitAnchor(name, name, name)
 	case (local || name == "this") && s.fieldRead(i):
-		b.touch(s.memberUse(i))
+		if name == "this" || s.reaches(i) {
+			b.fix()
+		}
 		root := locals.number(name)
 		field := locals.number(name + "." + s.text(i+2))
 		b.field(field, root)
@@ -712,12 +714,19 @@ func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) int {
 		b.lits[value] = true
 		return 2
 	case local:
-		b.touch(s.memberUse(i))
+		if s.reaches(i) {
+			b.fix()
+		}
 		b.emitVar(locals.number(name), s.writes(i, i+1))
 	case call:
 		b.calls[name] = true
 		b.emitAnchor(name, name, nearCallMask)
 	default:
+		// A name from outside the function: a variable of the module, an
+		// import, a global; but not a type a value is asserted to be.
+		if s.text(i-1) != "as" {
+			b.fix()
+		}
 		b.emit(name)
 	}
 	return 0
@@ -762,29 +771,19 @@ func (s *tsSource) writes(i, next int) bool {
 	return tsAssignments[s.text(next)]
 }
 
-// memberUse is how the name at i uses what it reaches, an object or an
-// array another name may reach too: through a field or an element, read or
-// written, or read by a loop over it.
-func (s *tsSource) memberUse(i int) memoryUse {
-	next := i + 1
-	for {
-		if dot := s.text(next); (dot == "." || dot == "?.") && next+1 < len(s.toks) && s.toks[next+1].kind == tsIdent {
-			next += 2
-		} else if dot == "?." && s.text(next+1) == "[" {
-			next++
-		} else if dot == "[" && s.match[next] > next {
-			next = s.match[next] + 1
-		} else {
-			break
-		}
+// reaches reports whether the name at i reaches what is not the function's
+// own: a property, which may be a getter, or an element of what it names,
+// which another name may reach too, or what a loop or in reads of it. Only
+// its length, read and nothing more, is its own.
+func (s *tsSource) reaches(i int) bool {
+	switch s.text(i + 1) {
+	case ".", "?.":
+		after := s.text(i + 3)
+		return s.text(i+2) != "length" || s.writes(i, i+3) || after == "." || after == "?." || after == "["
+	case "[":
+		return true
 	}
-	switch {
-	case next > i+1 && s.writes(i, next):
-		return memoryWrite
-	case next > i+1 || s.text(i-1) == "of" || s.text(i-1) == "in":
-		return memoryRead
-	}
-	return memoryNone
+	return s.text(i-1) == "of" || s.text(i-1) == "in"
 }
 
 // effect reports whether the token at i may do what nothing proves

@@ -102,23 +102,14 @@ type nearRole struct {
 	Parallel bool `json:"t,omitempty"`
 	// Fixed marks a statement nothing proves independent of the others: one
 	// that calls a function, takes an address, sends or receives, makes a
-	// closure or a subslice. It keeps its place among the statements.
-	Fixed bool `json:"x,omitempty"`
-	// Memory is how the statement uses what is reached through a pointer,
-	// a slice, a map or, in TypeScript, an object: another name may reach
-	// the same, so nothing proves a write there apart from a read.
-	Memory memoryUse `json:"m,omitempty"`
-	Parent int       `json:"p"`
+	// closure or a subslice, or reads or writes what is not the function's
+	// own, which another name may reach too: a variable of a package, what a
+	// pointer, a slice or a map reaches, in TypeScript a property, which may
+	// be a getter, or a name from outside the function. It keeps its place
+	// among the statements.
+	Fixed  bool `json:"x,omitempty"`
+	Parent int  `json:"p"`
 }
-
-// memoryUse is how a statement uses what is reached through a reference.
-type memoryUse uint8
-
-const (
-	memoryNone memoryUse = iota
-	memoryRead
-	memoryWrite
-)
 
 // nearBodyBuilder collects a nearBody in one pass over the body: every token
 // goes to the sequence and to the innermost statement that holds it, so the
@@ -176,15 +167,6 @@ func (b *nearBodyBuilder) emitVar(num int, write bool) {
 func (b *nearBodyBuilder) parallel() {
 	if b.detailed && len(b.open) > 0 {
 		b.open[len(b.open)-1].role.Parallel = true
-	}
-}
-
-// touch notes that the innermost open statement reads, or writes, what is
-// reached through a reference.
-func (b *nearBodyBuilder) touch(use memoryUse) {
-	if b.detailed && len(b.open) > 0 {
-		top := &b.open[len(b.open)-1]
-		top.role.Memory = max(top.role.Memory, use)
 	}
 }
 
@@ -411,11 +393,13 @@ func goEffect(info *types.Info, node ast.Node) bool {
 }
 
 // goReaches reports whether node, apart from what it holds, reaches what
-// another name may reach too: an element of a slice or a map, what a
-// pointer points to, the elements a range reads, the length of a map or a
-// channel.
+// another name may reach too: a variable of a package, an element of a
+// slice or a map, what a pointer points to, the elements a range reads, the
+// length of a map or a channel.
 func goReaches(info *types.Info, node ast.Node) bool {
 	switch x := node.(type) {
+	case *ast.Ident:
+		return goPackageVar(info, x)
 	case *ast.IndexExpr:
 		return goReference(info.TypeOf(x.X))
 	case *ast.StarExpr:
@@ -436,6 +420,12 @@ func goReaches(info *types.Info, node ast.Node) bool {
 	return false
 }
 
+// goPackageVar reports whether id names a variable of a package.
+func goPackageVar(info *types.Info, id *ast.Ident) bool {
+	v, ok := info.Uses[id].(*types.Var)
+	return ok && v.Pkg() != nil && v.Parent() == v.Pkg().Scope()
+}
+
 // goReference reports whether a value of type t reaches what another value
 // may reach: a slice, a map or a pointer.
 func goReference(t types.Type) bool {
@@ -449,22 +439,12 @@ func goReference(t types.Type) bool {
 	return false
 }
 
-// note marks the statement open with what node, apart from what it holds,
-// does: fixes it in its place for an effect (goEffect), notes a read or a
-// write of what a reference reaches (goReaches).
+// note fixes the statement open in its place when node, apart from what it
+// holds, has an effect (goEffect) or reaches what is not the function's own
+// (goReaches).
 func (w *goNearWalker) note(node ast.Node) {
-	if !w.b.detailed {
-		return
-	}
-	if goEffect(w.n.info, node) {
+	if w.b.detailed && (goEffect(w.n.info, node) || goReaches(w.n.info, node)) {
 		w.b.fix()
-	}
-	if goReaches(w.n.info, node) {
-		use := memoryRead
-		if w.writes[node] {
-			use = memoryWrite
-		}
-		w.b.touch(use)
 	}
 }
 
@@ -1305,7 +1285,46 @@ func sameRoles(c *nearCandidate, body nearBody) bool {
 			return false
 		}
 	}
-	return keepsOwnValues(roles, partner)
+	return keepsOwnValues(roles, partner) && keepsUnpairedFixed(roles, c.body.Roles, partner)
+}
+
+// keepsUnpairedFixed reports whether the statements that keep their place
+// and stand for no statement of the other side, on either side, stand at the
+// same places: as many of them after every paired statement of the library
+// function, or before the first, on both sides. setGet writes xs[i] and then
+// reads xs[j]; a body that reads a.n and then writes b.n pairs its read with
+// the read and leaves both writes unpaired, the library's before the read,
+// its own after it, so nothing proves it does what setGet does.
+func keepsUnpairedFixed(roles, lib []nearRole, partner []int) bool {
+	paired := make([]bool, len(lib))
+	for _, p := range partner {
+		if p >= 0 {
+			paired[p] = true
+		}
+	}
+	gaps := make(map[int]int)
+	last := -1
+	for i, p := range partner {
+		if p >= 0 {
+			last = max(last, p)
+		} else if roles[i].Fixed {
+			gaps[last]++
+		}
+	}
+	last = -1
+	for j, role := range lib {
+		if paired[j] {
+			last = j
+		} else if role.Fixed {
+			gaps[last]--
+		}
+	}
+	for _, n := range gaps {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // keepsOwnValues reports whether no statement that keeps its place runs
@@ -1433,17 +1452,13 @@ func keepsDependentOrder(roles, lib []nearRole, partner []int, roots map[int]int
 			}
 		}
 	}
-	for v, a := range access {
-		if !a.inOrder(partner) || v == nearMemory && !a.writesInOrder(partner) {
+	for _, a := range access {
+		if !a.inOrder(partner) {
 			return false
 		}
 	}
 	return true
 }
-
-// nearMemory stands among the variables of statementVars for what is
-// reached through a reference, which two writes may both change.
-const nearMemory = -2
 
 // heldFixed marks every statement of roles that keeps its place or holds
 // one that does.
@@ -1496,18 +1511,6 @@ func keptPair(partner []int, x, y int) bool {
 	return partner[x] == partner[y] || (x < y) == (partner[x] < partner[y])
 }
 
-// writesInOrder reports whether every two writers keep their order.
-func (a *varAccess) writesInOrder(partner []int) bool {
-	for k, w := range a.writers {
-		for _, other := range a.writers[k+1:] {
-			if !keptPair(partner, w, other) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 func (a *varAccess) inOrder(partner []int) bool {
 	for _, w := range a.writers {
 		for _, r := range a.readers {
@@ -1552,12 +1555,7 @@ func statementVars(roles []nearRole) []stmtVars {
 		for _, v := range roles[i].Locals {
 			out[i].reads[v] = true
 		}
-		switch roles[i].Memory {
-		case memoryWrite:
-			out[i].writes[nearMemory] = true
-		case memoryRead:
-			out[i].reads[nearMemory] = true
-		}
+
 		if p := roles[i].Parent; p >= 0 {
 			maps.Copy(out[p].writes, out[i].writes)
 			maps.Copy(out[p].reads, out[i].reads)

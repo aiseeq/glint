@@ -78,7 +78,8 @@ func FirstAbove(xs []int, min int) int {
 }
 `
 
-// A copy keeps the order of statements that depend on each other, writes
+// A copy keeps the order of statements that depend on each other and of
+// those that touch an element of a slice it was given, writes
 // a sum or a product either way round, works on a field of its receiver,
 // swaps through a temporary, names a variable twice and keeps its returns;
 // a function that differs there is another function.
@@ -110,7 +111,7 @@ func payprovReverse(vals []int) int {
 	}
 	return c
 }
-`, "Function payprovReverse is a near copy (100% alike) of function Reverse"},
+`, ""},
 		"sum written the other way round": {`package app
 
 func payprovScale(vs []float64, k, b float64) []float64 {

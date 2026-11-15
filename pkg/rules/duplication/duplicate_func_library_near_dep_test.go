@@ -111,7 +111,8 @@ func Reverse(xs []int) int {
 // through a field of a variable and of every statement with a call: a call
 // of a method, one that takes an address or one a slice is passed to may
 // change what another statement reads. It may move a statement without a
-// call that reads what no moved statement writes. A swap through a
+// call that reads only values of its own, which no moved statement writes;
+// an element of a slice is not the function's own. A swap through a
 // temporary is one only when it puts the temporary back.
 func TestDuplicateFuncOfLibraryNearCopyDependencies(t *testing.T) {
 	for name, tc := range map[string]struct{ source, subject string }{
@@ -306,7 +307,7 @@ func payprovSpread(vals []int, gap int) int {
 	}
 	return hi - lo
 }
-`, "Function payprovSpread is a near copy (100% alike) of function Spread"},
+`, ""},
 		"swap through a temporary that loses a value": {`package app
 
 func payprovReverse(vals []int) int {
@@ -417,8 +418,8 @@ function sortNumbers(xs: number[]): void {
 `
 
 // TypeScript copies keep the order of statements that depend on each other
-// through a field of a variable and of every statement with a call; they may
-// move a read without a call.
+// through a field of a variable and of every statement with a call or an
+// element; they may move a read of their own values without a call.
 func TestDuplicateFuncOfLibraryTypeScriptDependencies(t *testing.T) {
 	for name, tc := range map[string]struct{ source, subject string }{
 		"length read before the trim": {`export function payprovCount(items: string[], lim: number): number {
@@ -478,7 +479,7 @@ func TestDuplicateFuncOfLibraryTypeScriptDependencies(t *testing.T) {
   if (hi - lo < gap) return 0
   return Math.max(hi - lo, 0)
 }
-`, "Function payprovSpread is a near copy (100% alike) of function spread"},
+`, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			violations := tsDependentFindings(t, tc.source)
@@ -582,33 +583,25 @@ func TestTSNearBodyFixed(t *testing.T) {
 	require.NotEmpty(t, src.funcs)
 	body := src.tsNearBody(src.funcs[0], true)
 	assert.Equal(t, []bool{
-		false, true, true, true, false, true, true, false, false, false, false,
+		true, true, true, true, false, true, true, false, false, false, false,
 		true, true, true, true, true, true, false, true, false, true, true,
 	}, fixedStmts(body))
 }
 
-// memoryUses lists, for every statement of body in order, how it uses what
-// a reference reaches.
-func memoryUses(body nearBody) []memoryUse {
-	var out []memoryUse
-	for _, role := range body.Roles {
-		out = append(out, role.Memory)
-	}
-	return out
-}
-
-// A Go statement reads what a reference reaches through an element of a
-// slice or a map, a field through a pointer, a dereference, a range over a
-// slice or a map and the length of a map; it writes there when it assigns
-// to one of them. A field of a value, an element of an array, a string and
-// the length of a slice are its own.
-func TestGoNearBodyMemory(t *testing.T) {
+// A Go statement keeps its place when it reads or writes what is not the
+// function's own: an element of a slice or a map, a field through a
+// pointer, a dereference, a range over a slice or a map, the length of a
+// map, a variable of a package. A field of a value, an element of an array,
+// a string and the length of a slice are its own.
+func TestGoNearBodyForeignMemory(t *testing.T) {
 	bodies := goNearBodiesOf(t, `package app
 
 type payprovBox struct {
 	n   int
 	arr [2]int
 }
+
+var payprovCount int
 
 func payprovUse(xs []int, m map[int]int, p *payprovBox, b payprovBox, s string, q *int, r *[2]int) int {
 	a := xs[0] + m[1]
@@ -628,20 +621,22 @@ func payprovUse(xs []int, m map[int]int, p *payprovBox, b payprovBox, s string, 
 	for k := range m {
 		a += k
 	}
+	payprovCount++
+	a += payprovCount
 	return len(m)
 }
 `)
-	assert.Equal(t, []memoryUse{
-		memoryRead, memoryWrite, memoryRead, memoryWrite, memoryNone, memoryNone,
-		memoryRead, memoryWrite, memoryRead, memoryNone,
-		memoryRead, memoryWrite, memoryRead, memoryRead, memoryNone, memoryRead,
-	}, memoryUses(bodies["payprovUse"]))
+	assert.Equal(t, []bool{
+		true, true, true, true, false, false,
+		true, true, true, false,
+		true, true, true, true, false, true, true, true,
+	}, fixedStmts(bodies["payprovUse"]))
 }
 
-// A TypeScript statement reads what a reference reaches through a field or
-// an element of a variable and by a loop over it, and writes there when it
-// assigns to one or deletes it.
-func TestTSNearBodyMemory(t *testing.T) {
+// A TypeScript statement keeps its place when it reads or writes a field or
+// an element of a variable, loops over one or reads a name from outside the
+// function; the length of a variable, only read, is its own.
+func TestTSNearBodyForeignMemory(t *testing.T) {
 	src := parseTSSource(strings.Split(`function payprovUse(xs: number[], o: { n: number }, m: Record<string, number>, k: string, f: (n: number) => number): number {
   let a = xs[0] + o.n
   xs[0] = a
@@ -653,15 +648,50 @@ func TestTSNearBodyMemory(t *testing.T) {
   a = xs?.[0]
   a = f?.(1)
   a = a + 1
+  a = xs.length
+  a = xs.length.valueOf
+  xs.length = 0
+  a = payprovTotal
+  a = xs.length?.valueOf
+  a = xs.length[0]
+  a = this.length
+  a = a as payprovNum
+  a = a satisfies payprovNum
   return a
 }
 `, "\n"))
 	require.NotEmpty(t, src.funcs)
 	body := src.tsNearBody(src.funcs[0], true)
-	assert.Equal(t, []memoryUse{
-		memoryRead, memoryWrite, memoryWrite, memoryWrite, memoryRead, memoryNone, memoryRead, memoryNone,
-		memoryRead, memoryRead, memoryNone, memoryNone, memoryNone,
-	}, memoryUses(body))
+	assert.Equal(t, []bool{
+		true, true, true, true, true, false, true, false,
+		true, true, true, false, false, true, true, true,
+		true, true, true, false, true, false,
+	}, fixedStmts(body))
+}
+
+// Statements that keep their place and stand for none of the other side
+// stand after the same paired statement of the library function on both
+// sides, as many on each.
+func TestKeepsUnpairedFixed(t *testing.T) {
+	plain := nearRole{Parent: -1}
+	fixed := nearRole{Fixed: true, Parent: -1}
+	for name, tc := range map[string]struct {
+		roles, lib []nearRole
+		partner    []int
+		kept       bool
+	}{
+		"none unpaired":           {[]nearRole{fixed, plain}, []nearRole{fixed, plain}, []int{0, 1}, true},
+		"one each at one place":   {[]nearRole{plain, fixed}, []nearRole{plain, fixed}, []int{0, -1}, true},
+		"one each at two places":  {[]nearRole{plain, fixed}, []nearRole{fixed, plain}, []int{1, -1}, false},
+		"one of its own":          {[]nearRole{plain, fixed}, []nearRole{plain}, []int{0, -1}, false},
+		"one of the library":      {[]nearRole{plain}, []nearRole{plain, fixed}, []int{0}, false},
+		"unpaired but not fixed":  {[]nearRole{plain, plain}, []nearRole{plain, plain}, []int{0, -1}, true},
+		"after the latest paired": {[]nearRole{plain, plain, fixed}, []nearRole{plain, plain, plain, fixed}, []int{2, 0, -1}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.kept, keepsUnpairedFixed(tc.roles, tc.lib, tc.partner))
+		})
+	}
 }
 
 // A statement of the body that stands for none of the library function
@@ -717,10 +747,7 @@ func TestKeepsDependentOrder(t *testing.T) {
 		"held fixed partner moved":        {[]nearRole{role([]int{2}, nil), role([]int{1}, nil)}, []nearRole{role(nil, nil), fixed(nearRole{Parent: 0})}, []int{1, 0}, false},
 		"fixed statement in place":        {[]nearRole{fixed(role([]int{1}, nil)), role([]int{2}, nil), role([]int{3}, nil)}, plain, []int{0, 2, 1}, true},
 		"fixed statement unpaired":        {[]nearRole{role([]int{2}, nil), fixed(role([]int{1}, nil)), role([]int{3}, nil)}, plain, []int{1, -1, 0}, true},
-		"memory written, memory read":     {[]nearRole{{Memory: memoryWrite, Parent: -1}, {Memory: memoryRead, Parent: -1}}, plain, []int{1, 0}, false},
-		"memory written twice":            {[]nearRole{{Memory: memoryWrite, Parent: -1}, {Memory: memoryWrite, Parent: -1}}, plain, []int{1, 0}, false},
-		"memory read twice":               {[]nearRole{{Memory: memoryRead, Parent: -1}, {Memory: memoryRead, Parent: -1}}, plain, []int{1, 0}, true},
-		"held memory write":               {[]nearRole{role(nil, nil), {Memory: memoryWrite, Parent: 0}, {Memory: memoryRead, Parent: -1}}, plain, []int{1, 2, 0}, false},
+
 		"holder of a fixed one moved":     {[]nearRole{role([]int{2}, nil), role(nil, nil), fixed(nearRole{Parent: 1})}, plain, []int{1, 0, 2}, false},
 		"fixed one after a far one":       {[]nearRole{role([]int{1}, nil), role([]int{2}, nil), fixed(role([]int{3}, nil))}, plain, []int{2, 0, 1}, false},
 		"fixed statements of one partner": {[]nearRole{fixed(role(nil, nil)), fixed(role(nil, nil)), role([]int{3}, nil), role([]int{4}, nil)}, plain, []int{0, 0, 2, 1}, true},

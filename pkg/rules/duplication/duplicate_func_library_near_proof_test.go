@@ -225,9 +225,11 @@ func Label(p Person, tag string) string {
 // closure or a subslice keeps its place, operands with a call keep their
 // order, a swap through a temporary is a swap only when its indexes are
 // names or constants it does not write, and a second name stands for its
-// value only when no call and no address taken come between. A copy that
-// moves statements without calls, commutes operands without calls or reads
-// a value through a second name with no call between is still a copy.
+// value only when no call and no address taken come between. Fields read
+// through a pointer are not the function's own and keep their order too. A
+// copy that moves statements over values of its own without calls,
+// commutes operands without calls or reads a value through a second name
+// with no call between is still a copy.
 func TestDuplicateFuncOfLibraryNearCopyWithoutProof(t *testing.T) {
 	for name, tc := range map[string]struct{ source, subject string }{
 		"name relabeled": {`package app
@@ -494,7 +496,7 @@ func payprovArea(q *lib.Rect, s int) int {
 	}
 	return a
 }
-`, "Function payprovArea is a near copy (100% alike) of function Area"},
+`, ""},
 		"bounds blended in another order and operands commuted": {`package app
 
 func payprovBlend(l, h, s int) int {

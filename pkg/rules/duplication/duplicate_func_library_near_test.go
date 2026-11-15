@@ -906,10 +906,16 @@ func tidyReference(raw string) string {
 	value = strings.ReplaceAll(value, " ", "")
 	return value
 }
-`, "Function tidyReference is a near copy"},
+`, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			violations := nearLibraryFindings(t, tc.lib, tc.source)
+			if tc.subject == "" {
+				// A call the library function does not make, where it
+				// makes none, is an effect nothing proves it may add.
+				assert.Empty(t, violations)
+				return
+			}
 			require.Len(t, violations, 1)
 			assert.Contains(t, violations[0].Message, tc.subject)
 		})
