@@ -4,29 +4,31 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestTSDerivedFieldRecomputedLargeFunctionCompletes(t *testing.T) {
-	var source strings.Builder
-	source.WriteString("function inspect(item: Record) {")
-	for i := range 4096 {
-		source.WriteString("if (item.status === 'state")
-		source.WriteString(strconv.Itoa(i))
-		source.WriteString("') consume(item.statusGroup);")
+	source := func(n int) string {
+		var b strings.Builder
+		b.WriteString("function inspect(item: Record) {")
+		for i := range n {
+			b.WriteString("if (item.status === 'state")
+			b.WriteString(strconv.Itoa(i))
+			b.WriteString("') consume(item.statusGroup);")
+		}
+		b.WriteString("}")
+		return b.String()
 	}
-	source.WriteString("}")
-	start := time.Now()
-	places := rulestest.ProjectFilesRulePlaces(t, NewTSDerivedFieldRecomputedRule(), map[string]string{
-		"types/model.ts": "interface Record { status: string; statusGroup: string }",
-		"src/view.ts":    source.String(),
-	})
-	assert.Empty(t, places)
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("analyzing %d bytes took %s, want at most 10s", source.Len(), elapsed)
+	project := func(n int) {
+		assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewTSDerivedFieldRecomputedRule(), map[string]string{
+			"types/model.ts": "interface Record { status: string; statusGroup: string }",
+			"src/view.ts":    source(n),
+		}))
+	}
+	if growth := operationGrowthAtScale(t, project, 128, 20); growth > 250 {
+		t.Errorf("twenty times the input took %.1f times as long, want at most 250", growth)
 	}
 }
 

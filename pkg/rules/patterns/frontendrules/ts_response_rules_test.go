@@ -6,37 +6,36 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
-	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestTSFormNumberUncheckedInPayloadLargeFileCompletes(t *testing.T) {
-	source := "await api.send({value: Number(input)});" + strings.Repeat("({});", 1<<17)
-	start := time.Now()
-	rulestest.TextFileRuleLines(t, newTSRule("ts-form-number-unchecked-in-payload", "", checkFormNumberPayload), "frontend/src/generated.ts", source)
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("analyzing %d bytes took %s, want at most 10s", len(source), elapsed)
+	rule := newTSRule("ts-form-number-unchecked-in-payload", "", checkFormNumberPayload)
+	source := func(n int) string { return "await api.send({value: Number(input)});" + strings.Repeat("({});", n) }
+	if growth := ruleGrowthAtScale(t, rule, "frontend/src/perf.ts", source, 256, 20); growth > 120 {
+		t.Errorf("twenty times the input took %.1f times as long, want at most 120", growth)
 	}
 }
 
 func TestTSURLFilterEnumUnvalidatedLargeFileCompletes(t *testing.T) {
-	var source strings.Builder
-	for i := range 4096 {
-		name := "validate" + strconv.Itoa(i)
-		source.WriteString("const " + name + " = value => allowed.has(value);")
-		source.WriteString("({status:" + name + "(input)});")
+	rule := newTSRule("ts-url-filter-enum-unvalidated", "", checkURLFilterEnum)
+	source := func(n int) string {
+		var b strings.Builder
+		for i := range n {
+			name := "validate" + strconv.Itoa(i)
+			b.WriteString("const " + name + " = value => allowed.has(value);")
+			b.WriteString("({status:" + name + "(input)});")
+		}
+		return b.String()
 	}
-	start := time.Now()
-	rulestest.TextFileRuleLines(t, newTSRule("ts-url-filter-enum-unvalidated", "", checkURLFilterEnum), "frontend/src/generated.ts", source.String())
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("analyzing %d bytes took %s, want at most 10s", source.Len(), elapsed)
+	if growth := ruleGrowth(t, rule, "frontend/src/perf.ts", source, 128); growth > 60 {
+		t.Errorf("ten times the input took %.1f times as long, want at most 60", growth)
 	}
 }
 

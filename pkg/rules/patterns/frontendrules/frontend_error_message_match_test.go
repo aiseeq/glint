@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -117,11 +118,11 @@ export function show(err: Error, code: string) {
 }
 
 func TestFrontendErrorMessageMatchLargeFileCompletes(t *testing.T) {
-	source := "const helper = (message) => message;\n" + strings.Repeat("helper(error.message);", 1<<16)
-	start := time.Now()
-	rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "frontend/src/generated.ts", source)
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("analyzing %d bytes took %s, want at most 10s", len(source), elapsed)
+	source := func(n int) string {
+		return "const helper = (message) => message;\n" + strings.Repeat("helper(error.message);\n", n)
+	}
+	if growth := ruleGrowthAtScale(t, NewFrontendErrorMessageMatchRule(), "frontend/src/perf.ts", source, 256, 20); growth > 60 {
+		t.Errorf("ten times the input took %.1f times as long, want at most 60", growth)
 	}
 }
 
@@ -236,12 +237,11 @@ func TestFrontendErrorMessageMatch_NameStartsWithDollar(t *testing.T) {
 
 // Calls of a helper nested in one another cost linear time.
 func TestFrontendErrorMessageMatchNestedCallsComplete(t *testing.T) {
-	depth := 1 << 14
-	source := "function h(m){return m}try{x()}catch(err){" + strings.Repeat("h(", depth) + "err.message" + strings.Repeat(")", depth) + "}"
-	start := time.Now()
-	rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/n.js", source)
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("analyzing %d nested calls took %s, want at most 5s", depth, elapsed)
+	source := func(depth int) string {
+		return "function h(m){return m}try{x()}catch(err){" + strings.Repeat("h(", depth) + "err.message" + strings.Repeat(")", depth) + "}"
+	}
+	if growth := ruleGrowthAtScale(t, NewFrontendErrorMessageMatchRule(), "web/src/n.js", source, 128, 50); growth > 140 {
+		t.Errorf("fifty times the nested calls took %.1f times as long, want at most 140", growth)
 	}
 }
 
@@ -264,25 +264,50 @@ export function load() {
 	assert.Equal(t, []int{2}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.ts", source))
 }
 
-// ruleGrowth returns how many times longer rule takes on source(4n) than on
-// source(n), each the fastest of three runs, the shorter one taken as at
-// least a millisecond. Linear work grows about four times, quadratic
-// sixteen; a ratio leaves the slowdown of the race detector out.
-func ruleGrowth(t *testing.T, rule rules.Rule, path string, source func(n int) string, n int) float64 {
+// operationGrowth compares the fastest of three runs at two input sizes, in
+// CPU time of the process: a loaded machine delays the run, it does not make
+// the run do more work, so the ratio does not follow the load (a wall clock
+// did: 14.11, load 25, a linear path measured 8.3 times for 4 times the input).
+// The limit sits between the scale and its square, so a path gone quadratic
+// fails.
+func operationGrowth(t *testing.T, operation func(int), n int) float64 {
+	return operationGrowthAtScale(t, operation, n, 10)
+}
+
+func operationGrowthAtScale(t *testing.T, operation func(int), n, scale int) float64 {
 	t.Helper()
-	fastest := func(n int) time.Duration {
-		text := source(n)
+	fastest := func(size int) time.Duration {
 		best := time.Duration(math.MaxInt64)
 		for range 3 {
-			ctx := rulestest.TextFile(t, path, text)
-			start := time.Now()
-			rule.AnalyzeFile(ctx)
-			best = min(best, time.Since(start))
+			start := processCPUTime(t)
+			operation(size)
+			best = min(best, processCPUTime(t)-start)
 		}
 		return best
 	}
-	small := max(fastest(n), time.Millisecond)
-	return float64(fastest(4*n)) / float64(small)
+	small := max(fastest(n), 100*time.Microsecond)
+	return float64(fastest(scale*n)) / float64(small)
+}
+
+// processCPUTime is the user and system time the test process has used, the
+// garbage collector's threads included.
+func processCPUTime(t *testing.T) time.Duration {
+	t.Helper()
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		t.Fatalf("read the CPU time of the process: %v", err)
+	}
+	return time.Duration(usage.Utime.Nano() + usage.Stime.Nano())
+}
+func ruleGrowth(t *testing.T, rule rules.Rule, path string, source func(n int) string, n int) float64 {
+	return ruleGrowthAtScale(t, rule, path, source, n, 10)
+}
+
+func ruleGrowthAtScale(t *testing.T, rule rules.Rule, path string, source func(n int) string, n, scale int) float64 {
+	return operationGrowthAtScale(t, func(size int) {
+		ctx := rulestest.TextFile(t, path, source(size))
+		rule.AnalyzeFile(ctx)
+	}, n, scale)
 }
 
 // Many names holding the message, each handed to a helper on a line of its
@@ -315,9 +340,17 @@ func TestFrontendErrorMessageMatchAliasesGrowLinearly(t *testing.T) {
 	for name, c := range map[string]struct {
 		source func(int) string
 		n      int
-	}{"aliases": {aliases, 500}, "chain": {chain, 40}} {
-		if growth := ruleGrowth(t, rule, "web/src/g.js", c.source, c.n); growth > 8 {
-			t.Errorf("%s: four times the input took %.1f times as long, want at most 8", name, growth)
+	}{"aliases": {aliases, 512}, "chain": {chain, 40}} {
+		scale := 10
+		if name == "aliases" {
+			scale = 20
+		}
+		analyze := func(size int) {
+			ctx := rulestest.TextFile(t, "web/src/g.js", c.source(size))
+			rule.AnalyzeFile(ctx)
+		}
+		if growth := operationGrowthAtScale(t, analyze, c.n, scale); growth > 60 {
+			t.Errorf("%s: %d times the input took %.1f times as long, want at most 60", name, scale, growth)
 		}
 	}
 }

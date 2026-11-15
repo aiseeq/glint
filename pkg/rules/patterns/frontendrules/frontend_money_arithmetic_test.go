@@ -4,7 +4,6 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
@@ -13,11 +12,9 @@ import (
 )
 
 func TestFrontendMoneyArithmeticLargeFileCompletes(t *testing.T) {
-	source := "let value = 0;" + strings.Repeat("value += 1;", 1<<17)
-	start := time.Now()
-	rulestest.TextFileRuleLines(t, NewFrontendMoneyArithmeticRule(), "frontend/src/generated.ts", source)
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("analyzing %d bytes took %s, want at most 10s", len(source), elapsed)
+	source := func(n int) string { return "let value = 0;" + strings.Repeat("value += 1;", n) }
+	if growth := ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 2048, 10); growth > 30 {
+		t.Errorf("ten times the input took %.1f times as long, want at most 30", growth)
 	}
 }
 
@@ -1031,7 +1028,7 @@ func TestFrontendMoneyArithmeticCompoundAssignsGrowLinearly(t *testing.T) {
 	source := func(n int) string {
 		return "export function s(o){let total=0;" + strings.Repeat("total+=o.price;", n) + "return total}"
 	}
-	if growth := ruleGrowth(t, NewFrontendMoneyArithmeticRule(), "web/src/sum.js", source, 1<<12); growth > 8 {
-		t.Errorf("four times the input took %.1f times as long, want at most 8", growth)
+	if growth := ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "web/src/sum.js", source, 128, 60); growth > 250 {
+		t.Errorf("sixty times the input took %.1f times as long, want at most 250", growth)
 	}
 }
