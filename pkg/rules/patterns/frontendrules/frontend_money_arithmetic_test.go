@@ -13,9 +13,9 @@ import (
 
 func TestFrontendMoneyArithmeticLargeFileCompletes(t *testing.T) {
 	source := func(n int) string { return "let value = 0;" + strings.Repeat("value += 1;", n) }
-	if growth := ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 2048, 10); growth > 30 {
-		t.Errorf("ten times the input took %.1f times as long, want at most 30", growth)
-	}
+	const scale, limit = 120, 600
+	// At scale 120, current growth measured 150–235; last-index mutant at least 1463. Limit 600.
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 256, scale), scale, limit)
 }
 
 func TestFormattingIndexFindsContainingRangeBehindNestedRange(t *testing.T) {
@@ -1028,7 +1028,7 @@ func TestFrontendMoneyArithmeticCompoundAssignsGrowLinearly(t *testing.T) {
 	source := func(n int) string {
 		return "export function s(o){let total=0;" + strings.Repeat("total+=o.price;", n) + "return total}"
 	}
-	if growth := ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "web/src/sum.js", source, 128, 60); growth > 250 {
-		t.Errorf("sixty times the input took %.1f times as long, want at most 250", growth)
-	}
+	const scale, limit = 120, 500
+	// At n=512, scale 120: current growth 140–149; last-index mutant 2124–2201. Limit 500.
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "web/src/sum.js", source, 512, scale), scale, limit)
 }

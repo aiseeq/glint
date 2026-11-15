@@ -27,9 +27,9 @@ func TestTSDerivedFieldRecomputedLargeFunctionCompletes(t *testing.T) {
 			"src/view.ts":    source(n),
 		}))
 	}
-	if growth := operationGrowthAtScale(t, project, 128, 20); growth > 250 {
-		t.Errorf("twenty times the input took %.1f times as long, want at most 250", growth)
-	}
+	const scale, limit = 40, 220
+	// At n=8, current growth measured 47–56; cache removal 452–479 and reverted walk 423–471. Limit 220.
+	checkGrowth(t, operationGrowthAtScale(t, project, 8, scale), scale, limit)
 }
 
 func TestTSDerivedFieldRecomputed(t *testing.T) {

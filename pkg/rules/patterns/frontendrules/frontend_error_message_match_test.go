@@ -121,9 +121,9 @@ func TestFrontendErrorMessageMatchLargeFileCompletes(t *testing.T) {
 	source := func(n int) string {
 		return "const helper = (message) => message;\n" + strings.Repeat("helper(error.message);\n", n)
 	}
-	if growth := ruleGrowthAtScale(t, NewFrontendErrorMessageMatchRule(), "frontend/src/perf.ts", source, 256, 20); growth > 60 {
-		t.Errorf("ten times the input took %.1f times as long, want at most 60", growth)
-	}
+	const scale, limit = 40, 140
+	// Measured at scale 40: current 29–32; the prefix-scan mutant 1229–1657. Limit 140.
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendErrorMessageMatchRule(), "frontend/src/perf.ts", source, 32, scale), scale, limit)
 }
 
 // Every call of a helper on a line hands it an argument, not only the first:
@@ -240,9 +240,9 @@ func TestFrontendErrorMessageMatchNestedCallsComplete(t *testing.T) {
 	source := func(depth int) string {
 		return "function h(m){return m}try{x()}catch(err){" + strings.Repeat("h(", depth) + "err.message" + strings.Repeat(")", depth) + "}"
 	}
-	if growth := ruleGrowthAtScale(t, NewFrontendErrorMessageMatchRule(), "web/src/n.js", source, 128, 50); growth > 140 {
-		t.Errorf("fifty times the nested calls took %.1f times as long, want at most 140", growth)
-	}
+	const scale, limit = 40, 120
+	// Measured at scale 40: current 18–27; the bracket-rescan mutant 1230–2142. Limit 120.
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendErrorMessageMatchRule(), "web/src/n.js", source, 64, scale), scale, limit)
 }
 
 // A name that holds the message carries it into a helper as a message does:
@@ -307,6 +307,14 @@ func ruleGrowthAtScale(t *testing.T, rule rules.Rule, path string, source func(n
 	}, n, scale)
 }
 
+func checkGrowth(t *testing.T, growth float64, scale, limit int) {
+	t.Helper()
+	t.Logf("GROWTH %s %.1f %d", t.Name(), growth, limit)
+	if growth > float64(limit) {
+		t.Errorf("%d times the input took %.1f times as long, want at most %d", scale, growth, limit)
+	}
+}
+
 // Many names holding the message, each handed to a helper on a line of its
 // own, and a chain of helpers each handing the message to the next, cost
 // time linear in the file.
@@ -337,17 +345,16 @@ func TestFrontendErrorMessageMatchAliasesGrowLinearly(t *testing.T) {
 	for name, c := range map[string]struct {
 		source func(int) string
 		n      int
-	}{"aliases": {aliases, 512}, "chain": {chain, 40}} {
-		scale := 10
-		if name == "aliases" {
-			scale = 20
-		}
-		analyze := func(size int) {
-			ctx := rulestest.TextFile(t, "web/src/g.js", c.source(size))
-			rule.AnalyzeFile(ctx)
-		}
-		if growth := operationGrowthAtScale(t, analyze, c.n, scale); growth > 60 {
-			t.Errorf("%s: %d times the input took %.1f times as long, want at most 60", name, scale, growth)
-		}
+	}{"aliases": {aliases, 32}, "chain": {chain, 20}} {
+		t.Run(name, func(t *testing.T) {
+			scale, limit := 40, 140
+			// Measured at scale 40: aliases current 46–53 / prefix mutant 1206–2115;
+			// chain current 51–55 / bracket mutant 561–822 and pass-per-mark mutant 629–966. Limit 140.
+			analyze := func(size int) {
+				ctx := rulestest.TextFile(t, "web/src/g.js", c.source(size))
+				rule.AnalyzeFile(ctx)
+			}
+			checkGrowth(t, operationGrowthAtScale(t, analyze, c.n, scale), scale, limit)
+		})
 	}
 }
