@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-
 	"strings"
+	"sync"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
@@ -333,7 +333,7 @@ func narrowOversightExceptions(entries []broadEntry, cfg *core.Config, scopes []
 	var oneLine []oneLineException
 	for _, entry := range entries {
 		if entry.oneLine != nil {
-			oneLine = append(oneLine, oneLineException{rule: entry.excepted, exception: *entry.oneLine})
+			oneLine = append(oneLine, oneLineException{rule: entry.excepted, exception: entry.oneLine, source: entry.declaredIn()})
 		}
 	}
 	if len(oneLine) == 0 {
@@ -344,7 +344,7 @@ func narrowOversightExceptions(entries []broadEntry, cfg *core.Config, scopes []
 		return nil, err
 	}
 	return slices.DeleteFunc(entries, func(entry broadEntry) bool {
-		return entry.oneLine != nil && len(places.covered(entry.excepted, *entry.oneLine)) <= 1
+		return entry.oneLine != nil && len(places.covered(oneLineException{rule: entry.excepted, exception: entry.oneLine, source: entry.declaredIn()})) <= 1
 	}), nil
 }
 
@@ -354,9 +354,9 @@ const staleSuppressionRule = "stale-suppression"
 // a finding of a rule watching suppressions, of those an exception of one
 // line can cover.
 type oversightPlaces struct {
-	// files are the files, relative to the configuration's directory, where
-	// the rules report and their exceptions apply (broadRunFiles).
-	files []string
+	// files are the files where the rules report and the exceptions may apply
+	// (broadRunFiles).
+	files []runFile
 	// exceptions are the places in the configuration where stale-suppression
 	// reports an exception that matched nothing: the run excepts those
 	// findings with its exceptions too (silenceLateFindings). Only an
@@ -365,27 +365,37 @@ type oversightPlaces struct {
 }
 
 // oneLineException is an exception of one line of a rule watching
-// suppressions.
+// suppressions, and source the configuration file, absolute, that declares
+// it, at the exception's line (core.Exception.DeclaredAt).
 type oneLineException struct {
 	rule      string
-	exception core.Exception
+	exception *core.Exception
+	source    string
 }
 
 // readOversightPlaces reads the places the exceptions can cover.
 func readOversightPlaces(cfg *core.Config, scopes []string, exceptions []oneLineException) (oversightPlaces, error) {
-	files, err := broadRunFiles(cfg, scopes, func(file string) bool {
-		return slices.ContainsFunc(exceptions, func(exc oneLineException) bool { return exc.exception.CoversFile(file) })
-	})
+	files, err := broadRunFiles(cfg, scopes, exceptions)
 	if err != nil {
 		return oversightPlaces{}, err
 	}
 	places := oversightPlaces{files: files}
 	if slices.ContainsFunc(exceptions, func(exc oneLineException) bool { return exc.rule == staleSuppressionRule }) {
-		if places.exceptions, err = deadcode.StaleExceptionPlaces(cfg); err != nil {
+		if places.exceptions, err = deadcode.StaleExceptionPlaces(cfg, configuredRules(cfg)); err != nil {
 			return oversightPlaces{}, err
 		}
 	}
 	return places, nil
+}
+
+// configuredRules are the rules a check of the configuration executes, by
+// name (getEnabledRules without --rule and --category).
+func configuredRules(cfg *core.Config) map[string]rules.Rule {
+	executed := make(map[string]rules.Rule)
+	for _, rule := range withBroadExclusion(rules.GetEnabled(cfg)) {
+		executed[rule.Name()] = rule
+	}
+	return executed
 }
 
 // covered returns the files where the exception of one line of the rule
@@ -394,11 +404,16 @@ func readOversightPlaces(cfg *core.Config, scopes []string, exceptions []oneLine
 // exception on that line, the only line of it a finding stands on. The
 // configuration's other findings - of suppression-without-reason and of
 // broad-exclusion - pass no exception (analyzeConfigurationRules).
-func (p oversightPlaces) covered(rule string, exc core.Exception) []string {
-	files := slices.DeleteFunc(slices.Clone(p.files), func(file string) bool { return !exc.CoversFile(file) })
-	if rule == staleSuppressionRule {
+func (p oversightPlaces) covered(exc oneLineException) []string {
+	var files []string
+	for _, file := range p.files {
+		if file.applies(exc) {
+			files = append(files, file.path)
+		}
+	}
+	if exc.rule == staleSuppressionRule {
 		for _, place := range p.exceptions {
-			if place.Line == exc.Line && exc.CoversFile(place.File) {
+			if place.Line == exc.exception.Line && exc.exception.CoversFile(place.File) {
 				files = append(files, place.File)
 			}
 		}
@@ -407,56 +422,184 @@ func (p oversightPlaces) covered(rule string, exc core.Exception) []string {
 	return slices.Compact(files)
 }
 
-// broadRunFiles returns the files, relative to the configuration's
-// directory, of those keep accepts, where a check of it reports what the
-// rules find and applies their exceptions: what the walk of the run reads -
-// the configuration's exclude, skip_dirs and .gitignore apply, and so does
-// git for a tracked artifact directory - but the generated files, where no
-// rule reports (runRule). The configuration is not: the run judges its
-// markers whatever its exceptions say (analyzeConfigurationRules), and those
-// of the configurations it extends never. The nested repositories are in when
-// the configuration governs them: a check scoped to one reads it under the
-// configuration that governs its directory (analysisRoots). The paths the run
-// names are in as the walk of the run reads them: a file .gitignore leaves out
-// too.
-func broadRunFiles(cfg *core.Config, scopes []string, keep func(string) bool) ([]string, error) {
+// runFile is a file where a check reports what the rules find and may apply
+// an exception of the configuration.
+type runFile struct {
+	// path is the file relative to the configuration's directory.
+	path string
+	// named is the file as the check matches exceptions to it: relative to
+	// the directory of the configuration it reads.
+	named string
+	// governor is the configuration a check of the nested repository of the
+	// file reads, the configuration or one that extends it; nil for a file
+	// of the walk of the configuration's directory.
+	governor *core.Config
+}
+
+// applies reports whether a check of the file applies the exception to it at
+// some line: the exception covers the file, and the check reads the
+// configuration or a governor that keeps the rule on and the exception in
+// force.
+func (f runFile) applies(exc oneLineException) bool {
+	return (f.governor == nil || keepsException(f.governor, exc)) && exc.exception.CoversFile(f.named)
+}
+
+// keepsException reports whether the configuration, merged over the chain it
+// extends, keeps the rule of the exception on and the exception among the
+// rule's: the same declaration, of the same file and line.
+func keepsException(cfg *core.Config, exc oneLineException) bool {
+	rule, ok := rules.Get(exc.rule)
+	if !ok || !cfg.IsRuleEnabled(rule.Category(), exc.rule) {
+		return false
+	}
+	return slices.ContainsFunc(cfg.GetRuleExceptions(rule.Category(), exc.rule), func(kept core.Exception) bool {
+		return filepath.Clean(kept.Source()) == filepath.Clean(exc.source) && kept.DeclaredAt() == exc.exception.DeclaredAt()
+	})
+}
+
+// broadRunFiles returns the files where a check of the configuration, or of a
+// nested repository under it, reports what the rules find and may apply the
+// exceptions: what the walk of the check reads - the exclude, skip_dirs and
+// .gitignore of the configuration the check reads apply, and so does git for
+// a tracked artifact directory - of the files an exception covers, but the
+// generated files, where no rule reports (runRule), told by the syntax tree
+// as the run tells them (core.ParseGoFiles). The configuration is not: the run
+// judges its markers whatever its exceptions say (analyzeConfigurationRules),
+// and those of the configurations it extends never. A check scoped to a
+// nested repository reads it under the configuration that governs its
+// directory (analysisRoots): the repository is walked as that check walks it
+// when that configuration is the counted one or extends it, and keeps an
+// exception in force. The paths the run names are in as the walk of the run
+// reads them: a file .gitignore leaves out too.
+func broadRunFiles(cfg *core.Config, scopes []string, exceptions []oneLineException) ([]runFile, error) {
 	root := filepath.Dir(cfg.ConfigPath())
-	// The walk of root visits paths below it alone.
-	walker := core.NewWalker(root, cfg.AtConfigDir()).WithGoParsing(false).
-		WithNestedRepositories(func(dir string) (bool, error) { return governs(cfg, dir) }).
+	collect := &runFiles{cfg: cfg, exceptions: exceptions}
+	var walkScopes []string
+	if len(scopes) > 0 {
+		// The walk of root visits paths below it alone.
+		walkScopes = append([]string{root}, scopes...)
+	}
+	if err := collect.walk(root, nil, walkScopes); err != nil {
+		return nil, err
+	}
+	// A walk adds the repositories nested in what it walks.
+	for len(collect.pending) > 0 {
+		nested := collect.pending[0]
+		collect.pending = collect.pending[1:]
+		base := filepath.Dir(nested.governor.ConfigPath())
+		var nestedScopes []string
+		if nested.dir != base {
+			nestedScopes = []string{nested.dir}
+		}
+		if err := collect.walk(base, nested.governor, nestedScopes); err != nil {
+			return nil, err
+		}
+	}
+	return collect.files, nil
+}
+
+// runFiles collects the files of broadRunFiles.
+type runFiles struct {
+	cfg        *core.Config
+	exceptions []oneLineException
+	// mu guards pending, which the walks add to as they find nested
+	// repositories.
+	mu sync.Mutex
+	// pending are the nested repositories cfg or a configuration that extends
+	// it governs, yet to walk.
+	pending []nestedCheck
+	files   []runFile
+}
+
+// nestedCheck is a nested repository whose check reads governor: the counted
+// configuration, as a check of the repository loads it, or one that extends
+// it.
+type nestedCheck struct {
+	dir      string
+	governor *core.Config
+}
+
+// walk adds the files a check walking base with governor - the counted
+// configuration when nil - reads, limited to scopes when there are any.
+func (r *runFiles) walk(base string, governor *core.Config, scopes []string) error {
+	settings := r.cfg
+	if governor != nil {
+		settings = governor
+	}
+	walker := core.NewWalker(base, settings.AtConfigDir()).WithGoParsing(false).
+		WithNestedRepositories(r.pend).
 		WithRequiredFilePredicate(func(path string) bool {
-			rel, err := filepath.Rel(root, path)
-			return err == nil && keep(filepath.ToSlash(rel))
+			file, err := r.file(base, governor, path)
+			return err == nil && slices.ContainsFunc(r.exceptions, file.applies)
 		})
 	if len(scopes) > 0 {
-		walker.WithScopes(append([]string{root}, scopes...))
+		walker.WithScopes(scopes)
 	}
 	contexts, walkErrors := walker.WalkSync()
 	for _, err := range walkErrors {
 		// A directory or file the user cannot read holds no finding of the run.
 		if !errors.Is(err, fs.ErrPermission) {
-			return nil, fmt.Errorf("walk the files exceptions of one line cover: %w", err)
+			return fmt.Errorf("walk the files exceptions of one line cover: %w", err)
 		}
+	}
+	// As a run --tolerant does, a Go file that does not parse stays without a
+	// tree; a run without the flag fails on it before this count.
+	if err := core.ParseGoFiles(base, contexts, true); err != nil {
+		return fmt.Errorf("parse the Go files exceptions of one line cover: %w", err)
 	}
 	// A file the walk of root reads and the run names comes twice; covered
 	// counts it once.
-	var files []string
 	for _, ctx := range contexts {
-		if !ctx.IsGenerated() {
-			files = append(files, filepath.ToSlash(ctx.RelPath))
+		if ctx.IsGenerated() {
+			continue
 		}
+		file, err := r.file(base, governor, ctx.Path)
+		if err != nil {
+			return err
+		}
+		r.files = append(r.files, file)
 	}
-	return files, nil
+	return nil
 }
 
-// governs reports a directory a check of which reads the configuration, as
-// the run finds it (analysisRoots).
-func governs(cfg *core.Config, dir string) (bool, error) {
+// file names the file at path, absolute, of a walk of base with governor.
+func (r *runFiles) file(base string, governor *core.Config, path string) (runFile, error) {
+	rel, err := filepath.Rel(filepath.Dir(r.cfg.ConfigPath()), path)
+	if err != nil {
+		return runFile{}, fmt.Errorf("name %s relative to the configuration's directory: %w", path, err)
+	}
+	named, err := filepath.Rel(base, path)
+	if err != nil {
+		return runFile{}, fmt.Errorf("name %s relative to %s: %w", path, base, err)
+	}
+	return runFile{path: filepath.ToSlash(rel), named: filepath.ToSlash(named), governor: governor}, nil
+}
+
+// pend keeps the walk out of a nested repository: a check of it reads the
+// configuration that governs its directory, as the run finds it
+// (analysisRoots). One whose configuration is the counted one or extends it
+// and keeps one of the exceptions in force waits for a walk of its own.
+func (r *runFiles) pend(dir string) (bool, error) {
 	path, err := core.FindConfig(dir)
 	if err != nil {
 		return false, fmt.Errorf("find the configuration of %s: %w", dir, err)
 	}
-	return path != "" && filepath.Clean(path) == filepath.Clean(cfg.ConfigPath()), nil
+	if path == "" {
+		return false, nil
+	}
+	governor, err := core.LoadConfigWithDefaults(dir)
+	if err != nil {
+		return false, fmt.Errorf("load the configuration of %s: %w", dir, err)
+	}
+	if !slices.ContainsFunc(r.exceptions, func(exc oneLineException) bool { return keepsException(governor, exc) }) {
+		return false, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// A repository two walks reach adds its files twice; covered counts each
+	// once.
+	r.pending = append(r.pending, nestedCheck{dir: dir, governor: governor})
+	return false, nil
 }
 
 // foreignBroadNames are directories of foreign code and test data: no source

@@ -269,9 +269,14 @@ type ExceptionPlace struct {
 
 // StaleExceptionPlaces returns the places stale-suppression reports the
 // exceptions of the configuration at when they match no finding of a run of
-// every rule: an exception of stale-suppression excepts its findings there.
-func StaleExceptionPlaces(cfg *core.Config) ([]ExceptionPlace, error) {
-	judged, err := judgedExceptions(cfg, func(*core.RuleException) bool { return true })
+// the executed rules, by name: an exception of stale-suppression excepts its
+// findings there. A rule the run does not execute, one the configuration
+// switches off among them, has none.
+func StaleExceptionPlaces(cfg *core.Config, executed map[string]rules.Rule) ([]ExceptionPlace, error) {
+	judged, err := judgedExceptions(cfg, func(ruleException *core.RuleException) bool {
+		_, ran := executed[ruleException.Rule]
+		return ran
+	})
 	if err != nil {
 		return nil, err
 	}
