@@ -96,8 +96,8 @@ type projectTemplate struct {
 
 // runTemplates returns the template files under the project root that the
 // run analyzes.
-func runTemplates(ctx *core.GoProjectContext, respectGitignore bool) ([]projectTemplate, error) {
-	paths, err := patternkit.TemplateFiles(ctx.ProjectRoot, respectGitignore)
+func runTemplates(ctx *core.GoProjectContext, respectGitignore bool, skipDirs ...string) ([]projectTemplate, error) {
+	paths, err := patternkit.TemplateFiles(ctx.ProjectRoot, respectGitignore, skipDirs...)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +176,7 @@ func NewGoTemplateRootFieldInsideRangeRule() *templateProjectRule {
 		suggestion: "Read the page's field as $.Field inside the block",
 	}
 	r.analyze = func(ctx *core.GoProjectContext) ([]projectFinding, error) {
-		templates, err := runTemplates(ctx, r.RespectGitignore())
+		templates, err := runTemplates(ctx, r.RespectGitignore(), r.SkipDirs()...)
 		if err != nil {
 			return nil, err
 		}
@@ -568,7 +568,7 @@ func NewGoTemplateJSONStringInScriptContextRule() *templateProjectRule {
 		suggestion: "Pass the value itself (html/template encodes it as JSON in a script), or type the field template.JS",
 	}
 	r.analyze = func(ctx *core.GoProjectContext) ([]projectFinding, error) {
-		templates, err := runTemplatesAll(ctx, r.RespectGitignore())
+		templates, err := runTemplatesAll(ctx, r.RespectGitignore(), r.SkipDirs()...)
 		if err != nil {
 			return nil, err
 		}
@@ -617,8 +617,8 @@ func NewGoTemplateJSONStringInScriptContextRule() *templateProjectRule {
 
 // runTemplatesAll returns the text of every template file under the project
 // root, analyzed by the run or not: a Go field is checked against all of them.
-func runTemplatesAll(ctx *core.GoProjectContext, respectGitignore bool) ([]string, error) {
-	paths, err := patternkit.TemplateFiles(ctx.ProjectRoot, respectGitignore)
+func runTemplatesAll(ctx *core.GoProjectContext, respectGitignore bool, skipDirs ...string) ([]string, error) {
+	paths, err := patternkit.TemplateFiles(ctx.ProjectRoot, respectGitignore, skipDirs...)
 	if err != nil {
 		return nil, err
 	}
@@ -804,7 +804,7 @@ func NewI18nKeyUsedButNotDefinedRule() *templateProjectRule {
 			}
 		}
 		findings = append(findings, unevenMessageMaps(maps)...)
-		templates, err := runTemplates(ctx, r.RespectGitignore())
+		templates, err := runTemplates(ctx, r.RespectGitignore(), r.SkipDirs()...)
 		if err != nil {
 			return nil, err
 		}

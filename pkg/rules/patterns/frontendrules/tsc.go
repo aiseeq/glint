@@ -115,7 +115,7 @@ type tscPlan struct {
 	standalone int
 }
 
-func planTscPrograms(files []*core.FileContext, respectGitignore bool) (*tscPlan, error) {
+func planTscPrograms(files []*core.FileContext, respectGitignore bool, skipDirs ...string) (*tscPlan, error) {
 	plan := &tscPlan{}
 	configs := map[string]*tscProgram{}
 	analyzed := map[string]bool{}
@@ -139,7 +139,7 @@ func planTscPrograms(files []*core.FileContext, respectGitignore bool) (*tscPlan
 		if !ctx.IsTypeScriptFile() || strings.HasSuffix(ctx.Path, ".d.ts") {
 			continue
 		}
-		owners, err := tsconfigsOf(ctx, loadScope, respectGitignore)
+		owners, err := tsconfigsOf(ctx, loadScope, respectGitignore, skipDirs...)
 		if err != nil {
 			return nil, err
 		}
@@ -173,8 +173,8 @@ func slicesSortedByRelPath(files []*core.FileContext) []*core.FileContext {
 // tsconfigsOf returns the tsconfigs that compile a TS file: the
 // type-checked ones of the project, else the nearest tsconfig.json above it
 // that takes it, as an editor picks one.
-func tsconfigsOf(ctx *core.FileContext, loadScope func(string) (tsconfigScope, error), respectGitignore bool) ([]string, error) {
-	checked, err := projectCheckedTSConfigs(ctx.ProjectRoot, respectGitignore)
+func tsconfigsOf(ctx *core.FileContext, loadScope func(string) (tsconfigScope, error), respectGitignore bool, skipDirs ...string) ([]string, error) {
+	checked, err := projectCheckedTSConfigs(ctx.ProjectRoot, respectGitignore, skipDirs...)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +239,7 @@ func projectTsc(dir string) string {
 func (r *TscRule) CheckTools(files []*core.FileContext) error {
 	r.reset()
 	r.files = files
-	r.plan, r.planErr = planTscPrograms(files, r.RespectGitignore())
+	r.plan, r.planErr = planTscPrograms(files, r.RespectGitignore(), r.SkipDirs()...)
 	hasTS := false
 	for _, ctx := range files {
 		hasTS = hasTS || ctx.IsTypeScriptFile()

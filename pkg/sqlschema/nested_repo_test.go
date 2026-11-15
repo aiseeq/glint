@@ -43,6 +43,32 @@ func TestLoadLeavesOutMigrationsOfNestedRepositories(t *testing.T) {
 	assert.NotNil(t, schema.Table("report_runs").Column("account_id"))
 }
 
+func TestMigrationDirsRespectSkipDirs(t *testing.T) {
+	root := t.TempDir()
+	writeMigrations(t, root, map[string]string{ // graft:leak-ok generic helper of this package, schema_test.go:12
+		"app/migrations/001_init.up.sql":       "CREATE TABLE kept (id INT);\n",
+		"generated/migrations/001_init.up.sql": "CREATE TABLE hidden (id INT);\n",
+	})
+	got, err := findMigrationDirs(root, false, "generated")
+	require.NoError(t, err)
+	assert.Equal(t, []string{filepath.Join(root, "app/migrations")}, got)
+	got, err = findMigrationDirs(root, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{filepath.Join(root, "app/migrations"), filepath.Join(root, "generated/migrations")}, got)
+}
+
+func TestLoadOrdersMigrationsAcrossDirectoriesByVersion(t *testing.T) {
+	root := t.TempDir()
+	writeMigrations(t, root, map[string]string{ // graft:leak-ok generic helper of this package, schema_test.go:12
+		"storage/migrations/001_init.up.sql":        "CREATE TABLE ledger (id INT);\n",
+		"generated/migrations/002_chain_ref.up.sql": "ALTER TABLE ledger ADD COLUMN chain_ref TEXT;\n",
+	})
+	schema, err := Load(root, nil, false)
+	require.NoError(t, err)
+	assert.Empty(t, schema.Faults)
+	assert.Contains(t, schema.Table("ledger").Columns(), "chain_ref")
+}
+
 // Run in a linked worktree of the project, whose top holds a .git file, the
 // project's migrations are found as in the main checkout; outside any
 // repository a directory with a .git is what the run was pointed at.

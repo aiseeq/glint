@@ -350,10 +350,10 @@ var nextBuild = regexp.MustCompile(`(?:^|[\s;&|])next\s+build\b`)
 // the package.json) and next build, which checks that one too. A package.json
 // in a directory the run does not walk (core.RepositoryTree) is not the
 // project's.
-func checkedTSConfigs(root string, respectGitignore bool) ([]tsconfigScope, error) {
+func checkedTSConfigs(root string, respectGitignore bool, skipDirs ...string) ([]tsconfigScope, error) {
 	var scopes []tsconfigScope
 	seen := make(map[string]bool)
-	tree, err := core.NewRepositoryTree(root, respectGitignore)
+	tree, err := core.NewRepositoryTree(root, respectGitignore, skipDirs...)
 	if err != nil {
 		return nil, fmt.Errorf("find type-checked tsconfigs under %s: %w", root, err)
 	}
@@ -434,6 +434,7 @@ var (
 type tsCheckKey struct {
 	root             string
 	respectGitignore bool
+	skipDirs         string
 }
 
 type tsCheckResult struct {
@@ -443,13 +444,13 @@ type tsCheckResult struct {
 
 // projectCheckedTSConfigs returns the type-checked tsconfigs of the project
 // at root, read once per root and settings.respect_gitignore.
-func projectCheckedTSConfigs(root string, respectGitignore bool) ([]tsconfigScope, error) {
+func projectCheckedTSConfigs(root string, respectGitignore bool, skipDirs ...string) ([]tsconfigScope, error) {
 	checkedTSConfigsMu.Lock()
 	defer checkedTSConfigsMu.Unlock()
-	key := tsCheckKey{root: root, respectGitignore: respectGitignore}
+	key := tsCheckKey{root: root, respectGitignore: respectGitignore, skipDirs: strings.Join(skipDirs, "\x00")}
 	result, ok := checkedTSConfigsCache[key]
 	if !ok {
-		result.scopes, result.err = checkedTSConfigs(root, respectGitignore)
+		result.scopes, result.err = checkedTSConfigs(root, respectGitignore, skipDirs...)
 		checkedTSConfigsCache[key] = result
 	}
 	return result.scopes, result.err

@@ -201,7 +201,7 @@ func (r *JSTestExternalServiceRule) projectEnv(root string) projectEnv {
 	if env, ok := r.envKeys[root]; ok {
 		return env
 	}
-	keys, hash, err := envFileInputs(root, r.RespectGitignore())
+	keys, hash, err := envFileInputs(root, r.RespectGitignore(), r.SkipDirs()...)
 	env := projectEnv{keys: keys, hash: hash, err: err}
 	r.envKeys[root] = env
 	return env

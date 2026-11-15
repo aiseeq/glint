@@ -41,6 +41,17 @@ func TestEnvFileKeysLeaveOutNestedRepositories(t *testing.T) {
 	assert.Equal(t, map[string]bool{"DB_HOST": true, "DEPLOY_TOKEN": true}, keys)
 }
 
+func TestEnvFileKeysRespectSkipDirs(t *testing.T) {
+	root := t.TempDir()
+	writeEnvTree(t, root, map[string]string{".env": "VISIBLE=1\n", "generated/.env": "HIDDEN=1\n"})
+	keys, err := envFileKeys(root, false, "generated")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"VISIBLE": true}, keys)
+	keys, err = envFileKeys(root, false)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"VISIBLE": true, "HIDDEN": true}, keys)
+}
+
 // Run in a linked worktree of the project, the worktree's own env files are
 // the project's.
 func TestEnvFileKeysReadWorktreeRoot(t *testing.T) {

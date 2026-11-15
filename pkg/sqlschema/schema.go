@@ -246,14 +246,14 @@ var skippedDirs = map[string]bool{
 // respectGitignore (settings.respect_gitignore) decides as for the run. It
 // returns nil for a project without migrations and an error naming the file
 // that does not parse.
-func Load(root string, dirs []string, respectGitignore bool) (*Schema, error) {
-	schema, _, err := load(root, dirs, respectGitignore)
+func Load(root string, dirs []string, respectGitignore bool, skipDirs ...string) (*Schema, error) {
+	schema, _, err := load(root, dirs, respectGitignore, skipDirs...)
 	return schema, err
 }
 
-func load(root string, dirs []string, respectGitignore bool) (*Schema, string, error) {
+func load(root string, dirs []string, respectGitignore bool, skipDirs ...string) (*Schema, string, error) {
 	if len(dirs) == 0 {
-		found, err := findMigrationDirs(root, respectGitignore)
+		found, err := findMigrationDirs(root, respectGitignore, skipDirs...)
 		if err != nil {
 			return nil, "", err
 		}
@@ -268,17 +268,20 @@ func load(root string, dirs []string, respectGitignore bool) (*Schema, string, e
 	schema := &Schema{tables: make(map[string]*Table)}
 	digest := sha256.New()
 	loaded := false
+	var migrations []string
 	for _, dir := range dirs {
 		files, err := upMigrations(dir)
 		if err != nil {
 			return nil, "", err
 		}
-		for _, file := range files {
-			if err := schema.applyFile(file, digest); err != nil {
-				return nil, "", err
-			}
-			loaded = true
+		migrations = append(migrations, files...)
+	}
+	slices.SortFunc(migrations, compareVersions)
+	for _, file := range migrations {
+		if err := schema.applyFile(file, digest); err != nil {
+			return nil, "", err
 		}
+		loaded = true
 	}
 	key := hex.EncodeToString(digest.Sum(nil))
 	if !loaded {
@@ -290,8 +293,8 @@ func load(root string, dirs []string, respectGitignore bool) (*Schema, string, e
 // findMigrationDirs returns the directories named migrations under root that
 // the run walks: not in a dependency or test directory, one git ignores (with
 // respectGitignore) or a repository of its own below the project.
-func findMigrationDirs(root string, respectGitignore bool) ([]string, error) {
-	tree, err := core.NewRepositoryTree(root, respectGitignore)
+func findMigrationDirs(root string, respectGitignore bool, skipDirs ...string) ([]string, error) {
+	tree, err := core.NewRepositoryTree(root, respectGitignore, skipDirs...)
 	if err != nil {
 		return nil, fmt.Errorf("find migrations under %s: %w", root, err)
 	}
@@ -824,13 +827,13 @@ var (
 
 // LoadCached is Load done once per root, directories and respectGitignore for
 // the process: every file of a project checks against the same schema.
-func LoadCached(root string, dirs []string, respectGitignore bool) (*Schema, error) {
-	schema, _, err := loadCached(root, dirs, respectGitignore)
+func LoadCached(root string, dirs []string, respectGitignore bool, skipDirs ...string) (*Schema, error) {
+	schema, _, err := loadCached(root, dirs, respectGitignore, skipDirs...)
 	return schema, err
 }
 
-func loadCached(root string, dirs []string, respectGitignore bool) (*Schema, string, error) {
-	key := fmt.Sprintf("%s\x00%t\x00%s", root, respectGitignore, strings.Join(dirs, "\x00"))
+func loadCached(root string, dirs []string, respectGitignore bool, skipDirs ...string) (*Schema, string, error) {
+	key := fmt.Sprintf("%s\x00%t\x00%s\x00%s", root, respectGitignore, strings.Join(dirs, "\x00"), strings.Join(skipDirs, "\x00"))
 	cacheMu.Lock()
 	entry, ok := cache[key]
 	if !ok {
@@ -838,6 +841,6 @@ func loadCached(root string, dirs []string, respectGitignore bool) (*Schema, str
 		cache[key] = entry
 	}
 	cacheMu.Unlock()
-	entry.once.Do(func() { entry.schema, entry.inputs, entry.err = load(root, dirs, respectGitignore) })
+	entry.once.Do(func() { entry.schema, entry.inputs, entry.err = load(root, dirs, respectGitignore, skipDirs...) })
 	return entry.schema, entry.inputs, entry.err
 }

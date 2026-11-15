@@ -83,6 +83,7 @@ type BaseRule struct {
 	// respectGitignore is settings.respect_gitignore of the run's
 	// configuration (ConfigureAll); nil before one, the default.
 	respectGitignore *bool
+	skipDirs         []string
 }
 
 // SettingSpec describes a configurable rule setting.
@@ -161,7 +162,11 @@ type runConfigured interface {
 func (r *BaseRule) useRunConfig(cfg *core.Config) {
 	respect := cfg.RespectGitignore()
 	r.respectGitignore = &respect
+	r.skipDirs = cfg.SkipDirs()
 }
+
+// SkipDirs reports the directory names the run's walker leaves out.
+func (r *BaseRule) SkipDirs() []string { return r.skipDirs }
 
 // RespectGitignore reports settings.respect_gitignore of the run: whether a
 // walk of the tree the rule makes itself leaves out what git ignores, as the

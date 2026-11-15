@@ -95,6 +95,7 @@ type TestExternalServiceRule struct {
 type envFilesKey struct {
 	root             string
 	respectGitignore bool
+	skipDirs         string
 }
 
 // NewTestExternalServiceRule creates the rule
@@ -129,13 +130,14 @@ func (r *TestExternalServiceRule) projectEnv(root string) projectEnv {
 	if abs, err := filepath.Abs(root); err == nil {
 		root = abs
 	}
-	key := envFilesKey{root: root, respectGitignore: r.RespectGitignore()}
+	skipDirs := r.SkipDirs()
+	key := envFilesKey{root: root, respectGitignore: r.RespectGitignore(), skipDirs: strings.Join(skipDirs, "\x00")}
 	r.envMu.Lock()
 	defer r.envMu.Unlock()
 	if env, ok := r.env[key]; ok {
 		return env
 	}
-	keys, hash, err := envFileInputs(root, key.respectGitignore)
+	keys, hash, err := envFileInputs(root, key.respectGitignore, skipDirs...)
 	env := projectEnv{keys: keys, hash: hash, err: err}
 	r.env[key] = env
 	return env
@@ -216,15 +218,15 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 // directories the run does not walk (core.RepositoryTree): the variables a
 // developer's environment holds when the runner exports the file. Only the
 // key names are kept.
-func envFileKeys(root string, respectGitignore bool) (map[string]bool, error) {
-	keys, _, err := envFileInputs(root, respectGitignore)
+func envFileKeys(root string, respectGitignore bool, skipDirs ...string) (map[string]bool, error) {
+	keys, _, err := envFileInputs(root, respectGitignore, skipDirs...)
 	return keys, err
 }
 
-func envFileInputs(root string, respectGitignore bool) (map[string]bool, string, error) {
+func envFileInputs(root string, respectGitignore bool, skipDirs ...string) (map[string]bool, string, error) {
 	keys := make(map[string]bool)
 	hash := sha256.New()
-	tree, err := core.NewRepositoryTree(root, respectGitignore)
+	tree, err := core.NewRepositoryTree(root, respectGitignore, skipDirs...)
 	if err != nil {
 		return nil, "", fmt.Errorf("list env files under %s: %w", root, err)
 	}

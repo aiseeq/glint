@@ -17,12 +17,12 @@ import (
 // rule reads: those its migrations setting names, or else those the run's
 // walk reaches under its settings.respect_gitignore.
 func LoadSchema(root string, rule *rules.BaseRule) (*sqlschema.Schema, error) {
-	return sqlschema.LoadCached(root, MigrationDirs(rule), rule.RespectGitignore())
+	return sqlschema.LoadCached(root, MigrationDirs(rule), rule.RespectGitignore(), rule.SkipDirs()...)
 }
 
 // SchemaInputsHash identifies the migration bytes LoadSchema reads.
 func SchemaInputsHash(root string, rule *rules.BaseRule) (string, error) {
-	return sqlschema.InputsHash(root, MigrationDirs(rule), rule.RespectGitignore())
+	return sqlschema.InputsHash(root, MigrationDirs(rule), rule.RespectGitignore(), rule.SkipDirs()...)
 }
 
 // MigrationDirs reads the migrations setting.

@@ -50,7 +50,7 @@ func (r *CIToolchainImageOlderThanGoModRule) AnalyzeFile(ctx *core.FileContext) 
 	if !ctx.IsCIConfig() && !ctx.IsDockerfile() {
 		return nil
 	}
-	goMod, err := nearestGoMod(ctx, r.RespectGitignore())
+	goMod, err := nearestGoMod(ctx, r.RespectGitignore(), r.SkipDirs()...)
 	if err == nil && goMod == "" {
 		return nil
 	}
@@ -97,7 +97,7 @@ func olderToolchain(image, module string) bool {
 // walks under respectGitignore (core.RepositoryTree): a clone of another
 // repository there is not the module the pipeline builds. "" when there is
 // none.
-func nearestGoMod(ctx *core.FileContext, respectGitignore bool) (string, error) {
+func nearestGoMod(ctx *core.FileContext, respectGitignore bool, skipDirs ...string) (string, error) {
 	root := filepath.Clean(ctx.ProjectRoot)
 	for dir := filepath.Dir(ctx.Path); strings.HasPrefix(dir, root); dir = filepath.Dir(dir) {
 		if candidate := filepath.Join(dir, "go.mod"); regularFileExists(candidate) {
@@ -114,7 +114,7 @@ func nearestGoMod(ctx *core.FileContext, respectGitignore bool) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("list %s: %w", root, err)
 	}
-	tree, err := core.NewRepositoryTree(root, respectGitignore)
+	tree, err := core.NewRepositoryTree(root, respectGitignore, skipDirs...)
 	if err != nil {
 		return "", err
 	}
