@@ -117,6 +117,53 @@ func TestTemplateProjectRuleCacheInputsKeyTheirFindings(t *testing.T) {
 	}
 }
 
+func TestTemplateProjectRulesReportGoFileFindings(t *testing.T) {
+	tests := []struct {
+		name  string
+		rule  func() rules.Rule
+		files map[string]string
+		want  string
+	}{
+		{
+			name: "go-template-json-string-in-script-context",
+			rule: func() rules.Rule { return gorules.NewGoTemplateJSONStringInScriptContextRule() },
+			files: map[string]string{
+				"web/page.go": `package web
+type Page struct { PayloadJSON string }
+`,
+				"web/templates/page.html": `<script>const payload = {{.PayloadJSON}};</script>`,
+			},
+			want: "web/page.go",
+		},
+		{
+			name: "go-template-define-collision-in-shared-set",
+			rule: func() rules.Rule { return gorules.NewGoTemplateDefineCollisionInSharedSetRule() },
+			files: map[string]string{
+				"web/templates.go": `package web
+import "html/template"
+var pages, _ = template.New("pages").ParseGlob("templates/*.html")
+`,
+				"web/templates/base.html": `{{define "content"}}base{{end}}`,
+				"web/templates/page.html": `{{define "content"}}page{{end}}`,
+			},
+			want: "web/templates.go",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeModuleFile(t, root, "go.mod", "module example.com/project\n\ngo 1.24\n")
+			for path, content := range tc.files {
+				writeModuleFile(t, root, path, content)
+			}
+			findings := analyzeUncachedRoot(t, root, []rules.Rule{tc.rule()})
+			require.NotEmpty(t, findings)
+			assert.Equal(t, tc.want, findings[0].File)
+		})
+	}
+}
+
 // writeLiveGateModule writes a module whose test skips unless a token is set.
 // The gate is a real guard only while no env file of the project names the
 // token, so the finding of test-external-service depends on the env files,
