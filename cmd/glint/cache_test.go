@@ -1185,8 +1185,11 @@ func TestPruneCacheEvictsOldForeignFilesBeforeRecentCache(t *testing.T) {
 // analyzeCachedRoot runs one root through the check pipeline with the cache,
 // as runCheck does.
 func analyzeCachedRoot(t *testing.T, root string, list []rules.Rule) (*preparedRoot, core.ViolationList) {
+	return analyzeCachedRootWithConfig(t, root, list, core.DefaultConfig())
+}
+
+func analyzeCachedRootWithConfig(t *testing.T, root string, list []rules.Rule, cfg *core.Config) (*preparedRoot, core.ViolationList) {
 	t.Helper()
-	cfg := core.DefaultConfig()
 	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, cfg, list, true)
 	require.NoError(t, err)
 	require.NotNil(t, prepared.cache)

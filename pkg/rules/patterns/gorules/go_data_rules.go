@@ -1083,6 +1083,15 @@ func NewEnumComparedToForeignLiteralRule() *EnumComparedToForeignLiteralRule {
 	)}
 }
 
+// CacheInputs keys the template findings by the same files the rule scans.
+func (r *EnumComparedToForeignLiteralRule) CacheInputs(root string) (string, error) {
+	files, err := patternkit.TemplateFiles(root, r.RespectGitignore(), r.SkipDirs()...)
+	if err != nil {
+		return "", err
+	}
+	return rules.HashCacheInputs(root, files)
+}
+
 // AnalyzeFile is a no-op: the project analysis checks every file.
 func (r *EnumComparedToForeignLiteralRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
 	return nil

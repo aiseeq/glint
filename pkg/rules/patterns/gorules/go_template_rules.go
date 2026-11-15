@@ -1,10 +1,13 @@
 package gorules
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
+	"io/fs"
 	stdmaps "maps"
 	"os"
 	"path/filepath"
@@ -34,8 +37,17 @@ func init() {
 // against its Go code; analyze returns findings in either kind of file.
 type templateProjectRule struct {
 	*rules.BaseRule
-	suggestion string
-	analyze    func(ctx *core.GoProjectContext) ([]projectFinding, error)
+	suggestion  string
+	analyze     func(ctx *core.GoProjectContext) ([]projectFinding, error)
+	cacheInputs func(root string, respectGitignore bool, skipDirs ...string) (string, error)
+}
+
+// CacheInputs returns the external files whose contents affect this rule.
+func (r *templateProjectRule) CacheInputs(root string) (string, error) {
+	if r.cacheInputs == nil {
+		return "", nil
+	}
+	return r.cacheInputs(root, r.RespectGitignore(), r.SkipDirs()...)
 }
 
 // projectFinding is one report of a template rule: a file of the run, a line
@@ -443,7 +455,8 @@ func NewGoTemplateDefineCollisionInSharedSetRule() *templateProjectRule {
 			"Detects a ParseFS, ParseGlob or ParseFiles call loading two or more files that {{define}} the same name into one template set — the last parsed wins for every page",
 			core.SeverityHigh,
 		),
-		suggestion: "Parse each page into its own set (Clone the shared layout and add the page), or give each page's block its own name",
+		suggestion:  "Parse each page into its own set (Clone the shared layout and add the page), or give each page's block its own name",
+		cacheInputs: templateDefineCacheInputs,
 	}
 	r.analyze = func(ctx *core.GoProjectContext) ([]projectFinding, error) {
 		var findings []projectFinding
@@ -508,6 +521,131 @@ func matchedTemplateFiles(dir, root string, patterns []ast.Expr) ([]string, erro
 	return files, nil
 }
 
+func templateFilesCacheInputs(root string, respectGitignore bool, skipDirs ...string) (string, error) {
+	paths, err := patternkit.TemplateFiles(root, respectGitignore, skipDirs...)
+	if err != nil {
+		return "", err
+	}
+	return rules.HashCacheInputs(root, paths)
+}
+
+// templateDefineCacheInputs hashes the files matched by the same literal
+// ParseGlob/ParseFiles/ParseFS calls that the rule analyzes. It reads the Go
+// files of the tree, tests too, since the rule reads every file of the typed
+// packages: a file more in the key only costs a rerun, one less a stale
+// finding.
+func templateDefineCacheInputs(root string, respectGitignore bool, skipDirs ...string) (string, error) {
+	tree, err := core.NewRepositoryTree(root, respectGitignore, skipDirs...)
+	if err != nil {
+		return "", err
+	}
+	var files []string
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != root {
+				if patternkit.EnvFileSkipDirs[entry.Name()] || strings.HasPrefix(entry.Name(), ".") {
+					return filepath.SkipDir
+				}
+				if _, statErr := os.Stat(filepath.Join(path, "go.mod")); statErr == nil {
+					return filepath.SkipDir
+				}
+			}
+			return tree.Enter(path)
+		}
+		if strings.ToLower(filepath.Ext(path)) != ".go" {
+			return nil
+		}
+		source, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if !bytes.Contains(source, []byte("ParseGlob")) && !bytes.Contains(source, []byte("ParseFiles")) && !bytes.Contains(source, []byte("ParseFS")) {
+			return nil
+		}
+		syntax, parseErr := parser.ParseFile(token.NewFileSet(), path, source, 0)
+		if parseErr != nil {
+			return fmt.Errorf("parse template loader %s: %w", path, parseErr)
+		}
+		for _, call := range templateParseCalls(syntax) {
+			at, ok := parseCalls[helpers.CalleeName(call)]
+			if !ok || !templateParseCall(syntax, call) {
+				continue
+			}
+			matches, err := matchedTemplateFiles(filepath.Dir(path), root, call.Args[min(at, len(call.Args)):])
+			if err != nil {
+				return err
+			}
+			for _, match := range matches {
+				info, err := os.Stat(match)
+				if err != nil {
+					return fmt.Errorf("read template %s: %w", match, err)
+				}
+				if !info.IsDir() {
+					files = append(files, match)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return rules.HashCacheInputs(root, files)
+}
+
+func templateParseCalls(file *ast.File) []*ast.CallExpr {
+	var calls []*ast.CallExpr
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if _, ok := parseCalls[helpers.CalleeName(call)]; ok {
+			calls = append(calls, call)
+		}
+		return true
+	})
+	return calls
+}
+
+func templateParseCall(file *ast.File, call *ast.CallExpr) bool {
+	if _, ok := call.Fun.(*ast.Ident); ok {
+		for _, spec := range file.Imports {
+			if spec.Name == nil || spec.Name.Name != "." {
+				continue
+			}
+			path, ok := helpers.StringLiteral(spec.Path)
+			if ok && (path == "html/template" || path == "text/template") {
+				return true
+			}
+		}
+		return false
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	imports := make(map[string]bool, len(file.Imports))
+	for _, spec := range file.Imports {
+		path, ok := helpers.StringLiteral(spec.Path)
+		if !ok || (path != "html/template" && path != "text/template") {
+			continue
+		}
+		name := filepath.Base(path)
+		if spec.Name != nil {
+			name = spec.Name.Name
+		}
+		imports[name] = true
+	}
+	if ident, ok := selector.X.(*ast.Ident); ok && imports[ident.Name] {
+		return true
+	}
+	return len(imports) > 0
+}
+
 // sharedDefine returns a name two or more of the files define, with the
 // files that do.
 func sharedDefine(files []string) (string, []string, error) {
@@ -565,7 +703,8 @@ func NewGoTemplateJSONStringInScriptContextRule() *templateProjectRule {
 			"Detects a string field named for JSON that a template interpolates as a bare value inside <script> — html/template quotes it, and the script gets a string instead of the object",
 			core.SeverityMedium,
 		),
-		suggestion: "Pass the value itself (html/template encodes it as JSON in a script), or type the field template.JS",
+		suggestion:  "Pass the value itself (html/template encodes it as JSON in a script), or type the field template.JS",
+		cacheInputs: templateFilesCacheInputs,
 	}
 	r.analyze = func(ctx *core.GoProjectContext) ([]projectFinding, error) {
 		templates, err := runTemplatesAll(ctx, r.RespectGitignore(), r.SkipDirs()...)

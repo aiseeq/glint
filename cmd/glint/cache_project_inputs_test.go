@@ -10,8 +10,112 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/deadcode"
+	"github.com/aiseeq/glint/pkg/rules/patterns/gorules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/qarules"
 )
+
+// goProjectReportAdapter preserves the rule's analysis and cache inputs while
+// allowing its Go-file project findings through the report-location guard.
+type goProjectReportAdapter struct {
+	rules.GoProjectRule
+}
+
+func (r goProjectReportAdapter) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.GoProjectRule.AnalyzeFile(ctx)
+}
+
+func (goProjectReportAdapter) ReportsOn(ctx *core.FileContext) bool { return ctx.IsGoFile() }
+
+func (r goProjectReportAdapter) CacheInputs(root string) (string, error) {
+	if input, ok := r.GoProjectRule.(rules.CacheInputRule); ok {
+		return input.CacheInputs(root)
+	}
+	return "", nil
+}
+
+// Each project rule below reads template files that are not necessarily Go
+// inputs. Editing one must invalidate that rule's cached project findings.
+func TestTemplateProjectRuleCacheInputsKeyTheirFindings(t *testing.T) {
+	tests := []struct {
+		name    string
+		rule    func() rules.Rule
+		files   map[string]string
+		edit    map[string]string
+		exclude []string
+	}{
+		{
+			name: "unused-internal-export",
+			rule: func() rules.Rule { return deadcode.NewUnusedInternalExportRule() },
+			files: map[string]string{
+				"internal/model/model.go": "package model\n\ntype Record struct{}\n\nfunc (*Record) TemplateLabel() string { return \"record\" }\n",
+				"main.go":                 "package main\n\nimport \"example.com/project/internal/model\"\n\nfunc main() { _ = &model.Record{} }\n",
+				"views/page.tpl":          "{{.TemplateLabel}}\n",
+			},
+			edit: map[string]string{"views/page.tpl": "record\n"},
+		},
+		{
+			name: "enum-compared-to-foreign-literal",
+			rule: func() rules.Rule { return gorules.NewEnumComparedToForeignLiteralRule() },
+			files: map[string]string{
+				"handler.go":      "package project\n\nimport \"html/template\"\n\ntype State string\n\nconst StateOpen State = \"open\"\n\nvar functions = template.FuncMap{\"toState\": func(value string) bool { return State(value) == StateOpen }}\n",
+				"views/page.html": "{{toState \"open\"}}\n",
+			},
+			edit:    map[string]string{"views/page.html": "{{toState \"closed\"}}\n"},
+			exclude: []string{"views/**"},
+		},
+		{
+			name: "go-template-json-string-in-script-context",
+			rule: func() rules.Rule { return gorules.NewGoTemplateJSONStringInScriptContextRule() },
+			files: map[string]string{
+				"page.go":         "package project\n\ntype View struct { PayloadJSON string }\n",
+				"views/page.html": "<script>const payload = null;</script>\n",
+			},
+			edit:    map[string]string{"views/page.html": "<script>const payload = {{.PayloadJSON}};</script>\n"},
+			exclude: []string{"views/**"},
+		},
+		{
+			name: "go-template-define-collision-in-shared-set",
+			rule: func() rules.Rule { return gorules.NewGoTemplateDefineCollisionInSharedSetRule() },
+			files: map[string]string{
+				"templates.go":        "package project\n\nimport \"html/template\"\n\nvar parsed, _ = template.New(\"pages\").ParseGlob(\"templates/*.html\")\n",
+				"templates/base.html": "{{define \"content\"}}base{{end}}\n",
+				"templates/page.html": "page\n",
+			},
+			edit:    map[string]string{"templates/page.html": "{{define \"content\"}}page{{end}}\n"},
+			exclude: []string{"templates/**"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GLINT_CACHE_DIR", t.TempDir())
+			root := t.TempDir()
+			writeModuleFile(t, root, "go.mod", "module example.com/project\n\ngo 1.24\n")
+			for path, content := range tc.files {
+				writeModuleFile(t, root, path, content)
+			}
+			rule := tc.rule()
+			list := []rules.Rule{goProjectReportAdapter{GoProjectRule: rule.(rules.GoProjectRule)}}
+			cfg := core.DefaultConfig()
+			cfg.Settings.Exclude = tc.exclude
+			_, first := analyzeCachedRootWithConfig(t, root, list, cfg)
+			require.Empty(t, first)
+			for path, content := range tc.edit {
+				writeModuleFile(t, root, path, content)
+			}
+			want := analyzeUncachedRootWithConfig(t, root, list, cfg)
+			require.NotEmpty(t, want, "the template edit changes the project's findings")
+			prepared, got := analyzeCachedRootWithConfig(t, root, list, cfg)
+			assert.Equal(t, fingerprint(want), fingerprint(got))
+			assert.Equal(t, "0 cached, 1 rerun", prepared.cache.projectState())
+			again, reused := analyzeCachedRootWithConfig(t, root, list, cfg)
+			assert.Nil(t, again.project, "the changed template content is now a stable cache input")
+			assert.Equal(t, "1 cached, 0 rerun", again.cache.projectState())
+			assert.Equal(t, fingerprint(want), fingerprint(reused))
+		})
+	}
+}
 
 // writeLiveGateModule writes a module whose test skips unless a token is set.
 // The gate is a real guard only while no env file of the project names the
@@ -42,8 +146,11 @@ func TestLiveVault(t *testing.T) {
 // analyzeUncachedRoot runs one root through the check pipeline without the
 // cache, as a run with --no-cache does.
 func analyzeUncachedRoot(t *testing.T, root string, list []rules.Rule) core.ViolationList {
+	return analyzeUncachedRootWithConfig(t, root, list, core.DefaultConfig())
+}
+
+func analyzeUncachedRootWithConfig(t *testing.T, root string, list []rules.Rule, cfg *core.Config) core.ViolationList {
 	t.Helper()
-	cfg := core.DefaultConfig()
 	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, cfg, list, false)
 	require.NoError(t, err)
 	require.Nil(t, prepared.cache)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -92,6 +93,16 @@ func (r *UnusedInternalExportRule) Configure(settings map[string]any) error {
 
 // RequiresSSA reports that typed packages are enough — no SSA program needed.
 func (r *UnusedInternalExportRule) RequiresSSA() bool { return false }
+
+// CacheInputs keys findings by the template files whose selectors keep
+// exported methods alive.
+func (r *UnusedInternalExportRule) CacheInputs(root string) (string, error) {
+	files, err := templateSelectorFiles(root, r.RespectGitignore(), r.SkipDirs()...)
+	if err != nil {
+		return "", err
+	}
+	return rules.HashCacheInputs(root, files)
+}
 
 // AnalyzeFile does nothing: the rule needs every package to count references.
 func (r *UnusedInternalExportRule) AnalyzeFile(_ *core.FileContext) []*core.Violation {
@@ -268,16 +279,37 @@ func templateSelectorNames(ctx *core.GoProjectContext, respectGitignore bool, sk
 	if ctx.ProjectRoot == "" {
 		return names, nil
 	}
-	tree, err := core.NewRepositoryTree(ctx.ProjectRoot, respectGitignore, skipDirs...)
+	files, err := templateSelectorFiles(ctx.ProjectRoot, respectGitignore, skipDirs...)
 	if err != nil {
 		return nil, err
 	}
-	err = filepath.WalkDir(ctx.ProjectRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+	for _, path := range files {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		addActions(string(content))
+	}
+	return names, nil
+}
+
+// templateSelectorFiles returns the template files read for selector names.
+// Keep this selection shared by analysis and CacheInputs.
+func templateSelectorFiles(root string, respectGitignore bool, skipDirs ...string) ([]string, error) {
+	if root == "" {
+		return nil, nil
+	}
+	tree, err := core.NewRepositoryTree(root, respectGitignore, skipDirs...)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if entry.IsDir() {
-			if path != ctx.ProjectRoot {
+			if path != root {
 				switch entry.Name() {
 				case ".git", "node_modules", "vendor":
 					return filepath.SkipDir
@@ -290,18 +322,12 @@ func templateSelectorNames(ctx *core.GoProjectContext, respectGitignore bool, sk
 		}
 		switch strings.ToLower(filepath.Ext(path)) {
 		case ".html", ".tmpl", ".tpl", ".gohtml", ".gotmpl", ".txt":
-			content, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			addActions(string(content))
+			files = append(files, path)
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return names, nil
+	sort.Strings(files)
+	return files, err
 }
 
 func includeExportCandidate(usage *exportUsage, pkgCtx *core.GoPackageContext, internal, closedModule bool, interfaces []interfaceType) (bool, error) {
