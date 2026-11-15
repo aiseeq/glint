@@ -128,7 +128,7 @@ func checkSuppressions(root analysisRoot, prepared *preparedRoot, enabledRules [
 	late, lateSuppressions := core.SplitSuppressions(slices.Concat(stale, closed))
 	violations = slices.Concat(violations, late, ticketFileSuppressionsWithoutReason(enabledRules, cfg, prepared.ticketFiles))
 	silenced := newSilencedSeverities(cfg, slices.Concat(suppressions, lateSuppressions))
-	configFindings, err := analyzeConfigurationRules(enabledRules, cfg, contexts, root.dir, silenced)
+	configFindings, err := analyzeConfigurationRules(enabledRules, cfg, contexts, root, silenced)
 	if err != nil {
 		return nil, err
 	}

@@ -36,9 +36,9 @@ type Walker struct {
 	// worktree, a cloned dependency) is another repository, not the
 	// project's code, and is not descended into unless named as a scope.
 	skipNestedRepos bool
-	// keepNestedRepos descends into the nested repositories all the same
-	// (WithNestedRepositories).
-	keepNestedRepos bool
+	// keepNestedRepo tells the nested repositories the walk descends into all
+	// the same (WithNestedRepositories); nil for none.
+	keepNestedRepo func(dir string) (bool, error)
 
 	// Worker pool size. The channels belong to one walk: walk creates them,
 	// so the same walker can be reused.
@@ -99,10 +99,11 @@ func (w *Walker) ExcludedInstruction(path string) bool {
 }
 
 // WithNestedRepositories makes the walk descend into the nested repositories
-// below the root too, as a walk scoped to one of them does: the files a check
-// of some scope of the root can read.
-func (w *Walker) WithNestedRepositories(enabled bool) *Walker {
-	w.keepNestedRepos = enabled
+// below the root that keep accepts, by their absolute directory, as a walk
+// scoped to one of them does: the files a check of some scope of the root can
+// read.
+func (w *Walker) WithNestedRepositories(keep func(dir string) (bool, error)) *Walker {
+	w.keepNestedRepo = keep
 	return w
 }
 
@@ -357,13 +358,13 @@ func (w *Walker) visitDirectory(walkErrors chan<- error, held *heldDirError, pat
 			return filepath.SkipDir
 		}
 	}
-	if w.skipNestedRepos && !w.keepNestedRepos && path != w.projectRoot && !slices.Contains(w.scopes, path) {
-		nested, err := hasOwnGit(path)
+	if w.skipNestedRepos && path != w.projectRoot && !slices.Contains(w.scopes, path) {
+		skip, err := w.skipsNestedRepo(path)
 		if err != nil {
 			walkErrors <- err
 			return filepath.SkipDir
 		}
-		if nested {
+		if skip {
 			return filepath.SkipDir
 		}
 	}
@@ -373,6 +374,17 @@ func (w *Walker) visitDirectory(walkErrors chan<- error, held *heldDirError, pat
 		}
 	}
 	return nil
+}
+
+// skipsNestedRepo reports a directory that holds a repository of its own the
+// walk does not keep.
+func (w *Walker) skipsNestedRepo(path string) (bool, error) {
+	nested, err := hasOwnGit(path)
+	if err != nil || !nested || w.keepNestedRepo == nil {
+		return nested, err
+	}
+	keep, err := w.keepNestedRepo(path)
+	return !keep, err
 }
 
 func (w *Walker) visitFile(fileQueue chan<- string, walkErrors chan<- error, path string, entry os.DirEntry) error {

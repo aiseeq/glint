@@ -117,10 +117,13 @@ type StaleSuppressionRule struct {
 	*rules.BaseRule
 }
 
+// staleSuppressionName is the name of stale-suppression.
+const staleSuppressionName = "stale-suppression"
+
 // NewStaleSuppressionRule creates the rule.
 func NewStaleSuppressionRule() *StaleSuppressionRule {
 	return &StaleSuppressionRule{BaseRule: rules.NewBaseRule(
-		"stale-suppression",
+		staleSuppressionName,
 		"deadcode",
 		"Detects inline suppressions and configuration exceptions that silence no finding — they wait to hide the next real one",
 		core.SeverityMedium,
@@ -232,28 +235,80 @@ const toolName = "glint"
 // staleExceptions reports the exceptions of executed rules that matched no
 // finding, leaving to dead-config-exception those whose files do not exist.
 func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map[string]bool) ([]*core.Violation, error) {
-	files, err := run.Config.ConfigFiles()
-	if err != nil {
-		return nil, fmt.Errorf("list the files of the configuration's directory: %w", err)
-	}
-	nested, err := core.NestedRepositories(filepath.Dir(run.Config.ConfigPath()))
-	if err != nil {
-		return nil, fmt.Errorf("find the nested repositories of the configuration's directory: %w", err)
-	}
 	usedExceptions := map[string]bool{}
 	for key := range used {
 		if _, exception, ok := strings.Cut(key, "\x00"+core.SuppressionExceptionPrefix); ok {
 			usedExceptions[exception] = true
 		}
 	}
-	var violations []*core.Violation
-	exceptions := run.Config.Exceptions()
+	judged, err := judgedExceptions(run.Config, func(ruleException *core.RuleException) bool {
+		_, ran := run.Executed[ruleException.Rule]
+		return ran && !usedExceptions[run.Config.ExceptionKey(ruleException.Exception)]
+	})
+	if err != nil {
+		return nil, err
+	}
+	violations := make([]*core.Violation, 0, len(judged))
+	for _, exception := range judged {
+		v := r.CreateViolation(exception.place.File, exception.place.Line,
+			fmt.Sprintf("Exception of %s matched no finding of this run — it silences nothing and waits for the next real one", exception.Rule))
+		v.WithSuggestion("Delete the exception, or narrow it to the finding it was written for")
+		v.WithContext("category", exception.Category)
+		violations = append(violations, v)
+	}
+	return violations, nil
+}
+
+// ExceptionPlace is where stale-suppression reports an exception that
+// matched no finding: the configuration file that declares it, relative to
+// the configuration's directory, and the line that declares it.
+type ExceptionPlace struct {
+	File string
+	Line int
+}
+
+// StaleExceptionPlaces returns the places stale-suppression reports the
+// exceptions of the configuration at when they match no finding of a run of
+// every rule: an exception of stale-suppression excepts its findings there.
+func StaleExceptionPlaces(cfg *core.Config) ([]ExceptionPlace, error) {
+	judged, err := judgedExceptions(cfg, func(*core.RuleException) bool { return true })
+	if err != nil {
+		return nil, err
+	}
+	places := make([]ExceptionPlace, 0, len(judged))
+	for _, exception := range judged {
+		places = append(places, exception.place)
+	}
+	return places, nil
+}
+
+// judgedException is an exception stale-suppression judges, at the place it
+// reports it.
+type judgedException struct {
+	*core.RuleException
+	place ExceptionPlace
+}
+
+// judgedExceptions returns the exceptions of the configuration that wanted
+// accepts and stale-suppression judges: those of other rules - its own
+// findings are filtered after this check, by the run - that name no file or
+// a file a whole-root run analyzes, leaving to dead-config-exception those
+// whose files do not exist.
+func judgedExceptions(cfg *core.Config, wanted func(*core.RuleException) bool) ([]judgedException, error) {
+	files, err := cfg.ConfigFiles()
+	if err != nil {
+		return nil, fmt.Errorf("list the files of the configuration's directory: %w", err)
+	}
+	nested, err := core.NestedRepositories(filepath.Dir(cfg.ConfigPath()))
+	if err != nil {
+		return nil, fmt.Errorf("find the nested repositories of the configuration's directory: %w", err)
+	}
+	var judged []judgedException
+	exceptions := cfg.Exceptions()
 	for i := range exceptions {
 		ruleException := &exceptions[i]
 		exc := ruleException.Exception
-		_, ran := run.Executed[ruleException.Rule]
-		// Its own findings are filtered after this check, by the run.
-		if !ran || usedExceptions[run.Config.ExceptionKey(exc)] || ruleException.Rule == r.Name() {
+		if ruleException.Rule == staleSuppressionName || !wanted(ruleException) {
 			continue
 		}
 		if exc.File != "" || exc.Files != "" {
@@ -268,17 +323,13 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 				continue
 			}
 		}
-		source, err := filepath.Rel(filepath.Dir(run.Config.ConfigPath()), exc.Source())
+		source, err := filepath.Rel(filepath.Dir(cfg.ConfigPath()), exc.Source())
 		if err != nil {
 			return nil, fmt.Errorf("name configuration %q relative to its directory: %w", exc.Source(), err)
 		}
-		v := r.CreateViolation(source, exc.DeclaredAt(),
-			fmt.Sprintf("Exception of %s matched no finding of this run — it silences nothing and waits for the next real one", ruleException.Rule))
-		v.WithSuggestion("Delete the exception, or narrow it to the finding it was written for")
-		v.WithContext("category", ruleException.Category)
-		violations = append(violations, v)
+		judged = append(judged, judgedException{RuleException: ruleException, place: ExceptionPlace{File: filepath.ToSlash(source), Line: exc.DeclaredAt()}})
 	}
-	return violations, nil
+	return judged, nil
 }
 
 // reachedFile reports whether an exception names a file a whole-root run

@@ -374,13 +374,14 @@ func recordDeadConfigRule(enabledRules []rules.Rule, cfg *core.Config, configs m
 	return nil
 }
 
-func analyzeConfigurationRules(enabledRules []rules.Rule, cfg *core.Config, contexts []*core.FileContext, projectRoot string, silenced silencedSeverities) ([]*core.Violation, error) {
+func analyzeConfigurationRules(enabledRules []rules.Rule, cfg *core.Config, contexts []*core.FileContext, root analysisRoot, silenced silencedSeverities) ([]*core.Violation, error) {
+	projectRoot := root.dir
 	var findings []*core.Violation
 	for _, rule := range enabledRules {
 		switch rule.Name() {
 		case "broad-exclusion":
 			done := timings.track("broad-exclusion", "(project config)")
-			violations, err := broadExclusionFindings(cfg, silenced)
+			violations, err := broadExclusionFindings(cfg, root.walkScopes(), silenced)
 			done()
 			if err != nil {
 				return nil, err
