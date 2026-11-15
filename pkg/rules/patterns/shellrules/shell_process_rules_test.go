@@ -202,6 +202,59 @@ trap 'rm -f "$tmp_file"' EXIT
 `)
 }
 
+// Repro from a real project: every test ran in its own subshell inside the
+// loop and dropped the parent's trap there; a trap set in a subshell replaces
+// neither the parent's trap nor the one of the previous iteration.
+func TestShellTrapInLoopSubshell(t *testing.T) {
+	shellWanted(t, "shell-trap-in-loop", "subshell.sh", `#!/bin/bash
+for t in a b; do
+	(
+		trap - EXIT
+		"$t"
+	)
+	out=$(
+		trap 'rm -f "$t.tmp"' EXIT
+		"$t"
+	)
+	trap 'rm -f "$t.log"' EXIT # want
+done
+(
+	for t in a b; do
+		trap 'rm -f "$t"' EXIT # want
+	done
+)
+for t in a b; do
+	case "$t" in
+	a) run ;;
+	esac
+	trap 'rm -f "$t"' EXIT # want
+done
+for t in a b; do
+	( # each test in its own subshell)
+		case "$t" in
+		a) run ;;
+		esac
+		trap - EXIT
+		"$t"
+	)
+done
+for t in a b; do
+	case "$t" in
+	a) run ;;
+	esac
+	(
+		trap - EXIT
+		"$t" )
+	trap 'rm -f "$t"' EXIT # want
+done
+for t in a b; do
+	case "$t" in a) run ;; esac
+	echo "(" '('
+	trap 'rm -f "$t"' EXIT # want
+done
+`)
+}
+
 // Repro from a real project: the work directory was removed by trap on exit,
 // and a failed run exited before the step that copied its log out - the log
 // of the failure was lost.

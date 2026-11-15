@@ -437,27 +437,74 @@ func checkBackgroundWithoutTrap(r *shellRule, src *patternkit.ShellSource) []*co
 
 var trapExit = regexp.MustCompile(`^trap\s+.*\b(?:EXIT|0)\b`)
 
-// checkTrapInLoop reports trap ... EXIT set inside a loop.
+// checkTrapInLoop reports trap ... EXIT set inside a loop. A trap set in a
+// subshell opened in the loop body, ( … ) or $( … ), belongs to that
+// subshell: it replaces neither the trap of the script nor the one of the
+// previous iteration.
 func checkTrapInLoop(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
 	if src.Make {
 		return nil
 	}
 	var out []*core.Violation
-	depth := 0
+	var loops []int // the subshell depth each open loop starts at
+	subshells, cases := 0, 0
 	for _, s := range src.Steps() {
 		text := strings.TrimSpace(patternkit.CommandPrefix.ReplaceAllString(s.Text, ""))
 		switch {
 		case shellLoopStart(s.Text):
-			depth++
+			loops = append(loops, subshells)
 		case loopEnd.MatchString(text):
-			depth--
-		case depth > 0 && trapExit.MatchString(text):
+			if len(loops) > 0 {
+				loops = loops[:len(loops)-1]
+			}
+		case len(loops) > 0 && loops[len(loops)-1] == subshells && trapExit.MatchString(text):
 			out = appendReport(out, src.Report(r, s.Line,
 				"trap ... EXIT inside a loop replaces the trap of the previous iteration — only the last cleanup runs",
 				"Set one trap before the loop that cleans up everything the loop made (collect the paths in an array), or clean up at the end of each iteration"))
 		}
+		switch {
+		case caseStart.MatchString(text):
+			cases++
+		case caseEnd.MatchString(text) && cases > 0:
+			cases--
+		case cases > 0:
+			text = casePattern.ReplaceAllString(text, "")
+		}
+		subshells = max(0, subshells+parenChange(text))
 	}
 	return out
+}
+
+var (
+	caseEnd = regexp.MustCompile(`^esac\b`)
+	// casePattern is the pattern that opens a case arm, a) or (a|b): its )
+	// closes no subshell.
+	casePattern = regexp.MustCompile(`^\(?[^()\s;][^();]*\)`)
+)
+
+// parenChange returns the unquoted ( of text less its unquoted ): how many
+// subshells or command substitutions the command leaves open.
+func parenChange(text string) int {
+	var q patternkit.QuoteScanner
+	change := 0
+	for i := 0; i < len(text); {
+		if n := q.Step(text, i); n > 0 {
+			i += n
+			continue
+		}
+		switch text[i] {
+		case '(':
+			change++
+		case ')':
+			change--
+		case '#':
+			if i == 0 || text[i-1] == ' ' || text[i-1] == '\t' {
+				return change
+			}
+		}
+		i++
+	}
+	return change
 }
 
 var (
