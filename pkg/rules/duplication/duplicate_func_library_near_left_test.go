@@ -237,7 +237,7 @@ func payprovScale(vs []float64, k, b float64) []float64 {
 	}
 	return res
 }
-`, "Function payprovScale is a near copy (100% alike) of function Scale"},
+`, ""},
 		"variable named twice in another role": {`package app
 
 func payprovScale(vs []float64, k, b float64) []float64 {
@@ -554,6 +554,33 @@ func payprovB(xs []int, s string) (int, bool, string) {
 	assert.NotEqual(t, a[half-1:], b[half-1:])
 }
 
+// Operands with a call keep their order: the call may change what the other
+// reads.
+func TestGoNearBodyKeepsOperandsWithCalls(t *testing.T) {
+	bodies := goNearBodiesOf(t, `package app
+
+func payprovNext(xs []int) int { return xs[0] }
+
+func payprovA(xs []int) int {
+	return xs[1] + payprovNext(xs)*2
+}
+
+func payprovB(xs []int) int {
+	return payprovNext(xs)*2 + xs[1]
+}
+
+func payprovC(xs []int) int {
+	return payprovNext(xs) + xs[1]*2
+}
+
+func payprovD(xs []int) int {
+	return xs[1]*2 + payprovNext(xs)
+}
+`)
+	assert.NotEqual(t, bodies["payprovA"].Tokens, bodies["payprovB"].Tokens)
+	assert.NotEqual(t, bodies["payprovC"].Tokens, bodies["payprovD"].Tokens)
+}
+
 // A swap through a temporary prints as the swap it is, but when the
 // temporary is read again or the three statements move other values.
 func TestGoNearBodySwapsThroughATemporary(t *testing.T) {
@@ -611,9 +638,82 @@ func payprovOtherBackRead(xs []int, i, j, u int) int {
 	xs[j] = u
 	return t
 }
+
+func payprovTupleConst(xs []int, i, j int) int {
+	xs[0], xs[j] = xs[j], xs[0]
+	return 0
+}
+
+func payprovTempConst(xs []int, i, j int) int {
+	t := xs[0]
+	xs[0] = xs[j]
+	xs[j] = t
+	return 0
+}
+
+func payprovTupleIndexWritten(xs []int, i, j int) int {
+	i, xs[i] = xs[i], i
+	return 0
+}
+
+func payprovTempIndexWritten(xs []int, i, j int) int {
+	t := i
+	i = xs[i]
+	xs[i] = t
+	return 0
+}
+
+func payprovTupleIndexRead(xs []int, i, j int) int {
+	xs[i], xs[xs[i]] = xs[xs[i]], xs[i]
+	return 0
+}
+
+func payprovTempIndexRead(xs []int, i, j int) int {
+	t := xs[i]
+	xs[i] = xs[xs[i]]
+	xs[xs[i]] = t
+	return 0
+}
+
+func payprovTupleIndexSum(xs []int, i, j int) int {
+	xs[i+1], xs[j] = xs[j], xs[i+1]
+	return 0
+}
+
+func payprovTempIndexSum(xs []int, i, j int) int {
+	t := xs[i+1]
+	xs[i+1] = xs[j]
+	xs[j] = t
+	return 0
+}
+
+type payprovLink struct{ next *payprovLink }
+
+type payprovChain struct{ n *payprovLink }
+
+func payprovTupleLink(a payprovChain) int {
+	a.n, a.n.next = a.n.next, a.n
+	return 0
+}
+
+func payprovTempLink(a payprovChain) int {
+	t := a.n
+	a.n = a.n.next
+	a.n.next = t
+	return 0
+}
 `)
 	tuple := bodies["payprovTuple"].Tokens
 	assert.Equal(t, tuple, bodies["payprovTemp"].Tokens)
+	// A constant index stays where it is; an index the swap writes, or one
+	// that is not a name, moves.
+	assert.Equal(t, bodies["payprovTupleConst"].Tokens, bodies["payprovTempConst"].Tokens)
+	assert.NotEqual(t, bodies["payprovTupleIndexWritten"].Tokens, bodies["payprovTempIndexWritten"].Tokens)
+	assert.NotEqual(t, bodies["payprovTupleIndexRead"].Tokens, bodies["payprovTempIndexRead"].Tokens)
+	assert.NotEqual(t, bodies["payprovTupleIndexSum"].Tokens, bodies["payprovTempIndexSum"].Tokens)
+	// a.n.next written last is the field of the new a.n, where the swap
+	// writes the field of the old one.
+	assert.NotEqual(t, bodies["payprovTupleLink"].Tokens, bodies["payprovTempLink"].Tokens)
 	for _, name := range []string{"payprovReadAgain", "payprovOtherSave", "payprovOtherBack", "payprovOtherRead"} {
 		assert.NotEqual(t, tuple, bodies[name].Tokens, name)
 	}
@@ -686,16 +786,47 @@ func payprovOutside(xs []int, b payprovBox) int {
 	ys := payprovShared
 	return len(ys) + len(xs) + len(b.xs)
 }
+
+func payprovNamedBeforeCall(xs []int, b payprovBox) int {
+	ys := xs
+	payprovTouch(b)
+	return len(ys) + len(xs) + len(b.xs)
+}
+
+func payprovTouch(b payprovBox) {}
+
+func payprovDirectLoop(xs []int, ch chan int) int {
+	for v := range ch {
+		xs[0] = v
+	}
+	payprovSpend(xs)
+	return xs[1]
+}
+
+func payprovNamedLoop(xs []int, ch chan int) int {
+	for v := range ch {
+		ys := xs
+		ys[0] = v
+	}
+	payprovSpend(xs)
+	return xs[1]
+}
+
+func payprovSpend(xs []int) {}
 `)
 	assert.Equal(t, bodies["payprovDirect"].Tokens, bodies["payprovNamed"].Tokens)
+	// What runs before the second name in its loop, or after its scope,
+	// does not touch it while it names the value.
+	assert.Equal(t, bodies["payprovDirectLoop"].Tokens, bodies["payprovNamedLoop"].Tokens)
 	for name, kept := range map[string]int{
-		"payprovRebound":       2,
-		"payprovSourceRebound": 2,
-		"payprovFieldRebound":  2,
-		"payprovCopyWritten":   2,
-		"payprovSourceWritten": 2,
-		"payprovAddressed":     2,
-		"payprovOutside":       1,
+		"payprovRebound":         2,
+		"payprovSourceRebound":   2,
+		"payprovFieldRebound":    2,
+		"payprovCopyWritten":     2,
+		"payprovSourceWritten":   2,
+		"payprovAddressed":       2,
+		"payprovOutside":         1,
+		"payprovNamedBeforeCall": 2,
 	} {
 		assert.Len(t, bodies[name].Roles, kept+1, name)
 	}

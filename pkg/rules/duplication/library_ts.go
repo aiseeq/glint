@@ -539,6 +539,9 @@ func (s *tsSource) tsNearBody(f tsFunc, detailed bool) nearBody {
 			w.endStmt()
 		}
 		w.markHead(i)
+		if s.effect(i) {
+			w.b.fix()
+		}
 		switch tok.kind {
 		case tsIdent:
 			i += s.emitName(w.b, i, locals)
@@ -695,10 +698,11 @@ func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) int {
 	case name == "break" || name == "continue" || name == "return":
 		b.emitAnchor(name, name, name)
 	case (local || name == "this") && s.fieldRead(i):
+		b.touch(s.memberUse(i))
 		root := locals.number(name)
 		field := locals.number(name + "." + s.text(i+2))
 		b.field(field, root)
-		b.emitVar(field, s.access(i, i+3))
+		b.emitVar(field, s.writes(i, i+3))
 		return 2
 	case tsKeywords[name]:
 		b.emit(name)
@@ -708,7 +712,8 @@ func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) int {
 		b.lits[value] = true
 		return 2
 	case local:
-		b.emitVar(locals.number(name), s.access(i, i+1))
+		b.touch(s.memberUse(i))
+		b.emitVar(locals.number(name), s.writes(i, i+1))
 	case call:
 		b.calls[name] = true
 		b.emitAnchor(name, name, nearCallMask)
@@ -736,106 +741,66 @@ func (s *tsSource) fieldRead(i int) bool {
 	return s.text(i+1) == "." && s.isIdent(i+2) && s.text(i+3) != "(" && s.text(i+3) != "?."
 }
 
-// access is how the name at i, whose tokens end before next, is used:
-// written when declared, incremented or assigned, itself or at an index;
-// changed when a method of it that may change it is called or when it is
-// passed to a call that may change it, as an object or an array may be.
-func (s *tsSource) access(i, next int) nearAccess {
+// writes reports whether the name at i, whose tokens end before next, is
+// written: declared, incremented in front, deleted from, or assigned,
+// itself or at an index.
+func (s *tsSource) writes(i, next int) bool {
 	switch s.text(i - 1) {
-	case "let", "const", "var":
-		return nearWrite
+	case "let", "const", "var", "delete":
+		return true
 	case "++", "--":
 		if s.toks[i-1].line == s.toks[i].line {
-			return nearWrite
+			return true
 		}
 	}
-	after := next
-	for s.text(after) == "[" && s.match[after] > after {
-		after = s.match[after] + 1
+	for s.text(next) == "[" && s.match[next] > next {
+		next = s.match[next] + 1
 	}
-	switch op := s.text(after); {
-	case op == "++" || op == "--":
-		if s.toks[after].line == s.toks[after-1].line {
-			return nearWrite
+	if op := s.text(next); op == "++" || op == "--" {
+		return s.toks[next].line == s.toks[next-1].line
+	}
+	return tsAssignments[s.text(next)]
+}
+
+// memberUse is how the name at i uses what it reaches, an object or an
+// array another name may reach too: through a field or an element, read or
+// written, or read by a loop over it.
+func (s *tsSource) memberUse(i int) memoryUse {
+	next := i + 1
+	for {
+		if dot := s.text(next); (dot == "." || dot == "?.") && next+1 < len(s.toks) && s.toks[next+1].kind == tsIdent {
+			next += 2
+		} else if dot == "?." && s.text(next+1) == "[" {
+			next++
+		} else if dot == "[" && s.match[next] > next {
+			next = s.match[next] + 1
+		} else {
+			break
 		}
-		return nearRead
-	case tsAssignments[op]:
-		return nearWrite
 	}
-	if s.text(next) == "." && s.text(next+2) == "(" && s.toks[next+1].kind == tsIdent && !tsPureMethods[s.text(next+1)] {
-		return nearChange
+	switch {
+	case next > i+1 && s.writes(i, next):
+		return memoryWrite
+	case next > i+1 || s.text(i-1) == "of" || s.text(i-1) == "in":
+		return memoryRead
 	}
-	if s.passedOn(i, next) {
-		return nearChange
-	}
-	return nearRead
+	return memoryNone
 }
 
-// passedOn reports whether the name at i, whose tokens end before next, is
-// an argument of a call that may change it: not a method of tsPureMethods,
-// a function of tsPureFunctions, of an object of tsPureHolders or a
-// constructor of tsPureConstructors.
-func (s *tsSource) passedOn(i, next int) bool {
-	if prev := s.text(i - 1); prev != "(" && prev != "," {
-		return false
+// effect reports whether the token at i may do what nothing proves
+// independent of the statements around it: a call, a function made, an
+// await or a yield, a tagged template or a template with an expression,
+// whose names and calls the body does not see.
+func (s *tsSource) effect(i int) bool {
+	switch s.text(i) {
+	case "=>", "function", "await", "yield", "new":
+		return true
+	case "(":
+		prev := s.text(i - 1)
+		return s.isIdent(i-1) || prev == "super" || prev == ")" || prev == "]" || prev == "?."
 	}
-	if end := s.text(next); end != ")" && end != "," {
-		return false
-	}
-	open := i - 1
-	for open >= 0 && s.text(open) != "(" {
-		switch s.text(open) {
-		case "[", "{":
-			return false
-		case ")", "]", "}":
-			open = s.match[open]
-		}
-		open--
-	}
-	if open < 1 || s.toks[open-1].kind != tsIdent || tsKeywords[s.text(open-1)] {
-		return false
-	}
-	callee := s.text(open - 1)
-	switch s.text(open - 2) {
-	case ".", "?.":
-		return !tsPureMethods[callee] && !tsPureHolders[s.text(open-3)]
-	case "new":
-		return !tsPureConstructors[callee]
-	case "function":
-		return false
-	}
-	return !tsPureFunctions[callee]
+	return s.toks[i].kind == tsTemplate && (s.isIdent(i-1) || strings.Contains(s.toks[i].text, "${"))
 }
-
-// tsPureMethods are the methods that change neither the value they are
-// called on nor what is passed to them: those of strings, the reading ones
-// of arrays, maps and sets, and of numbers.
-var tsPureMethods = map[string]bool{
-	"at": true, "charAt": true, "charCodeAt": true, "codePointAt": true, "concat": true, "endsWith": true,
-	"entries": true, "every": true, "filter": true, "find": true, "findIndex": true, "findLast": true,
-	"findLastIndex": true, "flat": true, "flatMap": true, "forEach": true, "get": true, "has": true,
-	"includes": true, "indexOf": true, "join": true, "keys": true, "lastIndexOf": true, "localeCompare": true,
-	"map": true, "match": true, "matchAll": true, "normalize": true, "padEnd": true, "padStart": true,
-	"reduce": true, "reduceRight": true, "repeat": true, "replace": true, "replaceAll": true, "search": true,
-	"slice": true, "some": true, "split": true, "startsWith": true, "substring": true, "toFixed": true,
-	"toLowerCase": true, "toString": true, "toUpperCase": true, "trim": true, "trimEnd": true, "trimStart": true,
-	"values": true,
-}
-
-// tsPureHolders are the objects whose functions change nothing passed to
-// them.
-var tsPureHolders = map[string]bool{"Array": true, "JSON": true, "Math": true, "Number": true, "Object": true, "String": true, "console": true}
-
-// tsPureFunctions are the global functions that change nothing passed to
-// them.
-var tsPureFunctions = map[string]bool{
-	"Boolean": true, "Number": true, "String": true, "decodeURIComponent": true, "encodeURIComponent": true,
-	"isFinite": true, "isNaN": true, "parseFloat": true, "parseInt": true,
-}
-
-// tsPureConstructors are the classes whose constructors copy what is passed
-// to them.
-var tsPureConstructors = map[string]bool{"Array": true, "Date": true, "Error": true, "Map": true, "RegExp": true, "Set": true, "URL": true}
 
 func lowerBound(sorted []int, value int) int {
 	lo, hi := 0, len(sorted)

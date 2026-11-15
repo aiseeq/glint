@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"go/types"
 	"maps"
+	"math"
 	"math/bits"
 	"slices"
 	"strconv"
@@ -94,27 +95,29 @@ type nearRole struct {
 	Shape   uint64 `json:"s"`
 	Anchors uint64 `json:"a"`
 	Locals  []int  `json:"l,omitempty"`
-	// Writes are the variables of Locals the statement writes; Changes
-	// those of them a call may change: the receiver of a method, a value
-	// passed on or taken by address. Two calls that change a value, as two
-	// writes to a builder, give another value in another order.
-	Writes  []int `json:"w,omitempty"`
-	Changes []int `json:"c,omitempty"`
+	// Writes are the variables of Locals the statement writes.
+	Writes []int `json:"w,omitempty"`
 	// Parallel marks an assignment of several values at once, which reads
 	// all of them before it writes any.
 	Parallel bool `json:"t,omitempty"`
-	Parent   int  `json:"p"`
+	// Fixed marks a statement nothing proves independent of the others: one
+	// that calls a function, takes an address, sends or receives, makes a
+	// closure or a subslice. It keeps its place among the statements.
+	Fixed bool `json:"x,omitempty"`
+	// Memory is how the statement uses what is reached through a pointer,
+	// a slice, a map or, in TypeScript, an object: another name may reach
+	// the same, so nothing proves a write there apart from a read.
+	Memory memoryUse `json:"m,omitempty"`
+	Parent int       `json:"p"`
 }
 
-// nearAccess is how a statement uses a variable it names.
-type nearAccess uint8
+// memoryUse is how a statement uses what is reached through a reference.
+type memoryUse uint8
 
 const (
-	nearRead nearAccess = iota
-	nearWrite
-	// nearChange is a write by a call: of a method of the variable, of a
-	// call it is passed to, or through its address.
-	nearChange
+	memoryNone memoryUse = iota
+	memoryRead
+	memoryWrite
 )
 
 // nearBodyBuilder collects a nearBody in one pass over the body: every token
@@ -158,17 +161,13 @@ func (b *nearBodyBuilder) emit(tok string) { b.add(tok, tok, "", -1) }
 // emitLocal adds the variable the function numbers num.
 func (b *nearBodyBuilder) emitLocal(num int) { b.add("$L", "$L", "", num) }
 
-// emitVar adds the variable the function numbers num, as the statement uses
-// it.
-func (b *nearBodyBuilder) emitVar(num int, access nearAccess) {
+// emitVar adds the variable the function numbers num, which the statement
+// writes when write is set.
+func (b *nearBodyBuilder) emitVar(num int, write bool) {
 	b.emitLocal(num)
-	if access == nearRead || !b.detailed || len(b.open) == 0 {
-		return
-	}
-	top := &b.open[len(b.open)-1]
-	top.role.Writes = append(top.role.Writes, num)
-	if access == nearChange {
-		top.role.Changes = append(top.role.Changes, num)
+	if write && b.detailed && len(b.open) > 0 {
+		top := &b.open[len(b.open)-1]
+		top.role.Writes = append(top.role.Writes, num)
 	}
 }
 
@@ -177,6 +176,22 @@ func (b *nearBodyBuilder) emitVar(num int, access nearAccess) {
 func (b *nearBodyBuilder) parallel() {
 	if b.detailed && len(b.open) > 0 {
 		b.open[len(b.open)-1].role.Parallel = true
+	}
+}
+
+// touch notes that the innermost open statement reads, or writes, what is
+// reached through a reference.
+func (b *nearBodyBuilder) touch(use memoryUse) {
+	if b.detailed && len(b.open) > 0 {
+		top := &b.open[len(b.open)-1]
+		top.role.Memory = max(top.role.Memory, use)
+	}
+}
+
+// fix marks the innermost open statement as one that keeps its place.
+func (b *nearBodyBuilder) fix() {
+	if b.detailed && len(b.open) > 0 {
+		b.open[len(b.open)-1].role.Fixed = true
 	}
 }
 
@@ -313,23 +328,20 @@ func goNearBody(info *types.Info, fd *ast.FuncDecl, detailed bool) nearBody {
 	w := &goNearWalker{n: newFunctionBlockNormalizer(info, fd), b: newNearBodyBuilder(detailed), own: funcPackage(fd, info), fields: make(map[string]int)}
 	w.body = fd.Body
 	if detailed {
-		w.writes = goWrites(info, fd.Body)
+		w.writes = goWrites(fd.Body)
 	}
 	w.walk(fd.Body)
 	return w.b.finish()
 }
 
-// goWrites collects what a body writes, down to the variable an index, a
-// slice or a field of it writes: the left side of an assignment, the operand of ++ and
-// --, the key and the value of a range; and what a call may change: what is
-// taken by address, the receiver of a method that may change it and the
-// values passed to a call that may change them, a slice, a map, a pointer
-// or an interface.
-func goWrites(info *types.Info, body *ast.BlockStmt) map[ast.Node]nearAccess {
-	out := make(map[ast.Node]nearAccess)
-	mark := func(e ast.Expr, access nearAccess) {
+// goWrites collects what a body writes: the left side of an assignment, the
+// operand of ++ and --, the key and the value of a range, down to the
+// variable an index, a slice or a field of it writes.
+func goWrites(body *ast.BlockStmt) map[ast.Node]bool {
+	out := make(map[ast.Node]bool)
+	mark := func(e ast.Expr) {
 		for e != nil {
-			out[e] = max(out[e], access)
+			out[e] = true
 			switch x := e.(type) {
 			case *ast.IndexExpr:
 				e = x.X
@@ -352,108 +364,120 @@ func goWrites(info *types.Info, body *ast.BlockStmt) map[ast.Node]nearAccess {
 		switch x := node.(type) {
 		case *ast.AssignStmt:
 			for _, lhs := range x.Lhs {
-				mark(lhs, nearWrite)
+				mark(lhs)
 			}
 		case *ast.IncDecStmt:
-			mark(x.X, nearWrite)
+			mark(x.X)
 		case *ast.RangeStmt:
-			mark(x.Key, nearWrite)
-			mark(x.Value, nearWrite)
-		case *ast.UnaryExpr:
-			if x.Op == token.AND {
-				mark(x.X, nearChange)
-			}
-		case *ast.CallExpr:
-			if sel, ok := ast.Unparen(x.Fun).(*ast.SelectorExpr); ok && goMethodChanges(info, sel) {
-				mark(sel.X, nearChange)
-			}
-			for k, arg := range x.Args {
-				if t := info.TypeOf(arg); t != nil && (sharesValue(t) || types.IsInterface(t)) && goCallChanges(info, x, k) {
-					mark(arg, nearChange)
-				}
-			}
+			mark(x.Key)
+			mark(x.Value)
 		}
 		return true
 	})
 	return out
 }
 
-// goMethodChanges reports whether the method sel calls may change its
-// receiver: one on a pointer, an interface or a value that shares what it
-// holds, a slice or a map, unless goPureMethods knows it changes nothing.
-func goMethodChanges(info *types.Info, sel *ast.SelectorExpr) bool {
-	selection := info.Selections[sel]
-	if selection == nil || selection.Kind() != types.MethodVal {
-		return false
-	}
-	fn, ok := selection.Obj().(*types.Func)
-	if !ok || goPureMethods[fn.FullName()] {
-		return false
-	}
-	recv := fn.Signature().Recv().Type()
-	return types.IsInterface(recv) || sharesValue(recv)
-}
-
-// goCallChanges reports whether call may change the value of its argument
-// k: a builtin copy, delete or clear changes the first, a function of
-// goPurePackages or goPureFuncs and a conversion none, any other function
-// any.
-func goCallChanges(info *types.Info, call *ast.CallExpr, k int) bool {
-	var obj types.Object
-	switch x := ast.Unparen(call.Fun).(type) {
-	case *ast.Ident:
-		obj = info.Uses[x]
-	case *ast.SelectorExpr:
-		obj = info.Uses[x.Sel]
-	}
-	switch obj := obj.(type) {
-	case *types.Builtin:
-		switch obj.Name() {
-		case "copy", "delete", "clear":
-			return k == 0
-		}
-		return false
-	case *types.TypeName:
-		return false
-	case *types.Func:
-		if obj.Pkg() != nil && obj.Signature().Recv() == nil && goPurePackages[obj.Pkg().Path()] {
+// goEffect reports whether node, apart from what it holds, may do what
+// nothing proves independent of the statements around it: a call but of
+// len, cap or a conversion, an address taken, a send or a receive, a range
+// over a channel or a function, a closure, a subslice that shares what it
+// cuts.
+func goEffect(info *types.Info, node ast.Node) bool {
+	switch x := node.(type) {
+	case *ast.CallExpr:
+		if info.Types[x.Fun].IsType() {
 			return false
 		}
-		return !goPureFuncs[obj.FullName()] && !goPureMethods[obj.FullName()]
+		if id, ok := ast.Unparen(x.Fun).(*ast.Ident); ok {
+			if builtin, ok := info.Uses[id].(*types.Builtin); ok {
+				return builtin.Name() != "len" && builtin.Name() != "cap"
+			}
+		}
+		return true
+	case *ast.UnaryExpr:
+		return x.Op == token.AND || x.Op == token.ARROW
+	case *ast.RangeStmt:
+		if t := info.TypeOf(x.X); t != nil {
+			switch t.Underlying().(type) {
+			case *types.Chan, *types.Signature:
+				return true
+			}
+		}
+		return false
+	case *ast.SendStmt, *ast.FuncLit, *ast.SliceExpr:
+		return true
 	}
-	return true
+	return false
 }
 
-// goPurePackages are the packages whose functions change none of the values
-// passed to them.
-var goPurePackages = map[string]bool{
-	"bytes": true, "math": true, "math/bits": true, "path": true, "path/filepath": true,
-	"strconv": true, "strings": true, "unicode": true, "unicode/utf8": true,
+// goReaches reports whether node, apart from what it holds, reaches what
+// another name may reach too: an element of a slice or a map, what a
+// pointer points to, the elements a range reads, the length of a map or a
+// channel.
+func goReaches(info *types.Info, node ast.Node) bool {
+	switch x := node.(type) {
+	case *ast.IndexExpr:
+		return goReference(info.TypeOf(x.X))
+	case *ast.StarExpr:
+		return !info.Types[x.X].IsType()
+	case *ast.SelectorExpr:
+		selection := info.Selections[x]
+		return selection != nil && selection.Kind() == types.FieldVal && selection.Indirect()
+	case *ast.RangeStmt:
+		return goReference(info.TypeOf(x.X))
+	case *ast.CallExpr:
+		if len(x.Args) == 1 && info.TypeOf(x.Args[0]) != nil {
+			switch info.TypeOf(x.Args[0]).Underlying().(type) {
+			case *types.Map, *types.Chan:
+				return true
+			}
+		}
+	}
+	return false
 }
 
-// goPureFuncs are other functions that change none of the values passed to
-// them.
-var goPureFuncs = map[string]bool{
-	"errors.Is": true, "fmt.Errorf": true, "fmt.Print": true, "fmt.Printf": true, "fmt.Println": true,
-	"fmt.Sprint": true, "fmt.Sprintf": true, "fmt.Sprintln": true,
-	"maps.Clone": true, "maps.Equal": true, "maps.Keys": true, "maps.Values": true,
-	"slices.BinarySearch": true, "slices.Clone": true, "slices.Contains": true, "slices.ContainsFunc": true,
-	"slices.Equal": true, "slices.Index": true, "slices.IndexFunc": true, "slices.Max": true, "slices.Min": true,
+// goReference reports whether a value of type t reaches what another value
+// may reach: a slice, a map or a pointer.
+func goReference(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Underlying().(type) {
+	case *types.Slice, *types.Map, *types.Pointer:
+		return true
+	}
+	return false
 }
 
-// goPureMethods are the methods that change neither their receiver nor what
-// is passed to them, by types.Func.FullName.
-var goPureMethods = map[string]bool{
-	"(*strings.Builder).Cap": true, "(*strings.Builder).Len": true, "(*strings.Builder).String": true,
-	"(*bytes.Buffer).Bytes": true, "(*bytes.Buffer).Cap": true, "(*bytes.Buffer).Len": true, "(*bytes.Buffer).String": true,
-	"(*math/big.Int).BitLen": true, "(*math/big.Int).Cmp": true, "(*math/big.Int).CmpAbs": true,
-	"(*math/big.Int).Int64": true, "(*math/big.Int).IsInt64": true, "(*math/big.Int).Sign": true,
-	"(*math/big.Int).String": true, "(*math/big.Int).Text": true, "(*math/big.Int).Uint64": true,
-	"(*math/big.Float).Cmp": true, "(*math/big.Float).Sign": true, "(*math/big.Float).String": true, "(*math/big.Float).Text": true,
-	"(*math/big.Rat).Cmp": true, "(*math/big.Rat).Sign": true, "(*math/big.Rat).String": true,
-	"(*regexp.Regexp).FindAllString": true, "(*regexp.Regexp).FindString": true, "(*regexp.Regexp).FindStringSubmatch": true,
-	"(*regexp.Regexp).MatchString": true, "(*regexp.Regexp).ReplaceAllString": true, "(*regexp.Regexp).Split": true,
-	"(*regexp.Regexp).String": true, "(error).Error": true, "(fmt.Stringer).String": true,
+// note marks the statement open with what node, apart from what it holds,
+// does: fixes it in its place for an effect (goEffect), notes a read or a
+// write of what a reference reaches (goReaches).
+func (w *goNearWalker) note(node ast.Node) {
+	if !w.b.detailed {
+		return
+	}
+	if goEffect(w.n.info, node) {
+		w.b.fix()
+	}
+	if goReaches(w.n.info, node) {
+		use := memoryRead
+		if w.writes[node] {
+			use = memoryWrite
+		}
+		w.b.touch(use)
+	}
+}
+
+// goEffectFree reports whether node holds nothing goEffect sees.
+func goEffectFree(info *types.Info, node ast.Node) bool {
+	free := true
+	ast.Inspect(node, func(n ast.Node) bool {
+		if free && n != nil && goEffect(info, n) {
+			free = false
+		}
+		return free
+	})
+	return free
 }
 
 type goNearWalker struct {
@@ -467,7 +491,7 @@ type goNearWalker struct {
 	// fields numbers the fields of variables the body reads.
 	fields map[string]int
 	// writes holds what the body writes (goWrites), for a detailed body.
-	writes map[ast.Node]nearAccess
+	writes map[ast.Node]bool
 	// body is the body walked; uses counts the reads of its objects
 	// (goUses), once a swap through a temporary needs them.
 	body *ast.BlockStmt
@@ -495,6 +519,9 @@ func (w *goNearWalker) walk(root ast.Node) {
 				w.b.closeStmt()
 			}
 			return false
+		}
+		if !isNearStmt(node) {
+			w.note(node)
 		}
 		switch x := node.(type) {
 		case *ast.ParenExpr:
@@ -568,6 +595,7 @@ func (w *goNearWalker) walk(root ast.Node) {
 		}
 		if isNearStmt(node) {
 			w.openStmt(node)
+			w.note(node)
 		}
 		w.openNode(node)
 		if isElseBlock(node, stack) {
@@ -616,11 +644,31 @@ func (w *goNearWalker) alias(assign *ast.AssignStmt) bool {
 	if obj == nil || w.assigns.rebound[obj] || w.assigns.into[obj] && !sharesValue(obj.Type()) || !w.assigns.keeps(root, field, w.n.info.TypeOf(assign.Rhs[0])) {
 		return false
 	}
+	if !w.untouchedWhileNamed(assign, obj) {
+		return false
+	}
 	if w.aliases == nil {
 		w.aliases = make(map[types.Object]ast.Expr)
 	}
 	w.aliases[obj] = assign.Rhs[0]
 	return true
+}
+
+// untouchedWhileNamed reports whether nothing may change what assign names
+// a second time while obj names it: nothing after assign in the scope of
+// obj calls or takes an address (goEffect), since a call may change a value
+// a name of its own keeps.
+func (w *goNearWalker) untouchedWhileNamed(assign *ast.AssignStmt, obj types.Object) bool {
+	from, to := assign.End(), obj.Parent().End()
+	free := true
+	ast.Inspect(w.body, func(node ast.Node) bool {
+		if !free || node == nil || node.End() <= from || node.Pos() >= to {
+			return false
+		}
+		free = node.Pos() < from || !goEffect(w.n.info, node)
+		return free
+	})
+	return free
 }
 
 // localValue returns the variable of the function e is, or whose field it
@@ -776,6 +824,9 @@ func (w *goNearWalker) tupleSwap(first, second, third ast.Stmt) ast.Stmt {
 	if types.ExprString(save.Rhs[0]) != types.ExprString(move.Lhs[0]) || types.ExprString(move.Rhs[0]) != types.ExprString(back.Lhs[0]) {
 		return nil
 	}
+	if !w.swapPlace(move.Lhs[0], back.Lhs[0]) || !w.swapPlace(back.Lhs[0], move.Lhs[0]) {
+		return nil
+	}
 	if w.uses == nil {
 		w.uses = goUses(w.n.info, w.body)
 	}
@@ -783,6 +834,39 @@ func (w *goNearWalker) tupleSwap(first, second, third ast.Stmt) ast.Stmt {
 		return nil
 	}
 	return &ast.AssignStmt{Lhs: []ast.Expr{move.Lhs[0], back.Lhs[0]}, Tok: token.ASSIGN, Rhs: []ast.Expr{move.Rhs[0], save.Rhs[0]}}
+}
+
+// swapPlace reports whether e, one of the two places of a swap through a
+// temporary, is a place the write to the other, written, leaves where it
+// is: a name, or a field, an element at a name or a constant or what a
+// pointer points to of a place written is not, at an index written is not.
+// t := xs[k]; xs[k] = xs[xs[k]-1]; xs[xs[k]-1] = t reads
+// the new xs[k] for its last place, which the swap does not.
+func (w *goNearWalker) swapPlace(e, written ast.Expr) bool {
+	other := types.ExprString(written)
+	for {
+		switch x := e.(type) {
+		case *ast.Ident:
+			return true
+		case *ast.SelectorExpr:
+			e = x.X
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			id, name := x.Index.(*ast.Ident)
+			if name && id.Name == other || !name && w.n.info.Types[x.Index].Value == nil {
+				return false
+			}
+			e = x.X
+		default:
+			return false
+		}
+		if types.ExprString(e) == other {
+			return false
+		}
+	}
 }
 
 // rewritten prints an assignment that stands for another, a second name of
@@ -887,7 +971,7 @@ func (w *goNearWalker) commuted(x *ast.BinaryExpr) bool {
 	default:
 		return false
 	}
-	return nodeCount(x.X) < nodeCount(x.Y)
+	return nodeCount(x.X) < nodeCount(x.Y) && goEffectFree(w.n.info, x.X) && goEffectFree(w.n.info, x.Y)
 }
 
 // nodeCount counts the nodes of an expression as the body prints them: a
@@ -1205,17 +1289,52 @@ func sameRoles(c *nearCandidate, body nearBody) bool {
 	}
 	unpairHolders(roles, ownPartner, libPartner)
 	unpairHolders(c.body.Roles, libPartner, ownPartner)
-	if !keepsDependentOrder(roles, ownPartner, body.Roots) {
+	if !keepsDependentOrder(roles, c.body.Roles, ownPartner, body.Roots) {
 		return false
 	}
 	same, matched := m.alignRest(
 		restSide{tokens: unpairedTokens(c.body, libPartner), roles: c.body.Roles, roots: c.body.Roots},
 		restSide{tokens: unpairedTokens(body, ownPartner), roles: roles, roots: body.Roots})
-	if !same || len(matched) == 0 {
-		return same
+	if !same {
+		return false
 	}
-	partner := restPartners(ownPartner, matched)
-	return keepsDependentOrder(roles, partner, body.Roots) && keepsParallel(roles, c.body.Roles, partner)
+	partner := ownPartner
+	if len(matched) > 0 {
+		partner = restPartners(ownPartner, matched)
+		if !keepsDependentOrder(roles, c.body.Roles, partner, body.Roots) || !keepsParallel(roles, c.body.Roles, partner) {
+			return false
+		}
+	}
+	return keepsOwnValues(roles, partner)
+}
+
+// keepsOwnValues reports whether no statement that keeps its place runs
+// between a statement of the body that stands for none of the library
+// function and the last statement that reads what it writes: old := p.Name;
+// p.SetName(n); return old reads the name from before the call, where the
+// library function, which reads p.Name after it, reads the new one.
+func keepsOwnValues(roles []nearRole, partner []int) bool {
+	lastRead := make(map[int]int)
+	for k, role := range roles {
+		for _, v := range role.Locals {
+			lastRead[v] = k
+		}
+	}
+	nextFixed := len(roles)
+	for i := len(roles) - 1; i >= 0; i-- {
+		if partner[i] < 0 {
+			for _, v := range roles[i].Writes {
+				// A value nothing reads gives 0, before every statement after i.
+				if lastRead[v] >= nextFixed {
+					return false
+				}
+			}
+		}
+		if roles[i].Fixed {
+			nextFixed = i
+		}
+	}
+	return true
 }
 
 // restPartners adds to the partners of the paired statements the statement
@@ -1262,17 +1381,19 @@ func keepsParallel(roles, lib []nearRole, partner []int) bool {
 }
 
 // keepsDependentOrder reports whether the statements of a body with a
-// partner that depend on each other run in the order of their partners.
-// Two statements depend on each other when one writes a variable the other
-// reads without writing it, or both write it and a call changes it in one
-// of them. A field stands for its variable as well: writing the variable
-// writes its fields, reading or writing a field reads or writes the
-// variable, but two fields of one variable are apart. A copy may swap two
-// lookups, two counts or two rewrites of one value, but not a rewrite of a
-// value and a statement that reads it, which then reads another value, nor
-// two writes to one builder. A statement opens before the statements it
+// partner in the library function, lib, run in the order of their partners
+// where nothing proves them independent. A statement that keeps its place
+// (Fixed) on either side, or holds one, runs after every statement whose
+// partner runs before its partner and before every one whose partner runs
+// after. Other statements depend on each other when one writes a variable
+// the other reads without writing it. A field stands for its variable as
+// well: writing the variable writes its fields, writing a field writes the
+// variable for the statements that read it, but two fields of one variable
+// are apart. A copy may swap two lookups, two counts or two rewrites of one
+// value, but not a rewrite of a value and a statement that reads it, which
+// then reads another value. A statement opens before the statements it
 // holds, on both sides, so the two keep their order.
-func keepsDependentOrder(roles []nearRole, partner []int, roots map[int]int) bool {
+func keepsDependentOrder(roles, lib []nearRole, partner []int, roots map[int]int) bool {
 	last := -1
 	inOrder := true
 	for _, p := range partner {
@@ -1283,6 +1404,9 @@ func keepsDependentOrder(roles []nearRole, partner []int, roots map[int]int) boo
 	}
 	if inOrder {
 		return true
+	}
+	if !keepsFixedPlaces(heldFixed(roles), heldFixed(lib), partner) {
+		return false
 	}
 	vars := statementVars(roles)
 	access := make(map[int]*varAccess)
@@ -1296,11 +1420,10 @@ func keepsDependentOrder(roles []nearRole, partner []int, roots map[int]int) boo
 		if partner[i] < 0 {
 			continue
 		}
-		for v, changed := range sv.writes {
-			a := at(v)
-			a.writers = append(a.writers, varUse{i, changed})
+		for v := range sv.writes {
+			at(v).writers = append(at(v).writers, i)
 			if root, field := roots[v]; field {
-				at(root).fieldWriters = append(at(root).fieldWriters, varUse{i, changed})
+				at(root).fieldWriters = append(at(root).fieldWriters, i)
 			}
 		}
 		for v := range sv.reads {
@@ -1310,10 +1433,52 @@ func keepsDependentOrder(roles []nearRole, partner []int, roots map[int]int) boo
 			}
 		}
 	}
-	for _, a := range access {
-		if !a.inOrder(partner) {
+	for v, a := range access {
+		if !a.inOrder(partner) || v == nearMemory && !a.writesInOrder(partner) {
 			return false
 		}
+	}
+	return true
+}
+
+// nearMemory stands among the variables of statementVars for what is
+// reached through a reference, which two writes may both change.
+const nearMemory = -2
+
+// heldFixed marks every statement of roles that keeps its place or holds
+// one that does.
+func heldFixed(roles []nearRole) []bool {
+	out := make([]bool, len(roles))
+	for i := len(roles) - 1; i >= 0; i-- {
+		out[i] = out[i] || roles[i].Fixed
+		if p := roles[i].Parent; p >= 0 && out[i] {
+			out[p] = true
+		}
+	}
+	return out
+}
+
+// keepsFixedPlaces reports whether every statement of the body that keeps
+// its place, or whose partner does, has no statement before it with a later
+// partner and none after it with an earlier one.
+func keepsFixedPlaces(own, lib []bool, partner []int) bool {
+	later := make([]int, len(partner)+1)
+	later[len(partner)] = math.MaxInt
+	for i := len(partner) - 1; i >= 0; i-- {
+		later[i] = later[i+1]
+		if partner[i] >= 0 {
+			later[i] = min(later[i], partner[i])
+		}
+	}
+	before := -1
+	for i, p := range partner {
+		if p < 0 {
+			continue
+		}
+		if (own[i] || lib[p]) && (before > p || later[i+1] < p) {
+			return false
+		}
+		before = max(before, p)
 	}
 	return true
 }
@@ -1321,46 +1486,44 @@ func keepsDependentOrder(roles []nearRole, partner []int, roots map[int]int) boo
 // varAccess is how the statements use one variable: those that write it,
 // read it, and, for a variable with fields, write or read a field of it.
 type varAccess struct {
-	writers, fieldWriters []varUse
+	writers, fieldWriters []int
 	readers, fieldReaders []int
 }
 
-// varUse is a statement that writes a variable, by a call when changed is
-// set.
-type varUse struct {
-	stmt    int
-	changed bool
+// keptPair reports whether statements x and y of a body run in the order of
+// their partners, or stand for one statement.
+func keptPair(partner []int, x, y int) bool {
+	return partner[x] == partner[y] || (x < y) == (partner[x] < partner[y])
+}
+
+// writesInOrder reports whether every two writers keep their order.
+func (a *varAccess) writesInOrder(partner []int) bool {
+	for k, w := range a.writers {
+		for _, other := range a.writers[k+1:] {
+			if !keptPair(partner, w, other) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (a *varAccess) inOrder(partner []int) bool {
-	kept := func(x, y int) bool {
-		return partner[x] == partner[y] || (x < y) == (partner[x] < partner[y])
-	}
-	for k, w := range a.writers {
+	for _, w := range a.writers {
 		for _, r := range a.readers {
-			if !kept(w.stmt, r) {
+			if !keptPair(partner, w, r) {
 				return false
 			}
 		}
 		for _, r := range a.fieldReaders {
-			if !kept(w.stmt, r) {
-				return false
-			}
-		}
-		for _, f := range a.fieldWriters {
-			if (w.changed || f.changed) && !kept(w.stmt, f.stmt) {
-				return false
-			}
-		}
-		for _, other := range a.writers[k+1:] {
-			if (w.changed || other.changed) && !kept(w.stmt, other.stmt) {
+			if !keptPair(partner, w, r) {
 				return false
 			}
 		}
 	}
 	for _, f := range a.fieldWriters {
 		for _, r := range a.readers {
-			if !kept(f.stmt, r) {
+			if !keptPair(partner, f, r) {
 				return false
 			}
 		}
@@ -1369,8 +1532,7 @@ func (a *varAccess) inOrder(partner []int) bool {
 }
 
 // stmtVars are the variables a statement, with the statements it holds,
-// writes, each set when a call changes it, and those it reads without
-// writing them.
+// writes and those it reads without writing them.
 type stmtVars struct {
 	writes map[int]bool
 	reads  map[int]bool
@@ -1385,15 +1547,19 @@ func statementVars(roles []nearRole) []stmtVars {
 	}
 	for i := len(roles) - 1; i >= 0; i-- {
 		for _, v := range roles[i].Writes {
-			out[i].writes[v] = out[i].writes[v] || slices.Contains(roles[i].Changes, v)
+			out[i].writes[v] = true
 		}
 		for _, v := range roles[i].Locals {
 			out[i].reads[v] = true
 		}
+		switch roles[i].Memory {
+		case memoryWrite:
+			out[i].writes[nearMemory] = true
+		case memoryRead:
+			out[i].reads[nearMemory] = true
+		}
 		if p := roles[i].Parent; p >= 0 {
-			for v, changed := range out[i].writes {
-				out[p].writes[v] = out[p].writes[v] || changed
-			}
+			maps.Copy(out[p].writes, out[i].writes)
 			maps.Copy(out[p].reads, out[i].reads)
 		}
 	}

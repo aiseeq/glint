@@ -1,11 +1,6 @@
 package duplication
 
 import (
-	"go/ast"
-	"go/importer"
-	"go/parser"
-	"go/token"
-	"go/types"
 	"strings"
 	"testing"
 
@@ -113,10 +108,11 @@ func Reverse(xs []int) int {
 `
 
 // A copy keeps the order of the statements that depend on each other
-// through a field of a variable, a call of its method, its address or a
-// slice passed on; it may move a statement that reads another field, calls a
-// method that changes nothing or works on another variable. A swap through
-// a temporary is one only when it puts the temporary back.
+// through a field of a variable and of every statement with a call: a call
+// of a method, one that takes an address or one a slice is passed to may
+// change what another statement reads. It may move a statement without a
+// call that reads what no moved statement writes. A swap through a
+// temporary is one only when it puts the temporary back.
 func TestDuplicateFuncOfLibraryNearCopyDependencies(t *testing.T) {
 	for name, tc := range map[string]struct{ source, subject string }{
 		"name read before the pair is replaced": {`package app
@@ -181,7 +177,7 @@ func payprovGrow(q lib.Pair, lim int) int {
 	}
 	return c + extra
 }
-`, "Function payprovGrow is a near copy (100% alike) of function Grow"},
+`, ""},
 		"separator written after each part": {`package app
 
 import "strings"
@@ -210,7 +206,7 @@ func payprovSplit(items []string, delim string) (string, string) {
 	}
 	return ks.String(), vs.String()
 }
-`, "Function payprovSplit is a near copy (100% alike) of function Split"},
+`, ""},
 		"text read before the size": {`package app
 
 import "strings"
@@ -225,7 +221,7 @@ func payprovMeasure(items []string, delim string) (int, int) {
 	size := sb.Len()
 	return size, len(text)
 }
-`, "Function payprovMeasure is a near copy (100% alike) of function Measure"},
+`, ""},
 		"size read before the parts are written": {`package app
 
 import "strings"
@@ -274,7 +270,7 @@ func payprovSum(items []string, lim int) (int, int) {
 	}
 	return sum, count
 }
-`, "Function payprovSum is a near copy (100% alike) of function SumParsed"},
+`, ""},
 		"low read before the sort": {`package app
 
 import (
@@ -421,8 +417,8 @@ function sortNumbers(xs: number[]): void {
 `
 
 // TypeScript copies keep the order of statements that depend on each other
-// through a field of a variable, a call of its method or a value passed on,
-// and may move a check that only adds, a call on another value or a read.
+// through a field of a variable and of every statement with a call; they may
+// move a read without a call.
 func TestDuplicateFuncOfLibraryTypeScriptDependencies(t *testing.T) {
 	for name, tc := range map[string]struct{ source, subject string }{
 		"length read before the trim": {`export function payprovCount(items: string[], lim: number): number {
@@ -444,7 +440,7 @@ func TestDuplicateFuncOfLibraryTypeScriptDependencies(t *testing.T) {
   }
   return k
 }
-`, "Function payprovCount is a near copy (100% alike) of function trimCount"},
+`, ""},
 		"separator pushed after each part": {`export function payprovJoin(items: string[], delim: string): string[] {
   const res: string[] = []
   for (const it of items) {
@@ -464,7 +460,7 @@ func TestDuplicateFuncOfLibraryTypeScriptDependencies(t *testing.T) {
   }
   return [ks, vs]
 }
-`, "Function payprovSplit is a near copy (100% alike) of function splitPairs"},
+`, ""},
 		"low read before the sort": {`export function payprovSpread(vals: number[], gap: number): number {
   const ws = vals.slice()
   const lo = ws[0]
@@ -505,221 +501,232 @@ func tsDependentFindings(t *testing.T, source string) []*core.Violation {
 	}, "frontend/dep.ts", "backend", source)
 }
 
-// changedVars lists the variables a call changes in the statements of body,
-// in order.
-func changedVars(body nearBody) []int {
-	var out []int
+// fixedStmts lists, for every statement of body in order, whether it keeps
+// its place.
+func fixedStmts(body nearBody) []bool {
+	var out []bool
 	for _, role := range body.Roles {
-		out = append(out, role.Changes...)
+		out = append(out, role.Fixed)
 	}
 	return out
 }
 
-// A Go body records what a call may change: the receiver of a method on a
-// pointer or of a slice type, a slice passed to a function, the first value
-// of copy and delete, what is taken by address; not the receiver of a method
-// on a value, a value passed to len, the source of copy or a number passed
-// on.
-func TestGoNearBodyChanges(t *testing.T) {
+// A Go statement keeps its place when it calls a function or a method, but
+// len, cap or a conversion, appends, takes an address, sends, receives,
+// ranges over a channel, makes a closure or a subslice; a statement that
+// only holds such a statement does not itself.
+func TestGoNearBodyFixed(t *testing.T) {
 	bodies := goNearBodiesOf(t, `package app
-
-type payprovCounter struct{ n int }
-
-func (c *payprovCounter) Add(k int) { c.n += k }
-
-func (c payprovCounter) Get() int { return c.n }
 
 type payprovList []int
 
-func (l payprovList) Fill(v int) {
-	for i := range l {
-		l[i] = v
-	}
-}
-
-func payprovSink(xs []int) {}
+func (l payprovList) Len() int { return len(l) }
 
 func payprovRead(n int) int { return n }
 
-type payprovWriter interface{ Write(n int) }
-
-func payprovSinkAny(w payprovWriter) {}
-
-func payprovUse(c payprovCounter, l payprovList, xs, ys []int, m map[int]int, n int, w, v payprovWriter, f func([]int), zs []int) int {
-	_ = c.Get()
-	c.Add(1)
-	l.Fill(2)
-	payprovSink(xs)
-	_ = len(ys)
-	copy(ys, xs)
-	delete(m, n)
-	_ = payprovRead(n)
-	_ = payprovList(xs)
-	w.Write(n)
-	payprovSinkAny(v)
-	f(zs)
+func payprovUse(l payprovList, xs []int, n int, ch chan int) int {
+	a := len(xs) + cap(xs)
+	b := payprovList(xs)
+	c := l.Len()
+	d := payprovRead(n)
+	xs = append(xs, n)
 	p := &n
-	return *p
+	ch <- n
+	e := <-ch
+	for v := range ch {
+		a += v
+	}
+	f := func() int { return n }
+	g := xs[1:]
+	if a > 0 {
+		a = payprovRead(a)
+	}
+	return a + len(b) + c + d + *p + e + f() + len(g)
 }
 `)
-	body := bodies["payprovUse"]
-	// Numbered as they appear: c 0, l 1, xs 2, ys 3, m 4, n 5, w 6, v 7,
-	// f 8, zs 9, p 10.
-	assert.Equal(t, []int{0, 1, 2, 3, 4, 6, 7, 9, 5}, changedVars(body))
+	assert.Equal(t, []bool{
+		false, false, true, true, true, true, true, true,
+		true, false,
+		true, false, true,
+		false, true,
+		true,
+	}, fixedStmts(bodies["payprovUse"]))
 }
 
-// Every method, function and package the lists of calls that change nothing
-// name exists, under the name types.Func.FullName gives it.
-func TestGoPureCallsExist(t *testing.T) {
-	imp := importer.ForCompiler(token.NewFileSet(), "source", nil)
-	lookup := func(path string) *types.Package {
-		pkg, err := imp.Import(path)
-		require.NoError(t, err, path)
-		return pkg
-	}
-	for path := range goPurePackages {
-		lookup(path)
-	}
-	for name := range goPureFuncs {
-		dot := strings.LastIndex(name, ".")
-		fn, ok := lookup(name[:dot]).Scope().Lookup(name[dot+1:]).(*types.Func)
-		require.True(t, ok, name)
-		assert.Equal(t, name, fn.FullName())
-	}
-	for name := range goPureMethods {
-		recv, method, ok := strings.Cut(strings.TrimPrefix(name, "("), ").")
-		require.True(t, ok, name)
-		pointer := strings.HasPrefix(recv, "*")
-		recv = strings.TrimPrefix(recv, "*")
-		var named types.Type
-		if dot := strings.LastIndex(recv, "."); dot >= 0 {
-			named = lookup(recv[:dot]).Scope().Lookup(recv[dot+1:]).Type()
-		} else {
-			named = types.Universe.Lookup(recv).Type()
-		}
-		if pointer {
-			named = types.NewPointer(named)
-		}
-		obj, _, _ := types.LookupFieldOrMethod(named, true, nil, method)
-		fn, ok := obj.(*types.Func)
-		require.True(t, ok, name)
-		assert.Equal(t, name, fn.FullName())
-	}
-}
-
-// A TypeScript body records what a call may change: the value a method that
-// changes it is called on, a value passed to a function or a constructor
-// that may keep it; not the value of a method that only reads, nor what is
-// passed to Math, to a method that only reads, to new Set, inside an array
-// or an object, a check or the parameters of a function.
-func TestTSNearBodyChanges(t *testing.T) {
-	src := parseTSSource(strings.Split(`function payprovUse(out: string[], s: string, ys: number[], xs: number[], a: number, b: number, zs: number[]): number {
-  out.push(s.trim())
-  sortNumbers(ys)
-  const m = Math.max(a, b)
-  const set = new Set(xs)
-  const other = new PayprovBag(xs)
-  ys.sort((p, q) => p - q)
-  payprovKeep(Math.abs(a), zs)
-  payprovKeep([a, b, s], {a, b, s})
-  function inner(k) { return k }
-  if (b) return m
-  if (s.startsWith(out[0])) return m
-  const n = zs.items.length
-  return set.size + other.size + n
+// A TypeScript statement keeps its place when it calls a function or a
+// method, makes one, awaits, yields or constructs, but not when it reads a
+// field or an element, checks or loops.
+func TestTSNearBodyFixed(t *testing.T) {
+	src := parseTSSource(strings.Split(`function payprovUse(out: string[], s: string, n: number): number {
+  const a = out.length + out[0].length
+  out.push(s)
+  const f = (k: number) => k
+  const g = function (k: number) { return k }
+  const m = new Map()
+  const t = payprovTag`+"`x`"+`
+  if (n > 0) n = 1
+  for (let i = 0; i < n; i++) a
+  const h = f?.(n)
+  const u = out[0](n)
+  const v = (f)(n)
+  const w = await n
+  const x = yield n
+  super(n)
+  const y = (n)
+  const k = new payprovBox
+  const z = `+"`x`"+`
+  const q = `+"`${n}`"+`
+  return a + f(n)
 }
 `, "\n"))
 	require.NotEmpty(t, src.funcs)
 	body := src.tsNearBody(src.funcs[0], true)
-	// Numbered as they appear: out 0, s 1, ys 2, m 3, a 4, b 5, set 6,
-	// xs 7, other 8, p 9, q 10, zs 11.
-	assert.Equal(t, []int{0, 2, 7, 2, 11}, changedVars(body))
+	assert.Equal(t, []bool{
+		false, true, true, true, false, true, true, false, false, false, false,
+		true, true, true, true, true, true, false, true, false, true, true,
+	}, fixedStmts(body))
 }
 
-// goNearBodiesImporting is goNearBodiesOf for a source that imports packages
-// of the standard library.
-func goNearBodiesImporting(t *testing.T, source string) map[string]nearBody {
-	t.Helper()
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "app.go", source, 0)
-	require.NoError(t, err)
-	info := &types.Info{Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
-	_, err = (&types.Config{Importer: importer.ForCompiler(fset, "source", nil)}).Check("app", fset, []*ast.File{file}, info)
-	require.NoError(t, err)
-	out := make(map[string]nearBody)
-	for _, decl := range file.Decls {
-		if fd, ok := decl.(*ast.FuncDecl); ok {
-			out[fd.Name.Name] = goNearBody(info, fd, true)
-		}
+// memoryUses lists, for every statement of body in order, how it uses what
+// a reference reaches.
+func memoryUses(body nearBody) []memoryUse {
+	var out []memoryUse
+	for _, role := range body.Roles {
+		out = append(out, role.Memory)
 	}
 	return out
 }
 
-// The functions of a package that changes nothing, the functions and the
-// methods the lists name change nothing passed to them; others do.
-func TestGoNearBodyChangesOfLibraryCalls(t *testing.T) {
-	bodies := goNearBodiesImporting(t, `package app
+// A Go statement reads what a reference reaches through an element of a
+// slice or a map, a field through a pointer, a dereference, a range over a
+// slice or a map and the length of a map; it writes there when it assigns
+// to one of them. A field of a value, an element of an array, a string and
+// the length of a slice are its own.
+func TestGoNearBodyMemory(t *testing.T) {
+	bodies := goNearBodiesOf(t, `package app
 
-import (
-	"bytes"
-	"fmt"
-	"math/big"
-	"sort"
-	"strings"
-)
+type payprovBox struct {
+	n   int
+	arr [2]int
+}
 
-func payprovUse(xs []string, ns []int, p []byte, x, y *big.Int) int {
-	var b strings.Builder
-	var buf bytes.Buffer
-	_ = strings.Join(xs, ",")
-	_ = fmt.Sprint(xs)
-	_ = b.Len()
-	_ = x.Cmp(y)
-	sort.Ints(ns[1:])
-	b.WriteString("a")
-	buf.Read(p)
-	return b.Len()
+func payprovUse(xs []int, m map[int]int, p *payprovBox, b payprovBox, s string, q *int, r *[2]int) int {
+	a := xs[0] + m[1]
+	xs[0] = a
+	c := p.n
+	p.n = c
+	b.n = b.arr[0] + len(xs)
+	b.arr[1] = int(s[0])
+	d := *q
+	*q = d
+	for _, v := range xs {
+		a += v
+	}
+	e := m[2]
+	m[3] = e
+	a += r[0]
+	for k := range m {
+		a += k
+	}
+	return len(m)
 }
 `)
-	// Numbered as they appear: b 0, buf 1, xs 2, x 3, y 4, ns 5, p 6.
-	assert.Equal(t, []int{5, 0, 1, 6}, changedVars(bodies["payprovUse"]))
+	assert.Equal(t, []memoryUse{
+		memoryRead, memoryWrite, memoryRead, memoryWrite, memoryNone, memoryNone,
+		memoryRead, memoryWrite, memoryRead, memoryNone,
+		memoryRead, memoryWrite, memoryRead, memoryRead, memoryNone, memoryRead,
+	}, memoryUses(bodies["payprovUse"]))
+}
+
+// A TypeScript statement reads what a reference reaches through a field or
+// an element of a variable and by a loop over it, and writes there when it
+// assigns to one or deletes it.
+func TestTSNearBodyMemory(t *testing.T) {
+	src := parseTSSource(strings.Split(`function payprovUse(xs: number[], o: { n: number }, m: Record<string, number>, k: string, f: (n: number) => number): number {
+  let a = xs[0] + o.n
+  xs[0] = a
+  o.n += 1
+  delete m[k]
+  for (const v of xs) a += v
+  for (const j in m) a += 1
+  a = o?.n
+  a = xs?.[0]
+  a = f?.(1)
+  a = a + 1
+  return a
+}
+`, "\n"))
+	require.NotEmpty(t, src.funcs)
+	body := src.tsNearBody(src.funcs[0], true)
+	assert.Equal(t, []memoryUse{
+		memoryRead, memoryWrite, memoryWrite, memoryWrite, memoryRead, memoryNone, memoryRead, memoryNone,
+		memoryRead, memoryRead, memoryNone, memoryNone, memoryNone,
+	}, memoryUses(body))
+}
+
+// A statement of the body that stands for none of the library function
+// writes a value no statement after one that keeps its place reads.
+func TestKeepsOwnValues(t *testing.T) {
+	extra := nearRole{Locals: []int{1, 2}, Writes: []int{1}, Parent: -1}
+	call := nearRole{Locals: []int{2}, Fixed: true, Parent: -1}
+	read := nearRole{Locals: []int{1}, Parent: -1}
+	plain := nearRole{Locals: []int{3}, Parent: -1}
+	assert.False(t, keepsOwnValues([]nearRole{extra, call, read}, []int{-1, 0, 1}))
+	assert.False(t, keepsOwnValues([]nearRole{extra, {Locals: []int{1}, Fixed: true, Parent: -1}}, []int{-1, 0}))
+	assert.True(t, keepsOwnValues([]nearRole{extra, plain, read}, []int{-1, 0, 1}))
+	assert.True(t, keepsOwnValues([]nearRole{extra, read, call}, []int{-1, 0, 1}))
+	assert.True(t, keepsOwnValues([]nearRole{extra, call, read}, []int{2, 0, 1}))
+	assert.True(t, keepsOwnValues([]nearRole{{Locals: []int{1}, Parent: -1}, call, read}, []int{-1, 0, 1}))
+	assert.True(t, keepsOwnValues([]nearRole{call, extra, read}, []int{0, -1, 1}))
+	assert.True(t, keepsOwnValues([]nearRole{extra, call}, []int{-1, 0}))
 }
 
 // keepsDependentOrder lets two statements trade places unless one writes
-// what the other reads, or both write it and a call changes it in one of
-// them; a field is read and written with its variable, two fields of one
-// variable are apart, and two statements that stand for one statement of
-// the library function keep no order.
+// what the other reads or one keeps its place, on either side; a field is
+// read and written with its variable, two fields of one variable are apart,
+// two rewrites of one value may trade places, and two statements that stand
+// for one statement of the library function keep no order.
 func TestKeepsDependentOrder(t *testing.T) {
 	roots := map[int]int{10: 1, 11: 1}
-	role := func(locals, writes, changes []int) nearRole {
-		return nearRole{Locals: append(locals, writes...), Writes: writes, Changes: changes, Parent: -1}
+	role := func(locals, writes []int) nearRole {
+		return nearRole{Locals: append(locals, writes...), Writes: writes, Parent: -1}
 	}
+	fixed := func(r nearRole) nearRole {
+		r.Fixed = true
+		return r
+	}
+	plain := []nearRole{role(nil, nil), role(nil, nil), role(nil, nil), role(nil, nil)}
 	for name, tc := range map[string]struct {
-		roles   []nearRole
-		partner []int
-		kept    bool
+		roles, lib []nearRole
+		partner    []int
+		kept       bool
 	}{
-		"write and read swapped":               {[]nearRole{role(nil, []int{1}, nil), role([]int{1}, nil, nil)}, []int{1, 0}, false},
-		"writes of two variables":              {[]nearRole{role(nil, []int{1}, nil), role([]int{2}, nil, nil)}, []int{1, 0}, true},
-		"variable written, field read":         {[]nearRole{role(nil, []int{1}, nil), role([]int{10}, nil, nil)}, []int{1, 0}, false},
-		"field written, variable read":         {[]nearRole{role(nil, []int{10}, nil), role([]int{1}, nil, nil)}, []int{1, 0}, false},
-		"field written, other field read":      {[]nearRole{role(nil, []int{10}, nil), role([]int{11}, nil, nil)}, []int{1, 0}, true},
-		"two rewrites":                         {[]nearRole{role(nil, []int{1}, nil), role(nil, []int{1}, nil)}, []int{1, 0}, true},
-		"two changes":                          {[]nearRole{role(nil, []int{1}, []int{1}), role(nil, []int{1}, []int{1})}, []int{1, 0}, false},
-		"a rewrite and a change":               {[]nearRole{role(nil, []int{1}, nil), role(nil, []int{1}, []int{1})}, []int{1, 0}, false},
-		"a change and a rewrite":               {[]nearRole{role(nil, []int{1}, []int{1}), role(nil, []int{1}, nil)}, []int{1, 0}, false},
-		"variable and field changed":           {[]nearRole{role(nil, []int{1}, []int{1}), role(nil, []int{10}, []int{10})}, []int{1, 0}, false},
-		"field and variable changed":           {[]nearRole{role(nil, []int{10}, []int{10}), role(nil, []int{1}, []int{1})}, []int{1, 0}, false},
-		"variable and field rewritten":         {[]nearRole{role(nil, []int{1}, nil), role(nil, []int{10}, nil)}, []int{1, 0}, true},
-		"one statement split in two":           {[]nearRole{role(nil, []int{1}, nil), role([]int{1}, nil, nil), role([]int{2}, nil, nil), role([]int{3}, nil, nil)}, []int{0, 0, 2, 1}, true},
-		"held change":                          {[]nearRole{role(nil, nil, nil), {Locals: []int{1}, Writes: []int{1}, Changes: []int{1}, Parent: 0}, role(nil, []int{1}, []int{1})}, []int{1, 2, 0}, false},
-		"variable rewritten, field changed":    {[]nearRole{role(nil, []int{1}, nil), role(nil, []int{10}, []int{10})}, []int{1, 0}, false},
-		"held change, the holder alone paired": {[]nearRole{role(nil, nil, nil), {Locals: []int{1}, Writes: []int{1}, Changes: []int{1}, Parent: 0}, role(nil, []int{1}, nil)}, []int{1, -1, 0}, false},
-		"held rewrite":                         {[]nearRole{role(nil, nil, nil), {Locals: []int{1}, Writes: []int{1}, Parent: 0}, role(nil, []int{1}, nil)}, []int{1, 2, 0}, true},
+		"write and read swapped":          {[]nearRole{role(nil, []int{1}), role([]int{1}, nil)}, plain, []int{1, 0}, false},
+		"writes of two variables":         {[]nearRole{role(nil, []int{1}), role([]int{2}, nil)}, plain, []int{1, 0}, true},
+		"variable written, field read":    {[]nearRole{role(nil, []int{1}), role([]int{10}, nil)}, plain, []int{1, 0}, false},
+		"field written, variable read":    {[]nearRole{role(nil, []int{10}), role([]int{1}, nil)}, plain, []int{1, 0}, false},
+		"field written, other field read": {[]nearRole{role(nil, []int{10}), role([]int{11}, nil)}, plain, []int{1, 0}, true},
+		"two rewrites":                    {[]nearRole{role(nil, []int{1}), role(nil, []int{1})}, plain, []int{1, 0}, true},
+		"variable and field rewritten":    {[]nearRole{role(nil, []int{1}), role(nil, []int{10})}, plain, []int{1, 0}, true},
+		"one statement split in two":      {[]nearRole{role(nil, []int{1}), role([]int{1}, nil), role([]int{2}, nil), role([]int{3}, nil)}, plain, []int{0, 0, 2, 1}, true},
+		"held rewrite":                    {[]nearRole{role(nil, nil), {Locals: []int{1}, Writes: []int{1}, Parent: 0}, role(nil, []int{1})}, plain, []int{1, 2, 0}, true},
+		"fixed statement moved down":      {[]nearRole{fixed(role([]int{1}, nil)), role([]int{2}, nil)}, plain, []int{1, 0}, false},
+		"fixed statement moved up":        {[]nearRole{role([]int{2}, nil), fixed(role([]int{1}, nil))}, plain, []int{1, 0}, false},
+		"partner of a fixed one moved":    {[]nearRole{role([]int{1}, nil), role([]int{2}, nil)}, []nearRole{fixed(role(nil, nil)), role(nil, nil)}, []int{1, 0}, false},
+		"held fixed statement moved":      {[]nearRole{role(nil, nil), fixed(nearRole{Parent: 0}), role([]int{2}, nil)}, plain, []int{1, 2, 0}, false},
+		"held fixed partner moved":        {[]nearRole{role([]int{2}, nil), role([]int{1}, nil)}, []nearRole{role(nil, nil), fixed(nearRole{Parent: 0})}, []int{1, 0}, false},
+		"fixed statement in place":        {[]nearRole{fixed(role([]int{1}, nil)), role([]int{2}, nil), role([]int{3}, nil)}, plain, []int{0, 2, 1}, true},
+		"fixed statement unpaired":        {[]nearRole{role([]int{2}, nil), fixed(role([]int{1}, nil)), role([]int{3}, nil)}, plain, []int{1, -1, 0}, true},
+		"memory written, memory read":     {[]nearRole{{Memory: memoryWrite, Parent: -1}, {Memory: memoryRead, Parent: -1}}, plain, []int{1, 0}, false},
+		"memory written twice":            {[]nearRole{{Memory: memoryWrite, Parent: -1}, {Memory: memoryWrite, Parent: -1}}, plain, []int{1, 0}, false},
+		"memory read twice":               {[]nearRole{{Memory: memoryRead, Parent: -1}, {Memory: memoryRead, Parent: -1}}, plain, []int{1, 0}, true},
+		"held memory write":               {[]nearRole{role(nil, nil), {Memory: memoryWrite, Parent: 0}, {Memory: memoryRead, Parent: -1}}, plain, []int{1, 2, 0}, false},
+		"holder of a fixed one moved":     {[]nearRole{role([]int{2}, nil), role(nil, nil), fixed(nearRole{Parent: 1})}, plain, []int{1, 0, 2}, false},
+		"fixed one after a far one":       {[]nearRole{role([]int{1}, nil), role([]int{2}, nil), fixed(role([]int{3}, nil))}, plain, []int{2, 0, 1}, false},
+		"fixed statements of one partner": {[]nearRole{fixed(role(nil, nil)), fixed(role(nil, nil)), role([]int{3}, nil), role([]int{4}, nil)}, plain, []int{0, 0, 2, 1}, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tc.kept, keepsDependentOrder(tc.roles, tc.partner, roots))
+			assert.Equal(t, tc.kept, keepsDependentOrder(tc.roles, tc.lib, tc.partner, roots))
 		})
 	}
 }

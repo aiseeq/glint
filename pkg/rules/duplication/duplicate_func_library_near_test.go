@@ -103,8 +103,8 @@ func DescribeTransfer(from, to string, amount int64) map[string]string {
 }
 `
 
-// transferCopy sets the fields of DescribeTransfer in the reverse order and
-// keeps a squash of its own.
+// transferCopy sets the fields of DescribeTransfer and keeps a squash of
+// its own.
 const transferCopy = `package app
 
 import (
@@ -116,11 +116,11 @@ func squash(value string) string { return strings.Join(strings.Fields(value), ""
 
 func payprovTransfer(from, to string, amount int64) map[string]string {
 	out := make(map[string]string)
-	out["route"] = from + "->" + to
-	out["fee"] = strconv.FormatInt(amount/100, 10)
-	out["amount"] = strconv.FormatInt(amount, 10)
-	out["to"] = strings.ToUpper(to)
 	out["from"] = squash(from)
+	out["to"] = strings.ToUpper(to)
+	out["amount"] = strconv.FormatInt(amount, 10)
+	out["fee"] = strconv.FormatInt(amount/100, 10)
+	out["route"] = from + "->" + to
 	return out
 }
 `
@@ -153,8 +153,9 @@ func nearLibraryFilesFindings(t *testing.T, libFiles map[string]string, source s
 	return violations
 }
 
-// A copy that runs the same independent replacements and checks in another
-// order is the same function.
+// A copy that runs the same replacements and checks in another order is no
+// copy: every one of them calls a function, and nothing proves them
+// independent.
 func TestDuplicateFuncOfLibraryNearCopyReorderedStatements(t *testing.T) {
 	violations := nearLibraryFindings(t, libraryReferenceSource, `package app
 
@@ -170,20 +171,30 @@ func tidyReference(raw string) string {
 	return value
 }
 `)
-	require.Len(t, violations, 1)
-	assert.Equal(t, 5, violations[0].Line)
-	assert.Contains(t, violations[0].Message, "Function tidyReference is a near copy")
-	assert.Contains(t, violations[0].Message, "call lib.CleanReference instead")
+	assert.Empty(t, violations)
 }
 
-// Independent statements moved far apart keep few tokens in sequence but every
-// statement of the library function; the copy calls its own copy of a helper
-// of the library.
+// A copy that calls its own copy of a helper of the library is a copy; one
+// that sets the fields in the reverse order is not: every statement calls a
+// function and writes into one map, and nothing proves them independent.
 func TestDuplicateFuncOfLibraryNearCopyStatementsInReverseOrder(t *testing.T) {
 	violations := nearLibraryFindings(t, libraryTransferSource, transferCopy)
 	require.Len(t, violations, 1)
 	assert.Equal(t, 10, violations[0].Line)
-	assert.Contains(t, violations[0].Message, "Function payprovTransfer is a near copy (100% alike) of function DescribeTransfer")
+	assert.Contains(t, violations[0].Message, "Function payprovTransfer duplicates function DescribeTransfer")
+	reversed := strings.Replace(transferCopy, `	out["from"] = squash(from)
+	out["to"] = strings.ToUpper(to)
+	out["amount"] = strconv.FormatInt(amount, 10)
+	out["fee"] = strconv.FormatInt(amount/100, 10)
+	out["route"] = from + "->" + to
+`, `	out["route"] = from + "->" + to
+	out["fee"] = strconv.FormatInt(amount/100, 10)
+	out["amount"] = strconv.FormatInt(amount, 10)
+	out["to"] = strings.ToUpper(to)
+	out["from"] = squash(from)
+`, 1)
+	require.NotEqual(t, transferCopy, reversed)
+	assert.Empty(t, nearLibraryFindings(t, libraryTransferSource, reversed))
 }
 
 // A library package the project cannot import offers nothing to call
@@ -611,8 +622,8 @@ func TestDuplicateFuncOfLibraryTypeScriptCopyUnderOtherName(t *testing.T) {
 	}
 }
 
-// Lines that set independent fields, in the reverse order: a statement ends
-// at the line end.
+// Lines that set the fields in the reverse order, each with a call, are no
+// copy: nothing proves them independent.
 func TestDuplicateFuncOfLibraryTypeScriptStatementsInReverseOrder(t *testing.T) {
 	violations := tsLibraryFindings(t, "frontend/transfer.ts", "backend", `function payprovTransfer(from: string, to: string, amount: number): Record<string, string> {
   const out: Record<string, string> = {}
@@ -624,8 +635,7 @@ func TestDuplicateFuncOfLibraryTypeScriptStatementsInReverseOrder(t *testing.T) 
   return out
 }
 `)
-	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Message, "Function payprovTransfer is a near copy (100% alike) of function describeTransfer")
+	assert.Empty(t, violations)
 }
 
 // The keys of an object literal named like the parameters of the library
@@ -1130,7 +1140,7 @@ func TestDuplicateFuncOfLibraryTypeScriptRolesAndPlaces(t *testing.T) {
   if (str.startsWith(p)) return str
   return p + str
 }
-`, "Function payprovMark is a near copy (100% alike) of function withMark"},
+`, ""},
 		"variable and literal trade places": {`function payprovGrade(score: number, name: string): string {
   let label = 'unknown'
   if (score >= 90) {
