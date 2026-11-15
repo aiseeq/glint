@@ -210,6 +210,9 @@ func TestBroadExclusionOneLineExceptionCountsWhatTheRunExcepts(t *testing.T) {
 		for _, form := range forms {
 			exception := form + "\nline: 3"
 			t.Run(name+"/"+form, func(t *testing.T) {
+				// Each run is a subprocess in its own directory; in parallel
+				// the race build of the package stays within its timeout.
+				t.Parallel()
 				root := t.TempDir()
 				tree.write(t, root, true, rule)
 				tree.track(t, root)
@@ -290,6 +293,7 @@ func TestBroadExclusionOneLineStaleExceptionCountsTheConfiguration(t *testing.T)
 	for name, tree := range trees {
 		for _, form := range tree.forms {
 			t.Run(name+"/"+form, func(t *testing.T) {
+				t.Parallel()
 				root := t.TempDir()
 				for file, contents := range tree.files {
 					writeModuleFile(t, root, file, contents)
@@ -368,6 +372,7 @@ func TestBroadExclusionFileExceptionCoversWhatTheRunExcepts(t *testing.T) {
 	for name, tree := range trees {
 		for _, exception := range forms {
 			t.Run(name+"/"+strings.ReplaceAll(exception, "\n", " "), func(t *testing.T) {
+				t.Parallel()
 				root := t.TempDir()
 				tree.write(t, root, false, rule)
 				unexcepted := tree.runFindings(t, root)[rule]
