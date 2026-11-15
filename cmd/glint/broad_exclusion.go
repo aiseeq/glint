@@ -326,45 +326,111 @@ func decodeBroadException(exception *yaml.Node, rule string) (core.Exception, er
 
 // narrowOversightExceptions drops the exceptions of a rule watching
 // suppressions that keep one line of one file: a line of files named by base
-// name or by a glob that cover at most one file the run reads
-// (broadRunFiles), as the run matches them (core.Exception.CoversFile).
-func narrowOversightExceptions(entries []broadEntry, cfg *core.Config) ([]broadEntry, error) {
-	var oneLine []core.Exception
+// name or by a glob that cover at most one place where the run excepts a
+// finding of the rule (oversightPlaces.covered). scopes are the paths the run
+// names, absolute; none for a run of the whole root.
+func narrowOversightExceptions(entries []broadEntry, cfg *core.Config, scopes []string) ([]broadEntry, error) {
+	var oneLine []oneLineException
 	for _, entry := range entries {
 		if entry.oneLine != nil {
-			oneLine = append(oneLine, *entry.oneLine)
+			oneLine = append(oneLine, oneLineException{rule: entry.excepted, exception: *entry.oneLine})
 		}
 	}
 	if len(oneLine) == 0 {
 		return entries, nil
 	}
-	files, err := broadRunFiles(cfg, func(file string) bool {
-		return slices.ContainsFunc(oneLine, func(exc core.Exception) bool { return exc.CoversFile(file) })
-	})
+	places, err := readOversightPlaces(cfg, scopes, oneLine)
 	if err != nil {
 		return nil, err
 	}
 	return slices.DeleteFunc(entries, func(entry broadEntry) bool {
-		return entry.oneLine != nil && len(slices.DeleteFunc(slices.Clone(files), func(file string) bool { return !entry.oneLine.CoversFile(file) })) <= 1
+		return entry.oneLine != nil && len(places.covered(entry.excepted, *entry.oneLine)) <= 1
 	}), nil
 }
 
+const staleSuppressionRule = "stale-suppression"
+
+// oversightPlaces are the places where a check of the configuration excepts
+// a finding of a rule watching suppressions, of those an exception of one
+// line can cover.
+type oversightPlaces struct {
+	// files are the files, relative to the configuration's directory, where
+	// the rules report and their exceptions apply (broadRunFiles).
+	files []string
+	// exceptions are the places in the configuration where stale-suppression
+	// reports an exception that matched nothing: the run excepts those
+	// findings with its exceptions too (silenceLateFindings). Only an
+	// exception of stale-suppression needs them; nil otherwise.
+	exceptions []deadcode.ExceptionPlace
+}
+
+// oneLineException is an exception of one line of a rule watching
+// suppressions.
+type oneLineException struct {
+	rule      string
+	exception core.Exception
+}
+
+// readOversightPlaces reads the places the exceptions can cover.
+func readOversightPlaces(cfg *core.Config, scopes []string, exceptions []oneLineException) (oversightPlaces, error) {
+	files, err := broadRunFiles(cfg, scopes, func(file string) bool {
+		return slices.ContainsFunc(exceptions, func(exc oneLineException) bool { return exc.exception.CoversFile(file) })
+	})
+	if err != nil {
+		return oversightPlaces{}, err
+	}
+	places := oversightPlaces{files: files}
+	if slices.ContainsFunc(exceptions, func(exc oneLineException) bool { return exc.rule == staleSuppressionRule }) {
+		if places.exceptions, err = deadcode.StaleExceptionPlaces(cfg); err != nil {
+			return oversightPlaces{}, err
+		}
+	}
+	return places, nil
+}
+
+// covered returns the files where the exception of one line of the rule
+// excepts a finding, matched as the run matches it: a file of the run at any
+// line, and for stale-suppression a configuration file that declares an
+// exception on that line, the only line of it a finding stands on. The
+// configuration's other findings - of suppression-without-reason and of
+// broad-exclusion - pass no exception (analyzeConfigurationRules).
+func (p oversightPlaces) covered(rule string, exc core.Exception) []string {
+	files := slices.DeleteFunc(slices.Clone(p.files), func(file string) bool { return !exc.CoversFile(file) })
+	if rule == staleSuppressionRule {
+		for _, place := range p.exceptions {
+			if place.Line == exc.Line && exc.CoversFile(place.File) {
+				files = append(files, place.File)
+			}
+		}
+	}
+	slices.Sort(files)
+	return slices.Compact(files)
+}
+
 // broadRunFiles returns the files, relative to the configuration's
-// directory, that a check of it reads and a finding about a suppression can
-// be on, of those keep accepts: what the walk of the run reads - the
-// configuration's exclude, skip_dirs and .gitignore apply, and so does git
-// for a tracked artifact directory. The configuration is not: the run judges
-// its markers whatever its exceptions say (analyzeConfigurationRules), and
-// those of the configurations it extends never. The nested repositories are
-// in: a check scoped to one reads them, under the same configuration.
-func broadRunFiles(cfg *core.Config, keep func(string) bool) ([]string, error) {
+// directory, of those keep accepts, where a check of it reports what the
+// rules find and applies their exceptions: what the walk of the run reads -
+// the configuration's exclude, skip_dirs and .gitignore apply, and so does
+// git for a tracked artifact directory - but the generated files, where no
+// rule reports (runRule). The configuration is not: the run judges its
+// markers whatever its exceptions say (analyzeConfigurationRules), and those
+// of the configurations it extends never. The nested repositories are in when
+// the configuration governs them: a check scoped to one reads it under the
+// configuration that governs its directory (analysisRoots). The paths the run
+// names are in as the walk of the run reads them: a file .gitignore leaves out
+// too.
+func broadRunFiles(cfg *core.Config, scopes []string, keep func(string) bool) ([]string, error) {
 	root := filepath.Dir(cfg.ConfigPath())
 	// The walk of root visits paths below it alone.
-	walker := core.NewWalker(root, cfg.AtConfigDir()).WithGoParsing(false).WithNestedRepositories(true).
+	walker := core.NewWalker(root, cfg.AtConfigDir()).WithGoParsing(false).
+		WithNestedRepositories(func(dir string) (bool, error) { return governs(cfg, dir) }).
 		WithRequiredFilePredicate(func(path string) bool {
 			rel, err := filepath.Rel(root, path)
 			return err == nil && keep(filepath.ToSlash(rel))
 		})
+	if len(scopes) > 0 {
+		walker.WithScopes(append([]string{root}, scopes...))
+	}
 	contexts, walkErrors := walker.WalkSync()
 	for _, err := range walkErrors {
 		// A directory or file the user cannot read holds no finding of the run.
@@ -372,11 +438,25 @@ func broadRunFiles(cfg *core.Config, keep func(string) bool) ([]string, error) {
 			return nil, fmt.Errorf("walk the files exceptions of one line cover: %w", err)
 		}
 	}
+	// A file the walk of root reads and the run names comes twice; covered
+	// counts it once.
 	var files []string
 	for _, ctx := range contexts {
-		files = append(files, filepath.ToSlash(ctx.RelPath))
+		if !ctx.IsGenerated() {
+			files = append(files, filepath.ToSlash(ctx.RelPath))
+		}
 	}
 	return files, nil
+}
+
+// governs reports a directory a check of which reads the configuration, as
+// the run finds it (analysisRoots).
+func governs(cfg *core.Config, dir string) (bool, error) {
+	path, err := core.FindConfig(dir)
+	if err != nil {
+		return false, fmt.Errorf("find the configuration of %s: %w", dir, err)
+	}
+	return path != "" && filepath.Clean(path) == filepath.Clean(cfg.ConfigPath()), nil
 }
 
 // foreignBroadNames are directories of foreign code and test data: no source
@@ -630,8 +710,9 @@ func holdsOversightRule(category string) bool {
 
 // broadExclusionFindings reports the broad exclusions of the configuration;
 // one of an exception is as severe as the findings it silenced in the run
-// (silenced).
-func broadExclusionFindings(cfg *core.Config, silenced silencedSeverities) ([]*core.Violation, error) {
+// (silenced). scopes are the paths the run names, absolute; none for a run of
+// the whole root.
+func broadExclusionFindings(cfg *core.Config, scopes []string, silenced silencedSeverities) ([]*core.Violation, error) {
 	if cfg.ConfigPath() == "" {
 		return nil, nil
 	}
@@ -648,7 +729,7 @@ func broadExclusionFindings(cfg *core.Config, silenced silencedSeverities) ([]*c
 	if err != nil {
 		return nil, err
 	}
-	entries, err = narrowOversightExceptions(entries, cfg)
+	entries, err = narrowOversightExceptions(entries, cfg, scopes)
 	if err != nil {
 		return nil, err
 	}

@@ -146,6 +146,14 @@ func TestStaleSuppressionLeavesGolangciNamesToGolangci(t *testing.T) {
 	assert.NotContains(t, staleFindings(t, root, nil), "errs.go:26")
 }
 
+// An exception of a rule the run did not execute matched nothing because
+// nothing ran to match it: it is left alone, as the markers of such a rule.
+func TestStaleSuppressionLeavesExceptionsOfRulesThatDidNotRun(t *testing.T) {
+	root := writeStaleModule(t, false)
+	_, stale := analyzeWithRules(t, root, nil, "magic-number", "stale-suppression")
+	assert.NotContains(t, foundAt(stale), ".glint.yaml:10")
+}
+
 // A stale marker after code is told to cover its line only, one on a line of
 // its own the next line too.
 func TestStaleSuppressionTellsTheLinesAMarkerCovers(t *testing.T) {
