@@ -508,7 +508,7 @@ func trapSetsExit(call *syntax.CallExpr) bool {
 		operands = operands[1:]
 	}
 	if len(operands) > 1 {
-		if _, err := strconv.ParseUint(wordLit(operands[0]), 10, 0); err != nil {
+		if _, number := signalNumber(wordLit(operands[0])); !number {
 			operands = operands[1:]
 		}
 	}
@@ -517,11 +517,17 @@ func trapSetsExit(call *syntax.CallExpr) bool {
 		if strings.ToUpper(v) == "EXIT" {
 			return true
 		}
-		if n, err := strconv.ParseUint(v, 10, 0); err == nil && n == 0 {
+		if n, number := signalNumber(v); number && n == 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// signalNumber reads a signal given by its number, as trap 0 or trap 00.
+func signalNumber(s string) (uint64, bool) {
+	n, err := strconv.ParseUint(s, 10, 0)
+	return n, err == nil
 }
 
 // wordLit is the value of a word bash leaves as it is, or "" for one it
@@ -532,8 +538,8 @@ func wordLit(w *syntax.Word) string {
 }
 
 // wordValue returns the value of a word made of literal text, single quotes,
-// $'…' and double quotes without expansions, with the quotes and escapes
-// removed; ok is false for a word bash expands at run time.
+// $'…' and double quotes without expansions, as bash reads it without its
+// quotes and escapes; ok is false for a word bash expands at run time.
 func wordValue(w *syntax.Word) (string, bool) {
 	var b strings.Builder
 	for _, part := range w.Parts {
