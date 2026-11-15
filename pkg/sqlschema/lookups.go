@@ -327,33 +327,8 @@ func referencedColumns(node *pgquery.Node) map[string]bool {
 // read with LIMIT (a choice is made on purpose), a grouped or aggregate one,
 // one whose WHERE also fixes a full unique key, a join.
 func (s *Schema) PartialKeyReads(sql string) []int {
-	if s == nil {
-		return nil
-	}
-	result, ok := parse(sql)
-	if !ok || len(result.GetStmts()) != 1 {
-		return nil
-	}
-	sel := result.GetStmts()[0].GetStmt().GetSelectStmt()
-	if sel == nil || sel.GetWhereClause() == nil || sel.GetLimitCount() != nil || len(sel.GetGroupClause()) > 0 || onlyAggregates(sel) {
-		return nil
-	}
-	tables, joined := s.fromTables(sel)
-	if joined || len(tables) != 1 {
-		return nil
-	}
-	var table *Table
-	for _, t := range tables {
-		table = t
-	}
-	if table == nil {
-		return nil
-	}
-	pinned := make(map[string]bool)
-	for _, ref := range pinnedColumns(sel.GetWhereClause()) {
-		pinned[ref.name] = true
-	}
-	if pinned["id"] || table.UniqueWithin(pinned) {
+	sel, table, pinned, ok := s.unkeyedOneTableRead(sql)
+	if !ok {
 		return nil
 	}
 	tested := referencedColumns(sel.GetWhereClause())
@@ -387,33 +362,8 @@ var externalIdentity = regexp.MustCompile(`(?:^|_)(?:reference|ref|external_id|e
 // replay stores it twice, and the read takes either. Not reported: a read
 // with LIMIT, a grouped or aggregate one, a join.
 func (s *Schema) UnkeyedExternalReads(sql string) []ExternalKey {
-	if s == nil {
-		return nil
-	}
-	result, ok := parse(sql)
-	if !ok || len(result.GetStmts()) != 1 {
-		return nil
-	}
-	sel := result.GetStmts()[0].GetStmt().GetSelectStmt()
-	if sel == nil || sel.GetWhereClause() == nil || sel.GetLimitCount() != nil || len(sel.GetGroupClause()) > 0 || onlyAggregates(sel) {
-		return nil
-	}
-	tables, joined := s.fromTables(sel)
-	if joined || len(tables) != 1 {
-		return nil
-	}
-	var table *Table
-	for _, t := range tables {
-		table = t
-	}
-	if table == nil || table.View {
-		return nil
-	}
-	pinned := make(map[string]bool)
-	for _, ref := range pinnedColumns(sel.GetWhereClause()) {
-		pinned[ref.name] = true
-	}
-	if pinned["id"] || table.UniqueWithin(pinned) {
+	sel, table, pinned, ok := s.unkeyedOneTableRead(sql)
+	if !ok || table.View {
 		return nil
 	}
 	for _, key := range table.partial {
@@ -428,6 +378,42 @@ func (s *Schema) UnkeyedExternalReads(sql string) []ExternalKey {
 		}
 	}
 	return keys
+}
+
+// unkeyedOneTableRead parses a single SELECT of one table that is neither
+// limited, grouped nor aggregate, and returns it with its table and the columns
+// its WHERE fixes, when they are not id and no full unique key of the table
+// covers them; ok is false for any other statement.
+func (s *Schema) unkeyedOneTableRead(sql string) (sel *pgquery.SelectStmt, table *Table, pinned map[string]bool, ok bool) {
+	if s == nil {
+		return nil, nil, nil, false
+	}
+	result, parsed := parse(sql)
+	if !parsed || len(result.GetStmts()) != 1 {
+		return nil, nil, nil, false
+	}
+	sel = result.GetStmts()[0].GetStmt().GetSelectStmt()
+	if sel == nil || sel.GetWhereClause() == nil || sel.GetLimitCount() != nil || len(sel.GetGroupClause()) > 0 || onlyAggregates(sel) {
+		return nil, nil, nil, false
+	}
+	tables, joined := s.fromTables(sel)
+	if joined || len(tables) != 1 {
+		return nil, nil, nil, false
+	}
+	for _, t := range tables {
+		table = t
+	}
+	if table == nil {
+		return nil, nil, nil, false
+	}
+	pinned = make(map[string]bool)
+	for _, ref := range pinnedColumns(sel.GetWhereClause()) {
+		pinned[ref.name] = true
+	}
+	if pinned["id"] || table.UniqueWithin(pinned) {
+		return nil, nil, nil, false
+	}
+	return sel, table, pinned, true
 }
 
 func allIn(names []string, set map[string]bool) bool {

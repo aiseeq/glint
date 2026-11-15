@@ -55,6 +55,12 @@ func init() {
 // it calls. Statements too small to carry a computation of their own (a lookup
 // in a slice, grouping into a map, a sum, an error guard) are left out by size.
 //
+// A run of consecutive statements of a function body written again in another
+// function of the package - a prologue preparing the input, a common middle -
+// is a copy too, even when no statement of it is large enough on its own and
+// its error guards return other zero values beside the error (see
+// renamed_sequence.go).
+//
 // The copy is reported against the occurrence that makes up the largest share
 // of its function — the function to call. Repeats inside one function are left
 // to the textual rules; test files, generated files and test-double packages
@@ -69,7 +75,7 @@ func NewRenamedDuplicateBlockRule() *RenamedDuplicateBlockRule {
 	return &RenamedDuplicateBlockRule{BaseRule: rules.NewBaseRule(
 		"renamed-duplicate-block",
 		"duplication",
-		"Detects a loop or a branch of one function written again in another function under other names instead of a call — two copies of one computation that drift apart",
+		"Detects a loop, a branch or a run of statements of one function written again in another function under other names instead of a call — two copies of one computation that drift apart",
 		core.SeverityMedium,
 	)}
 }
@@ -93,11 +99,12 @@ const (
 	minRenamedBlockNodes      = 40
 )
 
-// renamedBlock is one compared statement.
+// renamedBlock is one compared statement or run of statements.
 type renamedBlock struct {
 	file string
-	stmt ast.Stmt
-	fn   *ast.FuncDecl
+	// pos and end bound the statement or the run.
+	pos, end token.Pos
+	fn       *ast.FuncDecl
 	// share is the statement's part of its function's body, in nodes.
 	share float64
 }
@@ -108,6 +115,7 @@ func (r *RenamedDuplicateBlockRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 		return nil, errors.New("renamed duplicate block: nil Go project context")
 	}
 	byKey := make(map[string][]*renamedBlock)
+	var reports []renamedReport
 	for _, pkg := range ctx.Packages {
 		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil {
 			return nil, errors.New("renamed duplicate block: package has no typed syntax")
@@ -115,6 +123,7 @@ func (r *RenamedDuplicateBlockRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 		if testDoublePackage(pkg.Package.PkgPath) {
 			continue
 		}
+		sequences := newRenamedSequences(pkg.Package.TypesInfo, ctx.FileSet)
 		// Every file of the package, not only the analyzed ones: the original
 		// of a copy in the run may lie outside it.
 		for _, file := range pkg.Package.Syntax {
@@ -125,12 +134,13 @@ func (r *RenamedDuplicateBlockRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 			for _, decl := range file.Decls {
 				if fd, ok := decl.(*ast.FuncDecl); ok && fd.Body != nil {
 					collectRenamedBlocks(byKey, path, fd, pkg.Package.TypesInfo)
+					sequences.add(path, fd)
 				}
 			}
 		}
+		reports = append(reports, sequences.reports()...)
 	}
 
-	var reports []renamedReport
 	for _, key := range slices.Sorted(maps.Keys(byKey)) {
 		group := byKey[key]
 		original := group[0]
@@ -156,20 +166,20 @@ type renamedReport struct {
 // outermostReports sorts the reports by file and position and drops a copy
 // nested in another reported copy: it is part of that copy.
 func outermostReports(reports []renamedReport) []renamedReport {
-	sort.Slice(reports, func(i, j int) bool {
+	sort.SliceStable(reports, func(i, j int) bool {
 		a, b := reports[i].copy, reports[j].copy
 		if a.file != b.file {
 			return a.file < b.file
 		}
-		if a.stmt.Pos() != b.stmt.Pos() {
-			return a.stmt.Pos() < b.stmt.Pos()
+		if a.pos != b.pos {
+			return a.pos < b.pos
 		}
-		return a.stmt.End() > b.stmt.End()
+		return a.end > b.end
 	})
 	var out []renamedReport
 	var last *renamedBlock
 	for _, rep := range reports {
-		if last != nil && last.file == rep.copy.file && rep.copy.stmt.End() <= last.stmt.End() {
+		if last != nil && last.file == rep.copy.file && rep.copy.end <= last.end {
 			continue
 		}
 		last = rep.copy
@@ -185,11 +195,11 @@ func (r *RenamedDuplicateBlockRule) violations(ctx *core.GoProjectContext, repor
 		if !inRun {
 			continue
 		}
-		line := ctx.FileSet.Position(rep.copy.stmt.Pos()).Line
+		line := ctx.FileSet.Position(rep.copy.pos).Line
 		if file.IsSuppressed(line, r.Name()) {
 			continue
 		}
-		origLine := ctx.FileSet.Position(rep.original.stmt.Pos()).Line
+		origLine := ctx.FileSet.Position(rep.original.pos).Line
 		origFile, err := filepath.Rel(ctx.ProjectRoot, rep.original.file)
 		if err != nil {
 			return nil, fmt.Errorf("renamed duplicate block: original of %s:%d: %w", file.RelPath, line, err)
@@ -221,19 +231,13 @@ func originalBefore(fset *token.FileSet, a, b *renamedBlock) bool {
 	if a.file != b.file {
 		return a.file < b.file
 	}
-	return fset.Position(a.stmt.Pos()).Offset < fset.Position(b.stmt.Pos()).Offset
+	return fset.Position(a.pos).Offset < fset.Position(b.pos).Offset
 }
 
 // collectRenamedBlocks adds the large enough compound statements of a
 // function to byKey under their normalized form.
 func collectRenamedBlocks(byKey map[string][]*renamedBlock, path string, fd *ast.FuncDecl, info *types.Info) {
-	funcNodes := 0
-	ast.Inspect(fd.Body, func(n ast.Node) bool {
-		if n != nil {
-			funcNodes++
-		}
-		return true
-	})
+	funcNodes := countNodes(fd.Body)
 	ast.Inspect(fd.Body, func(n ast.Node) bool {
 		stmt, ok := n.(ast.Stmt)
 		if !ok {
@@ -252,11 +256,23 @@ func collectRenamedBlocks(byKey map[string][]*renamedBlock, path string, fd *ast
 		}
 		key := norm.b.String()
 		byKey[key] = append(byKey[key], &renamedBlock{
-			file: path, stmt: stmt, fn: fd,
+			file: path, pos: stmt.Pos(), end: stmt.End(), fn: fd,
 			share: float64(norm.nodes) / float64(funcNodes),
 		})
 		return true
 	})
+}
+
+// countNodes counts the syntax nodes of root, root included.
+func countNodes(root ast.Node) int {
+	nodes := 0
+	ast.Inspect(root, func(n ast.Node) bool {
+		if n != nil {
+			nodes++
+		}
+		return true
+	})
+	return nodes
 }
 
 // funcDisplayName is Name, or Type.Name of a method.
@@ -281,9 +297,17 @@ type blockNormalizer struct {
 	// packageNames keeps the name of a package-level variable or constant
 	// instead of the placeholder, so two of them do not compare equal.
 	packageNames bool
-	b            strings.Builder
-	nodes        int
-	stmts        int
+	// zeroReturns prints a return of zero values beside its last result as
+	// a return of the last result alone: copies of one step returning
+	// "err", "false, err" and "\"\", \"\", err" are one step.
+	zeroReturns bool
+	// redeclared holds variables declared before the statement that a :=
+	// inside it declares again: they are the statement's own, as they are in
+	// a copy where no earlier declaration exists.
+	redeclared map[types.Object]bool
+	b          strings.Builder
+	nodes      int
+	stmts      int
 }
 
 func newBlockNormalizer(info *types.Info, stmt ast.Stmt) *blockNormalizer {
@@ -320,6 +344,15 @@ func (n *blockNormalizer) walk(root ast.Node) {
 			}
 		case *ast.Comment, *ast.CommentGroup:
 			return false
+		case *ast.ReturnStmt:
+			if last := len(x.Results) - 1; n.zeroReturns && last >= 0 && n.zeroValues(x.Results[:last]) {
+				n.stmts++
+				n.nodes++
+				n.b.WriteString("(ReturnStmt0")
+				n.walk(x.Results[last])
+				n.b.WriteByte(')')
+				return false
+			}
 		}
 		if _, ok := node.(ast.Stmt); ok {
 			if _, block := node.(*ast.BlockStmt); !block {
@@ -379,7 +412,7 @@ func (n *blockNormalizer) ident(id *ast.Ident) string {
 		if obj.IsField() {
 			return id.Name
 		}
-		if obj.Pos() >= n.lo && obj.Pos() < n.hi {
+		if obj.Pos() >= n.lo && obj.Pos() < n.hi || n.redeclared[obj] {
 			num, ok := n.locals[obj]
 			if !ok {
 				num = len(n.locals)
