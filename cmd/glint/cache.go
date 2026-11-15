@@ -62,12 +62,15 @@ type resultCache struct {
 	// The project findings are stored for the inputs of the typed load
 	// (core.GoProjectLoader.GoInputs); projectKeyed is false when this run
 	// could not identify them, and nothing is stored then.
-	previousProject      *projectEntry
-	projectInputs        string
-	projectPath          string
-	projectScope         string
-	projectRules         []string
-	projectFingerprints  map[string]string
+	previousProject     *projectEntry
+	projectInputs       string
+	projectPath         string
+	projectScope        string
+	projectRules        []string
+	projectFingerprints map[string]string
+	// projectInputsUnknown holds the project rules whose CacheInputs failed
+	// on this run: their findings are neither reused nor stored as reusable.
+	projectInputsUnknown map[string]bool
 	projectKeyed         bool
 	projectHit           *projectEntry
 	currentProject       *projectEntry
@@ -394,11 +397,14 @@ func (c *resultCache) store(relPath string, content [sha256.Size]byte, found map
 // keyProject records the inputs of this run's typed load and the project
 // rules it runs (sorted names), and returns stored project findings when they
 // were computed by the same rules for the same inputs and an equal or broader scope.
-func (c *resultCache) keyProject(inputs string, projectRules []string, enabled []rules.Rule, scope string) *projectEntry {
+// A project rule that reads files outside the typed load names them in
+// CacheInputs of projectRoot, and its findings are keyed by them as well.
+func (c *resultCache) keyProject(projectRoot, inputs string, projectRules []string, enabled []rules.Rule, scope string) *projectEntry {
 	c.projectHit = nil
 	c.projectInputs, c.projectScope, c.projectRules, c.projectKeyed = inputs, scope, projectRules, true
 	c.projectRulesCached, c.projectRulesRerun = 0, len(projectRules)
 	c.projectFingerprints = make(map[string]string, len(projectRules))
+	c.projectInputsUnknown = make(map[string]bool)
 	projectNames := make(map[string]bool, len(projectRules))
 	for _, name := range projectRules {
 		projectNames[name] = true
@@ -431,6 +437,18 @@ func (c *resultCache) keyProject(inputs string, projectRules []string, enabled [
 		fingerprint := c.fingerprint(rule)
 		if _, ok := rule.(rules.GoProjectRule); ok {
 			dependencies := fingerprint + "\n" + strings.Join(indexDependencies, "\n")
+			if input, keyed := rule.(rules.CacheInputRule); keyed {
+				value, err := input.CacheInputs(projectRoot)
+				if err != nil {
+					if flagTiming || flagVerbose {
+						fmt.Fprintf(os.Stderr, "result cache: %s inputs unavailable: %v\n", rule.Name(), err)
+					}
+					delete(c.projectFingerprints, rule.Name())
+					c.projectInputsUnknown[rule.Name()] = true
+					continue
+				}
+				dependencies += "\x00inputs\x00" + value
+			}
 			sum := sha256.Sum256([]byte(dependencies))
 			fingerprint = buildTag(hex.EncodeToString(sum[:]))
 		}
@@ -466,7 +484,7 @@ func (c *resultCache) keyProject(inputs string, projectRules []string, enabled [
 }
 
 func (c *resultCache) projectRuleReusable(rule rules.Rule) bool {
-	if c.projectHit == nil || c.projectHit.Fingerprints[rule.Name()] != c.projectFingerprints[rule.Name()] {
+	if c.projectHit == nil || c.projectInputsUnknown[rule.Name()] || c.projectHit.Fingerprints[rule.Name()] != c.projectFingerprints[rule.Name()] {
 		return false
 	}
 	return true

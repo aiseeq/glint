@@ -88,7 +88,7 @@ func runIndexedCachedRoot(t *testing.T, dir, projectRoot string, rule rules.Rule
 	t.Helper()
 	cache, err := openResultCache(dir, projectRoot, "", "build", "stamp")
 	require.NoError(t, err)
-	cache.keyProject("test-inputs", nil, []rules.Rule{rule}, "")
+	cache.keyProject("", "test-inputs", nil, []rules.Rule{rule}, "")
 	cfg := core.DefaultConfig()
 	rootRules := append(rules.GetEnabled(cfg), rule)
 	got, panics, err := analyzeProjectContained(run, root, []rules.Rule{rule}, rootRules, cfg, nil, cache)
@@ -317,7 +317,7 @@ func TestRootIndexCacheIgnoresUnrelatedGoEdit(t *testing.T) {
 	open := func(inputs string, contexts []*core.FileContext) *resultCache {
 		cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 		require.NoError(t, err)
-		cache.keyProject(inputs, nil, list, "")
+		cache.keyProject("", inputs, nil, list, "")
 		keyRootFileCache(cache, contexts, append(rules.GetEnabled(cfg), rule), cfg, true)
 		return cache
 	}
@@ -342,7 +342,7 @@ func runSubsetIndexedCached(t *testing.T, dir, version, value, path string) (cor
 	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
 	cache.ruleFingerprints[reflect.TypeFor[subsetIndexedFindingRule]().PkgPath()] = version
-	cache.keyProject("same-inputs", nil, list, "")
+	cache.keyProject("", "same-inputs", nil, list, "")
 	found, panics, err := analyzeProjectContained(contexts, contexts, list, append(rules.GetEnabled(cfg), rule), cfg, nil, cache)
 	require.NoError(t, err)
 	require.Empty(t, panics)
@@ -395,7 +395,7 @@ func TestRootSubsetCacheRetainsAndInvalidatesFindings(t *testing.T) {
 			var err error
 			cache, err = openResultCache(dir, "/project", "", "build", "stamp")
 			require.NoError(t, err)
-			cache.keyProject(inputs, nil, list, "")
+			cache.keyProject("", inputs, nil, list, "")
 		}
 		found, panics, err := analyzeProjectContained(contexts, contexts, list, append(rules.GetEnabled(cfg), rule), cfg, nil, cache)
 		require.NoError(t, err)
@@ -648,12 +648,12 @@ func TestProjectCacheFingerprintCoversRuleStateDependencies(t *testing.T) {
 		return cache
 	}
 	first := open("index-v1")
-	first.keyProject("inputs", []string{consumer.Name()}, ruleset, "")
+	first.keyProject("", "inputs", []string{consumer.Name()}, ruleset, "")
 	first.storeProject(nil, nil, map[string][]byte{indexer.Name(): []byte("old index")})
 	require.NoError(t, first.save())
 
 	second := open("index-v2")
-	hit := second.keyProject("inputs", []string{consumer.Name()}, ruleset, "")
+	hit := second.keyProject("", "inputs", []string{consumer.Name()}, ruleset, "")
 	require.NotNil(t, hit, "unchanged project inputs retain per-rule cache entries")
 	assert.False(t, second.projectRuleReusable(consumer), "a changed index producer invalidates dependent project findings")
 	assert.False(t, second.projectStateReusable(indexer), "a changed producer cannot restore its old RuleState")
@@ -666,12 +666,12 @@ func TestProjectCacheReportsPartialRuleHits(t *testing.T) {
 		ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "code-v1"},
 	}
 	ruleNames := []string{first.Name(), second.Name()}
-	cache.keyProject("inputs", ruleNames, []rules.Rule{first, second}, "")
+	cache.keyProject("", "inputs", ruleNames, []rules.Rule{first, second}, "")
 	previous := make(map[string]string, len(cache.projectFingerprints))
 	maps.Copy(previous, cache.projectFingerprints)
 	previous[second.Name()] = "stale-code"
 	cache.previousProject = &projectEntry{Inputs: "inputs", Fingerprints: previous}
-	cache.keyProject("inputs", ruleNames, []rules.Rule{first, second}, "")
+	cache.keyProject("", "inputs", ruleNames, []rules.Rule{first, second}, "")
 	assert.Equal(t, "1 cached, 1 rerun", cache.projectState())
 }
 
@@ -683,9 +683,9 @@ func TestProjectCacheFullScopeServesPartialRun(t *testing.T) {
 		build:            "code-v1",
 		ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "code-v1"},
 	}
-	assert.Same(t, previous, cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a"))
+	assert.Same(t, previous, cache.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a"))
 	previous.Fingerprints = maps.Clone(cache.projectFingerprints)
-	assert.Same(t, previous, cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a"))
+	assert.Same(t, previous, cache.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a"))
 	assert.Zero(t, cache.projectRulesRerun)
 
 	full := core.Violation{Rule: rule.Name(), File: "file-a", Message: "a"}
@@ -699,8 +699,8 @@ func TestProjectCachePartialScopesDoNotShareOrUpgrade(t *testing.T) {
 	rule := newProjectStubRule()
 	previous := &projectEntry{Inputs: "inputs", Scope: "file-a"}
 	cache := &resultCache{previousProject: previous}
-	assert.Nil(t, cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, ""), "partial data cannot satisfy a full run")
-	assert.Nil(t, cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-b"), "partial areas cannot satisfy one another")
+	assert.Nil(t, cache.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, ""), "partial data cannot satisfy a full run")
+	assert.Nil(t, cache.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-b"), "partial areas cannot satisfy one another")
 }
 
 // A partial run stores its project findings under its scope, so they never
@@ -708,7 +708,7 @@ func TestProjectCachePartialScopesDoNotShareOrUpgrade(t *testing.T) {
 func TestProjectCachePartialRunIsNotStoredAsFull(t *testing.T) {
 	rule := newProjectStubRule()
 	partial := &resultCache{}
-	partial.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a")
+	partial.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a")
 	partial.storeProject(nil, nil, map[string][]byte{})
 	assert.Nil(t, partial.currentProject, "a partial scope is not stored")
 }
@@ -721,7 +721,7 @@ func TestProjectCachePartialRunPreservesFullEntry(t *testing.T) {
 		Violations:   map[string][]core.Violation{rule.Name(): {{Rule: rule.Name(), File: "a.go"}}},
 	}
 	partial := &resultCache{previousProject: full}
-	partial.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a")
+	partial.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a")
 	partial.storeProject(nil, nil, map[string][]byte{})
 
 	require.Same(t, full, partial.currentProject)
@@ -738,7 +738,7 @@ func TestProjectCacheFullRunReplacesFindingsWithNewFingerprint(t *testing.T) {
 		Violations:   map[string][]core.Violation{rule.Name(): {{Rule: rule.Name(), Message: "old finding"}}},
 	}
 	cache := &resultCache{previousProject: previous, ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "new"}}
-	cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "")
+	cache.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, "")
 	newFingerprint := cache.projectFingerprints[rule.Name()]
 	newFinding := &core.Violation{Rule: rule.Name(), Message: "new finding"}
 	cache.storeProject(core.ViolationList{newFinding}, nil, map[string][]byte{})
@@ -748,7 +748,7 @@ func TestProjectCacheFullRunReplacesFindingsWithNewFingerprint(t *testing.T) {
 	assert.Equal(t, "new finding", cache.currentProject.Violations[rule.Name()][0].Message)
 
 	next := &resultCache{previousProject: cache.currentProject, ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "new"}}
-	next.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "")
+	next.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, "")
 	assert.True(t, next.projectRuleReusable(rule), "the next full run reuses the refreshed entry")
 	assert.Equal(t, "1 cached, 0 rerun", next.projectState())
 }
@@ -763,7 +763,7 @@ func TestProjectCachePartialRuleSetLeavesFullEntryUntouched(t *testing.T) {
 		Violations:   map[string][]core.Violation{rule.Name(): {{Rule: rule.Name(), Message: "full finding"}}},
 	}
 	cache := &resultCache{previousProject: previous}
-	cache.keyProject("inputs", []string{rule.Name()}, []rules.Rule{rule}, "")
+	cache.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, "")
 	cache.storeProject(nil, nil, map[string][]byte{})
 
 	assert.Same(t, previous, cache.currentProject, "a strict subset of the cached rules must leave the entry untouched")
@@ -978,7 +978,7 @@ func TestProjectCacheKeepsDifferentInputsAcrossSequentialAndConcurrentSaves(t *t
 			save := func(inputs string) {
 				cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 				require.NoError(t, err)
-				cache.keyProject(inputs, nil, nil, "")
+				cache.keyProject("", inputs, nil, nil, "")
 				cache.currentProject = &projectEntry{Inputs: inputs, Scope: "", Violations: map[string][]core.Violation{"marker": {{Message: inputs}}}}
 				require.NoError(t, cache.save())
 			}
@@ -996,7 +996,7 @@ func TestProjectCacheKeepsDifferentInputsAcrossSequentialAndConcurrentSaves(t *t
 			for _, inputs := range []string{"inputs-a", "inputs-b"} {
 				cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 				require.NoError(t, err)
-				assert.NotNil(t, cache.keyProject(inputs, nil, nil, ""), inputs)
+				assert.NotNil(t, cache.keyProject("", inputs, nil, nil, ""), inputs)
 				assert.Equal(t, inputs, cache.projectHit.Violations["marker"][0].Message)
 			}
 		})
@@ -1007,13 +1007,13 @@ func TestPartialProjectRunDoesNotReuseFindingsFromDifferentInputs(t *testing.T) 
 	dir := t.TempDir()
 	full, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
-	full.keyProject("inputs-off", []string{"project-rule"}, nil, "")
+	full.keyProject("", "inputs-off", []string{"project-rule"}, nil, "")
 	full.currentProject = &projectEntry{Inputs: "inputs-off", Scope: "", Violations: map[string][]core.Violation{"project-rule": {{File: "a.go", Message: "old mode"}}}}
 	require.NoError(t, full.save())
 
 	partial, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
-	assert.Nil(t, partial.keyProject("inputs-work", []string{"other-rule"}, nil, "b.go"))
+	assert.Nil(t, partial.keyProject("", "inputs-work", []string{"other-rule"}, nil, "b.go"))
 	partial.storeProject(nil, nil, nil)
 	assert.Nil(t, partial.currentProject, "a partial run with different inputs is not stored")
 }
@@ -1023,7 +1023,7 @@ func TestProjectCacheInputsAndBuildAreIsolated(t *testing.T) {
 	for _, inputs := range []string{"use-a", "use-b"} {
 		cache, err := openResultCache(dir, "/project", "", "build-old", "stamp")
 		require.NoError(t, err)
-		cache.keyProject(inputs, nil, nil, "")
+		cache.keyProject("", inputs, nil, nil, "")
 		cache.currentProject = &projectEntry{Inputs: inputs}
 		require.NoError(t, cache.save())
 	}
@@ -1031,11 +1031,11 @@ func TestProjectCacheInputsAndBuildAreIsolated(t *testing.T) {
 	for _, inputs := range []string{"use-a", "use-b"} {
 		cache, err := openResultCache(dir, "/project", "", "build-old", "stamp")
 		require.NoError(t, err)
-		assert.NotNil(t, cache.keyProject(inputs, nil, nil, ""))
+		assert.NotNil(t, cache.keyProject("", inputs, nil, nil, ""))
 	}
 	newBuild, err := openResultCache(dir, "/project", "", "build-new", "stamp")
 	require.NoError(t, err)
-	assert.Nil(t, newBuild.keyProject("use-a", nil, nil, ""), "a new build cannot use the old build's record")
+	assert.Nil(t, newBuild.keyProject("", "use-a", nil, nil, ""), "a new build cannot use the old build's record")
 }
 
 func TestProjectCacheKeepsOnlyEightNewestInputVariants(t *testing.T) {
@@ -1066,7 +1066,7 @@ func TestProjectCacheKeepsOnlyEightNewestInputVariants(t *testing.T) {
 	}
 	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
-	assert.NotNil(t, cache.keyProject("inputs-09", nil, nil, ""))
+	assert.NotNil(t, cache.keyProject("", "inputs-09", nil, nil, ""))
 	assert.Equal(t, "inputs-09", cache.projectHit.Violations["marker"][0].Message)
 }
 
@@ -1088,14 +1088,14 @@ func TestResultCacheFullHitDoesNotRewriteCacheFiles(t *testing.T) {
 	dir := t.TempDir()
 	first, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
-	first.keyProject("inputs", nil, nil, "")
+	first.keyProject("", "inputs", nil, nil, "")
 	first.currentProject = &projectEntry{Inputs: "inputs", Violations: map[string][]core.Violation{"marker": {{Message: "cached"}}}}
 	require.NoError(t, first.save())
 	projectPath := projectCachePath(dir, "/project", "build", "inputs")
 
 	second, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
-	assert.NotNil(t, second.keyProject("inputs", nil, nil, ""))
+	assert.NotNil(t, second.keyProject("", "inputs", nil, nil, ""))
 	second.current = second.previous
 	rootBefore, err := os.Stat(second.path)
 	require.NoError(t, err)
@@ -1132,7 +1132,7 @@ func TestCorruptProjectCacheWarnsAndReportsCorruptMiss(t *testing.T) {
 	reader, writer, err := os.Pipe()
 	require.NoError(t, err)
 	os.Stderr = writer
-	assert.Nil(t, cache.keyProject("inputs", nil, nil, ""))
+	assert.Nil(t, cache.keyProject("", "inputs", nil, nil, ""))
 	os.Stderr = oldStderr
 	require.NoError(t, writer.Close())
 	warning, err := io.ReadAll(reader)
@@ -1147,13 +1147,13 @@ func TestProjectCacheScopeMismatchHasScopeMissReason(t *testing.T) {
 	dir := t.TempDir()
 	first, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
-	first.keyProject("inputs", nil, nil, "file-a.go")
+	first.keyProject("", "inputs", nil, nil, "file-a.go")
 	first.currentProject = &projectEntry{Inputs: "inputs", Scope: "file-a.go"}
 	require.NoError(t, first.save())
 
 	second, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
-	assert.Nil(t, second.keyProject("inputs", nil, nil, "file-b.go"))
+	assert.Nil(t, second.keyProject("", "inputs", nil, nil, "file-b.go"))
 	assert.Equal(t, "scope", second.projectMiss)
 }
 
@@ -1595,6 +1595,17 @@ func TestCacheInputsKeyTheBytesReadOncePerRun(t *testing.T) {
 	after, err := js.CacheInputs(root)
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "env files")
+
+	goRule := qarules.NewTestExternalServiceRule()
+	before, err = goRule.CacheInputs(root)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".env"), []byte("LIVE=2\n"), 0o600))
+	after, err = goRule.CacheInputs(root)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "env files of the Go rule")
+	changed, err := qarules.NewTestExternalServiceRule().CacheInputs(root)
+	require.NoError(t, err)
+	assert.NotEqual(t, before, changed, "a new run reads the edited env file")
 
 	path := filepath.Join(root, "approved")
 	require.NoError(t, os.WriteFile(path, []byte("sonnet claude-sonnet\n"), 0o600))

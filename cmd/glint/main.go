@@ -1377,7 +1377,7 @@ func (p *preparedRoot) cachedProject(loader goProjectLoader, projectRoot string,
 		p.cache.projectMiss = "uncacheable"
 		return false, nil
 	}
-	hit := p.cache.keyProject(inputs, projectRules, enabledRules, reportScope)
+	hit := p.cache.keyProject(projectRoot, inputs, projectRules, enabledRules, reportScope)
 	if hit == nil {
 		return false, nil
 	}

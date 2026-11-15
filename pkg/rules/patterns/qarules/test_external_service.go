@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -84,6 +85,16 @@ type TestExternalServiceRule struct {
 	localHost       *regexp.Regexp
 	localAddress    *regexp.Regexp
 	externalURL     *regexp.Regexp
+
+	envMu sync.Mutex
+	env   map[envFilesKey]projectEnv
+}
+
+// envFilesKey names the env files a run reads: those of a project root, the
+// ones .gitignore hides left out when the run respects it.
+type envFilesKey struct {
+	root             string
+	respectGitignore bool
 }
 
 // NewTestExternalServiceRule creates the rule
@@ -108,7 +119,34 @@ func NewTestExternalServiceRule() *TestExternalServiceRule {
 		// A local host embedded in a non-URL literal: the tail of a DSN glued
 		// around a password ("@127.0.0.1:5432/app"), a bare "localhost:8090".
 		localAddress: regexp.MustCompile(`(?i)(?:^|[^a-z0-9.-])(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal)(?::\d+)?(?:[^a-z0-9.-]|$)`),
+		env:          map[envFilesKey]projectEnv{},
 	}
+}
+
+// projectEnv returns the env files of a project root, read once per root:
+// the findings and the cache key of a run come from the same bytes.
+func (r *TestExternalServiceRule) projectEnv(root string) projectEnv {
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	key := envFilesKey{root: root, respectGitignore: r.RespectGitignore()}
+	r.envMu.Lock()
+	defer r.envMu.Unlock()
+	if env, ok := r.env[key]; ok {
+		return env
+	}
+	keys, hash, err := envFileInputs(root, key.respectGitignore)
+	env := projectEnv{keys: keys, hash: hash, err: err}
+	r.env[key] = env
+	return env
+}
+
+// CacheInputs identifies the env files whose keys open a credential gate:
+// they are no input of the typed load, so the project findings are keyed by
+// them too.
+func (r *TestExternalServiceRule) CacheInputs(root string) (string, error) {
+	env := r.projectEnv(root)
+	return env.hash, env.err
 }
 
 // Configure accepts the list of opt-in helpers that legitimise a live call.
@@ -150,10 +188,11 @@ func (r *TestExternalServiceRule) AnalyzeGoProject(ctx *core.GoProjectContext) (
 	// поэтому у *_test.go типовой информации нет, и они висят только в ctx.Files.
 	// Имя пакета в вызове разрешается по секции import самого файла — этого хватает
 	// и заодно корректно обрабатывает алиасы импорта.
-	envKeys, err := envFileKeys(ctx.ProjectRoot, r.RespectGitignore())
-	if err != nil {
-		return nil, fmt.Errorf("test external service: %w", err)
+	env := r.projectEnv(ctx.ProjectRoot)
+	if env.err != nil {
+		return nil, fmt.Errorf("test external service: %w", env.err)
 	}
+	envKeys := env.keys
 	dirFacts := r.collectTestDirFacts(ctx.Files, envKeys)
 	var violations []*core.Violation
 	for _, file := range ctx.Files {

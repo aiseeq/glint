@@ -28,7 +28,7 @@ func TestWholeRootRuleSubsetPreservesCachedRootFindings(t *testing.T) {
 	run := func(contexts []*core.FileContext, selected []rules.Rule, all bool) core.ViolationList {
 		cache := openRootCache(root, nil, cfg, false)
 		require.NotNil(t, cache)
-		cache.keyProject("unchanged-go-inputs", nil, selected, "")
+		cache.keyProject("", "unchanged-go-inputs", nil, selected, "")
 		rootRules := selected
 		if all {
 			rootRules = append(rules.GetEnabled(cfg), selected...)
