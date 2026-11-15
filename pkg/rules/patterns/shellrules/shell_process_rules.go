@@ -479,29 +479,97 @@ func checkTrapInLoop(r *shellRule, src *patternkit.ShellSource) []*core.Violatio
 // trapSetsExit reports whether the command is trap with EXIT among its
 // signals. The signals are words, so a trap continued over a line break or
 // with an action of several lines counts, and an EXIT or a 0 inside the action
-// does not. As in bash: a single operand is a signal to reset, more operands
-// are an action and its signals, a name is taken in any case, SIGEXIT is no
-// signal, and trap -p and trap -l set nothing.
+// does not. A word counts by its value, quoted or not ("EXIT", E"XIT"). As in
+// bash: trap may be called as builtin trap or command trap; a single operand,
+// or a first operand that is a number, starts the signals to reset, otherwise
+// the first operand is the action; a name is taken in any case and a number by
+// its value (00 is EXIT), SIGEXIT is no signal, and trap -p, -P and -l set
+// nothing. A word bash expands at run time ("$sig") is not known.
 func trapSetsExit(call *syntax.CallExpr) bool {
-	if len(call.Args) < 2 || call.Args[0].Lit() != "trap" {
+	args := call.Args
+	for len(args) > 0 {
+		name, _ := wordValue(args[0])
+		if name != "builtin" && name != "command" {
+			break
+		}
+		args = args[1:]
+	}
+	if len(args) < 2 {
 		return false
 	}
-	operands := call.Args[1:]
-	switch operands[0].Lit() {
-	case "-p", "-l":
+	if name, _ := wordValue(args[0]); name != "trap" {
+		return false
+	}
+	operands := args[1:]
+	switch first, _ := wordValue(operands[0]); first {
+	case "-p", "-P", "-l":
 		return false
 	case "--":
 		operands = operands[1:]
 	}
 	if len(operands) > 1 {
-		operands = operands[1:]
+		if _, err := strconv.ParseUint(wordLit(operands[0]), 10, 0); err != nil {
+			operands = operands[1:]
+		}
 	}
 	for _, w := range operands {
-		if name := strings.ToUpper(w.Lit()); name == "EXIT" || name == "0" {
+		v := wordLit(w)
+		if strings.ToUpper(v) == "EXIT" {
+			return true
+		}
+		if n, err := strconv.ParseUint(v, 10, 0); err == nil && n == 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// wordLit is the value of a word bash leaves as it is, or "" for one it
+// expands at run time.
+func wordLit(w *syntax.Word) string {
+	v, _ := wordValue(w)
+	return v
+}
+
+// wordValue returns the value of a word made of literal text, single quotes,
+// $'…' and double quotes without expansions, with the quotes and escapes
+// removed; ok is false for a word bash expands at run time.
+func wordValue(w *syntax.Word) (string, bool) {
+	var b strings.Builder
+	for _, part := range w.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			b.WriteString(unescapeLit(p.Value))
+		case *syntax.SglQuoted:
+			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, inner := range p.Parts {
+				lit, ok := inner.(*syntax.Lit)
+				if !ok {
+					return "", false
+				}
+				b.WriteString(lit.Value)
+			}
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
+}
+
+// unescapeLit drops the backslashes of an unquoted word: \trap is trap.
+func unescapeLit(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // loopShell reports whether the innermost of the enclosing nodes that is a

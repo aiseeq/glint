@@ -351,9 +351,26 @@ for t in a b; do
 	trap -- EXIT # want
 done
 for t in a b; do
+	trap "rm -f '$t'" "EXIT" # want
+	trap 'rm -f "$t"' 'INT' "TERM" "EXIT" # want
+	trap 'rm -f "$t"' $'EXIT' # want
+	trap 'rm -f "$t"' E"XIT" # want
+	trap - "0" # want
+	trap 'rm -f "$t"' 00 # want
+	trap 0 INT # want
+	builtin trap 'rm -f "$t"' EXIT # want
+	command trap 'rm -f "$t"' EXIT # want
+	\trap 'rm -f "$t"' EXIT # want
+done
+for t in a b; do
+	trap -P EXIT
+	trap 'rm -f "$t"' "$sig"
+	trap 'rm -f "$t"' "${pre}EXIT"
+	trap 'rm -f "$t"' ${pre}EXIT
 	trap 'exit 0' INT
 	trap 'echo EXIT' TERM
-	trap -- 0 INT
+	trap -- 0 INT # want
+	trap -- EXIT INT
 	trap -p EXIT
 	trap 'rm -f "$t"' SIGEXIT
 	echo 'rm -f' EXIT
