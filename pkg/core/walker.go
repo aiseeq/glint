@@ -36,6 +36,9 @@ type Walker struct {
 	// worktree, a cloned dependency) is another repository, not the
 	// project's code, and is not descended into unless named as a scope.
 	skipNestedRepos bool
+	// keepNestedRepos descends into the nested repositories all the same
+	// (WithNestedRepositories).
+	keepNestedRepos bool
 
 	// Worker pool size. The channels belong to one walk: walk creates them,
 	// so the same walker can be reused.
@@ -93,6 +96,14 @@ func (w *Walker) ExcludedInstruction(path string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.excludedInstructions[path]
+}
+
+// WithNestedRepositories makes the walk descend into the nested repositories
+// below the root too, as a walk scoped to one of them does: the files a check
+// of some scope of the root can read.
+func (w *Walker) WithNestedRepositories(enabled bool) *Walker {
+	w.keepNestedRepos = enabled
+	return w
 }
 
 // WithGoParsing controls whether the walker parses Go files into ASTs.
@@ -346,7 +357,7 @@ func (w *Walker) visitDirectory(walkErrors chan<- error, held *heldDirError, pat
 			return filepath.SkipDir
 		}
 	}
-	if w.skipNestedRepos && path != w.projectRoot && !slices.Contains(w.scopes, path) {
+	if w.skipNestedRepos && !w.keepNestedRepos && path != w.projectRoot && !slices.Contains(w.scopes, path) {
 		nested, err := hasOwnGit(path)
 		if err != nil {
 			walkErrors <- err

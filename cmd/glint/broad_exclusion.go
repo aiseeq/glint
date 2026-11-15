@@ -27,12 +27,12 @@ type broadEntry struct {
 	// skipDir is a directory name of settings.skip_dirs: the walk leaves
 	// out every directory of that name.
 	skipDir bool
-	// rule is the rule watching suppressions that the entry switches off by
-	// name; "" for other entries.
-	rule string
 	// oversight marks an entry that switches off a rule watching
 	// suppressions, by name, with its category or by an exception of it.
 	oversight bool
+	// rule is the rule watching suppressions that the entry switches off by
+	// name; "" for other entries.
+	rule string
 	// excepted is the rule watching suppressions an exception keeps off for
 	// what it covers; "" for other entries.
 	excepted string
@@ -41,6 +41,9 @@ type broadEntry struct {
 	// glob: one line of one file when the project holds at most one file
 	// they name; nil for other entries.
 	oneLine *core.Exception
+	// excepts is an exception of another rule that names files, judged by the
+	// files it covers (core.Exception.CoversFile); nil for other entries.
+	excepts *core.Exception
 	// declaredAt is the line of an exception's entry that declares the
 	// exception, in origin when it is set and in file otherwise: what the
 	// exception silenced is found there (silencedSeverities.exception).
@@ -269,18 +272,18 @@ func collectBroadExceptions(exceptions *yaml.Node, rule string, entries *[]broad
 			}
 			continue
 		}
-		// A pattern, a function, a line above 0 or a file narrows an
-		// exception: an empty one or a line of 0 or less narrows nothing
-		// (core.Exception.matchesViolation), and a file is no glob, so the
-		// exception keeps the files of that path or base name alone
-		// (core.Exception.NamesFile).
-		if decoded.Pattern != "" || decoded.Function != "" || decoded.Line > 0 || decoded.File != "" {
+		// A pattern, a function or a line above 0 narrows an exception; an
+		// empty one or a line of 0 or less narrows nothing
+		// (core.Exception.matchesViolation). The files it keeps are those it
+		// covers (coversBroadly).
+		if decoded.Pattern != "" || decoded.Function != "" || decoded.Line > 0 {
 			continue
 		}
-		// One that names no files - a line below 1 alone - keeps every file.
-		entry := broadEntry{pattern: "**", line: exception.Line, exception: true, declaredAt: exception.Line}
+		// One that names files is reported on the line of its files, one
+		// without on its own line.
+		entry := broadEntry{line: exception.Line, exception: true, excepts: &decoded, declaredAt: exception.Line}
 		if decoded.Files != "" {
-			entry.pattern, entry.line = decoded.Files, configNode(exception, "files").Line
+			entry.line = configNode(exception, "files").Line
 		}
 		*entries = append(*entries, entry)
 	}
@@ -323,29 +326,57 @@ func decodeBroadException(exception *yaml.Node, rule string) (core.Exception, er
 
 // narrowOversightExceptions drops the exceptions of a rule watching
 // suppressions that keep one line of one file: a line of files named by base
-// name or by a glob that name at most one file of the project, matched as the
-// exception matches.
+// name or by a glob that cover at most one file the run reads
+// (broadRunFiles), as the run matches them (core.Exception.CoversFile).
 func narrowOversightExceptions(entries []broadEntry, cfg *core.Config) ([]broadEntry, error) {
-	if !slices.ContainsFunc(entries, func(entry broadEntry) bool { return entry.oneLine != nil }) {
+	var oneLine []core.Exception
+	for _, entry := range entries {
+		if entry.oneLine != nil {
+			oneLine = append(oneLine, *entry.oneLine)
+		}
+	}
+	if len(oneLine) == 0 {
 		return entries, nil
 	}
-	files, err := cfg.ConfigFiles()
+	files, err := broadRunFiles(cfg, func(file string) bool {
+		return slices.ContainsFunc(oneLine, func(exc core.Exception) bool { return exc.CoversFile(file) })
+	})
 	if err != nil {
-		return nil, fmt.Errorf("list project files for exceptions of one line: %w", err)
+		return nil, err
 	}
 	return slices.DeleteFunc(entries, func(entry broadEntry) bool {
-		if entry.oneLine == nil {
-			return false
-		}
-		named := 0
-		for _, file := range files {
-			// settings.skip_dirs leaves its files out of the list already.
-			if entry.oneLine.NamesFile(file) && !slices.ContainsFunc(cfg.Settings.Exclude, func(pattern string) bool { return core.MatchGlob(pattern, file) }) {
-				named++
-			}
-		}
-		return named <= 1
+		return entry.oneLine != nil && len(slices.DeleteFunc(slices.Clone(files), func(file string) bool { return !entry.oneLine.CoversFile(file) })) <= 1
 	}), nil
+}
+
+// broadRunFiles returns the files, relative to the configuration's
+// directory, that a check of it reads and a finding about a suppression can
+// be on, of those keep accepts: what the walk of the run reads - the
+// configuration's exclude, skip_dirs and .gitignore apply, and so does git
+// for a tracked artifact directory. The configuration is not: the run judges
+// its markers whatever its exceptions say (analyzeConfigurationRules), and
+// those of the configurations it extends never. The nested repositories are
+// in: a check scoped to one reads them, under the same configuration.
+func broadRunFiles(cfg *core.Config, keep func(string) bool) ([]string, error) {
+	root := filepath.Dir(cfg.ConfigPath())
+	// The walk of root visits paths below it alone.
+	walker := core.NewWalker(root, cfg.AtConfigDir()).WithGoParsing(false).WithNestedRepositories(true).
+		WithRequiredFilePredicate(func(path string) bool {
+			rel, err := filepath.Rel(root, path)
+			return err == nil && keep(filepath.ToSlash(rel))
+		})
+	contexts, walkErrors := walker.WalkSync()
+	for _, err := range walkErrors {
+		// A directory or file the user cannot read holds no finding of the run.
+		if !errors.Is(err, fs.ErrPermission) {
+			return nil, fmt.Errorf("walk the files exceptions of one line cover: %w", err)
+		}
+	}
+	var files []string
+	for _, ctx := range contexts {
+		files = append(files, filepath.ToSlash(ctx.RelPath))
+	}
+	return files, nil
 }
 
 // foreignBroadNames are directories of foreign code and test data: no source
@@ -750,6 +781,11 @@ func coversBroadly(entry broadEntry, sources broadSources) (bool, error) {
 	if entry.pattern == "<category>" || entry.rule != "" || entry.excepted != "" {
 		return true, nil
 	}
+	// An exception covers the project when the run excepts every source of
+	// it with the exception, whatever its files name.
+	if entry.excepts != nil {
+		return len(sources.files) > 0 && !slices.ContainsFunc(sources.files, func(file string) bool { return !entry.excepts.CoversFile(file) }), nil
+	}
 	if entry.skipDir {
 		return skipsSourceDirectory(entry.pattern, sources.files), nil
 	}
@@ -761,13 +797,12 @@ func coversBroadly(entry broadEntry, sources broadSources) (bool, error) {
 		return true, nil
 	}
 	matched := make(map[string]int)
-	projectMatches := 0
 	for _, file := range files {
 		match, err := matchesBroadPattern(entry.pattern, file)
 		if err != nil {
 			return false, err
 		}
-		if !match && !entry.exception {
+		if !match {
 			match, err = matchesBroadPattern(entry.pattern, "./"+file)
 			if err != nil {
 				return false, err
@@ -776,11 +811,7 @@ func coversBroadly(entry broadEntry, sources broadSources) (bool, error) {
 		if !match {
 			continue
 		}
-		projectMatches++
 		addMatchedCatalogDirs(file, matched)
-	}
-	if entry.exception {
-		return projectMatches == len(files), nil
 	}
 	for directory, total := range sources.catalog {
 		if total > 0 && matched[directory] == total {

@@ -328,3 +328,39 @@ func TestIsViolationExceptedMatchesSpecificFields(t *testing.T) {
 	assert.False(t, cfg.IsViolationExcepted("patterns", "query-in-loop", "repo.go", wrongLine))
 	assert.False(t, cfg.IsViolationExcepted("patterns", "query-in-loop", "repo.go", wrongPattern))
 }
+
+// CoversFile is where the run silences an exception's rule: a file-only
+// exception keeps the rule off a file its files glob or its file names,
+// either one, a file by its path or its base name; any other matches a file
+// both name, and one that names nothing matches no file and no finding.
+func TestExceptionCoversFileAsTheRunMatches(t *testing.T) {
+	cases := []struct {
+		exception Exception
+		covered   []string
+		uncovered []string
+	}{
+		{Exception{File: "a.go"}, []string{"a.go", "cmd/app/a.go"}, []string{"b.go"}},
+		{Exception{File: "cmd/app/a.go"}, []string{"cmd/app/a.go"}, []string{"a.go", "internal/cmd/app/a.go"}},
+		{Exception{Files: "*.go"}, []string{"a.go", "cmd/app/b.go"}, []string{"a.ts"}},
+		{Exception{Files: "cmd/**", File: "a.go"}, []string{"cmd/b.go", "internal/a.go"}, []string{"internal/b.go"}},
+		{Exception{Files: "cmd/**", File: "a.go", Line: 3}, []string{"cmd/app/a.go"}, []string{"cmd/b.go", "internal/a.go"}},
+		{Exception{Line: -1}, []string{"a.go", "cmd/app/b.go"}, nil},
+		{Exception{Reason: "names nothing"}, nil, []string{"a.go"}},
+	}
+	for _, c := range cases {
+		cfg := DefaultConfig()
+		patternsCat := cfg.Categories["patterns"]
+		patternsCat.Rules = map[string]RuleConfig{"query-in-loop": {Enabled: true, Exceptions: []Exception{c.exception}}}
+		cfg.Categories["patterns"] = patternsCat
+		for _, file := range c.covered {
+			assert.True(t, c.exception.CoversFile(file), "%+v covers %s", c.exception, file)
+			excepted := cfg.IsFileExcepted("patterns", "query-in-loop", file) || cfg.IsViolationExcepted("patterns", "query-in-loop", file, &Violation{Line: 3})
+			assert.True(t, excepted, "the run excepts %s with %+v", file, c.exception)
+		}
+		for _, file := range c.uncovered {
+			assert.False(t, c.exception.CoversFile(file), "%+v covers %s", c.exception, file)
+			excepted := cfg.IsFileExcepted("patterns", "query-in-loop", file) || cfg.IsViolationExcepted("patterns", "query-in-loop", file, &Violation{Line: 3})
+			assert.False(t, excepted, "the run excepts %s with %+v", file, c.exception)
+		}
+	}
+}

@@ -140,8 +140,9 @@ func TestBroadExclusionReadsTheConfigurationAsTheLoad(t *testing.T) {
 // one is, a duplicate key the load decodes to one name is the last one, and
 // a null item of a list is none, so it does not hide the list of a base. An
 // exception is narrowed as the load matches it: an empty pattern or a line
-// below 1 narrows nothing, one of no files keeps every file, and a file,
-// never a glob, keeps that file alone.
+// below 1 narrows nothing, one of no files keeps every file, a file, never a
+// glob, keeps that file alone, and a file-only one keeps the rule off the
+// files either its files or its file names (core.Config.FileException).
 func TestBroadExclusionJudgesWhatTheLoadDecodes(t *testing.T) {
 	for name, tt := range map[string]struct {
 		config string
@@ -159,7 +160,8 @@ func TestBroadExclusionJudgesWhatTheLoadDecodes(t *testing.T) {
 		"a line below 1 alone": {"version: 1\ncategories:\n  security:\n    rules:\n      hardcoded-secret:\n        exceptions:\n          - line: -1\n            reason: fixtures\n", []string{".glint.yaml:7"}},
 		"on the line of files": {"version: 1\ncategories:\n  security:\n    rules:\n      hardcoded-secret:\n        exceptions:\n          - reason: fixtures\n            files: !!binary Kio=\n", []string{".glint.yaml:8"}},
 		"file is no glob":      {"version: 1\ncategories:\n  security:\n    rules:\n      hardcoded-secret:\n        exceptions:\n          - file: \"**\"\n            reason: fixtures\n", nil},
-		"file narrows files":   {"version: 1\ncategories:\n  security:\n    rules:\n      hardcoded-secret:\n        exceptions:\n          - files: \"**\"\n            file: main.go\n            reason: fixtures\n", nil},
+		"file or files":        {"version: 1\ncategories:\n  security:\n    rules:\n      hardcoded-secret:\n        exceptions:\n          - files: \"**\"\n            file: main.go\n            reason: fixtures\n", []string{".glint.yaml:7"}},
+		"files by base name":   {"version: 1\ncategories:\n  security:\n    rules:\n      hardcoded-secret:\n        exceptions:\n          - files: \"*.go\"\n            reason: fixtures\n", []string{".glint.yaml:7"}},
 		"last duplicate wins":  {"version: 1\ncategories:\n  security:\n    enabled: true\n  ? !!binary c2VjdXJpdHk=\n  : enabled: false\n", []string{".glint.yaml:6"}},
 		"null item":            {"version: 1\nextends: conf/base.yaml\nsettings:\n  exclude: [~]\n", []string{"conf/base.yaml:3"}},
 		"binary narrow":        {"version: 1\ncategories:\n  security:\n    rules:\n      hardcoded-secret:\n        exceptions:\n          - files: !!binary aW50ZXJuYWwvKio=\n            reason: fixtures\n", nil},

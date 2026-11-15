@@ -553,6 +553,14 @@ func (c *Config) AnalyzesConfigDir() bool {
 	return c.path != "" && c.rootPrefix == ""
 }
 
+// AtConfigDir returns the configuration as a check of its own directory reads
+// it: the paths of a walk of that directory are the paths it names.
+func (c *Config) AtConfigDir() *Config {
+	at := *c
+	at.rootPrefix = ""
+	return &at
+}
+
 // configPath returns a path relative to the checked directory as the
 // configuration names it: relative to the configuration's own directory.
 func (c *Config) configPath(path string) string {
@@ -729,17 +737,37 @@ func (c *Config) IsFileExcepted(category, rule, filePath string) bool {
 func (c *Config) FileException(category, rule, filePath string) (Exception, bool) {
 	filePath = c.configPath(filePath)
 	for _, exc := range c.GetRuleExceptions(category, rule) {
-		if !exc.IsFileOnly() {
-			continue
-		}
-		if exc.Files != "" && MatchGlob(exc.Files, filePath) {
-			return exc, true
-		}
-		if exc.File != "" && (exc.File == filePath || exc.File == filepath.Base(filePath)) {
+		if exc.IsFileOnly() && exc.keepsFile(filePath) {
 			return exc, true
 		}
 	}
 	return Exception{}, false
+}
+
+// keepsFile reports whether a file-only exception keeps its rule off the
+// file: its files glob or its file names it, either one.
+func (e Exception) keepsFile(path string) bool {
+	return e.Files != "" && MatchGlob(e.Files, path) || e.File != "" && (e.File == path || e.File == filepath.Base(path))
+}
+
+// CoversFile reports whether the exception silences findings of its rule in
+// the file, relative to the configuration's directory, at some line: a
+// file-only one where FileException keeps the rule off the file, any other
+// where MatchingException matches the file (both file and files name it).
+func (e Exception) CoversFile(path string) bool {
+	if e.IsFileOnly() {
+		return e.keepsFile(path)
+	}
+	return e.matchesFile(path)
+}
+
+// matchesFile reports whether MatchingException can match a finding in the
+// file with the exception: both its file and its files name the file, and it
+// names something - one that names no file, line, pattern or function
+// matches nothing.
+func (e Exception) matchesFile(path string) bool {
+	namesNothing := e.File == "" && e.Files == "" && e.Line == 0 && e.Pattern == "" && e.Function == ""
+	return !namesNothing && e.NamesFile(path)
 }
 
 // IsViolationExcepted checks whether a specific violation matches a rule exception.
@@ -811,13 +839,7 @@ func (e Exception) matchesViolation(filePath string, violation *Violation) bool 
 	if violation == nil {
 		return false
 	}
-	if e.File == "" && e.Files == "" && e.Line == 0 && e.Pattern == "" && e.Function == "" {
-		return false
-	}
-	if e.File != "" && e.File != filePath && e.File != filepath.Base(filePath) {
-		return false
-	}
-	if e.Files != "" && !MatchGlob(e.Files, filePath) {
+	if !e.matchesFile(filePath) {
 		return false
 	}
 	if e.Line > 0 && e.Line != violation.Line {
