@@ -318,6 +318,54 @@ done
 `)
 }
 
+// The signals of a trap are its words, not the text of its line: a trap
+// continued over a line break or with a command string of several lines is
+// still trap ... EXIT, and a pipeline element, a background job or a coprocess
+// runs in a subshell of its own.
+func TestShellTrapInLoopWords(t *testing.T) {
+	shellWanted(t, "shell-trap-in-loop", "words.sh", `#!/bin/bash
+for t in a b; do
+	tmp=$(mktemp)
+	trap 'rm -f "$tmp" # want' \
+		EXIT
+done
+for t in a b; do
+	trap 'echo done # want
+		rm -f "$t"' EXIT
+done
+for t in a b; do
+	trap "rm -f $( # want
+		echo "$t"
+	)" EXIT
+done
+for t in a b; do
+	trap -- 'rm -f "$t"' 0 # want
+done
+for t in a b; do
+	trap 'rm -f "$t"' exit # want
+done
+for t in a b; do
+	trap EXIT # want
+done
+for t in a b; do
+	trap -- EXIT # want
+done
+for t in a b; do
+	trap 'exit 0' INT
+	trap 'echo EXIT' TERM
+	trap -- 0 INT
+	trap -p EXIT
+	trap 'rm -f "$t"' SIGEXIT
+	echo 'rm -f' EXIT
+done
+for t in a b; do
+	trap 'rm -f "$t"' EXIT | cat
+	trap 'rm -f "$t"' EXIT &
+	coproc { trap 'rm -f "$t"' EXIT; }
+done
+`)
+}
+
 // Repro from a real project: the work directory was removed by trap on exit,
 // and a failed run exited before the step that copied its log out - the log
 // of the failure was lost.

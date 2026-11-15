@@ -467,7 +467,7 @@ func checkTrapInLoop(r *shellRule, src *patternkit.ShellSource) []*core.Violatio
 			return true
 		}
 		// The command from its name: an assignment before it is no part of it.
-		if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) > 0 && trapExit.MatchString(text[call.Args[0].Pos().Offset():call.End().Offset()]) && loopShell(stack) {
+		if call, ok := node.(*syntax.CallExpr); ok && trapSetsExit(call) && loopShell(stack) {
 			out = appendReport(out, src.Report(r, int(call.Pos().Line()), trapInLoopMessage, trapInLoopSuggestion))
 		}
 		stack = append(stack, node)
@@ -476,15 +476,53 @@ func checkTrapInLoop(r *shellRule, src *patternkit.ShellSource) []*core.Violatio
 	return out
 }
 
+// trapSetsExit reports whether the command is trap with EXIT among its
+// signals. The signals are words, so a trap continued over a line break or
+// with an action of several lines counts, and an EXIT or a 0 inside the action
+// does not. As in bash: a single operand is a signal to reset, more operands
+// are an action and its signals, a name is taken in any case, SIGEXIT is no
+// signal, and trap -p and trap -l set nothing.
+func trapSetsExit(call *syntax.CallExpr) bool {
+	if len(call.Args) < 2 || call.Args[0].Lit() != "trap" {
+		return false
+	}
+	operands := call.Args[1:]
+	switch operands[0].Lit() {
+	case "-p", "-l":
+		return false
+	case "--":
+		operands = operands[1:]
+	}
+	if len(operands) > 1 {
+		operands = operands[1:]
+	}
+	for _, w := range operands {
+		if name := strings.ToUpper(w.Lit()); name == "EXIT" || name == "0" {
+			return true
+		}
+	}
+	return false
+}
+
 // loopShell reports whether the innermost of the enclosing nodes that is a
 // loop or a subshell is a loop: the trap runs in the shell the loop repeats.
+// An element of a pipeline, a background job and a coprocess run in a
+// subshell of their own, as ( … ) and $( … ) do.
 func loopShell(stack []syntax.Node) bool {
 	for i := len(stack) - 1; i >= 0; i-- {
-		switch stack[i].(type) {
+		switch n := stack[i].(type) {
 		case *syntax.ForClause, *syntax.WhileClause:
 			return true
-		case *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst:
+		case *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst, *syntax.CoprocClause:
 			return false
+		case *syntax.BinaryCmd:
+			if n.Op == syntax.Pipe || n.Op == syntax.PipeAll {
+				return false
+			}
+		case *syntax.Stmt:
+			if n.Background || n.Coprocess || n.Disown {
+				return false
+			}
 		}
 	}
 	return false
