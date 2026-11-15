@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -11,6 +12,63 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 )
+
+func TestCheckResolvesSymlinkRoots(t *testing.T) {
+	parent := t.TempDir()
+	project := filepath.Join(parent, "project")
+	writeModuleFile(t, project, "go.mod", "module example.com/projecta\n\ngo 1.22\n")
+	writeModuleFile(t, project, ".glint.yaml", "version: 1\n")
+	writeModuleFile(t, project, "internal/harness/harness.go", `package harness
+
+// Dead is not called by the project.
+func Dead() error { return nil }
+`)
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(project, link); err != nil {
+		t.Fatal(err)
+	}
+	withFlags(t, "", "unused-internal-export")
+
+	findings := func(t *testing.T, paths ...string) []string {
+		t.Helper()
+		roots, err := analysisRoots(paths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found []string
+		for _, root := range roots {
+			cfg, enabled, err := loadConfig(root.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := prepareScopedAnalysis(core.NewGoProjectLoader(), root, cfg, enabled, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rules.ResetState(enabled)
+			violations, err := analyzeProject(prepared.contexts, enabled, cfg, prepared.project, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range violations {
+				found = append(found, fmt.Sprintf("%s:%d %s", v.File, v.Line, v.Context["symbol"]))
+			}
+		}
+		sort.Strings(found)
+		return found
+	}
+	want := []string{"internal/harness/harness.go:4 Dead"}
+	if got := findings(t, project); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("real root findings = %v, want %v", got, want)
+	}
+	if got := findings(t, link); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("absolute symlink root findings = %v, want %v", got, want)
+	}
+	t.Chdir(link)
+	if got := findings(t, "."); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("dot root from symlink directory findings = %v, want %v", got, want)
+	}
+}
 
 // Paths under one .glint.yaml form one root walked over scopes; a path that no
 // configuration governs stays a root of its own.

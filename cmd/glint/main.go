@@ -863,7 +863,11 @@ func resolvePath(path string, allowFiles bool) (string, error) {
 	if !info.IsDir() && !allowFiles {
 		return "", fmt.Errorf("invalid project root %q: not a directory", projectRoot)
 	}
-	return projectRoot, nil
+	resolvedRoot, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve project root %q: %w", projectRoot, err)
+	}
+	return filepath.Clean(resolvedRoot), nil
 }
 
 func loadConfig(projectRoot string) (*core.Config, []rules.Rule, error) {
