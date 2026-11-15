@@ -296,9 +296,6 @@ func processCPUTime(t *testing.T) time.Duration {
 	}
 	return time.Duration(usage.Utime.Nano() + usage.Stime.Nano())
 }
-func ruleGrowth(t *testing.T, rule rules.Rule, path string, source func(n int) string, n int) float64 {
-	return ruleGrowthAtScale(t, rule, path, source, n, 10)
-}
 
 func ruleGrowthAtScale(t *testing.T, rule rules.Rule, path string, source func(n int) string, n, scale int) float64 {
 	return operationGrowthAtScale(t, func(size int) {
