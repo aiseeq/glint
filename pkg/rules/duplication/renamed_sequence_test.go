@@ -124,15 +124,17 @@ func renamedSequenceFiles(hint string) map[string]string {
 
 // Two functions of a package that open with one prologue of seven steps,
 // differing in the names and in the zero values returned beside the error:
-// the copy is reported against the function that is mostly the prologue.
+// the copy is reported against the function that is mostly the prologue. The
+// first step looks up m.out in one and a local copy of it in the other: a
+// field is part of the form, so the run starts at the guard after it.
 func TestRenamedDuplicateSequencePrologue(t *testing.T) {
 	violations, err := NewRenamedDuplicateBlockRule().AnalyzeGoProject(rulestest.Project(t, renamedSequenceFiles(renamedSequenceHint)))
 	require.NoError(t, err)
 	require.Len(t, violations, 1)
 	assert.Equal(t, "plan/hint.go", violations[0].File)
-	assert.Equal(t, 7, violations[0].Line)
+	assert.Equal(t, 8, violations[0].Line)
 	assert.Equal(t, "plan/refresh.go", violations[0].Context["original_file"])
-	assert.Equal(t, 4, violations[0].Context["original_line"])
+	assert.Equal(t, 5, violations[0].Context["original_line"])
 	assert.Contains(t, violations[0].Message, "(in refusedForRefresh)")
 }
 
@@ -140,7 +142,7 @@ func TestRenamedDuplicateSequencePrologue(t *testing.T) {
 func TestRenamedDuplicateSequenceMiddle(t *testing.T) {
 	hint := strings.Replace(renamedSequenceHint, "\tselected := m.out\n",
 		"\tselected := m.out\n\tif selected == \"\" {\n\t\treturn \"\", \"\", nil\n\t}\n\tdir = strings.TrimSpace(dir)\n", 1)
-	assert.Equal(t, []string{"plan/hint.go:11 -> plan/refresh.go:4"}, renamedBlockFindings(t, renamedSequenceFiles(hint)))
+	assert.Equal(t, []string{"plan/hint.go:12 -> plan/refresh.go:5"}, renamedBlockFindings(t, renamedSequenceFiles(hint)))
 }
 
 // A value returned beside the error that is not a zero value is a different
@@ -170,7 +172,7 @@ func TestRenamedDuplicateSequenceZeroValues(t *testing.T) {
 		"return found, 1, 1, 1, purpose, nil", 1)
 	files := renamedSequenceFiles(renamedSequenceHint)
 	files["plan/refresh.go"] = refused
-	assert.Equal(t, []string{"plan/hint.go:7 -> plan/refresh.go:4"}, renamedBlockFindings(t, files))
+	assert.Equal(t, []string{"plan/hint.go:8 -> plan/refresh.go:5"}, renamedBlockFindings(t, files))
 }
 
 // A function returning the error alone is the same prologue as one returning
@@ -182,7 +184,7 @@ func TestRenamedDuplicateSequenceErrorAlone(t *testing.T) {
 		"return plan(dir, found, built, actual, purpose)", 1)
 	files := renamedSequenceFiles(renamedSequenceHint)
 	files["plan/refresh.go"] = refused
-	assert.Equal(t, []string{"plan/hint.go:7 -> plan/refresh.go:4"}, renamedBlockFindings(t, files))
+	assert.Equal(t, []string{"plan/hint.go:8 -> plan/refresh.go:5"}, renamedBlockFindings(t, files))
 }
 
 // boundaryFiles builds two functions of the package opening with the same

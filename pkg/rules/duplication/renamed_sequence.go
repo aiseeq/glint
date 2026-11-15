@@ -92,7 +92,7 @@ func (s *renamedSequences) add(path string, fd *ast.FuncDecl) {
 		norm := &blockNormalizer{
 			info: s.info, lo: window[0].Pos(), hi: window[len(window)-1].End(),
 			locals: make(map[types.Object]int), zeroReturns: true,
-			redeclared: s.redeclared(window),
+			redeclared: s.redeclared(window), packageNames: true, fieldNames: true,
 		}
 		for _, stmt := range window {
 			norm.walk(stmt)
@@ -151,18 +151,79 @@ func (s *renamedSequences) reports() []renamedReport {
 	})
 	var reports []renamedReport
 	for _, pair := range pairs {
+		var large []sequenceRun
 		for _, run := range mergeSequenceMatches(matches[pair]) {
-			if rep, ok := s.report(pair[0], pair[1], run); ok {
-				reports = append(reports, rep)
+			if s.large(pair[0], pair[1], run) {
+				large = append(large, run)
 			}
 		}
+		for _, region := range joinSequenceRuns(large) {
+			reports = append(reports, s.report(pair[0], pair[1], region))
+		}
 	}
-	return reports
+	return joinCopies(reports)
 }
 
 // sequenceRun is statements a..a+size-1 of one body equal to b..b+size-1 of another.
 type sequenceRun struct {
 	a, b, size int
+}
+
+// sequenceRegion is statements aLo..aHi of one body and bLo..bHi of another
+// that runs at several shifts cover.
+type sequenceRegion struct {
+	aLo, aHi, bLo, bHi int
+}
+
+// joinSequenceRuns joins runs that overlap in both bodies into one region: a
+// chain of equal statements matches at every shift, and each shift is the
+// same copy again. Runs apart in one body are two copies.
+func joinSequenceRuns(runs []sequenceRun) []sequenceRegion {
+	sort.Slice(runs, func(i, j int) bool {
+		if runs[i].a != runs[j].a {
+			return runs[i].a < runs[j].a
+		}
+		return runs[i].b < runs[j].b
+	})
+	var regions []sequenceRegion
+	for _, run := range runs {
+		aHi, bHi := run.a+run.size-1, run.b+run.size-1
+		if n := len(regions); n > 0 {
+			last := &regions[n-1]
+			if run.a <= last.aHi && run.b <= last.bHi && bHi >= last.bLo {
+				last.aHi = max(last.aHi, aHi)
+				last.bLo, last.bHi = min(last.bLo, run.b), max(last.bHi, bHi)
+				continue
+			}
+		}
+		regions = append(regions, sequenceRegion{aLo: run.a, aHi: aHi, bLo: run.b, bHi: bHi})
+	}
+	return regions
+}
+
+// joinCopies joins the reports whose copies overlap in one function, against
+// several originals, into the first of them: one copied run is one finding.
+func joinCopies(reports []renamedReport) []renamedReport {
+	sort.SliceStable(reports, func(i, j int) bool {
+		a, b := reports[i].copy, reports[j].copy
+		if a.file != b.file {
+			return a.file < b.file
+		}
+		return a.pos < b.pos
+	})
+	var joined []renamedReport
+	for _, rep := range reports {
+		if n := len(joined); n > 0 {
+			last := joined[n-1].copy
+			// Positions of one file set never overlap across functions or files.
+			if rep.copy.pos < last.end {
+				last.end = max(last.end, rep.copy.end)
+				continue
+			}
+		}
+		joined = append(joined, rep)
+	}
+	return joined
 }
 
 // mergeSequenceMatches joins windows that follow each other at one shift.
@@ -187,19 +248,21 @@ func mergeSequenceMatches(matches []sequenceMatch) []sequenceRun {
 	return runs
 }
 
-// report turns a run into the copy and its original, when the run is large
-// enough to be one.
-func (s *renamedSequences) report(fa, fb *sequenceFunc, run sequenceRun) (renamedReport, bool) {
+// large reports a run large enough to be a copy.
+func (s *renamedSequences) large(fa, fb *sequenceFunc, run sequenceRun) bool {
 	left := fa.fd.Body.List[run.a : run.a+run.size]
 	right := fb.fd.Body.List[run.b : run.b+run.size]
-	if min(s.statementLines(left), s.statementLines(right)) < minRenamedSequenceLines || sequenceSteps(left) < minRenamedSequenceSteps {
-		return renamedReport{}, false
-	}
-	a, b := s.block(fa, left), s.block(fb, right)
+	return min(s.statementLines(left), s.statementLines(right)) >= minRenamedSequenceLines && sequenceSteps(left) >= minRenamedSequenceSteps
+}
+
+// report turns a region into the copy and its original.
+func (s *renamedSequences) report(fa, fb *sequenceFunc, region sequenceRegion) renamedReport {
+	a := s.block(fa, fa.fd.Body.List[region.aLo:region.aHi+1])
+	b := s.block(fb, fb.fd.Body.List[region.bLo:region.bHi+1])
 	if originalBefore(s.fset, b, a) {
 		a, b = b, a
 	}
-	return renamedReport{copy: b, original: a}, true
+	return renamedReport{copy: b, original: a}
 }
 
 func (s *renamedSequences) block(fn *sequenceFunc, stmts []ast.Stmt) *renamedBlock {

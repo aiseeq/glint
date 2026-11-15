@@ -305,6 +305,9 @@ type blockNormalizer struct {
 	// inside it declares again: they are the statement's own, as they are in
 	// a copy where no earlier declaration exists.
 	redeclared map[types.Object]bool
+	// fieldNames keeps a field path from a value from outside the statement
+	// as the placeholder and the field names: a copy touches the same fields.
+	fieldNames bool
 	b          strings.Builder
 	nodes      int
 	stmts      int
@@ -440,7 +443,7 @@ func (n *blockNormalizer) selector(sel *ast.SelectorExpr) (string, bool) {
 	if atom, ok := n.packageMember(sel); ok {
 		return atom, true
 	}
-	if n.freeRoot(sel) {
+	if !n.fieldNames && n.freeRoot(sel) {
 		return freeValue, true
 	}
 	return "", false
