@@ -11,6 +11,7 @@ import (
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 func init() {
@@ -437,74 +438,75 @@ func checkBackgroundWithoutTrap(r *shellRule, src *patternkit.ShellSource) []*co
 
 var trapExit = regexp.MustCompile(`^trap\s+.*\b(?:EXIT|0)\b`)
 
+const (
+	trapInLoopMessage    = "trap ... EXIT inside a loop replaces the trap of the previous iteration — only the last cleanup runs"
+	trapInLoopSuggestion = "Set one trap before the loop that cleans up everything the loop made (collect the paths in an array), or clean up at the end of each iteration"
+)
+
 // checkTrapInLoop reports trap ... EXIT set inside a loop. A trap set in a
-// subshell opened in the loop body, ( … ) or $( … ), belongs to that
+// subshell the loop body opens — ( … ), $( … ), <( … ) — belongs to that
 // subshell: it replaces neither the trap of the script nor the one of the
-// previous iteration.
+// previous iteration. The syntax tree tells the subshell; a script bash does
+// not parse is read by its steps, without subshells.
 func checkTrapInLoop(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
 	if src.Make {
 		return nil
 	}
+	text := strings.Join(src.Ctx.Lines, "\n")
+	file, err := syntax.NewParser().Parse(strings.NewReader(text), src.Ctx.Path)
+	if err != nil {
+		// Expected for a script outside the bash grammar (zsh, a template):
+		// it is read by its steps.
+		return trapInLoopSteps(r, src)
+	}
 	var out []*core.Violation
-	var loops []int // the subshell depth each open loop starts at
-	subshells, cases := 0, 0
+	var stack []syntax.Node
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		// The command from its name: an assignment before it is no part of it.
+		if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) > 0 && trapExit.MatchString(text[call.Args[0].Pos().Offset():call.End().Offset()]) && loopShell(stack) {
+			out = appendReport(out, src.Report(r, int(call.Pos().Line()), trapInLoopMessage, trapInLoopSuggestion))
+		}
+		stack = append(stack, node)
+		return true
+	})
+	return out
+}
+
+// loopShell reports whether the innermost of the enclosing nodes that is a
+// loop or a subshell is a loop: the trap runs in the shell the loop repeats.
+func loopShell(stack []syntax.Node) bool {
+	for i := len(stack) - 1; i >= 0; i-- {
+		switch stack[i].(type) {
+		case *syntax.ForClause, *syntax.WhileClause:
+			return true
+		case *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst:
+			return false
+		}
+	}
+	return false
+}
+
+// trapInLoopSteps reads a script the parser rejects by its steps: a trap
+// between a loop start and its done.
+func trapInLoopSteps(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+	var out []*core.Violation
+	depth := 0
 	for _, s := range src.Steps() {
 		text := strings.TrimSpace(patternkit.CommandPrefix.ReplaceAllString(s.Text, ""))
 		switch {
 		case shellLoopStart(s.Text):
-			loops = append(loops, subshells)
+			depth++
 		case loopEnd.MatchString(text):
-			if len(loops) > 0 {
-				loops = loops[:len(loops)-1]
-			}
-		case len(loops) > 0 && loops[len(loops)-1] == subshells && trapExit.MatchString(text):
-			out = appendReport(out, src.Report(r, s.Line,
-				"trap ... EXIT inside a loop replaces the trap of the previous iteration — only the last cleanup runs",
-				"Set one trap before the loop that cleans up everything the loop made (collect the paths in an array), or clean up at the end of each iteration"))
+			depth--
+		case depth > 0 && trapExit.MatchString(text):
+			out = appendReport(out, src.Report(r, s.Line, trapInLoopMessage, trapInLoopSuggestion))
 		}
-		switch {
-		case caseStart.MatchString(text):
-			cases++
-		case caseEnd.MatchString(text) && cases > 0:
-			cases--
-		case cases > 0:
-			text = casePattern.ReplaceAllString(text, "")
-		}
-		subshells = max(0, subshells+parenChange(text))
 	}
 	return out
-}
-
-var (
-	caseEnd = regexp.MustCompile(`^esac\b`)
-	// casePattern is the pattern that opens a case arm, a) or (a|b): its )
-	// closes no subshell.
-	casePattern = regexp.MustCompile(`^\(?[^()\s;][^();]*\)`)
-)
-
-// parenChange returns the unquoted ( of text less its unquoted ): how many
-// subshells or command substitutions the command leaves open.
-func parenChange(text string) int {
-	var q patternkit.QuoteScanner
-	change := 0
-	for i := 0; i < len(text); {
-		if n := q.Step(text, i); n > 0 {
-			i += n
-			continue
-		}
-		switch text[i] {
-		case '(':
-			change++
-		case ')':
-			change--
-		case '#':
-			if i == 0 || text[i-1] == ' ' || text[i-1] == '\t' {
-				return change
-			}
-		}
-		i++
-	}
-	return change
 }
 
 var (

@@ -16,6 +16,7 @@ require (
 	golang.org/x/tools v0.52.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (
@@ -33,5 +34,4 @@ require (
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
-	mvdan.cc/sh/v3 v3.14.1 // indirect
 )

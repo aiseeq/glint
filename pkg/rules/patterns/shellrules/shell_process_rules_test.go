@@ -202,6 +202,69 @@ trap 'rm -f "$tmp_file"' EXIT
 `)
 }
 
+// The subshell of a trap is told by the syntax tree: parentheses in a heredoc,
+// a string, a parameter expansion or a regular expression open nothing, and
+// $( … ) in double quotes is a subshell still.
+func TestShellTrapInLoopSyntax(t *testing.T) {
+	shellWanted(t, "shell-trap-in-loop", "forms.sh", `#!/usr/bin/env bash
+for host in alpha beta; do
+	cat >"$tmp" <<EOF
+note: generated (do not edit
+EOF
+	trap 'rm -f "$tmp"' EXIT # want
+done
+for t in a b; do
+	msg="first line
+(second line"
+	trap 'echo real' EXIT # want
+done
+(
+	for t in a b; do
+		case "$t" in a) echo a ;; esac
+		trap 'echo real' EXIT # want
+	done
+)
+for t in a b; do
+	out="$(
+		trap - EXIT
+		"$t"
+	)"
+	(
+		case "$t" in a) echo a ;; esac
+		trap - EXIT
+	)
+	(
+		case "$t" in # pick the mode
+		a) echo a ;;
+		esac
+		cat <<'EOF'
+closing paren in a heredoc )
+EOF
+		trap - EXIT
+	)
+done
+ls | while read -r l; do
+	LC_ALL=C trap 'echo real' EXIT # want
+done
+for t in a b; do (
+	trap - EXIT
+); done
+for t in a b; do
+	( for u in c; do
+		echo "$u"
+	done )
+	trap 'echo real' EXIT # want
+done
+`)
+	shellWanted(t, "shell-trap-in-loop", "odd.sh", `#!/usr/bin/env bash
+for t in a b; do
+	v=${t#(}
+	[[ $t =~ ^a[)]$ ]] && echo q
+	trap 'echo real' EXIT # want
+done
+`)
+}
+
 // Repro from a real project: every test ran in its own subshell inside the
 // loop and dropped the parent's trap there; a trap set in a subshell replaces
 // neither the parent's trap nor the one of the previous iteration.
