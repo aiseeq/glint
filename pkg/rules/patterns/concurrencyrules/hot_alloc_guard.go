@@ -17,11 +17,10 @@ func init() {
 }
 
 // HotFunctionWithoutAllocGuardRule detects a function marked //glint:hot
-// that no allocation measurement of the module's tests reaches: no closure
-// passed to testing.AllocsPerRun and no benchmark that calls b.ReportAllocs
-// calls it, directly or through the module's functions. Without a measured
-// ceiling the mark is a declaration only - the allocations of the hot path
-// grow unnoticed, one subsystem at a time:
+// that no checked testing.AllocsPerRun result reaches, directly or through
+// the module's functions. A benchmark or an unchecked allocation result
+// does not guard the hot path: allocations can grow unnoticed, one subsystem
+// at a time:
 //
 //	got := testing.AllocsPerRun(100, func() { e.Step(frames[k]); k++ })
 //	if got > stepAllocCeiling { t.Errorf("allocs per frame %.1f, ceiling %d", got, stepAllocCeiling) }
@@ -42,7 +41,7 @@ func NewHotFunctionWithoutAllocGuardRule() *HotFunctionWithoutAllocGuardRule {
 		BaseRule: rules.NewBaseRule(
 			"hot-function-without-alloc-guard",
 			"patterns",
-			"Detects a function marked //glint:hot that no testing.AllocsPerRun closure and no benchmark with b.ReportAllocs reaches — without a measured ceiling the mark is a declaration and the allocations grow unnoticed",
+			"Detects a function marked //glint:hot that no checked testing.AllocsPerRun result reaches — benchmarks and unchecked measurements let allocations grow unnoticed",
 			core.SeverityLow,
 		),
 	}
@@ -66,7 +65,9 @@ func (r *HotFunctionWithoutAllocGuardRule) AnalyzeGoProject(ctx *core.GoProjectC
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", r.Name(), err)
 	}
-	guarded := measuredFunctions(decls, measuredNames(ctx.Files))
+	checkedNames, uncheckedNames, benchmarkNames := measuredNames(ctx.Files)
+	guarded := measuredFunctions(decls, checkedNames)
+	unchecked := measuredFunctions(decls, unionNames(uncheckedNames, benchmarkNames))
 	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, _ *types.Info) []*core.Violation {
 		return patternkit.AnalyzeGoFunctions(file, func(fn *ast.FuncDecl) []*core.Violation {
 			if !patternkit.HasDirective(fn.Doc, patternkit.HotFunctionDirective) || guarded[fn] {
@@ -76,20 +77,23 @@ func (r *HotFunctionWithoutAllocGuardRule) AnalyzeGoProject(ctx *core.GoProjectC
 			if file.IsSuppressed(line, r.Name()) {
 				return nil
 			}
-			v := r.CreateViolation(file.RelPath, line, "Hot function "+patternkit.QualifiedFuncName(fn)+" is not reached by any testing.AllocsPerRun closure or benchmark with b.ReportAllocs — its allocations are not measured")
+			message := "Hot function " + patternkit.QualifiedFuncName(fn) + " is not reached by any allocation measurement"
+			if unchecked[fn] {
+				message = "Hot function " + patternkit.QualifiedFuncName(fn) + " is reached only by a benchmark or testing.AllocsPerRun whose result is not checked"
+			}
+			v := r.CreateViolation(file.RelPath, line, message+" — its allocations have no checked ceiling")
 			v.WithCode(strings.TrimSpace(file.GetLine(line)))
-			v.WithSuggestion("Add a test that runs it under testing.AllocsPerRun and fails above a ceiling that only goes down, or a benchmark with b.ReportAllocs in the gate")
+			v.WithSuggestion("Add a test that runs it under testing.AllocsPerRun and checks the result against an allocation ceiling")
 			return []*core.Violation{v}
 		})
 	})
 }
 
-// measuredNames returns the names the module's tests call inside an
-// allocation measurement: the closure or function passed to
-// testing.AllocsPerRun, and the body of a benchmark that calls ReportAllocs.
-func measuredNames(files []*core.FileContext) map[string]bool {
-	names := map[string]bool{}
-	collect := func(node ast.Node) {
+// measuredNames separates checked measurements from unchecked measurements
+// and benchmarks, returning the names each of them reaches.
+func measuredNames(files []*core.FileContext) (checked, unchecked, benchmarks map[string]bool) {
+	checked, unchecked, benchmarks = map[string]bool{}, map[string]bool{}, map[string]bool{}
+	collect := func(node ast.Node, names map[string]bool) {
 		ast.Inspect(node, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
 				if name := patternkit.CalledName(call); name != "" {
@@ -107,20 +111,134 @@ func measuredNames(files []*core.FileContext) map[string]bool {
 			switch node := n.(type) {
 			case *ast.CallExpr:
 				if patternkit.CalledName(node) == "AllocsPerRun" && len(node.Args) == 2 {
-					if name := patternkit.FuncExprName(node.Args[1]); name != "" {
-						names[name] = true
+					target := unchecked
+					if allocationResultChecked(node, enclosingFunc(file.GoAST, node)) {
+						target = checked
 					}
-					collect(node.Args[1])
+					if name := patternkit.FuncExprName(node.Args[1]); name != "" {
+						target[name] = true
+					}
+					collect(node.Args[1], target)
 				}
 			case *ast.FuncDecl:
 				if node.Body != nil && strings.HasPrefix(node.Name.Name, "Benchmark") && callsName(node.Body, "ReportAllocs") {
-					collect(node.Body)
+					collect(node.Body, benchmarks)
 				}
 			}
 			return true
 		})
 	}
-	return names
+	return checked, unchecked, benchmarks
+}
+
+func unionNames(groups ...map[string]bool) map[string]bool {
+	joined := map[string]bool{}
+	for _, group := range groups {
+		for name := range group {
+			joined[name] = true
+		}
+	}
+	return joined
+}
+
+func enclosingFunc(root ast.Node, target ast.Node) *ast.FuncDecl {
+	var result *ast.FuncDecl
+	ast.Inspect(root, func(node ast.Node) bool {
+		if fn, ok := node.(*ast.FuncDecl); ok && fn.Body != nil && target.Pos() >= fn.Body.Pos() && target.End() <= fn.Body.End() {
+			result = fn
+		}
+		return result == nil
+	})
+	return result
+}
+
+func allocationResultChecked(call *ast.CallExpr, fn *ast.FuncDecl) bool {
+	if fn == nil || fn.Body == nil {
+		return false
+	}
+	parents := map[ast.Node]ast.Node{}
+	var stack []ast.Node
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return false
+		}
+		if len(stack) > 0 {
+			parents[node] = stack[len(stack)-1]
+		}
+		stack = append(stack, node)
+		return true
+	})
+	for parent := parents[call]; parent != nil; parent = parents[parent] {
+		switch node := parent.(type) {
+		case *ast.FuncLit:
+			// Function literals belong to the enclosing function for checks.
+		case *ast.BinaryExpr:
+			if patternkit.IsComparisonOp(node.Op) {
+				return true
+			}
+		case *ast.ReturnStmt:
+			return true
+		case *ast.CallExpr:
+			if isIgnoredAllocationResultSink(patternkit.FuncExprName(node.Fun)) {
+				return false
+			}
+			return true
+		case *ast.AssignStmt:
+			return assignedAllocationCompared(node, fn, call)
+		case *ast.ValueSpec:
+			return valueAllocationCompared(node, fn, call)
+		case *ast.ExprStmt:
+			return false
+		}
+	}
+	return false
+}
+
+func assignedAllocationCompared(assign *ast.AssignStmt, fn *ast.FuncDecl, allocation *ast.CallExpr) bool {
+	for i, rhs := range assign.Rhs {
+		if !patternkit.ContainsNode(rhs, allocation) || i >= len(assign.Lhs) {
+			continue
+		}
+		if ident, ok := assign.Lhs[i].(*ast.Ident); ok && ident.Name != "_" && comparedName(fn.Body, ident.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+func valueAllocationCompared(spec *ast.ValueSpec, fn *ast.FuncDecl, allocation *ast.CallExpr) bool {
+	for i, value := range spec.Values {
+		if patternkit.ContainsNode(value, allocation) && i < len(spec.Names) && comparedName(fn.Body, spec.Names[i].Name) {
+			return true
+		}
+	}
+	return false
+}
+
+func comparedName(body ast.Node, name string) bool {
+	found := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		cmp, ok := node.(*ast.BinaryExpr)
+		if !ok || !patternkit.IsComparisonOp(cmp.Op) {
+			return true
+		}
+		for _, side := range []ast.Expr{cmp.X, cmp.Y} {
+			ast.Inspect(side, func(child ast.Node) bool {
+				if ident, ok := child.(*ast.Ident); ok && ident.Name == name {
+					found = true
+					return false
+				}
+				return !found
+			})
+		}
+		return !found
+	})
+	return found
+}
+
+func isIgnoredAllocationResultSink(name string) bool {
+	return name == "Log" || name == "Logf" || strings.HasPrefix(name, "Print") || strings.HasPrefix(name, "Sprint") || name == "println"
 }
 
 // callsName reports whether a body calls something of the name.
