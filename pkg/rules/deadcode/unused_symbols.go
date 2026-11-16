@@ -73,6 +73,7 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 
 	byFile := make(map[*core.FileContext][]declaredSymbol)
 	uses := make(map[types.Object]int)
+	linkedConstGroups := make(map[types.Object][]types.Object)
 	mentions, err := projectMentions(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("unused symbol: %w", err)
@@ -94,6 +95,23 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 				byFile[fileCtx] = append(byFile[fileCtx], sym)
 				found = true
 			}
+			for _, decl := range fileCtx.GoAST.Decls {
+				gen, ok := decl.(*ast.GenDecl)
+				if !ok || gen.Tok != token.CONST || !linkedConstGroup(gen) {
+					continue
+				}
+				var members []types.Object
+				for _, spec := range constSpecs(gen) {
+					for _, name := range spec.Names {
+						if obj := info.Defs[name]; obj != nil {
+							members = append(members, obj)
+						}
+					}
+				}
+				for _, member := range members {
+					linkedConstGroups[member] = members
+				}
+			}
 		}
 		if !found {
 			continue
@@ -108,7 +126,7 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		var violations []*core.Violation
 		for _, sym := range byFile[fileCtx] {
 			name := sym.obj.Name()
-			if uses[sym.obj] > 0 || linked[name] || mentions.mentioned(fileCtx, name) || ofUnusedType(sym.obj, uses) {
+			if uses[sym.obj] > 0 || linkedConstGroupUsed(sym.obj, linkedConstGroups, uses) || linked[name] || mentions.mentioned(fileCtx, name) || ofUnusedType(sym.obj, uses) {
 				continue
 			}
 			violations = append(violations, r.unusedViolation(fileCtx, sym.line, sym.kind, name))
@@ -130,6 +148,15 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 		}
 	}
 	return violations, nil
+}
+
+func linkedConstGroupUsed(obj types.Object, groups map[types.Object][]types.Object, uses map[types.Object]int) bool {
+	for _, member := range groups[obj] {
+		if uses[member] > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // testFileFunctions returns the unexported top-level functions of a test

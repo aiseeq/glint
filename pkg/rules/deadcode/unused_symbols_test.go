@@ -217,6 +217,66 @@ func analyzeUnusedSymbols(t *testing.T, files map[string]string) []*core.Violati
 	return violations
 }
 
+func TestUnusedSymbolPackageIotaGroupOneRead(t *testing.T) {
+	violations := analyzeUnusedSymbols(t, map[string]string{"constants.go": `package demo
+
+const (
+	pa = iota
+	pb
+	pc
+)
+
+func Use() { _ = pc }
+`})
+	assert.Empty(t, violations, "reading one constant keeps its linked package group alive")
+}
+
+func TestUnusedSymbolPackageRepeatedExprGroupOneRead(t *testing.T) {
+	violations := analyzeUnusedSymbols(t, map[string]string{"constants.go": `package demo
+
+const (
+	one = 1
+	alsoOne
+)
+
+func Use() { _ = alsoOne }
+`})
+	assert.Empty(t, violations, "reading one constant keeps its repeated-expression package group alive")
+}
+
+func TestUnusedSymbolPackageIotaGroupNoneRead(t *testing.T) {
+	violations := analyzeUnusedSymbols(t, map[string]string{"constants.go": `package demo
+
+const (
+	pa = iota
+	pb
+	pc
+)
+
+func Use() {}
+`})
+	require.Len(t, violations, 3)
+	var symbols []string
+	for _, violation := range violations {
+		symbols = append(symbols, violation.Context["symbol"].(string))
+	}
+	assert.ElementsMatch(t, []string{"pa", "pb", "pc"}, symbols)
+}
+
+func TestUnusedSymbolPackageIndependentConstExpressions(t *testing.T) {
+	violations := analyzeUnusedSymbols(t, map[string]string{"constants.go": `package demo
+
+const (
+	first = 1
+	second = 2
+)
+
+func Use() { _ = second }
+`})
+	require.Len(t, violations, 1)
+	assert.Equal(t, "first", violations[0].Context["symbol"])
+}
+
 func TestUnusedSymbolsCountsSiblingUsage(t *testing.T) {
 	violations := analyzeUnusedSymbols(t, map[string]string{
 		"main.go":  "package demo\n\nfunc helper() {}\n",
