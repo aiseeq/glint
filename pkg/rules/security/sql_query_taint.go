@@ -617,7 +617,20 @@ func (c *sqlTaintCheck) recordPositiveWhitelist(expr ast.Expr, at token.Pos) {
 }
 
 func (c *sqlTaintCheck) boolWhitelistFunction(call *ast.CallExpr) bool {
-	ident := helpers.IdentOf(call.Fun)
+	callee := ast.Unparen(call.Fun)
+	if indexed, ok := callee.(*ast.IndexExpr); ok {
+		callee = ast.Unparen(indexed.X)
+	}
+	var ident *ast.Ident
+	switch node := callee.(type) {
+	case *ast.Ident:
+		ident = node
+	case *ast.SelectorExpr:
+		ident = node.Sel
+	}
+	if ident == nil {
+		return false
+	}
 	fn, ok := c.info.Uses[ident].(*types.Func)
 	if !ok || fn.Pkg() == nil {
 		return false
@@ -630,15 +643,87 @@ func (c *sqlTaintCheck) boolWhitelistFunction(call *ast.CallExpr) bool {
 	if decl == nil {
 		decl = c.projectDecls[fn]
 	}
-	if decl == nil || decl.Body == nil || len(decl.Body.List) != 1 || len(decl.Type.Params.List) != 1 {
+	if decl == nil || decl.Body == nil || len(decl.Body.List) == 0 || len(decl.Body.List) > 2 || len(decl.Type.Params.List) != 1 {
 		return false
 	}
 	param := decl.Type.Params.List[0].Names
 	if len(param) != 1 {
 		return false
 	}
-	ret, ok := decl.Body.List[0].(*ast.ReturnStmt)
-	return ok && len(ret.Results) == 1 && finiteEqualitySet(ret.Results[0], param[0].Name)
+	if ret, ok := decl.Body.List[0].(*ast.ReturnStmt); ok {
+		return len(decl.Body.List) == 1 && len(ret.Results) == 1 && finiteEqualitySet(ret.Results[0], param[0].Name)
+	}
+	switchNode, ok := decl.Body.List[0].(*ast.SwitchStmt)
+	if !ok || !finiteSwitchEqualitySet(switchNode, param[0].Name) {
+		return false
+	}
+	if len(decl.Body.List) == 1 {
+		return hasRejectingSwitchDefault(switchNode)
+	}
+	ret, ok := decl.Body.List[1].(*ast.ReturnStmt)
+	return ok && len(ret.Results) == 1 && isBoolLiteral(ret.Results[0], false) && !hasRejectingSwitchDefault(switchNode)
+}
+
+// finiteSwitchEqualitySet accepts a switch predicate only when every listed
+// string literal returns true and any default clause returns false.
+func finiteSwitchEqualitySet(node *ast.SwitchStmt, name string) bool {
+	if node.Init != nil {
+		return false
+	}
+	tag, ok := ast.Unparen(node.Tag).(*ast.Ident)
+	if !ok || tag.Name != name {
+		return false
+	}
+	hasCase, hasDefault := false, false
+	for _, stmt := range node.Body.List {
+		clause, ok := stmt.(*ast.CaseClause)
+		if !ok || len(clause.Body) != 1 {
+			return false
+		}
+		ret, ok := clause.Body[0].(*ast.ReturnStmt)
+		if !ok || len(ret.Results) != 1 {
+			return false
+		}
+		if clause.List == nil {
+			if hasDefault || !isBoolLiteral(ret.Results[0], false) {
+				return false
+			}
+			hasDefault = true
+			continue
+		}
+		for _, value := range clause.List {
+			if !isSQLStringLiteral(value) {
+				return false
+			}
+		}
+		if !isBoolLiteral(ret.Results[0], true) {
+			return false
+		}
+		hasCase = true
+	}
+	return hasCase
+}
+
+func hasRejectingSwitchDefault(node *ast.SwitchStmt) bool {
+	for _, stmt := range node.Body.List {
+		clause, ok := stmt.(*ast.CaseClause)
+		if ok && clause.List == nil && len(clause.Body) == 1 {
+			ret, ok := clause.Body[0].(*ast.ReturnStmt)
+			return ok && len(ret.Results) == 1 && isBoolLiteral(ret.Results[0], false)
+		}
+	}
+	return false
+}
+
+func isBoolLiteral(expr ast.Expr, want bool) bool {
+	id, ok := ast.Unparen(expr).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	if want {
+		return id.Name == "true"
+	}
+	return id.Name == "false"
 }
 
 func finiteEqualitySet(expr ast.Expr, name string) bool {

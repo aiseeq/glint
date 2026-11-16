@@ -305,7 +305,7 @@ func accept(v string) bool { return v != "" }
 			want: 1,
 		},
 		{
-			name: "whitelist called through a package selector is not recognized",
+			name: "package selector calls finite whitelist",
 			files: map[string]string{
 				"db/db.go": `package db
 import (
@@ -318,17 +318,17 @@ func query(db *sql.DB, value string) { if !filter.Accept(value) { return }; db.Q
 func Accept(v string) bool { return v == "name" || v == "email" }
 `,
 			},
-			want: 1,
+			want: 0,
 		},
 		{
-			name: "method predicate is not a free function whitelist",
+			name: "concrete method calls finite whitelist",
 			files: map[string]string{"db/db.go": `package db
 import "database/sql"
 type checker struct{}
 func (checker) known(v string) bool { return v == "name" || v == "email" }
 func query(db *sql.DB, c checker, value string) { if !c.known(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value) }
 `},
-			want: 1,
+			want: 0,
 		},
 	}
 	for _, tt := range tests {
@@ -341,6 +341,102 @@ func query(db *sql.DB, c checker, value string) { if !c.known(value) { return };
 			assert.Len(t, violations, tt.want)
 		})
 	}
+}
+
+func TestSQLInjectionWhitelistPackageSelector(t *testing.T) {
+	assertSQLInjectionWhitelistFindingCount(t, map[string]string{
+		"db/db.go": `package db
+import (
+ "database/sql"
+ "example.com/rulestest/filter"
+)
+func query(db *sql.DB, value string) { if !filter.Accept(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value) }
+`,
+		"filter/filter.go": `package filter
+func Accept(v string) bool { return v == "name" || v == "email" }
+`,
+	}, 0)
+}
+
+func TestSQLInjectionWhitelistMethod(t *testing.T) {
+	assertSQLInjectionWhitelistFindingCount(t, map[string]string{"db/db.go": `package db
+import "database/sql"
+type checker struct{}
+func (checker) known(v string) bool { return v == "name" || v == "email" }
+func query(db *sql.DB, c checker, value string) { if !c.known(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value) }
+`}, 0)
+}
+
+func TestSQLInjectionWhitelistExplicitInstantiation(t *testing.T) {
+	assertSQLInjectionWhitelistFindingCount(t, map[string]string{"db/db.go": `package db
+import "database/sql"
+func known[T ~string](v T) bool { return v == "name" || v == "email" }
+func query(db *sql.DB, value string) { if !known[string](value) { return }; db.Query("SELECT * FROM items ORDER BY " + value) }
+`}, 0)
+}
+
+func TestSQLInjectionWhitelistSwitchForm(t *testing.T) {
+	assertSQLInjectionWhitelistFindingCount(t, map[string]string{"db/db.go": `package db
+import "database/sql"
+func known(v string) bool {
+ switch v {
+ case "name", "email": return true
+ }
+ return false
+}
+func query(db *sql.DB, value string) { if !known(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value) }
+`}, 0)
+}
+
+func TestSQLInjectionWhitelistFormsOpenSetKeepsFinding(t *testing.T) {
+	files := map[string]string{
+		"db/db.go": `package db
+import (
+ "database/sql"
+ "example.com/rulestest/filter"
+)
+type checker struct{}
+func (checker) known(v string) bool { return v != "" }
+func generic[T ~string](v T) bool { return v != "" }
+func switched(v string) bool {
+ switch v { case "name", "email": return true; default: return true }
+}
+func query(db *sql.DB, c checker, value string) {
+ if !filter.Accept(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value)
+}
+func queryMethod(db *sql.DB, c checker, value string) {
+ if !c.known(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value)
+}
+func queryGeneric(db *sql.DB, value string) {
+ if !generic[string](value) { return }; db.Query("SELECT * FROM items ORDER BY " + value)
+}
+func querySwitch(db *sql.DB, value string) {
+ if !switched(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value)
+}
+`,
+		"filter/filter.go": `package filter
+import "strings"
+func Accept(v string) bool { return strings.HasPrefix(v, "name") }
+`,
+	}
+	assertSQLInjectionWhitelistFindingCount(t, files, 4)
+}
+
+func TestSQLInjectionWhitelistInterfaceMethodKeepsFinding(t *testing.T) {
+	assertSQLInjectionWhitelistFindingCount(t, map[string]string{"db/db.go": `package db
+import "database/sql"
+type checker interface { known(string) bool }
+func query(db *sql.DB, c checker, value string) { if !c.known(value) { return }; db.Query("SELECT * FROM items ORDER BY " + value) }
+`}, 1)
+}
+
+func assertSQLInjectionWhitelistFindingCount(t *testing.T, files map[string]string, want int) {
+	t.Helper()
+	maps.Copy(files, fakeSQLXModule)
+	project := rulestest.Project(t, files)
+	violations, err := NewSQLInjectionRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Len(t, violations, want)
 }
 
 func TestSQLInjectionQueryArgumentBySignature(t *testing.T) {
