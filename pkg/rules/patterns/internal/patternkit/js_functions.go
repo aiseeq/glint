@@ -19,15 +19,17 @@ type JsFunctions struct {
 	braces []jsBraceHeader
 	// parens are the '(' and ')' offsets in order, each with the offset of the
 	// last byte before it that \s does not match (-1 at the start).
-	parens []jsParen
-	equals []int
-	colons []int
+	parens     []jsParen
+	parenOpens []int
+	equals     []int
+	colons     []int
 	// closeColons are the ')' that \s* and a ':' follow: "): T".
-	closeColons []jsCloseColon
-	words       []jsFunctionWord
-	wordsDone   bool
-	routes      *jsColonRoutes
-	names       map[int]string
+	closeColons    []jsCloseColon
+	words          []jsFunctionWord
+	wordsDone      bool
+	routes         *jsColonRoutes
+	names          map[int]string
+	modifierStarts map[string]map[int][]int
 }
 
 type jsBraceHeader struct {
@@ -75,6 +77,7 @@ func (f JsFlat) Functions() *JsFunctions {
 		case '(', '[':
 			if c == '(' {
 				x.parens = append(x.parens, jsParen{i, lastNonSpace})
+				x.parenOpens = append(x.parenOpens, i)
 			}
 			openers = append(openers, stop)
 			stop = i
@@ -234,26 +237,43 @@ var (
 // modifiers returns the offsets where the header's identifier may start after
 // zero, one, ... of the leading `(?:modifier\s+)` repeats, most repeats last.
 func (x *JsFunctions) modifiers(from, to int, words []string) []int {
-	starts := []int{from}
-	for pos := from; ; {
-		next := -1
-		for _, word := range words {
-			end := pos + len(word)
-			if strings.HasPrefix(x.code[pos:to], word) && end < to && IsRegexpSpace(x.code[end]) {
-				next = x.skipSpace(end, to)
+	key := words[1]
+	if x.modifierStarts == nil {
+		x.modifierStarts = make(map[string]map[int][]int)
+	}
+	if x.modifierStarts[key] == nil {
+		x.modifierStarts[key] = make(map[int][]int)
+	}
+	starts, ok := x.modifierStarts[key][from]
+	if !ok {
+		starts = []int{from}
+		for pos := from; ; {
+			next := -1
+			for _, word := range words {
+				end := pos + len(word)
+				if end < len(x.code) && strings.HasPrefix(x.code[pos:], word) && IsRegexpSpace(x.code[end]) {
+					next = x.skipSpace(end, len(x.code))
+					break
+				}
+			}
+			if next < 0 {
 				break
 			}
+			starts = append(starts, next)
+			pos = next
 		}
-		if next < 0 {
-			return starts
-		}
-		starts = append(starts, next)
-		pos = next
+		x.modifierStarts[key][from] = starts
 	}
+	end := sort.Search(len(starts), func(i int) bool { return starts[i] >= to })
+	return starts[:end]
 }
 
 // methodName is jsMethodHeader: name \s* <generic>? \s* ( at the start.
 func (x *JsFunctions) methodName(from, to int) (string, bool) {
+	paren := sort.SearchInts(x.parenOpens, from+1)
+	if paren == len(x.parenOpens) || x.parenOpens[paren] >= to {
+		return "", false
+	}
 	starts := x.modifiers(from, to, jsMethodModifiers)
 	for k := len(starts) - 1; k >= 0; k-- {
 		start := starts[k]

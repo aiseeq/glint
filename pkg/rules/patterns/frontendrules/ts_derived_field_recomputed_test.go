@@ -27,9 +27,22 @@ func TestTSDerivedFieldRecomputedLargeFunctionCompletes(t *testing.T) {
 			"src/view.ts":    source(n),
 		}))
 	}
-	const scale, limit = 40, 220
-	// At n=8, current growth measured 47–56; cache removal 452–479 and reverted walk 423–471. Limit 220.
-	checkGrowth(t, operationGrowthAtScale(t, project, 8, scale), scale, limit)
+	const scale, limit = 8, 20
+	// n=512 with scale 8 makes the large function comparison count expose repeated whole-function scans; the limit separates 64x from linear growth.
+	checkGrowth(t, operationGrowthAtScale(t, project, 512, scale), scale, limit)
+}
+
+func TestTSDerivedFieldRecomputedComparisonsGrowLinearly(t *testing.T) {
+	project := func(n int) {
+		source := "function inspect(item: Record) {" + strings.Repeat("if (item.status === 'pending' || item.status === 'approved') consume(item.statusGroup);", n) + "}"
+		assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewTSDerivedFieldRecomputedRule(), map[string]string{
+			"types/model.ts": "interface Record { status: string; statusGroup: string }",
+			"src/view.ts":    source,
+		}))
+	}
+	const scale, limit = 8, 20
+	// n=256 and scale 8 put thousands of comparisons in one function; the limit separates 64x from linear growth.
+	checkGrowth(t, operationGrowthAtScale(t, project, 256, scale), scale, limit)
 }
 
 func TestTSDerivedFieldRecomputed(t *testing.T) {

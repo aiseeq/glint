@@ -1,6 +1,7 @@
 package frontendrules
 
 import (
+	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
@@ -16,6 +17,123 @@ func TestFrontendMoneyArithmeticLargeFileCompletes(t *testing.T) {
 	const scale, limit = 120, 600
 	// At scale 120, current growth measured 150–235; last-index mutant at least 1463. Limit 600.
 	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 256, scale), scale, limit)
+}
+
+func TestFrontendMoneyArithmeticUnmatchedModifiersGrowLinearly(t *testing.T) {
+	source := func(n int) string {
+		return strings.Repeat("static ", n) + "a" + strings.Repeat(") {}", n)
+	}
+	const scale, limit = 8, 24
+	// n=256 and scale 8 make the modifier prefix and unmatched closer run grow together; the limit separates quadratic 64x from linear 8x.
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 256, scale), scale, limit)
+}
+
+func TestFrontendMoneyArithmeticRoundingGrowsLinearly(t *testing.T) {
+	source := func(n int) string {
+		return "function calc(){" + strings.Repeat("Math.round(amount);", n) + "}"
+	}
+	rule := NewFrontendMoneyArithmeticRule()
+	assert.Equal(t, 8, len(moneyMathCall.FindAllStringIndex(source(8), -1)))
+	assert.True(t, rule.moneyNameExpression("amount"))
+	type input struct {
+		ctx        *core.FileContext
+		flat       patternkit.JsFlat
+		duplicate  financialFPRoundingDuplicateIndex
+		formatting formattingIndex
+	}
+	inputs := make(map[int]input)
+	for _, n := range []int{100, 10000} {
+		ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(n))
+		flat := patternkit.NewJSFlat(ctx)
+		functions := flat.Functions()
+		inputs[n] = input{ctx: ctx, flat: flat, duplicate: newFinancialFPRoundingDuplicateIndex(flat), formatting: newFormattingIndex(flat, functions)}
+	}
+	const scale, limit = 100, 500
+	// n=100 and scale 100 isolate the rounding scan over ten thousand money calls; the limit sits between linear 100x and quadratic 10000x growth.
+	checkGrowth(t, operationGrowthAtScale(t, func(n int) {
+		in := inputs[n]
+		roundingFindings(rule, in.ctx, in.flat, nil, nil, make(map[int]bool), in.duplicate, in.formatting)
+	}, 100, scale), scale, limit)
+}
+
+func TestFrontendMoneyArithmeticDeclarationsGrowLinearly(t *testing.T) {
+	source := func(n int) string {
+		var b strings.Builder
+		b.WriteString("function calc(){")
+		for i := range n {
+			fmt.Fprintf(&b, "const amount%d = Number(item.amount);", i)
+		}
+		b.WriteString("}")
+		return b.String()
+	}
+	rule := NewFrontendMoneyArithmeticRule()
+	ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(8))
+	f := patternkit.NewJSFlat(ctx)
+	parsed := rule.moneyParseSpans(f)
+	vars := rule.moneyVariables(f, parsed)
+	decls := 0
+	for _, scopes := range vars {
+		decls += len(scopes)
+	}
+	assert.Equal(t, 8, len(parsed))
+	assert.Equal(t, 8, decls)
+	type input struct {
+		flat   patternkit.JsFlat
+		parsed []moneySpan
+	}
+	inputs := make(map[int]input)
+	for _, n := range []int{100, 20000} {
+		ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(n))
+		flat := patternkit.NewJSFlat(ctx)
+		inputs[n] = input{flat: flat, parsed: rule.moneyParseSpans(flat)}
+	}
+	const scale, limit = 200, 2000
+	// n=100 and scale 200 isolate moneyVariables across twenty thousand parsed declarations; the limit sits between linear 200x and quadratic 40000x growth.
+	checkGrowth(t, operationGrowthAtScale(t, func(n int) {
+		in := inputs[n]
+		rule.moneyVariables(in.flat, in.parsed)
+	}, 100, scale), scale, limit)
+}
+
+func TestFrontendMoneyArithmeticNestedOperandsGrowLinearly(t *testing.T) {
+	source := func(n int) string {
+		header := "function calc(counter=" + strings.Repeat("(", n) + "1" + strings.Repeat(")", n) + ")"
+		body := " { counter + item.amount; }"
+		return header + body + strings.Repeat(")"+body, n)
+	}
+	assert.NotEmpty(t, rulestest.TextFileRuleLines(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source(8)))
+	type input struct {
+		flat      patternkit.JsFlat
+		functions []patternkit.JsFunc
+	}
+	inputs := make(map[int]input)
+	for _, n := range []int{64, 1024} {
+		ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(n))
+		flat := patternkit.NewJSFlat(ctx)
+		index := flat.Functions()
+		var functions []patternkit.JsFunc
+		for pos := 0; pos < len(flat.Code); pos++ {
+			if flat.Code[pos] == '{' {
+				if fn, ok := index.AtBrace(pos); ok {
+					functions = append(functions, fn)
+				}
+			}
+		}
+		assert.Equal(t, n+1, len(functions))
+		for _, fn := range functions {
+			assert.Equal(t, 0, fn.Start)
+		}
+		inputs[n] = input{flat: flat, functions: functions}
+	}
+	const scale, limit = 16, 18
+	// n=64 and scale 16 reuse one nested parameter group in 65 then 1025 function scopes; the limit separates 256x repeated CallArgs from linear 16x growth.
+	checkGrowth(t, operationGrowthAtScale(t, func(n int) {
+		in := inputs[n]
+		cache := make(map[int]map[string]bool)
+		for _, fn := range in.functions {
+			counterParameterCached(in.flat, "counter", fn, true, cache)
+		}
+	}, 64, scale), scale, limit)
 }
 
 func TestFormattingIndexFindsContainingRangeBehindNestedRange(t *testing.T) {

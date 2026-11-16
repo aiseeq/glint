@@ -227,19 +227,24 @@ func (r *FrontendMoneyArithmeticRule) moneyParseSpans(f patternkit.JsFlat) []mon
 
 func (r *FrontendMoneyArithmeticRule) moneyVariables(f patternkit.JsFlat, parsed []moneySpan) map[string][]int {
 	vars := make(map[string][]int)
-	for _, m := range moneyVariableDecl.FindAllStringSubmatchIndex(f.Code, -1) {
+	matches := moneyVariableDecl.FindAllStringSubmatchIndex(f.Code, -1)
+	eligible := make([][]int, 0, len(matches))
+	positions := make([]int, 0, len(matches))
+	parsedIndex := 0
+	for _, m := range matches {
 		start, end := m[1], moneyExpressionEnd(f.Code, m[1])
-		hasMoneyParse := false
-		for _, p := range parsed {
-			if p.start >= start && p.end <= end {
-				hasMoneyParse = true
-				break
-			}
+		for parsedIndex < len(parsed) && parsed[parsedIndex].end <= start {
+			parsedIndex++
 		}
-		if !hasMoneyParse {
+		if parsedIndex == len(parsed) || parsed[parsedIndex].start < start || parsed[parsedIndex].end > end {
 			continue
 		}
-		fn, ok := f.EnclosingFunction(m[0])
+		eligible = append(eligible, m)
+		positions = append(positions, m[0])
+	}
+	functions := enclosingFunctionsAt(f, f.Functions(), positions)
+	for _, m := range eligible {
+		fn, ok := functions[m[0]]
 		scope := -1
 		if ok {
 			scope = fn.Brace
@@ -515,15 +520,17 @@ type arrowBodyRange struct{ start, end int }
 
 func functionParameterNames(code string, functions *patternkit.JsFunctions, brackets *patternkit.JsBrackets) map[string]bool {
 	names := make(map[string]bool)
+	processed := make(map[int]bool)
 	for _, brace := range brackets.Braces() {
 		fn, ok := functions.AtBrace(brace.Open)
 		if !ok {
 			continue
 		}
 		open, ok := brackets.OpeningBefore(fn.Brace)
-		if !ok || open < fn.Start {
+		if !ok || open < fn.Start || processed[open] {
 			continue
 		}
+		processed[open] = true
 		close, ok := brackets.Closing(open)
 		if ok && close < fn.Brace {
 			addParameterIdentifiers(code, open+1, close, names)
@@ -606,7 +613,16 @@ func (t textAccumulators) appendsText(code string, op arithmeticOperator) bool {
 }
 
 func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f patternkit.JsFlat, parsed []moneySpan, vars map[string][]int, found map[int]bool, duplicateRounding financialFPRoundingDuplicateIndex, formatting formattingIndex) {
-	for _, m := range moneyMathCall.FindAllStringIndex(f.Code, -1) {
+	matches := moneyMathCall.FindAllStringIndex(f.Code, -1)
+	positions := make([]int, 0, len(matches))
+	for _, m := range matches {
+		if !formatting.inFunction(m[0]) && !duplicateRounding.contains(m[0]) {
+			positions = append(positions, m[0])
+		}
+	}
+	functions := enclosingFunctionsAt(f, f.Functions(), positions)
+	parameters := make(map[int]map[string]bool)
+	for _, m := range matches {
 		if formatting.inFunction(m[0]) || duplicateRounding.contains(m[0]) {
 			continue
 		}
@@ -620,7 +636,8 @@ func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f p
 		}
 		arg := strings.TrimSpace(f.Code[args[0].Start:args[0].End])
 		id := strings.Trim(arg, "() \t\n")
-		moneyName := r.moneyNameExpression(id) && !counterParameterAt(f, id, m[0])
+		fn, inFunction := functions[m[0]]
+		moneyName := r.moneyNameExpression(id) && !counterParameterCached(f, id, fn, inFunction, parameters)
 		if formatting.inCall(m[0]) && !moneyName {
 			continue
 		}
@@ -633,7 +650,7 @@ func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f p
 				break
 			}
 		}
-		if patternkit.JsIdentifier.MatchString(id) && moneyVariableAt(f, vars, id, m[0]) {
+		if patternkit.JsIdentifier.MatchString(id) && moneyVariableInScope(vars, id, fn, inFunction) {
 			addMoneyFinding(nil, ctx, f, found, m[0])
 		}
 	}
@@ -907,47 +924,42 @@ func addMoneyFinding(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f pa
 	found[line] = true
 }
 
-func counterParameterAt(f patternkit.JsFlat, name string, pos int) bool {
-	fn, ok := f.EnclosingFunction(pos)
-	if !ok {
-		return false
-	}
-	return counterParameterInFunction(f, name, fn)
-}
-
 func counterParameterCached(f patternkit.JsFlat, name string, fn patternkit.JsFunc, inFunction bool, cache map[int]map[string]bool) bool {
 	if !inFunction {
 		return false
 	}
-	parameters, ok := cache[fn.Brace]
+	header := f.Code[fn.Start:fn.Brace]
+	openOffset := strings.Index(header, "(")
+	if openOffset < 0 {
+		return false
+	}
+	open := fn.Start + openOffset
+	parameters, ok := cache[open]
 	if !ok {
 		parameters = make(map[string]bool)
-		header := f.Code[fn.Start:fn.Brace]
-		if openOffset := strings.Index(header, "("); openOffset >= 0 {
-			for _, arg := range f.CallArgs(fn.Start + openOffset) {
-				text := strings.TrimSpace(f.Code[arg.Start:arg.End])
-				before, after, ok := strings.Cut(text, "=")
-				if !ok || strings.TrimSpace(after) == "" {
-					continue
-				}
-				parameter := parameterName.FindStringSubmatch(before)
-				if len(parameter) != 2 {
-					continue
-				}
-				allDigits := true
-				for _, char := range strings.TrimSpace(after) {
-					if char < '0' || char > '9' {
-						allDigits = false
-						break
-					}
-				}
-				defaultValue := strings.TrimSpace(after)
-				if allDigits && strings.TrimLeft(defaultValue, "0") != "" {
-					parameters[parameter[1]] = true
+		for _, arg := range f.CallArgs(open) {
+			text := strings.TrimSpace(f.Code[arg.Start:arg.End])
+			before, after, ok := strings.Cut(text, "=")
+			if !ok || strings.TrimSpace(after) == "" {
+				continue
+			}
+			parameter := parameterName.FindStringSubmatch(before)
+			if len(parameter) != 2 {
+				continue
+			}
+			allDigits := true
+			for _, char := range strings.TrimSpace(after) {
+				if char < '0' || char > '9' {
+					allDigits = false
+					break
 				}
 			}
+			defaultValue := strings.TrimSpace(after)
+			if allDigits && strings.TrimLeft(defaultValue, "0") != "" {
+				parameters[parameter[1]] = true
+			}
 		}
-		cache[fn.Brace] = parameters
+		cache[open] = parameters
 	}
 	return parameters[name]
 }
@@ -961,41 +973,6 @@ func moneyVariableInScope(vars map[string][]int, name string, fn patternkit.JsFu
 		scope = fn.Brace
 	}
 	return slices.Contains(vars[name], scope)
-}
-
-func counterParameterInFunction(f patternkit.JsFlat, name string, fn patternkit.JsFunc) bool {
-	header := f.Code[fn.Start:fn.Brace]
-	openOffset := strings.Index(header, "(")
-	if openOffset < 0 {
-		return false
-	}
-	args := f.CallArgs(fn.Start + openOffset)
-	for _, arg := range args {
-		text := strings.TrimSpace(f.Code[arg.Start:arg.End])
-		before, after, ok := strings.Cut(text, "=")
-		if !ok {
-			continue
-		}
-		parameter := parameterName.FindStringSubmatch(before)
-		if len(parameter) != 2 || parameter[1] != name {
-			continue
-		}
-		defaultValue := strings.TrimSpace(after)
-		if defaultValue == "" {
-			continue
-		}
-		allDigits := true
-		for _, char := range defaultValue {
-			if char < '0' || char > '9' {
-				allDigits = false
-				break
-			}
-		}
-		if allDigits && strings.TrimLeft(defaultValue, "0") != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // enclosingFunctionsAt resolves function scopes for sorted source positions in
@@ -1032,15 +1009,6 @@ func enclosingFunctionsAt(f patternkit.JsFlat, index *patternkit.JsFunctions, po
 		}
 	}
 	return functions
-}
-
-func moneyVariableAt(f patternkit.JsFlat, vars map[string][]int, name string, pos int) bool {
-	fn, ok := f.EnclosingFunction(pos)
-	scope := -1
-	if ok {
-		scope = fn.Brace
-	}
-	return slices.Contains(vars[name], scope)
 }
 
 func (r *FrontendMoneyArithmeticRule) moneyArgument(arg string) bool {

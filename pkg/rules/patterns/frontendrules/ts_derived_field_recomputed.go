@@ -120,25 +120,39 @@ func (r *TSDerivedFieldRecomputedRule) AnalyzeFile(c *core.FileContext) []*core.
 	f := patternkit.NewJSFlat(c)
 	seen := map[int]bool{}
 	summaries := map[int]*dFunctionSummary{}
+	ends := map[int]int{}
 	comparisons := dComparisonMatches{
 		derived: dCmp.FindAllStringSubmatchIndex(f.Code, -1),
 		bare:    dBareCmp.FindAllStringSubmatchIndex(f.Code, -1),
 	}
+	candidates := dCandidates(f.Code)
+	positions := make([]int, 0, len(comparisons.derived)+len(comparisons.bare)+len(candidates))
+	for _, m := range comparisons.derived {
+		positions = append(positions, m[0])
+	}
+	for _, m := range comparisons.bare {
+		positions = append(positions, m[0])
+	}
+	for _, candidate := range candidates {
+		positions = append(positions, candidate.pos)
+	}
+	sort.Ints(positions)
+	functions := enclosingFunctionsAt(f, f.Functions(), positions)
 	var out []*core.Violation
-	out = r.analyzeDerivedComparisons(c, f, comparisons.derived, seen, summaries, comparisons, out)
-	out = r.analyzeBareComparisons(c, f, comparisons.bare, seen, summaries, comparisons, out)
-	out = r.analyzeDerivedCandidates(c, f, seen, summaries, comparisons, out)
+	out = r.analyzeDerivedComparisons(c, f, comparisons.derived, seen, summaries, ends, functions, comparisons, out)
+	out = r.analyzeBareComparisons(c, f, comparisons.bare, seen, summaries, ends, functions, comparisons, out)
+	out = r.analyzeDerivedCandidates(c, f, candidates, seen, summaries, ends, functions, comparisons, out)
 	return out
 }
 
-func (r *TSDerivedFieldRecomputedRule) analyzeDerivedComparisons(c *core.FileContext, f patternkit.JsFlat, matches [][]int, seen map[int]bool, summaries map[int]*dFunctionSummary, comparisons dComparisonMatches, out []*core.Violation) []*core.Violation {
+func (r *TSDerivedFieldRecomputedRule) analyzeDerivedComparisons(c *core.FileContext, f patternkit.JsFlat, matches [][]int, seen map[int]bool, summaries map[int]*dFunctionSummary, ends map[int]int, functions map[int]patternkit.JsFunc, comparisons dComparisonMatches, out []*core.Violation) []*core.Violation {
 	for _, m := range matches {
 		name, field, lit := dCmpParts(f.Code, m)
-		fn, ok := f.EnclosingFunction(m[0])
+		fn, ok := functions[m[0]]
 		if !ok || seen[fn.Start] {
 			continue
 		}
-		end, ok := f.Closing(fn.Brace)
+		end, ok := functionEnd(f, fn, ends)
 		if !ok {
 			continue
 		}
@@ -156,17 +170,17 @@ func (r *TSDerivedFieldRecomputedRule) analyzeDerivedComparisons(c *core.FileCon
 	return out
 }
 
-func (r *TSDerivedFieldRecomputedRule) analyzeBareComparisons(c *core.FileContext, f patternkit.JsFlat, matches [][]int, seen map[int]bool, summaries map[int]*dFunctionSummary, comparisons dComparisonMatches, out []*core.Violation) []*core.Violation {
+func (r *TSDerivedFieldRecomputedRule) analyzeBareComparisons(c *core.FileContext, f patternkit.JsFlat, matches [][]int, seen map[int]bool, summaries map[int]*dFunctionSummary, ends map[int]int, functions map[int]patternkit.JsFunc, comparisons dComparisonMatches, out []*core.Violation) []*core.Violation {
 	for _, m := range matches {
 		name, value := dBareParts(f.Code, m)
 		if strings.HasSuffix(f.Code[:m[0]], ".") {
 			continue
 		}
-		fn, ok := f.EnclosingFunction(m[0])
+		fn, ok := functions[m[0]]
 		if !ok || seen[fn.Start] {
 			continue
 		}
-		end, ok := f.Closing(fn.Brace)
+		end, ok := functionEnd(f, fn, ends)
 		if !ok {
 			continue
 		}
@@ -181,13 +195,13 @@ func (r *TSDerivedFieldRecomputedRule) analyzeBareComparisons(c *core.FileContex
 	return out
 }
 
-func (r *TSDerivedFieldRecomputedRule) analyzeDerivedCandidates(c *core.FileContext, f patternkit.JsFlat, seen map[int]bool, summaries map[int]*dFunctionSummary, comparisons dComparisonMatches, out []*core.Violation) []*core.Violation {
-	for _, candidate := range dCandidates(f.Code) {
-		fn, ok := f.EnclosingFunction(candidate.pos)
+func (r *TSDerivedFieldRecomputedRule) analyzeDerivedCandidates(c *core.FileContext, f patternkit.JsFlat, candidates []dCandidate, seen map[int]bool, summaries map[int]*dFunctionSummary, ends map[int]int, functions map[int]patternkit.JsFunc, comparisons dComparisonMatches, out []*core.Violation) []*core.Violation {
+	for _, candidate := range candidates {
+		fn, ok := functions[candidate.pos]
 		if !ok || seen[fn.Start] {
 			continue
 		}
-		end, ok := f.Closing(fn.Brace)
+		end, ok := functionEnd(f, fn, ends)
 		if !ok {
 			continue
 		}
@@ -203,6 +217,17 @@ func (r *TSDerivedFieldRecomputedRule) analyzeDerivedCandidates(c *core.FileCont
 		out = patternkit.JsReport(out, r.BaseRule, c, f.Line(candidate.pos), "Function recomputes "+derived+" from raw "+candidate.field+" values", "Read "+candidate.name+"."+derived+" supplied by the API")
 	}
 	return out
+}
+
+func functionEnd(f patternkit.JsFlat, fn patternkit.JsFunc, ends map[int]int) (int, bool) {
+	if end, ok := ends[fn.Brace]; ok {
+		return end, true
+	}
+	end, ok := f.Closing(fn.Brace)
+	if ok {
+		ends[fn.Brace] = end
+	}
+	return end, ok
 }
 
 type dFieldKey struct {
