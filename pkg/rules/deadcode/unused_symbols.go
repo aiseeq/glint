@@ -95,23 +95,7 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 				byFile[fileCtx] = append(byFile[fileCtx], sym)
 				found = true
 			}
-			for _, decl := range fileCtx.GoAST.Decls {
-				gen, ok := decl.(*ast.GenDecl)
-				if !ok || gen.Tok != token.CONST || !linkedConstGroup(gen) {
-					continue
-				}
-				var members []types.Object
-				for _, spec := range constSpecs(gen) {
-					for _, name := range spec.Names {
-						if obj := info.Defs[name]; obj != nil {
-							members = append(members, obj)
-						}
-					}
-				}
-				for _, member := range members {
-					linkedConstGroups[member] = members
-				}
-			}
+			addLinkedConstGroups(fileCtx.GoAST, info, linkedConstGroups)
 		}
 		if !found {
 			continue
@@ -150,6 +134,29 @@ func (r *UnusedSymbolsRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*cor
 	return violations, nil
 }
 
+// addLinkedConstGroups maps each constant of a file's linked groups — an iota
+// group or one repeating an implicit expression — to all constants of its group.
+func addLinkedConstGroups(file *ast.File, info *types.Info, groups map[types.Object][]types.Object) {
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST || !linkedConstGroup(gen) {
+			continue
+		}
+		var members []types.Object
+		for _, spec := range constSpecs(gen) {
+			for _, name := range spec.Names {
+				if obj := info.Defs[name]; obj != nil {
+					members = append(members, obj)
+				}
+			}
+		}
+		for _, member := range members {
+			groups[member] = members
+		}
+	}
+}
+
+// linkedConstGroupUsed reports whether any constant of obj's linked group is read.
 func linkedConstGroupUsed(obj types.Object, groups map[types.Object][]types.Object, uses map[types.Object]int) bool {
 	for _, member := range groups[obj] {
 		if uses[member] > 0 {
