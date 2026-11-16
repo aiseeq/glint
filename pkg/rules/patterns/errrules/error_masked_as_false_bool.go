@@ -3,6 +3,7 @@ package errrules
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"slices"
 	"strings"
 
@@ -52,7 +53,13 @@ func init() {
 //     field of the receiver that the type's Err() error method reads
 type ErrorMaskedAsFalseBoolRule struct {
 	*rules.BaseRule
+	rules.GoFileFindingRule
 }
+
+var _ rules.GoProjectRule = (*ErrorMaskedAsFalseBoolRule)(nil)
+
+// RequiresSSA reports that typed syntax is sufficient for this rule.
+func (r *ErrorMaskedAsFalseBoolRule) RequiresSSA() bool { return false }
 
 // NewErrorMaskedAsFalseBoolRule creates the rule
 func NewErrorMaskedAsFalseBoolRule() *ErrorMaskedAsFalseBoolRule {
@@ -68,6 +75,15 @@ func NewErrorMaskedAsFalseBoolRule() *ErrorMaskedAsFalseBoolRule {
 
 // AnalyzeFile runs the rule.
 func (r *ErrorMaskedAsFalseBoolRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
+	return r.analyze(ctx, ctx.GoTypesInfo)
+}
+
+// AnalyzeGoProject uses the type information for each selected Go file.
+func (r *ErrorMaskedAsFalseBoolRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {
+	return rules.AnalyzeGoRunFiles(ctx, r.Name(), r.analyze)
+}
+
+func (r *ErrorMaskedAsFalseBoolRule) analyze(ctx *core.FileContext, info *types.Info) []*core.Violation {
 	if !ctx.IsGoFile() || ctx.IsTestFile() || !ctx.HasGoAST() {
 		return nil
 	}
@@ -88,7 +104,7 @@ func (r *ErrorMaskedAsFalseBoolRule) AnalyzeFile(ctx *core.FileContext) []*core.
 			return true
 		}
 
-		violations = append(violations, r.findViolations(ctx, fn, errFields)...)
+		violations = append(violations, r.findViolations(ctx, info, fn, errFields)...)
 		return true
 	})
 
@@ -187,7 +203,7 @@ func (r *ErrorMaskedAsFalseBoolRule) returnsBool(fn *ast.FuncDecl) bool {
 
 // findViolations scans a function body for `if err != nil { return false }`
 // patterns without logging.
-func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *ast.FuncDecl, errFields map[string]map[string]bool) []*core.Violation {
+func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, info *types.Info, fn *ast.FuncDecl, errFields map[string]map[string]bool) []*core.Violation {
 	var violations []*core.Violation
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -204,7 +220,7 @@ func (r *ErrorMaskedAsFalseBoolRule) findViolations(ctx *core.FileContext, fn *a
 		if ret == nil {
 			return true
 		}
-		if r.hasLoggingCall(ifStmt.Body) || handsErrorToLogWrapper(ifStmt.Body, errName, ret) {
+		if r.hasLoggingCall(ifStmt.Body, info) || handsErrorToLogWrapper(ifStmt.Body, info, errName, ret) {
 			return true
 		}
 		if answersClient(fn, ifStmt.Body) {
@@ -316,14 +332,14 @@ func classifiesError(cond ast.Expr, errName string) bool {
 }
 
 // hasLoggingCall returns true if any statement in the block calls a logger
-// (see helpers.IsLoggerCall).
-func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt) bool {
+// (see helpers.IsLoggerCallTyped).
+func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt, info *types.Info) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if found {
 			return false
 		}
-		if call, ok := n.(*ast.CallExpr); ok && helpers.IsLoggerCall(call) {
+		if call, ok := n.(*ast.CallExpr); ok && helpers.IsLoggerCallTyped(call, info) {
 			found = true
 		}
 		return !found
@@ -339,7 +355,7 @@ func (r *ErrorMaskedAsFalseBoolRule) hasLoggingCall(body *ast.BlockStmt) bool {
 // under a nested if or in a closure does not run on every path, and an err
 // assigned anew is another error. A variable computed from the error does not
 // count: retry := isRetryable(err) keeps none of its text.
-func handsErrorToLogWrapper(body *ast.BlockStmt, errName string, ret *ast.ReturnStmt) bool {
+func handsErrorToLogWrapper(body *ast.BlockStmt, info *types.Info, errName string, ret *ast.ReturnStmt) bool {
 	usesErr := func(expr ast.Expr) bool { return usesVariable(expr, errName) }
 	for _, stmt := range body.List {
 		if stmt.Pos() > ret.Pos() || rebindsVariable(stmt, errName) {
@@ -350,6 +366,11 @@ func handsErrorToLogWrapper(body *ast.BlockStmt, errName string, ret *ast.Return
 			continue
 		}
 		call, ok := exprStmt.X.(*ast.CallExpr)
+		if ok && info != nil {
+			if sig, ok := info.TypeOf(call.Fun).(*types.Signature); ok && sig.Results().Len() != 0 {
+				continue
+			}
+		}
 		if ok && helpers.IsLogLevelName(helpers.CalleeName(call)) && slices.ContainsFunc(call.Args, usesErr) {
 			return true
 		}

@@ -1,11 +1,57 @@
 package errrules
 
 import (
+	"go/ast"
+	"go/types"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestErrorMaskedAsFalseBoolTypedLoggers(t *testing.T) {
+	const code = `package p
+import ("log"; "log/slog")
+type entry struct{}
+func (entry) WithError(error) entry { return entry{} }
+func (entry) WithField(string, any) entry { return entry{} }
+func (entry) Error(string) {}
+func (entry) Debug(string) {}
+func factory() entry { return entry{} }
+type report struct{}
+func (report) WithError(error) report { return report{} }
+func (report) Error() string { return "error" }
+type checker struct{ l *log.Logger }
+func chain(err error) bool { if err != nil { factory().WithError(err).Error("failed"); return false }; return true }
+func fields(err error) bool { if err != nil { factory().WithField("key", 1).Debug("failed"); return false }; return true }
+func short(err error, debug *log.Logger) bool { if err != nil { debug.Printf("failed"); return false }; return true }
+func (c checker) field(err error) bool { if err != nil { c.l.Printf("failed"); return false }; return true }
+func structured(err error, s *slog.Logger) bool { if err != nil { s.Info("failed"); return false }; return true }
+func silent(err error) bool { if err != nil { return false }; return true }
+func text(err error, logger report) bool { if err != nil { _ = logger.WithError(err).Error(); return false }; return true }
+func named(err error, logger report) bool { if err != nil { _ = logger.Error(); return false }; return true }
+type renderer struct{}
+func (renderer) Warn(error) string { return "error" }
+func wrapped(err error, r renderer) bool { if err != nil { r.Warn(err); return false }; return true }
+`
+	ctx := core.NewFileContext("/src/p.go", "/src", []byte(code), core.DefaultConfig())
+	fset, file, err := core.NewParser().ParseGoFile("/src/p.go", []byte(code))
+	require.NoError(t, err)
+	ctx.SetGoAST(fset, file)
+	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
+	conf := types.Config{Importer: patterntest.StdImporter}
+	_, err = conf.Check("p", fset, []*ast.File{file}, info)
+	require.NoError(t, err)
+	ctx.GoTypesInfo = info
+	violations := NewErrorMaskedAsFalseBoolRule().AnalyzeFile(ctx)
+	var lines []int
+	for _, v := range violations {
+		lines = append(lines, v.Line)
+	}
+	assert.Equal(t, []int{18, 19, 20, 23}, lines)
+}
 
 func TestErrorMaskedAsFalseBoolRule(t *testing.T) {
 	rule := NewErrorMaskedAsFalseBoolRule()

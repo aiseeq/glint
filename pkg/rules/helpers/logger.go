@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"go/ast"
+	"go/types"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -29,6 +30,48 @@ func IsLoggerCall(call *ast.CallExpr) bool {
 		return true
 	}
 	return IsLoggerReceiver(sel.X)
+}
+
+// IsLoggerCallTyped recognises logger calls using type information when present.
+// The existing text-based recognition remains available for incomplete types.
+func IsLoggerCallTyped(call *ast.CallExpr, info *types.Info) bool {
+	if info == nil {
+		return IsLoggerCall(call)
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	if sig, ok := info.TypeOf(sel).(*types.Signature); ok && sig.Results().Len() != 0 {
+		return false
+	}
+	if IsLoggerCall(call) {
+		return true
+	}
+	if !loggingVerbs[LogVerb(sel)] {
+		return false
+	}
+	typ := info.TypeOf(sel.X)
+	if typ == nil {
+		return false
+	}
+	if ptr, ok := types.Unalias(typ).(*types.Pointer); ok {
+		if named, ok := types.Unalias(ptr.Elem()).(*types.Named); ok {
+			obj := named.Obj()
+			if obj.Pkg() != nil && obj.Pkg().Path() == "log" && obj.Name() == "Logger" {
+				return true
+			}
+		}
+	}
+	for _, name := range []string{"Error", "Errorf", "Warn", "Warnf", "Info", "Infof", "Debug", "Debugf"} {
+		obj, _, _ := types.LookupFieldOrMethod(typ, true, nil, name)
+		if fn, ok := obj.(*types.Func); ok {
+			if sig, ok := fn.Type().(*types.Signature); ok && sig.Results().Len() == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // IsStderrPrint reports fmt.Fprint, Fprintf or Fprintln to os.Stderr: the log
