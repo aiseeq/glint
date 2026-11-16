@@ -137,7 +137,10 @@ func (r *TSDerivedFieldRecomputedRule) AnalyzeFile(c *core.FileContext) []*core.
 		positions = append(positions, candidate.pos)
 	}
 	sort.Ints(positions)
-	functions := enclosingFunctionsAt(f, f.Functions(), positions)
+	var functions map[int]patternkit.JsFunc
+	if len(positions) > 0 {
+		functions = enclosingFunctionsAt(f, f.Functions(), positions)
+	}
 	var out []*core.Violation
 	out = r.analyzeDerivedComparisons(c, f, comparisons.derived, seen, summaries, ends, functions, comparisons, out)
 	out = r.analyzeBareComparisons(c, f, comparisons.bare, seen, summaries, ends, functions, comparisons, out)

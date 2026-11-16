@@ -282,7 +282,9 @@ func operationGrowthAtScale(t *testing.T, operation func(int), n, scale int) flo
 		}
 		return best
 	}
-	small := max(fastest(n), 100*time.Microsecond)
+	smallRun := fastest(n)
+	t.Logf("SMALLRUN %s %.0f", t.Name(), float64(smallRun)/float64(time.Microsecond))
+	small := max(smallRun, 100*time.Microsecond)
 	return float64(fastest(scale*n)) / float64(small)
 }
 

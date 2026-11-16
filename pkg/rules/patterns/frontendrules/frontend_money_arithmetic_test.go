@@ -23,9 +23,37 @@ func TestFrontendMoneyArithmeticUnmatchedModifiersGrowLinearly(t *testing.T) {
 	source := func(n int) string {
 		return strings.Repeat("static ", n) + "a" + strings.Repeat(") {}", n)
 	}
-	const scale, limit = 8, 24
-	// n=256 and scale 8 make the modifier prefix and unmatched closer run grow together; the limit separates quadratic 64x from linear 8x.
+	const scale, limit = 16, 48
+	// n=256 and scale 16 make the modifier prefix and unmatched closer run grow together; the limit separates quadratic growth with margin from linear growth.
 	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 256, scale), scale, limit)
+}
+
+func TestFrontendMoneyArithmeticModifierCallsGrowLinearly(t *testing.T) {
+	source := func(n int) string {
+		return strings.Repeat("static ", n) + "a=()" + strings.Repeat(") {}", n)
+	}
+	const scale, limit = 20, 72
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 1000, scale), scale, limit)
+}
+
+func TestFrontendMoneyArithmeticModifierArrowsGrowLinearly(t *testing.T) {
+	source := func(n int) string {
+		return strings.Repeat("static ", n) + "x" + strings.Repeat(")=>{}", n)
+	}
+	const scale, limit = 20, 72
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 1000, scale), scale, limit)
+}
+
+func TestFrontendMoneyArithmeticNestedSpanDeclarations(t *testing.T) {
+	cases := []string{
+		"function outer(){\nconst total=Number((()=>{\nconst value=parseFloat(item.amount);\nreturn Math.round(value);\n})());\n}",
+		"const total=parseFloat(function(){\nconst value=Number(item.amount);\nconst doubled=value*2;\nreturn Math.round(value);\n}());",
+		"function calc(item){\nconst value=Number(item.amount)+Number((function(){const parsedValue=parseFloat(item.price);return Math.floor(parsedValue)})());\nreturn Math.round(value);\n}",
+	}
+	for i, source := range cases {
+		lines := rulestest.TextFileRuleLines(t, NewFrontendMoneyArithmeticRule(), fmt.Sprintf("frontend/src/case%d.ts", i), source)
+		assert.Contains(t, lines, []int{4, 4, 3}[i], "nested money span finding in case %d", i)
+	}
 }
 
 func TestFrontendMoneyArithmeticRoundingGrowsLinearly(t *testing.T) {
@@ -38,22 +66,23 @@ func TestFrontendMoneyArithmeticRoundingGrowsLinearly(t *testing.T) {
 	type input struct {
 		ctx        *core.FileContext
 		flat       patternkit.JsFlat
+		functions  *patternkit.JsFunctions
 		duplicate  financialFPRoundingDuplicateIndex
 		formatting formattingIndex
 	}
 	inputs := make(map[int]input)
-	for _, n := range []int{100, 10000} {
+	for _, n := range []int{200, 20000} {
 		ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(n))
 		flat := patternkit.NewJSFlat(ctx)
 		functions := flat.Functions()
-		inputs[n] = input{ctx: ctx, flat: flat, duplicate: newFinancialFPRoundingDuplicateIndex(flat), formatting: newFormattingIndex(flat, functions)}
+		inputs[n] = input{ctx: ctx, flat: flat, functions: functions, duplicate: newFinancialFPRoundingDuplicateIndex(flat), formatting: newFormattingIndex(flat, functions)}
 	}
 	const scale, limit = 100, 500
-	// n=100 and scale 100 isolate the rounding scan over ten thousand money calls; the limit sits between linear 100x and quadratic 10000x growth.
+	// n=200 and scale 100 isolate the rounding scan over twenty thousand money calls; the limit separates linear 100x from repeated function-prefix scans.
 	checkGrowth(t, operationGrowthAtScale(t, func(n int) {
 		in := inputs[n]
 		roundingFindings(rule, in.ctx, in.flat, nil, nil, make(map[int]bool), in.duplicate, in.formatting)
-	}, 100, scale), scale, limit)
+	}, 200, scale), scale, limit)
 }
 
 func TestFrontendMoneyArithmeticDeclarationsGrowLinearly(t *testing.T) {
@@ -82,17 +111,17 @@ func TestFrontendMoneyArithmeticDeclarationsGrowLinearly(t *testing.T) {
 		parsed []moneySpan
 	}
 	inputs := make(map[int]input)
-	for _, n := range []int{100, 20000} {
+	for _, n := range []int{1000, 32000} {
 		ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(n))
 		flat := patternkit.NewJSFlat(ctx)
 		inputs[n] = input{flat: flat, parsed: rule.moneyParseSpans(flat)}
 	}
-	const scale, limit = 200, 2000
-	// n=100 and scale 200 isolate moneyVariables across twenty thousand parsed declarations; the limit sits between linear 200x and quadratic 40000x growth.
+	const scale, limit = 32, 140
+	// n=1000 and scale 32 isolate moneyVariables across thirty-two thousand parsed declarations; the limit separates linear growth from the quadratic path.
 	checkGrowth(t, operationGrowthAtScale(t, func(n int) {
 		in := inputs[n]
 		rule.moneyVariables(in.flat, in.parsed)
-	}, 100, scale), scale, limit)
+	}, 1000, scale), scale, limit)
 }
 
 func TestFrontendMoneyArithmeticNestedOperandsGrowLinearly(t *testing.T) {
@@ -107,7 +136,7 @@ func TestFrontendMoneyArithmeticNestedOperandsGrowLinearly(t *testing.T) {
 		functions []patternkit.JsFunc
 	}
 	inputs := make(map[int]input)
-	for _, n := range []int{64, 1024} {
+	for _, n := range []int{64, 768} {
 		ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(n))
 		flat := patternkit.NewJSFlat(ctx)
 		index := flat.Functions()
@@ -125,13 +154,15 @@ func TestFrontendMoneyArithmeticNestedOperandsGrowLinearly(t *testing.T) {
 		}
 		inputs[n] = input{flat: flat, functions: functions}
 	}
-	const scale, limit = 16, 18
-	// n=64 and scale 16 reuse one nested parameter group in 65 then 1025 function scopes; the limit separates 256x repeated CallArgs from linear 16x growth.
+	const scale, limit = 12, 26
+	// n=64, scale 12 and 1000 repeats lift the small run above the CPU timer floor while keeping repeated CallArgs distinguishable from linear growth.
 	checkGrowth(t, operationGrowthAtScale(t, func(n int) {
 		in := inputs[n]
-		cache := make(map[int]map[string]bool)
-		for _, fn := range in.functions {
-			counterParameterCached(in.flat, "counter", fn, true, cache)
+		for range 1000 {
+			cache := make(map[int]map[string]bool)
+			for _, fn := range in.functions {
+				counterParameterCached(in.flat, "counter", fn, true, cache)
+			}
 		}
 	}, 64, scale), scale, limit)
 }

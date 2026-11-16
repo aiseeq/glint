@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -19,10 +20,12 @@ type JsFunctions struct {
 	braces []jsBraceHeader
 	// parens are the '(' and ')' offsets in order, each with the offset of the
 	// last byte before it that \s does not match (-1 at the start).
-	parens     []jsParen
-	parenOpens []int
-	equals     []int
-	colons     []int
+	parens        []jsParen
+	parenOpens    []int
+	methodParens  []int
+	equals        []int
+	bindingEquals []int
+	colons        []int
 	// closeColons are the ')' that \s* and a ':' follow: "): T".
 	closeColons    []jsCloseColon
 	words          []jsFunctionWord
@@ -30,6 +33,7 @@ type JsFunctions struct {
 	routes         *jsColonRoutes
 	names          map[int]string
 	modifierStarts map[string]map[int][]int
+	trimNonSpaces  []int
 }
 
 type jsBraceHeader struct {
@@ -60,6 +64,13 @@ type jsColonRoute struct{ pos, value int }
 func (f JsFlat) Functions() *JsFunctions {
 	code := f.Code
 	x := &JsFunctions{code: code}
+	for i := 0; i < len(code); {
+		r, size := utf8.DecodeRuneInString(code[i:])
+		if !unicode.IsSpace(r) {
+			x.trimNonSpaces = append(x.trimNonSpaces, i)
+		}
+		i += size
+	}
 	// openers hold, for each open bracket, where Header stops before it.
 	var openers []int
 	// stop is where Header, walking back from the current offset, stops: the
@@ -78,6 +89,9 @@ func (f JsFlat) Functions() *JsFunctions {
 			if c == '(' {
 				x.parens = append(x.parens, jsParen{i, lastNonSpace})
 				x.parenOpens = append(x.parenOpens, i)
+				if lastNonSpace >= 0 && (IsWordChar(code[lastNonSpace]) || code[lastNonSpace] == '$' || code[lastNonSpace] == '>') {
+					x.methodParens = append(x.methodParens, i)
+				}
 			}
 			openers = append(openers, stop)
 			stop = i
@@ -105,6 +119,9 @@ func (f JsFlat) Functions() *JsFunctions {
 			stop = i
 		case '=':
 			x.equals = append(x.equals, i)
+			if i+1 >= len(code) || code[i+1] != '>' {
+				x.bindingEquals = append(x.bindingEquals, i)
+			}
 			lastEqual = i
 		case ':':
 			x.colons = append(x.colons, i)
@@ -124,10 +141,14 @@ func (f JsFlat) Functions() *JsFunctions {
 // trimmed by strings.TrimSpace, not a control statement, and ending the way
 // jsFuncHeader requires.
 func (x *JsFunctions) header(pos, start, lastEqual int, lastCloseColon jsCloseColon) jsBraceHeader {
-	raw := x.code[start:pos]
-	left := strings.TrimLeftFunc(raw, unicode.IsSpace)
-	from := start + len(raw) - len(left)
-	to := from + len(strings.TrimRightFunc(left, unicode.IsSpace))
+	first := sort.SearchInts(x.trimNonSpaces, start)
+	if first == len(x.trimNonSpaces) || x.trimNonSpaces[first] >= pos {
+		return jsBraceHeader{pos: pos, start: start}
+	}
+	from := x.trimNonSpaces[first]
+	last := sort.Search(len(x.trimNonSpaces), func(i int) bool { return x.trimNonSpaces[i] >= pos }) - 1
+	_, size := utf8.DecodeRuneInString(x.code[x.trimNonSpaces[last]:])
+	to := x.trimNonSpaces[last] + size
 	h := jsBraceHeader{pos: pos, start: start, from: from, to: to}
 	if from == to || x.controlHeader(from, to) {
 		return h
@@ -270,8 +291,8 @@ func (x *JsFunctions) modifiers(from, to int, words []string) []int {
 
 // methodName is jsMethodHeader: name \s* <generic>? \s* ( at the start.
 func (x *JsFunctions) methodName(from, to int) (string, bool) {
-	paren := sort.SearchInts(x.parenOpens, from+1)
-	if paren == len(x.parenOpens) || x.parenOpens[paren] >= to {
+	paren := sort.SearchInts(x.methodParens, from+1)
+	if paren == len(x.methodParens) || x.methodParens[paren] >= to {
 		return "", false
 	}
 	starts := x.modifiers(from, to, jsMethodModifiers)
@@ -314,6 +335,11 @@ func (x *JsFunctions) arrowBinding(from, to int) (string, bool) {
 		return "", false
 	}
 	arrow := to - 2
+	sep := sort.SearchInts(x.bindingEquals, from)
+	colon := sort.SearchInts(x.colons, from)
+	if (sep == len(x.bindingEquals) || x.bindingEquals[sep] >= arrow) && (colon == len(x.colons) || x.colons[colon] >= arrow) {
+		return "", false
+	}
 	starts := x.modifiers(from, to, jsBindingModifiers)
 	for k := len(starts) - 1; k >= 0; k-- {
 		start := starts[k]

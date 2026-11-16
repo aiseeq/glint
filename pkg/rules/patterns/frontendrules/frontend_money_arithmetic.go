@@ -184,12 +184,12 @@ func (r *FrontendMoneyArithmeticRule) isMoneyFieldName(name string) bool {
 
 func (r *FrontendMoneyArithmeticRule) analyzeFlat(ctx *core.FileContext, f patternkit.JsFlat) []*core.Violation {
 	parsed := r.moneyParseSpans(f)
-	vars := r.moneyVariables(f, parsed)
 	functions := f.Functions()
+	vars := r.moneyVariablesWithIndex(f, parsed, functions)
 	formatting := newFormattingIndex(f, functions)
 	duplicateRounding := newFinancialFPRoundingDuplicateIndex(f)
 	found := r.arithmeticFindings(ctx, f, functions, parsed, vars, duplicateRounding, formatting)
-	roundingFindings(r, ctx, f, parsed, vars, found, duplicateRounding, formatting)
+	roundingFindingsWithIndex(r, ctx, f, functions, parsed, vars, found, duplicateRounding, formatting)
 	centRoundingFindings(r, ctx, f, found)
 	existingPatternFindings(r, ctx, found)
 	lines := slices.Sorted(maps.Keys(found))
@@ -226,23 +226,31 @@ func (r *FrontendMoneyArithmeticRule) moneyParseSpans(f patternkit.JsFlat) []mon
 }
 
 func (r *FrontendMoneyArithmeticRule) moneyVariables(f patternkit.JsFlat, parsed []moneySpan) map[string][]int {
+	return r.moneyVariablesWithIndex(f, parsed, f.Functions())
+}
+
+func (r *FrontendMoneyArithmeticRule) moneyVariablesWithIndex(f patternkit.JsFlat, parsed []moneySpan, index *patternkit.JsFunctions) map[string][]int {
 	vars := make(map[string][]int)
 	matches := moneyVariableDecl.FindAllStringSubmatchIndex(f.Code, -1)
 	eligible := make([][]int, 0, len(matches))
 	positions := make([]int, 0, len(matches))
-	parsedIndex := 0
+	suffixMinEnd := make([]int, len(parsed))
+	if len(parsed) > 0 {
+		suffixMinEnd[len(parsed)-1] = parsed[len(parsed)-1].end
+		for i := len(parsed) - 2; i >= 0; i-- {
+			suffixMinEnd[i] = min(parsed[i].end, suffixMinEnd[i+1])
+		}
+	}
 	for _, m := range matches {
 		start, end := m[1], moneyExpressionEnd(f.Code, m[1])
-		for parsedIndex < len(parsed) && parsed[parsedIndex].end <= start {
-			parsedIndex++
-		}
-		if parsedIndex == len(parsed) || parsed[parsedIndex].start < start || parsed[parsedIndex].end > end {
+		parsedIndex := sort.Search(len(parsed), func(i int) bool { return parsed[i].start >= start })
+		if parsedIndex == len(parsed) || suffixMinEnd[parsedIndex] > end {
 			continue
 		}
 		eligible = append(eligible, m)
 		positions = append(positions, m[0])
 	}
-	functions := enclosingFunctionsAt(f, f.Functions(), positions)
+	functions := enclosingFunctionsAt(f, index, positions)
 	for _, m := range eligible {
 		fn, ok := functions[m[0]]
 		scope := -1
@@ -613,6 +621,10 @@ func (t textAccumulators) appendsText(code string, op arithmeticOperator) bool {
 }
 
 func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f patternkit.JsFlat, parsed []moneySpan, vars map[string][]int, found map[int]bool, duplicateRounding financialFPRoundingDuplicateIndex, formatting formattingIndex) {
+	roundingFindingsWithIndex(r, ctx, f, f.Functions(), parsed, vars, found, duplicateRounding, formatting)
+}
+
+func roundingFindingsWithIndex(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f patternkit.JsFlat, index *patternkit.JsFunctions, parsed []moneySpan, vars map[string][]int, found map[int]bool, duplicateRounding financialFPRoundingDuplicateIndex, formatting formattingIndex) {
 	matches := moneyMathCall.FindAllStringIndex(f.Code, -1)
 	positions := make([]int, 0, len(matches))
 	for _, m := range matches {
@@ -620,7 +632,7 @@ func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f p
 			positions = append(positions, m[0])
 		}
 	}
-	functions := enclosingFunctionsAt(f, f.Functions(), positions)
+	functions := enclosingFunctionsAt(f, index, positions)
 	parameters := make(map[int]map[string]bool)
 	for _, m := range matches {
 		if formatting.inFunction(m[0]) || duplicateRounding.contains(m[0]) {
@@ -928,39 +940,41 @@ func counterParameterCached(f patternkit.JsFlat, name string, fn patternkit.JsFu
 	if !inFunction {
 		return false
 	}
+	parameters, ok := cache[fn.Start]
+	if ok {
+		return parameters[name]
+	}
+	parameters = make(map[string]bool)
 	header := f.Code[fn.Start:fn.Brace]
 	openOffset := strings.Index(header, "(")
 	if openOffset < 0 {
+		cache[fn.Start] = parameters
 		return false
 	}
 	open := fn.Start + openOffset
-	parameters, ok := cache[open]
-	if !ok {
-		parameters = make(map[string]bool)
-		for _, arg := range f.CallArgs(open) {
-			text := strings.TrimSpace(f.Code[arg.Start:arg.End])
-			before, after, ok := strings.Cut(text, "=")
-			if !ok || strings.TrimSpace(after) == "" {
-				continue
-			}
-			parameter := parameterName.FindStringSubmatch(before)
-			if len(parameter) != 2 {
-				continue
-			}
-			allDigits := true
-			for _, char := range strings.TrimSpace(after) {
-				if char < '0' || char > '9' {
-					allDigits = false
-					break
-				}
-			}
-			defaultValue := strings.TrimSpace(after)
-			if allDigits && strings.TrimLeft(defaultValue, "0") != "" {
-				parameters[parameter[1]] = true
+	for _, arg := range f.CallArgs(open) {
+		text := strings.TrimSpace(f.Code[arg.Start:arg.End])
+		before, after, ok := strings.Cut(text, "=")
+		if !ok || strings.TrimSpace(after) == "" {
+			continue
+		}
+		parameter := parameterName.FindStringSubmatch(before)
+		if len(parameter) != 2 {
+			continue
+		}
+		allDigits := true
+		for _, char := range strings.TrimSpace(after) {
+			if char < '0' || char > '9' {
+				allDigits = false
+				break
 			}
 		}
-		cache[open] = parameters
+		defaultValue := strings.TrimSpace(after)
+		if allDigits && strings.TrimLeft(defaultValue, "0") != "" {
+			parameters[parameter[1]] = true
+		}
 	}
+	cache[fn.Start] = parameters
 	return parameters[name]
 }
 
