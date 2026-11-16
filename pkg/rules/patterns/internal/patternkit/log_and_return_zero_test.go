@@ -52,7 +52,7 @@ func TestIsZeroValueExprUsesTypedConstantValuesSafely(t *testing.T) {
 		for _, spec := range gen.Specs {
 			value := spec.(*ast.ValueSpec)
 			for i, name := range value.Names {
-				assert.Equal(t, values[name.Name], IsZeroValueExpr(value.Values[i], info), name.Name)
+				assert.Equal(t, values[name.Name], IsZeroValueExprTyped(value.Values[i], info), name.Name)
 			}
 		}
 	}
@@ -66,5 +66,5 @@ func TestIsZeroValueExprUsesTypedConstantValuesSafely(t *testing.T) {
 		return
 	}
 	assert.NotPanics(t, func() { assert.False(t, IsZeroValueExpr(division)) })
-	assert.NotPanics(t, func() { assert.False(t, IsZeroValueExpr(division, info)) })
+	assert.NotPanics(t, func() { assert.False(t, IsZeroValueExprTyped(division, info)) })
 }

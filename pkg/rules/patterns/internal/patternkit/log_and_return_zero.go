@@ -60,12 +60,17 @@ func IsWriteCall(call *ast.CallExpr) bool {
 	return helpers.IsWriteName(sel.Sel.Name)
 }
 
-// IsZeroValueExpr matches zero literals and values whose type information
-// proves that they are zero.
-func IsZeroValueExpr(expr ast.Expr, typeInfo ...*types.Info) bool {
+// IsZeroValueExpr matches zero literals by their syntax alone.
+func IsZeroValueExpr(expr ast.Expr) bool {
+	return IsZeroValueExprTyped(expr, nil)
+}
+
+// IsZeroValueExprTyped matches zero literals and, when info is not nil,
+// values whose type information proves that they are zero.
+func IsZeroValueExprTyped(expr ast.Expr, info *types.Info) bool {
 	expr = ast.Unparen(expr)
-	if len(typeInfo) > 0 && typeInfo[0] != nil {
-		if value, ok := typeInfo[0].Types[expr]; ok && value.Value != nil {
+	if info != nil {
+		if value, ok := info.Types[expr]; ok && value.Value != nil {
 			return isZeroConstant(value.Value)
 		}
 	}

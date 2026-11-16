@@ -330,11 +330,7 @@ func isSprintf(call *ast.CallExpr) bool {
 	return ok && sel.Sel.Name == "Sprintf"
 }
 
-func staticString(expr ast.Expr, locals, values map[string]string, contexts ...*sqlStringContext) (string, bool) {
-	var context *sqlStringContext
-	if len(contexts) > 0 {
-		context = contexts[0]
-	}
+func staticString(expr ast.Expr, locals, values map[string]string, context *sqlStringContext) (string, bool) {
 	switch x := ast.Unparen(expr).(type) {
 	case *ast.Ident:
 		if value, ok := locals[x.Name]; ok {

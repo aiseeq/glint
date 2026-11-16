@@ -1152,7 +1152,7 @@ func isNonZeroFallbackValue(ctx *core.FileContext, expr ast.Expr, produced map[s
 		return false
 	}
 	if value, ok := ctx.GoTypesInfo.Types[expr]; ok && value.Value != nil {
-		return !patternkit.IsZeroValueExpr(expr, ctx.GoTypesInfo) && !isZeroConstantValue(value.Value)
+		return !patternkit.IsZeroValueExprTyped(expr, ctx.GoTypesInfo) && !isZeroConstantValue(value.Value)
 	}
 	lit, ok := ast.Unparen(expr).(*ast.CompositeLit)
 	if !ok || len(lit.Elts) == 0 {

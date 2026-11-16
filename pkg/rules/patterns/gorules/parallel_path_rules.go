@@ -815,7 +815,7 @@ func filledElsewhere(info *types.Info, call *ast.CallExpr, fn *ast.FuncDecl, sit
 	nonNil := false
 	for i, arg := range call.Args {
 		arg = ast.Unparen(arg)
-		if !patternkit.IsZeroValueExpr(arg, info) {
+		if !patternkit.IsZeroValueExprTyped(arg, info) {
 			continue
 		}
 		for _, site := range sites {
