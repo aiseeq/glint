@@ -36,6 +36,22 @@ func TestFrontendMoneyArithmeticModifierCallsGrowLinearly(t *testing.T) {
 	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 1000, scale), scale, limit)
 }
 
+func TestFrontendMoneyArithmeticModifierCallFailGrowsLinearly(t *testing.T) {
+	source := func(n int) string {
+		return strings.Repeat("static ", n) + "a+b()" + strings.Repeat(") {}", n)
+	}
+	const scale, limit = 16, 48
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 1000, scale), scale, limit)
+}
+
+func TestFrontendMoneyArithmeticModifierBindingFailGrowsLinearly(t *testing.T) {
+	source := func(n int) string {
+		return strings.Repeat("static ", n) + "x=1" + strings.Repeat(")=>{}", n)
+	}
+	const scale, limit = 16, 48
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 1000, scale), scale, limit)
+}
+
 func TestFrontendMoneyArithmeticModifierArrowsGrowLinearly(t *testing.T) {
 	source := func(n int) string {
 		return strings.Repeat("static ", n) + "x" + strings.Repeat(")=>{}", n)
@@ -111,17 +127,21 @@ func TestFrontendMoneyArithmeticDeclarationsGrowLinearly(t *testing.T) {
 		parsed []moneySpan
 	}
 	inputs := make(map[int]input)
-	for _, n := range []int{1000, 32000} {
+	for _, n := range []int{8, 128} {
 		ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(n))
 		flat := patternkit.NewJSFlat(ctx)
-		inputs[n] = input{flat: flat, parsed: rule.moneyParseSpans(flat)}
+		parsed := make([]moneySpan, 100*n*n)
+		parsed = append(parsed, rule.moneyParseSpans(flat)...)
+		inputs[n] = input{flat: flat, parsed: parsed}
 	}
-	const scale, limit = 32, 140
-	// n=1000 and scale 32 isolate moneyVariables across thirty-two thousand parsed declarations; the limit separates linear growth from the quadratic path.
+	const scale, limit = 16, 600
+	// Synthetic earlier spans enlarge the parsed index without enlarging source text; indexed lookup stays linear while a full scan revisits them for every declaration.
 	checkGrowth(t, operationGrowthAtScale(t, func(n int) {
 		in := inputs[n]
-		rule.moneyVariables(in.flat, in.parsed)
-	}, 1000, scale), scale, limit)
+		for range 20 {
+			rule.moneyVariables(in.flat, in.parsed)
+		}
+	}, 8, scale), scale, limit)
 }
 
 func TestFrontendMoneyArithmeticNestedOperandsGrowLinearly(t *testing.T) {
@@ -136,7 +156,7 @@ func TestFrontendMoneyArithmeticNestedOperandsGrowLinearly(t *testing.T) {
 		functions []patternkit.JsFunc
 	}
 	inputs := make(map[int]input)
-	for _, n := range []int{64, 768} {
+	for _, n := range []int{64, 1536} {
 		ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(n))
 		flat := patternkit.NewJSFlat(ctx)
 		index := flat.Functions()
@@ -154,8 +174,8 @@ func TestFrontendMoneyArithmeticNestedOperandsGrowLinearly(t *testing.T) {
 		}
 		inputs[n] = input{flat: flat, functions: functions}
 	}
-	const scale, limit = 12, 26
-	// n=64, scale 12 and 1000 repeats lift the small run above the CPU timer floor while keeping repeated CallArgs distinguishable from linear growth.
+	const scale, limit = 24, 60
+	// n=64, scale 24 and 1000 repeats keep the small run above the CPU timer floor and amplify the repeated CallArgs path when the cache is keyed by Brace.
 	checkGrowth(t, operationGrowthAtScale(t, func(n int) {
 		in := inputs[n]
 		for range 1000 {

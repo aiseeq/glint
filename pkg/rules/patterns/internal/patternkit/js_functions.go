@@ -33,6 +33,8 @@ type JsFunctions struct {
 	routes         *jsColonRoutes
 	names          map[int]string
 	modifierStarts map[string]map[int][]int
+	methodStarts   map[int][]int
+	bindingStarts  map[int][]int
 	trimNonSpaces  []int
 }
 
@@ -186,11 +188,10 @@ func (x *JsFunctions) controlHeader(from, to int) bool {
 
 // AtBrace is FunctionAtBrace for the '{' at brace.
 func (x *JsFunctions) AtBrace(brace int) (JsFunc, bool) {
-	i := sort.Search(len(x.braces), func(i int) bool { return x.braces[i].pos >= brace })
-	if i == len(x.braces) || x.braces[i].pos != brace || !x.braces[i].function {
+	h, ok := x.braceHeaderAt(brace)
+	if !ok {
 		return JsFunc{}, false
 	}
-	h := x.braces[i]
 	if x.names == nil {
 		x.names = make(map[int]string)
 	}
@@ -200,6 +201,25 @@ func (x *JsFunctions) AtBrace(brace int) (JsFunc, bool) {
 		x.names[brace] = name
 	}
 	return JsFunc{Brace: brace, Start: h.start, Name: name}, true
+}
+
+// ScopeAtBrace returns the function scope without parsing its optional name.
+// Scope-based rules need only Brace and Start, and malformed modifier chains
+// can make name parsing expensive when repeated for every brace.
+func (x *JsFunctions) ScopeAtBrace(brace int) (JsFunc, bool) {
+	h, ok := x.braceHeaderAt(brace)
+	if !ok {
+		return JsFunc{}, false
+	}
+	return JsFunc{Brace: brace, Start: h.start}, true
+}
+
+func (x *JsFunctions) braceHeaderAt(brace int) (jsBraceHeader, bool) {
+	i := sort.Search(len(x.braces), func(i int) bool { return x.braces[i].pos >= brace })
+	if i == len(x.braces) || x.braces[i].pos != brace || !x.braces[i].function {
+		return jsBraceHeader{}, false
+	}
+	return x.braces[i], true
 }
 
 // name is the first of jsNamedFunction, jsMethodHeader and jsArrowBinding
@@ -295,8 +315,9 @@ func (x *JsFunctions) methodName(from, to int) (string, bool) {
 	if paren == len(x.methodParens) || x.methodParens[paren] >= to {
 		return "", false
 	}
-	starts := x.modifiers(from, to, jsMethodModifiers)
-	for k := len(starts) - 1; k >= 0; k-- {
+	starts := x.methodCandidates(from)
+	end := sort.Search(len(starts), func(i int) bool { return starts[i] >= to })
+	for k := end - 1; k >= 0; k-- {
 		start := starts[k]
 		if start >= to || !jsIdentStart(x.code[start]) {
 			continue
@@ -340,8 +361,9 @@ func (x *JsFunctions) arrowBinding(from, to int) (string, bool) {
 	if (sep == len(x.bindingEquals) || x.bindingEquals[sep] >= arrow) && (colon == len(x.colons) || x.colons[colon] >= arrow) {
 		return "", false
 	}
-	starts := x.modifiers(from, to, jsBindingModifiers)
-	for k := len(starts) - 1; k >= 0; k-- {
+	starts := x.bindingCandidates(from)
+	end := sort.Search(len(starts), func(i int) bool { return starts[i] >= to })
+	for k := end - 1; k >= 0; k-- {
 		start := starts[k]
 		if start >= to || !jsIdentStart(x.code[start]) {
 			continue
@@ -363,6 +385,48 @@ func (x *JsFunctions) arrowBinding(from, to int) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func (x *JsFunctions) methodCandidates(from int) []int {
+	if x.methodStarts == nil {
+		x.methodStarts = make(map[int][]int)
+	}
+	if starts, ok := x.methodStarts[from]; ok {
+		return starts
+	}
+	var candidates []int
+	for _, start := range x.modifiers(from, len(x.code), jsMethodModifiers) {
+		if start >= len(x.code) || !jsIdentStart(x.code[start]) {
+			continue
+		}
+		next := x.skipSpace(x.identEnd(start), len(x.code))
+		if next < len(x.code) && (x.code[next] == '(' || x.code[next] == '<') {
+			candidates = append(candidates, start)
+		}
+	}
+	x.methodStarts[from] = candidates
+	return candidates
+}
+
+func (x *JsFunctions) bindingCandidates(from int) []int {
+	if x.bindingStarts == nil {
+		x.bindingStarts = make(map[int][]int)
+	}
+	if starts, ok := x.bindingStarts[from]; ok {
+		return starts
+	}
+	var candidates []int
+	for _, start := range x.modifiers(from, len(x.code), jsBindingModifiers) {
+		if start >= len(x.code) || !jsIdentStart(x.code[start]) {
+			continue
+		}
+		next := x.skipSpace(x.identEnd(start), len(x.code))
+		if next < len(x.code) && (x.code[next] == '=' || x.code[next] == ':') {
+			candidates = append(candidates, start)
+		}
+	}
+	x.bindingStarts[from] = candidates
+	return candidates
 }
 
 // typedArrowBinding checks `(:[^=]*)?[=:]` from the ':' at sep: [=:] is sep

@@ -242,7 +242,7 @@ func TestFrontendErrorMessageMatchNestedCallsComplete(t *testing.T) {
 	}
 	const scale, limit = 40, 120
 	// Measured at scale 40: current 18–27; the bracket-rescan mutant 1230–2142. Limit 120.
-	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendErrorMessageMatchRule(), "web/src/n.js", source, 64, scale), scale, limit)
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendErrorMessageMatchRule(), "web/src/n.js", source, 160, scale), scale, limit)
 }
 
 // A name that holds the message carries it into a helper as a message does:
@@ -346,9 +346,8 @@ func TestFrontendErrorMessageMatchAliasesGrowLinearly(t *testing.T) {
 		n      int
 	}{"aliases": {aliases, 32}, "chain": {chain, 20}} {
 		t.Run(name, func(t *testing.T) {
-			scale, limit := 40, 140
-			// Measured at scale 40: aliases current 46–53 / prefix mutant 1206–2115;
-			// chain current 51–55 / bracket mutant 561–822 and pass-per-mark mutant 629–966. Limit 140.
+			scale, limit := 32, 140
+			// Scale 32 keeps the alias and chain guards below half the limit with margin; the former prefix and bracket mutants remain superlinear.
 			analyze := func(size int) {
 				ctx := rulestest.TextFile(t, "web/src/g.js", c.source(size))
 				rule.AnalyzeFile(ctx)

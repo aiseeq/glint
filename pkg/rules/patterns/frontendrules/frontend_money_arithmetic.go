@@ -1012,7 +1012,7 @@ func enclosingFunctionsAt(f patternkit.JsFlat, index *patternkit.JsFunctions, po
 		switch f.Code[i] {
 		case '{':
 			stack = append(stack, active)
-			if fn, ok := index.AtBrace(i); ok {
+			if fn, ok := index.ScopeAtBrace(i); ok {
 				active = functionScope{function: fn, ok: true}
 			}
 		case '}':

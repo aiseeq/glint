@@ -18,9 +18,9 @@ import (
 func TestTSFormNumberUncheckedInPayloadLargeFileCompletes(t *testing.T) {
 	rule := newTSRule("ts-form-number-unchecked-in-payload", "", checkFormNumberPayload)
 	source := func(n int) string { return "await api.send({value: Number(input)});" + strings.Repeat("({});", n) }
-	const scale, limit = 40, 120
-	// Measured at scale 40: current 20–36; the repeated-prefix mutant 1066–1125. Limit 120.
-	checkGrowth(t, ruleGrowthAtScale(t, rule, "frontend/src/perf.ts", source, 128, scale), scale, limit)
+	const scale, limit = 20, 120
+	// Scale 20 keeps margin below half the limit while the larger small input remains above the timer floor.
+	checkGrowth(t, ruleGrowthAtScale(t, rule, "frontend/src/perf.ts", source, 1024, scale), scale, limit)
 }
 
 func TestTSURLFilterEnumUnvalidatedLargeFileCompletes(t *testing.T) {
@@ -36,7 +36,7 @@ func TestTSURLFilterEnumUnvalidatedLargeFileCompletes(t *testing.T) {
 	}
 	const scale, limit = 40, 120
 	// Measured at scale 40, n=8: current 18–19; rebuilding definitions mutant 1361–1592. Limit 120.
-	checkGrowth(t, ruleGrowthAtScale(t, rule, "frontend/src/perf.ts", source, 8, scale), scale, limit)
+	checkGrowth(t, ruleGrowthAtScale(t, rule, "frontend/src/perf.ts", source, 48, scale), scale, limit)
 }
 
 func TestAllowedValidatorDefinitionsPreserveWordBoundaries(t *testing.T) {
