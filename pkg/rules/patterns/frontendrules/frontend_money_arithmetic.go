@@ -530,7 +530,7 @@ func functionParameterNames(code string, functions *patternkit.JsFunctions, brac
 	names := make(map[string]bool)
 	processed := make(map[int]bool)
 	for _, brace := range brackets.Braces() {
-		fn, ok := functions.AtBrace(brace.Open)
+		fn, ok := functions.ScopeAtBrace(brace.Open)
 		if !ok {
 			continue
 		}

@@ -127,6 +127,45 @@ func TestFrontendMoneyArithmeticDeclarationsGrowLinearly(t *testing.T) {
 		parsed []moneySpan
 	}
 	inputs := make(map[int]input)
+	for _, n := range []int{1000, 32000} {
+		ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(n))
+		flat := patternkit.NewJSFlat(ctx)
+		inputs[n] = input{flat: flat, parsed: rule.moneyParseSpans(flat)}
+	}
+	const scale, limit = 32, 140
+	// Real declarations grow with the source and exercise the declaration-to-span lookup at its original sizes.
+	checkGrowth(t, operationGrowthAtScale(t, func(n int) {
+		in := inputs[n]
+		rule.moneyVariables(in.flat, in.parsed)
+	}, 1000, scale), scale, limit)
+}
+
+func TestFrontendMoneyArithmeticSyntheticSpanDeclarationsGrowLinearly(t *testing.T) {
+	source := func(n int) string {
+		var b strings.Builder
+		b.WriteString("function calc(){")
+		for i := range n {
+			fmt.Fprintf(&b, "const amount%d = Number(item.amount);", i)
+		}
+		b.WriteString("}")
+		return b.String()
+	}
+	rule := NewFrontendMoneyArithmeticRule()
+	ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(8))
+	f := patternkit.NewJSFlat(ctx)
+	parsed := rule.moneyParseSpans(f)
+	vars := rule.moneyVariables(f, parsed)
+	decls := 0
+	for _, scopes := range vars {
+		decls += len(scopes)
+	}
+	assert.Equal(t, 8, len(parsed))
+	assert.Equal(t, 8, decls)
+	type input struct {
+		flat   patternkit.JsFlat
+		parsed []moneySpan
+	}
+	inputs := make(map[int]input)
 	for _, n := range []int{8, 128} {
 		ctx := rulestest.TextFile(t, "frontend/src/perf.ts", source(n))
 		flat := patternkit.NewJSFlat(ctx)
@@ -142,6 +181,44 @@ func TestFrontendMoneyArithmeticDeclarationsGrowLinearly(t *testing.T) {
 			rule.moneyVariables(in.flat, in.parsed)
 		}
 	}, 8, scale), scale, limit)
+}
+
+func TestFrontendMoneyArithmeticLongIdentifierHeadersGrowLinearly(t *testing.T) {
+	source := func(n int) string {
+		return strings.Repeat("a", n) + "()" + strings.Repeat(") {}", n)
+	}
+	const scale, limit = 32, 96
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 1000, scale), scale, limit)
+}
+
+func TestFrontendMoneyArithmeticModifierCandidateLookupGrowsLinearly(t *testing.T) {
+	source := func(n int) string {
+		return strings.Repeat("static ", n) + "a+b()" + strings.Repeat(") {}", n)
+	}
+	type input struct {
+		flat   patternkit.JsFlat
+		braces []int
+	}
+	inputs := make(map[int]input)
+	for _, n := range []int{1000, 16000} {
+		flat := patternkit.NewJSFlat(rulestest.TextFile(t, "frontend/src/perf.ts", source(n)))
+		braces := make([]int, 0, n)
+		for pos, b := range flat.Code {
+			if b == '{' {
+				braces = append(braces, pos)
+			}
+		}
+		assert.Len(t, braces, n)
+		inputs[n] = input{flat: flat, braces: braces}
+	}
+	const scale, limit = 16, 80
+	checkGrowth(t, operationGrowthAtScale(t, func(n int) {
+		in := inputs[n]
+		index := in.flat.Functions()
+		for _, brace := range in.braces {
+			index.AtBrace(brace)
+		}
+	}, 1000, scale), scale, limit)
 }
 
 func TestFrontendMoneyArithmeticNestedOperandsGrowLinearly(t *testing.T) {

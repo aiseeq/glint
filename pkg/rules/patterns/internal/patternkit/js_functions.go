@@ -322,13 +322,13 @@ func (x *JsFunctions) methodName(from, to int) (string, bool) {
 		if start >= to || !jsIdentStart(x.code[start]) {
 			continue
 		}
-		end := x.identEnd(start)
-		next := x.skipSpace(end, to)
+		identEnd := x.identEnd(start)
+		next := x.skipSpace(identEnd, to)
 		if next >= to {
 			continue
 		}
 		if x.code[next] == '(' {
-			return x.code[start:end], true
+			return x.code[start:identEnd], true
 		}
 		if x.code[next] != '<' {
 			continue
@@ -339,7 +339,7 @@ func (x *JsFunctions) methodName(from, to int) (string, bool) {
 		if i < len(x.parens) && x.parens[i].pos < to && x.code[x.parens[i].pos] == '(' {
 			before := x.parens[i].before
 			if before > next && x.code[before] == '>' {
-				return x.code[start:end], true
+				return x.code[start:identEnd], true
 			}
 		}
 	}
@@ -368,8 +368,8 @@ func (x *JsFunctions) arrowBinding(from, to int) (string, bool) {
 		if start >= to || !jsIdentStart(x.code[start]) {
 			continue
 		}
-		end := x.identEnd(start)
-		sep := x.skipSpace(end, to)
+		identEnd := x.identEnd(start)
+		sep := x.skipSpace(identEnd, to)
 		if sep >= to {
 			continue
 		}
@@ -381,7 +381,7 @@ func (x *JsFunctions) arrowBinding(from, to int) (string, bool) {
 			ok = x.typedArrowBinding(sep, arrow, to)
 		}
 		if ok {
-			return x.code[start:end], true
+			return x.code[start:identEnd], true
 		}
 	}
 	return "", false
