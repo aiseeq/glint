@@ -44,7 +44,7 @@ func runCount(t *testing.T, runs string) int {
 }
 
 func TestWarmCheckPrintsMedianOfFiveRuns(t *testing.T) {
-	glint, runs := fakeGlint(t, "sleep 0.05")
+	glint, runs := fakeGlint(t, "echo 'Files analyzed: 3'; sleep 0.05")
 	out, code := runWarmCheck(t, glint)
 	require.Equal(t, 0, code)
 	ms, err := strconv.Atoi(strings.TrimSpace(out))
@@ -88,5 +88,14 @@ func TestWarmCheckLongRunShrinksTheBudget(t *testing.T) {
 	glint, runs := fakeGlint(t, "sleep 1.1")
 	_, code := runWarmCheck(t, glint, "GLINT_WARM_BUDGET_S=3", "GLINT_WARM_LIMIT_S=2")
 	require.Equal(t, 0, code)
+	assert.Equal(t, 1, runCount(t, runs))
+}
+
+// An exit code other than 0 and 1 is a failure even without an Error: line.
+func TestWarmCheckFailsOnOtherExitCode(t *testing.T) {
+	glint, runs := fakeGlint(t, "exit 3")
+	out, code := runWarmCheck(t, glint)
+	assert.Equal(t, 3, code)
+	assert.Empty(t, out)
 	assert.Equal(t, 1, runCount(t, runs))
 }
