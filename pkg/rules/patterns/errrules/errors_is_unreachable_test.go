@@ -266,3 +266,129 @@ func Ready() error {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"service/service.go:110", "service/service.go:28", "service/service.go:36", "service/service.go:55", "service/service.go:73"}, patterntest.FoundLines(violations))
 }
+
+func TestErrorsIsTargetUnreachableHandledThenMutatedThroughAddress(t *testing.T) {
+	for _, mutation := range []struct {
+		name string
+		code string
+	}{
+		{
+			name: "call with address",
+			code: "s.store.Fill(&err)",
+		},
+		{
+			name: "assignment through pointer",
+			code: "p := &err\n\t*p = store.ErrMissing",
+		},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			violations, err := NewErrorsIsTargetUnreachableRule().AnalyzeGoProject(rulestest.Project(t, map[string]string{
+				"store/store.go": `package store
+
+import "errors"
+
+var ErrMissing = errors.New("missing")
+
+type Store struct{}
+
+func (*Store) Report() error { return ErrMissing }
+func (*Store) Fill(err *error) { *err = ErrMissing }
+`,
+				"service/service.go": `package service
+
+import (
+	"errors"
+
+	"example.com/rulestest/store"
+)
+
+type Service struct{ store *store.Store }
+
+func (s *Service) Submit() error {
+	err := s.store.Report()
+	if errors.Is(err, store.ErrMissing) {
+		return nil
+	}
+	` + mutation.code + `
+	return err
+}
+`,
+				"api/api.go": `package api
+
+import (
+	"errors"
+
+	"example.com/rulestest/service"
+	"example.com/rulestest/store"
+)
+
+type Handler struct{ service *service.Service }
+
+func (h *Handler) Check() error {
+	err := h.service.Submit()
+	if errors.Is(err, store.ErrMissing) {
+		return nil
+	}
+	return err
+}
+`,
+			}))
+			require.NoError(t, err)
+			assert.Empty(t, patterntest.FoundLines(violations))
+		})
+	}
+}
+
+func TestErrorsIsTargetUnreachableHandledThenUntouched(t *testing.T) {
+	violations, err := NewErrorsIsTargetUnreachableRule().AnalyzeGoProject(rulestest.Project(t, map[string]string{
+		"store/store.go": `package store
+
+import "errors"
+
+var ErrMissing = errors.New("missing")
+
+type Store struct{}
+
+func (*Store) Report() error { return ErrMissing }
+`,
+		"service/service.go": `package service
+
+import (
+	"errors"
+
+	"example.com/rulestest/store"
+)
+
+type Service struct{ store *store.Store }
+
+func (s *Service) Submit() error {
+	err := s.store.Report()
+	if errors.Is(err, store.ErrMissing) {
+		return nil
+	}
+	return err
+}
+`,
+		"api/api.go": `package api
+
+import (
+	"errors"
+
+	"example.com/rulestest/service"
+	"example.com/rulestest/store"
+)
+
+type Handler struct{ service *service.Service }
+
+func (h *Handler) Check() error {
+	err := h.service.Submit()
+	if errors.Is(err, store.ErrMissing) {
+		return nil
+	}
+	return err
+}
+`,
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"api/api.go:14"}, patterntest.FoundLines(violations))
+}

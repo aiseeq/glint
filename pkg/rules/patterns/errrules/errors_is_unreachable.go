@@ -1216,7 +1216,7 @@ func (f *errorFlow) handledBefore(fn patternkit.TypedFunc, v *types.Var, at ast.
 				if stmt.Pos() >= child.Pos() {
 					continue
 				}
-				if patternkit.AssignsVar(fn.Info, stmt, v) {
+				if patternkit.MayMutateVar(fn.Info, stmt, v) {
 					break
 				}
 				guard, ok := stmt.(*ast.IfStmt)
