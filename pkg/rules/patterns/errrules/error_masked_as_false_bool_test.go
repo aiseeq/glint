@@ -13,7 +13,7 @@ import (
 
 func TestErrorMaskedAsFalseBoolTypedLoggers(t *testing.T) {
 	const code = `package p
-import ("log"; "log/slog")
+import ("fmt"; "log"; "log/slog"; "os")
 type entry struct{}
 func (entry) WithError(error) entry { return entry{} }
 func (entry) WithField(string, any) entry { return entry{} }
@@ -35,6 +35,7 @@ func named(err error, logger report) bool { if err != nil { _ = logger.Error(); 
 type renderer struct{}
 func (renderer) Warn(error) string { return "error" }
 func wrapped(err error, r renderer) bool { if err != nil { r.Warn(err); return false }; return true }
+func stderr(err error) bool { if err != nil { fmt.Fprintf(os.Stderr, "failed: %v\n", err); return false }; return true }
 `
 	ctx := core.NewFileContext("/src/p.go", "/src", []byte(code), core.DefaultConfig())
 	fset, file, err := core.NewParser().ParseGoFile("/src/p.go", []byte(code))

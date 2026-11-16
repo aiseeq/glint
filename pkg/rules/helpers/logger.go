@@ -42,11 +42,16 @@ func IsLoggerCallTyped(call *ast.CallExpr, info *types.Info) bool {
 	if !ok {
 		return false
 	}
-	if sig, ok := info.TypeOf(sel).(*types.Signature); ok && sig.Results().Len() != 0 {
-		return false
-	}
+	sig, _ := info.TypeOf(sel).(*types.Signature)
+	// A method that returns only a string builds a text, as Error() string
+	// does, and logs nothing; a logger may still return a count or an error
+	// (fmt.Fprintf to os.Stderr, a Log method that returns error).
 	if IsLoggerCall(call) {
-		return true
+		return sig == nil || !returnsOnlyString(sig)
+	}
+	// A match by type alone is a call that returns nothing.
+	if sig != nil && sig.Results().Len() != 0 {
+		return false
 	}
 	if !loggingVerbs[LogVerb(sel)] {
 		return false
@@ -174,4 +179,12 @@ func ExprText(expr ast.Expr) string {
 	default:
 		return ""
 	}
+}
+
+func returnsOnlyString(sig *types.Signature) bool {
+	if sig.Results().Len() != 1 {
+		return false
+	}
+	basic, ok := types.Unalias(sig.Results().At(0).Type()).Underlying().(*types.Basic)
+	return ok && basic.Kind() == types.String
 }
