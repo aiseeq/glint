@@ -1,6 +1,8 @@
 package shellrules
 
 import (
+	"github.com/aiseeq/akit/shellcmd"
+
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -449,15 +451,39 @@ func singleKillFixture(value string) bool {
 	if strings.ContainsAny(trimmed, "\r\n") || strings.ContainsAny(trimmed, ";&|") {
 		return false
 	}
-	commands := shellCommands(trimmed)
-	if len(commands) != 1 {
-		return false
-	}
 	word := signalShellWords(trimmed, 0)
-	if len(word) == 0 || unquote(word[0].text) != "kill" {
+	if len(word) > 0 && unquote(word[0].text) == "kill" {
+		return len(shellCommands(trimmed)) == 1
+	}
+	return isWrappedKillFixture(trimmed)
+}
+
+// directKillWrappers run the command they wrap themselves, not through a shell.
+var directKillWrappers = map[string]bool{
+	"sudo": true, "doas": true, "timeout": true, "nice": true, "ionice": true, "env": true,
+	"nohup": true, "setsid": true, "stdbuf": true, "taskset": true, "chrt": true,
+}
+
+// isWrappedKillFixture reports a lone kill behind wrappers that run it directly,
+// the same fixture as a bare kill: every other call of the text is one of those
+// wrappers or an assignment shellcmd lists after sudo's options, so a nested
+// shell — itself a call — leaves its kill a finding.
+func isWrappedKillFixture(text string) bool {
+	calls, err := shellcmd.Calls(text)
+	if err != nil {
 		return false
 	}
-	return true
+	kills := 0
+	for _, call := range calls {
+		switch {
+		case call.Name == "kill":
+			kills++
+		case directKillWrappers[call.Name], strings.Contains(call.Name, "="):
+		default:
+			return false
+		}
+	}
+	return kills == 1
 }
 
 func shellExecutedLiterals(file *ast.File, info *types.Info) map[*ast.BasicLit]bool {

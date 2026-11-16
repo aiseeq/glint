@@ -1127,3 +1127,33 @@ func TestTable(t *testing.T) {
 	}
 	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
 }
+
+// A lone kill behind wrappers that run it directly (sudo with its options and
+// assignments, timeout, nice) is the same fixture as a bare kill; a kill that a
+// nested shell runs behind them is still a finding.
+func TestSignalImplicitTargetWrappedKillIsFixture(t *testing.T) {
+	source := "package sample\n" +
+		"type toolInput struct{ Command string }\n" +
+		"type guard struct{}\n" +
+		"func (guard) Validate(in *toolInput) bool { return len(in.Command) > 0 }\n" +
+		"func tables() {\n" +
+		"	for _, command := range []string{`sudo kill -9 -1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
+		"	for _, command := range []string{`sudo -- X=1 kill -9 -1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
+		"	for _, command := range []string{`sudo -u root -- X=1 kill -9 -1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
+		"	for _, command := range []string{`sudo -- X=1 k\\ill -9 -1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
+		"	for _, command := range []string{`sudo -- A=$a B=1 /bin/kill -9 -1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
+		"	for _, command := range []string{`timeout 5 nice kill -9 -1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
+		"	for _, command := range []string{`sudo -- X=1 bash <<< 'kill -9 -1'`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT\n" +
+		"	for _, command := range []string{`sudo bash -c 'kill -9 $PPID'`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT\n" +
+		"	for _, command := range []string{`sudo kill -9 -1 $(sh -c 'kill -9 -1')`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT\n" +
+		"	for _, command := range []string{`timeout 5 kill -9 -1 $(sudo kill -9 -1)`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT\n" +
+		"}\n"
+	file, pkg := signalSourceTyped(t, "guard_test.go", source)
+	var want []int
+	for i, line := range strings.Split(source, "\n") {
+		if strings.Contains(line, "// WANT") && !strings.Contains(line, "WANT-NONE") {
+			want = append(want, i+1)
+		}
+	}
+	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+}
