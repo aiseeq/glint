@@ -220,6 +220,12 @@ type FlowRule[S, C any] interface {
 	Normalize(edges *FlowEdges[S])
 }
 
+// flowFallthroughCaseRule lets a rule whose state tracks lexical depth add the
+// target case's scope to a fallthrough state without evaluating its guard.
+type flowFallthroughCaseRule[S, C any] interface {
+	FallthroughCaseClause(sw ast.Stmt, clause *ast.CaseClause, state S, scope C) S
+}
+
 // Walk runs the statement list of a callable body. The rule prepares the
 // function-level scope itself; the walker does not open a scope for the body.
 func (w *FlowWalker[S, C]) Walk(body *ast.BlockStmt, state S, scope C) FlowEdges[S] {
@@ -540,12 +546,24 @@ func (w *FlowWalker[S, C]) switchLike(
 		w.depth++
 		// A fallthrough from the previous clause enters this body without
 		// evaluating its guard.
+		if w.Rule.LiveState(carried) {
+			if rule, ok := any(w.Rule).(flowFallthroughCaseRule[S, C]); ok {
+				carried = rule.FallthroughCaseClause(sw, clause, carried, clauseScope)
+			}
+		}
 		clauseState = w.join(clauseState, carried)
 		clauseEdges := w.deadEdges()
 		if w.Rule.LiveState(clauseState) {
 			clauseEdges = w.stmtList(clause.Body, clauseState, clauseScope)
 		}
 		carried = w.takeFallthrough()
+		if w.Rule.LiveState(carried) {
+			fallthroughEdges := w.deadEdges()
+			fallthroughEdges.Next = carried
+			w.Rule.LeaveScope(FlowScopeCaseClause, clauseScope, &fallthroughEdges)
+			w.notifyScopeLeft(FlowScopeCaseClause, clause, &fallthroughEdges)
+			carried = fallthroughEdges.Next
+		}
 		w.leaveScope(FlowScopeCaseClause, clause, clauseScope, &clauseEdges)
 		edges.Next = w.join(edges.Next, clauseEdges.Next)
 		edges.Next = w.join(edges.Next, clauseEdges.Breaks)

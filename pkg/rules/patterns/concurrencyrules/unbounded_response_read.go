@@ -356,6 +356,16 @@ func (a *unboundedResponseAnalyzer) CaseClause(
 	return state, parent
 }
 
+func (*unboundedResponseAnalyzer) FallthroughCaseClause(
+	_ ast.Stmt,
+	_ *ast.CaseClause,
+	state *responseState,
+	_ struct{},
+) *responseState {
+	state.pushScope()
+	return state
+}
+
 func (a *unboundedResponseAnalyzer) CommClause(
 	_ *ast.CommClause,
 	state *responseState,

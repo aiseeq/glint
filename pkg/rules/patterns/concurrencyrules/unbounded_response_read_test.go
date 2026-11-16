@@ -600,6 +600,127 @@ func fetch() {
 	}
 }
 
+func TestUnboundedResponseReadFallthroughShadowedResponse(t *testing.T) {
+	violations := rulestest.RunRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"fallthrough_shadow.go": `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+type fake struct{ Body io.Reader }
+
+func fetch(k int) ([]byte, error) {
+	resp, err := http.Get("https://example.com")
+	if err != nil {
+		return nil, err
+	}
+	switch k {
+	case 1:
+		resp := fake{}
+		_ = resp
+		fallthrough
+	case 2:
+		return io.ReadAll(resp.Body)
+	}
+	return nil, nil
+}`})
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Code, "io.ReadAll(resp.Body)")
+}
+
+func TestUnboundedResponseReadFallthroughDefinedResponse(t *testing.T) {
+	violations := rulestest.RunRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"fallthrough_defined.go": `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+type fake struct{ Body io.Reader }
+
+func fetch(k int) ([]byte, error) {
+	resp := fake{}
+	switch k {
+	case 1:
+		resp, err := http.Get("https://example.com")
+		_, _ = resp, err
+		fallthrough
+	case 2:
+		return io.ReadAll(resp.Body)
+	}
+	return nil, nil
+}`})
+	require.Empty(t, violations)
+}
+
+func TestUnboundedResponseReadFallthroughDepth(t *testing.T) {
+	violations := rulestest.RunRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"fallthrough_depth.go": `package fetch
+
+import (
+	"io"
+	"net/http"
+)
+
+type fake struct{ Body io.Reader }
+
+func d1(k int) ([]byte, error) {
+	resp, err := http.Get("https://example.com")
+	if err != nil { return nil, err }
+	switch k {
+	case 1:
+		fallthrough
+	case 2:
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func d2(k, j int) ([]byte, error) {
+	resp, err := http.Get("https://example.com")
+	if err != nil { return nil, err }
+	if k > 0 {
+		switch k {
+		case 1:
+			fallthrough
+		case 2:
+			switch j {
+			case 1:
+				fallthrough
+			default:
+			}
+		}
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func d3(k int) ([]byte, error) {
+	resp, err := http.Get("https://example.com")
+	if err != nil { return nil, err }
+	switch k {
+	case 1:
+		fallthrough
+	case 2:
+		resp := fake{}
+		_ = resp
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func d4(k int) ([]byte, error) {
+	resp := fake{}
+	switch k {
+	case 1:
+		fallthrough
+	case 2:
+		resp, err := http.Get("https://example.com")
+		_, _ = resp, err
+	}
+	return io.ReadAll(resp.Body)
+}`})
+	require.Len(t, violations, 3)
+	assert.Equal(t, []int{18, 36, 49}, []int{violations[0].Line, violations[1].Line, violations[2].Line})
+}
+
 // ioutil.ReadAll is io.ReadAll under its old name: the same unbounded read.
 func TestUnboundedResponseReadRule_DeprecatedIoutil(t *testing.T) {
 	violations := rulestest.RunRuleOnFiles(t, NewUnboundedResponseReadRule(), map[string]string{"legacy.go": `package fetch
