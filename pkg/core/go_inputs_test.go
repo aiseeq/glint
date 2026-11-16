@@ -81,6 +81,33 @@ func TestGoInputsChangeWithWhatTheLoadReads(t *testing.T) {
 	}
 }
 
+func TestGoInputsChangeWithImportedTestdataPackage(t *testing.T) {
+	module, root := inputsModule(t)
+	writeInputsFile(t, module, "svc/svc.go", "package svc\n\nimport \"example.com/inputs/testdata/x\"\n\nvar V = x.Value\n")
+	writeInputsFile(t, module, "testdata/x/x.go", "package x\n\nconst Value = 1\n")
+	base, cacheable := inputsOf(t, root)
+	require.True(t, cacheable)
+
+	writeInputsFile(t, module, "testdata/x/x.go", "package x\n\nconst Value = 2\n")
+	changed, cacheable := inputsOf(t, root)
+	require.True(t, cacheable)
+	assert.NotEqual(t, base, changed, "an imported testdata package changes the typed load")
+}
+
+func TestGoInputsIgnoreUnimportedTestdata(t *testing.T) {
+	module, root := inputsModule(t)
+	writeInputsFile(t, module, "testdata/fixture.json", `{"value":1}`)
+	writeInputsFile(t, module, "testdata/unused/unused.go", "package unused\n\nconst Value = 1\n")
+	base, cacheable := inputsOf(t, root)
+	require.True(t, cacheable)
+
+	writeInputsFile(t, module, "testdata/fixture.json", `{"value":2}`)
+	writeInputsFile(t, module, "testdata/unused/unused.go", "package unused\n\nconst Value = 2\n")
+	changed, cacheable := inputsOf(t, root)
+	require.True(t, cacheable)
+	assert.Equal(t, base, changed, "unimported testdata fixtures do not change the typed load")
+}
+
 // Project rules check SQL against the schema the migrations leave: the SQL
 // files under the root are inputs too, wherever the module is.
 func TestGoInputsChangeWithSQLFiles(t *testing.T) {
@@ -537,4 +564,18 @@ func TestGoInputsSymlinkLoopCountsAsDangling(t *testing.T) {
 
 	_, cacheable := replaceInputs(t, module)
 	assert.True(t, cacheable)
+}
+
+func TestGoInputsChangeWithTransitiveTestdataImportInGroup(t *testing.T) {
+	module, root := inputsModule(t)
+	writeInputsFile(t, module, "svc/svc.go", "package svc\n\nimport (\n\t\"fmt\" // print\n\tfx \"example.com/inputs/testdata/x\"\n)\n\nfunc Show() { fmt.Println(fx.Value) }\n")
+	writeInputsFile(t, module, "testdata/x/x.go", "package x\n\nimport . \"example.com/inputs/internal/testdata/y\"\n\nconst Value = Inner\n")
+	writeInputsFile(t, module, "internal/testdata/y/y.go", "package y\n\nconst Inner = 1\n")
+	base, cacheable := inputsOf(t, root)
+	require.True(t, cacheable)
+
+	writeInputsFile(t, module, "internal/testdata/y/y.go", "package y\n\nconst Inner = 2\n")
+	changed, cacheable := inputsOf(t, root)
+	require.True(t, cacheable)
+	assert.NotEqual(t, base, changed, "a testdata package imported by an imported testdata package changes the typed load")
 }

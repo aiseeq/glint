@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/scanner"
+	"go/token"
 	"hash"
 	"io/fs"
 	"maps"
@@ -14,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -55,7 +58,8 @@ type moduleInputs struct {
 // target that is not a Go module.
 //
 // The walk skips what the go command ignores (directories starting with . or
-// _, testdata, nested modules) and node_modules, which holds no Go packages.
+// _, unimported testdata, nested modules) and node_modules, which holds no Go
+// packages. Explicitly imported testdata packages are hashed separately.
 func (l *GoProjectLoader) GoInputs(root string, contexts []*FileContext, tolerate bool) (hash string, cacheable bool, err error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
@@ -263,12 +267,16 @@ func hashModuleTree(sum hash.Hash, dir string, visited map[string]struct{}) (boo
 		writeHashLine(sum, "replace %s\n", target)
 		localReplaces = append(localReplaces, target)
 	}
-	if err := hashModuleSources(sum, dir, dir, visited, false); err != nil {
+	imports := make(map[string]struct{})
+	if err := hashModuleSources(sum, dir, dir, visited, false, imports); err != nil {
 		var linkedErr *linkedTreeReadError
 		if errors.As(err, &linkedErr) {
 			return false, nil
 		}
 		return false, fmt.Errorf("hash Go sources of %s: %w", dir, err)
+	}
+	if err := hashImportedTestdataPackages(sum, dir, mod.Module.Mod.Path, imports); err != nil {
+		return false, fmt.Errorf("hash imported testdata packages of %s: %w", dir, err)
 	}
 	for _, target := range localReplaces {
 		cacheable, err := isLocalReplaceModule(target)
@@ -318,7 +326,7 @@ func (e *linkedTreeReadError) Error() string { return e.err.Error() }
 func (e *linkedTreeReadError) Unwrap() error { return e.err }
 
 // hashModuleSources walks module files and Go sources, following symlinks.
-func hashModuleSources(sum hash.Hash, dir, moduleRoot string, visited map[string]struct{}, underExternalLink bool) error {
+func hashModuleSources(sum hash.Hash, dir, moduleRoot string, visited map[string]struct{}, underExternalLink bool, imports map[string]struct{}) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return markLinkedTreeReadError(err, underExternalLink)
@@ -365,7 +373,7 @@ func hashModuleSources(sum hash.Hash, dir, moduleRoot string, visited map[string
 				continue
 			}
 			visited[resolved] = struct{}{}
-			if err := hashModuleSources(sum, resolved, moduleRoot, visited, childUnderExternalLink); err != nil {
+			if err := hashModuleSources(sum, resolved, moduleRoot, visited, childUnderExternalLink, imports); err != nil {
 				return err
 			}
 			continue
@@ -376,12 +384,139 @@ func hashModuleSources(sum hash.Hash, dir, moduleRoot string, visited map[string
 		isModuleFile := filepath.Dir(path) == dir && (name == "go.mod" || name == "go.sum")
 		isVendorList := name == "modules.txt" && filepath.Base(filepath.Dir(path)) == "vendor"
 		if strings.HasSuffix(name, ".go") || cgoSourceExts[filepath.Ext(name)] || isModuleFile || isVendorList {
-			if err := hashFile(sum, path); err != nil {
-				return markLinkedTreeReadError(err, childUnderExternalLink)
+			if err := hashModuleSourceFile(sum, path, name, childUnderExternalLink, imports); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
+}
+
+func hashModuleSourceFile(sum hash.Hash, path, name string, underExternalLink bool, imports map[string]struct{}) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return markLinkedTreeReadError(err, underExternalLink)
+	}
+	hashFileContent(sum, path, data)
+	if strings.HasSuffix(name, ".go") {
+		collectGoImportsFromSource(path, data, imports)
+	}
+	return nil
+}
+
+func collectGoImportsFromSource(path string, source []byte, imports map[string]struct{}) {
+	fileSet := token.NewFileSet()
+	file := fileSet.AddFile(path, -1, len(source))
+	var scan scanner.Scanner
+	scan.Init(file, source, nil, 0)
+	inImportGroup := false
+	for {
+		_, tok, literal := scan.Scan()
+		// Imports precede every other declaration, so the first one ends them.
+		if tok == token.EOF || tok == token.FUNC || tok == token.TYPE || tok == token.VAR || tok == token.CONST {
+			return
+		}
+		if tok == token.IMPORT {
+			_, tok, literal = scan.Scan()
+			if tok == token.LPAREN {
+				inImportGroup = true
+				continue
+			}
+			if tok == token.IDENT || tok == token.PERIOD {
+				_, tok, literal = scan.Scan()
+			}
+			if tok == token.STRING {
+				addGoImport(literal, imports)
+			}
+			continue
+		}
+		if tok == token.RPAREN {
+			inImportGroup = false
+		} else if inImportGroup && tok == token.STRING {
+			addGoImport(literal, imports)
+		}
+	}
+}
+
+func addGoImport(literal string, imports map[string]struct{}) {
+	importPath, err := strconv.Unquote(literal)
+	if err == nil {
+		imports[importPath] = struct{}{}
+	}
+}
+
+// hashImportedTestdataPackages hashes only testdata packages reached by Go
+// imports in the module, following further testdata imports transitively.
+func hashImportedTestdataPackages(sum hash.Hash, moduleDir, modulePath string, imports map[string]struct{}) error {
+	queue := slices.Sorted(maps.Keys(imports))
+	seen := make(map[string]struct{})
+	for len(queue) > 0 {
+		slices.Sort(queue)
+		importPath := queue[0]
+		queue = queue[1:]
+		packageDir, ok := importedTestdataPackageDir(moduleDir, modulePath, importPath)
+		if !ok {
+			continue
+		}
+		if _, ok := seen[importPath]; ok {
+			continue
+		}
+		seen[importPath] = struct{}{}
+		packageImports, err := hashTestdataPackageSources(sum, packageDir)
+		if err != nil {
+			return err
+		}
+		for _, candidate := range packageImports {
+			if _, done := seen[candidate]; !done {
+				queue = append(queue, candidate)
+			}
+		}
+	}
+	return nil
+}
+
+func importedTestdataPackageDir(moduleDir, modulePath, importPath string) (string, bool) {
+	prefix := modulePath + "/"
+	if !strings.HasPrefix(importPath, prefix) {
+		return "", false
+	}
+	rel := strings.TrimPrefix(importPath, prefix)
+	if !filepath.IsLocal(filepath.FromSlash(rel)) {
+		return "", false
+	}
+	for segment := range strings.SplitSeq(rel, "/") {
+		if segment == "testdata" {
+			return filepath.Join(moduleDir, filepath.FromSlash(rel)), true
+		}
+	}
+	return "", false
+}
+
+func hashTestdataPackageSources(sum hash.Hash, dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	imports := make(map[string]struct{})
+	for _, entry := range entries {
+		if entry.IsDir() || !entry.Type().IsRegular() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".go") && !cgoSourceExts[filepath.Ext(name)] {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		source, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		hashFileContent(sum, path, source)
+		if strings.HasSuffix(name, ".go") {
+			collectGoImportsFromSource(path, source, imports)
+		}
+	}
+	return slices.Sorted(maps.Keys(imports)), nil
 }
 
 // followLink writes the link at path and its target into the hash and
@@ -427,8 +562,12 @@ func hashFile(sum hash.Hash, path string) error {
 	if err != nil {
 		return err
 	}
-	writeHashLine(sum, "file %s %x\n", path, sha256.Sum256(data))
+	hashFileContent(sum, path, data)
 	return nil
+}
+
+func hashFileContent(sum hash.Hash, path string, data []byte) {
+	writeHashLine(sum, "file %s %x\n", path, sha256.Sum256(data))
 }
 
 func hashOptionalFile(sum hash.Hash, path string) error {
