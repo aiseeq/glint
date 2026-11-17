@@ -948,6 +948,81 @@ func TestDuplicateFuncOfLibraryPeerRootsUseSameOwnerGitHead(t *testing.T) {
 	assert.NotEqual(t, before, after, "a peer commit changes the project result cache inputs")
 }
 
+func TestDuplicateFuncOfLibraryPeerRootModuleInRepositorySubdirectory(t *testing.T) {
+	repo := t.TempDir()
+	moduleDir := filepath.Join(repo, "backend")
+	writeLibraryTestModule(t, moduleDir, "example.com/owner/backend", map[string]string{
+		"pair.go": `package backend
+func splitPair(raw string) (string, string) { return raw, "" }
+`,
+	})
+	gitPeerTest(t, repo, "init", "-q")
+	gitPeerTest(t, repo, "add", "-A")
+	gitPeerTest(t, repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
+	sha, err := peerHeadSHA(moduleDir)
+	require.NoError(t, err)
+	source, tempRoot, err := peerHeadSource(moduleDir, sha)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, os.RemoveAll(tempRoot)) })
+	assert.FileExists(t, filepath.Join(source, "go.mod"))
+	assert.FileExists(t, filepath.Join(source, "pair.go"))
+}
+
+func TestDuplicateFuncOfLibraryPeerNearCopyUsingProjectNamedTypesIsIgnored(t *testing.T) {
+	rulestest.IsolateUserCache(t, t.TempDir())
+	t.Setenv("GOWORK", "off")
+	root := t.TempDir()
+	peers := filepath.Join(root, "peers")
+	projectA := filepath.Join(peers, "project-a")
+	projectF := filepath.Join(peers, "project-f")
+	projectSource := `package project
+type Option struct{ Value, Label string }
+func toOptions(values []string) []Option {
+	result := make([]Option, len(values))
+	for i, v := range values {
+		result[i] = Option{Value: v, Label: v}
+	}
+	return result
+}
+
+func includesOption(values []any) bool {
+	for _, value := range values {
+		if _, ok := value.(Option); ok {
+			return true
+		}
+	}
+	return false
+}
+`
+	peerSource := `package project
+type Item struct{ Code, Name string }
+type Row struct{ Value, Label string }
+func toOverrides(src map[string]Item) map[string]Row {
+	out := make(map[string]Row, len(src))
+	for id, e := range src {
+		out[id] = Row{Value: e.Code, Label: e.Name}
+	}
+	return out
+}
+func includesItem(values []any) bool {
+	for _, value := range values {
+		if _, ok := value.(Item); ok {
+			return true
+		}
+	}
+	return false
+}
+`
+	writePeerModule(t, projectA, "example.com/owner/a", projectSource)
+	writePeerModule(t, projectF, "example.com/owner/f", peerSource)
+	ctx := loadLibraryTestProject(t, projectA, projectA, projectSource)
+	rule := NewDuplicateFuncOfLibraryRule()
+	require.NoError(t, rule.Configure(map[string]any{"peer_roots": []string{filepath.Join(peers, "*")}}))
+	violations, err := rule.AnalyzeGoProject(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, violations, "near copies involving types declared by the project cannot be moved to a shared module")
+}
+
 func peerAmountCopy(name, comma, space, empty, prefix string) string {
 	return fmt.Sprintf(`package project
 import "strings"
@@ -1484,4 +1559,84 @@ func TestDuplicateFuncAcrossPackagesTestImportThroughDependency(t *testing.T) {
 
 	write("label_test.go", "package alpha\n\nimport \"example.com/ext/mid\"\n\nvar _ = mid.Name\n")
 	assert.False(t, newImportGraph(ctx).importedByAll(alphaTypes, copies), "the test of alpha reaches beta through mid, a dependency of gamma")
+}
+
+func TestDuplicateFuncOfLibraryPeerTypeSetsMatchAcrossModulePackages(t *testing.T) {
+	rulestest.IsolateUserCache(t, t.TempDir())
+	t.Setenv("GOWORK", "off")
+	root := t.TempDir()
+	peers := filepath.Join(root, "peers")
+	projectA := filepath.Join(peers, "project-a")
+	projectF := filepath.Join(peers, "project-f")
+	projectSource := `package project
+type Money struct{ Units int64 }
+func (m Money) Equal(o Money) bool { return m.Units == o.Units }
+func sameMoney(left, right *Money) bool {
+	if left == nil || right == nil { return left == nil && right == nil }
+	return left.Equal(*right)
+}
+`
+	peerSource := `package project
+import "time"
+func sameMoment(a, b *time.Time) bool {
+	if a == nil || b == nil { return a == nil && b == nil }
+	return a.Equal(*b)
+}
+`
+	clientSource := `package client
+import "strings"
+type Config struct { Token string; Header map[string]string }
+type Option func(*Config)
+func WithToken(token string) Option {
+	return func(c *Config) {
+		token = strings.TrimSpace(token)
+		if c.Header == nil { c.Header = make(map[string]string) }
+		c.Header["Authorization"] = "Bearer " + token
+		c.Token = token
+	}
+}
+`
+	writePeerModule(t, projectA, "example.com/owner/a", projectSource)
+	writePeerModule(t, projectF, "example.com/owner/f", peerSource)
+	for dir, source := range map[string]string{
+		filepath.Join(projectA, "client", "client.go"): clientSource,
+		filepath.Join(projectF, "client", "client.go"): strings.ReplaceAll(clientSource, "WithToken", "WithAuth"),
+	} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(dir), 0o755))
+		require.NoError(t, os.WriteFile(dir, []byte(source), 0o644))
+	}
+	gitPeerTest(t, projectA, "add", "client/client.go")
+	gitPeerTest(t, projectA, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "client")
+	gitPeerTest(t, projectF, "add", "client/client.go")
+	gitPeerTest(t, projectF, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "client")
+
+	check := func(source, relative, wantName string, want bool) {
+		t.Helper()
+		moduleDir := projectA
+		if relative != "amount.go" {
+			moduleDir = filepath.Join(projectA, "client")
+		}
+		var ctx *core.GoProjectContext
+		if relative == "amount.go" {
+			ctx = loadLibraryTestProject(t, projectA, moduleDir, source)
+		} else {
+			filePath := filepath.Join(moduleDir, "client.go")
+			fileCtx, err := core.NewFileContextChecked(filePath, projectA, []byte(source), core.DefaultConfig())
+			require.NoError(t, err)
+			ctx, err = core.LoadGoProject(projectA, []*core.FileContext{fileCtx}, core.GoProjectOptions{})
+			require.NoError(t, err)
+		}
+		rule := NewDuplicateFuncOfLibraryRule()
+		require.NoError(t, rule.Configure(map[string]any{"peer_roots": []string{filepath.Join(peers, "*")}}))
+		violations, err := rule.AnalyzeGoProject(ctx)
+		require.NoError(t, err)
+		if want {
+			require.NotEmpty(t, violations)
+			assert.Contains(t, violations[0].Message, wantName)
+		} else {
+			assert.Empty(t, violations, relative)
+		}
+	}
+	check(projectSource, "amount.go", "", false)
+	check(clientSource, "client/client.go", "WithAuth", true)
 }

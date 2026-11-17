@@ -122,9 +122,10 @@ func (r *DuplicateFuncOfLibraryRule) RequiresSSA() bool { return false }
 var libraryPackageLoads atomic.Int64
 
 type libraryFunction struct {
-	Name       string `json:"name"`
-	Package    string `json:"package"`
-	ImportPath string `json:"import_path"`
+	Name       string   `json:"name"`
+	Package    string   `json:"package"`
+	ImportPath string   `json:"import_path"`
+	Types      []string `json:"types,omitempty"`
 }
 
 // libraryNearFunction is a library function in the form of the near
@@ -142,6 +143,7 @@ type libraryCacheEntry struct {
 type libraryMatch struct {
 	name, module, packageName, importPath string
 	peer                                  bool
+	types                                 []string
 }
 
 // moduleLibrary is what the libraries of one project module offer: the exact
@@ -189,7 +191,7 @@ func (r *DuplicateFuncOfLibraryRule) AnalyzeGoProject(ctx *core.GoProjectContext
 	}
 	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		id := fileModules[filepath.Clean(file.Path)]
-		return r.findLibraryDuplicates(ctx, file, info, libraries[id])
+		return r.findLibraryDuplicates(ctx, file, info, libraries[id], modules[id].path)
 	})
 }
 
@@ -211,7 +213,7 @@ func (r *DuplicateFuncOfLibraryRule) mergePeerModules(lib *moduleLibrary, projec
 			r.warnLibraryInput(peer.path, "identify analyzer", err)
 			continue
 		}
-		key := toolcache.Key([]byte("peer"), []byte(peer.path), []byte(sha), []byte(buildHash))
+		key := toolcache.Key([]byte("peer-types-v1"), []byte(peer.path), []byte(sha), []byte(buildHash))
 		entry, hit, err := r.loadCache(cache, key)
 		if err != nil {
 			r.warnLibraryInput(peer.path, "read cache", err)
@@ -236,7 +238,7 @@ func (r *DuplicateFuncOfLibraryRule) mergePeerModules(lib *moduleLibrary, projec
 		}
 		for body, functions := range entry.Keys {
 			for _, fn := range functions {
-				candidate := libraryMatch{name: fn.Name, module: peer.path, packageName: fn.Package, importPath: fn.ImportPath, peer: true}
+				candidate := libraryMatch{name: fn.Name, module: peer.path, packageName: fn.Package, importPath: fn.ImportPath, peer: true, types: fn.Types}
 				if current, ok := lib.keys[body]; !ok || libraryMatchLess(candidate, current) {
 					lib.keys[body] = candidate
 				}
@@ -245,7 +247,7 @@ func (r *DuplicateFuncOfLibraryRule) mergePeerModules(lib *moduleLibrary, projec
 		for i := range entry.Near {
 			fn := &entry.Near[i]
 			if fn.Lang == "go" {
-				candidate := libraryMatch{name: fn.Name, module: peer.path, packageName: fn.Package, importPath: fn.ImportPath, peer: true}
+				candidate := libraryMatch{name: fn.Name, module: peer.path, packageName: fn.Package, importPath: fn.ImportPath, peer: true, types: fn.Types}
 				lib.goCandidates = append(lib.goCandidates, newNearCandidate(candidate, fn.Body))
 			}
 		}
@@ -332,15 +334,21 @@ func peerHeadSHA(dir string) (string, error) {
 }
 
 func peerHeadSource(dir, sha string) (string, string, error) {
+	repoCmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+	repoBytes, err := repoCmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("find peer repository root: %w", err)
+	}
+	repoRoot := strings.TrimSpace(string(repoBytes))
 	prefixCmd := exec.Command("git", "-C", dir, "rev-parse", "--show-prefix")
 	prefixBytes, err := prefixCmd.Output()
 	if err != nil {
 		return "", "", fmt.Errorf("find module path inside git repository: %w", err)
 	}
 	prefix := filepath.Clean(filepath.FromSlash(strings.TrimSpace(string(prefixBytes))))
-	archiveArgs := []string{"-C", dir, "archive", "--format=tar", sha}
+	archiveArgs := []string{"-C", repoRoot, "archive", "--format=tar", sha}
 	if prefix != "." {
-		archiveArgs = append(archiveArgs, "--", filepath.ToSlash(prefix))
+		archiveArgs = append(archiveArgs, "--", ":(literal)"+filepath.ToSlash(prefix))
 	}
 	archiveCmd := exec.Command("git", archiveArgs...)
 	archive, err := archiveCmd.Output()
@@ -548,7 +556,7 @@ func mergeImportableFunctions(keys map[string]libraryMatch, project goModule, de
 	}
 }
 
-func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectContext, file *core.FileContext, info *types.Info, lib *moduleLibrary) []*core.Violation {
+func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectContext, file *core.FileContext, info *types.Info, lib *moduleLibrary, projectPath string) []*core.Violation {
 	if lib == nil || len(lib.keys) == 0 && lib.goNear.empty() {
 		return nil
 	}
@@ -559,19 +567,156 @@ func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectCo
 			continue
 		}
 		line := ctx.FileSet.Position(fd.Pos()).Line
+		functionTypes := functionNamedTypes(fd, info, projectPath)
+		functionTypeSet := stringSet(functionTypes)
 		if match, ok := exactLibraryMatch(fd, info, lib.keys); ok {
-			if !file.IsSuppressed(line, r.Name()) {
-				out = append(out, r.libraryViolation(file, fd, line, match, 1, true))
+			if !match.peer || sameStrings(functionTypeSet, stringSet(match.types)) {
+				if !file.IsSuppressed(line, r.Name()) {
+					out = append(out, r.libraryViolation(file, fd, line, match, 1, true))
+				}
+				continue
 			}
-			continue
 		}
-		candidate, score, _ := lib.goNear.best(goNearBody(info, fd, false), func() nearBody { return goNearBody(info, fd, true) })
+		candidate, score, _ := lib.goNear.bestFiltered(goNearBody(info, fd, false), func() nearBody { return goNearBody(info, fd, true) }, func(candidate *nearCandidate) bool {
+			return !candidate.fn.peer || sameStrings(functionTypeSet, stringSet(candidate.fn.types))
+		})
 		if candidate == nil || file.IsSuppressed(line, r.Name()) {
 			continue
 		}
 		out = append(out, r.libraryViolation(file, fd, line, candidate.fn, score, false))
 	}
 	return out
+}
+
+func functionNamedTypes(fd *ast.FuncDecl, info *types.Info, modulePath string) []string {
+	if fd == nil || info == nil || modulePath == "" {
+		return nil
+	}
+	found := make(map[string]struct{})
+	if fn, ok := info.Defs[fd.Name].(*types.Func); ok {
+		collectNamedTypes(fn.Type(), modulePath, make(map[types.Type]bool), found)
+	}
+	ast.Inspect(fd, func(node ast.Node) bool {
+		if node == nil {
+			return true
+		}
+		if ident, ok := node.(*ast.Ident); ok {
+			collectObjectNamedTypes(info.Uses[ident], modulePath, found)
+			collectObjectNamedTypes(info.Defs[ident], modulePath, found)
+		}
+		if expr, ok := node.(ast.Expr); ok {
+			if value, ok := info.Types[expr]; ok {
+				collectNamedTypes(value.Type, modulePath, make(map[types.Type]bool), found)
+			}
+		}
+		return true
+	})
+	return slices.Sorted(maps.Keys(found))
+}
+
+func collectObjectNamedTypes(object types.Object, modulePath string, found map[string]struct{}) {
+	if object != nil {
+		collectNamedTypes(object.Type(), modulePath, make(map[types.Type]bool), found)
+	}
+}
+
+func collectNamedTypes(typ types.Type, modulePath string, seen map[types.Type]bool, found map[string]struct{}) {
+	if typ == nil || seen[typ] {
+		return
+	}
+	seen[typ] = true
+	var object *types.TypeName
+	switch t := typ.(type) {
+	case *types.Named:
+		object = t.Obj()
+	case *types.Alias:
+		object = t.Obj()
+	}
+	if object != nil && object.Pkg() != nil {
+		path := object.Pkg().Path()
+		identity := path + "." + object.Name()
+		if path == modulePath {
+			identity = "." + object.Name()
+		} else if strings.HasPrefix(path, strings.TrimSuffix(modulePath, "/")+"/") {
+			identity = strings.TrimPrefix(path, strings.TrimSuffix(modulePath, "/")) + "." + object.Name()
+		}
+		found[identity] = struct{}{}
+	}
+	for _, child := range typeChildren(typ) {
+		collectNamedTypes(child, modulePath, seen, found)
+	}
+}
+
+func stringSet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		out[value] = struct{}{}
+	}
+	return out
+}
+func sameStrings(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for value := range a {
+		if _, ok := b[value]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func typeChildren(typ types.Type) []types.Type {
+	var children []types.Type
+	appendType := func(child types.Type) { children = append(children, child) }
+	switch t := typ.(type) {
+	case *types.Named:
+		for arg := range t.TypeArgs().Types() {
+			appendType(arg)
+		}
+	case *types.Alias:
+		appendType(types.Unalias(t))
+	case *types.Pointer:
+		appendType(t.Elem())
+	case *types.Slice:
+		appendType(t.Elem())
+	case *types.Array:
+		appendType(t.Elem())
+	case *types.Map:
+		appendType(t.Key())
+		appendType(t.Elem())
+	case *types.Chan:
+		appendType(t.Elem())
+	case *types.Signature:
+		if t.Recv() != nil {
+			appendType(t.Recv().Type())
+		}
+		appendType(t.Params())
+		appendType(t.Results())
+	case *types.Tuple:
+		for variable := range t.Variables() {
+			appendType(variable.Type())
+		}
+	case *types.Struct:
+		for field := range t.Fields() {
+			appendType(field.Type())
+		}
+	case *types.Interface:
+		t.Complete()
+		for method := range t.Methods() {
+			appendType(method.Type())
+		}
+		for embedded := range t.EmbeddedTypes() {
+			appendType(embedded)
+		}
+	case *types.TypeParam:
+		appendType(t.Constraint())
+	case *types.Union:
+		for term := range t.Terms() {
+			appendType(term.Type())
+		}
+	}
+	return children
 }
 
 // nearCopyCandidate admits what IsDuplicateFuncBodyCandidate admits and
@@ -997,6 +1142,9 @@ func loadFunctionKeys(dir string, includeUnexported bool) (libraryCacheEntry, er
 				n.walk(fd.Body)
 				if n.nodes >= minimumDuplicateBodyNodes {
 					found := libraryFunction{Name: fd.Name.Name, Package: pkg.Name, ImportPath: pkg.PkgPath}
+					if includeUnexported {
+						found.Types = functionNamedTypes(fd, pkg.TypesInfo, pkg.Module.Path)
+					}
 					entry.Keys[n.b.String()] = append(entry.Keys[n.b.String()], found)
 					if body := goNearBody(pkg.TypesInfo, fd, true); len(body.Tokens) >= minGoNearCopyTokens {
 						entry.Near = append(entry.Near, libraryNearFunction{libraryFunction: found, Lang: "go", Body: body})

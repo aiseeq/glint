@@ -1177,6 +1177,10 @@ func newNearIndex(candidates []*nearCandidate, minTokens int) *nearIndex {
 // or above, and the similarity, and the body in detail, which detail makes
 // for the first library function that comes near.
 func (idx *nearIndex) best(body nearBody, detail func() nearBody) (*nearCandidate, float64, nearBody) {
+	return idx.bestFiltered(body, detail, nil)
+}
+
+func (idx *nearIndex) bestFiltered(body nearBody, detail func() nearBody, allow func(*nearCandidate) bool) (*nearCandidate, float64, nearBody) {
 	if idx == nil || len(body.Tokens) < idx.minTokens {
 		return nil, 0, body
 	}
@@ -1185,6 +1189,9 @@ func (idx *nearIndex) best(body nearBody, detail func() nearBody) (*nearCandidat
 	bestScore := 0.0
 	detailed := false
 	for _, c := range idx.groups[key] {
+		if allow != nil && !allow(c) {
+			continue
+		}
 		if !subsetOf(body.Lits, c.body.Lits) {
 			continue
 		}
