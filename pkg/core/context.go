@@ -379,12 +379,15 @@ func (ctx *FileContext) SuppressesFinding(line int, ruleName string, severity Se
 }
 
 // suppressingMarker returns the line of the marker that suppresses the rule
-// at line: on the line itself or of its own on the line above.
+// at line: on the line itself first, then of its own on the line above — a
+// marker of the line is the one written for its finding, and the marker above
+// stays free for its own line.
 func (ctx *FileContext) suppressingMarker(line int, ruleName string) (int, bool) {
-	for checkLine := line - 1; checkLine <= line; checkLine++ {
-		if ctx.lineSuppresses(checkLine, ruleName, checkLine < line) {
-			return checkLine, true
-		}
+	if ctx.lineSuppresses(line, ruleName, false) {
+		return line, true
+	}
+	if ctx.lineSuppresses(line-1, ruleName, true) {
+		return line - 1, true
 	}
 	return 0, false
 }

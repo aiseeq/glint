@@ -45,3 +45,16 @@ func TestSuppressionHitRatedAfterAnUnratedConsult(t *testing.T) {
 	assert.True(t, ctx.IsSuppressed(2, "my-rule"))
 	assert.Equal(t, []SuppressionHit{{Line: 1}}, ctx.TakeSuppressions("my-rule"), "a severity taken before rates no later consult")
 }
+
+// A finding on a line with a marker of its own is silenced by that marker,
+// not by a trailing marker of the line above: two calls in a row, each with
+// its marker, each marker silencing its own call. Taking the line above first
+// left the second marker unused, a false stale-suppression.
+func TestSuppressionOwnLineMarkerAnswersFirst(t *testing.T) {
+	source := "package p\nfunc g() {\n\tf() //nolint:my-rule\n\tf() //nolint:my-rule the error of f is nil here\n}\n"
+	ctx := &FileContext{Path: "a.go", RelPath: "a.go", Lines: strings.Split(source, "\n")}
+
+	assert.True(t, ctx.IsSuppressed(3, "my-rule"))
+	assert.True(t, ctx.IsSuppressed(4, "my-rule"))
+	assert.Equal(t, []SuppressionHit{{Line: 3}, {Line: 4}}, ctx.TakeSuppressions("my-rule"))
+}
