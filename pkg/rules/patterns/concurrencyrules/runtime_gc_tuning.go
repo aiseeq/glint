@@ -49,7 +49,7 @@ func NewRuntimeGCTuningRule() *RuntimeGCTuningRule {
 		BaseRule: rules.NewBaseRule(
 			"runtime-gc-tuning",
 			"patterns",
-			"Detects the collector set up from production code — debug.SetGCPercent, debug.SetMemoryLimit, os.Setenv of GOGC or GOMEMLIMIT, a forced runtime.GC, or GOGC/GOMEMLIMIT in shell, Makefile, Dockerfile or compose — it trades memory for CPU and hides where the garbage comes from; remove the allocations instead. It ignores .graft.yaml because its env configures development tasks, and ignores a bench script containing go test with -bench or -benchmem because those settings configure a measurement.",
+			"Detects the collector set up from production code — debug.SetGCPercent, debug.SetMemoryLimit, os.Setenv of GOGC or GOMEMLIMIT, a forced runtime.GC, or GOGC/GOMEMLIMIT in shell, Makefile, Dockerfile or compose — it trades memory for CPU and hides where the garbage comes from; remove the allocations instead. In compose, GOMEMLIMIT in a service with mem_limit or deploy.resources.limits.memory is an intentional memory bound; GOGC remains reportable. It ignores .graft.yaml because its env configures development tasks, and ignores a bench script containing go test with -bench or -benchmem because those settings configure a measurement.",
 			core.SeverityMedium,
 		),
 		Suggestion: "Find the allocations in the profile (go tool pprof -sample_index=alloc_space) and remove them; a memory limit sized to a container takes // runtime-gc-tuning: safe — <limit, measured RSS>",
@@ -77,6 +77,8 @@ var (
 	gcDockerEnv     = regexp.MustCompile(`(?i)^\s*ENV\s+(.*)$`)
 	gcYAMLKey       = regexp.MustCompile(`^\s*(?:-\s*)?(GOGC|GOMEMLIMIT)\s*:`)
 	gcYAMLList      = regexp.MustCompile(`^\s*-\s*(GOGC|GOMEMLIMIT)\s*=`)
+	gcYAMLAnyKey    = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+)\s*:`)
+	gcServicesKey   = regexp.MustCompile(`^\s*services\s*:`)
 	gcInlineYAML    = regexp.MustCompile(`\b(GOGC|GOMEMLIMIT)\s*:`)
 	gcBenchCommand  = regexp.MustCompile(`\bgo\s+test\b`)
 	gcBenchFlag     = regexp.MustCompile(`(?:^|\s)-bench(?:mem)?(?:=|\s|$)`)
@@ -156,11 +158,16 @@ func (r *RuntimeGCTuningRule) analyzeShellFile(ctx *core.FileContext) []*core.Vi
 	if !ok || isBenchScript(ctx.Content) {
 		return nil
 	}
+	heredocExempt := shellComposeGOMEMLIMITExemptions(ctx)
 	var out []*core.Violation
 	for _, logical := range src.Lines {
 		text := patternkit.WithoutComment(logical.Text)
 		for _, loc := range gcEnvAssignment.FindAllStringSubmatchIndex(text, -1) {
 			line := logical.LineAt(loc[0])
+			if text[loc[2]:loc[3]] == "GOMEMLIMIT" && shellLineIsExempt(ctx, line, heredocExempt) {
+				continue
+			}
+			line = shellComposeListLine(ctx, line)
 			out = appendGCSetting(out, r, ctx, line, text, "shell or make recipe")
 		}
 	}
@@ -183,27 +190,185 @@ func (r *RuntimeGCTuningRule) analyzeDockerfile(ctx *core.FileContext) []*core.V
 
 func (r *RuntimeGCTuningRule) analyzeCompose(ctx *core.FileContext) []*core.Violation {
 	var out []*core.Violation
+	variables, exempt := composeServiceVariables(ctx, ctx.Lines, 1)
+	for _, variable := range variables {
+		if variable.key == "GOMEMLIMIT" && exempt[variable.line] {
+			continue
+		}
+		out = appendGCSetting(out, r, ctx, variable.line, ctx.GetLine(variable.line), "compose environment")
+	}
+	return out
+}
+
+type composeGCVariable struct {
+	key  string
+	line int
+}
+
+type composeYAMLKey struct {
+	indent int
+	name   string
+}
+
+func composeServiceVariables(ctx *core.FileContext, lines []string, firstLine int) ([]composeGCVariable, map[int]bool) {
+	var variables []composeGCVariable
+	exempt := make(map[int]bool)
+	servicesIndent := -1
+	for i, raw := range lines {
+		text := composeBody(ctx, raw)
+		indent := yamlIndent(raw)
+		if gcServicesKey.MatchString(text) {
+			servicesIndent = indent
+			continue
+		}
+		if servicesIndent < 0 || (text != "" && indent <= servicesIndent) {
+			servicesIndent = -1
+			continue
+		}
+		if indent != servicesIndent+2 || !gcYAMLAnyKey.MatchString(text) {
+			continue
+		}
+		end := composeServiceEnd(ctx, lines, i+1, servicesIndent+2)
+		serviceVars, hardLimit := composeServiceVariablesInBlock(ctx, lines[i+1:end], firstLine+i+1)
+		for _, variable := range serviceVars {
+			variables = append(variables, variable)
+			if hardLimit && variable.key == "GOMEMLIMIT" {
+				exempt[variable.line] = true
+			}
+		}
+	}
+	return variables, exempt
+}
+
+func composeServiceEnd(ctx *core.FileContext, lines []string, from, serviceIndent int) int {
+	for i := from; i < len(lines); i++ {
+		text := composeBody(ctx, lines[i])
+		if text != "" && yamlIndent(lines[i]) <= serviceIndent {
+			return i
+		}
+	}
+	return len(lines)
+}
+
+func composeServiceVariablesInBlock(ctx *core.FileContext, lines []string, firstLine int) ([]composeGCVariable, bool) {
+	var variables []composeGCVariable
+	var path []composeYAMLKey
 	envIndent := -1
-	for i, raw := range ctx.Lines {
-		body := strings.TrimSuffix(raw, ctx.CommentOf(raw))
-		trimmed := strings.TrimSpace(body)
-		indent := len(raw) - len(strings.TrimLeft(raw, " \t"))
-		if strings.HasPrefix(trimmed, "environment:") {
+	hardLimit := false
+	for i, raw := range lines {
+		text := composeBody(ctx, raw)
+		indent := yamlIndent(raw)
+		key := gcYAMLAnyKey.FindStringSubmatch(text)
+		if key != nil {
+			path = trimYAMLPath(path, indent)
+			if key[1] == "mem_limit" || key[1] == "memory" && hasComposeMemoryLimitPath(path) {
+				hardLimit = true
+			}
+			path = append(path, composeYAMLKey{indent: indent, name: key[1]})
+		}
+		if envIndent >= 0 && text != "" && indent <= envIndent {
+			envIndent = -1
+		}
+		if strings.HasPrefix(text, "environment:") {
 			envIndent = indent
-			if gcInlineYAML.MatchString(trimmed) {
-				out = appendGCSetting(out, r, ctx, i+1, raw, "compose environment")
+			if gcInlineYAML.MatchString(text) {
+				variables = append(variables, composeInlineVariables(text, firstLine+i)...)
 			}
 			continue
 		}
-		if envIndent < 0 || (trimmed != "" && indent <= envIndent) {
-			envIndent = -1
-			continue
-		}
-		if gcYAMLKey.MatchString(trimmed) || gcYAMLList.MatchString(trimmed) {
-			out = appendGCSetting(out, r, ctx, i+1, raw, "compose environment")
+		if envIndent >= 0 && (gcYAMLKey.MatchString(text) || gcYAMLList.MatchString(text)) {
+			match := gcYAMLKey.FindStringSubmatch(text)
+			if match == nil {
+				match = gcYAMLList.FindStringSubmatch(text)
+			}
+			variables = append(variables, composeGCVariable{key: match[1], line: firstLine + i})
 		}
 	}
-	return out
+	return variables, hardLimit
+}
+
+func composeInlineVariables(text string, line int) []composeGCVariable {
+	var variables []composeGCVariable
+	for _, match := range gcInlineYAML.FindAllStringSubmatch(text, -1) {
+		variables = append(variables, composeGCVariable{key: match[1], line: line})
+	}
+	return variables
+}
+
+func trimYAMLPath(path []composeYAMLKey, indent int) []composeYAMLKey {
+	for len(path) > 0 && path[len(path)-1].indent >= indent {
+		path = path[:len(path)-1]
+	}
+	return path
+}
+
+func hasComposeMemoryLimitPath(path []composeYAMLKey) bool {
+	if len(path) < 3 {
+		return false
+	}
+	return path[len(path)-1].name == "limits" && path[len(path)-2].name == "resources" && path[len(path)-3].name == "deploy"
+}
+
+func composeBody(ctx *core.FileContext, raw string) string {
+	return strings.TrimSpace(strings.TrimSuffix(raw, ctx.CommentOf(raw)))
+}
+
+func yamlIndent(raw string) int {
+	return len(raw) - len(strings.TrimLeft(raw, " \t"))
+}
+
+func shellComposeGOMEMLIMITExemptions(ctx *core.FileContext) map[int]bool {
+	exempt := make(map[int]bool)
+	for i, raw := range ctx.Lines {
+		for _, delimiter := range patternkit.HeredocDelimiters(raw) {
+			end := heredocEnd(ctx, i+1, delimiter)
+			if end <= i+1 {
+				continue
+			}
+			body := ctx.Lines[i+1 : end]
+			_, serviceExempt := composeServiceVariables(ctx, body, i+2)
+			for line := range serviceExempt {
+				exempt[line] = true
+			}
+			i = end
+		}
+	}
+	return exempt
+}
+
+func heredocEnd(ctx *core.FileContext, from int, delimiter patternkit.HeredocRedirect) int {
+	for i := from; i < len(ctx.Lines); i++ {
+		line := ctx.Lines[i]
+		if delimiter.StripTabs {
+			line = strings.TrimLeft(line, "\t")
+		}
+		if line == delimiter.Word {
+			return i
+		}
+	}
+	return from
+}
+
+func shellLineIsExempt(ctx *core.FileContext, line int, exempt map[int]bool) bool {
+	if exempt[line] {
+		return true
+	}
+	return line < len(ctx.Lines) && exempt[line+1] && strings.Contains(ctx.Lines[line], "GOMEMLIMIT=")
+}
+
+func shellComposeListLine(ctx *core.FileContext, line int) int {
+	for i, raw := range ctx.Lines {
+		for _, delimiter := range patternkit.HeredocDelimiters(raw) {
+			end := heredocEnd(ctx, i+1, delimiter)
+			if line < i+2 || line >= end+1 {
+				continue
+			}
+			if strings.HasPrefix(strings.TrimSpace(ctx.Lines[line-1]), "- GOGC=") || strings.HasPrefix(strings.TrimSpace(ctx.Lines[line-1]), "- GOMEMLIMIT=") {
+				return line - 1
+			}
+		}
+	}
+	return line
 }
 
 func appendGCSetting(out []*core.Violation, r *RuntimeGCTuningRule, ctx *core.FileContext, line int, code, where string) []*core.Violation {

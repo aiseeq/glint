@@ -100,6 +100,8 @@ func TestRuntimeGCTuningOutsideGo(t *testing.T) {
 		{"Makefile", "run:\n\tGOGC=50 ./app\n", []int{2}},
 		{"Dockerfile", "FROM alpine\nENV GOMEMLIMIT=1GiB\n", []int{2}},
 		{"compose.yaml", "services:\n  app:\n    image: app\n    environment:\n      GOGC: 50\n  worker:\n    image: app\n    environment:\n      - GOMEMLIMIT=1200MiB\n  capped:\n    image: app\n    environment:\n      - GOMEMLIMIT=1200MiB #nolint:runtime-gc-tuning hard memory cap\n", []int{5, 9}},
+		{"compose.limits.yaml", "services:\n  capped:\n    environment:\n      GOMEMLIMIT: 1GiB\n    mem_limit: 2GiB\n  deploy-capped:\n    environment:\n      - GOMEMLIMIT=1GiB\n    deploy:\n      resources:\n        limits:\n          memory: 2GiB\n  gogc-still-found:\n    mem_limit: 2GiB\n    environment:\n      GOGC: 200\n  uncapped:\n    environment:\n      GOMEMLIMIT: 1GiB\n", []int{16, 19}},
+		{"scripts/deploy.sh", "#!/bin/bash\ncat > compose.yaml <<YAML\nservices:\n  capped:\n    environment:\n      - GOMEMLIMIT=1200MiB\n    mem_limit: 1536m\n  uncapped:\n    environment:\n      - GOMEMLIMIT=1200MiB\nYAML\n", []int{9}},
 		{"scripts/bench.sh", "#!/bin/sh\nGOGC=off go test -run xxx -bench . ./...\n", nil},
 		{".graft.yaml", "tasks:\n  test:\n    env:\n      GOGC: off\n", nil},
 	}
@@ -118,4 +120,6 @@ func TestRuntimeGCTuningOutsideGo(t *testing.T) {
 	}
 	assert.Contains(t, rule.Description(), ".graft.yaml")
 	assert.Contains(t, strings.ToLower(rule.Description()), "bench")
+	assert.Contains(t, rule.Description(), "mem_limit")
+	assert.Contains(t, rule.Description(), "deploy.resources.limits.memory")
 }
