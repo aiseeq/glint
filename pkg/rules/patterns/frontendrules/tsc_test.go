@@ -12,6 +12,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,7 +37,7 @@ func globalTsc7(t *testing.T) string {
 // installs tsc as the project's own tsc in node_modules/.bin.
 func tscProject(t *testing.T, tsc string, files map[string]string) string {
 	t.Helper()
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	root := t.TempDir()
 	for name, content := range files {
 		patterntest.WriteProjectFile(t, root, name, content)
@@ -201,7 +202,7 @@ func TestTscStatCacheSameContentRewrites(t *testing.T) {
 }
 
 func TestTscStatCacheResavesRefreshedHashMtime(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	path := filepath.Join(t.TempDir(), "main.ts")
 	require.NoError(t, os.WriteFile(path, []byte("export {}\n"), 0o644))
 	old := time.Now().Add(-time.Minute)
@@ -486,7 +487,7 @@ func TestTscStatCacheAddedTypesPackage(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "project")
 	require.NoError(t, os.MkdirAll(root, 0o755))
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	patterntest.WriteProjectFile(t, root, "tsconfig.json", strictTSConfig)
 	patterntest.WriteProjectFile(t, root, "src/main.ts", "/// <reference path=\"../../node_modules/@types/existing/index.d.ts\" />\nexport const n: number = typedGlobal\n")
 	patterntest.WriteProjectFile(t, base, "node_modules/@types/existing/package.json", `{"name":"@types/existing","version":"1.0.0","types":"index.d.ts"}`)
@@ -643,7 +644,7 @@ func TestTscIncrementalWorktreesApart(t *testing.T) {
 	left := tscProject(t, tsc, files)
 	cache := os.Getenv("XDG_CACHE_HOME")
 	right := tscProject(t, tsc, files)
-	t.Setenv("XDG_CACHE_HOME", cache)
+	rulestest.IsolateUserCache(t, cache)
 	patterntest.WriteProjectFile(t, left, "src/main.ts", "export const n: number = 'one'\n")
 	assert.NotEmpty(t, tscFindings(t, left))
 	assert.Empty(t, tscFindings(t, right))

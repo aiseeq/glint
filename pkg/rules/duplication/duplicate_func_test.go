@@ -498,7 +498,7 @@ func TestDuplicateFuncAcrossPackagesUnreadTestsKeepNoImplementation(t *testing.T
 }
 
 func TestDuplicateFuncOfLibraryLocalReplace(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	root := t.TempDir()
 	lib := filepath.Join(root, "lib")
 	consumer := filepath.Join(root, "consumer")
@@ -578,7 +578,7 @@ func tidyAmount(value int) int {
 `,
 	} {
 		t.Run(name, func(t *testing.T) {
-			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			rulestest.IsolateUserCache(t, t.TempDir())
 			ctx := duplicateLibraryTestProject(t, "example.com/owner/lib", "example.com/owner/app", consumer,
 				map[string]string{"amount.go": `package lib
 func NormalizeAmount(value int) int {
@@ -596,7 +596,7 @@ func NormalizeAmount(value int) int {
 }
 
 func TestDuplicateFuncOfLibraryExcludesUnexportedAndInternalPackages(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	ctx := duplicateLibraryTestProject(t, "example.com/owner/lib", "example.com/owner/app", `package app
 func tidyAmount(value int) int {
 	if value < 0 { value = -value }
@@ -634,7 +634,7 @@ func NormalizeAmount(value int) int {
 }
 
 func TestDuplicateFuncOfLibraryAllowsConfiguredForeignModule(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	consumer := `package app
 func tidyAmount(value int) int {
 	if value < 0 { value = -value }
@@ -665,7 +665,7 @@ func NormalizeAmount(value int) int {
 func TestDuplicateFuncOfLibraryUsesModuleCacheAndSkipsMissingSource(t *testing.T) {
 	for _, present := range []bool{true, false} {
 		t.Run(map[bool]string{true: "module cache", false: "missing"}[present], func(t *testing.T) {
-			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			rulestest.IsolateUserCache(t, t.TempDir())
 			cacheRoot := t.TempDir()
 			t.Setenv("GOMODCACHE", cacheRoot)
 			libFiles := map[string]string{"amount.go": `package lib
@@ -700,7 +700,7 @@ func tidyAmount(value int) int {
 }
 
 func TestDuplicateFuncOfLibrarySkipsMainPackages(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	ctx := duplicateLibraryTestProject(t, "example.com/owner/lib", "example.com/owner/app", libraryAmountCopy,
 		map[string]string{"cmd/tool/main.go": `package main
 func NormalizeAmount(value int) int {
@@ -734,7 +734,7 @@ func TestDuplicateFuncOfLibraryWithoutDependenciesDoesNotHashExecutable(t *testi
 // A library dependency whose source is in no replace and no module cache
 // gives nothing to compare, so the executable is not hashed for it.
 func TestDuplicateFuncOfLibraryDependencyWithoutSourceDoesNotHashExecutable(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	t.Setenv("GOMODCACHE", t.TempDir())
 	t.Setenv("GOPROXY", "off")
 	ctx := duplicateLibraryTestProject(t, "example.com/owner/lib", "example.com/owner/app", libraryAmountCopy, nil, false, "")
@@ -752,7 +752,7 @@ func TestDuplicateFuncOfLibraryDependencyWithoutSourceDoesNotHashExecutable(t *t
 }
 
 func TestDuplicateFuncOfLibraryAnalyzeUsesExecutableHashInCacheKey(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	ctx := duplicateLibraryTestProject(t, "example.com/owner/lib", "example.com/owner/app", libraryAmountCopy,
 		map[string]string{"amount.go": libraryAmountSource}, true, "")
 	previous := duplicateLibraryBuildHash
@@ -774,7 +774,7 @@ func TestDuplicateFuncOfLibraryAnalyzeUsesExecutableHashInCacheKey(t *testing.T)
 }
 
 func TestDuplicateFuncOfLibraryCacheKeyIncludesExecutableHash(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	dep := libraryDependency{path: "example.com/owner/lib", version: "v1.0.0"}
 	cache := toolcache.New("library-build-hash-test")
 	firstKey := libraryCacheKey(dep, "tree-hash", "binary-one")
@@ -831,7 +831,7 @@ func TestLibraryDependenciesSkipAlternateMajorVersion(t *testing.T) {
 }
 
 func TestDuplicateFuncOfLibraryFindsNestedModule(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	root := t.TempDir()
 	lib := filepath.Join(root, "lib")
 	app := filepath.Join(root, "backend")
@@ -845,7 +845,7 @@ func TestDuplicateFuncOfLibraryFindsNestedModule(t *testing.T) {
 }
 
 func TestDuplicateFuncOfLibraryResolvesGoWorkUse(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	root := t.TempDir()
 	lib := filepath.Join(root, "lib")
 	app := filepath.Join(root, "app")
@@ -859,7 +859,7 @@ func TestDuplicateFuncOfLibraryResolvesGoWorkUse(t *testing.T) {
 }
 
 func TestDuplicateFuncOfLibraryChoosesMatchDeterministically(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	root := t.TempDir()
 	lib := filepath.Join(root, "lib")
 	app := filepath.Join(root, "app")
@@ -897,14 +897,14 @@ func TestDuplicateFuncOfLibraryIgnoresDiskCacheErrors(t *testing.T) {
 	t.Setenv("GOCACHE", t.TempDir())
 	ctx := duplicateLibraryTestProject(t, "example.com/owner/lib", "example.com/owner/app", libraryAmountCopy,
 		map[string]string{"amount.go": libraryAmountSource}, true, "")
-	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	rulestest.IsolateUserCache(t, cacheHome)
 	violations, err := NewDuplicateFuncOfLibraryRule().AnalyzeGoProject(ctx)
 	require.NoError(t, err)
 	require.Len(t, violations, 1)
 }
 
 func TestDuplicateFuncOfLibrarySkipsOnlyBrokenLibraryPackage(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	t.Setenv("GOMODCACHE", t.TempDir())
 	t.Setenv("GOPROXY", "off")
 	t.Setenv("GOWORK", "off")
@@ -939,7 +939,7 @@ func TestDuplicateFuncOfLibrarySkipsOnlyBrokenLibraryPackage(t *testing.T) {
 }
 
 func TestDuplicateFuncOfLibraryDoesNotMatchFunctionFromBrokenPackage(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	t.Setenv("GOMODCACHE", t.TempDir())
 	t.Setenv("GOPROXY", "off")
 	t.Setenv("GOWORK", "off")
@@ -956,7 +956,7 @@ func TestDuplicateFuncOfLibraryDoesNotMatchFunctionFromBrokenPackage(t *testing.
 }
 
 func TestDuplicateFuncOfLibraryCacheKeyTracksDependencyAvailability(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	t.Setenv("GOMODCACHE", t.TempDir())
 	t.Setenv("GOPROXY", "off")
 	t.Setenv("GOWORK", "off")
@@ -1001,7 +1001,7 @@ func TestDuplicateFuncOfLibraryCacheKeyTracksDependencyAvailability(t *testing.T
 }
 
 func TestDuplicateFuncOfLibraryWarnsOnLocalModuleTreeHashFailure(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	ctx := duplicateLibraryTestProject(t, "example.com/owner/lib", "example.com/owner/app", libraryAmountCopy,
 		map[string]string{"amount.go": libraryAmountSource}, true, "")
 	appDir := ctx.Packages[0].Package.Module.Dir
@@ -1114,7 +1114,7 @@ func TestLibraryReplacementPrefersExactVersion(t *testing.T) {
 }
 
 func TestDuplicateFuncOfLibraryWarnsWhenLibraryDependencyGoModCannotBeParsed(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	cacheRoot := t.TempDir()
 	t.Setenv("GOMODCACHE", cacheRoot)
 	ctx := duplicateLibraryTestProject(t, "example.com/owner/lib", "example.com/owner/app", libraryAmountCopy, nil, false, "")
@@ -1131,7 +1131,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenLibraryDependencyGoModCannotBeParsed(t *
 }
 
 func TestDuplicateFuncOfLibraryMissingSourceIsSilent(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	t.Setenv("GOMODCACHE", t.TempDir())
 	rule := NewDuplicateFuncOfLibraryRule()
 	var warnings bytes.Buffer
@@ -1143,7 +1143,7 @@ func TestDuplicateFuncOfLibraryMissingSourceIsSilent(t *testing.T) {
 }
 
 func TestDuplicateFuncOfLibraryWarnsWhenDependenciesCannotBeRead(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	dir := t.TempDir()
 	rule := NewDuplicateFuncOfLibraryRule()
 	var warnings bytes.Buffer
@@ -1166,7 +1166,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenSourceLocationFails(t *testing.T) {
 }
 
 func TestDuplicateFuncOfLibraryWarnsWhenExecutableHashFails(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	project, dep, cache := libraryMergeTestInput(t)
 	previous := duplicateLibraryBuildHash
 	t.Cleanup(func() { duplicateLibraryBuildHash = previous })
@@ -1179,7 +1179,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenExecutableHashFails(t *testing.T) {
 }
 
 func TestDuplicateFuncOfLibraryWarnsWhenCacheLoadFails(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	project, dep, cache := libraryMergeTestInput(t)
 	rule := NewDuplicateFuncOfLibraryRule()
 	var warnings bytes.Buffer
@@ -1198,7 +1198,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenCacheLoadFails(t *testing.T) {
 func TestDuplicateFuncOfLibraryWarnsWhenDiskCacheLoadFails(t *testing.T) {
 	cacheHome := filepath.Join(t.TempDir(), "cache-file")
 	require.NoError(t, os.WriteFile(cacheHome, []byte("not a directory"), 0o644))
-	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	rulestest.IsolateUserCache(t, cacheHome)
 	project, dep, cache := libraryMergeTestInput(t)
 	rule := NewDuplicateFuncOfLibraryRule()
 	var warnings bytes.Buffer
@@ -1212,7 +1212,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenDiskCacheLoadFails(t *testing.T) {
 }
 
 func TestDuplicateFuncOfLibraryWarnsWhenLibraryLoadFails(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	project, dep, cache := libraryMergeTestInput(t)
 	rule := NewDuplicateFuncOfLibraryRule()
 	var warnings bytes.Buffer
@@ -1228,7 +1228,7 @@ func TestDuplicateFuncOfLibraryWarnsWhenLibraryLoadFails(t *testing.T) {
 }
 
 func TestDuplicateFuncOfLibraryWarnsWhenCacheStoreFails(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	project, dep, cache := libraryMergeTestInput(t)
 	rule := NewDuplicateFuncOfLibraryRule()
 	var warnings bytes.Buffer

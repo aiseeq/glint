@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/output"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 func TestReadConfigExpandsHomeAndRequiresRoot(t *testing.T) {
@@ -134,7 +135,7 @@ func TestNewBinaryUsesItsOwnResultCacheDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	userCache := filepath.Join(root, "cache")
-	t.Setenv("XDG_CACHE_HOME", userCache)
+	rulestest.IsolateUserCache(t, userCache)
 	t.Setenv("GLINT_CACHE_DIR", "")
 	seen := map[string]string{}
 	for _, name := range []string{"old", "new"} {

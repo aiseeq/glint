@@ -27,6 +27,7 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/patterns/frontendrules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/qarules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/shellrules"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 )
 
 // countingRule reports one finding per file and counts how often it runs.
@@ -605,7 +606,7 @@ func TestNewRootCacheUsesBinaryHashWithoutBuildManifest(t *testing.T) {
 func TestResultCacheDirUsesGLINTCacheDir(t *testing.T) {
 	userCache := t.TempDir()
 	cacheDir := filepath.Join(t.TempDir(), "results")
-	t.Setenv("XDG_CACHE_HOME", userCache)
+	rulestest.IsolateUserCache(t, userCache)
 	t.Setenv("GLINT_CACHE_DIR", cacheDir)
 
 	cache, err := newRootCache("/project", "", core.DefaultConfig(), false)
@@ -618,7 +619,7 @@ func TestResultCacheDirUsesGLINTCacheDir(t *testing.T) {
 
 func TestResultCacheDirDefaultsToUserCacheWhenGLINTCacheDirIsEmpty(t *testing.T) {
 	userCache := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", userCache)
+	rulestest.IsolateUserCache(t, userCache)
 	t.Setenv("GLINT_CACHE_DIR", "")
 
 	dir, err := resultCacheDir()

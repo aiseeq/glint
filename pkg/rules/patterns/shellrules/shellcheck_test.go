@@ -10,6 +10,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,7 +22,7 @@ func shellcheckProject(t *testing.T, files map[string]string) string {
 	if _, err := exec.LookPath("shellcheck"); err != nil {
 		t.Skip("shellcheck is not installed: the rule runs it")
 	}
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	root := t.TempDir()
 	for name, content := range files {
 		patterntest.WriteProjectFile(t, root, name, content)

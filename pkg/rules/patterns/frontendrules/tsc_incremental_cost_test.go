@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/aiseeq/glint/pkg/toolcache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -176,7 +177,7 @@ func TestTscSourceEditReusesShownConfig(t *testing.T) {
 }
 
 func TestTscCompilerVersionsInvalidatedByExecutableChange(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	rulestest.IsolateUserCache(t, t.TempDir())
 	compiler := filepath.Join(t.TempDir(), "tsc")
 	require.NoError(t, os.WriteFile(compiler, []byte("compiler"), 0o755))
 	old := time.Now().Add(-time.Minute)
