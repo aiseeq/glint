@@ -223,7 +223,9 @@ func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *t
 		return
 	}
 	fn := rangeCallFunc(call, info)
-	if fn != nil && fn.Pkg() != nil && pkg.path != "" && fn.Pkg().Path() == pkg.path {
+	// A package containing only test files can have an empty path; its
+	// functions still belong to the package checked with those files.
+	if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == pkg.path {
 		analyzeProjectRangeCall(call, dependent, fn, info, pkg, depth, stack, result)
 		return
 	}
@@ -501,6 +503,17 @@ func rangeDataCall(call *ast.CallExpr, info *types.Info) bool {
 	if isSubtest(call, info) {
 		return true
 	}
+	if isRangeTestLog(call, info) {
+		return true
+	}
+	if id, ok := ast.Unparen(call.Fun).(*ast.Ident); ok {
+		if builtin, ok := info.Uses[id].(*types.Builtin); ok && builtin.Name() == "len" {
+			if len(call.Args) == 1 {
+				_, direct := ast.Unparen(call.Args[0]).(*ast.Ident)
+				return direct
+			}
+		}
+	}
 	fn := rangeCallFunc(call, info)
 	if fn == nil || fn.Pkg() == nil {
 		return false
@@ -526,6 +539,24 @@ func rangeDataCall(call *ast.CallExpr, info *types.Info) bool {
 		return true
 	}
 	return (path == "strings" || path == "bytes") && textComparisons[name]
+}
+
+// Test imports can be incomplete when the project has no compiled Go files.
+// As with isSubtest, use the receiver name only when its type is unavailable.
+func isRangeTestLog(call *ast.CallExpr, info *types.Info) bool {
+	selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "Log" && selector.Sel.Name != "Logf" {
+		return false
+	}
+	receiver := info.TypeOf(selector.X)
+	if pointer, ok := receiver.(*types.Pointer); ok && pointer.Elem() == types.Typ[types.Invalid] {
+		receiver = nil
+	}
+	if receiver != nil && receiver != types.Typ[types.Invalid] {
+		return testingReceiver(receiver)
+	}
+	id, ok := ast.Unparen(selector.X).(*ast.Ident)
+	return ok && (id.Name == "t" || id.Name == "b")
 }
 
 func hasRangeLoggerPrefix(name string) bool {
