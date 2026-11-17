@@ -1,7 +1,10 @@
 package shellrules
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // Repro from a real project: every worker of a parallel series built the bot
@@ -146,6 +149,13 @@ pid=$!
 trap 'kill "$pid" 2>/dev/null || true' EXIT INT TERM
 run_checks
 `)
+	// The suggested form exits on INT and TERM, so a signal is not swallowed,
+	// and the rule takes it as a guard.
+	assert.Contains(t, backgroundJobTrapSuggestion, "trap 'exit 130' INT")
+	assert.Contains(t, backgroundJobTrapSuggestion, "trap 'exit 143' TERM")
+	_, form, _ := strings.Cut(backgroundJobTrapSuggestion, ": ")
+	shellWanted(t, "shell-background-job-without-trap", "suggested.sh", "#!/bin/bash\n./api-server.sh 5000 > \"$log\" 2>&1 &\n"+
+		strings.Replace(form, "; ", "\n", 1)+"\nwait_ready\nrun_checks\nkill \"$pid\"\n")
 	shellWanted(t, "shell-background-job-without-trap", "failing.sh", `#!/bin/bash
 ./api-server.sh 5000 > /tmp/api.log 2>&1 & # want
 for i in $(seq 1 40); do ready && break; sleep 2; done

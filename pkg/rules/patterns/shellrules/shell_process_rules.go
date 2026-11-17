@@ -431,10 +431,17 @@ func checkBackgroundWithoutTrap(r *shellRule, src *patternkit.ShellSource) []*co
 		}
 		out = appendReport(out, src.Report(r, s.Line,
 			"The background job is stopped only on the normal path, and nothing stops it on an error, a timeout or Ctrl-C — it is left running",
-			"Save its pid and kill it from a trap: pid=$!; trap 'kill \"$pid\" 2>/dev/null || true' EXIT INT TERM"))
+			backgroundJobTrapSuggestion))
 	}
 	return out
 }
+
+// backgroundJobTrapSuggestion stops the job on every way out. INT and TERM
+// get their own trap that exits: a trap on them that only kills the job
+// swallows the signal, and the script runs on after Ctrl-C. The exit runs the
+// EXIT trap, which kills the job.
+const backgroundJobTrapSuggestion = "Save its pid and kill it from an EXIT trap, and make INT and TERM exit: " +
+	"pid=$!; trap 'kill \"$pid\" 2>/dev/null || true' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM"
 
 var trapExit = regexp.MustCompile(`^trap\s+.*\b(?:EXIT|0)\b`)
 
